@@ -1,18 +1,18 @@
 <p align="center">
-  <a href="https://github.com/cv-cat/XHS_ALL_IN_ONE" target="_blank">
+  <a href="https://gitee.com/Sir-yuChen/xhs" target="_blank">
     <picture>
-      <img width="220" src="./author/logo.jpg" alt="XHS_ALL_IN_ONE logo">
+      <img width="220" src="./author/logo.jpg" alt="XHS logo">
     </picture>
   </a>
 </p>
 
 <div align="center">
 
-# XHS_ALL_IN_ONE
+# XHS
 
 **小红书一站式智能运营平台 — 采集、分析、AI 创作、自动发布，全链路闭环**
 
-[![Skills](https://img.shields.io/badge/skills-supported-success)](https://github.com/cv-cat/XhsSkills)
+[![Gitee](https://img.shields.io/badge/Gitee-XHS-C71D23)](https://gitee.com/Sir-yuChen/xhs)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![Node.js](https://img.shields.io/badge/nodejs-20%2B-green)](https://nodejs.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100%2B-009688)](https://fastapi.tiangolo.com/)
@@ -23,7 +23,7 @@
 </div>
 
 > 市面上的小红书工具要么只能爬数据，要么只能发笔记，要么需要手动复制粘贴到 AI 平台再贴回来。
-> **XHS_ALL_IN_ONE 是第一个把「采集 → 内容库 → AI 改写 → 图片润色 → 一键发布 → 定时自动运营」全链路打通的开源平台。**
+> **XHS 把「采集 → 内容库 → AI 改写 → 图片润色 → 一键发布 → 定时自动运营」全链路打通。**
 > 一个浏览器标签页，完成别人用 5 个工具才能做的事。
 
 **⚠️ 本项目仅供学习交流使用，禁止任何商业化行为，如有违反，后果自负**
@@ -32,15 +32,16 @@
 
 ## 核心优势
 
-| | 传统方案 | XHS_ALL_IN_ONE |
+| | 传统方案 | XHS |
 |---|---|---|
 | **数据采集** | 写脚本 / 用第三方爬虫 | 平台内搜索 + 一键入库，素材自动下载到本地 |
 | **内容管理** | Excel / 文件夹 / 各种笔记软件 | 统一内容库，标签筛选，卡片预览 |
 | **AI 改写** | 复制到 ChatGPT → 手动粘贴回来 | 编辑器内一键改写，标题/正文/标签全覆盖 |
 | **图片处理** | Photoshop / 在线工具 | AI 图片润色 + 参考图，原位替换 |
 | **发布** | 手动打开创作者平台上传 | 选账号 → 点发布，支持定时 |
-| **自动化** | 没有 / 需要写代码 | 配置关键词 + 频率，全自动：搜索→改写→发布 |
+| **自动化** | 没有 / 需要写代码 | 定时任务中心配置关键词 + 频率，全自动：搜索→改写→发布 |
 | **多账号** | 反复切换浏览器 | 账号矩阵统一管理，2h 自动健康巡检 |
+| **数据隔离** | 单用户工具，多人共用即串数据 | 库内所有数据按平台账号维度隔离，多用户互不干扰 |
 
 ---
 
@@ -84,7 +85,7 @@
 
 ### 自动运营 — 全自动内容生产管线
 
-设置关键词和调度频率（每日/每周/自定义间隔），系统自动执行完整管线：搜索热门笔记 → AI 改写标题+正文 → 上传图片素材 → 通过 Creator API 自动发布。真正的无人值守。
+定时任务中心配置关键词和调度频率（每日/每周/自定义间隔），系统自动执行完整管线：搜索热门笔记 → AI 改写标题+正文 → 上传图片素材 → 通过 Creator API 自动发布。真正的无人值守。
 
 <img src="./static/frontend_7.jpg" width="600" />
 
@@ -106,6 +107,7 @@
 | **创作者平台** | 二维码登录 / 手机验证码登录 | ✅ |
 | | 上传图集 / 视频作品 | ✅ |
 | | 查看已发布作品列表 | ✅ |
+| **千帆商家后台（ark）** | 店铺信息 / 商品列表（含搜索）/ 商品笔记列表（支持按 `note_ids` 反查）/ 登录态巡检 | ✅ **全部只读** |
 | **蒲公英平台** | KOL 博主列表 & 粉丝画像 & 合作邀请 | ⚠️ **已知不可用** |
 | **蒲公英分销商广场** | 分销商列表 & 合作品类 / 商品信息 | ⚠️ **已知不可用** |
 
@@ -125,18 +127,19 @@
 
 | 模块 | 功能 |
 |------|------|
-| **账号矩阵** | 多 PC / Creator 账号绑定、Cookie 加密存储、2h 自动健康巡检、过期通知 |
+| **账号矩阵** | 多 PC / Creator 账号绑定、Cookie 加密存储、2h 自动健康巡检、过期通知、三平台登录态标签（千帆/创作者/网页版） |
 | **笔记发现** | 关键词搜索、URL 直查、多维筛选、已保存标记、一键入库 |
 | **我的笔记** | 账号自有内容与互动数据：我发布的 / 我赞过的 / 我收藏的 / 互动消息；**笔记挂载的商品**（来源＝千帆商家后台，绑定店铺后按 `note_id` 显示商品标题/主图/规格/链接，并透出千帆侧的阅读数、近 30 日阅读、支付金额与订单数） |
+| **定时任务中心** | 一次性/定时/周期/调度四类任务统一管理；内置系统任务按用户各持一份（注册即播种）；建/改同一把账号归属校验；调度日志按用户收口 |
+| **商品笔记自动化** | 商品台账（只读本地 + 千帆门禁）、商品关联笔记、批量生成草稿（不自动发布）、发布状态四态追踪 |
 | **数据抓取** | 批量 URL / 搜索 / 评论抓取、Excel 导出、素材本地下载 |
-| **内容库** | 卡片/列表双视图、自定义标签、批量操作、JSON/CSV 导出、查看原文 |
+| **内容库** | 卡片/列表双视图、自定义标签、批量操作、JSON/CSV 导出、查看原文、按来源账号/笔记类型/发布状态筛选 |
 | **草稿工坊** | 三栏编辑器、AI 改写正文、润色标题/标签、拖拽排序素材、AI 图片润色 |
 | **图片工坊** | AI 图片生成（支持参考图）、图片描述、AI/普通图片资产管理 |
 | **发布中心** | 图集发布、定时发布、发布校验、状态追踪、重试/取消 |
 | **自动运营** | 定时任务（每日/每周/自定义间隔）、全自动管线：搜索→AI改写→上传→发布 |
 | **数据洞察** | 仪表盘总览、互动趋势、Top 内容、热门话题、评论分析 |
 | **竞品监控** | 关键词/账号/品牌/URL 监控、自动爬取刷新、快照历史 |
-| **任务中心** | 全量任务审计、调度器状态、耗时追踪 |
 | **通知系统** | Cookie 过期 / 任务失败自动通知、铃铛实时展示 |
 | **模型配置** | 支持任意 OpenAI 兼容 API（火山引擎、阿里云百炼、OpenAI 中转等） |
 
@@ -171,8 +174,8 @@
 ### 安装依赖
 
 ```bash
-git clone https://github.com/cv-cat/XHS_ALL_IN_ONE.git
-cd XHS_ALL_IN_ONE
+git clone https://gitee.com/Sir-yuChen/xhs.git
+cd xhs
 
 pip install -r requirements.txt
 npm install
@@ -190,7 +193,7 @@ python main.py --with-frontend
 - 前端: http://localhost:5173
 - API 文档: http://localhost:8000/docs
 
-首次启动自动创建数据库，注册账号即可使用。
+首次启动自动创建数据库（Alembic 迁移 + 初始化数据），注册账号即可使用。
 
 ### 本地常驻运行（后台自启）
 
@@ -232,29 +235,30 @@ docker compose up -d
 ## 📁 项目结构
 
 ```
-XHS_ALL_IN_ONE/
+xhs/
 ├── main.py                         # 统一启动入口
-├── config/                         # YAML 配置（default / production）
+├── config/                         # YAML 配置（default / production）+ 初始化数据种子
 ├── apis/                           # XHS 底层 SDK（逆向签名 + HTTP 接口）
 ├── xhs_utils/                      # 签名算法封装
-├── static/                         # 签名核心 JS 文件
 ├── backend/
+│   ├── alembic/                    # 数据库迁移（版本化 schema 演进）
 │   └── app/
 │       ├── main.py                 # FastAPI 应用
 │       ├── core/                   # 配置、数据库、安全、时区
-│       ├── models/                 # SQLAlchemy 数据模型（20+ 张表）
-│       ├── api/                    # API 路由
+│       ├── models/                 # SQLAlchemy 数据模型
+│       ├── api/                    # API 路由（180 operations / 156 paths）
 │       ├── services/               # 业务逻辑 + 定时调度
-│       ├── adapters/xhs/           # XHS SDK 适配层
-│       └── storage/                # 媒体文件 + 导出文件
+│       ├── adapters/xhs/           # XHS SDK 适配层（apis/ 不直接改）
+│       └── storage/                # 媒体文件 + 导出文件（运行时数据，不入库）
 ├── frontend/
 │   └── src/
-│       ├── pages/platforms/xhs/    # 各功能页面
+│       ├── pages/platforms/xhs/    # 各功能页面（23 个）
 │       ├── components/layout/      # 侧边栏 + 通知系统
-│       ├── lib/api.ts              # HTTP 客户端
+│       ├── lib/api.ts              # HTTP 客户端（156 个请求函数）
 │       └── types/                  # TypeScript 类型
-├── tests/                          # 后端测试（781 passed）
-├── Dockerfile                      # 多阶段构建
+├── tests/                          # 868 条后端测试 + 10 个前端行为脚本
+├── packaging/                      # Windows 桌面打包（PyInstaller + Inno Setup）
+├── docs/                           # 五阶段工程文档（唯一真相源）
 └── docker-compose.yml              # 编排文件
 ```
 
@@ -277,6 +281,29 @@ scheduler:
 
 ---
 
+## 🧪 测试与质量保障
+
+本项目把「验证」当成交付物的一部分，而不是事后补票：
+
+- **868 条后端测试**（2026-09-24 基线，全量并行回归约 2 分钟）：API 契约、服务层、迁移幂等、账号隔离、发布状态机全覆盖
+- **10 个前端行为脚本**：不依赖前端测试框架，用 esbuild 打包**真实**组件在 jsdom 里驱动，钉住「必须做到 / 不得出现」的 UI 契约
+- **变异测试**：每条关键守卫都配套「故意改坏必须变红」的变异用例——守卫承重有证据，不是永远绿的摆设
+- **慢用例打标**：迁移往返等 >3s 的用例打 `@pytest.mark.slow`，内循环 `-m "not slow"` 秒级反馈
+
+```bash
+# 跑某个测试文件（pytest.ini 已固化 -n auto 并行 + junit 判据自动落盘）
+pytest tests/backend/test_note_sync.py -q -x --lf
+
+# 全量回归（判定只看 .workbuddy/reports/reg.xml 四数，退出码会假性变 1）
+pytest tests/ -q
+
+# 按 git 改动自动选该跑的测试文件（.workbuddy 本地工具）
+python .workbuddy/scripts/pick_tests.py
+pytest $(python .workbuddy/scripts/pick_tests.py) -q
+```
+
+---
+
 ## 📚 项目文档
 
 本项目的工程文档遵循 **「文档先行」** 原则：**先有文档，再写代码**。代码变更必须由文档变更发起。
@@ -293,15 +320,19 @@ scheduler:
 
 > - 规范细则见 [`docs/00_管理规范/01_文档先行工作流.md`](./docs/00_管理规范/01_文档先行工作流.md)
 > - 历史文档（v1，共 25 份）已整体归档至 [`docs/_legacy_v1/`](./docs/_legacy_v1)，**只读、不再维护**
+> - 协作者的 AI 助手入口：[`AGENTS.md`](./AGENTS.md)（项目上下文速查，≤200 行）
 
 ---
 
 ## 🗝️ 注意事项
 
 - `apis/` 是底层 SDK 层，**请勿直接修改**，上层通过 `backend/app/adapters/` 中转调用
+- 对小红书/千帆的探测一律**只读**（GET 或只读查询 POST），不碰写接口、不做登录逆向
+- 数据库所有数据按**平台账号维度隔离**，多用户互不操作同一份数据
 - Cookie 有时效性，平台内置 2 小时自动健康巡检 + 过期通知
 - 所有敏感数据（Cookie、API Key）使用 Fernet 加密存储
 - AI 功能需在「模型配置」页面配置 OpenAI 兼容的 API 端点（支持火山引擎、阿里云百炼等）
+- `data/`（真实库与备份）、`backend/app/storage/`（媒体素材）、`node_modules/`、构建产物均**不入库**（见 `.gitignore`）
 
 ---
 
@@ -315,17 +346,15 @@ scheduler:
 
 ## 📈 Star History
 
-
-<a href="https://cvcat.site/star-history/svg?repos=cv-cat/XHS_ALL_IN_ONE&type=Date">
+<a href="https://star-history.com/#Sir-yuChen/xhs&Date">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://cvcat.site/star-history/svg?repos=cv-cat/XHS_ALL_IN_ONE&type=Date&theme=dark" />
-    <source media="(prefers-color-scheme: light)" srcset="https://cvcat.site/star-history/svg?repos=cv-cat/XHS_ALL_IN_ONE&type=Date" />
-    <img alt="Star History Chart" src="https://cvcat.site/star-history/svg?repos=cv-cat/XHS_ALL_IN_ONE&type=Date" />
+    <source media="(prefers-color-scheme: dark)" srcset="https://star-history.com/#Sir-yuChen/xhs&Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://star-history.com/#Sir-yuChen/xhs&Date&theme=light" />
+    <img alt="Star History Chart" src="https://star-history.com/#Sir-yuChen/xhs&Date" />
   </picture>
 </a>
 
 ---
-
 
 ## 🍔 交流群
 
