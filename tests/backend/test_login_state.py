@@ -28,6 +28,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
@@ -1019,37 +1021,60 @@ class TestQrPanelHasNoSecondDetailParser:
 
 
 class TestFrontendBehaviourScripts:
-    """行为验证：源码断言证明不了「函数怎么跑」（DEF-058 的教训）。"""
+    """行为验证：源码断言证明不了「函数怎么跑」（DEF-058 的教训）。
 
-    def _run(self, script: str, env: dict | None = None) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            ["node", str(ROOT / script)],
-            cwd=str(ROOT),
-            capture_output=True,
-            text=True,
-            env={**os.environ, **(env or {})},
-        )
+    2026-09-25 P0-4 提速（调研报告 `.workbuddy/reports/2026-09-24_测试回归耗时调研与提速方案.md`）：
+    契约 + 全部变异合并为**每个脚本一次** node 进程（`--self-check` 模式），
+    module 级 fixture 跑一次、9 个用例解析同一份输出。原来是 9 个用例各起一个
+    进程（其中 6 个是变异），占全量回归约 100s；现在两次进程（~0.5s + ~16s）。
+    变异语义一条不减：契约必须全 PASS、每个变异必须让对应断言变红，
+    任一不符 `--self-check` 自身就 rc≠0（fixture 直接断言）。
+    """
 
-    def test_login_state_mapping_is_driven_for_real(self):
-        result = self._run("tests/frontend/login_state.cjs")
-        if result.returncode != 0 and "node" in (result.stderr or "").lower() and "not found" in (result.stderr or "").lower():
-            import pytest
+    LOGIN_SCRIPT = "tests/frontend/login_state.cjs"
+    MODAL_SCRIPT = "tests/frontend/add_account_modal.cjs"
 
-            pytest.fail("需要 node 运行前端行为验证脚本，但 node 不可用")
-        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+    @pytest.fixture(scope="module")
+    def selfcheck(self) -> dict[str, str]:
+        """两个行为脚本各跑一次 `--self-check`，返回 {脚本: 合并输出}。
+
+        断言落在 fixture 本身：rc=0 意味着「契约全 PASS 且每个变异都至少
+        让一条断言变红」—— 变异空转（锚点失配/打包失败）会在这里直接红。
+        """
+        out: dict[str, str] = {}
+        for script in (self.LOGIN_SCRIPT, self.MODAL_SCRIPT):
+            result = subprocess.run(
+                ["node", str(ROOT / script), "--self-check"],
+                cwd=str(ROOT),
+                capture_output=True,
+                text=True,
+                env={**os.environ},
+                check=False,
+            )
+            combined = f"{result.stdout}\n{result.stderr}"
+            assert result.returncode == 0, (
+                f"{script} --self-check 失败（契约必须全 PASS；每个变异必须至少一条断言变红；"
+                f"变异锚点失配/打包失败也算失败）。输出：\n{combined}"
+            )
+            out[script] = combined
+        return out
+
+    def test_login_state_mapping_is_driven_for_real(self, selfcheck: dict[str, str]):
+        out = selfcheck[self.LOGIN_SCRIPT]
         # 20 条 = A(1) + B(4) + C(3) + D(2) + E(4) + F(2) + G(4)（§18.5 映射 + §18.14 标签 + tip 精简）
-        assert "20 PASS / 0 FAIL" in result.stdout
+        assert "20 PASS / 0 FAIL" in out
+        assert "SELF none OK" in out
 
-    def test_unknown_never_renders_as_expired_even_under_mutation(self):
+    def test_unknown_never_renders_as_expired_even_under_mutation(self, selfcheck: dict[str, str]):
         """变异：把 `unknown` 的文案改成「已失效」⇒ 脚本必须变红。
 
         这条是**守卫承重**的证据：脚本若对这类改动无感，它就没在守任何东西。
         """
-        result = self._run("tests/frontend/login_state.cjs", {"LOGIN_STATE_MUTATE": "label"})
-        assert result.returncode != 0, "unknown 与 expired 撞文案时脚本必须失败"
-        assert "B1 unknown 的文案 ≠ expired 的文案" in result.stdout
+        out = selfcheck[self.LOGIN_SCRIPT]
+        assert "SELF label OK" in out
+        assert "FAIL  B1 unknown 的文案 ≠ expired 的文案" in out, f"output={out}"
 
-    def test_tag_labels_are_guarded_under_mutation(self):
+    def test_tag_labels_are_guarded_under_mutation(self, selfcheck: dict[str, str]):
         """变异：两条通道短名撞车 / 短名等于全名 ⇒ 脚本必须变红（设计 13 §18.14）。
 
         §18.14 把登录态从「卡片里单开两行」改成了「昵称后面两个 tag」。位置是省下来了，
@@ -1060,56 +1085,56 @@ class TestFrontendBehaviourScripts:
         断言写成 `FAIL  F1` 这种**带前缀**的形式：只找 `F1` 的话，全绿时那行
         `PASS  F1 …` 同样命中，等于什么都没断言。
         """
+        out = selfcheck[self.LOGIN_SCRIPT]
         for mutate, expected in (("short", "F1"), ("shortlong", "F2")):
-            result = self._run("tests/frontend/login_state.cjs", {"LOGIN_STATE_MUTATE": mutate})
-            assert result.returncode != 0, f"{mutate} 变异必须让脚本失败"
-            assert f"FAIL  {expected}" in result.stdout, f"stdout={result.stdout}"
+            assert f"SELF {mutate} OK" in out, f"{mutate} 变异必须让脚本失败"
+            assert f"FAIL  {expected}" in out, f"output={out}"
 
     # ------------------------------------------------------------------ #
     # 2026-09-23 绑定弹窗改造（设计 13 §18.15）：行为脚本 add_account_modal.cjs
     # ------------------------------------------------------------------ #
 
-    def test_binding_dialog_contract_holds(self):
+    def test_binding_dialog_contract_holds(self, selfcheck: dict[str, str]):
         """弹窗 50vw×75vh / 无 Cookie 档 / 创作者平台文案 / 千帆双入口 / 无同步勾选。"""
-        result = self._run("tests/frontend/add_account_modal.cjs")
-        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
-        assert "ALL DIALOG CONTRACT HOLDS" in result.stdout
+        out = selfcheck[self.MODAL_SCRIPT]
+        assert "SELF none OK" in out
+        assert "ALL DIALOG CONTRACT HOLDS" in out, f"output={out}"
 
-    def test_binding_dialog_size_is_guarded_under_mutation(self):
+    def test_binding_dialog_size_is_guarded_under_mutation(self, selfcheck: dict[str, str]):
         """变异：把 50vw/75vh 改回旧尺寸 ⇒ 脚本必须变红（守卫承重的证据）。"""
-        result = self._run("tests/frontend/add_account_modal.cjs", {"MODAL_MUTATE": "drawer"})
-        assert result.returncode != 0, "尺寸回退时脚本必须失败"
-        assert "FAIL  A1" in result.stdout, f"stdout={result.stdout}"
+        out = selfcheck[self.MODAL_SCRIPT]
+        assert "SELF drawer OK" in out, "尺寸回退时脚本必须失败"
+        assert "FAIL  A1" in out, f"output={out}"
 
     # ------------------------------------------------------------------ #
     # 2026-09-23 补登弹窗对齐绑定弹窗（设计 13 §18.16）：行为脚本增补场景
     # ------------------------------------------------------------------ #
 
-    def test_renew_dialog_matches_binding_matrix(self):
+    def test_renew_dialog_matches_binding_matrix(self, selfcheck: dict[str, str]):
         """§18.16：补登弹窗按平台给登录方式（千帆 = 二维码/邮箱密码；网页版 /
         创作者 = 二维码/手机验证码），默认扫码，无 Cookie 粘贴入口。"""
-        result = self._run("tests/frontend/add_account_modal.cjs")
-        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
-        assert "ALL DIALOG CONTRACT HOLDS" in result.stdout
+        out = selfcheck[self.MODAL_SCRIPT]
+        assert "SELF none OK" in out
+        assert "ALL DIALOG CONTRACT HOLDS" in out, f"output={out}"
 
-    def test_renew_dialog_default_qr_is_guarded_under_mutation(self):
+    def test_renew_dialog_default_qr_is_guarded_under_mutation(self, selfcheck: dict[str, str]):
         """变异：默认方式从「二维码」改成「手机验证码」⇒ A7/A8 必须变红。"""
-        result = self._run("tests/frontend/add_account_modal.cjs", {"RENEW_MUTATE": "default"})
-        assert result.returncode != 0, "默认方式被改时脚本必须失败"
-        assert "FAIL  A7 www renew shows a QR by default" in result.stdout, f"stdout={result.stdout}"
+        out = selfcheck[self.MODAL_SCRIPT]
+        assert "SELF default OK" in out, "默认方式被改时脚本必须失败"
+        assert "FAIL  A7 www renew shows a QR by default" in out, f"output={out}"
 
-    def test_renew_dialog_matrix_is_guarded_under_mutation(self):
+    def test_renew_dialog_matrix_is_guarded_under_mutation(self, selfcheck: dict[str, str]):
         """变异：网页版 / 创作者档的「手机验证码」换成「邮箱密码」⇒ A7/A8 必须变红。"""
-        result = self._run("tests/frontend/add_account_modal.cjs", {"RENEW_MUTATE": "matrix"})
-        assert result.returncode != 0, "登录方式矩阵被改时脚本必须失败"
-        assert "FAIL  A7 www renew offers" in result.stdout, f"stdout={result.stdout}"
+        out = selfcheck[self.MODAL_SCRIPT]
+        assert "SELF matrix OK" in out, "登录方式矩阵被改时脚本必须失败"
+        assert "FAIL  A7 www renew offers" in out, f"output={out}"
 
-    def test_renew_dialog_target_wiring_is_guarded_under_mutation(self):
+    def test_renew_dialog_target_wiring_is_guarded_under_mutation(self, selfcheck: dict[str, str]):
         """变异：补登面板不再带 targetAccountId（续期退化成建号）⇒ A6/A7/A8 必须变红。"""
-        result = self._run("tests/frontend/add_account_modal.cjs", {"RENEW_MUTATE": "notarget"})
-        assert result.returncode != 0, "target 接线被拆时脚本必须失败"
-        assert "FAIL  A7 send-code submits target_account_id in renew mode" in result.stdout, (
-            f"stdout={result.stdout}"
+        out = selfcheck[self.MODAL_SCRIPT]
+        assert "SELF notarget OK" in out, "target 接线被拆时脚本必须失败"
+        assert "FAIL  A7 send-code submits target_account_id in renew mode" in out, (
+            f"output={out}"
         )
 
 

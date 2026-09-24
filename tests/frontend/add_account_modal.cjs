@@ -21,10 +21,17 @@
  *
  * Run:
  *   <node> tests/frontend/add_account_modal.cjs                        # expect all PASS
+ *   <node> tests/frontend/add_account_modal.cjs --self-check           # one process: contract + all mutations (pytest uses this)
  *   MODAL_MUTATE=drawer <node> tests/frontend/add_account_modal.cjs    # expect A1 FAIL
  *   RENEW_MUTATE=default  <node> tests/frontend/add_account_modal.cjs  # expect A6/A7/A8 FAIL
  *   RENEW_MUTATE=matrix   <node> tests/frontend/add_account_modal.cjs  # expect A7/A8 FAIL
  *   RENEW_MUTATE=notarget <node> tests/frontend/add_account_modal.cjs  # expect A7/A8 FAIL
+ *
+ * `--self-check` (2026-09-25 P0-4 speedup, see investigation report): contract + all
+ * mutations run sequentially in ONE node process and print
+ * `SELF <variant> OK|BROKEN <p>/<f>` summary lines for pytest to parse. Before this,
+ * each mutation spawned its own process (5x jsdom boot + esbuild); the related cases
+ * cost ~100s of the full regression, now ~1 run.
  *
  * jsdom is intentionally NOT a project dependency; point NODE_PATH at its
  * node_modules when installed outside the project.
@@ -602,7 +609,7 @@ const origLog = console.log;
 
 // §18.16 补登弹窗契约的变异开关：每个开关证明对应守卫承重
 // （锚点未命中直接抛错 —— 静默不生效比变红更危险）。
-const RENEW_MUTATE = process.env.RENEW_MUTATE || "";
+// mutate 由 runOnce 参数传入（单进程多变异，2026-09-25 P0-4 提速）。
 const RENEW_RESERVED = {
   // 默认方式从「二维码」改成「手机验证码」
   default: 'const DEFAULT_METHOD: RenewMethod = "qr";',
@@ -617,7 +624,9 @@ const RENEW_MUTATE_TO = {
   notarget: "targetAccountId={undefined}",
 };
 
-(async () => {
+// 跑一轮：modalMutate/renewMutate 为空串跑契约，否则跑对应变异。
+// 返回 { results, failed, timeout }；不碰 process.exit（单进程多变异靠这个可重入性）。
+async function runOnce(modalMutate, renewMutate) {
   const built = await esbuild.build({
     stdin: { contents: ENTRY, resolveDir: path.join(PROJECT, "frontend/src"), loader: "jsx" },
     bundle: true,
@@ -632,7 +641,7 @@ const RENEW_MUTATE_TO = {
         // harness proves A1 is load-bearing. Nothing on disk is touched.
         name: "mutate-modal",
         setup(build) {
-          const mutate = process.env.MODAL_MUTATE === "drawer";
+          const mutate = modalMutate === "drawer";
           build.onLoad({ filter: /add-account-drawer\.tsx$/ }, async (args) => {
             const fs = require("fs");
             let contents = fs.readFileSync(args.path, "utf8");
@@ -659,13 +668,13 @@ const RENEW_MUTATE_TO = {
             const fs = require("fs");
             // ⚠️ 行尾归一化：源码可能是 CRLF，锚点失配会让变异静默不生效。
             let contents = fs.readFileSync(args.path, "utf8").replace(/\r\n/g, "\n");
-            if (RENEW_MUTATE) {
-              const needle = RENEW_RESERVED[RENEW_MUTATE];
-              if (!needle) throw new Error(`未知变异：${RENEW_MUTATE}`);
+            if (renewMutate) {
+              const needle = RENEW_RESERVED[renewMutate];
+              if (!needle) throw new Error(`未知变异：${renewMutate}`);
               if (!contents.includes(needle)) {
                 throw new Error(`变异锚点未命中（实现已改？）：${needle}`);
               }
-              contents = contents.split(needle).join(RENEW_MUTATE_TO[RENEW_MUTATE]);
+              contents = contents.split(needle).join(RENEW_MUTATE_TO[renewMutate]);
             }
             return { contents, loader: "tsx" };
           });
@@ -690,29 +699,84 @@ const RENEW_MUTATE_TO = {
 
   const code = built.outputFiles[0].text;
 
-  const timer = setTimeout(() => {
-    origLog("@@TIMEOUT@@ no result produced");
-    process.exit(2);
-  }, 60000);
-
-  console.log = (...args) => {
-    const line = args.join(" ");
-    if (line.startsWith("@@JSON@@")) {
+  return await new Promise((resolve, reject) => {
+    const restore = () => {
       clearTimeout(timer);
-      const results = JSON.parse(line.slice("@@JSON@@".length));
-      let failed = 0;
-      for (const r of results) {
-        if (!r.ok) failed += 1;
-        origLog(`${r.ok ? "PASS" : "FAIL"}  ${r.name}   [${r.detail}]`);
-      }
-      origLog(failed === 0 ? "\nALL DIALOG CONTRACT HOLDS" : `\n${failed} CHECK(S) FAILED`);
-      process.exit(failed === 0 ? 0 : 1);
-    }
-    origLog(...args);
-  };
+      console.log = origLog;
+    };
+    const timer = setTimeout(() => {
+      restore();
+      origLog("@@TIMEOUT@@ no result produced");
+      resolve({ results: [], failed: -1, timeout: true });
+    }, 60000);
 
-  new Function(code)();
-})().catch((err) => {
-  origLog("HARNESS ERROR:", err && err.stack ? err.stack : err);
-  process.exit(3);
-});
+    console.log = (...args) => {
+      const line = args.join(" ");
+      if (line.startsWith("@@JSON@@")) {
+        restore();
+        const results = JSON.parse(line.slice("@@JSON@@".length));
+        let failed = 0;
+        for (const r of results) {
+          if (!r.ok) failed += 1;
+          origLog(`${r.ok ? "PASS" : "FAIL"}  ${r.name}   [${r.detail}]`);
+        }
+        origLog(failed === 0 ? "\nALL DIALOG CONTRACT HOLDS" : `\n${failed} CHECK(S) FAILED`);
+        resolve({ results, failed, timeout: false });
+        return;
+      }
+      origLog(...args);
+    };
+
+    try {
+      new Function(code)();
+    } catch (err) {
+      restore();
+      reject(err);
+    }
+  });
+}
+
+//: self-check 依次跑的 variant：none 契约（必须全 PASS），其余必须至少一个 FAIL
+const MODAL_VARIANTS = [
+  { name: "none", modal: "", renew: "" },
+  { name: "drawer", modal: "drawer", renew: "" },
+  { name: "default", modal: "", renew: "default" },
+  { name: "matrix", modal: "", renew: "matrix" },
+  { name: "notarget", modal: "", renew: "notarget" },
+];
+
+async function selfCheck() {
+  let broken = 0;
+  for (const v of MODAL_VARIANTS) {
+    let r;
+    try {
+      r = await runOnce(v.modal, v.renew);
+    } catch (err) {
+      // 打包失败 / 锚点未命中都算 BROKEN —— 静默不生效比变红更危险
+      origLog(`SELF ${v.name} BROKEN (throw: ${err && err.message ? err.message : err})`);
+      broken += 1;
+      continue;
+    }
+    const expectFail = v.name !== "none";
+    const ok = expectFail ? r.failed > 0 : r.failed === 0 && !r.timeout;
+    if (!ok) broken += 1;
+    origLog(`SELF ${v.name} ${ok ? "OK" : "BROKEN"} ${r.results.length - Math.max(r.failed, 0)}/${r.results.length}`);
+  }
+  return broken === 0 ? 0 : 1;
+}
+
+if (process.argv.includes("--self-check")) {
+  selfCheck()
+    .then((code) => process.exit(code))
+    .catch((err) => {
+      origLog("HARNESS ERROR:", err && err.stack ? err.stack : err);
+      process.exit(3);
+    });
+} else {
+  runOnce(process.env.MODAL_MUTATE || "", process.env.RENEW_MUTATE || "")
+    .then((r) => process.exit(r.failed === 0 && !r.timeout ? 0 : 1))
+    .catch((err) => {
+      origLog("HARNESS ERROR:", err && err.stack ? err.stack : err);
+      process.exit(3);
+    });
+}

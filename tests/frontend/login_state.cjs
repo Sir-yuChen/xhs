@@ -18,6 +18,7 @@
  * 运行（纯模块，不需要 antd 桩、不需要 jsdom）：
  *
  *   <node> tests/frontend/login_state.cjs                    # 期望 20 PASS
+ *   <node> tests/frontend/login_state.cjs --self-check       # 一次进程跑完契约+全部变异（pytest 用这个）
  *   LOGIN_STATE_MUTATE=expired <node> tests/frontend/login_state.cjs   # 期望 FAIL
  *   LOGIN_STATE_MUTATE=label   <node> tests/frontend/login_state.cjs   # 期望 FAIL
  *   LOGIN_STATE_MUTATE=order   <node> tests/frontend/login_state.cjs   # 期望 FAIL
@@ -34,6 +35,10 @@
  *   short     —— 三个平台的短名撞车（tag 长得一样，分不清哪个是千帆）；
  *   shortlong —— 短名等于全名（tag 里塞不下，把昵称挤没）；
  *   tip       —— 悬停说明又把后端长原因塞回去（用户口径：tip 太长了）。
+ *
+ * `--self-check`（2026-09-25 提速，见调研报告 P0-4）：契约 + 全部变异在**一个 node 进程**里
+ * 依次跑完，输出 `SELF <variant> OK|BROKEN <passed>/<failed>` 摘要行。原来是每个变异起一个
+ * 进程（6 次 node 冷启动 + 6 次 esbuild），单文件相关用例占全量回归约 100s；合并后约 30s。
  */
 const fs = require("fs");
 const os = require("os");
@@ -42,8 +47,6 @@ const path = require("path");
 const PROJECT = path.resolve(__dirname, "..", "..");
 const esbuild = require(path.join(PROJECT, "frontend/node_modules/esbuild"));
 const MODULE_TS = path.join(PROJECT, "frontend/src/lib/login-state.ts");
-
-const MUTATE = process.env.LOGIN_STATE_MUTATE || "";
 
 const RESERVED = {
   expired: '  return "unknown";\n}',
@@ -66,25 +69,31 @@ const MUTATE_TO = {
   tip: "  const head = `${row.shortLabel}令牌${row.view.label}${row.reason ? `（${row.reason}）` : \"\"}`;",
 };
 
-const mutatePlugin = {
-  name: "login-state-mutate",
-  setup(build) {
-    build.onLoad({ filter: /lib[\\/]login-state\.ts$/ }, (args) => {
-      // ⚠️ 行尾归一化：源码可能是 CRLF（Windows 编辑器留下的），多行锚点带 `\n`
-      // 会失配 —— 失配的表现是「变异静默不生效」，脚本照常全绿，比变红更危险。
-      let source = fs.readFileSync(args.path, "utf8").replace(/\r\n/g, "\n");
-      if (MUTATE) {
-        const needle = RESERVED[MUTATE];
-        if (!needle) throw new Error(`未知变异：${MUTATE}`);
-        if (!source.includes(needle)) {
-          throw new Error(`变异锚点未命中（实现已改？）：${needle}`);
+// 变异插件工厂：mutate 由参数传入（单进程多变异时每个 variant 各建一个插件实例）
+function makeMutatePlugin(mutate) {
+  return {
+    name: "login-state-mutate",
+    setup(build) {
+      build.onLoad({ filter: /lib[\\/]login-state\.ts$/ }, (args) => {
+        // ⚠️ 行尾归一化：源码可能是 CRLF（Windows 编辑器留下的），多行锚点带 `\n`
+        // 会失配 —— 失配的表现是「变异静默不生效」，脚本照常全绿，比变红更危险。
+        let source = fs.readFileSync(args.path, "utf8").replace(/\r\n/g, "\n");
+        if (mutate) {
+          const needle = RESERVED[mutate];
+          if (!needle) throw new Error(`未知变异：${mutate}`);
+          if (!source.includes(needle)) {
+            throw new Error(`变异锚点未命中（实现已改？）：${needle}`);
+          }
+          source = source.replace(needle, MUTATE_TO[mutate]);
         }
-        source = source.replace(needle, MUTATE_TO[MUTATE]);
-      }
-      return { contents: source, loader: "ts" };
-    });
-  },
-};
+        return { contents: source, loader: "ts" };
+      });
+    },
+  };
+}
+
+//: self-check 模式依次跑的 variant：空串 = 契约（必须全 PASS），其余必须至少一个 FAIL
+const VARIANTS = ["", "expired", "label", "order", "missing", "short", "shortlong", "tip"];
 
 let passed = 0;
 let failed = 0;
@@ -102,7 +111,9 @@ function check(label, actual, expected) {
   }
 }
 
-async function main() {
+// mutate = "" 跑契约；否则跑对应变异。返回 { passed, failed }，不碰 process.exit
+// （单进程多变异靠这个可重入性：每次重新打包 + require 新临时文件）。
+async function main(mutate) {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "login-state-"));
   const bundled = await esbuild.build({
     entryPoints: [MODULE_TS],
@@ -112,7 +123,7 @@ async function main() {
     platform: "node",
     target: "node18",
     logLevel: "silent",
-    plugins: [mutatePlugin],
+    plugins: [makeMutatePlugin(mutate)],
   });
   const outFile = path.join(tmpDir, "login-state.bundle.cjs");
   fs.writeFileSync(outFile, bundled.outputFiles[0].text);
@@ -121,12 +132,13 @@ async function main() {
 
   if (typeof loginStateView !== "function") {
     console.error("FATAL 未导出 loginStateView —— 若已重命名，请同步更新本脚本");
-    return 1;
+    return { passed: 0, failed: 1 };
   }
   if (typeof loginTagTip !== "function") {
     console.error("FATAL 未导出 loginTagTip —— 若已重命名，请同步更新本脚本");
-    return 1;
+    return { passed: 0, failed: 1 };
   }
+  if (mutate) console.log(`\n===== variant: ${mutate} =====`);
 
   const STATES = ["missing", "guest", "valid", "expired", "unknown"];
   const views = Object.fromEntries(STATES.map((state) => [state, loginStateView(state)]));
@@ -236,13 +248,45 @@ async function main() {
     true
   );
 
-  console.log(`\n${passed} PASS / ${failed} FAIL${MUTATE ? `  [变异模式：${MUTATE}]` : ""}`);
-  return failed === 0 ? 0 : 1;
+  console.log(`\n${passed} PASS / ${failed} FAIL${mutate ? `  [变异模式：${mutate}]` : ""}`);
+  return { passed, failed };
 }
 
-main()
-  .then((code) => process.exit(code))
-  .catch((error) => {
-    console.error(`FATAL ${error && error.message ? error.message : error}`);
-    process.exit(1);
-  });
+// --self-check：一个进程跑完契约 + 全部变异。
+// 每个 variant 的期望：契约全 PASS；变异至少一个 FAIL（守卫承重）。
+// 摘要行 `SELF <variant> OK|BROKEN <p>/<f>` 供 pytest 解析。
+async function selfCheck() {
+  let broken = 0;
+  for (const variant of VARIANTS) {
+    let r;
+    try {
+      r = await main(variant);
+    } catch (error) {
+      // 变异锚点未命中 / 打包失败都算 BROKEN —— 静默不生效比变红更危险
+      console.log(`SELF ${variant || "none"} BROKEN (throw: ${error && error.message})`);
+      broken += 1;
+      continue;
+    }
+    const expectFail = variant !== "";
+    const ok = expectFail ? r.failed > 0 : r.failed === 0;
+    if (!ok) broken += 1;
+    console.log(`SELF ${variant || "none"} ${ok ? "OK" : "BROKEN"} ${r.passed}/${r.failed}`);
+  }
+  return broken === 0 ? 0 : 1;
+}
+
+if (process.argv.includes("--self-check")) {
+  selfCheck()
+    .then((code) => process.exit(code))
+    .catch((error) => {
+      console.error(`FATAL ${error && error.message ? error.message : error}`);
+      process.exit(1);
+    });
+} else {
+  main(process.env.LOGIN_STATE_MUTATE || "")
+    .then((r) => process.exit(r.failed === 0 ? 0 : 1))
+    .catch((error) => {
+      console.error(`FATAL ${error && error.message ? error.message : error}`);
+      process.exit(1);
+    });
+}
