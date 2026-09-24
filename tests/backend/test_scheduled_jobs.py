@@ -24,6 +24,7 @@ from sqlalchemy.orm import sessionmaker
 from backend.app.main import app
 from backend.app.core.time import shanghai_now
 from backend.app.models import ScheduledJob, ScheduledJobLog, User
+from tests.backend.conftest import run_alembic
 
 client = TestClient(app)
 
@@ -1717,12 +1718,10 @@ def test_schedule_status_shape_and_auth(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 # 存量迁移（y8z9a0b1c2d3）：旧 auto_tasks 四态 → job 行
 # --------------------------------------------------------------------------- #
+@pytest.mark.slow
 def test_migration_converts_legacy_auto_tasks_four_ways(tmp_path):
     """真跑 alembic upgrade，钉住四态换算（weekly 的 isoweekday → cron dow 是关键）。"""
-    import os
     import sqlite3
-    import subprocess
-    import sys
 
     db_path = tmp_path / "legacy.db"
     conn = sqlite3.connect(db_path)
@@ -1781,24 +1780,10 @@ def test_migration_converts_legacy_auto_tasks_four_ways(tmp_path):
     finally:
         conn.close()
 
-    env = dict(os.environ)
-    env["DATABASE_URL"] = f"sqlite:///{db_path.as_posix()}"
     # 先 stamp 到本迁移的父 revision：夹具库只有 auto_tasks 一张表，从初始
     # migration 从头跑会撞「CREATE TABLE auto_tasks 已存在」。
-    subprocess.run(
-        [sys.executable, "-m", "alembic", "-c", "backend/alembic.ini", "stamp", "x7y8z9a0b1c2"],
-        cwd=os.getcwd(),
-        env=env,
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        [sys.executable, "-m", "alembic", "-c", "backend/alembic.ini", "upgrade", "head"],
-        cwd=os.getcwd(),
-        env=env,
-        check=True,
-        capture_output=True,
-    )
+    run_alembic(db_path, "stamp", "x7y8z9a0b1c2")
+    run_alembic(db_path, "upgrade", "head")
 
     conn = sqlite3.connect(db_path)
     try:
@@ -1851,6 +1836,7 @@ def test_schedule_endpoints_require_authentication(tmp_path):
 # --------------------------------------------------------------------------- #
 # R20 / R22 · 分组字段物理删除（2026-09-24 用户口径「数据库物理删除」）
 # --------------------------------------------------------------------------- #
+@pytest.mark.slow
 def test_migration_k1l2m3n4o5p6_drops_job_group_both_tables(tmp_path):
     """真跑 `upgrade`，钉住 `job_group` 在**两张表**上都已删除（源列 + 日志快照列）。
 
@@ -1861,10 +1847,7 @@ def test_migration_k1l2m3n4o5p6_drops_job_group_both_tables(tmp_path):
     ⇒ 判据不是「界面看不到了」，而是**迁移跑完后 PRAGMA 里没有这一列**。
     日志快照列同理：快照指向一个已不存在的源列毫无意义，两者同生共死。
     """
-    import os
     import sqlite3
-    import subprocess
-    import sys
 
     db_path = tmp_path / "drop_group.db"
     conn = sqlite3.connect(db_path)
@@ -1998,8 +1981,6 @@ def test_migration_k1l2m3n4o5p6_drops_job_group_both_tables(tmp_path):
     finally:
         conn.close()
 
-    env = dict(os.environ)
-    env["DATABASE_URL"] = f"sqlite:///{db_path.as_posix()}"
     # stamp 到 k1l2m3n4o5p6 的**父 revision**（`h8i9j0k1l2m3`），从那里升级。
     # 注意：这里**必须**用 stamp+定点 upgrade，**绝不能用 downgrade 对齐** ——
     # `y8z9a0b1c2d3.downgrade()` 会 `drop_table("scheduled_jobs")`，把夹具砸成空库。
@@ -2008,20 +1989,9 @@ def test_migration_k1l2m3n4o5p6_drops_job_group_both_tables(tmp_path):
     # `user_id IS NULL` 的全局行，而后续迁移 `a0b1c2d3e4f5` 的职责就是**按用户克隆后
     # 删除全局行**（夹具库 users 为空 ⇒ 直接删）—— 用 head 会让这条钉子行被后续迁移
     # 合理清掉，测试就红了。定点升级让本条只盯 `job_group` 删列这一件事。
-    subprocess.run(
-        [sys.executable, "-m", "alembic", "-c", "backend/alembic.ini", "stamp", "h8i9j0k1l2m3"],
-        cwd=os.getcwd(),
-        env=env,
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        [sys.executable, "-m", "alembic", "-c", "backend/alembic.ini", "upgrade", "k1l2m3n4o5p6"],
-        cwd=os.getcwd(),
-        env=env,
-        check=True,
-        capture_output=True,
-    )
+    # （DATABASE_URL 等细节收在 conftest.run_alembic）
+    run_alembic(db_path, "stamp", "h8i9j0k1l2m3")
+    run_alembic(db_path, "upgrade", "k1l2m3n4o5p6")
 
     conn = sqlite3.connect(db_path)
     try:
@@ -2068,6 +2038,7 @@ def test_migration_k1l2m3n4o5p6_drops_job_group_both_tables(tmp_path):
     assert kept_log == ("钉住用任务", "probe.keep_row", 42)
 
 
+@pytest.mark.slow
 def test_migration_a0b1c2d3e4f5_isolates_task_center(tmp_path):
     """真跑 `upgrade`，钉住账号维度隔离迁移（DEF-066，设计 15 §4.1.1）四件事：
 
@@ -2079,10 +2050,7 @@ def test_migration_a0b1c2d3e4f5_isolates_task_center(tmp_path):
     ④ 存量用户行的 `account_ids` 按归属**清洗**（滤掉不属于行主的 id）。
     """
     import json
-    import os
     import sqlite3
-    import subprocess
-    import sys
 
     db_path = tmp_path / "isolation.db"
     conn = sqlite3.connect(db_path)
@@ -2210,22 +2178,10 @@ def test_migration_a0b1c2d3e4f5_isolates_task_center(tmp_path):
     finally:
         conn.close()
 
-    env = dict(os.environ)
-    env["DATABASE_URL"] = f"sqlite:///{db_path.as_posix()}"
-    subprocess.run(
-        [sys.executable, "-m", "alembic", "-c", "backend/alembic.ini", "stamp", "k1l2m3n4o5p6"],
-        cwd=os.getcwd(),
-        env=env,
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        [sys.executable, "-m", "alembic", "-c", "backend/alembic.ini", "upgrade", "head"],
-        cwd=os.getcwd(),
-        env=env,
-        check=True,
-        capture_output=True,
-    )
+    # 夹具 = `k1l2m3n4o5p6` 之后的真实形态（无 job_group、日志表无 user_id），
+    # stamp 到 k1l2m3n4o5p6 再 upgrade head（细节收在 conftest.run_alembic）。
+    run_alembic(db_path, "stamp", "k1l2m3n4o5p6")
+    run_alembic(db_path, "upgrade", "head")
 
     conn = sqlite3.connect(db_path)
     try:

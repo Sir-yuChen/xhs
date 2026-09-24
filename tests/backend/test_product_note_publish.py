@@ -33,6 +33,7 @@ from backend.app.models import Note, NoteAsset, PlatformAccount, ShopProduct, Us
 from backend.app.models.shop import NoteGoods, Shop
 from backend.app.services import note_publish_service, product_note_gen_service
 from tests.backend.cookie_fixtures import bind_shop_account
+import pytest
 
 client = TestClient(app)
 ROOT = Path(__file__).resolve().parents[2]
@@ -360,6 +361,7 @@ def test_generate_platform_failure_writes_nothing(tmp_path):
         _teardown()
 
 
+@pytest.mark.slow
 def test_batch_generate_isolates_failures(tmp_path):
     headers, account_id, db_factory = _setup(tmp_path)
     try:

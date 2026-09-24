@@ -26,6 +26,7 @@ from sqlalchemy.orm import sessionmaker
 from backend.app.core import initial_data
 from backend.app.main import app
 from backend.app.models import ScheduledJob, User
+from tests.backend.conftest import run_alembic
 
 client = TestClient(app)
 
@@ -363,12 +364,10 @@ def test_tests_are_not_packaged():
 # --------------------------------------------------------------------------- #
 # 4. 迁移侧：不再播种（否则判重会挡住初始化数据，修都修不掉）
 # --------------------------------------------------------------------------- #
+@pytest.mark.slow
 def test_migration_no_longer_seeds_scheduled_jobs(tmp_path):
     """真跑 `alembic upgrade head`：`scheduled_jobs` **零行** —— 种子只由初始化数据产生。"""
-    import os
     import sqlite3
-    import subprocess
-    import sys
 
     db_path = tmp_path / "fresh.db"
     conn = sqlite3.connect(db_path)
@@ -412,23 +411,9 @@ def test_migration_no_longer_seeds_scheduled_jobs(tmp_path):
     finally:
         conn.close()
 
-    env = dict(os.environ)
-    env["DATABASE_URL"] = f"sqlite:///{db_path.as_posix()}"
     # stamp 到本迁移的父 revision（夹具库只有这两张表，从初始迁移跑会撞「表已存在」）
-    subprocess.run(
-        [sys.executable, "-m", "alembic", "-c", "backend/alembic.ini", "stamp", "x7y8z9a0b1c2"],
-        cwd=os.getcwd(),
-        env=env,
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        [sys.executable, "-m", "alembic", "-c", "backend/alembic.ini", "upgrade", "head"],
-        cwd=os.getcwd(),
-        env=env,
-        check=True,
-        capture_output=True,
-    )
+    run_alembic(db_path, "stamp", "x7y8z9a0b1c2")
+    run_alembic(db_path, "upgrade", "head")
 
     conn = sqlite3.connect(db_path)
     try:

@@ -52,9 +52,19 @@ cd frontend && node node_modules/typescript/bin/tsc --noEmit
 
 | 循环 | 什么时候跑 | 命令 |
 |---|---|---|
-| ① 内循环 | **每改一次代码** | `pytest tests/backend/test_xxx.py -q`（pytest.ini 已带 `-n auto`，不用手打） |
+| ① 内循环 | **每改一次代码** | `pytest tests/backend/test_xxx.py -q -x --lf`（pytest.ini 已带 `-n auto`，不用手打；`-x` 首个失败即停，`--lf` 优先跑上次失败的；慢用例多时加 `-m "not slow"`） |
 | ② 中循环 | 一个功能点做完 / 动了公共层 | `pytest <受影响文件集> -q`（同上，自动并行） |
 | ③ 外循环 | 收尾 / 用户明确要求 | `pytest tests/ -q`（自动并行 + 自动写 `.workbuddy/reports/reg.xml`） |
+
+**「涉及哪些文件」用脚本选，不靠人脑反查**（P1-1，2026-09-25）：
+
+```bash
+python .workbuddy/scripts/pick_tests.py            # 按 git 未提交改动自动选测试文件
+pytest $(python .workbuddy/scripts/pick_tests.py) -q   # 直接跑选出的文件集
+```
+
+原理：扫测试文件的 import 建「源模块 → 测试文件」反向索引（缓存 `.workbuddy/tmp/test-dep-index.json`），
+命中完整模块名 + 一级父包；公共层（`models/`、`core/database`、`lib/api.ts`…）改动会 WARN 并建议全量。
 
 判「涉及哪些文件」：按**改动的源文件**反查 —— 改 `services/xxx.py` ⇒ 跑 `tests/backend/test_xxx.py`
 及 import 它的测试；改 API ⇒ 跑对应契约测试；改前端 `pages/**/x.tsx` ⇒ 跑 `tests/frontend/*.cjs`

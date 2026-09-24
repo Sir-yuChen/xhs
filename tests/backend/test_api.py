@@ -13,6 +13,7 @@ from backend.app.services.account_service import (
     CHANNEL_WWW,
 )
 from tests.backend.cookie_fixtures import cookie_version
+import pytest
 
 
 client = TestClient(app)
@@ -773,6 +774,7 @@ def test_xhs_pc_qrcode_reports_creator_sync_failure_instead_of_swallowing_it(tmp
         app.dependency_overrides.pop(get_creator_login_adapter, None)
 
 
+@pytest.mark.slow
 def test_xhs_pc_qrcode_login_updates_existing_account_for_same_external_user(tmp_path):
     from backend.app.api.accounts import get_pc_account_adapter
     from backend.app.api.login_sessions import get_creator_login_adapter, get_pc_login_adapter
@@ -1324,6 +1326,7 @@ class FailingCookieAccountAdapter:
         raise RuntimeError("expired")
 
 
+@pytest.mark.slow
 def test_account_cookie_import_creates_account_and_health_check_updates_status(tmp_path):
     from backend.app.api.accounts import get_creator_account_adapter, get_pc_account_adapter
     from backend.app.core.database import get_db
@@ -1496,6 +1499,7 @@ def test_account_check_refreshes_xhs_self_profile_metrics(tmp_path):
         app.dependency_overrides.pop(get_xhs_self_profile_adapter, None)
 
 
+@pytest.mark.slow
 def test_account_check_enforces_ownership_and_marks_expired_on_adapter_failure(tmp_path):
     from backend.app.api.accounts import get_pc_account_adapter
 

@@ -169,3 +169,26 @@ def frontend_runner() -> Callable[[str, dict[str, str] | None], Any]:
         )
 
     return _run
+
+
+def run_alembic(db_path: Path, *args: str) -> None:
+    """在夹具库上跑 alembic 子命令（`stamp <rev>` / `upgrade <rev>`）。
+
+    四个迁移用例（`test_scheduled_jobs.py` × 3、`test_initial_data.py` × 1）原来各抄一遍
+    「`DATABASE_URL` + `subprocess.run([sys.executable, -m, alembic, ...])`」样板 ——
+    收在一处（DEF-044 同型：同一语义不留两份实现）。`check=True` ⇒ 失败直接炸，
+    不静默跳过（迁移没跑成功而断言空摆，比红更危险）。
+    """
+    import os  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+
+    env = dict(os.environ)
+    env["DATABASE_URL"] = f"sqlite:///{db_path.as_posix()}"
+    subprocess.run(
+        [sys.executable, "-m", "alembic", "-c", "backend/alembic.ini", *args],
+        cwd=os.getcwd(),
+        env=env,
+        check=True,
+        capture_output=True,
+    )
