@@ -1,0 +1,75 @@
+# ============ 原有（Docker / PyInstaller 模板，保留） ============
+__pycache__
+node_modules/
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+MANIFEST
+*.manifest
+*.spec
+.cache
+*.log
+local_settings.py
+db.sqlite3
+*.db
+*.db-journal
+backend/app/storage/
+__pypackages__/
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.env
+.claude
+CLAUDE.md
+.agent
+.idea
+.superpowers
+.pytest_cache
+docx
+
+# ============ git 上传策略（2026-09-24 v1.0 首次提交时确定） ============
+
+# 真实数据库与全部本地备份（data/*.db、data/*.bak-*、*.bak、*.bak-*）
+data/
+*.bak
+*.bak-*
+
+# PyInstaller 构建用虚拟环境（几百 MB，.venv 模板规则匹配不到 .venv-build）
+.venv-build/
+
+# 本地真机快照（openapi 实测导出，非协作文档）
+openapi_live.json
+
+# 桌面安装包产物
+spider-xhs-setup-*.exe
+
+# PyInstaller 的 .spec 是手写配置（源码），放行——模板的 *.spec 会误伤它
+!packaging/SpiderXHS.spec
+
+# .workbuddy：只上传 skills / scripts / memory（项目规范与基建）。
+# 其余（散落 xml/log/备份、tmp、reports、logs、projects、backup）均为过程产物。
+/.workbuddy/*
+!/.workbuddy/skills/
+!/.workbuddy/scripts/
+!/.workbuddy/memory/
+
+# author/：只保留 README 引用的 logo.jpg；其余为个人二维码 / 社交 / 打赏码
+author/*
+!author/logo.jpg
+
+# 系统 / 编辑器
+Thumbs.db
+.DS_Store

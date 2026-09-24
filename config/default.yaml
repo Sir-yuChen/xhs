@@ -1,0 +1,72 @@
+# Spider_XHS Configuration
+# ========================
+# This is the default configuration file.
+# Values here can be overridden by:
+#   1. A custom YAML file specified via CONFIG_FILE env var
+#   2. Environment variables (highest priority)
+#
+# Environment variable mapping:
+#   server.host          -> SERVER_HOST
+#   server.port          -> SERVER_PORT
+#   server.cors_origins  -> BACKEND_CORS_ORIGINS
+#   database.type        -> DATABASE_TYPE
+#   database.sqlite_path -> DATABASE_SQLITE_PATH
+#   database.mysql_host  -> DATABASE_MYSQL_HOST
+#   database.mysql_port  -> DATABASE_MYSQL_PORT
+#   database.mysql_user  -> DATABASE_MYSQL_USER
+#   database.mysql_password -> DATABASE_MYSQL_PASSWORD
+#   database.mysql_database -> DATABASE_MYSQL_DATABASE
+#   security.secret_key  -> SECRET_KEY
+#   security.fernet_key  -> FERNET_KEY
+#   scheduler.enabled    -> SCHEDULER_ENABLED
+#   scheduler.interval_seconds -> SCHEDULER_INTERVAL_SECONDS
+#   qianfan.health_check_enabled -> QIANFAN_HEALTH_CHECK_ENABLED
+#   qianfan.health_check_interval_hours -> QIANFAN_HEALTH_CHECK_INTERVAL_HOURS
+#   frontend.serve_static -> FRONTEND_SERVE_STATIC
+#   frontend.build_dir   -> FRONTEND_BUILD_DIR
+
+server:
+  host: "0.0.0.0"
+  port: 8000
+  cors_origins: "http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173"
+
+database:
+  # "sqlite" for local development, "mysql" for production
+  type: "sqlite"
+  # SQLite database path (relative to project root)
+  sqlite_path: "./data/spider_xhs.db"
+  # MySQL connection settings (used when type=mysql)
+  mysql_host: "localhost"
+  mysql_port: 3306
+  mysql_user: "spider_xhs"
+  mysql_password: "change_me"
+  mysql_database: "spider_xhs"
+
+security:
+  # JWT signing key - MUST be changed in production
+  secret_key: "dev-only-change-me"
+  # Fernet key for encrypting cookies and API keys
+  # If empty, auto-derived from secret_key via SHA-256 + base64
+  fernet_key: ""
+
+scheduler:
+  # Enable background task scheduler (publish jobs, monitoring refresh)
+  # 2026-09-24 用户口径：**默认启用**（装完即按任务行的 cron 自动执行；设计 15 §4.5）。
+  # ⚠️ 本开关只管「调度器起不起来」，**每个任务跑不跑看 `scheduled_jobs.status`**
+  #    （任务中心可逐条暂停/恢复）—— 两件事，别混。
+  enabled: true
+  # Polling interval in seconds
+  interval_seconds: 60
+
+# 千帆（ark）店铺绑定的登录态巡检（T-31）：只读探活 `GET /api/edith/seller/info/v2`
+# enabled=false 时**不注册定时任务**（页面的「立即巡检」按钮仍可用）
+qianfan:
+  health_check_enabled: true
+  # 巡检周期（小时），默认 6；只有到期（health_checked_at 超过周期）的绑定才会被探活
+  health_check_interval_hours: 6
+
+frontend:
+  # Set to true to serve pre-built frontend from backend (Docker/production)
+  serve_static: false
+  # Path to the built frontend assets
+  build_dir: "./frontend/dist"

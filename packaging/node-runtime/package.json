@@ -1,0 +1,7 @@
+﻿{
+  "name": "spider-xhs-node-runtime",
+  "private": true,
+  "dependencies": {
+    "crypto-js": "^4.2.0"
+  }
+}

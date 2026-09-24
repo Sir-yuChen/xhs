@@ -1,0 +1,1437 @@
+export type PlatformId = "xhs" | "douyin" | "kuaishou" | "weibo" | "xianyu" | "taobao";
+
+export type PlatformMeta = {
+  id: PlatformId;
+  name_cn: string;
+  name_en: string;
+  enabled: boolean;
+  status: "enabled" | "coming_soon";
+  accent_color: string;
+  icon: string;
+};
+
+export type Paginated<T> = {
+  total: number;
+  page: number;
+  page_size: number;
+  items: T[];
+};
+
+export type DashboardOverview = {
+  platform: "xhs";
+  today_crawls: number;
+  saved_notes: number;
+  pending_publishes: number;
+  healthy_accounts: number;
+  at_risk_accounts: number;
+  comment_count?: number;
+  total_engagement?: number;
+  hot_topics: Array<{ keyword: string; notes: number; engagement: number }>;
+  recent_activity: Array<{ type: string; title: string; status: string }>;
+};
+
+export type PlatformUser = {
+  id: number;
+  username: string;
+};
+
+export type AuthTokens = {
+  access_token: string;
+  refresh_token?: string;
+  token_type: "bearer";
+};
+
+export type AuthPayload = AuthTokens & {
+  user: PlatformUser;
+};
+
+/**
+ * 一条凭据通道的登录态（设计 13 §18.5）。
+ *
+ * **三层判据各有各的答案，所以状态是五个互斥取值而不是一个布尔**：
+ * - `missing`  —— 这个通道**从没导入过**（L1 没过）；
+ * - `guest`    —— 导入了，但只是**游客态 / 空壳**（L2 没过：www 缺 `id_token`、
+ *                 ark 缺 customer 单点登录键）；
+ * - `unknown`  —— 存了、也是登录态，但**还没检测**（或上次检测没得到结论）；
+ * - `valid` / `expired` —— 探活通过 / 平台明确拒绝（只有这两者是 L3 的结论）。
+ *
+ * ⚠️ **`unknown` 不是「已失效」**：用「没检查」冒充「不可用」会让用户去做一次
+ * 根本不需要的重登（DEF-057 的同型红线）。
+ */
+export type XhsLoginStateValue = "missing" | "guest" | "valid" | "expired" | "unknown" | string;
+
+export type XhsLoginChannelState = {
+  state: XhsLoginStateValue;
+  /** 后端给的原因全文（标签 tip 只用短映射，这里留作将来详情展示）。 */
+  reason: string;
+  /** 这一次真的打过只读探针吗（L3）。 */
+  probed: boolean;
+  /** 平台展示名（`www` → 「网页版（PC）」；`creator` → 「创作者平台」；`ark` → 「千帆」）。 */
+  label: string;
+};
+
+export type XhsLoginChannels = Record<string, XhsLoginChannelState>;
+
+export type XhsAccountLoginState = {
+  platform_account_id: number;
+  probe?: boolean;
+  channels: XhsLoginChannels;
+  checked_at?: string | null;
+};
+
+export type PlatformAccount = {
+  id: number;
+  platform: PlatformId;
+  sub_type: "pc" | "creator" | "qianfan" | null;
+  external_user_id?: string;
+  nickname: string;
+  avatar_url?: string;
+  status: "active" | "healthy" | "expired" | "risk" | "unknown" | string;
+  status_message?: string;
+  profile?: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
+  action?: "created" | "updated" | string;
+  /**
+   * 三个平台的登录态（L1/L2，**零平台请求**，随列表一起下发 —— 设计 13 §18.5）。
+   *
+   * 随列表给而不是逐卡片再问一次：既省 N 次往返，也让卡片上的登录态与账号资料
+   * 来自**同一次响应**（不会出现「列表刷新了、登录态还是上一轮」）。
+   * 老响应 / 别的调用点可能没有这个字段 —— 消费方按「没有就当没算过」处理。
+   *
+   * 2026-09-21 拆分（用户拍板）：千帆与创作者平台**不再是同一份令牌**，所以这里是
+   * **三个**平台（`ark` 千帆 / `creator` 创作者 / `www` 网页版），不是两个。
+   */
+  login_channels?: XhsLoginChannels;
+};
+
+export type XhsQrLoginSession = {
+  session_id: number;
+  status: "pending" | "scanned" | "confirmed" | "expired" | string;
+  qr_url: string;
+  qr_image_data_url?: string;
+  account?: PlatformAccount | null;
+  creator_account?: PlatformAccount | null;
+  /** Set when a PC login succeeded but the optional Creator sync did not. */
+  creator_sync_error?: string | null;
+  /**
+   * 续期（`target_account_id`）成功时写进的那个平台：`www` / `creator` / `ark`。
+   *
+   * 回传它是为了**让界面说出令牌落在哪**（2026-09-21 拆分后三个平台各自独立，
+   * 说清楚比让用户猜好）。
+   */
+  renewed_channel?: string;
+  /**
+   * 千帆续期写入的店铺名（仅千帆扫码有；其它恒为空）。
+   *
+   * 千帆的身份锚点是店铺而不是小红书用户，所以把店名回传，让界面能显示
+   * 「已写入千帆令牌（店铺：观隅好物的店）」—— 用户立刻看出扫对没扫对。
+   */
+  renewed_shop?: { shop_user_id?: string; shop_name?: string } | null;
+  /**
+   * 续期失败的结构化原因（`{code, message}`）。**只有**扫到的身份与目标账号
+   * 不一致、或目标账号不可用时才有 —— 此时**一个字节都没写**。
+   */
+  renew_error?: { code?: string; message?: string } | null;
+};
+
+export type NoteGoods = {
+  goods_id: string;
+  title: string;
+  price: string;
+  image: string;
+  url: string;
+  shop_name: string;
+  /** 规格描述（千帆口径 `variant_desc`，如「喵宠开心/40*60CM」）。 */
+  variant?: string;
+};
+
+/**
+ * 千帆（店铺侧）为一条笔记给出的指标。
+ *
+ * 「创作者账户数据全部接入千帆」的落地：千帆商品笔记列表里的每个字段都透出到
+ * 前端，而不是只取商品那一小块。**读不到的项是 `null`，不是 0** —— 缺值与真值
+ * 必须能被区分（设计文档 §18.2 / §19）。
+ */
+export type XhsNoteShopMetrics = {
+  note_id: string;
+  title: string;
+  cover: string;
+  note_flag: string;
+  browse_num: number | null;
+  browse_num_30d: number | null;
+  likes: number | null;
+  collects: number | null;
+  comments: number | null;
+  shares: number | null;
+  pay_gmv: number | null;
+  pay_order_cnt: number | null;
+  status: number | null;
+  note_type: number | null;
+  publish_time: number | null;
+  xsec_token: string;
+};
+
+/** 单篇笔记详情里，千帆给出的挂载商品（v1.18：三源合并）。 */
+export type XhsNoteShopGood = {
+  item_id: string;
+  item_title: string;
+  item_image: string;
+  variant_desc: string;
+  price: string;
+};
+
+/** `XhsSearchNote.shop` 在详情弹窗里的完整形状：指标平铺 + 商品数组。 */
+export type XhsNoteShopDetail = XhsNoteShopMetrics & {
+  /** 是否绑定了店铺（决定「千帆数据」这一区块显示与否） */
+  bound: boolean;
+  /** 该笔记在千帆确实有数据（有映射行） */
+  available: boolean;
+  /** 店铺名 */
+  source: string;
+  /** 失败原因（不阻断详情展示，只做一行提示） */
+  error: string;
+  goods: XhsNoteShopGood[];
+};
+
+export type XhsSearchNote = {
+  note_id: string;
+  /** 千帆（店铺侧）数据；列表页只有指标，详情弹窗里还带商品数组（v1.18）。 */
+  shop?: XhsNoteShopDetail | null;
+  note_url?: string;
+  title: string;
+  content: string;
+  author_id: string;
+  author_name: string;
+  author_avatar: string;
+  cover_url: string;
+  likes: number;
+  collects: number;
+  comments: number;
+  shares: number;
+  type: string;
+  timestamp?: number | string;
+  image_urls?: string[];
+  video_url?: string;
+  video_addr?: string;
+  tags?: string[];
+  /** null means "not parsed" — the backend never fabricates a placeholder. */
+  goods?: NoteGoods | null;
+  raw: Record<string, unknown>;
+};
+
+export type XhsNoteSearchResponse = {
+  total: number;
+  page: number;
+  page_size: number;
+  has_more: boolean;
+  items: XhsSearchNote[];
+  raw: Record<string, unknown>;
+};
+
+/**
+ * Which platform link served the data.
+ *
+ * ``pc``      — www (edith) endpoints; requires a ``web_session`` cookie.
+ * ``creator`` — creator platform (galaxy) endpoints; the note manager.
+ * ``""``      — neither is usable for the requested scope.
+ */
+export type XhsSelfLinkKind = "pc" | "creator" | "";
+
+/** Platform identity of the signed-in account (from POST /xhs/pc/users/me). */
+export type XhsSelfIdentity = {
+  user_id: string;
+  nickname: string;
+  avatar: string;
+  red_id: string;
+  ip_location: string;
+  link?: XhsSelfLinkKind;
+  raw?: Record<string, unknown>;
+};
+
+/** One self-content link's availability, always with a human-readable reason. */
+export type XhsSelfCapability = {
+  available: boolean;
+  /** Non-empty whenever `available` is false — never leave the user guessing. */
+  reason: string;
+  /** 仅用户维度三分类带：这次读数是靠自有会话还是借同身份兄弟账号的（v1.20）。 */
+  session_source?: XhsSelfSessionSource;
+};
+
+/**
+ * 用户维度三分类（我赞过的 / 我收藏的 / 互动消息）的会话来源。
+ *
+ * 只有 `own` 一种取值：账号自己没有 `web_session` 时后端直接给结构化原因。
+ */
+export type XhsSelfSessionSource = "own" | "";
+
+/**
+ * Capability report from POST /xhs/pc/users/capabilities.
+ *
+ * Computed locally on the server (no platform request), so the page can rely on
+ * it even when identity resolution fails. This is the single source of truth for
+ * which tabs are usable — never infer it from `sub_type` on the client.
+ */
+export type XhsSelfCapabilities = {
+  account_id: number;
+  sub_type: string;
+  has_web_session: boolean;
+  /** 用户维度三分类实际用的会话来源；`""` = 都没有（这三类置灰）。 */
+  session_source: XhsSelfSessionSource;
+  notes_link: XhsSelfLinkKind;
+  capabilities: Record<XhsSelfContentScope | "interactions" | "goods", XhsSelfCapability> & {
+    goods: XhsSelfGoodsCapability;
+  };
+};
+
+/**
+ * 商品能力声明：**来源 + 读取条件**，不是一句「暂不支持」。
+ *
+ * 笔记挂载的商品在小红书的网页与创作者接口里都不存在（设计文档 §19），
+ * 唯一真实来源是千帆商家后台（`source: "ark"`）。所以这条能力回答的是
+ * 「有没有绑定店铺、同步过多少条」，前端据此决定是展示绑定入口还是同步按钮。
+ */
+export type XhsSelfGoodsCapability = XhsSelfCapability & XhsGoodsSource;
+
+/** `POST /xhs/pc/users/notes` 附带的商品来源元信息（与 `capabilities.goods` **同源同形**）。 */
+export type XhsGoodsSource = {
+  source: string;
+  bound: boolean;
+  //: 2026-09-22 移除 `shop_account_count`：用户口径「店铺 ↔ 账号 1:1，不允许同店多账号」，
+  //: 「同一店铺被几个账号绑着」不再是一个事实（恒 0/1）。后端字段已删，前端不再读。
+  shop_name: string;
+  status: string;
+  status_message: string;
+  shop_total: number;
+  synced_notes: number;
+  synced_at: string;
+  /** 最近一次千帆登录态巡检时间（T-31）。 */
+  health_checked_at?: string;
+  /** 按需补齐（T-30）本次的结果：请求了几条 / 补到几条 / 失败原因。 */
+  on_demand?: { requested: number; stored: number; error: string };
+};
+
+/** `POST /xhs/qianfan/binding` 的响应（绑定状态）。 */
+export type XhsQianfanBinding = {
+  platform_account_id: number;
+  bound: boolean;
+  /** 店铺实体主键（`shops.id`）。2026-09-22 起账号 ↔ 店铺是 **1:1**。 */
+  shop_id_fk?: number | null;
+  shop_user_id: string;
+  shop_name: string;
+  status: string;
+  status_message: string;
+  goods_note_total: number;
+  synced_notes: number;
+  goods_synced_at: string;
+  /** 最近一次千帆登录态巡检时间（T-31）；空 = 从未巡检。 */
+  health_checked_at?: string;
+};
+
+/** `POST /xhs/qianfan/shops` 的一个店铺（**1:1** 的读侧，2026-09-22 起）。 */
+export type XhsQianfanShop = {
+  shop_id_fk: number;
+  seller_id: string;
+  shop_id: string;
+  shop_name: string;
+  status: string;
+  //: 2026-09-22 移除 `account_count`（同店多账号被否决，恒 0/1）；`accounts` 现在是
+  //: 「这个店挂着哪个账号」，至多一项 —— 用来把账号标签标成它的店铺名。
+  accounts: Array<{
+    platform_account_id: number;
+    nickname: string;
+    binding_status: string;
+  }>;
+  /** 该店铺名下所有绑定的映射条数之和（与 goods_note_total 同一口径）。 */
+  synced_notes: number;
+  goods_note_total: number;
+};
+
+/** 千帆商品列表的状态筛选键（与后端 `QIANFAN_ITEM_STATUSES` 一一对应）。 */
+export type XhsShopItemStatus =
+  | "all"
+  | "on_shelf"
+  | "off_shelf"
+  | "frozen"
+  | "auditing"
+  | "audit_rejected"
+  | "audit_passed"
+  | "rectify";
+
+/**
+ * `POST /xhs/qianfan/items` 的一个商品。
+ *
+ * 金额字段一律是**分**（千帆口径，原样透传），展示层自己除以 100 ——
+ * 这样「有没有乘错过 100」在契约上就是不可能发生的事。
+ */
+export type XhsShopItem = {
+  item_id: string;
+  title: string;
+  article_no: string;
+  image: string;
+  images: string[];
+  image_count: number;
+  price_min_fen: number | null;
+  price_max_fen: number | null;
+  stock: number | null;
+  sku_count: number | null;
+  on_sale_sku_count: number | null;
+  sales_total: number | null;
+  sales_30d: number | null;
+  /**
+   * 挂链笔记篇数（**关系表口径**：`note_goods` 按商品计数，设计 13 §32.4）。
+   * 本地生成一篇挂该商品的笔记就会 +1 —— 这是列表列显示的数字。
+   */
+  note_count: number;
+  /**
+   * 平台口径的挂链笔记数（原文 `product_note_num`）—— **只作对照**。
+   * 本地生成的笔记在平台侧还不存在 ⇒ 这个数不会动；关系表只覆盖
+   * 「已同步 + 本地生成」⇒ 本地 ≤ 平台是常态（Tooltip 里两个都说明）。
+   */
+  platform_note_count: number;
+  note_ids: string[];
+  category: string;
+  status_label: string;
+  buyable: boolean;
+  frozen: boolean;
+  deleted: boolean;
+  audit_status: number | null;
+  check_status: number | null;
+  is_channel: boolean;
+  stock_warning_sku_count: number;
+  create_time: string;
+  on_shelf_time: string;
+  update_time: string;
+  xsec_token: string;
+};
+
+export type XhsShopItemsQuery = {
+  platform_account_id: number;
+  page_no?: number;
+  page_size?: number;
+  keyword?: string;
+  status?: XhsShopItemStatus;
+  /** 元（用户口径）；后端转分后发给千帆。 */
+  price_from?: number;
+  price_to?: number;
+  stock_from?: number;
+  stock_to?: number;
+  sales_from?: number;
+  sales_to?: number;
+  /** 创建时间（`YYYY-MM-DD`；结束日含当天）。后端转成千帆要的 Unix 秒。 */
+  create_time_from?: string;
+  create_time_to?: string;
+  /** 挂链笔记数的比较符（v1.34）：`lt`/`lte`/`eq`/`gte`/`gt`，**默认 `lt`（小于）**。 */
+  note_count_op?: XhsNoteCountOp;
+  /**
+   * 挂链笔记数的比较值（v1.34）。**不传 ⇒ 不筛**（不是「小于 0」）；
+   * 口径 = `note_goods` **关系表**，与列表「挂链笔记」列是同一个数（设计 13 §33.8）。
+   */
+  note_count?: number;
+  sort_field?: string;
+  order?: "asc" | "desc";
+};
+
+/** 挂链笔记数筛选的比较符（v1.34）；白名单与后端 `qianfan.NOTE_COUNT_OPS` 逐个相等。 */
+export type XhsNoteCountOp = "lt" | "lte" | "eq" | "gte" | "gt";
+
+/**
+ * `POST /xhs/qianfan/item-notes` 的一条挂链笔记（**关系表源**，设计 13 §31.6）。
+ *
+ * v1.33 起数据源从 `shop_note_goods` 平台证据缓存切换到 `note_goods` join `notes`
+ * （本地实体关系）—— 弹窗要展示的是「本地这条笔记」的正文 / 图集 / 发布态，
+ * 缓存表没有这些。互动指标只有同步链路落库的笔记带（`raw_json` 里存了平台条目），
+ * 本地生成的笔记这些字段是 `null`（缺值口径：不造假）。
+ */
+export type XhsItemNote = {
+  note_id: string;
+  title: string;
+  /** 正文（关系表源新增；本地生成笔记的内容）。 */
+  content: string;
+  cover: string;
+  /** 图集（`note_assets` 的图片 URL，按 sort_order）。 */
+  images: string[];
+  /** 视频地址（有则视频笔记优先展示）。 */
+  video_url: string;
+  publish_time: string;
+  browse_num: number | null;
+  like_num: number | null;
+  collect_num: number | null;
+  comment_num: number | null;
+  share_num: number | null;
+  note_url: string;
+  /** `synced` / `local` / `local_generated`（设计 13 §31：本地生成待发布笔记）。 */
+  note_type: string;
+  /** 发布状态机（仅 `local_generated` 有意义）：`""` / `pending` / `publishing` / `published` / `failed`。 */
+  publish_status: string;
+  /** 发布失败原因（平台原文；空 = 没失败过）。 */
+  publish_error: string;
+  synced_at: string;
+};
+
+export type XhsItemNotesResponse = {
+  item_id: string;
+  count: number;
+  notes: XhsItemNote[];
+  /** 本地已映射的笔记数 / 店铺商品笔记总数 —— 用来诚实说明「可能不全」。 */
+  synced_notes: number;
+  goods_note_total: number;
+  goods_synced_at: string;
+};
+
+export type XhsShopItemsResponse = {
+  platform_account_id: number;
+  /** v1.32 起恒为 `local`（本地台账；改造前是 `ark` 实时查询）。 */
+  source: string;
+  shop_name: string;
+  status: XhsShopItemStatus;
+  status_label: string;
+  page_no: number;
+  page_size: number;
+  total: number;
+  count: number;
+  has_more: boolean;
+  /**
+   * **实际生效的排序口径**（设计 13 §32.1）：后端是排序的唯一权威 —— 前端表头
+   * 显示的就是这两个值（未知字段会在后端回退成 `create_time` / `desc`）。
+   */
+  sort_field: string;
+  order: string;
+  /** **本地同步时间**（本店 max(synced_at)，不是查询时间；空 = 从没同步过）。 */
+  queried_at: string;
+  /** 平台商品总数（同步时回报；0 = 没同步过，**不是**「平台 0 件」）。 */
+  products_total: number;
+  /** 台账同步时间（`YYYY-MM-DD HH:MM`；空 = 没同步过）。 */
+  products_synced_at: string;
+  items: XhsShopItem[];
+};
+
+/**
+ * `POST /xhs/qianfan/items/delete` 的响应（v1.36，批量删除；**只删本地台账行**）。
+ *
+ * `deleted` 与 `requested` **分开回**：后端回的是 `rowcount`（真实删掉的行数），
+ * 不是「请求了几条就当删了几条」—— 传进来不存在的、或别的店的 item_id 时
+ * `deleted < requested`，页面据此如实说明，不假装全删成功。
+ */
+export type XhsShopItemsDeleteResult = {
+  deleted: number;
+  /** 去重、去空白后的**有效**条数（后端校验过的口径）。 */
+  requested: number;
+  item_ids: string[];
+};
+
+/**
+ * `POST /xhs/qianfan/item-detail` 的响应（v1.32，商品详情弹窗数据源；**纯本地**）。
+ *
+ * `detail_synced_at` 为空串 = 还没补过 SKU 详情（同步商品任务多轮补足）——
+ * 此时 `skus` 为 `[]`，页面渲染空态 + 说明，**不渲染成 0 行**（缺值口径）。
+ */
+export type XhsShopItemSku = {
+  sku_id: string;
+  sku_name: string;
+  variant_name: string;
+  barcode: string;
+  erp_code: string;
+  /** 分（展示层 /100）。 */
+  price_fen: number | null;
+  original_price_fen: number | null;
+  stock: number | null;
+  spec_image: string;
+  weight: number | null;
+  buyable: boolean | null;
+  freeze: boolean | null;
+};
+
+export type XhsShopItemDetail = {
+  platform_account_id: number;
+  item_id: string;
+  shop_name: string;
+  /** 与列表 `items[]` 元素同构的基本信息。 */
+  item: XhsShopItem;
+  images: string[];
+  skus: XhsShopItemSku[];
+  /** SKU 数（详情补齐口径；没补过 = null）。 */
+  sku_count: number | null;
+  detail_synced_at: string;
+  synced_at: string;
+  /** 对账标记（设计 13 §27）：非空 = 最近一次同步发现「本地有、平台无」。 */
+  platform_missing_at: string;
+};
+
+export type XhsSelfContentScope = "notes" | "liked" | "collected";
+
+export type XhsSelfContentResponse = {
+  items: XhsSearchNote[];
+  /** Opaque platform cursor; pass back verbatim to load the next page. */
+  cursor: string;
+  has_more: boolean;
+  total: number;
+  scope: XhsSelfContentScope;
+  user_id: string;
+  /** "url" / "auto" on the PC link; "creator" when the creator link served it. */
+  token_source: string;
+  identity: XhsSelfIdentity | null;
+  /** 商品来源与覆盖率（仅 `scope === "notes"` 时返回）。 */
+  goods_source?: XhsGoodsSource;
+};
+
+export type XhsInteractionKind = "like_collect" | "mention" | "connection";
+
+export type XhsInteractionMessage = {
+  kind: XhsInteractionKind | string;
+  message_id: string;
+  title: string;
+  content: string;
+  user_name: string;
+  user_avatar: string;
+  note_id: string;
+  note_url: string;
+  cover_url: string;
+  time: number | string;
+  raw: Record<string, unknown>;
+};
+
+export type XhsInteractionResponse = {
+  items: XhsInteractionMessage[];
+  cursor: string;
+  has_more: boolean;
+  total: number;
+  kind: XhsInteractionKind | string;
+};
+
+/** 三分类各自的扫描元数据：结果是否完整、有没有失败、还能不能继续搜。 */
+export type XhsSelfSearchScopeMeta = {
+  label: string;
+  scanned_pages: number;
+  scanned_items: number;
+  matched: number;
+  /** true = 该分类已到最后一页（列表耗尽），不会再有更早的命中。 */
+  exhausted: boolean;
+  /** 非空表示该分类扫描失败；其余分类的结果仍然有效。 */
+  error: string;
+};
+
+export type XhsSelfSearchItem = XhsSearchNote & { scope: XhsSelfContentScope };
+
+export type XhsSelfSearchResponse = {
+  keyword: string;
+  items: XhsSelfSearchItem[];
+  total_matched: number;
+  /** true = 还有分类没扫到底，「继续搜索更早内容」才有意义。 */
+  has_more: boolean;
+  /** 原样回传给下一次请求即可续搜。 */
+  cursors: Partial<Record<XhsSelfContentScope, string>>;
+  scopes: Partial<Record<XhsSelfContentScope, XhsSelfSearchScopeMeta>>;
+  user_id: string;
+  token_source: string;
+  identity: XhsSelfIdentity | null;
+};
+
+export type XhsSearchOptions = {
+  account_id: number;
+  keyword: string;
+  page?: number;
+  sort_type_choice?: number;
+  note_type?: number;
+  note_time?: number;
+  note_range?: number;
+  pos_distance?: number;
+  geo?: string;
+};
+
+export type XhsDataCrawlMode = "note_urls" | "search" | "comments";
+
+export type XhsDataCrawlPayload = {
+  account_id: number;
+  mode: XhsDataCrawlMode;
+  urls?: string[];
+  keyword?: string;
+  pages?: number;
+  max_notes?: number;
+  time_sleep?: number;
+  fetch_comments?: boolean;
+  sort_type_choice?: number;
+  note_type?: number;
+  note_time?: number;
+  note_range?: number;
+  pos_distance?: number;
+  geo?: string;
+};
+
+export type XhsDataCrawlItem = {
+  source: string;
+  status: "success" | "failed" | string;
+  error: string;
+  note?: XhsSearchNote | null;
+  comments: NoteComment[];
+  comment_count: number;
+};
+
+export type XhsDataCrawlResponse = {
+  task: TaskRecord;
+  total: number;
+  success_count: number;
+  failed_count: number;
+  items: XhsDataCrawlItem[];
+};
+
+export type SavedNote = {
+  id: number;
+  platform: PlatformId;
+  platform_account_id: number;
+  /**
+   * **来源账号昵称**（设计 13 §19.13 / 设计 04 §2.12）。
+   *
+   * 「已发布」本身就是账号维度的事实（哪个账号发过），界面不给账号就无从核对。
+   * 昵称取不到时是空串 —— 前端按缺值口径**不展示**，不写「未知」充数。
+   */
+  account_name: string;
+  note_id: string;
+  title: string;
+  content: string;
+  author_name: string;
+  /**
+   * **是否已发布过**（设计 03 §4.1 / 设计 13 §19.12）。
+   *
+   * 由落库链路决定：笔记同步（www / creator / ark 三源）落库 ⇒ `true`；
+   * 采集（发现页保存、监控采集）⇒ `false`。
+   *
+   * ⚠️ 2026-09-23 起它是 `publish_status` 的**投影**（设计 13 §32.3.2）：
+   * 界面**不再单独渲染**它（卡片上只展示一个发布状态，由 `publish_status` 决定），
+   * 它留给导出与既有消费者。
+   */
+  published: boolean;
+  /**
+   * **笔记类型**（设计 13 §25，2026-09-22）：这条数据是谁搬来的。
+   *
+   * - `synced` = 三方同步笔记（**同步链路**落库：账号卡片手动同步与定时任务同一条路）；
+   * - `local` = 本地笔记（采集 / 监控 / 批量保存落库）；
+   * - `local_generated` = **本地生成**（商品笔记智能生成链路落库，设计 13 §31）——
+   *   待发布 / 发布失败 / 已发布三态由 `publish_status` 表达。
+   *
+   * 由**落库链路**决定、只升不降（与 `published` 同一把尺子），用户不可改。
+   * 内容库详情卡的「同步」按钮**只对 `synced` 渲染** —— 本地笔记是采集来的别人
+   * 的笔记，「拉平台最新内容」对它没有意义；「发布」按钮**只对 `local_generated`**
+   * 且 `publish_status ∈ {pending, failed}` 渲染。
+   */
+  note_type: "synced" | "local" | "local_generated";
+  /**
+   * **发布状态**（设计 13 §32.3，2026-09-23 起**所有笔记都有值**、只有一个字段）。
+   *
+   * `pending` 待发布 / `publishing` 发布中（链路瞬时态）/ `published` 已发布 /
+   * `failed` 发布失败（可重发，失败原因在 `publish_error`）。
+   *
+   * 卡片与详情**只渲染这一个状态**；`local_generated` 的状态由发布链路决定
+   * （不接受手改，手改会被 400 `NOTE_STATUS_MANAGED` 挡回），其余笔记可在界面上
+   * 手动切换「待发布 / 已发布」。
+   */
+  publish_status?: string;
+  /** 最近一次发布失败原因（平台原文；成功即清空）。 */
+  publish_error?: string;
+  /** 发布尝试次数（含失败）。 */
+  publish_attempts?: number;
+  /** 三方发布成功时间（本地 ISO；空 = 没发布过）。 */
+  published_at?: string | null;
+  /**
+   * **话题（#标签名列表）**（设计 13 §28）：专有列，`raw_json` 的投影。
+   * 空 = 没解析到（不造假）。
+   */
+  topics?: string[];
+  /**
+   * **挂载商品**（设计 13 §28.3）：走 `note_goods` 关系表 join `shop_products`
+   * 查出来当下的真值 —— 商品信息只在商品表存一份，笔记表不存快照。
+   * 空 = 没挂商品（不是错误）。
+   */
+  goods?: Array<{
+    item_id: string;
+    item_title: string;
+    /** 价格，**单位是分**的字符串（展示层换算成元）。 */
+    price: string;
+    images: string[];
+    stock: number | null;
+    sales: number | null;
+  }>;
+  raw_json?: Record<string, unknown>;
+  asset_urls?: string[];
+  cover_url?: string;
+  video_url?: string;
+  video_addr?: string;
+  created_at: string;
+  /**
+   * 对账标记（设计 13 §24，2026-09-22）：平台列表里已经没有这条笔记的时间。
+   * `null` = 正常；非空 = 最近一次对账发现「本地有、平台无」。
+   *
+   * **不删行**（用户口径：「本地多得数据不直接删除，打上状态」）—— 平台列表
+   * 可能因筛选 / 分页不完整，删不可逆。标记是自愈的：平台又返回了就清回 null。
+   */
+  platform_missing_at?: string | null;
+  /**
+   * ⚠️ ~~按需补齐的结果~~ **字段已移除**（2026-09-22）：详情端点不再打平台
+   * （用户口径「内容库应查询的均是本地数据」），`hydrate=true` 入口随之删除。
+   *
+   * 保留说明：它曾在 `GET /notes/{id}?hydrate=true` 时返回，让前端按失败三分法
+   * 区分「取不到」与「真没数据」。那条路径的 `db.commit()` 会与同步任务抢
+   * SQLite 写锁 ⇒ `database is locked` ⇒ 未捕获 ⇒ 用户看到「详情 500」。
+   * 正文与图集的补齐现在只由同步链路做（有界 + 跨轮累积，设计 13 §19.13）。
+   */
+  tags?: Tag[];
+};
+
+/**
+ * `GET /notes` 的响应：分页 + **全库口径**的发布状态统计（设计 05 §2.5）。
+ *
+ * ⚠️ `stats` **不随筛选变化**（只按 `user_id + platform` 统计），所以它**不能**
+ * 用 `items.length` 反推 —— 那会把「本页条数」当成「全库条数」。
+ */
+export type SavedNotesPage = Paginated<SavedNote> & {
+  /**
+   * 内容库**全库口径**的三档发布状态计数（不随筛选变化，设计 05 §2.5 / 设计 13 §32.3.3）。
+   * 三数之和 = 该用户的笔记总数。
+   */
+  stats: { pending: number; published: number; failed: number };
+};
+
+export type AnalyticsTopContent = {
+  id: number;
+  note_id: string;
+  title: string;
+  author_name: string;
+  created_at: string;
+  likes: number;
+  collects: number;
+  comments: number;
+  shares: number;
+  engagement: number;
+};
+
+export type AnalyticsHotTopic = {
+  keyword: string;
+  notes: number;
+  engagement: number;
+};
+
+export type AnalyticsCommentInsight = {
+  total_comments: number;
+  question_count: number;
+  top_terms: Array<{ term: string; count: number }>;
+  top_comments: Array<{
+    id: number;
+    note_id: number;
+    user_name: string;
+    content: string;
+    like_count: number;
+  }>;
+};
+
+export type BenchmarkTopNote = AnalyticsTopContent;
+
+export type BenchmarkItem = {
+  target_id: number;
+  target_type: "account" | "brand" | string;
+  name: string;
+  value: string;
+  status: string;
+  last_refreshed_at?: string | null;
+  matched_notes: number;
+  total_engagement: number;
+  average_engagement: number;
+  top_notes: BenchmarkTopNote[];
+};
+
+export type BenchmarkOverview = {
+  total_targets: number;
+  matched_notes: number;
+  total_engagement: number;
+  average_engagement: number;
+  items: BenchmarkItem[];
+};
+
+export type NoteAsset = {
+  id: number;
+  note_id: number;
+  asset_type: "image" | "video" | string;
+  url: string;
+  local_path: string;
+  download_url?: string;
+  sort_order?: number;
+};
+
+export type NoteComment = {
+  id: number;
+  note_id: number;
+  comment_id: string;
+  user_name: string;
+  user_id?: string | null;
+  content: string;
+  like_count: number;
+  parent_comment_id?: string | null;
+  created_at_remote?: string | null;
+  raw_json?: Record<string, unknown>;
+};
+
+export type Tag = {
+  id: number;
+  name: string;
+  color: string;
+};
+
+export type TagPayload = {
+  name: string;
+  color?: string;
+};
+
+export type BatchTagNotesPayload = {
+  note_ids: number[];
+  tag_ids: number[];
+  mode: "replace" | "add" | "remove";
+};
+
+export type BatchTagNotesResponse = {
+  updated_count: number;
+  items: SavedNote[];
+};
+
+export type BatchCreateDraftsPayload = {
+  note_ids: number[];
+  intent?: "rewrite" | "publish" | string;
+};
+
+export type BatchCreateDraftsResponse = {
+  created_count: number;
+  items: Draft[];
+};
+
+export type BenchmarkCreateDraftsResponse = BatchCreateDraftsResponse;
+
+export type NotesExportPayload = {
+  note_ids: number[];
+  format?: "json" | "csv";
+};
+
+export type NotesExportResponse = {
+  exported_count: number;
+  file_name: string;
+  file_path: string;
+  download_url: string;
+};
+
+export type AnalyticsReportPayload = {
+  note_ids?: number[];
+  format?: "json";
+};
+
+export type AnalyticsReportResponse = {
+  report_type: "operations";
+  generated_at: string;
+  note_count: number;
+  file_name: string;
+  file_path: string;
+  download_url: string;
+  summary: {
+    note_count: number;
+    total_engagement: number;
+    comment_count: number;
+    top_topics: AnalyticsHotTopic[];
+    top_notes: AnalyticsTopContent[];
+    benchmark_count: number;
+  };
+};
+
+export type SaveNotesResponse = {
+  saved_count: number;
+  items: SavedNote[];
+};
+
+export type Draft = {
+  id: number;
+  platform: PlatformId;
+  title: string;
+  body: string;
+  tags?: { id?: string; name: string }[];
+  source_note_id?: number | null;
+  created_at: string;
+};
+
+export type CreateDraftPayload = {
+  platform: "xhs";
+  source_note_id?: number;
+  title?: string;
+  body?: string;
+  intent?: "rewrite" | "publish" | string;
+};
+
+export type ModelType = "text" | "image";
+
+export type ModelConfig = {
+  id: number;
+  name: string;
+  model_type: ModelType;
+  provider: string;
+  model_name: string;
+  base_url: string;
+  has_api_key: boolean;
+  is_default: boolean;
+};
+
+export type ModelConfigPayload = {
+  name: string;
+  model_type: ModelType;
+  provider: string;
+  model_name: string;
+  base_url: string;
+  api_key: string;
+  is_default: boolean;
+};
+
+export type RewriteDraftPayload = {
+  draft_id: number;
+  instruction?: string;
+};
+
+export type GenerateNotePayload = {
+  platform?: "xhs";
+  topic: string;
+  reference?: string;
+  instruction?: string;
+};
+
+export type GenerateTitlePayload = {
+  title?: string;
+  body: string;
+  count?: number;
+};
+
+export type GenerateTagsPayload = {
+  title?: string;
+  body: string;
+  count?: number;
+};
+
+export type PolishTextPayload = {
+  text: string;
+  instruction?: string;
+};
+
+export type GeneratedImageAsset = {
+  id: number;
+  draft_id?: number | null;
+  prompt: string;
+  model_name: string;
+  params: Record<string, unknown>;
+  file_path: string;
+  created_at: string;
+};
+
+export type GenerateCoverPayload = {
+  prompt: string;
+  draft_id?: number;
+  size?: string;
+  style?: string;
+};
+
+export type GenerateImagePayload = {
+  prompt: string;
+  reference_images?: string[];
+  save_to_assets?: boolean;
+};
+
+export type GenerateImageResult = {
+  url: string;
+  raw?: unknown;
+  asset?: GeneratedImageAsset;
+};
+
+export type UserImageFile = {
+  file_name: string;
+  url: string;
+  size: number;
+};
+
+export type DescribeImagePayload = {
+  image_url: string;
+  instruction?: string;
+};
+
+export type ImageUtilityFile = {
+  file_name: string;
+  file_path: string;
+  download_url: string;
+  width: number;
+  height: number;
+  media_type: string;
+};
+
+export type ComposeImagePayload = {
+  title: string;
+  body?: string;
+  width?: number;
+  height?: number;
+  background_color?: string;
+  accent_color?: string;
+};
+
+export type ResizeImagePayload = {
+  source_file_name: string;
+  width?: number;
+  height?: number;
+  mode?: "cover" | "contain";
+  format?: "png" | "jpeg";
+  quality?: number;
+};
+
+export type TaskRecord = {
+  id: number;
+  platform: PlatformId;
+  task_type: string;
+  status: "pending" | "running" | "completed" | "failed" | "cancelled" | "exhausted" | string;
+  progress: number;
+  payload: Record<string, unknown>;
+  created_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  duration_ms?: number | null;
+  error_type?: string | null;
+  retry_count?: number;
+  max_retries?: number;
+  parent_task_id?: number | null;
+  children?: TaskRecord[];
+};
+
+export type ScheduleStatus = {
+  enabled: boolean;
+  running: boolean;
+  timezone: string;
+  jobs: Array<{
+    id: string;
+    next_run_time?: string | null;
+  }>;
+  stats: {
+    total: number;
+    active: number;
+    paused: number;
+    completed: number;
+  };
+};
+
+/** 调度任务行（若依 sys_job 的本项目化，设计 15 §4.1） */
+export type ScheduledJob = {
+  id: number;
+  user_id: number | null;
+  name: string;
+  job_key: string;
+  /** 任务类型三档（R14）：manual 只能手动触发 / cron 周期 / 定时一次；interval 已退役 */
+  trigger_type: "manual" | "cron" | "at" | string;
+  cron_expression: string;
+  run_at?: string | null;
+  misfire_policy: "fire_now" | "once" | "discard" | string;
+  concurrent: "forbid" | "allow" | string;
+  params: Record<string, unknown>;
+  /** 用户可写的自定义参数键（注册表白名单；前端据此渲染对应表单，不硬编码键名） */
+  params_editable: string[];
+  status: "active" | "paused" | "completed" | string;
+  remark: string;
+  is_builtin: boolean;
+  last_run_at?: string | null;
+  next_run_at?: string | null;
+  run_count: number;
+  fail_count: number;
+  consecutive_failures: number;
+  backoff_until?: string | null;
+  last_status?: string | null;
+  created_at: string;
+  updated_at?: string | null;
+};
+
+/** 可调度目标（R18：注册表全量 + 各目标已建任务数，设计 15 §5） */
+export type ScheduleTarget = {
+  job_key: string;
+  name: string;
+  builtin: boolean;
+  allow_concurrent: boolean;
+  params_required: string[];
+  params_editable: string[];
+  default_trigger_type: "manual" | "cron" | "at" | string;
+  default_cron: string;
+  default_misfire_policy: "fire_now" | "once" | "discard" | string;
+  /** 当前用户（含公共行）在该目标下已有的任务数 */
+  existing_count: number;
+};
+
+/** 调度执行日志（每次执行一行，设计 15 §4.2） */
+export type ScheduledJobLog = {
+  id: number;
+  job_id: number | null;
+  job_name: string;
+  job_key: string;
+  trigger_type: "scheduled" | "manual" | string;
+  /** 执行时快照：任务的任务类型（manual/cron/at；旧日志为空串） */
+  job_trigger_type: string;
+  status: "running" | "success" | "failed" | "skipped" | string;
+  started_at: string;
+  finished_at?: string | null;
+  duration_ms?: number | null;
+  /** 任务进度百分比 0~100（R13：日志表「任务进度 + 耗时或异常」列渲染进度条） */
+  progress: number;
+  message: string;
+  exception_info: string;
+  result: Record<string, unknown>;
+  /** 执行那一刻的任务配置快照（详情弹窗用；本列新增前的执行为 null） */
+  config_snapshot: Record<string, unknown> | null;
+  created_at: string;
+};
+
+/** 调度设置（创建 / 更新共用；与后端 ScheduleIn 对齐） */
+export type ScheduleIn = {
+  trigger_type?: "manual" | "cron" | "at";
+  cron_expression?: string;
+  run_at?: string | null;
+  misfire_policy?: "fire_now" | "once" | "discard";
+  concurrent?: "forbid" | "allow";
+  /** false = 建行即暂停（不自动执行） */
+  enabled?: boolean;
+};
+
+/** auto_tasks 响应里的调度摘要（来自 1:1 关联的 job 行） */
+export type AutoTaskSchedule = {
+  job_id: number;
+  trigger_type: string;
+  cron_expression: string;
+  run_at?: string | null;
+  misfire_policy: string;
+  concurrent: string;
+  status: string;
+  next_run_at?: string | null;
+  last_run_at?: string | null;
+  run_count: number;
+  last_status?: string | null;
+};
+
+export type RunDueTasksResponse = {
+  executed_count: number;
+  failed_count: number;
+  items: PublishJob[];
+};
+
+export type MonitoringTarget = {
+  id: number;
+  platform: PlatformId;
+  target_type: "keyword" | "account" | "brand" | "note_url" | string;
+  name: string;
+  value: string;
+  status: "active" | "paused" | string;
+  config: Record<string, unknown>;
+  last_refreshed_at?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type MonitoringTargetPayload = {
+  target_type: "keyword" | "account" | "brand" | "note_url";
+  name?: string;
+  value: string;
+  status?: "active" | "paused";
+  config?: Record<string, unknown>;
+};
+
+export type MonitoringSnapshot = {
+  id: number;
+  target_id: number;
+  payload: {
+    matched_count?: number;
+    total_engagement?: number;
+    top_notes?: Array<{
+      id: number;
+      note_id: string;
+      title: string;
+      author_name: string;
+      engagement: number;
+    }>;
+  };
+  created_at: string;
+};
+
+export type MonitoringNote = {
+  id: number;
+  note_id: string;
+  title: string;
+  author_name: string;
+  created_at: string;
+  likes: number;
+  collects: number;
+  comments: number;
+  shares: number;
+  engagement: number;
+};
+
+export type MonitoringRefreshResponse = {
+  target: MonitoringTarget;
+  task: TaskRecord;
+  snapshot: MonitoringSnapshot;
+};
+
+export type KeywordGroup = {
+  id: number;
+  platform: PlatformId;
+  name: string;
+  keywords: string[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type KeywordGroupPayload = {
+  platform?: PlatformId;
+  name: string;
+  keywords: string[];
+};
+
+export type KeywordGroupDetail = KeywordGroup & {
+  trend: {
+    total_matches: number;
+    total_engagement: number;
+    keywords: Array<{ keyword: string; notes: number; engagement: number }>;
+    matched_notes: Array<{
+      id: number;
+      note_id: string;
+      title: string;
+      author_name: string;
+      engagement: number;
+      created_at: string;
+    }>;
+  };
+};
+
+export type PublishJob = {
+  id: number;
+  platform_account_id: number;
+  source_draft_id?: number | null;
+  platform: PlatformId;
+  title: string;
+  body: string;
+  publish_mode: "immediate" | "scheduled" | string;
+  publish_options?: PublishOptions;
+  status: "pending" | "uploading" | "publishing" | "scheduled" | "published" | "failed" | "cancelled" | string;
+  scheduled_at?: string | null;
+  external_note_id: string;
+  publish_error: string;
+  published_at?: string | null;
+  created_at: string;
+};
+
+export type PublishOptions = {
+  topics?: string[];
+  location?: string;
+  privacy_type?: 0 | 1 | number;
+  is_private?: boolean;
+  draft_tags?: Array<{ id?: string; name?: string }>;
+};
+
+export type SendDraftToPublishPayload = {
+  platform_account_id?: number | null;
+  publish_mode?: "immediate" | "scheduled";
+  scheduled_at?: string | null;
+  topics?: string[];
+  location?: string | null;
+  privacy_type?: 0 | 1 | null;
+  is_private?: boolean | null;
+};
+
+export type PublishJobUpdatePayload = {
+  title?: string;
+  body?: string;
+  platform_account_id?: number | null;
+  publish_mode?: "immediate" | "scheduled";
+  scheduled_at?: string | null;
+  topics?: string[];
+  location?: string | null;
+  privacy_type?: 0 | 1 | null;
+  is_private?: boolean | null;
+};
+
+export type PublishAsset = {
+  id: number;
+  publish_job_id: number;
+  asset_type: "image" | "video" | string;
+  file_path: string;
+  upload_status: "pending" | "uploading" | "uploaded" | "failed" | string;
+  creator_media_id: string;
+  upload_error: string;
+  creator_upload_info: Record<string, unknown>;
+};
+
+export type PublishAssetPayload = {
+  asset_type: "image" | "video";
+  file_path: string;
+};
+
+export type AutoTask = {
+  id: number;
+  user_id: number;
+  name: string;
+  keywords: string[];
+  pc_account_id: number;
+  creator_account_id: number;
+  ai_instruction: string;
+  status: "active" | "paused" | "completed" | string;
+  last_run_at?: string | null;
+  total_published: number;
+  created_at: string;
+  /** 1:1 关联的调度行摘要（设计 15 §7.1；调度语义的唯一权威在 job 行） */
+  schedule?: AutoTaskSchedule | null;
+};
+
+export type AutoTaskCreatePayload = {
+  name: string;
+  keywords: string[];
+  pc_account_id: number;
+  creator_account_id: number;
+  ai_instruction?: string;
+  /** 不传 = 不自动执行（建行即暂停） */
+  schedule?: ScheduleIn;
+};
+
+export type AutoTaskUpdatePayload = {
+  name?: string;
+  keywords?: string[];
+  ai_instruction?: string;
+  status?: "active" | "paused" | "completed";
+  schedule?: ScheduleIn;
+};
+
+export type AutoTaskRunResult = {
+  auto_task: AutoTask;
+  log: ScheduledJobLog;
+  detail: {
+    keyword?: string;
+    publish_mode?: string;
+    source_note?: {
+      note_id: string;
+      title: string;
+      likes: number;
+      collects: number;
+      comments: number;
+    };
+    draft?: {
+      id: number;
+      title: string;
+      body: string;
+      created_at: string;
+    };
+    publish_job?: {
+      id: number;
+      status: string;
+      platform_account_id: number;
+    };
+  };
+};
+
+export type AppNotification = {
+  id: number;
+  title: string;
+  body: string;
+  level: "info" | "warning" | "error" | string;
+  source_task_id?: number | null;
+  source_type?: string | null;
+  source_id?: number | null;
+  read: boolean;
+  created_at: string;
+};

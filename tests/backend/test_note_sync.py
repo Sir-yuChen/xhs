@@ -1,0 +1,1010 @@
+"""账号笔记同步（T-803）的后端契约测试。
+
+盯的是这条链路的**纪律**而非吞吐：
+
+1. **有界**：翻页数由 `max_pages` 硬顶，`has_more=false` / 游标 `-1` /
+   已存够 `total` 三种提前结束都要真的生效（C5，禁全量循环）；
+2. **限流停本次**：`CrawlRateLimiter` 拒绝时**不抛异常**，已同步的保留，
+   原因写任务行；
+3. **令牌不静默**：PC 链路没有 `xsec_token` 一律 `failed` +
+   `XSEC_TOKEN_REQUIRED`，**不能**出现「同步成功但 0 条」；
+4. **防重（N3）**：同一账号第二次触发返回**同一个 task_id**，不新建任务行；
+5. **R3**：Creator 每页笔记落库后，把**本页** note_id 交给千帆补挂载商品
+   （每页 ≤1 次请求）；
+6. **缺值不造假（硬约束⑤）**：平台没给总数 → `progress.total` 是 `null`；
+   拿得到才写 `profile_json.notes_count`；
+7. **鉴权**：越权 404；参数越界 422。
+"""
+from __future__ import annotations
+
+import ast
+import inspect
+import json
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import sessionmaker
+
+from backend.app.adapters.xhs import qianfan_api_adapter
+from backend.app.api.platforms.xhs import pc
+from backend.app.core.database import Base, get_db
+from backend.app.main import app
+from backend.app.models import Note, NoteAsset, PlatformAccount, Task, User
+from backend.app.models.shop import ShopNoteGoods
+from tests.backend.cookie_fixtures import bind_shop_account
+from backend.app.services import note_sync_service as nss
+from backend.app.services import sync_task_service as sts
+
+client = TestClient(app)
+
+# 真实登录的 www jar 一定同时带 `web_session` 与 `id_token`（DEF-051）：
+# 只有 web_session 的是**游客会话**，平台对未登录访客也会种。
+PC_COOKIES = "web_session=abc123; id_token=tok123; a1=xyz"
+# 真实形态（2026-09-21 拆分）：带 creator 域令牌 —— 少了它这份 jar 会被
+# 分类器判成 www（默认兜底），「按平台取令牌」的契约就测不到了。
+CREATOR_COOKIES = (
+    "galaxy_creator_session_id=abc123; "
+    "access-token-creator.xiaohongshu.com=ctok123; "
+    "customer-sso-sid=sso123; a1=xyz"
+)
+
+#: 测试用的 Cookie 由它决定（`_account_cookies` 被替换成读这里）。
+ENV: dict = {"cookies": CREATOR_COOKIES, "channel": "creator"}
+#: **额外通道**的 Cookie：夹具默认只给 `ENV["channel"]` 一个通道；需要 www 详情
+#: 会话的用例（§19.14 页内联补齐）往里加 `{"www": PC_COOKIES}`。
+EXTRA_CHANNEL_COOKIES: dict = {}
+
+
+class AllowLimiter:
+    def allow(self, account_id: int) -> bool:  # noqa: ARG002
+        return True
+
+    def wait_allow(self, account_id: int, **kwargs) -> bool:  # noqa: ARG002
+        """全量翻页用的是**等待制**（设计 13 §21.3）：测试里立即放行、不真等待。"""
+        return True
+
+
+class DenyLimiter:
+    """额度**永远**没有：`wait_allow` 立即超时（不真等待）= 模拟「等到超时仍无额度」。"""
+
+    def allow(self, account_id: int) -> bool:  # noqa: ARG002
+        return False
+
+    def wait_allow(self, account_id: int, **kwargs) -> bool:  # noqa: ARG002
+        return False
+
+
+LIMITER: dict = {"impl": AllowLimiter()}
+
+
+# --------------------------------------------------------------------------- #
+# 假适配器（记录调用，用来断言「打了多少次平台」）
+# --------------------------------------------------------------------------- #
+class FakePcAdapter:
+    has_more_times = 0
+    total = None
+    calls: list = []
+    profile_calls = 0
+    #: §19.14 页内联详情补齐：记录打过的详情 URL；默认按 URL 里的 note_id 回一条
+    #: 带正文 + 一张图的响应（形状抄 `_normalize_detail_payload` 的输入）。
+    detail_calls: list = []
+    #: 详情恒失败（测「失败聚合成一行、列表数据照常落库、标记不写」）。
+    detail_fail = False
+
+    def __init__(self, cookies: str) -> None:
+        self.cookies = cookies
+
+    def get_self_profile(self):
+        type(self).profile_calls += 1
+        return True, "", {"data": {"user_id": "SELF-1", "nickname": "我的号"}}
+
+    def get_user_posted_page(self, user_id, cursor="", xsec_token="", xsec_source=""):
+        type(self).calls.append({"cursor": cursor, "token": xsec_token})
+        index = len(type(self).calls)
+        data = {
+            "notes": [_pc_note(f"PC-N{index}")],
+            "cursor": f"CUR-{index + 1}",
+            "has_more": index <= type(self).has_more_times,
+        }
+        if type(self).total is not None:
+            data["total"] = type(self).total
+        return True, "", {"data": data}
+
+    def get_note_info(self, url: str):
+        type(self).detail_calls.append(url)
+        if type(self).detail_fail:
+            return False, "平台暂时无法浏览", {}
+        note_id = _note_id_of_detail_url(url)
+        card = {
+            "note_id": note_id,
+            "display_title": f"详情标题 {note_id}",
+            "desc": f"详情正文 {note_id}",
+            "type": "normal",
+            "image_list": [{"url_default": f"https://cdn.example/{note_id}-detail.jpg"}],
+        }
+        return True, "", {"data": {"items": [{"id": note_id, "note_card": card}]}}
+
+
+def _note_id_of_detail_url(url: str) -> str:
+    """从详情 URL 里取 note_id（`/explore/<id>?xsec_token=…`）。"""
+    marker = "/explore/"
+    if marker not in str(url):
+        return ""
+    return str(url).split(marker, 1)[1].split("?", 1)[0].strip()
+
+
+class FakeCreatorAdapter:
+    calls: list = []
+    note_ids: list = ["C-N1", "C-N2"]
+    notes_count = 1969
+    #: 多页形状（§21 全量翻页用例专用）：`{页码: [note_id, ...]}`，页码从 0 起
+    #: （与 `_creator_page_index` 同口径）。`None` = 单页（其余用例的默认形状）。
+    pages: "dict | None" = None
+
+    def __init__(self, cookies: str) -> None:
+        self.cookies = cookies
+
+    def get_posted_notes_page(self, page: int = 0, tab: int = 0):
+        type(self).calls.append(page)
+        pages = type(self).pages
+        if pages is None:
+            ids, next_page = type(self).note_ids, -1
+        else:
+            # §21：`data.page` 是**下一个**游标，`-1` 终止（`_creator_pagination` 口径）。
+            ids = pages.get(page, [])
+            next_page = page + 1 if (page + 1) in pages else -1
+        return True, "", {
+            "data": {
+                "notes": [_creator_note(note_id) for note_id in ids],
+                "page": next_page,
+                "tags": [
+                    {"name": "所有笔记", "notes_count": type(self).notes_count, "checked": True}
+                ],
+            }
+        }
+
+
+class FakeQianfanAdapter:
+    note_id_queries: list = []
+    calls = 0
+    #: §19：商品笔记**列表**（不带 note_ids 的调用）返回的条目。
+    #: 形状抄自 2026-09-21 真机抓包的 `goods-note/list` 响应。
+    list_entries: list = []
+
+    def __init__(self, cookies: str) -> None:
+        self.cookies = cookies
+
+    def get_goods_note_page(self, page_num: int = 1, page_size: int = 20, *, note_ids=None):
+        type(self).calls += 1
+        if note_ids:
+            type(self).note_id_queries.append(list(note_ids))
+            entries = [
+                {"note_id": note_id, "item_id": f"ITEM-{note_id}", "item_title": "商品",
+                 "goods_infos": []}
+                for note_id in note_ids
+            ]
+            return True, "", {"data": {"note_infos": entries, "total": len(entries)}}
+        entries = type(self).list_entries
+        return True, "", {
+            "data": {
+                "note_infos": entries,
+                "total": len(entries),
+                # 一页装下 => 直接结束（真机是 end_tag=False + total=1960 翻页）。
+                "end_tag": True,
+            }
+        }
+
+
+def _ark_note(note_id: str, *, title: str = "", xsec_token: str = "ARK-TK") -> dict:
+    """一条千帆商品笔记（§19.1.1 实测字段）。"""
+    return {
+        "note_id": note_id,
+        "note_title": title or f"商品笔记 {note_id}",
+        "note_image": f"https://ci.example/{note_id}.jpg",
+        "note_type": 1,
+        "publish_time": 1786584162000,
+        "browse_num": 12,
+        "like_num": 3,
+        "collect_num": 1,
+        "comment_num": 0,
+        "share_num": 0,
+        "item_id": f"ITEM-{note_id}",
+        "item_title": "夜市摆摊灯",
+        "item_image": "https://qimg.example/item.jpg",
+        "variant_desc": "100W暖黄光",
+        "xsec_token": xsec_token,
+        "note_flag": "goods_note",
+        "goods_infos": [
+            {"item_id": f"ITEM-{note_id}", "item_title": "夜市摆摊灯", "variant_desc": "100W暖黄光"}
+        ],
+    }
+
+
+def _pc_note(note_id: str) -> dict:
+    """一张 PC 链路笔记卡（形状抄自真机样本）。"""
+    return {
+        "id": note_id,
+        "xsec_token": "TK",
+        "note_card": {
+            "note_id": note_id,
+            "display_title": f"标题 {note_id}",
+            "desc": "正文",
+            "type": "normal",
+            "time": 1700000000,
+            "user": {"user_id": "SELF-1", "nickname": "我的号"},
+            "interact_info": {
+                "liked_count": 1, "collected_count": 2, "comment_count": 3, "share_count": 4,
+            },
+            "image_list": [{"url_default": f"https://cdn.example/{note_id}.jpg"}],
+        },
+    }
+
+
+def _creator_note(note_id: str) -> dict:
+    """一条创作者平台的笔记（扁平指标、`images_list`、无正文字段）。"""
+    return {
+        "id": note_id,
+        "display_title": f"创作 {note_id}",
+        "time": "2026-08-13 09:30",
+        "likes": 12,
+        "collected_count": 3,
+        "comments_count": 1,
+        "shared_count": 0,
+        "view_count": 100,
+        "images_list": [{"url": f"https://ci.example/{note_id}.jpg"}],
+        "goods_info": {"goods_name": []},
+    }
+
+
+def _reset_fakes() -> None:
+    FakePcAdapter.has_more_times = 0
+    FakePcAdapter.total = None
+    FakePcAdapter.calls = []
+    FakePcAdapter.profile_calls = 0
+    FakePcAdapter.detail_calls = []
+    FakePcAdapter.detail_fail = False
+    FakeCreatorAdapter.calls = []
+    FakeCreatorAdapter.note_ids = ["C-N1", "C-N2"]
+    FakeCreatorAdapter.notes_count = 1969
+    FakeCreatorAdapter.pages = None
+    FakeQianfanAdapter.note_id_queries = []
+    FakeQianfanAdapter.calls = 0
+    FakeQianfanAdapter.list_entries = []
+    EXTRA_CHANNEL_COOKIES.clear()
+    LIMITER["impl"] = AllowLimiter()
+
+
+def _setup(tmp_path, monkeypatch, *, sub_type: str = "creator", with_binding: bool = True):
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'note-sync.db'}", connect_args={"check_same_thread": False}
+    )
+    Base.metadata.create_all(bind=engine)
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+    def override_get_db():
+        db = SessionLocal()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app.dependency_overrides[get_db] = override_get_db
+    monkeypatch.setattr(nss, "SessionLocal", SessionLocal)
+    # §11.5：取 Cookie 必须带通道。这里刻意做成**通道敏感**的假实现 ——
+    # 要的通道不对就返回空串，让「拿错通道的 jar 去打接口」这类回归直接炸，
+    # 而不是被一个「反正都能用」的假实现掩盖掉。
+    monkeypatch.setattr(
+        nss, "_account_cookies",
+        lambda db, account_id, *, channel="www": (
+            ENV["cookies"] if channel == ENV["channel"] else EXTRA_CHANNEL_COOKIES.get(channel, "")
+        ),
+    )
+    monkeypatch.setattr(nss, "PAGE_GAP_SECONDS", 0.0)
+    monkeypatch.setattr(nss, "get_rate_limiter", lambda: LIMITER["impl"])
+    monkeypatch.setattr(pc, "get_xhs_pc_api_adapter_factory", lambda: FakePcAdapter)
+    monkeypatch.setattr(pc, "get_xhs_creator_api_adapter_factory", lambda: FakeCreatorAdapter)
+    monkeypatch.setattr(
+        qianfan_api_adapter, "get_qianfan_api_adapter_factory", lambda: FakeQianfanAdapter
+    )
+    # 素材下载在测试里不联网（`_download_asset` 是函数内 import，改模块属性即可生效）。
+    monkeypatch.setattr(
+        "backend.app.services.asset_downloader.download_asset_to_local", lambda *a, **k: None
+    )
+
+    _reset_fakes()
+    ENV["cookies"] = CURRENT[0]
+
+    response = client.post(
+        "/api/auth/register", json={"username": "owner", "password": "secret123"}
+    )
+    assert response.status_code == 200, response.text
+    headers = {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+    db = SessionLocal()
+    try:
+        user_id = db.scalar(select(User.id).where(User.username == "owner"))
+        account = PlatformAccount(
+            user_id=user_id, platform="xhs", sub_type=sub_type,
+            nickname="我的号", status="active",
+        )
+        db.add(account)
+        db.flush()
+        if with_binding:
+            #: 2026-09-22：关系/凭据/状态三件事各归其位（`shop_account_bindings` 整表移除）。
+            #: ⚠️ `sync_note_ids` 取的是**账号自己的 ark 通道**，所以夹具必须给 ark 令牌 ——
+            #: 这正是本轮的口径（不再向绑定行借）。
+            bind_shop_account(
+                db,
+                account,
+                cookies_text=CREATOR_COOKIES,
+                shop_name="观隅好物的店",
+            )
+        db.commit()
+        account_id = account.id
+        user_id_out = user_id
+    finally:
+        db.close()
+    return headers, account_id, user_id_out, SessionLocal
+
+
+def _teardown() -> None:
+    app.dependency_overrides.clear()
+
+
+#: `_setup` 用它把当前用例的 Cookie 类型传进 `ENV`。
+CURRENT: list = [CREATOR_COOKIES]
+
+
+@pytest.fixture
+def creator_env(tmp_path, monkeypatch):
+    CURRENT[0] = CREATOR_COOKIES
+    ENV["channel"] = "creator"    # creator 链路打创作者平台 → creator 平台（§11.5 / 拆分）
+    headers, account_id, user_id, SessionLocal = _setup(tmp_path, monkeypatch)
+    yield headers, account_id, user_id, SessionLocal
+    _teardown()
+
+
+@pytest.fixture
+def pc_env(tmp_path, monkeypatch):
+    CURRENT[0] = PC_COOKIES
+    ENV["channel"] = "www"        # pc 链路打 www → www 通道（§11.5）
+    headers, account_id, user_id, SessionLocal = _setup(tmp_path, monkeypatch, sub_type="pc")
+    yield headers, account_id, user_id, SessionLocal
+    _teardown()
+
+
+@pytest.fixture
+def pc_env_no_binding(tmp_path, monkeypatch):
+    """PC 账号、**没有任何可用源**（www 通道取不到 + 不建绑定）。
+
+    用来钉「均不可用」的结构化多原因失败（§19.3.1）。
+    """
+    CURRENT[0] = PC_COOKIES
+    ENV["channel"] = "ark"  # www 通道取不到 ⇒ 没有 www 源
+    headers, account_id, user_id, SessionLocal = _setup(
+        tmp_path, monkeypatch, sub_type="pc", with_binding=False
+    )
+    yield headers, account_id, user_id, SessionLocal
+    _teardown()
+
+
+# --------------------------------------------------------------------------- #
+# §19：三态同步（www / creator / ark 各自独立）
+# --------------------------------------------------------------------------- #
+
+def test_missing_creator_session_fails_with_structured_reason(pc_env_no_binding):
+    """**创作者平台会话是唯一硬门禁**（§21.4，2026-09-22 用户口径）。
+
+    没有创作者会话 ⇒ 一律 `CREATOR_SESSION_REQUIRED` + `failed`，**且不退化成
+    「用 ark 凑合跑一遍」** —— 用户要的是「补齐后再触发」，不是「哪个源能用就用哪个」。
+    """
+    _, account_id, user_id, _ = pc_env_no_binding
+
+    result = nss.run_note_sync(account_id, user_id=user_id)
+
+    assert result["status"] == sts.STATUS_FAILED
+    assert "CREATOR_SESSION_REQUIRED" in result["error"]
+    # 一个平台请求都没发（连 ark 都没试）。
+    assert FakePcAdapter.calls == []
+    assert FakeQianfanAdapter.calls == 0
+
+
+def test_creator_source_failure_keeps_ark_and_reports_reason(creator_env, monkeypatch):
+    """创作者源失败但 ark 源可用 ⇒ **部分成功**（done），原因记在分源明细里。
+
+    §19.3 的纪律不变：源与源互不阻塞，失败的那条**结构化**留在 `sources` 里。
+    """
+    class FailingCreatorAdapter:
+        def __init__(self, cookies: str) -> None:
+            self.cookies = cookies
+
+        def get_posted_notes_page(self, page: int = 0, tab: int = 0):
+            return False, "登录凭证缺失，请重新登录", {"code": -13000, "success": False}
+
+    monkeypatch.setattr(pc, "get_xhs_creator_api_adapter_factory", lambda: FailingCreatorAdapter)
+    FakeQianfanAdapter.list_entries = [_ark_note("ARK-N1")]
+    _, account_id, user_id, _ = creator_env
+
+    result = nss.run_note_sync(account_id, user_id=user_id)
+
+    assert result["status"] == sts.STATUS_DONE, result
+    by_source = {entry["source"]: entry for entry in result["sources"]}
+    assert "登录凭证缺失" in by_source["creator"]["error"]
+    assert by_source["ark"]["stored"] == 1
+
+
+def test_without_creator_session_ark_is_not_enough(pc_env, monkeypatch):
+    """**只有千帆令牌不够**：同步笔记必须先有创作者平台会话（§21.4）。
+
+    这条钉的是「不退化」—— 旧实现会把 ark 当独立入口跑一遍，任务显示
+    「同步成功」，而**一条笔记都没落**，用户以为同步过了。
+    """
+    FakeQianfanAdapter.list_entries = [_ark_note("ARK-N1")]
+    _, account_id, user_id, SessionLocal = pc_env
+
+    result = nss.run_note_sync(account_id, user_id=user_id)
+
+    assert result["status"] == sts.STATUS_FAILED
+    assert "CREATOR_SESSION_REQUIRED" in result["error"]
+    assert FakeQianfanAdapter.calls == 0  # ark 源一次都没打
+    db = SessionLocal()
+    try:
+        assert db.scalars(select(Note.note_id)).all() == []
+    finally:
+        db.close()
+
+
+def test_creator_and_ark_sources_run_when_both_usable(creator_env, monkeypatch):
+    """创作者平台 + 千帆均可用 ⇒ 两个源各自落库（§21：**www 已不参与**）。"""
+    FakeQianfanAdapter.list_entries = [_ark_note("ARK-N1")]
+    _, account_id, user_id, SessionLocal = creator_env
+
+    result = nss.run_note_sync(account_id, user_id=user_id)
+
+    assert result["status"] == sts.STATUS_DONE, result
+    by_source = {entry["source"]: entry for entry in result["sources"]}
+    # ⚠️ `www` **不在**清单里 —— 这是 §21.4 的那条删除，写回 www 源本用例必红。
+    assert set(by_source) == {"creator", "ark"}
+    assert by_source["creator"]["stored"] == 2  # C-N1 / C-N2
+    assert by_source["ark"]["stored"] == 1
+
+    db = SessionLocal()
+    try:
+        assert {"C-N1", "C-N2", "ARK-N1"} <= set(db.scalars(select(Note.note_id)).all())
+    finally:
+        db.close()
+
+
+def test_ark_merge_never_erases_existing_content(creator_env, monkeypatch):
+    """ark 源**填空合并**：已落库的正文 / 标题一个字节不动（§19.3.2 语义不变）。"""
+    # 创作者源这一轮**不返回 C-N1**，让 C-N1 只由 ark 源处理（否则整行覆盖会先清空正文）。
+    FakeCreatorAdapter.note_ids = ["C-OTHER"]
+    _, account_id, user_id, SessionLocal = creator_env
+
+    # 先造一条「已落库、带正文」的行（模拟详情补齐已经填过正文）。
+    db = SessionLocal()
+    try:
+        db.add(
+            Note(
+                user_id=user_id,
+                platform="xhs",
+                platform_account_id=account_id,
+                note_id="C-N1",
+                title="已有标题",
+                content="已有正文",
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    FakeQianfanAdapter.list_entries = [_ark_note("C-N1", title="千帆侧标题")]
+    result = nss.run_note_sync(account_id, user_id=user_id)
+    assert result["status"] == sts.STATUS_DONE, result
+
+    db = SessionLocal()
+    try:
+        note = db.scalars(select(Note).where(Note.note_id == "C-N1")).one()
+        assert note.content == "已有正文"  # 空值**不覆盖**非空（这是本用例的全部意义）
+        assert note.title == "已有标题"
+        assert note.published is True  # 只升不降（§19.12）
+        assert note.raw_json["ark"]["likes"] == 3
+    finally:
+        db.close()
+
+# --------------------------------------------------------------------------- #
+# R1 / R3：笔记落库 + Creator 顺带补挂载商品
+# --------------------------------------------------------------------------- #
+def test_creator_sync_stores_notes_and_writes_notes_count(creator_env):
+    _, account_id, user_id, SessionLocal = creator_env
+    result = nss.run_note_sync(account_id, user_id=user_id, max_pages=3)
+
+    assert result["status"] == sts.STATUS_DONE, result
+    assert result["stored"] == 2
+
+    db = SessionLocal()
+    try:
+        note_ids = set(db.scalars(select(Note.note_id)).all())
+        assert {"C-N1", "C-N2"} <= note_ids
+        account = db.get(PlatformAccount, account_id)
+        # 总数只有创作者响应里那处 `tags[checked].notes_count` 给得出。
+        # `profile_json` 是 Text 列存 JSON 串（不是 JSON 列），要解析。
+        assert json.loads(account.profile_json)["notes_count"] == 1969
+    finally:
+        db.close()
+
+
+def test_creator_sync_backfills_goods_for_the_page_note_ids(creator_env):
+    _, account_id, user_id, SessionLocal = creator_env
+    nss.run_note_sync(account_id, user_id=user_id, max_pages=1)
+
+    # 一页笔记 → 一次按需补齐，且带的是**本页**的 note_id。
+    assert len(FakeQianfanAdapter.note_id_queries) == 1
+    assert sorted(FakeQianfanAdapter.note_id_queries[0]) == ["C-N1", "C-N2"]
+
+    db = SessionLocal()
+    try:
+        stored = set(db.scalars(select(ShopNoteGoods.note_id)).all())
+        assert {"C-N1", "C-N2"} <= stored
+    finally:
+        db.close()
+
+
+def test_creator_sync_reports_goods_stored_count(creator_env):
+    _, account_id, user_id, _ = creator_env
+    result = nss.run_note_sync(account_id, user_id=user_id, max_pages=1)
+    assert result["goods_stored"] == 2
+
+
+# --------------------------------------------------------------------------- #
+# §19.14 页内联详情补齐：一次同步拿全再落库（不再有账号级补齐队列）
+# --------------------------------------------------------------------------- #
+
+def test_creator_sync_hydrates_the_page_inline(creator_env):
+    """有 www 会话 ⇒ **本页笔记落库后就地打详情**：正文 / 图集随同步一起落库。
+
+    钉的是用户 2026-09-23 口径「每次同步笔记时，获取到该笔记下所有数据……全部数据后
+    再落库」：一条详情请求都不留给「后续任务」—— `hydrated_at` 当场写上，
+    `content_filled` 计入同步结果。
+    """
+    EXTRA_CHANNEL_COOKIES["www"] = PC_COOKIES
+    _, account_id, user_id, SessionLocal = creator_env
+
+    result = nss.run_note_sync(account_id, user_id=user_id, max_pages=1)
+
+    assert result["status"] == sts.STATUS_DONE, result
+    # 本页两篇各打一次详情（一次请求同时给正文 + 图集）。
+    assert len(FakePcAdapter.detail_calls) == 2, FakePcAdapter.detail_calls
+    assert result["content_filled"] == 2
+
+    db = SessionLocal()
+    try:
+        for note_id in ("C-N1", "C-N2"):
+            note = db.scalars(select(Note).where(Note.note_id == note_id)).one()
+            assert note.content == f"详情正文 {note_id}", "正文没随同步落库"
+            assert note.hydrated_at is not None, "补过的行要写标记（不再进后续候选）"
+            # 详情里的图也并进来了（列表只给一张封面）。
+            urls = [
+                a.url for a in db.scalars(select(NoteAsset).where(NoteAsset.note_id == note.id)).all()
+            ]
+            assert f"https://cdn.example/{note_id}-detail.jpg" in urls
+    finally:
+        db.close()
+
+
+def test_creator_sync_without_www_session_stores_list_data_and_says_so(creator_env):
+    """没有 www 会话 ⇒ 列表数据照常落库，一条详情请求都不发，任务行安静说明。
+
+    失败三分法：账号级「暂不可用」不是接口异常 —— 不红块、不中止，一行原因就够。
+    """
+    _, account_id, user_id, SessionLocal = creator_env
+
+    result = nss.run_note_sync(account_id, user_id=user_id, max_pages=1)
+
+    assert result["status"] == sts.STATUS_DONE, result
+    assert FakePcAdapter.detail_calls == [], "没有 www 会话不该打详情"
+    assert result["content_filled"] == 0
+    assert "网页版（www）会话" in result["note"]
+
+    db = SessionLocal()
+    try:
+        note = db.scalars(select(Note).where(Note.note_id == "C-N1")).one()
+        assert note.content == "", "列表源不带正文 ⇒ 留空不造假（缺值口径）"
+        assert note.hydrated_at is None, "没打过详情就不写标记（补登后还能被补）"
+    finally:
+        db.close()
+
+
+def test_second_full_sync_does_not_refetch_hydrated_notes(creator_env):
+    """**重复全量同步不重复请求已补过的行**（额度 5 次/分钟，白烧就是犯罪）。"""
+    EXTRA_CHANNEL_COOKIES["www"] = PC_COOKIES
+    _, account_id, user_id, _ = creator_env
+
+    nss.run_note_sync(account_id, user_id=user_id, max_pages=1, mode="full")
+    assert len(FakePcAdapter.detail_calls) == 2
+
+    FakePcAdapter.detail_calls.clear()
+    nss.run_note_sync(account_id, user_id=user_id, max_pages=1, mode="full")
+    assert FakePcAdapter.detail_calls == [], "已补齐的行不许被第二轮全量重复请求"
+
+
+def test_detail_failures_are_aggregated_into_one_line(creator_env):
+    """详情请求失败 ⇒ 列表数据**照常落库** + 跨源聚合成**一行**任务说明 + 不写标记。
+
+    与商品侧 `detail_failed` 同口径：失败是可恢复的，`hydrated_at` 留 NULL，
+    下次全量同步重试；「同步成功但正文永远为空且不留痕」正是旧实现的坑。
+    """
+    EXTRA_CHANNEL_COOKIES["www"] = PC_COOKIES
+    FakePcAdapter.detail_fail = True
+    _, account_id, user_id, SessionLocal = creator_env
+
+    result = nss.run_note_sync(account_id, user_id=user_id, max_pages=1)
+
+    assert result["status"] == sts.STATUS_DONE, result
+    assert len(FakePcAdapter.detail_calls) == 2, "本页两篇都该尝试一次"
+    assert "2 条笔记详情获取失败" in result["note"]
+    assert result["content_filled"] == 0
+
+    db = SessionLocal()
+    try:
+        note = db.scalars(select(Note).where(Note.note_id == "C-N1")).one()
+        assert note.content == "", "列表源不带正文 ⇒ 失败也不造假"
+        assert note.hydrated_at is None, "失败不写标记 ⇒ 下次全量同步重试"
+    finally:
+        db.close()
+
+
+# --------------------------------------------------------------------------- #
+# PC 链路：令牌必须来自请求体，缺了要吼出来
+# --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# 有界：三种提前结束
+# --------------------------------------------------------------------------- #
+
+def test_full_pagination_stops_only_when_platform_says_done(creator_env, monkeypatch):
+    """**不传 `max_pages` = 全量**（§21，2026-09-22 用户口径）。
+
+    翻到平台说「没有下一页」为止 —— 不是翻 3 页就停。这条钉的就是用户报的那个 bug：
+    `已落库 180 / 共 1961 条` + `已达本次翻页上限（3 页），剩余留待下一轮`。
+    """
+    FakeCreatorAdapter.pages = {0: ["C-P1"], 1: ["C-P2"], 2: ["C-P3"], 3: ["C-P4"]}
+    _, account_id, user_id, _ = creator_env
+
+    result = nss.run_note_sync(account_id, user_id=user_id)  # 刻意不传 max_pages
+
+    assert len(FakeCreatorAdapter.calls) == 4, FakeCreatorAdapter.calls
+    assert result["stored"] == 4
+    assert "上限" not in result["note"]
+
+
+def test_full_sync_advances_the_cursor_so_next_run_is_incremental(creator_env, monkeypatch):
+    """**全量同步也必须写游标**（§22，2026-09-22 用户口径）。
+
+    这是「增量化」能真正生效的另一半：旧实现把推进写在
+    `if incremental and cursor_advanced` 里 ⇒ 全量同步**永不写游标** ⇒ 游标恒为 0
+    ⇒ 自动模式永远选全量 ⇒ 用户看到的「手动同步永远是全量、永远 30–45 分钟」。
+
+    断言分两层：① 全量跑完游标被写成本次观测到的最新发布时间；② 下一轮不传 mode
+    时自动落到 incremental（不再翻页扫全表）。
+    """
+    FakeCreatorAdapter.pages = {0: ["C-P1"], 1: ["C-P2"]}
+    _, account_id, user_id, SessionLocal = creator_env
+
+    nss.run_note_sync(account_id, user_id=user_id)  # 不传 mode ⇒ auto
+
+    db = SessionLocal()
+    try:
+        cursor_after_full = sts.load_note_cursor(db, account_id)
+    finally:
+        db.close()
+    assert cursor_after_full > 0, "全量同步没推进游标 ⇒ 自动模式永远选全量"
+
+    # 第二轮：游标已在 ⇒ auto 应解析成 incremental，且早停（整页都不新）。
+    FakeCreatorAdapter.calls = []
+    FakeCreatorAdapter.pages = {0: ["C-P1"], 1: ["C-P2"]}
+    nss.run_note_sync(account_id, user_id=user_id)
+
+    assert len(FakeCreatorAdapter.calls) == 1, "第二轮应增量早停，不该再翻全表"
+    db = SessionLocal()
+    try:
+        assert sts.load_note_cursor(db, account_id) >= cursor_after_full
+    finally:
+        db.close()
+
+
+def test_stops_early_when_platform_reports_no_more(creator_env, monkeypatch):
+    """平台 `page=-1` ⇒ 当页就停，**不再多打一次请求**。"""
+    _, account_id, user_id, _ = creator_env
+
+    result = nss.run_note_sync(account_id, user_id=user_id)
+
+    assert len(FakeCreatorAdapter.calls) == 1
+    # §19.14：没有 www 会话 ⇒ 任务行**诚实两行**（本页没补 + 剩余量与补救路径），
+    # 不再像旧队列那样把 `no_session` 原因静默丢掉。
+    assert "网页版（www）会话" in result["note"]
+    assert "正文待补齐 2 条" in result["note"]
+
+
+def test_stops_early_when_stored_reaches_total(creator_env, monkeypatch):
+    """已落库 ≥ `total` ⇒ 提前结束（不为了凑页数继续翻）。"""
+    FakeCreatorAdapter.pages = {0: ["C-P1"], 1: ["C-P2"], 2: ["C-P3"]}
+    FakeCreatorAdapter.notes_count = 1  # 平台说总共就 1 条
+    _, account_id, user_id, _ = creator_env
+
+    nss.run_note_sync(account_id, user_id=user_id)
+
+    assert len(FakeCreatorAdapter.calls) == 1
+
+# --------------------------------------------------------------------------- #
+# 风控：限流停本次，不抛异常，保留已同步
+# --------------------------------------------------------------------------- #
+
+def test_rate_limit_wait_timeout_stops_without_raising(creator_env):
+    """等待额度**超时** ⇒ 不抛异常：任务 done、原因写任务行（§21 等待制）。
+
+    ⚠️ 与旧契约的区别：这里断言的**不是**「第一页就被限流挡住」，而是
+    「等不到额度才停」。`wait_allow` 而不是 `allow` —— 改回去本用例必红。
+    """
+    _, account_id, user_id, _ = creator_env
+    LIMITER["impl"] = DenyLimiter()
+
+    result = nss.run_note_sync(account_id, user_id=user_id)
+
+    assert FakeCreatorAdapter.calls == []
+    assert result["status"] == sts.STATUS_DONE  # 不是异常，是「本次到此为止」
+    assert "限流" in result["note"]
+
+
+def test_rate_limit_keeps_what_the_first_page_already_stored(creator_env, monkeypatch):
+    """第 1 页放行、第 2 页起等待超时：**已同步的必须留下来**。"""
+    FakeCreatorAdapter.pages = {0: ["C-P1"], 1: ["C-P2"]}
+
+    class OneShotLimiter:
+        """第 1 次等额度就成功，之后一律超时。"""
+
+        def __init__(self) -> None:
+            self.n = 0
+
+        def allow(self, key) -> bool:  # noqa: ARG002
+            self.n += 1
+            return self.n == 1
+
+        def wait_allow(self, key, **kwargs) -> bool:  # noqa: ARG002
+            return self.allow(key)
+
+    LIMITER["impl"] = OneShotLimiter()
+    _, account_id, user_id, SessionLocal = creator_env
+
+    result = nss.run_note_sync(account_id, user_id=user_id)
+
+    assert len(FakeCreatorAdapter.calls) == 1
+    assert result["stored"] == 1
+    db = SessionLocal()
+    try:
+        assert db.scalar(select(Note.id).where(Note.note_id == "C-P1")) is not None
+    finally:
+        db.close()
+
+# --------------------------------------------------------------------------- #
+# §19.11：限流键必须带源（真机教训：三源共用一个账号键 ⇒ ark 源第 1 页就被挡）
+# --------------------------------------------------------------------------- #
+def test_rate_limit_key_is_per_source():
+    """账号键耗光后，**带源的键必须还能放行**（平台风控按平台各自独立）。
+
+    这条钉的是修复本身：改回 `allow(account.id)` 单键，本测试必红。
+    """
+    from backend.app.services.rate_limiter import CrawlRateLimiter
+
+    limiter = CrawlRateLimiter(max_per_minute=3)
+    assert all(limiter.allow(42) for _ in range(3))
+    assert limiter.allow(42) is False  # 账号键的额度用完了
+
+    # 另一个平台（ark / goods）的键与账号键互不相干 —— 真实请求量没超。
+    assert limiter.allow("42:ark") is True
+    assert limiter.allow("42:www") is True
+    assert limiter.allow("42:goods") is True
+    # reset 也按 key（清账号键不会清掉源键）。
+    limiter.reset(42)
+    assert limiter.allow(42) is True
+
+
+
+def test_limited_source_is_marked_limited(creator_env, monkeypatch):
+    """ark 源被限流 ⇒ `limited=True`、stored=0（**不是**「千帆 0 条笔记」）。
+
+    真机教训（2026-09-22，acct 8）：creator 源翻页耗光额度后 ark 源被挡，
+    结果行显示「千帆商品笔记 0 条」—— 把「没跑完」显示成了「没数据」。
+    """
+    _, account_id, user_id, _ = creator_env
+
+    class PerKeyLimiter:
+        """只挡 ark 源的假限流器（按限流键判定，不按账号）。"""
+
+        def allow(self, key) -> bool:  # noqa: ARG002
+            return str(key) != f"{account_id}:ark"
+
+        def wait_allow(self, key, **kwargs) -> bool:  # noqa: ARG002
+            return self.allow(key)
+
+    LIMITER["impl"] = PerKeyLimiter()
+    FakeQianfanAdapter.list_entries = [_ark_note("ARK-N1")]
+
+    result = nss.run_note_sync(account_id, user_id=user_id)
+
+    by_source = {entry["source"]: entry for entry in result["sources"]}
+    assert set(by_source) == {"creator", "ark"}
+    assert by_source["creator"]["stored"] == 2
+    assert by_source["creator"]["limited"] is False
+    # ark 源第 1 页前就被挡 ⇒ limited=True（0 条是没跑完，不是没数据）
+    assert by_source["ark"]["stored"] == 0
+    assert by_source["ark"]["limited"] is True
+
+# --------------------------------------------------------------------------- #
+# 缺值不造假（硬约束⑤）
+# --------------------------------------------------------------------------- #
+def test_creator_total_missing_does_not_write_a_zero(creator_env):
+    """拿不到 `tags[checked].notes_count` 时**不许**用「本页条数」冒充总数。
+
+    `pc.py::_creator_total` 在字段缺失时退化成 `len(items)` —— 对展示接口是
+    「不精确」，对我们会把「有待同步」的分母写成 2（于是永远判定已同步完）。
+    """
+    _, account_id, user_id, SessionLocal = creator_env
+    FakeCreatorAdapter.notes_count = 0
+
+    result = nss.run_note_sync(account_id, user_id=user_id, max_pages=1)
+
+    assert result["total"] is None
+    db = SessionLocal()
+    try:
+        account = db.get(PlatformAccount, account_id)
+        assert "notes_count" not in json.loads(account.profile_json or "{}")
+    finally:
+        db.close()
+
+
+# --------------------------------------------------------------------------- #
+# 防重（N3）+ 状态接口
+# --------------------------------------------------------------------------- #
+def test_second_trigger_reuses_the_active_task(creator_env, monkeypatch):
+    headers, account_id, _user_id, SessionLocal = creator_env
+    # 不让线程真的跑：本用例只盯任务行的防重语义。
+    monkeypatch.setattr(nss, "_run_in_thread", lambda *a, **k: None)
+
+    first = client.post(f"/api/accounts/{account_id}/notes/sync", headers=headers, json={})
+    assert first.status_code == 200, first.text
+    second = client.post(f"/api/accounts/{account_id}/notes/sync", headers=headers, json={})
+    assert second.status_code == 200, second.text
+
+    assert first.json()["task_id"] == second.json()["task_id"]
+    db = SessionLocal()
+    try:
+        rows = db.scalars(select(Task).where(Task.task_type == sts.NOTE_SYNC_TASK_TYPE)).all()
+        assert len(rows) == 1
+    finally:
+        db.close()
+
+
+def test_status_is_idle_before_any_task_and_after_one_finishes(creator_env):
+    headers, account_id, user_id, SessionLocal = creator_env
+
+    idle = client.get(f"/api/accounts/{account_id}/notes/sync/status", headers=headers)
+    assert idle.status_code == 200
+    assert idle.json()["task_id"] is None
+    assert idle.json()["status"] == "idle"
+    assert idle.json()["last_result"] is None
+
+    nss.run_note_sync(account_id, user_id=user_id, max_pages=1)
+
+    after = client.get(f"/api/accounts/{account_id}/notes/sync/status", headers=headers)
+    body = after.json()
+    assert body["task_id"] is None
+    assert body["status"] == "idle"
+    assert body["last_result"]["status"] == sts.STATUS_DONE
+    assert body["last_result"]["progress"]["stored"] == 2
+    assert body["last_result"]["finished_at"]
+
+
+# --------------------------------------------------------------------------- #
+# 鉴权与参数边界
+# --------------------------------------------------------------------------- #
+def test_other_users_account_is_404(creator_env, monkeypatch):
+    _, account_id, _user_id, _ = creator_env
+    monkeypatch.setattr(nss, "_run_in_thread", lambda *a, **k: None)
+
+    other = client.post("/api/auth/register", json={"username": "intruder", "password": "secret123"})
+    assert other.status_code == 200, other.text
+    headers = {"Authorization": f"Bearer {other.json()['access_token']}"}
+
+    assert client.post(f"/api/accounts/{account_id}/notes/sync", headers=headers).status_code == 404
+    assert (
+        client.get(f"/api/accounts/{account_id}/notes/sync/status", headers=headers).status_code
+        == 404
+    )
+
+
+
+def test_page_bounds_follow_the_new_contract(creator_env, monkeypatch):
+    """参数边界（§21）：`0` 越界 422；`21` **现在合法**（上限已放到 `ABSOLUTE_PAGE_CAP`）；
+    超过绝对兜底 422；`None`/缺省 = 全量。"""
+    headers, account_id, _user_id, _ = creator_env
+    monkeypatch.setattr(nss, "_run_in_thread", lambda *a, **k: None)
+
+    reject = ({"max_pages": 0}, {"max_pages": 501}, {"page_size": 0}, {"page_size": 101})
+    for body in reject:
+        response = client.post(
+            f"/api/accounts/{account_id}/notes/sync", headers=headers, json=body
+        )
+        assert response.status_code == 422, (body, response.text)
+
+    # 21 页**不再是越界**（旧契约 le=20 已废）；缺省也是合法请求（= 全量）。
+    for body in ({"max_pages": 21}, {}):
+        response = client.post(
+            f"/api/accounts/{account_id}/notes/sync", headers=headers, json=body
+        )
+        assert response.status_code == 200, (body, response.text)
+
+# --------------------------------------------------------------------------- #
+# 硬约束 C5：源码级守卫，不许出现全量循环
+# --------------------------------------------------------------------------- #
+def test_service_never_calls_full_loop_methods():
+    """用 AST 查**真实调用**，不查文档字符串。
+
+    直接对源码文本做 `in` 判断会被自己的注释/文档字符串误伤（本模块的文档
+    字符串就正好在讲「禁用 `get_all_posted_notes`」）—— 那种守卫会在「改注释」
+    时变红、在「真调用」时漏判，两边都错。所以只看 Attribute 调用。
+    """
+    tree = ast.parse(inspect.getsource(nss))
+    banned = {"get_all_posted_notes", "get_user_all_notes", "get_all_notes"}
+    called = {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    assert not (called & banned), f"笔记同步不得调用全量循环方法：{called & banned}"
+
+
+# --------------------------------------------------------------------------- #
+# §21：全量翻页契约（2026-09-22 用户口径）
+# --------------------------------------------------------------------------- #
+def test_clamp_pages_none_is_full_and_explicit_is_capped():
+    """`clamp_pages`：`None` / 坏值 = **全量**；显式数字夹到 `[1, ABSOLUTE_PAGE_CAP]`。
+
+    ⚠️ 旧契约「坏值退回 3 页」已废 —— 把「没传」当「传了 3」正是那个 bug 的入口。
+    """
+    assert sts.clamp_pages(None) is None
+    assert sts.clamp_pages("") is None
+    assert sts.clamp_pages("abc") is None
+    assert sts.clamp_pages(0) == 1
+    assert sts.clamp_pages(7) == 7
+    assert sts.clamp_pages(10**6) == sts.ABSOLUTE_PAGE_CAP
+
+
+def test_absolute_page_cap_exists_as_a_dead_loop_guard():
+    """绝对兜底必须存在且**远高于**真实数据量（否则「取消上限」= 死循环）。"""
+    assert sts.DEFAULT_MAX_PAGES is None
+    assert sts.ABSOLUTE_PAGE_CAP >= 100
+
+
+def test_absolute_cap_stops_a_platform_that_never_says_done(creator_env, monkeypatch):
+    """平台永远不说「没有下一页」时，循环必须在绝对兜底处停下并如实说明。"""
+    monkeypatch.setattr(sts, "ABSOLUTE_PAGE_CAP", 3)
+    FakeCreatorAdapter.pages = {0: ["C-P1"], 1: ["C-P2"], 2: ["C-P3"], 3: ["C-P4"]}
+    _, account_id, user_id, _ = creator_env
+
+    result = nss.run_note_sync(account_id, user_id=user_id)
+
+    assert len(FakeCreatorAdapter.calls) == 3
+    assert "兜底" in result["note"]
+
+
+def test_wait_allow_returns_false_on_timeout_without_hanging():
+    """`wait_allow`：额度够就立即放行；超时窗口内等不到就返回 False（不挂死）。"""
+    from backend.app.services.rate_limiter import CrawlRateLimiter
+
+    fresh = CrawlRateLimiter(max_per_minute=2)
+    assert fresh.wait_allow("9:creator", timeout=0) is True
+
+    used = CrawlRateLimiter(max_per_minute=1)
+    assert used.allow("8:creator") is True
+    assert used.wait_allow("8:creator", timeout=0) is False

@@ -1,0 +1,221 @@
+"""测试规范的可执行守卫 —— 把「约定」变成「红了才算数」。
+
+这些不是普通用例，是**防止回退的钉子**。每一条都对应一次真实的踩坑：
+
+* **禁止固定 `sleep(N>=100)`**：`add_account_modal.cjs` 里 38 次、`qr_session_identity.cjs`
+  里 6 次固定 sleep，本仓实测让全量回归白等 **18.5s**，又因为每个脚本被 pytest 调 6 次
+  ⇒ **96 秒纯浪费**（占全量 20%）。已改成 `waitFor(条件)`；这里保证**不许改回去**。
+* **禁止新的 engine 样板**：conftest 已提供夹具，新文件再抄 `_override_database()`
+  就是重复代码。既有文件在白名单里（迁移是独立工作，见规范文档的清单）。
+* **`node` 必须可用**：行为脚本全部靠它，node 不在 PATH 上时应当**明确失败**，
+  而不是静默 skip（静默 skip = 守卫形同虚设）。
+"""
+from __future__ import annotations
+
+import re
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+BACKEND_DIR = ROOT / "tests" / "backend"
+FRONTEND_DIR = ROOT / "tests" / "frontend"
+
+#: 本文件自己（守卫里出现 `create_engine(` / `dependency_overrides` 字样是在**读源码**，不是在建 engine）。
+THIS_FILE = Path(__file__).name
+
+#: 固定 sleep 的阈值：>= 100ms 视为「盲等」（React 首帧 / 轮询 tick 都在几十毫秒级，
+#: 100ms 以上几乎一定是没去想「到底在等什么」）。
+SLEEP_FLOOR_MS = 100
+
+#: 允许固定 sleep 的白名单 —— **必须是「真的在等真实时间」的场景**，且每条都要写明理由。
+#: 新增条目只减不增；发现新的盲等一律先改 `waitFor`。
+SLEEP_ALLOWLIST: dict[str, str] = {}
+
+#: 仍在用「自建 engine」老样板的文件（迁完一个划一个，目标清零）。
+#: ⚠️ 这份清单由 `test_legacy_allowlist_matches_reality` **逐条核对**：
+#: 多列、漏列、列了不存在的文件都会红 —— 所以它不可能悄悄过期。
+LEGACY_ENGINE_FILES: set[str] = {
+    "test_account_metrics.py",
+    "test_api.py",
+    "test_cookie_channels.py",
+    "test_initial_data.py",
+    "test_login_state.py",
+    "test_note_cleanup.py",
+    "test_note_content_backfill.py",
+    "test_note_fields.py",
+    "test_note_published.py",
+    "test_note_sync.py",
+    "test_note_type.py",
+    "test_product_note.py",
+    "test_product_note_publish.py",
+    "test_scheduled_jobs.py",
+    "test_self_content.py",
+    "test_shop_goods_sync.py",
+    "test_shop_health.py",
+    "test_shop_items.py",
+    "test_shop_nm.py",
+    "test_task_cancel.py",
+    "test_uniqueness.py",
+}
+
+
+def _strip_comments(source: str) -> str:
+    """去掉块注释与行注释，免得断言被自己的解释性注释命中（DEF-058 的教训）。"""
+    source = re.sub(r"/\*.*?\*/", "", source, flags=re.S)
+    return re.sub(r"(?m)//.*$", "", source)
+
+
+def _legacy_engine_files() -> set[str]:
+    """实际仍在用 `create_engine(` + `dependency_overrides` 三件套的文件。"""
+    found: set[str] = set()
+    for path in sorted(BACKEND_DIR.glob("test_*.py")):
+        if path.name == THIS_FILE:
+            continue
+        source = _strip_comments(path.read_text(encoding="utf-8", errors="ignore"))
+        if "create_engine(" in source and "dependency_overrides" in source:
+            found.add(path.name)
+    return found
+
+
+# --------------------------------------------------------------------------- #
+# ① 前端行为脚本：不许有盲等
+# --------------------------------------------------------------------------- #
+
+def test_no_blind_sleep_in_frontend_behaviour_scripts():
+    """`tests/frontend/*.cjs` 不许有固定 `sleep(N>=100)`。
+
+    这条是本次优化的**核心守卫**：盲等既慢又 flaky，且会被 pytest 的调用次数
+    成倍放大。等异步就 `waitFor(条件, {timeout})` —— 一就绪就继续。
+    """
+    offenders: list[str] = []
+    for script in sorted(FRONTEND_DIR.glob("*.cjs")):
+        if script.name in SLEEP_ALLOWLIST:
+            continue
+        code = _strip_comments(script.read_text(encoding="utf-8"))
+        for match in re.finditer(r"sleep\(\s*(\d+)\s*\)", code):
+            if int(match.group(1)) >= SLEEP_FLOOR_MS:
+                offenders.append(f"{script.name}: sleep({match.group(1)})")
+    assert not offenders, (
+        "固定 sleep 会把回归拖慢且 flaky，改用 waitFor(条件, {timeout})。"
+        f" 命中：{offenders}"
+    )
+
+
+def test_jsdom_scripts_must_provide_waitfor():
+    """用 jsdom 驱动 React 的脚本**必须**有 `waitFor`。
+
+    精确判据是「用了 jsdom」而不是「有 await」—— 大部分脚本的 `await` 只是
+    `await esbuild.build(...)` 和直接 await 一个 promise，压根没有 UI 等待，
+    要求它们也带 waitFor 是噪音。真正需要 waitFor 的是那两个渲染真实组件的脚本。
+
+    ⚠️ 判据用 `\\b` 词边界，**不能**用裸 `in`：`function waitFor` 是
+    `function waitForeverX` 的子串，裸 `in` 会让「改了名」这种变异静默漏过
+    （DEF-058 同型：负向断言被子串命中 ⇒ 恒真 ⇒ 守卫变成摆设）。
+    """
+    missing: list[str] = []
+    declared = re.compile(r"\b(?:function|const|let|var)\s+waitFor\b")
+    for script in sorted(FRONTEND_DIR.glob("*.cjs")):
+        code = _strip_comments(script.read_text(encoding="utf-8"))
+        if "jsdom" not in code.lower() and "JSDOM" not in code:
+            continue
+        if not declared.search(code):
+            missing.append(script.name)
+    assert not missing, (
+        "jsdom 脚本必须提供 waitFor(条件, {timeout}) 来等渲染，不要用固定 sleep。"
+        f" 命中：{missing}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# ② 后端测试：不许再抄 engine 样板
+# --------------------------------------------------------------------------- #
+
+def test_new_test_files_must_not_duplicate_the_engine_boilerplate():
+    """新测试文件不许再抄 `create_engine` + `create_all` + `dependency_overrides` 三件套。
+
+    既有文件在 `LEGACY_ENGINE_FILES` 白名单里（迁移是独立工作，见规范文档清单）。
+    **新文件进白名单 = 违规**，所以新增文件必须用 `tests/backend/conftest.py` 的夹具。
+    """
+    legacy = _legacy_engine_files()
+    offenders = sorted(legacy - LEGACY_ENGINE_FILES)
+    assert not offenders, (
+        "新测试文件请用 tests/backend/conftest.py 的夹具（db_engine / db_factory / api_client），"
+        f"不要自建 engine。命中：{offenders}"
+    )
+
+
+def test_legacy_allowlist_matches_reality():
+    """白名单必须**正好**等于现实：多列 / 漏列 / 列了不存在的文件都要红。
+
+    没有这条，白名单就会悄悄过期（本次初版就同时错了 11 处：9 条陈旧 + 2 条漏列），
+    而守卫会变成一个「永远绿但什么都没守」的摆设。
+    """
+    actual = _legacy_engine_files()
+    stale = sorted(LEGACY_ENGINE_FILES - actual)
+    missing = sorted(actual - LEGACY_ENGINE_FILES)
+    assert not stale, f"白名单里有过期条目（这些文件已经不抄样板了，请划掉）：{stale}"
+    assert not missing, f"有文件在抄样板却没进白名单（请补登记，并排迁移）：{missing}"
+
+
+def test_legacy_engine_allowlist_is_shrinking_not_growing():
+    """白名单只许减不许增 —— 防止「把新文件加进白名单」变成绕过守卫的后门。"""
+    assert len(LEGACY_ENGINE_FILES) <= 21, (
+        "LEGACY_ENGINE_FILES 只应在迁移中变小；变大了说明有人在往里加文件。"
+        f" 当前 {len(LEGACY_ENGINE_FILES)} 条"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# ③ 运行环境与覆盖面
+# --------------------------------------------------------------------------- #
+
+def test_node_is_available_for_behaviour_scripts():
+    """node 必须在 PATH 上；缺失就**明确失败**，不许静默 skip。"""
+    assert shutil.which("node"), (
+        "node 不在 PATH 上 ⇒ 前端行为脚本全部无法运行。"
+        "装好 node 再跑，别让守卫退化成 skip。"
+    )
+    result = subprocess.run(["node", "--version"], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().startswith("v"), result.stdout
+
+
+def test_conftest_fixtures_are_really_shared():
+    """conftest 必须真的提供那几件套（防止有人把夹具删了还以为测试在跑）。"""
+    from tests.backend import conftest as shared
+
+    for name in ("db_engine", "db_factory", "db_session", "api_client", "client", "frontend_runner"):
+        assert hasattr(shared, name), f"conftest 缺少 fixture: {name}"
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "add_account_modal.cjs",
+        "detail_message.cjs",
+        "library_item_filter.cjs",
+        "login_state.cjs",
+        "note_filters.cjs",
+        "note_publish.cjs",
+        "qr_session_identity.cjs",
+        "schedule_center.cjs",
+        "shop_items_view.cjs",
+        "sync_gates.cjs",
+    ],
+)
+def test_every_behaviour_script_is_wired_into_pytest(script: str):
+    """每个 `.cjs` 都必须被 pytest 调用到（否则它只是个没人跑的文件）。
+
+    DEF-063 同型：脚本存在 ≠ 在被守。`qr_session_identity.cjs` 就曾经因为
+    mock 桩缺导出而**打包期即死**，整脚本长期空转还没人发现。
+    """
+    haystack = ""
+    for path in sorted(BACKEND_DIR.glob("test_*.py")):
+        haystack += path.read_text(encoding="utf-8", errors="ignore")
+    assert script in haystack, (
+        f"{script} 没有被任何 pytest 文件引用 ⇒ 它不在守卫范围内。"
+        "要么接线，要么删掉。"
+    )

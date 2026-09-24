@@ -1,0 +1,1061 @@
+"""店铺商品同步（T-805 / §19）的后端契约测试。
+
+盯的是这条链路的三条纪律 + 一套风控 + 内联详情补齐：
+
+1. **完整同步才删旧行**：翻完最后一页（或存够 `total`）才删本次未出现的行；
+   半途而废（到页数上限 / 被限流 / 翻页失败）**一行不删**——删 = 把没扫到的商品
+   当已下架丢掉；
+2. **解不出店铺就不同步**：`shop_id_fk` 是 NOT NULL，拿不到就 `failed`，
+   **不编店铺**（缺值口径）；
+3. **凭据失效不清数据**：`-13000` → 绑定标 `invalid` + 保留全部已有商品；
+4. **风控**：有界翻页、按账号限流（超限停本次、已同步的保留）、页间停顿；
+5. **缺值不造假**：`item_id` 缺失的条目跳过；价格取不到留空串；状态取不到留空；
+6. **§19.4 内联详情补齐**：每页列表商品落库前**先拉 SKU 明细**（批量 10），
+   列表数据 + 规格详情一次性 upsert——白名单归一化（raw 不透传）、批量硬上限 10、
+   详情失败不阻塞列表（失败商品留空，下轮重试）。
+"""
+from __future__ import annotations
+
+import ast
+import inspect
+import json
+
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, select, text as sa_text
+from sqlalchemy.orm import sessionmaker
+
+from backend.app.core.database import Base, get_db
+from backend.app.core.time import shanghai_now
+from backend.app.main import app
+from backend.app.models import PlatformAccount, Task, User
+from backend.app.models.shop import Shop
+from backend.app.models.shop_product import ShopProduct
+from backend.app.services import shop_goods_sync_service as sgs
+from backend.app.services.shop_binding_service import get_shop_state
+from tests.backend.cookie_fixtures import bind_shop_account, give_ark_cookies
+
+client = TestClient(app)
+
+ARK_COOKIES = "access-token-ark.xiaohongshu.com=abc123"
+
+
+class AllowLimiter:
+    def allow(self, account_id: int) -> bool:  # noqa: ARG002
+        return True
+
+    def wait_allow(self, account_id: int, **kwargs) -> bool:  # noqa: ARG002
+        """全量翻页用的是**等待制**（设计 13 §21.3）：测试里立即放行、不真等待。"""
+        return True
+
+
+class DenyLimiter:
+    """额度**永远**没有：`wait_allow` 立即超时（不真等待）= 模拟「等到超时仍无额度」。"""
+
+    def allow(self, account_id: int) -> bool:  # noqa: ARG002
+        return False
+
+    def wait_allow(self, account_id: int, **kwargs) -> bool:  # noqa: ARG002
+        return False
+
+
+LIMITER: dict = {"impl": AllowLimiter()}
+
+
+class FakeItemsAdapter:
+    """千帆商品列表假实现：按页脚本回应，并记录每次调用的参数。"""
+
+    pages: list = []
+    calls: list = []
+    #: §19：SKU 明细假实现按 item_id 回应；不在表里 = 平台没返回这个商品。
+    skus_map: dict = {}
+    #: 记录每次 `get_skus_by_item_ids` 收到的批量（用来钉 ≤10）。
+    sku_batches: list = []
+    #: 置 True 时详情一律失败（用来钉「详情失败不阻塞列表」）。
+    sku_fail: bool = False
+
+    def __init__(self, cookies: str) -> None:
+        self.cookies = cookies
+
+    def search_items(self, **kwargs):
+        type(self).calls.append(kwargs)
+        index = len(type(self).calls) - 1
+        if index >= len(type(self).pages):
+            return True, "", {"code": 0, "data": {"items": [], "total": 0, "has_more": False}}
+        items, total, has_more = type(self).pages[index]
+        return True, "", {
+            "code": 0,
+            "data": {"items": items, "total": total, "has_more": has_more},
+        }
+
+    def get_skus_by_item_ids(self, item_ids):
+        batch = list(item_ids)
+        type(self).sku_batches.append(batch)
+        if type(self).sku_fail:
+            return False, "商品详情获取失败", {"code": 500, "success": False}
+        skus_map = {
+            item_id: type(self).skus_map[item_id]
+            for item_id in batch
+            if item_id in type(self).skus_map
+        }
+        return True, "", {"code": 200, "data": {"skusMap": skus_map}}
+
+
+class InvalidCredentialAdapter:
+    def __init__(self, cookies: str) -> None:
+        self.cookies = cookies
+
+    def search_items(self, **kwargs):
+        return False, "登录凭证缺失，请重新登录", {"code": -13000, "success": False}
+
+
+def _item(
+    item_id: str,
+    *,
+    title: str = "商品",
+    min_price=1999,
+    max_price=1999,
+    stock=10,
+    sales=5,
+    card_type=2,
+    categories=None,
+    images=None,
+    article_no="1056576341942",
+    on_shelf_time=1784084996000,
+    item_audit_time=1784089999000,
+    sale_qty30=3,
+) -> dict:
+    return {
+        "item_id": item_id,
+        "item_name": title,
+        "min_price": min_price,
+        "max_price": max_price,
+        "total_stock": stock,
+        "sale_qty_info": {"acc_sale_qty": sales, "sale_qty30": sale_qty30},
+        "card_type": card_type,
+        "categories": (
+            categories
+            if categories is not None
+            else [{"name": "家居", "level": 1}, {"name": "地垫", "level": 2}]
+        ),
+        "images": images if images is not None else [{"link": f"http://img.example/{item_id}.jpg"}],
+        # v1.32（§30.3）：筛选 / 排序九列的来源字段（真实响应形状，2026-09-22 核对）。
+        "article_no": article_no,
+        "create_time": 1784082313000,
+        "on_shelf_time": on_shelf_time,
+        "item_audit_time": item_audit_time,
+    }
+
+
+def _setup(tmp_path, monkeypatch, *, with_binding: bool = True, shop_id_fk: bool = True):
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'shop-goods-sync.db'}", connect_args={"check_same_thread": False}
+    )
+    Base.metadata.create_all(bind=engine)
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+    def override_get_db():
+        db = SessionLocal()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app.dependency_overrides[get_db] = override_get_db
+    monkeypatch.setattr(sgs, "SessionLocal", SessionLocal)
+    monkeypatch.setattr(sgs, "PAGE_GAP_SECONDS", 0.0)
+    monkeypatch.setattr(sgs, "get_rate_limiter", lambda: LIMITER["impl"])
+
+    FakeItemsAdapter.pages = []
+    FakeItemsAdapter.calls = []
+    FakeItemsAdapter.skus_map = {}
+    FakeItemsAdapter.sku_batches = []
+    FakeItemsAdapter.sku_fail = False
+    LIMITER["impl"] = AllowLimiter()
+
+    response = client.post(
+        "/api/auth/register", json={"username": "owner", "password": "secret123"}
+    )
+    assert response.status_code == 200, response.text
+    headers = {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+    db = SessionLocal()
+    try:
+        user_id = db.scalar(select(User.id).where(User.username == "owner"))
+        account = PlatformAccount(
+            user_id=user_id, platform="xhs", sub_type="creator", nickname="我的号"
+        )
+        db.add(account)
+        db.flush()
+        if with_binding:
+            #: 2026-09-22：关系写账号行（`shop_id_fk`）、状态写 `shop_state`、
+            #: 凭据写账号自己的 `ark` 通道 —— `shop_account_bindings` 整表移除。
+            #: `shop_id_fk=False` 用来复现「有凭据但没绑店」：同步必须失败得可读。
+            if shop_id_fk:
+                bind_shop_account(db, account, cookies_text=ARK_COOKIES, shop_name="观隅好物的店")
+            else:
+                give_ark_cookies(db, account, ARK_COOKIES)
+        db.commit()
+        account_id = account.id
+        user_id_out = user_id
+    finally:
+        db.close()
+    return headers, account_id, user_id_out, SessionLocal
+
+
+def _teardown() -> None:
+    app.dependency_overrides.clear()
+
+
+def _seed_product(SessionLocal, shop_id_fk: int, item_id: str, user_id: int = 1) -> None:
+    db = SessionLocal()
+    try:
+        db.add(
+            ShopProduct(
+                user_id=user_id,
+                shop_id_fk=shop_id_fk,
+                item_id=item_id,
+                item_title="旧的",
+                synced_at=shanghai_now(),
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
+def _shop_pk(SessionLocal) -> int:
+    db = SessionLocal()
+    try:
+        return int(db.scalar(select(Shop.id)))
+    finally:
+        db.close()
+
+
+# --------------------------------------------------------------------------- #
+# 归一化：千帆条目 → shop_products
+# --------------------------------------------------------------------------- #
+def test_items_are_normalized_into_product_rows(tmp_path, monkeypatch):
+    _headers, account_id, user_id, SessionLocal = _setup(tmp_path, monkeypatch)
+    FakeItemsAdapter.pages = [([_item("I1", title="编织地垫", min_price=1999, max_price=2999)], 1, False)]
+
+    result = sgs.run_shop_goods_sync(
+        account_id, user_id=user_id, max_pages=3, adapter_factory=FakeItemsAdapter
+    )
+
+    assert result["status"] == sgs.sts.STATUS_DONE, result
+    assert result["stored"] == 1
+
+    db = SessionLocal()
+    try:
+        product = db.scalars(select(ShopProduct).where(ShopProduct.item_id == "I1")).one()
+        assert product.item_title == "编织地垫"
+        # 价格是**分**的字符串：同价给单值，区间给 `low~high`（展示层换算成元）。
+        assert product.price == "1999~2999"
+        assert product.stock == 10
+        assert product.sales == 5
+        assert product.category == "家居 / 地垫"
+        assert json.loads(product.images_json) == ["http://img.example/I1.jpg"]
+        assert product.status == "售卖中"
+        # 整条原文留底（字段集还会变，真值留本地）。
+        assert json.loads(product.raw_json)["item_id"] == "I1"
+    finally:
+        db.close()
+
+
+def test_sync_asks_for_all_statuses_and_stays_on_one_page_at_a_time(tmp_path, monkeypatch):
+    """`status="all"` 同步全部状态；一次只翻一页（page_no 递增），不并发不错页。"""
+    _headers, account_id, user_id, _ = _setup(tmp_path, monkeypatch)
+    FakeItemsAdapter.pages = [([_item("I1")], 2, True), ([_item("I2")], 2, False)]
+
+    sgs.run_shop_goods_sync(
+        account_id, user_id=user_id, max_pages=3, adapter_factory=FakeItemsAdapter
+    )
+
+    assert [call["status"] for call in FakeItemsAdapter.calls] == ["all", "all"]
+    assert [call["page_no"] for call in FakeItemsAdapter.calls] == [1, 2]
+
+
+def test_items_without_id_are_skipped_not_counted(tmp_path, monkeypatch):
+    """没有 `item_id` 的条目跳过，且**不计入 stored**（没有主键就没有行的身份）。"""
+    _headers, account_id, user_id, SessionLocal = _setup(tmp_path, monkeypatch)
+    FakeItemsAdapter.pages = [([_item(""), _item("I1")], 1, False)]
+
+    result = sgs.run_shop_goods_sync(
+        account_id, user_id=user_id, max_pages=1, adapter_factory=FakeItemsAdapter
+    )
+
+    assert result["stored"] == 1  # 无主键的条目不算成功
+    db = SessionLocal()
+    try:
+        assert {row.item_id for row in db.scalars(select(ShopProduct)).all()} == {"I1"}
+    finally:
+        db.close()
+
+
+# --------------------------------------------------------------------------- #
+# §19.4：SKU 详情补齐（第二段）
+# --------------------------------------------------------------------------- #
+def _sku(sku_id: str, *, price: int = 21152, stock=None) -> dict:
+    """一条 SKU 明细（形状抄自 2026-09-21 真机抓包的 `get_skus_by_item_ids`）。
+
+    刻意带一堆**白名单外**字段（`boutiqueInfo` / `logisticsInfo` / `faqs`）——
+    归一化必须把它们挡在 `detail_json` 之外（10 个商品 5.4MB，不透传 raw）。
+    """
+    return {
+        "skuId": sku_id,
+        "skuName": f"商品 {sku_id}",
+        "variantName": "金逸风华",
+        "barcode": f"XHS-{sku_id}",
+        "erpCode": f"tb_{sku_id}",
+        "basePriceInfo": {"price": price, "originalPrice": 22620, "taxType": 0},
+        "baseStockInfos": [{"stock": stock}] if stock is not None else None,
+        "specImage": {"link": f"https://qimg.example/{sku_id}.jpg"},
+        "weight": 0,
+        "buyable": True,
+        "freeze": False,
+        # —— 以下都是白名单外字段 ——
+        "boutiqueInfo": {"isBoutique": False},
+        "logisticsInfo": {"legal": True, "logistics": "auto"},
+        "faqs": [],
+        "skuDetails": [],
+    }
+
+
+def test_sku_details_are_normalized_with_whitelist(tmp_path, monkeypatch):
+    """SKU 明细按白名单归一化：raw 字段不进 `detail_json`（不透传 5.4MB）。"""
+    _headers, account_id, user_id, SessionLocal = _setup(tmp_path, monkeypatch)
+    FakeItemsAdapter.pages = [([_item("I1")], 1, False)]
+    FakeItemsAdapter.skus_map = {"I1": [_sku("S1", price=21152, stock=7)]}
+
+    result = sgs.run_shop_goods_sync(
+        account_id, user_id=user_id, max_pages=3,
+        adapter_factory=FakeItemsAdapter,
+    )
+
+    assert result["status"] == sgs.sts.STATUS_DONE, result
+    assert result["detail_done"] == 1
+
+    db = SessionLocal()
+    try:
+        product = db.scalars(select(ShopProduct).where(ShopProduct.item_id == "I1")).one()
+        details = json.loads(product.detail_json)
+        assert len(details) == 1
+        entry = details[0]
+        # 白名单内的值都在
+        assert entry["sku_id"] == "S1"
+        assert entry["sku_name"] == "商品 S1"
+        assert entry["variant_name"] == "金逸风华"
+        assert entry["barcode"] == "XHS-S1"
+        assert entry["price_fen"] == 21152
+        assert entry["original_price_fen"] == 22620
+        assert entry["stock"] == 7
+        assert entry["spec_image"] == "https://qimg.example/S1.jpg"
+        assert entry["buyable"] is True and entry["freeze"] is False
+        # 白名单外字段一个都不在
+        assert set(entry) == {
+            "sku_id", "sku_name", "variant_name", "barcode", "erp_code",
+            "price_fen", "original_price_fen", "stock", "spec_image", "weight",
+            "buyable", "freeze",
+        }
+        assert product.sku_count == 1
+        assert product.detail_synced_at is not None
+    finally:
+        db.close()
+
+
+def test_sku_missing_stock_stays_null_not_zero(tmp_path, monkeypatch):
+    """SKU 响应里没有库存字段（实测常态）⇒ 留 null，不造 0（硬约束⑤）。"""
+    _headers, account_id, user_id, SessionLocal = _setup(tmp_path, monkeypatch)
+    FakeItemsAdapter.pages = [([_item("I1")], 1, False)]
+    FakeItemsAdapter.skus_map = {"I1": [_sku("S1")]}  # baseStockInfos=None
+
+    sgs.run_shop_goods_sync(
+        account_id, user_id=user_id, max_pages=3, adapter_factory=FakeItemsAdapter
+    )
+
+    db = SessionLocal()
+    try:
+        product = db.scalars(select(ShopProduct).where(ShopProduct.item_id == "I1")).one()
+        assert json.loads(product.detail_json)[0]["stock"] is None
+        assert product.sku_count == 1  # 有 SKU 行但库存未知 ≠ 没补过
+    finally:
+        db.close()
+
+
+def test_sku_batches_never_exceed_ten(tmp_path, monkeypatch):
+    """批量硬上限 10（实测 20 个被服务端 500 挡回）：12 个商品 ⇒ 2 批。"""
+    _headers, account_id, user_id, _ = _setup(tmp_path, monkeypatch)
+    items = [_item(f"I{index:02d}") for index in range(12)]
+    FakeItemsAdapter.pages = [(items, 12, False)]
+    FakeItemsAdapter.skus_map = {f"I{index:02d}": [_sku(f"S{index}")] for index in range(12)}
+
+    result = sgs.run_shop_goods_sync(
+        account_id, user_id=user_id, max_pages=3,
+        adapter_factory=FakeItemsAdapter,
+    )
+
+    assert result["detail_done"] == 12
+    assert [len(batch) for batch in FakeItemsAdapter.sku_batches] == [10, 2]
+
+
+def test_sku_not_returned_stays_empty(tmp_path, monkeypatch):
+    """平台没返回某商品的 SKU（可能刚删除）⇒ detail_json 留空，detail_synced_at 留 NULL。"""
+    _headers, account_id, user_id, SessionLocal = _setup(tmp_path, monkeypatch)
+    FakeItemsAdapter.pages = [([_item("I1")], 1, False)]
+    FakeItemsAdapter.skus_map = {}  # 平台没返回 I1 的 SKU
+
+    result = sgs.run_shop_goods_sync(
+        account_id, user_id=user_id, max_pages=3,
+        adapter_factory=FakeItemsAdapter,
+    )
+
+    assert result["detail_done"] == 0
+    db = SessionLocal()
+    try:
+        product = db.scalars(select(ShopProduct).where(ShopProduct.item_id == "I1")).one()
+        # 空串 = 没补过（与「补过但 0 SKU」的 `[]` 是两件事）。
+        assert product.detail_json == ""
+        assert product.detail_synced_at is None
+        assert product.sku_count is None
+    finally:
+        db.close()
+
+
+def test_detail_total_reports_remaining_after_sync(tmp_path, monkeypatch):
+    """`detail_total` = 全店还剩多少商品没详情（增量同步可能只覆盖到新商品）。"""
+    _headers, account_id, user_id, _ = _setup(tmp_path, monkeypatch)
+    items = [_item(f"I{index}") for index in range(5)]
+    FakeItemsAdapter.pages = [(items, 5, False)]
+    FakeItemsAdapter.skus_map = {f"I{index}": [_sku(f"S{index}")] for index in range(5)}
+
+    result = sgs.run_shop_goods_sync(
+        account_id, user_id=user_id, max_pages=3,
+        adapter_factory=FakeItemsAdapter,
+    )
+
+    # 5 个全补上了
+    assert result["detail_done"] == 5
+    assert result["detail_total"] == 0
+
+
+def test_detail_failure_keeps_products_and_says_so(tmp_path, monkeypatch):
+    """详情拉取失败 ⇒ 列表照常落库、detail 留空、原因写进 note（不阻塞）。"""
+    _headers, account_id, user_id, SessionLocal = _setup(tmp_path, monkeypatch)
+    FakeItemsAdapter.pages = [([_item("I1")], 1, False)]
+    FakeItemsAdapter.sku_fail = True
+
+    result = sgs.run_shop_goods_sync(
+        account_id, user_id=user_id, max_pages=3, adapter_factory=FakeItemsAdapter
+    )
+
+    assert result["status"] == sgs.sts.STATUS_DONE, result
+    assert result["stored"] == 1  # 列表没受影响
+    assert result["detail_done"] == 0
+    assert "详情获取失败" in result["note"]
+    db = SessionLocal()
+    try:
+        product = db.scalars(select(ShopProduct).where(ShopProduct.item_id == "I1")).one()
+        assert product.detail_json == ""  # 没补过就别写
+    finally:
+        db.close()
+
+
+def test_sdk_truncates_item_ids_to_batch_size(monkeypatch):
+    """SDK 层硬截断到 `SKU_BATCH_SIZE`（20 个会被服务端 500 挡回，实测）。"""
+    from apis.xhs_qianfan_apis import SKU_BATCH_SIZE, XHS_Qianfan_Apis
+
+    captured: dict = {}
+
+    class FakeResponse:
+        def json(self):
+            return {"code": 200, "success": True, "msg": "ok", "data": {"skusMap": {}}}
+
+    def fake_post(url, json=None, **kwargs):  # noqa: A002 - 对齐 requests.post 形态
+        captured["url"] = url
+        captured["body"] = json
+        return FakeResponse()
+
+    monkeypatch.setattr("apis.xhs_qianfan_apis.requests.post", fake_post)
+    ids = [f"{index:024x}" for index in range(15)]
+    success, _message, _payload = XHS_Qianfan_Apis("web_session=x").get_skus_by_item_ids(ids)
+
+    assert success is True
+    assert captured["url"].endswith("/api/edith/product/get_skus_by_item_ids")
+    assert SKU_BATCH_SIZE == 10
+    assert len(captured["body"]["itemIds"]) == 10
+    assert captured["body"]["itemIds"] == ids[:10]
+
+
+def test_missing_price_and_status_are_left_empty(tmp_path, monkeypatch):
+    _headers, account_id, user_id, SessionLocal = _setup(tmp_path, monkeypatch)
+    FakeItemsAdapter.pages = [
+        ([{"item_id": "I9", "item_name": "无价无状态", "card_type": 999}], 1, False)
+    ]
+
+    sgs.run_shop_goods_sync(account_id, user_id=user_id, max_pages=1, adapter_factory=FakeItemsAdapter)
+
+    db = SessionLocal()
+    try:
+        row = db.scalars(select(ShopProduct).where(ShopProduct.item_id == "I9")).one()
+        assert row.price == ""
+        assert row.status == ""  # 未知 card_type 不猜标签
+        assert row.stock is None and row.sales is None  # 缺值留空，不造 0
+    finally:
+        db.close()
+
+
+# --------------------------------------------------------------------------- #
+# 完整同步才删旧行
+# --------------------------------------------------------------------------- #
+def test_complete_sync_drops_rows_that_did_not_come_back(tmp_path, monkeypatch):
+    _headers, account_id, user_id, SessionLocal = _setup(tmp_path, monkeypatch)
+    shop_pk = _shop_pk(SessionLocal)
+    _seed_product(SessionLocal, shop_pk, "STALE")
+    FakeItemsAdapter.pages = [([_item("I1"), _item("I2")], 2, False)]
+
+    result = sgs.run_shop_goods_sync(
+        account_id, user_id=user_id, max_pages=3, adapter_factory=FakeItemsAdapter
+    )
+
+    assert result["removed"] == 1
+    db = SessionLocal()
+    try:
+        ids = set(db.scalars(select(ShopProduct.item_id)).all())
+        assert ids == {"I1", "I2"}
+    finally:
+        db.close()
+
+
+def test_partial_sync_never_drops_rows(tmp_path, monkeypatch):
+    """到页数上限 = 没翻完 → 一行都不许删。"""
+    _headers, account_id, user_id, SessionLocal = _setup(tmp_path, monkeypatch)
+    shop_pk = _shop_pk(SessionLocal)
+    _seed_product(SessionLocal, shop_pk, "STALE")
+    # 第 1 页说还有更多，但 max_pages=1 到顶了。
+    FakeItemsAdapter.pages = [([_item("I1")], 999, True)]
+
+    result = sgs.run_shop_goods_sync(
+        account_id, user_id=user_id, max_pages=1, adapter_factory=FakeItemsAdapter
+    )
+
+    assert result["complete"] is False
+    assert result["removed"] == 0
+    assert "保留既有行" in result["note"]
+    db = SessionLocal()
+    try:
+        ids = set(db.scalars(select(ShopProduct.item_id)).all())
+        assert "STALE" in ids
+    finally:
+        db.close()
+
+
+def test_incremental_empty_page_never_drops_rows(tmp_path, monkeypatch):
+    """**增量追平后平台回空页（complete=True）也一行都不许删**（§27.5，2026-09-22）。
+
+    增量下「本次未出现」的正确解释是「**没有新的商品**」，不是「商品都没了」——
+    旧实现在这条路上会走到 `complete=True` + `stored_ids=∅` ⇒ 把整个店铺的商品
+    清空。删除只允许发生在**全量、无时间窗**的同步里。
+    """
+    from backend.app.services.shop_binding_service import set_shop_state
+
+    _headers, account_id, user_id, SessionLocal = _setup(tmp_path, monkeypatch)
+    shop_pk = _shop_pk(SessionLocal)
+    _seed_product(SessionLocal, shop_pk, "EXISTING")
+    # 有同步历史 ⇒ auto 落成 incremental；平台一上来就回空页（没有新商品）。
+    db = SessionLocal()
+    try:
+        set_shop_state(db.get(PlatformAccount, account_id), goods_cursor_ms=1784157704000)
+        db.commit()
+    finally:
+        db.close()
+    FakeItemsAdapter.pages = []
+
+    result = sgs.run_shop_goods_sync(
+        account_id, user_id=user_id, max_pages=3, adapter_factory=FakeItemsAdapter
+    )
+
+    assert result["complete"] is True, "空页 = 平台没有更新的商品（翻完了）"
+    assert result["removed"] == 0, "增量同步删了行（会把整个店铺清空）"
+    db = SessionLocal()
+    try:
+        ids = set(db.scalars(select(ShopProduct.item_id)).all())
+        assert ids == {"EXISTING"}
+    finally:
+        db.close()
+
+
+def test_range_sync_keeps_out_of_range_rows(tmp_path, monkeypatch):
+    """**区间同步**：范围外的既有行保留不删（用户只让同步这个区间，没让删别的）。"""
+    _headers, account_id, user_id, SessionLocal = _setup(tmp_path, monkeypatch)
+    shop_pk = _shop_pk(SessionLocal)
+    _seed_product(SessionLocal, shop_pk, "OUT-OF-RANGE")
+    FakeItemsAdapter.pages = [([_item("I1")], 1, False)]
+
+    day_ms = 24 * 3600 * 1000
+    result = sgs.run_shop_goods_sync(
+        account_id, user_id=user_id, max_pages=3, adapter_factory=FakeItemsAdapter,
+        time_from_ms=1786584162000 - day_ms, time_to_ms=1786584162000 + day_ms,
+    )
+
+    assert result["removed"] == 0
+    db = SessionLocal()
+    try:
+        ids = set(db.scalars(select(ShopProduct.item_id)).all())
+        assert "OUT-OF-RANGE" in ids and "I1" in ids
+    finally:
+        db.close()
+
+
+# --------------------------------------------------------------------------- #
+# 2026-09-23 用户口径：增量 / 区间同步只补「条件区间内」的商品信息和详情
+# --------------------------------------------------------------------------- #
+def test_range_sync_does_not_fetch_details_for_out_of_window_items(tmp_path, monkeypatch):
+    """**区间同步：比结束日期更新的商品既不拉详情、也不落库**（用户口径
+    「增量同步只补条件区间内的商品信息和详情」）。"""
+    _headers, account_id, user_id, SessionLocal = _setup(tmp_path, monkeypatch)
+    window_to_ms = 1784082313000 + 1000  # 结束日：只比商品创建时间晚 1 秒
+    later = _item("LATER")
+    later["create_time"] = window_to_ms + 999999  # 比窗口上界还新（范围外）
+    in_window = _item("IN-WINDOW")
+    in_window["create_time"] = 1784082313000  # 在窗口内
+    FakeItemsAdapter.pages = [([later, in_window], 2, False)]
+    FakeItemsAdapter.skus_map = {
+        "LATER": [_sku("S-LATER")],
+        "IN-WINDOW": [_sku("S-IN")],
+    }
+
+    result = sgs.run_shop_goods_sync(
+        account_id, user_id=user_id, max_pages=3, adapter_factory=FakeItemsAdapter,
+        mode="full", time_to_ms=window_to_ms,
+    )
+
+    # 范围外的商品**详情请求一个都不该发**
+    fetched = {item_id for batch in FakeItemsAdapter.sku_batches for item_id in batch}
+    assert fetched == {"IN-WINDOW"}, f"范围外的商品被拉了详情：{fetched}"
+    assert result["detail_done"] == 1
+
+    db = SessionLocal()
+    try:
+        ids = set(db.scalars(select(ShopProduct.item_id)).all())
+        assert ids == {"IN-WINDOW"}, f"范围外的商品被落库了：{ids}"
+    finally:
+        db.close()
+
+
+def test_incremental_sync_does_not_fetch_details_for_items_behind_cursor(tmp_path, monkeypatch):
+    """**增量同步：比游标旧、被平台秒级窗口圈回来的商品不拉详情、不落库。**
+
+    平台的 `create_time_from` 单位是**秒**且按 `>=` 比较（DEF-045）⇒ 同一秒内
+    毫秒数更小的旧行也会被圈回来。那些行**不属于**本次增量范围。
+    """
+    from backend.app.services.shop_binding_service import set_shop_state
+
+    _headers, account_id, user_id, SessionLocal = _setup(tmp_path, monkeypatch)
+    cursor_ms = 1784082313000
+    db = SessionLocal()
+    try:
+        set_shop_state(db.get(PlatformAccount, account_id), goods_cursor_ms=cursor_ms)
+        db.commit()
+    finally:
+        db.close()
+
+    stale = _item("STALE")  # 比游标旧（被秒级窗口圈回的旧行）
+    stale["create_time"] = cursor_ms - 500
+    fresh = _item("FRESH")
+    fresh["create_time"] = cursor_ms + 1000
+    FakeItemsAdapter.pages = [([stale, fresh], 2, False)]
+    FakeItemsAdapter.skus_map = {
+        "STALE": [_sku("S-STALE")],
+        "FRESH": [_sku("S-FRESH")],
+    }
+
+    result = sgs.run_shop_goods_sync(
+        account_id, user_id=user_id, max_pages=3,
+        mode="incremental", adapter_factory=FakeItemsAdapter,
+    )
+
+    fetched = {item_id for batch in FakeItemsAdapter.sku_batches for item_id in batch}
+    assert fetched == {"FRESH"}, f"游标之前（范围外）的商品被拉了详情：{fetched}"
+    assert result["detail_done"] == 1
+
+    db = SessionLocal()
+    try:
+        ids = set(db.scalars(select(ShopProduct.item_id)).all())
+        assert ids == {"FRESH"}, f"游标之前的商品被落库了：{ids}"
+    finally:
+        db.close()
+
+
+def test_rate_limit_stops_the_page_loop(tmp_path, monkeypatch):
+    _headers, account_id, user_id, _SessionLocal = _setup(tmp_path, monkeypatch)
+    LIMITER["impl"] = DenyLimiter()
+
+    result = sgs.run_shop_goods_sync(
+        account_id, user_id=user_id, max_pages=3, adapter_factory=FakeItemsAdapter
+    )
+
+    assert FakeItemsAdapter.calls == []
+    assert result["status"] == sgs.sts.STATUS_DONE  # 不是异常，是「本次到此为止」
+    assert "限流" in result["note"]
+
+
+def test_page_cap_bounds_the_run(tmp_path, monkeypatch):
+    _headers, account_id, user_id, _SessionLocal = _setup(tmp_path, monkeypatch)
+    FakeItemsAdapter.pages = [
+        ([_item("I1")], 999, True),
+        ([_item("I2")], 999, True),
+        ([_item("I3")], 999, True),
+    ]
+
+    sgs.run_shop_goods_sync(
+        account_id, user_id=user_id, max_pages=2, adapter_factory=FakeItemsAdapter
+    )
+
+    assert len(FakeItemsAdapter.calls) == 2
+
+
+def test_stops_early_when_stored_reaches_total(tmp_path, monkeypatch):
+    _headers, account_id, user_id, _SessionLocal = _setup(tmp_path, monkeypatch)
+    FakeItemsAdapter.pages = [([_item("I1")], 1, True)]
+
+    result = sgs.run_shop_goods_sync(
+        account_id, user_id=user_id, max_pages=20, adapter_factory=FakeItemsAdapter
+    )
+
+    assert result["complete"] is True
+    assert len(FakeItemsAdapter.calls) == 1
+
+
+# --------------------------------------------------------------------------- #
+# 店铺解析 + 凭据失效
+# --------------------------------------------------------------------------- #
+def test_missing_binding_fails_without_touching_the_platform(tmp_path, monkeypatch):
+    _headers, account_id, user_id, _SessionLocal = _setup(tmp_path, monkeypatch, with_binding=False)
+
+    result = sgs.run_shop_goods_sync(
+        account_id, user_id=user_id, max_pages=3, adapter_factory=FakeItemsAdapter
+    )
+
+    assert result["status"] == sgs.sts.STATUS_FAILED
+    assert "QIANFAN_BINDING_REQUIRED" in result["error"]
+    assert FakeItemsAdapter.calls == []
+
+
+def test_shop_unresolved_fails_and_invents_nothing(tmp_path, monkeypatch):
+    """解不出店铺 → 任务失败且**一行都不编**（`shop_products.shop_id_fk` 是 NOT NULL）。
+
+    ⚠️ **被取代的旧断言（原句保留）**：本用例原名
+    `test_binding_without_shop_entity_fails_and_invents_nothing`，断言
+    `"SHOP_UNRESOLVED" in result["error"]`。那个 code 存在的理由，是旧模型里
+    **「有绑定行、但绑定的 `shop_id_fk` 为空」**是一个**独立状态**
+    （`shop_account_bindings` 一行 + 一个 NULL 外键）。
+
+    2026-09-22 `shop_account_bindings` 整表移除后，「账号有没有店铺」**就是**
+    `platform_accounts.shop_id_fk` —— 「没绑店」与「解不出店」成了**同一个状态**，
+    再也分不出第二种，所以 `SHOP_UNRESOLVED` 被 `QIANFAN_BINDING_REQUIRED` 取代
+    （见设计 13 §17.8 的修订；任务分解文档里的旧 code 按「被取代」标注）。
+    """
+    _headers, account_id, user_id, SessionLocal = _setup(tmp_path, monkeypatch, shop_id_fk=False)
+
+    result = sgs.run_shop_goods_sync(
+        account_id, user_id=user_id, max_pages=3, adapter_factory=FakeItemsAdapter
+    )
+
+    assert result["status"] == sgs.sts.STATUS_FAILED
+    assert "QIANFAN_BINDING_REQUIRED" in result["error"]
+    assert FakeItemsAdapter.calls == [], "解不出店铺时一个平台请求都不该发"
+    db = SessionLocal()
+    try:
+        assert db.scalar(select(ShopProduct.id)) is None  # 没编出任何一行
+    finally:
+        db.close()
+
+
+def test_invalid_credential_marks_shop_state_but_keeps_products(tmp_path, monkeypatch):
+    _headers, account_id, user_id, SessionLocal = _setup(tmp_path, monkeypatch)
+    shop_pk = _shop_pk(SessionLocal)
+    _seed_product(SessionLocal, shop_pk, "KEEP-ME")
+
+    result = sgs.run_shop_goods_sync(
+        account_id, user_id=user_id, max_pages=3, adapter_factory=InvalidCredentialAdapter
+    )
+
+    assert result["status"] == sgs.sts.STATUS_FAILED
+    db = SessionLocal()
+    try:
+        account = db.get(PlatformAccount, account_id)
+        #: 千帆侧状态已从绑定行搬到 `account.shop_state`（2026-09-22）。
+        assert get_shop_state(account)["status"] == "invalid"  # 页面的「重新绑定」提示据此接管
+        # 登录态过期 ≠ 商品下架。
+        assert db.scalars(select(ShopProduct.item_id)).all() == ["KEEP-ME"]
+    finally:
+        db.close()
+
+
+# --------------------------------------------------------------------------- #
+# API：防重 / 鉴权 / 参数 / 状态
+# --------------------------------------------------------------------------- #
+def test_second_trigger_reuses_the_active_task(tmp_path, monkeypatch):
+    headers, account_id, _user_id, SessionLocal = _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(sgs, "_run_in_thread", lambda *a, **k: None)
+
+    first = client.post(
+        "/api/xhs/qianfan/sync-shop-goods",
+        json={"platform_account_id": account_id},
+        headers=headers,
+    )
+    assert first.status_code == 200, first.text
+    second = client.post(
+        "/api/xhs/qianfan/sync-shop-goods",
+        json={"platform_account_id": account_id},
+        headers=headers,
+    )
+    assert second.status_code == 200, second.text
+
+    assert first.json()["task_id"] == second.json()["task_id"]
+    assert first.json()["task_type"] == "xhs_shop_goods_sync"
+    db = SessionLocal()
+    try:
+        rows = db.scalars(
+            select(Task).where(Task.task_type == sgs.sts.SHOP_GOODS_SYNC_TASK_TYPE)
+        ).all()
+        assert len(rows) == 1
+    finally:
+        db.close()
+
+
+def test_unbound_account_is_400(tmp_path, monkeypatch):
+    headers, account_id, _user_id, _SessionLocal = _setup(tmp_path, monkeypatch, with_binding=False)
+
+    response = client.post(
+        "/api/xhs/qianfan/sync-shop-goods",
+        json={"platform_account_id": account_id},
+        headers=headers,
+    )
+
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"]["code"] == "QIANFAN_BINDING_REQUIRED"
+
+
+def test_other_users_account_is_404(tmp_path, monkeypatch):
+    _headers, account_id, _user_id, _SessionLocal = _setup(tmp_path, monkeypatch)
+    other = client.post("/api/auth/register", json={"username": "intruder", "password": "secret123"})
+    other_headers = {"Authorization": f"Bearer {other.json()['access_token']}"}
+
+    response = client.post(
+        "/api/xhs/qianfan/sync-shop-goods",
+        json={"platform_account_id": account_id},
+        headers=other_headers,
+    )
+    assert response.status_code == 404
+
+
+def test_out_of_range_params_are_rejected(tmp_path, monkeypatch):
+    headers, account_id, _user_id, _SessionLocal = _setup(tmp_path, monkeypatch)
+
+    # §21：`21` 现在**合法**（上限已放到 `ABSOLUTE_PAGE_CAP=500`）。
+    for body in ({"max_pages": 0}, {"max_pages": 501}, {"page_size": 0}, {"page_size": 101}):
+        response = client.post(
+            "/api/xhs/qianfan/sync-shop-goods",
+            json={"platform_account_id": account_id, **body},
+            headers=headers,
+        )
+        assert response.status_code == 422, (body, response.text)
+
+
+def test_status_endpoint_is_idle_then_reports_the_result(tmp_path, monkeypatch):
+    headers, account_id, user_id, _SessionLocal = _setup(tmp_path, monkeypatch)
+    FakeItemsAdapter.pages = [([_item("I1")], 1, False)]
+
+    idle = client.get(
+        f"/api/xhs/qianfan/sync-shop-goods/status?platform_account_id={account_id}",
+        headers=headers,
+    )
+    assert idle.status_code == 200
+    assert idle.json()["status"] == "idle"
+
+    sgs.run_shop_goods_sync(
+        account_id, user_id=user_id, max_pages=1, adapter_factory=FakeItemsAdapter
+    )
+
+    after = client.get(
+        f"/api/xhs/qianfan/sync-shop-goods/status?platform_account_id={account_id}",
+        headers=headers,
+    )
+    body = after.json()
+    assert body["status"] == "idle"
+    assert body["last_result"]["status"] == sgs.sts.STATUS_DONE
+    assert body["last_result"]["progress"]["stored"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# 硬约束 C5：AST 守卫（按 Attribute 调用判定，不被文档字符串误伤）
+# --------------------------------------------------------------------------- #
+def test_service_never_calls_a_full_loop():
+    tree = ast.parse(inspect.getsource(sgs))
+    banned = {"get_all_items", "get_all_products", "iter_all_items"}
+    called = {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    assert not (called & banned), f"商品同步不得调用全量循环方法：{called & banned}"
+
+
+# --------------------------------------------------------------------------- #
+# v1.32（设计 13 §30.3）：筛选 / 排序九列 + 字段补足 pass
+# --------------------------------------------------------------------------- #
+def test_normalize_product_fills_list_columns(tmp_path, monkeypatch):
+    """九列逐字段断言：来源 raw_json 的键；缺值留空 / None，**不造 0**。"""
+    normalized = sgs.normalize_product(
+        {
+            "item_id": "I1",
+            "item_name": "编织地垫",
+            "article_no": "A-1",
+            "min_price": 1999,
+            "max_price": 2999,
+            "total_stock": 10,
+            "sale_qty_info": {"acc_sale_qty": 5, "sale_qty30": 2},
+            "card_type": 2,
+            "on_shelf_time": 1784084996000,
+            "off_shelf_time": None,
+            "create_time": 1784082313000,
+            "item_audit_time": 1784089999000,
+        }
+    )
+    assert normalized is not None
+    assert normalized["article_no"] == "A-1"
+    assert normalized["card_type"] == 2
+    assert normalized["price_min_fen"] == 1999 and normalized["price_max_fen"] == 2999
+    assert normalized["create_time_ms"] == 1784082313000
+    assert normalized["on_shelf_time_ms"] == 1784084996000
+    assert normalized["off_shelf_time_ms"] is None
+    assert normalized["last_audit_time_ms"] == 1784089999000
+    assert normalized["sales_30d"] == 2
+
+    # 缺值：价格 / 货号 / 状态都没有 ⇒ 空，不是 0（硬约束⑤）。
+    # ⚠️ card_type 例外：平台不给时按生命周期推导（真机 1974 条 0 命中 card_type）——
+    # 无上架时间 ⇒ 推导成「已下架」(3)，这是**有依据的推导**不是猜（§30.3.2）。
+    bare = sgs.normalize_product({"item_id": "I2", "item_name": "空的"})
+    assert bare["price_min_fen"] is None and bare["price_max_fen"] is None
+    assert bare["article_no"] == ""
+    assert bare["create_time_ms"] is None and bare["sales_30d"] is None
+    assert bare["card_type"] == 3
+    assert bare["status"] == "已下架"
+    # 没有主键就没有行的身份
+    assert sgs.normalize_product({"item_name": "没有 ID"}) is None
+
+
+def test_list_columns_are_backfilled_from_raw_json(tmp_path, monkeypatch):
+    """字段补足：老行（九列为空、raw_json 有值）→ 本地派生回填；**零平台请求**。"""
+    _headers, account_id, user_id, SessionLocal = _setup(tmp_path, monkeypatch)
+    FakeItemsAdapter.pages = [
+        (
+            [
+                _item(
+                    "I1",
+                    title="编织地垫",
+                    min_price=1999,
+                    max_price=2999,
+                    stock=10,
+                    sales=5,
+                    card_type=2,
+                )
+            ],
+            1,
+            False,
+        )
+    ]
+    result = sgs.run_shop_goods_sync(
+        account_id, user_id=user_id, max_pages=1, adapter_factory=FakeItemsAdapter
+    )
+    assert result["stored"] == 1
+
+    # 模拟「迁移前的老行」：九列被清空（raw_json 完好 = 真机存量行的形状）
+    db = SessionLocal()
+    try:
+        db.execute(
+            sa_text(
+                "UPDATE shop_products SET article_no='', card_type=NULL, price_min_fen=NULL,"
+                " price_max_fen=NULL, create_time_ms=NULL, on_shelf_time_ms=NULL,"
+                " off_shelf_time_ms=NULL, last_audit_time_ms=NULL, sales_30d=NULL"
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    # 同步任务的字段补足 pass 再跑一次：从 raw_json 本地回填（不打平台）
+    db = SessionLocal()
+    try:
+        shop_pk = db.scalar(select(Shop.id))
+        changed = sgs.backfill_list_columns(db, shop_pk)
+        assert changed == 1
+        row = db.scalars(select(ShopProduct).where(ShopProduct.item_id == "I1")).one()
+        assert row.article_no == "1056576341942"
+        assert row.price_min_fen == 1999 and row.price_max_fen == 2999
+        assert row.card_type == 2
+        assert row.on_shelf_time_ms == 1784084996000
+        assert row.last_audit_time_ms == 1784089999000
+        assert row.sales_30d == 3
+        assert row.create_time_ms == 1784082313000
+        assert FakeItemsAdapter.calls != [], "前面刚同步过（调用发生在同步，不发生在补足）"
+        calls_before = len(FakeItemsAdapter.calls)
+        sgs.backfill_list_columns(db, shop_pk)
+        assert len(FakeItemsAdapter.calls) == calls_before, "字段补足不得打平台"
+    finally:
+        db.close()
+
+
+def test_backfill_respects_the_cap(tmp_path, monkeypatch):
+    """字段补足有界：每轮最多 `LIST_BACKFILL_CAP` 行，多轮收敛。"""
+    _headers, account_id, user_id, SessionLocal = _setup(tmp_path, monkeypatch)
+    FakeItemsAdapter.pages = [([_item("I1"), _item("I2"), _item("I3")], 3, False)]
+    sgs.run_shop_goods_sync(
+        account_id, user_id=user_id, max_pages=1, adapter_factory=FakeItemsAdapter
+    )
+
+    db = SessionLocal()
+    try:
+        db.execute(
+            sa_text(
+                "UPDATE shop_products SET article_no='', card_type=NULL, price_min_fen=NULL,"
+                " price_max_fen=NULL, create_time_ms=NULL, on_shelf_time_ms=NULL,"
+                " off_shelf_time_ms=NULL, last_audit_time_ms=NULL, sales_30d=NULL"
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    db = SessionLocal()
+    try:
+        shop_pk = db.scalar(select(Shop.id))
+        assert sgs.backfill_list_columns(db, shop_pk, cap=1) == 1
+        assert sgs.backfill_list_columns(db, shop_pk, cap=1) == 1
+        assert sgs.backfill_list_columns(db, shop_pk, cap=1) == 1
+        assert sgs.backfill_list_columns(db, shop_pk, cap=1) == 0, "补完就该收敛"
+        filled = db.scalar(
+            sa_text("SELECT COUNT(*) FROM shop_products WHERE price_min_fen IS NOT NULL")
+        )
+        assert filled == 3
+    finally:
+        db.close()
+
+
+def test_sync_records_products_total_and_synced_at_in_shop_state(tmp_path, monkeypatch):
+    """同步把平台总数 + 同步时间写进 `shop_state`（页面「本地台账 N 件 · 同步于 X」）。"""
+    _headers, account_id, user_id, SessionLocal = _setup(tmp_path, monkeypatch)
+    FakeItemsAdapter.pages = [([_item("I1")], 1, False)]
+    sgs.run_shop_goods_sync(
+        account_id, user_id=user_id, max_pages=1, adapter_factory=FakeItemsAdapter
+    )
+
+    db = SessionLocal()
+    try:
+        account = db.get(PlatformAccount, account_id)
+        state = get_shop_state(account)
+        assert state["products_total"] == 1
+        assert state["products_synced_at"], "同步时间必须落 state（页面据此展示时效）"
+    finally:
+        db.close()

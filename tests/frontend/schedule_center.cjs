@@ -1,0 +1,498 @@
+/**
+ * 行为验证：定时任务中心（设计 15，2026-09-24；2026-09-24 验收修正为两页签）。
+ *
+ * 盯的四件事（源码断言 / 自我印证都证明不了）：
+ *
+ * 1. **两页签口径**：任务中心只剩「任务列表」+「任务日志」；「一次性任务」页签与
+ *    「执行到期任务」按钮已按用户验收口径移除（补跑由调度器自动进行）。
+ * 2. **at 与周期合并为单一列表**：任务列表渲染**全部** scheduled_jobs 行（不按
+ *    trigger_type 拆两个页签/两个表格），列一致；操作列按状态区分 —— completed
+ *    （只有 at 会到）不给暂停/恢复。
+ * 3. **前后端 cron 口径一致**：预设「每周一、五 9:00」的 cron 必须是
+ *    `0 0 9 * * 0,4`（APScheduler 0=周一）。旧 auto_tasks 的 isoweekday
+ *    （1=周一）口径一旦混回前端，调度就会整体差一天。
+ * 4. **cron 默认值与后端同值**：`emptyCronDraft()` 产出 `0 0 9 * * *`，
+ *    与后端 AutoTask 惰性默认、`/schedule/jobs` 默认 schedule 逐字符一致。
+ *
+ * 做法与 note_filters.cjs 同源：esbuild 打包**真实**模块直接调用
+ * （纯函数模块，不需要 antd 桩）；页面结构断言读**真实页面源文件**。
+ *
+ * 运行：
+ *   <node> tests/frontend/schedule_center.cjs        # 期望全 PASS
+ *   SCHEDULE_MUTATE=dow      <node> …                # 期望 FAIL
+ *   SCHEDULE_MUTATE=label    <node> …                # 期望 FAIL
+ *   SCHEDULE_MUTATE=atlabel  <node> …                # 期望 FAIL
+ *   SCHEDULE_MUTATE=skipped  <node> …                # 期望 FAIL
+ *   SCHEDULE_MUTATE=defaultcron <node> …             # 期望 FAIL
+ *   SCHEDULE_MUTATE=manual   <node> …                # 期望 FAIL
+ *   SCHEDULE_MUTATE=fulllabel <node> …               # 期望 FAIL
+ *   SCHEDULE_MUTATE=typecol  <node> …                # 期望 FAIL
+ *   SCHEDULE_MUTATE=targetcol <node> …               # 期望 FAIL（调用目标丢中文名）
+ *   SCHEDULE_MUTATE=width70  <node> …                # 期望 FAIL（详情弹窗宽度漂移）
+ *   SCHEDULE_MUTATE=accountscope <node> …            # 期望 FAIL（账号多选退回仅编辑态）
+ */
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+
+const PROJECT = path.resolve(__dirname, "..", "..");
+const esbuild = require(path.join(PROJECT, "frontend/node_modules/esbuild"));
+const MODULE_TS = path.join(PROJECT, "frontend/src/lib/schedule.ts");
+const CRON_MODULE_TS = path.join(PROJECT, "frontend/src/lib/cron-builder.ts");
+const PAGE_TSX = path.join(PROJECT, "frontend/src/pages/tasks/task-center-page.tsx");
+const API_TS = path.join(PROJECT, "frontend/src/lib/api.ts");
+
+const MUTATE = process.env.SCHEDULE_MUTATE || "";
+
+// 变异锚点（必须是源码里**唯一**的串；行尾归一化防 CRLF 失配）
+// ⚠️ 锚点必须逐字符等于源码（含缩进）—— 对象字面量里的键是**顶格**的，
+//    曾经误写 2 空格缩进 ⇒ 锚点永不命中、变异静默失效（假通过）。见 DEF-063。
+const RESERVED = {
+  // 每周预设的 dow 用回 isoweekday（1,5）⇒ 调度整体差一天
+  dow: `{ label: "每周一、五 9:00", cron: "0 0 9 * * 0,4" },`,
+  // 错过策略文案漂移
+  label: `once: "执行一次",`,
+  // 类型**简写**文案漂移（R15：列表列用简写，漂了就会被当成别的档）
+  atlabel: `at: "定时",`,
+  // 日志状态四档少一档（skipped 没了 ⇒ 撞退避门的执行在 UI 上看不出来）
+  skipped: `skipped: { color: "warning", label: "已跳过（退避中）" },`,
+  // cron 构建器默认值从 9 点漂到 12 点（与后端默认不再同值）
+  defaultcron: `hour: { mode: "value", value: "9" },`,
+  // R14/R15：三档简写表的「手动」漂移
+  manual: `  manual: "手动",\n  cron: "Cron",`,
+  // R15：全称表漂移（表单会跟着漂）
+  fulllabel: `  cron: "Cron 周期",\n  at: "定时一次",`,
+  // R16：类型列偷偷包回 Tag（列表该是纯文本）
+  typecol: `render: (type: string) => <Text>{triggerTypeLabel(type)}</Text>,`,
+  // R19 后续：详情弹窗宽度退回固定 720（脱离 70% 口径）
+  width70: `      width="70%"\n      destroyOnClose`,
+  // 调用目标列退回「只有代码键」的单行（中文名丢掉）
+  targetcol: `          <Text>{targetNames[key] ?? "-"}</Text>\n          <Text code type="secondary" style={{ fontSize: 12 }}>`,
+  // R22（物理删除）反向变异：把分组字段偷偷加回 schedule 模块 ⇒ 必须被守卫抓住
+  groupfield: `export type TriggerType =`,
+  // R22 反向变异：详情弹窗快照块把「分组」行加回来
+  groupsnapshot: `                <Descriptions.Item label="调用目标">`,
+  // DEF-066 反向变异：账号多选退回「仅编辑态」⇒ 新建态又没有账号多选了
+  // （手抄 account_ids 过不了归属校验 ⇒ 用户建不出账号维度任务）
+  accountscope: `(job?.params_editable ?? selectedTarget.params_editable)?.includes("account_ids")`,
+};
+
+const MUTATE_TO = {
+  dow: `{ label: "每周一、五 9:00", cron: "0 0 9 * * 1,5" },`,
+  label: `once: "合并执行",`,
+  atlabel: `at: "定时任务",`,
+  skipped: `skipped: { color: "warning", label: "已跳过" },`,
+  defaultcron: `hour: { mode: "value", value: "12" },`,
+  manual: `  manual: "定时任务",\n  cron: "Cron",`,
+  fulllabel: `  cron: "周期任务",\n  at: "定时一次",`,
+  typecol: `render: (type: string) => <Tag>{triggerTypeLabel(type)}</Tag>,`,
+  width70: `      width={720}\n      destroyOnClose`,
+  targetcol: `          <Text code style={{ fontSize: 12 }}>`,
+  // R22 反向变异：在模块里复活分组常量（守卫应立刻红）
+  groupfield: `export const JOB_GROUP_LABELS: Record<string, string> = { DEFAULT: "默认分组", SYSTEM: "系统分组" };\n\nexport type TriggerType =`,
+  // R22 反向变异：快照块加回「分组」项
+  groupsnapshot: `                <Descriptions.Item label="分组">{String(snapshot.job_group ?? "")}</Descriptions.Item>\n                <Descriptions.Item label="调用目标">`,
+  // DEF-066 反向变异：账号多选退回编辑态专属（新建态丢失多选）
+  accountscope: `job?.params_editable?.includes("account_ids")`,
+};
+
+let failures = 0;
+function check(name, condition, detail) {
+  if (condition) {
+    console.log(`PASS ${name}`);
+  } else {
+    failures += 1;
+    console.log(`FAIL ${name}${detail ? ` — ${detail}` : ""}`);
+  }
+}
+
+// 锚点归属：每个锚点只在其**所在文件**里替换。两个插件（schedule.ts /
+// cron-builder.ts）都要跑，若让任一插件对「不属于自己」的锚点硬失败，
+// 变异就永远命中不了（假通过）。见 DEF-063。
+const RESERVED_FILE = {
+  dow: CRON_MODULE_TS,
+  defaultcron: CRON_MODULE_TS,
+  label: MODULE_TS,
+  atlabel: MODULE_TS,
+  skipped: MODULE_TS,
+  manual: MODULE_TS,
+  fulllabel: MODULE_TS,
+  typecol: PAGE_TSX,
+  targetcol: PAGE_TSX,
+  width70: path.join(PROJECT, "frontend/src/components/schedule/job-log-detail-modal.tsx"),
+  groupfield: MODULE_TS,
+  groupsnapshot: path.join(PROJECT, "frontend/src/components/schedule/job-log-detail-modal.tsx"),
+  accountscope: path.join(PROJECT, "frontend/src/components/schedule/job-form-modal.tsx"),
+};
+
+// 页面源码不参与 esbuild 打包（用 fs 读原文做结构断言）⇒ 页面侧变异单独改文件。
+// ⚠️ 必须**就地改、跑完还原**，否则变异会污染工作区（返回前无条件复原）。
+const pageMutations = [];
+function applyPageMutation() {
+  if (!MUTATE) return;
+  const targetFile = RESERVED_FILE[MUTATE];
+  // 只处理「不参与 esbuild 打包」的文件（页面 / 弹窗）；模块侧交给插件
+  if (!targetFile || targetFile === MODULE_TS || targetFile === CRON_MODULE_TS) return;
+  const original = fs.readFileSync(targetFile, "utf8");
+  // ⚠️ 源码是 CRLF ⇒ 锚点（含 \n）必须先归一化再比对，否则永远「found 不到」
+  //    （曾在 targetcol 上复现：锚点肉眼一致却报 anchor not found）。
+  const normalized = original.replace(/\r\n/g, "\n");
+  if (!normalized.includes(RESERVED[MUTATE])) {
+    console.log(`FAIL mutate anchor not found: ${MUTATE} in ${path.basename(targetFile)}`);
+    process.exit(1);
+  }
+  fs.writeFileSync(targetFile, normalized.replace(RESERVED[MUTATE], MUTATE_TO[MUTATE]));
+  pageMutations.push(() => fs.writeFileSync(targetFile, original));
+}
+function restorePageMutations() {
+  while (pageMutations.length) pageMutations.pop()();
+}
+
+function mutatePlugin(targetFile) {
+  return {
+    name: "mutate",
+    setup(build) {
+      build.onLoad({ filter: new RegExp(`${path.basename(targetFile)}$`) }, () => {
+        let source = fs.readFileSync(targetFile, "utf8").replace(/\r\n/g, "\n");
+        if (MUTATE && RESERVED[MUTATE] && RESERVED_FILE[MUTATE] === targetFile) {
+          if (!source.includes(RESERVED[MUTATE])) {
+            console.log(`FAIL mutate anchor not found: ${MUTATE} in ${path.basename(targetFile)}`);
+            process.exit(1);
+          }
+          source = source.replace(RESERVED[MUTATE], MUTATE_TO[MUTATE]);
+        }
+        return { contents: source, loader: "ts" };
+      });
+    },
+  };
+}
+
+async function main() {
+  applyPageMutation(); // 页面侧变异（跑完在 finally 里无条件还原）
+  try {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "schedule-center-"));
+  const bundled = await esbuild.build({
+    entryPoints: [MODULE_TS],
+    bundle: true,
+    write: false,
+    format: "cjs",
+    platform: "node",
+    target: "node18",
+    logLevel: "silent",
+    plugins: [mutatePlugin(CRON_MODULE_TS), mutatePlugin(MODULE_TS)],
+  });
+  const outFile = path.join(tmpDir, "schedule.bundle.cjs");
+  fs.writeFileSync(outFile, bundled.outputFiles[0].text);
+  const schedule = require(outFile);
+
+  const {
+    triggerTypeLabel,
+    triggerTypeFullLabel,
+    misfirePolicyLabel,
+    concurrentLabel,
+    jobStatusTag,
+    logStatusTag,
+    logTriggerLabel,
+    triggerSummary,
+    JOB_GROUP_LABELS,
+  } = schedule;
+
+  // R22 守卫：分组字段已**物理删除** ⇒ 模块不该再有它的任何导出。
+  // （正向断言在页尾守卫组；这条紧贴模块加载，让 groupfield 反向变异**必红**。）
+  check("R22 模块无 JOB_GROUP_LABELS 导出", JOB_GROUP_LABELS === undefined);
+
+  if (typeof triggerSummary !== "function") {
+    console.error("FATAL 未导出 schedule 模块 —— 若已重命名，请同步更新本脚本");
+    process.exit(1);
+  }
+
+  // --------------------------------------------------------------- //
+  // 1. 文案字面期望表（用户契约，不从模块里读 —— 读了就是自我印证）
+  // --------------------------------------------------------------- //
+  check("misfire.fire_now=立即执行", misfirePolicyLabel("fire_now") === "立即执行");
+  check("misfire.once=执行一次", misfirePolicyLabel("once") === "执行一次");
+  check("misfire.discard=放弃执行", misfirePolicyLabel("discard") === "放弃执行");
+  // R15：列表类型用**简写**（用户口径「尽量简写」）；全称给表单 / Tooltip
+  check("trigger.manual=手动", triggerTypeLabel("manual") === "手动");
+  check("trigger.cron=Cron", triggerTypeLabel("cron") === "Cron");
+  check("trigger.at=定时", triggerTypeLabel("at") === "定时");
+  check("trigger 全称 manual=手动执行", triggerTypeFullLabel("manual") === "手动执行");
+  check("trigger 全称 cron=Cron 周期", triggerTypeFullLabel("cron") === "Cron 周期");
+  check("trigger 全称 at=定时一次", triggerTypeFullLabel("at") === "定时一次");
+  check("trigger.interval 不再是一档（已并入 cron）", triggerTypeLabel("interval") === "interval");
+  check("jobStatus.active=运行中", jobStatusTag("active").label === "运行中");
+  check("jobStatus.completed=已完成", jobStatusTag("completed").label === "已完成");
+  check("logStatus.skiipped 存在且带退避说明", logStatusTag("skipped").label.includes("退避"));
+  check("logTrigger.manual=手动执行", logTriggerLabel("manual") === "手动执行");
+  check("concurrent.forbid=禁止并发", concurrentLabel("forbid") === "禁止并发");
+
+  // 触发器摘要：预设 cron 回中文，非预设回原文（不造第二个 cron 解释器）
+  check(
+    "triggerSummary 预设回中文",
+    triggerSummary({ trigger_type: "cron", cron_expression: "0 0 9 * * *" }) === "每天 9:00"
+  );
+  check(
+    "triggerSummary 非预设回原文",
+    triggerSummary({ trigger_type: "cron", cron_expression: "0 30 8 15 * *" }) === "0 30 8 15 * *"
+  );
+  // R14：manual 档没有触发器，摘要固定为「手动触发（不自动执行）」
+  check(
+    "triggerSummary manual 回「手动触发」",
+    triggerSummary({ trigger_type: "manual" }).includes("手动触发")
+  );
+
+  // --------------------------------------------------------------- //
+  // 2. cron 纯函数（与后端 6 位口径一致）
+  // --------------------------------------------------------------- //
+  const bundledCron = await esbuild.build({
+    entryPoints: [CRON_MODULE_TS],
+    bundle: true,
+    write: false,
+    format: "cjs",
+    platform: "node",
+    target: "node18",
+    logLevel: "silent",
+    plugins: [mutatePlugin(CRON_MODULE_TS), mutatePlugin(MODULE_TS)],
+  });
+  const cronOutFile = path.join(tmpDir, "cron.bundle.cjs");
+  fs.writeFileSync(cronOutFile, bundledCron.outputFiles[0].text);
+  const cron = require(cronOutFile);
+  const { CRON_PRESETS, buildCron, emptyCronDraft, parseCron, cronLooksSane } = cron;
+
+  check("默认草稿 = 0 0 9 * * *（与后端同值）", buildCron(emptyCronDraft()) === "0 0 9 * * *");
+  check("cronLooksSane 接受 6 位", cronLooksSane("0 0 9 * * *") === true);
+  check("cronLooksSane 拒绝 5 位", cronLooksSane("0 0 9 * *") === false);
+  check("parseCron 解析 6 位", parseCron("0 0 9 * * *") !== null);
+  check("parseCron 拒绝 5 位", parseCron("0 0 9 * *") === null);
+  const weekly = parseCron("0 0 9 * * 0,4");
+  check("parseCron 周字段识别为 list", weekly !== null && weekly.week.mode === "list" && weekly.week.value === "0,4");
+
+  // 前后端口径契约：预设「每周一、五」必须是 APScheduler dow（0=周一）
+  const weeklyPreset = CRON_PRESETS.find((item) => item.label === "每周一、五 9:00");
+  check("每周预设 dow=0,4（0=周一，非 isoweekday）", weeklyPreset && weeklyPreset.cron === "0 0 9 * * 0,4");
+  const dailyPreset = CRON_PRESETS.find((item) => item.label === "每天 9:00");
+  check("每天预设 = 0 0 9 * * *", dailyPreset && dailyPreset.cron === "0 0 9 * * *");
+
+  // --------------------------------------------------------------- //
+  // 3. 页面结构（真实源文件）
+  // --------------------------------------------------------------- //
+  const page = fs.readFileSync(PAGE_TSX, "utf8");
+  // 剥注释后的页面源码：`in source` 型断言一律用它（DEF-056 教训：解释性注释会
+  // 命中自己写的关键词）。定义在此处，供第 3 / 6 / 9 节共用。
+  const pageCode = page.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  // schedule 模块源码（R22 物理删除守卫用；同样剥注释）
+  const scheduleCode = fs
+    .readFileSync(MODULE_TS, "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/[^\n]*/g, "");
+  // 「任务列表」label 带计数后缀（模板字符串）；「任务日志」是普通字符串
+  check("页签「任务列表」存在", page.includes("label: `任务列表"));
+  check("页签「任务日志」存在", page.includes('label: "任务日志"'));
+  // 验收口径 ①：「一次性任务」页签与「执行到期任务」按钮已移除
+  check("「一次性任务」页签已移除", !page.includes("一次性任务"));
+  check("「执行到期任务」按钮已移除", !page.includes("执行到期任务"));
+  check("页面不再 import runDueTasks", !page.includes("runDueTasks"));
+  // 验收口径 ②：at 与周期合并为单一列表（不再按 trigger_type 过滤渲染）
+  check("任务列表渲染全部行", page.includes("dataSource={jobs}"));
+  check("不再按 trigger_type 拆列表", !page.includes('trigger_type === "at"') && !page.includes('trigger_type !== "at"'));
+  // 操作列按状态区分：completed（只有 at 会到）不给暂停/恢复
+  check("completed 行不给暂停/恢复", page.includes('record.status !== "completed"'));
+  // ⚠️ 原断言「builtin 行删除禁用」（`page.includes("record.is_builtin")`）**已被推翻**：
+  //    用户口径「所有任务都是内置的」⇒ 内置不再是特权，删除一律放开。原文保留：
+  //        check("builtin 行删除禁用", page.includes("record.is_builtin"));
+  check("旧调度状态端点已不在页面", !page.includes("/tasks/scheduler/status"));
+
+  const api = fs.readFileSync(API_TS, "utf8");
+  check("api 指向 /schedule/status", api.includes('"/schedule/status"'));
+  check("api 不再有 fetchSchedulerStatus", !api.includes("fetchSchedulerStatus"));
+  check("api 有 cron 校验函数", api.includes("export async function validateCron"));
+  check("api 有日志清空函数", api.includes("export async function cleanScheduleLogs"));
+
+  // --------------------------------------------------------------- //
+  // 4. 任务类型选择器（R14：三档 = 手动执行 / Cron 周期 / 定时一次）
+  // --------------------------------------------------------------- //
+  const fields = fs.readFileSync(
+    path.join(PROJECT, "frontend/src/components/schedule/schedule-fields.tsx"),
+    "utf8"
+  );
+  // R15/R16：三档文案不再硬编码在表单里 —— 改判「走同源表」（见第 8 节）
+  check("任务类型选择器三档齐全（manual/cron/at）", fields.includes('value="manual"') && fields.includes('value="cron"') && fields.includes('value="at"'));
+  // 验收口径 R14：「间隔周期」并入 Cron，「间隔周期」字样不再出现在选择器
+  check("「间隔周期」已从选择器移除", !fields.includes('value="interval"'));
+  // 剥掉注释再判（注释里解释「字段已删除」不算代码残留 —— DEF-056 教训：
+  // `in source` 型断言必须先剥注释，否则会被自己写的解释性注释命中）
+  const fieldsCode = fields.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  check("interval 秒数输入区已移除", !fieldsCode.includes("interval_seconds"));
+  check("新建默认 cron（每天 9:00）", fields.includes("DEFAULT_CRON = CRON_PRESETS[2].cron"));
+
+  // --------------------------------------------------------------- //
+  // 5. 自定义参数：账号多选（用户 2026-09-24 口径，白名单驱动）
+  // --------------------------------------------------------------- //
+  const form = fs.readFileSync(
+    path.join(PROJECT, "frontend/src/components/schedule/job-form-modal.tsx"),
+    "utf8"
+  );
+  // DEF-066：账号多选按 params_editable 驱动，且**建 / 改同款**（原 `job?.params_editable`
+  // 仅在编辑态出现 ⇒ 新建态只能手抄 JSON，归属校验上线后必然 400，控件必须跟上）
+  check(
+    "账号多选按 params_editable 驱动（建/改同款）",
+    form.includes('(job?.params_editable ?? selectedTarget.params_editable)?.includes("account_ids")')
+  );
+  check("账号多选控件存在", form.includes('mode="multiple"'));
+  check("提交只发白名单键 account_ids", form.includes("params = { account_ids: accountIds }"));
+  check("账号下拉只展示账号名称", form.includes("account.nickname ||") && !form.includes("sub_type"));
+
+  // --------------------------------------------------------------- //
+  // 6. 列表列口径（用户 2026-09-24：撤下次/上次运行，加任务类型）
+  // --------------------------------------------------------------- //
+  check("任务列表有「任务类型」列", page.includes('"任务类型"'));
+  check("不再展示「下次运行」列", !page.includes('"下次运行"'));
+  check("不再展示「上次运行」列", !page.includes('"上次运行"'));
+  // 日志筛选：任务类型下拉（默认「全部任务」）+ 任务下拉，均为 antd Select
+  check("日志有任务类型下拉（默认全部任务）", page.includes("setLogTriggerType") && page.includes('label: "全部任务"'));
+  check("日志任务筛选用 antd Select", !page.includes("<select"));
+  check("执行账号列不在列表展示", !page.includes('"执行账号"'));
+
+  // --------------------------------------------------------------- //
+  // 7. 任务日志表列收敛为 6 项（R13，2026-09-24 用户口径）
+  //    任务名称 / 任务类型 / 状态 / 触发方式 / 开始执行时间 / 任务进度
+  //    其余信息全在详情弹窗。
+  // --------------------------------------------------------------- //
+  const logSection = page.slice(page.indexOf("const logColumns"), page.indexOf("const jobKeyOptions"));
+  check("日志表有「任务名称」列", logSection.includes('title: "任务名称"'));
+  check("日志表有「任务类型」列（快照口径）", logSection.includes('title: "任务类型"') && logSection.includes("job_trigger_type"));
+  check("日志表有「状态」列", logSection.includes('title: "状态"'));
+  check("日志表有「触发方式」列", logSection.includes('title: "触发方式"'));
+  check("日志表有「开始执行时间」列", logSection.includes('title: "开始执行时间"'));
+  // R13：一列合并「任务进度 + 耗时或异常」，进度用 Progress 进度条渲染
+  check("日志表有「任务进度」列", logSection.includes('title: "任务进度"'));
+  check("任务进度用 Progress 进度条渲染", logSection.includes("<Progress") && logSection.includes("percent={"));
+  check("失败显异常 / 成功显耗时", logSection.includes("exception_info") && logSection.includes("duration_ms"));
+  // 已移出列表的列（全部进详情弹窗）
+  check("日志表不再单列「触发器」", !logSection.includes('title: "触发器"'));
+  check("日志表不再单列「错过策略」", !logSection.includes('title: "错过策略"'));
+  check("日志表不再单列「并发」", !logSection.includes('title: "并发"'));
+  check("日志表不再单列「耗时」", !logSection.includes('title: "耗时"'));
+  check("日志表不再单列「异常」", !logSection.includes('title: "异常"'));
+  // 日志详情弹窗（配置快照 + 明细 + 被移出列表的字段都在这里）
+  check("日志表有「详情」操作", page.includes("setDetailLog"));
+  const detail = fs.readFileSync(
+    path.join(PROJECT, "frontend/src/components/schedule/job-log-detail-modal.tsx"),
+    "utf8"
+  );
+  check("日志详情弹窗展示配置快照", detail.includes("config_snapshot"));
+  check("日志详情弹窗展示任务进度", detail.includes("<Progress") && detail.includes("log.progress"));
+  check("日志详情弹窗含触发器/错过策略/并发", detail.includes("triggerSummary") && detail.includes("misfirePolicyLabel") && detail.includes("concurrentLabel"));
+
+  // --------------------------------------------------------------- //
+  // 8. R16（2026-09-24 用户口径）：任务类型**不用 Tag**，纯文本渲染；
+  //    且表单三档标签与列表文案**同源一表**（不许各拼各的）。
+  // --------------------------------------------------------------- //
+  // 任务列表「任务类型」列：纯 Text，不得包 Tag
+  const colSec = (section, title) => {
+    const i = section.indexOf(`title: "${title}"`);
+    return i < 0 ? "" : section.slice(i, i + 400);
+  };
+  const listTypeCol = colSec(page.slice(0, page.indexOf("const logColumns")), "任务类型");
+  check("任务列表类型列用纯文本（R16 不用 Tag）", listTypeCol.includes("<Text>") && !listTypeCol.includes("<Tag>"));
+  const logTypeCol = colSec(logSection, "任务类型");
+  check("日志表类型列用纯文本（R16 不用 Tag）", logTypeCol.includes("<Text>") && !logTypeCol.includes("<Tag>"));
+  // 表单三档标签走同源表：不得再出现硬编码的中文三档
+  check(
+    "表单三档标签与列表同源（triggerTypeFullLabel）",
+    fields.includes('triggerTypeFullLabel("manual")') &&
+      fields.includes('triggerTypeFullLabel("cron")') &&
+      fields.includes('triggerTypeFullLabel("at")')
+  );
+  check(
+    "表单不再硬编码三档全称",
+    !/<Radio\.Button value="manual">手动执行</.test(fields)
+  );
+  // 日志筛选不得再出现已退役的 interval 档
+  check("日志类型筛选已无 interval 档", !page.includes('value: "interval"'));
+
+  // --------------------------------------------------------------- //
+  // 9. R18 / R19 / R20（2026-09-24 用户口径）
+  //    R18：调用目标支持全部目标（含已用过的）；R19：日志详情弹窗两块布局；
+  //    R20：新建任务弹窗去掉「分组」。
+  // --------------------------------------------------------------- //
+  // R18-①：前端不再硬编码可建目标表（旧 CREATABLE_JOB_KEYS 只有 1 项）
+  check("R18 调用目标不再硬编码 CREATABLE_JOB_KEYS", !form.includes("CREATABLE_JOB_KEYS"));
+  // R18-②：目标清单来自后端端点
+  check("R18 目标清单走后端端点", form.includes("fetchScheduleTargets"));
+  check("api 有 fetchScheduleTargets", api.includes("export async function fetchScheduleTargets"));
+  check("api 指向 /schedule/targets", api.includes('"/schedule/targets"'));
+  // R18-③：已建过的目标仍可选 —— 只提示一句，不禁用
+  check("R18 已建目标仍可选（提示而非禁用）", form.includes("existing_count > 0"));
+  check("R18 不对已建目标置灰", !form.includes("disabled={selectedTarget.existing_count"));
+  // 标签只显示目标名（不拼 key，不拼分组）
+  check("R18 目标下拉 label 只有名称", form.includes("label: item.name,") && !form.includes("（${item.key}）"));
+
+  // R20：分组字段整条移除（含那句 helper 文案）
+  check("R20 新建弹窗无「分组」字段", !form.includes('label="分组"'));
+  check("R20 不再展示分组 helper 文案", !form.includes("分组："));
+  check("R20 不再 import jobGroupLabel", !form.includes("jobGroupLabel"));
+
+  // R19：日志详情弹窗两段布局（执行日志信息 / 快照配置），各成一个区块
+  check("R19 弹窗含「执行日志信息」区块", detail.includes("执行日志信息"));
+  check("R19 弹窗含「快照配置」区块", detail.includes("快照配置"));
+  check("R19 两块各成 Card（不再嵌套 Descriptions.Item）", (detail.match(/<Card/g) || []).length >= 2);
+  check("R19 快照不再是嵌套的 Descriptions.Item", !detail.includes('label="配置快照"'));
+  // R19：日志信息块在前（打开先看这次跑得怎么样）
+  check(
+    "R19 日志信息块在快照块之前",
+    detail.indexOf("执行日志信息") < detail.indexOf("快照配置")
+  );
+  // R19 后续口径：详情弹窗宽度 **70%**
+  check("R19 详情弹窗宽度 70%", detail.includes('width="70%"'));
+  // 调用目标列**两行**（中文名 + 代码键）
+  // ⚠️ 用剥注释后的 pageCode（列里加了说明注释，用 raw page 会因窗口截断而误判）
+  const targetCol = colSec(pageCode.slice(0, pageCode.indexOf("const logColumns")), "调用目标");
+  check("调用目标列两行展示（中文名 + 代码键）", targetCol.includes("targetNames[key]") && targetCol.includes("{key}"));
+  check("调用目标列第一行是中文名", targetCol.indexOf("targetNames[key]") < targetCol.indexOf("Text code"));
+  check("调用目标名来自 /schedule/targets", pageCode.includes("fetchScheduleTargets"));
+
+  // 用户口径（2026-09-24）：任务名下方**不再挂「内置」Tag**；且所有任务一律可删
+  // ⚠️ 用上面已定义的 `pageCode`（已剥注释）
+  const nameCol = colSec(pageCode.slice(0, pageCode.indexOf("const logColumns")), "任务名称");
+  check("任务名下方不再挂「内置」Tag", !nameCol.includes("内置"));
+  check("页面无「内置」字样渲染", !pageCode.includes(">内置<"));
+  check("删除按钮不再按 builtin 禁用", !pageCode.includes("record.is_builtin"));
+
+  // 用户口径（2026-09-24）②：任务**分组**整条移除（列表不再有分组列）
+  const listSec = pageCode.slice(0, pageCode.indexOf("const logColumns"));
+  check("任务列表无「分组」列", !listSec.includes('title: "分组"'));
+  check("页面不再 import jobGroupLabel", !pageCode.includes("jobGroupLabel"));
+  check("页面不再引用 job_group 列", !listSec.includes("job_group"));
+
+  // R20/R22 加强（2026-09-24 用户口径「**数据库物理删除**」）：分组不只是从 UI 藏起来，
+  // 而是**连列带逻辑一起退**（迁移 k1l2m3n4o5p6 —— 与本轮真实库实跑对应）。
+  // 下面这几条把「物理删除」钉死，防止它被悄悄改回「只去 UI、列还在」。
+  check("R22 目标清单类型里没有 group 字段", !api.includes("group: \"DEFAULT\"") && !api.includes("group: string"));
+  check("R22 日志详情弹窗不再取 snapshot.job_group", !detail.includes("snapshot.job_group"));
+  check("R22 schedule 模块不再导出 JOB_GROUP_LABELS", !scheduleCode.includes("JOB_GROUP_LABELS"));
+  check("R22 schedule 模块不再导出 jobGroupLabel", !scheduleCode.includes("export function jobGroupLabel"));
+
+  // 用户口径（2026-09-24）③：**一切提示走弹窗**，页面不留 inline 消息条
+  check("页面无 inline Alert 消息条", !pageCode.includes("<Alert"));
+  check("页面不再 import Alert", !page.includes("  Alert,"));
+  check("结果提示统一走 notice 弹窗", pageCode.includes("notify(") && pageCode.includes("open={notice !== null}"));
+  check("不再有 message 状态（旧 inline 条残留）", !pageCode.includes("setMessage"));
+  check("不再有 jobNotice（旧启停弹窗残留）", !pageCode.includes("setJobNotice"));
+
+  if (failures > 0) {
+    console.log(`\n${failures} check(s) FAILED`);
+    process.exitCode = 1;
+    return;
+  }
+  console.log("\nAll checks PASS");
+  } finally {
+    restorePageMutations(); // 页面侧变异**无条件**还原（含异常路径）
+  }
+}
+
+main().catch((error) => {
+  restorePageMutations();
+  console.error(error);
+  process.exit(1);
+});

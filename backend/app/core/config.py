@@ -1,0 +1,249 @@
+from __future__ import annotations
+
+import os
+from functools import lru_cache
+from pathlib import Path
+from typing import Any, Dict
+
+try:
+    from pydantic_settings import (
+        BaseSettings,
+        PydanticBaseSettingsSource,
+        SettingsConfigDict,
+    )
+except ImportError:  # pragma: no cover - handled by dependency installation
+    BaseSettings = object
+    PydanticBaseSettingsSource = None  # type: ignore[assignment,misc]
+    SettingsConfigDict = dict
+
+_HAS_PYDANTIC_SETTINGS = PydanticBaseSettingsSource is not None
+
+
+def _load_yaml_config() -> Dict[str, Any]:
+    """Load YAML configuration files and flatten into env-var-style keys.
+
+    Merge order inside YAML (later values override earlier ones):
+      1. config/default.yaml (always loaded if it exists)
+      2. File specified by CONFIG_FILE environment variable
+
+    The result is consumed by :class:`_YamlSettingsSource` as the **lowest
+    priority** settings source, so environment variables always win over YAML.
+    """
+    try:
+        import yaml
+    except ImportError:
+        return {}
+
+    project_root = Path(__file__).resolve().parent.parent.parent.parent
+    flat: Dict[str, Any] = {}
+
+    # Mapping from nested YAML paths to Settings field names
+    yaml_key_map = {
+        "server.host": "server_host",
+        "server.port": "server_port",
+        "server.cors_origins": "backend_cors_origins",
+        "database.type": "database_type",
+        "database.sqlite_path": "database_sqlite_path",
+        "database.mysql_host": "database_mysql_host",
+        "database.mysql_port": "database_mysql_port",
+        "database.mysql_user": "database_mysql_user",
+        "database.mysql_password": "database_mysql_password",
+        "database.mysql_database": "database_mysql_database",
+        "security.secret_key": "secret_key",
+        "security.fernet_key": "fernet_key",
+        "scheduler.enabled": "scheduler_enabled",
+        "scheduler.interval_seconds": "scheduler_interval_seconds",
+        "qianfan.health_check_enabled": "qianfan_health_check_enabled",
+        "qianfan.health_check_interval_hours": "qianfan_health_check_interval_hours",
+        # M1.9 账号矩阵同步（T-806）：两个定时同步开关 **默认关**（需求 N2：
+        # 「慢慢同步」，不默认替用户打平台），周期默认 6 小时。
+        "xhs.note_sync.enabled": "xhs_note_sync_enabled",
+        "xhs.note_sync.interval_hours": "xhs_note_sync_interval_hours",
+        "xhs.shop_goods_sync.enabled": "xhs_shop_goods_sync_enabled",
+        "xhs.shop_goods_sync.interval_hours": "xhs_shop_goods_sync_interval_hours",
+        # 调度轮内账号之间的停顿（秒）：多账号矩阵不一窝蜂。
+        "xhs.sync.account_gap_seconds": "xhs_sync_account_gap_seconds",
+        "frontend.serve_static": "frontend_serve_static",
+        "frontend.build_dir": "frontend_build_dir",
+    }
+
+    def _flatten(data: Any, prefix: str = "") -> None:
+        if isinstance(data, dict):
+            for key, value in data.items():
+                full_key = f"{prefix}.{key}" if prefix else key
+                if full_key in yaml_key_map:
+                    flat[yaml_key_map[full_key]] = value
+                _flatten(value, full_key)
+
+    # 1. Load config/default.yaml
+    default_yaml = project_root / "config" / "default.yaml"
+    if default_yaml.exists():
+        with open(default_yaml, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+            if data:
+                _flatten(data)
+
+    # 2. Load CONFIG_FILE override
+    config_file = os.environ.get("CONFIG_FILE")
+    if config_file:
+        config_path = Path(config_file)
+        if not config_path.is_absolute():
+            config_path = project_root / config_path
+        if config_path.exists():
+            with open(config_path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+                if data:
+                    _flatten(data)
+
+    return flat
+
+
+if _HAS_PYDANTIC_SETTINGS:
+
+    class _YamlSettingsSource(PydanticBaseSettingsSource):  # type: ignore[misc]
+        """Settings source backed by ``config/default.yaml`` (+ ``CONFIG_FILE``).
+
+        Registered as the **lowest-priority** source, so YAML values behave as
+        defaults that environment variables can override. This is what makes
+        ``SECRET_KEY`` / ``FERNET_KEY`` / ``FRONTEND_SERVE_STATIC`` /
+        ``SCHEDULER_ENABLED`` work as documented.
+        """
+
+        def get_field_value(self, field: Any, field_name: str):  # pragma: no cover
+            # Whole-mapping source: per-field lookup is never used because
+            # __call__ returns the complete flattened dict at once.
+            return None, field_name, False
+
+        def __call__(self) -> Dict[str, Any]:
+            return _load_yaml_config()
+
+
+class Settings(BaseSettings):
+    app_name: str = "Spider_XHS"
+    api_title: str = "Spider_XHS Operations Platform"
+    environment: str = "development"
+
+    # Database
+    database_url: str = ""
+    database_type: str = "sqlite"
+    database_sqlite_path: str = "./data/spider_xhs.db"
+    database_mysql_host: str = "localhost"
+    database_mysql_port: int = 3306
+    database_mysql_user: str = "spider_xhs"
+    database_mysql_password: str = "change_me"
+    database_mysql_database: str = "spider_xhs"
+
+    # Security
+    secret_key: str = "dev-only-change-me"
+    fernet_key: str = ""
+
+    # Server
+    server_host: str = "0.0.0.0"
+    server_port: int = 8000
+
+    # CORS
+    backend_cors_origins: str = "http://127.0.0.1:5173,http://localhost:5173"
+
+    # Scheduler
+    scheduler_enabled: bool = False
+    scheduler_interval_seconds: int = 60
+
+    # 千帆（ark）店铺绑定的登录态巡检（T-31）—— 只读探活，见 services/shop_health_service.py
+    # 关闭开关 = 不注册定时任务（手动「立即巡检」按钮仍可用）。
+    qianfan_health_check_enabled: bool = True
+    # 周期（小时）：默认 6。千帆登录态按天/周级过期，无需更密。
+    qianfan_health_check_interval_hours: int = 6
+
+    # 无流量笔记自动清理（写操作，风控口径见 services/no_traffic_cleanup_service.py）。
+    # 开关关闭 = 不注册定时任务（手动「开始清理」仍可用，且仍受批次上限 + 限流约束）。
+    no_traffic_cleanup_enabled: bool = True
+    # 周期（小时）：默认 6。216 篇候选 / 每批 20 篇，4 小时内绰绰有余。
+    no_traffic_cleanup_interval_hours: int = 6
+
+    # M1.9 账号矩阵同步的定时任务（T-806）。
+    # **两个开关都默认 False**：同步是「慢慢来」的后台活，什么时候开始由用户决定；
+    # 手动按钮不受开关影响（开关只管定时任务注册）。
+    xhs_note_sync_enabled: bool = False
+    # 周期（小时）：默认 6。有界翻页下每轮每账号只走几页，靠多轮摊完大账号。
+    xhs_note_sync_interval_hours: int = 6
+    xhs_shop_goods_sync_enabled: bool = False
+    xhs_shop_goods_sync_interval_hours: int = 6
+    # 调度轮内**账号之间**的停顿（秒）：多账号矩阵不能一窝蜂同时打平台。
+    xhs_sync_account_gap_seconds: int = 10
+
+    # Asset storage
+    asset_storage_type: str = "local"
+
+    # Frontend static serving
+    frontend_serve_static: bool = False
+    frontend_build_dir: str = "./frontend/dist"
+
+    if hasattr(BaseSettings, "model_config"):
+        model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    if _HAS_PYDANTIC_SETTINGS:
+
+        @classmethod
+        def settings_customise_sources(
+            cls,
+            settings_cls: Any,
+            init_settings: Any,
+            env_settings: Any,
+            dotenv_settings: Any,
+            file_secret_settings: Any,
+        ) -> tuple:
+            """Declare source precedence: **init > env vars > .env > YAML > secrets**.
+
+            Fixes DEF-004 / T-110. Previously ``get_settings()`` passed the YAML
+            mapping as *init kwargs*, which pydantic-settings treats as the
+            highest-priority source — so ``config/default.yaml`` silently
+            overrode environment variables, contradicting both the file header
+            and this module's own documentation.
+            """
+            return (
+                init_settings,
+                env_settings,
+                dotenv_settings,
+                _YamlSettingsSource(settings_cls),
+                file_secret_settings,
+            )
+
+    def model_post_init(self, __context: Any) -> None:
+        # Build database_url from component fields if not explicitly set
+        if not self.database_url:
+            if self.database_type == "mysql":
+                object.__setattr__(
+                    self,
+                    "database_url",
+                    f"mysql+pymysql://{self.database_mysql_user}:{self.database_mysql_password}"
+                    f"@{self.database_mysql_host}:{self.database_mysql_port}/{self.database_mysql_database}"
+                    "?charset=utf8mb4",
+                )
+            else:
+                # Backward compatibility: if the old default DB path exists but the
+                # new YAML-configured path does not, use the old path so existing
+                # installations keep their data without manual migration.
+                sqlite_path = self.database_sqlite_path
+                old_default = "./backend/app/storage/spider_xhs.db"
+                if sqlite_path != old_default:
+                    new_db = Path(sqlite_path)
+                    old_db = Path(old_default)
+                    if not new_db.exists() and old_db.exists():
+                        sqlite_path = old_default
+                object.__setattr__(
+                    self,
+                    "database_url",
+                    f"sqlite:///{sqlite_path}",
+                )
+
+    @property
+    def storage_dir(self) -> Path:
+        return Path("backend/app/storage")
+
+
+@lru_cache
+def get_settings() -> Settings:
+    # The YAML mapping is injected by Settings.settings_customise_sources as the
+    # lowest-priority source, so it must NOT be passed as init kwargs here —
+    # init kwargs outrank environment variables (defect DEF-004 / task T-110).
+    return Settings()

@@ -1,0 +1,449 @@
+"""账号矩阵同步的**调度侧**（T-806）契约测试。
+
+2026-09-24（设计 15）：调度装配从「硬编码 8 job」改为 **DB 驱动**（`scheduled_jobs`
+行 ⇒ 启动/API 同步注册）。本文件盯的事：
+
+1. **开关默认关** —— 两个同步的真实默认值是关 ⇒ 种子行 `paused`（不默认替用户打平台）；
+2. **注册的 job 带 `max_instances=1` + `coalesce=True`** —— 两轮同步绝不相交（风控）；
+3. **「有待同步」判定（D9）** —— 平台总数缺值**视为待同步**（宁可多跑一轮，不可漏）；
+4. **轮内纪律** —— 同一账号有未完成任务就跳过；账号之间**真的停顿**（这一条顺带
+   钉住 `scheduler_service` 里 `time` 的导入：`time` 没导入时 `time.sleep` 只在运行时炸，
+   而「gap=0 时不调用」会让它躲过所有测试）。
+
+持久化 store 守卫（§24.9）与 builtin 种子一致性的用例在 `test_scheduled_jobs.py`。
+"""
+from __future__ import annotations
+
+import json
+
+import pytest
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import sessionmaker
+
+from backend.app.core.config import get_settings
+from backend.app.core.database import Base
+from backend.app.core.security import encrypt_text
+from backend.app.models import AccountCookieVersion, PlatformAccount, ScheduledJob, Task, User
+from backend.app.models.note import Note
+from backend.app.services import note_sync_service, scheduler_service as sched
+from backend.app.services.account_service import CHANNEL_CREATOR, CHANNEL_WWW
+from tests.backend.cookie_fixtures import bind_shop_account
+
+# 真实形态（2026-09-21 拆分）：带 creator 域令牌
+CREATOR_COOKIES = (
+    "galaxy_creator_session_id=abc123; "
+    "access-token-creator.xiaohongshu.com=ctok123; "
+    "customer-sso-sid=sso123; a1=xyz"
+)
+# 真实登录的 www jar 一定同时带 `web_session` 与 `id_token`（DEF-051）。
+PC_COOKIES = "web_session=abc123; id_token=tok123; a1=xyz"
+#: 千帆（ark）jar —— 形态必须带 `access-token-ark.*`，否则会被判到别的通道，
+#: 而这轮「取不到票」的红会指错方向。
+_ARK_COOKIES = "a1=x; access-token-ark.xiaohongshu.com=y"
+
+
+def _setup(tmp_path, monkeypatch):
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'sched-sync.db'}", connect_args={"check_same_thread": False}
+    )
+    Base.metadata.create_all(bind=engine)
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    monkeypatch.setattr(sched, "SessionLocal", SessionLocal)
+
+    db = SessionLocal()
+    try:
+        user = User(username="owner", password_hash="x")
+        db.add(user)
+        db.flush()
+        # A：创作者链路（无 web_session）→ 可无人值守同步
+        creator = PlatformAccount(
+            user_id=user.id, platform="xhs", sub_type="creator", nickname="创作者"
+        )
+        # B：带 web_session → 需要用户粘贴令牌，定时轮不覆盖
+        pc_ish = PlatformAccount(
+            user_id=user.id, platform="xhs", sub_type="creator", nickname="网页会话"
+        )
+        # C：pc 账号 → 同样不在定时轮范围
+        pc = PlatformAccount(user_id=user.id, platform="xhs", sub_type="pc", nickname="PC")
+        db.add_all([creator, pc_ish, pc])
+        db.flush()
+        db.add_all(
+            [
+                _cookie(creator.id, CREATOR_COOKIES),
+                _cookie(pc_ish.id, PC_COOKIES, platform=CHANNEL_WWW),
+                _cookie(pc.id, PC_COOKIES, platform=CHANNEL_WWW),
+            ]
+        )
+        #: 关系 + 状态 + 凭据各归其位（`shop_account_bindings` 整表移除，2026-09-22）。
+        #: 定时轮给创作者链路同步商品笔记时取的就是这份 `ark` 令牌。
+        bind_shop_account(db, creator, cookies_text=_ARK_COOKIES, shop_name="店")
+        creator.profile_json = json.dumps({"notes_count": 100})
+        db.commit()
+        # DEF-066：user_id 一并带回（调度函数按行主收口账号范围，用例必须显式传）
+        ids = {"creator": creator.id, "pc_ish": pc_ish.id, "pc": pc.id, "user": user.id}
+    finally:
+        db.close()
+    return SessionLocal, ids
+
+
+def _cookie(account_id: int, raw: str, platform: str = CHANNEL_CREATOR):
+    """落一行信封（2026-09-21 起信封是唯一存储形态；平台由调用方按 jar 归属给）。"""
+    from backend.app.services.account_service import dump_channel_envelope
+
+    return AccountCookieVersion(
+        platform_account_id=account_id,
+        encrypted_cookies=encrypt_text(dump_channel_envelope({platform: raw})),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# DB 驱动装配（设计 15 §6.1，2026-09-24 重构后）
+# --------------------------------------------------------------------------- #
+def test_builtin_seeds_default_to_config_values():
+    """内置 job 的**真实默认值**来自 config：两个同步默认关 ⇒ 种子行 paused。
+
+    ⚠️ 刻意不 monkeypatch：把开关 patch 成 False 再断言「没注册」的守卫在默认值
+    被改成 True 时依然全绿，等于没守（2026-09-22 用户口径：「先停止本地项目
+    同步定时任务」——同步改为完全由用户手动触发）。
+    """
+    settings = get_settings()
+    assert settings.xhs_note_sync_enabled is False, "笔记同步定时任务应默认关闭"
+    assert settings.xhs_shop_goods_sync_enabled is False, "商品同步定时任务应默认关闭"
+
+    from backend.app.services.scheduler_service import _builtin_seed_defaults
+
+    seeds = _builtin_seed_defaults()
+    assert seeds["system.note_sync"]["status"] == "paused"
+    assert seeds["system.shop_goods_sync"]["status"] == "paused"
+    # 巡检 / 清理默认开（与迁移种子一致）
+    assert seeds["system.cookie_health_check"]["status"] == "active"
+    assert seeds["system.qianfan_health_check"]["status"] == "active"
+    assert seeds["system.no_traffic_cleanup"]["status"] == "active"
+
+
+def test_enabled_switches_register_single_instance_jobs(monkeypatch):
+    """同步开关打开 ⇒ 种子行 active ⇒ 启动同步注册，且带风控三件套。"""
+    from backend.app.services.scheduler_service import build_scheduler, ensure_builtin_jobs, sync_jobs_from_db
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "xhs_note_sync_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "xhs_note_sync_interval_hours", 6, raising=False)
+    monkeypatch.setattr(settings, "xhs_shop_goods_sync_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "xhs_shop_goods_sync_interval_hours", 6, raising=False)
+
+    engine = create_engine(
+        "sqlite:///:memory:", connect_args={"check_same_thread": False}
+    )
+    Base.metadata.create_all(bind=engine)
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    monkeypatch.setattr(sched, "SessionLocal", SessionLocal)
+
+    db = SessionLocal()
+    try:
+        # DEF-066：内置行按用户播种 ⇒ 先有用户，ensure 才会铺出行
+        db.add(User(username="switches", password_hash="x"))
+        db.commit()
+        ensure_builtin_jobs(db)
+    finally:
+        db.close()
+
+    scheduler = build_scheduler()
+    stats = sync_jobs_from_db(scheduler)
+    assert stats["registered"] >= 2
+    jobs = {job.id: job for job in scheduler.get_jobs()}
+    sync_jobs = [
+        job for job in jobs.values()
+        if job.id.startswith("job_")
+    ]
+    assert sync_jobs, "至少注册了两个同步 job"
+    for job in sync_jobs:
+        # 两轮绝不相交：风控第三层（与旧 auto_tasks_runner 时代的断言同口径）
+        assert job.max_instances == 1
+        assert job.coalesce is True
+
+
+def test_paused_rows_are_not_registered(monkeypatch):
+    """paused 行不进调度器（同步侧只注册 active 行，设计 15 §6.1）。"""
+    from backend.app.services.scheduler_service import build_scheduler, sync_jobs_from_db
+
+    engine = create_engine(
+        "sqlite:///:memory:", connect_args={"check_same_thread": False}
+    )
+    Base.metadata.create_all(bind=engine)
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    monkeypatch.setattr(sched, "SessionLocal", SessionLocal)
+
+    db = SessionLocal()
+    try:
+        # R14：`interval` 档与 `interval_seconds` 列已删（换 cron 表达），
+        # 夹具必须跟着换 —— 旧写法会在构造期抛未知 kwarg（DEF-064 记录）。
+        paused = ScheduledJob(
+            user_id=None, name="暂停的",
+            job_key="system.monitoring_refresh", trigger_type="cron",
+            cron_expression="0 0 * * * *", status="paused",
+        )
+        db.add(paused)
+        db.commit()
+        db.refresh(paused)
+        paused_id = paused.id
+    finally:
+        db.close()
+
+    scheduler = build_scheduler()
+    sync_jobs_from_db(scheduler)
+    ids = {job.id for job in scheduler.get_jobs()}
+    # 只断言「暂停行没进调度器」：sync 会顺带 ensure_builtin_jobs（5 个活跃内置行），
+    # 数总和没有意义。
+    assert f"job_{paused_id}" not in ids
+
+
+def test_scheduler_is_not_started_when_master_switch_is_off(monkeypatch):
+    """总开关 `scheduler_enabled=False` 时**连调度器都不启动**（结构性闸门）。
+
+    闸门在 `main.lifespan`（`if settings.scheduler_enabled:`）。⚠️ 这里把
+    `init_db` / `start_scheduler` 都打桩：否则进 lifespan 会拿**真实运行库**
+    跑迁移，测试就变成了对生产库的写操作。
+    """
+    import asyncio
+
+    from backend.app import main as main_module
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "scheduler_enabled", False, raising=False)
+    monkeypatch.setattr(main_module, "init_db", lambda: None)
+
+    started: list[object] = []
+    monkeypatch.setattr(
+        main_module, "start_scheduler",
+        lambda *a, **k: started.append(True) or "SPY-SCHEDULER",
+    )
+
+    app = main_module.app
+
+    async def _enter() -> object:
+        await app.router.lifespan_context(app).__aenter__()
+        return app.state.scheduler
+
+    try:
+        scheduler = asyncio.run(_enter())
+        assert started == [], "总开关关着时不该启动调度器"
+        assert scheduler is None
+    finally:
+        try:
+            asyncio.run(app.router.lifespan_context(app).__aexit__(None, None, None))
+        except Exception:  # noqa: BLE001 - 测试收尾不影响结论
+            pass
+
+
+# --------------------------------------------------------------------------- #
+# 「有待同步」判定（D9）
+# --------------------------------------------------------------------------- #
+def test_unknown_platform_total_counts_as_needing_sync(tmp_path, monkeypatch):
+    SessionLocal, ids = _setup(tmp_path, monkeypatch)
+    db = SessionLocal()
+    try:
+        account = db.get(PlatformAccount, ids["creator"])
+        account.profile_json = "{}"  # 平台总数缺值
+        assert sched.account_needs_note_sync(db, account) is True
+    finally:
+        db.close()
+
+
+def test_needs_sync_compares_local_count_against_platform_total(tmp_path, monkeypatch):
+    SessionLocal, ids = _setup(tmp_path, monkeypatch)
+    db = SessionLocal()
+    try:
+        account = db.get(PlatformAccount, ids["creator"])  # notes_count = 100
+        assert sched.account_needs_note_sync(db, account) is True  # 本地 0 < 100
+
+        for index in range(100):
+            db.add(
+                Note(
+                    user_id=account.user_id,
+                    platform_account_id=account.id,
+                    platform="xhs",
+                    note_id=f"N{index}",
+                )
+            )
+        db.commit()
+        assert sched.account_needs_note_sync(db, account) is False  # 已追平
+    finally:
+        db.close()
+
+
+# --------------------------------------------------------------------------- #
+# 轮内：只覆盖能无人值守的账号
+# --------------------------------------------------------------------------- #
+def test_only_creator_link_accounts_are_scheduled(tmp_path, monkeypatch):
+    """定时轮只覆盖**有创作者/千帆令牌的创作者账号**（§24.9 修订理由）。
+
+    ⚠️ 2026-09-23：判据从「有 creator 令牌**且没有 www 网页会话」收紧为
+    「有 creator/ark 令牌」—— www 源已整体退场（§21.4），同步不再需要 URL 级
+    `xsec_token`，「有 www 会话就要留给手动」的前提不存在了。下面
+    `test_creator_account_with_www_session_is_now_schedulable` 钉新判据。
+    """
+    SessionLocal, ids = _setup(tmp_path, monkeypatch)
+    db = SessionLocal()
+    try:
+        accounts = db.scalars(select(PlatformAccount)).all()
+        picked = {account.id for account in sched._schedulable_accounts(db, list(accounts))}
+    finally:
+        db.close()
+
+    assert picked == {ids["creator"]}
+    # `pc_ish` 只有 www 通道（没有 creator/ark 令牌）⇒ 排除；
+    # `pc` 是 pc 链路账号 ⇒ 排除。
+    assert ids["pc_ish"] not in picked
+    assert ids["pc"] not in picked
+
+
+def test_creator_account_with_www_session_is_now_schedulable(tmp_path, monkeypatch):
+    """§24.9：带 www 网页会话**不再是**排除理由（观隅好物 acct 8 同款形状）。
+
+    旧实现的 `has_web_session(www jar)` 过滤会把三通道齐全的账号永久排除出
+    定时轮 —— 那是 www 源时代「PC 链路要用户粘贴 xsec_token」的残留。§21.4
+    起同步源只剩 creator + ark，不需要 xsec_token ⇒ 这类账号必须进定时轮。
+    """
+    SessionLocal, _ids = _setup(tmp_path, monkeypatch)
+    db = SessionLocal()
+    try:
+        user = db.scalars(select(User)).first()
+        account = PlatformAccount(
+            user_id=user.id, platform="xhs", sub_type="creator", nickname="三通道"
+        )
+        db.add(account)
+        db.flush()
+        db.add_all(
+            [
+                _cookie(account.id, CREATOR_COOKIES),
+                _cookie(account.id, PC_COOKIES, platform=CHANNEL_WWW),
+            ]
+        )
+        db.commit()
+        picked = {a.id for a in sched._schedulable_accounts(db, [account])}
+    finally:
+        db.close()
+
+    assert picked == {account.id}
+
+
+def test_scheduled_run_syncs_due_accounts_and_pauses_between_them(tmp_path, monkeypatch):
+    SessionLocal, ids = _setup(tmp_path, monkeypatch)
+    calls: list = []
+    monkeypatch.setattr(
+        note_sync_service,
+        "run_note_sync",
+        lambda account_id, **kw: calls.append((account_id, kw.get("source"))),
+    )
+    monkeypatch.setattr(sched, "_sync_account_gap_seconds", lambda: 3)
+    slept: list = []
+    # 这一行同时钉住 `scheduler_service` 里 `time` 的导入（没导入就没有可打的属性）。
+    monkeypatch.setattr(sched.time, "sleep", lambda seconds: slept.append(seconds))
+
+    sched.run_scheduled_note_syncs(ids["user"])
+
+    assert calls == [(ids["creator"], "scheduled")]
+    assert slept == [3]
+
+
+def test_scheduled_run_skips_accounts_with_an_active_task(tmp_path, monkeypatch):
+    SessionLocal, ids = _setup(tmp_path, monkeypatch)
+    calls: list = []
+    monkeypatch.setattr(
+        note_sync_service, "run_note_sync", lambda account_id, **kw: calls.append(account_id)
+    )
+    monkeypatch.setattr(sched, "_sync_account_gap_seconds", lambda: 0)
+
+    db = SessionLocal()
+    try:
+        db.add(
+            Task(
+                user_id=1,
+                platform="xhs",
+                task_type="xhs_note_sync",
+                status="running",
+                payload={"account_id": ids["creator"]},
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    sched.run_scheduled_note_syncs(ids["user"])
+
+    assert calls == []  # 手动任务在跑 → 本轮跳过该账号（两道入口共用同一条判断）
+
+
+def test_scheduled_run_swallows_per_account_failures(tmp_path, monkeypatch):
+    SessionLocal, ids = _setup(tmp_path, monkeypatch)
+
+    def boom(account_id, **kw):
+        raise RuntimeError("平台炸了")
+
+    monkeypatch.setattr(note_sync_service, "run_note_sync", boom)
+    monkeypatch.setattr(sched, "_sync_account_gap_seconds", lambda: 0)
+
+    sched.run_scheduled_note_syncs(ids["user"])  # 不抛 = 单个账号失败不拖垮整轮
+
+
+# --------------------------------------------------------------------------- #
+# 商品同步的调度轮：只跑有绑定的账号
+# --------------------------------------------------------------------------- #
+def test_goods_run_only_touches_bound_accounts(tmp_path, monkeypatch):
+    SessionLocal, ids = _setup(tmp_path, monkeypatch)
+    calls: list = []
+    monkeypatch.setattr(
+        sched, "_sync_account_gap_seconds", lambda: 0
+    )
+    import backend.app.services.shop_goods_sync_service as sgs
+
+    monkeypatch.setattr(
+        sgs, "run_shop_goods_sync", lambda account_id, **kw: calls.append(account_id)
+    )
+
+    sched.run_scheduled_shop_goods_syncs(ids["user"])
+
+    assert calls == [ids["creator"]]  # 只有它绑了店
+
+
+def test_goods_run_swallows_failures(tmp_path, monkeypatch):
+    SessionLocal, ids = _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(sched, "_sync_account_gap_seconds", lambda: 0)
+    import backend.app.services.shop_goods_sync_service as sgs
+
+    def boom(account_id, **kw):
+        raise RuntimeError("千帆炸了")
+
+    monkeypatch.setattr(sgs, "run_shop_goods_sync", boom)
+
+    sched.run_scheduled_shop_goods_syncs(ids["user"])
+
+
+# --------------------------------------------------------------------------- #
+# 配置口径
+# --------------------------------------------------------------------------- #
+def test_sync_switches_default_to_off_and_have_yaml_aliases():
+    settings = get_settings()
+    assert settings.xhs_note_sync_enabled is False
+    assert settings.xhs_shop_goods_sync_enabled is False
+    assert settings.xhs_note_sync_interval_hours == 6
+    assert settings.xhs_shop_goods_sync_interval_hours == 6
+    assert settings.xhs_sync_account_gap_seconds == 10
+
+    from backend.app.core.config import Settings
+
+    mapping = Settings.model_fields["xhs_note_sync_enabled"]
+    assert mapping is not None  # 字段存在
+    source = open(
+        __import__("pathlib").Path(__file__).resolve().parents[2]
+        / "backend/app/core/config.py",
+        encoding="utf-8",
+    ).read()
+    for yaml_key in (
+        "xhs.note_sync.enabled",
+        "xhs.note_sync.interval_hours",
+        "xhs.shop_goods_sync.enabled",
+        "xhs.shop_goods_sync.interval_hours",
+        "xhs.sync.account_gap_seconds",
+    ):
+        assert f'"{yaml_key}"' in source, f"YAML 键 {yaml_key} 未登记到 alias 表"
