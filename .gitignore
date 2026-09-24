@@ -59,12 +59,9 @@ spider-xhs-setup-*.exe
 # PyInstaller 的 .spec 是手写配置（源码），放行——模板的 *.spec 会误伤它
 !packaging/SpiderXHS.spec
 
-# .workbuddy：只上传 skills / scripts / memory（项目规范与基建）。
-# 其余（散落 xml/log/备份、tmp、reports、logs、projects、backup）均为过程产物。
-/.workbuddy/*
-!/.workbuddy/skills/
-!/.workbuddy/scripts/
-!/.workbuddy/memory/
+# .workbuddy 整体不上云（2026-09-25 用户口径）：本地规范 / 记忆 / 脚本 / 过程件
+# 均属本地资产，远程仓库只放业务源码、测试、文档。
+/.workbuddy/
 
 # author/：只保留 README 引用的 logo.jpg；其余为个人二维码 / 社交 / 打赏码
 author/*
