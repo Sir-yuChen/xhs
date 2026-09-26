@@ -15,7 +15,9 @@
      前端 ``baseURL: "/api"`` 是相对路径，回退对 UI 透明）；
   6. 健康检查通过后开**独立应用窗口**（Edge/Chrome 的 ``--app=`` 模式，无地址栏 /
      无标签栏 / 无工具栏，不是浏览器标签页）；托盘图标提供「打开界面 / 退出」；
-  7. 已有健康实例在跑 ⇒ 只开独立窗口后退出（单实例）。
+  7. 已有健康实例在跑 ⇒ 只开独立窗口后退出（单实例）；
+  8. windowed 打包下给全部子进程注入 ``CREATE_NO_WINDOW``（签名运行时每次请求
+     都会 ``subprocess.run(['node', …])``，不抑制则每个请求闪一个黑色控制台窗口）。
 
 日志：``<安装目录>/logs/launcher.log``（windowed 模式下 stderr 不可见，必须落文件）。
 """
@@ -214,6 +216,9 @@ def start_server(root: Path, port: int, console: bool):
         log_config=uvicorn_log_config(root, console),
         access_log=True,
         lifespan="on",
+        # 停机兜底：独立窗口若还没关，前端 5s 轮询会不断重连，优雅停机会一直等连接；
+        # 给 5s 超时强断，保证托盘「退出」在关窗口失败时也能落停
+        timeout_graceful_shutdown=5,
     )
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, name=f"uvicorn-{port}", daemon=True)
@@ -242,6 +247,9 @@ def start_server(root: Path, port: int, console: bool):
 # ②不共享用户的插件 / 历史 / 登录态。两者都找不到才退回系统默认浏览器。
 
 APP_WINDOW_SIZE = "1440,900"
+
+# 最近一次「打开界面」起的浏览器进程；托盘退出时据此连窗口一起收掉
+_app_window_proc = None
 
 _BROWSER_CANDIDATES = (
     (
@@ -284,7 +292,12 @@ def _app_profile_dir() -> Path:
 
 
 def open_app_window(url: str) -> bool:
-    """以独立应用窗口打开 UI；Edge/Chrome 都不可用时退回默认浏览器。"""
+    """以独立应用窗口打开 UI；Edge/Chrome 都不可用时退回默认浏览器。
+
+    浏览器进程句柄记录到 ``_app_window_proc``，托盘退出时由 :func:`_close_app_window`
+    连窗口一起收掉 —— 窗口是独立 profile 的浏览器进程，launcher 只停后端是关不掉它的。
+    """
+    global _app_window_proc
     profile = _app_profile_dir()
     args = [
         f"--app={url}",
@@ -297,13 +310,15 @@ def open_app_window(url: str) -> bool:
         if not exe.is_file():
             continue
         try:
-            subprocess.Popen(
+            proc = subprocess.Popen(
                 [str(exe), *args],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 stdin=subprocess.DEVNULL,
             )
-            log.info("已用 %s 打开独立应用窗口：%s（profile=%s）", label, url, profile)
+            _app_window_proc = proc
+            log.info("已用 %s 打开独立应用窗口：%s（profile=%s，pid=%d）",
+                     label, url, profile, proc.pid)
             return True
         except Exception as exc:
             log.warning("%s 启动失败（%s），尝试下一个候选", label, exc)
@@ -313,6 +328,62 @@ def open_app_window(url: str) -> bool:
     except Exception as exc:
         log.warning("打开浏览器失败（%s），请手动访问 %s", exc, url)
         return False
+
+
+def _close_app_window() -> None:
+    """关掉我们起的独立窗口（独占 profile ⇒ 独立进程树，不影响用户自己的浏览器）。"""
+    global _app_window_proc
+    proc = _app_window_proc
+    if proc is None:
+        return
+    _app_window_proc = None
+    if proc.poll() is not None:
+        log.info("应用窗口进程已自行退出（pid=%d）", proc.pid)
+        return
+    log.info("关闭独立应用窗口（pid=%d）", proc.pid)
+    try:
+        # 独占 user-data-dir ⇒ 这棵进程树全是我们的窗口，树杀干净且不误伤
+        subprocess.run(
+            ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+            capture_output=True, timeout=10,
+        )
+    except Exception as exc:
+        log.warning("关闭应用窗口失败（%s），尝试 terminate", exc)
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# 子进程控制台抑制（2026-09-26，用户实测：页面每有操作就闪黑窗、无法操作）
+# ---------------------------------------------------------------------------
+# 根因：打包版 SpiderXHS.exe 是 windowed（--noconsole）进程，自身没有控制台；
+# 而 Windows 的规则是——无控制台进程 spawn 一个**控制台**程序时，系统会为子进程
+# 新建一个控制台窗口。签名运行时（xhs_utils/xhs_core|xhs_pc|xhs_creator 的
+# runtime.py、xhs_pc/params.py）每次调用都是裸 ``subprocess.run(['node', …])``，
+# PyExecJS（xhs_creator_util）内部同样起 node ⇒ **每个走签名的页面请求都闪一个
+# 黑色控制台窗口**（前端 5s 轮询 + 用户操作，频繁到无法操作）。
+# dev 模式看不到：uvicorn 跑在用户终端里，子进程继承该控制台，不会新建窗口。
+# 修法：进程内给 ``Popen`` 默认注入 ``CREATE_NO_WINDOW``——subprocess.run 与
+# PyExecJS 全部经由 Popen，一处 patch 覆盖现有 6 处调用点和未来新增调用点；
+# 不逐个改 runtime.py（同一语义不留两份实现）。GUI 子进程（Edge）不受影响。
+
+def suppress_child_console_windows() -> None:
+    """windowed 打包下，所有控制台子进程不再弹黑色窗口。"""
+    if sys.platform != "win32":
+        return
+    create_no_window = 0x08000000
+    original = subprocess.Popen.__init__
+
+    def patched(self, *args, **kwargs):
+        flags = kwargs.get("creationflags") or 0
+        if not flags & create_no_window:
+            kwargs["creationflags"] = flags | create_no_window
+        return original(self, *args, **kwargs)
+
+    subprocess.Popen.__init__ = patched
+    log.info("子进程控制台抑制已启用（CREATE_NO_WINDOW，frozen windowed）")
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +412,9 @@ def run_tray(server, thread: threading.Thread, port: int) -> bool:
     def quit_app() -> None:
         log.info("用户从托盘退出")
         server.should_exit = True
+        # 窗口是独立 profile 的浏览器进程：不关它，页面会一直停在连不上的界面上，
+        # 且轮询连接不断会让 uvicorn 优雅停机互相等待（窗口关掉 = 连接断 = 停机加速）
+        _close_app_window()
         icon.stop()
 
     icon = pystray.Icon(APP_NAME, image, f"{APP_NAME} :{port}", pystray.Menu(
@@ -378,6 +452,9 @@ def main(argv=None) -> int:
     root = app_root()
     frozen = bool(getattr(sys, "frozen", False))
     console = args.console or not frozen
+    if frozen:
+        # 必须在 uvicorn 线程启动前生效：签名请求全在服务线程里 spawn node
+        suppress_child_console_windows()
 
     os.chdir(root)
     ensure_directories(root)

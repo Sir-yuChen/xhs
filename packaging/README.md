@@ -37,6 +37,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build.ps1 -Version
 **独立应用窗口**（无地址栏/标签栏，独占 profile `%LOCALAPPDATA%\SpiderXHS\app-profile`），
 不再弹系统默认浏览器的标签页；两者都找不到才退回默认浏览器（设计 14 §2）。
 
+**黑窗闪现（2026-09-26 修复）**：windowed 主进程每次起 `node.exe` 算签名都会闪一个黑色
+控制台窗口（页面每有操作/每轮 5s 轮询都触发）。launcher 在 frozen 时给全部子进程注入
+`CREATE_NO_WINDOW`（一处 patch `Popen.__init__` 覆盖 6 处签名调用点 + PyExecJS）。
+托盘「退出」会同时树杀独立窗口进程，uvicorn 停机带 5s 超时兜底。
+
 ## 什么不该进包（2026-09-26 v1.0.1 梳理）
 
 **结论：进包内容由白名单决定**（`SpiderXHS.spec` 的 `datas` + PyInstaller 依赖分析），
