@@ -22,22 +22,29 @@ from backend.app.core.time import shanghai_now
 class PlatformAccount(Base):
     __tablename__ = "platform_accounts"
     __table_args__ = (
-        #: **账号身份唯一**（台账 §4.9 / 不变量 I1，迁移 `d4e5f6a7b8c9`）。
+        #: **账号身份唯一 —— 按小红书账号 ID**（台账 §4.9 / 不变量 I1；迁移
+        #: `g6h7i8j9k0l1`，取代原 `d4e5f6a7b8c9` 的 `uq_platform_accounts_identity`）。
         #:
-        #: 键**必须含 `sub_type`**：同一小红书账号的 `pc` 与 `creator` 是两条
-        #: **合法链路**（`_sync_creator_account_from_pc_cookie()` 有意从 PC Cookie
-        #: 换出创作者链路，账号卡片上也明确区分「类型：PC / Creator」），
-        #: 把两条合成一条会**丢掉发布能力**（发布要求 `sub_type == "creator"`）。
+        #: 键 = `(user_id, platform, external_user_id)`。**`sub_type` 不再进键**
+        #: （2026-09-26 用户口径：「数据库任何场景下账号信息表，根据账号小红书 ID
+        #: 均不允许出现重复多行账号信息」）。原键含 `sub_type` ⇒ 同一个账号先按
+        #: 「PC」扫、再按「创作者平台」扫就留下**两行**，界面上看起来是
+        #: 「两个相同的账号信息」（真实库实测：同 `external_user_id`、
+        #: 同昵称、同小红书号，只差一个「类型」）。
+        #:
+        #: 链路不进键 ≠ 丢掉链路：`sub_type` 仍是单列事实，两条链路合并成一行时
+        #: 取**更强**的那条（`account_types.strongest_sub_type`，`creator` > `pc`，
+        #: 否则会静默丢掉发布能力）；两条链路的令牌本来就各在自己的通道里
+        #: （`www` / `creator` / `ark`）。
         #:
         #: **为什么是部分索引**：`external_user_id` 为空的行不参与约束 —— 「空」不构成
-        #: 身份，若参与，多个空 id 账号会互相冲突。空 id 的重复改由业务层用
-        #: `(user_id, platform, sub_type, nickname)` 兜底匹配拦住（见
-        #: `account_service.upsert_platform_account_from_login`）。
+        #: 身份，若参与，多个空 id 账号（例如按店铺建的千帆账号）会互相冲突。
+        #: 空 id 的重复改由业务层用 `(user_id, platform, sub_type, nickname)` 兜底匹配
+        #: 拦住（见 `account_service.upsert_platform_account_from_login`）。
         Index(
-            "uq_platform_accounts_identity",
+            "uq_platform_accounts_xhs_identity",
             "user_id",
             "platform",
-            "sub_type",
             "external_user_id",
             unique=True,
             sqlite_where=text("external_user_id IS NOT NULL AND external_user_id <> ''"),

@@ -1342,6 +1342,72 @@ def test_note_filters_guards_are_load_bearing(mutate, expected):
     assert f"FAIL {expected}" in result.stdout, f"stdout={result.stdout}"
 
 
+# --------------------------------------------------------------------------- #
+# §25.8 内容库「挂链商品」筛选：行为验证（esbuild 打包真实 api.ts + 两页源码守卫）
+#
+# ⚠️ 2026-09-26 接线：本脚本自 2026-09-23 建起**从未被 pytest 执行过** —— 它在仓库里
+# 唯一的"引用"是 `test_testing_spec_guards.py` 的参数列表（而那条守卫的 haystack
+# 包含守卫文件自己 ⇒ 对它恒真）。同一形态的踩坑在 `note_filters.cjs`
+# （2026-09-25 接线）上已经发生过一次。顺带修掉一颗哑弹：`urlinit` 变异的锚点
+# 少了换行上下文、一直在 "FATAL 变异锚点未命中" 上空转。
+# --------------------------------------------------------------------------- #
+def _run_library_item_filter(env: dict | None = None):
+    script = ROOT / "tests/frontend/library_item_filter.cjs"
+    assert script.exists(), "行为验证脚本缺失（tests/frontend/library_item_filter.cjs）"
+    try:
+        return subprocess.run(
+            ["node", str(script)],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=180,
+            env={**os.environ, **(env or {})},
+        )
+    except FileNotFoundError:  # pragma: no cover - 环境问题，不是逻辑分支
+        pytest.fail("未找到 node：本机无法运行前端行为验证（AGENTS.md §2 已依赖 node 跑 tsc）")
+
+
+def test_library_item_filter_is_driven_for_real():
+    """挂链商品筛选的前端契约有真实打包产物验证（§25.8）。
+
+    21 条 = A(2 驱动真实 `lib/api.ts`) + B(14 源码守卫 `library-page.tsx`)
+    + C(4 源码守卫 `shop-items-page.tsx`) + 1 条口径断言。
+    用户当时两次报告同一现象：挂链笔记弹窗 3 篇、内容库只看到 2 篇 ——
+    本脚本钉的是「跳转入口 → URL 初值 → 筛选参数 → 提示条 / 空态」整条链路。
+    """
+    result = _run_library_item_filter()
+    assert result.returncode == 0, (result.stdout + result.stderr)[-900:]
+    assert "21 passed / 0 failed" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "mutate,expected",
+    [
+        ("trim", "A1"),       # item_id 不 trim ⇒ 带空格的 ID 原样发给后端
+        ("trim", "A2"),       # 空串当筛选值 ⇒ 不筛变成筛空
+        ("urlinit", "B1"),    # URL ?item_id= 初值被删 ⇒ 弹窗跳进来筛选不生效
+        ("cfilter", "B2"),    # currentFilters 丢 item_id ⇒ 输入框改了不发后端
+        ("notice", "B6"),     # 提示条不再渲染 ⇒ 用户不知道在筛什么
+        ("jump", "C1"),       # 跳转查询键名写错 ⇒ 跳过去等于没跳
+    ],
+)
+def test_library_item_filter_guards_are_load_bearing(mutate, expected):
+    """变异验证：每个守卫被改坏时脚本必须变红 —— 且**必须靠断言变红**。
+
+    ⚠️ 断言两块都要：`returncode != 0` 单看是**不够的** —— 锚点失配时脚本也以
+    rc=1 退出（打印 "FATAL 变异锚点未命中"），那说明变异根本没生效，不是承重。
+    所以第二条必须要求**出现具体那条 `FAIL  Xn` 行**（DEF-058 的教训）。
+    """
+    result = _run_library_item_filter({"LIB_ITEM_MUTATE": mutate})
+    assert result.returncode != 0, f"{mutate} 变异必须让脚本失败"
+    assert "FATAL" not in result.stdout + result.stderr, (
+        f"{mutate} 变异锚点失配（实现已改？）⇒ 这不是承重证明：\n{result.stdout}\n{result.stderr}"
+    )
+    assert f"FAIL  {expected}" in result.stdout, f"stdout={result.stdout}"
+
+
 
 # ---------------------------------------------------------------------------
 # 笔记类型 + 同步按钮 + 话题/商品解耦（设计 13 §25 / §27 / §28，2026-09-22）

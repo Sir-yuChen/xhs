@@ -210,6 +210,12 @@ export function QrLoginPanel({ accountType, onConfirmed, targetAccountId, onRene
               本次写入了哪个平台、其它平台没动。
             */
             message.success(`已把新令牌写入该账号的「${channelText}」。其它平台的令牌未被改动。`);
+            // 令牌写入成功但**店铺关系没绑上**（1:1 冲突等）时必须说出来：
+            // 否则用户以为「登录好了，商品也能看了」，而商品区仍显示未绑定店铺。
+            const renewBindError = detailMessage(polled.shop_bind_error);
+            if (renewBindError) {
+              message.warning(renewBindError);
+            }
             onRenewedRef.current?.(polled.account ?? null, channel);
             return;
           }
@@ -217,6 +223,11 @@ export function QrLoginPanel({ accountType, onConfirmed, targetAccountId, onRene
             return;
           }
           setStatusText("账号绑定成功");
+          // 同上：绑定成功、但店铺关系没绑上时照实说明（弹窗马上会关，靠 toast 承载）。
+          const bindError = detailMessage(polled.shop_bind_error);
+          if (bindError) {
+            message.warning(bindError);
+          }
           onConfirmedRef.current(polled.account);
         }
       } catch {

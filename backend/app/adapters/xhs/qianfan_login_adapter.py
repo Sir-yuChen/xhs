@@ -53,15 +53,46 @@ class XhsQianfanLoginAdapter:
         }
 
     def check_qrcode_status(self, qr_id: str, cookies: dict[str, Any]) -> dict[str, Any]:
+        """轮询扫码状态；**确认后补做 ark 域换票**（2026-09-26 修复）。
+
+        ## 为什么必须换票（用户实测：「扫码成功，但读取千帆店铺信息失败」）
+
+        `check_qrcode_status()` 只种下 **customer 域**的会话 —— 它等价于浏览器在
+        扫码页轮询的那几次请求。浏览器在确认之后还会**跳转**
+        `ark/?ticket=…&from=ark-login` 并调 `ssologin`，千帆域令牌
+        （`access-token-ark.*`）是那一跳种下的。
+
+        只做轮询不做换票，手里的 jar 打千帆一律 `-13000 缺失登录凭证` ——
+        于是「登录成功」与「读不到店铺」同时成立，用户看到的是
+        「登录成功，但读取千帆店铺信息失败……本次没有保存任何令牌」。
+        这与邮箱密码登录**本来就是同一条链**（同一套 CAS），所以换票逻辑
+        抽成 `_exchange_ticket_for_ark_session()` 供两条路复用。
+        """
         with direct_xhs_request_env():
             api = self._api()
-            success, message, updated_cookies = api.check_qrcode_status(qr_id, cookies)
-        status = "confirmed" if success else "pending"
+            # 用 `query_qrcode_status`（而不是 `check_qrcode_status`）：前者保留
+            # `ticket`，那正是换票必需的输入；后者把它丢掉了。
+            detail = api.query_qrcode_status(qr_id, cookies)
+            status = self._status_from_detail(detail)
+            if status == "confirmed":
+                ticket = str(detail.get("ticket") or "")
+                if ticket:
+                    self._exchange_ticket_for_ark_session(api, ticket)
+            # 返回**整个 profile**：换票往同一个 CookieProfile 里种 ark 域令牌，
+            # `detail['cookies']` 是换票前那一版的快照，用它会把新令牌丢掉。
+            cookies_out = dict(api.profile.cookie_map)
+        return {"status": status, "cookies": cookies_out}
+
+    @staticmethod
+    def _status_from_detail(detail: dict[str, Any]) -> str:
+        """CAS 轮询结果 → 我们的四态（`pending` / `scanned` / `confirmed` / `expired`）。"""
+        message = str(detail.get("message") or "")
+        status = "confirmed" if detail.get("success") else "pending"
         if "过期" in message or "expired" in message.lower():
             status = "expired"
         if "确认" in message or "confirm" in message.lower():
             status = "scanned"
-        return {"status": status, "cookies": updated_cookies}
+        return status
 
     # ------------------------------------------------------------------ #
     # 邮箱密码登录（2026-09-23，设计 13 §18.15.3）
@@ -81,6 +112,9 @@ class XhsQianfanLoginAdapter:
         4. `POST ark/api/edith/open/ssologin` `{system, ticket:ST}`（签名）
            ⇒ `seller_infos[]`（seller_id / userId）；
         5. `POST ark/api/edith/open/seller/login` `{seller_id, user_id, is_vendor:false}`（签名）。
+
+        ⚠️ 第 2–5 步已抽成 `_exchange_ticket_for_ark_session()` 并被**扫码路径复用**
+        （2026-09-26）—— 两条链拿到的是同一种 ST，换票动作逐字相同。
 
         ⚠️ **§18.14.3「服务端复现 ssologin 不可交付」的边界被本条推翻**：那条针对
         「从创作者 jar 自动派生」（用户无感知）；本条是**用户本人提交邮箱密码**、
@@ -107,47 +141,68 @@ class XhsQianfanLoginAdapter:
             ticket = str(data.get("ticket") or "")
             if not ticket:
                 raise RuntimeError("登录成功但未拿到服务票据（ST），请重试")
-            # 2. ticket/route：把 ST 注册到 ark 系统（浏览器在跳转前从登录页调用）
+            # 2-5. 换票（与扫码路径**同一份实现**，见下）
+            self._exchange_ticket_for_ark_session(api, ticket)
+            return {"status": "confirmed", "cookies": api.profile.cookie_map}
+
+    def _exchange_ticket_for_ark_session(self, api: Any, ticket: str) -> None:
+        """CAS 服务票据（ST）→ **ark 域令牌**（浏览器跳转那一跳的等价物）。
+
+        四步，缺任何一步千帆域令牌都种不下来：
+
+        1. `POST /api/edith/seller/ticket/route` —— 把 ST 注册到 ark 系统；
+        2. `GET ark/?ticket=…&from=ark-login` —— 导航换票（`Set-Cookie`）；
+        3. `POST /api/edith/open/ssologin` —— ST → 店铺会话；
+        4. `POST /api/edith/open/seller/login` —— 选定店铺（个人店单选，多店取主店）。
+
+        ⚠️ **扫码与邮箱密码共用这一份**（2026-09-26）：两条路拿到的是同一种 ST，
+        换票动作逐字相同。原先只有邮箱密码做了这四步，扫码只做轮询 —— 于是
+        「账号密码登录正常、扫码登录异常」（用户实测）。同一语义不留两份实现：
+        邮箱密码那条链现在也调用本函数，任何一侧的修正都会同时生效。
+        """
+        from apis.xhs_creator_login_apis import CREATOR_USER_AGENT, REQUEST_TIMEOUT
+
+        landing_url = f"{ARK_SERVICE_URL}/?ticket={ticket}&from=ark-login"
+        # 1. ticket/route：把 ST 注册到 ark 系统（浏览器在跳转前从登录页调用）
+        self._ark_signed_post(
+            api,
+            "/api/edith/seller/ticket/route",
+            {"system": "ark", "url": ARK_SERVICE_URL, "ticket": ticket},
+            referer=f"{ARK_SERVICE_URL}/",
+        )
+        # 2. 导航换票：该请求的 Set-Cookie 与后续 ssologin 一起种下 ark 域令牌
+        landing = api.http.get(
+            landing_url,
+            headers={
+                "cookie": self._cookie_header(api, ARK_SERVICE_URL),
+                "user-agent": CREATOR_USER_AGENT,
+                "referer": f"{ARK_SERVICE_URL}/",
+            },
+            proxies=api.proxies,
+            timeout=REQUEST_TIMEOUT,
+            allow_redirects=False,
+        )
+        api._merge_response_cookies(landing)
+        # 3. ssologin：ST → 店铺会话（拿 seller_id / userId）
+        sso = self._ark_signed_post(
+            api,
+            "/api/edith/open/ssologin",
+            {"system": ARK_TICKET_LANDING, "ticket": ticket},
+            referer=landing_url,
+        )
+        seller = self._first_seller(sso)
+        # 4. seller/login：选定店铺（个人店单选；多店时取主店）
+        if seller.get("seller_id"):
             self._ark_signed_post(
                 api,
-                "/api/edith/seller/ticket/route",
-                {"system": "ark", "url": ARK_SERVICE_URL, "ticket": ticket},
-                referer=f"{ARK_SERVICE_URL}/",
-            )
-            # 3. 导航换票：该请求的 Set-Cookie 与后续 ssologin 一起种下 ark 域令牌
-            landing = api.http.get(
-                f"{ARK_SERVICE_URL}/?ticket={ticket}&from=ark-login",
-                headers={
-                    "cookie": self._cookie_header(api, ARK_SERVICE_URL),
-                    "user-agent": CREATOR_USER_AGENT,
-                    "referer": f"{ARK_SERVICE_URL}/",
+                "/api/edith/open/seller/login",
+                {
+                    "seller_id": seller["seller_id"],
+                    "user_id": seller.get("user_id", ""),
+                    "is_vendor": False,
                 },
-                proxies=api.proxies,
-                timeout=REQUEST_TIMEOUT,
-                allow_redirects=False,
+                referer=landing_url,
             )
-            api._merge_response_cookies(landing)
-            # 4. ssologin：ST → 店铺会话（拿 seller_id / userId）
-            sso = self._ark_signed_post(
-                api,
-                "/api/edith/open/ssologin",
-                {"system": ARK_TICKET_LANDING, "ticket": ticket},
-                referer=f"{ARK_SERVICE_URL}/?ticket={ticket}&from=ark-login",
-            )
-            seller = self._first_seller(sso)
-            # 5. seller/login：选定店铺（个人店单选；多店时取主店）
-            if seller.get("seller_id"):
-                self._ark_signed_post(
-                    api,
-                    "/api/edith/open/seller/login",
-                    {
-                        "seller_id": seller["seller_id"],
-                        "user_id": seller.get("user_id", ""),
-                        "is_vendor": False,
-                    },
-                    referer=f"{ARK_SERVICE_URL}/?ticket={ticket}&from=ark-login",
-                )
-            return {"status": "confirmed", "cookies": api.profile.cookie_map}
 
     def _ark_signed_post(self, api: Any, path: str, body: dict, *, referer: str) -> dict:
         """带 `X-s`/`X-t`/`X-S-Common` 签名的 ark POST（签名逻辑全部在 SDK 内）。"""

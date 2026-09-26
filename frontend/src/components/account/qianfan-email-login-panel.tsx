@@ -62,6 +62,12 @@ export function QianfanEmailLoginPanel({
       // 凭据使命完成，立刻从 state 里清掉（不留着过夜）。
       setPwd("");
       setDone(true);
+      // 令牌已落库、账号已就位；只是店铺关系没绑上（店已被别的账号占用等）时
+      // 照实说明 —— 否则用户以为「登录成功 = 商品也能读了」。
+      const bindError = detailMessage(result.shop_bind_error);
+      if (bindError) {
+        message.warning(bindError);
+      }
       if (result.account) {
         if (renewing) {
           onRenewed?.(result.account.id);

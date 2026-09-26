@@ -60,7 +60,55 @@ PC_COOKIE_PAYLOAD = json.dumps(
 )
 CREATOR_COOKIE_PAYLOAD = json.dumps({"a1": "a1-value", "galaxy_creator_session_id": "creator-session"})
 
+#: `creator_with_www` **自己的** www 会话（v1.31 夹具的修正，2026-09-26）。
+#:
+#: ⚠️ 原来它直接复用 `PC_COOKIE_PAYLOAD` —— 也就是 `metrics_pc` 那一份 www 会话。
+#: `FakeProfileAdapter` 会把**被 check 的账号**回写成桩返回的 `user_id`，于是两个
+#: 账号都被写成 `PC_EXTERNAL_USER_ID`：在旧唯一键（含 `sub_type`）下侥幸不冲突，
+#: 2026-09-26 唯一键改成**按小红书 ID**之后立刻撞约束 —— 而夹具当时说的其实是
+#: 「这两个账号是同一个人」，那本来就是错的：每个账号有**自己的** www 会话。
+CREATOR_WITH_WWW_PC_COOKIE_PAYLOAD = json.dumps(
+    {
+        "a1": "creator-with-www-a1",
+        "web_session": "creator-with-www-session",
+        "id_token": "creator-with-www-id-token",
+    }
+)
+
+#: `creator_with_www` 的 **creator** 通道 jar（也必须与 `creator_only` 的不同，
+#: 理由同下：健康检查拿这条 jar 调 `get_user_info`，桩按 jar 给身份）。
+CREATOR_WITH_WWW_CREATOR_COOKIE_PAYLOAD = json.dumps(
+    {
+        "a1": "creator-with-www-a1",
+        "galaxy_creator_session_id": "creator-with-www-session",
+    }
+)
+
+#: `failed_pc` 的 www 会话（同样必须与 `metrics_pc` 的不同 —— 见上）。
+FAILED_PC_COOKIE_PAYLOAD = json.dumps(
+    {"a1": "failed-pc-a1", "web_session": "failed-pc-session", "id_token": "failed-pc-id-token"}
+)
+
 PC_EXTERNAL_USER_ID = "5bdc4dddd7773d0001d028f2"
+CREATOR_ONLY_EXTERNAL_USER_ID = "6a5f63a4000000000f03b802"
+FAILED_PC_EXTERNAL_USER_ID = "6f2a1b3c4d5e6f708192a3b4"
+
+
+def identity_for_jar(text: str) -> str:
+    """一份 Cookie jar → 它**自己的**小红书 ID（两个桩共用的唯一实现）。
+
+    ⚠️ 桩必须**按 jar 给身份**，不能一个常量返给所有账号：`/check` 会把探测到的
+    身份**回写**账号行，常量于是把多行写成同一个小红书 ID —— 旧唯一键含 `sub_type`
+    把这件事遮住了，2026-09-26 键改成「按小红书 ID」后立刻撞
+    `uq_platform_accounts_xhs_identity`。语义上更是错的：**每个账号有自己的会话**。
+    """
+    if "creator-with-www" in text:
+        return CREATOR_WITH_WWW_EXTERNAL_USER_ID
+    if "galaxy_creator_session_id" in text:
+        return CREATOR_ONLY_EXTERNAL_USER_ID
+    if "failed-pc" in text:
+        return FAILED_PC_EXTERNAL_USER_ID
+    return PC_EXTERNAL_USER_ID
 
 #: v1.31 夹具：creator_with_www 的 external_user_id。**不能与 PC_EXTERNAL_USER_ID
 #: 相同** —— 唯一键含 sub_type 看似不冲突，但 `/check` 的登录适配器桩对**所有**
@@ -88,7 +136,14 @@ class FakeProfileAdapter:
 
     def get_self_profile(self, cookies_text: str):
         FakeProfileAdapter.calls["profile"] = FakeProfileAdapter.calls.get("profile", 0) + 1
-        return True, "", {"data": {"user_id": PC_EXTERNAL_USER_ID, "nickname": "我的号"}}
+        # 身份跟着**手里这份 www 会话**走，不是一个常量返给所有账号 ——
+        # 常量会把两个账号回写成同一个小红书 ID（= 撞新唯一键，且语义上是错的）。
+        user_id = (
+            CREATOR_WITH_WWW_EXTERNAL_USER_ID
+            if "creator-with-www" in cookies_text
+            else PC_EXTERNAL_USER_ID
+        )
+        return True, "", {"data": {"user_id": user_id, "nickname": "我的号"}}
 
     def get_other_info(self, cookies_text: str, user_id: str):
         FakeProfileAdapter.calls.setdefault("otherinfo_users", []).append(user_id)
@@ -111,7 +166,7 @@ class FakePcLoginAdapter:
 
     def get_user_info(self, cookies: dict):
         return {
-            "external_user_id": PC_EXTERNAL_USER_ID,
+            "external_user_id": identity_for_jar(json.dumps(cookies or {}, ensure_ascii=False)),
             "nickname": "我的号",
             "avatar_url": "https://cdn.example/avatar.jpg",
             "profile": {"red_id": "293066917"},
@@ -208,7 +263,7 @@ def _setup(tmp_path, mode: str = "ok"):
             # `PC_EXTERNAL_USER_ID`，等于造了「同一小红书账号存在两条 pc 行」——
             # 这在现实中**不可能**，而它恰好和当时的缺陷（表上无唯一约束）互相掩护：
             # 约束一加上，夹具立刻插不进去。属于「**夹具变成缺陷的共谋**」的又一例。
-            external_user_id="6f2a1b3c4d5e6f708192a3b4",
+            external_user_id=FAILED_PC_EXTERNAL_USER_ID,
             nickname="上次同步失败的号",
             status="active",
             # 上一次同步留下的好数据：本轮失败**不得**把它擦掉
@@ -227,12 +282,16 @@ def _setup(tmp_path, mode: str = "ok"):
                 # creator-only：creator jar 落在 **creator 通道**（按 jar 形态判定，
                 # 与生产写入同一条路径）—— 它没有 www 会话，取不到计数。
                 cookie_version(creator_only.id, CREATOR_COOKIE_PAYLOAD, CHANNEL_CREATOR),
-                # creator + www 两个通道并存（一行信封包两个平台）
+                # creator + www 两个通道并存（一行信封包两个平台）；
+                # www 那一份是**它自己的**会话（见 CREATOR_WITH_WWW_PC_COOKIE_PAYLOAD）。
                 cookie_version_multi(
                     creator_with_www.id,
-                    {CHANNEL_CREATOR: CREATOR_COOKIE_PAYLOAD, CHANNEL_WWW: PC_COOKIE_PAYLOAD},
+                    {
+                        CHANNEL_CREATOR: CREATOR_WITH_WWW_CREATOR_COOKIE_PAYLOAD,
+                        CHANNEL_WWW: CREATOR_WITH_WWW_PC_COOKIE_PAYLOAD,
+                    },
                 ),
-                cookie_version(failed_pc.id, PC_COOKIE_PAYLOAD, CHANNEL_WWW),
+                cookie_version(failed_pc.id, FAILED_PC_COOKIE_PAYLOAD, CHANNEL_WWW),
             ]
         )
         db.commit()

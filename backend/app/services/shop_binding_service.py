@@ -166,6 +166,77 @@ def attach_shop(db: Session, account: PlatformAccount, shop_row: Shop) -> None:
     account.shop_id_fk = shop_row.id
 
 
+class ShopBindError(Exception):
+    """绑店失败（**业务结果**，不是程序错误）。
+
+    `code` / `status_code` 由 HTTP 层原样映射（409 + 可读原因），
+    与 `AccountRejectedError` 同型：调用点不再各写一套 `if/raise`。
+    """
+
+    code = "QIANFAN_SHOP_BIND_FAILED"
+    status_code = 409
+
+    def __init__(self, message: str, *, code: str | None = None):
+        super().__init__(message)
+        if code:
+            self.code = code
+
+
+def bind_shop_for_account(
+    db: Session,
+    *,
+    user_id: int,
+    account: PlatformAccount,
+    shop_user_id: str,
+    shop_name: str,
+) -> Shop:
+    """把千帆店铺绑到账号上（关系 + 状态）。**这是全项目唯一的绑店实现。**
+
+    ## 为什么要有它（2026-09-26 用户实测）
+
+    原先只有 `POST /qianfan/bind`（用户手动粘贴 Cookie）建关系，而
+    **扫码 / 邮箱密码登录这两条路只写令牌**。于是「补登千帆成功」之后账号仍然
+    `shop_id_fk IS NULL`：我的笔记页与商品列表照旧显示
+    「当前账号尚未绑定店铺」，用户明明刚在同一个弹窗里登录过。
+    登录时已经把店铺信息读出来了（`get_shop_info`），不落关系等于白读。
+
+    幂等：重复绑同一个店 = 重新验一次凭据（`upsert_shop` 只更新非空店名）。
+
+    :raises ShopBindError: 店铺已被**别的**账号占用（1:1 闸）。
+    """
+    if not (shop_user_id or shop_name):
+        raise ShopBindError(
+            "千帆响应中既没有店铺名也没有店铺 ID，无法确认绑定对象",
+            code="QIANFAN_SHOP_UNKNOWN",
+        )
+    shop_row = upsert_shop(db, user_id, seller_id=shop_user_id, shop_name=shop_name)
+
+    # 1:1 闸（用户 2026-09-22 口径：不允许「同店铺、多账号」）。DB 层另有部分唯一索引
+    # `uq_platform_accounts_shop_id_fk` 兜底；这里是为了给一句人话，而不是让用户
+    # 看到一句 IntegrityError。
+    holder = account_for_shop(db, shop_row.id, user_id=user_id)
+    if holder is not None and holder.id != account.id:
+        raise ShopBindError(
+            f"店铺「{shop_row.shop_name or shop_row.seller_id}」已经绑在账号"
+            f"「{holder.nickname or holder.id}」上。一个店铺只能绑一个账号，"
+            "请先在那个账号上解绑。",
+            code="QIANFAN_SHOP_TAKEN",
+        )
+    # 全库范围再查一次：唯一索引是**全局**的，而上面的归属闸是**租户内**的。
+    foreign_holder = any_account_for_shop(db, shop_row.id)
+    if foreign_holder is not None and foreign_holder.id != account.id:
+        raise ShopBindError(
+            f"店铺「{shop_row.shop_name or shop_row.seller_id}」已被另一个账号占用"
+            "（可能是历史测试数据留下的引用）。请在那个账号上解绑，或联系管理员清理。",
+            code="QIANFAN_SHOP_TAKEN",
+        )
+
+    attach_shop(db, account, shop_row)
+    # 刚用这份 Cookie 验过 ⇒ `active`，旧原因一并清掉。
+    set_shop_state(account, status="active", status_message="")
+    return shop_row
+
+
 def detach_shop(db: Session, account: PlatformAccount) -> int:
     """解除**本账号**与店铺的关联，并删掉它的本地商品映射。返回删除的映射行数。
 

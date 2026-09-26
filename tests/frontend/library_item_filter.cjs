@@ -45,10 +45,15 @@ const MUTATIONS = {
     to: "item_id: platformOrFilters.item_id,",
   },
   // library：URL 初值读取被删 ⇒ 弹窗跳转进来筛选不生效（用户二次报告的形态）
+  // ⚠️ 2026-09-26 重锚：原锚点写成 `() => new URLSearchParams(...)`，而真实源码是
+  //    `() =>\n    new URLSearchParams(...)`（换行，不是空格）⇒ **锚点失配**，
+  //    脚本以 rc=1 的 "FATAL 变异锚点未命中" 退出。那既不是契约变红、也不是变异承重，
+  //    接进 pytest 后会被「必须出现 FAIL 行」的断言抓住（假红）。锚点取源码唯一的
+  //    读取表达式本身，不带箭头函数前缀。
   urlinit: {
     file: "library",
-    from: '() => new URLSearchParams(window.location.search).get("item_id") ?? ""',
-    to: '() => ""',
+    from: 'new URLSearchParams(window.location.search).get("item_id") ?? ""',
+    to: '""',
   },
   // library：currentFilters 丢掉 item_id ⇒ 输入框改了也不发给后端
   cfilter: {

@@ -108,29 +108,44 @@ def test_upsert_same_identity_twice_keeps_exactly_one_row(tmp_path):
     assert first.id == second.id
 
 
-def test_pc_and_creator_stay_two_rows_same_identity(tmp_path):
-    """同一小红书账号的 `pc` / `creator` 必须**仍是两行**（别「顺手合并」）。
+def test_pc_and_creator_share_one_row_and_keep_the_stronger_link(tmp_path):
+    """同一小红书账号的 `pc` / `creator` 链路**合并成一行**，且保住更强的链路。
 
-    两条链路是**有意**的（`_sync_creator_account_from_pc_cookie` 会从 PC Cookie 派生
-    创作者账号；卡片上明确区分「类型」），且发布闸门要求 `sub_type == "creator"`。
-    唯一键若不含 `sub_type`，这里会被合成一条、**丢掉发布能力**。
+    ⚠️ 本条**取代** `test_pc_and_creator_stay_two_rows_same_identity`
+    （2026-09-26 用户口径：「数据库任何场景下账号信息表，根据账号小红书 ID 均不允许
+    出现重复多行账号信息」；真实故障：同一个账号先按「PC」扫码、再按「创作者平台」
+    扫码，卡片上出现「两个相同的账号信息」，只差一个「类型」）。
+
+    原用例断言「同一身份必须两行」，理由是「发布闸门要求
+    `sub_type == "creator"`」—— 理由没错，**结论错了**：保住发布能力的正确做法是
+    合并时取更强的链路（`creator` > `qianfan` > `pc`），而不是让同一个账号占两行。
+    两条链路的令牌仍各在自己的通道里（`www` / `creator`），一个都没丢 ——
+    真正的能力来自**令牌通道**，不是行数。
     """
     SessionLocal, _headers, user_id = _wire(tmp_path)
     info = {"external_user_id": "ext-same", "nickname": "双链路号", "avatar_url": "", "profile": {}}
     db = SessionLocal()
     try:
-        for sub_type in ("pc", "creator"):
-            upsert_platform_account_from_login(
-                db=db, user_id=user_id, platform="xhs", sub_type=sub_type,
-                user_info=info, cookies_text=COOKIE_PAYLOAD,
+        # 两种顺序都要成立：合并方向由**能力**决定，不由写入顺序决定。
+        for order in (("pc", "creator"), ("creator", "pc")):
+            for sub_type in order:
+                upsert_platform_account_from_login(
+                    db=db, user_id=user_id, platform="xhs", sub_type=sub_type,
+                    user_info={**info, "external_user_id": f"ext-{order[0]}"},
+                    cookies_text=COOKIE_PAYLOAD,
+                )
+                db.commit()
+            rows = db.scalars(
+                select(PlatformAccount).where(
+                    PlatformAccount.external_user_id == f"ext-{order[0]}"
+                )
+            ).all()
+            assert len(rows) == 1, f"同一小红书 ID 落了两行：{[r.id for r in rows]}"
+            assert rows[0].sub_type == "creator", (
+                f"顺序 {order} 下链路被降级成 {rows[0].sub_type!r} —— 发布会因此不可用"
             )
-            db.commit()
-        rows = db.scalars(select(PlatformAccount)).all()
     finally:
         db.close()
-
-    assert len(rows) == 2
-    assert {r.sub_type for r in rows} == {"pc", "creator"}
 
 
 def test_empty_external_id_falls_back_to_nickname(tmp_path):

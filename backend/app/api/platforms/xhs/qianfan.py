@@ -55,10 +55,10 @@ from backend.app.services.sync_task_service import (
 )
 from backend.app.services.note_cleanup_service import CandidateQuery, list_candidates
 from backend.app.services.shop_binding_service import (
+    ShopBindError,
     account_for_shop,
     account_shop_id,
-    any_account_for_shop,
-    attach_shop,
+    bind_shop_for_account,
     detach_shop,
     get_shop_state,
     qianfan_cookies_for_account,
@@ -66,7 +66,6 @@ from backend.app.services.shop_binding_service import (
     shop_for_account,
     shops_for_user,
     synced_note_count,
-    upsert_shop,
 )
 from backend.app.models.user import User
 
@@ -332,56 +331,26 @@ def bind_shop(
             detail="千帆响应中既没有店铺名也没有店铺 ID，无法确认绑定对象",
         )
 
-    # ① 店铺实体：按 (user_id, seller_id) 取或建（同一平台卖家 ID 在不同用户下是不同实体）。
-    shop_row = upsert_shop(
-        db,
-        current_user.id,
-        seller_id=shop["shop_user_id"],
-        shop_name=shop["shop_name"],
-    )
-
-    # ② **1:1 闸**（用户 2026-09-22 口径：不允许「同店铺、多账号」）：这个店若已被
-    #    **别的**账号占用 → 409 + 可读原因。DB 层另有部分唯一索引
-    #    `uq_platform_accounts_shop_id_fk` 兜底；这里是为了给一句人话，
-    #    而不是让用户看到一句 IntegrityError。
-    holder = account_for_shop(db, shop_row.id, user_id=current_user.id)
-    if holder is not None and holder.id != account.id:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "code": "QIANFAN_SHOP_TAKEN",
-                "message": (
-                    f"店铺「{shop_row.shop_name or shop_row.seller_id}」已经绑在账号"
-                    f"「{holder.nickname or holder.id}」上。一个店铺只能绑一个账号，"
-                    "请先在那个账号上解绑。"
-                ),
-            },
+    # ①~③ 店铺实体 + 1:1 闸 + 关系 + 状态：**唯一实现**在 service 层
+    #     （扫码 / 邮箱密码登录两条路走的是同一份 —— 2026-09-26 收敛）。
+    try:
+        bind_shop_for_account(
+            db,
+            user_id=current_user.id,
+            account=account,
+            shop_user_id=shop["shop_user_id"],
+            shop_name=shop["shop_name"],
         )
-    # ②b 全库范围再查一次：唯一索引是**全局**的，而上面的归属闸是**租户内**的。
-    #     一条别的租户的残留引用会让 DB 拒绝写入，而租户闸看不见它 —— 不补这一查，
-    #     用户拿到的是 500 + IntegrityError 原文，而不是一句能自救的话。
-    foreign_holder = any_account_for_shop(db, shop_row.id)
-    if foreign_holder is not None and foreign_holder.id != account.id:
+    except ShopBindError as exc:
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "code": "QIANFAN_SHOP_TAKEN",
-                "message": (
-                    f"店铺「{shop_row.shop_name or shop_row.seller_id}」已被另一个账号占用"
-                    "（可能是历史测试数据留下的引用）。请在那个账号上解绑，或联系管理员清理。"
-                ),
-            },
-        )
-
-    # ③ 关系：写账号行的外键（幂等 —— 重复绑同一个店就是重验一次凭据）。
-    attach_shop(db, account, shop_row)
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
 
     # ④ 凭据：写账号自己的通道。**平台由 jar 形态判定**（千帆 jar 带
     #    `access-token-ark.*` ⇒ 落 `ark` 通道），不由这里写死 —— 写死 = 造第二份真相源。
     store_channel_cookies(db=db, account=account, cookies_text=cookies)
 
-    # ⑤ 状态：刚用这份 Cookie 验过 ⇒ `active`，旧原因一并清掉。
-    set_shop_state(account, status="active", status_message="")
     db.commit()
     db.refresh(account)
     return _account_shop_summary(db, account)

@@ -23,11 +23,15 @@
  * Run (jsdom is intentionally NOT a project dependency):
  *
  *   <node> tests/frontend/qr_session_identity.cjs                 # expect 9 PASS
- *   QR_MUTATE=old <node> tests/frontend/qr_session_identity.cjs   # expect 4 FAIL
+ *   QR_MUTATE=old <node> tests/frontend/qr_session_identity.cjs   # expect 3 FAIL
  *
  * The second form strips the three guards in memory as esbuild loads the
  * component, which is what proves the guards are load-bearing.  With jsdom
  * installed outside the project, point NODE_PATH at its node_modules.
+ *
+ * 2026-09-26：本文件此前**没有被任何 pytest 用例执行**（只在
+ * `test_testing_spec_guards.py` 的参数列表里被"提到"，而那条守卫只查子串出现），
+ * 现已接线到 `tests/backend/test_login_state.py`（契约 + 变异各跑一次）。
  */
 const path = require("path");
 // tests/frontend/qr_session_identity.cjs -> project root

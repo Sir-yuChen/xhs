@@ -2419,7 +2419,16 @@ def test_migration_c2d3e4f5a6b7_renames_cleanup_job(tmp_path):
     finally:
         conn.close()
 
-    assert version == "f5a6b7c8d9e0", "迁移链前进到新 head"
+    # ⚠️ **不要写死 head 字符串**（原来写的是当时的 `f5a6b7c8d9e0`）：每加一条迁移
+    # 这条断言都会红，而它真正要钉的只有「upgrade 之后 alembic_version 停在 head」——
+    # 写死把「链没前进」与「head 变了」混成同一个红。现在从迁移目录现算。
+    from alembic.config import Config as AlembicConfig
+    from alembic.script import ScriptDirectory
+
+    expected_head = ScriptDirectory.from_config(
+        AlembicConfig("backend/alembic.ini")
+    ).get_current_head()
+    assert version == expected_head, "迁移链前进到新 head"
     # ① 旧键行改名（不新增行 —— 一任务两行会让种子再补一份、清理跑两遍）
     assert jobs == [
         (1, "队列记录清理", "system.queue_record_cleanup"),

@@ -63,3 +63,44 @@ def normalize_sub_type(sub_type: Optional[str]) -> str:
 def is_known_sub_type(sub_type: Optional[str]) -> bool:
     """判断取值是否可被安全路由（供校验层使用，不做归一）。"""
     return sub_type is None or sub_type == "" or sub_type in SUB_TYPES
+
+
+#: 链路**能力强弱**（合并同一小红书身份的多个链路时取最大者）。
+#:
+#: 为什么不复用 `SUB_TYPES` / `normalize_sub_type`：那两个的契约是「未知取值显式失败」
+#: （它们是路由开关，选错会打错域名）；本表是**合并 / 迁移**用的，遇到历史取值
+#: （例如库里真实存在的 `qianfan`）必须给出确定答案，而不是把一次建号变成 500。
+LINK_RANK: dict[str, int] = {
+    "pc": 1,
+    #: 千帆链路：只有 B 端会话，不参与发布，但强于纯网页版。
+    "qianfan": 2,
+    #: 创作者链路：**发布唯一可用的链路**（`ensure_creator_account_for_publish` 要求它）。
+    "creator": 3,
+}
+
+
+def strongest_sub_type(*values: Optional[str]) -> str:
+    """一组链路取值里**能力最强**的那个（未知 / 空值按最弱处理）。
+
+    ## 谁需要它（2026-09-26，用户口径「同一小红书 ID 不允许出现多行账号」）
+
+    建号时不再按 `(…, sub_type, external_user_id)` 找行，而是**按小红书 ID**
+    找 —— 于是「同一个账号先按 PC 扫、再按创作者平台扫」会命中**同一行**，
+    那一行的 `sub_type` 必须取两条链路里更强的那个：
+
+    * 取 `pc` ⇒ **静默丢掉发布能力**（发布闸门要求 `sub_type == "creator"`）；
+    * 取 `creator` ⇒ 两条链路的令牌都在各自的通道里，一个都不少。
+
+    这也是「一个账号、多平台令牌」模型该有的结论：链路只影响**怎么打平台**，
+    不影响「这是几个账号」。
+    """
+    best = ""
+    best_rank = -1
+    for value in values:
+        text = (value or "").strip()
+        if not text:
+            continue
+        rank = LINK_RANK.get(text, 0)
+        if rank > best_rank:
+            best, best_rank = text, rank
+    return best

@@ -102,6 +102,19 @@ export function RenewLoginModal({ target, onClose, onRenewed }: RenewLoginModalP
     ? method
     : methodOptions[0].value;
 
+  /**
+   * 补登成功：刷新卡片标签 **+ 关掉弹窗**（2026-09-26 用户口径
+   * 「补齐登录令牌补登成功之后……应自动关闭弹窗」）。
+   *
+   * 三个面板只在**真正成功**时才回调（失败走各自的 inline 说明 / toast，
+   * `renew_error` 分支更是直接 return）—— 所以这里不必再判一次成败，
+   * 判两次等于两处各自以为对方在判。
+   */
+  function handleRenewed(accountId: number) {
+    onRenewed(accountId);
+    onClose();
+  }
+
   return (
     <Modal
       open={target !== null}
@@ -140,8 +153,8 @@ export function RenewLoginModal({ target, onClose, onRenewed }: RenewLoginModalP
               targetAccountId={target.account.id}
               onConfirmed={() => undefined}
               // 成功与否都由面板自己说（它会渲染「已把新令牌写入…」或后端给的真原因）；
-              // 这里只负责让卡片上的标签跟着刷新。
-              onRenewed={(account) => onRenewed(account?.id ?? target.account.id)}
+              // 这里负责让卡片标签刷新 + 关窗。
+              onRenewed={(account) => handleRenewed(account?.id ?? target.account.id)}
             />
           ) : effectiveMethod === "phone" ? (
             <PhoneLoginPanel
@@ -154,7 +167,7 @@ export function RenewLoginModal({ target, onClose, onRenewed }: RenewLoginModalP
             <QianfanEmailLoginPanel
               targetAccountId={target.account.id}
               onConfirmed={() => undefined}
-              onRenewed={(id) => onRenewed(id)}
+              onRenewed={(id) => handleRenewed(id)}
             />
           )}
         </div>

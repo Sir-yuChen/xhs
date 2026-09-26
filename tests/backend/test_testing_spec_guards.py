@@ -193,6 +193,57 @@ def test_conftest_fixtures_are_really_shared():
         assert hasattr(shared, name), f"conftest 缺少 fixture: {name}"
 
 
+def _strip_py_noise(source: str) -> str:
+    """去掉三引号字符串与 `#` 行注释 —— 免得「文档字符串 / 注释里提一句」算接线证据。
+
+    ⚠️ 2026-09-26 变异验证实录：只去文档字符串时，`test_login_state.py` 里一句
+    `# 2026-09-26 接线：qr_session_identity.cjs（…）` 的注释**仍被算成接线**
+    （判定只有 `script in code`，而 `script` 是裸文件名）⇒ 把真接线常量整段删掉，
+    守卫依然绿。所以判定必须同时收紧到**路径形态 / 调用形态**，并去掉行注释。
+    """
+    source = re.sub(r'"""(?:.|\n)*?"""', "", source)
+    source = re.sub(r"'''(?:.|\n)*?'''", "", source)
+    return re.sub(r"(?m)#.*$", "", source)
+
+
+def _executes_node(code: str) -> bool:
+    """该测试文件是否真的会拉起一个 node 进程（行为脚本的唯一执行通路）。"""
+    return bool(re.search(r"subprocess\.(run|Popen)\(", code)) or "frontend_runner(" in code
+
+
+def _mentions(script: str, code: str) -> bool:
+    """`code` 里是否有**执行形态**的引用（裸文件名出现在注释里不算）。
+
+    两种形态都要认：
+    * `ROOT / "tests/frontend/x.cjs"` / `XXX_SCRIPT = "tests/frontend/x.cjs"`（路径形态）
+    * `frontend_runner("x.cjs")`（调用形态，conftest 夹具直接吃文件名）
+    """
+    if f"tests/frontend/{script}" in code:
+        return True
+    return bool(re.search(r'frontend_runner\(\s*"' + re.escape(script) + r'"', code))
+
+
+def _wired_by(script: str) -> list[str]:
+    """哪些测试文件**在执行形态上**引用了 `script`，且该文件真的会跑 node。
+
+    ⚠️ 两点都比字面看起来重要：
+
+    * **必须排除本文件**：`THIS_FILE` 的 parametrize 参数列表里就写着这些脚本名，
+      把它算进 haystack ⇒ 断言对每个条目恒真（**这条守卫 2026-09-24 建起到
+      2026-09-26 一直是恒真的**：`library_item_filter.cjs` 与
+      `qr_session_identity.cjs` 当时都没有任何 pytest 用例执行过）。
+    * **必须去掉文档字符串与注释**，且只认执行形态（见 `_mentions`）。
+    """
+    hits: list[str] = []
+    for path in sorted(BACKEND_DIR.glob("test_*.py")):
+        if path.name == THIS_FILE:
+            continue
+        code = _strip_py_noise(path.read_text(encoding="utf-8", errors="ignore"))
+        if _mentions(script, code) and _executes_node(code):
+            hits.append(path.name)
+    return hits
+
+
 @pytest.mark.parametrize(
     "script",
     [
@@ -212,18 +263,26 @@ def test_conftest_fixtures_are_really_shared():
     ],
 )
 def test_every_behaviour_script_is_wired_into_pytest(script: str):
-    """每个 `.cjs` 都必须被 pytest 调用到（否则它只是个没人跑的文件）。
+    """每个 `.cjs` 都必须被某个测试文件的**可执行代码**引用（否则它只是个没人跑的文件）。
 
     DEF-063 同型：脚本存在 ≠ 在被守。`qr_session_identity.cjs` 就曾经因为
     mock 桩缺导出而**打包期即死**，整脚本长期空转还没人发现。
     """
-    haystack = ""
-    for path in sorted(BACKEND_DIR.glob("test_*.py")):
-        haystack += path.read_text(encoding="utf-8", errors="ignore")
-    assert script in haystack, (
-        f"{script} 没有被任何 pytest 文件引用 ⇒ 它不在守卫范围内。"
-        "要么接线，要么删掉。"
+    wired = _wired_by(script)
+    assert wired, (
+        f"{script} 没有被任何 pytest 文件的**可执行代码**引用 ⇒ 它不在守卫范围内。"
+        "要么接线，要么删掉。（只在文档字符串 / 本守卫的参数列表里出现不算。）"
     )
+
+
+def test_wiring_guard_is_not_vacuous():
+    """守卫自检：一个不存在的脚本名必须判「没接线」。
+
+    没有这条，把判定写宽（比如又把本文件算进 haystack）就会**静默退化成恒真** ——
+    这条守卫正是这么退化了整整两天。一个永远 PASS 的校验脚本和没有校验一样。
+    """
+    assert _wired_by("definitely_not_a_behaviour_script.cjs") == []
+
 
 
 # ---------------------------------------------------------------------------

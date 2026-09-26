@@ -693,14 +693,17 @@ def upsert_platform_account_from_login(
 ) -> tuple[PlatformAccount, str]:
     """**所有建号路径的唯一写入点**（登录 / Cookie 导入 / PC→创作者派生）。
 
-    身份键（I1，台账 §4.9）= `(user_id, platform, sub_type, external_user_id)`，
-    与 DB 层的部分唯一索引 `uq_platform_accounts_identity` **同口径**。
+    身份键（I1，台账 §4.9）= `(user_id, platform, external_user_id)` —— **按小红书账号 ID**，
+    与 DB 层的部分唯一索引 `uq_platform_accounts_xhs_identity` **同口径**。
 
     三个容易写错的地方：
 
-    * **`sub_type` 必须在键里**：同一小红书账号的 `pc` 与 `creator` 是两条**合法链路**
-      （`_sync_creator_account_from_pc_cookie()` 有意派生、卡片上明确区分「类型」），
-      合成一条会丢掉发布能力。
+    * **`sub_type` 不在键里**（2026-09-26 用户口径：同一个小红书 ID 不允许两行）。
+      同一账号的 `pc` 与 `creator` 是两条**合法链路**，但它们是**同一行**的两条链路：
+      令牌各在自己的通道（`www` / `creator` / `ark`），`sub_type` 这一列记录
+      **更强**的那条（`creator` > `qianfan` > `pc`）。⚠️ 若取 `pc`，
+      发布能力会被**静默丢掉**（发布闸门要求 `sub_type == "creator"`），
+      所以合并方向由 `account_types.strongest_sub_type()` 决定，不靠写入顺序。
     * **必须能命中软删行**：账号删除是软删（I3）。这里**故意不过滤 `deleted_at`**，
       命中后把 `deleted_at` 清空即「复活」—— 这正是「删了再导入又来一条」的根治办法。
     * **`external_user_id` 为空时降级匹配**：空 id 不参与唯一索引（部分索引），
@@ -714,16 +717,27 @@ def upsert_platform_account_from_login(
     """
     external_user_id = user_info.get("external_user_id", "") or ""
     nickname = user_info.get("nickname", "") or ""
+    # 合并同一身份的两条链路时要挑「更强的那条」，判定只有一份实现
+    from backend.app.core.account_types import strongest_sub_type
+
     account = None
     if external_user_id:
-        account = db.scalar(
-            select(PlatformAccount).where(
+        # ⚠️ **身份键不含 `sub_type`**（2026-09-26 用户口径）：按**小红书账号 ID** 找行。
+        # 含 sub_type 时，同一个账号先按「PC」扫、再按「创作者平台」扫就会各建一行，
+        # 卡片上看起来是「两个相同的账号信息」（真实库实测：同 external_user_id、
+        # 同昵称、同小红书号）。与 DB 部分唯一索引 `uq_platform_accounts_xhs_identity`
+        # **逐字同口径** —— 两处不一致的后果是「本地检查放行、DB 约束拒绝」，
+        # 用户看到 500 而不是一行结果。
+        account = db.scalars(
+            select(PlatformAccount)
+            .where(
                 PlatformAccount.user_id == user_id,
                 PlatformAccount.platform == platform,
-                PlatformAccount.sub_type == sub_type,
                 PlatformAccount.external_user_id == external_user_id,
             )
-        )
+            .order_by(PlatformAccount.id)
+            .limit(1)
+        ).first()
     elif nickname:
         account = db.scalar(
             select(PlatformAccount).where(
@@ -749,10 +763,17 @@ def upsert_platform_account_from_login(
             created_at=now,
         )
         db.add(account)
-    elif account.deleted_at is not None:
-        # 复活：身份行一直在位，唯一索引因此永久成立
-        account.deleted_at = None
-        action = "restored"
+    else:
+        # 第二条链路合到同一行：`sub_type` 取更强的那个。
+        # ⚠️ 取 `pc` 会**静默丢掉发布能力**（发布闸门要求 `sub_type == "creator"`），
+        # 所以这里不允许「后写的覆盖先写的」。
+        merged = strongest_sub_type(account.sub_type, sub_type)
+        if merged and account.sub_type != merged:
+            account.sub_type = merged
+        if account.deleted_at is not None:
+            # 复活：身份行一直在位，唯一索引因此永久成立
+            account.deleted_at = None
+            action = "restored"
 
     account.nickname = nickname or account.nickname or ""
     account.avatar_url = user_info.get("avatar_url", "") or account.avatar_url or ""

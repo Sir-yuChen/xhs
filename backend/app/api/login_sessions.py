@@ -28,7 +28,11 @@ from backend.app.services.account_service import (
     store_channel_cookies,
     upsert_platform_account_from_login,
 )
-from backend.app.services.shop_binding_service import shop_for_account
+from backend.app.services.shop_binding_service import (
+    ShopBindError,
+    bind_shop_for_account,
+    shop_for_account,
+)
 
 router = APIRouter(prefix="/xhs/login-sessions", tags=["xhs-login-sessions"])
 
@@ -265,18 +269,54 @@ def _qianfan_shop_user_info(shop: dict) -> dict:
     }
 
 
+def _bind_login_shop(
+    *,
+    db: Session,
+    user_id: int,
+    account: PlatformAccount,
+    shop: dict,
+) -> dict | None:
+    """登录成功后**顺手建立店铺关系**，返回失败原因（成功为 `None`）。
+
+    ## 为什么登录要建店（2026-09-26 用户实测）
+
+    扫码 / 邮箱密码登录本来就已经把店铺信息读出来了（`get_shop_info`），
+    但只有 `POST /qianfan/bind`（手动粘 Cookie）会把它写进
+    `platform_accounts.shop_id_fk`。于是「补登千帆成功」之后，我的笔记页与
+    商品列表照旧显示「当前账号尚未绑定店铺」—— 用户刚在同一个弹窗里登录过，
+    页面却说没绑。登录成功就把它绑上，是这两件事本来就该有的关系。
+
+    **绑店失败（店已被别的账号占用等）不算登录失败**：令牌已经落库、账号已经建好，
+    只把原因回给界面（登录是登录，绑店是绑店，两件事的失败不该互相连带）。
+    """
+    try:
+        bind_shop_for_account(
+            db,
+            user_id=user_id,
+            account=account,
+            shop_user_id=str(shop.get("shop_user_id") or ""),
+            shop_name=str(shop.get("shop_name") or ""),
+        )
+    except ShopBindError as exc:
+        logger.warning("[login] qianfan shop bind skipped: %s", exc)
+        return {"code": exc.code, "message": str(exc)}
+    return None
+
+
 def _create_qianfan_account_from_login(
     *,
     db: Session,
     user_id: int,
     cookies: dict,
     qianfan_adapter: Any,
-) -> tuple[PlatformAccount | None, str, dict]:
+) -> tuple[PlatformAccount | None, str, dict, dict | None]:
     """千帆登录**建号**（扫码 / 邮箱密码共用，设计 13 §18.15.3）。
 
-    返回 `(account, action, shop)`；读店铺信息失败时 `account` 为 `None` 且
-    **什么都不写**（令牌都没落库 —— 建不了号的令牌对用户没有意义，
+    返回 `(account, action, shop, bind_error)`；读店铺信息失败时 `account` 为 `None`
+    且**什么都不写**（令牌都没落库 —— 建不了号的令牌对用户没有意义，
     落下去只会多一个「千帆已登录却不知道是谁」的半成品行）。
+
+    `bind_error` 只在「账号建好了但店铺没绑上」时非空（见 `_bind_login_shop`）。
     """
     try:
         shop = qianfan_adapter.get_shop_info(cookies)
@@ -285,7 +325,7 @@ def _create_qianfan_account_from_login(
         return None, "", {
             "code": "QIANFAN_SHOP_UNVERIFIED",
             "message": f"登录成功，但读取千帆店铺信息失败（{exc}）—— 本次没有保存任何令牌。",
-        }
+        }, None
     account, action = upsert_platform_account_from_login(
         db=db,
         user_id=user_id,
@@ -294,7 +334,8 @@ def _create_qianfan_account_from_login(
         user_info=_qianfan_shop_user_info(shop),
         cookies_text=_dump_json(cookies),
     )
-    return account, action, shop
+    bind_error = _bind_login_shop(db=db, user_id=user_id, account=account, shop=shop)
+    return account, action, shop, bind_error
 
 
 #: 续期时**扫到的账号与目标账号不是同一个**（设计 13 §18.8 决定 ③A：报错让用户重扫）。
@@ -415,7 +456,7 @@ def _renew_qianfan_from_login(
         return None, "", {
             "code": RENEW_TARGET_UNAVAILABLE,
             "message": "要续期的账号不存在、不属于你，或已被删除 —— 本次没有保存任何令牌。",
-        }
+        }, None
 
     try:
         shop = qianfan_adapter.get_shop_info(cookies)
@@ -424,7 +465,7 @@ def _renew_qianfan_from_login(
         return None, "", {
             "code": "RENEW_QIANFAN_UNVERIFIED",
             "message": f"扫码成功，但用这份令牌读取千帆店铺信息失败（{exc}）—— 本次没有保存任何令牌。",
-        }
+        }, None
 
     linked_shop = shop_for_account(db, account.id)
     if (
@@ -440,12 +481,16 @@ def _renew_qianfan_from_login(
                 f"与这个账号已绑定的「{linked_shop.shop_name or linked_shop.seller_id}」不是同一个。"
                 "本次**没有保存任何令牌** —— 请重新扫描正确店铺的二维码。"
             ),
-        }
+        }, None
 
     cookies_text = _dump_json(cookies)
     channel = channel_for_cookies(cookies_text)
     store_channel_cookies(db=db, account=account, cookies_text=cookies_text)
-    return account, channel, shop
+    # 登录即建店（2026-09-26）：**「第一次给这个账号补千帆令牌」这一支本来就没有
+    # 店铺关系**（上面那条对账在无绑定时刻意放行）—— 不在这里补上，用户补登成功
+    # 之后页面仍会说「当前账号尚未绑定店铺」。
+    bind_error = _bind_login_shop(db=db, user_id=current_user.id, account=account, shop=shop)
+    return account, channel, shop, bind_error
 
 
 @router.post("/pc/qrcode")
@@ -616,7 +661,7 @@ def qianfan_email_login(
 
     cookies = result["cookies"]
     if payload.target_account_id:
-        account, renewed_channel, shop_or_error = _renew_qianfan_from_login(
+        account, renewed_channel, renewed_shop, bind_error = _renew_qianfan_from_login(
             db=db,
             current_user=current_user,
             target_account_id=payload.target_account_id,
@@ -626,7 +671,7 @@ def qianfan_email_login(
         if account is None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=shop_or_error,
+                detail=renewed_shop,
             )
         db.commit()
         return {
@@ -634,10 +679,13 @@ def qianfan_email_login(
             "status": "confirmed",
             "account": serialize_account(account, "renewed"),
             "renewed_channel": renewed_channel,
-            "renewed_shop": shop_or_error,
+            "renewed_shop": renewed_shop,
+            # 令牌已落库、账号已就位，只是店铺关系没绑上（已被别的账号占用等）。
+            # 界面照实说明，而不是让「补登成功」看起来一切正常。
+            "shop_bind_error": bind_error,
         }
 
-    account, action, shop_or_error = _create_qianfan_account_from_login(
+    account, action, renewed_shop, bind_error = _create_qianfan_account_from_login(
         db=db,
         user_id=current_user.id,
         cookies=cookies,
@@ -646,14 +694,15 @@ def qianfan_email_login(
     if account is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=shop_or_error,
+            detail=renewed_shop,
         )
     db.commit()
     return {
         "session_id": None,
         "status": "confirmed",
         "account": serialize_account(account, action),
-        "renewed_shop": shop_or_error,
+        "renewed_shop": renewed_shop,
+        "shop_bind_error": bind_error,
     }
 
 
@@ -744,7 +793,7 @@ def login_session(
             # —— 它们都会 upsert 出账号行，而续期的语义是「只改我点开的这一个」。
             if session.sub_type == "qianfan":
                 # 千帆的身份锚点是**店铺**，对账逻辑不一样（见函数 docstring）。
-                account, renewed_channel, renewed_shop = _renew_qianfan_from_login(
+                account, renewed_channel, renewed_shop, shop_bind_error = _renew_qianfan_from_login(
                     db=db,
                     current_user=current_user,
                     target_account_id=state.target_account_id,
@@ -768,7 +817,7 @@ def login_session(
             if session.sub_type == "qianfan":
                 # 千帆扫码**建号**（2026-09-23，§18.15.3）：店铺信息 → upsert
                 # `sub_type=qianfan`（external_user_id 留空，昵称兜底匹配）。
-                account, action, renewed_shop = _create_qianfan_account_from_login(
+                account, action, renewed_shop, shop_bind_error = _create_qianfan_account_from_login(
                     db=db,
                     user_id=current_user.id,
                     cookies=result["cookies"],

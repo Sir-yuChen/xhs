@@ -59,6 +59,10 @@ export function AddAccountDrawer({ open, onClose, onBound }: AddAccountDrawerPro
     const actionText = account.action === "updated" ? "已更新到账号矩阵" : "已加入账号矩阵";
     message.success(`${account.nickname || "账号"} ${actionText}`);
     onBound();
+    // 绑定成功即收工：**弹窗连同蒙版一起关掉**（2026-09-26 用户口径
+    // 「账号绑定成功后应关闭……绑定账号弹窗」）。之前只刷新列表不关窗，
+    // 用户看到的是「二维码还挂在屏幕上」——分不清是没登成还是没关。
+    onClose();
   }
 
   /**
@@ -86,6 +90,10 @@ export function AddAccountDrawer({ open, onClose, onBound }: AddAccountDrawerPro
       onCancel={onClose}
       footer={null}
       destroyOnClose
+      // 蒙版（用户口径「绑定时添加页面蒙版」，2026-09-26）：登录期间窗口是**模态**的
+      // —— 点蒙版不关窗（`maskClosable={false}`：扫码扫到一半误点空白会把会话丢掉），
+      // 且蒙版本身要**看得见**（见下方 `styles.mask`）。
+      maskClosable={false}
       /**
        * 2026-09-23（设计 13 §18.15.2，用户口径「使用弹窗展示全屏的50%」，
        * 当日修正：高为全屏的 **75%**）：Drawer（右侧 420）→ Modal **50vw × 75vh**。
@@ -100,6 +108,14 @@ export function AddAccountDrawer({ open, onClose, onBound }: AddAccountDrawerPro
         container: { height: "75vh", display: "flex", flexDirection: "column", background: "#141414" },
         header: { background: "#1f1f1f", borderBottom: "1px solid #303030" },
         body: { background: "#141414", padding: 24, flex: 1, overflowY: "auto" },
+        // 页面底色本身就是深色（#141414），antd 默认的 `rgba(0,0,0,0.45)` 蒙版
+        // 在这上面**几乎看不出来**（用户口径「绑定时添加页面蒙版」）。
+        // 显式给一层看得见的遮罩：加不透明度 + 轻微模糊，让「弹窗外的页面被压住」
+        // 这件事在深色主题下也成立。
+        mask: {
+          background: "rgba(0, 0, 0, 0.75)",
+          backdropFilter: "blur(2px)",
+        },
       }}
     >
       <div style={{ marginBottom: 20 }}>

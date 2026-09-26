@@ -248,8 +248,15 @@ def start_server(root: Path, port: int, console: bool):
 
 APP_WINDOW_SIZE = "1440,900"
 
-# 最近一次「打开界面」起的浏览器进程；托盘退出时据此连窗口一起收掉
-_app_window_proc = None
+#: 起过的**每一个**应用窗口进程；托盘退出时逐个收掉。
+#:
+#: ⚠️ 必须是**列表**（2026-09-26 用户实测「托盘退出后应用窗口依旧未关闭」）：
+#: 单变量只记住最后一次 Popen 的句柄，而 Chromium 系浏览器有**单例机制** ——
+#: 同一个 `--user-data-dir` 已有实例在跑时，新进程把 URL 转交给它之后**立刻退出**。
+#: 于是「启动时开窗 + 用户点托盘『打开界面』再开一次」之后，句柄指向的是一个
+#: 已经退出的空壳：旧实现 `if proc.poll() is not None: return` 因此**什么都没关**，
+#: 而屏幕上那个窗口属于上一个进程（它的 pid 已经没人记着了）。
+_app_window_procs: list[subprocess.Popen] = []
 
 _BROWSER_CANDIDATES = (
     (
@@ -294,10 +301,9 @@ def _app_profile_dir() -> Path:
 def open_app_window(url: str) -> bool:
     """以独立应用窗口打开 UI；Edge/Chrome 都不可用时退回默认浏览器。
 
-    浏览器进程句柄记录到 ``_app_window_proc``，托盘退出时由 :func:`_close_app_window`
+    浏览器进程句柄记录到 ``_app_window_procs``，托盘退出时由 :func:`_close_app_window`
     连窗口一起收掉 —— 窗口是独立 profile 的浏览器进程，launcher 只停后端是关不掉它的。
     """
-    global _app_window_proc
     profile = _app_profile_dir()
     args = [
         f"--app={url}",
@@ -316,7 +322,7 @@ def open_app_window(url: str) -> bool:
                 stderr=subprocess.DEVNULL,
                 stdin=subprocess.DEVNULL,
             )
-            _app_window_proc = proc
+            _app_window_procs.append(proc)
             log.info("已用 %s 打开独立应用窗口：%s（profile=%s，pid=%d）",
                      label, url, profile, proc.pid)
             return True
@@ -330,29 +336,73 @@ def open_app_window(url: str) -> bool:
         return False
 
 
-def _close_app_window() -> None:
-    """关掉我们起的独立窗口（独占 profile ⇒ 独立进程树，不影响用户自己的浏览器）。"""
-    global _app_window_proc
-    proc = _app_window_proc
-    if proc is None:
+def _taskkill_tree(pid: int) -> None:
+    """按 pid 连整棵进程树强杀（独占 user-data-dir ⇒ 树里全是我们的窗口）。"""
+    if sys.platform != "win32":
         return
-    _app_window_proc = None
-    if proc.poll() is not None:
-        log.info("应用窗口进程已自行退出（pid=%d）", proc.pid)
-        return
-    log.info("关闭独立应用窗口（pid=%d）", proc.pid)
     try:
-        # 独占 user-data-dir ⇒ 这棵进程树全是我们的窗口，树杀干净且不误伤
-        subprocess.run(
-            ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+        result = subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
             capture_output=True, timeout=10,
         )
+        if result.returncode != 0:
+            # 进程已退出是最常见的原因，不是错误 —— 记一行就够（退出流程不该卡住）
+            log.info("taskkill pid=%d 返回 %d（进程可能已退出）", pid, result.returncode)
     except Exception as exc:
-        log.warning("关闭应用窗口失败（%s），尝试 terminate", exc)
-        try:
-            proc.terminate()
-        except Exception:
-            pass
+        log.warning("taskkill pid=%d 失败：%s", pid, exc)
+
+
+def _kill_browsers_using_profile(profile: Path) -> None:
+    """兜底：**按命令行里的 profile 路径**收掉所有还开着的窗口进程。
+
+    为什么 pid 之外还要这一刀（2026-09-26 用户实测：托盘退出后窗口还在）：
+
+    Chromium 的单例机制会把「用同一个 user-data-dir 再开一次」变成
+    **转交给已有实例**，新进程随即退出 —— 我们手里的 pid 于是指向一个空壳，
+    而屏幕上的窗口属于更早的那个进程。只按 pid 杀必然漏。
+
+    **为什么不会误伤用户自己的浏览器**：`--user-data-dir` 是**我们独占**的
+    专用目录（`%LOCALAPPDATA%\\SpiderXHS\\app-profile`），用户日常浏览器绝不会
+    带这个参数。命令行里带它的进程，按定义就是本应用开的窗口。
+    """
+    if sys.platform != "win32":
+        return
+    needle = str(profile).replace("'", "''")
+    script = (
+        "$ErrorActionPreference='SilentlyContinue'; "
+        f"$needle = '{needle}'; "
+        "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe' or Name='msedge.exe'\" | "
+        "Where-Object { $_.CommandLine -like ('*' + $needle + '*') } | "
+        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
+    )
+    try:
+        subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True,
+            timeout=20,
+        )
+        log.info("已按 profile 兜底清理窗口进程（profile=%s）", profile)
+    except Exception as exc:
+        log.warning("按 profile 清理窗口进程失败（%s）", exc)
+
+
+def _close_app_window() -> None:
+    """关掉我们起的独立窗口（独占 profile ⇒ 独立进程树，不影响用户自己的浏览器）。
+
+    ⚠️ **两条腿都要走**（2026-09-26 用户实测「托盘退出后应用窗口依旧未关闭」）：
+    pid 是我们**以为**的窗口进程、profile 是**真相**。只靠 pid 会在浏览器
+    单例转交时静默失效（见 `_app_window_procs` 的说明），所以 pid 全杀一遍之后
+    再按 profile 兜底扫一遍；反过来也不行 —— 万一 CIM 查询不可用（老系统 / 权限），
+    pid 那一刀仍然有效。
+    """
+    global _app_window_procs
+    procs = list(_app_window_procs)
+    _app_window_procs.clear()
+    for proc in procs:
+        log.info("关闭独立应用窗口（pid=%d，poll=%s）", proc.pid, proc.poll())
+        _taskkill_tree(proc.pid)
+    # 兜底：浏览器单例转交会让上面那几刀落到空壳上（见 `_app_window_procs`）
+    _kill_browsers_using_profile(_app_profile_dir())
 
 
 # ---------------------------------------------------------------------------

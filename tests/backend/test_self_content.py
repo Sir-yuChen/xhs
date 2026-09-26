@@ -892,7 +892,7 @@ def test_creator_note_detail_is_refused_even_when_a_sibling_session_exists(tmp_p
     """
     headers, _, ids = _setup(tmp_path)
     try:
-        _add_sibling(ids, nickname="观隅好物", external_user_id="SELF-1")
+        _add_sibling(ids, nickname="另一个账号", external_user_id="OTHER-1")
         url = "https://www.xiaohongshu.com/explore/6a7d1e2f000000002c001c33"
         response = client.post(
             "/api/xhs/pc/notes/detail", json={"account_id": ids["creator"], "url": url}, headers=headers
@@ -965,70 +965,58 @@ def test_ownership_errors_are_not_swallowed_by_the_fallback(tmp_path):
 
 
 def test_user_scope_endpoints_never_use_a_sibling_session(tmp_path):
-    """用户维度三分类**一个兄弟账号的会话都不碰** —— 无论是不是同一个人。
+    """用户维度三分类**一个别的账号的会话都不碰**。
 
     这三类回答的是「**这个人**做过什么」。借别人的会话会把别人的赞过 / 收藏 /
     收到的互动当成自己的展示 —— 那不是「少数据」，是**显示错数据**。
 
-    参数化两种兄弟形状：``same_person=True``（同一身份的另一个账号，最像「自己」、
-    最容易被认为可以借）与 ``False``（陌生人）。两种都必须走到同一个结构化拒绝，
-    且**零平台调用** —— 连「这份会话还能不能用」都不去问平台。
+    必须走到结构化拒绝，且**零平台调用** —— 连「这份会话还能不能用」都不去问平台。
+
+    ⚠️ 原用例参数化了「同一个人 / 陌生人」两种形状；**2026-09-26 起前者已不可能
+    存在**（同一小红书 ID 只允许一行，见 `test_same_xhs_identity_never_produces_two_rows`），
+    所以只剩「别人的可用会话」这一种诱因 —— 它也正是这条要钉住的越权。
     """
-    for same_person in (True, False):
-        case_dir = tmp_path / ("same" if same_person else "other")
-        case_dir.mkdir()
-        headers, _, ids = _setup(case_dir)
-        try:
-            _add_sibling(
-                ids,
-                nickname="观隅好物" if same_person else "别人的号",
-                external_user_id="SELF-1" if same_person else "OTHER-9",
-                payload=COOKIE_PAYLOAD,
-                same_person=same_person,
-            )
-            for path, body in (
-                ("/api/xhs/pc/users/liked", {"account_id": ids["creator"]}),
-                ("/api/xhs/pc/users/collected", {"account_id": ids["creator"]}),
-                ("/api/xhs/pc/users/interactions", {"account_id": ids["creator"], "kind": "mention"}),
-            ):
-                response = client.post(path, json=body, headers=headers)
-                assert response.status_code == 400, f"same_person={same_person} {path} 实际 {response.status_code}"
-                assert response.json()["detail"]["code"] == "WEB_SESSION_REQUIRED"
-            assert not FakeSelfContentAdapter.calls, "兄弟账号的会话不该被碰，连探活都不行"
-        finally:
-            _teardown()
+    headers, _, ids = _setup(tmp_path)
+    try:
+        _add_sibling(ids, nickname="别人的号", external_user_id="OTHER-9")
+        for path, body in (
+            ("/api/xhs/pc/users/liked", {"account_id": ids["creator"]}),
+            ("/api/xhs/pc/users/collected", {"account_id": ids["creator"]}),
+            ("/api/xhs/pc/users/interactions", {"account_id": ids["creator"], "kind": "mention"}),
+        ):
+            response = client.post(path, json=body, headers=headers)
+            assert response.status_code == 400, f"{path} 实际 {response.status_code}"
+            assert response.json()["detail"]["code"] == "WEB_SESSION_REQUIRED"
+        assert not FakeSelfContentAdapter.calls, "兄弟账号的会话不该被碰，连探活都不行"
+    finally:
+        _teardown()
 
 
-def _add_sibling(
-    ids, *, nickname, external_user_id, payload=COOKIE_PAYLOAD, same_person=True
-):
-    """给 `creator` 账号挂一个兄弟账号，模拟真机里的 acct1(pc) / acct8(creator)。
+def _add_sibling(ids, *, nickname, external_user_id, payload=COOKIE_PAYLOAD):
+    """给 `creator` 账号挂一个**兄弟账号**（另一个身份 + 一份可用的 www 会话）。
 
-    真机关系：观隅好物在库里是两条行 —— `pc` 一条存着 www Cookie、`creator` 一条
-    只有创作者会话，两者 `external_user_id` 相同、昵称都是「观隅好物」。
+    用途：造出「库里确实存在一份可用的 www 会话」这个**最容易顺手用掉**的形状，
+    验证接口仍然**只认本账号**的凭据（借来的会话读到的始终是别人的数据面）。
 
-    ``same_person=True`` 会把**目标账号**也改成同一个身份（造出「同一个人两个账号」）；
-    ``same_person=False`` 只新增一个**陌生人**，目标账号原样不动 —— 两种形状分别锁
-    「同一个人的另一行」与「一个字都不许碰」。
-
-    唯一索引 `uq_platform_accounts_identity` 含 `sub_type`，所以同一个
-    `external_user_id` 下的 pc / creator 两行是**合法**的（D10）。
+    ⚠️ **2026-09-26 起「同一个人的第二行」造不出来了**：用户口径「同一小红书 ID
+    不允许出现重复多行账号」⇒ 部分唯一索引换成
+    `uq_platform_accounts_xhs_identity (user_id, platform, external_user_id)`
+    （原索引含 `sub_type`，`pc` / `creator` 各算一个身份，正是同一个账号在库里
+    留下两行的原因）。所以现在唯一的诱因形状就是**别人**的可用会话 ——
+    与「凭据只认本账号」要钉住的东西完全一致（借来的会话本来就是别人的数据面）。
+    「同一身份只允许一行」这件事由
+    `test_same_xhs_identity_never_produces_two_rows` 单独钉住。
     """
     db = _session()
     try:
         creator = db.get(PlatformAccount, ids["creator"])
-        if same_person:
-            creator.nickname = nickname
-            creator.external_user_id = external_user_id
-            creator.profile_json = GUANYU_PROFILE
         sibling = PlatformAccount(
             user_id=creator.user_id,
             platform="xhs",
             sub_type="pc",
             nickname=nickname,
             external_user_id=external_user_id,
-            # 同一个人的另一行 → 同一个小红书号；陌生人则不带。
-            profile_json=GUANYU_PROFILE if same_person else "{}",
+            profile_json="{}",
             status="active",
         )
         db.add(sibling)
@@ -1040,6 +1028,72 @@ def _add_sibling(
         db.close()
 
 
+def test_same_xhs_identity_never_produces_two_rows(tmp_path):
+    """**同一小红书 ID 不允许出现第二行**（用户 2026-09-26 口径）。
+
+    真实故障：同一个账号先按「PC」扫码、再按「创作者平台」扫码，库里留下两行 ——
+    同 `external_user_id`、同昵称、同小红书号，界面显示「两个相同的账号信息」，
+    只差一个「类型」。原因是原唯一索引的键含 `sub_type`（两条链路各算一个身份）。
+
+    两道锁都要钉（缺一条都拦不住）：
+
+    ① **DB 层**：直接插一行同 `(user_id, platform, external_user_id)` 会被
+       `uq_platform_accounts_xhs_identity` 拒绝 —— 这是最后一道，任何写入路径都绕不过；
+    ② **业务层**：`upsert_platform_account_from_login()` 按小红书 ID 找行，
+       第二条链路**合并到同一行**，且 `sub_type` 取**更强**的那个
+       （取 `pc` 会静默丢掉发布能力 —— 发布闸门要求 `sub_type == "creator"`）。
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    from backend.app.services.account_service import upsert_platform_account_from_login
+
+    headers, _, ids = _setup(tmp_path)
+    try:
+        db = _session()
+        try:
+            creator = db.get(PlatformAccount, ids["creator"])
+            creator.external_user_id = "SAME-XHS-1"
+            db.commit()
+
+            # ① DB 层：同身份第二行必须被拒
+            db.add(
+                PlatformAccount(
+                    user_id=creator.user_id,
+                    platform="xhs",
+                    sub_type="pc",
+                    nickname="观隅好物",
+                    external_user_id="SAME-XHS-1",
+                    status="active",
+                )
+            )
+            try:
+                db.commit()
+                raise AssertionError("同一个小红书 ID 的第二行竟然写进去了")
+            except IntegrityError:
+                db.rollback()
+
+            # ② 业务层：第二条链路合并到同一行，sub_type 取更强的那个
+            account, action = upsert_platform_account_from_login(
+                db=db,
+                user_id=creator.user_id,
+                platform="xhs",
+                sub_type="pc",
+                user_info={"external_user_id": "SAME-XHS-1", "nickname": "观隅好物"},
+                cookies_text=COOKIE_PAYLOAD,
+            )
+            assert account.id == creator.id, "第二条链路必须合并到同一行"
+            assert action == "updated"
+            rows = db.scalars(
+                select(PlatformAccount).where(PlatformAccount.external_user_id == "SAME-XHS-1")
+            ).all()
+            assert len(rows) == 1, f"同一个小红书 ID 出现了 {len(rows)} 行"
+            assert rows[0].sub_type == "creator", "合并不得把发布链路降级成 pc"
+        finally:
+            db.close()
+    finally:
+        _teardown()
+
+
 def test_sibling_session_does_not_change_the_outcome(tmp_path):
     """**同一个人的另一个账号**在网页版登录过，也不改变本账号的结论。
 
@@ -1049,7 +1103,7 @@ def test_sibling_session_does_not_change_the_outcome(tmp_path):
     """
     headers, _, ids = _setup(tmp_path)
     try:
-        _add_sibling(ids, nickname="观隅好物", external_user_id="SELF-1")
+        _add_sibling(ids, nickname="另一个账号", external_user_id="OTHER-1")
         for path, body in (
             ("/api/xhs/pc/users/liked", {"account_id": ids["creator"]}),
             ("/api/xhs/pc/users/collected", {"account_id": ids["creator"]}),
@@ -1072,7 +1126,7 @@ def test_stale_sibling_session_is_irrelevant(tmp_path):
     """
     headers, _, ids = _setup(tmp_path)
     try:
-        _add_sibling(ids, nickname="观隅好物", external_user_id="SELF-1")
+        _add_sibling(ids, nickname="另一个账号", external_user_id="OTHER-1")
         FakeSelfContentAdapter.mode = "profile_fail"  # 兄弟账号的会话已过期
         response = client.post(
             "/api/xhs/pc/users/liked", json={"account_id": ids["creator"]}, headers=headers
@@ -1094,7 +1148,7 @@ def test_capabilities_report_own_session_source_only(tmp_path):
     """
     headers, _, ids = _setup(tmp_path)
     try:
-        _add_sibling(ids, nickname="观隅好物", external_user_id="SELF-1")
+        _add_sibling(ids, nickname="另一个账号", external_user_id="OTHER-1")
         payload = client.post(
             "/api/xhs/pc/users/capabilities", json={"account_id": ids["creator"]}, headers=headers
         ).json()

@@ -1137,6 +1137,74 @@ class TestFrontendBehaviourScripts:
             f"output={out}"
         )
 
+    # ------------------------------------------------------------------ #
+    # 2026-09-26 接线：qr_session_identity.cjs（此前**从未被 pytest 执行过**）
+    # ------------------------------------------------------------------ #
+
+    QR_SCRIPT = "tests/frontend/qr_session_identity.cjs"
+
+    #: 变异模式下必须变红的三条（脚本剥掉的是三个 StrictMode / 会话归属守卫）。
+    #: 断言写成带 `FAIL  ` 前缀：全绿时那行是 `PASS  S1 …`，只找 `S1` 会恒真。
+    QR_MUTATION_FAILURES = (
+        "FAIL  S1 StrictMode mount mints exactly one session",
+        "FAIL  S3 poller stayed on the displayed session",
+        "FAIL  S4 qianfan mount mints exactly one session",
+    )
+
+    @pytest.fixture(scope="module")
+    def qr_selfcheck(self) -> dict[str, str]:
+        """契约 + 变异各跑一次 `qr_session_identity.cjs`，返回 {模式: 输出}。
+
+        该脚本**没有** `--self-check` 聚合模式（它自己按不变式给退出码），
+        所以这里显式跑两遍并各自断言退出码 —— 契约必须 rc=0、变异必须 rc≠0。
+
+        ⚠️ 为什么要新接线：它此前的"接线"只是 `test_testing_spec_guards.py`
+        参数列表里的一个**字符串**（接线守卫只查子串出现，文档字符串提一句也算过），
+        pytest 从未真正执行它 —— 与 DEF-063（脚本空转）同型。2026-09-26 修
+        「扫码绑千帆拿不到店铺」时改的正是它覆盖的 `qr-login-panel.tsx`，
+        没有可执行的守卫就等于没测。
+        """
+        out: dict[str, str] = {}
+        for mode, env in (
+            ("contract", {}),
+            ("mutation", {"QR_MUTATE": "old"}),
+        ):
+            result = subprocess.run(
+                ["node", str(ROOT / self.QR_SCRIPT)],
+                cwd=str(ROOT),
+                capture_output=True,
+                text=True,
+                env={**os.environ, **env},
+                check=False,
+            )
+            combined = f"{result.stdout}\n{result.stderr}"
+            if mode == "contract":
+                assert result.returncode == 0, (
+                    f"{self.QR_SCRIPT} 契约失败（扫码会话不变式必须全 PASS）：\n{combined}"
+                )
+                assert "ALL INVARIANTS HOLD" in combined, f"output={combined}"
+            else:
+                assert result.returncode != 0, (
+                    f"{self.QR_SCRIPT} 变异未变红 ⇒ 三条守卫可能是摆设：\n{combined}"
+                )
+            out[mode] = combined
+        return out
+
+    def test_qr_session_identity_contract_holds(self, qr_selfcheck: dict[str, str]):
+        """S1/S2/S3/S4 全绿：一个抽屉只铸一个会话、被取代的创建不能变成展示的码、
+        别的会话的轮询不能劫持面板、千帆分支只铸自己那一个。"""
+        out = qr_selfcheck["contract"]
+        assert "FAIL" not in out, f"契约不该出现 FAIL 行：{out}"
+        assert out.count("PASS  S") == 9, f"应有 9 条不变式 PASS：{out}"
+        assert "ALL INVARIANTS HOLD" in out, f"output={out}"
+
+    def test_qr_session_identity_guards_are_load_bearing(self, qr_selfcheck: dict[str, str]):
+        """变异（剥掉三个守卫）⇒ 三条断言必须各变红（守卫承重的证据）。"""
+        out = qr_selfcheck["mutation"]
+        for line in self.QR_MUTATION_FAILURES:
+            assert line in out, f"变异下应有 `{line}`，output={out}"
+        assert "INVARIANT(S) VIOLATED" in out, f"output={out}"
+
 
 def test_renew_does_not_touch_the_ark_channel(tmp_path: Path):
     """创作者扫码续期**只写 creator 通道**，账号自己的 ark 令牌一个字节都不动。

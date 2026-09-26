@@ -133,6 +133,14 @@ export type XhsQrLoginSession = {
    * 不一致、或目标账号不可用时才有 —— 此时**一个字节都没写**。
    */
   renew_error?: { code?: string; message?: string } | null;
+  /**
+   * 千帆登录**成功**（令牌已落库、账号已就位），但**店铺关系没绑上**的原因。
+   *
+   * 2026-09-26：登录成功即自动建店铺关系；只有「这个店已经绑在别的账号上」
+   * 这类 1:1 冲突才会走到这里。非空时界面必须说出来 —— 否则「登录成功」
+   * 会被用户读成「商品也能读了」，而我的笔记页仍会显示「尚未绑定店铺」。
+   */
+  shop_bind_error?: { code?: string; message?: string } | null;
 };
 
 export type NoteGoods = {
