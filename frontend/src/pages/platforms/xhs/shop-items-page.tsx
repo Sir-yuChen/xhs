@@ -9,6 +9,7 @@ import {
 } from "@ant-design/icons";
 import {
   Alert,
+  App,
   Button,
   Card,
   Col,
@@ -20,7 +21,6 @@ import {
   Image,
   Input,
   InputNumber,
-  message,
   Modal,
   Row,
   Select,
@@ -36,27 +36,41 @@ import type { ColumnsType } from "antd/es/table";
 import dayjs from "dayjs";
 import type { Dayjs } from "dayjs";
 import type { CSSProperties } from "react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import {
   batchGenerateProductNotes,
   bindXhsQianfanShop,
   deleteXhsShopItems,
+  EMPTY_GENERATE_QUEUE_SNAPSHOT,
   fetchAccounts,
+  fetchGenerateQueue,
   fetchXhsItemNotes,
   fetchXhsQianfanBinding,
   fetchXhsShopItemDetail,
   fetchXhsShopItems,
   generateProductNote,
 } from "../../../lib/api";
+import type { GenerateQueueFinishedEntry, GenerateQueueSnapshot } from "../../../lib/api";
 import { yuan } from "../../../lib/format";
+import {
+  EMPTY_SHOP_ITEMS_DRAFT,
+  FILTER_CACHE_KEYS,
+  asFiniteNumber,
+  asNumberEnum,
+  readFilterCache,
+  sanitizeShopItemsDraft,
+  usePersistedFilter,
+  writeFilterCache,
+  type ShopItemsFilterDraft,
+} from "../../../lib/filter-cache";
 import { NoteDetailBody } from "../../../components/platforms/note-detail-modal";
 import {
   accountLabel,
   batchDeleteBlock,
   batchDeleteHint,
-  DEFAULT_NOTE_COUNT_OP,
+  DEFAULT_SHOP_ITEMS_PAGE_SIZE,
   DEFAULT_SORT,
   ledgerPrerequisite,
   MAX_BATCH_DELETE,
@@ -65,6 +79,8 @@ import {
   normalizeDeleteIds,
   QIANFAN_PREREQUISITE_HINT,
   resolveSort,
+  sanitizeSortState,
+  SHOP_ITEMS_PAGE_SIZES,
   SORT_FIELD_BY_COLUMN,
   selectableAccounts,
   skuCell,
@@ -125,6 +141,12 @@ function priceText(item: XhsShopItem): string {
   return `¥${lo} ~ ¥${hi}`;
 }
 
+/** 轮询间隔：与内容库三张进度卡同一节奏（用户口径「数据 5 秒更新一次」）。 */
+const QUEUE_POLL_INTERVAL_MS = 5000;
+
+/** 连续「本轮无任务」的轮数上限（空转兜底：快照被新批次清空重开时定时器不泄漏）。 */
+const QUEUE_IDLE_ROUNDS_LIMIT = 6;
+
 /**
  * 商品缩略图边长（v1.35）。
  *
@@ -157,7 +179,8 @@ const IMAGE_COUNT_BADGE_STYLE: CSSProperties = {
   pointerEvents: "none",
 };
 
-async function copyToClipboard(value: string, okText: string): Promise<void> {
+/** 复制反馈的 message 实例由调用方（组件内 `App.useApp()`）传入 —— 模块级函数拿不到 hook。 */
+async function copyToClipboard(value: string, okText: string, msg: { success: (text: string) => void; error: (text: string) => void }): Promise<void> {
   try {
     if (navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(value);
@@ -171,9 +194,9 @@ async function copyToClipboard(value: string, okText: string): Promise<void> {
       document.execCommand("copy");
       document.body.removeChild(holder);
     }
-    message.success(okText);
+    msg.success(okText);
   } catch {
-    message.error("复制失败，请手动选中后复制");
+    msg.error("复制失败，请手动选中后复制");
   }
 }
 
@@ -193,9 +216,62 @@ type QueryForm = {
   note_count?: number;
 };
 
+/**
+ * 缓存的**草稿 → antd Form 初值**（2026-09-26 「搜索条件落本地缓存」）。
+ *
+ * 空值统一成 `undefined`（antd 的空态就是 `undefined`，塞 `null` 会让 `allowClear`
+ * 的清除按钮与占位符行为不一致）；日期区间还原成 dayjs 对象对（`RangePicker` 只认
+ * dayjs，缓存里存的是 `YYYY-MM-DD` 字符串 —— 见 `ShopItemsFilterDraft`）。
+ */
+function draftToFormValues(draft: ShopItemsFilterDraft): QueryForm {
+  return {
+    keyword: draft.keyword || undefined,
+    status: draft.status as XhsShopItemStatus,
+    price_from: draft.price_from ?? undefined,
+    price_to: draft.price_to ?? undefined,
+    stock_from: draft.stock_from ?? undefined,
+    stock_to: draft.stock_to ?? undefined,
+    sales_from: draft.sales_from ?? undefined,
+    sales_to: draft.sales_to ?? undefined,
+    create_time_range:
+      draft.create_from || draft.create_to
+        ? [
+            draft.create_from ? dayjs(draft.create_from) : null,
+            draft.create_to ? dayjs(draft.create_to) : null,
+          ]
+        : undefined,
+    note_count_op: draft.note_count_op,
+    note_count: draft.note_count ?? undefined,
+  };
+}
+
+/**
+ * antd Form 值 → 可缓存草稿（`formValuesToDraft` 是 `draftToFormValues` 的逆运算，
+ * 两者**成对维护**：形状对不上的值会被 `sanitizeShopItemsDraft` 在校验时丢掉）。
+ */
+function formValuesToDraft(values: QueryForm): ShopItemsFilterDraft {
+  const range = values.create_time_range;
+  return {
+    keyword: values.keyword?.trim() || "",
+    status: values.status || EMPTY_SHOP_ITEMS_DRAFT.status,
+    price_from: values.price_from ?? null,
+    price_to: values.price_to ?? null,
+    stock_from: values.stock_from ?? null,
+    stock_to: values.stock_to ?? null,
+    sales_from: values.sales_from ?? null,
+    sales_to: values.sales_to ?? null,
+    create_from: range?.[0] ? dayjs(range[0]).format("YYYY-MM-DD") : null,
+    create_to: range?.[1] ? dayjs(range[1]).format("YYYY-MM-DD") : null,
+    note_count_op: values.note_count_op || EMPTY_SHOP_ITEMS_DRAFT.note_count_op,
+    note_count: values.note_count ?? null,
+  };
+}
+
 
 /** 挂链笔记弹窗右栏信息区（同步链路笔记带互动指标；本地生成笔记带发布态）。 */
 function renderItemNoteInfo(note: XhsItemNote) {
+  // 全站消息提醒统一走 antd message（设计 04 §3.6）：复制反馈用继承主题的实例。
+  const { message } = App.useApp();
   const publishLabel: Record<string, { text: string; color: string }> = {
     pending: { text: "待发布", color: "orange" },
     publishing: { text: "发布中", color: "blue" },
@@ -247,7 +323,7 @@ function renderItemNoteInfo(note: XhsItemNote) {
             <Text
               style={{ fontSize: 12, cursor: "pointer", color: "#1677ff" }}
               ellipsis
-              onClick={() => void copyToClipboard(note.note_url, "笔记链接已复制")}
+              onClick={() => void copyToClipboard(note.note_url, "笔记链接已复制", message)}
             >
               {note.note_url}
             </Text>
@@ -268,16 +344,30 @@ function renderItemNoteInfo(note: XhsItemNote) {
 
 export function XhsShopItemsPage() {
   const navigate = useNavigate();
+  // 全站消息提醒统一走 antd message（设计 04 §3.6，2026-09-25 用户口径：
+  // 「所有消息提醒参考 antd 成熟组件，不要在页面暂用空间」）—— `App.useApp()`
+  // 替代静态 `message` 导入，实例继承 ConfigProvider 的主题与 locale。
+  const { message } = App.useApp();
   const [accounts, setAccounts] = useState<PlatformAccount[]>([]);
   const [accountsLoaded, setAccountsLoaded] = useState(false);
-  const [selectedAccountId, setSelectedAccountId] = useState<number | null>(null);
+  // 账号 / 每页条数 / 排序 / 搜索条件草稿**落本地缓存**（2026-09-26 用户口径
+  // 「筛选条件和账号选择后放本地缓存，避免每次均需要重新选择」）：账号走
+  // `asFiniteNumber`（数字或 null）、每页条数走 `asNumberEnum`（只能从候选里挑）、
+  // 排序走 `sanitizeSortState`（形状对不上就回「无排序」）、条件草稿走
+  // `sanitizeShopItemsDraft`（见下面 `Form` 的 initialValues）。
+  // ⚠️ `pageNo`（第几页）**不缓存** —— 每次进页面从第一页开始是刻意的。
+  const [selectedAccountId, setSelectedAccountId] = usePersistedFilter<number | null>(
+    FILTER_CACHE_KEYS.shopItems.accountId, null, asFiniteNumber
+  );
   const [binding, setBinding] = useState<XhsQianfanBinding | null>(null);
   const [bindingLoaded, setBindingLoaded] = useState(false);
   const [data, setData] = useState<XhsShopItemsResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [errorText, setErrorText] = useState("");
   const [pageNo, setPageNo] = useState(1);
-  const [pageSize, setPageSize] = useState(20);
+  const [pageSize, setPageSize] = usePersistedFilter(
+    FILTER_CACHE_KEYS.shopItems.pageSize, DEFAULT_SHOP_ITEMS_PAGE_SIZE, asNumberEnum(SHOP_ITEMS_PAGE_SIZES)
+  );
   // v1.32：排序挪到表头（上下箭头），不再在搜索区单独放字段/方向下拉。
   // 状态即「当前生效的排序」—— 服务端分页，排序必须回服务端做（客户端
   // 只有当前页，本地排只会重排一页，是假排序）。
@@ -285,8 +375,18 @@ export function XhsShopItemsPage() {
   // v1.36（用户 2026-09-23 口径「默认不排序，只有点击触发后进行排序，参考 antd
   // 组件中的排序」）：初值是 **null = 无排序** —— 进来表头没有箭头、请求里也不带
   // `sort_field`（后端用它的稳定默认序）。点表头才开始有排序态（升 → 降 → 取消）。
-  const [sort, setSort] = useState<SortState | null>(DEFAULT_SORT);
+  // 2026-09-26：排序态**也落缓存**（用户点过的排序 = 他的选择，不该每次重来）。
+  const [sort, setSort] = usePersistedFilter<SortState | null>(
+    FILTER_CACHE_KEYS.shopItems.sort, DEFAULT_SORT, sanitizeSortState
+  );
+  // 搜索条件表单：初值取**缓存草稿**（`sanitizeShopItemsDraft` 校验形状与取值域），
+  // 每次改动即回写（`onValuesChange`）—— 用户填了一半就切页面，回来还在。
   const [form] = Form.useForm<QueryForm>();
+  const cachedDraft = useMemo(
+    () => sanitizeShopItemsDraft(readFilterCache(FILTER_CACHE_KEYS.shopItems.form)),
+    []
+  );
+  const formInitialValues = useMemo(() => draftToFormValues(cachedDraft), [cachedDraft]);
   const [bindOpen, setBindOpen] = useState(false);
   const [bindCookie, setBindCookie] = useState("");
   const [binding_, setBinding_] = useState(false);
@@ -297,10 +397,22 @@ export function XhsShopItemsPage() {
   const [notesItem, setNotesItem] = useState<XhsShopItem | null>(null);
   /** 挂链笔记弹窗当前 tab（一篇笔记一个 tab；单篇时隐藏 tab 栏）。 */
   const [notesTab, setNotesTab] = useState("0");
-  // 商品笔记智能生成（设计 13 §31）
+  // 商品笔记智能生成（设计 13 §31；§31.10 起单 / 批量都走队列）
   const [selectedItemIds, setSelectedItemIds] = useState<string[]>([]);
   const [generatingItemId, setGeneratingItemId] = useState<string | null>(null);
   const [batchGenerating, setBatchGenerating] = useState(false);
+  // 生成进度（队列快照 + 轮询三件）：入队后按钮 loading 交给快照的
+  // `running + queued`（`genQueueItemIds`），终态由轮询报一次（与批量同一个出口）。
+  // 2026-09-26 常驻化（用户口径「不需要队列批次，队列是常驻」）：快照只给队列
+  // 实时态（running / queued / total / finished），**本轮成败数由本页按自己入队
+  // 的商品累计**（`genRound`，空闲起轮归零、忙时并入 —— 与旧「空闲即新开一批」
+  // 同口径）。
+  const [genQueue, setGenQueue] = useState<GenerateQueueSnapshot>(EMPTY_GENERATE_QUEUE_SNAPSHOT);
+  const [genRound, setGenRound] = useState({ ok: 0, failed: 0 });
+  const genPollRef = useRef<number | null>(null);
+  const genTrackedRef = useRef<Set<string>>(new Set());
+  const genResultsRef = useRef<Map<string, GenerateQueueFinishedEntry>>(new Map());
+  const genIdleRoundsRef = useRef(0);
   /** 批量删除进行中（v1.36）：只用来给按钮上 loading，判据本身在 lib（`batchDeleteBlock`）。 */
   const [batchDeleting, setBatchDeleting] = useState(false);
   // 商品详情弹窗（v1.32：点标题打开；数据来自 /item-detail，纯本地）
@@ -316,11 +428,16 @@ export function XhsShopItemsPage() {
         // v1.32（设计 13 §30.1）：**不再按 sub_type 过滤** —— 千帆门禁由后端把着
         // （未绑店 → 400 QIANFAN_BINDING_REQUIRED），前端按类型预判「哪类账号有
         // 店铺」就是第二份真相源。用户口径：下拉展示所有已绑定的小红书账号。
-        setAccounts(selectableAccounts(list));
-        const first = selectableAccounts(list)[0];
-        if (first && selectedAccountId === null) {
-          setSelectedAccountId(first.id);
-        }
+        const selectable = selectableAccounts(list);
+        setAccounts(selectable);
+        // 账号选择的**缓存自愈**（2026-09-26）：缓存里的账号可能已被删除、或已不在
+        // 可选集合里（未绑店等）⇒ 此时退回第一个账号；否则下拉里会挂着一个候选里
+        // 找不到的值，列表恒空而用户看不出原因。
+        setSelectedAccountId((current) =>
+          current !== null && selectable.some((account) => account.id === current)
+            ? current
+            : selectable[0]?.id ?? null
+        );
       } catch (error) {
         message.error(error instanceof Error ? error.message : "账号列表加载失败");
       } finally {
@@ -403,7 +520,14 @@ export function XhsShopItemsPage() {
    * 拍还没生效 ⇒ 必须显式把目标值传进去，否则会按**旧**排序重拉。
    */
   function runSearch(resetForm: boolean) {
-    if (resetForm) form.resetFields();
+    if (resetForm) {
+      // ⚠️ 「重置」必须回**清空态**，不能回 `initialValues`：后者现在是缓存里那份
+      // 「上次的筛选」（2026-09-26 起表单初值取自缓存）—— 用 `resetFields()` 会让
+      // 重置把筛选条件原样保留，语义直接反了。这里显式写一份全空草稿，并把清空态
+      // **覆盖进缓存**（否则下次进页面它又长回来）。
+      form.setFieldsValue(draftToFormValues(EMPTY_SHOP_ITEMS_DRAFT));
+      writeFilterCache(FILTER_CACHE_KEYS.shopItems.form, EMPTY_SHOP_ITEMS_DRAFT);
+    }
     setSelectedItemIds([]);
     setPageNo(1);
     const nextSort = resetForm ? DEFAULT_SORT : sort;
@@ -512,26 +636,27 @@ export function XhsShopItemsPage() {
   }
 
   /**
-   * 单商品「生成笔记」（设计 13 §31.4）：调千帆后台智能生成，落库为待发布的
-   * 本地生成笔记（内容库可见，之后在内容库发布）。
+   * 单商品「生成笔记」（设计 13 §31.4 + §31.10）：入队即返回，worker 后台跑。
+   *
+   * 门禁失败（未绑店 / 无令牌 / 台账无此行）仍是结构化 400/404，由全局拦截器
+   * 摆真实原因；平台侧失败（502）发生在 worker 里，只在快照 `finished` 给一次。
    */
   async function generateNote(item: XhsShopItem) {
     if (!selectedAccountId) return;
     setGeneratingItemId(item.item_id);
     try {
       const result = await generateProductNote(selectedAccountId, item.item_id);
-      // 媒体口径如实报（设计 13 §32.2.1：视频优先，图 ≤6 / 视频 ≤1）；并说清
-      // 「生成 ≠ 发布」—— 只有内容库点「发布」才走发布链路（§32.2.2）。
-      const mediaText =
-        result.video_count > 0 ? `${result.video_count} 个视频` : `${result.image_count} 张图片`;
+      // 2026-09-26 用户口径「优化提示内容，简单一些，提示太长了」：一句说清
+      // 「入队了」+「发布在哪」，不复述「才会真正发布」的长句。
+      const name = item.title || item.item_id;
       message.success(
-        `已生成待发布笔记《${result.title || "未命名"}》（${mediaText}）；到内容库点「发布」才会真正发布`
+        result.already_queued ? `《${name}》已在队列中` : `《${name}》已入队，发布请到内容库`
       );
-      // 刷新挂链笔记数（生成后该商品的映射多了本地生成那篇）
+      trackGenItems([item.item_id]);
+      // 刷新挂链笔记数（生成成功后该商品的映射多了本地生成那篇）
       if (notesItem && notesItem.item_id === item.item_id && notesOpen) {
         void openItemNotes(item);
       }
-      if (selectedAccountId) void load(selectedAccountId, pageNo, pageSize);
     } catch (error) {
       const detail = (error as { response?: { data?: { detail?: { message?: string } } } })?.response?.data
         ?.detail;
@@ -544,30 +669,120 @@ export function XhsShopItemsPage() {
     }
   }
 
-  /** 批量「生成笔记」（设计 13 §31.4 步 6）：选中行顺序生成，单项失败不阻断。 */
+  /** 批量「生成笔记」（设计 13 §31.4 步 6 + §31.10）：逐项过门禁，通过项入队。 */
   async function batchGenerate() {
     if (!selectedAccountId || selectedItemIds.length === 0) return;
     setBatchGenerating(true);
     try {
       const result = await batchGenerateProductNotes(selectedAccountId, selectedItemIds);
+      const enqueued = result.results.filter((r) => r.ok).map((r) => r.item_id);
       if (result.failed === 0) {
-        message.success(
-          `已生成 ${result.succeeded} 篇待发布笔记（到内容库点「发布」才会真正发布）`
-        );
+        message.success(`已入队 ${result.started} 项，发布请到内容库`);
       } else {
         const firstError = result.results.find((r) => !r.ok)?.error || "";
         message.warning(
-          `生成完成：成功 ${result.succeeded} 篇，失败 ${result.failed} 篇${firstError ? `（首例：${firstError}）` : ""}`
+          `已入队 ${result.started} 项，门禁未过 ${result.failed} 项${firstError ? `（首例：${firstError}）` : ""}`
         );
       }
+      if (enqueued.length) trackGenItems(enqueued);
       setSelectedItemIds([]);
-      if (selectedAccountId) void load(selectedAccountId, pageNo, pageSize);
     } catch (error) {
       message.error(error instanceof Error ? error.message : "批量生成失败");
     } finally {
       setBatchGenerating(false);
     }
   }
+
+  // --------------------------------------------------------------------------- #
+  // 生成队列轮询（§31.10；与内容库同步进度卡同一套骨架：5s 一轮、待处理为 0 即停）
+  // --------------------------------------------------------------------------- #
+
+  /** 起轮询（直到**待处理为 0**）：把入队的 item_id 交给同一个轮询器。
+   *
+   * 2026-09-26 常驻化：本轮成败在本页累计，**空闲过（没在轮询）才归零** ——
+   * 忙时到来的新入队并入同一轮继续计数，不把用户上半场的成果从卡片上抹掉。
+   */
+  function trackGenItems(itemIds: string[]) {
+    for (const id of itemIds) genTrackedRef.current.add(id);
+    if (genPollRef.current === null) {
+      setGenRound({ ok: 0, failed: 0 });
+      genPollRef.current = window.setInterval(() => {
+        void pollGenQueue();
+      }, QUEUE_POLL_INTERVAL_MS);
+    }
+  }
+
+  function stopGenPolling() {
+    if (genPollRef.current !== null) {
+      window.clearInterval(genPollRef.current);
+      genPollRef.current = null;
+    }
+    genTrackedRef.current.clear();
+    genResultsRef.current.clear();
+    genIdleRoundsRef.current = 0;
+    setBatchGenerating(false);
+  }
+
+  /** 轮询一轮：刷新快照 → 累积逐项结果 → 离开队列的项报一次终态 → 待处理为 0 收尾。 */
+  async function pollGenQueue() {
+    let snapshot: GenerateQueueSnapshot;
+    try {
+      snapshot = await fetchGenerateQueue();
+    } catch {
+      return; // 安静重试（下一轮）
+    }
+    setGenQueue(snapshot);
+    // 累积逐项结果：快照 `finished` 可能被新批次清空重开而变短，累积才能每项都报一次。
+    for (const entry of snapshot.finished) {
+      if (entry.item_id) genResultsRef.current.set(entry.item_id, entry);
+    }
+    const stillActive = new Set<string>([
+      ...(snapshot.running ? [snapshot.running.item_id] : []),
+      ...snapshot.queued.map((q) => q.item_id),
+    ]);
+    const finishedNow = [...genTrackedRef.current].filter((id) => !stillActive.has(id));
+    if (finishedNow.length) {
+      const okTitles: string[] = [];
+      const failLines: string[] = [];
+      for (const itemId of finishedNow) {
+        genTrackedRef.current.delete(itemId);
+        const result = genResultsRef.current.get(itemId);
+        if (result && result.ok) okTitles.push(result.title || itemId);
+        else if (result) {
+          failLines.push(`${itemId}：${result.reason || "平台未给原因"}`);
+        }
+        // 第三种：离开了队列但拿不到结果（快照被新批次清空 / 进程重启）——
+        // 只刷新列表，不宣称成功也不宣称失败（缺值口径：不造假）。
+      }
+      const parts: string[] = [];
+      if (okTitles.length) parts.push(`已生成 ${okTitles.length} 篇待发布笔记`);
+      if (failLines.length) parts.push(`生成失败 ${failLines.length} 项（${failLines.join("；")}）`);
+      // 本轮成败累计（常驻化后没有批次记账，卡片上的数字由本页算）
+      if (okTitles.length || failLines.length) {
+        setGenRound((prev) => ({ ok: prev.ok + okTitles.length, failed: prev.failed + failLines.length }));
+      }
+      if (parts.length) {
+        const text = `${parts.join("；")}。`;
+        if (failLines.length) message.warning(text); else message.success(text);
+      }
+      // 生成成功会多出本地生成笔记 ⇒ 刷新列表统计（挂链笔记数等）
+      if (okTitles.length && selectedAccountId) void load(selectedAccountId, pageNo, pageSize);
+    }
+    // 停止条件（与另两张进度卡同口径）：快照 total > 0 且待处理为 0 ⇒ 收尾；
+    // 空转兜底防定时器泄漏。
+    genIdleRoundsRef.current = snapshot.total > 0 ? 0 : genIdleRoundsRef.current + 1;
+    const pending = (snapshot.running ? 1 : 0) + snapshot.queued.length;
+    if ((snapshot.total > 0 && pending === 0) || genIdleRoundsRef.current >= QUEUE_IDLE_ROUNDS_LIMIT) {
+      stopGenPolling();
+    }
+  }
+
+  /** 队列中的商品 ID 集合（running + queued）—— 生成按钮的 loading 判据。 */
+  const genQueueItemIds = useMemo(() => {
+    const ids = new Set<string>(genQueue.queued.map((q) => q.item_id));
+    if (genQueue.running?.item_id) ids.add(genQueue.running.item_id);
+    return ids;
+  }, [genQueue]);
 
   /**
    * 批量删除本地台账行（v1.36，用户口径「商品列表新增批量删除操作」）。
@@ -790,7 +1005,7 @@ export function XhsShopItemsPage() {
                 <Tooltip title="点击复制商品 ID">
                   <CopyOutlined
                     style={{ fontSize: 11, cursor: "pointer" }}
-                    onClick={() => void copyToClipboard(item.item_id, "商品 ID 已复制")}
+                    onClick={() => void copyToClipboard(item.item_id, "商品 ID 已复制", message)}
                   />
                 </Tooltip>
               </Space>
@@ -923,14 +1138,20 @@ export function XhsShopItemsPage() {
       width: 130,
       render: (_value, item) => (
         <Space size={4}>
-          {/* 生成笔记（设计 13 §31.4，用户需求③）：调千帆后台智能生成，落库待发布 */}
-          <Tooltip title="调用千帆后台智能生成一篇挂本商品的笔记（待发布，之后到内容库发布）">
+          {/* 生成笔记（设计 13 §31.4，用户需求③；§31.10 起入队即返回）：
+              调千帆后台智能生成一篇挂本商品的笔记（待发布，之后到内容库发布）。
+              loading 判据 = 快照的 running + queued（队列在执行这一项），
+              不只是「本次点击在等回执」—— 回执毫秒级，执行在后台。 */}
+          <Tooltip title="调用千帆后台智能生成一篇挂本商品的笔记（入队后后台执行，待发布，之后到内容库发布）">
             <Button
               type="link"
               size="small"
-              icon={<FileAddOutlined />}
-              loading={generatingItemId === item.item_id}
-              disabled={generatingItemId !== null && generatingItemId !== item.item_id}
+              icon={<FileAddOutlined spin={genQueueItemIds.has(item.item_id)} />}
+              loading={generatingItemId === item.item_id || genQueueItemIds.has(item.item_id)}
+              disabled={
+                (generatingItemId !== null && generatingItemId !== item.item_id) ||
+                (genQueueItemIds.size > 0 && !genQueueItemIds.has(item.item_id))
+              }
               onClick={() => void generateNote(item)}
             >
               生成笔记
@@ -1079,7 +1300,11 @@ export function XhsShopItemsPage() {
         <Form<QueryForm>
           form={form}
           layout="vertical"
-          initialValues={{ status: "on_shelf", note_count_op: DEFAULT_NOTE_COUNT_OP }}
+          initialValues={formInitialValues}
+          // 每次改动即回写缓存（不等点「搜索」）：用户填了一半切走再回来，条件还在。
+          // 「重置」走 `form.resetFields()` ⇒ 回到 `initialValues`（也就是**缓存里的值**），
+          // 所以下面那一拍必须显式把**清空态**写回缓存（否则重置后重进页面又长回来了）。
+          onValuesChange={() => writeFilterCache(FILTER_CACHE_KEYS.shopItems.form, formValuesToDraft(form.getFieldsValue()))}
         >
             {/* 第一行：关键词(6) + 状态(4) + 价格区间(4+4) + 创建时间(6) = 24 */}
             <Row gutter={12}>
@@ -1199,16 +1424,26 @@ export function XhsShopItemsPage() {
           title="商品台账"
           extra={
             <Space size={8}>
+              {/* 生成队列实时态（§31.10）：有待处理时一行小字，转圈即清（无 Tip，
+                  与另两张进度卡同口径）。队列空不占位。 */}
+              {genQueueItemIds.size > 0 && (
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  <FileAddOutlined spin /> 生成队列：{genQueueItemIds.size} 项待处理
+                  {genRound.failed > 0 || genRound.ok > 0
+                    ? `（已生成 ${genRound.ok} · 失败 ${genRound.failed}）`
+                    : ""}
+                </Text>
+              )}
               <Tooltip
                 title={
                   selectedItemIds.length > 0
-                    ? `对选中的 ${selectedItemIds.length} 个商品逐个智能生成笔记（≤20 个/次，单项失败不阻断）`
+                    ? `对选中的 ${selectedItemIds.length} 个商品逐个入队生成笔记（≤20 个/次，单项失败不阻断；后台顺序执行）`
                     : "先在表格里勾选商品（最多 20 个/次）"
                 }
               >
                 <Button
                   type="primary"
-                  icon={<FileAddOutlined />}
+                  icon={<FileAddOutlined spin={genQueueItemIds.size > 0} />}
                   disabled={selectedItemIds.length === 0}
                   loading={batchGenerating}
                   onClick={() => void batchGenerate()}
@@ -1263,7 +1498,7 @@ export function XhsShopItemsPage() {
                 pageSize,
                 total: data.total,
                 showSizeChanger: true,
-                pageSizeOptions: ["20", "50", "100"],
+                pageSizeOptions: SHOP_ITEMS_PAGE_SIZES.map(String),
                 showTotal: (total) => `共 ${total} 件商品`,
                 onChange: (page, size) => {
                   setPageNo(page);
@@ -1339,7 +1574,7 @@ export function XhsShopItemsPage() {
                   {detail.item.item_id}
                   <CopyOutlined
                     style={{ fontSize: 11, cursor: "pointer" }}
-                    onClick={() => void copyToClipboard(detail.item.item_id, "商品 ID 已复制")}
+                    onClick={() => void copyToClipboard(detail.item.item_id, "商品 ID 已复制", message)}
                   />
                 </Space>
               </Descriptions.Item>

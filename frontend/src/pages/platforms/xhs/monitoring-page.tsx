@@ -5,7 +5,7 @@ import {
   SyncOutlined,
 } from "@ant-design/icons";
 import {
-  Alert,
+  App,
   Button,
   Card,
   Col,
@@ -82,12 +82,12 @@ export function XhsMonitoringPage() {
   const [value, setValue] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isWorking, setIsWorking] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // 全站消息提醒统一走 antd message（设计 04 §3.6，2026-09-25 用户口径）：
+  // 操作结果反馈不再渲染 inline Alert 占版面。
+  const { message } = App.useApp();
 
   async function loadTargets() {
     setIsLoading(true);
-    setError(null);
     try {
       const result = await fetchMonitoringTargets();
       setTargets(result.items);
@@ -121,7 +121,7 @@ export function XhsMonitoringPage() {
       );
       setNotesByTarget(Object.fromEntries(noteResults));
     } catch {
-      setError("监控目标加载失败。");
+      message.error("监控目标加载失败。");
     } finally {
       setIsLoading(false);
     }
@@ -134,11 +134,10 @@ export function XhsMonitoringPage() {
   async function createTarget() {
     const trimmedValue = value.trim();
     if (!trimmedValue) {
-      setMessage("请输入监控值。");
+      message.warning("请输入监控值。");
       return;
     }
     setIsWorking(true);
-    setMessage(null);
     try {
       const created = await createMonitoringTarget({
         target_type: targetType,
@@ -150,9 +149,9 @@ export function XhsMonitoringPage() {
       setTargets((currentTargets) => [created, ...currentTargets]);
       setName("");
       setValue("");
-      setMessage("监控目标已创建。");
+      message.success("监控目标已创建。");
     } catch {
-      setMessage("监控目标创建失败。");
+      message.error("监控目标创建失败。");
     } finally {
       setIsWorking(false);
     }
@@ -160,7 +159,6 @@ export function XhsMonitoringPage() {
 
   async function refreshTarget(targetId: number) {
     setIsWorking(true);
-    setMessage(null);
     try {
       const result = await refreshMonitoringTarget(targetId);
       setTargets((currentTargets) =>
@@ -177,9 +175,9 @@ export function XhsMonitoringPage() {
         ...currentNotes,
         [result.target.id]: notes.items,
       }));
-      setMessage(`刷新任务已创建：#${result.task.id}`);
+      message.success(`刷新任务已创建：#${result.task.id}`);
     } catch {
-      setMessage("刷新任务创建失败。");
+      message.error("刷新任务创建失败。");
     } finally {
       setIsWorking(false);
     }
@@ -187,7 +185,6 @@ export function XhsMonitoringPage() {
 
   async function removeTarget(targetId: number) {
     setIsWorking(true);
-    setMessage(null);
     try {
       await deleteMonitoringTarget(targetId);
       setTargets((currentTargets) =>
@@ -203,9 +200,9 @@ export function XhsMonitoringPage() {
         delete nextNotes[targetId];
         return nextNotes;
       });
-      setMessage("监控目标已删除。");
+      message.success("监控目标已删除。");
     } catch {
-      setMessage("监控目标删除失败。");
+      message.error("监控目标删除失败。");
     } finally {
       setIsWorking(false);
     }
@@ -273,25 +270,6 @@ export function XhsMonitoringPage() {
           </Form.Item>
         </Form>
       </Card>
-
-      {message && (
-        <Alert
-          type="info"
-          message={message}
-          showIcon
-          closable
-          style={{ marginBottom: 16 }}
-        />
-      )}
-      {error && (
-        <Alert
-          type="error"
-          message={error}
-          showIcon
-          closable
-          style={{ marginBottom: 16 }}
-        />
-      )}
 
       {isLoading ? (
         <div style={{ textAlign: "center", padding: 48 }}>

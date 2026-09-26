@@ -7,7 +7,7 @@ import {
   RightOutlined,
 } from "@ant-design/icons";
 import {
-  Alert,
+  App,
   Button,
   Card,
   Col,
@@ -78,13 +78,13 @@ export function XhsBenchmarksPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [refreshingIds, setRefreshingIds] = useState<Set<number>>(new Set());
   const [loadingSnapshotIds, setLoadingSnapshotIds] = useState<Set<number>>(new Set());
-  const [error, setError] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
+  // 全站消息提醒统一走 antd message（设计 04 §3.6，2026-09-25 用户口径）：
+  // 操作结果反馈不再渲染 inline Alert 占版面。
+  const { message } = App.useApp();
   const [latestSnapshots, setLatestSnapshots] = useState<Record<number, MonitoringSnapshot>>({});
 
   const loadTargets = useCallback(async () => {
     setIsLoading(true);
-    setError(null);
     try {
       const result = await fetchMonitoringTargets();
       const noteUrlTargets = result.items.filter(
@@ -108,7 +108,7 @@ export function XhsBenchmarksPage() {
       );
       setLatestSnapshots(snapshotEntries);
     } catch {
-      setError("竞品数据加载失败。");
+      message.error("竞品数据加载失败。");
     } finally {
       setIsLoading(false);
     }
@@ -122,8 +122,6 @@ export function XhsBenchmarksPage() {
     const trimmed = newUrl.trim();
     if (!trimmed) return;
     setIsAdding(true);
-    setError(null);
-    setMessage(null);
     try {
       await createMonitoringTarget({
         target_type: "note_url",
@@ -133,10 +131,10 @@ export function XhsBenchmarksPage() {
       });
       setNewUrl("");
       setNewInterval(30);
-      setMessage("已添加监控目标。");
+      message.success("已添加监控目标。");
       await loadTargets();
     } catch {
-      setError("添加监控目标失败。");
+      message.error("添加监控目标失败。");
     } finally {
       setIsAdding(false);
     }
@@ -144,7 +142,6 @@ export function XhsBenchmarksPage() {
 
   async function handleRefresh(targetId: number) {
     setRefreshingIds((prev) => new Set(prev).add(targetId));
-    setError(null);
     try {
       const result = await refreshMonitoringTarget(targetId);
       // Update the target in state
@@ -155,9 +152,9 @@ export function XhsBenchmarksPage() {
       if (result.snapshot) {
         setLatestSnapshots((prev) => ({ ...prev, [targetId]: result.snapshot }));
       }
-      setMessage("刷新成功。");
+      message.success("刷新成功。");
     } catch {
-      setError("刷新失败，请稍后重试。");
+      message.error("刷新失败，请稍后重试。");
     } finally {
       setRefreshingIds((prev) => {
         const next = new Set(prev);
@@ -168,7 +165,6 @@ export function XhsBenchmarksPage() {
   }
 
   async function handleDelete(targetId: number) {
-    setError(null);
     try {
       await deleteMonitoringTarget(targetId);
       setTargets((prev) => prev.filter((t) => t.id !== targetId));
@@ -185,9 +181,9 @@ export function XhsBenchmarksPage() {
       if (expandedTargetId === targetId) {
         setExpandedTargetId(null);
       }
-      setMessage("已删除监控目标。");
+      message.success("已删除监控目标。");
     } catch {
-      setError("删除失败。");
+      message.error("删除失败。");
     }
   }
 
@@ -297,27 +293,6 @@ export function XhsBenchmarksPage() {
           </Button>
         </Space>
       </Card>
-
-      {error && (
-        <Alert
-          type="error"
-          message={error}
-          showIcon
-          closable
-          onClose={() => setError(null)}
-          style={{ marginBottom: 16 }}
-        />
-      )}
-      {message && (
-        <Alert
-          type="success"
-          message={message}
-          showIcon
-          closable
-          onClose={() => setMessage(null)}
-          style={{ marginBottom: 16 }}
-        />
-      )}
 
       {isLoading ? (
         <div style={{ textAlign: "center", padding: 48 }}>

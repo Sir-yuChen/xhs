@@ -12,10 +12,14 @@
  * ③ 任务类型三档（R14）：手动执行 / Cron 周期 / 定时一次 ——「间隔周期」并入 Cron；
  * ④ 日志表只展示 6 列（R13）：任务名称 / 任务类型 / 状态 / 触发方式 /
  *    开始执行时间 / 任务进度（进度条 + 耗时或异常），其余进详情弹窗；
- * ⑤ 页面**不留 inline 消息条**（2026-09-24 口径「所有的提示都改为弹窗提示除非
- *    界面没有内容」）：一切结果提示走统一弹窗；
+ * ⑤ 页面**不留 inline 消息条**：一切结果提示走 antd `message` 轻提示
+ *    （2026-09-24 口径「所有的提示都改为弹窗提示」⇒ 2026-09-25 口径
+ *    「所有消息提醒参考 antd 成熟组件，不要在页面暂用空间」，设计 04 §3.6；
+ *    notice 弹窗比消息条更占空间，被 message 取代）；
  * ⑥ **任务分组整条移除**（2026-09-24 口径「任务分组先去掉」）：列表不再有「分组」列；
- * ⑦ 调用目标列**两行**（中文名 + 代码键）、任务名下方不挂「内置」Tag。
+ * ⑦ 调用目标**一律两行**（中文名 + 代码键）：列表列与日志详情弹窗同口径
+ *    （2026-09-25 用户口径「调用目标需要配置中文名称」—— 弹窗原只显代码键）；
+ *    任务名下方不挂「内置」Tag。
  */
 import {
   ClockCircleOutlined,
@@ -30,12 +34,12 @@ import {
   SyncOutlined,
 } from "@ant-design/icons";
 import {
+  App,
   Button,
   Card,
   Col,
   DatePicker,
   Empty,
-  Modal,
   Popconfirm,
   Progress,
   Row,
@@ -93,13 +97,11 @@ const cardStyle = { background: "#1f1f1f", borderColor: "#303030" };
 
 export function TaskCenterPage() {
   const [activeTab, setActiveTab] = useState("jobs");
-  // 用户口径（2026-09-24）：页面**不放 inline 消息条**，一切结果提示走**弹窗**。
-  // `notice` 取代原先的 `message`（Alert）+ `jobNotice` 两套，统一成一个弹窗。
-  const [notice, setNotice] = useState<{
-    kind: "success" | "error" | "info";
-    title: string;
-    content: string;
-  } | null>(null);
+  // 全站消息提醒统一走 antd message（设计 04 §3.6，2026-09-25 用户口径：
+  // 「所有消息提醒参考 antd 成熟组件，不要在页面暂用空间」）—— 取代 2026-09-24
+  // 的 notice 结果弹窗（弹窗遮罩比 inline 消息条更占空间，设计 15 §9.1.1 R22
+  // 原句已标注被取代）。`App.useApp()` 的实例继承主题与 locale。
+  const { message } = App.useApp();
 
   // 任务列表（scheduled_jobs：at / cron / interval 全量）
   const [jobs, setJobs] = useState<ScheduledJob[]>([]);
@@ -124,13 +126,6 @@ export function TaskCenterPage() {
   // 日志详情弹窗（执行时配置快照 + 日志明细）
   const [detailLog, setDetailLog] = useState<ScheduledJobLog | null>(null);
 
-  /** 结果提示小工具：一次调用一个弹窗（替代原先散落的 setMessage） */
-  const notify = useCallback(
-    (kind: "success" | "error" | "info", title: string, content: string) =>
-      setNotice({ kind, title, content }),
-    []
-  );
-
   const loadStatus = useCallback(async () => {
     try {
       setScheduleStatus(await fetchScheduleStatus());
@@ -146,7 +141,7 @@ export function TaskCenterPage() {
       const result = await fetchScheduleJobs({ page_size: 100 });
       setJobs(result.items);
     } catch {
-      notify("error", "加载失败", "任务列表加载失败，请稍后重试。");
+      message.error("任务列表加载失败，请稍后重试。");
     } finally {
       setJobsLoading(false);
     }
@@ -177,7 +172,7 @@ export function TaskCenterPage() {
       setLogs(result.items);
       setSelectedLogIds([]);
     } catch {
-      notify("error", "加载失败", "任务日志加载失败，请稍后重试。");
+      message.error("任务日志加载失败，请稍后重试。");
     } finally {
       setLogsLoading(false);
     }
@@ -212,18 +207,16 @@ export function TaskCenterPage() {
     try {
       const paused = job.status === "active";
       await changeScheduleJobStatus(job.id, paused ? "paused" : "active");
-      // 验收口径（用户 2026-09-24）：启停结果用**弹窗**提醒，不用页顶 inline 提示
-      setNotice({
-        kind: "success",
-        title: paused ? "任务已暂停" : "任务已恢复",
-        content: paused
+      // 结果提醒走 antd message（设计 04 §3.6，2026-09-25 用户口径）。
+      message.success(
+        paused
           ? `任务「${job.name}」已暂停：到达触发时间也不会自动执行，可随时点「恢复」。`
-          : `任务「${job.name}」已恢复：将按触发器自动执行。`,
-      });
+          : `任务「${job.name}」已恢复：将按触发器自动执行。`
+      );
       await loadJobs();
       await loadStatus();
     } catch {
-      notify("error", "操作失败", `任务「${job.name}」状态切换失败。`);
+      message.error(`任务「${job.name}」状态切换失败。`);
     } finally {
       setActionLoading(false);
     }
@@ -233,9 +226,9 @@ export function TaskCenterPage() {
     setActionLoading(true);
     try {
       await runScheduleJobOnce(job.id);
-      notify("success", "已入队执行", `任务「${job.name}」已入队执行，记录见「任务日志」页签。`);
+      message.success(`任务「${job.name}」已入队执行，记录见「任务日志」页签。`);
     } catch {
-      notify("error", "执行失败", `任务「${job.name}」执行失败。`);
+      message.error(`任务「${job.name}」执行失败。`);
     } finally {
       setActionLoading(false);
     }
@@ -245,12 +238,12 @@ export function TaskCenterPage() {
     setActionLoading(true);
     try {
       await deleteScheduleJob(job.id);
-      notify("success", "任务已删除", `任务「${job.name}」已删除（任务日志保留）。`);
+      message.success(`任务「${job.name}」已删除（任务日志保留）。`);
       await loadJobs();
       await loadStatus();
     } catch (err) {
       const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-      notify("error", "删除失败", String(detail ?? `任务「${job.name}」删除失败。`));
+      message.error(String(detail ?? `任务「${job.name}」删除失败。`));
     } finally {
       setActionLoading(false);
     }
@@ -653,7 +646,7 @@ export function TaskCenterPage() {
                       disabled={selectedLogIds.length === 0}
                       onClick={async () => {
                         const result = await deleteScheduleLogs(selectedLogIds);
-                        notify("success", "已删除", `已删除 ${result.deleted} 条日志。`);
+                        message.success(`已删除 ${result.deleted} 条日志。`);
                         await loadLogs();
                       }}
                     >
@@ -664,7 +657,7 @@ export function TaskCenterPage() {
                       description="不可恢复。任务行不受影响。"
                       onConfirm={async () => {
                         const result = await cleanScheduleLogs();
-                        notify("success", "已清空", `已清空 ${result.deleted} 条日志。`);
+                        message.success(`已清空 ${result.deleted} 条日志。`);
                         await loadLogs();
                       }}
                       okButtonProps={{ danger: true }}
@@ -706,29 +699,18 @@ export function TaskCenterPage() {
         onCancel={() => setJobFormOpen(false)}
         onSaved={(saved) => {
           setJobFormOpen(false);
-          notify("success", "已保存", `任务「${saved.name}」已保存。`);
+          message.success(`任务「${saved.name}」已保存。`);
           void loadJobs();
           void loadStatus();
         }}
       />
 
-      {/* 统一结果弹窗（用户口径 2026-09-24：一切提示走弹窗，页面不留消息条） */}
-      <Modal
-        open={notice !== null}
-        title={notice?.title}
-        onOk={() => setNotice(null)}
-        onCancel={() => setNotice(null)}
-        okText="知道了"
-        width={460}
-        footer={(_, { OkBtn }) => <OkBtn />}
-      >
-        <Text type={notice?.kind === "error" ? "danger" : undefined}>{notice?.content}</Text>
-      </Modal>
-
       {/* 日志详情：执行时的配置快照 + 日志明细 */}
       <JobLogDetailModal
         open={detailLog !== null}
         log={detailLog}
+        // 调用目标中文名与列表列共用同一份 /schedule/targets（不另写映射表，DEF-044）
+        targetNames={targetNames}
         onCancel={() => setDetailLog(null)}
       />
     </div>

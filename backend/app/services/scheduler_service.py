@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from datetime import datetime
-from typing import Any, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -545,6 +546,19 @@ def check_all_account_cookies_once(user_id: int, account_ids: Optional[Sequence[
         db.close()
 
 
+#: job store 引擎等写锁的上限（秒，DEF-067）。默认只有 pysqlite 的 5 秒。
+JOBSTORE_BUSY_TIMEOUT_SECONDS = 30
+
+#: APScheduler 后台主循环的线程名（3.11 `BackgroundScheduler.start` 里写死）。
+SCHEDULER_THREAD_NAME = "APScheduler"
+
+#: 守活看门狗的巡检间隔（秒）与重建失败后的退避上限（秒）。
+WATCHDOG_INTERVAL_SECONDS = 30.0
+WATCHDOG_MAX_BACKOFF_SECONDS = 600.0
+#: 看门狗退出信号（`stop_scheduler_watchdog()` 置位，启动时复位）。
+_watchdog_stop = threading.Event()
+
+
 def _persistent_jobstores() -> dict[str, Any]:
     """持久化 job store（设计 13 §24.9）：指向应用**同一个** SQLite 库。
 
@@ -557,10 +571,28 @@ def _persistent_jobstores() -> dict[str, Any]:
     表数**（`verify_doc_counts.py` 只数 `models/` 里声明的表）。
     ⚠️ 持久化 store 要求 job 函数可被**文本引用**（module 级函数）—— 生产路径
     传的都是 module 级函数；lambda 只能在内存 store 里用（测试）。
+
+    ⚠️ **`engine_options` 是必需项，别删（DEF-067）**：job store **自建引擎**、
+    不走 `core/database.py` 的事件监听 ⇒ 拿不到 `PRAGMA busy_timeout=5000`，
+    只剩 pysqlite 默认的 **5 秒**。5 秒内拿不到写锁就抛 `database is locked`；
+    而这一抛发生在 **APScheduler 主循环里**（`base.py::_process_jobs` 的
+    `jobstore.update_job`）⇒ **整个调度线程当场死掉**（实测 2026-09-25
+    16:00:06 起，作业 14 分钟一个没跑；`scheduler.running` 仍是 `True`，
+    状态端点看不出来）。给足等待时长把「抛异常」变成「等一会儿」。
     """
     from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 
-    return {"default": SQLAlchemyJobStore(url=get_settings().database_url)}
+    return {
+        "default": SQLAlchemyJobStore(
+            url=get_settings().database_url,
+            engine_options={
+                "connect_args": {
+                    "timeout": JOBSTORE_BUSY_TIMEOUT_SECONDS,
+                    "check_same_thread": False,
+                }
+            },
+        )
+    }
 
 
 def _stored_job_exists(store: Any, job_id: str) -> bool:
@@ -904,6 +936,93 @@ def start_scheduler() -> BackgroundScheduler:
 def shutdown_scheduler(scheduler: Optional[BackgroundScheduler]) -> None:
     if scheduler is not None and scheduler.running:
         scheduler.shutdown(wait=False)
+
+
+# --------------------------------------------------------------------------- #
+# 调度器守活（DEF-067，2026-09-25）
+# --------------------------------------------------------------------------- #
+
+
+def scheduler_thread_alive() -> bool:
+    """APScheduler 主循环线程是否还活着（**唯一可信的存活判据**）。
+
+    ⚠️ 别用 `scheduler.running`：3.11 的 `state` 只在 `shutdown()` 里改，
+    主循环线程因异常死掉时它仍是 `STATE_RUNNING` ⇒ `running` 返回 `True`，
+    `/api/schedule` 状态端点会报「运行中」而实际上一个作业都不会跑
+    （2026-09-25 实测：16:00 起作业静默停摆 14 分钟，端点照样说 running）。
+    """
+    return any(
+        thread.name == SCHEDULER_THREAD_NAME and thread.is_alive()
+        for thread in threading.enumerate()
+    )
+
+
+def revive_scheduler(
+    holder: Any,
+    *,
+    build: Optional[Callable[[], BackgroundScheduler]] = None,
+) -> BackgroundScheduler:
+    """主循环已死 ⇒ **重建一台新的**并换进 `holder.scheduler`。
+
+    为什么不是「重启同一台」：3.11 的 `shutdown()` 会把 `ThreadPoolExecutor`
+    一起关掉（`BasePoolExecutor.shutdown` → `_pool.shutdown()`），而
+    `BaseExecutor.start()` **不会重建池子** ⇒ 复用同一台会造出「循环在跑、
+    作业提交不了」的僵尸。只有 `BackgroundScheduler(...)` 新实例是干净的。
+
+    旧实例照旧 `shutdown`（关执行器与 job store，释放它可能还攥着的库连接）。
+    """
+    old = getattr(holder, "scheduler", None)
+    if old is not None:
+        try:
+            old.shutdown(wait=False)
+        except Exception:  # noqa: BLE001 - 旧实例已异常，关不掉也要继续重建
+            logger.warning("旧调度器 shutdown 失败（主循环已死，继续重建）", exc_info=True)
+    builder = build or start_scheduler
+    scheduler = builder()
+    holder.scheduler = scheduler
+    logger.warning("调度器已重建并接管（旧主循环已死，作业由 DB 重新注册）")
+    return scheduler
+
+
+def start_scheduler_watchdog(
+    holder: Any,
+    *,
+    interval: float = WATCHDOG_INTERVAL_SECONDS,
+    build: Optional[Callable[[], BackgroundScheduler]] = None,
+) -> threading.Thread:
+    """守活线程：定期检查主循环线程，死了就重建（APScheduler 自己不自愈）。
+
+    重建失败按 `interval` 指数退避（上限 `WATCHDOG_MAX_BACKOFF_SECONDS`），
+    防「库长期不可用」时每 30 秒造一台调度器把线程/连接耗光。
+    进程收尾调 :func:`stop_scheduler_watchdog`（否则测试里 app 下线后
+    看门狗还会复活一台指向真库的调度器）。
+    """
+    _watchdog_stop.clear()
+
+    def _loop() -> None:
+        backoff = interval
+        while not _watchdog_stop.is_set():
+            if _watchdog_stop.wait(backoff):  # 可被 stop 打断的等待
+                return
+            try:
+                if scheduler_thread_alive():
+                    backoff = interval
+                    continue
+                logger.error("调度主循环已死（`%s` 线程不存在）—— 重建调度器", SCHEDULER_THREAD_NAME)
+                revive_scheduler(holder, build=build)
+                backoff = interval
+            except Exception:  # noqa: BLE001 - 看门狗本身绝不能被一次失败带走
+                logger.exception("调度看门狗重建失败，%.0f 秒后重试", backoff)
+                backoff = min(backoff * 2, WATCHDOG_MAX_BACKOFF_SECONDS)
+
+    thread = threading.Thread(target=_loop, name="scheduler-watchdog", daemon=True)
+    thread.start()
+    return thread
+
+
+def stop_scheduler_watchdog() -> None:
+    """让看门狗退出巡检（幂等；下一次 `start_scheduler_watchdog` 会自动复位）。"""
+    _watchdog_stop.set()
 
 
 # --------------------------------------------------------------------------- #

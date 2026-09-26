@@ -165,6 +165,90 @@ def test_shop_items_view_guards_are_load_bearing(mutate, expected):
     assert f"FAIL  {expected}" in result.stdout, f"stdout={result.stdout}"
 
 
+def _run_library_topics_merge(env: dict | None = None):
+    script = ROOT / "tests/frontend/library_topics_merge.cjs"
+    assert script.exists(), "行为验证脚本缺失（tests/frontend/library_topics_merge.cjs）"
+    try:
+        return subprocess.run(
+            ["node", str(script)],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=180,
+            env={**os.environ, **(env or {})},
+        )
+    except FileNotFoundError:  # pragma: no cover - 环境问题，不是逻辑分支
+        pytest.fail("未找到 node：本机无法运行前端行为验证（AGENTS.md §2 已依赖 node 跑 tsc）")
+
+
+def test_library_topics_merge_drives_real_api():
+    """标签并入话题（§34.4）：A 段驱动真实 api.ts + B/C 段源码守卫，全绿。"""
+    result = _run_library_topics_merge()
+    assert result.returncode == 0, (result.stdout + result.stderr)[-900:]
+    assert "FAIL" not in result.stdout, result.stdout
+
+
+@pytest.mark.parametrize(
+    "mutate,expected",
+    [
+        ("titlebar", "B1"),       # 标题栏加回标签 chips ⇒ 刚移除的 UI 又回来了
+        ("objects", "B2"),        # 话题 chips 退回字符串渲染 ⇒ 关系表对象契约被破坏
+        ("autocomplete", "B3"),   # AutoComplete 下拉清空 ⇒ 「选已有话题」能力丢失
+        ("filter", "B4"),         # 筛选回退 tag_id ⇒ 后端参数已改名，筛了等于没筛
+        ("cards", "B5"),          # 话题渲染加回卡片 ⇒ 用户口径「话题只留详情弹窗」被破坏
+        ("route", "C1"),          # 话题字典回退 /tags ⇒ 路由已随表合并改名
+    ],
+)
+def test_library_topics_merge_guards_are_load_bearing(mutate, expected):
+    """变异验证：每个守卫被改坏时脚本必须变红（DEF-058：带前缀断言）。"""
+    result = _run_library_topics_merge({"LIB_TOPIC_MUTATE": mutate})
+    assert result.returncode != 0, f"{mutate} 变异必须让脚本失败"
+    assert f"FAIL {expected}" in result.stdout, f"stdout={result.stdout}"
+
+
+def _run_library_topic_search(env: dict | None = None):
+    script = ROOT / "tests/frontend/library_topic_search.cjs"
+    assert script.exists(), "行为验证脚本缺失（tests/frontend/library_topic_search.cjs）"
+    try:
+        return subprocess.run(
+            ["node", str(script)],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=180,
+            env={**os.environ, **(env or {})},
+        )
+    except FileNotFoundError:  # pragma: no cover - 环境问题，不是逻辑分支
+        pytest.fail("未找到 node：本机无法运行前端行为验证（AGENTS.md §2 已依赖 node 跑 tsc）")
+
+
+def test_library_topic_search_drives_real_api():
+    """话题下拉远程模糊搜索（§34.4）：A 段驱动真实 api.ts + B 段驱动真实
+    topic-search.ts + C/D 段源码守卫，全绿。"""
+    result = _run_library_topic_search()
+    assert result.returncode == 0, (result.stdout + result.stderr)[-900:]
+    assert "FAIL" not in result.stdout, result.stdout
+
+
+@pytest.mark.parametrize(
+    "mutate,expected",
+    [
+        ("nodebounce", "C2"),      # onSearch 绕过防抖器直连查询 ⇒ 每次击键都打后端
+        ("localfilter", "C1"),     # 退回本地过滤 ⇒ keyword 永不到后端，远程搜索名存实亡
+        ("nolike", "D2"),          # keyword 拉了不用（去 LIKE）⇒ 搜索退化成全量
+    ],
+)
+def test_library_topic_search_guards_are_load_bearing(mutate, expected):
+    """变异验证：每个守卫被改坏时脚本必须变红（DEF-058：带前缀断言）。"""
+    result = _run_library_topic_search({"LIB_TOPIC_SEARCH_MUTATE": mutate})
+    assert result.returncode != 0, f"{mutate} 变异必须让脚本失败"
+    assert f"FAIL {expected}" in result.stdout, f"stdout={result.stdout}"
+
+
 def test_shop_items_page_removed_entries_stay_removed():
     """v1.32（§30.1 / §30.2 + 用户 2026-09-23 口径）：商品列表页**不再有**
     「换一份千帆 Cookie」按钮、「同步挂链映射」按钮，账号下拉**不再按类型过滤**；
@@ -240,7 +324,11 @@ def test_shop_items_page_follows_the_2026_09_23_review():
     assert 'name="note_count_op"' in code and 'name="note_count"' in code, (
         "搜索条件应有「挂链笔记数」比较符 + 篇数（v1.34 / §33.6）"
     )
-    assert "DEFAULT_NOTE_COUNT_OP" in code, "比较符默认值必须取 lib 常量（默认「小于」）"
+    assert "EMPTY_SHOP_ITEMS_DRAFT.note_count_op" in code, (
+        "比较符默认值必须取 lib 常量（`EMPTY_SHOP_ITEMS_DRAFT.note_count_op` = 「小于」）；"
+        "2026-09-26 起表单初值来自缓存草稿，那份草稿的默认值仍住 lib"
+    )
+    assert 'note_count_op: "lt"' not in code, "页面不许自己写比较符默认值（第二份真相源）"
     assert "noteCountFilter(" in code, "篇数 → 请求参数必须走 lib 的 noteCountFilter（留空不筛）"
     # ⑥ 分类不自动换行：`…` 收起 + Tooltip（换行会把整行商品卡撑高、列基线错开）
     assert "ellipsis={{ tooltip: item.category" in code, "分类行应 `…` 收起 + Tooltip，不换行"
@@ -380,8 +468,15 @@ def test_shop_items_sorting_is_server_side_and_off_by_default():
     assert "sorter: (" not in code, (
         "不许给 antd 传比较函数：那会变成对当前页的本地假排序（后端排序结果被它盖住）"
     )
-    assert "useState<SortState | null>(DEFAULT_SORT)" in code, (
-        "排序状态初值必须是 lib 的 DEFAULT_SORT（无排序），页面不得自己编一个默认字段"
+    # 2026-09-26：排序态**落本地缓存**（`usePersistedFilter`，用户点过的排序不该每次重来），
+    # 但**默认值仍是 lib 的 `DEFAULT_SORT`（无排序）**、且必须过形状校验 —— 页面不得
+    # 自己编一个默认字段。切片断言：只找 `DEFAULT_SORT` 会被 lib 里任何一个同名用法满足。
+    sort_decl = code.split("usePersistedFilter<SortState | null>(", 1)[1].split(")", 1)[0]
+    assert "DEFAULT_SORT" in sort_decl, (
+        "排序的默认值必须是 lib 的 DEFAULT_SORT（无排序），页面不得自己编一个默认字段"
+    )
+    assert "sanitizeSortState" in sort_decl, (
+        "缓存的排序态必须过 `sanitizeSortState`（脏形状回「无排序」，不是回某个硬编字段）"
     )
     assert "...(sortArg" in code, "无排序态必须整个省略 sort_field/order（不是送空串去兜底）"
     # ⚠️ 只断言「那段文本在」是不够的（变异实测：把 `: {}` 换成 `: { sort_field: "" }`
@@ -670,6 +765,25 @@ def test_detail_comment_pane_has_fixed_height_and_inner_scroll():
     assert "@media (max-width: 900px)" in css
     # 信息区必须能滚（flex 子项需要 min-height: 0）
     assert "min-height: 0" in css
+
+
+def test_note_detail_thumbnails_stay_on_one_scrollable_row():
+    """缩略图条**一行展示 + 超宽左右滑**（v1.55 用户口径）。
+
+    旧实现是 antd `Space wrap` —— 图一多就堆成好几行，把「下载当前图片」与素材
+    说明顶出首屏，左栏被迫多滚一屏。现在永不分行：`flex-wrap: nowrap` +
+    `overflow-x: auto`。三个断言各管一头：class 在手、不换行、放不下能滑。
+    """
+    source = _read(NOTE_DETAIL_MODAL)
+    assert '"note-detail-thumbs"' in source, "缩略图条必须挂 .note-detail-thumbs class"
+    # 反向：整个弹窗不再有 `Space wrap`（换行复发即回归；下载按钮那处单按钮包装
+    # 同轮改成普通 div —— 一个按钮没有「wrap」可言）。
+    assert "<Space wrap" not in source, "弹窗里又出现 Space wrap 了？缩略图条会重新堆成多行"
+    css = _read(GLOBAL_CSS)
+    # 起始标记带 `{` ⇒ 注释里的同类名字面量不会抢跑（DEF-057：全文断言会被别处遮过）。
+    block = _slice_between(css, ".note-detail-thumbs {", "}")
+    assert "flex-wrap: nowrap" in block, "缩略图条不得换行"
+    assert "overflow-x: auto" in block, "超出一行时必须能左右滑"
 
 
 # ---------------------------------------------------------------------------
@@ -1172,6 +1286,62 @@ def test_sync_gates_guards_are_load_bearing(mutate, expected):
     assert f"FAIL  {expected}" in result.stdout, f"stdout={result.stdout}"
 
 
+# --------------------------------------------------------------------------- #
+# 内容库筛选口径 + 批量同步门禁：行为验证（esbuild 打包真实 note-filters.ts）
+# --------------------------------------------------------------------------- #
+def _run_note_filters(env: dict | None = None):
+    script = ROOT / "tests/frontend/note_filters.cjs"
+    assert script.exists(), "行为验证脚本缺失（tests/frontend/note_filters.cjs）"
+    try:
+        return subprocess.run(
+            ["node", str(script)],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=180,
+            env={**os.environ, **(env or {})},
+        )
+    except FileNotFoundError:  # pragma: no cover - 环境问题，不是逻辑分支
+        pytest.fail("未找到 node：本机无法运行前端行为验证（AGENTS.md §2 已依赖 node 跑 tsc）")
+
+
+def test_note_filters_and_batch_sync_gates_are_driven_for_real():
+    """筛选口径 / 类型文案 / 同步与**批量同步**门禁有真实打包产物验证（§25 / §35.1）。
+
+    43 条 = A5 + B9 + C3 + D8 + E4 + F6 + G9。2026-09-25 起本脚本**真正被 pytest
+    执行**（此前只在 docstring 里被提到 —— 脚本存在 ≠ 在被守，与
+    `test_every_behaviour_script_is_wired_into_pytest` 想防的事是同一条）。
+    """
+    result = _run_note_filters()
+    assert result.returncode == 0, (result.stdout + result.stderr)[-900:]
+    assert "43 PASS / 0 FAIL" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "mutate,expected",
+    [
+        # 既有锚点（§25）：去掉「已发布 ⇒ 给同步」半条 ⇒ 回到漏按钮状态
+        ("syncpub", "F2"),
+        # §35.1 新锚点：批量门禁放宽 ⇒ 未发布/发布失败也进同步队列
+        ("batchgate", "G3"),
+        # §35.1：跳过不计数 ⇒ 确认框少说跳过几篇
+        ("batchskip", "G7"),
+        # §35.1：目标顺序反转 ⇒ 队列顺序处理变成逆序
+        ("batchorder", "G8"),
+    ],
+)
+def test_note_filters_guards_are_load_bearing(mutate, expected):
+    """变异验证：批量同步门禁的三个锚点被改坏时脚本必须变红。
+
+    断言带 `FAIL ` 前缀：只找 `G3` 会被全绿时的 `PASS G3 …` 命中（DEF-058）。
+    """
+    result = _run_note_filters({"NOTE_FILTERS_MUTATE": mutate})
+    assert result.returncode != 0, f"{mutate} 变异必须让脚本失败"
+    assert f"FAIL {expected}" in result.stdout, f"stdout={result.stdout}"
+
+
 
 # ---------------------------------------------------------------------------
 # 笔记类型 + 同步按钮 + 话题/商品解耦（设计 13 §25 / §27 / §28，2026-09-22）
@@ -1223,6 +1393,416 @@ def test_library_sync_button_shows_only_for_synced_notes():
     )
     # ④ 一个实现、两个调用点（旧断言保留：定义 + 详情 + 卡片 = 3 处 syncNote 调用）
     assert code.count("syncNote(") >= 3, "卡片与详情必须共用同一个 syncNote 实现"
+
+
+def test_library_publish_is_async_with_progress_card():
+    """发布异步 + 进度卡接线（2026-09-25，设计 13 §31.5 异步化）。
+
+    用户口径：「前端点击发布无需等待，后端异步发布」+「内容库页新增发布进度卡」。
+    源码断言守四件事（少任何一件，用户侧就退回「干等」或「进度看不见」）：
+
+    ① 点击后**不起全链等待**：`publishSavedNote` 的返回值只用于置 publishing +
+       起轮询（`trackPublishNotes`），页面源码里**不许**出现「await 发布结果后再
+       摆终态文案」的旧形态；
+    ② 进度卡数据源是 `GET /notes/publish-queue`（`fetchPublishQueue`），且轮询
+       间隔是**一个常量**（原 `PUBLISH_POLL_INTERVAL_MS`，2026-09-25 与同步卡统一
+       成 `QUEUE_POLL_INTERVAL_MS = 5000` —— 用户口径「数据 5 秒更新一次」），
+       不是散落的魔法数；
+    ③ 轮询随页面卸载停（`useEffect` cleanup 里 `clearInterval`）—— 否则切页面
+       后定时器继续打接口；
+    ④ 后端路由 `publish-queue` 注册在 `/{note_id}` **之前**（否则被 int 转换
+       吃掉变 422，进度卡永远取不到数）；
+    ⑤ 进度卡是**统计卡行里的第 5 张小卡**（2026-09-25 用户口径「发布进度卡做成
+       小卡，与已发、待发布、发布失败、等卡片一行样式一致，并去掉相同的统计数据」）：
+       位置在筛选区之前；`counts.published/failed/pending` 三个**重复计数不再渲染**
+       （统计行前三张已是同一份数）。
+    ⑥ 2026-09-25 用户口径「发布、同步进度卡做类似的调整」+「去掉 tip」⇒ 卡片从
+       「发布中(0/1) + 排队(N) + Tooltip」改成**三数**（成功 / 失败 / 待发布），
+       与同步卡同形。
+       ⚠️ **被取代的原句**（保留，不静默删除）：
+         「快照 `published`/`failed`/`total` 是**本轮队列记账**
+           （`note_publish_service._publish_results`），不是全库四态 `counts`。」
+       —— §35.9 队列持久化后「本轮」由 `tasks` 表的**批次行**承担（内存
+       `_publish_results` 已整段删除），`publish_queue_snapshot` 委托底座
+       `note_queue_service.snapshot` 并把通用名 `synced` 改名成 `published`
+       （改名契约由 `test_publish_worker_watchdog.py` 的键名守卫钉死）。
+       ⚠️ **被取代的原句**（保留，不静默删除）：
+         「assert "publishQueueTooltip" in code, "「正在发布哪篇 + 后面排几篇」
+           收进 Tooltip，别整条删"」
+       ⚠️ 2026-09-26 常驻化那版的**「本页累计」也被取代**（保留，不静默删除）：
+         「assert "publishRound" in code, "本轮成败数必须本页累计"
+           / assert "setPublishRound(" in code, ...」
+       —— 2026-09-26 当日口径（用户口径「只统计当日发布或同步的数据，在卡片右下角
+       小字展示仅当日数据，**统计队列记录表中的数据**」）：三数改读快照 `today`
+       （后端 `today_item_counts` 按当日 `tasks` 行现算），页面不再自己累计
+       —— 累计刷新页面就归零、还看不见别的入口入队的项。
+    ⑦ **六张卡同尺寸**（2026-09-26 用户口径「另外两个进度卡与其它卡片大小不一致，
+       应与其它卡片保持一致」）：`flex="1 1 0%"` 只保证**等宽**，高度得靠统一的
+       内容盒常量（`STAT_CARD_CONTENT` / `STAT_CARD_PROGRESS_CONTENT`）—— 否则
+       进度卡多一行「仅当日数据」小字就比同行普通卡高一截。
+    ⑧ **当日小字改走主题令牌**（2026-09-26 用户口径「仅当日数据黑色字体看不清」）：
+       小字从 `<div style={…}>`（样式里写死 `rgba(0, 0, 0, 0.45)`）改成
+       `<Text style={{ …, color: token.colorTextSecondary }}>`（`theme.useToken()`
+       取令牌，亮 `rgba(0,0,0,.65)` / 暗 `rgba(255,255,255,.65)`）。
+       ⚠️ 别退回 `<Text type="secondary">`：它取 `colorTextTertiary`（0.45），
+       暗色下 12px 只有 ≈4.5:1、亮色下与写死的 0.45 黑同色 —— 都还是「看不清」。
+       根因：本应用**默认暗色**
+       （`app/providers.tsx` `saved === "light" ? "light" : "dark"`，卡片底 `#1a1a1a`）
+       ⇒ 写死黑字叠近黑底 ≈1.2:1，看不见；亮色下 0.45 黑（≈#8C8C8C）对 12px 也偏淡。
+       ⚠️ **被取代的原句**（保留，不静默删除）：
+         「assert "style={STAT_CARD_TODAY_NOTE}" in code, "当日小字未用右下角样式常量"」
+       —— 断言本身仍在（常量仍是唯一写样式的入口），但**常量里不许再有 `color`**，
+       且渲染必须带 `type="secondary"`；这两条由本 test ⑦ 段的两行断言钉死。
+    """
+    code = _code_only(_read(LIBRARY))
+    # ① 点击即入队、不等链路
+    assert "trackPublishNotes(" in code, "发布入队后未起轮询（用户看不到进度）"
+    assert "await refreshPublishQueue()" in code, "入队后未立刻拉一次快照（排队位置算不出来）"
+    # ② 进度卡数据源 + 单一间隔常量
+    assert "fetchPublishQueue" in code, "进度卡未接 GET /notes/publish-queue"
+    # ⚠️ 被取代：`assert code.count("PUBLISH_POLL_INTERVAL_MS") >= 2, ...`
+    #    （常量名已与同步卡统一为 QUEUE_POLL_INTERVAL_MS）
+    assert code.count("QUEUE_POLL_INTERVAL_MS") >= 2, "轮询间隔必须是一个常量（定义 + setInterval 各一次）"
+    assert "setInterval" in code and "clearInterval" in code, "轮询没有起停手段"
+    # ③ 卸载即停
+    assert "publishPollRef.current !== null) window.clearInterval(publishPollRef.current)" in code, (
+        "页面卸载未停发布轮询（定时器会跟着路由切换一直跑）"
+    )
+    # ④ 后端路由顺序（进度卡的生命线）
+    notes_api = _read(ROOT / "backend/app/api/notes.py")
+    queue_at = notes_api.index('@router.get("/publish-queue")')
+    note_id_at = notes_api.index('@router.get("/{note_id}")')
+    assert queue_at < note_id_at, (
+        "publish-queue 必须注册在 /{note_id} 之前 —— 否则被 int 转换吃掉（422），进度卡取不到数"
+    )
+    assert '"publish-queue"' in notes_api or '"/publish-queue"' in notes_api
+    # ⑤ 小卡并入统计行 + 去重（独立整行卡已撤）
+    # ⚠️ 2026-09-26 用户口径「发布进度卡不要再显示『发布进度』小标题」⇒ 小标题已删，
+    #    原断言 `assert "发布进度" in code` **被取代**（保留原文备查）：
+    #    「进度卡标题没了（并入统计行后仍是『发布进度』小卡）」。
+    assert "发布进度" not in code, "小标题已按 2026-09-26 用户口径撤掉，不许回来"
+    for field in ("publishQueue.counts.published", "publishQueue.counts.failed", "publishQueue.counts.pending"):
+        assert field not in code, f"{field} 与统计卡前三张重复，已按口径撤掉（同一语义不留两份呈现）"
+    assert "publishQueue.queued.length" in code, "排队数是「待发布」的组成部分（统计行没有它），不能撤"
+    # ⑥ 本轮三数（发布成功 / 失败 / 待发布）+ 去掉 tip（2026-09-25 用户口径）
+    # ⚠️ 2026-09-25 用户口径「发布进度成功与同步进度成功优化为：发布成功和同步成功」
+    # ⇒ 第一张小卡的 title 从「成功」改为「**发布成功**」（两张卡各说各的，不再共用一个
+    # 看不出是哪条链路的「成功」）。原句保留：~~`title="成功"`~~ 已被取代。
+    assert 'title="发布成功"' in code and 'title="失败"' in code and 'title="待发布"' in code, (
+        "发布进度卡应是「发布成功 / 失败 / 待发布」三数（用户口径「发布、同步进度卡做类似的调整」）"
+    )
+    # ⚠️ 2026-09-26 常驻化（用户口径「不需要队列批次，队列是常驻」）：后端快照不再有
+    #    published / failed 计数（只回队列实时态）⇒ 三数**曾**改由本页按自己入队的篇
+    #    累计。原句 `assert "publishQueue.published" in code` **被取代**（快照没这个
+    #    键了，读了也是 undefined）。
+    # ⚠️ 2026-09-26 **当日口径再改一次**（用户口径「只统计当日发布或同步的数据，在卡片
+    #    右下角小字展示仅当日数据，**统计队列记录表中的数据**」）：三数改读快照 `today`
+    #    （后端 `today_item_counts` 按当日 `tasks` 行现算）。上一条「本页累计」的原句
+    #    （`assert "publishRound" in code` / `assert "setPublishRound(" in code`）
+    #    **同样被取代**，保留备查 —— 累计刷新页面就归零、还看不见别的入口入队的项。
+    assert "publishRound" not in code and "setPublishRound(" not in code, (
+        "本页累计已按 2026-09-26 当日口径撤掉（三数走快照 today，见 docstring 被取代原句）"
+    )
+    assert "publishQueue.today" in code and "publishToday" in code, (
+        "发布进度卡的卡面三数未接快照 today（当日队列记录；`?? EMPTY_QUEUE_TODAY_COUNTS` "
+        "是形状兜底，别把整页取崩）"
+    )
+    assert "publishToday.ok" in code and "publishToday.failed" in code, (
+        "发布成功 / 失败未读当日窗口"
+    )
+    assert "publishToday.pending" in code, "「待发布」未读当日窗口（快照 today）"
+    assert "publishQueuePending" in code, "轮询停止条件仍要实时待处理数（running + queued）"
+    # ⑦ 当日口径小字 + **六张卡同尺寸**（2026-09-26 用户口径「在卡片右下角小字展示仅
+    #    当日数据」+「另外两个进度卡与其它卡片大小不一致，应与其它卡片保持一致」）
+    assert '"仅当日数据"' in code, "进度卡右下角缺「仅当日数据」小字（用户口径原文）"
+    # ⚠️ 2026-09-26 用户口径「仅当日数据黑色字体看不清」：小字**必须走 antd 主题令牌**
+    #    （`<Text type="secondary">` → `colorTextSecondary`，亮/暗两套主题各自成立）。
+    #    根因是样式里写死了 `rgba(0, 0, 0, 0.45)`，而本应用**默认是暗色主题**
+    #    （`app/providers.tsx`：`saved === "light" ? "light" : "dark"`，卡片底 `#1a1a1a`）
+    #    ⇒ 黑字叠近黑底，对比度约 1.2:1，基本看不见。
+    #    下面第一条守「颜色不在样式里写死」（任何颜色都不行），第二条守「确实接上令牌」。
+    assert code.count("style={{ ...STAT_CARD_TODAY_NOTE, color: token.colorTextSecondary }}") == 2, (
+        "两张卡的当日小字都要接「右下角样式常量 + 主题令牌色」"
+    )
+    _today_note_style = code.split("const STAT_CARD_TODAY_NOTE: CSSProperties = {", 1)[1].split("};", 1)[0]
+    assert "color" not in _today_note_style, (
+        "当日小字样式里写死了颜色 —— 本应用默认暗色主题，黑字叠近黑底看不清"
+        "（2026-09-26 用户已报过一次）；颜色一律交给 antd 主题令牌"
+    )
+    # 颜色必须**来自令牌**（`theme.useToken()` → `token.colorTextSecondary`），
+    # 而不是 `type="secondary"`（那是 tertiary 0.45，亮色下与写死的 0.45 黑同色）。
+    assert "theme.useToken()" in code, "本页未取主题令牌（小字的颜色只能来自 token）"
+    assert code.count("style={STAT_CARD_CONTENT}") == 4, (
+        "四张普通统计卡未接统一内容盒 —— 高度会与两张进度卡不一致（等宽管不了高度）"
+    )
+    assert code.count("style={STAT_CARD_PROGRESS_CONTENT}") == 2, (
+        "两张进度卡未接统一内容盒（三数 + 右下角小字两行撑满同一高度）"
+    )
+    # ⚠️ 被取代：`assert "publishQueueTooltip" in code, "「正在发布哪篇 + 后面排几篇」收进 Tooltip，别整条删"`
+    assert "publishQueueTooltip" not in code, "发布进度卡的 Tooltip 已按用户口径「去掉 tip」撤除"
+    assert "Tooltip title={publishQueue" not in code, "发布进度卡不该再被 Tooltip 包裹"
+
+
+def test_library_batch_sync_with_progress_card():
+    """批量同步 + 同步进度卡接线（2026-09-25，设计 13 §35）。
+
+    用户口径：「内容库新增一个同步进度卡，新增支持多选批量同步笔记，只有已发布的
+    支持被选中，后端使用队列，按顺序同步，并统计数据到进度卡，已同步数/同步进度比/总数」。
+    源码断言守七件事（少任何一件，用户侧就退回「批量不同步」或「进度看不见」）：
+
+    ① 批量入口：批量操作区有「批量同步」按钮，二次确认 + 跳过明示
+       （`splitSyncTargets` 的 `skipped` 必须进确认框 —— 静默丢 = 用户以为都同步了）；
+    ② 门禁只有一把尺子：`splitSyncTargets` / `canBatchSyncNote`（`note-filters.ts`），
+       页面里**不许**再出现就地判断 `publish_status === "published"`（第二份实现）；
+    ③ 后端同口径：`start_batch_sync` 过模型层唯一判据 `note_supports_batch_sync`；
+    ④ 进度卡数据源是 `GET /notes/sync-queue`（`fetchSyncQueue`），轮询间隔是**一个常量**
+       （原 `SYNC_POLL_INTERVAL_MS`，2026-09-25 与发布卡统一成
+       `QUEUE_POLL_INTERVAL_MS = 5000` —— 用户口径「数据 5 秒更新一次」）；
+    ⑤ 轮询起停与卸载清理齐备（`trackSyncNotes` / `stopSyncPolling` / cleanup）；
+    ⑥ 后端路由 `sync-queue` 注册在 `/{note_id}` **之前**（否则 422，进度卡取不到数）；
+    ⑦ 进度卡是统计卡行里的**第 6 张小卡**，2026-09-25 用户口径「同步进度统计调整为，
+       成功同步数 / 失败同步数 / 待同步数」+「去掉 tip」⇒ 卡上是**三数**，Tooltip
+       与百分比**都已撤**。
+       ⚠️ 2026-09-26 当日口径（用户口径「同步进度卡……**只统计当日**同步的数据，在卡片
+       右下角小字展示仅当日数据，**统计队列记录表中的数据**」）：三数改读快照 `today`
+       （后端按当日 `tasks` 行现算），**不再由本页按自己入队的篇累计**。
+       ⚠️ **被取代的原句**（保留，不静默删除）：
+         「assert "syncRound" in code and "setSyncRound(" in code,
+           "本轮成败数必须本页累计（常驻队列没有批次记账）」」
+    ⑧ 轮询纪律（同轮用户口径「数据 5 秒更新一次」+「待同步数为 0 时，不再刷新统计
+       数据」）：间隔是 `QUEUE_POLL_INTERVAL_MS = 5000`；停止条件是**待处理数为 0**
+       （`snapshot.total > 0 && pending === 0`），并带「本轮无任务」连续空转兜底
+       （`QUEUE_IDLE_ROUNDS_LIMIT`）—— 否则入队与快照之间有时差时会立刻停、
+       数字再也不刷新（用户报的「同步进度未更新」）。
+       ⚠️ **被取代的原句**（保留，不静默删除）：
+         「assert "syncQueue.synced" in code and "/ ${syncQueue.total}" in code,
+           "已同步数 / 总数后缀缺失"」
+         「assert "（${syncPercent}%）" in code, "百分比应收进 Tooltip"」
+         「assert "title={syncQueueTooltip || undefined}" in code, "空闲（本轮无任务）
+           时不应再有 Tooltip 文案"」
+         「assert "syncQueueTooltip" in code, "「正在同步哪篇 + 失败数」应收进 Tooltip"」
+    """
+    code = _code_only(_read(LIBRARY))
+    filters = _code_only(_read(ROOT / "frontend/src/lib/note-filters.ts"))
+    sync_service = _read(ROOT / "backend/app/services/note_sync_service.py")
+    notes_api = _read(ROOT / "backend/app/api/notes.py")
+
+    # ① 批量入口 + 确认框明示跳过
+    assert "batchSyncSelected" in code and "batchSyncNotes(" in code, "批量同步入口缺失"
+    assert "splitSyncTargets(notes, selectedNoteIds)" in code, "批量同步未按选中集合拆分目标/跳过"
+    assert "skipped > 0" in code and "将跳过" in code, "确认框未明示跳过篇数（静默丢 = 用户以为都同步了）"
+    # ② 门禁单一实现（批量同步的目标拆分只走 splitSyncTargets；尺子在 note-filters.ts）
+    batch_fn = code.split("function batchSyncSelected()", 1)[1].split("async function batchSyncNotes", 1)[0]
+    assert "publish_status" not in batch_fn, "batchSyncSelected 里又写了一份门禁判断（应走 splitSyncTargets）"
+    assert "export function canBatchSyncNote" in filters and "export function splitSyncTargets" in filters
+    # ③ 后端同口径（模型层唯一判据）
+    assert "note_supports_batch_sync" in sync_service, "后端批量同步未走模型层唯一判据"
+    # ④ 进度卡数据源 + 单一间隔常量
+    assert "fetchSyncQueue" in code, "进度卡未接 GET /notes/sync-queue"
+    # ⚠️ 被取代：`assert code.count("SYNC_POLL_INTERVAL_MS") >= 2, ...`
+    #    （常量名已与发布卡统一为 QUEUE_POLL_INTERVAL_MS）
+    assert code.count("QUEUE_POLL_INTERVAL_MS") >= 2, "轮询间隔必须是一个常量（定义 + setInterval 各一次）"
+    # ⑤ 轮询起停 + 卸载清理
+    assert "trackSyncNotes(" in code and "stopSyncPolling" in code, "同步轮询没有起停手段"
+    assert "syncPollRef.current !== null) window.clearInterval(syncPollRef.current)" in code, (
+        "页面卸载未停同步轮询（定时器会跟着路由切换一直跑）"
+    )
+    # ⑥ 后端路由顺序（进度卡的生命线）
+    queue_at = notes_api.index('@router.get("/sync-queue")')
+    note_id_at = notes_api.index('@router.get("/{note_id}")')
+    assert queue_at < note_id_at, (
+        "sync-queue 必须注册在 /{note_id} 之前 —— 否则被 int 转换吃掉（422），进度卡取不到数"
+    )
+    # ⑦ 第 6 张小卡：**当日三数**（成功同步数 / 失败同步数 / 待同步数）
+    # ⚠️ 2026-09-26 用户口径「同步进度卡不要再显示『同步进度』小标题」⇒ 小标题已删，
+    #    原断言 `assert "同步进度" in code` **被取代**（保留原文备查）：
+    #    「统计卡行里没有『同步进度』小卡」。
+    assert "同步进度" not in code, "小标题已按 2026-09-26 用户口径撤掉，不许回来"
+    # ⚠️ 2026-09-26 常驻化（用户口径「不需要队列批次，队列是常驻」）：快照曾不再有
+    #    synced / failed 计数 ⇒ 三数**曾**改由本页按自己入队的篇累计（`syncRound`）。
+    #    原句 `assert "syncQueue.synced" in code and "syncQueue.failed" in code`
+    #    **被取代**（快照没这两个键了，读了也是 undefined）。
+    # ⚠️ 2026-09-26 当日口径（用户口径「同步进度卡……只统计当日同步的数据，在卡片右下角
+    #    小字展示仅当日数据，统计队列记录表中的数据」）⇒ 三数改读快照 `today`
+    #    （后端按当日 `tasks` 行现算）。「本页累计」这一版**同样被取代**（见 docstring）。
+    assert "syncRound" not in code and "setSyncRound(" not in code, (
+        "本页累计已按 2026-09-26 当日口径撤掉（三数走快照 today）"
+    )
+    assert "syncQueue.today" in code and "syncToday" in code, (
+        "同步进度卡的卡面三数未接快照 today（当日队列记录）"
+    )
+    assert "syncToday.ok" in code and "syncToday.failed" in code, "同步成功 / 失败未读当日窗口"
+    assert "syncToday.pending" in code, "「待同步」未读当日窗口（快照 today）"
+    assert "syncQueuePending" in code, "轮询停止条件仍要实时待处理数（running + queued）"
+    # ⚠️ 2026-09-25 用户口径「发布进度成功与同步进度成功优化为：发布成功和同步成功」
+    # ⇒ 第一张小卡 title 从「成功」改为「**同步成功**」。原句保留：~~`title="成功"`~~。
+    assert 'title="同步成功"' in code and 'title="失败"' in code and 'title="待同步"' in code, (
+        "同步进度卡应是「同步成功 / 失败 / 待同步」三数（用户口径原文 + 文案优化）"
+    )
+    assert "<Progress" not in code, "同步进度卡里的进度条已按用户口径移除"
+    assert "暂无同步任务" not in code, "「暂无同步任务（批量同步进行时显示进度）」文本已按用户口径移除"
+    # ⚠️ 被取代（原句见 docstring 括注）：Tooltip / 百分比断言 → 反向断言
+    assert "syncQueueTooltip" not in code and "syncPercent" not in code, (
+        "同步进度卡的 Tooltip 与百分比已按用户口径「去掉 tip」撤除"
+    )
+    assert "Tooltip title={syncQueue" not in code, "同步进度卡不该再被 Tooltip 包裹"
+    assert "batchSyncSavedNotes" in code, "批量同步未接 POST /notes/batch-sync"
+    # 「仅当日数据」小字（2026-09-26 用户口径；两张进度卡共用同一个文本常量与样式）
+    assert code.count("style={{ ...STAT_CARD_TODAY_NOTE, color: token.colorTextSecondary }}") == 2, (
+        "两张进度卡都要有右下角「仅当日数据」小字，且颜色走主题令牌（用户口径原文）"
+    )
+    assert code.count("color: token.colorTextSecondary") == 2, (
+        "同步卡的当日小字也要用主题令牌（写死黑字在暗色主题下看不清，用户已报）"
+    )
+
+    # ⑧ 轮询纪律：5 秒一轮 + 待处理为 0 才停（2026-09-25 用户口径）
+    assert "QUEUE_POLL_INTERVAL_MS = 5000" in code, "轮询间隔应为 5 秒（用户口径「数据 5 秒更新一次」）"
+    assert "QUEUE_IDLE_ROUNDS_LIMIT" in code, "缺「本轮无任务」空转兜底（定时器会泄漏）"
+    assert code.count("snapshot.total > 0 && pending === 0") >= 2, (
+        "两张进度卡的停止条件都应是「待处理数为 0」（用户口径「待同步数为 0 时，"
+        "不再刷新统计数据」）"
+    )
+    assert code.count("pending === 0") >= 2, "停止条件里必须有待处理数的判定"
+
+
+def test_library_page_notices_use_message_and_no_longer_occupy_layout():
+    """内容库页**所有**提示走消息组件，不再占页面布局（2026-09-25 用户口径）。
+
+    用户口径：「内容库页……页面所有提示包括异常提示，正常提示，成功提示等均实现
+    消息提示组件不要占用页面布局」。
+
+    本轮把**页面级**的 inline 承载全撤（每一个都曾是占版面的一块）：
+      * `batchFailure`（「批量操作失败」红块 —— 用户看到的那条「批量操作失败
+        Method Not Allowed」正是长在这里）；
+      * `error`（列表加载失败的 `<Alert>`）；
+      * `topicFailure`（「话题保存失败」红块）；
+      * `detailSyncFailure`（详情弹窗里的「同步失败」红块）；
+      * 加载更多的失败红块（**只留「重试」按钮本身** —— 它是控件，不是提示条）。
+
+    替换路径分两类（§3.1.1 `_silent` 规则）：
+      * 非 `_silent` 的接口 ⇒ 全局拦截器弹一次 `message`，调用点**不再自己报**（防双弹）；
+      * `_silent` 的 `syncSavedNote` / 以及「200 + 失败态」这两条不走拦截器异常分支 ⇒
+        **必须**由调用点 `message.error` 报真原因，否则失败就彻底没声了。
+
+    边界（**不随 message 化搬走**，设计 04 §3.6 表格第 2 行「静态说明」类）：
+      * `publish_error` 的「发布失败原因」—— 落库的持久状态说明，重开弹窗还要看；
+      * 详情弹窗内部的 `failure`（`renderFailure` 三分法）—— 「这块数据为什么是空的」
+        的结构呈现，且是 my-notes / 内容库**共用**的唯一实现。
+    """
+    code = _code_only(_read(LIBRARY))
+    # ① 旧承载全不在（反向断言必须先过 `_code_only` —— 注释里已写了这些名字）
+    for marker in (
+        "setBatchFailure(",
+        "batchFailure",
+        "setDetailSyncFailure(",
+        "detailSyncFailure",
+        "setTopicFailure(",
+        "topicFailure",
+    ):
+        assert marker not in code, f"内容库页仍有 inline 红块承载 {marker}（应改走 antd message）"
+    assert "const [error, setError]" not in code, "列表加载失败的 `error` state 应随 inline Alert 一起移除"
+    assert "renderFailure(" not in code, "内容库页不应再直接渲染三分法红块（页面级提示已 message 化）"
+    assert "<Alert" in code and 'message="发布失败原因"' in code, (
+        "`publish_error` 是落库的持久状态说明（静态说明类），应保留 inline —— 别把它一起扫掉"
+    )
+    # ② 新路径真的在（否则「删干净」也能变绿 —— 这就是负向断言的经典陷阱）
+    assert "message.error(`同步失败：${reason}`)" in code, (
+        "`syncSavedNote` 是 `_silent`（门禁 400 走这里）⇒ 同步失败必须由调用点 message.error 报真原因"
+    )
+    # ⚠️ 2026-09-25 队列化取代：原断言 `'s.reason || "平台未给原因"' in code`（「200 + 失败态」
+    # 就地报原因）随用户口径「单独点击同步按钮也需要放入同步队列中执行，与批量同步一致」
+    # 失效 —— 单条端点不再返回逐项结果，失败原因只在快照 `finished` 里给一次，由轮询器
+    # `pollSyncQueue` 报。原句保留：~~同上~~。兜底文案本身仍在（换到了轮询侧）。
+    assert "平台未给原因" in code, "失败原因兜底（「平台未给原因」）必须仍在轮询结果里报一次"
+    assert "syncSavedNote(note.id)" in code, (
+        "单条同步必须走**入队端点**（`POST /notes/{id}/sync` 回执），不能退回同步阻塞执行"
+    )
+    assert "trackSyncNotes([note.id])" in code, (
+        "单条入队后必须把这一篇交给**同一个轮询器**（与批量共用 pollSyncQueue / stopSyncPolling）"
+        "—— 不 track 就没有任何路径去报它的终态（变异 track 咬的就是这条）"
+    )
+    # ⚠️ 别用「已加入同步队列」当锚点：批量路径的成功提示也是这句 ⇒ 单条被改坏仍绿。
+    # 单条独有的是幂等分支那句「已在同步队列中」（批量没有这个分支）。
+    assert "已在同步队列中" in code, (
+        "幂等命中（`already_queued`）要单独提示「已在同步队列中」—— 它与批量的"
+        "「已加入同步队列 N 篇」不是同一句，不许用共文案冒充（变异 enqueuehint 咬的就是这条）"
+    )
+    assert "content_updated" not in code and "images_added" not in code, (
+        "单条同步的逐项结果（正文 / 图片计数）已随队列化移除 —— 前端不该再渲染它"
+    )
+    assert "message.`" in code or "message.error(" in code, "内容库页必须真有 message.* 调用"
+
+# --------------------------------------------------------------------------- #
+# 2026-09-25 §36 笔记工坊：图片 / 视频 / 草稿三坊合并（一页 Tabs + 菜单一项）
+# --------------------------------------------------------------------------- #
+ROUTER = ROOT / "frontend/src/app/router.tsx"
+APP_SHELL = ROOT / "frontend/src/components/layout/app-shell.tsx"
+NOTE_WORKSHOP = ROOT / "frontend/src/pages/platforms/xhs/note-workshop-page.tsx"
+WORKSHOP_PANELS = (
+    "frontend/src/pages/platforms/xhs/image-studio-panel.tsx",
+    "frontend/src/pages/platforms/xhs/video-studio-panel.tsx",
+    "frontend/src/pages/platforms/xhs/drafts-workshop-panel.tsx",
+)
+
+
+def test_three_workshops_merge_into_one_page_with_tabs():
+    """三坊合并的结构守卫（设计 13 §36）：一页三项 —— 路由、菜单、面板。
+
+    用户口径：「将图片坊，视频坊，草稿坊，合并为一个页面视图tab自然隔离，新增菜单
+    名称为笔记工坊」。守五件事（少任何一件就是「合并了但入口死了」或「没隔离」）：
+
+    ① 新路由渲染工坊页；三个旧路由是 `Navigate` 重定向到对应 tab
+       （深链 / 书签 / 外部链接不死）；
+    ② 菜单只剩「笔记工坊」一项，三个旧菜单项**整项**移除（含 key 与标签）；
+    ③ 工坊页 = `Tabs` 三页签（images / videos / drafts）+ 三个面板组件
+       （tab 即隔离：面板各自持状态，不是三套状态挤一个组件）；
+    ④ 面板不再各扛 `PageHeader`（工坊页只保留一个骨架标题）；
+    ⑤ 内容库「加入草稿工坊」跳转改指规范 URL `?tab=drafts`。
+    """
+    router = _code_only(_read(ROUTER))
+    shell = _code_only(_read(APP_SHELL))
+    page = _code_only(_read(NOTE_WORKSHOP))
+
+    # ① 新路由 + 旧路由重定向
+    assert 'path="/platforms/xhs/note-workshop"' in router and "XhsNoteWorkshopPage" in router
+    for old, tab in (
+        ("/platforms/xhs/image-studio", "images"),
+        ("/platforms/xhs/video-studio", "videos"),
+        ("/platforms/xhs/drafts", "drafts"),
+    ):
+        assert f'path="{old}"' in router, f"旧路由 {old} 应保留为重定向（深链不死）"
+        assert f'to="/platforms/xhs/note-workshop?tab={tab}"' in router, f"{old} 应重定向到 tab={tab}"
+    assert "<Navigate" in router, "旧路由应走 Navigate 重定向"
+
+    # ② 菜单一项
+    assert 'key: "/platforms/xhs/note-workshop"' in shell and "笔记工坊" in shell
+    for label in ("图片工坊", "视频工坊", "草稿工坊"):
+        assert label not in shell, f"菜单里不应再有「{label}」独立项（已合并进笔记工坊）"
+    for key in ('"/platforms/xhs/image-studio"', '"/platforms/xhs/video-studio"', '"/platforms/xhs/drafts"'):
+        assert key not in shell, f"菜单旧 key {key} 未移除"
+
+    # ③ Tabs 三页签 + 三面板
+    for key in ('key: "images"', 'key: "videos"', 'key: "drafts"'):
+        assert key in page, f"工坊页缺少页签 {key}"
+    for panel in ("ImageStudioPanel", "VideoStudioPanel", "DraftsWorkshopPanel"):
+        assert panel in page, f"工坊页未挂面板 {panel}"
+    for relative in WORKSHOP_PANELS:
+        assert (ROOT / relative).exists(), f"面板文件缺失：{relative}"
+    # tab 状态进 URL query（可分享 / 刷新保持；未知值回落 images 不白屏）
+    assert 'searchParams.get("tab")' in page, "tab 初值未从 URL query 读（刷新/分享丢页签）"
+    assert 'next.set("tab", key)' in page, "切 tab 未写回 URL query"
+    assert "normalizeTab" in page, "未知 tab 值缺归一化（回落 images，不白屏）"
+
+    # ④ 面板不再各扛 PageHeader
+    for relative in WORKSHOP_PANELS:
+        source = _code_only(_read(ROOT / relative))
+        assert "PageHeader" not in source, f"{relative} 仍在使用 PageHeader（骨架标题应收进工坊页）"
+
+    # ⑤ 内容库跳转改指规范 URL
+    library = _code_only(_read(LIBRARY))
+    assert "/platforms/xhs/note-workshop?tab=drafts" in library, (
+        "内容库「加入草稿工坊」应跳规范 URL（旧路径只剩重定向兜底）"
+    )
 
 
 def test_library_card_shows_note_type_tag():
@@ -1382,7 +1962,9 @@ def test_library_sync_button_exists_for_published_notes():
     ① 卡片与详情**两处**都走 `canSyncNote`（同一判定，不留两份实现 —— DEF-044/047/058）；
     ② 页面里**不得**再出现 `note_type === "synced"` 这种就地判断（那就是第二份实现）；
     ③ 判定本身在 `lib/note-filters.ts`，且条件含 `publish_status === "published"`
-       （行为验证在 `tests/frontend/note_filters.cjs` 的 F 段 + 三个变异开关）。
+       （行为验证在 `tests/frontend/note_filters.cjs` 的 F 段，由
+       `test_note_filters_and_batch_sync_gates_are_driven_for_real` 真正执行 +
+       `syncpub` 变异锚点守它）。
 
     ⚠️ **前后端同口径**（2026-09-23 用户口径「已发布的笔记也支持同步笔记最新的三方数据」
     之后）：后端 `POST /notes/{id}/sync` 的闸门已放宽到同一个判据
@@ -1505,10 +2087,10 @@ def test_library_has_no_table_view_and_no_batch_tag_dropdown():
     「选择标签」下拉 + 「加标签」/「去标签」两枚按钮**三件套一起撤** ——
     没有下拉就选不到标签，两枚按钮也就永远 disabled，只删下拉会留下死按钮。
     * `batchTagId` / `setBatchTagId` / `applyBatchTag` 一并移除；
-    * ⚠️ **后端与单条能力不动**：`batchTagNotes`（api.ts）与
-      `POST /notes/batch-tag` 端点保留，详情弹窗里给**单条**笔记增删标签
-      走的正是它 ⇒ 撤的只是批量卡里那个入口，不是打标签能力。
-      断言 `batchTagNotes(` 仍在（防止被顺手删成 BREAKING）。
+    * ⚠️ **后端与单条能力不动**：`POST /notes/batch-tag` 端点保留（API 消费者）；
+      ⚠️ **2026-09-25（§34.4）前端单条增删从 `batchTagNotes` 收敛到
+      `updateSavedNoteTopics`（PUT /notes/{id}/topics，整列替换 + find-or-create）**
+      —— 标签表并入话题表后一个入口管全部话题，`batchTagNotes` 前端函数随之删除。
     """
     code = _code_only(_read(LIBRARY))
     # ① 表格视图
@@ -1526,11 +2108,12 @@ def test_library_has_no_table_view_and_no_batch_tag_dropdown():
     assert ">加标签<" not in code and ">去标签<" not in code, (
         "批量操作卡里仍有加标签 / 去标签按钮 —— 没了下拉它们永远 disabled（死按钮）"
     )
-    # ⚠️ 能力本身没撤：api.ts 的函数与端点仍在，详情弹窗的单条增删靠它
+    # ⚠️ 能力本身没撤（§34.4 换了入口）：单条增删走 PUT /notes/{id}/topics
     api = _code_only(_read(ROOT / "frontend/src/lib/api.ts"))
-    assert "batchTagNotes" in api, "batchTagNotes 被误删 —— 详情弹窗给单条笔记增删标签仍要用"
-    assert "/notes/batch-tag" in api, "批量打标签端点被误删（撤的只是前端批量入口）"
-    assert "batchTagNotes(" in code, "页面里 batchTagNotes 调用被误删（详情弹窗单条增删仍需它）"
+    assert "updateSavedNoteTopics" in api, "updateSavedNoteTopics 被误删 —— 单条话题增删的唯一落库入口"
+    assert "/notes/${noteId}/topics" in api, "话题函数未指向 PUT /notes/{id}/topics"
+    assert "batchTagNotes" not in api, "batchTagNotes 应随标签表合并一并移除（前端不再调用）"
+    assert "updateSavedNoteTopics(" in code, "页面里 updateSavedNoteTopics 调用被误删（话题增删仍需它）"
 
 
 def test_library_detail_renders_topics_and_goods_from_columns():
@@ -1594,14 +2177,20 @@ def test_library_card_type_and_sync_on_cover_bottom_left():
     **原断言保留在版本历史里，不静默删除。**
     """
     code = _code_only(_read(LIBRARY))
-    # ① 卡片标签（§29.9，用户口径「卡片中也增加标签……只展示4个……悬停展示全部」）：
-    #    最多 4 枚 + 「+N」收窄 + 整行 Tooltip 悬停看全部。§29.4「不上卡片」被其取代。
-    assert "slice(0, 4)" in code, "卡片标签最多展示 4 枚（§29.9）"
-    assert "note.tags.length - 4" in code, "超出 4 枚应给「+N」收窄（§29.9）"
-    # ⚠️ 2026-09-23：原断言是 `code.count("tags.map") >= 2`（卡片 + **表格**两处）。
-    # 表格视图已按用户口径移除 ⇒ 现在只有卡片一处，改成 `>= 1`。
-    # **不是放松**：表格没了，「两处」这个前提本身不复存在。
-    assert code.count("tags.map") >= 1, "卡片未渲染标签（§29.9：卡片也展示标签）"
+    # ① 卡片**不渲染话题**（2026-09-25 用户口径「拆分的话题不要放在卡片上，放在
+    #    笔记详情弹窗内就可以了」）：§29.9「卡片也展示话题、悬停看全部」被本条**取代**
+    #    （原句保留在设计文档 §29.9 并标注），§34.4 标签并入话题后短暂落到卡片上的
+    #    那版也一并退回。原断言（保留备查，现在**必须为假**）：
+    #      assert "(note.topics ?? []).slice(0, 4)" in code   # 卡片最多展示 4 枚
+    #      assert "(note.topics ?? []).length - 4" in code    # 超出给「+N」收窄
+    #      assert "(note.topics ?? []).map(" in code          # 卡片渲染话题（含 Tooltip 悬停那版）
+    assert "(note.topics ?? []).slice(0, 4)" not in code, (
+        "卡片上又渲染话题了 —— 用户口径：话题只放详情弹窗（§29.9 卡片展示已废止）"
+    )
+    assert "(note.topics ?? []).map(" not in code, "卡片上又渲染话题了（Tooltip 悬停那版也不许回来）"
+    assert "note.tags" not in code, "卡片还在读 note.tags（标签表已并入话题表，§34.4）"
+    # 正向锚点：话题的展示与增删**仍在详情弹窗**（口径是「搬家」不是「删除」）
+    assert "selectedNote.topics" in code, "详情弹窗的话题区不能一起撤掉"
     # ② 封面左下角一块：**发布状态 + 同步按钮**（类型 Tag 已按 §25.7.3 移出）
     cover = _slice_between(code, 'left: 8, bottom: 8', "</div>")
     # 组件在 §32.3.4（2026-09-23）由 `PublishedTag` 改名 `PublishStatusTag`：
@@ -1637,28 +2226,30 @@ def test_library_card_type_and_sync_on_cover_bottom_left():
     )
 
 
-def test_library_detail_custom_title_row_has_plus_and_tags():
-    """内容库详情弹窗用**自定义标题行**：名称 + 加号 + 可删标签，加号紧跟名称（§29.12）。
+def test_library_detail_title_row_is_plain_and_tags_live_in_topics_section():
+    """内容库详情弹窗标题栏**只留标题文本**；标签展示 / 添加整体并入话题区（§34.4）。
 
     事故分析（用户口径「分析添加标签加号图标依旧未紧跟弹窗标题后」）：§29.7 把加号放在
     共用弹窗的 `titleExtra` 插槽里，而标题栏容器是 `justify-content: space-between` ——
     标题文本被推到最左、插槽被推到最右，加号与标题之间隔着大半个标题栏。**插槽架构与
     「紧跟」互斥**。修法 = 自定义标题（`title` 传 ReactNode，调用方排整行，DOM 顺序即
-    界面顺序）。断言分四组：
-    ① 内容库传的是 JSX 标题行，且顺序为 名称 → 加号 → 标签；
+    界面顺序）。§29.12 当时把「标签 chips + 加号」排进了标题行。
+
+    ⚠️ **2026-09-25（§34.4）标题行那半条被取代**：用户口径「将内容库笔记详情弹窗中
+    标题后展示标签tag和添加标签tag合并到笔记话题功能中」⇒ 标题行的标签 chips 与
+    「+ 添加标签」弹层**整块移除**，标题栏只留标题文本；标签的展示 / 增删 / 落库
+    全部并进正文下方的**话题区**（一个入口管全部话题）。本断言按新口径重写：
+    ① 标题栏无标签 chips / 无「添加标签」Tooltip / 无 `removeTagFromNote`；
     ② `titleExtra` 插槽整体移除（同一语义不留两条路，两处引用都干净）；
     ③ 共用组件按 `typeof title` 分流：字符串走旧版式（我的笔记不变）、ReactNode 走自定义行；
-    ④ §29.7/§29.10 的不变量保持（可删实时落库 / 纯图标 / 单 AutoComplete）。
+    ④ §29.3 / §29.10 的话题不变量保持（可删实时落库 / 纯图标 / 单 AutoComplete）。
     """
     code = _code_only(_read(LIBRARY))
-    # ① 自定义标题行：名称 → 加号 → 标签 chips（源码顺序即界面顺序）
-    assert "title={" in code, "内容库应传自定义标题行（JSX）"
-    # ⚠️ 加号的标记用标题行内唯一的 Tooltip `title="添加标签"` —— 直接找
-    # `PlusOutlined` 会先命中文件顶部的图标 import（假红）。
-    assert code.index("selectedNote?.title") < code.index('title="添加标签"') < code.index(
-        "removeTagFromNote(t.id)"
-    ), "标题行顺序应为 名称 → 加号 → 标签（§29.12）"
-    assert code.index("title={") < code.index("{selectedNote.content ? ("), "标题行应在正文之前"
+    # ① 标题栏只留标题文本（标签能力整体搬去话题区）
+    assert 'title="添加标签"' not in code, "标题栏仍有「添加标签」Tooltip（应已并入话题区）"
+    assert "removeTagFromNote" not in code, "仍有 removeTagFromNote —— 标签 chips 应随标题栏一起移除"
+    assert "selectedNote?.tags" not in code, "标题栏仍在读 selectedNote.tags（字段已删）"
+    assert "添加标签" not in code, "页面里仍有「添加标签」字样（话题区入口叫「添加话题」）"
     # ② titleExtra 插槽整体移除（代码里不再有该 prop，注释里的历史说明不算）
     assert "titleExtra={" not in code and "titleExtra:" not in code, "titleExtra 插槽应已移除（§29.12）"
     modal = _code_only(_read(NOTE_DETAIL_MODAL))
@@ -1670,12 +2261,12 @@ def test_library_detail_custom_title_row_has_plus_and_tags():
     assert 'marginLeft: "auto"' in modal, "自定义行里的刷新按钮应仍靠右"
     my_notes = _code_only(_read(MY_NOTES))
     assert "title={noteForDetail?.title}" in my_notes, "「我的笔记」页应仍传字符串标题（版式不变）"
-    # ④ §29.7 / §29.10 不变量保持
-    assert "closable" in code and "removeTagFromNote" in code, "标题行标签应可删并实时落库"
+    # ④ §29.3 / §29.10 话题不变量保持（能力搬家不降级）
+    assert "closable" in code and "removeTopic" in code, "话题 Tag 应可删并实时落库"
     assert "PlusOutlined" in code, "添加按钮应使用加号图标"
-    assert not re.findall(r"添加标签\s*<", code), "添加按钮应只有加号图标（无文字标签）"
-    assert 'title="添加标签"' in code, "纯图标按钮应有 Tooltip 说明"
-    assert "AutoComplete" in code and "submitTagDraft" in code, "添加标签应仍是单 AutoComplete（§29.10）"
+    # ⚠️ 「纯图标无文字」是**旧标题栏按钮**的规则（§29.12）；话题区的「+」触发器
+    # 本来就带「添加话题」文字（§29.3 既有形态）⇒ 这里只钉 AutoComplete 单组件。
+    assert "AutoComplete" in code and "submitTopicDraft" in code, "添加话题应仍是单 AutoComplete（§29.10）"
 
 
 def test_goods_price_uses_fen_price_text_not_number():
@@ -1749,15 +2340,26 @@ def test_settings_page_no_longer_hosts_the_donation_module():
 
     负面断言先剥注释（`_code_only`）：模块删了，`HeartOutlined` / `Image` 导入
     与两条硬编码媒体路径也不该回来 —— 它们只为这一张卡存在（这两个路径正是
-    设计 04 的 FE-6 / Mock 清单 F6 两条待办的关闭原因）。正向锚住两张幸存
-    卡片，防止「把整页删空」也能让断言变绿。
+    设计 04 的 FE-6 / Mock 清单 F6 两条待办的关闭原因）。
+
+    ⚠️ 2026-09-26 用户口径「设置页面移除项目声明」：「项目声明」卡（开源警告 Alert
+    + 四条禁止条款）也整卡移除 ⇒ 正向锚改成**只剩「安全边界」一张**（仍要锚，
+    否则「把整页删空」也能让断言变绿），并对声明文案做反向断言。
+    ⚠️ **被取代的原句**（保留，不静默删除）：
+      「assert "安全边界" in code and "项目声明" in code, "设置页其余两张卡片应在位"」
     """
     code = _code_only(_read(SETTINGS))
     assert "为爱发电" not in code, "捐赠模块已移除，不得回归"
     assert "HeartOutlined" not in code, "该导入只为赞赏码卡片存在"
     assert "Image" not in code, "该导入只为赞赏码卡片存在"
     assert "wx_pay" not in code and "zfb_pay" not in code, "硬编码收款码路径不得回归"
-    assert "安全边界" in code and "项目声明" in code, "设置页其余两张卡片应在位"
+    assert "安全边界" in code, "设置页的「安全边界」卡片应在位（防止整页删空也能让断言变绿）"
+    # 2026-09-26 用户口径「设置页面移除项目声明」⇒ 反向钉死，文案不许回来
+    assert "项目声明" not in code, "设置页的「项目声明」卡已按用户口径移除"
+    assert "开源学习项目" not in code and "禁止任何形式的商业化使用" not in code, (
+        "项目声明文案不得回归（用户口径：设置页面移除项目声明）"
+    )
+    assert "WarningOutlined" not in code, "该图标只为项目声明卡存在，应随卡一起删"
 
 
 def test_account_dropdowns_show_only_the_account_name():
@@ -1796,3 +2398,105 @@ def test_account_dropdowns_show_only_the_account_name():
             )
         # 正向锚：下拉选项仍在（防「把下拉整个删掉」也让断言变绿）。
         assert "label:" in code, f"{relative} 的账号下拉选项消失了？"
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-25 · 全站消息提醒统一走 antd message（设计 04 §3.6，用户口径
+# 「所有消息提醒参考 antd 成熟组件，不要在页面暂用空间」）
+# ---------------------------------------------------------------------------
+
+#: 操作结果反馈（一次性提示：保存 / 删除 / 发布 / 切换 / 复制 / 生成 / 验证码…）
+#: 所在的页面与组件。新增带这类提示的文件时**必须**加进来 —— 漏一个就等于那个
+#: 页面又会长出 inline 消息条（或 notice 弹窗），而没有任何断言会变红。
+MESSAGE_FEEDBACK_PAGES = (
+    "frontend/src/pages/platforms/xhs/publish-page.tsx",
+    # 2026-09-25 §36：原 rewrite-page.tsx（草稿工坊）面板化，仍带操作反馈 ⇒ 跟替文件名
+    "frontend/src/pages/platforms/xhs/drafts-workshop-panel.tsx",
+    "frontend/src/pages/platforms/xhs/auto-ops-page.tsx",
+    "frontend/src/pages/platforms/xhs/drafts-page.tsx",
+    "frontend/src/pages/platforms/xhs/benchmarks-page.tsx",
+    # 2026-09-25 §36：原 image-studio-page.tsx（图片工坊）面板化
+    "frontend/src/pages/platforms/xhs/image-studio-panel.tsx",
+    "frontend/src/pages/platforms/xhs/monitoring-page.tsx",
+    "frontend/src/pages/platforms/xhs/keywords-page.tsx",
+    "frontend/src/pages/models/model-config-page.tsx",
+    "frontend/src/pages/platforms/xhs/library-page.tsx",
+    "frontend/src/pages/platforms/xhs/my-notes-page.tsx",
+    "frontend/src/pages/platforms/xhs/shop-items-page.tsx",
+    "frontend/src/pages/tasks/task-center-page.tsx",
+    "frontend/src/components/account/qr-login-panel.tsx",
+    "frontend/src/components/account/phone-login-panel.tsx",
+    "frontend/src/components/account/qianfan-email-login-panel.tsx",
+    "frontend/src/components/account/add-account-drawer.tsx",
+)
+
+#: 旧形态的状态 setter / 静态导入 —— 出现任何一个都算回退。
+MESSAGE_STATE_MARKERS = (
+    "setMessage(",
+    "setNotice(",
+    "setBatchActionMessage(",
+    "setDetailActionMessage(",
+    "message as ",
+)
+
+
+def test_transient_feedback_uses_antd_message_not_inline_alerts():
+    """一次性操作反馈全部走 `App.useApp()` 的 message，不再占页面空间。
+
+    三条断言各自防一种回退：
+    1. **没有 hook** —— 说明又回到了静态 `message`（深色主题下冒浅色 toast）；
+    2. **旧状态 setter 复活** —— 说明又长出了「state + inline Alert」消息条；
+    3. **没有一次 message 调用** —— 防「只加 hook 不用」的空挂。
+    """
+    for relative in MESSAGE_FEEDBACK_PAGES:
+        code = _code_only(_read(ROOT / relative))
+        assert "App.useApp()" in code, (
+            f"{relative} 未接入 App.useApp()：消息提醒必须用继承主题的 message 实例"
+        )
+        for marker in MESSAGE_STATE_MARKERS:
+            assert marker not in code, (
+                f"{relative} 仍有旧消息提醒形态 {marker}：结果提示应走 antd message"
+            )
+        assert "message." in code, f"{relative} 接了 hook 却没有 message.* 调用（空挂）"
+
+
+def test_static_antd_message_import_only_survives_in_api_ts():
+    """静态 `import { message } from "antd"` 只允许活在 `lib/api.ts`。
+
+    它是**非 React 模块**（全局响应拦截器），拿不到 hook —— 设计 04 §3.6 记的
+    唯一例外。页面 / 组件里再出现静态导入就是回退（吃不到 ConfigProvider 主题）。
+    """
+    offenders = []
+    for path in (ROOT / "frontend/src").rglob("*.ts*"):
+        relative = path.relative_to(ROOT).as_posix()
+        if relative == "frontend/src/lib/api.ts":
+            continue
+        code = _code_only(_read(path))
+        if re.search(r"import\s*\{[^}]*\bmessage\b[^}]*\}\s*from\s*[\"']antd[\"']", code):
+            offenders.append(relative)
+    assert not offenders, f"这些文件还在静态导入 antd message（应改 App.useApp()）：{offenders}"
+
+
+def test_failure_three_way_blocks_stay_inline_after_the_message_switch():
+    """边界钉死：三分法的红块 / 安静一行**不随 message 化搬走**（设计 12 §17.9）。
+
+    「不占页面空间」只针对**一次性操作反馈**；「这块数据为什么这样」是结构呈现，
+    搬成 toast 会丢原因与重试入口。这里钉住三个承载点仍在 inline。
+
+    ⚠️ 2026-09-26：第三个承载点原是**设置页的「项目声明」**，该卡已按用户口径
+    「设置页面移除项目声明」整卡删除 ⇒ 换成**分析页「开发优化中」的常驻
+    `<Alert type="info">`**（同为「本就不是提醒、不该被消息化」的静态内容）。
+    ⚠️ **被取代的原句**（保留，不静默删除）：
+      「assert "开源学习项目" in settings, "设置页的项目声明是常驻内容，不应被消息化"」
+    """
+    modal = _code_only(_read(NOTE_DETAIL_MODAL))
+    assert "export function renderFailure" in modal and "export function quietHint" in modal, (
+        "详情弹窗的失败三分法承载函数被删了？红块 / 安静一行是结构块，不是消息提醒"
+    )
+    accounts = _code_only(_read(ACCOUNTS))
+    assert '<Alert type="error"' in accounts, "账号矩阵页的加载失败红块应保留（三分法）"
+    # ⚠️ 原锚点是设置页「项目声明」（已移除），换成分析页的常驻说明块。
+    analytics = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/analytics-page.tsx"))
+    assert '<Alert type="info"' in analytics and "开发优化中" in analytics, (
+        "分析页「开发优化中」是常驻静态说明，不该被消息化（原设置页项目声明已按用户口径移除）"
+    )

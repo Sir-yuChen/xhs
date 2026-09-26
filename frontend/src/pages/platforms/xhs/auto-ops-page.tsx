@@ -10,7 +10,7 @@ import {
   ThunderboltOutlined,
 } from "@ant-design/icons";
 import {
-  Alert,
+  App,
   Button,
   Card,
   Checkbox,
@@ -100,8 +100,9 @@ export function AutoOpsPage() {
   const [pcAccounts, setPcAccounts] = useState<PlatformAccount[]>([]);
   const [creatorAccounts, setCreatorAccounts] = useState<PlatformAccount[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
+  // 全站消息提醒统一走 antd message（设计 04 §3.6，2026-09-25 用户口径）：
+  // 操作结果反馈不再渲染 inline Alert 占版面。
+  const { message } = App.useApp();
 
   // Create form state
   const [showCreate, setShowCreate] = useState(false);
@@ -134,7 +135,6 @@ export function AutoOpsPage() {
 
   async function loadData() {
     setIsLoading(true);
-    setError(null);
     try {
       const [tasksRes, accountsRes] = await Promise.all([
         fetchAutoTasks(),
@@ -144,7 +144,7 @@ export function AutoOpsPage() {
       setPcAccounts(accountsRes.filter((a) => a.sub_type === "pc"));
       setCreatorAccounts(accountsRes.filter((a) => a.sub_type === "creator"));
     } catch {
-      setError("加载自动运营任务失败。");
+      message.error("加载自动运营任务失败。");
     } finally {
       setIsLoading(false);
     }
@@ -157,12 +157,10 @@ export function AutoOpsPage() {
   async function handleCreate() {
     const keywords = parseKeywords(createKeywords);
     if (!createName.trim() || keywords.length === 0 || !createPcAccountId || !createCreatorAccountId) {
-      setError("请填写任务名称、至少一个关键词，并选择 PC 和 Creator 账号。");
+      message.warning("请填写任务名称、至少一个关键词，并选择 PC 和 Creator 账号。");
       return;
     }
     setIsCreating(true);
-    setError(null);
-    setMessage(null);
     try {
       const created = await createAutoTask({
         name: createName.trim(),
@@ -180,9 +178,9 @@ export function AutoOpsPage() {
       setCreateCreatorAccountId(null);
       setCreateInstruction("");
       setCreateSchedule(DEFAULT_SCHEDULE);
-      setMessage(`自动任务"${created.name}"已创建。`);
+      message.success(`自动任务"${created.name}"已创建。`);
     } catch {
-      setError("创建自动任务失败。");
+      message.error("创建自动任务失败。");
     } finally {
       setIsCreating(false);
     }
@@ -190,44 +188,38 @@ export function AutoOpsPage() {
 
   async function handleToggleStatus(task: AutoTask) {
     const newStatus = task.status === "active" ? "paused" : "active";
-    setError(null);
-    setMessage(null);
     try {
       const updated = await updateAutoTask(task.id, { status: newStatus });
       setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
-      setMessage(`任务"${updated.name}"已${newStatus === "active" ? "恢复" : "暂停"}。`);
+      message.success(`任务"${updated.name}"已${newStatus === "active" ? "恢复" : "暂停"}。`);
     } catch {
-      setError("更新任务状态失败。");
+      message.error("更新任务状态失败。");
     }
   }
 
   async function handleDelete(taskId: number) {
-    setError(null);
-    setMessage(null);
     try {
       await deleteAutoTask(taskId);
       setTasks((prev) => prev.filter((t) => t.id !== taskId));
-      setMessage("自动任务已删除。");
+      message.success("自动任务已删除。");
     } catch {
-      setError("删除自动任务失败。");
+      message.error("删除自动任务失败。");
     }
   }
 
   async function handleRun(task: AutoTask) {
     setRunningTaskId(task.id);
-    setError(null);
-    setMessage(null);
     setLastRunResult(null);
     try {
       const result = await runAutoTask(task.id);
       setLastRunResult(result);
       setTasks((prev) => prev.map((t) => (t.id === result.auto_task.id ? result.auto_task : t)));
-      setMessage(
+      message.success(
         `任务"${task.name}"执行完成 -- 关键词: ${result.detail?.keyword ?? "-"}, 已创建发布任务 #${result.detail?.publish_job?.id ?? "-"}。`
       );
     } catch (err: unknown) {
       const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-      setError(`执行失败：${detail || "请检查账号和模型配置。"}`);
+      message.error(`执行失败：${detail || "请检查账号和模型配置。"}`);
     } finally {
       setRunningTaskId(null);
     }
@@ -244,8 +236,6 @@ export function AutoOpsPage() {
   async function handleSaveEdit() {
     if (!editTask) return;
     setIsSaving(true);
-    setError(null);
-    setMessage(null);
     try {
       const keywords = parseKeywords(editKeywords);
       const updated = await updateAutoTask(editTask.id, {
@@ -256,9 +246,9 @@ export function AutoOpsPage() {
       });
       setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
       setEditTask(null);
-      setMessage(`任务"${updated.name}"已更新。`);
+      message.success(`任务"${updated.name}"已更新。`);
     } catch {
-      setError("更新任务失败。");
+      message.error("更新任务失败。");
     } finally {
       setIsSaving(false);
     }
@@ -276,13 +266,6 @@ export function AutoOpsPage() {
           </Button>
         }
       />
-
-      {error && (
-        <Alert type="error" message={error} showIcon closable onClose={() => setError(null)} />
-      )}
-      {message && (
-        <Alert type="success" message={message} showIcon closable onClose={() => setMessage(null)} />
-      )}
 
       {/* Task List */}
       {isLoading ? (

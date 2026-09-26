@@ -733,10 +733,11 @@ export type SavedNote = {
   /** 三方发布成功时间（本地 ISO；空 = 没发布过）。 */
   published_at?: string | null;
   /**
-   * **话题（#标签名列表）**（设计 13 §28）：专有列，`raw_json` 的投影。
-   * 空 = 没解析到（不造假）。
+   * **话题**（设计 13 §34，2026-09-25）：走 `note_topics` 关系表 join `topics`
+   * 字典表查出的当下真值（原 `tags` 标签表已并入话题表；`notes.topics_json` 列已删）。
+   * 空 = 这条笔记没有话题（不是错误）。
    */
-  topics?: string[];
+  topics?: NoteTopic[];
   /**
    * **挂载商品**（设计 13 §28.3）：走 `note_goods` 关系表 join `shop_products`
    * 查出来当下的真值 —— 商品信息只在商品表存一份，笔记表不存快照。
@@ -774,7 +775,11 @@ export type SavedNote = {
    * SQLite 写锁 ⇒ `database is locked` ⇒ 未捕获 ⇒ 用户看到「详情 500」。
    * 正文与图集的补齐现在只由同步链路做（有界 + 跨轮累积，设计 13 §19.13）。
    */
-  tags?: Tag[];
+  /**
+   * ⚠️ ~~`tags`（用户标签）~~ **字段已移除**（2026-09-25，设计 13 §34.4）：
+   * 标签表已整表并入话题表 ⇒ 标签的展示 / 增删统一走 `topics`（关系表 join
+   * 话题字典）。`tags` 留着就是同一语义两个字段（DEF-044 同款）。
+   */
 };
 
 /**
@@ -869,21 +874,20 @@ export type NoteComment = {
   raw_json?: Record<string, unknown>;
 };
 
-export type Tag = {
+/**
+ * **话题字典行**（设计 13 §34.4，2026-09-25）：原 `Tag`（用户标签）—— 标签表
+ * 已整表并入话题表（`tags` / `note_tags` ⇒ `topics` / `note_topics`），
+ * 类型随之改名。`color` 自标签表沿用（迁移时原样保留旧值）。
+ */
+export type NoteTopic = {
   id: number;
   name: string;
   color: string;
 };
 
-export type TagPayload = {
+export type TopicPayload = {
   name: string;
   color?: string;
-};
-
-export type BatchTagNotesPayload = {
-  note_ids: number[];
-  tag_ids: number[];
-  mode: "replace" | "add" | "remove";
 };
 
 export type BatchTagNotesResponse = {
@@ -1079,6 +1083,31 @@ export type ResizeImagePayload = {
   quality?: number;
 };
 
+/**
+ * 队列**批次**的派生汇总（`GET /tasks?tree=1` 的批次行 `summary`，后端按子行现算）。
+ *
+ * 为什么由后端给：状态 / 计数 / 耗时的判据必须只有一份（后端 `batch_rollup`）——
+ * 前端再算一遍就是 DEF-044（同一语义两份实现），迟早两边不一致。
+ */
+export type QueueBatchSummary = {
+  /** 派生状态（与「可清理判据」自洽：不可清的明细 ⇒ 批次也不可清）。 */
+  status: string;
+  /** 明细总数（= 子行数）。 */
+  total: number;
+  done: number;
+  /** `failed` 已把 `exhausted` 并进来（对用户是同一件事：没跑成，可重试）。 */
+  failed: number;
+  cancelled: number;
+  running: number;
+  pending: number;
+  /** 已终态条数（进度分子）。 */
+  settled: number;
+  /** `settled / total` 的百分数。 */
+  progress: number;
+  /** 整批耗时（首条开始 → 最后一条结束）；还有未终态子行 ⇒ `null`（缺值口径）。 */
+  duration_ms?: number | null;
+};
+
 export type TaskRecord = {
   id: number;
   platform: PlatformId;
@@ -1094,6 +1123,23 @@ export type TaskRecord = {
   retry_count?: number;
   max_retries?: number;
   parent_task_id?: number | null;
+  /**
+   * **唯一批次号**（只有批次父行有值，队列项为 `null`）。
+   *
+   * 「这一行是不是批次」由它回答（不看类型清单）：新队列上线时后端自动生成
+   * 批次号，前端零改动就能把新队列的批次行渲染成父节点。
+   */
+  batch_no?: string | null;
+  /** 批次行的派生汇总（只有批次行有；队列项行不带）。 */
+  summary?: QueueBatchSummary | null;
+  /**
+   * 批次行**用到哪些平台账号**（后端 `batch_account_ids` 按子行派生：去重保序）。
+   *
+   * 只有批次行带（明细行的账号看自己 `payload.account_id`）。一次批量可以跨账号
+   * 勾选 ⇒ 批次级不存在「唯一账号」，所以这里是**列表**而不是单个 id
+   * （2026-09-26 用户口径「批次记录执行的账号」）。
+   */
+  accounts?: number[] | null;
   children?: TaskRecord[];
 };
 

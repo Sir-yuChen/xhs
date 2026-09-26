@@ -1,6 +1,7 @@
 """商品笔记生成（M4 起步）：`POST /api/xhs/product-notes/generate`。
 
-设计真相源：`docs/02_设计文档/07_功能设计_发布链路.md` §12（生成与护栏契约）。
+设计真相源：`docs/02_设计文档/07_功能设计_发布链路.md` §12（生成与护栏契约）、
+`docs/02_设计文档/13_功能设计_账号矩阵同步.md` §31（智能生成与发布）、§31.10（走队列）。
 
 ## 这一版**故意**只做「干运行」
 
@@ -16,6 +17,12 @@
 | 落库 / 审核闸门 / `prompt_version` | T-402 / T-406（需要 `product_note_jobs` 表，属 M2 之后） |
 | 发布、挂链 | M5（写接口，本项目当前零触碰） |
 
+## 落库的两个入口都走队列（§31.10，2026-09-25 用户口径）
+
+`/generate-save`（单篇）与 `/batch-generate`（批量）**同步段只做门禁 + 入队**，
+立即返回入队回执；三步生成 + 轮询 + 落库在后台 worker 逐篇跑。终态与真实原因走
+`GET /generate-queue` 快照（与发布 / 同步队列同一个出口、同一个底座）。
+
 ## 为什么每次都要取一次商品（而不是缓存）
 
 价格/库存会变，而「生成的笔记里写了旧价格」= 违规（07 §9「发布前复核商品状态与价格」）。
@@ -23,7 +30,7 @@
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 import requests
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -37,12 +44,14 @@ from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user
 from backend.app.models.platform_account import PlatformAccount
 from backend.app.models.user import User
-from backend.app.services.product_note_service import generate_product_note
 from backend.app.services.product_note_gen_service import (
+    GENERATE_BATCH_MAX_ITEMS,
     ProductNoteGenerationError,
-    batch_generate_notes,
-    generate_note_for_item,
+    generate_queue_snapshot,
+    start_batch_generate,
+    start_generate_note,
 )
+from backend.app.services.product_note_service import generate_product_note
 from backend.app.services.shop_binding_service import (
     account_shop_id,
     qianfan_cookies_for_account,
@@ -241,7 +250,7 @@ def generate_and_save_note(
     db: Session = Depends(get_db),
     adapter_factory=Depends(get_qianfan_api_adapter_factory),
 ):
-    """**智能生成一篇商品笔记并落库为「待发布」**（设计 13 §31.4，用户需求③）。
+    """**智能生成一篇商品笔记并落库为「待发布」**（设计 13 §31.4，用户需求③；§31.10 起走队列）。
 
     与干运行端点（`/generate`）的分工：干运行是「看一眼草稿」（本地模型、
     不落库）；本端点是「落库待发布」（**千帆后台智能生成**，写 `notes` +
@@ -251,30 +260,27 @@ def generate_and_save_note(
     |---|---|
     | 生成 | 千帆三步链路：`aigc-publish/attributes` → `note/sellerpoint/aigc` → 轮询 `aigctask/result`（真机抓包，无签名） |
     | 商品 | **本地台账** `shop_products`（同一行同时供媒体链接与挂链关系，§31.4 约定 1） |
-    | 话题 | 平台 AI 结果自带 `topics[{id,name}]` → `topics_json` + `raw_json.aigc`（发布的 `hash_tag` 直接用平台 ID） |
+    | 话题 | 平台 AI 结果自带 `topics[{id,name}]` → `raw_json.aigc`（发布的 `hash_tag` 直接用平台 ID） |
     | 媒体 | 商品图直链落 `note_assets`（发布时再下载重传） |
     | 笔记 ID | `local_<uuid>`（未发布不存在三方 ID；发布成功回写真 ID） |
     | 状态 | `publish_status=pending`、`note_type=local_generated`、`published=False` |
     | 护栏 | 记录不拦截（内容出自平台官方 AI，§31.4 约定） |
-    | 失败 | 平台 `errMsg` 原文 502；门禁失败 400；**不落库**（无半条笔记） |
+    | **异步** | 同步段只做门禁 + 入队，**毫秒级返回**；三步 + 轮询 + 落库在后台 worker 跑（§31.10） |
+    | 失败 | 门禁失败（未绑店 / 无令牌 / 台账无此行）400/404 结构化；平台失败 502 + 平台原文，**不落库**（无半条笔记）—— 两者都在快照 `finished` 里再给一次 |
+
+    终态不靠响应体：前端轮询 `GET /generate-queue`（与批量同一个出口）。
     """
     account = _owned_account(db, current_user, payload.platform_account_id)
     try:
-        outcome = generate_note_for_item(db, account, payload.item_id, adapter_factory=adapter_factory)
+        receipt = start_generate_note(
+            db, current_user.id, account, payload.item_id, adapter_factory=adapter_factory
+        )
     except ProductNoteGenerationError as error:
         raise _generation_error(error)
     return {
         "ok": True,
         "platform_account_id": payload.platform_account_id,
-        "item_id": payload.item_id,
-        "note_id": outcome["note_id"],
-        "title": outcome["title"],
-        "topics": outcome["topics"],
-        #: 落库的媒体（用户口径「图片最多 6 张，视频最多一个」，设计 13 §32.2.1）：
-        #: 视频优先 ⇒ 有视频时 `image_count=0`、`video_count=1`；两个数都如实回。
-        "image_count": outcome["image_count"],
-        "video_count": outcome["video_count"],
-        "guardrails": outcome["guardrails"],
+        **receipt,
     }
 
 
@@ -285,13 +291,41 @@ def batch_generate_notes_endpoint(
     db: Session = Depends(get_db),
     adapter_factory=Depends(get_qianfan_api_adapter_factory),
 ):
-    """批量智能生成（设计 13 §31.4 步 6；用户需求⑤）。
+    """批量智能生成入队（设计 13 §31.4 步 6 + §31.10；用户需求⑤）。
 
-    逐项走 `/generate-save` 同一链路；**单项失败不阻断**（与千帆页面
-    `Promise.allSettled` 同语义）。响应给逐项结果，前端汇总
-    「成功 X / 失败 Y」并列出失败原因。
+    逐项过门禁（绑店 → ark 令牌 → 台账商品），通过项按序入队；**单项失败不阻断**
+    （与千帆页面 `Promise.allSettled` 同语义）。响应给逐项回执，前端汇总
+    「已入队 X / 失败 Y」并列出失败原因；**逐项终态**（生成成功 / 平台失败）
+    走 `GET /generate-queue` 快照 `finished` —— 与单篇同一个出口。
+
+    `max_items` 上限与 `GENERATE_BATCH_MAX_ITEMS`（20）对齐：批量是显式动作，
+    超限分多次即可。
     """
     account = _owned_account(db, current_user, payload.platform_account_id)
-    return batch_generate_notes(
-        db, account, payload.item_ids, adapter_factory=adapter_factory, max_items=payload.max_items
+    return start_batch_generate(
+        db,
+        current_user.id,
+        account,
+        payload.item_ids,
+        adapter_factory=adapter_factory,
+        max_items=min(payload.max_items, GENERATE_BATCH_MAX_ITEMS),
     )
+
+
+@router.get("/generate-queue")
+def get_generate_queue(
+    platform: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """生成进度快照（商品列表页「生成进度卡」；设计 13 §31.10）。
+
+    回**当前用户**的生成队列：`running` / `queued`（FIFO 序，条目带 `item_id` /
+    `title`）+ 计数（`generated` 已生成 / `failed` 失败 / `total` 本轮总数）+
+    `finished`（已出结果的逐项 `ok` 与 `reason` —— 生成失败不落库到笔记行，
+    原因只在这里给一次）。
+
+    ⚠️ 键名是 `generated` 不是底座通用形状的 `synced`（改名由
+    `generate_queue_snapshot` 做，直接透传底座结果 = 进度卡三数恒 0 而后端不报错）。
+    """
+    return generate_queue_snapshot(db, current_user.id, platform=platform)

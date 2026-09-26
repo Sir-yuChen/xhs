@@ -14,18 +14,28 @@
  * 4. **账号文案不留空**：昵称为空时写「未命名账号」—— 空白选项 = 用户猜不出是哪一行。
  * 5. **类型 Tag 配色三档**（2026-09-23 第三轮口径「使用 tag 放图片右下角」）：
  *    卡片封面右下角与详情弹窗**共用同一份** `noteTypeTagColor`，各写一遍就是漂移
- *    （DEF-061 同型：同一字段两处各写一份呈现）。
+ *    （DEF-061 同型：同一字段两处各写一份呈现）；
+ * 6. **批量同步门禁只认「已发布」**（2026-09-25 §35.1，用户口径「只有已发布的
+ *    支持被选中」）：`canBatchSyncNote` 比 `canSyncNote`（F 段）**严** ——
+ *    synced 但被手切回 pending 的行，单条按钮仍给同步、批量**不收**；
+ *    两把尺子各守各的门，混同其一 = 批量把未发布笔记也拉一遍；
+ * 7. **批量跳过必须明示**（`splitSyncTargets`）：选 5 篇只有 3 篇已发布 ⇒
+ *    targets=3 / skipped=2，静默丢 2 篇 = 用户以为都同步了（与批量发布同款纪律）。
  *
  * 做法与 `sync_gates.cjs` 同源：esbuild 打包**真实** `lib/note-filters.ts`，
  * 直接调用它（纯模块，不需要 antd 桩、不需要 jsdom）。
  *
  * 运行：
  *   <node> tests/frontend/note_filters.cjs                 # 期望全 PASS
- *   NOTE_FILTERS_MUTATE=enumin   <node> …                  # 期望 FAIL
- *   NOTE_FILTERS_MUTATE=label    <node> …                  # 期望 FAIL
- *   NOTE_FILTERS_MUTATE=fallback <node> …                  # 期望 FAIL
- *   NOTE_FILTERS_MUTATE=blank    <node> …                  # 期望 FAIL
- *   NOTE_FILTERS_MUTATE=tagcolor <node> …                  # 期望 FAIL
+ *   NOTE_FILTERS_MUTATE=enumin    <node> …                  # 期望 FAIL
+ *   NOTE_FILTERS_MUTATE=label     <node> …                  # 期望 FAIL
+ *   NOTE_FILTERS_MUTATE=fallback  <node> …                  # 期望 FAIL
+ *   NOTE_FILTERS_MUTATE=blank     <node> …                  # 期望 FAIL
+ *   NOTE_FILTERS_MUTATE=tagcolor  <node> …                  # 期望 FAIL
+ *   NOTE_FILTERS_MUTATE=syncpub   <node> …                  # 期望 FAIL
+ *   NOTE_FILTERS_MUTATE=batchgate <node> …                  # 期望 FAIL（§35.1）
+ *   NOTE_FILTERS_MUTATE=batchskip <node> …                  # 期望 FAIL（§35.1）
+ *   NOTE_FILTERS_MUTATE=batchorder <node> …                 # 期望 FAIL（§35.1）
  */
 const fs = require("fs");
 const os = require("os");
@@ -69,6 +79,17 @@ const RESERVED = {
   // 同步按钮判定：缺值当成「能同步」（宁可错给，于是本地笔记也长按钮）
   syncmissing: `  if ((note?.note_type ?? "").trim() === "synced") return true;
   return (note?.publish_status ?? "").trim() === "published";`,
+  // 批量同步门禁（§35.1）：放宽成「都能同步」⇒ 未发布/发布失败的选中项也进队列。
+  // ⚠️ 锚点必须带**函数签名**：`canSyncNote` 里有一行逐字相同的 return，只锚那行
+  //    会命中第一处（canSyncNote）而不是本函数 —— 变异静默打偏，脚本照常红，但红的
+  //    原因与想守的守卫无关（比不变红更危险）。
+  batchgate: `export function canBatchSyncNote(note: { publish_status?: string }): boolean {
+  return (note?.publish_status ?? "").trim() === "published";
+}`,
+  // 批量跳过不计数 ⇒ 确认框少说「跳过 2 篇」，用户以为都同步了
+  batchskip: "      skipped += 1;",
+  // 目标顺序反转 ⇒ 队列顺序处理变成逆序（限流节奏与失败定位都对不上）
+  batchorder: "      targets.push(note);",
 };
 
 const MUTATE_TO = {
@@ -90,6 +111,14 @@ const MUTATE_TO = {
   // 缺值当成「能同步」⇒ 没发布过的本地笔记也长按钮（误导）
   syncmissing: `  if ((note?.note_type ?? "").trim() === "synced") return true;
   return true;`,
+  // 批量门禁放宽 ⇒ G3/G4/G5 红（未发布也进同步队列）
+  batchgate: `export function canBatchSyncNote(note: { publish_status?: string }): boolean {
+  return true;
+}`,
+  // 跳过不计数 ⇒ G7 红
+  batchskip: "      skipped += 0;",
+  // 目标顺序反转 ⇒ G8 红
+  batchorder: "      targets.unshift(note);",
 };
 
 let failures = 0;
@@ -143,6 +172,8 @@ async function main() {
     noteTypeTagColor,
     accountFilterLabel,
     canSyncNote,
+    canBatchSyncNote,
+    splitSyncTargets,
   } = mod;
 
   if (!Array.isArray(NOTE_TYPE_FILTER_OPTIONS) || typeof noteTypeLabel !== "function") {
@@ -151,6 +182,10 @@ async function main() {
   }
   if (typeof canSyncNote !== "function") {
     console.error("FATAL 未导出 canSyncNote —— 卡片 / 详情两处共用的判定，缺它按钮会消失");
+    return 1;
+  }
+  if (typeof canBatchSyncNote !== "function" || typeof splitSyncTargets !== "function") {
+    console.error("FATAL 未导出 canBatchSyncNote / splitSyncTargets —— 批量同步门禁（§35.1）缺它");
     return 1;
   }
 
@@ -308,6 +343,48 @@ async function main() {
     console.log(`FAIL 检查条数不符：期望 ${totalChecks}，实际 ${passedCount()}`);
     failures += 1;
   }
+
+  // ---- G. 批量同步门禁（§35.1，2026-09-25）：只认「已发布」，比 canSyncNote 严 ----
+  check("G1 已发布的本地生成笔记可批量同步", canBatchSyncNote({ note_type: "local_generated", publish_status: "published" }) === true);
+  check("G2 已发布的采集笔记也可批量同步（发布过 = 平台有这条）", canBatchSyncNote({ note_type: "local", publish_status: "published" }) === true);
+  // 与 F 段的分野（本轮核心）：synced 但被手切回 pending ⇒ 单条按钮仍给同步（F 段），
+  // 批量**不收**（用户口径「只有已发布的支持被选中」）。两把尺子不许混同。
+  check(
+    "G3 synced 但未发布 ⇒ 批量不可同步（与 canSyncNote 刻意分野）",
+    canBatchSyncNote({ note_type: "synced", publish_status: "pending" }) === false
+      && canSyncNote({ note_type: "synced", publish_status: "pending" }) === true
+  );
+  check("G4 发布失败 ⇒ 批量不可同步", canBatchSyncNote({ note_type: "local_generated", publish_status: "failed" }) === false);
+  check("G5 空状态 / 缺字段 ⇒ 批量不可同步", canBatchSyncNote({ note_type: "synced", publish_status: "" }) === false && canBatchSyncNote({}) === false);
+  check("G6 undefined 入参不炸", canBatchSyncNote(undefined) === false);
+
+  // G7-G9：splitSyncTargets（splitPublishTargets 同款：目标 + 跳过数 + 顺序）
+  const mixed = [
+    { id: 1, note_type: "local_generated", publish_status: "published" },
+    { id: 2, note_type: "synced", publish_status: "pending" },   // 选中但不可批量同步
+    { id: 3, note_type: "local", publish_status: "published" },
+    { id: 4, note_type: "local_generated", publish_status: "failed" }, // 选中但不可批量同步
+    { id: 5, note_type: "synced", publish_status: "published" },
+  ];
+  const split = splitSyncTargets(mixed, [5, 2, 1, 4, 3]);
+  check(
+    "G7 混合选中 ⇒ 只收已发布（targets=3 / skipped=2，跳过明示）",
+    split.targets.map((n) => n.id).join(",") === "5,1,3" && split.skipped === 2,
+    `实际：targets=${JSON.stringify(split.targets.map((n) => n.id))} skipped=${split.skipped}`
+  );
+  check(
+    "G8 目标顺序 = 选中顺序（队列顺序处理）",
+    JSON.stringify(split.targets.map((n) => n.id)) === JSON.stringify([5, 1, 3])
+  );
+  check(
+    "G9 不在列表里的选中 id 记 skipped（不静默丢）",
+    splitSyncTargets(mixed, [1, 999]).skipped === 1
+  );
+
+  if (passedCount() !== totalChecks) {
+    console.log(`FAIL 检查条数不符：期望 ${totalChecks}，实际 ${passedCount()}`);
+    failures += 1;
+  }
   console.log(`\n${passedCount()} PASS / ${failures} FAIL`);
   return failures === 0 ? 0 : 1;
 
@@ -316,9 +393,9 @@ async function main() {
   }
 }
 
-// 期望检查条数：A5 + (B1+B2)×3 + B3 + C3 + D1×3 + D2~D5 + E4 + F6 = 34；
+// 期望检查条数：A5 + (B1+B2)×3 + B3 + C3 + D1×3 + D2~D5 + E4 + F6 + G9 = 43；
 // 新增检查必须同步改这个数，否则「少跑了几条」会被静默掩盖（比变红更危险）。
-const totalChecks = 34;
+const totalChecks = 43;
 
 main().then((code) => process.exit(code)).catch((error) => {
   console.error(error);

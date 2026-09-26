@@ -21,7 +21,7 @@ import type { DragEndEvent } from "@dnd-kit/core";
 import { SortableContext, useSortable, horizontalListSortingStrategy, arrayMove } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import {
-  Alert,
+  App,
   Badge,
   Button,
   Card,
@@ -32,7 +32,6 @@ import {
   Image,
   Input,
   List,
-  message as antMessage,
   Modal,
   Popconfirm,
   Row,
@@ -168,8 +167,9 @@ export function XhsDraftsPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [isSendingPublish, setIsSendingPublish] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // 全站消息提醒统一走 antd message（设计 04 §3.6，2026-09-25 用户口径）：
+  // 操作结果反馈不再渲染 inline Alert 占版面（原静态 antMessage 两处也收口到这里）。
+  const { message } = App.useApp();
   const [assetUrl, setAssetUrl] = useState("");
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
   const [optimizeModalOpen, setOptimizeModalOpen] = useState(false);
@@ -194,24 +194,17 @@ export function XhsDraftsPage() {
 
   /* ── status helpers ─────────────────────────────────────────────── */
 
-  function clearStatus() {
-    setMessage(null);
-    setError(null);
-  }
-
   function selectDraft(draft: Draft) {
     setSelectedDraftId(draft.id);
     setTitle(draft.title);
     setBody(draft.body);
     setAssetUrl("");
-    clearStatus();
   }
 
   /* ── data fetching ──────────────────────────────────────────────── */
 
   async function loadDrafts() {
     setIsLoading(true);
-    setError(null);
     try {
       const result = await fetchDrafts("xhs");
       setDrafts(result.items);
@@ -228,7 +221,7 @@ export function XhsDraftsPage() {
         setBody("");
       }
     } catch {
-      setError("草稿列表加载失败。");
+      message.error("草稿列表加载失败。");
     } finally {
       setIsLoading(false);
     }
@@ -247,29 +240,28 @@ export function XhsDraftsPage() {
         setSourceNote(null);
         setSourceAssets([]);
       }
-      setMessage("草稿已删除。");
+      message.success("草稿已删除。");
     } catch {
-      setError("草稿删除失败。");
+      message.error("草稿删除失败。");
     }
   }
 
   async function handleSave() {
     if (!selectedDraft) {
-      setError("请先选择一个草稿。");
+      message.warning("请先选择一个草稿。");
       return;
     }
     setIsSaving(true);
-    clearStatus();
     try {
       const updated = await updateDraft(selectedDraft.id, { title, body, tags: draftTags });
       setDrafts((prev) =>
         prev.map((d) => (d.id === updated.id ? updated : d))
       );
-      setMessage(`草稿 #${updated.id} 已保存。`);
+      message.success(`草稿 #${updated.id} 已保存。`);
     } catch (err: unknown) {
       const detail = (err as { response?: { data?: { detail?: string } } })
         ?.response?.data?.detail;
-      setError(detail || "草稿保存失败。");
+      message.error(detail || "草稿保存失败。");
     } finally {
       setIsSaving(false);
     }
@@ -277,11 +269,10 @@ export function XhsDraftsPage() {
 
   async function handleSendToPublish() {
     if (!selectedDraft) {
-      setError("请先选择一个草稿。");
+      message.warning("请先选择一个草稿。");
       return;
     }
     setIsSendingPublish(true);
-    clearStatus();
     try {
       const saved = await updateDraft(selectedDraft.id, { title, body });
       setDrafts((prev) =>
@@ -290,13 +281,13 @@ export function XhsDraftsPage() {
       const job = await sendDraftToPublish(saved.id, {
         publish_mode: "immediate",
       });
-      setMessage(
+      message.success(
         `已送入发布中心，发布任务 #${job.id}。请前往发布中心选择账号并发布。`
       );
     } catch (err: unknown) {
       const detail = (err as { response?: { data?: { detail?: string } } })
         ?.response?.data?.detail;
-      setError(detail || "送发布中心失败。");
+      message.error(detail || "送发布中心失败。");
     } finally {
       setIsSendingPublish(false);
     }
@@ -360,9 +351,9 @@ export function XhsDraftsPage() {
           }));
         }
         setUploadModalOpen(false);
-        antMessage.success("素材上传成功");
+        message.success("素材上传成功");
       } catch {
-        antMessage.error("素材上传失败");
+        message.error("素材上传失败");
       }
     })();
 
@@ -372,11 +363,11 @@ export function XhsDraftsPage() {
   function handleUrlAdd() {
     const trimmed = assetUrl.trim();
     if (!trimmed) {
-      antMessage.warning("请输入素材链接。");
+      message.warning("请输入素材链接。");
       return;
     }
     if (!isValidUrl(trimmed)) {
-      antMessage.error("链接格式不正确，请输入 http:// 或 https:// 开头的链接。");
+      message.error("链接格式不正确，请输入 http:// 或 https:// 开头的链接。");
       return;
     }
     const assetType = getAssetTypeFromUrl(trimmed);
@@ -390,7 +381,7 @@ export function XhsDraftsPage() {
           setAssetUrl("");
           setUploadModalOpen(false);
         } catch {
-          antMessage.error("素材添加失败");
+          message.error("素材添加失败");
         }
       })();
     } else {
@@ -441,7 +432,7 @@ export function XhsDraftsPage() {
       }
       setSelectedAssetUrls([]);
       setUploadModalOpen(false);
-      antMessage.success(`已添加 ${selectedAssetUrls.length} 个图片`);
+      message.success(`已添加 ${selectedAssetUrls.length} 个图片`);
     })();
   }
 
@@ -652,25 +643,6 @@ export function XhsDraftsPage() {
           </Button>
         }
       />
-
-      {error && (
-        <Alert
-          type="error"
-          message={error}
-          showIcon
-          closable
-          onClose={() => setError(null)}
-        />
-      )}
-      {message && (
-        <Alert
-          type="success"
-          message={message}
-          showIcon
-          closable
-          onClose={() => setMessage(null)}
-        />
-      )}
 
       <Row gutter={16}>
         {/* Left column: draft list */}
@@ -946,7 +918,7 @@ export function XhsDraftsPage() {
                               icon={<HighlightOutlined />}
                               loading={isOptimizing}
                               onClick={async () => {
-                                if (!optimizePrompt.trim()) { antMessage.warning("请输入润色提示词"); return; }
+                                if (!optimizePrompt.trim()) { message.warning("请输入润色提示词"); return; }
                                 setIsOptimizing(true); setOptimizeResult(null);
                                 try {
                                   const result = await generateImageWithAi({
@@ -955,9 +927,9 @@ export function XhsDraftsPage() {
                                     save_to_assets: false,
                                   });
                                   setOptimizeResult(result.url);
-                                  antMessage.success("图片润色完成");
+                                  message.success("图片润色完成");
                                 } catch {
-                                  antMessage.error("图片润色失败，请确认已配置图片生成模型");
+                                  message.error("图片润色失败，请确认已配置图片生成模型");
                                 } finally { setIsOptimizing(false); }
                               }}
                             >
@@ -976,7 +948,7 @@ export function XhsDraftsPage() {
                                     }).catch(() => {});
                                   }
                                   setOptimizeModalOpen(false); setOptimizeAssetId(null); setOptimizePrompt(""); setOptimizeRefImages([]); setOptimizeResult(null);
-                                  antMessage.success("已替换为润色后的图片");
+                                  message.success("已替换为润色后的图片");
                                 }}
                               >
                                 替换当前素材

@@ -42,14 +42,26 @@ VMP 内部把 `getdss()` 返回值直接写入 `window._dsl`。
 """
 from __future__ import annotations
 
+import logging
 import re
 import time
 import threading
 from typing import Optional
 
+logger = logging.getLogger(__name__)
+
 _GETDSS_RE = re.compile(r"function\s+getdss\s*\(\s*\)\s*\{\s*return\s+'(\d+)'")
 _DS_URL = "https://as.xiaohongshu.com/api/sec/v1/ds?appId=xhs-pc-web"
 _TTL = 300  # 与服务端 max-age 对齐
+
+#: 单次 fetch 的超时（秒）。原为 8 —— 实测 CDN 抖动时「8 秒只收到 1152 字节后断开」
+#: （curl 28），一次失败就把整篇同步判死。放宽到 12 秒。
+_FETCH_TIMEOUT = 12
+#: 总尝试次数（首次 + 重试）。DS 值是**签名材料**，取不到就没法发任何业务请求，
+#: 所以值得重试；它自己也有 5 分钟缓存，重试只发生在「首次」或「过期刷新」时。
+_FETCH_ATTEMPTS = 3
+#: 重试退避基数（秒）：第 n 次重试前等 n × 基数（0.6s / 1.2s）。
+_FETCH_RETRY_BACKOFF = 0.6
 
 
 class DsFetcher:
@@ -98,19 +110,34 @@ class DsFetcher:
             now = time.time()
             if not force and self._value and now - self._fetched_at < self._ttl:
                 return self._value
-            try:
-                new_val = self._fetch(
-                    proxies=proxies,
-                    http_client=http_client,
-                )
-                self._value = new_val
-                self._fetched_at = now
-                return new_val
-            except Exception as e:
-                if self._value:
-                    # 失败降级：返回旧值
-                    return self._value
-                raise RuntimeError(f'ds 接口首次 fetch 失败：{e}') from e
+            last_error: Optional[Exception] = None
+            for attempt in range(1, _FETCH_ATTEMPTS + 1):
+                try:
+                    new_val = self._fetch(
+                        proxies=proxies,
+                        http_client=http_client,
+                    )
+                except Exception as e:  # noqa: BLE001 - 单次失败进入重试
+                    last_error = e
+                    if attempt < _FETCH_ATTEMPTS:
+                        # 退避后重试（2026-09-25）：CDN 抖动是常态，一次超时不
+                        # 该等于「本次同步失败」—— 重试成本只在首次/过期刷新。
+                        logger.warning(
+                            "dsl fetch failed (attempt %s/%s): %s",
+                            attempt,
+                            _FETCH_ATTEMPTS,
+                            e,
+                        )
+                        time.sleep(_FETCH_RETRY_BACKOFF * attempt)
+                        continue
+                else:
+                    self._value = new_val
+                    self._fetched_at = now
+                    return new_val
+            if self._value:
+                # 失败降级：返回旧值
+                return self._value
+            raise RuntimeError(f'ds 接口首次 fetch 失败：{last_error}') from last_error
 
     def _fetch(
         self,
@@ -136,7 +163,7 @@ class DsFetcher:
                     self._url,
                     headers=headers,
                     proxies=proxies,
-                    timeout=8,
+                    timeout=_FETCH_TIMEOUT,
                 )
             finally:
                 client.close()

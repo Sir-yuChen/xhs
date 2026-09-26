@@ -6,7 +6,7 @@ import {
   SaveOutlined,
 } from "@ant-design/icons";
 import {
-  Alert,
+  App,
   Button,
   Card,
   Col,
@@ -56,12 +56,12 @@ export function XhsKeywordsPage() {
   const [editingGroupId, setEditingGroupId] = useState<number | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isWorking, setIsWorking] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // 全站消息提醒统一走 antd message（设计 04 §3.6，2026-09-25 用户口径）：
+  // 操作结果反馈不再渲染 inline Alert 占版面。
+  const { message } = App.useApp();
 
   async function loadGroups() {
     setIsLoading(true);
-    setError(null);
     try {
       const result = await fetchKeywordGroups("xhs");
       setGroups(result.items);
@@ -83,7 +83,7 @@ export function XhsKeywordsPage() {
         )
       );
     } catch {
-      setError("关键词组加载失败。");
+      message.error("关键词组加载失败。");
     } finally {
       setIsLoading(false);
     }
@@ -108,11 +108,10 @@ export function XhsKeywordsPage() {
   async function saveGroup() {
     const nextKeywords = splitKeywords(keywords);
     if (!name.trim() || nextKeywords.length === 0) {
-      setMessage("请填写名称和至少一个关键词。");
+      message.warning("请填写名称和至少一个关键词。");
       return;
     }
     setIsWorking(true);
-    setMessage(null);
     try {
       if (editingGroupId) {
         const updated = await updateKeywordGroup(editingGroupId, {
@@ -129,7 +128,7 @@ export function XhsKeywordsPage() {
           ...currentDetails,
           [updated.id]: detail,
         }));
-        setMessage("关键词组已更新。");
+        message.success("关键词组已更新。");
       } else {
         const created = await createKeywordGroup({
           platform: "xhs",
@@ -142,11 +141,11 @@ export function XhsKeywordsPage() {
           ...currentDetails,
           [created.id]: detail,
         }));
-        setMessage("关键词组已创建。");
+        message.success("关键词组已创建。");
       }
       resetForm();
     } catch {
-      setMessage("关键词组保存失败。");
+      message.error("关键词组保存失败。");
     } finally {
       setIsWorking(false);
     }
@@ -154,7 +153,6 @@ export function XhsKeywordsPage() {
 
   async function removeGroup(groupId: number) {
     setIsWorking(true);
-    setMessage(null);
     try {
       await deleteKeywordGroup(groupId);
       setGroups((currentGroups) =>
@@ -168,9 +166,9 @@ export function XhsKeywordsPage() {
       if (editingGroupId === groupId) {
         resetForm();
       }
-      setMessage("关键词组已删除。");
+      message.success("关键词组已删除。");
     } catch {
-      setMessage("关键词组删除失败。");
+      message.error("关键词组删除失败。");
     } finally {
       setIsWorking(false);
     }
@@ -235,25 +233,6 @@ export function XhsKeywordsPage() {
           )}
         </Form>
       </Card>
-
-      {message && (
-        <Alert
-          type="info"
-          message={message}
-          showIcon
-          closable
-          style={{ marginBottom: 16 }}
-        />
-      )}
-      {error && (
-        <Alert
-          type="error"
-          message={error}
-          showIcon
-          closable
-          style={{ marginBottom: 16 }}
-        />
-      )}
 
       {isLoading ? (
         <div style={{ textAlign: "center", padding: 48 }}>

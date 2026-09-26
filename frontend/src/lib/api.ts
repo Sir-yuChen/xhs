@@ -2,6 +2,7 @@ import axios from "axios";
 import { message } from "antd";
 
 import { fallbackPlatforms } from "./platforms";
+import type { CleanResultShape } from "./task-records";
 import type {
   AuthPayload,
   AutoTask,
@@ -18,8 +19,6 @@ import type {
   BenchmarkOverview,
   BatchCreateDraftsPayload,
   BatchCreateDraftsResponse,
-  BatchTagNotesPayload,
-  BatchTagNotesResponse,
   ComposeImagePayload,
   CreateDraftPayload,
   DashboardOverview,
@@ -69,9 +68,9 @@ import type {
   SavedNotesPage,
   SaveNotesResponse,
   SendDraftToPublishPayload,
-  Tag,
+  NoteTopic,
   UserImageFile,
-  TagPayload,
+  TopicPayload,
   TaskRecord,
   XhsNoteSearchResponse,
   XhsDataCrawlItem,
@@ -334,7 +333,12 @@ export interface SyncNotesOptions {
 export type SavedNoteFilters = {
   platform?: string;
   q?: string;
-  tag_id?: number;
+  /**
+   * **话题筛选**（设计 13 §34.4，2026-09-25）：原 `tag_id`（标签筛选）——
+   * 标签表已并入话题表，走后端 `note_topics` 关系表子查询。取值 = 话题字典行
+   * id（`topics.id`）。不传 = 不筛。
+   */
+  topic_id?: number;
   has_assets?: boolean;
   has_comments?: boolean;
   /**
@@ -387,7 +391,7 @@ export async function fetchSavedNotes(
       : {
           platform: platformOrFilters.platform ?? "xhs",
           q: platformOrFilters.q || undefined,
-          tag_id: platformOrFilters.tag_id,
+          topic_id: platformOrFilters.topic_id,
           has_assets: platformOrFilters.has_assets,
           has_comments: platformOrFilters.has_comments,
           // `all` 不传（= 不筛）；其余四档原样透传（`"failed"` 是本轮新增的那一档）。
@@ -429,38 +433,44 @@ export async function updateSavedNotePublishStatus(
 }
 
 /** 单条同步（内容库「同步」按钮）的结果载荷（设计 13 §25.4）。 */
-export interface SavedNoteSyncResult {
-  /** 与后端 `hydrate_note_detail` 同源的状态机。 */
-  status: "ok" | "no_url" | "no_session" | "failed";
-  /** 正文被详情内容覆盖/补上了（平台改过正文时本地跟上）。 */
-  content_updated: boolean;
-  title_updated: boolean;
-  /** 本轮补进本地的图片条数（只增不删）。 */
-  images_added: number;
-  /** 是否补到视频流地址（列表端点不带，只有详情有）。 */
-  video_added: boolean;
-  /** 失败/跳过的真实原因（成功时为空串）。 */
-  reason: string;
-  /** 机器可读原因码（`WEB_SESSION_REQUIRED` 等；成功为空串）。 */
-  code: string;
+/**
+ * 单条同步的**入队回执**（`POST /notes/{id}/sync`，2026-09-25 队列化后）。
+ *
+ * ⚠️ 2026-09-25 用户口径「单独点击同步按钮也需要放入同步队列中执行，与批量同步
+ * 一致」⇒ 该端点从**同步阻塞执行**改为**入队即返回**，`sync` 字段随之从「同步的
+ * 逐项结果」（`{status, content_updated, images_added, …}`）变成回执。
+ *
+ * 终态（同步成功 / 失败 + 真实原因）由 `GET /notes/sync-queue` 的快照 `finished`
+ * 给一次 —— 与批量同步**同一个出口**（`SyncQueueFinishedEntry`），不另设一套。
+ */
+export interface SavedNoteSyncEnqueueResult {
+  ok: true;
+  /** 恒为 `queued`（入队成功；终态不走这个字段）。 */
+  status: "queued";
+  /** 本地笔记主键（进度卡逐篇条目用的就是它）。 */
+  note_pk: number;
+  /** 平台笔记 ID（展示用）。 */
+  note_id: string;
+  /** 该篇**已在队列里**（幂等命中，不重复请求）。 */
+  already_queued?: boolean;
 }
 
 /**
- * 内容库「同步」按钮：用笔记 id 拉平台最新内容，更新落库（设计 13 §25）。
+ * 内容库「同步」按钮：把这篇**加入同步队列**（设计 13 §25.4 / §35.10）。
  *
- * 与定时任务同步笔记逻辑**同源**（后端复用 `hydrate_note_detail` 唯一实现）。
- * ⚠️ 2026-09-23 用户口径「已发布的笔记也支持同步笔记最新的三方数据」⇒ 判据放宽为
+ * 与批量同步**同一个队列、同一个 worker**（顺序执行 = www 限流的第一道保障），
+ * 与定时任务同步笔记逻辑**同源**（后端 worker 复用 `hydrate_note_detail` 唯一实现）。
+ * ⚠️ 2026-09-23 用户口径「已发布的笔记也支持同步笔记最新的三方数据」⇒ 判据
  * **`synced` 或 `publish_status == "published"`**（与前端 `canSyncNote` 同口径）。
- * 两者都不满足的笔记后端给结构化 400 **`NOTE_NOT_SYNCABLE`**（原 `NOTE_NOT_SYNCED`
- * 已随口径一起改名 —— 名字里不再预设「只有 synced 才行」）。
+ * 两者都不满足的笔记后端给结构化 400 **`NOTE_NOT_SYNCABLE`**。
  *
- * `_silent`：结果（含失败原因）要显示在详情卡里，不弹全局 toast —— 失败三分法
- * 由调用方按 `sync.status` / `sync.code` 渲染（预期内安静一行、真异常红块）。
+ * `_silent`：门禁失败的 400 要由调用点报（不弹全局 toast 双份）—— 调用点按
+ * `message.error(readError(e).message)` 渲染真实原因。
  */
 export async function syncSavedNote(
   noteId: number
-): Promise<{ note: SavedNote; sync: SavedNoteSyncResult }> {
-  const response = await http.post<{ note: SavedNote; sync: SavedNoteSyncResult }>(
+): Promise<{ note: SavedNote; sync: SavedNoteSyncEnqueueResult }> {
+  const response = await http.post<{ note: SavedNote; sync: SavedNoteSyncEnqueueResult }>(
     `/notes/${noteId}/sync`,
     {},
     { _silent: true } as never
@@ -469,10 +479,11 @@ export async function syncSavedNote(
 }
 
 /**
- * 话题增删的**落库入口**（设计 13 §29.3）：整列替换，返回更新后的整行。
+ * 话题增删的**落库入口**（设计 13 §29.3 / §34.4）：整列替换，返回更新后的整行。
  *
- * 内容库详情卡「+ 新增 / Tag 上 × 删话题」都走它 —— 每次增删一次写库（实时落库），
- * 调用方传增删后的**完整列表**，后端负责归一化（trim / 去空 / 去重 / 限量）。
+ * 内容库详情卡「+ 新增话题 / Tag 上 × 删话题」都走它 —— 每次增删一次写库（实时落库），
+ * 调用方传增删后的**完整列表**（话题**名**），后端 find-or-create 话题典例行 +
+ * 对齐 `note_topics` 关系行（归一化：trim / 去空 / 去重 / 限量，唯一实现）。
  */
 export async function updateSavedNoteTopics(
   noteId: number,
@@ -483,33 +494,36 @@ export async function updateSavedNoteTopics(
 }
 
 // --------------------------------------------------------------------------- #
-// 商品笔记智能生成与发布（设计 13 §31，2026-09-23）
+// 商品笔记智能生成与发布（设计 13 §31，2026-09-23；§31.10 起走队列）
 // --------------------------------------------------------------------------- #
 
-/** 单商品智能生成 + 落库的结果（`POST /xhs/product-notes/generate-save`）。 */
+/**
+ * 单商品「生成笔记」的**入队回执**（`POST /xhs/product-notes/generate-save`，
+ * 2026-09-25 §31.10 起异步）。
+ *
+ * 异步口径（用户口径「单独生成商品笔记和批量生成商品笔记均需走队列」）：端点只同步
+ * 做门禁（未绑店 / 无 ark 令牌 / 台账无此商品 ⇒ 结构化 400/404，由全局拦截器报），
+ * 立即返回 `ok:true + status:"queued"`；三步生成 + 轮询 + 落库在后台 worker 跑。
+ * **终态不在这里** —— 前端轮询 `fetchGenerateQueue` 看快照 `finished`（与批量同一个
+ * 出口）；生成失败的真实原因只在那里给一次（生成失败不落库，没有 `publish_error`
+ * 那样的持久位）。
+ */
 export interface ProductNoteGenerateResult {
   ok: boolean;
   platform_account_id: number;
+  /** 入队成功恒为 `"queued"`。 */
+  status: string;
+  /** 商品 ID（入队时原样回显）。 */
   item_id: string;
-  /** 本地笔记 ID（`local_` 前缀；发布成功后换成平台真实 ID）。 */
-  note_id: string;
-  title: string;
-  /** 平台 AI 带的话题名（发布时用平台话题 ID，见 `raw_json.aigc.topics`）。 */
-  topics: string[];
-  /** 落库的媒体张数（商品图，**最多 6 张**，设计 13 §32.2.1）。 */
-  image_count: number;
-  /** 落库的视频个数（**最多 1 个**；视频优先于图片。当前商品无视频源 ⇒ 恒 0）。 */
-  video_count: number;
-  /** 本地护栏结果（记录不拦截；内容出自平台官方 AI）。 */
-  guardrails: { passed: boolean; blocked_terms: string[]; price_note: string };
+  /** 重复入队（已在队列 / 执行中）⇒ `true`（幂等，不重复生成）。 */
+  already_queued?: boolean;
 }
 
 /**
- * 单商品「生成笔记」（商品列表页操作列按钮；设计 13 §31.4）。
+ * 单商品「生成笔记」（商品列表页操作列按钮；设计 13 §31.4 + §31.10）。
  *
  * 调千帆后台智能生成（attributes → sellerpoint/aigc → 轮询），落库为
- * **待发布**的本地生成笔记。门禁失败（未绑店 / 无令牌 / 无此商品）是结构化
- * 400/404；平台侧失败 502 + 平台原文。
+ * **待发布**的本地生成笔记（内容库可见，之后在内容库发布）。
  */
 export async function generateProductNote(
   accountId: number,
@@ -522,29 +536,37 @@ export async function generateProductNote(
   return response.data;
 }
 
-/** 批量生成的逐项结果。 */
+/** 批量生成的逐项回执。 */
 export interface ProductNoteBatchItem {
   item_id: string;
+  /** 入队成功（`status:"queued"`）或门禁失败。 */
   ok: boolean;
-  note_id?: string;
-  title?: string;
+  /** 入队成功恒为 `"queued"`。 */
+  status?: string;
+  /** 重复入队（已在队列 / 执行中）⇒ `true`（幂等，不重复生成）。 */
+  already_queued?: boolean;
+  /** 门禁失败原因（平台原文 / 数据问题）。 */
   error?: string;
+  /** 门禁失败码（`QIANFAN_ITEM_NOT_FOUND` 等）。 */
   code?: string;
 }
 
 /** 批量生成汇总（`POST /xhs/product-notes/batch-generate`）。 */
 export interface ProductNoteBatchResult {
   total: number;
-  succeeded: number;
+  /** 入队（后台将生成）的项数。 */
+  started: number;
+  /** 门禁失败（未入队）的项数。 */
   failed: number;
   results: ProductNoteBatchItem[];
 }
 
 /**
- * 批量「生成笔记」（商品列表页工具栏；设计 13 §31.4 步 6）。
+ * 批量「生成笔记」（商品列表页工具栏；设计 13 §31.4 步 6 + §31.10）。
  *
- * 顺序处理、单项失败不阻断（与千帆页面 `Promise.allSettled` 同语义）；
- * ≤20 项/请求。返回逐项结果，调用方汇总「成功 X / 失败 Y」。
+ * 逐项过门禁、通过项顺序入队，单项失败不阻断（与千帆页面 `Promise.allSettled`
+ * 同语义）；≤20 项/请求。返回逐项回执，调用方汇总「已入队 X / 失败 Y」。
+ * **逐项终态**（生成成功 / 平台失败）走 `fetchGenerateQueue` 快照 `finished`。
  */
 export async function batchGenerateProductNotes(
   accountId: number,
@@ -557,29 +579,98 @@ export async function batchGenerateProductNotes(
   return response.data;
 }
 
-/** 单篇发布结果（`POST /notes/{id}/publish`）。 */
+/** 生成进度卡的单项条目（`GET /xhs/product-notes/generate-queue`）。 */
+export interface GenerateQueueEntry {
+  /** 恒 0（生成前笔记不存在）；详情抽屉据此不拉笔记标题。 */
+  note_pk: number;
+  /** 商品 ID（业务主键）。 */
+  item_id: string;
+  /** 商品名（入队时台账快照；终态后优先显示生成的笔记标题）。 */
+  title: string;
+  /** 生成的本地笔记 ID（终态后才有；排队中为空串）。 */
+  note_id: string;
+}
+
+/** 生成进度卡的逐项结果（快照 `finished`；生成失败的原因只在这里给一次）。 */
+export interface GenerateQueueFinishedEntry extends GenerateQueueEntry {
+  ok: boolean;
+  /** 与另两个队列同口径的结果态（`ok` / `failed`）。 */
+  status: string;
+  /** 失败的真实原因（平台原文；成功时为空串）。 */
+  reason: string;
+  /** 机器可读原因码（`AI_GENERATION_FAILED` 等；成功为空串）。 */
+  code: string;
+}
+
+/** 生成进度卡数据（`GET /xhs/product-notes/generate-queue`，设计 13 §31.10）。
+
+ * 2026-09-26 常驻化（用户口径「不需要队列批次，队列是常驻」）：快照只描述**队列
+ * 实时态 + 近期终态** —— `running` / `queued` / `total`（= 两者 + 近期终态数）+
+ * `finished`（近期终态项，含 ok 与 reason）。**没有 `generated` / `failed` 计数**
+ * ——「本轮成败」由页面按自己入队的项累计（后端不知道用户这一轮点了什么）。
+ */
+export interface GenerateQueueSnapshot {
+  /** 正在生成的那条（null = 空闲）。 */
+  running: GenerateQueueEntry | null;
+  /** 排队中的（FIFO 序）。 */
+  queued: GenerateQueueEntry[];
+  /** 队列规模 = running + queued + 近期终态数（进度卡停止条件「>0 且待处理为 0」用）。 */
+  total: number;
+  /** 近期已出结果的逐项（含 ok 与 reason）。 */
+  finished: GenerateQueueFinishedEntry[];
+}
+
+/** 生成进度快照的**空闲初值**（页面首屏 / 轮询停止后用）。 */
+export const EMPTY_GENERATE_QUEUE_SNAPSHOT: GenerateQueueSnapshot = {
+  running: null,
+  queued: [],
+  total: 0,
+  finished: [],
+};
+
+/**
+ * 生成进度快照（商品列表页「生成进度卡」轮询用；设计 13 §31.10）。
+ *
+ * 前端在「有生成中 / 排队」时每 5 秒拉一次，待处理为 0 即停（与另两张进度卡同一套
+ * 骨架）。⚠️ 2026-09-26 起快照不带成败计数，页面自己按入队的项累计。
+ */
+export async function fetchGenerateQueue(silent = true): Promise<GenerateQueueSnapshot> {
+  const response = await http.get<GenerateQueueSnapshot>("/xhs/product-notes/generate-queue", {
+    _silent: silent,
+  } as never);
+  return response.data;
+}
+
+/**
+ * 单篇发布**启动**结果（`POST /notes/{id}/publish`，2026-09-25 起异步）。
+ *
+ * 异步口径（用户「前端点击发布无需等待，后端异步发布」）：端点只同步做门禁，
+ * 立即返回 `ok:true + status:"publishing"`；下载 / 上传 / 预审核 / 发布在后台
+ * 线程跑。**终态不在这里** —— 前端轮询 `fetchSavedNote` 看 `publish_status`
+ * （`published` / `failed`，失败原因在 `publish_error`），见 `note-publish-gates.ts`。
+ */
 export interface NotePublishResult {
   ok: boolean;
   /** 本地笔记主键（就地更新卡片用；与平台 ID 无关）。 */
   note_pk: number;
-  /** 笔记 ID（成功时是平台真实 ID，失败时是本地 `local_` ID）。 */
+  /** 笔记 ID（异步启动时还是本地 `local_` ID；平台 ID 要等终态）。 */
   note_id: string;
-  /** 平台真实笔记 ID（成功时）。 */
+  /** 恒为 `"publishing"`（启动成功的语义确认）。 */
+  status?: string;
+  /** 平台真实笔记 ID（异步启动时**不带**；终态轮询才有）。 */
   platform_note_id?: string;
   published_at?: string;
-  /** 失败原因（平台原文 / 网络异常；成功为空串）。 */
+  /** 失败原因（平台原文 / 网络异常；启动成功为空）。 */
   error?: string;
-  /** 机器可读失败码（`PUBLISH_AUDIT_REJECTED` 等）。 */
+  /** 机器可读失败码（`PUBLISH_AUDIT_REJECTED` 等；异步启动时不带）。 */
   code?: string;
 }
 
 /**
  * 单篇「发布」（内容库卡片按钮，前端先二次确认；设计 13 §31.5）。
  *
- * 链路：下载媒体到本地临时文件夹 → 上传平台 → 预审核 → 发布 → 回写平台
- * 真实 note_id → 删临时目录。**失败也回 200**：门禁之外的一切失败
- * （下载 / 上传 / 平台拒发）是「试一次的结果」，落在 `publish.ok=false` +
- * `publish.error`，前端把笔记状态改成「发布失败」并展示原因、支持重发。
+ * **异步启动**：毫秒级返回，不等发布链路。门禁失败（不含 / 已发布 / 发布中 /
+ * 无媒体 / 无 ark 令牌）仍是 400 结构化错误，由调用方摆原因。
  */
 export async function publishSavedNote(
   noteId: number
@@ -592,24 +683,230 @@ export async function publishSavedNote(
   return response.data;
 }
 
+/** 批量发布**单篇**结果（`POST /notes/batch-publish`，2026-09-25 起异步）。 */
+export interface NoteBatchPublishItem {
+  note_pk: number;
+  /** 入队成功（`status:"publishing"`）或门禁失败。 */
+  ok: boolean;
+  /** 笔记 ID（入队时是本地 `local_` ID）。 */
+  note_id?: string;
+  /** 入队成功恒为 `"publishing"`。 */
+  status?: string;
+  /** 门禁失败原因（平台原文 / 数据问题）。 */
+  error?: string;
+  /** 门禁失败码（`NOTE_ALREADY_PUBLISHED` 等）。 */
+  code?: string;
+}
+
 /** 批量发布汇总（`POST /notes/batch-publish`）。 */
 export interface NoteBatchPublishResult {
   total: number;
-  succeeded: number;
+  /** 入队（后台将发布）的篇数。 */
+  started: number;
+  /** 门禁失败（未入队）的篇数。 */
   failed: number;
-  results: NotePublishResult[];
+  results: NoteBatchPublishItem[];
 }
 
 /**
- * 批量「发布」（内容库批量操作区；设计 13 §31.5 步 8）。
+ * 批量「发布」（内容库批量操作区；设计 13 §31.5 步 8，2026-09-25 起异步）。
  *
- * 顺序处理、单项失败不阻断；≤20 篇/请求。返回逐篇结果，
- * 前端按结果逐条更新卡片状态（成功的换平台 ID、失败的标「发布失败」）。
+ * 逐篇过门禁，通过篇入队由后台一个线程顺序跑完。**立即返回**：`results` 里
+ * 入队篇是 `{ok:true, status:"publishing"}`，门禁失败篇带 `error`/`code`。
+ * 终态由前端对入队篇轮询 `fetchSavedNote` 获取。
  */
 export async function batchPublishSavedNotes(noteIds: number[]): Promise<NoteBatchPublishResult> {
   const response = await http.post<NoteBatchPublishResult>("/notes/batch-publish", {
     note_ids: noteIds,
   });
+  return response.data;
+}
+
+/** 发布进度卡的单篇条目（`GET /notes/publish-queue`）。 */
+export interface PublishQueueEntry {
+  note_pk: number;
+  title: string;
+  /** 本地 `local_` ID（发布中还没换平台 ID）。 */
+  note_id: string;
+}
+
+/**
+ * 进度卡的**当日三数**（`GET /notes/publish-queue` / `GET /notes/sync-queue`
+ * 的 `today` 键；2026-09-26 用户口径「只统计当日发布或同步的数据，在卡片右下角
+ * 小字展示仅当日数据，统计队列记录表中的数据」）。
+ *
+ * 口径落在**队列记录表**（`tasks`）上，由后端现算（`today_item_counts`）：
+ * 成功 / 失败按「**今天出结果的**」（`finished_at` 落在当日）收口，待处理是队列
+ * **实时**未终态数（跨天滞留的续跑项照样算进来）。
+ * ⚠️ 因此不再由页面按自己入队的篇累计 —— 那样刷新页面数字就归零，也看不见
+ * 定时 / 恢复入口入队的项。
+ */
+export interface QueueTodayCounts {
+  /** 统计口径的日期（`YYYY-MM-DD`，上海时区）——「仅当日数据」说的是哪一天。 */
+  date: string;
+  /** 当日成功数（`done`）。 */
+  ok: number;
+  /** 当日失败数（`failed` + `exhausted`）。 */
+  failed: number;
+  /** 待处理数（未终态：`pending` + `running`）。 */
+  pending: number;
+}
+
+/** 进度卡当日三数的**空闲初值**（首屏 / 快照未到手时）。 */
+export const EMPTY_QUEUE_TODAY_COUNTS: QueueTodayCounts = {
+  date: "",
+  ok: 0,
+  failed: 0,
+  pending: 0,
+};
+
+/** 发布进度卡数据（`GET /notes/publish-queue`，2026-09-25 异步 + 队列）。
+
+ * 2026-09-26 常驻化（用户口径「不需要队列批次，队列是常驻」）：`running` /
+ * `queued` / `total`（= 两者 + 近期终态数）+ `counts`（四态原始计数）。
+ *
+ * ⚠️ 2026-09-26 再改口径（用户口径「只统计当日发布的数据……统计队列记录表中的
+ * 数据」）：卡面三数改读 `today`（当日 `tasks` 行现算），**不再由页面按自己入队的
+ * 篇累计**（原「本轮成败由页面累计」对卡面数字已不成立）。
+ */
+export interface PublishQueueSnapshot {
+  /** 正在发布的那篇（null = 空闲）。 */
+  running: PublishQueueEntry | null;
+  /** 排队中的（FIFO 序）。 */
+  queued: PublishQueueEntry[];
+  /** 队列规模 = running + queued + 近期终态数（进度卡停止条件「>0 且待处理为 0」用）。 */
+  total: number;
+  /** 四态原始计数（publishing 不归并待发布，与筛选档统计是两件事）。 */
+  counts: {
+    pending: number;
+    publishing: number;
+    published: number;
+    failed: number;
+  };
+  /** 当日三数（成功 / 失败 / 待处理）—— 卡面数字的来源（2026-09-26 口径）。 */
+  today: QueueTodayCounts;
+}
+
+/**
+ * 发布进度快照（内容库「发布进度卡」轮询用；设计 13 §31.5）。
+ *
+ * 前端在「有发布中 / 排队」时每几秒拉一次，队列空则停。
+ */
+export async function fetchPublishQueue(
+  silent = true
+): Promise<PublishQueueSnapshot> {
+  const response = await http.get<PublishQueueSnapshot>("/notes/publish-queue", {
+    _silent: silent,
+  } as never);
+  return response.data;
+}
+
+// --------------------------------------------------------------------------- #
+// 批量同步 + 同步进度卡（设计 13 §35，2026-09-25）
+// --------------------------------------------------------------------------- #
+
+/** 批量同步**单篇**结果（`POST /notes/batch-sync`）。 */
+export interface NoteBatchSyncItem {
+  note_pk: number;
+  /** 入队成功（`status:"queued"`）或门禁失败。 */
+  ok: boolean;
+  /** 笔记 ID（入队时原样回显）。 */
+  note_id?: string;
+  /** 入队成功恒为 `"queued"`。 */
+  status?: string;
+  /** 重复入队（已在队列 / 执行中）⇒ `true`（幂等，不重复请求）。 */
+  already_queued?: boolean;
+  /** 门禁失败原因（平台原文 / 数据问题）。 */
+  error?: string;
+  /** 门禁失败码（`NOTE_NOT_SYNCABLE` / `NOTE_NOT_FOUND`）。 */
+  code?: string;
+}
+
+/** 批量同步汇总（`POST /notes/batch-sync`）。 */
+export interface NoteBatchSyncResult {
+  total: number;
+  /** 入队（后台将同步）的篇数。 */
+  started: number;
+  /** 门禁失败（未入队）的篇数。 */
+  failed: number;
+  results: NoteBatchSyncItem[];
+}
+
+/**
+ * 批量「同步」（内容库批量操作区；设计 13 §35.2）。
+ *
+ * 门禁比单条「同步」按钮严：只收**已发布**的选中篇（与后端
+ * `note_supports_batch_sync` 同口径，不达标篇带 `error`/`code` 进 `results`）。
+ * 逐篇入队由后台**一个**线程顺序跑完（顺序执行 = www 限流的第二道保障）。
+ * **立即返回**；终态由前端轮询 `fetchSyncQueue`（快照 `finished` 带逐篇结果
+ * 与原因 —— 同步失败不落库到笔记行，没有 `publish_error` 那样的持久位）。
+ */
+export async function batchSyncSavedNotes(noteIds: number[]): Promise<NoteBatchSyncResult> {
+  const response = await http.post<NoteBatchSyncResult>("/notes/batch-sync", {
+    note_ids: noteIds,
+  });
+  return response.data;
+}
+
+/** 同步进度卡的单篇条目（`GET /notes/sync-queue`）。 */
+export interface SyncQueueEntry {
+  note_pk: number;
+  title: string;
+  note_id: string;
+}
+
+/** 同步进度卡的逐篇结果（快照 `finished`；同步失败的原因只在这里给一次）。 */
+export interface SyncQueueFinishedEntry extends SyncQueueEntry {
+  ok: boolean;
+  /** 与 `hydrate_note_detail` 同源的状态（`ok` / `no_url` / `no_session` / `failed`）。 */
+  status: string;
+  /** 失败/跳过的真实原因（成功时为空串）。 */
+  reason: string;
+  /** 机器可读原因码（`WEB_SESSION_REQUIRED` 等；成功为空串）。 */
+  code: string;
+}
+
+/** 同步进度卡数据（`GET /notes/sync-queue`，2026-09-25 批量同步）。
+
+ * 2026-09-26 常驻化（用户口径「不需要队列批次，队列是常驻」）：`running` /
+ * `queued` / `total`（= 两者 + 近期终态数）+ `finished`（近期终态项，含 ok 与
+ * reason —— 同步失败不落库到笔记行，原因只在这里给一次）。**没有 `synced` /
+ * `failed` 计数**。
+ *
+ * ⚠️ 2026-09-26 再改口径（用户口径「只统计当日同步的数据……统计队列记录表中的
+ * 数据」）：卡面三数改读 `today`（当日 `tasks` 行现算）。
+ */
+export interface SyncQueueSnapshot {
+  /** 正在同步的那条（null = 空闲）。 */
+  running: SyncQueueEntry | null;
+  /** 排队中的（FIFO 序）。 */
+  queued: SyncQueueEntry[];
+  /** 队列规模 = running + queued + 近期终态数（进度卡停止条件「>0 且待处理为 0」用）。 */
+  total: number;
+  /** 近期已出结果的逐篇（含 ok 与 reason）。 */
+  finished: SyncQueueFinishedEntry[];
+  /** 当日三数（成功 / 失败 / 待处理）—— 卡面数字的来源（2026-09-26 口径）。 */
+  today: QueueTodayCounts;
+}
+
+/** 同步进度快照的**空闲初值**（页面首屏 / 轮询停止后用）。 */
+export const EMPTY_SYNC_QUEUE_SNAPSHOT: SyncQueueSnapshot = {
+  running: null,
+  queued: [],
+  total: 0,
+  finished: [],
+  today: { ...EMPTY_QUEUE_TODAY_COUNTS },
+};
+
+/**
+ * 同步进度快照（内容库「同步进度卡」轮询用；设计 13 §35.3）。
+ *
+ * 前端在「有同步中 / 排队」时每几秒拉一次，队列空则停（与发布进度卡同一套骨架）。
+ */
+export async function fetchSyncQueue(silent = true): Promise<SyncQueueSnapshot> {
+  const response = await http.get<SyncQueueSnapshot>("/notes/sync-queue", {
+    _silent: silent,
+  } as never);
   return response.data;
 }
 
@@ -664,18 +961,22 @@ export async function deleteSavedNote(noteId: number): Promise<{ id: number; sta
   return response.data;
 }
 
-export async function fetchTags(): Promise<Paginated<Tag>> {
-  const response = await http.get<Paginated<Tag>>("/tags");
+/**
+ * 话题字典（设计 13 §34.4）。
+ *
+ * `keyword` 非空 ⇒ 后端 `name LIKE '%关键词%'` 模糊搜索（内容库筛选栏话题
+ * 下拉的远程搜索用；调用方先过 `createTopicSearchDebouncer` 300ms 防抖，
+ * 见 `lib/topic-search.ts`）。不传 = 全量（详情弹窗「选已有话题」仍走全量）。
+ */
+export async function fetchTopics(keyword?: string): Promise<Paginated<NoteTopic>> {
+  const response = await http.get<Paginated<NoteTopic>>("/topics", {
+    params: keyword && keyword.trim() ? { keyword: keyword.trim() } : undefined,
+  });
   return response.data;
 }
 
-export async function createTag(payload: TagPayload): Promise<Tag> {
-  const response = await http.post<Tag>("/tags", payload);
-  return response.data;
-}
-
-export async function batchTagNotes(payload: BatchTagNotesPayload): Promise<BatchTagNotesResponse> {
-  const response = await http.post<BatchTagNotesResponse>("/notes/batch-tag", payload);
+export async function createTopic(payload: TopicPayload): Promise<NoteTopic> {
+  const response = await http.post<NoteTopic>("/topics", payload);
   return response.data;
 }
 
@@ -1366,10 +1667,107 @@ export async function deleteModelConfig(configId: number): Promise<{ id: number;
   return response.data;
 }
 
-export async function fetchTasks(platform?: string): Promise<Paginated<TaskRecord>> {
+/**
+ * 队列记录页的**父子树**（`GET /tasks?tree=1`，2026-09-26 用户口径
+ * 「批次+详情父子树风格展示」）。
+ *
+ * 为什么用同一个 `GET /tasks` 的 `tree` 参数而不是新端点：这一页要的是「`tasks`
+ * 的另一种视图」，不是另一份资源 —— 新开端点等于把「任务归属收口 / 权限」
+ * 多维护一处（DEF-044 同型）。
+ *
+ * 返回的顶级行**只有批次父行**（一次入队动作 = 一个唯一批次号），每行带
+ * `children`（明细，FIFO 序）+ `summary`。**不做存量兼容**（2026-09-26 用户口径
+ * 「不做兼容逻辑，数据已清空」）：不再有「无父的队列项行」这种形态。
+ * 批次行的 `status` / `progress` / `duration_ms` 由后端**按子行现算**覆盖 ——
+ * 前端不再自己汇总（判据只有一份）；批次**自己的 `created_at` 不被覆盖**
+ * （「批次创建时间」列取它）。
+ *
+ * `batchNo` 给定时按**唯一批次号**查（同日用户口径「新增列表支持使用唯一批次号
+ * 查询」）：大小写不敏感、支持只给尾段（用户手抄常只记得后四位）。
+ */
+export async function fetchQueueRecords(
+  limit?: number,
+  batchNo?: string
+): Promise<Paginated<TaskRecord>> {
   const response = await http.get<Paginated<TaskRecord>>("/tasks", {
-    params: platform ? { platform } : undefined
+    params: {
+      tree: 1,
+      ...(limit ? { page_size: limit } : {}),
+      ...(batchNo ? { batch_no: batchNo } : {}),
+    },
   });
+  return response.data;
+}
+
+/**
+ * 任务记录详情（含 `children` —— 一个批次 = 父行 + N 个子行，设计 13 §35.9）。
+ *
+ * 与列表的差别只在 `children`：列表一次拉一页看不出「这一批里有哪几篇、各自什么
+ * 结果」。同步 / 发布失败的真实原因只在子行 `payload.reason` 里给一次（不落库到
+ * 笔记行）⇒ 详情抽屉必须把它显示出来，吞了用户就失去自救能力（DEF-058 同型）。
+ */
+/**
+ * 队列清单 + 每个队列的实时计数（`GET /tasks/queues`，设计 13 §35.11）。
+ *
+ * ⚠️ **为什么由后端下发**：队列不止同步 / 发布两种（后端服务可能有很多不同的队列）。
+ * 前端写死类型常量 ⇒ 新队列上线时界面不显示（「按钮在、功能不在」的老问题）。
+ * 队列记录页按这份清单渲染：新增队列 = 后端加一行注册，前端零改动。
+ *
+ * 2026-09-26 批次层：清单同时下发 `batch_task_type`（批次父行类型）—— 前端把
+ * 批次行也归到它所属队列做筛选，**依然不写死类型清单**。
+ * ⚠️ 它是**注册表常量**（每个队列恒定），**不上屏**：卡片只显示队列类型
+ * （2026-09-26 用户口径「直接使用队列类型不就可以了，唯一 key 肯定是唯一的，
+ * 不需要多一个批次」）；真实批次号是任务行上的 `batch_no`（`NB…`）。
+ */
+export interface QueueSummary {
+  key: string;
+  label: string;
+  item_task_type: string;
+  /**
+   * 批次父行类型（一次入队动作 = 一个批次号；批次行永不被执行）。
+   * **只给 `queueKeyForTask` 反查归队用，不渲染**（它恒定，会被误读成批次号）。
+   */
+  batch_task_type: string;
+  note_bound: boolean;
+  /** 待跑 + 在跑。 */
+  open: number;
+  /** 近 15 天成功（与清理任务同口径，不是全库累计）。 */
+  done: number;
+  failed: number;
+  cancelled: number;
+}
+
+export async function fetchQueues(): Promise<QueueSummary[]> {
+  const response = await http.get<{ items: QueueSummary[] }>("/tasks/queues");
+  return response.data.items ?? [];
+}
+
+export async function fetchTaskDetail(taskId: number): Promise<TaskRecord> {
+  const response = await http.get<TaskRecord>(`/tasks/${taskId}`);
+  return response.data;
+}
+
+/**
+ * 手动清理**指定**队列记录（单条 / 批量选中；2026-09-26 用户口径「新增手动批量
+ * 清理」；同日再一轮「支持按照批次清理记录……清理功能分为两个维度，批次维度和批次内
+ * 的操作」）。
+ *
+ * 返回**分两个维度报账**：`batches`（批次维度 = 点名批次行 / 一键清除）、`items`
+ * （批次内明细维度 = 点名单条）、`blocked`（被挡下的批次 + 原因）。⚠️ 批内有
+ * **正在执行 / 待执行**或**待重试**明细的批次**整批不清理**（原子动作，不半清）；
+ * 前端禁用按钮只是体验，这里才是边界。
+ */
+export async function cleanTasks(taskIds: number[]): Promise<CleanResultShape> {
+  const response = await http.post<CleanResultShape>("/tasks/clean", { task_ids: taskIds });
+  return response.data;
+}
+
+/**
+ * 一键清除**全部可清**队列记录：只清**整批可清**的批次（连明细）；批内有活 /
+ * 待重试明细的，**连它可清的明细也不动**（不把还在使用的批次清成残的）。
+ */
+export async function cleanAllTasks(): Promise<CleanResultShape> {
+  const response = await http.post<CleanResultShape>("/tasks/clean-all");
   return response.data;
 }
 

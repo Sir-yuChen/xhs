@@ -22,10 +22,10 @@ import {
   ShoppingOutlined,
   StarOutlined,
   SyncOutlined,
-  TagsOutlined,
 } from "@ant-design/icons";
 import {
   Alert,
+  App,
   AutoComplete,
   Button,
   Card,
@@ -47,8 +47,10 @@ import {
   Tag,
   Tooltip,
   Typography,
+  theme,
 } from "antd";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
 import {
@@ -56,29 +58,40 @@ import {
   formatRemoteTime,
   quietError,
   readError,
-  renderFailure,
 } from "../../../components/platforms/note-detail-modal";
 import type { QuietError } from "../../../components/platforms/note-detail-modal";
 import {
   batchCreateDraftsFromNotes,
   batchPublishSavedNotes,
-  batchTagNotes,
+  batchSyncSavedNotes,
   createDraftFromNote,
-  createTag,
   deleteSavedNote,
   downloadExportFile,
   exportSavedNotes,
   fetchAccounts,
+  fetchPublishQueue,
   fetchSavedNote,
   fetchSavedNoteAssets,
   fetchSavedNotes,
-  fetchTags,
+  fetchSyncQueue,
+  fetchTopics,
   publishSavedNote,
   syncSavedNote,
   updateSavedNotePublishStatus,
   updateSavedNoteTopics,
+  EMPTY_QUEUE_TODAY_COUNTS,
+  EMPTY_SYNC_QUEUE_SNAPSHOT,
 } from "../../../lib/api";
 import { fenPriceText } from "../../../lib/format";
+import {
+  FILTER_CACHE_KEYS,
+  NOTE_TYPE_FILTER_ALL_VALUES,
+  PUBLISH_STATUS_FILTER_VALUES,
+  asBoolean,
+  asEnum,
+  asString,
+  usePersistedFilter,
+} from "../../../lib/filter-cache";
 import {
   PUBLISH_STATUS_FILTER_OPTIONS,
   canPublish,
@@ -87,6 +100,10 @@ import {
   splitPublishTargets,
   type PublishStatusFilter,
 } from "../../../lib/note-publish-gates";
+import {
+  createTopicSearchDebouncer,
+  type TopicSearchDebouncer,
+} from "../../../lib/topic-search";
 import { formatShanghaiTime } from "../../../lib/time";
 import {
   NOTE_TYPE_FILTER_OPTIONS,
@@ -94,11 +111,77 @@ import {
   canSyncNote,
   noteTypeLabel,
   noteTypeTagColor,
+  splitSyncTargets,
   type NoteTypeFilter,
 } from "../../../lib/note-filters";
-import type { NoteAsset, NotesExportResponse, PlatformAccount, SavedNote, Tag as TagType } from "../../../types";
+import type { NoteAsset, NotesExportResponse, NoteTopic, PlatformAccount, SavedNote } from "../../../types";
+import type { PublishQueueSnapshot, SyncQueueFinishedEntry, SyncQueueSnapshot } from "../../../lib/api";
 
 const { Title, Text, Paragraph } = Typography;
+
+/** 进度卡轮询间隔（ms）。2026-09-25 用户口径「数据 5 秒更新一次」。 */
+const QUEUE_POLL_INTERVAL_MS = 5000;
+
+/**
+ * 「本轮没有任何任务」连续多少轮才认定真的没跑起来（6 × 5s ≈ 30 秒）。
+ *
+ * 为什么需要它：2026-09-25 用户口径把停止条件定成「**待同步数为 0 时，不再刷新
+ * 统计数据**」。那个条件成立的前提是快照里能看到本轮任务（`total > 0`）；若入队
+ * 与快照之间有时差（或这轮压根没入队成功），待处理数一上来就是 0，直接停就再也
+ * 不刷新（用户报的「同步进度未更新」）。连续空转若干轮再停：不误停，也不泄漏
+ * 一个永不停止的定时器。
+ */
+const QUEUE_IDLE_ROUNDS_LIMIT = 6;
+
+/**
+ * 统计行六张卡**统一的内容高度**（px）—— 2026-09-26 用户口径「另外两个进度卡与
+ * 其它卡片大小不一致，应与其它卡片保持一致」。
+ *
+ * 为什么需要钉一个高度：四张普通卡的内容 = 小标题（14px ≈ 22px）+ 值（24px ≈ 38px）
+ * ≈ 64px；两张进度卡 = 三个 16px 小统计 ≈ 51px + 右下角「仅当日数据」小字 ≈ 19px
+ * ≈ 70px。两条内容**自然高度天然不同**（进度卡还多一行小字），靠内容撑高就会
+ * 一张高一张矮、同一行上下沿对不齐。
+ *
+ * 取较高者（70）作为六张卡共同的内容高度，普通卡用垂直居中吸收多出的几像素；
+ * ⚠️ 不要改成逐卡调 padding —— 任一处文案变长就又会错位（`flex="1 1 0%"` 只保证
+ * **等宽**，管不了高度）。
+ */
+const STAT_CARD_CONTENT_HEIGHT = 70;
+
+/** 普通统计卡的内容盒（固定高度 + 垂直居中）。 */
+const STAT_CARD_CONTENT: CSSProperties = {
+  height: STAT_CARD_CONTENT_HEIGHT,
+  display: "flex",
+  flexDirection: "column",
+  justifyContent: "center",
+};
+
+/** 进度卡的内容盒：三数在上、当日口径小字在下（两行撑满同一高度）。 */
+const STAT_CARD_PROGRESS_CONTENT: CSSProperties = {
+  ...STAT_CARD_CONTENT,
+  justifyContent: "space-between",
+};
+
+/** 进度卡**右下角**的当日口径小字（2026-09-26 用户口径「在卡片右下角小字展示仅当日数据」）。
+ *
+ * ⚠️ **颜色交给 antd 主题令牌**（渲染处再补 `color: token.colorTextSecondary`
+ * = 亮色 `rgba(0,0,0,.65)` / 暗色 `rgba(255,255,255,.65)`），**这里不许再写死颜色**。
+ * ⚠️ 别用 `<Text type="secondary">` 顶替令牌 —— 它取的是 `colorTextTertiary`（0.45），
+ *    暗色下 12px 小字只有 ≈4.5:1，勉强；亮色下则和写死的 0.45 黑一模一样。
+ * 2026-09-26 用户报「仅当日数据黑色字体看不清」：本应用**默认就是暗色主题**
+ * （`app/providers.tsx` 里 `saved === "light" ? "light" : "dark"`，卡片底 `#1a1a1a`），
+ * 写死的黑字叠在近黑底上对比度约 1.2:1 —— 亮色下同样偏淡（0.45 黑 ≈ #8C8C8C，12px 未达 4.5:1）。
+ * 同一页里其它统计值用的是高饱和语义色（绿 / 橙 / 红），两种主题都成立，不受此坑影响。
+ */
+const STAT_CARD_TODAY_NOTE: CSSProperties = {
+  display: "block",
+  textAlign: "right",
+  fontSize: 12,
+  lineHeight: "16px",
+};
+
+/** 「仅当日数据」小字（固定文案 —— 后端把窗口定在当日，前端只负责说明）。 */
+const TODAY_ONLY_NOTE = "仅当日数据";
 
 /**
  * 正文缺口的**安静说明**（失败三分法的第三态，设计 12 §17.9）。
@@ -142,7 +225,13 @@ function LoadMoreBar(props: {
   }
   return (
     <div style={{ textAlign: "center", padding: "16px 0" }}>
-      {failure && <div style={{ marginBottom: 8 }}>{renderFailure(failure, "加载更多失败")}</div>}
+      {/*
+        ⚠️ 2026-09-25 用户口径「页面所有提示包括异常提示、正常提示、成功提示等
+        均实现消息提示组件，不要占用页面布局」：原「加载更多失败」inline 红块 /
+        安静行**已移除**。失败原因由全局拦截器的 `message` 承担（`fetchSavedNotes`
+        不是 `_silent`，展示权在拦截器）；这里只留「重试」按钮 —— 它是**控件**
+        （用户不必滚回去再滚下来重试），不是提示条。
+      */}
       <Button size="small" loading={loading} onClick={onLoadMore} disabled={!hasMore && !failure}>
         {loading ? "加载中…" : failure ? "重试" : `加载更多（已加载 ${loaded} / ${total}）`}
       </Button>
@@ -281,6 +370,18 @@ function PublishStatusTag({
 
 export function XhsLibraryPage() {
   const navigate = useNavigate();
+  // 全站消息提醒统一走 antd message（设计 04 §3.6，2026-09-25 用户口径：
+  // 「所有消息提醒参考 antd 成熟组件，不要在页面暂用空间」）—— 批量 / 详情的
+  // 操作结果反馈不再渲染 inline Alert 占版面。`error` 红块与各 `*Failure`
+  // 三分法呈现是结构块，**保留**（设计 12 §17.9）。
+  const { message } = App.useApp();
+  // 主题令牌（2026-09-26 用户口径「仅当日数据黑色字体看不清」）：**凡是要读的小字，
+  // 颜色一律取 `token.colorTextSecondary`**（亮 `rgba(0,0,0,.65)` / 暗
+  // `rgba(255,255,255,.65)`），不许写死 `rgba(0,0,0,…)` —— 本应用默认是暗色主题
+  // （`app/providers.tsx`），写死的黑字叠 `#1a1a1a` 卡底基本看不见。
+  // ⚠️ 也**不用** `<Text type="secondary">`：它取的是 `colorTextTertiary`（0.45），
+  // 暗色下对比度只有 ≈4.5:1，12px 小字仍然勉强。
+  const { token } = theme.useToken();
   const [notes, setNotes] = useState<SavedNote[]>([]);
   const [total, setTotal] = useState(0);
   // 全库口径的发布状态统计（**不随筛选变化**，设计 05 §2.5 / §32.3.3 三档）。
@@ -290,7 +391,6 @@ export function XhsLibraryPage() {
     failed: 0,
   });
   const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [selectedNote, setSelectedNote] = useState<SavedNote | null>(null);
   const [selectedAssets, setSelectedAssets] = useState<NoteAsset[]>([]);
   const [isDetailOpen, setIsDetailOpen] = useState(false);
@@ -299,55 +399,113 @@ export function XhsLibraryPage() {
   // （设计 12 §17.9）—— 早前这里是一句 `Alert type="warning"` 的泛化文案，
   // 用户既看不出原因、也没有自救线索。
   const [detailFailure, setDetailFailure] = useState<QuietError | null>(null);
-  const [detailActionMessage, setDetailActionMessage] = useState<string | null>(null);
   // 「同步」按钮（§25）：**笔记卡片与详情卡都渲染**（仅三方同步笔记）。
   // `syncingNoteId` 记「哪一条在同步中」—— 卡片与详情共用同一个 loading 语义。
-  // `detailSyncFailure` 承载详情卡内的失败三分法：`WEB_SESSION_REQUIRED` 安静一行，
-  // 其余红块摆后端原话（DEF-058）。
+  // ⚠️ 2026-09-25 用户口径「页面所有提示……均实现消息提示组件，不要占用页面布局」：
+  // 原 `detailSyncFailure` 承载（预期内安静一行 / 真异常红块）**已移除** —— 同步失败
+  // 统一由 `message.error` 报一次（`syncSavedNote` 是 `_silent`，展示权本在调用点）。
   const [syncingNoteId, setSyncingNoteId] = useState<number | null>(null);
-  const [detailSyncFailure, setDetailSyncFailure] = useState<QuietError | null>(null);
   // 「发布」按钮（设计 13 §31）：**笔记卡片与详情卡都渲染**（仅本地生成且
   // 待发布/发布失败的笔记）。`publishingNoteId` 记「哪一篇在发布中」——
   // 发布是几次平台请求量级的链路，loading 语义与同步分开（互不打断）。
   const [publishingNoteId, setPublishingNoteId] = useState<number | null>(null);
   const [isBatchPublishing, setIsBatchPublishing] = useState(false);
+  // 发布进度卡（2026-09-25 异步 + 发布队列；2026-09-26 常驻化 + 当日口径）。
+  // `ref` 与 state 同步，供「入队后算前面还有几篇」这类**即时**读取（state 在闭包
+  // 里是旧值）。卡面三数 = 快照 `today`（**当日队列记录**，2026-09-26 用户口径
+  // 「只统计当日发布的数据……统计队列记录表中的数据」）—— 本页**不再自己累计**
+  // （原 `publishRound` 已删：刷新页面就归零，也看不见别的入口入队的项）。
+  const [publishQueue, setPublishQueue] = useState<PublishQueueSnapshot>({
+    running: null,
+    queued: [],
+    total: 0,
+    counts: { pending: 0, publishing: 0, published: 0, failed: 0 },
+    today: { ...EMPTY_QUEUE_TODAY_COUNTS },
+  });
+  const publishQueueRef = useRef(publishQueue);
+  const publishPollRef = useRef<number | null>(null);
+  const trackedPublishIdsRef = useRef<Set<number>>(new Set());
+  // 连续「本轮无任务」的轮数（见 `QUEUE_IDLE_ROUNDS_LIMIT`）。
+  const publishIdleRoundsRef = useRef(0);
+  // 同步进度卡（2026-09-25 批量同步 + 队列，设计 13 §35；2026-09-26 常驻化）。
+  // 与发布进度卡**同一套骨架**（ref 与 state 同步、tracked 集合、离开队列即拉
+  // 终态回填）—— 两张卡是两件事，但轮询纪律只有一份。卡面三数同发布卡走
+  // 快照 `today`（原 `syncRound` 已删，理由同上）。
+  const [syncQueue, setSyncQueue] = useState<SyncQueueSnapshot>(EMPTY_SYNC_QUEUE_SNAPSHOT);
+  const syncQueueRef = useRef(syncQueue);
+  const syncPollRef = useRef<number | null>(null);
+  const trackedSyncIdsRef = useRef<Set<number>>(new Set());
+  const syncIdleRoundsRef = useRef(0);
+  // 已处理过的逐篇结果（按 note_pk 累积）：快照 `finished` 只回**近期**终态项，
+  // 累积一份才能把每条的结果都报一次、且不重复报。
+  const processedSyncResultsRef = useRef<Map<number, SyncQueueFinishedEntry>>(new Map());
+  const [isBatchSyncing, setIsBatchSyncing] = useState(false);
   const [isCreatingDraft, setIsCreatingDraft] = useState(false);
-  const [availableTags, setAvailableTags] = useState<TagType[]>([]);
-  // 标签增删（§29.7）：详情弹窗标题后展示 + 「+ 添加标签」Popover（下拉选已有 + 输入自定义）。
-  // `tagPopoverOpen` = Popover 开合；`customTagName` = 自定义输入框草稿；
-  // `tagSaving` = 正在写库（防连点）；`tagFailure` = 失败三分法呈现。
-  const [tagPopoverOpen, setTagPopoverOpen] = useState(false);
-  const [customTagName, setCustomTagName] = useState("");
-  const [tagSaving, setTagSaving] = useState(false);
-  const [tagFailure, setTagFailure] = useState<QuietError | null>(null);
-  // 话题增删（§29.3）：Tag 展示，增删都实时落库。`topicDraft` = 「+」弹出输入框里的草稿；
-  // `topicSaving` = 正在写库（防连点），`topicFailure` = 写库失败的三分法呈现。
+  // 话题字典候选（§34.4）：详情弹窗话题区「+ 添加话题」的 AutoComplete 下拉选项
+  // （选已有话题 / 输入新名字 —— 后端 find-or-create，不再需要先建标签再关联）。
+  // 原「标签」state（availableTags / tagPopoverOpen / customTagName / tagSaving /
+  // tagFailure）随标题栏标签 UI 一起移除（标签表已并入话题表）。
+  const [availableTopics, setAvailableTopics] = useState<NoteTopic[]>([]);
+  // 话题增删（§29.3 / §34.4）：Tag 展示，增删都实时落库。`topicDraft` = 「+」弹出
+  // 输入框里的草稿（AutoComplete：下拉选已有 + 输入新名）；`topicSaving` = 正在写库
+  // （防连点）。写库失败的提示走 message —— 2026-09-25 原 `topicFailure` inline 红块已移除。
   const [topicPopoverOpen, setTopicPopoverOpen] = useState(false);
   const [topicDraft, setTopicDraft] = useState("");
   const [topicSaving, setTopicSaving] = useState(false);
-  const [topicFailure, setTopicFailure] = useState<QuietError | null>(null);
-  const [keywordFilter, setKeywordFilter] = useState("");
-  const [selectedTagFilter, setSelectedTagFilter] = useState("");
+  // 以下 8 个筛选状态**都落本地缓存**（2026-09-26 用户口径「筛选条件和账号选择后放
+  // 本地缓存，避免每次均需要重新选择」）：`usePersistedFilter` 与 `useState` 同形，
+  // 初值优先取缓存、变化即回写 —— 调用点（onChange / clearFilters / currentFilters）
+  // 一个字都不用改。⚠️ 缓存要过**取值域校验**（`asEnum`）：后端枚举改了之后，
+  // 旧缓存不会变成一个界面选得出、后端不认的值。
+  const [keywordFilter, setKeywordFilter] = usePersistedFilter(
+    FILTER_CACHE_KEYS.library.keyword, "", asString
+  );
+  // 话题筛选（§34.4）：原「标签筛选」—— 标签表并入话题表后走 `topic_id` 参数。
+  const [selectedTopicFilter, setSelectedTopicFilter] = usePersistedFilter(
+    FILTER_CACHE_KEYS.library.topicId, "", asString
+  );
+  // 话题筛选下拉的**远程模糊搜索**（§34.4，2026-09-25 用户口径「支持输入模糊查询，
+  // 控制查询频率」）：`topicSearchResults = null` 表示没输入过（回退全量
+  // `availableTopics`），非 null = 后端按 keyword 过滤后的结果；`topicSearching`
+  // 是下拉 loading；`topicSearchSeq` 是竞态序号（后发的请求覆盖先发的，过期
+  // 响应直接丢弃 —— 慢先到不渲染）。
+  const [topicSearchResults, setTopicSearchResults] = useState<NoteTopic[] | null>(null);
+  const [topicSearching, setTopicSearching] = useState(false);
+  const topicSearchSeq = useRef(0);
+  const topicDebouncerRef = useRef<TopicSearchDebouncer | null>(null);
   // 发布状态筛选（设计 13 §32.3.3 四档：全部 / 待发布 / 已发布 / 发布失败）。
-  const [publishStatusFilter, setPublishStatusFilter] = useState<PublishStatusFilter>("all");
+  const [publishStatusFilter, setPublishStatusFilter] = usePersistedFilter<PublishStatusFilter>(
+    FILTER_CACHE_KEYS.library.publishStatus, "all", asEnum(PUBLISH_STATUS_FILTER_VALUES)
+  );
   // 来源账号 / 笔记类型筛选（2026-09-23，用户口径「内容库新增根据账号筛选的条件」+「笔记类型」）。
   // 两个都是**枚举筛选**，取值集合与后端查询参数逐字对齐（见 `lib/note-filters.ts`）；
   // `""` / `"all"` 一律表示**不筛**（不传参数），不复用成「查 id 为空的账号」。
-  const [accountFilter, setAccountFilter] = useState<string>("");
-  const [noteTypeFilter, setNoteTypeFilter] = useState<NoteTypeFilter>("");
+  const [accountFilter, setAccountFilter] = usePersistedFilter(
+    FILTER_CACHE_KEYS.library.accountId, "", asString
+  );
+  const [noteTypeFilter, setNoteTypeFilter] = usePersistedFilter<NoteTypeFilter>(
+    FILTER_CACHE_KEYS.library.noteType, "", asEnum(NOTE_TYPE_FILTER_ALL_VALUES)
+  );
   // 挂链商品筛选（设计 13 §25.8）：平台商品 ID。**惰性从 URL 读初值** ——
   // 挂链笔记弹窗的「在内容库中查看」跳 `/platforms/xhs/library?item_id=…`，
   // 首屏渲染时就要带上它（放 effect 里 setState 会晚一拍，首条请求已发出）。
   // `""` = 不筛；位置在筛选区**第二行**（第一行 span 之和已满 24，§25.7.5）。
   const [searchParams, setSearchParams] = useSearchParams();
-  const [itemIdFilter, setItemIdFilter] = useState<string>(
-    () => new URLSearchParams(window.location.search).get("item_id") ?? ""
+  const [itemIdFilter, setItemIdFilter] = usePersistedFilter(FILTER_CACHE_KEYS.library.itemId, () =>
+    new URLSearchParams(window.location.search).get("item_id") ?? ""
   );
   // 账号下拉候选：**只列本平台的账号**（`fetchAccounts("xhs")`）。
   // 取不到时留空数组 + 不动筛选值 —— 下拉空是「列表没取到」，不是「筛成 0 条」。
   const [filterAccounts, setFilterAccounts] = useState<PlatformAccount[]>([]);
-  const [hasAssetsFilter, setHasAssetsFilter] = useState(false);
-  const [hasCommentsFilter, setHasCommentsFilter] = useState(false);
+  // 账号候选**成功取到**过没有（失败 / 还没回来时不能拿空数组去「校验」缓存里的账号：
+  // 那会把用户存的账号当成已删除而清掉）。见下面的缓存自愈 effect。
+  const [filterAccountsLoaded, setFilterAccountsLoaded] = useState(false);
+  const [hasAssetsFilter, setHasAssetsFilter] = usePersistedFilter(
+    FILTER_CACHE_KEYS.library.hasAssets, false, asBoolean
+  );
+  const [hasCommentsFilter, setHasCommentsFilter] = usePersistedFilter(
+    FILTER_CACHE_KEYS.library.hasComments, false, asBoolean
+  );
   // ⚠️ 2026-09-23 用户口径「内容库默认使用卡片，不再支持表格展示笔记」：
   // `viewMode` / `setViewMode` **整条移除**（不是默认改成 card 留着切换器）——
   // 视图只剩一种，「当前视图」就不再是状态，留着它就是一个永远不变的死状态。
@@ -355,8 +513,10 @@ export function XhsLibraryPage() {
   // ⚠️ `batchTagId` / `setBatchTagId` 已随批量打标签的界面入口一起移除
   // （2026-09-23 用户口径「把选择当前页中的标签下拉框移除」）——
   // 那个 state 只服务于被撤掉的下拉，留着就是一个永远不被写入的死状态。
-  const [batchActionMessage, setBatchActionMessage] = useState<string | null>(null);
-  const [batchFailure, setBatchFailure] = useState<QuietError | null>(null);
+  // ⚠️ 2026-09-25：原 `batchFailure`（批量操作失败 inline 红块）**已移除** —— 用户口径
+  // 「页面所有提示包括异常提示……均实现消息提示组件，不要占用页面布局」。批量链路里
+  // 非 `_silent` 的接口失败由全局拦截器弹 message；`syncSavedNote` 这类 `_silent` 的
+  // 接口由调用点自己 `message.error`（展示权归调用点，§3.1.1）。
   const [isBatchWorking, setIsBatchWorking] = useState(false);
   const [latestExport, setLatestExport] = useState<NotesExportResponse | null>(null);
   const [togglingStatusId, setTogglingStatusId] = useState<number | null>(null);
@@ -380,7 +540,7 @@ export function XhsLibraryPage() {
   function currentFilters() {
     return {
       q: keywordFilter.trim() || undefined,
-      tag_id: selectedTagFilter ? Number(selectedTagFilter) : undefined,
+      topic_id: selectedTopicFilter ? Number(selectedTopicFilter) : undefined,
       has_assets: hasAssetsFilter || undefined,
       has_comments: hasCommentsFilter || undefined,
       publish_status: publishStatusFilter === "all" ? undefined : publishStatusFilter,
@@ -409,7 +569,7 @@ export function XhsLibraryPage() {
   }
 
   async function loadNotes(overrideFilters?: Partial<ReturnType<typeof currentFilters>>) {
-    setIsLoading(true); setError(null);
+    setIsLoading(true);
     const f = overrideFilters ?? currentFilters();
     try {
       // 每次都从第 1 页重新取（筛选变了就是新的一次查询），并重置分页状态。
@@ -420,7 +580,9 @@ export function XhsLibraryPage() {
       setLoadMoreFailure(null);
       const ids = new Set(r.items.map((n) => n.id));
       setSelectedNoteIds((c) => c.filter((id) => ids.has(id)));
-    } catch { setError("内容库加载失败。"); } finally { setIsLoading(false); }
+    // 失败提示归全局拦截器（`fetchSavedNotes` 非 `_silent` ⇒ 弹后端原话）；
+    // 2026-09-25 用户口径「提示不占页面布局」⇒ 原页面级 inline `Alert` 已移除。
+    } catch { /* 见上：提示走 message */ } finally { setIsLoading(false); }
   }
 
   /** 取下一页并**追加**到列表末尾（下拉自动加载 / 点「加载更多」都走这里）。 */
@@ -461,7 +623,43 @@ export function XhsLibraryPage() {
     // `notes.length` 进依赖：追加后 sentinel 位置变化，需要重新观察
   }, [hasMore, page, notes.length, isLoading, isLoadingMore]);
 
-  useEffect(() => { void loadNotes(); void loadTags(); void loadFilterAccounts(); }, []);
+  useEffect(() => {
+    void loadNotes();
+    void loadTopics();
+    void loadFilterAccounts();
+    void refreshPublishQueue(); // 发布进度卡：进页面先拉一次（队列可能还有在跑的生产任务）
+    void refreshSyncQueue(); // 同步进度卡：同上（批量同步队列可能还有在跑的任务）
+  }, []);
+
+  // 发布轮询随页面卸载停（daemon 线程在后台照跑，但前端不再拉）。
+  useEffect(
+    () => () => {
+      if (publishPollRef.current !== null) window.clearInterval(publishPollRef.current);
+      if (syncPollRef.current !== null) window.clearInterval(syncPollRef.current);
+    },
+    []
+  );
+
+  /**
+   * 账号筛选的**缓存自愈**（2026-09-26 随「筛选条件落缓存」一起加）。
+   *
+   * 账号可能已经被删除（换机 / 账号矩阵里删过），而缓存里还留着它的 id：此时下拉
+   * 里没有这个值 ⇒ 界面显示一个**裸数字**、列表恒空，用户看不出是缓存干的。
+   *
+   * 候选账号到手后校验一次：不在候选里 ⇒ 退回「不筛」并按全空条件重拉一次
+   * （`setState` 是异步的，所以显式把 `platform_account_id` 传成 `undefined`，
+   * 与 `clearFilters` 同一手法）。校验只在**候选成功取到**之后做 —— 账号列表
+   * 取失败时拿空数组去校验，会把用户存的账号当成已删除而清掉。
+   */
+  useEffect(() => {
+    if (!filterAccountsLoaded || !accountFilter) return;
+    if (filterAccounts.some((account) => String(account.id) === accountFilter)) return;
+    setAccountFilter("");
+    void loadNotes({ ...currentFilters(), platform_account_id: undefined });
+    // 触发时机 = 「候选账号到手」；`accountFilter` 故意不进依赖（它不是触发条件，
+    // 是校验对象；进去会让每次改账号都白跑一遍校验）。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterAccountsLoaded, filterAccounts]);
 
   /**
    * 「重置」= **回默认视图**：清空全部筛选**状态**，再按一份**手写**的全空条件重新拉。
@@ -472,7 +670,7 @@ export function XhsLibraryPage() {
    * 与 `currentFilters()` 的回默认结果**逐字对应**（新增筛选项时必须同时改这两处）。
    */
   function clearFilters() {
-    setKeywordFilter(""); setSelectedTagFilter(""); setPublishStatusFilter("all");
+    setKeywordFilter(""); setSelectedTopicFilter(""); setPublishStatusFilter("all");
     setAccountFilter(""); setNoteTypeFilter(""); setItemIdFilter("");
     setHasAssetsFilter(false); setHasCommentsFilter(false);
     // URL 里的 `item_id` 一并删（§25.8）：否则刷新会把跳转来的筛选加回来。
@@ -481,7 +679,7 @@ export function XhsLibraryPage() {
     setSearchParams(next, { replace: true });
     void loadNotes({
       q: undefined,
-      tag_id: undefined,
+      topic_id: undefined,
       has_assets: undefined,
       has_comments: undefined,
       publish_status: undefined,
@@ -491,23 +689,68 @@ export function XhsLibraryPage() {
   }
   function toggleNoteSelection(id: number) { setSelectedNoteIds((c) => c.includes(id) ? c.filter((i) => i !== id) : [...c, id]); }
   function toggleVisibleSelection() { if (!notes.length) return; const vis = notes.map((n) => n.id); const allSel = vis.every((id) => selectedNoteIdSet.has(id)); setSelectedNoteIds((c) => allSel ? c.filter((id) => !vis.includes(id)) : Array.from(new Set([...c, ...vis]))); }
-  function clearSelection() { setSelectedNoteIds([]); setBatchActionMessage(null); setBatchFailure(null); }
+  function clearSelection() { setSelectedNoteIds([]); }
 
-  async function loadTags() { try { const r = await fetchTags(); setAvailableTags(r.items); } catch { setAvailableTags([]); } }
+  async function loadTopics() { try { const r = await fetchTopics(); setAvailableTopics(r.items); } catch { setAvailableTopics([]); } }
+
+  /**
+   * 话题筛选下拉的远程模糊搜索（§34.4）：后端 `GET /topics?keyword=` LIKE 过滤。
+   *
+   * 三分法：搜索失败**不清空**当前 options（保留上一次结果，用户可继续选）——
+   * 搜索挂了只是这一次没结果，不是「话题没了」。竞态防护：序号只有最新
+   * 那次能落 state / 关 loading（慢先到的响应直接丢弃）。
+   */
+  async function searchTopicsByKeyword(keyword: string) {
+    const seq = ++topicSearchSeq.current;
+    setTopicSearching(true);
+    try {
+      const r = await fetchTopics(keyword);
+      if (seq !== topicSearchSeq.current) return; // 过期响应：丢弃
+      setTopicSearchResults(keyword.trim() ? r.items : null); // 清空输入 ⇒ 回退全量
+    } catch {
+      // 可容忍失败：保留当前 options（见上方三分法说明）
+    } finally {
+      if (seq === topicSearchSeq.current) setTopicSearching(false);
+    }
+  }
+
+  // 防抖搜索器（300ms，§34.4）：整个生命周期只建一个；卸载时 cancel ——
+  // 防「组件没了定时器还在，回调打回来 setState」。`onSearch` 每次输入都调
+  // `search`（内部合并），只有停下来那一次会真正打到后端（控制查询频率）。
+  useEffect(() => {
+    topicDebouncerRef.current = createTopicSearchDebouncer((kw) => { void searchTopicsByKeyword(kw); });
+    return () => topicDebouncerRef.current?.cancel();
+  }, []);
+
+  /**
+   * 筛选下拉的最终 options：没搜索过 ⇒ 全量 `availableTopics`；搜索过 ⇒ 后端结果。
+   * **选中项常驻**：远程结果可能不含当前选中话题（先选再清空输入的常见路径），
+   * 不并进来的话 antd 只能渲染出 value 数字（用户看到一串 id，不知道是谁）。
+   */
+  const topicFilterOptions: NoteTopic[] = useMemo(() => {
+    const base = topicSearchResults ?? availableTopics;
+    if (!selectedTopicFilter) return base;
+    const picked = availableTopics.find((t) => String(t.id) === selectedTopicFilter);
+    return picked && !base.some((t) => t.id === picked.id) ? [picked, ...base] : base;
+  }, [topicSearchResults, availableTopics, selectedTopicFilter]);
 
   /**
    * 账号下拉候选（`GET /accounts?platform=xhs`）—— **只读本平台**。
    *
    * 取不到就留空数组、**不弹错误**：账号列表挂了不该让整个内容库变成错误页，
    * 而账号下拉空着本身已经说明问题（用户仍可按其它条件筛选）。
-   * 与 `loadTags` 同一策略：筛选辅助数据失败是**可容忍失败**，不抢主列表的错。
+   * 与 `loadTopics` 同一策略：筛选辅助数据失败是**可容忍失败**，不抢主列表的错。
    */
   async function loadFilterAccounts() {
-    try { setFilterAccounts(await fetchAccounts("xhs")); } catch { setFilterAccounts([]); }
+    try {
+      setFilterAccounts(await fetchAccounts("xhs"));
+      // 只有**成功取到**才算「候选已知」（失败留空数组 ⇒ 不能拿去校验缓存里的账号）
+      setFilterAccountsLoaded(true);
+    } catch { setFilterAccounts([]); }
   }
 
   async function openDetail(note: SavedNote) {
-    setIsDetailOpen(true); setSelectedNote(note); setDetailFailure(null); setDetailActionMessage(null); setIsDetailLoading(true);
+    setIsDetailOpen(true); setSelectedNote(note); setDetailFailure(null); setIsDetailLoading(true);
     try {
       // **只读本地库**（2026-09-22 用户口径）：详情与资产都不打平台。
       // 曾在这里按 `!note.content` 走 `?hydrate=true` 让后端当场补正文，
@@ -521,7 +764,7 @@ export function XhsLibraryPage() {
       setDetailFailure(quietError(message, code));
     } finally { setIsDetailLoading(false); }
   }
-  function closeDetail() { setIsDetailOpen(false); setDetailFailure(null); setDetailActionMessage(null); setSelectedAssets([]); setDetailSyncFailure(null); setTopicPopoverOpen(false); setTopicDraft(""); setTopicFailure(null); }
+  function closeDetail() { setIsDetailOpen(false); setDetailFailure(null); setSelectedAssets([]); setTopicPopoverOpen(false); setTopicDraft(""); }
 
   /** 重新读一次本地详情（弹窗右上角「刷新」）。**不打平台** —— 只重读本地行。 */
   async function refreshDetail() {
@@ -547,64 +790,58 @@ export function XhsLibraryPage() {
    * （「改完之后卡片数字不动」= 用户会以为没生效）。
    */
   async function togglePublishStatus(note: SavedNote, next: "pending" | "published") {
-    setTogglingStatusId(note.id); setBatchActionMessage(null); setBatchFailure(null);
+    setTogglingStatusId(note.id);
     try {
       const updated = await updateSavedNotePublishStatus(note.id, next);
-      setNotes((c) => c.map((n) => (n.id === updated.id ? { ...n, ...updated, tags: updated.tags ?? n.tags } : n)));
-      if (selectedNote?.id === updated.id) setSelectedNote((current) => current ? { ...current, ...updated, tags: updated.tags ?? current.tags } : current);
-      setBatchActionMessage(`已标记为「${updated.publish_status === "published" ? "已发布" : "待发布"}」。`);
+      setNotes((c) => c.map((n) => (n.id === updated.id ? { ...n, ...updated } : n)));
+      if (selectedNote?.id === updated.id) setSelectedNote((current) => current ? { ...current, ...updated } : current);
+      message.success(`已标记为「${updated.publish_status === "published" ? "已发布" : "待发布"}」。`);
       await loadNotes();
-    } catch (e) {
-      const { message, code } = readError(e);
-      setBatchFailure(quietError(message, code));
-    } finally { setTogglingStatusId(null); }
+    } catch { /* 提示归全局拦截器（`updateSavedNotePublishStatus` 非 `_silent`） */ }
+    finally { setTogglingStatusId(null); }
   }
 
   async function copySelectedNote() {
     if (!selectedNote) return;
-    try { await navigator.clipboard.writeText(`${selectedNote.title}\n\n${selectedNote.content}`.trim()); setDetailActionMessage("已复制标题和正文。"); }
-    catch { setDetailActionMessage("复制失败。"); }
+    try { await navigator.clipboard.writeText(`${selectedNote.title}\n\n${selectedNote.content}`.trim()); message.success("已复制标题和正文。"); }
+    catch { message.error("复制失败。"); }
   }
 
   /**
-   * 「同步」按钮（设计 13 §25）：用笔记 id 拉平台最新内容，更新落库。
-   * **笔记卡片与详情卡共用**这一个实现（同一语义不留两份）。
+   * 「同步」按钮（设计 13 §25.4 / §35.10）：把这**一篇**加入同步队列，
+   * 由队列 worker 拉平台最新内容并落库。**笔记卡片与详情卡共用**这一个实现
+   * （同一语义不留两份）。
    *
-   * 与定时任务同步笔记逻辑同源（后端同一个 `hydrate_note_detail` 实现）。
-   * 成功 ⇒ 就地替换列表行（详情开着的连详情行一起换）+ 一行说明（补到什么
-   * 说什么；什么都没变明说「平台未返回新内容」，不伪装成已更新）；
-   * 失败 ⇒ 失败三分法（详情开着的在弹窗里摆，否则用页面级提示）。
+   * ⚠️ 2026-09-25 用户口径「单独点击同步按钮也需要放入同步队列中执行，与批量同步
+   * 一致」：原实现是**同步阻塞**（点下去等平台请求回来再报结果），现在与批量走
+   * **同一个队列、同一个 worker**（顺序执行 = www 限流的第一道保障，两条链路不再
+   * 各打各的请求）。前端随之只报**入队回执**，终态（同步成功 / 失败 + 真实原因）
+   * 由轮询 `GET /notes/sync-queue` 的快照 `finished` 报一次 —— 与批量同一出口、
+   * 同一个轮询器（`trackSyncNotes` / `pollSyncQueue`）。
+   *
+   * 按钮的 loading 也顺势交给队列：入队后 `syncQueueNoteIds`（快照的 running +
+   * queued）即包含这一篇，卡片与详情的 `SyncOutlined spin` 直接跟着转，直到它
+   * 离开队列。
    */
   async function syncNote(note: SavedNote) {
     setSyncingNoteId(note.id);
-    setDetailActionMessage(null); setDetailSyncFailure(null);
-    setBatchActionMessage(null); setBatchFailure(null);
     try {
       const r = await syncSavedNote(note.id);
       replaceNoteInList(r.note);
       if (selectedNote?.id === r.note.id) setSelectedNote(r.note);
-      const s = r.sync;
       const name = `「${r.note.title || "未命名"}」`;
-      const parts: string[] = [];
-      if (s.content_updated) parts.push("正文");
-      if (s.images_added) parts.push(`图片 +${s.images_added}`);
-      if (s.video_added) parts.push("视频地址");
-      const inDetail = isDetailOpen && selectedNote?.id === r.note.id;
-      if (s.status === "ok") {
-        const text = parts.length
-          ? `已同步${name}最新内容（${parts.join("、")}）。`
-          : `${name}已同步，平台未返回新内容。`;
-        if (inDetail) setDetailActionMessage(text); else setBatchActionMessage(text);
+      await refreshSyncQueue(); // 入队后的最新位置（ref 已是新值）
+      if (r.sync.already_queued) {
+        message.info(`${name}已在同步队列中，进度见上方进度卡。`);
       } else {
-        const failure = quietError(s.reason, s.code);
-        if (inDetail) setDetailSyncFailure(failure); else setBatchFailure(failure);
+        message.success(`${name}已加入同步队列，按顺序执行中，进度见上方进度卡。`);
       }
+      trackSyncNotes([note.id]); // 终态由轮询报（与批量同一条路径）
     } catch (e) {
-      // 真异常（含非 synced 的结构化 400）：摆真实原因，不吞。
-      const { message, code } = readError(e);
-      const failure = quietError(message, code);
-      if (isDetailOpen && selectedNote?.id === note.id) setDetailSyncFailure(failure);
-      else setBatchFailure(failure);
+      // 真异常（含门禁不过的结构化 400 `NOTE_NOT_SYNCABLE`）：摆真实原因，不吞。
+      // `syncSavedNote` 是 `_silent` ⇒ 展示权在调用点，这里必须自己报。
+      const { message: reason } = readError(e);
+      message.error(`同步失败：${reason}`);
     } finally { setSyncingNoteId(null); }
   }
 
@@ -618,134 +855,383 @@ export function XhsLibraryPage() {
   }
 
   /**
-   * 「发布」按钮（设计 13 §31.5）：**先二次确认**再发请求（用户口径）。
-   *
-   * 链路（后端做）：下载媒体到本地临时文件夹 → 上传平台 → 平台预审核 → 发布 →
-   * 回写平台真实 note_id → 删临时目录。失败也回 200：`publish.ok=false` +
-   * 平台原文原因，卡片改「发布失败」态、详情弹窗摆原因，支持重发。
+   * 「发布」按钮（设计 13 §31.5，2026-09-25 异步 + 发布队列）：
+   * **先二次确认**再发请求（用户口径）。点击即入发布队列、毫秒级返回 ——
+   * 发布链路（下载媒体 → 上传 → 预审核 → 发布）由后端队列 worker 逐篇顺序
+   * 执行，前端不等待；进度看「发布进度卡」，终态（已发布 / 发布失败 + 平台
+   * 原文原因）由轮询落库后回填卡片。
    */
   function publishNoteWithConfirm(note: SavedNote) {
     Modal.confirm({
       title: "发布这篇笔记？",
-      content: `将把《${note.title || "未命名"}》发布到小红书并挂上对应商品链接。发布成功后状态更新为已发布，本地临时下载的媒体会自动清理。`,
+      content: `将把《${note.title || "未命名"}》加入发布队列并发布到小红书、挂上对应商品链接。发布成功后状态更新为已发布，本地临时下载的媒体会自动清理。`,
       okText: "确认发布",
       cancelText: "取消",
-      onOk: async () => {
-        await publishNote(note);
+      onOk: () => {
+        void publishNote(note);
       },
     });
+  }
+
+  /** 拉一次发布进度快照（失败安静略过 —— 下一轮轮询会重试）。 */
+  async function refreshPublishQueue() {
+    try {
+      const snapshot = await fetchPublishQueue();
+      publishQueueRef.current = snapshot;
+      setPublishQueue(snapshot);
+    } catch {
+      // 预期内失败：安静（失败三分法），不打断发布
+    }
+  }
+
+  /** 起轮询（5s 一轮，2026-09-25 用户口径「数据 5 秒更新一次」）：直到**待发布为 0**。
+   *
+   * 2026-09-26 当日口径后本页**不再有「轮次记账」**（卡面三数是快照 `today`，
+   * 后端按当日 `tasks` 行现算）—— 这里只管轮询起停与逐篇结果消息。
+   * ⚠️ 起轮询前先 `refreshPublishQueue()` 拉一次（见 :func:`publishNote`）：卡上数字
+   * 是**入库后**的当日数，早于入队拉会看到少一篇的旧值。
+   */
+  function trackPublishNotes(ids: number[]) {
+    for (const id of ids) trackedPublishIdsRef.current.add(id);
+    if (publishPollRef.current === null) {
+      publishPollRef.current = window.setInterval(() => {
+        void pollPublishQueue();
+      }, QUEUE_POLL_INTERVAL_MS);
+    }
+  }
+
+  function stopPublishPolling() {
+    if (publishPollRef.current !== null) {
+      window.clearInterval(publishPollRef.current);
+      publishPollRef.current = null;
+    }
+    trackedPublishIdsRef.current.clear();
+    publishIdleRoundsRef.current = 0;
+    setPublishingNoteId(null);
+    setIsBatchPublishing(false);
+  }
+
+  /** 轮询一轮：刷新快照 → 把离开队列的笔记拉终态回填 → 待发布为 0 则收尾。 */
+  async function pollPublishQueue() {
+    let snapshot: PublishQueueSnapshot;
+    try {
+      snapshot = await fetchPublishQueue();
+    } catch {
+      return; // 安静重试（下一轮）
+    }
+    publishQueueRef.current = snapshot;
+    setPublishQueue(snapshot);
+    const stillActive = new Set<number>([
+      ...(snapshot.running ? [snapshot.running.note_pk] : []),
+      ...snapshot.queued.map((q) => q.note_pk),
+    ]);
+    const finished = [...trackedPublishIdsRef.current].filter((id) => !stillActive.has(id));
+    if (finished.length) {
+      const updated = await Promise.all(
+        finished.map((id) => fetchSavedNote(id).catch(() => null))
+      );
+      const okNotes: SavedNote[] = [];
+      const failNotes: SavedNote[] = [];
+      for (const u of updated) {
+        if (!u) continue;
+        trackedPublishIdsRef.current.delete(u.id);
+        replaceNoteInList(u);
+        if (selectedNote?.id === u.id) setSelectedNote(u);
+        if (u.publish_status === "published") okNotes.push(u);
+        else if (u.publish_status === "failed") failNotes.push(u);
+      }
+      // 逐篇结果消息（卡面三数不在这里算 —— 是快照 `today`，见 `refreshPublishQueue`）。
+      const parts: string[] = [];
+      if (okNotes.length) parts.push(`已发布 ${okNotes.length} 篇`);
+      if (failNotes.length) {
+        const reasons = failNotes
+          .map((u) => `《${u.title || "未命名"}》：${u.publish_error || "平台未给原因"}`)
+          .join("；");
+        parts.push(`发布失败 ${failNotes.length} 篇（${reasons}）`);
+      }
+      if (parts.length) {
+        const text = `${parts.join("；")}。失败的可在卡片上重发。`;
+        if (failNotes.length) message.warning(text); else message.success(text);
+      }
+    }
+    // 2026-09-25 用户口径「待同步数为 0 时，不再刷新统计数据」：停止条件从
+    // 「被跟踪的笔记全部离开队列」改成**待处理数为 0**。`total > 0` 是「本轮确实
+    // 跑过」的判据（否则待处理数一上来就是 0，会立刻停、永远不刷新）；空转兜底
+    // 防定时器泄漏。
+    publishIdleRoundsRef.current = snapshot.total > 0 ? 0 : publishIdleRoundsRef.current + 1;
+    const pending = (snapshot.running ? 1 : 0) + snapshot.queued.length;
+    if ((snapshot.total > 0 && pending === 0) || publishIdleRoundsRef.current >= QUEUE_IDLE_ROUNDS_LIMIT) {
+      stopPublishPolling();
+      await loadNotes(); // 刷新列表统计（stats 与进度卡三数同源）
+    }
   }
 
   async function publishNote(note: SavedNote) {
     setPublishingNoteId(note.id);
-    setDetailActionMessage(null);
-    setBatchActionMessage(null);
-    setBatchFailure(null);
     try {
       const r = await publishSavedNote(note.id);
+      // 入队成功：本地先置 publishing（卡片转「发布中」、发布按钮收起），
+      // 之后进度走队列轮询 —— 不等链路（用户口径「点击发布无需等待」）。
       replaceNoteInList(r.note);
       if (selectedNote?.id === r.note.id) setSelectedNote(r.note);
+      await refreshPublishQueue(); // 入队后的最新位置（ref 已是新值）
+      trackPublishNotes([note.id]);
+      const ahead =
+        (publishQueueRef.current.running ? 1 : 0) + publishQueueRef.current.queued.length;
       const name = `「${r.note.title || "未命名"}」`;
-      const inDetail = isDetailOpen && selectedNote?.id === r.note.id;
-      if (r.publish.ok) {
-        const text = `${name}已发布（平台笔记 ID ${r.publish.platform_note_id}）。`;
-        if (inDetail) setDetailActionMessage(text); else setBatchActionMessage(text);
-        await loadNotes();
-      } else {
-        const text = `${name}发布失败：${r.publish.error || "平台未给原因"}（可在详情里重发）`;
-        if (inDetail) setDetailActionMessage(text); else setBatchActionMessage(text);
-      }
+      const text =
+        ahead > 0
+          ? `${name}已加入发布队列（前面还有 ${ahead} 篇），进度见上方进度卡。`
+          : `${name}发布中，进度见上方进度卡。`;
+      message.success(text);
     } catch (e) {
       // 真异常（含门禁类结构化 400）：摆真实原因，不吞。
-      const { message } = readError(e);
-      if (isDetailOpen && selectedNote?.id === note.id) setDetailActionMessage(`发布失败：${message}`);
-      else setBatchActionMessage(`发布失败：${message}`);
-    } finally {
+      const { message: reason } = readError(e);
+      message.error(`发布失败：${reason}`);
       setPublishingNoteId(null);
     }
   }
 
-  /** 批量发布（设计 13 §31.5 步 8）：只发选中里**可发布**的，跳过的明示。 */
+  /** 批量发布（设计 13 §31.5 步 8）：只发选中里**可发布**的，跳过的明示；入队后异步执行。 */
   function batchPublishSelected() {
     const { targets, skipped } = splitPublishTargets(notes, selectedNoteIds);
     if (!targets.length) {
-      setBatchActionMessage("选中的笔记里没有可发布的（待发布/发布失败的本地生成笔记才可发布）。");
+      message.warning("选中的笔记里没有可发布的（待发布/发布失败的本地生成笔记才可发布）。");
       return;
     }
     Modal.confirm({
       title: `批量发布 ${targets.length} 篇笔记？`,
-      content: `逐篇发布到小红书（下载媒体 → 上传 → 预审核 → 发布），单项失败不阻断。${
+      content: `逐篇加入发布队列，由后端按顺序执行（下载媒体 → 上传 → 预审核 → 发布），单项失败不阻断。${
         skipped > 0 ? `另有 ${skipped} 篇选中项不可发布，将跳过。` : ""
       }`,
       okText: "确认发布",
       cancelText: "取消",
-      onOk: async () => {
-        setIsBatchPublishing(true);
-        setBatchActionMessage(null);
-        setBatchFailure(null);
-        try {
-          const r = await batchPublishSavedNotes(targets.map((n) => n.id));
-          // 逐篇结果回填（按本地主键 note_pk 匹配）：成功的换平台 ID、
-          // 失败的标发布失败（临时目录保留可重发）。
-          for (const item of r.results) {
-            if (item.ok) {
-              setNotes((c) =>
-                c.map((n) =>
-                  n.id === item.note_pk
-                    ? {
-                        ...n,
-                        note_id: item.platform_note_id || n.note_id,
-                        // 状态是唯一源；`published` 只是它的投影，这里一起更新免得
-                        // 就地替换的行与后端投影短暂不一致（下次刷新即覆盖为后端值）。
-                        publish_status: "published",
-                        published: true,
-                        publish_error: "",
-                        published_at: item.published_at || null,
-                      }
-                    : n
-                )
-              );
-            } else {
-              setNotes((c) =>
-                c.map((n) =>
-                  n.id === item.note_pk
-                    ? { ...n, publish_status: "failed", publish_error: item.error || "" }
-                    : n
-                )
-              );
-            }
-          }
-          setBatchActionMessage(
-            `批量发布完成：成功 ${r.succeeded} 篇，失败 ${r.failed} 篇。失败的可在卡片上重发。`
-          );
-          await loadNotes();
-        } catch (e) {
-          const { message } = readError(e);
-          setBatchFailure(quietError(message, ""));
-        } finally {
-          setIsBatchPublishing(false);
-        }
+      onOk: () => {
+        void batchPublishNotes(targets);
       },
     });
   }
 
+  async function batchPublishNotes(targets: SavedNote[]) {
+    setIsBatchPublishing(true);
+    try {
+      const r = await batchPublishSavedNotes(targets.map((n) => n.id));
+      const enqueuedIds: number[] = [];
+      for (const item of r.results) {
+        if (item.ok) {
+          enqueuedIds.push(item.note_pk);
+          // 入队即 publishing（状态唯一源；`published` 投影一起翻，下次刷新由后端覆盖）
+          setNotes((c) =>
+            c.map((n) =>
+              n.id === item.note_pk
+                ? { ...n, publish_status: "publishing", published: false, publish_error: "" }
+                : n
+            )
+          );
+        } else {
+          setNotes((c) =>
+            c.map((n) =>
+              n.id === item.note_pk
+                ? { ...n, publish_status: "failed", publish_error: item.error || "" }
+                : n
+            )
+          );
+        }
+      }
+      const rejected = r.results.filter((item) => !item.ok);
+      const parts = [`已加入发布队列 ${r.started} 篇，按顺序执行中，进度见上方进度卡。`];
+      if (rejected.length) {
+        parts.push(
+          `${rejected.length} 篇不满足发布条件已跳过（${rejected.map((i) => i.error || "原因未知").join("；")}）。`
+        );
+      }
+      if (rejected.length) message.warning(parts.join("")); else message.success(parts.join(""));
+      if (enqueuedIds.length) trackPublishNotes(enqueuedIds);
+      else {
+        setIsBatchPublishing(false);
+        await loadNotes();
+      }
+    } catch {
+      // 提示归全局拦截器（`batchPublishSavedNotes` 非 `_silent`）。
+      setIsBatchPublishing(false);
+    }
+  }
+
+  // --------------------------------------------------------------------- //
+  // 批量同步（设计 13 §35）：门禁 → 入队 → 轮询收尾。与发布同一套骨架，
+  // 不同的是终态不在笔记行上（同步失败不落库）⇒ 结果从快照 `finished` 取。
+  // --------------------------------------------------------------------- //
+
+  /**
+   * 批量同步（设计 13 §35.2）：只同步选中里**已发布**的，跳过的明示。
+   *
+   * 门禁判据是 `splitSyncTargets`（`canBatchSyncNote`：仅 `published`）——
+   * 比单条「同步」按钮（`canSyncNote`：synced 或 published）严，用户口径
+   * 「只有已发布的支持被选中」。跳过数在确认框里明示，不静默丢。
+   */
+  function batchSyncSelected() {
+    const { targets, skipped } = splitSyncTargets(notes, selectedNoteIds);
+    if (!targets.length) {
+      message.warning("选中的笔记里没有已发布的（只有已发布过的笔记支持批量同步）。");
+      return;
+    }
+    Modal.confirm({
+      title: `批量同步 ${targets.length} 篇笔记？`,
+      content: `逐篇加入同步队列，由后端按顺序拉取平台最新内容（正文 / 图集 / 视频地址，单项失败不阻断）。${
+        skipped > 0 ? `另有 ${skipped} 篇选中项未发布或发布失败，将跳过。` : ""
+      }`,
+      okText: "确认同步",
+      cancelText: "取消",
+      onOk: () => {
+        void batchSyncNotes(targets);
+      },
+    });
+  }
+
+  async function batchSyncNotes(targets: SavedNote[]) {
+    setIsBatchSyncing(true);
+    try {
+      const r = await batchSyncSavedNotes(targets.map((n) => n.id));
+      const enqueuedIds: number[] = [];
+      for (const item of r.results) {
+        if (item.ok) enqueuedIds.push(item.note_pk);
+      }
+      await refreshSyncQueue(); // 入队后的最新位置（ref 已是新值）
+      const rejected = r.results.filter((item) => !item.ok);
+      const parts = [`已加入同步队列 ${r.started} 篇，按顺序执行中，进度见上方进度卡。`];
+      if (rejected.length) {
+        parts.push(
+          `${rejected.length} 篇不满足同步条件已跳过（${rejected.map((i) => i.error || "原因未知").join("；")}）。`
+        );
+      }
+      if (rejected.length) message.warning(parts.join("")); else message.success(parts.join(""));
+      if (enqueuedIds.length) trackSyncNotes(enqueuedIds);
+      else setIsBatchSyncing(false);
+    } catch {
+      // 提示归全局拦截器（`batchSyncSavedNotes` 非 `_silent`）—— 2026-09-25 修：
+      // 原来这里把原因摆成页面 inline 红块（用户看到「批量操作失败 Method Not
+      // Allowed」占版面那条），现按用户口径只留 message 一条。
+      setIsBatchSyncing(false);
+    }
+  }
+
+  /** 拉一次同步进度快照（失败安静略过 —— 下一轮轮询会重试）。 */
+  async function refreshSyncQueue() {
+    try {
+      const snapshot = await fetchSyncQueue();
+      syncQueueRef.current = snapshot;
+      setSyncQueue(snapshot);
+    } catch {
+      // 预期内失败：安静（失败三分法），不打断同步
+    }
+  }
+
+  /** 起轮询（5s 一轮，2026-09-25 用户口径「数据 5 秒更新一次」）：直到**待同步为 0**。
+   *
+   * 2026-09-26 当日口径后本页**不再有「轮次记账」**（卡面三数是快照 `today`，后端
+   * 按当日 `tasks` 行现算）—— 这里只管轮询起停与逐篇结果消息。
+   */
+  function trackSyncNotes(ids: number[]) {
+    for (const id of ids) trackedSyncIdsRef.current.add(id);
+    if (syncPollRef.current === null) {
+      syncPollRef.current = window.setInterval(() => {
+        void pollSyncQueue();
+      }, QUEUE_POLL_INTERVAL_MS);
+    }
+  }
+
+  function stopSyncPolling() {
+    if (syncPollRef.current !== null) {
+      window.clearInterval(syncPollRef.current);
+      syncPollRef.current = null;
+    }
+    trackedSyncIdsRef.current.clear();
+    processedSyncResultsRef.current.clear();
+    syncIdleRoundsRef.current = 0;
+    setIsBatchSyncing(false);
+  }
+
+  /** 轮询一轮：刷新快照 → 累积逐篇结果 → 把离开队列的笔记拉新行回填 → 待同步为 0 则收尾。 */
+  async function pollSyncQueue() {
+    let snapshot: SyncQueueSnapshot;
+    try {
+      snapshot = await fetchSyncQueue();
+    } catch {
+      return; // 安静重试（下一轮）
+    }
+    syncQueueRef.current = snapshot;
+    setSyncQueue(snapshot);
+    // 累积逐篇结果：快照 `finished` 可能被新批次清空重开而变短，累积才能每条都报一次。
+    for (const entry of snapshot.finished) {
+      processedSyncResultsRef.current.set(entry.note_pk, entry);
+    }
+    const stillActive = new Set<number>([
+      ...(snapshot.running ? [snapshot.running.note_pk] : []),
+      ...snapshot.queued.map((q) => q.note_pk),
+    ]);
+    const finishedNow = [...trackedSyncIdsRef.current].filter((id) => !stillActive.has(id));
+    if (finishedNow.length) {
+      const updated = await Promise.all(
+        finishedNow.map((id) => fetchSavedNote(id).catch(() => null))
+      );
+      const okNotes: SavedNote[] = [];
+      const failNotes: SavedNote[] = [];
+      for (const u of updated) {
+        if (!u) continue;
+        trackedSyncIdsRef.current.delete(u.id);
+        replaceNoteInList(u);
+        if (selectedNote?.id === u.id) setSelectedNote(u);
+        const result = processedSyncResultsRef.current.get(u.id);
+        if (result && !result.ok) failNotes.push(u);
+        else if (result) okNotes.push(u);
+        // 第三种：离开了队列但拿不到结果（快照被新批次清空 / 进程重启）——
+        // 只刷新行，不宣称成功也不宣称失败（缺值口径：不造假）。
+      }
+      const parts: string[] = [];
+      if (okNotes.length) parts.push(`已同步 ${okNotes.length} 篇`);
+      if (failNotes.length) {
+        const reasons = failNotes
+          .map((u) => `《${u.title || "未命名"}》：${processedSyncResultsRef.current.get(u.id)?.reason || "平台未给原因"}`)
+          .join("；");
+        parts.push(`同步失败 ${failNotes.length} 篇（${reasons}）`);
+      }
+      // 逐篇结果消息（卡面三数不在这里算 —— 是快照 `today`）。
+      if (parts.length) {
+        const text = `${parts.join("；")}。`;
+        if (failNotes.length) message.warning(text); else message.success(text);
+      }
+    }
+    // 2026-09-25 用户口径「待同步数为 0 时，不再刷新统计数据」：停止条件从
+    // 「被跟踪的笔记全部离开队列」改成**待同步数为 0** —— 这同时修掉用户报的
+    // 「同步进度未更新」（旧形态首个快照里 tracked 若无活跃项就立刻停，数字再也
+    // 不动）。`total > 0` = 本轮确实跑过；空转兜底防定时器泄漏。
+    syncIdleRoundsRef.current = snapshot.total > 0 ? 0 : syncIdleRoundsRef.current + 1;
+    const pending = (snapshot.running ? 1 : 0) + snapshot.queued.length;
+    if ((snapshot.total > 0 && pending === 0) || syncIdleRoundsRef.current >= QUEUE_IDLE_ROUNDS_LIMIT) {
+      stopSyncPolling();
+      await loadNotes(); // 刷新列表统计（stats 与进度卡三数同源）
+    }
+  }
+
   async function createDraft(intent: "rewrite" | "publish") {
-    if (!selectedNote) return; setIsCreatingDraft(true); setDetailActionMessage(null);
+    if (!selectedNote) return; setIsCreatingDraft(true);
     try {
       const d = await createDraftFromNote({ platform: "xhs", source_note_id: selectedNote.id, intent });
-      setDetailActionMessage(`已创建草稿 #${d.id}，正在跳转...`);
-      setTimeout(() => navigate("/platforms/xhs/drafts"), 600);
+      message.success(`已创建草稿 #${d.id}，正在跳转...`);
+      // 2026-09-25 §36：草稿工坊并入「笔记工坊」页（tab=drafts）。旧路径
+      // /platforms/xhs/drafts 仍有重定向兜底，这里直接指规范 URL。
+      setTimeout(() => navigate("/platforms/xhs/note-workshop?tab=drafts"), 600);
     }
-    catch { setDetailActionMessage("草稿创建失败。"); } finally { setIsCreatingDraft(false); }
+    catch { message.error("草稿创建失败。"); } finally { setIsCreatingDraft(false); }
   }
 
   async function addToDrafts() {
-    if (!selectedNote) return; setIsCreatingDraft(true); setDetailActionMessage(null);
+    if (!selectedNote) return; setIsCreatingDraft(true);
     try {
       const d = await createDraftFromNote({ platform: "xhs", source_note_id: selectedNote.id, intent: "rewrite" });
-      setDetailActionMessage(`已加入草稿工坊，草稿 #${d.id}。`);
+      message.success(`已加入草稿工坊，草稿 #${d.id}。`);
     }
-    catch { setDetailActionMessage("加入草稿工坊失败。"); } finally { setIsCreatingDraft(false); }
+    catch { message.error("加入草稿工坊失败。"); } finally { setIsCreatingDraft(false); }
   }
 
   async function handleDeleteNote(note: SavedNote) {
@@ -758,10 +1244,10 @@ export function XhsLibraryPage() {
           setSelectedNoteIds((c) => c.filter((id) => id !== note.id));
           setTotal((c) => Math.max(0, c - 1));
           if (selectedNote?.id === note.id) closeDetail();
-          setBatchActionMessage("已删除笔记。");
+          message.success("已删除笔记。");
           // 统计卡跟着删掉的那一条走（已发布/待发布都可能是它）。
           await loadNotes();
-        } catch { setBatchActionMessage("删除失败。"); }
+        } catch { message.error("删除失败。"); }
       },
     });
   }
@@ -783,148 +1269,89 @@ export function XhsLibraryPage() {
   //   }
 
   async function createBatchRewriteDrafts() {
-    if (!selectedNoteIds.length) { setBatchActionMessage("请先选择笔记。"); return; }
-    setIsBatchWorking(true); setBatchActionMessage(null); setBatchFailure(null);
-    try { const r = await batchCreateDraftsFromNotes({ note_ids: selectedNoteIds, intent: "rewrite" }); setBatchActionMessage(`已创建 ${r.created_count} 个改写草稿。`); }
-    catch (e) { const { message, code } = readError(e); setBatchFailure(quietError(message, code)); } finally { setIsBatchWorking(false); }
+    if (!selectedNoteIds.length) { message.warning("请先选择笔记。"); return; }
+    setIsBatchWorking(true);
+    try { const r = await batchCreateDraftsFromNotes({ note_ids: selectedNoteIds, intent: "rewrite" }); message.success(`已创建 ${r.created_count} 个改写草稿。`); }
+    catch { /* 提示归全局拦截器（非 `_silent`） */ } finally { setIsBatchWorking(false); }
   }
 
   async function exportSelectedNotes(format: "json" | "csv") {
-    if (!selectedNoteIds.length) { setBatchActionMessage("请先选择笔记。"); return; }
-    setIsBatchWorking(true); setBatchActionMessage(null); setBatchFailure(null);
-    try { const r = await exportSavedNotes({ note_ids: selectedNoteIds, format }); setLatestExport(r); setBatchActionMessage(`已导出 ${r.exported_count} 条笔记。`); }
-    catch (e) { const { message, code } = readError(e); setBatchFailure(quietError(message, code)); } finally { setIsBatchWorking(false); }
+    if (!selectedNoteIds.length) { message.warning("请先选择笔记。"); return; }
+    setIsBatchWorking(true);
+    try { const r = await exportSavedNotes({ note_ids: selectedNoteIds, format }); setLatestExport(r); message.success(`已导出 ${r.exported_count} 条笔记。`); }
+    catch { /* 提示归全局拦截器（非 `_silent`） */ } finally { setIsBatchWorking(false); }
   }
 
   async function batchDeleteNotes() {
     if (!selectedNoteIds.length) return;
-    setIsBatchWorking(true); setBatchActionMessage(null); setBatchFailure(null);
+    setIsBatchWorking(true);
     try {
       for (const id of selectedNoteIds) {
         await deleteSavedNote(id);
       }
       setNotes((c) => c.filter((n) => !selectedNoteIds.includes(n.id)));
       setTotal((c) => Math.max(0, c - selectedNoteIds.length));
-      setBatchActionMessage(`已删除 ${selectedNoteIds.length} 条笔记。`);
+      message.success(`已删除 ${selectedNoteIds.length} 条笔记。`);
       setSelectedNoteIds([]);
       await loadNotes();
-    } catch (e) { const { message, code } = readError(e); setBatchFailure(quietError(message, code)); }
+    } catch { /* 提示归全局拦截器（非 `_silent`） */ }
     finally { setIsBatchWorking(false); }
   }
 
   async function downloadLatestExport() {
-    if (!latestExport) return; setIsBatchWorking(true); setBatchActionMessage(null);
-    try { await downloadExportFile(latestExport.download_url, latestExport.file_name); setBatchActionMessage(`已下载：${latestExport.file_name}`); }
-    catch { setBatchActionMessage("下载失败。"); } finally { setIsBatchWorking(false); }
+    if (!latestExport) return; setIsBatchWorking(true);
+    try { await downloadExportFile(latestExport.download_url, latestExport.file_name); message.success(`已下载：${latestExport.file_name}`); }
+    catch { message.error("下载失败。"); } finally { setIsBatchWorking(false); }
   }
 
   // --------------------------------------------------------------------- //
-  // 标签增删（设计 13 §29.7）：标题后展示已有标签，「+ 添加标签」Popover 两条路
-  // （下拉选已创建的 / 输入自定义新建）。全部走 `note_tags` 关联表 + `tags` 实体表，
-  // 每次操作一次写库（实时落库），返回更新后的整行就地替换。
-  // --------------------------------------------------------------------- //
-  /** 打一枚已有标签（下拉选中的那条）。 */
-  async function addTagToNote(tagId: number) {
-    if (!selectedNote) return;
-    setTagSaving(true); setTagFailure(null);
-    try {
-      const r = await batchTagNotes({ note_ids: [selectedNote.id], tag_ids: [tagId], mode: "add" });
-      const u = r.items[0]; setSelectedNote(u); replaceNoteInList(u);
-      setTagPopoverOpen(false);
-    } catch (e) {
-      // 失败三分法：预期内安静一行、真异常红块摆后端原话（DEF-058）。
-      const { message, code } = readError(e);
-      setTagFailure(quietError(message, code));
-    } finally { setTagSaving(false); }
-  }
-
-  /** 去掉一枚标签（Tag 上的 ×）。删成功才消失，失败保持原样。 */
-  async function removeTagFromNote(tagId: number) {
-    if (!selectedNote) return;
-    setTagSaving(true); setTagFailure(null);
-    try {
-      const r = await batchTagNotes({ note_ids: [selectedNote.id], tag_ids: [tagId], mode: "remove" });
-      const u = r.items[0]; setSelectedNote(u); replaceNoteInList(u);
-    } catch (e) {
-      const { message, code } = readError(e);
-      setTagFailure(quietError(message, code));
-    } finally { setTagSaving(false); }
-  }
-
-  /** 新建一枚自定义标签并打上（下拉+输入合一组件里回车走这条，§29.10）。 */
-  async function createAndAddCustomTag(name: string) {
-    const trimmed = name.trim();
-    if (!trimmed || !selectedNote) return;
-    setTagSaving(true); setTagFailure(null);
-    try {
-      const created = await createTag({ name: trimmed, color: "#111111" });
-      setAvailableTags((t) => [...t, created]);
-      const r = await batchTagNotes({ note_ids: [selectedNote.id], tag_ids: [created.id], mode: "add" });
-      const u = r.items[0]; setSelectedNote(u); replaceNoteInList(u);
-      setCustomTagName(""); setTagPopoverOpen(false);
-    } catch (e) {
-      const { message, code } = readError(e);
-      setTagFailure(quietError(message, code));
-    } finally { setTagSaving(false); }
-  }
-
-  /**
-   * 下拉+输入**合一**组件的提交（§29.10，用户口径「添加标签弹窗中得组件使用一个下拉
-   * 支持输入得组件」）：输入框里的名字——
-   * ① 命中**已打在这条笔记上**的标签 ⇒ 无事可做（关掉即可，不重复请求）；
-   * ② 命中**可添加**的已有标签 ⇒ 直接打上（`addTagToNote`，后端 add 幂等）；
-   * ③ 都不命中 ⇒ 新建后打上（`createAndAddCustomTag`）。
-   * 显式收 name 参数：`onSelect` 触发时 state 还没更新，读闭包会拿到旧值。
-   */
-  async function submitTagDraft(name: string) {
-    const trimmed = name.trim();
-    if (!trimmed || !selectedNote) return;
-    if ((selectedNote.tags ?? []).some((t) => t.name === trimmed)) {
-      setCustomTagName(""); setTagPopoverOpen(false); return;
-    }
-    const existing = addableTags.find((t) => t.name === trimmed);
-    if (existing) { await addTagToNote(existing.id); setCustomTagName(""); return; }
-    await createAndAddCustomTag(trimmed);
-  }
-
-  // 下拉里只列**还没打在这条笔记上**的标签（打了的再列一次没有意义）。
-  const addableTags = availableTags.filter(
-    (t) => !(selectedNote?.tags ?? []).some((n) => n.id === t.id)
-  );
-
-  // --------------------------------------------------------------------- //
-  // 话题增删（设计 13 §29.3）：Tag 展示，增删都**实时落库**。
-  // 整列替换语义 —— 传增删后的完整列表给后端，不猜加了哪个删了哪个。
+  // 话题增删（设计 13 §29.3 / §34.4）：正文下方话题区展示，「+ 添加话题」
+  // AutoComplete（下拉选已有 / 输入新名）。**标签功能已合并进来**（2026-09-25，
+  // 标签表并入话题表）—— 原标题栏的标签 chips + 「+ 添加标签」弹层整块移除，
+  // 这里一个入口同时干两份事。增删都**实时落库**（PUT 整列替换，后端
+  // find-or-create 话题典例行 + 对齐关系行），返回更新后的整行就地替换。
   // --------------------------------------------------------------------- //
   async function saveTopics(next: string[]) {
     if (!selectedNote) return;
-    setTopicSaving(true); setTopicFailure(null);
+    setTopicSaving(true);
     try {
       const updated = await updateSavedNoteTopics(selectedNote.id, next);
       setSelectedNote(updated);
       replaceNoteInList(updated);
-    } catch (e) {
-      // 失败三分法：预期内安静一行、真异常红块摆后端原话（DEF-058）。
-      const { message, code } = readError(e);
-      setTopicFailure(quietError(message, code));
+    } catch {
+      // 提示归全局拦截器（`updateSavedNoteTopics` 非 `_silent`）。
+      // ⚠️ 2026-09-25：原「话题保存失败」inline 红块按用户口径移除（提示不占版面）。
     } finally { setTopicSaving(false); }
   }
 
   /** 删一个话题：Tag 上的 ×。其余原样传回（顺序保持）。 */
-  function removeTopic(topic: string) {
+  function removeTopic(topic: NoteTopic) {
     if (!selectedNote) return;
-    void saveTopics((selectedNote.topics ?? []).filter((t) => t !== topic));
+    void saveTopics((selectedNote.topics ?? []).filter((t) => t.id !== topic.id).map((t) => t.name));
   }
 
-  /** 加一个话题：「+」弹出框里回车/点确定。空值忽略；已存在则不重复请求。 */
-  function submitTopicDraft() {
-    const name = topicDraft.trim();
-    if (!name || !selectedNote) return;
+  /**
+   * 加一个话题：AutoComplete 里回车/点「添加」。输入框里的名字——
+   * ① 命中**已打在这条笔记上**的话题 ⇒ 无事可做（关掉即可，不重复请求）；
+   * ② 命中**字典里已有**的话题（按名字，大小写不敏感）⇒ 直接打上；
+   * ③ 都不命中 ⇒ 新名字原样传（后端 find-or-create 建典例行再关联）。
+   * 显式收 name 参数：`onSelect` 触发时 state 还没更新，读闭包会拿到旧值。
+   */
+  function submitTopicDraft(name: string) {
+    const trimmed = name.trim();
+    if (!trimmed || !selectedNote) return;
     const current = selectedNote.topics ?? [];
-    if (current.includes(name)) { setTopicPopoverOpen(false); setTopicDraft(""); return; }
+    if (current.some((t) => t.name.toLowerCase() === trimmed.toLowerCase())) {
+      setTopicPopoverOpen(false); setTopicDraft(""); return;
+    }
     setTopicPopoverOpen(false); setTopicDraft("");
-    void saveTopics([...current, name]);
+    void saveTopics([...current.map((t) => t.name), trimmed]);
   }
+
+  // AutoComplete 下拉里只列**还没打在这条笔记上**的话题（打了的再列一次没有意义）。
+  const addableTopics = availableTopics.filter(
+    (t) => !(selectedNote?.topics ?? []).some((n) => n.id === t.id)
+  );
 
   // --------------------------------------------------------------------- //
   // 弹窗媒体：**优先本地已下载素材**（内容库的东西已经躺在磁盘上，
@@ -943,6 +1370,38 @@ export function XhsLibraryPage() {
     ? `平台已无此笔记（对账标记于 ${formatShanghaiTime(selectedNote.platform_missing_at)}）`
     : null;
   const hasLocalAssets = selectedAssets.some((a) => Boolean(a.local_path));
+  // 发布队列的**实时**待处理数（发布中 + 排队）—— **只喂轮询停止条件**，不上屏
+  // （卡面「待发布」是快照 `today.pending`，2026-09-26 当日口径）。
+  // ⚠️ 2026-09-25 用户口径「发布、同步进度卡做类似的调整」+「去掉 tip」⇒
+  // 原 Tooltip（悬停看「正在发布哪篇 + 后面排几篇」）**已撤**，卡上只留三个数。
+  const publishQueuePending = (publishQueue.running ? 1 : 0) + publishQueue.queued.length;
+
+  // --------------------------------------------------------------------- //
+  // 同步进度卡派生值（设计 13 §35.4）
+  // * `syncQueueNoteIds`：running + queued 的 note_pk 集合 —— 卡片 / 详情的
+  //   单条「同步」按钮对队列中的笔记同样转圈（同一动作不留两种呈现）；
+  // * `syncQueuePending`：同步队列的**实时**待处理数 —— **只喂轮询停止条件**
+  //   （卡面「待同步」是快照 `today.pending`）。
+  //   2026-09-25 用户口径「同步进度统计调整为，成功同步数 / 失败同步数 / 待同步数」
+  //   +「去掉 tip」⇒ 原 `syncPercent` 与 Tooltip **已撤**，卡上只留三个数。
+  // --------------------------------------------------------------------- //
+  const syncQueueNoteIds = useMemo(
+    () =>
+      new Set<number>([
+        ...(syncQueue.running ? [syncQueue.running.note_pk] : []),
+        ...syncQueue.queued.map((q) => q.note_pk),
+      ]),
+    [syncQueue]
+  );
+  const syncQueuePending = (syncQueue.running ? 1 : 0) + syncQueue.queued.length;
+
+  // 两张进度卡的**卡面三数**（当日口径，2026-09-26 用户口径）。
+  // `?? EMPTY_QUEUE_TODAY_COUNTS` 是形状兜底：`today` 是 2026-09-26 才加进快照的键，
+  // 前端热更新撞上**还没重启的旧后端**时读到 `undefined` —— 直接取 `.ok` 会整页白屏。
+  // 缺值按缺值口径渲染 0（后端漏发该键由 `test_progress_card_snapshots_carry_today_counts`
+  // 在测试里钉死，不会静默漏）。
+  const publishToday = publishQueue.today ?? EMPTY_QUEUE_TODAY_COUNTS;
+  const syncToday = syncQueue.today ?? EMPTY_QUEUE_TODAY_COUNTS;
 
   return (
     <div>
@@ -952,15 +1411,92 @@ export function XhsLibraryPage() {
       </Row>
 
       {/*
-        统计卡：**已发布 / 待发布 / 发布失败**（内容池结构这一眼）+ 已保存 + 已选择。
+        统计卡：**已发布 / 待发布 / 发布失败**（内容池结构这一眼）+ 已保存 + 已选择
+        + **发布进度**（2026-09-25 用户口径「发布进度卡做成小卡，与已发、待发布、
+        发布失败、等卡片一行样式一致，并去掉相同的统计数据」）
+        + **同步进度**（2026-09-25 用户口径「内容库新增一个同步进度卡……统计数据到
+        进度卡，已同步数/同步进度比/总数」）。
         口径是**全库**（`stats` 来自后端，只按 user+platform 统计）—— 不随筛选变化，
         也不由 `items.length` 反推。设计 13 §32.3.3：三档与筛选同一份映射。
+
+        ⚠️ 两张进度卡（§31.5 / §35.4）都是**当日三数**：成功 / 失败 / 待处理。
+        2026-09-25 用户口径「同步进度统计调整为，成功同步数 / 失败同步数 /
+        待同步数」+「发布、同步进度卡做类似的调整」+「去掉 tip」+「数据 5 秒
+        更新一次」+「待同步数为 0 时，不再刷新统计数据」。
+        2026-09-26 用户口径（**现行**）：「只统计当日发布或同步的数据，在卡片右下角
+        小字展示仅当日数据，**统计队列记录表中的数据**」⇒ 三数改读快照 `today`
+        （后端 `today_item_counts` 从 `tasks` 表按当日现算），本页**不再自己累计**
+        （刷新页面就归零、也看不见定时 / 恢复入口入队的项）；卡右下角加
+        「仅当日数据」小字。**被取代的原句**（保留备查）：「成功 / 失败由**本页按
+        自己入队的篇累计**（`publishRound` / `syncRound`，空闲起轮归零、忙时并入）」。
+        原「已同步/总数 + Progress 细条 + Tooltip」与「发布中 0/1 + 排队 N +
+        Tooltip」两种形态**都已撤**（原始口径保留在用例库 / 设计文档，不静默删除）。
+        `counts` 快照后端仍全量返回（TC-PPUB-13 守它的形状），前端不再渲染它。
+
+        六张卡用 `flex="1 1 0%"` **严格等宽**填满一行（原来四张 `span={6}` 正好
+        24 格，加第五张必须换布局 —— `span={4}` 会剩 4 列尾空；`flex={1}` 在 antd
+        里解析成 `1 1 auto`，列宽被内容撑着走，「已保存笔记」带后缀会更宽，
+        五张不一致；`1 1 0%` 才是一行等宽）。
+        ⚠️ **等宽管不了高度**（2026-09-26 用户口径「另外两个进度卡与其它卡片大小
+        不一致，应与其它卡片保持一致」）：六张卡的内容盒统一用 `STAT_CARD_CONTENT`
+        （固定高度；普通卡居中、进度卡两行撑满）—— 见文件顶部常量处的推导。
       */}
       <Row gutter={16} style={{ marginBottom: 16 }}>
-        <Col span={6}><Card size="small"><Statistic title="已发布" value={stats.published} valueStyle={{ color: "#52c41a" }} /></Card></Col>
-        <Col span={6}><Card size="small"><Statistic title="待发布" value={stats.pending} valueStyle={{ color: "#fa8c16" }} /></Card></Col>
-        <Col span={6}><Card size="small"><Statistic title="发布失败" value={stats.failed} valueStyle={{ color: "#ff4d4f" }} /></Card></Col>
-        <Col span={6}><Card size="small"><Statistic title="已保存笔记" value={total} suffix={`/ 已选 ${selectedNoteIds.length}`} /></Card></Col>
+        <Col flex="1 1 0%" style={{ minWidth: 0 }}><Card size="small"><div style={STAT_CARD_CONTENT}><Statistic title="已发布" value={stats.published} valueStyle={{ color: "#52c41a" }} /></div></Card></Col>
+        <Col flex="1 1 0%" style={{ minWidth: 0 }}><Card size="small"><div style={STAT_CARD_CONTENT}><Statistic title="待发布" value={stats.pending} valueStyle={{ color: "#fa8c16" }} /></div></Card></Col>
+        <Col flex="1 1 0%" style={{ minWidth: 0 }}><Card size="small"><div style={STAT_CARD_CONTENT}><Statistic title="发布失败" value={stats.failed} valueStyle={{ color: "#ff4d4f" }} /></div></Card></Col>
+        <Col flex="1 1 0%" style={{ minWidth: 0 }}><Card size="small"><div style={STAT_CARD_CONTENT}><Statistic title="已保存笔记" value={total} suffix={`/ 已选 ${selectedNoteIds.length}`} /></div></Card></Col>
+        {/*
+          发布进度（§31.5）：**当日三数** —— 发布成功 / 失败 / 待发布
+          （卡面取 `publishToday` = 快照 `today`，后端按当日 `tasks` 行现算）。
+          轮询 5 秒一轮，**待发布（实时队列）为 0 即停**（`trackPublishNotes` 起、
+          `stopPublishPolling` 停）—— 停止条件用的是队列实时态 `publishQueuePending`，
+          与卡面数字（当日窗口）是两件事：一个问「还有没有活」，一个问「今天跑成几篇」。
+          待发布 > 0 着蓝色（进行时；另两个是终态计数，用语义色）。
+          2026-09-26 用户口径：卡片**不再带「发布进度」小标题** —— 与同行其余
+          卡片（已发布 / 待发布 / 发布失败 / 已保存笔记）一样只有统计项；
+          「当日」口径由右下角小字说明，而「已发布」那张是**全库四态**。
+        */}
+        <Col flex="1 1 0%" style={{ minWidth: 0 }}>
+          <Card size="small">
+            <div style={STAT_CARD_PROGRESS_CONTENT}>
+              <Space size={8}>
+                <Statistic title="发布成功" value={publishToday.ok} valueStyle={{ fontSize: 16, color: "#52c41a" }} />
+                <Statistic title="失败" value={publishToday.failed} valueStyle={{ fontSize: 16, color: "#ff4d4f" }} />
+                <Statistic
+                  title="待发布"
+                  value={publishToday.pending}
+                  valueStyle={{ fontSize: 16, color: publishToday.pending > 0 ? "#1677ff" : undefined }}
+                />
+              </Space>
+              <Text style={{ ...STAT_CARD_TODAY_NOTE, color: token.colorTextSecondary }}>{TODAY_ONLY_NOTE}</Text>
+            </div>
+          </Card>
+        </Col>
+        {/*
+          同步进度（§35.4）：**当日三数** —— 同步成功 / 失败 / 待同步
+          （卡面取 `syncToday` = 快照 `today`，与发布卡同源同口径）。
+          轮询 5 秒一轮，**待同步（实时队列）为 0 即停**（`trackSyncNotes` 起、
+          `stopSyncPolling` 停）；要重新看进度就再发起一次同步。
+          2026-09-26 用户口径：卡片**不再带「同步进度」小标题**（与发布进度卡
+          同样处理，两张卡都只剩统计项 + 右下角当日说明）。
+        */}
+        <Col flex="1 1 0%" style={{ minWidth: 0 }}>
+          <Card size="small">
+            <div style={STAT_CARD_PROGRESS_CONTENT}>
+              <Space size={8}>
+                <Statistic title="同步成功" value={syncToday.ok} valueStyle={{ fontSize: 16, color: "#52c41a" }} />
+                <Statistic title="失败" value={syncToday.failed} valueStyle={{ fontSize: 16, color: "#ff4d4f" }} />
+                <Statistic
+                  title="待同步"
+                  value={syncToday.pending}
+                  valueStyle={{ fontSize: 16, color: syncToday.pending > 0 ? "#1677ff" : undefined }}
+                />
+              </Space>
+              <Text style={{ ...STAT_CARD_TODAY_NOTE, color: token.colorTextSecondary }}>{TODAY_ONLY_NOTE}</Text>
+            </div>
+          </Card>
+        </Col>
       </Row>
 
       {/*
@@ -1008,7 +1544,20 @@ export function XhsLibraryPage() {
               options={NOTE_TYPE_FILTER_OPTIONS}
             />
           </Col>
-          <Col span={5}><Select value={selectedTagFilter || undefined} onChange={(v) => setSelectedTagFilter(v ?? "")} placeholder="全部标签" allowClear style={{ width: "100%" }} options={availableTags.map((t) => ({ value: String(t.id), label: t.name }))} /></Col>
+          <Col span={5}>
+            <Select
+              value={selectedTopicFilter || undefined}
+              onChange={(v) => setSelectedTopicFilter(v ?? "")}
+              placeholder="全部话题"
+              allowClear
+              showSearch
+              filterOption={false}
+              loading={topicSearching}
+              onSearch={(kw) => topicDebouncerRef.current?.search(kw)}
+              style={{ width: "100%" }}
+              options={topicFilterOptions.map((t) => ({ value: String(t.id), label: t.name }))}
+            />
+          </Col>
           {/* 发布状态四档（含「发布失败」，设计 13 §32.3.3） */}
           <Col span={5}><Select value={publishStatusFilter} onChange={(v) => setPublishStatusFilter(v as PublishStatusFilter)} style={{ width: "100%" }} options={PUBLISH_STATUS_FILTER_OPTIONS} /></Col>
         </Row>
@@ -1070,6 +1619,19 @@ export function XhsLibraryPage() {
                   批量发布
                 </Button>
               </Tooltip>
+              {/* 批量同步（设计 13 §35）：只同步选中里**已发布**的（用户口径「只有已发布的
+                  支持被选中」），跳过的在确认框里明示；入队后按顺序执行，进度见上方进度卡。 */}
+              <Tooltip title="把选中里已发布的笔记加入同步队列，按顺序拉取平台最新内容（逐篇处理，单项失败不阻断）">
+                <Button
+                  icon={<CloudSyncOutlined />}
+                  disabled={isBatchWorking || isBatchSyncing || !selectedNoteIds.length}
+                  loading={isBatchSyncing}
+                  onClick={() => void batchSyncSelected()}
+                  size="small"
+                >
+                  批量同步
+                </Button>
+              </Tooltip>
               {/* 批量打标签的**界面入口已移除**（2026-09-23 用户口径
                   「把选择当前页中的标签下拉框移除」）。
 
@@ -1094,12 +1656,17 @@ export function XhsLibraryPage() {
               <Button disabled={!selectedNoteIds.length} onClick={clearSelection} size="small">清空选择</Button>
             </Space>
           </Col>
-          {batchActionMessage && <Alert message={batchActionMessage} type="info" showIcon style={{ marginTop: 8 }} closable onClose={() => setBatchActionMessage(null)} />}
-          {batchFailure && <div style={{ marginTop: 8 }}>{renderFailure(batchFailure, "批量操作失败")}</div>}
+          {/*
+            ⚠️ 2026-09-25 用户口径「页面所有提示包括异常提示、正常提示、成功提示等
+            均实现消息提示组件，不要占用页面布局」：原「批量操作失败」inline 红块
+            **已移除**（它正是用户看到「批量操作失败 Method Not Allowed」占版面那条）。
+            非 `_silent` 接口的失败由全局拦截器弹 message；`_silent` 的同步接口由
+            `syncNote` 自己 `message.error`。
+          */}
         </Card>
       )}
 
-      {error && <Alert message={error} type="error" showIcon style={{ marginBottom: 16 }} />}
+      {/* 列表加载失败不再占版面：`fetchSavedNotes` 非 `_silent`，提示归全局拦截器。 */}
 
       {/*
         挂链商品筛选生效时的**提示条**（设计 13 §25.8）：输入框里只有一个原始
@@ -1188,21 +1755,28 @@ export function XhsLibraryPage() {
                             // 与详情弹窗的同步按钮同款 —— 同一动作不留两种呈现。
                             danger
                             type="primary"
-                            icon={<SyncOutlined spin={syncingNoteId === note.id} />}
-                            loading={syncingNoteId === note.id}
-                            disabled={syncingNoteId !== null && syncingNoteId !== note.id}
+                            icon={<SyncOutlined spin={syncingNoteId === note.id || syncQueueNoteIds.has(note.id)} />}
+                            loading={syncingNoteId === note.id || syncQueueNoteIds.has(note.id)}
+                            disabled={
+                              syncingNoteId === note.id
+                              || syncQueueNoteIds.has(note.id)
+                              || (syncingNoteId !== null && syncingNoteId !== note.id)
+                            }
                             onClick={(event) => { event.stopPropagation(); void syncNote(note); }}
                           >
                             同步
                           </Button>
                         )}
                         {canPublishNote(note) && (
+                          // 异步 + 队列后**去掉**「别的笔记在发布就禁用」：点击只是入队
+                          // （后端 worker 顺序执行），多发几篇会排队而不是互相打断。
+                          // 发布中这篇的按钮本来就会被 `canPublishNote` 收起（publishing
+                          // 不可再发），双发由后端门禁兜（400 NOTE_NOT_PUBLISHABLE）。
                           <Button
                             size="small"
                             type="primary"
                             icon={<SendOutlined />}
                             loading={publishingNoteId === note.id}
-                            disabled={publishingNoteId !== null && publishingNoteId !== note.id}
                             onClick={(event) => { event.stopPropagation(); void publishNoteWithConfirm(note); }}
                           >
                             发布
@@ -1264,31 +1838,14 @@ export function XhsLibraryPage() {
                     </div>
                   } />
                   {/*
-                    标签（§29.9，用户口径「内容页笔记卡片中也增加标签，鼠标悬停展示全部，
-                    卡片上只展示4个」）：最多展示 4 枚，超出给「+N」；整行挂 Tooltip，
-                    悬停展示**全部**标签（含被收起的）。§29.4「标签不上卡片」的口径被本条
-                    取代 —— 原句保留在设计文档 §29.4 并标注。
+                    话题**不在卡片上展示**（2026-09-25 用户口径「拆分的话题不要放在
+                    卡片上，放在笔记详情弹窗内就可以了」）：§29.9「卡片也展示话题、
+                    悬停看全部」的口径被本条**取代**（原句保留在设计文档 §29.9 并标注），
+                    §34.4 标签并入话题后短暂落到卡片上的那版也一并退回来。
+                    话题的展示与增删**只在详情弹窗**（正文下方话题区：Tag 列表 +
+                    AutoComplete 选已有 / 输新名 + × 实时删）—— 卡片保持
+                    「封面 + 标题 + 来源/时间」的干净形态。
                   */}
-                  {note.tags && note.tags.length > 0 && (
-                    <Tooltip
-                      title={
-                        <Space size={[4, 4]} wrap>
-                          {note.tags.map((t) => (
-                            <Tag key={t.id} color="blue" style={{ fontSize: 11, margin: 0 }}>{t.name}</Tag>
-                          ))}
-                        </Space>
-                      }
-                    >
-                      <div style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 4 }}>
-                        {note.tags.slice(0, 4).map((t) => (
-                          <Tag key={t.id} color="blue" style={{ fontSize: 11, margin: 0 }}>{t.name}</Tag>
-                        ))}
-                        {note.tags.length > 4 && (
-                          <Tag style={{ fontSize: 11, margin: 0 }}>+{note.tags.length - 4}</Tag>
-                        )}
-                      </div>
-                    </Tooltip>
-                  )}
                 </Card>
               </Col>
             );
@@ -1324,76 +1881,13 @@ export function XhsLibraryPage() {
       <NoteDetailModal
         open={isDetailOpen}
         onClose={closeDetail}
+        // ⚠️ 2026-09-25（§34.4）：原标题栏的「标签 chips + 加号添加标签」整块移除
+        // —— 标签展示 / 添加已合并进正文下方的话题区（一个入口管全部话题）。
+        // 标题栏只留标题文本（加粗 + 超长省略号截断）。
         title={
-          // 自定义弹窗标题（§29.12，用户口径「使用自定义弹窗标题来实现展示标签tag和
-          // 添加标签tag」）：整行 = 笔记名称 + 加号 + 标签 chips，元素按 DOM 顺序紧邻
-          // 排列 —— 加号因此紧跟名称文本。⚠️ 标题栏容器是 space-between，任何「标题
-          // 右侧插槽」都会被推到弹窗远端（§29.7 的 titleExtra 正因此做不到「紧跟」）。
-          <Space size={[4, 4]} wrap style={{ minWidth: 0 }}>
-            {/* 标题文本：加粗 + 超长省略号截断（flex 行里可收窄） */}
-            <span style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
-              {selectedNote?.title || "笔记详情"}
-            </span>
-            {/* 加号：**紧跟标题文本后**（用户口径 §29.12）—— 自定义标题行里按 DOM
-                顺序紧邻，标题文本之后第一个元素就是它，标签 chips 排在其后 */}
-            <Tooltip title="添加标签">
-              <Popover
-                open={tagPopoverOpen}
-                onOpenChange={(open) => { setTagPopoverOpen(open); if (!open) setCustomTagName(""); }}
-                trigger="click"
-                content={
-                  <Space.Compact style={{ width: 260 }}>
-                    {/*
-                      **一个**组件同时支持「下拉选已有」与「输入新建」（§29.10，用户口径
-                      「添加标签弹窗中得组件使用一个下拉支持输入得组件」）—— AutoComplete：
-                      点下拉里的已有标签 ⇒ 立即打上；输入新名字 ⇒ 点「添加」新建后打上。
-                      不用 Enter 提交：AutoComplete 的 Enter 会被选项选择消费，自处理会双触发。
-                    */}
-                    <AutoComplete
-                      autoFocus
-                      style={{ width: "100%" }}
-                      placeholder="选择已有标签，或输入新标签名"
-                      value={customTagName}
-                      options={addableTags.map((t) => ({ value: t.name, label: t.name }))}
-                      filterOption={(input, option) =>
-                        String(option?.label ?? "").toLowerCase().includes(input.toLowerCase())
-                      }
-                      notFoundContent={null}
-                      onSelect={(name) => { void submitTagDraft(String(name)); }}
-                      onChange={(value) => setCustomTagName(value)}
-                    />
-                    <Button
-                      type="primary"
-                      loading={tagSaving}
-                      disabled={!customTagName.trim()}
-                      onClick={() => void submitTagDraft(customTagName)}
-                    >
-                      添加
-                    </Button>
-                  </Space.Compact>
-                }
-              >
-                {/* 只展示加号图标（无文字）—— 用户口径 */}
-                <Tag
-                  icon={<PlusOutlined />}
-                  style={{ cursor: "pointer", borderStyle: "dashed" }}
-                  onClick={() => setTagPopoverOpen(true)}
-                />
-              </Popover>
-            </Tooltip>
-            {(selectedNote?.tags ?? []).map((t) => (
-              <Tag
-                key={t.id}
-                color="blue"
-                closable
-                // 先阻止默认关闭：列表由服务端状态驱动，删成功才消失，
-                // 失败保持原样 + 下方红块/安静行说明（不假装删掉了）。
-                onClose={(e) => { e.preventDefault(); void removeTagFromNote(t.id); }}
-              >
-                {t.name}
-              </Tag>
-            ))}
-          </Space>
+          <span style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
+            {selectedNote?.title || "笔记详情"}
+          </span>
         }
         loading={isDetailLoading}
         failure={detailFailure}
@@ -1405,8 +1899,6 @@ export function XhsLibraryPage() {
       >
         {selectedNote && (
           <>
-            {detailActionMessage && <Alert message={detailActionMessage} type="success" showIcon style={{ marginBottom: 12 }} closable onClose={() => setDetailActionMessage(null)} />}
-
             {/*
               ⚠️ 标签不在右栏单开一块 —— 已整体进**弹窗标题栏**（自定义标题行：名称 +
               可删标签 chips + 纯加号图标「添加标签」按钮，用户 2026-09-22 口径 §29.12）。
@@ -1426,8 +1918,11 @@ export function XhsLibraryPage() {
             )}
 
             {/*
-              话题（§28 / §29.3）：专有列，**Tag 展示 + 可增删**。
-              - 每个 Tag 带 × 删除；末尾「+」弹出输入框新增；
+              话题（§28 / §29.3 / §34.4）：**Tag 展示 + 可增删**；2026-09-25 起
+              标题栏的「标签展示 / 添加」已合并进来（标签表并入话题表）——
+              一个入口管全部话题。
+              - 每个 Tag 带 × 删除；末尾「+」弹出 **AutoComplete** 新增
+                （下拉选字典里已有的话题 / 输入新名字，后端 find-or-create）；
               - 增删都**实时落库**（`PUT /notes/{id}/topics` 整列替换），不等保存；
               - 空列表也渲染这一行 —— 「+」是加第一个话题的入口；删到空不是错误态。
             */}
@@ -1435,14 +1930,14 @@ export function XhsLibraryPage() {
               <Space size={[4, 8]} wrap>
                 {(selectedNote.topics ?? []).map((t) => (
                   <Tag
-                    key={t}
+                    key={t.id}
                     color="blue"
                     closable
                     // 先阻止默认关闭：列表由服务端状态驱动，删成功才消失，
                     // 失败时保持原样 + 下方红块/安静行说明（不假装删掉了）。
                     onClose={(e) => { e.preventDefault(); removeTopic(t); }}
                   >
-                    #{t}
+                    #{t.name}
                   </Tag>
                 ))}
                 <Popover
@@ -1450,17 +1945,36 @@ export function XhsLibraryPage() {
                   onOpenChange={(open) => { setTopicPopoverOpen(open); if (open) setTopicDraft(""); }}
                   trigger="click"
                   content={
-                    <Space.Compact style={{ width: 240 }}>
-                      <Input
+                    <Space.Compact style={{ width: 260 }}>
+                      {/*
+                        **一个**组件同时支持「下拉选已有」与「输入新建」（§29.10 组件形态
+                        沿用，2026-09-25 从标签搬到话题）—— AutoComplete：点下拉里的已有
+                        话题 ⇒ 立即打上；输入新名字 ⇒ 点「添加」新建后打上（后端
+                        find-or-create，不再需要先建典再关联）。
+                      */}
+                      <AutoComplete
                         size="small"
                         autoFocus
-                        placeholder="话题名（不用输 #）"
-                        maxLength={50}
+                        style={{ width: "100%" }}
+                        placeholder="选择已有话题，或输入新话题名"
                         value={topicDraft}
-                        onChange={(e) => setTopicDraft(e.target.value)}
-                        onPressEnter={submitTopicDraft}
+                        options={addableTopics.map((t) => ({ value: t.name, label: t.name }))}
+                        filterOption={(input, option) =>
+                          String(option?.label ?? "").toLowerCase().includes(input.toLowerCase())
+                        }
+                        notFoundContent={null}
+                        onSelect={(name) => { submitTopicDraft(String(name)); }}
+                        onChange={(value) => setTopicDraft(value)}
                       />
-                      <Button size="small" type="primary" loading={topicSaving} onClick={submitTopicDraft}>确定</Button>
+                      <Button
+                        size="small"
+                        type="primary"
+                        loading={topicSaving}
+                        disabled={!topicDraft.trim()}
+                        onClick={() => submitTopicDraft(topicDraft)}
+                      >
+                        添加
+                      </Button>
                     </Space.Compact>
                   }
                 >
@@ -1473,7 +1987,6 @@ export function XhsLibraryPage() {
                   </Tag>
                 </Popover>
               </Space>
-              {topicFailure && <div style={{ marginTop: 6 }}>{renderFailure(topicFailure, "话题保存失败")}</div>}
             </div>
 
             {/*
@@ -1555,8 +2068,8 @@ export function XhsLibraryPage() {
                     style={{ cursor: "pointer" }}
                     onClick={() => {
                       void navigator.clipboard.writeText(selectedNote.note_id)
-                        .then(() => setDetailActionMessage("笔记 ID 已复制。"))
-                        .catch(() => setDetailActionMessage("复制失败，请手动选中后复制。"));
+                        .then(() => message.success("笔记 ID 已复制。"))
+                        .catch(() => message.error("复制失败，请手动选中后复制。"));
                     }}
                   >
                     {selectedNote.note_id || "—"}
@@ -1622,13 +2135,18 @@ export function XhsLibraryPage() {
                         type="primary"
                         icon={<SendOutlined />}
                         loading={publishingNoteId === selectedNote.id}
-                        disabled={publishingNoteId !== null && publishingNoteId !== selectedNote.id}
                         onClick={() => void publishNoteWithConfirm(selectedNote)}
                       >
                         {selectedNote.publish_status === "failed" ? "重新发布" : "发布"}
                       </Button>
                     )}
                   </Space>
+                  {/*
+                    ⚠️ 「发布失败原因」**保留 inline**（不随 message 化搬走）：它不是一次性
+                    操作反馈，而是这条笔记的**持久状态说明** —— `publish_error` 是落库字段，
+                    用户重开弹窗还要看（设计 04 §3.6 表格第 2 行「静态说明」类）。搬成 toast
+                    只会让原因一条条飘走、无法回看。
+                  */}
                   {selectedNote.publish_status === "failed" && selectedNote.publish_error && (
                     <Alert
                       type="error"
@@ -1686,9 +2204,9 @@ export function XhsLibraryPage() {
               {canSyncNote(selectedNote) && (
                 <Tooltip title="用这条笔记的 ID 拉取平台最新内容并更新本地（与同步任务同一套逻辑）">
                   <Button
-                    icon={<SyncOutlined spin={syncingNoteId === selectedNote.id} />}
+                    icon={<SyncOutlined spin={syncingNoteId === selectedNote.id || syncQueueNoteIds.has(selectedNote.id)} />}
                     onClick={() => void syncNote(selectedNote)}
-                    loading={syncingNoteId === selectedNote.id}
+                    loading={syncingNoteId === selectedNote.id || syncQueueNoteIds.has(selectedNote.id)}
                     size="small"
                     // 红色主按钮：与笔记卡片上的同步按钮同款（§29.5）——
                     // 同一个动作不留两种呈现。
@@ -1704,17 +2222,12 @@ export function XhsLibraryPage() {
               <Button icon={<EditOutlined />} onClick={() => createDraft("rewrite")} loading={isCreatingDraft} size="small">AI 改写</Button>
               <Popconfirm title="确定删除？" onConfirm={() => void handleDeleteNote(selectedNote)}><Button danger icon={<DeleteOutlined />} size="small">删除</Button></Popconfirm>
             </Space>
-            {detailSyncFailure && (
-              <div style={{ marginBottom: 12 }}>{renderFailure(detailSyncFailure, "同步失败")}</div>
-            )}
 
             {/*
-              标签增删失败的三分法呈现（§29.7）：预期内安静一行、真异常红块摆后端原话。
-              位置跟在功能按钮行后（标签块在右栏顶部，失败提示靠近操作区）。
+              ⚠️ 2026-09-25（§34.4）：原「标签增删失败」呈现块随标题栏标签 UI 一并
+              移除；同轮（用户口径「提示不占页面布局」）把话题增删失败的 inline 红块
+              也一并撤掉 —— 现在失败只弹一次 message，这里不留任何第二块。
             */}
-            {tagFailure && (
-              <div style={{ marginBottom: 12 }}>{renderFailure(tagFailure, "标签保存失败")}</div>
-            )}
           </>
         )}
       </NoteDetailModal>

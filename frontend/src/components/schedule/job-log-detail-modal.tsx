@@ -5,8 +5,14 @@
  * 嵌套表格」的混排）——
  * 1. **执行日志信息**（当次运行的客观事实）：状态 / 触发方式 / 起止时间 /
  *    耗时 / 进度 / 消息 / 异常 / 执行结果；
- * 2. **快照配置**（当时那个任务是怎么配的）：触发器 / 策略 / 参数（含执行账号）
- *    / 备注。任务行之后被改被删都不影响。
+ * 2. **快照配置**（当时那个任务是怎么配的）：任务名称 / **调用目标（中文名 +
+ *    代码键，与任务列表同口径）** / 触发器 / 策略 / 参数（含执行账号）/ 备注。
+ *    任务行之后被改被删都不影响。
+ *
+ * ⚠️ 调用目标在本弹窗**曾经只显示代码键**（`system.queue_record_cleanup` 这种）
+ * —— 2026-09-25 用户口径「调用目标需要配置中文名称」后与列表列拉齐：中文名在前、
+ * 代码键在后。中文名由 `targetNames` prop 传入（同一份 `/schedule/targets` 数据源，
+ * 不另写映射表）。
  *
  * ⚠️ 块顺序刻意是「日志在前、快照在后」：打开弹窗第一眼要看的是**这次跑得怎么样**，
  * 配置是次要的对照信息。
@@ -66,13 +72,29 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
 export type JobLogDetailModalProps = {
   open: boolean;
   log: ScheduledJobLog | null;
+  /**
+   * `job_key → 中文名` 表（来自 `GET /schedule/targets`）。
+   *
+   * ⚠️ **必须由调用方传入，弹窗里不许另写一份映射表**（DEF-044：同一语义不留两份
+   * 实现）—— 与任务列表「调用目标」列共用同一份数据源，改一处两处同步。
+   */
+  targetNames?: Record<string, string>;
   onCancel: () => void;
 };
 
-export function JobLogDetailModal({ open, log, onCancel }: JobLogDetailModalProps) {
+export function JobLogDetailModal({
+  open,
+  log,
+  targetNames = {},
+  onCancel,
+}: JobLogDetailModalProps) {
   const snapshot = log?.config_snapshot ?? null;
   const params = (snapshot?.params ?? null) as Record<string, unknown> | null;
   const accountIds = Array.isArray(params?.account_ids) ? (params.account_ids as number[]) : null;
+  // 调用目标：**中文名在前、代码键在后**（与任务列表同口径）。
+  // 快照里的 job_key 若已被注册表移除（不可能：注册表是代码侧白名单），
+  // 中文名取不到 ⇒ 显示 `-`（缺值不猜，硬约束⑤）。
+  const jobKey = String(snapshot?.job_key ?? "").trim()
 
   return (
     <Modal
@@ -150,9 +172,12 @@ export function JobLogDetailModal({ open, log, onCancel }: JobLogDetailModalProp
                   {String(snapshot.name ?? "-")}
                 </Descriptions.Item>
                 <Descriptions.Item label="调用目标">
-                  <Text code style={{ fontSize: 12 }}>
-                    {String(snapshot.job_key ?? "-")}
-                  </Text>
+                  <Space direction="vertical" size={0}>
+                    <Text>{targetNames[jobKey] ?? "-"}</Text>
+                    <Text code type="secondary" style={{ fontSize: 12 }}>
+                      {jobKey || "-"}
+                    </Text>
+                  </Space>
                 </Descriptions.Item>
                 <Descriptions.Item label="任务类型">
                   {triggerTypeLabel(String(snapshot.trigger_type ?? ""))}

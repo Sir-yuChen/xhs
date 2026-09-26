@@ -1,4 +1,4 @@
-import { Alert, Button, Card, Space, Typography } from "antd";
+import { App, Button, Card, Space, Typography } from "antd";
 import { ReloadOutlined } from "@ant-design/icons";
 import { useEffect, useRef, useState } from "react";
 
@@ -35,14 +35,15 @@ type QrLoginPanelProps = {
   onRenewed?: (account: PlatformAccount | null, channel: string) => void;
 };
 
-type Notice = { type: "success" | "warning"; text: string };
-
 export function QrLoginPanel({ accountType, onConfirmed, targetAccountId, onRenewed }: QrLoginPanelProps) {
   const [session, setSession] = useState<XhsQrLoginSession | null>(null);
   const [statusText, setStatusText] = useState("准备生成二维码");
   const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<Notice | null>(null);
+  // 全站消息提醒统一走 antd message（设计 04 §3.6，2026-09-25 用户口径：
+  // 「所有消息提醒参考 antd 成熟组件，不要在页面暂用空间」）—— 面板内的
+  // notice / error 两条 inline Alert 收口成 message；`statusText` 是**实时
+  // 状态行**（扫码进度），不是一次性提醒，保留。
+  const { message } = App.useApp();
   const confirmedRef = useRef(false);
   const renewing = typeof targetAccountId === "number";
 
@@ -103,8 +104,6 @@ export function QrLoginPanel({ accountType, onConfirmed, targetAccountId, onRene
     const generation = createGenerationRef.current + 1;
     createGenerationRef.current = generation;
     setIsLoading(true);
-    setError(null);
-    setNotice(null);
     confirmedRef.current = false;
     // Nothing is active while we mint: any in-flight poll for the previous
     // session must not be able to write itself back into state.
@@ -139,7 +138,7 @@ export function QrLoginPanel({ accountType, onConfirmed, targetAccountId, onRene
       if (generation !== createGenerationRef.current) {
         return;
       }
-      setError(errorMessage(caught));
+      message.error(errorMessage(caught));
     } finally {
       if (generation === createGenerationRef.current) {
         setIsLoading(false);
@@ -194,7 +193,7 @@ export function QrLoginPanel({ accountType, onConfirmed, targetAccountId, onRene
             */
             if (polled.renew_error) {
               setStatusText("续期未完成");
-              setError(detailMessage(polled.renew_error) || "续期失败，本次没有保存任何令牌。");
+              message.error(detailMessage(polled.renew_error) || "续期失败，本次没有保存任何令牌。");
               return;
             }
             const channel = polled.renewed_channel || "";
@@ -210,10 +209,7 @@ export function QrLoginPanel({ accountType, onConfirmed, targetAccountId, onRene
               真机实测推翻了它（创作者 jar 打千帆一律 -13000）。这里只说事实：
               本次写入了哪个平台、其它平台没动。
             */
-            setNotice({
-              type: "success",
-              text: `已把新令牌写入该账号的「${channelText}」。其它平台的令牌未被改动。`
-            });
+            message.success(`已把新令牌写入该账号的「${channelText}」。其它平台的令牌未被改动。`);
             onRenewedRef.current?.(polled.account ?? null, channel);
             return;
           }
@@ -225,7 +221,9 @@ export function QrLoginPanel({ accountType, onConfirmed, targetAccountId, onRene
         }
       } catch {
         if (sessionId === activeSessionIdRef.current) {
-          setError("轮询登录状态失败，正在等待下一次尝试。");
+          // 轮询每 2s 一次：用**同一个 key**，连续失败只更新同一条 toast，
+          // 不会每 2 秒叠一条（antd message 的成熟用法）。
+          message.error({ content: "轮询登录状态失败，正在等待下一次尝试。", key: "qr-login-poll" });
         }
       }
     }, 2000);
@@ -290,12 +288,6 @@ export function QrLoginPanel({ accountType, onConfirmed, targetAccountId, onRene
           本次登录只更新这一个账号的对应令牌，不会新建账号；扫到的若不是该账号，会报错且不保存任何内容。
         </Text>
       ) : null}
-
-      {notice ? (
-        <Alert type={notice.type} message={notice.text} showIcon />
-      ) : null}
-
-      {error ? <Alert type="error" message={error} showIcon /> : null}
 
       <Button
         block

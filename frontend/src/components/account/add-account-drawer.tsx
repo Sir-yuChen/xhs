@@ -1,4 +1,4 @@
-import { Modal, Segmented, message } from "antd";
+import { App, Modal, Segmented } from "antd";
 import { useState } from "react";
 
 import type { PlatformAccount } from "../../types";
@@ -50,6 +50,10 @@ const loginMethodOptions: Record<AccountType, { label: string; value: LoginMetho
 export function AddAccountDrawer({ open, onClose, onBound }: AddAccountDrawerProps) {
   const [accountType, setAccountType] = useState<AccountType>("pc");
   const [method, setMethod] = useState<LoginMethod>("qr");
+  // 全站消息提醒统一走 antd message（设计 04 §3.6，2026-09-25 用户口径：
+  // 「所有消息提醒参考 antd 成熟组件，不要在页面暂用空间」）—— `App.useApp()`
+  // 替代静态 `message` 导入，实例继承 ConfigProvider 的主题与 locale。
+  const { message } = App.useApp();
 
   function handleConfirmed(account: PlatformAccount) {
     const actionText = account.action === "updated" ? "已更新到账号矩阵" : "已加入账号矩阵";

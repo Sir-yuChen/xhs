@@ -3,19 +3,11 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, Table, Text, Column, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.app.core.database import Base
 from backend.app.core.time import shanghai_now
-
-
-note_tags = Table(
-    "note_tags",
-    Base.metadata,
-    Column("note_id", ForeignKey("notes.id"), primary_key=True),
-    Column("tag_id", ForeignKey("tags.id"), primary_key=True),
-)
 
 #: 笔记类型取值（设计 13 §25，2026-09-22）—— **唯一定义处**，业务代码只许引用常量。
 NOTE_TYPE_SYNCED = "synced"
@@ -124,6 +116,30 @@ def note_supports_sync(note: "Note") -> bool:
     return (getattr(note, "publish_status", "") or "") == PUBLISH_STATUS_PUBLISHED
 
 
+def note_supports_batch_sync(note: "Note") -> bool:
+    """这条笔记能不能进**批量同步**队列（设计 13 §35.1，2026-09-25 用户口径）。
+
+    判据只有一条：`publish_status == "published"`（用户口径原文：「只有已发布的
+    支持被选中」）。
+
+    ⚠️ 比 `note_supports_sync()`（单条「同步」按钮：`synced` **或** `published`）
+    **更严**，这是刻意的两把尺子，各守各的门：
+
+    * 单条按钮回答「这条**有没有**可拉的平台最新内容」—— synced 笔记天然有
+      （§25.7.5 口径，不回归）；
+    * 批量同步是「把一批**已发布**笔记刷新到平台最新」的显式动作 —— 只收已发布。
+
+    **改一边不默认改另一边**：两份判据分别写在各自 docstring 里，同改必须两边都改
+    （与 `note_supports_sync` 的前后端同口径纪律同款）。
+
+    前后端同口径：前端 `lib/note-filters.ts::canBatchSyncNote()`（界面侧：确认框
+    明示跳过数），本函数是后端闸门（`POST /notes/batch-sync` 逐篇校验）。
+    """
+    if note is None:
+        return False
+    return (getattr(note, "publish_status", "") or "") == PUBLISH_STATUS_PUBLISHED
+
+
 class Note(Base):
     __tablename__ = "notes"
     __table_args__ = (
@@ -200,7 +216,11 @@ class Note(Base):
     #: 单独一张表），关系在 `note_goods`（多对对关系表），查询走
     #: `note_goods` join `shop_products`（`api/notes.py::_serialize_note` 的
     #: `goods` 字段）—— 不在笔记表冗余一份会漂的商品快照。
-    topics_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False, server_default="[]")
+    #:
+    #: ⛔ **本列已删**（2026-09-25，设计 13 §34，迁移 `b2c3d4e5f6g7`）：话题改落
+    #: `topics` 表 + `note_topics` 关系表（正文里的 `#话题` 同步时拆出），序列化的
+    #: `topics` 字段改走关系表 join —— 本列留着就是同一语义的第二份实现
+    #: （DEF-044/047/058）。原注释与列定义保留在此备查，**不在模型里映射**。
     #: **详情是否已补齐**（正文 + 完整图集，2026-09-22 新增，迁移 `o7p8q9r0s1t2`）。
     #:
     #: 三个源的**列表接口都不带正文**，图片也可能只有一张封面（千帆 `goods-note/list`
@@ -244,6 +264,72 @@ class Note(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now)
 
 
+class Topic(Base):
+    """**话题字典**（设计 13 §34，2026-09-25；**原 `tags` 标签表 + 同步拆出的平台话题**）。
+
+    用户 ② 口径「将当前系统的笔记标签表合并成话题表」⇒ `tags` / `note_tags` 两表
+    整表并入本表与 `NoteTopic`（迁移 `b2c3d4e5f6g7`）。标签（用户给笔记打的标记）与
+    话题（笔记正文里拆出来的 `#标签`）在**界面与写入路径上完全同构**（都是 M2M、
+    都可增删、详情卡都渲染 chips）—— 合成一张表，消掉「一个语义两张表」。
+
+    **按用户归属**（不是全局字典）：与 `tags` 原形态一致，也守住账号维度隔离
+    （DEF-066 同款纪律）；`(user_id, name)` 唯一 ⇒ 同一用户下标签与话题同名时
+    **天然合并成一行**（迁移按此归并，关系行进 `NoteTopic`）。
+
+    `platform_id`：**平台话题 ID**。商品笔记 AI 生成结果自带 `topics[{id, name}]`，
+    发布链路的 `hash_tag` 要平台 ID 才认（`note_publish_service._build_publish_body`）——
+    生成时存下、发布时直接取。同步链路拆出的话题没有平台 ID（`_tag_names` 只取
+    名字）⇒ 留空，**不造假**。
+    """
+
+    __tablename__ = "topics"
+    __table_args__ = (
+        UniqueConstraint("user_id", "name", name="uq_topics_user_name"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    #: 话题 / 标签名 —— 存**不带 `#`** 的纯名字（展示层自己拼 `#`）。
+    name: Mapped[str] = mapped_column(String(64), default="")
+    #: chips 配色（自 `tags` 表沿用；新话题默认蓝，与话题区 UI 一致）。
+    color: Mapped[str] = mapped_column(String(24), default="#1677ff", server_default="#1677ff")
+    #: 平台话题 ID（商品笔记 AI 生成时存下；同步拆出的话题没有 ⇒ 空串）。
+    platform_id: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now)
+
+
+class NoteTopic(Base):
+    """**笔记 ↔ 话题** 多对多关系（设计 13 §34，2026-09-25）。
+
+    与 `note_goods`（§26）同款分工：`notes` 装笔记信息、`topics` 装话题字典、
+    本表只装**关系** —— 一篇笔记可挂多个话题、一个话题可属于多篇笔记（M2M），
+    由唯一键 `(note_id, topic_id)` 强制（重复落库幂等，不产生重复行）。
+
+    写入语义分两种入口（§34.5）：
+
+    * **同步 / 采集 / 详情补齐 / 商品生成** ⇒ `note_topic_service.apply_sync_topics`：
+      **只增不删**（find-or-create 话题 + 补关系；平台撤了话题也不删关系行）；
+    * **`PUT /notes/{id}/topics`（手动增删）** ⇒ `replace_note_topics`：
+      **整列替换**（§29.3 原契约：调用方传增删后的完整列表，后端不猜）。
+
+    删除链（§34.7）：FK 不级联（`PRAGMA foreign_keys` 未开）⇒ 删笔记
+    （`purge_note`）与删话题词典项（`DELETE /topics/{id}`）都必须**显式**删关系行，
+    漏一边就是孤儿数据。
+    """
+
+    __tablename__ = "note_topics"
+    __table_args__ = (
+        UniqueConstraint("note_id", "topic_id", name="uq_note_topics_note_topic"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    #: 本地笔记行（`notes.id`）—— **本地主键，不是平台 note_id**。
+    note_id: Mapped[int] = mapped_column(ForeignKey("notes.id"), index=True)
+    #: 话题字典行（`topics.id`）。
+    topic_id: Mapped[int] = mapped_column(ForeignKey("topics.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now)
+
+
 class NoteAsset(Base):
     __tablename__ = "note_assets"
 
@@ -270,10 +356,8 @@ class NoteComment(Base):
     raw_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
 
-class Tag(Base):
-    __tablename__ = "tags"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
-    name: Mapped[str] = mapped_column(String(64))
-    color: Mapped[str] = mapped_column(String(24), default="#111111")
+# ⛔ `Tag` / `note_tags`（原「用户标签」表 + 连接表）已于 2026-09-25 **整表移除**
+# （设计 13 §34，迁移 `b2c3d4e5f6g7`）：用户口径「将当前系统的笔记标签表合并成
+# 话题表」⇒ 并入 `Topic` / `NoteTopic`（见上方两个类）。原表形态存档：
+# `tags` = `id` / `user_id` / `name`(String 64) / `color`(String 24, 默认 `#111111`)；
+# `note_tags` = `note_id` + `tag_id` 复合主键。数据搬迁规则见 §34.4。

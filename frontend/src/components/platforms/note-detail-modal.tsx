@@ -305,6 +305,15 @@ export function NoteCommentList({
  *
  * 媒体状态由本组件自管（索引 / 下载中）；换了一篇笔记（mediaUrls 变）自动回到第一张。
  */
+
+/**
+ * 缩略图边长（v1.55 用户口径「缩小图片一行展示，超出一行的支持左右滑动」）：
+ * 48 → 40。收窄让不放滑也能多容几张；真正放不下时由 `.note-detail-thumbs`
+ * 的 `overflow-x: auto` 左右滑（触板横滑 / shift+滚轮 / 拖滚动条均可）。
+ * **一个常量**：真图与选中描边共用同一尺寸口径（选中态只换 border 颜色）。
+ */
+const MEDIA_THUMB_SIZE = 40;
+
 export function NoteDetailBody({
   mediaUrls = [],
   videoUrl = "",
@@ -416,7 +425,11 @@ export function NoteDetailBody({
                 )}
               </div>
               {mediaUrls.length > 1 && (
-                <Space wrap size={8} style={{ marginTop: 8 }}>
+                /* 缩略图条（v1.55 用户口径）：**一行展示，超出一行左右滑**。
+                   旧实现是 `Space wrap` —— 图一多就堆成好几行，把下载按钮和素材
+                   说明顶出首屏，左栏被迫多滚一屏。现在永不分行，放不下的部分由
+                   `.note-detail-thumbs` 的 `overflow-x: auto` 接住。 */
+                <div className="note-detail-thumbs" style={{ marginTop: 8 }}>
                   {mediaUrls.map((url, index) => (
                     <img
                       key={`${url}-${index}`}
@@ -424,8 +437,9 @@ export function NoteDetailBody({
                       alt=""
                       onClick={() => setMediaIndex(index)}
                       style={{
-                        width: 48,
-                        height: 48,
+                        width: MEDIA_THUMB_SIZE,
+                        height: MEDIA_THUMB_SIZE,
+                        flex: "0 0 auto",
                         objectFit: "cover",
                         borderRadius: 4,
                         cursor: "pointer",
@@ -433,9 +447,10 @@ export function NoteDetailBody({
                       }}
                     />
                   ))}
-                </Space>
+                </div>
               )}
-              <Space wrap style={{ marginTop: 8 }}>
+              {/* 单个按钮不需要 `Space wrap`（v1.55：wrap 语义只属于会溢出的行） */}
+              <div style={{ marginTop: 8 }}>
                 <Button
                   size="small"
                   icon={<DownloadOutlined />}
@@ -444,7 +459,7 @@ export function NoteDetailBody({
                 >
                   下载当前图片
                 </Button>
-              </Space>
+              </div>
             </div>
           ) : (
             mediaEmpty ?? <Alert type="info" showIcon message="未解析到图片或视频素材" />

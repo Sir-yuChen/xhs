@@ -68,6 +68,9 @@ from backend.app.models.note import (
     NOTE_TYPE_LOCAL,
     NOTE_TYPE_SYNCED,
     PUBLISH_STATUS_PUBLISHED,
+    Note,
+    note_supports_batch_sync,
+    note_supports_sync,
     set_note_publish_status,
 )
 from backend.app.models.platform_account import PlatformAccount
@@ -80,13 +83,18 @@ from backend.app.services.account_service import (
     has_ark_token,
     has_creator_token,
 )
+from backend.app.services import note_queue_service
+from backend.app.services.note_topic_service import apply_sync_topics
 from backend.app.services.rate_limiter import get_rate_limiter
 from backend.app.services import task_cancel
 
 logger = logging.getLogger(__name__)
 
-#: 页与页之间的停顿（秒，上限 60）。测试把它置 0 以避免真等待。
-PAGE_GAP_SECONDS = 3.0
+#: 页与页之间的停顿**基础值**（秒）。测试把它置 0 以避免真等待。
+#: 2026-09-25 用户口径「后端同步时注意不要触发平台的限流，可以拉长间隔时间，
+#: 随机化间隔时间」⇒ 3.0 → **5.0**；实际停顿还要乘抖动系数（见 `sync_pacing`），
+#: 落在 [0.8, 1.6] × 基础值之间且不超过 `MAX_PAGE_GAP_SECONDS`。
+PAGE_GAP_SECONDS = 5.0
 
 #: 单页停顿的硬顶（设计 13 §8）。time.sleep 永远不会超过这个值。
 MAX_PAGE_GAP_SECONDS = 60.0
@@ -104,6 +112,60 @@ class SyncFailure(Exception):
         super().__init__(message)
         self.message = message
         self.code = code
+
+
+#: 详情请求异常的**用户可读**文案分类（2026-09-25）。
+#:
+#: 为什么不全量透传异常字符串：底层是 curl_cffi，超时抛的是
+#: `Failed to perform, curl: (28) Operation timed out after 8009 milliseconds with
+#: 1152 bytes received. See https://curl.se/libcurl/c/libcurl-errors.html first for
+#: more details.` —— 这段原文**只对排查有意义**，端到进度卡上就是噪音（用户实测
+#: 反馈）。原文仍然进日志（`logger.warning`），库里/接口给的是下面这句人话。
+_DETAIL_TIMEOUT_MARKERS = ("timed out", "timeout", "curl: (28)")
+_DETAIL_NETWORK_MARKERS = (
+    "curl: (6)",
+    "curl: (7)",
+    "curl: (28)",
+    "curl: (35)",
+    "curl: (52)",
+    "curl: (56)",
+    "connection",
+    "resolve",
+    "ssl",
+    "network is unreachable",
+    "proxy",
+)
+
+
+def _classify_detail_failure(exc: Exception) -> tuple[str, str]:
+    """详情请求异常 → `(用户可读原因, 机器码)`。**原始报文只进日志**。"""
+    text = str(exc)
+    lowered = text.lower()
+    if any(marker in lowered for marker in _DETAIL_TIMEOUT_MARKERS):
+        return "详情请求超时（网络或平台响应慢），请稍后重试", "DETAIL_TIMEOUT"
+    if any(marker in lowered for marker in _DETAIL_NETWORK_MARKERS):
+        return "详情请求网络连接失败，请稍后重试", "DETAIL_NETWORK_ERROR"
+    brief = " ".join(text.split())
+    if len(brief) > 80:
+        brief = brief[:80] + "…"
+    return f"详情请求失败：{brief}", "DETAIL_REQUEST_FAILED"
+
+
+def _build_pc_adapter(adapter_factory, cookies: str, account: Optional[PlatformAccount]):
+    """构造 PC 适配器，**尽量把落库的平台 user_id 带进去**（§19.14 的加固）。
+
+    带进去的收益：SDK 不再为「算 xy-direction」先发一次 `/v2/user/me`
+    （那次请求自己还要先取 DS 签名材料，是最脆的一环）。取不到就照旧让 SDK 自己
+    bootstrap —— 这是**加固**，不是新门禁：缺 `external_user_id` 不影响同步能不能跑。
+
+    `TypeError` 兜底是给**测试替身**的（老替身只吃一个位置参数）；生产工厂
+    `XhsPcApiAdapter` 显式支持 `user_id`。
+    """
+    external_user_id = str(getattr(account, "external_user_id", "") or "")
+    try:
+        return adapter_factory(cookies, user_id=external_user_id)
+    except TypeError:
+        return adapter_factory(cookies)
 
 
 def _note_sources(db: Session, account: PlatformAccount) -> list[dict[str, Any]]:
@@ -259,12 +321,19 @@ def _is_hex_note_id(note_id: str) -> bool:
     return len(value) >= 16 and all(char in "0123456789abcdefABCDEF" for char in value)
 
 
-def _note_detail_url(note: Any) -> str:
+def _note_detail_url(note: Any, *, allow_tokenless: bool = False) -> str:
     """详情请求要用的 URL：有笔记级 `xsec_token` 就带上（§19.13）。
 
     无 token 的 explore 链接平台也回「成功」，但正文是 0 字（DEF-053 实测）——
     假成功会白烧一次限流额度。所以 `raw_json` 里另存了 token 就补进 URL：
     千帆条目（顶层 `xsec_token`）与创作者列表项都在自己那层带着它。
+
+    ``allow_tokenless``（2026-09-25，用户报「本地生成 + 已发布笔记同步未完成：
+    没有可用的详情地址」）：**仅用户显式单条同步**（`sync_note_from_platform`）
+    为 True。本地生成笔记发布成功后 `raw_json` 里没有 `note_url` / `xsec_token`
+    （平台 publish 响应只回 `id`，见 `_execute_publish` 成功回写段）⇒ 兜底用
+    `note_id` 拼 explore 地址。批量页内联补齐 / 定时同步（`refresh=False`）**不**
+    放开：无 token 的「假成功」在那两条链路里每轮全量重打，正是 DEF-053 要防的。
     """
     raw = note.raw_json if isinstance(note.raw_json, dict) else {}
     url = str(raw.get("note_url") or "").strip()
@@ -274,11 +343,149 @@ def _note_detail_url(note: Any) -> str:
     if not token:
         ark = raw.get("ark") if isinstance(raw.get("ark"), dict) else {}
         token = str(ark.get("xsec_token") or "").strip()
-    if not token or not _is_hex_note_id(note.note_id):
+    if not _is_hex_note_id(note.note_id):
+        return url
+    if not token:
+        # 本地生成 + 已发布：发布回写只落了平台 note_id（hex），raw 无地址。
+        # 单条同步路径兜底拼 explore（无 token 可能拉到空正文，但 hydrate 的
+        # 「详情正文为空不覆盖本地」保证不抹数据；且单次触发不反复烧额度）。
+        if allow_tokenless and not url:
+            return f"https://www.xiaohongshu.com/explore/{str(note.note_id).strip()}"
         return url
     if url:
         return f"{url}{'&' if '?' in url else '?'}xsec_token={token}"
     return f"https://www.xiaohongshu.com/explore/{str(note.note_id).strip()}?xsec_token={token}"
+
+
+def backfill_note_detail_ref(db: Session, note: Any, fetch: Any) -> bool:
+    """把**详情地址**（explore URL + 笔记级 `xsec_token`）补进 `raw_json`（§25.4）。
+
+    场景：本地生成笔记发布成功后，平台 `note/publish` 响应只回 `{"id"}`，
+    **不带** `note_url` / `xsec_token` ⇒ `raw_json` 没有详情地址 ⇒ 内容库
+    「同步」按钮的 `_note_detail_url` 判 `no_url`，用户看到「这条笔记没有可用的
+    详情地址」—— 按钮在、功能不在（真实库 id 1967「中古风桌旗…」）。
+
+    做法：用千帆商品笔记列表的 `note_ids` **精确查询**（与
+    `shop_goods_service.sync_note_ids` 同一端点）取回该项的 `xsec_token`，
+    拼成 explore URL 落进 `raw_json`（顶层 `note_url` + `xsec_token`，与
+    `_normalize_ark_note` 同形态）。之后**所有**链路（单条同步 / 批量同步 /
+    定时补齐）都拿到带 token 的完整地址。
+
+    ``fetch``：一次只读查询的注入点（`callable(note_ids) -> (ok, msg, payload)`，
+    与适配器三元组同形）—— 发布路径传发布适配器的 `get_goods_note_page`
+    （凭据已在手），单条同步路径传用账号自己 `ark` 令牌构造的同一个方法
+    （§18.14：千帆只认本账号 ark）。异常 / 平台报错 / 查无项都返回 False
+    （**best-effort，调用方不抛**）。
+
+    ⚠️ **不 commit**：事务边界归调用方（发布路径在成功回写事务里，同步路径
+    单独提交）。返回 True 表示 `note.raw_json` 已被修改、调用方必须提交。
+
+    单篇版是**批量版的特例**（委托 :func:`backfill_note_detail_refs`）——
+    批量同步时一篇触发、整批一次请求补全（DEF-069 提速，见该函数 docstring）。
+    """
+    return backfill_note_detail_refs(db, [note], fetch) > 0
+
+
+def backfill_note_detail_refs(db: Session, notes: list[Any], fetch: Any) -> int:
+    """**批量**补详情地址：一次 `note_ids` 精确查询补全整批（§25.4，2026-09-25 提速）。
+
+    为什么需要批量版：批量同步 N 篇本地生成笔记时，旧实现每篇各回查一次千帆
+    ⇒ N 次请求（每次 1-2 秒）。而 `get_goods_note_page(note_ids=[...])` 本身
+    支持一次查多个（与 `shop_goods_service.sync_note_ids` 同参数）⇒ 合并为
+    **一次请求**。由 worker 在「本篇缺地址」时触发，把当时队列里同样缺地址的
+    篇一起补上（一篇触发、全批受益）—— 单条按钮路径走单篇版，行为不变。
+
+    只补**缺地址**的行（已有 `note_url` 的不碰）；返回补齐篇数（调用方据此
+    决定要不要 commit）。hex 判据是 `_note_detail_url` 拼 explore 的关切；
+    这里只要求有平台 id（真实平台恒为 hex，替身 / 历史行不保证）。
+    """
+    pending = []
+    for note in notes:
+        raw = note.raw_json if isinstance(note.raw_json, dict) else {}
+        if str(raw.get("note_url") or "").strip():
+            continue
+        note_id = str(note.note_id or "").strip()
+        if note_id:
+            pending.append((note, note_id))
+    if not pending or fetch is None:
+        return 0
+    try:
+        ok, _message, payload = fetch([note_id for _note, note_id in pending])
+    except Exception as exc:  # noqa: BLE001 - 补地址失败不影响调用方主流程
+        logger.info(
+            "note sync: detail ref backfill skipped (%d notes): %s", len(pending), exc
+        )
+        return 0
+    if not ok or not isinstance(payload, dict):
+        return 0
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    entries = [e for e in (data.get("note_infos") or []) if isinstance(e, dict)]
+    tokens = {
+        str(e.get("note_id") or "").strip(): str(e.get("xsec_token") or "").strip()
+        for e in entries
+    }
+    filled = 0
+    for note, note_id in pending:
+        token = tokens.get(note_id) or ""
+        if not token:
+            continue
+        merged = dict(note.raw_json if isinstance(note.raw_json, dict) else {})
+        merged["note_url"] = (
+            f"https://www.xiaohongshu.com/explore/{note_id}?xsec_token={token}"
+        )
+        merged["xsec_token"] = token
+        note.raw_json = merged
+        filled += 1
+    if filled:
+        logger.info("note sync: detail ref backfilled (%d/%d notes)", filled, len(pending))
+    return filled
+
+
+def _backfill_detail_ref_for_account(db: Session, account: PlatformAccount, note: Any) -> bool:
+    """用**账号自己的 `ark` 令牌**回查商品笔记列表，补详情地址（§25.4 / §18.14）。
+
+    千帆凭据只认本账号 `ark`（`qianfan_cookies_for_account`，无令牌返空串）——
+    拿不到就静默跳过（调用方有 explore 兜底），**不借任何别的凭据**、不发探活。
+    """
+    return _backfill_detail_ref_for_accounts(db, account, [note]) > 0
+
+
+def _backfill_detail_ref_for_accounts(
+    db: Session, account: PlatformAccount, notes: list[Any]
+) -> int:
+    """批量版：一次 `note_ids` 精确查询补全整批（DEF-069 提速，2026-09-25）。
+
+    批量同步 N 篇本地生成笔记时，逐篇回查 = N 次千帆请求（1-2 秒/次）；
+    合并为一次后，worker 在「本篇缺地址」时把队列里同样缺地址的篇一起补上
+    （一篇触发、全批受益）。单条按钮路径走单篇版，行为不变。
+    """
+    from backend.app.services.shop_binding_service import qianfan_cookies_for_account
+
+    cookies = qianfan_cookies_for_account(db, account.id)
+    if not cookies:
+        return 0
+    try:
+        from backend.app.api.platforms.xhs.qianfan import (
+            get_qianfan_api_adapter_factory,
+        )
+
+        adapter = get_qianfan_api_adapter_factory()(cookies)
+        goods_page = getattr(adapter, "get_goods_note_page", None)
+    except Exception as exc:  # noqa: BLE001 - 工厂取不到就跳过，不阻路
+        logger.info("note sync: detail ref backfill factory failed: %s", exc)
+        return 0
+    if goods_page is None:
+        return 0
+
+    def _fetch(note_ids: list[str]):
+        # 与 `shop_goods_service.sync_note_ids` 同一组参数（note_ids 精确查询）。
+        return goods_page(page_num=1, page_size=len(note_ids), note_ids=note_ids)
+
+    filled = backfill_note_detail_refs(db, notes, _fetch)
+    if filled <= 0:
+        return 0
+    db.commit()
+    return filled
 
 
 def _merge_note_images(db: Session, note: Any, urls: list[Any]) -> int:
@@ -303,6 +510,7 @@ def hydrate_note_detail(
     adapter: Any = None,
     adapter_factory: Any = None,
     refresh: bool = False,
+    allow_tokenless: bool = False,
 ) -> dict[str, Any]:
     """对**一条**已落库笔记打一次详情：补正文 + 补缺失图片（设计 13 §19.13 / §19.14）。
 
@@ -328,11 +536,18 @@ def hydrate_note_detail(
     * **图片只增不删**（两种模式一致）：只补本地没有的 url，不删不改已有；
     * **正文按模式落地**：见上文 ``refresh`` 说明（同步链路 = 填空；「同步」按钮 =
       刷新），共同底线是**详情正文为空时不抹本地**；
+    * **话题拆分**（§34.2，2026-09-25）：正文里的 `#话题` 摘进 `topics` 表 +
+      `note_topics` 关系（正文不再存话题）；平台声明的 ``tags`` 是权威、正文解析
+      是兜底；话题 / 关系**只增不删**（唯一实现 ``apply_sync_topics``）；
     * **`hydrated_at` = 详情取到的标记**：批量同步（页内联，§19.14）只挑
       `hydrated_at IS NULL` 或「视频笔记却没有视频资产」的行 ⇒ 失败的行**不写**标记，
       下次**全量同步**自然重试（与商品侧「详情失败 ⇒ `detail_synced_at` 留空、下轮重试」
       同口径）。想立刻重试的用户路径是**内容库详情卡片的「同步」按钮** —— 那条路径不看标记；
     * **失败静默**：拿不到就保持原样（笔记与已落库的正文都在），原因放在返回值里。
+
+    ``allow_tokenless``：透传给 ``_note_detail_url`` —— 本地生成 + 已发布笔记的
+    raw 没有详情地址（平台 publish 响应只回 id），单条同步路径据此兜底拼 explore
+    地址（详见 ``_note_detail_url`` docstring）。批量 / 定时链路保持默认 False。
 
     ``hydrated_at`` 写不写**按状态区分**（既不是一律写、也不是一律不写）：
 
@@ -356,8 +571,11 @@ def hydrate_note_detail(
         "images_added": 0,
         "video_added": False,
         "reason": "",
+        # §34：话题拆分结果（正文摘除 + 关系行新增数）。
+        "topics_linked": 0,
+        "content_stripped": False,
     }
-    url = _note_detail_url(note)
+    url = _note_detail_url(note, allow_tokenless=allow_tokenless)
     if not url:
         # 本地数据缺详情地址 ⇒ **写标记**：这条不会自愈，留着只会永远占住
         # 「待补齐」剩余计数（用户看到那个数字永不下降）。与 `no_session` 的
@@ -384,7 +602,7 @@ def hydrate_note_detail(
             from backend.app.api.platforms.xhs.pc import get_xhs_pc_api_adapter_factory
 
             adapter_factory = get_xhs_pc_api_adapter_factory()
-        adapter = adapter_factory(account_cookies)
+        adapter = _build_pc_adapter(adapter_factory, account_cookies, account)
 
     try:
         success, message, raw_payload = adapter.get_note_info(url)
@@ -392,7 +610,8 @@ def hydrate_note_detail(
         logger.warning("note sync: detail hydrate failed (%s): %s", note.note_id, exc)
         # ⚠️ 失败**不写** `hydrated_at`（§19.14）：账号级队列已移除，「防饿死」的
         # 前提不存在；留着 NULL ⇒ 下次全量同步重试（商品详情失败同口径）。
-        result.update(reason=f"详情请求异常：{exc}")
+        reason, code = _classify_detail_failure(exc)
+        result.update(reason=reason, code=code)
         return result
 
     if not success:
@@ -418,10 +637,13 @@ def hydrate_note_detail(
         # 填空语义（§19.13，同步链路）：正文只在本地为空时写。
         note.content = content
         result["content_filled"] = True
-    # 话题专有列（§28.2）：详情拿到非空话题 ⇒ 覆盖（最新真相）；为空 ⇒ 不碰。
+    # 话题（§34.2）：正文里的 `#话题` 拆进 `topics` 表 + `note_topics` 关系，
+    # 正文不再存话题（用户 2026-09-25 口径）。平台声明的 `tags` 是权威，正文解析
+    # 是兜底；话题 / 关系**只增不删**（`apply_sync_topics` 唯一实现）。
     detail_topics = [str(t).strip() for t in (normalized.get("tags") or []) if str(t).strip()]
-    if detail_topics:
-        note.topics_json = json.dumps(detail_topics, ensure_ascii=False)
+    topic_outcome = apply_sync_topics(db, note, detail_topics)
+    result["topics_linked"] = topic_outcome["relations_added"]
+    result["content_stripped"] = topic_outcome["content_stripped"]
     result["images_added"] = _merge_note_images(db, note, normalized.get("image_urls") or [])
     # ⚠️ **视频流地址也必须落库**（2026-09-22 修）：列表端点只给 `video_info.duration`、
     # 不带流地址（真机实测），可播放地址**只有详情有**。旧实现拿到了 `video_url`
@@ -499,8 +721,15 @@ def sync_note_from_platform(
         )
         return result
 
+    # 本地没有详情地址时，先用账号自己的 ark 令牌回查一次商品笔记列表补上
+    # （§25.4：平台 publish 响应只回 id）。best-effort：查不到就靠
+    # `allow_tokenless` 的 explore 兜底，不回查不阻路。
+    if not _note_detail_url(note):
+        _backfill_detail_ref_for_account(db, account, note)
+
     outcome = hydrate_note_detail(
-        db, account, note, refresh=True, adapter_factory=adapter_factory
+        db, account, note, refresh=True, adapter_factory=adapter_factory,
+        allow_tokenless=True,
     )
     result.update(
         status=outcome["status"],
@@ -519,6 +748,609 @@ def sync_note_from_platform(
         note.platform_missing_at = None
         db.commit()
     return result
+
+
+# --------------------------------------------------------------------------- #
+# 批量同步：单 worker FIFO 队列（设计 13 §35，2026-09-25 用户口径）
+#
+# 用户口径原文：「内容库新增一个同步进度卡，新增支持多选批量同步笔记，只有已发布的
+# 支持被选中，后端使用队列，按顺序同步，并统计数据到进度卡，已同步数/同步进度比/总数」。
+#
+# **队列持久化（§35.9，2026-09-25 用户口径「应用退出再次启动后可继续执行」）**：
+# 原来是**纯内存** deque —— 进程一退、没跑完的篇就丢了。现在队列项的**唯一真相源
+# 是 `tasks` 表**（`note_queue_service`，复用不造表），内存里只剩一个唤醒信号
+# `_sync_wakeup`（不是队列，是「可能有活干了」的提示）；worker 每次醒来都去 DB
+# `claim_next_item()` 认领。⇒ 重启后未跑完的篇仍在库里，由启动恢复重新入队。
+#
+# ⚠️ **不做内存 + DB 双写**：那是两份真相源（DEF-044 级），一致性迟早崩。
+# 内存结构（deque / results dict / running 元组）本轮**整段删除**，不留影子。
+#
+# 与发布队列（`note_publish_service`，§31.5）**同构不同责**：
+#   * 同一个形态：FIFO + 单 worker + 快照 + 路由注册在 `/{note_id}` 之前；
+#   * 不同的活：这里逐篇跑 `sync_note_from_platform`（**唯一实现复用** —— 详情拉取、
+#     合并落库、限流等待、hydrated_at 三态与单条按钮、定时任务同一把尺子），
+#     不新写一份同步逻辑（DEF-044/047/058）。
+#   * 不同的账：同步失败**不落库到笔记行**（没有 publish_error 那样的持久位），
+#     结果在 `tasks` 行的 `payload` 里（快照 `finished` 逐篇给出）。
+# --------------------------------------------------------------------------- #
+
+#: 批量同步单次上限（篇）。与发布批次（`BatchPublishNotesRequest.max_items`）同值：
+#: 批量是显式动作，超限分多次即可；同步单篇 = 一次详情请求（www 额度 5 次/分钟），
+#: 20 篇 ≈ 4 分钟以上，取 20 与发布批次对齐。
+SYNC_BATCH_MAX_ITEMS = 20
+
+#: worker 空闲时的兜底巡检间隔（秒）。唤醒信号是「提示」不是「唯一入口」：
+#: 一旦 `_sync_wakeup` 的 set 因任何原因没被等到，最坏情况也只是**晚这么久**发现
+#: 新任务，不会永久停摆（DEF-048「安全网不能条件性」）。
+SYNC_IDLE_POLL_SECONDS = 5.0
+
+#: 队列内存态保护锁：本轮起只保护「停止位 + 唤醒位」的复合读写（不再守护 deque）。
+_sync_queue_lock = threading.Lock()
+#: 唤醒信号（**不是队列**）：入队后 set，worker 醒来去 DB 认领。
+_sync_wakeup = threading.Event()
+#: worker 收尾 / 测试专用出口（置位 + set wakeup ⇒ 排空即退；生产永不置位）。
+_sync_worker_stop = threading.Event()
+_sync_worker: Optional[threading.Thread] = None
+#: 后台线程自建 Session 的工厂（测试注入临时库的 sessionmaker）。
+_session_factory = SessionLocal
+
+
+def _enqueue_sync(
+    db: Session,
+    *,
+    user_id: int,
+    note_pk: int,
+    note_title: str = "",
+    account_id: Optional[int] = None,
+    source: str,
+    batch: Any = None,
+) -> tuple[Any, bool]:
+    """入队一篇到 `tasks` 表（幂等）。返回 `(task_row, created)`。
+
+    `created=False` = 已在队列 / 执行中（不重复请求）。调用方据此回
+    `{ok: true, status: "queued", already_queued: true}`。
+
+    `note_title` = 入队时的笔记标题快照（§35.9：入队即完整落库 —— 队列记录页
+    直接显示主体，不为每行回头拉笔记）。`source` = **按钮级来源**（必填，见
+    `note_queue_service` 的来源常量；单条 / 批量入口各传各的）。
+
+    `account_id` = 这篇笔记所属平台账号（`note.platform_account_id`）—— 队列记录页
+    的「账号」列要在**每条明细**上回答「这行是哪个账号跑的」（2026-09-26 用户口径
+    「批次记录执行的账号」）。与发布 / 商品生成两个队列**同形**：入队即写进
+    `payload.account_id`（原先只有这里漏了 ⇒ 同步队列项的账号恒为 `None`，页面上
+    整列都是 `-`）。**批次行的账号由子行派生**（`batch_account_ids`），不在批次行上
+    另存一份（一次批量可以跨账号勾选 ⇒ 批次级只有一个账号 id 是错的）。
+
+    `batch` = 这次入队动作的批次上下文（2026-09-26 用户口径「批次逻辑不再移除，
+    生成唯一批次号」）：同一动作的每次调用传**同一个** `BatchRequest` 实例，
+    底座据此把真落库的项挂到同一个批次号下。
+
+    ⚠️ 不 commit、**不唤醒 worker**：一次批量 = 一个事务，提交与唤醒都归
+    :func:`start_batch_sync`（worker 自建 Session，看不到未提交的行）。
+    """
+    return note_queue_service.enqueue_item(
+        db,
+        user_id=user_id,
+        item_task_type=note_queue_service.TASK_TYPE_SYNC_ITEM,
+        note_pk=note_pk,
+        account_id=account_id,
+        note_title=note_title,
+        source=source,
+        batch=batch,
+    )
+
+
+def ensure_sync_worker() -> None:
+    """确保有一条活着的 worker（惰性起；已活则只唤醒它）。
+
+    公开（不是 `_` 前缀）：**启动恢复**也要用它 —— `main.py::lifespan` 复位完
+    中断行后立刻唤醒，把上次进程留下的 `pending` 项接着跑（否则要等看门狗 30 秒
+    后巡检才发现「没 worker」）。
+    """
+    with _sync_queue_lock:
+        if _sync_worker is None or not _sync_worker.is_alive():
+            _spawn_sync_worker()
+    _sync_wakeup.set()
+
+
+def _enqueue_notes(
+    db: Session,
+    user_id: int,
+    note_pks: list[int],
+    *,
+    gate: Any,
+    gate_message: str,
+    max_items: int,
+    source: str,
+) -> dict:
+    """**入队的唯一实现**（单条与批量共用；设计 13 §35.2 / §35.10）。
+
+    只有「门禁函数 + 门禁文案 + 上限 + **来源**」四处不同，其余（去重 / 归属校验 /
+    幂等入队 / 整批一事务 / 提交后唤醒）逐字相同 —— 单条另写一份就是 DEF-044。
+
+    ⚠️ **门禁两把尺子，不要合并**：单条 `note_supports_sync`（`synced` **或**
+    已发布）vs 批量 `note_supports_batch_sync`（**仅**已发布，用户口径「只有已发布
+    的支持被选中」）。改一边不默认改另一边。
+
+    `source` = 按钮级来源（必填）：单条入口传 `note_sync_single`，批量入口传
+    `note_sync_batch`（2026-09-26 用户口径「来源要具体到按钮」）。
+
+    **一个动作 = 一个批次**（2026-09-26 用户口径「批次逻辑不再移除，生成唯一
+    批次号」）：本函数（无论单条还是批量调用）建**一个** `BatchRequest`，通过篇
+    全挂同一个批次号 —— 用户在记录页看到的就是「一次点击 = 一个批次 + N 条明细」。
+    批次行**懒创建**（一篇都没通过门禁 ⇒ 不留空批次行）。
+
+    **一个事务**（要么整批入队、要么整批不落）。
+    """
+    cleaned = [int(pk) for pk in note_pks if str(pk).strip()]
+    distinct = list(dict.fromkeys(cleaned))[:max_items]
+    # 一次动作一个批次上下文（懒创建：真有一篇入队才落批次行）
+    batch = note_queue_service.BatchRequest(
+        user_id=user_id,
+        item_task_type=note_queue_service.TASK_TYPE_SYNC_ITEM,
+        source=source,
+    )
+
+    results: list[dict] = []
+    try:
+        for note_pk in distinct:
+            note = db.get(Note, note_pk)
+            if note is None or note.user_id != user_id:
+                results.append(
+                    {"note_pk": note_pk, "ok": False, "error": "笔记不存在或不属于当前用户", "code": "NOTE_NOT_FOUND"}
+                )
+                continue
+            if not gate(note):
+                results.append(
+                    {"note_pk": note_pk, "ok": False, "error": gate_message, "code": "NOTE_NOT_SYNCABLE"}
+                )
+                continue
+            _row, created = _enqueue_sync(
+                db,
+                user_id=user_id,
+                note_pk=note.id,
+                note_title=str(note.title or ""),
+                # 账号快照（队列记录页「账号」列的数据来源）：`note` 就在手边，
+                # 顺手带上 —— 发布队列那边也是在入队时取 `note.platform_account_id`。
+                account_id=(
+                    int(note.platform_account_id) if note.platform_account_id else None
+                ),
+                source=source,
+                batch=batch,
+            )
+            results.append(
+                {
+                    "note_pk": note.id,
+                    "ok": True,
+                    "status": "queued",
+                    "note_id": note.note_id,
+                    **({} if created else {"already_queued": True}),
+                }
+            )
+        db.commit()
+    except BaseException:
+        db.rollback()  # 安全网不条件性：半批入队比不入队更难排查
+        raise
+
+    # ⚠️ 唤醒放在**提交之后**：worker 自建 Session，看不到未提交的行 ——
+    # 提前唤醒只会让它空转一轮再回 wait。
+    ensure_sync_worker()
+    started = sum(1 for r in results if r.get("ok"))
+    logger.info(
+        "note sync enqueued (total=%s, started=%s, already=%s)",
+        len(distinct),
+        started,
+        sum(1 for r in results if r.get("already_queued")),
+    )
+    return {"total": len(distinct), "started": started, "failed": len(distinct) - started, "results": results}
+
+
+def start_batch_sync(
+    db: Session,
+    user_id: int,
+    note_pks: list[int],
+    *,
+    max_items: int = SYNC_BATCH_MAX_ITEMS,
+) -> dict:
+    """批量同步入口（设计 13 §35.2）：逐篇过门禁，通过篇按序入队，**毫秒级返回**。
+
+    门禁（与前端 `canBatchSyncNote` 同口径，模型层唯一判据
+    `note_supports_batch_sync`）：① 归属（`user_id`）；② **已发布**
+    （`publish_status == "published"`）。不达标篇**不入队**、进 `results`
+    （`ok:false, code:"NOTE_NOT_SYNCABLE"` / `"NOTE_NOT_FOUND"`），不阻断其余。
+
+    立即返回 `{total, started, failed, results}`：通过篇
+    `{ok:true, status:"queued"}`（重复入队的带 `already_queued:true`）。终态由
+    前端轮询 `GET /notes/sync-queue`（快照 `finished` 带逐篇结果与原因）。
+    """
+    return _enqueue_notes(
+        db,
+        user_id,
+        note_pks,
+        gate=note_supports_batch_sync,
+        gate_message="只有已发布过的笔记支持批量同步",
+        max_items=max_items,
+        source=note_queue_service.SOURCE_NOTE_SYNC_BATCH,
+    )
+
+
+def start_sync_note(db: Session, user_id: int, note_pk: int) -> dict:
+    """单条同步入口（内容库「同步」按钮）：**与批量同一个队列、同一个 worker**。
+
+    2026-09-25 用户口径：「单独点击同步按钮也需要放入同步队列中执行，与批量同步
+    一致」。改造前单条是**同步阻塞执行**（端点在请求线程里直接调
+    `sync_note_from_platform`）⇒ 与批量并存时两条链路各打各的平台请求，
+    www 额度（5 次/分钟）下互相插队、限流等待叠加；队列化后只有一个 worker
+    逐篇跑，顺序执行就是限流的第一道保障（§21.3 等待式限流）。
+
+    门禁仍是**单条那把尺子** `note_supports_sync`（`synced` **或**已发布）——
+    比批量（仅 published）宽，**不随这次改造收紧**（页面按钮的渲染条件
+    `canSyncNote` 与它同口径，收紧会让「按钮在、点了 400」重现）。
+
+    返回与批量 `results` 单项**同形**：`{note_pk, ok, status:"queued", note_id,
+    already_queued?}`；门禁不过 / 笔记不存在时 `ok:false` + `code` + `error`，
+    **不抛异常**（调用方按 `ok` 决定回 400 还是 200）。
+
+    ⚠️ 不返回同步的**逐项细节**（正文 / 图片各更新了什么）—— 那是
+    `sync_note_from_platform` 的返回，现在只发生在 worker 线程里。终态与原因由
+    `GET /notes/sync-queue` 的快照 `finished` 给一次（与批量同一出口）。
+    """
+    payload = _enqueue_notes(
+        db,
+        user_id,
+        [note_pk],
+        gate=note_supports_sync,
+        gate_message="只有三方同步笔记或已发布过的笔记支持同步",
+        max_items=1,
+        source=note_queue_service.SOURCE_NOTE_SYNC_SINGLE,
+    )
+    item = payload["results"][0] if payload["results"] else {
+        "note_pk": int(note_pk), "ok": False, "error": "笔记不存在或不属于当前用户", "code": "NOTE_NOT_FOUND",
+    }
+    logger.info(
+        "note single sync enqueued (note_pk=%s, ok=%s, already=%s)",
+        note_pk,
+        item.get("ok"),
+        item.get("already_queued", False),
+    )
+    return item
+
+
+def _sync_worker_loop() -> None:
+    """DB 队列 worker：醒来 → 认领一条 → 跑一条 → 再认领 …… 认不到就回去等。
+
+    ⚠️ 唤醒信号只是**提示**：`wait(timeout=SYNC_IDLE_POLL_SECONDS)` 带兜底超时
+    ⇒ 任何一次 `set` 丢失，最坏也只是晚 5 秒发现新任务，不会永久停摆
+    （DEF-048：安全网不能条件性）。
+
+    ⚠️ DEF-069（2026-09-25 真机）：`_run_one_sync` 篇内的 `except BaseException`
+    挡「一篇炸」，但**线程自身**仍可能被 BaseException（`SystemExit` 等 ——
+    threading 对它们**静默**，连 traceback 都不打）或漏网路径带走 ⇒ 队列剩余篇
+    永久停摆（用户看到「待同步 N」永不下降）。外层再包一层网；真死了由看门狗
+    重建（`start_sync_worker_watchdog`），重建时把卡在 `running` 的行复位。
+
+    `_sync_worker_stop` 是**收尾 / 测试专用出口**：置位（并 `set` 唤醒）后**不再
+    认领新任务**、立即退出。生产永不置位 —— 进程退出由 daemon 线程语义保证。
+    ⚠️ 「不丢正在排队的篇」现在**由库保证**（未跑的项是 `pending` 行，下次启动
+    接着跑），不再依赖 worker「排空」；停止位只负责别再干新活。
+    """
+    while not _sync_worker_stop.is_set():
+        _sync_wakeup.wait(timeout=SYNC_IDLE_POLL_SECONDS)
+        _sync_wakeup.clear()
+        while not _sync_worker_stop.is_set():
+            item_id = _claim_one_sync_item()
+            if item_id is None:
+                break
+            try:
+                _run_one_sync(item_id)
+            except BaseException as error:  # noqa: BLE001 - 线程不死（DEF-069）
+                logger.error(
+                    "note batch sync worker: run escaped the inner net (task=%s): %s",
+                    item_id,
+                    error,
+                    exc_info=True,
+                )
+
+
+def _claim_one_sync_item() -> Optional[int]:
+    """认领一条待跑项，返回其 `tasks.id`（无活可干 / 认领出错 ⇒ None）。
+
+    认领用**独立 Session**（`claim_next_item` 内部提交换状态，用完即关）；
+    用它自带的 `except BaseException` 兜住认领期的 DB 异常 —— 认领失败只是这一轮
+    空转（外层 `wait(timeout=…)` 天然退避），不许把 worker 带走。
+    """
+    db = _session_factory()
+    try:
+        item = note_queue_service.claim_next_item(
+            db, item_task_type=note_queue_service.TASK_TYPE_SYNC_ITEM
+        )
+        return int(item.id) if item is not None else None
+    except BaseException:  # noqa: BLE001 - 认领失败退避，不死 worker
+        logger.exception("note batch sync worker: claim failed")
+        return None
+    finally:
+        db.close()
+
+
+def _item_note_pk(item: Task) -> int:
+    """从队列项的 `payload` 取 `note_pk`（0 = 脏行，当不存在处理）。
+
+    委托持久化底座的 `note_pk_of`（原实现从 `_note_pk_of` 私有名提升为公开名：
+    发布 worker 也要用同一份，**同一语义不留两份实现**）。
+    """
+    return note_queue_service.note_pk_of(item)
+
+
+def _run_one_sync(item_id: int) -> None:
+    """跑一条（按 `tasks.id`）：自建 Session；任何漏网异常都不许把队列卡死。
+
+    ⚠️ DEF-069：`except BaseException` 而不是 `except Exception` —— `SystemExit`
+    是 `BaseException` 子类，`except Exception` 抓不到，而 threading 对它**静默**
+    （不打 traceback、不重启线程）⇒ worker 无声死亡、队列停摆。
+
+    安全网不条件性（DEF-048）：**任何**异常路径都必须把这条写成终态（`failed` +
+    原因），否则它会永远挂在 `running` 上（快照里「正在同步」永远转圈）。
+    """
+    db = _session_factory()
+    try:
+        item = db.get(Task, item_id)
+        if item is None:
+            return  # 行已被清理任务删掉 / 不存在：无事可做
+        note_pk = _item_note_pk(item)
+        note = db.get(Note, note_pk) if note_pk else None
+        if note is None:
+            note_queue_service.finish_item(
+                db, item, ok=False, reason="笔记不存在", code="NOTE_NOT_FOUND"
+            )
+            return
+        # 提速（DEF-069）：本篇缺详情地址（本地生成 + 已发布的既有形态）时，把
+        # **队列里同样缺地址的篇一次请求全部补上** —— 否则 N 篇本地生成笔记要
+        # 打 N 次千帆（1-2 秒/次）。一篇触发、全批受益；后续篇 `_note_detail_url`
+        # 已能取到地址，`sync_note_from_platform` 内部的单篇回查自然跳过。
+        if not _note_detail_url(note):
+            pending_pks = note_queue_service.list_note_pks_by_status(
+                db, item_task_type=note_queue_service.TASK_TYPE_SYNC_ITEM
+            )
+            batch = [row for row in (db.get(Note, pk) for pk in pending_pks) if row is not None]
+            batch = [row for row in batch if row.platform_account_id == note.platform_account_id]
+            if batch:
+                account = db.get(PlatformAccount, note.platform_account_id)
+                if account is not None:
+                    _backfill_detail_ref_for_accounts(db, account, [note, *batch])
+        # **唯一实现复用**：与单条「同步」按钮、定时任务同步同一把尺子（限流等待 +
+        # 详情合并落库 + hydrated_at 三态），不另写一份同步逻辑。
+        outcome = sync_note_from_platform(db, note)
+        note_queue_service.finish_item(
+            db,
+            item,
+            ok=outcome.get("status") == "ok",
+            reason=str(outcome.get("reason") or ""),
+            code=str(outcome.get("code") or ""),
+        )
+    except BaseException as error:  # noqa: BLE001 - 兜底安全网：SystemExit 也不许把队列卡死
+        logger.warning("note batch sync worker crashed (task=%s): %s", item_id, error)
+        try:
+            db.rollback()  # 失败的 commit 留待回滚状态；不回滚则记结果的动作也会炸
+        except Exception:  # noqa: BLE001 - 恢复也失败只能留痕，不能再抛
+            logger.exception("note batch sync rollback failed (task=%s)", item_id)
+        try:
+            item = db.get(Task, item_id)
+            if item is not None:
+                note_queue_service.finish_item(
+                    db,
+                    item,
+                    ok=False,
+                    reason=f"{type(error).__name__}: {error}",
+                    code="SYNC_FAILED",
+                )
+        except Exception:  # noqa: BLE001 - 连记账都失败：留痕，行留在 running 由启动恢复捡回
+            logger.exception("note batch sync failed to record failure (task=%s)", item_id)
+    finally:
+        db.close()
+
+
+#: worker 线程名（探针与重建都认它；DEF-067 同型：存活判据只能是**线程在不在**）。
+SYNC_WORKER_THREAD_NAME = "note-batch-sync-worker"
+
+#: 看门狗巡检间隔 / 重建失败指数退避上限（与调度器守活 `scheduler_service` 同值）。
+SYNC_WATCHDOG_INTERVAL_SECONDS = 30.0
+SYNC_WATCHDOG_MAX_BACKOFF_SECONDS = 600.0
+
+_sync_watchdog_stop = threading.Event()
+
+
+def sync_worker_thread_alive() -> bool:
+    """进程里有没有**活着的** `note-batch-sync-worker` 线程（唯一可信存活判据，DEF-069）。
+
+    为什么不看 `_sync_worker` 模块变量：线程带异常 / `SystemExit` 死后它仍指着
+    那个 `Thread` 对象，而 `_enqueue_sync` 只在**入队时**检查一次 —— 队列跑起来
+    之后线程死了，没有任何现存路径会发现。与
+    `scheduler_service.scheduler_thread_alive()` 同判据（DEF-067 的教训：
+    状态位会骗人，线程本身不会）。
+    """
+    return any(
+        thread.name == SYNC_WORKER_THREAD_NAME and thread.is_alive()
+        for thread in threading.enumerate()
+    )
+
+
+def _spawn_sync_worker() -> None:
+    """起一条新的 worker 线程（调用方持 `_sync_queue_lock`）。
+
+    起新世代时清掉历史停止位 —— 重建出来的 worker 不该被上一世代的收尾位挡住
+    （`_revive_sync_worker` 的路径）。
+    """
+    global _sync_worker
+    _sync_worker_stop.clear()
+    _sync_worker = threading.Thread(
+        target=_sync_worker_loop,
+        name=SYNC_WORKER_THREAD_NAME,
+        daemon=True,
+    )
+    _sync_worker.start()
+
+
+def stop_sync_worker(*, timeout: float = 5.0) -> None:
+    """让当前 worker **立即停手退出**（**测试 / 进程收尾专用**，生产不调用）。
+
+    只置停止位不够：worker 常态卡在 `_sync_wakeup.wait(timeout=…)` 上，必须再
+    `set` 一下 wakeup 才能唤醒它回来检查停止位。唤醒后它**不再认领新任务**、
+    手上那条跑完即退。
+
+    ⚠️ 「不丢正在排队的篇」现在**由库保证**：未跑的项还是 `pending` 行，下次启动
+    （或下一次唤醒）接着跑 —— 不靠 worker「排空」。
+    """
+    _sync_worker_stop.set()
+    _sync_wakeup.set()
+    worker = _sync_worker
+    if worker is not None and worker.is_alive():
+        worker.join(timeout=timeout)
+
+
+def _revive_sync_worker() -> None:
+    """worker 线程死了 ⇒ 复位它卡住的那条 + 重建 worker（不丢篇）。
+
+    线程死后，它认领的那条 `tasks` 行**永远停在 `running`**（`_sync_worker_loop`
+    的 finally 都没机会跑）⇒ 不复位的话它既不会被重跑、也永远算在「正在同步」里，
+    快照的待同步数含它、前端永远轮询。复位就是把它改回 `pending`
+    （`recover_interrupted` 只动 `running` 行，见其 docstring）。
+
+    ⚠️ **顺序：先复位、再起新 worker**。反过来新 worker 可能刚认领一条就被复位
+    抢回 `pending` ⇒ 同一条被跑两遍。
+
+    判据是 `_sync_worker.is_alive()`（这一条自己的线程），与探针的进程级枚举互补：
+    探针回答「还有没有能干活的」，这里回答「要不要换」。
+    """
+    recovered = {"requeued": 0, "failed": 0}
+    try:
+        db = _session_factory()
+        try:
+            recovered = note_queue_service.recover_interrupted(
+                db, item_task_types=(note_queue_service.TASK_TYPE_SYNC_ITEM,)
+            )
+        finally:
+            db.close()
+    except BaseException:  # noqa: BLE001 - 复位失败也要把 worker 建起来
+        logger.exception("同步 worker 重建：中断行复位失败（继续重建 worker）")
+    with _sync_queue_lock:
+        if _sync_worker is None or not _sync_worker.is_alive():
+            _spawn_sync_worker()
+    _sync_wakeup.set()  # 新 worker 可能已在 wait 上：不等下一批也要立刻跑积压
+    logger.error(
+        "note-batch-sync-worker 已死 —— 已重建（中断行 requeued=%s failed=%s）",
+        recovered.get("requeued"),
+        recovered.get("failed"),
+    )
+
+
+def start_sync_worker_watchdog(
+    *, interval: float = SYNC_WATCHDOG_INTERVAL_SECONDS
+) -> threading.Thread:
+    """守活线程：worker 死了就重建（DEF-069，2026-09-25）。
+
+    现场（真机，不是推演）：批量同步 19 篇跑到 8 篇后 `note-batch-sync-worker`
+    线程**无声消失** —— `py-spy dump` 进程里查无此线程、日志无 traceback、DB 无
+    新写入、SQLite 写锁无竞争 ⇒ 剩余 11 篇「待同步」永不执行、前端按
+    `pending != 0` 一直轮询。与 DEF-067 的 APScheduler **同型**：单线程组件
+    没有自愈，任何 `except Exception` 够不着的死法都是永久停摆。
+
+    看门狗自己绝不被一次失败带走（`except BaseException` + 失败指数退避，
+    上限 `SYNC_WATCHDOG_MAX_BACKOFF_SECONDS`）。进程收尾调
+    :func:`stop_sync_worker_watchdog`。
+    """
+    _sync_watchdog_stop.clear()
+
+    def _loop() -> None:
+        backoff = interval
+        while not _sync_watchdog_stop.is_set():
+            if _sync_watchdog_stop.wait(backoff):  # 可被 stop 打断的等待
+                return
+            try:
+                if sync_worker_thread_alive():
+                    backoff = interval
+                    continue
+                _revive_sync_worker()
+                backoff = interval
+            except BaseException:  # noqa: BLE001 - 看门狗自己也不能死
+                logger.exception("同步 worker 看门狗重建失败，%.0f 秒后重试", backoff)
+                backoff = min(backoff * 2, SYNC_WATCHDOG_MAX_BACKOFF_SECONDS)
+
+    thread = threading.Thread(target=_loop, name="sync-worker-watchdog", daemon=True)
+    thread.start()
+    return thread
+
+
+def stop_sync_worker_watchdog() -> None:
+    """让看门狗退出巡检（幂等；下一次 `start_sync_worker_watchdog` 自动复位）。"""
+    _sync_watchdog_stop.set()
+
+
+def sync_queue_snapshot(db: Session, user_id: int, *, platform: Optional[str] = None) -> dict:
+    """同步队列快照（进度卡用；设计 13 §35.3 / §35.9）。
+
+    2026-09-26 常驻化（用户口径「不需要队列批次，队列是常驻」）：快照只描述
+    **队列实时态 + 近期终态** —— `running` = 正在同步的那条，`queued` = 排队中的
+    （FIFO 序），`finished` = 近期终态项（含逐项 `ok` 与 `reason` —— 同步失败
+    不落库到笔记行，原因只在这里给一次），`total` = 三者计数之和（进度卡停止
+    条件「`total > 0` 且待处理为 0」靠它成立）。
+
+    **不再有 `synced` / `failed` 计数字段**：「本轮成败」由前端按自己入队的项
+    累计（后端不知道用户这一轮点了什么），窗口计数只会把「近期」说成「本轮」。
+
+    ⚠️ 2026-09-26 用户口径改口径（「**只统计当日同步的数据**……统计队列记录表中的
+    数据」）：卡上三数**不再由前端按自己入队的篇累计**（刷新页面就丢、也看不见
+    别的入口入队的），改由 `today` 键（`note_queue_service.today_item_counts`：
+    当日 `tasks` 行现算 成功 / 失败 / 待处理）承担。逐篇失败原因仍走 `finished`。
+
+    形状与另两个队列对齐（前端三卡同一套轮询骨架）；实现直接委托持久化底座
+    （`note_queue_service.snapshot`），本模块不留第二份实现（DEF-044）。
+    """
+    raw = note_queue_service.snapshot(
+        db,
+        user_id=user_id,
+        item_task_type=note_queue_service.TASK_TYPE_SYNC_ITEM,
+        platform=platform,
+    )
+    return {
+        "running": raw["running"],
+        "queued": raw["queued"],
+        "total": raw["total"],
+        "finished": raw["finished"],
+        # 进度卡的**当日三数**（2026-09-26 用户口径「只统计当日同步的数据，……
+        # 统计队列记录表中的数据」）：来自 `tasks` 表，不是本页累计。
+        "today": note_queue_service.today_item_counts(
+            db,
+            user_id=user_id,
+            item_task_type=note_queue_service.TASK_TYPE_SYNC_ITEM,
+        ),
+    }
+
+
+def wait_sync_done(note_pk: int, timeout: float = 30.0) -> bool:
+    """等某篇跑完（**测试用**；生产代码不调）。超时返 False。
+
+    判据 = 库里该 `note_pk` 不再有待跑（`pending`）/ 在跑（`running`）的同步项。
+    已终态 / 从未入队 ⇒ 立即 True（与旧内存版「查不到等待事件就当已完成」同语义）。
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            db = _session_factory()
+            try:
+                open_pks = note_queue_service.list_note_pks_by_status(
+                    db,
+                    item_task_type=note_queue_service.TASK_TYPE_SYNC_ITEM,
+                    statuses=("pending", "running"),
+                )
+            finally:
+                db.close()
+            if int(note_pk) not in open_pks:
+                return True
+        except BaseException:  # noqa: BLE001 - 查询失败继续等，不炸测试
+            logger.exception("wait_sync_done: 查询队列状态失败（继续等待）")
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
 
 
 def _pending_hydration_count(db: Session, account: PlatformAccount) -> int:
@@ -590,7 +1422,7 @@ def _hydrate_page_notes(
     纪律：
 
     * **单一实现**：逐条委托 ``hydrate_note_detail``（正文填空 / 图集与视频只增不删 /
-      话题非空覆盖 / ``hydrated_at`` 三态）—— 不另写一份合并逻辑（DEF-044/047/058）；
+      话题拆分只增不删 / ``hydrated_at`` 三态）—— 不另写一份合并逻辑（DEF-044/047/058）；
     * **限流等待不即停**（§21.3）：等不到 ⇒ 停本页剩余条目并计数报上去，
       **不逐条静默 continue**（静默正是旧实现「同步成功、正文永远为空」的坑）；
     * **失败不写标记**：列表数据已落库，``hydrated_at`` 留 NULL，下次**全量同步**重试。
@@ -675,9 +1507,14 @@ def _pc_total(raw_payload: Any) -> Optional[int]:
 
 
 def _sleep_between_pages() -> None:
-    gap = min(max(PAGE_GAP_SECONDS, 0.0), MAX_PAGE_GAP_SECONDS)
-    if gap > 0:
-        time.sleep(gap)
+    """页间停顿 = 基础值 × 随机抖动（唯一实现 `sync_pacing.sleep_between_pages`）。
+
+    读**模块级** `PAGE_GAP_SECONDS`（不是闭包常量），测试 monkeypatch 成 0
+    仍然免等待。
+    """
+    from backend.app.services.sync_pacing import sleep_between_pages
+
+    sleep_between_pages(PAGE_GAP_SECONDS, cap=MAX_PAGE_GAP_SECONDS)
 
 
 def _creator_total_strict(raw_payload: Any) -> Optional[int]:
@@ -1016,6 +1853,9 @@ def _merge_ark_notes(db: Session, account: PlatformAccount, items: list[dict[str
             note.raw_json = ark_raw
             db.add(note)
             db.flush()
+            # §34：ark 条目 content 恒为空（列表无正文），声明话题也没有 ⇒ 这里是
+            # 幂等 no-op；万一带了正文 / 话题，与 creator 源同一把尺子拆（唯一实现）。
+            apply_sync_topics(db, note)
             # ⚠️ 持锁纪律（设计 13 §24.7）：**先落笔记行（短事务），再下载素材（零锁），
             # 再落资产行**。旧实现 flush 后逐图下载、页末才 commit ⇒ 写锁跨网络持有
             # 数十秒~数分钟，其他类型任务的写者全被顶到 `database is locked`。
@@ -1041,6 +1881,8 @@ def _merge_ark_notes(db: Session, account: PlatformAccount, items: list[dict[str
                 note.content = str(normalized.get("content") or "")
             if not note.author_name:
                 note.author_name = str(normalized.get("author_name") or "")
+            # §34：与新建分支同一把尺子（ark 条目通常无正文无话题 ⇒ 幂等 no-op）。
+            apply_sync_topics(db, note)
             # ⚠️ 必须赋**新 dict**：JSON 列没有挂 MutableDict，原地改
             # （`raw["ark"] = ...`）再赋回同一个对象，SQLAlchemy 的历史比对
             # 看到「还是那个对象」就不发 UPDATE —— 合并会静默丢失（本函数

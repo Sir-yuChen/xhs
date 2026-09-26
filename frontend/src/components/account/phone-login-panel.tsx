@@ -1,4 +1,4 @@
-import { Alert, Button, Form, Input, Space, Typography } from "antd";
+import { App, Button, Form, Input, Space, Typography } from "antd";
 import { MessageOutlined, CheckCircleOutlined } from "@ant-design/icons";
 import { useEffect, useRef, useState } from "react";
 
@@ -49,8 +49,11 @@ export function PhoneLoginPanel({
   const [isSending, setIsSending] = useState(false);
   const [isConfirming, setIsConfirming] = useState(false);
   const [cooldownSeconds, setCooldownSeconds] = useState(0);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<{ type: "success" | "warning"; text: string } | null>(null);
+  // 全站消息提醒统一走 antd message（设计 04 §3.6，2026-09-25 用户口径：
+  // 「所有消息提醒参考 antd 成熟组件，不要在页面暂用空间」）—— 面板内的
+  // notice / error 两条 inline Alert 收口成 message；`statusText` 是**实时
+  // 状态行**，不是一次性提醒，保留。
+  const { message } = App.useApp();
   const isCoolingDown = cooldownSeconds > 0;
   const renewing = typeof targetAccountId === "number";
 
@@ -71,13 +74,11 @@ export function PhoneLoginPanel({
   }, [cooldownSeconds]);
 
   async function handleSendCode() {
-    setError(null);
-    setNotice(null);
     if (isCoolingDown) {
       return;
     }
     if (phone.trim().length < 6) {
-      setError("请输入有效手机号。");
+      message.warning("请输入有效手机号。");
       return;
     }
 
@@ -94,21 +95,19 @@ export function PhoneLoginPanel({
       setStatusText("验证码已发送，请查看手机短信");
       setCooldownSeconds(PHONE_CODE_COOLDOWN_SECONDS);
     } catch {
-      setError("验证码发送失败。");
+      message.error("验证码发送失败。");
     } finally {
       setIsSending(false);
     }
   }
 
   async function handleConfirm() {
-    setError(null);
-    setNotice(null);
     if (!sessionId) {
-      setError("请先发送验证码。");
+      message.warning("请先发送验证码。");
       return;
     }
     if (code.trim().length < 4) {
-      setError("请输入短信验证码。");
+      message.warning("请输入短信验证码。");
       return;
     }
 
@@ -131,10 +130,7 @@ export function PhoneLoginPanel({
         const channel = result.renewed_channel || "";
         const channelText = channel ? loginChannelLabel(channel) : "对应";
         setStatusText("登录令牌已更新");
-        setNotice({
-          type: "success",
-          text: `已把新令牌写入该账号的「${channelText}」。其它平台的令牌未被改动。`,
-        });
+        message.success(`已把新令牌写入该账号的「${channelText}」。其它平台的令牌未被改动。`);
         onRenewedRef.current?.(result.account ?? null, channel);
         return;
       }
@@ -145,13 +141,13 @@ export function PhoneLoginPanel({
     } catch (caught) {
       const detail = (caught as { response?: { data?: { detail?: unknown } } })?.response?.data
         ?.detail;
-      const message = detailMessage(detail);
+      const reason = detailMessage(detail);
       if (renewing) {
         // 续期失败：后端**一个字节都没写**，文案必须说清「什么都没改」。
         setStatusText("续期未完成");
-        setError(message || "续期失败，本次没有保存任何令牌。");
+        message.error(reason || "续期失败，本次没有保存任何令牌。");
       } else {
-        setError("验证码校验失败或已过期。");
+        message.error("验证码校验失败或已过期。");
       }
     } finally {
       setIsConfirming(false);
@@ -199,12 +195,6 @@ export function PhoneLoginPanel({
           本次登录只更新这一个账号的对应令牌，不会新建账号；登录后若不是该账号，会报错且不保存任何内容。
         </Text>
       ) : null}
-
-      {notice ? (
-        <Alert type={notice.type} message={notice.text} showIcon />
-      ) : null}
-
-      {error ? <Alert type="error" message={error} showIcon /> : null}
 
       <Button
         type="primary"

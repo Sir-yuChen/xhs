@@ -216,7 +216,11 @@ class XhsCreatorApiAdapter:
                 "type": "topic",
             }
             data["common"]["hash_tag"].append(insert_topic)
-            data["common"]["desc"] += f" #{insert_topic['name']}[话题]# "
+            # 平台正文形态（`#名字[话题]#`）走唯一实现 —— 这条链路一直是这个形态，
+            # 商品笔记链路 2026-09-25 才对齐（同一形态不留两份实现）。
+            from backend.app.services.note_topic_service import topic_token
+
+            data["common"]["desc"] += f" {topic_token(insert_topic['name'])} "
         headers, cookies, body = api._request_params(
             post_api,
             data,

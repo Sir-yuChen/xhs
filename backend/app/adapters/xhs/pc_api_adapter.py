@@ -6,14 +6,20 @@ from backend.app.adapters.xhs.request_env import direct_xhs_request_env
 
 
 class XhsPcApiAdapter:
-    def __init__(self, cookies: str) -> None:
+    def __init__(self, cookies: str, user_id: str = "") -> None:
         self.cookies = cookies
+        #: 落库的 `PlatformAccount.external_user_id`（**平台**用户 id）。非空时直接
+        #: 注入 Auth ⇒ `XHS_Apis._request_params` 里「要 xy-direction 但没有 user_id
+        #: 就先 bootstrap」那条分支不再触发 —— 少一次 `/v2/user/me`（而那次请求本身
+        #: 要先取 DS 签名材料，是整条链路里最脆的一环：实测 CDN 抖动 8 秒超时就把
+        #: 整篇同步判死）。
+        self.user_id = str(user_id or "")
 
     def _api(self):
         from apis.xhs_pc_apis import XHS_Apis
         from xhs_utils.xhs_pc import XHSPcAuth
 
-        auth = XHSPcAuth.from_cookie(self.cookies)
+        auth = XHSPcAuth.from_cookie(self.cookies, user_id=self.user_id)
         return XHS_Apis(auth)
 
     def search_note(

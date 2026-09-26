@@ -65,6 +65,16 @@ qianfan:
   # 巡检周期（小时），默认 6；只有到期（health_checked_at 超过周期）的绑定才会被探活
   health_check_interval_hours: 6
 
+# 账号矩阵同步（设计 13 §19 / §21）：节流与账号间停顿
+xhs:
+  sync:
+    # 平台请求限流（次/分钟，按 `<账号>:<源>` 键计量；`wait_allow` 等待式，不即停）。
+    # 默认 60。嫌慢可调大（DEF-069 提速，2026-09-25 用户口径「同步感觉慢，加快速度」），
+    # 但平台风控是真实的 —— 详情请求密度过高会触发反爬（curl 28 超时即其表现形式）。
+    rate_limit_per_minute: 60
+    # 调度轮内账号之间的停顿（秒）：多账号矩阵不一窝蜂
+    account_gap_seconds: 10
+
 frontend:
   # Set to true to serve pre-built frontend from backend (Docker/production)
   serve_static: false

@@ -75,6 +75,7 @@ def _build_registry() -> dict[str, JobSpec]:
     # 延迟 import：拆掉 scheduler_service ↔ job_registry 的导入环（见模块 docstring）。
     from backend.app.services import scheduler_service
     from backend.app.services.auto_ops_service import run_keyword_pipeline
+    from backend.app.services.note_queue_service import cleanup_queue_records
     from backend.app.services.shop_health_service import run_shop_health_checks_once
 
     specs = [
@@ -145,6 +146,21 @@ def _build_registry() -> dict[str, JobSpec]:
             params_editable=("account_ids",),
             default_trigger_type="cron",
             default_cron="0 0 */6 * * *",
+        ),
+        JobSpec(
+            # 2026-09-25 用户口径「笔记任务记录清理应扩展为队列详情记录清理……
+            # 任务名称修改为队列记录清理」：任务键与中文名同步改（迁移
+            # `c2d3e4f5a6b7` 把存量行与历史日志一起改名，不静默留旧键）。
+            key="system.queue_record_cleanup",
+            name="队列记录清理",
+            func=cleanup_queue_records,
+            builtin=True,
+            user_scoped=True,
+            # 无自定义参数：保留期是**固定口径**（15 天），不做成可调项 ——
+            # 可调会让「能翻多久的历史」每人不同，排查时对不上口径。
+            params_editable=(),
+            default_trigger_type="cron",
+            default_cron="0 0 7 * * *",
         ),
         JobSpec(
             key="auto_ops.keyword_pipeline",

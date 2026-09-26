@@ -5,7 +5,7 @@ import {
   CloudDownloadOutlined,
   DashboardOutlined,
   DatabaseOutlined,
-  FileTextOutlined,
+  HistoryOutlined,
   KeyOutlined,
   LogoutOutlined,
   MenuFoldOutlined,
@@ -20,10 +20,9 @@ import {
   ShoppingOutlined,
   SettingOutlined,
   ThunderboltOutlined,
-  StarOutlined,
+  ToolOutlined,
   SunOutlined,
   UserOutlined,
-  VideoCameraOutlined,
 } from "@ant-design/icons";
 import {
   Avatar,
@@ -63,16 +62,19 @@ const mainNavItems: MenuProps["items"] = [
   { key: "/platforms/xhs/keywords", icon: <KeyOutlined />, label: "关键词组" },
   { key: "/platforms/xhs/analytics", icon: <BarChartOutlined />, label: "数据洞察" },
   { key: "/platforms/xhs/benchmarks", icon: <AimOutlined />, label: "竞品监控" },
-  { key: "/platforms/xhs/image-studio", icon: <StarOutlined />, label: "图片工坊" },
-  { key: "/platforms/xhs/video-studio", icon: <VideoCameraOutlined />, label: "视频工坊" },
   { key: "/platforms/xhs/library", icon: <DatabaseOutlined />, label: "内容库" },
-  { key: "/platforms/xhs/drafts", icon: <FileTextOutlined />, label: "草稿工坊" },
+  // 2026-09-25 §36：图片 / 视频 / 草稿三坊合并为「笔记工坊」一项（页内 Tabs 隔离）。
+  // 旧菜单项 image-studio / video-studio / drafts 整项移除（含图标 import）。
+  { key: "/platforms/xhs/note-workshop", icon: <ToolOutlined />, label: "笔记工坊" },
   { key: "/platforms/xhs/publish", icon: <SendOutlined />, label: "发布中心" },
   { key: "/platforms/xhs/auto-ops", icon: <ThunderboltOutlined />, label: "自动运营" },
 ];
 
 const footerNavItems: MenuProps["items"] = [
   { key: "/tasks", icon: <ScheduleOutlined />, label: "任务中心" },
+  // 2026-09-25 §35.11 队列记录（执行记录）。与上面的「任务中心」是两件事 ——
+  // 任务中心管「什么时候跑」（scheduled_jobs），这里管「跑完了什么」（tasks 表）。
+  { key: "/task-records", icon: <HistoryOutlined />, label: "队列记录" },
   { key: "/models", icon: <RobotOutlined />, label: "模型配置" },
   { key: "/settings", icon: <SettingOutlined />, label: "设置" },
 ];
@@ -223,7 +225,7 @@ export function AppShell() {
   );
 }
 
-export function PageHeader({ eyebrow, title, description, action }: { eyebrow: string; title: string; description: string; action?: ReactNode }) {
+export function PageHeader({ eyebrow, title, description, action }: { eyebrow: string; title: string; description: ReactNode; action?: ReactNode }) {
   return (
     <Row justify="space-between" align="top" style={{ marginBottom: 24 }}>
       <Col>

@@ -3,7 +3,7 @@
 > - **阶段**：二 · 设计
 > - **访问端**：浏览器（React SPA）
 > - **基准**：按页面（用户可见的功能单元）组织，每个页面给出布局、交互、数据来源
-> - **版本**：v1.9 · 2026-09-23（**§2.21 商品列表 v1.37 排序两改（设计 13 §33.11）**：① **默认不排序** —— `DEFAULT_SORT` 改为 `null`，进来表头没有箭头、请求也不带 `sort_field`（后端用它自己的稳定默认序）；② 点表头才触发，且**一律由后端排** —— `sorter: true` + 受控 `sortOrder`，**不许给 `sorter` 传比较函数**（antd `getSortFunction` 只在 function / `.compare` 时返回真值，`sorter: true` 时 `getSortData` 跳过本地排序；传了函数就变成「只排当前页」的假排序）；三态与 antd 原生一致（升 → 降 → 取消），「重置」清排序、「搜索」保留排序）。v1.8 · 2026-09-23（**§2.21 商品列表 v1.36 三改（设计 13 §33.10）**：① 修「挂链笔记数筛选未生效」—— 根因是**跑着的后端是旧进程**（模型里没这两个字段，Pydantic 默认 `extra="ignore"` ⇒ 参数被静默丢弃），修复 = 重启 + 请求模型加 **`extra="forbid"`**（未知字段 422，不许静默丢弃）；② 新增**批量删除本地台账行**（勾选跨页保留、换条件/换账号清空；上限 200/次；确认框讲清「关系不动 / 同步会写回」；平台商品不动）；③ 挂链笔记弹窗 **80vw × 84vh → 75vw × 75vh**（去 `maxWidth`、改 `centered`、body `overflow: auto`））。v1.7 · 2026-09-23（**§2.21 商品列表页上机验收修正（设计 13 §33，v1.33~v1.35）**：千帆可用性前置校验且未通过时**零请求 + 只提示一句**；搜索条件**恰好两行**、按钮组置尾；**新增挂链笔记数筛选**（比较符默认「小于」，留空不筛，关系表口径）；台账**只有「上架时间」列可排**且默认上架时间倒序；分类 / 商品名**不换行**（`…` 收起 + Tooltip）；缩略图 **71×71**、「N 图」角标挪到图片左上角；首卡「商品列表（千帆）」无内容时 body 整块不渲染（去空白））。v1.6 · 2026-09-22（**§2.12 内容库正文/图集补齐 + 来源账号**（设计 13 §19.13）：① 详情弹窗在正文为空、或点右上角「刷新」时带 `?hydrate=true` **即时补齐该条**（补齐后再拉素材），补齐后空正文用一行原因区分「取回过但确实没有」与「这次没取到（原因）」；② 表格新增「来源账号」列、卡片在来源与作者**不同名**时显示「来源：X」、详情弹窗加「来源账号」项 —— **空则整项不渲染**（缺值口径））。v1.5 · 2026-09-22（**§2.12 两处界面收敛（用户口径）**：① 撤掉详情弹窗里「同步回来的笔记默认『已发布』；下一轮同步会把改回『待发布』的再升回去」那行机制说明 —— 口径本身仍记在 §2.12「手动切换」行与 `03_数据模型设计.md` §4.1，只是**不搬到界面上**（把实现机制写在页面上属噪声，与「商品来源行不解释补齐行为」同源）；② 作者昵称缺值**整项不渲染**，不再写「未知」充数（硬约束⑤：没数据 ≠ 有数据））。v1.4 · 2026-09-22（**内容库「发布状态」工作流 + 详情改弹窗**：§2.12 内容库页 ① 顶部统计卡改为「已发布 / 待发布」（**全库口径**，不随筛选变化）；② 筛选加「发布状态」；③ 卡片与表格展示发布状态标识并支持**手动切换**；④ 详情由 `Drawer` 改为**弹窗**，与「我的笔记」**共用** `components/platforms/note-detail-modal.tsx`；§2.20 详情 Modal 同步标注「已抽为共用组件」）。v1.3 · 2026-09-18（v1.3：§2.4 账号卡片五字段统一 + 指标真实来源与同步入口；「我的笔记」页翻页改滚动触发、新增关键词搜索、弹窗评论区固定尺寸）
+> - **版本**：v1.10 · 2026-09-26（**§2.12 内容库统计卡：两张进度卡走「当日口径」（设计 13 §37）**：发布 / 同步进度卡的卡面三数不再由页面自己累计（刷新即归零、也看不见定时 / 恢复入口入队的项），改读快照新键 `today`（后端从 `tasks` 表按当日现算 成功 / 失败 / 待处理）；两张卡右下角加小字「仅当日数据」；六张卡统一内容高度（`flex="1 1 0%"` 只管等宽，高度得显式钉）。统计卡行由「三卡」口径勘正为**六卡**）。v1.9 · 2026-09-23（**§2.21 商品列表 v1.37 排序两改（设计 13 §33.11）**：① **默认不排序** —— `DEFAULT_SORT` 改为 `null`，进来表头没有箭头、请求也不带 `sort_field`（后端用它自己的稳定默认序）；② 点表头才触发，且**一律由后端排** —— `sorter: true` + 受控 `sortOrder`，**不许给 `sorter` 传比较函数**（antd `getSortFunction` 只在 function / `.compare` 时返回真值，`sorter: true` 时 `getSortData` 跳过本地排序；传了函数就变成「只排当前页」的假排序）；三态与 antd 原生一致（升 → 降 → 取消），「重置」清排序、「搜索」保留排序）。v1.8 · 2026-09-23（**§2.21 商品列表 v1.36 三改（设计 13 §33.10）**：① 修「挂链笔记数筛选未生效」—— 根因是**跑着的后端是旧进程**（模型里没这两个字段，Pydantic 默认 `extra="ignore"` ⇒ 参数被静默丢弃），修复 = 重启 + 请求模型加 **`extra="forbid"`**（未知字段 422，不许静默丢弃）；② 新增**批量删除本地台账行**（勾选跨页保留、换条件/换账号清空；上限 200/次；确认框讲清「关系不动 / 同步会写回」；平台商品不动）；③ 挂链笔记弹窗 **80vw × 84vh → 75vw × 75vh**（去 `maxWidth`、改 `centered`、body `overflow: auto`））。v1.7 · 2026-09-23（**§2.21 商品列表页上机验收修正（设计 13 §33，v1.33~v1.35）**：千帆可用性前置校验且未通过时**零请求 + 只提示一句**；搜索条件**恰好两行**、按钮组置尾；**新增挂链笔记数筛选**（比较符默认「小于」，留空不筛，关系表口径）；台账**只有「上架时间」列可排**且默认上架时间倒序；分类 / 商品名**不换行**（`…` 收起 + Tooltip）；缩略图 **71×71**、「N 图」角标挪到图片左上角；首卡「商品列表（千帆）」无内容时 body 整块不渲染（去空白））。v1.6 · 2026-09-22（**§2.12 内容库正文/图集补齐 + 来源账号**（设计 13 §19.13）：① 详情弹窗在正文为空、或点右上角「刷新」时带 `?hydrate=true` **即时补齐该条**（补齐后再拉素材），补齐后空正文用一行原因区分「取回过但确实没有」与「这次没取到（原因）」；② 表格新增「来源账号」列、卡片在来源与作者**不同名**时显示「来源：X」、详情弹窗加「来源账号」项 —— **空则整项不渲染**（缺值口径））。v1.5 · 2026-09-22（**§2.12 两处界面收敛（用户口径）**：① 撤掉详情弹窗里「同步回来的笔记默认『已发布』；下一轮同步会把改回『待发布』的再升回去」那行机制说明 —— 口径本身仍记在 §2.12「手动切换」行与 `03_数据模型设计.md` §4.1，只是**不搬到界面上**（把实现机制写在页面上属噪声，与「商品来源行不解释补齐行为」同源）；② 作者昵称缺值**整项不渲染**，不再写「未知」充数（硬约束⑤：没数据 ≠ 有数据））。v1.4 · 2026-09-22（**内容库「发布状态」工作流 + 详情改弹窗**：§2.12 内容库页 ① 顶部统计卡改为「已发布 / 待发布」（**全库口径**，不随筛选变化）；② 筛选加「发布状态」；③ 卡片与表格展示发布状态标识并支持**手动切换**；④ 详情由 `Drawer` 改为**弹窗**，与「我的笔记」**共用** `components/platforms/note-detail-modal.tsx`；§2.20 详情 Modal 同步标注「已抽为共用组件」）。v1.3 · 2026-09-18（v1.3：§2.4 账号卡片五字段统一 + 指标真实来源与同步入口；「我的笔记」页翻页改滚动触发、新增关键词搜索、弹窗评论区固定尺寸）
 
 ---
 
@@ -12,7 +12,7 @@
 侧边栏分为「主导航」与「底部导航」两组（`frontend/src/components/layout/app-shell.tsx:54-74`）。
 
 ```
-┌─ 主导航（14 项）────────────────────┐
+┌─ 主导航（12 项）────────────────────┐
 │ 总览          /platforms/xhs/dashboard
 │ 账号矩阵      /platforms/xhs/accounts
 │ 笔记发现      /platforms/xhs/discovery
@@ -21,10 +21,8 @@
 │ 关键词组      /platforms/xhs/keywords
 │ 数据洞察      /platforms/xhs/analytics
 │ 竞品监控      /platforms/xhs/benchmarks
-│ 图片工坊      /platforms/xhs/image-studio
-│ 视频工坊      /platforms/xhs/video-studio
 │ 内容库        /platforms/xhs/library
-│ 草稿工坊      /platforms/xhs/drafts
+│ 笔记工坊      /platforms/xhs/note-workshop   ← 2026-09-25 合并图片 / 视频 / 草稿三坊（§2.22）
 │ 发布中心      /platforms/xhs/publish
 │ 自动运营      /platforms/xhs/auto-ops
 ├─ 底部导航（3 项）───────────────────┤
@@ -33,6 +31,12 @@
 │ 设置          /settings
 └────────────────────────────────────┘
 ```
+
+> ⚠️ **2026-09-25 §36 合并**：原「图片工坊 / 视频工坊 / 草稿工坊」三个菜单项与三条路由
+> 合并为**「笔记工坊」一项一页**（页内 Tabs 隔离三个工坊）。旧路由
+> `/image-studio`、`/video-studio`、`/drafts` **重定向**到
+> `/note-workshop?tab=images|videos|drafts`（深链与书签不死）。下文 §2.10 / §2.11 /
+> §2.13 保留原设计并标注「被 §2.22 取代」，新口径以 §2.22 为准。
 
 **布局骨架**：`AppShell` = 左侧可折叠 Sider（宽 64 / 220）+ 顶部 Header（通知铃铛 + 主题切换 + 用户信息）+ 内容区。
 
@@ -222,9 +226,9 @@ PC 链路登录成功后可顺带绑定同名 Creator 账号。这个选项的�
 | 数据 | 复用 monitoring 端点：`createMonitoringTarget` / `deleteMonitoringTarget` / `fetchMonitoringTargets` / `refreshMonitoringTarget` / `fetchMonitoringSnapshots` |
 | ⚠️ 缺口 | 无「暂停/恢复」与「编辑」入口 |
 
-> 说明：`monitoring-page.tsx`（另一个监控页，401 行）被 `router.tsx:21` import 但**没有任何 `<Route>` 使用** → **孤儿页面**，竞品监控能力实际由本页承载。
+> 说明：`monitoring-page.tsx`（另一个监控页，401 行）被 `router.tsx:20` import 但**没有任何 `<Route>` 使用** → **孤儿页面**，竞品监控能力实际由本页承载。
 
-### 2.10 `/platforms/xhs/image-studio` 图片工坊
+### 2.10 `/platforms/xhs/image-studio` 图片工坊（**已被 §2.22 取代**，原设计保留）
 
 | 项 | 内容 |
 |---|---|
@@ -232,9 +236,16 @@ PC 链路登录成功后可顺带绑定同名 Creator 账号。这个选项的�
 | 数据 | `fetchGeneratedImageAssets` / `deleteGeneratedImageAsset` / `fetchUserImages` / `deleteUserImage` / `generateImageWithAi` / `describeImageWithAi` / `uploadAssetFile` |
 | 能力 | AI 生成（支持参考图）、图片理解（转文字）、资产管理与删除 |
 
-### 2.11 `/platforms/xhs/video-studio` 视频工坊
+> ⚠️ 2026-09-25：本页**重构为面板组件** `ImageStudioPanel`（`image-studio-panel.tsx`），
+> 作为「笔记工坊 → 图片工坊」页签的内容；独立路由与 PageHeader 已移除
+> （现口径见 §2.22，设计 13 §36）。
+
+### 2.11 `/platforms/xhs/video-studio` 视频工坊（**已被 §2.22 取代**，原设计保留）
 
 **空壳页**（37 行）：PageHeader + Empty 卡「视频工坊即将上线」。无数据调用。
+
+> ⚠️ 2026-09-25：重构为 `VideoStudioPanel`（`video-studio-panel.tsx`）—— 只保留
+> 「即将上线」Empty 卡，作为「笔记工坊 → 视频工坊」页签（现口径见 §2.22）。
 
 ### 2.12 `/platforms/xhs/library` 内容库
 
@@ -252,7 +263,7 @@ PC 链路登录成功后可顺带绑定同名 Creator 账号。这个选项的�
 | 项 | 设计 |
 |---|---|
 | 标识来源 | **落库链路决定，不在前端猜**：笔记同步链路（creator / ark 两源）落库 ⇒ `published`；发现页采集保存与监控采集 ⇒ `pending`；商品智能生成 ⇒ `pending`（详见 §32.3.2） |
-| 统计卡 | **三卡：「已发布」/「待发布」/「发布失败」**，取列表响应的 `stats`（**全库口径**：只按 `user_id + platform` 统计，不叠加任何筛选，三数之和 = 该用户笔记总数）。⚠️ 不得用 `items.length` 反推 —— 那会把「本页条数」当成「全库条数」 |
+| 统计卡 | **六卡一行（`flex="1 1 0%"` 等宽 + 统一内容高度）**：「已发布」/「待发布」/「发布失败」三张取列表响应的 `stats`（**全库口径**：只按 `user_id + platform` 统计，不叠加任何筛选，三数之和 = 该用户笔记总数）+「已保存笔记（/ 已选 N）」+ **发布进度** + **同步进度**（两张进度卡是**当日三数**：成功 / 失败 / 待处理，右下角小字「仅当日数据」，数据来自快照 `today` —— 当日 `tasks` 行现算，见设计 13 §31.5 / §35.4；2026-09-26 用户口径）。⚠️ 不得用 `items.length` 反推 —— 那会把「本页条数」当成「全库条数」 |
 | 筛选 | 筛选卡「发布状态」`Select` 四档（全部 / 待发布 / 已发布 / **发布失败**），值传 `GET /notes?publish_status=`；未知值后端 400（不猜）；「重置」一并清空 |
 | 展示 | **卡片与详情弹窗都只渲染一个状态标签**（`PublishStatusTag`，纯逻辑在 `lib/note-publish-gates.ts`）：`failed` ⇒ **红色 + Tooltip 摆 `publish_error` 原文**（长文案 `…` 收起 + Tooltip、不换行，ADR-018）；表格视图：独立「发布状态」列。（旧版「封面右上角绿/橙 Tag + 另一个『发布失败』tag」的**并排双状态已被取代** —— 两个标签可能互相矛盾） |
 | 手动切换 | 卡片/详情内的**同一个** `PublishStatusTag` 可点切换（·待发布 ⇄ 已发布），调 `PATCH /notes/{id}/publish-status`，**就地更新列表行与统计卡**（不整表刷新）；**本地生成笔记只读**（后端 400 `NOTE_STATUS_MANAGED`，界面不给入口）；失败沿用失败三分法，不弹通用 toast。⚠️ 同步回来的笔记改成「待发布」后**下一轮同步会升回已发布**（这是同步落库的定义，不是 bug）—— **该口径只留在文档，界面上不写这行提示**（2026-09-22 用户口径：机制说明属噪声） |
@@ -262,11 +273,16 @@ PC 链路登录成功后可顺带绑定同名 Creator 账号。这个选项的�
 | 详情弹窗 | 由 `Drawer` 改为**弹窗**，与「我的笔记」共用 `components/platforms/note-detail-modal.tsx`（同一版式一份实现）。**合并两边的功能，不丢任何一个**：左侧媒体区取**本地已下载素材**（`asset_urls`，空时回退 `cover_url` / CDN 直链）；右侧保留内容库原有能力（标签增删改、复制标题正文、加入草稿工坊、AI 改写、删除、原始 JSON 折叠）+ 我的笔记侧的元信息版式（类型 / 笔记 ID 可复制 / 作者 / 发布时间 / 互动四项 / 作品链接）+ 评论区（数据取本地 `fetchSavedNoteComments`，**渲染共用同一份评论组件**） |
 | 失败呈现 | 与「我的笔记」同一套**三分法**（设计 12 §17.9）：有数据→渲染 / 没数据→空态 / 预期内取不到→一行安静说明 / 真·接口异常→红块 + 真实原因。原内容库的 `Alert type="warning"` 泛化文案**被取代** |
 
-### 2.13 `/platforms/xhs/drafts` 草稿工坊（最复杂页面）
+> **筛选条件与账号选择落本地缓存**（2026-09-26 用户口径）：8 项筛选（关键词 / 话题 /
+> 发布状态 / 来源账号 / 笔记类型 / 商品 ID / 有素材 / 有评论）走 `usePersistedFilter`
+> （`lib/filter-cache.ts`），下次进页面自动回填；来源账号缓存**在候选账号到手后自愈**
+> （账号被删 ⇒ 退回默认）。契约见 §3.7。
+
+### 2.13 `/platforms/xhs/drafts` 草稿工坊（**已被 §2.22 取代**，原设计保留；最复杂页面）
 
 | 项 | 内容 |
 |---|---|
-| 规模 | 1377 行（`rewrite-page.tsx`） |
+| 规模 | 1377 行（`rewrite-page.tsx`；2026-09-25 §36 起为 `drafts-workshop-panel.tsx`） |
 | 双模式 | Segmented 切换「改写模式」/「生成模式」 |
 
 **改写模式：三栏布局**
@@ -293,7 +309,12 @@ PC 链路登录成功后可顺带绑定同名 Creator 账号。这个选项的�
 | 送发布 | `sendDraftToPublish` → 创建 `publish_job` |
 | ⚠️ 缺口 | 「视频润色」入口为禁用态（`:1143`） |
 
-> ⚠️ **重复实现警告**：`drafts-page.tsx`（1250 行）与 `rewrite-page.tsx` 都导出 `XhsDraftsPage`，router 只引用后者（`router.tsx:18`）→ `drafts-page.tsx` 是**死代码**。改这个功能时务必确认改的是 `rewrite-page.tsx`。
+> ⚠️ **重复实现警告**：`drafts-page.tsx`（1250 行）与 `drafts-workshop-panel.tsx`（原 `rewrite-page.tsx`）都导出过 `XhsDraftsPage`；2026-09-25 §36 起后者更名 `DraftsWorkshopPanel`、由「笔记工坊」页引用，而 `drafts-page.tsx` **无任何文件引用** ⇒ **死代码**。改草稿功能务必确认改的是 `drafts-workshop-panel.tsx`。
+
+> ⚠️ 2026-09-25 §36：本页**重构为面板组件** `DraftsWorkshopPanel`
+> （`drafts-workshop-panel.tsx`，原 `rewrite-page.tsx`），作为「笔记工坊 → 草稿工坊」
+> 页签；独立路由与 PageHeader 已移除（现口径见 §2.22）。**死代码 `drafts-page.tsx`
+> 本轮不动**（FE-1 保持）。
 
 ### 2.14 `/platforms/xhs/publish` 发布中心
 
@@ -348,7 +369,13 @@ PC 链路登录成功后可顺带绑定同名 Creator 账号。这个选项的�
 
 ### 2.19 `/settings` 设置
 
-静态页（51 行）：安全边界说明、项目声明（开源警告）。无数据调用。**2026-09-24 移除「为爱发电」模块**（用户口径「全部移除」）：原页面还有一张赞赏码卡片（微信 / 支付宝收款码，走 `/api/files/media/*` 硬编码路径，`settings-page.tsx:60,70`），是该路径的唯一使用者；随模块一并删除，`HeartOutlined` / `Image` 导入与 `author/` 下两张收款码（按 `.bak-20260924-donation-removed` 惯例隔离）同批清理。
+静态页：**只剩「安全边界说明」一张卡**。无数据调用。
+**2026-09-26 移除「项目声明」卡**（用户口径「设置页面移除项目声明」）：开源警告 `Alert`
++ 四条禁止条款整卡删除，`WarningOutlined` / `Alert` 导入随之下线；`Row` 里只剩一个
+`Col xs={24}`（原两张卡各 `lg={12}`，删一张后不补会留半行空白）。守卫
+`test_settings_page_no_longer_hosts_the_donation_module` 的正向锚从「两张幸存卡」
+改成「只剩安全边界」（仍要锚，否则删空整页也能变绿），并对声明文案做反向断言。
+**2026-09-24 移除「为爱发电」模块**（用户口径「全部移除」）：原页面还有一张赞赏码卡片（微信 / 支付宝收款码，走 `/api/files/media/*` 硬编码路径，`settings-page.tsx:60,70`），是该路径的唯一使用者；随模块一并删除，`HeartOutlined` / `Image` 导入与 `author/` 下两张收款码（按 `.bak-20260924-donation-removed` 惯例隔离）同批清理。
 
 ### 2.20 `/platforms/xhs/my-notes` 我的笔记 **（2026-09-18 新增 · 已实现）**
 
@@ -402,6 +429,11 @@ PC 链路登录成功后可顺带绑定同名 Creator 账号。这个选项的�
 > 完整决策清单见 `01_需求文档/03_需求规格_我的笔记列表.md` D1–D12；
 > 字段保真度与商品调研结论见 `02_设计文档/12_功能设计_我的笔记与互动数据.md` §17–§19。
 
+> **账号选择 / 页签 / 互动 kind 等落本地缓存**（2026-09-26 用户口径）：5 项
+> （账号 / 页签 / 互动 kind / 无流量阈值 / 无流量查询）走 `usePersistedFilter`
+> （`lib/filter-cache.ts`），下次进页面自动回到上次的账号与页签；账号缓存**在账号清单
+> 到手后自愈**（账号被删 ⇒ 退回首个可用账号）。契约见 §3.7。
+
 ---
 
 ### 2.21 `/platforms/xhs/shop-items` 商品列表 **（2026-09-19 新增 · 已实现）**
@@ -451,6 +483,30 @@ PC 链路登录成功后可顺带绑定同名 Creator 账号。这个选项的�
 | 商品单元格排版 | 三类长内容一律**不换行**（换行会把整行商品卡撑高、右侧几列基线错开）：标题（v1.35）、分类路径（v1.34）、图数角标改贴图片（v1.35）。缩略图尺寸只住一个常量 `ITEM_THUMB_SIZE`，真图与无图占位块共用 |
 | **挂链笔记反查（v1.9 / v1.33 改版）** | 点「N 篇」打开**弹窗**（Modal + 多篇用 Tabs 自然隔离）：**零平台请求**（走 `note_goods` 关系表 join `notes`），内容区与内容库详情弹窗**共用同一份两栏版式**（`NoteDetailBody`）。⚠️ 弹窗顶部的「本地已映射 M/N」说明（v1.34）与列表该列的 Tooltip（v1.34，§33.1）**均已移除**：界面只剩「一个可点的篇数」，两个口径（关系表 / 平台原文 `platform_note_count`）的对照**只在响应里**，不再占界面 |
 | 与「我的笔记」联动 | 关系在**同步笔记（ark 源）**与**「生成笔记」**时自动建立（`note_goods`），不再有独立的「同步挂链映射」按钮（v1.32 已删） |
+
+> **账号选择 / 搜索条件 / 每页条数 / 排序落本地缓存**（2026-09-26 用户口径）：4 项走
+> `usePersistedFilter`（`lib/filter-cache.ts`）—— 搜索条件存**整份表单草稿**
+> （`ShopItemsFilterDraft`，纯 JSON 形状、日期存 `YYYY-MM-DD`），「重置」回
+> `EMPTY_SHOP_ITEMS_DRAFT`。换账号仍清空跨页勾选；账号缓存**在可选账号到手后自愈**。
+> 契约见 §3.7。
+
+### 2.22 `/platforms/xhs/note-workshop` 笔记工坊 **（2026-09-25 新增 · 已实现；设计 13 §36）**
+
+| 项 | 内容 |
+|---|---|
+| 布局 | PageHeader（笔记工坊）+ `Tabs` 三页签：**图片工坊 / 视频工坊 / 草稿工坊**（tab 状态进 `?tab=images\|videos\|drafts`，可分享、刷新保持；默认 `images`） |
+| 面板 | `ImageStudioPanel`（§2.10 重构）/ `VideoStudioPanel`（§2.11 重构）/ `DraftsWorkshopPanel`（§2.13 重构）—— 三个面板文件各自持状态，**视图隔离** |
+| 挂载语义 | antd Tabs 默认保活：页签首次激活后跨切换不丢状态；未激活页签不渲染（不提前打接口） |
+| 旧路由 | `/image-studio`、`/video-studio`、`/drafts` → `Navigate replace` 重定向到本页对应 tab（深链 / 书签不死） |
+| 菜单 | 侧边菜单原三项合并为一项「笔记工坊」（`ToolOutlined`，内容库之后、发布中心之前） |
+| 关联 | 内容库「加入草稿工坊」跳转改指 `/note-workshop?tab=drafts`；`xhs-section-page.tsx` 的 `image-studio` 死条目移除 |
+
+**为什么合并**（用户口径「合并为一个页面视图 tab 自然隔离」）：三个工坊是同一批工作流
+（找素材 → 做图 → 写草稿 → 发布）的连续环节，拆三个菜单项时用户要在侧边栏来回跳；
+合成一页后 tab 即隔离，URL 仍可深链到具体工坊。发布中心等处的「草稿工坊」文字引用
+**不动**（页签名未变）。
+
+---
 
 ## 3. 前端基础设施设计
 
@@ -541,6 +597,117 @@ if (!originalRequest?._silent) {
   个体户店  [可挂商品 ✓]
   企业店    [可挂商品 ✓] [待缴保证金]
 ```
+
+### 3.6 全站消息提醒统一规范（2026-09-25 用户口径）
+
+用户口径：「项目中所有消息提醒均使用消息提醒，参考 antd 成熟的组件，**不要在页面暂用空间**」。
+
+**规则（全站唯一口径）**：
+
+| 场景 | 呈现 | 实现 |
+|---|---|---|
+| **操作结果反馈** —— 用户做一个动作（保存 / 删除 / 发布 / 切换 / 复制 / 生成 / 发送验证码…）后出现的一次性提示，**无论成功、失败还是警告** | antd `message` 轻提示（顶部悬浮、自动消失、**不占版面**） | `const { message } = App.useApp()`（`<App>` 已在 `app/providers.tsx` 挂载）；**禁止**再写 `setMessage`/`setNotice` 状态 + 页面内联 `<Alert>` |
+| 静态说明 / 声明 / 免责（模型配置推荐服务商、分析页「开发优化中」；⚠️ 设置页「项目声明」**已于 2026-09-26 按用户口径整卡移除**，不再是本行的例证） | inline（**本就不是提醒**，是常驻内容） | `Alert` / `Card` 照旧 |
+| 空态 / 占位（暂无数据、未解析到素材） | inline `Empty` / `quietHint` | 照旧 |
+| 表单校验（弹窗内紧贴控件的验证说明） | inline | 照旧 |
+| **失败三分法**（设计 12 §17.9：红块 + 真实原因 / 安静一行 + Tooltip） | inline | 照旧 —— 那是「这块数据为什么这样」的结构呈现，不是操作提醒。⚠️ **2026-09-25 细化**：同为「失败」，**操作结果的失败**（点了同步 / 删除 / 切状态，动作没成）是**操作提醒** ⇒ 走 `message`；**结构呈现的失败**（这块数据为什么是空的、这条笔记为什么发布失败）才留 inline。内容库页是本条细化后的样板页，见下方「2026-09-25 迭代」 |
+
+**为什么是 `message` 而不是 `notification`**（两者都不占版面，按 antd 官方「何时使用」分工）：
+
+| 组件 | 官方定位（文档原文） | 本项目用例 |
+|---|---|---|
+| **`message`** | 「顶部居中显示并自动消失，是一种**不打断用户操作的轻量级提示**。适合全局展示操作反馈信息，且不需要用户立即点击交互的场景」 | ✅ 全部现有场景：一句式操作反馈（「配置已保存。」「删除失败。」） |
+| `notification` | 「在系统**四个角**显示通知提醒信息。经常用于以下情况：**较为复杂的通知内容**；**带有交互的通知**，给出用户下一步的行动点；**系统主动推送**」 | ❌ 当前无一例符合 —— 若将来出现「失败原因 + 一键重试按钮」或「后台任务完成推送」，走同一个 `App.useApp()` 的 `notification` 实例，**不新增第二套机制** |
+
+**为什么必须 `App.useApp()` 而不是静态 `import { message } from "antd"`**：antd 6 的静态 `message` 走独立 React root（`es/message/index.js` 的 `GlobalHolder`），**不吃 `ConfigProvider` 的主题与 locale** —— 深色主题（本默认）下会冒出一条浅色 toast；官方文档亦明确「静态方法无法消费 Context，不能动态响应 ConfigProvider 提供的各项配置」，推荐 hooks 或 `App` 组件实例。`App.useApp()` 返回的实例继承 `<App>` 上的主题 / locale / `message` 配置（`duration` 默认 3s、`top` 默认 8，均用默认值，不另配）。
+
+**唯一例外**：`lib/api.ts` 的全局响应拦截器是**非 React 模块**，拿不到 hook，继续用静态 `message.error(detail)`；§3.1.1 的 `_silent` 规则（展示权归调用点）不变。页面 / 组件内**不再新增**静态 message 用法。
+
+**取代关系**：2026-09-24 任务中心「一切提示走 notice 弹窗」（设计 15 §9.1.1 R22）**被本条取代** —— 弹窗比 inline 消息条更占空间（整屏遮罩），`message` 是两条路线的共同终点。原句与演变表行保留在设计 15 并标注。
+
+**本轮转换清单（14 个文件，inline 消息条 → `message`）**：
+
+| 文件 | 原形态 | 现形态 |
+|---|---|---|
+| `pages/platforms/xhs/publish-page.tsx` | `message`/`error` 双状态 + 2 条 closable `Alert` | `message.success/error` |
+| `pages/platforms/xhs/drafts-workshop-panel.tsx`（原 `rewrite-page.tsx`，§36 面板化） | 同上 + 一处静态 `antMessage` | `App.useApp()` 一处收口 |
+| `pages/platforms/xhs/auto-ops-page.tsx` | 同上 | 同上 |
+| `pages/platforms/xhs/drafts-page.tsx` | 同上 | 同上（死代码，一并转换保持全站一致） |
+| `pages/platforms/xhs/benchmarks-page.tsx` | 同上 | 同上 |
+| `pages/platforms/xhs/image-studio-panel.tsx`（原 `image-studio-page.tsx`，§36 面板化） | 同上 | 同上 |
+| `pages/platforms/xhs/monitoring-page.tsx` | `message`(info)/`error` 双状态 + 2 条 `Alert` | 同上 |
+| `pages/platforms/xhs/keywords-page.tsx` | `message` 单状态 + 1 条 `Alert`（成功 / 失败 / 校验复用） | `message.success/error/warning` |
+| `pages/models/model-config-page.tsx` | `message`/`error` 双状态 + 2 条 `Alert` | 同上（两条静态信息 `Alert` 保留） |
+| `pages/platforms/xhs/library-page.tsx` | `batchActionMessage` / `detailActionMessage` 双状态 + 2 条 `Alert` | `message.success/error/warning`。⚠️ 括注里的「`error` 红块与 `*Failure` 三分法保留」**已被 2026-09-25 迭代取代**（原句保留）⇒ 见下方「2026-09-25 迭代（内容库页）」 |
+| `pages/tasks/task-center-page.tsx` | `notice` 状态 + 底部 `<Modal>` 结果弹窗 | `message.*`（`notify()` 助手删除） |
+| `components/account/qr-login-panel.tsx` | `notice`/`error` + 2 条 `Alert` | `message.*`（`statusText` 状态行保留） |
+| `components/account/phone-login-panel.tsx` | 同左 | 同左 |
+| `components/account/qianfan-email-login-panel.tsx` | `error` + 1 条 `Alert` | `message.error` |
+
+**2026-09-25 迭代（内容库页，用户口径）**：用户口径「内容库页……**页面所有提示包括
+异常提示，正常提示，成功提示等均实现消息提示组件不要占用页面布局**」。落地分
+**两类来源**（由 §3.1.1 的 `_silent` 规则决定「谁报」）：
+
+| 来源 | 谁报 | 依据 |
+|---|---|---|
+| **非 `_silent`**（`fetchSavedNotes` / `updateSavedNotePublishStatus` / `updateSavedNoteTopics` / `batchSyncSavedNotes` / `batchPublishSavedNotes` / `batchCreateDraftsFromNotes` / `exportSavedNotes` / `deleteSavedNote`） | **全局响应拦截器** | 拦截器本就会对任何非 401 失败弹一次 `message.error(detail)`；调用点再报就是**双弹** |
+| **`_silent`**（`syncSavedNote`）+「**200 + 失败态**」（`sync.status !== "ok"`，如 `no_session` / `no_url` / `failed`） | **调用点** `message.error` | 这两条不走拦截器的异常分支；不报就彻底没声 ⇒ 必须有守卫钉住 |
+
+撤掉的四个页面级承载 + 一个列表承载：`error`（列表加载失败 `Alert`）、
+`batchFailure`（「批量操作失败」红块 —— 用户看到的那条「批量操作失败 Method Not
+Allowed」正是长在这里）、`topicFailure`（「话题保存失败」）、`detailSyncFailure`
+（详情里的「同步失败」）、加载更多的失败红块（**只留「重试」按钮本身** —— 它是
+控件，不是提示条）。
+
+**边界（明确不搬）**：① `publish_error` 的「发布失败原因」是**落库的持久状态说明**，
+重开弹窗还要看（本表第 2 行「静态说明」类）；② 详情弹窗内部的 `failure`
+（`renderFailure` 三分法）是 my-notes / 内容库**共用**的唯一实现，回答「这块数据
+为什么是空的」。两者都不随 message 化搬走，且各有守卫钉住。
+
+**顺带收敛的 3 处静态 message**（本就用的是 antd message，但静态方法不吃主题；改为同一个 hook，全站只此一种形态）：`my-notes-page.tsx`（约 15 处）、`shop-items-page.tsx`（约 18 处）、`add-account-drawer.tsx`（1 处）。两页的模块级 `copyToClipboard(value, okText)` 拿不到 hook ⇒ 由调用方把 `message` 实例作参数传入（`renderItemNoteInfo` 是模块级函数组件，自己调 hook）。
+
+**守卫**：
+- `tests/backend/test_page_optimizations.py::test_transient_feedback_uses_antd_message_not_inline_alerts`（上表 17 个文件逐一断言旧状态 / 旧渲染已除、`App.useApp()` 已接入、`message.*` 真有调用）；
+- `::test_static_antd_message_import_only_survives_in_api_ts`（静态 `import { message }` 只允许活在 `lib/api.ts` —— 非 React 模块的 documented 例外）；
+- `::test_failure_three_way_blocks_stay_inline_after_the_message_switch`（三分法红块 / 安静一行 / 静态声明**不随 message 化搬走**）；
+- `::test_library_page_notices_use_message_and_no_longer_occupy_layout`（2026-09-25 迭代：内容库页四个页面级 inline 承载确实不在 + `_silent` 的同步失败必须由调用点报真原因 + 持久状态说明没被一起扫掉；**6 个变异全部被抓**）；
+- `::test_library_batch_sync_with_progress_card`（⑦ 改为新口径：`<Progress` 不得出现、百分比只留 Tooltip、空闲文案不得出现）；
+- `tests/frontend/schedule_center.cjs` 的 R22 弹窗断言改写为 message 断言（原句留 docstring）；`add_account_modal.cjs` 的 harness 补 `<App component={false}>` 包裹 —— `App.useApp()` 在 `<App>` 之外返回的是**空对象**（antd 源码 context 默认值），真机不炸只因 `providers.tsx` 有 `<App>`。
+
+---
+
+### 3.7 页面筛选条件 / 账号选择的本地缓存（2026-09-26 新增）
+
+用户口径：「梳理所有商品列表，我的笔记，内容库页，**筛选条件和账号选择后放本地缓存**，
+避免每次均需要重新选择」。
+
+**唯一实现 = `frontend/src/lib/filter-cache.ts`**（DEF-044）：三个页面共用这一份 ——
+页面只声明「哪个 key + 默认值 + 校验器」，读写 / 容错 / 自愈全在 lib。各页自己拼
+`localStorage.getItem` 必然写出三种容错口径（一处 try/catch、一处崩、一处把脏值当合法值用）。
+
+| 项 | 设计 |
+|---|---|
+| 覆盖面 | **内容库**（8 项：关键词 / 话题 / 发布状态 / 来源账号 / 笔记类型 / 商品 ID / 有素材 / 有评论）、**我的笔记**（5 项：账号 / 页签 / 互动 kind / 无流量阈值 / 无流量查询）、**商品列表**（4 项：账号 / 搜索条件整份草稿 / 每页条数 / 排序） |
+| Hook | `usePersistedFilter(key, fallback, sanitize?)` —— **与 `useState` 同形**（`[value, setValue]`），页面只把 `useState(...)` 换成它，其余调用点一字不改；`fallback` 支持**惰性初值**（商品 ID 是「URL 里有就用 URL 的，否则取缓存」） |
+| 键形态 | `xhs.filters.<page>.<field>`，**一个字段一个 key**（不按页面存大对象 —— 存大对象就得每次写时把整份拼一遍，漏一个字段 = 那个筛选静默不生效；一字段一 key 时读写的形状与 `useState` 一一对应） |
+| 取值域校验 | 缓存值必须过**当前代码认的取值集合**：枚举走 `asEnum` / `asNumberEnum`，数字走 `asFiniteNumber`，对象走 `asFields`（**按默认值形状逐字段校验**，多出的键丢掉、类型对不上回默认）。否则后端改枚举 / 前端改默认值后，旧缓存会变成「界面选了一个后端不认的值」（400 或筛成空集，用户看不出原因） |
+| 容错 | **缓存是体验，不是真相**：`window.localStorage` 拿不到（隐私模式 / 被沙箱 iframe 嵌住）⇒ 返回 `null` 不抛；读到坏 JSON ⇒ **静默回默认并顺手删掉那条 key**（免得每次进页面都解析一次坏 JSON）；写失败（配额满）⇒ 静默。**一个坏缓存绝不能把页面打红** |
+| 账号自愈 | 账号可能已被删除 ⇒ 缓存里的 id 成了下拉中不存在的裸数字 + 恒空列表。**在账号列表成功到手后校验一次**（失配退回默认并覆盖缓存）—— ⚠️ 校验**必须等到「成功」这个分支**：拿失败时的空数组去校验，会把一个合法缓存账号误清（内容库用 `filterAccountsLoaded` 旗标，另两页用 effect 成功分支） |
+| 刻意不缓存 | **分页游标 / 页码**（每次进页面从第一页开始）、详情弹窗状态、列表累加的 `page`、搜索结果本身（关键词只是**条件**，搜不搜由页面决定） |
+
+**商品列表的「搜索条件」是整份表单草稿**（antd Form 不是 `useState`，单独一份读写）：
+`ShopItemsFilterDraft` 是**纯 JSON 形状**（日期存 `YYYY-MM-DD` 字符串，不存 dayjs 对象 ——
+`JSON.stringify(dayjs)` 出来是 `{"$d":…}` 这类脏值），字段名与千帆请求参数一致
+（`price_from` / `note_count_op`…）；`EMPTY_SHOP_ITEMS_DRAFT` 是「重置」的落点，
+`sanitizeShopItemsDraft` 做形状 + 取值域（`note_count_op` 走 `NOTE_COUNT_OPS`，
+与后端同一份）。`status` 这里**只校验「非空字符串」**：取值域由后端兜底（未知值 400
+并回支持列表，不静默降级），前端再抄一份状态白名单就是第二份真相源。
+
+**测试要点**：`tests/frontend/persisted_filters.cjs`（esbuild 打包**真**
+`lib/filter-cache.ts`，喂假 `localStorage`，**30** 条断言 + **7** 个变异）+ 
+`tests/backend/test_filter_cache.py`（行为脚本接线 1 / 变异 7 逐一实测变红 / 三页每个
+筛选都接线 / 页面不许自己碰 `localStorage` / 不许退回裸 `useState` / 账号自愈三页齐备，
+共 **15** 条）；脚本已接入 `test_testing_spec_guards.py` 的接线参数化清单。
 
 ---
 

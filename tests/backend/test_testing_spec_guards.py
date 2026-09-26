@@ -12,9 +12,11 @@
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -197,9 +199,12 @@ def test_conftest_fixtures_are_really_shared():
         "add_account_modal.cjs",
         "detail_message.cjs",
         "library_item_filter.cjs",
+        "library_topics_merge.cjs",
+        "library_topic_search.cjs",
         "login_state.cjs",
         "note_filters.cjs",
         "note_publish.cjs",
+        "persisted_filters.cjs",
         "qr_session_identity.cjs",
         "schedule_center.cjs",
         "shop_items_view.cjs",
@@ -219,3 +224,69 @@ def test_every_behaviour_script_is_wired_into_pytest(script: str):
         f"{script} 没有被任何 pytest 文件引用 ⇒ 它不在守卫范围内。"
         "要么接线，要么删掉。"
     )
+
+
+# ---------------------------------------------------------------------------
+# 记忆预算守卫（2026-09-25）
+#
+# 这一组守的是「会话收尾纪律」—— 此前它**只写在文档里**，没有任何机械校验，
+# 于是主记忆从 8KB 漂到 12.9KB（+61%），同时 `.workbuddy/memory/2026-09-24.md`
+# 损坏了 15% 也没人知道。规矩不接线就是纸面规矩。
+# ---------------------------------------------------------------------------
+
+#: 记忆预算脚本在 `.workbuddy/scripts/`（不是 `.cjs`），所以不进上面那张 .cjs 清单。
+MEMORY_BUDGET_SCRIPT = ROOT / ".workbuddy" / "scripts" / "verify_memory_budget.py"
+
+
+def _run_memory_budget(**env: str) -> subprocess.CompletedProcess[str]:
+    environment = os.environ.copy()
+    environment.update(env)
+    return subprocess.run(
+        [sys.executable, str(MEMORY_BUDGET_SCRIPT)],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=environment,
+        check=False,
+    )
+
+
+def test_memory_budget_script_is_wired_and_green():
+    """主记忆 / `REF_*.md` / 日志的**预算 + 可解码性**必须全绿。
+
+    2026-09-25 实测三件事，各自都值得一条钉子：
+
+    ① 主记忆立了「≤8KB」却长期无人机械校验 ⇒ 实际 12.9KB。**实测地板 ≈10KB**
+       （把叙述性内容全部下移到 `REF §G` 后仍要 10KB，再压只能删规则），
+       故额度校准为 **12KB**（留 ~2KB 给后续新规范）。
+    ② 单日日志**从来没有上限**：7 天合计 368KB / 144,537 token，单文件最高
+       60.7KB。现钉 **≤25KB**（立规前的历史文件在白名单里只报不判）。
+    ③ `.workbuddy/memory/2026-09-24.md` 已损坏 15%（5,529 个字符的末字节被 `?`
+       顶掉 ⇒ 整份文件 UTF-8 解码抛异常）。它此前只是「文档里说按需 grep」，
+       **没有任何脚本碰过它**，所以烂了很久没暴露 ⇒ 可解码性必须有判据。
+    """
+    result = _run_memory_budget()
+    assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+    assert "0 FAIL" in result.stdout, result.stdout
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected"),
+    [
+        ("memory", "主记忆 "),
+        ("ref", "REF "),
+        ("log", "日志超限"),
+        ("utf8", "UTF-8 判据失灵"),
+    ],
+)
+def test_memory_budget_guards_are_load_bearing(mutate: str, expected: str):
+    """变异验证：额度／判据被压坏时脚本必须变红（否则它没在守任何东西）。
+
+    断言带 `FAIL  ` **前缀**：只找 `主记忆` 的话，全绿时那行 `PASS  MEMORY.md`
+    同样命中，等于什么都没断言（DEF-058 的教训）。
+    """
+    result = _run_memory_budget(MEMORY_BUDGET_MUTATE=mutate)
+    assert result.returncode != 0, f"{mutate} 变异必须让脚本失败：stdout={result.stdout}"
+    assert f"FAIL  {expected}" in result.stdout, f"stdout={result.stdout}"

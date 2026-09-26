@@ -56,8 +56,10 @@ from backend.app.services.rate_limiter import get_rate_limiter
 
 logger = logging.getLogger(__name__)
 
-#: 页与页之间的停顿（秒，上限 60）。测试置 0。
-PAGE_GAP_SECONDS = 3.0
+#: 页与页之间的停顿**基础值**（秒）。测试置 0。
+#: 2026-09-25 与笔记同步同口径（用户「拉长间隔时间，随机化间隔时间」）：3.0 → 5.0，
+#: 实际停顿再乘抖动系数（`sync_pacing`）。
+PAGE_GAP_SECONDS = 5.0
 MAX_PAGE_GAP_SECONDS = 60.0
 
 #: 「字段补足」每轮回填的行数上限（设计 13 §30.3.4）。**本地操作、零平台请求**，
@@ -960,9 +962,14 @@ def _drop_stale_rows(db: Session, shop_id_fk: int, keep_ids: set[str]) -> int:
 
 
 def _sleep_between_pages() -> None:
-    gap = min(max(PAGE_GAP_SECONDS, 0.0), MAX_PAGE_GAP_SECONDS)
-    if gap > 0:
-        time.sleep(gap)
+    """页间停顿 = 基础值 × 随机抖动（唯一实现 `sync_pacing.sleep_between_pages`）。
+
+    与笔记同步（`note_sync_service`）**同一把尺子**：拉长 + 随机化，避免等距
+    节奏被平台风控识别。读模块级 `PAGE_GAP_SECONDS`，测试置 0 仍免等待。
+    """
+    from backend.app.services.sync_pacing import sleep_between_pages
+
+    sleep_between_pages(PAGE_GAP_SECONDS, cap=MAX_PAGE_GAP_SECONDS)
 
 
 def _update_progress(

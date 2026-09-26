@@ -6,8 +6,10 @@
 2. **同步落库 ⇒ `synced`**：判据是**链路**（手动与定时同一条路），不是触发方式；
 3. **只升不降**：同步过的行被采集命中不降级；采集过的行被同步命中升级；
 4. **序列化**：`GET /notes` / 详情 / 导出同一份输出带 `note_type`；
-5. **单条同步接口**：`POST /notes/{id}/sync` 四态（ok / no_url / no_session / failed）、
-   非 synced ⇒ 结构化 400、越权 404、限流键 `<account>:www`；
+5. **单条同步接口**：`POST /notes/{id}/sync` **入队回执** `queued`（2026-09-25
+   用户口径「单独点击同步按钮也需要放入同步队列中执行，与批量同步一致」⇒ 端点从
+   同步阻塞改为入队；四态结果搬到快照 `finished`，与批量同一个出口）、
+   非 synced 且未发布 ⇒ 结构化 400、越权 404、限流键 `<account>:www`；
 6. **刷新语义**（§25.3）：详情有非空正文 ⇒ **覆盖**本地（平台改过正文本地跟上）；
    详情正文为空 ⇒ **不抹**本地；`platform_missing_at` 自愈；
 7. **迁移回填**：`published=1` ⇒ `synced`（§19.12 不变量的一次性数据归类，源码级守卫）。
@@ -16,6 +18,9 @@
 `note.note_type`（列有 DDL 默认值，只靠默认值会让新契约在测试里等于没测）。
 """
 from __future__ import annotations
+
+import threading
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -296,27 +301,49 @@ def _detail_payload(note_id: str, *, desc: str = "", title: str = "", images=Non
     return {"data": {"items": [{"id": note_id, "note_card": card}]}}
 
 
+class RecordingPcAdapter:
+    """`api_env` 的假 PC 详情适配器：记录真正打出去的 URL（兜底 / 拼 token 断言用）。"""
+
+    detail: dict = {"desc": "平台最新正文", "title": "", "images": []}
+    seen: list[str] = []
+
+    def __init__(self, cookies: str) -> None:
+        self.cookies = cookies
+
+    def get_note_info(self, url: str):
+        RecordingPcAdapter.seen.append(url)
+        note_id = url.rsplit("/", 1)[-1].split("?")[0]
+        return True, "ok", _detail_payload(
+            note_id,
+            desc=RecordingPcAdapter.detail["desc"],
+            title=RecordingPcAdapter.detail["title"],
+            images=RecordingPcAdapter.detail["images"],
+        )
+
+
 @pytest.fixture
 def api_env(tmp_path, monkeypatch):
     """一个用户 + 一个持 www 会话的 creator 账号 + 两条 synced 笔记。
 
     `detail` 控制假详情适配器返回的正文（空串 = 平台没给正文）。
+
+    ⚠️ 2026-09-25 用户口径「单独点击同步按钮也需要放入同步队列中执行，与批量同步
+    一致」⇒ 单条端点从同步阻塞改为**入队**，真活由后台 worker 干。两处相应改动：
+
+    1. `nss._session_factory` 指向本夹具的临时库 —— worker 自建 Session 走的就是它。
+       不打桩的话 worker 会拿**真库**去认领，既跑不到本篇（tasks 行在临时库），
+       又是数据隔离事故；
+    2. teardown 里 `stop_sync_worker()` + 等库里没有 `running` 行 —— worker 是
+       进程级全局线程，不收会跨用例（甚至跨文件）抢队列。
     """
     SessionLocal = _session(tmp_path, "api.db")
     detail = {"desc": "平台最新正文", "title": "", "images": []}
-
-    class FakePcAdapter:
-        def __init__(self, cookies: str) -> None:
-            self.cookies = cookies
-
-        def get_note_info(self, url: str):
-            note_id = url.rsplit("/", 1)[-1].split("?")[0]
-            return True, "ok", _detail_payload(
-                note_id, desc=detail["desc"], title=detail["title"], images=detail["images"]
-            )
-
-    monkeypatch.setattr(pc, "get_xhs_pc_api_adapter_factory", lambda: FakePcAdapter)
+    RecordingPcAdapter.detail = detail
+    RecordingPcAdapter.seen = []
+    monkeypatch.setattr(pc, "get_xhs_pc_api_adapter_factory", lambda: RecordingPcAdapter)
     monkeypatch.setattr(nss, "get_rate_limiter", lambda: _limiter)
+    # worker（真同步逻辑 + 假平台适配器）只认这个库
+    monkeypatch.setattr(nss, "_session_factory", SessionLocal)
 
     def override_get_db():
         db = SessionLocal()
@@ -345,6 +372,23 @@ def api_env(tmp_path, monkeypatch):
         get_rate_limiter().reset(account_id)
         yield headers, SessionLocal, account_id, detail
     finally:
+        nss.stop_sync_worker(timeout=10)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            db = SessionLocal()
+            try:
+                still_running = nss.note_queue_service.list_note_pks_by_status(
+                    db,
+                    item_task_type=nss.note_queue_service.TASK_TYPE_SYNC_ITEM,
+                    statuses=("running",),
+                )
+            finally:
+                db.close()
+            if not still_running:
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail("同步 worker 在夹具收尾后 10s 仍在跑（worker 卡死？）")
         app.dependency_overrides.pop(get_db, None)
 
 
@@ -386,6 +430,32 @@ def test_notes_serialization_includes_note_type(api_env):
     assert listed["items"][0]["note_type"] == "synced"
 
 
+def _sync_via_button(client, headers, note_pk: int) -> dict:
+    """点一次「同步」按钮：断言**入队回执**，等 worker 把这篇跑完，返回响应体。
+
+    ⚠️ 2026-09-25 用户口径「单独点击同步按钮也需要放入同步队列中执行，与批量同步
+    一致」⇒ 端点只回回执（`sync.status == "queued"`）。真正的逐项结果（正文有没有
+    更新、失败的真实原因）搬到了 `GET /notes/sync-queue` 的快照 `finished` 里
+    —— 与批量同步**同一个出口**，用例也随之改成「等 worker + 读快照」。
+    """
+    response = client.post(f"/api/notes/{note_pk}/sync", headers=headers)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["sync"]["status"] == "queued", body
+    assert body["sync"]["note_pk"] == note_pk, body
+    assert nss.wait_sync_done(note_pk, timeout=20), "worker 20s 内没跑完这篇（队列停摆？）"
+    return body
+
+
+def _sync_finished_entry(client, headers, note_pk: int) -> dict:
+    """从同步队列快照里取这一篇的**终态条目**（批量与单条共用这一个出口）。"""
+    snapshot = client.get("/api/notes/sync-queue", headers=headers).json()
+    for entry in snapshot["finished"]:
+        if entry["note_pk"] == note_pk:
+            return entry
+    pytest.fail(f"快照 finished 里没有 note_pk={note_pk}：{snapshot}")
+
+
 def test_sync_note_rejects_local_note(api_env):
     """**既不是 synced 也没发布过**的笔记 ⇒ 结构化 400（按钮不渲染，接口同一道闸）。
 
@@ -422,8 +492,13 @@ def test_sync_note_allows_published_local_generated_note(api_env):
 
     本用例只验**闸门放行**（不再 400）；真正拉到平台内容是
     `sync_note_from_platform` → `hydrate_note_detail` 的事，与类型无关。
+
+    ⚠️ 2026-09-25 队列化：放行的表现形式从「200 + 同步结果」变成「200 + 入队回执」
+    （`status == "queued"`）；这篇由 worker 真跑（本文件的 `api_env` 把
+    `_session_factory` 指到临时库），跑完的快照终态由
+    `test_sync_note_overwrites_stale_content` 等用例逐项断言。
     """
-    headers, SessionLocal, account_id, detail = api_env
+    headers, SessionLocal, account_id, _ = api_env
     db = SessionLocal()
     try:
         account = db.get(PlatformAccount, account_id)
@@ -438,12 +513,61 @@ def test_sync_note_allows_published_local_generated_note(api_env):
 
     response = client.post(f"/api/notes/{note_id}/sync", headers=headers)
 
-    # 闸门放行 ⇒ 不再是 400。真正结果（ok / no_session / failed）由 sync 字段给。
+    # 闸门放行 ⇒ 不再是 400，回执是「已入队」。终态走快照 finished（见上面说明）。
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["sync"]["status"] in {"ok", "no_session", "no_url", "failed"}, body
+    assert body["sync"]["status"] == "queued", body
     assert body["note"]["note_type"] == "local_generated"
     assert body["note"]["publish_status"] == "published"
+
+
+def test_sync_note_published_local_generated_without_raw_url(api_env):
+    """本地生成 + 已发布、`raw_json` **没有详情地址** ⇒ 同步按钮也要能真同步。
+
+    2026-09-25 用户报障（真实库 id 1967「中古风桌旗，让家瞬间高级感」）：
+    平台 `note/publish` 响应只回 `{"id"}`，本地生成笔记的 raw 从来没有
+    `note_url` / `xsec_token` ⇒ 旧实现判 `no_url`，用户看到「这条笔记没有可用
+    的详情地址」—— 按钮在、功能不在。
+
+    修复后单条同步路径（`allow_tokenless=True`）：本用例账号没有 ark 令牌 ⇒
+    回查跳过，用平台 note_id 兜底拼 explore 地址打详情 ⇒ `ok` + 正文按刷新
+    语义覆盖本地（§25.3）。批量 / 定时链路（`refresh=False`）不放开，由
+    `test_note_content_backfill.py::TestDetailRefBackfill` 守边界。
+
+    ⚠️ 2026-09-25 队列化：入队后等 worker 跑完，再从快照 `finished` 读终态
+    （`status == "ok"`）—— 与批量同一个出口。`content_updated` 这类逐项细节
+    现在只在 worker 内部，响应体不再带。
+    """
+    headers, SessionLocal, account_id, detail = api_env
+    db = SessionLocal()
+    try:
+        account = db.get(PlatformAccount, account_id)
+        note = _add_note(
+            db,
+            account,
+            HEX_NOTE_ID,
+            note_type="local_generated",
+            content="旧正文",
+            raw={"aigc": {"task_id": "T"}, "guardrails": {}, "item_id": "ITEM-1"},
+        )
+        set_note_publish_status(note, "published")
+        db.commit()
+        note_id = note.id
+    finally:
+        db.close()
+
+    _sync_via_button(client, headers, note_id)
+
+    entry = _sync_finished_entry(client, headers, note_id)
+    assert entry["ok"] is True and entry["status"] == "ok", entry
+    db = SessionLocal()
+    try:
+        assert db.get(Note, note_id).content == "平台最新正文"
+    finally:
+        db.close()
+    assert RecordingPcAdapter.seen == [
+        f"https://www.xiaohongshu.com/explore/{HEX_NOTE_ID}"
+    ], "兜底 URL 就是 explore/{平台 note_id}（无 token）"
 
 
 def test_sync_note_allows_published_collected_note(api_env):
@@ -451,6 +575,11 @@ def test_sync_note_allows_published_collected_note(api_env):
 
     用户口径是「**已经发布过**的笔记一定支持同步」，没有把 `local_generated` 和
     `local` 分开 —— 发布过这个事实本身就够了。前端口径（`canSyncNote`）也是如此。
+
+    ⚠️ 队列化后该用例同时守「**单条尺子 ≠ 批量尺子**」：`local` + `published`
+    过得了单条（这里），但 `note_supports_batch_sync` 只认 published ——
+    `local` + `published` 其实两把尺子都过，真正只过单条的是 `synced` 类型，
+    由 `test_single_sync_accepts_synced_note_batch_would_reject` 守。
     """
     headers, SessionLocal, account_id, _ = api_env
     db = SessionLocal()
@@ -463,9 +592,9 @@ def test_sync_note_allows_published_collected_note(api_env):
     finally:
         db.close()
 
-    response = client.post(f"/api/notes/{note_id}/sync", headers=headers)
+    body = _sync_via_button(client, headers, note_id)
 
-    assert response.status_code == 200, response.text
+    assert body["sync"]["status"] == "queued"
 
 
 def test_sync_note_overwrites_stale_content(api_env):
@@ -479,20 +608,17 @@ def test_sync_note_overwrites_stale_content(api_env):
     finally:
         db.close()
 
-    response = client.post(f"/api/notes/{note_id}/sync", headers=headers)
+    _sync_via_button(client, headers, note_id)
 
-    assert response.status_code == 200, response.text
-    body = response.json()
-    assert body["sync"]["status"] == "ok"
-    assert body["sync"]["content_updated"] is True
-    assert body["note"]["content"] == "平台最新正文"
+    entry = _sync_finished_entry(client, headers, note_id)
+    assert entry["ok"] is True, entry
     # 落库确认（不只看响应）
     db = SessionLocal()
     try:
         assert db.get(Note, note_id).content == "平台最新正文"
     finally:
         db.close()
-    # 限流尺子与同步链路同一把：`<account>:www`
+    # 限流尺子与同步链路同一把：`<account>:www`（worker 线程里等的也是这把尺子）
     assert _limiter.keys == [f"{account_id}:www"]
 
 
@@ -508,19 +634,24 @@ def test_sync_note_keeps_local_when_detail_empty(api_env):
     finally:
         db.close()
 
-    response = client.post(f"/api/notes/{note_id}/sync", headers=headers)
+    _sync_via_button(client, headers, note_id)
 
-    assert response.status_code == 200, response.text
-    body = response.json()
-    assert body["sync"]["status"] == "ok"
-    assert body["sync"]["content_updated"] is False
-    assert body["note"]["content"] == "本地已有正文"
+    entry = _sync_finished_entry(client, headers, note_id)
+    assert entry["ok"] is True, entry
+    db = SessionLocal()
+    try:
+        assert db.get(Note, note_id).content == "本地已有正文"
+    finally:
+        db.close()
 
 
-def test_sync_note_without_web_session_is_quiet_200(api_env):
-    """账号没有 www 会话 ⇒ **200 + no_session**（预期内取不到，不是接口异常）。
+def test_sync_note_without_web_session_reports_no_session(api_env):
+    """账号没有 www 会话 ⇒ **队列照跑、快照给 `no_session`**（预期内取不到，不是接口异常）。
 
-    `code=WEB_SESSION_REQUIRED` 是前端安静降级白名单里的既有 code（不新造）。
+    ⚠️ 2026-09-25 队列化前后**响应分层变了**：改造前端点 200 + `sync.status ==
+    "no_session"`；改造后端点 200 + 入队回执，`no_session` 只在快照 `finished`
+    里给一次（与批量同步同一个出口）。`code=WEB_SESSION_REQUIRED` 仍是前端安静
+    降级白名单里的既有 code（不新造）。
     """
     headers, SessionLocal, account_id, _ = api_env
     # 把账号的 www 令牌删掉（只留 creator 通道）
@@ -537,12 +668,12 @@ def test_sync_note_without_web_session_is_quiet_200(api_env):
     finally:
         db.close()
 
-    response = client.post(f"/api/notes/{note_id}/sync", headers=headers)
+    body = _sync_via_button(client, headers, note_id)
 
-    assert response.status_code == 200, response.text
-    body = response.json()
-    assert body["sync"]["status"] == "no_session"
-    assert body["sync"]["code"] == "WEB_SESSION_REQUIRED"
+    assert body["sync"]["status"] == "queued"
+    entry = _sync_finished_entry(client, headers, note_id)
+    assert entry["status"] == "failed", entry
+    assert entry["code"] == "WEB_SESSION_REQUIRED", entry
     # no_session 不写 hydrated_at（账号级、可恢复）
     db = SessionLocal()
     try:
@@ -563,15 +694,89 @@ def test_sync_note_heals_platform_missing_mark(api_env):
     finally:
         db.close()
 
-    response = client.post(f"/api/notes/{note_id}/sync", headers=headers)
+    _sync_via_button(client, headers, note_id)
 
-    assert response.status_code == 200, response.text
-    assert response.json()["sync"]["status"] == "ok"
+    entry = _sync_finished_entry(client, headers, note_id)
+    assert entry["ok"] is True, entry
     db = SessionLocal()
     try:
         assert db.get(Note, note_id).platform_missing_at is None
     finally:
         db.close()
+
+
+def test_single_sync_accepts_synced_note_batch_would_reject(api_env):
+    """**两把尺子的边界**：`synced`（未发布）单条能入队，批量同步会拒。
+
+    用户口径「只有已发布的支持被选中」只针对**批量**；单条「同步」按钮的判据
+    （`canSyncNote` / `note_supports_sync`）从 2026-09-23 起就是 `synced` **或**
+    已发布。队列化改造**不许顺手收紧**单条尺子 —— 收紧等于把「按钮在、点了 400」
+    的旧 bug 找回来。
+
+    本用例因此同时钉两端点：单条 200 + `queued`；批量
+    `{ok: false, code: NOTE_NOT_SYNCABLE}` 且不入队。
+    """
+    headers, SessionLocal, account_id, _ = api_env
+    db = SessionLocal()
+    try:
+        account = db.get(PlatformAccount, account_id)
+        note = _add_note(db, account, HEX_NOTE_ID, note_type="synced")
+        assert note.publish_status == "pending"
+        note_id = note.id
+    finally:
+        db.close()
+
+    body = _sync_via_button(client, headers, note_id)
+    assert body["sync"]["status"] == "queued"
+    assert _sync_finished_entry(client, headers, note_id)["ok"] is True
+
+    batch = client.post(
+        "/api/notes/batch-sync", headers=headers, json={"note_ids": [note_id]}
+    ).json()
+    assert batch["started"] == 0, batch
+    assert batch["results"][0]["code"] == "NOTE_NOT_SYNCABLE", batch
+
+
+def test_single_sync_is_idempotent_when_already_queued(api_env, monkeypatch):
+    """同一篇已在队列 ⇒ 再点一次回 `already_queued`，不重复入队、不重复请求。
+
+    ⚠️ 必须用**门控替身**把 worker 停在「已认领、还没跑完」上：否则真实替身秒级
+    返回，第二次点击时第一项可能已终态 ⇒ `enqueue_item` 看不到未终态行、正常新开
+    一项 —— 那不是幂等失效，是竞态假象（实测在 `-n auto` 下偶发红一次）。
+    """
+    headers, SessionLocal, account_id, detail = api_env
+    db = SessionLocal()
+    try:
+        account = db.get(PlatformAccount, account_id)
+        note = _add_note(db, account, HEX_NOTE_ID)
+        note_id = note.id
+    finally:
+        db.close()
+
+    reached = threading.Event()
+    gate = threading.Event()
+
+    def _hold(db, note, *, account=None, adapter_factory=None):
+        reached.set()
+        gate.wait(timeout=10)
+        return {"status": "ok", "content_updated": False, "reason": "", "code": ""}
+
+    monkeypatch.setattr(nss, "sync_note_from_platform", _hold)
+
+    first = client.post(f"/api/notes/{note_id}/sync", headers=headers).json()
+    assert first["sync"]["status"] == "queued"
+    assert "already_queued" not in first["sync"], first
+    assert reached.wait(timeout=10), "worker 没在 10s 内认领到这一篇"
+
+    second = client.post(f"/api/notes/{note_id}/sync", headers=headers).json()
+    assert second["sync"]["status"] == "queued"
+    assert second["sync"]["already_queued"] is True, second
+
+    # 队列里只有一条（不重复请求 = 幂等的实质）
+    snapshot = client.get("/api/notes/sync-queue", headers=headers).json()
+    assert snapshot["total"] == 1, snapshot
+    gate.set()
+    assert nss.wait_sync_done(note_id, timeout=20)
 
 
 def test_sync_note_other_users_note_is_404(api_env):

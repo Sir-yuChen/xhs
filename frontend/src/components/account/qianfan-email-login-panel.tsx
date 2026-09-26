@@ -1,4 +1,4 @@
-import { Alert, Button, Form, Input, Space, Typography } from "antd";
+import { App, Button, Form, Input, Space, Typography } from "antd";
 import { KeyOutlined } from "@ant-design/icons";
 import { useState } from "react";
 
@@ -38,8 +38,11 @@ export function QianfanEmailLoginPanel({
   const [email, setEmail] = useState("");
   const [pwd, setPwd] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [error, setError] = useState("");
   const [done, setDone] = useState(false);
+  // 全站消息提醒统一走 antd message（设计 04 §3.6，2026-09-25 用户口径：
+  // 「所有消息提醒参考 antd 成熟组件，不要在页面暂用空间」）—— 登录失败
+  // 不再渲染 inline Alert 占版面。
+  const { message } = App.useApp();
 
   const renewing = typeof targetAccountId === "number";
 
@@ -48,7 +51,6 @@ export function QianfanEmailLoginPanel({
       return;
     }
     setIsSubmitting(true);
-    setError("");
     try {
       const result = await loginXhsQianfanByEmail({
         email: email.trim(),
@@ -70,7 +72,7 @@ export function QianfanEmailLoginPanel({
     } catch (caught) {
       const detail = (caught as { response?: { data?: { detail?: unknown } } })?.response?.data
         ?.detail;
-      setError(
+      message.error(
         detailMessage(detail) || "登录失败，请确认邮箱与密码，或改用扫码登录。"
       );
     } finally {
@@ -120,8 +122,6 @@ export function QianfanEmailLoginPanel({
           />
         </Form.Item>
       </Form>
-
-      {error ? <Alert type="error" message={error} showIcon /> : null}
 
       <Button
         type="primary"

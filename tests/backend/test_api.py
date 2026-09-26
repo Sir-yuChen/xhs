@@ -165,7 +165,9 @@ def test_discovery_cards_show_note_media_type():
 
 
 def test_rewrite_page_preserves_mode_switch():
-    source = open("frontend/src/pages/platforms/xhs/rewrite-page.tsx", encoding="utf-8").read()
+    # 2026-09-25 §36：草稿工坊并入「笔记工坊」页，原 rewrite-page.tsx 更名为
+    # drafts-workshop-panel.tsx（面板组件，Segmented 双模式原样保留）。
+    source = open("frontend/src/pages/platforms/xhs/drafts-workshop-panel.tsx", encoding="utf-8").read()
 
     assert "rewrite" in source
     assert "generate" in source
@@ -248,7 +250,7 @@ def test_alembic_initial_migration_creates_all_product_tables(tmp_path):
     table_names = set(inspect(test_engine).get_table_names())
     expected = {
         "users", "platform_accounts", "account_cookie_versions", "login_sessions",
-        "notes", "note_assets", "note_comments", "tags", "note_tags",
+        "notes", "note_assets", "note_comments", "topics", "note_topics",
         "model_configs", "ai_drafts", "ai_generated_assets",
         "publish_jobs", "publish_assets", "tasks",
         "monitoring_targets", "monitoring_snapshots",
@@ -2800,14 +2802,14 @@ def test_notes_comments_list_requires_auth_and_enforces_ownership(tmp_path):
         app.dependency_overrides.pop(get_xhs_pc_api_adapter_factory, None)
 
 
-def test_tags_crud_are_user_scoped_and_validate_duplicates(tmp_path):
+def test_topics_crud_are_user_scoped_and_validate_duplicates(tmp_path):
     db_dependency = _override_database(tmp_path)
     try:
         owner_token = _register_and_get_access_token("tags-crud-owner")
         intruder_token = _register_and_get_access_token("tags-crud-intruder")
 
         create_response = client.post(
-            "/api/tags",
+            "/api/topics",
             headers={"Authorization": f"Bearer {owner_token}"},
             json={"name": "High value", "color": "#111111"},
         )
@@ -2817,35 +2819,35 @@ def test_tags_crud_are_user_scoped_and_validate_duplicates(tmp_path):
         assert created["color"] == "#111111"
 
         duplicate_response = client.post(
-            "/api/tags",
+            "/api/topics",
             headers={"Authorization": f"Bearer {owner_token}"},
             json={"name": "High value", "color": "#ef4444"},
         )
         assert duplicate_response.status_code == 400
 
         owner_list_response = client.get(
-            "/api/tags",
+            "/api/topics",
             headers={"Authorization": f"Bearer {owner_token}"},
         )
         assert owner_list_response.status_code == 200
         assert owner_list_response.json()["total"] == 1
 
         intruder_list_response = client.get(
-            "/api/tags",
+            "/api/topics",
             headers={"Authorization": f"Bearer {intruder_token}"},
         )
         assert intruder_list_response.status_code == 200
         assert intruder_list_response.json()["total"] == 0
 
         intruder_update_response = client.patch(
-            f"/api/tags/{created['id']}",
+            f"/api/topics/{created['id']}",
             headers={"Authorization": f"Bearer {intruder_token}"},
             json={"name": "Stolen"},
         )
         assert intruder_update_response.status_code == 404
 
         update_response = client.patch(
-            f"/api/tags/{created['id']}",
+            f"/api/topics/{created['id']}",
             headers={"Authorization": f"Bearer {owner_token}"},
             json={"name": "Rewrite queue", "color": "#2563eb"},
         )
@@ -2854,20 +2856,20 @@ def test_tags_crud_are_user_scoped_and_validate_duplicates(tmp_path):
         assert update_response.json()["color"] == "#2563eb"
 
         intruder_delete_response = client.delete(
-            f"/api/tags/{created['id']}",
+            f"/api/topics/{created['id']}",
             headers={"Authorization": f"Bearer {intruder_token}"},
         )
         assert intruder_delete_response.status_code == 404
 
         delete_response = client.delete(
-            f"/api/tags/{created['id']}",
+            f"/api/topics/{created['id']}",
             headers={"Authorization": f"Bearer {owner_token}"},
         )
         assert delete_response.status_code == 200
         assert delete_response.json() == {"id": created["id"], "status": "deleted"}
 
         empty_list_response = client.get(
-            "/api/tags",
+            "/api/topics",
             headers={"Authorization": f"Bearer {owner_token}"},
         )
         assert empty_list_response.json()["total"] == 0
@@ -2875,16 +2877,16 @@ def test_tags_crud_are_user_scoped_and_validate_duplicates(tmp_path):
         app.dependency_overrides.pop(db_dependency, None)
 
 
-def test_notes_batch_tag_applies_and_removes_owned_tags(tmp_path):
+def test_notes_batch_topic_applies_and_removes_owned_topics(tmp_path):
     db_dependency, owner_token, owner_account_id = _create_pc_account_with_cookie(tmp_path, "batch-tag-owner")
     try:
-        first_tag = client.post(
-            "/api/tags",
+        first_topic = client.post(
+            "/api/topics",
             headers={"Authorization": f"Bearer {owner_token}"},
             json={"name": "Rewrite", "color": "#111111"},
         ).json()
-        second_tag = client.post(
-            "/api/tags",
+        second_topic = client.post(
+            "/api/topics",
             headers={"Authorization": f"Bearer {owner_token}"},
             json={"name": "Benchmark", "color": "#2563eb"},
         ).json()
@@ -2907,56 +2909,56 @@ def test_notes_batch_tag_applies_and_removes_owned_tags(tmp_path):
         replace_response = client.post(
             "/api/notes/batch-tag",
             headers={"Authorization": f"Bearer {owner_token}"},
-            json={"note_ids": [note_id], "tag_ids": [first_tag["id"]], "mode": "replace"},
+            json={"note_ids": [note_id], "tag_ids": [first_topic["id"]], "mode": "replace"},
         )
         assert replace_response.status_code == 200
         assert replace_response.json()["updated_count"] == 1
-        assert replace_response.json()["items"][0]["tags"] == [first_tag]
+        assert replace_response.json()["items"][0]["topics"] == [first_topic]
 
         add_response = client.post(
             "/api/notes/batch-tag",
             headers={"Authorization": f"Bearer {owner_token}"},
-            json={"note_ids": [note_id], "tag_ids": [second_tag["id"]], "mode": "add"},
+            json={"note_ids": [note_id], "tag_ids": [second_topic["id"]], "mode": "add"},
         )
         assert add_response.status_code == 200
-        assert [tag["name"] for tag in add_response.json()["items"][0]["tags"]] == ["Rewrite", "Benchmark"]
+        assert [t["name"] for t in add_response.json()["items"][0]["topics"]] == ["Rewrite", "Benchmark"]
 
         remove_response = client.post(
             "/api/notes/batch-tag",
             headers={"Authorization": f"Bearer {owner_token}"},
-            json={"note_ids": [note_id], "tag_ids": [first_tag["id"]], "mode": "remove"},
+            json={"note_ids": [note_id], "tag_ids": [first_topic["id"]], "mode": "remove"},
         )
         assert remove_response.status_code == 200
-        assert remove_response.json()["items"][0]["tags"] == [second_tag]
+        assert remove_response.json()["items"][0]["topics"] == [second_topic]
 
         detail_response = client.get(
             f"/api/notes/{note_id}",
             headers={"Authorization": f"Bearer {owner_token}"},
         )
         assert detail_response.status_code == 200
-        assert detail_response.json()["tags"] == [second_tag]
+        assert [t["name"] for t in detail_response.json()["topics"]] == ["Benchmark"]
 
         list_response = client.get(
             "/api/notes?platform=xhs",
             headers={"Authorization": f"Bearer {owner_token}"},
         )
         assert list_response.status_code == 200
-        assert list_response.json()["items"][0]["tags"] == [second_tag]
+        assert [t["name"] for t in list_response.json()["items"][0]["topics"]] == ["Benchmark"]
     finally:
         app.dependency_overrides.pop(db_dependency, None)
 
 
-def test_notes_batch_tag_rejects_cross_user_note_or_tag(tmp_path):
+def test_notes_batch_topic_rejects_cross_user_note_or_topic(tmp_path):
     db_dependency, owner_token, owner_account_id = _create_pc_account_with_cookie(tmp_path, "batch-tag-cross-owner")
     intruder_token = _register_and_get_access_token("batch-tag-cross-intruder")
     try:
         owner_tag = client.post(
-            "/api/tags",
+            "/api/topics",
             headers={"Authorization": f"Bearer {owner_token}"},
             json={"name": "Owner tag", "color": "#111111"},
         ).json()
         intruder_tag = client.post(
-            "/api/tags",
+            "/api/topics",
             headers={"Authorization": f"Bearer {intruder_token}"},
             json={"name": "Intruder tag", "color": "#ef4444"},
         ).json()
@@ -3061,7 +3063,7 @@ def test_notes_export_writes_json_for_owned_notes_and_rejects_cross_user_notes(t
         assert save_response.status_code == 200
         note_id = save_response.json()["items"][0]["id"]
         tag_response = client.post(
-            "/api/tags",
+            "/api/topics",
             headers={"Authorization": f"Bearer {owner_token}"},
             json={"name": "Export", "color": "#111111"},
         )
@@ -3086,7 +3088,7 @@ def test_notes_export_writes_json_for_owned_notes_and_rejects_cross_user_notes(t
         assert export_path.exists()
         exported = json.loads(export_path.read_text(encoding="utf-8"))
         assert exported["items"][0]["note_id"] == "export-note-001"
-        assert exported["items"][0]["tags"][0]["name"] == "Export"
+        assert exported["items"][0]["topics"][0]["name"] == "Export"
 
         download_response = client.get(
             payload["download_url"],
@@ -3146,7 +3148,7 @@ def test_notes_export_writes_csv_for_owned_notes(tmp_path):
         )
         assert download_response.status_code == 200
         csv_text = download_response.content.decode("utf-8-sig")
-        assert "note_id,title,author_name,content,tags,published,created_at" in csv_text
+        assert "note_id,title,author_name,content,topics,published,created_at" in csv_text
         assert "export-csv-001" in csv_text
         assert "CSV 标题" in csv_text
         # 采集入库（batch-save）默认「待发布」⇒ CSV 里该列必须是 false（设计 13 §19.12）。
@@ -3188,7 +3190,7 @@ def test_xhs_analytics_uses_current_user_saved_notes_tags_and_comments(tmp_path)
         assert save_response.status_code == 200
         first_note_id = save_response.json()["items"][0]["id"]
         tag_response = client.post(
-            "/api/tags",
+            "/api/topics",
             headers={"Authorization": f"Bearer {owner_token}"},
             json={"name": "早餐", "color": "#111111"},
         )
@@ -4512,7 +4514,7 @@ def test_notes_library_filters_by_keyword_tag_assets_and_comments(tmp_path):
         comment_note_id = first_save.json()["items"][1]["id"]
 
         tag_response = client.post(
-            "/api/tags",
+            "/api/topics",
             headers={"Authorization": f"Bearer {owner_token}"},
             json={"name": "Breakfast", "color": "#111111"},
         )
@@ -4544,7 +4546,7 @@ def test_notes_library_filters_by_keyword_tag_assets_and_comments(tmp_path):
         assert [item["note_id"] for item in keyword_response.json()["items"]] == ["filter-note-assets"]
 
         tag_filter_response = client.get(
-            f"/api/notes?platform=xhs&tag_id={tag_id}",
+            f"/api/notes?platform=xhs&topic_id={tag_id}",
             headers={"Authorization": f"Bearer {owner_token}"},
         )
         assert tag_filter_response.status_code == 200
@@ -4565,7 +4567,7 @@ def test_notes_library_filters_by_keyword_tag_assets_and_comments(tmp_path):
         assert [item["note_id"] for item in comments_response.json()["items"]] == ["filter-note-comments"]
 
         intruder_response = client.get(
-            f"/api/notes?platform=xhs&tag_id={tag_id}",
+            f"/api/notes?platform=xhs&topic_id={tag_id}",
             headers={"Authorization": f"Bearer {intruder_token}"},
         )
         assert intruder_response.status_code == 404
@@ -4614,7 +4616,7 @@ def test_notes_library_detail_enforces_ownership(tmp_path):
 
 def test_notes_library_delete_removes_owned_note_children_and_rejects_cross_user(tmp_path):
     from backend.app.core.database import get_db
-    from backend.app.models import AiDraft, Note, NoteAsset, NoteComment, Tag, note_tags
+    from backend.app.models import AiDraft, Note, NoteAsset, NoteComment, NoteTopic, Topic
 
     db_dependency, owner_token, owner_account_id = _create_pc_account_with_cookie(tmp_path, "library-delete-owner")
     intruder_token = _register_and_get_access_token("library-delete-intruder")
@@ -4628,13 +4630,13 @@ def test_notes_library_delete_removes_owned_note_children_and_rejects_cross_user
                 note_id="delete-note-001",
                 title="Delete me",
             )
-            tag = Tag(user_id=1, name="待删除", color="#111111")
-            db.add_all([note, tag])
+            topic = Topic(user_id=1, name="待删除")
+            db.add_all([note, topic])
             db.flush()
             db.add(NoteAsset(note_id=note.id, asset_type="image", url="https://example.test/delete.webp"))
             db.add(NoteComment(note_id=note.id, comment_id="delete-comment", content="删除评论"))
             db.add(AiDraft(user_id=1, platform="xhs", title="Draft", body="Body", source_note_id=note.id))
-            db.execute(note_tags.insert().values(note_id=note.id, tag_id=tag.id))
+            db.add(NoteTopic(note_id=note.id, topic_id=topic.id))
             db.commit()
             note_id = note.id
         finally:
@@ -4664,7 +4666,7 @@ def test_notes_library_delete_removes_owned_note_children_and_rejects_cross_user
             assert db.get(Note, note_id) is None
             assert db.query(NoteAsset).filter(NoteAsset.note_id == note_id).count() == 0
             assert db.query(NoteComment).filter(NoteComment.note_id == note_id).count() == 0
-            assert db.execute(select(note_tags).where(note_tags.c.note_id == note_id)).first() is None
+            assert db.scalars(select(NoteTopic).where(NoteTopic.note_id == note_id)).first() is None
             assert db.query(AiDraft).filter(AiDraft.source_note_id == note_id).count() == 0
         finally:
             db.close()
@@ -5461,9 +5463,9 @@ def test_schedule_status_reports_scheduler_state_and_counts(tmp_path):
         assert payload["running"] is False
         assert payload["timezone"] == "Asia/Shanghai"
         assert payload["jobs"] == []
-        # 注册播种 7 行（全 active）+ 本测试 2 行（1 active + 1 paused）
-        assert payload["stats"]["total"] == 9
-        assert payload["stats"]["active"] == 8
+        # 注册播种 8 行（全 active）+ 本测试 2 行（1 active + 1 paused）
+        assert payload["stats"]["total"] == 10
+        assert payload["stats"]["active"] == 9
         assert payload["stats"]["paused"] == 1
         assert payload["stats"]["completed"] == 0
     finally:
@@ -5583,6 +5585,407 @@ def test_task_execution_fields_and_retry_with_exhausted_status(tmp_path):
         response = client.post("/api/drafts/1/send-to-publish", json={"platform_account_id": 1})
 
         assert response.status_code == 401
+    finally:
+        app.dependency_overrides.pop(db_dependency, None)
+
+
+def test_manual_clean_endpoints_respect_cleanable_statuses(tmp_path):
+    """手动清理（2026-09-26 用户口径「新增手动批量清理……清理逻辑不包含待重试和
+    进行中状态的记录，前端不允许被选中」）：
+
+    1. `POST /tasks/clean`（显式 ids）：只删 `done` / `cancelled`；待重试
+       （`failed` / `exhausted`）与进行中（`pending` / `running`）**一律不删**
+       （`skipped` 计数，后端第二道闸 —— 前端禁用复选框只是体验）；
+    2. `POST /tasks/clean-all`：删本用户全部可清记录，别家的一行不动（DEF-066）；
+    3. 重试（`POST /tasks/{id}/retry`）把来源标成 `retry`（按钮级来源口径）。
+    """
+    from backend.app.core.database import get_db
+    from backend.app.core.time import shanghai_now
+    from backend.app.models import Task
+
+    db_dependency = _override_database(tmp_path)
+    token = _register_and_get_access_token("task-clean-user")
+    try:
+        db = next(app.dependency_overrides[get_db]())
+        try:
+            now = shanghai_now()
+
+            def _row(task_type: str, status: str, **payload) -> Task:
+                row = Task(
+                    user_id=1, platform="xhs", task_type=task_type, status=status,
+                    progress=100 if status == "done" else 0,
+                    payload={"source": "note_sync_single", **payload},
+                    started_at=now, finished_at=now,
+                )
+                db.add(row)
+                return row
+
+            done_row = _row("xhs_note_sync_item", "done", note_pk=1, ok=True)
+            cancelled_row = _row("xhs_note_sync_item", "cancelled", note_pk=2)
+            failed_row = _row("xhs_note_sync_item", "failed", note_pk=3, ok=False, reason="平台限流")
+            exhausted_row = _row("xhs_note_sync_item", "exhausted", note_pk=4, ok=False)
+            pending_row = _row("xhs_note_sync_item", "pending", note_pk=5)
+            running_row = _row("xhs_note_sync_item", "running", note_pk=6)
+            db.commit()
+            ids = {
+                "done": done_row.id,
+                "cancelled": cancelled_row.id,
+                "failed": failed_row.id,
+                "exhausted": exhausted_row.id,
+                "pending": pending_row.id,
+                "running": running_row.id,
+            }
+        finally:
+            db.close()
+
+        headers = {"Authorization": f"Bearer {token}"}
+
+        # 1) 显式 ids：把六种状态一起点一遍，只有 done / cancelled 被清
+        mixed = client.post(
+            "/api/tasks/clean",
+            json={"task_ids": list(ids.values())},
+            headers=headers,
+        )
+        assert mixed.status_code == 200, mixed.text
+        body = mixed.json()
+        assert body["cleaned"] == 2 and body["skipped"] == 4 and body["requested"] == 6, (
+            "只有已完成 / 已取消被清；待重试与进行中被跳过（不删）"
+        )
+        assert body["items"] == {"cleaned": 2, "skipped": 4}, "明细维度：清 2 跳 4（分维度报账）"
+        assert body["batches"] == {"cleaned": 0, "blocked": 0}, (
+            "点名的是明细行 ⇒ 批次维度不参与（两个维度各报各的）"
+        )
+        assert body["blocked"] == [], "没有批次被挡下"
+        db2 = next(app.dependency_overrides[get_db]())
+        try:
+            for key in ("failed", "exhausted", "pending", "running"):
+                assert db2.get(Task, ids[key]) is not None, f"{key} 行不许被清掉"
+            assert db2.get(Task, ids["done"]) is None
+            assert db2.get(Task, ids["cancelled"]) is None
+        finally:
+            db2.close()
+
+        # 2) 一键清除全部：剩下的可清记录（此时只剩不可清的）⇒ cleaned = 0
+        all_resp = client.post("/api/tasks/clean-all", headers=headers)
+        assert all_resp.status_code == 200, all_resp.text
+        assert all_resp.json()["cleaned"] == 0, "待重试 / 进行中不在可清范围"
+
+        # 造一条新的 done + 别家的一条 done ⇒ 一键清只清本用户
+        db3 = next(app.dependency_overrides[get_db]())
+        try:
+            mine = Task(
+                user_id=1, platform="xhs", task_type="xhs_note_sync_item", status="done",
+                progress=100, payload={"source": "note_sync_single"}, started_at=now, finished_at=now,
+            )
+            db3.add(mine)
+            db3.flush()
+            theirs = Task(
+                user_id=2, platform="xhs", task_type="xhs_note_sync_item", status="done",
+                progress=100, payload={"source": "note_sync_single"}, started_at=now, finished_at=now,
+            )
+            db3.add(theirs)
+            db3.commit()
+            mine_id, theirs_id = mine.id, theirs.id
+        finally:
+            db3.close()
+        all_resp2 = client.post("/api/tasks/clean-all", headers=headers)
+        assert all_resp2.json()["cleaned"] == 1, "只清本用户的可清记录（DEF-066）"
+        db4 = next(app.dependency_overrides[get_db]())
+        try:
+            assert db4.get(Task, mine_id) is None
+            assert db4.get(Task, theirs_id) is not None, "别家的记录物理上够不着"
+        finally:
+            db4.close()
+
+        # 3) 重试标 retry 来源（常驻化后一行 = 一个队列项，直接复位本行）
+        retry = client.post(f"/api/tasks/{ids['failed']}/retry", headers=headers)
+        assert retry.status_code == 200
+        assert retry.json()["status"] == "pending"
+        db5 = next(app.dependency_overrides[get_db]())
+        try:
+            row = db5.get(Task, ids["failed"])
+            assert row.payload["source"] == "retry", "这一跑来自重试（按钮级来源）"
+            assert row.retry_count == 1
+        finally:
+            db5.close()
+    finally:
+        app.dependency_overrides.pop(db_dependency, None)
+
+
+def test_batch_clean_is_atomic_and_blocked_by_unfinished_items(tmp_path):
+    """批次维度清理（2026-09-26 用户口径「支持按照批次清理记录，批次中存在正在执行或
+    待执行得记录，则不支持该批次全部清理……清理功能分为两个维度，批次维度和批次内的
+    操作」）：
+
+    1. 批内有 `running` / `pending`（**正在执行 / 待执行**）⇒ **整批不清理**：批次行
+       与子行一条不少，`blocked` 里报出原因（`active` 计数）；
+    2. 批内只有 `failed`（待重试）⇒ 同样不支持整批（删了用户失去重试入口），原因走
+       `retryable`（与 `active` 分开报，别混成一坨）；
+    3. 批内全是 `done` / `cancelled` ⇒ **整批一起删**（批次行 + 全部子行，不留孤儿）；
+    4. **批次内维度**：批内有待重试篇时，点名明细行仍能单独清掉已成功的那条，批次与
+       待重试的那条都留着（用户还能点重试）；
+    5. **一键清除不拆散**被挡下的批次：它那些可清的明细也不清（不把在用的批次清成残的）。
+    """
+    from backend.app.core.database import get_db
+    from backend.app.core.time import shanghai_now
+    from backend.app.models import Task
+
+    db_dependency = _override_database(tmp_path)
+    token = _register_and_get_access_token("batch-clean-user")
+    try:
+        db = next(app.dependency_overrides[get_db]())
+        try:
+            now = shanghai_now()
+
+            def _batch(batch_no: str) -> Task:
+                row = Task(
+                    user_id=1, platform="xhs", task_type="xhs_note_sync_batch", status="pending",
+                    progress=0, batch_no=batch_no,
+                    payload={"source": "note_sync_batch", "queue_key": "note_sync"},
+                    created_at=now,
+                )
+                db.add(row)
+                db.flush()
+                return row
+
+            def _child(batch: Task, status: str, pk: int, **payload) -> Task:
+                row = Task(
+                    user_id=1, platform="xhs", task_type="xhs_note_sync_item", status=status,
+                    progress=100 if status == "done" else 0,
+                    payload={"source": "note_sync_batch", "note_pk": pk, **payload},
+                    parent_task_id=batch.id, created_at=now,
+                    started_at=now if status != "pending" else None,
+                    finished_at=now if status in ("done", "failed", "cancelled") else None,
+                )
+                db.add(row)
+                db.flush()
+                return row
+
+            active_batch = _batch("NB20260926150000-AAAA")
+            active_done = _child(active_batch, "done", 1, ok=True)
+            _child(active_batch, "running", 2)
+            _child(active_batch, "pending", 3)
+
+            retry_batch = _batch("NB20260926150001-BBBB")
+            retry_done = _child(retry_batch, "done", 4, ok=True)
+            retry_failed = _child(retry_batch, "failed", 5, ok=False, reason="平台限流")
+
+            ready_batch = _batch("NB20260926150002-CCCC")
+            ready_done = _child(ready_batch, "done", 6, ok=True)
+            ready_cancelled = _child(ready_batch, "cancelled", 7)
+            db.commit()
+            ids = {
+                "active_batch": active_batch.id,
+                "active_done": active_done.id,
+                "retry_batch": retry_batch.id,
+                "retry_done": retry_done.id,
+                "retry_failed": retry_failed.id,
+                "ready_batch": ready_batch.id,
+                "ready_done": ready_done.id,
+                "ready_cancelled": ready_cancelled.id,
+            }
+        finally:
+            db.close()
+
+        headers = {"Authorization": f"Bearer {token}"}
+
+        def _rows(*keys: str) -> dict:
+            session = next(app.dependency_overrides[get_db]())
+            try:
+                return {key: session.get(Task, ids[key]) for key in keys}
+            finally:
+                session.close()
+
+        # 1) 批内有正在执行 / 待执行 ⇒ 整批不清理（用户原话「不支持该批次全部清理」）
+        blocked = client.post(
+            "/api/tasks/clean", json={"task_ids": [ids["active_batch"]]}, headers=headers
+        )
+        assert blocked.status_code == 200, blocked.text
+        body = blocked.json()
+        assert body["cleaned"] == 0 and body["skipped"] == 1, "整批被挡 ⇒ 一条都不清"
+        assert body["batches"] == {"cleaned": 0, "blocked": 1}, "批次维度：被挡 1 个"
+        assert body["blocked"] == [
+            {
+                "id": ids["active_batch"],
+                "batch_no": "NB20260926150000-AAAA",
+                "active": 2,
+                "retryable": 0,
+            }
+        ], "被挡下的批次必须报出原因（2 条正在执行 / 待执行）"
+        kept_active = _rows("active_batch", "active_done")
+        assert all(row is not None for row in kept_active.values()), (
+            "整批被挡 ⇒ 批次行与它的明细一条不少（原子动作，不做半清）"
+        )
+
+        # 2) 批内只有待重试（failed）⇒ 同样不支持整批（删了用户失去重试入口）
+        retry_blocked = client.post(
+            "/api/tasks/clean", json={"task_ids": [ids["retry_batch"]]}, headers=headers
+        )
+        assert retry_blocked.status_code == 200
+        assert retry_blocked.json()["blocked"] == [
+            {
+                "id": ids["retry_batch"],
+                "batch_no": "NB20260926150001-BBBB",
+                "active": 0,
+                "retryable": 1,
+            }
+        ], "待重试的明细也让整批不可清（原因与 active 分开报）"
+
+        # 3) **批次内维度**：点名明细行 ⇒ 清掉已成功的那条，批次与待重试的那条都留着
+        one = client.post(
+            "/api/tasks/clean", json={"task_ids": [ids["retry_done"]]}, headers=headers
+        )
+        assert one.status_code == 200
+        assert one.json()["items"] == {"cleaned": 1, "skipped": 0}, "明细维度：清 1"
+        assert one.json()["batches"] == {"cleaned": 0, "blocked": 0}, "没点名批次 ⇒ 批次维度不参与"
+        after = _rows("retry_batch", "retry_done", "retry_failed")
+        assert after["retry_done"] is None, "点名的明细被清掉"
+        assert after["retry_batch"] is not None and after["retry_failed"] is not None, (
+            "批次与待重试的明细留着（用户还能点重试）"
+        )
+
+        # 4) 批内全是已完成 / 已取消 ⇒ 整批（批次 + 全部明细）一次删
+        ready = client.post(
+            "/api/tasks/clean", json={"task_ids": [ids["ready_batch"]]}, headers=headers
+        )
+        assert ready.status_code == 200
+        assert ready.json()["batches"] == {"cleaned": 1, "blocked": 0}
+        assert ready.json()["cleaned"] == 1, "只点了批次行 ⇒ 整批算一次清理"
+        gone = _rows("ready_batch", "ready_done", "ready_cancelled")
+        assert all(row is None for row in gone.values()), "批次行与它的明细一起消失（不留孤儿）"
+
+        # 5) 一键清除：被挡下的批次**连它可清的明细也不拆**
+        all_resp = client.post("/api/tasks/clean-all", headers=headers)
+        assert all_resp.status_code == 200
+        payload = all_resp.json()
+        assert payload["cleaned"] == 0, "剩下的都在被挡下的批次里 ⇒ 连可清明细也不清"
+        assert payload["batches"]["blocked"] == 2, "两个批次被挡（有活 / 待重试）"
+        kept = _rows("active_batch", "active_done", "retry_batch", "retry_failed")
+        assert all(row is not None for row in kept.values()), "被挡批次一条明细都不许少"
+    finally:
+        app.dependency_overrides.pop(db_dependency, None)
+
+
+def test_queue_record_tree_groups_batches_and_queries_by_batch_no(tmp_path):
+    """`GET /tasks?tree=1`（2026-09-26 用户口径「批次+详情父子树风格展示」+
+    「新增列表支持使用唯一批次号查询」）：
+
+    1. 顶级行 = **只有批次行**（2026-09-26 用户口径「不做兼容逻辑，数据已清空」：
+       无父的队列项行属于已清掉的存量形态，**不再**出现在树里），批次行内嵌
+       `children` 与按子行现算的 `summary`（状态 / 计数 / 耗时）；
+    2. `batch_no` 过滤只回批次号匹配的批次行（大小写不敏感、支持只给尾段）；
+    3. 默认形状（`tree` 不传）**一点没变** —— 平铺 + 分页，不许把老调用方带崩；
+    4. 批次行**不是可执行任务**：取消 / 重试它明确 400（不静默改父行造成父子树自相矛盾）；
+    5. 批次行另派生 `accounts`（子行 `payload.account_id` 去重 + FIFO 保序）——
+       「账号」列取它（2026-09-26 用户口径「批次记录执行的账号」）；明细行不带该键
+       （它的账号在自己 `payload.account_id` 里）。
+    """
+    from backend.app.core.database import get_db
+    from backend.app.core.time import shanghai_now
+    from backend.app.models import Task
+
+    db_dependency = _override_database(tmp_path)
+    token = _register_and_get_access_token("queue-tree-user")
+    try:
+        db = next(app.dependency_overrides[get_db]())
+        try:
+            now = shanghai_now()
+            batch = Task(
+                user_id=1, platform="xhs", task_type="xhs_note_sync_batch", status="pending",
+                progress=0, payload={"source": "note_sync_batch", "queue_key": "note_sync"},
+                batch_no="NB20260926120000-ABCD", created_at=now,
+            )
+            db.add(batch)
+            db.flush()
+            done_child = Task(
+                user_id=1, platform="xhs", task_type="xhs_note_sync_item", status="done",
+                progress=100, payload={"note_pk": 1, "note_title": "甲", "ok": True, "source": "note_sync_batch", "account_id": 7},
+                parent_task_id=batch.id, created_at=now, started_at=now, finished_at=now,
+            )
+            failed_child = Task(
+                user_id=1, platform="xhs", task_type="xhs_note_sync_item", status="failed",
+                progress=0, payload={"note_pk": 2, "note_title": "乙", "ok": False, "reason": "平台限流", "source": "note_sync_batch", "account_id": 9},
+                parent_task_id=batch.id, created_at=now, started_at=now, finished_at=now,
+            )
+            orphan = Task(
+                user_id=1, platform="xhs", task_type="xhs_note_publish_item", status="done",
+                progress=100, payload={"note_pk": 3, "note_title": "丙", "ok": True, "source": "manual"},
+                created_at=now, started_at=now, finished_at=now,
+            )
+            db.add_all([done_child, failed_child, orphan])
+            db.commit()
+            batch_id, done_id, failed_id, orphan_id = batch.id, done_child.id, failed_child.id, orphan.id
+        finally:
+            db.close()
+
+        headers = {"Authorization": f"Bearer {token}"}
+
+        # 1) 树模式：顶级**只有批次行**（无父的队列项行不做兼容 ⇒ 不出现）；
+        #    批次行带 children 与按子行现算的 summary
+        tree = client.get("/api/tasks?tree=1", headers=headers)
+        assert tree.status_code == 200, tree.text
+        body = tree.json()
+        by_id = {row["id"]: row for row in body["items"]}
+        assert set(by_id) == {batch_id}, (
+            "顶级只给批次行：数据已清空后不再兼容「无父的队列项行」"
+            "（2026-09-26 用户口径「不做兼容逻辑，数据已清空」）"
+        )
+        batch_node = by_id[batch_id]
+        assert batch_node["batch_no"] == "NB20260926120000-ABCD"
+        assert [child["id"] for child in batch_node["children"]] == [done_id, failed_id], "子行按 FIFO 序"
+        assert batch_node["summary"]["total"] == 2
+        assert batch_node["summary"]["done"] == 1 and batch_node["summary"]["failed"] == 1
+        assert batch_node["status"] == "failed", "派生状态：有失败子行 ⇒ 批次报失败"
+        assert batch_node["duration_ms"] is not None, "子行都终态 ⇒ 整批耗时给得出"
+        assert batch_node["summary"]["progress"] == 100
+        assert batch_node["created_at"], "批次自己的创建时间必须保留（列表「批次创建时间」列取它）"
+        # 账号（2026-09-26 用户口径「批次记录执行的账号」）：批次级账号**由子行派生**
+        # （`batch_account_ids`，去重 + FIFO 保序）—— 跨账号批量必须两个都报出来，
+        # 只报第一个就是把「跨账号」说成「单账号」（明细里明明有 2 个）。
+        assert batch_node["accounts"] == [7, 9], (
+            "批次行的账号 = 子行 payload.account_id 去重保序（跨账号批量两个都要在）"
+        )
+        assert batch_node["children"][0]["payload"]["account_id"] == 7, (
+            "明细行的账号在它自己的 payload 里（入队快照）"
+        )
+        assert "accounts" not in batch_node["children"][0], (
+            "明细行不带批次级的 accounts（那是批次行的派生字段，明细看自己 payload.account_id）"
+        )
+        assert orphan_id not in by_id, (
+            "无父的队列项行既不进树、也不当顶级行（它没有批次号，列表顶级行只有批次行）"
+        )
+
+        # 2) 批次号查询：大小写不敏感 + 支持只给尾段（用户手抄容易只记得后四位）
+        exact = client.get("/api/tasks?tree=1&batch_no=NB20260926120000-ABCD", headers=headers)
+        assert [row["id"] for row in exact.json()["items"]] == [batch_id]
+        lower_tail = client.get("/api/tasks?tree=1&batch_no=abcd", headers=headers)
+        assert [row["id"] for row in lower_tail.json()["items"]] == [batch_id], "小写尾段也能查到"
+        miss = client.get("/api/tasks?tree=1&batch_no=ZZZZ", headers=headers)
+        assert miss.json()["items"] == [], "查不到就空列表（不许回全部）"
+
+        # 3) 默认形状不变：平铺 + 分页，四行都在（含子行），没有 children / summary
+        flat = client.get("/api/tasks", headers=headers)
+        assert flat.status_code == 200
+        flat_ids = {row["id"] for row in flat.json()["items"]}
+        assert flat_ids == {batch_id, done_id, failed_id, orphan_id}, "平铺模式仍是全部行（含子行）"
+        assert all("children" not in row and "summary" not in row for row in flat.json()["items"])
+
+        # 4) 批次行不可取消 / 不可重试：明确 400（静默改父行 = 父子树自相矛盾）
+        cancel_batch = client.post(f"/api/tasks/{batch_id}/cancel", headers=headers)
+        assert cancel_batch.status_code == 400, cancel_batch.text
+        assert cancel_batch.json()["detail"]["code"] == "BATCH_ROW_NOT_OPERABLE"
+        retry_batch = client.post(f"/api/tasks/{batch_id}/retry", headers=headers)
+        assert retry_batch.status_code == 400, retry_batch.text
+        assert retry_batch.json()["detail"]["code"] == "BATCH_ROW_NOT_OPERABLE"
+
+        # 明细行仍可正常重试，且**批次的派生状态跟着回到「没跑完」**（父行被刷新）
+        retry_child = client.post(f"/api/tasks/{failed_id}/retry", headers=headers)
+        assert retry_child.status_code == 200, retry_child.text
+        assert retry_child.json()["status"] == "pending"
+        after = client.get("/api/tasks?tree=1&batch_no=ABCD", headers=headers).json()["items"][0]
+        assert after["status"] == "pending", "重试后批次不再报失败（有未终态子行）"
+        assert after["duration_ms"] is None, "没跑完的整批没有耗时（缺值口径，不是 0）"
+        assert after["summary"]["pending"] == 1 and after["summary"]["done"] == 1
     finally:
         app.dependency_overrides.pop(db_dependency, None)
 

@@ -9,9 +9,8 @@ import {
   RobotOutlined,
   StarOutlined,
   UploadOutlined,
-} from "@ant-design/icons";
-import {
-  Alert,
+} from "@ant-design/icons";import {
+  App,
   Button,
   Card,
   Checkbox,
@@ -30,7 +29,6 @@ import {
 } from "antd";
 import { useEffect, useState } from "react";
 
-import { PageHeader } from "../../../components/layout/app-shell";
 import {
   deleteGeneratedImageAsset,
   deleteUserImage,
@@ -55,7 +53,12 @@ function isRenderableImage(value: string): boolean {
   );
 }
 
-export function XhsImageStudioPage() {
+/**
+ * 图片工坊**面板**（2026-09-25 §36：原 `image-studio-page.tsx` 独立页面，现为
+ * 「笔记工坊 → 图片工坊」页签的内容）。与原页面的唯一差别：`PageHeader` 收成
+ * 面板头部行（工坊页只保留一个骨架标题，三个工坊各自不再各扛一个页面标题）。
+ */
+export function ImageStudioPanel() {
   const [assets, setAssets] = useState<GeneratedImageAsset[]>([]);
   const [userImages, setUserImages] = useState<UserImageFile[]>([]);
   const [prompt, setPrompt] = useState("");
@@ -65,8 +68,9 @@ export function XhsImageStudioPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isDescribing, setIsDescribing] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // 全站消息提醒统一走 antd message（设计 04 §3.6，2026-09-25 用户口径）：
+  // 操作结果反馈不再渲染 inline Alert 占版面。
+  const { message } = App.useApp();
   const [refPickerOpen, setRefPickerOpen] = useState(false);
   const [saveToAssets, setSaveToAssets] = useState(true);
   const [generatedPreview, setGeneratedPreview] = useState<string | null>(null);
@@ -79,7 +83,6 @@ export function XhsImageStudioPage() {
 
   async function loadAssets() {
     setIsLoading(true);
-    setError(null);
     try {
       const [aiResult, userResult] = await Promise.all([
         fetchGeneratedImageAssets(),
@@ -88,7 +91,7 @@ export function XhsImageStudioPage() {
       setAssets(aiResult.items);
       setUserImages(userResult.items);
     } catch {
-      setError("图片资产加载失败。");
+      message.error("图片资产加载失败。");
     } finally {
       setIsLoading(false);
     }
@@ -96,12 +99,10 @@ export function XhsImageStudioPage() {
 
   async function handleGenerate() {
     if (!prompt.trim()) {
-      setError("请填写提示词。");
+      message.warning("请填写提示词。");
       return;
     }
     setIsGenerating(true);
-    setError(null);
-    setMessage(null);
     setGeneratedPreview(null);
     try {
       const result = await generateImageWithAi({
@@ -114,9 +115,9 @@ export function XhsImageStudioPage() {
       if (result.asset) {
         setAssets((prev) => [result.asset!, ...prev]);
       }
-      setMessage("图片生成成功。");
+      message.success("图片生成成功。");
     } catch {
-      setError("AI 图片生成失败，请确认已配置图片生成模型。");
+      message.error("AI 图片生成失败，请确认已配置图片生成模型。");
     } finally {
       setIsGenerating(false);
     }
@@ -124,21 +125,19 @@ export function XhsImageStudioPage() {
 
   async function handleDescribeImage() {
     if (!imageUrl.trim()) {
-      setError("请先填写图片 URL。");
+      message.warning("请先填写图片 URL。");
       return;
     }
     setIsDescribing(true);
-    setError(null);
-    setMessage(null);
     try {
       const result = await describeImageWithAi({
         image_url: imageUrl.trim(),
         instruction: "提炼这张图片适合小红书发布的卖点、风格和标题方向。",
       });
       setDescription(result.text);
-      setMessage("图片描述已生成。");
+      message.success("图片描述已生成。");
     } catch {
-      setError("图片描述失败，请确认已配置支持视觉理解的图片模型。");
+      message.error("图片描述失败，请确认已配置支持视觉理解的图片模型。");
     } finally {
       setIsDescribing(false);
     }
@@ -177,7 +176,7 @@ export function XhsImageStudioPage() {
       };
       setUserImages((prev) => [newItem, ...prev]);
     } catch {
-      setError("文件上传失败。");
+      message.error("文件上传失败。");
     }
     return false; // prevent antd auto-upload
   }
@@ -188,41 +187,20 @@ export function XhsImageStudioPage() {
 
   return (
     <div>
-      <PageHeader
-        eyebrow="XHS Image Studio"
-        title="图片工坊"
-        description="AI 图片生成、图片描述、沉淀图片资产，赋能小红书内容创作。"
-        action={
-          <Button
-            icon={<ReloadOutlined />}
-            onClick={loadAssets}
-            loading={isLoading}
-          >
+      {/* 面板头部行（§36）：说明文案 + 刷新资产（原 PageHeader 的 action 收进这里） */}
+      <Row justify="space-between" align="middle" style={{ marginBottom: 16 }}>
+        <Col>
+          <Text strong>图片工坊</Text>
+          <Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
+            AI 图片生成、图片描述与图片资产管理。
+          </Text>
+        </Col>
+        <Col>
+          <Button icon={<ReloadOutlined />} onClick={loadAssets} loading={isLoading} size="small">
             刷新资产
           </Button>
-        }
-      />
-
-      {error && (
-        <Alert
-          type="error"
-          message={error}
-          showIcon
-          closable
-          onClose={() => setError(null)}
-          style={{ marginBottom: 16 }}
-        />
-      )}
-      {message && (
-        <Alert
-          type="success"
-          message={message}
-          showIcon
-          closable
-          onClose={() => setMessage(null)}
-          style={{ marginBottom: 16 }}
-        />
-      )}
+        </Col>
+      </Row>
 
       {/* ---- Top Row: Two tool cards ---- */}
       <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
@@ -401,7 +379,7 @@ export function XhsImageStudioPage() {
                       onClick={() => {
                         // Re-generate with save flag
                         setSaveToAssets(true);
-                        setMessage("下次生成将自动保存到 AI 资产。");
+                        message.info("下次生成将自动保存到 AI 资产。");
                       }}
                       style={{ marginTop: 8 }}
                     >

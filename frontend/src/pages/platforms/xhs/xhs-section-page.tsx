@@ -26,10 +26,8 @@ const sectionInfo: Record<string, { title: string; description: string }> = {
     title: "AI 改写",
     description: "把收藏笔记转化为可编辑草稿，生成标题、标签和内容角度。",
   },
-  "image-studio": {
-    title: "图片工坊",
-    description: "封面生成、配图变体、版式调整和发布前图片处理。",
-  },
+  // ⚠️ 2026-09-25 §36：`image-studio` 条目移除 —— 该 path 起有真实路由
+  // （「笔记工坊」的 tab 重定向），`:section` 兜底页永远轮不到它，是死条目。
   publish: {
     title: "发布中心",
     description: "草稿、素材上传、立即发布、定时发布、失败重试和历史记录。",

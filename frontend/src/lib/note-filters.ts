@@ -83,6 +83,54 @@ export function canSyncNote(note: { note_type?: string; publish_status?: string 
 }
 
 /**
+ * 这条笔记**能不能进批量同步队列**（设计 13 §35.1，2026-09-25 用户口径）。
+ *
+ * > 需求原文：「只有已发布的支持被选中」。
+ *
+ * 判据只有一条：`publish_status === "published"`。
+ *
+ * ⚠️ 比 `canSyncNote`（单条「同步」按钮：synced **或** published）**更严**，
+ * 这是刻意的两把尺子（与后端 `note_supports_sync` / `note_supports_batch_sync`
+ * 同款分工）：单条按钮回答「这条有没有可拉的平台最新内容」；批量同步是
+ * 「把一批**已发布**笔记刷新到平台最新」的显式动作。**改一边不默认改另一边。**
+ *
+ * 前后端同口径：后端 `POST /notes/batch-sync` 逐篇校验（模型层唯一判据
+ * `models/note.py::note_supports_batch_sync`）—— 界面跳过与接口放行一致，
+ * 不会出现「按钮在、点下去 400」或「按钮没有却还能调」。
+ */
+export function canBatchSyncNote(note: { publish_status?: string }): boolean {
+  return (note?.publish_status ?? "").trim() === "published";
+}
+
+/**
+ * 批量同步的**目标与跳过数**（确认框要用：跳过几条必须明示，不静默丢）。
+ *
+ * 与 `note-publish-gates.ts::splitPublishTargets` 同款形态（那个管发布、
+ * 这个管同步 —— 两把尺子两个家，都是「批量目标 + 跳过计数」的同一契约）：
+ *
+ * @param notes 当前列表（已选的会在里面）
+ * @param selectedIds 勾选的笔记 id
+ * @returns `{ targets, skipped }` —— targets 保持传入顺序（队列顺序处理）
+ */
+export function splitSyncTargets<T extends { id: number; publish_status?: string }>(
+  notes: T[],
+  selectedIds: number[]
+): { targets: T[]; skipped: number } {
+  const byId = new Map(notes.map((note) => [note.id, note]));
+  const targets: T[] = [];
+  let skipped = 0;
+  for (const id of selectedIds) {
+    const note = byId.get(id);
+    if (note && canBatchSyncNote(note)) {
+      targets.push(note);
+    } else {
+      skipped += 1;
+    }
+  }
+  return { targets, skipped };
+}
+
+/**
  * 账号下拉选项的文案：**昵称（取不到就明说）**，与内容库「来源账号」列同一事实。
  *
  * 内容库不展示店铺 / 类型后缀（那是商品台账的口径）—— 这里只有一个账号昵称，

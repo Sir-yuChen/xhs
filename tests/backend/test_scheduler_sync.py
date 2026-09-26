@@ -201,8 +201,13 @@ def test_scheduler_is_not_started_when_master_switch_is_off(monkeypatch):
     """总开关 `scheduler_enabled=False` 时**连调度器都不启动**（结构性闸门）。
 
     闸门在 `main.lifespan`（`if settings.scheduler_enabled:`）。⚠️ 这里把
-    `init_db` / `start_scheduler` 都打桩：否则进 lifespan 会拿**真实运行库**
-    跑迁移，测试就变成了对生产库的写操作。
+    `init_db` / `start_scheduler` **以及队列恢复、三个 worker 唤醒、三个看门狗**
+    全部打桩：否则进 lifespan 会拿**真实运行库**跑迁移 / 做队列恢复 / 起常驻
+    worker 去认领真实数据 —— 测试就变成了对生产库的写操作。
+
+    顺带守住「重启续跑 + 守活确实被接线」（比 AST 断言更强：走一遍真 lifespan
+    看副作用）。顺序也是判据：**先复位再唤醒** —— 先唤醒会让 worker 去认领那些
+    本该被复位成 `pending` 的 `running` 行（认领只认 `pending`，等于什么也没捞到）。
     """
     import asyncio
 
@@ -218,6 +223,34 @@ def test_scheduler_is_not_started_when_master_switch_is_off(monkeypatch):
         lambda *a, **k: started.append(True) or "SPY-SCHEDULER",
     )
 
+    recoveries: list[str] = []
+    woken: list[str] = []
+
+    class _StubRecovery:
+        def recover_interrupted(self, _db):
+            recoveries.append("interrupted")
+            return {"requeued": 0, "failed": 0}
+
+        def recover_publishing_notes(self, _db):
+            recoveries.append("publishing")
+            return 0
+
+    class _StubSession:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(main_module, "note_queue_service", _StubRecovery())
+    monkeypatch.setattr(main_module, "SessionLocal", _StubSession)
+    monkeypatch.setattr(main_module, "ensure_sync_worker", lambda: woken.append("sync"))
+    monkeypatch.setattr(main_module, "ensure_publish_worker", lambda: woken.append("publish"))
+    monkeypatch.setattr(main_module, "ensure_generate_worker", lambda: woken.append("generate"))
+    monkeypatch.setattr(main_module, "start_sync_worker_watchdog", lambda **k: None)
+    monkeypatch.setattr(main_module, "stop_sync_worker_watchdog", lambda: None)
+    monkeypatch.setattr(main_module, "start_publish_worker_watchdog", lambda **k: None)
+    monkeypatch.setattr(main_module, "stop_publish_worker_watchdog", lambda: None)
+    monkeypatch.setattr(main_module, "start_generate_worker_watchdog", lambda **k: None)
+    monkeypatch.setattr(main_module, "stop_generate_worker_watchdog", lambda: None)
+
     app = main_module.app
 
     async def _enter() -> object:
@@ -228,6 +261,12 @@ def test_scheduler_is_not_started_when_master_switch_is_off(monkeypatch):
         scheduler = asyncio.run(_enter())
         assert started == [], "总开关关着时不该启动调度器"
         assert scheduler is None
+        assert recoveries == ["interrupted", "publishing"], (
+            "启动必须先复位中断队列项、再复位卡在 publishing 的笔记"
+        )
+        assert woken == ["sync", "publish", "generate"], (
+            "复位完必须**立刻**唤醒三个 worker（等看门狗 30 秒巡检 = 积压白等半分钟）"
+        )
     finally:
         try:
             asyncio.run(app.router.lifespan_context(app).__aexit__(None, None, None))

@@ -162,6 +162,25 @@ export type SortState = { field: string; order: "ascend" | "descend" };
  */
 export const DEFAULT_SORT: SortState | null = null;
 
+/**
+ * 每页条数候选（分页器 `pageSizeOptions`）与默认值。
+ *
+ * 抽到 lib 是因为它有**第二个消费者**：本地缓存的取值域校验（2026-09-26
+ * 「筛选条件落本地缓存」）—— 缓存里若是 `999` 这种页面选不出来的值，分页器会
+ * 显示一个用户没法理解的「每页 999 条」。两处各写一遍 = 迟早对不上。
+ */
+export const SHOP_ITEMS_PAGE_SIZES = [20, 50, 100] as const;
+export const DEFAULT_SHOP_ITEMS_PAGE_SIZE = 20;
+
+/** 缓存的排序态校验（形状对不上就回「无排序」，不是回某个默认字段）。 */
+export function sanitizeSortState(raw: unknown, fallback: SortState | null): SortState | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return fallback;
+  const candidate = raw as { field?: unknown; order?: unknown };
+  const field = typeof candidate.field === "string" ? candidate.field : "";
+  const order = candidate.order === "ascend" || candidate.order === "descend" ? candidate.order : null;
+  return field && order ? { field, order } : fallback;
+}
+
 /** 排序字段 → 中文名（v1.32 起表头箭头驱动排序；这里给「当前排序」提示行用）。 */
 export const SORT_FIELD_LABELS: Record<string, string> = {
   create_time: "创建时间",

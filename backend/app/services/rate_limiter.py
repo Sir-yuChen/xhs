@@ -7,7 +7,8 @@ from threading import Lock
 from backend.app.core.config import get_settings
 
 
-#: `wait_allow()` 的最长等待（秒）。额度 5 次/分钟 ⇒ 最坏 60 秒必有空位，120 给两倍余量。
+#: `wait_allow()` 的最长等待（秒）。默认额度 60 次/分钟 ⇒ 最坏 60 秒必有空位，
+#: 120 给两倍余量（额度由 `settings.crawl_rate_limit_per_minute` 配，DEF-069）。
 WAIT_TIMEOUT_SECONDS = 120.0
 
 #: `wait_allow()` 的轮询间隔（秒）。测试把它置 0 以免真等待。
@@ -15,17 +16,27 @@ WAIT_POLL_SECONDS = 1.0
 
 
 class CrawlRateLimiter:
+    """按限流键的滑动窗口放行器（`allow` 判定 / `wait_allow` 等待式节流）。
+
+    额度优先级（DEF-069，2026-09-25）：**构造参数 > settings > 5**。构造参数是
+    调用方 / 测试的显式意图，必须优先；settings 的 `crawl_rate_limit_per_minute`
+    是产品配置（默认 60）；都读不到才兜底 5。⚠️ 旧实现的兜底读的是
+    `scheduler_interval_seconds`（调度周期）—— 语义混乱，改限流要改调度周期。
+    """
+
     def __init__(self, max_per_minute: int | None = None):
-        self._max = max_per_minute or get_settings().scheduler_interval_seconds or 5
+        self._override = max_per_minute
         self._lock = Lock()
         self._windows: dict[str, list[float]] = defaultdict(list)
 
     @property
     def max_per_minute(self) -> int:
+        if self._override:
+            return int(self._override)
         try:
-            return int(getattr(get_settings(), "crawl_rate_limit_per_minute", 0)) or self._max
+            return int(getattr(get_settings(), "crawl_rate_limit_per_minute", 0)) or 5
         except Exception:
-            return self._max
+            return 5
 
     def allow(self, account_id: int | str) -> bool:
         """按**限流键**放行。键可以是账号 id，或 ``"<账号>:<源>"``。

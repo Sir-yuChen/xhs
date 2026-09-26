@@ -16,7 +16,7 @@ from backend.app.core.config import get_settings
 from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user
 from backend.app.core.time import shanghai_now
-from backend.app.models import AiDraft, KeywordGroup, MonitoringTarget, Note, NoteComment, PlatformAccount, PublishJob, Tag, User, note_tags
+from backend.app.models import AiDraft, KeywordGroup, MonitoringTarget, Note, NoteComment, NoteTopic, PlatformAccount, PublishJob, Topic, User
 
 router = APIRouter(prefix="/xhs/analytics", tags=["xhs-analytics"])
 
@@ -158,14 +158,16 @@ def _topic_items(db: Session, current_user: User, notes: list[Note]) -> list[dic
     note_by_id = {note.id: note for note in notes}
     topic_note_ids: dict[str, set[int]] = defaultdict(set)
 
-    tag_rows = db.execute(
-        select(note_tags.c.note_id, Tag.name)
-        .join(Tag, Tag.id == note_tags.c.tag_id)
-        .where(Tag.user_id == current_user.id, note_tags.c.note_id.in_(note_by_id.keys() or [-1]))
+    # 话题来源一：`note_topics` 关系表 join `topics` 字典表（§34.4：2026-09-25 起
+    # 标签表已并入话题表 —— 原 `note_tags` join `tags` 的同款查询）。
+    topic_rows = db.execute(
+        select(NoteTopic.note_id, Topic.name)
+        .join(Topic, Topic.id == NoteTopic.topic_id)
+        .where(Topic.user_id == current_user.id, NoteTopic.note_id.in_(note_by_id.keys() or [-1]))
     ).all()
-    for note_id, tag_name in tag_rows:
-        if tag_name:
-            topic_note_ids[tag_name].add(note_id)
+    for note_id, topic_name in topic_rows:
+        if topic_name:
+            topic_note_ids[topic_name].add(note_id)
 
     for note in notes:
         for topic in _raw_topics(note.raw_json or {}):

@@ -122,12 +122,12 @@ def _user_of(token: str) -> int:
 # --------------------------------------------------------------------------- #
 # 注册表白名单
 # --------------------------------------------------------------------------- #
-def test_registry_has_exactly_eight_entries():
-    """注册表全量 8 项（7 系统 + 1 业务管线）；键集合钉死 —— 新增任务类型 = 发版。"""
+def test_registry_has_exactly_nine_entries():
+    """注册表全量 9 项（8 系统 + 1 业务管线）；键集合钉死 —— 新增任务类型 = 发版。"""
     from backend.app.services.job_registry import job_registry
 
     registry = job_registry()
-    assert len(registry) == 8
+    assert len(registry) == 9
     assert set(registry) == {
         "system.due_publish",
         "system.monitoring_refresh",
@@ -136,8 +136,32 @@ def test_registry_has_exactly_eight_entries():
         "system.no_traffic_cleanup",
         "system.note_sync",
         "system.shop_goods_sync",
+        "system.queue_record_cleanup",
         "auto_ops.keyword_pipeline",
     }
+
+
+def test_every_registry_entry_declares_a_chinese_display_name():
+    """**每个注册表项都要有中文名**，不许留裸代码键（用户口径 2026-09-25）。
+
+    现场：新增 `system.queue_record_cleanup`（队列记录清理）后，用户报
+    「调用目标需要配置中文名称」。根因是注册表 `name` 这条**口径没被守卫钉住** ——
+    任务列表列与日志详情弹窗的中文名唯一来源就是 `JobSpec.name`（前端不存映射表），
+    漏配一处就直接显示 `system.xxx` 裸键。
+
+    三条判据缺一不可：
+    1. 非空；
+    2. **不等于 `job_key`**（拿代码键顶中文名 = 没配）；
+    3. 含中文字符（配成 `note task cleanup` 这种英文名同样不算「中文名称」）。
+    """
+    import re
+
+    from backend.app.services.job_registry import job_registry
+
+    for key, spec in job_registry().items():
+        assert spec.name and spec.name.strip(), f"{key} 没有配中文名（前端会显示裸代码键）"
+        assert spec.name != key, f"{key} 拿代码键顶中文名 = 没配"
+        assert re.search(r"[\u4e00-\u9fff]", spec.name), f"{key} 的中文名不含中文：{spec.name}"
 
 
 def test_create_job_rejects_unknown_job_key(tmp_path):
@@ -383,7 +407,7 @@ def test_schedule_status_counts_only_my_rows(tmp_path, monkeypatch):
     try:
         owner = _register("status-owner")
         intruder = _register("status-intruder")
-        # 主人有 7 个内置行；入侵者先手动建一个自己的
+        # 主人有 8 个内置行；入侵者先手动建一个自己的
         _seed_builtin(SessionLocal, owner)
         response = client.post(
             "/api/schedule/jobs",
@@ -398,9 +422,9 @@ def test_schedule_status_counts_only_my_rows(tmp_path, monkeypatch):
 
         owner_stats = client.get("/api/schedule/status", headers=_auth(owner)).json()["stats"]
         intruder_stats = client.get("/api/schedule/status", headers=_auth(intruder)).json()["stats"]
-        assert owner_stats["total"] == 7
-        # 入侵者注册时也播种了 7 行 + 自己新建 1 行 = 8（只见自己的，不见主人的）
-        assert intruder_stats["total"] == 8, "入侵者只应看到自己的行"
+        assert owner_stats["total"] == 8
+        # 入侵者注册时也播种了 8 行 + 自己新建 1 行 = 9（只见自己的，不见主人的）
+        assert intruder_stats["total"] == 9, "入侵者只应看到自己的行"
     finally:
         app.dependency_overrides.clear()
 
@@ -429,7 +453,7 @@ def test_list_targets_returns_registry_with_existing_counts(tmp_path):
         assert response.status_code == 200, response.text
         items = response.json()["items"]
         keys = {item["job_key"] for item in items}
-        # 注册表全量都在（含 7 个内置 + 1 个普通）
+        # 注册表全量都在（含 8 个内置 + 1 个普通）
         assert keys == set(job_registry().keys())
         assert len(items) == len(job_registry())
 
@@ -1409,7 +1433,7 @@ def test_ensure_builtin_jobs_seeds_from_application_initial_data(tmp_path, monke
     原断言的**意图保留**（值不许漂）：只是对照源从迁移常量换成数据文件。
 
     ⚠️ **DEF-066（2026-09-24）再修订**：内置行**按用户各持一份**（原全局共享单行
-    `user_id IS NULL` 已废）⇒ 本用例钉 per-user 播种：每个用户 7 行、值逐字段
+    `user_id IS NULL` 已废）⇒ 本用例钉 per-user 播种：每个用户 8 行、值逐字段
     等于数据文件、二次调用不插行、**库里不允许再有 NULL 行**。
     """
     from backend.app.core.initial_data import load_initial_scheduled_jobs
@@ -1422,7 +1446,7 @@ def test_ensure_builtin_jobs_seeds_from_application_initial_data(tmp_path, monke
         second_user = _make_user(SessionLocal, "seed-second")
         db = SessionLocal()
         first = ensure_builtin_jobs(db)
-        assert len(first) == 14, "两个用户 × 7 个内置目标"
+        assert len(first) == 16, "两个用户 × 8 个内置目标"
         second = ensure_builtin_jobs(db)
         assert second == [], "幂等：已存在的 (user, job_key) 不插行"
         rows = list(db.scalars(select(ScheduledJob).where(ScheduledJob.is_builtin.is_(True))))
@@ -1488,7 +1512,7 @@ def test_sync_jobs_from_db_registers_active_rows_only(tmp_path, monkeypatch):
     SessionLocal = _override_database(tmp_path)
     _patch_service_sessions(monkeypatch, SessionLocal)
     try:
-        # DEF-066：内置行按用户播种 ⇒ 先有用户，sync 里的 ensure 才会铺出 7 行。
+        # DEF-066：内置行按用户播种 ⇒ 先有用户，sync 里的 ensure 才会铺出 8 行。
         # 测试行用 auto_ops 键（不用 system.* —— 同用户同 key 会被判重挡掉，
         # 那是「只补缺失」的正确语义，不能用来造假数字）。
         user_id = _make_user(SessionLocal, "sync-register")
@@ -1511,10 +1535,10 @@ def test_sync_jobs_from_db_registers_active_rows_only(tmp_path, monkeypatch):
         scheduler = build_scheduler()
         stats = sync_jobs_from_db(scheduler)
         ids = {job.id for job in scheduler.get_jobs()}
-        # 活跃行 = 测试行 1 + 应用初始化数据播种的 7 行（R24 起全 active）；
-        # 其中 `system.no_traffic_cleanup` 是 manual 档、**不参与调度装配** ⇒ 注册 7。
-        assert stats["registered"] == 7
-        assert len(ids) == 7
+        # 活跃行 = 测试行 1 + 应用初始化数据播种的 8 行（R24 起全 active）；
+        # 其中 `system.no_traffic_cleanup` 是 manual 档、**不参与调度装配** ⇒ 注册 8。
+        assert stats["registered"] == 8
+        assert len(ids) == 8
         assert all(job_id.startswith("job_") for job_id in ids)
     finally:
         app.dependency_overrides.clear()
@@ -2179,9 +2203,12 @@ def test_migration_a0b1c2d3e4f5_isolates_task_center(tmp_path):
         conn.close()
 
     # 夹具 = `k1l2m3n4o5p6` 之后的真实形态（无 job_group、日志表无 user_id），
-    # stamp 到 k1l2m3n4o5p6 再 upgrade head（细节收在 conftest.run_alembic）。
+    # stamp 到 k1l2m3n4o5p6 再**定点** upgrade 到本迁移（细节收在 conftest.run_alembic）。
+    # ⚠️ 不能 upgrade head：head 之后还有 `b2c3d4e5f6g7`（话题表合并，动 notes/tags）
+    # 与 `c2d3e4f5a6b7`（清理任务改名）—— 本夹具只建了 scheduled_* 两张表，跑到后面
+    # 的迁移会因缺表炸；且断言目标就是「版本号停在 a0b1c2d3e4f5」。
     run_alembic(db_path, "stamp", "k1l2m3n4o5p6")
-    run_alembic(db_path, "upgrade", "head")
+    run_alembic(db_path, "upgrade", "a0b1c2d3e4f5")
 
     conn = sqlite3.connect(db_path)
     try:
@@ -2313,3 +2340,93 @@ def test_schedule_center_group_mutations_are_caught(mutate):
     )
     output = result.stdout + result.stderr
     assert result.returncode != 0, f"变异 {mutate} **未被抓住**（守卫只是恰好为真）：\n{output[-600:]}"
+
+
+@pytest.mark.slow
+def test_migration_c2d3e4f5a6b7_renames_cleanup_job(tmp_path):
+    """真跑 `upgrade`，钉住清理任务改名迁移（2026-09-25 用户口径
+    「笔记任务记录清理应扩展为队列详情记录清理……任务名称修改为队列记录清理」）四件事：
+
+    ① `scheduled_jobs` 旧键行 ⇒ 新键 + 新中文名（一任务一行，不产生第二行）；
+    ② `scheduled_job_logs` 的**执行时快照**（`job_key` / `job_name`）跟着改 ——
+       只改任务行不改日志 ⇒ 同一任务的历史被劈成两半（任务中心按 job_key 筛选）；
+    ③ **选择性**：别家的行（`system.note_sync` 等）一行不动；
+    ④ 纯数据改写：`alembic_version` 前进到 head，表结构零变化。
+
+    ⚠️ 夹具刻意停在 `b2c3d4e5f6g7`（本迁移的父 revision）再升级到 head ——
+    本迁移只改数据，从任何更早的 revision 跑都能到，但没有父 revision 的
+    「旧键行」上下文，断言就只剩形状了。
+    """
+    import sqlite3
+
+    db_path = tmp_path / "rename.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        # 最小夹具：只建本迁移要碰的两张表（数据迁移，不反射整库）
+        conn.executescript(
+            """
+            CREATE TABLE scheduled_jobs (
+                id INTEGER NOT NULL,
+                user_id INTEGER,
+                name VARCHAR(128) NOT NULL,
+                job_key VARCHAR(128) NOT NULL,
+                status VARCHAR(16) DEFAULT 'active' NOT NULL,
+                created_at DATETIME NOT NULL,
+                PRIMARY KEY (id)
+            );
+            CREATE TABLE scheduled_job_logs (
+                id INTEGER NOT NULL,
+                job_id INTEGER,
+                job_name VARCHAR(128) DEFAULT '' NOT NULL,
+                job_key VARCHAR(128) DEFAULT '' NOT NULL,
+                created_at DATETIME NOT NULL,
+                PRIMARY KEY (id)
+            );
+            """
+        )
+        conn.execute(
+            "INSERT INTO scheduled_jobs (id, user_id, name, job_key, status, created_at)"
+            " VALUES (1, 1, '笔记任务记录清理', 'system.note_task_record_cleanup', 'active', datetime('now'))"
+        )
+        conn.execute(
+            "INSERT INTO scheduled_jobs (id, user_id, name, job_key, status, created_at)"
+            " VALUES (2, 1, '账号笔记同步', 'system.note_sync', 'active', datetime('now'))"
+        )
+        conn.execute(
+            "INSERT INTO scheduled_job_logs (id, job_id, job_name, job_key, created_at)"
+            " VALUES (1, 1, '笔记任务记录清理', 'system.note_task_record_cleanup', datetime('now'))"
+        )
+        conn.execute(
+            "INSERT INTO scheduled_job_logs (id, job_id, job_name, job_key, created_at)"
+            " VALUES (2, 2, '账号笔记同步', 'system.note_sync', datetime('now'))"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    run_alembic(db_path, "stamp", "b2c3d4e5f6g7")
+    run_alembic(db_path, "upgrade", "head")
+
+    conn = sqlite3.connect(db_path)
+    try:
+        version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+        jobs = conn.execute(
+            "SELECT id, name, job_key FROM scheduled_jobs ORDER BY id"
+        ).fetchall()
+        logs = conn.execute(
+            "SELECT id, job_name, job_key FROM scheduled_job_logs ORDER BY id"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert version == "f5a6b7c8d9e0", "迁移链前进到新 head"
+    # ① 旧键行改名（不新增行 —— 一任务两行会让种子再补一份、清理跑两遍）
+    assert jobs == [
+        (1, "队列记录清理", "system.queue_record_cleanup"),
+        (2, "账号笔记同步", "system.note_sync"),
+    ]
+    # ② 历史日志快照跟着改（任务中心按 job_key 筛选，劈成两半历史就查不到）
+    assert logs == [
+        (1, "队列记录清理", "system.queue_record_cleanup"),
+        (2, "账号笔记同步", "system.note_sync"),
+    ]

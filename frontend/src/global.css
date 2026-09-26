@@ -137,6 +137,21 @@ body {
 }
 
 /*
+ * 缩略图条（v1.55 用户口径「缩小图片一行展示，超出一行的支持左右滑动」）。
+ * 旧实现是 antd `Space wrap`：图一多就堆成好几行，把下载按钮与素材说明顶出首屏。
+ * 现在 `flex-wrap: nowrap` 永不分行，`overflow-x: auto` 接住放不下的部分
+ * （触板横滑 / shift+滚轮 / 拖滚动条均可）；缩略图自身 `flex: 0 0 auto` 不被压缩。
+ */
+.note-detail-thumbs {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 4px; /* 给横向滚动条留位，不压缩略图 */
+}
+
+/*
  * 挂载商品卡片：规格与价格**同一行**（DEF-047）。
  * 规格是长度不由前端决定的那类文案（平台原文可达 30+ 字），所以让它先让位
  * （单行 `…` + tip），价格永远完整可见；换行会把整卡高度推起来、同屏卡片参差。

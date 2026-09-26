@@ -60,7 +60,10 @@ from backend.app.services.schedule_triggers import (
     SCHEDULER_TIMEZONE,
     parse_cron_expression,
 )
-from backend.app.services.scheduler_service import sync_job_registration
+from backend.app.services.scheduler_service import (
+    scheduler_thread_alive,
+    sync_job_registration,
+)
 from backend.app.services.scheduled_job_runner import run_job_in_background
 
 router = APIRouter(prefix="/schedule", tags=["schedule"])
@@ -699,7 +702,11 @@ def schedule_status(
         counts[job.status] = counts.get(job.status, 0) + 1
     return {
         "enabled": bool(settings.scheduler_enabled),
-        "running": bool(scheduler is not None and scheduler.running),
+        # ⚠️ 别用 `scheduler.running`（DEF-067）：3.11 的 `state` 只在 `shutdown()`
+        # 里改，主循环线程因异常死掉后它**仍是 True** ⇒ 这里会报「运行中」而作业
+        # 一个都不跑（2026-09-25 实测静默停摆 14 分钟，状态端点毫无异常）。
+        # 唯一可信的判据是「主循环线程在不在」（看门狗用的是同一把尺子）。
+        "running": bool(scheduler is not None and scheduler_thread_alive()),
         "timezone": SCHEDULER_TIMEZONE,
         "jobs": jobs,
         "stats": {

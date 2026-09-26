@@ -33,6 +33,33 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build.ps1 -Version
 7. 组装：`frontend/dist`、`config/default.yaml`、`runtime/node`；
 8. ISCC → `spider-xhs-setup-<版本>.exe`（项目根目录）。
 
+## 什么不该进包（2026-09-26 v1.0.1 梳理）
+
+**结论：进包内容由白名单决定**（`SpiderXHS.spec` 的 `datas` + PyInstaller 依赖分析），
+在此之上叠三道拦截 —— 不是「尽量别打包」，而是"构建当场判红"。
+
+| 不该进包 | 为什么 | 拦在哪 |
+|---|---|---|
+| `docs/`、`tests/`、`pytest`、tkinter、IPython、notebook | 文档与测试链，运行期零使用（pytest 约 10MB+） | spec `excludes` + 构建自检（`tests` / `pytest` / `_pytest` / `docs`） |
+| `static/`（v1 期界面截图）、`author/`（Logo / 收款码） | 与运行时无关的展示资产；`static/` 已于 2026-09-26 从仓库移除 | 构建自检 `_internal\static` / `_internal\author` |
+| `data/`（开发库与历史备份）、`backend/app/storage/` | 运行期数据，安装后在用户目录生成；把开发库打进去 = 泄露真实数据 | 构建自检 `data` / `_internal\data`；两者都不在 `datas` 白名单 |
+| `.git/`、`.workbuddy/` | 版本历史、本地规范与日志 | 构建自检 |
+| `frontend/src/`、`frontend/node_modules/` | 前端源码与构建期依赖，只发 `frontend/dist` 产物 | 构建自检（`frontend\src` / `frontend\node_modules`） |
+| crypto-js 以外的 node 依赖 | 签名运行时只需要 crypto-js | 构建自检：安装根 `node_modules` 只允许 crypto-js |
+| cv2 的 `data/`（haarcascade 等模型，约 10MB） | 本仓 cv2 只用 `imdecode` / `imencode` / `VideoCapture`，无级联分类器用法 | `build.ps1` 第 7a 步直接删 |
+| 旧安装包 `spider-xhs-setup-*.exe` | 上一版产物（约 90MB），不是输入 | 安装脚本 Source 只指向 `dist\SpiderXHS\*` |
+
+**哪些看着大却不能动**：
+
+| 依赖 | 体积 | 为什么必须带 |
+|---|---|---|
+| `cv2` | **112MB** | 发布链路要用：`apis/xhs_creator_apis.py` 用 `imdecode` 取图片宽高、`VideoCapture` 取视频时长与封面帧（`upload_media` → 发布/自动运营都走它） |
+| `runtime/node/node.exe` | 84MB | 签名 JS 的唯一执行器（`xhs_utils/**/js`） |
+| `PIL` / `numpy` / `cryptography` / `curl_cffi` | 13M / 27M / 9.5M / 3.8M | 图片处理（`image_util`） / cv2 依赖 / Fernet 加密 Cookie 与 Key / HTTP 指纹请求 |
+
+> 每次构建尾部会自动打印 `_internal` 体积 **top 15** 并跑一遍禁止项自检 ——
+> 有新东西混进包，看那张表和 `[LEAK]` 行就够了，不用人肉翻目录。
+
 ## 安装后布局（全部在用户选择的安装目录）
 
 ```

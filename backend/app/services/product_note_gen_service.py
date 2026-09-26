@@ -1,4 +1,4 @@
-"""商品笔记智能生成（设计 13 §31，2026-09-23 用户口径）。
+"""商品笔记智能生成（设计 13 §31，2026-09-23 用户口径；§31.10 起走队列）。
 
 ## 这个模块做什么（其余不归它管）
 
@@ -7,6 +7,7 @@
 | ① 调千帆「智能生成笔记」三步链路（attributes → sellerpoint/aigc → 轮询） | 发布（`note_publish_service`） |
 | ② 把生成结果落库：`notes`（`local_generated`/`pending`）+ `note_assets`（商品图）+ `note_goods`（关系） | 干运行预览（`product_notes.py::generate` 端点原样保留） |
 | ③ 护栏**记录不拦截**（内容出自平台官方 AI，与本地模型不同链） | 话题增删入口（设计 13 §29 已有） |
+| ④ **单 / 批量生成都走队列**（§31.10）：端点只做门禁 + 入队即返回，worker 逐篇跑 | 前端轮询（`GET /xhs/product-notes/generate-queue`） |
 
 ## 三条硬约定
 
@@ -21,14 +22,26 @@
 
 页面自身 1.5s 间隔、~6–21s 出结果。本服务同样 1.5s 间隔、90s 上限；
 超时按失败处理（502 + 平台 `errMsg` 或超时说明），**不落库**。
+
+## 队列化（§31.10，2026-09-25 用户口径「单独生成商品笔记和批量生成商品笔记均需走队列」）
+
+单篇生成要跑「三步 + 轮询」~6–21s，批量 20 篇就是数分钟 —— 同步段跑完会把 HTTP
+请求挂死（前端 120s 超时），且两个入口并存时各打各的平台请求。因此与发布 / 同步
+队列**同构**：`start_generate_note` / `start_batch_generate` 只做门禁（绑店 → ark
+令牌 → 台账商品，都是确定性答案 ⇒ 失败仍 400/404 结构化）+ 入队即返回；一个
+`note-generate-worker` 守护线程逐篇跑 `generate_note_for_item`（顺序执行 = 节流
+第二道保障）。队列底座复用 `note_queue_service`（`tasks` 表），队列项**不绑定笔记**
+（生成前笔记不存在）⇒ 行上存 `item_id` / `item_name`，终态后补 `note_id` /
+`note_title`。看门狗 / 停止出口 / 重启续跑与另两个队列同型（DEF-069 同款缺口）。
 """
 from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 import uuid
-from typing import Any
+from typing import Any, Optional
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -37,15 +50,20 @@ from apis.xhs_qianfan_apis import (
     AIGC_TASK_STATUS_COMPLETED,
     AIGC_TASK_STATUS_RUNNING,
 )
+from backend.app.core.database import SessionLocal
+from backend.app.models import Task
 from backend.app.models.note import (
     NOTE_TYPE_LOCAL_GENERATED,
     PUBLISH_STATUS_PENDING,
     Note,
     set_note_publish_status,
 )
+from backend.app.models.platform_account import PlatformAccount
 from backend.app.models.shop import NoteGoods
 from backend.app.models.shop_product import ShopProduct
+from backend.app.services import note_queue_service
 from backend.app.services.product_note_service import run_guardrails
+from backend.app.services.note_topic_service import apply_sync_topics
 from backend.app.services.shop_binding_service import account_shop_id, qianfan_cookies_for_account
 
 logger = logging.getLogger(__name__)
@@ -65,6 +83,42 @@ MAX_NOTE_VIDEOS = 1
 
 #: 商品原文里可能承载视频的键（口径见 :func:`_product_video`）。
 _VIDEO_KEYS = ("video", "video_url", "video_link", "item_video", "video_info")
+
+# --------------------------------------------------------------------------- #
+# 生成队列（设计 13 §31.10，2026-09-25 用户口径「单独 / 批量生成均需走队列」）
+# --------------------------------------------------------------------------- #
+#: 批量生成单次上限（个）。批量是显式动作，超限分多次即可（与发布 / 同步同值）。
+GENERATE_BATCH_MAX_ITEMS = 20
+
+#: 生成队列空闲轮询间隔（秒）。唤醒信号只是**提示**，这个超时是兜底：
+#: 任何一次 `set` 丢失，最坏也只晚这么久发现新任务，不会永久停摆（DEF-048）。
+GEN_IDLE_POLL_SECONDS = 5.0
+
+#: worker 线程名（探针与重建都认它；DEF-069 同型：存活判据只能是**线程在不在**）。
+GENERATE_WORKER_THREAD_NAME = "note-generate-worker"
+
+#: 看门狗巡检间隔 / 重建失败指数退避上限（与同步 / 发布 worker、调度器守活同值）。
+GEN_WATCHDOG_INTERVAL_SECONDS = 30.0
+GEN_WATCHDOG_MAX_BACKOFF_SECONDS = 600.0
+
+#: 队列持久化（设计 13 §35.9 同型）：真相源是 `tasks` 表里的 `xhs_note_gen_item` 行，
+#: **内存里不再有队列 / 结果 / 序号** —— 只留一个唤醒信号 `_gen_wakeup`。
+_gen_wakeup = threading.Event()
+_gen_queue_lock = threading.Lock()
+_gen_worker: Optional[threading.Thread] = None
+#: worker 收尾 / 测试专用出口（置位 + set wakeup ⇒ 不再认领新任务即退；生产不置位）。
+_gen_worker_stop = threading.Event()
+_gen_watchdog_stop = threading.Event()
+
+#: 入队时的 adapter 工厂缓存（`tasks.id -> factory`），与发布队列同型：
+#: 端点的工厂是 FastAPI 依赖注入（测试 override 出来的假适配器），worker 线程拿不到
+#: 注入层，只能由入队路径带进来。⚠️ **是缓存不是真相源**：进程重启后为空，
+#: `_default_generate_adapter_factory()` 回落到默认千帆工厂 —— 那正是续跑该走的来源
+#: （凭据按库里当前有效的 ark 令牌现取，§18.14）。跑完即 pop，不无限增长。
+_gen_adapter_factories: dict[int, Any] = {}
+
+#: 后台线程自建 Session 的工厂（测试注入临时库的 sessionmaker）。
+_session_factory = SessionLocal
 
 
 class ProductNoteGenerationError(Exception):
@@ -320,6 +374,29 @@ def _run_aigc(adapter, item_id: str) -> dict:
     )
 
 
+def _gate_for_generation(db: Session, account, item_id: str) -> tuple[ShopProduct, str]:
+    """生成门禁（§31.4 步 1-2）：绑店 → ark 令牌 → 台账商品行。
+
+    **单 / 批量入队与 worker 重跑共用这一把尺子**（DEF-044）：三项都是**确定性
+    答案**（本地库可判），不过 ⇒ 抛 :class:`ProductNoteGenerationError`，调用方
+    按 400/404 结构化呈现。worker 重跑时再走一遍 —— 凭据 / 台账可能在排队期间
+    变化（用户补令牌 / 同步商品），现取现判。
+
+    返回 `(台账商品行, ark 令牌)`：调用方直接用这份令牌造 adapter，不在门禁里
+    构造 adapter（门禁失败时一次平台对象都不该造）。
+    """
+    if account_shop_id(db, account.id) is None:
+        raise ProductNoteGenerationError(
+            "QIANFAN_BINDING_REQUIRED", "尚未绑定千帆商家后台，无法生成商品笔记。请先绑定后再生成。"
+        )
+    cookies = qianfan_cookies_for_account(db, account.id)
+    if not cookies:
+        raise ProductNoteGenerationError(
+            "QIANFAN_CREDENTIAL_MISSING", "该账号还没有千帆（ark）令牌，请先在浏览器登录千帆后导入。"
+        )
+    return _product_row(db, account, item_id), cookies
+
+
 def generate_note_for_item(
     db: Session,
     account,
@@ -332,19 +409,11 @@ def generate_note_for_item(
     返回 `{ok, note_id, title, topics, guardrails, item_id}`；
     门禁 / 平台失败抛 :class:`ProductNoteGenerationError`（不落库）。
 
-    门禁顺序（设计 13 §31.4 步 1）：**绑店 → ark 令牌 → 台账商品**。
+    门禁顺序（设计 13 §31.4 步 1）：**绑店 → ark 令牌 → 台账商品**
+    （唯一实现 :func:`_gate_for_generation`，队列入口与 worker 共用）。
     """
-    if account_shop_id(db, account.id) is None:
-        raise ProductNoteGenerationError(
-            "QIANFAN_BINDING_REQUIRED", "尚未绑定千帆商家后台，无法生成商品笔记。请先绑定后再生成。"
-        )
-    cookies = qianfan_cookies_for_account(db, account.id)
-    if not cookies:
-        raise ProductNoteGenerationError(
-            "QIANFAN_CREDENTIAL_MISSING", "该账号还没有千帆（ark）令牌，请先在浏览器登录千帆后导入。"
-        )
+    row, cookies = _gate_for_generation(db, account, item_id)
     adapter = adapter_factory(cookies)
-    row = _product_row(db, account, item_id)
     generated = _run_aigc(adapter, item_id)
     if not generated["title"] and not generated["content"]:
         raise ProductNoteGenerationError("AI_GENERATION_FAILED", "平台返回了空的标题与正文。")
@@ -378,7 +447,6 @@ def generate_note_for_item(
         content=generated["content"],
         author_name="",
         note_type=NOTE_TYPE_LOCAL_GENERATED,
-        topics_json=json.dumps([t["name"] for t in generated["topics"]], ensure_ascii=False),
         raw_json={
             # sku_id / sku_name 是发布链路的 `goodsInfo` / `bizRelations` 必需项
             # （平台用 sku 粒度挂链，不用 item 粒度；bundle 实抓）—— 生成时存下，
@@ -398,6 +466,20 @@ def generate_note_for_item(
     set_note_publish_status(note, PUBLISH_STATUS_PENDING)
     db.add(note)
     db.flush()  # 先拿 note.id（资产 / 关系的外键）
+
+    # §34：AI 正文若自带 `#话题` ⇒ 拆进 topics 表 + note_topics 关系（正文不再存
+    # 话题）；平台 AI 话题（`aigc.topics[{id,name}]`）是权威声明，`platform_id`
+    # 存平台话题 ID —— 发布链路 `hash_tag` 直接取，不再回头打平台。
+    apply_sync_topics(
+        db,
+        note,
+        [t["name"] for t in generated["topics"]],
+        platform_ids={
+            str(t.get("name") or ""): str(t.get("id") or "")
+            for t in generated["topics"]
+            if isinstance(t, dict) and t.get("name") and t.get("id")
+        },
+    )
 
     from backend.app.models.note import NoteAsset  # 局部导入避免环
 
@@ -427,33 +509,420 @@ def generate_note_for_item(
     }
 
 
-def batch_generate_notes(
+def start_generate_note(
     db: Session,
+    user_id: int,
+    account,
+    item_id: str,
+    *,
+    adapter_factory=None,
+) -> dict:
+    """单商品生成**入队即返回**（设计 13 §31.10；端点调）。
+
+    同步段只做门禁（:func:`_gate_for_generation`，确定性答案 ⇒ 不过仍 400/404）
+    + 入队；三步生成 + 轮询 + 落库在后台 worker 跑。立即返回入队回执
+    `{ok, status:"queued", item_id, already_queued?}`；**终态与真实原因不在这里**
+    —— 走 `GET /xhs/product-notes/generate-queue` 快照 `finished`（与批量同一个出口）。
+
+    幂等：同用户未终态队列里已有同 `item_id` ⇒ `already_queued: true`（不重复生成）。
+    """
+    row, _cookies = _gate_for_generation(db, account, item_id)
+    # 一次动作 = 一个批次（2026-09-26 用户口径「批次逻辑不再移除，生成唯一批次号」）：
+    # 单商品点击也开新批次号（一条明细），不复用已有批次。
+    generate_batch = note_queue_service.BatchRequest(
+        user_id=user_id,
+        item_task_type=note_queue_service.TASK_TYPE_GEN_ITEM,
+        source=note_queue_service.SOURCE_PRODUCT_NOTE_GENERATE_SINGLE,
+    )
+    task_row, created = note_queue_service.enqueue_item(
+        db,
+        user_id=user_id,
+        item_task_type=note_queue_service.TASK_TYPE_GEN_ITEM,
+        account_id=account.id,
+        item_id=item_id,
+        item_name=str(getattr(row, "item_title", "") or ""),
+        source=note_queue_service.SOURCE_PRODUCT_NOTE_GENERATE_SINGLE,
+        batch=generate_batch,
+    )
+    if created and adapter_factory is not None:
+        with _gen_queue_lock:
+            _gen_adapter_factories[task_row.id] = adapter_factory
+    db.commit()
+    # ⚠️ 唤醒放在**提交之后**：worker 自建 Session，看不到未提交的行（§35.9 同型）。
+    ensure_generate_worker()
+    logger.info("product note generate enqueued (item_id=%s, created=%s)", item_id, created)
+    return {
+        "ok": True,
+        "status": "queued",
+        "item_id": item_id,
+        **({} if created else {"already_queued": True}),
+    }
+
+
+def start_batch_generate(
+    db: Session,
+    user_id: int,
     account,
     item_ids: list[str],
     *,
-    adapter_factory,
-    max_items: int = 20,
+    adapter_factory=None,
+    max_items: int = GENERATE_BATCH_MAX_ITEMS,
 ) -> dict:
-    """批量生成（顺序处理，单项失败不阻断；设计 13 §31.4 步 6）。
+    """批量生成入队（设计 13 §31.10；端点调）：逐项过门禁，通过项按序入队。
 
-    返回 `{total, succeeded, failed, results:[{item_id, ok, note_id?, title?, error?}]}`。
+    **一个** worker 顺序跑完队列（顺序执行 = 平台侧节流的第二道保障）。立即返回
+    `{total, started, failed, results}`：通过项 `{ok:true, status:"queued",
+    already_queued?}`，门禁失败项 `{ok:false, error, code}`（不阻断其余，与千帆页面
+    `Promise.allSettled` 同语义）。终态走前端轮询（与单篇同一个出口）。
+
+    来源统一标 `product_note_generate_batch`（按钮级，2026-09-26 用户口径
+    「来源要具体到按钮」）。
     """
     cleaned = [str(i).strip() for i in item_ids if str(i).strip()]
     distinct = list(dict.fromkeys(cleaned))[:max_items]
+    # 一次批量 = 一个批次（懒创建：全部门禁不过 ⇒ 不留空批次行）
+    generate_batch = note_queue_service.BatchRequest(
+        user_id=user_id,
+        item_task_type=note_queue_service.TASK_TYPE_GEN_ITEM,
+        source=note_queue_service.SOURCE_PRODUCT_NOTE_GENERATE_BATCH,
+    )
     results: list[dict] = []
     for item_id in distinct:
         try:
-            outcome = generate_note_for_item(db, account, item_id, adapter_factory=adapter_factory)
-            results.append(
-                {
-                    "item_id": item_id,
-                    "ok": True,
-                    "note_id": outcome["note_id"],
-                    "title": outcome["title"],
-                }
-            )
+            row, _cookies = _gate_for_generation(db, account, item_id)
         except ProductNoteGenerationError as error:
             results.append({"item_id": item_id, "ok": False, "error": error.message, "code": error.code})
-    succeeded = sum(1 for r in results if r["ok"])
-    return {"total": len(distinct), "succeeded": succeeded, "failed": len(distinct) - succeeded, "results": results}
+            continue
+        task_row, created = note_queue_service.enqueue_item(
+            db,
+            user_id=user_id,
+            item_task_type=note_queue_service.TASK_TYPE_GEN_ITEM,
+            account_id=account.id,
+            item_id=item_id,
+            item_name=str(getattr(row, "item_title", "") or ""),
+            source=note_queue_service.SOURCE_PRODUCT_NOTE_GENERATE_BATCH,
+            batch=generate_batch,
+        )
+        if created and adapter_factory is not None:
+            with _gen_queue_lock:
+                _gen_adapter_factories[task_row.id] = adapter_factory
+        results.append(
+            {
+                "item_id": item_id,
+                "ok": True,
+                "status": "queued",
+                **({} if created else {"already_queued": True}),
+            }
+        )
+    db.commit()
+    ensure_generate_worker()  # 同上：提交后才唤醒
+    started = sum(1 for r in results if r.get("ok"))
+    logger.info("product note generate batch enqueued (total=%s, started=%s)", len(distinct), started)
+    return {"total": len(distinct), "started": started, "failed": len(distinct) - started, "results": results}
+
+
+# --------------------------------------------------------------------------- #
+# 生成 worker（与发布 / 同步 worker 同型：单线程 FIFO + 看门狗 + 停止出口）
+# --------------------------------------------------------------------------- #
+def ensure_generate_worker() -> None:
+    """确保有一条活着的 worker（惰性起；已活则只唤醒它）。
+
+    公开（不是 `_` 前缀）：**启动恢复**也要用它 —— `main.py::lifespan` 复位完
+    中断行后立刻唤醒，把上次进程留下的 `pending` 项接着跑（否则要等看门狗 30 秒
+    后巡检才发现「没 worker」）。
+    """
+    with _gen_queue_lock:
+        if _gen_worker is None or not _gen_worker.is_alive():
+            _spawn_generate_worker()
+    _gen_wakeup.set()
+
+
+def _gen_worker_loop() -> None:
+    """DB 队列 worker：醒来 → 认领一条 → 跑一条 → 再认领 …… 认不到就回去等。
+
+    ⚠️ 唤醒信号只是**提示**：`wait(timeout=GEN_IDLE_POLL_SECONDS)` 带兜底超时
+    ⇒ 任何一次 `set` 丢失，最坏也只晚 5 秒发现新任务，不会永久停摆（DEF-048）。
+
+    ⚠️ DEF-069 同型缺口（本模块从一开始就补齐四件）：篇内 `except BaseException`
+    网、循环外层第二层网、看门狗（`start_generate_worker_watchdog`）、停止出口
+    （`stop_generate_worker`）。`_gen_worker_stop` 是**收尾 / 测试专用出口**：
+    置位（并 `set` 唤醒）后**不再认领新任务**即退。生产永不置位。⚠️「不丢正在
+    排队的项」由**库**保证（未跑的项是 `pending` 行，下次启动接着跑）。
+    """
+    while not _gen_worker_stop.is_set():
+        _gen_wakeup.wait(timeout=GEN_IDLE_POLL_SECONDS)
+        _gen_wakeup.clear()
+        while not _gen_worker_stop.is_set():
+            item_id = _claim_one_generate_item()
+            if item_id is None:
+                break
+            try:
+                _run_one_generate(item_id)
+            except BaseException as error:  # noqa: BLE001 - 线程不死（DEF-069）
+                logger.error(
+                    "note generate worker: run escaped the inner net (task=%s): %s",
+                    item_id,
+                    error,
+                    exc_info=True,
+                )
+
+
+def _claim_one_generate_item() -> Optional[int]:
+    """认领一条待生成项，返回其 `tasks.id`（无活可干 / 认领出错 ⇒ None）。
+
+    认领用**独立 Session**（`claim_next_item` 内部提交换状态，用完即关）；认领期
+    的 DB 异常在这里收住 —— 认领失败只是这一轮空转（外层 `wait(timeout=…)` 天然
+    退避），不许把 worker 带走。
+    """
+    db = _session_factory()
+    try:
+        item = note_queue_service.claim_next_item(
+            db, item_task_type=note_queue_service.TASK_TYPE_GEN_ITEM
+        )
+        return int(item.id) if item is not None else None
+    except BaseException:  # noqa: BLE001 - 认领失败退避，不死 worker
+        logger.exception("note generate worker: claim failed")
+        return None
+    finally:
+        db.close()
+
+
+def _default_generate_adapter_factory() -> Any:
+    """worker 重建 adapter 的**默认**工厂（进程重启续跑走的来源）。
+
+    惰性导入：`get_qianfan_api_adapter_factory()` 定义在适配器模块（避免与路由层
+    成环），这里按需取，不在 import 期固化。
+    """
+    from backend.app.adapters.xhs.qianfan_api_adapter import get_qianfan_api_adapter_factory
+
+    return get_qianfan_api_adapter_factory()
+
+
+def _run_one_generate(item_id: int) -> None:
+    """跑一条（按 `tasks.id`）：自建 Session；任何漏网异常都不许把队列卡死。
+
+    安全网不条件性（DEF-048）：**任何**异常路径都必须把这条写成终态，否则它
+    永远挂在 `running` 上（进度卡「生成中」永远转圈）。凭据**按库里当前有效**
+    的 ark 令牌现取（`generate_note_for_item` 内部走同一把门禁尺子，§18.14：
+    拿不到就是失败，**不借会话、不发探活**）。
+    """
+    db = _session_factory()
+    try:
+        item = db.get(Task, item_id)
+        if item is None:
+            return  # 行已被清理任务删掉 / 不存在：无事可做
+        payload = item.payload if isinstance(item.payload, dict) else {}
+        gen_item_id = str(payload.get("item_id") or "")
+        account_pk = int(payload.get("account_id") or 0)
+        account = db.get(PlatformAccount, account_pk) if account_pk else None
+        if not gen_item_id or account is None:
+            note_queue_service.finish_item(
+                db, item, ok=False, reason="队列项缺少商品或账号信息", code="GEN_ITEM_INVALID"
+            )
+            return
+        with _gen_queue_lock:
+            factory = _gen_adapter_factories.get(item_id)
+        try:
+            outcome = generate_note_for_item(
+                db, account, gen_item_id, adapter_factory=factory or _default_generate_adapter_factory()
+            )
+        except ProductNoteGenerationError as error:
+            note_queue_service.finish_item(db, item, ok=False, reason=error.message, code=error.code)
+            return
+        note_queue_service.finish_item(
+            db,
+            item,
+            ok=True,
+            # 成功后把「生成了哪篇笔记」补进行体：快照 / 详情抽屉直接显示，
+            # 不回头反查（缺值口径：拿不到就不写，不造假）。
+            extra={"note_id": outcome["note_id"], "note_title": outcome["title"]},
+        )
+    except BaseException as error:  # noqa: BLE001 - 兜底安全网：SystemExit 也不许把队列卡死
+        logger.warning("note generate worker crashed (task=%s): %s", item_id, error)
+        try:
+            db.rollback()  # 失败的 commit 留待回滚状态；不回滚则恢复动作也会炸
+        except Exception:  # noqa: BLE001 - 恢复也失败只能留痕，不能再抛
+            logger.exception("note generate rollback failed (task=%s)", item_id)
+        try:
+            item = db.get(Task, item_id)
+            if item is not None:
+                note_queue_service.finish_item(
+                    db,
+                    item,
+                    ok=False,
+                    reason=f"{type(error).__name__}: {error}",
+                    code="GEN_FAILED",
+                )
+        except Exception:  # noqa: BLE001 - 连记账都失败：留痕，行留 running 由启动恢复捡回
+            logger.exception("note generate failed to record failure (task=%s)", item_id)
+    finally:
+        db.close()
+        with _gen_queue_lock:
+            _gen_adapter_factories.pop(item_id, None)
+
+
+def count_open_generate_items(db: Session) -> int:
+    """还有多少条待生成 / 在生成（测试与启动判断用）。"""
+    return note_queue_service.count_open_items(
+        db, item_task_type=note_queue_service.TASK_TYPE_GEN_ITEM
+    )
+
+
+def _spawn_generate_worker() -> None:
+    """起一条新的 worker 线程（调用方持 `_gen_queue_lock`）。
+
+    起新世代时清掉历史停止位 —— 重建出来的 worker 不该被上一世代的收尾位挡住。
+    """
+    global _gen_worker
+    _gen_worker_stop.clear()
+    _gen_worker = threading.Thread(
+        target=_gen_worker_loop,
+        name=GENERATE_WORKER_THREAD_NAME,
+        daemon=True,
+    )
+    _gen_worker.start()
+
+
+def generate_worker_thread_alive() -> bool:
+    """进程里有没有**活着的** `note-generate-worker` 线程（唯一可信存活判据，DEF-069）。
+
+    为什么不看 `_gen_worker` 模块变量：线程带异常 / `SystemExit` 死后它仍指着那个
+    `Thread` 对象，而 `ensure_generate_worker` 只在**入队时**检查一次 —— 队列跑起来
+    之后线程死了，没有任何现存路径会发现（同 scheduler DEF-067、同步 worker DEF-069
+    的教训：状态位会骗人，线程本身不会）。
+    """
+    return any(
+        thread.name == GENERATE_WORKER_THREAD_NAME and thread.is_alive()
+        for thread in threading.enumerate()
+    )
+
+
+def stop_generate_worker(*, timeout: float = 5.0) -> None:
+    """让当前 worker **立即停手退出**（**测试 / 进程收尾专用**，生产不调用）。
+
+    只置停止位不够：worker 常态卡在 `_gen_wakeup.wait(timeout=…)` 上，必须再
+    `set` 一下 wakeup 才能唤醒它回来检查停止位。唤醒后它**不再认领新任务**、手上
+    那条跑完即退。⚠️「不丢正在排队的项」由**库保证**（未跑的项还是 `pending` 行），
+    不靠 worker 排空。
+    """
+    _gen_worker_stop.set()
+    _gen_wakeup.set()
+    worker = _gen_worker
+    if worker is not None and worker.is_alive():
+        worker.join(timeout=timeout)
+
+
+def _revive_generate_worker() -> None:
+    """worker 线程死了 ⇒ 复位它卡住的那条 + 重建 worker（不丢项）。
+
+    线程死后，它认领的那条 `tasks` 行**永远停在 `running`** ⇒ 不复位的话它既不会
+    被重跑、也永远算在「生成中」里。复位就是把它改回 `pending`
+    （`recover_interrupted` 只动 `running` 行）。
+
+    ⚠️ **顺序：先复位、再起新 worker**。反过来新 worker 可能刚认领一条就被复位
+    抢回 `pending` ⇒ 同一条被跑两遍。
+    """
+    recovered = {"requeued": 0, "failed": 0}
+    try:
+        db = _session_factory()
+        try:
+            recovered = note_queue_service.recover_interrupted(
+                db, item_task_types=(note_queue_service.TASK_TYPE_GEN_ITEM,)
+            )
+        finally:
+            db.close()
+    except BaseException:  # noqa: BLE001 - 复位失败也要把 worker 建起来
+        logger.exception("生成 worker 重建：中断行复位失败（继续重建 worker）")
+    with _gen_queue_lock:
+        if _gen_worker is None or not _gen_worker.is_alive():
+            _spawn_generate_worker()
+    _gen_wakeup.set()  # 新 worker 可能已在 wait 上：不等下一批也要立刻跑积压
+    logger.error(
+        "note-generate-worker 已死 —— 已重建（中断行 requeued=%s failed=%s）",
+        recovered.get("requeued"),
+        recovered.get("failed"),
+    )
+
+
+def start_generate_worker_watchdog(
+    *, interval: float = GEN_WATCHDOG_INTERVAL_SECONDS
+) -> threading.Thread:
+    """守活线程：worker 死了就重建（DEF-069 同型缺口，2026-09-25）。
+
+    与同步 / 发布 worker 同型：单线程组件没有自愈，任何够不着的死法（`SystemExit`
+    之类，`except Exception` 抓不到、threading 对它静默）都是永久停摆。看门狗
+    自己绝不被一次失败带走（`except BaseException` + 失败指数退避，上限
+    `GEN_WATCHDOG_MAX_BACKOFF_SECONDS`）。进程收尾调
+    :func:`stop_generate_worker_watchdog`。
+    """
+    _gen_watchdog_stop.clear()
+
+    def _loop() -> None:
+        backoff = interval
+        while not _gen_watchdog_stop.is_set():
+            if _gen_watchdog_stop.wait(backoff):  # 可被 stop 打断的等待
+                return
+            try:
+                if generate_worker_thread_alive():
+                    backoff = interval
+                    continue
+                _revive_generate_worker()
+                backoff = interval
+            except BaseException as error:  # noqa: BLE001 - 看门狗自己也不能死
+                logger.exception("生成 worker 看门狗重建失败，%.0f 秒后重试", backoff)
+                backoff = min(backoff * 2, GEN_WATCHDOG_MAX_BACKOFF_SECONDS)
+
+    thread = threading.Thread(target=_loop, name="generate-worker-watchdog", daemon=True)
+    thread.start()
+    return thread
+
+
+def stop_generate_worker_watchdog() -> None:
+    """让看门狗退出巡检（幂等；下一次 `start_generate_worker_watchdog` 自动复位）。"""
+    _gen_watchdog_stop.set()
+
+
+# --------------------------------------------------------------------------- #
+# 快照（进度卡）与测试辅助
+# --------------------------------------------------------------------------- #
+def generate_queue_snapshot(
+    db: Session, user_id: int, *, platform: Optional[str] = None
+) -> dict:
+    """生成进度快照（商品列表页「生成进度卡」；`GET /xhs/product-notes/generate-queue`）。
+
+    2026-09-26 常驻化（用户口径「不需要队列批次，队列是常驻」）：形状与另两个
+    队列对齐（前端三卡同一套轮询骨架）—— `running` / `queued`（FIFO 序）+
+    `total`（= 两者 + 近期终态数）+ `finished`（近期终态项的逐项 `ok` 与
+    `reason` —— 生成失败不落库到笔记行，原因只在这里给一次）。
+
+    **不再有 `generated` / `failed` 计数字段**：「本轮成败」由前端按自己入队的
+    商品累计（后端不知道用户这一轮点了什么）。
+    """
+    raw = note_queue_service.snapshot(
+        db, user_id=user_id, item_task_type=note_queue_service.TASK_TYPE_GEN_ITEM, platform=platform
+    )
+    return {
+        "running": raw["running"],
+        "queued": raw["queued"],
+        "total": raw["total"],
+        "finished": raw["finished"],
+    }
+
+
+def wait_generate_done(timeout: float = 30.0) -> bool:
+    """等生成队列跑空（测试用；判定落在库上 —— 不信内存位）。
+
+    与 `wait_publish_done(note_pk)` 的差别：生成项**没有 note_pk**（生成前笔记
+    不存在）⇒ 按「没有未终态生成项」判定。worker 是单线程 FIFO，队列空 = 本轮
+    全部出终态。
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        db = _session_factory()
+        try:
+            if count_open_generate_items(db) == 0:
+                return True
+        finally:
+            db.close()
+        time.sleep(0.1)
+    return False

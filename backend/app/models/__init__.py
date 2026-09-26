@@ -4,7 +4,7 @@ from backend.app.models.auto_task import AutoTask
 from backend.app.models.keyword_group import KeywordGroup
 from backend.app.models.login_session import LoginSession
 from backend.app.models.monitoring import MonitoringSnapshot, MonitoringTarget
-from backend.app.models.note import Note, NoteAsset, NoteComment, Tag, note_tags
+from backend.app.models.note import Note, NoteAsset, NoteComment, NoteTopic, Topic
 from backend.app.models.notification import Notification
 from backend.app.models.platform_account import AccountCookieVersion, PlatformAccount
 from backend.app.models.publish import PublishAsset, PublishJob
@@ -39,8 +39,8 @@ __all__ = [
     "ScheduledJobLog",
     "ShopNoteGoods",
     "ShopProduct",
-    "Tag",
     "Task",
+    "Topic",
+    "NoteTopic",
     "User",
-    "note_tags",
 ]

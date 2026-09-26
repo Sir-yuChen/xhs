@@ -1,26 +1,33 @@
-"""商品笔记智能生成与发布测试（设计 13 §31，2026-09-23）。
+"""商品笔记智能生成与发布测试（设计 13 §31，2026-09-23；2026-09-25 异步 + 发布队列；
+同日起生成也走队列，§31.10）。
 
 这批用例盯的是**状态机与链路完整性**，不是平台行为（平台行为由真机验证记录
 背书，见设计 13 §31.5.1）：
 
 1. **生成落库四件套**：`notes`（`local_generated`/`pending`/`local_` 前缀 ID）+
-   `note_assets`（商品图）+ `note_goods`（关系）+ `topics_json`（平台话题）；
+   `note_assets`（商品图）+ `note_goods`（关系）+`topics_json`（平台话题）；
 2. **门禁失败零平台请求**：未绑店 / 无 ark 令牌 / 台账无此行 —— 三个 400/404，
    且假适配器一次都不被构造；
-3. **平台失败不落库**：task `success=false` / 轮询超时 ⇒ 502 + 平台原文，
-   库里一条半成品都不留；
-4. **批量错误隔离**：3 项挂 1 项 ⇒ 其余 2 项落库、失败项带原因；
-5. **发布成功全链**：下载 → 上传（permit→PUT）→ 预审核 → 发布，四步调用序，
-   成功后 `note_id` 换平台 ID、三态置位、**临时目录已删**、`local_path` 清空；
-6. **发布失败留现场**：平台拒发 ⇒ `failed` + `publish_error` 含原文、
-   **临时目录保留**、可重发；
-7. **item-notes 改关系表源**：`note_goods` join `notes`，本地生成笔记带发布态。
+3. **平台失败不落库**：task `success=false` / 轮询超时 ⇒ 队列项 `failed` + 平台
+   原文，库里一条半成品都不留（§31.10 起失败发生在 worker 里，入队端点照常 200）；
+4. **批量错误隔离**：3 项挂 1 项 ⇒ 其余 2 项入队并落库、失败项带原因；
+5. **发布异步全链**（2026-09-25）：`start_publish` 毫秒级返回 publishing，
+   后台 worker 跑完下载 → 上传（permit→PUT）→ 预审核 → 发布，终态落库；
+6. **发布失败留现场 + 可重发**：平台拒发 ⇒ `failed` + `publish_error` 含原文、
+   临时目录保留、可重发；
+7. **队列顺序执行**：批量入队按 FIFO 跑完，进度快照（running/queued/计数）正确；
+8. **下载节流与临时目录治理**：张间随机 1–3s（测试置 0 不真等）、下载失败删本次
+   目录、文件名带商品 ID、成功按**本地** note_id 删目录（历史缺陷回归）；
+9. **item-notes 改关系表源**：`note_goods` join `notes`，本地生成笔记带发布态。
 """
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
@@ -29,11 +36,10 @@ from backend.app.adapters.xhs.qianfan_api_adapter import get_qianfan_api_adapter
 from backend.app.api.platforms.xhs.qianfan import get_qianfan_api_adapter_factory as _qf_dep
 from backend.app.core.database import Base, get_db
 from backend.app.main import app
-from backend.app.models import Note, NoteAsset, PlatformAccount, ShopProduct, User
+from backend.app.models import Note, NoteAsset, NoteTopic, PlatformAccount, ShopProduct, Task, Topic, User
 from backend.app.models.shop import NoteGoods, Shop
 from backend.app.services import note_publish_service, product_note_gen_service
 from tests.backend.cookie_fixtures import bind_shop_account
-import pytest
 
 client = TestClient(app)
 ROOT = Path(__file__).resolve().parents[2]
@@ -47,9 +53,20 @@ class FakePublishAdapter:
 
     `fail_task` / `reject_preaudit` / `fail_publish` 三个开关分别制造三种失败，
     用来验证「不落库 / 记失败 / 可重发」。
+
+    `upload_gate` / `upload_reached`（2026-09-25 异步测试用）：`upload_gate`
+    非 None 时，**第一个** `upload_file` 调用先置 `upload_reached` 再等 gate
+    —— 把链路停在「下载已完成、上传未开始」的确定态，用来断言异步启动的
+    同步段效果（publishing 已落库、临时文件已按商品 ID 命名）。
     """
 
     calls: list[str] = []
+    published_titles: list[str] = []
+    upload_gate: threading.Event | None = None
+    upload_reached: threading.Event | None = None
+    #: 平台 note_id 序号（每次成功发布自增）—— 真机每篇返回不同 ID，
+    #: `notes(user_id, note_id)` 有唯一键，同 ID 会撞（批量测试实测踩到）。
+    _publish_seq = 0
 
     def __init__(self, cookies: str) -> None:
         self.cookies = cookies
@@ -121,6 +138,13 @@ class FakePublishAdapter:
         }
 
     def upload_file(self, *, upload_addr, file_id, token, file_path):
+        gate = FakePublishAdapter.upload_gate
+        if gate is not None:
+            # 一次性闸门：只拦第一个上传调用（后续放行），reached 先置位再等。
+            FakePublishAdapter.upload_gate = None
+            if FakePublishAdapter.upload_reached is not None:
+                FakePublishAdapter.upload_reached.set()
+            gate.wait(timeout=10)
         FakePublishAdapter.calls.append(f"upload_file:{file_id}")
         return True, "成功", None
 
@@ -153,21 +177,39 @@ class FakePublishAdapter:
     # ---- 发布 ----
     def publish_note(self, body):
         FakePublishAdapter.calls.append("publish")
+        FakePublishAdapter.published_titles.append(str((body.get("common") or {}).get("title") or ""))
         if FakePublishAdapter.fail_publish:
             return False, "平台发布被拒（测试）", {"success": False, "msg": "平台发布被拒（测试）"}
-        return True, "成功", {"success": True, "data": {"id": "REAL-NOTE-1", "note_id": "REAL-NOTE-1"}}
+        FakePublishAdapter._publish_seq += 1
+        platform_id = f"REAL-NOTE-{FakePublishAdapter._publish_seq}"
+        return True, "成功", {"success": True, "data": {"id": platform_id, "note_id": platform_id}}
+
+    # ---- 发布后回查商品笔记列表（补详情地址，§25.4）----
+    def get_goods_note_page(self, **kwargs):
+        FakePublishAdapter.calls.append("goods_note_page")
+        return True, "ok", {
+            "code": 0,
+            "data": {"note_infos": list(FakePublishAdapter.goods_note_entries)},
+        }
 
     # ---- 类变量开关（测试间重置）----
     fail_task = False
     reject_preaudit = False
     fail_publish = False
+    #: 回查商品笔记列表时返回的条目（默认空 = 平台查无此项 ⇒ 跳过补地址）。
+    goods_note_entries: list = []
 
 
 def _reset():
     FakePublishAdapter.calls = []
+    FakePublishAdapter.published_titles = []
     FakePublishAdapter.fail_task = False
     FakePublishAdapter.reject_preaudit = False
     FakePublishAdapter.fail_publish = False
+    FakePublishAdapter.upload_gate = None
+    FakePublishAdapter.upload_reached = None
+    FakePublishAdapter._publish_seq = 0
+    FakePublishAdapter.goods_note_entries = []
 
 
 def _setup(tmp_path):
@@ -208,6 +250,24 @@ def _setup(tmp_path):
 
 def _teardown():
     app.dependency_overrides.clear()
+    # 收掉生成队列 worker（§31.10）：进程级全局线程，不收会跨用例抢队列 /
+    # 拿真库认领测试塞的假行（与发布 / 同步 worker 同规）。
+    product_note_gen_service._gen_worker_stop.set()
+    product_note_gen_service._gen_wakeup.set()
+    for thread in list(threading.enumerate()):
+        if thread.name == product_note_gen_service.GENERATE_WORKER_THREAD_NAME and thread.is_alive():
+            thread.join(timeout=5)
+    with product_note_gen_service._gen_queue_lock:
+        product_note_gen_service._gen_worker = None
+        product_note_gen_service._gen_adapter_factories.clear()
+    product_note_gen_service._gen_worker_stop.clear()
+    product_note_gen_service._gen_wakeup.clear()
+
+
+def _patch_gen_worker(monkeypatch, db_factory) -> None:
+    """生成队列 worker 打桩：Session 落**临时库** + 轮询间隔置 0（不真等 1.5s）。"""
+    monkeypatch.setattr(product_note_gen_service, "_session_factory", db_factory)
+    monkeypatch.setattr(product_note_gen_service, "_POLL_INTERVAL", 0)
 
 
 def _bind_with_product(
@@ -265,10 +325,12 @@ def _bind_with_product(
 # --------------------------------------------------------------------------- #
 
 
-def test_generate_save_creates_note_assets_and_relation(tmp_path):
+def test_generate_save_enqueues_and_worker_creates_note_assets_and_relation(tmp_path, monkeypatch):
+    """单篇生成（§31.10 起走队列）：端点毫秒级回收入队回执，worker 落四件套。"""
     headers, account_id, db_factory = _setup(tmp_path)
     try:
         _bind_with_product(db_factory, account_id)
+        _patch_gen_worker(monkeypatch, db_factory)
         resp = client.post(
             "/api/xhs/product-notes/generate-save",
             json={"platform_account_id": account_id, "item_id": ITEM_ID},
@@ -277,17 +339,30 @@ def test_generate_save_creates_note_assets_and_relation(tmp_path):
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["ok"] is True
-        assert body["note_id"].startswith("local_")
-        assert body["topics"] == ["桌布", "桌垫"]
+        assert body["status"] == "queued", "入队回执（不是逐项结果）"
+        assert FakePublishAdapter.calls == [], "生成必须在后台 worker 里跑"
+
+        assert product_note_gen_service.wait_generate_done(timeout=15), "后台 worker 未在超时内跑完"
 
         db = db_factory()
         try:
-            note = db.scalar(select(Note).where(Note.note_id == body["note_id"]))
+            item = db.scalar(select(Task).where(Task.task_type == "xhs_note_gen_item"))
+            assert item is not None and item.status == "done"
+            payload = item.payload if isinstance(item.payload, dict) else {}
+            note = db.scalar(select(Note).where(Note.note_id == payload["note_id"]))
             assert note is not None
             assert note.note_type == "local_generated"
             assert note.publish_status == "pending"
             assert note.published is False
-            assert json.loads(note.topics_json) == ["桌布", "桌垫"]
+            # §34：话题进 topics 字典 + note_topics 关系表（`topics_json` 列已移除，
+            # 保留就是同一语义的第二份实现）
+            topic_names = db.scalars(
+                select(Topic.name)
+                .join(NoteTopic, NoteTopic.topic_id == Topic.id)
+                .where(NoteTopic.note_id == note.id)
+                .order_by(NoteTopic.id)
+            ).all()
+            assert list(topic_names) == ["桌布", "桌垫"]
             aigc = note.raw_json["aigc"]
             assert aigc["task_id"] == "TASK-1"
             assert aigc["sku_id"] == SKU_ID  # 发布链路要用的 SKU 粒度
@@ -340,21 +415,29 @@ def test_generate_requires_binding_and_token(tmp_path):
         _teardown()
 
 
-def test_generate_platform_failure_writes_nothing(tmp_path):
+def test_generate_platform_failure_marks_item_failed_and_writes_nothing(tmp_path, monkeypatch):
+    """平台生成失败（§31.10 起发生在 worker 里）：队列项 failed + 平台原文，不落库。"""
     headers, account_id, db_factory = _setup(tmp_path)
     try:
         _bind_with_product(db_factory, account_id)
+        _patch_gen_worker(monkeypatch, db_factory)
         FakePublishAdapter.fail_task = True
         resp = client.post(
             "/api/xhs/product-notes/generate-save",
             json={"platform_account_id": account_id, "item_id": ITEM_ID},
             headers=headers,
         )
-        assert resp.status_code == 502
-        assert "平台生成失败（测试）" in resp.json()["detail"]["message"]
+        assert resp.status_code == 200, "入队照常成功（平台失败在 worker 里）"
+        assert product_note_gen_service.wait_generate_done(timeout=15)
+
         db = db_factory()
         try:
             assert db.scalar(select(Note)) is None  # 不落库
+            item = db.scalar(select(Task).where(Task.task_type == "xhs_note_gen_item"))
+            assert item is not None and item.status == "failed"
+            payload = item.payload if isinstance(item.payload, dict) else {}
+            assert "平台生成失败（测试）" in payload["reason"]
+            assert payload["code"] == "AI_GENERATION_FAILED"
         finally:
             db.close()
     finally:
@@ -362,10 +445,12 @@ def test_generate_platform_failure_writes_nothing(tmp_path):
 
 
 @pytest.mark.slow
-def test_batch_generate_isolates_failures(tmp_path):
+def test_batch_generate_isolates_failures(tmp_path, monkeypatch):
+    """批量（§31.10）：门禁不过项不阻断其余；通过项入队并由 worker 顺序跑完。"""
     headers, account_id, db_factory = _setup(tmp_path)
     try:
         _bind_with_product(db_factory, account_id)
+        _patch_gen_worker(monkeypatch, db_factory)
         db = db_factory()
         try:
             from backend.app.services.shop_binding_service import account_shop_id
@@ -393,19 +478,28 @@ def test_batch_generate_isolates_failures(tmp_path):
         assert resp.status_code == 200
         body = resp.json()
         assert body["total"] == 3
-        assert body["succeeded"] == 2
+        assert body["started"] == 2, "门禁通过的两项入队"
         assert body["failed"] == 1
         results = {r["item_id"]: r for r in body["results"]}
-        assert results[ITEM_ID]["ok"] is True
+        assert results[ITEM_ID]["ok"] is True and results[ITEM_ID]["status"] == "queued"
         assert results["ITEM-2"]["ok"] is True
         assert results["ITEM-3"]["ok"] is False
         assert results["ITEM-3"]["code"] == "QIANFAN_ITEM_NOT_FOUND"
+
+        # worker 顺序跑完两项（FIFO）
+        assert product_note_gen_service.wait_generate_done(timeout=20)
+        db = db_factory()
+        try:
+            notes = db.scalars(select(Note)).all()
+            assert len(notes) == 2, "两项都落库、失败项不落"
+        finally:
+            db.close()
     finally:
         _teardown()
 
 
 # --------------------------------------------------------------------------- #
-# 发布
+# 发布（2026-09-25 起：异步启动 + 队列顺序执行 + 下载节流 + 临时目录治理）
 # --------------------------------------------------------------------------- #
 
 
@@ -420,166 +514,7 @@ def _generate_one(db_factory, account_id):
         db.close()
 
 
-def test_publish_success_runs_full_chain(tmp_path, monkeypatch):
-    headers, account_id, db_factory = _setup(tmp_path)
-    try:
-        _bind_with_product(db_factory, account_id)
-        note_id = _generate_one(db_factory, account_id)
-        FakePublishAdapter.calls = []  # 只看发布阶段的调用序
-
-        # 把下载目标指向本地假服务器太贵 —— 直接 monkeypatch requests.get 回假图字节
-        import requests
-
-        class _FakeResponse:
-            status_code = 200
-            content = b"\xff\xd8\xff\xe0" + b"0" * 2048  # 够 100 字节下限
-            headers = {"content-type": "image/jpeg"}
-
-            def raise_for_status(self):
-                return None
-
-        monkeypatch.setattr(requests, "get", lambda *a, **kw: _FakeResponse())
-
-        db = db_factory()
-        try:
-            note = db.scalar(select(Note).where(Note.note_id == note_id))
-            result = note_publish_service.publish_note(
-                db, 1, note.id, adapter_factory=lambda cookies: FakePublishAdapter(cookies)
-            )
-        finally:
-            db.close()
-
-        assert result["ok"] is True
-        assert result["platform_note_id"] == "REAL-NOTE-1"
-        # 调用序：上传凭证 → 逐文件上传 → 预审核 → 发布
-        assert FakePublishAdapter.calls[0] == "upload_permit"
-        assert FakePublishAdapter.calls[1].startswith("upload_file:")
-        assert "preaudit" in FakePublishAdapter.calls
-        assert FakePublishAdapter.calls[-1] == "publish"
-
-        db = db_factory()
-        try:
-            note = db.scalar(select(Note).where(Note.id == note.id))
-            assert note.note_id == "REAL-NOTE-1"  # 平台 ID 回写
-            assert note.publish_status == "published"
-            assert note.published is True
-            assert note.publish_error == ""
-            assert note.published_at is not None
-            assets = db.scalars(select(NoteAsset).where(NoteAsset.note_id == note.id)).all()
-            assert all(not a.local_path for a in assets)
-            # 临时目录已删
-            from backend.app.core.config import get_settings
-
-            tmp_dir = Path(get_settings().storage_dir) / "tmp_note_publish" / "REAL-NOTE-1"
-            assert not tmp_dir.exists()
-        finally:
-            db.close()
-    finally:
-        _teardown()
-
-
-def test_publish_failure_records_reason_and_keeps_temp(tmp_path, monkeypatch):
-    headers, account_id, db_factory = _setup(tmp_path)
-    try:
-        _bind_with_product(db_factory, account_id)
-        note_id = _generate_one(db_factory, account_id)
-        FakePublishAdapter.fail_publish = True
-        FakePublishAdapter.calls = []
-
-        import requests
-
-        class _FakeResponse:
-            status_code = 200
-            content = b"\xff\xd8\xff\xe0" + b"0" * 2048
-            headers = {"content-type": "image/jpeg"}
-
-            def raise_for_status(self):
-                return None
-
-        monkeypatch.setattr(requests, "get", lambda *a, **kw: _FakeResponse())
-
-        db = db_factory()
-        try:
-            note = db.scalar(select(Note).where(Note.note_id == note_id))
-            local_id = note.note_id
-            result = note_publish_service.publish_note(
-                db, 1, note.id, adapter_factory=lambda cookies: FakePublishAdapter(cookies)
-            )
-        finally:
-            db.close()
-
-        assert result["ok"] is False
-        assert "平台发布被拒（测试）" in result["error"]
-        db = db_factory()
-        try:
-            note = db.scalar(select(Note).where(Note.id == note.id))
-            assert note.publish_status == "failed"
-            assert note.publish_error == "平台发布被拒（测试）"
-            assert note.note_id == local_id  # 平台 ID 没污染本地 ID
-            # 临时目录保留（重发不必重下）
-            from backend.app.core.config import get_settings
-
-            tmp_dir = Path(get_settings().storage_dir) / "tmp_note_publish" / local_id
-            assert tmp_dir.exists()
-        finally:
-            db.close()
-
-        # 失败后可重发：去掉开关再发一次 → 成功
-        FakePublishAdapter.fail_publish = False
-        db = db_factory()
-        try:
-            result2 = note_publish_service.publish_note(
-                db, 1, note.id, adapter_factory=lambda cookies: FakePublishAdapter(cookies)
-            )
-        finally:
-            db.close()
-        assert result2["ok"] is True
-    finally:
-        _teardown()
-
-
-def test_publish_gates(tmp_path, monkeypatch):
-    headers, account_id, db_factory = _setup(tmp_path)
-    try:
-        _bind_with_product(db_factory, account_id)
-        note_id = _generate_one(db_factory, account_id)
-        db = db_factory()
-        try:
-            # 不存在 ⇒ 抛 NOTE_NOT_FOUND（门禁类错误走异常，端点层转 400）
-            try:
-                note_publish_service.publish_note(
-                    db, 1, 999999, adapter_factory=lambda cookies: FakePublishAdapter(cookies)
-                )
-                raise AssertionError("should raise")
-            except note_publish_service.NotePublishError as error:
-                assert error.code == "NOTE_NOT_FOUND"
-
-            note = db.scalar(select(Note).where(Note.note_id == note_id))
-            # 无媒体 ⇒ 记 failed + NOTE_MEDIA_EMPTY（链路上的失败走返回值）
-            db.query(NoteAsset).filter(NoteAsset.note_id == note.id).delete()
-            db.commit()
-            result = note_publish_service.publish_note(
-                db, 1, note.id, adapter_factory=lambda cookies: FakePublishAdapter(cookies)
-            )
-            assert result["ok"] is False
-            assert result["code"] == "NOTE_MEDIA_EMPTY"
-            db.refresh(note)
-            assert note.publish_status == "failed"
-            assert note.publish_error  # 原因非空
-        finally:
-            db.close()
-
-        # 端点层同一道闸：无媒体的笔记走 HTTP ⇒ 200 + publish.ok=false
-        # （链路失败回 200 是刻意设计：与「同步」端点同哲学 —— 试过的失败不是接口错误）
-        resp = client.post(f"/api/notes/{_pk_of(db_factory, note_id)}/publish", headers=headers)
-        assert resp.status_code == 200
-        assert resp.json()["publish"]["ok"] is False
-        assert resp.json()["publish"]["code"] == "NOTE_MEDIA_EMPTY"
-    finally:
-        _teardown()
-
-
-def _pk_of(db_factory, note_id: str) -> int:
+def _note_pk(db_factory, note_id: str) -> int:
     db = db_factory()
     try:
         return db.scalar(select(Note.id).where(Note.note_id == note_id))
@@ -587,38 +522,745 @@ def _pk_of(db_factory, note_id: str) -> int:
         db.close()
 
 
+def _temp_dir(note_id: str) -> Path:
+    """测试用的临时目录（**与 service 同一把尺子**：读它的 `get_settings()`）。
+
+    ⚠️ 2026-09-25 修：旧写法直接读真实 `get_settings().storage_dir` ⇒ 测试往
+    `backend/app/storage/tmp_note_publish/` 真写文件，每跑一轮回归留几个目录
+    （真机积压 184 个的伴生问题）。现在 `_patch_async` 把 service 的 settings
+    指到用例 tmp_path，这里读同一份 ⇒ 断言对象与实现同源，且不落真实盘。
+    """
+    return Path(note_publish_service.get_settings().storage_dir) / "tmp_note_publish" / note_id
+
+
+class _FakeResponse:
+    status_code = 200
+    content = b"\xff\xd8\xff\xe0" + b"0" * 2048  # 够 100 字节下限
+    headers = {"content-type": "image/jpeg"}
+
+    def raise_for_status(self):
+        return None
+
+
+class _FakeSettings:
+    """只带 `storage_dir` 的设置替身（service 只用这一个字段）。"""
+
+    def __init__(self, storage_dir: Path) -> None:
+        self.storage_dir = storage_dir
+
+
+def _patch_downloads(monkeypatch, *, fail_on_second: bool = False) -> None:
+    """把媒体下载打到本地假字节（不打真 CDN）。
+
+    `fail_on_second=True` 时第二张抛 `RequestException` —— 制造「下载中途失败」，
+    验证临时目录被删（用户 2026-09-25 口径）。
+    """
+    import requests
+
+    state = {"n": 0}
+
+    def _fake_get(*args, **kwargs):
+        state["n"] += 1
+        if fail_on_second and state["n"] == 2:
+            raise requests.RequestException("CDN 429（测试）")
+        return _FakeResponse()
+
+    monkeypatch.setattr(requests, "get", _fake_get)
+
+
+def _patch_async(monkeypatch, db_factory, tmp_path) -> None:
+    """异步测试四件套：worker 用测试库的 session、节流置 0（不真等）、下载打桩、
+    临时目录指到用例 tmp_path（不污染真实 storage）。"""
+    monkeypatch.setattr(note_publish_service, "_session_factory", db_factory)
+    monkeypatch.setattr(note_publish_service, "_download_gap_seconds", lambda: 0.0)
+    monkeypatch.setattr(note_publish_service, "get_settings", lambda: _FakeSettings(Path(tmp_path)))
+    _patch_downloads(monkeypatch)
+
+
+def test_publish_success_runs_full_chain(tmp_path, monkeypatch):
+    """发布异步全链：启动即返回 publishing，worker 跑完四步 + 终态落库。
+
+    历史缺陷回归（2026-09-25）：成功删除的是**本地 note_id** 目录 —— 旧实现
+    先 `note.note_id = 平台 ID` 再删，删的是从未创建的平台 ID 目录，每次成功
+    发布都漏一个本地目录（真机曾积压 184 个）。
+    """
+    headers, account_id, db_factory = _setup(tmp_path)
+    try:
+        _bind_with_product(db_factory, account_id)
+        note_id = _generate_one(db_factory, account_id)
+        FakePublishAdapter.calls = []  # 只看发布阶段的调用序
+        _patch_async(monkeypatch, db_factory, tmp_path)
+        note_pk = _note_pk(db_factory, note_id)
+
+        db = db_factory()
+        try:
+            started = note_publish_service.start_publish(
+                db, 1, note_pk, adapter_factory=lambda cookies: FakePublishAdapter(cookies)
+            )
+            assert started.publish_status == "publishing"  # 同步段即落库
+        finally:
+            db.close()
+
+        assert note_publish_service.wait_publish_done(note_pk, timeout=15), "后台 worker 未在超时内跑完"
+
+        # 调用序：上传凭证 → 逐文件上传 → 预审核 → 发布 → 回查商品笔记列表
+        # （发布成功后补详情地址，§25.4；默认查无此项 ⇒ raw 不动）
+        assert FakePublishAdapter.calls[0] == "upload_permit"
+        assert FakePublishAdapter.calls[1].startswith("upload_file:")
+        assert "preaudit" in FakePublishAdapter.calls
+        assert FakePublishAdapter.calls[-2:] == ["publish", "goods_note_page"]
+
+        db = db_factory()
+        try:
+            note = db.scalar(select(Note).where(Note.id == note_pk))
+            assert note.note_id == "REAL-NOTE-1"  # 平台 ID 回写
+            assert note.publish_status == "published"
+            assert note.published is True
+            assert note.publish_error == ""
+            assert note.published_at is not None
+            assert note.publish_attempts == 1
+            assets = db.scalars(select(NoteAsset).where(NoteAsset.note_id == note.id)).all()
+            assert all(not a.local_path for a in assets)
+            # 临时目录按**本地** ID 删（历史缺陷回归）
+            assert not _temp_dir(note_id).exists()
+        finally:
+            db.close()
+    finally:
+        _teardown()
+
+
+def test_publish_success_backfills_detail_ref_into_raw_json(tmp_path, monkeypatch):
+    """发布成功即把**详情地址**补进 `raw_json`（§25.4，2026-09-25 用户报障回归）。
+
+    用户报障原文：「本地生成的笔记已经发布成功的笔记，点击同步按钮『中古风桌旗，
+    让家瞬间高级感』同步未完成：这条笔记没有可用的详情地址」。
+
+    根因：平台 `note/publish` 响应只回 `{"id"}`，**不带** `note_url` /
+    `xsec_token` ⇒ 本地生成笔记的 `raw_json` 从来没有详情地址 ⇒ 同步按钮的
+    `_note_detail_url` 判 `no_url`（按钮在、功能不在）。
+
+    修法：发布成功回写事务里 best-effort 回查一次商品笔记列表
+    （`note_ids` 精确查询，与 `shop_goods_service.sync_note_ids` 同一端点），
+    把带 token 的 explore URL 合入 `raw_json`。之后**所有**链路（单条同步 /
+    批量同步 / 定时补齐）都拿到完整地址，不再依赖无 token 兜底。
+    """
+    headers, account_id, db_factory = _setup(tmp_path)
+    try:
+        _bind_with_product(db_factory, account_id)
+        note_id = _generate_one(db_factory, account_id)
+        FakePublishAdapter.calls = []
+        FakePublishAdapter.goods_note_entries = [
+            {"note_id": "REAL-NOTE-1", "xsec_token": "XT-1", "item_id": ITEM_ID}
+        ]
+        _patch_async(monkeypatch, db_factory, tmp_path)
+        note_pk = _note_pk(db_factory, note_id)
+
+        db = db_factory()
+        try:
+            started = note_publish_service.start_publish(
+                db, 1, note_pk, adapter_factory=lambda cookies: FakePublishAdapter(cookies)
+            )
+            assert started.publish_status == "publishing"
+        finally:
+            db.close()
+
+        assert note_publish_service.wait_publish_done(note_pk, timeout=15), "后台 worker 未跑完"
+
+        db = db_factory()
+        try:
+            note = db.scalar(select(Note).where(Note.id == note_pk))
+            assert note.publish_status == "published"
+            assert note.note_id == "REAL-NOTE-1"
+            raw = note.raw_json if isinstance(note.raw_json, dict) else json.loads(note.raw_json)
+            assert raw["note_url"] == (
+                "https://www.xiaohongshu.com/explore/REAL-NOTE-1?xsec_token=XT-1"
+            )
+            assert raw["xsec_token"] == "XT-1"
+            assert raw["item_id"] == ITEM_ID, "生成时落的字段不被抹掉（只增不写）"
+            assert FakePublishAdapter.calls[-1] == "goods_note_page"
+        finally:
+            db.close()
+    finally:
+        _teardown()
+
+
+def test_publish_success_when_detail_ref_lookup_finds_nothing(tmp_path, monkeypatch):
+    """回查查无该项（非商品笔记 / 平台延迟）⇒ 发布照样成功，raw 保持原样。
+
+    best-effort 的边界：补地址失败**不能**把已成功的发布拖成失败；拿不到 token
+    的笔记靠单条同步路径的 explore 兜底（`allow_tokenless`）继续可同步。
+    """
+    headers, account_id, db_factory = _setup(tmp_path)
+    try:
+        _bind_with_product(db_factory, account_id)
+        note_id = _generate_one(db_factory, account_id)
+        FakePublishAdapter.calls = []
+        FakePublishAdapter.goods_note_entries = []  # 平台查无此项
+        _patch_async(monkeypatch, db_factory, tmp_path)
+        note_pk = _note_pk(db_factory, note_id)
+
+        db = db_factory()
+        try:
+            started = note_publish_service.start_publish(
+                db, 1, note_pk, adapter_factory=lambda cookies: FakePublishAdapter(cookies)
+            )
+            assert started.publish_status == "publishing"
+        finally:
+            db.close()
+
+        assert note_publish_service.wait_publish_done(note_pk, timeout=15), "后台 worker 未跑完"
+
+        db = db_factory()
+        try:
+            note = db.scalar(select(Note).where(Note.id == note_pk))
+            assert note.publish_status == "published"
+            assert note.publish_error == ""
+            raw = note.raw_json if isinstance(note.raw_json, dict) else json.loads(note.raw_json)
+            assert "note_url" not in raw, "查不到就不写，不造假（缺值口径）"
+            assert FakePublishAdapter.calls[-1] == "goods_note_page", "回查仍然发生过"
+        finally:
+            db.close()
+    finally:
+        _teardown()
+
+
+def test_full_chain_generation_to_publish_carries_topics(tmp_path, monkeypatch):
+    """**生成 → 发布全链路**：话题一路带到平台发布体（2026-09-25 新增）。
+
+    用户报障原文：「发布成功的笔记均没有话题，只有正文图片」。本用例把整条链跑
+    一遍并**逐段断言话题的实际形态**（不是只测组装层）：
+
+    1. **生成**：AI 正文自带话题（平台形态 `#桌布[话题]#` + 老形态 `#复古风`）+
+       平台 topics（带 ID）⇒ 正文拆净、话题落 `topics` / `note_topics`、名字不带
+       `[话题]` 标记、`platform_id` 落库；
+    2. **发布体**：`desc` 末尾是平台形态 `#名字[话题]#`（含没 ID 的）；`hash_tag`
+       带平台 ID；
+    3. **平台实收**：假适配器捕获的 body 与 2 一致 —— 防「组装层对、发出去又变」。
+    """
+
+    def _task_result(self, task_id):
+        """AI 结果里放两种话题形态（平台形态 + 老形态），并带两个平台话题 ID。"""
+        FakePublishAdapter.calls.append("aigc_task_result")
+        detail = {
+            "success": True,
+            "title": "测试桌布真好用",
+            "content": "这是一段用于测试的正文。#桌布[话题]# 复古风。#复古风",
+            "topics": [{"id": "T1", "name": "桌布"}, {"id": "T2", "name": "桌垫"}],
+        }
+        return True, "ok", {
+            "code": 0,
+            "data": {"task_status": "COMPLETED", "task_detail": json.dumps(detail)},
+        }
+
+    headers, account_id, db_factory = _setup(tmp_path)
+    try:
+        _bind_with_product(db_factory, account_id)
+        _patch_async(monkeypatch, db_factory, tmp_path)
+        monkeypatch.setattr(FakePublishAdapter, "aigc_task_result", _task_result)
+
+        # ---- 1) 生成落库 ----
+        note_id = _generate_one(db_factory, account_id)
+        note_pk = _note_pk(db_factory, note_id)
+        db = db_factory()
+        try:
+            note = db.get(Note, note_pk)
+            assert "#" not in (note.content or ""), f"正文没拆净：{note.content!r}"
+            assert "[话题]" not in (note.content or "")
+            rows = db.execute(
+                select(Topic.name, Topic.platform_id)
+                .join(NoteTopic, NoteTopic.topic_id == Topic.id)
+                .where(NoteTopic.note_id == note.id)
+                .order_by(NoteTopic.id)
+            ).all()
+            assert [name for name, _ in rows] == ["桌布", "桌垫", "复古风"]
+            assert all("[话题" not in name for name, _ in rows), f"名字带标记：{rows}"
+            assert {name: pid for name, pid in rows}["桌布"] == "T1"
+        finally:
+            db.close()
+
+        # ---- 2/3) 发布并捕获平台真正收到的 body ----
+        bodies: list[dict] = []
+        original_publish = FakePublishAdapter.publish_note
+
+        def _capture(self, body):
+            bodies.append(json.loads(json.dumps(body, ensure_ascii=False)))
+            return original_publish(self, body)
+
+        monkeypatch.setattr(FakePublishAdapter, "publish_note", _capture)
+
+        db = db_factory()
+        try:
+            note_publish_service.start_publish(
+                db, 1, note_pk, adapter_factory=lambda cookies: FakePublishAdapter(cookies)
+            )
+        finally:
+            db.close()
+        assert note_publish_service.wait_publish_done(note_pk, timeout=15), "后台 worker 未跑完"
+
+        assert len(bodies) == 1, "发布体应只发一次"
+        common = bodies[0]["common"]
+        desc = common["desc"]
+        for name in ("桌布", "桌垫", "复古风"):
+            assert f"#{name}[话题]#" in desc, f"desc 缺平台形态话题：{desc!r}"
+        assert desc.count("#桌布[话题]#") == 1, f"话题重复拼接：{desc!r}"
+        # hash_tag 是并行的结构化参数：只收带平台 ID 的（桌布 T1 / 桌垫 T2）
+        assert common["hash_tag"] == [
+            {"id": "T1", "name": "桌布", "type": "topic"},
+            {"id": "T2", "name": "桌垫", "type": "topic"},
+        ]
+
+        db = db_factory()
+        try:
+            assert db.get(Note, note_pk).publish_status == "published"
+        finally:
+            db.close()
+    finally:
+        _teardown()
+
+
+def test_publish_start_returns_immediately_and_rejects_double_start(tmp_path, monkeypatch):
+    """异步启动语义：毫秒级返回 publishing + 落库；发布中再启动 ⇒ 拒绝（不双发）。
+
+    闸门把链路停在「下载完成、上传未开始」的确定态，用来断言同步段效果
+    （不等链路）与临时文件名（商品 ID + 序号）。
+    """
+    headers, account_id, db_factory = _setup(tmp_path)
+    try:
+        _bind_with_product(db_factory, account_id)
+        note_id = _generate_one(db_factory, account_id)
+        FakePublishAdapter.calls = []
+        _patch_async(monkeypatch, db_factory, tmp_path)
+        note_pk = _note_pk(db_factory, note_id)
+
+        gate = threading.Event()
+        reached = threading.Event()
+        FakePublishAdapter.upload_gate = gate
+        FakePublishAdapter.upload_reached = reached
+
+        db = db_factory()
+        try:
+            note_publish_service.start_publish(
+                db, 1, note_pk, adapter_factory=lambda cookies: FakePublishAdapter(cookies)
+            )
+        finally:
+            db.close()
+
+        # 同步段已落库（不等后台）：publishing + attempts=1
+        assert reached.wait(timeout=10), "worker 没在超时内到达上传（闸门失效？）"
+        db = db_factory()
+        try:
+            note = db.scalar(select(Note).where(Note.id == note_pk))
+            assert note.publish_status == "publishing"
+            assert note.publish_attempts == 1
+            assert note.note_id == note_id  # 平台 ID 没污染本地 ID
+        finally:
+            db.close()
+
+        # 下载已完成：文件名 = 商品 ID + 序号（用户 2026-09-25 口径）
+        names = sorted(p.name for p in _temp_dir(note_id).iterdir())
+        assert names == [f"{ITEM_ID}_001.jpg", f"{ITEM_ID}_002.jpg", f"{ITEM_ID}_003.jpg"]
+
+        # 双发被拒：publishing 不在可发布集合；attempts 不增、不起第二个 worker
+        db = db_factory()
+        try:
+            with pytest.raises(note_publish_service.NotePublishError) as exc:
+                note_publish_service.start_publish(
+                    db, 1, note_pk, adapter_factory=lambda cookies: FakePublishAdapter(cookies)
+                )
+            assert exc.value.code == "NOTE_NOT_PUBLISHABLE"
+        finally:
+            db.close()
+
+        # 放行 → 后台跑完 → 终态 + 删目录
+        gate.set()
+        assert note_publish_service.wait_publish_done(note_pk, timeout=15)
+        db = db_factory()
+        try:
+            note = db.scalar(select(Note).where(Note.id == note_pk))
+            assert note.publish_status == "published"
+            assert note.note_id == "REAL-NOTE-1"
+            assert note.publish_attempts == 1  # 双发被拒，没有多加
+        finally:
+            db.close()
+        assert not _temp_dir(note_id).exists()
+    finally:
+        FakePublishAdapter.upload_gate = None
+        FakePublishAdapter.upload_reached = None
+        _teardown()
+
+
+def test_publish_failure_records_reason_and_keeps_temp(tmp_path, monkeypatch):
+    """发布失败留现场 + 可重发：平台拒发 ⇒ failed + 原文 + 临时目录保留（本地 ID 键）。"""
+    headers, account_id, db_factory = _setup(tmp_path)
+    try:
+        _bind_with_product(db_factory, account_id)
+        note_id = _generate_one(db_factory, account_id)
+        FakePublishAdapter.fail_publish = True
+        FakePublishAdapter.calls = []
+        _patch_async(monkeypatch, db_factory, tmp_path)
+        note_pk = _note_pk(db_factory, note_id)
+
+        db = db_factory()
+        try:
+            note_publish_service.start_publish(
+                db, 1, note_pk, adapter_factory=lambda cookies: FakePublishAdapter(cookies)
+            )
+        finally:
+            db.close()
+        assert note_publish_service.wait_publish_done(note_pk, timeout=15)
+
+        db = db_factory()
+        try:
+            note = db.scalar(select(Note).where(Note.id == note_pk))
+            assert note.publish_status == "failed"
+            assert note.publish_error == "平台发布被拒（测试）"
+            assert note.note_id == note_id  # 平台 ID 没污染本地 ID
+            # 上传/发布阶段失败：临时目录**保留**（现场可查；§31.3.5）
+            assert _temp_dir(note_id).exists()
+        finally:
+            db.close()
+
+        # 失败后可重发：去掉开关再发一次 → 成功（全链重走）
+        FakePublishAdapter.fail_publish = False
+        db = db_factory()
+        try:
+            note_publish_service.start_publish(
+                db, 1, note_pk, adapter_factory=lambda cookies: FakePublishAdapter(cookies)
+            )
+        finally:
+            db.close()
+        assert note_publish_service.wait_publish_done(note_pk, timeout=15)
+        db = db_factory()
+        try:
+            note = db.scalar(select(Note).where(Note.id == note_pk))
+            assert note.publish_status == "published"
+            assert note.publish_attempts == 2
+        finally:
+            db.close()
+        assert not _temp_dir(note_id).exists()
+    finally:
+        _teardown()
+
+
+def test_download_failure_deletes_temp_dir(tmp_path, monkeypatch):
+    """下载中途失败 ⇒ PUBLISH_UPSTREAM_ERROR + **删本次临时目录**（不留半截文件）。"""
+    headers, account_id, db_factory = _setup(tmp_path)
+    try:
+        _bind_with_product(db_factory, account_id)
+        note_id = _generate_one(db_factory, account_id)
+        FakePublishAdapter.calls = []
+        _patch_async(monkeypatch, db_factory, tmp_path)
+        _patch_downloads(monkeypatch, fail_on_second=True)  # 第 2 张打挂
+        note_pk = _note_pk(db_factory, note_id)
+
+        db = db_factory()
+        try:
+            note_publish_service.start_publish(
+                db, 1, note_pk, adapter_factory=lambda cookies: FakePublishAdapter(cookies)
+            )
+        finally:
+            db.close()
+        assert note_publish_service.wait_publish_done(note_pk, timeout=15)
+
+        db = db_factory()
+        try:
+            note = db.scalar(select(Note).where(Note.id == note_pk))
+            assert note.publish_status == "failed"
+            assert "下载媒体失败（第 2 个）" in note.publish_error
+            assert "RequestException" in note.publish_error  # 网络异常带类型（DEF-058）
+        finally:
+            db.close()
+        # 半截目录被删（重发是全量重下，留着只会堆积）
+        assert not _temp_dir(note_id).exists()
+        # 下载就挂了：上传/发布一步都不该走
+        assert FakePublishAdapter.calls == []
+    finally:
+        _teardown()
+
+
+def test_download_gap_is_random_one_to_three_seconds(tmp_path, monkeypatch):
+    """下载节流：张间随机 1–3s（首张不停）；测试内置 0 不真等。"""
+    # ① 真实函数采样：边界就是契约（改了上限/下限这条红）
+    samples = [note_publish_service._download_gap_seconds() for _ in range(50)]
+    assert all(1.0 <= s <= 3.0 for s in samples), f"节流越界：{min(samples)}~{max(samples)}"
+    assert len(set(samples)) > 1, "间隔是定值 —— 随机才有意义（固定值本身是机器节奏特征）"
+
+    # ② 循环行为：3 张图 ⇒ 张间调 2 次（首张前不调）
+    headers, account_id, db_factory = _setup(tmp_path)
+    try:
+        _bind_with_product(db_factory, account_id)
+        note_id = _generate_one(db_factory, account_id)
+        FakePublishAdapter.calls = []
+        _patch_downloads(monkeypatch)
+        monkeypatch.setattr(note_publish_service, "_session_factory", db_factory)
+        monkeypatch.setattr(note_publish_service, "get_settings", lambda: _FakeSettings(Path(tmp_path)))
+        gaps: list[float] = []
+        monkeypatch.setattr(
+            note_publish_service, "_download_gap_seconds", lambda: gaps.append(1.5) or 1.5
+        )
+        note_pk = _note_pk(db_factory, note_id)
+
+        db = db_factory()
+        try:
+            note_publish_service.start_publish(
+                db, 1, note_pk, adapter_factory=lambda cookies: FakePublishAdapter(cookies)
+            )
+        finally:
+            db.close()
+        assert note_publish_service.wait_publish_done(note_pk, timeout=15)
+        assert len(gaps) == 2, f"3 张图应有 2 次张间停顿，实际 {len(gaps)}"
+    finally:
+        _teardown()
+
+
+def test_publish_queue_runs_in_order_with_snapshot(tmp_path, monkeypatch):
+    """批量入队按 FIFO 跑完；进度快照（running/queued/四态计数）正确。
+
+    同时覆盖 `GET /notes/publish-queue` 端点（进度卡数据源）与「路由必须注册在
+    `/{note_id}` 之前」—— 否则 "publish-queue" 被 int 转换吃掉变 422。
+    """
+    headers, account_id, db_factory = _setup(tmp_path)
+    try:
+        _bind_with_product(db_factory, account_id)
+        note_ids = [_generate_one(db_factory, account_id) for _ in range(3)]
+        FakePublishAdapter.calls = []
+        FakePublishAdapter.published_titles = []
+        _patch_async(monkeypatch, db_factory, tmp_path)
+        # 三篇不同标题 ⇒ 用发布体标题断言执行顺序（假适配器内容相同，只能靠这个区分）
+        pks = []
+        db = db_factory()
+        try:
+            for index, note_id in enumerate(note_ids):
+                note = db.scalar(select(Note).where(Note.note_id == note_id))
+                note.title = f"队列笔记{index + 1}"
+                pks.append(note.id)
+            db.commit()
+        finally:
+            db.close()
+
+        # 闸门拦住第一篇的第一个上传 ⇒ 另两篇必然还在队列里
+        gate = threading.Event()
+        reached = threading.Event()
+        FakePublishAdapter.upload_gate = gate
+        FakePublishAdapter.upload_reached = reached
+
+        resp = client.post(
+            "/api/notes/batch-publish",
+            json={"note_ids": pks},
+            headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["total"] == 3 and body["started"] == 3 and body["failed"] == 0
+        assert [item["status"] for item in body["results"]] == ["publishing"] * 3
+
+        assert reached.wait(timeout=10)
+        snap = client.get("/api/notes/publish-queue", headers=headers).json()
+        assert snap["running"] is not None and snap["running"]["note_pk"] == pks[0]
+        assert [q["note_pk"] for q in snap["queued"]] == pks[1:]
+        assert snap["counts"]["publishing"] == 3  # 四态原始计数（不归并待发布）
+        # 2026-09-26 常驻化 + 当日口径：快照 = 队列实时态（running/queued/total）
+        # + 四态计数 + **当日三数**（`today`，进度卡卡面数字的来源）。
+        # 原句 `assert set(snap) == {"running", "queued", "total", "counts"}`
+        # **被 2026-09-26 当日口径取代**（保留备查）。
+        assert set(snap) == {"running", "queued", "total", "counts", "today"}
+        assert snap["today"]["pending"] == 3, "当日待处理 = 未终态数（此刻三篇都在队列里）"
+        assert snap["total"] == 3, "total = 在跑 + 排队（+ 近期终态，此时还没有）"
+
+        gate.set()
+        for pk in pks:
+            assert note_publish_service.wait_publish_done(pk, timeout=20), f"note_pk={pk} 未跑完"
+
+        assert FakePublishAdapter.published_titles == ["队列笔记1", "队列笔记2", "队列笔记3"]
+        db = db_factory()
+        try:
+            for pk in pks:
+                note = db.scalar(select(Note).where(Note.id == pk))
+                assert note.publish_status == "published"
+        finally:
+            db.close()
+        # 队列排空：快照回空闲
+        snap = client.get("/api/notes/publish-queue", headers=headers).json()
+        assert snap["running"] is None and snap["queued"] == []
+        assert snap["counts"]["published"] == 3
+        # 2026-09-26 当日口径：三篇今天跑完 ⇒ 当日成功 = 3、待处理 = 0（卡面三数
+        # 就是它；「本页累计」那一版已被取代，见模块内其它注释）。
+        assert set(snap) == {"running", "queued", "total", "counts", "today"}
+        assert snap["today"]["ok"] == 3 and snap["today"]["pending"] == 0
+        assert snap["total"] == 3
+    finally:
+        FakePublishAdapter.upload_gate = None
+        FakePublishAdapter.upload_reached = None
+        _teardown()
+
+
+def _wait_publish_idle(timeout: float = 5.0) -> None:
+    """等发布队列真正空闲（库里没有未终态的发布项）。
+
+    持久化后（§35.9）「空闲」的判据落在**库**上：没有 `pending` / `running` 的
+    `xhs_note_publish_item` 行 = worker 手上没事了，下一批入队必然新开一批
+    （`ensure_open_batch` 的判据正是「该批还有没有未终态子行」）。改造前靠等
+    内存位 `_publish_running` 收回 None —— 那个位已经不存在了（队列真相源是库）。
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        db = note_publish_service._session_factory()
+        try:
+            if note_publish_service.count_open_publish_items(db) == 0:
+                return
+        finally:
+            db.close()
+        time.sleep(0.02)
+
+
+def test_publish_queue_counts_failures_and_restarts_when_idle(tmp_path, monkeypatch):
+    """**当日口径**：失败计入 `today.failed`；空闲后重新入队 ⇒ 当日窗口继续累加。
+
+    2026-09-25 用户口径「发布、同步进度卡做类似的调整」+「待同步数为 0 时，不再
+    刷新统计数据」；2026-09-26 用户口径**改口径**「只统计当日发布或同步的数据……
+    统计队列记录表中的数据」⇒ 卡面三数不再是「本轮记账」（那是页面自己累计，
+    刷新页面就丢），而是**当日 `tasks` 行的现算值**：跑过的篇留在当日窗口里，
+    所以再入队一批时上一批的成败**继续算在今天**（不再被「新一轮」清掉）。
+    """
+    headers, account_id, db_factory = _setup(tmp_path)
+    try:
+        _bind_with_product(db_factory, account_id)
+        note_ids = [_generate_one(db_factory, account_id) for _ in range(2)]
+        _patch_async(monkeypatch, db_factory, tmp_path)
+        pks = []
+        db = db_factory()
+        try:
+            for note_id in note_ids:
+                note = db.scalar(select(Note).where(Note.note_id == note_id))
+                pks.append(note.id)
+        finally:
+            db.close()
+
+        # 第一批：1 篇，成功
+        FakePublishAdapter.fail_publish = False
+        resp = client.post("/api/notes/batch-publish", json={"note_ids": [pks[0]]}, headers=headers)
+        assert resp.status_code == 200, resp.text
+        assert note_publish_service.wait_publish_done(pks[0], timeout=20)
+        _wait_publish_idle()
+        snap = client.get("/api/notes/publish-queue", headers=headers).json()
+        # 2026-09-26 当日口径：终态项留在**当日窗口**里 ⇒ today.ok=1；
+        # 队列实时态为空（running/queued 空，total 仍是近期终态数）。
+        assert set(snap) == {"running", "queued", "total", "counts", "today"}
+        assert snap["running"] is None and snap["queued"] == []
+        assert snap["total"] == 1, "终态项留在近期窗口（不是「新一轮」把它清掉）"
+        assert snap["counts"]["published"] == 1
+        assert snap["today"]["ok"] == 1 and snap["today"]["pending"] == 0
+
+        # 第二批：1 篇，被平台拒 ⇒ 笔记行 failed；**上一批的成功仍在当日窗口里**
+        FakePublishAdapter.fail_publish = True
+        resp = client.post("/api/notes/batch-publish", json={"note_ids": [pks[1]]}, headers=headers)
+        assert resp.status_code == 200, resp.text
+        assert note_publish_service.wait_publish_done(pks[1], timeout=20)
+        snap = client.get("/api/notes/publish-queue", headers=headers).json()
+        assert snap["running"] is None and snap["queued"] == []
+        assert snap["total"] == 2, "两批的终态项都在近期窗口里"
+        assert snap["counts"]["published"] == 1 and snap["counts"]["failed"] == 1
+        assert snap["today"]["ok"] == 1 and snap["today"]["failed"] == 1, (
+            "当日三数跨批累加（同一天里上一批的成败不清零）"
+        )
+    finally:
+        FakePublishAdapter.fail_publish = False
+        _teardown()
+
+
+def test_publish_gates(tmp_path, monkeypatch):
+    """门禁四态：不存在 / 无媒体 / 已发布 / 发布中 —— 全部同步拒绝（400 或抛错）。"""
+    headers, account_id, db_factory = _setup(tmp_path)
+    try:
+        _bind_with_product(db_factory, account_id)
+        note_id = _generate_one(db_factory, account_id)
+        _patch_async(monkeypatch, db_factory, tmp_path)
+
+        db = db_factory()
+        try:
+            # 不存在 ⇒ 抛 NOTE_NOT_FOUND
+            with pytest.raises(note_publish_service.NotePublishError) as exc:
+                note_publish_service.start_publish(
+                    db, 1, 999999, adapter_factory=lambda cookies: FakePublishAdapter(cookies)
+                )
+            assert exc.value.code == "NOTE_NOT_FOUND"
+
+            note = db.scalar(select(Note).where(Note.note_id == note_id))
+            note_pk = note.id
+            # 无媒体 ⇒ 同步门禁拒绝（§31.5 步 0：不进队列、不起 worker）
+            db.query(NoteAsset).filter(NoteAsset.note_id == note.id).delete()
+            db.commit()
+            with pytest.raises(note_publish_service.NotePublishError) as exc:
+                note_publish_service.start_publish(
+                    db, 1, note_pk, adapter_factory=lambda cookies: FakePublishAdapter(cookies)
+                )
+            assert exc.value.code == "NOTE_MEDIA_EMPTY"
+            db.refresh(note)
+            assert note.publish_status == "pending"  # 门禁拒绝不动状态机
+        finally:
+            db.close()
+
+        # 端点层同一道闸：无媒体 ⇒ 400 结构化错误（文档口径，§31.5 步 0）
+        resp = client.post(f"/api/notes/{note_pk}/publish", headers=headers)
+        assert resp.status_code == 400
+        assert resp.json()["detail"]["code"] == "NOTE_MEDIA_EMPTY"
+    finally:
+        _teardown()
+
+
+def test_publish_already_published_is_rejected(tmp_path, monkeypatch):
+    """已发布 ⇒ NOTE_ALREADY_PUBLISHED（同步门禁，不起 worker）。"""
+    headers, account_id, db_factory = _setup(tmp_path)
+    try:
+        _bind_with_product(db_factory, account_id)
+        note_id = _generate_one(db_factory, account_id)
+        _patch_async(monkeypatch, db_factory, tmp_path)
+        db = db_factory()
+        try:
+            note = db.scalar(select(Note).where(Note.note_id == note_id))
+            note_pk = note.id
+            from backend.app.models.note import set_note_publish_status
+
+            set_note_publish_status(note, "published")
+            db.commit()
+            with pytest.raises(note_publish_service.NotePublishError) as exc:
+                note_publish_service.start_publish(
+                    db, 1, note_pk, adapter_factory=lambda cookies: FakePublishAdapter(cookies)
+                )
+            assert exc.value.code == "NOTE_ALREADY_PUBLISHED"
+        finally:
+            db.close()
+    finally:
+        _teardown()
+
+
 def test_publish_preaudit_rejection(tmp_path, monkeypatch):
+    """预审核拒绝：平台原文落 publish_error，不调 publish。"""
     headers, account_id, db_factory = _setup(tmp_path)
     try:
         _bind_with_product(db_factory, account_id)
         note_id = _generate_one(db_factory, account_id)
         FakePublishAdapter.reject_preaudit = True
         FakePublishAdapter.calls = []
-
-        import requests
-
-        class _FakeResponse:
-            status_code = 200
-            content = b"\xff\xd8\xff\xe0" + b"0" * 2048
-            headers = {"content-type": "image/jpeg"}
-
-            def raise_for_status(self):
-                return None
-
-        monkeypatch.setattr(requests, "get", lambda *a, **kw: _FakeResponse())
+        _patch_async(monkeypatch, db_factory, tmp_path)
+        note_pk = _note_pk(db_factory, note_id)
 
         db = db_factory()
         try:
-            note = db.scalar(select(Note).where(Note.note_id == note_id))
-            result = note_publish_service.publish_note(
-                db, 1, note.id, adapter_factory=lambda cookies: FakePublishAdapter(cookies)
+            note_publish_service.start_publish(
+                db, 1, note_pk, adapter_factory=lambda cookies: FakePublishAdapter(cookies)
             )
         finally:
             db.close()
+        assert note_publish_service.wait_publish_done(note_pk, timeout=15)
 
-        assert result["ok"] is False
-        assert result["code"] == "PUBLISH_AUDIT_REJECTED"
-        assert "正文含违规词（平台审的）" in result["error"]
+        db = db_factory()
+        try:
+            note = db.scalar(select(Note).where(Note.id == note_pk))
+            assert note.publish_status == "failed"
+            assert "正文含违规词（平台审的）" in note.publish_error
+        finally:
+            db.close()
         assert "publish" not in FakePublishAdapter.calls  # 预审核拒了就不发布
     finally:
         _teardown()
@@ -664,28 +1306,31 @@ def _publish_side_calls() -> list[str]:
     ]
 
 
-def test_generate_caps_images_at_six_and_never_publishes(tmp_path):
+def test_generate_caps_images_at_six_and_never_publishes(tmp_path, monkeypatch):
     """媒体上限 6 张（用户口径「图片最多 6 张」）+ **生成不发布**（§32.2）。
 
     商品有 10 张图 ⇒ 只落 6 张；整条生成链路里发布侧调用**一次都没有**
     （上传凭证 / 上传 / 预审核 / 发布）—— 只有内容库点「发布」才走发布链路。
+    §31.10 起生成走队列：断言对象从响应体搬到 worker 跑完后的库 / 队列项。
     """
     headers, account_id, db_factory = _setup(tmp_path)
     try:
         _bind_with_product(db_factory, account_id, image_count=10)
+        _patch_gen_worker(monkeypatch, db_factory)
         resp = client.post(
             "/api/xhs/product-notes/generate-save",
             json={"platform_account_id": account_id, "item_id": ITEM_ID},
             headers=headers,
         )
         assert resp.status_code == 200, resp.text
-        body = resp.json()
-        assert body["image_count"] == 6
-        assert body["video_count"] == 0
+        assert resp.json()["status"] == "queued"
+        assert product_note_gen_service.wait_generate_done(timeout=15), "后台 worker 未跑完"
 
         db = db_factory()
         try:
-            note = db.scalar(select(Note).where(Note.note_id == body["note_id"]))
+            item = db.scalar(select(Task).where(Task.task_type == "xhs_note_gen_item"))
+            payload = item.payload if isinstance(item.payload, dict) else {}
+            note = db.scalar(select(Note).where(Note.note_id == payload["note_id"]))
             assert note.publish_status == "pending"  # 待发布
             assert note.published is False  # 投影同步
             assets = db.scalars(select(NoteAsset).where(NoteAsset.note_id == note.id)).all()
@@ -700,28 +1345,30 @@ def test_generate_caps_images_at_six_and_never_publishes(tmp_path):
         _teardown()
 
 
-def test_generate_prefers_video_over_images(tmp_path):
+def test_generate_prefers_video_over_images(tmp_path, monkeypatch):
     """视频优先（§32.2.1）：有视频 ⇒ 只落 1 个视频资产、不落图片。
 
     ⚠️ 商品视频当前**无签名源**（§31.1.3 真机 0 命中），所以这条用构造数据验证
-    取舍分支本身；现实数据下走的是上面那条纯图片路径。
+    取舍分支本身；现实数据下走的是上面那条纯图片路径。§31.10 起走队列。
     """
     headers, account_id, db_factory = _setup(tmp_path)
     try:
         _bind_with_product(db_factory, account_id, image_count=4, video_url="http://qimg.example/v.mp4")
+        _patch_gen_worker(monkeypatch, db_factory)
         resp = client.post(
             "/api/xhs/product-notes/generate-save",
             json={"platform_account_id": account_id, "item_id": ITEM_ID},
             headers=headers,
         )
         assert resp.status_code == 200, resp.text
-        body = resp.json()
-        assert body["video_count"] == 1
-        assert body["image_count"] == 0
+        assert resp.json()["status"] == "queued"
+        assert product_note_gen_service.wait_generate_done(timeout=15), "后台 worker 未跑完"
 
         db = db_factory()
         try:
-            note = db.scalar(select(Note).where(Note.note_id == body["note_id"]))
+            item = db.scalar(select(Task).where(Task.task_type == "xhs_note_gen_item"))
+            payload = item.payload if isinstance(item.payload, dict) else {}
+            note = db.scalar(select(Note).where(Note.note_id == payload["note_id"]))
             assets = db.scalars(select(NoteAsset).where(NoteAsset.note_id == note.id)).all()
             assert len(assets) == 1
             assert assets[0].asset_type == "video"
@@ -733,35 +1380,35 @@ def test_generate_prefers_video_over_images(tmp_path):
         _teardown()
 
 
-def test_publish_video_only_note_is_rejected_with_reason(tmp_path):
+def test_publish_video_only_note_is_rejected_with_reason(tmp_path, monkeypatch):
     """「只有视频」的笔记发布 ⇒ 明确失败 + 可读原因（§32.7：视频发布链路未接通）。
 
     守的是**不静默失败**：用户看到的是 `NOTE_VIDEO_UNSUPPORTED` 与一句说清的话，
-    不是「发布失败（未给原因）」。
+    不是「发布失败（未给原因）」。异步后这是**同步门禁**（§31.5 步 0）——
+    点击即知发不了，不进队列。
     """
     headers, account_id, db_factory = _setup(tmp_path)
     try:
         _bind_with_product(db_factory, account_id, image_count=0, video_url="http://qimg.example/v.mp4")
         note_id = _generate_one(db_factory, account_id)
+        _patch_async(monkeypatch, db_factory, tmp_path)
         db = db_factory()
         try:
             note = db.scalar(select(Note).where(Note.note_id == note_id))
-            result = note_publish_service.publish_note(
-                db, 1, note.id, adapter_factory=lambda cookies: FakePublishAdapter(cookies)
-            )
+            with pytest.raises(note_publish_service.NotePublishError) as exc:
+                note_publish_service.start_publish(
+                    db, 1, note.id, adapter_factory=lambda cookies: FakePublishAdapter(cookies)
+                )
+            assert exc.value.code == "NOTE_VIDEO_UNSUPPORTED"
+            assert "视频笔记发布链路尚未接通" in exc.value.message
         finally:
             db.close()
-        assert result["ok"] is False
-        assert result["code"] == "NOTE_VIDEO_UNSUPPORTED"
-        assert "视频笔记发布链路尚未接通" in result["error"]
     finally:
         _teardown()
 
 
 def test_set_note_publish_status_keeps_projection_in_sync():
     """唯一写入入口：状态与 `published` 投影**一次写入**，非法取值直接抛（§32.3.2）。"""
-    import pytest as _pytest
-
     from backend.app.models.note import (
         PUBLISH_STATUS_FAILED,
         PUBLISH_STATUS_PENDING,
@@ -786,7 +1433,7 @@ def test_set_note_publish_status_keeps_projection_in_sync():
     assert note.published is False
     assert note.publish_error == ""  # 重发中不留旧原因
 
-    with _pytest.raises(ValueError):
+    with pytest.raises(ValueError):
         set_note_publish_status(note, "archived")
 
 
@@ -820,3 +1467,44 @@ def test_item_note_count_follows_relation_table(tmp_path):
         assert after["sort_field"] == "create_time" and after["order"] == "desc"
     finally:
         _teardown()
+
+
+# --------------------------------------------------------------------------- #
+# 前端行为脚本（note-publish-gates.ts 纯逻辑）：接线 + 变异（2026-09-25 补）
+# --------------------------------------------------------------------------- #
+
+
+def test_note_publish_behaviour_script_passes(frontend_runner):
+    """`note_publish.cjs` 必须**真的被 pytest 跑到**（DEF-063 同型：没接 = 没守）。
+
+    脚本打包真实的 `lib/note-publish-gates.ts`，验证可发布判据只有一条、
+    已发布不许重发、批量跳过明示、顺序保持。
+    """
+    result = frontend_runner("note_publish.cjs")
+    assert result.returncode == 0, (result.stdout + result.stderr)[-900:]
+
+
+@pytest.mark.parametrize("mutate", ["gate", "repub", "skip", "label", "order"])
+def test_note_publish_mutations_are_caught(mutate):
+    """五个变异开关必须把脚本打红（守卫不是「恰好为真」）。
+
+    没有这一层，`gate` / `repub` 这些锚点可能只是恰好匹配 —— 变异没接入
+    pytest = 变异不算数。
+    """
+    import os
+    import subprocess
+
+    env = dict(os.environ)
+    env["NOTE_PUBLISH_MUTATE"] = mutate
+    result = subprocess.run(
+        ["node", str(ROOT / "tests" / "frontend" / "note_publish.cjs")],
+        cwd=str(ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=180,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode != 0, f"变异 {mutate} **未被抓住**（守卫只是恰好为真）：\n{output[-600:]}"

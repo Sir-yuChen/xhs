@@ -12,6 +12,7 @@ import {
 } from "@ant-design/icons";
 import {
   Alert,
+  App,
   Button,
   Card,
   Checkbox,
@@ -73,8 +74,10 @@ export function ModelConfigPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // 全站消息提醒统一走 antd message（设计 04 §3.6，2026-09-25 用户口径：
+  // 「所有消息提醒参考 antd 成熟组件，不要在页面暂用空间」）—— 操作结果反馈
+  // 不再渲染 inline Alert 占版面；`App.useApp()` 的实例继承主题与 locale。
+  const { message } = App.useApp();
   const [testingId, setTestingId] = useState<number | null>(null);
   const [testResults, setTestResults] = useState<Record<number, { status: string; message: string }>>({});
 
@@ -88,12 +91,11 @@ export function ModelConfigPage() {
 
   async function loadConfigs() {
     setIsLoading(true);
-    setError(null);
     try {
       const result = await fetchModelConfigs();
       setConfigs(result.items);
     } catch {
-      setError("模型配置加载失败。");
+      message.error("模型配置加载失败。");
     } finally {
       setIsLoading(false);
     }
@@ -102,7 +104,7 @@ export function ModelConfigPage() {
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!form.name.trim() || !form.model_name.trim()) {
-      setError("请填写配置名称和模型名称。");
+      message.warning("请填写配置名称和模型名称。");
       return;
     }
 
@@ -119,14 +121,12 @@ export function ModelConfigPage() {
         isValidUrl = false;
       }
       if (!isValidUrl) {
-        setError("Base URL 需为合法网址（以 http:// 或 https:// 开头），请检查输入内容。");
+        message.warning("Base URL 需为合法网址（以 http:// 或 https:// 开头），请检查输入内容。");
         return;
       }
     }
 
     setIsSaving(true);
-    setMessage(null);
-    setError(null);
     const payload = {
       ...form,
       name: form.name.trim(),
@@ -139,7 +139,7 @@ export function ModelConfigPage() {
       if (editingId) {
         const updated = await updateModelConfig(editingId, payload);
         setConfigs((current) => current.map((c) => c.id === updated.id ? updated : (updated.is_default && c.model_type === updated.model_type ? { ...c, is_default: false } : c)));
-        setMessage(`${typeLabel(updated.model_type)}配置已更新。`);
+        message.success(`${typeLabel(updated.model_type)}配置已更新。`);
         setEditingId(null);
       } else {
         const created = await createModelConfig(payload);
@@ -149,11 +149,11 @@ export function ModelConfigPage() {
             : current;
           return [created, ...withoutOldDefault];
         });
-        setMessage(`${typeLabel(created.model_type)}配置已保存。`);
+        message.success(`${typeLabel(created.model_type)}配置已保存。`);
       }
       setForm({ ...emptyForm, model_type: form.model_type });
     } catch {
-      setError("模型配置保存失败。");
+      message.error("模型配置保存失败。");
     } finally {
       setIsSaving(false);
     }
@@ -170,8 +170,6 @@ export function ModelConfigPage() {
       api_key: "",
       is_default: config.is_default,
     });
-    setMessage(null);
-    setError(null);
   }
 
   function handleCancelEdit() {
@@ -180,15 +178,13 @@ export function ModelConfigPage() {
   }
 
   async function handleDelete(configId: number) {
-    setError(null);
-    setMessage(null);
     try {
       await deleteModelConfig(configId);
       setConfigs((current) => current.filter((c) => c.id !== configId));
       if (editingId === configId) { setEditingId(null); setForm({ ...emptyForm, model_type: form.model_type }); }
-      setMessage("配置已删除。");
+      message.success("配置已删除。");
     } catch {
-      setError("配置删除失败。");
+      message.error("配置删除失败。");
     }
   }
 
@@ -205,8 +201,6 @@ export function ModelConfigPage() {
   }
 
   async function handleSetDefault(config: ModelConfig) {
-    setError(null);
-    setMessage(null);
     try {
       const updated = await setDefaultModelConfig(config.id);
       setConfigs((current) =>
@@ -216,11 +210,11 @@ export function ModelConfigPage() {
             : item
         )
       );
-      setMessage(
+      message.success(
         `${updated.name} 已设为默认${typeLabel(updated.model_type)}。`
       );
     } catch {
-      setError("默认模型切换失败。");
+      message.error("默认模型切换失败。");
     }
   }
 
@@ -256,25 +250,6 @@ export function ModelConfigPage() {
           <Typography.Link href="https://bailian.console.aliyun.com/" target="_blank" rel="noreferrer">阿里云百炼</Typography.Link> — 通义千问系列，Base URL: <Typography.Text code>https://dashscope.aliyuncs.com/compatible-mode/v1</Typography.Text>
         </>}
       />
-
-      {error && (
-        <Alert
-          type="error"
-          message={error}
-          showIcon
-          closable
-          style={{ marginBottom: 16 }}
-        />
-      )}
-      {message && (
-        <Alert
-          type="success"
-          message={message}
-          showIcon
-          closable
-          style={{ marginBottom: 16 }}
-        />
-      )}
 
       <Row gutter={[24, 24]}>
         <Col xs={24} lg={8}>

@@ -18,6 +18,7 @@ import {
 } from "@ant-design/icons";
 import {
   Alert,
+  App,
   Avatar,
   Button,
   Card,
@@ -27,7 +28,6 @@ import {
   Empty,
   InputNumber,
   Input,
-  message,
   Modal,
   Popconfirm,
   Row,
@@ -44,6 +44,14 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 import { PageHeader } from "../../../components/layout/app-shell";
+import {
+  FILTER_CACHE_KEYS,
+  MY_NOTES_TAB_VALUES,
+  asEnum,
+  asFields,
+  asFiniteNumber,
+  usePersistedFilter,
+} from "../../../lib/filter-cache";
 import {
   bindXhsQianfanShop,
   fetchAccounts,
@@ -97,7 +105,8 @@ import type { QuietError } from "../../../components/platforms/note-detail-modal
 const { Text, Paragraph, Link: AntLink } = Typography;
 
 /** 复制到剪贴板：优先 Clipboard API，非安全上下文（如局域网 IP 访问）退回 execCommand。 */
-async function copyToClipboard(value: string, okText: string): Promise<void> {
+/** 复制反馈的 message 实例由调用方（组件内 `App.useApp()`）传入 —— 模块级函数拿不到 hook。 */
+async function copyToClipboard(value: string, okText: string, msg: { success: (text: string) => void; error: (text: string) => void }): Promise<void> {
   try {
     if (navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(value);
@@ -111,9 +120,9 @@ async function copyToClipboard(value: string, okText: string): Promise<void> {
       document.execCommand("copy");
       document.body.removeChild(holder);
     }
-    message.success(okText);
+    msg.success(okText);
   } catch {
-    message.error("复制失败，请手动选中后复制");
+    msg.error("复制失败，请手动选中后复制");
   }
 }
 
@@ -264,6 +273,31 @@ const interactionKinds: { value: XhsInteractionKind; label: string }[] = [
   { value: "connection", label: "新增关注" },
 ];
 
+/**
+ * 互动分类的**合法取值**（用于本地缓存的取值域校验）。
+ * 与上面的下拉**同一份**：新加一个分类时缓存校验自动跟上，不会出现「界面选得到、
+ * 缓存校验不认」而把用户的选择静默退回默认。
+ */
+const INTERACTION_KIND_VALUES = interactionKinds.map((item) => item.value);
+
+/**
+ * 「无流量笔记清理」弹窗的**清空态**（阈值 + 查询条件）。
+ *
+ * 定义在模块级：既是状态初值、又是本地缓存的**校验模板**（`asFields` 按它的形状
+ * 逐字段校验）—— 两份写开就会出现「缓存校验放行了状态初值不认的字段」。
+ */
+const EMPTY_NO_TRAFFIC_THRESHOLDS: NoTrafficThresholds = {
+  max_browse: 0,
+  max_pay_order: 0,
+  max_pay_gmv: 0,
+};
+
+const EMPTY_NO_TRAFFIC_QUERY: NoTrafficQuery = {
+  keyword: "",
+  note_type: "",
+  published_before: null,
+};
+
 const TAB_LABELS: Record<TabKey, string> = {
   notes: "我发布的",
   liked: "我赞过的",
@@ -354,8 +388,18 @@ function Metric({ icon, value, title }: { icon: ReactNode; value: number; title:
 }
 
 export function XhsMyNotesPage() {
+  // 全站消息提醒统一走 antd message（设计 04 §3.6，2026-09-25 用户口径：
+  // 「所有消息提醒参考 antd 成熟组件，不要在页面暂用空间」）—— `App.useApp()`
+  // 替代静态 `message` 导入，实例继承 ConfigProvider 的主题与 locale。
+  const { message } = App.useApp();
   const [accounts, setAccounts] = useState<PlatformAccount[]>([]);
-  const [selectedAccountId, setSelectedAccountId] = useState<number | null>(null);
+  // 账号选择 + 页签 + 互动分类**落本地缓存**（2026-09-26 用户口径「筛选条件和账号
+  // 选择后放本地缓存，避免每次均需要重新选择」）：`usePersistedFilter` 与 `useState`
+  // 同形，初值优先取缓存、变化即回写。账号经 `asFiniteNumber` 校验（只能是数字或
+  // `null`），页签 / 互动分类走 `asEnum`（取值集合就是界面上那两组下拉的集合）。
+  const [selectedAccountId, setSelectedAccountId] = usePersistedFilter<number | null>(
+    FILTER_CACHE_KEYS.myNotes.accountId, null, asFiniteNumber
+  );
   const [identity, setIdentity] = useState<XhsSelfIdentity | null>(null);
   const [identityError, setIdentityError] = useState<string | null>(null);
   const [capabilities, setCapabilities] = useState<XhsSelfCapabilities | null>(null);
@@ -367,7 +411,9 @@ export function XhsMyNotesPage() {
   const [isLoadingAccounts, setIsLoadingAccounts] = useState(true);
   const [isLoadingIdentity, setIsLoadingIdentity] = useState(false);
 
-  const [activeTab, setActiveTab] = useState<TabKey>("notes");
+  const [activeTab, setActiveTab] = usePersistedFilter<TabKey>(
+    FILTER_CACHE_KEYS.myNotes.tab, "notes", asEnum(MY_NOTES_TAB_VALUES)
+  );
   const [profileUrl, setProfileUrl] = useState("");
   const [needsToken, setNeedsToken] = useState(false);
 
@@ -376,7 +422,9 @@ export function XhsMyNotesPage() {
     liked: emptyPanel<XhsSearchNote>(),
     collected: emptyPanel<XhsSearchNote>(),
   });
-  const [interactionKind, setInteractionKind] = useState<XhsInteractionKind>("like_collect");
+  const [interactionKind, setInteractionKind] = usePersistedFilter<XhsInteractionKind>(
+    FILTER_CACHE_KEYS.myNotes.interactionKind, "like_collect", asEnum(INTERACTION_KIND_VALUES)
+  );
   const [interactionPanel, setInteractionPanel] = useState<PanelState<XhsInteractionMessage>>(
     emptyPanel<XhsInteractionMessage>(),
   );
@@ -445,7 +493,15 @@ export function XhsMyNotesPage() {
         const loaded = await fetchAccounts("xhs");
         setAccounts(loaded);
         const first = loaded.find((account) => account.platform === "xhs");
-        setSelectedAccountId((current) => current ?? first?.id ?? null);
+        // 账号选择的**缓存自愈**（2026-09-26）：缓存里的账号可能已被删除 —— 它不在
+        // 候选里时退回第一个账号（否则页面会带着一个下拉里根本找不到的 id 去请求，
+        // 用户只看到「没数据」，看不出是缓存留下的旧账号）。
+        setSelectedAccountId((current) => {
+          if (current !== null && loaded.some((account) => account.id === current)) {
+            return current;
+          }
+          return first?.id ?? null;
+        });
       } catch {
         setIdentityError("账号列表加载失败。");
       } finally {
@@ -582,16 +638,19 @@ export function XhsMyNotesPage() {
   // ── 无流量笔记清理（写操作，全部走后台异步 + 限流 + 批次上限）──────────────
   const [noTrafficOpen, setNoTrafficOpen] = useState(false);
   const [noTrafficLoading, setNoTrafficLoading] = useState(false);
-  const [noTrafficThresholds, setNoTrafficThresholds] = useState<NoTrafficThresholds>({
-    max_browse: 0,
-    max_pay_order: 0,
-    max_pay_gmv: 0,
-  });
-  const [noTrafficQuery, setNoTrafficQuery] = useState<NoTrafficQuery>({
-    keyword: "",
-    note_type: "",
-    published_before: null,
-  });
+  // 阈值与查询条件也是**筛选项**（用户每次都要重填一遍的那个表单）⇒ 一起落缓存
+  // （2026-09-26 口径）。`asFields` 按默认值的形状逐字段校验：类型对不上的字段回
+  // 默认，多出来的键丢掉 —— 免得 `{"max_browse": "0"}` 这种脏值流进请求体。
+  const [noTrafficThresholds, setNoTrafficThresholds] = usePersistedFilter<NoTrafficThresholds>(
+    FILTER_CACHE_KEYS.myNotes.noTrafficThresholds,
+    EMPTY_NO_TRAFFIC_THRESHOLDS,
+    asFields(EMPTY_NO_TRAFFIC_THRESHOLDS)
+  );
+  const [noTrafficQuery, setNoTrafficQuery] = usePersistedFilter<NoTrafficQuery>(
+    FILTER_CACHE_KEYS.myNotes.noTrafficQuery,
+    EMPTY_NO_TRAFFIC_QUERY,
+    asFields(EMPTY_NO_TRAFFIC_QUERY)
+  );
   const [noTrafficCandidates, setNoTrafficCandidates] = useState<NoTrafficCandidate[]>([]);
   const [noTrafficTotal, setNoTrafficTotal] = useState(0);
   const [noTrafficCoverage, setNoTrafficCoverage] = useState<string>("");
@@ -824,8 +883,8 @@ export function XhsMyNotesPage() {
       setNeedsToken(false);
     } catch (error) {
       if (seq !== requestSeq.current) return;
-      const { message, code } = readError(error);
-      setSearchError(message);
+      const { message: reason, code } = readError(error);
+      setSearchError(reason);
       if (code === "XSEC_TOKEN_REQUIRED") setNeedsToken(true);
       if (!append) setSearchResult(null);
     } finally {
@@ -1401,7 +1460,7 @@ export function XhsMyNotesPage() {
     </Space>
   );
 
-  const tabItems = (["notes", "liked", "collected", "interactions"] as TabKey[]).map((key) => {
+  const tabItems = (MY_NOTES_TAB_VALUES as readonly TabKey[]).map((key) => {
     // v1.27（用户拍板 / §17.8）：页签**不再按账号类型或能力置灰、不再禁用**。
     // 旧写法用 `capabilityFor(key).available` 把页签灰掉并换成一块说明 —— 但真机已证明
     // 那些接口是通的（creator 账号只有 ark 通道是**正常形态**），灰掉的恰恰是可用链路；
@@ -1846,7 +1905,7 @@ export function XhsMyNotesPage() {
                                           color: "#1677ff",
                                         }}
                                         ellipsis
-                                        onClick={() => void copyToClipboard(g.url, "商品链接已复制")}
+                                        onClick={() => void copyToClipboard(g.url, "商品链接已复制", message)}
                                       >
                                         {g.url}
                                       </Text>
@@ -1856,7 +1915,7 @@ export function XhsMyNotesPage() {
                                         type="text"
                                         size="small"
                                         icon={<CopyOutlined />}
-                                        onClick={() => void copyToClipboard(g.url, "商品链接已复制")}
+                                        onClick={() => void copyToClipboard(g.url, "商品链接已复制", message)}
                                       />
                                     </Tooltip>
                                   </Space>

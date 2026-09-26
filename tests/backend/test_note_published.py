@@ -425,7 +425,7 @@ def test_patch_publish_status_toggles_and_is_idempotent(api_env):
     assert toggled.status_code == 200, toggled.text
     assert toggled.json()["publish_status"] == "published"
     assert toggled.json()["published"] is True  # 投影同步
-    assert "tags" in toggled.json(), "切换后应返回整行（与列表同形状）"
+    assert "topics" in toggled.json(), "切换后应返回整行（与列表同形状）"
 
     # 幂等：再提交同一个值
     again = client.patch(

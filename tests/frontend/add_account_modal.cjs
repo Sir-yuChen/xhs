@@ -159,6 +159,7 @@ export function detailMessage(detail) {
 const ENTRY = `
 import React, { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import { App } from "antd";
 import { AddAccountDrawer } from "./components/account/add-account-drawer";
 import { RenewLoginModal } from "./components/account/renew-login-modal";
 import { QrLoginPanel } from "./components/account/qr-login-panel";
@@ -191,7 +192,15 @@ function reset() {
 function mount() {
   const el = document.createElement("div");
   document.getElementById("root").appendChild(el);
-  return { el, root: createRoot(el) };
+  const root = createRoot(el);
+  const rawRender = root.render.bind(root);
+  // 与真实应用结构一致：组件树整体挂在 antd App 之下 —— 页面/组件里的
+  // App.useApp()（消息提醒，设计 04 §3.6）从它拿 message 实例；App 之外
+  // 该 hook 返回的是空对象（antd 源码 context 默认值），调用即炸。
+  // component={false} 用 Fragment 渲染，不引入额外 DOM 包裹层，
+  // 下面所有 .ant-modal / .ant-drawer DOM 断言不受影响。
+  root.render = (node) => rawRender(React.createElement(App, { component: false }, node));
+  return { el, root };
 }
 function modalText() {
   const modal = document.querySelector(".ant-modal");

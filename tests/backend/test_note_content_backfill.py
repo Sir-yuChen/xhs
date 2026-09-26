@@ -500,6 +500,247 @@ class TestHydratePageNotes:
             db.close()
 
 
+class TestDetailRefBackfill:
+    """本地生成 + 已发布笔记「没有可用的详情地址」的修复（§25.4，2026-09-25 用户报障）。
+
+    真实库 id 1967「中古风桌旗，让家瞬间高级感」：`local_generated` + `published`，
+    `raw_json` 只有 `aigc` / `guardrails` / `item_id` —— 平台 `note/publish` 响应
+    只回 `{"id"}`，**详情地址从来没被写进去** ⇒ `_note_detail_url` 取不到 URL ⇒
+    同步按钮判 `no_url`。用户看到的就是「按钮在、功能不在」。
+
+    三层修复（本类逐层守）：
+
+    1. **发布回写即补地址**：`_execute_publish` 成功段 best-effort 回查千帆商品
+       笔记列表（`note_ids` 精确查询），把 `note_url` + `xsec_token` 合入
+       `raw_json`（单一实现 `backfill_note_detail_ref`，发布 / 单条同步共用）；
+    2. **单条同步先回查再兜底**：`sync_note_from_platform` 打详情前用账号**自己
+       的 `ark` 令牌**回查一次（`_backfill_detail_ref_for_account`，§18.14）；
+    3. **explore 兜底**：回查不到时 `hydrate_note_detail(allow_tokenless=True)`
+       （**仅单条同步路径**）用平台 note_id 拼 explore 地址。批量页内联 / 定时
+       同步（`refresh=False`）**不**放开 —— 无 token 是 DEF-053 的「假成功」，
+       那两条链路每轮全量重打，放开就白烧额度（第 4 条用例守这条边界）。
+    """
+
+    def test_note_detail_url_tokenless_branch_is_gated(self, tmp_path: Path):
+        """兜底拼 explore 只对「hex 平台 ID + 显式允许」放开，其余一律不拼。"""
+        import backend.app.services.note_sync_service as nss
+
+        class _Note:
+            def __init__(self, note_id: str, raw: dict) -> None:
+                self.note_id = note_id
+                self.raw_json = raw
+
+        local_generated = _Note(HEX_NOTE_ID, {"aigc": {"x": 1}, "item_id": "ITEM-1"})
+        assert nss._note_detail_url(local_generated) == ""
+        assert nss._note_detail_url(local_generated, allow_tokenless=True) == (
+            f"https://www.xiaohongshu.com/explore/{HEX_NOTE_ID}"
+        )
+        # 非平台形态的 id（本地临时 id）⇒ 再允许也不拼（拼出来平台也不认）。
+        local_temp = _Note("N-LOCAL-1", {})
+        assert nss._note_detail_url(local_temp, allow_tokenless=True) == ""
+        # 有 token 的老路径不受影响（DEF-053 防线原样）。
+        with_token = _Note(
+            HEX_NOTE_ID,
+            {"note_url": f"https://www.xiaohongshu.com/explore/{HEX_NOTE_ID}", "xsec_token": "T"},
+        )
+        assert nss._note_detail_url(with_token) == (
+            f"https://www.xiaohongshu.com/explore/{HEX_NOTE_ID}?xsec_token=T"
+        )
+
+    def test_batch_hydration_keeps_the_no_url_guard(self, tmp_path: Path):
+        """批量 / 定时链路（`refresh=False`）对无地址笔记仍然**零请求 + no_url**。
+
+        DEF-053 的防线不能因为修单条同步被顺手拆掉：无 token 的「假成功」在
+        每轮全量同步里反复出现，比一条笔记同步不了贵得多。
+        """
+        import backend.app.services.note_sync_service as nss
+
+        db_dependency, db, creator = _build_db(tmp_path)
+        try:
+            note = _add_note(db, creator, HEX_NOTE_ID, raw={})
+            calls: list[str] = []
+
+            class SpyAdapter:
+                def __init__(self, cookies):
+                    pass
+
+                def get_note_info(self, url):
+                    calls.append(url)
+                    return True, "ok", _detail_payload(HEX_NOTE_ID, desc="正文")
+
+            result = nss.hydrate_note_detail(db, creator, note, adapter=SpyAdapter("x"))
+
+            assert calls == []
+            assert result["status"] == "no_url"
+            assert note.hydrated_at is not None, "no_url 不会自愈 ⇒ 写标记出队"
+        finally:
+            db.close()
+
+    def test_single_sync_falls_back_to_explore_url(self, tmp_path: Path, monkeypatch):
+        """单条同步（refresh=True）对无地址笔记：回查不到 token 也能打详情。"""
+        import backend.app.api.platforms.xhs.pc as pc_module
+        import backend.app.services.note_sync_service as nss
+
+        db_dependency, db, creator = _build_db(tmp_path)
+        try:
+            note = _add_note(db, creator, HEX_NOTE_ID, content="旧正文", raw={})
+            calls: list[str] = []
+
+            class SpyAdapter:
+                def __init__(self, cookies):
+                    pass
+
+                def get_note_info(self, url):
+                    calls.append(url)
+                    return True, "ok", _detail_payload(HEX_NOTE_ID, desc="平台最新正文")
+
+            monkeypatch.setattr(pc_module, "get_xhs_pc_api_adapter_factory", lambda: SpyAdapter)
+            monkeypatch.setattr(nss, "get_rate_limiter", lambda: _AllowLimiter())
+
+            result = nss.sync_note_from_platform(db, note)
+
+            assert result["status"] == "ok", result
+            # 兜底 URL 就是 explore/{平台 id}（无 token）；不再判 no_url。
+            assert calls == [f"https://www.xiaohongshu.com/explore/{HEX_NOTE_ID}"]
+            # 刷新语义：详情有非空正文 ⇒ 覆盖本地（§25.3）。
+            assert note.content == "平台最新正文"
+        finally:
+            db.close()
+
+    def test_backfill_merges_token_into_raw_json(self, tmp_path: Path):
+        """`backfill_note_detail_ref`：回查命中 ⇒ 合并 URL + token；不命中 ⇒ 原样不动。"""
+        import backend.app.services.note_sync_service as nss
+
+        db_dependency, db, creator = _build_db(tmp_path)
+        try:
+            note = _add_note(db, creator, HEX_NOTE_ID, raw={"item_id": "ITEM-1"})
+
+            def _fetch(note_ids):
+                assert note_ids == [HEX_NOTE_ID]
+                return True, "ok", {
+                    "data": {"note_infos": [{"note_id": HEX_NOTE_ID, "xsec_token": "XT-1"}]}
+                }
+
+            assert nss.backfill_note_detail_ref(db, note, _fetch) is True
+            assert note.raw_json["note_url"] == (
+                f"https://www.xiaohongshu.com/explore/{HEX_NOTE_ID}?xsec_token=XT-1"
+            )
+            assert note.raw_json["xsec_token"] == "XT-1"
+            assert note.raw_json["item_id"] == "ITEM-1", "既有字段不被抹掉"
+
+            # 已有地址 ⇒ 直接返回 False，不覆盖（只增不写）。
+            assert nss.backfill_note_detail_ref(db, note, _fetch) is False
+            assert note.raw_json["note_url"].endswith("xsec_token=XT-1")
+
+            # 平台没有这一项 / 没给 token / 请求炸了 ⇒ False 且不炸（best-effort）。
+            miss = _add_note(db, creator, HEX_NOTE_ID_2, raw={})
+            assert nss.backfill_note_detail_ref(
+                db, miss, lambda ids: (True, "ok", {"data": {"note_infos": []}})
+            ) is False
+            assert nss.backfill_note_detail_ref(
+                db, miss, lambda ids: (True, "ok", {"data": {"note_infos": [
+                    {"note_id": HEX_NOTE_ID_2}]}})
+            ) is False
+
+            def _boom(ids):
+                raise RuntimeError("平台超时（测试）")
+
+            assert nss.backfill_note_detail_ref(db, miss, _boom) is False
+            assert miss.raw_json == {}
+        finally:
+            db.close()
+
+    def test_account_backfill_uses_the_accounts_own_ark_token(self, tmp_path: Path, monkeypatch):
+        """单条同步前的回查用**账号自己的 ark 令牌**（§18.14），合入后要提交。"""
+        import backend.app.services.note_sync_service as nss
+        from tests.backend.cookie_fixtures import give_ark_cookies
+
+        db_dependency, db, creator = _build_db(tmp_path)
+        try:
+            give_ark_cookies(db, creator)
+            db.commit()
+            note = _add_note(db, creator, HEX_NOTE_ID, raw={})
+            seen: list[list[str]] = []
+
+            class FakeQianfanAdapter:
+                def __init__(self, cookies: str) -> None:
+                    self.cookies = cookies
+
+                def get_goods_note_page(self, **kwargs):
+                    seen.append(list(kwargs.get("note_ids") or []))
+                    return True, "ok", {
+                        "data": {"note_infos": [{"note_id": HEX_NOTE_ID, "xsec_token": "XT-9"}]}
+                    }
+
+            import backend.app.api.platforms.xhs.qianfan as qianfan_module
+
+            monkeypatch.setattr(
+                qianfan_module, "get_qianfan_api_adapter_factory", lambda: FakeQianfanAdapter
+            )
+
+            assert nss._backfill_detail_ref_for_account(db, creator, note) is True
+            assert seen == [[HEX_NOTE_ID]]
+            assert note.raw_json["note_url"].endswith("xsec_token=XT-9")
+
+            # 提交过：新 session 里也读得到（证明不是只改内存）。
+            db.close()
+            db = next(db_dependency())
+            reloaded = db.scalars(select(Note).where(Note.id == note.id)).one()
+            assert reloaded.raw_json["xsec_token"] == "XT-9"
+        finally:
+            db.close()
+
+    def test_account_backfill_skips_without_ark_token(self, tmp_path: Path):
+        """没有 ark 令牌 ⇒ 不回查、不借凭据（调用方有 explore 兜底）。"""
+        import backend.app.services.note_sync_service as nss
+
+        db_dependency, db, creator = _build_db(tmp_path)
+        try:
+            note = _add_note(db, creator, HEX_NOTE_ID, raw={})
+            assert nss._backfill_detail_ref_for_account(db, creator, note) is False
+            assert note.raw_json == {}
+        finally:
+            db.close()
+
+    def test_batch_backfill_fills_every_note_in_one_request(self, tmp_path: Path):
+        """批量版：一次 `note_ids` 查询补全整批（DEF-069 提速；一篇触发、全批受益）。"""
+        import backend.app.services.note_sync_service as nss
+
+        db_dependency, db, creator = _build_db(tmp_path)
+        try:
+            notes = [
+                _add_note(db, creator, HEX_NOTE_ID, raw={"item_id": "ITEM-1"}),
+                _add_note(db, creator, HEX_NOTE_ID_2, raw={"item_id": "ITEM-2"}),
+            ]
+            # 已有地址的那篇不碰（只增不写）。
+            done = _add_note(
+                db, creator, "6a7d14b20000000028001cba", raw={"note_url": "https://x/done"}
+            )
+            seen: list[list[str]] = []
+
+            def _fetch(note_ids):
+                seen.append(list(note_ids))
+                return True, "ok", {
+                    "data": {
+                        "note_infos": [
+                            {"note_id": HEX_NOTE_ID, "xsec_token": "XT-1"},
+                            {"note_id": HEX_NOTE_ID_2, "xsec_token": "XT-2"},
+                        ]
+                    }
+                }
+
+            filled = nss.backfill_note_detail_refs(db, [*notes, done], _fetch)
+
+            assert filled == 2
+            assert len(seen) == 1, "整批一次请求（不是每篇各一次）"
+            assert sorted(seen[0]) == sorted([HEX_NOTE_ID, HEX_NOTE_ID_2])
+            assert notes[0].raw_json["note_url"].endswith("xsec_token=XT-1")
+            assert notes[1].raw_json["note_url"].endswith("xsec_token=XT-2")
+            assert done.raw_json["note_url"] == "https://x/done", "已有地址不被覆盖"
+        finally:
+            db.close()
+
+
 def _session(tmp_path: Path, name: str) -> Any:
     engine = create_engine(
         f"sqlite:///{tmp_path / name}", connect_args={"check_same_thread": False}

@@ -1,13 +1,17 @@
-"""笔记的「话题」专有列 + 商品信息走关系表查询（设计 13 §28）。
+"""笔记的「话题」关系表 + 商品信息走关系表查询（设计 13 §28 / §34）。
 
 用户 2026-09-22 两条口径（② 取代 ① 的商品部分）：
 ① 「笔记内容字段增加话题和专有解耦……」；
 ② 「笔记表**不要再存商品信息**，直接通过笔记和商品关联表进行查询，同步落库时也进行
 **拆分**，将笔记与商品的关系落在笔记和商品关系表中」。
 
+⚠️ **2026-09-25 §34 起话题改走关系表**（`topics` + `note_topics`；`topics_json` 列已删，
+原 `tags` / `note_tags` 标签表并入话题表）—— 本文件的话题断言全部改盯关系表，
+专项测试在 `test_note_topics.py`。
+
 本文件守的纪律：
 
-1. **话题专有列**：默认 `[]`；详情补齐 / 列表条目拿到非空话题才写；回填不造假；
+1. **话题关系表**：详情 / 列表拿到话题 ⇒ 落 `topics` + `note_topics`（只增不删）；
 2. **notes 表没有商品列**（源码级守卫）—— 商品信息只在 `shop_products` 存一份；
 3. **查询走关系表**：`GET /notes` 的 `goods` 是 `note_goods` join `shop_products`
    的投影 ⇒ 商品表改字段，投影跟着变（不是笔记行里的快照）；
@@ -24,9 +28,10 @@ from backend.app.api.platforms.xhs import pc
 from backend.app.api.platforms.xhs.crawl import _save_normalized_notes
 from backend.app.core.database import Base, get_db
 from backend.app.main import app
-from backend.app.models import Note, NoteGoods, PlatformAccount, ShopProduct, User
+from backend.app.models import Note, NoteGoods, NoteTopic, PlatformAccount, ShopProduct, Topic, User
 from backend.app.models.shop import Shop
 from backend.app.services import note_sync_service as nss
+from backend.app.services import note_topic_service as nts
 from tests.backend.cookie_fixtures import cookie_version
 
 client = TestClient(app)
@@ -86,44 +91,47 @@ def _detail_payload(note_id: str, *, desc: str = "", tags=None) -> dict:
     return {"data": {"items": [{"id": note_id, "note_card": card}]}}
 
 
+def _topic_names_of(db, note_pk: int) -> list[str]:
+    """该笔记的话题名（关系行 id 排序 = 落库顺序）。"""
+    return nts.note_topic_names(db, note_pk)
+
+
 # --------------------------------------------------------------------------- #
-# 1) 话题专有列
+# 1) 话题关系表（§34；原「专有列」断言已改盯关系表）
 # --------------------------------------------------------------------------- #
-def test_topics_default_is_empty_list(tmp_path, no_download):
-    """新建行 `topics_json == '[]'`（DDL 默认；采集条目不带话题时不写坏）。"""
+def test_new_note_has_no_topic_relations(tmp_path, no_download):
+    """新建行没有话题关系（采集条目不带话题时不写坏）。"""
     SessionLocal = _session(tmp_path, "topics-default.db")
     db = SessionLocal()
     try:
         _, account = _seed_account(db)
         _save_normalized_notes(db, account, [_item("N-1")])
         note = db.scalars(select(Note).where(Note.note_id == "N-1")).one()
-        assert note.topics_json == "[]"
+        assert _topic_names_of(db, note.id) == []
     finally:
         db.close()
 
 
-def test_list_item_topics_are_written(tmp_path, no_download):
-    """列表条目自带话题 ⇒ 写专有列；没有则不碰本地已有值。"""
+def test_list_item_topics_land_in_relations(tmp_path, no_download):
+    """列表条目自带话题 ⇒ 落 topics + note_topics；没有则不碰本地已有关系。"""
     SessionLocal = _session(tmp_path, "topics-list.db")
     db = SessionLocal()
     try:
         _, account = _seed_account(db)
         _save_normalized_notes(db, account, [_item("N-1", tags=["家居", "好物"])])
         note = db.scalars(select(Note).where(Note.note_id == "N-1")).one()
-        import json
+        assert _topic_names_of(db, note.id) == ["家居", "好物"]
 
-        assert json.loads(note.topics_json) == ["家居", "好物"]
-
-        # 第二次落库不带话题 ⇒ 不抹掉已写的话题
+        # 第二次落库不带话题 ⇒ 不抹掉已写的关系（只增不删）
         _save_normalized_notes(db, account, [_item("N-1")])
         db.refresh(note)
-        assert json.loads(note.topics_json) == ["家居", "好物"]
+        assert _topic_names_of(db, note.id) == ["家居", "好物"]
     finally:
         db.close()
 
 
 def test_hydrate_writes_topics_from_detail(tmp_path, monkeypatch):
-    """详情补齐：详情有非空话题 ⇒ 覆盖；没有 ⇒ 不碰。"""
+    """详情补齐：详情有非空话题 ⇒ 落关系；没有 ⇒ 不碰。"""
     SessionLocal = _session(tmp_path, "topics-hydrate.db")
     monkeypatch.setattr(
         "backend.app.services.asset_downloader.download_asset_to_local", lambda *a, **k: None
@@ -152,22 +160,22 @@ def test_hydrate_writes_topics_from_detail(tmp_path, monkeypatch):
         monkeypatch.setattr(pc, "get_xhs_pc_api_adapter_factory", lambda: FakeAdapter)
         nss.sync_note_from_platform(db, note)
 
-        import json
+        assert _topic_names_of(db, note.id) == ["收纳", "桌面"]
 
-        db.refresh(note)
-        assert json.loads(note.topics_json) == ["收纳", "桌面"]
-
-        # 详情这次没给话题 ⇒ 不抹本地
+        # 详情这次没给话题 ⇒ 不抹本地（只增不删）
         tags_seen["tags"] = []
         nss.sync_note_from_platform(db, note)
-        db.refresh(note)
-        assert json.loads(note.topics_json) == ["收纳", "桌面"]
+        assert _topic_names_of(db, note.id) == ["收纳", "桌面"]
     finally:
         db.close()
 
 
 def test_migration_backfills_topics_from_raw_json():
-    """迁移必须含「从 `raw_json` 回填 topics」的逻辑（候选键 + 不造假）。"""
+    """（历史迁移）`s1t2u3v4w5x6` 必须含「从 `raw_json` 回填 topics」的逻辑。
+
+    ⚠️ 该列已于 2026-09-25 删除（§34，迁移 `b2c3d4e5f6g7`）—— 本测试盯的是
+    **历史迁移文件自身**的候选键与可逆性，不是现行列。
+    """
     from pathlib import Path
 
     migrations = sorted(Path("backend/alembic/versions").glob("s1t2u3v4w5x6_add_note_topics.py"))
@@ -184,11 +192,17 @@ def test_migration_backfills_topics_from_raw_json():
 # 2) 商品信息不落笔记列 + 走关系表查询
 # --------------------------------------------------------------------------- #
 def test_notes_model_has_no_goods_column():
-    """**notes 表没有商品列**（用户 ② 口径）—— 商品在 shop_products、关系在 note_goods。"""
+    """**notes 表没有商品列**（用户 ② 口径）—— 商品在 shop_products、关系在 note_goods。
+
+    同时守 §34：`topics_json` 列已删（话题走关系表），`tags` / `note_tags` 不在 metadata。
+    """
     column_names = {column.name for column in Note.__table__.columns}
     assert "goods_json" not in column_names
     assert "goods" not in column_names
-    assert "topics_json" in column_names
+    assert "topics_json" not in column_names
+    tables = set(Base.metadata.tables)
+    assert "tags" not in tables and "note_tags" not in tables
+    assert {"topics", "note_topics"} <= tables
 
 
 @pytest.fixture
@@ -220,10 +234,13 @@ def api_env(tmp_path):
             note = Note(
                 platform_account_id=account.id, user_id=user.id,
                 note_id=HEX_NOTE_ID, platform="xhs", title="挂了商品的笔记",
-                note_type="synced", topics_json='["话题一", "话题二"]',
+                note_type="synced",
             )
             db.add(note)
             db.flush()
+            # 话题（§34）：走关系表落库（原 topics_json 专有列已删）
+            nts.apply_sync_topics(db, note, ["话题一", "话题二"])
+            db.commit()
             for item_id, title in (("ITEM-1", "商品一"), ("ITEM-2", "商品二")):
                 product = ShopProduct(
                     user_id=user.id, shop_id_fk=shop.id, item_id=item_id,
@@ -263,12 +280,14 @@ def test_serialized_goods_come_from_the_relation_join(api_env):
     assert [g["item_title"] for g in detail["goods"]] == ["改过标题的商品一", "商品二"]
 
 
-def test_serialized_topics_come_from_the_column(api_env):
-    """`topics` 读专有列（不再让前端去 `raw_json` 挖）。"""
+def test_serialized_topics_come_from_the_relation_join(api_env):
+    """`topics` 读关系表 join 话题字典（`[{id,name,color}]`；不再有专列 / tags 字段）。"""
     headers, _, note_id = api_env
 
     detail = client.get(f"/api/notes/{note_id}", headers=headers).json()
-    assert detail["topics"] == ["话题一", "话题二"]
+    assert [t["name"] for t in detail["topics"]] == ["话题一", "话题二"]
+    assert all({"id", "name", "color"} <= set(t) for t in detail["topics"])
+    assert "tags" not in detail
 
 
 def test_note_without_goods_serializes_empty_list(api_env):
@@ -295,7 +314,7 @@ def test_note_without_goods_serializes_empty_list(api_env):
 # 5) 话题增删端点（设计 13 §29.3）：PUT /notes/{id}/topics，整列替换 + 实时落库
 # --------------------------------------------------------------------------- #
 def test_put_topics_replaces_and_persists(api_env):
-    """整列替换：传新列表 ⇒ 返回行 `topics` 即新列表，`topics_json` 已落库。"""
+    """整列替换：传新列表 ⇒ 返回行 `topics` 即新列表，关系行已落库。"""
     headers, SessionLocal, note_id = api_env
 
     response = client.put(
@@ -304,13 +323,15 @@ def test_put_topics_replaces_and_persists(api_env):
         headers=headers,
     )
     assert response.status_code == 200, response.text
-    assert response.json()["topics"] == ["露营", "装备"]
+    assert [t["name"] for t in response.json()["topics"]] == ["露营", "装备"]
 
     # 落库是**即时**的（实时更新数据库）：另开连接读也是新值
     db = SessionLocal()
     try:
         stored = db.scalars(select(Note).where(Note.id == note_id)).one()
-        assert stored.topics_json == '["露营", "装备"]'
+        assert nts.note_topic_names(db, stored.id) == ["露营", "装备"]
+        # 话题字典行建了（find-or-create）
+        assert {t.name for t in db.scalars(select(Topic)).all()} >= {"露营", "装备"}
     finally:
         db.close()
 
@@ -325,7 +346,7 @@ def test_put_topics_add_then_remove_roundtrip(api_env):
         json={"topics": ["话题一", "话题二", "新话题"]},
         headers=headers,
     )
-    assert response.json()["topics"] == ["话题一", "话题二", "新话题"]
+    assert [t["name"] for t in response.json()["topics"]] == ["话题一", "话题二", "新话题"]
 
     # 删掉中间的（其余原样传回，顺序保持）
     response = client.put(
@@ -333,7 +354,7 @@ def test_put_topics_add_then_remove_roundtrip(api_env):
         json={"topics": ["话题一", "新话题"]},
         headers=headers,
     )
-    assert response.json()["topics"] == ["话题一", "新话题"]
+    assert [t["name"] for t in response.json()["topics"]] == ["话题一", "新话题"]
 
 
 def test_put_topics_normalizes(api_env):
@@ -355,7 +376,7 @@ def test_put_topics_normalizes(api_env):
         f"/api/notes/{note_id}/topics", json={"topics": raw}, headers=headers
     )
     assert response.status_code == 200, response.text
-    topics = response.json()["topics"]
+    topics = [t["name"] for t in response.json()["topics"]]
     assert topics[0] == "露营"
     assert "CASE" in topics and "case" not in topics
     assert len(topics) == 20
@@ -407,6 +428,7 @@ def test_put_topics_other_users_note_404(api_env):
     db = SessionLocal()
     try:
         stored = db.scalars(select(Note).where(Note.id == foreign_id)).one()
-        assert stored.topics_json == "[]"  # 一个字节都没被改
+        assert nts.note_topic_names(db, stored.id) == []  # 一个字节都没被改
+        assert not db.scalars(select(NoteTopic).where(NoteTopic.note_id == foreign_id)).all()
     finally:
         db.close()

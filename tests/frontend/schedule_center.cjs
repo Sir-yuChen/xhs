@@ -40,6 +40,7 @@ const esbuild = require(path.join(PROJECT, "frontend/node_modules/esbuild"));
 const MODULE_TS = path.join(PROJECT, "frontend/src/lib/schedule.ts");
 const CRON_MODULE_TS = path.join(PROJECT, "frontend/src/lib/cron-builder.ts");
 const PAGE_TSX = path.join(PROJECT, "frontend/src/pages/tasks/task-center-page.tsx");
+const DETAIL_TSX = path.join(PROJECT, "frontend/src/components/schedule/job-log-detail-modal.tsx");
 const API_TS = path.join(PROJECT, "frontend/src/lib/api.ts");
 
 const MUTATE = process.env.SCHEDULE_MUTATE || "";
@@ -72,6 +73,10 @@ const RESERVED = {
   groupfield: `export type TriggerType =`,
   // R22 反向变异：详情弹窗快照块把「分组」行加回来
   groupsnapshot: `                <Descriptions.Item label="调用目标">`,
+  // 用户口径（2026-09-25）反向变异：详情弹窗的调用目标**退回只显代码键**
+  // （中文名丢掉）—— 这正是用户报的「调用目标需要配置中文名称」那个缺口，
+  // 缺了就只剩 `system.queue_record_cleanup` 这种裸键。
+  detailtarget: `                    <Text>{targetNames[jobKey] ?? "-"}</Text>\n                    <Text code type="secondary" style={{ fontSize: 12 }}>`,
   // DEF-066 反向变异：账号多选退回「仅编辑态」⇒ 新建态又没有账号多选了
   // （手抄 account_ids 过不了归属校验 ⇒ 用户建不出账号维度任务）
   accountscope: `(job?.params_editable ?? selectedTarget.params_editable)?.includes("account_ids")`,
@@ -92,6 +97,8 @@ const MUTATE_TO = {
   groupfield: `export const JOB_GROUP_LABELS: Record<string, string> = { DEFAULT: "默认分组", SYSTEM: "系统分组" };\n\nexport type TriggerType =`,
   // R22 反向变异：快照块加回「分组」项
   groupsnapshot: `                <Descriptions.Item label="分组">{String(snapshot.job_group ?? "")}</Descriptions.Item>\n                <Descriptions.Item label="调用目标">`,
+  // 用户口径（2026-09-25）反向变异：弹窗调用目标退回单行代码键
+  detailtarget: `                    <Text code type="secondary" style={{ fontSize: 12 }}>`,
   // DEF-066 反向变异：账号多选退回编辑态专属（新建态丢失多选）
   accountscope: `job?.params_editable?.includes("account_ids")`,
 };
@@ -119,9 +126,10 @@ const RESERVED_FILE = {
   fulllabel: MODULE_TS,
   typecol: PAGE_TSX,
   targetcol: PAGE_TSX,
-  width70: path.join(PROJECT, "frontend/src/components/schedule/job-log-detail-modal.tsx"),
+  width70: DETAIL_TSX,
   groupfield: MODULE_TS,
-  groupsnapshot: path.join(PROJECT, "frontend/src/components/schedule/job-log-detail-modal.tsx"),
+  groupsnapshot: DETAIL_TSX,
+  detailtarget: DETAIL_TSX,
   accountscope: path.join(PROJECT, "frontend/src/components/schedule/job-form-modal.tsx"),
 };
 
@@ -452,6 +460,23 @@ async function main() {
   check("调用目标列第一行是中文名", targetCol.indexOf("targetNames[key]") < targetCol.indexOf("Text code"));
   check("调用目标名来自 /schedule/targets", pageCode.includes("fetchScheduleTargets"));
 
+  // 用户口径（2026-09-25）：「调用目标需要配置中文名称」—— **日志详情弹窗也要**。
+  // 原 R18 口径只覆盖了任务列表列，弹窗里一直是裸代码键（`system.xxx` 这种），
+  // 用户看到的正是那个缺口。两份展示点必须同口径、同一数据源。
+  check(
+    "弹窗调用目标两行（中文名 + 代码键）",
+    detail.includes("targetNames[jobKey]") && detail.includes("{jobKey ||")
+  );
+  check(
+    "弹窗调用目标第一行是中文名",
+    detail.indexOf("targetNames[jobKey]") < detail.indexOf("{jobKey ||")
+  );
+  check(
+    "弹窗中文名走 prop（不另写映射表）",
+    detail.includes("targetNames?: Record<string, string>")
+  );
+  check("页面把 targets 传给弹窗", pageCode.includes("targetNames={targetNames}"));
+
   // 用户口径（2026-09-24）：任务名下方**不再挂「内置」Tag**；且所有任务一律可删
   // ⚠️ 用上面已定义的 `pageCode`（已剥注释）
   const nameCol = colSec(pageCode.slice(0, pageCode.indexOf("const logColumns")), "任务名称");
@@ -473,11 +498,15 @@ async function main() {
   check("R22 schedule 模块不再导出 JOB_GROUP_LABELS", !scheduleCode.includes("JOB_GROUP_LABELS"));
   check("R22 schedule 模块不再导出 jobGroupLabel", !scheduleCode.includes("export function jobGroupLabel"));
 
-  // 用户口径（2026-09-24）③：**一切提示走弹窗**，页面不留 inline 消息条
+  // 用户口径（2026-09-25）③：**一切提示走 antd message 轻提示**，页面不留 inline
+  // 消息条、也不再弹 notice 结果弹窗（弹窗遮罩比消息条更占空间；设计 04 §3.6）。
+  // ⚠️ 取代 2026-09-24 的「一切提示走弹窗」口径，原断言留档：
+  //   check("结果提示统一走 notice 弹窗", pageCode.includes("notify(") && pageCode.includes("open={notice !== null}"));
   check("页面无 inline Alert 消息条", !pageCode.includes("<Alert"));
   check("页面不再 import Alert", !page.includes("  Alert,"));
-  check("结果提示统一走 notice 弹窗", pageCode.includes("notify(") && pageCode.includes("open={notice !== null}"));
+  check("结果提示统一走 antd message", pageCode.includes("App.useApp()") && !pageCode.includes("notify(") && !pageCode.includes("notice"));
   check("不再有 message 状态（旧 inline 条残留）", !pageCode.includes("setMessage"));
+  check("不再有 notice 弹窗（2026-09-24 R22 残留）", !pageCode.includes("setNotice") && !pageCode.includes("open={notice"));
   check("不再有 jobNotice（旧启停弹窗残留）", !pageCode.includes("setJobNotice"));
 
   if (failures > 0) {

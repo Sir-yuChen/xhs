@@ -21,16 +21,24 @@ from backend.app.core.config import get_settings
 from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user, get_owned_active_account
 from backend.app.core.time import shanghai_now
-from backend.app.models import AiDraft, Note, NoteAsset, NoteComment, NoteGoods, PlatformAccount, ShopProduct, Tag, User, note_tags
+from backend.app.models import AiDraft, Note, NoteAsset, NoteComment, NoteGoods, NoteTopic, PlatformAccount, ShopProduct, Topic, User
 from backend.app.models.note import (
     NOTE_TYPE_LOCAL,
     NOTE_TYPE_LOCAL_GENERATED,
     NOTE_TYPE_SYNCED,
+    PUBLISH_STATUS_FAILED,
     PUBLISH_STATUS_FILTER_GROUPS,
+    PUBLISH_STATUS_PENDING,
+    PUBLISH_STATUS_PUBLISHED,
+    PUBLISH_STATUS_PUBLISHING,
     note_supports_sync,
     set_note_publish_status,
 )
 from backend.app.schemas.common import paginated
+from backend.app.services.note_topic_service import (
+    apply_sync_topics,
+    replace_note_topics,
+)
 
 router = APIRouter(prefix="/notes", tags=["notes"])
 
@@ -67,6 +75,8 @@ class BatchSaveNotesRequest(BaseModel):
 
 class BatchTagNotesRequest(BaseModel):
     note_ids: list[int] = Field(min_length=1)
+    #: 话题字典行 id（`topics.id`）—— 2026-09-25 起标签表已并入话题表（§34.4），
+    #: 字段名沿用 `tag_ids` 保持 API 兼容，语义 = topic ids。
     tag_ids: list[int] = Field(default_factory=list)
     mode: Literal["replace", "add", "remove"] = "replace"
 
@@ -108,61 +118,57 @@ class BatchPublishNotesRequest(BaseModel):
     max_items: int = Field(default=20, ge=1, le=20)
 
 
-#: 话题归一化上限（设计 13 §29.3）：展示字段，超限**静默截断**不报错。
-NOTE_TOPICS_MAX_ITEMS = 20
-NOTE_TOPICS_MAX_LEN = 50
+class BatchSyncNotesRequest(BaseModel):
+    """批量同步**已发布**笔记（设计 13 §35，2026-09-25）。
 
-
-def _normalize_topics(raw: list[str]) -> list[str]:
-    """话题归一化（**唯一实现**，设计 13 §29.3）：trim → 去空 → 去重 → 限量。
-
-    去重键 = 去空格后的**小写**（`#露营` 与 `#露营 ` 是同一个话题）；保留**首次
-    出现的大小写形态**（用户敲的原样）。空列表合法（= 清空话题）。
+    门禁比单条「同步」按钮严：只收 `publish_status == "published"` 的选中篇
+    （模型层唯一判据 `note_supports_batch_sync`，与前端 `canBatchSyncNote`
+    同口径）；不达标篇不进队列、进 `results`（`ok:false, code`），不阻断其余。
+    `max_items` 与发布批次同值（默认 20，超限服务端截断并如实报 `total`）。
     """
-    seen: set[str] = set()
-    out: list[str] = []
-    for item in raw:
-        text = str(item or "").strip()
-        if not text:
-            continue
-        if len(text) > NOTE_TOPICS_MAX_LEN:
-            text = text[:NOTE_TOPICS_MAX_LEN]
-        key = text.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(text)
-        if len(out) >= NOTE_TOPICS_MAX_ITEMS:
-            break
-    return out
+
+    note_ids: list[int] = Field(min_length=1)
+    max_items: int = Field(default=20, ge=1, le=20)
+
+
+#: 话题归一化上限（NOTE_TOPICS_MAX_ITEMS / NOTE_TOPICS_MAX_LEN）：**唯一定义处**在
+#: `services/note_topic_service.py`（本文件顶部 import 复用，不重抄字面量 ——
+#: 否则「后端两份归一化」必然漂移，DEF-044/047/058 同款）。
 
 
 class UpdateNoteTopicsRequest(BaseModel):
-    """话题整列替换（设计 13 §29.3）：内容库话题增删的唯一落库入口。
+    """话题整列替换（设计 13 §29.3 / §34.4）：内容库话题增删的唯一落库入口。
 
     **整列替换语义**：调用方传增删后的**完整列表**，后端不猜「加了哪个删了哪个」——
-    猜就是造第二份真相源（DEF-044/058 的教训）。归一化见 `_normalize_topics`。
+    猜就是造第二份真相源（DEF-044/058 的教训）。归一化见
+    `note_topic_service.normalize_topic_names`（唯一实现）。
     """
 
     topics: list[str] = Field(default_factory=list, max_length=200)
 
 
-def _serialize_tag(tag: Tag) -> dict:
+def _serialize_topic(topic: Topic) -> dict:
+    """话题行 ⇒ 序列化（`{id, name, color}`；原 `_serialize_tag` 的替代）。"""
     return {
-        "id": tag.id,
-        "name": tag.name,
-        "color": tag.color,
+        "id": topic.id,
+        "name": topic.name,
+        "color": topic.color,
     }
 
 
-def _get_note_tags(db: Session, note_id: int) -> list[dict]:
-    tags = db.scalars(
-        select(Tag)
-        .join(note_tags, Tag.id == note_tags.c.tag_id)
-        .where(note_tags.c.note_id == note_id)
-        .order_by(Tag.id.asc())
+def _get_note_topics(db: Session, note_id: int) -> list[dict]:
+    """该笔记的话题（§34.1）：走 `note_topics` 关系表 join `topics` 字典表。
+
+    2026-09-25 起 `notes.topics_json` 列已删（同一语义不留两份实现）⇒ 话题的
+    **唯一读取路径**就是关系表 join。关系行 id 排序 = 落库顺序。
+    """
+    rows = db.scalars(
+        select(Topic)
+        .join(NoteTopic, NoteTopic.topic_id == Topic.id)
+        .where(NoteTopic.note_id == note_id)
+        .order_by(NoteTopic.id.asc())
     ).all()
-    return [_serialize_tag(tag) for tag in tags]
+    return [_serialize_topic(topic) for topic in rows]
 
 
 def _get_note_assets(db: Session, note: Note) -> list[NoteAsset]:
@@ -241,8 +247,10 @@ def _serialize_note(db: Session, note: Note) -> dict:
         # 内容库详情卡的「同步」按钮**只对 synced 渲染**（本地笔记是采集来的别人
         # 的笔记，拉平台最新内容没有意义）。列 not null，不存在第三态。
         "note_type": note.note_type,
-        # 话题（设计 13 §28）：专有列，`raw_json` 的投影；空 = 没解析到（不造假）。
-        "topics": _json_list(note.topics_json),
+        # 话题（设计 13 §34）：走 `note_topics` 关系表 join `topics` 字典表
+        # （`[{id, name, color}]`；`topics_json` 列已删，关系表是唯一读取路径）。
+        # 空 = 这条笔记没有话题（不是错误）。
+        "topics": _get_note_topics(db, note.id),
         # 挂载商品（设计 13 §28.3）：走 `note_goods` join `shop_products` 查，
         # **不在笔记表存商品快照**；空 = 没挂商品。
         "goods": _note_goods(db, note),
@@ -265,26 +273,31 @@ def _serialize_note(db: Session, note: Note) -> dict:
     }
 
 
-def _serialize_note_with_tags(db: Session, note: Note) -> dict:
-    serialized = _serialize_note(db, note)
-    serialized["tags"] = _get_note_tags(db, note.id)
-    return serialized
+def _serialize_note_with_topics(db: Session, note: Note) -> dict:
+    """序列化 + 话题（话题已在 `_serialize_note` 内 join，本函数保留为**统一入口名**）。
+
+    ⚠️ 2026-09-25 前叫 `_serialize_note_with_topics`（序列化后再挂 `tags` 字段）——
+    标签表并入话题表（§34.4）后 `tags` 字段已移除，函数随之改名；
+    `topics` 改由 `_serialize_note` 一次带出（少一次 join 的重复）。
+    """
+    return _serialize_note(db, note)
 
 
 def _build_notes_csv(db: Session, notes: list[Note]) -> str:
     output = io.StringIO()
-    fieldnames = ["note_id", "title", "author_name", "content", "tags", "published", "created_at"]
+    fieldnames = ["note_id", "title", "author_name", "content", "topics", "published", "created_at"]
     writer = csv.DictWriter(output, fieldnames=fieldnames)
     writer.writeheader()
     for note in notes:
-        tags = ",".join(tag["name"] for tag in _get_note_tags(db, note.id))
+        # 话题列（§34.4）：原 `tags` 列 —— 标签表已并入话题表，数据同一份。
+        topics = ",".join(topic["name"] for topic in _get_note_topics(db, note.id))
         writer.writerow(
             {
                 "note_id": note.note_id,
                 "title": note.title,
                 "author_name": note.author_name,
                 "content": note.content,
-                "tags": tags,
+                "topics": topics,
                 # 与 API 字段同一表示（`true` / `false`），不留第二套写法。
                 "published": "true" if note.published else "false",
                 "created_at": note.created_at.isoformat(),
@@ -401,11 +414,75 @@ def get_note_ids(
     return {"items": list(note_ids)}
 
 
+@router.get("/publish-queue")
+def get_publish_queue(
+    platform: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """发布进度快照（内容库「发布进度卡」；2026-09-25 异步 + 队列）。
+
+    两件事一次给全：① **进程内发布队列**（`running` 正在发布的那篇 / `queued`
+    排队中的，FIFO 序，按归属过滤）；② **四态计数**（pending / publishing /
+    published / failed，按存储值原样计数 —— 与筛选档统计 `_publish_status_stats`
+    是两件事：那个把 `publishing` 归并进「待发布」档，这个不归并）。
+
+    前端在「有发布中 / 排队」时每几秒轮询一次；队列空则停（ counts 随列表刷新。
+    ⚠️ 路由必须注册在 `/{note_id}` **之前** —— 否则 "publish-queue" 会被
+    `/{note_id}` 的 int 转换先吃掉，422。
+    """
+    from backend.app.services.note_publish_service import publish_queue_snapshot
+
+    snapshot = publish_queue_snapshot(db, current_user.id, platform=platform)
+    snapshot["counts"] = _publish_status_counts(db, current_user.id, platform)
+    return snapshot
+
+
+@router.get("/sync-queue")
+def get_sync_queue(
+    platform: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """同步进度快照（内容库「同步进度卡」；2026-09-25 批量同步，设计 13 §35.3）。
+
+    回**当前用户**的批量同步队列：`running` / `queued`（FIFO 序）+ 计数
+    （`synced` 已同步 / `failed` 失败 / `total` 本轮总数）+ `finished`
+    （已出结果的逐篇 `ok` 与 `reason` —— 同步失败不落库到笔记行，原因只在这里给）。
+
+    ⚠️ 路由必须注册在 `/{note_id}` **之前** —— 否则 "sync-queue" 会被
+    `/{note_id}` 的 int 转换先吃掉，422（`publish-queue` 的同款教训，§31.5）。
+    """
+    from backend.app.services.note_sync_service import sync_queue_snapshot
+
+    return sync_queue_snapshot(db, current_user.id, platform=platform)
+
+
+def _publish_status_counts(db: Session, user_id: int, platform: Optional[str]) -> dict:
+    """四态**原始**计数（发布进度卡用）。
+
+    与筛选档统计 `_publish_status_stats` 刻意分开：那个按
+    `PUBLISH_STATUS_FILTER_GROUPS` 归并（`publishing` 归「待发布」档、空值归
+    「待发布」），服务的是筛选下拉；这个按存储值原样计数，服务的是「发布进度」
+    这一眼 —— 进度卡上「发布中」必须单独一档，不能并进待发布。
+    """
+    base = select(Note.publish_status, func.count()).select_from(Note).where(Note.user_id == user_id)
+    if platform:
+        base = base.where(Note.platform == platform)
+    counts = {str(status or ""): int(total or 0) for status, total in db.execute(base.group_by(Note.publish_status)).all()}
+    return {
+        "pending": counts.get(PUBLISH_STATUS_PENDING, 0),
+        "publishing": counts.get(PUBLISH_STATUS_PUBLISHING, 0),
+        "published": counts.get(PUBLISH_STATUS_PUBLISHED, 0),
+        "failed": counts.get(PUBLISH_STATUS_FAILED, 0),
+    }
+
+
 @router.get("")
 def get_notes(
     platform: Optional[str] = None,
     q: Optional[str] = None,
-    tag_id: Optional[int] = None,
+    topic_id: Optional[int] = None,
     has_assets: Optional[bool] = None,
     has_comments: Optional[bool] = None,
     publish_status: str = "all",
@@ -437,6 +514,9 @@ def get_notes(
       子查询（与 `has_assets` 同款形态，不引入 JOIN+GROUP-BY）。**存在性不校验**：
       `user_id` 那道 where 始终在，别人的 / 不存在的 item_id 只会得到空集，不 404
       （与 `platform_account_id` 同一理由，设计 13 §25.8）。不传 = 不筛。
+
+    2026-09-25：`tag_id` ⇒ `topic_id`（§34.4，标签表并入话题表）—— 走的
+    `note_topics` 关系表；归属校验照旧（404 不暴露「存在但无权」）。
     """
     statement = (
         select(Note)
@@ -454,11 +534,13 @@ def get_notes(
                 Note.note_id.ilike(keyword),
             )
         )
-    if tag_id is not None:
-        tag = db.get(Tag, tag_id)
-        if tag is None or tag.user_id != current_user.id:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tag not found")
-        statement = statement.where(Note.id.in_(select(note_tags.c.note_id).where(note_tags.c.tag_id == tag_id)))
+    if topic_id is not None:
+        # 话题筛选（§34.4）：原「标签筛选」—— 标签表已并入话题表，筛的是
+        # `note_topics` 关系。归属校验照旧（404 不暴露「存在但无权」）。
+        topic = db.get(Topic, topic_id)
+        if topic is None or topic.user_id != current_user.id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Topic not found")
+        statement = statement.where(Note.id.in_(select(NoteTopic.note_id).where(NoteTopic.topic_id == topic_id)))
     if has_assets is True:
         statement = statement.where(Note.id.in_(select(NoteAsset.note_id)))
     elif has_assets is False:
@@ -517,7 +599,7 @@ def get_notes(
             )
         )
     notes = db.scalars(statement.order_by(Note.created_at.desc())).all()
-    result = paginated([_serialize_note_with_tags(db, note) for note in notes], page, page_size)
+    result = paginated([_serialize_note_with_topics(db, note) for note in notes], page, page_size)
     # 统计与筛选是两件事：`stats` 是全库口径，不随上面任一 `where` 变化。
     result["stats"] = _publish_status_stats(db, current_user.id, platform)
     return result
@@ -572,7 +654,7 @@ def get_note(
     跨轮累积，设计 13 §19.13）；本地暂时没有正文的行，前端按缺值口径安静说明。
     """
     note = _get_owned_note(db, current_user, note_id)
-    return _serialize_note_with_tags(db, note)
+    return _serialize_note_with_topics(db, note)
 
 
 def purge_note(db: Session, note: Note) -> None:
@@ -590,8 +672,11 @@ def purge_note(db: Session, note: Note) -> None:
     ⚠️ 与**商品台账删除**的口径刻意不同（§33.10）：删商品时关系行**不级联删**
     （商品被同步写回时关系要原样接上）；删笔记时关系行**必须删**（笔记是真删，
     没有「写回时接上」这回事）。同一个关系表、两个方向、两种正确处理。
+    ⚠️ 2026-09-25（§34.7）：`note_tags` ⇒ **`note_topics`**（标签表已并入话题表）——
+    同一条删除链规则：本地实体真删 ⇒ 关系行跟着走，两个方向（删笔记 / 删话题
+    词典项）同一把尺子。
     """
-    db.execute(delete(note_tags).where(note_tags.c.note_id == note.id))
+    db.execute(delete(NoteTopic).where(NoteTopic.note_id == note.id))
     db.execute(delete(NoteAsset).where(NoteAsset.note_id == note.id))
     db.execute(delete(NoteComment).where(NoteComment.note_id == note.id))
     # 商品关联关系（§26）：笔记没了，指向它的多对对关系行一并删。
@@ -645,7 +730,7 @@ def update_note_publish_status(
     set_note_publish_status(note, payload.publish_status)
     db.commit()
     db.refresh(note)
-    return _serialize_note_with_tags(db, note)
+    return _serialize_note_with_topics(db, note)
 
 
 @router.post("/{note_id}/sync")
@@ -654,7 +739,7 @@ def sync_note(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """内容库「同步」按钮：用笔记 id 拉平台最新内容，更新落库（设计 13 §25.4）。
+    """内容库「同步」按钮：**入同步队列**，由队列 worker 拉平台最新内容（设计 13 §25.4 / §35.10）。
 
     **判据是 `note_supports_sync()`**（models/note.py，与前端 `canSyncNote` 同口径）：
     `synced` **或** `publish_status == "published"`。
@@ -667,12 +752,18 @@ def sync_note(
     仍被拒的是**既不是 synced、也没发布过**的笔记（采集来的别人的笔记）：
     「拉平台最新内容」对它没有意义，按钮同样不渲染。
 
-    与定时任务同步笔记逻辑**同源**：单条刷新走 `note_sync_service
-    .sync_note_from_platform`（复用 `hydrate_note_detail` 唯一实现 + 同一把限流尺子）。
+    ⚠️ **2026-09-25 用户口径「单独点击同步按钮也需要放入同步队列中执行，与批量同步
+    一致」**：本端点从**同步阻塞执行**改为**入队即返回**（与 `POST /notes/{id}/publish`
+    同形）。理由不只是形态统一 —— 顺序执行是限流的第一道保障（www 额度 5 次/分钟）：
+    单条阻塞 + 批量队列并存时，两条链路各打各的请求，限流等待互相插队、叠加。
 
-    **失败也回 200**：没网页会话 / 没有详情地址 / 平台异常都是「试一次的结果」，
-    放在 `sync.status` + `sync.reason` 里由前端按三分法渲染（预期内安静一行、
-    真异常红块摆原话），不伪装成接口错误。响应带**更新后的整行**，前端就地替换。
+    响应 `sync` 字段随之从「同步的逐项结果」变成**入队回执**
+    （`{ok, status:"queued", note_pk, note_id, already_queued?}`）。终态（成功 / 失败 +
+    真实原因）由前端轮询 `GET /notes/sync-queue` 的快照 `finished` 给一次 —— 与批量
+    同步**同一个出口**，前端不另走一套。
+
+    **门禁失败仍 400**（`NOTE_NOT_SYNCABLE`）：它是「这篇能不能同步」的确定性答案，
+    不该伪装成一次异步结果。**越权 404**（`_get_owned_note`）不变。
     """
     note = _get_owned_note(db, current_user, note_id)
     if not note_supports_sync(note):
@@ -685,9 +776,28 @@ def sync_note(
         )
     from backend.app.services import note_sync_service
 
-    result = note_sync_service.sync_note_from_platform(db, note)
+    item = note_sync_service.start_sync_note(db, current_user.id, note.id)
+    if not item.get("ok"):
+        # 服务层复核出的「不存在 / 不属于当前用户」（理论上端点层已挡）：保持结构化 400，
+        # 不让一个 ok:false 的回执被前端当成「已入队」而空等。
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": str(item.get("code") or "NOTE_NOT_SYNCABLE"),
+                "message": str(item.get("error") or "这篇笔记当前不能同步"),
+            },
+        )
     db.refresh(note)
-    return {"note": _serialize_note_with_tags(db, note), "sync": result}
+    return {
+        "note": _serialize_note_with_topics(db, note),
+        "sync": {
+            "ok": True,
+            "status": "queued",
+            "note_pk": int(item["note_pk"]),
+            "note_id": note.note_id,
+            **({"already_queued": True} if item.get("already_queued") else {}),
+        },
+    }
 
 
 @router.post("/{note_id}/publish")
@@ -697,31 +807,31 @@ def publish_note_endpoint(
     db: Session = Depends(get_db),
     adapter_factory=Depends(get_qianfan_api_adapter_factory),
 ):
-    """内容库「发布」按钮：把待发布的本地生成笔记发布到平台（设计 13 §31.5）。
+    """内容库「发布」按钮：**异步**启动发布（设计 13 §31.5，2026-09-25 异步化）。
 
-    **仅本地生成笔记可用**（`note_type == "local_generated"` 且
-    `publish_status ∈ {pending, failed}`）—— 采集 / 同步笔记不走本链路
-    （它们本来就是平台已存在或别人的内容）。
+    同步段只做门禁（归属 / 类型 / 状态 / 媒体 / ark 令牌；**发布中 ⇒ 400，
+    不会双发**）；下载 / 上传 / 预审核 / 发布在后台守护线程跑，本端点**立即返回**
+    `publish:{ok:true, status:"publishing"}` 与 publishing 态的笔记行 —— 前端点击
+    发布无需等待。终态（`published` / `failed` + `publish_error` 平台原文）由前端
+    轮询 `GET /notes/{id}` 获取（`publish_status` 是唯一状态字段，§32.3）。
 
-    链路：下载媒体到临时文件夹 → 上传平台 → `note/publish` → 回写平台
-    真实 note_id + 删临时目录。**失败也回 200**：门禁之外的一切失败
-    （下载 / 上传 / 平台拒发）都是「试一次的结果」，落在
-    `publish.ok=false` + `publish.error`（平台原文），前端把笔记状态
-    改成「发布失败」并展示原因、支持重发 —— 不伪装成接口错误。
-
+    门禁失败（不含 / 已发布 / 发布中 / 无媒体 / 无 ark 令牌）走 400 结构化错误。
     二次确认在前端做（用户口径），本端点不重复拦。
     """
-    from backend.app.services.note_publish_service import NotePublishError, publish_note
+    from backend.app.services.note_publish_service import NotePublishError, start_publish
 
     try:
-        result = publish_note(db, current_user.id, note_id, adapter_factory=adapter_factory)
+        start_publish(db, current_user.id, note_id, adapter_factory=adapter_factory)
     except NotePublishError as error:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"code": error.code, "message": error.message},
         )
     note = db.get(Note, note_id)
-    return {"note": _serialize_note_with_tags(db, note), "publish": result}
+    return {
+        "note": _serialize_note_with_topics(db, note),
+        "publish": {"ok": True, "status": "publishing", "note_pk": note.id, "note_id": note.note_id},
+    }
 
 
 @router.post("/batch-publish")
@@ -731,18 +841,37 @@ def batch_publish_notes_endpoint(
     db: Session = Depends(get_db),
     adapter_factory=Depends(get_qianfan_api_adapter_factory),
 ):
-    """批量发布待发布笔记（设计 13 §31.5 步 8；顺序处理，单项失败不阻断）。
+    """批量发布（异步队列；设计 13 §31.5 步 8，2026-09-25 异步化）。
 
-    请求体：`{"note_ids": [<notes.id>, …]}`（≤20，去重保序）。
-    响应：`{total, succeeded, failed, results:[{note_id, ok, platform_note_id?, error?}]}`
-    —— 每篇独立成败，前端按结果逐条更新卡片状态。
+    逐篇过门禁（同步；失败篇立即进 `results`，不阻断），通过篇入队由**一个**
+    后台线程顺序跑完。**立即返回** `{total, started, failed, results}`：通过篇
+    `{note_pk, ok:true, status:"publishing", note_id}`，门禁失败篇
+    `{note_pk, ok:false, error, code}`。终态由前端对 publishing 篇轮询获取。
     """
-    from backend.app.services.note_publish_service import batch_publish_notes
+    from backend.app.services.note_publish_service import start_batch_publish
 
-    result = batch_publish_notes(
+    return start_batch_publish(
         db, current_user.id, payload.note_ids, adapter_factory=adapter_factory, max_items=payload.max_items
     )
-    return result
+
+
+@router.post("/batch-sync")
+def batch_sync_notes_endpoint(
+    payload: BatchSyncNotesRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """批量同步（异步队列；设计 13 §35.2，2026-09-25）。
+
+    逐篇过门禁（同步；不达标篇立即进 `results`，不阻断），通过篇入队由**一个**
+    后台线程顺序跑完（顺序执行 = www 限流的第二道保障）。**立即返回**
+    `{total, started, failed, results}`：通过篇 `{note_pk, ok:true,
+    status:"queued", note_id}`，门禁失败篇 `{note_pk, ok:false, error, code}`。
+    终态由前端轮询 `GET /notes/sync-queue`（快照 `finished` 带逐篇结果）。
+    """
+    from backend.app.services.note_sync_service import start_batch_sync
+
+    return start_batch_sync(db, current_user.id, payload.note_ids, max_items=payload.max_items)
 
 
 @router.put("/{note_id}/topics")
@@ -752,20 +881,24 @@ def update_note_topics(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """话题增删的**落库入口**（设计 13 §29.3）：整列替换 `topics_json`。
+    """话题增删的**落库入口**（设计 13 §29.3 / §34.4）：整列替换话题关系。
 
     内容库详情卡里「+ 新增话题 / Tag 上 × 删话题」都调这里 —— 每次增删一次写库
-    （「实时更新数据库」），前端传增删后的完整列表，后端归一化后覆写。
+    （「实时更新数据库」），前端传增删后的完整列表，后端归一化后**对齐关系行**
+    （`replace_note_topics`：话题行 find-or-create，关系行删到与列表严格一致后
+    按输入顺序重建）。
 
-    与平台写入方（同步链路 `hydrate_note_detail` / `_save_normalized_notes`，
-    §28.2）写**同一列**，与 `published` 的「用户改 / 系统改同一列」同构；下次同步
-    详情带回非空话题时会**以平台为准覆盖**用户编辑（真值源是平台）。
+    ⚠️ 与同步链路的写入语义**刻意不同**（§34.5）：同步 / 采集 / 详情补齐 /
+    商品生成走 `apply_sync_topics`（**只增不删** —— 平台撤了话题也不删关系行）；
+    本端点是**用户手动管理**，整列替换（§29.3 原契约：调用方传完整列表，后端不猜）。
+    ⚠️ 2026-09-25 起不再写 `topics_json`（该列已删，§34.1）—— 落点就是
+    `note_topics` 关系表，与序列化读取路径同一张表。
     """
     note = _get_owned_note(db, current_user, note_id)
-    note.topics_json = json.dumps(_normalize_topics(payload.topics), ensure_ascii=False)
+    replace_note_topics(db, note, payload.topics)
     db.commit()
     db.refresh(note)
-    return _serialize_note_with_tags(db, note)
+    return _serialize_note_with_topics(db, note)
 
 
 @router.get("/{note_id}/assets")
@@ -951,7 +1084,7 @@ def batch_save_notes(
 
     return {
         "saved_count": len(saved_notes),
-        "items": [_serialize_note_with_tags(db, note) for note in saved_notes],
+        "items": [_serialize_note_with_topics(db, note) for note in saved_notes],
     }
 
 
@@ -961,44 +1094,51 @@ def batch_tag_notes(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    """按话题 id 批量增删笔记的话题关系（§34.4：标签表已并入话题表，`tag_ids` 即 topic ids）。
+
+    `mode`：`replace` = 整列替换 / `add` = 只增 / `remove` = 只删。前端详情弹窗
+    的话题增删在 2026-09-25 前走这里；现已统一到 `PUT /notes/{id}/topics`
+    （整列替换 + find-or-create，一个入口）⇒ 本端点保留给 API 消费者，
+    行为与手工删话题的删除链一致（关系行跟着走，话题字典行不动）。
+    """
     notes: list[Note] = []
     for note_id in dict.fromkeys(payload.note_ids):
         notes.append(_get_owned_note(db, current_user, note_id))
 
-    tag_ids = list(dict.fromkeys(payload.tag_ids))
-    for tag_id in tag_ids:
-        tag = db.get(Tag, tag_id)
-        if tag is None or tag.user_id != current_user.id:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tag not found")
+    topic_ids = list(dict.fromkeys(payload.tag_ids))
+    for topic_id in topic_ids:
+        topic = db.get(Topic, topic_id)
+        if topic is None or topic.user_id != current_user.id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Topic not found")
 
     for note in notes:
         if payload.mode == "replace":
-            db.execute(delete(note_tags).where(note_tags.c.note_id == note.id))
-            for tag_id in tag_ids:
-                db.execute(note_tags.insert().values(note_id=note.id, tag_id=tag_id))
+            db.execute(delete(NoteTopic).where(NoteTopic.note_id == note.id))
+            for topic_id in topic_ids:
+                db.add(NoteTopic(note_id=note.id, topic_id=topic_id))
             continue
 
         if payload.mode == "add":
-            existing_tag_ids = set(
-                db.scalars(select(note_tags.c.tag_id).where(note_tags.c.note_id == note.id)).all()
+            existing_topic_ids = set(
+                db.scalars(select(NoteTopic.topic_id).where(NoteTopic.note_id == note.id)).all()
             )
-            for tag_id in tag_ids:
-                if tag_id not in existing_tag_ids:
-                    db.execute(note_tags.insert().values(note_id=note.id, tag_id=tag_id))
+            for topic_id in topic_ids:
+                if topic_id not in existing_topic_ids:
+                    db.add(NoteTopic(note_id=note.id, topic_id=topic_id))
             continue
 
-        if tag_ids:
+        if topic_ids:
             db.execute(
-                delete(note_tags).where(
-                    note_tags.c.note_id == note.id,
-                    note_tags.c.tag_id.in_(tag_ids),
+                delete(NoteTopic).where(
+                    NoteTopic.note_id == note.id,
+                    NoteTopic.topic_id.in_(topic_ids),
                 )
             )
 
     db.commit()
     return {
         "updated_count": len(notes),
-        "items": [_serialize_note_with_tags(db, note) for note in notes],
+        "items": [_serialize_note_with_topics(db, note) for note in notes],
     }
 
 
@@ -1022,7 +1162,7 @@ def export_notes(
             "format": payload.format,
             "exported_at": exported_at.isoformat(),
             "total": len(notes),
-            "items": [_serialize_note_with_tags(db, note) for note in notes],
+            "items": [_serialize_note_with_topics(db, note) for note in notes],
         }
         file_path.write_text(json.dumps(export_payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return {

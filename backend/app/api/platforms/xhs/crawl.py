@@ -28,6 +28,7 @@ from backend.app.models.note import (
     PUBLISH_STATUS_PUBLISHED,
     set_note_publish_status,
 )
+from backend.app.services.note_topic_service import apply_sync_topics
 
 router = APIRouter(prefix="/xhs/crawl", tags=["xhs-crawl"])
 
@@ -260,13 +261,10 @@ def _save_normalized_notes(
         if not str(note.content or "").strip():
             note.content = str(normalized.get("content") or "")
         note.author_name = str(normalized.get("author_name") or "")
-        # 话题专有列（§28.2）：条目自带话题才写（非空覆盖；没有则不碰本地）。
-        # 「话题」是本系统要渲染的语义，不再让每个读方去 `raw_json` 里挖形状。
-        item_topics = [
-            str(t).strip() for t in (normalized.get("tags") or []) if str(t).strip()
-        ]
-        if item_topics:
-            note.topics_json = json.dumps(item_topics, ensure_ascii=False)
+        # 话题（§34.2）：正文里的 `#话题` 拆进 `topics` 表 + `note_topics` 关系
+        # （正文不再存话题）；条目自带的话题（`normalized["tags"]`）是权威声明。
+        # **只增不删** —— 唯一实现 `apply_sync_topics`，与详情补齐同一把尺子。
+        apply_sync_topics(db, note, normalized.get("tags") or [])
         note.raw_json = _raw_with_metrics(normalized)
         # ⚠️ 持锁纪律（设计 13 §24.7，用户 2026-09-23 口径「不同类型任务互不影响、
         # 不应排序等待」）：**先落笔记行（短事务），再下载素材（零锁），再落资产行**。

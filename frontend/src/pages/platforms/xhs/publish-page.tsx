@@ -11,7 +11,7 @@ import {
   SendOutlined,
 } from "@ant-design/icons";
 import {
-  Alert,
+  App,
   Button,
   Card,
   Col,
@@ -98,8 +98,9 @@ export function XhsPublishPage() {
   const [isDetailLoading, setIsDetailLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isPublishing, setIsPublishing] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // 全站消息提醒统一走 antd message（设计 04 §3.6，2026-09-25 用户口径）：
+  // 操作结果反馈不再渲染 inline Alert 占版面。
+  const { message } = App.useApp();
 
   const creatorAccounts = accounts.filter((a) => a.platform === "xhs" && a.sub_type === "creator");
   const filteredJobs = statusFilter === "all" ? jobs : jobs.filter((j) => j.status === statusFilter);
@@ -141,8 +142,6 @@ export function XhsPublishPage() {
     } else {
       setPrivacyChoice("public");
     }
-    setMessage(null);
-    setError(null);
   }
 
   async function loadAssets(jobId: number) {
@@ -161,7 +160,6 @@ export function XhsPublishPage() {
 
   async function loadJobs() {
     setIsLoading(true);
-    setError(null);
     try {
       const result = await fetchPublishJobs("xhs");
       setJobs(result.items);
@@ -175,7 +173,7 @@ export function XhsPublishPage() {
         setAssets([]);
       }
     } catch {
-      setError("发布任务加载失败。");
+      message.error("发布任务加载失败。");
     } finally {
       setIsLoading(false);
     }
@@ -188,7 +186,7 @@ export function XhsPublishPage() {
       applyJob(detail);
       await loadAssets(detail.id);
     } catch {
-      setError("发布任务详情加载失败。");
+      message.error("发布任务详情加载失败。");
     } finally {
       setIsDetailLoading(false);
     }
@@ -197,8 +195,6 @@ export function XhsPublishPage() {
   async function handleSave() {
     if (!selectedJob) return;
     setIsSaving(true);
-    setError(null);
-    setMessage(null);
     try {
       const updated = await updatePublishJob(selectedJob.id, {
         platform_account_id: selectedAccountId,
@@ -210,9 +206,9 @@ export function XhsPublishPage() {
       });
       setJobs((current) => current.map((job) => (job.id === updated.id ? updated : job)));
       applyJob(updated);
-      setMessage(`发布参数已保存。`);
+      message.success(`发布参数已保存。`);
     } catch {
-      setError("发布参数保存失败。");
+      message.error("发布参数保存失败。");
     } finally {
       setIsSaving(false);
     }
@@ -221,8 +217,6 @@ export function XhsPublishPage() {
   async function handlePublish() {
     if (!selectedJob) return;
     setIsPublishing(true);
-    setError(null);
-    setMessage(null);
     try {
       await updatePublishJob(selectedJob.id, {
         platform_account_id: selectedAccountId,
@@ -235,10 +229,10 @@ export function XhsPublishPage() {
       const updated = await publishJobToCreator(selectedJob.id);
       setJobs((current) => current.map((job) => (job.id === updated.id ? updated : job)));
       applyJob(updated);
-      setMessage(updated.status === "scheduled" ? `发布任务 #${updated.id} 已定时。` : `发布任务 #${updated.id} 已提交。`);
+      message.success(updated.status === "scheduled" ? `发布任务 #${updated.id} 已定时。` : `发布任务 #${updated.id} 已提交。`);
     } catch (err: unknown) {
       const d = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-      setError(d || "发布失败，请确认 Creator 账号和素材状态。");
+      message.error(d || "发布失败，请确认 Creator 账号和素材状态。");
       try {
         const refreshed = await fetchPublishJob(selectedJob.id);
         setJobs((current) => current.map((job) => (job.id === refreshed.id ? refreshed : job)));
@@ -251,18 +245,16 @@ export function XhsPublishPage() {
 
   async function handleDeleteJob() {
     if (!selectedJob) return;
-    setError(null);
-    setMessage(null);
     try {
       await deletePublishJob(selectedJob.id);
       setJobs((current) => current.filter((j) => j.id !== selectedJob.id));
       setSelectedJobId(null);
       setAssets([]);
       setSelectedAccountId(null);
-      setMessage("发布任务已删除。");
+      message.success("发布任务已删除。");
     } catch (err: unknown) {
       const d = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-      setError(d || "发布任务删除失败。");
+      message.error(d || "发布任务删除失败。");
     }
   }
 
@@ -285,9 +277,6 @@ export function XhsPublishPage() {
           </Button>
         }
       />
-
-      {error && <Alert type="error" message={error} showIcon closable onClose={() => setError(null)} />}
-      {message && <Alert type="success" message={message} showIcon closable onClose={() => setMessage(null)} />}
 
       {isLoading ? (
         <Card style={panelStyle} styles={{ body: cardBodyStyle }}>

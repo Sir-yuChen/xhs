@@ -63,6 +63,10 @@ def _load_yaml_config() -> Dict[str, Any]:
         "xhs.shop_goods_sync.interval_hours": "xhs_shop_goods_sync_interval_hours",
         # 调度轮内账号之间的停顿（秒）：多账号矩阵不一窝蜂。
         "xhs.sync.account_gap_seconds": "xhs_sync_account_gap_seconds",
+        # 平台请求限流（次/分钟，按 `<账号>:<源>` 键计量；等待式，不即停）。
+        # DEF-069 提速（2026-09-25）：原实现没有这一项，额度实际落到
+        # `scheduler_interval_seconds`（60）兜底 —— 语义混乱且改不动。
+        "xhs.sync.rate_limit_per_minute": "crawl_rate_limit_per_minute",
         "frontend.serve_static": "frontend_serve_static",
         "frontend.build_dir": "frontend_build_dir",
     }
@@ -147,6 +151,12 @@ class Settings(BaseSettings):
     # Scheduler
     scheduler_enabled: bool = False
     scheduler_interval_seconds: int = 60
+
+    # 平台请求限流（次/分钟，按 `<账号>:<源>` 键计量；`wait_allow` 等待式，不即停）。
+    # 默认 60（= 与原 `scheduler_interval_seconds` 兜底同值，行为不变）；嫌慢可调大
+    # （DEF-069 提速，2026-09-25 用户口径「同步感觉慢，加快速度」），但注意平台
+    # 风控是真实的 —— 详情请求密度过高会触发反爬（curl 28 超时即其表现形式）。
+    crawl_rate_limit_per_minute: int = 60
 
     # 千帆（ark）店铺绑定的登录态巡检（T-31）—— 只读探活，见 services/shop_health_service.py
     # 关闭开关 = 不注册定时任务（手动「立即巡检」按钮仍可用）。
