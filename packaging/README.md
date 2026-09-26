@@ -95,6 +95,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build.ps1 -Version
   （v1.0.1 首轮就是这样失败的）。没有旧产物时它不会触发删除，一次过。
 - **`cv2/data` 裁剪失败只告警、不中断**（2026-09-26 起）：那 10MB 是体积优化不是正确性判据，
   删不掉就让包大一点，不该让整包构建失败。日志里认 `[WARN] cv2/data trim failed` 那行。
+- **⚠️ 跑完 `smoke-test.ps1` 必须先清掉它留下的静默安装残留，再手工装包验证**
+  （2026-09-26 实测踩到）：冒烟是 `/VERYSILENT /DIR=.workbuddy\tmp\smoke-install` 装的，
+  中途失败会 `exit` 掉、卸载步骤不执行 ⇒ **卸载表里留下一条同 `AppId` 的条目**，指向那个
+  随后被清空的目录。之后手工双击安装器，Inno 判定「已安装过」就会**整页跳过
+  「选择目标位置」**（`UsePreviousAppDir=yes` 的既定行为），看起来像「包坏了不能选目录」——
+  其实是环境残留，安装包本身没问题。清法：删 `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall`
+  下 `{8F2A7C4E-…}_is1` 那一条（或跑一次残留目录里的 `unins000.exe`）。
 - **编辑 `build.ps1` / `installer.iss` 后必须确认文件仍带 UTF-8 BOM**（PowerShell 5.1 与
   ISCC 对无 BOM 的 UTF-8 文件会按 GBK 误读中文，导致 tokenizer 行号错位、解析报错）。
   用 VS Code 等编辑器保存时选「带 BOM 的 UTF-8」。
