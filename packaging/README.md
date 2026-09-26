@@ -90,6 +90,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build.ps1 -Version
 
 ## 注意
 
+- **先清 `packaging/dist`、`packaging/build` 再打包**：PyInstaller 起手要删旧的
+  `dist\SpiderXHS`（近千个文件），在带删除保护的受控环境里这一步会被拦 ⇒ 构建直接挂
+  （v1.0.1 首轮就是这样失败的）。没有旧产物时它不会触发删除，一次过。
+- **`cv2/data` 裁剪失败只告警、不中断**（2026-09-26 起）：那 10MB 是体积优化不是正确性判据，
+  删不掉就让包大一点，不该让整包构建失败。日志里认 `[WARN] cv2/data trim failed` 那行。
 - **编辑 `build.ps1` / `installer.iss` 后必须确认文件仍带 UTF-8 BOM**（PowerShell 5.1 与
   ISCC 对无 BOM 的 UTF-8 文件会按 GBK 误读中文，导致 tokenizer 行号错位、解析报错）。
   用 VS Code 等编辑器保存时选「带 BOM 的 UTF-8」。

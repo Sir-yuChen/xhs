@@ -230,8 +230,15 @@ Copy-Item (Join-Path $Root "config\initial_data") (Join-Path $Bundle "config") -
 $cv2Data = Join-Path $Bundle "_internal\cv2\data"
 if (Test-Path $cv2Data) {
     $cv2Size = (Get-ChildItem $cv2Data -Recurse -File | Measure-Object -Property Length -Sum).Sum / 1MB
-    Remove-Item $cv2Data -Recurse -Force
-    Write-Host ("  已裁剪 cv2/data（{0:N1} MB，无级联分类器用法）" -f $cv2Size)
+    # ADDED 2026-09-26 v1.0.1: trim is a SIZE optimization, not a correctness gate.
+    # In managed envs Remove-Item is intercepted/routed to the recycle bin; if the bin
+    # refuses the write the whole build used to die. Not trimmed = +10MB, still works.
+    try {
+        Remove-Item $cv2Data -Recurse -Force -ErrorAction Stop
+        Write-Host ("  trimmed cv2/data ({0:N1} MB, no cascade-classifier usage)" -f $cv2Size)
+    } catch {
+        Write-Host ("  [WARN] cv2/data trim failed ({0:N1} MB kept in bundle, no functional impact): {1}" -f $cv2Size, $_.Exception.Message) -ForegroundColor Yellow
+    }
 }
 
 $BundleNode = Join-Path $Bundle "runtime\node"

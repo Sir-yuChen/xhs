@@ -134,22 +134,36 @@ foreach ($rel in @(
 }
 Write-Host "  data / storage / logs 均在安装目录下"
 
-# --- 4b. 应用初始化数据已**落成任务行**（设计 15 §4.5） ------------------------
+# --- 4b. 定时任务随「注册」铺设（DEF-066：内置任务按用户各持一份） -------
 # 判据必须落在「行」上而不是「文件」上：文件在而没播种 = 用户打开任务中心还是空的。
-Write-Step "校验定时任务已随安装铺设（首启播种）"
+# 2026-09-26 v1.0.1 改口径：DEF-066 之前内置任务是全局共享行，「首启就能查到行」是当时的正确判据；
+#   改成按用户各持一份后，全新安装没有任何用户 -> 首启 0 行才是正确行为，旧断言会次次误报。
+#   真正的判据：注册一个用户 -> 立刻给这个用户铺满 N 条。
+Write-Step "校验定时任务随注册铺设（内置任务按用户各持一份）"
 $py = (Get-Command python -ErrorAction SilentlyContinue).Source
 if (-not $py) {
     Write-Host "  [跳过] 本机无 python，无法查库行数（文件侧已在第 2 段校验）" -ForegroundColor Yellow
 } else {
     $dbPath = (Join-Path $InstallDir "data\spider_xhs.db")
-    $code = "import sqlite3;c=sqlite3.connect(r'$dbPath');print(len(c.execute('select id from scheduled_jobs where is_builtin=1').fetchall()))"
-    $seeded = (& $py -c $code | Select-Object -Last 1)
+    $countSql = "import sqlite3;c=sqlite3.connect(r'$dbPath');print(len(c.execute('select id from scheduled_jobs where is_builtin=1').fetchall()))"
+    $before = (& $py -c $countSql | Select-Object -Last 1)
+    $before = "$before".Trim()
+    if ($before -ne "0") { Fail "全新安装未注册时库里应 0 行（内置任务按用户各持一份），实测 $before 行" }
+    Write-Host "  未注册时 0 行（符合按用户隔离口径）"
+    $smokeUser = "smoke" + (Get-Date -Format "HHmmss")
+    $body = (@{ username = $smokeUser; password = "Smoke@20260101" } | ConvertTo-Json)
+    try {
+        $null = Invoke-WebRequest -Uri "$Base/api/auth/register" -Method POST -ContentType "application/json" -Body ([Text.Encoding]::UTF8.GetBytes($body)) -TimeoutSec 15 -UseBasicParsing
+    } catch {
+        Fail "注册冒烟用户失败（播种链路失效）：$($_.Exception.Message)"
+    }
+    $seeded = (& $py -c $countSql | Select-Object -Last 1)
     if ($seeded -is [array]) { $seeded = $seeded[-1] }
     $seeded = "$seeded".Trim()
     if ($seeded -ne "$initialCount") {
-        Fail "定时任务未随安装铺设：库里 $seeded 行，初始化数据 $initialCount 条（首启播种失效）"
+        Fail "定时任务播种失效：注册后库里 $seeded 行，初始化数据 $initialCount 条"
     }
-    Write-Host "  已铺设 $seeded 个内置任务行（= 初始化数据条数）"
+    Write-Host "  注册后铺设 $seeded 个内置任务行（= 初始化数据条数）"
 }
 
 # --- 5. 端口回退 --------------------------------------------------------------
