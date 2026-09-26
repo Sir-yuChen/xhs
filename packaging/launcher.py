@@ -13,8 +13,9 @@
   4. ``PATH`` 前插 ``runtime/node``（签名链路裸调 ``node`` + PyExecJS 都走 PATH）；
   5. uvicorn 起 ``127.0.0.1:<port>``（默认 8000，被占按 8001→8010 回退；
      前端 ``baseURL: "/api"`` 是相对路径，回退对 UI 透明）；
-  6. 健康检查通过后开系统默认浏览器；托盘图标提供「打开界面 / 退出」；
-  7. 已有健康实例在跑 ⇒ 只开浏览器后退出（单实例）。
+  6. 健康检查通过后开**独立应用窗口**（Edge/Chrome 的 ``--app=`` 模式，无地址栏 /
+     无标签栏 / 无工具栏，不是浏览器标签页）；托盘图标提供「打开界面 / 退出」；
+  7. 已有健康实例在跑 ⇒ 只开独立窗口后退出（单实例）。
 
 日志：``<安装目录>/logs/launcher.log``（windowed 模式下 stderr 不可见，必须落文件）。
 """
@@ -26,6 +27,7 @@ import logging
 import os
 import secrets
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -232,6 +234,88 @@ def start_server(root: Path, port: int, console: bool):
 
 
 # ---------------------------------------------------------------------------
+# 独立应用窗口（2026-09-26 起：不再走系统默认浏览器的标签页）
+# ---------------------------------------------------------------------------
+# 口径：优先 Edge（Win10/11 自带），其次 Chrome，用 ``--app=<url>`` 起「无地址栏 /
+# 无标签栏 / 无工具栏」的独立窗口；配**独占 user-data-dir** —— ①不受用户已开着的
+# 浏览器实例影响（共用 profile 时 --app 参数可能被已有进程吞掉，窗口不开）；
+# ②不共享用户的插件 / 历史 / 登录态。两者都找不到才退回系统默认浏览器。
+
+APP_WINDOW_SIZE = "1440,900"
+
+_BROWSER_CANDIDATES = (
+    (
+        "Microsoft Edge",
+        (
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        ),
+    ),
+    (
+        "Google Chrome",
+        (
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        ),
+    ),
+)
+
+
+def _candidate_browsers() -> list[tuple[str, Path]]:
+    """机器上可能存在的 Edge / Chrome 可执行文件（先系统级，后用户级）。"""
+    out: list[tuple[str, Path]] = []
+    for label, paths in _BROWSER_CANDIDATES:
+        for p in paths:
+            out.append((label, Path(p)))
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        base = Path(local) / "Google" / "Chrome" / "Application" / "chrome.exe"
+        out.append(("Google Chrome", base))
+        out.append(("Microsoft Edge", Path(local) / "Microsoft" / "Edge" / "Application" / "msedge.exe"))
+    return out
+
+
+def _app_profile_dir() -> Path:
+    """独立窗口专属 profile：``%LOCALAPPDATA%\\SpiderXHS\\app-profile``。"""
+    base = os.environ.get("LOCALAPPDATA")
+    if base:
+        return Path(base) / APP_NAME / "app-profile"
+    return app_root() / "runtime" / "app-profile"
+
+
+def open_app_window(url: str) -> bool:
+    """以独立应用窗口打开 UI；Edge/Chrome 都不可用时退回默认浏览器。"""
+    profile = _app_profile_dir()
+    args = [
+        f"--app={url}",
+        f"--user-data-dir={profile}",
+        f"--window-size={APP_WINDOW_SIZE}",
+        "--no-first-run",
+        "--no-default-browser-check",
+    ]
+    for label, exe in _candidate_browsers():
+        if not exe.is_file():
+            continue
+        try:
+            subprocess.Popen(
+                [str(exe), *args],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+            )
+            log.info("已用 %s 打开独立应用窗口：%s（profile=%s）", label, url, profile)
+            return True
+        except Exception as exc:
+            log.warning("%s 启动失败（%s），尝试下一个候选", label, exc)
+    log.warning("未找到 Edge / Chrome，退回系统默认浏览器打开 %s", url)
+    try:
+        return bool(webbrowser.open(url))
+    except Exception as exc:
+        log.warning("打开浏览器失败（%s），请手动访问 %s", exc, url)
+        return False
+
+
+# ---------------------------------------------------------------------------
 # 托盘
 # ---------------------------------------------------------------------------
 
@@ -252,7 +336,7 @@ def run_tray(server, thread: threading.Thread, port: int) -> bool:
         return False
 
     def open_ui() -> None:
-        webbrowser.open(f"http://127.0.0.1:{port}")
+        open_app_window(f"http://127.0.0.1:{port}")
 
     def quit_app() -> None:
         log.info("用户从托盘退出")
@@ -306,9 +390,9 @@ def main(argv=None) -> int:
     )
 
     if _healthy(args.port):
-        log.info("端口 %d 已有健康实例 ⇒ 只打开浏览器", args.port)
+        log.info("端口 %d 已有健康实例 ⇒ 只打开应用窗口", args.port)
         if not args.no_browser:
-            webbrowser.open(f"http://127.0.0.1:{args.port}")
+            open_app_window(f"http://127.0.0.1:{args.port}")
         return 0
 
     started = None
@@ -333,10 +417,7 @@ def main(argv=None) -> int:
     url = f"http://127.0.0.1:{port}"
     log.info("服务就绪：%s", url)
     if not args.no_browser:
-        try:
-            webbrowser.open(url)
-        except Exception as exc:
-            log.warning("打开浏览器失败（%s），请手动访问 %s", exc, url)
+        open_app_window(url)
 
     if run_tray(server, thread, port):
         return 0

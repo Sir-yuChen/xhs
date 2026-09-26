@@ -33,6 +33,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build.ps1 -Version
 7. 组装：`frontend/dist`、`config/default.yaml`、`runtime/node`；
 8. ISCC → `spider-xhs-setup-<版本>.exe`（项目根目录）。
 
+**启动行为（2026-09-26 起）**：launcher 健康检查通过后用 Edge / Chrome 的 `--app=` 起
+**独立应用窗口**（无地址栏/标签栏，独占 profile `%LOCALAPPDATA%\SpiderXHS\app-profile`），
+不再弹系统默认浏览器的标签页；两者都找不到才退回默认浏览器（设计 14 §2）。
+
 ## 什么不该进包（2026-09-26 v1.0.1 梳理）
 
 **结论：进包内容由白名单决定**（`SpiderXHS.spec` 的 `datas` + PyInstaller 依赖分析），
