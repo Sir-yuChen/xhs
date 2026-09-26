@@ -47,6 +47,39 @@
       → 成功：重放原请求；失败：清凭证跳登录
 ```
 
+**⚠️ 2026-09-27 补：上面那句「失败：清凭证跳登录」在 1.0.2 之前**并不是**代码事实**
+（原句保留在上一段 —— 它描述的是**意图**，不是当时的行为。前一句已由本节取代。）**
+
+差别只在**刷新请求自己的 401 会不会再进同一个拦截器**：
+
+- 拦截器的分支条件是「是 `401` **且**这个请求还没重试过（`_authRetry`）**且**本地还有
+  refresh token」；
+- `refreshAccessToken()` 用的是**同一个** `http` 实例，它发出的 `/auth/refresh` 401 也回到
+  这个拦截器；而那次请求的 `_authRetry` 是空、`getRefreshToken()` 又仍然非空 ⇒ 分支成立
+  ⇒ **又调一次 `refreshAccessToken()`** ⇒ 递归，承诺**永不 settle**。
+
+后果不是「多刷几次」，而是**整条恢复链路死掉**：`bootstrapAuth()` 永远 await ⇒
+`use-auth` 的 status 卡在 `checking` ⇒ 界面停在「正在验证登录状态…」。2026-09-27 打包版实测
+5 分钟打出 **8.8 万次** `POST /api/auth/refresh` 401（`<安装目录>\logs\launcher.log` 涨到 8.6MB）。
+触发条件是**每个用户都会走到**的正常路径（refresh token 过期 / 库被重置 / 用户被删），
+故定为 **P1**（台账 DEF-075）。
+
+**落地（两层，缺一不可）**：
+
+1. `refreshAccessToken()` 的 `http.post("/auth/refresh", …)` 带
+   `{ _authRetry: true, _silent: true }` —— `_authRetry` 让拦截器**短路**（刷新请求本身就是
+   恢复手段，不许再被恢复一次）；`_silent` 让失败呈现权归调用点（否则「登录已过期」弹两次）。
+2. 拦截器里的短路判断（`originalRequest?._authRetry`）**必须留着** —— 只加标记、拆掉判断，
+   照样递归（`AUTH_MUTATE=shortcircuit` 已实测变红）。
+
+**不变量**：`/auth/refresh` 自身失败时，**每次调用最多发一次刷新请求然后终止**，绝不递归。
+守卫 = `tests/frontend/auth_refresh_terminates.cjs`（驱动**真实**拦截器 + 受控 axios 桩，
+直接数请求次数；三个变异各证一行承重），接线在
+`tests/backend/test_login_state.py::TestFrontendBehaviourScripts`。
+
+⚠️ **取证口径**（下次同类问题的第一眼）：安装目录 `logs\launcher.log` 里
+`grep -c "auth/refresh"` —— 正常是零散几行；**同秒几十行 401** 就是这条递归。
+
 ---
 
 ## 2. 端点清单（按模块）

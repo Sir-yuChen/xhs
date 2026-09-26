@@ -1205,6 +1205,83 @@ class TestFrontendBehaviourScripts:
             assert line in out, f"变异下应有 `{line}`，output={out}"
         assert "INVARIANT(S) VIOLATED" in out, f"output={out}"
 
+    # ------------------------------------------------------------------ #
+    # 2026-09-27 接线：auth_refresh_terminates.cjs
+    #   （打包版 1.0.2 卡在「正在验证登录状态…」的那个死循环）
+    # ------------------------------------------------------------------ #
+
+    AUTH_SCRIPT = "tests/frontend/auth_refresh_terminates.cjs"
+
+    #: 每个变异各自必须变红的断言。⚠️ 断言必须带 `FAIL  ` 前缀 —— 全绿那行是
+    #: `PASS  C1 …`，只找 `C1` 会恒真（负向断言禁裸 `in`）。
+    AUTH_MUTATION_FAILURES = {
+        # 摘掉刷新请求的 `_authRetry` ⇒ 递归：C1/C6 的有界性断言必须红
+        "retry": ("FAIL  C1 ", "FAIL  C6 "),
+        # 摘掉 `_silent` ⇒ 失败呈现权错位，拦截器自己弹一次
+        "silent": ("FAIL  C2 ",),
+        # 拦截器不再认 `_authRetry` ⇒ 连标记过的请求也逃不掉
+        "shortcircuit": ("FAIL  C1 ", "FAIL  C6 "),
+    }
+
+    @pytest.fixture(scope="module")
+    def auth_refresh_runs(self) -> dict[str, str]:
+        """契约 + 三个变异各跑一次 `auth_refresh_terminates.cjs`，返回 {模式: 输出}。
+
+        判据与 `qr_selfcheck` 同款：契约必须 rc=0 且 `ALL INVARIANTS HOLD`，
+        每个变异必须 rc≠0。脚本的变异锚点未命中会 **FATAL 退出**（rc=1）而不
+        静默不生效 —— 这正是 2026-09-26 在 `library_item_filter.cjs` 上踩过的坑：
+        「假红」不是承重证明。
+        """
+        out: dict[str, str] = {}
+        modes = [("contract", {})] + [
+            (name, {"AUTH_MUTATE": name}) for name in self.AUTH_MUTATION_FAILURES
+        ]
+        for mode, env in modes:
+            result = subprocess.run(
+                ["node", str(ROOT / self.AUTH_SCRIPT)],
+                cwd=str(ROOT),
+                capture_output=True,
+                text=True,
+                env={**os.environ, **env},
+                check=False,
+            )
+            combined = f"{result.stdout}\n{result.stderr}"
+            if mode == "contract":
+                assert result.returncode == 0, (
+                    f"{self.AUTH_SCRIPT} 契约失败（刷新失败必须有界收敛）：\n{combined}"
+                )
+                assert "ALL INVARIANTS HOLD" in combined, f"output={combined}"
+            else:
+                assert result.returncode != 0, (
+                    f"{self.AUTH_SCRIPT} 变异 {mode} 未变红 ⇒ 那行标记可能是摆设：\n{combined}"
+                )
+                assert "FATAL" not in combined, (
+                    f"{self.AUTH_SCRIPT} 变异锚点未命中（FATAL）⇒ 那种红不算证明：\n{combined}"
+                )
+            out[mode] = combined
+        return out
+
+    def test_auth_refresh_failure_terminates(self, auth_refresh_runs: dict[str, str]):
+        """`/auth/refresh` 自己 401 时必须有界失败 —— 不是无限递归。
+
+        这是 2026-09-27 打包版实测的用户可见缺陷：库被重置后 localStorage 里
+        还留着旧 refresh token，刷新恒 401，拦截器回头再调 `refreshAccessToken()`
+        ⇒ 承诺永不 settle ⇒ 界面停在「正在验证登录状态…」，5 分钟打出 8.8 万次
+        `POST /api/auth/refresh` 401。
+        """
+        out = auth_refresh_runs["contract"]
+        assert "FAIL" not in out, f"契约不该出现 FAIL 行：{out}"
+        assert out.count("PASS  C") == 6, f"应有 6 条不变式 PASS：{out}"
+        assert "ALL INVARIANTS HOLD" in out, f"output={out}"
+
+    def test_auth_refresh_guards_are_load_bearing(self, auth_refresh_runs: dict[str, str]):
+        """三个变异（摘 `_authRetry` / 摘 `_silent` / 拆拦截器短路）各自必须变红。"""
+        for mode, expected in self.AUTH_MUTATION_FAILURES.items():
+            out = auth_refresh_runs[mode]
+            for line in expected:
+                assert line in out, f"变异 {mode} 下应有 `{line}`，output={out}"
+            assert "INVARIANT(S) VIOLATED" in out, f"变异 {mode} output={out}"
+
 
 def test_renew_does_not_touch_the_ark_channel(tmp_path: Path):
     """创作者扫码续期**只写 creator 通道**，账号自己的 ark 令牌一个字节都不动。

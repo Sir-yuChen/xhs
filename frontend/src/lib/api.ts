@@ -228,9 +228,26 @@ export async function refreshAccessToken(): Promise<string> {
     throw new Error("Missing refresh token");
   }
 
-  const response = await http.post<{ access_token: string; token_type: "bearer" }>("/auth/refresh", {
-    refresh_token: refreshToken
-  });
+  // ⚠️ 必须带 `_authRetry`（+ `_silent`）：**这个请求本身就是恢复手段**，
+  // 它自己 401 时绝不能再去走拦截器的「401 ⇒ 刷新 ⇒ 重试」分支。
+  //
+  // 漏了这个标记的后果是**无限递归**（2026-09-27 打包版实测）：`http.post` 的 401
+  // 重新进入同一分支时，`_authRetry` 是 undefined、而 `getRefreshToken()` 仍然非空
+  // （旧令牌还在 localStorage 里），于是分支条件为假 ⇒ 又调 `refreshAccessToken()`
+  // ⇒ 再 POST ⇒ 再 401 … 承诺**永不 settle**。上游 `bootstrapAuth()` 永远 await，
+  // `use-auth` 的 status 卡在 "checking"，界面停在「正在验证登录状态…」；
+  // 服务端 5 分钟内被打出 **8.8 万次** `POST /api/auth/refresh` 401。
+  //
+  // 触发条件不是边界情况：「登录已过期」是**每个用户都会走到**的正常路径
+  // （refresh token 过期 / 库被重置 / 用户被删），所以这是 P1 而非边角。
+  //
+  // `_silent`：失败呈现权归调用点（`use-auth` 的 bootstrap，或拦截器自己的
+  // catch 那句「登录已过期，请重新登录」）—— 不标就会在过期时连弹两次。
+  const response = await http.post<{ access_token: string; token_type: "bearer" }>(
+    "/auth/refresh",
+    { refresh_token: refreshToken },
+    { _authRetry: true, _silent: true } as never
+  );
   setAccessToken(response.data.access_token);
   return response.data.access_token;
 }
