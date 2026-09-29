@@ -34,16 +34,20 @@
 * **失败静默**：浏览页面时千帆挂了不该让人看不到笔记；补齐失败就照常渲染（商品缺）。
   唯一的例外是凭据失效（`-13000`）：把绑定标 `invalid` 并写原因，让页面的失效提示接管。
 
-## 笔记 ↔ 商品关系（设计 13 §26，2026-09-22）
+## 笔记 ↔ 商品关系（设计 13 §26.7，2026-09-27 改键）
 
-``note_goods`` 是**本地实体关系表**（`notes.id` ↔ `shop_products.id`，M2M）。
-本模块提供它的**唯一解析入口** `link_note_goods`：
+``note_goods`` 是**笔记 ↔ 商品关系表**（**平台 ID 级**：`notes.note_id` ↔
+`shop_products.item_id`，M2M）。本模块提供它的**唯一写入入口** `link_note_goods`：
 
-* **纯本地解析、零平台请求** —— 只读 `shop_note_goods` 缓存 / 调用方给的挂载条目，
-  在本地 `notes` 与 `shop_products` 里找主键；
-* **两边都解析成功才建关系** —— 任一侧本地行缺失（商品还没同步 / 笔记还没落库）⇒ 跳过，
-  **不造假**，等下一次同步自然补上；
+* **零平台请求** —— 只读 `shop_note_goods` 缓存 / 调用方给的挂载条目；
+* **不校验商品是否存在**（用户 2026-09-27 口径）—— 关系行两个字段都是平台 ID
+  ⇒ 商品台账里没有这件商品、账号还没绑店、笔记行还没落库，**都不挡关系落库**；
+  唯一跳过条件是挂载条目里**取不到 `item_id`**（连平台商品 ID 都没有，无键可落）；
 * **只增不删**（§23：同步链路不做删除维度）。
+
+⚠️ 旧口径（~~2026-09-22~~，原句保留）：*「本地实体关系（`notes.id` ↔
+`shop_products.id`）……两边都解析成功才建关系，任一侧缺失 ⇒ 跳过」* ——
+真实库实测 1933 个挂载条目里 16 个因台账缺行**永远落不了库**，被用户口径推翻。
 """
 from __future__ import annotations
 
@@ -55,7 +59,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.core.time import shanghai_now
-from backend.app.models import Note, NoteGoods, PlatformAccount
+from backend.app.models import NoteGoods, PlatformAccount
 from backend.app.models.shop import ShopNoteGoods
 from backend.app.models.shop_product import ShopProduct
 
@@ -240,92 +244,95 @@ def _item_id_of(goods: dict[str, Any]) -> str:
     return _text(goods.get("item_id"), goods.get("goods_id"))
 
 
+def products_by_item_id(
+    db: Session, user_id: int, item_ids: Iterable[str]
+) -> dict[str, ShopProduct]:
+    """**平台商品 ID → 本地商品行**（`note_goods` 从本地主键改成平台 ID 之后的唯一查法）。
+
+    `note_goods` 只存平台 ID（§26.7）⇒ 想拿商品信息（标题 / 价格 / 图 / 宽高）就得
+    回到 `shop_products` 按 `item_id` 找一次。**台账里没有这件商品是正常态**
+    （关系落库不校验商品存在）⇒ 缺的 id **不在返回里**，调用方按缺值口径渲染，
+    **不要**在这里造占位行。
+
+    `item_ids` 去重、分块（`IN (...)` 的变量数上限）。同一 `item_id` 在本用户下
+    理论上只有一行（`uq_shop_products_shop_item` 是 `(shop_id_fk, item_id)`，
+    跨店可能重名）⇒ 同 id 命中多行时**取 id 最小的那行**（稳定、可预期）。
+    """
+    wanted = [text for text in (_text(item) for item in item_ids) if text]
+    wanted = list(dict.fromkeys(wanted))
+    if not wanted:
+        return {}
+    found: dict[str, ShopProduct] = {}
+    for start in range(0, len(wanted), _RESOLVE_CHUNK):
+        chunk = wanted[start : start + _RESOLVE_CHUNK]
+        rows = db.scalars(
+            select(ShopProduct)
+            .where(ShopProduct.user_id == int(user_id or 0), ShopProduct.item_id.in_(chunk))
+            .order_by(ShopProduct.id.asc())
+        ).all()
+        for row in rows:
+            found.setdefault(str(row.item_id or ""), row)
+    return found
+
+
 def link_note_goods(
     db: Session,
     account: PlatformAccount,
     mappings: list[tuple[str, list[dict[str, Any]]]],
 ) -> dict[str, int]:
-    """把「平台 note_id → 挂载商品」解析成**本地实体关系**，upsert 进 `note_goods`（§26）。
+    """把「平台 note_id → 挂载商品」写成 `note_goods` 关系行（§26.7，**平台 ID 级**）。
 
-    三个解析步，全部本地：
+    两步，全部本地（**零平台请求**）：
 
-    1. 本地笔记行：`notes` 按 `(user_id, 平台 note_id)` 找（同步链路刚落库的就是这批行）；
-    2. 本地商品行：`shop_products` 按 `(shop_id_fk, item_id)` 找（`shop_id_fk` 取账号的店）；
-    3. 既有关系：按 `note_id` 查一次，去重后只插**缺失**的行（唯一键兜底幂等）。
+    1. 取键：每条挂载条目 → 平台商品 ID（`_item_id_of`：只认 `item_id` / `goods_id`）；
+    2. 既有关系：按 `(user_id, 平台 note_id)` 查一次，只插**缺失**的
+       `(user_id, 平台 note_id, item_id)`（唯一键兜底幂等）。
 
-    **两边都解析成功才建关系**；任一侧缺失 ⇒ 计入 `skipped` 并跳过（不造假）。
+    ⚠️ **不解析本地笔记行 / 本地商品行、不需要店铺**（2026-09-27 用户口径
+    「**无需校验商品是否存在**」）：关系行的两个字段都是平台 ID ⇒ 商品台账里没有这件
+    商品、账号没绑店、笔记行还没落库，都**不挡**关系落库。
+
+    唯一跳过条件：挂载条目里**取不到 `item_id`**（连平台商品 ID 都没有 ⇒ 无键可落，
+    缺值口径不造假）。旧实现「任一侧本地行缺失 ⇒ 跳过」已废（真实库实测 16 个挂载
+    条目因此永远落不了库）。
+
     **只增不删** —— 平台撤了挂载也不删关系行（§23：同步链路不做删除维度）。
 
-    返回 `{"linked": 新建关系行数, "skipped": 任一侧缺失而跳过的 (笔记, 商品) 对数}`。
+    返回 `{"linked": 新建关系行数, "skipped": 无 item_id 而跳过的条目数}`。
     """
-    from backend.app.services.shop_binding_service import account_shop_id
+    user_id = int(account.user_id or 0)
 
     # 收集 (平台 note_id, item_id) 对（去重、保序）
     pairs: list[tuple[str, str]] = []
+    unkeyed = 0
     for note_id, goods_list in mappings:
         platform_note_id = _text(note_id)
-        if not platform_note_id:
-            continue
         for goods in goods_list or []:
             if not isinstance(goods, dict):
                 continue
             item_id = _item_id_of(goods)
-            if item_id:
-                pairs.append((platform_note_id, item_id))
+            if not platform_note_id or not item_id:
+                # 缺平台笔记 ID / 平台商品 ID ⇒ 无键可落（不造假）
+                unkeyed += 1
+                continue
+            pairs.append((platform_note_id, item_id))
     distinct_pairs = set(pairs)
     if not distinct_pairs:
-        return {"linked": 0, "skipped": 0}
-
-    shop_pk = account_shop_id(db, account.id)
-    if shop_pk is None:
-        # 账号没有店铺 ⇒ 商品行无从解析（shop_products 按 shop_id_fk 归属）。
-        return {"linked": 0, "skipped": len(distinct_pairs)}
+        return {"linked": 0, "skipped": unkeyed}
 
     note_ids = list(dict.fromkeys(nid for nid, _ in distinct_pairs))
-    item_ids = list(dict.fromkeys(iid for _, iid in distinct_pairs))
-
-    note_pk: dict[str, int] = {}
+    existing: set[tuple[str, str]] = set()
     for start in range(0, len(note_ids), _RESOLVE_CHUNK):
         chunk = note_ids[start : start + _RESOLVE_CHUNK]
         rows = db.execute(
-            select(Note.id, Note.note_id).where(
-                Note.user_id == account.user_id, Note.note_id.in_(chunk)
+            select(NoteGoods.note_id, NoteGoods.item_id).where(
+                NoteGoods.user_id == user_id, NoteGoods.note_id.in_(chunk)
             )
         ).all()
-        for pk, platform_note_id in rows:
-            note_pk[platform_note_id] = pk
+        existing.update((note_id, item_id) for note_id, item_id in rows)
 
-    product_pk: dict[str, int] = {}
-    for start in range(0, len(item_ids), _RESOLVE_CHUNK):
-        chunk = item_ids[start : start + _RESOLVE_CHUNK]
-        rows = db.execute(
-            select(ShopProduct.id, ShopProduct.item_id).where(
-                ShopProduct.shop_id_fk == shop_pk, ShopProduct.item_id.in_(chunk)
-            )
-        ).all()
-        for pk, item_id in rows:
-            product_pk[item_id] = pk
-
-    wanted = {
-        (note_pk[nid], product_pk[iid])
-        for nid, iid in distinct_pairs
-        if nid in note_pk and iid in product_pk
-    }
-    skipped = len(distinct_pairs) - len(wanted)
-    if not wanted:
-        return {"linked": 0, "skipped": skipped}
-
-    existing: set[tuple[int, int]] = set()
-    note_pks = list(dict.fromkeys(pk for pk, _ in wanted))
-    for start in range(0, len(note_pks), _RESOLVE_CHUNK):
-        chunk = note_pks[start : start + _RESOLVE_CHUNK]
-        rows = db.execute(
-            select(NoteGoods.note_id, NoteGoods.product_id).where(NoteGoods.note_id.in_(chunk))
-        ).all()
-        existing.update((note_id, product_id) for note_id, product_id in rows)
-
-    fresh = wanted - existing
-    for note_pk_, product_pk_ in sorted(fresh):
-        db.add(NoteGoods(note_id=note_pk_, product_id=product_pk_))
+    fresh = distinct_pairs - existing
+    for platform_note_id, item_id in sorted(fresh):
+        db.add(NoteGoods(user_id=user_id, note_id=platform_note_id, item_id=item_id))
     db.commit()
-    return {"linked": len(fresh), "skipped": skipped}
+    return {"linked": len(fresh), "skipped": unkeyed}

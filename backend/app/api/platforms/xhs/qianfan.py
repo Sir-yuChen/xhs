@@ -38,12 +38,14 @@ from backend.app.core.deps import get_current_user, get_owned_active_account
 from backend.app.core.time import shanghai_now
 from backend.app.models.platform_account import PlatformAccount
 from backend.app.models.note import Note, NoteAsset
-from backend.app.models.shop import NoteGoods, Shop, ShopNoteGoods
-from backend.app.models.shop_product import ShopProduct
+from backend.app.models.shop import NoteGoods, Shop
 from backend.app.services.account_service import store_channel_cookies
 from backend.app.services.shop_health_service import check_account_health
-from backend.app.services import shop_goods_sync_service, sync_task_service
+from backend.app.services import scheduled_job_runner, sync_task_service
+from backend.app.services import shop_goods_sync_service
 from backend.app.services import shop_products_service
+from backend.app.services.job_registry import JOB_KEY_SHOP_GOODS_SYNC
+from backend.app.services.note_queue_service import SOURCE_ACCOUNT_CARD_GOODS_SYNC
 from backend.app.services.sync_task_service import (
     ABSOLUTE_PAGE_CAP,
     DEFAULT_MAX_PAGES,
@@ -61,8 +63,6 @@ from backend.app.services.shop_binding_service import (
     bind_shop_for_account,
     detach_shop,
     get_shop_state,
-    qianfan_cookies_for_account,
-    set_shop_state,
     shop_for_account,
     shops_for_user,
     synced_note_count,
@@ -638,25 +638,22 @@ def item_notes(
         )
 
     state = get_shop_state(account) or {}
-    product = db.scalars(
-        select(ShopProduct).where(ShopProduct.shop_id_fk == shop_pk, ShopProduct.item_id == payload.item_id)
-    ).first()
-    if product is None:
-        # 台账里没有这件商品 ⇒ 关系表无从查起（空列表，不是错误）。
-        return {
-            "item_id": payload.item_id,
-            "count": 0,
-            "notes": [],
-            "synced_notes": synced_note_count(db, account.id),
-            "goods_note_total": int(state.get("goods_note_total") or 0),
-            "goods_synced_at": _fmt_state_time(state.get("goods_synced_at")),
-        }
-
-    relations = db.scalars(select(NoteGoods).where(NoteGoods.product_id == product.id)).all()
-    note_pks = [relation.note_id for relation in relations]
+    # ⚠️ 2026-09-27（§26.7）：关系表按**平台 ID** 挂 ⇒ 直接按 `item_id` 查，
+    # **不再先找台账行**（台账里没有这件商品时也有关系 —— 关系落库不校验商品存在）。
+    relations = db.scalars(
+        select(NoteGoods).where(
+            NoteGoods.user_id == current_user.id,
+            NoteGoods.item_id == payload.item_id,
+        )
+    ).all()
+    note_ids = [str(relation.note_id or "") for relation in relations]
+    note_ids = [note_id for note_id in dict.fromkeys(note_ids) if note_id]
     notes: list[dict[str, Any]] = []
-    if note_pks:
-        rows = db.scalars(select(Note).where(Note.id.in_(note_pks))).all()
+    if note_ids:
+        rows = db.scalars(
+            select(Note).where(Note.user_id == current_user.id, Note.note_id.in_(note_ids))
+        ).all()
+        note_pks = [note.id for note in rows]
         asset_rows = db.scalars(
             select(NoteAsset)
             .where(NoteAsset.note_id.in_(note_pks))
@@ -1021,7 +1018,8 @@ class SyncShopGoodsRequest(BaseModel):
 
     platform_account_id: int
     #: **不传 = 全量**（设计 13 §21，用户 2026-09-22 口径）：翻到平台没有下一页为止，
-    #: 速率由 `CrawlRateLimiter.wait_allow()` 的 5 次/分钟保证。显式传数字时夹到
+    #: 速率由 `CrawlRateLimiter.wait_allow()` 的**运行时额度**（默认 60 次/分钟，
+    #: 设置页可改，设计 10 §7 / 设计 13 §38.2）保证。显式传数字时夹到
     #: `[1, ABSOLUTE_PAGE_CAP]`（小批量调试用）。
     max_pages: Optional[int] = Field(default=DEFAULT_MAX_PAGES, ge=1, le=ABSOLUTE_PAGE_CAP)
     #: 每页条数。千帆商品列表实测上限 100。
@@ -1047,11 +1045,14 @@ def sync_shop_goods(
 ):
     """把该店铺的商品同步到本地 `shop_products` 表（需求 R2）。
 
-    **异步**：立即返回任务摄要（`pending`），同步在后台线程里慢慢跑（**全量翻页** +
-    按账号限流**等待** + 页间停顿，见设计 13 §21）。
+    **语义 = 手动触发定时任务 `system.shop_goods_sync` 的「执行一次」**（设计 13 §35.17，
+    2026-09-27 用户口径）：日志落 `scheduled_job_logs`（`trigger_type=manual` —— 任务中心
+    「任务日志」看得到、执行期间带进度心跳），执行体是 `run_scheduled_shop_goods_syncs` 的
+    **定向模式**（只跑本账号、**不**省流跳过、**不**重入；未绑店给结构化失败），业务任务行
+    照旧落 `tasks`。同步本体在后台跑（**全量翻页** + 按账号限流**等待** + 页间停顿，§21）。
 
-    **防重（需求 N3）**：该账号已有未完成的商品同步任务 → 返回**已有任务**，
-    不新建、不重复打平台。
+    **响应**：`{log_id, status, account_id, scope_note}` —— **不再回任务摄要**；任务号与
+    进度由**首查** `GET …/sync-shop-goods/status` 给出（§35.17.4 的轮询纪律）。
 
     **完成语义**：只有翻完最后一页（或已存够总数）才删除本次未出现的旧行；
     半途而废**不删**（删 = 把没扫到的商品当已下架丢掉）。凭据失效（`-13000`）
@@ -1062,7 +1063,7 @@ def sync_shop_goods(
     不再有独立的多轮补齐队列——列表翻完 = 详情也全了。详情失败不影响列表落库，
     失败的商品下轮同步时重试。
     """
-    _owned_account(db, current_user, payload.platform_account_id)
+    account = _owned_account(db, current_user, payload.platform_account_id)
     if account_shop_id(db, payload.platform_account_id) is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1083,22 +1084,48 @@ def sync_shop_goods(
             if time_from_ms and time_to_ms
             else "未识别到有效的时间区间，已按全量同步"
         )
+    mode = sync_task_service.normalize_mode(payload.mode)
+    max_pages = sync_task_service.clamp_pages(payload.max_pages)
+    page_size = sync_task_service.clamp_page_size(payload.page_size)
     summary = shop_goods_sync_service.start_shop_goods_sync(
         payload.platform_account_id,
         user_id=current_user.id,
-        max_pages=sync_task_service.clamp_pages(payload.max_pages),
-        page_size=sync_task_service.clamp_page_size(payload.page_size),
-        source="manual",
-        mode=sync_task_service.normalize_mode(payload.mode),
+        # §35.12：来源要**具体到按钮**（遗留值 `manual` 会显示成「页面按钮（早期数据）」）。
+        source=SOURCE_ACCOUNT_CARD_GOODS_SYNC,
+        # 同步语义全部传下去（漏一个 = 用户选的全量 / 时间区间静默丢失）。
+        mode=mode,
         time_from_ms=time_from_ms,
         time_to_ms=time_to_ms,
+        max_pages=max_pages,
+        page_size=page_size,
     )
-    summary.pop("reused", None)
+    task_id = summary.get("task_id")
+    log_id = None
+    if task_id and not summary.get("reused"):
+        log_id = scheduled_job_runner.run_targeted_job(
+            user_id=current_user.id,
+            job_key=JOB_KEY_SHOP_GOODS_SYNC,
+            task_id=int(task_id),
+            task_type=sync_task_service.SHOP_GOODS_SYNC_TASK_TYPE,
+            # 账号快照（迁移 `j1k2l3m4n5o6`）：账号卡「同步中」的判据 = 该账号
+            # **最新一条**同步日志的状态（2026-09-27 用户口径）⇒ 日志必须记账号。
+            account_id=payload.platform_account_id,
+            # 日志快照里留一份**本次实际生效**的语义（与任务行对得上）。
+            params_extra={
+                "account_id": payload.platform_account_id,
+                # 账号名称快照（2026-09-27 用户口径「执行账号应是当前账号信息卡的店铺」）：
+                # 「执行详情」的「执行账号」显示账号名称，与账号卡一一对应。
+                "account_name": account.nickname or "",
+                "mode": mode,
+                "time_from_ms": time_from_ms,
+                "time_to_ms": time_to_ms,
+            },
+            # §35.17.3：执行期间把该任务行的进度映到定时任务日志的 `progress` 列。
+            progress_probe=sync_task_service.task_progress_probe(int(task_id)),
+        )
     # §23：把「实际生效的同步范围」带回前端 —— 区间没解析出来时用户必须知道
     # 自己其实跑了全量，否则会以为只同步了一个时间段。
-    if scope_note:
-        summary["scope_note"] = scope_note
-    return summary
+    return {**summary, "log_id": log_id, "scope_note": scope_note}
 
 
 @router.get("/sync-shop-goods/status")
@@ -1113,5 +1140,10 @@ def sync_shop_goods_status(
     """
     _owned_account(db, current_user, platform_account_id)
     return sync_task_service.status_payload(
-        db, SHOP_GOODS_SYNC_TASK_TYPE, platform_account_id
+        db,
+        SHOP_GOODS_SYNC_TASK_TYPE,
+        platform_account_id,
+        # 账号卡「同步中」按**该账号最新一条同步日志**判（2026-09-27 用户口径）。
+        user_id=current_user.id,
+        job_key=JOB_KEY_SHOP_GOODS_SYNC,
     )

@@ -73,7 +73,13 @@ def _add_note(db, account, note_id: str, *, content: str = "", title: str = "") 
         title=title or note_id,
         content=content,
         note_type="synced",
-        raw_json={"note_url": f"https://www.xiaohongshu.com/explore/{note_id}"},
+        # §19.13.9（2026-09-28）：详情请求**必须**带笔记级令牌 —— 无令牌现在会被拦成
+        # `no_token`（无 token 的 explore 兜底已删除）⇒ 夹具按**真实形态**给令牌
+        # （真实库里 71/71 篇都有）。
+        raw_json={
+            "note_url": f"https://www.xiaohongshu.com/explore/{note_id}",
+            "xsec_token": "TK-TEST",
+        },
     )
     db.add(note)
     db.commit()

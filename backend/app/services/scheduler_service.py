@@ -1029,10 +1029,26 @@ def stop_scheduler_watchdog() -> None:
 # M1.9 同步的调度侧（T-806）
 # --------------------------------------------------------------------------- #
 def _sync_account_gap_seconds() -> int:
-    """账号之间的停顿（秒）；配置读不到按 10 秒。"""
+    """账号之间的停顿（秒）；配置读不到按 10 秒。
+
+    ⚠️ 2026-09-27（设计 10 §7.5）：读点改走**运行时配置**（`system_settings` 行优先，
+    回落 settings / 内置 10）—— 它此前只读 `get_settings()`，于是「设置页改了它」
+    不会有任何效果（而白名单却把它标成「实时生效」⇒ 负向失真）。
+    进程级开关（调度轮不是某个账号私有的）⇒ 用 `live_int_process`。
+    """
     try:
-        return max(0, int(getattr(get_settings(), "xhs_sync_account_gap_seconds", 10) or 0))
-    except Exception:  # pragma: no cover
+        from backend.app.services.settings_service import live_int_process
+
+        return max(
+            0,
+            int(
+                live_int_process(
+                    "xhs_sync_account_gap_seconds",
+                    default=int(getattr(get_settings(), "xhs_sync_account_gap_seconds", 10) or 10),
+                )
+            ),
+        )
+    except Exception:  # pragma: no cover - 配置读不到不该让调度轮停摆
         return 10
 
 
@@ -1104,26 +1120,161 @@ def _schedulable_accounts(db: Any, accounts: list) -> list:
     return schedulable
 
 
-def run_scheduled_note_syncs(user_id: int, account_ids: Optional[Sequence[int]] = None) -> None:
-    """调度器入口：给「有待同步」的账号跑**一次有界同步**（限行主本人，DEF-066）。
+#: 定向执行等待业务任务到终态的轮询间隔（秒）。
+TARGETED_AWAIT_POLL_SECONDS = 2.0
+
+#: 定向执行等待业务任务终态的上限（秒）。60 分钟 = §21.5 实测全量同步（30–48 分钟）
+#: 之上留余量；超时不「静默变成成功」，而是记失败并说明任务仍在后台跑。
+TARGETED_AWAIT_TIMEOUT_SECONDS = 60 * 60
+
+
+#: 定向执行（`account_ids` 非空）也**照旧**过省流与账号间停顿：
+#: 「用户点名了这几个账号」不等于「每一轮都无条件打平台」——省流判据是**账号级**的
+#: 保护（本地已是最新就别打），与「跑哪些账号」是两个正交的问题。真正需要「立刻、
+#: 不打折」的是账号卡的按钮，那条路不走这里（它直接建任务行，§35.17.2）。
+
+
+def _targeted_outcome(results: list[dict[str, Any]], *, what: str) -> dict[str, Any]:
+    """定向执行的统一收口（设计 13 §35.17.2）：有失败 ⇒ **抛错**，否则回摘要。
+
+    为什么有失败必须抛：`execute_job` 只有「执行体抛异常」才会把 `scheduled_job_logs`
+    写成 `failed`。若执行体自己吞掉失败、正常返回，日志会显示「执行成功」而 `result`
+    里躺着错误原因 —— 那就是**假成功**，正是本次要消灭的形态（§35.17.1 实测：最新
+    10 条定时日志全是 `success` / `progress=100` / 0–133ms，而实际什么都没跑）。
+
+    `skipped`（省流判定本地已最新）与「该账号已有任务在跑」都**不算失败** ——
+    那是「没执行」，不是「执行失败」，说明留在 `result` 里给用户看即可。
+    """
+    failed = [
+        row
+        for row in results
+        if str(row.get("status") or "") == "failed" or row.get("error")
+    ]
+    if failed:
+        detail = "；".join(
+            "账号 %s：%s" % (row.get("account_id"), row.get("error") or row.get("note") or "未知原因")
+            for row in failed
+        )
+        raise RuntimeError(f"{what}失败：{detail}"[:1000])
+    return {"targeted": True, "what": what, "accounts": results}
+
+
+def _targeted_result(account_id: int, terminal: dict[str, Any]) -> dict[str, Any]:
+    """把一个业务任务的终态整理成 `scheduled_job_logs.result` 里的一行（缺值给 None）。"""
+    progress = terminal.get("progress") or {}
+    return {
+        "account_id": account_id,
+        "task_id": terminal.get("task_id"),
+        "status": terminal.get("status"),
+        "stored": progress.get("stored"),
+        "total": progress.get("total"),
+        "note": terminal.get("note") or "",
+        "error": terminal.get("error") or "",
+    }
+
+
+def _run_targeted_note_sync(account: Any) -> dict[str, Any]:
+    """定向（点名了账号）的单账号执行：**建行 → 账号任务 worker 跑 → 等终态**。
+
+    为什么不在这里直接 `run_note_sync`（批量路径就是那么干的）：§35.16 确立的
+    「单 worker 串行」是用户要过的能力（不与笔记级队列抢平台额度）—— 直接同步跑就等于
+    把它绕过去了，两个账号同时点就是并排打平台。建行 + worker ⇒ 串行天然成立；
+    这里的等待只为拿到**真实终态**写日志（§35.17.2）。
+
+    ⚠️ 来源写 `scheduled`（不是 `account_card_*`）：这条路的调用方是**调度侧**
+    （cron 或任务中心的「执行一次」）。账号卡的按钮走的是另一条路
+    （端点自己建行、来源 `account_card_*`，§35.17.2）—— 两处都写同一个来源就等于
+    在数据里造假历史（§35.12「来源要具体到按钮」）。
+    """
+    from backend.app.services import sync_task_service as sts
+    from backend.app.services.note_queue_service import SOURCE_SCHEDULED
+    from backend.app.services.note_sync_service import start_note_sync
+
+    summary = start_note_sync(account.id, user_id=account.user_id, source=SOURCE_SCHEDULED)
+    task_id = summary.get("task_id")
+    if summary.get("reused"):
+        return {
+            "account_id": account.id,
+            "task_id": task_id,
+            "status": summary.get("status"),
+            "note": f"该账号已有同步任务在跑（任务 #{task_id}），本次不重入",
+        }
+    return _targeted_result(account.id, _await_targeted_task(task_id))
+
+
+def _run_targeted_goods_sync(account: Any) -> dict[str, Any]:
+    """定向（点名了账号）的单账号**商品**执行 —— 与笔记侧**逐字同构**（只是函数不同）。
+
+    同构是刻意的：两条链路的差别只有 `task_type` 与执行体，纪律（建行 → worker 串行 →
+    等终态 → 记真实结果）必须一致，否则又会长出两套会各自漂移的实现。
+    """
+    from backend.app.services.note_queue_service import SOURCE_SCHEDULED
+    from backend.app.services.shop_goods_sync_service import start_shop_goods_sync
+
+    summary = start_shop_goods_sync(account.id, user_id=account.user_id, source=SOURCE_SCHEDULED)
+    task_id = summary.get("task_id")
+    if summary.get("reused"):
+        return {
+            "account_id": account.id,
+            "task_id": task_id,
+            "status": summary.get("status"),
+            "note": f"该账号已有商品同步任务在跑（任务 #{task_id}），本次不重入",
+        }
+    return _targeted_result(account.id, _await_targeted_task(task_id))
+
+
+def _await_targeted_task(task_id: Optional[int]) -> dict[str, Any]:
+    """等定向建出的业务任务到终态（实现住在 `sync_task_service`，这里只给口径）。"""
+    from backend.app.services import sync_task_service as sts
+
+    if not task_id:
+        return {"task_id": None, "status": "missing", "error": "任务行未建出来（建行即失败）"}
+    return sts.await_task_terminal(
+        task_id,
+        timeout_seconds=TARGETED_AWAIT_TIMEOUT_SECONDS,
+        poll_seconds=TARGETED_AWAIT_POLL_SECONDS,
+    )
+
+
+def run_scheduled_note_syncs(
+    user_id: int,
+    account_ids: Optional[Sequence[int]] = None,
+) -> Optional[dict[str, Any]]:
+    """调度器入口：给账号跑一次有界同步（限行主本人，DEF-066）。
 
     ⚠️ `user_id` 必填（行归属者，runner 注入）：账号查询恒带
     `PlatformAccount.user_id == user_id` —— 原「空 account_ids = 全库账号」的形态已废。
     `account_ids` 非空 = 只跑指定账号（自定义参数，设计 15 §4.1，建 / 改双路归属校验）；
     空 = 本人的全部账号。
 
-    三道防重/风控一起生效：
+    **只有一处按 `account_ids` 分流**（设计 13 §35.17.2）：预筛怎么处理「跑不了的账号」。
+
+    | 维度 | `account_ids` 空（定时轮转） | 非空（点名了账号） |
+    |---|---|---|
+    | 预筛 | `_schedulable_accounts` 挑创作者链路账号，**安静跳过** | **不预筛** ⇒ 交给下游给结构化失败（如 `CREATOR_SESSION_REQUIRED`）并**进 `result`**：用户点了名，必须知道这个账号为什么没跑，而不是看到一条安静的「执行成功」 |
+    | 省流判据 | `account_needs_note_sync` 生效 | **同样生效**（账号级保护，与「跑哪些账号」正交）；被判「本地已最新」时进 `result` 说明，不静默 |
+    | 账号间停顿 | `xhs_sync_account_gap_seconds` | **同样生效**（点名了 5 个账号 ≠ 可以并排打平台） |
+    | 返回 | `None` | 每账号结果摘要（进 `scheduled_job_logs.result`）；有失败则**抛错** ⇒ 日志记 `failed`（不是假成功） |
+
+    三道防重/风控一起生效（**两种模式都保留**）：
 
     * **轮与轮不重叠** —— job 层面 `max_instances=1 + coalesce`；
-    * **同一账号不重入** —— 手动任务在跑时 `find_active_task` 让本轮跳过该账号
-      （与手动触发共用同一条判断，所以两道入口不会互相打架）；
+    * **同一账号不重入** —— 已有在跑的任务时本轮跳过该账号（与手动触发共用同一条判断，
+      所以两道入口不会互相打架）；
     * **账号之间停顿** —— 每处理完一个账号 sleep `xhs_sync_account_gap_seconds`。
+
+    ⚠️ 账号卡的「同步笔记」按钮**不走这里**（§35.17.2 已改）：它要的是「立刻跑一次、
+    别省流」，并且要留下 `trigger_type=manual` 的定时日志 —— 那条路在端点里直接建任务行，
+    本函数是**调度侧**的入口，职责没变。
     """
     from backend.app.models.platform_account import PlatformAccount
     from backend.app.services import sync_task_service as sts
+    from backend.app.services.note_queue_service import SOURCE_SCHEDULED
     from backend.app.services.note_sync_service import run_note_sync
 
+    targeted = bool(account_ids)
     gap = _sync_account_gap_seconds()
+    results: list[dict[str, Any]] = []
     db = SessionLocal()
     try:
         statement = select(PlatformAccount).where(
@@ -1134,28 +1285,58 @@ def run_scheduled_note_syncs(user_id: int, account_ids: Optional[Sequence[int]] 
         if account_ids:
             statement = statement.where(PlatformAccount.id.in_(list(account_ids)))
         accounts = db.scalars(statement).all()
-        candidates = _schedulable_accounts(db, list(accounts))
-        skipped = len(accounts) - len(candidates)
-        if skipped:
-            logger.info(
-                "scheduled note sync: skipped %s account(s) needing a pasted xsec_token", skipped
-            )
+        if targeted:
+            candidates = list(accounts)
+        else:
+            candidates = _schedulable_accounts(db, list(accounts))
+            skipped = len(accounts) - len(candidates)
+            if skipped:
+                logger.info(
+                    "scheduled note sync: skipped %s account(s) not on the creator channel", skipped
+                )
         for account in candidates:
             try:
-                if sts.find_active_task(db, sts.NOTE_SYNC_TASK_TYPE, account.id) is not None:
+                active = sts.find_active_task(db, sts.NOTE_SYNC_TASK_TYPE, account.id)
+                if active is not None:
+                    if targeted:
+                        results.append(
+                            {
+                                "account_id": account.id,
+                                "task_id": active.id,
+                                "status": active.status,
+                                "note": (
+                                    f"该账号已有笔记同步任务在跑（任务 #{active.id}，"
+                                    f"{active.status}），本次不重入"
+                                ),
+                            }
+                        )
                     continue
                 if not account_needs_note_sync(db, account):
+                    if targeted:
+                        results.append(
+                            {
+                                "account_id": account.id,
+                                "status": "skipped",
+                                "note": "本地数据已是最新（省流判据），本次未打平台",
+                            }
+                        )
+                    continue
+                if targeted:
+                    # 建行 + 账号任务 worker 串行执行 + 等终态（见 `_run_targeted_note_sync`）。
+                    results.append(_run_targeted_note_sync(account))
                     continue
                 run_note_sync(
                     account.id,
                     user_id=account.user_id,
-                    source="scheduled",
+                    source=SOURCE_SCHEDULED,
                     # §22：调度也走 auto。第一次（无同步历史）自动全量补全，
                     # 之后自动增量 —— 与手动触发同一把尺子，不做两套口径。
                     mode=sts.SYNC_MODE_AUTO,
                 )
             except Exception as exc:  # noqa: BLE001 - 单个账号失败不拖垮整轮
                 logger.warning("scheduled note sync for account %s failed: %s", account.id, exc)
+                if targeted:
+                    results.append({"account_id": account.id, "status": "failed", "error": str(exc)})
             if gap:
                 time.sleep(gap)
     except Exception as exc:  # noqa: BLE001 - 调度器调用，必须吞异常
@@ -1163,21 +1344,36 @@ def run_scheduled_note_syncs(user_id: int, account_ids: Optional[Sequence[int]] 
     finally:
         db.close()
 
+    if not targeted:
+        return None
+    return _targeted_outcome(results, what="笔记同步")
 
-def run_scheduled_shop_goods_syncs(user_id: int, account_ids: Optional[Sequence[int]] = None) -> None:
+
+def run_scheduled_shop_goods_syncs(
+    user_id: int,
+    account_ids: Optional[Sequence[int]] = None,
+) -> Optional[dict[str, Any]]:
     """调度器入口：给每个**绑定了店铺的创作者账号**跑一次有界商品同步（限行主本人，DEF-066）。
 
-    轮内纪律与笔记同步一致（不重叠 / 不重入 / 账号间停顿）。
+    轮内纪律与笔记同步一致（不重叠 / 不重入 / 账号间停顿 / 省流），分流规则同
+    `run_scheduled_note_syncs`（见其 docstring 的差异表，设计 13 §35.17.2）。
     ⚠️ `user_id` 必填（行归属者，runner 注入）：账号查询恒带
     `PlatformAccount.user_id == user_id`；`account_ids` 非空 = 只跑指定账号，
     空 = 本人的全部账号。
+
+    **没绑店的账号**：批量模式**安静跳过**（没绑店跑商品同步是无意义的失败）；定向模式
+    **不跳过**，改为收进 `results` 当失败 —— 用户点了名，必须知道「这个账号还没绑店铺」，
+    而不是看到一条安静的「执行成功」。
     """
     from backend.app.models.platform_account import PlatformAccount
     from backend.app.services import sync_task_service as sts
+    from backend.app.services.note_queue_service import SOURCE_SCHEDULED
     from backend.app.services.shop_binding_service import account_shop_id
     from backend.app.services.shop_goods_sync_service import run_shop_goods_sync
 
+    targeted = bool(account_ids)
     gap = _sync_account_gap_seconds()
+    results: list[dict[str, Any]] = []
     db = SessionLocal()
     try:
         statement = select(PlatformAccount).where(
@@ -1190,26 +1386,51 @@ def run_scheduled_shop_goods_syncs(user_id: int, account_ids: Optional[Sequence[
         accounts = db.scalars(statement).all()
         for account in accounts:
             try:
-                # 商品只对有店铺的账号有意义（没绑店 → 不做无意义的失败）。
                 if account_shop_id(db, account.id) is None:
+                    if targeted:
+                        results.append(
+                            {
+                                "account_id": account.id,
+                                "status": "failed",
+                                "error": "该账号未绑定店铺，无法同步商品（请先在店铺页绑定千帆店铺）",
+                            }
+                        )
                     continue
                 if sts.find_active_task(db, sts.SHOP_GOODS_SYNC_TASK_TYPE, account.id) is not None:
+                    if targeted:
+                        results.append(
+                            {
+                                "account_id": account.id,
+                                "status": "running",
+                                "note": "该账号已有商品同步任务在跑，本次不重入",
+                            }
+                        )
+                    continue
+                if targeted:
+                    # 建行 + 账号任务 worker 串行执行 + 等终态（与笔记侧同构）。
+                    results.append(_run_targeted_goods_sync(account))
                     continue
                 run_shop_goods_sync(
                     account.id,
                     user_id=account.user_id,
-                    source="scheduled",
+                    source=SOURCE_SCHEDULED,
                     # §22：同笔记侧，auto 让「无同步历史 ⇒ 全量」也覆盖到定时任务。
                     mode=sts.SYNC_MODE_AUTO,
                 )
             except Exception as exc:  # noqa: BLE001 - 单个账号失败不拖垮整轮
                 logger.warning("scheduled goods sync for account %s failed: %s", account.id, exc)
+                if targeted:
+                    results.append({"account_id": account.id, "status": "failed", "error": str(exc)})
             if gap:
                 time.sleep(gap)
     except Exception as exc:  # noqa: BLE001 - 调度器调用，必须吞异常
         logger.error("run_scheduled_shop_goods_syncs failed: %s", exc)
     finally:
         db.close()
+
+    if not targeted:
+        return None
+    return _targeted_outcome(results, what="商品同步")
 
 
 def run_scheduled_cleanups(user_id: int, account_ids: Optional[Sequence[int]] = None) -> None:
@@ -1225,9 +1446,6 @@ def run_scheduled_cleanups(user_id: int, account_ids: Optional[Sequence[int]] = 
     """
     from backend.app.services.no_traffic_cleanup_service import (
         DEFAULT_DELETE_BATCH,
-        CLEANUP_TASK_TYPE,
-        STATUS_PENDING,
-        STATUS_RUNNING,
         run_no_traffic_cleanup,
     )
     from backend.app.services.no_traffic_service import (

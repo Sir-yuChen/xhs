@@ -25,6 +25,8 @@ import os
 import re
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -2629,4 +2631,351 @@ class TestLoginCredentialsNeverPersisted:
         assert "[REDACTED]" in redacted
         # 非 JSON 输入原样返回（脱敏器自己不能抛）
         assert XHSCreatorLoginApi._redact_login_body("not-json") == "not-json"
-"unknown"
+
+
+class TestProbeEfficiency:
+    """令牌探针的效率契约（设计 13 §18.18，2026-09-28）。
+
+    效率改造最容易「优化掉正确性」：并发把结论搞乱、缓存让结论不再可信、
+    锁没了变成带着本机代理打平台。这里逐条钉死。
+    """
+
+    @staticmethod
+    def _seed_www_accounts(
+        session_factory: Any, username: str, count: int
+    ) -> tuple[Any, list[Any]]:
+        """落 `count` 个「只有 www 令牌」的账号（每账号恰好 1 次可探平台）。"""
+        _register(username)
+        db = session_factory()
+        user = db.scalar(select(User).where(User.username == username))
+        accounts = []
+        for index in range(count):
+            account = _seed_account(
+                db, user_id=user.id, nickname=f"并发{index}", external_user_id=f"p-{index}"
+            )
+            _add_cookies(db, account, WWW_JAR, CHANNEL_WWW)
+            accounts.append(account)
+        return db, accounts
+
+    def test_every_account_channel_is_probed_exactly_once(
+        self, tmp_path: Path, monkeypatch: Any
+    ):
+        """并发**不放大请求数**：每账号每平台仍只探一次（风控面与串行时一致）。"""
+        session_factory = _override_database(tmp_path)
+        spy = _ProbeSpy().install(monkeypatch)
+        monkeypatch.setattr(login_state_service, "_probe_parallelism", lambda: 4)
+        try:
+            db, accounts = self._seed_www_accounts(session_factory, "probe-once-owner", 4)
+            try:
+                login_state_service.login_states_for_accounts(
+                    db, accounts, probe=True, profile_adapter=XhsSelfProfileAdapter()
+                )
+            finally:
+                db.close()
+            assert spy.calls.count("www") == 4, f"每账号只该探一次，实际：{spy.calls}"
+            assert len(spy.calls) == 4, f"只该探已登录的平台，实际：{spy.calls}"
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_parallel_probe_returns_the_same_conclusions_as_serial(
+        self, tmp_path: Path, monkeypatch: Any
+    ):
+        """并发与串行给出**完全相同**的结论 —— 并发只改墙钟，不改答案。"""
+        session_factory = _override_database(tmp_path)
+        _ProbeSpy().install(monkeypatch, www_result=("expired", "平台原话：登录已过期"))
+        try:
+            db, accounts = self._seed_www_accounts(session_factory, "probe-parity-owner", 4)
+            try:
+                monkeypatch.setattr(login_state_service, "_probe_parallelism", lambda: 1)
+                serial = login_state_service.login_states_for_accounts(
+                    db, accounts, probe=True, profile_adapter=XhsSelfProfileAdapter()
+                )
+                monkeypatch.setattr(login_state_service, "_probe_parallelism", lambda: 4)
+                parallel = login_state_service.login_states_for_accounts(
+                    db, accounts, probe=True, profile_adapter=XhsSelfProfileAdapter()
+                )
+            finally:
+                db.close()
+            # `checked_at` 是「本批探测时刻」，两次调用天然不同 ⇒ 只比结论。
+            assert {
+                key: value["channels"] for key, value in serial.items()
+            } == {
+                key: value["channels"] for key, value in parallel.items()
+            }, "并发路径与串行路径必须给出逐字段相同的结论"
+            for account in accounts:
+                entry = serial[account.id]["channels"][CHANNEL_WWW]
+                assert entry["state"] == "expired"
+                assert entry["probed"] is True
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_accounts_really_run_in_parallel(self, tmp_path: Path, monkeypatch: Any):
+        """账号**之间**确实并行 —— 否则这次改造等于没做（钉住「并发」本身）。"""
+        session_factory = _override_database(tmp_path)
+        lock = threading.Lock()
+        state = {"active": 0, "peak": 0}
+
+        def slow_www(cookies, profile_adapter):  # noqa: ANN001
+            with lock:
+                state["active"] += 1
+                state["peak"] = max(state["peak"], state["active"])
+            time.sleep(0.2)
+            with lock:
+                state["active"] -= 1
+            return ("valid", "ok")
+
+        monkeypatch.setattr(login_state_service, "_probe_www", slow_www)
+        monkeypatch.setattr(login_state_service, "_probe_parallelism", lambda: 3)
+        try:
+            db, accounts = self._seed_www_accounts(session_factory, "probe-parallel-owner", 4)
+            try:
+                login_state_service.login_states_for_accounts(
+                    db, accounts, probe=True, profile_adapter=XhsSelfProfileAdapter()
+                )
+            finally:
+                db.close()
+            assert state["peak"] >= 2, f"应至少两个账号同时在探，实测峰值 {state['peak']}"
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_probe_parallelism_comes_from_the_sync_setting(self, monkeypatch: Any):
+        """并行度**复用同步那把尺子**（一个真相源），并夹到 1–8。"""
+        from backend.app.services import note_sync_service
+
+        monkeypatch.setattr(note_sync_service, "sync_parallelism", lambda: 5)
+        assert login_state_service._probe_parallelism() == 5
+        monkeypatch.setattr(note_sync_service, "sync_parallelism", lambda: 99)
+        assert login_state_service._probe_parallelism() == login_state_service.PROBE_MAX_PARALLELISM
+        monkeypatch.setattr(note_sync_service, "sync_parallelism", lambda: 0)
+        assert login_state_service._probe_parallelism() == 1
+
+        def boom() -> int:
+            raise RuntimeError("配置读不到")
+
+        monkeypatch.setattr(note_sync_service, "sync_parallelism", boom)
+        assert (
+            login_state_service._probe_parallelism()
+            == login_state_service.PROBE_DEFAULT_PARALLELISM
+        )
+
+    def test_probe_thread_prefix_differs_from_the_sync_worker(self):
+        """探针线程名前缀**不得**与同步 worker 撞名（看门狗按前缀补齐会误建线程）。"""
+        from backend.app.services import note_sync_service
+
+        assert not login_state_service.PROBE_THREAD_PREFIX.startswith(
+            note_sync_service.SYNC_WORKER_THREAD_NAME
+        )
+        assert not note_sync_service.SYNC_WORKER_THREAD_NAME.startswith(
+            login_state_service.PROBE_THREAD_PREFIX
+        )
+
+    def test_proxy_guard_is_lock_free_without_proxy_env(self, monkeypatch: Any):
+        """**无代理 ⇒ 不持锁**：第二个调用不该等第一个出来（否则并发被整段吃掉）。"""
+        from backend.app.adapters.xhs import request_env
+
+        for key in request_env.PROXY_ENV_KEYS:
+            monkeypatch.delenv(key, raising=False)
+        monkeypatch.setattr(request_env, "_PROXY_ENV_PRESENT", None)
+
+        inside = threading.Event()
+        release = threading.Event()
+
+        def holder() -> None:
+            with request_env.direct_xhs_request_env():
+                inside.set()
+                release.wait(3)
+
+        thread = threading.Thread(target=holder, name="proxy-holder")
+        thread.start()
+        assert inside.wait(3), "holder 没能进入"
+        start = time.perf_counter()
+        with request_env.direct_xhs_request_env():
+            pass
+        elapsed = time.perf_counter() - start
+        release.set()
+        thread.join(3)
+        assert elapsed < 0.5, f"无代理时不该等锁（实测等了 {elapsed:.2f}s）"
+
+    def test_proxy_guard_still_serialises_when_proxy_env_present(self, monkeypatch: Any):
+        """**有代理 ⇒ 仍串行**：正确性优先，绝不静默降级为带着本机代理打平台。"""
+        from backend.app.adapters.xhs import request_env
+
+        monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
+        monkeypatch.setattr(request_env, "_PROXY_ENV_PRESENT", None)
+
+        inside = threading.Event()
+        release = threading.Event()
+
+        def holder() -> None:
+            with request_env.direct_xhs_request_env():
+                inside.set()
+                release.wait(3)
+
+        thread = threading.Thread(target=holder, name="proxy-holder-2")
+        thread.start()
+        assert inside.wait(3), "holder 没能进入"
+        start = time.perf_counter()
+        with request_env.direct_xhs_request_env():
+            pass
+        elapsed = time.perf_counter() - start
+        release.set()
+        thread.join(3)
+        assert elapsed >= 0.5, "有代理时必须互斥（否则会带着本机代理打小红书）"
+        assert os.environ.get("HTTP_PROXY") == "http://127.0.0.1:1", "退出时必须恢复环境变量"
+
+    def test_proxy_env_presence_is_judged_once(self, monkeypatch: Any):
+        """判定**只做一次**：否则处于别人清理窗口内的调用会误判「没有代理」而绕过锁。"""
+        from backend.app.adapters.xhs import request_env
+
+        for key in request_env.PROXY_ENV_KEYS:
+            monkeypatch.delenv(key, raising=False)
+        monkeypatch.setattr(request_env, "_PROXY_ENV_PRESENT", None)
+        assert request_env._proxy_env_present() is False
+        monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+        assert request_env._proxy_env_present() is False, "判定结果必须缓存"
+
+    def test_b1_cache_reuses_within_ttl(self, monkeypatch: Any):
+        """b1 命中缓存 ⇒ **不再起 node**（按平台 + 令牌分键）。"""
+        from backend.app.adapters.xhs import b1_cache
+
+        calls: list[str] = []
+
+        class _Profile:
+            fixed_b1 = ""
+
+            def current_b1(self) -> str:
+                calls.append("generated")
+                return "b1-value"
+
+        b1_cache.clear()
+        profile = _Profile()
+        assert b1_cache.cached_b1(b1_cache.PLATFORM_WWW, "cookies-a", profile) == "b1-value"
+        assert b1_cache.cached_b1(b1_cache.PLATFORM_WWW, "cookies-a", profile) == "b1-value"
+        assert len(calls) == 1, "第二次必须命中缓存（那正是省下来的 node 进程）"
+        b1_cache.cached_b1(b1_cache.PLATFORM_WWW, "cookies-b", profile)
+        assert len(calls) == 2, "不同令牌必须分键"
+        b1_cache.cached_b1(b1_cache.PLATFORM_CREATOR, "cookies-a", profile)
+        assert len(calls) == 3, "不同平台必须分键"
+        b1_cache.clear()
+
+    def test_b1_cache_defers_to_the_sdk_fixed_value(self):
+        """SDK 已显式给了固定 b1 ⇒ 直接用它，**一次都不生成**。"""
+        from backend.app.adapters.xhs import b1_cache
+
+        class _Profile:
+            fixed_b1 = "preset-b1"
+
+            def current_b1(self) -> str:
+                raise AssertionError("SDK 已固定 b1 时不得再生成")
+
+        assert b1_cache.cached_b1(b1_cache.PLATFORM_WWW, "cookies", _Profile()) == "preset-b1"
+
+    def test_b1_cache_can_be_switched_off(self, monkeypatch: Any):
+        """回退开关：TTL 置 0 ⇒ 每次都生成（恢复改前行为）。"""
+        from backend.app.adapters.xhs import b1_cache
+
+        calls: list[str] = []
+
+        class _Profile:
+            fixed_b1 = ""
+
+            def current_b1(self) -> str:
+                calls.append("generated")
+                return "b1-value"
+
+        monkeypatch.setattr(b1_cache, "B1_TTL_SECONDS", 0)
+        b1_cache.clear()
+        profile = _Profile()
+        b1_cache.cached_b1(b1_cache.PLATFORM_WWW, "cookies", profile)
+        b1_cache.cached_b1(b1_cache.PLATFORM_WWW, "cookies", profile)
+        assert len(calls) == 2, "TTL=0 时必须每次重新生成"
+
+    def test_shared_session_is_built_once_per_platform(self):
+        """共享会话：每平台只建一次、可整体回收（回退开关也钉住）。"""
+        from backend.app.adapters.xhs import http_session
+
+        http_session.close_all()
+        built: list[str] = []
+
+        def factory():
+            built.append("built")
+            return type("_Client", (), {"close": lambda self: None})()
+
+        try:
+            first = http_session.shared_client(http_session.SESSION_WWW, factory)
+            second = http_session.shared_client(http_session.SESSION_WWW, factory)
+            assert first is second, "同平台必须复用同一个会话"
+            assert len(built) == 1, "第二次不得再建（那正是省下来的握手）"
+            other = http_session.shared_client(http_session.SESSION_CREATOR, factory)
+            assert other is not first, "不同平台各自一个会话"
+            assert len(built) == 2
+        finally:
+            http_session.close_all()
+
+    def test_ds_fetcher_does_not_block_on_a_stale_value(self, monkeypatch: Any):
+        """DS 过期 ⇒ **立刻用旧值**，刷新交给后台（那 38s 的卡顿就是在这里消掉的）。"""
+        from xhs_utils.xhs_pc import dsl
+
+        fetcher = dsl.DsFetcher()
+        fetcher._value = "1783929625569"
+        fetcher._fetched_at = time.time() - (dsl._TTL + 10)
+        blocked: list[bool] = []
+
+        def fake_blocking(*, proxies=None, http_client=None, force=False) -> str:  # noqa: ANN001
+            blocked.append(force)
+            return "1783929625569"
+
+        monkeypatch.setattr(fetcher, "_fetch_blocking", fake_blocking)
+        start = time.perf_counter()
+        value = fetcher.get()
+        elapsed = time.perf_counter() - start
+        assert value == "1783929625569"
+        assert elapsed < 0.3, f"有旧值时必须立刻返回，实测 {elapsed:.2f}s"
+        for _ in range(100):
+            if blocked:
+                break
+            time.sleep(0.02)
+        assert blocked == [True], "过期时应在后台刷新（force=True）"
+
+    def test_ds_fetcher_blocks_when_the_value_is_too_stale(self, monkeypatch: Any):
+        """旧值过期超过 `_MAX_STALE` ⇒ 回到阻塞刷新（不许一直用几小时前的值）。"""
+        from xhs_utils.xhs_pc import dsl
+
+        fetcher = dsl.DsFetcher()
+        fetcher._value = "ancient"
+        fetcher._fetched_at = time.time() - (dsl._MAX_STALE + 10)
+        calls: list[bool] = []
+
+        def fake_blocking(*, proxies=None, http_client=None, force=False) -> str:  # noqa: ANN001
+            calls.append(force)
+            return "fresh"
+
+        monkeypatch.setattr(fetcher, "_fetch_blocking", fake_blocking)
+        assert fetcher.get() == "fresh"
+        assert calls == [False], "超过容忍窗口必须同步取新值"
+
+    def test_ds_refresh_thread_name_avoids_the_sync_worker(self):
+        """DS 后台刷新线程名**不得**撞上同步 worker 前缀（看门狗会误建重复线程）。"""
+        from backend.app.services import note_sync_service
+        from xhs_utils.xhs_pc import dsl
+
+        assert not dsl._REFRESH_THREAD_NAME.startswith(note_sync_service.SYNC_WORKER_THREAD_NAME)
+
+    def test_frontend_probe_is_deduplicated_while_in_flight(self):
+        """探活「在飞」去重（§18.18.10）：重复触发不得把平台请求数翻倍。
+
+        ⚠️ 复位必须在 `finally` —— 放 `try` 里的话失败路径不复位，探活会**永久失效**
+        （「安全网不能条件性」同一条纪律）。
+        """
+        source = (
+            ROOT / "frontend" / "src" / "pages" / "platforms" / "xhs" / "accounts-page.tsx"
+        ).read_text(encoding="utf-8")
+        assert "const loginProbeInFlight = useRef(false)" in source, "缺少在飞标记声明"
+        parts = source.split("async function autoCheckLoginStates()", 1)
+        assert len(parts) == 2, "autoCheckLoginStates 不见了（改名请同步更新本守卫）"
+        body = parts[1].split("async function", 1)[0]
+        assert "if (loginProbeInFlight.current)" in body, "入口必须检查在飞标记"
+        assert "loginProbeInFlight.current = true" in body, "入口必须置位"
+        assert re.search(
+            r"finally\s*\{[^}]*loginProbeInFlight\.current = false", body
+        ), "复位必须在 finally 里（失败路径也要复位）"

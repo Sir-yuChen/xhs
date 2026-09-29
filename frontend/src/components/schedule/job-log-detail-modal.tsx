@@ -19,9 +19,15 @@
  *
  * 缺值口径：快照为 null（该列新增之前的执行）时如实说明，不补一个
  * “看起来像当时”的配置（硬约束⑤：不造假）。
+ *
+ * ⚠️ **「执行账号」分两态**（2026-09-27 用户口径「执行账号应是当前账号信息卡的店铺」）：
+ * 账号卡按钮建的那条日志带 `params_override`（定向执行）⇒ 显示**那一个账号的名称**；
+ * 定时 / 手动「执行一次」的日志没有这一层 ⇒ 仍按任务配置显示「全部账号 / N 个账号」。
+ * 详见下方 `targetAccountId` 处的注释。
  */
-import { Card, Descriptions, Modal, Progress, Space, Tag, Typography } from "antd";
+import { Card, Descriptions, Modal, Space, Tag, Typography } from "antd";
 
+import { JobLogProgress } from "./job-log-progress";
 import {
   concurrentLabel,
   logStatusTag,
@@ -90,7 +96,23 @@ export function JobLogDetailModal({
 }: JobLogDetailModalProps) {
   const snapshot = log?.config_snapshot ?? null;
   const params = (snapshot?.params ?? null) as Record<string, unknown> | null;
+  /** 本次点击实际生效的语义（账号卡链路才有；cron 执行没有这一层）。 */
+  const override = (snapshot?.params_override ?? null) as Record<string, unknown> | null;
   const accountIds = Array.isArray(params?.account_ids) ? (params.account_ids as number[]) : null;
+  /**
+   * **定向执行**（账号卡「同步笔记 / 同步商品」按钮）本次实际跑的账号。
+   *
+   * 唯一来源是 `config_snapshot.params_override`（设计 13 §35.17.2 的记账口径）——
+   * 快照块里的 `params.account_ids` 在定向执行时已被后端收窄成同一个账号，但那里只有
+   * **id 数量**，说不出「是哪个账号」；`account_name` 是执行那一刻的账号名称快照。
+   *
+   * ⚠️ 不能再按 `params.account_ids` 判「全部账号」：2026-09-27 用户实测报障
+   * 「账号信息卡点同步笔记，执行详情的执行账号依旧展示的是全部账号」—— 那是 job 行的
+   * **任务配置**（空 = 本人全部账号），而这一次只跑了一个账号。
+   */
+  const targetAccountId =
+    typeof override?.account_id === "number" ? (override.account_id as number) : null;
+  const targetAccountName = targetAccountId === null ? "" : String(override?.account_name ?? "").trim();
   // 调用目标：**中文名在前、代码键在后**（与任务列表同口径）。
   // 快照里的 job_key 若已被注册表移除（不可能：注册表是代码侧白名单），
   // 中文名取不到 ⇒ 显示 `-`（缺值不猜，硬约束⑤）。
@@ -136,11 +158,12 @@ export function JobLogDetailModal({
               </Descriptions.Item>
               <Descriptions.Item label="耗时">{formatDuration(log.duration_ms)}</Descriptions.Item>
               <Descriptions.Item label="任务进度">
-                <Progress
-                  percent={Math.max(0, Math.min(100, log.progress ?? 0))}
-                  size="small"
-                  style={{ maxWidth: 220 }}
-                />
+                {/* ⚠️ **必须与任务日志列表列用同一个组件**（DEF-044，设计 13 §43）：
+                    旧实现这里直接读 `log.progress ?? 0`，于是「在跑且后端还没上报」时
+                    弹窗显示 0%，而列表列当时画的是满格条（看起来 100%）——
+                    同一行数据两个相反读数，用户 2026-09-28 实测报障。
+                    共用一个组件后，「未知」在两处都是同一种呈现（不定量滑动条）。 */}
+                <JobLogProgress log={log} size="default" maxWidth={220} />
               </Descriptions.Item>
               <Descriptions.Item label="消息" span={2}>
                 <JsonBlock value={log.message} />
@@ -195,11 +218,18 @@ export function JobLogDetailModal({
                 <Descriptions.Item label="并发">
                   {concurrentLabel(String(snapshot.concurrent ?? ""))}
                 </Descriptions.Item>
-                {accountIds !== null && (
+                {targetAccountId !== null ? (
+                  // 定向执行（账号卡按钮）⇒ 说清**这一个**账号是谁（名称取执行那一刻的快照；
+                  // 名称缺失（存量日志 / 账号已改名前的行）⇒ 退「1 个账号」，不猜名字）。
+                  <Descriptions.Item label="执行账号" span={2}>
+                    {targetAccountName || "1 个账号"}
+                  </Descriptions.Item>
+                ) : accountIds !== null ? (
+                  // 定时 / 手动「执行一次」的**任务配置**口径：空 = 本人全部账号。
                   <Descriptions.Item label="执行账号" span={2}>
                     {accountIds.length === 0 ? "全部账号" : `${accountIds.length} 个账号`}
                   </Descriptions.Item>
-                )}
+                ) : null}
                 <Descriptions.Item label="调用参数" span={2}>
                   <JsonBlock value={params} />
                 </Descriptions.Item>

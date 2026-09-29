@@ -1,20 +1,24 @@
-"""笔记 ↔ 商品关系表（设计 13 §26）：`note_goods` 多对多 + 同步时解析落库。
+"""笔记 ↔ 商品关系表（设计 13 **§26.7**）：`note_goods` 多对多 + 同步时落库。
 
-用户口径：「笔记可能会挂载商品，同步笔记时如果存在笔记挂载得商品，则应与本地商品
-信息表中对应商品建立关系表……一个商品下可能存在多个笔记，笔记与商品之间得关系均是
-多对多，新增笔记商品关系表」＋「笔记相关得信息单独一张表，商品信息单独一张表，
-笔记与商品之间得关系单独一张关系表」。
+用户口径（2026-09-27，本轮）：
 
-本文件守的纪律：
+> 「同步笔记时，如果笔记挂有商品**必须**将笔记与商品的关系落库到笔记与商品关系表，
+> **无需校验商品是否存在**，删除笔记时需删除笔记与商品之间的关系」
+> ＋「**关系表改存平台商品 ID 和平台笔记 ID**」。
+
+本文件守的纪律（与 §26.7.7 的测试要点表一一对应）：
 
 1. **M2M 两个方向都成立**：一篇笔记挂多个商品 ⇒ 多行；一个商品被多篇笔记挂 ⇒ 多行；
-2. **幂等**：同一关系重复解析不报错、不产生重复行（唯一键 `(note_id, product_id)`）；
-3. **缺侧跳过**：商品还没同步（本地无 `shop_products` 行）⇒ 0 行、不造假；
-   商品落库后自愈解析补上（**两种先后顺序都收敛**，不做半成品）；
+2. **幂等**：同一关系重复解析不报错、不产生重复行（唯一键 `(user_id, note_id, item_id)`）；
+3. **不校验商品存在**（本轮的核心变化）：本地 `shop_products` 里**没有**这件商品 ⇒
+   关系行**照样落**（旧口径「任一侧缺失 ⇒ 跳过」已废）；唯一跳过条件是条目里
+   **取不到 `item_id`**；
 4. **只增不删**：二次解析时挂载变少 ⇒ 旧关系行仍在（§23：同步链路不做删除维度）；
 5. **两条调用点都覆盖**：creator 源（证据缓存路径）与 ark 源（条目自带 goods_infos）；
-6. **纯本地**：解析过程零平台请求（只读缓存 + 本地两张表）；
-7. **删除链**：笔记被删 ⇒ 指向它的关系行一并删（2026-09-23 用户口径，见文件末尾）。
+6. **零平台请求**：解析过程只读缓存 / 调用方给的条目，不打平台；
+7. **删除链**：笔记被删 ⇒ 指向它的关系行一并删（2026-09-23 用户口径）；
+8. **读取退化**：台账缺行时 `GET /notes` 的 `goods` 只给 `item_id`（标题 / 价格留空）；
+9. **发布改写笔记 ID 时关系跟着走**（本地生成笔记的 `local_…` ⇒ 平台真 ID）。
 """
 from __future__ import annotations
 
@@ -85,12 +89,12 @@ def _add_product(db, shop, item_id: str, *, user_id: int) -> ShopProduct:
 
 
 def _relations(db) -> list[tuple[str, str]]:
-    """本地关系 ⇒ (平台 note_id, item_id) 对（按两侧排序，稳定可比）。"""
-    rows = db.execute(
-        select(Note.note_id, ShopProduct.item_id)
-        .join(NoteGoods, NoteGoods.note_id == Note.id)
-        .join(ShopProduct, ShopProduct.id == NoteGoods.product_id)
-    ).all()
+    """关系行 ⇒ (平台 note_id, 平台 item_id) 对（**直接读关系表**）。
+
+    ⚠️ 2026-09-27（§26.7）：关系表两个字段都是平台 ID ⇒ 不再需要 join
+    `notes` / `shop_products`（这也正是「台账缺行也有关系」的结构保证）。
+    """
+    rows = db.execute(select(NoteGoods.note_id, NoteGoods.item_id)).all()
     return sorted((note_id, item_id) for note_id, item_id in rows)
 
 
@@ -120,21 +124,20 @@ def test_m2m_holds_in_both_directions(env):
         ("NOTE-A", "ITEM-2"),
         ("NOTE-B", "ITEM-1"),
     ]
-    # 反查：ITEM-1 被几篇笔记挂（商品 → 笔记方向）
+    # 反查：ITEM-1 被几篇笔记挂（商品 → 笔记方向，按平台 ID 关联）
     notes_of_p1 = db.scalars(
         select(Note.note_id)
-        .join(NoteGoods, NoteGoods.note_id == Note.id)
-        .where(NoteGoods.product_id == p1.id)
+        .join(NoteGoods, NoteGoods.note_id == Note.note_id)
+        .where(NoteGoods.item_id == p1.item_id)
     ).all()
     assert sorted(notes_of_p1) == ["NOTE-A", "NOTE-B"]
     # 正查：NOTE-A 挂了几个商品（笔记 → 商品方向）
     products_of_a = db.scalars(
-        select(ShopProduct.item_id)
-        .join(NoteGoods, NoteGoods.product_id == ShopProduct.id)
-        .where(NoteGoods.note_id == note_a.id)
+        select(NoteGoods.item_id).where(NoteGoods.note_id == note_a.note_id)
     ).all()
     assert sorted(products_of_a) == ["ITEM-1", "ITEM-2"]
     assert p2.id != p1.id
+    assert note_b.note_id == "NOTE-B"
 
 
 # --------------------------------------------------------------------------- #
@@ -156,51 +159,72 @@ def test_repeated_link_is_idempotent(env):
 
 
 # --------------------------------------------------------------------------- #
-# 3) 缺侧跳过 + 自愈（两种先后顺序都收敛）
+# 3) 不校验商品存在（本轮核心口径）
 # --------------------------------------------------------------------------- #
-def test_skips_when_product_not_synced_yet(env):
-    """商品还没同步（本地无行）⇒ 0 行、计入 skipped，**不造假**。"""
+def test_links_even_when_product_missing(env):
+    """商品台账里**没有**这件商品 ⇒ 关系行**照样落**（用户口径「无需校验商品是否存在」）。
+
+    旧口径（~~§26.2-3「任一侧缺失 ⇒ 跳过」~~）的实际后果：真实库 1933 个挂载条目里
+    **16 个**因台账缺行永远落不了库，内容库那条笔记的「挂载商品」区空着。
+    """
     db, _user, account, _shop = env
     _add_note(db, account, "NOTE-A")
 
-    result = sgs.link_note_goods(db, account, [("NOTE-A", [{"item_id": "ITEM-1"}])])
+    result = sgs.link_note_goods(db, account, [("NOTE-A", [{"item_id": "ITEM-MISSING"}])])
 
-    assert result == {"linked": 0, "skipped": 1}
-    assert _relations(db) == []
+    assert result == {"linked": 1, "skipped": 0}, "商品不在台账里就跳过 = 用户要推翻的那条"
+    assert _relations(db) == [("NOTE-A", "ITEM-MISSING")]
+    assert db.scalar(select(func.count()).select_from(ShopProduct)) == 0, "不得为落关系而造商品行"
 
 
-def test_self_heals_after_goods_sync(env):
-    """先同步笔记（商品没落库 ⇒ 建不起）⇒ 商品落库后自愈解析补上。
+def test_links_without_note_row_and_without_shop(env):
+    """连本地笔记行都没有 / 账号没绑店 ⇒ 关系也照样落（两个字段都是平台 ID）。"""
+    db, _user, account, _shop = env
+    # 不建 note 行、也不解析店铺（旧实现会在 `account_shop_id` 这一步直接返回 skipped）
+    result = sgs.link_note_goods(db, account, [("NOTE-NOT-LOCAL", [{"item_id": "ITEM-X"}])])
 
-    复刻商品同步收尾的自愈钩子（`shop_goods_sync_service._sync_with_task`）：
-    读该账号的证据缓存 + 同一解析器。两种先后顺序都必须收敛，否则
-    「两个按钮都点过，关系表还是空的」（§21.3 同款假修复）。
-    """
-    db, user, account, shop = env
+    assert result == {"linked": 1, "skipped": 0}
+    assert _relations(db) == [("NOTE-NOT-LOCAL", "ITEM-X")]
+
+
+def test_skips_only_when_item_id_missing(env):
+    """唯一跳过条件：挂载条目里**取不到 `item_id`**（无键可落，不造假）。"""
+    db, _user, account, _shop = env
     _add_note(db, account, "NOTE-A")
-    # 证据缓存：平台说过 NOTE-A 挂了 ITEM-1（creator 源 sync_note_ids 的落库形状）
-    db.add(
-        ShopNoteGoods(
-            user_id=user.id,
-            platform_account_id=account.id,
-            note_id="NOTE-A",
-            item_id="ITEM-1",
-            goods_json='[{"item_id": "ITEM-1", "item_title": "商品"}]',
-        )
+
+    result = sgs.link_note_goods(
+        db,
+        account,
+        [
+            ("NOTE-A", [{"id": "sku-level-id"}, {"item_title": "只有标题"}, {"item_id": ""}]),
+            ("NOTE-A", [{"item_id": "ITEM-1"}]),
+        ],
     )
-    db.commit()
 
-    # 第一遍：商品还没落库 ⇒ 建不起
-    assert sgs.link_note_goods(db, account, sgs.cached_goods_mappings(db, account.id))["linked"] == 0
-    assert _relations(db) == []
-
-    # 商品同步落地（自愈钩子的触发条件）
-    _add_product(db, shop, "ITEM-1", user_id=user.id)
-
-    # 第二遍（自愈）：同一解析器，关系补上
-    healed = sgs.link_note_goods(db, account, sgs.cached_goods_mappings(db, account.id))
-    assert healed["linked"] == 1
+    assert result == {"linked": 1, "skipped": 3}, "取不到 item_id 才跳过（`id` 是 SKU 级，不认）"
     assert _relations(db) == [("NOTE-A", "ITEM-1")]
+
+
+def test_reader_degrades_to_item_id_when_product_missing(env):
+    """读取端：台账缺行 ⇒ `goods` 只给 `item_id`，标题 / 价格留空（缺值口径）。"""
+    from backend.app.api.notes import _note_goods
+
+    db, user, account, shop = env
+    note = _add_note(db, account, "NOTE-A")
+    _add_product(db, shop, "ITEM-IN-LEDGER", user_id=user.id)
+    sgs.link_note_goods(
+        db,
+        account,
+        [("NOTE-A", [{"item_id": "ITEM-IN-LEDGER"}, {"item_id": "ITEM-MISSING"}])],
+    )
+
+    goods = {entry["item_id"]: entry for entry in _note_goods(db, note)}
+    assert set(goods) == {"ITEM-IN-LEDGER", "ITEM-MISSING"}
+    assert goods["ITEM-IN-LEDGER"]["item_title"] == "商品 ITEM-IN-LEDGER"
+    # 台账缺行的那件：有 ID、没标题没价格（前端渲染「（无商品标题）」「价格待同步」）
+    assert goods["ITEM-MISSING"]["item_title"] == ""
+    assert goods["ITEM-MISSING"]["price"] == ""
+    assert goods["ITEM-MISSING"]["images"] == []
 
 
 # --------------------------------------------------------------------------- #
@@ -258,8 +282,7 @@ def creator_env(tmp_path, monkeypatch):
 
     monkeypatch.setattr(nsync.FakeQianfanAdapter, "get_goods_note_page", _goods_note_page)
 
-    # 预置本地商品（关系表的右侧）：creator 源按 note_ids 查到 ITEM-C-N1/C-N2，
-    # ark 源条目自带 ITEM-ARK-N1。
+    # 预置本地商品（**只**为验证「台账里有的商品能带出标题」，不再是落关系的前提）
     db = SessionLocal()
     try:
         from backend.app.models.shop import Shop
@@ -294,8 +317,6 @@ def test_note_sync_links_goods_from_both_sources(creator_env):
         assert ("C-N2", "ITEM-C-N2") in relations
         # ark 源：ARK-N1 的挂载商品随条目 inline 给出
         assert ("ARK-N1", "ITEM-ARK-N1") in relations
-        # 关系只建在「两边都解析成功」的行上：没有对应本地商品的不出现
-        assert all(item_id.startswith("ITEM-") for _, item_id in relations)
     finally:
         db.close()
 
@@ -306,15 +327,13 @@ def test_note_sync_links_goods_from_both_sources(creator_env):
 def test_purge_note_deletes_its_goods_relations(env):
     """删笔记 ⇒ 该笔记的 `note_goods` 关系行一并删；**别的笔记的关系不受影响**。
 
-    用户口径：「删除笔记时需要删除笔记与商品的关联关系」。
+    用户口径：「删除笔记时需要删除笔记与商品的关联关系」（2026-09-27 再次强调）。
 
     真实库曾留 **4 条孤儿行**（note_id 1963/1964/1965/1967 → product_id 1）——
-    删掉那几条本地生成笔记时 `purge_note` 没清关系表。它们不参与任何列表口径
-    （`note_count` 走 join），但数据自相矛盾（关系指向一条不存在的笔记）。
+    删掉那几条本地生成笔记时 `purge_note` 没清关系表。
 
-    ⚠️ 与**删商品**的口径**刻意相反**（§33.10）：删本地台账商品行时关系行**不删**
-    （商品会被同步写回、关系要原样接上）；删笔记时**必须删**（笔记是真删，
-    没有「写回时接上」这回事）。同一个关系表、两个方向、两种正确处理。
+    ⚠️ 2026-09-27（§26.7）：关系表改按**平台笔记 ID + 归属**存 ⇒ 删除判据是
+    `(user_id, note.note_id)`（不再是本地主键）。行为与用户口径不变。
     """
     from backend.app.api.notes import purge_note
 
@@ -345,6 +364,29 @@ def test_purge_note_deletes_its_goods_relations(env):
     assert db.scalar(select(func.count()).select_from(ShopProduct)) == 2
 
 
+def test_purge_note_does_not_touch_topic_dictionary(env):
+    """用户口径「**内容库页点击删除笔记时，话题只删关系表**」：字典行必须留着。
+
+    与商品关系同一条删除链：`note_topics` 只删**关系行**，`topics` 是用户资产
+    （别的笔记还在用、话题筛选下拉还要列它）—— 删一篇笔记不该让话题消失。
+    """
+    from backend.app.api.notes import purge_note
+    from backend.app.models import NoteTopic, Topic
+    from backend.app.services import note_topic_service as nts
+
+    db, _user, account, _shop = env
+    note = _add_note(db, account, "NOTE-A")
+    nts.apply_sync_topics(db, note, ["露营", "徒步"])
+    db.commit()
+    assert db.scalar(select(func.count()).select_from(NoteTopic)) == 2
+
+    purge_note(db, note)
+    db.commit()
+
+    assert db.scalar(select(func.count()).select_from(NoteTopic)) == 0, "关系行要删"
+    assert sorted(db.scalars(select(Topic.name)).all()) == ["徒步", "露营"], "字典行不能删"
+
+
 def test_purge_note_with_no_relations_is_a_noop_for_goods(env):
     """没有关系行的笔记删起来也不报错（`delete ... where note_id = x` 命中 0 行）。"""
     from backend.app.api.notes import purge_note
@@ -357,3 +399,55 @@ def test_purge_note_with_no_relations_is_a_noop_for_goods(env):
 
     assert _relations(db) == []
     assert db.get(Note, note.id) is None
+
+
+# --------------------------------------------------------------------------- #
+# 8) 发布改写笔记 ID：关系行跟着走（本地生成笔记 `local_…` ⇒ 平台真 ID）
+# --------------------------------------------------------------------------- #
+def test_publish_rewrite_moves_relations_to_platform_id(env):
+    """发布成功把 `notes.note_id` 改成平台真 ID ⇒ 关系行的笔记键**跟着改**。
+
+    不迁的实际后果：笔记一发出去，挂链商品就查不到了（关系行还在，但指向一个
+    不再存在的笔记 ID）。发布路径 `_execute_publish` 在改写那一行调用本函数。
+    """
+    from backend.app.services.note_publish_service import _move_note_goods_relations
+
+    db, _user, account, _shop = env
+    note = _add_note(db, account, "local_abc123")
+    sgs.link_note_goods(db, account, [("local_abc123", [{"item_id": "ITEM-1"}])])
+    assert _relations(db) == [("local_abc123", "ITEM-1")]
+
+    note.note_id = "6ab2c3d40000000000000001"
+    moved = _move_note_goods_relations(
+        db, note, old_note_id="local_abc123", new_note_id=note.note_id
+    )
+    db.commit()
+
+    assert moved == 1
+    assert _relations(db) == [("6ab2c3d40000000000000001", "ITEM-1")]
+
+
+def test_publish_rewrite_dedupes_when_new_key_already_linked(env):
+    """新键上**已有**同一关系（同步链路按真 ID 落过）⇒ 旧行删掉、不撞唯一键。"""
+    from backend.app.services.note_publish_service import _move_note_goods_relations
+
+    db, _user, account, _shop = env
+    note = _add_note(db, account, "local_abc123")
+    sgs.link_note_goods(
+        db,
+        account,
+        [
+            ("local_abc123", [{"item_id": "ITEM-1"}]),
+            ("6ab2c3d40000000000000001", [{"item_id": "ITEM-1"}]),
+        ],
+    )
+    assert len(_relations(db)) == 2
+
+    note.note_id = "6ab2c3d40000000000000001"
+    moved = _move_note_goods_relations(
+        db, note, old_note_id="local_abc123", new_note_id=note.note_id
+    )
+    db.commit()
+
+    assert moved == 0, "新键上已有同一关系 ⇒ 不新建"
+    assert _relations(db) == [("6ab2c3d40000000000000001", "ITEM-1")]

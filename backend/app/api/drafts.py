@@ -12,7 +12,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user, get_owned_active_account
-from backend.app.models import AiDraft, DraftAsset, Note, NoteAsset, PlatformAccount, PublishAsset, PublishJob, User
+from backend.app.models import AiDraft, DraftAsset, Note, NoteAsset, PublishAsset, PublishJob, User
 from backend.app.schemas.common import paginated
 
 router = APIRouter(prefix="/drafts", tags=["drafts"])

@@ -742,7 +742,10 @@ def test_item_notes_reads_relation_table_without_touching_the_platform(tmp_path)
             db.flush()
             db.add(NoteAsset(note_id=note.id, asset_type="image", url="http://ci.example/note-a.jpg", sort_order=0))
             product = db.scalar(select(ShopProduct).where(ShopProduct.item_id == "ITEM-1"))
-            db.add(NoteGoods(note_id=note.id, product_id=product.id))
+            # §26.7：关系表按平台 ID 落（笔记平台 ID ↔ 商品平台 ID）
+            db.add(
+                NoteGoods(user_id=note.user_id, note_id=note.note_id, item_id=product.item_id)
+            )
             # 平台证据缓存一行（覆盖率的计数口径：synced_notes 数的是它）
             store_entry(
                 db,
@@ -898,7 +901,9 @@ def _link_notes(session_local, account_id: int, item_id: str, count: int) -> Non
             )
             db.add(note)
             db.flush()
-            db.add(NoteGoods(note_id=note.id, product_id=product.id))
+            db.add(
+                NoteGoods(user_id=note.user_id, note_id=note.note_id, item_id=product.item_id)
+            )
         db.commit()
     finally:
         db.close()
@@ -1066,7 +1071,13 @@ def test_items_delete_removes_only_local_rows(tmp_path):
             )
             db.add(other_note)
             db.flush()
-            db.add(NoteGoods(note_id=other_note.id, product_id=other_product.id))
+            db.add(
+                NoteGoods(
+                    user_id=other_note.user_id,
+                    note_id=other_note.note_id,
+                    item_id=other_product.item_id,
+                )
+            )
             db.commit()
         finally:
             db.close()
@@ -1094,10 +1105,14 @@ def test_items_delete_removes_only_local_rows(tmp_path):
             )
             assert kept_other_shop == 1, "另一个店里的同 item_id 行不许被删"
 
-            # 只剩 2 条关系：ITEM-C 那 1 条 + 另一家店 ITEM-B 那 1 条
-            # （本店 ITEM-A 的 2 条、本店 ITEM-B 的 1 条都跟着删了）
-            assert db.scalar(select(func.count()).select_from(NoteGoods)) == 2, (
-                "关系行应只删指向被删商品的那些；幸存商品 / 别的店的关系必须留下"
+            # 只剩 1 条关系：ITEM-C 那 1 条。
+            # ⚠️ 2026-09-27（§26.7）：关系表按**平台商品 ID** 挂、**不带店铺维度**
+            # ⇒ 「另一家店里同名的 ITEM-B」的关系行**也会被删**（关系回答的是
+            # 「这条笔记挂了哪个平台商品」，与它在哪个店无关）。本用例里两家店同属
+            # 一个用户、item_id 撞名是刻意构造的退化场景：**商品行**（上面那条
+            # `kept_other_shop == 1`）才是按店收口的，关系行不是。
+            assert db.scalar(select(func.count()).select_from(NoteGoods)) == 1, (
+                "关系行按 item_id 删（ITEM-A / ITEM-B 的全部关系）；ITEM-C 的必须留下"
             )
             # 笔记本体不连坐（删的是关系不是笔记）：ITEM-A 2 篇 + ITEM-B 1 篇
             # + ITEM-C 1 篇 + 另一家店 1 篇 = 5 篇都该活着

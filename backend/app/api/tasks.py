@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -18,6 +19,8 @@ from backend.app.services.scheduler_service import run_due_publish_jobs
 from backend.app.services.task_cancel import signal_task_cancel
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
+
+logger = logging.getLogger(__name__)
 
 
 def serialize_task(task: Task) -> dict:
@@ -75,6 +78,15 @@ def get_tasks(
     platform: Optional[str] = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    task_types: str = Query(
+        "",
+        description=(
+            "按任务类型筛选（**逗号分隔**，如 `xhs_note_sync,xhs_shop_goods_sync`）。"
+            "任务中心「账号级任务」页签用它筛三类账号级任务（设计 13 §35.16）。"
+            "⚠️ 刻意用逗号串而不是可重复参数：axios 对数组默认序列化成 `task_types[]=`，"
+            "FastAPI 不认（静默筛不到 ⇒ 页面空列表却不报错），逗号串两端都无歧义。"
+        ),
+    ),
     tree: bool = Query(
         False,
         description="队列记录页的父子树模式（批次行 + 内嵌 children + 派生状态）",
@@ -104,6 +116,11 @@ def get_tasks(
     statement = select(Task).where(Task.user_id == current_user.id)
     if platform:
         statement = statement.where(Task.platform == platform)
+    if task_types:
+        # §35.16：筛选必须在**后端**做 —— 前端过滤会把账号级行从分页里切掉。
+        wanted = [item.strip() for item in str(task_types).split(",") if item.strip()]
+        if wanted:
+            statement = statement.where(Task.task_type.in_(wanted))
     tasks = db.scalars(statement.order_by(Task.created_at.desc(), Task.id.desc())).all()
     return paginated([serialize_task(task) for task in tasks], page, page_size)
 
@@ -293,6 +310,25 @@ def cancel_task(
         # 队列项被取消 ⇒ 它的批次父行派生状态跟着变（写回是冗余，读取仍按子行现算）
         if result.rowcount:
             _refresh_parent_batch(db, task)
+            # 任务日志**同步收口**（2026-09-27 用户口径「点击取消按钮二次确认后真实取消
+            # 再执行的任务并修改对应任务日志记录相关状态和数据」）：取消是用户可见的终态，
+            # 日志不能等观测线程（它可能已随进程消失、或还在轮询周期里）—— 否则又会出现
+            # 「日志说正在执行、任务已取消」两个相反结论。
+            #
+            # ⚠️ **收口失败不许让整个请求失败**（2026-09-27 用户报障「操作列点击取消任务
+            # 提示请求失败，但任务实际已经被取消了」）：上面那次 `db.commit()` 已经把取消
+            # **落库**了 —— 它是不可回滚的既成事实。收口只是**附加动作**，它抛异常时返回 500
+            # 等于把「日志没同步」说成「取消失败」，是**错误归因**（用户会重复点，而任务早已
+            # 取消；更糟的是他可能以为没取消掉）。留痕 + 让请求正常返回；残留的 running 日志
+            # 由启动时的 `close_orphan_running_logs` 兜底收口（安全网不条件性，DEF-048）。
+            from backend.app.services import sync_task_service
+
+            try:
+                if sync_task_service.close_running_logs_for_task(db, task.id):
+                    db.commit()
+            except Exception:  # noqa: BLE001 - 主操作已落库，附加动作不许翻盘
+                logger.exception("取消任务 %s：日志收口失败（取消本身已生效）", task.id)
+                db.rollback()
     return serialize_task(task)
 
 

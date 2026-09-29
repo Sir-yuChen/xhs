@@ -386,7 +386,43 @@ class TestHydratePageNotes:
             db.close()
 
     def test_note_without_detail_url_makes_no_request(self, tmp_path: Path):
-        """本地没有可用详情地址 → 一次请求都不发（没有读取目标就别硬上）。"""
+        """`note_id` 非平台形态 ⇒ 一次请求都不发，判 `no_url` 并**写标记**。"""
+        import backend.app.services.note_sync_service as nss
+
+        db_dependency, db, creator = _build_db(tmp_path)
+        try:
+            # ⚠️ 必须用**非平台形态**的 id：平台形态 + 无令牌现在是 `no_token`
+            # （可自救 ⇒ 不写标记），见下一个用例。
+            local_id = "N-LOCAL-1"
+            _add_note(db, creator, local_id, raw={})
+            calls: list[str] = []
+
+            class SpyAdapter:
+                def __init__(self, cookies):
+                    pass
+
+                def get_note_info(self, url):
+                    calls.append(url)
+                    return True, "ok", {}
+
+            result = _hydrate(db, creator, [local_id], SpyAdapter("x"))
+
+            assert calls == []
+            # 本地缺详情地址**不会自愈** ⇒ 写标记，否则每轮全量同步都白打一次。
+            assert result["no_url"] == 1
+            assert result["no_token"] == 0
+            note = db.scalars(select(Note).where(Note.note_id == local_id)).one()
+            assert note.hydrated_at is not None
+        finally:
+            db.close()
+
+    def test_note_missing_token_is_blocked_without_marker(self, tmp_path: Path):
+        """平台形态 id + 无令牌 ⇒ `no_token`（**用户可自救**）⇒ **不写** `hydrated_at`。
+
+        §19.13.9（2026-09-28 用户口径「没有令牌强行拦截，让用户补齐登录令牌」）：
+        缺令牌不是本地数据缺失 —— 补齐网页版登录后这些行还要能被补，必须留 NULL。
+        与上一个用例（`no_url` 写标记）刻意相反，两者不能混成一个状态。
+        """
         import backend.app.services.note_sync_service as nss
 
         db_dependency, db, creator = _build_db(tmp_path)
@@ -404,11 +440,11 @@ class TestHydratePageNotes:
 
             result = _hydrate(db, creator, [HEX_NOTE_ID], SpyAdapter("x"))
 
-            assert calls == []
-            # 本地缺详情地址**不会自愈** ⇒ 写标记，否则每轮全量同步都白打一次。
-            assert result["no_url"] == 1
+            assert calls == [], "缺令牌不硬打（平台对无 token 链接一律 302 → /404）"
+            assert result["no_token"] == 1
+            assert result["no_url"] == 0
             note = db.scalars(select(Note).where(Note.note_id == HEX_NOTE_ID)).one()
-            assert note.hydrated_at is not None
+            assert note.hydrated_at is None, "缺令牌可自救 ⇒ 不写标记"
         finally:
             db.close()
 
@@ -521,8 +557,13 @@ class TestDetailRefBackfill:
        那两条链路每轮全量重打，放开就白烧额度（第 4 条用例守这条边界）。
     """
 
-    def test_note_detail_url_tokenless_branch_is_gated(self, tmp_path: Path):
-        """兜底拼 explore 只对「hex 平台 ID + 显式允许」放开，其余一律不拼。"""
+    def test_note_detail_url_requires_a_token(self, tmp_path: Path):
+        """无令牌 ⇒ 一律返空串（§19.13.9：`allow_tokenless` 兜底已删除）。
+
+        旧实现允许单条同步路径拼一个**无 token** 的 explore 地址；平台对这类链接
+        一律 302 → `/404?error_code=300031`（§19.13.8 真机实测，带会话也一样）⇒
+        那是 DEF-053「假成功」的入口。现在拿不到令牌就返空串，由调用方拦截。
+        """
         import backend.app.services.note_sync_service as nss
 
         class _Note:
@@ -530,15 +571,12 @@ class TestDetailRefBackfill:
                 self.note_id = note_id
                 self.raw_json = raw
 
+        # 平台形态 id 但没令牌 ⇒ 空串（不再拼「看起来能用」的地址）。
         local_generated = _Note(HEX_NOTE_ID, {"aigc": {"x": 1}, "item_id": "ITEM-1"})
         assert nss._note_detail_url(local_generated) == ""
-        assert nss._note_detail_url(local_generated, allow_tokenless=True) == (
-            f"https://www.xiaohongshu.com/explore/{HEX_NOTE_ID}"
-        )
-        # 非平台形态的 id（本地临时 id）⇒ 再允许也不拼（拼出来平台也不认）。
-        local_temp = _Note("N-LOCAL-1", {})
-        assert nss._note_detail_url(local_temp, allow_tokenless=True) == ""
-        # 有 token 的老路径不受影响（DEF-053 防线原样）。
+        # 非平台形态 id ⇒ 同样空串（拼出来平台也不认）。
+        assert nss._note_detail_url(_Note("N-LOCAL-1", {})) == ""
+        # 有 token 的路径不受影响。
         with_token = _Note(
             HEX_NOTE_ID,
             {"note_url": f"https://www.xiaohongshu.com/explore/{HEX_NOTE_ID}", "xsec_token": "T"},
@@ -547,11 +585,12 @@ class TestDetailRefBackfill:
             f"https://www.xiaohongshu.com/explore/{HEX_NOTE_ID}?xsec_token=T"
         )
 
-    def test_batch_hydration_keeps_the_no_url_guard(self, tmp_path: Path):
-        """批量 / 定时链路（`refresh=False`）对无地址笔记仍然**零请求 + no_url**。
+    def test_batch_hydration_blocks_on_missing_token(self, tmp_path: Path):
+        """批量 / 定时链路对**缺令牌**的笔记：零请求 + `no_token`，且**不写**标记。
 
-        DEF-053 的防线不能因为修单条同步被顺手拆掉：无 token 的「假成功」在
-        每轮全量同步里反复出现，比一条笔记同步不了贵得多。
+        DEF-053 的防线不能因为修单条同步被顺手拆掉（无 token 的「假成功」在每轮
+        全量同步里反复出现）；但也不能把「缺令牌」记成 `no_url` —— 前者用户补齐
+        登录就能自愈，后者才是真的没救（写标记出队）。
         """
         import backend.app.services.note_sync_service as nss
 
@@ -571,39 +610,50 @@ class TestDetailRefBackfill:
             result = nss.hydrate_note_detail(db, creator, note, adapter=SpyAdapter("x"))
 
             assert calls == []
-            assert result["status"] == "no_url"
-            assert note.hydrated_at is not None, "no_url 不会自愈 ⇒ 写标记出队"
+            assert result["status"] == "no_token"
+            assert result["code"] == "NOTE_DETAIL_TOKEN_REQUIRED"
+            assert note.hydrated_at is None, "缺令牌可自救 ⇒ 不写标记，补齐登录后重试"
         finally:
             db.close()
 
-    def test_single_sync_falls_back_to_explore_url(self, tmp_path: Path, monkeypatch):
-        """单条同步（refresh=True）对无地址笔记：回查不到 token 也能打详情。"""
+    def test_single_sync_blocks_when_token_missing(self, tmp_path: Path, monkeypatch):
+        """单条同步：ark 回查也拿不到令牌 ⇒ **拦截**，不翻 `user_posted`、不打详情。
+
+        §19.13.9（2026-09-28 用户口径「移除兜底，不允许出现翻页到底；没有令牌强行
+        拦截，让用户补齐登录令牌」）。旧实现在这里拼一个无 token 的 explore 地址
+        去打详情 —— 平台一律 302 → `/404`，白烧一次请求（DEF-053 同型）。
+        """
         import backend.app.api.platforms.xhs.pc as pc_module
         import backend.app.services.note_sync_service as nss
 
         db_dependency, db, creator = _build_db(tmp_path)
         try:
             note = _add_note(db, creator, HEX_NOTE_ID, content="旧正文", raw={})
-            calls: list[str] = []
+            detail_calls: list[str] = []
+            posted_calls: list[str] = []
 
             class SpyAdapter:
                 def __init__(self, cookies):
                     pass
 
                 def get_note_info(self, url):
-                    calls.append(url)
+                    detail_calls.append(url)
                     return True, "ok", _detail_payload(HEX_NOTE_ID, desc="平台最新正文")
+
+                def get_user_posted_page(self, user_id, cursor="", xsec_token="", xsec_source=""):
+                    posted_calls.append(cursor)
+                    return True, "", {"data": {"notes": [], "has_more": False, "cursor": ""}}
 
             monkeypatch.setattr(pc_module, "get_xhs_pc_api_adapter_factory", lambda: SpyAdapter)
             monkeypatch.setattr(nss, "get_rate_limiter", lambda: _AllowLimiter())
 
             result = nss.sync_note_from_platform(db, note)
 
-            assert result["status"] == "ok", result
-            # 兜底 URL 就是 explore/{平台 id}（无 token）；不再判 no_url。
-            assert calls == [f"https://www.xiaohongshu.com/explore/{HEX_NOTE_ID}"]
-            # 刷新语义：详情有非空正文 ⇒ 覆盖本地（§25.3）。
-            assert note.content == "平台最新正文"
+            assert result["status"] == "no_token", result
+            assert result["code"] == "NOTE_DETAIL_TOKEN_REQUIRED"
+            assert detail_calls == [], "缺令牌 ⇒ 详情一次都不打"
+            assert posted_calls == [], "缺令牌 ⇒ 不翻 user_posted（兜底已移除）"
+            assert note.content == "旧正文", "没取到详情就不动本地正文"
         finally:
             db.close()
 
@@ -892,3 +942,319 @@ class TestLibraryDetailEndpoint:
             assert "hydrate" not in response.json()
         finally:
             self._cleanup()
+
+
+class TestExploreSsrDetailRoute:
+    """§19.13.8（2026-09-28）：详情改走 explore SSR，不必再为每篇翻 `user_posted` 全表。
+
+    旧契约（§19.13.6 ⑤）是「每篇详情前先用 www 会话翻 `user_posted` 拿网页侧令牌」
+    —— 1951 条 ÷ 30/页 ≈ 66 页、页间停顿 5s × 抖动 ⇒ **5–8 分钟/篇**，批量 N 篇 =
+    N 次全表扫描。真机实测（真实窗口 Chrome + CDP，探针
+    `.workbuddy/scripts/probe_note_detail_by_id.py`）证明：**explore 页面的 SSR 里
+    就带着详情**，一次 GET 拿全，且**不挑令牌来源**（千帆 / 创作者令牌同样成功）。
+
+    本类守三层契约：
+
+    ① **取数路由**：SSR 优先（`get_note_info_html`），拿到就不打 `/v1/feed`；
+       SSR 取不到 ⇒ 回退 JSON 端点，行为与改造前逐字一致；
+    ② **单条同步零翻页**：本地已有令牌 ⇒ 一次 `user_posted` 都不发（旧实现每篇
+       66–200 页）；
+    ③ **兜底已整段移除**（§19.13.9，2026-09-28 用户口径「移除兜底，不允许出现翻页
+       到底；没有令牌强行拦截，让用户补齐登录令牌」）：源码里不许再出现任何
+       「翻 `user_posted` 拿详情令牌」的实现，缺令牌一律结构化拦截。
+    """
+
+    def test_ssr_is_preferred_and_json_feed_is_not_called(self, tmp_path: Path):
+        """本地有令牌 ⇒ 走 explore SSR，`/v1/feed` **一次都不打**。"""
+        import backend.app.services.note_sync_service as nss
+
+        _db_dependency, db, creator = _build_db(tmp_path)
+        try:
+            note = _add_note(
+                db,
+                creator,
+                HEX_NOTE_ID,
+                content="",
+                raw={
+                    "note_url": f"https://www.xiaohongshu.com/explore/{HEX_NOTE_ID}?xsec_token=TK",
+                    "xsec_token": "TK",
+                },
+            )
+            ssr_calls: list[str] = []
+            feed_calls: list[str] = []
+
+            class SsrAdapter:
+                def __init__(self, cookies: str) -> None:
+                    pass
+
+                def get_note_info_html(self, url: str):
+                    ssr_calls.append(url)
+                    return True, "成功", _detail_payload(HEX_NOTE_ID, desc="SSR 正文")
+
+                def get_note_info(self, url: str):
+                    feed_calls.append(url)
+                    return True, "ok", _detail_payload(HEX_NOTE_ID, desc="JSON 正文")
+
+            result = nss.hydrate_note_detail(db, creator, note, adapter=SsrAdapter("x"))
+
+            assert result["status"] == "ok", result
+            assert len(ssr_calls) == 1, "详情必须走 explore SSR"
+            assert feed_calls == [], "SSR 已拿到 ⇒ 不该再打 /v1/feed"
+            assert note.content == "SSR 正文"
+        finally:
+            db.close()
+
+    def test_ssr_failure_falls_back_to_json_feed(self, tmp_path: Path):
+        """SSR 取不到（结构变更 / 风控页）⇒ 回退 `/v1/feed`，不判死。"""
+        import backend.app.services.note_sync_service as nss
+
+        _db_dependency, db, creator = _build_db(tmp_path)
+        try:
+            note = _add_note(
+                db,
+                creator,
+                HEX_NOTE_ID,
+                raw={
+                    "note_url": f"https://www.xiaohongshu.com/explore/{HEX_NOTE_ID}?xsec_token=TK",
+                    "xsec_token": "TK",
+                },
+            )
+            ssr_calls: list[str] = []
+            feed_calls: list[str] = []
+
+            class SsrFailingAdapter:
+                def __init__(self, cookies: str) -> None:
+                    pass
+
+                def get_note_info_html(self, url: str):
+                    ssr_calls.append(url)
+                    return False, "explore 页面未包含笔记数据（SSR 结构变更或该笔记不可见）", None
+
+                def get_note_info(self, url: str):
+                    feed_calls.append(url)
+                    return True, "ok", _detail_payload(HEX_NOTE_ID, desc="JSON 正文")
+
+            result = nss.hydrate_note_detail(db, creator, note, adapter=SsrFailingAdapter("x"))
+
+            assert result["status"] == "ok", result
+            assert len(ssr_calls) == 1 and len(feed_calls) == 1, "SSR 失败必须回退 JSON 端点"
+            assert note.content == "JSON 正文"
+        finally:
+            db.close()
+
+    def test_single_sync_with_local_token_never_lists_user_posted(
+        self, tmp_path: Path, monkeypatch: Any
+    ):
+        """**核心回归**：本地已有令牌 ⇒ 单条同步一次 `user_posted` 翻页都不发。
+
+        改造前这里每篇都要翻 66–200 页（5–8 分钟）；本用例就是那件事的守卫 ——
+        一旦有人把「打详情前必刷令牌」加回来，`listed` 立刻非空。
+        """
+        import backend.app.services.note_sync_service as nss
+
+        _db_dependency, db, creator = _build_db(tmp_path)
+        try:
+            note = _add_note(
+                db,
+                creator,
+                HEX_NOTE_ID,
+                content="旧正文",
+                raw={
+                    "note_url": f"https://www.xiaohongshu.com/explore/{HEX_NOTE_ID}?xsec_token=TK",
+                    "xsec_token": "TK",
+                },
+            )
+            listed: list[str] = []
+            ssr_calls: list[str] = []
+
+            class Adapter:
+                def __init__(self, cookies: str) -> None:
+                    pass
+
+                def get_self_profile(self):
+                    # ⚠️ 必须让身份查询**成功**：否则 `refresh_www_detail_tokens` 会在
+                    # 取身份那步就退出（`get_self_profile` 抛 AttributeError ⇒ 记 warning
+                    # 返回），`get_user_posted_page` 一次都不会被调到 ⇒ 「有没有翻全表」
+                    # 这件事就测不出来（变异验证实测：漏了这个方法，本用例对
+                    # 「本地有令牌仍刷新」的变异**不敏感**）。
+                    return True, "", {"data": {"user_id": "SELF-1"}}
+
+                def get_user_posted_page(
+                    self, user_id: str, cursor: str = "", xsec_token: str = "", xsec_source: str = ""
+                ):
+                    listed.append(cursor)
+                    # ⚠️ `has_more` **必须有界**（2026-09-28 实测踩坑）：本用例的语义是
+                    # 「一次都不该翻」（正常路径 `listed` 恒空），但变异验证会把那条判断
+                    # 摘掉 —— 那时若 `has_more` 恒真，翻页循环会跑到
+                    # `WWW_LIST_PAGE_CAP = 200` 页、**每页 `_sleep_between_pages()` 真停
+                    # 5 秒** ⇒ 用例挂起 1000 秒被 SIGTERM，变异脚本的 `finally` 来不及
+                    # 还原源文件（源文件会留在变异态，后续几轮全跑在坏文件上）。
+                    # 有界 + 用例内 `PAGE_GAP_SECONDS=0` ⇒ 变异时也在 3 页内快速变红。
+                    return True, "", {
+                        "data": {
+                            "notes": [],
+                            "has_more": len(listed) < 3,
+                            "cursor": f"C-{len(listed)}",
+                        }
+                    }
+
+                def get_note_info_html(self, url: str):
+                    ssr_calls.append(url)
+                    return True, "成功", _detail_payload(HEX_NOTE_ID, desc="SSR 正文")
+
+                def get_note_info(self, url: str):
+                    return True, "ok", _detail_payload(HEX_NOTE_ID, desc="JSON 正文")
+
+            monkeypatch.setattr(nss, "get_rate_limiter", lambda: _AllowLimiter())
+            # 页间停顿归零：变异验证会把「本地有令牌就不刷新」摘掉，那时若还按 5 秒/页
+            # 真停顿，用例会挂到超时（见替身里 `has_more` 的说明）。
+            monkeypatch.setattr(nss, "PAGE_GAP_SECONDS", 0.0)
+            monkeypatch.setattr(
+                "backend.app.api.platforms.xhs.pc.get_xhs_pc_api_adapter_factory", lambda: Adapter
+            )
+
+            result = nss.sync_note_from_platform(db, note)
+
+            assert result["status"] == "ok", result
+            assert listed == [], "本地有令牌时不该翻 user_posted（旧实现每篇翻 66–200 页）"
+            assert len(ssr_calls) == 1, "详情仍要走 explore SSR"
+            assert note.content == "SSR 正文"
+        finally:
+            db.close()
+
+    def test_no_user_posted_token_sweep_exists_anywhere(self):
+        """**兜底已整段移除**（§19.13.9，2026-09-28 用户口径）。
+
+        守卫形态从 §19.13.8 的「每个调用点都要传 `only_note_ids`」升级为**更强的一条**：
+        源码里连这个函数都不许再出现 —— 它存在的唯一意义就是「翻 `user_posted` 全表
+        拿详情令牌」，而那条路已被判定为不可接受（「不允许出现翻页到底」）。
+        行为用例只覆盖已知入口，**新写的实现**只有这条结构守卫挡得住。
+        """
+        import inspect
+
+        import backend.app.services.note_sync_service as nss
+
+        source = inspect.getsource(nss)
+        assert "refresh_www_detail_tokens" not in source, (
+            "兜底刷新已移除：不许再引入任何「翻 user_posted 拿详情令牌」的实现"
+        )
+        assert "WWW_LIST_PAGE_CAP" not in source, "该常量只服务于已删除的兜底"
+        assert "WWW_DETAIL_TOKEN_FLAG" not in source
+
+    def test_full_list_sdk_calls_stay_on_the_registered_whitelist(self):
+        """全量循环 SDK 方法只允许**已登记的**三处调用；新增即红（C5 / §19.13.9）。
+
+        本次改动的实质是「删掉一条为拿令牌而翻到底的兜底」⇒ 同类逻辑必须能被拦住。
+        扫描范围 = `backend/app/adapters/xhs/*.py` 里**每个方法**实际调用的 SDK 全量
+        方法名（AST，不看注释，注释提一句不算）。
+
+        现状（2026-09-28 全项目排查 + 处置）**两处**，各有理由：
+          * `get_user_notes` → 数据抓取 / 监控巡检（DEF-033 已登记）；
+          * `get_note_comments` → 评论抓取（用户主动、按需）。
+
+        ⚠️ 原第三处 `get_published_notes`（`GET /api/xhs/creator/published`，一期遗留、
+        无 UI 使用）**已删除**：它与 `POST /api/xhs/pc/users/notes` 数据 100% 重复，且是
+        当时唯一还在「翻到底」的读端点（设计 13 §19.13.9）。
+
+        ⚠️ **不许新增**。真需要翻全量时，先看有没有单页方法 + 外层刹车（限流
+        `wait_allow` + `ABSOLUTE_PAGE_CAP`），像笔记 / 商品同步那样。
+        """
+        import ast
+        from pathlib import Path
+
+        full_list = {
+            "get_user_all_notes",
+            "get_user_all_like_note_info",
+            "get_user_all_collect_note_info",
+            "get_all_posted_notes",
+            "get_all_publish_note_info",
+            "get_note_all_comment",
+            "get_all_likesAndcollects",
+            "get_all_metions",
+            "get_all_new_connections",
+        }
+        allowed = {"get_user_notes", "get_note_comments"}
+
+        adapters_dir = Path(__file__).resolve().parents[2] / "backend/app/adapters/xhs"
+        offenders: set[str] = set()
+        for path in sorted(adapters_dir.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for fn in (node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)):
+                called = {
+                    call.func.attr
+                    for call in ast.walk(fn)
+                    if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                }
+                if called & full_list:
+                    offenders.add(fn.name)
+
+        assert offenders == allowed, (
+            f"全量循环 SDK 调用集变了 —— 新增 {sorted(offenders - allowed)}、"
+            f"消失 {sorted(allowed - offenders)}。新增必须先论证刹车在哪（C5）；"
+            "消失请一并更新白名单。"
+        )
+
+    def test_pending_without_token_count_reports_only_the_blocked_ones(self, tmp_path: Path):
+        """缺令牌计数只收「待补齐 **且** 无令牌」的篇（用于如实报数，不触发任何刷新）。"""
+        import backend.app.services.note_sync_service as nss
+
+        _db_dependency, db, creator = _build_db(tmp_path)
+        try:
+            _add_note(db, creator, HEX_NOTE_ID, raw={"xsec_token": "TK"})
+            _add_note(db, creator, HEX_NOTE_ID_2, raw={})
+            # 无令牌但**已补齐**（hydrated_at 非空）⇒ 不进候选。
+            _add_note(db, creator, "6a7d14000000000000000001", raw={}, hydrated=True)
+
+            assert nss._pending_hydration_without_token_count(db, creator) == 1
+        finally:
+            db.close()
+
+    def test_explore_html_parser_maps_initial_state_into_feed_shape(self):
+        """SSR HTML ⇒ 与 `/v1/feed` **同形**的 payload（归一化层原样复用，不写第二份）。"""
+        from backend.app.adapters.xhs.note_detail_ssr import note_detail_payload_from_html
+
+        state = {
+            "note": {
+                "noteDetailMap": {
+                    "abc": {
+                        "note": {
+                            "noteId": "abc",
+                            "title": "T",
+                            "desc": "D",
+                            "type": "normal",
+                            "time": 1700000000,
+                            "imageList": [
+                                {"urlDefault": "https://img.example/a.jpg", "width": 1, "height": 2}
+                            ],
+                            "tagList": [{"name": "话题", "type": "topic"}],
+                            "interactInfo": {"likedCount": "3", "collectedCount": "4"},
+                            "user": {
+                                "userId": "U",
+                                "nickname": "N",
+                                "avatar": "https://img.example/av.jpg",
+                            },
+                        }
+                    }
+                }
+            }
+        }
+        html = "<html><body><script>window.__INITIAL_STATE__ = " + json.dumps(state) + "</script>"
+
+        payload = note_detail_payload_from_html(html)
+
+        assert payload is not None
+        assert payload["success"] is True and payload["code"] == 0
+        card = payload["data"]["items"][0]["note_card"]
+        assert card["note_id"] == "abc"
+        assert card["title"] == "T"
+        assert card["desc"] == "D"
+        assert card["image_list"][0]["url_default"] == "https://img.example/a.jpg"
+        assert card["tag_list"] == [{"name": "话题", "type": "topic"}]
+        assert card["interact_info"]["liked_count"] == "3"
+        assert card["user"]["user_id"] == "U"
+        # 结构不符 / 没有详情 ⇒ None（不猜、不造，交给调用方回退 JSON 端点）。
+        assert note_detail_payload_from_html("<html><body>风控页</body></html>") is None
+        assert note_detail_payload_from_html(
+            '<script>window.__INITIAL_STATE__ = {"note":{}}</script>'
+        ) is None
+

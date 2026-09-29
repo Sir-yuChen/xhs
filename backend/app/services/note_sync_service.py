@@ -56,7 +56,7 @@ import json
 import logging
 import threading
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -65,7 +65,6 @@ from backend.app.core.account_types import SUB_TYPE_CREATOR
 from backend.app.core.database import SessionLocal
 from backend.app.core.time import shanghai_now
 from backend.app.models.note import (
-    NOTE_TYPE_LOCAL,
     NOTE_TYPE_SYNCED,
     PUBLISH_STATUS_PUBLISHED,
     Note,
@@ -77,7 +76,6 @@ from backend.app.models.platform_account import PlatformAccount
 from backend.app.models.task import Task
 from backend.app.services import sync_task_service as sts
 from backend.app.services.account_service import (
-    CHANNEL_ARK,
     CHANNEL_CREATOR,
     CHANNEL_WWW,
     has_ark_token,
@@ -98,9 +96,6 @@ PAGE_GAP_SECONDS = 5.0
 
 #: 单页停顿的硬顶（设计 13 §8）。time.sleep 永远不会超过这个值。
 MAX_PAGE_GAP_SECONDS = 60.0
-
-#: 三个笔记源的名字（任务进度 `sources` 里回显，前端结果行共用）。
-SOURCE_WWW = "www"
 SOURCE_CREATOR = "creator"
 SOURCE_ARK = "ark"
 
@@ -223,7 +218,6 @@ def _account_cookies(db: Session, account_id: int, *, channel: str = CHANNEL_WWW
     按「最新一版」猜会拿到另一个平台的 jar —— 拿创作者 jar 打 www、或拿 www 的
     打创作者接口，平台都只会回「缺失登录凭证」，而错误信息完全指错方向。
     """
-    from backend.app.api.platforms.xhs.pc import _cookies_to_string
     from backend.app.services.account_service import latest_cookies_for_channel
 
     return latest_cookies_for_channel(db, account_id, channel)
@@ -321,19 +315,17 @@ def _is_hex_note_id(note_id: str) -> bool:
     return len(value) >= 16 and all(char in "0123456789abcdefABCDEF" for char in value)
 
 
-def _note_detail_url(note: Any, *, allow_tokenless: bool = False) -> str:
-    """详情请求要用的 URL：有笔记级 `xsec_token` 就带上（§19.13）。
+def _note_detail_url(note: Any) -> str:
+    """详情请求要用的 URL：**必须带**笔记级 `xsec_token`（§19.13 / §19.13.9）。
 
-    无 token 的 explore 链接平台也回「成功」，但正文是 0 字（DEF-053 实测）——
-    假成功会白烧一次限流额度。所以 `raw_json` 里另存了 token 就补进 URL：
-    千帆条目（顶层 `xsec_token`）与创作者列表项都在自己那层带着它。
+    ⚠️ **无令牌一律返空串**（2026-09-28 用户口径：「没有令牌强行拦截，让用户补齐
+    登录令牌」）：平台对无 token 的 explore 链接回 302 → `/404?error_code=300031`，
+    **即使带会话也拿不到**（§19.13.8 真机实测，匿名 / 登录态都是这个结果）。旧实现
+    曾在**单条同步**路径用 `allow_tokenless` 兜底拼 explore 地址 —— 那是 DEF-053
+    「假成功」的入口，已整段移除。调用方拿到空串即结构化拦截。
 
-    ``allow_tokenless``（2026-09-25，用户报「本地生成 + 已发布笔记同步未完成：
-    没有可用的详情地址」）：**仅用户显式单条同步**（`sync_note_from_platform`）
-    为 True。本地生成笔记发布成功后 `raw_json` 里没有 `note_url` / `xsec_token`
-    （平台 publish 响应只回 `id`，见 `_execute_publish` 成功回写段）⇒ 兜底用
-    `note_id` 拼 explore 地址。批量页内联补齐 / 定时同步（`refresh=False`）**不**
-    放开：无 token 的「假成功」在那两条链路里每轮全量重打，正是 DEF-053 要防的。
+    `raw_json` 里另存了 token 就补进 URL：千帆条目（顶层 `xsec_token`）与创作者
+    列表项都在自己那层带着它。
     """
     raw = note.raw_json if isinstance(note.raw_json, dict) else {}
     url = str(raw.get("note_url") or "").strip()
@@ -343,14 +335,9 @@ def _note_detail_url(note: Any, *, allow_tokenless: bool = False) -> str:
     if not token:
         ark = raw.get("ark") if isinstance(raw.get("ark"), dict) else {}
         token = str(ark.get("xsec_token") or "").strip()
-    if not _is_hex_note_id(note.note_id):
-        return url
-    if not token:
-        # 本地生成 + 已发布：发布回写只落了平台 note_id（hex），raw 无地址。
-        # 单条同步路径兜底拼 explore（无 token 可能拉到空正文，但 hydrate 的
-        # 「详情正文为空不覆盖本地」保证不抹数据；且单次触发不反复烧额度）。
-        if allow_tokenless and not url:
-            return f"https://www.xiaohongshu.com/explore/{str(note.note_id).strip()}"
+    if not token or not _is_hex_note_id(note.note_id):
+        # 无令牌（可自救 ⇒ 由调用方拦截并指引补齐登录）／note_id 非平台形态
+        # （拼出来平台也不认）⇒ 一律返空，不拼「看起来能用」的地址。
         return url
     if url:
         return f"{url}{'&' if '?' in url else '?'}xsec_token={token}"
@@ -510,7 +497,6 @@ def hydrate_note_detail(
     adapter: Any = None,
     adapter_factory: Any = None,
     refresh: bool = False,
-    allow_tokenless: bool = False,
 ) -> dict[str, Any]:
     """对**一条**已落库笔记打一次详情：补正文 + 补缺失图片（设计 13 §19.13 / §19.14）。
 
@@ -544,10 +530,18 @@ def hydrate_note_detail(
       下次**全量同步**自然重试（与商品侧「详情失败 ⇒ `detail_synced_at` 留空、下轮重试」
       同口径）。想立刻重试的用户路径是**内容库详情卡片的「同步」按钮** —— 那条路径不看标记；
     * **失败静默**：拿不到就保持原样（笔记与已落库的正文都在），原因放在返回值里。
+    * **取数路由**（§19.13.8，2026-09-28）：详情**先走 explore SSR**（`get_note_info_html`，
+      一次 GET 拿全、不挑令牌来源），拿不到再回退 JSON 端点 `/v1/feed`。两条路共用本函数
+      的归一化 / 状态 / 落库纪律 —— **不写第二份实现**；替身没实现 SSR 方法时自动只走
+      JSON 端点（行为与改造前逐字一致）。
 
-    ``allow_tokenless``：透传给 ``_note_detail_url`` —— 本地生成 + 已发布笔记的
-    raw 没有详情地址（平台 publish 响应只回 id），单条同步路径据此兜底拼 explore
-    地址（详见 ``_note_detail_url`` docstring）。批量 / 定时链路保持默认 False。
+    **无令牌 ⇒ `no_token`（不写 `hydrated_at`）**（2026-09-28 用户口径：「没有令牌
+    强行拦截，让用户补齐登录令牌」）：`_note_detail_url` 拿不到带 token 的地址时，
+    若 `note_id` 是**平台形态**（hex）就只可能是「缺令牌」—— 那是**用户可自救**的
+    （补齐网页版登录 / 重新同步该笔记）⇒ 不写标记、下次同步重试；只有 `note_id`
+    非平台形态（本地临时 id，拼了平台也不认）才走 `no_url` 写标记出队。
+    旧实现的 `allow_tokenless`（单条同步拼无 token 的 explore 地址）已删除：平台对
+    无 token 的链接一律 302 → `/404`（§19.13.8 真机实测），那是 DEF-053「假成功」入口。
 
     ``hydrated_at`` 写不写**按状态区分**（既不是一律写、也不是一律不写）：
 
@@ -555,7 +549,8 @@ def hydrate_note_detail(
     |---|---|---|---|
     | `ok` | 打过详情且平台返回成功 | ✅ 写 | 已补齐，出队 |
     | `failed` | 请求异常 / 平台报错 | ❌ **不写** | **可恢复**：下次全量同步重试。§19.14 起账号级队列已移除，「失败也写以防饿死」的前提（队列）不存在，写了反而让一次瞬时失败永久跳过这篇 |
-    | `no_url` | 本地没有详情地址 | ✅ 写 | 本地数据缺失、不会自愈，重试无意义 |
+    | `no_token` | 本地缺详情令牌（**用户可自救**） | ❌ **不写** | 补齐网页版登录后这些行还要能被补（与 `no_session` 同口径） |
+    | `no_url` | `note_id` 非平台形态、无详情地址 | ✅ 写 | 本地数据缺失、**不会自愈**，重试无意义 |
     | `no_session` | 账号缺 www 会话 | ❌ 不写 | **账号级、可恢复**：用户补登 www 后这些行还要能被补 |
     """
     from backend.app.api.platforms.xhs.pc import (
@@ -575,11 +570,23 @@ def hydrate_note_detail(
         "topics_linked": 0,
         "content_stripped": False,
     }
-    url = _note_detail_url(note, allow_tokenless=allow_tokenless)
+    url = _note_detail_url(note)
     if not url:
-        # 本地数据缺详情地址 ⇒ **写标记**：这条不会自愈，留着只会永远占住
-        # 「待补齐」剩余计数（用户看到那个数字永不下降）。与 `no_session` 的
-        # 「不写」刻意相反，理由见 docstring 的状态表。
+        if _is_hex_note_id(note.note_id):
+            # 平台形态的 note_id 却拿不到带令牌的地址 ⇒ **缺令牌**。用户可自救
+            # （补齐登录 / 重新同步）⇒ **不写** `hydrated_at`，下次同步重试。
+            result.update(
+                status="no_token",
+                reason=(
+                    "这条笔记缺详情令牌（xsec_token），无法读取正文；"
+                    "请补齐该账号的网页版登录后重新同步"
+                ),
+                code="NOTE_DETAIL_TOKEN_REQUIRED",
+            )
+            return result
+        # note_id 非平台形态（本地临时 id）⇒ 拼出来平台也不认、**不会自愈** ⇒ 写标记：
+        # 留着只会永远占住「待补齐」剩余计数（用户看到那个数字永不下降）。
+        # 与 `no_token` / `no_session` 的「不写」刻意相反，理由见 docstring 的状态表。
         note.hydrated_at = shanghai_now()
         db.commit()
         result.update(status="no_url", reason="这条笔记没有可用的详情地址")
@@ -604,19 +611,63 @@ def hydrate_note_detail(
             adapter_factory = get_xhs_pc_api_adapter_factory()
         adapter = _build_pc_adapter(adapter_factory, account_cookies, account)
 
-    try:
-        success, message, raw_payload = adapter.get_note_info(url)
-    except Exception as exc:  # noqa: BLE001 - 单条失败不影响其余
-        logger.warning("note sync: detail hydrate failed (%s): %s", note.note_id, exc)
-        # ⚠️ 失败**不写** `hydrated_at`（§19.14）：账号级队列已移除，「防饿死」的
-        # 前提不存在；留着 NULL ⇒ 下次全量同步重试（商品详情失败同口径）。
-        reason, code = _classify_detail_failure(exc)
-        result.update(reason=reason, code=code)
-        return result
+    # 详情取数路由（设计 13 §19.13.8）：① explore SSR（一次 GET 拿全、不挑令牌来源）
+    # → ② JSON 端点 `/v1/feed`（与改造前**逐字一致**）。两条路返回同形三元组。
+    # ⚠️ SSR 方法用 `getattr` 取：既有测试注入的替身没有它 ⇒ 自动只走 JSON 端点，
+    # 不必逐个改替身（也保证「替身没实现新能力」时行为退回改造前）。
+    ssr_fetch = getattr(adapter, "get_note_info_html", None)
+    success: Any = False
+    message = ""
+    raw_payload: Any = None
+    if callable(ssr_fetch):
+        try:
+            success, message, raw_payload = ssr_fetch(url)
+        except Exception as exc:  # noqa: BLE001 - SSR 取不到就回退，不在这里判死
+            logger.info(
+                "note sync: explore SSR 详情异常（%s），回退 /v1/feed：%s", note.note_id, exc
+            )
+            success, message, raw_payload = False, str(exc), None
+        if not success:
+            logger.info(
+                "note sync: explore SSR 未取到详情（%s）：%s，回退 /v1/feed",
+                note.note_id,
+                message,
+            )
+
+    if not success:
+        try:
+            success, message, raw_payload = adapter.get_note_info(url)
+        except Exception as exc:  # noqa: BLE001 - 单条失败不影响其余
+            logger.warning("note sync: detail hydrate failed (%s): %s", note.note_id, exc)
+            # ⚠️ 失败**不写** `hydrated_at`（§19.14）：账号级队列已移除，「防饿死」的
+            # 前提不存在；留着 NULL ⇒ 下次全量同步重试（商品详情失败同口径）。
+            reason, code = _classify_detail_failure(exc)
+            result.update(reason=reason, code=code)
+            return result
 
     if not success:
         # 同上：平台报错是**可恢复**失败，不写标记，下次全量同步重试。
         result.update(reason=str(message or "详情接口返回失败"))
+        return result
+
+    # ⚠️ §19.13.5（2026-09-27 真机实测）：「`success=True` 但没拿到笔记对象」
+    # **不是**「这条笔记没有正文」。平台在令牌无效 / 笔记不可见时回
+    # `{"code":0,"success":true,"data":{},"msg":""}` —— items 为空。旧实现把它
+    # 当 `ok` ⇒ 写 `hydrated_at` ⇒ **永久跳过**（「同步任务跑完、正文永远没有」的
+    # 直接原因，DEF-053「假成功」第三次复发）。
+    #
+    # 判据刻意用「有没有 items」而不是「正文是否为空」：**空正文的纯图片笔记真实
+    # 存在**（拿到对象、正文就是空），那种写标记是对的（不会自愈）；而「没拿到
+    # 对象」是**可恢复**的取数失败（令牌可能已过期 ⇒ 重新同步 / 补登录后重试），
+    # 必须留 NULL 让下次同步重试。
+    detail_data = (raw_payload or {}).get("data") if isinstance(raw_payload, dict) else None
+    detail_items = detail_data.get("items") if isinstance(detail_data, dict) else None
+    if not detail_items:
+        result.update(
+            status="failed",
+            reason="平台未返回笔记内容（详情令牌可能已失效或该笔记不可见）",
+            code="DETAIL_EMPTY",
+        )
         return result
 
     note.hydrated_at = shanghai_now()
@@ -681,12 +732,19 @@ def sync_note_from_platform(
     全程不碰创作者平台；缺 www 会话 ⇒ `no_session` + `WEB_SESSION_REQUIRED`
     （前端安静一行指引补登网页版），与定时链路 hydrate 步骤的口径一致。
 
+    **缺详情令牌 ⇒ 拦截，不翻 `user_posted` 兜底**（§19.13.9，2026-09-28 用户口径
+    「移除兜底，不允许出现翻页到底；没有令牌强行拦截，让用户补齐登录令牌」）：
+    `raw_json` 里拿不到 `xsec_token` 时先做一次 **ark 精确回查**（按 `note_ids` 查
+    商品笔记列表，**不是翻全表**）；仍拿不到 ⇒ `no_token` +
+    `NOTE_DETAIL_TOKEN_REQUIRED`，**一次平台请求都不再发**。旧实现会在这里翻
+    66–200 页去赌令牌出现，已整段删除。
+
     **不建任务行、不轮询**：一次详情请求秒级返回。⚠️ 尤其不能用 `xhs_note_sync`
     任务行 —— 账号卡片轮询的正是那个状态，库里点一下同步就让卡片显示「同步中」是误导。
 
     返回 `{"status", "content_updated", "title_updated", "images_added",
     "video_added", "reason", "code"}`；`status` 与 `hydrate_note_detail` 同源
-    （`ok` / `no_url` / `no_session` / `failed`）。**不向上抛异常** ——
+    （`ok` / `no_token` / `no_url` / `no_session` / `failed`）。**不向上抛异常** ——
     预期内的取不到是结果数据，不是接口异常（§25.4）。
     """
     result: dict[str, Any] = {
@@ -722,14 +780,36 @@ def sync_note_from_platform(
         return result
 
     # 本地没有详情地址时，先用账号自己的 ark 令牌回查一次商品笔记列表补上
-    # （§25.4：平台 publish 响应只回 id）。best-effort：查不到就靠
-    # `allow_tokenless` 的 explore 兜底，不回查不阻路。
+    # （§25.4：平台 publish 响应只回 id）。⚠️ 这是**按 note_ids 的精确查询**，
+    # 不是翻全表 —— 令牌缺失的自救路径就靠它。
     if not _note_detail_url(note):
         _backfill_detail_ref_for_account(db, account, note)
 
+    # ⚠️ **无令牌 ⇒ 拦截，不再翻 `user_posted` 兜底**（2026-09-28 用户口径：
+    # 「移除兜底，不允许出现翻页到底；没有令牌强行拦截，让用户补齐登录令牌」）。
+    #
+    # 沿革：§19.13.5 要求「打详情前必刷网页侧令牌」（每篇翻 66–200 页）→ §19.13.8
+    # 改成「本地有令牌就不刷，只在完全没令牌时兜底」→ **本轮把兜底整段删除**。
+    # 那条兜底是**唯一**会翻全表的地方，而它要救的场景（本地生成 + 已发布笔记）
+    # 已由上面的 ark 精确回查覆盖。
+    #
+    # 拦的是**取数前提**而不是失败：缺令牌是用户可自救的（网页版登录 / 重新同步
+    # 该笔记），所以给结构化 code + 可执行指引，不给「平台未返回内容」这种用户
+    # 无法行动的归因（DEF-058）。
+    if "xsec_token=" not in _note_detail_url(note):
+        result.update(
+            status="no_token",
+            reason=(
+                "这条笔记本地没有详情令牌（xsec_token），无法读取正文。"
+                "请先在网页版（xiaohongshu.com）登录该账号后重新同步这条笔记；"
+                "若为本地生成笔记，请先在商品笔记列表同步一次以补齐令牌。"
+            ),
+            code="NOTE_DETAIL_TOKEN_REQUIRED",
+        )
+        return result
+
     outcome = hydrate_note_detail(
         db, account, note, refresh=True, adapter_factory=adapter_factory,
-        allow_tokenless=True,
     )
     result.update(
         status=outcome["status"],
@@ -775,8 +855,10 @@ def sync_note_from_platform(
 # --------------------------------------------------------------------------- #
 
 #: 批量同步单次上限（篇）。与发布批次（`BatchPublishNotesRequest.max_items`）同值：
-#: 批量是显式动作，超限分多次即可；同步单篇 = 一次详情请求（www 额度 5 次/分钟），
-#: 20 篇 ≈ 4 分钟以上，取 20 与发布批次对齐。
+#: 批量是显式动作，超限分多次即可；同步单篇 = 一次详情请求（额度按账号读运行时配置，
+#: 默认 60 次/分钟 ⇒ 20 篇 ≈ 20 秒的平台请求 + 落库开销），取 20 与发布批次对齐。
+#: ⚠️ 2026-09-27 前这里写的是「www 额度 5 次/分钟 ⇒ 20 篇 ≈ 4 分钟」——那个 5 是
+#: 代码里写死的值，不是平台额度（设计 13 §38.1）。
 SYNC_BATCH_MAX_ITEMS = 20
 
 #: worker 空闲时的兜底巡检间隔（秒）。唤醒信号是「提示」不是「唯一入口」：
@@ -784,15 +866,111 @@ SYNC_BATCH_MAX_ITEMS = 20
 #: 新任务，不会永久停摆（DEF-048「安全网不能条件性」）。
 SYNC_IDLE_POLL_SECONDS = 5.0
 
-#: 队列内存态保护锁：本轮起只保护「停止位 + 唤醒位」的复合读写（不再守护 deque）。
+#: worker 线程名（探针与重建都认它；DEF-067 同型：存活判据只能是**线程在不在**）。
+#: ⚠️ 池化（设计 13 §38.3）后：第 1 条**保持这个原名**（既有探针 / 测试 / 日志
+#: 全都不改），第 2..N 条是 `note-batch-sync-worker#2` … `#N`；
+#: 探针一律按**前缀**匹配（`thread_name_matches_sync_worker`）。
+SYNC_WORKER_THREAD_NAME = "note-batch-sync-worker"
+#: 池大小上限（配置可调，但要有个硬顶：手滑填 200 会同时打 200 个账号）。
+SYNC_MAX_PARALLELISM = 8
+#: 并行度默认值（与 `config/default.yaml` 的 `xhs.sync.account_parallelism` 一致）。
+SYNC_DEFAULT_PARALLELISM = 3
+
+#: 队列内存态保护锁：本轮起只保护「停止位 + 唤醒位 + 池成员表」的复合读写。
 _sync_queue_lock = threading.Lock()
 #: 唤醒信号（**不是队列**）：入队后 set，worker 醒来去 DB 认领。
 _sync_wakeup = threading.Event()
 #: worker 收尾 / 测试专用出口（置位 + set wakeup ⇒ 排空即退；生产永不置位）。
 _sync_worker_stop = threading.Event()
+#: **主 worker**（池里第 1 条）。保留这个单数变量是为了兼容既有探针 / 测试 /
+#: `_revive_sync_worker` 的判据；池的完整成员表是 `_sync_workers`。
 _sync_worker: Optional[threading.Thread] = None
+#: 池成员表（含主 worker；权威的池大小判据）。
+_sync_workers: list[threading.Thread] = []
+#: **每线程**停止位（降并行度时要能只收掉多余的那几条）。
+#: 键 = 线程名；缺项 = 该线程只受全局停止位约束（测试自建线程走这条）。
+_sync_worker_stops: dict[str, threading.Event] = {}
+#: 各 worker **当前持有的账号**（`payload.account_id`；`None` = 空闲）。
+#: 这是账号级互斥的**唯一**依据（设计 13 §38.3）—— 同账号至多 1 条在跑。
+_sync_busy_accounts: dict[str, Optional[int]] = {}
+#: 各 worker **当前持有的队列项 id**（看门狗复位中断行时要跳过它们，见
+#: `note_queue_service.recover_interrupted` 的 `exclude_task_ids`）。
+_sync_held_items: dict[str, int] = {}
+
+
+def _alive_worker_names() -> set[str]:
+    """活着成员的线程名集合（判定「占用是否还有主」用）。"""
+    return {thread.name for thread in _alive_sync_workers()}
+
+
+def _busy_account_ids() -> set[int]:
+    """**当前被占用**的账号 id 集合（账号级互斥的输入）。
+
+    ⚠️ 只算**活着**的线程：死线程留下的占用必须失效，否则那个账号会被永久
+    「占住」—— 队列里它的项再也没人认领（比死锁更隐蔽：界面显示「排队中」却永不开始）。
+    """
+    alive = _alive_worker_names()
+    return {
+        int(account_id)
+        for name, account_id in _sync_busy_accounts.items()
+        if name in alive and account_id is not None
+    }
+
+
+def _held_task_ids() -> set[int]:
+    """**仍被活着 worker 持有**的队列项 id（复位中断行时跳过它们）。"""
+    alive = _alive_worker_names()
+    return {int(item_id) for name, item_id in _sync_held_items.items() if name in alive}
+
+
+def _mark_worker_idle(thread_name: str) -> None:
+    """这条 worker 跑完了（**必须放掉占用**，否则账号被永久占住）。
+
+    放掉之后顺手 `set` 一次唤醒位：刚空出来的账号可能正是别的 worker 想认领却被
+    排除掉的那些项 ⇒ 唤醒它们立刻重试，而不是干等 `SYNC_IDLE_POLL_SECONDS`。
+    代价有界（每跑完一条项才 set 一次），收益是「多账号交错排队」不再有 5 秒级的空转。
+    """
+    with _sync_queue_lock:
+        _sync_held_items.pop(thread_name, None)
+        _sync_busy_accounts.pop(thread_name, None)
+    _sync_wakeup.set()
 #: 后台线程自建 Session 的工厂（测试注入临时库的 sessionmaker）。
 _session_factory = SessionLocal
+
+
+def thread_name_matches_sync_worker(name: Any) -> bool:
+    """线程名是否属于本池（**前缀**匹配：`note-batch-sync-worker` / `…#2` / `…#8`）。
+
+    ⚠️ 必须是前缀而不是相等：池化后名字带序号，写死相等会让探针只认第 1 条 ——
+    第 1 条死、第 2 条活着时报「worker 全死」，看门狗会去重建出重复线程。
+    """
+    text = str(name or "")
+    return text == SYNC_WORKER_THREAD_NAME or text.startswith(f"{SYNC_WORKER_THREAD_NAME}#")
+
+
+def sync_parallelism() -> int:
+    """**并行账号数**（运行时配置，夹到 `[1, SYNC_MAX_PARALLELISM]`）。
+
+    读点走 `settings_service.live_int_process`（进程级开关：所有用户的该键行取最大值
+    ⇒ 任何用户在设置页调大都真的生效），回落 `settings.xhs_sync_account_parallelism`
+    （YAML / env，默认 3），再回落内置 3。
+
+    ⚠️ 任何异常都退默认值：并行度读不到不该让同步停摆。
+    """
+    try:
+        from backend.app.services.settings_service import live_int_process
+
+        value = live_int_process(
+            "xhs_sync_account_parallelism", default=SYNC_DEFAULT_PARALLELISM
+        )
+    except Exception:  # noqa: BLE001 - 配置读不到就用默认并行度
+        logger.warning("note sync: 读并行度失败，本次用默认 %s", SYNC_DEFAULT_PARALLELISM, exc_info=True)
+        value = SYNC_DEFAULT_PARALLELISM
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = SYNC_DEFAULT_PARALLELISM
+    return max(1, min(number, SYNC_MAX_PARALLELISM))
 
 
 def _enqueue_sync(
@@ -841,15 +1019,19 @@ def _enqueue_sync(
 
 
 def ensure_sync_worker() -> None:
-    """确保有一条活着的 worker（惰性起；已活则只唤醒它）。
+    """确保 worker 池**满员**（惰性起；已满则只唤醒）。
+
+    池化后语义从「有一条活着的」升级为「**对齐到配置的并行度**」：
+    缺 ⇒ 补齐；多（用户把并行度调小了）⇒ 收掉多余的。两个方向都要做，否则
+    「页面把并行度从 3 改成 1」会变成假配置（改了不生效）。
 
     公开（不是 `_` 前缀）：**启动恢复**也要用它 —— `main.py::lifespan` 复位完
     中断行后立刻唤醒，把上次进程留下的 `pending` 项接着跑（否则要等看门狗 30 秒
-    后巡检才发现「没 worker」）。
+    后巡检才发现「没 worker」）；**设置页改并行度**也用它（`api/settings.py`
+    的 `_wake_runtime_consumers`）。
     """
     with _sync_queue_lock:
-        if _sync_worker is None or not _sync_worker.is_alive():
-            _spawn_sync_worker()
+        _reconcile_sync_worker_pool()
     _sync_wakeup.set()
 
 
@@ -980,8 +1162,10 @@ def start_sync_note(db: Session, user_id: int, note_pk: int) -> dict:
     2026-09-25 用户口径：「单独点击同步按钮也需要放入同步队列中执行，与批量同步
     一致」。改造前单条是**同步阻塞执行**（端点在请求线程里直接调
     `sync_note_from_platform`）⇒ 与批量并存时两条链路各打各的平台请求，
-    www 额度（5 次/分钟）下互相插队、限流等待叠加；队列化后只有一个 worker
-    逐篇跑，顺序执行就是限流的第一道保障（§21.3 等待式限流）。
+    限流额度下互相插队、限流等待叠加；队列化后由 worker 逐篇跑，
+    顺序执行就是限流的第一道保障（§21.3 等待式限流）。
+    ⚠️ 原句「www 额度（5 次/分钟）」中的 5 是**代码写死的值**，不是平台额度
+    （设计 13 §38.1 F1/F2，2026-09-27 已修）。
 
     门禁仍是**单条那把尺子** `note_supports_sync`（`synced` **或**已发布）——
     比批量（仅 published）宽，**不随这次改造收紧**（页面按钮的渲染条件
@@ -1016,8 +1200,15 @@ def start_sync_note(db: Session, user_id: int, note_pk: int) -> dict:
     return item
 
 
-def _sync_worker_loop() -> None:
+def _sync_worker_loop(thread_name: Optional[str] = None) -> None:
     """DB 队列 worker：醒来 → 认领一条 → 跑一条 → 再认领 …… 认不到就回去等。
+
+    **池化**（设计 13 §38.3，2026-09-27）：本函数是池内**每一条**线程的执行体，
+    靠 `thread_name`（缺省取当前线程名）认领自己的停止位与占用登记。
+
+    * **跨账号并行**：N 条 worker 同时跑 N 个不同账号的项；
+    * **账号级互斥**：认领时排除「已被别的 worker 占住的账号」⇒ 同一账号任何时刻
+      至多 1 条在跑（同账号并发只会互抢同一个限流桶，既不提速又让额度语义失真）。
 
     ⚠️ 唤醒信号只是**提示**：`wait(timeout=SYNC_IDLE_POLL_SECONDS)` 带兜底超时
     ⇒ 任何一次 `set` 丢失，最坏也只是晚 5 秒发现新任务，不会永久停摆
@@ -1027,49 +1218,112 @@ def _sync_worker_loop() -> None:
     挡「一篇炸」，但**线程自身**仍可能被 BaseException（`SystemExit` 等 ——
     threading 对它们**静默**，连 traceback 都不打）或漏网路径带走 ⇒ 队列剩余篇
     永久停摆（用户看到「待同步 N」永不下降）。外层再包一层网；真死了由看门狗
-    重建（`start_sync_worker_watchdog`），重建时把卡在 `running` 的行复位。
+    补齐（`start_sync_worker_watchdog`），补齐时把**确实无人认领**的 `running` 行复位
+    （还活着的那几条手上的项**不动** —— 见 `_revive_sync_worker`）。
 
-    `_sync_worker_stop` 是**收尾 / 测试专用出口**：置位（并 `set` 唤醒）后**不再
-    认领新任务**、立即退出。生产永不置位 —— 进程退出由 daemon 线程语义保证。
-    ⚠️ 「不丢正在排队的篇」现在**由库保证**（未跑的项是 `pending` 行，下次启动
-    接着跑），不再依赖 worker「排空」；停止位只负责别再干新活。
+    `_sync_worker_stop`（全局）与 `_sync_worker_stops[名字]`（本线程）任一置位
+    ⇒ **不再认领新任务**、立即退出。生产只在进程收尾时置全局位；单线程位用于
+    「并行度调小 ⇒ 收掉多余的那几条」（设计 13 §38.3）。
+    ⚠️ 「不丢正在排队的篇」**由库保证**（未跑的项是 `pending` 行，下次启动接着跑），
+    不再依赖 worker「排空」；停止位只负责别再干新活。
     """
-    while not _sync_worker_stop.is_set():
+    name = str(thread_name or threading.current_thread().name)
+
+    def _stopped() -> bool:
+        if _sync_worker_stop.is_set():
+            return True
+        own = _sync_worker_stops.get(name)
+        return own is not None and own.is_set()
+
+    while not _stopped():
         _sync_wakeup.wait(timeout=SYNC_IDLE_POLL_SECONDS)
         _sync_wakeup.clear()
-        while not _sync_worker_stop.is_set():
-            item_id = _claim_one_sync_item()
-            if item_id is None:
-                break
+        while not _stopped():
+            # ⚠️ **「算占用 → 认领 → 登记占用」必须在同一把锁里**（2026-09-27 实测踩到）：
+            # 拆开做时三条 worker 会**同时**算出「没有账号被占」（那一刻确实还没有人
+            # 登记），于是同一账号的三条项被三条线程一起领走 —— 账号级互斥形同虚设，
+            # 三条线程互抢同一个限流桶。锁只包住这几行（认领是一次毫秒级 DB 操作），
+            # 不包执行体，所以并行度不受影响。
+            with _sync_queue_lock:
+                if _stopped():
+                    break
+                # 认领顺序：同步队列（用户刚点的那篇优先）→ 发布 / 生成各有自己的 worker。
+                # 笔记详情补齐已并入同步任务本身（设计 13 §35.18）⇒ 这里不再有第二个队列。
+                item = _claim_one_sync_item(exclude_account_ids=_busy_account_ids())
+                if item is None:
+                    break
+                # 登记占用（**直接写**，不走 `_mark_worker_busy` —— 那是同一把非重入锁）
+                _sync_held_items[name] = int(item.id)
+                _sync_busy_accounts[name] = note_queue_service.account_id_of(item)
             try:
-                _run_one_sync(item_id)
-            except BaseException as error:  # noqa: BLE001 - 线程不死（DEF-069）
-                logger.error(
-                    "note batch sync worker: run escaped the inner net (task=%s): %s",
-                    item_id,
-                    error,
-                    exc_info=True,
-                )
+                _run_safely("note batch sync worker", _run_one_sync, int(item.id))
+            finally:
+                # 放掉占用（**必须在 finally**：`_run_safely` 吞 BaseException，
+                # 但漏网路径也要保证账号不被永久占住）
+                _mark_worker_idle(name)
 
 
-def _claim_one_sync_item() -> Optional[int]:
-    """认领一条待跑项，返回其 `tasks.id`（无活可干 / 认领出错 ⇒ None）。
+def _run_safely(label: str, runner: Any, item_id: int) -> None:
+    """跑一条并把**线程级**漏网异常吃掉（DEF-069 的第二层网）。
+
+    `_run_one_sync` 内部的 `except BaseException` 挡「一篇炸」，
+    这里挡「把线程带走」—— threading 对 `BaseException`（`SystemExit` 等）**静默**
+    （不打 traceback、不重启线程）⇒ worker 无声死亡、队列永久停摆。真死了由看门狗
+    重建（`start_sync_worker_watchdog`），重建时把卡在 `running` 的行复位。
+
+    `label` = 日志前缀（发布 / 生成 worker 也共用本函数，**不各写一份同样的网**）。
+    """
+    try:
+        runner(item_id)
+    except BaseException as error:  # noqa: BLE001 - 线程不死（DEF-069）
+        logger.error(
+            "%s: run escaped the inner net (task=%s): %s",
+            label,
+            item_id,
+            error,
+            exc_info=True,
+        )
+
+
+def _claim_one_item(
+    item_task_type: str,
+    *,
+    label: str,
+    exclude_account_ids: Optional[set[int]] = None,
+) -> Optional[Task]:
+    """认领一条指定队列类型的待跑项，返回**任务行**（无活可干 / 认领出错 ⇒ None）。
 
     认领用**独立 Session**（`claim_next_item` 内部提交换状态，用完即关）；
     用它自带的 `except BaseException` 兜住认领期的 DB 异常 —— 认领失败只是这一轮
     空转（外层 `wait(timeout=…)` 天然退避），不许把 worker 带走。
+
+    `label` = 日志前缀（保持两个队列各自的原文案，便于日志里分辨是哪条队列在报错）。
+    `exclude_account_ids` = 账号级互斥的排除集（发布 / 生成队列不传 ⇒ 行为不变）。
+
+    ⚠️ 返回**行**而不是 id（改造前返回 id）：调用方要拿 `payload.account_id` 去登记
+    「这个账号被占住了」。让调用方再查一次库只为拿一个字段，是把一次读取拆成两次。
     """
     db = _session_factory()
     try:
-        item = note_queue_service.claim_next_item(
-            db, item_task_type=note_queue_service.TASK_TYPE_SYNC_ITEM
+        return note_queue_service.claim_next_item(
+            db,
+            item_task_type=item_task_type,
+            exclude_account_ids=exclude_account_ids or (),
         )
-        return int(item.id) if item is not None else None
     except BaseException:  # noqa: BLE001 - 认领失败退避，不死 worker
-        logger.exception("note batch sync worker: claim failed")
+        logger.exception("%s: claim failed", label)
         return None
     finally:
         db.close()
+
+
+def _claim_one_sync_item(exclude_account_ids: Optional[set[int]] = None) -> Optional[Task]:
+    """认领一条待跑的**同步**项（类型绑定包装，实现见 `_claim_one_item`）。"""
+    return _claim_one_item(
+        note_queue_service.TASK_TYPE_SYNC_ITEM,
+        label="note batch sync worker",
+        exclude_account_ids=exclude_account_ids,
+    )
 
 
 def _item_note_pk(item: Task) -> int:
@@ -1149,9 +1403,6 @@ def _run_one_sync(item_id: int) -> None:
         db.close()
 
 
-#: worker 线程名（探针与重建都认它；DEF-067 同型：存活判据只能是**线程在不在**）。
-SYNC_WORKER_THREAD_NAME = "note-batch-sync-worker"
-
 #: 看门狗巡检间隔 / 重建失败指数退避上限（与调度器守活 `scheduler_service` 同值）。
 SYNC_WATCHDOG_INTERVAL_SECONDS = 30.0
 SYNC_WATCHDOG_MAX_BACKOFF_SECONDS = 600.0
@@ -1159,52 +1410,139 @@ SYNC_WATCHDOG_MAX_BACKOFF_SECONDS = 600.0
 _sync_watchdog_stop = threading.Event()
 
 
-def sync_worker_thread_alive() -> bool:
-    """进程里有没有**活着的** `note-batch-sync-worker` 线程（唯一可信存活判据，DEF-069）。
+def _alive_sync_workers() -> list[threading.Thread]:
+    """进程里**活着的**本池线程（按线程名前缀枚举，DEF-069 的唯一可信存活判据）。
 
-    为什么不看 `_sync_worker` 模块变量：线程带异常 / `SystemExit` 死后它仍指着
-    那个 `Thread` 对象，而 `_enqueue_sync` 只在**入队时**检查一次 —— 队列跑起来
-    之后线程死了，没有任何现存路径会发现。与
-    `scheduler_service.scheduler_thread_alive()` 同判据（DEF-067 的教训：
-    状态位会骗人，线程本身不会）。
+    为什么不看模块变量：线程带异常 / `SystemExit` 死后变量仍指着那个 `Thread`
+    对象，而 `_enqueue_sync` 只在**入队时**检查一次 —— 队列跑起来之后线程死了，
+    没有任何现存路径会发现。与 `scheduler_service.scheduler_thread_alive()`
+    同判据（DEF-067 的教训：状态位会骗人，线程本身不会）。
     """
-    return any(
-        thread.name == SYNC_WORKER_THREAD_NAME and thread.is_alive()
+    return [
+        thread
         for thread in threading.enumerate()
-    )
+        if thread_name_matches_sync_worker(thread.name) and thread.is_alive()
+    ]
 
 
-def _spawn_sync_worker() -> None:
+def sync_worker_thread_alive() -> bool:
+    """进程里有没有**活着的**本池 worker（任一即真）。
+
+    ⚠️ 池化（设计 13 §38.3）后判据从「有那一条」变成「**至少还有一条**」：
+    看门狗据此决定要不要补人，**期望条数**另由 `sync_worker_pool_deficit()` 回答。
+    """
+    return bool(_alive_sync_workers())
+
+
+def sync_worker_pool_size() -> int:
+    """当前活着的池成员数（观测 / 测试 / 看门狗用）。"""
+    return len(_alive_sync_workers())
+
+
+def sync_worker_pool_deficit() -> int:
+    """还缺几条 worker（期望 = `sync_parallelism()`，实际 = 活着的条数）。"""
+    return max(0, sync_parallelism() - sync_worker_pool_size())
+
+
+def sync_worker_thread_name(index: int) -> str:
+    """池内第 `index`（0 起）条 worker 的线程名。
+
+    第 1 条**保持原名**（兼容既有探针 / 测试 / 日志检索），其余带 `#序号`。
+    """
+    return SYNC_WORKER_THREAD_NAME if index == 0 else f"{SYNC_WORKER_THREAD_NAME}#{index + 1}"
+
+
+def _spawn_sync_worker(index: int = 0) -> threading.Thread:
     """起一条新的 worker 线程（调用方持 `_sync_queue_lock`）。
 
     起新世代时清掉历史停止位 —— 重建出来的 worker 不该被上一世代的收尾位挡住
-    （`_revive_sync_worker` 的路径）。
+    （`_revive_sync_worker` 的路径）。⚠️ 但**只在建第 1 条（index=0）时清**：
+    补人（池里死了 1 条、补 1 条）时清全局停止位会把「收尾中」的池重新激活。
+
+    `index` = 池内序号（决定线程名与是否当主 worker）。
     """
     global _sync_worker
-    _sync_worker_stop.clear()
-    _sync_worker = threading.Thread(
+    # ⚠️ 线程名只能由 `sync_worker_thread_name` 产出（它以 `SYNC_WORKER_THREAD_NAME`
+    # 为基名，探针按此前缀匹配）—— 这里**不许写裸字符串**，否则探针认不到这些线程。
+    name = sync_worker_thread_name(index)
+    if index == 0:
+        _sync_worker_stop.clear()
+    stop = threading.Event()
+    _sync_worker_stops[name] = stop
+    # ⚠️ **不传 `kwargs`**：`_sync_worker_loop` 自己用 `threading.current_thread().name`
+    # 认身份。传参会让「把 `_sync_worker_loop` 换成零参替身」的测试直接 TypeError
+    # （线程静默死掉 ⇒ 池里凭空少人），而零参替身正是既有测试的写法。
+    thread = threading.Thread(
         target=_sync_worker_loop,
-        name=SYNC_WORKER_THREAD_NAME,
+        name=name,
         daemon=True,
     )
-    _sync_worker.start()
+    if index == 0:
+        _sync_worker = thread
+    _sync_workers.append(thread)
+    thread.start()
+    return thread
+
+
+def _reconcile_sync_worker_pool(*, spawn_missing: bool = True) -> list[threading.Thread]:
+    """把池对齐到 `sync_parallelism()`：**补缺**（必要时）并**收掉多余的**。
+
+    调用方持 `_sync_queue_lock`。返回对齐后活着的成员。
+
+    两个方向都要做，否则「页面把并行度从 3 改成 1」会变成一个**假的实时配置**
+    （改了不生效，正是设计 10 §1 定义的管理缺陷）：
+
+    * 缺 ⇒ `_spawn_sync_worker(index)` 补到期望条数（`spawn_missing=False` 时只报告）；
+    * 多 ⇒ 给多余的线程置**它自己的**停止位（不碰全局停止位，其余线程照跑）。
+
+    ⚠️ 主 worker（`_sync_worker`）**优先保留**：它是既有探针 / 测试的判据锚点。
+    """
+    # ⚠️ `_sync_worker` 是**模块级**探针锚点（`_sync_workers` 是原地改的列表，不需要
+    # global）。漏这句会让本函数里的赋值被当成**局部变量** ⇒ 走到最后那行直接
+    # `UnboundLocalError`（实测：任何一次入队都炸，同步链路整体不可用）。
+    global _sync_worker
+    desired = sync_parallelism()
+    alive = _alive_sync_workers()
+    if len(alive) > desired:
+        keep = alive[:desired]
+        for thread in alive[desired:]:
+            stop = _sync_worker_stops.get(thread.name)
+            if stop is not None:
+                stop.set()
+        _sync_wakeup.set()  # 唤醒它们回来检查自己的停止位
+        alive = keep
+    if spawn_missing:
+        for index in range(len(alive), desired):
+            alive.append(_spawn_sync_worker(index))
+    # 池成员表收敛到实际活着的那些（死线程 / 被收掉的都不留在表里）
+    _sync_workers[:] = list(alive)
+    if _sync_worker is not None and not _sync_worker.is_alive():
+        _sync_worker = alive[0] if alive else None
+    # 清掉已死线程的账号占用（不让死线程把某个账号永久「占住」）
+    for name in [n for n in _sync_busy_accounts if n not in {t.name for t in alive}]:
+        _sync_busy_accounts.pop(name, None)
+    return alive
 
 
 def stop_sync_worker(*, timeout: float = 5.0) -> None:
-    """让当前 worker **立即停手退出**（**测试 / 进程收尾专用**，生产不调用）。
+    """让**全部** worker **立即停手退出**（**测试 / 进程收尾专用**，生产不调用）。
 
     只置停止位不够：worker 常态卡在 `_sync_wakeup.wait(timeout=…)` 上，必须再
-    `set` 一下 wakeup 才能唤醒它回来检查停止位。唤醒后它**不再认领新任务**、
+    `set` 一下 wakeup 才能唤醒它回来检查停止位。唤醒后它们**不再认领新任务**、
     手上那条跑完即退。
 
-    ⚠️ 「不丢正在排队的篇」现在**由库保证**：未跑的项还是 `pending` 行，下次启动
+    ⚠️ 池化后是**整池**停（`_sync_worker_stops` 里每一条都置位）—— 只停第 1 条会让
+    测试 teardown 后还剩 N−1 条真 worker 继续打平台（正是「测试写生产库」那类事故的形态）。
+    ⚠️ 「不丢正在排队的篇」**由库保证**：未跑的项还是 `pending` 行，下次启动
     （或下一次唤醒）接着跑 —— 不靠 worker「排空」。
     """
     _sync_worker_stop.set()
+    for stop in _sync_worker_stops.values():
+        stop.set()
     _sync_wakeup.set()
-    worker = _sync_worker
-    if worker is not None and worker.is_alive():
-        worker.join(timeout=timeout)
+    for worker in list(_sync_workers):
+        if worker.is_alive():
+            worker.join(timeout=timeout)
 
 
 def _revive_sync_worker() -> None:
@@ -1218,26 +1556,39 @@ def _revive_sync_worker() -> None:
     ⚠️ **顺序：先复位、再起新 worker**。反过来新 worker 可能刚认领一条就被复位
     抢回 `pending` ⇒ 同一条被跑两遍。
 
-    判据是 `_sync_worker.is_alive()`（这一条自己的线程），与探针的进程级枚举互补：
-    探针回答「还有没有能干活的」，这里回答「要不要换」。
+    ⚠️ **复位要覆盖这条线程能跑的**所有**队列类型**：`note-batch-sync-worker` 现在只跑
+    同步队列项（详情补齐项已并入同步任务本身，设计 13 §35.18）—— 但**同步任务现在会
+    长时间跑账号级补齐**，占住 worker 的那条行同样必须能复位，否则它永远算在
+    「正在同步」里。
+
+    判据是**池的缺口**（`sync_worker_pool_deficit()`）：探针回答「还有没有能干活的」，
+    这里回答「要不要补人」——池化后可能是「死了 2 条、还剩 1 条」，只判「有没有」会漏掉。
+
+    ⚠️ **复位与补人是两件事，顺序固定**：只要**有任何一条** worker 死过（不论池里还剩
+    几条），就可能有一条 `running` 行被丢下 —— 所以只要缺口 > 0 就先复位，再补人。
     """
     recovered = {"requeued": 0, "failed": 0}
     try:
         db = _session_factory()
         try:
             recovered = note_queue_service.recover_interrupted(
-                db, item_task_types=(note_queue_service.TASK_TYPE_SYNC_ITEM,)
+                db,
+                item_task_types=(note_queue_service.TASK_TYPE_SYNC_ITEM,),
+                # ⚠️ 跳过还活着的那几条 worker 手上的项（池化后必须给）：
+                # 不给就会把它们的任务从脚下抽走（改回 pending）⇒ 同一条被跑两遍。
+                exclude_task_ids=_held_task_ids(),
             )
         finally:
             db.close()
     except BaseException:  # noqa: BLE001 - 复位失败也要把 worker 建起来
         logger.exception("同步 worker 重建：中断行复位失败（继续重建 worker）")
     with _sync_queue_lock:
-        if _sync_worker is None or not _sync_worker.is_alive():
-            _spawn_sync_worker()
+        alive = _reconcile_sync_worker_pool()
     _sync_wakeup.set()  # 新 worker 可能已在 wait 上：不等下一批也要立刻跑积压
     logger.error(
-        "note-batch-sync-worker 已死 —— 已重建（中断行 requeued=%s failed=%s）",
+        "%s 池缺人 —— 已补齐到 %s 条（中断行 requeued=%s failed=%s）",
+        SYNC_WORKER_THREAD_NAME,
+        len(alive),
         recovered.get("requeued"),
         recovered.get("failed"),
     )
@@ -1266,10 +1617,15 @@ def start_sync_worker_watchdog(
             if _sync_watchdog_stop.wait(backoff):  # 可被 stop 打断的等待
                 return
             try:
-                if sync_worker_thread_alive():
-                    backoff = interval
-                    continue
-                _revive_sync_worker()
+                # 池化后判据是**缺口**不是「有没有」：死 2 条还剩 1 条时
+                # `sync_worker_thread_alive()` 仍是 True —— 只判它就会漏补。
+                if sync_worker_pool_deficit() > 0:
+                    _revive_sync_worker()
+                else:
+                    # 满员时也要对一次账：用户可能把并行度**调小**了（收掉多余的）。
+                    # 两个方向都由 `_reconcile_sync_worker_pool` 负责。
+                    with _sync_queue_lock:
+                        _reconcile_sync_worker_pool()
                 backoff = interval
             except BaseException:  # noqa: BLE001 - 看门狗自己也不能死
                 logger.exception("同步 worker 看门狗重建失败，%.0f 秒后重试", backoff)
@@ -1370,6 +1726,45 @@ def _pending_hydration_count(db: Session, account: PlatformAccount) -> int:
     )
 
 
+def _raw_has_detail_token(raw: Any) -> bool:
+    """`raw_json` 里有没有**任何**可用的笔记级详情令牌（顶层 / `ark` 子对象）。
+
+    ⚠️ 与 `_note_detail_url` 取令牌的**两条来源同一口径**（顶层 `xsec_token` 或
+    `ark.xsec_token`）—— 「判要不要刷新」与「拼 URL 用哪个」不能有两套规则，
+    否则会出现「判为有令牌所以不刷新、但拼 URL 时又取不到」的空转（DEF-044 形态）。
+    """
+    data = raw if isinstance(raw, dict) else {}
+    if str(data.get("xsec_token") or "").strip():
+        return True
+    ark = data.get("ark") if isinstance(data.get("ark"), dict) else {}
+    return bool(str(ark.get("xsec_token") or "").strip())
+
+
+def _pending_hydration_without_token_count(db: Session, account: PlatformAccount) -> int:
+    """待补齐笔记里**本地完全没有详情令牌**的条数（只用于如实报数，不触发任何刷新）。
+
+    设计 13 §19.13.8 / §19.13.9（2026-09-28）：详情走 explore SSR 后不挑令牌来源，
+    有令牌的篇本就不需要刷新；没令牌的篇**不再翻 `user_posted` 兜底**（用户口径：
+    「移除兜底，不允许出现翻页到底」）⇒ 本函数只把「有多少篇卡在缺令牌上」报给用户，
+    让他去补齐网页版登录令牌，而不是拿一次全表扫描去赌。
+
+    只读 `(note_id, raw_json)` 两列、不加载整对象 —— 欠账上千条时也只是一次轻查询。
+    """
+    from backend.app.models import Note
+
+    rows = db.execute(
+        select(Note.note_id, Note.raw_json).where(
+            Note.platform_account_id == account.id,
+            Note.hydrated_at.is_(None),
+        )
+    ).all()
+    return sum(
+        1
+        for note_id, raw in rows
+        if str(note_id or "").strip() and not _raw_has_detail_token(raw)
+    )
+
+
 def _row_is_video(row: Any) -> bool:
     """这条已落库笔记是不是视频笔记（读 `raw_json.type`，平台原值）。"""
     raw = row.raw_json if isinstance(row.raw_json, dict) else {}
@@ -1402,6 +1797,153 @@ def _needs_hydration(db: Session, note: Any) -> bool:
     return _row_is_video(note) and not _has_video_asset(db, note.id)
 
 
+def _new_hydration_result() -> dict[str, Any]:
+    """一次补齐统计的**唯一**初值（两个候选集来源共用，形状不许各写一份）。
+
+    ``attempted_pks`` = 本次真打过详情的**本地笔记主键**。它不是给人看的统计，
+    而是给**同一个任务**里的下一段用的：页内联试过的篇，账号级收尾不许再试一次
+    （www 详情额度 5 次/分钟，同一任务重复打同一篇既是白烧、也会让 `detail_failed`
+    把同一篇数两遍）。
+
+    ``page_total`` / ``pending_total``（2026-09-28 加）= 本批**候选条数**（含不需要补齐的）
+    与其中**真需要补齐**的条数 —— 进度口径 `processed / work_total` 靠这两个数算
+    「已处理」：`已处理 = 候选 - (候选 - 已尝试)`，即「无需补的 + 真尝试过的」。
+    只试过一部分（限流等待超时 / 取消）时**没尝试的不计入** ⇒ 进度条到不了 100% 是
+    **如实**的（`_finish` 会写真实终态）。账号级补齐不设 `page_total`（那里 `pending` 就是全部候选）。
+    """
+    return {
+        "filled": 0,
+        "failed": 0,
+        "no_token": 0,
+        "no_url": 0,
+        "skipped_by_limit": 0,
+        "attempted": 0,
+        "attempted_pks": [],
+        "warnings": [],
+        "page_total": 0,
+        "pending_total": 0,
+    }
+
+
+def _hydrate_note_rows(
+    db: Session,
+    account: PlatformAccount,
+    pending: list[Any],
+    *,
+    cookies: str,
+    adapter: Any,
+    limiter: Any,
+    task_id: Optional[int] = None,
+    scope_label: str = "本页",
+    on_progress: Optional[Callable[[int, int], None]] = None,
+) -> dict[str, Any]:
+    """逐篇补齐给定的**待补行**（**唯一循环实现**，设计 13 §19.14 / §35.18）。
+
+    两个候选集来源共用它（DEF-044：同一语义不留两份实现）：
+
+    * :func:`_hydrate_page_notes` —— 本页刚落库的行（翻页循环**内联**，§19.14）；
+    * :func:`_hydrate_account_pending` —— 该账号的**全部历史欠账**（同步任务收尾，§35.18）。
+
+    纪律：
+
+    * **单一实现**：逐条委托 ``hydrate_note_detail``（正文填空 / 图集与视频只增不删 /
+      话题拆分只增不删 / ``hydrated_at`` 三态）—— 不另写一份合并逻辑（DEF-044/047/058）；
+    * **限流等待不即停**（§21.3）：等不到 ⇒ 停剩余条目并计数报上去，
+      **不逐条静默 continue**（静默正是旧实现「同步成功、正文永远为空」的坑）；
+    * **失败不写标记**：列表数据已落库，``hydrated_at`` 留 NULL，下次同步重试。
+
+    ``scope_label`` 只影响 warning 文案（「本页」/「账号」），不改任何判据。
+    ``on_progress`` 是**观测**回调（**每篇一次**，参数 = 已处理 / 本批总数）：账号级补齐要跑
+    几小时、页内补齐一页也要几分钟，任务行的进度数据必须**持续**动起来
+    （`sts.progress_percent` 的首选口径 `processed / work_total` 就靠它累加）。
+    回调里的异常**全吞**：进度是观测，不得影响执行本身（同 `_ProgressPump` 纪律）。
+
+    返回 ``{"filled", "failed", "no_url", "skipped_by_limit", "attempted", "warnings"}``；
+    ``filled`` = 详情**确有数据写入**的条数（正文 / 图 / 视频至少一项），
+    ``attempted`` = 实际打过详情的条数。
+    """
+    result = _new_hydration_result()
+    if not pending or adapter is None:
+        # 没有 www 会话（适配器为 None）⇒ 一条请求都不发；任务行由编排器安静说明。
+        return result
+    # 2026-09-28：本批**候选总数** —— 调用方算「已处理」用它扣掉「没尝试的」：
+    # `已处理 = 候选 - (候选 - 已尝试) = 已尝试 + (候选 - pending)`。
+    result["pending_total"] = len(pending)
+
+    for note in pending:
+        # 协作式中断检查点（§24.8）：每条详情请求前看一次。补齐是最密的一段
+        # （一页最多 50 条 / 账号级可能上千条），不检查的话取消要等整段补完才生效。
+        if task_id is not None and task_cancel.is_cancelled(task_id):
+            skipped = len(pending) - result["attempted"]
+            if skipped > 0:
+                result["warnings"].append(
+                    f"已被用户取消，{scope_label}剩余 {skipped} 条未补正文（下次同步重试）"
+                )
+            break
+        # 打的是 PC 详情接口，与列表翻页共享 www 通道的真实额度（§19.13.4 口径不变）。
+        if not limiter.wait_allow(f"{account.id}:www"):
+            skipped = len(pending) - result["attempted"]
+            result["skipped_by_limit"] = skipped
+            if skipped:
+                result["warnings"].append(
+                    f"{skipped} 条笔记详情未补齐（{scope_label}限流等待超时，列表数据已落库，下次同步重试）"
+                )
+            break
+        try:
+            note_pk = int(note.id)
+        except Exception:  # noqa: BLE001 - 对象已失效（并发删除 / 会话过期）⇒ 跳过该篇
+            result["failed"] += 1
+            continue
+        result["attempted"] += 1
+        result["attempted_pks"].append(note_pk)
+        # ⚠️ **篇级安全网**（2026-09-27 真机实测 `Could not refresh instance`）：
+        # `hydrate_note_detail` 内部会 commit ⇒ 会话里其它已加载对象被 expire；
+        # 某行若在这期间失效，后续访问它的属性会抛 `InvalidRequestError`。
+        # 旧实现没有这一层 ⇒ **一篇失败炸掉整个补齐批次**（真实库 task 45：
+        # stored=60 之后整任务 failed，剩余 1700+ 篇一篇都没补）。
+        # 安全网不能条件性（DEF-048）：单篇任何异常都只记这一篇，继续下一篇。
+        try:
+            outcome = hydrate_note_detail(
+                db, account, note, account_cookies=cookies, adapter=adapter
+            )
+        except Exception as exc:  # noqa: BLE001 - 单篇失败不停批
+            logger.warning("note hydrate: 单篇补齐异常 (note_pk=%s): %s", note_pk, exc)
+            result["failed"] += 1
+            try:
+                # 失败的 commit 会留下回滚态；不回滚则**下一篇也写不进**。
+                db.rollback()
+            except Exception:  # noqa: BLE001
+                logger.exception("note hydrate: rollback failed (note_pk=%s)", note_pk)
+            continue
+        status = outcome.get("status")
+        if status == "ok":
+            if (
+                outcome.get("content_filled")
+                or outcome.get("images_added")
+                or outcome.get("video_added")
+            ):
+                result["filled"] += 1
+        elif status == "no_token":
+            # 缺令牌**不是失败**：它是「用户补齐登录就能好」的前置缺失，所以
+            # ① 不计入 `failed`（否则任务行会把它报成取数失败，归因错了）；
+            # ② 不写 `hydrated_at`（`hydrate_note_detail` 里已保证）⇒ 下次同步重试。
+            result["no_token"] += 1
+        elif status == "no_url":
+            result["no_url"] += 1
+        else:
+            result["failed"] += 1
+        # ⚠️ **每篇都回调**（2026-09-28 用户口径「进度条慢慢增加」）：回调体只写内存态的
+        # `processed`（**不 commit**），成本可忽略；而旧实现的「每 5 篇一次」在额度
+        # 8 次/分钟下 ≈ 37 秒才动一格 —— 用户看到的仍是「不动」。刷盘仍由
+        # `hydrate_note_detail` 自己的 commit 顺带完成（`_report_detail_progress` 的纪律不变）。
+        if on_progress is not None:
+            try:
+                on_progress(result["attempted"], len(pending))
+            except Exception:  # noqa: BLE001 - 观测失败不得影响执行
+                logger.debug("note hydrate progress callback failed", exc_info=True)
+    return result
+
+
 def _hydrate_page_notes(
     db: Session,
     account: PlatformAccount,
@@ -1411,37 +1953,26 @@ def _hydrate_page_notes(
     adapter: Any,
     limiter: Any,
     task_id: Optional[int] = None,
+    on_progress: Optional[Callable[[int, int], None]] = None,
 ) -> dict[str, Any]:
     """把**本页刚落库**的笔记就地补齐：正文 / 完整图集 / 视频流地址 / 话题（§19.14）。
 
-    与商品同步的 ``_fetch_page_skus`` 同构：翻页循环**内联**完成，一次同步拿全再落库 ——
-    **不另起任务、不建账号级队列、不跨轮累积**（那套契约被 §19.14.1 取代）。
+    与商品同步的 ``_fetch_page_skus`` 同构：翻页循环**内联**完成，一次同步拿全再落库。
 
     候选 = 本页 note_id 里 ``_needs_hydration`` 为真的行（带账号归属闸，防串号）。
+    循环体在 :func:`_hydrate_note_rows`（与账号级补齐共用，不另写一份）。
 
-    纪律：
-
-    * **单一实现**：逐条委托 ``hydrate_note_detail``（正文填空 / 图集与视频只增不删 /
-      话题拆分只增不删 / ``hydrated_at`` 三态）—— 不另写一份合并逻辑（DEF-044/047/058）；
-    * **限流等待不即停**（§21.3）：等不到 ⇒ 停本页剩余条目并计数报上去，
-      **不逐条静默 continue**（静默正是旧实现「同步成功、正文永远为空」的坑）；
-    * **失败不写标记**：列表数据已落库，``hydrated_at`` 留 NULL，下次**全量同步**重试。
-
-    返回 ``{"filled", "failed", "no_url", "skipped_by_limit", "attempted", "warnings"}``；
-    ``filled`` = 详情**确有数据写入**的条数（正文 / 图 / 视频至少一项），
-    ``attempted`` = 实际打过详情的条数。
+    ``on_progress``（2026-09-28 加）：逐篇回调 —— 页内补齐是最长的一段（一页 50 条
+    按 www 额度 8 次/分钟约 6 分钟），不接回调的话进度条在这 6 分钟里一动不动。
     """
-    result: dict[str, Any] = {
-        "filled": 0,
-        "failed": 0,
-        "no_url": 0,
-        "skipped_by_limit": 0,
-        "attempted": 0,
-        "warnings": [],
-    }
     ids = [note_id for note_id in dict.fromkeys(note_ids) if note_id]
+    result = _new_hydration_result()
+    # 2026-09-28：本页**候选条数**（含不需要补齐的）—— 进度口径 `processed` 要把它算进去，
+    # 否则「无需补齐的行」永远不算「已处理」，进度条到不了 100%。
+    result["page_total"] = len(ids)
     if not ids or adapter is None:
-        # 没有 www 会话（适配器为 None）⇒ 一条请求都不发；任务行由编排器安静说明。
+        # 没有 www 会话 ⇒ 一条详情请求都不发；这些行**本任务已处理完**（没有可做的详情活）
+        # ⇒ `page_total` 照给，页尾会把它们计入 `processed`（否则进度条永远差一截）。
         return result
 
     from backend.app.models import Note
@@ -1454,42 +1985,89 @@ def _hydrate_page_notes(
         )
     ).all()
     pending = [note for note in notes if _needs_hydration(db, note)]
-    for note in pending:
-        # 协作式中断检查点（§24.8）：每条详情请求前看一次。补齐是最密的一段
-        # （一页最多 50 条请求），不检查的话取消要等整页补完才生效。
-        if task_id is not None and task_cancel.is_cancelled(task_id):
-            skipped = len(pending) - result["attempted"]
-            if skipped > 0:
-                result["warnings"].append(
-                    f"已被用户取消，本页剩余 {skipped} 条未补正文（下次全量同步重试）"
-                )
-            break
-        # 打的是 PC 详情接口，与列表翻页共享 www 通道的真实额度（§19.13.4 口径不变）。
-        if not limiter.wait_allow(f"{account.id}:www"):
-            skipped = len(pending) - result["attempted"]
-            result["skipped_by_limit"] = skipped
-            if skipped:
-                result["warnings"].append(
-                    f"{skipped} 条笔记详情未补齐（本页限流等待超时，列表数据已落库，下次全量同步重试）"
-                )
-            break
-        result["attempted"] += 1
-        outcome = hydrate_note_detail(
-            db, account, note, account_cookies=cookies, adapter=adapter
-        )
-        status = outcome.get("status")
-        if status == "ok":
-            if (
-                outcome.get("content_filled")
-                or outcome.get("images_added")
-                or outcome.get("video_added")
-            ):
-                result["filled"] += 1
-        elif status == "no_url":
-            result["no_url"] += 1
-        else:
-            result["failed"] += 1
+    result = _hydrate_note_rows(
+        db,
+        account,
+        pending,
+        cookies=cookies,
+        adapter=adapter,
+        limiter=limiter,
+        task_id=task_id,
+        on_progress=on_progress,
+    )
+    result["page_total"] = len(ids)
     return result
+
+
+def _hydrate_account_pending(
+    db: Session,
+    account: PlatformAccount,
+    *,
+    cookies: str,
+    adapter: Any,
+    limiter: Any,
+    task_id: Optional[int] = None,
+    on_progress: Optional[Callable[[int, int], None]] = None,
+    exclude_pks: Optional[set[int]] = None,
+) -> dict[str, Any]:
+    """账号级详情补齐：把该账号**所有还没补过详情**的笔记逐篇补齐（设计 13 §35.18）。
+
+    2026-09-27 用户口径：「账号信息卡中移除补齐详情逻辑，点击同步笔记时，应获取到
+    当前笔记的所有信息后再落库，**在一个任务中完成**，不需要再点击补齐详情」。
+
+    为什么必须有这一步（而不是只靠页内联）：账号卡「同步笔记」默认 `mode=auto`，
+    有游标的账号走**增量** ⇒ 第 1 页早停 ⇒ 页内联补齐的候选集（只取**本页** note_id）
+    为 0 ⇒ **历史欠账永远补不到**（真实库账号 8：1867 条 `hydrated_at IS NULL`，
+    其中没有一条是因为缺详情地址）。收尾扫一次账号全量候选，就把这条缺口封在
+    同一个同步任务里 —— 用户点一次「同步笔记」，任务结束时该账号的笔记详情即为完整态。
+
+    候选判据 = :func:`_needs_hydration`（`hydrated_at IS NULL`，或**视频笔记但本地没有
+    视频资产**）—— 与页内联**同一把尺子**（DEF-044）。对整个账号的行跑一次该判据：
+    `hydrated_at` 非空的行才会走到 `_has_video_asset` 那步（账号 8 实测 1970 行里只有
+    103 行），代价可忽略，换来判据 100% 同源。
+
+    ⚠️ **代价如实记账**（2026-09-27 设计 13 §38.1 修订）：额度按账号读运行时配置，
+    默认 60 次/分钟 ⇒ 1867 篇欠账 ≈ **31 分钟**。改造前那个「≈ 6.2 小时」是
+    **写死 5 次/分钟**算出来的（不是平台额度）；若把额度调回 5，估算回到 6.2 小时。
+    这条路径**可中断、可续跑**（失败不写 `hydrated_at`，下次同步接着补；
+    用户点取消在逐篇检查点生效），不要求用户一次等完。
+
+    ⚠️ 没有 www 会话时返回**空统计**（一条请求都不发）：账号级、可恢复 ——
+    补登网页版后下次同步自动补上（任务行由 `_sync_with_task` 安静说明一行）。
+
+    ``exclude_pks`` = 本任务**页内联阶段已经试过**的笔记主键：跳过它们，别在同一个
+    任务里对同一篇打两次详情（重复请求 = 白烧限流额度；也让 `detail_failed` 不会把同一篇数两遍）。
+    注意「试过」不等于「补上了」—— 失败的行 `hydrated_at` 仍是 NULL，**下次同步**
+    自然会重新进候选（`_needs_hydration` 的口径不变）。
+    """
+    if adapter is None:
+        return _new_hydration_result()
+
+    from backend.app.models import Note
+
+    notes = db.scalars(
+        select(Note)
+        .where(
+            Note.user_id == account.user_id,
+            Note.platform_account_id == account.id,
+        )
+        .order_by(Note.id)
+    ).all()
+    skip = exclude_pks or set()
+    pending = [
+        note for note in notes if int(note.id) not in skip and _needs_hydration(db, note)
+    ]
+    return _hydrate_note_rows(
+        db,
+        account,
+        pending,
+        cookies=cookies,
+        adapter=adapter,
+        limiter=limiter,
+        task_id=task_id,
+        scope_label="账号",
+        on_progress=on_progress,
+    )
 
 
 def _pc_total(raw_payload: Any) -> Optional[int]:
@@ -1932,6 +2510,7 @@ def _sync_source(
     time_to_ms: int = 0,
     www_cookies: str = "",
     www_adapter: Any = None,
+    backlog_work: int = 0,
 ) -> dict[str, Any]:
     """**单个源**的翻页同步（**全量** + 限流等待 + 逐页落库，设计 13 §21）。
 
@@ -1945,6 +2524,10 @@ def _sync_source(
     ``www_cookies`` / ``www_adapter``（§19.14）：页内联详情补齐用的 www 会话与
     适配器，由编排器**解析一次**传进来（适配器为 None = 账号没有 www 会话 ⇒ 本页
     不补、也不发任何请求）。
+
+    ``backlog_work``（2026-09-28）：启动时该账号**本次任务能处理的**详情欠账条数
+    （编排器算一次传进来：欠账总数 − 本地没令牌、处理不了的那些），
+    用于算进度分母 `work_total`（见 `_update_progress` 的 `processed` / `work_total`）。
     """
     from backend.app.api.platforms.xhs.crawl import _save_normalized_notes
 
@@ -1994,7 +2577,26 @@ def _sync_source(
     # §19.14：本页内联补齐的失败条数（详情请求失败 / 平台报错）—— 列表数据已落库，
     # 由编排器聚合成**一行**任务说明（与商品侧 detail_failed 同口径），不每页一行。
     detail_failed = 0
+    # §35.15（2026-09-27）：本页内联补齐里「本地没有详情地址」被跳过的条数。
+    # 原来这个数字**只存在于返回值里**、从不上报 ⇒ 用户看不到「有 N 条被静默跳过」。
+    # 现在由编排器聚合成一行安静说明（DEF-058 同型：静默跳过是「不知道发生了什么」的源头）。
+    no_url = 0
+    # §19.13.9（2026-09-28）：本页内联补齐里「缺详情令牌」被拦下的条数 —— 与
+    # `no_url` **分开报**：缺令牌是**用户补齐登录就能好**的（可自救），`no_url` 是
+    # 本地数据缺失（不会自愈）。混进一个数字里，用户不知道该做什么（DEF-058 口径）。
+    no_token = 0
+    # §35.18：本页内联**试过详情**的本地笔记主键（跨页累积）—— 交给编排器，
+    # 让账号级收尾那段跳过它们（同一任务不对同一篇打两次详情）。
+    attempted_note_pks: list[int] = []
+    # 2026-09-28：**本任务累计已处理条数** + 预计总工作量（进度条看的那一对，
+    # 见 `_update_progress`）。`work_total` 在首个页边界算一次，之后只增不减。
+    processed = 0
+    work_total: Optional[int] = None
     total: Optional[int] = None
+    # §35.18.6：**有界同步**（增量 / 用户选的时间区间）会早停 ⇒ `stored` 永远追不上
+    # 平台报告的账号总量（`total`）；拿它当进度分母 = 进度条恒 0%，用户以为卡死而
+    # 反复取消（2026-09-27 报障）。有界时**不报分母**，让「比例未知」如实表达。
+    bounded = incremental or bool(time_from_ms) or bool(time_to_ms)
     cursor = ""
     warnings: list[str] = []
     stopped = False
@@ -2031,8 +2633,9 @@ def _sync_source(
         # 限流键带源（§19.11 真机教训）：平台风控按平台各自独立，三源共用一个
         # 账号键会让先跑的源把额度耗光、后跑的源第 1 页就被挡。
         #
-        # ⚠️ **等待**而不是 break（设计 13 §21.3）：额度 5 次/分钟而页间只 sleep 3 秒，
-        # 20 秒就烧完额度 —— 这里 break 等于把页数上限从 3 悄悄改成 5，问题原样存在。
+        # ⚠️ **等待**而不是 break（设计 13 §21.3）：额度再高也有烧完的时候（页间只
+        # sleep 5 秒 × 抖动 ⇒ 一分钟能打十几页），这里 break 等于把「全量」悄悄改回
+        # 「有界」，问题原样存在。
         if not limiter.wait_allow(f"{account.id}:{kind}"):
             stopped = True
             warnings.append(f"第 {page_no} 页前限流等待超时")
@@ -2056,7 +2659,11 @@ def _sync_source(
             # 首页失败 = 一行都没落 → 抛给编排器；后续页失败保留已同步的。
             if page_no == 1:
                 _update_progress(
-                    db, task, stored=stored, total=total, goods_stored=goods_stored
+                    db,
+                    task,
+                    stored=stored,
+                    total=None if bounded else total,
+                    goods_stored=goods_stored,
                 )
                 raise
             warnings.append(f"第 {page_no} 页获取失败")
@@ -2105,10 +2712,66 @@ def _sync_source(
             )
             stored += len(saved)
 
+        # ⚠️ **进度分母 = 本次任务「启动时可知」的工作量**（设计 13 §43.1，2026-09-28
+        # 用户报障后收紧）：
+        #   * 无界全量：平台报告的账号总量（拿不到 ⇒ 0，**不拿 `stored` 冒充**）；
+        #   * 有界（增量 / 区间）：**0** —— 列表阶段要翻多少条**只有跑完才知道**
+        #     （§35.18.6 禁的是报 `total` 这个键，本轮补上的是「也不许拿运行中的量充数」）；
+        #   * 详情欠账数（启动时数得清）**永远**计入。
+        # ⛔ **运行中才发现的量不进分母**：它与分子的「本页已处理」数的是**同一批笔记**
+        # （两边每页同步 +N）⇒ 比值恒 100% ⇒ 进度条**第一页就打满** —— 这正是 2026-09-28
+        # 用户报障「刚开跑就 100%」的真身（旧实现在有界分支拿「已落库条数」当分母）。
+        # 唯一例外：**欠账 > 0** 时把「本任务已落库条数」也叠加进分母 —— 那一段工作量确实
+        # 属于本次任务（欠账是它的延续），叠加后 `processed ≤ work_total` 恒成立（不虚高），
+        # 且恰在欠账补完那一刻到 100%；**欠账 = 0 时叠加就是同源，禁止**。
+        # **只在首个页边界算一次**，之后只允许变大（变小 = 进度倒退，禁止）。
+        candidate = 0 if bounded else (int(total) if total is not None else 0)
+        candidate += int(backlog_work)
+        if backlog_work > 0:
+            candidate += int(stored)
+        if candidate > 0:
+            work_total = candidate if work_total is None else max(work_total, candidate)
+
+        # ⚠️ **落库即刷进度**（设计 13 §42.3，2026-09-28 用户口径「每执行 50 条应更新一次
+        # 任务执行详情数据」）：本页的 `stored` 此刻已经确定，而**下面**的页内详情补齐
+        # 要逐篇打 www 详情（额度 8 次/分钟 ⇒ 一页 50 条约 6 分钟）。
+        # 旧实现把刷盘点放在补齐**之后**（页尾那次 `_update_progress`）⇒ 这 6 分钟里
+        # 用户看到的是一个**不动的数字**，任务日志的进度条整页只跳一格且要等到最后 ——
+        # 这正是「进度不更新」的真身。刷盘点前移到落库之后：数字与事实同刻。
+        # ⚠️ 必须 `commit`：进度泵（`task_progress_probe`）是**独立 Session**，
+        # 不提交它读不到（§35.17.3）。页尾那次保留 —— 它要补 `goods_stored`。
+        _update_progress(
+            db,
+            task,
+            stored=stored,
+            total=None if bounded else total,
+            goods_stored=goods_stored,
+            processed=processed,
+            work_total=work_total,
+        )
+        db.commit()
+
         # 正文 / 图集 / 视频流地址的补齐**在本页内联完成**（设计 13 §19.14）：
         # 落库后就地打一次 www 详情，一次同步拿全再落库。账号级补齐队列 /
         # 跨轮累积 / 「每轮 cap=30」那套契约已移除（§19.14.1）。
         page_note_ids = [note_id for note_id in (_note_id(item) for item in items) if note_id]
+        # 页内补齐的**逐篇**回调（2026-09-28）：把「本页已补 M 篇」换算成**任务累计
+        # 已处理**再写进任务行 —— 这是「进度条在页内也慢慢涨」的唯一来源。
+        # ⚠️ 不传 `detail_*`：页内补齐的分母只有本页待补数，写进去就是一页内 0→100 反复跳。
+        # ⚠️ 回调体只改内存态（不 commit），刷盘借 `hydrate_note_detail` 自己的 commit。
+        processed_base = processed
+
+        def _on_page_hydrate(attempted_in_page: int, _batch_total: int) -> None:
+            _report_detail_progress(
+                db,
+                task,
+                stored=stored,
+                total=None if bounded else total,
+                goods_stored=goods_stored,
+                processed=processed_base + int(attempted_in_page),
+                work_total=work_total,
+            )
+
         hydration = _hydrate_page_notes(
             db,
             account,
@@ -2117,9 +2780,19 @@ def _sync_source(
             adapter=www_adapter,
             limiter=limiter,
             task_id=task.id,
+            on_progress=_on_page_hydrate,
+        )
+        # 「本页**已处理**」= 无需补齐的（`page_total - pending_total`）+ 真尝试过的
+        # （回调已经逐篇加过 `attempted`）。⚠️ **没尝试的不计入** —— 限流等待超时 /
+        # 取消导致中途停下时，进度条到不了 100% 是**如实**的（`_finish` 写真实终态）。
+        processed += int(hydration.get("page_total") or 0) - int(
+            hydration.get("pending_total") or 0
         )
         content_filled += hydration["filled"]
         detail_failed += hydration["failed"]
+        no_url += hydration["no_url"]
+        no_token += hydration.get("no_token", 0)
+        attempted_note_pks.extend(hydration.get("attempted_pks") or [])
         warnings.extend(hydration["warnings"])
 
         if items:
@@ -2140,7 +2813,18 @@ def _sync_source(
             goods_stored += _sync_goods_for_notes(db, account, items)
 
         _store_notes_count(db, account, total)
-        _update_progress(db, task, stored=stored, total=total, goods_stored=goods_stored)
+        # 进度分母：有界同步不报 `total`（§35.18.6）—— `total` 本身仍照原样返回给编排器
+        # （`_store_notes_count` / 多源聚合要的是「账号笔记数」，与进度分母不是一件事）。
+        # `processed` / `work_total` 才是进度条看的那一对（单调，见 `_update_progress`）。
+        _update_progress(
+            db,
+            task,
+            stored=stored,
+            total=None if bounded else total,
+            goods_stored=goods_stored,
+            processed=processed,
+            work_total=work_total,
+        )
         db.commit()
 
         if not has_more or str(cursor_out).strip() == "-1":
@@ -2155,7 +2839,11 @@ def _sync_source(
         "goods_stored": goods_stored,
         "content_filled": content_filled,
         "detail_failed": detail_failed,
+        "no_url": no_url,
+        "no_token": no_token,
         "total": total,
+        # §35.18：本页内联试过详情的笔记主键（编排器拿去给账号级收尾做去重）。
+        "attempted_note_pks": attempted_note_pks,
         "warnings": warnings,
         "stopped_by_limit": stopped,
         "cursor_ms": cursor_ms,
@@ -2165,6 +2853,9 @@ def _sync_source(
         # 编排器据此判「能不能下『平台没有它』的结论」。
         "seen_ids": seen_ids,
         "enumerate_complete": enumerate_complete,
+        # 2026-09-28：进度条口径的两个数（编排器接着往下累加，见 `_sync_with_task`）。
+        "processed": processed,
+        "work_total": work_total,
     }
 
 
@@ -2210,6 +2901,8 @@ def _sync_with_task(
     # 「表里有没有行」—— 见 `resolve_note_sync_mode` 的说明。
     mode = sts.resolve_note_sync_mode(db, account.id, mode)
     incremental = mode == sts.SYNC_MODE_INCREMENTAL
+    # §35.18.6：有界同步 = 增量或用户选了时间区间 ⇒ 会早停，进度分母不可知。
+    bounded = incremental or bool(time_from_ms) or bool(time_to_ms)
     # 增量从游标起；全量从 0 起（扫全部，但**仍然**把观测到的最新时间写回游标，
     # 否则自动模式永远选全量 —— 见下面 `if cursor_advanced` 的注释）。
     last_cursor_ms = sts.load_note_cursor(db, account.id) if incremental else 0
@@ -2225,6 +2918,9 @@ def _sync_with_task(
     content_filled = 0
     # §19.14：跨源聚合的「详情请求失败」条数（列表数据已落库，下次全量同步重试）。
     detail_failed = 0
+    # §19.13.9（2026-09-28）：跨源聚合的「缺详情令牌、被拦下」条数 —— 与
+    # `detail_failed` 分开：那个说「下次重试」，这个说「去补网页版登录」。
+    no_token = 0
     warnings: list[str] = []
     stopped_by_limit = False
     source_results: list[dict[str, Any]] = []
@@ -2232,6 +2928,23 @@ def _sync_with_task(
     # 翻完。后者是「平台没有它」这个结论的判据前提（DEF-057：样本不完整则结论不成立）。
     platform_ids: set[str] = set()
     full_list_complete = False
+    # 2026-09-28：进度条口径 —— `processed` 跨源累加、`work_total` 取各源的最大值
+    # （源之间是**并行取数**的语义，取最大而不是相加：相加会让「creator + ark 两个源
+    # 覆盖同一批笔记」把分母算成两倍，进度条永远到不了 100%）。
+    processed_total = 0
+    work_total_max = 0
+    # 启动时该账号的**详情欠账条数**：算进度分母用（`work_total = 列表工作量 + 欠账`）。
+    # 只在编排器这里算一次（每个源都算一遍是白花一次 COUNT）。
+    # ⚠️ 其中「本地完全没有详情令牌」的那些**本次任务处理不了**（用户补齐网页版登录
+    # 才能好，如实报在 warnings 里）⇒ **不计入工作量** —— 算进去会让进度条永远差最后一截，
+    # 用户读成「卡住了」（2026-09-27 报障的同一形态）。
+    backlog_total = _pending_hydration_count(db, account)
+    backlog_work = max(
+        0, backlog_total - _pending_hydration_without_token_count(db, account)
+    )
+    # §35.18：本轮**页内联阶段已经试过详情**的本地笔记主键 —— 账号级收尾要跳过它们
+    # （同一任务不对同一篇打两次详情；也让 `detail_failed` 不会把同一篇数两遍）。
+    attempted_note_pks: set[int] = set()
 
     for source in sources:
         try:
@@ -2251,6 +2964,7 @@ def _sync_with_task(
                 time_to_ms=time_to_ms,
                 www_cookies=www_cookies,
                 www_adapter=www_adapter,
+                backlog_work=backlog_work,
             )
         except SyncFailure as exc:
             reason = f"{exc.code}: {exc.message}" if exc.code else exc.message
@@ -2262,9 +2976,14 @@ def _sync_with_task(
         goods_stored += result["goods_stored"]
         content_filled += result["content_filled"]
         detail_failed += result.get("detail_failed") or 0
+        attempted_note_pks.update(result.get("attempted_note_pks") or [])
         warnings.extend(result["warnings"])
         stopped_by_limit = stopped_by_limit or result["stopped_by_limit"]
         platform_ids.update(result.get("seen_ids") or [])
+        # 2026-09-28：进度条口径跨源累加（分母取最大 —— 多源覆盖同一批笔记，
+        # 相加会把分母算成两倍，进度条永远到不了 100%）。
+        processed_total += int(result.get("processed") or 0)
+        work_total_max = max(work_total_max, int(result.get("work_total") or 0))
         # ark 源只看得到商品笔记（子集）⇒ 凭它不能下「平台没有普通笔记」的结论；
         # creator / pc 源读的是全量列表（§21.4：creator 更全），它完整才算完整。
         if result.get("enumerate_complete") and source["kind"] in ("creator", "pc"):
@@ -2291,17 +3010,49 @@ def _sync_with_task(
     # 不造 0（硬约束⑤；单源时行为与从前逐字节一致）。
     reported = [entry["total"] for entry in source_results if entry.get("total")]
     total = max(reported) if reported else None
+    # §35.18.6：**进度分母**与「账号笔记数」（上面的 `total`）不是一回事 ——
+    # 有界同步（增量 / 区间）会早停，`stored` 追不上账号总量 ⇒ 一律不报分母。
+    progress_total = None if bounded else total
+
+    # 2026-09-28：**进度口径跨源收口** —— 把「累计已处理 / 预计总工作量」写一次，
+    # 让下面的账号级补齐从同一对数字继续。不写的话多源时 payload 里留下的是
+    # **最后一个源**的数（分母可能更小 ⇒ 进度条虚高）。
+    if work_total_max:
+        _update_progress(
+            db,
+            task,
+            stored=stored,
+            total=progress_total,
+            goods_stored=goods_stored,
+            processed=processed_total,
+            work_total=work_total_max,
+        )
 
     # 协作式中断（设计 13 §24.8）：取消信号命中 ⇒ 不做对账、不推进游标、不走 done
     # 收尾，直接写 cancelled 终态（`_finish` 内的竞态守卫是第二道保险）。
     if task_cancel.is_cancelled(task.id):
+        # §35.18.6：取消 ⇒ **收尾段（详情令牌刷新 + 账号级补齐）整段没跑**，
+        # 正文 / 图集还欠着。如实报数并给下一步 —— 旧实现只说「已被用户取消」，
+        # 用户以为同步已经完成、数据本该如此（2026-09-27 报障的直接来源）。
+        pending_detail = _pending_hydration_count(db, account)
+        cancel_note = (
+            f"正文与图集待补 {pending_detail} 条，再次同步可继续补"
+            if pending_detail
+            else ""
+        )
         _finish(
             task,
             status=sts.STATUS_CANCELLED,
             stored=stored,
-            total=total,
+            total=progress_total,
             goods_stored=goods_stored,
-            note="已被用户取消",
+            # ⚠️ **不传**「已被用户取消」：`_finish`（:3210）自己会拼
+            # `note = f"{note}；已被用户取消" if note else "已被用户取消"` ——
+            # 这里再传一遍就会拼成「已被用户取消；已被用户取消」（2026-09-27
+            # 真机数据 `task=11` 的 payload 实读发现）。传**业务说明**才是这个
+            # 参数的本意（商品侧传「未翻完，保留既有行」⇒ 拼出
+            # 「未翻完，保留既有行；已被用户取消」，那是对的）。
+            note=cancel_note,
             sources=source_results,
         )
         db.commit()
@@ -2324,22 +3075,83 @@ def _sync_with_task(
         )
         raise SyncFailure(detail, code="NOTE_SOURCES_UNAVAILABLE")
 
-    # 正文 / 图集 / 视频流地址的补齐已在**源内页循环**完成（设计 13 §19.14）——
-    # 账号级补齐队列（`_hydrate_pending_notes`、cap=30、跨轮累积）整段移除。
-    # 这里只做三件收尾：
-    # ① 没有 www 会话 ⇒ 一行安静说明（失败三分法：取不到 ≠ 接口异常）；
-    # ② 本轮详情请求失败数（跨源聚合成**一行**，与商品侧 detail_failed 同口径）；
-    # ③ 账号级剩余量（含历史欠账）—— 与商品侧 `detail_remaining` 同口径，
-    #    **不是**新任务：增量只覆盖本轮新笔记，老行等下次**全量同步**按页补齐。
-    if www_adapter is None and stored:
-        warnings.append("该账号没有网页版（www）会话，本轮同步的笔记未补正文与图集")
+    # 正文 / 图集 / 视频流地址的补齐分两段（设计 13 §19.14 + §35.18）：
+    #
+    # ① **源内页循环**已就地补过**本轮枚举到**的行（§19.14，翻页内联，拿全再落库）；
+    # ② 这里再对该账号**全部历史欠账**收口一次（§35.18，2026-09-27 用户口径：
+    #    「点击同步笔记时，应获取到当前笔记的所有信息后再落库，在一个任务中完成，
+    #    不需要再点击补齐详情」）。第 ② 段是**必需**的而不是锦上添花：增量同步
+    #    （`mode=auto` 有游标时）第 1 页就早停 ⇒ 候选集为 0 ⇒ 只靠 ① 的话历史欠账
+    #    永远补不到（真实库账号 8：1867 条 `hydrated_at IS NULL`）。
+    #
+    # ⚠️ 代价如实记账：额度按账号读运行时配置（默认 60 次/分钟）⇒ 上千篇欠账按
+    # 额度换算（60 ⇒ ≈ 半小时量级；调回 5 ⇒ 几小时）。见设计 13 §38.1/§38.2。
+    # 这条路径**可中断（逐篇检查点）、可续跑（失败不写 `hydrated_at`）**，
+    # 不要求用户一次等完；进度写进任务行 `payload.progress.detail_done/detail_total`
+    # （§35.17.3 的进度泵据此更新「任务日志」的进度条）。
+    if www_adapter is None:
+        if stored:
+            warnings.append("该账号没有网页版（www）会话，本轮同步的笔记未补正文与图集")
+    else:
+        # ⚠️ **不再刷新详情令牌**（2026-09-28 用户口径：「移除兜底，不允许出现翻页
+        # 到底；没有令牌强行拦截，让用户补齐登录令牌」）。
+        #
+        # 沿革：§19.13.5「先刷令牌再补齐」（每篇翻 `user_posted` 66–200 页）→
+        # §19.13.8「只在完全没令牌时兜底且命中即停」→ **本轮整段删除**。详情走
+        # explore SSR 后本就不挑令牌来源，有令牌的篇不需要刷新；没令牌的篇改为
+        # **如实报数、让用户补齐**，而不是拿一次全表扫描去赌它恰好被翻到。
+        missing_token_count = _pending_hydration_without_token_count(db, account)
+        if missing_token_count:
+            warnings.append(
+                f"{missing_token_count} 条笔记缺详情令牌（xsec_token），未补正文；"
+                "请在网页版（xiaohongshu.com）登录该账号后重新同步"
+            )
+        sweep = _hydrate_account_pending(
+            db,
+            account,
+            cookies=www_cookies,
+            adapter=www_adapter,
+            limiter=limiter,
+            task_id=task.id,
+            exclude_pks=attempted_note_pks,
+            on_progress=lambda done, todo: _report_detail_progress(
+                db,
+                task,
+                stored=stored,
+                total=progress_total,
+                goods_stored=goods_stored,
+                # 2026-09-28：进度条口径**跨阶段连续** —— 账号级补齐从列表阶段
+                # 停下的地方接着数（`processed_total + done`），分母沿用同一个
+                # `work_total`（它已经含启动时的欠账数）⇒ 进度条从 ~X% 平滑走到 100%，
+                # 不会在阶段切换时归零重来（那正是用户禁止的「反复跳」）。
+                processed=processed_total + int(done),
+                work_total=work_total_max or None,
+                # `detail_*` 只服务前端文案「详情补齐 d/t」，不参与百分比（见 progress_percent）。
+                detail_done=done,
+                detail_total=todo,
+            ),
+        )
+        content_filled += sweep["filled"]
+        detail_failed += sweep["failed"]
+        no_token += sweep.get("no_token", 0)
+        warnings.extend(sweep["warnings"])
     if detail_failed:
         warnings.append(
-            f"{detail_failed} 条笔记详情获取失败（列表数据已落库，下次全量同步重试）"
+            f"{detail_failed} 条笔记详情获取失败（列表数据已落库，下次同步重试）"
+        )
+    if no_token:
+        # §19.13.9（2026-09-28）：缺令牌**单独报**，且给的是可执行动作。
+        # 不混进上面那条「获取失败」—— 那条说「下次重试」，这条说「去补登录」，
+        # 用户按错的那句做只会白等（DEF-058 口径）。
+        warnings.append(
+            f"{no_token} 条笔记缺详情令牌（xsec_token），未补正文；"
+            "请在网页版（xiaohongshu.com）登录该账号后重新同步"
         )
     remaining = _pending_hydration_count(db, account)
     if remaining:
-        warnings.append(f"正文待补齐 {remaining} 条（下次全量同步时按页补齐）")
+        # 走到这里还有欠账 ⇒ 只可能是「被限流 / 被取消 / 没有 www 会话」三种
+        # （正常跑完的账号候选集会被清空）。如实报数，别让用户以为已经全补完了。
+        warnings.append(f"正文待补齐 {remaining} 条（下次同步继续补）")
 
     # §27：对账融合 —— 用**本轮已枚举**的平台集合标记「本地有、平台无」的行。
     # 零额外平台请求（枚举结果同步链路已经有了）。判据前提（枚举完整 + 有全量
@@ -2372,7 +3184,7 @@ def _sync_with_task(
         task,
         status=sts.STATUS_DONE,
         stored=stored,
-        total=total,
+        total=progress_total,
         goods_stored=goods_stored,
         note=note,
         sources=source_results,
@@ -2400,10 +3212,51 @@ def _sync_with_task(
 
 
 def _update_progress(
-    db: Session, task: Task, *, stored: int, total: Optional[int], goods_stored: int
+    db: Session,
+    task: Task,
+    *,
+    stored: int,
+    total: Optional[int],
+    goods_stored: int,
+    detail_done: Optional[int] = None,
+    detail_total: Optional[int] = None,
+    processed: Optional[int] = None,
+    work_total: Optional[int] = None,
 ) -> None:
+    """写任务行的进行中进度（**唯一实现**：列表落库 + 详情补齐两个阶段共用）。
+
+    **刷盘点**（设计 13 §42.3，2026-09-28 用户口径「每执行 50 条应更新一次任务执行详情
+    数据」）：本函数在列表阶段每页调用**两次** —— ① 本页落库之后、页内详情补齐之前
+    （`stored` 刚确定就刷，去掉分钟级滞后）；② 页尾（补 `goods_stored`）。
+    页内补齐阶段则由 `on_progress` 回调**逐篇**更新（借 `hydrate_note_detail` 自己的
+    commit 刷盘，≈7.5 秒一格），页粒度 = `sts.PROGRESS_FLUSH_EVERY`（默认 50 条）。
+    ⚠️ **没有时间上界**（`PROGRESS_FLUSH_SECONDS` 已删）：逐篇回调本来就比它更细。
+
+    ``processed`` / ``work_total`` 是**进度条真正看的那一对**（2026-09-28 用户口径
+    「进度条慢慢增加、不许 0→100 反复跳」）：`processed` = 本任务**累计已处理条数**
+    （列表落库 + 详情补齐都算「处理」，每篇一次），`work_total` = 本任务**预计总工作量**
+    （首个页边界算一次，中途不缩）。分子只增、分母固定 ⇒ 比值单调，
+    这是 `sts.progress_percent` 的**首选**口径（见那里的三条优先级）。
+
+    ``detail_done`` / ``detail_total`` 是**第二阶段**（账号级详情补齐，设计 13 §35.18）
+    的分子分母：只在真的进入补齐阶段后才写（``detail_total is None`` ⇒ 不写这个键，
+    与「缺值不造 0」同口径）。⚠️ 页内补齐**不再**写它（那是 0→100 反复跳的根源），
+    它现在只服务前端文案「详情补齐 d/t」。
+    """
     payload = sts.task_payload(task)
-    payload["progress"] = {"stored": stored, "total": total}
+    # ⚠️ §35.18.6：`total` 缺失（有界同步早停 / 首页还没回来）⇒ **不写这个键**，
+    # 而不是写 `null` —— 前端据此区分「比例未知」与「比例就是 0」（缺值口径）。
+    progress: dict[str, Any] = {"stored": stored}
+    if total is not None:
+        progress["total"] = total
+    if processed is not None:
+        progress["processed"] = processed
+    if work_total is not None:
+        progress["work_total"] = work_total
+    if detail_total is not None:
+        progress["detail_done"] = detail_done
+        progress["detail_total"] = detail_total
+    payload["progress"] = progress
     payload["goods_stored"] = goods_stored
     task.payload = payload
     if total:
@@ -2411,6 +3264,48 @@ def _update_progress(
     task.status = sts.STATUS_RUNNING
     if task.started_at is None:
         task.started_at = shanghai_now()
+
+
+def _report_detail_progress(
+    db: Session,
+    task: Task,
+    *,
+    stored: int,
+    total: Optional[int],
+    goods_stored: int,
+    processed: Optional[int] = None,
+    work_total: Optional[int] = None,
+    detail_done: Optional[int] = None,
+    detail_total: Optional[int] = None,
+) -> None:
+    """把**补齐阶段**的进度写进任务行（页内补齐 + 账号级补齐共用，设计 13 §35.18 / §42.4）。
+
+    **为什么不做额外 commit**：``_hydrate_note_rows`` 每篇都会经
+    ``hydrate_note_detail`` 落一次库（它自己 commit），本函数写下的 payload 变更
+    会被**下一篇那次 commit 顺带刷盘** —— 进度最多滞后一篇（额度 8 次/分钟下 ≈ 7.5 秒），
+    换来的是不把写库次数翻倍。整段跑完的终态由 ``_finish`` 统一写。
+
+    ``processed`` / ``work_total`` = 进度条看的那一对（单调口径，见 `_update_progress`）；
+    ``detail_done`` / ``detail_total`` = **仅账号级阶段**的分子分母（前端文案「详情补齐 d/t」用）。
+    ⚠️ **页内补齐不传 `detail_*`** —— 它的分母只有本页待补数，写进去就是「一页内 0→100
+    反复跳」（2026-09-28 用户口径明确禁止）。
+
+    ⚠️ 观测纪律：任何异常都不许影响执行（同 `_ProgressPump`）。
+    """
+    try:
+        _update_progress(
+            db,
+            task,
+            stored=stored,
+            total=total,
+            goods_stored=goods_stored,
+            processed=processed,
+            work_total=work_total,
+            detail_done=detail_done,
+            detail_total=detail_total,
+        )
+    except Exception:  # noqa: BLE001 - 观测不得影响执行
+        logger.debug("note sync: detail progress write failed", exc_info=True)
 
 
 def _finish(
@@ -2433,7 +3328,19 @@ def _finish(
     task.status = status
     task.finished_at = shanghai_now()
     payload = sts.task_payload(task)
-    payload["progress"] = {"stored": stored, "total": total}
+    # ⚠️ **合并而不是覆盖**（2026-09-28 修）：旧实现直接 `payload["progress"] = {stored, total}`
+    # ⇒ 终态那一刻把 `processed` / `work_total` / `detail_*` 全抹掉，而观测线程正是拿
+    # `sts.progress_percent(payload["progress"])` 算**日志终态百分比**的 ⇒ 终态会退回
+    # 旧口径（`stored/total`）算出一个**更低**的数 ⇒ 进度条在收尾时**倒退**（用户口径
+    # 明确禁止）。只覆盖本函数拥有的两个键，其余原样保留。
+    # 同 `_update_progress`：`total` 缺失（有界同步）⇒ 不写这个键（§35.18.6）。
+    progress: dict[str, Any] = dict(payload.get("progress") or {})
+    progress["stored"] = stored
+    if total is not None:
+        progress["total"] = total
+    else:
+        progress.pop("total", None)
+    payload["progress"] = progress
     payload["goods_stored"] = goods_stored
     payload["note"] = note
     payload["error"] = error
@@ -2532,6 +3439,11 @@ def run_note_sync(
         task.status = sts.STATUS_RUNNING
         if task.started_at is None:
             task.started_at = shanghai_now()
+        # ⚠️ 重跑时**清掉上一轮的结束时间**（与 `note_queue_service.recover_interrupted`
+        # 的脏值修复同因）：`running` + 已有 `finished_at` 是**自相矛盾**的行 ——
+        # 「这个任务结束了吗」会出现两种答案（账号卡按钮读 `status`、任务中心读
+        # 时间戳），用户看到的就是「任务已失败，卡片还显示同步中」。
+        task.finished_at = None
         db.commit()
 
         # §19.3：按源清单同步（www / creator / ark 各自独立、互不阻塞）。
@@ -2594,16 +3506,23 @@ def start_note_sync(
     time_from_ms: int = 0,
     time_to_ms: int = 0,
 ) -> dict[str, Any]:
-    """建任务行 + 起线程，**立即返回**任务摄要（HTTP 请求不阻塞）。
+    """建任务行 + 唤醒账号任务 worker，**立即返回**任务摄要（HTTP 请求不阻塞）。
+
+    §35.16（2026-09-27 用户口径「同步商品的任务日志没有新增」）：执行**不再起独立线程**
+    （原 `note-sync-{account_id}`），改由 `account_task_service` 的账号任务 worker 认领 ——
+    串行（不并发打平台）、进程退出后可续跑（行是 `pending`，重启自动接上）。
+    防重口径与响应形状**逐字不变**（调用方零感知）。
 
     防重（需求 N3）：该账号已有未完成的笔记同步 → 返回**已有任务**
     （``reused=True``），不新建、不打平台。
 
-    ``profile_url`` / ``xsec_token`` 只经线程参数传递，**不写进任务 payload**：
-    它们是访问令牌，任务行会被前端读到，没有理由留第二份。§19 起只有
-    **www 源**用得到它们（PC 链路的 URL 级令牌）；ark / creator 源传空串即可。
+    ``profile_url`` / ``xsec_token`` 是 **www 源**的 URL 级令牌，**不写进任务 payload**：
+    任务行会被前端读到，没有理由留第二份。§21.4 起 www 源**整体移除** ⇒ 两者已是
+    死参数（§35.16.3 实查无读取方），worker 从行重建时传空串**语义等价**；
+    将来若恢复 www 源，必须同时把「令牌落库 **或** 放弃续跑」想清楚。
     ``mode`` 默认 ``auto``（§22）；``time_from_ms`` / ``time_to_ms`` 是用户在
-    弹窗里选的时间区间（§23），``(0, 0)`` = 不设界。
+    弹窗里选的时间区间（§23），``(0, 0)`` = 不设界 —— **三者都必须写进任务行**
+    （§35.16：执行体从行重建参数，不落库就丢）。
     """
     db = SessionLocal()
     try:
@@ -2618,6 +3537,9 @@ def start_note_sync(
             source=source,
             max_pages=max_pages,
             page_size=page_size,
+            # §35.16：执行改由账号任务 worker 从**任务行**重建参数 ⇒ 同步语义必须落库
+            # （原线程版靠 args 传，行里没有）。漏写 = 用户选的「全量 / 时间区间」静默丢失。
+            extra={"mode": mode, "time_from_ms": time_from_ms, "time_to_ms": time_to_ms},
         )
         db.commit()
         db.refresh(task)
@@ -2629,39 +3551,9 @@ def start_note_sync(
     finally:
         db.close()
 
-    thread = threading.Thread(
-        target=_run_in_thread,
-        args=(account_id, task_id, user_id, max_pages, page_size, source, profile_url, xsec_token, mode, time_from_ms, time_to_ms),
-        name=f"note-sync-{account_id}",
-        daemon=True,
-    )
-    thread.start()
+    # §35.16：不再起独立线程 —— 交给账号任务 worker 认领执行（串行 + 可续跑 + 可见）。
+    # 执行参数已随任务行落库（见上面的 `extra`），worker 从行重建。
+    from backend.app.services import account_task_service
+
+    account_task_service.ensure_account_task_worker()
     return {"reused": False, **summary}
-
-
-def _run_in_thread(
-    account_id: int,
-    task_id: int,
-    user_id: int,
-    max_pages: Optional[int],
-    page_size: int,
-    source: str,
-    profile_url: str,
-    xsec_token: str,
-    mode: str = sts.SYNC_MODE_AUTO,
-    time_from_ms: int = 0,
-    time_to_ms: int = 0,
-) -> None:
-    run_note_sync(
-        account_id,
-        task_id=task_id,
-        user_id=user_id,
-        max_pages=max_pages,
-        page_size=page_size,
-        source=source,
-        profile_url=profile_url,
-        xsec_token=xsec_token,
-        mode=mode,
-        time_from_ms=time_from_ms,
-        time_to_ms=time_to_ms,
-    )

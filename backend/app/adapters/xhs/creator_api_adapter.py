@@ -12,8 +12,19 @@ class XhsCreatorApiAdapter:
     def _api(self):
         from apis.xhs_creator_apis import XHS_Creator_Apis
         from xhs_utils.xhs_creator import XHSCreatorAuth
+        from xhs_utils.xhs_creator.http import CreatorHttpClient
 
-        auth = XHSCreatorAuth.from_cookie(self.cookies)
+        from backend.app.adapters.xhs.b1_cache import PLATFORM_CREATOR, cached_b1
+        from backend.app.adapters.xhs.http_session import SESSION_CREATOR, shared_client
+
+        # 与 `pc_api_adapter` 同因同法（设计 13 §18.18.7 / §18.18.8）：
+        # ① b1 跨请求复用（SDK 的 `_named_b1_values` 是设备档案实例级的，跨请求命中不了）；
+        # ② 进程级共享会话（冷连接 157–213 ms → 复用 40–48 ms）。
+        auth = XHSCreatorAuth.from_cookie(
+            self.cookies,
+            http_client=shared_client(SESSION_CREATOR, CreatorHttpClient),
+        )
+        auth.profile.fixed_b1 = cached_b1(PLATFORM_CREATOR, self.cookies, auth.profile)
         return XHS_Creator_Apis(auth)
 
     def get_topic(self, keyword: str) -> Any:
@@ -23,10 +34,6 @@ class XhsCreatorApiAdapter:
     def get_location_info(self, keyword: str) -> Any:
         with direct_xhs_request_env():
             return self._api().get_location_info(keyword=keyword)
-
-    def get_published_notes(self) -> Any:
-        with direct_xhs_request_env():
-            return self._api().get_all_posted_notes()
 
     def get_posted_notes_page(self, page: int = 0, tab: int = 0) -> Any:
         """Single page of published notes (creator note-manager).

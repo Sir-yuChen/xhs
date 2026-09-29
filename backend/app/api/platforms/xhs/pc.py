@@ -7,7 +7,7 @@ from typing import Any, Literal, NamedTuple, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.adapters.xhs.pc_api_adapter import XhsPcApiAdapter
@@ -23,7 +23,6 @@ from backend.app.services.account_service import (
     coerce_count,
     has_web_session,
     latest_cookies_for_channel,
-    parse_channel_envelope,
 )
 from backend.app.services.shop_binding_service import (
     get_shop_state,
@@ -674,14 +673,6 @@ def _resolve_identity(
     return _IdentityResolution(identity["user_id"], token, source, "auto", identity, "")
 
 
-# The only cookie that proves a www (xiaohongshu.com) session. An account that
-# logs in on creator.xiaohongshu.com carries galaxy_creator_session_id instead,
-# and XHSPcAuth refuses such a jar outright — so the PC links are *unreachable*
-# rather than merely unauthorised. This distinction is the whole reason the
-# former ``sub_type != "pc"`` guard was wrong. See design doc §17.
-_WEB_SESSION_COOKIE = "web_session"
-
-
 def _has_web_session(cookies: str) -> bool:
     """True when this cookie jar can authenticate PC (www) endpoints.
 
@@ -1056,10 +1047,6 @@ def note_comments(
         )
     items = normalize_comment_payload(raw_payload)
     return {"total": len(items), "items": items}
-
-
-def note_comments_placeholder():
-    return {"total": 1, "items": [{"id": "comment-1", "content": "这个选题很有用"}]}
 
 
 class SelfProfileRequest(BaseModel):

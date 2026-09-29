@@ -9,8 +9,9 @@ import {
   detailMessage,
   pollXhsLoginSession
 } from "../../lib/api";
-import { loginChannelLabel } from "../../lib/login-state";
+import { loginChannelLabel, loginConfirmed, LOGIN_WAIT_LIMIT_MS } from "../../lib/login-state";
 import type { PlatformAccount, XhsQrLoginSession } from "../../types";
+import { LoginSubmitMask } from "./login-submit-mask";
 
 const { Text, Link: AntLink } = Typography;
 
@@ -166,7 +167,16 @@ export function QrLoginPanel({ accountType, onConfirmed, targetAccountId, onRene
       return;
     }
 
+    // 页面级等待上限（2026-09-28 用户口径「页面最多等待5分钟」）：旧实现只有
+    // confirmed / expired 两个出口 —— 用户不扫，轮询就永远转下去。到点收口。
+    const deadline = Date.now() + LOGIN_WAIT_LIMIT_MS;
     const interval = window.setInterval(async () => {
+      if (Date.now() > deadline) {
+        window.clearInterval(interval);
+        setSession((current) => (current ? { ...current, status: "expired" } : current));
+        setStatusText("等待超时（5 分钟），请刷新二维码重试");
+        return;
+      }
       try {
         const polled = await pollXhsLoginSession(sessionId);
         // A response that belongs to a session no longer on screen must be
@@ -183,7 +193,7 @@ export function QrLoginPanel({ accountType, onConfirmed, targetAccountId, onRene
           setStatusText("已扫码，请在手机端确认登录");
         } else if (polled.status === "expired") {
           setStatusText("二维码已过期，请刷新");
-        } else if (polled.status === "confirmed" && !confirmedRef.current) {
+        } else if (loginConfirmed(polled) && !confirmedRef.current) {
           confirmedRef.current = true;
           if (renewingRef.current) {
             /*
@@ -243,7 +253,7 @@ export function QrLoginPanel({ accountType, onConfirmed, targetAccountId, onRene
   }, [accountType, session?.session_id, session?.status]);
 
   return (
-    <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+    <Space direction="vertical" size="middle" style={{ width: "100%", position: "relative" }}>
       <Card
         styles={{
           body: {
@@ -308,6 +318,17 @@ export function QrLoginPanel({ accountType, onConfirmed, targetAccountId, onRene
       >
         {isLoading ? "生成中..." : "刷新二维码"}
       </Button>
+
+      {/*
+        提交蒙版（2026-09-28 用户口径）：二维码没有「提交按钮」，它的提交时刻是
+        **手机端确认之后**（`status="scanned"` ⇒ 正在等平台回执）—— 这一段盖住面板，
+        成功时面板回调关窗、蒙版随窗口一起消失。不用「整个轮询期」当判据：那会让
+        二维码一直蒙着，用户反而看不见自己该扫的东西。
+      */}
+      <LoginSubmitMask
+        active={session?.status === "scanned"}
+        text="已扫码，正在确认登录…"
+      />
     </Space>
   );
 }

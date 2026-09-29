@@ -28,7 +28,8 @@ from backend.app.core.database import Base, get_db
 from backend.app.core.security import create_access_token
 from backend.app.core.time import shanghai_now
 from backend.app.main import app
-from backend.app.models import PlatformAccount, Task, User
+from backend.app.models import PlatformAccount, ScheduledJobLog, Task, User
+from backend.app.models.scheduled_job import LOG_FAILED, LOG_SUCCESS
 from backend.app.services import note_sync_service as nss
 from backend.app.services import shop_goods_sync_service as sgs
 from backend.app.services import sync_task_service as sts
@@ -245,7 +246,13 @@ def test_note_mid_run_cancel_stops_page_loop(env):
         row = db.get(Task, task_id)
         assert row.status == "cancelled"
         assert row.finished_at is not None
-        assert "已被用户取消" in str((row.payload or {}).get("note", ""))
+        note = str((row.payload or {}).get("note", ""))
+        assert "已被用户取消" in note
+        # ⚠️ **只许出现一次**（DEF-081）：调用点与 `_finish`（:3210）各拼一次会变成
+        # 「已被用户取消；已被用户取消」（2026-09-27 真机 `task=11` 的 payload 实读）。
+        # 上面那条 `in` 断言是**子串匹配** ⇒ 重复文案照样通过 —— 这正是瑕疵逃逸的原因，
+        # 所以这里必须计数（项目纪律：负向 / 精确断言禁裸 `in`）。
+        assert note.count("已被用户取消") == 1, f"取消标记重复了：{note!r}"
     finally:
         db.close()
 
@@ -358,29 +365,36 @@ def test_cancel_endpoint_does_not_overwrite_finished_task(env):
 
 
 # --------------------------------------------------------------------------- #
-# 5) 计时字段 + cancelled 进 last_result
+# 5) 计时字段 + 终态结果（**判据 = 该账号最新一条同步日志**）
 # --------------------------------------------------------------------------- #
-def test_status_payload_reports_timing_and_cancelled_last_result(env):
-    """状态端点回起止时间与耗时；cancelled 是 last_result 的一种（卡片要展示）。"""
+def test_status_payload_reports_timing_from_latest_log(env):
+    """状态端点回起止时间与耗时；终态进 `last_result`（卡片要展示）。
+
+    ⚠️ **判据已从「业务任务行」改为「该账号最新一条同步日志」**（2026-09-27 用户口径
+    「账号信息卡的判断逻辑应只需要关注最新一条的同步笔记任务日志的状态即可」+
+    「根据任务日志详情的状态判断终态即可」）：任务行与「用户点的那一下」不是一一对应
+    （同一任务行会被复用 / 被恢复重跑），而日志行才是「一次点击 = 一条记录」。
+    ⇒ 本用例造的是**日志行**，任务行**不再参与**判定。
+    """
     _, account_id, user_id, SessionLocal = env
     started = shanghai_now() - timedelta(seconds=125)
     finished = shanghai_now()
     db = SessionLocal()
     try:
         db.add(
-            Task(
+            ScheduledJobLog(
                 user_id=user_id,
-                platform="xhs",
-                task_type=sts.NOTE_SYNC_TASK_TYPE,
-                status=sts.STATUS_CANCELLED,
+                account_id=account_id,
+                job_name="账号笔记同步",
+                job_key="system.note_sync",
+                job_trigger_type="manual",
+                trigger_type="manual",
+                status=LOG_SUCCESS,
                 started_at=started,
                 finished_at=finished,
-                payload={
-                    "account_id": account_id,
-                    "source": "manual",
-                    "progress": {"stored": 7, "total": 100},
-                    "note": "已被用户取消",
-                },
+                duration_ms=125_000,
+                progress=100,
+                message="同步完成",
             )
         )
         db.commit()
@@ -389,15 +403,186 @@ def test_status_payload_reports_timing_and_cancelled_last_result(env):
 
     db = SessionLocal()
     try:
-        body = sts.status_payload(db, sts.NOTE_SYNC_TASK_TYPE, account_id)
+        body = sts.status_payload(
+            db,
+            sts.NOTE_SYNC_TASK_TYPE,
+            account_id,
+            user_id=user_id,
+            job_key="system.note_sync",
+        )
     finally:
         db.close()
 
-    assert body["status"] == "idle"  # 无进行中任务
+    assert body["status"] == "idle"  # 日志已终态 ⇒ 不是「同步中」
     result = body["last_result"]
-    assert result is not None and result["status"] == "cancelled"
+    assert result is not None and result["status"] == "done"
     assert result["started_at"] is not None
     assert result["finished_at"] is not None
-    assert 120_000 <= result["duration_ms"] <= 130_000
-    # 无进行中任务时 task_summary 的计时字段是 None（缺值口径，不造 0）
-    assert body["started_at"] is None and body["duration_ms"] is None
+    assert result["duration_ms"] == 125_000
+
+
+def test_status_payload_running_log_means_syncing(env):
+    """日志仍是 `running` ⇒ `status="running"`（前端据此显示「同步中」）。
+
+    这是用户口径的另一半：「**只有任务日志状态在『正在执行』，才展示同步中**」。
+    """
+    _, account_id, user_id, SessionLocal = env
+    db = SessionLocal()
+    try:
+        db.add(
+            ScheduledJobLog(
+                user_id=user_id,
+                account_id=account_id,
+                job_name="账号笔记同步",
+                job_key="system.note_sync",
+                job_trigger_type="manual",
+                trigger_type="manual",
+                status="running",
+                started_at=shanghai_now(),
+                progress=37,
+                message="任务仍在执行",
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    db = SessionLocal()
+    try:
+        body = sts.status_payload(
+            db,
+            sts.NOTE_SYNC_TASK_TYPE,
+            account_id,
+            user_id=user_id,
+            job_key="system.note_sync",
+        )
+    finally:
+        db.close()
+
+    assert body["status"] == "running"
+    assert body["last_result"] is None  # 没跑完 ⇒ 没有结果行
+    # ⚠️ 日志口径下 `started_at` **有值**（日志在「用户点下去」那一刻就建好了）——
+    # 旧判据那句「无进行中任务 ⇒ 计时字段为 None」是**任务行**的缺值口径，不再适用。
+    assert body["started_at"] is not None
+
+
+# --------------------------------------------------------------------------- #
+# 6) 取消时**同步收口日志** + 收口失败不许翻盘（2026-09-27 用户报障；DEF-080）
+# --------------------------------------------------------------------------- #
+def test_cancel_endpoint_closes_running_log(env):
+    """取消一个**有 running 日志**的任务 ⇒ 日志在同一请求内收口。
+
+    用户报障（2026-09-27）：「任务日志列表，操作列点击取消任务提示请求失败，请稍后重试，
+    但任务实际已经被取消了」。
+
+    根因：`close_running_logs_for_task` 用了**未导入**的 `shanghai_now` ⇒ `NameError`
+    ⇒ 500。而取消本身在它**之前**就已 `db.commit()`（不可回滚）⇒ 用户看到「失败」但
+    任务真取消了；日志行的改动也随异常一起丢掉 ⇒ 日志永远停在「正在执行」。
+
+    ⚠️ 本用例是**唯一**能抓住它的用例：原有用例都没造 `running` 日志行 ⇒
+    `close_running_logs_for_task` 返回 0 直接跳过，那条 `shanghai_now` 根本没被执行到。
+    """
+    headers, account_id, user_id, SessionLocal = env
+    task_id = _new_task(
+        SessionLocal, user_id=user_id, account_id=account_id,
+        task_type=sts.NOTE_SYNC_TASK_TYPE, status=sts.STATUS_RUNNING,
+    )
+    db = SessionLocal()
+    try:
+        db.add(
+            ScheduledJobLog(
+                user_id=user_id,
+                account_id=account_id,
+                job_name="账号笔记同步",
+                job_key="system.note_sync",
+                job_trigger_type="manual",
+                trigger_type="manual",
+                status="running",
+                started_at=shanghai_now(),
+                task_id=task_id,
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    response = client.post(f"/api/tasks/{task_id}/cancel", headers=headers)
+
+    assert response.status_code == 200, "取消已生效却报失败 ⇒ 错误归因（用户会重复点）"
+    assert response.json()["status"] == "cancelled"
+    db = SessionLocal()
+    try:
+        log = db.scalars(select(ScheduledJobLog)).one()
+        assert log.status == LOG_FAILED, "用户取消不算成功（日志表没有 cancelled 一档）"
+        assert log.message == "已被用户取消"
+        assert log.finished_at is not None, "日志没收口 ⇒ 会永远显示「正在执行」"
+    finally:
+        db.close()
+
+
+def test_cancel_returns_ok_even_if_log_close_raises(env, monkeypatch):
+    """收口抛异常 ⇒ 仍返回 200（取消已落库，附加动作不许翻盘）。
+
+    守卫的是**错误归因**：把「日志没同步」说成「取消失败」，用户会以为没取消掉而重复点。
+    残留的 `running` 日志由启动时的 `close_orphan_running_logs` 兜底（DEF-048）。
+    """
+    headers, account_id, user_id, SessionLocal = env
+    task_id = _new_task(
+        SessionLocal, user_id=user_id, account_id=account_id,
+        task_type=sts.NOTE_SYNC_TASK_TYPE, status=sts.STATUS_RUNNING,
+    )
+
+    def _boom(db, _task_id):  # noqa: ARG001
+        raise RuntimeError("收口炸了")
+
+    monkeypatch.setattr(sts, "close_running_logs_for_task", _boom)
+
+    response = client.post(f"/api/tasks/{task_id}/cancel", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelled"
+    db = SessionLocal()
+    try:
+        assert db.get(Task, task_id).status == "cancelled"
+    finally:
+        db.close()
+
+
+def test_close_orphan_running_logs_writes_terminal_state(env):
+    """孤儿日志收口**真的能跑通**（同一个 `shanghai_now` 缺失曾让它静默失败）。
+
+    调用方 `recover_account_tasks` 用 `except BaseException` 兜底 ⇒ 抛异常时只留一行
+    logger，**启动看起来完全正常**，而日志永远停在「正在执行」。这是本项目最危险的
+    失败形态（静默失败）：没有报错、没有红，只有「同步中」一直转。
+    """
+    _, account_id, user_id, SessionLocal = env
+    task_id = _new_task(
+        SessionLocal, user_id=user_id, account_id=account_id,
+        task_type=sts.NOTE_SYNC_TASK_TYPE, status=sts.STATUS_DONE,
+    )
+    db = SessionLocal()
+    try:
+        db.add(
+            ScheduledJobLog(
+                user_id=user_id,
+                account_id=account_id,
+                job_name="账号笔记同步",
+                job_key="system.note_sync",
+                job_trigger_type="manual",
+                trigger_type="manual",
+                status="running",
+                started_at=shanghai_now(),
+                task_id=task_id,
+            )
+        )
+        db.commit()
+
+        closed = sts.close_orphan_running_logs(db)
+        db.commit()
+
+        assert closed == 1, "孤儿日志没收口（任务已 done，日志却还在 running）"
+        log = db.scalars(select(ScheduledJobLog)).one()
+        assert log.status == LOG_SUCCESS
+        assert log.finished_at is not None
+    finally:
+        db.close()

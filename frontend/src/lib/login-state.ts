@@ -186,7 +186,42 @@ export function loginTagTip(row: LoginChannelRow): string {
   return `${head}，点击${row.view.actionLabel}`;
 }
 
-/** 至少有一个平台需要用户动手（用于给卡片加一处汇总提示，可选）。 */
-export function needsAttention(channels: unknown): boolean {
-  return loginChannelRows(channels).some((row) => row.view.state !== "valid");
+/**
+ * 登录接口「**后端判定成功**」的唯一判据（2026-09-28 用户口径：「根据后端接口返回的
+ * 成功与否进行判断是否关闭弹窗」）。
+ *
+ * 三个登录面板（扫码 / 手机验证码 / 千帆邮箱）拿到响应后都要回答同一个问题：
+ * 「这次登录到底成没成？」—— 各判各的必然漂移，实际情况就是这样：
+ *
+ * * 手机验证码档**根本没判** —— HTTP 200 就当成功，于是「后端回 `pending`」也会关窗；
+ * * 千帆邮箱档判的是 `result.account` 有没有值（派生字段，不是后端结论）；
+ * * 扫码档判 `polled.status === "confirmed"`（这条本来是对的）。
+ *
+ * 后端三个端点（`/pc|creator/phone/confirm`、`/qianfan/email-login`、
+ * `GET /{id}` 轮询）**都以 `status` 表达结论**：`confirmed` = 令牌真的写进去了；
+ * `pending` / `scanned` / `expired` = 还没成功。所以判据只有这一个字段。
+ *
+ * ⚠️ **不看** `renewed_channel` / `account` 是否存在：后端成功分支一定给
+ * `status="confirmed"`，拿派生字段反推会把「后端说成功、但账号序列化恰好为空」
+ * 判成失败 —— 用户会卡在窗口里反复点。判据要跟着**结论**走，不跟着**副作用**走。
+ */
+export function loginConfirmed(result: { status?: string } | null | undefined): boolean {
+  return String(result?.status ?? "") === "confirmed";
 }
+
+/**
+ * 登录窗口的**页面级总等待上限**（2026-09-28 用户口径：「页面最多等待5分钟」）。
+ *
+ * 分工要说清，否则会以为是重复的一层：
+ *
+ * * **单次请求**由请求层兜底 —— `lib/api.ts` 的 `axios.create({ timeout: 120000 })`
+ *   （2 分钟）；所以手机验证码 / 千帆邮箱这两条「一次请求定生死」的路径**天然**短于
+ *   5 分钟，不必再加一层。
+ * * **本常量管的是会无限等下去的那条** —— 扫码轮询（每 2 秒一次，旧实现只有
+ *   `confirmed` / `expired` 两个出口：用户不扫，它就永远转）。到点就停止等待并给出
+ *   可执行的下一步（刷新二维码），而不是让窗口一直「转」。
+ *
+ * ⚠️ 数值是**口径本身**（用户明确说了 5 分钟），改它等于改需求 —— 守卫
+ * `tests/frontend/add_account_modal.cjs` A12 直接断言这个数。
+ */
+export const LOGIN_WAIT_LIMIT_MS = 5 * 60 * 1000;

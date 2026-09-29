@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
 from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -10,11 +9,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.api.platforms.xhs.pc import get_xhs_pc_api_adapter_factory
-from backend.app.api.tasks import serialize_task
 from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user
 from backend.app.core.time import shanghai_now
-from backend.app.models import MonitoringSnapshot, MonitoringTarget, Note, PlatformAccount, Task, User
+from backend.app.models import MonitoringSnapshot, MonitoringTarget, Note, User
 from backend.app.schemas.common import paginated
 from backend.app.services.monitoring_crawl_service import execute_monitoring_refresh
 

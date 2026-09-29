@@ -33,8 +33,11 @@ from backend.app.main import app
 from backend.app.models import Note, NoteAsset, PlatformAccount, Task, User
 from backend.app.models.shop import ShopNoteGoods
 from tests.backend.cookie_fixtures import bind_shop_account
+from tests.backend.conftest import patch_service_sessions
 from backend.app.services import note_sync_service as nss
+from backend.app.services import account_task_service as ats
 from backend.app.services import sync_task_service as sts
+from backend.app.services import task_cancel
 
 client = TestClient(app)
 
@@ -291,6 +294,11 @@ def _setup(tmp_path, monkeypatch, *, sub_type: str = "creator", with_binding: bo
 
     app.dependency_overrides[get_db] = override_get_db
     monkeypatch.setattr(nss, "SessionLocal", SessionLocal)
+    # ⚠️ 端点链路会走到 `scheduled_job_runner` / `sync_task_service` 等模块，它们各自
+    # 持有模块级 SessionLocal（`from … import SessionLocal`）—— 只 patch `nss` 的话
+    # 这些模块**照样写生产库**（2026-09-27 真实发生过：真实库多出一次僵尸任务
+    # + 一条假定时日志）。`patch_service_sessions` 按 AST 扫出的全量清单逐一打桩。
+    patch_service_sessions(monkeypatch, SessionLocal)
     # §11.5：取 Cookie 必须带通道。这里刻意做成**通道敏感**的假实现 ——
     # 要的通道不对就返回空串，让「拿错通道的 jar 去打接口」这类回归直接炸，
     # 而不是被一个「反正都能用」的假实现掩盖掉。
@@ -863,13 +871,175 @@ def test_creator_total_missing_does_not_write_a_zero(creator_env):
         db.close()
 
 
+def test_bounded_sync_does_not_report_a_progress_denominator(creator_env, monkeypatch):
+    """§35.18.6：**有界同步**（增量 / 用户选的时间区间）不报进度分母。
+
+    2026-09-27 用户报障的诱因：`progress.total` 取的是**平台报告的账号笔记总量**
+    （真实库 1951），而区间同步只落个位数 ⇒ 进度条恒 0–1% ⇒ 用户以为卡死、反复取消
+    ⇒ 收尾段（详情令牌刷新 + 账号级补齐）整段没跑 ⇒ 详情弹窗里正文全空。
+
+    口径：只有**无界全量**的分母是真的（全量会翻到底，`stored` 最终收敛到它）；
+    有界时一律**不写 `total` 键**（缺值口径：不知道就不报，不拿账号总量冒充）。
+
+    ⚠️ **2026-09-28 同日第三轮收紧**（用户报障「任务进度列的进度条自动达到了 100% 但是
+    此时任务刚刚开始」，设计 13 §43）：`work_total` **也不许拿运行中的量充数** ——
+    有界 + **零欠账**时，列表阶段要翻多少条只有跑完才知道，旧实现拿「已落库条数」当分母，
+    而它与分子的「本页已处理」数的是**同一批笔记**（两边每页同步 +N）⇒ 比值恒 100%
+    ⇒ 进度条第一页就打满。现在：**零欠账 ⇒ 不报分母**（`progress_percent` 返回 `None`
+    ⇒ 前端渲染「比例未知」的不定量条）；**有欠账 ⇒ 照报**（欠账是启动时数得清的工作量，
+    分母 = 已落库条数 + 欠账，保证 `processed ≤ work_total`）。
+    """
+    _, account_id, user_id, SessionLocal = creator_env
+
+    # ① 无界全量 ⇒ 分母 = 平台报告的账号总量（本夹具 2 条）
+    nss.run_note_sync(account_id, user_id=user_id, max_pages=1, mode=sts.SYNC_MODE_FULL)
+    db = SessionLocal()
+    try:
+        task = db.scalars(
+            select(Task).where(Task.task_type == sts.NOTE_SYNC_TASK_TYPE).order_by(Task.id.desc())
+        ).first()
+        full_progress = sts.task_payload(task)["progress"]
+        # 分母的具体值由适配器报告（本夹具非 2 —— 那是「本页条数」的另一回事），
+        # 这里只钉「无界全量**必须**有分母」。
+        assert full_progress.get("total") is not None, "无界全量必须报出分母"
+    finally:
+        db.close()
+
+    # ② 用户选了时间区间（只有上界也算有界）⇒ **不写** `total` 键（早停 ⇒ 分母不可知）
+    nss.run_note_sync(
+        account_id,
+        user_id=user_id,
+        max_pages=1,
+        mode=sts.SYNC_MODE_FULL,
+        time_from_ms=0,
+        time_to_ms=2**50,
+    )
+    db = SessionLocal()
+    try:
+        task = db.scalars(
+            select(Task).where(Task.task_type == sts.NOTE_SYNC_TASK_TYPE).order_by(Task.id.desc())
+        ).first()
+        progress = sts.task_payload(task)["progress"]
+        assert "total" not in progress, f"有界同步不该报分母：{progress}"
+        assert progress["stored"] == 2, "已落库数照常报（它是事实，不是比例）"
+        assert isinstance(progress.get("processed"), int), f"已处理条数必须报出：{progress}"
+        # ③ 零欠账的有界同步 ⇒ **不报分母**（旧实现在这里报 `work_total = stored`，
+        #    与分子的「本页已处理」同源 ⇒ 比值恒 100%，正是用户报障的那个形态）。
+        assert progress.get("work_total") is None, (
+            f"零欠账的有界同步不该报分母（分母会与分子同源 ⇒ 恒 100%）：{progress}"
+        )
+        assert sts.progress_percent(progress) is None, (
+            "没有可预知的分母 ⇒ 比例**未知**（不是 0%、更不是 100%）——"
+            "前端据此渲染不定量条（设计 13 §43.1）"
+        )
+    finally:
+        db.close()
+
+    # ④ 有界 + **有欠账** ⇒ 分母照报：欠账是「启动时数得清」的工作量，
+    #    且 `processed ≤ work_total` 恒成立（分母含本任务已落库条数那一段，
+    #    与分子的「本页已处理」一一对应 ⇒ 不虚高、恰在欠账补完那一刻到 100%）。
+    monkeypatch.setattr(nss, "_pending_hydration_count", lambda *a, **k: 7)
+    monkeypatch.setattr(nss, "_pending_hydration_without_token_count", lambda *a, **k: 0)
+    nss.run_note_sync(
+        account_id,
+        user_id=user_id,
+        max_pages=1,
+        mode=sts.SYNC_MODE_FULL,
+        time_from_ms=0,
+        time_to_ms=2**50,
+    )
+    db = SessionLocal()
+    try:
+        task = db.scalars(
+            select(Task).where(Task.task_type == sts.NOTE_SYNC_TASK_TYPE).order_by(Task.id.desc())
+        ).first()
+        progress = sts.task_payload(task)["progress"]
+    finally:
+        db.close()
+
+    work_total = int(progress.get("work_total") or 0)
+    processed = int(progress.get("processed") or 0)
+    assert work_total >= 7, f"有欠账的有界同步必须报出分母（含欠账数）：{progress}"
+    assert processed <= work_total, f"已处理数不得超过分母（分母算错了会虚高到 100%）：{progress}"
+
+
+def test_note_sync_reports_task_scoped_monotonic_progress(creator_env):
+    """2026-09-28 用户口径：进度条**慢慢增加**且**绝不 0→100 反复跳**（设计 13 §42.4）。
+
+    判据（口径层的三条不变量，不依赖具体平台数据）：
+    ① 进度看的是 `processed / work_total`（**本任务**累计已处理 / 预计总工作量），
+       不是「一页内 0→100」的 `detail_done / detail_total`；
+    ② `work_total` 是**本次任务**的工作量（无界全量 = 平台报告的账号总量 + 可处理的详情欠账），
+       且 `processed ≤ work_total`（超了就是分母算错，进度条会虚高到 100 后停住）；
+    ③ `progress_percent` 单调：同一任务里先后两次读到的百分比**不许变小**。
+    """
+    _, account_id, user_id, SessionLocal = creator_env
+
+    nss.run_note_sync(account_id, user_id=user_id, max_pages=1, mode=sts.SYNC_MODE_FULL)
+    db = SessionLocal()
+    try:
+        task = db.scalars(
+            select(Task).where(Task.task_type == sts.NOTE_SYNC_TASK_TYPE).order_by(Task.id.desc())
+        ).first()
+        progress = sts.task_payload(task)["progress"]
+    finally:
+        db.close()
+
+    processed = int(progress.get("processed") or 0)
+    work_total = int(progress.get("work_total") or 0)
+    assert work_total > 0, f"必须报出本次任务的预计工作量：{progress}"
+    assert processed <= work_total, f"已处理数不得超过预计工作量（分母算错了）：{progress}"
+    assert sts.progress_percent(progress) == max(
+        0, min(100, int(processed * 100 / work_total))
+    ), "百分比必须走 processed / work_total 这条口径"
+    # 单调性：把「已处理」往后推一点，百分比**只许变大或不变**
+    before = sts.progress_percent(progress)
+    after = sts.progress_percent({**progress, "processed": min(processed + 1, work_total)})
+    assert after >= before, f"进度不许倒退：{before} → {after}"
+
+
+def test_cancel_reports_the_detail_backlog(creator_env, monkeypatch):
+    """§35.18.6：取消 ⇒ 说明行必须报出「正文与图集还欠多少」并给出下一步。
+
+    2026-09-27 用户报障：取消后详情弹窗里全是「列表源不带正文」/「（无商品标题）
+    价格待同步」，而任务行只写「已被用户取消」⇒ 用户以为同步已经完成、数据本该如此。
+    根因是**收尾段（详情令牌刷新 + 账号级补齐）整段没跑**，欠账必须如实报出来。
+
+    同时钉住取消后缀**只出现一次**：调用方传业务说明，后缀由 `_finish` 统一拼
+    （旧实现两处都拼 ⇒「已被用户取消；已被用户取消」，真实库 task=11 实测）。
+    """
+    _, account_id, user_id, SessionLocal = creator_env
+
+    # 前置：先落一批「列表有、详情没补」的行（本夹具**没有 www 会话** ⇒ 正文留空、
+    # `hydrated_at` 留 NULL —— 正是收尾段要补的那批）。
+    nss.run_note_sync(account_id, user_id=user_id, max_pages=1)
+
+    # 再跑一次，但一开跑就命中取消信号 ⇒ 收尾段整段不执行。
+    monkeypatch.setattr(task_cancel, "is_cancelled", lambda _task_id: True)
+    nss.run_note_sync(account_id, user_id=user_id, max_pages=1)
+
+    db = SessionLocal()
+    try:
+        task = db.scalars(
+            select(Task).where(Task.task_type == sts.NOTE_SYNC_TASK_TYPE).order_by(Task.id.desc())
+        ).first()
+        assert task.status == sts.STATUS_CANCELLED
+        note = sts.task_payload(task)["note"]
+    finally:
+        db.close()
+
+    assert "待补 2 条" in note, f"取消必须报出欠账：{note}"
+    assert "再次同步可继续补" in note, f"要给出下一步：{note}"
+    assert note.count("已被用户取消") == 1, f"取消后缀只许出现一次：{note}"
+
+
 # --------------------------------------------------------------------------- #
 # 防重（N3）+ 状态接口
 # --------------------------------------------------------------------------- #
 def test_second_trigger_reuses_the_active_task(creator_env, monkeypatch):
     headers, account_id, _user_id, SessionLocal = creator_env
     # 不让线程真的跑：本用例只盯任务行的防重语义。
-    monkeypatch.setattr(nss, "_run_in_thread", lambda *a, **k: None)
+    monkeypatch.setattr(ats, "ensure_account_task_worker", lambda *a, **k: None)
 
     first = client.post(f"/api/accounts/{account_id}/notes/sync", headers=headers, json={})
     assert first.status_code == 200, first.text
@@ -886,6 +1056,19 @@ def test_second_trigger_reuses_the_active_task(creator_env, monkeypatch):
 
 
 def test_status_is_idle_before_any_task_and_after_one_finishes(creator_env):
+    """`last_result` 的来源 = **该账号最新一条同步日志**（2026-09-27 判据变更，设计 13 §35.17）。
+
+    ⚠️ **被取代的原断言（保留备查）**：改造前这里跑完 `nss.run_note_sync(...)` 就直接断言
+    `last_result["status"] == STATUS_DONE` 且 `progress["stored"] == 2` —— 那时 `last_result`
+    读的是**业务任务行**。判据改成「该账号最新一条同步日志」后**不做兼容回落**（两套判据
+    并存正是「日志 failed / 卡片同步中」的土壤）⇒ 任务行在、日志不在 ⇒ 端点回**空态**。
+    账号卡完整链路（点按钮 ⇒ 任务行 + 日志行 ⇒ 终态一致）由
+    `test_account_card_sync_job_log.py` 覆盖；这里钉的是**端点读的是日志**。
+    """
+    from backend.app.core.time import shanghai_now
+    from backend.app.models.scheduled_job import ScheduledJobLog
+    from backend.app.services.job_registry import JOB_KEY_NOTE_SYNC
+
     headers, account_id, user_id, SessionLocal = creator_env
 
     idle = client.get(f"/api/accounts/{account_id}/notes/sync/status", headers=headers)
@@ -894,14 +1077,40 @@ def test_status_is_idle_before_any_task_and_after_one_finishes(creator_env):
     assert idle.json()["status"] == "idle"
     assert idle.json()["last_result"] is None
 
+    # 只落业务任务行（不写日志）⇒ 端点**仍是空态**：判据只认日志
     nss.run_note_sync(account_id, user_id=user_id, max_pages=1)
+    task_only = client.get(f"/api/accounts/{account_id}/notes/sync/status", headers=headers)
+    assert task_only.json()["status"] == "idle"
+    assert task_only.json()["last_result"] is None, "判据只认日志，不回读业务任务行"
+
+    # 补一条终态日志（账号卡路径由 `scheduled_job_runner.run_targeted_job` 写）⇒ 端点回它
+    db = SessionLocal()
+    try:
+        db.add(
+            ScheduledJobLog(
+                user_id=user_id,
+                account_id=account_id,
+                job_key=JOB_KEY_NOTE_SYNC,
+                job_name="同步笔记",
+                trigger_type="manual",
+                status="success",
+                progress=100,
+                duration_ms=1234,
+                started_at=shanghai_now(),
+                finished_at=shanghai_now(),
+                result={"stored": 2, "total": 2},
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
 
     after = client.get(f"/api/accounts/{account_id}/notes/sync/status", headers=headers)
     body = after.json()
     assert body["task_id"] is None
     assert body["status"] == "idle"
     assert body["last_result"]["status"] == sts.STATUS_DONE
-    assert body["last_result"]["progress"]["stored"] == 2
+    assert body["last_result"]["progress"] == 100
     assert body["last_result"]["finished_at"]
 
 
@@ -910,7 +1119,7 @@ def test_status_is_idle_before_any_task_and_after_one_finishes(creator_env):
 # --------------------------------------------------------------------------- #
 def test_other_users_account_is_404(creator_env, monkeypatch):
     _, account_id, _user_id, _ = creator_env
-    monkeypatch.setattr(nss, "_run_in_thread", lambda *a, **k: None)
+    monkeypatch.setattr(ats, "ensure_account_task_worker", lambda *a, **k: None)
 
     other = client.post("/api/auth/register", json={"username": "intruder", "password": "secret123"})
     assert other.status_code == 200, other.text
@@ -928,7 +1137,7 @@ def test_page_bounds_follow_the_new_contract(creator_env, monkeypatch):
     """参数边界（§21）：`0` 越界 422；`21` **现在合法**（上限已放到 `ABSOLUTE_PAGE_CAP`）；
     超过绝对兜底 422；`None`/缺省 = 全量。"""
     headers, account_id, _user_id, _ = creator_env
-    monkeypatch.setattr(nss, "_run_in_thread", lambda *a, **k: None)
+    monkeypatch.setattr(ats, "ensure_account_task_worker", lambda *a, **k: None)
 
     reject = ({"max_pages": 0}, {"max_pages": 501}, {"page_size": 0}, {"page_size": 101})
     for body in reject:

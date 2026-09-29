@@ -35,6 +35,9 @@ INITIAL_DATA_DIRNAME = "initial_data"
 #: 定时任务初始化数据文件名
 SCHEDULED_JOBS_FILENAME = "scheduled_jobs.json"
 
+#: 运行时配置初始化数据文件名（设计 10 §7.3，2026-09-27）
+SYSTEM_SETTINGS_FILENAME = "system_settings.json"
+
 
 def _project_root() -> Path:
     """与 `core/config.py::_load_yaml_config()` 同一口径（frozen 下 = `_internal/`）。"""
@@ -73,7 +76,11 @@ def _load_payload(filename: str) -> Any:
         )
         return None
     try:
-        with open(path, "r", encoding="utf-8") as handle:
+        # ⚠️ 用 `utf-8-sig` 而不是 `utf-8`：这两个文件**用户可见、可编辑**（安装目录下），
+        # 一个被 Windows 编辑器加上 BOM 的副本会让 `json.load` 抛 `JSONDecodeError`
+        # ⇒ 整份种子静默退化成代码默认（2026-09-27 实测踩到过一次）。
+        # 随包出厂的形态由测试钉住「必须是**无 BOM** 的纯 UTF-8」，读取侧则一律宽容。
+        with open(path, "r", encoding="utf-8-sig") as handle:
             return json.load(handle)
     except (OSError, json.JSONDecodeError) as exc:  # noqa: BLE001 - 坏数据不是致命错误
         logger.warning("initial_data: %s 解析失败（%s: %s）", path, type(exc).__name__, exc)
@@ -197,4 +204,57 @@ def load_initial_scheduled_jobs() -> list[dict[str, Any]]:
         if item is not None:
             normalized.append(item)
     logger.info("initial_data: 载入 %s 条定时任务初始化数据", len(normalized))
+    return normalized
+
+
+def _normalize_system_setting(raw: Any) -> dict[str, Any] | None:
+    """单条运行时配置初始化数据 → 规范 dict；缺 key ⇒ `None`（丢弃该条 + warning）。
+
+    ⚠️ **不在这一层校验 `value_type` 白名单**：值类型归一化与坏值兜底是
+    `settings_service` 的职责（唯一实现，DEF-044），这里只做「结构是否像一行配置」。
+    在两层各写一份类型判断，迟早一边改了另一边没改。
+    """
+    if not isinstance(raw, dict):
+        logger.warning("initial_data: 配置条目不是对象（%r），已跳过", type(raw).__name__)
+        return None
+    key = raw.get("key")
+    if not isinstance(key, str) or not key.strip():
+        logger.warning("initial_data: 配置条目缺少 key，已跳过")
+        return None
+    return {
+        "key": key.strip(),
+        "value": raw.get("value"),
+        "value_type": str(raw.get("value_type") or ""),
+        "category": str(raw.get("category") or ""),
+        "label": str(raw.get("label") or ""),
+        "description": str(raw.get("description") or ""),
+        "requires_restart": bool(raw.get("requires_restart", False)),
+        "is_dangerous": bool(raw.get("is_dangerous", False)),
+    }
+
+
+def load_initial_system_settings() -> list[dict[str, Any]]:
+    """运行时配置应用初始化数据（规范化后的列表；任何问题 ⇒ warning + 可用部分）。
+
+    与 `load_initial_scheduled_jobs` 同构（双路解析、坏数据不致命）。
+    """
+    payload = _load_payload(SYSTEM_SETTINGS_FILENAME)
+    if payload is None:
+        return []
+    if not isinstance(payload, dict):
+        logger.warning("initial_data: %s 顶层不是对象，已忽略", SYSTEM_SETTINGS_FILENAME)
+        return []
+    rows = payload.get("system_settings")
+    if not isinstance(rows, list):
+        logger.warning(
+            "initial_data: %s 缺少 system_settings 数组，已忽略", SYSTEM_SETTINGS_FILENAME
+        )
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    for raw in rows:
+        item = _normalize_system_setting(raw)
+        if item is not None:
+            normalized.append(item)
+    logger.info("initial_data: 载入 %s 条运行时配置初始化数据", len(normalized))
     return normalized

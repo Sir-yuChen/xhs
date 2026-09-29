@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from backend.app.api import accounts, ai, auth, auto_tasks, drafts, files, keyword_groups, login_sessions, model_configs, notes, notifications, publish, schedule, tasks, topics
+from backend.app.api import accounts, ai, auth, auto_tasks, drafts, files, keyword_groups, login_sessions, model_configs, notes, notifications, publish, schedule, settings as settings_api, tasks, topics
 from backend.app.api.platforms import registry
 from backend.app.api.platforms.xhs import (
     analytics,
@@ -21,6 +21,12 @@ from backend.app.api.platforms.xhs import (
 from backend.app.core.config import get_settings
 from backend.app.core.database import SessionLocal, init_db
 from backend.app.services import note_queue_service
+from backend.app.services.account_task_service import (
+    ensure_account_task_worker,
+    recover_account_tasks,
+    start_account_task_watchdog,
+    stop_account_task_watchdog,
+)
 from backend.app.services.note_publish_service import (
     ensure_publish_worker,
     start_publish_worker_watchdog,
@@ -43,6 +49,7 @@ from backend.app.services.scheduler_service import (
     start_scheduler_watchdog,
     stop_scheduler_watchdog,
 )
+from backend.app.services.settings_service import seed_builtin_settings_from_initial_data
 
 
 @asynccontextmanager
@@ -52,6 +59,10 @@ async def lifespan(app: FastAPI):
     # ⚠️ 位置在调度器之前且**不受 `scheduler_enabled` 影响** —— 桌面版默认不启调度器，
     #    若把播种挂在调度器装配里，任务中心会是空的（「装完即有用」就落空了）。
     seed_builtin_jobs_from_initial_data()
+    # 运行时配置基线（设计 10 §7.3，2026-09-27）：与定时任务同一套「随安装附有 + 只补
+    # 缺失不覆盖」语义。**必须早于任何运行期读点**（限流器 / worker 池都要读它）——
+    # 虽然读点自身有「DB 无行 ⇒ 回落 settings」的兜底，但先播种才能让设置页一打开就有行。
+    seed_builtin_settings_from_initial_data()
     settings = get_settings()
     scheduler = start_scheduler() if settings.scheduler_enabled else None
     app.state.scheduler = scheduler
@@ -70,6 +81,9 @@ async def lifespan(app: FastAPI):
     # 守活（DEF-069 同型缺口）：商品生成 worker（§31.10，单 / 批量生成都走队列）——
     # 一篇要跑三步 + 轮询 ~6–21s，线程死了同样无声停摆。同款看门狗补上。
     start_generate_worker_watchdog()
+    # 守活（DEF-069 同型）：账号级任务 worker（设计 13 §35.16）—— 笔记同步 / 商品同步
+    # 此前是**每账号一条独立线程**，线程被带走 / 进程退出后 `running` 行永久卡住。
+    start_account_task_watchdog()
     # 重启恢复（设计 13 §35.9.2，用户口径「应用退出再次启动后可继续执行」）：
     # ① 上次进程留下的 `running` 队列项 ⇒ 复位成 `pending`（**只自动重试「中断」**；
     #    业务失败不自动重试，等用户在任务记录里手动点「重试」）；
@@ -84,17 +98,23 @@ async def lifespan(app: FastAPI):
         note_queue_service.recover_publishing_notes(recovery_db)
     finally:
         recovery_db.close()
-    # 复位完**立刻唤醒**三个 worker：积压的 `pending` 项不该等看门狗 30 秒巡检才被
+    # §35.16：账号级任务（笔记同步 / 商品同步 / 清理）的 `running` 行**不在**
+    # `QUEUE_ITEM_TASK_TYPES` 里 ⇒ 上面那次复位覆盖不到，此前永远卡在「同步中」——
+    # 卡片与记录页显示「同步中」却再也不会结束（真缺陷，DEF-048 同型）。单独复位。
+    recover_account_tasks()
+    # 复位完**立刻唤醒**四个 worker：积压的 `pending` 项不该等看门狗 30 秒巡检才被
     # 发现（唤醒带兜底超时的长等待，无活可干时它们自动回去睡）。
     ensure_sync_worker()
     ensure_publish_worker()
     ensure_generate_worker()
+    ensure_account_task_worker()
     try:
         yield
     finally:
         stop_publish_worker_watchdog()
         stop_sync_worker_watchdog()
         stop_generate_worker_watchdog()
+        stop_account_task_watchdog()
         stop_scheduler_watchdog()
         # 取 `app.state` 上的**当前**实例：看门狗可能已经换过一台。
         shutdown_scheduler(getattr(app.state, "scheduler", None))
@@ -140,6 +160,8 @@ def create_app() -> FastAPI:
     app.include_router(monitoring.router, prefix="/api")
     app.include_router(auto_tasks.router, prefix="/api")
     app.include_router(schedule.router, prefix="/api")
+    # 运行时配置中心（设计 10 §7）：设置页的列表 / 增删改查
+    app.include_router(settings_api.router, prefix="/api")
 
     # Serve pre-built frontend in production / Docker
     if settings.frontend_serve_static:

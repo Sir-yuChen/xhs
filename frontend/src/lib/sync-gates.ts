@@ -13,7 +13,7 @@
 
 import { loginChannelRows } from "./login-state";
 import { formatDuration } from "./time";
-import type { XhsSyncLastResult, XhsSyncProgress } from "./api";
+import type { XhsSyncLastResult, XhsSyncProgress, XhsSyncTaskStatus } from "./api";
 import type { XhsLoginChannels } from "../types";
 
 /**
@@ -121,11 +121,29 @@ export function goodsGate(
   };
 }
 
-/** 同步**进行中**的进度行（设计 13 §6.2）。 */
+/**
+ * 同步**进行中**的进度行（设计 13 §6.2 / **§35.18.6**）。
+ *
+ * **三态**（分母按阶段取，取代「一律 `stored / total`」）：
+ *
+ * 1. **详情补齐阶段**（`detail_total` 有值）⇒ 它才是「还要等多久」的那一段
+ *    （上千篇可能几小时）⇒ 显示补齐进度；
+ * 2. **无界全量** ⇒ `已落库 N / 共 M`（全量会翻到底，分母真实）；
+ * 3. **有界同步**（增量 / 时间区间，后端不写 `total`）⇒ 只报已落库数。
+ *    ⚠️ **不渲染「/ 共 -」**：把「比例未知」渲染成占位符，用户会读成「卡住了」——
+ *    这正是 2026-09-27 报障里「反复取消同步」的诱因。
+ */
 export function syncProgressText(progress: XhsSyncProgress | null, unit: string): string {
   const stored = progress?.stored ?? 0;
+  const detailTotal = progress?.detail_total;
+  if (detailTotal != null) {
+    return `已落库 ${stored} ${unit} · 详情补齐 ${progress?.detail_done ?? 0} / ${detailTotal}`;
+  }
   const total = progress?.total;
-  return `已落库 ${stored} / 共 ${total ?? "-"} ${unit}`;
+  if (total == null) {
+    return `已落库 ${stored} ${unit}`;
+  }
+  return `已落库 ${stored} / 共 ${total} ${unit}`;
 }
 
 /** 同步**已结束**的结果行：优先用后端 `note`（限流/部分完成的说明由后端给，前端不硬编码业务判断）。 */
@@ -141,8 +159,13 @@ export function syncResultText(result: XhsSyncLastResult | null, unit: string): 
   // 用户刚点过取消，结果行必须说「已取消」而不是退回「同步已结束」。
   if (result.status === "cancelled") {
     const parts = ["已取消"];
-    if (result.note && result.note !== "已被用户取消") {
-      parts.push(result.note);
+    // §35.18.6：后端 `note` 形如「<说明>；已被用户取消」（`_finish` 统一拼的取消
+    // 后缀），而这里已经自带「已取消」前缀 ⇒ 必须**剥掉后缀**再拼，否则同一句
+    // 「取消」出现两次；剥完为空则不拼（旧实现在这句只做了 `!== "已被用户取消"`
+    // 的相等判断 ⇒ 带业务说明的取消行会把后缀一起漏出来）。
+    const note = (result.note || "").replace(/(^|；)已被用户取消$/, "");
+    if (note) {
+      parts.push(note);
     }
     return withDuration(parts.join(" · "));
   }
@@ -187,3 +210,82 @@ export function goodsResultText(result: XhsSyncLastResult | null): string {
   const remaining = result.detail_total == null ? "-" : String(result.detail_total);
   return `${base} · 规格详情 ${result.detail_done} 件（剩余 ${remaining}）`;
 }
+
+/**
+ * 「还在跑」的两个状态（设计 13 §6.2 / §35.17.4）—— 只有这两个要继续 5s 轮询。
+ *
+ * ⚠️ 判据放在这里而不是页面里：它是**要不要继续打后端**的决策，值得被行为脚本驱动
+ * （写进组件就只能靠源码断言，而源码断言证明不了函数怎么跑，DEF-058）。
+ */
+export const SYNC_ACTIVE_STATES: readonly string[] = ["pending", "running"];
+
+/** 账号卡「同步任务」区块的三态（设计 13 §35.17.4）。 */
+export type SyncTaskPhase =
+  /** 没有对应任务记录 ⇒ 不展示区块、不轮询。 */
+  | "idle"
+  /** 有未结束的任务 ⇒ 展示进度 + **继续 5s 轮询**。 */
+  | "active"
+  /** 有已结束的任务 ⇒ 展示结果 + **停止轮询**（正常 / 非正常结束一视同仁）。 */
+  | "finished";
+
+/**
+ * 由状态端点响应判定「这个账号此刻要不要轮询」（2026-09-27 用户口径）。
+ *
+ * 用户原话：「查一次任务记录表当前账号存在对应任务则展示页签，任务非结束状态
+ * （包括正常结束和非正常结束）则前端 5 秒查询一次，如果为结束状态则不再轮询查询，
+ * 每次刷新按钮或进入页面时自动触发一次，**根据第一个获取的信息决定是否需要轮询**」。
+ *
+ * 所以判据是「**有没有任务** + **任务结没结束**」，不是某个具体状态值：
+ *
+ * * 状态端点的 `status` 只表达**进行中**的任务（没有就是 `idle`）；
+ * * 已结束的结果挪到 `last_result` 里（含 `failed` / `cancelled` 两个非正常终态）；
+ * * 两者都没有 ⇒ 这个账号还没跑过，什么都不显示。
+ */
+export function syncTaskPhase(status: XhsSyncTaskStatus | null | undefined): SyncTaskPhase {
+  if (!status) {
+    return "idle";
+  }
+  if (SYNC_ACTIVE_STATES.includes(status.status)) {
+    return "active";
+  }
+  return status.last_result ? "finished" : "idle";
+}
+
+/**
+ * 轮询到**终态**时要不要打扰用户，以及说什么（设计 13 §35.18，2026-09-27 用户口径）。
+ *
+ * 背景：账号卡不再有「同步任务」进度区块（用户口径「点击后展示的同步任务进度卡移除，
+ * 只需要将同步笔记按钮改成同步中即可」）⇒ 卡片上只剩按钮态。此时**非正常终态必须
+ * 报出来**：静默吞掉失败等于用户点了半天不知道发生了什么（失败三分法：真异常要给真原因）。
+ *
+ * 口径：**只有「没成功」才打扰**。
+ *
+ * * `null`（没有结果）/ `done` ⇒ **空串**（成功不弹；进度与结果去任务中心「任务日志」看）；
+ * * `failed` / `cancelled` ⇒ 结果行文案（真原因由后端给，前端不硬编码业务判断）。
+ *
+ * 判据放在这里而不是页面里：它决定「用户会不会被告知失败」，值得被行为脚本真实驱动
+ * （写进组件就只能靠源码断言，而源码断言证明不了函数怎么跑，DEF-058）。
+ * `formatResult` 的单位由这里传进去（同 `syncBlockText` 被删前的教训：少传一次
+ * 就是「共 10 undefined」，TS 抓不住）。
+ */
+export function syncTerminalNotice(
+  result: XhsSyncLastResult | null | undefined,
+  unit: string,
+  formatResult: (result: XhsSyncLastResult | null, unit: string) => string = syncResultText
+): string {
+  if (!result || result.status === "done") {
+    return "";
+  }
+  return formatResult(result, unit);
+}
+
+/*
+ * ⚠️ **`syncBlockText` 已删除**（2026-09-27 用户口径：「点击后展示的同步任务进度卡移除，
+ * 只需要将同步笔记按钮改成同步中即可」）：它是账号卡「同步任务」区块那一行的正文拼装器，
+ * 区块整块移除后没有任何调用方。
+ *
+ * 保留下来的两个函数各有各的活：
+ * * `syncTaskPhase` —— 「还要不要继续打后端」的决策（首查 + 5s 轮询都用它）；
+ * * `syncResultText` / `goodsResultText` —— 非正常终态时那条轻提示的文案（真原因要报出来，
+ *   失败三分法：真异常不能静默吞掉）。
+ */

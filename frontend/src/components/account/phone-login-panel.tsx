@@ -3,8 +3,9 @@ import { MessageOutlined, CheckCircleOutlined } from "@ant-design/icons";
 import { useEffect, useRef, useState } from "react";
 
 import { confirmXhsPhoneLogin, detailMessage, sendXhsPhoneCode } from "../../lib/api";
-import { loginChannelLabel } from "../../lib/login-state";
+import { loginChannelLabel, loginConfirmed } from "../../lib/login-state";
 import type { PlatformAccount } from "../../types";
+import { LoginSubmitMask } from "./login-submit-mask";
 
 const { Text } = Typography;
 
@@ -120,6 +121,18 @@ export function PhoneLoginPanel({
         code: code.trim(),
         ...(targetAccountId === undefined ? {} : { target_account_id: targetAccountId }),
       });
+      /*
+        ⚠️ **关窗/落态的唯一判据 = 后端结论**（2026-09-28 用户口径「根据后端接口返回的
+        成功与否进行判断是否关闭弹窗」）。HTTP 200 **不等于**登录成功：后端可能回
+        `status="pending"`（平台还没确认）。旧实现不判这一条 ⇒ 未成功也回调、也关窗，
+        用户看到窗口关了却什么都没更新。判据走唯一实现 `loginConfirmed`。
+      */
+      if (!loginConfirmed(result)) {
+        const reason = detailMessage((result as { renew_error?: unknown }).renew_error);
+        setStatusText("登录未完成");
+        message.error(reason || "后端未确认登录成功，本次没有更新任何令牌。");
+        return;
+      }
       if (renewing) {
         /*
           续期分支（§18.16）：登录成功但续期失败时后端返回 **400 + 结构化
@@ -155,7 +168,7 @@ export function PhoneLoginPanel({
   }
 
   return (
-    <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+    <Space direction="vertical" size="middle" style={{ width: "100%", position: "relative" }}>
       <Text style={{ color: "rgba(255,255,255,0.65)" }}>{statusText}</Text>
 
       <Form layout="vertical">
@@ -205,6 +218,13 @@ export function PhoneLoginPanel({
       >
         {isConfirming ? "验证中..." : renewing ? "确认并更新令牌" : "确认绑定"}
       </Button>
+
+      {/*
+        提交蒙版（2026-09-28 用户口径）：点「确认并更新令牌」之后盖住表单 ——
+        既让用户看到「正在提交」，也挡住重复点击。成功时面板回调关窗、`isConfirming`
+        随之归位，蒙版与窗口一起消失。
+      */}
+      <LoginSubmitMask active={isConfirming} />
     </Space>
   );
 }

@@ -4,7 +4,7 @@ import base64
 import io
 import json
 import logging
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -17,7 +17,6 @@ from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user, get_owned_active_account
 from backend.app.core.security import decrypt_text, encrypt_text
 from backend.app.models import LoginSession, PlatformAccount, User
-from backend.app.adapters.xhs.pc_api_adapter import XhsPcApiAdapter
 from backend.app.services.account_service import (
     channel_for_cookies,
     cookie_header_from_text,

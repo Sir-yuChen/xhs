@@ -1,0 +1,46 @@
+{
+  "_comment": "应用初始化数据 · 运行时配置（设计 10 §7.3）。随安装包分发（packaging/build.ps1 组装 + SpiderXHS.spec 兜底），应用启动时据此铺设 system_settings 行。语义：只补『缺失的行』，已存在的行一律不覆盖（升级不会重置用户在设置页调过的值）。⚠️ 只列『有运行时读点』的键（settings_service.LIVE_KEYS）—— 没有读点的键放进来就是死配置，正是设计 10 §1 要消灭的东西。改配置基线改本文件，不要改迁移、也不要写死在代码里。",
+  "version": 1,
+  "system_settings": [
+    {
+      "key": "crawl_rate_limit_per_minute",
+      "value": 8,
+      "value_type": "int",
+      "category": "sync",
+      "label": "平台请求限流额度（次/分钟）",
+      "description": "按『账号:源』键计量，等待式（超限是等，不是停）。调大 = 同步更快，但平台风控是真实的：实测 60 次/分钟会让平台踢掉网页会话（随后同步全线登录失效），保守区间 5~10。改完立即生效，无需重启。",
+      "requires_restart": false,
+      "is_dangerous": true
+    },
+    {
+      "key": "xhs_sync_account_parallelism",
+      "value": 3,
+      "value_type": "int",
+      "category": "sync",
+      "label": "同步并行账号数",
+      "description": "同时跑几个账号的同步任务（同一账号始终串行，互不抢限流额度）。范围 1–8。调大 = 多账号欠账同时收敛，但出口 IP 的总请求速率会成倍上升。改完立即生效。",
+      "requires_restart": false,
+      "is_dangerous": false
+    },
+    {
+      "key": "xhs_sync_account_gap_seconds",
+      "value": 10,
+      "value_type": "int",
+      "category": "scheduler",
+      "label": "调度轮内账号间停顿（秒）",
+      "description": "定时同步一轮里，账号与账号之间的停顿 —— 多账号矩阵不一窝蜂同时打平台。改完立即生效。",
+      "requires_restart": false,
+      "is_dangerous": false
+    },
+    {
+      "key": "xhs_allow_duplicate_goods_publish",
+      "value": false,
+      "value_type": "bool",
+      "category": "publish",
+      "label": "允许商品笔记重复发布",
+      "description": "默认关闭。关闭时，同一商品只要已有笔记（已发布或正在发布），再点「发布」或「批量发布」都不会真的发出去 —— 该笔记会被标记为「发布失败」，原因是「挂载的商品已经发布过笔记」。打开后不再校验，同一商品可以发布多篇笔记。改完立即生效。",
+      "requires_restart": false,
+      "is_dangerous": false
+    }
+  ]
+}

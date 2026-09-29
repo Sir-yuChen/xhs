@@ -18,6 +18,13 @@ from functools import lru_cache
 from typing import Any, Callable, Optional
 
 
+#: 内置任务键（**唯一真相源**）：API 层按 key 定位任务行（账号卡定向执行，
+#: 设计 13 §35.17.2 的 `run_targeted_job`）时引用这里，**不要在别处再写一遍字面量** ——
+#: 漂移后要么 `get_job_spec` 抛 `KeyError`，要么更糟：悄悄定位到另一个任务。
+JOB_KEY_NOTE_SYNC = "system.note_sync"
+JOB_KEY_SHOP_GOODS_SYNC = "system.shop_goods_sync"
+
+
 @dataclass(frozen=True)
 class JobSpec:
     """一个可调度任务的代码侧声明。"""
@@ -128,7 +135,7 @@ def _build_registry() -> dict[str, JobSpec]:
             default_cron="0 0 */6 * * *",
         ),
         JobSpec(
-            key="system.note_sync",
+            key=JOB_KEY_NOTE_SYNC,
             name="账号笔记同步",
             func=scheduler_service.run_scheduled_note_syncs,
             builtin=True,
@@ -138,7 +145,7 @@ def _build_registry() -> dict[str, JobSpec]:
             default_cron="0 0 */6 * * *",
         ),
         JobSpec(
-            key="system.shop_goods_sync",
+            key=JOB_KEY_SHOP_GOODS_SYNC,
             name="店铺商品同步",
             func=scheduler_service.run_scheduled_shop_goods_syncs,
             builtin=True,

@@ -329,15 +329,22 @@ if (-not (Test-Path $nm)) {
         Write-Host "  node_modules 仅含 crypto-js"
     }
 }
-# 正向断言：应用初始化数据必须随包（设计 15 §4.5 / 设计 14 §8-8）。
-# 缺了 = 用户装完任务中心是空的 —— 与上面「禁止项」相反方向的安全网：
+# 正向断言：应用初始化数据必须随包（设计 15 §4.5 / 设计 10 §7.3 / 设计 14 §8-8）。
+# 缺了 = 用户装完任务中心是空的、设置页没有那批配置行 —— 与上面「禁止项」相反方向的安全网：
 # 只查「不该有的没有」会漏掉「该有的没有」。
-$initialData = Join-Path $Bundle "config\initial_data\scheduled_jobs.json"
-if (Test-Path $initialData) {
-    Write-Host "  应用初始化数据: config\initial_data\scheduled_jobs.json"
-} else {
-    Write-Host "  [MISSING] 应用初始化数据未随包：$initialData" -ForegroundColor Red
-    $leak = $true
+# ⚠️ 每个数据文件都要**单独断言**（2026-09-27 补 system_settings）：只断言一个文件，
+#    另一个悄悄漏掉时自检照样「全部通过」。
+foreach ($rel in @(
+    "config\initial_data\scheduled_jobs.json",
+    "config\initial_data\system_settings.json"
+)) {
+    $initialData = Join-Path $Bundle $rel
+    if (Test-Path $initialData) {
+        Write-Host "  应用初始化数据: $rel"
+    } else {
+        Write-Host "  [MISSING] 应用初始化数据未随包：$initialData" -ForegroundColor Red
+        $leak = $true
+    }
 }
 if ($leak) { Fail "bundle 自检未通过（见上方 [LEAK] / [MISSING] 行）" }
 Write-Host "  全部通过"

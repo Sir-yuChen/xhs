@@ -16,7 +16,6 @@ from backend.app.api.platforms.xhs.pc import (
 )
 from backend.app.core.time import shanghai_now
 from backend.app.models import (
-    AccountCookieVersion,
     MonitoringSnapshot,
     MonitoringTarget,
     Note,

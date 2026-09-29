@@ -210,6 +210,12 @@ def _reset():
     FakePublishAdapter.upload_reached = None
     FakePublishAdapter._publish_seq = 0
     FakePublishAdapter.goods_note_entries = []
+    # 运行时配置的**进程级缓存**也要清：上一个用例可能开了「允许商品重复发布」
+    # （`_enable_duplicate_goods_publish`），TTL（3 秒）内不清会让本用例读到旧值 ——
+    # 「该被门禁拦下的用例反而放行」正是这类串味的典型表现。
+    from backend.app.services import settings_service
+
+    settings_service.reset_cache_for_tests()
 
 
 def _setup(tmp_path):
@@ -250,6 +256,9 @@ def _setup(tmp_path):
 
 def _teardown():
     app.dependency_overrides.clear()
+    from backend.app.services import settings_service
+
+    settings_service.reset_cache_for_tests()  # 别把开关值留给下一个用例
     # 收掉生成队列 worker（§31.10）：进程级全局线程，不收会跨用例抢队列 /
     # 拿真库认领测试塞的假行（与发布 / 同步 worker 同规）。
     product_note_gen_service._gen_worker_stop.set()
@@ -369,7 +378,12 @@ def test_generate_save_enqueues_and_worker_creates_note_assets_and_relation(tmp_
             assets = db.scalars(select(NoteAsset).where(NoteAsset.note_id == note.id)).all()
             assert len(assets) == 3
             assert assets[0].url == "http://qimg.example/a.jpg"
-            rels = db.scalars(select(NoteGoods).where(NoteGoods.note_id == note.id)).all()
+            # §26.7：关系行按**平台 ID** 落；发布成功后 `note_id` 会被改写成平台真 ID
+            rels = db.scalars(
+                select(NoteGoods).where(
+                    NoteGoods.user_id == note.user_id, NoteGoods.note_id == note.note_id
+                )
+            ).all()
             assert len(rels) == 1
         finally:
             db.close()
@@ -503,6 +517,44 @@ def test_batch_generate_isolates_failures(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
+def _set_duplicate_goods_publish(db_factory, allowed: bool, user_id: int = 1) -> None:
+    """把「允许商品笔记重复发布」开关设成 `allowed`（改**测试库**里的运行时配置行）。
+
+    走 `settings_service` 的读写函数而不是自己 `db.add`：注册路径已经**播种**过这一行
+    （设计 10 §7.3），直接插会撞 `uq_system_settings_user_key`；而且这两个函数内部会
+    失效缓存（写后立即生效）。
+    """
+    from backend.app.services import settings_service
+
+    db = db_factory()
+    try:
+        key = "xhs_allow_duplicate_goods_publish"
+        row = settings_service.find_setting(db, user_id, key)
+        if row is None:
+            settings_service.create_setting(
+                db,
+                user_id=user_id,
+                key=key,
+                value=allowed,
+                value_type="bool",
+                category="publish",
+                label="允许商品笔记重复发布",
+            )
+        else:
+            settings_service.update_setting(db, row, value=allowed)
+        db.commit()
+    finally:
+        db.close()
+    settings_service.reset_cache_for_tests()  # 写后必须失效（设计 10 §7.4）
+
+
+def _enable_duplicate_goods_publish(db_factory, user_id: int = 1) -> None:
+    """打开开关。本文件里凡是要**连续发布多篇同商品笔记**的用例（队列 FIFO、当日计数）
+    都要先开它：默认关闭下第 2 篇起会被 §31.5.2 的商品重复发布门禁拦下，队列用例就测不到
+    队列了。开关自身的用例见 `test_publish_goods_duplicate_guard_*`（那批刻意**不开**）。"""
+    _set_duplicate_goods_publish(db_factory, True, user_id)
+
+
 def _generate_one(db_factory, account_id):
     db = db_factory()
     try:
@@ -518,6 +570,35 @@ def _note_pk(db_factory, note_id: str) -> int:
     db = db_factory()
     try:
         return db.scalar(select(Note.id).where(Note.note_id == note_id))
+    finally:
+        db.close()
+
+
+def _rewrite_note_item_id(db_factory, note_pk: int, item_id: str) -> None:
+    """把一篇笔记的「挂载商品」改成 `item_id`（空串 = **清空**挂载）。
+
+    只为 §31.5.2 的边界用例服务：生成链路的商品固定是 `ITEM_ID`，要造「不同商品 /
+    无挂载」这两种形态只能改**两处**（门禁两处都读）：`note_goods` 关系行 + `raw_json.item_id`。
+    """
+    db = db_factory()
+    try:
+        note = db.get(Note, note_pk)
+        raw = note.raw_json if isinstance(note.raw_json, dict) else json.loads(note.raw_json or "{}")
+        raw = dict(raw or {})
+        if item_id:
+            raw["item_id"] = item_id
+        else:
+            raw.pop("item_id", None)
+        note.raw_json = raw
+        for row in db.scalars(
+            select(NoteGoods).where(
+                NoteGoods.user_id == note.user_id, NoteGoods.note_id == note.note_id
+            )
+        ).all():
+            db.delete(row)
+        if item_id:
+            db.add(NoteGoods(user_id=note.user_id, note_id=note.note_id, item_id=item_id))
+        db.commit()
     finally:
         db.close()
 
@@ -1022,6 +1103,9 @@ def test_publish_queue_runs_in_order_with_snapshot(tmp_path, monkeypatch):
     headers, account_id, db_factory = _setup(tmp_path)
     try:
         _bind_with_product(db_factory, account_id)
+        # 本用例测的是**队列 FIFO 顺序**（三篇同商品）⇒ 先开重复发布开关，
+        # 否则第 2 篇起被 §31.5.2 门禁拦下（那批行为另有用例覆盖）。
+        _enable_duplicate_goods_publish(db_factory)
         note_ids = [_generate_one(db_factory, account_id) for _ in range(3)]
         FakePublishAdapter.calls = []
         FakePublishAdapter.published_titles = []
@@ -1125,6 +1209,9 @@ def test_publish_queue_counts_failures_and_restarts_when_idle(tmp_path, monkeypa
     headers, account_id, db_factory = _setup(tmp_path)
     try:
         _bind_with_product(db_factory, account_id)
+        # 两篇同商品、分两批发布 ⇒ 先开重复发布开关（否则第 2 篇被 §31.5.2 门禁拦下，
+        # 本用例要观察的是「平台拒发 ⇒ 当日 failed」那条路径）。
+        _enable_duplicate_goods_publish(db_factory)
         note_ids = [_generate_one(db_factory, account_id) for _ in range(2)]
         _patch_async(monkeypatch, db_factory, tmp_path)
         pks = []
@@ -1228,6 +1315,155 @@ def test_publish_already_published_is_rejected(tmp_path, monkeypatch):
                     db, 1, note_pk, adapter_factory=lambda cookies: FakePublishAdapter(cookies)
                 )
             assert exc.value.code == "NOTE_ALREADY_PUBLISHED"
+        finally:
+            db.close()
+    finally:
+        _teardown()
+
+
+# --------------------------------------------------------------------------- #
+# 商品重复发布门禁（设计 13 §31.5.2，2026-09-28 用户口径）
+#
+# 用户口径原文：「新增一个配置开关，允许商品笔记重复发布**默认关闭**……点击发布和批量
+# 发布笔记时通过开关校验，该商品是否已经发布过笔记，如果已经发布过笔记不再发布，该笔记
+# 设置为**发布失败**，原因**挂载的商品已经发布过笔记**。」
+# --------------------------------------------------------------------------- #
+def test_publish_goods_duplicate_guard_blocks_and_marks_failed(tmp_path, monkeypatch):
+    """默认关：同一商品已有**已发布**笔记 ⇒ 不再发布，本篇落 `failed` + 原因，零平台请求。"""
+    headers, account_id, db_factory = _setup(tmp_path)
+    try:
+        _bind_with_product(db_factory, account_id)
+        _enable_duplicate_goods_publish(db_factory)  # 先把第 1 篇正常发出去（占用 ITEM-1）
+        first = _generate_one(db_factory, account_id)
+        _patch_async(monkeypatch, db_factory, tmp_path)
+        pk1 = _note_pk(db_factory, first)
+        assert client.post(f"/api/notes/{pk1}/publish", headers=headers).status_code == 200
+        assert note_publish_service.wait_publish_done(pk1, timeout=20)
+
+        _set_duplicate_goods_publish(db_factory, False)  # 回到默认态（关）
+        second = _generate_one(db_factory, account_id)
+        pk2 = _note_pk(db_factory, second)
+        calls_before = list(FakePublishAdapter.calls)
+
+        resp = client.post(f"/api/notes/{pk2}/publish", headers=headers)
+        assert resp.status_code == 400, resp.text
+        detail = resp.json()["detail"]
+        assert detail["code"] == "GOODS_ALREADY_PUBLISHED"
+        assert detail["message"] == "挂载的商品已经发布过笔记"
+
+        db = db_factory()
+        try:
+            blocked = db.get(Note, pk2)
+            # 用户口径「该笔记设置为发布失败，原因挂载的商品已经发布过笔记」
+            assert blocked.publish_status == "failed"
+            assert blocked.publish_error == "挂载的商品已经发布过笔记"
+            assert blocked.published is False
+            # 没进发布链路 ⇒ 不算一次尝试（`publish_attempts` 记的是「真的跑了几次」）
+            assert (blocked.publish_attempts or 0) == 0
+            # 也没入队：队列里没有未终态项
+            assert note_publish_service.count_open_publish_items(db) == 0
+        finally:
+            db.close()
+        assert FakePublishAdapter.calls == calls_before, "命中门禁后不许有任何平台请求"
+    finally:
+        _teardown()
+
+
+def test_publish_goods_duplicate_guard_allows_when_switch_on(tmp_path, monkeypatch):
+    """开关**打开** ⇒ 不再校验，同一商品可以连续发布多篇（与默认关的行为成对照）。"""
+    headers, account_id, db_factory = _setup(tmp_path)
+    try:
+        _bind_with_product(db_factory, account_id)
+        _enable_duplicate_goods_publish(db_factory)
+        note_ids = [_generate_one(db_factory, account_id) for _ in range(2)]
+        _patch_async(monkeypatch, db_factory, tmp_path)
+        pks = [_note_pk(db_factory, note_id) for note_id in note_ids]
+        for pk in pks:
+            assert client.post(f"/api/notes/{pk}/publish", headers=headers).status_code == 200
+        for pk in pks:
+            assert note_publish_service.wait_publish_done(pk, timeout=20)
+        db = db_factory()
+        try:
+            statuses = [db.get(Note, pk).publish_status for pk in pks]
+        finally:
+            db.close()
+        assert statuses == ["published", "published"], "开关打开 ⇒ 同商品两篇都发得出去"
+    finally:
+        _teardown()
+
+
+def test_publish_goods_duplicate_guard_blocks_second_in_batch(tmp_path, monkeypatch):
+    """批量同批两篇同商品 ⇒ 第 1 篇入队、第 2 篇被拦（**判据含 `publishing`**）。
+
+    ⚠️ 这条盯的正是判据表里的那格：第 1 篇此刻**还没** `published`（刚置 `publishing`）。
+    只认 `published` 就会把第 2 篇也放行 —— 批量勾选同商品多篇时用户「不重复发布」
+    的诉求直接落空。
+    """
+    headers, account_id, db_factory = _setup(tmp_path)
+    try:
+        _bind_with_product(db_factory, account_id)
+        note_ids = [_generate_one(db_factory, account_id) for _ in range(2)]
+        _patch_async(monkeypatch, db_factory, tmp_path)
+        pks = [_note_pk(db_factory, note_id) for note_id in note_ids]
+
+        resp = client.post("/api/notes/batch-publish", json={"note_ids": pks}, headers=headers)
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["total"] == 2 and body["started"] == 1 and body["failed"] == 1
+        assert body["results"][0]["ok"] is True
+        blocked = body["results"][1]
+        assert blocked["ok"] is False
+        assert blocked["code"] == "GOODS_ALREADY_PUBLISHED"
+        assert blocked["error"] == "挂载的商品已经发布过笔记"
+
+        db = db_factory()
+        try:
+            second = db.get(Note, pks[1])
+            assert second.publish_status == "failed"
+            assert second.publish_error == "挂载的商品已经发布过笔记"
+        finally:
+            db.close()
+        assert note_publish_service.wait_publish_done(pks[0], timeout=20)
+    finally:
+        _teardown()
+
+
+def test_publish_goods_duplicate_guard_skips_unrelated_or_empty_goods(tmp_path, monkeypatch):
+    """边界：**不同商品**与**未挂载商品**的笔记都不受门禁影响。
+
+    判据是「**该**商品是否已有笔记」，不是「有没有任何笔记发布过」：换成别的商品
+    （关系行 + `raw_json.item_id` 都改掉）或干脆没有挂载 ⇒ 放行（缺值不造假，硬约束⑤）。
+    """
+    headers, account_id, db_factory = _setup(tmp_path)
+    try:
+        _bind_with_product(db_factory, account_id)
+        _enable_duplicate_goods_publish(db_factory)
+        note_ids = [_generate_one(db_factory, account_id) for _ in range(3)]
+        _patch_async(monkeypatch, db_factory, tmp_path)
+        pks = [_note_pk(db_factory, note_id) for note_id in note_ids]
+
+        # 第 1 篇正常发出去 ⇒ ITEM-1 被占用
+        assert client.post(f"/api/notes/{pks[0]}/publish", headers=headers).status_code == 200
+        assert note_publish_service.wait_publish_done(pks[0], timeout=20)
+        _set_duplicate_goods_publish(db_factory, False)
+
+        # 第 2 篇改挂 ITEM-2（**不同商品**）⇒ 不受 ITEM-1 的占用影响
+        _rewrite_note_item_id(db_factory, pks[1], "ITEM-2")
+        assert client.post(f"/api/notes/{pks[1]}/publish", headers=headers).status_code == 200
+        assert note_publish_service.wait_publish_done(pks[1], timeout=20)
+        db = db_factory()
+        try:
+            assert db.get(Note, pks[1]).publish_status == "published"
+        finally:
+            db.close()
+
+        # 第 3 篇**清空挂载** ⇒ 没有「重复」可言 ⇒ 放行
+        _rewrite_note_item_id(db_factory, pks[2], "")
+        assert client.post(f"/api/notes/{pks[2]}/publish", headers=headers).status_code == 200
+        assert note_publish_service.wait_publish_done(pks[2], timeout=20)
+        db = db_factory()
+        try:
+            assert db.get(Note, pks[2]).publish_status == "published"
         finally:
             db.close()
     finally:

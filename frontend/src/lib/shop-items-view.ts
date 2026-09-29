@@ -21,14 +21,6 @@
 import { channelUnavailable } from "./sync-gates";
 import type { XhsLoginChannels } from "../types";
 
-/** 账号下拉项的最小形状（`PlatformAccount` 的超集）。 */
-export type ShopAccountLike = {
-  id: number;
-  nickname: string;
-  sub_type: string;
-  platform: string;
-};
-
 /**
  * 状态筛选键里**无法从本地台账区分**的四个审核态。
  *

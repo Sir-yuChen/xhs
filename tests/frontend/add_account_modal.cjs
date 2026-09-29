@@ -18,6 +18,11 @@
  *   A7  补登弹窗网页版档 = 二维码 / 手机验证码，默认扫码；扫码/发码都带
  *      target_account_id（只续这一个账号）
  *   A8  补登弹窗创作者档 = 二维码 / 手机验证码（走 creator 扫码通道）
+ *   A9  续期成功后弹窗**自动关闭**（三种方式各验一次；2026-09-28 用户实测
+ *      「手机号登录成功后重登窗口未自动关闭」补的守卫）
+ *   A10 提交后出现蒙版、成功后蒙版随窗口消失（三种方式各验一次）
+ *   A11 关窗判据 = 后端返回成功（回 pending 时必须**不关窗**）
+ *   A12 登录窗口页面级等待上限 = 5 分钟
  *
  * Run:
  *   <node> tests/frontend/add_account_modal.cjs                        # expect all PASS
@@ -26,6 +31,9 @@
  *   RENEW_MUTATE=default  <node> tests/frontend/add_account_modal.cjs  # expect A6/A7/A8 FAIL
  *   RENEW_MUTATE=matrix   <node> tests/frontend/add_account_modal.cjs  # expect A7/A8 FAIL
  *   RENEW_MUTATE=notarget <node> tests/frontend/add_account_modal.cjs  # expect A7/A8 FAIL
+ *   MASK_MUTATE=nomask   <node> tests/frontend/add_account_modal.cjs  # expect A10 FAIL
+ *   LOGIN_MUTATE=loginconfirm <node> tests/frontend/add_account_modal.cjs  # expect A11 FAIL
+ *   LOGIN_MUTATE=shortwait <node> tests/frontend/add_account_modal.cjs  # expect A12 FAIL
  *
  * `--self-check` (2026-09-25 P0-4 speedup, see investigation report): contract + all
  * mutations run sequentially in ONE node process and print
@@ -110,6 +118,10 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = false;
 // --- stub for frontend/src/lib/api -----------------------------------------
 const MOCK_API = `
 const G = globalThis;
+// 可控延迟（默认 0）：A10 要断言「提交后出现蒙版」，而蒙版只在请求在途时存在
+// —— 桩立即 resolve 的话蒙版一帧就没了，测不到（假绿）。置位后所有提交类接口
+// 都慢一拍，让蒙版可观察。
+const wait = () => new Promise((r) => setTimeout(r, G.__MODAL_DELAY_MS__ || 0));
 export async function createXhsPcQrLoginSession(payload) {
   G.__MODAL_LOG__.qr.push({ kind: "pc", payload });
   return { session_id: 9001, status: "pending", qr_url: "u", qr_image_data_url: "data:img/pc" };
@@ -123,6 +135,22 @@ export async function createXhsQianfanQrLoginSession(payload) {
   return { session_id: 9003, status: "pending", qr_url: "u", qr_image_data_url: "data:img/qf" };
 }
 export async function pollXhsLoginSession(sessionId) {
+  await wait();
+  // A9（续期成功必须关窗）要驱动「扫码确认」这一格：默认仍是 pending（其它用例
+  // 依赖它），只有显式置位才回 confirmed。**默认关闭**，不改变既有用例的行为。
+  if (G.__MODAL_QR_CONFIRM__) {
+    return {
+      session_id: sessionId,
+      status: "confirmed",
+      account: { id: 79, nickname: "扫码账号", sub_type: "pc", action: "renewed" },
+      renewed_channel: "www",
+    };
+  }
+  // A10 要观察「已扫码、正在确认」这一段的蒙版：置位后先回 scanned，等用例把它
+  // 关掉再回 confirmed（模拟真机「扫了 → 手机端点确认」两步）。
+  if (G.__MODAL_QR_SCANNED__) {
+    return { session_id: sessionId, status: "scanned" };
+  }
   return { session_id: sessionId, status: "pending", qr_url: "u" };
 }
 export async function sendXhsPhoneCode(payload) {
@@ -131,17 +159,21 @@ export async function sendXhsPhoneCode(payload) {
 }
 export async function confirmXhsPhoneLogin(payload) {
   G.__MODAL_LOG__.phone.push(payload);
+  await wait();
+  // A11 要验「后端未确认成功 ⇒ 不关窗」：__MODAL_CONFIRM_STATUS__ 可把结论改成
+  // pending 之类。默认 confirmed（其它用例依赖成功路径）。
   return {
     session_id: payload.session_id,
-    status: "confirmed",
+    status: G.__MODAL_CONFIRM_STATUS__ || "confirmed",
     account: { id: 78, nickname: "手机号账号", sub_type: "pc", action: "created" },
   };
 }
 export async function loginXhsQianfanByEmail(payload) {
   G.__MODAL_LOG__.email.push(payload);
+  await wait();
   return {
     session_id: null,
-    status: "confirmed",
+    status: G.__MODAL_CONFIRM_STATUS__ || "confirmed",
     account: { id: 77, nickname: "观隅好物的店", sub_type: "qianfan", action: "created" },
     renewed_shop: { shop_user_id: "S1", shop_name: "观隅好物的店" },
   };
@@ -163,6 +195,7 @@ import { App } from "antd";
 import { AddAccountDrawer } from "./components/account/add-account-drawer";
 import { RenewLoginModal } from "./components/account/renew-login-modal";
 import { QrLoginPanel } from "./components/account/qr-login-panel";
+import { LOGIN_WAIT_LIMIT_MS } from "./lib/login-state";
 
 const G = globalThis;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -187,6 +220,10 @@ const modalHas = (needle) => { const m = document.querySelector(".ant-modal"); r
 
 function reset() {
   G.__MODAL_LOG__ = { qr: [], email: [], phone: [] };
+  G.__MODAL_QR_CONFIRM__ = false;
+  G.__MODAL_QR_SCANNED__ = false;
+  G.__MODAL_DELAY_MS__ = 0;
+  G.__MODAL_CONFIRM_STATUS__ = "";
   return G.__MODAL_LOG__;
 }
 function mount() {
@@ -224,6 +261,43 @@ const results = [];
 function check(name, ok, detail) {
   results.push({ name, ok: !!ok, detail: String(detail) });
 }
+
+/* A9 / A10 共用的表单操作与挂载辅助。
+ * ⚠️ 本段住在 ENTRY 模板串里 ⇒ 注释与代码都不许出现反引号。 */
+function setInputValue(input, value) {
+  if (!input) return;
+  const setter = Object.getOwnPropertyDescriptor(
+    window.HTMLInputElement.prototype, "value"
+  ).set;
+  setter.call(input, value);
+  input.dispatchEvent(new window.Event("input", { bubbles: true }));
+}
+function findButton(text) {
+  return Array.from(document.querySelectorAll("button")).find(
+    (b) => (b.textContent || "").trim() === text
+  );
+}
+/**
+ * 挂载补登弹窗，并把 onClose 记进 closed 数组。
+ *
+ * ⚠️ onClose 里**把 target 置回 null 重新渲染** —— 真实父组件就是这么关窗的
+ * （open={target !== null}）。少了这一步，harness 里的弹窗永远开着，
+ * 「成功后蒙版随窗口消失」这条根本测不到（组件没被卸载 ⇒ 蒙版还在）。
+ */
+function mountRenewModal(target) {
+  const closed = [];
+  const { el, root } = mount();
+  const render = (current) => root.render(
+    React.createElement(StrictMode, null, React.createElement(RenewLoginModal, {
+      target: current,
+      onClose: function () { closed.push(true); render(null); },
+      onRenewed: function () {}
+    }))
+  );
+  render(target);
+  return { el, root, closed };
+}
+const maskEl = () => document.querySelector('[data-testid="login-submit-mask"]');
 
 /* A1 — 绑定弹窗是 50vw × 75vh 的 Modal（不是右侧 420 Drawer）。 */
 async function scenarioA1() {
@@ -559,6 +633,234 @@ async function scenarioA8() {
   await waitFor(() => document.querySelectorAll('.ant-modal').length === 0, { timeout: 500 });
 }
 
+/* A9 — 续期成功后弹窗必须**自动关闭**（2026-09-26 用户口径；2026-09-28 用户实测
+ * 「手机号登录成功后重登窗口未自动关闭」补的守卫）。
+ *
+ * 覆盖手机验证码 / 千帆邮箱两档；**二维码那一格由 A10 覆盖**（它同时断言 onClose
+ * 与蒙版，不必再等一轮 2000ms 轮询）。
+ *
+ * 为什么这条必须钉住：三种登录方式（二维码 / 手机验证码 / 千帆邮箱）各自有**独立**
+ * 的 onRenewed 接线，少接一处就只有那一种方式不关窗 —— 而 A6/A7/A8 只验「渲染出
+ * 了哪些档」，对「成功后关不关窗」一无所知。用户就是这么踩到的：手机档直连
+ * onRenewed 而绕过了带 onClose() 的 handleRenewed。
+ *
+ * 判据是 **onClose 真的被调到**，不是「DOM 里没有 .ant-modal」—— 后者在组件
+ * 根本没挂上时也成立，等于没判（假绿）。
+ *
+ * ⚠️ 本段住在 ENTRY 模板串里 ⇒ **注释与代码都不许出现反引号**（会提前终止模板串，
+ * 报 SyntaxError: Unexpected identifier）。
+ */
+async function scenarioA9() {
+  // 操作辅助与挂载器已提到 ENTRY 顶层（A9 / A10 共用），这里只取别名。
+  const setValue = setInputValue;
+  const mountRenew = mountRenewModal;
+  const WWW = { account: { id: 8, nickname: "观隅好物" }, channel: "www", state: "expired" };
+  const ARK = { account: { id: 8, nickname: "观隅好物" }, channel: "ark", state: "expired" };
+
+  /* ① 手机验证码 */
+  reset();
+  let h = mountRenew(WWW);
+  await waitFor(modalEl);
+  clickByText(".ant-segmented-item", "手机验证码");
+  await waitFor(() => document.querySelector('input[placeholder="请输入手机号"]'));
+  setValue(document.querySelector('input[placeholder="请输入手机号"]'), "13800138000");
+  await waitFor(() => findButton("发送验证码"));
+  const sendBtn = findButton("发送验证码");
+  if (sendBtn) sendBtn.click();
+  // ⚠️ 必须等**发码真的回来**（session_id 落进 state）再点确认 —— 否则
+  // handleConfirm 走 if (!sessionId) { warning("请先发送验证码。"); return; }
+  // 直接返回，onClose 永远为 0，用例会误判成「关窗逻辑坏了」（假红）。
+  // DOM 信号：发码成功后状态行变「验证码已发送，请查看手机短信」。
+  await waitFor(() => (modalText() || "").includes("验证码已发送"), { timeout: 3000 });
+  setValue(document.querySelector('input[placeholder="请输入验证码"]'), "123456");
+  await waitFor(() => findButton("确认并更新令牌"));
+  const phoneConfirm = findButton("确认并更新令牌");
+  if (phoneConfirm) phoneConfirm.click();
+  await waitFor(() => h.closed.length > 0, { timeout: 3000 });
+  check("A9 手机验证码续期成功后自动关闭弹窗", h.closed.length > 0,
+    "onClose=" + h.closed.length + " phoneLog=" + JSON.stringify(G.__MODAL_LOG__.phone)
+    + " tail=" + (modalText() || "").slice(-80));
+  h.root.unmount();
+  h.el.remove();
+  await waitFor(() => document.querySelectorAll('.ant-modal').length === 0, { timeout: 500 });
+
+  /* ② 千帆邮箱密码 */
+  reset();
+  h = mountRenew(ARK);
+  await waitFor(modalEl);
+  clickByText(".ant-segmented-item", "邮箱密码");
+  await waitFor(() => document.querySelector('input[placeholder="name@example.com"]'));
+  setValue(document.querySelector('input[placeholder="name@example.com"]'), "ops@example.com");
+  setValue(document.querySelector('input[placeholder="千帆商家后台密码"]'), "secret123");
+  // 按钮在两个输入框都非空前是 disabled 的（React state 异步 ⇒ 等它可用）
+  await waitFor(() => { const b = findButton("登录"); return b && !b.disabled; }, { timeout: 1500 });
+  const emailBtn = findButton("登录");
+  if (emailBtn) emailBtn.click();
+  await waitFor(() => h.closed.length > 0, { timeout: 3000 });
+  check("A9 千帆邮箱续期成功后自动关闭弹窗", h.closed.length > 0, "onClose=" + h.closed.length);
+  h.root.unmount();
+  h.el.remove();
+  await waitFor(() => document.querySelectorAll('.ant-modal').length === 0, { timeout: 500 });
+
+}
+
+/* A10 — 提交后必须出现蒙版，成功后蒙版随窗口一起消失（2026-09-28 用户口径
+ * 「所有登录窗口提交后加蒙版，登录成功后自动关闭蒙版和窗口」）。
+ *
+ * 三种登录方式各验一次：蒙版本身是共享件（login-submit-mask.tsx），但**触发条件
+ * 各写各的**（phone 的 isConfirming / email 的 isSubmitting / QR 的 status=scanned）
+ * —— 漏接一处就只有那一种方式没有蒙版，而 A9 只看「关不关窗」，对这种漏接一无所知。
+ *
+ * ⚠️ 桩要慢一拍（__MODAL_DELAY_MS__）才观察得到蒙版：桩立即 resolve 的话蒙版一帧
+ * 就没了，断言恒绿（假绿）。承重变异：MASK_MUTATE=nomask（让共享件永远返回 null）。
+ */
+async function scenarioA10() {
+  const WWW = { account: { id: 8, nickname: "观隅好物" }, channel: "www", state: "expired" };
+  const ARK = { account: { id: 8, nickname: "观隅好物" }, channel: "ark", state: "expired" };
+
+  /* 1 手机验证码 */
+  reset();
+  G.__MODAL_DELAY_MS__ = 400;
+  let h = mountRenewModal(WWW);
+  await waitFor(modalEl);
+  clickByText(".ant-segmented-item", "手机验证码");
+  await waitFor(() => document.querySelector('input[placeholder="请输入手机号"]'));
+  setInputValue(document.querySelector('input[placeholder="请输入手机号"]'), "13800138000");
+  await waitFor(() => findButton("发送验证码"));
+  const sendBtnA9 = findButton("发送验证码");
+  if (sendBtnA9) sendBtnA9.click();
+  await waitFor(() => (modalText() || "").includes("验证码已发送"), { timeout: 3000 });
+  setInputValue(document.querySelector('input[placeholder="请输入验证码"]'), "123456");
+  await waitFor(() => findButton("确认并更新令牌"));
+  const confirmBtn = findButton("确认并更新令牌");
+  if (confirmBtn) confirmBtn.click();
+  const phoneMask = await waitFor(maskEl, { timeout: 1500 });
+  check("A10 手机验证码提交后出现蒙版", phoneMask, "mask=" + !!maskEl());
+  await waitFor(() => h.closed.length > 0, { timeout: 3000 });
+  await waitFor(() => !maskEl(), { timeout: 1500 });
+  check("A10 手机验证码成功后蒙版随窗口消失",
+    h.closed.length > 0 && !maskEl(), "onClose=" + h.closed.length + " mask=" + !!maskEl());
+  h.root.unmount();
+  h.el.remove();
+  await waitFor(() => document.querySelectorAll('.ant-modal').length === 0, { timeout: 500 });
+
+  /* 2 千帆邮箱密码 */
+  reset();
+  G.__MODAL_DELAY_MS__ = 400;
+  h = mountRenewModal(ARK);
+  await waitFor(modalEl);
+  clickByText(".ant-segmented-item", "邮箱密码");
+  await waitFor(() => document.querySelector('input[placeholder="name@example.com"]'));
+  setInputValue(document.querySelector('input[placeholder="name@example.com"]'), "ops@example.com");
+  setInputValue(document.querySelector('input[placeholder="千帆商家后台密码"]'), "secret123");
+  await waitFor(() => { const b = findButton("登录"); return b && !b.disabled; }, { timeout: 1500 });
+  const emailBtn = findButton("登录");
+  if (emailBtn) emailBtn.click();
+  const emailMask = await waitFor(maskEl, { timeout: 1500 });
+  check("A10 千帆邮箱提交后出现蒙版", emailMask, "mask=" + !!maskEl());
+  await waitFor(() => h.closed.length > 0, { timeout: 3000 });
+  await waitFor(() => !maskEl(), { timeout: 1500 });
+  check("A10 千帆邮箱成功后蒙版随窗口消失",
+    h.closed.length > 0 && !maskEl(), "onClose=" + h.closed.length + " mask=" + !!maskEl());
+  h.root.unmount();
+  h.el.remove();
+  await waitFor(() => document.querySelectorAll('.ant-modal').length === 0, { timeout: 500 });
+
+  /* 3 二维码：已扫码等手机端确认这一段必须盖住（轮询 2000ms，超时给 10s） */
+  reset();
+  G.__MODAL_QR_SCANNED__ = true;
+  h = mountRenewModal(WWW);
+  await waitFor(modalEl);
+  // ⚠️ 显式切到「二维码」：不依赖 DEFAULT_METHOD（否则 default 变异会把本用例
+  // 变成「因为默认方式变了才红」，与它要守的东西无关，信号被搅浑）。
+  clickByText(".ant-segmented-item", "二维码");
+  const qrMask = await waitFor(maskEl, { timeout: 10000 });
+  check("A10 二维码已扫码等待确认时出现蒙版", qrMask, "mask=" + !!maskEl());
+  G.__MODAL_QR_SCANNED__ = false;
+  G.__MODAL_QR_CONFIRM__ = true;
+  await waitFor(() => h.closed.length > 0, { timeout: 10000 });
+  await waitFor(() => !maskEl(), { timeout: 1500 });
+  check("A10 二维码登录成功后蒙版随窗口消失",
+    h.closed.length > 0 && !maskEl(), "onClose=" + h.closed.length + " mask=" + !!maskEl());
+  G.__MODAL_QR_CONFIRM__ = false;
+  h.root.unmount();
+  h.el.remove();
+  await waitFor(() => document.querySelectorAll('.ant-modal').length === 0, { timeout: 500 });
+}
+
+/* A11 — 关窗判据 = **后端返回成功**（2026-09-28 用户口径「根据后端接口返回的成功与否
+ * 进行判断是否关闭弹窗」）。
+ *
+ * 为什么单独立一条：A9 只验「成功后关窗」，验不出**失败也关窗**这种反向缺陷 ——
+ * 手机验证码档原来根本不看 status（HTTP 200 就当成功），千帆邮箱档看的是
+ * result.account 这个派生字段。本用例把桩的结论改成 pending（HTTP 仍是 200），
+ * 断言弹窗**必须留着**，且不回调 onRenewed。
+ *
+ * 承重变异：LOGIN_MUTATE=loginconfirm（让 loginConfirmed 恒真）。
+ */
+async function scenarioA11() {
+  const WWW = { account: { id: 8, nickname: "观隅好物" }, channel: "www", state: "expired" };
+  const ARK = { account: { id: 8, nickname: "观隅好物" }, channel: "ark", state: "expired" };
+
+  /* 1 手机验证码：后端回 pending */
+  reset();
+  G.__MODAL_CONFIRM_STATUS__ = "pending";
+  let h = mountRenewModal(WWW);
+  await waitFor(modalEl);
+  clickByText(".ant-segmented-item", "手机验证码");
+  await waitFor(() => document.querySelector('input[placeholder="请输入手机号"]'));
+  setInputValue(document.querySelector('input[placeholder="请输入手机号"]'), "13800138000");
+  await waitFor(() => findButton("发送验证码"));
+  const sendBtn11 = findButton("发送验证码");
+  if (sendBtn11) sendBtn11.click();
+  await waitFor(() => (modalText() || "").includes("验证码已发送"), { timeout: 3000 });
+  setInputValue(document.querySelector('input[placeholder="请输入验证码"]'), "123456");
+  await waitFor(() => findButton("确认并更新令牌"));
+  const confirmBtn11 = findButton("确认并更新令牌");
+  if (confirmBtn11) confirmBtn11.click();
+  // 等到请求真的回来（桩里记了 confirm 那次调用）再判「关没关」
+  await waitFor(() => (G.__MODAL_LOG__.phone || []).length >= 2, { timeout: 3000 });
+  await waitFor(() => false, { timeout: 300 });
+  check("A11 手机验证码：后端回 pending 时不关窗",
+    h.closed.length === 0 && !!maskEl() === false && !!modalEl(),
+    "onClose=" + h.closed.length + " modal=" + !!modalEl());
+  h.root.unmount();
+  h.el.remove();
+  await waitFor(() => document.querySelectorAll('.ant-modal').length === 0, { timeout: 500 });
+
+  /* 2 千帆邮箱：后端回 pending */
+  reset();
+  G.__MODAL_CONFIRM_STATUS__ = "pending";
+  h = mountRenewModal(ARK);
+  await waitFor(modalEl);
+  clickByText(".ant-segmented-item", "邮箱密码");
+  await waitFor(() => document.querySelector('input[placeholder="name@example.com"]'));
+  setInputValue(document.querySelector('input[placeholder="name@example.com"]'), "ops@example.com");
+  setInputValue(document.querySelector('input[placeholder="千帆商家后台密码"]'), "secret123");
+  await waitFor(() => { const b = findButton("登录"); return b && !b.disabled; }, { timeout: 1500 });
+  const emailBtn11 = findButton("登录");
+  if (emailBtn11) emailBtn11.click();
+  await waitFor(() => (G.__MODAL_LOG__.email || []).length >= 1, { timeout: 3000 });
+  await waitFor(() => false, { timeout: 300 });
+  check("A11 千帆邮箱：后端回 pending 时不关窗",
+    h.closed.length === 0 && !!modalEl(),
+    "onClose=" + h.closed.length + " modal=" + !!modalEl());
+  h.root.unmount();
+  h.el.remove();
+  await waitFor(() => document.querySelectorAll('.ant-modal').length === 0, { timeout: 500 });
+}
+
+/* A12 — 页面最多等待 5 分钟（2026-09-28 用户口径）。
+ *
+ * 数值就是口径本身，所以直接断言这个数：扫码轮询是唯一会无限等下去的路径
+ * （手机 / 邮箱两条各由请求层 2 分钟超时兜住），本常量是它的收口闸。
+ * 承重变异：LOGIN_MUTATE=shortwait（把 5 分钟改成 300ms）。
+ */
+function scenarioA12() {
+  check("A12 登录窗口页面级等待上限 = 5 分钟",
+    LOGIN_WAIT_LIMIT_MS === 5 * 60 * 1000, "limit=" + LOGIN_WAIT_LIMIT_MS);
+}
+
 /* A4c — 邮箱 / 密码输入框**默认必须为空**（用户口径；安全属性）。
  *
  * 为什么值得钉一条守卫：预填邮箱/密码需要把它们存到某个地方
@@ -609,6 +911,10 @@ async function scenarioA4c() {
   await scenarioA6();
   await scenarioA7();
   await scenarioA8();
+  await scenarioA9();
+  await scenarioA10();
+  await scenarioA11();
+  scenarioA12();
   console.log("@@JSON@@" + JSON.stringify(results));
 })();
 `;
@@ -626,16 +932,24 @@ const RENEW_RESERVED = {
   matrix: '{ label: "手机验证码", value: "phone" },',
   // 二维码面板不再带 targetAccountId（续期退化成建号）
   notarget: "targetAccountId={target.account.id}",
+  // A9 的承重变异：手机档绕过带 `onClose()` 的 `handleRenewed`，直连 `onRenewed`
+  // —— 正是 2026-09-28 用户实测的那个缺陷（手机号登录成功、窗口不关）。
+  // ⚠️ 锚点必须带**收尾上下文** `) : (`：二维码档的接线行与手机档**逐字相同**，
+  // 只锚那一行会打到二维码档上（变异打偏 ⇒ A9 的二维码那格变红、手机那格照样绿）。
+  phoneclose:
+    '              onRenewed={(account) => handleRenewed(account?.id ?? target.account.id)}\n            />\n          ) : (',
 };
 const RENEW_MUTATE_TO = {
   default: 'const DEFAULT_METHOD: RenewMethod = "phone";',
   matrix: '{ label: "邮箱密码", value: "email" },',
   notarget: "targetAccountId={undefined}",
+  phoneclose:
+    '              onRenewed={(account) => onRenewed(account?.id ?? target.account.id)}\n            />\n          ) : (',
 };
 
 // 跑一轮：modalMutate/renewMutate 为空串跑契约，否则跑对应变异。
 // 返回 { results, failed, timeout }；不碰 process.exit（单进程多变异靠这个可重入性）。
-async function runOnce(modalMutate, renewMutate) {
+async function runOnce(modalMutate, renewMutate, maskMutate, loginMutate) {
   const built = await esbuild.build({
     stdin: { contents: ENTRY, resolveDir: path.join(PROJECT, "frontend/src"), loader: "jsx" },
     bundle: true,
@@ -686,6 +1000,51 @@ async function runOnce(modalMutate, renewMutate) {
               contents = contents.split(needle).join(RENEW_MUTATE_TO[renewMutate]);
             }
             return { contents, loader: "tsx" };
+          });
+        }
+      },
+      {
+        // A10 的承重变异：让共享蒙版永远返回 null —— 三种登录方式都该因此变红。
+        // 锚点住在 login-submit-mask.tsx（共享件），改的是内存里的 bundle，不落盘。
+        name: "mutate-mask",
+        setup(build) {
+          build.onLoad({ filter: /login-submit-mask\.tsx$/ }, async (args) => {
+            const fs = require("fs");
+            let contents = fs.readFileSync(args.path, "utf8").replace(/\r\n/g, "\n");
+            if (maskMutate === "nomask") {
+              const needle = "  if (!active) {";
+              if (!contents.includes(needle)) {
+                throw new Error("蒙版变异锚点未命中（实现已改？）：" + needle);
+              }
+              contents = contents.replace(needle, "  if (true) {");
+            }
+            return { contents, loader: "tsx" };
+          });
+        }
+      },
+      {
+        // A11 的承重变异：让 loginConfirmed 恒真 —— 「后端没确认也关窗」的老缺陷。
+        // 锚点住在 lib/login-state.ts（判据的唯一实现），只改内存里的 bundle。
+        name: "mutate-login",
+        setup(build) {
+          build.onLoad({ filter: /login-state\.ts$/ }, async (args) => {
+            const fs = require("fs");
+            let contents = fs.readFileSync(args.path, "utf8").replace(/\r\n/g, "\n");
+            if (loginMutate === "loginconfirm") {
+              const needle = 'return String(result?.status ?? "") === "confirmed";';
+              if (!contents.includes(needle)) {
+                throw new Error("登录判据变异锚点未命中（实现已改？）：" + needle);
+              }
+              contents = contents.replace(needle, "return true;");
+            } else if (loginMutate === "shortwait") {
+              // A12 的承重变异：把 5 分钟压成 300ms（口径被改）。
+              const needle = "5 * 60 * 1000";
+              if (!contents.includes(needle)) {
+                throw new Error("等待上限变异锚点未命中（实现已改？）：" + needle);
+              }
+              contents = contents.replace(needle, "300");
+            }
+            return { contents, loader: "ts" };
           });
         }
       },
@@ -747,11 +1106,15 @@ async function runOnce(modalMutate, renewMutate) {
 
 //: self-check 依次跑的 variant：none 契约（必须全 PASS），其余必须至少一个 FAIL
 const MODAL_VARIANTS = [
-  { name: "none", modal: "", renew: "" },
-  { name: "drawer", modal: "drawer", renew: "" },
-  { name: "default", modal: "", renew: "default" },
-  { name: "matrix", modal: "", renew: "matrix" },
-  { name: "notarget", modal: "", renew: "notarget" },
+  { name: "none", modal: "", renew: "", mask: "", login: "" },
+  { name: "drawer", modal: "drawer", renew: "", mask: "", login: "" },
+  { name: "default", modal: "", renew: "default", mask: "", login: "" },
+  { name: "matrix", modal: "", renew: "matrix", mask: "", login: "" },
+  { name: "notarget", modal: "", renew: "notarget", mask: "", login: "" },
+  { name: "phoneclose", modal: "", renew: "phoneclose", mask: "", login: "" },
+  { name: "nomask", modal: "", renew: "", mask: "nomask", login: "" },
+  { name: "loginconfirm", modal: "", renew: "", mask: "", login: "loginconfirm" },
+  { name: "shortwait", modal: "", renew: "", mask: "", login: "shortwait" },
 ];
 
 async function selfCheck() {
@@ -759,7 +1122,7 @@ async function selfCheck() {
   for (const v of MODAL_VARIANTS) {
     let r;
     try {
-      r = await runOnce(v.modal, v.renew);
+      r = await runOnce(v.modal, v.renew, v.mask, v.login);
     } catch (err) {
       // 打包失败 / 锚点未命中都算 BROKEN —— 静默不生效比变红更危险
       origLog(`SELF ${v.name} BROKEN (throw: ${err && err.message ? err.message : err})`);
@@ -782,7 +1145,7 @@ if (process.argv.includes("--self-check")) {
       process.exit(3);
     });
 } else {
-  runOnce(process.env.MODAL_MUTATE || "", process.env.RENEW_MUTATE || "")
+  runOnce(process.env.MODAL_MUTATE || "", process.env.RENEW_MUTATE || "", process.env.MASK_MUTATE || "", process.env.LOGIN_MUTATE || "")
     .then((r) => process.exit(r.failed === 0 && !r.timeout ? 0 : 1))
     .catch((err) => {
       origLog("HARNESS ERROR:", err && err.stack ? err.stack : err);

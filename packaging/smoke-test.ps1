@@ -48,8 +48,9 @@ Write-Step "校验安装产物"
 foreach ($rel in @(
     "SpiderXHS.exe", "_internal", "runtime\node\node.exe",
     "frontend\dist\index.html", "config\default.yaml",
-    # 应用初始化数据（设计 15 §4.5）：缺了 = 装完任务中心是空的
-    "config\initial_data\scheduled_jobs.json"
+    # 应用初始化数据（设计 15 §4.5 / 设计 10 §7.3）：缺了 = 装完任务中心 / 设置页是空的
+    "config\initial_data\scheduled_jobs.json",
+    "config\initial_data\system_settings.json"
 )) {
     $p = Join-Path $InstallDir $rel
     if (-not (Test-Path $p)) { Fail "缺少 $rel" }
@@ -70,6 +71,14 @@ if (-not $initialJson.scheduled_jobs -or $initialJson.scheduled_jobs.Count -lt 1
 }
 $initialCount = $initialJson.scheduled_jobs.Count
 Write-Host "  应用初始化数据: $initialCount 条定时任务"
+
+# 运行时配置初始化数据同样必须可解析（设计 10 §7.3）：缺了 = 装完设置页「系统参数」卡是空的
+$settingsJson = Get-Content (Join-Path $InstallDir "config\initial_data\system_settings.json") -Raw -Encoding UTF8 | ConvertFrom-Json
+if (-not $settingsJson.system_settings -or $settingsJson.system_settings.Count -lt 1) {
+    Fail "应用初始化数据里没有运行时配置条目"
+}
+$settingsCount = $settingsJson.system_settings.Count
+Write-Host "  应用初始化数据: $settingsCount 条运行时配置"
 
 # --- 3. 启动 + 健康检查 -------------------------------------------------------
 Write-Step "启动服务（端口 $Port，--no-browser）"
@@ -104,6 +113,14 @@ Write-Host "  /openapi.json paths: $($paths.Count)"
 #     写的 UTF-8 无 BOM，PS5.1 默认按 GBK 解码会把中文搅成乱码 ⇒ 匹配假失败；
 #     ② 必须用 Get-Content 而非 File.ReadAllText —— 后者默认 FileShare.Read，
 #     打不开正被 launcher 追加的日志（IOException 另一进程正在使用）。
+#
+# ⚠️ 判据里那条访问日志**不能**用就绪轮询打出的 `GET /api/health`：
+#     alembic 的 `fileConfig` 会在启动迁移期间**禁用全部 logger**（`launcher.log`
+#     黑洞），`launcher.ensure_file_logging()` 要等**服务就绪之后**才把它们挂回来
+#     ⇒ 就绪轮询的成功请求可能正好落在「恢复之前」而**不落日志**（2026-09-27 实测
+#     踩到，同一份代码时红时绿 = 竞态）。这里**显式再打一次 health**：那时日志一定
+#     已恢复，判据才是确定性的（安全网不许条件性）。
+$null = Invoke-WebRequest -Uri "$Base/api/health" -TimeoutSec 5 -UseBasicParsing
 $logFile = Join-Path $InstallDir "logs\launcher.log"
 $logOk = $false
 foreach ($i in 1..10) {
@@ -134,12 +151,12 @@ foreach ($rel in @(
 }
 Write-Host "  data / storage / logs 均在安装目录下"
 
-# --- 4b. 定时任务随「注册」铺设（DEF-066：内置任务按用户各持一份） -------
-# 判据必须落在「行」上而不是「文件」上：文件在而没播种 = 用户打开任务中心还是空的。
+# --- 4b. 初始化数据随「注册」铺设（DEF-066：按用户各持一份；定时任务 + 运行时配置） -------
+# 判据必须落在「行」上而不是「文件」上：文件在而没播种 = 用户打开任务中心 / 设置页还是空的。
 # 2026-09-26 v1.0.1 改口径：DEF-066 之前内置任务是全局共享行，「首启就能查到行」是当时的正确判据；
 #   改成按用户各持一份后，全新安装没有任何用户 -> 首启 0 行才是正确行为，旧断言会次次误报。
 #   真正的判据：注册一个用户 -> 立刻给这个用户铺满 N 条。
-Write-Step "校验定时任务随注册铺设（内置任务按用户各持一份）"
+Write-Step "校验初始化数据随注册铺设（定时任务 + 运行时配置，按用户各持一份）"
 $py = (Get-Command python -ErrorAction SilentlyContinue).Source
 if (-not $py) {
     Write-Host "  [跳过] 本机无 python，无法查库行数（文件侧已在第 2 段校验）" -ForegroundColor Yellow
@@ -164,6 +181,17 @@ if (-not $py) {
         Fail "定时任务播种失效：注册后库里 $seeded 行，初始化数据 $initialCount 条"
     }
     Write-Host "  注册后铺设 $seeded 个内置任务行（= 初始化数据条数）"
+
+    # 运行时配置行同样必须随注册铺设（设计 10 §7.3）—— 判据落在「行」上而不是「文件」上：
+    # 文件在而没播种 = 用户打开设置页「系统参数」卡还是空的。
+    $settingsSql = "import sqlite3;c=sqlite3.connect(r'$dbPath');print(len(c.execute('select id from system_settings').fetchall()))"
+    $settingsSeeded = (& $py -c $settingsSql | Select-Object -Last 1)
+    if ($settingsSeeded -is [array]) { $settingsSeeded = $settingsSeeded[-1] }
+    $settingsSeeded = "$settingsSeeded".Trim()
+    if ($settingsSeeded -ne "$settingsCount") {
+        Fail "运行时配置播种失效：注册后库里 $settingsSeeded 行，初始化数据 $settingsCount 条"
+    }
+    Write-Host "  注册后铺设 $settingsSeeded 行运行时配置（= 初始化数据条数）"
 }
 
 # --- 5. 端口回退 --------------------------------------------------------------

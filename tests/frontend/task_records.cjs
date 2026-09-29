@@ -279,6 +279,8 @@ async function main() {
   );
   // A7-A10 队列白名单与批次父行（§31.10 商品生成 + 2026-09-26 批次层）
   check("A7 生成队列项有中文名", taskTypeLabel("xhs_note_gen_item"), "生成商品笔记");
+  // ⚠️ 2026-09-27 §35.18：详情补齐队列（`xhs_note_hydrate_item` / `xhs_note_hydrate_batch`）
+  // 随「补齐详情」按钮一并移除 ⇒ 白名单只剩三个队列（各含项 + 批次父行）。
   check(
     "A8 队列白名单收满队列项 + 批次父行（父子树的两级都在）",
     QUEUE_TASK_TYPES.slice().sort(),

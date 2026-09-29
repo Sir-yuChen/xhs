@@ -34,31 +34,6 @@ def notify_task_exhausted(db: Session, task: Task) -> Notification:
     )
 
 
-def notify_account_expired(db: Session, user_id: int, account_name: str, account_id: int) -> Notification:
-    return _create(
-        db,
-        user_id=user_id,
-        title=f"账号凭证过期: {account_name}",
-        body="请重新登录或更新 Cookie",
-        level="error",
-        source_type="account",
-        source_id=account_id,
-    )
-
-
-def notify_publish_failed(db: Session, user_id: int, job_title: str, job_id: int, task_id: Optional[int] = None) -> Notification:
-    return _create(
-        db,
-        user_id=user_id,
-        title=f"发布失败: {job_title}",
-        body="",
-        level="warning",
-        source_task_id=task_id,
-        source_type="publish_job",
-        source_id=job_id,
-    )
-
-
 def notify_target_paused(db: Session, user_id: int, target_name: str, target_id: int) -> Notification:
     return _create(
         db,

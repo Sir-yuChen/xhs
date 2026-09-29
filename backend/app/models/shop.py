@@ -110,53 +110,63 @@ class ShopNoteGoods(Base):
 
 
 class NoteGoods(Base):
-    """**笔记 ↔ 商品** 多对多关系（本地实体级，设计 13 §26，2026-09-22）。
+    """**笔记 ↔ 商品** 多对多关系（**平台 ID 级**，设计 13 §26.7，2026-09-27 改键）。
 
     三张表各司其职（用户口径：「笔记相关得信息单独一张表，商品信息单独一张表，
-    笔记与商品之间得关系单独一张关系表」）：
+    笔记与商品之间得关系单独一张关系表」）—— 分工不变，**只有本表的键换了**：
 
-    * `notes` 装**笔记信息**（本地 PK = `notes.id`）；
-    * `shop_products` 装**商品信息**（本地 PK = `shop_products.id`）；
+    * `notes` 装**笔记信息**（身份 `(user_id, note_id)`，`note_id` 是平台 ID）；
+    * `shop_products` 装**商品信息**（身份 `(shop_id_fk, item_id)`，`item_id` 是平台 ID）；
     * 本表只装**关系** —— 一篇笔记可挂多个商品、一个商品可被多篇笔记挂载（M2M），
-      由唯一键 `(note_id, product_id)` 强制（重复解析幂等，不产生重复行）。
+      由唯一键 `(user_id, note_id, item_id)` 强制（重复解析幂等，不产生重复行）。
+
+    ⚠️ **键为什么从本地主键改成平台 ID**（用户 2026-09-27 口径，**取代** 2026-09-22 的
+    「两边都解析成功才建关系」）：
+
+    * 原文：「同步笔记时，如果笔记挂有商品必须将笔记与商品的关系落库到笔记与商品
+      关系表，**无需校验商品是否存在**」＋「**关系表改存平台商品 ID 和平台笔记 ID**」；
+    * 旧键 `(notes.id, shop_products.id)` 是**本地主键** ⇒ 商品台账里没有这件商品就
+      **写不进关系**（外键指向不存在的行），而 `shop_note_goods` 缓存里明明有它的
+      `item_id`（真实库实测：1933 个挂载条目里 **16 个** 因台账缺行永远落不了库）；
+    * 新键不依赖台账、也不依赖店铺（未绑店的账号同样能落）⇒「笔记挂了什么就落什么」。
+
+    **结构上没有孤儿**：两个外键**全部去掉**（不再指向 `notes.id` / `shop_products.id`）
+    ⇒ 「关系指向一条已删本地行」这种数据自相矛盾在结构上不可能出现。
 
     ⚠️ 与 `shop_note_goods` **不是同一语义的两份实现**：后者是**平台证据缓存**
     （按账号 + 平台 note_id 存千帆原文，回答「千帆说这条笔记挂了什么」）；
-    本表是**本地实体关系**（回答「本地这篇笔记挂了本地哪些商品」）。
-    解析器（`shop_goods_service.link_note_goods`）只读缓存、只写本表，**零平台请求**。
+    本表是**关系**（回答「这条笔记挂了哪些商品」）。解析器
+    （`shop_goods_service.link_note_goods`）只读缓存、只写本表，**零平台请求**。
 
-    **只增不删**（§23 / §25.3：同步链路不做删除维度）—— 平台撤了挂载也不删关系行，
-    删除语义由对账负责。⚠️ **2026-09-23 两条用户口径 ⇒ 补两个例外，且方向一致**：
+    **只增不删**（§23 / §25.3：同步链路不做删除维度）—— 平台撤了挂载也不删关系行。
+    ⚠️ **2026-09-23 两条用户口径 ⇒ 补两个例外，且方向一致**（2026-09-27 仍现行）：
 
     * 「删除笔记时需要删除笔记与商品的关联关系」⇒ **删笔记**时关系行一并删
-      （`purge_note` 里显式 `delete(NoteGoods)`）。真实库曾因此留 4 条孤儿
-      （note_id 1963/1964/1965/1967 → product_id 1）。
+      （`purge_note` 里显式 `delete(NoteGoods)`，按 `(user_id, note_id)`）；
     * 「删除商品时也需要删除笔记与商品的关联关系」⇒ **删商品**时关系行一并删
-      （`shop_products_service.delete_items`：先取将删行的本地 `id`，再按
-      `product_id` 删关系，最后删商品行 —— **顺序不能反**，删了就对不上了）。
+      （`shop_products_service.delete_items`：⚠️ 2026-09-27 起直接按 `item_id` 删，
+      **不再需要**旧实现里「先取本地 `id` → 再按 `product_id` 删」那一步顺序纪律）。
 
-    即**本地实体真删 ⇒ 关系行跟着走**，两个方向同一条规则。⚠️ 第二条把 v1.36
-    （§33.10）「删商品时关系行不动、等同步写回后原样接上」的决定**推翻**了 ——
-    用户明确要求改，理由也站得住：关系指向一条已删商品就是孤儿行，与删笔记
-    留孤儿是同一个病的另一个方向。
+    即**本地实体真删 ⇒ 关系行跟着走**，两个方向同一条规则（v1.36 的「删商品时关系行
+    不动、等同步写回后原样接上」已被 2026-09-23 口径推翻，原句保留在 §33.10.2）。
 
     ⚠️ 与 `shop_goods_sync_service._drop_stale_rows` **刻意不同**：那个由
-    「完整同步成功后平台已不存在的商品」触发，删的是**平台侧已消失**的行；
+    「完整同步成功后平台已不存在的商品」触发，删的是**平台侧已消失**的台账行；
     用户口径只针对**显式删除**，同步侧的连带删除本轮不动（要改需另议，§33.12 待办）。
-
-    两个外键仍**不级联删**（`PRAGMA foreign_keys` 未开，级联本来就不生效）
-    ⇒ 删除链必须在代码里显式写全：`purge_note`（笔记）与 `delete_items`（商品）
-    **各自**都要把关系行写进自己的删除链，漏一边就是孤儿数据。
+    平台侧商品消失后关系行**留着**（按 `item_id` 仍然成立），读取时退化成只显示 `item_id`。
     """
 
     __tablename__ = "note_goods"
     __table_args__ = (
-        UniqueConstraint("note_id", "product_id", name="uq_note_goods_note_product"),
+        UniqueConstraint("user_id", "note_id", "item_id", name="uq_note_goods_user_note_item"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    #: 本地笔记行（`notes.id`）—— **本地主键，不是平台 note_id**。
-    note_id: Mapped[int] = mapped_column(ForeignKey("notes.id"), index=True)
-    #: 本地商品行（`shop_products.id`）—— **本地主键，不是平台 item_id**。
-    product_id: Mapped[int] = mapped_column(ForeignKey("shop_products.id"), index=True)
+    #: **归属**（DEF-066 同款纪律）。`notes` 的身份键是 `(user_id, note_id)`，本表对齐。
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    #: **平台笔记 ID**（`notes.note_id`；本地生成笔记是 `local_…` 合成 ID，发布成功后
+    #: 会随 `notes.note_id` 一起被改写成平台真 ID —— 见 `note_publish_service`）。
+    note_id: Mapped[str] = mapped_column(String(128), index=True)
+    #: **平台商品 ID**（`shop_products.item_id`；台账里没有这件商品也照样有值）。
+    item_id: Mapped[str] = mapped_column(String(64), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now)

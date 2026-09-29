@@ -1016,14 +1016,20 @@ def test_note_sync_gate_is_creator_only():
 
 
 def test_accounts_sync_progress_renders_dash_for_unknown_total():
-    """进度行的平台总数缺值渲染 `-`，**不是 `0`**（缺值口径的底线）。
+    """分母**未知时不渲染占位符**（§35.18.6 取代旧的「渲染 `-`」口径）。
 
-    §19 起渲染函数在 `lib/sync-gates.ts`（行为脚本 F1–F3 钉的是「怎么跑」）；
+    ⚠️ **被取代的原断言（保留备查）**：本节原要求 `'total ?? "-"' in gates` —— 即把
+    未知总数渲染成「已落库 N / 共 - 条」。2026-09-27 用户报障显示那句话会被读成
+    「卡住了」（区间 / 增量同步本来就没有确定分母，占位符把「未知」说成「已知的 0」）
+    ⇒ 新口径：`total` 缺失只报「已落库 N 条」，且有界同步后端**不写 `total` 键**。
+
+    §19 起渲染函数在 `lib/sync-gates.ts`（行为脚本 I1–I3 钉的是「怎么跑」）；
     这里钉「只有一份实现」：页面不得再留一份 `total ?? `。
     """
     source = _read(ACCOUNTS)
     gates = _read(ROOT / "frontend/src/lib/sync-gates.ts")
-    assert 'total ?? "-"' in gates, "总数取不到必须渲染 `-`，不许 ?? 0"
+    assert 'total ?? "-"' not in gates, "分母未知不许渲染占位符（用户会读成「卡住了」）"
+    assert "if (total == null) {" in gates, "分母缺失必须有独立分支（缺值口径）"
     assert "total ??" not in source, "渲染口径只留 sync-gates 一份，页面不得再写"
 
 
@@ -1080,30 +1086,43 @@ def test_accounts_sync_polling_uses_five_seconds_and_stops_on_unmount():
 def test_accounts_sync_polling_keeps_running_until_terminal():
     """摘除账号必须写在 `try/catch` **之后**，不得写进 `finally`（设计 13 §6.2 的实现坑）。
 
-    `pending`/`running` 分支用的是 `return`，而 `finally` 对 `return` 同样生效 ——
+    「未结束就继续跑」的分支用的是 `return`，而 `finally` 对 `return` 同样生效 ——
     一旦把 `next.delete(accountId)` 放进 `finally`，**第一轮轮询就把账号移出集合**，
     轮询当场停摆，卡片进度行永久冻结在「已落库 N / 共 M」。症状极具欺骗性：
     页面看起来还在跑（按钮仍是 disabled），其实数据再没更新过。
 
     这条守卫的价值在于**能区分两种写法**：把删除语句裹回
     `try { … } finally { … }` 之后必须变红 —— 只断言「`next.delete` 存在」是抓不住的。
+
+    ⚠️ 2026-09-27（§35.17.4）改判据位置：`pending` / `running` 的字面量比较**搬进了
+    `lib/sync-gates.ts` 的 `syncTaskPhase`**（页面里再比一次 `status === "running"`
+    = 两份判据必然漂移，DEF-044）。所以这里断言的顺序变成「`syncTaskPhase(...) ===
+    "active"` 的判定排在 `next.delete` 之前」，并额外守住「页面不得自建第二份状态名单」
+    —— 否则这次改动等于把守卫悄悄架空。
     """
     source = _read(ACCOUNTS)
     start = source.index("async function pollSyncTasks")
     end = source.index("async function handleDelete", start)
     body = source[start:end]
     # 注释里为了说明坑因会提到 `finally`，所以只对**代码**做结构判断。
-    code = re.sub(r"//[^\n]*", "", body)
+    # ⚠️ 两种注释都要剥：`//` 行注释**与** `/* … */` 块注释（JSDoc）。
+    # 只剥 `//` 会让函数上方的 JSDoc 里那句「不写 finally」把守卫打红 ——
+    # 守卫自身写的「只对代码做结构判断」就会失真（2026-09-27 实测踩到）。
+    code = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
+    code = re.sub(r"//[^\n]*", "", code)
 
     assert "next.delete(accountId)" in code, "轮询结束必须把账号移出集合（否则会一直打后端）"
     assert "finally" not in code, (
-        "轮询函数里不得出现 finally：`running` 分支是 return，finally 会连带执行，"
+        "轮询函数里不得出现 finally：`active` 分支是 return，finally 会连带执行，"
         "导致第一轮就把账号摘除、轮询停摆"
     )
-    assert code.index('status.status === "pending"') < code.index("next.delete(accountId)"), (
+    assert code.index('syncTaskPhase(status) === "active"') < code.index("next.delete(accountId)"), (
         "摘除必须排在「仍在跑」的判定之后"
     )
-    assert 'status.status === "running"' in code, "`running` 必须与 `pending` 同列「继续轮询」"
+    # 「未结束」的判据**只有一份**（住在 lib/sync-gates.ts），页面不许再比一次
+    assert "SYNC_ACTIVE_STATES" not in code, "状态名单不得在页面里重复声明（DEF-044）"
+    assert '"running"' not in code, "「在跑」的字面量比较属于 syncTaskPhase，页面不得自建第二份"
+    assert "syncTaskPhase" in _read(ROOT / "frontend/src/lib/sync-gates.ts"), "判据本体必须在 lib 里"
 
 
 # ---------------------------------------------------------------------------
@@ -1112,7 +1131,7 @@ def test_accounts_sync_polling_keeps_running_until_terminal():
 
 
 def test_accounts_long_lines_collapse_with_tooltip_instead_of_wrapping():
-    """四类可能超长的行都必须「单行 `…` + 悬停 tip」，**不得靠换行**。
+    """三类可能超长的行都必须「单行 `…` + 悬停 tip」，**不得靠换行**。
 
     用户实测报出：「读取互动数据失败，请稍后重试，或重新登录网页版账号」这类提示
     在窄列（`lg=8`）里一行放不下。这些文案的长度**不由前端决定**（后端 25–30 字、
@@ -1123,12 +1142,12 @@ def test_accounts_long_lines_collapse_with_tooltip_instead_of_wrapping():
     **不会让任何别的断言变红**，但用户会立刻看到那半截文案。
     """
     source = _read(ACCOUNTS)
+    # ⚠️ 2026-09-27：`noteSyncText` / `goodsSyncText` 随「同步任务」进度区块一并移除
+    # （用户口径「点击后展示的同步任务进度卡移除」）⇒ 它们不再是这一页的超长行载体。
     carriers = (
         "metricsNote",
         "account.status_message",
         "updatedText",
-        "noteSyncText",
-        "goodsSyncText",
     )
     for carrier in carriers:
         expected = f"ellipsis={{{{ tooltip: {carrier} }}}}"
@@ -1251,15 +1270,23 @@ def _run_sync_gates(env: dict | None = None):
 
 
 def test_sync_gate_three_states_are_driven_for_real():
-    """三态门禁 / 分源摘要 / 缺值渲染 / 取消与耗时有**真实打包产物**验证（§19.8 / §24.8）。
+    """三态门禁 / 分源摘要 / 缺值渲染 / 取消与耗时 / 首查驱动轮询 / 终态提示有**真实打包产物**验证。
 
-    20 条 = A(2) + B(1) + C(4) + D(4) + E(5) + F(3) + G(1)：创作者会话不可用必须拦、
-    unknown 必须放行、源清单只含 creator(+ark)（www 已退场）、被限流的源说「未跑完」
-    不说「0 条」、详情剩余缺值渲染 `-`、cancelled 终态带耗时（E4/E5，§24.8）。
+    36 条 = A(2) + B(1) + C(4) + D(4) + E(5) + F(3) + G(1) + H(11) + I(5)：创作者会话不可用
+    必须拦、unknown 必须放行、源清单只含 creator(+ark)（www 已退场）、被限流的源说
+    「未跑完」不说「0 条」、详情剩余缺值渲染 `-`、cancelled 终态带耗时（E4/E5，§24.8）；
+    H1–H7（§35.17.4，2026-09-27）盯「**要不要继续 5s 轮询**」这个决策：在跑 ⇒ active、
+    已结束（含 failed / cancelled 两个非正常终态）⇒ finished、没跑过 ⇒ idle；
+    H8–H11（§35.18，2026-09-27）盯「终态要不要打扰用户」：只有 failed / cancelled
+    才给文案（成功与「没有结果」都是空串）—— 卡片里的进度区块已按用户口径移除，
+    非正常终态若不弹就是彻底静默（失败三分法：真异常要给真原因）。
+    I1–I5（**§35.18.6**，2026-09-27 用户报障）盯**进度分母三态**与**取消说明**：
+    只有无界全量才报分母、有界（`total` 缺失）只报「已落库 N 条」（**不渲染 `/ 共 -`**）、
+    详情补齐阶段优先报它、取消结果行剥掉「已被用户取消」后缀。
     """
     result = _run_sync_gates()
     assert result.returncode == 0, (result.stdout + result.stderr)[-900:]
-    assert "20 PASS / 0 FAIL" in result.stdout
+    assert "36 PASS / 0 FAIL" in result.stdout
 
 
 @pytest.mark.parametrize(
@@ -1273,6 +1300,11 @@ def test_sync_gate_three_states_are_driven_for_real():
         ("dash", "F1"),         # 详情剩余缺值渲染 0 ⇒ 把未知说成已知
         ("goodsgate", "D1"),    # 千帆不可用也放行同步商品
         ("cancel", "E4"),       # cancelled 分支失效 ⇒ 取消后结果行误导（§24.8）
+        ("phaseactive", "H2"),  # 「进行中」判据失效 ⇒ 在跑的任务被当结束、首查当场摘出轮询集
+        ("phaseidle", "H4"),    # 已结束一律当 idle ⇒ 轮询停不下来（对着不会再变的任务无限打后端）
+        ("terminalnotice", "H8"),  # 成功也弹提示 ⇒ 每次同步完都打扰用户（用户口径：只留按钮态）
+        ("progressdash", "I2"),    # 分母缺失仍渲染「/ 共 -」⇒ 用户读成「卡住了」（§35.18.6）
+        ("cancelsuffix", "I4"),    # 不剥取消后缀 ⇒ 结果行出现两次「取消」（§35.18.6）
     ],
 )
 def test_sync_gates_guards_are_load_bearing(mutate, expected):
@@ -1284,6 +1316,106 @@ def test_sync_gates_guards_are_load_bearing(mutate, expected):
     result = _run_sync_gates({"SYNC_GATES_MUTATE": mutate})
     assert result.returncode != 0, f"{mutate} 变异必须让脚本失败"
     assert f"FAIL  {expected}" in result.stdout, f"stdout={result.stdout}"
+
+
+def test_accounts_page_sync_state_is_driven_by_first_query():
+    """账号卡的「同步中」按钮态由**首查 + 轮询**驱动（设计 13 §35.17.4 / §35.18）。
+
+    用户口径（2026-09-27，两轮）：
+    ① 「查一次任务记录表当前账号存在对应任务则展示页签，任务非结束状态（包括正常结束和
+       非正常结束）则前端 5 秒查询一次，如果为结束状态则不再轮询查询，**每次刷新按钮或
+       进入页面时自动触发一次**，根据第一个获取的信息决定是否需要轮询」；
+    ② 「账号信息卡中移除补齐详情逻辑……点击后展示的同步任务进度卡移除，只需要将同步笔记
+       按钮改成同步中即可」—— 于是**卡片上唯一会变的东西就是按钮文案**，
+       首查 / 轮询的意义收敛成两件事：入集（按钮变「同步中」）与摘出（切回「同步笔记」）。
+
+    `syncTaskPhase` / `syncTerminalNotice` 的判据本体由 `sync_gates.cjs` 真实驱动（H1–H11），
+    这里只守**接线** —— 纯逻辑对而没接上，功能一样不存在（这正是
+    `test_every_behaviour_script_is_wired_into_pytest` 想防的同一类事）：
+
+    ① 首查挂在 `loadAccounts`（进页面 / 点刷新都走它）里，且**不 await**（不能把页面
+       卡在 loading 上等 N 个只读查询）；
+    ② 首查按「未结束 ⇒ 入集 / 结束或没有 ⇒ 摘出」双向处置 —— 只写「入集」那一支
+       等于用户口径里的「结束状态则不再轮询」从未实现；
+    ③ 竞态防护在位：本页刚触发的账号不被首查那条旧快照摘出轮询集
+       （否则就是 H9 那类「看着像在跑，其实再也没更新过」）；
+    ④ 轮询到终态**摘出集合**（按钮切回「同步笔记」），且**只有非正常终态**报原因
+       （卡片已无进度区块 ⇒ 静默吞掉失败 = 用户永远不知道失败了）；
+    ⑤ 进度区块 / 补齐详情 / 取消入口**整条不在**卡片里（用户口径），
+       且按钮文案确实随集合切换（反向锚点：证明前几条不是「切片打偏所以什么都没匹配到」）。
+    """
+    code = _code_only(_read(ACCOUNTS))
+    load = _slice_between(code, "async function loadAccounts", "async function autoCheckLoginStates")
+    assert "void firstQuerySyncStatus(loadedAccounts)" in load, "进入页面 / 刷新必须自动首查一次"
+    assert "await firstQuerySyncStatus" not in load, "首查不得 await（会把页面卡在 loading 上）"
+
+    query = _slice_between(code, "async function querySyncStatus", "async function pollSyncTasks")
+    assert 'syncTaskPhase(status) === "active"' in query, "首查必须按 syncTaskPhase 判「要不要轮询」"
+    assert "next.delete(accountId)" in query, "命中已结束 / 无任务必须**摘出**轮询集（用户口径）"
+    assert "locallyTriggeredRef.current.has(accountId)" in query, (
+        "本页刚触发的账号必须挡住首查的旧快照，否则轮询当场停摆"
+    )
+
+    poll = _slice_between(code, "async function pollSyncTasks", "async function handleDelete")
+    assert 'syncTaskPhase(status) === "active"' in poll, "轮询同样按 syncTaskPhase 判在跑 / 已结束"
+    assert "syncTerminalNotice(" in poll, "终态要不要打扰用户必须走唯一判据（sync-gates）"
+    assert "if (notice) {" in poll and "message.error(notice);" in poll, (
+        "非正常终态必须报出真原因（卡片已无进度区块，静默 = 用户不知道失败）"
+    )
+    assert "next.delete(accountId)" in poll, "终态必须摘出集合（否则按钮永远停在「同步中」）"
+    assert "finally" not in poll, (
+        "摘除不能写进 finally（H9）：`return` 也触发 finally ⇒ 第一轮就把账号摘出去、轮询停摆"
+    )
+
+    # ⑤ 进度区块 / 补齐详情 / 取消入口整条移除
+    for gone in ("hasSyncTask", "syncBlockText", "hydratePendingNotes", "补齐详情", "cancelSync"):
+        assert gone not in code, f"「{gone}」应已随进度卡一并移除（2026-09-27 用户口径）"
+    # 反向锚点：按钮文案仍随集合切换，且驱动它的集合还在
+    assert "const isNoteSyncing = noteSyncIds.has(account.id);" in code
+    assert '{isNoteSyncing ? "同步中" : "同步笔记"}' in code, "同步笔记按钮必须能显示「同步中」"
+    assert '{isGoodsSyncing ? "同步中" : "同步商品"}' in code, "同步商品按钮同规"
+
+
+@pytest.mark.parametrize(
+    "needle,replacement",
+    [
+        # 首查不再挂在加载 / 刷新上 ⇒ 「进入页面自动触发一次」失效
+        ("void firstQuerySyncStatus(loadedAccounts);", "void 0;"),
+        # 首查 await 了 ⇒ 页面卡在 loading 上等 N 个只读查询
+        ("void firstQuerySyncStatus(loadedAccounts);", "await firstQuerySyncStatus(loadedAccounts);"),
+        # 只写「入集」不写「摘出」⇒ 用户口径里的「结束状态则不再轮询」从未实现
+        ("      } else if (locallyTriggeredRef.current.has(accountId)) {", "      } else if (true) {"),
+        # 丢竞态防护 ⇒ 首查的旧快照会把刚触发的账号摘出轮询集（轮询停摆）
+        ("      } else if (locallyTriggeredRef.current.has(accountId)) {", "      } else if (false) {"),
+        # 终态不报原因 ⇒ 失败被静默吞掉（卡片已无进度区块，用户永远不知道）
+        ("      if (notice) {", "      if (false) {"),
+        # 按钮不再随集合切换 ⇒ 「同步中」永远不出现（用户口径的核心就没了）
+        ('{isNoteSyncing ? "同步中" : "同步笔记"}', '{"同步笔记"}'),
+    ],
+)
+def test_first_query_guard_is_load_bearing(monkeypatch, needle, replacement):
+    """变异验证：上面那条守卫的每个判据被改坏时**必须变红**。
+
+    为什么用 `monkeypatch` 改 `_read` 而不是临时改文件：改文件再回滚一旦中途失败
+    就会把坏源码留在工作区（本项目已有「同一文件并行 Edit 竞态回退改动」的前车之鉴）。
+    断言写成 `pytest.raises(AssertionError)` —— **必须真的抛**，不能只看内容，
+    否则守卫写歪（比如锚点打偏）时这条变异验证自己也会绿。
+    """
+    import test_page_optimizations as page_opt
+
+    source = _read(ACCOUNTS)
+    assert needle in source, f"变异锚点未命中（实现已改？）：{needle}"
+    mutated = source.replace(needle, replacement, 1)
+    real_read = page_opt._read
+
+    def fake_read(path: Path) -> str:
+        if path == ACCOUNTS:
+            return mutated
+        return real_read(path)
+
+    monkeypatch.setattr(page_opt, "_read", fake_read)
+    with pytest.raises(AssertionError):
+        page_opt.test_accounts_page_sync_state_is_driven_by_first_query()
 
 
 # --------------------------------------------------------------------------- #
@@ -2391,6 +2523,32 @@ def test_accounts_page_has_no_reconcile_entry():
     assert not (ROOT / "frontend/src/components/platforms/reconcile-modal.tsx").exists(), (
         "对账弹窗组件应随端点一起删除"
     )
+
+
+def test_accounts_page_header_removed_and_bind_button_in_card_extra():
+    """账号矩阵页**页面头部整块移除**，「绑定账号」收进卡片右上角与「刷新」同行。
+
+    用户 2026-09-28 口径：「将头部的 XHS Accounts / 账号矩阵 / 管理小红书账号、各平台
+    登录态与数据同步（笔记 / 商品 / 互动数据）。移除，绑定账号按钮放到右上角与刷新一起」
+    —— 设计 13 §40。
+
+    两条断言缺一不可：
+
+    * **正向锚**（`绑定账号` 必须真的在 `extra` 切片里）—— 只写反向断言的话，
+      「把整块删空」也能让它变绿（本文件「设置页」那条踩过的坑）；
+    * **反向**（三行页头文案不得回归）—— 必须先过 `_code_only` 剥注释：本页注释里
+      **原样引用了被删掉的文案**（那是需求原文，该留），不剥注释就是被自己的注释命中。
+
+    为什么值得钉：这条改动看起来「只是删了几行」，而它最容易的回归方式恰恰是
+    下次给这页加东西时顺手把页头补回来 —— 那种改动不会让任何断言变红。
+    """
+    code = _code_only(_read(ACCOUNTS))
+    extra = _slice_between(code, "extra={", "styles={{ body: { padding: 24 } }}")
+    assert "绑定账号" in extra, "「绑定账号」应在卡片右上角 extra 里（与「刷新」同行）"
+    assert "刷新" in extra, "「刷新」应仍在卡片右上角 extra 里"
+    for removed in ("XHS Accounts", "账号矩阵", "管理小红书账号"):
+        assert removed not in code, f"页面头部已按用户口径移除，不得回归：{removed}"
+    assert "<Title" not in code, "页头标题（antd Title）随页头一起移除"
 
 
 def test_api_ts_has_no_reconcile_functions_but_has_note_sync():

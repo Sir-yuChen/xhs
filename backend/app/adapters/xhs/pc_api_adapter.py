@@ -18,8 +18,22 @@ class XhsPcApiAdapter:
     def _api(self):
         from apis.xhs_pc_apis import XHS_Apis
         from xhs_utils.xhs_pc import XHSPcAuth
+        from xhs_utils.xhs_pc.http import PcHttpClient
 
-        auth = XHSPcAuth.from_cookie(self.cookies, user_id=self.user_id)
+        from backend.app.adapters.xhs.b1_cache import PLATFORM_WWW, cached_b1
+        from backend.app.adapters.xhs.http_session import SESSION_WWW, shared_client
+
+        # 进程级共享会话（设计 13 §18.18.8）：实测冷连接 157–213 ms、复用连接 40–48 ms。
+        # curl_cffi 的 Session 官方声明线程安全且连接池按线程隔离 ⇒ 跨线程共享是安全的。
+        auth = XHSPcAuth.from_cookie(
+            self.cookies,
+            user_id=self.user_id,
+            http_client=shared_client(SESSION_WWW, PcHttpClient),
+        )
+        # b1 跨请求复用（设计 13 §18.18.7）：SDK 的 `_named_b1_values` 挂在**设备档案
+        # 实例**上，而这里每次都新建档案 ⇒ 那个缓存跨请求永远命中不了，于是每个请求
+        # 都要起一次 node（实测冷启动 480–530 ms，b1 单次约 145 ms）。
+        auth.profile.fixed_b1 = cached_b1(PLATFORM_WWW, self.cookies, auth.profile)
         return XHS_Apis(auth)
 
     def search_note(
@@ -48,6 +62,19 @@ class XhsPcApiAdapter:
     def get_note_info(self, url: str) -> Any:
         with direct_xhs_request_env():
             return self._api().get_note_info(url=url)
+
+    def get_note_info_html(self, url: str) -> Any:
+        """详情走 explore 页面 SSR（设计 13 §19.13.8）：**一次 GET 拿全**，不挑令牌来源。
+
+        与 :meth:`get_note_info` 返回**同形**三元组 `(success, message, payload)`，
+        调用方（`hydrate_note_detail`）可以两条路互换：SSR 拿不到就回退到 JSON 端点。
+
+        ⚠️ **不用本适配器持有的 Cookie**（`PcHttpClient` 是 `discard_cookies=True`）——
+        真机实测匿名即可拿到 SSR 详情，少一处会话依赖。
+        """
+        from backend.app.adapters.xhs.note_detail_ssr import fetch_note_detail_payload
+
+        return fetch_note_detail_payload(url)
 
     def get_note_comments(self, note_url: str) -> Any:
         with direct_xhs_request_env():

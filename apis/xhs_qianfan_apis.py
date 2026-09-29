@@ -51,6 +51,24 @@ AIGC_TASK_STATUS_COMPLETED = "COMPLETED"
 #:  body、发布要等平台落库，15s 实测不够（写超时 / 读超时都踩过，2026-09-23）。
 WRITE_TIMEOUT = 60
 
+#: 进程级共享会话（设计 13 §18.18.8）。`requests.Session` 是线程安全的（urllib3
+#: 连接池自带锁），复用它让同一 host 的连续请求省掉 DNS + TLS + HTTP/2 握手 ——
+#: 实测「新建连接 157–213 ms」vs「复用连接 40–48 ms」（令牌探针链路只读实测）。
+#:
+#: ⚠️ 共享会话**只借连接、不借凭据**：千帆令牌是每次请求**显式传入**的
+#: （`cookies=self._cookie_dict()`），若让会话自己攒下 Set-Cookie，下一个账号的请求
+#: 就会带上上一个账号的 Cookie（串号）。所以 `_session_request` 前后都清空会话 Cookie。
+_http_session = requests.Session()
+
+
+def _session_request(method: str, url: str, **kwargs):
+    """走共享会话发一次请求，**前后都清空会话 Cookie**（只借连接，不借凭据）。"""
+    _http_session.cookies.clear()
+    try:
+        return _http_session.request(method, url, **kwargs)
+    finally:
+        _http_session.cookies.clear()
+
 
 class XHS_Qianfan_Apis:
     """千帆商家后台的只读客户端（Cookie 即登录态）。"""
@@ -103,7 +121,8 @@ class XHS_Qianfan_Apis:
 
     def _get(self, api: str, params: dict | None, referer: str) -> tuple[bool, str, dict | None]:
         try:
-            response = requests.get(
+            response = _session_request(
+                "GET",
                 self.base_url + api,
                 params=params,
                 headers=self._headers(referer),
@@ -132,7 +151,8 @@ class XHS_Qianfan_Apis:
         用默认 15s 会误杀（2026-09-23 实测读超时）。
         """
         try:
-            response = requests.post(
+            response = _session_request(
+                "POST",
                 self.base_url + api,
                 json=body,
                 headers={**self._headers(referer), "Content-Type": "application/json"},

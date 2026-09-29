@@ -2,14 +2,18 @@
 
 用户口径（2026-09-24）：「将当前的定时任务配置数据定义为应用初始化数据，
 随应用的安装自动附有」。
+用户口径（2026-09-27）：「重新打包 config 表的当前数据添加到种子数据中」
+⇒ 同一套机制覆盖**运行时配置**（`config/initial_data/system_settings.json`，
+设计 10 §7.3），本文件同时盯住它（§1b）。
 
 本文件盯四件事，**任何一件坏了「装完即有用」就落空**：
 
 1. **数据文件本身**：存在、可解析、`job_key` 集合 = 注册表 builtin 全集（不多不少）、
-   字段全在白名单内；
+   字段全在白名单内；运行时配置侧同理（键集合 = `LIVE_KEYS`、**三处基线同值**）；
 2. **播种链路**：启动即播种（**与调度器开关解耦**）、值取自数据文件、幂等、
    **已有行不覆盖**（升级不重置用户配置）、文件坏/缺 ⇒ 退化代码默认并 **warning**（不静默）；
-3. **打包链路**：`build.ps1` 与 `SpiderXHS.spec` 都收了 `config/initial_data`（漏一处 = 装完空）；
+3. **打包链路**：`build.ps1` 与 `SpiderXHS.spec` 都收了 `config/initial_data`（漏一处 = 装完空），
+   且**每个数据文件都有一条正向断言**（构建自检 + 冒烟）；
 4. **迁移侧**：`y8z9a0b1c2d3` 不再播种（否则判重会挡住初始化数据，修都修不掉）。
 """
 
@@ -26,7 +30,7 @@ from sqlalchemy.orm import sessionmaker
 from backend.app.core import initial_data
 from backend.app.main import app
 from backend.app.models import ScheduledJob, User
-from tests.backend.conftest import run_alembic
+from tests.backend.conftest import create_later_migration_tables, run_alembic
 
 client = TestClient(app)
 
@@ -35,8 +39,10 @@ ROOT = Path(__file__).resolve().parents[2]
 
 #: 数据文件与打包脚本的真实路径
 INITIAL_DATA_FILE = ROOT / "config" / "initial_data" / "scheduled_jobs.json"
+SETTINGS_DATA_FILE = ROOT / "config" / "initial_data" / "system_settings.json"
 BUILD_PS1 = ROOT / "packaging" / "build.ps1"
 SPEC_FILE = ROOT / "packaging" / "SpiderXHS.spec"
+SMOKE_TEST_PS1 = ROOT / "packaging" / "smoke-test.ps1"
 
 
 def _make_user(SessionLocal, username: str = "seed-owner") -> int:
@@ -145,6 +151,179 @@ def test_initial_data_fields_are_within_whitelists():
         assert row["name"], key
         if row["trigger_type"] == TRIGGER_CRON:
             assert row["cron_expression"], f"{key} 是 cron 档却没有表达式"
+
+
+# --------------------------------------------------------------------------- #
+# 1b. 数据文件本身：运行时配置（设计 10 §7.3，2026-09-27 起随包）
+# --------------------------------------------------------------------------- #
+def _point_settings_initial_data_at(tmp_path, monkeypatch, payload) -> Path:
+    """把**运行时配置**初始化数据指向自造文件（测「值非法 / 文件坏」这些分支）。
+
+    与 `_point_initial_data_at` 同型，只是文件名不同 —— 定位链按**文件名**取，所以替身
+    必须只对 `system_settings.json` 生效（否则定时任务那份也被换掉，两个用例互相污染）。
+    """
+    path = tmp_path / "system_settings.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(
+        initial_data,
+        "initial_data_candidates",
+        lambda filename: [path] if filename == initial_data.SYSTEM_SETTINGS_FILENAME else [],
+    )
+    return path
+
+
+def test_settings_initial_data_covers_every_live_key():
+    """配置表种子的键集合 **= `LIVE_KEYS`**（少一个 ⇒ 新装那项回落到代码默认 = 基线漂移）。"""
+    from backend.app.services import settings_service
+
+    payload = json.loads(SETTINGS_DATA_FILE.read_text(encoding="utf-8"))
+    assert {row["key"] for row in payload["system_settings"]} == set(settings_service.LIVE_KEYS)
+
+
+def test_settings_initial_data_fields_are_within_whitelists():
+    """逐条字段必须在白名单内（白名单从 models 常量取，不在这里重抄）。"""
+    from backend.app.models.system_setting import (
+        CATEGORY_AI,
+        CATEGORY_FEATURE,
+        CATEGORY_PUBLISH,
+        CATEGORY_SCHEDULER,
+        CATEGORY_SYNC,
+        VALUE_TYPES,
+    )
+
+    categories = {
+        CATEGORY_SYNC,
+        CATEGORY_SCHEDULER,
+        CATEGORY_PUBLISH,
+        CATEGORY_AI,
+        CATEGORY_FEATURE,
+    }
+    payload = json.loads(SETTINGS_DATA_FILE.read_text(encoding="utf-8"))
+    for row in payload["system_settings"]:
+        key = row["key"]
+        assert row["value_type"] in VALUE_TYPES, key
+        assert row["category"] in categories, key
+        assert row["label"], key
+        assert isinstance(row["requires_restart"], bool), key
+        assert isinstance(row["is_dangerous"], bool), key
+
+
+def test_settings_baseline_is_one_number_everywhere():
+    """「产品基线」三处必须同值：**随包种子 = `BUILTIN_DEFAULTS` = `config/default.yaml`**。
+
+    ⚠️ 这条守卫的来由：额度曾经「声明 60、实际跑 5」（设计 13 §38.1 F2）—— 同一语义留
+    两份数字，迟早互相矛盾。2026-09-27 基线下调为 8（设计 13 §38.7）就是三处一起改。
+    """
+    from backend.app.core.config import get_settings
+    from backend.app.services import settings_service
+
+    payload = json.loads(SETTINGS_DATA_FILE.read_text(encoding="utf-8"))
+    baseline = {row["key"]: row["value"] for row in payload["system_settings"]}
+    settings_obj = get_settings()
+    for key, value in baseline.items():
+        assert settings_service.BUILTIN_DEFAULTS[key] == value, f"{key}：内置兜底与随包种子不同值"
+        assert getattr(settings_obj, key) == value, f"{key}：config/default.yaml 与随包种子不同值"
+
+
+def test_initial_data_files_ship_without_bom_and_loader_tolerates_one(tmp_path, monkeypatch):
+    """随包形态 = **无 BOM 的纯 UTF-8**；读取侧则宽容 BOM（用户可见、可编辑，编辑器会加）。
+
+    ⚠️ 为什么这条要单独钉：带 BOM 的副本会让 `json.load` 抛 `JSONDecodeError`
+    ⇒ **整份种子静默退化成代码默认**（新装用户拿到的是兜底值，不是基线）。
+    2026-09-27 实测踩到过一次（改文件时被加上了 BOM）。
+    """
+    for path in (INITIAL_DATA_FILE, SETTINGS_DATA_FILE):
+        raw = path.read_bytes()
+        assert not raw.startswith(b"\xef\xbb\xbf"), f"{path.name} 带 BOM（随包形态必须无 BOM）"
+        raw.decode("utf-8")  # 能按 utf-8 解出 = 不是别的编码
+
+    bom_path = tmp_path / "system_settings.json"
+    bom_path.write_bytes(b"\xef\xbb\xbf" + SETTINGS_DATA_FILE.read_bytes())
+    monkeypatch.setattr(
+        initial_data,
+        "initial_data_candidates",
+        lambda filename: [bom_path] if filename == initial_data.SYSTEM_SETTINGS_FILENAME else [],
+    )
+    assert len(initial_data.load_initial_system_settings()) == len(
+        json.loads(SETTINGS_DATA_FILE.read_text(encoding="utf-8"))["system_settings"]
+    ), "带 BOM 的副本也必须能读全（条数与源文件一致；不写死数字，新增键不用改这条）"
+
+
+def test_settings_seed_value_comes_from_the_data_file(db_factory, tmp_path, monkeypatch):
+    """播种值来自数据文件（不是 `BUILTIN_DEFAULTS` / YAML 推导值）。"""
+    from backend.app.services import settings_service
+
+    _point_settings_initial_data_at(
+        tmp_path,
+        monkeypatch,
+        {
+            "version": 1,
+            "system_settings": [
+                {"key": "crawl_rate_limit_per_minute", "value": 42, "value_type": "int"},
+            ],
+        },
+    )
+    db = db_factory()
+    try:
+        user = User(username="settings-seed-owner", password_hash="x")
+        db.add(user)
+        db.commit()
+        settings_service.seed_settings_for_user(db, user.id)
+        db.commit()
+        row = settings_service.find_setting(db, user.id, "crawl_rate_limit_per_minute")
+        assert row is not None and row.value == "42", "播种值必须取自数据文件"
+    finally:
+        db.close()
+
+
+def test_settings_seed_falls_back_to_builtin_when_file_value_is_illegal(
+    db_factory, tmp_path, monkeypatch, caplog
+):
+    """文件里的值非法（int 键给了 `"abc"`）⇒ 内置默认 + **显式 warning**（不静默、不抛）。"""
+    from backend.app.services import settings_service
+
+    _point_settings_initial_data_at(
+        tmp_path,
+        monkeypatch,
+        {
+            "version": 1,
+            "system_settings": [
+                {"key": "crawl_rate_limit_per_minute", "value": "abc", "value_type": "int"},
+            ],
+        },
+    )
+    db = db_factory()
+    try:
+        user = User(username="settings-bad-value", password_hash="x")
+        db.add(user)
+        db.commit()
+        with caplog.at_level("WARNING"):
+            settings_service.seed_settings_for_user(db, user.id)
+            db.commit()
+        row = settings_service.find_setting(db, user.id, "crawl_rate_limit_per_minute")
+        fallback = settings_service.BUILTIN_DEFAULTS["crawl_rate_limit_per_minute"]
+        assert row.value == str(fallback)
+        assert any("非法" in record.message for record in caplog.records)
+    finally:
+        db.close()
+
+
+def test_settings_missing_or_broken_data_file_degrades_with_warning(tmp_path, monkeypatch, caplog):
+    """文件缺失 / 顶层缺数组 ⇒ 空列表 + warning（初始化数据是增强，坏掉不该让应用起不来）。"""
+    monkeypatch.setattr(
+        initial_data, "initial_data_candidates", lambda filename: [tmp_path / "nope.json"]
+    )
+    with caplog.at_level("WARNING"):
+        assert initial_data.load_initial_system_settings() == []
+    assert any("不存在" in record.message for record in caplog.records)
+
+    path = tmp_path / "system_settings.json"
+    path.write_text(json.dumps({"version": 1}, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(initial_data, "initial_data_candidates", lambda filename: [path])
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        assert initial_data.load_initial_system_settings() == []
+    assert any("缺少 system_settings" in record.message for record in caplog.records)
 
 
 # --------------------------------------------------------------------------- #
@@ -343,11 +522,29 @@ def test_packaging_ships_the_initial_data():
     assert "config/initial_data" in spec_text, "SpiderXHS.spec 的 datas 没收 initial_data"
 
 
-def test_build_has_a_positive_assertion_for_initial_data():
-    """构建自检必须**正向断言**数据文件在包内（只查禁止项会漏掉「该有的没有」）。"""
+def test_build_has_a_positive_assertion_for_every_initial_data_file():
+    """构建自检必须**逐文件正向断言**（只查禁止项会漏掉「该有的没有」）。
+
+    ⚠️ 2026-09-27 补 `system_settings.json`：此前只断言 `scheduled_jobs.json`，
+    配置表种子漏进包时自检照样「全部通过」—— **一个数据文件一条断言**，不许合并成目录级。
+    """
     build_text = BUILD_PS1.read_text(encoding="utf-8-sig")
-    assert "scheduled_jobs.json" in build_text
     assert "MISSING" in build_text
+    for name in ("scheduled_jobs.json", "system_settings.json"):
+        assert name in build_text, f"build.ps1 自检没有正向断言 {name}"
+
+
+def test_smoke_test_checks_every_initial_data_file_and_its_rows():
+    """冒烟必须：① 文件清单含每个数据文件；② 可解析；③ **库里真的铺了行**。
+
+    判据落在「行」上而不是「文件」上（`.workbuddy/skills/xhs-app-initial-data` §3）：
+    文件在而没播种 = 用户打开任务中心 / 设置页还是空的。
+    """
+    smoke_text = SMOKE_TEST_PS1.read_text(encoding="utf-8-sig")
+    for name in ("scheduled_jobs.json", "system_settings.json"):
+        assert name in smoke_text, f"smoke-test.ps1 没有校验 {name}"
+    assert "select id from system_settings" in smoke_text, "冒烟没有查配置行的落库判据"
+    assert "运行时配置播种失效" in smoke_text, "冒烟查到行数却没有失败判据（只打印不断言）"
 
 
 def test_tests_are_not_packaged():
@@ -407,6 +604,9 @@ def test_migration_no_longer_seeds_scheduled_jobs(tmp_path):
             )
             """
         )
+        # ⚠️ 补上「区间内后续迁移会碰、但本夹具不建」的表（DEF-082）：
+        # `upgrade head` 会把 `(x7y8z9a0b1c2, head]` 里的**全部**迁移跑一遍，缺一张表就红。
+        create_later_migration_tables(conn)
         conn.commit()
     finally:
         conn.close()

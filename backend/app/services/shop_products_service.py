@@ -28,9 +28,8 @@ from typing import Any, Optional
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
-from backend.app.core.time import SHANGHAI_TZ
 from backend.app.models.platform_account import PlatformAccount
-from backend.app.models.shop import NoteGoods
+from backend.app.models.shop import NoteGoods, Shop
 from backend.app.models.shop_product import ShopProduct
 
 #: 排序字段 → 列（设计 13 §30.3.2）。未知字段由调用方的门禁挡掉（400），
@@ -210,26 +209,30 @@ def normalize_item_from_raw(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _relation_note_counts(db: Session, product_ids: list[int]) -> dict[int, int]:
-    """商品行 ID → 挂链笔记篇数（**关系表口径**，设计 13 §32.4）。
+def _relation_note_counts(db: Session, item_ids: list[str]) -> dict[str, int]:
+    """**平台商品 ID** → 挂链笔记篇数（**关系表口径**，设计 13 §32.4）。
 
     为什么不用平台原文 `product_note_num`：本地生成的笔记在平台侧**还不存在**，
     平台那个数不会因为「刚生成了一篇」而变化 —— 用户点完生成却看到列上数字不动。
-    关系表（`note_goods`，§26）是本地实体关系的唯一真相源，挂链篇数由它回答。
+    关系表（`note_goods`，§26.7）是关系的唯一真相源，挂链篇数由它回答。
 
     关系表只覆盖「已同步 + 本地生成」的笔记 ⇒ 本地数 ≤ 平台数是常态，
     两个口径都回传（`note_count` / `platform_note_count`），不混成一个数字。
     当前页一次批量查询（`IN` + `GROUP BY`），零平台请求。
+
+    ⚠️ 2026-09-27（§26.7）：关系表键从**本地商品主键**改成**平台 `item_id`**
+    ⇒ 入参与返回都用 `item_id`（字符串），**台账缺行也有数**（关系不校验商品存在）。
     """
-    ids = [int(pid) for pid in product_ids]
+    ids = [str(item_id).strip() for item_id in item_ids if str(item_id or "").strip()]
+    ids = list(dict.fromkeys(ids))
     if not ids:
         return {}
     rows = db.execute(
-        select(NoteGoods.product_id, func.count())
-        .where(NoteGoods.product_id.in_(ids))
-        .group_by(NoteGoods.product_id)
+        select(NoteGoods.item_id, func.count())
+        .where(NoteGoods.item_id.in_(ids))
+        .group_by(NoteGoods.item_id)
     ).all()
-    return {int(pid): int(count) for pid, count in rows}
+    return {str(item_id): int(count) for item_id, count in rows}
 
 
 def delete_items(db: Session, *, shop_id_fk: int, item_ids: list[str]) -> int:
@@ -249,6 +252,8 @@ def delete_items(db: Session, *, shop_id_fk: int, item_ids: list[str]) -> int:
     2. **`note_goods` 关系行一并删**（⚠️ 2026-09-23 用户口径「删除商品时也需要删除
        笔记与商品的关联关系」，**取代** v1.36 的「关系行不动」）：先取到将删行的
        本地 `id`，再按 `product_id` 删关系行，最后删商品行。
+       ⚠️ **2026-09-27（§26.7）简化**：关系表改存平台 ID ⇒ 直接按 `item_id` 删，
+       「先取本地 `id` / 顺序不能反」这条纪律随 `product_id` 一起消失。
 
     ⚠️ **为什么推翻 v1.36 的决定**：当时的理由是「商品被同步写回时关系原样接上」。
     用户明确要求改，理由也站得住 —— 关系指向一条已删商品就是**孤儿行**，与
@@ -268,7 +273,7 @@ def delete_items(db: Session, *, shop_id_fk: int, item_ids: list[str]) -> int:
     if not ids:
         return 0
 
-    # 1) 先拿将删行的本地 id（删了就再也对不上 note_goods.product_id）
+    # 1) 这个店铺里实际存在的选中行（传了别人的 / 不存在的 item_id ⇒ 少删几行）
     doomed = list(
         db.scalars(
             select(ShopProduct.id).where(
@@ -280,8 +285,14 @@ def delete_items(db: Session, *, shop_id_fk: int, item_ids: list[str]) -> int:
     if not doomed:
         return 0
 
-    # 2) 删指向这些商品的关系行（§26.6：本地实体真删 ⇒ 关系跟着走）
-    db.execute(delete(NoteGoods).where(NoteGoods.product_id.in_(doomed)))
+    # 2) 删指向这些商品的关系行（§26.7：本地实体真删 ⇒ 关系跟着走；
+    #    关系表按平台 `item_id` 挂 ⇒ 直接按它删，不再需要先取本地 `id`）。
+    #    `user_id` 一并收口：`item_id` 是平台 ID，跨用户同名理论上可能（DEF-066 同款纪律）。
+    owner_id = db.scalar(select(Shop.user_id).where(Shop.id == shop_id_fk))
+    relation_delete = delete(NoteGoods).where(NoteGoods.item_id.in_(ids))
+    if owner_id is not None:
+        relation_delete = relation_delete.where(NoteGoods.user_id == int(owner_id))
+    db.execute(relation_delete)
 
     # 3) 删商品行本体
     result = db.execute(
@@ -394,10 +405,12 @@ def _apply_filters(
     # 一层 `.subquery()`，改 JOIN 会连带影响分页总数；这里只是多一个 WHERE。
     note_count = getattr(payload, "note_count", None)
     if note_count is not None:
+        # ⚠️ 2026-09-27（§26.7）：关系表按**平台 ID** 挂 ⇒ 按 `item_id` 关联
+        # （不再是 `product_id = ShopProduct.id`）。
         relation_count = (
             select(func.count())
             .select_from(NoteGoods)
-            .where(NoteGoods.product_id == ShopProduct.id)
+            .where(NoteGoods.item_id == ShopProduct.item_id)
             .scalar_subquery()
         )
         bound = int(note_count)
@@ -486,9 +499,9 @@ def query_items(
     items = [normalize_item_from_raw(_parse_raw(row)) for row in rows]
     # 挂链笔记数：**关系表口径**覆盖掉平台原值（设计 13 §32.4）；
     # 平台值留在 `platform_note_count` 里做对照。
-    counts = _relation_note_counts(db, [row.id for row in rows])
+    counts = _relation_note_counts(db, [str(row.item_id or "") for row in rows])
     for item, row in zip(items, rows):
-        item["note_count"] = counts.get(int(row.id), 0)
+        item["note_count"] = counts.get(str(row.item_id or ""), 0)
     #: 台账同步时间 = 本店 max(synced_at)（**没有行 → 空串**，上层渲染 `-`）。
     latest_sync = db.scalar(
         select(func.max(ShopProduct.synced_at)).where(ShopProduct.shop_id_fk == shop_id_fk)
@@ -544,7 +557,9 @@ def item_detail(
 
     item = normalize_item_from_raw(_parse_raw(row))
     # 挂链笔记数按关系表口径（与列表同一份实现，设计 13 §32.4）。
-    item["note_count"] = _relation_note_counts(db, [row.id]).get(int(row.id), 0)
+    item["note_count"] = _relation_note_counts(db, [str(row.item_id or "")]).get(
+        str(row.item_id or ""), 0
+    )
 
     return {
         "item": item,

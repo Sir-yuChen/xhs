@@ -70,6 +70,10 @@ const QUIET_REASONS: Record<string, string> = {
   WEB_SESSION_REQUIRED: "该账号缺少登录态，需重新登录创作者平台或 PC 端平台",
   // 28 字
   XSEC_TOKEN_REQUIRED: "缺少主页访问令牌，粘贴你自己的主页链接后即可读取完整列表",
+  // 28 字（§19.13.9，2026-09-28）：缺详情令牌是**用户可自救**的（补齐网页版登录后
+  // 重新同步），所以给安静说明而不是红块 —— 与「平台没返回内容」那种用户无法行动的
+  // 归因刻意区分（DEF-058）。「重新登录」是唯一可执行的动作，必须留着。
+  NOTE_DETAIL_TOKEN_REQUIRED: "该账号的这条笔记缺少详情令牌，需重新登录网页版后重新同步",
 };
 
 /** 一行安静说明的**形状**：`text` 给界面，`full` 是后端原话（Tooltip 里看）。 */
@@ -115,7 +119,11 @@ export function readError(error: unknown): { message: string; code: string } {
  * 这类原因的共同点：**原因在本地、用户可自救**，所以它的正确呈现是
  * 「这里为什么是空的」的一句说明，而不是一块错误。
  */
-const EXPECTED_FAILURE_CODES = new Set(["WEB_SESSION_REQUIRED", "XSEC_TOKEN_REQUIRED"]);
+const EXPECTED_FAILURE_CODES = new Set([
+  "WEB_SESSION_REQUIRED",
+  "XSEC_TOKEN_REQUIRED",
+  "NOTE_DETAIL_TOKEN_REQUIRED",
+]);
 
 /** 一行安静提示：不占红块、不弹 toast；完整原因挂 Tooltip 供排查。 */
 export function quietHint(fullReason: string, text: string) {

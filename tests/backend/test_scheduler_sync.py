@@ -217,6 +217,24 @@ def test_scheduler_is_not_started_when_master_switch_is_off(monkeypatch):
     monkeypatch.setattr(settings, "scheduler_enabled", False, raising=False)
     monkeypatch.setattr(main_module, "init_db", lambda: None)
 
+    # ⚠️ 以下七项**同样必须桩掉**（2026-09-28 补齐，此前一直漏着）：它们要么自开 Session
+    #    写**真实运行库**、要么起常驻线程去认领真实数据 —— 与 `init_db` 同一条理由。
+    #    漏桩的实际后果（本轮实测）：新增一个运行时配置键后，
+    #    `seed_builtin_settings_from_initial_data()` 第一次真的写 ⇒ **全量回归把 6 行写进了
+    #    `data/spider_xhs.db`**（2026-09-28 18:08:47，6 个用户各一行）。更早之前
+    #    `recover_account_tasks()` 与 `ensure_account_task_worker()` 也一直在拿真库跑
+    #    （前者当时恰好是 no-op、后者起了常驻 worker 线程）—— 只是因为「没造成可见破坏」
+    #    而没被发现。守卫：`test_lifespan_steps_are_all_stubbed_by_this_module`。
+    monkeypatch.setattr(main_module, "seed_builtin_jobs_from_initial_data", lambda: 0)
+    monkeypatch.setattr(main_module, "seed_builtin_settings_from_initial_data", lambda: 0)
+    monkeypatch.setattr(main_module, "recover_account_tasks", lambda *a, **k: 0)
+    monkeypatch.setattr(main_module, "ensure_account_task_worker", lambda: None)
+    monkeypatch.setattr(main_module, "start_account_task_watchdog", lambda *a, **k: None)
+    monkeypatch.setattr(main_module, "stop_account_task_watchdog", lambda: None)
+    monkeypatch.setattr(main_module, "start_scheduler_watchdog", lambda *a, **k: None)
+    monkeypatch.setattr(main_module, "stop_scheduler_watchdog", lambda: None)
+    monkeypatch.setattr(main_module, "shutdown_scheduler", lambda *a, **k: None)
+
     started: list[object] = []
     monkeypatch.setattr(
         main_module, "start_scheduler",
@@ -272,6 +290,89 @@ def test_scheduler_is_not_started_when_master_switch_is_off(monkeypatch):
             asyncio.run(app.router.lifespan_context(app).__aexit__(None, None, None))
         except Exception:  # noqa: BLE001 - 测试收尾不影响结论
             pass
+
+
+# --------------------------------------------------------------------------- #
+# 进真 lifespan 的用例：**每个**步骤都必须打桩（防「测试写生产库」）
+# --------------------------------------------------------------------------- #
+#: `lifespan` 里**允许不打桩**的裸名调用（纯读 / 内置，无副作用）。
+LIFESPAN_STUB_FREE_CALLS = {"get_settings", "getattr"}
+
+#: 上面那个「进真 lifespan」用例的函数名（桩清单从它体内取，见守卫）。
+LIFESPAN_TEST_NAME = "test_scheduler_is_not_started_when_master_switch_is_off"
+
+
+def _lifespan_test_stubs() -> set[str]:
+    """从**那个用例体内**提取 `monkeypatch.setattr(main_module, "X", …)` 的 `X` 集合。
+
+    ⚠️ 两个「不」：不从整个文件取（别处的桩会把它凑绿 —— 宽锚点 = 假绿）；
+    不在守卫里再抄一份名单（两份真相迟早漂移：加桩的人只改一处，守卫拿旧名单判，
+    红绿都可能失真）。判据的唯一真相源 = 那段源码本身。
+    """
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    owner = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == LIFESPAN_TEST_NAME
+    )
+    names: set[str] = set()
+    for node in ast.walk(owner):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Attribute) and func.attr == "setattr"):
+            continue
+        if len(node.args) < 2:
+            continue
+        target, attribute = node.args[0], node.args[1]
+        if (
+            isinstance(target, ast.Name)
+            and target.id == "main_module"
+            and isinstance(attribute, ast.Constant)
+        ):
+            names.add(str(attribute.value))
+    return names
+
+
+def test_lifespan_steps_are_all_stubbed_by_this_module():
+    """`lifespan` 里**每个**裸名调用都必须被「进真 lifespan」那个用例桩掉（或登记为无需桩）。
+
+    ⚠️ 为什么要有这条（2026-09-28 实测踩到）：`lifespan` 里两个**播种**步骤
+    （`seed_builtin_jobs_from_initial_data` / `seed_builtin_settings_from_initial_data`）
+    会自开 Session 写库（`settings_service.SessionLocal`）。此前它们一直是 no-op
+    （内置行都在），漏桩看不出问题；本轮新增一个运行时配置键后播种第一次真的写
+    ⇒ **全量回归把 6 行写进了真实运行库 `data/spider_xhs.db`**。同批漏桩的还有
+    `recover_account_tasks()`（写库）、`ensure_account_task_worker()` 与
+    `start_account_task_watchdog()`（起常驻线程认领真实数据）。
+
+    判据是 **AST 集合包含**，不是「测试没炸」—— 漏桩的表现恰恰是**测试全绿**，
+    而副作用已经落在生产库上。
+    """
+    import ast
+    from pathlib import Path
+
+    from backend.app import main as main_module
+
+    tree = ast.parse(Path(main_module.__file__).read_text(encoding="utf-8"))
+    lifespan = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "lifespan"
+    )
+    called = {
+        node.func.id
+        for node in ast.walk(lifespan)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    missing = sorted(called - _lifespan_test_stubs() - LIFESPAN_STUB_FREE_CALLS)
+    assert not missing, (
+        f"lifespan 里有没被本文件桩掉的步骤：{missing} —— 它们会拿**真实运行库**执行"
+        "（写库 / 起常驻线程）。请在本文件的桩清单里补上；确实无需桩的（纯读 / 内置）"
+        "登记进 LIFESPAN_STUB_FREE_CALLS 并写明理由。"
+    )
 
 
 # --------------------------------------------------------------------------- #

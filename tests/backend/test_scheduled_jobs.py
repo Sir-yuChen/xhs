@@ -24,7 +24,7 @@ from sqlalchemy.orm import sessionmaker
 from backend.app.main import app
 from backend.app.core.time import shanghai_now
 from backend.app.models import ScheduledJob, ScheduledJobLog, User
-from tests.backend.conftest import run_alembic
+from tests.backend.conftest import create_later_migration_tables, run_alembic
 
 client = TestClient(app)
 
@@ -748,7 +748,17 @@ def test_user_job_params_are_immutable_via_schedule_api(tmp_path, monkeypatch):
 
 
 def test_note_sync_runner_filters_by_account_ids(tmp_path, monkeypatch):
-    """服务层：account_ids 非空 ⇒ 只跑指定账号；**行主隔离** ⇒ 不碰别人的账号。"""
+    """服务层：account_ids 非空 ⇒ 只跑指定账号；**行主隔离** ⇒ 不碰别人的账号。
+
+    ⚠️ 两条路径的**执行方式不同**（设计 13 §35.17.2，2026-09-27 起），所以这里对两段
+    分别建桩、分别断言：
+
+    * `account_ids` **非空**（点名了账号）⇒ `start_note_sync` 建任务行 + 等终态
+      （§35.16 单 worker 串行）—— **不得**再直接调 `run_note_sync`；
+    * `account_ids` **空**（定时轮转，批量）⇒ 照旧直接 `run_note_sync`。
+
+    两段共用「只跑行主的账号」这条判断，所以隔离断言在两段上都要成立。
+    """
     from backend.app.core.security import encrypt_text
     from backend.app.models import AccountCookieVersion, PlatformAccount
     from backend.app.services import note_sync_service
@@ -765,6 +775,27 @@ def test_note_sync_runner_filters_by_account_ids(tmp_path, monkeypatch):
         calls.append(account_id)
 
     monkeypatch.setattr(note_sync_service, "run_note_sync", _fake_run_note_sync)
+
+    #: 定向路径的观察点：建行时的 (account_id, source)。
+    started: list[tuple[int, str]] = []
+
+    def _fake_start_note_sync(account_id, **kwargs):
+        started.append((account_id, str(kwargs.get("source"))))
+        return {"reused": False, "task_id": 900 + account_id}
+
+    monkeypatch.setattr(note_sync_service, "start_note_sync", _fake_start_note_sync)
+    # 定向执行要等业务任务到终态；本用例只盯「跑了哪些账号」，把等待桩成立即结束。
+    monkeypatch.setattr(
+        sched,
+        "_await_targeted_task",
+        lambda task_id: {
+            "task_id": task_id,
+            "status": "done",
+            "progress": {"stored": 1, "total": 1},
+            "note": "",
+            "error": "",
+        },
+    )
 
     db = SessionLocal()
     # 本用例走服务层（不登录），用户行需自行播种 —— `_override_database` 只建表。
@@ -799,15 +830,20 @@ def test_note_sync_runner_filters_by_account_ids(tmp_path, monkeypatch):
     other_id = other.id
     db.close()
 
-    # ① account_ids 非空 ⇒ 只跑指定账号（自己的）
+    # ① account_ids 非空 ⇒ 只跑指定账号（自己的），走「建行 + 等终态」
     sched.run_scheduled_note_syncs(user_id=user_id, account_ids=[mine[0]])
-    assert calls == [mine[0]], f"只应跑指定账号，实跑 {calls}"
+    assert [account_id for account_id, _ in started] == [mine[0]], f"只应跑指定账号，实跑 {started}"
+    assert calls == [], "定向执行不得再直接调 run_note_sync（那就把 §35.16 的单 worker 串行绕过去了）"
+    assert {source for _, source in started} == {"scheduled"}, (
+        "调度侧定向执行的来源必须是 scheduled —— 写 account_card_* 等于在数据里造假历史"
+    )
 
     # ② 空 = **本人全部账号**（DEF-066：不再是全库账号）
     calls.clear()
     sched.run_scheduled_note_syncs(user_id=user_id)
     assert sorted(calls) == sorted(mine), f"空应跑本人全部，实跑 {calls}"
     assert theirs_id not in calls, "行主隔离失效：跑别人的账号了"
+    assert started == [(mine[0], "scheduled")], "批量路径不该建任务行（仍是直接跑执行体）"
 
     # ③ 行主自己的账号一个不少（回归：隔离不许把该跑的漏掉）
     calls.clear()
@@ -1177,16 +1213,118 @@ def test_execute_job_writes_progress_for_success_and_failure(tmp_path, monkeypat
         assert execute_job(job_id, trigger_type="scheduled")["status"] == "success"
         assert _latest_progress() == 100, "上报 150 ⇒ 应夹到 100"
 
-        # ③ 失败 ⇒ 0
+        # ③ 失败 ⇒ **不清零**（2026-09-27 用户口径「任务执行失败后任务进度不要变，
+        #   应展示执行的进度比例」）。本用例没给探针 ⇒ 执行期间从没写过 progress
+        #   ⇒ 行上还是初始 0；**关键是不再被 `_mark_failed` 主动写 0**（保留语义）。
         def _boom(**kwargs):
             raise RuntimeError("炸了")
 
         _stub_spec(_boom)
         job_id = _make_job(SessionLocal(), "进度C")
         assert execute_job(job_id, trigger_type="scheduled")["status"] == "failed"
-        assert _latest_progress() == 0, "失败 ⇒ 进度应为 0（不猜值）"
+        assert _latest_progress() == 0, "没上报过进度 ⇒ 保留初始 0（不是被清成 0）"
     finally:
         app.dependency_overrides.clear()
+
+
+def test_mark_failed_keeps_reached_progress(tmp_path, monkeypatch):
+    """失败**不清零**已执行的进度百分比（2026-09-27 用户口径）。
+
+    用户原话：「任务执行失败后任务进度不要变，应展示执行的进度比例」＋追问确认
+    「**文案继续展示，但是已执行的进度百分比保留**」。
+
+    旧实现无条件 `log.progress = 0` ⇒ 进度条被打回 0%（既不是「没跑」也不是「跑完了」，
+    是最没信息量的那个数）。新口径两条：
+
+    * 调用方给了终态进度（观测线程从任务行算出来的百分比）⇒ 用它（比泵的 2s 采样准）；
+    * 没给 ⇒ **原样保留**泵最后一次写入的值（不猜、不清零）。
+    """
+    from backend.app.services import scheduled_job_runner as sjr
+    from backend.app.services.scheduled_job_runner import _mark_failed
+
+    SessionLocal = _override_database(tmp_path)
+    _patch_service_sessions(monkeypatch, SessionLocal)
+    db = SessionLocal()
+    try:
+        user_id = _make_user(SessionLocal, "progress-keep")
+        job = ScheduledJob(
+            user_id=user_id, name="进度保留", job_key="system.monitoring_refresh",
+            trigger_type="cron", cron_expression="0 0 * * * *", status="active",
+        )
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+        log = sjr._new_log_row(db, job, trigger_type="manual")
+        log.progress = 37  # 模拟进度泵执行期间写入的值
+        db.commit()
+
+        _mark_failed(db, job, log, "boom", message="执行失败")
+        db.commit()
+        assert log.progress == 37, "没给终态进度 ⇒ 保留泵写入的 37（不许清零）"
+
+        log.status = "running"
+        _mark_failed(db, job, log, "boom", message="执行失败", progress=42)
+        assert log.progress == 42, "给了终态进度 ⇒ 用它"
+
+        log.status = "running"
+        _mark_failed(db, job, log, "boom", message="执行失败", progress=150)
+        assert log.progress == 100, "越界值夹回 0~100"
+    finally:
+        db.close()
+        app.dependency_overrides.clear()
+
+
+def test_failure_reason_never_shows_status_code():
+    """兜底文案**不许摆状态码原文**（旧实现拼 `任务状态 cancelled`）。
+
+    真原因（`error` / `note`）优先 —— 失败三分法不变：真异常必须给真原因。
+    """
+    from backend.app.services.scheduled_job_runner import _failure_reason
+
+    assert _failure_reason({"status": "failed", "error": "连接超时", "note": ""}) == "连接超时"
+    assert (
+        _failure_reason({"status": "cancelled", "error": "", "note": "已被用户取消"})
+        == "已被用户取消"
+    )
+    for status in ("cancelled", "timeout", "missing", "failed"):
+        reason = _failure_reason({"status": status, "error": "", "note": ""})
+        assert reason, "兜底文案不能是空串"
+        assert "任务状态" not in reason, f"兜底文案摆了状态码原文：{reason}"
+        assert status not in reason, f"兜底文案含英文状态码 {status}：{reason}"
+
+
+def test_progress_percent_is_single_implementation():
+    """`sync_task_service.progress_percent` 是进度换算的**唯一实现**（泵与终态共用）。
+
+    优先级（2026-09-28 重排，设计 13 §42.4）：**`processed` / `work_total`**（本任务
+    累计已处理 / 预计总工作量，**两个执行体都写**）> 详情补齐口径（`detail_done` /
+    `detail_total`）> 列表口径（`stored` / `total`）；都没有 ⇒ `None`（缺值口径，不造 0）。
+    """
+    from backend.app.services.sync_task_service import progress_percent
+
+    assert progress_percent({"stored": 3, "total": 10}) == 30
+    assert progress_percent({"stored": 3, "total": 10, "detail_done": 1, "detail_total": 4}) == 25
+    assert progress_percent({"stored": 3, "total": 10, "detail_done": 1, "detail_total": 0}) == 30
+    assert progress_percent({"stored": 3, "total": None}) is None
+    assert progress_percent({}) is None
+    assert progress_percent(None) is None
+    # 2026-09-28：`processed` / `work_total` 是**首选**口径 —— 它俩在就必须用它，
+    # 否则「有界同步（没有 total）」的进度条又会退回「比例未知」。
+    assert progress_percent({"processed": 5, "work_total": 20}) == 25
+    assert progress_percent(
+        {"processed": 5, "work_total": 20, "stored": 1, "total": 1000}
+    ) == 25, "有 processed/work_total 时不许退回 stored/total（那正是「恒 0%」的旧口径）"
+    assert progress_percent(
+        {"processed": 5, "work_total": 20, "detail_done": 1, "detail_total": 4}
+    ) == 25, "processed/work_total 优先级高于 detail_*（后者只服务文案）"
+    assert progress_percent({"processed": 5, "work_total": 0, "stored": 3, "total": 10}) == 30, (
+        "work_total=0 视为「没报」⇒ 退回下一档（分母为 0 不能当比例）"
+    )
+    assert progress_percent({"processed": 5, "work_total": None, "stored": 3, "total": 10}) == 30
+    assert progress_percent({"processed": 5, "work_total": 0}) is None, (
+        "分母没报、也没有别的口径 ⇒ None（缺值口径，不造 0）"
+    )
+    assert progress_percent({"processed": 30, "work_total": 20}) == 100, "越界夹到 100"
 
 
 def test_execute_job_failure_sets_backoff_and_gate_skips_next_scheduled_run(tmp_path, monkeypatch):
@@ -1800,6 +1938,10 @@ def test_migration_converts_legacy_auto_tasks_four_ways(tmp_path):
                 " VALUES (1, ?, '[\"k\"]', 1, 1, ?, ?, ?, ?, ?, datetime('now'))",
                 (name, kind, time_text, days, hours, status),
             )
+        # ⚠️ 再补上「区间内后续迁移会碰、但本夹具不建」的表（DEF-082）：`upgrade head`
+        # 会把 `(x7y8z9a0b1c2, head]` 里的**全部**迁移跑一遍，缺一张表就红在这里
+        # （head 迁移 `l3m4n5o6p7q8` 要 `notes`）。集中一处维护，见 conftest 的说明。
+        create_later_migration_tables(conn)
         conn.commit()
     finally:
         conn.close()
@@ -2284,6 +2426,11 @@ def test_job_group_has_no_reference_in_backend_or_frontend():
     assert not offenders, "job_group 已物理删除，以下位置仍在引用它：\n" + "\n".join(offenders)
 
 
+# ⚠️ 本用例与下面的变异用例曾**并行抢同一个文件**：页面侧变异原先是「就地改磁盘、跑完还原」
+# ⇒ `-n auto` 下正向断言会读到「已被改坏、还没还原」的内容（DEF-078；2026-09-27 实测
+# `R22 日志详情弹窗不再取 snapshot.job_group` 随机变红，而单跑脚本 / `-n0` 全绿）。
+# **修法在脚本侧**（改成「读时内存变异」`readSource`），**不是**在这里加 `xdist_group` ——
+# 那个标记默认不参与调度（需 `--dist loadgroup`），加了等于没加。
 def test_schedule_center_behaviour_script_passes():
     """任务中心前端行为脚本（esbuild 打包真实模块 + 真实源文件结构断言）。
 
@@ -2312,12 +2459,39 @@ def test_schedule_center_behaviour_script_passes():
     assert result.returncode == 0, (result.stdout + result.stderr)[-900:]
 
 
-@pytest.mark.parametrize("mutate", ["groupfield", "groupsnapshot", "accountscope"])
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        "groupfield",
+        "groupsnapshot",
+        "accountscope",
+        "accountlabel",
+        "progressbar",
+        "fakefull",
+        "unknownzero",
+        "tworeads",
+        "pageread",
+    ],
+)
 def test_schedule_center_group_mutations_are_caught(mutate):
     """R22 反向变异：把分组字段/快照项**改回去**，行为脚本必须变红。
 
     DEF-066 追加 `accountscope`：账号多选退回「仅编辑态」⇒ 新建态没有账号多选
     （归属校验上线后手抄 id 只会 400）—— 与分组变异同一层防线。
+
+    2026-09-27 追加 `accountlabel`：「执行账号」退回只看 `params.account_ids`（job 行的
+    **任务配置**，空 = 本人全部账号）⇒ 账号卡点「同步笔记」后执行详情又显示「全部账号」
+    （用户报障原样复活）—— 与「快照要说清这次跑的是谁」同一层防线。
+
+    2026-09-28 追加 `progressbar`：任务日志「任务进度」列的**不定量进度条**退回一行
+    「进行中」文字 ⇒ 用户口径「任务进度列应展示任务进度条，而不是文本进行中」原样复活
+    —— 与「进度列一律进度条」同一层防线。
+
+    2026-09-28 同日第三轮追加四条（用户报障「进度条自动达到了 100% 但任务刚刚开始，
+    点详情却是 0%」，设计 13 §43）：`fakefull`（未知比例退回 `percent={100}` 满格冒充）、
+    `unknownzero`（未知判据失效 ⇒ 未知被谎报成 0%）、`tworeads`（详情弹窗退回自绘
+    `log.progress`）、`pageread`（列表列绕开唯一实现自绘）—— 四条合起来守的是
+    「**同一行数据只能有一个读数**」+「未知既不是 100% 也不是 0%」。
 
     没有这一层，上面那批 `not includes` 守卫可能只是「恰好为真」
     （DEF-063 同型：变异没接入 pytest = 变异不算数）。
@@ -2371,6 +2545,7 @@ def test_migration_c2d3e4f5a6b7_renames_cleanup_job(tmp_path):
                 name VARCHAR(128) NOT NULL,
                 job_key VARCHAR(128) NOT NULL,
                 status VARCHAR(16) DEFAULT 'active' NOT NULL,
+                remark TEXT DEFAULT '' NOT NULL,
                 created_at DATETIME NOT NULL,
                 PRIMARY KEY (id)
             );
@@ -2400,6 +2575,9 @@ def test_migration_c2d3e4f5a6b7_renames_cleanup_job(tmp_path):
             "INSERT INTO scheduled_job_logs (id, job_id, job_name, job_key, created_at)"
             " VALUES (2, 2, '账号笔记同步', 'system.note_sync', datetime('now'))"
         )
+        # ⚠️ 补上「区间内后续迁移会碰、但本夹具不建」的表（DEF-082）：
+        # `upgrade head` 会把 `(b2c3d4e5f6g7, head]` 里的全部迁移跑一遍。
+        create_later_migration_tables(conn)
         conn.commit()
     finally:
         conn.close()
@@ -2439,3 +2617,97 @@ def test_migration_c2d3e4f5a6b7_renames_cleanup_job(tmp_path):
         (1, "队列记录清理", "system.queue_record_cleanup"),
         (2, "账号笔记同步", "system.note_sync"),
     ]
+
+
+def test_dedupe_seeded_scheduled_jobs_migration(tmp_path):
+    """DEF-077 迁移 `i0j1k2l3m4n5`：收敛「播种影子行」，且**不误伤用户行**。
+
+    2026-09-27 用户口径「队列记录清理 `system.queue_record_cleanup` 任务，在任务列表
+    出现了两次，应只有只需要一个」。根因 = 改名迁移 `c2d3e4f5a6b7` 与「按新键播种」
+    时序错开：旧键行还没被改名时，按**新键**判重的播种看不见它 ⇒ 又插一批；改名一落地
+    两批撞成同键两行（6 个用户各 2 行，两批都被 apscheduler 注册 ⇒ 任务**双跑**）。
+
+    为什么是「删播种行」而不是「加 `(user_id, job_key)` 唯一索引」：R18 明确允许
+    「用户新建一条**同目标、不同调度**的任务行」—— 唯一索引会把这条合法用法一并禁掉。
+    所以判据落在**播种行的文案特征**上（`remark` 以种子固定前缀开头）。
+
+    本用例钉四件事（缺一条这个迁移就可能是「删错」或「没删」）：
+    ① 同一 `(user_id, job_key)` 的**多条播种行** ⇒ 只留 `id` 最小的一条；
+    ② **用户新建的同目标任务行** ⇒ **一行不动**（它是 R18 的合法数据，不是脏数据）；
+    ③ 跨用户互不影响：同 key 不同 `user_id` 各留自己那行；
+    ④ 幂等：把版本 stamp 回父 revision 再 upgrade，**零删除**。
+    """
+    import sqlite3
+
+    db_path = tmp_path / "dedupe.db"
+    seeded = "系统内置任务（应用初始化数据，随安装附有；保留期固定 15 天，只清终态记录）"
+    seeded_new = "系统内置任务（应用初始化数据，随安装附有；队列详情记录保留期固定 15 天，只清终态记录）"
+    rows = [
+        # user 1：同一 job_key 三行 —— 两行播种（新旧文案）+ 一行用户新建
+        (1, 1, "队列记录清理", "system.queue_record_cleanup", seeded),
+        (2, 1, "队列记录清理", "system.queue_record_cleanup", seeded_new),
+        (3, 1, "我的每小时清理", "system.queue_record_cleanup", "我自己加的，每小时跑一次"),
+        # user 2：同 key 只有一行播种行 ⇒ 一行都不能少
+        (4, 2, "队列记录清理", "system.queue_record_cleanup", seeded),
+        # user 1 的另一个任务 ⇒ 完全不该被碰
+        (5, 1, "账号笔记同步", "system.note_sync", seeded),
+    ]
+    conn = sqlite3.connect(db_path)
+    try:
+        # 最小夹具：只建本迁移要碰的表（数据迁移，不反射整库）。
+        # `remark` 必须建 —— 本迁移的判据就落在它上面。
+        conn.execute(
+            "CREATE TABLE scheduled_jobs ("
+            " id INTEGER NOT NULL, user_id INTEGER, name VARCHAR(128) NOT NULL,"
+            " job_key VARCHAR(128) NOT NULL, status VARCHAR(16) DEFAULT 'active' NOT NULL,"
+            " remark TEXT DEFAULT '' NOT NULL, created_at DATETIME NOT NULL, PRIMARY KEY (id))"
+        )
+        # ⚠️ `scheduled_job_logs` 也要建（2026-09-27）：本用例跑的是 `upgrade head`，
+        # 而 head 迁移 `j1k2l3m4n5o6` 会给这张表加 `account_id` 列 —— 表不存在则迁移
+        # 报错，用例红得与它要验的 DEF-077 毫无关系（夹具缺失，不是被测行为坏了）。
+        # 刻意**不含** `account_id`：那正是迁移要加的列，预置会让迁移重复加列而失败。
+        conn.execute(
+            "CREATE TABLE scheduled_job_logs ("
+            " id INTEGER NOT NULL, status VARCHAR(16) DEFAULT 'running' NOT NULL,"
+            " PRIMARY KEY (id))"
+        )
+        for job_id, user_id, name, job_key, remark in rows:
+            conn.execute(
+                "INSERT INTO scheduled_jobs (id, user_id, name, job_key, status, remark, created_at)"
+                " VALUES (?, ?, ?, ?, 'active', ?, datetime('now'))",
+                (job_id, user_id, name, job_key, remark),
+            )
+        # ⚠️ 补上「区间内后续迁移会碰、但本夹具不建」的表（DEF-082）：
+        # `upgrade head` 会把 `(h9i0j1k2l3m4, head]` 里的全部迁移跑一遍。
+        create_later_migration_tables(conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+    def snapshot() -> list[tuple]:
+        handle = sqlite3.connect(db_path)
+        try:
+            return handle.execute(
+                "SELECT id, remark FROM scheduled_jobs ORDER BY id"
+            ).fetchall()
+        finally:
+            handle.close()
+
+    run_alembic(db_path, "stamp", "h9i0j1k2l3m4")
+    run_alembic(db_path, "upgrade", "head")
+
+    jobs = snapshot()
+    # ① 组内播种行只留 id 最小（id 1 留 / id 2 删）；③ 跨用户各自保留（id 4）；
+    # ② 用户新建行（id 3）与别的任务（id 5）必须一行不动。
+    assert [row[0] for row in jobs] == [1, 3, 4, 5], (
+        "播种影子行（id 2）应被收敛，用户行（id 3）与其它任务（id 5）必须一行不动"
+    )
+    # 保留行字段零改动（§4.5「已有行一律不覆盖」）
+    assert jobs[0][1] == seeded
+
+    # ④ 幂等：stamp 回父 revision 再 upgrade ⇒ 零删除（收敛后条件不再命中）
+    run_alembic(db_path, "stamp", "h9i0j1k2l3m4")
+    run_alembic(db_path, "upgrade", "head")
+    assert [row[0] for row in snapshot()] == [1, 3, 4, 5], (
+        "重复执行不得再删任何行（本迁移必须幂等）"
+    )

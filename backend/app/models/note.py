@@ -39,9 +39,6 @@ PUBLISH_STATUSES = (
 )
 #: 可发起发布的状态（门禁判据只此一处）。
 PUBLISHABLE_STATUSES = (PUBLISH_STATUS_PENDING, PUBLISH_STATUS_FAILED)
-#: 用户可手动切换到的状态（§19.12 的手动切换能力；`publishing` 是链路专属，不许手设；
-#: `failed` 由链路写，也不在手切白名单里）。
-MANUAL_PUBLISH_STATUSES = (PUBLISH_STATUS_PENDING, PUBLISH_STATUS_PUBLISHED)
 #: 内容库**筛选档 → 实际匹配的存储值**（设计 13 §32.3.3）—— 筛选与统计**共用这一份**
 #: 映射，避免「统计把 `publishing` 算进待发布、筛选却不含它」这类两处漂移。
 #: `pending` 档含瞬时的 `publishing`（它还没发出去）与迁移前的空值 `""`。

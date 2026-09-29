@@ -31,8 +31,10 @@ from backend.app.models import PlatformAccount, Task, User
 from backend.app.models.shop import Shop
 from backend.app.models.shop_product import ShopProduct
 from backend.app.services import shop_goods_sync_service as sgs
+from backend.app.services import account_task_service as ats
 from backend.app.services.shop_binding_service import get_shop_state
 from tests.backend.cookie_fixtures import bind_shop_account, give_ark_cookies
+from tests.backend.conftest import patch_service_sessions
 
 client = TestClient(app)
 
@@ -162,6 +164,10 @@ def _setup(tmp_path, monkeypatch, *, with_binding: bool = True, shop_id_fk: bool
 
     app.dependency_overrides[get_db] = override_get_db
     monkeypatch.setattr(sgs, "SessionLocal", SessionLocal)
+    # ⚠️ 端点链路还会走到 `scheduled_job_runner` / `sync_task_service` 等模块，它们各自
+    # 持有模块级 SessionLocal —— 只 patch `sgs` 的话这些模块**照样写生产库**
+    # （2026-09-27 真实发生过）。按 AST 扫出的全量清单逐一打桩。
+    patch_service_sessions(monkeypatch, SessionLocal)
     monkeypatch.setattr(sgs, "PAGE_GAP_SECONDS", 0.0)
     monkeypatch.setattr(sgs, "get_rate_limiter", lambda: LIMITER["impl"])
 
@@ -438,6 +444,121 @@ def test_detail_total_reports_remaining_after_sync(tmp_path, monkeypatch):
     assert result["detail_total"] == 0
 
 
+def test_sku_fetch_reports_progress_per_batch(tmp_path, monkeypatch):
+    """SKU 明细**逐批**回调进度（每批 10 个 ≈ 一次限流等待 ≈ 7.5 秒）。
+
+    2026-09-28 用户口径「进度条慢慢增加」：不接回调的话一页 50 个商品要 40 秒才动一格，
+    用户看到的还是「不动」；接上之后页内也在一格一格涨。
+    """
+    batches: list[list[str]] = []
+
+    class _StubAdapter:
+        def get_skus_by_item_ids(self, batch):
+            batches.append(list(batch))
+            return True, "", {"data": {"skusMap": {i: [_sku("S")] for i in batch}}}
+
+    class _Account:
+        id = 7
+
+    seen: list[int] = []
+    out = sgs._fetch_page_skus(
+        _Account(),
+        _StubAdapter(),
+        item_ids=[f"I{index}" for index in range(25)],
+        limiter=AllowLimiter(),
+        on_progress=seen.append,
+    )
+
+    assert [len(b) for b in batches] == [10, 10, 5], f"分批不对：{[len(b) for b in batches]}"
+    assert seen == [10, 20, 25], f"每批都要回调（累计已尝试数），实得 {seen}"
+    assert out["done"] == 25
+
+
+def test_progress_is_task_scoped_and_monotonic(tmp_path, monkeypatch):
+    """2026-09-28 用户口径：进度条**慢慢增加**且**绝不 0→100 反复跳**（设计 13 §42.4）。
+
+    判据：任务行 `payload.progress` 必须带 `processed` / `work_total`（进度条看的那一对），
+    且 `processed ≤ work_total`、百分比走这一对 —— 而不是「一页内 0→100」的
+    `detail_done / detail_total`。
+    """
+    _headers, account_id, user_id, SessionLocal = _setup(tmp_path, monkeypatch)
+    items = [_item(f"I{index}") for index in range(5)]
+    FakeItemsAdapter.pages = [(items, 5, False)]
+    FakeItemsAdapter.skus_map = {f"I{index}": [_sku(f"S{index}")] for index in range(5)}
+
+    sgs.run_shop_goods_sync(
+        account_id, user_id=user_id, max_pages=3, adapter_factory=FakeItemsAdapter
+    )
+
+    db = SessionLocal()
+    try:
+        task = db.scalars(
+            select(Task)
+            .where(Task.task_type == sgs.sts.SHOP_GOODS_SYNC_TASK_TYPE)
+            .order_by(Task.id.desc())
+        ).first()
+        progress = sgs.sts.task_payload(task)["progress"]
+    finally:
+        db.close()
+
+    processed = int(progress.get("processed") or 0)
+    work_total = int(progress.get("work_total") or 0)
+    assert work_total == 5, f"预计工作量 = 平台报告的商品总数：{progress}"
+    assert processed == 5, f"5 个商品都处理过（SKU 批次尝试过）：{progress}"
+    assert processed <= work_total, f"已处理数不得超过预计工作量：{progress}"
+    assert sgs.sts.progress_percent(progress) == 100, f"跑完就是 100%：{progress}"
+
+
+def test_bounded_progress_denominator_is_the_platform_total(tmp_path, monkeypatch):
+    """有界（增量 / 时间区间）同步的分母 = **平台按同一条查询条件报出的 `total`**。
+
+    2026-09-28 用户报障（设计 13 §43 的 D2）：「任务进度列的进度条**自动达到了 100%**
+    但是此时**任务刚刚开始**」。真库实测 `task=82`：`{"stored":100,"total":713,
+    "processed":100,"work_total":100}` —— 窗口内还有 600+ 件没处理，进度条已经 100%。
+
+    根因是**分母与分子同源**：旧实现在有界分支取 `work_total = new_count`（本轮范围内
+    枚举数），而分子 `processed` 数的正是**同一批商品**（本页枚举出来、立刻被 SKU 批次
+    尝试的那批）⇒ 每个页边界都恰好 `processed == work_total` ⇒ 恒 100%。
+
+    判据（本用例的锚点）：平台报 `total=10`、只跑 1 页（本页 5 件）⇒ 分母必须是 **10**
+    （= 本次查询条件下的条数），百分比 **50%** —— 旧实现会给 5 ⇒ 100%。
+    """
+    _headers, account_id, user_id, SessionLocal = _setup(tmp_path, monkeypatch)
+    items = [_item(f"I{index}") for index in range(5)]
+    # 平台报告：本条查询条件（时间窗口）下共 10 件；本页只返回 5 件且还有下一页。
+    FakeItemsAdapter.pages = [(items, 10, True)]
+    FakeItemsAdapter.skus_map = {f"I{index}": [_sku(f"S{index}")] for index in range(5)}
+
+    sgs.run_shop_goods_sync(
+        account_id,
+        user_id=user_id,
+        max_pages=1,
+        adapter_factory=FakeItemsAdapter,
+        # 时间区间（上界足够大 ⇒ 本夹具 5 件全在窗口内）⇒ 走**有界**分支。
+        time_from_ms=0,
+        time_to_ms=2**50,
+    )
+
+    db = SessionLocal()
+    try:
+        task = db.scalars(
+            select(Task)
+            .where(Task.task_type == sgs.sts.SHOP_GOODS_SYNC_TASK_TYPE)
+            .order_by(Task.id.desc())
+        ).first()
+        progress = sgs.sts.task_payload(task)["progress"]
+    finally:
+        db.close()
+
+    assert progress.get("work_total") == 10, (
+        f"有界同步的分母 = 平台报告的本条查询条件下的条数（不是本页枚举数）：{progress}"
+    )
+    assert int(progress.get("processed") or 0) == 5, f"本页 5 件都处理过：{progress}"
+    assert sgs.sts.progress_percent(progress) == 50, (
+        f"跑了 1 页（5/10）就该是 50%，而不是同源分母算出来的 100%：{progress}"
+    )
+
+
 def test_detail_failure_keeps_products_and_says_so(tmp_path, monkeypatch):
     """详情拉取失败 ⇒ 列表照常落库、detail 留空、原因写进 note（不阻塞）。"""
     _headers, account_id, user_id, SessionLocal = _setup(tmp_path, monkeypatch)
@@ -470,16 +591,20 @@ def test_sdk_truncates_item_ids_to_batch_size(monkeypatch):
         def json(self):
             return {"code": 200, "success": True, "msg": "ok", "data": {"skusMap": {}}}
 
-    def fake_post(url, json=None, **kwargs):  # noqa: A002 - 对齐 requests.post 形态
+    def fake_post(method, url, **kwargs):
+        captured["method"] = method
         captured["url"] = url
-        captured["body"] = json
+        captured["body"] = kwargs.get("json")
         return FakeResponse()
 
-    monkeypatch.setattr("apis.xhs_qianfan_apis.requests.post", fake_post)
+    # 打桩点跟着实现走：SDK 现在走**进程级共享会话**（`_session_request`），
+    # 不再直接调 `requests.post`（设计 13 §18.18.8 —— 只借连接、不借凭据）。
+    monkeypatch.setattr("apis.xhs_qianfan_apis._session_request", fake_post)
     ids = [f"{index:024x}" for index in range(15)]
     success, _message, _payload = XHS_Qianfan_Apis("web_session=x").get_skus_by_item_ids(ids)
 
     assert success is True
+    assert captured["method"] == "POST"
     assert captured["url"].endswith("/api/edith/product/get_skus_by_item_ids")
     assert SKU_BATCH_SIZE == 10
     assert len(captured["body"]["itemIds"]) == 10
@@ -797,7 +922,7 @@ def test_invalid_credential_marks_shop_state_but_keeps_products(tmp_path, monkey
 # --------------------------------------------------------------------------- #
 def test_second_trigger_reuses_the_active_task(tmp_path, monkeypatch):
     headers, account_id, _user_id, SessionLocal = _setup(tmp_path, monkeypatch)
-    monkeypatch.setattr(sgs, "_run_in_thread", lambda *a, **k: None)
+    monkeypatch.setattr(ats, "ensure_account_task_worker", lambda *a, **k: None)
 
     first = client.post(
         "/api/xhs/qianfan/sync-shop-goods",
@@ -864,6 +989,17 @@ def test_out_of_range_params_are_rejected(tmp_path, monkeypatch):
 
 
 def test_status_endpoint_is_idle_then_reports_the_result(tmp_path, monkeypatch):
+    """`last_result` 的来源 = **该账号最新一条同步日志**（2026-09-27 判据变更，设计 13 §35.17）。
+
+    ⚠️ **被取代的原断言（保留备查）**：改造前跑完 `sgs.run_shop_goods_sync(...)` 就直接断言
+    `last_result["status"] == STATUS_DONE` 且 `progress["stored"] == 1` —— 那时 `last_result`
+    读的是**业务任务行**。判据改成「该账号最新一条同步日志」后**不做兼容回落** ⇒ 任务行在、
+    日志不在 ⇒ 端点回**空态**。账号卡完整链路由 `test_account_card_sync_job_log.py` 覆盖；
+    这里钉的是**端点读的是日志**。
+    """
+    from backend.app.models.scheduled_job import ScheduledJobLog
+    from backend.app.services.job_registry import JOB_KEY_SHOP_GOODS_SYNC
+
     headers, account_id, user_id, _SessionLocal = _setup(tmp_path, monkeypatch)
     FakeItemsAdapter.pages = [([_item("I1")], 1, False)]
 
@@ -874,9 +1010,38 @@ def test_status_endpoint_is_idle_then_reports_the_result(tmp_path, monkeypatch):
     assert idle.status_code == 200
     assert idle.json()["status"] == "idle"
 
+    # 只落业务任务行（不写日志）⇒ 端点**仍是空态**：判据只认日志
     sgs.run_shop_goods_sync(
         account_id, user_id=user_id, max_pages=1, adapter_factory=FakeItemsAdapter
     )
+    task_only = client.get(
+        f"/api/xhs/qianfan/sync-shop-goods/status?platform_account_id={account_id}",
+        headers=headers,
+    )
+    assert task_only.json()["status"] == "idle"
+    assert task_only.json()["last_result"] is None, "判据只认日志，不回读业务任务行"
+
+    # 补一条终态日志（账号卡路径由 `scheduled_job_runner.run_targeted_job` 写）⇒ 端点回它
+    db = _SessionLocal()
+    try:
+        db.add(
+            ScheduledJobLog(
+                user_id=user_id,
+                account_id=account_id,
+                job_key=JOB_KEY_SHOP_GOODS_SYNC,
+                job_name="同步商品",
+                trigger_type="manual",
+                status="success",
+                progress=100,
+                duration_ms=1234,
+                started_at=shanghai_now(),
+                finished_at=shanghai_now(),
+                result={"stored": 1, "total": 1},
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
 
     after = client.get(
         f"/api/xhs/qianfan/sync-shop-goods/status?platform_account_id={account_id}",
@@ -885,7 +1050,7 @@ def test_status_endpoint_is_idle_then_reports_the_result(tmp_path, monkeypatch):
     body = after.json()
     assert body["status"] == "idle"
     assert body["last_result"]["status"] == sgs.sts.STATUS_DONE
-    assert body["last_result"]["progress"]["stored"] == 1
+    assert body["last_result"]["progress"] == 100
 
 
 # --------------------------------------------------------------------------- #

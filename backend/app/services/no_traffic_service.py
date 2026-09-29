@@ -22,7 +22,6 @@ from typing import Any, Optional
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.app.core.time import shanghai_now
 from backend.app.models import PlatformAccount
 from backend.app.models.shop import ShopNoteGoods
 from backend.app.services.shop_binding_service import account_shop_id

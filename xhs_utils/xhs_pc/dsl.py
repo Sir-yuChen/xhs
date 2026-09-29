@@ -54,6 +54,14 @@ _GETDSS_RE = re.compile(r"function\s+getdss\s*\(\s*\)\s*\{\s*return\s+'(\d+)'")
 _DS_URL = "https://as.xiaohongshu.com/api/sec/v1/ds?appId=xhs-pc-web"
 _TTL = 300  # 与服务端 max-age 对齐
 
+#: 旧值**最长可容忍**的过期时间（秒，设计 13 §18.18.9）。超过它就不再「用旧值继续」，
+#: 回到阻塞刷新 —— 避免「后台刷新一直失败 + 一直用几小时前的值」这种静默退化。
+_MAX_STALE = 1800
+
+#: 后台刷新线程名。⚠️ 必须避开 `note-batch-sync-worker` 前缀：同步 worker 的看门狗
+#: 按线程名前缀匹配并会「补齐缺口」，名字撞上会被当成失联 worker 而重建重复线程。
+_REFRESH_THREAD_NAME = "xhs-ds-refresh"
+
 #: 单次 fetch 的超时（秒）。原为 8 —— 实测 CDN 抖动时「8 秒只收到 1152 字节后断开」
 #: （curl 28），一次失败就把整篇同步判死。放宽到 12 秒。
 _FETCH_TIMEOUT = 12
@@ -83,6 +91,10 @@ class DsFetcher:
         self._value: Optional[str] = None
         self._fetched_at: float = 0.0
         self._lock = threading.Lock()
+        #: 后台刷新去重（同一时刻只允许一轮）：过期窗口内并发进来的请求不该
+        #: 每个都起一个刷新线程（设计 13 §18.18.9）。
+        self._refresh_lock = threading.Lock()
+        self._refreshing = False
 
     def get(
         self,
@@ -91,11 +103,24 @@ class DsFetcher:
         http_client=None,
     ) -> str:
         """
-        拿 getdss() 值（=_dsl）。缓存命中直接返回，否则同步 fetch。
+        拿 getdss() 值（=_dsl）。缓存命中直接返回，否则见下。
+
+        ## 过期时**不再阻塞**（设计 13 §18.18.9，2026-09-28）
+
+        有旧值、且过期未超 `_MAX_STALE` ⇒ **立刻返回旧值**，刷新交给后台守护线程。
+        两层理由：
+
+        * 本模块的设计本来就允许用旧值继续（见文件头「失败时用上次值继续
+          （不阻塞签名）」）—— 「过期」只是**刷新时机到了**，不是「旧值不可用」；
+        * 阻塞刷新的最坏情况是 `12s × 3 次尝试 + 退避 ≈ 38s`，而它**持着锁**，
+          于是并发的令牌探针 / 同步翻页一起卡住 —— 那正是「偶发卡很久」的来源
+          （实测见设计 13 §18.18.1）。
+
+        旧值过期超过 `_MAX_STALE`（30 分钟）⇒ 不再用它，回到阻塞刷新。
 
         Args:
             proxies: 可选，透传给 HTTP 客户端
-            force:   强制刷新（跳过缓存）
+            force:   强制刷新（跳过缓存，走阻塞路径）
             http_client: 可选，复用 Auth 的浏览器传输 Session
 
         Returns:
@@ -105,6 +130,22 @@ class DsFetcher:
         if not force and self._value and now - self._fetched_at < self._ttl:
             return self._value
 
+        if not force and self._value and now - self._fetched_at < _MAX_STALE:
+            self._refresh_in_background(proxies=proxies, http_client=http_client)
+            return self._value
+
+        return self._fetch_blocking(
+            proxies=proxies, http_client=http_client, force=force
+        )
+
+    def _fetch_blocking(
+        self,
+        *,
+        proxies: Optional[dict] = None,
+        http_client=None,
+        force: bool = False,
+    ) -> str:
+        """阻塞式取新值（首次 / 超过 `_MAX_STALE` / `force=True` 走这里）。"""
         with self._lock:
             # 双重检查（多线程下另一线程可能刚 fetch 完）
             now = time.time()
@@ -138,6 +179,38 @@ class DsFetcher:
                 # 失败降级：返回旧值
                 return self._value
             raise RuntimeError(f'ds 接口首次 fetch 失败：{last_error}') from last_error
+
+    def _refresh_in_background(
+        self,
+        *,
+        proxies: Optional[dict] = None,
+        http_client=None,
+    ) -> None:
+        """后台刷新一次（daemon 线程；同一时刻只允许一轮，失败只记日志）。
+
+        ⚠️ 失败**不影响业务**：调用方拿到的仍是旧值，与原「失败降级」同一取向。
+        """
+        with self._refresh_lock:
+            if self._refreshing:
+                return
+            self._refreshing = True
+
+        def worker() -> None:
+            try:
+                self._fetch_blocking(
+                    proxies=proxies, http_client=http_client, force=True
+                )
+            except Exception as exc:  # noqa: BLE001 - 后台刷新失败不算业务失败
+                logger.warning("ds 后台刷新失败，继续用旧值：%s", exc)
+            finally:
+                with self._refresh_lock:
+                    self._refreshing = False
+
+        threading.Thread(
+            target=worker,
+            name=_REFRESH_THREAD_NAME,
+            daemon=True,
+        ).start()
 
     def _fetch(
         self,

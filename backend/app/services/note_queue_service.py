@@ -70,6 +70,11 @@ TASK_TYPE_SYNC_ITEM = "xhs_note_sync_item"
 TASK_TYPE_PUBLISH_ITEM = "xhs_note_publish_item"
 #: 商品生成笔记队列项（一篇 = 一个商品；**不绑定笔记** —— 生成前笔记还不存在）。
 TASK_TYPE_GEN_ITEM = "xhs_note_gen_item"
+#: ⚠️ **详情补齐队列项（`xhs_note_hydrate_item`）已删除**（2026-09-27 用户口径：
+#: 「账号信息卡中移除补齐详情逻辑，点击同步笔记时，应获取到当前笔记的所有信息后再落库，
+#: 在一个任务中完成，不需要再点击补齐详情」）。补齐能力并入**同步任务本身**
+#: （设计 13 §35.18：`_sync_with_task` 收尾对账号全部待补笔记内联补齐）⇒ 独立队列
+#: 失去唯一入口，留着就是死代码 + 与同步内补齐重复（DEF-044）。
 
 QUEUE_ITEM_TASK_TYPES: tuple[str, ...] = (
     TASK_TYPE_SYNC_ITEM,
@@ -179,11 +184,24 @@ assert {spec.batch_task_type for spec in QUEUE_REGISTRY} == set(QUEUE_BATCH_TASK
     "QUEUE_REGISTRY 与 QUEUE_BATCH_TASK_TYPES 不一致：新增队列要两边一起加"
 )
 
+#: **账号级任务**类型（设计 13 §35.16，2026-09-27 用户口径「账号卡点同步商品，任务中心
+#: 任务日志没有新增」）：粒度是「一次账号级动作」而不是「一篇笔记 / 一个商品」⇒
+#: **不是队列项**（队列认领只认 `QUEUE_ITEM_TASK_TYPES`），但**共用**同一套认领 / 记账 /
+#: 复位 / 保留期机制（`account_task_service`）。三类各自被账号任务 worker 逐个跑 ⇒ 串行。
+ACCOUNT_TASK_TYPES: tuple[str, ...] = (
+    "xhs_note_sync",
+    "xhs_shop_goods_sync",
+    "xhs_no_traffic_cleanup",
+)
+
 #: 清理任务认的「队列详情记录」白名单：三个队列的**队列项行 + 批次父行**，外加
-#: **账号级**同步行（`xhs_note_sync` —— 它不是队列，但与队列记录同生命周期同保留期，
-#: 分开清会出现「队列记录 15 天、账号同步行永久」的双轨）。
-#: ⚠️ 刻意**不含** `ai_*` / `xhs_shop_goods_sync` / `monitoring_crawl` /
-#: `xhs_no_traffic_cleanup` —— 那些不是「队列详情记录」，删了会丢别处的排查依据。
+#: **账号级任务行**（`ACCOUNT_TASK_TYPES` —— 它们不是队列，但与队列记录同生命周期、
+#: 同保留期，分开清会出现「队列记录 15 天、账号级行永久」的双轨）。
+#: ⚠️ 刻意**不含** `ai_*` / `monitoring_crawl` —— 那些不是「队列详情记录」，
+#: 删了会丢别处的排查依据（各自模块另有记录）。
+#: ⚠️ 2026-09-27 §35.16：原句「刻意**不含** `xhs_shop_goods_sync` / `xhs_no_traffic_cleanup`」
+#: **被本次取代** —— 两者是账号级同步 / 清理，与队列记录同生命周期，故纳入白名单。
+#: ⚠️ 2026-09-27 §35.18：详情补齐队列的项 / 批次类型**整条移除**（队列已不存在）。
 QUEUE_RECORD_TYPES: tuple[str, ...] = (
     TASK_TYPE_SYNC_ITEM,
     TASK_TYPE_PUBLISH_ITEM,
@@ -191,7 +209,10 @@ QUEUE_RECORD_TYPES: tuple[str, ...] = (
     TASK_TYPE_SYNC_BATCH,
     TASK_TYPE_PUBLISH_BATCH,
     TASK_TYPE_GEN_BATCH,
-    "xhs_note_sync",
+    *ACCOUNT_TASK_TYPES,
+)
+assert set(ACCOUNT_TASK_TYPES).issubset(set(QUEUE_RECORD_TYPES)), (
+    "账号级任务必须全部纳入队列记录白名单（否则保留期清理留下永久行）"
 )
 
 #: 终态：不再被认领、可被保留期清理。`pending` / `running` **永不清理**。
@@ -207,13 +228,24 @@ FINISHED_WINDOW = 50
 #: **为什么必须有固定值**：队列记录页的「来源」列回答「这条记录从哪来的」。
 #: 2026-09-26 用户两次口径：「来源列不能是未知，你排查所有来源后给每个来源固定值」+
 # 「来源不能是简单的手动或自动，应具体到按钮」⇒ 取值**具体到触发它的那个按钮**：
-#: 页面入口六个（三个队列 × 单条 / 批量）+ 重试 + 重启恢复 + 定时（预留）。
+#: 页面入口（三个队列 × 单条 / 批量）+ 账号卡两个同步按钮（§35.17）+ 重试 + 重启恢复 + 定时。
 #: **新入口必须在这里加常量 + 前端 lib 加中文名，不许留空**（留空 = 「未知」）。
 SOURCE_NOTE_SYNC_SINGLE = "note_sync_single"
 """内容库 · 单条「同步」按钮（`POST /notes/{id}/sync`）。"""
 
 SOURCE_NOTE_SYNC_BATCH = "note_sync_batch"
 """内容库 · 「批量同步」按钮（`POST /notes/batch-sync`）。"""
+
+SOURCE_ACCOUNT_CARD_NOTE_SYNC = "account_card_note_sync"
+"""账号卡 · 「同步笔记」按钮（`POST /accounts/{id}/notes/sync`，设计 13 §35.17）。
+
+⚠️ 这条入口**同时**落两处账：定时任务日志（`scheduled_job_logs`，`trigger_type=manual`）
+与业务任务行（`tasks`，就是本来源值所在的那行）。原先把按钮写成遗留值 `manual`，
+界面上显示成「页面按钮（早期数据）」—— 那是**假历史**，2026-09-27 用户口径一并纠正。
+"""
+
+SOURCE_ACCOUNT_CARD_GOODS_SYNC = "account_card_goods_sync"
+"""账号卡 · 「同步商品」按钮（`POST /api/xhs/qianfan/sync-shop-goods`，设计 13 §35.17）。"""
 
 SOURCE_NOTE_PUBLISH_SINGLE = "note_publish_single"
 """内容库 · 单条「发布」按钮（`POST /notes/{id}/publish`）。"""
@@ -234,7 +266,10 @@ SOURCE_RECOVERY = "recovery"
 """应用重启后由启动恢复自动续跑的（`recover_interrupted` 复位的断点行）。"""
 
 SOURCE_SCHEDULED = "scheduled"
-"""定时任务触发（当前无队列入队走这条；账号级同步行早在用，先占位防未来漏标）。"""
+"""定时任务触发（`run_scheduled_*` 给每个账号写的那行，`scheduled_job_logs` 侧同源）。
+
+⚠️ 2026-09-27 更正：原注释写「当前无队列入队走这条……先占位」——**已是真实入口**
+（定时轮转的笔记 / 商品同步行一直用它，设计 13 §35.17 起账号卡定向执行也归到定时任务那条路）。"""
 
 SOURCE_MANUAL = "manual"
 """**遗留值**：按钮级细分之前入队的行（迁移 `d3e4f5a6b7c8` 回填的存量）。
@@ -248,6 +283,8 @@ SOURCE_MANUAL = "manual"
 QUEUE_SOURCES: tuple[str, ...] = (
     SOURCE_NOTE_SYNC_SINGLE,
     SOURCE_NOTE_SYNC_BATCH,
+    SOURCE_ACCOUNT_CARD_NOTE_SYNC,
+    SOURCE_ACCOUNT_CARD_GOODS_SYNC,
     SOURCE_NOTE_PUBLISH_SINGLE,
     SOURCE_NOTE_PUBLISH_BATCH,
     SOURCE_PRODUCT_NOTE_GENERATE_SINGLE,
@@ -539,6 +576,39 @@ def batch_account_ids(children: list[Task]) -> list[int]:
 # --------------------------------------------------------------------------- #
 # 入队
 # --------------------------------------------------------------------------- #
+def open_note_pk_index(
+    db: Session,
+    *,
+    user_id: int,
+    item_task_type: str,
+) -> dict[int, Task]:
+    """预取「本用户 + 本类型**未终态**队列项」的 `note_pk → 行` 索引（批量入队用）。
+
+    给 `enqueue_item(known_open=…)` 用（设计 13 §35.15）：账号级补齐一次要入队上千篇
+    （账号 8 实测 1867 条待补），逐篇自查未终态行是 O(N²)，一次预取把它压成 O(N)。
+
+    ⚠️ **where 条件与 `enqueue_item` 的自查路径逐字相同**（`user_id` + `task_type` +
+    `pending`/`running`）—— 这是同一判据的两条取材路径，不是两份判据：改状态口径时
+    两处必须一起改（它们在同一文件、相邻两段，紧邻放置就是为了这个）。
+
+    只索引 `note_pk`（笔记绑定队列的幂等主键）；非笔记绑定队列（商品生成）认
+    `item_id`，不适用 —— 传进 `known_open` 会被 `enqueue_item` 直接拒掉。
+    """
+    rows = db.scalars(
+        select(Task).where(
+            Task.user_id == user_id,
+            Task.task_type == item_task_type,
+            Task.status.in_(("pending", "running")),
+        )
+    ).all()
+    index: dict[int, Task] = {}
+    for row in rows:
+        pk = note_pk_of(row)
+        if pk:
+            index.setdefault(pk, row)
+    return index
+
+
 def enqueue_item(
     db: Session,
     *,
@@ -551,6 +621,7 @@ def enqueue_item(
     note_title: str = "",
     source: str,
     batch: Optional[BatchRequest] = None,
+    known_open: Optional[dict[int, Task]] = None,
 ) -> tuple[Task, bool]:
     """入队一个队列项（幂等）。返回 `(行, created)`；`created=False` = 已在队列 / 执行中。
 
@@ -575,25 +646,48 @@ def enqueue_item(
     见本模块顶部）。给默认值就等于允许「忘了传还静悄悄显示手动」—— 那正是
     2026-09-26 用户投诉的「未知 / 手动」来源列。
 
+    ``known_open``（设计 13 §35.15，2026-09-27）：调用方**预取**的「本用户 + 本类型
+    未终态行」索引（`note_pk → 行`，由 :func:`open_note_pk_index` 产出，唯一实现）。
+    不传（默认）⇒ 本函数自己查一遍 —— 单条入口的既有行为**逐字不变**。
+
+    为什么需要它：账号级「补齐详情」一次要入队上千篇（账号 8 实测 1867 条待补），
+    而每篇都自查一遍未终态行 = N 次「查全表 + 建 N 个 ORM 对象」⇒ O(N²)
+    （1867² ≈ 350 万次比较，请求要转几十秒）。给了索引 ⇒ 判重退化为一次 dict 命中。
+
+    ⚠️ 判重口径**仍是同一段代码**（本函数的既有分支），不产生第二份实现
+    （DEF-044）：索引只是把「未终态行从哪来」换成调用方预取。
+    ⚠️ 新入队的行会**回填进索引**，所以调用方只需预取一次、循环里无需自己维护。
+    ⚠️ 只支持**笔记绑定队列**（索引键是 `note_pk`）：非笔记绑定队列（商品生成）
+    传它 ⇒ 直接 `ValueError` —— 静默退化成「不判重」会在商品侧造成重复入队
+    （安全网不能条件性，DEF-048）。
+
     ⚠️ 不 commit：调用方提交（一次批量 = 一个事务）。
     """
     if not str(source or "").strip():
         raise ValueError("enqueue_item: source 必填（按钮级来源常量，见 note_queue_service）")
     note_pk = int(note_pk or 0)
     ref = str(item_id or "").strip()
-    open_rows = db.scalars(
-        select(Task).where(
-            Task.user_id == user_id,
-            Task.task_type == item_task_type,
-            Task.status.in_(("pending", "running")),
-        )
-    ).all()
-    for row in open_rows:
-        if note_pk:
-            if note_pk_of(row) == note_pk:
+    if known_open is not None and not note_pk:
+        raise ValueError("enqueue_item: known_open 只适用于笔记绑定队列（note_pk 必填）")
+    if known_open is not None:
+        # 批量入口：索引已预取（本次动作在单事务内跑完，索引期间不会失效）。
+        hit = known_open.get(note_pk)
+        if hit is not None:
+            return hit, False
+    else:
+        open_rows = db.scalars(
+            select(Task).where(
+                Task.user_id == user_id,
+                Task.task_type == item_task_type,
+                Task.status.in_(("pending", "running")),
+            )
+        ).all()
+        for row in open_rows:
+            if note_pk:
+                if note_pk_of(row) == note_pk:
+                    return row, False
+            elif ref and item_ref_of(row) == ref:
                 return row, False
-        elif ref and item_ref_of(row) == ref:
-            return row, False
 
     payload: dict = {
         "note_pk": note_pk,
@@ -622,6 +716,10 @@ def enqueue_item(
     )
     db.add(row)
     db.flush()
+    if known_open is not None and note_pk:
+        # 回填索引：不回填就等于「这批内的重复候选不判重」（同一循环里先后两次
+        # 命中同一篇时，第二次会再插一行 —— 幂等判据不能只在批间成立）。
+        known_open[note_pk] = row
     if parent is not None:
         # 批次行刚多了一个子行 ⇒ 它的派生状态 / 进度跟着变（写回是冗余不是真相源，
         # 但让并发的列表读取看到一致值）
@@ -632,23 +730,80 @@ def enqueue_item(
 # --------------------------------------------------------------------------- #
 # 认领 / 记账
 # --------------------------------------------------------------------------- #
-def claim_next_item(db: Session, *, item_task_type: str) -> Optional[Task]:
+#: 认领扫描窗口：一次最多看这么多条 `pending` 行来决定认领哪一条。
+#: 为什么不是 1：带 `exclude_account_ids` 时要跳过「账号已被别的 worker 占住」的项，
+#: 窗口太小会让「队头恰好是忙账号」直接变成「这一轮没活干」（假空转）。
+#: 64 远大于并行度上限 8，够跳过所有忙账号还有余量；窗口本身只是一次带 `LIMIT` 的
+#: 主键扫描，成本可忽略。
+CLAIM_SCAN_WINDOW = 64
+
+
+def account_id_of(row: Task) -> Optional[int]:
+    """队列项所属平台账号（`payload.account_id`）。
+
+    与 `note_pk_of` / `item_ref_of` 同族：**Python 侧读 JSON**（不写
+    `payload["account_id"]` 的 SQL 路径 —— SQLite / PG 的可移植性不一致，本项目
+    在 `enqueue_item` 的幂等判据里已立过这条规矩）。
+    缺值 / 脏值 ⇒ `None`（**不猜成某个账号**：猜错会让两个 worker 同时跑同一账号）。
+    """
+    payload = row.payload if isinstance(row.payload, dict) else {}
+    try:
+        value = payload.get("account_id")
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def claim_next_item(
+    db: Session,
+    *,
+    item_task_type: str,
+    exclude_account_ids: Iterable[int] = (),
+) -> Optional[Task]:
     """全局 FIFO 认领一条 `pending` 项并置 `running`（条件 UPDATE 防抢同一行）。
 
     为什么用「先查 id、再条件 UPDATE」而不是「查出来直接改」：多一条 worker
     （看门狗重建的瞬间新旧并存）时，两边可能查到同一行；条件 UPDATE 带
     `status == "pending"` 且按 `rowcount` 判定 ⇒ 只有一个能认领成功，另一个
     重试下一行 —— 这是「同一行不被跑两遍」的唯一闸门。
+
+    `exclude_account_ids`（设计 13 §38.3，2026-09-27）：**跳过这些账号的项**，
+    用于跨账号并行的**账号级互斥** —— 同一账号的任何时刻至多 1 条在跑。
+
+    * 不传（默认 `()`）⇒ 行为与改造前**逐字一致**（发布 / 生成两个队列复用本函数，
+      不受影响）；
+    * `payload.account_id` 缺值的项**不参与排除**（排除不了就照常认领：宁可让脏行
+      按 FIFO 跑掉，也不要因为它把整条队列堵住 —— 「未知账号」不等于「忙账号」）。
     """
+    blocked = {int(value) for value in exclude_account_ids if value is not None}
     for _ in range(8):
-        candidate_id = db.scalar(
-            select(Task.id)
-            .where(Task.task_type == item_task_type, Task.status == "pending")
-            .order_by(Task.id)
-            .limit(1)
+        candidate_ids = list(
+            db.scalars(
+                select(Task.id)
+                .where(Task.task_type == item_task_type, Task.status == "pending")
+                .order_by(Task.id)
+                .limit(CLAIM_SCAN_WINDOW)
+            ).all()
         )
-        if candidate_id is None:
+        if not candidate_ids:
             return None
+
+        candidate_id: Optional[int] = candidate_ids[0]
+        if blocked:
+            candidate_id = None
+            # 只在**有账号被占住**时才多查一次行体（无并行 / 无占用时零额外开销）
+            for row in db.scalars(
+                select(Task).where(Task.id.in_(candidate_ids)).order_by(Task.id)
+            ).all():
+                account_id = account_id_of(row)
+                if account_id is None or account_id not in blocked:
+                    candidate_id = int(row.id)
+                    break
+            if candidate_id is None:
+                # 窗口内全是忙账号的项 ⇒ 本轮不认领（**不是**「队列空了」：
+                # 调用方据此继续等，另一条 worker 跑完就会让这些项重新可选）
+                return None
+
         result = db.execute(
             update(Task)
             .where(Task.id == candidate_id, Task.status == "pending")
@@ -1016,6 +1171,7 @@ def recover_interrupted(
     db: Session,
     *,
     item_task_types: tuple[str, ...] = QUEUE_ITEM_TASK_TYPES,
+    exclude_task_ids: Iterable[int] = (),
 ) -> dict:
     """启动恢复：上次进程留下的 `running` 行按口径复位（**自动续跑**）。
 
@@ -1031,9 +1187,15 @@ def recover_interrupted(
     复位行的来源改标 `recovery`（2026-09-26 用户口径「给每个来源固定值」）：
     这一跑是应用重启续跑，不是用户当时点的那次。
 
-    返回 `{"requeued": n, "failed": m}`。
+    `exclude_task_ids`（设计 13 §38.3，2026-09-27）：**跳过这些行**。
+
+    ⚠️ 为什么池化后**必须**有它：看门狗在「池里死了一条、其余还活着」时也要复位，
+    而本函数的判据是「所有 `running` 行」—— 不做排除就会把**活着的那几条 worker
+    手上的任务从脚下抽走**（改回 `pending`）⇒ 同一条被跑两遍 + 原 worker 跑完后
+    把一条已不属于它的行写成终态。启动路径不传（那时没有活 worker，全部该复位）。
     """
     now = shanghai_now()
+    keep = {int(value) for value in exclude_task_ids if value is not None}
     rows = list(
         db.scalars(
             select(Task).where(
@@ -1042,12 +1204,20 @@ def recover_interrupted(
             )
         ).all()
     )
+    if keep:
+        rows = [row for row in rows if int(row.id) not in keep]
     requeued = failed = 0
     for row in rows:
         if int(row.retry_count or 0) < int(row.max_retries or 3):
             row.status = "pending"
             row.retry_count = int(row.retry_count or 0) + 1
             row.started_at = None
+            # ⚠️ **`finished_at` 必须一并清**（2026-09-27 真机实测）：复位是
+            # 「重新排队」，留着上一轮的结束时间 ⇒ 行处于「`pending`/`running`
+            # 但已有 `finished_at`」的**自相矛盾**状态。后果是「任务结束了吗」
+            # 有两个答案 —— 账号卡按钮读 `status`（显示「同步中」），任务中心
+            # 读时间戳（显示已结束），用户看到的就是「任务已失败，卡片还在转」。
+            row.finished_at = None
             payload = dict(row.payload or {})
             payload["source"] = SOURCE_RECOVERY
             row.payload = payload
@@ -1109,9 +1279,6 @@ def recover_publishing_notes(db: Session) -> int:
 #: 就是丢任务（清理入口绝不能变成第二个丢任务的入口，与保留期清理同纪律）。
 #: 用户口径原文：「清理逻辑不包含待重试和进行中状态的记录，前端不允许被选中」。
 CLEANABLE_STATUSES: tuple[str, ...] = ("done", "cancelled")
-
-#: 前端据此禁用复选框 / 灰掉清理按钮（同一个常量，两边不各写一份）。
-UNCLEANABLE_STATUSES: tuple[str, ...] = ("pending", "running", "failed", "exhausted")
 
 #: **正在执行 / 待执行**：用户口径「批次中存在正在执行或待执行得记录，则不支持该
 #: 批次全部清理」里点名的两类 —— 活的队列项，worker 会（或正在）认领，删了就是丢任务。
@@ -1306,7 +1473,7 @@ def cleanup_records(
     永远不清」，又是一种静默漏项（DEF-044 同型）。
 
     返回 `{"retention_days": n, "cutoff": iso, "items": n, "batches": n,
-    "sync_tasks": n}`。
+    "account_tasks": n}`。
     """
     cutoff = shanghai_now() - timedelta(days=int(retention_days))
     # 类型**从注册表派生**（不写死两个）：新队列上线时清理范围自动跟上。
@@ -1341,10 +1508,12 @@ def cleanup_records(
     if stale_batch_ids:
         batches = db.execute(delete(Task).where(Task.id.in_(stale_batch_ids))).rowcount
 
-    sync_tasks = db.execute(
+    # 账号级任务行（§35.16）：粒度是「一次账号级动作」，不在 `QUEUE_REGISTRY` 派生集里，
+    # 但同为「队列详情记录」⇒ 同一保留期。原实现只覆盖 `xhs_note_sync`，另两类漏清。
+    account_tasks = db.execute(
         delete(Task).where(
             Task.user_id == user_id,
-            Task.task_type == "xhs_note_sync",
+            Task.task_type.in_(ACCOUNT_TASK_TYPES),
             Task.status.in_(TERMINAL_STATUSES),
             Task.created_at < cutoff,
         )
@@ -1356,7 +1525,7 @@ def cleanup_records(
         "cutoff": cutoff.isoformat(),
         "items": int(items or 0),
         "batches": int(batches or 0),
-        "sync_tasks": int(sync_tasks or 0),
+        "account_tasks": int(account_tasks or 0),
     }
     logger.info("note task record cleanup: %s", result)
     return result

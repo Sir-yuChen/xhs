@@ -1,9 +1,15 @@
 /**
- * 任务中心（设计 15 §9.1，2026-09-24 验收修正）——两个页签：
+ * 任务中心（设计 15 §9.1，2026-09-24 验收修正）——**两个页签**：
  *
  * 1. **任务列表**：全部 `scheduled_jobs` 行（手动执行 / Cron 周期 / 定时一次
  *    合并为单一列表，列一致；操作列按任务类型与状态区分，completed 的不给暂停/恢复）；
  * 2. **任务日志**：每次调度执行一行（成功 / 失败 / 跳过留痕）。
+ *
+ * ⚠️ **2026-09-27：第三个页签「账号级任务」已移除**（用户口径「任务中心移除账号级任务 (1)
+ * tab，点击同步笔记和同步商品属于手动触发的任务，日志应记录在任务日志 tab 下，且注意
+ * 更新任务进度数据即可」）。账号卡「同步笔记 / 同步商品」（设计 13 §35.17）本来就各落
+ * 一条 `trigger_type=manual` 的日志行 ⇒ 归属「任务日志」；账号级任务行本身仍可在队列
+ * 记录页看到（`QUEUE_RECORD_TYPES` 含三类账号级类型），中断 / 重试也在那里。
  *
  * 验收口径（用户 2026-09-24，多轮）：
  * ① 任务页不放说明文案；调度补跑按钮与手动执行记录页签按口径移除
@@ -41,7 +47,6 @@ import {
   DatePicker,
   Empty,
   Popconfirm,
-  Progress,
   Row,
   Segmented,
   Select,
@@ -57,15 +62,15 @@ import {
 import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useState } from "react";
 
-import { PageHeader } from "../../components/layout/app-shell";
 import { JobFormModal } from "../../components/schedule/job-form-modal";
 import { JobLogDetailModal } from "../../components/schedule/job-log-detail-modal";
+import { JobLogProgress } from "../../components/schedule/job-log-progress";
 import {
+  cancelTask,
   changeScheduleJobStatus,
   cleanScheduleLogs,
   deleteScheduleJob,
   deleteScheduleLogs,
-  fetchAccounts,
   fetchScheduleJobs,
   fetchScheduleLogs,
   fetchScheduleStatus,
@@ -84,7 +89,6 @@ import {
 } from "../../lib/schedule";
 import { formatDuration, formatShanghaiTime } from "../../lib/time";
 import type {
-  PlatformAccount,
   ScheduleStatus,
   ScheduledJob,
   ScheduledJobLog,
@@ -196,6 +200,31 @@ export function TaskCenterPage() {
     void loadTargets();
     if (activeTab === "logs") {
       void loadLogs();
+    }
+  }
+
+  /**
+   * 取消一次执行（任务日志「操作」列的取消按钮）。
+   *
+   * 用户口径（2026-09-27）：「点击取消按钮**二次确认**后**真实取消**再执行的任务并
+   * **修改对应任务日志记录相关状态和数据**」。前端只做三件事：
+   * ① 按日志的 `task_id` 找到业务任务行（缺 `task_id` ⇒ 按钮根本不渲染）；
+   * ② 调 `POST /tasks/{id}/cancel` —— **真实中断**由后端完成（行置 `cancelled` + 发
+   *    协作式取消信号，任务体在翻页 / 补详情的检查点优雅退出，不再打平台）；
+   * ③ 重新拉日志 / 任务列表 —— **日志状态的修改也在后端同一请求内完成**
+   *    （`close_running_logs_for_task`），前端不自己改本地状态（那会造第二份真相源）。
+   */
+  async function cancelLogTask(record: ScheduledJobLog) {
+    if (!record.task_id) {
+      return;
+    }
+    try {
+      await cancelTask(record.task_id);
+      message.success("已取消该次执行");
+      void loadLogs();
+      void loadJobs();
+    } catch {
+      message.error("取消失败，请稍后重试。");
     }
   }
 
@@ -393,6 +422,17 @@ export function TaskCenterPage() {
 
   const logColumns: ColumnsType<ScheduledJobLog> = [
     {
+      // 日志 ID（2026-09-27 用户口径「任务日志添加 ID 列」）：它是**排障的锚点** ——
+      // 用户报障时念一个数字即可精确定位到某一次执行（时间戳会撞、任务名会重复）。
+      // 取 `ScheduledJobLog.id`（主键，单调递增 = 落库顺序），**不是**业务任务号
+      // （那是 `task_id`，账号卡路径上为空，见设计 15 §15）。
+      title: "ID",
+      dataIndex: "id",
+      key: "id",
+      width: 90,
+      render: (id: number) => <Text>{id}</Text>,
+    },
+    {
       title: "任务名称",
       dataIndex: "job_name",
       key: "job_name",
@@ -438,28 +478,37 @@ export function TaskCenterPage() {
     {
       // R13 用户口径：一列合并展示「任务进度 + 耗时（成功）/ 异常（失败）」；
       // 其余细节（触发器 / 错过策略 / 并发 / 消息 / 结果全文）全在详情弹窗。
+      //
+      // ⚠️ **进度条的渲染不在本文件**（DEF-044）：比例已知 / 未知两态、以及「未知」的
+      // 呈现（**不定量滑动条**，不是满格条）统一由 `JobLogProgress` 承担，
+      // **详情弹窗用的是同一个组件**。
+      //
+      // 为什么必须共用（2026-09-28 用户报障，设计 13 §43）：旧实现这里在「在跑且
+      // `progress` 为 0」时渲染 `percent={100}` 的满格条（与「100% 完成」视觉同形），
+      // 而详情弹窗读的是同一个 `log.progress`（0）⇒ 用户看到「列表 100% / 详情 0%」
+      // 两个相反读数；取消后本列又回落成真实值 0%。「未知」与「0%」都不是 100%，
+      // 唯一不会说谎的载体是**没有固定填充比例**的滑动条。
       title: "任务进度",
       key: "progress",
       width: 240,
       render: (_: unknown, record: ScheduledJobLog) => (
         <Space direction="vertical" size={2} style={{ width: "100%" }}>
-          <Progress
-            percent={Math.max(0, Math.min(100, record.progress ?? 0))}
-            size="small"
-            status={
-              record.status === "failed"
-                ? "exception"
-                : record.status === "running"
-                  ? "active"
-                  : "normal"
-            }
-          />
+          <JobLogProgress log={record} />
           {record.status === "failed" && record.exception_info ? (
-            <Tooltip title={record.exception_info}>
-              <Text type="danger" style={{ fontSize: 12 }} ellipsis>
-                {record.exception_info}
-              </Text>
-            </Tooltip>
+            /* 2026-09-27 用户口径「任务日志的进度列展示异常信息太长了，固定一下长度，
+               使用 tip 展示全部」：原实现只有外层 `Tooltip` + `Text ellipsis`，但
+               `Table` 未设 `tableLayout`（默认 auto）⇒ 列宽 240 只是**建议值**，长异常
+               文本会把整列撑开，`ellipsis` 的 `max-width: 100%` 随之被撑大 —— **实际
+               从未截断**。故给**固定上限** `maxWidth`（不依赖 td 宽度），并改用 antd
+               `ellipsis={{ tooltip }}`：只在**真被截断时**才出 tip（与账号卡同口径，
+               没截断就不平白多一个悬停气泡）。 */
+            <Text
+              type="danger"
+              style={{ fontSize: 12, maxWidth: 200, display: "inline-block" }}
+              ellipsis={{ tooltip: record.exception_info }}
+            >
+              {record.exception_info}
+            </Text>
           ) : (
             <Text type="secondary" style={{ fontSize: 12 }}>
               耗时 {formatDuration(record.duration_ms)}
@@ -471,11 +520,30 @@ export function TaskCenterPage() {
     {
       title: "操作",
       key: "actions",
-      width: 90,
+      width: 170,
       render: (_: unknown, record: ScheduledJobLog) => (
-        <Button size="small" onClick={() => setDetailLog(record)}>
-          详情
-        </Button>
+        <Space size={4}>
+          <Button size="small" onClick={() => setDetailLog(record)}>
+            详情
+          </Button>
+          {/* 取消（2026-09-27 用户口径「任务日志列表操作列新增取消任务中断任务执行功能
+              按钮和逻辑」）：**只在日志仍在 `running` 且带业务任务号时**渲染 ——
+              终态行点取消是「假动作」（后端原样返回），缺 `task_id` 的行（cron 系统作业 /
+              存量日志）没有可取消的业务任务行。二次确认后才真发请求。 */}
+          {record.status === "running" && record.task_id ? (
+            <Popconfirm
+              title="取消这次执行？"
+              description="已在执行的部分保留，剩余部分不再继续。"
+              okText="取消任务"
+              cancelText="再想想"
+              onConfirm={() => cancelLogTask(record)}
+            >
+              <Button size="small" danger>
+                取消
+              </Button>
+            </Popconfirm>
+          ) : null}
+        </Space>
       ),
     },
   ];
@@ -486,18 +554,10 @@ export function TaskCenterPage() {
 
   return (
     <div>
-      <PageHeader
-        eyebrow="Automation"
-        title="任务中心"
-        description="调度任务的统一管理台：任务列表 + 每次执行的日志。"
-        action={
-          <Space>
-            <Button icon={<ReloadOutlined />} onClick={refreshAll} loading={jobsLoading}>
-              刷新
-            </Button>
-          </Space>
-        }
-      />
+      {/* ⚠️ 顶部标题区已**整块移除**（2026-09-27 用户口径：「任务中心的顶部：Automation /
+          任务中心 / 调度任务的统一管理台：任务列表 + 每次执行的日志 —— **全部移除**，
+          刷新按钮放后台调度卡右上角」）。进入页面即是「后台调度」卡：少一层标题占位，
+          首屏直接是数据。刷新按钮随之挪到那张卡的右上角（`Card.extra`）。 */}
 
       {/* 用户口径（2026-09-24）：页面不放 inline 消息条，结果一律走底部弹窗 */}
 
@@ -514,6 +574,12 @@ export function TaskCenterPage() {
                   : "未启用"}
               </Tag>
             </Space>
+          }
+          /* 刷新按钮（2026-09-27 用户口径：从顶部标题区挪到本卡右上角）。 */
+          extra={
+            <Button icon={<ReloadOutlined />} onClick={refreshAll} loading={jobsLoading}>
+              刷新
+            </Button>
           }
           style={{ ...cardStyle, marginBottom: 24 }}
         >

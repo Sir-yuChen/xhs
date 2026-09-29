@@ -15,11 +15,15 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Callable, Optional
+
+import time
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from backend.app.core.database import SessionLocal
+from backend.app.core.time import shanghai_now
 from backend.app.models.task import Task
 
 #: 两类同步任务的 task_type。
@@ -38,6 +42,11 @@ STATUS_CANCELLED = "cancelled"
 
 #: 「未完成」= 仍占着防重名额的状态。
 ACTIVE_STATUSES = (STATUS_PENDING, STATUS_RUNNING)
+#: 终态 = 不会再变化的三个（成功 / 失败 / 协作式中断）。
+#: ⚠️ 与 `note_queue_service.TERMINAL_STATUSES` 必须是**同一个集合** —— 那边是字面量
+#: 元组、这里是按 `STATUS_*` 组合出来的，两处漂移会造出「队列认为结束了、同步台账
+#: 认为还在跑」的活锁。守卫：`test_testing_spec_guards.py::test_terminal_statuses_agree`。
+TERMINAL_STATUSES = (STATUS_DONE, STATUS_FAILED, STATUS_CANCELLED)
 
 #: **全量翻页**（设计 13 §21，2026-09-22 用户口径）：`None` = 翻到平台没有下一页为止。
 #: ⚠️ 旧契约「有界翻页：默认 3 页、上限 20 页 × 100 条」（§8 / C5）**已被 §21 取代** ——
@@ -50,6 +59,27 @@ DEFAULT_MAX_PAGES: Optional[int] = None
 ABSOLUTE_PAGE_CAP = 500
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 100
+
+#: 「任务执行详情」的**刷新粒度**（条）—— 两个账号级同步执行体（笔记同步 / 店铺商品同步）
+#: **每处理这么多条**就把任务行进度刷一次（设计 13 §42.3）。
+#: 用户口径（2026-09-28）：「店铺商品同步和账号笔记同步**每执行 50 条**应更新一次任务
+#: 执行详情数据」。
+#:
+#: ⚠️ 为什么它与 `DEFAULT_PAGE_SIZE` 是**同一个数**：两个执行体的翻页循环都是
+#: 「取一页 → 落库 → 刷进度」，页边界就是天然刷盘点。刻意**不**新造第二个数 ——
+#: 一旦粒度小于页（例如页 100、粒度 50），就得把一页拆成两半分别落库刷盘，
+#: 复杂度换不来任何可见收益（DEF-044 同型：同一语义只留一个数）。
+PROGRESS_FLUSH_EVERY = 50
+assert DEFAULT_PAGE_SIZE <= PROGRESS_FLUSH_EVERY, (
+    "默认页大小不得超过进度刷新粒度：页是刷盘点，页比粒度大就等于「超过 50 条才刷」"
+)
+
+#: ⚠️ **只有「条数」这一个上界，没有时间上界**（2026-09-28 清死代码时删掉了
+#: `PROGRESS_FLUSH_SECONDS = 30`）：那个常量**从未被任何代码读过**，只在注释里声明了
+#: 一个不存在的机制（幽灵契约 —— 比没有更坏，会让人以为「超过 30 秒一定会刷」）。
+#: 真正的「慢慢涨」由**逐篇 / 逐批回调**达成（设计 13 §42.3 的页内刷新两行）：
+#: 笔记 `_hydrate_note_rows` 每篇回调、商品 `_fetch_page_skus` 每批回调，
+#: 借执行体自己的 commit 刷盘 ⇒ 约 7.5 秒一格，本来就比 30 秒更细。
 
 #: 同步模式（设计 13 §17.8 / §22）：
 #: * ``full`` = 全量重扫 + upsert，翻到平台没有下一页为止；
@@ -374,8 +404,191 @@ def _duration_ms(task: Task) -> Optional[int]:
     return int((task.finished_at - task.started_at).total_seconds() * 1000)
 
 
-def status_payload(db: Session, task_type: str, account_id: int) -> dict[str, Any]:
+def _latest_account_log(
+    db: Session, *, user_id: int, account_id: int, job_key: str
+) -> Any:
+    """该用户该账号**最新一条**该定时任务的日志行（无 ⇒ `None`）。
+
+    「最新」按 `id` 倒序（自增主键 = 落库顺序，不受时钟回拨影响）—— 与
+    `latest_finished_task` 同口径。
+    """
+    from backend.app.models import ScheduledJobLog
+
+    return db.scalars(
+        select(ScheduledJobLog)
+        .where(
+            ScheduledJobLog.user_id == user_id,
+            ScheduledJobLog.account_id == account_id,
+            ScheduledJobLog.job_key == job_key,
+        )
+        .order_by(ScheduledJobLog.id.desc())
+        .limit(1)
+    ).first()
+
+
+#: 定时任务 job_key → 业务任务类型（账号卡两条链路；孤儿日志收口按它找回任务行）。
+ACCOUNT_JOB_TASK_TYPES: dict[str, str] = {
+    "system.note_sync": NOTE_SYNC_TASK_TYPE,
+    "system.shop_goods_sync": SHOP_GOODS_SYNC_TASK_TYPE,
+}
+
+
+def close_orphan_running_logs(db: Session) -> int:
+    """把**没有对应在跑任务**的 `running` 日志收口（进程重启后的孤儿）。**不 commit**。
+
+    **为什么需要**（2026-09-27 实测，用户报「再次分析账号笔记同步任务是否真实还在执行」）：
+    观测线程 `_watch_task_run` 是**进程内**的；进程重启后它没了，而它负责的那条日志仍是
+    `running`。此时任务行已被启动恢复复位（`pending`）或已重跑完成（`done`）⇒ **日志再也
+    没人写终态** ⇒ 永远「正在执行」，账号卡据此显示「同步中」，**而任务其实早已结束**
+    （实测 `log=14821` running ↔ `task=51` done，卡片骗了用户一个多小时）。
+
+    与 `_watch_task_run` 的「无限等」是**互补的两条腿**：那条保证「进程活着时日志不因超时
+    误判」，这条保证「进程重启后日志不留孤儿」。缺任一条都会出现「日志与实际任务不一致」。
+
+    收口口径（**优先精确**）：日志 `task_id` 能查到任务行 ⇒ 用它的真实终态；查不到
+    （存量 NULL / 任务行被记录清理）⇒ 回落「该账号最近一次终态任务」；连那个也没有 ⇒
+    `failed` + 「执行被应用退出中断」（「日志 running 而任务行连终态都没有」只可能是中断）。
+    """
+    from backend.app.models import ScheduledJobLog
+    from backend.app.models.scheduled_job import LOG_FAILED, LOG_RUNNING, LOG_SUCCESS
+
+    rows = db.scalars(
+        select(ScheduledJobLog).where(ScheduledJobLog.status == LOG_RUNNING)
+    ).all()
+    closed = 0
+    for log in rows:
+        task_type = ACCOUNT_JOB_TASK_TYPES.get(str(log.job_key or ""))
+        if task_type is None:
+            continue  # 非账号卡链路（cron 全量 / 系统作业）没有这条腿
+        account_id = log.account_id
+        if account_id is None:
+            continue  # 缺账号 ⇒ 归属不明，不动它（缺值口径：不猜）
+        if find_active_task(db, task_type, int(account_id)) is not None:
+            continue  # 真在跑 ⇒ 日志该是 running
+        task = db.get(Task, int(log.task_id)) if log.task_id else None
+        if task is None:
+            task = latest_finished_task(db, task_type, int(account_id))
+        if task is not None:
+            payload = task_payload(task)
+            log.status = LOG_SUCCESS if str(task.status) == STATUS_DONE else LOG_FAILED
+            log.finished_at = task.finished_at or shanghai_now()
+            log.duration_ms = _duration_ms(task)
+            log.message = str(payload.get("note") or "")
+            log.exception_info = str(payload.get("error") or "")
+        else:
+            log.status = LOG_FAILED
+            log.finished_at = shanghai_now()
+            log.message = "执行被应用退出中断"
+            log.exception_info = "执行被应用退出中断"
+        closed += 1
+    if closed:
+        db.flush()
+    return closed
+
+
+def close_running_logs_for_task(db: Session, task_id: int) -> int:
+    """把**某次业务任务**对应的 `running` 日志行收口。**不 commit**。
+
+    **为什么需要**（2026-09-27 用户口径「点击取消按钮二次确认后真实取消再执行的任务并修改
+    对应任务日志记录相关状态和数据」）：取消走 `POST /tasks/{id}/cancel`，它原本只改**任务行**；
+    日志行只由观测线程（`_watch_task_run`）在任务到终态时收口 —— 而观测线程可能已随进程消失
+    （重启）或还在轮询周期里 ⇒ **用户点了取消、任务也真取消了，日志却仍显示「正在执行」**，
+    与「日志状态 = 实际任务状态」这条不变量直接冲突。
+
+    日志状态表没有 `cancelled` 一档（`running`/`success`/`failed`/`skipped`）⇒ 记 `failed`
+    + message「已被用户取消」（`_terminal_fallback_reason` 同口径：**用户取消不算成功**）。
+    观测线程若还活着，写终态前会看到日志已终态 ⇒ **不覆写**（幂等，不会把 cancelled 改回别的）。
+    """
+    from backend.app.models import ScheduledJobLog
+    from backend.app.models.scheduled_job import LOG_FAILED, LOG_RUNNING
+
+    rows = db.scalars(
+        select(ScheduledJobLog).where(
+            ScheduledJobLog.task_id == int(task_id),
+            ScheduledJobLog.status == LOG_RUNNING,
+        )
+    ).all()
+    closed = 0
+    for log in rows:
+        log.status = LOG_FAILED
+        log.finished_at = shanghai_now()
+        log.message = "已被用户取消"
+        log.exception_info = ""
+        closed += 1
+    if closed:
+        db.flush()
+    return closed
+
+
+def _payload_from_log(log: Any) -> dict[str, Any]:
+    """日志行 ⇒ 状态端点响应体（**形状与 `task_summary` + `last_result` 逐字兼容**）。
+
+    映射（用户口径「只有任务日志状态在『正在执行』，才展示同步中」）：
+
+    * 日志 `running` ⇒ `status="running"`（前端 `syncTaskPhase` 判 active ⇒ 按钮「同步中」）；
+    * 日志 `success` / `failed` / `skipped` ⇒ `status="idle"` + `last_result` ⇒ 按钮回到可点，
+      失败原因走 `last_result`（`syncTerminalNotice` 只在「没成功」时打扰用户）。
+      ⚠️ `skipped`（被并发门挡下）映射成 `done`：跳过不是失败，弹一条失败提示是错归因。
+    """
+    # ⚠️ 常量住在 `models/scheduled_job`（`backend.app.models` 包**不导出**它们 ——
+    # 从包里 import 会 ImportError，实测 500 就是这么来的）。
+    from backend.app.models.scheduled_job import LOG_FAILED, LOG_RUNNING
+
+    running = str(log.status or "") == LOG_RUNNING
+    started = log.started_at.isoformat() if log.started_at else None
+    finished = log.finished_at.isoformat() if log.finished_at else None
+    note = str(log.message or "")
+    error = str(log.exception_info or "")
+    body: dict[str, Any] = {
+        # 日志不指向业务任务行（`scheduled_job_logs.task_id` 在账号卡路径上是空的）
+        # ⇒ 给 `None` 而不是编一个（缺值口径）。
+        "task_id": None,
+        "task_type": log.job_key,
+        "status": "running" if running else "idle",
+        "progress": log.progress,
+        "note": note,
+        "started_at": started,
+        "finished_at": None if running else finished,
+        "duration_ms": None if running else log.duration_ms,
+        "last_result": None,
+    }
+    if not running:
+        body["last_result"] = {
+            "task_id": None,
+            "status": "done" if str(log.status or "") != LOG_FAILED else "failed",
+            "progress": log.progress,
+            "goods_stored": None,
+            "note": note,
+            "error": error,
+            "finished_at": finished,
+            "started_at": started,
+            "duration_ms": log.duration_ms,
+            "sources": [],
+            "detail_done": None,
+            "detail_total": None,
+        }
+    return body
+
+
+def status_payload(
+    db: Session,
+    task_type: str,
+    account_id: int,
+    *,
+    user_id: Optional[int] = None,
+    job_key: str = "",
+) -> dict[str, Any]:
     """状态端点响应体：当前任务 + 最近一次结果（设计 13 §4.2 / §19.5）。
+
+    ⚠️ **账号卡的判据是「该账号最新一条同步日志的状态」**（2026-09-27 用户口径：
+    「账号信息卡的判断逻辑应只需要关注最新一条的同步笔记任务日志的状态即可」+
+    「根据任务日志详情的状态判断终态即可」「只有任务日志状态在『正在执行』，才展示同步中」）。
+    为什么改判据：业务任务行与「用户点的那一下」不是一一对应（同一个任务行可能被复用 /
+    被恢复重跑），而**日志行才是「一次点击 = 一条记录」**；且任务行的终态由执行方写，
+    日志的终态由观测方写，两者曾出现「日志 failed / 任务 running」的相反结论。
+
+    传了 `user_id` + `job_key` ⇒ 优先按日志判；日志缺失（存量数据 / 非账号卡入口）⇒
+    **回落到既有业务任务行判据**（行为与改造前逐字一致，不制造新的空态）。
 
     无进行中任务时 ``task_id=None, status="idle"`` —— 前端据此停轮询。
 
@@ -384,24 +597,173 @@ def status_payload(db: Session, task_type: str, account_id: int) -> dict[str, An
     * ``detail_done`` / ``detail_total``：商品同步本轮补了多少 SKU 详情 /
       队列还剩多少（``None`` = 不知道，前端显示 ``-``）。
     """
-    active = find_active_task(db, task_type, account_id)
-    last = latest_finished_task(db, task_type, account_id)
-    body = task_summary(active)
-    body["last_result"] = None
-    if last is not None:
-        payload = task_payload(last)
-        finished_at = last.finished_at.isoformat() if last.finished_at else None
-        body["last_result"] = {
-            "status": last.status,
-            "progress": payload.get("progress"),
-            "goods_stored": payload.get("goods_stored"),
-            "note": payload.get("note", ""),
-            "error": payload.get("error", ""),
-            "finished_at": finished_at,
-            "started_at": last.started_at.isoformat() if last.started_at else None,
-            "duration_ms": _duration_ms(last),
-            "sources": payload.get("sources") or [],
-            "detail_done": payload.get("detail_done"),
-            "detail_total": payload.get("detail_total"),
+    # ⚠️ **不做兼容回落**（2026-09-27 用户口径「不做兼容逻辑，历史错误数据修复」）：
+    # 判据**只有**「该账号最新一条同步日志」这一条 —— 没有日志就是 `idle`（空态），
+    # 而不是回头去读业务任务行。两套判据并存正是「日志 failed / 卡片同步中」的土壤
+    # （同一个事实两个答案，读的人永远不知道该信哪个）。存量缺 `account_id` 的日志
+    # 由数据修复脚本补齐，**不靠读取侧猜**。
+    if user_id is None or not job_key:
+        raise ValueError(
+            "status_payload 必须给出 user_id 与 job_key —— 判据只有「最新一条日志」一条路"
+        )
+    log = _latest_account_log(
+        db, user_id=user_id, account_id=account_id, job_key=job_key
+    )
+    if log is None:
+        # 这个账号还没跑过（或日志被清理）⇒ 空态：不显示同步中、也没有结果行。
+        return {
+            "task_id": None,
+            "task_type": job_key,
+            "status": "idle",
+            "progress": None,
+            "note": "",
+            "started_at": None,
+            "finished_at": None,
+            "duration_ms": None,
+            "last_result": None,
         }
-    return body
+    return _payload_from_log(log)
+
+
+def progress_percent(progress: Any) -> Optional[int]:
+    """任务行 `payload.progress` → 0–100 的百分比；**取不到给 `None`**（缺值口径，不造 0）。
+
+    **唯一实现**（DEF-044）：两处消费同一份判据 ——
+
+    * 进度泵的探针（`task_progress_probe`，执行期间每 2s 写一次日志 `progress`）；
+    * 观测线程写**日志终态**时（`scheduled_job_runner._watch_task_run`）取任务的
+      最终进度 —— 泵最多晚 2s，终态这一取才是「失败时停在哪个比例」的准确答案
+      （2026-09-27 用户口径「任务执行失败后任务进度不要变，应展示执行的进度比例」）。
+
+    ## 三个口径的优先级（2026-09-28 重排，设计 13 §42.4）
+
+    1. **`processed / work_total`**（**首选**，两个执行体都写）：`processed` = 本任务
+       **累计已处理条数**（列表落库 + 详情补齐都算「处理」，每篇/每商品一次），
+       `work_total` = 本任务**启动时可知的总工作量**（任务开始时算一次，中途不缩）。
+       这两个键是**唯一**能做到「进度条慢慢涨、且绝不 0→100 反复跳」的口径 ——
+       分子只增、分母固定 ⇒ 比值单调。
+    2. `detail_done / detail_total`（账号级详情补齐阶段）：仅在没写 `processed` 时兜底。
+    3. `stored / total`（列表落库）：同样只是兜底。
+
+    ⚠️ **为什么旧口径会跳**（2026-09-28 第二轮要修的那件事）：`detail_done / detail_total`
+    曾经被页内补齐借用，而它每页的 `detail_total` 只有**本页**待补数 ⇒ 一页内 0→100、
+    下一页又回 0。现在页内补齐**不再写 `detail_*`**，改累加 `processed`。
+    ⚠️ **分母语义（2026-09-28 第三轮修订，设计 13 §43）**：`work_total` 是「**启动时
+    可知**的工作量」—— 无界全量的平台总量、启动时的详情欠账数、平台按**同一条查询条件**
+    报出的商品总量（千帆接口按 `create_time_from` 服务端过滤 ⇒ 有界同步它也是本次工作量）。
+    **运行中才发现的量（本页枚举数 / 已落库条数）一律不进分母**：它与分子数的是**同一批
+    对象**，比值恒 100% ⇒ 进度条第一页就打满（旧实现的有界分支，用户报障「刚开跑就 100%」）。
+    ⇒ 有界同步因此可能**没有** `work_total`（欠账为 0 时）⇒ 本函数返回 `None` ⇒
+    前端如实渲染「比例未知」的不定量条（「未知」≠ 0%，见设计 13 §35.18.6 / §43.1）。
+    """
+    if not isinstance(progress, dict):
+        return None
+    processed = progress.get("processed")
+    work_total = progress.get("work_total")
+    if isinstance(processed, int) and isinstance(work_total, int) and work_total > 0:
+        return max(0, min(100, int(processed * 100 / work_total)))
+    done = progress.get("detail_done")
+    todo = progress.get("detail_total")
+    if isinstance(todo, int) and todo > 0 and isinstance(done, int):
+        return max(0, min(100, int(done * 100 / todo)))
+    stored = progress.get("stored")
+    total = progress.get("total")
+    if not isinstance(total, int) or total <= 0 or not isinstance(stored, int):
+        return None
+    return max(0, min(100, int(stored * 100 / total)))
+
+
+def task_progress_probe(task_id: int) -> Callable[[], Optional[int]]:
+    """造一个**进度探针**（设计 13 §35.17.3）：返回 0–100；取不到给 `None`。
+
+    给 `scheduled_job_runner` 的进度泵用 —— 泵跑在**独立线程**里，不能复用请求的
+    session，所以每次调用**自查一次库**（2s 一次，开销可忽略）。
+
+    缺值口径（§35.17.3，与全项目一致）：任务行已不在、或分页总数未知
+    （`total` 为 `None` —— 首页还没回来时就是这种）⇒ `None`，泵据此**不写** progress，
+    而不是写个 0 冒充「刚开始」。
+
+    ⚠️ 口径是**任务号**不是「账号当前的活动任务」：调用方（账号卡端点）已经确切知道
+    自己建的是哪一行，按 `task_id` 取才不会把「另一个刚被建出来的任务」的进度算进来。
+    笔记与商品**共用这一份实现**（DEF-044：同一语义不留两份）。
+    """
+    def _probe() -> Optional[int]:
+        db = SessionLocal()
+        try:
+            task = db.get(Task, task_id)
+            if task is None:
+                return None
+            # 换算走唯一实现 `progress_percent`（与观测线程写终态同一把尺子）。
+            return progress_percent(task_payload(task).get("progress"))
+        except Exception:  # noqa: BLE001 - 探针永不抛：观测不得影响执行
+            return None
+        finally:
+            db.close()
+
+    return _probe
+
+
+def await_task_terminal(
+    task_id: int,
+    *,
+    timeout_seconds: Optional[float],
+    poll_seconds: float,
+) -> dict[str, Any]:
+    """等一个业务任务行走到**终态**，返回 `{task_id, status, progress, note, error}`。
+
+    两处调用方，**共用这一份实现**（DEF-044）：定时任务日志的观测线程
+    （`scheduled_job_runner._watch_task_run`）与调度侧定向执行
+    （`scheduler_service._run_targeted_*`）。两边都要「按真实终态写结果」，
+    各写一份迟早一边记得处理 `cancelled`、另一边漏掉。
+
+    三种收尾都给**明确答案**（不返回 `None`，不留「不知道」给调用方去猜）：
+
+    * `done` / `failed` / `cancelled` ⇒ 原样带出（含任务 payload 里的 `note` / `error`）；
+    * 行不存在（被记录清理删掉）⇒ `status="missing"`；
+    * 超时 ⇒ `status="timeout"`（缺值口径：**不**猜成成功，也不猜成失败原因）。
+
+    ⚠️ 返回体**不从 `task_summary` 取**：那个形状不含 `error`（失败原因），而日志要写它。
+
+    ⚠️ `timeout_seconds=None` ⇒ **无限等**（2026-09-27 用户口径「任务无需超时校验」）：
+    长同步任务一次拿全正文与商品（实测 105 分钟仍在中途）是**正常**的；用超时把观测方
+    提前放走，只会得到「一条失败日志 + 一个还在跑的任务」这种自相矛盾（用户报「日志
+    记录依旧是失败，为何实际任务未终止，状态与实际任务不一致」）。要超时是**调用方**
+    的选择，函数本身两种都支持。
+    """
+    #: `None` = 无限等（不给 deadline）；否则到点返回 `timeout`。
+    deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
+    while True:
+        db = SessionLocal()
+        try:
+            row = db.get(Task, task_id)
+            if row is None:
+                return {
+                    "task_id": task_id,
+                    "status": "missing",
+                    "progress": None,
+                    "note": "",
+                    "error": f"任务 #{task_id} 已不存在（可能被记录清理删除），本次执行没有结果可记",
+                }
+            if row.status in TERMINAL_STATUSES:
+                payload = task_payload(row)
+                return {
+                    "task_id": task_id,
+                    "status": row.status,
+                    "progress": payload.get("progress"),
+                    "note": payload.get("note") or "",
+                    "error": payload.get("error") or "",
+                }
+        finally:
+            db.close()
+        if deadline is not None and time.monotonic() >= deadline:
+            return {
+                "task_id": task_id,
+                "status": "timeout",
+                "progress": None,
+                "note": "",
+                "error": (
+                    f"等待任务 #{task_id} 超过 {int((timeout_seconds or 0) / 60)} 分钟仍未结束，"
+                    "任务仍在后台继续执行，可在账号卡查看"
+                ),
+            }
+        time.sleep(poll_seconds)

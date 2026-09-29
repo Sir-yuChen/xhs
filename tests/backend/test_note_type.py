@@ -407,7 +407,16 @@ def _add_note(db, account, note_id: str, *, content: str = "", note_type: str = 
         title=note_id,
         content=content,
         note_type=note_type,
-        raw_json=raw if raw is not None else {"note_url": f"https://www.xiaohongshu.com/explore/{note_id}"},
+        # §19.13.9（2026-09-28）：详情必须带笔记级令牌 —— 无令牌会被拦成 `no_token`
+        # （无 token 的 explore 兜底已删除）⇒ 默认夹具按**真实形态**给令牌。
+        raw_json=(
+            raw
+            if raw is not None
+            else {
+                "note_url": f"https://www.xiaohongshu.com/explore/{note_id}",
+                "xsec_token": "TK-TEST",
+            }
+        ),
         platform_missing_at=shanghai_now() if platform_missing else None,
     )
     db.add(note)
@@ -521,22 +530,20 @@ def test_sync_note_allows_published_local_generated_note(api_env):
     assert body["note"]["publish_status"] == "published"
 
 
-def test_sync_note_published_local_generated_without_raw_url(api_env):
-    """本地生成 + 已发布、`raw_json` **没有详情地址** ⇒ 同步按钮也要能真同步。
+def test_sync_note_published_local_generated_without_token_is_blocked(api_env):
+    """本地生成 + 已发布、`raw_json` **没有详情令牌** ⇒ 结构化拦截，让用户补齐登录。
 
     2026-09-25 用户报障（真实库 id 1967「中古风桌旗，让家瞬间高级感」）：
     平台 `note/publish` 响应只回 `{"id"}`，本地生成笔记的 raw 从来没有
-    `note_url` / `xsec_token` ⇒ 旧实现判 `no_url`，用户看到「这条笔记没有可用
-    的详情地址」—— 按钮在、功能不在。
+    `note_url` / `xsec_token`。
 
-    修复后单条同步路径（`allow_tokenless=True`）：本用例账号没有 ark 令牌 ⇒
-    回查跳过，用平台 note_id 兜底拼 explore 地址打详情 ⇒ `ok` + 正文按刷新
-    语义覆盖本地（§25.3）。批量 / 定时链路（`refresh=False`）不放开，由
-    `test_note_content_backfill.py::TestDetailRefBackfill` 守边界。
+    ⚠️ **§19.13.9（2026-09-28 用户口径）改写了处置方式**：「移除兜底，不允许出现
+    翻页到底；没有令牌强行拦截，让用户补齐登录令牌」。旧实现（`allow_tokenless`）
+    在这里拼一个**无 token** 的 explore 地址去打详情 —— 平台对这类链接一律
+    302 → `/404?error_code=300031`（§19.13.8 真机实测），白烧一次请求。
 
-    ⚠️ 2026-09-25 队列化：入队后等 worker 跑完，再从快照 `finished` 读终态
-    （`status == "ok"`）—— 与批量同一个出口。`content_updated` 这类逐项细节
-    现在只在 worker 内部，响应体不再带。
+    现在：先做一次 **ark 精确回查**（本用例账号没有 ark 令牌 ⇒ 回查跳过），
+    仍拿不到令牌 ⇒ `no_token` + `NOTE_DETAIL_TOKEN_REQUIRED`，**一次平台请求都不发**。
     """
     headers, SessionLocal, account_id, detail = api_env
     db = SessionLocal()
@@ -559,15 +566,19 @@ def test_sync_note_published_local_generated_without_raw_url(api_env):
     _sync_via_button(client, headers, note_id)
 
     entry = _sync_finished_entry(client, headers, note_id)
-    assert entry["ok"] is True and entry["status"] == "ok", entry
+    # 快照的 `status` 只有 ok / failed（细分靠 `code`，见 note_queue_service 快照段）。
+    assert entry["ok"] is False, entry
+    assert entry["status"] == "failed", entry
+    assert entry["code"] == "NOTE_DETAIL_TOKEN_REQUIRED", entry
+    # 缺令牌 ⇒ 一次详情请求都不发（旧实现会打一个无 token 的 explore 地址）。
+    assert RecordingPcAdapter.seen == [], RecordingPcAdapter.seen
     db = SessionLocal()
     try:
-        assert db.get(Note, note_id).content == "平台最新正文"
+        row = db.get(Note, note_id)
+        assert row.content == "旧正文", "没取到详情就不动本地正文"
+        assert row.hydrated_at is None, "缺令牌可自救 ⇒ 不写标记，补齐登录后重试"
     finally:
         db.close()
-    assert RecordingPcAdapter.seen == [
-        f"https://www.xiaohongshu.com/explore/{HEX_NOTE_ID}"
-    ], "兜底 URL 就是 explore/{平台 note_id}（无 token）"
 
 
 def test_sync_note_allows_published_collected_note(api_env):
@@ -1041,16 +1052,16 @@ def _seed_item_filter_fixture(db, *, user_id: int, account_id: int) -> dict:
             )
         )
     db.flush()
-    pk = {n.note_id: n.id for n in db.scalars(select(Note)).all()}
+    # §26.7：关系表按**平台 ID** 落（平台笔记 ID ↔ 平台商品 ID）
     db.add_all(
         [
-            NoteGoods(note_id=pk["N-1"], product_id=p1.id),
-            NoteGoods(note_id=pk["N-2"], product_id=p1.id),
-            NoteGoods(note_id=pk["N-3"], product_id=p2.id),
+            NoteGoods(user_id=user_id, note_id="N-1", item_id=p1.item_id),
+            NoteGoods(user_id=user_id, note_id="N-2", item_id=p1.item_id),
+            NoteGoods(user_id=user_id, note_id="N-3", item_id=p2.item_id),
         ]
     )
     db.commit()
-    return {"p1": p1.id, "p2": p2.id}
+    return {"p1": p1.item_id, "p2": p2.item_id}
 
 
 def test_notes_filter_by_item_id(api_env):
@@ -1135,6 +1146,26 @@ def test_notes_filter_by_item_id_does_not_leak_other_users(api_env):
             user_id=intruder.id, shop_id_fk=intruder_shop.id, item_id="ITEM-FOREIGN", item_title="别人的商品"
         )
         db.add(foreign)
+        # ⚠️ 别人的**关系行 + 笔记行**也要真建：只建商品行的话，本用例在新口径下
+        # 会「因为压根没有关系行」而通过（假绿）。要证明的是 `user_id` 闸真的挡得住。
+        intruder_account = PlatformAccount(
+            user_id=intruder.id, platform="xhs", sub_type="creator",
+            nickname="别人的号", status="active",
+        )
+        db.add(intruder_account)
+        db.flush()
+        db.add(
+            Note(
+                user_id=intruder.id,
+                platform_account_id=intruder_account.id,
+                platform="xhs",
+                note_id="N-FOREIGN",
+                title="别人的笔记",
+                note_type="synced",
+            )
+        )
+        db.flush()
+        db.add(NoteGoods(user_id=intruder.id, note_id="N-FOREIGN", item_id="ITEM-FOREIGN"))
         db.commit()
     finally:
         db.close()

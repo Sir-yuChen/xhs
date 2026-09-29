@@ -24,6 +24,9 @@
  *   SYNC_GATES_MUTATE=dash      <node> …                  # 期望 FAIL
  *   SYNC_GATES_MUTATE=goodsgate <node> …                  # 期望 FAIL
  *   SYNC_GATES_MUTATE=cancel    <node> …                  # 期望 FAIL（§24.8）
+ *   SYNC_GATES_MUTATE=terminalnotice <node> …             # 期望 FAIL（§35.18）
+ *   SYNC_GATES_MUTATE=progressdash <node> …               # 期望 FAIL（§35.18.6）
+ *   SYNC_GATES_MUTATE=cancelsuffix <node> …               # 期望 FAIL（§35.18.6）
  */
 const fs = require("fs");
 const os = require("os");
@@ -46,6 +49,13 @@ const RESERVED = {
   dash: 'const remaining = result.detail_total == null ? "-" : String(result.detail_total);',
   goodsgate: "    blocked: channelUnavailable(channels, \"ark\"),",
   cancel: '  if (result.status === "cancelled") {',
+  // H 组（§35.17.4 首查驱动轮询 / §35.18 终态提示）—— 2026-09-27
+  phaseactive: "  if (SYNC_ACTIVE_STATES.includes(status.status)) {",
+  phaseidle: '  return status.last_result ? "finished" : "idle";',
+  terminalnotice: '  if (!result || result.status === "done") {',
+  // I 组（§35.18.6 进度分母三态 / 取消说明剥离）—— 2026-09-27 用户报障
+  progressdash: "  if (total == null) {",
+  cancelsuffix: '    const note = (result.note || "").replace(/(^|；)已被用户取消$/, "");',
 };
 
 const MUTATE_TO = {
@@ -65,6 +75,16 @@ const MUTATE_TO = {
   goodsgate: "    blocked: false,",
   // 取消分支失效 ⇒ cancelled 退回「上次同步 …」误导用户（§24.8）
   cancel: '  if (false && result.status === "cancelled") {',
+  // 「进行中」判据失效 ⇒ 在跑的任务被当成结束，首查当场把账号摘出轮询集
+  phaseactive: "  if (false && SYNC_ACTIVE_STATES.includes(status.status)) {",
+  // 已结束一律当 idle ⇒ 轮询停不下来（对着不会再变的任务无限 5s 轮询）
+  phaseidle: '  return "idle";',
+  // 成功也弹提示 ⇒ 每次同步完都打扰用户（用户口径：只留按钮态「同步中」）
+  terminalnotice: '  if (!result) {',
+  // 分母缺失也照渲染 ⇒ 回到「已落库 15 / 共 null 条」（用户读成「卡住了」）
+  progressdash: "  if (false) {",
+  // 不剥取消后缀 ⇒ 结果行出现两次「取消」（「已取消 · …；已被用户取消」）
+  cancelsuffix: '    const note = result.note || "";',
 };
 
 const mutatePlugin = {
@@ -117,6 +137,7 @@ async function main() {
   fs.writeFileSync(outFile, bundled.outputFiles[0].text);
   const mod = require(outFile);
   const { noteSyncPlan, goodsGate, syncResultText, goodsResultText, channelUnavailable } = mod;
+  const { syncTaskPhase, syncTerminalNotice, syncProgressText } = mod;
 
   if (typeof noteSyncPlan !== "function") {
     console.error("FATAL 未导出 noteSyncPlan —— 若已重命名，请同步更新本脚本");
@@ -191,6 +212,9 @@ async function main() {
   );
 
   // E. 结果行：分源摘要必须带上失败的源（不许吞）
+  // ⚠️ 2026-09-27 §35.18.6 **取代**了「分母缺失渲染 `/ 共 -`」的旧断言：分母不可知
+  //    （增量 / 区间同步会早停）时只报「已落库 N 条」—— 把「未知」渲染成占位符会被
+  //    读成「卡住了」，正是报障里用户反复取消同步的诱因。**旧原句保留在版本历史里**。
   check(
     "E1 分源摘要：成功的报条数、失败的带原因",
     syncResultText(
@@ -205,7 +229,7 @@ async function main() {
       },
       "条"
     ),
-    "上次同步 已落库 2 / 共 - 条 · 网页版 2 条；千帆商品笔记：ARK_NOTE_LIST_FAILED: 登录凭证缺失"
+    "上次同步 已落库 2 条 · 网页版 2 条；千帆商品笔记：ARK_NOTE_LIST_FAILED: 登录凭证缺失"
   );
   check(
     "E2 失败任务整体：错误原因必须在行里",
@@ -243,7 +267,7 @@ async function main() {
       syncResultText({ status: "done", progress: { stored: 2, total: null }, note: "", duration_ms: 4200 }, "条"),
       syncResultText({ status: "done", progress: { stored: 2, total: null }, note: "" }, "条"),
     ],
-    ["上次同步 已落库 2 / 共 - 条 · 耗时 4 秒", "上次同步 已落库 2 / 共 - 条"]
+    ["上次同步 已落库 2 条 · 耗时 4 秒", "上次同步 已落库 2 条"]
   );
 
   // F. 商品结果行：详情进度 + 缺值渲染 `-`（不渲染 0）
@@ -256,7 +280,7 @@ async function main() {
       detail_done: 3,
       detail_total: null,
     }),
-    "上次同步 已落库 3 / 共 - 件 · 规格详情 3 件（剩余 -）"
+    "上次同步 已落库 3 件 · 规格详情 3 件（剩余 -）"
   );
   check(
     "F2 详情剩余有值 ⇒ 照实显示",
@@ -267,12 +291,12 @@ async function main() {
       detail_done: 2,
       detail_total: 3,
     }),
-    "上次同步 已落库 3 / 共 - 件 · 规格详情 2 件（剩余 3）"
+    "上次同步 已落库 3 件 · 规格详情 2 件（剩余 3）"
   );
   check(
     "F3 没跑详情段（detail_done 缺失）⇒ 不拼详情行",
     goodsResultText({ status: "done", progress: { stored: 1, total: null }, note: "" }),
-    "上次同步 已落库 1 / 共 - 件"
+    "上次同步 已落库 1 件"
   );
 
   // G. 门禁判据与 v1.31 同一条尺子（www / ark 共用）
@@ -281,6 +305,140 @@ async function main() {
     [channelUnavailable(channels({ ...unknown, www: "expired" }), "www"),
      channelUnavailable(channels({ ...unknown, ark: "expired" }), "ark")],
     [true, true]
+  );
+
+  // H. **首查驱动轮询**（§35.17.4，2026-09-27 用户口径）：
+  //    「查一次任务记录表当前账号存在对应任务则展示页签，任务非结束状态（包括正常
+  //      结束和非正常结束）则前端 5 秒查询一次，如果为结束状态则不再轮询查询，
+  //      每次刷新按钮或进入页面时自动触发一次，**根据第一个获取的信息决定是否需要
+  //      轮询**」。
+  //
+  //    这一组盯的是「要不要继续打后端」这个决策 —— 判错的两端都有害：
+  //    把在跑的当结束 ⇒ 按钮永久停在「同步中」（H9 那类「看着像在跑其实没更新」）；
+  //    把结束的当在跑 ⇒ 对一个不会再变的任务无限 5s 轮询，纯浪费且违反用户口径。
+  check("H1 没有状态响应 ⇒ idle（不展示、不轮询）", syncTaskPhase(null), "idle");
+  check(
+    "H2 running ⇒ active（继续 5s 轮询）",
+    syncTaskPhase({ task_id: 7, status: "running", progress: { stored: 3, total: 10 } }),
+    "active"
+  );
+  check(
+    "H3 pending ⇒ active（排队中也是未结束）",
+    syncTaskPhase({ task_id: 7, status: "pending", progress: null }),
+    "active"
+  );
+  check(
+    "H4 任务已结束（状态端点回 idle、结果在 last_result）⇒ finished（停止轮询）",
+    syncTaskPhase({
+      task_id: null,
+      status: "idle",
+      last_result: { task_id: 7, status: "done", progress: { stored: 10, total: 10 }, note: "", error: "" },
+    }),
+    "finished"
+  );
+  check(
+    "H5 没有进行中也没有历史 ⇒ idle（用户口径的「不存在对应任务」）",
+    syncTaskPhase({ task_id: null, status: "idle", last_result: null }),
+    "idle"
+  );
+  check(
+    "H6 **非正常结束**（failed）也算结束 ⇒ finished（不再轮询）",
+    syncTaskPhase({
+      task_id: null,
+      status: "idle",
+      last_result: { task_id: 8, status: "failed", progress: null, note: "", error: "NOTE_SOURCES_UNAVAILABLE: …" },
+    }),
+    "finished"
+  );
+  check(
+    "H7 取消（cancelled）也是终态 ⇒ finished",
+    syncTaskPhase({
+      task_id: null,
+      status: "idle",
+      last_result: { task_id: 9, status: "cancelled", progress: { stored: 3, total: 10 }, note: "已被用户取消", error: "" },
+    }),
+    "finished"
+  );
+
+  // H8–H11：终态提示（§35.18，2026-09-27 用户口径「进度卡移除，只留按钮态」）——
+  //    卡片里不再有进度区块 ⇒ 非正常终态**必须**由轻提示报出真原因，
+  //    成功则**不许**打扰（否则每次同步完都弹一条，纯噪声）。
+  check(
+    "H8 成功（done）⇒ 空串（不打扰；进度与结果去任务中心「任务日志」看）",
+    syncTerminalNotice(
+      { status: "done", progress: { stored: 10, total: 10 }, note: "", error: "" },
+      "条",
+      syncResultText
+    ),
+    ""
+  );
+  check(
+    "H9 失败（failed）⇒ 带真原因（静默吞掉失败 = 用户点了半天不知道发生了什么）",
+    syncTerminalNotice(
+      { status: "failed", progress: null, note: "", error: "NOTE_SOURCES_UNAVAILABLE: …" },
+      "条",
+      syncResultText
+    ),
+    "同步失败：NOTE_SOURCES_UNAVAILABLE: …"
+  );
+  check(
+    "H10 取消（cancelled）也算没成功 ⇒ 说「已取消」并带耗时",
+    syncTerminalNotice(
+      { status: "cancelled", progress: { stored: 3, total: 10 }, note: "已被用户取消", error: "", duration_ms: 125000 },
+      "条",
+      syncResultText
+    ),
+    "已取消 · 耗时 2 分 5 秒"
+  );
+  check(
+    "H11 没有结果（null）⇒ 空串（首查/轮询拿不到 last_result 时不许凭空报一句）",
+    [syncTerminalNotice(null, "条", syncResultText), syncTerminalNotice(undefined, "条", syncResultText)],
+    ["", ""]
+  );
+
+  // ---- I 组：进度分母三态 + 取消说明剥离（§35.18.6，2026-09-27 用户报障） ----
+  //   用户原话：「最新包中的笔记同步后，详情弹窗内全部是：列表源不带正文……
+  //   同步笔记为何出现这些场景，数据不全」。根因是**任务被取消 ⇒ 收尾段整段没跑**，
+  //   而诱因之一是**进度条恒 0%**（分母取了账号总量 1951，区间同步却只落个位数）
+  //   ⇒ 用户以为卡死而反复取消。这里盯四件事：
+  //   ① 只有**无界全量**才报分母；② 有界（total 缺失）**不许**渲染「/ 共 -」；
+  //   ③ 详情补齐阶段优先报它；④ 取消结果行**不许**把「已被用户取消」后缀漏出来。
+  check(
+    "I1 无界全量 ⇒ 报分母（全量会翻到底，分母真实）",
+    syncProgressText({ stored: 15, total: 1951 }, "条"),
+    "已落库 15 / 共 1951 条"
+  );
+  check(
+    "I2 有界同步（total 缺失）⇒ 只报已落库，**不渲染「/ 共 -」**",
+    syncProgressText({ stored: 15, total: null }, "条"),
+    "已落库 15 条"
+  );
+  check(
+    "I3 详情补齐阶段优先（那一段才是「还要等多久」）",
+    syncProgressText({ stored: 15, total: null, detail_done: 3, detail_total: 13 }, "条"),
+    "已落库 15 条 · 详情补齐 3 / 13"
+  );
+  check(
+    "I4 取消 + 业务说明 ⇒ 剥掉「已被用户取消」后缀，说明保留（不重复说「取消」）",
+    syncResultText(
+      {
+        status: "cancelled",
+        progress: { stored: 10 },
+        note: "正文与图集待补 13 条，再次同步可继续补；已被用户取消",
+        error: "",
+        duration_ms: 23000,
+      },
+      "条"
+    ),
+    "已取消 · 正文与图集待补 13 条，再次同步可继续补 · 耗时 23 秒"
+  );
+  check(
+    "I5 取消只有后缀（没有业务说明）⇒ 只留「已取消」（既有行为不回归）",
+    syncResultText(
+      { status: "cancelled", progress: { stored: 3, total: 10 }, note: "已被用户取消", error: "", duration_ms: 125000 },
+      "条"
+    ),
+    "已取消 · 耗时 2 分 5 秒"
   );
 
   console.log(`\n${passed} PASS / ${failed} FAIL`);

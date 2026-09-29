@@ -63,10 +63,16 @@ def _load_yaml_config() -> Dict[str, Any]:
         "xhs.shop_goods_sync.interval_hours": "xhs_shop_goods_sync_interval_hours",
         # 调度轮内账号之间的停顿（秒）：多账号矩阵不一窝蜂。
         "xhs.sync.account_gap_seconds": "xhs_sync_account_gap_seconds",
+        # 同步并行账号数（设计 13 §38.3，2026-09-27）：同一账号始终串行（账号级互斥），
+        # 并行只发生在**账号之间**。运行期可在设置页改（system_settings 行覆盖本值）。
+        "xhs.sync.account_parallelism": "xhs_sync_account_parallelism",
         # 平台请求限流（次/分钟，按 `<账号>:<源>` 键计量；等待式，不即停）。
         # DEF-069 提速（2026-09-25）：原实现没有这一项，额度实际落到
         # `scheduler_interval_seconds`（60）兜底 —— 语义混乱且改不动。
         "xhs.sync.rate_limit_per_minute": "crawl_rate_limit_per_minute",
+        # 商品笔记重复发布开关（设计 13 §31.5.2，2026-09-28）：默认 false = 同一商品
+        # 已有笔记（已发布 / 正在发布）时不再发布。运行期可在设置页改（行覆盖本值）。
+        "xhs.publish.allow_duplicate_goods": "xhs_allow_duplicate_goods_publish",
         "frontend.serve_static": "frontend_serve_static",
         "frontend.build_dir": "frontend_build_dir",
     }
@@ -153,10 +159,12 @@ class Settings(BaseSettings):
     scheduler_interval_seconds: int = 60
 
     # 平台请求限流（次/分钟，按 `<账号>:<源>` 键计量；`wait_allow` 等待式，不即停）。
-    # 默认 60（= 与原 `scheduler_interval_seconds` 兜底同值，行为不变）；嫌慢可调大
-    # （DEF-069 提速，2026-09-25 用户口径「同步感觉慢，加快速度」），但注意平台
-    # 风控是真实的 —— 详情请求密度过高会触发反爬（curl 28 超时即其表现形式）。
-    crawl_rate_limit_per_minute: int = 60
+    # 默认 **8**（2026-09-27 由 60 下调，用户口径，见设计 13 §38.7）：实测 60 次/分钟
+    # 会让平台踢掉网页会话 ⇒ 保守区间 5~10；嫌慢可在设置页调大（改完立即生效），
+    # 但平台风控是真实的 —— 详情请求密度过高会触发反爬。
+    # ⚠️ 本字段只是**第 3 层兜底**（构造参数 > 运行时配置 > 本字段 > 内置 5）：
+    #    随包种子已按用户铺设 `system_settings` 行，正常安装路径下读的是那一行。
+    crawl_rate_limit_per_minute: int = 8
 
     # 千帆（ark）店铺绑定的登录态巡检（T-31）—— 只读探活，见 services/shop_health_service.py
     # 关闭开关 = 不注册定时任务（手动「立即巡检」按钮仍可用）。
@@ -180,6 +188,20 @@ class Settings(BaseSettings):
     xhs_shop_goods_sync_interval_hours: int = 6
     # 调度轮内**账号之间**的停顿（秒）：多账号矩阵不能一窝蜂同时打平台。
     xhs_sync_account_gap_seconds: int = 10
+    # 同步**并行账号数**（设计 13 §38.3，2026-09-27 用户口径「账号之间的任务应支持并行」）。
+    # 同一账号始终串行（账号级互斥 —— 同账号并发只会互抢同一个限流桶，既不提速又让
+    # 「每账号每源 N 次/分钟」的语义失真）；并行只发生在账号之间。
+    # ⚠️ 运行期可在设置页改（`system_settings` 行优先于本值，见 services/settings_service.py）。
+    # ⚠️ 与限流额度是**乘性**关系：N 个账号 × 单账号速率 = 出口 IP 的总请求速率（设计 13 §38.6）。
+    xhs_sync_account_parallelism: int = 3
+
+    # 商品笔记重复发布开关（设计 13 §31.5.2，2026-09-28 用户口径）。
+    # 默认 **False** = 同一商品已有笔记（已发布 / 正在发布）时，再点发布 / 批量发布
+    # **不再发布**，该笔记落 `publish_status=failed` + 原因「挂载的商品已经发布过笔记」。
+    # ⚠️ 本字段只是**第 3 层兜底**（构造参数 > 运行时配置 > 本字段 > 内置默认）：
+    #    随包种子已按用户铺设 `system_settings` 行，正常安装路径下读的是那一行
+    #    （设置页可改、改完立即生效）。
+    xhs_allow_duplicate_goods_publish: bool = False
 
     # Asset storage
     asset_storage_type: str = "local"

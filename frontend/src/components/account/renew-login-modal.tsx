@@ -161,7 +161,11 @@ export function RenewLoginModal({ target, onClose, onRenewed }: RenewLoginModalP
               accountType={target.channel === "creator" ? "creator" : "pc"}
               targetAccountId={target.account.id}
               onConfirmed={() => undefined}
-              onRenewed={(account) => onRenewed(account?.id ?? target.account.id)}
+              // ⚠️ 必须走 `handleRenewed`（它带 `onClose()`），**不能**直接调 `onRenewed`：
+              // 2026-09-28 用户实测「手机号登录成功后重登窗口未自动关闭」就是这里漏了关窗
+              // —— 二维码 / 千帆邮箱两档走的是 `handleRenewed`，只有手机档直连 `onRenewed`。
+              // 守卫：`tests/frontend/add_account_modal.cjs` A9（三种方式都必须关窗）。
+              onRenewed={(account) => handleRenewed(account?.id ?? target.account.id)}
             />
           ) : (
             <QianfanEmailLoginPanel

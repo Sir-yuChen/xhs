@@ -14,8 +14,10 @@
    只吃一个位置参数的老替身（加固，不是新门禁）。
 
 2026-09-25 DEF-069 追加第五组：**限流额度配置化** —— `CrawlRateLimiter` 的额度
-从「构造参数 > settings（`crawl_rate_limit_per_minute`，默认 60）> 5」解析
+从「构造参数 > 运行时配置 > settings（`crawl_rate_limit_per_minute`）> 5」解析
 （原兜底读 `scheduler_interval_seconds`，语义混乱：改限流要改调度周期）。
+⚠️ 2026-09-27 起 settings 层的**默认值是 8**（由 60 下调，设计 13 §38.8）；下面的
+「60」只出现在**替身**里 —— 那测的是层级优先级，不是产品默认值。
 
 ⚠️ **本文件头部曾被误毁并重建**（2026-09-25）：一次 `cat >>` heredoc 覆盖了
 模块 docstring / imports 与两条用例（正是 `REF_易错与运行坑.md` §B 末条记的
@@ -53,12 +55,12 @@ def test_rate_limit_quota_prefers_explicit_argument_over_settings(monkeypatch):
 
 
 def test_default_quota_comes_from_settings(monkeypatch):
-    """生产默认额度 = `settings.crawl_rate_limit_per_minute`（默认 60，行为不变）。"""
+    """生产默认额度 = `settings.crawl_rate_limit_per_minute`（2026-09-27 起 **8**，设计 13 §38.8）。"""
     from backend.app.core.config import get_settings
     from backend.app.services.rate_limiter import CrawlRateLimiter
 
-    assert getattr(get_settings(), "crawl_rate_limit_per_minute", 0) == 60
-    assert CrawlRateLimiter().max_per_minute == 60
+    assert getattr(get_settings(), "crawl_rate_limit_per_minute", 0) == 8
+    assert CrawlRateLimiter().max_per_minute == 8
 
 
 # --------------------------------------------------------------------------- #

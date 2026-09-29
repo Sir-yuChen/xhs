@@ -4002,9 +4002,6 @@ def test_xhs_creator_routes_use_owned_creator_account_and_record_tasks(tmp_path)
         def post_note(self, note_info):
             return {"success": True, "data": {"note_id": "creator-direct-note"}, "note_info": note_info}
 
-        def get_published_notes(self):
-            return True, "ok", {"data": {"items": [{"note_id": "published-001", "title": "Published"}]}}
-
     db_dependency, owner_token, creator_account_id = _create_creator_account_with_cookie(
         tmp_path, "creator-routes-owner"
     )
@@ -4075,13 +4072,6 @@ def test_xhs_creator_routes_use_owned_creator_account_and_record_tasks(tmp_path)
         )
         assert video_response.status_code == 200
         assert video_response.json()["payload"]["note_info"]["media_type"] == "video"
-
-        published_response = client.get(
-            f"/api/xhs/creator/published?account_id={creator_account_id}",
-            headers={"Authorization": f"Bearer {owner_token}"},
-        )
-        assert published_response.status_code == 200
-        assert published_response.json()["items"][0]["note_id"] == "published-001"
 
         db = next(app.dependency_overrides[get_db]())
         try:

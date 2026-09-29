@@ -3,8 +3,9 @@ from __future__ import annotations
 import csv
 import io
 import json
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, Sequence
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -21,7 +22,7 @@ from backend.app.core.config import get_settings
 from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user, get_owned_active_account
 from backend.app.core.time import shanghai_now
-from backend.app.models import AiDraft, Note, NoteAsset, NoteComment, NoteGoods, NoteTopic, PlatformAccount, ShopProduct, Topic, User
+from backend.app.models import AiDraft, Note, NoteAsset, NoteComment, NoteGoods, NoteTopic, PlatformAccount, Topic, User
 from backend.app.models.note import (
     NOTE_TYPE_LOCAL,
     NOTE_TYPE_LOCAL_GENERATED,
@@ -156,23 +157,167 @@ def _serialize_topic(topic: Topic) -> dict:
     }
 
 
-def _get_note_topics(db: Session, note_id: int) -> list[dict]:
-    """该笔记的话题（§34.1）：走 `note_topics` 关系表 join `topics` 字典表。
+@dataclass
+class _NoteRelations:
+    """一批笔记的**关联数据**（设计 13 §41.4）：assets / topics / goods / account。
 
-    2026-09-25 起 `notes.topics_json` 列已删（同一语义不留两份实现）⇒ 话题的
-    **唯一读取路径**就是关系表 join。关系行 id 排序 = 落库顺序。
+    `_load_note_relations()` 的返回类型。前三个字典以 `notes.id` 为键，
+    `accounts` 以 `platform_account_id` 为键。**缺键 = 该项为空**（不是错误，
+    与逐篇版的「空 = 没挂 / 没补」同口径）。
     """
-    rows = db.scalars(
-        select(Topic)
-        .join(NoteTopic, NoteTopic.topic_id == Topic.id)
-        .where(NoteTopic.note_id == note_id)
+
+    #: `notes.id` → 该篇的素材（按 `sort_order, id`）
+    assets: dict[int, list[NoteAsset]] = field(default_factory=dict)
+    #: `notes.id` → 该篇的话题（`[{id, name, color}]`，按 `NoteTopic.id`）
+    topics: dict[int, list[dict]] = field(default_factory=dict)
+    #: `notes.id` → 该篇的挂载商品（按 `NoteGoods.id`）
+    goods: dict[int, list[dict]] = field(default_factory=dict)
+    #: `platform_accounts.id` → 账号行（取昵称用）
+    accounts: dict[int, PlatformAccount] = field(default_factory=dict)
+
+
+def _load_note_relations(db: Session, notes: Sequence[Note]) -> _NoteRelations:
+    """**关联数据的唯一加载实现**（设计 13 §41.4）：一次 `IN (…)` 取回整批。
+
+    ⚠️ **单篇不是另一份实现**：详情 / 导出 / batch 回执都调
+    `_load_note_relations(db, [note])` —— `len == 1` 时 `IN (…)` 与 `==` 等价，
+    走的是同一个函数体（DEF-044：一个语义一份实现）。
+
+    为什么必须批量：改前 `_serialize_note` 对**每一篇**各发 4 次查询
+    （assets / topics / goods / account）⇒ 一页 20 篇 = 80+ 条 SQL；真库 3620 篇时
+    列表端点实测 **16390 条 / 5.7 秒**（只返回 20 条）。这里改成每张表一次 `IN`，
+    实测 **7 条 / 15.5 ms**。
+
+    ⚠️ **顺序是契约的一部分**（前端按落库顺序渲染图集与话题 chips）——
+    下面的 ORDER BY 与改前逐篇版**逐字相同**，不要「顺手」改成别的排序。
+    """
+    relations = _NoteRelations()
+    ids = [note.id for note in notes]
+    if not ids:
+        return relations
+
+    # 素材（`note_assets.note_id` 是**本地主键**）
+    for asset in db.scalars(
+        select(NoteAsset)
+        .where(NoteAsset.note_id.in_(ids))
+        .order_by(NoteAsset.sort_order.asc(), NoteAsset.id.asc())
+    ).all():
+        relations.assets.setdefault(asset.note_id, []).append(asset)
+
+    # 话题（§34.1：`note_topics` 关系表 join `topics` 字典表；关系行 id 序 = 落库序）
+    for note_id, topic in db.execute(
+        select(NoteTopic.note_id, Topic)
+        .join(Topic, Topic.id == NoteTopic.topic_id)
+        .where(NoteTopic.note_id.in_(ids))
         .order_by(NoteTopic.id.asc())
-    ).all()
-    return [_serialize_topic(topic) for topic in rows]
+    ).all():
+        relations.topics.setdefault(note_id, []).append(_serialize_topic(topic))
+
+    # 挂载商品（§26.7：关系表两侧都是**平台 ID** ⇒ 用 `note.note_id` 查）
+    relations.goods.update(_load_batch_goods(db, notes))
+
+    # 来源账号（取昵称；软删账号照常回传 —— 那是这条笔记的历史归属，不是「可选账号」）
+    account_ids = {note.platform_account_id for note in notes if note.platform_account_id}
+    if account_ids:
+        for account in db.scalars(
+            select(PlatformAccount).where(PlatformAccount.id.in_(account_ids))
+        ).all():
+            relations.accounts[account.id] = account
+
+    return relations
 
 
-def _get_note_assets(db: Session, note: Note) -> list[NoteAsset]:
-    return db.scalars(select(NoteAsset).where(NoteAsset.note_id == note.id).order_by(NoteAsset.sort_order.asc(), NoteAsset.id.asc())).all()
+def _load_batch_goods(db: Session, notes: Sequence[Note]) -> dict[int, list[dict]]:
+    """这批笔记的挂载商品（`notes.id` → `[{item_id, item_title, price, images, stock, sales}]`）。
+
+    `_load_note_relations` 的一环，单独拆出来只为让主函数读得下去。
+
+    归属过滤用 `(user_id, note_id)` **复合键** —— 与逐篇版
+    `NoteGoods.user_id == note.user_id, NoteGoods.note_id == note.note_id` **严格等价**，
+    不引入「一批笔记同属一个用户」这个隐含前提（虽然列表端点事实上同用户）。
+    过滤在 Python 里做：`IN (…)` 只能表达一个维度，而候选行数 = 本页挂载数，很小。
+    """
+    note_ids_by_key = {(int(note.user_id or 0), note.note_id): note.id for note in notes}
+    if not note_ids_by_key:
+        return {}
+    rows = [
+        row
+        for row in db.scalars(
+            select(NoteGoods)
+            .where(NoteGoods.note_id.in_({note_id for _, note_id in note_ids_by_key}))
+            .order_by(NoteGoods.id.asc())
+        ).all()
+        if (int(row.user_id or 0), row.note_id) in note_ids_by_key
+    ]
+    # ⚠️ **空关系短路**（逐篇版 `if not relations: return []` 的同款）：
+    # 整批都没挂商品时不发 `shop_products` 查询 —— 不为空集多打一次库。
+    if not rows:
+        return {}
+
+    from backend.app.services.shop_goods_service import products_by_item_id
+
+    # 商品行按**用户**归属（`products_by_item_id` 的签名只有一个 user_id）⇒ 按 user 分组。
+    # 结果键也带上 user_id：同一 `item_id` 在不同用户下是两件不同的商品，不能互相覆盖。
+    products: dict[tuple[int, str], Any] = {}
+    for user_id in {int(row.user_id or 0) for row in rows}:
+        resolved = products_by_item_id(
+            db,
+            user_id,
+            [row.item_id for row in rows if int(row.user_id or 0) == user_id],
+        )
+        for item_id, product in resolved.items():
+            products[(user_id, item_id)] = product
+
+    goods: dict[int, list[dict]] = {}
+    for row in rows:
+        note_key = note_ids_by_key.get((int(row.user_id or 0), row.note_id))
+        if note_key is None:
+            continue
+        goods.setdefault(note_key, []).append(
+            _goods_entry(products.get((int(row.user_id or 0), str(row.item_id or ""))), row.item_id)
+        )
+    return goods
+
+
+def _goods_entry(product: Any, item_id: Any) -> dict:
+    """一条挂载商品的序列化（**唯一实现**；`None` = 台账里没有这件商品）。
+
+    ⚠️ **2026-09-27 改键（§26.7）**：关系行两个字段都是**平台 ID**
+    （`note_goods.note_id` = `notes.note_id`、`note_goods.item_id` =
+    `shop_products.item_id`）⇒ 查法是「取关系行 → 按 `item_id` 找商品行」，
+    **商品台账里没有这件商品是正常态**（关系落库不校验商品存在）：
+    那种商品**只给 `item_id`**，标题 / 价格 / 图 / 库存留空（缺值口径，前端渲染
+    「（无商品标题）」「价格待同步」），**不造假、也不拿缓存表顶替**。
+    """
+    item_key = str(item_id or "")
+    if product is None:
+        return {
+            "item_id": item_key,
+            "item_title": "",
+            # 价格是**分**的字符串（列名即口径，展示层换算成元）。
+            "price": "",
+            "images": [],
+            "stock": None,
+            "sales": None,
+        }
+    return {
+        "item_id": product.item_id,
+        "item_title": product.item_title,
+        "price": product.price,
+        "images": _json_list(product.images_json),
+        "stock": product.stock,
+        "sales": product.sales,
+    }
+
+
+def _note_goods(db: Session, note: Note) -> list[dict]:
+    """（薄包装）**唯一实现见 `_load_note_relations`** —— 单篇 = 长度为 1 的批量。
+
+    保留这个函数名只为既有调用点（`tests/backend/test_note_goods.py` 直接 import 它）
+    不断裂；**函数体只有这一行转发**，不许在别处再抄一遍「`note_goods` join
+    `shop_products`」的查法（DEF-044：一个语义两份实现）。
+    """
+    return _load_note_relations(db, [note]).goods.get(note.id, [])
 
 
 def _asset_display_url(asset: NoteAsset) -> str:
@@ -190,35 +335,16 @@ def _json_list(text: str) -> list:
     return value if isinstance(value, list) else []
 
 
-def _note_goods(db: Session, note: Note) -> list[dict]:
-    """挂载商品（设计 13 §28.3）：走 `note_goods` 关系表 join `shop_products`。
+def _serialize_note(db: Session, note: Note, relations: Optional[_NoteRelations] = None) -> dict:
+    """笔记 ⇒ 序列化（列表 / 详情 / 导出 JSON 三处的**同一份**输出）。
 
-    **商品信息只在 `shop_products` 存一份**（用户 2026-09-22 口径：「笔记表不要再存
-    商品信息，直接通过笔记和商品关联表进行查询」）⇒ 商品改价 / 下架后，这里查出去
-    的是**当下的真值**，不是笔记行里一份会漂的快照。关系为空 = 没挂商品（不是错误）。
+    `relations`（设计 13 §41.4）：调用方**已预取**的关联数据。列表端点整页传一份
+    （`_load_note_relations(db, rows)`）⇒ 序列化过程零额外查询；不传则内部对
+    `[note]` 调**同一个** `_load_note_relations` —— **不是两份实现**，
+    单篇只是「长度为 1 的批量」。
     """
-    rows = db.scalars(
-        select(ShopProduct)
-        .join(NoteGoods, NoteGoods.product_id == ShopProduct.id)
-        .where(NoteGoods.note_id == note.id)
-        .order_by(ShopProduct.id.asc())
-    ).all()
-    return [
-        {
-            "item_id": product.item_id,
-            "item_title": product.item_title,
-            # 价格是**分**的字符串（列名即口径，展示层换算成元）。
-            "price": product.price,
-            "images": _json_list(product.images_json),
-            "stock": product.stock,
-            "sales": product.sales,
-        }
-        for product in rows
-    ]
-
-
-def _serialize_note(db: Session, note: Note) -> dict:
-    assets = _get_note_assets(db, note)
+    rel = relations if relations is not None else _load_note_relations(db, [note])
+    assets = rel.assets.get(note.id, [])
     image_assets = [asset for asset in assets if asset.asset_type == "image"]
     video_assets = [asset for asset in assets if asset.asset_type == "video"]
     asset_urls = [_asset_display_url(asset) for asset in assets if asset.url or asset.local_path]
@@ -228,7 +354,7 @@ def _serialize_note(db: Session, note: Note) -> dict:
     # 「已发布」这个标识本身就是账号维度的事实，界面不给账号就无从核对。
     # 软删账号的昵称**照常回传**：那是这条笔记的历史归属（事实），不是「可选账号」；
     # 昵称取不到时留空，前端按缺值口径不展示（硬约束⑤）。
-    account = db.get(PlatformAccount, note.platform_account_id) if note.platform_account_id else None
+    account = rel.accounts.get(note.platform_account_id) if note.platform_account_id else None
     return {
         "id": note.id,
         "platform": note.platform,
@@ -249,11 +375,11 @@ def _serialize_note(db: Session, note: Note) -> dict:
         "note_type": note.note_type,
         # 话题（设计 13 §34）：走 `note_topics` 关系表 join `topics` 字典表
         # （`[{id, name, color}]`；`topics_json` 列已删，关系表是唯一读取路径）。
-        # 空 = 这条笔记没有话题（不是错误）。
-        "topics": _get_note_topics(db, note.id),
+        # 空 = 这条笔记没有话题（不是错误）。取自 `relations`（§41.4 批量预取）。
+        "topics": rel.topics.get(note.id, []),
         # 挂载商品（设计 13 §28.3）：走 `note_goods` join `shop_products` 查，
-        # **不在笔记表存商品快照**；空 = 没挂商品。
-        "goods": _note_goods(db, note),
+        # **不在笔记表存商品快照**；空 = 没挂商品。取自 `relations`（§41.4）。
+        "goods": rel.goods.get(note.id, []),
         # 对账标记（设计 13 §24）：平台列表里已经没有这条笔记的时间。
         # `null` = 正常；非空 = 最近一次对账发现「本地有、平台无」。
         "platform_missing_at": note.platform_missing_at.isoformat() if note.platform_missing_at else None,
@@ -273,14 +399,18 @@ def _serialize_note(db: Session, note: Note) -> dict:
     }
 
 
-def _serialize_note_with_topics(db: Session, note: Note) -> dict:
+def _serialize_note_with_topics(
+    db: Session, note: Note, relations: Optional[_NoteRelations] = None
+) -> dict:
     """序列化 + 话题（话题已在 `_serialize_note` 内 join，本函数保留为**统一入口名**）。
 
     ⚠️ 2026-09-25 前叫 `_serialize_note_with_topics`（序列化后再挂 `tags` 字段）——
     标签表并入话题表（§34.4）后 `tags` 字段已移除，函数随之改名；
     `topics` 改由 `_serialize_note` 一次带出（少一次 join 的重复）。
+
+    `relations`（§41.4）：列表端点整页传一份预取结果；不传 = 单篇自取（同一实现）。
     """
-    return _serialize_note(db, note)
+    return _serialize_note(db, note, relations)
 
 
 def _build_notes_csv(db: Session, notes: list[Note]) -> str:
@@ -288,9 +418,12 @@ def _build_notes_csv(db: Session, notes: list[Note]) -> str:
     fieldnames = ["note_id", "title", "author_name", "content", "topics", "published", "created_at"]
     writer = csv.DictWriter(output, fieldnames=fieldnames)
     writer.writeheader()
+    # 话题一次预取（§41.4）：导出是「用户选中的 N 篇」，逐篇查就是 N 次 ——
+    # 走与列表同一个 `_load_note_relations`（同一实现，不另开读法）。
+    relations = _load_note_relations(db, notes)
     for note in notes:
         # 话题列（§34.4）：原 `tags` 列 —— 标签表已并入话题表，数据同一份。
-        topics = ",".join(topic["name"] for topic in _get_note_topics(db, note.id))
+        topics = ",".join(topic["name"] for topic in relations.topics.get(note.id, []))
         writer.writerow(
             {
                 "note_id": note.note_id,
@@ -458,6 +591,12 @@ def get_sync_queue(
     return sync_queue_snapshot(db, current_user.id, platform=platform)
 
 
+# ⚠️ **`GET /notes/hydrate-queue` 已移除**（2026-09-27 用户口径：账号卡移除「补齐详情」，
+# 补齐能力并入「同步笔记」任务本身，设计 13 §35.18）。详情补齐队列（`note_hydrate`）
+# 与它的入队端点 `POST /accounts/{id}/notes/hydrate-pending` 一并删除 —— 没有入口的
+# 队列快照端点留着只会让人以为这条链路还在跑。
+
+
 def _publish_status_counts(db: Session, user_id: int, platform: Optional[str]) -> dict:
     """四态**原始**计数（发布进度卡用）。
 
@@ -510,10 +649,12 @@ def get_notes(
     * `note_type` ∈ `Note.note_type` 的合法取值（`synced` / `local` / `local_generated`）；
       未知值 → 400 `NOTE_TYPE_UNSUPPORTED`（与 `publish_status` 同口径：白名单 + 支持列表）。
       不传 = 不筛。
-    * `item_id` —— **挂链商品**（平台商品 ID）。走 `note_goods` join `shop_products`
-      子查询（与 `has_assets` 同款形态，不引入 JOIN+GROUP-BY）。**存在性不校验**：
+    * `item_id` —— **挂链商品**（平台商品 ID）。走 `note_goods` 子查询
+      （与 `has_assets` 同款形态，不引入 JOIN+GROUP-BY）。**存在性不校验**：
       `user_id` 那道 where 始终在，别人的 / 不存在的 item_id 只会得到空集，不 404
       （与 `platform_account_id` 同一理由，设计 13 §25.8）。不传 = 不筛。
+      ⚠️ 2026-09-27（§26.7）：关系表按**平台 ID** 挂 ⇒ 子查询不再 join
+      `shop_products`（台账里没有这件商品时**也能筛出笔记**）。
 
     2026-09-25：`tag_id` ⇒ `topic_id`（§34.4，标签表并入话题表）—— 走的
     `note_topics` 关系表；归属校验照旧（404 不暴露「存在但无权」）。
@@ -591,18 +732,43 @@ def get_notes(
     # 保证；查不到 = 空集，不校验存在性、不 404。
     item_key = (item_id or "").strip()
     if item_key:
+        # ⚠️ 2026-09-27（§26.7）：关系表按**平台 ID** 挂 ⇒ 子查询不再 join
+        # `shop_products`（台账里没有这件商品时**也能筛出笔记**）。
         statement = statement.where(
-            Note.id.in_(
-                select(NoteGoods.note_id)
-                .join(ShopProduct, ShopProduct.id == NoteGoods.product_id)
-                .where(ShopProduct.item_id == item_key)
+            Note.note_id.in_(
+                select(NoteGoods.note_id).where(
+                    NoteGoods.user_id == current_user.id,
+                    NoteGoods.item_id == item_key,
+                )
             )
         )
-    notes = db.scalars(statement.order_by(Note.created_at.desc())).all()
-    result = paginated([_serialize_note_with_topics(db, note) for note in notes], page, page_size)
-    # 统计与筛选是两件事：`stats` 是全库口径，不随上面任一 `where` 变化。
-    result["stats"] = _publish_status_stats(db, current_user.id, platform)
-    return result
+    # ------------------------------------------------------------------ #
+    # 分页**下推到 SQL**（设计 13 §41.3）：改前是「取全部命中行 → 内存切片」，
+    # 真库 3620 篇实测 5774 ms / 16390 条 SQL（只返回 20 条）。
+    # 现在：① `count(*)` 单独一次（实测 0.1 ms，`ix_notes_user_id` 是 covering index）；
+    #       ② 只取本页 `page_size` 行。
+    # ⚠️ **`total` 必须仍是「命中总数」**（前端 `hasMore` 靠它推），不是本页条数。
+    # ⚠️ **`Note.id.desc()` 是稳定排序键**（§41.5）：`created_at` 可能同值
+    #    （批量落库 / 同一秒同步的多篇），单键排序下行序不确定 ⇒ 翻页漏行 / 重行，
+    #    而前端按 id 去重（`loadMoreNotes`）会把漏掉的那些**静默吞掉**。
+    # ------------------------------------------------------------------ #
+    total = db.scalar(select(func.count()).select_from(statement.subquery())) or 0
+    rows = db.scalars(
+        statement.order_by(Note.created_at.desc(), Note.id.desc())
+        .limit(page_size)
+        .offset((page - 1) * page_size)
+    ).all()
+    # 关联数据一次预取（§41.4）：整页的 assets / topics / goods / account 各一条 `IN`。
+    # 不预取的话，`_serialize_note` 会对每一篇各查 4 次（N+1，改前的形态）。
+    relations = _load_note_relations(db, rows)
+    return {
+        "total": int(total),
+        "page": page,
+        "page_size": page_size,
+        "items": [_serialize_note_with_topics(db, note, relations) for note in rows],
+        # 统计与筛选是两件事：`stats` 是全库口径，不随上面任一 `where` 变化。
+        "stats": _publish_status_stats(db, current_user.id, platform),
+    }
 
 
 @router.post("/batch-create-drafts")
@@ -675,12 +841,24 @@ def purge_note(db: Session, note: Note) -> None:
     ⚠️ 2026-09-25（§34.7）：`note_tags` ⇒ **`note_topics`**（标签表已并入话题表）——
     同一条删除链规则：本地实体真删 ⇒ 关系行跟着走，两个方向（删笔记 / 删话题
     词典项）同一把尺子。
+
+    ⚠️ **2026-09-27（§26.7）两处口径确认**（用户当轮两条要求）：
+
+    * 「**删除笔记时需删除笔记与商品之间的关系**」⇒ 下面 `note_goods` 那一句保留，
+      但**判据改成平台 ID + 归属**（`(user_id, note.note_id)`）—— 关系表已不存本地主键；
+    * 「**内容库页点击删除笔记时，话题只删关系表**」⇒ `note_topics` 只删**关系行**，
+      `topics` **字典行不动**（话题 / 标签是用户资产，删一篇笔记不该让别处的话题消失）。
+      这与「删话题词典项」方向不同（那边删典 ⇒ 关系行一并删，见 `api/topics.py`）。
     """
     db.execute(delete(NoteTopic).where(NoteTopic.note_id == note.id))
     db.execute(delete(NoteAsset).where(NoteAsset.note_id == note.id))
     db.execute(delete(NoteComment).where(NoteComment.note_id == note.id))
-    # 商品关联关系（§26）：笔记没了，指向它的多对对关系行一并删。
-    db.execute(delete(NoteGoods).where(NoteGoods.note_id == note.id))
+    # 商品关联关系（§26.7）：笔记没了，指向它的关系行一并删（按平台笔记 ID + 归属）。
+    db.execute(
+        delete(NoteGoods).where(
+            NoteGoods.user_id == note.user_id, NoteGoods.note_id == note.note_id
+        )
+    )
     # 草稿只解除引用、不连坐：AI 草稿是用户资产，笔记没了它还在（§12）。
     db.query(AiDraft).filter(AiDraft.source_note_id == note.id).update({"source_note_id": None})
     db.delete(note)
@@ -754,7 +932,8 @@ def sync_note(
 
     ⚠️ **2026-09-25 用户口径「单独点击同步按钮也需要放入同步队列中执行，与批量同步
     一致」**：本端点从**同步阻塞执行**改为**入队即返回**（与 `POST /notes/{id}/publish`
-    同形）。理由不只是形态统一 —— 顺序执行是限流的第一道保障（www 额度 5 次/分钟）：
+    同形）。理由不只是形态统一 —— 顺序执行是限流的第一道保障（额度按账号读运行时
+    配置，默认 60 次/分钟，设计 13 §38.2）：
     单条阻塞 + 批量队列并存时，两条链路各打各的请求，限流等待互相插队、叠加。
 
     响应 `sync` 字段随之从「同步的逐项结果」变成**入队回执**

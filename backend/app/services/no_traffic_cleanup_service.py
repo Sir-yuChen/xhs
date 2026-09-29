@@ -20,19 +20,15 @@
 
 from __future__ import annotations
 
-import json
 import logging
-from datetime import datetime
 from typing import Any, Optional
 
 from sqlalchemy import select
 
 from backend.app.core.database import SessionLocal
-from backend.app.core.security import decrypt_text
 from backend.app.core.time import shanghai_now
 from backend.app.models.task import Task
 from backend.app.services.no_traffic_service import (
-    DEFAULT_BATCH_LIMIT,
     CleanupQuery,
     TrafficThresholds,
     list_no_traffic_candidates,

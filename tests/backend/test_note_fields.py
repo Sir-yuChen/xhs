@@ -143,7 +143,11 @@ def test_hydrate_writes_topics_from_detail(tmp_path, monkeypatch):
         note = Note(
             platform_account_id=account.id, user_id=account.user_id,
             note_id=HEX_NOTE_ID, platform="xhs", title="t",
-            raw_json={"note_url": f"https://www.xiaohongshu.com/explore/{HEX_NOTE_ID}"},
+            # §19.13.9：无令牌会被拦成 `no_token` ⇒ 夹具给令牌（真实形态）。
+            raw_json={
+                "note_url": f"https://www.xiaohongshu.com/explore/{HEX_NOTE_ID}",
+                "xsec_token": "TK-TEST",
+            },
         )
         db.add(note)
         db.commit()
@@ -248,7 +252,12 @@ def api_env(tmp_path):
                 )
                 db.add(product)
                 db.flush()
-                db.add(NoteGoods(note_id=note.id, product_id=product.id))
+                # §26.7：关系表按平台 ID 落（`note.note_id` ↔ `product.item_id`）
+                db.add(
+                    NoteGoods(
+                        user_id=note.user_id, note_id=note.note_id, item_id=product.item_id
+                    )
+                )
             db.commit()
             note_id = note.id
         finally:

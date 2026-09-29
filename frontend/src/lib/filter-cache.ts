@@ -68,7 +68,6 @@ export const FILTER_CACHE_KEYS = {
 
 /** 「我的笔记」四个页签（渲染顺序 + 合法取值**同一份**，页面拿它渲染 Tab 栏）。 */
 export const MY_NOTES_TAB_VALUES = ["notes", "liked", "collected", "interactions"] as const;
-export type MyNotesTab = (typeof MY_NOTES_TAB_VALUES)[number];
 
 // --------------------------------------------------------------------------- #
 // 存储层：localStorage 的最小封装（容错全在这里）

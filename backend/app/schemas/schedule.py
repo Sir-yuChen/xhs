@@ -23,8 +23,6 @@ from backend.app.models.scheduled_job import (
 )
 from backend.app.services.schedule_triggers import parse_cron_expression
 
-TRIGGER_MANUAL_VALUE = "manual"
-
 
 class ScheduleValidationError(ValueError):
     """调度字段校验失败。`code` 即 API 400 的 detail（如 `CRON_INVALID`）。"""

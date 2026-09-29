@@ -336,25 +336,6 @@ export type XhsQianfanBinding = {
   health_checked_at?: string;
 };
 
-/** `POST /xhs/qianfan/shops` 的一个店铺（**1:1** 的读侧，2026-09-22 起）。 */
-export type XhsQianfanShop = {
-  shop_id_fk: number;
-  seller_id: string;
-  shop_id: string;
-  shop_name: string;
-  status: string;
-  //: 2026-09-22 移除 `account_count`（同店多账号被否决，恒 0/1）；`accounts` 现在是
-  //: 「这个店挂着哪个账号」，至多一项 —— 用来把账号标签标成它的店铺名。
-  accounts: Array<{
-    platform_account_id: number;
-    nickname: string;
-    binding_status: string;
-  }>;
-  /** 该店铺名下所有绑定的映射条数之和（与 goods_note_total 同一口径）。 */
-  synced_notes: number;
-  goods_note_total: number;
-};
-
 /** 千帆商品列表的状态筛选键（与后端 `QIANFAN_ITEM_STATUSES` 一一对应）。 */
 export type XhsShopItemStatus =
   | "all"
@@ -838,27 +819,6 @@ export type AnalyticsCommentInsight = {
 
 export type BenchmarkTopNote = AnalyticsTopContent;
 
-export type BenchmarkItem = {
-  target_id: number;
-  target_type: "account" | "brand" | string;
-  name: string;
-  value: string;
-  status: string;
-  last_refreshed_at?: string | null;
-  matched_notes: number;
-  total_engagement: number;
-  average_engagement: number;
-  top_notes: BenchmarkTopNote[];
-};
-
-export type BenchmarkOverview = {
-  total_targets: number;
-  matched_notes: number;
-  total_engagement: number;
-  average_engagement: number;
-  items: BenchmarkItem[];
-};
-
 export type NoteAsset = {
   id: number;
   note_id: number;
@@ -893,11 +853,6 @@ export type NoteTopic = {
   color: string;
 };
 
-export type TopicPayload = {
-  name: string;
-  color?: string;
-};
-
 export type BatchTagNotesResponse = {
   updated_count: number;
   items: SavedNote[];
@@ -912,8 +867,6 @@ export type BatchCreateDraftsResponse = {
   created_count: number;
   items: Draft[];
 };
-
-export type BenchmarkCreateDraftsResponse = BatchCreateDraftsResponse;
 
 export type NotesExportPayload = {
   note_ids: number[];
@@ -1019,11 +972,6 @@ export type GenerateTagsPayload = {
   count?: number;
 };
 
-export type PolishTextPayload = {
-  text: string;
-  instruction?: string;
-};
-
 export type GeneratedImageAsset = {
   id: number;
   draft_id?: number | null;
@@ -1032,13 +980,6 @@ export type GeneratedImageAsset = {
   params: Record<string, unknown>;
   file_path: string;
   created_at: string;
-};
-
-export type GenerateCoverPayload = {
-  prompt: string;
-  draft_id?: number;
-  size?: string;
-  style?: string;
 };
 
 export type GenerateImagePayload = {
@@ -1062,33 +1003,6 @@ export type UserImageFile = {
 export type DescribeImagePayload = {
   image_url: string;
   instruction?: string;
-};
-
-export type ImageUtilityFile = {
-  file_name: string;
-  file_path: string;
-  download_url: string;
-  width: number;
-  height: number;
-  media_type: string;
-};
-
-export type ComposeImagePayload = {
-  title: string;
-  body?: string;
-  width?: number;
-  height?: number;
-  background_color?: string;
-  accent_color?: string;
-};
-
-export type ResizeImagePayload = {
-  source_file_name: string;
-  width?: number;
-  height?: number;
-  mode?: "cover" | "contain";
-  format?: "png" | "jpeg";
-  quality?: number;
 };
 
 /**
@@ -1215,6 +1129,12 @@ export type ScheduleTarget = {
 export type ScheduledJobLog = {
   id: number;
   job_id: number | null;
+  /**
+   * 业务任务号（后端迁移 `k2l3m4n5o6p7`）：操作列「取消任务」按它调
+   * `POST /tasks/{id}/cancel`。`null` = 这条日志没有对应业务任务行（cron 系统作业 /
+   * 存量日志）⇒ **不渲染**取消按钮（缺值口径：不猜一个 id，猜错就会去取消别人的任务）。
+   */
+  task_id?: number | null;
   job_name: string;
   job_key: string;
   trigger_type: "scheduled" | "manual" | string;
@@ -1323,6 +1243,65 @@ export type MonitoringRefreshResponse = {
   snapshot: MonitoringSnapshot;
 };
 
+// 运行时配置中心（设计 10 §7，2026-09-27）：设置页的列表 / 增删改查。
+// `value` 已由后端按 `value_type` 解码成 JS 值（int → number、bool → boolean），
+// 页面**不要**再自己 `JSON.parse`（那是第二份解码实现，DEF-044）。
+export type SystemSettingValueType = "int" | "float" | "bool" | "str" | "json";
+
+export type SystemSetting = {
+  id: number;
+  key: string;
+  value: unknown;
+  raw_value: string;
+  value_type: SystemSettingValueType | string;
+  category: string;
+  label: string;
+  description: string;
+  requires_restart: boolean;
+  is_dangerous: boolean;
+  // 该键是否**接进了运行时读点**（后端 `settings_service.LIVE_KEYS` 白名单派生）。
+  // false = 仅存档，改了不影响运行时 —— 页面必须显式标注，不许让用户以为改了有用。
+  is_live: boolean;
+  live_read_point: string;
+  updated_by: number | null;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+export type SystemSettingListResponse = {
+  items: SystemSetting[];
+  total: number;
+  live_keys: string[];
+};
+
+export type SystemSettingCreatePayload = {
+  key: string;
+  value: unknown;
+  value_type?: SystemSettingValueType | string;
+  category?: string;
+  label?: string;
+  description?: string;
+  requires_restart?: boolean;
+  is_dangerous?: boolean;
+};
+
+export type SystemSettingUpdatePayload = {
+  value?: unknown;
+  value_type?: SystemSettingValueType | string;
+  category?: string;
+  label?: string;
+  description?: string;
+  requires_restart?: boolean;
+  is_dangerous?: boolean;
+};
+
+export type SystemSettingDeleteResult = {
+  key: string;
+  status: string;
+  effective_value: unknown;
+  is_live: boolean;
+};
+
 export type KeywordGroup = {
   id: number;
   platform: PlatformId;
@@ -1410,11 +1389,6 @@ export type PublishAsset = {
   creator_media_id: string;
   upload_error: string;
   creator_upload_info: Record<string, unknown>;
-};
-
-export type PublishAssetPayload = {
-  asset_type: "image" | "video";
-  file_path: string;
 };
 
 export type AutoTask = {

@@ -42,10 +42,3 @@ _PLATFORMS: List[PlatformMeta] = [
 
 def get_platforms() -> List[PlatformMeta]:
     return list(_PLATFORMS)
-
-
-def get_platform(platform_id: PlatformId) -> PlatformMeta:
-    for platform in _PLATFORMS:
-        if platform.id == platform_id:
-            return platform
-    raise KeyError(platform_id)

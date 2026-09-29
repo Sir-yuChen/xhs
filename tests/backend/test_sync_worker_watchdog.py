@@ -81,10 +81,15 @@ def _quiesce_named_workers(*, timeout: float = 5.0) -> list[str]:
     别人的行 —— 夹具在场时是「抢测试的行」，夹具不在场时是「拿真库跑测试数据」。
     """
     nss._sync_worker_stop.set()
+    for stop in list(nss._sync_worker_stops.values()):
+        stop.set()
     nss._sync_wakeup.set()
     stopped: list[str] = []
     for thread in list(threading.enumerate()):
-        if thread.name != nss.SYNC_WORKER_THREAD_NAME or not thread.is_alive():
+        # ⚠️ 2026-09-27 池化（设计 13 §38.3）：判据必须是**前缀**匹配 ——
+        # 写死 `!= SYNC_WORKER_THREAD_NAME` 会漏掉 `…#2`..`…#8`，
+        # 残留的那几条会继续抢后续用例（甚至真库）的队列。
+        if not nss.thread_name_matches_sync_worker(thread.name) or not thread.is_alive():
             continue
         thread.join(timeout=timeout)
         if not thread.is_alive():
@@ -96,6 +101,10 @@ def _quiesce_named_workers(*, timeout: float = 5.0) -> list[str]:
             )
     with nss._sync_queue_lock:
         nss._sync_worker = None
+        nss._sync_workers.clear()
+        nss._sync_worker_stops.clear()
+        nss._sync_busy_accounts.clear()
+        nss._sync_held_items.clear()
     nss._sync_worker_stop.clear()
     nss._sync_wakeup.clear()
     return stopped
@@ -113,6 +122,10 @@ def clean_sync_globals(monkeypatch):
     （docstring 第 3 条坑）。
     """
     _quiesce_named_workers()
+    # 本文件的用例关心的是**守活**，不是「池子多大」：把并行度钉成 1（改造前的单 worker
+    # 语义）⇒ 断言不受运行时配置影响，也不去读配置库。池大小 / 账号互斥另有专门用例
+    # （`test_note_sync_parallel.py`）。
+    monkeypatch.setattr(nss, "sync_parallelism", lambda: 1)
     spawned: list[threading.Thread] = []
     try:
         yield spawned
@@ -252,11 +265,33 @@ def test_probe_only_trusts_a_live_named_thread(monkeypatch):
 
 
 def test_worker_thread_name_is_the_one_the_probe_trusts():
-    """`_spawn_sync_worker` 起的线程名必须走探针认的那个常量（对不上 = 探针永假/永真）。"""
+    """线程名必须走探针认的那个常量（对不上 = 探针永假/永真）。
+
+    2026-09-27 池化（设计 13 §38.3）后名字多了一层：**唯一实现**是
+    `sync_worker_thread_name(index)`（它读 `SYNC_WORKER_THREAD_NAME` 当基名，
+    第 2..N 条加 `#序号`），`_spawn_sync_worker` **委托**给它 —— 所以断言要落在
+    **两处**：常量在唯一实现里、起线程处只能通过它取名字（不许自己拼裸字符串）。
+
+    ⚠️ 只断言「`_spawn_sync_worker` 源码里出现过常量名」在池化后会退化成**注释级
+    守卫**（写句注释就过），所以这里额外钉住「委托」这一事实。
+    """
     import inspect
 
+    helper = inspect.getsource(nss.sync_worker_thread_name)
+    assert "SYNC_WORKER_THREAD_NAME" in helper, "基名必须用常量，不许另写裸字符串"
+
     source = inspect.getsource(nss._spawn_sync_worker)
-    assert "SYNC_WORKER_THREAD_NAME" in source, "线程名必须用常量，不许另写裸字符串"
+    assert "sync_worker_thread_name(" in source, "起线程处必须委托给唯一实现取名"
+
+    # 名字本身：第 1 条保持原名（既有探针 / 测试 / 日志检索都认它），其余带序号
+    assert nss.sync_worker_thread_name(0) == nss.SYNC_WORKER_THREAD_NAME
+    assert nss.sync_worker_thread_name(1) == f"{nss.SYNC_WORKER_THREAD_NAME}#2"
+    # 探针按**前缀**认：池里任何一条都算「有能干活的人」
+    assert nss.thread_name_matches_sync_worker(nss.sync_worker_thread_name(0)) is True
+    assert nss.thread_name_matches_sync_worker(nss.sync_worker_thread_name(7)) is True
+    assert nss.thread_name_matches_sync_worker("note-publish-worker") is False
+    # 前缀匹配不许退化成「包含」：别的队列名里出现同样的子串不算本池
+    assert nss.thread_name_matches_sync_worker("x-note-batch-sync-worker") is False
 
 
 # --------------------------------------------------------------------------- #
@@ -449,8 +484,14 @@ def test_watchdog_revives_dead_worker_and_survives_revive_failures(clean_sync_gl
 
 
 def test_watchdog_stays_quiet_while_worker_is_alive(clean_sync_globals, monkeypatch):
-    """worker 活着 ⇒ 看门狗什么都不做（不重建、不打扰）。"""
-    monkeypatch.setattr(nss, "sync_worker_thread_alive", lambda: True)
+    """池满员 ⇒ 看门狗什么都不做（不重建、不打扰）。
+
+    ⚠️ 2026-09-27 池化后判据从「`sync_worker_thread_alive()` 为真」升级为
+    **「池里不缺人」**（`sync_worker_pool_deficit() == 0`）—— 死 2 条还剩 1 条时
+    前者仍为真，只判它就会漏补。所以本用例钉的是**新判据**（旧断言保留在
+    `test_worker_thread_name_is_the_one_the_probe_trusts` 的探针部分）。
+    """
+    monkeypatch.setattr(nss, "sync_worker_pool_deficit", lambda: 0)
     revived = {"n": 0}
     monkeypatch.setattr(nss, "_revive_sync_worker", lambda: revived.__setitem__("n", revived["n"] + 1))
 
@@ -460,6 +501,20 @@ def test_watchdog_stays_quiet_while_worker_is_alive(clean_sync_globals, monkeypa
         time.sleep(0.3)
         assert revived["n"] == 0
         assert thread.is_alive() is True
+    finally:
+        nss.stop_sync_worker_watchdog()
+
+
+def test_watchdog_revives_when_the_pool_is_short(clean_sync_globals, monkeypatch):
+    """池缺人（死 2 条还剩 1 条那种）⇒ 看门狗必须补 —— 旧判据「有没有活着的」看不见。"""
+    monkeypatch.setattr(nss, "sync_worker_pool_deficit", lambda: 2)
+    revived = {"n": 0}
+    monkeypatch.setattr(nss, "_revive_sync_worker", lambda: revived.__setitem__("n", revived["n"] + 1))
+
+    thread = nss.start_sync_worker_watchdog(interval=0.05)
+    clean_sync_globals.append(thread)
+    try:
+        assert _wait_until(lambda: revived["n"] > 0, timeout=5), "池缺人必须触发补齐"
     finally:
         nss.stop_sync_worker_watchdog()
 

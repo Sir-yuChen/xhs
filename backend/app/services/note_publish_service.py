@@ -17,7 +17,7 @@
 
 ```
 start_publish / start_batch_publish（同步，毫秒级返回）
-  门禁（归属 / 类型 / 状态 / 媒体 / ark 令牌；发布中 ⇒ 拒绝，不双发）
+  门禁（归属 / 类型 / 状态 / 媒体 / 商品重复发布 / ark 令牌；发布中 ⇒ 拒绝，不双发）
   → publish_status = publishing + attempts + 1（先落库）
   → 入发布队列（FIFO），立即返回 {ok: true, status: "publishing"}
 
@@ -60,7 +60,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import requests
-from sqlalchemy import select
+from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 
 from backend.app.core.config import get_settings
@@ -96,6 +96,17 @@ MAX_NOTE_IMAGES = 6
 #: 视频上限（个）。视频笔记发布链路未接通（§32.7）⇒ 本值当前只用于**拒绝时的说明**，
 #: 不参与上传（`_select_media` 遇到「只有视频」的笔记直接给可读失败）。
 MAX_NOTE_VIDEOS = 1
+
+#: 命中「商品已发布过笔记」时的失败原因（用户 2026-09-28 口径**原文**，唯一文案）。
+GOODS_ALREADY_PUBLISHED_MESSAGE = "挂载的商品已经发布过笔记"
+
+#: 结构化错误码（单篇端点 400 / 批量 `results` 共用）。
+GOODS_ALREADY_PUBLISHED_CODE = "GOODS_ALREADY_PUBLISHED"
+
+#: 「该商品已被占用」的发布状态。**含 `publishing` 是刻意的**（§31.5.2）：批量勾选多篇
+#: 同商品笔记时，第 1 篇入队后是 `publishing`（还没 `published`）—— 只认 `published`
+#: 会让同批 2~N 篇全部放行，用户「不重复发布」的诉求落空。
+_GOODS_OCCUPYING_STATUSES = (PUBLISH_STATUS_PUBLISHED, PUBLISH_STATUS_PUBLISHING)
 
 #: 媒体下载节流（2026-09-25 用户口径「可控制间隔一秒或 1-3 秒随机」）：
 #: 每两张之间随机停 [min, max] 秒，**首张不停**。随机而非固定值 —— 固定间隔本身
@@ -242,14 +253,119 @@ def _item_id_for(db: Session, note: Note) -> str:
     item_id = str((_parse_raw(note).get("item_id") or "")).strip()
     if item_id:
         return item_id
-    relation = db.scalars(select(NoteGoods).where(NoteGoods.note_id == note.id)).first()
+    # ⚠️ 2026-09-27（§26.7）：关系行**直接就是平台商品 ID** ⇒ 不必再查商品表。
+    relation = db.scalars(
+        select(NoteGoods).where(
+            NoteGoods.user_id == note.user_id, NoteGoods.note_id == note.note_id
+        )
+    ).first()
     if relation is not None:
-        from backend.app.models.shop_product import ShopProduct
-
-        product = db.get(ShopProduct, relation.product_id)
-        if product is not None:
-            return str(product.item_id or "").strip()
+        return str(relation.item_id or "").strip()
     return ""
+
+
+def _goods_item_ids_for(db: Session, note: Note) -> list[str]:
+    """该笔记**挂载的商品 ID** 集合（平台商品 ID，设计 13 §31.5.2）。
+
+    以 `note_goods` 关系行为准（§26.7：关系表存的就是**平台商品 ID**），并把
+    `raw_json.item_id`（生成时落库的那一份）一并并入 —— 关系行尚未落库时仍认得出
+    「这篇挂的是什么商品」。都取不到 ⇒ 空列表 ⇒ 门禁放行（缺值不造假，硬约束⑤）。
+    """
+    ids = {
+        str(row.item_id or "").strip()
+        for row in db.scalars(
+            select(NoteGoods).where(
+                NoteGoods.user_id == note.user_id, NoteGoods.note_id == note.note_id
+            )
+        ).all()
+    }
+    raw_item_id = str(_parse_raw(note).get("item_id") or "").strip()
+    if raw_item_id:
+        ids.add(raw_item_id)
+    return sorted(item_id for item_id in ids if item_id)
+
+
+def _occupied_goods_item_ids(db: Session, note: Note, item_ids: list[str]) -> list[str]:
+    """这批商品里，哪些已经被**别的**笔记占用（已发布 / 正在发布，§31.5.2）。
+
+    join 用 `(user_id, note_id)` 而不是本地主键：`note_goods` 的键就是**平台笔记 ID**
+    （§26.7，两个外键已整条去掉）⇒ 必须显式给 ON 条件。发布成功的笔记关系行已迁到平台
+    note_id（`_move_note_goods_relations`），正在发布的笔记两边都还是本地 ID ⇒ 两种
+    形态都能对上。
+
+    ⚠️ 排除自己（`Note.id != note.id`）：重发场景下本篇自己可能是 `failed`，本就不是
+    占用方；但**已 `published` 的自己**会先被 `_check_publishable` 拦下，不靠这里兜。
+    """
+    if not item_ids:
+        return []
+    statement = (
+        select(NoteGoods.item_id)
+        .join(
+            Note,
+            and_(Note.user_id == NoteGoods.user_id, Note.note_id == NoteGoods.note_id),
+        )
+        .where(
+            NoteGoods.user_id == note.user_id,
+            NoteGoods.item_id.in_(item_ids),
+            Note.publish_status.in_(_GOODS_OCCUPYING_STATUSES),
+            Note.id != note.id,
+        )
+    )
+    return sorted({str(item_id) for item_id in db.scalars(statement).all() if str(item_id or "")})
+
+
+def _allow_duplicate_goods_publish(db: Session, user_id: int) -> bool:
+    """商品笔记是否**允许重复发布**（运行时配置 `xhs_allow_duplicate_goods_publish`，
+    默认关 = 不允许重复）。
+
+    **唯一读点**（`settings_service.LIVE_KEYS` 的 `xhs_allow_duplicate_goods_publish`
+    指向本函数，由 `test_app_settings.py::test_live_keys_are_real_read_points` 钉住
+    「函数体里真的有这个键名」）：设置页改完**立即生效**（设计 10 §7.4），不需要重启、
+    不需要重跑种子。读配置失败退 `default=False`（保守侧 = 仍然拦截），绝不把一次发布
+    请求炸成 500。
+
+    ⚠️ 键名**写成字面量**而不是模块级常量：本项目的读点守卫按「函数体里出现该键名」
+    判定接线（`inspect.getsource`）—— 走常量会让守卫看不见这个读点（设计 13 §38.2 的
+    `rate_limit_per_minute_for_key` 等三个读点同款写法）。
+    """
+    from backend.app.services import settings_service
+
+    return settings_service.live_bool(
+        db, user_id, "xhs_allow_duplicate_goods_publish", default=False
+    )
+
+
+def _check_goods_publish_guard(db: Session, note: Note) -> None:
+    """**商品重复发布门禁**（设计 13 §31.5.2，2026-09-28 用户口径）。
+
+    开关关（默认）且「挂载的商品已有**别的**笔记（已发布 / 正在发布）」⇒ **不再发布**：
+    该笔记落 `publish_status=failed` + 原因「挂载的商品已经发布过笔记」，再抛
+    :class:`NotePublishError`（端点转 400 `GOODS_ALREADY_PUBLISHED`）。
+
+    ⚠️ 与其余门禁（类型 / 状态 / 无媒体 / 无令牌）**刻意不同**：那些是「这篇笔记本身
+    能不能发」的确定性答案 ⇒ 400 且**不动状态**；本条是**策略性拒绝**（笔记本身没问题，
+    是「同一商品不许重复」的运营规则）—— 用户口径明确要求**落 `failed`**，好让用户在
+    内容库里看得见「为什么没发出去」。判据不同、处置不同，不是两套实现。
+
+    ⚠️ **零平台请求**：本函数在下载 / 上传 / 入队**之前**跑。
+    ⚠️ 挂载为空 ⇒ 放行（没挂商品就没有「重复」可言）。
+    ⚠️ 调用方是**同步门禁段**（`_begin_publish`，单篇与批量共用）⇒ 批量里命中篇只进
+    `results` 的失败项，**不阻断其余篇**。
+    """
+    if _allow_duplicate_goods_publish(db, note.user_id):
+        return
+    item_ids = _goods_item_ids_for(db, note)
+    if not item_ids:
+        return
+    if not _occupied_goods_item_ids(db, note, item_ids):
+        return
+    # 先落库再抛：用户口径要的是「该笔记设置为发布失败」（`_mark_failed` 是失败落库的
+    # 唯一出口：状态 + 投影 + `publish_error` 一次写入，§32.3.2）。
+    _mark_failed(db, note, GOODS_ALREADY_PUBLISHED_MESSAGE)
+    logger.info(
+        "note publish blocked by goods guard (note_pk=%s, item_ids=%s)", note.id, item_ids
+    )
+    raise NotePublishError(GOODS_ALREADY_PUBLISHED_CODE, GOODS_ALREADY_PUBLISHED_MESSAGE)
 
 
 def _safe_name(text: str) -> str:
@@ -504,12 +620,22 @@ def _build_publish_body(db: Session, note: Note, images: list[dict]) -> dict:
     task_id = str(aigc.get("task_id") or "")
 
     # 宽高从商品 raw_json 回填（平台 image_info 要宽高；缺失传 0，不造假）。
-    relations = list(db.scalars(select(NoteGoods).where(NoteGoods.note_id == note.id)).all())
+    # ⚠️ 2026-09-27（§26.7）：关系行存的是**平台商品 ID** ⇒ 按 `item_id` 找本地商品行；
+    # 台账里没有这件商品 ⇒ `product=None`，宽高按缺值走（**不是**发布失败）。
+    relations = list(
+        db.scalars(
+            select(NoteGoods).where(
+                NoteGoods.user_id == note.user_id, NoteGoods.note_id == note.note_id
+            )
+        ).all()
+    )
     product = None
     if relations:
-        from backend.app.models.shop_product import ShopProduct
+        from backend.app.services.shop_goods_service import products_by_item_id
 
-        product = db.get(ShopProduct, relations[0].product_id)
+        product = products_by_item_id(db, int(note.user_id or 0), [relations[0].item_id]).get(
+            str(relations[0].item_id or "")
+        )
     dims = (
         _image_dims_for(product, [str(image.get("url") or "") for image in images])
         if product is not None
@@ -678,6 +804,11 @@ def _begin_publish(db: Session, user_id: int, note_pk: int) -> Note:
         note = _owned_note(db, user_id, note_pk)
         _check_publishable(note)
         _select_media(db, note)  # 无媒体 / 只有视频 ⇒ 同步拒绝（§31.5 步 0）
+        # 商品重复发布门禁（§31.5.2，2026-09-28）：开关默认关 ⇒ 同一商品已有笔记
+        # （已发布 / 正在发布）时不再发布，本篇落 failed + 原因，然后抛结构化错误。
+        # ⚠️ 放在 `_select_media` **之后**：数据性问题（笔记本身有毛病）优先于策略性
+        # 拒绝 —— 无媒体的笔记不该被标成「商品已发布过」。
+        _check_goods_publish_guard(db, note)
         cookies = qianfan_cookies_for_account(db, note.platform_account_id)
         if not cookies:
             raise NotePublishError(
@@ -1114,8 +1245,10 @@ def _backfill_detail_ref(db: Session, note: Note, adapter: Any) -> None:
     为什么需要：平台 `note/publish` 响应只回 `{"id": 平台 note_id}`，**不带**
     `note_url` / `xsec_token`。本地生成笔记的 `raw_json` 因此没有详情地址 ⇒
     内容库「同步」按钮（`sync_note_from_platform` → `hydrate_note_detail`）的
-    `_note_detail_url` 判 `no_url`，用户看到「这条笔记没有可用的详情地址」——
-    按钮在、功能不在（真实库 id 1967「中古风桌旗…」）。
+    `_note_detail_url` 取不到地址 ⇒ 用户看到「没有可用的详情地址 / 缺详情令牌」——
+    按钮在、功能不在（真实库 id 1967「中古风桌旗…」）。⚠️ **这条回查就是缺令牌的
+    自救路径**：§19.13.9（2026-09-28）起不再翻 `user_posted` 兜底，本地生成笔记
+    的令牌全靠它按 `note_ids` 精确补上。
 
     实现**委托** `note_sync_service.backfill_note_detail_ref`（单一实现）：发布
     路径与单条同步路径共用同一份「回查千帆商品笔记列表 → 合并 raw」逻辑，
@@ -1135,6 +1268,53 @@ def _backfill_detail_ref(db: Session, note: Note, adapter: Any) -> None:
         return fetch(page_num=1, page_size=len(note_ids), note_ids=note_ids)
 
     backfill_note_detail_ref(db, note, _fetch)
+
+
+def _move_note_goods_relations(
+    db: Session, note: Note, *, old_note_id: str, new_note_id: str
+) -> int:
+    """发布成功改写 `notes.note_id` 后，把 `note_goods` 关系行的笔记键一起迁到新 ID（§26.7）。
+
+    **为什么必须做**：本地生成笔记的 `note_id` 是 `local_…` 合成 ID（§31），发布成功后
+    平台才给真 ID（`_execute_publish` 里 `note.note_id = platform_note_id`）。关系表
+    以**平台笔记 ID** 为键 ⇒ 不迁 = 「笔记一发出去，挂链商品就查不到了」（关系行还在，
+    但指向一个不再存在的笔记 ID）。
+
+    幂等 / 去重：新键上可能**已经**有同 `item_id` 的关系行（同步链路按真 ID 落过）⇒
+    那种旧行**删掉**（新行已表达同一事实），不撞 `uq_note_goods_user_note_item`。
+    返回真正迁移过去的关系行数（调用方只用于日志）。
+    """
+    old = str(old_note_id or "").strip()
+    new = str(new_note_id or "").strip()
+    if not old or not new or old == new:
+        return 0
+    rows = list(
+        db.scalars(
+            select(NoteGoods).where(
+                NoteGoods.user_id == note.user_id, NoteGoods.note_id == old
+            )
+        ).all()
+    )
+    if not rows:
+        return 0
+    existing = {
+        str(row.item_id or "")
+        for row in db.scalars(
+            select(NoteGoods).where(
+                NoteGoods.user_id == note.user_id, NoteGoods.note_id == new
+            )
+        ).all()
+    }
+    moved = 0
+    for row in rows:
+        if str(row.item_id or "") in existing:
+            db.delete(row)  # 新键上已有同一关系 ⇒ 旧行多余
+            continue
+        row.note_id = new
+        existing.add(str(row.item_id or ""))
+        moved += 1
+    db.flush()
+    return moved
 
 
 def _execute_publish(db: Session, note: Note, adapter) -> dict:
@@ -1189,6 +1369,10 @@ def _execute_publish(db: Session, note: Note, adapter) -> dict:
 
     # ---- 成功回写（一个事务）----
     note.note_id = platform_note_id
+    # ⚠️ 2026-09-27（§26.7）：关系表以**平台笔记 ID** 为键 ⇒ `note.note_id` 一改写，
+    # 旧键（本地生成的 `local_…` 合成 ID）上的关系行就必须**跟着迁到新 ID**，
+    # 否则「笔记一发出去，挂链商品就查不到了」（关系还在，指向一个不再存在的笔记 ID）。
+    _move_note_goods_relations(db, note, old_note_id=local_note_id, new_note_id=platform_note_id)
     set_note_publish_status(note, PUBLISH_STATUS_PUBLISHED)
     _backfill_detail_ref(db, note, adapter)
     _clear_temp_paths(db, note)

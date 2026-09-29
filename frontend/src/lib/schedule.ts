@@ -11,10 +11,6 @@
 import { CRON_PRESETS } from "./cron-builder";
 
 export type TriggerType = "manual" | "cron" | "at" | string;
-export type MisfirePolicy = "fire_now" | "once" | "discard" | string;
-export type ConcurrentMode = "forbid" | "allow" | string;
-export type JobStatus = "active" | "paused" | "completed" | string;
-export type LogStatus = "running" | "success" | "failed" | "skipped" | string;
 
 /**
  * 任务类型三档（2026-09-24 用户口径 R14 + R15）：

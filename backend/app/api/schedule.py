@@ -117,6 +117,12 @@ def serialize_log(log: ScheduledJobLog) -> dict:
         "job_id": log.job_id,
         # 归属快照（DEF-066）：日志按用户隔离的唯一依据（任务删了仍在）
         "user_id": log.user_id,
+        # 业务任务号（迁移 `k2l3m4n5o6p7`）：任务日志列表的「取消任务」按钮按它调
+        # `POST /tasks/{id}/cancel`（2026-09-27 用户口径「任务日志列表操作列新增取消
+        # 任务中断任务执行功能按钮和逻辑」）。`null` = 该日志没有对应业务任务行
+        # （cron 系统作业 / 存量日志）⇒ 前端**不渲染**取消按钮（缺值口径：不猜一个 id，
+        # 猜错就会去取消别人的任务）。
+        "task_id": log.task_id,
         "job_name": log.job_name,
         "job_key": log.job_key,
         "trigger_type": log.trigger_type,

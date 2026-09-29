@@ -691,21 +691,35 @@ def test_cleanup_is_user_scoped(queue_env, db_factory):
 
 
 def test_cleanup_is_independent_of_unrelated_task_types(queue_env):
-    """白名单之外的任务类型（ai_* / 商品同步 / 监控）不在清理范围内。"""
+    """白名单之外的任务类型（ai_* / 抓取监控）不在清理范围内。
+
+    ⚠️ 2026-09-27 被 §35.16 取代：**账号级任务（`xhs_note_sync` /
+    `xhs_shop_goods_sync` / `xhs_no_traffic_cleanup`）现在与队列记录共用保留期**
+    （`ACCOUNT_TASK_TYPES` 并入 `QUEUE_RECORD_TYPES`），所以它们**会被清理** ——
+    本用例原先把 `xhs_shop_goods_sync` 当「别处口径」断言不许删，那是旧边界；
+    现行边界只剩「真·无关类型」：AI 生成 / 抓取监控 这类不在任何队列里的行。
+    """
     db, user_id, account, notes = queue_env
     old = shanghai_now() - timedelta(days=40)
-    unrelated = Task(
-        user_id=user_id,
-        platform="xhs",
-        task_type="xhs_shop_goods_sync",
-        status="done",
-        payload={},
-        created_at=old,
-    )
-    db.add(unrelated)
-    db.commit()
+    unrelated_types = ("ai_generate_note", "monitoring_crawl")
+    unrelated_ids = []
+    for task_type in unrelated_types:
+        row = Task(
+            user_id=user_id,
+            platform="xhs",
+            task_type=task_type,
+            status="done",
+            payload={},
+            created_at=old,
+        )
+        db.add(row)
+        db.commit()
+        unrelated_ids.append(row.id)
     q.cleanup_records(db, user_id=user_id)
-    assert db.get(Task, unrelated.id) is not None, "别处的任务记录有别的保留口径，不许连带删"
+    for task_type, row_id in zip(unrelated_types, unrelated_ids):
+        assert db.get(Task, row_id) is not None, (
+            f"别处的任务记录有别的保留口径，不许连带删（{task_type}）"
+        )
 
 
 def test_cleanup_handler_uses_its_own_session_and_default_retention(queue_env, db_factory):
@@ -1125,25 +1139,33 @@ def test_recovery_marks_exhausted_rows_without_touching_source(queue_env):
 
 
 def test_all_queue_sources_have_frontend_labels():
-    """来源常量与前端 `lib/task-records.ts` 的中文名一一对应（防两边漂移）。
+    """`QUEUE_SOURCES` 的每一项都要在前端 `lib/task-records.ts` 有中文名（防两边漂移）。
 
-    判据落在**前端源文件**上（读文本，不 import）：后端加一个来源而前端没加中文名
-    ⇒ 页面显示英文原值，用户看不懂。
+    ⚠️ **判据由 `QUEUE_SOURCES` 驱动，不再手写清单**（2026-09-28）：手写清单本身
+    就是「同一语义两份实现」（DEF-044），上一版手写 10 项而 `QUEUE_SOURCES` 有 12 项
+    ⇒ 两个账号卡来源（`account_card_note_sync` / `account_card_goods_sync`）**真的会
+    入队却缺中文名**，页面显示英文原值，而这份测试抓不到。改成遍历真相源后，后端
+    新增来源而前端没加中文名 ⇒ 立刻红。
+
+    判据落在**前端源文件**上（读文本，不 import）：只断言「有键」，具体文案由前端
+    review —— 后端不硬编码前端文案（那是第二份真相源）。
     """
     lib = (ROOT / "frontend/src/lib/task-records.ts").read_text(encoding="utf-8")
-    for source, label in (
-        (q.SOURCE_NOTE_SYNC_SINGLE, "内容库-同步按钮"),
-        (q.SOURCE_NOTE_SYNC_BATCH, "内容库-批量同步按钮"),
-        (q.SOURCE_NOTE_PUBLISH_SINGLE, "内容库-发布按钮"),
-        (q.SOURCE_NOTE_PUBLISH_BATCH, "内容库-批量发布按钮"),
-        (q.SOURCE_PRODUCT_NOTE_GENERATE_SINGLE, "商品列表-生成笔记按钮"),
-        (q.SOURCE_PRODUCT_NOTE_GENERATE_BATCH, "商品列表-批量生成笔记按钮"),
-        (q.SOURCE_RETRY, "队列记录-重试按钮"),
-        (q.SOURCE_RECOVERY, "应用重启恢复"),
-        (q.SOURCE_SCHEDULED, "定时任务"),
-        (q.SOURCE_MANUAL, "页面按钮（早期数据）"),
-    ):
-        assert f'{source}: "{label}"' in lib, f"来源 {source} 的前端中文名「{label}」缺失"
+    assert len(q.QUEUE_SOURCES) >= 10, "真相源退化了？QUEUE_SOURCES 不该这么短"
+    # 账号卡两个来源必须在内（上一版漏的就是它们，钉住防再漏）。
+    assert "account_card_note_sync" in q.QUEUE_SOURCES
+    assert "account_card_goods_sync" in q.QUEUE_SOURCES
+
+    labels_block = lib.split("export const TASK_SOURCE_LABELS")[1].split("};")[0]
+    tips_block = lib.split("export const TASK_SOURCE_TIPS")[1].split("};")[0]
+    for source in q.QUEUE_SOURCES:
+        assert f"{source}:" in labels_block, (
+            f"来源 {source} 缺前端中文名（TASK_SOURCE_LABELS）⇒ 页面显示英文原值"
+        )
+        assert f"{source}:" in tips_block, (
+            f"来源 {source} 缺前端 Tooltip 说明（TASK_SOURCE_TIPS）"
+        )
+
     label_fn = lib.split("export function taskSourceLabel")[1].split("}")[0]
     assert "未知" not in label_fn, (
         "taskSourceLabel 不许再返回「未知」（2026-09-26 用户口径「来源列不能是未知」）"

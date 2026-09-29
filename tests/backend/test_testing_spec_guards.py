@@ -258,6 +258,7 @@ def _wired_by(script: str) -> list[str]:
         "persisted_filters.cjs",
         "qr_session_identity.cjs",
         "schedule_center.cjs",
+        "settings_view.cjs",
         "shop_items_view.cjs",
         "sync_gates.cjs",
     ],
@@ -349,3 +350,81 @@ def test_memory_budget_guards_are_load_bearing(mutate: str, expected: str):
     result = _run_memory_budget(MEMORY_BUDGET_MUTATE=mutate)
     assert result.returncode != 0, f"{mutate} 变异必须让脚本失败：stdout={result.stdout}"
     assert f"FAIL  {expected}" in result.stdout, f"stdout={result.stdout}"
+
+
+# --------------------------------------------------------------------------- #
+# 模块层 Session 工厂必须全部打桩（2026-09-27 立规）
+# --------------------------------------------------------------------------- #
+#: 打桩清单**必须**覆盖的最小集合（判据落在具体模块上，不是「列表非空」）。
+#: 这四个是「端点链路最容易走到、漏了就直接写生产库」的模块。
+CRITICAL_SESSION_MODULES = {
+    "backend.app.services.scheduled_job_runner",
+    "backend.app.services.scheduler_service",
+    "backend.app.services.note_sync_service",
+    "backend.app.services.sync_task_service",
+}
+
+
+def test_service_session_registry_covers_every_session_owner():
+    """AST 扫出来的模块清单必须真的覆盖持有方（否则打桩是空转）。
+
+    为什么要有这条：`patch_service_sessions` 的清单是**扫出来的**，扫法本身写错
+    （例如只认 `import` 不认赋值、或把 `ast.walk` 写成只看第一个节点）时它会安静地
+    返回一个短清单 —— 打了桩的模块变少，测试**照样全绿**，而请求已经写进生产库。
+    """
+    from tests.backend.conftest import service_session_modules
+
+    modules = set(service_session_modules())
+    missing = CRITICAL_SESSION_MODULES - modules
+    assert not missing, f"打桩清单漏了关键模块：{sorted(missing)}"
+    for name in sorted(modules):
+        module = __import__(name, fromlist=["_"])
+        assert any(
+            hasattr(module, attribute) for attribute in ("SessionLocal", "_session_factory")
+        ), f"{name} 被列入清单却两个名字都没有 —— 打桩会空转"
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    [
+        "backend.app.services.scheduled_job_runner",
+        "backend.app.services.scheduler_service",
+        "backend.app.services.note_sync_service",
+        "backend.app.services.account_task_service",
+    ],
+)
+def test_patch_service_sessions_replaces_the_factory(monkeypatch, module_name):
+    """变异验证：打桩必须**真的换掉**模块属性（含 `_session_factory` 快照别名）。
+
+    `account_task_service._session_factory` 是「import 时取的另一模块属性」的**快照** ——
+    只 patch `note_queue_service.SessionLocal` 对它无效。这正是最容易漏的一种持有方式，
+    所以它单独占一个参数分支（漏了它 = 账号任务 worker 在测试里写生产库）。
+    """
+    from tests.backend.conftest import patch_service_sessions
+
+    sentinel = object()
+    patched = patch_service_sessions(monkeypatch, sentinel)
+
+    module = __import__(module_name, fromlist=["_"])
+    assert any(name.startswith(f"{module_name}.") for name in patched), patched
+    # ⚠️ 两个名字不一定都在（`account_task_service` 只有 `_session_factory` 快照），
+    # 所以用 `getattr` 取值：直接写 `module.SessionLocal` 会在缺属性时抛 AttributeError，
+    # 失败原因变成「属性不存在」而不是「没替换成功」（判据打偏）。
+    assert getattr(module, "SessionLocal", None) is sentinel or (
+        getattr(module, "_session_factory", None) is sentinel
+    ), f"{module_name} 未被替换：patched={patched}"
+
+def test_terminal_statuses_agree():
+    """「终态」只能有一个集合：队列侧（字面量）与同步台账（按 `STATUS_*` 组合）必须一致。
+
+    漂移的代价很具体：队列认为任务结束了、同步台账的 `await_task_terminal` 却继续等
+    ⇒ 账号卡点了同步之后，定时任务日志会**一直停在 running**（看起来像卡死），
+    而任务其实早就结束了。
+    """
+    from backend.app.services import note_queue_service, sync_task_service
+
+    assert set(sync_task_service.TERMINAL_STATUSES) == set(note_queue_service.TERMINAL_STATUSES), (
+        "两处终态定义漂移："
+        f"{sorted(sync_task_service.TERMINAL_STATUSES)} vs "
+        f"{sorted(note_queue_service.TERMINAL_STATUSES)}"
+    )

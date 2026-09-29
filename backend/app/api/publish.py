@@ -12,9 +12,8 @@ from sqlalchemy.orm import Session
 from backend.app.adapters.xhs.creator_api_adapter import XhsCreatorApiAdapter
 from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user, get_owned_active_account
-from backend.app.core.security import decrypt_text
 from backend.app.core.time import shanghai_now
-from backend.app.models import AccountCookieVersion, PlatformAccount, PublishAsset, PublishJob, Task, User
+from backend.app.models import PlatformAccount, PublishAsset, PublishJob, Task, User
 from backend.app.schemas.common import paginated
 from backend.app.services.account_service import (
     AccountRejectedError,

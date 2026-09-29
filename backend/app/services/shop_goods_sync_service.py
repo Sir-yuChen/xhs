@@ -37,7 +37,6 @@ from __future__ import annotations
 
 import json
 import logging
-import threading
 import time
 from typing import Any, Optional
 
@@ -45,7 +44,6 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from backend.app.core.database import SessionLocal
-from backend.app.core.security import decrypt_text
 from backend.app.core.time import shanghai_now
 from backend.app.models.platform_account import PlatformAccount
 from backend.app.models.shop_product import ShopProduct
@@ -409,6 +407,11 @@ def _sync_with_task(
     # 内联详情补齐的累计计数（2026-09-23 重构：不再有多轮队列，这里只统计本轮）。
     detail_done = 0
     detail_failed = 0
+    # 2026-09-28：**进度条口径** —— `processed` = 本任务累计已处理的商品数
+    # （SKU 批次尝试过的，含失败），`work_total` = 本次任务的预计工作量
+    # （首个页边界算一次，之后只增不减）。见 `_update_progress` / `sts.progress_percent`。
+    processed = 0
+    work_total: Optional[int] = None
     # 预先定义，避免「限流 break」路径上未赋值（DEF-045 同批引入的回归）。
     new_items: list[dict[str, Any]] = []
 
@@ -431,7 +434,7 @@ def _sync_with_task(
         # 限流键带 `:goods`（§19.11）：笔记同步与商品同步是两个任务类型、可并发，
         # 都打 ark。共用一个账号键会互饿（同多源笔记的教训）。
         #
-        # ⚠️ **等待**而不是 break（§21.3）：额度 5 次/分钟，页间只 sleep 3 秒 ⇒
+        # ⚠️ **等待**而不是 break（§21.3）：额度按账号读运行时配置（默认 60 次/分钟），页间只 sleep 3 秒 ⇒
         # 20 秒烧完额度；这里 break 等于把页数上限从 3 悄悄改成 5，问题原样存在。
         if not limiter.wait_allow(f"{account.id}:goods"):
             stopped_by_limit = True
@@ -507,9 +510,47 @@ def _sync_with_task(
             for item_id in (_first_text(it.get("item_id")) for it in new_items)
             if item_id
         ]
+        # ⚠️ **进度分母 = 平台按同一条查询条件报出的 `total`**（设计 13 §43.1，2026-09-28
+        # 用户报障后改）：千帆列表接口按 `create_time_from` **服务端过滤** ⇒ `total` 就是
+        # 本条查询条件（窗口下界 / 增量游标）下的条数 —— **有界同步它照样是本次工作量**
+        # （实测：账号 8 窗口 2026-07-05~08-11 平台报 713、本地窗口内 707）。
+        # ⚠️ 平台没有 `create_time_to`（上界只能本地筛）⇒ 纯历史区间的 `total` 会偏大，
+        # 进度条停在 <100% 再随终态跳到 100% 是**如实**的（不谎报完成）。
+        #
+        # ⛔ **不许拿 `new_count`（本轮范围内枚举数）当分母**（旧实现的有界分支）：它与
+        # 分子 `processed` 数的是**同一批商品**（本页枚举出来、立刻被 SKU 批次尝试的那批）
+        # ⇒ 每个页边界都恰好 `processed == work_total` ⇒ **第一页跑完进度条就 100%**，
+        # 而窗口内还有几百件没处理（真库 `task=82` 实测 `processed=100 / work_total=100`
+        # 而 `total=713`）。「分母与分子同源」是这一类 bug 的通用判据（DEF 级）。
+        #
+        # 拿不到 `total` ⇒ **不报分母**（缺值口径：不知道就不报，不拿一个同源的数冒充）
+        # ⇒ 前端如实渲染「比例未知」的不定量条。只允许变大（变小 = 进度倒退，禁止）。
+        if total:
+            candidate = int(total)
+            work_total = candidate if work_total is None else max(work_total, candidate)
+
+        # SKU 明细**逐批**回调（每批 10 个商品 ≈ 一次限流等待 ≈ 7.5 秒）⇒ 进度条在页内
+        # 也慢慢涨。回调体只改内存态；刷盘由下面的 `_update_progress` + commit 完成，
+        # 所以再补一次「页内每批 commit」的代价不值得（页粒度 ≈ 40 秒已够平滑）。
+        processed_base = processed
+
+        def _on_batch(attempted_in_page: int) -> None:
+            _update_progress(
+                db,
+                task,
+                stored=new_count,
+                total=total,
+                page=page_no,
+                processed=processed_base + int(attempted_in_page),
+                work_total=work_total,
+            )
+
         page_skus = _fetch_page_skus(
-            account, adapter, item_ids=page_item_ids, limiter=limiter,
+            account, adapter, item_ids=page_item_ids, limiter=limiter, on_progress=_on_batch,
         )
+        # 「本页已处理」= SKU 批次**已尝试**的商品数（成功 + 失败都算尝试过；
+        # 限流等待超时那批一个请求都没发 ⇒ 不计入 ⇒ 进度条到不了 100% 是**如实**的）。
+        processed += int(page_skus["done"]) + int(page_skus["failed"])
         detail_done += page_skus["done"]
         detail_failed += page_skus["failed"]
         warnings.extend(page_skus["warnings"])
@@ -540,7 +581,15 @@ def _sync_with_task(
                 if _stamp > observed_raw_max_ms:
                     observed_raw_max_ms = _stamp
 
-        _update_progress(db, task, stored=new_count, total=total, page=page_no)
+        _update_progress(
+            db,
+            task,
+            stored=new_count,
+            total=total,
+            page=page_no,
+            processed=processed,
+            work_total=work_total,
+        )
         db.commit()
 
         # §17.3：商品列表没有 end_tag，「翻到底」的信号是「本页 0 行」。
@@ -767,6 +816,7 @@ def _fetch_page_skus(
     *,
     item_ids: list[str],
     limiter: Any,
+    on_progress: Any = None,
 ) -> dict[str, Any]:
     """拉取一页商品的 SKU 明细，返回 ``{skus_map, done, failed, warnings, time}``。
 
@@ -774,6 +824,12 @@ def _fetch_page_skus(
     **失败不阻塞**：某批失败记一条 warning 继续下一批，对应商品的详情留空
     （`detail_synced_at = NULL`），下轮重试。凭据失效（`-13000`）停本函数
     （后续页面也没必要翻了，但调用方决定是否继续列表翻页）。
+
+    ``on_progress(attempted_in_page)``（2026-09-28 加）：**每批**回调一次，参数 =
+    本页**已尝试**的商品数（含失败）。这是「进度条在页内也慢慢涨」的唯一来源 ——
+    一批 10 个商品 ≈ 一次限流等待（额度 8 次/分钟 ⇒ 约 7.5 秒），不接回调的话
+    一页 50 个商品要 40 秒才动一格（用户口径：进度条要**慢慢增加**）。
+    ⚠️ 回调里的异常全吞：进度是观测，不得影响执行（同 `_ProgressPump` 纪律）。
     """
     from apis.xhs_qianfan_apis import SKU_BATCH_SIZE
 
@@ -790,6 +846,8 @@ def _fetch_page_skus(
         batch = item_ids[start : start + SKU_BATCH_SIZE]
         if not limiter.wait_allow(f"{account.id}:goods"):
             warnings.append(f"补详情第 {start // SKU_BATCH_SIZE + 1} 批前限流等待超时")
+            # ⚠️ 限流等待超时**不算已尝试**（`failed` 照记，供调用方如实报数）：
+            # 这一批一个请求都没发出去，算进「已处理」会让进度条虚高。
             failed += len(batch)
             break
         try:
@@ -798,10 +856,12 @@ def _fetch_page_skus(
             logger.warning("shop goods sync: sku detail batch failed: %s", exc)
             failed += len(batch)
             warnings.append(f"{len(batch)} 个商品详情获取异常")
+            _notify_batch_progress(on_progress, done + failed)
             continue
         if not success:
             failed += len(batch)
             warnings.append(f"{len(batch)} 个商品详情获取失败：{message or '未知原因'}")
+            _notify_batch_progress(on_progress, done + failed)
             if "-13000" in str(message):
                 break
             continue
@@ -817,6 +877,7 @@ def _fetch_page_skus(
             else:
                 # 平台没返回这个商品的 SKU（可能刚删除）⇒ 留空，不算成功
                 failed += 1
+        _notify_batch_progress(on_progress, done + failed)
 
     return {
         "skus_map": skus_map,
@@ -827,108 +888,14 @@ def _fetch_page_skus(
     }
 
 
-def _detail_queue(
-    db: Session, shop_id_fk: int, cap: int
-) -> list[ShopProduct]:
-    """待补详情队列：**从没补过的优先**（`detail_synced_at IS NULL`），
-    其次补过最旧的。SQLite 的 ASC 排序 NULL 在前，正好是「没补过优先」。
-
-    只按店铺取，不按账号 —— 商品属于店铺实体（与列表落库同一口径）。
-    """
-    if cap <= 0:
-        return []
-    return list(
-        db.scalars(
-            select(ShopProduct)
-            .where(ShopProduct.shop_id_fk == shop_id_fk)
-            .order_by(ShopProduct.detail_synced_at.asc())
-            .limit(cap)
-        ).all()
-    )
-
-
-def _backfill_details(
-    db: Session,
-    account: PlatformAccount,
-    shop_id_fk: int,
-    adapter: Any,
-    *,
-    cap: int,
-    limiter: Any,
-) -> dict[str, Any]:
-    """第二段：给缺详情的商品补 SKU 明细（设计 13 §19.4.2）。
-
-    有界：每轮最多 `cap` 个商品、每批 ≤ :data:`SKU_BATCH_SIZE` 个 id、
-    批间限流 + 停顿。**失败不阻塞**：某批失败记一条 warning 继续下一批，
-    商品保持旧详情（或空）；凭据失效（`-13000`）由调用方在列表段已处理，
-    这里再遇到只停本段（不重复标 binding）。
-
-    返回 `{detail_done, detail_total, detail_failed, warnings}`：
-    * `detail_done` = 本轮成功补到的商品数；
-    * `detail_total` = 补完后队列还剩多少（NULL = 不知道，前端显示 `-`）。
-    """
-    from apis.xhs_qianfan_apis import SKU_BATCH_SIZE
-
-    warnings: list[str] = []
-    done = 0
-    failed = 0
-    queue = _detail_queue(db, shop_id_fk, cap)
-    if not queue:
-        return {"detail_done": 0, "detail_total": 0, "detail_failed": 0, "warnings": []}
-
-    by_id = {row.item_id: row for row in queue}
-    item_ids = [row.item_id for row in queue if row.item_id]
-    for start in range(0, len(item_ids), SKU_BATCH_SIZE):
-        batch = item_ids[start : start + SKU_BATCH_SIZE]
-        # **等待**额度（设计 13 §21.3）：详情补齐本来就是「多轮收敛」的队列，
-        # 限流即停会让队列永远清不完（笔记侧的 `hydrated_at` 同理）。
-        if not limiter.wait_allow(f"{account.id}:goods"):
-            warnings.append(f"补详情第 {start // SKU_BATCH_SIZE + 1} 批前限流等待超时")
-            break
-        try:
-            success, message, raw_payload = adapter.get_skus_by_item_ids(batch)
-        except Exception as exc:  # noqa: BLE001 - 单批失败不中断其余
-            logger.warning("shop goods sync: sku detail batch failed: %s", exc)
-            failed += len(batch)
-            warnings.append(f"{len(batch)} 个商品详情获取异常")
-            continue
-        if not success:
-            failed += len(batch)
-            warnings.append(f"{len(batch)} 个商品详情获取失败：{message or '未知原因'}")
-            # 列表段没炸但这里 -13000 ⇒ 令牌在这一步失效，停本段（下轮重试）
-            if "-13000" in str(message):
-                break
-            continue
-
-        data = raw_payload.get("data") if isinstance(raw_payload, dict) else None
-        skus_map = data.get("skusMap") if isinstance(data, dict) else None
-        skus_map = skus_map if isinstance(skus_map, dict) else {}
-        now = shanghai_now()
-        for item_id in batch:
-            row = by_id.get(item_id)
-            if row is None:  # pragma: no cover - 队列与批量同源，不会发生
-                continue
-            skus = skus_map.get(item_id)
-            if not isinstance(skus, list):
-                # 平台没返回这个商品的 SKU（可能刚删除）⇒ 不算成功，留待下轮
-                failed += 1
-                continue
-            normalized = normalize_skus(skus)
-            row.detail_json = json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
-            row.sku_count = len(normalized) if normalized else None
-            row.detail_synced_at = now
-            done += 1
-        db.commit()
-        if start + SKU_BATCH_SIZE < len(item_ids):
-            _sleep_between_pages()
-
-    remaining = len(_detail_queue(db, shop_id_fk, cap + 1))
-    return {
-        "detail_done": done,
-        "detail_total": remaining,
-        "detail_failed": failed,
-        "warnings": warnings,
-    }
+def _notify_batch_progress(on_progress: Any, attempted_in_page: int) -> None:
+    """一批 SKU 拉完 ⇒ 通知进度回调（异常全吞：观测不得影响执行）。"""
+    if on_progress is None:
+        return
+    try:
+        on_progress(int(attempted_in_page))
+    except Exception:  # noqa: BLE001 - 观测失败不得影响执行
+        logger.debug("shop goods sync: batch progress callback failed", exc_info=True)
 
 
 def _item_create_ms(item: dict[str, Any]) -> int:
@@ -973,10 +940,34 @@ def _sleep_between_pages() -> None:
 
 
 def _update_progress(
-    db: Session, task: Task, *, stored: int, total: Optional[int], page: int
+    db: Session,
+    task: Task,
+    *,
+    stored: int,
+    total: Optional[int],
+    page: int,
+    processed: Optional[int] = None,
+    work_total: Optional[int] = None,
 ) -> None:
+    """写任务行的进行中进度。
+
+    **刷盘点**（设计 13 §42.3，2026-09-28 用户口径「每执行 50 条应更新一次任务执行详情
+    数据」+「进度条慢慢增加」）：翻页循环里**每页一次**（本页详情拉完 + 落库之后，
+    `stored` 才为真），页粒度 = `sts.PROGRESS_FLUSH_EVERY`（默认 50 条）；
+    **页内**由 `_fetch_page_skus` 的逐批回调更新（每批 10 个商品）——
+    与笔记同步**同一把尺子**。
+
+    ``processed`` / ``work_total`` = **进度条真正看的那一对**（单调口径，见
+    `sts.progress_percent` 的三条优先级）：分子只增、分母固定 ⇒ 比值单调，
+    不再出现「一页内 0→100 反复跳」。
+    """
     payload = sts.task_payload(task)
-    payload["progress"] = {"stored": stored, "total": total, "page": page}
+    progress: dict[str, Any] = {"stored": stored, "total": total, "page": page}
+    if processed is not None:
+        progress["processed"] = processed
+    if work_total is not None:
+        progress["work_total"] = work_total
+    payload["progress"] = progress
     task.payload = payload
     task.status = sts.STATUS_RUNNING
     if task.started_at is None:
@@ -1155,7 +1146,12 @@ def start_shop_goods_sync(
     time_from_ms: int = 0,
     time_to_ms: int = 0,
 ) -> dict[str, Any]:
-    """建任务行 + 起线程，**立即返回**任务摄要。
+    """建任务行 + 唤醒账号任务 worker，**立即返回**任务摄要。
+
+    §35.16（2026-09-27 用户口径「账号卡点同步商品，任务中心任务日志没有新增」）：
+    执行**不再起独立线程**（原 `shop-goods-sync-{account_id}`），改由
+    `account_task_service` 的账号任务 worker 认领 —— 串行 + 进程退出可续跑 + 记录页可见。
+    防重口径与响应形状**逐字不变**。
 
     防重（需求 N3）：该账号已有未完成的商品同步 → 返回**已有任务**（`reused=True`）。
     """
@@ -1172,6 +1168,9 @@ def start_shop_goods_sync(
             source=source,
             max_pages=max_pages,
             page_size=page_size,
+            # §35.16：执行改由账号任务 worker 从**任务行**重建参数 ⇒ 同步语义必须落库
+            # （原线程版靠 args 传，行里没有）。漏写 = 用户选的「全量 / 时间区间」静默丢失。
+            extra={"mode": mode, "time_from_ms": time_from_ms, "time_to_ms": time_to_ms},
         )
         db.commit()
         db.refresh(task)
@@ -1182,35 +1181,9 @@ def start_shop_goods_sync(
     finally:
         db.close()
 
-    thread = threading.Thread(
-        target=_run_in_thread,
-        args=(account_id, task_id, user_id, max_pages, page_size, source, mode, time_from_ms, time_to_ms),
-        name=f"shop-goods-sync-{account_id}",
-        daemon=True,
-    )
-    thread.start()
+    # §35.16：不再起独立线程 —— 交给账号任务 worker 认领执行（串行 + 可续跑 + 可见）。
+    # 执行参数已随任务行落库（见上面的 `extra`），worker 从行重建。
+    from backend.app.services import account_task_service
+
+    account_task_service.ensure_account_task_worker()
     return {"reused": False, **summary}
-
-
-def _run_in_thread(
-    account_id: int,
-    task_id: int,
-    user_id: int,
-    max_pages: Optional[int],
-    page_size: int,
-    source: str,
-    mode: str = sts.SYNC_MODE_AUTO,
-    time_from_ms: int = 0,
-    time_to_ms: int = 0,
-) -> None:
-    run_shop_goods_sync(
-        account_id,
-        task_id=task_id,
-        user_id=user_id,
-        max_pages=max_pages,
-        page_size=page_size,
-        source=source,
-        mode=mode,
-        time_from_ms=time_from_ms,
-        time_to_ms=time_to_ms,
-    )

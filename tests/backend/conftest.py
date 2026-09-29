@@ -1,5 +1,40 @@
 """后端测试的公共夹具 —— 消灭「每个文件各建一份 engine / TestClient」的样板。
 
+## ⚠️ 模块级 `SessionLocal` 必须打桩（2026-09-27 立规）
+
+`get_db` **不是**唯一的数据库入口：`services/` 里 12 个模块各自
+`from backend.app.core.database import SessionLocal`（模块属性，绑在自己的名字空间里），
+服务函数自开 Session 时用的是**它**。`api_client` 只覆盖 FastAPI 依赖 ⇒ 一旦端点链路
+走到服务层，请求就**落到生产库**上。
+
+代价已经真实发生过两次（2026-09-27 本日两回）：账号卡同步端点改造后链路变长
+（`scheduled_job_runner` → `scheduler_service` → `note_sync_service`），测试只打桩了
+自己知道的那一个模块，于是**用户真实库**里多了一行 `running` 的僵尸任务 + 7 条假定时日志。
+
+对策是**两条一起上**（缺任一条都会复发）：
+
+1. `patch_service_sessions(monkeypatch, factory)` —— 打桩清单由 **AST 扫源码**得出
+   （`service_session_modules()`），不是人肉维护的名单 ⇒ 新增服务模块自动被覆盖；
+2. `api_client` **默认**打桩（见夹具 docstring）⇒ 新写的端点测试不用记得这件事。
+
+守卫见 `test_testing_spec_guards.py::test_service_session_registry_covers_every_session_owner`。
+
+**第三次（2026-09-28）—— 形态不同，上面两条对策都挡不住**：`test_scheduler_sync.py` 里那个
+「进真 `lifespan`」的用例**不用 `api_client`**（它手动 `monkeypatch` 自己关心的那几个依赖）
+⇒ 第 2 条对策覆盖不到它。它漏桩了 `lifespan` 里的两个**播种**步骤
+（`seed_builtin_jobs_from_initial_data` / `seed_builtin_settings_from_initial_data`）以及
+`recover_account_tasks()`（自开 Session 写库）与 `ensure_account_task_worker()` /
+`start_account_task_watchdog()`（起常驻线程去认领真实数据）。此前它们一直是 no-op
+（内置行都在）⇒ 看不出问题；本轮**新增一个运行时配置键**后播种第一次真的写
+⇒ **全量回归把 6 行写进了 `data/spider_xhs.db`**（18:08:47，6 个用户各一行）。
+
+⇒ 本轮补的判据是**结构性的**：`test_scheduler_sync.py::test_lifespan_steps_are_all_stubbed_by_this_module`
+用 AST 取 `lifespan` 的**裸名调用集合**，断言 ⊆ 该用例的桩清单（桩清单同样从它的源码 AST 取，
+不在守卫里另抄一份 —— 两份名单必然漂移）⇒ `lifespan` 新增任何步骤而没同步桩就红。
+**凡「手动进 `lifespan` / 手动 `create_engine`」的用例都要有同款守卫**（`api_client` 的
+自动打桩管不到它们）。
+
+
 ## 为什么要有这个文件
 
 改之前：**41 个后端测试文件、30836 行**里，有 **29 个文件各自 `create_engine` +
@@ -72,6 +107,72 @@ def db_path(tmp_path: Path) -> Path:
     return tmp_path / "test.db"
 
 
+def service_session_modules() -> list[str]:
+    """列出**所有**「模块层持有 Session 工厂」的后端模块（点分模块名）。
+
+    两种形态都算（项目里并存，都必须打桩）：
+
+    * `from backend.app.core.database import SessionLocal` —— 直接持有工厂；
+    * `_session_factory = …` —— 模块层的**快照别名**（`note_sync_service` /
+      `account_task_service` 等的「测试可注入」惯例）。⚠️ 快照是在 **import 时**取的，
+      只 patch 它引用的那个模块**不会**改变它 ⇒ 必须连名字本身一起 patch。
+
+    用 `ast` 扫语法树而不是字符串匹配：注释 / 文档里提到这些名字不算数
+    （负向断言禁裸 `in`，这里同理）。
+
+    ⚠️ **不硬编码名单**：硬编码迟早漏掉新模块，而漏掉的代价是「测试默默写生产库」
+    （2026-09-27 已发生两次）。语法错的模块直接抛出，不静默跳过。
+    """
+    import ast  # noqa: PLC0415
+
+    names = {"SessionLocal", "_session_factory"}
+    modules: list[str] = []
+    for path in sorted((ROOT / "backend" / "app").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in tree.body:  # 只看模块层：函数内的 import / 赋值不影响模块属性
+            targets: list[ast.expr] = []
+            if isinstance(node, ast.Assign):
+                targets = list(node.targets)
+            elif isinstance(node, ast.AnnAssign):
+                targets = [node.target]
+            elif isinstance(node, ast.ImportFrom):
+                targets = [ast.Name(id=alias.name) for alias in node.names]
+            if any(isinstance(t, ast.Name) and t.id in names for t in targets):
+                modules.append(_module_name(path))
+                break
+    return sorted(set(modules))
+
+
+def _module_name(path: Path) -> str:
+    """`…/backend/app/services/x.py` → `backend.app.services.x`。"""
+    relative = path.relative_to(ROOT).with_suffix("")
+    return ".".join(relative.parts)
+
+
+def patch_service_sessions(monkeypatch: Any, session_factory: Callable[[], Session]) -> list[str]:
+    """把**全部**模块层 Session 工厂打到夹具库上，返回被替换的模块名（升序）。
+
+    每个模块按它**实际持有**的名字替换（`SessionLocal` / `_session_factory` 都可能，
+    也可能两个都有）—— 只替换存在的那个，不做「猜」。
+
+    调用方拿到返回值可以断言「确实打到了想打的那个模块」（例如本用例关心的服务层），
+    而不是靠「测试没炸」推断 —— 没打到桩时测试往往是**假绿**（断言看不到自己写的行，
+    而请求已经落到生产库上了）。
+
+    用 `monkeypatch` 而非裸 `setattr`：退出时自动还原，不会把替换泄漏给后面的用例。
+    """
+    import importlib  # noqa: PLC0415
+
+    patched: list[str] = []
+    for name in service_session_modules():
+        module = importlib.import_module(name)
+        for attribute in ("SessionLocal", "_session_factory"):
+            if hasattr(module, attribute):
+                monkeypatch.setattr(module, attribute, session_factory)
+                patched.append(f"{name}.{attribute}")
+    return patched
+
+
 @pytest.fixture()
 def db_engine(db_path: Path) -> Engine:
     """建好全部表的 engine。"""
@@ -101,11 +202,19 @@ def db_session(db_factory: Callable[[], Session]) -> Iterator[Session]:
 
 
 @pytest.fixture()
-def api_client(db_engine: Engine):
+def api_client(db_engine: Engine, monkeypatch):
     """连到测试库的 `TestClient(app)`；退出时清掉自己加的 override。
 
     ⚠️ 退出时**必定** `pop`：`app.dependency_overrides` 是模块级全局，
     旧样板的 `_override_database()` 只写不清，会把库指向泄漏给同会话后面的用例。
+
+    ⚠️ **同时把全部模块级 `SessionLocal` 打到本夹具库上**（2026-09-27 起，见模块
+    docstring）：光覆盖 `get_db` 只挡住「用 `Depends(get_db)` 的代码」，服务层自开
+    Session 的那部分照样打到生产库 —— 端点一旦在链路里调服务函数，测试就会写真实数据。
+    这条默认行为让「用 `api_client` = 落库落在测试库」成为**唯一约定**。
+
+    用例若还想断言「本用例关心的那个服务模块确实被打到桩上」，直接调
+    `patch_service_sessions(monkeypatch, db_factory)` 取返回值即可（重复打桩幂等）。
     """
     from fastapi.testclient import TestClient  # noqa: PLC0415
 
@@ -113,6 +222,7 @@ def api_client(db_engine: Engine):
     from backend.app.main import app  # noqa: PLC0415
 
     factory = sessionmaker(autocommit=False, autoflush=False, bind=db_engine)
+    patch_service_sessions(monkeypatch, factory)
 
     def override_get_db() -> Any:
         db = factory()
@@ -171,13 +281,61 @@ def frontend_runner() -> Callable[[str, dict[str, str] | None], Any]:
     return _run
 
 
+#: `upgrade head` 路上「**区间内后续迁移会碰、但最小夹具不建**」的表（DDL 逐条在此）。
+#:
+#: 为什么需要它（DEF-082 实测）：四个迁移用例（`test_scheduled_jobs.py` × 3、
+#: `test_initial_data.py` × 1，见 `run_alembic`）都是「建**最小**遗留库 → `stamp <父 revision>`
+#: → `upgrade head`」。最小库只建**被测迁移要碰的表**，而 `upgrade head` 会把
+#: `(stamp, head]` 区间里的**全部**迁移跑一遍 —— 区间里任何一条迁移碰了夹具没有的表，
+#: 用例就红在与它毫无关系的地方（head 迁移 `l3m4n5o6p7q8` 建
+#: `ix_notes_user_created(user_id, created_at)`，四个夹具都没有 `notes` ⇒ 四条 slow
+#: 用例一起红，而报错被 `CalledProcessError` 吞掉，看不出根因）。
+#:
+#: ⚠️ **不要给迁移加「表不存在就跳过」的兜底**：那会让迁移在真库上**静默不干活**
+#: （DEF-048「安全网不能条件性」同型）。缺表是**夹具**的债，在夹具侧还。
+#: ⚠️ **新增 head 迁移若碰了新表 ⇒ 只改这里一处**（四个夹具共用本表，不各抄一份，DEF-044）。
+LATER_MIGRATION_TABLES: dict[str, str] = {
+    # `l3m4n5o6p7q8`（2026-09-28，设计 13 §41.6）：建 `notes(user_id, created_at)` 复合索引。
+    # 夹具只需要「这张表存在 + 有这两列」——迁移只建索引，不读数据。
+    "notes": (
+        "CREATE TABLE notes ("
+        " id INTEGER NOT NULL,"
+        " user_id INTEGER,"
+        " note_id VARCHAR(64),"
+        " created_at DATETIME NOT NULL,"
+        " PRIMARY KEY (id))"
+    ),
+}
+
+
+def create_later_migration_tables(conn: Any) -> None:
+    """给最小夹具补上「迁移链后半段要碰的表」（幂等；清单见 `LATER_MIGRATION_TABLES`）。
+
+    调用点：四个迁移用例各自建完**自己的**遗留表之后、`conn.commit()` 之前。
+    已存在的表**跳过**（夹具将来自己建同名表时不冲突）。
+    """
+    existing = {
+        row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    for name, ddl in LATER_MIGRATION_TABLES.items():
+        if name not in existing:
+            conn.execute(ddl)
+
+
 def run_alembic(db_path: Path, *args: str) -> None:
     """在夹具库上跑 alembic 子命令（`stamp <rev>` / `upgrade <rev>`）。
 
     四个迁移用例（`test_scheduled_jobs.py` × 3、`test_initial_data.py` × 1）原来各抄一遍
     「`DATABASE_URL` + `subprocess.run([sys.executable, -m, alembic, ...])`」样板 ——
-    收在一处（DEF-044 同型：同一语义不留两份实现）。`check=True` ⇒ 失败直接炸，
-    不静默跳过（迁移没跑成功而断言空摆，比红更危险）。
+    收在一处（DEF-044 同型：同一语义不留两份实现）。
+
+    ⚠️ **失败时把 alembic 的输出原样带出来**（2026-09-28 实测教训）：原实现用
+    `check=True` + `capture_output=True`，而 `CalledProcessError.__str__()` **只有**
+    「returned non-zero exit status 1」—— alembic 的真实报错（`no such table: main.notes`
+    这种）被吞在 `result.stderr` 里，pytest 只给你一个 `CalledProcessError`。
+    后果：四个迁移用例同时红，却分不清是「夹具缺表」还是「迁移写坏了」，只能手工复现。
+    现在改成显式判 rc + `AssertionError`（附 stdout/stderr 尾部），一眼能看出根因。
+    失败**依然直接炸**，不静默跳过（迁移没跑成功而断言空摆，比红更危险）。
     """
     import os  # noqa: PLC0415
     import subprocess  # noqa: PLC0415
@@ -185,10 +343,19 @@ def run_alembic(db_path: Path, *args: str) -> None:
 
     env = dict(os.environ)
     env["DATABASE_URL"] = f"sqlite:///{db_path.as_posix()}"
-    subprocess.run(
+    result = subprocess.run(
         [sys.executable, "-m", "alembic", "-c", "backend/alembic.ini", *args],
         cwd=os.getcwd(),
         env=env,
-        check=True,
         capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
+    if result.returncode != 0:
+        raise AssertionError(
+            f"alembic {' '.join(args)} 失败（rc={result.returncode}，库={db_path.name}）—— "
+            "迁移没跑成功，后面的断言全是空摆。真实报错：\n"
+            f"--- stdout ---\n{result.stdout[-2000:]}\n"
+            f"--- stderr ---\n{result.stderr[-2000:]}"
+        )

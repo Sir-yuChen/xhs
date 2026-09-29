@@ -15,23 +15,18 @@ import type {
   AnalyticsReportResponse,
   AnalyticsTopContent,
   AppNotification,
-  BenchmarkCreateDraftsResponse,
-  BenchmarkOverview,
   BatchCreateDraftsPayload,
   BatchCreateDraftsResponse,
-  ComposeImagePayload,
   CreateDraftPayload,
   DashboardOverview,
   Draft,
   DescribeImagePayload,
   GenerateNotePayload,
-  GenerateCoverPayload,
   GenerateImagePayload,
   GenerateImageResult,
   GeneratedImageAsset,
   GenerateTagsPayload,
   GenerateTitlePayload,
-  ImageUtilityFile,
   KeywordGroup,
   KeywordGroupDetail,
   KeywordGroupPayload,
@@ -52,12 +47,14 @@ import type {
   PlatformMeta,
   PlatformUser,
   PublishAsset,
-  PublishAssetPayload,
   PublishJob,
   PublishJobUpdatePayload,
-  PolishTextPayload,
-  ResizeImagePayload,
   RewriteDraftPayload,
+  SystemSetting,
+  SystemSettingCreatePayload,
+  SystemSettingDeleteResult,
+  SystemSettingListResponse,
+  SystemSettingUpdatePayload,
   RunDueTasksResponse,
   ScheduleIn,
   ScheduleTarget,
@@ -70,12 +67,10 @@ import type {
   SendDraftToPublishPayload,
   NoteTopic,
   UserImageFile,
-  TopicPayload,
   TaskRecord,
   XhsNoteSearchResponse,
   XhsDataCrawlItem,
   XhsDataCrawlPayload,
-  XhsDataCrawlResponse,
   XhsSearchOptions,
   XhsSearchNote,
   XhsSelfCapabilities,
@@ -86,14 +81,13 @@ import type {
   XhsInteractionKind,
   XhsInteractionResponse,
   XhsQianfanBinding,
-  XhsQianfanShop,
   XhsShopItemDetail,
   XhsShopItemsQuery,
   XhsShopItemsResponse,
   XhsShopItemsDeleteResult,
   XhsItemNotesResponse,
   XhsAccountLoginState,
-  XhsQrLoginSession
+  XhsQrLoginSession,
 } from "../types";
 
 const http = axios.create({
@@ -304,20 +298,6 @@ export async function fetchXhsCommentInsights(): Promise<AnalyticsCommentInsight
   return response.data;
 }
 
-export async function fetchXhsBenchmarks(): Promise<BenchmarkOverview> {
-  const response = await http.get<BenchmarkOverview>("/xhs/analytics/benchmarks");
-  return response.data;
-}
-
-export async function createBenchmarkDrafts(targetId: number, limit = 5): Promise<BenchmarkCreateDraftsResponse> {
-  const response = await http.post<BenchmarkCreateDraftsResponse>(
-    `/xhs/analytics/benchmarks/${targetId}/create-drafts`,
-    null,
-    { params: { limit } }
-  );
-  return response.data;
-}
-
 export async function createXhsAnalyticsReport(
   payload: AnalyticsReportPayload = { format: "json" }
 ): Promise<AnalyticsReportResponse> {
@@ -341,6 +321,18 @@ export interface SyncNotesOptions {
   /** 调试/测试用：显式限制页数。**不传 = 全量**（§21）。 */
   maxPages?: number;
   scope?: SyncScope;
+  /**
+   * **同步模式**（设计 13 §22 / §35.15，2026-09-27）。
+   *
+   * `full` = 真重扫整个列表（翻到平台没有下一页）；不传 = 后端 `auto`
+   * （**有同步游标即增量**）。
+   *
+   * 为什么必须能显式传：`scope` 与 `mode` 是**正交**的两件事 —— `scope=full`
+   * 只说「不设时间界」，模式仍由游标决定。用户点「全量同步」却不传 `mode=full`
+   * 时，有同步历史的账号照样走增量、第 1 页就增量早停（§35.15.1 实测：同步
+   * 「成功」但一条都没补），「全量」这个选项名不副实。
+   */
+  mode?: "full" | "incremental";
   /** `YYYY-MM-DD`；`scope=range` 时生效。 */
   startDate?: string;
   /** `YYYY-MM-DD`；`scope=range` 时生效（含当天一整天）。 */
@@ -875,7 +867,7 @@ export interface SyncQueueEntry {
 /** 同步进度卡的逐篇结果（快照 `finished`；同步失败的原因只在这里给一次）。 */
 export interface SyncQueueFinishedEntry extends SyncQueueEntry {
   ok: boolean;
-  /** 与 `hydrate_note_detail` 同源的状态（`ok` / `no_url` / `no_session` / `failed`）。 */
+  /** 与 `hydrate_note_detail` 同源的状态（`ok` / `no_token` / `no_url` / `no_session` / `failed`）。 */
   status: string;
   /** 失败/跳过的真实原因（成功时为空串）。 */
   reason: string;
@@ -927,6 +919,14 @@ export async function fetchSyncQueue(silent = true): Promise<SyncQueueSnapshot> 
   return response.data;
 }
 
+/*
+ * ⚠️ **详情补齐队列的前端接口已删除**（2026-09-27 用户口径：账号卡移除「补齐详情」，
+ * 补齐能力并入「同步笔记」任务本身，设计 13 §35.18）。同时删掉的：
+ * `fetchHydrateQueue` / `HydrateQueueSnapshot` / `EMPTY_HYDRATE_QUEUE_SNAPSHOT` /
+ * `hydratePendingNotes` / `HydratePendingResult` —— 后端端点
+ * `GET /notes/hydrate-queue` 与 `POST /accounts/{id}/notes/hydrate-pending` 一并移除。
+ */
+
 /**
  * 笔记详情（内容库）。**只读本地库，零平台请求**（2026-09-22 用户口径：
  * 「内容库应查询的均是本地数据」）。
@@ -935,8 +935,8 @@ export async function fetchSyncQueue(silent = true): Promise<SyncQueueSnapshot> 
  * `db.commit()` 会与正在跑的同步任务抢 SQLite 写锁，`database is locked`
  * 未捕获 ⇒ 用户看到「内容库笔记详情 500」。一个只读页面不该有平台副作用。
  *
- * 正文与图集的补齐现在**只由同步链路**做（有界 + 跨轮累积）；本地暂时没有正文
- * 的行，界面按缺值口径说明，不假装有数据。
+ * 正文与图集的补齐现在**只由同步链路**做（同步任务内联，含历史欠账，设计 13 §35.18）；
+ * 本地暂时没有正文的行，界面按缺值口径说明，不假装有数据。
  */
 export async function fetchSavedNote(
   noteId: number,
@@ -951,19 +951,6 @@ export async function fetchSavedNote(
 export async function fetchSavedNoteAssets(noteId: number): Promise<Paginated<NoteAsset>> {
   const response = await http.get<Paginated<NoteAsset>>(`/notes/${noteId}/assets`);
   return response.data;
-}
-
-export async function addNoteAsset(noteId: number, payload: { asset_type: string; url?: string; local_path?: string }): Promise<NoteAsset> {
-  const response = await http.post<NoteAsset>(`/notes/${noteId}/assets`, payload);
-  return response.data;
-}
-
-export async function deleteNoteAsset(noteId: number, assetId: number): Promise<void> {
-  await http.delete(`/notes/${noteId}/assets/${assetId}`);
-}
-
-export async function reorderNoteAssets(noteId: number, assetIds: number[]): Promise<void> {
-  await http.put(`/notes/${noteId}/assets/reorder`, { asset_ids: assetIds });
 }
 
 export async function fetchSavedNoteComments(noteId: number, page = 1): Promise<Paginated<NoteComment>> {
@@ -992,11 +979,6 @@ export async function fetchTopics(keyword?: string): Promise<Paginated<NoteTopic
   return response.data;
 }
 
-export async function createTopic(payload: TopicPayload): Promise<NoteTopic> {
-  const response = await http.post<NoteTopic>("/topics", payload);
-  return response.data;
-}
-
 export async function batchCreateDraftsFromNotes(
   payload: BatchCreateDraftsPayload
 ): Promise<BatchCreateDraftsResponse> {
@@ -1022,10 +1004,6 @@ export async function downloadExportFile(downloadUrl: string, fileName: string):
   window.URL.revokeObjectURL(objectUrl);
 }
 
-export async function downloadMediaFile(downloadUrl: string, fileName: string): Promise<void> {
-  return downloadExportFile(downloadUrl, fileName);
-}
-
 export type UploadedFile = {
   file_name: string;
   file_path: string;
@@ -1042,12 +1020,6 @@ export async function uploadAssetFile(file: File): Promise<UploadedFile> {
     timeout: 120000,
   });
   return response.data;
-}
-
-export async function createMediaObjectUrl(downloadUrl: string): Promise<string> {
-  const endpoint = downloadUrl.startsWith("/api") ? downloadUrl.slice(4) : downloadUrl;
-  const response = await http.get<Blob>(endpoint, { responseType: "blob" });
-  return window.URL.createObjectURL(response.data);
 }
 
 export async function searchXhsNotes(payload: XhsSearchOptions): Promise<XhsNoteSearchResponse> {
@@ -1257,6 +1229,10 @@ export async function bindXhsQianfanShop(
  *
  * 2026-09-23 重构：每页列表商品的 SKU 规格详情在落库前拉取（批量 10），
  * 列表数据 + 规格详情一次性 upsert——列表翻完 = 详情也全了，不再有多轮补齐队列。
+ *
+ * **语义（§35.17）**：手动触发定时任务 `system.shop_goods_sync` 的「执行一次」——
+ * 任务行给账号卡轮询，`scheduled_job_logs` 给任务中心「任务日志」；已有任务在跑时
+ * `reused: true` 且 `log_id` 为 `null`。
  */
 export async function syncShopGoods(payload: {
   platformAccountId: number;
@@ -1265,8 +1241,8 @@ export async function syncShopGoods(payload: {
   scope?: SyncScope;
   startDate?: string;
   endDate?: string;
-}): Promise<XhsSyncTaskSummary> {
-  const response = await http.post<XhsSyncTaskSummary>(
+}): Promise<XhsSyncTriggerResult> {
+  const response = await http.post<XhsSyncTriggerResult>(
     "/xhs/qianfan/sync-shop-goods",
     {
       platform_account_id: payload.platformAccountId,
@@ -1389,16 +1365,6 @@ export async function fetchNoTrafficCleanupStatus(
  * T-32 起账号↔店铺是 N:M，所以店铺列表是「选账号」之外的一层信息：
  * 商品列表页用它给账号选项标注所属店铺，并在同一店铺多账号时提示。
  */
-export async function fetchXhsQianfanShops(
-  accountId?: number
-): Promise<{ count: number; shops: XhsQianfanShop[] }> {
-  const response = await http.post<{ count: number; shops: XhsQianfanShop[] }>(
-    "/xhs/qianfan/shops",
-    accountId ? { platform_account_id: accountId } : {}
-  );
-  return response.data;
-}
-
 /** 解除绑定（连本地商品映射一起清掉）；`shop_remaining_accounts` = 店铺还有几个账号绑着。 */
 export async function unbindXhsQianfanShop(
   accountId: number
@@ -1604,11 +1570,6 @@ export async function generateTagOptions(payload: GenerateTagsPayload): Promise<
   return response.data;
 }
 
-export async function polishTextWithAi(payload: PolishTextPayload): Promise<{ text: string }> {
-  const response = await http.post<{ text: string }>("/ai/polish-text", payload);
-  return response.data;
-}
-
 export async function fetchGeneratedImageAssets(): Promise<Paginated<GeneratedImageAsset>> {
   const response = await http.get<Paginated<GeneratedImageAsset>>("/ai/images/assets");
   return response.data;
@@ -1620,11 +1581,6 @@ export async function deleteGeneratedImageAsset(assetId: number): Promise<void> 
 
 export async function deleteUserImage(fileName: string): Promise<void> {
   await http.delete(`/files/images/${fileName}`);
-}
-
-export async function generateCoverWithAi(payload: GenerateCoverPayload): Promise<GeneratedImageAsset> {
-  const response = await http.post<GeneratedImageAsset>("/ai/images/generate-cover", payload);
-  return response.data;
 }
 
 export async function generateImageWithAi(payload: GenerateImagePayload): Promise<GenerateImageResult> {
@@ -1639,16 +1595,6 @@ export async function fetchUserImages(): Promise<{ items: UserImageFile[] }> {
 
 export async function describeImageWithAi(payload: DescribeImagePayload): Promise<{ text: string }> {
   const response = await http.post<{ text: string }>("/ai/images/describe", payload);
-  return response.data;
-}
-
-export async function composeImageUtility(payload: ComposeImagePayload): Promise<ImageUtilityFile> {
-  const response = await http.post<ImageUtilityFile>("/files/images/compose", payload);
-  return response.data;
-}
-
-export async function resizeImageUtility(payload: ResizeImagePayload): Promise<ImageUtilityFile> {
-  const response = await http.post<ImageUtilityFile>("/files/images/resize", payload);
   return response.data;
 }
 
@@ -1702,6 +1648,7 @@ export async function deleteModelConfig(configId: number): Promise<{ id: number;
  * `batchNo` 给定时按**唯一批次号**查（同日用户口径「新增列表支持使用唯一批次号
  * 查询」）：大小写不敏感、支持只给尾段（用户手抄常只记得后四位）。
  */
+
 export async function fetchQueueRecords(
   limit?: number,
   batchNo?: string
@@ -1918,14 +1865,6 @@ export async function createMonitoringTarget(payload: MonitoringTargetPayload): 
   return response.data;
 }
 
-export async function updateMonitoringTarget(
-  targetId: number,
-  payload: Partial<MonitoringTargetPayload>
-): Promise<MonitoringTarget> {
-  const response = await http.patch<MonitoringTarget>(`/xhs/monitoring/targets/${targetId}`, payload);
-  return response.data;
-}
-
 export async function deleteMonitoringTarget(targetId: number): Promise<{ id: number; status: string }> {
   const response = await http.delete<{ id: number; status: string }>(`/xhs/monitoring/targets/${targetId}`);
   return response.data;
@@ -1998,37 +1937,12 @@ export async function publishJobToCreator(jobId: number): Promise<PublishJob> {
   return response.data;
 }
 
-export async function retryPublishJob(jobId: number): Promise<PublishJob> {
-  const response = await http.post<PublishJob>(`/publish/jobs/${jobId}/retry`);
-  return response.data;
-}
-
-export async function cancelPublishJob(jobId: number): Promise<PublishJob> {
-  const response = await http.post<PublishJob>(`/publish/jobs/${jobId}/cancel`);
-  return response.data;
-}
-
 export async function deletePublishJob(jobId: number): Promise<void> {
   await http.delete(`/publish/jobs/${jobId}`);
 }
 
 export async function fetchPublishAssets(jobId: number): Promise<Paginated<PublishAsset>> {
   const response = await http.get<Paginated<PublishAsset>>(`/publish/jobs/${jobId}/assets`);
-  return response.data;
-}
-
-export async function addPublishAsset(jobId: number, payload: PublishAssetPayload): Promise<PublishAsset> {
-  const response = await http.post<PublishAsset>(`/publish/jobs/${jobId}/assets`, payload);
-  return response.data;
-}
-
-export async function deletePublishAsset(assetId: number): Promise<{ id: number; status: string }> {
-  const response = await http.delete<{ id: number; status: string }>(`/publish/assets/${assetId}`);
-  return response.data;
-}
-
-export async function uploadPublishAsset(assetId: number): Promise<PublishAsset> {
-  const response = await http.post<PublishAsset>(`/publish/assets/${assetId}/upload`);
   return response.data;
 }
 
@@ -2097,7 +2011,15 @@ export async function deleteAccount(accountId: number): Promise<{ id: number; st
 /** 同步进度。`total` 是平台总数，**取不到时为 `null`**（渲染 `-`，不是 `0`）。 */
 export interface XhsSyncProgress {
   stored: number;
+  /**
+   * 进度分母（设计 13 §35.18.6）：**只在「无界全量」时才有值** —— 增量 / 时间区间
+   * 同步会早停，`stored` 追不上账号总量，后端**不写这个键** ⇒ `null` 表示
+   * 「比例未知」，**不是**「0%」（缺值口径）。
+   */
   total: number | null;
+  /** §35.18：收尾「账号级详情补齐」阶段的分子 / 分母（只在进入该阶段后才有值）。 */
+  detail_done?: number | null;
+  detail_total?: number | null;
 }
 
 /** 触发端点与状态端点共用的部分（后端 `task_summary`）。 */
@@ -2140,6 +2062,8 @@ export interface XhsSyncSourceResult {
 
 /** 最近一次已完成任务的结果（后端 `last_result`）。 */
 export interface XhsSyncLastResult {
+  /** 这一条对应的任务号（§35.17.4：账号卡「同步任务」区块要显示 `任务 #N`）。 */
+  task_id?: number | null;
   status: string;
   progress: XhsSyncProgress | null;
   /** 本次顺带落库的挂载商品数（只有笔记同步会填）。 */
@@ -2164,22 +2088,40 @@ export interface XhsSyncTaskStatus extends XhsSyncTaskSummary {
 }
 
 /**
+ * 账号卡同步按钮的触发响应（设计 13 §35.17，2026-09-27 用户口径）。
+ *
+ * = **任务摄要**（与状态端点同一形状，前端不用记两套字段）+ 本次点击在
+ * `scheduled_job_logs` 留下的行号。
+ *
+ * `log_id` 为 `null` = **本次没有记日志**：该账号已有任务在跑（`reused`），
+ * 没有新执行就没有新日志 —— 同一个任务行记两次账会让任务中心的执行次数翻倍。
+ */
+export interface XhsSyncTriggerResult extends XhsSyncTaskSummary {
+  log_id: number | null;
+  /** `true` = 该账号已有任务在跑，返回的是**已有任务**的摄要，本次未触发新执行。 */
+  reused?: boolean;
+}
+
+/**
  * 触发笔记同步（**所有账号**都用这个）。
  *
  * `profileUrl` 只有 **PC 账号**需要：`user_posted` 要的是 URL 级 `xsec_token`，
  * 而账号 Cookie 拿不到它（设计 13 §4.1 与 §6.1.1）—— PC 账号不传就必定
  * `XSEC_TOKEN_REQUIRED`。Creator 账号传空串即可。
  *
- * **防重**：该账号已有未完成的同步任务 → 后端返回**同一个 `task_id`**，
- * 不新建任务、不重复打平台。
+ * **语义（§35.17）**：手动触发定时任务 `system.note_sync` 的「执行一次」——
+ * 任务行给账号卡轮询，`scheduled_job_logs` 给任务中心「任务日志」。
+ *
+ * **防重**：该账号已有未完成的同步任务 → 后端返回**同一个 `task_id`** 且 `reused: true`，
+ * 不新建任务、不重复打平台，`log_id` 为 `null`。
  *
  * `_silent`：失败原因要显示在卡片里（`readErrorDetail`），不弹全局 toast。
  */
 export async function syncAccountNotes(
   accountId: number,
   options: SyncNotesOptions = {}
-): Promise<XhsSyncTaskSummary> {
-  const response = await http.post<XhsSyncTaskSummary>(
+): Promise<XhsSyncTriggerResult> {
+  const response = await http.post<XhsSyncTriggerResult>(
     `/accounts/${accountId}/notes/sync`,
     {
       // ⚠️ **不传 `max_pages` = 全量**（设计 13 §21，2026-09-22 用户口径：
@@ -2189,6 +2131,9 @@ export async function syncAccountNotes(
       ...(options.maxPages ? { max_pages: options.maxPages } : {}),
       // §23：用户在弹窗里选的同步范围。不传 = 后端默认 full（不设时间界）。
       ...(options.scope ? { scope: options.scope } : {}),
+      // §35.15：**模式**要单独传 —— 弹窗选「全量同步」时必须带 `mode: "full"`，
+      // 否则后端按游标判 auto=增量，第 1 页就早停（scope=full 管不到模式）。
+      ...(options.mode ? { mode: options.mode } : {}),
       ...(options.startDate ? { start_date: options.startDate } : {}),
       ...(options.endDate ? { end_date: options.endDate } : {}),
     },
@@ -2403,5 +2348,39 @@ export async function deleteAutoTask(taskId: number): Promise<{ id: number; stat
 
 export async function runAutoTask(taskId: number): Promise<AutoTaskRunResult> {
   const response = await http.post<AutoTaskRunResult>(`/auto-tasks/${taskId}/run`);
+  return response.data;
+}
+
+// ---------------------------------------------------------------------------
+// 运行时配置中心（设计 10 §7，2026-09-27）：设置页的列表 / 增删改查
+// ---------------------------------------------------------------------------
+// ⚠️ key 一律 `encodeURIComponent`：配置键可能含 `.` / `:` 等字符，
+// 不编码会拼出会被路径解析吃掉的 URL（`/settings/a/b` 变成两段路径）。
+export async function fetchSystemSettings(category?: string): Promise<SystemSettingListResponse> {
+  const response = await http.get<SystemSettingListResponse>("/settings", {
+    params: category ? { category } : {},
+  });
+  return response.data;
+}
+
+export async function createSystemSetting(
+  payload: SystemSettingCreatePayload
+): Promise<SystemSetting> {
+  const response = await http.post<SystemSetting>("/settings", payload);
+  return response.data;
+}
+
+export async function updateSystemSetting(
+  key: string,
+  payload: SystemSettingUpdatePayload
+): Promise<SystemSetting> {
+  const response = await http.put<SystemSetting>(`/settings/${encodeURIComponent(key)}`, payload);
+  return response.data;
+}
+
+export async function deleteSystemSetting(key: string): Promise<SystemSettingDeleteResult> {
+  const response = await http.delete<SystemSettingDeleteResult>(
+    `/settings/${encodeURIComponent(key)}`
+  );
   return response.data;
 }

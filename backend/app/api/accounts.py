@@ -10,7 +10,6 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.adapters.xhs.creator_login_adapter import XhsCreatorLoginAdapter
-from backend.app.adapters.xhs.pc_api_adapter import XhsPcApiAdapter
 from backend.app.adapters.xhs.pc_login_adapter import XhsPcLoginAdapter
 from backend.app.adapters.xhs.qianfan_api_adapter import (
     get_qianfan_api_adapter_factory,  # 登录态探针（L3）要能被打桩：走 FastAPI 依赖注入
@@ -23,7 +22,6 @@ from backend.app.core.account_types import (
 )
 from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user, get_owned_active_account
-from backend.app.core.security import decrypt_text
 from backend.app.core.time import shanghai_now
 from backend.app.models import AccountCookieVersion, PlatformAccount, User
 from backend.app.schemas.common import paginated
@@ -48,7 +46,14 @@ from backend.app.services.account_service import (
     upsert_platform_account_from_login,
     XhsSelfProfileAdapter,
 )
-from backend.app.services import login_state_service, note_sync_service, sync_task_service
+from backend.app.services import (
+    login_state_service,
+    note_sync_service,
+    scheduled_job_runner,
+    sync_task_service,
+)
+from backend.app.services.job_registry import JOB_KEY_NOTE_SYNC
+from backend.app.services.note_queue_service import SOURCE_ACCOUNT_CARD_NOTE_SYNC
 from backend.app.services.sync_task_service import (
     ABSOLUTE_PAGE_CAP,
     DEFAULT_MAX_PAGES,
@@ -707,17 +712,29 @@ def start_account_note_sync(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """把该账号的笔记同步到本地 `notes` 表（需求 R1）。
+    """对该账号触发一次笔记同步（设计 13 §35.17，2026-09-27 用户口径）。
 
-    所有账号都可用（PC / Creator 双链路，按 Cookie 能力自动选，见
-    `services/note_sync_service.py`）。Creator 账号在同一任务里**顺带**把本页
-    笔记挂载的千帆商品落库（需求 R3），因此不需要再单独触发商品同步。
+    **语义 = 手动触发定时任务 `system.note_sync` 的「执行一次」**（不是另开一条链路），
+    每次点击**同时**留下两处账：
 
-    **异步**：接口立即返回任务摄要（`pending`），同步在后台线程里慢慢跑
-    （有界翻页 + 按账号限流 + 页间停顿，见设计 13 §8）。
+    * `tasks` 一行（来源 `account_card_note_sync`，账号卡内「同步任务」区块与
+      `…/notes/sync/status` 的数据源），执行方是账号任务 worker —— §35.16 的单 worker
+      串行因此天然成立，不与笔记级队列抢平台额度；
+    * `scheduled_job_logs` 一行（`trigger_type=manual`，经
+      `scheduled_job_runner.run_targeted_job` 观测该任务）⇒ 任务中心「任务日志」看得到，
+      执行期间 `progress` 有心跳（§35.17.3），终态与任务行**一致**。
 
-    **防重（需求 N3）**：该账号已有未完成的笔记同步任务 → 返回**已有任务**
-    （`task_id` 是那一个），不新建任务、不重复打平台。
+    **两条纪律**（§35.17.2）：
+
+    * 任务行由**本端点同步建好**再交给 worker，日志只做**观测** —— 若让跑任务的那条路
+      再建一行，同一账号会被跑两遍；若建完就写 `success`，会得到几十毫秒的**假成功**；
+    * `reused=True`（该账号已有任务在跑）⇒ **本次不记日志**：没有新执行就没有新日志，
+      否则同一个任务行被记两次账，执行次数翻倍。
+
+    **响应**：任务摄要 + `log_id`（+ 请求区间没解析出来时的 `scope_note`）。响应形状与
+    改造前**逐字兼容**（调用方零感知），只是多了一个 `log_id`，`null` = 本次未记日志。
+
+    **防重（需求 N3）**：该账号已有未完成任务 ⇒ 返回**同一个任务行**（`reused=True`）。
     """
     account = _get_owned_active_account(db, current_user, account_id)
     if account.platform != "xhs":
@@ -725,7 +742,7 @@ def start_account_note_sync(
 
     payload = payload or NoteSyncRequest()
     # §23：把弹窗选的「全量 / 时间区间」解析成毫秒窗口。解析不了 ⇒ (0, 0) = 全量，
-    # 但**要在任务行里说一句** —— 静默按全量跑会让用户以为自己在同步一个区间。
+    # 但**要在响应里说一句** —— 静默按全量跑会让用户以为自己在同步一个区间。
     time_from_ms, time_to_ms = sync_task_service.resolve_time_window(
         payload.scope, payload.start_date, payload.end_date
     )
@@ -735,23 +752,51 @@ def start_account_note_sync(
             scope_note = f"按时间区间同步：{payload.start_date} ~ {payload.end_date}"
         else:
             scope_note = "未识别到有效的时间区间，已按全量同步"
+
+    mode = sync_task_service.normalize_mode(payload.mode)
+    max_pages = sync_task_service.clamp_pages(payload.max_pages)
+    page_size = sync_task_service.clamp_page_size(payload.page_size)
     summary = note_sync_service.start_note_sync(
         account.id,
         user_id=current_user.id,
-        max_pages=sync_task_service.clamp_pages(payload.max_pages),
-        page_size=sync_task_service.clamp_page_size(payload.page_size),
-        source="manual",
-        profile_url=payload.profile_url,
-        xsec_token=payload.xsec_token,
-        mode=sync_task_service.normalize_mode(payload.mode),
+        # §35.12：来源要**具体到按钮**（遗留值 `manual` 在队列记录页显示成
+        # 「页面按钮（早期数据）」，那是假历史）。
+        source=SOURCE_ACCOUNT_CARD_NOTE_SYNC,
+        # 同步语义必须**全部**传下去：漏一个 = 用户选的全量 / 时间区间静默丢失
+        # （§35.16.3 同型坑）。
+        mode=mode,
         time_from_ms=time_from_ms,
         time_to_ms=time_to_ms,
+        max_pages=max_pages,
+        page_size=page_size,
     )
-    summary.pop("reused", None)
+    task_id = summary.get("task_id")
+    log_id = None
+    if task_id and not summary.get("reused"):
+        log_id = scheduled_job_runner.run_targeted_job(
+            user_id=current_user.id,
+            job_key=JOB_KEY_NOTE_SYNC,
+            task_id=int(task_id),
+            task_type=sync_task_service.NOTE_SYNC_TASK_TYPE,
+            # 账号快照（迁移 `j1k2l3m4n5o6`）：账号卡「同步中」的判据 = 该账号
+            # **最新一条**同步日志的状态（2026-09-27 用户口径）⇒ 日志必须记账号。
+            account_id=account.id,
+            # 日志快照里留一份**本次实际生效**的语义：任务行与日志各一份，排查时才对得上。
+            params_extra={
+                "account_id": account.id,
+                # 账号名称快照（2026-09-27 用户口径「执行账号应是当前账号信息卡的店铺」）：
+                # 「执行详情」的「执行账号」直接显示账号名称 —— 账号改名 / 被删都不影响
+                # 历史日志（与快照块「任务行之后被改被删都不影响」同一口径）。
+                "account_name": account.nickname or "",
+                "mode": mode,
+                "time_from_ms": time_from_ms,
+                "time_to_ms": time_to_ms,
+            },
+            # §35.17.3：执行期间把该任务行的进度映到定时任务日志的 `progress` 列。
+            progress_probe=sync_task_service.task_progress_probe(int(task_id)),
+        )
     # §23：把「实际生效的同步范围」带回前端（区间没解析出来时用户必须知道跑了全量）。
-    if scope_note:
-        summary["scope_note"] = scope_note
-    return summary
+    return {**summary, "log_id": log_id, "scope_note": scope_note}
 
 
 @router.get("/{account_id}/notes/sync/status")
@@ -769,4 +814,22 @@ def account_note_sync_status(
     account = _get_owned_active_account(db, current_user, account_id)
     if account.platform != "xhs":
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
-    return sync_task_service.status_payload(db, NOTE_SYNC_TASK_TYPE, account.id)
+    return sync_task_service.status_payload(
+        db,
+        NOTE_SYNC_TASK_TYPE,
+        account.id,
+        # 账号卡「同步中」按**该账号最新一条同步日志**判（2026-09-27 用户口径
+        # 「账号信息卡的判断逻辑应只需要关注最新一条的同步笔记任务日志的状态即可」）。
+        user_id=current_user.id,
+        job_key=JOB_KEY_NOTE_SYNC,
+    )
+
+
+# ⚠️ **`POST /accounts/{account_id}/notes/hydrate-pending` 已移除**（2026-09-27 用户口径：
+# 「账号信息卡中移除补齐详情逻辑，点击同步笔记时，应获取到当前笔记的所有信息后再落库，
+# 在一个任务中完成，不需要再点击补齐详情」）。
+#
+# 补齐能力并入 `POST /accounts/{account_id}/notes/sync` 自己（设计 13 §35.18：
+# `note_sync_service._sync_with_task` 收尾对该账号**全部待补笔记**内联补齐）——
+# 于是这条端点连同 `GET /notes/hydrate-queue`、`note_hydrate` 队列一并删除：
+# 入口没了还留着链路就是死代码 + 与同步内补齐重复（DEF-044）。

@@ -493,7 +493,15 @@ def generate_note_for_item(
                 sort_order=entry["sort_order"],
             )
         )
-    db.add(NoteGoods(note_id=note.id, product_id=row.id))
+    # ⚠️ 2026-09-27（§26.7）：关系行按**平台 ID** 落（`note.note_id` 是本地生成的
+    # `local_…` 合成 ID，发布成功后由 `_move_note_goods_relations` 迁到平台真 ID）。
+    db.add(
+        NoteGoods(
+            user_id=note.user_id,
+            note_id=note.note_id,
+            item_id=str(row.item_id or ""),
+        )
+    )
     db.commit()
 
     return {

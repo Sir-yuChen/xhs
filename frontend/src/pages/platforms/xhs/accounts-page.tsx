@@ -1,5 +1,6 @@
 import {
   Alert,
+  App,
   Avatar,
   Button,
   Card,
@@ -25,13 +26,12 @@ import {
   SyncOutlined,
   UserOutlined,
 } from "@ant-design/icons";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { AddAccountDrawer } from "../../../components/account/add-account-drawer";
 import { RenewLoginModal, type RenewTarget } from "../../../components/account/renew-login-modal";
 import { SyncOptionsModal, type SyncOptions } from "../../../components/platforms/sync-options-modal";
 import {
-  cancelTask,
   deleteAccount,
   fetchAccounts,
   fetchXhsAccountLoginState,
@@ -45,7 +45,7 @@ import {
 import type {
   SyncNotesOptions,
   XhsSyncLastResult,
-  XhsSyncProgress,
+  XhsSyncTaskStatus,
 } from "../../../lib/api";
 import { loginChannelRows, loginTagTip } from "../../../lib/login-state";
 import {
@@ -54,13 +54,14 @@ import {
   goodsGate,
   goodsResultText,
   noteSyncPlan,
-  syncProgressText,
   syncResultText,
+  syncTaskPhase,
+  syncTerminalNotice,
 } from "../../../lib/sync-gates";
 import { formatShanghaiTime } from "../../../lib/time";
 import type { PlatformAccount, XhsLoginChannels } from "../../../types";
 
-const { Title, Text } = Typography;
+const { Text } = Typography;
 
 /**
  * 同步状态轮询间隔（设计 13 §6.2）：5 秒，与既有任务状态查询同阶。
@@ -117,25 +118,33 @@ export function XhsAccountsPage() {
   const [syncingAccountIds, setSyncingAccountIds] = useState<Set<number>>(() => new Set());
   /** 每个账号最近一次「互动数据」的结果说明（不可得原因 / 同步失败原因），只在卡片内展示。 */
   const [metricsNotes, setMetricsNotes] = useState<Record<number, string>>({});
-  /** 正在跑「同步笔记」/「同步店铺商品」的账号（按钮 disabled + 轮询的依据）。 */
+  /**
+   * 正在跑「同步笔记」/「同步店铺商品」的账号。
+   *
+   * **唯一用途 = 按钮文案在「同步笔记 ↔ 同步中」之间切换**（2026-09-27 用户口径：
+   * 「点击后展示的同步任务进度卡移除，只需要将同步笔记按钮改成同步中即可」）——
+   * 卡片里不再有进度区块，进度 / 结果 / 失败原因一律去任务中心的「任务日志」看。
+   */
   const [noteSyncIds, setNoteSyncIds] = useState<Set<number>>(() => new Set());
   const [goodsSyncIds, setGoodsSyncIds] = useState<Set<number>>(() => new Set());
-  /**
-   * 每个在跑账号的 **task_id**（§24.8：卡片上的「取消」按钮要拿它去调
-   * `POST /tasks/{id}/cancel`）。触发响应的摄要里带，取消后由轮询的终态分支
-   * 自然清掉（不手动维护两份状态）。
-   */
-  const [noteSyncTaskIds, setNoteSyncTaskIds] = useState<Record<number, number>>({});
-  const [goodsSyncTaskIds, setGoodsSyncTaskIds] = useState<Record<number, number>>({});
-  /** 每个账号的同步进度 / 结果行文案（同样只落在卡片里，不弹全局提示）。 */
-  const [noteSyncNotes, setNoteSyncNotes] = useState<Record<number, string>>({});
-  const [goodsSyncNotes, setGoodsSyncNotes] = useState<Record<number, string>>({});
   /**
    * 轮询节拍。每轮结束 +1 —— 用来让下面的 effect **重新排下一次 timeout**。
    * 为什么不靠 Set 的引用变化：一轮轮询若什么都没变（状态仍是 running），
    * Set 内容相同、effect 不会重跑，轮询会**静默停在第 2 次**。
    */
   const [syncPollTick, setSyncPollTick] = useState(0);
+  /**
+   * **本页刚刚触发过**同步的账号（§35.17.4：首查与「刚点击」的竞态防护）。
+   *
+   * 首查是「进入页面时的第一个信息」，但它是**异步**的：用户在首查返回之前点了
+   * 「同步笔记」，那条首查响应（问的是点击**之前**的库状态 ⇒ idle）就会把刚刚入集的
+   * 账号摘出轮询集 —— 症状正是本项目最忌讳的那一类「看着像在跑，其实再也没更新过」。
+   *
+   * 所以本页触发过的账号记在这里，首查**不许摘**它们；等轮询真的看到 `active`
+   * （或走到终态）再删除标记，交还给常规判据。刷新页面时 ref 自然重置，
+   * 那时库里的任务已经被首查看见，不需要这个兜底。
+   */
+  const locallyTriggeredRef = useRef<Set<number>>(new Set());
   /** PC 账号点「同步笔记」时先要主页链接（设计 13 §6.1.1）。 */
   const [linkAccount, setLinkAccount] = useState<PlatformAccount | null>(null);
   const [linkInput, setLinkInput] = useState("");
@@ -179,6 +188,20 @@ export function XhsAccountsPage() {
   /** 正在「重新登录 / 补齐令牌」的目标（打开续期弹窗的依据）。 */
   const [renewTarget, setRenewTarget] = useState<RenewTarget | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * 消息提醒统一走 antd `message`（设计 04 §3.6）：卡片里已经没有「同步任务」进度块
+   * 了，同步触发失败 / 轮询到非正常终态这类**必须让用户知道**的事只能由轻提示承载
+   * （失败三分法：真异常要给真原因，不能静默吞掉）。
+   */
+  const { message } = App.useApp();
+  /**
+   * 探活**在飞标记**（设计 13 §18.18.10）：同一时刻只允许一轮探活。
+   *
+   * 有两个来源会让同一批探活被重复触发：① 开发模式下 React StrictMode 的 effect
+   * 双跑；② 用户连点「刷新」。重复那一轮**不会更快出结论**（后端要按账号逐个探），
+   * 却会让平台请求数翻倍（风控面）—— 所以直接跳过，等已经在飞的那一轮回来。
+   */
+  const loginProbeInFlight = useRef(false);
 
   async function loadAccounts() {
     setIsLoading(true);
@@ -197,6 +220,11 @@ export function XhsAccountsPage() {
       // 就是「现在还能不能用」而不是「还没检测」。不 await：探活要几秒钟，
       // 不能让整个页面卡在 loading 上等它。
       void autoCheckLoginStates();
+      // 进入页面 / 点刷新 ⇒ **首查一次同步任务状态**（§35.17.4，2026-09-27 用户口径）。
+      // 这是「根据第一个获取的信息决定是否需要轮询」里的那个第一个信息：命中未结束
+      // ⇒ 入轮询集，命中已结束 / 没有任务 ⇒ 不入集。不 await：它每卡两次只读查询，
+      // 不该把页面卡在 loading 上。
+      void firstQuerySyncStatus(loadedAccounts);
     } catch {
       setError("账号列表加载失败。");
     } finally {
@@ -211,6 +239,11 @@ export function XhsAccountsPage() {
    * 不编一个 `expired` 出来（§18.5 红线：`unknown` 不得渲染成「已失效」）。
    */
   async function autoCheckLoginStates() {
+    // 已有一轮在飞 ⇒ 跳过（§18.18.10）：重复发不会更快，只会把平台请求数翻倍。
+    if (loginProbeInFlight.current) {
+      return;
+    }
+    loginProbeInFlight.current = true;
     try {
       const payload = await fetchXhsAccountLoginStates({ probe: true });
       const next: Record<number, XhsLoginChannels> = {};
@@ -220,6 +253,8 @@ export function XhsAccountsPage() {
       setLoginChannels(next);
     } catch {
       // 见上：没结论就不改，卡片继续说「未检测」（刷新页面可再探一次）。
+    } finally {
+      loginProbeInFlight.current = false;
     }
   }
 
@@ -310,92 +345,122 @@ export function XhsAccountsPage() {
   }
 
   /**
-   * 触发笔记同步（异步任务：立刻返回任务摄要，进度靠轮询）。
+   * 触发笔记同步（§35.17：**手动触发定时任务 `system.note_sync` 的执行一次**）。
    *
    * ⚠️ **不再传 `profile_url` / `max_pages`**（设计 13 §21，2026-09-22 用户口径）：
    * www 源已不参与（creator 源强制）、翻页不再设上限。`profileUrl` 曾用于 www 链路的
    * URL 级 `xsec_token` —— 那个令牌**不是登录令牌**（是网页版主页 URL 上的查询参数），
    * 随 www 源一并退场。
+   *
+   * 触发响应本身就是「第一个获取的信息」：它带回任务摄要 ⇒ 卡片立刻把按钮切成
+   * 「同步中」，不用等 5 秒后的第一轮轮询；入轮询集是为了**在任务结束时把按钮切回来**。
+   *
+   * ⚠️ **卡片不再展示任何进度 / 结果行**（2026-09-27 用户口径「点击后展示的同步任务
+   * 进度卡移除，只需要将同步笔记按钮改成同步中即可」）⇒ 触发失败必须走轻提示报出真原因
+   * （否则点了没反应）；成功不打扰，进度与结果去任务中心「任务日志」看。
    */
   async function startNoteSync(accountId: number, options?: SyncNotesOptions) {
     if (noteSyncIds.has(accountId)) {
       return;
     }
-    setNoteSyncNotes((current) => ({ ...current, [accountId]: "已提交，正在同步…" }));
     try {
       const summary = await syncAccountNotes(accountId, options);
-      setNoteSyncIds((current) => new Set(current).add(accountId));
-      if (summary.task_id) {
-        setNoteSyncTaskIds((current) => ({ ...current, [accountId]: summary.task_id as number }));
+      if (summary.reused) {
+        message.info("该账号已有同步任务在跑，本次未触发新执行。");
       }
-      setNoteSyncNotes((current) => ({
-        ...current,
-        [accountId]: `${summary.scope_note ? `${summary.scope_note}；` : ""}已提交${
-          summary.task_id ? `（任务 #${summary.task_id}）` : ""
-        }，正在同步…`,
-      }));
+      setNoteSyncIds((current) => new Set(current).add(accountId));
+      // 记下这次是本页触发的：首查（它问的是点击之前的库状态）不许把刚入集的我摘掉。
+      locallyTriggeredRef.current.add(accountId);
     } catch (syncError) {
-      setNoteSyncNotes((current) => ({ ...current, [accountId]: readErrorDetail(syncError) }));
+      message.error(readErrorDetail(syncError));
     }
   }
 
-  /** 触发店铺商品同步（**仅 Creator**；未绑定千帆时后端 400，原因就地展示）。 */
+  /** 触发店铺商品同步（**仅 Creator**；未绑定千帆时后端 400，原因由轻提示报出）。 */
   async function startGoodsSync(accountId: number, options?: SyncNotesOptions) {
     if (goodsSyncIds.has(accountId)) {
       return;
     }
-    setGoodsSyncNotes((current) => ({ ...current, [accountId]: "已提交，正在同步…" }));
     try {
       const summary = await syncShopGoods({ platformAccountId: accountId, ...(options ?? {}) });
-      setGoodsSyncIds((current) => new Set(current).add(accountId));
-      if (summary.task_id) {
-        setGoodsSyncTaskIds((current) => ({ ...current, [accountId]: summary.task_id as number }));
+      if (summary.reused) {
+        message.info("该账号已有同步任务在跑，本次未触发新执行。");
       }
-      setGoodsSyncNotes((current) => ({
-        ...current,
-        [accountId]: `${summary.scope_note ? `${summary.scope_note}；` : ""}已提交${
-          summary.task_id ? `（任务 #${summary.task_id}）` : ""
-        }，正在同步…`,
-      }));
+      setGoodsSyncIds((current) => new Set(current).add(accountId));
+      // 同上：本页刚触发 ⇒ 首查不许摘（笔记 / 商品共用同一份竞态防护）。
+      locallyTriggeredRef.current.add(accountId);
     } catch (syncError) {
-      setGoodsSyncNotes((current) => ({ ...current, [accountId]: readErrorDetail(syncError) }));
+      message.error(readErrorDetail(syncError));
     }
   }
 
   /**
-   * 中断一次正在跑的同步（设计 13 §24.8：任务执行中应支持中断）。
+   * **首查**（§35.17.4，2026-09-27 用户口径）：进页面 / 点刷新时，对每张卡各查一次
+   * 两个状态端点，**由第一个拿到的信息决定要不要轮询**。
    *
-   * 取消后**不把账号摘出轮询集合**：下一轮轮询会从状态端点拿到 cancelled 终态
-   * （`latest_finished_task` 含 cancelled），结果行换成「已取消 · 耗时 X」——
-   * 用户刚点的取消，要看到它生效了，而不是卡片安静地退回空白。
+   * 三种结果对应三种处置（判据在 `lib/sync-gates.ts` 的 `syncTaskPhase`）：
+   *
+   * * `active`（未结束）⇒ **入轮询集**（后续 5s 一轮，按钮显示「同步中」）；
+   * * `finished`（正常 / 非正常结束都算）⇒ **不入集**（不会再变，轮询纯浪费）；
+   * * `idle`（没有对应任务）⇒ 不入集。
+   *
+   * 为什么必须有这一步：账号卡的「同步中」此前只由**本页点击**点亮 ⇒ 换台设备、
+   * 刷新页面、或定时任务正在跑，卡片都显示成「空闲」—— 而任务其实在跑。
    */
-  async function cancelSync(kind: "notes" | "goods", accountId: number) {
-    const taskId =
-      kind === "notes" ? noteSyncTaskIds[accountId] : goodsSyncTaskIds[accountId];
-    if (!taskId) {
-      return;
-    }
-    const setNotes = kind === "notes" ? setNoteSyncNotes : setGoodsSyncNotes;
+  async function firstQuerySyncStatus(accountList: PlatformAccount[]) {
+    await Promise.all(
+      accountList.flatMap((account) => [
+        querySyncStatus("notes", account.id),
+        querySyncStatus("goods", account.id),
+      ])
+    );
+  }
+
+  /**
+   * 首查的单个账号 × 单类任务（笔记 / 商品同构，只差状态端点）。
+   *
+   * 卡片上已经没有进度区块了，首查现在只回答**一件事**：这个账号此刻要不要继续轮询
+   * （判据 `syncTaskPhase`：`active` ⇒ 入集；其余 ⇒ 不入集）。按钮文案由集合驱动，
+   * 所以首查同时负责「刷新页面 / 换台设备 / 定时任务在跑」这几种情况下的按钮还原。
+   */
+  async function querySyncStatus(kind: "notes" | "goods", accountId: number) {
+    const setIds = kind === "notes" ? setNoteSyncIds : setGoodsSyncIds;
+    const fetchStatus = kind === "notes" ? syncAccountNotesStatus : syncShopGoodsStatus;
     try {
-      await cancelTask(taskId);
+      const status = await fetchStatus(accountId);
+      if (syncTaskPhase(status) === "active") {
+        // 它真的在跑 ⇒ 竞态窗口已过，交还给常规判据。
+        locallyTriggeredRef.current.delete(accountId);
+        setIds((current) => new Set(current).add(accountId));
+      } else if (locallyTriggeredRef.current.has(accountId)) {
+        // ⚠️ 本页刚触发过、首查却回 idle —— 这是**首查响应比点击更早**造成的旧快照
+        // （它问的是点击之前的库状态）。此时摘除会让轮询当场停摆，正是 H9 那类
+        // 「看着像在跑，其实再也没更新过」的 bug。留着，下一轮轮询会看到真状态。
+      } else {
+        // 结束 / 没有任务 ⇒ **摘出去**（首查就是那个「第一个获取的信息」）。
+        setIds((current) => {
+          if (!current.has(accountId)) return current;
+          const next = new Set(current);
+          next.delete(accountId);
+          return next;
+        });
+      }
     } catch {
-      // 取消失败（任务可能已结束）：摘出集合让轮询停，文案说明情况。
-      const setIds = kind === "notes" ? setNoteSyncIds : setGoodsSyncIds;
-      setIds((current) => {
-        const next = new Set(current);
-        next.delete(accountId);
-        return next;
-      });
-      setNotes((current) => ({ ...current, [accountId]: "取消失败，任务可能已结束" }));
+      // 首查失败**不入集也不报错**：它是进入页面的附带动作，问不到就让按钮停在
+      // 「同步笔记」，用户点按钮时那条路会给出真原因（不在这里刷一条与当前操作无关的红字）。
     }
   }
 
   /**
-   * 一轮轮询：把每个在跑账号的状态拉回来。
+   * 一轮轮询：把每个在跑账号的状态拉回来，**只为把按钮从「同步中」切回来**。
    *
    * **结束判据是「状态端点回 `idle`」，不是某个 `done`**：状态端点只返回
    * *进行中* 的任务，任务一结束它就变 `idle`，结果挪到 `last_result` 里
    * （设计 13 §4.2）。所以「看到 idle」= 「这一轮干完了」。
+   *
+   * ⚠️ **终态只在「没成功」时打扰用户**：成功不弹（进度 / 结果去任务中心「任务日志」
+   * 看），`failed` / `cancelled` 用轻提示报一次真原因 —— 卡片里已经没有进度块了，
+   * 静默吞掉失败等于用户点了半天不知道发生了什么（失败三分法）。
    */
   async function pollSyncTasks() {
     const noteIds = Array.from(noteSyncIds);
@@ -403,26 +468,31 @@ export function XhsAccountsPage() {
 
     const pollOne = async (
       accountId: number,
-      fetchStatus: (id: number) => Promise<{ status: string; progress: XhsSyncProgress | null; last_result: XhsSyncLastResult | null }>,
+      fetchStatus: (id: number) => Promise<XhsSyncTaskStatus>,
       unit: string,
       formatResult: (result: XhsSyncLastResult | null, unit: string) => string,
-      setNotes: (updater: (current: Record<number, string>) => Record<number, string>) => void,
       setIds: (updater: (current: Set<number>) => Set<number>) => void,
     ) => {
+      let status: XhsSyncTaskStatus | null = null;
       try {
-        const status = await fetchStatus(accountId);
-        if (status.status === "pending" || status.status === "running") {
-          setNotes((current) => ({ ...current, [accountId]: syncProgressText(status.progress, unit) }));
+        status = await fetchStatus(accountId);
+        if (syncTaskPhase(status) === "active") {
+          // 真的在跑 ⇒ 首查那个竞态窗口过去了，撤掉本页触发的保护标记。
+          locallyTriggeredRef.current.delete(accountId);
           return;
         }
-        setNotes((current) => ({ ...current, [accountId]: formatResult(status.last_result, unit) }));
-      } catch (pollError) {
-        setNotes((current) => ({ ...current, [accountId]: readErrorDetail(pollError) }));
+      } catch {
+        // 轮询失败：问不到就摘出去停刷（不在这里刷红字 —— 与当前操作无关的报错是噪声）。
+      }
+      const notice = syncTerminalNotice(status?.last_result ?? null, unit, formatResult);
+      if (notice) {
+        message.error(notice);
       }
       // ⚠️ **摘除账号必须写在这里，不能写在 `finally` 里**：上面「仍在跑」的分支是
       // `return`，而 `finally` 对 `return` 一样生效 —— 写进 `finally` 就会在**第一轮**
-      // 把账号移出集合，轮询当场停摆，卡片进度行永久冻在「已落库 N / 共 M」
-      // （症状是「看着像在跑，其实再也没更新过」）。只有真的到终态或这次查询失败才摘除。
+      // 把账号移出集合，轮询当场停摆（症状是「看着像在跑，其实再也没更新过」）。
+      // 只有真的到终态或这次查询失败才摘除。
+      locallyTriggeredRef.current.delete(accountId);
       setIds((current) => {
         const next = new Set(current);
         next.delete(accountId);
@@ -432,24 +502,10 @@ export function XhsAccountsPage() {
 
     await Promise.all([
       ...noteIds.map((accountId) =>
-        pollOne(
-          accountId,
-          syncAccountNotesStatus,
-          "条",
-          syncResultText,
-          setNoteSyncNotes,
-          setNoteSyncIds,
-        ),
+        pollOne(accountId, syncAccountNotesStatus, "条", syncResultText, setNoteSyncIds),
       ),
       ...goodsIds.map((accountId) =>
-        pollOne(
-          accountId,
-          syncShopGoodsStatus,
-          "件",
-          (result) => goodsResultText(result),
-          setGoodsSyncNotes,
-          setGoodsSyncIds,
-        ),
+        pollOne(accountId, syncShopGoodsStatus, "件", goodsResultText, setGoodsSyncIds),
       ),
     ]);
     setSyncPollTick((tick) => tick + 1);
@@ -499,34 +555,19 @@ export function XhsAccountsPage() {
 
   return (
     <div style={{ padding: "0 0 32px" }}>
-      {/* Page header */}
-      <div style={{ marginBottom: 28 }}>
-        <Text
-          style={{
-            fontSize: 11,
-            textTransform: "uppercase",
-            letterSpacing: 1.5,
-            color: "rgba(255,255,255,0.35)",
-            display: "block",
-            marginBottom: 4,
-          }}
-        >
-          XHS Accounts
-        </Text>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <div>
-            <Title level={3} style={{ margin: 0, color: "rgba(255,255,255,0.88)" }}>
-              账号矩阵
-            </Title>
-            <Text style={{ color: "rgba(255,255,255,0.45)", marginTop: 4, display: "block" }}>
-              管理小红书账号、各平台登录态与数据同步（笔记 / 商品 / 互动数据）。
-            </Text>
-          </div>
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => setDrawerOpen(true)}>
-            绑定账号
-          </Button>
-        </div>
-      </div>
+      {/*
+        ⚠️ **页面头部整块移除**（2026-09-28 用户口径：「将头部的 XHS Accounts / 账号矩阵 /
+        管理小红书账号、各平台登录态与数据同步（笔记 / 商品 / 互动数据）。移除，
+        绑定账号按钮放到右上角与刷新一起」）——设计 13 §40。
+
+        原来那三行（eyebrow `XHS Accounts` + `账号矩阵` 标题 + 一句描述）是**重复信息**：
+        「账号矩阵」这个标题与侧边菜单项**逐字相同**，描述那句说的正是下面卡片里
+        已经摆着的东西（已绑定账号列表 + 三个同步按钮）。删掉之后页面从卡片开始，
+        一屏能多看见一行账号卡。
+
+        「绑定账号」不再是页面级的独立按钮，**收进卡片右上角与「刷新」同行** ——
+        与设置页（`刷新` + `新增`）、任务中心（刷新从顶部标题区挪进卡片）同一套排布。
+      */}
 
       {/* Section card */}
       <Card
@@ -534,9 +575,14 @@ export function XhsAccountsPage() {
           <span style={{ color: "rgba(255,255,255,0.88)", fontWeight: 600 }}>已绑定账号</span>
         }
         extra={
-          <Button icon={<ReloadOutlined />} onClick={loadAccounts} loading={isLoading}>
-            刷新
-          </Button>
+          <Space size={8}>
+            <Button icon={<ReloadOutlined />} onClick={loadAccounts} loading={isLoading}>
+              刷新
+            </Button>
+            <Button type="primary" icon={<PlusOutlined />} onClick={() => setDrawerOpen(true)}>
+              绑定账号
+            </Button>
+          </Space>
         }
         style={{ background: "#1f1f1f", borderColor: "#303030" }}
         styles={{ body: { padding: 24 } }}
@@ -574,11 +620,6 @@ export function XhsAccountsPage() {
               const isCreator = account.sub_type === "creator";
               const isNoteSyncing = noteSyncIds.has(account.id);
               const isGoodsSyncing = goodsSyncIds.has(account.id);
-              const noteSyncNote = noteSyncNotes[account.id] || "";
-              const goodsSyncNote = goodsSyncNotes[account.id] || "";
-              /** 同步行文案（前缀 + 内容拼成一份，显示与 tip 共用，避免两处各拼一次而漂移）。 */
-              const noteSyncText = noteSyncNote ? `笔记同步：${noteSyncNote}` : "";
-              const goodsSyncText = goodsSyncNote ? `商品同步：${goodsSyncNote}` : "";
               /** 时间行文案（同一份文本既用于显示、也用于 tip，避免两处各拼一次而漂移）。 */
               const updatedText = `更新时间：${formatDate(account.updated_at || account.created_at)}`;
               const statusColor = statusColorMap[account.status] || "default";
@@ -784,28 +825,15 @@ export function XhsAccountsPage() {
                     ) : null}
 
                     {/*
-                      M1.9 同步的进度 / 结果行（设计 13 §6.2）。
-                      与上面那行「互动数据原因」分开：那是**账号属性**（相对稳定），
-                      这是**任务态**（自己会变）；混在一行会让「同步中」被账号原因顶掉。
+                      ⚠️ **「同步任务」进度区块整块移除**（2026-09-27 用户口径：
+                      「点击后展示的同步任务进度卡移除，只需要将同步笔记按钮改成同步中即可」）。
+
+                      原区块（设计 13 §35.17.4，标题 + 笔记 / 商品两行 + 行内取消）连同
+                      驱动它的 `noteSyncNotes` / `goodsSyncNotes` / `*TaskIds` 一起删掉：
+                      任务态**只有一处入口**——任务中心「任务日志」（账号卡两个按钮现在都
+                      落一条 `trigger_type=manual` 的日志，§35.17）；中断入口在队列记录页。
+                      卡片这一层只保留「同步中」这个按钮态，它由首查 + 5s 轮询维持。
                     */}
-                    {noteSyncText ? (
-                      <Text
-                        type="secondary"
-                        ellipsis={{ tooltip: noteSyncText }}
-                        style={{ display: "block", fontSize: 12, marginBottom: 6, color: "rgba(255,255,255,0.45)" }}
-                      >
-                        {noteSyncText}
-                      </Text>
-                    ) : null}
-                    {goodsSyncText ? (
-                      <Text
-                        type="secondary"
-                        ellipsis={{ tooltip: goodsSyncText }}
-                        style={{ display: "block", fontSize: 12, marginBottom: 6, color: "rgba(255,255,255,0.45)" }}
-                      >
-                        {goodsSyncText}
-                      </Text>
-                    ) : null}
 
                     {/*
                       Footer：更新时间一行、按钮一行（设计 13 §6.1 的卡片草图就是这个排布）。
@@ -853,16 +881,6 @@ export function XhsAccountsPage() {
                         >
                           {isNoteSyncing ? "同步中" : "同步笔记"}
                         </Button>
-                        {isNoteSyncing && (
-                          <Button
-                            size="small"
-                            danger
-                            onClick={() => void cancelSync("notes", account.id)}
-                            title="中断本次笔记同步（后台尽快停止，已落库的数据保留）"
-                          >
-                            取消
-                          </Button>
-                        )}
                         {/*
                           「同步商品」v1.31 起**所有账号都渲染**（旧版仅 Creator）。
                           千帆会话不可用时点击会弹窗提示先补登（见 handleGoodsSyncClick）——
@@ -877,16 +895,16 @@ export function XhsAccountsPage() {
                         >
                           {isGoodsSyncing ? "同步中" : "同步商品"}
                         </Button>
-                        {isGoodsSyncing && (
-                          <Button
-                            size="small"
-                            danger
-                            onClick={() => void cancelSync("goods", account.id)}
-                            title="中断本次商品同步（后台尽快停止，已落库的数据保留）"
-                          >
-                            取消
-                          </Button>
-                        )}
+                        {/*
+                          ⚠️ 「补齐详情」按钮**已移除**（2026-09-27 用户口径：
+                          「账号信息卡中移除补齐详情逻辑，点击同步笔记时，应获取到当前笔记的
+                          所有信息后再落库，在一个任务中完成，不需要再点击补齐详情」）。
+
+                          原按钮 + 它背后的详情补齐队列（`POST /accounts/{id}/notes/hydrate-pending`、
+                          `GET /notes/hydrate-queue`、`note_hydrate` 队列）整条链路一并删除 ——
+                          补齐能力已并入「同步笔记」任务本身（设计 13 §35.18：任务收尾对该账号
+                          全部待补笔记内联补齐，`_hydrate_page_notes` 那把尺子，含历史欠账）。
+                        */}
                         <Button
                           size="small"
                           danger

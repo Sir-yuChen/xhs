@@ -46,6 +46,9 @@ jar 只带 `access-token-creator.*`，打千帆一律 `-13000 缺失登录凭证
   仍是「一次页面动作一次探针」，**不进轮询、不进定时任务**）。v1.31 起账号卡片的
   「检查」按钮已移除（用户口径），探活不再有第二个手工入口 —— 真探不出结论时
   刷新页面即重试；
+* **账号间并发、账号内串行**（§18.18.3，2026-09-28）：并行度复用
+  `xhs_sync_account_parallelism`（默认 3，夹 1–8）。请求数不变（每账号 ≤3 次只读），
+  只是不再一个账号一个账号地等 —— 改前 4 账号 4.29 s，改后见 §18.18.5；
 * `成功=False` 且 **`payload is None`**（SDK 在传输异常时不抛异常、只把 `success` 置假）
   ⇒ 判 `unknown`，**不判 `expired`**。判据是**结构**（有没有拿到平台的 JSON），
   不是去匹配错误文案；
@@ -63,6 +66,7 @@ jar 只带 `access-token-creator.*`，打千帆一律 `-13000 缺失登录凭证
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Sequence
 
 from sqlalchemy.orm import Session
@@ -88,13 +92,38 @@ STATE_GUEST = "guest"
 STATE_VALID = "valid"
 STATE_EXPIRED = "expired"
 STATE_UNKNOWN = "unknown"
-LOGIN_STATES: tuple[str, ...] = (
-    STATE_MISSING,
-    STATE_GUEST,
-    STATE_VALID,
-    STATE_EXPIRED,
-    STATE_UNKNOWN,
-)
+
+#: 探针线程名前缀（§18.18.3）。**必须独立于同步 worker 的前缀** ——
+#: `note_sync_service` 的看门狗按线程名前缀匹配、会去「补齐缺口」，两者混用
+#: 会让看门狗把探针线程当成失联的同步 worker 而重建出重复线程。
+PROBE_THREAD_PREFIX = "xhs-login-probe"
+
+#: 并行度读不到时的回落值（与 `note_sync_service.SYNC_DEFAULT_PARALLELISM` 同值）。
+PROBE_DEFAULT_PARALLELISM = 3
+#: 并行度上限（与设置页 `xhs_sync_account_parallelism` 的范围上界一致）。
+PROBE_MAX_PARALLELISM = 8
+
+
+def _probe_parallelism() -> int:
+    """账号间探针并行度 —— **复用同步的那把尺子**（§18.18.3）。
+
+    「账号级并行度」只允许有**一个真相源**：`xhs_sync_account_parallelism`
+    （设置页可改，默认 3，夹 1–8）。探针自己再开一个键 = 两把尺子，必然漂移。
+
+    任何异常都退默认值：并行度读不到不该让令牌检测停摆。
+    """
+    try:
+        from backend.app.services.note_sync_service import sync_parallelism
+
+        return max(1, min(int(sync_parallelism()), PROBE_MAX_PARALLELISM))
+    except Exception:  # noqa: BLE001 - 配置读不到就用默认并行度
+        logger.warning(
+            "login-state: 读并行度失败，本次用默认 %s",
+            PROBE_DEFAULT_PARALLELISM,
+            exc_info=True,
+        )
+        return PROBE_DEFAULT_PARALLELISM
+
 
 #: 每个平台的展示名。**千帆与创作者分开**（2026-09-21 拆分）—— 合成一个名字
 #: 会让用户以为一份令牌能同时打两边，正是本轮要消灭的误解。
@@ -147,15 +176,6 @@ _REASONS: dict[tuple[str, str], str] = {
     (CHANNEL_CREATOR, STATE_UNKNOWN): "已确认是登录态，但还没检测过它现在还能不能用（刷新页面会自动检测）。",
     (CHANNEL_ARK, STATE_UNKNOWN): "已确认是登录态，但还没检测过它现在还能不能用（刷新页面会自动检测）。",
 }
-
-
-def empty_state() -> dict[str, Any]:
-    """一个平台的「不存在」形态。
-
-    `state` 与 `reason` 一起下发，前端**不需要**自己拼兜底文案（缺值不造假：
-    没记录就是 `missing`，不是 `unknown`）。
-    """
-    return {"state": STATE_MISSING, "reason": "", "probed": False}
 
 
 def _layer12_state(channel: str, cookies: str) -> str:
@@ -269,6 +289,47 @@ def _default_qianfan_factory():
     return get_qianfan_api_adapter_factory()
 
 
+def _probe_channels_for_account(
+    account_id: int,
+    cookie_map: dict[tuple[int, str], str],
+    *,
+    probe: bool,
+    profile_adapter: Any,
+    qianfan_adapter_factory: Any,
+    creator_adapter_factory: Any,
+) -> dict[str, dict[str, Any]]:
+    """**一个账号**的三平台登录态（串行与并发**共用这一份实现**，§18.18.3）。
+
+    ⚠️ 只读 `cookie_map`（并发前一次性读好的内存快照）——**线程内不碰 DB**：
+    SQLAlchemy `Session` 不是线程安全的，把会话带进线程池等于埋一颗随机崩溃。
+    """
+    channels: dict[str, dict[str, Any]] = {}
+    for channel in CHANNELS:
+        cookies = cookie_map.get((account_id, channel), "")
+        state = _layer12_state(channel, cookies)
+        entry = {
+            "state": state,
+            "reason": _REASONS.get((channel, state), ""),
+            "probed": False,
+            "label": CHANNEL_LABELS.get(channel, channel),
+        }
+        # L3：只在**显式**探活、且 L2 已经确认「是登录态」时打那一次只读请求。
+        # `missing` / `guest` 探也没有意义 —— 没有可用令牌，探针只会告诉我们
+        # 已知的事实，白花一次请求（风控：请求数越少越好）。
+        if probe and state == STATE_UNKNOWN:
+            if channel == CHANNEL_WWW:
+                probed_state, reason = _probe_www(cookies, profile_adapter)
+            elif channel == CHANNEL_CREATOR:
+                probed_state, reason = _probe_creator(cookies, creator_adapter_factory)
+            else:
+                probed_state, reason = _probe_ark(cookies, qianfan_adapter_factory)
+            entry["state"] = probed_state
+            entry["reason"] = reason
+            entry["probed"] = True
+        channels[channel] = entry
+    return channels
+
+
 def login_states_for_accounts(
     db: Session,
     accounts: Sequence[PlatformAccount],
@@ -283,52 +344,46 @@ def login_states_for_accounts(
     返回 `{account_id: {"channels": {www: {...}, creator: {...}, ark: {...}}, "checked_at": iso|None}}`。
     `channels` 里三个平台**都在**（哪怕 `missing`）—— 缺项消失会让前端误以为
     「这个账号没有这个平台」和「后端没算」是两回事。
+
+    ## 并发（§18.18.3，2026-09-28）
+
+    `probe=True` 时**账号之间并行**（线程池，并行度 = `xhs_sync_account_parallelism`），
+    而**同一账号的三个平台仍然串行** —— 三个不同域同时打会把单账号的风控面放大，
+    账号间并发则打的是**不同账号**，每账号请求数与串行时完全一致。
+
+    * 结论与串行**完全相同**（`pool.map` 保序，逐账号结果各自独立）；
+    * `checked_at` 仍是本批**统一的一个时刻**；
+    * 并行度 ≤1 或只有 1 个账号 ⇒ 走原串行路径（单账号零线程开销）；
+    * 令牌在进线程池**之前**一次性读进内存，线程内不碰 DB。
     """
     cookie_map = latest_cookies_for_channels(db, [account.id for account in accounts])
     checked_at = shanghai_now().isoformat() if probe else None
+    account_ids = [account.id for account in accounts]
 
-    result: dict[int, dict[str, Any]] = {}
-    for account in accounts:
-        channels: dict[str, dict[str, Any]] = {}
-        for channel in CHANNELS:
-            cookies = cookie_map.get((account.id, channel), "")
-            state = _layer12_state(channel, cookies)
-            entry = {
-                "state": state,
-                "reason": _REASONS.get((channel, state), ""),
-                "probed": False,
-                "label": CHANNEL_LABELS.get(channel, channel),
-            }
-            # L3：只在**显式**探活、且 L2 已经确认「是登录态」时打那一次只读请求。
-            # `missing` / `guest` 探也没有意义 —— 没有可用令牌，探针只会告诉我们
-            # 已知的事实，白花一次请求（风控：请求数越少越好）。
-            if probe and state == STATE_UNKNOWN:
-                if channel == CHANNEL_WWW:
-                    probed_state, reason = _probe_www(cookies, profile_adapter)
-                elif channel == CHANNEL_CREATOR:
-                    probed_state, reason = _probe_creator(cookies, creator_adapter_factory)
-                else:
-                    probed_state, reason = _probe_ark(cookies, qianfan_adapter_factory)
-                entry["state"] = probed_state
-                entry["reason"] = reason
-                entry["probed"] = True
-            channels[channel] = entry
-        result[account.id] = {"channels": channels, "checked_at": checked_at}
-    return result
+    def channels_for(account_id: int) -> dict[str, dict[str, Any]]:
+        return _probe_channels_for_account(
+            account_id,
+            cookie_map,
+            probe=probe,
+            profile_adapter=profile_adapter,
+            qianfan_adapter_factory=qianfan_adapter_factory,
+            creator_adapter_factory=creator_adapter_factory,
+        )
 
+    parallelism = _probe_parallelism() if probe else 1
+    if parallelism > 1 and len(account_ids) > 1:
+        with ThreadPoolExecutor(
+            max_workers=min(parallelism, len(account_ids)),
+            thread_name_prefix=PROBE_THREAD_PREFIX,
+        ) as pool:
+            channel_sets = list(pool.map(channels_for, account_ids))
+    else:
+        channel_sets = [channels_for(account_id) for account_id in account_ids]
 
-def summarize_state(state_payload: dict[str, Any]) -> str:
-    """把一次登录态压成一句话（给日志与测试断言用；**不用于界面**）。
-
-    优先级刻意是 `expired` > `missing` > `guest` > `unknown` > `valid`：
-    有失效的令牌时，用户最需要知道的是那一条。
-    """
-    channels = state_payload.get("channels") or {}
-    states = [entry.get("state") for entry in channels.values()]
-    for candidate in (STATE_EXPIRED, STATE_MISSING, STATE_GUEST, STATE_UNKNOWN, STATE_VALID):
-        if candidate in states:
-            return candidate
-    return ""
+    return {
+        account_id: {"channels": channels, "checked_at": checked_at}
+        for account_id, channels in zip(account_ids, channel_sets)
+    }
 
 
 # ⚠️ 「哪些状态该给「重新登录」入口」**刻意不在这里**：那是**呈现**决定（改版就意味着改后端），

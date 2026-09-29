@@ -13,12 +13,12 @@
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │ L5  前端 SPA                                                     │
-│     React 19 + antd 6 · 25 页面 · 163 请求函数                    │
+│     React 19 + antd 6 · 25 页面 · 149 请求函数                    │
 │     app/router.tsx → pages/** → components/** → lib/api.ts       │
 └───────────────────────────┬─────────────────────────────────────┘
                             │ HTTP /api（Bearer）
 ┌───────────────────────────▼─────────────────────────────────────┐
-│ L4  API 路由层（23 个 router / 187 端点）                         │
+│ L4  API 路由层（24 个 router / 191 端点）                          │
 │     auth · platforms · accounts · login-sessions · notes ·        │
 │     files · drafts · ai · tasks · model-configs · tags ·          │
 │     notifications · keyword-groups · publish ·                    │
@@ -31,7 +31,7 @@
 │     monitoring_crawl_service · notification_service ·             │
 │     asset_downloader · image_util · rate_limiter                  │
 │     ★ publish_service（2026-09-18 新增，发布幂等）                │
-│     ⚠️ task_service（死模块）· ⚠️ mock_data（死模块）              │
+│     ✅ task_service 已删 · mock_data 部分删（见 §6.2）            │
 └───────────────────────────┬─────────────────────────────────────┘
                             │
 ┌───────────────────────────▼─────────────────────────────────────┐
@@ -78,7 +78,7 @@
 | `keyword-groups` | — | — | `KeywordGroup` |
 | `publish` | `scheduler_service` | `creator_api_adapter` | `PublishJob`, `PublishAsset` |
 | `xhs/analytics` | — | — | `Note`, `PlatformAccount`, `PublishJob` |
-| `xhs/pc` | `mock_data`(⚠️ 2 处) | `pc_api_adapter` | — |
+| `xhs/pc` | `mock_data`(✅ 2026-09-28 已删 4 个死函数，仅剩 `sample_notes`) | `pc_api_adapter` | — |
 | `xhs/creator` | — | `creator_api_adapter` | — |
 | `xhs/crawl` | `asset_downloader` | `pc_api_adapter` | `Note`, `NoteAsset`, `NoteComment` |
 | `xhs/monitoring` | `monitoring_crawl_service` | `pc_api_adapter` | `MonitoringTarget`, `MonitoringSnapshot` |
@@ -309,13 +309,15 @@ shops ──┬──▶ platform_accounts            （1:1：platform_accounts
 
 | # | 位置 | 规模 | 判定依据 |
 |---|---|---|---|
-| 1 | `backend/app/services/task_service.py` | 整模块 | 无任何调用方 |
-| 2 | `backend/app/services/mock_data.py` 的 `dashboard_overview` / `sample_accounts` / `sample_model_configs` | 3 个函数 | 无任何引用 |
-| 3 | `backend/app/api/platforms/xhs/pc.py:634 note_comments_placeholder()` | 1 函数 | 无路由装饰器（2026-09-18 行号已下移，原 `:382`） |
-| 4 | `backend/app/core/task_runner.py` 的 `InProcessTaskRunner` | 1 类 | 只被实例化，从未调用 |
+| 1 | ~~`backend/app/services/task_service.py`~~ | 整模块 | ✅ **已删除**（2026-09-28，归档至 `.workbuddy/tmp/dead-code-archive/`） |
+| 2 | ~~`backend/app/services/mock_data.py` 的 `dashboard_overview` / `sample_accounts` / `sample_model_configs`~~（另含 `sample_tasks`） | 4 个函数 | ✅ **已删除**（2026-09-28）。⚠️ **模块本身保留**：`sample_notes` 被 `api/platforms/xhs/pc.py` 的 mock 端点引用 |
+| 3 | ~~`backend/app/api/platforms/xhs/pc.py note_comments_placeholder()`~~ | 1 函数 | ✅ **已删除**（2026-09-28） |
+| 4 | ~~`backend/app/core/task_runner.py` 的 `InProcessTaskRunner`~~ | 整模块 | ✅ **已删除**（2026-09-28，归档同上） |
 | 5 | `frontend/src/pages/platforms/xhs/drafts-page.tsx` | **1250 行** | 未被 router 引用 |
 | 6 | `frontend/src/pages/platforms/xhs/monitoring-page.tsx` | 401 行 | 被 import 但无 `<Route>` |
 | 7 | `xhs_utils/xhs_util.py` | 兼容转发层 | 仅转发 `xhs_pc.params` |
+| 8 | ~~`backend/app/api/auth.py` 的 `UserResponse`~~ | 1 类 | ✅ **已删除**（2026-09-28）：无 `response_model=` 引用，实际响应由 `_serialize_user()` 出（T-104 注释已随迁） |
+| 9 | ~~`backend/app/services/shop_goods_sync_service.py` 的 `_detail_queue()`~~ | 1 函数 | ✅ **已删除**（2026-09-28）：详情补齐已**内联**进同步流程（同文件 `detail_remaining` / `detail_total` 查询），旧独立队列函数无人调用 |
 
 ### 6.3 循环依赖检测
 
@@ -326,7 +328,7 @@ shops ──┬──▶ platform_accounts            （1:1：platform_accounts
 
 ### 6.4 孤儿端点（后端有、前端不调）
 
-共 **20 个**，分类见 `05_Mock清单与接线覆盖度.md` §3。
+共 **17 个**（2026-09-28：原 20 个，3 个已消除；最近一次是 `GET /api/xhs/creator/published`），分类见 `05_Mock清单与接线覆盖度.md` §3。
 
 ### 6.5 共享资源竞争点
 

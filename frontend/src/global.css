@@ -100,6 +100,54 @@ body {
   transition: transform 0.3s ease;
 }
 
+/* ===== 任务日志「比例未知」的不定量进度条（设计 13 §43 / 设计 15 §9.1） ===== */
+/*
+ * 为什么不用 antd `Progress percent={100}` 冒充：满格条与「100% 完成」**视觉同形**
+ * （只少一个数字）—— 2026-09-28 用户报障「任务刚开跑进度条就 100%，点详情却是 0%」
+ * 正是这么来的。本形态**没有固定填充比例**：一个 40% 宽的色块来回滑动，
+ * 既不会被读成 100%，也不会被读成 0%（0% 会被读成卡死，见设计 13 §35.18.6）。
+ *
+ * ⚠️ 本文件其余动画纪律是「只做 hover/transition」；这一条是**唯一的常驻 animation**，
+ *    只作用于一个 6px 高的小元素、只改 `transform`（不触发布局），且仅出现在
+ *    「在跑且比例未知」这一个状态下 —— 该状态下本来就没有可读的数字，动画是唯一的信息。
+ *    颜色由 JS 侧从 antd token 传入（dark / light 双主题），这里不硬编码。
+ */
+.log-progress-unknown {
+  position: relative;
+  display: block;
+  width: 100%;
+  min-width: 120px;
+  border-radius: 100px;
+  overflow: hidden;
+}
+
+.log-progress-unknown-bar {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 40%;
+  border-radius: 100px;
+  animation: log-progress-unknown-slide 1.4s ease-in-out infinite;
+}
+
+@keyframes log-progress-unknown-slide {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(250%);
+  }
+}
+
+/* 系统「减少动态效果」偏好：停成一段居中的静态色块（仍不表示任何比例）。 */
+@media (prefers-reduced-motion: reduce) {
+  .log-progress-unknown-bar {
+    animation: none;
+    left: 30%;
+  }
+}
+
 /* ===== 我的笔记 · 详情弹窗（设计文档 §23） ===== */
 /* 弹窗外框固定高度、整体不滚动：滚动被限制在「信息区」与「评论区」内部。 */
 /* 评论区高度恒定，所以「加载中 / 空 / 失败 / 有数据」四态下版式都不跳动。 */

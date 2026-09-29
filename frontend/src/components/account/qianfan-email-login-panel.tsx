@@ -3,7 +3,9 @@ import { KeyOutlined } from "@ant-design/icons";
 import { useState } from "react";
 
 import { detailMessage, loginXhsQianfanByEmail } from "../../lib/api";
+import { loginConfirmed } from "../../lib/login-state";
 import type { PlatformAccount } from "../../types";
+import { LoginSubmitMask } from "./login-submit-mask";
 
 const { Text } = Typography;
 
@@ -59,6 +61,14 @@ export function QianfanEmailLoginPanel({
         // JSON 序列化丢掉，但对象形状应该是「意图明确」的：建号 vs 续期。
         ...(targetAccountId === undefined ? {} : { target_account_id: targetAccountId }),
       });
+      // ⚠️ **关窗/落态的唯一判据 = 后端结论**（2026-09-28 用户口径「根据后端接口返回的
+      // 成功与否进行判断是否关闭弹窗」）。旧实现判的是 `result.account` 有没有值
+      // （派生字段，不是后端结论）⇒ 后端回非 confirmed 时照样关窗。判据走唯一实现
+      // `loginConfirmed`；**不通过就什么都不做**（不清密码、不置 done、不回调）。
+      if (!loginConfirmed(result)) {
+        message.error("后端未确认登录成功，本次没有更新任何令牌。");
+        return;
+      }
       // 凭据使命完成，立刻从 state 里清掉（不留着过夜）。
       setPwd("");
       setDone(true);
@@ -95,7 +105,7 @@ export function QianfanEmailLoginPanel({
   }
 
   return (
-    <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+    <Space direction="vertical" size="middle" style={{ width: "100%", position: "relative" }}>
       <Text type="secondary" style={{ fontSize: 13 }}>
         使用千帆商家后台的账号密码登录。邮箱与密码仅用于本次登录，不会保存。
       </Text>
@@ -139,6 +149,9 @@ export function QianfanEmailLoginPanel({
       >
         {isSubmitting ? "登录中..." : "登录"}
       </Button>
+
+      {/* 提交蒙版（2026-09-28 用户口径）：点「登录」后盖住表单，成功时随窗口一起消失。 */}
+      <LoginSubmitMask active={isSubmitting} />
     </Space>
   );
 }

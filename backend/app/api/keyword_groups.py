@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user
 from backend.app.core.time import shanghai_now
-from backend.app.models import KeywordGroup, Note, PlatformAccount, User
+from backend.app.models import KeywordGroup, Note, User
 from backend.app.schemas.common import paginated
 
 router = APIRouter(prefix="/keyword-groups", tags=["keyword-groups"])

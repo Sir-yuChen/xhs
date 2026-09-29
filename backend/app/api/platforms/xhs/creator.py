@@ -4,17 +4,15 @@ import json
 from datetime import datetime
 from typing import Any, Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.adapters.xhs.creator_api_adapter import XhsCreatorApiAdapter
 from backend.app.api.tasks import serialize_task
 from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user, get_owned_active_account
-from backend.app.core.security import decrypt_text
-from backend.app.models import AccountCookieVersion, PlatformAccount, Task, User
+from backend.app.models import PlatformAccount, Task, User
 
 router = APIRouter(prefix="/xhs/creator", tags=["xhs-creator"])
 
@@ -300,17 +298,3 @@ def publish_video(
     except Exception as exc:
         _fail_operation_task(db, task, str(exc))
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
-
-
-@router.get("/published")
-def published(
-    account_id: int = Query(...),
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-    adapter_factory=Depends(get_creator_api_adapter_factory),
-):
-    _, adapter = _adapter_for_account(db, current_user, account_id, adapter_factory)
-    success, message, raw_payload = adapter.get_published_notes()
-    if not success:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=message or "Creator published list failed")
-    return {"items": _payload_items(raw_payload), "raw": raw_payload}

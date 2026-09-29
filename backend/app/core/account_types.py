@@ -60,11 +60,6 @@ def normalize_sub_type(sub_type: Optional[str]) -> str:
     return sub_type
 
 
-def is_known_sub_type(sub_type: Optional[str]) -> bool:
-    """判断取值是否可被安全路由（供校验层使用，不做归一）。"""
-    return sub_type is None or sub_type == "" or sub_type in SUB_TYPES
-
-
 #: 链路**能力强弱**（合并同一小红书身份的多个链路时取最大者）。
 #:
 #: 为什么不复用 `SUB_TYPES` / `normalize_sub_type`：那两个的契约是「未知取值显式失败」

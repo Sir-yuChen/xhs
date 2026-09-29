@@ -31,7 +31,13 @@ export const QUEUE_ITEM_TASK_TYPES: readonly string[] = [
   "xhs_note_gen_item",
 ];
 
-/** 队列**批次父行**类型（一次入队动作 = 一个唯一批次号；批次行**永不被执行**）。 */
+/**
+ * 队列**批次父行**类型（一次入队动作 = 一个唯一批次号；批次行**永不被执行**）。
+ *
+ * ⚠️ 2026-09-27：详情补齐队列（`xhs_note_hydrate_item` / `xhs_note_hydrate_batch`）
+ * **整条移除**（用户口径「账号信息卡中移除补齐详情逻辑……不需要再点击补齐详情」）——
+ * 补齐能力并入同步任务本身（设计 13 §35.18），后端 `QUEUE_REGISTRY` 只剩三个队列。
+ */
 export const QUEUE_BATCH_TASK_TYPES: readonly string[] = [
   "xhs_note_sync_batch",
   "xhs_note_publish_batch",
@@ -47,7 +53,14 @@ export const QUEUE_TASK_TYPES: readonly string[] = [
 /** 商品生成队列的队列项类型（生成前笔记不存在 ⇒ 显示商品而不是拉笔记标题）。 */
 export const GEN_ITEM_TASK_TYPE = "xhs_note_gen_item";
 
-/** 是不是队列**项**（最细粒度的一行；批次父行不是）。 */
+/*
+ * ⚠️ **`ACCOUNT_TASK_TYPES` 已删除**（2026-09-27 用户口径「任务中心移除账号级任务 (1) tab」）：
+ * 它是「账号级任务」页签的筛选白名单（`GET /tasks?task_types=…`），页签移除后没有调用方。
+ * 后端仍保留 `ACCOUNT_TASK_TYPES`（账号任务 worker 的认领 / 复位 / 保留期用它），
+ * 账号级任务行仍可在队列记录页查看与中断（`QUEUE_RECORD_TYPES` 含它们）。
+ */
+
+/** 是不是**队列**项（最细粒度的一行；批次父行不是）。 */
 export function isQueueItemTask(taskType: string): boolean {
   return QUEUE_ITEM_TASK_TYPES.includes(taskType);
 }
@@ -158,11 +171,18 @@ export const TASK_STATUS_COLORS: Record<string, string> = {
  * | `note_publish_batch` | 内容库-批量发布按钮 | 内容库「批量发布」 |
  * | `product_note_generate_single` | 商品列表-生成笔记按钮 | 商品列表单条「生成笔记」 |
  * | `product_note_generate_batch` | 商品列表-批量生成笔记按钮 | 商品列表「批量生成智能笔记」 |
+ * | `account_card_note_sync` | 账号卡-同步笔记按钮 | 账号卡「同步笔记」（等价手动跑一次定时任务） |
+ * | `account_card_goods_sync` | 账号卡-同步商品按钮 | 账号卡「同步商品」（同上） |
  * | `retry` | 队列记录-重试按钮 | 本页点「重试」 |
  * | `recovery` | 应用重启恢复 | 启动恢复自动续跑的断点行 |
  * | `scheduled` | 定时任务 | 预留（队列侧暂无入口） |
  * | `manual` | 页面按钮（早期数据） | **遗留值**：按钮级细分之前入队的行（迁移
  *   `d3e4f5a6b7c8` 回填的），代码不再写它；显示时说清是早期数据，别冒充具体按钮 |
+ *
+ * ⚠️ **「一一对应」由守卫强制**（2026-09-28）：`tests/backend/test_note_queue_service.py::
+ * test_all_queue_sources_have_frontend_labels` 会**遍历 `QUEUE_SOURCES`** 逐项检查本表
+ * 与 `TASK_SOURCE_TIPS` 都有键。加后端来源而忘加这里 ⇒ 用例直接红。
+ * （此前该守卫手写清单，漏了上面两个账号卡来源 —— 页面显示英文原值而无人察觉。）
  */
 export const TASK_SOURCE_LABELS: Record<string, string> = {
   note_sync_single: "内容库-同步按钮",
@@ -171,6 +191,8 @@ export const TASK_SOURCE_LABELS: Record<string, string> = {
   note_publish_batch: "内容库-批量发布按钮",
   product_note_generate_single: "商品列表-生成笔记按钮",
   product_note_generate_batch: "商品列表-批量生成笔记按钮",
+  account_card_note_sync: "账号卡-同步笔记按钮",
+  account_card_goods_sync: "账号卡-同步商品按钮",
   retry: "队列记录-重试按钮",
   recovery: "应用重启恢复",
   scheduled: "定时任务",
@@ -190,6 +212,8 @@ export const TASK_SOURCE_TIPS: Record<string, string> = {
   note_publish_batch: "你在内容库点「批量发布」入队的（一次多篇）。",
   product_note_generate_single: "你在商品列表点「生成笔记」按钮入队的（一个商品 = 一条记录）。",
   product_note_generate_batch: "你在商品列表点「批量生成智能笔记」入队的（一次多个商品）。",
+  account_card_note_sync: "你在账号卡上点「同步笔记」触发的（等价于手动跑一次定时任务，不与笔记队列抢平台额度）。",
+  account_card_goods_sync: "你在账号卡上点「同步商品」触发的（等价于手动跑一次定时任务）。",
   retry: "你在队列记录里点「重试」重新入队的（这一跑来自重试，不是当初入队那次）。",
   recovery: "应用重启后由启动恢复自动续跑的断点（上次退出时没跑完的那些，不是新任务）。",
   scheduled:

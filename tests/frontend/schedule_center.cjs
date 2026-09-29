@@ -30,6 +30,13 @@
  *   SCHEDULE_MUTATE=targetcol <node> …               # 期望 FAIL（调用目标丢中文名）
  *   SCHEDULE_MUTATE=width70  <node> …                # 期望 FAIL（详情弹窗宽度漂移）
  *   SCHEDULE_MUTATE=accountscope <node> …            # 期望 FAIL（账号多选退回仅编辑态）
+ *   SCHEDULE_MUTATE=progresskeep <node> …            # 期望 FAIL（失败退回 exception 态 ⇒ 百分比被顶掉）
+ *   SCHEDULE_MUTATE=progressbar  <node> …            # 期望 FAIL（不定量条退回「进行中」文字）
+ *   SCHEDULE_MUTATE=fakefull     <node> …            # 期望 FAIL（未知比例退回 percent={100} 满格冒充）
+ *   SCHEDULE_MUTATE=unknownzero  <node> …            # 期望 FAIL（未知判据失效 ⇒ 未知被谎报成 0%）
+ *   SCHEDULE_MUTATE=tworeads     <node> …            # 期望 FAIL（详情弹窗不再共用组件 ⇒ 同一行两个读数）
+ *   SCHEDULE_MUTATE=pageread     <node> …            # 期望 FAIL（列表列绕开唯一实现自绘进度条）
+ *   SCHEDULE_MUTATE=accountlabel <node> …            # 期望 FAIL（执行账号退回只看任务配置 ⇒ 又显「全部账号」）
  */
 const fs = require("fs");
 const os = require("os");
@@ -41,6 +48,8 @@ const MODULE_TS = path.join(PROJECT, "frontend/src/lib/schedule.ts");
 const CRON_MODULE_TS = path.join(PROJECT, "frontend/src/lib/cron-builder.ts");
 const PAGE_TSX = path.join(PROJECT, "frontend/src/pages/tasks/task-center-page.tsx");
 const DETAIL_TSX = path.join(PROJECT, "frontend/src/components/schedule/job-log-detail-modal.tsx");
+const PROGRESS_TSX = path.join(PROJECT, "frontend/src/components/schedule/job-log-progress.tsx");
+const GLOBAL_CSS = path.join(PROJECT, "frontend/src/global.css");
 const API_TS = path.join(PROJECT, "frontend/src/lib/api.ts");
 
 const MUTATE = process.env.SCHEDULE_MUTATE || "";
@@ -77,9 +86,33 @@ const RESERVED = {
   // （中文名丢掉）—— 这正是用户报的「调用目标需要配置中文名称」那个缺口，
   // 缺了就只剩 `system.queue_record_cleanup` 这种裸键。
   detailtarget: `                    <Text>{targetNames[jobKey] ?? "-"}</Text>\n                    <Text code type="secondary" style={{ fontSize: 12 }}>`,
+  // 2026-09-27 反向变异：失败时退回 antd `exception` 态（百分比文字被 ✗ 图标顶掉
+  // ⇒ 用户看不到「已执行的进度比例」，正是本轮要修的那件事）
+  progresskeep: `strokeColor={record.status === "failed" ? "#ff4d4f" : undefined}`,
+  // 2026-09-28 反向变异：比例未知的**不定量进度条**退回「进行中」文字
+  // （用户口径「任务进度列应展示任务进度条，而不是文本进行中」原样复活）。
+  // ⚠️ 同日第三轮换锚点：不定量条已从「满格 `percent={100}`」改成**滑动色块**，
+  //    实现在 `job-log-progress.tsx`（唯一实现）—— 锚点跟着搬到那个类名上。
+  progressbar: `className="log-progress-unknown"`,
+  // 2026-09-28（同日第三轮，用户实测报障）反向变异：比例未知时**退回满格条冒充 100%**
+  // —— 满格条与「100% 完成」视觉同形，用户看到「任务刚开跑进度条就 100%、点详情 0%」
+  //   正是这么来的（设计 13 §43 的 D1）。
+  fakefull: `    const height = size === "small" ? 6 : 8;`,
+  // 2026-09-28 反向变异：**未知判据失效**（恒不未知）⇒ 后端还没上报的那段时间
+  // 被谎报成 0% 进度条 —— 0% 会被读成卡死，是 2026-09-27 用户反复取消同步的诱因
+  // （设计 13 §35.18.6：未知与 0% 是两件事）。
+  unknownzero: `  return log.status === "running" && !log.progress;`,
+  // 2026-09-28 反向变异：详情弹窗**不再共用唯一实现**（退回自己读 `log.progress`）
+  // ⇒ 同一行数据在列表与弹窗里又变成两个读数（用户报障的原形态）。
+  tworeads: `                <JobLogProgress log={log} size="default" maxWidth={220} />`,
+  // 2026-09-28 反向变异：列表列**绕开唯一实现自绘进度条** ⇒ 两处呈现又会各说各话。
+  pageread: `          <JobLogProgress log={record} />`,
   // DEF-066 反向变异：账号多选退回「仅编辑态」⇒ 新建态又没有账号多选了
   // （手抄 account_ids 过不了归属校验 ⇒ 用户建不出账号维度任务）
   accountscope: `(job?.params_editable ?? selectedTarget.params_editable)?.includes("account_ids")`,
+  // 2026-09-27 反向变异：「执行账号」退回**只看 `params.account_ids`**（丢掉定向执行快照）
+  // ⇒ 账号卡点「同步笔记」后，执行详情又显示「全部账号」（用户报障原样复活）
+  accountlabel: `                {targetAccountId !== null ? (`,
 };
 
 const MUTATE_TO = {
@@ -99,8 +132,23 @@ const MUTATE_TO = {
   groupsnapshot: `                <Descriptions.Item label="分组">{String(snapshot.job_group ?? "")}</Descriptions.Item>\n                <Descriptions.Item label="调用目标">`,
   // 用户口径（2026-09-25）反向变异：弹窗调用目标退回单行代码键
   detailtarget: `                    <Text code type="secondary" style={{ fontSize: 12 }}>`,
+  progresskeep: `status={record.status === "failed" ? "exception" : "normal"}`,
+  // 2026-09-28 反向变异：不定量滑动条退回「进行中」文字（进度条整条消失）
+  progressbar: `className="log-progress-text"`,
+  // 2026-09-28 反向变异：未知比例退回满格条冒充 100%
+  fakefull: `    return <Progress percent={100} showInfo={false} size={size} status="active" />;
+    const height = size === "small" ? 6 : 8;`,
+  // 2026-09-28 反向变异：未知判据失效（永远不认为「未知」）
+  unknownzero: `  return false;`,
+  // 2026-09-28 反向变异：详情弹窗退回自绘进度条（直读 log.progress）
+  tworeads: `                <Progress percent={Math.max(0, Math.min(100, log.progress ?? 0))} size="small" style={{ maxWidth: 220 }} />`,
+  // 2026-09-28 反向变异：列表列退回自绘进度条
+  pageread: `          <Progress percent={record.progress ?? 0} size="small" />`,
   // DEF-066 反向变异：账号多选退回编辑态专属（新建态丢失多选）
   accountscope: `job?.params_editable?.includes("account_ids")`,
+  // 2026-09-27 反向变异：「执行账号」分支条件退回只看 `params.account_ids`
+  // （= 又去读 job 行的任务配置「空 = 全部账号」）
+  accountlabel: `                {accountIds !== null ? (`,
 };
 
 let failures = 0;
@@ -130,30 +178,33 @@ const RESERVED_FILE = {
   groupfield: MODULE_TS,
   groupsnapshot: DETAIL_TSX,
   detailtarget: DETAIL_TSX,
+  progresskeep: PAGE_TSX,
+  progressbar: PROGRESS_TSX,
+  fakefull: PROGRESS_TSX,
+  unknownzero: PROGRESS_TSX,
+  tworeads: DETAIL_TSX,
+  pageread: PAGE_TSX,
   accountscope: path.join(PROJECT, "frontend/src/components/schedule/job-form-modal.tsx"),
+  accountlabel: DETAIL_TSX,
 };
 
-// 页面源码不参与 esbuild 打包（用 fs 读原文做结构断言）⇒ 页面侧变异单独改文件。
-// ⚠️ 必须**就地改、跑完还原**，否则变异会污染工作区（返回前无条件复原）。
-const pageMutations = [];
-function applyPageMutation() {
-  if (!MUTATE) return;
-  const targetFile = RESERVED_FILE[MUTATE];
-  // 只处理「不参与 esbuild 打包」的文件（页面 / 弹窗）；模块侧交给插件
-  if (!targetFile || targetFile === MODULE_TS || targetFile === CRON_MODULE_TS) return;
-  const original = fs.readFileSync(targetFile, "utf8");
+// 页面 / 弹窗源码一律经本函数读取 —— 变异**作用在内存字符串上，不碰磁盘**。
+// ⚠️ 原实现是「就地改写文件、跑完在 finally 里还原」：`-n auto` 下正向用例（读同一文件
+//    做结构断言）会读到「已被改坏、还没还原」的内容 —— 2026-09-27 实测
+//    `R22 日志详情弹窗不再取 snapshot.job_group` 随机变红，而单跑脚本 / `-n0` 全绿。
+//    模块侧本来就是这个语义（`mutatePlugin` 在 onLoad 里替换），这里拉齐：变异不再污染
+//    工作区，也不再与任何并行用例抢同一个文件。
+function readSource(file) {
+  const source = fs.readFileSync(file, "utf8");
+  if (!MUTATE || RESERVED_FILE[MUTATE] !== file || !RESERVED[MUTATE]) return source;
   // ⚠️ 源码是 CRLF ⇒ 锚点（含 \n）必须先归一化再比对，否则永远「found 不到」
   //    （曾在 targetcol 上复现：锚点肉眼一致却报 anchor not found）。
-  const normalized = original.replace(/\r\n/g, "\n");
+  const normalized = source.replace(/\r\n/g, "\n");
   if (!normalized.includes(RESERVED[MUTATE])) {
-    console.log(`FAIL mutate anchor not found: ${MUTATE} in ${path.basename(targetFile)}`);
+    console.log(`FAIL mutate anchor not found: ${MUTATE} in ${path.basename(file)}`);
     process.exit(1);
   }
-  fs.writeFileSync(targetFile, normalized.replace(RESERVED[MUTATE], MUTATE_TO[MUTATE]));
-  pageMutations.push(() => fs.writeFileSync(targetFile, original));
-}
-function restorePageMutations() {
-  while (pageMutations.length) pageMutations.pop()();
+  return normalized.replace(RESERVED[MUTATE], MUTATE_TO[MUTATE]);
 }
 
 function mutatePlugin(targetFile) {
@@ -176,8 +227,8 @@ function mutatePlugin(targetFile) {
 }
 
 async function main() {
-  applyPageMutation(); // 页面侧变异（跑完在 finally 里无条件还原）
-  try {
+  // 页面侧变异已改为「读时内存变异」（见 `readSource`）—— 不再就地改文件，
+  // 因此没有「跑完还原」这一步，`try/finally` 一并撤掉。
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "schedule-center-"));
   const bundled = await esbuild.build({
     entryPoints: [MODULE_TS],
@@ -284,7 +335,7 @@ async function main() {
   // --------------------------------------------------------------- //
   // 3. 页面结构（真实源文件）
   // --------------------------------------------------------------- //
-  const page = fs.readFileSync(PAGE_TSX, "utf8");
+  const page = readSource(PAGE_TSX);
   // 剥注释后的页面源码：`in source` 型断言一律用它（DEF-056 教训：解释性注释会
   // 命中自己写的关键词）。定义在此处，供第 3 / 6 / 9 节共用。
   const pageCode = page.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
@@ -319,9 +370,8 @@ async function main() {
   // --------------------------------------------------------------- //
   // 4. 任务类型选择器（R14：三档 = 手动执行 / Cron 周期 / 定时一次）
   // --------------------------------------------------------------- //
-  const fields = fs.readFileSync(
-    path.join(PROJECT, "frontend/src/components/schedule/schedule-fields.tsx"),
-    "utf8"
+  const fields = readSource(
+    path.join(PROJECT, "frontend/src/components/schedule/schedule-fields.tsx")
   );
   // R15/R16：三档文案不再硬编码在表单里 —— 改判「走同源表」（见第 8 节）
   check("任务类型选择器三档齐全（manual/cron/at）", fields.includes('value="manual"') && fields.includes('value="cron"') && fields.includes('value="at"'));
@@ -336,9 +386,8 @@ async function main() {
   // --------------------------------------------------------------- //
   // 5. 自定义参数：账号多选（用户 2026-09-24 口径，白名单驱动）
   // --------------------------------------------------------------- //
-  const form = fs.readFileSync(
-    path.join(PROJECT, "frontend/src/components/schedule/job-form-modal.tsx"),
-    "utf8"
+  const form = readSource(
+    path.join(PROJECT, "frontend/src/components/schedule/job-form-modal.tsx")
   );
   // DEF-066：账号多选按 params_editable 驱动，且**建 / 改同款**（原 `job?.params_editable`
   // 仅在编辑态出现 ⇒ 新建态只能手抄 JSON，归属校验上线后必然 400，控件必须跟上）
@@ -367,15 +416,69 @@ async function main() {
   //    其余信息全在详情弹窗。
   // --------------------------------------------------------------- //
   const logSection = page.slice(page.indexOf("const logColumns"), page.indexOf("const jobKeyOptions"));
+  // 剥注释后的同一段（`in source` 型断言一律用它 —— DEF-056：解释性注释会命中自己
+  // 写下的关键词；本轮注释里就出现了「进行中」三个字）
+  const logSectionCode = pageCode.slice(
+    pageCode.indexOf("const logColumns"),
+    pageCode.indexOf("const jobKeyOptions")
+  );
+  // 进度条的唯一实现（2026-09-28 同日第三轮抽出，设计 13 §43）：列表列与详情弹窗共用，
+  // 断言要在两个位置引用它 ⇒ 提前读，避免 TDZ。
+  const progress = readSource(PROGRESS_TSX);
+  const progressCode = progress.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  const css = readSource(GLOBAL_CSS);
   check("日志表有「任务名称」列", logSection.includes('title: "任务名称"'));
   check("日志表有「任务类型」列（快照口径）", logSection.includes('title: "任务类型"') && logSection.includes("job_trigger_type"));
   check("日志表有「状态」列", logSection.includes('title: "状态"'));
   check("日志表有「触发方式」列", logSection.includes('title: "触发方式"'));
   check("日志表有「开始执行时间」列", logSection.includes('title: "开始执行时间"'));
-  // R13：一列合并「任务进度 + 耗时或异常」，进度用 Progress 进度条渲染
+  // R13：一列合并「任务进度 + 耗时或异常」，进度用进度条渲染（**经唯一实现**）
   check("日志表有「任务进度」列", logSection.includes('title: "任务进度"'));
-  check("任务进度用 Progress 进度条渲染", logSection.includes("<Progress") && logSection.includes("percent={"));
+  check(
+    "任务进度经唯一实现渲染（列内不再自绘 Progress）",
+    logSectionCode.includes("<JobLogProgress") && !logSectionCode.includes("<Progress")
+  );
   check("失败显异常 / 成功显耗时", logSection.includes("exception_info") && logSection.includes("duration_ms"));
+  // 2026-09-27 用户口径「已执行的进度百分比保留」：失败**不切** antd `exception` 态
+  // （该态会把百分比文字换成 ✗ 图标 ⇒ 用户看不到「跑到多少了」），红色改由 strokeColor 表达。
+  // ⚠️ 该渲染已随唯一实现搬进 `job-log-progress.tsx` ⇒ 断言改读那个文件（意图不变）。
+  check(
+    "失败保留百分比：不切 antd exception 态",
+    progressCode.includes('strokeColor={log.status === "failed"') &&
+      !progressCode.includes('status={log.status === "failed"')
+  );
+  check(
+    "失败语义由红色进度条 + 红色原因行表达",
+    progressCode.includes("#ff4d4f") && logSection.includes("exception_info")
+  );
+  // 2026-09-28 用户口径「任务日志列表的任务进度列应展示任务进度条，而不是文本进行中」：
+  // 该列**任何状态**都必须是进度条。⚠️ **同日第三轮**（用户实测报障「任务进度列的进度条
+  // 自动达到了 100% 但是此时任务刚刚开始，点击查看详情发现详情弹窗中进度条 0%」）：
+  // 进度条的渲染**抽成唯一实现** `JobLogProgress`（比例已知 / 未知两态都在里面），
+  // 列表列与详情弹窗**共用** ⇒ 同一行不可能再出现两个读数；「比例未知」渲染
+  // **不定量滑动条**（**没有固定填充比例**），不再拿满格条冒充 100%（设计 13 §43）。
+  check("进度条有唯一实现（JobLogProgress）", progressCode.includes("export function JobLogProgress"));
+  check(
+    "列表列改用唯一实现（不再自绘进度条）",
+    logSectionCode.includes("<JobLogProgress log={record} />") && !logSectionCode.includes("<Progress")
+  );
+  check(
+    "比例未知的分支条件是「在跑且未上报进度」",
+    progressCode.includes('log.status === "running" && !log.progress')
+  );
+  check(
+    "比例未知渲染不定量滑动条（不是满格条）",
+    progressCode.includes('className="log-progress-unknown"')
+  );
+  check("满格条冒充已作废（不许 percent={100}）", !progressCode.includes("percent={100}"));
+  check("不定量条不显百分比数字（无 showInfo）", !progressCode.includes("showInfo"));
+  check(
+    "不定量条真有滑动动画（组件类名与 global.css 对得上）",
+    css.includes(".log-progress-unknown-bar") &&
+      css.includes("@keyframes log-progress-unknown-slide") &&
+      progressCode.includes('className="log-progress-unknown-bar"')
+  );
+  check("进度列不再有「进行中」文字回落", !logSectionCode.includes("进行中"));
   // 已移出列表的列（全部进详情弹窗）
   check("日志表不再单列「触发器」", !logSection.includes('title: "触发器"'));
   check("日志表不再单列「错过策略」", !logSection.includes('title: "错过策略"'));
@@ -384,13 +487,34 @@ async function main() {
   check("日志表不再单列「异常」", !logSection.includes('title: "异常"'));
   // 日志详情弹窗（配置快照 + 明细 + 被移出列表的字段都在这里）
   check("日志表有「详情」操作", page.includes("setDetailLog"));
-  const detail = fs.readFileSync(
-    path.join(PROJECT, "frontend/src/components/schedule/job-log-detail-modal.tsx"),
-    "utf8"
+  const detail = readSource(
+    path.join(PROJECT, "frontend/src/components/schedule/job-log-detail-modal.tsx")
   );
   check("日志详情弹窗展示配置快照", detail.includes("config_snapshot"));
-  check("日志详情弹窗展示任务进度", detail.includes("<Progress") && detail.includes("log.progress"));
+  // 2026-09-28（同日第三轮）：弹窗的进度条**必须与列表列共用唯一实现** ——
+  // 旧实现自己读 `log.progress ?? 0`，于是「在跑且后端还没上报」时弹窗画 0%、
+  // 列表列画满格条（看起来 100%）⇒ 同一行两个相反读数（用户实测报障）。
+  check(
+    "日志详情弹窗的进度条与列表列同源（共用 JobLogProgress）",
+    detail.includes("<JobLogProgress log={log}") && !detail.includes("<Progress")
+  );
   check("日志详情弹窗含触发器/错过策略/并发", detail.includes("triggerSummary") && detail.includes("misfirePolicyLabel") && detail.includes("concurrentLabel"));
+  // 2026-09-27 用户口径「账号信息卡点同步笔记，执行详情的执行账号依旧展示的是全部账号，
+  // 执行账号应是当前账号信息卡的店铺」：定向执行（账号卡按钮）的那条日志带
+  // `params_override` ⇒ 显示**那一个账号的名称**；定时 / 手动「执行一次」的日志没有
+  // 这一层 ⇒ 仍按任务配置显示「全部账号 / N 个账号」。
+  check(
+    "执行账号优先取定向执行的账号快照（params_override）",
+    detail.includes("params_override") &&
+      detail.includes("targetAccountId") &&
+      detail.includes("account_name")
+  );
+  check(
+    "定向执行分支在前、「全部账号」只作回落",
+    detail.indexOf("targetAccountId !== null ?") > -1 &&
+      detail.indexOf("targetAccountId !== null ?") < detail.indexOf('"全部账号"')
+  );
+  check("账号名称缺失回落「1 个账号」（不猜名字）", detail.includes('targetAccountName || "1 个账号"'));
 
   // --------------------------------------------------------------- //
   // 8. R16（2026-09-24 用户口径）：任务类型**不用 Tag**，纯文本渲染；
@@ -515,13 +639,9 @@ async function main() {
     return;
   }
   console.log("\nAll checks PASS");
-  } finally {
-    restorePageMutations(); // 页面侧变异**无条件**还原（含异常路径）
-  }
 }
 
 main().catch((error) => {
-  restorePageMutations();
   console.error(error);
   process.exit(1);
 });

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -10,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user
-from backend.app.core.roles import DEFAULT_ROLE, normalize_role
+from backend.app.core.roles import normalize_role
 from backend.app.core.security import create_access_token, create_refresh_token, decode_token, hash_password, verify_password
 from backend.app.models import User
 
@@ -28,22 +27,12 @@ class RefreshRequest(BaseModel):
     refresh_token: str = Field(min_length=1)
 
 
-class UserResponse(BaseModel):
-    id: int
-    username: str
-    # T-104: 前端据此决定是否显示/启用「全局系统设置」入口。
-    # 注意这是**提示性**信息，真正的权限判定一律在后端 require_admin 处。
-    role: str = DEFAULT_ROLE
-
-
-class TokenResponse(BaseModel):
-    access_token: str
-    refresh_token: Optional[str] = None
-    token_type: str = "bearer"
-    user: Optional[UserResponse] = None
-
-
 def _serialize_user(user: User) -> dict:
+    """用户对象的响应形状（注册 / 登录 / 刷新三处共用）。
+
+    T-104：`role` 供前端决定是否显示/启用「全局系统设置」入口。注意这是
+    **提示性**信息，真正的权限判定一律在后端 `require_admin` 处。
+    """
     return {"id": user.id, "username": user.username, "role": normalize_role(user.role)}
 
 
@@ -89,6 +78,17 @@ def register(
         if scheduler is not None and scheduler.running:
             for job in created:
                 sync_job_registration(scheduler, job)
+
+    # 设计 10 §7.3（2026-09-27）：运行时配置行同样**按用户各持一份** ⇒ 注册即播种，
+    # 新用户打开设置页就看得见基线（启动播种只覆盖「启动时已存在的用户」）。
+    try:
+        from backend.app.services.settings_service import seed_settings_for_user
+
+        seed_settings_for_user(db, user.id)
+        db.commit()
+    except Exception as exc:  # noqa: BLE001 - 注册不被子系统问题拖死
+        db.rollback()
+        logger.warning("register: seed runtime settings for user %s failed: %s", user.id, exc)
 
     return _token_response(user)
 

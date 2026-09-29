@@ -290,8 +290,14 @@ def test_generate_save_enqueues_and_worker_creates_note(gen_env, db_factory):
         assert note.raw_json["aigc"]["sku_id"] == SKU_ID
         assets = db.scalars(select(NoteAsset).where(NoteAsset.note_id == note.id)).all()
         assert len(assets) == 2
-        rels = db.scalars(select(NoteGoods).where(NoteGoods.note_id == note.id)).all()
+        # §26.7：关系行按**平台 ID** 落（本地生成笔记的 note_id 是 `local_…` 合成 ID）
+        rels = db.scalars(
+            select(NoteGoods).where(
+                NoteGoods.user_id == note.user_id, NoteGoods.note_id == note.note_id
+            )
+        ).all()
         assert len(rels) == 1
+        assert rels[0].item_id == ITEM_ID
         topic_names = db.scalars(
             select(Topic.name)
             .join(NoteTopic, NoteTopic.topic_id == Topic.id)

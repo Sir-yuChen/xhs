@@ -2,8 +2,8 @@
 
 > - **阶段**：二 · 设计
 > - **访问端**：HTTP API 消费方（Web 前端、第三方脚本、上层 Agent 工具链）
-> - **规模**：23 个 router / **187 个端点**（`create_app()` 后 OpenAPI 实测 `operations = 187`；path 条数 163；2026-09-26 §35.12⑤ 手动清理：+2 端点 `POST /tasks/clean` / `POST /tasks/clean-all` ⇒ 185→187 / 161→163（当时漏记，本轮 §35.13 逐域回数补上）；2026-09-26 §35.13 批次层回归 + 批次号查询：`GET /tasks?tree=1&batch_no=…`（同一 path，无新端点）；2026-09-25 §31.10 商品生成走队列：+1 端点 `GET /xhs/product-notes/generate-queue`（生成进度卡，快照键名 `generated` 不是底座通用的 `synced`）⇒ 184→185 / 160→161；2026-09-25 §35.11 队列记录页：+1 端点 `GET /tasks/queues`（队列清单 + 实时计数，注册表 `QUEUE_REGISTRY` 驱动）⇒ 183→184 / 159→160；2026-09-25 §35 批量同步：+2 端点 `POST /notes/batch-sync` 与 `GET /notes/sync-queue`（同步进度卡，`sync-queue` 路由必须注册在 `/{note_id}` 之前）；2026-09-25 §31.5 发布异步化：+1 端点 `GET /notes/publish-queue`（发布进度卡，路由必须注册在 `/{note_id}` 之前）；2026-09-24 设计 15：+12 `/api/schedule`、−1 `/tasks/scheduler/status`；2026-09-23 §18.15 再校：+1 端点 `POST /xhs/login-sessions/qianfan/email-login`（千帆邮箱密码登录）；**2026-09-23 五校（设计 13 §33.10 商品列表 v1.36：+1 端点 `POST /xhs/qianfan/items/delete`）**。此前 2026-09-23 再校（设计 13 §31 商品笔记生成与发布：+4 端点）。其中 2026-09-19 起新增千帆 8 端点 + 商品笔记 1 端点，2026-09-21 新增账号登录态 1 端点，2026-09-22 新增内容库发布状态 1 端点、单条同步 1 端点，**移除独立对账 2 端点**（对账融合进同步，设计 13 §27）、话题增删 1 端点（设计 13 §29））
-> - **版本**：v1.17 · 2026-09-22（**数据对账**（设计 13 §24）：新增 `POST /api/accounts/{id}/notes/reconcile` 与 `POST /api/xhs/qianfan/reconcile-shop-goods`；对账范围与同步条件同源（`scope`/`start_date`/`end_date`），本地多出的行**打状态标记不删** ⇒ 端点 160 → **162**、path 140 → **142**）。v1.16 · 2026-09-22（**内容库正文与图集补齐 + 来源账号**（设计 13 §19.13 / 设计 04 §2.12）：`GET /notes/{id}` 新增查询参数 **`hydrate`**（`true` = 先对本条做一次详情补齐再返回，**不新增端点**）；`_serialize_note` 增字段 **`account_name`**（来源账号，列表/详情/导出三处一致，查不到留空串）。端点 **160** / path **140** / 请求函数 **137** 均不变）。v1.15 · 2026-09-22（**内容库「是否发布过」标识**（设计 12 §22 / 设计 04 §2.12 / 设计 13 §19.12）：`GET /notes` 加三态 `published` 过滤 + **全库口径** `stats{published,unpublished}`；新增 **`PATCH /api/notes/{id}/published`**（手动切换）⇒ 端点 159 → **160**、path 139 → **140**）。v1.14 · 2026-09-21（**新增 `POST /api/accounts/{account_id}/login-state`**（设计 13 §18）：端点 156 → **156**、path 135 → **136**；`GET /api/accounts` 每项新增 `login_channels` 字段（**不新增端点，随列表下发**））。v1.13 · 2026-09-21（**「规模」行按实测回数**：router 21 → **22**、端点 147 → **156**、path 127 → **135**；与 `AGENTS.md` §5 同口径，漂移会被 `verify_doc_counts.py` 拦下）。v1.12 · 2026-09-21（`POST /xhs/qianfan/shops` 的 `account_count` / `accounts[]` 明确**只数当前租户下账号未软删的绑定**，DEF-054/055）。v1.11 · 2026-09-19（v1.11 T-401/403/405 新增 `xhs/product-notes/generate` → 147 operations / 127 paths；v1.10 T-32 新增 `qianfan/shops`；v1.9 商品映射改**按需补齐**）
+> - **规模**：24 个 router / **191 个端点**（`create_app()` 后 OpenAPI 实测 `operations = 191`；path 条数 164；2026-09-28 §19.13.9 删 1 端点 `GET /api/xhs/creator/published`（与 `POST /api/xhs/pc/users/notes` 数据 100% 重复 + 唯一「翻到底」读端点）⇒ 192→191 / 165→164；2026-09-27 **运行时配置中心**（设计 10 §7）：+5 端点 `GET` / `POST /api/settings` 与 `GET` / `PUT` / `DELETE /api/settings/{key}`（占 2 条 path；设置页的列表 + 增删改查）⇒ 187→192 / 163→165；2026-09-27 §35.18 **补齐详情并入同步笔记**：删 2 端点 `POST /accounts/{account_id}/notes/hydrate-pending` 与 `GET /notes/hydrate-queue`（`note_hydrate` 队列整条移除；补齐改由同步任务收尾内联做）⇒ 189→187 / 165→163；2026-09-27 §35.15 **详情补齐队列**：+2 端点 `POST /accounts/{account_id}/notes/hydrate-pending`（账号级，缺正文 / 缺资产笔记**全量入队**，www 会话硬门禁）与 `GET /notes/hydrate-queue`（补齐进度卡数据源，路由必须注册在 `/{note_id}` 之前）⇒ 187→189 / 163→165；2026-09-26 §35.12⑤ 手动清理：+2 端点 `POST /tasks/clean` / `POST /tasks/clean-all` ⇒ 185→187 / 161→163（当时漏记，本轮 §35.13 逐域回数补上）；2026-09-26 §35.13 批次层回归 + 批次号查询：`GET /tasks?tree=1&batch_no=…`（同一 path，无新端点）；2026-09-25 §31.10 商品生成走队列：+1 端点 `GET /xhs/product-notes/generate-queue`（生成进度卡，快照键名 `generated` 不是底座通用的 `synced`）⇒ 184→185 / 160→161；2026-09-25 §35.11 队列记录页：+1 端点 `GET /tasks/queues`（队列清单 + 实时计数，注册表 `QUEUE_REGISTRY` 驱动）⇒ 183→184 / 159→160；2026-09-25 §35 批量同步：+2 端点 `POST /notes/batch-sync` 与 `GET /notes/sync-queue`（同步进度卡，`sync-queue` 路由必须注册在 `/{note_id}` 之前）；2026-09-25 §31.5 发布异步化：+1 端点 `GET /notes/publish-queue`（发布进度卡，路由必须注册在 `/{note_id}` 之前）；2026-09-24 设计 15：+12 `/api/schedule`、−1 `/tasks/scheduler/status`；2026-09-23 §18.15 再校：+1 端点 `POST /xhs/login-sessions/qianfan/email-login`（千帆邮箱密码登录）；**2026-09-23 五校（设计 13 §33.10 商品列表 v1.36：+1 端点 `POST /xhs/qianfan/items/delete`）**。此前 2026-09-23 再校（设计 13 §31 商品笔记生成与发布：+4 端点）。其中 2026-09-19 起新增千帆 8 端点 + 商品笔记 1 端点，2026-09-21 新增账号登录态 1 端点，2026-09-22 新增内容库发布状态 1 端点、单条同步 1 端点，**移除独立对账 2 端点**（对账融合进同步，设计 13 §27）、话题增删 1 端点（设计 13 §29））
+> - **版本**：v1.20 · 2026-09-27（**运行时配置中心**（设计 10 §7）：新增 `GET` / `POST /api/settings` 与 `GET` / `PUT` / `DELETE /api/settings/{key}` —— 设置页的**列表 + 增删改查**；行按 `(user_id, key)` 唯一（越权一律 404）、删 = **回落**（响应回 `effective_value`）、请求体 `extra="forbid"`；`is_live` 由后端白名单 `settings_service.LIVE_KEYS` **派生**（没有运行时读点的键显式标「仅存档」，不许让用户以为改了有用）。**写后立即失效进程内缓存**（设计 10 §5.1 的 **P-3** 在此结清）⇒ 「页面实时配置」不是文案而是判据。同轮：限流额度**去硬编码**（`get_rate_limiter()` 不再传构造参数，改读运行时配置，见 **DEF-076**）⇒ 端点 187 → **192**、path 163 → **165**、请求函数 163 → **168**；数据表 28 → **29**（`system_settings`，迁移 `h9i0j1k2l3m4`）。v1.19 · 2026-09-27（**补齐详情并入同步笔记**（设计 13 §35.18）：删 `POST /api/accounts/{account_id}/notes/hydrate-pending` 与 `GET /api/notes/hydrate-queue`，`note_hydrate` 队列整条移除；「同步笔记」任务收尾改为对**该账号全部待补笔记**内联补齐（`_hydrate_account_pending`，与页内联共用 `_hydrate_note_rows` 一把尺子），任务行新增进度键 `detail_done` / `detail_total`（进度泵优先读它）⇒ 端点 189 → **187**、path 165 → **163**、请求函数 166 → **163**（−`hydratePendingNotes` / `fetchHydrateQueue` / `fetchAccountTasks`）；数据表仍 **28**；同期任务中心**移除「账号级任务」页签**（账号卡两个按钮的 `trigger_type=manual` 日志本来就落在「任务日志」）。v1.18 · 2026-09-27（**详情补齐队列**（设计 13 §35.15）：新增 `POST /api/accounts/{account_id}/notes/hydrate-pending`（账号级，缺正文 / 缺资产笔记全量入队）与 `GET /api/notes/hydrate-queue`（补齐进度卡）；修「账号卡同步走增量 ⇒ 早停 ⇒ 历史欠账正文永远补不到」—— 与详情弹窗「同步」同源（执行体复用 `sync_note_from_platform`）⇒ 端点 187 → **189**、path 163 → **165**、请求函数 163 → **166**（详情补齐 +2、**§35.16 账号级任务视图 +1** `fetchAccountTasks`）；数据表仍 **28**；同期 §35.16 账号级任务统一底座：`GET /tasks` 新增查询参数 `task_types`（同 path，**无新端点**，账号级任务可见 + 串行 + 续跑））。v1.17 · 2026-09-22（**数据对账**（设计 13 §24）：新增 `POST /api/accounts/{id}/notes/reconcile` 与 `POST /api/xhs/qianfan/reconcile-shop-goods`；对账范围与同步条件同源（`scope`/`start_date`/`end_date`），本地多出的行**打状态标记不删** ⇒ 端点 160 → **162**、path 140 → **142**）。v1.16 · 2026-09-22（**内容库正文与图集补齐 + 来源账号**（设计 13 §19.13 / 设计 04 §2.12）：`GET /notes/{id}` 新增查询参数 **`hydrate`**（`true` = 先对本条做一次详情补齐再返回，**不新增端点**）；`_serialize_note` 增字段 **`account_name`**（来源账号，列表/详情/导出三处一致，查不到留空串）。端点 **160** / path **140** / 请求函数 **137** 均不变）。v1.15 · 2026-09-22（**内容库「是否发布过」标识**（设计 12 §22 / 设计 04 §2.12 / 设计 13 §19.12）：`GET /notes` 加三态 `published` 过滤 + **全库口径** `stats{published,unpublished}`；新增 **`PATCH /api/notes/{id}/published`**（手动切换）⇒ 端点 159 → **160**、path 139 → **140**）。v1.14 · 2026-09-21（**新增 `POST /api/accounts/{account_id}/login-state`**（设计 13 §18）：端点 156 → **156**、path 135 → **136**；`GET /api/accounts` 每项新增 `login_channels` 字段（**不新增端点，随列表下发**））。v1.13 · 2026-09-21（**「规模」行按实测回数**：router 21 → **22**、端点 147 → **156**、path 127 → **135**；与 `AGENTS.md` §5 同口径，漂移会被 `verify_doc_counts.py` 拦下）。v1.12 · 2026-09-21（`POST /xhs/qianfan/shops` 的 `account_count` / `accounts[]` 明确**只数当前租户下账号未软删的绑定**，DEF-054/055）。v1.11 · 2026-09-19（v1.11 T-401/403/405 新增 `xhs/product-notes/generate` → 147 operations / 127 paths；v1.10 T-32 新增 `qianfan/shops`；v1.9 商品映射改**按需补齐**）
 
 ---
 
@@ -98,7 +98,7 @@
 
 | GET | `/api/platforms` | 返回平台注册表（6 个平台，仅 xhs `enabled=true`） |
 
-### 2.3 `accounts`（7）
+### 2.3 `accounts`（8）
 
 | 方法 | 路径 | 说明 | 备注 |
 |---|---|---|---|
@@ -108,6 +108,7 @@
 | POST | `/api/accounts/{id}/login-state` | **账号维度登录态**（三层判据）。body `{probe: bool = false}` | ✅ **2026-09-21 新增**（设计 13 §18.11）。`probe=false` = 纯本地零请求；`probe=true` 对**已确认是登录态**的通道各发 1 次**只读**探针（www → `/v2/user/me`；ark → `/api/edith/seller/info/v2`）。响应 = `{channels: {www, ark}, checked_at}`；每个通道给 `{state, reason, probed, label}`，`state ∈ missing/guest/valid/expired/unknown`。**⚠️ `unknown` 绝不渲染成 `expired`**（探针「没问到」≠「平台拒绝」，DEF-057 同型红线） |
 | POST | `/api/accounts/{id}/metrics` | **账号级互动数据同步**（粉丝 / 关注 / 获赞与收藏） | ✅ **2026-09-18 新增**；响应 = `serialize_account()` + `metrics_reason`，与 `/check` 同构 |
 | DELETE | `/api/accounts/{id}` | 删除账号 | — |
+| ~~POST~~ | ~~`/api/accounts/{account_id}/notes/hydrate-pending`~~ | ~~**补齐待补详情**（2026-09-27 新增，设计 13 §35.15）：把本账号**缺正文 / 缺图集资产**的笔记**全量**入补齐队列（`_needs_hydration` 挑候选，**不设批量上限**）。www 会话缺失 ⇒ 400 **`WEB_SESSION_REQUIRED`**；成功 = `{total, started, already_queued}`。执行体复用 `sync_note_from_platform`~~ —— **已被 2026-09-27 的 §35.18 删除**（原句保留）：补齐并入「同步笔记」任务收尾（`_hydrate_account_pending`），不再有独立按钮 / 独立队列 | ❌ 已删除 |
 
 > **`/metrics` 取数口径（2026-09-18 真机实测确立，禁止在别处另写一套）**：
 > ① 按 **Cookie 能力**路由（`web_session` 是否存在），**不看 `sub_type`**；
@@ -134,13 +135,14 @@
 
 > 设计要点：会话临时态（`qr_id` / `code` / 临时 Cookie）**加密落库**，轮询驱动状态机 `pending → scanned → confirmed`。成功后 upsert `platform_accounts` 并按 `external_user_id` 匹配。千帆邮箱密码登录**不建会话行**（无中间态），凭据只在当次请求内存里。
 
-### 2.5 `notes`（13）
+### 2.5 `notes`（14）
 
 内容库 CRUD + 批量 + 导出 + 评论。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/notes/ids` | 已保存笔记 ID 集合（用于发现页打标） |
+| ~~GET~~ | ~~`/api/notes/hydrate-queue`~~ | ~~**补齐队列快照**（2026-09-27 新增，设计 13 §35.15）~~ —— **已被 2026-09-27 的 §35.18 删除**（原句保留）：账号卡「补齐详情」入口摘掉、补齐并入「同步笔记」任务本身 ⇒ 没有入口的队列快照端点留着只会让人以为这条链路还在跑 |
 | GET | `/api/notes` | 列表（筛选/分页）。**2026-09-22 新增**查询参数 `published`（不传/`true`/`false` 三态）+ 响应体增补 `stats`；**2026-09-23 改**（设计 13 §32.3.3）：`published` 参数**删除**，改 `publish_status`（`all`/`pending`/`published`/`failed` **四档**，未知值 → 400 `NOTE_STATUS_UNSUPPORTED`），`stats` 改 **`{pending, published, failed}`** 三档。**同日晚些再改**（设计 13 §25.7）：新增 `platform_account_id`（来源账号，**不校验存在性**，别人的 id ⇒ 空集不 404）+ `note_type`（`synced`/`local_generated`/`local` 三档，未知值 → 400 `NOTE_TYPE_UNSUPPORTED` + `supported` 列表），两者均为**可选、不传 = 不筛**，与既有 `publish_status` 白名单同口径；`stats` 仍是**全库口径**、不随任何筛选变化 |
 | GET | `/api/notes/{id}` | 详情。**2026-09-22 新增**查询参数 `hydrate`（不传/`false` = 只读本地；`true` = 先对本条做一次详情补齐再返回）。响应体增字段 `account_name`（来源账号昵称，取不到为 `""`），`hydrate=true` 时另带 `hydrate`（`{status, reason?, content_filled?, images_added?}`） |
 | PATCH | `/api/notes/{id}/published` | ~~**切换「是否已发布过」**（2026-09-22 新增）。body `{published: bool}`~~ —— **已被 2026-09-23 的 `PATCH /api/notes/{id}/publish-status` 取代**（设计 13 §32.3.3：发布状态收敛为一个字段，旧布尔端点删除） |
@@ -193,7 +195,7 @@
   仍返回 200 + 本地现状 + `hydrate` 里如实的原因（失败三分法：取不到 ≠ 接口异常）；
 * `account_name` 在**列表、详情、导出**三处同样一致（同源 `_serialize_note`）；
   **查不到账号留空串**，前端按缺值口径整项不渲染（不写「未知」）；
-* 补齐的落库规则（正文只在空时填、图集只增不删、`hydrated_at` 三态）见设计 13 §19.14（2026-09-23 起同步链路改**页内联补齐**：本页落库后就地打详情，一次同步拿全再落库；账号级补齐队列与「每轮 cap=30 多轮收敛」已移除，取代对照表见 §19.14.1）。
+* 补齐的落库规则（正文只在空时填、图集只增不删、`hydrated_at` 三态）见设计 13 §19.14（2026-09-23 起同步链路改**页内联补齐**：本页落库后就地打详情，一次同步拿全再落库；「每轮 cap=30 多轮收敛」已移除，取代对照表见 §19.14.1）。⚠️ 原文「**账号级补齐队列…已移除**」**被 2026-09-27 设计 13 §35.15 取代**：当时移除的是**账号同步链路里的自动补齐**（会让每次同步都变慢）；§35.15 新增的是**用户显式触发的补齐队列**（只补历史欠账：`hydrated_at IS NULL` / 视频缺资产），两者不冲突 —— 自动补齐仍不做，显式补齐走 `POST /accounts/{id}/notes/hydrate-pending`。
 
 ### 2.6 `files`（7）
 
@@ -388,8 +390,8 @@ POST       /api/auto-tasks/{id}/run  ← 立即执行（走统一 runner，返�
 | `image_util` | 图片合成 / 缩放 / 格式处理 | `api/files.py` |
 | `notification_service` | 站内通知写入（Cookie 过期、任务失败） | 各调度 job |
 | `rate_limiter` | 请求限流 | 采集链路 |
-| `task_service` | ⚠️ **死模块**：`list_tasks` 返回 `sample_tasks()` 假数据，**无任何调用方** | 无 |
-| `mock_data` | ⚠️ **死模块**：5 个假数据函数，其中 3 个完全无引用 | `task_service`、`api/xhs/pc.py`（**1** 个 mock 端点，原 2 个；`/users/notes` 已于 2026-09-18 去 mock） |
+| `task_service` | ~~⚠️ **死模块**~~ ⇒ ✅ **已删除**（2026-09-28：`list_tasks` 返回假数据、无任何调用方） | — |
+| `mock_data` | ⚠️ **部分删除**（2026-09-28）：`dashboard_overview` / `sample_accounts` / `sample_model_configs` / `sample_tasks` 已删；**`sample_notes` 保留**（被 `api/xhs/pc.py` 的 mock 端点用） | `api/xhs/pc.py`（**1** 个 mock 端点，原 2 个；`/users/notes` 已于 2026-09-18 去 mock） |
 
 ### 3.1 `scheduler_service` 详细设计（自动化核心）
 
@@ -496,7 +498,7 @@ AI 改写 → 上传素材 → 发布 → 重算 next_run_at（执行后计算�
 | 3 | `POST /api/xhs/qianfan/sync-goods` | **批量补齐**商品笔记映射（可选；日常靠浏览时按需补齐） | 是（≤ `max_pages` 次） |
 | 4 | `POST /api/xhs/qianfan/unbind` | 解除绑定并清理本地映射 | **否（纯本地）** |
 | 5 | `POST /api/xhs/qianfan/items` | **商品列表**（v1.32 起查**本地台账** `shop_products`，零平台请求；搜索条件：关键词 / 状态 / 价格 / **创建时间区间** / 库存 / 销量 / **挂链笔记数**（v1.34，`note_count_op` 默认 `lt` + `note_count`，**关系表口径**，留空不筛）/ 排序（`sort_field`+`order`，服务端排；界面只放开「上架时间」，v1.34）/ 分页；**v1.36 起请求模型 `extra="forbid"`** —— 未知字段 422，不再静默丢弃，见设计 13 §33.10.1） | **否（纯本地）** |
-| 5.1 | `POST /api/xhs/qianfan/items/delete` | **批量删除本地台账行**（v1.36，设计 13 §33.10.2）：body `{platform_account_id, item_ids[]}`，**只删本店** `shop_products` 行（`note_goods` 关系行不动、平台商品不动）；空 → 400 `QIANFAN_ITEM_IDS_REQUIRED`、超 `MAX_BATCH_DELETE`（200）→ 400 `QIANFAN_ITEM_IDS_TOO_MANY`（携 `limit`）、未绑店 → 400 `QIANFAN_BINDING_REQUIRED`、越权 → 404；回 `{deleted(=rowcount), requested, item_ids}` | **否（纯本地）** |
+| 5.1 | `POST /api/xhs/qianfan/items/delete` | **批量删除本地台账行**（v1.36，设计 13 §33.10.2）：body `{platform_account_id, item_ids[]}`，**只删本店** `shop_products` 行（⚠️ 「`note_goods` 关系行不动」是 v1.36 原文，**已被 2026-09-23 用户口径推翻** ⇒ 关系行**按 `item_id` 一并删**，见设计 13 §26.7.5；平台商品不动）；空 → 400 `QIANFAN_ITEM_IDS_REQUIRED`、超 `MAX_BATCH_DELETE`（200）→ 400 `QIANFAN_ITEM_IDS_TOO_MANY`（携 `limit`）、未绑店 → 400 `QIANFAN_BINDING_REQUIRED`、越权 → 404；回 `{deleted(=rowcount), requested, item_ids}` | **否（纯本地）** |
 | 6 | `POST /api/xhs/qianfan/item-notes` | **商品 → 挂链笔记反查**（本地 `note_goods` join `notes`，带覆盖率；v1.33 起关系表源） | **否（纯本地）** |
 | 7 | `POST /api/xhs/qianfan/health-check` | **立即巡检**千帆登录态（只读探活，见设计 12 §24.3.1） | 是（1 次 `seller/info/v2`） |
 | 8 | `POST /api/xhs/qianfan/shops` | **店铺列表 + 已绑账号**（N:M 读侧，T-32；设计 12 §24.3.3）。`account_count` / `accounts[]` **只数当前用户（租户）名下的、账号未软删的绑定** —— 跨租户与软删行一律不计（v1.12 · DEF-054/055） | **否（纯本地）** |

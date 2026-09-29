@@ -18,9 +18,6 @@ TRIGGER_CRON = "cron"
 TRIGGER_AT = "at"  # 定时一次性：到 run_at 执行一次，成功后自动 completed（§3.1）
 TRIGGER_TYPES = (TRIGGER_MANUAL, TRIGGER_CRON, TRIGGER_AT)
 
-#: 会被调度器装配的触发器（manual 不在其中 —— 只能手动触发）
-SCHEDULED_TRIGGER_TYPES = (TRIGGER_CRON, TRIGGER_AT)
-
 MISFIRE_FIRE_NOW = "fire_now"  # 立即执行：积压全部补跑
 MISFIRE_ONCE = "once"  # 执行一次：积压合并补一次（默认，= APScheduler coalesce 现状）
 MISFIRE_DISCARD = "discard"  # 放弃执行：积压全丢弃
@@ -126,6 +123,18 @@ class ScheduledJobLog(Base):
     user_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("users.id"), nullable=True, index=True
     )
+    #: 执行时快照的**平台账号**（迁移 `j1k2l3m4n5o6`）：账号卡「同步中」的判据 =
+    #: 「该账号**最新一条**同步任务日志的状态」（2026-09-27 用户口径「账号信息卡的
+    #: 判断逻辑应只需要关注最新一条的同步笔记任务日志的状态即可」）—— 没有这一列就
+    #: 只能靠 `task_id` 关联，而账号卡路径上那个字段是空的（两条路都断）。
+    #: **刻意不加外键**：日志是历史快照（同 `user_id` 的理由 —— 账号删了，日志仍要
+    #: 能回答「当时是哪个账号」）。存量行为 NULL ⇒ 不参与「最新一条」候选。
+    account_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    #: 执行时快照的**业务任务号**（迁移 `k2l3m4n5o6p7`）：`run_targeted_job` 一直收得到它，
+    #: 只是此前没有列可存 ⇒ 日志与任务行只能靠「同秒启动」猜（重启重跑后 `started_at`
+    #: 差了近 2 小时，猜法直接失效）。有了它，**孤儿日志收口**才能精确回查任务行真实终态
+    #: （设计 15 §15）。不加外键：任务行被记录清理删掉后，日志仍要能回答「当时是哪次执行」。
+    task_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
     job_name: Mapped[str] = mapped_column(String(128), default="")
     job_key: Mapped[str] = mapped_column(String(128), default="")
     #: 执行时快照：任务的**触发器类型**（manual/cron/at）—— 日志按任务类型
