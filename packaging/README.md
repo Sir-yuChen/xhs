@@ -22,6 +22,48 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build.ps1 -Version
 | `-SkipInstaller` | 只出 `packaging/dist/SpiderXHS/` bundle，不调 Inno Setup |
 | `-Clean` | 先删 `packaging/{build,dist,.venv-build,node-runtime}` 全量重建 |
 
+## 正式版发布工作流（一键发版）
+
+打包只是上游；「发正式版」还要 校验 → 冒烟 → 打 tag → 建 Release 并上传安装包。
+`packaging/release.ps1` 把这七步串成一条**可重复执行**的链路：
+
+```powershell
+# 完整发版（要求工作区干净）
+powershell -NoProfile -ExecutionPolicy Bypass -File packaging\release.ps1 -Version 1.0.2
+
+# 只打包 + 冒烟，不发版
+powershell -NoProfile -ExecutionPolicy Bypass -File packaging\release.ps1 -Version 1.0.2 -SkipTag -SkipRelease
+
+# 换 tag 名 / 指定发布说明
+powershell -NoProfile -ExecutionPolicy Bypass -File packaging\release.ps1 -Version 1.0.2 `
+    -TagName v1.0.2 -ReleaseName "v1.0.2 · 正式版" -NotesFile notes.md
+```
+
+| 阶段 | 做什么 | 闸门（不过就停） |
+|---|---|---|
+| 1 预检 | 工作区是否干净、tag 是否已被占用、Python / Inno Setup 是否就绪 | **工作区脏 ⇒ 直接拒绝**（包必须对应确定提交，否则 tag 与发布物脱钩） |
+| 2 打包 | 清 `packaging/{dist,build}` + 删旧安装包 → `build.ps1 -Version` | 构建 exit≠0 |
+| 3 校验 | 产物存在且 ≥80MB、**包内 `frontend/dist/assets/index-*.js` 与源码 dist 逐名一致**、`version_info.txt` 版本号、构建自检「全部通过」且无 `[LEAK]`/`[MISSING]` | 任一不符 |
+| 4 冒烟 | `smoke-test.ps1`（静默安装 → health → openapi paths → 端口回退 → 卸载） | 冒烟非「全部通过」 |
+| 5 清残留 | 删 `.workbuddy/tmp/smoke-install` | 清理被拦只告警 |
+| 6 打 tag | 附注 tag（正文含提交号 / 体积 / sha256）+ push | tag 已存在 / push 失败 |
+| 7 发布 | `gitee_release.py`：建或复用 Release、更新说明、**同名附件 `--replace` 覆盖** | API 调用失败 |
+
+**开关**：`-SkipFrontend` `-SkipSmoke` `-SkipTag` `-SkipRelease` `-AllowDirty`
+`-Owner` `-Repo` `-Python` `-TagName` `-ReleaseName` `-NotesFile`。
+
+**三条硬口径**：
+
+1. **安装包不进 git 仓库** —— `.gitignore` 明确排除 `spider-xhs-setup-*.exe`，发布物一律走 **Release 附件**。
+   86.7MB 二进制提交进 git 会让仓库历史永久膨胀。
+2. **发布判据不看网页状态码** —— 仓库是**私有**的，未登录访问仓库页 / Release 页 / 附件直链**恒返回 403**。
+   判据用 **API 返回的 assets 列表**（`gitee_release.py` 末尾会打印附件名与下载直链）。
+3. **令牌从凭据管理器取** —— `gitee_release.py` 用 `git credential fill` 读 gitee 凭据（私人令牌），
+   全程只在内存流转、**不落盘、不回显**；取不到时才需要手工提供。
+
+> 实测（2026-09-29，v1.0.1）：构建 5m14s / 冒烟 27s / 附件替换上传 20s；
+> 包 **90,860,466 B**、sha256 `04c6c05415450156…`；冒烟 `paths: 164` 与 `AGENTS.md` §5 声明值一致。
+
 ## 流程（脚本自动完成）
 
 1. 前置检查：Python 3.12（可用 `SPIDER_XHS_PYTHON` 指定）、node/npm、Inno Setup（ISCC）；
@@ -90,6 +132,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build.ps1 -Version
 卸载**只删程序文件，数据永远保留**（`data/`、`storage/`、`logs/` 都是运行期生成、
 不在卸载记录里）。要彻底清除就删整个安装目录。早期「弹窗问是否删数据」的设计已移除：
 静默卸载时 [Code] 里的 MsgBox 不会被自动应答，会把卸载器堵死。
+
+## 发版自检清单
+
+> 2026-09-29 起，下面 5 条已由 `packaging/release.ps1` 的阶段 2–4 **自动执行**
+> （构建尾部自检 + `smoke-test.ps1` 覆盖）。只有在 `-SkipSmoke` 或冒烟被跳过时，
+> 才需要人工照此复核一遍。
 
 - [ ] `packaging/build.ps1 -Version <x.y.z>` 全绿；
 - [ ] 静默安装到测试目录，`/api/health` 200、`/` 出 index.html；
