@@ -43,6 +43,12 @@ cd frontend && node node_modules/typescript/bin/tsc --noEmit
 #   ② 文档 vs 实测（声明的端点/表/请求函数/页面数 vs 代码实际值；**离线**，~1.5s，不需服务在跑）
 "C:/Users/admin/AppData/Local/Programs/Python/Python312/python.exe" .workbuddy/skills/xhs-doc-stats-verify/verify_doc_counts.py
 
+# 正式版发版（打包 -> 校验 -> 冒烟 -> 清残留 -> 打 tag -> Gitee Release，七阶段一键）
+#   powershell -NoProfile -ExecutionPolicy Bypass -File packaging\release.ps1 -Version x.y.z
+#   ⚠️ **要求工作区干净**（包必须对应确定提交，否则 tag 与发布物脱钩）——脏工作区在阶段 1 直接 FAIL
+#   ⚠️ 发布物走 Release 附件，**exe 不进 git**（.gitignore 已排除 spider-xhs-setup-*.exe）
+#   ⚠️ 仓库私有 ⇒ 未登录访问 Release 页/直链恒 403，判据看 API 返回的 assets（详见 packaging/README.md）
+
 ### 测试范围铁律（2026-09-22 用户口径，2026-09-24 按实测修订，强制执行）
 
 **默认只跑本次改动涉及的测试文件，不要每次跑全量回归。** 全量回归（`pytest tests/ -q -n auto`，
