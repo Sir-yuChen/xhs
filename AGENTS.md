@@ -23,13 +23,11 @@
 ```bash
 # 服务：**已停 —— 未经用户明确许可不得启动**（2026-09-27 用户口径）；计划任务 XHS-AllInOne-App 已禁用（登录不自启）
 #   ⚠️ `run-app.py` 是**监督进程**（子进程挂掉 5s 自动重启）⇒ 停服务须先杀它，再杀 uvicorn/vite；查杀走 `.workbuddy/tmp_stop_app.py`（本机 PS/wmic 不可用）
-#   http://127.0.0.1:8000  → 后端直出 frontend/dist 构建产物 + API
-#   http://127.0.0.1:5173  → Vite dev（热更新，/api 反代 8000）
+#   :8000 → 后端直出 frontend/dist 构建产物 + API ；:5173 → Vite dev（热更新，/api 反代 8000）
 
 # 后端测试（基线见 §5；判定一律以 --junitxml 为准，别信退出码）
 # ⚠️ **默认只跑改动涉及的文件**，见下方「测试范围」铁律
-# ⚠️ pytest.ini 已固化 `-n auto` / `--junitxml` / `--durations`：裸跑 pytest 即并行、自动出判据
-#    （想串行调试用 `-n0` 覆盖）
+# ⚠️ pytest.ini 已固化 `-n auto` / `--junitxml` / `--durations`：裸跑即并行、自动出判据（串行调试用 `-n0`）
 "C:/Users/admin/AppData/Local/Programs/Python/Python312/python.exe" -m pytest tests/ -q -n auto
 
 # 前端类型检查（tsconfig.json 已开 incremental + tsBuildInfoFile：二次编译 ~10s）
