@@ -2,19 +2,36 @@
 
 > - **体系位置**：`docs/02_设计文档/`（二开方向 1 的独立详细设计，文档先行五阶段「阶段二」产出）
 > - **上游**：`docs/01_需求文档/05_需求规格_第二阶段二开.md`（方向 1）、`docs/02_设计文档/16_功能设计_第二阶段二开.md` §2
-> - **状态**：v1.0 · 2026-09-29（**方案待评审，未开始写代码**）
-> - **覆盖**：LLM 网关 + 供应商配置 + 文案生成 + 媒体生成 + 提示词模板 + 本地素材库 + 闭环；
->   ~18 端点、~9 张新表 → 全部在本文档定稿
+> - **状态**：v1.3 · 2026-09-29（**方案待评审，未开始写代码**）
+> - **覆盖**：LLM 网关（**集成 New API 市场网关**）+ 服务商/账号（New API 渠道+令牌）+ 文案生成 + 媒体生成 + 提示词模板 + 本地素材库 + 用量监控（New API 看板 + 项目侧快照）+ 闭环；
+>   ~27 端点、~9 张新表 → 全部在本文档定稿
 > - **写作约定**：只写「现状结论」，不堆演进链；被推翻结论就地标注「被 XX 取代」；每条结论可追到实现位置
+> - **v1.1 修订**（2026-09-29 用户新需求「新增 LLM 网关 + 统计大模型数据 + 支持多服务商 + 服务商下多账号」）：
+>   ① 新增**服务商层** `llm_providers`（表）+ `model_configs` 升级为**账号层**（`provider_id` 归属）；
+>   ② 新增**用量统计** `llm_usage_records` + `llm_usage_stats` + 统计端点；
+>   ⚠️ **v1.0 的「不建 llm_providers」结论被 v1.1 取代**。
+> - **v1.2 修订**（2026-09-29 用户拍板：「直接复用 `D:\work\WB2API`，只需做数据落库」）：
+>   网关不自研协议层，改由本地 WB2API 转发腾讯后端。
+> - **v1.3 修订**（2026-09-29 用户拍板：「**取消 WB2API，调研市场成熟 API 通用网关，要能整合进项目且有数据监控**」，
+>   选型结论 = **New API**（QuantumNous/new-api，45K★，Go 单二进制，Windows 免 Docker，SQLite 默认，自带数据看板 +
+>   `/api/log/*` 统计 API，原生「渠道=服务商 · 令牌=账号」）：
+>   ③ **取消自建服务商层** `llm_providers`（v1.1 新增）与 **`model_configs` 账号层改造** —— 服务商/账号由 **New API 渠道+令牌**承载，项目侧不再自建；
+>   ④ **取消自建用量表** `llm_usage_records`/`llm_usage_stats`（v1.1 新增）—— 用量监控由 **New API 数据看板 + `/api/log/stat`** 承载，项目侧仅**快照缓存**（`llm_gateway_snapshots`）；
+>   ⑤ 新增 **`llm_gateway_configs`**（存 New API 连接配置：base_url / 管理令牌 / 网关令牌 / 默认模型 / 健康状态）+
+>   **`llm_gateway_snapshots`**（每日统计快照）；
+>   ⑥ 端点数 ~30 → **~27**、新表数 10 → **9**（`llm_providers`/`llm_usage_records`/`llm_usage_stats` 取消，
+>   增 `llm_gateway_configs`/`llm_gateway_snapshots`）；
+>   ⚠️ **v1.1/v1.2 的服务商层 + 用量表 + WB2API 方案结论全部被 v1.3 取代**（原句保留见 §1/§3/§4）。
 
 ---
 
 ## 0. 一句话
 
-把一期「千帆 AI 智能生成」扩成**第二套通用 LLM 生成链路**：用户可选任意 OpenAI 兼容供应商，
-用「公共提示词模块 + 按任务类型模板」两层结构组装 Prompt，生成**标题/正文/话题/封面/视频**，
-媒体来源支持 **AI 生成 / 本地素材库 / 复用商品原始图 / 参考原始图生成新图** 四种，生成结果
-落库为 `local`+`pending` 本地笔记，用户预览编辑后显式发布（走一期千帆 `note/publish` 链路）。
+把一期「千帆 AI 智能生成」扩成**第二套通用 LLM 生成链路**：**网关层集成市场成熟的 New API 网关**
+（本机自托管，OpenAI/Claude/Gemini 统一格式，渠道=服务商、令牌=账号，自带数据看板与统计 API），
+项目侧用「公共提示词模块 + 按任务类型模板」两层结构组装 Prompt，向 New API 网关发起生成，产出
+**标题/正文/话题/封面/视频**，媒体来源支持 **AI 生成 / 本地素材库 / 复用商品原始图 / 参考原始图生成新图** 四种，
+生成结果落库为 `local`+`pending` 本地笔记，用户预览编辑后显式发布（走一期千帆 `note/publish` 链路）。
 
 ---
 
@@ -24,8 +41,9 @@
 
 | 模块 | 做 |
 |---|---|
-| LLM 网关 | 统一 OpenAI 兼容调用（文本/图片/视频三类 capability），重试/超时/限流/密钥注入 |
-| 供应商配置 | **扩展现有一期 `model_configs`**（text/image 已支持），不建新表；补 video 能力线 |
+| LLM 网关 | **集成 New API 网关**（`QuantumNous/new-api`，本机新起进程，默认 :3000，SQLite 落盘；OpenAI/Claude/Gemini 统一格式），不自研协议层 |
+| 服务商/账号 | **由 New API 的渠道 + 令牌承载**（渠道=服务商，一个渠道下多令牌/多渠道=多账号）；项目侧只存**网关连接配置**（`llm_gateway_configs`：base_url / 管理令牌 / 网关令牌 / 默认模型 / 健康状态） |
+| 用量监控 | **New API 数据看板 + `/api/log/stat` 统计 API 承载**；项目侧每日**快照缓存**（`llm_gateway_snapshots`）供 XHS 前端展示 |
 | 文案生成 | 标题（多备选）＋ 正文（600–900 字）＋ 话题标签；经一期护栏 + 话题标记 |
 | 媒体生成 | 文生图 / 图生图（参考图）/ 图生视频 / 图文拼图，落本地 + AIGC 溯源 |
 | 提示词模板 | 两层结构：`prompt_modules`（公共片段）+ `prompt_templates`（任务模板引用模块） |
@@ -36,16 +54,21 @@
 
 - **不做热点生成**（方向 2，M3）、**不做仪表盘**（方向 3，M2）、**不做商品编辑扩展**（方向 4，M4）、
   不做工作流（方向 5，M5）、订单（方向 6，M6/M7）。
-- **不做供应商的「能力探测 / 自动选型」**（一期 T-301~T-305 属 M3 待办，本期用手工配置+测试连通）。
-- **不做对话式改写**（一期 `ai_drafts` 已有 rewrite/polish，本期聚焦「商品 → 笔记」生成；方向 1 只补生成编排，不重做一期已有能力）。
-- **不做媒体落 `media_assets` 新表** —— 一期 `notes.note_assets` 已是笔记媒体唯一落库（按 note 外键），
-  本期媒体一律落它；素材库落 `material_files`。**这条为本文档对 16 文档 §8/§10 的取代**（见 §0 备份说明）。
+- **不自研 LLM 协议网关**（v1.3 取代 v1.2 的 WB2API 方案与 v1.1 的自研方案）—— 网关 **集成 New API**
+  （默认 `127.0.0.1:3000`），多服务商/多账号（渠道/令牌）、OpenAI/Claude/Gemini 格式转换、日志统计全部由 New API 承担。
+- **不建服务商层表** `llm_providers`、**不改 `model_configs` 为账号层**（v1.3 取代 v1.1）—— 服务商/账号在 New API 里管理。
+- **不建用量明细/聚合表** `llm_usage_records`/`llm_usage_stats`（v1.3 取代 v1.1）—— 用量监控走 New API 看板 + 项目侧快照。
+- **不做供应商的「能力探测 / 自动选型」**（本期 New API 渠道手工配模型，测试连通走 New API `/v1/models`）。
+- **不做对话式改写**（一期 `ai_drafts` 已有 rewrite/polish，本期聚焦「商品 → 笔记」生成）。
+- **不做媒体落 `media_assets` 新表** —— 一期 `notes.note_assets` 已是笔记媒体唯一落库；素材库落 `material_files`。
 
 > ⚠️ **本设计对上游 16 文档的三处修订**（16 文档是需求级「链路/方案/原型」，本文档是字段级定稿）：
-> ① `llm_providers` / `llm_models` 两张表**取消** → 复用一期 `model_configs`（已有 text/image 能力线 + CRUD + 测试 + 默认）；
+> ① ~~`llm_providers` / `llm_models` 两张表**取消** → 复用一期 `model_configs`~~ → 历经 **v1.1**（恢复 `llm_providers` 服务商层）→ **v1.3 定稿**：
+>   **服务商/账号不再自建**，由 **New API 渠道+令牌**承载；项目侧仅 `llm_gateway_configs`（网关连接配置）—— 见 §3.8；
 > ② `media_assets` 表**取消** → 笔记媒体复用 `notes.note_assets`、素材库用 `material_files`（同一语义只留一份，DEF-044 纪律）；
-> ③ 新增表净 **7 张**（不是 9 张）：`prompt_modules` / `prompt_templates` / `material_folders` / `material_files` /
->   `generation_records` / `note_generation_links` / `aigc_media_assets`。
+> ③ 新增表经 v1.1（9 张）→ **v1.3 净 9 张**：`llm_gateway_configs` / `llm_gateway_snapshots` / `prompt_modules` / `prompt_templates` /
+>   `material_folders` / `material_files` / `generation_records` / `note_generation_links` / `aigc_media_assets`
+>   （`llm_providers`/`llm_usage_records`/`llm_usage_stats` 取消，`media_assets`/`llm_models` 不建）。
 > 上述在 16 文档 §10/§11 已就地标注「被 17_功能设计_LLM生成链路.md 取代」。
 
 ---
@@ -58,8 +81,9 @@
    ┌────────────────────────────────────────────────────────┘
    ▼
 (5) 组装 Prompt：商品白名单字段 + 公共模块 + 任务模板 + 素材/参考图引用
-        ├─ (5a) LLM 网关 → 标题/正文/话题（JSON，经护栏 + 话题标记解析）
-        ├─ (5b) 媒体：AI 文生图 / 参考图生成 / 图生视频  OR  本地素材库选取  OR  复用商品原始图
+        ├─ (5a) New API 网关（POST /v1/chat/completions，OpenAI 兼容）→ 标题/正文/话题（JSON，经护栏 + 话题标记解析）
+        │       网关令牌 = llm_gateway_configs.gateway_token；模型 = configs.default_model / 生成配置所选
+        ├─ (5b) 媒体：AI 文生图 / 参考图生成 / 图生视频（New API 转发，按渠道能力）  OR  本地素材库  OR  复用商品原始图
         ▼
 (6) 话题落库 topics + note_topics（复用 note_topic_service，只增不删）
 (7) 保存本地笔记（note_type=local + publish_status=local+pending）+ note_assets + note_goods
@@ -70,10 +94,11 @@
 - 生成走队列：`POST /xhs/product-notes/generate-llm` 入队即返回，前端 5s 轮询 `GET /xhs/product-notes/generate-llm-queue`；
   快照键名 `generated`（沿用一期改名纪律，透传底座 `synced` = 进度卡恒 0）。
 - **不自动发布**：发布必须用户显式动作（一期 §31.5 纪律延续）。
+- 用量统计：New API 数据看板承载实时监控；项目侧**按日快照** `llm_gateway_snapshots`（定时任务拉 `/api/log/stat`）供 XHS 前端展示。
 
 ---
 
-## 3. 字段级数据模型（~7 张新表 + 复用/扩展表）
+## 3. 字段级数据模型（~9 张新表 + 复用表）
 
 > 落库标注：✅ 明文落库 ｜ 🔒 加密落库 ｜ ⚠️ 必要脱敏 ｜ ❌ 不落库（实时拉取或临时）
 > 命名/类型/约束对齐一期 (`models/*.py` 风格)；时间一律 `shanghai_now()`。
@@ -165,7 +190,8 @@
 | task_id | Integer | FK tasks.id, index | ✅ | 对应队列项（一个生成任务一条） |
 | shop_product_id | Integer | FK shop_products.id, index | ✅ | 源商品（本地台账行） |
 | template_id | Integer | FK prompt_templates.id, nullable | ✅ | 所用模板（null = 未用模板） |
-| model_config_id | Integer | FK model_configs.id, nullable | ✅ | 所用供应商配置 |
+| gateway_config_id | Integer | FK llm_gateway_configs.id, index | ✅ | 所用 New API 网关配置 |
+| model_name | String(128) | 默认 "" | ✅ | 实际使用的模型名（快照，改配置不丢审计） |
 | media_source | String(32) | 非空 | ✅ | `ai_generate`/`material`/`product_image`/`reference_image` |
 | status | String(32) | 非空, index | ✅ | `queued`/`running`/`success`/`failed` |
 | title / body | Text | | ✅ | 生成的标题 / 正文（护栏通过后落） |
@@ -219,11 +245,59 @@
   `note_goods` 由发布链路按平台返回的 sku 落（一期行为不变），本表是生成链路的审计维度。
   ⚠️ 前端展示挂链商品**仍读 `note_goods`**（契约不变）；本表只服务「生成链路追查」。
 
-### 3.8 复用/扩展的一期表
+### 3.8 `llm_gateway_configs`（New API 网关连接配置，v1.3 新增 ✅）
+
+> 语义：项目侧对 **New API 网关**的单行连接配置（本机自托管网关的连接 + 鉴权 + 默认模型 + 健康状态）。
+> ⚠️ **取代 v1.1 的 `llm_providers` 服务商层与 `model_configs` 账号层改造**（v1.3 定稿）：服务商=New API 渠道、
+> 账号=New API 令牌，项目侧不复制这两层，只存「怎么连网关」。
+
+| 列 | 类型 | 约束 | 落库 | 说明 |
+|---|---|---|---|---|
+| id | Integer | PK | ✅ | |
+| user_id | Integer | FK users.id, index | ✅ | 归属 |
+| name | String(128) | 非空 | ✅ | 网关别名（如「本机 New API」） |
+| base_url | String(512) | 非空 | ✅ | New API 地址（默认 `http://127.0.0.1:3000`） |
+| admin_token | Text | 默认 "" | 🔒 | New API **管理令牌**（拉 `/api/log/stat` 等管理 API 用；`encrypt_text` 加密） |
+| gateway_token | Text | 默认 "" | 🔒 | New API **网关令牌**（业务调用 `POST /v1/chat/completions` 用；加密） |
+| default_model | String(128) | 默认 "" | ✅ | 生成默认模型名（New API 模型目录中的名字） |
+| enabled | Boolean | 默认 True | ✅ | 停用 = 业务调用不可用 |
+| healthy | Boolean | 默认 False | ✅ | 最近一次健康探测结果 |
+| last_health_at | DateTime | nullable | ✅ | 最近健康探测时间 |
+| created_at / updated_at | DateTime | default / onupdate | ✅ | |
+
+- **唯一约束**：`UniqueConstraint("user_id", "name")`（用户内网关配置名唯一）。
+- **`model_configs` 一期表不动**（继续服务一期 `ai_drafts` 的改写/润色）；**不**升级为账号层、不加 `provider_id`。
+
+### 3.9 `llm_gateway_snapshots`（New API 用量快照，v1.3 新增 ✅）
+
+> 语义：**New API 数据看板 + `/api/log/stat` 统计 API** 承载实时用量；项目侧**按日快照**缓存到本地，
+> 供 XHS 前端「大模型用量」页展示（不每次打网关管理 API）。
+> ⚠️ **取代 v1.1 的 `llm_usage_records`（明细）+ `llm_usage_stats`（聚合）两表**（v1.3 定稿）：
+> 明细不去项目侧落，New API 的 Logs 表本地已有（数据监控的核心在 New API 侧）。
+
+| 列 | 类型 | 约束 | 落库 | 说明 |
+|---|---|---|---|---|
+| id | Integer | PK | ✅ | |
+| user_id | Integer | FK users.id, index | ✅ | 归属 |
+| gateway_id | Integer | FK llm_gateway_configs.id, index | ✅ | 对应网关配置 |
+| stat_date | Date | 非空 | ✅ | 统计日（shanghai 时区） |
+| call_count / success_count / fail_count | Integer | 默认 0 | ✅ | 当日计数（自 `/api/log/stat` 聚合） |
+| total_quota | Integer | 默认 0 | ✅ | 当日配额消耗（New API quota 单位） |
+| total_tokens | Integer | 默认 0 | ✅ | 当日总 token（自 Logs 聚合） |
+| avg_latency_ms | Integer | nullable | ✅ | 当日平均响应耗时 |
+| source | String(16) | 默认 "newapi" | ✅ | 快照来源（预留多网关） |
+| raw_json | Text | 默认 "{}" | ✅ | 网关统计 API 原文快照（证据链） |
+| created_at / updated_at | DateTime | default / onupdate | ✅ | |
+
+- **唯一约束**：`UniqueConstraint("user_id", "gateway_id", "stat_date")`（每网关每日一行，upsert 幂等）。
+- 写入方：**定时任务**（复用二期 `schedule_triggers` 机制）每天 0:10 拉一次 New API 统计存快照；前端读本表。
+- 明细查询（下钻单次调用）：前端跳到 **New API 自带的 /console/log**（项目内嵌 iframe 或外链），不在 XHS 重做单据页。
+
+### 3.10 复用/扩展的一期表
 
 | 表 | 用途 | 变更 |
 |---|---|---|
-| `model_configs` | 供应商配置 | **无结构变更**；`model_type` 白名单加 `video`（一期是 `^(text\|image)$`，**改动点**：请求模型 pattern + 测试连通逻辑） |
+| `model_configs` | 一期 AI 改写/润色的模型配置 | **不动**（v1.3 取消 v1.1 的账号层改造；`model_type` 加 video 可顺带支持、非本模块依赖） |
 | `notes` | 生成结果落库 | 无结构变更（`note_type=local`、`publish_status=local+pending`、`note_id=local_<uuid>`） |
 | `note_assets` | 笔记媒体 | 无结构变更（生成媒体落这里，`url` 用本地下载 URL） |
 | `note_goods` | 挂链商品（平台级） | 无结构变更（发布链路复用） |
@@ -232,45 +306,80 @@
 | `system_settings` | 运行时配置 | 无结构变更（如有读点键则补 LIVE_KEYS） |
 | `ai_drafts` | 一期文案改写 | 不动（本期无对话改写需求） |
 
-> **新增表合计 7 张**（较 16 文档 §10 的 `llm_providers`/`llm_models`/`media_assets` 3 张取消，净 7 张，见 §0）。
+> **新增表合计 9 张**（v1.3 定稿）：
+> `llm_gateway_configs` / `llm_gateway_snapshots` / `prompt_modules` / `prompt_templates` /
+> `material_folders` / `material_files` / `generation_records` / `note_generation_links` / `aigc_media_assets`；
+> `llm_providers` / `llm_usage_records` / `llm_usage_stats`（v1.1 增）与 `media_assets`/`llm_models`（16 文档设想）**均不建**。
 
 ---
 
-## 4. LLM 网关设计
+## 4. LLM 网关设计（v1.3：集成 New API 市场网关）
 
-### 4.1 网关抽象
+> ⚠️ **本节取代 v1.2 的「复用本地 WB2API」结论与 v1.1 的「自研 `llm_gateway.py` 三层调用」结论**（2026-09-29 用户拍板）：
+> 网关 = **New API（QuantumNous/new-api）**，本机自托管、独立进程，项目侧只做薄连接 + 快照。
 
-`services/llm_gateway.py`（新）提供三类 capability 的统一调用；**底层复用一期**
-`services/ai_service.py` 的 `OpenAICompatibleTextClient` / `OpenAICompatibleImageClient`
-（已在生产用，含 OpenAI 兼容 base_url + Bearer 注入 + JSON/图片解析 + base64 本地图转 data URL）。
+### 4.1 New API 是什么（选型依据）
 
-| capability | 客户端 | 一期现状 | M1 动作 |
-|---|---|---|---|
-| text | `OpenAICompatibleTextClient` | ✅ 已有 | 加 `generate_full_note()`（JSON 输出：标题/正文/话题，一次完成） |
-| image | `OpenAICompatibleImageClient` | ✅ 已有 | 加 `generate_video()`（调 `/videos/generations`，新 capability） |
-| video | 新增 `OpenAIVideoClient` | ❌ | 按一期图片客户端同款模式实现；供应商实现差异大 ⇒ **协议适配层**（见下） |
+- **成熟市场网关**：45K★，One API 增强分支，Go 单二进制，**Windows 免 Docker**（官方 Release `new-api-v1.x.x.exe`，前端内嵌），
+  **SQLite 默认**（数据落 `data/` 单文件），自带**数据看板**（消耗趋势折线 + 按用户/模型/渠道多维统计）与 **`/api/log/*` 统计 API**。
+- **「多服务商 + 服务商下多账号」由 New API 原生承载**：**渠道** = 服务商/上游（可加多个 DeepSeek / OpenAI / 通义… 渠道，加权随机 + 失败重试）；
+  **令牌** = 对外账号（可为每个 XHS 场景建多个令牌，分组 + 额度 + 模型限制）。
+- **统一协议**：OpenAI Compatible / Claude Messages / Google Gemini / Responses / Realtime，自动格式转换 —— 业务侧只用 OpenAI 兼容形态。
+- **许可**：AGPLv3（**自托管自用不受影响**；不对外分发/修改后闭源发布）。**合规**：仅使用有合法授权的上游，且绝不对公众开放（本机 127.0.0.1）。
 
-**协议适配层**：不同供应商的图片/视频端点形态不一（`/images/generations` vs `/v1/videos` 等）。
-本期**支持 OpenAI 兼容形态**（`images/generations` + 可选 `videos/generations`）；其余供应商标记为
-`capability: text-only`，媒体生成前端按能力线禁用。**不做**供应商私有协议适配（可控范围内）。
+### 4.2 集成拓扑
 
-### 4.2 重试 / 超时 / 限流
+```
+┌─────────────── XHS 项目 ───────────────┐        ┌──────── New API（独立进程）────────┐
+│ 前端：生成页/素材/模板/用量展示          │        │  :3000（默认，可配）                  │
+│ 后端：prompt 渲染 → 护栏 → worker        │  HTTP   │  /v1/chat/completions（业务调用）     │
+│   └ worker 组装 prompt ────────────────┼───────► │  /api/log/stat（管理统计）            │
+│   └ 定时任务拉统计 → llm_gateway_snapshots │        │  /console（自带数据看板）             │
+└──────────────────────────────────────┘        │  SQLite data/（渠道/令牌/日志全落盘）│
+                                                 └──────────────────────────────────────┘
+```
+
+- **进程生命周期**：New API 以独立进程随 XHS 桌面端**一并启停**（launcher `run-app.py` 增加一个子进程拉起，或作为独立快捷方式）；
+  其数据落 `D:\work\XHS\data\newapi\`（SQLite + logs），纳入既有备份/打包口径。
+- **健康探测**：项目侧定时 `GET http://127.0.0.1:3000/api/status`（或 `/v1/models`）写 `llm_gateway_configs.healthy`。
+
+### 4.3 项目侧薄客户端
+
+- `services/llm_gateway_client.py`（v1.2 的薄客户端保留，目标改为 New API）：
+  ① 读 `llm_gateway_configs` 的 base_url / gateway_token / default_model；② `POST {base}/v1/chat/completions` OpenAI 兼容形态；
+  ③ 解析回包（`choices[0].message.content`）；④ **不自己落 token/耗时明细**（New API 的 Logs 落盘兜底）—— 业务侧只把
+  关键信息写进 `generation_records`（本次生成用的模型/网关）。
+- **不做**：不做协议适配（New API 已统一）、不做多账号轮转（New API 渠道池管）、不做格式转换。
+
+### 4.4 能力线 / 模型
+
+- New API 渠道里配置的模型 = 可用模型集合（`GET /v1/models` 可查）。XHS 生成侧只需在 `llm_gateway_configs.default_model`
+  与生成配置里选模型名；**模型能力（text/image/video）由 New API 渠道模型映射决定**（一个渠道模型名即一种能力）。
+- 文案生成走 `text` 模型；封面/配图走 `image` 模型；视频走 `video` 模型 —— 均指 New API 模型目录里的名字。
+- 测试连通：`POST /api/gateway/{id}/test` → 打 New API `/v1/models`（校验模型存在）+ 一次极小 chat 请求（可选）。
+
+### 4.5 用量监控（数据监控的核心，New API 承担）
+
+| 层 | 谁做 | 说明 |
+|---|---|---|
+| 实时看板 | **New API /console** | 消耗趋势折线、按用户/模型/渠道消耗分布、日志表格（含 token/耗时/quota） |
+| 统计 API | **New API `/api/log/stat`** | 返回 `{quota, rpm, tpm}`（最近 60s）+ `GET /api/log/` 明细页过滤 |
+| 项目侧快照 | **本项目** | 定时任务每天拉 `/api/log/stat` + 当日 Logs 聚合成 `llm_gateway_snapshots`，XHS「大模型用量」页展示（不重做单据页） |
+| 下钻 | **本项目 iframe/外链** | 前端「查看详情」跳到 New API /console/log（带网关 base_url） |
+
+> ⚠️ 与 v1.1 的差异：**Token/额度明细不重复落项目侧库**（New API SQLite 已有权威数据），
+> 项目只做**快照缓存**供集成展示 —— 避免「同一语义两份真相源」（DEF-044）。
+
+### 4.6 重试 / 超时 / 限流
 
 | 项 | 约定 |
 |---|---|
-| 超时 | text 60s / image 180s / video **300s**（一期图片已 180s，视频加长以兼容长任务） |
-| 重试 | 网关内对 `requests` 网络异常（ConnectTimeout / ConnectionError）**最多重试 1 次**（间隔 2s）；HTTP 4xx/5xx **不重试**（供应商侧问题，记失败） |
-| 限流 | 复用一期 `rate_limiter`（`wait_allow()`）**在 worker 内**调用，**不**在网关内再叠一层（网关是纯 HTTP 层，无状态） |
-| 密钥 | 从 `model_configs.encrypted_api_key` 解密后注入 `Authorization: Bearer`，**不落日志、不落库** |
+| 超时 | 文本 60s / 媒体（image/video）180s（对齐一期 `ai_service` 180s） |
+| 重试 | 客户端对 `ConnectError`/`Timeout` **最多重试 1 次**（间隔 2s）；HTTP 4xx/5xx **不重试**（网关/上游侧问题，记失败） |
+| 限流 | 复用一期 `rate_limiter`（`wait_allow()`）**在 worker 内**调用（项目自身对网关的调用频控，防止把人流量压到网关） |
+| 密钥 | 项目→网关鉴权用 `llm_gateway_configs.gateway_token`（New API 令牌）加密落库；**不落日志** |
 
-### 4.3 能力线（capability）白名单
-
-- `model_configs.model_type` 一期是 `^(text|image)$`。M1 扩展为 `^(text|image|video)$`（**改动点**：
-  请求模型 pattern、前端供应商卡片展示、测试连通逻辑）。
-- 文案生成必须 `text` 配置；封面/配图生成必须 `image`；视频生成必须 `video`。
-- 一个供应商可配多条能力线（同名不同 `model_type`），默认标记互不干扰（`is_default` 按 type 清旧，一期已实现）。
-
-### 4.4 文本生成格式约束（JSON 输出 + 护栏）
+### 4.7 文本生成格式约束（JSON 输出 + 护栏）
 
 `generate_full_note()` 输出**严格 JSON**：
 
@@ -345,17 +454,32 @@ final_prompt =
 > ⚠️ 端点前缀沿用一期 `GET /openapi.json` 实测的**三层平台路由** —— LLM 模块挂在
 > `/api/xhs/product-notes/` 与新增 `/api/xhs/llm/` 下。
 
-### 7.1 供应商配置（复用一期 `/model-configs`，仅扩展 video）
+### 7.1 网关配置（New API 集成，v1.3：~5 端点）
 
-| 端点 | 现状 | M1 变更 |
-|---|---|---|
-| `GET/POST /api/model-configs` | ✅ | `model_type` pattern 加 `video`；POST 允许 video |
-| `POST /api/model-configs/{id}/test` | ✅ | video 分支调 `/videos/generations` |
-| `PATCH/DELETE /api/model-configs/{id}` | ✅ | 无变更 |
-| `POST /api/model-configs/{id}/set-default` | ✅ | 无变更 |
+> ⚠️ **v1.1 的「服务商层 + 账号层升级」与 v1.2 的「WB2API 连接」均被 v1.3 取代**（原句见 §0 修订说明）：
+> 服务商/账号在 **New API 面板**（渠道 + 令牌）管理，项目侧只配 **网关连接**（`llm_gateway_configs`）+ 看板跳转。
 
-> 前端「供应商配置」设置卡片在本期**直接消费这组一期端点**（新增字段只有 `model_type=video` 一个，
-> 一期前端已有展示；加 video 选项）。
+**`GET /api/xhs/llm/gateway-configs`**（网关配置列表）
+- 返回 `paginated`，字段 `id/name/base_url/default_model/enabled/healthy/last_health_at/gateway_version?`（**令牌字段永不返回**，只给 `has_admin_token`/`has_gateway_token` 布尔）。
+
+**`POST /api/xhs/llm/gateway-configs`**（新增网关配置）
+- 请求：`{name, base_url?, admin_token?, gateway_token?, default_model?}`；
+  `base_url` 默认 `http://127.0.0.1:3000`；两个 token 用 `encrypt_text` 加密落库；
+  `name` 用户内唯一（409 `LLM_GATEWAY_NAME_EXISTS`）；返回 201 + 对象（token 不返）。
+
+**`PATCH /api/xhs/llm/gateway-configs/{id}`**（编辑网关配置）
+- 改 token 时**留空 = 保持不变**（防止误清）；改 base_url 后 `healthy` 自动置 False（需重新探测）。
+
+**`DELETE /api/xhs/llm/gateway-configs/{id}`**（删除网关配置）
+- 删除时同步清理 `llm_gateway_snapshots` 历史快照（软删？**否** —— 直接级联删，配置没了快照无意义）。
+
+**`POST /api/xhs/llm/gateway-configs/{id}/test`**（健康探测 + 模型列表）
+- 顺序：① `GET {base}/api/status`（New API 可达性）→ ② `GET {base}/v1/models`（带 gateway_token，取模型目录）→
+  （可选）③ 一次极小 chat 请求验证 default_model；
+- 结果写 `healthy`/`last_health_at`；不可达 400 `LLM_GATEWAY_UNREACHABLE`；令牌错 401 `LLM_GATEWAY_AUTH_FAILED`。
+- 返回 `{id, healthy, message, models: [name...]}`（前端用模型列表填充生成配置下拉）。
+
+> 端点合计：网关配置 **5**。New API 本身的渠道/令牌/日志由用户在其面板操作，项目侧不做端点承接。
 
 ### 7.2 提示词模板（新增，~7 端点）
 
@@ -423,19 +547,20 @@ final_prompt =
 ### 7.4 生成（新增，~4 端点）
 
 **`POST /api/xhs/product-notes/generate-llm`**（单篇入队）
-- 请求：`{platform_account_id, item_id, template_id?, model_config_id?, media_source, media_options?}`
+- 请求：`{platform_account_id, item_id, template_id?, gateway_config_id?, model_name?, media_source, media_options?}`
   - `platform_account_id`：目标账号（门禁：有 creator 会话？**否** —— 生成阶段不需要平台令牌，
     只在校验「该账号属于当前用户」；发布阶段才需要令牌）；
   - `item_id`：商品 `shop_products.item_id`（必须在本账号某店铺台账存在，400 `LLM_PRODUCT_NOT_FOUND`）；
+  - `gateway_config_id`：New API 网关配置（默认取用户唯一配置）；`model_name?` 可选覆盖 `default_model`；
   - `media_source`：`ai_generate` / `material` / `product_image` / `reference_image`；
   - `media_options`：素材选中 ids / 参考图 ids / 是否生成封面 / 文生图·图生视频·图文拼图等；
-- 门禁：模板存在 / 供应商配置存在且能力线匹配（text 配置缺 → 400 `LLM_TEXT_CONFIG_REQUIRED`；
-  media_source=ai_generate 且无 image 配置 → 400 `LLM_IMAGE_CONFIG_REQUIRED`）⇒ 全过 → 入队
+- 门禁：模板存在 / 网关配置存在且 `enabled`（缺 → 400 `LLM_GATEWAY_NOT_CONFIGURED`）/ `healthy` 或允许重试探测
+  （`healthy=false` 时不拦但触发一次探测，失败 400 `LLM_GATEWAY_UNREACHABLE`）⇒ 全过 → 入队
   `TASK_TYPE_GEN_LLM_ITEM` → 返回 `{ok, status:"queued", item_id, generation_record_id}`；
-- 幂等：同用户未终态队列已有同 (item_id, template_id) => `already_queued: true`（不重复入队）。
+- 幂等：同用户未终态队列已有同 (item_id, template_id, gateway_config_id) => `already_queued: true`（不重复入队）。
 
 **`POST /api/xhs/product-notes/batch-generate-llm`**（批量入队）
-- 请求：`{platform_account_id, item_ids[], template_id?, model_config_id?, media_source, media_options?}`；
+- 请求：`{platform_account_id, item_ids[], template_id?, gateway_config_id?, model_name?, media_source, media_options?}`；
   逐项过门禁（同单篇），单项失败不阻断；`max_items` 上限 20（一期 `GENERATE_BATCH_MAX_ITEMS` 对齐）；
   返回逐项回执 `[{item_id, ok, error?}]`。
 
@@ -450,16 +575,33 @@ final_prompt =
 
 > 端点合计：生成 **4**。
 
-### 7.5 端点统计与一期对齐
+### 7.5 用量展示（v1.3：New API 看板 + 项目侧快照，~3 端点）
+
+**`GET /api/xhs/llm/usage/overview`**（总览：今日/近 7 日/近 30 日）
+- 从 `llm_gateway_snapshots` 聚合：`{today: {call_count, success_count, fail_count, success_rate, total_tokens, avg_latency_ms},
+  week: {…}, month: {…}, gateway_healthy}`（快照没有的日 = 当日无数据，前端按空态处理，不造假）。
+
+**`GET /api/xhs/llm/usage/daily`**（按日序列，供折线图）
+- 参数：`gateway_id?` / `start_date` / `end_date`；返回 `[{stat_date, call_count, success_count, fail_count, total_tokens, avg_latency_ms}]`（仅快照有的日期）。
+
+**`POST /api/xhs/llm/usage/refresh`**（手动刷新快照，可选）
+- 立即拉一次 New API `/api/log/stat` + 当日 Logs 聚合写 `llm_gateway_snapshots`（upsert）；返回 202 后台跑。
+
+> 端点合计：用量展示 **3**。**明细下钻** = 前端「查看详情」跳 New API `/console/log`（iframe/外链），项目侧不做明细端点。
+
+### 7.6 端点统计与一期对齐
 
 | 组 | 新端点 | 说明 |
 |---|---|---|
+| 网关配置 | 5 | gateway-configs CRUD + test（v1.3 新增） |
 | 提示词模板 | 8 | modules 4 + templates 4 |
 | 素材库 | 7 | folders 4 + files 3 |
 | 生成 | 4 | 单/批/队列/重试 |
-| **合计** | **19** | 含 `render-preview`（16 文档预估 ~18，实施按实测回数） |
+| 用量展示 | 3 | overview/daily/refresh（v1.3 新增） |
+| **合计** | **27** | v1.3：网关 5 + 模板 8 + 素材 7 + 生成 4 + 用量 3 = 27（v1.2 的 28 + 服务商 5 - 用量 4 - 账号层 0 调整 ≈ 净变化） |
 
-- 供应商端点是**复用一期** `/model-configs`（不新增），但 `model_type=video` 是**行为扩展**（openapi 变更）；
+- 服务商/账号（New API 渠道+令牌）、模型管理（New API `/console`）**不在项目侧建端点**；
+- `/model-configs`（一期）**不动**（继续服务 `ai_drafts`）；
 - 实施时逐域回数并同步 `AGENTS.md` §5 + `verify_doc_counts.py`（16 文档 §11 已声明）。
 
 ---
@@ -478,9 +620,9 @@ final_prompt =
 ### 8.2 worker
 
 - 复用一期 `ensure_generate_worker()` 的线程池模式（跨账号并行 = 独立的 LLM worker 线程）；
-- 认领队列项 → 读 payload（item_id/template_id/model_config_id/media_source/media_options）→
-  `generation_records` 状态 `queued→running` → 组装 Prompt → 调网关 → 护栏校验 → 落库（笔记/媒体/话题/挂链）→
-  `running→success`；任一步异常 `running→failed` + 记 `error_code/message`；
+- 认领队列项 → 读 payload（item_id/template_id/gateway_config_id/model_name/media_source/media_options）→
+  `generation_records` 状态 `queued→running` → 组装 Prompt → **调 New API**（`POST /v1/chat/completions`）→
+  护栏校验 → 落库（笔记/媒体/话题/挂链）→ `running→success`；任一步异常 `running→failed` + 记 `error_code/message`；
 - 异常分支**先 `db.rollback()` 再记失败**（§35 纪律，防卡 running）。
 
 ---
@@ -489,14 +631,15 @@ final_prompt =
 
 | 数据 | 落库 | 说明 |
 |---|---|---|
-| 供应商 base_url / model_name / is_default | ✅ 明文 | `model_configs`（一期已有） |
-| 供应商 api_key | 🔒 加密 | `encrypted_api_key`（一期 `encrypt_text`；响应 `has_api_key` 不吐明文） |
+| 网关 base_url / default_model / name | ✅ 明文 | `llm_gateway_configs` |
+| New API 管理令牌 / 网关令牌 | 🔒 加密 | `llm_gateway_configs.admin_token`/`gateway_token`（`encrypt_text`；响应只给 `has_*` 布尔） |
 | 提示词模块 / 模板 | ✅ 明文 | `prompt_modules` / `prompt_templates` |
 | 素材文件夹路径 | ✅ 明文 | 本地绝对路径；**不读内容落库** |
 | 素材文件索引 / 缩略图 | ✅ 索引落库 / 缩略图副本落盘 | 二进制不落库（源文件在用户磁盘原位） |
 | 生成标题 / 正文 / 话题 | ✅ 明文（可编辑草稿） | `notes` + `note_topics` |
-| 生成完整 Prompt | ❌ 不落 | 体积大；按 `template_id`+`module_ids` 可重建（§3.5） |
-| 供应商密钥 / 完整响应原文 | ❌ 不落 | 日志里 `[REDACTED]` |
+| 生成完整 Prompt | ❌ 不落 | 体积大；按 `template_id`+`module_ids` 可重建（§3.8） |
+| 调用 token/耗时/成败 明细 | ❌ 项目侧不落 | **New API SQLite（Logs）权威**；项目侧只落 `llm_gateway_snapshots` 按日快照 |
+| 网关令牌 / 上游渠道密钥 | ❌ 项目侧不落 | 网关令牌加密存配置；上游渠道密钥只在 New API 库（项目侧**不接触**） |
 | AIGC 溯源 | ✅ 明文 | `aigc_media_assets.aigc_task_id`（合规要求） |
 | 平台发布状态 / 挂链 | ✅ 明文 | 复用一期 `publish_jobs` / `note_goods` |
 
@@ -512,6 +655,8 @@ final_prompt =
 | 提示词注入 | `prompt_skeleton` 插槽白名单；未知插槽渲染报错（§5.1） |
 | Prompt 泄漏 | 生成产物含商品细节，属用户自有数据；演示/截图不打全量 Prompt |
 | 媒体落盘 | 只写 `storage/media/`（应用目录），**不写用户素材文件夹**（只读边界 C2） |
+| 网关令牌 | `llm_gateway_configs.admin_token`/`gateway_token` 用 `encrypt_text` 加密落库；响应只给 `has_*` 布尔，**永不回传明文** |
+| 网关访问 | New API **仅监听 127.0.0.1**（本机自用）；上游渠道密钥只存 New API 库，项目侧不接触 |
 
 ---
 
@@ -521,16 +666,18 @@ final_prompt =
 
 | 页面 | 位置 | 说明 |
 |---|---|---|
-| 生成配置弹窗 | `pages/platforms/xhs/`（商品列表页入口） | 选模板/供应商/媒体来源/素材；复用 16 §2.5 原型 |
+| 生成配置弹窗 | `pages/platforms/xhs/`（商品列表页入口） | 选模板/网关模型/媒体来源/素材；复用 16 §2.5 原型 |
 | 素材库面板 | `components/MaterialPicker` | 弹窗 + 文件夹分组 + 缩略图网格 + 搜索/筛选 + 多选 + 拖拽复用 antd Upload.Dragger |
 | 提示词模板设置卡 | 设置页「提示词模板」卡 | 两层管理（公共模块库 + 模板库）+ 预览渲染效果 |
-| 供应商配置卡 | 设置页（复用一期 `/model-configs` 卡） | 加 video 能力线选项 |
+| LLM 网关设置卡 | 设置页「大模型网关」卡 | 配 `llm_gateway_configs`（base_url/令牌/默认模型）+ 健康探测 + 模型列表下拉 |
+| 大模型用量页 | `pages/platforms/xhs/`（仪表盘Tab 或独立页） | 从 `llm_gateway_snapshots` 展示 今日/近 7 日/近 30 日 卡片 + 按日折线；「查看详情」跳 New API `/console/log` |
 
 ### 11.2 交互要点
 
 - 生成进度卡复用一期「队列记录页」5s 轮询、无 Tip；停刷判据 `total > 0 且待处理 0`（§35 纪律）；
 - 素材面板秒开：列表本地先用 `file_count` + 缩略图 URL 占位，缩略图懒加载；
-- 生成结果在内容库可见（`local`+`pending`），可预览编辑、可一键发布（复用一期 `POST /notes/{id}/publish`）。
+- 生成结果在内容库可见（`local`+`pending`），可预览编辑、可一键发布（复用一期 `POST /notes/{id}/publish`）；
+- **用量下钻**：项目侧不做明细页，跳到 New API 自带看板（iframe 或新标签，`gateway_configs.base_url` + `/console/log`）。
 
 ---
 
@@ -538,14 +685,15 @@ final_prompt =
 
 | 层 | 用例 |
 |---|---|
-| 模型 | 7 表建表/约束/唯一索引；归属校验；`material_files` 唯一 `(folder_id, rel_path)` |
+| 模型 | 9 表建表/约束/唯一索引；归属校验；`material_files` 唯一 `(folder_id, rel_path)`；`llm_gateway_snapshots` 唯一 `(user_id, gateway_id, stat_date)` |
 | 迁移 | `upgrade head` 幂等、`downgrade` 可逆；真库前备份（REF §F 纪律） |
-| 供应商 | video 能力线新增后 `GET /openapi.json` 的 `/model-configs` 契约不变 + `model_type` 校验含 video |
+| 网关配置 | `/gateway-configs` CRUD + test（健康探测 / 模型列表 / 令牌永不回传） |
 | 模板渲染 | 插槽白名单 / 未知插槽报错 / 默认模板唯一（变异：清旧默认不生效 → 红） |
 | 素材库 | 安全路径拦截（C:\Windows / 不存在 / 非目录）/ 增量扫描 mtime / 删除不物理删用户文件 |
-| 生成 | 门禁（商品不存在/模板不存在/能力线不匹配）/ 幂等 already_queued / 护栏命中不落半条 / 失败记 generation_records / retry 幂等 |
+| 生成 | 门禁（商品不存在/模板不存在/网关未配置或不健康）/ 幂等 already_queued / 护栏命中不落半条 / 失败记 generation_records / retry 幂等 |
 | 队列 | `QUEUE_REGISTRY` assert 自检（新增队列两边同加）/ 快照键名 `generated` / 停刷判据 |
-| 前端 | 供应商卡 video 选项 / 素材面板搜索筛选 / 提示词模板卡两层管理 / 生成进度卡 5s 轮询无 Tip |
+| 用量快照 | 定时拉取 upsert 幂等 / overview & daily 聚合（无数据日按空态不造假）/ New API 不可达时不写假数据 |
+| 前端 | 网关设置卡 + 模型下拉 / 素材面板搜索筛选 / 提示词模板卡两层管理 / 生成进度卡 5s 轮询无 Tip / 用量页折线 |
 | 回归 | 一期 `/model-configs` 与 `/notes` 相关行为零破坏（`test_model_configs.py` / `test_product_note_*.py` 全绿） |
 
 ---
@@ -554,15 +702,17 @@ final_prompt =
 
 | 阶段 | 任务 | 依赖 | 交付 |
 |---|---|---|---|
-| T1 | `model_configs` 加 video 能力线 + 测试连通 | 无 | openapi 契约变更可见 |
+| T0 | **引入 New API 网关**（下载官方 Release exe → 本机 `:3000` 起进程 → 渠道/令牌配置 → 探活） | 无 | 网关可用，`/v1/chat/completions` 通 |
+| T1 | `llm_gateway_configs`/`llm_gateway_snapshots` 表 + 迁移 + 网关配置 CRUD + test 端点 | T0 | 项目侧能连网关、取模型列表 |
 | T2 | `prompt_modules`/`prompt_templates` 表 + 迁移 + CRUD 端点 | T1 | 模板两层结构可管理 |
 | T3 | `material_folders`/`material_files` 表 + 迁移 + 扫描/索引/检索 + 安全拦截 | T1 | 素材库多文件夹秒开 |
-| T4 | `llm_gateway` 文本生成（generate_full_note JSON）+ 护栏 + 话题落库 | T2 | 文案生成（干运行） |
+| T4 | New API 薄客户端（`llm_gateway_client` chat 调用）+ 生成 JSON + 护栏 + 话题落库 | T1/T2 | 文案生成（干运行） |
 | T5 | `generation_records`/`aigc_media_assets`/`note_generation_links` 表 + 迁移 | T2/T4 | 生成审计可追溯 |
 | T6 | 生成编排 + 队列注册 + worker + 单/批/队列/重试端点 | T4/T5 | 商品→可发布笔记闭环 |
-| T7 | 媒体生成（文生图/图生视频/拼图）+ 落库 + 溯源 | T6 | 媒体来源四选一 |
-| T8 | 前端：供应商卡 video + 提示词模板卡 + 素材面板 + 生成配置弹窗 + 进度卡 | T2/T3/T6/T7 | UI 闭环 |
-| T9 | 测试补全（§12）+ 双脚本 + 同步 AGENTS.md §5 + README | 全部 | 验收可过 |
+| T7 | 媒体生成（文生图/图生视频/拼图，走 New API 渠道）+ 落库 + 溯源 | T6 | 媒体来源四选一 |
+| T8 | 定时任务拉 New API 统计 → `llm_gateway_snapshots` + 用量页（overview/daily）+ 跳转看板 | T1 | 数据监控集成展示 |
+| T9 | 前端：网关设置卡 + 提示词模板卡 + 素材面板 + 生成配置弹窗 + 进度卡 | T2/T3/T6/T7/T8 | UI 闭环 |
+| T10 | 测试补全（§12）+ 双脚本 + 同步 AGENTS.md §5 + README | 全部 | 验收可过 |
 
 > 每个任务是「文档先行」的一个完整闭环：改契约先改本文档对应 §，再写码。
 
@@ -574,4 +724,35 @@ final_prompt =
   话题标签 + 封面图/视频（AI 生成 / 素材库选取 / 复用商品原始图 / 参考原始图生成新图）；
 - 生成结果在内容库可见（`local`+`pending`），可预览编辑、可一键发布（走一期预审核 + 挂链）；
 - 素材库：配 2–3 个本地文件夹后，面板秒开缩略图，可搜索/拖拽选用；增删文件后「刷新」即同步；
-- 提示词模板：公共模块可组合复用、单独模板按任务类型调用；生成图可指定落素材库 + 直接用于当前笔记。
+- 提示词模板：公共模块可组合复用、单独模板按任务类型调用；生成图可指定落素材库 + 直接用于当前笔记；
+- **数据监控**：New API 面板可见消耗趋势/模型分布/日志；XHS「大模型用量」页从 `llm_gateway_snapshots` 展示
+  今日/近 7 日/近 30 日 调用与成功率的卡片 + 折线，可跳转 New API 明细。
+
+---
+
+## 15. New API 网关部署与初始化（v1.3 工程前置，T0）
+
+### 15.1 获取与运行（Windows 免 Docker）
+
+- 从 `github.com/QuantumNous/new-api/releases` 下载 `new-api-v1.x.x.exe`（前端内嵌，~115MB；国内可用 `ghfast.top` 反代）。
+- 同目录建 `.env`：`SESSION_SECRET`/`CRYPTO_SECRET`（`Get-Random` 生成 hex）、`SQL_DSN=`（留空用 SQLite）、
+  `SQLITE_PATH=data/new-api.db?_busy_timeout=30000`、`TZ=Asia/Shanghai`、`BATCH_UPDATE_ENABLED=true`。
+- 前台跑：`.\new-api.exe --port 3000 --log-dir .\logs` → 访问 `http://127.0.0.1:3000` 引导设管理员。
+- **常驻**：`Start-Process` 分离进程 或 挂任务计划程序（登录自启）；数据落 `D:\work\XHS\data\newapi\`。
+
+### 15.2 项目侧初始化（`llm_gateway_configs` 一行）
+
+| 字段 | 值 |
+|---|---|
+| base_url | `http://127.0.0.1:3000` |
+| admin_token | New API「个人设置」里的系统访问令牌（拉统计用） |
+| gateway_token | New API「令牌管理」新建一个 `sk-` 令牌（业务调用用，分组与渠道匹配） |
+| default_model | New API 模型目录里的一个名字（如 `deepseek-v4-flash`） |
+
+### 15.3 注意事项（合规 + 运维）
+
+- **只监听 `127.0.0.1`**（New API 默认即 127.0.0.1，不要改 0.0.0.0）；不对外提供生成服务（《生成式 AI 服务管理暂行办法》合规）。
+- 上游渠道须有**合法授权**（自购 API/订阅），遵守上游条款。
+- `CRYPTO_SECRET` 丢失 ⇒ 已存渠道密钥解不开，须与 `data/` 一起备份。
+- 端口冲突：若 `:3000` 被占，改用 `--port 3001` 并在 `llm_gateway_configs.base_url` 同步。
+- 该项目是**独立进程**，与 XHS 的 FastAPI（:8000）/ Vite（:5173）互不干扰；随桌面端一并启停。
