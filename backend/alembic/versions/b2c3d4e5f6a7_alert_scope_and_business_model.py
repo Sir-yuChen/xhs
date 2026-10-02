@@ -52,6 +52,7 @@ depends_on = None
 
 _TABLE_ALERTS = "llm_gateway_alerts"
 _TABLE_BUSINESS = "llm_business_providers"
+_TABLE_CONFIGS = "llm_gateway_configs"
 
 
 def _column_exists(conn, table: str, column: str) -> bool:
@@ -109,24 +110,29 @@ def upgrade() -> None:
     # 只回填「映射已指向某服务商」但 model_name 仍空的行；服务商不存在（裸列引用）
     # 或 default_model 也为空的行保持空 —— 让它显式失败（去页面重选），
     # 而不是编一个模型名出来（同「缺值不造假」纪律）。
-    conn.execute(
-        sa.text(
-            f"""
-            UPDATE {_TABLE_BUSINESS}
-            SET model_name = COALESCE(
-                (
-                    SELECT c.default_model
-                    FROM llm_gateway_configs AS c
-                    WHERE c.user_id = {_TABLE_BUSINESS}.user_id
-                      AND c.provider_key = {_TABLE_BUSINESS}.provider_key
-                ),
-                ''
+    # ⚠️ **必须先判 `default_model` 列存在**（2026-10-02 修）：后续迁移
+    #    `f6a7b8c9d0e1`（v2.8）会 **drop** 这列，而「stamp 回早期 revision 再 upgrade」
+    #    是 alembic 的正常用法（迁移用例的 ④ 幂等步骤就这么做）⇒ 重跑时该列已不存在，
+    #    `SELECT c.default_model` 直接 `OperationalError: no such column`。
+    if _column_exists(conn, _TABLE_CONFIGS, "default_model"):
+        conn.execute(
+            sa.text(
+                f"""
+                UPDATE {_TABLE_BUSINESS}
+                SET model_name = COALESCE(
+                    (
+                        SELECT c.default_model
+                        FROM llm_gateway_configs AS c
+                        WHERE c.user_id = {_TABLE_BUSINESS}.user_id
+                          AND c.provider_key = {_TABLE_BUSINESS}.provider_key
+                    ),
+                    ''
+                )
+                WHERE model_name = ''
+                  AND provider_key <> ''
+                """
             )
-            WHERE model_name = ''
-              AND provider_key <> ''
-            """
         )
-    )
 
 
 def downgrade() -> None:

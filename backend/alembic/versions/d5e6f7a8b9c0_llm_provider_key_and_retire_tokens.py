@@ -178,28 +178,34 @@ def upgrade() -> None:
     # 策略：优先取该行 `models_json` 目录的第一个模型；目录空 ⇒ 落占位文案。
     # ⚠️ 回填而非留空：留空 = 一条永远调不通、而用户看不出原因的服务商。
     # ⚠️ 也**不猜真实模型名**（那是替用户编造凭据，§5 硬约束 5）。
+    # ⚠️ **必须先判列存在**（2026-10-02 修）：后续迁移 `f6a7b8c9d0e1`（v2.8）会 **drop**
+    #    这列，而「stamp 回早期 revision 再 upgrade」是 alembic 的正常用法（迁移用例
+    #    的 ④ 幂等步骤就这么做）⇒ 重跑时该列已不存在，`SELECT default_model` 直接
+    #    `OperationalError: no such column`。与下方 ② 判表存在同型（`_columns()` 对
+    #    缺列同样返回「不在集合」，故统一用 `_columns()` 判列）。
     import json as _json
 
-    blanks = conn.execute(
-        sa.text(
-            f"SELECT id, models_json FROM {_TABLE_CONFIGS} "
-            f"WHERE default_model IS NULL OR TRIM(default_model) = ''"
-        )
-    ).fetchall()
-    for row_id, models_json in blanks:
-        picked = ""
-        try:
-            models = _json.loads(models_json or "[]")
-            if isinstance(models, list):
-                picked = next(
-                    (m for m in models if isinstance(m, str) and m.strip()), ""
-                )
-        except Exception:
+    if "default_model" in _columns(conn, _TABLE_CONFIGS):
+        blanks = conn.execute(
+            sa.text(
+                f"SELECT id, models_json FROM {_TABLE_CONFIGS} "
+                f"WHERE default_model IS NULL OR TRIM(default_model) = ''"
+            )
+        ).fetchall()
+        for row_id, models_json in blanks:
             picked = ""
-        conn.execute(
-            sa.text(f"UPDATE {_TABLE_CONFIGS} SET default_model = :m WHERE id = :i"),
-            {"m": picked or _DEFAULT_MODEL_PLACEHOLDER, "i": int(row_id)},
-        )
+            try:
+                models = _json.loads(models_json or "[]")
+                if isinstance(models, list):
+                    picked = next(
+                        (m for m in models if isinstance(m, str) and m.strip()), ""
+                    )
+            except Exception:
+                picked = ""
+            conn.execute(
+                sa.text(f"UPDATE {_TABLE_CONFIGS} SET default_model = :m WHERE id = :i"),
+                {"m": picked or _DEFAULT_MODEL_PLACEHOLDER, "i": int(row_id)},
+            )
 
     # --------------------------------------------------- ② model_configs #
     # ⚠️ **必须同时判表存在**：`_columns()` 对不存在的表返回空集，于是
