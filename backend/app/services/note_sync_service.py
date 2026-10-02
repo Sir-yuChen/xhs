@@ -5,27 +5,38 @@
 一期起「我的笔记」就是**纯实时、完全不落库**（设计 12 §17）。这次要的是本地
 沉淀：离线可查、可检索、供后续生成与统计取用。两条链路并存，不互相替代。
 
-## 多源独立同步（§19.3，2026-09-21 用户口径：三态）
+## 单源同步（§44，2026-09-30 用户拍板：拆成两个任务/入口）
 
-**每个可用源各同步各的，互不阻塞**（用户口径：pc 与千帆令牌均可用 ⇒ 两个平台的
-笔记全部落库；只有一个可用 ⇒ 只同步该平台；均不可用 ⇒ 结构化多原因失败）：
+**一次任务只跑一个源**，由 `_note_sources(db, account, *, only=…)` 的 `only` 决定：
+
+| 任务 | task_type | `only` | 硬门禁 | 源 |
+|---|---|---|---|---|
+| 同步**普通笔记** | `xhs_note_sync` | `"creator"` | 创作者会话 | `creator` |
+| 同步**商品笔记** | `xhs_goods_note_sync` | `"ark"` | 千帆 / ark 令牌 | `ark` |
+
+~~「creator 跑完再追加 ark 的混合双源」~~ **已删除**（DEF-044：同一语义不留两份）：
+两件事的前置条件、耗时、失败原因都不同，混在一个任务里用户只能得到「哪些源跑成了」
+这种混合答案。各源自己的链路见下表（`pc` 分支保留但当前**无调用方**，§21.4 已移除 www 源）。
 
 | 源 | 令牌 | 链路 |
 |---|---|---|
-| ``www`` | 账号 www 通道（`web_session`+`id_token`） | PC（``get_user_posted_page``）——**仅非 creator 账号**（§21.4 移除冗余源） |
-| ``creator`` | 账号 creator 通道 | 创作者平台（``get_posted_notes_page``），**仅 creator 账号** |
-| ``ark`` | 账号**自己的** ark 通道（`qianfan_cookies_for_account`，§20 起**无兜底、不借用**） | 千帆商品笔记（``get_goods_note_page``，§19.1.1 实测） |
+| ``www`` | 账号 www 通道（`web_session`+`id_token`） | PC（``get_user_posted_page``）——**§21.4 起整体移除**，`_sync_source` 的 `pc` 分支保留备用 |
+| ``creator`` | 账号 creator 通道 | 创作者平台（``get_posted_notes_page``）——**普通笔记任务**的源 |
+| ``ark`` | 账号**自己的** ark 通道（`qianfan_cookies_for_account`，§20 起**无兜底、不借用**） | 千帆商品笔记（``get_goods_note_page``，§19.1.1 实测）——**商品笔记任务**的源 |
 
-**为什么保留 creator 源**：创作者账号今天靠它同步；砍掉 = 只有 creator 令牌的
-账号彻底不能同步（回归）。用户原文只说「pc 和千帆」两个平台，实现是超集 —
-**每个可用源都同步**；要严格两平台，删源清单里一行即可。
+**`only="ark"` 时三条账号级副作用一律不写**（§44.2，它们是 creator 列表的位置/口径）：
+
+1. **不推进** `note_sync_cursor_ms`：那是 creator 列表的增量位置，被 ark 推进会让
+   普通笔记的增量同步**跳过**从未同步过的旧笔记；
+2. **不写** `profile_json.notes_count`：ark 平台报的 `total` 是**商品笔记子集数**；
+3. **不做**收尾的账号级详情补齐与对账（`mark_notes_missing` 的判据要求「能枚举全量
+   笔记的源完整翻完」，ark 只看得到子集 ⇒ 结论不成立，做了会把正常笔记误标「平台不存在」）。
 
 **PC 链路缺 ``xsec_token`` 时明确失败**（``XSEC_TOKEN_REQUIRED``），不静默同步
 空集 —— 「同步成功但 0 条」会把「令牌缺失」伪装成「账号没笔记」。
 
-**落库合并语义**（§19.3.2）：PC/creator 源先跑（有正文，整行覆盖）；
-ark 源后跑，**填空式合并**（只补空字段、raw_json 补键不冲键、无资产才下图）——
-直接覆盖会用空正文抹掉已落库的正文。
+**落库合并语义**（§19.3.2）：creator 源整行覆盖（有正文）；ark 源**填空式合并**
+（只补空字段、raw_json 补键不冲键、无资产才下图）—— 直接覆盖会用空正文抹掉已落库的正文。
 
 ## 风控（需求 N1 / 硬约束 C5 —— 2026-09-22 按设计 13 §21 修订）
 
@@ -40,8 +51,9 @@ ark 源后跑，**填空式合并**（只补空字段、raw_json 补键不冲键
   必须能停下，否则「取消上限」= 死循环。
 * **仍然禁**：不用 ``get_all_posted_notes`` / ``get_user_all_notes`` 这类
   **没有分页 / 限流插槽**的一次性全量方法（调用即失控）。**逐页翻到底不在此列。**
-* **时长代价**（§21.5）：1961 条 creator ≈ 66 页 ≈ 13 分钟；三源串行，
-  单次任务 30–45 分钟量级（改造前 ~20 秒）。
+* **时长代价**（§21.5）：1961 条 creator ≈ 66 页 ≈ 13 分钟；千帆商品笔记 ≈ 40 页 ≈ 8 分钟。
+  §44 拆分后**每个任务只跑一个源**（原来的「三源串行、单任务 30–45 分钟」已是历史口径），
+  两个任务由**各自的 worker 并行认领**（任务类型级并行，§42）。
 
 ## Creator 增强（需求 R3）
 
@@ -98,6 +110,14 @@ PAGE_GAP_SECONDS = 5.0
 MAX_PAGE_GAP_SECONDS = 60.0
 SOURCE_CREATOR = "creator"
 SOURCE_ARK = "ark"
+
+#: 源取值与「源 → 任务类型」映射（住在 `sync_task_service`，§44）**必须一一对应**：
+#: 任何一边漂移（改名 / 加源）都在 import 期报错，而不是运行时静默把商品笔记
+#: 写进普通笔记的任务类型里。
+assert set(sts.SOURCE_TASK_TYPES) == {SOURCE_CREATOR, SOURCE_ARK}, (
+    "sync_task_service.SOURCE_TASK_TYPES 与 note_sync_service 的源常量不一致："
+    "新增同步源要两个模块一起改"
+)
 
 
 class SyncFailure(Exception):
@@ -163,49 +183,64 @@ def _build_pc_adapter(adapter_factory, cookies: str, account: Optional[PlatformA
         return adapter_factory(cookies)
 
 
-def _note_sources(db: Session, account: PlatformAccount) -> list[dict[str, Any]]:
-    """本次同步的笔记源清单（§19.3.1 / §21.4）。**按 creator → ark 顺序**：
+def _note_sources(
+    db: Session, account: PlatformAccount, *, only: str = SOURCE_CREATOR
+) -> list[dict[str, Any]]:
+    """本次同步的笔记源清单（**单源**，§44.2 / §19.3.1 / §21.4）。
 
-    creator 先跑（条目带正文潜力，走整行覆盖）；ark 后跑（填空合并，补商品与指标）。
-    顺序写死在这里，不靠调用方传。**www 源已整体移除**（§21.4，2026-09-22）。
+    `only` 是**唯一的两把尺子**（缺省 `creator`）：
+
+    * ``"creator"`` ⇒ **创作者平台会话硬门禁**（无会话 ⇒ 返回 `[]`，上游给
+      `CREATOR_SESSION_REQUIRED`），返回 ``[creator]``；
+    * ``"ark"`` ⇒ **千帆 ark 令牌硬门禁**（`has_ark_token` 不成立 ⇒ 返回 `[]`，
+      上游给 `ARK_SESSION_REQUIRED`），返回 ``[ark]``；
+    * 其它取值 ⇒ **抛 `ValueError`**：源清单是路由开关，未知取值静默退化成某一种
+      会让「商品笔记同步」变成跑普通笔记（`account_types.normalize_sub_type` 同款纪律）。
+
+    ⚠️ **混合路径已删**（§44，2026-09-30 用户拍板「删旧混合路径」）：~~creator 跑完
+    再追加 ark 的填空合并~~不再存在 —— 一次任务只跑一个源，两条链路各自独立、各自
+    硬门禁、互不阻塞（DEF-044：同一语义不留两份）。
 
     可用性判据是**零请求**的 L2 口径（jar 形态），与登录态服务同一把尺子；
     能不能真取到由翻页时的第一次请求回答（DEF-057：不预判）。
+
+    ⚠️ `_sync_source` 的 pc 分支**保留代码但当前无调用方** —— www 源已整体移除
+    （§21.4）；要恢复 www 源时在这里加回三行即可（不要改 `_sync_source`）。
     """
-    sources: list[dict[str, Any]] = []
+    if only == SOURCE_CREATOR:
+        # **强制前置条件：必须有创作者平台登录会话**（2026-09-22 用户口径原文：
+        # 「同步笔记按钮该账号必须存在有效的创作者登录会话，不存在有效创作者平台
+        # 登录会话的提示补齐后再触发」）。
+        #
+        # www 源**整体不再参与**（同日用户口径：「www 源在这里是冗余的，则移除不要，
+        # 使用 creator 源」）：creator 源读的是同一批笔记且**更全**（含仅自己可见的），
+        # 而 www 源额外要一个 URL 级 `xsec_token` —— 那不是登录令牌，是网页版主页 URL
+        # 上的查询参数，账号卡片触发时拿不到 ⇒ 每轮白打一次平台请求 + 结果行里一条
+        # 看起来像故障的 `XSEC_TOKEN_REQUIRED`。
+        creator_cookies = _account_cookies(db, account.id, channel=CHANNEL_CREATOR)
+        if not has_creator_token(creator_cookies):
+            # 返回空 ⇒ 上层给**结构化**原因（`CREATOR_SESSION_REQUIRED`）。
+            # **刻意不退化成「用 ark 凑合」**：用户要的是「补齐后再触发」，
+            # 而不是「哪个源能用就用哪个」—— 后者会让「没创作者会话」表现为
+            # 「同步成功但只同步到商品笔记」。
+            return []
+        return [{"source": SOURCE_CREATOR, "kind": "creator", "cookies": creator_cookies}]
 
-    # **强制前置条件：必须有创作者平台登录会话**（2026-09-22 用户口径原文：
-    # 「同步笔记按钮该账号必须存在有效的创作者登录会话，不存在有效创作者平台
-    # 登录会话的提示补齐后再触发」）。
-    #
-    # www 源**整体不再参与**（同日用户口径：「www 源在这里是冗余的，则移除不要，
-    # 使用 creator 源」）：creator 源读的是同一批笔记且**更全**（含仅自己可见的），
-    # 而 www 源额外要一个 URL 级 `xsec_token` —— 那不是登录令牌，是网页版主页 URL
-    # 上的查询参数，账号卡片触发时拿不到 ⇒ 每轮白打一次平台请求 + 结果行里一条
-    # 看起来像故障的 `XSEC_TOKEN_REQUIRED`。
-    #
-    # ⚠️ `_sync_source` 的 pc 分支**保留代码但当前无调用方** —— 它是 `_fetch_page`
-    # 的合法源类型之一，要恢复 www 源时在这里加回三行即可（不要改 `_sync_source`）。
-    creator_cookies = _account_cookies(db, account.id, channel=CHANNEL_CREATOR)
-    if not has_creator_token(creator_cookies):
-        # 返回空 ⇒ 上层给**结构化**原因（`CREATOR_SESSION_REQUIRED`）。
-        # **刻意不退化成「用 ark 凑合」**：用户要的是「补齐后再触发」，
-        # 而不是「哪个源能用就用哪个」—— 后者会让「没创作者会话」表现为
-        # 「同步成功但只同步到商品笔记」。
-        return []
-    sources.append(
-        {"source": SOURCE_CREATOR, "kind": "creator", "cookies": creator_cookies}
+    if only == SOURCE_ARK:
+        # ark：**只认账号自己的 ark 通道**（与 `_probe_ark` 同一口径）。2026-09-22 起
+        # 「绑定表兜底」整条移除 —— 没有独立 ark 令牌的账号就是没有千帆源。
+        # §44：商品笔记任务里它是**唯一硬门禁**（原来只是混合任务的可选附加）。
+        from backend.app.services.shop_binding_service import qianfan_cookies_for_account
+
+        ark_cookies = qianfan_cookies_for_account(db, account.id)
+        if not has_ark_token(ark_cookies):
+            return []
+        return [{"source": SOURCE_ARK, "kind": "ark", "cookies": ark_cookies}]
+
+    raise ValueError(
+        f"未知的同步源 only={only!r}；已知取值：{SOURCE_CREATOR!r}（普通笔记）、"
+        f"{SOURCE_ARK!r}（商品笔记）。"
     )
-
-    # ark：**只认账号自己的 ark 通道**（与 `_probe_ark` 同一口径）。2026-09-22 起
-    # 「绑定表兜底」整条移除 —— 没有独立 ark 令牌的账号就是没有千帆源。
-    from backend.app.services.shop_binding_service import qianfan_cookies_for_account
-
-    ark_cookies = qianfan_cookies_for_account(db, account.id)
-    if has_ark_token(ark_cookies):
-        sources.append({"source": SOURCE_ARK, "kind": "ark", "cookies": ark_cookies})
-
-    return sources
 
 
 def _account_cookies(db: Session, account_id: int, *, channel: str = CHANNEL_WWW) -> str:
@@ -263,10 +298,10 @@ def _sync_goods_for_notes(db: Session, account: PlatformAccount, items: list[dic
         return 0
 
     from backend.app.adapters.xhs.qianfan_api_adapter import get_qianfan_api_adapter_factory
-    from backend.app.services.shop_binding_service import account_shop_id
+    from backend.app.services.shop_binding_service import has_ark_session
     from backend.app.services.shop_goods_service import sync_note_ids
 
-    if account_shop_id(db, account.id) is None:
+    if not has_ark_session(db, account.id):
         return 0
     try:
         result = sync_note_ids(db, account, note_ids, get_qianfan_api_adapter_factory())
@@ -2511,6 +2546,7 @@ def _sync_source(
     www_cookies: str = "",
     www_adapter: Any = None,
     backlog_work: int = 0,
+    writes_account_note_count: bool = True,
 ) -> dict[str, Any]:
     """**单个源**的翻页同步（**全量** + 限流等待 + 逐页落库，设计 13 §21）。
 
@@ -2528,6 +2564,11 @@ def _sync_source(
     ``backlog_work``（2026-09-28）：启动时该账号**本次任务能处理的**详情欠账条数
     （编排器算一次传进来：欠账总数 − 本地没令牌、处理不了的那些），
     用于算进度分母 `work_total`（见 `_update_progress` 的 `processed` / `work_total`）。
+
+    ``writes_account_note_count``（§44，2026-09-30）：本源的平台 `total` 是否代表
+    **账号笔记总数** —— creator 列表是全量 ⇒ `True`；ark 列表只有商品笔记（子集）
+    ⇒ `False`，否则 `profile_json.notes_count` 会被写成子集数（账号卡的「笔记数」
+    会显示成商品笔记数）。
     """
     from backend.app.api.platforms.xhs.crawl import _save_normalized_notes
 
@@ -2812,7 +2853,9 @@ def _sync_source(
         if kind == "creator" and account.sub_type == SUB_TYPE_CREATOR:
             goods_stored += _sync_goods_for_notes(db, account, items)
 
-        _store_notes_count(db, account, total)
+        if writes_account_note_count:
+            # §44：ark 列表的 `total` 是商品笔记子集数 ⇒ 不写（见上面 docstring）。
+            _store_notes_count(db, account, total)
         # 进度分母：有界同步不报 `total`（§35.18.6）—— `total` 本身仍照原样返回给编排器
         # （`_store_notes_count` / 多源聚合要的是「账号笔记数」，与进度分母不是一件事）。
         # `processed` / `work_total` 才是进度条看的那一对（单调，见 `_update_progress`）。
@@ -2872,8 +2915,9 @@ def _sync_with_task(
     mode: str = sts.SYNC_MODE_AUTO,
     time_from_ms: int = 0,
     time_to_ms: int = 0,
+    only: str = SOURCE_CREATOR,
 ) -> dict[str, Any]:
-    """多源编排（§19.3）：每个源各同步各的，互不阻塞。
+    """单源编排（§44；原「多源编排」的多源遍历保留 —— 单源只是它的一个特例）。
 
     ``mode``：``full`` = 全量重扫 + upsert；``incremental`` = 只取比游标新的笔记；
     ``auto``（默认）= 按账号有没有同步历史自动选。详见设计 13 §17 / §22。
@@ -2881,10 +2925,18 @@ def _sync_with_task(
     ``time_from_ms`` / ``time_to_ms``（§23）：用户在弹窗里选的时间区间，
     ``(0, 0)`` = 不设界。与 ``mode`` 是 **and** 关系，不是替代关系。
 
+    ``only``（§44）：``"creator"`` = 普通笔记任务；``"ark"`` = 商品笔记任务。
+    ark 链路下**三条账号级副作用一律不写**（游标 / 笔记总数 / 账号级详情补齐 + 对账，
+    理由见 `_note_sources` 的 docstring）：它们是「creator 列表的位置与口径」，
+    ark 只看得到商品笔记子集，写进去会造出「增量跳过旧笔记」「账号笔记总数变成子集数」
+    「正常笔记被误标平台不存在」三类静默错误。
+
     **全部源都失败**（或一个源都没有）⇒ 抛 `SyncFailure`，`code` 统一
     ``NOTE_SOURCES_UNAVAILABLE``，message 是**分源多原因**（每个源一行），
     前端结果行原样展示；部分成功 ⇒ `done` + note 说明（设计 13 §9）。
     """
+    #: 是否写「账号级副作用」（§44）：只有普通笔记任务（creator 列表）拥有这些口径。
+    account_wide = only == SOURCE_CREATOR
     limiter = get_rate_limiter()
     # §19.14：页内联详情补齐用的 www 会话**在这里解析一次**（适配器构造零平台请求）。
     # 账号没有 www 会话 ⇒ `www_adapter=None` ⇒ 每页不补、一条请求都不发，任务行
@@ -2899,8 +2951,21 @@ def _sync_with_task(
         www_adapter = get_xhs_pc_api_adapter_factory()(www_cookies)
     # §22：``auto``（默认）在这里落成 full / incremental。判据是游标，不是
     # 「表里有没有行」—— 见 `resolve_note_sync_mode` 的说明。
-    mode = sts.resolve_note_sync_mode(db, account.id, mode)
+    # §44：**商品笔记链路不读 creator 游标**（ark 看的是另一份列表，且千帆
+    # `goods-note/list` 没有可比的 note 游标）⇒ `auto` 一律落 `full`（幂等重扫 +
+    # 填空合并），用户选了时间区间时 `bounded` 照旧成立、仍在链路内早停。
+    if account_wide:
+        mode = sts.resolve_note_sync_mode(db, account.id, mode)
+    else:
+        mode = sts.normalize_mode(mode)
+        if mode == sts.SYNC_MODE_AUTO:
+            mode = sts.SYNC_MODE_FULL
     incremental = mode == sts.SYNC_MODE_INCREMENTAL
+    # §44：**商品笔记链路没有「增量」这一档**（没有可比游标）—— 显式传 incremental
+    # 也按全量跑：游标语义不存在时「早停」只能靠时间区间表达（`time_from_ms`）。
+    # 这里不静默改变用户可见结果：`bounded` 仍由时间区间决定，进度分母口径同 §43。
+    if not account_wide:
+        incremental = False
     # §35.18.6：有界同步 = 增量或用户选了时间区间 ⇒ 会早停，进度分母不可知。
     bounded = incremental or bool(time_from_ms) or bool(time_to_ms)
     # 增量从游标起；全量从 0 起（扫全部，但**仍然**把观测到的最新时间写回游标，
@@ -2942,6 +3007,10 @@ def _sync_with_task(
     backlog_work = max(
         0, backlog_total - _pending_hydration_without_token_count(db, account)
     )
+    # §44：商品笔记链路**不跑账号级详情补齐**（见下）⇒ 欠账不属于本次工作量，
+    # 计进分母会让进度条永远差最后一截（§43 的「卡住」形态）。
+    if not account_wide:
+        backlog_work = 0
     # §35.18：本轮**页内联阶段已经试过详情**的本地笔记主键 —— 账号级收尾要跳过它们
     # （同一任务不对同一篇打两次详情；也让 `detail_failed` 不会把同一篇数两遍）。
     attempted_note_pks: set[int] = set()
@@ -2965,6 +3034,8 @@ def _sync_with_task(
                 www_cookies=www_cookies,
                 www_adapter=www_adapter,
                 backlog_work=backlog_work,
+                # §44：ark 链路不写账号级笔记总数（平台报的是商品笔记子集数）。
+                writes_account_note_count=account_wide,
             )
         except SyncFailure as exc:
             reason = f"{exc.code}: {exc.message}" if exc.code else exc.message
@@ -3089,7 +3160,13 @@ def _sync_with_task(
     # 这条路径**可中断（逐篇检查点）、可续跑（失败不写 `hydrated_at`）**，
     # 不要求用户一次等完；进度写进任务行 `payload.progress.detail_done/detail_total`
     # （§35.17.3 的进度泵据此更新「任务日志」的进度条）。
-    if www_adapter is None:
+    #
+    # §44：第 ② 段与对账**只属于普通笔记任务**（账号级口径）。商品笔记任务只做了 ①
+    # （页内联补它**本轮枚举到**的行），这里整段跳过 —— 不是失败，是**本任务的边界**，
+    # 且必须如实说一句（静默跳过正是「不知道发生了什么」的源头，DEF-058）。
+    if not account_wide:
+        warnings.append("本次为商品笔记同步：不做账号级正文补齐与对账（由「同步笔记」承担）")
+    elif www_adapter is None:
         if stored:
             warnings.append("该账号没有网页版（www）会话，本轮同步的笔记未补正文与图集")
     else:
@@ -3148,14 +3225,20 @@ def _sync_with_task(
             "请在网页版（xiaohongshu.com）登录该账号后重新同步"
         )
     remaining = _pending_hydration_count(db, account)
-    if remaining:
+    if remaining and account_wide:
         # 走到这里还有欠账 ⇒ 只可能是「被限流 / 被取消 / 没有 www 会话」三种
         # （正常跑完的账号候选集会被清空）。如实报数，别让用户以为已经全补完了。
+        # ⚠️ §44：商品笔记链路**不跑**账号级补齐 ⇒ 这个数在那边是**预期内**的，
+        # 上面那句「不做账号级正文补齐与对账」已经说清，不再重复报一次（同一件事
+        # 报两遍会让 note 变噪声，用户反而读不出哪条才是行动项）。
         warnings.append(f"正文待补齐 {remaining} 条（下次同步继续补）")
 
     # §27：对账融合 —— 用**本轮已枚举**的平台集合标记「本地有、平台无」的行。
     # 零额外平台请求（枚举结果同步链路已经有了）。判据前提（枚举完整 + 有全量
     # 枚举源）不满足 ⇒ 本轮不对账，任务行明说，不把「没对账」伪装成「对过了」。
+    # ⚠️ §44：商品笔记链路**整段不参与**（ark 只看得到商品笔记子集 ⇒ 「平台没有它」
+    # 的结论不成立，做了会把正常笔记误标「三方不存在」）；它不参与这件事已由上面
+    # 那句边界说明告知，这里不再追加「对账未执行」的噪声。
     if full_list_complete:
         from backend.app.services import reconcile_service
 
@@ -3174,7 +3257,7 @@ def _sync_with_task(
             if outcome["unknown_time"]:
                 line += f"；{outcome['unknown_time']} 条取不到发布时间未纳入对账"
             warnings.append(line)
-    else:
+    elif account_wide:
         warnings.append("对账未执行：平台列表未完整枚举（限流/兜底/失败），不下「平台没有」的结论")
 
     note = "；".join(warnings)
@@ -3189,7 +3272,7 @@ def _sync_with_task(
         note=note,
         sources=source_results,
     )
-    if cursor_advanced:
+    if cursor_advanced and account_wide:
         # D13：游标只在「本次同步落库成功」之后推进。落库失败时游标保持不动，
         # 下一轮从头重取，不会漏数据（DEF-043 的守卫）。
         #
@@ -3197,6 +3280,11 @@ def _sync_with_task(
         # 本来就观测到了最新的 `publish_time`，不写游标 = 游标恒为 0 = 自动模式
         # 永远选全量 = 「增量化」这件事永远不生效。旧实现写成
         # `if incremental and cursor_advanced`，正是这个缺口。
+        #
+        # ⚠️ §44：商品笔记链路**不写**游标 —— `note_sync_cursor_ms` 是 **creator 列表**
+        # 的增量位置（见 `resolve_note_sync_mode`）。ark 报的是商品笔记子集，拿它推进
+        # 游标 ⇒ 普通笔记的增量同步会认为「已经追平」，**跳过从未同步过的旧笔记**
+        # （静默漏数据，比报错难查得多）。
         sts.save_note_cursor(db, account.id, last_cursor_ms, cursor_note_id)
     if stopped_by_limit:
         logger.info("note sync stopped by rate limit (account=%s)", account.id)
@@ -3393,12 +3481,18 @@ def run_note_sync(
     mode: str = sts.SYNC_MODE_AUTO,
     time_from_ms: int = 0,
     time_to_ms: int = 0,
+    only: str = SOURCE_CREATOR,
 ) -> dict[str, Any]:
-    """执行一次笔记同步（供后台线程 / 调度器调用）。**不向上抛异常。**
+    """执行一次笔记同步（供账号任务 worker / 调度器调用）。**不向上抛异常。**
+
+    ``only``（§44）：``"creator"`` = 同步普通笔记（缺省，任务类型 `xhs_note_sync`）；
+    ``"ark"`` = 同步商品笔记（任务类型 `xhs_goods_note_sync`）。同一个执行体服务两条
+    链路（DEF-044），差别只在源清单与由此决定的 task_type。
 
     ``mode`` 默认 ``auto``（§22）：账号没有同步历史 ⇒ 全量；有 ⇒ 增量。
     返回 ``{task_id, stored, total, goods_stored, note, error, status}``。
     """
+    task_type = sts.task_type_for_source(only)
     db = SessionLocal()
     task: Optional[Task] = None
     try:
@@ -3413,7 +3507,7 @@ def run_note_sync(
             task = sts.create_task(
                 db,
                 user_id=user_id or account.user_id,
-                task_type=sts.NOTE_SYNC_TASK_TYPE,
+                task_type=task_type,
                 account_id=account_id,
                 source=source,
                 max_pages=max_pages,
@@ -3446,15 +3540,16 @@ def run_note_sync(
         task.finished_at = None
         db.commit()
 
-        # §19.3：按源清单同步（www / creator / ark 各自独立、互不阻塞）。
-        # 源清单是**零请求**的 L2 口径；一个源都没有 ⇒ 「均不可用」的结构化失败
-        # （用户口径：提示登录 pc 和千帆后再次触发）。
-        sources = _note_sources(db, account)
+        # §44：按**单源**清单同步（`only` 决定是普通笔记还是商品笔记）。
+        # 源清单是**零请求**的 L2 口径；清单为空 ⇒ 给**结构化**原因让用户知道该补什么。
+        sources = _note_sources(db, account, only=only)
         if not sources:
-            # 源清单为空 = **只有一种可能：创作者平台会话缺失**（§21.4 起 www 源
-            # 已不参与，ark 不足以单独成行）。给**结构化**原因，让用户知道该补什么。
             reason = (
                 "CREATOR_SESSION_REQUIRED: 缺少创作者平台登录会话，请补齐后再试。"
+                if only == SOURCE_CREATOR
+                # §44：商品笔记任务的门禁是 ark 令牌（原来它只是混合任务的可选附加源，
+                # 拿不到就静默少跑一个源 —— 这正是拆分要修的语义）。
+                else "ARK_SESSION_REQUIRED: 缺少千帆（ark）登录令牌，请补登后再试。"
             )
             _finish(task, status=sts.STATUS_FAILED, stored=0, total=None, goods_stored=0,
                     error=reason, note=reason)
@@ -3475,6 +3570,7 @@ def run_note_sync(
             mode=mode,
             time_from_ms=time_from_ms,
             time_to_ms=time_to_ms,
+            only=only,
         )
         return {"task_id": task.id, "status": task.status, "error": "", **result}
     except SyncFailure as exc:
@@ -3506,15 +3602,16 @@ def start_note_sync(
     time_from_ms: int = 0,
     time_to_ms: int = 0,
 ) -> dict[str, Any]:
-    """建任务行 + 唤醒账号任务 worker，**立即返回**任务摄要（HTTP 请求不阻塞）。
+    """「**同步普通笔记**」入口（§44）：建任务行 + 唤醒账号任务 worker，立即返回摄要。
 
     §35.16（2026-09-27 用户口径「同步商品的任务日志没有新增」）：执行**不再起独立线程**
     （原 `note-sync-{account_id}`），改由 `account_task_service` 的账号任务 worker 认领 ——
     串行（不并发打平台）、进程退出后可续跑（行是 `pending`，重启自动接上）。
     防重口径与响应形状**逐字不变**（调用方零感知）。
 
-    防重（需求 N3）：该账号已有未完成的笔记同步 → 返回**已有任务**
-    （``reused=True``），不新建、不打平台。
+    防重（需求 N3）：该账号已有未完成的**同类**同步 → 返回**已有任务**
+    （``reused=True``），不新建、不打平台。⚠️ 防重按 `task_type` 分别成立 ⇒
+    「普通笔记在跑」**不**阻塞「商品笔记」（§44 要的就是两条腿能各自跑）。
 
     ``profile_url`` / ``xsec_token`` 是 **www 源**的 URL 级令牌，**不写进任务 payload**：
     任务行会被前端读到，没有理由留第二份。§21.4 起 www 源**整体移除** ⇒ 两者已是
@@ -3524,21 +3621,83 @@ def start_note_sync(
     弹窗里选的时间区间（§23），``(0, 0)`` = 不设界 —— **三者都必须写进任务行**
     （§35.16：执行体从行重建参数，不落库就丢）。
     """
+    return _start_sync_task(
+        account_id,
+        user_id=user_id,
+        task_type=sts.NOTE_SYNC_TASK_TYPE,
+        source=source,
+        max_pages=max_pages,
+        page_size=page_size,
+        mode=mode,
+        time_from_ms=time_from_ms,
+        time_to_ms=time_to_ms,
+    )
+
+
+def start_goods_note_sync(
+    account_id: int,
+    *,
+    user_id: int,
+    max_pages: Optional[int] = sts.DEFAULT_MAX_PAGES,
+    page_size: int = sts.DEFAULT_PAGE_SIZE,
+    source: str = "manual",
+    mode: str = sts.SYNC_MODE_AUTO,
+    time_from_ms: int = 0,
+    time_to_ms: int = 0,
+) -> dict[str, Any]:
+    """「**同步商品笔记**」入口（§44）：与 `start_note_sync` **逐字同构**，只换任务类型。
+
+    同构是刻意的（DEF-044）：两条链路的差别只有 `task_type`（⇒ 源清单与门禁），
+    防重 / 建行 / 唤醒 worker / 响应形状必须一致，否则又会长出两套会各自漂移的实现。
+
+    没有 ``profile_url`` / ``xsec_token``：那两个是 www 源的 URL 级令牌，商品笔记链路
+    用不到（ark 令牌来自账号的千帆通道）。
+    """
+    return _start_sync_task(
+        account_id,
+        user_id=user_id,
+        task_type=sts.GOODS_NOTE_SYNC_TASK_TYPE,
+        source=source,
+        max_pages=max_pages,
+        page_size=page_size,
+        mode=mode,
+        time_from_ms=time_from_ms,
+        time_to_ms=time_to_ms,
+    )
+
+
+def _start_sync_task(
+    account_id: int,
+    *,
+    user_id: int,
+    task_type: str,
+    source: str,
+    max_pages: Optional[int],
+    page_size: int,
+    mode: str,
+    time_from_ms: int,
+    time_to_ms: int,
+) -> dict[str, Any]:
+    """建任务行 + 唤醒账号任务 worker 的**唯一实现**（两个公开入口共用，§44）。
+
+    ⚠️ 三个参数（`mode` / `time_from_ms` / `time_to_ms`）**必须落进任务行**：
+    执行体从行重建参数（§35.16），漏写 = 用户选的「全量 / 时间区间」静默丢失。
+    """
     db = SessionLocal()
     try:
-        existing = sts.find_active_task(db, sts.NOTE_SYNC_TASK_TYPE, account_id)
+        existing = sts.find_active_task(db, task_type, account_id)
         if existing is not None:
             return {"reused": True, **sts.task_summary(existing)}
         task = sts.create_task(
             db,
             user_id=user_id,
-            task_type=sts.NOTE_SYNC_TASK_TYPE,
+            task_type=task_type,
             account_id=account_id,
             source=source,
             max_pages=max_pages,
             page_size=page_size,
             # §35.16：执行改由账号任务 worker 从**任务行**重建参数 ⇒ 同步语义必须落库
-            # （原线程版靠 args 传，行里没有）。漏写 = 用户选的「全量 / 时间区间」静默丢失。
+            # （原线程版靠 args 传，行里没有）。
             extra={"mode": mode, "time_from_ms": time_from_ms, "time_to_ms": time_to_ms},
         )
         db.commit()

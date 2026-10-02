@@ -32,14 +32,18 @@ from sqlalchemy.orm import Session
 from backend.app.adapters.xhs.qianfan_api_adapter import (
     get_qianfan_api_adapter_factory,  # noqa: F401  重导出：`from ...xhs.qianfan import ...` 与测试打桩继续有效
 )
-from backend.app.api.platforms.xhs.pc import _cookies_to_string
 from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user, get_owned_active_account
 from backend.app.core.time import shanghai_now
+from backend.app.api.ai import get_image_ai_client
+from backend.app.services.ai_service import ImageAiClient
+from backend.app.services.business_provider_keys import (
+    BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE,
+)
 from backend.app.models.platform_account import PlatformAccount
 from backend.app.models.note import Note, NoteAsset
-from backend.app.models.shop import NoteGoods, Shop
-from backend.app.services.account_service import store_channel_cookies
+from backend.app.models.shop import NoteGoods
+from backend.app.models.task import Task
 from backend.app.services.shop_health_service import check_account_health
 from backend.app.services import scheduled_job_runner, sync_task_service
 from backend.app.services import shop_goods_sync_service
@@ -57,25 +61,13 @@ from backend.app.services.sync_task_service import (
 )
 from backend.app.services.note_cleanup_service import CandidateQuery, list_candidates
 from backend.app.services.shop_binding_service import (
-    ShopBindError,
-    account_for_shop,
-    account_shop_id,
-    bind_shop_for_account,
-    detach_shop,
     get_shop_state,
-    shop_for_account,
-    shops_for_user,
+    has_ark_session,
     synced_note_count,
 )
 from backend.app.models.user import User
 
 router = APIRouter(prefix="/xhs/qianfan", tags=["xhs-qianfan"])
-
-
-class BindShopRequest(BaseModel):
-    platform_account_id: int
-    #: 千帆自己的 Cookie 串（含 `access-token-ark.xiaohongshu.com`）。
-    cookie_string: str = Field(min_length=8, max_length=8192)
 
 
 class ShopAccountRequest(BaseModel):
@@ -160,8 +152,8 @@ class ShopItemsDeleteRequest(BaseModel):
     写在 `shop_products_service.delete_items` 的 docstring 里（唯一一份）。
 
     入参用 **`item_id`（平台商品 ID）** 而不是本地自增主键：跨页勾选时前端手里
-    就是 `item_id`（表格 `rowKey`），且店铺维度已经由 `shop_id_fk` 限定 ⇒ 传别人
-    店的 item_id 只会删到 0 行，不会越权。
+    就是 `item_id`（表格 `rowKey`），且归属维度已由 `platform_account_id` 限定 ⇒
+    传别的账号的 item_id 只会删到 0 行，不会越权。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -223,30 +215,6 @@ def _owned_account(db: Session, current_user: User, account_id: int) -> Platform
     return get_owned_active_account(db, current_user, account_id, platform="xhs")
 
 
-def _account_shop(db: Session, account_id: int) -> Shop | None:
-    """账号关联的千帆店铺实体。
-
-    **唯一实现**在 `services/shop_binding_service.shop_for_account` —— 2026-09-22
-    `shop_account_bindings` 整表移除后，「账号有没有店铺」由
-    `platform_accounts.shop_id_fk` 回答（服务层里带软删闸 + 租户闸）。
-    """
-    return shop_for_account(db, account_id)
-
-
-def _shop_from_seller_info(payload: Any) -> dict[str, str]:
-    """`/api/edith/seller/info/v2` → 展示所需的三个字段。
-
-    **白名单构造**，不整体透传：该响应里带 `user_email`（脱敏过的邮箱）、
-    `config_values`（含支付商户号）等与展示无关且敏感的内容（实测）。
-    """
-    data = payload.get("data") if isinstance(payload, dict) else None
-    data = data if isinstance(data, dict) else {}
-    return {
-        "shop_user_id": _first_text(data.get("user_id"), data.get("seller_id")),
-        "shop_name": _first_text(data.get("seller_name"), data.get("user_name")),
-    }
-
-
 def _fmt_state_time(value: Any) -> str:
     """`shop_state` 里的 ISO 时间 → 展示用 `YYYY-MM-DD HH:MM`；空 / 坏值 → 空串。"""
     from backend.app.services.shop_binding_service import parse_state_time
@@ -256,37 +224,36 @@ def _fmt_state_time(value: Any) -> str:
 
 
 def _account_shop_summary(db: Session, account: PlatformAccount) -> dict[str, Any]:
-    """账号的千帆店铺状态（**纯本地**，不打千帆）。
+    """账号的千帆能力概览（**纯本地**，不打千帆）。
 
-    响应字段与「绑定行时代」基本相同，三处变化（都是本轮口径要求）：
-    * **`shop_account_count` 已移除** —— 用户 2026-09-22 拍板店铺与账号 1:1，
-      「同店多账号」不再存在，这个计数恒为 1，留着只会误导界面；
-    * 店铺名 / 卖家 ID 来自 `shops` 表（不再是绑定行上的冗余字段）；
-    * `status` / `goods_note_total` / 时间字段来自 `account.shop_state`。
+    ## `bound` 字段名保留，语义已改（ADR-021 / 设计 18，2026-09-30）
+
+    用户 2026-09-30 口径：*「商品页走的本地数据库数据，不应该校验是否存在千帆店铺，
+    所有校验应该校验的是该小红书账号下是否存在千帆可用的会话」*。
+
+    ⇒ **`bound` 现在回答的是「本账号有没有可用的 `ark` 会话」**，而不是
+    「有没有绑店」。字段名刻意不变（省前端连带改），但语义写在这里，
+    前端提示语也必须跟着改（旧文案「请先绑定千帆店铺」现在是错的）。
+
+    * `shop_id_fk` 字段**保留但恒为 `None`** —— 店铺实体已退场。留着是给老前端
+      一个明确的空值，而不是让它 `KeyError`；新前端不该再读它。
+    * `shop_user_id` / `shop_name` 改从 `account.seller_id` / 账号昵称派生
+      （`seller_id` 是账号属性了，店铺名就是账号的千帆卖家名）。
+
+    ⚠️ **归属（seller_id）与能力（ark 令牌）是两件事**：有 `seller_id` 没有令牌
+    ⇒ 仍然 `bound=False`（调不了千帆）；有令牌没有 `seller_id` ⇒ `bound=True`
+    （能调，`seller_id` 等首次真调千帆时回填）。账号 9 就是后者。
     """
-    shop = _account_shop(db, account.id)
-    if shop is None:
-        return {
-            "platform_account_id": account.id,
-            "bound": False,
-            "shop_id_fk": None,
-            "shop_user_id": "",
-            "shop_name": "",
-            "status": "",
-            "status_message": "",
-            "goods_note_total": 0,
-            "synced_notes": 0,
-            "goods_synced_at": "",
-            "health_checked_at": "",
-        }
     state = get_shop_state(account)
+    has_ark = has_ark_session(db, account.id)
     return {
         "platform_account_id": account.id,
-        "bound": True,
-        #: 店铺实体主键（`shops.id`）。1:1 之后它同时也是「这个账号的店」的标识。
-        "shop_id_fk": shop.id,
-        "shop_user_id": shop.seller_id,
-        "shop_name": shop.shop_name,
+        #: ⚠️ **语义已改为「有可用的 ark 会话」**（不是「已绑店」）。见 docstring。
+        "bound": has_ark,
+        #: 已退场字段（店铺实体不存在了）。恒 `None`，只为老前端不 `KeyError`。
+        "shop_id_fk": None,
+        "shop_user_id": account.seller_id or "",
+        "shop_name": _shop_display_name(db, account),
         "status": str(state["status"]),
         "status_message": str(state["status_message"]),
         "goods_note_total": int(state["goods_note_total"] or 0),
@@ -297,63 +264,37 @@ def _account_shop_summary(db: Session, account: PlatformAccount) -> dict[str, An
     }
 
 
-@router.post("/bind")
-def bind_shop(
-    payload: BindShopRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-    adapter_factory=Depends(get_qianfan_api_adapter_factory),
-):
-    """绑定千帆店铺：校验 Cookie 可用，再把**关系与凭据各写各的**。
+def _shop_display_name(db: Session, account: PlatformAccount) -> str:
+    """店铺展示名 —— 店铺不是实体了，所以取「账号昵称」（千帆卖家名与之同源）。
 
-    | 写什么 | 写哪 |
-    |---|---|
-    | 账号 ↔ 店铺关系 | `platform_accounts.shop_id_fk`（1:1 + UNIQUE，被占用 → 409） |
-    | 千帆凭据 | **账号自己的通道**（`account_cookie_versions`；平台由 jar 形态判定） |
-    | 状态 | `platform_accounts.shop_state`（刚验过 → `active`） |
-
-    不逆向千帆登录（需求 §九 范围外）：Cookie 由用户在浏览器登录千帆后自行导入。
+    千帆 `get_seller_info()` 回的 `seller_name` 在登录时就写进了账号昵称的
+    更新链路；这里不额外存一份名字（**同一语义不留两份实现**）。
     """
-    account = _owned_account(db, current_user, payload.platform_account_id)
-    cookies = _cookies_to_string(payload.cookie_string)
+    return (account.nickname or "").strip()
 
-    adapter = adapter_factory(cookies)
-    success, message, raw_payload = adapter.get_seller_info()
-    if not success:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=message or "千帆登录态校验失败",
-        )
-    shop = _shop_from_seller_info(raw_payload)
-    if not shop["shop_user_id"] and not shop["shop_name"]:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="千帆响应中既没有店铺名也没有店铺 ID，无法确认绑定对象",
-        )
 
-    # ①~③ 店铺实体 + 1:1 闸 + 关系 + 状态：**唯一实现**在 service 层
-    #     （扫码 / 邮箱密码登录两条路走的是同一份 —— 2026-09-26 收敛）。
-    try:
-        bind_shop_for_account(
-            db,
-            user_id=current_user.id,
-            account=account,
-            shop_user_id=shop["shop_user_id"],
-            shop_name=shop["shop_name"],
-        )
-    except ShopBindError as exc:
-        raise HTTPException(
-            status_code=exc.status_code,
-            detail={"code": exc.code, "message": str(exc)},
-        ) from exc
+@router.post("/bind", include_in_schema=False)
+def bind_shop_removed():
+    """**已退场**（ADR-021 / 设计 18，2026-09-30）。
 
-    # ④ 凭据：写账号自己的通道。**平台由 jar 形态判定**（千帆 jar 带
-    #    `access-token-ark.*` ⇒ 落 `ark` 通道），不由这里写死 —— 写死 = 造第二份真相源。
-    store_channel_cookies(db=db, account=account, cookies_text=cookies)
+    原 `POST /qianfan/bind` 校验 Cookie 可用 → 建店铺实体 → 写 1:1 关系 → 存凭据。
+    关系（`shop_id_fk`）与店铺实体一起退场后，**没有「绑定」这个动作了**：
+    千帆能力现在完全由「本账号有没有可用的 `ark` 会话」决定 —— 用户要开通，就在
+    账号矩阵里给该账号**导入千帆（ark）登录态**，那是凭据操作。
 
-    db.commit()
-    db.refresh(account)
-    return _account_shop_summary(db, account)
+    `include_in_schema=False` + 显式 `410`：端点曾经存在但已不再是能力，所以
+    ① 不再进 OpenAPI（后端端点计数只算真实能力）；② 留着老的 `POST /bind` 路径
+    给老前端一个**能读懂的答复**，而不是 `404` 猜半天。
+    """
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail={
+            "code": "QIANFAN_BINDING_REMOVED",
+            "message": "「绑定千帆店铺」已随店铺实体一并退场（ADR-021）。"
+                       "千帆能力现在由该账号自己的 ark 登录态决定，请在账号矩阵导入其千帆登录态。",
+        },
+    )
+
 
 @router.post("/health-check")
 def check_shop_health(
@@ -368,14 +309,17 @@ def check_shop_health(
     页面上点一次就得到确定答案，不必等下一个周期。
 
     * 只读：探测失败也只是把账号的千帆状态标 `invalid`，**不动已同步的映射**（不毁数据）；
-    * 越权：账号不属于当前用户 → 404（与 bind/unbind 同一口径）；
-    * 未绑定 → 404，提示先绑定（没有店铺就没有可巡检的对象）。
+    * 越权 / 软删：账号不属于当前用户或已删除 → 404（`get_owned_active_account` 统一承担）；
+    * **没有 `ark` 会话 → 404 `ARK_SESSION_REQUIRED`**（ADR-021：判据是令牌，不是绑店）。
     """
     account = _owned_account(db, current_user, payload.platform_account_id)
-    if account_shop_id(db, account.id) is None:
+    if not has_ark_session(db, account.id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="该账号还没有绑定千帆店铺，先绑定再巡检。",
+            detail={
+                "code": "ARK_SESSION_REQUIRED",
+                "message": "该账号没有可用的千帆（ark）登录态，先在账号矩阵导入其千帆登录态再巡检。",
+            },
         )
 
     result = check_account_health(db, account, adapter_factory)
@@ -415,19 +359,10 @@ def note_cleanup_candidates(
     | 条件可配置 | 时间区间、30 日阅读开关与上限、三项阈值全部可选；不是写死全库 |
     | 分页 | `page` / `page_size`（上限 100），响应带 `total` |
     | 诚实边界 | `coverage.pool`（本地映射条数）/ `coverage.goods_note_total`（店铺笔记总数）必须一起暴露 |
-    | 鉴权 | 账号不属于当前用户 → 404；未绑定千帆 → 404（没有绑定就没有候选池） |
+    | 鉴权 | 账号不属于当前用户 → 404；**无千帆登录态门禁** —— 纯本地读，未登录也能判定已同步的数据 |
     | 只读 | 不写任何表 |
     """
     account = _owned_account(db, current_user, payload.platform_account_id)
-    shop = _account_shop(db, account.id)
-    if shop is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "code": "QIANFAN_BINDING_REQUIRED",
-                "message": "尚未绑定千帆商家后台，无法判定笔记流量。请先绑定并同步商品笔记。",
-            },
-        )
 
     try:
         publish_from = _datetime_from(payload.publish_from, end_of_day=False)
@@ -460,7 +395,7 @@ def note_cleanup_candidates(
     result = list_candidates(db, account.id, query, page=payload.page, page_size=payload.page_size)
     return {
         "platform_account_id": payload.platform_account_id,
-        "shop_name": shop.shop_name,
+        "shop_name": _shop_display_name(db, account),
         "queried_at": shanghai_now().strftime("%Y-%m-%d %H:%M:%S"),
         **result,
     }
@@ -505,106 +440,45 @@ def _datetime_from(value: str | None, *, end_of_day: bool) -> datetime | None:
     return parsed.replace(tzinfo=SHANGHAI_TZ)
 
 
-@router.post("/unbind")
-def unbind_shop(
-    payload: ShopAccountRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """解除**本账号**的绑定并清掉它的本地商品映射（凭据不保留）。
+@router.post("/unbind", include_in_schema=False)
+def unbind_shop_removed():
+    """**已退场**（ADR-021 / 设计 18，2026-09-30）。
 
-    1:1 之后只剩本账号一件事：清空 `platform_accounts.shop_id_fk`、删掉本账号的
-    本地商品映射与千帆状态；店铺行若因此没人用了，一并删掉 —— 否则「解绑了却还在
-    店铺列表里」会被读成「还有一个账号绑着」。
+    原动作是「清 `shop_id_fk` + 删本账号的商品映射 + 删店铺行」。关系与店铺实体
+    都不在了 ⇒ 无「解绑」对象。停用某账号的千帆能力 = 在账号矩阵
+    **移除该账号的 ark 登录态**（凭据操作）。
 
-    别的账号的数据**一律不动**；店铺若仍被本租户的存活账号引用（历史残留），
-    也如实回报，不谎报 0。
+    与 `POST /bind` 同样保留显式 `410`（见其 docstring），不进 OpenAPI。
     """
-    account = _owned_account(db, current_user, payload.platform_account_id)
-    shop_pk = account.shop_id_fk
-    if shop_pk is None:
-        return {"platform_account_id": payload.platform_account_id, "bound": False, "removed": 0}
-
-    removed = detach_shop(db, account)
-    #: 只数**本租户存活账号**（DEF-054 / DEF-055）：把别的租户的残留行算进来，
-    #: 用户解绑后仍会看到「店铺还有账号绑着」，与实际情况不符。
-    remaining = (
-        1
-        if account_for_shop(db, shop_pk, user_id=current_user.id) is not None
-        else 0
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail={
+            "code": "QIANFAN_BINDING_REMOVED",
+            "message": "「解绑千帆店铺」已随店铺实体一并退场（ADR-021）。"
+                       "要停用千帆能力，请在账号矩阵移除该账号的千帆登录态。",
+        },
     )
-    db.commit()
-    return {
-        "platform_account_id": payload.platform_account_id,
-        "bound": False,
-        "removed": removed,
-        #: 店铺是否还有别的账号绑着（页面据此决定要不要刷新店铺信息）。
-        "shop_remaining_accounts": remaining,
-    }
 
 
-class ShopListRequest(BaseModel):
-    """列当前用户的店铺（1:1 的读侧）。全字段可选。"""
+@router.post("/shops", include_in_schema=False)
+def list_shops_removed():
+    """**已退场**（ADR-021 / 设计 18，2026-09-30）。
 
-    #: 只看与某个账号相关的店铺（不传 = 全部）。
-    platform_account_id: int | None = None
+    原读侧「列当前用户的店铺、每个店挂哪个账号」建立在 `shops` 表上；店铺不再是
+    实体 ⇒ 这个视图无对象。前端商品列表页的账号选择器现在**直接用账号列表**
+    （账号即归属），不再需要「店铺 → 账号」的映射。
 
-
-@router.post("/shops")
-def list_shops(
-    payload: ShopListRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """当前用户有哪些千帆店铺、每个店铺挂着**哪个账号**（**纯本地**，不打千帆）。
-
-    | 约定 | 做法 |
-    |---|---|
-    | 零平台请求 | 只读 `shops` / `platform_accounts` / `shop_note_goods` |
-    | **1:1** | 用户 2026-09-22 口径：一个店铺只挂一个账号，所以 `accounts` 至多一项 |
-    | 覆盖度口径一致 | `synced_notes` 是该账号的映射条数；`goods_note_total` 取它的 `shop_state` |
-    | 不合并用户 | 只看当前用户的店铺；别的用户绑同一个千帆 seller 是另一个实体 |
-
-    消费方：商品列表页的账号选择器（标注每个创作者账号属于哪个店铺）。
+    `include_in_schema=False`：不再是能力，不进 OpenAPI；显式 `410` 给老前端
+    一个能读懂的答复而不是 `404`。
     """
-    if payload.platform_account_id:
-        account = _owned_account(db, current_user, payload.platform_account_id)
-        shops = [shop for shop in shops_for_user(db, current_user.id) if shop.id == account.shop_id_fk]
-    else:
-        shops = shops_for_user(db, current_user.id)
-
-    out: list[dict[str, Any]] = []
-    for shop in shops:
-        #: 租户闸 + 软删闸（DEF-054 / DEF-055）都由 `account_for_shop` 承担：
-        #: 少了它们，一条别的用户 / 已删账号的残留引用会被当成这个店的占用者，
-        #: 界面就会显示一个**当前用户根本选不到**的账号。
-        account = account_for_shop(db, shop.id, user_id=current_user.id)
-        state = get_shop_state(account) if account is not None else None
-        out.append(
-            {
-                "shop_id_fk": shop.id,
-                "seller_id": shop.seller_id,
-                "shop_id": shop.shop_id,
-                "shop_name": shop.shop_name,
-                "status": shop.status,
-                #: `account_count` **已移除**（2026-09-22）：同店多账号被否决后它恒 0/1，
-                #: 留着只会让人以为还有「多个账号读同一个店」的场景。
-                "accounts": (
-                    []
-                    if account is None
-                    else [
-                        {
-                            "platform_account_id": account.id,
-                            "nickname": account.nickname or "",
-                            "binding_status": str(state["status"]),
-                        }
-                    ]
-                ),
-                "synced_notes": synced_note_count(db, account.id) if account is not None else 0,
-                "goods_note_total": int(state["goods_note_total"] or 0) if state else 0,
-            }
-        )
-    return {"count": len(out), "shops": out}
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail={
+            "code": "QIANFAN_SHOPS_REMOVED",
+            "message": "「店铺列表」已随店铺实体一并退场（ADR-021）。请改用账号列表"
+                       "（账号即数据归属键）。",
+        },
+    )
 
 
 @router.post("/item-notes")
@@ -627,15 +501,8 @@ def item_notes(
     发布态，弹窗里与内容库同源展示）。
     """
     account = _owned_account(db, current_user, payload.platform_account_id)
-    shop_pk = account_shop_id(db, account.id)
-    if shop_pk is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": "QIANFAN_BINDING_REQUIRED",
-                "message": "尚未绑定千帆商家后台，无法反查该商品挂了哪些笔记。",
-            },
-        )
+    # ⚠️ 无千帆登录态门禁：本接口**纯本地**（`note_goods` join `notes`，零平台
+    # 请求），未登录千帆也能看已落库的挂链关系（用户 2026-09-30 口径）。
 
     state = get_shop_state(account) or {}
     # ⚠️ 2026-09-27（§26.7）：关系表按**平台 ID** 挂 ⇒ 直接按 `item_id` 查，
@@ -800,7 +667,7 @@ def shop_items(
     | 有界 | 一次一页，`page_size` 上限 100（Pydantic 钳制）；本地分页无风控问题 |
     | 状态白名单 | 未知 `status` → 400 `QIANFAN_STATUS_UNSUPPORTED`，不猜枚举 |
     | 挂链笔记数（v1.34） | `note_count_op`（`lt`/`lte`/`eq`/`gte`/`gt`，**默认 `lt`**）+ `note_count`；口径 = `note_goods` 关系表（与列表该列同一个数）；未知比较符 → 400 `QIANFAN_NOTE_COUNT_OP_UNSUPPORTED`；`note_count` 为空 ⇒ 不筛 |
-    | 绑定门禁 | 未绑店 → 400 `QIANFAN_BINDING_REQUIRED`（与 item-notes 同口径；**不需要千帆令牌** —— 读本地不涉及凭据） |
+    | 归属门禁 | **无门禁** —— 本页读**本地台账** `shop_products`（零平台请求），未登录千帆也能看已同步的数据；登录态只决定「能不能同步新数据」 |
     | 金额单位 | 入参是**元**、出参是**分**，换算只发生在 `_price_fen()` |
     | 时效诚实 | `queried_at` = 本店 `max(synced_at)`（台账同步时间，不是查询时间）；平台总数 / 同步时间另回 `products_total` / `products_synced_at` |
 
@@ -835,16 +702,10 @@ def shop_items(
             },
         )
 
-    shop_id = account_shop_id(db, account.id)
-    if shop_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": "QIANFAN_BINDING_REQUIRED",
-                "message": "尚未绑定千帆商家后台，无法读取商品列表。请先绑定后再同步商品。",
-            },
-        )
-
+    # ⚠️ **本页无千帆登录态门禁**（用户 2026-09-30 明确口径）：商品列表读的是
+    # **本地台账**（`shop_products`，零平台请求），未登录千帆也能看已同步的数据。
+    # 登录态只决定「能不能从平台同步新数据」，不决定「本地已有数据能不能读」——
+    # 无登录态就拦下整页 = 把已落库的数据锁死，是错的。
     try:
         time_from = _epoch_millis(payload.create_time_from, end_of_day=False)
         time_to = _epoch_millis(payload.create_time_to, end_of_day=True)
@@ -866,18 +727,17 @@ def shop_items(
         db,
         account,
         payload,
-        shop_id_fk=int(shop_id),
+        platform_account_id=account.id,
         from_ms=time_from,
         to_ms=time_to,
         price_from_fen=_price_fen(payload.price_from),
         price_to_fen=_price_fen(payload.price_to),
     )
-    shop = _account_shop(db, account.id)
     state = get_shop_state(account)
     return {
         "platform_account_id": payload.platform_account_id,
         "source": "local",
-        "shop_name": shop.shop_name if shop is not None else "",
+        "shop_name": _shop_display_name(db, account),
         "status": status_key,
         "status_label": status_label,
         "page_no": page["page_no"],
@@ -908,26 +768,19 @@ def shop_items_delete(
 
     | 约定 | 做法 |
     |---|---|
-    | 删什么 | 只删本店 `shop_products` 的选中行；**平台商品不动**（SDK 无商品删除接口） |
-    | 键 | `item_id`（平台商品 ID）；店铺维度由 `shop_id_fk` 限定 ⇒ 传别人的 item_id 只会删 0 行 |
+    | 删什么 | 只删本账号 `shop_products` 的选中行；**平台商品不动**（SDK 无商品删除接口） |
+    | 键 | `item_id`（平台商品 ID）；归属维度由 `platform_account_id` 限定 ⇒ 传别人的 item_id 只会删 0 行 |
     | 空 | `item_ids` 去重去空白后为空 → 400 `QIANFAN_ITEM_IDS_REQUIRED`（不静默成功） |
     | 上限 | `> MAX_BATCH_DELETE` → 400 `QIANFAN_ITEM_IDS_TOO_MANY`（不静默截断） |
-    | 门禁 | 未绑店 → 400 `QIANFAN_BINDING_REQUIRED`（与 `/items` 同口径）；越权 → 404 |
+    | 门禁 | **无门禁** —— 删的是**本地台账**行（零平台请求），未登录千帆也能删本地数据；越权 → 404 |
     | 连带 | `note_goods` 关系行**一并删**（⚠️ 2026-09-23 用户口径「删除商品时也需要删除笔记与商品的关联关系」，**取代** v1.36 的「关系行不动」；理由：关系指向已删商品就是孤儿行，与 §26.6 同一个病） |
 
     返回 `deleted` 是**实际**删除行数（`rowcount`），与 `requested` 对照即可看出
-    有没有传进来不存在 / 别的店的 item_id —— 这里不假定「请求几条就删了几条」。
+    有没有传进来不存在 / 别的账号的 item_id —— 这里不假定「请求几条就删了几条」。
     """
     account = _owned_account(db, current_user, payload.platform_account_id)
-    shop_id = account_shop_id(db, account.id)
-    if shop_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": "QIANFAN_BINDING_REQUIRED",
-                "message": "尚未绑定千帆商家后台，无法删除台账商品。请先绑定后再操作。",
-            },
-        )
+    # ⚠️ 无千帆登录态门禁：删的是**本地台账行**（零平台请求），与 `/items` 同口径
+    # （用户 2026-09-30：本地数据读 / 删不需要登录态）。
 
     # 去重保序：勾选框重复给同一个 item_id（跨页勾选、手改请求）不该删两次、
     # 也不该把「请求条数」算虚 —— `requested` 是校验过的**有效**条数。
@@ -957,7 +810,7 @@ def shop_items_delete(
         )
 
     deleted = shop_products_service.delete_items(
-        db, shop_id_fk=int(shop_id), item_ids=item_ids
+        db, platform_account_id=account.id, item_ids=item_ids
     )
     return {"deleted": deleted, "requested": len(item_ids), "item_ids": item_ids}
 
@@ -977,33 +830,25 @@ def item_detail(
 
     | 错误 | 语义 |
     |---|---|
-    | 404 | 账号不存在 / 不属于当前用户，或本店没有这个商品 |
-    | 400 `QIANFAN_BINDING_REQUIRED` | 未绑定千帆（没有店铺就没有台账） |
+    | 404 | 账号不存在 / 不属于当前用户，或本账号没有这个商品 |
+
+    ⚠️ **无千帆登录态门禁**：详情读本地台账（`detail_json`），零平台请求，
+    与 `/items` 同口径 —— 未登录千帆也能看已同步的商品详情。
     """
     account = _owned_account(db, current_user, payload.platform_account_id)
-    shop_id = account_shop_id(db, account.id)
-    if shop_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": "QIANFAN_BINDING_REQUIRED",
-                "message": "尚未绑定千帆商家后台，无法读取商品详情。请先绑定后再同步商品。",
-            },
-        )
 
     detail = shop_products_service.item_detail(
-        db, shop_id_fk=int(shop_id), item_id=payload.item_id
+        db, platform_account_id=account.id, item_id=payload.item_id
     )
     if detail is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="本地台账里没有这个商品（可能还没同步到它）",
         )
-    shop = _account_shop(db, account.id)
     return {
         "platform_account_id": payload.platform_account_id,
         "item_id": payload.item_id,
-        "shop_name": shop.shop_name if shop is not None else "",
+        "shop_name": _shop_display_name(db, account),
         **detail,
     }
 
@@ -1064,12 +909,13 @@ def sync_shop_goods(
     失败的商品下轮同步时重试。
     """
     account = _owned_account(db, current_user, payload.platform_account_id)
-    if account_shop_id(db, payload.platform_account_id) is None:
+    if not has_ark_session(db, account.id):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
-                "code": "QIANFAN_BINDING_REQUIRED",
-                "message": "尚未绑定千帆商家后台，无法同步商品。请先绑定后再同步。",
+                "code": "ARK_SESSION_REQUIRED",
+                "message": "该账号没有可用的千帆（ark）登录态，无法同步商品。"
+                           "先在账号矩阵导入其千帆登录态后再同步。",
             },
         )
 
@@ -1147,3 +993,170 @@ def sync_shop_goods_status(
         user_id=current_user.id,
         job_key=JOB_KEY_SHOP_GOODS_SYNC,
     )
+
+
+class GenerateDetailImageRequest(BaseModel):
+    """商品详情图生成请求（设计 17 §13.3.3，v2.1）。
+
+    ⚠️ **刻意不给 `image_url`**：商品图由后端按 `item_id` 从本地台账取。
+    让前端传 URL = 前端可传任意 URL 让后端去下载（SSRF 面），且台账里就有真值 ——
+    多一份「传的和台账不一致」的静默分叉。
+    """
+
+    platform_account_id: int
+    item_id: str = Field(min_length=1, max_length=64)
+    #: 用户补充要求；为空 ⇒ 后端按商品标题/规格拼默认提示词（不硬编码在端点里，
+    #: 见 `_default_detail_image_prompt`）。
+    prompt: str = Field(default="", max_length=2000)
+
+
+def _default_detail_image_prompt(item: dict[str, Any], skus: list[dict[str, Any]]) -> str:
+    """按商品信息拼默认提示词（用户没填 `prompt` 时用）。
+
+    只用**台账里真实存在**的字段（标题 / 规格名 / 价格带），缺值就不写进提示词 ——
+    编造卖点等于替用户宣称商品没有的属性。
+    """
+    title = str(item.get("title") or "").strip()
+    parts = [f"电商商品详情图，商品：{title}" if title else "电商商品详情图"]
+    variant_names = [
+        str(sku.get("variant_name") or "").strip()
+        for sku in skus
+        if str(sku.get("variant_name") or "").strip()
+    ]
+    if variant_names:
+        # 去重保序，最多取 4 个（再多提示词会失控）
+        seen: list[str] = []
+        for name in variant_names:
+            if name not in seen:
+                seen.append(name)
+        parts.append("可选规格：" + "、".join(seen[:4]))
+    parts.append("竖版长图构图，干净背景，突出商品主体与卖点排版")
+    return "；".join(parts)
+
+
+@router.post("/generate-detail-image")
+def generate_detail_image(
+    payload: GenerateDetailImageRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    image_ai_client: ImageAiClient = Depends(get_image_ai_client),
+):
+    """**生成商品详情图**（设计 17 §13.3.3，v2.1；用户口径 2026-10-01）。
+
+    「商品列表 → 商品详情 → 生成商品详情图」这条链路的执行体。
+
+    ## 为什么必须后端代理（不能前端直连服务商）
+
+    1. 服务商 `api_key` 在服务端（`llm_gateway_configs`），**绝不下发前端**；
+    2. 商品图是**千帆 CDN 直链**，服务商侧取不到 ⇒ 必须由后端取商品图作参考图送入；
+    3. 出图要落 `aigc_media_assets` 溯源（发布时平台要求 `aigcTaskId`）。
+
+    ## 业务点与错误口径
+
+    走 `generate_product_detail_image` 业务点（**与「生成配图」是两个业务点**：
+    配图服务笔记正文，详情图服务商品 —— 提示词与尺寸口径都不同，可分别挂服务商）。
+    失败一律**结构化、不回落**（同 `ai.py::_business_model_context`）。
+    """
+    from backend.app.models.generation import AigcMediaAsset
+    from backend.app.api.ai import _business_model_context
+
+    account = _owned_account(db, current_user, payload.platform_account_id)
+
+    detail = shop_products_service.item_detail(
+        db, platform_account_id=account.id, item_id=payload.item_id
+    )
+    if detail is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="本账号的商品台账里没有这个商品（先同步商品再试）",
+        )
+
+    images = [url for url in (detail.get("images") or []) if url]
+    if not images:
+        # 如实报缺：没有商品图就没有参考图，**不凭空生成一张冒充商品图**
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "PRODUCT_IMAGE_MISSING",
+                "message": "这个商品还没有同步到图片，先执行「同步商品」补齐图集再试",
+            },
+        )
+
+    # 业务点 → 服务商（不回落；未配置 / 类型不符 ⇒ 400 结构化）。
+    # ⚠️ 复用 `ai.py::_business_model_context`（**同一份**错误映射实现）：
+    # 自己再写一遍 `resolve + except LLMGatewayError → 400` = 同一语义两份实现（DEF-044），
+    # 两份会在「新增错误码」时分叉。
+    model_config, api_key = _business_model_context(
+        db, current_user, BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE
+    )
+
+    prompt = (payload.prompt or "").strip() or _default_detail_image_prompt(
+        detail.get("item") or {}, detail.get("skus") or []
+    )
+
+    task = Task(
+        user_id=current_user.id,
+        platform="xhs",
+        task_type="ai_product_detail_image",
+        status="running",
+        progress=10,
+        payload={
+            "platform_account_id": account.id,
+            "item_id": payload.item_id,
+            "prompt": prompt,
+            "model_config_id": model_config.id,
+            "reference_images": images[:1],
+        },
+    )
+    db.add(task)
+    db.flush()
+
+    try:
+        result = image_ai_client.generate_image(
+            model_config=model_config,
+            api_key=api_key,
+            prompt=prompt,
+            # 参考图只送**首图**：商品图集动辄 10+ 张，全送会超服务商上限
+            # （且详情图以首图为主体是电商惯例）。
+            reference_images=images[:1],
+        )
+    except Exception as exc:  # noqa: BLE001 - 服务商五花八门，一律结构化转出
+        task.status = "failed"
+        task.progress = 100
+        task.payload = {**(task.payload or {}), "error": str(exc)}
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"生成商品详情图失败：{exc}",
+        ) from exc
+
+    task.status = "completed"
+    task.progress = 100
+
+    url = result.get("url") or ""
+    asset = AigcMediaAsset(
+        user_id=current_user.id,
+        asset_type="image",
+        # ⚠️ 缺值口径：服务商没回本地路径时留空串（**不拿 url 冒充 local_path** ——
+        # 那是两个语义，冒充会让「素材库」显示一条不存在的本地文件）。
+        local_path=result.get("local_path") or "",
+        url=url or None,
+        prompt=prompt,
+        model_name=model_config.model_name,
+    )
+    db.add(asset)
+    db.flush()
+    task.payload = {**(task.payload or {}), "asset_id": asset.id}
+    db.commit()
+    db.refresh(asset)
+
+    return {
+        "url": url,
+        "asset": {
+            "id": asset.id,
+            "local_path": asset.local_path,
+            "url": asset.url,
+            "prompt": asset.prompt,
+            "model_name": asset.model_name,
+        },
+    }

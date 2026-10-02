@@ -182,7 +182,7 @@ def mark_notes_missing(
 
 def mark_goods_missing(
     db: Session,
-    shop_pk: int,
+    account_id: int,
     platform_item_ids: Iterable[str],
     *,
     time_from_ms: int = 0,
@@ -194,7 +194,8 @@ def mark_goods_missing(
     `shop_products.item_id` 在不在 ``platform_item_ids`` 里，只认这一把尺子 ——
     标题 / 价格 / 状态会变，不参与匹配；`create_time` 只用于**范围判定**。
 
-    ``shop_pk`` = 账号的店铺实体主键（`platform_accounts.shop_id_fk`，1:1 §20）。
+    ``account_id`` = 账号主键（`shop_products.platform_account_id`，ADR-021：
+    归属键即隔离键，商品直接挂账号）。
     完整**全量**商品同步本来就会删「本次未出现」的行（§19.4：完整才删）⇒ 标记
     通道主要作用于**区间 / 增量**同步（范围外不删、范围内多出的行打标记）。
     """
@@ -205,7 +206,7 @@ def mark_goods_missing(
     marked = 0
     healed = 0
     unknown_time = 0
-    for row in db.scalars(select(ShopProduct).where(ShopProduct.shop_id_fk == shop_pk)).all():
+    for row in db.scalars(select(ShopProduct).where(ShopProduct.platform_account_id == account_id)).all():
         stamp = _local_goods_time_ms(row)
         if stamp <= 0:
             unknown_time += 1

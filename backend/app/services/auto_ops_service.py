@@ -25,12 +25,12 @@ from __future__ import annotations
 import random
 from typing import Any, Optional
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.core.database import SessionLocal
 from backend.app.core.time import shanghai_now
-from backend.app.models import AiDraft, AutoTask, ModelConfig, PublishAsset, PublishJob, User
+from backend.app.models import AiDraft, AutoTask, PublishAsset, PublishJob, User
+from backend.app.services.llm_gateway_usage_service import FUNCTION_REWRITE, FUNCTION_TITLE
 
 
 class AutoTaskRunError(RuntimeError):
@@ -46,21 +46,6 @@ MAX_AUTO_IMAGES = 9
 
 #: 搜索候选池大小（按互动总量选优）
 CANDIDATE_POOL = 10
-
-
-def _get_text_model_for_user(db: Session, user_id: int) -> tuple[Optional[ModelConfig], str]:
-    config = db.scalars(
-        select(ModelConfig).where(
-            ModelConfig.user_id == user_id,
-            ModelConfig.model_type == "text",
-            ModelConfig.is_default.is_(True),
-        )
-    ).first()
-    if not config or not config.encrypted_api_key:
-        return None, ""
-    from backend.app.core.security import decrypt_text
-
-    return config, decrypt_text(config.encrypted_api_key)
 
 
 def _pick_best_note(candidates: list[dict[str, Any]]) -> dict[str, Any]:
@@ -145,9 +130,20 @@ def _run_pipeline(db: Session, *, auto_task_id: int, publish_mode: str) -> dict[
 
     # 5. AI 改写（默认文本模型缺失 / 改写失败 = 致命：无人值守路径要的是
     #    响亮的失败 + 退避，不是悄悄产出一篇抄袭稿） -------------------------- #
-    model_config, api_key = _get_text_model_for_user(db, user.id)
-    if model_config is None:
-        raise AutoTaskRunError("Default text model is not configured")
+    # v2.0（设计 17 §13.2.4）：一期「默认文本模型」随 `model_configs` 退场，
+    # 改由「平台 × 业务点」映射解析服务商。映射缺失 ⇒ 抛结构化错误
+    # （**不回落**：回落 = 用错服务商而不报错，同 §13.2.3 D4）。
+    from backend.app.services.business_provider_keys import BUSINESS_KEY_REWRITE_NOTE
+    from backend.app.services.llm_gateway_client import (
+        LLMGatewayError,
+        resolve_business_provider,
+    )
+
+    try:
+        context = resolve_business_provider(db, user, BUSINESS_KEY_REWRITE_NOTE, platform="xhs")
+    except LLMGatewayError as exc:
+        raise AutoTaskRunError(f"AI 服务商未配置：{exc}") from exc
+    model_config, api_key = context, context.api_key
     text_client = OpenAICompatibleTextClient()
     try:
         rewritten_body = text_client.rewrite_note(
@@ -156,6 +152,8 @@ def _run_pipeline(db: Session, *, auto_task_id: int, publish_mode: str) -> dict[
             title=draft.title,
             body=draft.body,
             instruction=task.ai_instruction or "改写为原创小红书笔记，保持核心信息，提升表达和语感",
+            platform="xhs",
+            function=FUNCTION_REWRITE,
         )
         draft.body = rewritten_body
     except Exception as exc:
@@ -169,6 +167,8 @@ def _run_pipeline(db: Session, *, auto_task_id: int, publish_mode: str) -> dict[
             title=draft.title,
             body=draft.body,
             count=1,
+            platform="xhs",
+            function=FUNCTION_TITLE,
         )
         if titles:
             draft.title = str(titles[0]).strip().strip('"').strip("'").strip("《》")

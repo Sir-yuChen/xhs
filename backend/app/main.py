@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from backend.app.api import accounts, ai, auth, auto_tasks, drafts, files, keyword_groups, login_sessions, model_configs, notes, notifications, publish, schedule, settings as settings_api, tasks, topics
+from backend.app.api import accounts, ai, auth, auto_tasks, drafts, files, keyword_groups, llm_gateway, llm_gateway_monitor, llm_prompts, login_sessions, model_configs, notes, notifications, publish, schedule, settings as settings_api, tasks, topics
 from backend.app.api.platforms import registry
 from backend.app.api.platforms.xhs import (
     analytics,
@@ -36,6 +36,11 @@ from backend.app.services.note_sync_service import (
     ensure_sync_worker,
     start_sync_worker_watchdog,
     stop_sync_worker_watchdog,
+)
+from backend.app.services.note_gen_llm_worker import (
+    ensure_llm_generate_worker,
+    start_llm_generate_worker_watchdog,
+    stop_llm_generate_worker_watchdog,
 )
 from backend.app.services.product_note_gen_service import (
     ensure_generate_worker,
@@ -81,6 +86,10 @@ async def lifespan(app: FastAPI):
     # 守活（DEF-069 同型缺口）：商品生成 worker（§31.10，单 / 批量生成都走队列）——
     # 一篇要跑三步 + 轮询 ~6–21s，线程死了同样无声停摆。同款看门狗补上。
     start_generate_worker_watchdog()
+    # 守活（DEF-069 同型）：LLM 生成队列 worker（设计 17 §7.4 / T6）—— 一次生成
+    # 要走「渲染 Prompt → 上游调用（60s 超时）→ 解析 → 护栏 → 落库」，是最长的一条；
+    # 线程被带走则队列里的项无人认领，`generation_records` 永远卡在 `queued`。
+    start_llm_generate_worker_watchdog()
     # 守活（DEF-069 同型）：账号级任务 worker（设计 13 §35.16）—— 笔记同步 / 商品同步
     # 此前是**每账号一条独立线程**，线程被带走 / 进程退出后 `running` 行永久卡住。
     start_account_task_watchdog()
@@ -107,6 +116,7 @@ async def lifespan(app: FastAPI):
     ensure_sync_worker()
     ensure_publish_worker()
     ensure_generate_worker()
+    ensure_llm_generate_worker()
     ensure_account_task_worker()
     try:
         yield
@@ -114,6 +124,7 @@ async def lifespan(app: FastAPI):
         stop_publish_worker_watchdog()
         stop_sync_worker_watchdog()
         stop_generate_worker_watchdog()
+        stop_llm_generate_worker_watchdog()
         stop_account_task_watchdog()
         stop_scheduler_watchdog()
         # 取 `app.state` 上的**当前**实例：看门狗可能已经换过一台。
@@ -147,6 +158,16 @@ def create_app() -> FastAPI:
     app.include_router(ai.router, prefix="/api")
     app.include_router(tasks.router, prefix="/api")
     app.include_router(model_configs.router, prefix="/api")
+    # LLM 网关配置（设计 17 §7.1，T1）：上游连接配置 CRUD + 健康探测（v1.7 纯 OpenAI 兼容，无外挂进程）
+    app.include_router(llm_gateway.router, prefix="/api")
+    # v1.9：使用平台枚举下发（§7.1：`GET /api/llm/providers/platforms`，独立前缀）
+    app.include_router(llm_gateway.providers_router, prefix="/api")
+    # v2.0（设计 17 §13.2.6）：「平台 × 业务点 → 服务商」映射端点
+    app.include_router(llm_gateway.business_router, prefix="/api")
+    # LLM 网关令牌映射 + 预警规则 + 用量展示（设计 17 §7.1a/§7.1b/§7.5，v1.6）
+    app.include_router(llm_gateway_monitor.router, prefix="/api")
+    # 提示词模块 / 模板（设计 17 §7.2，T2）：两表 CRUD + 渲染预览
+    app.include_router(llm_prompts.router, prefix="/api")
     app.include_router(topics.router, prefix="/api")
     app.include_router(notifications.router, prefix="/api")
     app.include_router(keyword_groups.router, prefix="/api")

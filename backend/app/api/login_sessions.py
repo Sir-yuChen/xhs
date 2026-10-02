@@ -27,11 +27,6 @@ from backend.app.services.account_service import (
     store_channel_cookies,
     upsert_platform_account_from_login,
 )
-from backend.app.services.shop_binding_service import (
-    ShopBindError,
-    bind_shop_for_account,
-    shop_for_account,
-)
 
 router = APIRouter(prefix="/xhs/login-sessions", tags=["xhs-login-sessions"])
 
@@ -268,37 +263,35 @@ def _qianfan_shop_user_info(shop: dict) -> dict:
     }
 
 
-def _bind_login_shop(
+def _record_login_seller(
     *,
     db: Session,
-    user_id: int,
     account: PlatformAccount,
     shop: dict,
 ) -> dict | None:
-    """登录成功后**顺手建立店铺关系**，返回失败原因（成功为 `None`）。
+    """登录成功后**顺手把千帆卖家身份写进账号字段**（ADR-021，2026-09-30）。
 
-    ## 为什么登录要建店（2026-09-26 用户实测）
+    ## 从「建店关系」变成「回填账号字段」
 
-    扫码 / 邮箱密码登录本来就已经把店铺信息读出来了（`get_shop_info`），
-    但只有 `POST /qianfan/bind`（手动粘 Cookie）会把它写进
-    `platform_accounts.shop_id_fk`。于是「补登千帆成功」之后，我的笔记页与
-    商品列表照旧显示「当前账号尚未绑定店铺」—— 用户刚在同一个弹窗里登录过，
-    页面却说没绑。登录成功就把它绑上，是这两件事本来就该有的关系。
+    2026-09-26 时的做法是登录后调 `bind_shop_for_account` 建 `shop_id_fk`，
+    因为那时「千帆可用」被实现成一条需要维护的店铺关系。ADR-021 之后：
+    店铺不再是实体（`shops` 表退场），`seller_id` 下沉为 `platform_accounts`
+    自己的字段 ⇒ 这一步退化成**一次纯字段回填**，不再是「建关系」。
 
-    **绑店失败（店已被别的账号占用等）不算登录失败**：令牌已经落库、账号已经建好，
-    只把原因回给界面（登录是登录，绑店是绑店，两件事的失败不该互相连带）。
+    为什么仍然要做：`seller_id` 是**归属**信息（这个千帆卖家属于哪个账号），
+    登录是唯一能免费、准确地拿到它的时刻（`get_shop_info()` 已经调用过）。
+    不回填的话，商品列表 / 概览里的「卖家 ID」会一直是空的。
+
+    ⚠️ 回填 `seller_id` **不影响能力判据** —— 能不能调千帆看的是 `ark` 令牌
+    （`has_ark_session`），令牌在 `upsert_platform_account_from_login` /
+    `store_channel_cookies` 那一步已经落库了，与本函数无关。
+
+    返回值恒为 `None`（保留函数签名与调用点的 `bind_error` 形状，减少连带改动）：
+    字段回填没有「被别的账号占用」这种冲突了，不存在需要用户处理的失败。
     """
-    try:
-        bind_shop_for_account(
-            db,
-            user_id=user_id,
-            account=account,
-            shop_user_id=str(shop.get("shop_user_id") or ""),
-            shop_name=str(shop.get("shop_name") or ""),
-        )
-    except ShopBindError as exc:
-        logger.warning("[login] qianfan shop bind skipped: %s", exc)
-        return {"code": exc.code, "message": str(exc)}
+    seller_id = str(shop.get("shop_user_id") or "").strip()
+    if seller_id and (account.seller_id or "").strip() != seller_id:
+        account.seller_id = seller_id
     return None
 
 
@@ -315,7 +308,8 @@ def _create_qianfan_account_from_login(
     且**什么都不写**（令牌都没落库 —— 建不了号的令牌对用户没有意义，
     落下去只会多一个「千帆已登录却不知道是谁」的半成品行）。
 
-    `bind_error` 只在「账号建好了但店铺没绑上」时非空（见 `_bind_login_shop`）。
+    `bind_error` 目前恒为 `None`（ADR-021 后「回填 `seller_id`」不再有冲突失败；
+    保留该返回位是为了不改动调用方的解包形状，见 `_record_login_seller`）。
     """
     try:
         shop = qianfan_adapter.get_shop_info(cookies)
@@ -333,7 +327,7 @@ def _create_qianfan_account_from_login(
         user_info=_qianfan_shop_user_info(shop),
         cookies_text=_dump_json(cookies),
     )
-    bind_error = _bind_login_shop(db=db, user_id=user_id, account=account, shop=shop)
+    bind_error = _record_login_seller(db=db, account=account, shop=shop)
     return account, action, shop, bind_error
 
 
@@ -438,16 +432,17 @@ def _renew_qianfan_from_login(
     与 PC / 创作者续期的差别只在**身份锚点**：千帆侧没有小红书用户身份，
     能对账的只有店铺（`shop_user_id`）。所以：
 
-    * 账号**已关联店铺**且双方都拿得到店铺 ID ⇒ 必须相等，否则拒绝写入
-      （§18.8 ③A 同型：宁可失败，不可把别人店的令牌写进这个账号）；
-    * 账号**没有关联店铺**（第一次补千帆令牌）⇒ 无法对账，放行 —— 用户点开的就是
-      这张卡片，扫码本身就是意图表达；写入的店铺名随响应回去，界面照实显示。
+    * 账号**已有 `seller_id`**（说明这个账号此前就属某个千帆卖家）且双方都拿得到
+      卖家 ID ⇒ 必须相等，否则拒绝写入（§18.8 ③A 同型：宁可失败，不可把别人店的
+      令牌写进这个账号）；
+    * 账号**没有 `seller_id`**（第一次补千帆令牌）⇒ 无法对账，放行 —— 用户点开的
+      就是这张卡片，扫码本身就是意图表达；写入的店铺名随响应回去，界面照实显示。
 
     ⚠️ 这条不对称是**刻意**的：它对「老账号扫错店」零容忍，对「新账号第一次补」
-    不添堵。哪天千帆能给出用户身份了，再把无绑定的分支也收紧。
+    不添堵。哪天千帆能给出用户身份了，再把无 seller_id 的分支也收紧。
 
-    ⚠️ 店铺关系读 `platform_accounts.shop_id_fk`（经 `shop_for_account`，
-    带租户闸 + 软删闸）—— `shop_account_bindings` 整表已于 2026-09-22 移除。
+    ⚠️ 归属信息现在读 `platform_accounts.seller_id`（ADR-021：店铺不再是实体，
+    `shop_id_fk` / `shops` 表已随 2026-09-30 迁移退场）。
     """
     try:
         account = get_owned_active_account(db, current_user, target_account_id)
@@ -466,18 +461,16 @@ def _renew_qianfan_from_login(
             "message": f"扫码成功，但用这份令牌读取千帆店铺信息失败（{exc}）—— 本次没有保存任何令牌。",
         }, None
 
-    linked_shop = shop_for_account(db, account.id)
     if (
-        linked_shop is not None
-        and shop.get("shop_user_id")
-        and (linked_shop.seller_id or "").strip()
-        and linked_shop.seller_id != shop["shop_user_id"]
+        shop.get("shop_user_id")
+        and (account.seller_id or "").strip()
+        and account.seller_id != shop["shop_user_id"]
     ):
         return None, "", {
             "code": RENEW_IDENTITY_MISMATCH,
             "message": (
                 f"扫到的是店铺「{shop.get('shop_name') or shop['shop_user_id']}」，"
-                f"与这个账号已绑定的「{linked_shop.shop_name or linked_shop.seller_id}」不是同一个。"
+                f"与这个账号已归属的「{account.seller_id}」不是同一个。"
                 "本次**没有保存任何令牌** —— 请重新扫描正确店铺的二维码。"
             ),
         }, None
@@ -485,10 +478,8 @@ def _renew_qianfan_from_login(
     cookies_text = _dump_json(cookies)
     channel = channel_for_cookies(cookies_text)
     store_channel_cookies(db=db, account=account, cookies_text=cookies_text)
-    # 登录即建店（2026-09-26）：**「第一次给这个账号补千帆令牌」这一支本来就没有
-    # 店铺关系**（上面那条对账在无绑定时刻意放行）—— 不在这里补上，用户补登成功
-    # 之后页面仍会说「当前账号尚未绑定店铺」。
-    bind_error = _bind_login_shop(db=db, user_id=current_user.id, account=account, shop=shop)
+    # ADR-021：不再「登录即建店」，改为**回填 seller_id**（见 `_record_login_seller`）。
+    bind_error = _record_login_seller(db=db, account=account, shop=shop)
     return account, channel, shop, bind_error
 
 

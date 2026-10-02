@@ -680,6 +680,15 @@ def _builtin_seed_defaults() -> dict[str, dict[str, Any]]:
             "cron": _cron_every_n_hours(hours("xhs_note_sync_interval_hours", 6)),
             "status": "active" if bool(getattr(settings, "xhs_note_sync_enabled", False)) else "paused",
         },
+        # §44（2026-09-30）：商品笔记同步独立成任务 ⇒ 独立开关 / 周期（与普通笔记同款兜底语义）。
+        "system.goods_note_sync": {
+            "cron": _cron_every_n_hours(hours("xhs_goods_note_sync_interval_hours", 6)),
+            "status": (
+                "active"
+                if bool(getattr(settings, "xhs_goods_note_sync_enabled", False))
+                else "paused"
+            ),
+        },
         "system.shop_goods_sync": {
             "cron": _cron_every_n_hours(hours("xhs_shop_goods_sync_interval_hours", 6)),
             "status": "active" if bool(getattr(settings, "xhs_shop_goods_sync_enabled", False)) else "paused",
@@ -1349,6 +1358,145 @@ def run_scheduled_note_syncs(
     return _targeted_outcome(results, what="笔记同步")
 
 
+def _run_targeted_goods_note_sync(account: Any) -> dict[str, Any]:
+    """定向（点名了账号）的单账号**商品笔记**执行 —— 与笔记侧**逐字同构**（§44）。
+
+    同构是刻意的（DEF-044）：两条链路的差别只有入口函数与 `task_type`，纪律
+    （建行 → worker 串行 → 等终态 → 记真实结果）必须一致。
+    """
+    from backend.app.services.note_queue_service import SOURCE_SCHEDULED
+    from backend.app.services.note_sync_service import start_goods_note_sync
+
+    summary = start_goods_note_sync(account.id, user_id=account.user_id, source=SOURCE_SCHEDULED)
+    task_id = summary.get("task_id")
+    if summary.get("reused"):
+        return {
+            "account_id": account.id,
+            "task_id": task_id,
+            "status": summary.get("status"),
+            "note": f"该账号已有商品笔记同步任务在跑（任务 #{task_id}），本次不重入",
+        }
+    return _targeted_result(account.id, _await_targeted_task(task_id))
+
+
+def _schedulable_goods_note_accounts(db: Any, accounts: list) -> list:
+    """能**无人值守**同步商品笔记的账号：**有 ark 通道**的账号（设计 13 §44）。
+
+    为什么判据是「通道」而不是 `sub_type`：商品笔记源（千帆 `goods-note/list`）只认
+    **账号自己的 ark 令牌**（`qianfan_cookies_for_account` + `has_ark_token`，
+    `_note_sources(only="ark")` 同一把尺子）。有 ark 令牌的账号既可能是 `creator`
+    也可能是 `qianfan` 链路，`sub_type` 不表达「有没有千帆令牌」。
+
+    这里只做**零请求**的 jar 形态预筛（L2 口径，与注释同步的纪律一致）：真能不能取到
+    由翻页时的第一次请求回答（DEF-057：不预判）。⚠️ 与 `run_scheduled_note_syncs` 的
+    `_schedulable_accounts`（要 `sub_type == "creator"`）是**两把不同的尺子**：
+    那个筛的是「有创作者会话」，这个筛的是「有千帆令牌」。
+    """
+    from backend.app.services.account_service import CHANNEL_ARK, channel_jars
+
+    schedulable = []
+    for account in accounts:
+        jars = channel_jars(db, account.id)
+        if CHANNEL_ARK not in jars:
+            continue
+        schedulable.append(account)
+    return schedulable
+
+
+def run_scheduled_goods_note_syncs(
+    user_id: int,
+    account_ids: Optional[Sequence[int]] = None,
+) -> Optional[dict[str, Any]]:
+    """调度器入口：给账号跑一次**商品笔记**同步（限行主本人，DEF-066；设计 13 §44）。
+
+    与 `run_scheduled_note_syncs` **逐字同构**，三处差异（其余纪律全部照搬）：
+
+    | 维度 | 本函数 | 差异说明 |
+    |---|---|---|
+    | 任务类型 | `xhs_goods_note_sync` | 独立成行 + 独立 worker（⇒ 与普通笔记**可并行**） |
+    | 预筛 | `_schedulable_goods_note_accounts`（**有 ark 通道**） | 那条筛的是创作者会话 |
+    | 省流判据 | **不适用**（恒跑） | `account_needs_note_sync` 判的是 **note 游标**，那是 creator 列表的位置，与商品笔记无关 |
+
+    定向模式（`account_ids` 非空）**不预筛** ⇒ 交给下游给结构化失败
+    （缺 ark 令牌 ⇒ 任务行 `ARK_SESSION_REQUIRED`）并进 `result`：用户点了名，
+    必须知道这个账号为什么没跑，而不是看到一条安静的「执行成功」。
+    """
+    from backend.app.models.platform_account import PlatformAccount
+    from backend.app.services import sync_task_service as sts
+    from backend.app.services.note_queue_service import SOURCE_SCHEDULED
+    from backend.app.services.note_sync_service import SOURCE_ARK, run_note_sync
+
+    targeted = bool(account_ids)
+    gap = _sync_account_gap_seconds()
+    results: list[dict[str, Any]] = []
+    db = SessionLocal()
+    try:
+        statement = select(PlatformAccount).where(
+            PlatformAccount.user_id == user_id,
+            PlatformAccount.platform == "xhs",
+            PlatformAccount.deleted_at.is_(None),
+        )
+        if account_ids:
+            statement = statement.where(PlatformAccount.id.in_(list(account_ids)))
+        accounts = db.scalars(statement).all()
+        if targeted:
+            candidates = list(accounts)
+        else:
+            candidates = _schedulable_goods_note_accounts(db, list(accounts))
+            skipped = len(accounts) - len(candidates)
+            if skipped:
+                logger.info(
+                    "scheduled goods-note sync: skipped %s account(s) without ark channel", skipped
+                )
+        for account in candidates:
+            try:
+                active = sts.find_active_task(
+                    db, sts.GOODS_NOTE_SYNC_TASK_TYPE, account.id
+                )
+                if active is not None:
+                    if targeted:
+                        results.append(
+                            {
+                                "account_id": account.id,
+                                "task_id": active.id,
+                                "status": active.status,
+                                "note": (
+                                    f"该账号已有商品笔记同步任务在跑（任务 #{active.id}，"
+                                    f"{active.status}），本次不重入"
+                                ),
+                            }
+                        )
+                    continue
+                if targeted:
+                    # 建行 + 账号任务 worker 串行执行 + 等终态（见 `_run_targeted_goods_note_sync`）。
+                    results.append(_run_targeted_goods_note_sync(account))
+                    continue
+                run_note_sync(
+                    account.id,
+                    user_id=account.user_id,
+                    source=SOURCE_SCHEDULED,
+                    # §44：商品笔记链路没有可比游标 ⇒ auto 在那边落 full（幂等重扫 + 填空合并）。
+                    mode=sts.SYNC_MODE_AUTO,
+                    only=SOURCE_ARK,
+                )
+            except Exception as exc:  # noqa: BLE001 - 单个账号失败不拖垮整轮
+                logger.warning(
+                    "scheduled goods-note sync for account %s failed: %s", account.id, exc
+                )
+                if targeted:
+                    results.append({"account_id": account.id, "status": "failed", "error": str(exc)})
+            if gap:
+                time.sleep(gap)
+    except Exception as exc:  # noqa: BLE001 - 调度器调用，必须吞异常
+        logger.error("run_scheduled_goods_note_syncs failed: %s", exc)
+    finally:
+        db.close()
+
+    if not targeted:
+        return None
+    return _targeted_outcome(results, what="商品笔记同步")
+
+
 def run_scheduled_shop_goods_syncs(
     user_id: int,
     account_ids: Optional[Sequence[int]] = None,
@@ -1368,7 +1516,7 @@ def run_scheduled_shop_goods_syncs(
     from backend.app.models.platform_account import PlatformAccount
     from backend.app.services import sync_task_service as sts
     from backend.app.services.note_queue_service import SOURCE_SCHEDULED
-    from backend.app.services.shop_binding_service import account_shop_id
+    from backend.app.services.shop_binding_service import has_ark_session
     from backend.app.services.shop_goods_sync_service import run_shop_goods_sync
 
     targeted = bool(account_ids)
@@ -1386,13 +1534,13 @@ def run_scheduled_shop_goods_syncs(
         accounts = db.scalars(statement).all()
         for account in accounts:
             try:
-                if account_shop_id(db, account.id) is None:
+                if not has_ark_session(db, account.id):
                     if targeted:
                         results.append(
                             {
                                 "account_id": account.id,
                                 "status": "failed",
-                                "error": "该账号未绑定店铺，无法同步商品（请先在店铺页绑定千帆店铺）",
+                                "error": "该账号没有可用的千帆登录态，无法同步商品（请先登录该账号的千帆）",
                             }
                         )
                     continue

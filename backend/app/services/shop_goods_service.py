@@ -32,7 +32,7 @@
   也**只在无过滤的翻页同步里更新** —— 带 `note_ids` 的响应里 `total` 是**过滤后条数**，
   拿它当店铺总数会把分母写坏（1968 → 2）。
 * **失败静默**：浏览页面时千帆挂了不该让人看不到笔记；补齐失败就照常渲染（商品缺）。
-  唯一的例外是凭据失效（`-13000`）：把绑定标 `invalid` 并写原因，让页面的失效提示接管。
+  唯一的例外是凭据失效（`CREDENTIAL_ERROR_CODES`）：把绑定标 `invalid` 并写原因，让页面的失效提示接管。
 
 ## 笔记 ↔ 商品关系（设计 13 §26.7，2026-09-27 改键）
 
@@ -186,9 +186,14 @@ def sync_note_ids(
 
     if not success:
         # 凭据失效要留下痕迹（页面据此显示「重新登录千帆」），其余失败静默。
-        # 判定读 **payload 的 code**（平台原文里没有"-13000"字样，只有中文提示）。
+        # 判定读 **payload 的 code**，且走 SDK 的**唯一判据**（DEF-084，2026-09-30）：
+        # 平台原文里没有 "-13000" 字样（只有中文提示），而过期回的是 **-13004** ——
+        # 原先硬编码 `code == -13000` 会把「令牌过期」当成普通失败 ⇒
+        # 页面既不提示重新登录、也不标 `invalid`，用户永远等不到那句提示。
+        from apis.xhs_qianfan_apis import XHS_Qianfan_Apis
+
         code = payload.get("code") if isinstance(payload, dict) else None
-        credential_invalid = code == -13000 or "-13000" in str(message)
+        credential_invalid = XHS_Qianfan_Apis.is_credential_error(code)
         if credential_invalid:
             set_shop_state(account, status="invalid", status_message=str(message)[:200])
             db.commit()
@@ -255,8 +260,8 @@ def products_by_item_id(
     **不要**在这里造占位行。
 
     `item_ids` 去重、分块（`IN (...)` 的变量数上限）。同一 `item_id` 在本用户下
-    理论上只有一行（`uq_shop_products_shop_item` 是 `(shop_id_fk, item_id)`，
-    跨店可能重名）⇒ 同 id 命中多行时**取 id 最小的那行**（稳定、可预期）。
+    理论上只有一行（`uq_shop_products_account_item` 是 `(platform_account_id, item_id)`，
+    ADR-021：账号即归属键，跨账号可能重名）⇒ 同 id 命中多行时**取 id 最小的那行**（稳定、可预期）。
     """
     wanted = [text for text in (_text(item) for item in item_ids) if text]
     wanted = list(dict.fromkeys(wanted))

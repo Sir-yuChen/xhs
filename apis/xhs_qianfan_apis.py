@@ -75,8 +75,35 @@ class XHS_Qianfan_Apis:
 
     base_url = "https://ark.xiaohongshu.com"
 
-    #: 平台语义：未登录 / 登录态失效。区分它与「接口变了」是本层的主要职责。
+    #: 平台语义：**凭据类**错误码（未登录 / 登录态失效）—— 全项目**唯一**的凭据判据来源。
+    #: 区分它与「接口变了」是本层的主要职责（判错方向 = 错归因：把「平台变了」说成
+    #: 「你需要重新登录」，用户重登一百次也没用）。
+    #:
+    #: | 码 | 平台语义 | 真机证据 |
+    #: |---|---|---|
+    #: | `-13000` | 缺失登录凭证 | 没带 jar / 带的是别的域的 jar（观隅好物账号 8） |
+    #: | `-13004` | 登录凭证**已过期** | 2026-09-30 实测（账号 8/10 令牌过期）：`msg="登录凭证已过期, 请重新登录"` |
+    #:
+    #: ⚠️ 只收**真机见过**的码 —— 新码要先复现再往里加（DEF-084 就是这么漏掉 `-13004` 的：
+    #: 只认 `-13000` ⇒ 过期被归成「未得到结论」⇒ 卡片永久停在「未检测」且没有重登入口）。
+    CREDENTIAL_ERROR_CODES: frozenset[int] = frozenset({-13000, -13004})
+
+    #: 兼容旧名（历史只认识「缺失登录凭证」那一个码）。
+    #: ⚠️ 新代码请用 `is_credential_error()` / `CREDENTIAL_ERROR_CODES`，别再用这个名字。
     CREDENTIAL_ERROR_CODE = -13000
+
+    @classmethod
+    def is_credential_error(cls, code: object) -> bool:
+        """平台是否明确答复「凭据问题」（缺失 / 过期）。**唯一实现**。
+
+        四个调用点都调它（三平台探针的 ark 分支 + 两条商品链路）——
+        同一个语义不留两份实现（DEF-044）：留两份就会出现「这里说过期、
+        那里说未检测」，且**加一个码要改四处、漏一处静默错**。
+        """
+        try:
+            return int(code) in cls.CREDENTIAL_ERROR_CODES
+        except (TypeError, ValueError):
+            return False
 
     def __init__(self, cookies: str):
         self.cookies = cookies or ""
@@ -136,7 +163,7 @@ class XHS_Qianfan_Apis:
         if not isinstance(payload, dict):
             return False, "千帆接口返回了非预期的响应体", None
         code = payload.get("code")
-        if code == self.CREDENTIAL_ERROR_CODE:
+        if self.is_credential_error(code):
             return False, str(payload.get("msg") or "千帆登录态失效"), payload
         if code not in (0, None) or payload.get("success") is False:
             return False, str(payload.get("msg") or f"千帆接口返回 code={code}"), payload
@@ -166,7 +193,7 @@ class XHS_Qianfan_Apis:
         if not isinstance(payload, dict):
             return False, "千帆接口返回了非预期的响应体", None
         code = payload.get("code")
-        if code == self.CREDENTIAL_ERROR_CODE:
+        if self.is_credential_error(code):
             return False, str(payload.get("msg") or "千帆登录态失效"), payload
         if code not in (0, 200, None) or payload.get("success") is False:
             return False, str(payload.get("msg") or f"千帆接口返回 code={code}"), payload

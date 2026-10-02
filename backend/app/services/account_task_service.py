@@ -26,7 +26,7 @@ running / 终态（它们本来就这么做），worker 只在**执行体崩了*
 > 不起子线程 ⇒ 一次只有一条账号级任务在跑，第二条保持 `pending`（用户看到「排队等待」
 > 而不是「并发打平台」）。」~~
 
-原实现只有**一条** worker 线程，而 `ACCOUNT_WORKER_TYPES` 里的两个类型由这**同一条**线程
+原实现只有**一条** worker 线程，而 `ACCOUNT_WORKER_TYPES` 里的类型由这**同一条**线程
 按顺序认领 ⇒ 「笔记同步跑着，商品同步只能等」——连**跨账号**都串行。这正是用户报障的
 「依旧无法并行」的**真身**（设计 13 §39 F3 早已点名，但那一版没落地）。
 
@@ -34,19 +34,20 @@ running / 终态（它们本来就这么做），worker 只在**执行体崩了*
 
 | 维度 | 口径 |
 |---|---|
-| 并行粒度 | **任务类型级**：`xhs_note_sync` 与 `xhs_shop_goods_sync` **各一条** worker 线程 ⇒ 同一账号的「同步笔记」与「同步商品」**真并行** |
+| 并行粒度 | **任务类型级**：`xhs_note_sync` / `xhs_goods_note_sync` / `xhs_shop_goods_sync` **各一条** worker 线程 ⇒ 同一账号的「同步笔记」「同步商品笔记」「同步商品」**真并行** |
 | 类内 | **仍逐个跑**（一条线程认领一个类型，FIFO）—— 同类型的两条任务不并发（风控口径，§38.3） |
 | 跨账号 | 同类型内仍**逐个跑**（与 §39 §281「每类任务一个，类内逐个跑」同口径） |
 | 额度 | 不变：限流桶按 `账号:源`（§38.3），并行不放大单账号速率，只是让**不同源**同时走 |
 
 ⚠️ **为什么不是「一条线程池 + 账号级互斥」**（`note_sync_service` 队列 worker 那种形态）：
-队列 worker 的项是**篇级**的（上千条、账号维度才是并行单位），而账号级任务只有两类、
+队列 worker 的项是**篇级**的（上千条、账号维度才是并行单位），而账号级任务只有这几类、
 每类同时最多一条在跑 —— 池 + 占用登记会引入「算占用 / 认领 / 登记必须同一把锁」那一整套
 复杂度（§38.3 实测踩过），换不来任何并行度。**每类一条线程**是能达成目标的最小形状。
 
 ⚠️ **认领范围比 `ACCOUNT_TASK_TYPES` 少一个**：`xhs_no_traffic_cleanup` 的建行 / 执行
 自成一套（破坏性写操作、当前由 `NO_TRAFFIC_CLEANUP_ENABLED` 显式关闭），本期只把它纳入
 「可见 + 复位 + 保留期」三件事，**不动它的执行路径**（改破坏性链路的风险 > 收益）。
+（§44 起新增的 `xhs_goods_note_sync` **在**认领范围内。）
 """
 from __future__ import annotations
 
@@ -69,6 +70,7 @@ ACCOUNT_WORKER_THREAD_PREFIX = "account-task-worker"
 #: worker **认领**的类型（§35.16.2）。**每个类型一条 worker 线程**（§42）。
 ACCOUNT_WORKER_TYPES: tuple[str, ...] = (
     "xhs_note_sync",
+    "xhs_goods_note_sync",
     "xhs_shop_goods_sync",
 )
 
@@ -191,6 +193,28 @@ def _dispatch_account_task(item_id: int) -> Optional[dict]:
             mode=mode,
             time_from_ms=time_from_ms,
             time_to_ms=time_to_ms,
+            # §44：普通笔记 = creator 源（硬门禁 = 创作者会话）。
+            only=note_sync_service.SOURCE_CREATOR,
+        )
+
+    if task_type == "xhs_goods_note_sync":
+        # §44（2026-09-30）：商品笔记同步 —— 与上面**同一个执行体**，只换源（ark）。
+        # 两者由**各自的 worker 线程**认领（`ACCOUNT_WORKER_TYPES`）⇒ 可并行。
+        from backend.app.services import note_sync_service
+
+        return note_sync_service.run_note_sync(
+            account_id,
+            task_id=item_id,
+            user_id=user_id,
+            max_pages=max_pages,
+            page_size=page_size,
+            source=source,
+            profile_url="",
+            xsec_token="",
+            mode=mode,
+            time_from_ms=time_from_ms,
+            time_to_ms=time_to_ms,
+            only=note_sync_service.SOURCE_ARK,
         )
 
     if task_type == "xhs_shop_goods_sync":
@@ -397,7 +421,7 @@ def _revive_missing_workers() -> bool:
         try:
             recovered = note_queue_service.recover_interrupted(
                 db,
-                # ⚠️ 复位用 **`ACCOUNT_TASK_TYPES`（三类）**而不是 `ACCOUNT_WORKER_TYPES`：
+                # ⚠️ 复位用 **`ACCOUNT_TASK_TYPES`（四类）**而不是 `ACCOUNT_WORKER_TYPES`：
                 # 清理任务虽不由本 worker 执行，但它的 `running` 行同样会因进程退出而卡住，
                 # 一并复位才不会留下永久行（DEF-048 同型）。
                 item_task_types=note_queue_service.ACCOUNT_TASK_TYPES,

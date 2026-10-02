@@ -22,11 +22,17 @@
 所以只在 `active/unknown → invalid` 的**那一次**写通知，后续轮次只刷新时间与原因。
 
 ## 2026-09-22：巡检对象从「绑定行」换成「账号」
+## 2026-09-30（ADR-021 / 设计 18）：换成「**有 ark 令牌的存活账号**」
 
-`shop_account_bindings` 整表移除后，巡检对象是**有 `shop_id_fk` 的存活账号**；
-状态与巡检时间落在 `platform_accounts.shop_state`（读写只经 `shop_binding_service`，
-避免 JSON 列「原地改不标脏」的坑）。取票走唯一入口
-`qianfan_cookies_for_account()`（只认账号自己的 `ark` 通道）。
+`shop_account_bindings` 整表移除后巡检对象是账号；`shops` 表与
+`platform_accounts.shop_id_fk` 随 ADR-021 一并退场 ⇒ 巡检对象进一步收敛为
+「**本账号 `ark` 通道有令牌的存活账号**」（判据 = `has_ark_session`，
+**不是**任何店铺归属）。状态与巡检时间落在 `platform_accounts.shop_state`
+（读写只经 `shop_binding_service`，避免 JSON 列「原地改不标脏」的坑）。取票走
+唯一入口 `qianfan_cookies_for_account()`（只认账号自己的 `ark` 通道）。
+
+⚠️ **账号名 ≠ 店名**：店铺实体退场后，通知 / 返回里的「店铺名」一律取
+`account.nickname`（账号自己的展示名）—— 这是**账号**的标识，不是店铺的标识。
 """
 from __future__ import annotations
 
@@ -77,13 +83,13 @@ def check_account_health(
         get_shop_state,
         qianfan_cookies_for_account,
         set_shop_state,
-        shop_for_account,
     )
 
     now = now or shanghai_now()
     previous = str(get_shop_state(account)["status"] or "unknown")
     factory = adapter_factory or get_qianfan_api_adapter_factory()
-    shop = shop_for_account(db, account.id)
+    # ADR-021：店铺实体已退场 ⇒ 展示名取账号自己的昵称（无店铺可解析）。
+    shop_name = (account.nickname or "").strip()
 
     cookies = qianfan_cookies_for_account(db, account.id)
     if not cookies:
@@ -103,7 +109,7 @@ def check_account_health(
             "status": "invalid",
             "message": MISSING_CREDENTIAL_REASON,
             "flipped_to_invalid": flipped,
-            "shop_name": shop.shop_name if shop is not None else "",
+            "shop_name": shop_name,
         }
 
     try:
@@ -115,14 +121,16 @@ def check_account_health(
     if success:
         set_shop_state(account, status="active", status_message="")
         # 店铺信息可能改名：只有平台确实给了才覆盖（拿不到就保持原值，不写空）。
+        # ADR-021：`seller_id` 已下沉为账号字段，直接写回账号（不再经店铺实体）。
         data = raw_payload.get("data") if isinstance(raw_payload, dict) else None
-        if isinstance(data, dict) and shop is not None:
+        if isinstance(data, dict):
             name = str(data.get("seller_name") or "").strip()
             seller_id = str(data.get("user_id") or "").strip()
             if name:
-                shop.shop_name = name
-            if seller_id and not shop.seller_id:
-                shop.seller_id = seller_id
+                account.nickname = name
+                shop_name = name
+            if seller_id:
+                account.seller_id = seller_id
     else:
         set_shop_state(account, status="invalid", status_message=_clamp_message(str(message or "")))
 
@@ -138,24 +146,22 @@ def check_account_health(
         "status": str(state["status"]),
         "message": str(state["status_message"]),
         "flipped_to_invalid": flipped,
-        "shop_name": shop.shop_name if shop is not None else "",
+        "shop_name": shop_name,
     }
 
 
 def _notify_invalid(db: Session, account: PlatformAccount) -> None:
-    """失效通知（铃铛）。文案必须**可执行**：说清是谁、哪家店、去做什么。"""
-    from backend.app.services.shop_binding_service import shop_for_account
+    """失效通知（铃铛）。文案必须**可执行**：说清是谁、去做什么。
 
-    shop = shop_for_account(db, account.id)
-    shop_name = shop.shop_name if shop is not None else ""
-    nickname = account.nickname or account.external_user_id
+    ADR-021：店铺退场后不再有「哪家店」这一维，文案收敛为「哪个账号的千帆登录态」。
+    """
+    nickname = (account.nickname or "").strip() or account.external_user_id
     db.add(
         Notification(
             user_id=account.user_id,
             title="千帆登录态失效",
             body=(
-                f"账号「{nickname or account.id}」绑定的千帆店铺"
-                f"「{shop_name or '（未命名店铺）'}」登录态已失效，"
+                f"账号「{nickname or account.id}」的千帆登录态已失效，"
                 "商品信息将无法更新，请重新登录千帆并导入令牌。"
             ),
             level="warning",
@@ -188,21 +194,28 @@ def run_shop_health_checks(
     account_ids: Optional[Sequence[int]] = None,
     user_id: int,
 ) -> dict[str, Any]:
-    """对**指定用户**已绑店的存活账号做一轮巡检（**有界**：默认只查到期的那几条）。
+    """对**指定用户**有千帆登录态的存活账号做一轮巡检（**有界**：默认只查到期的那几条）。
 
     ⚠️ `user_id` 必填（DEF-066，设计 15 §4.1.1）：账号查询恒带
     `PlatformAccount.user_id == user_id` —— 原「全库已绑店账号」的形态已废，
     一行触发只巡检行主本人的账号。`account_ids` 非空 = 只巡检指定账号
     （建 / 改双路归属校验，API 层收口）。
 
+    ⚠️ ADR-021：**巡检对象 = `has_ark_session()` 为真的存活账号**。判据从
+    「`shop_id_fk IS NOT NULL`」（店铺归属）换成「`ark` 通道有令牌」（能力），
+    因为**能不能探活只取决于有没有令牌**；归属与能力是两把尺子，禁互相顶替。
+    令牌存在 `account_cookie_versions` 而非账号表 ⇒ 无法在 SQL 里过滤，改为
+    取到存活账号后逐条 `has_ark_session` 判定（无令牌者如实排除，不算失败）。
+
     * 单条失败不影响其他账号（per-account try/except，沿用一期巡检写法）；
     * 失效**只通知一次**（状态翻转时），避免周期巡检把铃铛刷满；
     * **不触碰** `shop_note_goods` —— 失效不等于数据作废。
     """
+    from backend.app.services.shop_binding_service import has_ark_session
+
     now = now or shanghai_now()
     statement = select(PlatformAccount).where(
         PlatformAccount.user_id == user_id,
-        PlatformAccount.shop_id_fk.isnot(None),
         PlatformAccount.deleted_at.is_(None),
     )
     if account_ids:
@@ -216,6 +229,9 @@ def run_shop_health_checks(
     flipped = 0
     items: list[dict[str, Any]] = []
     for account in accounts:
+        # 没有千帆令牌的账号没有可探的东西 ⇒ 不进巡检（不算失败、不入 items）。
+        if not has_ark_session(db, account.id):
+            continue
         if limit is not None and checked >= limit:
             break
         if only_due and not account_health_due(account, now, interval_hours):

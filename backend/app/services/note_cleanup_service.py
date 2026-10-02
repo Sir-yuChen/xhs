@@ -34,7 +34,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.models import PlatformAccount
 from backend.app.models.shop import ShopNoteGoods
-from backend.app.services.shop_binding_service import account_shop_id, get_shop_state
+from backend.app.services.shop_binding_service import has_ark_session, get_shop_state
 
 #: 三项指标在 `entry_json` 里的键名（千帆「商品笔记」列表原文）。
 METRIC_KEYS = ("browse_num", "note_pay_order_cnt", "note_pay_gmv")
@@ -209,10 +209,10 @@ def list_candidates(
 
     返回 `{candidates, page, page_size, total, coverage}`。`coverage` 是已知边界
     的量化：`pool` = 本地映射条数（候选池大小），`goods_note_total` = 店铺商品笔记
-    总数（分母）。**没有绑定 → 404 由调用方给**，这里返回空池 + 分母 0。
+    总数（分母）。**没有可用的千帆登录态 → 404 由调用方给**，这里返回空池 + 分母 0。
     """
     account = db.get(PlatformAccount, account_id)
-    if account is None or account.deleted_at is not None or account_shop_id(db, account_id) is None:
+    if account is None or account.deleted_at is not None or not has_ark_session(db, account_id):
         return {
             "candidates": [],
             "page": max(page, 1),

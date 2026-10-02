@@ -21,9 +21,10 @@
 
 * **完整同步才删旧行**：只有「翻完最后一页」（`has_more=false`）或「已存够 `total`」
   才删除本次未出现的 `shop_products` 行。半途而废就删 = 把没扫到的商品当已下架丢掉。
-* **解不出店铺就不同步**：账号没有 `shop_id_fk`（未绑店）→ 任务 `failed` 并写明原因，
-  **不编一个店铺出来**（缺值口径）。
-* **凭据失效不清数据**：`-13000` → 账号的千帆状态标 `invalid` + 平台原文，
+* **没有千帆登录态就不同步**：账号没有可用的 `ark` 令牌 → 任务 `failed` 并写明原因，
+  **不编账号 / 不编店铺出来**（缺值口径）。ADR-021：判据是**令牌有无**，
+  不再是「有没有绑店」。
+* **凭据失效不清数据**：`CREDENTIAL_ERROR_CODES` → 账号的千帆状态标 `invalid` + 平台原文，
   **已有商品一行不删**（登录态过期不等于商品下架）。
 
 ## 风控
@@ -212,7 +213,7 @@ def normalize_product(item: dict[str, Any]) -> Optional[dict[str, Any]]:
 
 
 def backfill_list_columns(
-    db: Session, shop_id_fk: int, *, cap: int = LIST_BACKFILL_CAP
+    db: Session, platform_account_id: int, *, cap: int = LIST_BACKFILL_CAP
 ) -> int:
     """**字段补足**（设计 13 §30.3.4）：raw_json 有值但筛选列为空的存量行
     → 从 raw_json **本地派生**回填。**零平台请求**，返回实际发生变更的行数。
@@ -229,7 +230,7 @@ def backfill_list_columns(
     rows = db.scalars(
         select(ShopProduct)
         .where(
-            ShopProduct.shop_id_fk == shop_id_fk,
+            ShopProduct.platform_account_id == platform_account_id,
             ShopProduct.raw_json != "",
             ShopProduct.raw_json != "{}",
             (
@@ -269,7 +270,7 @@ def backfill_list_columns(
 def store_products(
     db: Session,
     user_id: int,
-    shop_id_fk: int,
+    platform_account_id: int,
     items: list[dict[str, Any]],
     *,
     skus_map: dict[str, list[dict]] | None = None,
@@ -287,7 +288,7 @@ def store_products(
     existing = {
         row.item_id: row
         for row in db.scalars(
-            select(ShopProduct).where(ShopProduct.shop_id_fk == shop_id_fk)
+            select(ShopProduct).where(ShopProduct.platform_account_id == platform_account_id)
         ).all()
     }
     stored: list[str] = []
@@ -311,7 +312,9 @@ def store_products(
             normalized["detail_synced_at"] = detail_time or now
         row = existing.get(item_id)
         if row is None:
-            row = ShopProduct(user_id=user_id, shop_id_fk=shop_id_fk, item_id=item_id)
+            row = ShopProduct(
+                user_id=user_id, platform_account_id=platform_account_id, item_id=item_id
+            )
             db.add(row)
             existing[item_id] = row
         for field, value in normalized.items():
@@ -324,25 +327,31 @@ def store_products(
 # --------------------------------------------------------------------------- #
 # 执行体
 # --------------------------------------------------------------------------- #
-def _resolve_shop_id(db: Session, account: PlatformAccount) -> int:
-    """账号 → 店铺实体主键。解不出就抛（**不编店铺**）。
+def _resolve_account_id(db: Session, account: PlatformAccount) -> int:
+    """账号 → **归属键**（ADR-021：商品挂账号，`platform_account_id` 就是 `account.id`）。
 
-    2026-09-22 起「账号有没有店铺」只由 `platform_accounts.shop_id_fk` 回答
-    （原来的绑定表已移除），守卫（软删闸 + 租户闸）在 `account_shop_id` 里。
+    解不出就抛（**不编账号**）。ADR-021 之前这里解析的是店铺实体主键
+    （`platform_accounts.shop_id_fk`）；店铺退场后「商品属于哪个账号」直接就是
+    账号自己的主键，**不再有任何关系需要解析**。
+
+    守卫（软删闸 + 租户闸）在 `account_for_ark_gate()` 里。
     """
-    from backend.app.services.shop_binding_service import account_shop_id
+    from backend.app.services.shop_binding_service import account_for_ark_gate, has_ark_session
 
-    shop_pk = account_shop_id(db, account.id)
-    if shop_pk is None:
-        raise SyncFailure("该账号尚未绑定千帆店铺，无法同步商品。", code="QIANFAN_BINDING_REQUIRED")
-    return int(shop_pk)
+    if account_for_ark_gate(db, account.id) is None:
+        raise SyncFailure("该账号不存在或已删除，无法同步商品。", code="ACCOUNT_NOT_FOUND")
+    if not has_ark_session(db, account.id):
+        raise SyncFailure(
+            "该账号没有可用的千帆登录态，无法同步商品。", code="ARK_SESSION_REQUIRED"
+        )
+    return int(account.id)
 
 
 def _sync_with_task(
     db: Session,
     task: Task,
     account: PlatformAccount,
-    shop_id_fk: int,
+    platform_account_id: int,
     adapter_factory: Any,
     *,
     max_pages: Optional[int],
@@ -556,7 +565,7 @@ def _sync_with_task(
         warnings.extend(page_skus["warnings"])
 
         page_stored = store_products(
-            db, account.user_id, shop_id_fk, new_items,
+            db, account.user_id, platform_account_id, new_items,
             skus_map=page_skus["skus_map"], detail_time=page_skus["time"],
         )
         stored_ids.update(page_stored)
@@ -616,7 +625,7 @@ def _sync_with_task(
     # 「没有新的商品」），若无条件删会把整个店铺的商品清空 —— 本守卫顺带堵掉这个缺口。
     full_scope = not incremental and not time_from_ms and not time_to_ms
     if complete and not stopped_by_limit and full_scope:
-        removed = _drop_stale_rows(db, shop_id_fk, stored_ids)
+        removed = _drop_stale_rows(db, platform_account_id, stored_ids)
     elif not complete or stopped_by_limit:
         warnings.append("未翻完，保留既有行")
     else:
@@ -625,7 +634,7 @@ def _sync_with_task(
     # 字段补足（设计 13 §30.3.4）：把 raw_json 有值、筛选列为空的存量行**本地**
     # 回填（零平台请求）。放在翻页之后：本轮新落库的行 already 带全列，这里只
     # 兜迁移前的老行；也放在删旧行之后，避免给即将删掉的行白做工。
-    backfilled = backfill_list_columns(db, shop_id_fk)
+    backfilled = backfill_list_columns(db, platform_account_id)
     if backfilled:
         warnings.append(f"字段补足 {backfilled} 行（从 raw_json 本地回填）")
 
@@ -670,7 +679,7 @@ def _sync_with_task(
 
             outcome = reconcile_service.mark_goods_missing(
                 db,
-                shop_id_fk,
+                platform_account_id,
                 reconcile_ids,
                 time_from_ms=scope_from_ms,
                 time_to_ms=reconcile_to_ms,
@@ -701,7 +710,7 @@ def _sync_with_task(
     detail_remaining = db.scalar(
         select(ShopProduct)
         .where(
-            ShopProduct.shop_id_fk == shop_id_fk,
+            ShopProduct.platform_account_id == platform_account_id,
             ShopProduct.detail_synced_at.is_(None),
         )
         .order_by(ShopProduct.id.asc())
@@ -714,7 +723,7 @@ def _sync_with_task(
 
         detail_total = db.scalar(
             select(func.count()).select_from(ShopProduct).where(
-                ShopProduct.shop_id_fk == shop_id_fk,
+                ShopProduct.platform_account_id == platform_account_id,
                 ShopProduct.detail_synced_at.is_(None),
             )
         )
@@ -822,7 +831,7 @@ def _fetch_page_skus(
 
     按 :data:`apis.xhs_qianfan_apis.SKU_BATCH_SIZE`（10）分批，每批过一次限流器。
     **失败不阻塞**：某批失败记一条 warning 继续下一批，对应商品的详情留空
-    （`detail_synced_at = NULL`），下轮重试。凭据失效（`-13000`）停本函数
+    （`detail_synced_at = NULL`），下轮重试。凭据失效（`CREDENTIAL_ERROR_CODES`）停本函数
     （后续页面也没必要翻了，但调用方决定是否继续列表翻页）。
 
     ``on_progress(attempted_in_page)``（2026-09-28 加）：**每批**回调一次，参数 =
@@ -862,7 +871,11 @@ def _fetch_page_skus(
             failed += len(batch)
             warnings.append(f"{len(batch)} 个商品详情获取失败：{message or '未知原因'}")
             _notify_batch_progress(on_progress, done + failed)
-            if "-13000" in str(message):
+            # 凭据失效 ⇒ 后面的批次一定也失败，停本函数（判决走 SDK 唯一判据）。
+            # ⚠️ 原实现是 `if "-13000" in str(message)` —— 平台的 msg 是**中文**
+            # （"登录凭证已过期, 请重新登录"），这个分支**从未命中**，凭据失效时会
+            # 白跑完剩余所有批次（每批一次限流等待 + 一次注定失败的请求）。DEF-084。
+            if _payload_is_credential_error(raw_payload):
                 break
             continue
 
@@ -906,21 +919,32 @@ def _item_create_ms(item: dict[str, Any]) -> int:
     return 0
 
 
+def _payload_is_credential_error(payload: Any) -> bool:
+    """千帆响应的 `code` 是否表达「凭据失效」（缺失 / 过期）。**唯一判据在 SDK**。
+
+    不在这里写 `code == -13000`：DEF-084（2026-09-30 实测）令牌过期时平台回的是
+    **`-13004`**，硬编码单个码会让「已过期」这类**最该提示重登**的情况静默漏掉。
+    """
+    from apis.xhs_qianfan_apis import XHS_Qianfan_Apis
+
+    code = payload.get("code") if isinstance(payload, dict) else None
+    return XHS_Qianfan_Apis.is_credential_error(code)
+
+
 def _mark_credential_state(
     db: Session, account: PlatformAccount, message: str, payload: Any
 ) -> None:
-    """`-13000` → 把账号的千帆状态标 `invalid`（页面的「重新登录千帆」提示据此接管）。"""
+    """凭据失效（`CREDENTIAL_ERROR_CODES`）→ 把账号的千帆状态标 `invalid`（页面的「重新登录千帆」提示据此接管）。"""
     from backend.app.services.shop_binding_service import set_shop_state
 
-    code = payload.get("code") if isinstance(payload, dict) else None
-    if code == -13000 or "-13000" in str(message):
+    if _payload_is_credential_error(payload):
         set_shop_state(account, status="invalid", status_message=str(message)[:200])
         db.commit()
 
 
-def _drop_stale_rows(db: Session, shop_id_fk: int, keep_ids: set[str]) -> int:
+def _drop_stale_rows(db: Session, platform_account_id: int, keep_ids: set[str]) -> int:
     """**仅在完整同步成功后**删除本次未出现的商品行。返回删除条数。"""
-    query = delete(ShopProduct).where(ShopProduct.shop_id_fk == shop_id_fk)
+    query = delete(ShopProduct).where(ShopProduct.platform_account_id == platform_account_id)
     if keep_ids:
         query = query.where(ShopProduct.item_id.notin_(keep_ids))
     result = db.execute(query)
@@ -1102,7 +1126,7 @@ def run_shop_goods_sync(
             task.started_at = shanghai_now()
         db.commit()
 
-        shop_id_fk = _resolve_shop_id(db, account)  # 解不出店铺 → 抛（不编店铺）
+        platform_account_id = _resolve_account_id(db, account)  # 解不出账号 → 抛（不编账号）
 
         if adapter_factory is None:
             from backend.app.adapters.xhs.qianfan_api_adapter import (
@@ -1112,7 +1136,7 @@ def run_shop_goods_sync(
             adapter_factory = get_qianfan_api_adapter_factory()
 
         result = _sync_with_task(
-            db, task, account, shop_id_fk, adapter_factory,
+            db, task, account, platform_account_id, adapter_factory,
             max_pages=max_pages, page_size=page_size, mode=mode,
             time_from_ms=time_from_ms, time_to_ms=time_to_ms,
         )

@@ -22,6 +22,7 @@ from typing import Any, Callable, Optional
 #: 设计 13 §35.17.2 的 `run_targeted_job`）时引用这里，**不要在别处再写一遍字面量** ——
 #: 漂移后要么 `get_job_spec` 抛 `KeyError`，要么更糟：悄悄定位到另一个任务。
 JOB_KEY_NOTE_SYNC = "system.note_sync"
+JOB_KEY_GOODS_NOTE_SYNC = "system.goods_note_sync"
 JOB_KEY_SHOP_GOODS_SYNC = "system.shop_goods_sync"
 
 
@@ -82,6 +83,7 @@ def _build_registry() -> dict[str, JobSpec]:
     # 延迟 import：拆掉 scheduler_service ↔ job_registry 的导入环（见模块 docstring）。
     from backend.app.services import scheduler_service
     from backend.app.services.auto_ops_service import run_keyword_pipeline
+    from backend.app.services.llm_gateway_monitor_service import run_llm_gateway_monitor_once
     from backend.app.services.note_queue_service import cleanup_queue_records
     from backend.app.services.shop_health_service import run_shop_health_checks_once
 
@@ -145,6 +147,21 @@ def _build_registry() -> dict[str, JobSpec]:
             default_cron="0 0 */6 * * *",
         ),
         JobSpec(
+            key=JOB_KEY_GOODS_NOTE_SYNC,
+            # §44（2026-09-30）：商品笔记同步（千帆 goods-note/list 的挂链笔记）——
+            # 由原「账号笔记同步」的混合双源拆出的独立任务，与 JOB_KEY_NOTE_SYNC
+            # （普通笔记，creator 源）各自成行：各自 cron、各自 account_ids、各自日志流。
+            # ⚠️ 名字里必须带「商品笔记」四字 —— 它与 `JOB_KEY_SHOP_GOODS_SYNC`
+            # （**店铺商品台账**，SKU / 价格）不是一回事。
+            name="账号商品笔记同步",
+            func=scheduler_service.run_scheduled_goods_note_syncs,
+            builtin=True,
+            user_scoped=True,
+            params_editable=("account_ids",),
+            default_trigger_type="cron",
+            default_cron="0 0 */6 * * *",
+        ),
+        JobSpec(
             key=JOB_KEY_SHOP_GOODS_SYNC,
             name="店铺商品同步",
             func=scheduler_service.run_scheduled_shop_goods_syncs,
@@ -178,6 +195,17 @@ def _build_registry() -> dict[str, JobSpec]:
             default_cron="0 0 9 * * *",
             params_required=("auto_task_id",),
             params_validator=_validate_auto_ops_params,
+        ),
+        JobSpec(
+            # 2026-09-29 v1.6 架构 A（设计 17 §4.5）：LLM 网关用量/健康预警。
+            # 轮询本地台账，对照预警规则，超阈值写站内通知。user_scoped。
+            key="system.llm_gateway_monitor",
+            name="LLM 网关预警",
+            func=run_llm_gateway_monitor_once,
+            builtin=True,
+            user_scoped=True,
+            default_trigger_type="cron",
+            default_cron="0 */10 * * * *",  # 每 10 分钟轮询一次
         ),
     ]
     return {spec.key: spec for spec in specs}

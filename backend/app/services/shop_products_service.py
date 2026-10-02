@@ -29,7 +29,7 @@ from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from backend.app.models.platform_account import PlatformAccount
-from backend.app.models.shop import NoteGoods, Shop
+from backend.app.models.shop import NoteGoods
 from backend.app.models.shop_product import ShopProduct
 
 #: 排序字段 → 列（设计 13 §30.3.2）。未知字段由调用方的门禁挡掉（400），
@@ -235,14 +235,16 @@ def _relation_note_counts(db: Session, item_ids: list[str]) -> dict[str, int]:
     return {str(item_id): int(count) for item_id, count in rows}
 
 
-def delete_items(db: Session, *, shop_id_fk: int, item_ids: list[str]) -> int:
+def delete_items(db: Session, *, platform_account_id: int, item_ids: list[str]) -> int:
     """批量删除**本地台账行**（v1.36，用户口径：「商品列表新增批量删除操作」）。
 
     ## 删的是什么（口径，必须写清）
 
-    只删 `shop_products` 里这个店铺的选中行 —— **不打千帆**（零平台请求，本模块
+    只删 `shop_products` 里**这个账号**的选中行 —— **不打千帆**（零平台请求，本模块
     总纪律）。平台侧的商品**不动**：千帆 SDK 里根本没有商品删除接口，删平台商品
     要另立一条抓包写链路，那是另一件事（设计 13 §33.10 不做边界已记）。
+
+    ⚠️ ADR-021：归属键是 `platform_account_id`（不再有店铺实体）。
 
     ## 两个连带后果（不藏）
 
@@ -273,11 +275,11 @@ def delete_items(db: Session, *, shop_id_fk: int, item_ids: list[str]) -> int:
     if not ids:
         return 0
 
-    # 1) 这个店铺里实际存在的选中行（传了别人的 / 不存在的 item_id ⇒ 少删几行）
+    # 1) 这个账号的台账里实际存在的选中行（传了别人的 / 不存在的 item_id ⇒ 少删几行）
     doomed = list(
         db.scalars(
             select(ShopProduct.id).where(
-                ShopProduct.shop_id_fk == shop_id_fk,
+                ShopProduct.platform_account_id == platform_account_id,
                 ShopProduct.item_id.in_(ids),
             )
         )
@@ -288,7 +290,10 @@ def delete_items(db: Session, *, shop_id_fk: int, item_ids: list[str]) -> int:
     # 2) 删指向这些商品的关系行（§26.7：本地实体真删 ⇒ 关系跟着走；
     #    关系表按平台 `item_id` 挂 ⇒ 直接按它删，不再需要先取本地 `id`）。
     #    `user_id` 一并收口：`item_id` 是平台 ID，跨用户同名理论上可能（DEF-066 同款纪律）。
-    owner_id = db.scalar(select(Shop.user_id).where(Shop.id == shop_id_fk))
+    #    ADR-021：租户归属直接问账号（店铺实体已退场，不再经 `shops.user_id`）。
+    owner_id = db.scalar(
+        select(PlatformAccount.user_id).where(PlatformAccount.id == platform_account_id)
+    )
     relation_delete = delete(NoteGoods).where(NoteGoods.item_id.in_(ids))
     if owner_id is not None:
         relation_delete = relation_delete.where(NoteGoods.user_id == int(owner_id))
@@ -297,7 +302,7 @@ def delete_items(db: Session, *, shop_id_fk: int, item_ids: list[str]) -> int:
     # 3) 删商品行本体
     result = db.execute(
         delete(ShopProduct).where(
-            ShopProduct.shop_id_fk == shop_id_fk,
+            ShopProduct.platform_account_id == platform_account_id,
             ShopProduct.item_id.in_(ids),
         )
     )
@@ -312,6 +317,41 @@ def _parse_raw(row: ShopProduct) -> dict[str, Any]:
     except (TypeError, ValueError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def load_product_dict_from_ledger(row: ShopProduct) -> dict[str, Any]:
+    """台账行 → 商品字典（**只读本地，零平台请求**）。
+
+    为什么需要它：`normalize_item_from_raw` 的入参是**千帆条目原文**，而单篇 /
+    批量生成链路拿到的是 `ShopProduct` 行。没有这个函数时，调用方就各自手写
+    `{"item_id": row.item_id, "sales_total": row.sales, ...}` 的字段映射 ——
+    键名一旦与 `PRODUCT_FIELDS` 漂移（如把 `sales` 写成 `sales`/`sales_total`
+    两套），`product_payload()` 会**静默丢字段**（缺值即不提取），
+    生成结果悄悄少信息且不报错。⇒ 统一在这里构造，全项目只有这一份（DEF-044）。
+
+    **只用于本地渲染 / 预览**：生成链路要求平台**当下**数据（07 §10），
+    那条路径走 `normalize_item_from_raw`（平台响应），不走本函数。
+
+    优先取 `raw_json`（与列表页展示契约逐字段一致）；`raw_json` 缺失或坏掉时
+    退回归一化列，保证预览不会因为一条坏行而整页报错（DEF-048：安全网不条件开放）。
+    """
+    raw = _parse_raw(row)
+    if raw:
+        return normalize_item_from_raw(raw)
+    return {
+        "item_id": row.item_id or "",
+        "title": row.item_title or "",
+        "article_no": row.article_no or "",
+        "price_min_fen": row.price_min_fen,
+        "price_max_fen": row.price_max_fen,
+        "stock": row.stock,
+        "sales_total": row.sales,
+        "category": row.category or "",
+        # 归一化列里没有这两个（`on_sale_sku_count` 只在 `raw_json` 里）；
+        # 缺值留 None，**不造 0**（硬约束⑤）。
+        "sku_count": row.sku_count,
+        "on_sale_sku_count": None,
+    }
 
 
 def _split_keywords(keyword: str) -> list[str]:
@@ -457,7 +497,7 @@ def query_items(
     account: PlatformAccount,
     payload: Any,
     *,
-    shop_id_fk: int,
+    platform_account_id: int,
     from_ms: Optional[int],
     to_ms: Optional[int],
     price_from_fen: Optional[int] = None,
@@ -465,11 +505,16 @@ def query_items(
 ) -> dict[str, Any]:
     """本地商品列表一页（`POST /xhs/qianfan/items` 的执行体，**零平台请求**）。
 
+    ⚠️ **零平台请求 ⇒ 零门禁**（用户 2026-09-30 口径）：本页读的是**本地台账**
+    `shop_products`，**不需要千帆登录态就能看**。登录态只决定「能不能从平台同步
+    新数据」，不决定「本地已有数据能不能读」—— 无登录态就拦下整页 = 把已落库的
+    数据锁死，是错的。
+
     入参 `payload` 是路由层已通过 Pydantic 校验的 `ShopItemsRequest`；
     `from_ms` / `to_ms` 是路由层解析好的创建时间窗口（毫秒，结束日含当天）；
     `price_*_fen` 是路由层 `_price_fen()` 换算好的价格边界（元→分只在那一处）。
     """
-    stmt = select(ShopProduct).where(ShopProduct.shop_id_fk == shop_id_fk)
+    stmt = select(ShopProduct).where(ShopProduct.platform_account_id == platform_account_id)
     stmt = _apply_filters(
         stmt,
         payload,
@@ -502,9 +547,11 @@ def query_items(
     counts = _relation_note_counts(db, [str(row.item_id or "") for row in rows])
     for item, row in zip(items, rows):
         item["note_count"] = counts.get(str(row.item_id or ""), 0)
-    #: 台账同步时间 = 本店 max(synced_at)（**没有行 → 空串**，上层渲染 `-`）。
+    #: 台账同步时间 = 本账号 max(synced_at)（**没有行 → 空串**，上层渲染 `-`）。
     latest_sync = db.scalar(
-        select(func.max(ShopProduct.synced_at)).where(ShopProduct.shop_id_fk == shop_id_fk)
+        select(func.max(ShopProduct.synced_at)).where(
+            ShopProduct.platform_account_id == platform_account_id
+        )
     )
     return {
         "total": total,
@@ -520,18 +567,21 @@ def query_items(
 
 
 def item_detail(
-    db: Session, *, shop_id_fk: int, item_id: str
+    db: Session, *, platform_account_id: int, item_id: str
 ) -> Optional[dict[str, Any]]:
     """单个商品的本地详情（`POST /xhs/qianfan/item-detail` 的执行体）。
 
-    返回 `None` = 本店没有这个商品（路由层转 404）。SKU 明细读
+    ⚠️ 同 `query_items`：**读本地台账，零平台请求 ⇒ 无门禁**（用户 2026-09-30 口径）。
+
+    返回 `None` = 本账号的台账没有这个商品（路由层转 404）。SKU 明细读
     `detail_json`（同步任务的详情补齐落库，设计 13 §19.4.2）：**空串 =
     没补过** ⇒ `skus` 回 `[]` 且 `detail_synced_at` 为空串，由上层渲染
     空态 + 说明，**不渲染成 0 行**（缺值口径）。
     """
     row = db.scalar(
         select(ShopProduct).where(
-            ShopProduct.shop_id_fk == shop_id_fk, ShopProduct.item_id == item_id
+            ShopProduct.platform_account_id == platform_account_id,
+            ShopProduct.item_id == item_id,
         )
     )
     if row is None:

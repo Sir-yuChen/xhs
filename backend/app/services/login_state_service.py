@@ -55,19 +55,44 @@ jar 只带 `access-token-creator.*`，打千帆一律 `-13000 缺失登录凭证
 * 每一次结果都带上 `probed` 与 `reason`，让界面能说「上次检测未得到结论：<原因>」，
   而不是替平台下一个它没下过的结论。
 
+## ⚠️ 探不出结论 ≠ 一直探（v1.32，2026-09-30）
+
+「不许把 `unknown` 说成 `expired`」**不等于**「可以无限停在 `unknown`」。真机反馈：
+千帆令牌卡片长期停在「未检测」，用户既不知道能不能用、也没有重登入口 —— 因为探测
+**一次就放弃**，而千帆接口偶发慢（共享会话首次 TLS 握手 + 平台侧抖动）会稳定命中。
+
+所以探针加**有界重试**：每平台最多 `PROBE_MAX_ATTEMPTS`(=3) 次，每次 `PROBE_ATTEMPT_TIMEOUT`
+(=10s)；**只有拿到了平台的 JSON 答复**（哪怕是被拒绝）才提前结束重试。三次都拿不到
+JSON ⇒ 判 `expired`（重登入口由前端状态映射自动出现），reason 明写「连续 N 次未得到结论」，
+**不冒充**平台的拒绝原话。
+
+⚠️ 这把尺子**只加在千帆（ark）上**：www 探针走 `apis/xhs_pc_apis`（每账号 jar 不同，
+重试会翻倍请求面），creator 同理；千帆是**用户长期抱怨的那一个**，且它的重试面最小
+（同 jar、同 host、同共享会话）。要推广到另两个平台时，把 `probe_max_attempts` /
+`probe_attempt_timeout` 参数一并传下去即可，函数签名已预留。
+
+* 请求数上限因此从「每账号 ≤3 次」变为「www ≤1 + creator ≤1 + ark ≤3」；
+  **仍不进轮询、不进定时任务**，仍是一次页面动作一次探针。
+
 ## 只读边界
 
 * 探针**只读**（三个 GET），**不落库**：L3 的结论只影响**这一次响应**里的展示 ——
-  它**不得**删除 / 覆盖任何存量令牌，也**不得**动店铺关系（`shop_id_fk` / `shop_state`）（§18.9.3）；
-  （原句为「也不得清空 `shop_account_bindings`」—— 该表已于 2026-09-22 整表移除。）
+  它**不得**删除 / 覆盖任何存量令牌，也**不得**动千帆侧状态（`shop_state`）（§18.9.3）；
+  （原句为「也不得动店铺关系（`shop_id_fk` / `shop_state`）」—— `shop_id_fk` 已随
+  ADR-021 退场；更早的原句「也不得清空 `shop_account_bindings`」—— 该表已于
+  2026-09-22 整表移除。）
 * **不进轮询、不进定时任务**（§18.9.5 风控）：一张卡片最多三次探活（www + creator + ark），
   且仅限页面动作触发。
 """
 from __future__ import annotations
 
 import logging
-from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Sequence
+import threading
+import time
+import weakref
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from concurrent.futures.thread import _threads_queues, _worker
+from typing import Any, Callable, Sequence
 
 from sqlalchemy.orm import Session
 
@@ -98,10 +123,26 @@ STATE_UNKNOWN = "unknown"
 #: 会让看门狗把探针线程当成失联的同步 worker 而重建出重复线程。
 PROBE_THREAD_PREFIX = "xhs-login-probe"
 
+#: 单次探针的**超时兜底线程**前缀（v1.32）。同样必须独立 —— 它是短命线程，
+#: 混进 `PROBE_THREAD_PREFIX` 会让「探针在飞」的统计把已超时的线程也算进去。
+PROBE_TIMEOUT_THREAD_PREFIX = "xhs-login-probe-timeout"
+
 #: 并行度读不到时的回落值（与 `note_sync_service.SYNC_DEFAULT_PARALLELISM` 同值）。
 PROBE_DEFAULT_PARALLELISM = 3
 #: 并行度上限（与设置页 `xhs_sync_account_parallelism` 的范围上界一致）。
 PROBE_MAX_PARALLELISM = 8
+
+#: 单平台探针的**最大尝试次数**（v1.32）与**单次超时**（秒）。
+#:
+#: ⚠️ 这两个数是**有意的保守值**：`3 × 10s = 30s` 是最坏墙钟（三次全超时），
+#: 而账号之间并行（默认 3 并发）⇒ 一批 4 账号最坏约 40s。再往上调会让「刷新
+#: 账号页」变成等半分钟，往下调则穿透不了千帆的真实抖动区间（实测首次请求
+#: 1.5–8s）。
+PROBE_MAX_ATTEMPTS = 3
+PROBE_ATTEMPT_TIMEOUT = 10
+#: 重试之间的停顿（秒）。**必须 > 0**：瞬时抖动立刻重试会打在同一个坏窗口上，
+#: 三连失败退化成一次失败。0.6s 足够错过一次拥塞窗口，又不拖长最坏墙钟。
+PROBE_RETRY_BACKOFF = 0.6
 
 
 def _probe_parallelism() -> int:
@@ -247,34 +288,201 @@ def _probe_creator(cookies: str, adapter_factory: Any) -> tuple[str, str]:
     return STATE_EXPIRED, f"{_REASONS[(CHANNEL_CREATOR, STATE_EXPIRED)]}（平台原话：{message}）"
 
 
-def _probe_ark(cookies: str, adapter_factory: Any) -> tuple[str, str]:
+class _DaemonThreadPool(ThreadPoolExecutor):
+    """单线程池，但**线程是 daemon**（`_call_with_timeout` 专用）。
+
+    `concurrent.futures.ThreadPoolExecutor` 没有 daemon 开关。它的后台线程由
+    `_adjust_thread_count()` 创建并**立即 `start()`**，所以「先 `super()` 建完
+    再改 `daemon`」必抛 `RuntimeError: cannot set daemon status of active thread`
+    （v1.32 实测踩过）。**唯一可行的位置是「建好线程、`start()` 之前」** ——
+    所以这里把父类那段逻辑整个搬过来自己写，只多了 `thread.daemon = True` 一行。
+
+    ⚠️ 别用「给实例赋一个函数」（`pool._adjust_thread_count = f`）：那是**非描述符**
+    赋值，父类内部按 `self._adjust_thread_count()` 调用时 `self` 会被当成第一个
+    位置参数，patch 静默失效（实测线程仍是 `daemon=False`，pytest 收尾照样等 30s）。
+    必须走**继承**。
+
+    ⚠️ 为什么非要有这个类：默认线程是**非 daemon**，Python 退出（含 pytest 收尾）
+    会 `join()` 它们 —— 挂住的探针线程于是又变回「阻塞整个进程 30s」。
+    daemon 线程随进程一起消失，这才是「不阻塞调用方」的完整含义。
+
+    逻辑与 `concurrent.futures.thread.ThreadPoolExecutor._adjust_thread_count`
+    （CPython 3.12）逐行对齐，只为可控性而内联；改动 CPython 版本时要复核。
+    """
+
+    def _adjust_thread_count(self) -> None:  # type: ignore[override]
+        if self._idle_semaphore.acquire(timeout=0):  # type: ignore[attr-defined]
+            return
+
+        def weakref_cb(_, q=self._work_queue):  # type: ignore[attr-defined]
+            q.put(None)
+
+        num_threads = len(self._threads)  # type: ignore[attr-defined]
+        if num_threads < self._max_workers:  # type: ignore[attr-defined]
+            thread_name = "%s_%d" % (self._thread_name_prefix or self, num_threads)  # type: ignore[attr-defined]
+            thread = threading.Thread(
+                name=thread_name,
+                target=_worker,
+                args=(
+                    weakref.ref(self, weakref_cb),
+                    self._work_queue,  # type: ignore[attr-defined]
+                    self._initializer,  # type: ignore[attr-defined]
+                    self._initargs,  # type: ignore[attr-defined]
+                ),
+            )
+            thread.daemon = True  # ⬅️ 本子类存在的**唯一**理由
+            thread.start()
+            self._threads.add(thread)  # type: ignore[attr-defined]
+            _threads_queues[thread] = self._work_queue  # type: ignore[attr-defined]
+
+
+def _daemon_pool() -> ThreadPoolExecutor:
+    """建一个**线程是 daemon** 的单线程池。"""
+    return _DaemonThreadPool(
+        max_workers=1, thread_name_prefix=PROBE_TIMEOUT_THREAD_PREFIX
+    )
+
+
+def _call_with_timeout(call: Callable[[], Any], timeout: float) -> Any:
+    """在**独立线程**里跑 `call()`，超过 `timeout` 秒就抛 `TimeoutError`（v1.32）。
+
+    为什么需要它：千帆 SDK 的 `timeout=` 只管**单个 socket 读/写**，连接建立、
+    重定向、以及被平台挂住（半开连接）都不受它约束 —— 真机上「一直未返回检测结果」
+    就是这种形态。探针是**串行**跑一个账号的三个平台的，一个卡住 = 整张卡片没有结论。
+
+    ⚠️ 超时后**底层线程无法被强杀**（Python 没有安全的线程取消）：它会作为 daemon
+    线程自然结束。这正是我们能接受的代价 —— 探针是只读 GET，最坏情形是它自己
+    超时退出，不会写任何东西、不会占住 DB（`cookie_map` 是内存快照）。
+
+    ⚠️⚠️ **不许用 `with ThreadPoolExecutor(...)`，也不许在 `finally` 里
+    `shutdown(wait=True)`**：两者都会在退出时 `join()`，于是「超时」变成
+    「等它真的跑完」—— 实测挂 30s 的 adapter 让本函数等了整整 30s（v1.32 反例）。
+    正确做法是 `shutdown(wait=False)`，且**只调用一次**（不能既 `with` 又手动
+    `shutdown`）。`cancel_futures` 也无效 —— 它只取消**尚未开始**的任务。
+
+    ⚠️⚠️ **线程必须是 daemon**（`_daemon_pool()`）：`ThreadPoolExecutor` 默认
+    建**非 daemon** 线程，Python 在退出（含 pytest 收尾）时会 `join()` 它们 ——
+    于是挂住的 adapter 又把 30s 等回来了。daemon 线程随进程一起消失，这才是
+    「不阻塞调用方」的完整含义。
+    """
+    pool = _daemon_pool()
+    try:
+        future = pool.submit(call)
+    except BaseException:
+        pool.shutdown(wait=False)
+        raise
+    try:
+        return future.result(timeout=timeout)
+    except FutureTimeoutError:
+        raise TimeoutError(f"探针超过 {timeout}s 未返回") from None
+    finally:
+        # ✅ 不 join：超时后立刻把控制权还给调用方，挂在里面的 daemon 线程由它自己收场。
+        #    **这是本函数存在的全部理由。**
+        pool.shutdown(wait=False)
+
+
+def _probe_ark(
+    cookies: str,
+    adapter_factory: Any,
+    *,
+    max_attempts: int | None = None,
+    attempt_timeout: int | None = None,
+) -> tuple[str, str]:
     """L3 探活千帆（`GET /api/edith/seller/info/v2`，只读）。返回 `(state, reason)`。
 
-    SDK 已经把「凭据失效」（`code=-13000`）与「接口变了」分开（`CREDENTIAL_ERROR_CODE`），
+    SDK 已经把「凭据失效」（`CREDENTIAL_ERROR_CODES`）与「接口变了」分开（`is_credential_error`），
     这里只在**明确是凭据问题**时才判 `expired`，其余失败一律 `unknown`。
 
     ⚠️ 2026-09-21 拆分后，**创作者平台的 jar 打这个探针只会得到 `-13000`**
     （它没有 ark 域令牌）—— 那是实话：那份令牌确实打不开千帆。所以取票必须
     按平台分清楚（`qianfan_cookies_for_account`），不能让千帆探针拿到创作者 jar。
+
+    ## 有界重试（v1.32，2026-09-30 —— 修「一直未返回检测结果」）
+
+    旧实现在任何失败上都**一次即弃**，于是千帆接口偶发慢（首次 TLS 握手 + 平台抖动）
+    会让卡片永久停在「未检测」，用户既没有结论也没有重登入口。现在：
+
+    | 结局 | 条件 | 是否继续重试 |
+    |---|---|---|
+    | `valid` | `success=True` | ❌ 得到结论，结束 |
+    | `expired` | 平台答复 `code=-13000` | ❌ **平台明确拒绝**，重试无意义，结束 |
+    | `unknown` | 平台答复了别的 code | ❌ 拿到 JSON 就说明链路通，重试只会拿到同一句 |
+    | `unknown` | **没拿到 JSON**（超时 / 连接失败 / 解析失败） | ✅ 重试，最多 `max_attempts` 次 |
+    | **`expired`** | **连续 N 次都没拿到 JSON** | ❌ 放弃并**给出重登入口** |
+
+    ⚠️ 第一张表的 `expired` 行**必须走 SDK 的唯一判据**（`XHS_Qianfan_Apis.is_credential_error`），
+    不能自己写 `code == -13000` —— DEF-084（2026-09-30）：平台令牌过期时回的是 **`-13004`**，
+    只认 `-13000` 会把「已过期」错归成「未得到结论」⇒ 卡片永久停在「未检测」、
+    而且 `unknown` **不可点** ⇒ 用户既没结论也没有重登入口（这正是用户报的「一直卡未检测」）。
+
+    ⚠️ 最后一行的判据说清楚：这不是「替平台宣布失效」，而是**「我们连不上它，
+    所以请用户重新登录以确保万无一失」** —— reason 里明写尝试次数与最后一次的
+    错误原话，**绝不伪造平台原话**。这就是用户要的「三次重试强制重新登录」。
+
+    ⚠️ `max_attempts <= 1` 时退化为**旧行为**（单次探测，失败即 `unknown`）——
+    测试与「关掉重试」的调用方都能用它拿到老语义。
     """
     from apis.xhs_qianfan_apis import XHS_Qianfan_Apis
 
-    credential_error_code = int(getattr(XHS_Qianfan_Apis, "CREDENTIAL_ERROR_CODE", -13000))
-    try:
-        adapter = (adapter_factory or _default_qianfan_factory())(cookies)
-        success, message, payload = adapter.get_seller_info()
-    except Exception as exc:  # noqa: BLE001 - 探活失败本身是业务结果
-        logger.warning("[login-state] ark probe raised: %s", exc)
-        return STATE_UNKNOWN, f"检测千帆令牌时出错，状态未确定：{exc}"
+    is_credential_error = XHS_Qianfan_Apis.is_credential_error
+    attempts_limit = PROBE_MAX_ATTEMPTS if max_attempts is None else int(max_attempts)
+    attempts_limit = max(1, attempts_limit)
+    timeout = PROBE_ATTEMPT_TIMEOUT if attempt_timeout is None else attempt_timeout
 
-    if success:
-        return STATE_VALID, _REASONS[(CHANNEL_ARK, STATE_VALID)]
-    code = payload.get("code") if isinstance(payload, dict) else None
-    if code == credential_error_code:
-        return STATE_EXPIRED, f"{_REASONS[(CHANNEL_ARK, STATE_EXPIRED)]}（平台原话：{message}）"
-    if payload is None:
-        return STATE_UNKNOWN, f"检测千帆令牌未得到结论（请求未完成）：{message}"
-    return STATE_UNKNOWN, f"检测千帆令牌未得到结论（{message}）"
+    last_message = ""
+    for attempt in range(1, attempts_limit + 1):
+        try:
+            # ⚠️ **构造 adapter 也必须进超时保护**（v1.32 实测踩过）：工厂里可能
+            #    带 IO（真机 SDK 的 `__init__` 目前不联网，但把「建对象」和
+            #    「发请求」分开包会让挂住点从保护圈里漏出去 —— 测试正是用一个
+            #    会 sleep 的工厂抓出了这个洞，卡了整整 30s）。
+            def _attempt() -> Any:
+                adapter = (adapter_factory or _default_qianfan_factory())(cookies)
+                return adapter.get_seller_info()
+
+            success, message, payload = _call_with_timeout(_attempt, timeout)
+        except TimeoutError:
+            # ⚠️ 墙钟超时 = **我们自己切断了这次尝试**，等价于「没拿到 JSON」
+            #    ⇒ 与传输失败同路：可重试，而不是直接给 unknown。
+            last_message = f"探针超过 {timeout}s 未返回"
+            logger.info(
+                "[login-state] ark probe timed out (attempt %s/%s)", attempt, attempts_limit
+            )
+            if attempt < attempts_limit:
+                time.sleep(PROBE_RETRY_BACKOFF)
+            continue
+        except Exception as exc:  # noqa: BLE001 - 探活失败本身是业务结果，不是程序错误
+            logger.warning("[login-state] ark probe raised (attempt %s): %s", attempt, exc)
+            return STATE_UNKNOWN, f"检测千帆令牌时出错，状态未确定：{exc}"
+
+        if success:
+            return STATE_VALID, _REASONS[(CHANNEL_ARK, STATE_VALID)]
+
+        code = payload.get("code") if isinstance(payload, dict) else None
+        if is_credential_error(code):
+            # 平台**答复并拒绝** —— 这是最确定的结论，重试没有意义。
+            return STATE_EXPIRED, f"{_REASONS[(CHANNEL_ARK, STATE_EXPIRED)]}（平台原话：{message}）"
+
+        if payload is not None:
+            # 拿到了 JSON 但不认识 ⇒ 平台/接口变了，重试也是同一句。
+            return STATE_UNKNOWN, f"检测千帆令牌未得到结论（{message}）"
+
+        # —— 到这里 = **连平台的 JSON 都没拿到**（超时 / 连接失败），这是可重试的。
+        last_message = str(message or "")
+        logger.info(
+            "[login-state] ark probe got no JSON (attempt %s/%s): %s",
+            attempt,
+            attempts_limit,
+            last_message or "无消息",
+        )
+        if attempt < attempts_limit:
+            time.sleep(PROBE_RETRY_BACKOFF)
+
+    # 三次都没拿到 JSON ⇒ 放弃探测，**给出重登入口**（reason 不伪造平台原话）。
+    return STATE_EXPIRED, (
+        f"{_REASONS[(CHANNEL_ARK, STATE_EXPIRED)]}"
+        f"（连续 {attempts_limit} 次检测都未得到结论，最后一次：{last_message or '请求未完成'}）"
+    )
 
 
 def _default_creator_factory():

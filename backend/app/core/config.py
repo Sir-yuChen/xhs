@@ -59,6 +59,9 @@ def _load_yaml_config() -> Dict[str, Any]:
         # 「慢慢同步」，不默认替用户打平台），周期默认 6 小时。
         "xhs.note_sync.enabled": "xhs_note_sync_enabled",
         "xhs.note_sync.interval_hours": "xhs_note_sync_interval_hours",
+        # §44（2026-09-30）：商品笔记同步（千帆挂链笔记）—— 与普通笔记各自开关。
+        "xhs.goods_note_sync.enabled": "xhs_goods_note_sync_enabled",
+        "xhs.goods_note_sync.interval_hours": "xhs_goods_note_sync_interval_hours",
         "xhs.shop_goods_sync.enabled": "xhs_shop_goods_sync_enabled",
         "xhs.shop_goods_sync.interval_hours": "xhs_shop_goods_sync_interval_hours",
         # 调度轮内账号之间的停顿（秒）：多账号矩阵不一窝蜂。
@@ -184,6 +187,10 @@ class Settings(BaseSettings):
     xhs_note_sync_enabled: bool = False
     # 周期（小时）：默认 6。有界翻页下每轮每账号只走几页，靠多轮摊完大账号。
     xhs_note_sync_interval_hours: int = 6
+    # §44（2026-09-30）：**商品笔记**同步独立成任务（千帆 goods-note/list 挂链笔记），
+    # 与上面的普通笔记同步各自开关 / 周期。同款语义：默认 False = 只在手动按钮触发。
+    xhs_goods_note_sync_enabled: bool = False
+    xhs_goods_note_sync_interval_hours: int = 6
     xhs_shop_goods_sync_enabled: bool = False
     xhs_shop_goods_sync_interval_hours: int = 6
     # 调度轮内**账号之间**的停顿（秒）：多账号矩阵不能一窝蜂同时打平台。

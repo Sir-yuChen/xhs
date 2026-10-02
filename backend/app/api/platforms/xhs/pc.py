@@ -26,9 +26,9 @@ from backend.app.services.account_service import (
 )
 from backend.app.services.shop_binding_service import (
     get_shop_state,
+    has_ark_session,
     parse_state_time,
     qianfan_cookies_for_account,
-    shop_for_account,
     synced_note_count,
 )
 from backend.app.services.shop_goods_service import (
@@ -831,11 +831,11 @@ def _note_shop_detail(
         "source": "",
         "error": "",
     }
-    shop = shop_for_account(db, account.id)
-    if shop is None:
+    # ADR-021：店铺实体已退场 ⇒「能力」= 本账号有可用的 ark 会话；展示名取账号昵称。
+    if not has_ark_session(db, account.id):
         return info
     info["bound"] = True
-    info["source"] = shop.shop_name or ""
+    info["source"] = (account.nickname or "").strip()
 
     # 先读本地映射（零请求）；没有再按需补一次（一次只读请求）。
     rows = list(
@@ -1343,9 +1343,10 @@ def _shop_goods_source(db: Session, account: PlatformAccount) -> dict[str, Any]:
     ⚠️ `shop_account_count` 已于 2026-09-22 移除：用户拍板店铺与账号 **1:1**
     （`platform_accounts.shop_id_fk` UNIQUE），「同一店铺被几个账号绑着」不再是
     一个事实 —— 恒为 0 / 1 的计数字段留着只会让人以为还有多账号场景。
+    2026-09-30 ADR-021：店铺实体整体退场，`bound` 改由**本账号 ark 会话**回答
+    （不再是「有没有绑店」），`shop_name` 取账号昵称。
     """
-    shop = shop_for_account(db, account.id)
-    if shop is None:
+    if not has_ark_session(db, account.id):
         return {
             "source": "ark",
             "bound": False,
@@ -1361,7 +1362,7 @@ def _shop_goods_source(db: Session, account: PlatformAccount) -> dict[str, Any]:
     return {
         "source": "ark",
         "bound": True,
-        "shop_name": shop.shop_name,
+        "shop_name": (account.nickname or "").strip(),
         "status": str(state["status"]),
         "status_message": str(state["status_message"]),
         "shop_total": int(state["goods_note_total"] or 0),
@@ -1584,8 +1585,8 @@ def _attach_shop_goods(
         )
     ).all()
     mapping = {row.note_id: row for row in rows}
-    shop = shop_for_account(db, account.id)
-    shop_name = shop.shop_name if shop is not None else ""
+    # ADR-021：店铺实体已退场 ⇒ 商品展示里的店铺名取账号昵称。
+    shop_name = (account.nickname or "").strip()
     pending: list[str] = []
     for item in items:
         row = mapping.get(str(item.get("note_id") or ""))

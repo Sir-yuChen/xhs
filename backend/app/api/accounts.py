@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Optional
+from typing import Callable, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -52,8 +52,11 @@ from backend.app.services import (
     scheduled_job_runner,
     sync_task_service,
 )
-from backend.app.services.job_registry import JOB_KEY_NOTE_SYNC
-from backend.app.services.note_queue_service import SOURCE_ACCOUNT_CARD_NOTE_SYNC
+from backend.app.services.job_registry import JOB_KEY_GOODS_NOTE_SYNC, JOB_KEY_NOTE_SYNC
+from backend.app.services.note_queue_service import (
+    SOURCE_ACCOUNT_CARD_GOODS_NOTE_SYNC,
+    SOURCE_ACCOUNT_CARD_NOTE_SYNC,
+)
 from backend.app.services.sync_task_service import (
     ABSOLUTE_PAGE_CAP,
     DEFAULT_MAX_PAGES,
@@ -61,6 +64,7 @@ from backend.app.services.sync_task_service import (
     MAX_PAGE_SIZE,
     SYNC_MODE_AUTO,
     SYNC_SCOPE_FULL,
+    GOODS_NOTE_SYNC_TASK_TYPE,
     NOTE_SYNC_TASK_TYPE,
 )
 from xhs_utils.cookie_util import trans_cookies
@@ -251,9 +255,10 @@ def account_login_state(
     * **只读**：`/v2/user/me`、`/api/galaxy/user/info`、`/api/edith/seller/info/v2`，
       不发任何写请求；
     * **不落库**：L3 的结论只影响本次响应，**不删改**任何存量令牌，
-      也**不动**店铺关系与任何存量令牌（探活失败 ≠ 可以毁数据）。
-      （原句为「也不清空 `shop_account_bindings`」—— 该表已于 2026-09-22 整表移除；
-      现在要保护的是账号的 `ark` 通道与 `shop_id_fk` / `shop_state`。）
+      也**不动**任何存量令牌（探活失败 ≠ 可以毁数据）。
+      （原句为「也不动店铺关系与任何存量令牌」—— `shop_id_fk` 已随 ADR-021 退场；
+      更早的原句「也不清空 `shop_account_bindings`」—— 该表已于 2026-09-22 整表移除。
+      现在要保护的是账号的 `ark` 通道与 `shop_state`。）
     * **软删账号不给**：`get_owned_active_account` 拦（同 DEF-055 口径）。
     """
     account = _get_owned_active_account(db, current_user, account_id)
@@ -296,11 +301,13 @@ def renew_qianfan_cookie(
 ):
     """给**已有账号**续期千帆（ark 平台）令牌：粘贴 → 只读校验 → 落库。
 
-    与 `POST /qianfan/shops/bind` 的分工：那个是**关系维度**（顺带写账号的
-    `shop_id_fk` / `shop_state`），本端点是**账号维度** —— 只把令牌写进账号的
-    `ark` 通道，**不碰店铺关系**（关系是用户数据，续期不该顺手动它，§18.4）。
-    （原句为「顺带建/改 `shop_account_bindings` 行」与「不碰绑定表」—— 该表已于
-    2026-09-22 整表移除；**分工与「不顺手动关系」这条纪律都不变**。）
+    本端点是**账号维度** —— 只把令牌写进账号的 `ark` 通道，**不碰其他任何数据**
+    （令牌是账号自己的凭据，续期不该顺手动别的东西，§18.4）。ADR-021 起店铺实体
+    与关系一并退场，更不存在「顺手动店铺关系」这回事。
+    （原句为「与 `POST /qianfan/shops/bind` 的分工：那个是**关系维度**（顺带写账号的
+    `shop_id_fk` / `shop_state`）」与「不碰店铺关系」—— `shop_id_fk` / 绑店动作
+    均已退场；更早的原句「顺带建/改 `shop_account_bindings` 行」「不碰绑定表」
+    —— 该表已于 2026-09-22 整表移除。**「只写令牌、不顺手动别的」这条纪律不变**。）
 
     校验用**只读**的 `get_seller_info()`：通过才落库，不通过就把平台原话带回前端，
     绝不「先存了再说」。
@@ -674,7 +681,7 @@ def sync_account_metrics(
 
 
 class NoteSyncRequest(BaseModel):
-    """笔记同步的触发参数。
+    """笔记同步的触发参数（**普通笔记与商品笔记共用**，§44）。
 
     **全部可选**。⚠️ `max_pages` **不传 = 全量**（设计 13 §21，用户 2026-09-22 口径）：
     翻到平台没有下一页为止，速率由限流器保证。~~旧契约「默认 3 页 / 上限 20 页」~~
@@ -683,8 +690,9 @@ class NoteSyncRequest(BaseModel):
 
     `profile_url` / `xsec_token` **当前无消费者**（保留字段以便恢复 www 源，见设计 13
     §21.4.1）：它们**不是平台登录令牌**，是网页版主页 URL 上的查询参数；`www` 源已
-    按用户 2026-09-22 口径整体移除 ⇒ 传了也不生效。**同步笔记的硬门禁是创作者平台
-    登录会话**，缺则返回任务行 `CREATOR_SESSION_REQUIRED`。
+    按用户 2026-09-22 口径整体移除 ⇒ 传了也不生效。**同步普通笔记的硬门禁是创作者平台
+    登录会话**（缺则任务行 `CREATOR_SESSION_REQUIRED`）；**同步商品笔记的硬门禁是
+    ark 令牌**（缺则 `ARK_SESSION_REQUIRED`）。
     """
 
     max_pages: Optional[int] = Field(default=DEFAULT_MAX_PAGES, ge=1, le=ABSOLUTE_PAGE_CAP)
@@ -705,42 +713,40 @@ class NoteSyncRequest(BaseModel):
     end_date: str = ""
 
 
-@router.post("/{account_id}/notes/sync")
-def start_account_note_sync(
-    account_id: int,
-    payload: NoteSyncRequest | None = None,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """对该账号触发一次笔记同步（设计 13 §35.17，2026-09-27 用户口径）。
+def _start_account_sync(
+    *,
+    account: PlatformAccount,
+    user_id: int,
+    payload: NoteSyncRequest,
+    task_type: str,
+    job_key: str,
+    source: str,
+    starter: Callable[..., dict],
+) -> dict:
+    """账号卡「同步」按钮的**唯一实现**（§35.17 + §44）：解析区间 → 建行 → 记日志。
 
-    **语义 = 手动触发定时任务 `system.note_sync` 的「执行一次」**（不是另开一条链路），
+    两条链路（普通笔记 / 商品笔记）**逐字同构**，差别只有三个入参：
+    `task_type`（⇒ 源清单与硬门禁）、`job_key`（⇒ 日志归属哪条流）、`source`（按钮级来源）。
+
     每次点击**同时**留下两处账：
 
-    * `tasks` 一行（来源 `account_card_note_sync`，账号卡内「同步任务」区块与
-      `…/notes/sync/status` 的数据源），执行方是账号任务 worker —— §35.16 的单 worker
-      串行因此天然成立，不与笔记级队列抢平台额度；
+    * `tasks` 一行（来源 = 按钮级值，账号卡内「同步任务」区块与 `…/sync/status`
+      的数据源），执行方是账号任务 worker —— 每类任务一条 worker（§42），不与笔记级
+      队列抢平台额度；
     * `scheduled_job_logs` 一行（`trigger_type=manual`，经
       `scheduled_job_runner.run_targeted_job` 观测该任务）⇒ 任务中心「任务日志」看得到，
       执行期间 `progress` 有心跳（§35.17.3），终态与任务行**一致**。
 
     **两条纪律**（§35.17.2）：
 
-    * 任务行由**本端点同步建好**再交给 worker，日志只做**观测** —— 若让跑任务的那条路
-      再建一行，同一账号会被跑两遍；若建完就写 `success`，会得到几十毫秒的**假成功**；
-    * `reused=True`（该账号已有任务在跑）⇒ **本次不记日志**：没有新执行就没有新日志，
-      否则同一个任务行被记两次账，执行次数翻倍。
+    * 任务行由**调用方**（端点）同步建好再交给 worker，日志只做**观测** —— 若让跑任务
+      的那条路再建一行，同一账号会被跑两遍；若建完就写 `success`，会得到几十毫秒的
+      **假成功**；
+    * `reused=True`（该账号已有**同类**任务在跑）⇒ **本次不记日志**：没有新执行就没有
+      新日志，否则同一个任务行被记两次账，执行次数翻倍。
 
-    **响应**：任务摄要 + `log_id`（+ 请求区间没解析出来时的 `scope_note`）。响应形状与
-    改造前**逐字兼容**（调用方零感知），只是多了一个 `log_id`，`null` = 本次未记日志。
-
-    **防重（需求 N3）**：该账号已有未完成任务 ⇒ 返回**同一个任务行**（`reused=True`）。
+    **响应**：任务摄要 + `log_id`（+ 请求区间没解析出来时的 `scope_note`）。
     """
-    account = _get_owned_active_account(db, current_user, account_id)
-    if account.platform != "xhs":
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
-
-    payload = payload or NoteSyncRequest()
     # §23：把弹窗选的「全量 / 时间区间」解析成毫秒窗口。解析不了 ⇒ (0, 0) = 全量，
     # 但**要在响应里说一句** —— 静默按全量跑会让用户以为自己在同步一个区间。
     time_from_ms, time_to_ms = sync_task_service.resolve_time_window(
@@ -756,12 +762,12 @@ def start_account_note_sync(
     mode = sync_task_service.normalize_mode(payload.mode)
     max_pages = sync_task_service.clamp_pages(payload.max_pages)
     page_size = sync_task_service.clamp_page_size(payload.page_size)
-    summary = note_sync_service.start_note_sync(
+    summary = starter(
         account.id,
-        user_id=current_user.id,
+        user_id=user_id,
         # §35.12：来源要**具体到按钮**（遗留值 `manual` 在队列记录页显示成
         # 「页面按钮（早期数据）」，那是假历史）。
-        source=SOURCE_ACCOUNT_CARD_NOTE_SYNC,
+        source=source,
         # 同步语义必须**全部**传下去：漏一个 = 用户选的全量 / 时间区间静默丢失
         # （§35.16.3 同型坑）。
         mode=mode,
@@ -774,10 +780,10 @@ def start_account_note_sync(
     log_id = None
     if task_id and not summary.get("reused"):
         log_id = scheduled_job_runner.run_targeted_job(
-            user_id=current_user.id,
-            job_key=JOB_KEY_NOTE_SYNC,
+            user_id=user_id,
+            job_key=job_key,
             task_id=int(task_id),
-            task_type=sync_task_service.NOTE_SYNC_TASK_TYPE,
+            task_type=task_type,
             # 账号快照（迁移 `j1k2l3m4n5o6`）：账号卡「同步中」的判据 = 该账号
             # **最新一条**同步日志的状态（2026-09-27 用户口径）⇒ 日志必须记账号。
             account_id=account.id,
@@ -799,13 +805,91 @@ def start_account_note_sync(
     return {**summary, "log_id": log_id, "scope_note": scope_note}
 
 
+@router.post("/{account_id}/notes/sync")
+def start_account_note_sync(
+    account_id: int,
+    payload: NoteSyncRequest | None = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """对该账号触发一次**普通笔记**同步（设计 13 §35.17 + **§44**，2026-09-27 / 09-30 用户口径）。
+
+    **语义 = 手动触发定时任务 `system.note_sync` 的「执行一次」**（不是另开一条链路）。
+    建行 / 记日志 / 防重 / 响应形状的纪律见 `_start_account_sync`（两条链路共用它）。
+
+    ⚠️ **§44 起本端点只跑 creator 源（普通笔记）**：~~原来它一次跑完普通笔记 + 商品笔记
+    （混合双源）~~，商品笔记拆到 `POST /accounts/{id}/goods-notes/sync`（独立任务 + 独立日志流）。
+    防重因此也按任务类型分别成立：普通笔记在跑**不**阻塞商品笔记。
+
+    **防重（需求 N3）**：该账号已有未完成的**同类**任务 ⇒ 返回**同一个任务行**（`reused=True`）。
+    """
+    account = _get_owned_active_account(db, current_user, account_id)
+    if account.platform != "xhs":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
+
+    return _start_account_sync(
+        account=account,
+        user_id=current_user.id,
+        payload=payload or NoteSyncRequest(),
+        task_type=NOTE_SYNC_TASK_TYPE,
+        job_key=JOB_KEY_NOTE_SYNC,
+        source=SOURCE_ACCOUNT_CARD_NOTE_SYNC,
+        starter=note_sync_service.start_note_sync,
+    )
+
+
+@router.post("/{account_id}/goods-notes/sync")
+def start_account_goods_note_sync(
+    account_id: int,
+    payload: NoteSyncRequest | None = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """对该账号触发一次**商品笔记**同步（**设计 13 §44**，2026-09-30 用户拍板拆分）。
+
+    **语义 = 手动触发定时任务 `system.goods_note_sync` 的「执行一次」**（与普通笔记端点
+    **逐字同构**，见 `_start_account_sync`）。两者的差别只有：
+
+    | 维度 | 本端点（商品笔记） | `…/notes/sync`（普通笔记） |
+    |---|---|---|
+    | 源 / 硬门禁 | **ark 令牌**（千帆 `goods-note/list`） | 创作者会话（creator 列表） |
+    | 任务类型 | `xhs_goods_note_sync` | `xhs_note_sync` |
+    | 日志流 | `system.goods_note_sync` | `system.note_sync` |
+    | 来源值 | `account_card_goods_note_sync` | `account_card_note_sync` |
+
+    缺 ark 令牌时**不发任何平台请求**，任务行给结构化原因 `ARK_SESSION_REQUIRED`
+    （前端门禁 `goodsNoteSyncPlan` 会在点击时就拦住并提示补登千帆）。
+
+    ⚠️ **与「同步商品」（`POST /api/xhs/qianfan/sync-shop-goods`）不是一回事**：
+    那条同步的是**店铺商品台账**（SKU / 价格，落 `shop_products`），本条同步的是
+    **挂链笔记**（落 `notes` + `note_goods`）。
+
+    **防重（需求 N3）**：该账号已有未完成的**商品笔记**任务 ⇒ 返回同一个任务行
+    （`reused=True`），不新建、不打平台、不记日志。
+    """
+    account = _get_owned_active_account(db, current_user, account_id)
+    if account.platform != "xhs":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
+
+    return _start_account_sync(
+        account=account,
+        user_id=current_user.id,
+        # 请求体与普通笔记共用（`max_pages` / 时间区间 / 模式对两条链路同义）。
+        payload=payload or NoteSyncRequest(),
+        task_type=GOODS_NOTE_SYNC_TASK_TYPE,
+        job_key=JOB_KEY_GOODS_NOTE_SYNC,
+        source=SOURCE_ACCOUNT_CARD_GOODS_NOTE_SYNC,
+        starter=note_sync_service.start_goods_note_sync,
+    )
+
+
 @router.get("/{account_id}/notes/sync/status")
 def account_note_sync_status(
     account_id: int,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """笔记同步的进度查询（前端轮询）。
+    """**普通笔记**同步的进度查询（前端轮询）。
 
     无进行中任务时 `task_id: null, status: "idle"` —— 前端据此停轮询。
     `last_result` 是最近一次已完成任务的结果（含部分完成时的 warning 文案）。
@@ -822,6 +906,32 @@ def account_note_sync_status(
         # 「账号信息卡的判断逻辑应只需要关注最新一条的同步笔记任务日志的状态即可」）。
         user_id=current_user.id,
         job_key=JOB_KEY_NOTE_SYNC,
+    )
+
+
+@router.get("/{account_id}/goods-notes/sync/status")
+def account_goods_note_sync_status(
+    account_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """**商品笔记**同步的进度查询（前端每 5 秒轮询；§44）。
+
+    与 `…/notes/sync/status` **逐字同构**，只换两条判据来源：任务类型
+    `xhs_goods_note_sync` + 日志流 `system.goods_note_sync`。
+
+    ⚠️ 两条日志流**互相独立** ⇒ 普通笔记在跑**不影响**商品笔记按钮的「同步中」态
+    （反之亦然）—— 这正是拆分要的行为，别再合并回一个 job_key。
+    """
+    account = _get_owned_active_account(db, current_user, account_id)
+    if account.platform != "xhs":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
+    return sync_task_service.status_payload(
+        db,
+        GOODS_NOTE_SYNC_TASK_TYPE,
+        account.id,
+        user_id=current_user.id,
+        job_key=JOB_KEY_GOODS_NOTE_SYNC,
     )
 
 

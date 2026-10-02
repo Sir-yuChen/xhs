@@ -28,6 +28,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from backend.app.services.llm_gateway_usage_service import FUNCTION_GENERATE
+
 # --------------------------------------------------------------------------- #
 # ① 商品字段白名单（Prompt 与一致性校验都只看这些）
 # --------------------------------------------------------------------------- #
@@ -347,7 +349,14 @@ class ProductNoteTextClient(Protocol):
     """只需要「按 Prompt 生成商品笔记」这一个能力（便于测试注入假客户端）。"""
 
     def generate_product_note(
-        self, *, model_config: Any, api_key: str, product: dict[str, Any], instruction: str
+        self,
+        *,
+        model_config: Any,
+        api_key: str,
+        product: dict[str, Any],
+        instruction: str,
+        platform: str = "",
+        function: str = "",
     ) -> dict[str, Any]:  # pragma: no cover - 协议声明
         ...
 
@@ -385,16 +394,25 @@ def generate_product_note(
     product: dict[str, Any],
     instruction: str = "",
     image_count: int | None = None,
+    platform: str = "",
 ) -> ProductNoteResult:
     """生成 → 护栏 → 格式校验，**不落库**（落库与审核闸门属 T-406）。
 
     `image_count` 为 `None` 表示「这次不校验图片张数」（生成阶段还没有选素材）。
     只要存在拦截项，`ok=False` 且**仍然返回正文**：页面要能显示「为什么被拦」，
     静默丢弃会让用户以为模型没输出。
+
+    `platform`：台账记账维度（设计 17 §4.3.1）—— 调用点下传，`function` 固定
+    `generate`（商品笔记生成），由本函数写死不让调用方传，避免出现第二种取值。
     """
     payload = product_payload(product)
     generated = client.generate_product_note(
-        model_config=model_config, api_key=api_key, product=payload, instruction=instruction
+        model_config=model_config,
+        api_key=api_key,
+        product=payload,
+        instruction=instruction,
+        platform=platform,
+        function=FUNCTION_GENERATE,
     )
     title = str(generated.get("title") or "").strip()
     body = str(generated.get("body") or "").strip()

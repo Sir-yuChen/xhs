@@ -10,10 +10,29 @@ from sqlalchemy.orm import Session
 
 from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user
-from backend.app.core.security import decrypt_text
-from backend.app.models import AiDraft, AiGeneratedAsset, ModelConfig, Task, User
+from backend.app.models import AiDraft, AiGeneratedAsset, Task, User
 from backend.app.schemas.common import paginated
+from backend.app.services import llm_gateway_client
 from backend.app.services.ai_service import ImageAiClient, OpenAICompatibleImageClient, OpenAICompatibleTextClient, TextAiClient
+from backend.app.services.business_provider_keys import (
+    BUSINESS_KEY_DESCRIBE_IMAGE,
+    BUSINESS_KEY_GENERATE_COVER,
+    BUSINESS_KEY_GENERATE_IMAGE,
+    BUSINESS_KEY_GENERATE_NOTE,
+    BUSINESS_KEY_GENERATE_TAGS,
+    BUSINESS_KEY_GENERATE_TITLE,
+    BUSINESS_KEY_POLISH_TEXT,
+    BUSINESS_KEY_REWRITE_NOTE,
+)
+from backend.app.services.llm_gateway_client import LLMGatewayError, PLATFORM_XHS as BUSINESS_PLATFORM_XHS
+from backend.app.services.llm_gateway_usage_service import (
+    FUNCTION_DESCRIBE,
+    FUNCTION_GENERATE,
+    FUNCTION_POLISH,
+    FUNCTION_REWRITE,
+    FUNCTION_TAG,
+    FUNCTION_TITLE,
+)
 
 router = APIRouter(prefix="/ai", tags=["ai"])
 
@@ -84,42 +103,33 @@ def _serialize_draft(draft: AiDraft) -> dict:
     }
 
 
-def _get_default_text_model(db: Session, current_user: User) -> ModelConfig:
-    config = db.scalars(
-        select(ModelConfig).where(
-            ModelConfig.user_id == current_user.id,
-            ModelConfig.model_type == "text",
-            ModelConfig.is_default.is_(True),
+def _business_model_context(
+    db: Session,
+    current_user: User,
+    business_key: str,
+    platform: str = BUSINESS_PLATFORM_XHS,
+) -> tuple[Any, str]:
+    """按**业务点固定 key** 取调用上下文（v2.0 唯一入口，设计 17 §13.2.4）。
+
+    取代一期 `_text_model_context` / `_image_model_context`（它们在 v2.0 退场）：
+    业务不再按「文本/图像」找默认模型，而是按**业务点**（`generate_note` /
+    `generate_cover` …）查「平台 × 业务点 → 服务商」映射 ——
+    页面换服务商即刻生效，代码零改动。
+
+    失败一律**结构化、不回落**（`llm_gateway_client` 的业务异常），
+    这里把它映射成 HTTP 400 并把 `code` 带进响应体，
+    让前端能凭 code 给出「去模型配置页配一个」的指向性提示。
+    """
+    try:
+        ctx = llm_gateway_client.resolve_business_provider(
+            db, current_user, business_key, platform
         )
-    ).first()
-    if config is None:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Default text model is not configured")
-    return config
-
-
-def _get_default_image_model(db: Session, current_user: User) -> ModelConfig:
-    config = db.scalars(
-        select(ModelConfig).where(
-            ModelConfig.user_id == current_user.id,
-            ModelConfig.model_type == "image",
-            ModelConfig.is_default.is_(True),
-        )
-    ).first()
-    if config is None:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Default image model is not configured")
-    return config
-
-
-def _text_model_context(db: Session, current_user: User) -> tuple[ModelConfig, str]:
-    model_config = _get_default_text_model(db, current_user)
-    api_key = decrypt_text(model_config.encrypted_api_key) if model_config.encrypted_api_key else ""
-    return model_config, api_key
-
-
-def _image_model_context(db: Session, current_user: User) -> tuple[ModelConfig, str]:
-    model_config = _get_default_image_model(db, current_user)
-    api_key = decrypt_text(model_config.encrypted_api_key) if model_config.encrypted_api_key else ""
-    return model_config, api_key
+    except LLMGatewayError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": exc.code, "message": exc.message},
+        ) from exc
+    return ctx, ctx.api_key
 
 
 def _serialize_generated_asset(asset: AiGeneratedAsset) -> dict[str, Any]:
@@ -222,7 +232,7 @@ def rewrite_note(
     if draft is None or draft.user_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found")
 
-    model_config, api_key = _text_model_context(db, current_user)
+    model_config, api_key = _business_model_context(db, current_user, BUSINESS_KEY_REWRITE_NOTE)
     task, rewritten_body = _recorded_text_task(
         db=db,
         current_user=current_user,
@@ -235,6 +245,8 @@ def rewrite_note(
             title=draft.title,
             body=draft.body,
             instruction=payload.instruction,
+            platform=draft.platform,
+            function=FUNCTION_REWRITE,
         ),
     )
     draft.body = rewritten_body
@@ -251,7 +263,7 @@ def generate_note(
     db: Session = Depends(get_db),
     text_ai_client: TextAiClient = Depends(get_text_ai_client),
 ):
-    model_config, api_key = _text_model_context(db, current_user)
+    model_config, api_key = _business_model_context(db, current_user, BUSINESS_KEY_GENERATE_NOTE)
     task, result = _recorded_text_task(
         db=db,
         current_user=current_user,
@@ -264,6 +276,8 @@ def generate_note(
             topic=payload.topic,
             reference=payload.reference,
             instruction=payload.instruction,
+            platform=payload.platform,
+            function=FUNCTION_GENERATE,
         ),
     )
     draft = AiDraft(
@@ -287,7 +301,7 @@ def generate_title(
     db: Session = Depends(get_db),
     text_ai_client: TextAiClient = Depends(get_text_ai_client),
 ):
-    model_config, api_key = _text_model_context(db, current_user)
+    model_config, api_key = _business_model_context(db, current_user, BUSINESS_KEY_GENERATE_TITLE)
     task, items = _recorded_text_task(
         db=db,
         current_user=current_user,
@@ -300,6 +314,8 @@ def generate_title(
             title=payload.title,
             body=payload.body,
             count=payload.count,
+            platform="xhs",
+            function=FUNCTION_TITLE,
         ),
     )
     task.payload = {**(task.payload or {}), "result_count": len(items)}
@@ -314,7 +330,7 @@ def generate_tags(
     db: Session = Depends(get_db),
     text_ai_client: TextAiClient = Depends(get_text_ai_client),
 ):
-    model_config, api_key = _text_model_context(db, current_user)
+    model_config, api_key = _business_model_context(db, current_user, BUSINESS_KEY_GENERATE_TAGS)
     task, items = _recorded_text_task(
         db=db,
         current_user=current_user,
@@ -327,6 +343,8 @@ def generate_tags(
             title=payload.title,
             body=payload.body,
             count=payload.count,
+            platform="xhs",
+            function=FUNCTION_TAG,
         ),
     )
     task.payload = {**(task.payload or {}), "result_count": len(items)}
@@ -341,7 +359,7 @@ def polish_text(
     db: Session = Depends(get_db),
     text_ai_client: TextAiClient = Depends(get_text_ai_client),
 ):
-    model_config, api_key = _text_model_context(db, current_user)
+    model_config, api_key = _business_model_context(db, current_user, BUSINESS_KEY_POLISH_TEXT)
     task, text = _recorded_text_task(
         db=db,
         current_user=current_user,
@@ -353,6 +371,8 @@ def polish_text(
             api_key=api_key,
             text=payload.text,
             instruction=payload.instruction,
+            platform="xhs",
+            function=FUNCTION_POLISH,
         ),
     )
     task.payload = {**(task.payload or {}), "result_length": len(text)}
@@ -401,7 +421,7 @@ def generate_cover(
         if draft is None or draft.user_id != current_user.id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found")
 
-    model_config, api_key = _image_model_context(db, current_user)
+    model_config, api_key = _business_model_context(db, current_user, BUSINESS_KEY_GENERATE_COVER)
     task, result = _recorded_image_task(
         db=db,
         current_user=current_user,
@@ -438,7 +458,7 @@ def generate_image(
     db: Session = Depends(get_db),
     image_ai_client: ImageAiClient = Depends(get_image_ai_client),
 ):
-    model_config, api_key = _image_model_context(db, current_user)
+    model_config, api_key = _business_model_context(db, current_user, BUSINESS_KEY_GENERATE_IMAGE)
     task, result = _recorded_image_task(
         db=db,
         current_user=current_user,
@@ -478,7 +498,7 @@ def describe_image(
     db: Session = Depends(get_db),
     image_ai_client: ImageAiClient = Depends(get_image_ai_client),
 ):
-    model_config, api_key = _image_model_context(db, current_user)
+    model_config, api_key = _business_model_context(db, current_user, BUSINESS_KEY_DESCRIBE_IMAGE)
     task, text = _recorded_image_task(
         db=db,
         current_user=current_user,
@@ -489,6 +509,8 @@ def describe_image(
             api_key=api_key,
             image_url=payload.image_url,
             instruction=payload.instruction,
+            platform="xhs",
+            function=FUNCTION_DESCRIBE,
         ),
     )
     task.payload = {**(task.payload or {}), "result_length": len(text)}

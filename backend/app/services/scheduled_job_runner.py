@@ -181,9 +181,10 @@ def _new_log_row(
         job_id=job.id,
         # 归属快照（DEF-066）：任务删了历史日志仍能按用户收口；不 join scheduled_jobs
         user_id=job.user_id,
-        # 账号快照（迁移 `j1k2l3m4n5o6`）：账号卡「同步中」= 该账号**最新一条**日志的
+        # 账号快照（迁移 `j1k2l3m4n5o6` 建列，`b3c4d5e6f7a8` 随 ADR-021 改名
+        # `platform_account_id`）：账号卡「同步中」= 该账号**最新一条**日志的
         # 状态（2026-09-27 用户口径）。非账号级任务（cron 全量、系统作业）传 None。
-        account_id=account_id,
+        platform_account_id=account_id,
         # 业务任务号快照（迁移 `k2l3m4n5o6p7`）：**孤儿日志收口**要靠它精确回查任务行
         # 真实终态 —— 进程重启会带走观测线程，日志若停在 `running` 就再没人写终态，
         # 账号卡会一直显示「同步中」而任务其实早已结束（2026-09-27 实测）。

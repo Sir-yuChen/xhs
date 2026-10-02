@@ -24,7 +24,6 @@ from sqlalchemy.orm import Session
 
 from backend.app.models import PlatformAccount
 from backend.app.models.shop import ShopNoteGoods
-from backend.app.services.shop_binding_service import account_shop_id
 
 #: 三项指标的默认阈值（用户可覆盖，**不写死 0**）。
 DEFAULT_MAX_BROWSE = 0
@@ -214,13 +213,29 @@ def list_no_traffic_candidates(
     """
     thresholds = thresholds or TrafficThresholds()
     query = query or CleanupQuery()
-    if account_shop_id(db, account_id) is None:
+    # ⚠️ 门禁按**本链路的令牌**判，不是千帆 ark（ADR-021「隔离键 ≠ 能力判据」的另一半：
+    #    能力判据要取该链路自己那份）。无流量清理打的是**创作者平台**的笔记管理接口
+    #    （`_account_cookies` 取 `CHANNEL_CREATOR`、走 `XhsCreatorApiAdapter`），
+    #    所以判据 = `creator` 通道有令牌。
+    #    2026-09-30 收尾时这里一度误写成 `has_ark_session`（千帆令牌）——那会让
+    #    「有创作者会话但没绑千帆」的账号本地候选池恒空（test_no_traffic_cleanup_runner
+    #    实测：给了 creator jar 仍零候选、什么也不删）。
+    from backend.app.services.account_service import (
+        CHANNEL_CREATOR,
+        latest_cookies_for_channel,
+    )
+
+    if not latest_cookies_for_channel(db, account_id, CHANNEL_CREATOR):
         return {
             "candidates": [],
             "total": 0,
             "thresholds": thresholds.to_dict(),
             "query": query.to_dict(),
-            "coverage": {"synced_notes": 0, "pool_total": 0, "reason": "未绑定千帆店铺"},
+            "coverage": {
+                "synced_notes": 0,
+                "pool_total": 0,
+                "reason": "本账号没有可用的创作者平台登录态",
+            },
         }
 
     # 有搜索条件：先服务端搜 + 落库，再本地筛（搜索是过滤前置）。

@@ -64,7 +64,7 @@ from backend.app.models.shop_product import ShopProduct
 from backend.app.services import note_queue_service
 from backend.app.services.product_note_service import run_guardrails
 from backend.app.services.note_topic_service import apply_sync_topics
-from backend.app.services.shop_binding_service import account_shop_id, qianfan_cookies_for_account
+from backend.app.services.shop_binding_service import has_ark_session, qianfan_cookies_for_account
 
 logger = logging.getLogger(__name__)
 
@@ -143,15 +143,17 @@ def _first_list(value: Any) -> list:
 
 
 def _product_row(db: Session, account, item_id: str) -> ShopProduct:
-    """本地台账取商品行（同一份真相源：生成 / 挂链 / 媒体都指它）。"""
-    shop_pk = account_shop_id(db, account.id)
-    if shop_pk is None:
+    """本地台账取商品行（同一份真相源：生成 / 挂链 / 媒体都指它）。
+
+    **归属键 = `platform_account_id`**（ADR-021）：商品直接挂账号，不再经店铺实体。
+    """
+    if not has_ark_session(db, account.id):
         raise ProductNoteGenerationError(
-            "QIANFAN_BINDING_REQUIRED", "尚未绑定千帆商家后台，无法生成商品笔记。请先绑定后再生成。"
+            "ARK_SESSION_REQUIRED", "本账号没有可用的千帆登录态，无法生成商品笔记。请先登录该账号的千帆。"
         )
     row = db.scalars(
         select(ShopProduct).where(
-            ShopProduct.shop_id_fk == shop_pk, ShopProduct.item_id == item_id
+            ShopProduct.platform_account_id == account.id, ShopProduct.item_id == item_id
         )
     ).first()
     if row is None:
@@ -375,19 +377,23 @@ def _run_aigc(adapter, item_id: str) -> dict:
 
 
 def _gate_for_generation(db: Session, account, item_id: str) -> tuple[ShopProduct, str]:
-    """生成门禁（§31.4 步 1-2）：绑店 → ark 令牌 → 台账商品行。
+    """生成门禁（§31.4 步 1-2）：ark 令牌 → 台账商品行。
 
-    **单 / 批量入队与 worker 重跑共用这一把尺子**（DEF-044）：三项都是**确定性
+    **单 / 批量入队与 worker 重跑共用这一把尺子**（DEF-044）：两项都是**确定性
     答案**（本地库可判），不过 ⇒ 抛 :class:`ProductNoteGenerationError`，调用方
     按 400/404 结构化呈现。worker 重跑时再走一遍 —— 凭据 / 台账可能在排队期间
     变化（用户补令牌 / 同步商品），现取现判。
 
+    ⚠️ ADR-021：门禁只剩「**本账号 ark 令牌是否可用**」这一条（`shop_id_fk`
+    归属判据已随店铺实体退场）。取票即门禁 —— 先判 `has_ark_session` 拿到统一
+    的 `ARK_SESSION_REQUIRED` 解释，再取 cookies 供调用方造 adapter。
+
     返回 `(台账商品行, ark 令牌)`：调用方直接用这份令牌造 adapter，不在门禁里
     构造 adapter（门禁失败时一次平台对象都不该造）。
     """
-    if account_shop_id(db, account.id) is None:
+    if not has_ark_session(db, account.id):
         raise ProductNoteGenerationError(
-            "QIANFAN_BINDING_REQUIRED", "尚未绑定千帆商家后台，无法生成商品笔记。请先绑定后再生成。"
+            "ARK_SESSION_REQUIRED", "本账号没有可用的千帆登录态，无法生成商品笔记。请先登录该账号的千帆。"
         )
     cookies = qianfan_cookies_for_account(db, account.id)
     if not cookies:
