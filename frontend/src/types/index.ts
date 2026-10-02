@@ -940,7 +940,18 @@ export type CreateDraftPayload = {
   intent?: "rewrite" | "publish" | string;
 };
 
-export type ModelType = "text" | "image";
+/**
+ * 模型能力类型（v2.9 起四值，设计 17 §13.2.11）。
+ *
+ * - `text` 文本：只出文本（chat / reasoning）
+ * - `image` 图片：只出图片（文生图 / 图生图）
+ * - `multimodal` 多态：文本与图片都能出，**同时满足** text / image 两种业务点
+ * - `video` 视频：出视频
+ *
+ * 归属真相源在后端 `business_provider_keys.MODEL_TYPE_LABELS`（前端零硬编码，
+ * 选项由 `GET /llm/business-provider-keys` 的 `model_types` 下发）。
+ */
+export type ModelType = "text" | "image" | "multimodal" | "video";
 
 // —— 「平台 × 业务点 → 服务商」映射（设计 17 §13.2，v2.0）——
 //
@@ -977,11 +988,23 @@ export type BusinessProviderRow = {
   provider_model_type: BusinessProviderKind | null;
   /**
    * v2.3：已选**具体模型**（服务商下的某个模型）。空串 = 只选了服务商、还没选模型。
-   * ⚠️ 服务商 + 模型**两者都必选**，缺一调用即失败（不复用服务商的 `default_model`）。
+   * ⚠️ 服务商 + 模型**两者都必选**，缺一调用即失败（不回落任何服务商级默认模型，v2.8 起连该列都已删）。
    */
   model_name: string;
   /** v2.3：该服务商的模型目录（前端模型下拉候选，由 `models_json` 解析） */
   provider_models: string[];
+  /**
+   * v2.7：该服务商的**模型行**（带 `model_type` / `platform`）。
+   *
+   * ⚠️ 与 `provider_models` 的分工（§13.2.9.4）：
+   * - `provider_models` = 上游 `/models` 拉到的**候选池**（字符串，可能含未配置的）
+   * - `provider_model_rows` = 用户**已配置**的模型行（带类型，能真正参与调用）
+   *
+   * 「模型下拉按业务点 kind 过滤」读**本字段** —— 候选池没有类型信息，
+   * 且未配置的候选在 v2.7 起无法调用（后端 400 `LLM_BUSINESS_MODEL_NOT_CONFIGURED`）。
+   * 旧代码（v2.0）读的是服务商级 `provider_model_type`，该字段已随服务商级类型退场。
+   */
+  provider_model_rows: LlmGatewayModelRow[];
   /** v2.3：**服务商与模型都选了**才算配置好（只选服务商 ⇒ false） */
   configured: boolean;
   enabled: boolean;
@@ -1022,30 +1045,111 @@ export type LlmGatewayConfig = {
   name: string;
   /** 服务商唯一 KEY（v1.9）：系统生成、创建后不可编辑；业务代码按它引用服务商 */
   provider_key: string;
-  /** 使用平台（v1.9）：服务商服务哪个业务平台（枚举，后端下发） */
-  platform: string;
-  /** 模型类型（v2.0）：`text` / `image`；「模型配置页」按它过滤业务点的下拉候选 */
-  model_type: ModelType;
   base_url: string;
-  default_model: string;
-  models: string[];
+  /**
+   * ⚠️ **v2.7/v2.8 出参变更**：
+   * `platform` / `model_type` 已下沉到**模型行**（本数组每项的字段），
+   * `default_model` 整列删除（§13.2.10）—— 三者都不再是服务商级字段。
+   * 能力类型（text/image）与使用平台（xhs/douyin/…）请读 `models[*]`。
+   */
+  models: LlmGatewayModelRow[];
+  /** v2.7：上游 `/models` 拉到的候选池（字符串数组，供下拉；未配置的模型不在此列） */
+  catalog: string[];
   has_access_token: boolean;
   enabled: boolean;
   healthy: boolean;
   last_health_at: string | null;
   created_at?: string | null;
   updated_at?: string | null;
+  /**
+   * v2.9：**仅创建响应**带此字段** —— 新建服务商时后端自动同步一次模型
+   * （拉目录 + AI 归纳类型）。前端据 `ok` 决定提示文案；**失败不阻断创建**，
+   * 服务商已建成，用户可在操作列点「同步服务商模型」重试。
+   * `GET` 列表 / `PATCH` 的响应都没有这个字段。
+   */
+  sync?: LlmGatewaySyncSummary;
+};
+
+/** v2.7：服务商下的模型行（服务商「模型」子列表的出参/入参形状） */
+export type LlmGatewayModelRow = {
+  id?: number;
+  model_name: string;
+  model_type: ModelType | "";
+  /**
+   * ⚠️ **v2.9 类型变更**：由 `string`（单值）改为 `string[]`（多值）——
+   * 一个模型可被**多个平台共用**（用户口径「多平台共用同一模型」）。
+   * 出参恒为数组（后端 `_parse_platforms` 归一，旧单值也包成 `["xhs"]`）。
+   */
+  platform: string[];
+  enabled: boolean;
+  remark?: string;
+  /**
+   * v2.10：**服务商内自然序号**（`"1"`/`"2"`/`"3"`…）—— 人类可读的唯一标识，
+   * 区别于 DB 全局自增 `id`。同步/新增时后端按「组内最大 +1」生成，**不回收**；
+   * 迁移前的老行由迁移回填。
+   */
+  model_key?: string;
+  /**
+   * v2.10：模型级健康（探测过且通 = true）。
+   * ⚠️ 判「正常」须同时看 `last_health_at`（从未探测时它也是 false）。
+   */
+  healthy?: boolean;
+  /** v2.10：模型级最近探测时间；`null` = 从未探测。 */
+  last_health_at?: string | null;
+  /**
+   * v2.10：**正在使用该模型的业务点**（空数组 = 无业务点在用）。
+   * 用户口径「已在使用的模型无法停用」⇒ 非空时前端置灰「启用」开关；
+   * 后端 `PATCH` 也会 400 拦（`LLM_MODEL_IN_USE_BY_BUSINESS`，前端置灰只是体验层）。
+   */
+  usages?: LlmGatewayModelUsage[];
+};
+
+/** v2.10：一条「模型被某业务点使用」的记录（`LlmGatewayModelRow.usages` 的元素）。 */
+export type LlmGatewayModelUsage = {
+  /** 业务点固定 key（如 `generate_note`） */
+  business_key: string;
+  /** 业务点中文名（如「生成笔记」；页面提示用） */
+  label: string;
+  /** 业务点能力类别（`text` / `image` / `multimodal` / `video`） */
+  kind?: string;
+  /** 该映射所属平台 */
+  platform?: string;
+};
+
+/**
+ * v2.9：`POST /llm/gateway-configs/{id}/sync-models` 的返回体
+ * （拉目录 + AI 归纳类型 + upsert 模型行）。
+ *
+ * ⚠️ **同步失败不是 HTTP 错误** —— 上游不可达 / 令牌过期时接口仍返 200，
+ * 由 `sync.ok=false` + `sync.reason` 如实说明（服务商本身没问题，只是这次同步没成）。
+ */
+export type LlmGatewaySyncSummary = {
+  /** 目录是否成功拉到且模型行已落库 */
+  ok: boolean;
+  /** 中文结果说明（成功时是「目录 N 个模型; 新建 X / 补类型 Y; AI 归纳 …」） */
+  reason: string;
+  /** 上游返回的模型个数 */
+  catalog_count: number;
+  /** 本次新建的模型行数 */
+  created: number;
+  /** 本次补上类型的已有行数（仅补空值，不覆盖用户手工改过的类型） */
+  updated: number;
+  /** AI 成功归纳出类型的模型个数 */
+  classified: number;
+  /** 参与归纳的模型总数 */
+  total: number;
 };
 
 export type LlmGatewayConfigPayload = {
   name: string;
-  /** 使用平台（v1.9 必填，须在 `GET /llm/providers/platforms` 的枚举内） */
-  platform?: string;
-  /** 模型类型（v2.0 必填）：`text` / `image` */
-  model_type?: ModelType;
   base_url?: string;
   access_token?: string;
-  default_model?: string;
+  /**
+   * ⚠️ **v2.7/v2.8**：模型随服务商一并创建/更新 —— 每项带自己的 type/platform/enabled/remark。
+   * `platform` / `model_type` / `default_model` 三键**不再是服务商级字段**：
+   * 后端 `extra="forbid"`，传了会 **422**（§13.2.10）。
+   */
+  models?: LlmGatewayModelRow[];
   // ⚠️ 无 `provider_key`（v1.9）：该字段由服务端生成且**不可编辑** ——
   // 后端 PATCH 请求体带它会 422（`extra="forbid"`），前端不许出现在 payload 里。
 };

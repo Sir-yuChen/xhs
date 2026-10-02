@@ -2800,12 +2800,12 @@ def test_failure_three_way_blocks_stay_inline_after_the_message_switch():
 # 退场而消失。**旧锚点会假绿**：断言字符串已经不在文件里了，但不是因为写对了，
 # 而是因为整页换掉了 —— 必须对着新实现重新落锚，否则这一页谁改都没人管。
 #
-# 守的五件「不许回退」：
+# 守的七件「不许回退」：
 # ① 业务点清单**从后端拉**（前端不写死 key 列表 —— 写死 = 新增业务点要改两处，
 #    前端那份静默过期，DEF-044）；
 # ② **选中即生效**（onChange 直接 PUT，没有「保存」按钮 —— 用户要的是实时，
 #    多一个按钮就多一个「改了没点保存」的静默坑）；
-# ③ 下拉候选**按 kind 过滤**（图像业务点不列文本服务商，否则选了就过不了
+# ③ 二级候选**按 kind 过滤**（图像业务点不列文本服务商，否则选了就过不了
 #    后端类型校验，用户以为是后端坏了）；
 # ④ 空态**有文案**（没有该类型服务商时给一行说明，不是空下拉 ——
 #    空下拉无法区分「坏了」与「没配」，DEF-057 同型）；
@@ -2813,6 +2813,10 @@ def test_failure_three_way_blocks_stay_inline_after_the_message_switch():
 #    只能配置小红书相关业务使用的模型，把右上角的下拉移除，不支持切换到其它平台」）。
 #    ⚠️ 这条是**删假入口**的性质：业务调用点全部写死 `'xhs'`，页面若能切到抖音，
 #    用户配的那份映射**永远不会有业务代码读它** —— 典型的「能改但不生效」静默坑。
+# ⑥ 服务商候选**从 `models-tree` 端点拉**（v2.11，2026-10-02 用户报「全部无法修改」的根因：
+#    `GET /llm/gateway-configs` 的 `models` 恒空 ⇒ 候选全空 ⇒ 控件恒 disabled）；
+# ⑦ 服务商 / 模型列 = **单个 antd `Cascader`**（v2.11 用户口径「应使用二级联动组件展示，
+#    且支持修改」）—— 不许拆回两个 `Select`（那是 v2.5 死循环的温床）。
 # ===========================================================================
 
 MODEL_CONFIG_PAGE = ROOT / "frontend/src/pages/models/model-config-page.tsx"
@@ -2862,22 +2866,62 @@ def test_model_config_page_switch_is_immediate_without_save_button():
 
 
 def test_model_config_page_filters_candidates_by_kind():
-    """③ 下拉候选按 `kind` 过滤 —— 图像业务点不列文本服务商。"""
+    """③ 候选模型按 `kind` 过滤 —— **判据必须镜像后端 `_type_satisfies`**（v2.11）。
+
+    ⚠️ **本条在 v2.11 被改写**（2026-10-02 用户口径「服务商和服务商模型应使用二级联动
+    组件展示，且支持修改」）。原断言 `model_type === kind` 守的是页面里**内联的严格相等**
+    过滤；v2.11 把判据下沉到 `provider-options.ts` 的 `typeSatisfies()`，且**放宽到
+    后端口径**（`multimodal` 可服务 `text` 与 `image`）—— 原断言会把正确实现判红。
+
+    为什么必须放宽：后端 `services/llm_gateway_client._type_satisfies` 对
+    `text` / `image` 都接受 `multimodal`（只有 `video` 是严格单值）。页面若用严格相等，
+    `multimodal` 模型会从 text/image 业务点的候选里**静默消失** ⇒ 用户看得见的候选
+    比真正可用的少（「能改但看不到」）。因此这里守的是：
+    ① 类型过滤**必须存在**（不能退化成「全量候选」）；
+    ② 过滤**必须走 `typeSatisfies`**（唯一判据，与后端同源，不许再内联 `=== kind`）。
+    """
     code = _code_only(_read(MODEL_CONFIG_PAGE))
-    body = _slice_between(code, "const candidatesFor = useCallback(", "const onSwitch = useCallback(")
-    assert "model_type === kind" in body, (
-        "候选必须按 `provider.model_type === row.kind` 过滤（跨 kind 选了必过不了后端类型校验）"
+    # 正向①：类型过滤必须真存在 —— 走 provider-options 的纯函数 `buildModelOptions`
+    #   （它内部调 `usableModels` → `typeSatisfies`）。若把它删掉换成全量
+    #   `children: options`，跨 kind 选了必过不了后端类型校验。
+    assert "buildModelOptions(" in code, (
+        "二级候选必须走 `buildModelOptions(provider, kind)` —— 它是按 kind 过滤的唯一入口"
+    )
+    # 正向②：二级 children **必须**逐个经 `buildModelOptions` 过滤 —— 切片到级联映射那段，
+    #   断言 `children:` 的右值就是 `buildModelOptions(...)`。若改成
+    #   `children: options.map(...)`（全量不过滤）⇒ 变红（变异实测）。
+    seg = _slice_between(code, "const cascaderOptions = providerOptions.map(", "const boundOption")
+    # 归一化空白（`children: buildModelOptions(\n   options.find(...)` 跨多行 ⇒ 直接子串匹配会漏）
+    assert "children: buildModelOptions(" in re.sub(r"\s+", " ", seg), (
+        "二级 children 必须 = buildModelOptions(provider, kind)：直接挂全量 options = 不过滤"
+    )
+    # 反向：不许再出现内联的严格相等判据（那正是被放宽掉的旧实现 —— 它会漏掉 multimodal）
+    assert "model_type === kind" not in code, (
+        "不许内联 `model_type === kind`：严格相等会漏掉 multimodal（后端是放行的），"
+        "判据必须走 typeSatisfies"
+    )
+    assert re.search(r"children\s*:\s*options\b", code) is None, (
+        "二级 children 不许直接挂全量 options：必须在 buildModelOptions 里按 kind 过滤"
     )
 
 
 def test_model_config_page_shows_explicit_empty_state():
-    """④ 没有该类型服务商时给**明确文案**，不是空下拉。"""
+    """④ 没有该类型服务商时给**明确文案**，不是空下拉。
+
+    ⚠️ **v2.11 收紧**：页面上有 4 段提示都含「服务商配置」，全文断言会被**别的提示遮过**
+    —— 杀掉「该类型暂无服务商」这一段，`还没有` / `服务商配置` 仍能在其它三处命中 ⇒
+    守卫假绿（变异实测）。故切片到 `{empty && (` 这一段内部断言（DEF-057 同型：
+    断言必须落到**能区分对错**的粒度）。
+    """
     code = _code_only(_read(MODEL_CONFIG_PAGE))
+    # 无候选时 placeholder 必须明说（空下拉分不清「坏了」还是「没配」）
     assert "暂无可用的该类型服务商" in code, (
         "无候选时 placeholder 必须明说（空下拉分不清「坏了」还是「没配」）"
     )
-    assert "还没有" in code and "服务商配置" in code, (
-        "空态必须给出「去哪配」的指向（请先到「服务商配置」新增）"
+    # 「该类型暂无服务商」这一段必须给出「去哪配」的指向 —— 只在这段里断言
+    seg = _slice_between(code, "{empty && (", "{allCatalogEmpty && (")
+    assert "还没有" in seg and "服务商配置" in seg, (
+        "空态必须给出「去哪配」的指向（请先到「服务商配置」新增）—— 段内断言，不许被别处提示遮过"
     )
 
 
@@ -2919,17 +2963,90 @@ def test_model_config_page_has_no_platform_switcher():
     assert "options={platforms" not in code, "不应再有平台下拉的 options 绑定"
 
 
+def test_model_config_page_uses_models_tree_endpoint():
+    """⑥ 服务商候选**必须从 `models-tree` 端点拉**（v2.11 根因守卫）。
+
+    用户口径（2026-10-02）：「当前服务商 / 模型列 … 目前**全部无法修改**服务商和模型」。
+
+    根因：页面原调 `fetchGatewayConfigs()`（`GET /llm/gateway-configs`），该端点每项的
+    `models` **恒为空数组**（后端 `_serialize_config(c)` 不传 `models`，形参默认
+    `None ⇒ []`），而候选逻辑要读 `models` ⇒ **全部服务商被丢弃** ⇒ 控件恒 `disabled`
+    ⇒ 「全部无法修改」。正解是 `fetchGatewayModelsTree()`
+    （`GET /llm/gateway-configs/models-tree`，同一个序列化函数但真装模型行）。
+
+    ⚠️ 这两个端点**长得像孪生**（同一路由前缀、同一 `_serialize_config`），极易在下次
+    改动里被换回前者 —— 换回去**不报错**，只是又全部改不了（静默坑）。故必须落锚：
+    正向必须调 `models-tree`；反向必须**不再调** `fetchGatewayConfigs`。
+    """
+    code = _code_only(_read(MODEL_CONFIG_PAGE))
+    # 正向：必须在 load 里真调 models-tree（带括号 = 真在调，不是「导入了没用」）
+    assert "fetchGatewayModelsTree(" in code, (
+        "服务商候选必须从 `GET /llm/gateway-configs/models-tree` 拉（该端点才带模型行）"
+    )
+    body = _slice_between(code, "const load = useCallback(", "const candidatesFor = useCallback(")
+    assert "fetchGatewayModelsTree(" in body, (
+        "load 必须真调 fetchGatewayModelsTree（写成 import 留着不算）"
+    )
+    # 反向：不许再调「models 恒空」的那个端点 —— 换回去 = 再次「全部无法修改」。
+    # ⚠️ 只禁**调用形态**（`fetchGatewayConfigs(`），不禁注释里提它的名字
+    #   （本页注释要留根因说明，一刀切禁词会误伤 —— DEF-057 同型）。
+    assert "fetchGatewayConfigs(" not in body, (
+        "load 不许调 fetchGatewayConfigs：它的 `models` 恒空 ⇒ 候选全空 ⇒ 又全部改不了"
+    )
+
+
+def test_model_config_page_pk_column_is_single_cascader():
+    """⑦ 服务商 / 模型列 = **一个二级联动组件**（antd `Cascader`），非两个独立 `Select`。
+
+    用户口径（2026-10-02）：「服务商和服务商模型**应使用二级联动组件**展示，且**支持修改**」。
+
+    为什么守这个：拆成两个 `Select` 时，① 级（服务商）与 ② 级（模型）要各自管
+    `disabled`/值/提交时机，正是 v2.5 死循环（选了服务商 ⇒ PUT 400 ⇒ 二级永远打不开）
+    的温床。antd `Cascader` 把两级收进**一个控件**（`changeOnSelect` + `allowClear`），
+    中间态天然只到一级 ⇒ 配合 `commitDecision` 守卫一次提交。
+
+    ⚠️ 不许回退成两个 `Select`：那是本次修复要消除的形态。
+    """
+    code = _code_only(_read(MODEL_CONFIG_PAGE))
+    # 正向：必须用 antd 官方的二级联动组件 Cascader
+    assert re.search(r"\bCascader\b", code), (
+        "服务商 / 模型列必须用 antd `Cascader`（二级联动组件）"
+    )
+    assert "changeOnSelect" in code, (
+        "Cascader 必须开 `changeOnSelect`：允许只选到一级（服务商），否则二级打不开"
+    )
+    # 反向：那一列不许再拆回两个 Select（`options={providerOptions}` + `options={modelOptions}`）
+    assert "options={cascaderOptions}" in code, (
+        "级联数据必须绑定到 Cascader 的 `options`（单控件）"
+    )
+    body = _slice_between(code, 'title: "当前服务商 / 模型"', 'title: "状态"')
+    assert "<Cascader" in body, "该列必须渲染 Cascader"
+    assert "<Select" not in body, (
+        "该列不许再拆回 `<Select>`（两级拆开正是 v2.5 死循环的温床）"
+    )
+
+
 def test_model_config_page_drops_redundant_intro_paragraph():
     """卡内**说明段落已移除**（v2.6 用户追加口径：「这里面这段说明也不要了」）。
 
-    ⚠️ 只断言**那一段的具体文案**不在，不禁止所有 `Paragraph` ——
-    断言要不误伤（DEF-057 同型：断言必须能区分对错）。下方 `Alert` 承载
-    「两者都必选」的关键约束，**必须留着**（删它才是回退）。
+    ⚠️ **本条在 v2.11 被订正**（此前是**假红**）：原断言要求页面保留一句集中式
+    `Alert`（`服务商与具体模型都必选`）。但 v2.9 已把该 Alert **整段移除**，改为
+    **按行条件提示**（「该类型的 N 个服务商都还没有可用模型 …」「该服务商在该业务点下
+    没有可用模型 …」）—— 集中式 Alert 反而与「实时级联 + 逐行空态」的口径冲突
+    （用户要的是每行当场说清，不是顶部一句通用约束）。原断言从 v2.9 起就一直是红的
+    （未被察觉），本次一并订正为守**当前的正确形态**。
+
+    守什么：① 卡内那段长说明**不回来**；② 空态提示**必须保留**（换成了按行形态）——
+    删掉它才是回退（DEF-057：断言要能区分对错）。
     """
     code = _code_only(_read(MODEL_CONFIG_PAGE))
     assert "服务商在「服务商配置」页单独维护" not in code, (
         "卡内说明段落已按用户口径移除，不应回退"
     )
-    assert "服务商与具体模型都必选" in code, (
-        "Alert 的关键约束（两者都必选 / 不回落）必须保留 —— 删它才是回退"
+    # v2.11 订正：约束提示改由**按行**空态文案承载（不再是集中式 Alert）。
+    assert "暂无可用的该类型服务商" in code, (
+        "空态提示必须保留（v2.9 起改为按行形态）—— 删它才是回退"
+    )
+    assert "该业务点下没有可用模型" in code, (
+        "「服务商在该业务点下无可用模型」的按行提示必须保留（原集中式 Alert 的等价物）"
     )

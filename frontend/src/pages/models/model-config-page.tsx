@@ -1,20 +1,22 @@
 import { ReloadOutlined } from "@ant-design/icons";
-import { Alert, App, Card, Select, Space, Spin, Table, Tag, Typography } from "antd";
+import { App, Card, Cascader, Space, Spin, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { PageHeader } from "../../components/layout/app-shell";
 import {
+  buildModelOptions,
   buildProviderOptions,
   commitDecision,
   isAllCatalogEmpty,
+  isModelMissing,
   isSelectableForRow,
   isStepOneLocked,
 } from "./provider-options";
 import {
   fetchBusinessProviderKeys,
   fetchBusinessProviders,
-  fetchGatewayConfigs,
+  fetchGatewayModelsTree,
   upsertBusinessProvider,
 } from "../../lib/api";
 import type {
@@ -81,10 +83,21 @@ export function ModelConfigPage() {
     setIsLoading(true);
     try {
       // 平台固定 `xhs`（v2.6，§13.2.8）⇒ 不再拉平台枚举，也不再传可变 scope。
+      //
+      // ⚠️ **v2.11 纠错（2026-10-02 用户报「全部无法修改服务商和模型」的根因）**：
+      //   这里原本调 `fetchGatewayConfigs()` —— 那个端点的每项 `models` **恒为空数组**
+      //   （后端 `GET /llm/gateway-configs` 走 `_serialize_config(c)` 不传 `models`，
+      //   形参默认 `None ⇒ []`）。而下方 `candidatesFor()` 会
+      //   `.filter((p) => p.models.length > 0)` ⇒ **所有服务商被过滤掉** ⇒ `options` 恒空
+      //   ⇒ `empty = true` ⇒ 两个 `Select` 的 `disabled` 恒真 ⇒ 服务商与模型**都改不了**
+      //   （且不报错，是「能看不能改」的静默坑）。
+      //   正解 = 换 `fetchGatewayModelsTree()`（`GET /llm/gateway-configs/models-tree`），
+      //   它与 `GET /` 的过滤/排序/序列化**同一个函数**，只是每项的 `models` 真的装了模型行。
+      //   `usage-dashboard-panel.tsx` 早已踩过同一个坑并留了注释，本页是漏改的一处。
       const [mapping, keyList, providerList] = await Promise.all([
         fetchBusinessProviders(XHS_PLATFORM),
         fetchBusinessProviderKeys(),
-        fetchGatewayConfigs(),
+        fetchGatewayModelsTree(),
       ]);
       setRows(mapping.items);
       setKeys(keyList.items);
@@ -100,9 +113,28 @@ export function ModelConfigPage() {
     void load();
   }, [load]);
 
-  /** 某业务点的下拉候选 = 本用户的**同 kind** 服务商（图像业务点不列文本服务商） */
+  /**
+   * 某业务点的候选服务商 = **`kind` 下有可用模型行**的服务商。
+   *
+   * ⚠️ **v2.7**：`model_type` 已从服务商下沉到**模型行** —— 读 `p.models` 而不是
+   * 服务商级的 `p.model_type`（该字段已不存在）。
+   *
+   * ⚠️ **v2.11**：判据全交给 `provider-options.ts` 的 `usableModels` / `typeSatisfies`
+   * （**与后端 `_type_satisfies` 同判**）。老代码这里内联了 `(m.model_type||"text")===kind`
+   * 的**严格相等** ⇒ 把 `multimodal` 模型从 text/image 业务点的候选里静默滤掉了
+   * （后端其实放行）⇒ 用户看得见的候选比可用的少。
+   *
+   * 为什么不用 `catalog`（上游候选池）：那是**未配置**的候选，没有类型信息，
+   * 且 v2.7 起调用时后端只认模型行 ⇒ 候选池里的名字选下去会 400
+   * `LLM_BUSINESS_MODEL_NOT_CONFIGURED`（§13.2.9.4 分工）。
+   *
+   * ⚠️ **不再预过滤空目录服务商**：v2.11 起候选池保留**全部**服务商，由
+   * `buildProviderOptions` 把「无该类型模型」的置灰并标注原因 —— 「仍可见不隐藏」
+   * 才能让用户知道去补目录（同「缺值不造假」）。老代码 `.filter(p => p.models.length>0)`
+   * 会把它们**整条删掉**，用户既看不见也修不了。
+   */
   const candidatesFor = useCallback(
-    (kind: string) => providers.filter((p) => p.model_type === kind),
+    (_kind: string) => providers,
     [providers],
   );
 
@@ -218,91 +250,85 @@ export function ModelConfigPage() {
     {
       title: "当前服务商 / 模型",
       dataIndex: "provider_key",
+      width: 420,
       render: (_v, record) => {
         const options = candidatesFor(record.kind);
         const empty = options.length === 0;
         const saving = savingKey === record.business_key;
-        // 「生效服务商」= 暂存选择（用户刚在 ① 步点过）优先，否则库内值。
+        // 「生效服务商」= 暂存选择（用户刚在 ① 级点过）优先，否则库内值。
         const chosenKey = effectiveProviderKey(record);
-        // 模型候选 = **生效服务商**的目录：暂存选择也要能立刻出模型，否则 ② 步还是空的
-        const modelOptions = (
-          chosenKey
-            ? (options.find((p) => p.provider_key === chosenKey)?.models ?? [])
-            : []
-        ).map((m) => ({ value: m, label: m }));
-        const noModelCatalog = !!chosenKey && modelOptions.length === 0;
-        // v2.3 修正：模型目录为空的服务商**不可选**（灰掉 + 说明）。
-        //   原因：模型是必选项，而空目录 ⇒ 第 ② 步下拉永远是空的 ⇒ 用户选完只能停在
-        //   「缺具体模型」的报错态、且**自己无法补救**（唯一出路是去服务商页拉取目录）。
-        //   放它可选 = 把用户引进死胡同，正是「报错但不可自救」。规则已抽到
-        //   `provider-options.ts` 并有单测钉住（见该文件顶部注释）。
-        const providerOptions = buildProviderOptions(options);
-        const allCatalogEmpty = isAllCatalogEmpty(options);
-        // ⚠️ 收紧置灰条件（用户第二次反馈「还是选不了模型」）：
-        //   `allCatalogEmpty` 只该在**本行还没绑任何服务商**时才整体禁用 ① 步。
-        //   若本行已经绑着一个空目录服务商（脏配置，如 `TEST-TEXT`），再整体禁用
-        //   就把用户锁死在报错态：合法服务商选不了（② 步必然空），连清空也点不了。
-        //   此时 ① 步必须可选 —— 已绑定项由 `isSelectableForRow` 放行，用户得以
-        //   换服务商或清空来自救。
+        // ⚠️ v2.11：服务商与模型合并为**一级联组件**（用户口径「应使用二级联动组件展示」）。
+        //   规则仍在 `provider-options.ts`（纯函数、有单测钉住），这里只做渲染与提交。
+        const providerOptions = buildProviderOptions(options, record.kind);
+        const allCatalogEmpty = isAllCatalogEmpty(options, record.kind);
+        // 只在该行**还没绑服务商**时才整体锁死：已绑行必须能改选/清空以自救（v2.5 结论）。
         const lockedByAllEmpty = isStepOneLocked(allCatalogEmpty, chosenKey);
-        const selectableOptions = providerOptions.map((o) => ({
-          ...o,
+        // 级联数据：一级 = 服务商（无该类型模型的置灰并标注原因，仍可见不隐藏）；
+        //   二级 = 该服务商在该业务点下的可用模型（后端 `_type_satisfies` 同判）。
+        const cascaderOptions = providerOptions.map((o) => ({
+          value: o.value,
+          label: o.label,
           disabled: !isSelectableForRow(o, chosenKey),
+          children: buildModelOptions(
+            options.find((p) => p.provider_key === o.value),
+            record.kind,
+          ),
         }));
         // 已绑定项若仍不可选 ⇒ 说明是「已停用」而非「无目录」（无目录已被上面放行）
         const boundOption = providerOptions.find((o) => o.value === chosenKey);
         const boundDisabled = boundOption?.disabledReason === "disabled";
+        // 该服务商在该业务点下没有可用模型（先看候选，再按生效服务商判）
+        const noModelCatalog =
+          !!chosenKey &&
+          buildModelOptions(
+            options.find((p) => p.provider_key === chosenKey),
+            record.kind,
+          ).length === 0;
+        // ⚠️ 库里存的模型已不可用（被停用 / 改类型 / 删了）：**不静默清空**，
+        //   如实提示 —— 用户没动它，悄悄抹掉才是最难查的那种（同「缺值不造假」）。
+        const modelMissing = isModelMissing(chosenKey, record.model_name, options, record.kind);
+        // 级联当前值：服务商选好但模型还没选 = 只给一级（中间态）；齐全才给 [服务商, 模型]。
+        const cascaderValue: string[] = chosenKey
+          ? record.model_name && !modelMissing
+            ? [chosenKey, record.model_name]
+            : [chosenKey]
+          : [];
         return (
-          <Space direction="vertical" size={4} style={{ minWidth: 340 }}>
-            <Select
-              style={{ width: 340 }}
-              value={chosenKey || undefined}
+          <Space direction="vertical" size={4} style={{ minWidth: 380 }}>
+            <Cascader
+              style={{ width: 380 }}
+              value={cascaderValue.length ? cascaderValue : undefined}
               placeholder={
                 empty
                   ? "暂无可用的该类型服务商"
                   : lockedByAllEmpty
-                    ? "该类型服务商都还没有模型目录"
-                    : "① 选择服务商"
+                    ? "该类型服务商都还没有可用模型"
+                    : "选择服务商 — 模型（选中即保存）"
               }
               disabled={empty || lockedByAllEmpty || saving}
-              loading={saving}
+              options={cascaderOptions}
+              // 允许只选到一级（服务商）：此刻只落本地暂存，不落库（中间态见 commitDecision）
+              changeOnSelect
               allowClear
+              showSearch={{
+                filter: (input, path) =>
+                  path.some((o) => String(o.label ?? "").toLowerCase().includes(input.toLowerCase())),
+              }}
+              displayRender={(labels) => labels.join(" — ")}
               onChange={(value) => {
-                // ① 步：`commitDecision` 说 hold 就只存本地暂存，绝不落库
-                //    （此刻 PUT 必 400 ⇒ provider_key 存不下 ⇒ ② 步永远打不开）。
-                //    清空时是 commit（`provider_key=""` 合法，后端连带清空模型）。
-                const next = value ?? "";
-                if (commitDecision(next, "") === "commit") {
-                  void onSwitch(record, next, "");
+                // `changeOnSelect` 下 value 可能只有一级（选了服务商）或两级（服务商+模型）
+                const nextProvider = (value?.[0] as string) ?? "";
+                const nextModel = (value?.[1] as string) ?? "";
+                // 清空（点了 allowClear）⇒ 一次 PUT 清空该行（provider_key="" 合法）
+                if (commitDecision(nextProvider, nextModel) === "commit") {
+                  void onSwitch(record, nextProvider, nextModel);
                   return;
                 }
-                setPendingProvider((prev) => ({ ...prev, [record.business_key]: next }));
+                // 中间态（选了服务商、还没选模型）⇒ **只在本地暂存**，绝不落库：
+                //   此刻 PUT 必 400（后端要求服务商+模型都非空）⇒ provider_key 存不下
+                //   ⇒ 级联二级永远打不开 ⇒ 死循环（v2.5 根因，`commitDecision` 守卫）。
+                setPendingProvider((prev) => ({ ...prev, [record.business_key]: nextProvider }));
               }}
-              options={selectableOptions}
-            />
-            <Select
-              style={{ width: 340 }}
-              value={record.model_name || undefined}
-              placeholder={
-                !chosenKey
-                  ? "② 先选服务商"
-                  : noModelCatalog
-                    ? "该服务商暂无模型目录"
-                    : "② 选择具体模型（必选，选中即保存）"
-              }
-              disabled={!chosenKey || noModelCatalog || saving}
-              loading={saving}
-              allowClear
-              onChange={(value) => {
-                // ② 步：服务商 + 模型齐全 ⇒ commit，一次性落库（唯一写点）。
-                //    这里恒为 commit（providerKey 非空、modelName 非空）。
-                const nextModel = value ?? "";
-                if (commitDecision(chosenKey, nextModel) === "commit") {
-                  void onSwitch(record, chosenKey, nextModel);
-                }
-              }}
-              options={modelOptions}
-              showSearch
             />
             {empty && (
               <Text type="secondary" style={{ fontSize: 12 }}>
@@ -312,20 +338,28 @@ export function ModelConfigPage() {
             )}
             {allCatalogEmpty && (
               <Text type="secondary" style={{ fontSize: 12 }}>
-                该类型的 {options.length} 个服务商都还没有模型目录；模型是必选项，
+                该类型的 {options.length} 个服务商都还没有可用模型；模型是必选项，
                 请先到「服务商配置」对目标服务商执行「测试」以拉取模型目录。
               </Text>
             )}
             {noModelCatalog && (
               <Text type="secondary" style={{ fontSize: 12 }}>
-                该服务商还没有模型目录（目录为空时选不出模型）。请到「服务商配置」对它
-                执行「测试」拉取模型目录；或先把本行服务商<b>清空</b>，再改选其它有目录的服务商。
+                该服务商在该业务点下没有可用模型。请到「服务商配置」为它补
+                {record.kind === "image" ? "图像" : "文本"}类模型；或先把本行服务商
+                <b>清空</b>，再改选其它服务商。
               </Text>
             )}
             {boundDisabled && (
               <Text type="secondary" style={{ fontSize: 12 }}>
                 本行绑定的服务商<b>已停用</b>。请到「服务商配置」启用它，或先把本行服务商
                 <b>清空</b>再改选其它服务商。
+              </Text>
+            )}
+            {modelMissing && (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                已存的模型「{record.model_name}」在该业务点下<b>已不可用</b>
+                （被停用、改了类型或已删除）。请重新选择模型；或先把本行服务商
+                <b>清空</b>再改选。
               </Text>
             )}
           </Space>
@@ -361,12 +395,6 @@ export function ModelConfigPage() {
         }
       />
       <Card>
-        <Alert
-          type="info"
-          showIcon
-          style={{ marginBottom: 12 }}
-          message="服务商与具体模型都必选：先选服务商，再选它下面的具体模型；选中模型即保存。只选服务商不选模型，业务调用会报「该业务点还没配模型」，不会回落到服务商的默认模型，也不会回落到其它服务商。"
-        />
         <Table
           rowKey="_key"
           loading={isLoading}

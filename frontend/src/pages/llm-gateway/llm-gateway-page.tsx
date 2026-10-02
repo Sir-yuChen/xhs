@@ -11,19 +11,28 @@ import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-
 
 import { PageHeader } from "../../components/layout/app-shell";
 import { WorkspaceShell } from "../../components/layout/workspace-shell";
-import { buildGatewayTree, isExpandableProvider, type GatewayTreeRow } from "./gateway-tree";
+import {
+  buildGatewayTree,
+  isExpandableProvider,
+  type GatewayModelNode,
+  type GatewayProviderNode,
+  type GatewayTreeRow,
+} from "./gateway-tree";
 import { UsageDashboardPanel } from "./usage-dashboard-panel";
 import {
   createGatewayConfig,
   createGatewayAlert,
   deleteGatewayAlert,
+  fetchBusinessProviderKeys,
   fetchGatewayAlerts,
   fetchGatewayConfigs,
+  fetchGatewayModelsTree,
   fetchGatewayPlatforms,
   fetchGatewayStats,
-  previewGatewayModels,
+  syncGatewayModels,
   testGatewayConfig,
   updateGatewayConfig,
+  updateGatewayModel,
   updateGatewayAlert,
 } from "../../lib/api";
 import type {
@@ -32,8 +41,10 @@ import type {
   LlmGatewayAlertScope,
   LlmGatewayConfig,
   LlmGatewayConfigPayload,
+  LlmGatewayModelRow,
   LlmGatewayPlatformOption,
   LlmGatewayStats,
+  ModelType,
 } from "../../types";
 
 const { Text } = Typography;
@@ -42,6 +53,28 @@ const { Text } = Typography;
 function statsLine(stats: LlmGatewayStats["today"]): string {
   if (!stats) return "-";
   return `调用 ${stats.calls} · 成功 ${stats.success_calls} · Tokens ${stats.total_tokens} · 均耗 ${stats.avg_latency_ms}ms`;
+}
+
+/**
+ * 类型枚举值 → 中文标签（v2.9）。选项由**后端下发**（`GET /llm/business-provider-keys`）。
+ *
+ * ⚠️ 枚举未加载 / 值不在枚举内 ⇒ **原样显示枚举键**（缺值口径：不造名、不猜）；
+ * 这是「取不到就留白」在标签场景的落地 —— 宁可显示 `text` 也不显示「文本」，
+ * 以免后端加了第五种类型时前端把它错标成已有的某种。
+ */
+function typeLabel(
+  options: { value: string; label: string }[],
+  value: string,
+): string {
+  return options.find((o) => o.value === value)?.label ?? value;
+}
+
+/** 类型标签配色：图片紫 / 多态青 / 视频橙 / 文本（及其余）蓝。 */
+function typeTagColor(value: string): string {
+  if (value === "image") return "purple";
+  if (value === "multimodal") return "cyan";
+  if (value === "video") return "orange";
+  return "blue";
 }
 
 // 服务商列表 = **父子树**（2026-10-02 用户口径「服务商列表使用父子树，父是服务商，
@@ -186,13 +219,25 @@ function GatewaysPage() {
   const [editing, setEditing] = useState<LlmGatewayConfig | null>(null);
   const [saving, setSaving] = useState(false);
   const [testingId, setTestingId] = useState<number | null>(null);
-  const [togglingId, setTogglingId] = useState<number | null>(null);
+  /** v2.9：正在同步模型的服务商 id（操作列「同步服务商模型」按钮的 loading） */
+  const [syncingId, setSyncingId] = useState<number | null>(null);
+  /** v2.9：正在改类型的模型行 id（「类型」列下拉的 loading） */
+  const [typeSavingId, setTypeSavingId] = useState<number | null>(null);
+  /** v2.10：正在启停的模型行 id（子表「启用」列开关的 loading） */
+  const [togglingModelId, setTogglingModelId] = useState<number | null>(null);
+  /** v2.10：正在做健康检查的模型行 id（子表「健康」列检查按钮的 loading）。
+   *  ⚠️ 探测的粒度是**服务商**（连通性由凭据+地址决定），检查完顺带写回该服务商下
+   *  全部模型行的健康戳 —— 故这个 id 只是「哪个按钮在转」，不代表探测只针对该模型。 */
+  const [checkingModelId, setCheckingModelId] = useState<number | null>(null);
   const [statsMap, setStatsMap] = useState<Record<number, LlmGatewayStats>>({});
   // 「使用平台」枚举**由后端下发**（v1.9 D3）—— 前端不写死选项
   const [platformOptions, setPlatformOptions] = useState<LlmGatewayPlatformOption[]>([]);
-  // v1.9：模型下拉的候选（由**服务商**决定 ⇒ 点「拉取模型」时按表单当前地址+令牌现拉）
-  const [modelOptions, setModelOptions] = useState<string[]>([]);
-  const [loadingModels, setLoadingModels] = useState(false);
+  // v2.9：**模型类型枚举由后端下发**（`GET /llm/business-provider-keys` 的 `model_types`）——
+  // 与「业务点映射」页共用同一份真相源（`business_provider_keys.MODEL_TYPE_LABELS`），
+  // 前端零硬编码（加第五种类型时前端不用改）。
+  const [modelTypeOptions, setModelTypeOptions] = useState<{ value: string; label: string }[]>([]);
+  // ⚠️ v2.9：`modelOptions` / `loadingModels`（弹窗内「拉取模型」候选池）**随
+  // `Form.List` 模型编辑器一并删除** —— 模型不再手工挑，改为「同步服务商模型」拉全量。
 
   useEffect(() => {
     let alive = true;
@@ -210,10 +255,31 @@ function GatewaysPage() {
     };
   }, []);
 
+  // v2.9：模型类型枚举（同源 `fetchBusinessProviderKeys`，业务点映射页也在用）
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const data = await fetchBusinessProviderKeys();
+        if (alive) setModelTypeOptions(data.model_types);
+      } catch {
+        // 取不到 = 类型下拉无选项；不写死兜底（缺值不造假，宁可空）
+        if (alive) setModelTypeOptions([]);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await fetchGatewayConfigs();
+      // ⚠️ v2.9（2026-10-02 用户口径「服务商使用父子列表展示」）：
+      // 走**一个**端点拿到「服务商 + 其全部模型行」（`GET /llm/gateway-configs/models-tree`），
+      // 不再自己拼「列表 + 每行再拉一次模型」—— 一次请求一个结果，
+      // 中间的失败语义由后端定（详见该端点 docstring）。
+      const data = await fetchGatewayModelsTree();
       setGateways(data.items);
       // 列表挂载即拉**全部**服务商的调用量（调用量列按行展示，不再依赖「选中」交互）
       const items = data.items;
@@ -239,26 +305,31 @@ function GatewaysPage() {
     void load();
   }, [load]);
 
-  // 服务商 → 父子树（父 = 服务商，子 = 其模型目录）。数据源 = `gateways`（每项含 `models`）。
+  // 服务商列表 → 父子树（父 = 服务商，子 = 其模型目录）。数据源 = `gateways`（每项含 `models`）。
   const treeData = useMemo(() => buildGatewayTree<LlmGatewayConfig>(gateways), [gateways]);
+  // 父表的数据源 = **只有服务商行**（子模型不再混在同一张表里）。
+  // ⚠️ `buildGatewayTree` 仍产出 children（展开行要用）——父表靠 `expandedRowRender`
+  // 拿 `row.children` 渲染子表，所以这里**不能**把 children 摘掉（摘了子表就没数据了）。
+  const providerRows = useMemo(
+    () => treeData.filter((r): r is GatewayProviderNode<LlmGatewayConfig> => r.kind === "provider"),
+    [treeData]
+  );
 
   const openCreate = () => {
     setEditing(null);
-    setModelOptions([]); // v1.9：新增态没有目录 ⇒ 清空候选（用户点「拉取模型」现拉）
     form.resetFields();
     setModalOpen(true);
   };
 
   const openEdit = (g: LlmGatewayConfig) => {
     setEditing(g);
-    // 已有目录直接做候选（用户不一定重拉；改了地址/令牌再点「拉取模型」）
-    setModelOptions(g.models ?? []);
     form.setFieldsValue({
       name: g.name,
-      platform: g.platform,
-      model_type: g.model_type,
       base_url: g.base_url,
-      default_model: g.default_model,
+      // v2.9：**弹窗里不再有模型行编辑器**（用户口径「不需要再进入编辑后添加模型」）——
+      // 模型列表在**主页面的父子树**里直接展示，类型在树上**就地改**，模型集合由
+      // 「同步服务商模型」按钮刷新。故这里不再 setFieldsValue 回填 `models`，
+      // 也不再读 `g.catalog` 填候选池（那是给被删掉的「拉取模型」下拉用的）。
       // ⚠️ 编辑态**不回填令牌**（后端语义是「留空 = 保持不变」，见 submit 的注释）
       access_token: "",
     });
@@ -272,23 +343,32 @@ function GatewaysPage() {
       if (editing) {
         await updateGatewayConfig(editing.id, {
           ...(values.name ? { name: values.name } : {}),
-          ...(values.platform ? { platform: values.platform } : {}),
-          ...(values.model_type ? { model_type: values.model_type } : {}),
           ...(values.base_url ? { base_url: values.base_url } : {}),
           ...(values.access_token ? { access_token: values.access_token } : {}),
-          ...(values.default_model !== undefined ? { default_model: values.default_model } : {}),
+          // ⚠️ **不传 `models`**（v2.9）：模型集合由「同步服务商模型」维护，
+          // 编辑弹窗只改服务商本体（名称 / 地址 / 令牌）。传了 `models` 是**整表替换**，
+          // 会把树上用户手工改过的类型全冲掉。
         });
         message.success("已更新服务商");
       } else {
-        await createGatewayConfig({
+        // v2.9：创建时**后端自动同步一次**模型目录 + AI 归纳类型（用户口径
+        // 「添加服务商时默认拉取一次」）。同步是否成功看响应上的 `sync`：
+        // ⚠️ **同步失败不阻断创建**（服务商照样建成），故这里按 `sync.ok` 分开提示，
+        // 失败时明确引导用户去操作列重试 —— 不静默、也不谎报成功。
+        const created = await createGatewayConfig({
           name: values.name,
-          platform: values.platform || "",
-          model_type: values.model_type || "text",
           base_url: values.base_url || "http://127.0.0.1:3000",
           access_token: values.access_token || "",
-          default_model: values.default_model || "",
+          models: [],
         });
-        message.success("已新增服务商");
+        const sync = created.sync;
+        if (sync?.ok) {
+          message.success(`已新增服务商；${sync.reason}`);
+        } else if (sync) {
+          message.warning(`已新增服务商，但模型同步未完成：${sync.reason}（可在操作列点「同步服务商模型」重试）`);
+        } else {
+          message.success("已新增服务商");
+        }
       }
       setModalOpen(false);
       await load();
@@ -300,20 +380,11 @@ function GatewaysPage() {
   };
 
   // ⚠️ v1.9：`remove()` **已删除**（用户口径「移除删除功能」）。
-  // 后端 DELETE 是 410 墓碑；服务商一旦被业务引用就不能删，
-  // 替代入口 = 下面的启停开关（`enabled`）。
-  const toggleEnabled = async (g: LlmGatewayConfig, next: boolean) => {
-    setTogglingId(g.id);
-    try {
-      await updateGatewayConfig(g.id, { enabled: next });
-      message.success(next ? `已开启 ${g.name}` : `已停用 ${g.name}`);
-      await load();
-    } catch {
-      // 失败由拦截器报；本地状态不乐观更新，故表格仍显示后端值
-    } finally {
-      setTogglingId(null);
-    }
-  };
+  // 后端 DELETE 是 410 墓碑；服务商一旦被业务引用就不能删。
+  // ⚠️ ~~服务商级启停 `toggleEnabled`~~ **v2.10 删除**（用户口径「启用状态开关放具体模型维度，
+  // 不要放服务商维度」）：开关下沉到子表「启用」列（见 `toggleModelEnabled`），
+  // 父表不再有这一列 ⇒ 本方法与配套的 `togglingId` state 一并退场（避免留死代码）。
+  // 后端服务商级 `enabled` 字段保留（模型级可用性的前提之一），只是前端不再提供入口。
 
   const runTest = async (g: LlmGatewayConfig) => {
     setTestingId(g.id);
@@ -328,65 +399,137 @@ function GatewaysPage() {
     }
   };
 
-  // v1.9：按**表单当前值**拉服务商模型目录（下拉候选）。
-  // ⚠️ 不写库 —— 预览语义；用户可反复拉（改地址/改令牌后重拉）。
-  // ⚠️ 编辑态令牌留空（= 不修改）时传 `id`，让后端用库里已存的令牌兜底。
-  const loadModels = async () => {
-    const values = form.getFieldsValue();
-    const baseUrl = (values.base_url || "").trim();
-    if (!baseUrl) {
-      message.warning("请先填写模型调用地址");
-      return;
-    }
-    setLoadingModels(true);
+  // v2.9：同步服务商模型（操作列按钮）—— 拉目录 + AI 归纳类型 + upsert 模型行。
+  // ⚠️ 同步「没成功」不是异常：接口恒 200，看 `sync.ok` 分流提示（网络/令牌问题如实说）。
+  const runSync = async (g: LlmGatewayConfig) => {
+    setSyncingId(g.id);
     try {
-      const result = await previewGatewayModels({
-        base_url: baseUrl,
-        access_token: (values.access_token || "").trim() || undefined,
-        ...(editing && !(values.access_token || "").trim() ? { id: editing.id } : {}),
-      });
-      setModelOptions(result.models);
-      message.success(result.message);
+      const result = await syncGatewayModels(g.id);
+      const s = result.sync;
+      if (s.ok) {
+        message.success(`${g.name}：${s.reason}`);
+      } else {
+        message.warning(`${g.name} 同步未完成：${s.reason}`);
+      }
+      await load();
     } catch {
-      // 失败由全局拦截器报（401/400 都带结构化原因）
-      setModelOptions([]);
+      // 真异常（越权 404 等）由全局拦截器报
     } finally {
-      setLoadingModels(false);
+      setSyncingId(null);
     }
   };
 
-  // 列定义按**树节点**（`GatewayTreeRow`）书写，而不是 `LlmGatewayConfig`：
-  // 父行（服务商）渲染完整字段；子行（模型）只在「名称」列显示模型名、其余列以 `-` 占位。
-  // ⚠️ 每个 `render` 都用 `row.kind === "provider"` 早返回 —— 这是**同一个表格两套行形态**
-  // 的唯一分叉点；不抽两份列定义（同一语义不留两份实现，DEF-044 同型风险）。
-  const columns: ColumnsType<GatewayTreeRow<LlmGatewayConfig>> = [
+  // v2.9：「类型」列**就地改类型**（用户口径「模型类型列表中支持修改，下拉框」）。
+  // AI 归纳只是**初始值**，用户有最终决定权 ⇒ 改完立即 PATCH 落库，成功才刷新列表。
+  // ⚠️ 入参取**模型子节点整行**（`GatewayTreeRow` 的 model 分支）而不是拆开的
+  // `(gateway, modelId)`：类型断言会因此自然收窄，不需要在 render 里 `as number` 硬转。
+  const changeModelType = async (
+    row: Extract<GatewayTreeRow<LlmGatewayConfig>, { kind: "model" }>,
+    next: ModelType,
+  ) => {
+    const modelId = row.modelId;
+    if (modelId === null) return; // 无 id 发不出 PATCH（理论上表格里不会出现）
+    setTypeSavingId(modelId);
+    try {
+      // 父服务商 id 直接取子节点上的 `parentId`（树构建时已带回，不必再查表）
+      await updateGatewayModel(row.parentId, modelId, { model_type: next });
+      message.success(`已改为${modelTypeOptions.find((o) => o.value === next)?.label ?? next}`);
+      await load();
+    } catch {
+      // 失败由拦截器报；本地不乐观更新 ⇒ 表格仍显示后端旧值
+    } finally {
+      setTypeSavingId(null);
+    }
+  };
+
+  // v2.10：「启用」下沉到**模型维度**（用户口径「健康状态和启用状态开关放具体模型维度，
+  // 不要放服务商维度」）。与 `changeModelType` 同套路：就地 PATCH，成功才 `load()` 刷新，
+  // 不做本地乐观更新（失败了表格继续显示后端真值，不会被 UI 骗）。
+  // ⚠️ 父服务商 id 取子节点带回的 `parentId`，不必再查表。
+  const toggleModelEnabled = async (
+    row: Extract<GatewayTreeRow<LlmGatewayConfig>, { kind: "model" }>,
+    next: boolean,
+  ) => {
+    const modelId = row.modelId;
+    if (modelId === null) return; // 无 id 发不出 PATCH
+    setTogglingModelId(modelId);
+    try {
+      await updateGatewayModel(row.parentId, modelId, { enabled: next });
+      message.success(next ? `已启用 ${row.model}` : `已停用 ${row.model}`);
+      await load();
+    } catch {
+      // 失败由拦截器报；本地不乐观更新 ⇒ 表格仍显示后端旧值
+    } finally {
+      setTogglingModelId(null);
+    }
+  };
+
+  // v2.10：「健康」列**检查按钮**（用户口径「子表健康列未检查的展示检测检查按钮，触发可健康检查」）。
+  // 「未检查」= 该模型从未探测过（`lastHealthAt == null`）⇒ 显示「检查」按钮，点一下触发探测；
+  // 已探测过的显示健康标签（正常 / 异常），不再重复给按钮（信息已足）。
+  // ⚠️ 探测端点复用服务商级 `POST /{config_id}/test`（连通性由凭据 + 地址决定，模型共用同一凭据），
+  // 后端探测成功后会**写回该服务商下所有模型行**的健康戳 ⇒ 一处检查、整组刷新。
+  const runModelCheck = async (
+    row: Extract<GatewayTreeRow<LlmGatewayConfig>, { kind: "model" }>,
+  ) => {
+    const modelId = row.modelId;
+    if (modelId === null) return; // 无 id ⇒ 无法定位服务商（理论上表格里不会出现）
+    setCheckingModelId(modelId);
+    try {
+      const result = await testGatewayConfig(row.parentId);
+      message.success(`${row.parentName}：${result.message}`);
+      await load();
+    } catch {
+      // 失败由拦截器报；不乐观更新 ⇒ 表格仍显示后端真值（保持「未探测」）
+    } finally {
+      setCheckingModelId(null);
+    }
+  };
+
+  // ⚠️ ~~`loadModels`（弹窗内「拉取模型」预览）~~ **v2.9 删除**（用户口径
+  // 「配置服务商时应直接父子树展示该服务商下所有模型，不需要再进入编辑后添加模型」）。
+  // 拉取目录的动作改由**服务商本体**承担：① 创建时后端自动同步一次；
+  // ② 之后在列表操作列点「同步服务商模型」（`runSync`）—— 都会真落库、AI 归纳类型。
+  // 「预览候选池（不写库）」这个中间态不再需要，故连同该预览调用一起退场
+  // （`previewGatewayModels` 函数本身保留在 `lib/api.ts`，本页不再 import/调用）。
+
+  // ⚠️ **2026-10-02 用户口径「父子表的表头独立设置」**：父子**各用一套列定义**，
+  // 不再共用一张表（此前共表 ⇒ 子行在服务商专有列上处处显示 `-`，表头也是服务商的，
+  // 例如子行「类型」列头上写着服务商语境的字，读起来割裂）。
+  // 现在的结构 = **父表（服务商）× 子表（模型）两张独立表**，各写各的列与表头。
+  //
+  // ⛔ **实现红线（踩过坑，2026-10-02）**：`expandedRowRender` 里**可以放 `<Table>`**
+  // （antd 支持嵌套 Table），但**必须同时关掉父表的「树数据自动探测」** ——
+  // 否则点开箭头**整页白屏**（React 渲染直接崩）。
+  //
+  // 根因：`buildGatewayTree` 产出的**服务商行自带 `children` 字段**，而 `children` 正是
+  // antd `Table` 树形数据的**内置字段名**（`childrenColumnName` 默认 `"children"`）。
+  // 于是 antd 认为「这是一棵要用内置树模式渲染的树」⇒ 同时跑 ① 内置树递归渲染 +
+  // ② 我们的 `expandedRowRender` ⇒ 两条渲染路径互相打架，React 崩白屏。
+  //
+  // ✅ 修复 = 在父 `<Table>` 上设 **`childrenColumnName="__no_tree__"`**（一个数据里
+  // 不存在的 key）：antd 探测不到子节点，自动放弃内置树渲染，只走 `expandedRowRender`。
+  // ⇒ 这样嵌套 Table 保住、父子表头各自独立，真正由两张表定义。
+  // （**不要**靠摘掉 `children` 字段来绕 —— 展开区还指着 `row.children` 取数据。）
+  //
+  // 生成器函数 `providerColumns` 的理由：列定义要用到 `statsMap` / `togglingId` 等
+  // 组件内状态，闭包捕获它们才能把列定义留在组件内（而不是提到模块级再传一堆 props）。
+  const providerColumns: ColumnsType<GatewayProviderNode<LlmGatewayConfig>> = [
     {
-      title: "名称",
+      title: "服务商名称",
       key: "name",
       width: 260,
-      render: (_v, row) => {
-        if (row.kind === "model") {
-          // 子行：模型名（缩进由表格的展开层级自带，这里只标一个图标区分「这是模型」）
-          return (
-            <Space size={6}>
-              <span style={{ color: "#8c8c8c" }}>└</span>
-              <Text code>{row.model}</Text>
-            </Space>
-          );
-        }
-        return <Text strong>{row.gateway.name}</Text>;
-      },
+      render: (_v, row) => <Text strong>{row.gateway.name}</Text>,
     },
     {
       // ⚠️ v1.9 新增（用户口径「连接配置页面新增唯一KEY，新增后不可编辑」）：
       // 表格里是**只读展示 + 可复制**（业务代码要用它，抄错代价高）；
       // 弹窗内不提供输入框 —— 服务端也拒改（PATCH 传它 ⇒ 422）。
-      // ⚠️ 子行（模型）**没有**服务编码 —— 它属于父级服务商，这里留 `-`。
+      // v2.9 父子分开：这一列属于**父表（服务商）** ⇒ 子表另有自己的列定义（见 `modelColumns`）。
       title: "服务编码",
       key: "provider_key",
       width: 190,
       render: (_v, row) => {
-        if (row.kind === "model") return <Text type="secondary">-</Text>;
         const key = row.gateway.provider_key;
         return (
           <Typography.Text
@@ -399,60 +542,22 @@ function GatewaysPage() {
       },
     },
     {
-      // ⚠️ v1.9 新增（用户口径「新增使用平台，后端新增枚举下拉选择必选」）：
-      // 显示后端枚举的**中文名**（label），值仍是枚举键。
-      title: "使用平台",
-      key: "platform",
-      width: 110,
-      render: (_v, row) => {
-        if (row.kind === "model") return <Text type="secondary">-</Text>;
-        const value = row.gateway.platform;
-        const label = platformOptions.find((o) => o.value === value)?.label;
-        // 枚举未加载/值不在枚举内 ⇒ 原样显示枚举键（**不造名**，缺值口径）
-        return <Tag>{label ?? value ?? "-"}</Tag>;
-      },
-    },
-    {
-      title: "类型",
-      key: "model_type",
-      width: 90,
-      render: (_v, row) => {
-        if (row.kind === "model") return <Text type="secondary">-</Text>;
-        const value = row.gateway.model_type;
-        return (
-          <Tag color={value === "image" ? "purple" : "blue"}>
-            {value === "image" ? "图像" : "文本"}
-          </Tag>
-        );
-      },
-    },
-    {
-      title: "地址",
+      // ⚠️ ~~「覆盖平台」「模型类型」两列~~ **2026-10-02 移除**（用户口径
+      // 「服务商列表页的覆盖平台跟模型类型都不需要」）。
+      // 这两列本就是**其模型行的聚合**（多标签），信息已在子表里逐模型给出 ⇒
+      // 父表留着只是重复，且聚合标签读起来不如子表明细清楚。父表回归「服务商本体」字段。
+      // （`platformOptions` / `modelTypeOptions` / `typeLabel` / `typeTagColor` 仍被子表用，
+      //   故这些定义保留，只是不再出现在父表列里。）
+      title: "模型调用地址",
       key: "base_url",
-      render: (_v, row) =>
-        row.kind === "model" ? (
-          <Text type="secondary">-</Text>
-        ) : (
-          <Text type="secondary">{row.gateway.base_url}</Text>
-        ),
-    },
-    {
-      title: "默认模型",
-      key: "default_model",
-      width: 180,
-      render: (_v, row) => {
-        if (row.kind === "model") return <Text type="secondary">-</Text>;
-        const m = row.gateway.default_model;
-        return m ? <Text code>{m}</Text> : <Text type="secondary">-</Text>;
-      },
+      ellipsis: true,
+      render: (_v, row) => <Text type="secondary">{row.gateway.base_url}</Text>,
     },
     {
       title: "调用量（今日/近7日）",
       key: "stats",
-      width: 260,
+      width: 250,
       render: (_v, row) => {
-        // 调用量是**服务商维度**的台账聚合（模型维度不单独统计）—— 子行留 `-`。
-        if (row.kind === "model") return <Text type="secondary">-</Text>;
         const s = statsMap[row.gateway.id];
         if (!s?.available) return <Text type="secondary">{s?.message ?? "-"}</Text>;
         return (
@@ -469,64 +574,32 @@ function GatewaysPage() {
       key: "tokens",
       width: 90,
       render: (_v, row) =>
-        row.kind === "model" ? (
-          <Text type="secondary">-</Text>
-        ) : row.gateway.has_access_token ? (
+        row.gateway.has_access_token ? (
           <Tag color="green">已配置</Tag>
         ) : (
           <Text type="secondary">无</Text>
         ),
     },
     {
-      title: "健康",
-      key: "healthy",
-      width: 90,
-      render: (_v, row) => {
-        // 健康探测是**服务商维度**的（`/{id}/test` 打的是服务商地址）—— 模型不单独探活。
-        if (row.kind === "model") return <Text type="secondary">-</Text>;
-        const g = row.gateway;
-        return (
-          <Tooltip title={g.last_health_at ? `最近探测 ${g.last_health_at}` : "尚未探测"}>
-            <Tag color={g.healthy ? "green" : "orange"}>{g.healthy ? "正常" : "未探测"}</Tag>
-          </Tooltip>
-        );
-      },
-    },
-    {
-      // ⚠️ v1.9 新增（用户口径「新增停用开启功能」）：替代被移除的「删除」。
-      // 停用语义 = **业务取不到该服务商**（后端抛 LLM_PROVIDER_DISABLED，不回落）。
-      // ⚠️ 只作用于**服务商**（父行）；模型没有独立的启停（服务商停用即其下模型全不可用）。
-      title: "启用",
-      key: "enabled",
-      width: 90,
-      render: (_v, row) => {
-        if (row.kind === "model") return <Text type="secondary">-</Text>;
-        const g = row.gateway;
-        return (
-          <Tooltip title={g.enabled ? "点击停用（业务将取不到该服务商）" : "点击启用"}>
-            <Switch
-              size="small"
-              checked={g.enabled}
-              loading={togglingId === g.id}
-              onChange={(next) => void toggleEnabled(g, next)}
-            />
-          </Tooltip>
-        );
-      },
-    },
-    {
-      // 操作同样是**服务商维度**的（测试打的是服务商地址、编辑编辑的是服务商行）。
-      // 子行（模型）不提供任何操作 —— 模型由服务商「拉取模型」刷新，不是独立可编辑对象。
+      // ⚠️ ~~「健康」「启用」两列~~ **2026-10-02 下沉到模型维度**（用户口径
+      // 「健康状态和启用状态开关放具体模型维度，不要放服务商维度」）。
+      // 理由：同一个服务商下的模型是独立可用的（某模型停用不影响别的），
+      // 摆一行服务商级开关表达不出来这层粒度；健康探测同理 —— 探测是拿服务商凭据发的，
+      // 但通不通最终要落到「这个模型能不能用」上。
+      // ⇒ 两列移到子表（`modelColumns`），父表只留服务商本体字段。
       title: "操作",
       key: "actions",
-      width: 130,
+      width: 230,
       render: (_v, row) => {
-        if (row.kind === "model") return <Text type="secondary">-</Text>;
         const g = row.gateway;
         return (
           <Space size="small">
             <Button type="link" size="small" loading={testingId === g.id} onClick={() => void runTest(g)}>
               测试
+            </Button>
+            {/* v2.9：拉目录 + AI 归纳类型 + upsert 模型行（用户口径「操作列新增同步服务商模型」） */}
+            <Button type="link" size="small" loading={syncingId === g.id} onClick={() => void runSync(g)}>
+              同步服务商模型
             </Button>
             <Button type="link" size="small" onClick={() => openEdit(g)}>
               编辑
@@ -539,11 +612,137 @@ function GatewaysPage() {
     },
   ];
 
+  // ── 子表列定义（**模型**；与父表列定义完全独立，表头不共用） ──
+  // ⚠️ 用户口径「父和子的表头分开，不公用」：子表只列**模型自己的属性**
+  // （模型 / 类型 / 使用平台 / 启用 / 备注），不出现服务商专有列。
+  // 父表列的语义反过来 = 其模型行的聚合（覆盖平台 / 模型类型是多标签）。
+  const modelColumns: ColumnsType<GatewayModelNode<LlmGatewayConfig>> = [
+    {
+      title: "模型",
+      key: "model",
+      width: 320,
+      render: (_v, row) => <Text>{row.model}</Text>,
+    },
+    {
+      // v2.9：**就地改类型**（用户口径「模型类型列表中支持修改，下拉框」）。
+      // AI 归纳只是初始值 ⇒ 下拉选项由后端下发（`modelTypeOptions`），改完立即 PATCH。
+      title: "类型",
+      key: "model_type",
+      width: 150,
+      render: (_v, row) => (
+        <Select
+          size="small"
+          style={{ width: "100%" }}
+          value={row.modelType || undefined}
+          placeholder={row.modelType ? undefined : "-"}
+          loading={typeSavingId === row.modelId}
+          disabled={row.modelId === null}
+          options={modelTypeOptions}
+          onChange={(next) => void changeModelType(row, next as ModelType)}
+        />
+      ),
+    },
+    {
+      title: "使用平台",
+      key: "platform",
+      width: 180,
+      render: (_v, row) => {
+        if (row.platforms.length === 0) return <Text type="secondary">-</Text>;
+        return (
+          <Space size={4} wrap>
+            {row.platforms.map((p) => (
+              <Tag key={p}>{platformOptions.find((o) => o.value === p)?.label ?? p}</Tag>
+            ))}
+          </Space>
+        );
+      },
+    },
+    {
+      // v2.10：**健康下沉到模型维度**（用户口径「健康状态…放具体模型维度」）。
+      // ⛔ 判据必须是 `last_health_at is not None AND healthy`（与后端模型级字段同形）——
+      // 只看 `healthy` 会把「从未探测过」误报成「异常」（`healthy` 默认 False），
+      // 这是本项目在服务商级 `healthy` 上踩过的老坑（DEF-067 类：判活只认探测过的那次）。
+      // 故三态：正常 / 未探测 / 异常。
+      title: "健康",
+      key: "healthy",
+      width: 130,
+      render: (_v, row) => {
+        const probed = row.lastHealthAt !== null && row.lastHealthAt !== undefined;
+        if (!probed) {
+          // v2.10（用户口径「子表健康列未检查的展示检测检查按钮，触发可健康检查」）：
+          // 未探测 ⇒ **给一个「检查」按钮**（而不是只显示一个「未探测」死标签）——
+          // 用户看到空状态时最自然的动作就是「点一下试试」，让入口就在那里。
+          return (
+            <Tooltip title="该模型尚未探测过连通性，点击立即检查">
+              <Button
+                type="link"
+                size="small"
+                style={{ padding: 0 }}
+                loading={checkingModelId === row.modelId}
+                disabled={row.modelId === null}
+                onClick={() => void runModelCheck(row)}
+              >
+                检查
+              </Button>
+            </Tooltip>
+          );
+        }
+        return (
+          <Tooltip title={`最近探测 ${row.lastHealthAt}`}>
+            <Tag color={row.healthy ? "green" : "red"}>{row.healthy ? "正常" : "异常"}</Tag>
+          </Tooltip>
+        );
+      },
+    },
+    {
+      // v2.10：**启用下沉到模型维度**（用户口径「启用状态开关放具体模型维度」）。
+      // 与父表原来的服务商级开关同语义，但作用域收窄到「这一个模型」：
+      // 停用 ⇒ 业务按模型名取时取不到（父服务商仍可用，只是少了这个模型）。
+      title: "启用",
+      key: "enabled",
+      width: 120,
+      render: (_v, row) => {
+        // ⚠️ v2.10（用户 2026-10-02 口径「**已在使用的模型无法停用**」）：
+        // 有业务点映射指向它 ⇒ 开关**置灰**（不管当前是开还是关）——
+        // 因为「停用」这条路被业务引用堵死了，开关留着可点只会误导。
+        // ⚠️ 前端置灰只是体验，**判据在后端**（PATCH 会回 400 `LLM_MODEL_IN_USE_BY_BUSINESS`）
+        // —— 前端状态可能过期（别人在另一个标签页改了映射），靠前端拦会漏。
+        const inUse = row.usages.length > 0;
+        if (inUse) {
+          return (
+            <Tooltip title={`正被 ${row.usages.join("、")} 使用，请先在模型配置页改到别的模型`}>
+              <Switch size="small" checked={row.enabled} disabled />
+            </Tooltip>
+          );
+        }
+        return (
+          <Tooltip title={row.enabled ? "点击停用（业务将取不到该模型）" : "点击启用"}>
+            <Switch
+              size="small"
+              checked={row.enabled}
+              loading={togglingModelId === row.modelId}
+              disabled={row.modelId === null}
+              onChange={(next) => void toggleModelEnabled(row, next)}
+            />
+          </Tooltip>
+        );
+      },
+    },
+    {
+      title: "备注",
+      key: "remark",
+      ellipsis: true,
+      render: (_v, row) =>
+        row.remark ? <Text type="secondary">{row.remark}</Text> : <Text type="secondary">-</Text>,
+    },
+  ];
+
+
   return (
     <GatewaySection
       eyebrow="LLM Gateway"
       title="服务商"
-      description="任意 OpenAI 兼容端点（三方服务商直连，或自托管的兼容网关）。服务商在所有平台间共用；业务代码按「服务编码」引用它们。"
+      description="任意 OpenAI 兼容端点（三方服务商直连，或自托管的兼容网关）。服务商在所有平台间共用；业务代码按「服务编码」引用它们。展开一行可查看该服务商的模型清单。"
       action={
         <Button type="primary" onClick={openCreate}>
           新增服务商
@@ -557,21 +756,43 @@ function GatewaysPage() {
           </Button>
         }
       >
-        <Table<GatewayTreeRow<LlmGatewayConfig>>
+        {/* 父表 = **服务商**（表头见 `providerColumns`）。展开行里是子表 = **模型**。 */}
+        <Table<GatewayProviderNode<LlmGatewayConfig>>
           rowKey="key"
           size="small"
           loading={loading}
-          columns={columns}
-          dataSource={treeData}
+          columns={providerColumns}
+          dataSource={providerRows}
           pagination={false}
-          // ⚠️ 父子树（2026-10-02 用户口径）：父 = 服务商，子 = 服务商下的具体模型。
-          // 每行自带 `children`（见 `buildGatewayTree`）⇒ 表格自动渲染展开箭头。
-          // `defaultExpandAllRows` 只在**首次挂载**生效，因此把「全展开」设成默认
-          // （服务商数量有限，模型目录正是用户要看的）；用户可手动折叠。
+          // ⛔ **白屏修复的关键一行（2026-10-02）**：把 antd 的「树数据自动探测」关掉。
+          // `children` 是 antd Table 树形模式的**内置字段名**，而我们 `buildGatewayTree`
+          // 产出的服务商行恰好带 `children` ⇒ antd 会同时跑内置树渲染 + `expandedRowRender`，
+          // 两条路径冲突 ⇒ 点开箭头整页白屏。
+          // 指向一个数据里不存在的 key（`__no_tree__`）⇒ antd 认不出子节点，放弃树模式，
+          // 只走 `expandedRowRender`（`row.children` 仍在数据里，展开区照样取得到）。
+          childrenColumnName="__no_tree__"
+          // ⚠️ **2026-10-02 用户口径「父子表的表头独立设置」**：父子不再共用一张表 ——
+          // 父表每行展开时渲染**一张独立的子表**（自带表头），而不是把子行塞进父表行里
+          // （那样子行必须沿用父表的列，服务商专有列只显示 `-`，表头也是服务商语境的）。
+          // 展开箭头只给含模型的父行（`rowExpandable`），空目录不出现「点了没反应」的箭头。
           expandable={{
             defaultExpandAllRows: true,
-            // 无模型的父行不给展开箭头（避免出现「点了没反应」的空箭头）
             rowExpandable: isExpandableProvider,
+            expandedRowRender: (row) => (
+              <Table<GatewayModelNode<LlmGatewayConfig>>
+                rowKey="key"
+                size="small"
+                columns={modelColumns}
+                // `row.children` 的静态类型是父/子联合 —— 这里按 kind 收窄成纯模型节点
+                // （`buildGatewayTree` 保证第二层只可能是 model，收窄不是「猜」）。
+                dataSource={row.children.filter(
+                  (c): c is GatewayModelNode<LlmGatewayConfig> => c.kind === "model"
+                )}
+                pagination={false}
+                // 子表不再有「展开」概念（模型下没有第三层）
+                showHeader
+              />
+            ),
           }}
           locale={{ emptyText: "还没有服务商 —— 点右上「新增服务商」添加第一个" }}
         />
@@ -595,31 +816,10 @@ function GatewaysPage() {
           <Form.Item name="name" label="名称" rules={[{ required: true, message: "请填写名称" }]}>
             <Input autoComplete="off" placeholder="如 DeepSeek 官方" />
           </Form.Item>
-          <Form.Item
-            name="platform"
-            label="使用平台"
-            rules={[{ required: true, message: "请选择使用平台" }]}
-          >
-            <Select placeholder="选择平台" options={platformOptions.map((o) => ({ value: o.value, label: o.label }))} />
-          </Form.Item>
-          {/* ⚠️ v2.0（设计 17 §13.2.1）：模型类型**必选**。
-              它决定「模型配置页」里这个服务商能挂在哪些业务点下（图像业务点只列 image 型）。
-              ⚠️ 编辑态**可改**，但改了会让**已指向它的映射失效** —— 后端类型校验会拦
-              （业务点 kind ≠ 服务商 model_type ⇒ 400），所以这里如实提示后果，不静默。 */}
-          <Form.Item
-            name="model_type"
-            label="模型类型"
-            rules={[{ required: true, message: "请选择模型类型" }]}
-            extra="决定哪些业务点可以选用该服务商；改动可能让已指向它的业务点失效"
-          >
-            <Select
-              placeholder="选择模型类型"
-              options={[
-                { value: "text", label: "文本（chat/completions）" },
-                { value: "image", label: "图像（images/generations）" },
-              ]}
-            />
-          </Form.Item>
+          {/* ⚠️ v2.7/v2.8：服务商级的「使用平台」/「模型类型」/「默认模型」三件**全部移除**
+              （用户口径「直接移除输入框与列」）——前两者下沉到每条模型行，
+              后者整列删除。这里改为「模型行列表」编辑器：一行一个模型，
+              各自带 名称 + 类型 + 平台 + 启用，可增删。 */}
           <Form.Item
             name="base_url"
             label="模型调用地址"
@@ -639,34 +839,14 @@ function GatewaysPage() {
           >
             <Input.Password autoComplete="new-password" placeholder="sk-..." />
           </Form.Item>
-          {/* ⚠️ v1.9：默认模型**必填**（用户口径「访问令牌和默认模型必填」）。
-              模型名由**服务商**决定 ⇒ 改为**下拉选择**（用户口径「模型输入框改为下拉框选择」）：
-              点「拉取模型」按当前地址+令牌现拉候选，避免手输拼错。
-              ⚠️ 下拉**不禁止手输**（`showSearch` + 自由值）：服务商 `/models` 可能不返回
-              全部可用模型（部分中转站只列白名单），硬禁手输会把能用的模型挡在外面。
-              与 access_token 同理 —— 必填只约束新增（编辑态后端「不传 = 不变」）。 */}
-          <Form.Item label="默认模型" required={!editing}>
-            <Space.Compact style={{ width: "100%" }}>
-              <Form.Item
-                name="default_model"
-                noStyle
-                rules={editing ? [] : [{ required: true, message: "请选择或填写默认模型" }]}
-              >
-                <Select
-                  showSearch
-                  allowClear
-                  placeholder="点右侧「拉取模型」后选择，或直接输入模型名"
-                  options={modelOptions.map((m) => ({ value: m, label: m }))}
-                  // 自由输入：目录不全时仍可手填（见上方注释）
-                  mode={undefined}
-                  style={{ width: "100%" }}
-                />
-              </Form.Item>
-              <Button loading={loadingModels} onClick={() => void loadModels()}>
-                拉取模型
-              </Button>
-            </Space.Compact>
-          </Form.Item>
+          {/* ⚠️ **v2.9：模型行编辑器整段移除**（用户口径「服务商模型不允许手动添加，
+              只能拉取三方」「配置服务商时应直接父子树展示该服务商下所有模型，
+              不需要再进入编辑后添加模型」）。
+              模型的来源与展示改为：
+                ① 新增服务商后，**后端自动同步一次**（拉目录 + AI 归纳类型）；
+                ② 之后在列表操作列点「同步服务商模型」重拉；
+                ③ 模型在**主页面的父子树**里按服务商展开查看，类型可在树上就地改。
+              故弹窗只留服务商本体的三个字段（名称 / 地址 / 令牌）。 */}
         </Form>
       </Modal>
     </GatewaySection>
@@ -939,11 +1119,18 @@ function AlertsPage() {
     },
   ];
 
-  /** 模型下拉候选 = 所选服务商的模型目录（未选服务商 / 目录为空 ⇒ 空态） */
+  /**
+   * 模型下拉候选 = 所选服务商的**已配置模型行**（v2.7/v2.8）。
+   *
+   * ⚠️ 老实现读 `gw.models` 并将其视为 `string[]`；现在 `models` 是结构数组，
+   * 候选池（上游 `/models` 拉的字符串数组）在同级的 `catalog` 里。
+   * 预警规则的作用域模型**该是已配置的模型行**（台账里记的就是这些名字），
+   * 故这里读 `models[*].model_name`，**不读 catalog** —— 未配置的候选无从产出用量。
+   */
   const modelOptions = useMemo(() => {
     if (formGatewayId === null) return [];
     const gw = gateways.find((g) => g.id === formGatewayId);
-    const models: string[] = gw?.models ?? [];
+    const models = (gw?.models ?? []).map((m) => m.model_name).filter(Boolean);
     return models.map((m) => ({ value: m, label: m }));
   }, [gateways, formGatewayId]);
 

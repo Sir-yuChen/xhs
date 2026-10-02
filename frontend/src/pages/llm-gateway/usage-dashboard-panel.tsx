@@ -44,12 +44,14 @@ import {
 } from "recharts";
 
 import {
-  fetchGatewayConfigs,
+  fetchGatewayModelsTree,
   fetchGatewayUsageBreakdown,
   fetchGatewayUsageDaily,
   fetchGatewayUsageOverview,
 } from "../../lib/api";
 import type {
+  LlmGatewayConfig,
+  LlmGatewayModelRow,
   LlmGatewayUsageBreakdownItem,
   LlmGatewayUsageDailyItem,
   LlmGatewayUsageOverview,
@@ -143,7 +145,10 @@ export function UsageDashboardPanel() {
     dayjs(),
   ]);
   const [gatewayId, setGatewayId] = useState<number | undefined>(undefined);
+  const [modelName, setModelName] = useState<string | undefined>(undefined);
   const [gateways, setGateways] = useState<{ id: number; name: string }[]>([]);
+  // 服务商 → 其下模型行（级联「模型」下拉的数据源）
+  const [modelsByGateway, setModelsByGateway] = useState<Record<number, LlmGatewayModelRow[]>>({});
 
   // 数据
   const [overview, setOverview] = useState<LlmGatewayUsageOverview | null>(null);
@@ -159,16 +164,27 @@ export function UsageDashboardPanel() {
   const startDate = range?.[0]?.format("YYYY-MM-DD");
   const endDate = range?.[1]?.format("YYYY-MM-DD");
 
-  // 网关下拉：拿一次即可（失败不阻塞看板 —— 下拉退化为「全部网关」）
+  // 网关下拉：拿一次即可（失败不阻塞看板 —— 下拉退化为「全部网关」）。
+  // ⚠️ 用 `models-tree`（每项带 `models` 模型行）而非 `fetchGatewayConfigs`（`models` 恒空），
+  //    以便「模型」下拉按所选服务商级联列出其下具体模型（§7.5 筛选粒度要求）。
   useEffect(() => {
     let alive = true;
-    fetchGatewayConfigs()
+    fetchGatewayModelsTree()
       .then((res) => {
         if (!alive) return;
-        setGateways((res.items ?? []).map((g) => ({ id: g.id, name: g.name })));
+        const items: LlmGatewayConfig[] = res.items ?? [];
+        setGateways(items.map((g) => ({ id: g.id, name: g.name })));
+        const byGw: Record<number, LlmGatewayModelRow[]> = {};
+        for (const g of items) {
+          byGw[g.id] = g.models ?? [];
+        }
+        setModelsByGateway(byGw);
       })
       .catch(() => {
-        if (alive) setGateways([]);
+        if (alive) {
+          setGateways([]);
+          setModelsByGateway({});
+        }
       });
     return () => {
       alive = false;
@@ -182,17 +198,24 @@ export function UsageDashboardPanel() {
       // 总览固定三段（今日/近7日/近30日），不受 RangePicker 影响（与设计 §11.3 口径一致）；
       // daily/breakdown 用筛选器区间。
       const [ov, dy, bd, md] = await Promise.all([
-        fetchGatewayUsageOverview({ gateway_id: gatewayId }),
-        fetchGatewayUsageDaily({ gateway_id: gatewayId, start_date: startDate, end_date: endDate }),
+        fetchGatewayUsageOverview({ gateway_id: gatewayId, model_name: modelName }),
+        fetchGatewayUsageDaily({
+          gateway_id: gatewayId,
+          model_name: modelName,
+          start_date: startDate,
+          end_date: endDate,
+        }),
         fetchGatewayUsageBreakdown({
           dimension,
           gateway_id: gatewayId,
+          model_name: modelName,
           start_date: startDate,
           end_date: endDate,
         }),
         fetchGatewayUsageBreakdown({
           dimension: "model",
           gateway_id: gatewayId,
+          model_name: modelName,
           start_date: startDate,
           end_date: endDate,
         }),
@@ -208,7 +231,7 @@ export function UsageDashboardPanel() {
     } finally {
       setLoading(false);
     }
-  }, [gatewayId, startDate, endDate, dimension, message]);
+  }, [gatewayId, modelName, startDate, endDate, dimension, message]);
 
   useEffect(() => {
     void load();
@@ -411,8 +434,29 @@ export function UsageDashboardPanel() {
             placeholder="全部网关"
             allowClear
             value={gatewayId}
-            onChange={(v: number | undefined) => setGatewayId(v)}
+            onChange={(v: number | undefined) => {
+              setGatewayId(v);
+              // 换网关 ⇒ 模型列表随之切换，已选模型失效清空
+              setModelName(undefined);
+            }}
             options={gateways.map((g) => ({ value: g.id, label: g.name }))}
+          />
+          <Text type="secondary" style={{ fontSize: 13 }}>
+            模型
+          </Text>
+          <Select
+            style={{ minWidth: 220 }}
+            placeholder="全部模型"
+            allowClear
+            showSearch
+            optionFilterProp="label"
+            value={modelName}
+            disabled={gatewayId == null}
+            onChange={(v: string | undefined) => setModelName(v)}
+            options={(modelsByGateway[gatewayId ?? -1] ?? []).map((m) => ({
+              value: m.model_name,
+              label: m.model_name,
+            }))}
           />
           <Text type="secondary" style={{ fontSize: 12 }}>
             （区间作用于趋势 / 拆分 / 明细；总览卡固定为今日 · 近 7 日 · 近 30 日）

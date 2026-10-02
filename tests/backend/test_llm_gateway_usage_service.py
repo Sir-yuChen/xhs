@@ -93,19 +93,18 @@ def _seed_gateway(
     name: str = "本机网关",
     provider_key: str = "PROVIDER-A1",
 ) -> LlmGatewayConfig:
-    """种一条服务商（v1.9：`provider_key` / `platform` 为必填列）。
+    """种一条服务商（v1.9：`provider_key` 为必填列）。
 
     ⚠️ `provider_key` **显式传参**而非由 name 派生 —— 中文名 slug 化后为空/重复，
     派生会让两个不同服务商撞同一个 KEY，掩盖本用例要验证的反查语义。
+    ⚠️ **v2.7/v2.8**：服务商层已无 `platform` / `model_type` / `default_model` 三列。
     """
     gateway = LlmGatewayConfig(
         user_id=user.id,
         name=name,
         provider_key=provider_key,
-        platform="xhs",
         base_url=base_url,
         access_token="encrypted",
-        default_model="deepseek-v4-flash",
         enabled=True,
     )
     db.add(gateway)

@@ -2793,11 +2793,19 @@ def test_migration_d5e6f7a8b9c0_backfills_blank_default_model(tmp_path):
     finally:
         conn.close()
 
-    # ⚠️ 先 `stamp` 到本迁移的**父 revision**（`c4d5e6f7a8b9`），再 `upgrade head`：
-    # 夹具只建了本迁移要碰的表，从不跑前面的迁移链（同项目既有三个迁移用例的做法）。
-    # 少了这一步，alembic 会从**首迁移**开跑 ⇒ `table users already exists`。
+    # ⚠️ 先 `stamp` 到本迁移的**父 revision**（`c4d5e6f7a8b9`），再 `upgrade` 到**本迁移**
+    # （`d5e6f7a8b9c0`，不是 `head`）：
+    # 夹具只建了本迁移要碰的表，从不跑前面的迁移链（同项目既有迁移用例的做法）；
+    # 少了 stamp 这一步，alembic 会从**首迁移**开跑 ⇒ `table users already exists`。
+    #
+    # ⚠️ 2026-10-02 修：此处原为 `upgrade head`。v2.7（`e5f6a7b8c9d0`）与 v2.8
+    # （`f6a7b8c9d0e1`）落地后，`head` 已前移到 `b8c9d0e1f2a3`，而 **v2.8 明确 drop 了
+    # `llm_gateway_configs.default_model`**（死字段下线，设计 17 §13.2.10）⇒ 跑到 head 时本列
+    # 已不存在，`SELECT default_model` 直接 `OperationalError`。
+    # 本用例要钉的是**本迁移自己的回填行为**，故只升到本迁移即止 —— 与「改到 head 后断言随
+    # 下游迁移漂移」解耦（同 test_migration_c2d3e4f5a6b7_renames_cleanup_job 的定 revision 做法）。
     run_alembic(db_path, "stamp", "c4d5e6f7a8b9")
-    run_alembic(db_path, "upgrade", "head")
+    run_alembic(db_path, "upgrade", "d5e6f7a8b9c0")
 
     conn = sqlite3.connect(db_path)
     try:
@@ -2816,6 +2824,16 @@ def test_migration_d5e6f7a8b9c0_backfills_blank_default_model(tmp_path):
 
 
 PARENT_V20 = "d5e6f7a8b9c0"
+
+# ⚠️ 本组用例要钉的是 **v2.0 迁移（`f8a9b0c1d2e3`）自己**的行为，故 `upgrade` 以它为终点，
+# **不是 `head`**（2026-10-02 修）。
+# 背景：v2.0 落地时它是当时的 head，`upgrade head` 与 `upgrade f8a9b0c1d2e3` 等价；
+# 之后 v2.3~v2.10 链（`b2c3d4e5f6a7` → `b8c9d0e1f2a3`）续上来，`head` 前移，
+# 而这条链会碰 `users` 等**夹具根本没建的表**（`create_later_migration_tables` 只补
+# v2.0 及之前用到的）⇒ `upgrade head` 直接 `NoSuchTableError: users`，
+# 后面的断言全成空摆。钉住 revision 即与下游链的解耦（同
+# `test_migration_c2d3e4f5a6b7_renames_cleanup_job` 的定点 upgrade 做法）。
+V20_REV = "f8a9b0c1d2e3"
 
 
 def _seed(db_path):
@@ -2889,10 +2907,11 @@ def test_v20_business_provider_migration(tmp_path):
     db_path = tmp_path / "v20.db"
     _seed(db_path)
 
-    # ⚠️ 先 stamp 到父 revision 再 upgrade head：夹具只建了本迁移要碰的表，
-    # 从不跑前面的迁移链（同项目既有迁移用例做法）。
+    # ⚠️ 先 stamp 到父 revision 再定点 upgrade 到 **v2.0 迁移本身**（`V20_REV`，不是 `head`）：
+    # 夹具只建了本迁移要碰的表，从不跑前面的迁移链（同项目既有迁移用例做法）。
+    # 不用 head 的原因见 `V20_REV` 定义处（后续 v2.3~v2.10 链会碰夹具没有的表）。
     run_alembic(db_path, "stamp", PARENT_V20)
-    run_alembic(db_path, "upgrade", "head")
+    run_alembic(db_path, "upgrade", V20_REV)
 
     conn = sqlite3.connect(db_path)
     try:
@@ -2934,7 +2953,7 @@ def test_v20_business_provider_migration(tmp_path):
 
     # ⑤ 幂等：stamp 回父 revision 再 upgrade ⇒ 零变化
     run_alembic(db_path, "stamp", PARENT_V20)
-    run_alembic(db_path, "upgrade", "head")
+    run_alembic(db_path, "upgrade", V20_REV)
     conn = sqlite3.connect(db_path)
     try:
         after = list(
@@ -2954,7 +2973,7 @@ def test_v20_downgrade_recreates_empty_table(tmp_path):
     db_path = tmp_path / "v20_down.db"
     _seed(db_path)
     run_alembic(db_path, "stamp", PARENT_V20)
-    run_alembic(db_path, "upgrade", "head")
+    run_alembic(db_path, "upgrade", V20_REV)
     run_alembic(db_path, "downgrade", PARENT_V20)
 
     conn = sqlite3.connect(db_path)

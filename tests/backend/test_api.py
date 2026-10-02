@@ -8,7 +8,7 @@ from sqlalchemy.orm import sessionmaker
 
 from backend.app.main import app
 from backend.app.models.user import User
-from backend.app.models.llm_gateway import LlmBusinessProvider, LlmGatewayConfig
+from backend.app.models.llm_gateway import LlmBusinessProvider, LlmGatewayConfig, LlmGatewayModel
 from backend.app.services.business_provider_keys import BUSINESS_KEYS
 from backend.app.services.account_service import (
     CHANNEL_ARK,
@@ -4949,7 +4949,8 @@ def test_text_model_config_default_name_rule_is_gone_410(tmp_path):
     """⚠️ v2.0：一期「文本模型默认名 gpt-5.4」的归一化规则随端点一起退场。
 
     该规则属于 `model_configs` 语义（新建时补默认模型名）；v2.0 的模型名来自
-    服务商的 `default_model`（§13.2.4），不需要端点侧归一化 ⇒ 连端点一起 410。
+    「平台 × 业务点」映射**显式选定的模型**（§13.2.4，v2.3 起不再有服务商兜底名，
+    v2.8 `default_model` 列已删），不需要端点侧归一化 ⇒ 连端点一起 410。
     """
     db_dependency = _override_database(tmp_path)
     owner_token = _register_and_get_access_token("model-default-owner")
@@ -5158,7 +5159,7 @@ def test_ai_text_generation_requires_authentication(tmp_path):
         app.dependency_overrides.pop(db_dependency, None)
 
 
-def test_ai_text_generation_endpoints_use_default_model_and_create_tasks(tmp_path):
+def test_ai_text_generation_endpoints_use_business_model_and_create_tasks(tmp_path):
     from backend.app.api.ai import get_text_ai_client
 
     class FakeTextGenerationClient:
@@ -5263,7 +5264,7 @@ def test_ai_image_routes_require_authentication(tmp_path):
         app.dependency_overrides.pop(db_dependency, None)
 
 
-def test_ai_image_routes_use_default_model_store_assets_and_enforce_scope(tmp_path):
+def test_ai_image_routes_use_business_model_store_assets_and_enforce_scope(tmp_path):
     from backend.app.api.ai import get_image_ai_client
 
     class FakeImageAiClient:
@@ -5436,7 +5437,7 @@ def test_generate_detail_image_uses_own_business_point_and_persists_asset(tmp_pa
         # 只映射**详情图**业务点（不是全 image 类）：这样「代码是否走了对的业务点」
         # 变成可判定 —— 走错点会拿到未配置的 400。
         from backend.app.core.security import encrypt_text
-        from backend.app.models import LlmBusinessProvider, LlmGatewayConfig
+        from backend.app.models import LlmBusinessProvider, LlmGatewayConfig, LlmGatewayModel
 
         db = _test_session_factory()
         try:
@@ -5445,14 +5446,24 @@ def test_generate_detail_image_uses_own_business_point_and_persists_asset(tmp_pa
                     user_id=_last_registered_user_id,
                     name="test-image",
                     provider_key="TEST-IMAG",
-                    platform="xhs",
                     base_url="https://api.example.test/v1",
                     access_token=encrypt_text("«redacted:sk-…»"),
-                    default_model="detail-image-model",
                     models_json=json.dumps(["detail-image-model"]),
                     enabled=True,
-                    model_type="image",
                     healthy=True,
+                )
+            )
+            db.flush()
+            # ⚠️ v2.7/v2.8：`platform` / `model_type` / `default_model` 已从服务商层移除 ——
+            # 能力类型与使用平台改由**模型行**承载（v2.7），兜底名整列删除（v2.8）。
+            db.add(
+                LlmGatewayModel(
+                    user_id=_last_registered_user_id,
+                    provider_key="TEST-IMAG",
+                    model_name="detail-image-model",
+                    model_type="image",
+                    platform="xhs",
+                    enabled=True,
                 )
             )
             db.flush()
@@ -8033,16 +8044,25 @@ def _seed_provider_and_mappings(token: str, model_type: str, model_name: str, ap
                     user_id=user_id,
                     name=f"test-{model_type}",
                     provider_key=key,
-                    platform="xhs",
                     base_url="https://api.example.test/v1",
                     # ⚠️ 库列存**密文**（与一期端点同样经 `encrypt_text`）——
                     # 直接写明文会让 `decrypt_text` 抛 InvalidToken。
                     access_token=encrypt_text(api_key),
-                    default_model=model_name,
                     models_json=json.dumps([model_name]),
                     enabled=True,
-                    model_type=model_type,
                     healthy=True,
+                )
+            )
+            db.flush()
+            # ⚠️ v2.7/v2.8：能力类型/平台改由**模型行**承载，`default_model` 整列删除。
+            db.add(
+                LlmGatewayModel(
+                    user_id=user_id,
+                    provider_key=key,
+                    model_name=model_name,
+                    model_type=model_type,
+                    platform="xhs",
+                    enabled=True,
                 )
             )
             db.flush()
@@ -8054,7 +8074,7 @@ def _seed_provider_and_mappings(token: str, model_type: str, model_name: str, ap
                         platform="xhs",
                         business_key=spec.key,
                         provider_key=key,
-                        # v2.3：业务入口必须显式带 model_name（不再回落 default_model）。
+                        # v2.3：业务入口必须显式带 model_name（不再回落任何默认名）。
                         model_name=model_name,
                         enabled=True,
                     )

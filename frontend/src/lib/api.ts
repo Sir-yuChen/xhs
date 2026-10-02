@@ -32,8 +32,10 @@ import type {
   KeywordGroupPayload,
   LlmGatewayConfig,
   LlmGatewayConfigPayload,
+  LlmGatewayModelRow,
   LlmGatewayPlatformOption,
   LlmGatewayStats,
+  LlmGatewaySyncSummary,
   LlmGatewayAlert,
   LlmGatewayAlertPayload,
   LlmGatewayUsageOverview,
@@ -1673,6 +1675,24 @@ export async function fetchGatewayConfigs(): Promise<Paginated<LlmGatewayConfig>
   return response.data;
 }
 
+/**
+ * 服务商 × 模型**两级列表**（v2.9，2026-10-02 用户口径「服务商使用父子列表展示」）。
+ *
+ * 一个端点拿到「服务商 + 其全部模型行」—— 前端服务商页据此渲染父子两张独立表
+ * （父表列 = 服务商维度；子表列 = 模型维度，各用各的表头）。
+ *
+ * ⚠️ 与 `fetchGatewayConfigs()` 的区别只在 `models`：那个端点的每项 `models` 恒为 `[]`
+ * （后端 `_serialize_config` 的形参默认值），只够渲染父表；本端点才真的装了模型行。
+ * **别用 `fetchGatewayConfigs` 渲染子表** —— 子表会永远空着（且不报错，最难查的那种）。
+ */
+export async function fetchGatewayModelsTree(): Promise<Paginated<LlmGatewayConfig>> {
+  const response = await http.get<Paginated<LlmGatewayConfig>>(
+    "/llm/gateway-configs/models-tree",
+    { params: { page: 1, page_size: 100 } }
+  );
+  return response.data;
+}
+
 export async function fetchGatewayStats(configId: number): Promise<LlmGatewayStats> {
   const response = await http.get<LlmGatewayStats>(`/llm/gateway-configs/${configId}/stats`);
   return response.data;
@@ -1688,6 +1708,47 @@ export async function updateGatewayConfig(
   payload: Partial<LlmGatewayConfigPayload> & { enabled?: boolean }
 ): Promise<LlmGatewayConfig> {
   const response = await http.patch<LlmGatewayConfig>(`/llm/gateway-configs/${configId}`, payload);
+  return response.data;
+}
+
+/**
+ * **同步服务商模型**（v2.9，`POST /llm/gateway-configs/{id}/sync-models`）。
+ *
+ * 动作 = 拉上游 `/models` 目录 + 调一次 LLM 归纳整批模型类型 + upsert 模型行。
+ * 「创建服务商时自动同步一次」走的是**同一份后端实现**（DEF-044），前端这里只供
+ * 操作列的「同步服务商模型」按钮重试。
+ *
+ * ⚠️ **同步失败不是 HTTP 错误**：上游不可达 / 令牌过期时接口仍 200，
+ * 看 `summary.ok` 与 `summary.reason`（服务商本身没问题，只是这次没同步成）。
+ */
+export async function syncGatewayModels(
+  configId: number,
+  payload: { platform?: string } = {}
+): Promise<{ id: number; sync: LlmGatewaySyncSummary; catalog: string[]; models: LlmGatewayModelRow[] }> {
+  const response = await http.post<{
+    id: number;
+    sync: LlmGatewaySyncSummary;
+    catalog: string[];
+    models: LlmGatewayModelRow[];
+  }>(`/llm/gateway-configs/${configId}/sync-models`, payload);
+  return response.data;
+}
+
+/**
+ * 改一条**模型行**的类型（v2.9「类型」列就地可编辑下拉）。
+ *
+ * 走既有 `PATCH /llm/gateway-configs/{id}/models/{model_id}`（`update_gateway_model`
+ * 早就支持 `model_type`）—— 不为「改类型」新开端点（同一语义不留两份实现）。
+ */
+export async function updateGatewayModel(
+  configId: number,
+  modelId: number,
+  payload: Partial<Pick<LlmGatewayModelRow, "model_type" | "enabled" | "platform" | "remark">>
+): Promise<LlmGatewayModelRow> {
+  const response = await http.patch<LlmGatewayModelRow>(
+    `/llm/gateway-configs/${configId}/models/${modelId}`,
+    payload
+  );
   return response.data;
 }
 
@@ -2594,6 +2655,7 @@ export async function fetchGatewayUsageOverview(params?: {
   gateway_id?: number;
   platform?: string;
   function?: string;
+  model_name?: string;
 }): Promise<LlmGatewayUsageOverview> {
   const response = await http.get<LlmGatewayUsageOverview>("/llm/usage/overview", { params });
   return response.data;
@@ -2603,6 +2665,7 @@ export async function fetchGatewayUsageDaily(params?: {
   gateway_id?: number;
   platform?: string;
   function?: string;
+  model_name?: string;
   start_date?: string;
   end_date?: string;
 }): Promise<LlmGatewayUsageDailyItem[]> {
@@ -2612,6 +2675,7 @@ export async function fetchGatewayUsageDaily(params?: {
 
 export async function fetchGatewayUsageBreakdown(params?: {
   gateway_id?: number;
+  model_name?: string;
   dimension: string;
   start_date?: string;
   end_date?: string;

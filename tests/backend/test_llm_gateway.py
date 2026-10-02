@@ -45,11 +45,13 @@ def test_create_and_serialize_hides_tokens(api_client, db_factory):
         "/api/llm/gateway-configs",
         json={
             "name": "接入中转站",
-            "platform": "xhs",
-            "model_type": "text",
             "base_url": "http://127.0.0.1:3000",
             "access_token": "sk-gateway-secret",
-            "default_model": "deepseek-v4-flash",
+            # ⚠️ v2.7/v2.8：platform / model_type 下沉到模型行；`default_model` 已删。
+            # 模型随服务商一并创建（§13.2.9.5）。
+            "models": [
+                {"model_name": "deepseek-v4-flash", "model_type": "text", "platform": ["xhs"]}
+            ],
         },
         headers=headers,
     )
@@ -61,9 +63,18 @@ def test_create_and_serialize_hides_tokens(api_client, db_factory):
     # v1.7：local_db_path 已从出参移除
     assert "local_db_path" not in body
     assert body["healthy"] is False
-    # v1.9：服务编码系统生成（非空、唯一），使用平台回显
+    # v1.9：服务编码系统生成（非空、唯一）
     assert body["provider_key"]
-    assert body["platform"] == "xhs"
+    # ⚠️ v2.7：platform / model_type **不再在服务商出参**（已下沉模型层）——
+    # 传了反而 422（extra="forbid"）。
+    assert "platform" not in body
+    assert "model_type" not in body
+    # ⚠️ **v2.8**：`default_model` 出参移除（列已删，§13.2.10）。
+    assert "default_model" not in body
+    # v2.7：模型行随创建落库并回传（结构数组）
+    assert [m["model_name"] for m in body["models"]] == ["deepseek-v4-flash"]
+    assert body["models"][0]["model_type"] == "text"
+    assert body["models"][0]["platform"] == ["xhs"]
 
     # 库里是加密文本，不是明文
     with db_factory() as db:
@@ -87,11 +98,9 @@ def test_create_seeds_default_alerts(api_client, db_factory):
         "/api/llm/gateway-configs",
         json={
             "name": "带种子的网关",
-            "platform": "xhs",
-            "model_type": "text",
             "base_url": "http://127.0.0.1:3000",
             "access_token": "sk-seed",
-            "default_model": "m",
+            "models": [{"model_name": "m", "model_type": "text", "platform": ["xhs"]}],
         },
         headers=headers,
     )
@@ -123,11 +132,9 @@ def test_create_seeding_is_idempotent(api_client, db_factory):
         "/api/llm/gateway-configs",
         json={
             "name": "幂等网关",
-            "platform": "xhs",
-            "model_type": "text",
             "base_url": "http://127.0.0.1:3000",
             "access_token": "sk-idem",
-            "default_model": "m",
+            "models": [{"model_name": "m", "model_type": "text", "platform": ["xhs"]}],
         },
         headers=headers,
     )
@@ -182,11 +189,9 @@ def test_create_assigns_unique_provider_code(api_client):
     headers = _auth_header(api_client)
     payload = {
         "name": "dup",
-        "platform": "xhs",
-        "model_type": "text",
         "base_url": "http://127.0.0.1:3000",
         "access_token": "sk-t",
-        "default_model": "m",
+        "models": [{"model_name": "m", "model_type": "text", "platform": ["xhs"]}],
     }
     first = api_client.post("/api/llm/gateway-configs", json=payload, headers=headers)
     assert first.status_code == 201, first.text
@@ -206,30 +211,52 @@ def test_create_assigns_unique_provider_code(api_client):
 
 
 def test_create_rejects_missing_required_fields(api_client):
-    """v1.9 必填三件（用户口径「访问令牌和默认模型必填」「使用平台必选」）。
+    """必填项校验（v1.9 令牌必填；v2.7 起类型/平台必填**下沉到模型行**）。
 
-    ⚠️ 缺值 ⇒ 400 结构化错误，**不静默用默认值补齐** —— 补齐等于替用户编造一份凭据，
+    ⚠️ 缺值 ⇒ 结构化错误，**不静默用默认值补齐** —— 补齐等于替用户编造一份凭据，
     第一次调用才会发现是错的。
+
+    ⚠️ **v2.8（§13.2.10）**：`default_model` 与 `LLM_PROVIDER_MODEL_REQUIRED` 已删除
+    （列已删）⇒ 本用例**取代** v1.9 的「默认模型必填」断言；模型必填性现由
+    **模型行**的 `model_type` 必填承担（`LLM_PROVIDER_MODEL_TYPE_REQUIRED`）。
     """
     headers = _auth_header(api_client)
-    base = {"name": "n", "platform": "xhs", "base_url": "http://127.0.0.1:3000", "model_type": "text",
-            "access_token": "sk-t", "default_model": "m"}
+    base = {
+        "name": "n",
+        "base_url": "http://127.0.0.1:3000",
+        "access_token": "sk-t",
+        "models": [{"model_name": "m", "model_type": "text", "platform": ["xhs"]}],
+    }
 
-    # 缺 platform
-    r = api_client.post("/api/llm/gateway-configs", json={k: v for k, v in base.items() if k != "platform"}, headers=headers)
-    assert r.status_code == 422  # pydantic 必填（字段缺失）
-    # platform 非法
-    r = api_client.post("/api/llm/gateway-configs", json={**base, "platform": "bogus"}, headers=headers)
-    assert r.status_code == 400
-    assert r.json()["detail"]["code"] == "LLM_PROVIDER_PLATFORM_REQUIRED"
+    # 服务商层 `platform` 已退场 ⇒ 传了即 422（extra="forbid"，不再有 400 PLATFORM_REQUIRED）
+    r = api_client.post("/api/llm/gateway-configs", json={**base, "platform": "xhs"}, headers=headers)
+    assert r.status_code == 422
+    # 服务商层 `model_type` 已退场 ⇒ 传了即 422
+    r = api_client.post("/api/llm/gateway-configs", json={**base, "model_type": "text"}, headers=headers)
+    assert r.status_code == 422
+    # v2.8：服务商层 `default_model` 已退场 ⇒ 传了即 422（不再是 400 MODEL_REQUIRED）
+    r = api_client.post("/api/llm/gateway-configs", json={**base, "default_model": "m"}, headers=headers)
+    assert r.status_code == 422
     # 令牌空
     r = api_client.post("/api/llm/gateway-configs", json={**base, "access_token": ""}, headers=headers)
     assert r.status_code == 400
     assert r.json()["detail"]["code"] == "LLM_PROVIDER_TOKEN_REQUIRED"
-    # 默认模型空
-    r = api_client.post("/api/llm/gateway-configs", json={**base, "default_model": "  "}, headers=headers)
+    # 模型行的 model_type 空 ⇒ 400（类型必填下沉到模型行）
+    r = api_client.post(
+        "/api/llm/gateway-configs",
+        json={**base, "models": [{"model_name": "m", "model_type": "", "platform": ["xhs"]}]},
+        headers=headers,
+    )
     assert r.status_code == 400
-    assert r.json()["detail"]["code"] == "LLM_PROVIDER_MODEL_REQUIRED"
+    assert r.json()["detail"]["code"] == "LLM_PROVIDER_MODEL_TYPE_REQUIRED"
+    # 模型行的 platform 非法 ⇒ 400
+    r = api_client.post(
+        "/api/llm/gateway-configs",
+        json={**base, "models": [{"model_name": "m", "model_type": "text", "platform": ["bogus"]}]},
+        headers=headers,
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "LLM_PROVIDER_PLATFORM_REQUIRED"
 
 
 def test_provider_key_not_editable_via_patch_422(api_client):
@@ -237,8 +264,8 @@ def test_provider_key_not_editable_via_patch_422(api_client):
     headers = _auth_header(api_client)
     created = api_client.post(
         "/api/llm/gateway-configs",
-        json={"name": "locked", "platform": "xhs", "base_url": "http://127.0.0.1:3000", "model_type": "text",
-              "access_token": "sk-t", "default_model": "m"},
+        json={"name": "locked", "base_url": "http://127.0.0.1:3000",
+              "access_token": "sk-t", "models": [{"model_name": "m", "model_type": "text", "platform": ["xhs"]}]},
         headers=headers,
     ).json()
 
@@ -275,8 +302,8 @@ def test_delete_is_gone_410_and_keeps_row(api_client, db_factory):
     headers = _auth_header(api_client)
     created = api_client.post(
         "/api/llm/gateway-configs",
-        json={"name": "nodelete", "platform": "xhs", "base_url": "http://127.0.0.1:3000", "model_type": "text",
-              "access_token": "sk-t", "default_model": "m"},
+        json={"name": "nodelete", "base_url": "http://127.0.0.1:3000",
+              "access_token": "sk-t", "models": [{"model_name": "m", "model_type": "text", "platform": ["xhs"]}]},
         headers=headers,
     ).json()
 
@@ -294,12 +321,12 @@ def test_list_only_own(api_client):
     other = _other_auth(api_client)
     api_client.post(
         "/api/llm/gateway-configs",
-        json={"name": "mine", "platform": "xhs", "base_url": "http://127.0.0.1:3000", "access_token": "sk-t", "default_model": "m", "model_type": "text"},
+        json={"name": "mine", "base_url": "http://127.0.0.1:3000", "access_token": "sk-t", "models": [{"model_name": "m", "model_type": "text", "platform": ["xhs"]}]},
         headers=headers,
     )
     api_client.post(
         "/api/llm/gateway-configs",
-        json={"name": "theirs", "platform": "xhs", "base_url": "http://127.0.0.1:3000", "access_token": "sk-t", "default_model": "m", "model_type": "text"},
+        json={"name": "theirs", "base_url": "http://127.0.0.1:3000", "access_token": "sk-t", "models": [{"model_name": "m", "model_type": "text", "platform": ["xhs"]}]},
         headers=other,
     )
     resp = api_client.get("/api/llm/gateway-configs?page=1&page_size=20", headers=headers)
@@ -313,7 +340,7 @@ def test_cross_user_404(api_client):
     other = _other_auth(api_client)
     created = api_client.post(
         "/api/llm/gateway-configs",
-        json={"name": "secret", "platform": "xhs", "base_url": "http://127.0.0.1:3000", "access_token": "sk-t", "default_model": "m", "model_type": "text"},
+        json={"name": "secret", "base_url": "http://127.0.0.1:3000", "access_token": "sk-t", "models": [{"model_name": "m", "model_type": "text", "platform": ["xhs"]}]},
         headers=headers,
     ).json()
     resp = api_client.patch(
@@ -330,7 +357,7 @@ def test_update_base_url_resets_healthy(api_client):
     headers = _auth_header(api_client)
     created = api_client.post(
         "/api/llm/gateway-configs",
-        json={"name": "cfg", "platform": "xhs", "base_url": "http://127.0.0.1:3000", "access_token": "sk-t", "default_model": "m1", "model_type": "text"},
+        json={"name": "cfg", "base_url": "http://127.0.0.1:3000", "access_token": "sk-t", "models": [{"model_name": "m1", "model_type": "text", "platform": ["xhs"]}]},
         headers=headers,
     ).json()
     # 假装探活过
@@ -354,7 +381,7 @@ def test_update_token_blank_keeps_old(api_client, db_factory):
     headers = _auth_header(api_client)
     created = api_client.post(
         "/api/llm/gateway-configs",
-        json={"name": "tok", "platform": "xhs", "base_url": "http://127.0.0.1:3000", "access_token": "sk-original", "default_model": "m", "model_type": "text"},
+        json={"name": "tok", "base_url": "http://127.0.0.1:3000", "access_token": "sk-original", "models": [{"model_name": "m", "model_type": "text", "platform": ["xhs"]}]},
         headers=headers,
     ).json()
     resp = api_client.patch(
@@ -387,7 +414,7 @@ def test_local_db_path_rejected(api_client):
 
     created = api_client.post(
         "/api/llm/gateway-configs",
-        json={"name": "legacy2", "platform": "xhs", "base_url": "http://127.0.0.1:3000", "access_token": "sk-t", "default_model": "m", "model_type": "text"},
+        json={"name": "legacy2", "base_url": "http://127.0.0.1:3000", "access_token": "sk-t", "models": [{"model_name": "m", "model_type": "text", "platform": ["xhs"]}]},
         headers=headers,
     ).json()
     resp = api_client.patch(
@@ -405,11 +432,9 @@ def test_test_endpoint_unreachable_400(api_client):
         "/api/llm/gateway-configs",
         json={
             "name": "dead",
-            "platform": "xhs",
-            "model_type": "text",
             "base_url": "http://127.0.0.1:59999",  # 不可达端口
             "access_token": "sk-x",
-            "default_model": "m",
+            "models": [{"model_name": "m", "model_type": "text", "platform": ["xhs"]}],
         },
         headers=headers,
     ).json()
@@ -428,8 +453,8 @@ def test_test_endpoint_no_token_skips_probe(api_client, db_factory):
     headers = _auth_header(api_client)
     created = api_client.post(
         "/api/llm/gateway-configs",
-        json={"name": "notoken", "platform": "xhs", "base_url": "http://127.0.0.1:59999", "model_type": "text",
-              "access_token": "sk-t", "default_model": "m"},
+        json={"name": "notoken", "base_url": "http://127.0.0.1:59999",
+              "access_token": "sk-t", "models": [{"model_name": "m", "model_type": "text", "platform": ["xhs"]}]},
         headers=headers,
     ).json()
     # v1.9：清空令牌列以复现「无令牌」状态（绕过新建必填）
@@ -488,7 +513,7 @@ def test_test_endpoint_models_path_only(api_client, monkeypatch):
     # ⚠️ 地址**自带 `/v1`**（真实服务商形态）⇒ 期望请求 `…/v1/models`，而非 `/v1/v1/models`
     created = api_client.post(
         "/api/llm/gateway-configs",
-        json={"name": "probe", "platform": "xhs", "base_url": "http://127.0.0.1:3000/v1", "access_token": "sk-x", "default_model": "m", "model_type": "text"},
+        json={"name": "probe", "base_url": "http://127.0.0.1:3000/v1", "access_token": "sk-x", "models": [{"model_name": "m", "model_type": "text", "platform": ["xhs"]}]},
         headers=headers,
     ).json()
     resp = api_client.post(f"/api/llm/gateway-configs/{created['id']}/test", json={}, headers=headers)
@@ -527,7 +552,7 @@ def test_test_endpoint_root_base_url_no_v1_appended(api_client, monkeypatch):
     headers = _auth_header(api_client)
     created = api_client.post(
         "/api/llm/gateway-configs",
-        json={"name": "rootaddr", "platform": "xhs", "base_url": "http://127.0.0.1:3000", "access_token": "sk-x", "default_model": "m", "model_type": "text"},
+        json={"name": "rootaddr", "base_url": "http://127.0.0.1:3000", "access_token": "sk-x", "models": [{"model_name": "m", "model_type": "text", "platform": ["xhs"]}]},
         headers=headers,
     ).json()
     assert created["base_url"] == "http://127.0.0.1:3000", created
@@ -546,7 +571,7 @@ def test_base_url_stored_verbatim(api_client):
     headers = _auth_header(api_client)
     created = api_client.post(
         "/api/llm/gateway-configs",
-        json={"name": "verbatim", "platform": "xhs", "base_url": "  https://discovery-api.intern-ai.org.cn/v1  ", "access_token": "sk-t", "default_model": "m", "model_type": "text"},
+        json={"name": "verbatim", "base_url": "  https://discovery-api.intern-ai.org.cn/v1  ", "access_token": "sk-t", "models": [{"model_name": "m", "model_type": "text", "platform": ["xhs"]}]},
         headers=headers,
     ).json()
     assert created["base_url"] == "https://discovery-api.intern-ai.org.cn/v1", created
@@ -554,7 +579,7 @@ def test_base_url_stored_verbatim(api_client):
     # 末尾斜杠只做拼接语法层的归一（不改变指向的地址）
     trailing = api_client.post(
         "/api/llm/gateway-configs",
-        json={"name": "trailing", "platform": "xhs", "base_url": "https://api.deepseek.com/v1/", "access_token": "sk-t", "default_model": "m", "model_type": "text"},
+        json={"name": "trailing", "base_url": "https://api.deepseek.com/v1/", "access_token": "sk-t", "models": [{"model_name": "m", "model_type": "text", "platform": ["xhs"]}]},
         headers=headers,
     ).json()
     assert trailing["base_url"] == "https://api.deepseek.com/v1", trailing
@@ -572,11 +597,9 @@ def test_stats_remote_gateway_empty_state(api_client):
         "/api/llm/gateway-configs",
         json={
             "name": "remote",
-            "platform": "xhs",
-            "model_type": "text",
             "base_url": "https://discovery-api.intern-ai.org.cn",  # 远程三方网关
             "access_token": "sk-t",
-            "default_model": "m",
+            "models": [{"model_name": "m", "model_type": "text", "platform": ["xhs"]}],
         },
         headers=headers,
     ).json()
@@ -594,11 +617,9 @@ def test_stats_empty_ledger_empty_state(api_client):
         "/api/llm/gateway-configs",
         json={
             "name": "nodb",
-            "platform": "xhs",
-            "model_type": "text",
             "base_url": "http://127.0.0.1:3000",
             "access_token": "sk-t",
-            "default_model": "m",
+            "models": [{"model_name": "m", "model_type": "text", "platform": ["xhs"]}],
         },
         headers=headers,
     ).json()
@@ -626,16 +647,20 @@ def test_legacy_xhs_path_is_gone(api_client):
 
 
 def _create_gateway(api_client, headers, name="gw"):
-    """建一条服务商（v1.9：`platform` / `access_token` / `default_model` 均必填）。"""
+    """建一条服务商（v1.9 令牌必填；v2.7 起类型/平台随**模型行**必填）。
+
+    ⚠️ v2.8：服务商层 `default_model` 已删（§13.2.10）—— 模型真相源 = 模型行，
+    故此处改为随创建带一条 `deepseek-v4-flash`（text / xhs）模型行。
+    """
     return api_client.post(
         "/api/llm/gateway-configs",
         json={
             "name": name,
-            "platform": "xhs",
-            "model_type": "text",
             "base_url": "http://127.0.0.1:3000",
             "access_token": "sk-test-token",
-            "default_model": "deepseek-v4-flash",
+            "models": [
+                {"model_name": "deepseek-v4-flash", "model_type": "text", "platform": ["xhs"]}
+            ],
         },
         headers=headers,
     ).json()
@@ -659,7 +684,7 @@ def test_token_mapping_endpoints_are_gone_410(api_client):
     assert (
         api_client.post(
             "/api/llm/gateway-tokens",
-            json={"gateway_id": 1, "platform": "xhs", "function": "generate", "token_name": "t", "model_type": "text"},
+            json={"gateway_id": 1, "platform": ["xhs"], "function": "generate", "token_name": "t", "model_type": "text"},
             headers=headers,
         ).status_code
         == 410
@@ -923,6 +948,53 @@ def test_usage_aggregates_ledger(api_client, db_factory):
     assert items["review"]["calls"] == 1
 
 
+def test_usage_filter_by_model(api_client, db_factory):
+    """筛选粒度到「服务商下具体模型」：`model_name` 参数过滤 overview/daily/breakdown。
+
+    §7.5 用户口径「筛选条件应达到服务商下的具体模型，目前只有服务商维度」——
+    三个用量端点统一新增 `model_name` 筛选（台账 `LlmGatewayUsageLog.model_name` 直接过滤）。
+    """
+    from backend.app.models import LlmGatewayUsageLog
+
+    headers = _auth_header(api_client)
+    gw = _create_gateway(api_client, headers)
+
+    with db_factory() as db:
+        db.add_all([
+            LlmGatewayUsageLog(user_id=1, gateway_id=gw["id"], platform="xhs", model_name="m1", prompt_tokens=10, completion_tokens=0, latency_ms=100, status="success"),
+            LlmGatewayUsageLog(user_id=1, gateway_id=gw["id"], platform="xhs", model_name="m1", prompt_tokens=5, completion_tokens=0, latency_ms=200, status="success"),
+            LlmGatewayUsageLog(user_id=1, gateway_id=gw["id"], platform="xhs", model_name="m2", prompt_tokens=1, completion_tokens=0, latency_ms=50, status="success"),
+        ])
+        db.commit()
+
+    # 不筛模型 ⇒ 3 次
+    resp = api_client.get("/api/llm/usage/overview", headers=headers)
+    assert resp.json()["today"]["calls"] == 3
+
+    # 筛 m1 ⇒ 2 次
+    resp = api_client.get("/api/llm/usage/overview?model_name=m1", headers=headers)
+    assert resp.json()["today"]["calls"] == 2
+
+    # 筛 m2 ⇒ 1 次
+    resp = api_client.get("/api/llm/usage/overview?model_name=m2", headers=headers)
+    assert resp.json()["today"]["calls"] == 1
+
+    # daily 端点也吃 model_name（m1 两天？—— 这里同一天，验证列表长度与聚合值）
+    resp = api_client.get("/api/llm/usage/daily?model_name=m1", headers=headers)
+    daily = resp.json()
+    assert len(daily) == 1
+    assert daily[0]["calls"] == 2
+
+    # breakdown 端点也吃 model_name：dimension=platform 只留 m1 的那两条
+    resp = api_client.get("/api/llm/usage/breakdown?dimension=platform&model_name=m1", headers=headers)
+    items = {i["key"]: i for i in resp.json()}
+    assert items["xhs"]["calls"] == 2
+
+    # 筛不存在的模型 ⇒ 空态（缺值口径：不造假，回空/0）
+    resp = api_client.get("/api/llm/usage/overview?model_name=ghost", headers=headers)
+    assert resp.json()["today"]["calls"] == 0
+
+
 # ───────────────────────── v1.6：监控预警（§4.5）─────────────────────────
 
 
@@ -1156,8 +1228,8 @@ def test_models_preview_uses_stored_token_when_blank(api_client, monkeypatch):
     headers = _auth_header(api_client)
     created = api_client.post(
         "/api/llm/gateway-configs",
-        json={"name": "pv", "platform": "xhs", "base_url": "http://127.0.0.1:3000/v1", "model_type": "text",
-              "access_token": "sk-stored", "default_model": "m"},
+        json={"name": "pv", "base_url": "http://127.0.0.1:3000/v1",
+              "access_token": "sk-stored", "models": [{"model_name": "m", "model_type": "text", "platform": ["xhs"]}]},
         headers=headers,
     ).json()
 
@@ -1204,8 +1276,8 @@ def test_get_single_config_and_platforms_not_shadowed(api_client):
     headers = _auth_header(api_client)
     created = api_client.post(
         "/api/llm/gateway-configs",
-        json={"name": "single", "platform": "xhs", "base_url": "http://127.0.0.1:3000", "model_type": "text",
-              "access_token": "sk-t", "default_model": "m"},
+        json={"name": "single", "base_url": "http://127.0.0.1:3000",
+              "access_token": "sk-t", "models": [{"model_name": "m", "model_type": "text", "platform": ["xhs"]}]},
         headers=headers,
     ).json()
 
@@ -1221,3 +1293,239 @@ def test_get_single_config_and_platforms_not_shadowed(api_client):
 
     # 越权/不存在 ⇒ 404
     assert api_client.get("/api/llm/gateway-configs/999999", headers=headers).status_code == 404
+
+
+# ───────── v2.9：服务商 × 模型**两级列表**（2026-10-02 用户口径「父子列表」）─────────
+
+
+def test_models_tree_returns_provider_with_its_models(api_client):
+    """`GET /models-tree` = 每个服务商**带上它的全部模型行**（父子列表的数据源）。
+
+    ⚠️ 与 `GET /` 的关键差别：`GET /` 的每项 `models` 恒为 `[]`（只够渲染父表），
+    前端若拿它渲染子表会**永远空着且不报错** —— 本用例把两者钉住，防止回退。
+    """
+    headers = _auth_header(api_client)
+    created = _create_gateway(api_client, headers, name="父子列表")
+
+    resp = api_client.get("/api/llm/gateway-configs/models-tree", headers=headers)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    items = body["items"]
+    assert len(items) == 1
+
+    row = items[0]
+    assert row["id"] == created["id"]
+    # 父层字段（服务商维度）齐全
+    assert row["name"] == "父子列表"
+    assert row["provider_key"] == created["provider_key"]
+    assert "access_token" not in row
+    # 子层真的装了模型行（这是一个端点存在的全部理由）
+    assert [m["model_name"] for m in row["models"]] == ["deepseek-v4-flash"]
+    assert row["models"][0]["model_type"] == "text"
+    # 模型行没有令牌字段（凭据在服务商层）
+    assert "access_token" not in row["models"][0]
+
+    # 对照组：`GET /` 的 models 恒为空数组（不是「恰好空」，是设计如此）
+    listed = api_client.get("/api/llm/gateway-configs?page=1&page_size=20", headers=headers).json()
+    assert listed["items"][0]["models"] == []
+
+
+def test_models_tree_not_shadowed_by_config_id_route(api_client):
+    """⚠️ 路由顺序回归：`/models-tree` 不得被 `GET /{config_id}` 抢走。
+
+    Starlette 按**声明顺序**匹配 ⇒ 若 `/models-tree` 定义在 `GET /{config_id}` **之后**，
+    请求会被后者接住（`config_id="models-tree"` 解析 int 失败 ⇒ 422），
+    前端拿不到数据且报错信息与真实原因无关（最难查的那类）。
+    """
+    headers = _auth_header(api_client)
+    resp = api_client.get("/api/llm/gateway-configs/models-tree", headers=headers)
+    assert resp.status_code == 200, f"被 /{{config_id}} 抢走了：{resp.status_code} {resp.text}"
+    assert "items" in resp.json()
+
+
+def test_models_tree_only_own(api_client):
+    """跨用户隔离：只返回自己的服务商（与 `GET /` 同一口径）。"""
+    headers = _auth_header(api_client)
+    other_headers = _other_auth(api_client)
+    _create_gateway(api_client, headers, name="我的")
+
+    mine = api_client.get("/api/llm/gateway-configs/models-tree", headers=headers).json()["items"]
+    theirs = api_client.get("/api/llm/gateway-configs/models-tree", headers=other_headers).json()["items"]
+    assert [r["name"] for r in mine] == ["我的"]
+    assert theirs == []
+
+
+def test_models_tree_empty_is_empty_list_not_error(api_client):
+    """没配过服务商 ⇒ 空列表（空态由前端 `locale.emptyText` 呈现，不是错误）。"""
+    headers = _auth_header(api_client)
+    resp = api_client.get("/api/llm/gateway-configs/models-tree", headers=headers)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["items"] == []
+    assert resp.json()["total"] == 0
+
+
+# ───── v2.10：模型自然序号 / 模型级健康 / **已在使用的模型无法停用**（2026-10-02 用户口径）─────
+
+
+def test_model_rows_carry_model_key_and_health_fields(api_client):
+    """模型行出参带 `model_key`（服务商内自然序号）+ 模型级健康两字段。"""
+    headers = _auth_header(api_client)
+    _create_gateway(api_client, headers, name="序号")
+
+    rows = api_client.get("/api/llm/gateway-configs/models-tree", headers=headers).json()["items"]
+    model = rows[0]["models"][0]
+    # 创建时后端的**首个**模型 ⇒ 服务商内自然序号从 1 起
+    assert model["model_key"] == "1"
+    # 从未探测 ⇒ healthy=False 且 last_health_at=None（**两字段必须一起给**，
+    # 只给 healthy 会让前端把「从未探测」渲染成「异常」）
+    assert model["healthy"] is False
+    assert model["last_health_at"] is None
+    # 无业务点映射 ⇒ usages 空数组（不是 None：前端按 length 判置灰）
+    assert model["usages"] == []
+
+
+def test_model_keys_are_sequential_within_provider(api_client):
+    """同一服务商下多个模型 ⇒ `model_key` 为 1/2/3… 递增（用户口径「服务商内不重复即可」）。"""
+    headers = _auth_header(api_client)
+    created = _create_gateway(api_client, headers, name="多模型")
+    for name in ("m-second", "m-third"):
+        resp = api_client.post(
+            f"/api/llm/gateway-configs/{created['id']}/models",
+            json={"model_name": name, "model_type": "text", "platform": ["xhs"]},
+            headers=headers,
+        )
+        assert resp.status_code == 201, resp.text
+
+    rows = api_client.get("/api/llm/gateway-configs/models-tree", headers=headers).json()["items"]
+    keys = [m["model_key"] for m in rows[0]["models"]]
+    assert keys == ["1", "2", "3"], keys
+
+
+def test_model_key_scoped_per_provider(api_client):
+    """⚠️ 自然序号是**服务商内**的 ⇒ 两个服务商各自从 1 起（不是全局递增）。"""
+    headers = _auth_header(api_client)
+    _create_gateway(api_client, headers, name="甲")
+    _create_gateway(api_client, headers, name="乙")
+
+    rows = api_client.get("/api/llm/gateway-configs/models-tree", headers=headers).json()["items"]
+    assert all(r["models"][0]["model_key"] == "1" for r in rows), rows
+
+
+def test_disable_model_in_use_by_business_is_rejected_400(api_client, db_factory):
+    """**已在使用的模型无法停用**（用户口径 2026-10-02）。
+
+    被测：`PATCH /{config_id}/models/{model_id} {enabled: false}` ——
+    若该 `(provider_key, model_name)` 正被某业务点映射引用 ⇒ 400 `LLM_MODEL_IN_USE_BY_BUSINESS`，
+    且**不得落库**（不是「先停用再报错」—— 那会让业务点变成「配好了但永远跑不通」的死配置）。
+    """
+    headers = _auth_header(api_client)
+    created = _create_gateway(api_client, headers, name="在用")
+    provider_key = created["provider_key"]
+    model_id = created["models"][0]["id"]
+
+    # 把一个业务点映射到这个模型（business_key / model_name 与 `_create_gateway` 造的模型对齐）
+    resp = api_client.put(
+        "/api/llm/business-providers",
+        json={
+            "platform": "xhs",
+            "business_key": "generate_note",
+            "provider_key": provider_key,
+            "model_name": "deepseek-v4-flash",
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+
+    # 现在该模型「在使用中」⇒ 停用被拒
+    resp = api_client.patch(
+        f"/api/llm/gateway-configs/{created['id']}/models/{model_id}",
+        json={"enabled": False},
+        headers=headers,
+    )
+    assert resp.status_code == 400, resp.text
+    detail = resp.json()["detail"]
+    assert detail["code"] == "LLM_MODEL_IN_USE_BY_BUSINESS"
+    # 结构化带上「被谁在用」，前端提示才能指名道姓
+    assert [u["business_key"] for u in detail["usages"]] == ["generate_note"]
+    assert detail["usages"][0]["label"] == "生成笔记"
+
+    # ⚠️ 关键：**没有落库**（读回仍是启用）
+    rows = api_client.get("/api/llm/gateway-configs/models-tree", headers=headers).json()["items"]
+    assert rows[0]["models"][0]["enabled"] is True
+
+
+def test_disable_model_not_in_use_is_allowed(api_client):
+    """无人引用的模型 ⇒ 停用照常放行（守卫只拦「在用」，不是把停用功能一刀切砍掉）。"""
+    headers = _auth_header(api_client)
+    created = _create_gateway(api_client, headers, name="空闲")
+    model_id = created["models"][0]["id"]
+
+    resp = api_client.patch(
+        f"/api/llm/gateway-configs/{created['id']}/models/{model_id}",
+        json={"enabled": False},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["enabled"] is False
+
+
+def test_enable_model_in_use_is_allowed(api_client, db_factory):
+    """⚠️ 守卫**只拦停用**：在用模型的「启用」不拦 —— 那是在修复「指着已停用模型」的死配置。
+
+    构造：先（手写库）把模型置为停用 + 建好指向它的业务点映射，再 PATCH `enabled=True`
+    ⇒ 必须放行（否则用户被锁死：映射要求模型可用，而启用又被拒）。
+    """
+    headers = _auth_header(api_client)
+    created = _create_gateway(api_client, headers, name="救回")
+    provider_key = created["provider_key"]
+    model_id = created["models"][0]["id"]
+
+    api_client.put(
+        "/api/llm/business-providers",
+        json={
+            "platform": "xhs",
+            "business_key": "generate_note",
+            "provider_key": provider_key,
+            "model_name": "deepseek-v4-flash",
+        },
+        headers=headers,
+    )
+
+    # 直接改库把模型停用（绕过 PATCH 的守卫 —— 模拟「映射是后来加的」这种历史态）
+    from backend.app.models.llm_gateway import LlmGatewayModel
+
+    with db_factory() as db:
+        row = db.scalars(select(LlmGatewayModel).where(LlmGatewayModel.id == model_id)).one()
+        row.enabled = False
+        db.commit()
+
+    resp = api_client.patch(
+        f"/api/llm/gateway-configs/{created['id']}/models/{model_id}",
+        json={"enabled": True},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["enabled"] is True
+
+
+def test_models_tree_reports_usages_for_mapped_model(api_client, db_factory):
+    """`usages` 供前端把「启用」开关置灰 —— 映射到哪个业务点就报哪个。"""
+    headers = _auth_header(api_client)
+    created = _create_gateway(api_client, headers, name="带用")
+    api_client.put(
+        "/api/llm/business-providers",
+        json={
+            "platform": "xhs",
+            "business_key": "generate_note",
+            "provider_key": created["provider_key"],
+            "model_name": "deepseek-v4-flash",
+        },
+        headers=headers,
+    )
+
+    rows = api_client.get("/api/llm/gateway-configs/models-tree", headers=headers).json()["items"]
+    usages = rows[0]["models"][0]["usages"]
+    assert [u["business_key"] for u in usages] == ["generate_note"]
+    assert usages[0]["label"] == "生成笔记"
+    assert usages[0]["platform"] == "xhs"
+

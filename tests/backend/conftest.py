@@ -324,6 +324,12 @@ LATER_MIGRATION_TABLES: dict[str, str] = {
     ),
     # `m4n5o6p7q8r9`（2026-09-29，设计 17 §3.8/§3.9）：llm 网关两张新表。
     # 迁移区间内会自动建（幂等保护：已存在即返回），夹具只需保证「不冲突」。
+    # ⚠️ `default_model` / `models_json` **必须声明**（2026-10-02 修）：
+    #    stamp 点之后的 `d5e6f7a8b9c0`（v1.9）要读这两列做存量回填
+    #    （`SELECT id, models_json ... WHERE default_model IS NULL OR TRIM(default_model)=''`）
+    #    —— 少列即 `no such column: default_model`，四条最小夹具用例同时红。
+    #    夹具语义是「**stamp 点当时的形状**」，不是 head 的形状：后续 v2.8
+    #    （`f6a7b8c9d0e1`）删列是**迁移自己**的事，夹具不得替它预先删掉。
     "llm_gateway_configs": (
         "CREATE TABLE llm_gateway_configs ("
         " id INTEGER NOT NULL,"
@@ -332,6 +338,7 @@ LATER_MIGRATION_TABLES: dict[str, str] = {
         " base_url VARCHAR(512) NOT NULL DEFAULT 'http://127.0.0.1:3000',"
         " access_token TEXT NOT NULL DEFAULT '',"
         " default_model VARCHAR(128) NOT NULL DEFAULT '',"
+        " models_json TEXT NOT NULL DEFAULT '[]',"
         " enabled BOOLEAN NOT NULL DEFAULT 1,"
         " healthy BOOLEAN NOT NULL DEFAULT 0,"
         " last_health_at DATETIME,"
@@ -517,6 +524,26 @@ LATER_MIGRATION_TABLES: dict[str, str] = {
         " user_id INTEGER,"
         " platform_account_id INTEGER,"
         " status VARCHAR(32),"
+        " PRIMARY KEY (id))"
+    ),
+    # ⚠️ `users`（2026-10-02，设计 17 §13 v2.9）：`a7b8c9d0e1f2` 对
+    #    `llm_gateway_models` 做 `batch_alter_table`（SQLite 改约束只能重建表）——
+    #    SQLAlchemy 重建前会**反射整表**，`llm_gateway_models` 建表时（`e5f6a7b8c9d0`）
+    #    带 `sa.ForeignKey("users.id")` ⇒ 反射要解析 FK 目标表 `users`
+    #    ⇒ 夹具没有它即 `NoSuchTableError: users`（2026-10-02 实测，4 个迁移用例齐红）。
+    #    ⚠️ 与 `llm_gateway_alerts` 同型例外：**表不在 stamp 区间内、迁移只读不改结构**
+    #    （本表是**首迁移** `3bd70519ad3c` 建的一期表，链上远在全部 stamp 点之前）。
+    #    ⚠️ 只给「足以让反射解析 FK」的最小形状（主键 + 迁移会读的常见列），
+    #    不复制生产全貌（夹具债在夹具侧还，见上方立规注释）。
+    "users": (
+        "CREATE TABLE users ("
+        " id INTEGER NOT NULL,"
+        " username VARCHAR(64),"
+        " email VARCHAR(128),"
+        " hashed_password VARCHAR(256),"
+        " is_active BOOLEAN NOT NULL DEFAULT 1,"
+        " created_at DATETIME,"
+        " updated_at DATETIME,"
         " PRIMARY KEY (id))"
     ),
 }

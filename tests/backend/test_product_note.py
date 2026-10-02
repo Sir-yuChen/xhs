@@ -25,7 +25,7 @@ from backend.app.api.platforms.xhs.qianfan import get_qianfan_api_adapter_factor
 from backend.app.core.database import Base, get_db
 from backend.app.main import app
 from backend.app.models import AiDraft, PlatformAccount, PublishJob, Task, User
-from backend.app.models.llm_gateway import LlmBusinessProvider, LlmGatewayConfig
+from backend.app.models.llm_gateway import LlmBusinessProvider, LlmGatewayConfig, LlmGatewayModel
 class _ModelConfigStub:
     """`ModelConfig` 的鸭子类型替身（v2.0：ORM 类已随 model_configs 表退场）。
 
@@ -192,21 +192,30 @@ def _setup(tmp_path):
         )
         db.add(account)
         # v2.0（设计 17 §13.2）：业务调用改走「平台 × 业务点 → 服务商」映射，
-        # 一期 `model_configs` 已退场。这里建一条**服务商 + 映射**，
+        # 一期 `model_configs` 已退场。这里建一条**服务商 + 模型行 + 映射**，
         # 让「已配置」的路径与改造后的调用链一致（映射缺失 ⇒ 400 未配置）。
         db.add(
             LlmGatewayConfig(
                 user_id=user_id,
                 name="fake-provider",
                 provider_key="FAKE-KEY1",
-                platform="xhs",
                 base_url="http://127.0.0.1:9",
                 access_token="",
-                default_model="fake-model",
                 models_json='["fake-model"]',
                 enabled=True,
-                model_type="text",
                 healthy=True,
+            )
+        )
+        # ⚠️ v2.7/v2.8：`platform` / `model_type` / `default_model` 已从服务商层移除 ——
+        # 能力类型与使用平台改由**模型行**承载（v2.7），兜底名整列删除（v2.8）。
+        db.add(
+            LlmGatewayModel(
+                user_id=user_id,
+                provider_key="FAKE-KEY1",
+                model_name="fake-model",
+                model_type="text",
+                platform="xhs",
+                enabled=True,
             )
         )
         db.add(

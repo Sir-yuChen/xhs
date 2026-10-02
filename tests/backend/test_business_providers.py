@@ -51,21 +51,28 @@ def _register(api_client, username: str) -> dict:
 def _create_provider(
     api_client, headers, name: str, model_type: str = "text", models: list[str] | None = None
 ) -> dict:
-    """建服务商。`models` 非空时**直接把它写进 `models_json` 模型目录**。
+    """建服务商 + 模型行。`models` 非空时**直接把它写进 `models_json` 模型目录**。
 
     ⚠️ `POST /gateway-configs` **不落目录**（目录由「测试连接 / 拉取模型」写入，见
     `_serialize_config` 的 `models` 来自 `models_json`）；测试里造「目录非空」用于验证
     v2.3 的目录校验分支，必须直连 ORM 写 `models_json`，不能指望创建端点。
+
+    ⚠️ **v2.7/v2.8**：服务商层已无 `platform` / `model_type` / `default_model`
+    （前两者下沉到模型行、第三者整列删除）—— 旧 payload 会因 `extra="forbid"` 得 **422**。
+    故改为随创建带 `models` 子列表：目录里每个模型建一条**模型行**（`model_type` 由参数给定），
+    首个模型名即旧的 `default_model` 口径（`deepseek-v4-flash`）。
     """
+    catalog = models or ["deepseek-v4-flash"]
     resp = api_client.post(
         "/api/llm/gateway-configs",
         json={
             "name": name,
-            "platform": "xhs",
-            "model_type": model_type,
             "base_url": "http://127.0.0.1:3000",
             "access_token": "***",
-            "default_model": "deepseek-v4-flash",
+            "models": [
+                {"model_name": m, "model_type": model_type, "platform": ["xhs"]}
+                for m in catalog
+            ],
         },
         headers=headers,
     )
@@ -126,8 +133,9 @@ def _upsert(
 def test_resolve_hit_returns_provider_context(api_client, db_factory):
     """命中：返回服务商上下文，`model_name` = **用户在映射里选的那个模型**。
 
-    ⚠️ v2.3：断言「显式选的 ≠ 服务商 `default_model`」—— 后者是 `deepseek-v4-flash`，
-    这里是 `deepseek-v4-pro`。若实现偷偷回落默认模型，本用例即失败（防静默回落）。
+    ⚠️ v2.3：断言「显式选的 ≠ 服务商兜底模型」—— 模型行里有 `deepseek-v4-flash`，
+    这里是 `deepseek-v4-pro`。若实现偷偷回落，本用例即失败（防静默回落）。
+    ⚠️ **v2.8**：兜底源（`default_model` 列）已删，判据落到**模型行**上。
     """
     headers = _register(api_client, "bp_hit")
     provider = _create_provider(
@@ -167,9 +175,17 @@ def test_resolve_missing_mapping_raises_and_never_falls_back(api_client, db_fact
 
 
 def test_resolve_type_mismatch_raises(api_client, db_factory):
-    """类型不匹配 ⇒ `BusinessProviderTypeMismatchError`（提前拦，不打上游）。"""
+    """类型不匹配 ⇒ `BusinessProviderTypeMismatchError`（提前拦，不打上游）。
+
+    ⚠️ **v2.7**：类型判据在**模型行**（`llm_gateway_models.model_type`）——
+    故必须为该模型建档且标成 `image`，否则会先撞 `BusinessModelNotConfiguredError`
+    （「目录里有名字但没建行」是另一种失败，本用例要测的是「建了行但类型不符」）。
+    """
     headers = _register(api_client, "bp_type")
-    image_provider = _create_provider(api_client, headers, "type-provider", MODEL_TYPE_IMAGE)
+    image_provider = _create_provider(
+        api_client, headers, "type-provider", MODEL_TYPE_IMAGE,
+        models=["some-image-model"],
+    )
 
     # 端点层会先拦（§13.2.6 类型校验）⇒ 直接用 ORM 造一条脏映射验证解析层也拦
     user = _user_by_name(api_client, db_factory, "bp_type")
@@ -570,9 +586,9 @@ def test_list_exposes_model_name_and_provider_models(api_client):
 
 
 def test_resolve_uses_mapping_model_and_ignores_disabled_default(api_client, db_factory):
-    """解析层取映射里选的模型；服务商 `default_model` 不同也不回落。"""
+    """解析层取映射里选的模型；模型层另有其它模型也不回落。"""
     headers = _register(api_client, "bp_resolvemodel")
-    # default_model 固定为 deepseek-v4-flash（见 _create_provider）
+    # 模型行含 deepseek-v4-flash（见 _create_provider 默认目录）
     provider = _create_provider(
         api_client, headers, "resolvemodel", MODEL_TYPE_TEXT,
         models=["deepseek-v4-flash", "deepseek-v4-pro"],

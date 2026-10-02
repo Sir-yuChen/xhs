@@ -2,6 +2,36 @@
 
 > - **体系位置**：`docs/02_设计文档/`（二开方向 1 的独立详细设计，文档先行五阶段「阶段二」产出）
 > - **上游**：`docs/01_需求文档/05_需求规格_第二阶段二开.md`（方向 1）、`docs/02_设计文档/16_功能设计_第二阶段二开.md` §2
+> - **v2.11**（2026-10-02 用户口径「模型配置列表的当前服务商 / 模型列，服务商和服务商模型**应使用二级联动
+>   组件**展示，且**支持修改**，目前**全部无法修改**服务商和模型」）：**服务商 / 模型列改二级联动 + 修掉取数端点** ——
+>   ① ⚠️ 根因是**取数端点用错**：页面调 `GET /llm/gateway-configs`（该端点 `models` **恒为 `[]`**，
+>   见 §13.2.12 的「`models` 恒空」地雷）⇒ 候选服务商被「按 `models.length > 0` 过滤」全数丢弃 ⇒
+>   两列**恒 `disabled`**（正是「全部无法修改」的现象）；改用 **`GET /llm/gateway-configs/models-tree`**
+>   （真带模型行）。② 服务商 + 模型**合并为单个 antd `Cascader`**（一级 = 服务商，二级 = 该服务商在该业务点
+>   下的可用模型；`changeOnSelect` 允许只选到一级，中间态**只落本地暂存不落库**，保留 v2.5 防死循环守卫）。
+>   ③ 类型匹配从「前端裸 `=== kind`」改为**镜像后端 `_type_satisfies`**（`multimodal` 可服务 text/image）；
+>   规则全部下沉到 `provider-options.ts` 纯函数（有单测钉住）。**零新端点、零新表**。详见 **§13.2.13**。
+> - **v2.10**（2026-10-02 用户口径「**健康状态和启用状态开关放具体模型维度**」「具体的模型也生成一个
+>   唯一ID，**使用自然序号**」「子表健康列**未检查的展示检测检查按钮**，触发可健康检查」
+>   「**被使用中的模型不支持停用**」）：**模型级健康 + 自然序号 ID + 在用不可停用** ——
+>   ① `llm_gateway_models` 加 `healthy` / `last_health_at` / `model_key` 三列（迁移 `b8c9d0e1f2a3`）；
+>   ② 健康与启用**下沉到模型维度**（父表删两列）；③ 未探测给「检查」按钮（探测粒度 = 服务商，写回整组）；
+>   ④ 被业务点引用的模型停用 ⇒ **400** `LLM_MODEL_IN_USE_BY_BUSINESS`（只拦停用、不拦启用）。
+>   **零新端点、零新表**。详见 **§13.2.12**。
+> - **v2.9**（2026-10-02 用户口径「**服务商模型不允许手动添加，只能拉取三方**」「添加服务商时**默认拉取一次**，
+>   操作列新增**同步服务商模型**按钮」「模型类型**图文改回图片**」「模型类型列表中**支持修改，下拉框**」
+>   「配置服务商时**直接父子树展示**该服务商下所有模型」「模型类型由 **AI 调用总结**（text/image/multimodal/video）」
+>   「**多平台共用同一模型**」「列表的**地址太短了**」「**父子表使用各自的表头**」）：**模型全生命周期自动化** ——
+>   ① 类型枚举扩到**四值**（文本/图片/多态/视频）+ 后端下发；② `platform` 单值 → **多值**（多平台共用）；
+>   ③ 模型行**只由同步产生**（拉目录 + **AI 归纳类型**），弹窗手动编辑器**整段移除**；
+>   ④ 创建即同步 + 操作列「同步服务商模型」（共用 `_sync_provider_models_core`）；⑤ 类型列**就地可编辑下拉**；
+>   ⑥ 前端父子**各自表头**（父表 `expandedRowRender` 渲染独立子表）。详见 **§13.2.11**。
+> - **v2.7**（2026-10-02 用户口径「服务商信息是其下的模型**公用的**（接口 key / 调用地址），
+>   具体模型才需要分文本、多模态、图片、视频；**使用平台下沉到具体模型**」）：**服务商 / 模型数据分层** ——
+>   ① 新增 **`llm_gateway_models`** 子表（模型层：`model_type` + `platform` + 启停）；
+>   ② `llm_gateway_configs` **删除 `model_type` / `platform` 两列**（SQL 修复存量后删，非保留）；
+>   ③ 类型匹配校验**改查模型层**；④ 前端「候选服务商按类型过滤」→「选完服务商后**模型下拉按 kind 过滤**」。
+>   取代 §13.2.1a「一条服务商 = 一种能力 ⇒ 建两条」。详见 **§13.2.9**。
 > - **v2.6**（2026-10-02 用户口径「小红书模型配置页面只能配置小红书相关业务使用的模型，
 >   把右上角的下拉移除，不支持切换到其它平台」）：**模型配置页移除平台下拉**，页内固定 `xhs`；
 >   后端 `PLATFORM_ENUM` 与跨平台隔离能力**原样保留**（前端只删假入口，不删后端能力）。详见 §13.2.8。
@@ -954,11 +984,18 @@ final_prompt =
 - ⚠️ 与台账 `platform`（§4.3.1 的 `platform × function` 聚合键）**不是同一个概念**（§3.8 ⚠️），**不许复用同一份常量表**。
 
 **`POST /api/llm/gateway-configs`**（新增服务商）
-- 请求：`{name, platform, access_token, default_model, base_url?}`；`access_token` 用 `encrypt_text` 加密落库；
-  `name` 用户内唯一（409 `LLM_GATEWAY_NAME_EXISTS`）；返回 201 + 对象（令牌不返）。
+- 请求：~~`{name, platform, access_token, default_model, base_url?}`~~
+  ⚠️ **被 §13.2.9（v2.7）+ §13.2.10（v2.8）取代** —— 现为
+  `{name, access_token, base_url?, models: [{model_name, model_type, platform, enabled, remark}]}`：
+  `platform` / `model_type` 下沉到**模型行**，`default_model` 整列删除。
+  `access_token` 用 `encrypt_text` 加密落库；`name` 用户内唯一（409 `LLM_GATEWAY_NAME_EXISTS`）；
+  返回 201 + 对象（令牌不返）。
 - ⚠️ **v1.9 必填三件**（用户口径「访问令牌和默认模型必填」「使用平台必选」）：
-  `access_token` 空 ⇒ 400 `LLM_PROVIDER_TOKEN_REQUIRED`；`default_model` 空 ⇒ 400 `LLM_PROVIDER_MODEL_REQUIRED`；
-  `platform` 缺失或非枚举值 ⇒ 400 `LLM_PROVIDER_PLATFORM_REQUIRED`。
+  ~~`access_token` 空 ⇒ 400 `LLM_PROVIDER_TOKEN_REQUIRED`；`default_model` 空 ⇒ 400 `LLM_PROVIDER_MODEL_REQUIRED`；
+  `platform` 缺失或非枚举值 ⇒ 400 `LLM_PROVIDER_PLATFORM_REQUIRED`。~~
+  **v2.7/v2.8 现状**（原句保留）：`access_token` 空 ⇒ 仍 400 `LLM_PROVIDER_TOKEN_REQUIRED`；
+  ~~`default_model`~~ / ~~服务商级 `platform`~~ **两件已随列删除**，改为**每个模型行**各自校验
+  `model_type ∈ MODEL_TYPES`、`platform ∈ PLATFORM_VALUES`（§13.2.9.9）。
   ⚠️ **必填只约束新增**（`PATCH` 的 `access_token` 语义仍是「留空 = 保持不变」，见下）。
 - ⚠️ **v1.9 `provider_key` 由系统生成**（D1），**请求体不收该字段**（`extra="forbid"` ⇒ 传了 422）。
   生成算法：`{slug(name)}-{4位随机}`（字母表去 `0/O/1/I/L`），生成后查重 ×8 重试，
@@ -1247,14 +1284,15 @@ final_prompt =
 > 不再依赖 `llm_gateway_snapshots` 也不打任何上游管理 API（v1.7 去外挂后更彻底）。
 
 **`GET /api/llm/usage/overview`**（总览：今日/近 7 日/近 30 日，按维度切片）
-- 参数：`gateway_id?` / `platform?` / `function?`；返回 `{today: {calls, success, fail, fail_rate, total_tokens, avg_latency_ms},
+- 参数：`gateway_id?` / `platform?` / `function?` / `model_name?`；返回 `{today: {calls, success, fail, fail_rate, total_tokens, avg_latency_ms},
   week: {…}, month: {…}, gateway_healthy}`（从台账聚合；无数据日 = 空态，不造假）。
+- ⚠️ `model_name`（2026-10-02 新增）：筛选粒度下探到「服务商下具体模型」（台账 `model_name` 列直接过滤）。
 
 **`GET /api/llm/usage/daily`**（按日序列，供折线图）
-- 参数：`gateway_id?` / `platform?` / `function?` / `start_date` / `end_date`；返回 `[{date, calls, success, fail, total_tokens, avg_latency_ms}]`（仅台账有的日期）。
+- 参数：`gateway_id?` / `platform?` / `function?` / `model_name?` / `start_date` / `end_date`；返回 `[{date, calls, success, fail, total_tokens, avg_latency_ms}]`（仅台账有的日期）。
 
 **`GET /api/llm/usage/breakdown`**（维度拆分：按平台/功能/模型分组）
-- 参数：`gateway_id?` / `start_date` / `end_date` / `dimension`（`platform|function|model|token`）；返回分组聚合，供「平台→功能」两级切片展示。
+- 参数：`gateway_id?` / `model_name?` / `start_date` / `end_date` / `dimension`（`platform|function|model`；⚠️ `token` 已随令牌映射退场从白名单移除，见 §7.1a）；返回分组聚合，供「平台→功能」两级切片展示。
 
 > 端点合计：用量展示 **3**。~~**明细下钻** = 前端「查看详情」跳 New API `/console/log`（iframe/外链）~~
 > —— **v1.7 移除**；明细下钻改为**看板内按维度筛选**（breakdown 已够用，不做逐条明细页）。
@@ -1397,7 +1435,7 @@ final_prompt =
 | ② 趋势折线 | 近 30 日**双轴折线**：调用量（左轴）+ 总 Token（右轴），X 轴日期 | `GET /api/llm/usage/daily` |
 | ③ 维度拆分 | **四维可切换**（平台 / 功能 / 模型 / 令牌）：环形图占比 + 图例带数值 | `GET /api/llm/usage/breakdown?dimension=` |
 | ④ 明细表 | 切换「按天 / 按模型」两张表：日期或模型 + 调用 / 成功 / 失败 / 失败率 / Token / 平均延迟 | daily 或 `breakdown?dimension=model` |
-| ⑤ 筛选器 | 时间区间（RangePicker，默认近 30 日）+ 网关下拉（可空 = 全部网关） | 三端点共用 `start_date`/`end_date`/`gateway_id` |
+| ⑤ 筛选器 | 时间区间（RangePicker，默认近 30 日）+ 网关下拉（可空 = 全部网关）+ **模型下拉（级联，选网关后列出其下具体模型；可空 = 全部模型）** | 三端点共用 `start_date`/`end_date`/`gateway_id`/`model_name` |
 
 **图表库 = recharts**（`frontend/package.json` 的 `dependencies` 里 **v3.6.0 已装**，此前无任何页面使用）。
 理由：① **零新增依赖**（已在依赖表里，只是没接线）；② React 组件式 API（`<LineChart>`/`<PieChart>`）
@@ -1407,7 +1445,7 @@ final_prompt =
 - **失败三分法**：有数据 ⇒ 渲染；无数据 ⇒ **空态（`Empty`，不是错误）**；预期内取不到 ⇒ 一行安静说明；真异常 ⇒ 红块 + 真原因。
 - **消息提醒**统一 `App.useApp().message.*`；**禁**静态 import / inline Alert 消息条（inline 只留结构呈现）。
 - **只读页**：不提供任何写操作（停用令牌 / 改阈值等仍在网关页）。
-- **既有端点，零后端改动**：三端点（overview/daily/breakdown）在 T1b 已落地，本页纯前端消费。
+- **既有端点，微调筛选参数**：三端点（overview/daily/breakdown）在 T1b 已落地；2026-10-02 为把筛选粒度下探到「服务商下具体模型」，三端点统一新增 `model_name` 筛选参数（台账 `model_name` 列直接过滤），前端补「模型」级联下拉。
 
 ---
 
@@ -1560,6 +1598,11 @@ final_prompt =
 ~~`llm_gateway_configs.is_default` / `image_model` 两列~~ **已放弃**（迁移 `e6f7a8b9c0d1` 作废）。
 
 ### 13.2.1a 服务商的**模型类型**（用户 2026-10-01 口径：「同一服务商可能存在不同的模型类型」）
+
+> ⚠️ **被 v2.7 取代（2026-10-02）**：本节把「能力类型」挂在**服务商层**，要求「同一上游要供两种能力
+> ⇒ 建两条服务商」。**新口径改为类型下沉到模型层**（`llm_gateway_models` 子表）——
+> 服务商唯一、模型行各带 `model_type`。**下文的可扩展性论证仍然成立**（「新能力 = 新增枚举值，
+> 零表结构改动」），但它服务的层级从「服务商」变成「模型」。**原句保留如下，见 §13.2.9。**
 
 **一条服务商 = 一种能力**：`llm_gateway_configs` 新增 `model_type String(16)`，取值 `text` / `image`。
 
@@ -1811,6 +1854,474 @@ OpenAICompatibleTextClient._complete()  /  OpenAICompatibleImageClient.generate_
 
 ---
 
+### 13.2.9 **服务商 / 模型数据分层**：类型与平台**下沉到模型级**（2026-10-02 用户口径）· v2.7
+
+> 用户口径（原文）：「模型网关中的服务商页面，**将服务商和服务商模型的数据才分开**，因为服务商信息是
+> 其下的模型**公用的**比如服务商接口 key、调用地址是公共的，**具体模型才需要分文本，多模态，图片，
+> 视频类似等等**，你可以调研一下目前市场上的服务商和其下的模块类型，对应的逻辑进行调整，
+> **使用平台下沉到具体模型**，当前具体平台配置后同步修改这个参数。」
+
+> 澄清结论（同日问答，用户逐项确认）：
+> ① 模型级数据**建子表**落库；
+> ② 服务商表的 `model_type` / `platform` **不保留**，用 SQL **修复存量数据**（搬走再删列）；
+> ③ 「同步修改这个参数」= **在具体平台下配置该服务商的具体模型时，把当前平台的 platform
+>    写进该模型的 `platform`**。
+
+#### 13.2.9.1 被取代的结论（原句保留）
+
+~~§13.2.1a「**一条服务商 = 一种能力**：`llm_gateway_configs` 新增 `model_type String(16)`，
+取值 `text` / `image`。**同一上游要供两种能力 ⇒ 建两条**（同 `base_url`、可同令牌；`name` 与
+`provider_key` 各不相同，如 `discovery-文本` / `discovery-图像`）。页面按类型分组展示，用户看得清。」~~
+
+**被 v2.7 取代。** 该结论的**可扩展性论证本身仍然成立**（「新能力 = 新增枚举值，零表结构改动」），
+但它把**能力**挂错了层级 —— 详见 §13.2.9.3 的对照表。新口径：**服务商唯一，模型行各带能力类型**。
+
+~~§13.2.1 三层职责表「服务商层 | … 地址 / 令牌 / **模型类型** / 默认模型 …」~~
+**被 v2.7 取代**：服务商层不再含「模型类型」，该维度移入**模型层**（新增第四层）。
+
+#### 13.2.9.2 为什么改：现状的两个具体症状（实测存量数据）
+
+存量 `llm_gateway_configs` 共 **7 行**（2026-10-02 实测），其中 user 7 的两行是**教科书案例**：
+
+| id | provider_key | name | base_url | model_type |
+|---|---|---|---|---|
+| 3 | `TEST-TEXT` | test-text | `https://api.example.test/v1` | `text` |
+| 4 | `TEST-IMAG` | test-image | **同一个 `https://api.example.test/v1`** | `image` |
+
+同一上游、同一 base_url、同一令牌，**为了表达两种能力被拆成两条服务商**。症状：
+
+1. **凭据重复**：`base_url` 与 `access_token`（本质是同一个 key）填两遍，改一处漏一处 ⇒ 两张行静默不一致。
+2. **服务商列表失真**：「服务商」这个概念在页面上退化成「能力条目」，用户看到的是 7 条「服务商」，
+   其中真正不同的上游只有 5 个（`127.0.0.1:3000`、`discovery-api…`、`api.example.test`、`127.0.0.1:9`）。
+3. **`/models` 目录重复拉取**：同一上游拉两遍模型目录（`models_json` 各存一份）。
+
+#### 13.2.9.3 市场调研结论（用户要求「调研一下目前市场上的服务商和其下的模块类型」）
+
+**行业共识：能力类型是「模型」的属性，不是「服务商/渠道」的属性。**
+
+| 来源 | 组织方式 | 能力类型维度 |
+|---|---|---|
+| **OpenAI 原生** | provider 一份 key + base_url；能力由**端点**区分 | chat/completions、responses、embeddings、images（生成+编辑）、audio（speech/transcription/realtime）、video（Sora） |
+| **OpenRouter** | 一个 provider key 覆盖全部；模型目录**每条模型**带 `output_modalities` | `text` / `image` / `video` / `audio` / `speech` / `transcription` / `embeddings` / `rerank` |
+| **New API**（本项目 v1.3 曾选型） | 渠道（channel）持 key + 地址；**渠道下挂多个模型** | Chat、Embeddings、Rerank、Realtime、Image、Audio、Music、Video |
+| **API7 / 各兼容层** | provider → models 两级 | 各服务商能力集差异大（OpenAI 最全；Anthropic 仅 chat；Cohere 支持 rerank） |
+
+OpenRouter 目录实测计数（2026-09-12）：Text 445 / Image 52 / Video 29 / Transcription+speech 39 /
+Embeddings+rerank 44 / Audio 4 —— **同一个 key 下面挂着多种输出模态的模型**，这是主流形态。
+
+⇒ 用户口径与市场一致：**服务商 = 公共凭据（key + 地址）持有者；能力类型 = 模型属性。**
+
+#### 13.2.9.4 新表 `llm_gateway_models`（模型层，v2.7 新增）
+
+| 列 | 类型 | 说明 |
+|---|---|---|
+| `id` | Integer PK | |
+| `user_id` | FK `users.id`，索引 | 归属（多用户隔离，同全项目纪律） |
+| `provider_key` | String(64) | **指向 `llm_gateway_configs.provider_key`**（裸列，**不做 DB 外键** —— 同 `llm_business_providers` 的迁移风格，应用层校验归属） |
+| `model_name` | String(128) | 模型名（上游 `/models` 里的名字，如 `deepseek-v4-flash-0731`） |
+| `model_type` | String(16) | **能力类型**（本项目当前 `text` / `image`；枚举源 `services/business_provider_keys.py` 的 `MODEL_TYPES`，可扩展 video 等） |
+| `platform` | String(32) | **使用平台**（下沉自服务商层；枚举源同 `PLATFORM_ENUM`） |
+| `enabled` | Boolean | 该模型是否启用（不启用 = 业务点不能指向它） |
+| `remark` | String(255) | 备注（可选，用户自填） |
+| `created_at` / `updated_at` | DateTime | `shanghai_now()` |
+
+**唯一约束 `(user_id, provider_key, model_name)`** —— 同一服务商下同一模型名只能一行。
+
+⚠️ **模型目录（`models_json`）与模型行（本表）的关系**：
+
+| | 来源 | 内容 | 用途 |
+|---|---|---|---|
+| `llm_gateway_configs.models_json` | **上游回报**（`GET {base_url}/models`） | 字符串数组，全部**候选**模型名 | 前端下拉候选池 |
+| `llm_gateway_models`（本表） | **用户声明** | 用户**显式配置**过的模型行 | 类型/平台判据、业务点匹配、预警模型维度 |
+
+⇒ 目录里**未被配置**的模型**不建行**（用户没表态 ⇒ 不给它猜类型，同 §13.2.1a 的
+「不造假 / 不猜 image」纪律）。**用户配一个、建一行**（方案 C 语义：目录留 JSON，被配的才有行）。
+
+⚠️ **`model_type` / `platform` 仍是「用户声明，不是上游回报」**（原 §13.2.1a 的这条纪律**继续有效**）：
+上游 `/models` 不返回能力类型（OpenRouter 例外，但非本项目接入口径）⇒ 类型必须由用户标。
+
+#### 13.2.9.5 服务商层与模型层的字段归属（新四层）
+
+| 层 | 职责 | 落地 | 变化 |
+|---|---|---|---|
+| **服务商层** | 公共凭据与连通性：地址 / 令牌 / 名称 / 健康 / **模型目录** / 启停 | `llm_gateway_configs` | ⚠️ **去掉 `model_type` / `platform` 两列**（v2.7） |
+| **模型层**（新） | 单个模型的**能力类型 + 使用平台** + 启停 | **新表 `llm_gateway_models`** | 🆕 v2.7 |
+| **映射层** | 「平台 × 业务点」→ 服务商 **+ 具体模型** | `llm_business_providers` | 不变（v2.3 已就位） |
+| **调用层** | 固定 key 查映射 → 取凭据 → 按模型调用 | `resolve_business_provider(...)` | ⚠️ **类型匹配改查模型层**（§13.2.9.6） |
+
+**~~`default_model` 保留在服务商层~~** —— ⚠️ **被 §13.2.10（v2.8）取代**：该列**已整列删除**。
+~~它是「该服务商没指定模型时的兜底名」，属服务商配置。~~
+（原句保留。删除理由见 §13.2.10.2：v2.3 起已无任何回落调用点 ⇒ 是死列。）
+⚠️ §13.2.3 v2.3 纪律**不变且被本次强化**：业务点映射**必须显式选模型**，**无任何兜底可回落**。
+
+#### 13.2.9.6 类型匹配校验的落点迁移
+
+原 §13.2.1a 的校验：`business_key.kind` **必须等于**服务商 `model_type`。
+
+**v2.7 改为**：`business_key.kind` **必须等于映射所选模型的 `model_type`**
+（查 `llm_gateway_models` 的 `(provider_key, model_name)` 行）⇒ 不等则
+**400 `LLM_BUSINESS_PROVIDER_TYPE_MISMATCH`**，错误消息带上模型名（「模型 X 的能力是 text，
+而业务点『生成封面』要求 image」）。
+
+**前置条件**：所选模型**必须已配置成行**（否则 400 `LLM_BUSINESS_MODEL_NOT_CONFIGURED`
+——「请先到服务商配置页为该模型标注能力类型」）。这是新增的一道校验：v2.3 只要求模型名落在
+`models_json` 目录里，v2.7 还要求它在**模型层有类型声明**（否则无法判类型）。
+
+**两处实现必须同步改**（同 `_validate_model_type` 纪律，禁留两份实现）：
+
+| 位置 | 现状 | v2.7 |
+|---|---|---|
+| `services/llm_gateway_client.py:298-307` | 读 `config.model_type` 比对 `spec.kind` | 查模型行 `model_type` 比对 |
+| `api/llm_gateway.py:843/:881/:888` | 用 `config.model_type` 校验映射 PUT | 查模型行 `model_type` 校验 |
+| `api/llm_gateway.py:799/:821` | `type_of = {provider_key: config.model_type}` | 回填**模型级**类型 |
+| `frontend/src/pages/models/model-config-page.tsx:105` | `providers.filter(p => p.model_type === kind)` | 候选**服务商**不再按类型过滤（服务商无类型）；改为**选完服务商后，模型下拉只列该服务商下 `model_type === kind` 的模型** |
+
+⚠️ 最后一条是**交互口径的实质变化**，需要用户过目：
+原来「挑服务商时就按类型筛掉不匹配的」，现在是「服务商不再有类型 ⇒ 都能选；
+选完服务商后，**模型下拉按业务点 kind 过滤**」。这更合理 —— 同一服务商可能既有文本模型又有图像模型，
+按类型筛服务商反而会把它整条筛掉（现状 `TEST-IMAG` / `TEST-TEXT` 就是被迫拆条的根源）。
+
+#### 13.2.9.7 「平台下沉 + 配置时同步」（用户第 ③ 条口径的精确定义）
+
+> 用户原话：「**再具体平台配置该服务商下的具体模型时，将当前平台的设置为当前服务商下的模型的使用平台**」
+
+落到实现：
+
+- **模型层 `platform` 的写入时机** = 用户在**某个平台上下文**里配置该模型时，
+  取**当前平台**写入该模型行。
+- 本项目的平台上下文 = 模型配置页的 `XHS_PLATFORM`（§13.2.8 已固定为 `xhs`）
+  ／服务商配置页的「使用平台」下拉 ⇒ **配置动作发生在哪个平台，模型就归属哪个平台**。
+- **不做隐式跨平台联动**：不因「父服务商 `platform` 变了」去批量改模型的 `platform`
+  —— 服务商层的 `platform` 列**已删**（§13.2.9.5），不存在「父值」可联动。
+  这是**有意的**：平台是模型的属性，模型各自表态，不继承。
+- ⚠️ **`LlmBusinessProvider.platform` 不变**（映射层唯一键仍是 `(user_id, platform, business_key)`）：
+  映射的 `platform` = **业务上下文**（业务代码传 `"xhs"`），模型行的 `platform` = **该模型的适用范围**。
+  调用时两者**不做相等校验**（映射指向模型即可；模型 platform 是展示与筛选维度）——
+  若未来接入第二平台，再决定是否加该校验。⚠️ **本轮不加**，避免把「多平台表达力」做成「多平台硬校验」。
+
+#### 13.2.9.8 迁移结论（`down_revision = b2c3d4e5f6a7`，脚本核验，非凭记忆）
+
+1. **建表** `llm_gateway_models`（+ 唯一约束 `(user_id, provider_key, model_name)` + `user_id` 索引）。
+2. **存量回填**（用 SQL 从既有数据反推，**每一条都有来源，不猜**）：
+
+   | 来源 | 回填规则 |
+   |---|---|
+   | `llm_business_providers` 的 13 行映射 | 每行的 `(provider_key, model_name)` ⇒ 一条模型行；`model_type` = 该映射指向的 `business_key` 的 kind（**可靠**：业务点的 kind 是代码常量，`generate_cover` 必是 image）；`platform` = 映射行的 `platform` |
+   | `llm_gateway_configs.default_model` | 若该 `(provider_key, default_model)` 尚未由上面产生，补一条；`model_type` = **该服务商的 `model_type`**（旧列值）；`platform` = 该服务商的 `platform` |
+   | 其余 | **不补**（目录里未被任何映射/默认引用的模型，用户没表态 ⇒ 不建行，同 §13.2.9.4） |
+
+   ⚠️ 冲突处理：同一 `(provider_key, model_name)` 若被**不同 kind** 的映射引用（理论上不该发生，
+   因旧校验已保证 kind = 服务商 model_type），以**服务商旧 `model_type`** 为准并**留迁移告警日志**
+   （不静默丢；本项目历史上这类「不一致存量」正是靠日志发现的）。
+3. **删列**：`llm_gateway_configs.model_type`、`llm_gateway_configs.platform`
+   （SQLite：`batch_alter_table` 重建表，项目已有先例）。
+4. **降级（downgrade）**：建回两列 + 从模型层**取每个服务商的第一条模型行**回填
+   （取不到则 `text` / `xhs`，`text` 是 §13.2.1a 定的安全默认）。
+
+⚠️ **迁移是破坏性的**（删列），上生产前**必须**用库副本三向实测（升级 → 校验 → 降级 → 再升级），
+同项目迁移纪律（`REF §F`）。
+
+#### 13.2.9.9 端点增减量（供 T7 逐域回数）
+
+| 端点 | 变化 |
+|---|---|
+| `POST/PATCH /api/llm/gateway-configs` | 入参**去** `model_type` / `platform`；**加** `models: [{model_name, model_type, platform, enabled, remark}]`（创建时一并落模型行；PATCH 时**只增改不删**，删除走模型端点） |
+| `GET /api/llm/gateway-configs` | 出参 `models` 由「字符串数组」升级为**结构数组**（含 type/platform/enabled）；`model_type` / `platform` **移除** |
+| 🆕 `GET/POST /api/llm/gateway-configs/{id}/models` | 列 / 增该服务商下的模型行 |
+| 🆕 `PATCH/DELETE /api/llm/gateway-configs/{id}/models/{model_id}` | 改（类型/平台/启停）/ 删模型行 |
+| `GET /api/llm/business-providers/keys` | `provider_model_type` 语义变化；新增**模型级候选**下发 |
+| `POST /api/llm/gateway-configs/models-preview` | 不变（拉上游目录）；⚠️ 可对齐标注「哪些已在模型层配置过」 |
+
+⇒ **净增 4 端点**（2 组 models 子资源）；`llm_gateway_configs` 净增 1 张表。
+
+#### 13.2.9.10 本轮不做
+
+- **不加 video / audio / embeddings 等类型值**：`MODEL_TYPES` 的**可扩展性**已验证（新能力 = 新增枚举值），
+  但本轮**只迁移既有 `text` / `image`**，不趁机扩类型（避免范围蔓延；用户提到的「视频」在 §13.4.4 另有安排）。
+- **不做模型行的批量导入**：目录 179 个模型（`discovery` 实测）逐个手配不现实，但**批量一键按名猜类型**
+  会违反「不猜」纪律 ⇒ 本轮**手动配**；将来若痛点明确，再设计「批量标注」交互（用户显式确认每类）。
+
+---
+
+### 13.2.10 服务商 `default_model` 列删除 · v2.8（2026-10-02 用户口径）
+
+#### 13.2.10.1 用户口径（原句保留）
+
+> 「**不指定默认模型，该字段移除**」
+
+三个次生决策（`AskUserQuestion` 逐项确认）：
+
+| 议题 | 用户选择 | 落地 |
+|---|---|---|
+| 测试连通性端点用哪个模型 | **改用模型行的第一个模型** | `POST /{id}/test` 取该服务商**首条启用模型行**，无则退回极小 chat 探测 |
+| 存量 `default_model` 数据 | **删列 + 用迁移补齐模型行（推荐）** | 迁移 `f6a7b8c9d0e1`：先按 `(provider_key, default_model)` 补模型行，**再**删列 |
+| 前端表单/列 | **直接移除输入框与列** | 弹窗改「模型行列表」编辑器；表格删「默认模型」列 |
+
+#### 13.2.10.2 为什么删：它自 v2.3 起就是死列
+
+| 判据 | 结论 |
+|---|---|
+| 调用链是否读它 | **不读** —— `resolve_business_provider`（v2.3 起）**只认映射层的 `model_name`**，明确**不回落** `default_model` |
+| 写它是否有用 | **无用** —— 写了没有任何读点；改了不改变任何调用行为 |
+| 唯一残留用途 | v1.9 的「测试连通性」顺手用它做探测模型名 —— 属**探测参数**，不是业务语义 |
+
+⇒ 结论：一个**无读点的可写列** = 死字段。保留它只会误导（使用者以为配了它就有默认行为），
+与 §13.2.9 的「信息下沉到模型层」方向也矛盾（模型能力现已全在 `llm_gateway_models`）。
+
+#### 13.2.10.3 端点与出参变更
+
+| 端点 | 变化 |
+|---|---|
+| `POST/PATCH /api/llm/gateway-configs` | 入参**去** `default_model`（`extra="forbid"` ⇒ 传了 422） |
+| `GET /api/llm/gateway-configs` | 出参**去** `default_model`；`catalog`（原 `models` 字符串数组）= 上游候选池 |
+| `POST /api/llm/gateway-configs/{id}/test` | 探测模型改取**首条启用模型行**；该服务商无模型行 ⇒ 退回极小 chat 探测（不报 500） |
+
+⚠️ **`models` / `catalog` 分工**（§13.2.9.4 已定，本次未改）：`models` = 已配置模型行（结构数组），
+`catalog` = 上游候选池（字符串数组）。前端模型下拉读 `models[*].model_name`，**不读 `catalog`**
+（候选池里的名字在 v2.7 起无法调用 ⇒ 400 `LLM_BUSINESS_MODEL_NOT_CONFIGURED`）。
+
+#### 13.2.10.4 迁移（`down_revision = e5f6a7b8c9d0`，脚本核验）
+
+| 步 | 动作 |
+|---|---|
+| ① | 遍历 `llm_gateway_configs`，对 `default_model` 非空者，按 `(user_id, provider_key, default_model)` upsert 一条模型行 |
+| ② | 模型行的 `model_type` / `platform` 取该服务商的旧列值（`model_type` 缺 ⇒ `text`；`platform` 缺 ⇒ `xhs`，§13.2.1a 安全默认） |
+| ③ | 全部补完后 `DROP COLUMN default_model` |
+
+⚠️ **顺序不可颠倒**：必须先补模型行再删列 —— 反了就没法从旧列取类型/平台。
+⚠️ **破坏性迁移**（删列）：上生产前用库副本三向实测（升级 → 校验 → 降级 → 再升级），同 `REF §F`。
+✅ 已落地真实库 `data/spider_xhs.db`，head = `f6a7b8c9d0e1`；备份 `data/spider_xhs.db.bak-20261002-pre-v28-dropdefaultmodel`。
+
+#### 13.2.10.5 本轮不做
+
+- **不给模型行加「是否默认」标志**：用户口径是「**不指定默认模型**」——
+  引入 `is_default` 等于换个名字把同一个概念加回来，与口径相反。
+- **不做多模型批量删除端点**：模型行删除走 `DELETE /{id}/models/{model_id}`（§13.2.9.9），
+  前端「模型行列表」的删除 = 逐条调用，不满批。
+
+---
+
+### 13.2.11 模型全生命周期自动化 · v2.9（2026-10-02 用户口径）
+
+> **一句话**：模型**不再手输**——配置服务商时**自动拉取三方目录**、用 **AI 归纳每个模型的类型**、
+> **父子树展示**；类型/平台**下沉为多值**、AI 只给**初始值**、用户可就地改；前端**父子各自表头**。
+
+#### 13.2.11.1 用户口径（原句保留，逐条）
+
+| # | 原句 | 落地 |
+|---|---|---|
+| ① | 「**服务商模型不允许手动添加，只能拉取三方**」 | 弹窗内 `Form.List name="models"` 手动编辑器**整段移除**；模型行只由**同步**产生 |
+| ② | 「**添加服务商时默认拉取一次**，操作列新增**同步服务商模型**按钮」 | 创建端点内联同步一次（响应带 `sync` 摘要）；操作列新增「同步服务商模型」（`POST /{id}/sync-models`）；两者共用 `_sync_provider_models_core` |
+| ③ | 「模型类型**图文**，改回**图片**」 | `MODEL_TYPE_LABELS` 的 `image` 中文 = **「图片」**（非「图文」） |
+| ④ | 「模型类型列表中**支持修改，下拉框**」 | 子表「模型类型」列 = 就地 `Select`（选项读后端下发），改动即 `PATCH` |
+| ⑤ | 「配置服务商时**直接父子树展示**该服务商下所有模型」 | 列表按服务商展开，展开行 = 该服务商的模型清单 |
+| ⑥ | 「模型类型由 **AI 调用总结**（text/image/multimodal/video）」 | `model_type_classifier.classify_model_types` 批量归纳（**不猜名**，走 AI 语义判断） |
+| ⑦ | 「**多平台共用同一模型**」 | `llm_gateway_models.platform` 由单值 → **多值数组** |
+| ⑧ | 「列表的**地址太短了**」 | 父表「模型调用地址」列加 `ellipsis`、去写死窄宽（自适应） |
+| ⑨ | 「**父子表使用各自的表头**」 | 由「单表 + `children` 共用列」改为「父表 + `expandedRowRender` 独立子表」，**两张表各带表头** |
+
+#### 13.2.11.2 类型枚举扩到四值（`text` / `image` / `multimodal` / `video`）
+
+- 后端 `MODEL_TYPES = ("text", "image", "multimodal", "video")`，中文标签 `MODEL_TYPE_LABELS`
+  （**文本 / 图片 / 多态 / 视频**）；经 `GET /llm/business-provider-keys` 的 `model_types` **下发**。
+- 前端 **零硬编码**：`fetchBusinessProviderKeys()` → `modelTypeOptions`，选项文案随后端变。
+- ⚠️ **枚举未加载 / 值不在枚举内 ⇒ 原样显示枚举键**（缺值口径：**不造名、不猜**）；
+  旧 `text`/`image` 两值数据**原样可读**（新值只是**新增**，不是替换）。
+
+#### 13.2.11.3 `platform` 由单值 → 多值（多平台共用）
+
+- `llm_gateway_models.platform` 语义：**一个模型可被多个平台共用** ⇒ 出参为 `string[]`。
+- 父表「覆盖平台」= 其模型行 `platform` 的 **flatMap 摊平 + 去重**（聚合只读）；
+  子表「使用平台」= 逐值打标签（**列级多值**，这是逐模型看平台的唯一入口）。
+- ⚠️ 与 §13.2.6「模型配置页固定 `xhs`」不冲突：页内仍固定 `xhs`，多值是**数据能力**（一期就把结构放开）。
+
+#### 13.2.11.4 同步链路（`_sync_provider_models_core` 唯一实现 —— 守 DEF-044）
+
+```
+拉上游目录 (discovery) → AI 批量归纳类型 (classify_model_types)
+   → 按 (user_id, provider_key, model_name) upsert 模型行 → 返回 sync 摘要
+```
+
+| 触发点 | 落点 | 说明 |
+|---|---|---|
+| **创建服务商** | `POST /llm/gateway-configs` 内联跑一次 | 响应体带 `sync`（`ok/reason/catalog_count/created/updated/classified/total`） |
+| **列表操作列按钮** | 🆕 `POST /api/llm/gateway-configs/{id}/sync-models` | 恒 **200**，成功与否看 `sync.ok`（网络/令牌问题如实说，不当异常抛） |
+
+- ⚠️ **同步「没成功」不是异常**：接口恒 200 ⇒ 前端据 `sync.ok` **分流**成功/警告提示。
+- ⚠️ **两条路径共用同一个函数**（`_sync_provider_models_core`）—— 禁各写一份（DEF-044）。
+- ⚠️ **编辑服务商不触发同步**：`PATCH` 不传 `models`（避免整表替换**冲掉用户手改的类型**）。
+  ⇒ 「拉目录」只由**服务商本体**的两个明确动作发起，编辑动作不隐式覆盖。
+
+#### 13.2.11.5 前端列表：父子**各自表头**（v2.9 末次口径）
+
+| 表 | 列（表头） |
+|---|---|
+| **父表**（服务商，`providerColumns`） | 服务商名称 / 服务编码 / 覆盖平台(聚合) / 模型类型(聚合只读) / 模型调用地址(`ellipsis`) / 调用量 / 令牌 / 健康 / 启用 / 操作(测试·**同步服务商模型**·编辑) |
+| **子表**（模型，`modelColumns`） | 模型名称 / **模型类型(就地 `Select`)** / 使用平台 / 启用 / 备注 |
+
+- **结构**：父表 `Table` 的 `expandable.expandedRowRender` **渲染另一张子表 `Table`**（`showHeader` = 各自表头）。
+  分叉点**收敛在一处**；`rowExpandable: isExpandableProvider` ⇒ 空目录**不出现**「点了没反应」的箭头。
+- ⚠️ **被取代的形态（原句保留）**：v2.7–v2.8 为「**单张** `Table` + `children` 展开子行，**父子共用一套列**」。
+  该形态下子行必须沿用父表列，**服务商专有列处处显示 `-`**、表头也是服务商语境的 ⇒ 已按用户口径改为**双表**。
+- ⚠️ **父表删掉「启停」列**（下沉到子表）：启停是**模型级**属性，挂在服务商行上会含混「这一格描述谁」。
+- ⚠️ **类型列可编辑只在子表**：父表类型 = 聚合**只读**；就地改类型在子表（`changeModelType` → `PATCH`）。
+  - 无 id 的行（理论上不出现）**只读展示** —— 宁可不给入口，也不给**点了没反应**的入口。
+- ⚠️ **子表无「停用中」视觉陷阱**：`enabled` 用 Tag 明确「启用/停用」二态。
+
+#### 13.2.11.6 端点增减量（供逐域回数）
+
+| 端点 | 变化 |
+|---|---|
+| `POST /api/llm/gateway-configs` | 响应**新增** `sync` 摘要（创建即同步一次） |
+| 🆕 `POST /api/llm/gateway-configs/{id}/sync-models` | 拉目录 + AI 归纳 + upsert，恒 200（成功看 `sync.ok`） |
+| `PATCH /api/llm/gateway-configs/{id}/models/{model_id}` | 复用于**就地改类型**（校验 `model_type ∈ MODEL_TYPES`、`platform` 多值）；**不新开端点**（守 DEF-044） |
+| `GET /api/llm/business-provider-keys` | `model_types` 下发**四值**枚举 + 中文标签 |
+
+⇒ **净增 1 端点**（`sync-models`）；**无表结构改动**（`platform` 多值仅语义与序列化变更）。
+
+#### 13.2.11.7 本轮不做
+
+- **不做「模型行批量删除 / 批量标注」**：删除仍逐条走 `DELETE /{id}/models/{model_id}`；
+  批量猜类型违反「不猜」纪律（同 §13.2.9.10）。
+- **不在前端做类型推断**：AI 归纳**只在后端**（`classify_model_types`），前端只消费结果 + 允许手改。
+
+---
+
+### 13.2.12 模型级健康 + 自然序号 ID + 在用不可停用 · v2.10（2026-10-02 用户口径）
+
+> **一句话**：**健康与启用下沉到模型维度**（服务商行不再持有），模型用**服务商内自然序号**做 ID，
+> **被业务点引用的模型不许停用**；未探测的模型行给一个「**检查**」按钮，点了就探测并回写整组。
+
+#### 13.2.12.1 用户口径（原句保留，逐条）
+
+| # | 原句 | 落地 |
+|---|---|---|
+| ① | 「**健康状态和启用状态开关放具体模型维度**」 | 父表**删**「健康」「启用」两列；子表**加**「健康」列 + 「启用」`Switch` |
+| ② | 「**具体的模型也生成一个唯一ID，使用自然序号**」 | `llm_gateway_models.model_key`：**服务商内** `1/2/3…`（唯一键 `(config_id, model_key)`） |
+| ③ | 「**子表健康列未检查的展示检测检查按钮，触发可健康检查**」 | 未探测（`last_health_at is None`）时渲染「检查」`Button`（非死标签），点击触发探测 |
+| ④ | 「**被使用中的模型不支持停用**」 | `PATCH` 停用在用模型 ⇒ **400** `LLM_MODEL_IN_USE_BY_BUSINESS` |
+
+#### 13.2.12.2 数据层（迁移 `b8c9d0e1f2a3`，revises `a7b8c9d0e1f2`）
+
+`llm_gateway_models` 新增三列（**零新表、零新端点**）：
+
+| 列 | 类型 | 语义 |
+|---|---|---|
+| `healthy` | `BOOLEAN NOT NULL DEFAULT 0` | 最近一次探测是否健康（**默认 False** —— 「从未探测」与「探测失败」都落在 False，靠 `last_health_at` 区分） |
+| `last_health_at` | `DATETIME NULL` | 最近一次探测时间；**`NULL` = 从未探测**（前端据此显示「检查」按钮） |
+| `model_key` | `INTEGER` | **服务商内自然序号**（1/2/3…），回填为「按 `id` 升序在 `config_id` 内计数」；唯一键 `(config_id, model_key)` |
+
+- ⚠️ **`healthy` 默认 False + `last_health_at` 判据**：网关预警的 `health` 指标判据同步为
+  `last_health_at is not None AND not healthy`（**不判「从未探测」就会误报每个新建服务商**）。
+- ⚠️ **回填必须服务商内唯一无重号**：迁移后逐服务商核验（本机 24 行全部回填、无空 `model_key`）。
+- ⚠️ **`model_key` 是展示/引用用的自然序号**，**不是主键**：主键仍是自增 `id`；
+  `model_key` 在**同一服务商内**稳定（删除中间模型后**不重排**，避免引用错位）。
+
+#### 13.2.12.3 「检查」按钮与探测粒度（服务商级探测写回整组）
+
+- **探测粒度 = 服务商**：连通性由**凭据 + 调用地址**决定（与具体模型无关）⇒
+  `POST /api/llm/gateway-configs/{id}/test` **一次探测成功后，把该服务商下所有模型行**一并写
+  `healthy=True / last_health_at=now`（整组状态一致，不逐模型空转）。
+- **子表「健康」列**：`last_health_at is None` ⇒ 渲染「检查」`Button`（`type="link"`，`loading` 绑当前行）；
+  已探测 ⇒ 显示「正常 / 异常」`Tag`（按 `healthy`）。
+- ⚠️ **不给死标签**：「未探测」若只显文案，用户没有任何下手的地方 ⇒ 必须给**可点入口**（同类：
+  §13.2.11.5「宁可不给入口，也不给点了没反应的入口」）。
+- ⚠️ **探测失败也写 `last_health_at`**（只是 `healthy=False`）：否则永远停在「未探测」⇒
+  用户会以为「没点成功」而反复点（与「不造假」不冲突：时间是真的、结果是真实的失败）。
+
+#### 13.2.12.4 在用的模型不可停用（400 `LLM_MODEL_IN_USE_BY_BUSINESS`）
+
+- **判据**：`llm_business_providers` 中存在 `(user_id, provider_key, model_name)` 三字段都命中的行
+  ⇒ 该模型正被业务点引用 ⇒ **禁止停用**。
+- **只拦「停用」**（`payload.enabled is False and row.enabled`）；**启用不拦** ——
+  启用是在**修复**「业务点指向已停用模型」的死配置，拦它只会把用户锁死。
+- **响应**（结构化 400，前端据此给 Tooltip）：
+
+```json
+{ "code": "LLM_MODEL_IN_USE_BY_BUSINESS",
+  "message": "模型「xxx」正在被 2 个业务点使用（生成笔记、改写笔记），请先在模型配置页改到别的模型再停用",
+  "usages": [{ "business_key": "...", "label": "...", "kind": "...", "platform": "..." }] }
+```
+
+- ⚠️ **守卫在服务端、不在前端**：前端 Switch 置灰只是**提前告知**（`usages.length > 0` ⇒ `disabled` +
+  Tooltip），真正拦截必须是后端 400（前端可被绕过）。
+- ⚠️ **`usages` 随列表下发**：`_load_models()` 一次查完该用户全部 `LlmBusinessProvider`，按
+  `(provider_key, model_name)` 建字典 ⇒ 每个模型行附 `usages`（缺则 `[]`）；
+  **不在前端各页面重复统计**（DEF-044）。
+
+#### 13.2.12.5 端点 / 表 / 请求函数增减量（供逐域回数）
+
+| 项 | 变化 |
+|---|---|
+| 端点 / path | **±0**（复用 `GET /models-tree` 与 `PATCH /{id}/models/{model_id}`，无新端点） |
+| 表 | **±0**（`llm_gateway_models` 加三列，迁移 `b8c9d0e1f2a3`） |
+| 前端请求函数 | **±0**（子表「检查」复用 `testGatewayConfig`，不新增函数） |
+
+⚠️ 文档声明的 `230 / 191 / 165` 由 **v2.9** 落地（v2.10 无增减）；此前声明停在 `229 / 190 / 164`
+（v2.9 漏回写）⇒ 本轮一并订正。
+
+### 13.2.13 服务商 / 模型列改二级联动 + 修掉取数端点 · v2.11（2026-10-02 用户口径）
+
+#### 13.2.13.1 用户口径（原句保留）
+
+> 「模型配置列表的当前服务商 / 模型列，服务商和服务商模型**应使用二级联动组件**展示，
+> 且**支持修改**，目前**全部无法修改**服务商和模型」
+
+拆成三条要求：① 该列要**一个**服务商→模型的**二级联动**控件（不是两个独立的 `Select`）；
+② 该控件**可改**；③ 修掉「**全部无法修改**」这个现象。
+
+#### 13.2.13.2 根因：取数端点用错（`models` 恒空的地雷）
+
+⚠️ **同一个 `_serialize_config()`，两个端点语义不同**：
+
+| 端点 | 序列化调用 | `models` 实得 |
+|---|---|---|
+| `GET /llm/gateway-configs` | `_serialize_config(config)`（**不带** `models` 实参） | **恒为 `[]`**（默认 `None ⇒ []`） |
+| `GET /llm/gateway-configs/models-tree` | `_serialize_config(c, models_of.get(c.provider_key, []))` | **真带该服务商的模型行** |
+
+页面原来调前者 ⇒ 前端 `candidatesFor()` 里「按 `p.models.length > 0` 过滤候选」把**每一个服务商都丢掉**
+⇒ 候选集恒空 ⇒ 两个 `Select` 的 `disabled` **恒真** ⇒ 服务商和模型**都改不了** —— 与用户口径逐字吻合。
+
+**结论**：改用 `fetchGatewayModelsTree()`（`GET /llm/gateway-configs/models-tree`）。
+⚠️ 该地雷已在 `usage-dashboard-panel.tsx` 注释里记录过，本页是**最后一处**仍在用错端点的页面
+（与「同一语义不留两份实现」同型：两个端点看着像孪生，实际一个不填 `models`）。
+
+#### 13.2.13.3 二级联动：单个 antd `Cascader`
+
+- **一级 = 服务商**（`buildProviderOptions`；该类型下无可用模型的置灰并**标注原因**，**仍可见不隐藏** ——
+  隐藏会让用户以为「服务商没了」，与「缺值不造假」不符）。
+- **二级 = 该服务商在该业务点下的可用模型**（`buildModelOptions`，等价于后端 `_type_satisfies` 的判据）。
+- **`changeOnSelect`**：允许只选到一级。此刻**只落本地暂存**（`pendingProvider`），**绝不落库** ——
+  后端要求「服务商 + 模型都非空」才收，中间态 PUT 必 400 ⇒ 落库不进去 ⇒ 二级永远打不开 ⇒
+  死循环（v2.5 根因）。守卫仍是 `commitDecision(providerKey, modelName)`：两者齐 ⇒ `commit`；
+  只服务商 ⇒ `hold`；都空 ⇒ `commit`（清空）。
+- **`allowClear`**：清空 ⇒ 一次 PUT 把该行 `provider_key` / `model_name` 置空（合法路径）。
+- **`showSearch`**：一级 / 二级 label 均可模糊匹配；`displayRender` 用 ` — ` 连接两级。
+- ⚠️ **「库里存的模型已不可用」（被停用 / 改类型 / 删了）⇒ 不静默清空**：`isModelMissing()` 如实提示，
+  当前值**退回只显一级**（不给假二级值）。用户没动它却悄悄抹掉，是最难查的那种（同「缺值不造假」）。
+
+#### 13.2.13.4 类型匹配：前端镜像后端 `_type_satisfies`
+
+前端原用裸 `(m.model_type || "text") === kind`（**严格相等**），会把 `multimodal` 模型从 text/image
+业务点**静默滤掉**，而后端是**收**的（`multimodal` 可服务 `text` 与 `image`）。
+⇒ 新增 `typeSatisfies(kind, modelType)`，**逐字镜像**后端
+`services/llm_gateway_client._type_satisfies`：`text` 认 `{text, multimodal}`、`image` 认 `{image, multimodal}`、
+`video` 只认 `{video}`（**方向性严格**：text 模型不能服务 image）。
+规则全部**下沉到 `provider-options.ts` 纯函数**（`typeSatisfies` / `usableModels` / `buildModelOptions` /
+`isModelMissing` / `hasNoCatalog` / `isAllCatalogEmpty` / `buildProviderOptions`），页面只做渲染与提交。
+
+#### 13.2.13.5 端点 / 表 / 请求函数增减量（供逐域回数）
+
+| 项 | 变化 |
+|---|---|
+| 端点 / path | **±0**（改用既有 `GET /models-tree`，无新端点） |
+| 表 | **±0**（无迁移） |
+| 前端请求函数 | **±0**（改用既有 `fetchGatewayModelsTree`，不新增函数） |
+
+⚠️ 文档声明的 `230 / 191 / 165`（v2.9 落地）**本轮不变**。
+
+---
+
 ## 13.3 v2.1 业务点「触发源」+ 商品详情图链路（2026-10-01 用户口径）· **决策定稿**
 
 ### 13.3.1 用户口径与两轮纠正（原句保留）
@@ -1899,6 +2410,117 @@ OpenAICompatibleTextClient._complete()  /  OpenAICompatibleImageClient.generate_
 | 迁移 | **0** |
 | 前端请求函数 | **+1**（`generateProductDetailImage`）⇒ 161 → **162** |
 | 业务点 | 8 → **9**（`generate_product_detail_image`，kind `image`） |
+
+---
+
+## 13.4 T7 媒体生成（图片先行）· 字段级定稿（2026-10-02）
+
+> **本轮范围**：LLM 生成链路的**图片**媒体落地（`ai_generate` / `material` /
+> `reference_image` 三种来源）+ `aigc_media_assets` 溯源落库 + LLM 生成前端入口
+> （生成配置弹窗 + 媒体来源四选一）。
+> ⚠️ **视频生成（图生视频）明确排到下一轮**：视频是**异步任务链路**（提交 → 轮询 →
+> 下载，分钟级），与图片的同步调用（`/images/generations` 一次返回）差异大，且需新增
+> `model_type=video` + `/videos/generations` 客户端 + 异步轮询，独立成需求（§13.4.4 预留）。
+
+### 13.4.1 `media_options` 精确结构（补全 §7.4 原「文生图·图生视频·图文拼图等」）
+
+`media_options` 是 `media_source` 的**参数载体**，随 `media_source` 取值不同而语义不同。
+JSON 结构（请求模型里是 `Optional[dict]`，**不落库**，只进队列项 `payload`）：
+
+| `media_source` | `media_options` 字段 | 说明 |
+|---|---|---|
+| `product_image` | 无需（`{}`） | 复用商品原图直链，已有实现 |
+| `material` | `material_file_ids: int[]` | 素材库 `material_files.id` 列表（勾选 N 张） |
+| `reference_image` | `reference_image_urls: str[]`（可选） | 参考图 URL；**为空则后端按台账首图自动取**（同 §13.3.3 详情图口径：不让前端传 URL 是 SSRF 面） |
+| `ai_generate` | `prompt?: str` / `reference_image_urls?: str[]` / `count?: int` | 文生图提示词（可选，空则后端按商品拼默认）；带 `reference_image_urls` 则走图生图；`count` 生成张数（默认 1，上限 4） |
+
+- **错误口径**：`media_options` 与 `media_source` 不匹配（如 `material` 但无 `material_file_ids`）
+  ⇒ 400 `LLM_MEDIA_OPTIONS_INVALID`（同步段门禁拦截，不入队）。
+- **缺值口径**：`material_file_ids` 指向不存在 / 非本人的文件 ⇒ 400 `MATERIAL_FILE_NOT_FOUND`
+  （DEF-066 归属校验）；`reference_image` 但商品无图 ⇒ 400 `PRODUCT_IMAGE_MISSING`（如实报缺，不造图）。
+
+### 13.4.2 三种图片来源的精确行为（worker 内 `_media_assets_for` 扩写）
+
+| 来源 | 行为 | 落 `note_assets` | 落 `aigc_media_assets` |
+|---|---|---|---|
+| `product_image` | 商品图直链（现有，不动） | url=商品图 URL | ❌（非 AI 生成） |
+| `material` | 按 `material_file_ids` 取 `material_files` 行 → 本地文件 URL | url=本地下载 URL（`/api/xhs/materials/files/{id}/file`） | ❌（用户素材，非 AI 生成） |
+| `reference_image` | 取参考图（`reference_image_urls` 或台账首图）→ `OpenAICompatibleImageClient.generate_image(reference_images=[…])` → 下载落 `storage/media/` → `note_assets` 用本地 URL | url=本地 URL | ✅（`prompt` / `model_name` / `aigc_task_id` 留空） |
+| `ai_generate` | 文生图（`prompt`）或图生图（带 `reference_image_urls`）→ 同上 | url=本地 URL | ✅ |
+
+- **媒体生成的模型上下文**：走 `generate_image` 业务点（`BUSINESS_KEY_GENERATE_IMAGE`，kind=`image`），
+  **不是** `generate_note`（文本业务点）。worker 里媒体生成与文案生成**分开取模型上下文**：
+  文案走 `generate_note`（text），媒体走 `generate_image`（image）—— 两者可能指向不同服务商。
+- **媒体生成失败 ≠ 笔记生成失败**（本轮决策）：媒体是「配图/封面」，正文才是产物。
+  `ai_generate` / `reference_image` 出图失败 ⇒ 记 `aigc_media_assets` 为空、`note_assets` 无媒体，
+  **笔记照常落库**（正文 + 话题仍在），worker 日志告警 —— 与 `_media_assets_for` 现有
+  「照实返回空列表、不阻塞笔记落库」纪律一致（一个坏媒体不该废掉整篇正文）。
+- **落盘只写 `storage/media/`**（§10 安全设计，不写用户素材文件夹）；下载用 `requests`，
+  校验 `Content-Type` 是图片（`image/*`），失败丢弃不落半条。
+
+### 13.4.3 `aigc_media_assets` 溯源落库（接线现有表）
+
+表已存在（T5 建，`models/generation.py::AigcMediaAsset`，迁移 `c4d5e6f7a8b9`），
+本轮**不建表、不迁移**，只把落库接进媒体生成路径：
+
+- `generation_record_id` → 关联 `generation_records.id`（本队列已有审计行）；
+- `asset_type` = `image`；`local_path` = 落盘路径；`url` = 供应商回传 URL（若有）；
+- `prompt` = 本次图片 Prompt（**溯源必留**）；`model_name` = 图像模型名；
+- `aigc_task_id` **本轮留空串**（图片生成上游不回平台溯源号；发布时再按需回填）。
+- ⚠️ **落库时机**：与笔记落库**同一事务**（§8.2「一条笔记的落库是一个事务」），
+  媒体生成成功后 `db.add(AigcMediaAsset)` + `db.flush()`，随 `_persist_generated_note` 一起 commit。
+
+### 13.4.4 视频生成（下一轮预留，本轮不做）
+
+- 需新增 `model_type=video`（`business_provider_keys.MODEL_TYPES` + `_validate_model_type` +
+  服务商页下拉）+ 视频业务点（`generate_video`，kind=`video`）+ 视频客户端
+  （`POST {base_url}/videos/generations` → 轮询 `GET {base_url}/videos/generations/{id}` → 下载）。
+- 异步轮询嵌进 LLM 生成 worker（复用 `wait_allow` 限流 + 状态机 `queued→running→success/failed`）。
+- `aigc_media_assets.asset_type = video`。
+
+### 13.4.5 前端：LLM 生成入口 + 生成配置弹窗 + 媒体来源四选一
+
+- `lib/api.ts` 新增请求函数：`generateLlmNote` / `batchGenerateLlmNotes` /
+  `fetchLlmGenerateQueue` / `retryLlmGenerate`（对应 §7.4 四端点）。
+- 商品列表页（`shop-items-page.tsx`）新增「LLM 生成」入口（与一期「生成笔记」并存，
+  两队列语义不同，见 `note_gen_llm_worker.py` 模块 docstring）。
+- 生成配置弹窗：选模板（`prompt_templates`）/ 媒体来源四选一（`ai_generate` /
+  `material` / `product_image` / `reference_image`）/ 素材选择（`material` 时勾选
+  `material_files`）/ 参考图（`reference_image` 时可选）。
+- 生成进度卡复用一期骨架（5s 轮询 `generate-llm-queue`，键名 `generated`）。
+
+### 13.4.6 增减量（供回数）
+
+| 域 | 变化 |
+|---|---|
+| 端点 | **0**（复用 §7.4 四端点，`media_options` 只是请求体字段扩展） |
+| 数据表 | **0**（复用 `aigc_media_assets`，不建表） |
+| 迁移 | **0** |
+| 前端请求函数 | **+4**（`generateLlmNote`/`batchGenerateLlmNotes`/`fetchLlmGenerateQueue`/`retryLlmGenerate`）⇒ 162 → **166** |
+| 业务点 | **0**（复用 `generate_image`，kind `image`） |
+
+### 13.4.7 落地记录（2026-10-02，backend 部分）
+
+**结论：T7 后端已落地，前端（§13.4.5 的 4 个请求函数 + 商品页入口 + 四选一 UI）尚未实现，转为 T9 一并做。**
+
+| 面 | 状态 | 落点 |
+|---|---|---|
+| 媒体生成服务 | ✅ 已落地 | `services/media_generation.py`（文生图/图生图 + 三种来源 + 失败不阻断正文） |
+| worker 接线 | ✅ 已落地 | `services/note_gen_llm_worker.py` 调用媒体生成、消费 `aigc_origins` |
+| AIGC 溯源落库 | ✅ 已落地 | `media_generation.py` 内 `AigcMediaAsset(...)`（不建表、不迁移，接线既有表） |
+| API 字段门禁 | ✅ 已落地 | `media_options` 请求体字段校验（模型类型匹配 `_type_satisfies`） |
+| 前端 4 函数 + UI | ⏳ **未实现** | 归 T9（`shop-items-page.tsx` 现仍只有一期「生成笔记」入口，零 `media_source` 引用） |
+
+**增减量实测（照 §13.4.6 回数，均为 0）：** 端点 **0** / 数据表 **0** / 迁移 **0** / 业务点 **0**。
+⚠️ 前端请求函数 **仍未 +4**（T9 才落地，届时 162 → 166）—— 本节落地**不改变**该口径。
+
+#### 13.4.7.1 连带修复：迁移幂等（`default_model` 列守卫）
+
+T7 连带跑全量回归时暴露 **3 条未提交迁移的幂等缺陷**（`e5f6a7b8c9d0` v2.7 / `b2c3d4e5f6a7` v2.3 / `d5e6f7a8b9c0` v1.9）：它们都**无守卫地引用 `llm_gateway_configs.default_model`**，而 `f6a7b8c9d0e1`（v2.8）会 **drop** 该列；「stamp 回早期 revision 再 upgrade」是 alembic 正常用法（迁移用例 ④ 幂等步骤正是如此）⇒ 重跑即 `no such column: default_model`。
+
+修法：三处均加 `_column_exists(conn, _TABLE_CONFIGS, "default_model")` 守卫（与各文件既有的判列/判表纪律同型）。**这是迁移正确性修复，非测试妥协。**
+
+⚠️ 同时补齐夹具：`tests/backend/conftest.py` 的 `LATER_MIGRATION_TABLES` 新增 `users` 最小形状表 —— `a7b8c9d0e1f2`（v2.9）对 `llm_gateway_models` 做 `batch_alter_table` 时 SQLAlchemy 反射整表，要解析建表时（`e5f6a7b8c9d0`）带的 `sa.ForeignKey("users.id")` ⇒ 夹具缺 `users` 即 `NoSuchTableError`。
 
 ---
 

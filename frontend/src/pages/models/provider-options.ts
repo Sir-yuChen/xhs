@@ -12,8 +12,87 @@ export type ProviderCandidate = {
   provider_key: string;
   name: string;
   enabled: boolean;
-  models: string[] | null | undefined;
+  /**
+   * ⚠️ **v2.7/v2.8**：这里是服务商的**已配置模型行**（结构数组），
+   * 不再是上游候选池 —— 候选池搬到了 `catalog: string[]`。
+   * 「无模型目录」判据改看它（服务商下没有可用模型行 = ② 步选不出模型）。
+   *
+   * ⚠️ **v2.9**：`platform` 由单值改为 `string[]`（一个模型可被多个平台共用）。
+   * 本模块只用 `model_name` / `enabled` 判「有无可用模型」，平台不参与判定 ——
+   * 但类型要与后端出参（`LlmGatewayModelRow`）对齐，否则传进来就类型不兼容。
+   */
+  models:
+    | { model_name: string; model_type?: string; platform?: string[] | null; enabled?: boolean }[]
+    | null
+    | undefined;
 };
+
+/** 模型行（本模块用到的最小字段，也是级联候选的叶子）。 */
+export type ModelCandidate = {
+  model_name: string;
+  model_type?: string;
+  enabled?: boolean;
+};
+
+/**
+ * 业务点能力需求 `kind` 是否被模型声明的 `model_type` 满足。
+ *
+ * ⚠️ **必须与后端 `services/llm_gateway_client._type_satisfies` 同判**（§13.2.11.4，v2.9）。
+ * 两处不同判会出现最难查的形态：**前端筛出来的候选一选就被后端 400 拒**（或反之，
+ * 后端放行的模型前端压根不显示）。
+ *
+ * | 业务点 kind | 可被哪些 model_type 满足 |
+ * |---|---|
+ * | `text` | `text` ✅ · `multimodal` ✅ · `image` ❌ · `video` ❌ |
+ * | `image` | `image` ✅ · `multimodal` ✅ · `text` ❌ · `video` ❌ |
+ * | `video` | `video` ✅ |
+ *
+ * ⚠️ **v2.11 修**：本函数此前是内联的 `(m.model_type || "text") === kind` **严格相等**，
+ * 会把 `multimodal` 模型从 text/image 业务点的候选里**静默滤掉** —— 而后端是放行的
+ * （多态模型打 `/chat/completions` 或 `/images/generations` 都可用）⇒ 用户看得见的
+ * 候选比可用的少，且没有任何提示。放宽后与后端一致。
+ *
+ * ⚠️ **`image` 不认 `text`**：文本模型打 `/images/generations` 必失败，方向性不兼容必须拦住。
+ * ⚠️ 空类型 / 未知类型 ⇒ 不满足，**不猜**（DEF-057）。
+ */
+export function typeSatisfies(kind: string, modelType: string | undefined | null): boolean {
+  const t = modelType || "";
+  if (!t) return false;
+  if (t === kind) return true;
+  // 多态模型同时可服务 text 与 image 两类业务点
+  if (t === "multimodal" && (kind === "text" || kind === "image")) return true;
+  return false;
+}
+
+/**
+ * 某业务点 `kind` 下**可用于级联叶子**的模型行。
+ *
+ * 过滤两件事（缺一不可）：
+ * - **能力匹配** ⇒ `typeSatisfies`（与后端同判，放宽 multimodal）
+ * - **可用** ⇒ `enabled !== false` 且 `model_name` 非空（停用/占位行选下去调用必失败）
+ *
+ * 结果**保序**（沿用后端 `_load_models` 的 `id asc` 顺序 = 用户配置顺序）。
+ */
+export function usableModels(
+  models: ProviderCandidate["models"],
+  kind: string,
+): ModelCandidate[] {
+  return (models ?? []).filter(
+    (m): m is ModelCandidate =>
+      !!m?.model_name && m?.enabled !== false && typeSatisfies(kind, m?.model_type),
+  );
+}
+
+/**
+ * 该服务商在某业务点 `kind` 下**是否没有任何可用模型**。
+ *
+ * ⚠️ v2.7/v2.8：判据只看**启用的**模型行 —— 全被停用的服务商与无模型等价
+ * （② 步同样选不出可用模型），必须一起归入「无目录」并置灰，否则又是死胡同。
+ * ⚠️ v2.11：类型判据改走 `typeSatisfies`（不再严格相等），与后端同判。
+ */
+export function hasNoCatalog(provider: ProviderCandidate, kind: string): boolean {
+  return usableModels(provider.models, kind).length === 0;
+}
 
 /**
  * 一条下拉选项（`label` 已带状态后缀，`disabled` 已按规则算好）。
@@ -34,16 +113,6 @@ export type ProviderOption = {
 };
 
 /**
- * 该服务商是否**没有模型目录**。
- *
- * `null` / `undefined` / 空数组一律视为空目录 —— 三者对用户是同一件事
- * （② 步选不出模型），分开处理只会漏掉一种形态。
- */
-export function hasNoCatalog(provider: ProviderCandidate): boolean {
-  return (provider.models ?? []).length === 0;
-}
-
-/**
  * 服务商候选 → 下拉选项。
  *
  * 两种「不可选」各自标注真实原因，**不混为一谈**：
@@ -52,12 +121,16 @@ export function hasNoCatalog(provider: ProviderCandidate): boolean {
  *
  * 二者都 `disabled`：停用无法调用、空目录选完必然卡在 ② 步。**仍在列表可见**
  * （不隐藏）—— 用户看得见「它存在但还差什么」，才知道去补目录（同「缺值不造假」）。
+ *
+ * @param providers 候选服务商
+ * @param kind      该行业务点的能力需求（决定「有无可用模型」的判据，v2.11 新增）
  */
 export function buildProviderOptions(
   providers: ProviderCandidate[],
+  kind: string,
 ): ProviderOption[] {
   return providers.map((p) => {
-    const noCatalog = hasNoCatalog(p);
+    const noCatalog = hasNoCatalog(p, kind);
     return {
       value: p.provider_key,
       label: !p.enabled
@@ -69,6 +142,22 @@ export function buildProviderOptions(
       disabledReason: !p.enabled ? "disabled" : noCatalog ? "no_catalog" : null,
     };
   });
+}
+
+/**
+ * 某服务商在某业务点下**可用于级联叶子的模型选项**（label = 模型名，值 = 模型名）。
+ *
+ * 级联的第二级（叶子）用它；`kind` 决定能力过滤（v2.11 起走 `typeSatisfies`，
+ * 与后端同判，`multimodal` 会出现在 text / image 两类业务点下）。
+ */
+export function buildModelOptions(
+  provider: ProviderCandidate | undefined,
+  kind: string,
+): { value: string; label: string }[] {
+  return usableModels(provider?.models, kind).map((m) => ({
+    value: m.model_name,
+    label: m.model_name,
+  }));
 }
 
 /**
@@ -91,14 +180,37 @@ export function isSelectableForRow(
 }
 
 /**
- * 该类型的全部服务商**都没有模型目录**。
+ * 该类型的全部服务商**都没有可用模型**（v2.11：按 `kind` 判，不再只看有无模型行）。
  *
  * 用于把 ① 步下拉整体置灰并给一行说明：此时不是「某个服务商有问题」，
  * 而是**该类型一个能用的都没有** ⇒ 应引导用户去服务商页拉目录，
  * 而不是让他逐个点开、逐个失望。
  */
-export function isAllCatalogEmpty(providers: ProviderCandidate[]): boolean {
-  return providers.length > 0 && providers.every(hasNoCatalog);
+export function isAllCatalogEmpty(providers: ProviderCandidate[], kind: string): boolean {
+  return providers.length > 0 && providers.every((p) => hasNoCatalog(p, kind));
+}
+
+/**
+ * 某服务商在当前业务点下**是否缺失所选模型**（用于回显校验）。
+ *
+ * 场景：库里存着 `model_name=X`，但 X 已被停用 / 改了类型 / 不在该服务商下 ⇒
+ * 级联的叶子会显示不出来。此时**不能静默清空**该值（用户没动它），
+ * 而应让页面据此给出「该模型已不可用」的安静说明 —— 由本函数判定。
+ *
+ * @param providerKey 生效服务商
+ * @param modelName   该行当前所选模型
+ * @param selected    该行的候选服务商（`kind` 过滤后的那批）
+ */
+export function isModelMissing(
+  providerKey: string,
+  modelName: string,
+  selected: ProviderCandidate[],
+  kind: string,
+): boolean {
+  if (!providerKey || !modelName) return false;
+  const p = selected.find((x) => x.provider_key === providerKey);
+  if (!p) return false;
+  return !usableModels(p.models, kind).some((m) => m.model_name === modelName);
 }
 
 /**

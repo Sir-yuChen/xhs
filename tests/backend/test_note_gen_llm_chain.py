@@ -18,7 +18,7 @@ T4（`note_gen_llm_service`，359 行）+ T6（`note_gen_llm_worker`，1250 行�
 
 | 用例 | 钉住的契约 |
 |---|---|
-| `test_missing_default_model_gate_blocks_enqueue` | 网关门禁：没配默认文本模型 ⇒ 400 `LLM_GATEWAY_NOT_CONFIGURED`，**不入队** |
+| `test_gateway_not_configured_blocks_enqueue` | 网关门禁：没配服务商/映射 ⇒ 400 `LLM_GATEWAY_NOT_CONFIGURED`，**不入队** |
 | `test_unknown_product_gate_blocks_enqueue` | 商品门禁：台账无此行 ⇒ 404 `LLM_PRODUCT_NOT_FOUND`，**不入队** |
 | `test_unknown_template_gate_blocks_enqueue` | 模板门禁：模板不存在 ⇒ 404 `LLM_TEMPLATE_NOT_FOUND`，**不入队** |
 | `test_gate_failures_never_call_upstream` | 三条门禁全部**零上游请求**（stub 计数为 0） |
@@ -53,6 +53,7 @@ from backend.app.models import (
     GenerationRecord,
     LlmBusinessProvider,
     LlmGatewayConfig,
+    LlmGatewayModel,
     Note,
     NoteAsset,
     NoteGenerationLink,
@@ -215,29 +216,40 @@ def llm_env(api_client, db_factory, monkeypatch):
 
 
 def _seed_gateway(db, user: User, account: PlatformAccount) -> LlmGatewayConfig:
-    """默认文本服务商 + `generate_note` 业务点映射（`resolve_business_provider` 的输入）。
+    """默认文本服务商 + 模型行 + `generate_note` 业务点映射（`resolve_business_provider` 的输入）。
 
     v2.0 语义：`llm_gateway_configs` 是服务商凭据行，`llm_business_providers`
     是「平台 × 业务点 → provider_key」映射。**两者齐备**才算「配了默认文本模型」。
 
-    v2.3 起映射行**必须显式带 `model_name`**（业务入口不再回落到 `default_model`），
+    v2.3 起映射行**必须显式带 `model_name`**（业务入口不再回落任何默认名），
     且该模型须在该服务商目录内 —— 这里一并写进 `models_json`，否则
     `resolve_business_provider` 会抛 `LLM_BUSINESS_MODEL_REQUIRED`。
+
+    ⚠️ **v2.7/v2.8**：服务商层已无 `platform` / `model_type` / `default_model`
+    三列 —— 能力类型（`model_type`）与使用平台（`platform`）改由**模型行**承载，
+    兜底名整列删除。故这里额外建一条模型行（v2.7 起类型判据即读它）。
     """
     config = LlmGatewayConfig(
         user_id=user.id,
         name="测试文本服务商",
         provider_key=PROVIDER_KEY,
-        platform="xhs",
         base_url="https://api.example.test/v1",
         access_token=encrypt_text("sk-test"),
-        default_model=MODEL_NAME,
         models_json=json.dumps([MODEL_NAME]),
-        model_type="text",
         enabled=True,
         healthy=True,
     )
     db.add(config)
+    db.add(
+        LlmGatewayModel(
+            user_id=user.id,
+            provider_key=PROVIDER_KEY,
+            model_name=MODEL_NAME,
+            model_type="text",
+            platform="xhs",
+            enabled=True,
+        )
+    )
     db.add(
         LlmBusinessProvider(
             user_id=user.id,
@@ -287,8 +299,12 @@ def _wait_until(predicate, timeout: float = 15.0) -> bool:
 # --------------------------------------------------------------------------- #
 # ① 门禁三件：任一不过 ⇒ 400/404 结构化，**不入队、不碰上游**
 # --------------------------------------------------------------------------- #
-def test_missing_default_model_gate_blocks_enqueue(api_client, db_factory, monkeypatch):
-    """没配默认文本模型 ⇒ 400 `LLM_GATEWAY_NOT_CONFIGURED`，队列零行。"""
+def test_gateway_not_configured_blocks_enqueue(api_client, db_factory, monkeypatch):
+    """没配服务商 / 业务点映射 ⇒ 400 `LLM_GATEWAY_NOT_CONFIGURED`，队列零行。
+
+    ⚠️ 原名 `test_missing_default_model_gate_blocks_enqueue` —— v2.8 `default_model` 列已删，
+    「没配默认模型」这一说法不再成立；实际判据始终是「服务商 + 业务点映射是否齐备」。
+    """
     _reset_fake()
     monkeypatch.setattr(gw.llm_gateway_client, "complete_text", FakeUpstream.complete_text)
     monkeypatch.setattr(gw, "_session_factory", db_factory)
