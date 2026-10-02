@@ -2,6 +2,9 @@
 
 > - **体系位置**：`docs/02_设计文档/`（二开方向 1 的独立详细设计，文档先行五阶段「阶段二」产出）
 > - **上游**：`docs/01_需求文档/05_需求规格_第二阶段二开.md`（方向 1）、`docs/02_设计文档/16_功能设计_第二阶段二开.md` §2
+> - **v2.6**（2026-10-02 用户口径「小红书模型配置页面只能配置小红书相关业务使用的模型，
+>   把右上角的下拉移除，不支持切换到其它平台」）：**模型配置页移除平台下拉**，页内固定 `xhs`；
+>   后端 `PLATFORM_ENUM` 与跨平台隔离能力**原样保留**（前端只删假入口，不删后端能力）。详见 §13.2.8。
 > - **状态**：v2.0 · 2026-10-01（**「平台 × 业务点 → 服务商」映射**，用户口径「服务商为单独配置，
 >   业务中的使用点映射成固定 key，新增一个模型配置页，不同平台和不同的业务可以**实时切换服务商**」）：
 >   ① **一期 `model_configs` 整表退场** —— 表 drop（迁移 `f8a9b0c1d2e3`）+ 6 端点转 **410 墓碑**
@@ -477,9 +480,10 @@ v1.9 起新行**恒落 `""`**。
 |---|---|---|---|---|
 | id | Integer | PK | ✅ | |
 | user_id | Integer | FK users.id, index | ✅ | 归属 |
-| gateway_id | Integer | FK llm_gateway_configs.id, index | ✅ | 监控的网关 |
+| gateway_id | Integer | FK llm_gateway_configs.id, index, **nullable** | ✅ | 监控的服务商；**`NULL` = 全网关作用域**（v2.3）|
 | platform | String(32) | 默认 "" | ✅ | 平台维度（空 = 该网关全平台） |
 | function | String(32) | 默认 "" | ✅ | 功能维度（空 = 该平台全功能） |
+| model_name | String(128) | 默认 "" | ✅ | **v2.3 新增**：具体模型作用域（空 = 该服务商全模型）|
 | metric | String(16) | 非空 | ✅ | `calls`/`fail_rate`/`health`（白名单 `ALERT_METRICS`，`quota` 已退场） |
 | operator | String(8) | 非空 | ✅ | `gt`/`gte`/`lt`/`eq`（白名单 `ALERT_OPERATORS`；health 恒用 `eq`） |
 | threshold | Float | 非空 | ✅ | 阈值（calls 为绝对值；fail_rate 为 0–1；health 用 0/1） |
@@ -490,6 +494,29 @@ v1.9 起新行**恒落 `""`**。
 | created_at / updated_at | DateTime | default / onupdate | ✅ | |
 
 - **去重**：同规则同日只发一次（`last_fired_at` 当天已发 ⇒ 跳过），避免轮询刷屏。
+
+> ⚠️ **v2.3（2026-10-02）：三级作用域**（用户口径「预警规则可以控制到具体模型维度，
+> 也可以服务商维度或全网关」）。作用域由 `gateway_id` + `model_name` **两个字段共同表达**
+> （不用哨兵值，语义直白；`gateway_id` 因此**改可空**）：
+>
+> | 作用域 | `gateway_id` | `model_name` | 读出的 `scope` | 判定目标 |
+> |---|---|---|---|---|
+> | 全网关 | `NULL` | `""`（必须） | `all` | 该用户**名下全部服务商**，逐个判（方案 A）|
+> | 服务商 | 具体 id | `""` | `gateway` | 该服务商 |
+> | 具体模型 | 具体 id | 非空 | `model` | 该服务商 + 台账按 `model_name` 再过滤 |
+>
+> - **唯一非法组合** = **全网关 + 指定模型** ⇒ 400 `LLM_ALERT_SCOPE_CONFLICT`（校验入口
+>   `_validate_alert_scope()`）。全网关不绑单个服务商，而「某个模型」必须依附某个服务商
+>   才有意义；两者并存只会产生一条语义不明、**永远不会命中**的规则。
+> - **`scope` 是派生只读字段**（`_serialize_alert()` 算），前端据此回填三选一下拉。
+> - **全网关逐个判（方案 A）**：`_iter_scope_gateway_ids()` 对 `gateway_id IS NULL` 的规则
+>   返回**该用户全部服务商**；命中可**多项**，每项各发一条通知（正文指明**是哪个服务商**超限）
+>   —— 而不是把多服务商台账合并成一个数字（那样用户不知道去看谁）。
+> - ⚠️ **列表端点不带 `gateway_id` ⇒ 返回全部作用域（含 `NULL` 行）**；带 `gateway_id` 过滤
+>   ⇒ 只回该服务商的行（`NULL` 行被排除）—— 这是过滤的定义行为，**不是缺陷**。
+>   前端预警页刷新**必须不带过滤**，否则全网关规则会「消失」。
+> - ⚠️ **更新端点不带作用域字段**（`GatewayAlertUpdateRequest` 只收 threshold/operator/
+>   window_seconds/level/enabled）：改作用域 = 删了重建（避免「改了一半」的中间态）。
 
 > ⚠️ **v2.2（2026-10-02）字段口径校准**：上表 `metric` / `operator` / `threshold` 三行的取值
 > **以代码白名单为唯一真相源** —— `ALERT_METRICS = ("calls","fail_rate","health")`、
@@ -748,6 +775,23 @@ v1.9 起新行**恒落 `""`**。
   ⇒ 真删无悬空风险。**判据 = 是否被业务数据引用，不是「表重不重要」**（避免把 D-删 误推广成全表禁删）。
 - 规则字段校验走 `_validate_alert()`：`metric` ∈ {`calls`,`fail_rate`,`health`}、
   `operator` ∈ {`gt`,`gte`,`lt`,`eq`}；非法 ⇒ 400 结构化原因。
+- **作用域校验走 `_validate_alert_scope()`**（**v2.3**）：唯一非法组合 = 全网关 + 指定模型
+  ⇒ 400 `LLM_ALERT_SCOPE_CONFLICT`；服务商作用域还须校验 `gateway_id` **归属**（别人的 ⇒ 404
+  `LLM_GATEWAY_NOT_FOUND`）。三级作用域定义见 §3.12 ⚠️。
+- ⚠️ **更新端点不改作用域**：`GatewayAlertUpdateRequest` 只收 threshold/operator/window_seconds/
+  level/enabled —— 改作用域 = 删了重建（避免「改了一半」的中间态；前端编辑弹窗把作用域
+  三个下拉置灰）。
+
+> ⚠️ **v2.3（2026-10-02）：预警三级作用域**（用户口径「预警规则可以控制到具体模型维度，
+> 也可以服务商维度或全网关」）。字段口径与判定表见 §3.12；三处实现要点：
+> 1. **全网关逐个判（方案 A）**：`_iter_scope_gateway_ids()` 对 `gateway_id IS NULL` 的规则
+>    返回**该用户全部服务商**，逐个取值判定；命中**可多项**，每项各发一条通知，正文用
+>    `_describe(alert, value, gateway_label)` 带上**服务商名**（否则用户不知道去看谁）。
+> 2. **具体模型作用域**：台账 SQL 再 `WHERE model_name == alert.model_name` 过滤
+>    （数据源列 `llm_gateway_usage_logs.model_name` 早已存在，本轮只是终于用上）。
+> 3. **端点侧**：`GET /gateway-alerts` **不带过滤 ⇒ 返回全部作用域（含 `NULL` 行）**；
+>    `POST` 按两字段推导并校验；`_serialize_alert()` 下发派生只读 `scope`
+>    （`all`/`gateway`/`model`）+ `model_name`，前端据此渲染与回填。
 
 > ⚠️ 与 v1.1/v1.3 的差异：**Token/额度明细不重复落 New API 侧权威**（本地台账已是权威，DEF-044 单一真相源）。
 
@@ -1300,7 +1344,7 @@ final_prompt =
 | 提示词模板设置卡 | 设置页「提示词模板」卡 | 两层管理（公共模块库 + 模板库）+ 预览渲染效果 |
 | **大模型网关页** | `pages/llm-gateway/llm-gateway-page.tsx`（`/platform-select` 网关卡片进入） | **v1.9 起自有 3 个独立页面**（用量看板 / **服务商** / 预警规则），**无 iframe、无 Tabs**<br>⚠️ **v1.9（2026-10-01）**：「连接配置」改称「**服务商**」、「令牌映射」页**整页删除**（4→3）<br>（2026-10-01 页面形态三次修订：先删「用量看板」页签迁独立首页 ⇒ 4→3；随后**独立首页撤销**、完整看板收进本页**第一个页签** ⇒ 3→**4**；最后**取消 Tabs**、4 项改**子路由独立页面**，侧栏成为导航菜单，旧 `?tab=` 重定向） |
 | ↳ **用量看板页面**（**第一项**，`/llm-gateway/usage`） | 同上 | **v1.7 完整看板**：总览三卡（今日/近7日/近30日）+ 30 日双轴折线 + **三维**拆分环形（平台/功能/模型）+ 明细表 + 筛选器；内容组件 `pages/llm-gateway/usage-dashboard-panel.tsx`（**只渲染内容，壳层由网关页提供**），见 §11.3<br>⚠️ **v1.9**：四维→**三维**（令牌映射退场，`dimension=token` 移除） |
-| ↳ **服务商页面**（`/llm-gateway/gateways`） | 同上 | **v1.9 改名**（原「连接配置」）：`llm_gateway_configs` 增删改（**无删除**）+ 健康探测 + 模型目录<br>列：服务商名 / **KEY**（只读，可复制）/ **使用平台** / 地址 / 默认模型 / 调用量 / 令牌 / 健康 / **启停开关** / 操作（测试、编辑）<br>弹窗（**新增服务商** / **编辑服务商**）：名称* / **使用平台\*（下拉）** / 地址* / **访问令牌\*** / **默认模型\***；KEY **不在弹窗内可编辑**（仅新增后展示） |
+| ↳ **服务商页面**（`/llm-gateway/gateways`） | 同上 | **v1.9 改名**（原「连接配置」）：`llm_gateway_configs` 增删改（**无删除**）+ 健康探测 + 模型目录<br>**v2.3（2026-10-02）列表改父子树**（用户口径「服务商列表使用父子树，父是服务商，子是服务商下的具体模型」）：父行 = 服务商、子行 = 该服务商 `models` 目录里的每个模型（`Table` 可展开子行，默认全展开）。<br>父行列：服务商名 / **KEY**（只读，可复制）/ **使用平台** / 类型 / 地址 / 默认模型 / 调用量 / 令牌 / 健康 / **启停开关** / 操作（测试、编辑）；子行**只展示模型名**，其余列以 `-` 占位（模型不是独立实体，无编码/地址/令牌等属性，**不复制父行值**）。<br>弹窗（**新增服务商** / **编辑服务商**）：名称* / **使用平台\*（下拉）** / **模型类型\*** / 地址* / **访问令牌\*** / **默认模型\***；KEY **不在弹窗内可编辑**（仅新增后展示） |
 | ↳ ~~令牌映射页面~~（`/llm-gateway/tokens`） | ~~同上~~ | ~~platform×function → token_name 映射（v1.6）~~ **被 v1.9 整页删除**（用户口径「令牌映射页面移除」；路由 + 菜单项 + 组件 + `lib/api.ts` 5 个请求函数一并移除），原句保留 |
 | ↳ 预警规则页面 | 同上（`/llm-gateway/alerts`） | 阈值规则 CRUD：用量 / 失败率 / 健康（v1.6） |
 | ↳ ~~页签形态（`?tab=gateways` 等）~~ | 同上 | ~~单页 + antd Tabs 承载 4 页签，选中态进 URL `?tab=`~~ **被 2026-10-01 §11.3 第三次修订取代**（取消 Tabs ⇒ 子路由独立页面；旧 `?tab=` 仍经 `TAB_TO_PATH` 重定向，深链不死），原句保留 |
@@ -1389,7 +1433,7 @@ final_prompt =
 | 生成 | 门禁（商品不存在/模板不存在/网关未配置或不健康）/ 幂等 already_queued / 护栏命中不落半条 / 失败记 generation_records / retry 幂等 |
 | 队列 | `QUEUE_REGISTRY` assert 自检（新增队列两边同加）/ 快照键名 `generated` / 停刷判据 |
 | 用量台账 | **记账器 `record_usage()` 成功/失败都记**（失败含 error_message）/ `usage` 缺失时 token 记 0 不报错 / **记账异常不影响业务调用**（安全网不得条件性）/ overview & daily & breakdown 聚合正确（无数据 = 空态，不造假） |
-| 前端 | 网关内 **4 个独立页面（子路由，无 Tabs、无 iframe）**：`/llm-gateway/usage`（第一项，进网关默认落地）/ `gateways` / `tokens` / `alerts`；侧栏 4 项 = 导航菜单（高亮当前项）；旧 `?tab=` 重定向 + `path="*"` 回落默认页；连接配置 + 模型下拉 / 令牌映射 / 预警规则 / 生成进度卡 5s 轮询无 Tip；**用量看板内容组件 `usage-dashboard-panel.tsx`**（三卡 + 双轴折线 + 四维拆分 + 明细表；只渲染内容，壳层由网关页统一提供） |
+| 前端 | 网关内 **3 个独立页面（子路由，无 Tabs、无 iframe）**：`/llm-gateway/usage`（第一项，进网关默认落地）/ `gateways` / `alerts`；侧栏 3 项 = 导航菜单（高亮当前项）；旧 `?tab=` 重定向 + `path="*"` 回落默认页；连接配置 + 模型下拉 / 预警规则 / 生成进度卡 5s 轮询无 Tip；**用量看板内容组件 `usage-dashboard-panel.tsx`**（三卡 + 双轴折线 + 四维拆分 + 明细表；只渲染内容，壳层由网关页统一提供）<br>⚠️ **v1.9 修订（2026-10-01）**：**令牌映射页已退场**（端点 410 墓碑 + `include_in_schema=False`，前端删除页面与 `TAB_TO_PATH` 中的 `tokens` 项）⇒ 「网关内 4 个独立页面」**修订为 3 个**（用量看板 / 服务商 / 预警规则）；原「4 个」句已被本行取代，见 §11.4 退场记录 |
 | 回归 | 一期 `/model-configs` 与 `/notes` 相关行为零破坏（`test_model_configs.py` / `test_product_note_*.py` 全绿） |
 
 ---
@@ -1596,6 +1640,7 @@ final_prompt =
 | platform | String(32) | 非空 | 业务平台（与 §3.8 的 `PLATFORM_ENUM` 同源） |
 | business_key | String(48) | 非空 | 业务点固定 key（§13.2.2 常量之一） |
 | provider_key | String(64) | 非空 | 指向 `llm_gateway_configs.provider_key` |
+| model_name | String(128) | 默认 "" | **v2.3 新增**：该业务点选用的**具体模型**（必须落在服务商模型目录里）|
 | enabled | Boolean | 默认 True | 停用 = 该业务点**回落**到「同平台同 key 的其它行」？**否** —— 见下 |
 | created_at / updated_at | DateTime | | |
 
@@ -1608,6 +1653,49 @@ final_prompt =
   是最难查的形态（同 D4「停用不静默回落」）。
 - ⚠️ **映射命中但服务商停用/不存在** ⇒ `LLM_PROVIDER_DISABLED` / `LLM_PROVIDER_NOT_FOUND`
   —— 承接 v1.9 D4，**仍然不回落**。
+- ⚠️ **v2.3：`model_name` 必填（用户口径「两者都应是必须选择，不指定具体模型无法调用成功」）**：
+  服务商与具体模型**都必选**。`model_name` 为空 ⇒ 解析层抛 `LLM_BUSINESS_MODEL_REQUIRED`，
+  **绝不回落** `default_model`（那是 v2.3 前的静默兜底，已**整体废除**）—— 用户配错要立刻看到，
+  而不是调用时才发现用的是另一个模型。`configured` 判据 = `bool(provider_key and model_name)`
+  （只选服务商**不算**配好）。
+- ⚠️ **`model_name` 目录校验**：PUT 时非空 `model_name` 必须落在该服务商的 `models_json`
+  模型目录里 ⇒ 否则 400 `LLM_BUSINESS_MODEL_NOT_IN_CATALOG`。**目录为空时放行**（目录是
+  「上游 `/models` 拉到什么」，有些上游不含全部可用模型，硬拦会误伤）。
+  清空 `provider_key` ⇒ `model_name` 一并清空（无服务商则无模型可言）。
+- ⚠️ **v2.4（2026-10-02，用户实测报错「选择服务商后无法选择具体模型」）**：
+  上一条「目录为空时放行」是**后端**校验口径（不硬拦，避免误伤）；但**前端候选下拉**
+  若也把空目录服务商当可选，用户在 ② 步**必然选不出模型** ⇒ 卡在 `LLM_BUSINESS_MODEL_REQUIRED`
+  且**无法自救**（后端同时要求 `model_name` 非空，用户却无模型可选）。两处口径必须分开看：
+  - **后端 PUT**：保持「目录为空时放行」——防上游目录不全被硬拦（不变）。
+  - **前端候选**：空目录服务商**置灰不可选**（`disabled` + 后缀 `（无模型目录）`，**与
+    `（已停用）` 分开标注真实原因**），**仍在列表可见不隐藏**（用户看得见「它存在但还差什么」，
+    才知道去服务商页拉目录 —— 同「缺值不造假」）。
+  - 某 `model_type` 下**全部服务商都空目录** ⇒ ① 步下拉**整体置灰** + 一行说明
+    「请先去服务商配置拉取模型目录」（引导，**不静默**）。
+  - 实现抽为纯模块 `frontend/src/pages/models/provider-options.ts`（`hasNoCatalog` /
+    `buildProviderOptions` / `isAllCatalogEmpty`）+ 单测 `provider-options.test.ts`（13 例，
+    3 处变异全部 CAUGHT）—— 理由同 §11.1 的 `gateway-tree.ts`：**只有纯函数才能被单测钉住**。
+- ⚠️ **v2.5（2026-10-02，用户二次反馈「还是选不了模型」—— 根因在两段式写入时机）**：
+  v2.4 只是把「空目录服务商」置灰，**没有解决用户实际踩到的死循环**。实测复现（令牌直打
+  `PUT /api/llm/business-providers`）确认根因是**① 步落库时机错误**：
+  - ① 步（选服务商）`onChange` 原本**立刻 PUT**（`provider_key=X, model_name=""`）。
+  - 但后端契约是**两者都非空**才接受 ⇒ 这次 PUT **必被 400 拒**
+    （`LLM_BUSINESS_MODEL_REQUIRED`，错误文案正是「业务点「改写笔记」必须选择具体模型
+    （服务商「discovery」）」）。
+  - 写入被拒 ⇒ 库内该行 `provider_key` **仍是空** ⇒ ② 步 `disabled = !provider_key` **恒真**
+    ⇒ 模型下拉**永远打不开**。
+  - 用户视角：*选了服务商 → 弹「必须选择具体模型」→ 模型却选不了* ⇒ **死循环、且不可自救**。
+  修正（前后端契约不变，只改前端提交时机）：
+  - ① 步选中服务商 ⇒ **只写本地暂存**（`pendingProvider`），据暂存渲染 ② 步的模型目录候选；
+    **不落库**（`commitDecision(key, "") === "hold"`）。
+  - ② 步选中模型 ⇒ **一次性 PUT（服务商 + 模型齐全）** = 唯一写点，单请求即合法
+    （`commitDecision(key, model) === "commit"`）。
+  - ① 步**清空** ⇒ 直接 PUT（`provider_key=""` 是合法请求，后端连带清空 `model_name`）。
+  - 另修：`allCatalogEmpty` 整体置灰**只在本行未绑服务商时**生效（`isStepOneLocked`）——
+    否则已绑空目录服务商的脏行连「清空」都点不了，同样锁死。
+  - 已绑定项即使 `disabled` 也**对本行放行**（`isSelectableForRow`），保证用户总能清空/改选。
+  - 新增守卫：`commitDecision` / `isStepOneLocked` / `isSelectableForRow`（单测 25 例，
+    本轮 4 处变异全部 CAUGHT）。
 
 ### 13.2.4 调用链（取代 v1.9 §4.3.1 的 `model_configs` 路径）
 
@@ -1629,9 +1717,15 @@ OpenAICompatibleTextClient._complete()  /  OpenAICompatibleImageClient.generate_
 - ⚠️ **`ai_service` 签名解耦**（v1.9 已定，本版沿用）：`_complete()` / `generate_image()`
   **不再收 `ModelConfig`**，改收 `base_url` + `api_key` + `model_name` 三个标量
   —— ORM 行不该穿透到服务层。
-- ⚠️ **`model_name` 从哪来**：服务商的 `default_model`（§3.8，v1.9 已标必填）；
+- ⚠️ **`model_name` 从哪来**（**v2.3 更新**）：~~服务商的 `default_model`（§3.8，v1.9 已标必填）；
   业务点若要指定别的模型，由该业务点在代码里传 `model_override`（可选，默认空 = 用服务商默认）。
-  本轮**不新增字段**：先跑通「业务点 → 服务商」，模型粒度留到有真实需求再加。
+  本轮**不新增字段**：先跑通「业务点 → 服务商」，模型粒度留到有真实需求再加。~~
+  ⇒ **被 v2.3 取代**：`model_name` 是**映射行自己的列**（§13.2.3），用户在模型配置页
+  **显式选**（服务商 + 具体模型两级联动下拉），解析层**只读映射行**、**不回落**
+  `default_model`。理由（原句保留）：模型粒度**不是「以后再说」而是硬需求** ——
+  同一服务商下不同模型质量/价格差异大，业务点必须能各选各的；静默用默认模型 =
+  用户以为选了 A、实际跑 B，是最难查的形态。`default_model` 退为「服务商连通性探测」
+  用的默认值（`/test` 端点），**不再参与业务调用**。
 
 ### 13.2.5 迁移结论
 
@@ -1684,6 +1778,36 @@ OpenAICompatibleTextClient._complete()  /  OpenAICompatibleImageClient.generate_
 **图像服务商从哪来？** 实测现有两条服务商的模型目录**全是文本类**（`discovery` 10 个模型无出图模型），
 ⇒ 图像类 3 个 key 映射后**仍会在调用时报服务商错**。本版**不阻塞**（映射先建，能配就先配上），
 但**图像真正可用**需要用户提供一条支持 `/images/generations` 的服务商。
+
+### 13.2.8 模型配置页**去掉平台下拉**（2026-10-02 用户口径）· v2.6
+
+> 用户口径（原文）：「小红书模型配置页面**只能配置小红书相关业务使用的模型**，
+> 把右上角的下拉移除，**不支持切换到其它平台**。」
+
+**改的是前端，不动后端**（**本轮范围，用户已确认**）：
+
+| 项 | 处理 |
+|---|---|
+| 页面右上角平台 `Select` | **移除**（含 `ReloadOutlined` 之外的这一项；刷新图标保留） |
+| 卡内**说明段落**（「服务商在『服务商配置』页单独维护…」） | **一并移除**（用户追加口径：「这里面这段说明也不要了」）—— 它与下方 `Alert` 语义重叠，移除后只留 `Alert` 承载「两者都必选」的关键约束 |
+| 页内平台态 | 常量 `XHS_PLATFORM = "xhs"` 固定，**不再有 `setPlatform` / 切换分支** |
+| `fetchGatewayPlatforms()` 调用 | 从本页**移出**（页面不再需要平台枚举 ⇒ 少一次请求）。⚠️ 函数与 `/api/llm/providers/platforms` 端点**保留** —— 「服务商配置」页（`llm-gateway-page.tsx`）仍用它填「使用平台」下拉 |
+| 后端 `PLATFORM_ENUM` / `?platform=` 查询参数 | **原样保留**（服务商层仍按平台标注适用范围；映射表唯一键仍是 `(user_id, platform, business_key)`） |
+| `test_mapping_is_isolated_across_platforms` | **原样保留**（后端跨平台隔离能力未变，测试仍应过） |
+
+**理由**：本项目**当前只有一个业务平台（小红书）**，业务代码的调用点**全部**传 `'xhs'`
+（`resolve_business_provider(db, user, BUSINESS_KEY_*, "xhs")`）。页面上那个 6 平台下拉
+（`xhs/douyin/kuaishou/weibo/xianyu/taobao`）**是一个入口指向 5 个没有任何业务代码会读的映射** ——
+用户切到「抖音」配置一通，业务侧**永远不会读到**（所有调用写死 `xhs`），
+这是典型的**「能改但不生效」静默坑**（同 §13.2.3 的「不回落」纪律：宁可没有入口，也不要一个假入口）。
+
+⚠️ **不是删能力，是删假入口**：后端多平台表达力（`PLATFORM_ENUM` + 隔离键）**完整保留** ——
+将来真接抖音时，后端**零改动**，只需在前端把 `XHS_PLATFORM` 换回真实平台态 + 恢复下拉。
+
+⚠️ **页面标题沿用「模型配置」**，不改名为「小红书模型配置」：侧边栏菜单项
+（`app-shell.tsx` 的「模型配置」）与本页 `PageHeader.title` 是同一语义的两处展示，
+改名要同步两处且会影响「服务商配置」页里「请到模型配置页选择」等**跨页文案引用**；
+本轮只做用户明确要求的「移除下拉」。**待用户后续要求时再统一改名**（记于此，不静默漏掉）。
 
 ---
 

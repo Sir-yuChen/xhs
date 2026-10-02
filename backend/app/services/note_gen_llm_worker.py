@@ -817,7 +817,11 @@ def _run_one_llm_generate(item_id: int) -> None:
         try:
             # v2.0（设计 17 §13.2.4）：按**业务点固定 key** 取上下文，
             # 不再走一期 `model_configs`（已退场）。
-            model_config, api_key = llm_gateway_client.resolve_business_provider(
+            # ⚠️ 返回值是 **`ResolvedModelContext` 标量载体**，不是 `(config, key)`
+            #    二元组 —— 不许 `a, b = ...` 解包（会 `TypeError` 并把每次生成都
+            #    打成 `LLM_GENERATE_FAILED`，实测踩过）。其余调用点
+            #    （`api/ai.py` / `auto_ops_service.py`）一律按属性读，此处对齐。
+            context = llm_gateway_client.resolve_business_provider(
                 db, user, BUSINESS_KEY_GENERATE_NOTE
             )
         except LLMGatewayError as error:
@@ -831,7 +835,7 @@ def _run_one_llm_generate(item_id: int) -> None:
 
         # 队列项行体里的模型名是**入队时**的快照；实际用哪个以上游解析结果为准
         # （用户可能换了默认模型）⇒ 记回行体，快照页显示的才是真用过的那个。
-        used_model = str(getattr(model_config, "model_name", "") or "")
+        used_model = str(getattr(context, "model_name", "") or "")
 
         # ---- ③ 生成（护栏在内部；记账在 _complete 内部） ----
         skeleton = template.prompt_skeleton if template is not None else ""
@@ -841,8 +845,8 @@ def _run_one_llm_generate(item_id: int) -> None:
                 db=db,
                 user_id=user_id,
                 product=load_product_dict_from_ledger(row),
-                model_config=model_config,
-                api_key=api_key,
+                model_config=context,
+                api_key=context.api_key,
                 skeleton=skeleton,
                 modules=modules,
             )

@@ -1652,10 +1652,16 @@ export async function fetchBusinessProviders(platform?: string): Promise<Busines
   return response.data;
 }
 
-/** **实时切换服务商**：upsert (platform, business_key) → provider_key。改一行即生效。 */
+/** **实时切换服务商 + 具体模型**（v2.3）：upsert (platform, business_key) → (provider_key, model_name)。改一行即生效。 */
 export async function upsertBusinessProvider(
   payload: BusinessProviderUpsertPayload,
-): Promise<{ platform: string; business_key: string; provider_key: string; configured: boolean }> {
+): Promise<{
+  platform: string;
+  business_key: string;
+  provider_key: string;
+  model_name: string;
+  configured: boolean;
+}> {
   const response = await http.put("/llm/business-providers", payload);
   return response.data;
 }
@@ -2549,6 +2555,13 @@ export async function previewGatewayModels(payload: {
   return response.data;
 }
 
+/**
+ * 预警规则列表。
+ *
+ * ⚠️ `gateway_id` 是**可选过滤**：不传 ⇒ 返回全部规则（含 `gateway_id=null` 的**全网关**规则）。
+ * 传了 ⇒ 后端只回 `gateway_id == X` 的行，**全网关规则会被滤掉**。
+ * 预警页因此**不按网关过滤**，改为全量拉取后在前端分组展示（否则全网关规则永远看不见）。
+ */
 export async function fetchGatewayAlerts(params?: {
   gateway_id?: number;
   enabled?: boolean;

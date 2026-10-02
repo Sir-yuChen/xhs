@@ -2800,7 +2800,7 @@ def test_failure_three_way_blocks_stay_inline_after_the_message_switch():
 # 退场而消失。**旧锚点会假绿**：断言字符串已经不在文件里了，但不是因为写对了，
 # 而是因为整页换掉了 —— 必须对着新实现重新落锚，否则这一页谁改都没人管。
 #
-# 守的四件「不许回退」：
+# 守的五件「不许回退」：
 # ① 业务点清单**从后端拉**（前端不写死 key 列表 —— 写死 = 新增业务点要改两处，
 #    前端那份静默过期，DEF-044）；
 # ② **选中即生效**（onChange 直接 PUT，没有「保存」按钮 —— 用户要的是实时，
@@ -2808,8 +2808,12 @@ def test_failure_three_way_blocks_stay_inline_after_the_message_switch():
 # ③ 下拉候选**按 kind 过滤**（图像业务点不列文本服务商，否则选了就过不了
 #    后端类型校验，用户以为是后端坏了）；
 # ④ 空态**有文案**（没有该类型服务商时给一行说明，不是空下拉 ——
-#    空下拉无法区分「坏了」与「没配」，DEF-057 同型）。
-# ---------------------------------------------------------------------------
+#    空下拉无法区分「坏了」与「没配」，DEF-057 同型）；
+# ⑤ **平台固定 `xhs`、不许有平台下拉**（v2.6，2026-10-02 用户口径「小红书模型配置页面
+#    只能配置小红书相关业务使用的模型，把右上角的下拉移除，不支持切换到其它平台」）。
+#    ⚠️ 这条是**删假入口**的性质：业务调用点全部写死 `'xhs'`，页面若能切到抖音，
+#    用户配的那份映射**永远不会有业务代码读它** —— 典型的「能改但不生效」静默坑。
+# ===========================================================================
 
 MODEL_CONFIG_PAGE = ROOT / "frontend/src/pages/models/model-config-page.tsx"
 
@@ -2882,3 +2886,50 @@ def test_model_config_page_reports_type_mismatch_and_disabled():
     code = _code_only(_read(MODEL_CONFIG_PAGE))
     assert "类型不匹配" in code, "映射指向的服务商类型被改过时必须显式报红"
     assert "服务商已停用" in code, "映射指向已停用服务商时必须显式报橙"
+
+
+def test_model_config_page_has_no_platform_switcher():
+    """⑤ 平台固定 `xhs`，**不许**有平台下拉（v2.6，设计 17 §13.2.8）。
+
+    用户口径（2026-10-02）：「小红书模型配置页面只能配置小红书相关业务使用的模型，
+    把右上角的下拉移除，不支持切换到其它平台。」
+
+    为什么这也要守：该下拉**长得像功能、其实是假入口** —— 业务调用点全部写死
+    `resolve_business_provider(..., "xhs")`，用户切到「抖音」配的映射**永远没有
+    业务代码读它**。删掉它是这次改动的**核心**，而它极易在下一次
+    「顺手加个平台筛选」时被重新引入（改动者会以为删它才是回归）。
+    """
+    code = _code_only(_read(MODEL_CONFIG_PAGE))
+    # 正向：平台写死为常量，且真的用在拉取调用里（不是「定义了没用」）
+    assert 'XHS_PLATFORM = "xhs"' in code, (
+        "平台必须写死为 `XHS_PLATFORM = \"xhs\"` 常量（页面只服务小红书业务）"
+    )
+    assert "fetchBusinessProviders(XHS_PLATFORM)" in code, (
+        "映射列表必须用固定平台常量拉取，不得再用可变平台态"
+    )
+    # 反向①：不许再拉平台枚举（本页不需要；服务商配置页仍用它，那是另一页的事）
+    assert "fetchGatewayPlatforms" not in code, (
+        "本页不该再调 fetchGatewayPlatforms：平台固定，枚举只服务「服务商配置」页的下拉"
+    )
+    # 反向②：不许再有平台 state / setter（有 state 才有切换的可能）
+    assert "setPlatform" not in code and "useState<string>(\"xhs\")" not in code, (
+        "不应保留平台 state/setter：平台固定，可变平台态 = 切平台的入口又回来了"
+    )
+    # 反向③：`platforms` 候选数组不许再出现在渲染里
+    assert "options={platforms" not in code, "不应再有平台下拉的 options 绑定"
+
+
+def test_model_config_page_drops_redundant_intro_paragraph():
+    """卡内**说明段落已移除**（v2.6 用户追加口径：「这里面这段说明也不要了」）。
+
+    ⚠️ 只断言**那一段的具体文案**不在，不禁止所有 `Paragraph` ——
+    断言要不误伤（DEF-057 同型：断言必须能区分对错）。下方 `Alert` 承载
+    「两者都必选」的关键约束，**必须留着**（删它才是回退）。
+    """
+    code = _code_only(_read(MODEL_CONFIG_PAGE))
+    assert "服务商在「服务商配置」页单独维护" not in code, (
+        "卡内说明段落已按用户口径移除，不应回退"
+    )
+    assert "服务商与具体模型都必选" in code, (
+        "Alert 的关键约束（两者都必选 / 不回落）必须保留 —— 删它才是回退"
+    )

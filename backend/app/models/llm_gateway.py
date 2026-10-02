@@ -130,17 +130,35 @@ class LlmGatewayAlert(Base):
 
     语义：监控任务 `system.llm_gateway_monitor` 轮询本地台账，对照规则判断，
     超阈值 → 写 `notifications` 表（站内通知）。规则分：用量阈值 / 失败率阈值 / 网关健康。
-    `platform`/`function` 为空 = 该维度全量（空 platform = 该网关全平台）。
+    `platform`/`function` 为空 = 该维度全量（空 platform = 该服务商全平台）。
     `last_fired_at` 用于同日去重防抖（同规则同日只发一次）。
+
+    ## ⚠️ 三级作用域（v2.3，2026-10-02 用户口径「预警规则挂可以控制到具体模型维度，
+    也可以服务商维度或全网关」）
+
+    | 作用域 | `gateway_id` | `model_name` | 含义 |
+    |---|---|---|---|
+    | **全网关** | `NULL` | 必须 `""` | 该用户**名下所有服务商**分别判（逐个判，见监控服务） |
+    | **服务商** | 具体 id | `""` | 该服务商**全部模型** |
+    | **具体模型** | 具体 id | 非空 | 该服务商下**某一个模型** |
+
+    ⚠️ **`gateway_id` 可空是「全网关」的表达**（`NULL` = 不绑单个服务商）——
+    刻意不用哨兵值（`0` 之类）：哨兵在 JOIN / `db.get()` 上语义不明，且一眼看不出是魔法值。
+    ⚠️ **`model_name` 非空时 `gateway_id` 必须非空**（全网关下谈「某个模型」无意义）——
+    该互斥由 API 层校验，DB 层只保证两列各自形态。
     """
 
     __tablename__ = "llm_gateway_alerts"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
-    gateway_id: Mapped[int] = mapped_column(ForeignKey("llm_gateway_configs.id"), index=True, nullable=False)
+    #: ⚠️ **可空**（v2.3）：`NULL` = 全网关（不绑单个服务商，遍历该用户所有服务商逐个判）。
+    gateway_id: Mapped[Optional[int]] = mapped_column(ForeignKey("llm_gateway_configs.id"), index=True, nullable=True)
     platform: Mapped[str] = mapped_column(String(32), nullable=False, default="")
     function: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    #: ⚠️ **v2.3 新增**：具体模型名（`""` = 该服务商全模型）。
+    #: 非空 = 只对台账里 `model_name` 等于本值的调用算指标（数据源 `llm_gateway_usage_logs.model_name` 早有）。
+    model_name: Mapped[str] = mapped_column(String(128), nullable=False, default="")
     #: 指标：quota（未在台账，用 calls 代替）/ calls / fail_rate / health
     metric: Mapped[str] = mapped_column(String(16), nullable=False)
     #: 操作符：gt / gte / lt / eq（health 用 eq）
@@ -201,6 +219,16 @@ class LlmBusinessProvider(Base):
     ⚠️ **未命中映射不回落**：抛 `LLM_BUSINESS_PROVIDER_NOT_CONFIGURED`
     （「该业务点还没配服务商，请到模型配置页选择」）。回落 = 用错服务商而不报错，
     是最难查的形态（同 D4「停用不静默回落」）。
+
+    ## ⚠️ v2.3：**必须同时选定「服务商 + 具体模型」**（2026-10-02 用户口径
+    「两者都应是必须选择，不指定具体的模型无法调用成功」）
+
+    - `provider_key` = 服务商（映射到 `llm_gateway_configs`）；
+    - `model_name` = **该服务商下的某个具体模型**（必须非空）。
+
+    两者都必填 —— 只给服务商不指定模型，`resolve_business_provider` 会抛
+    `LLM_BUSINESS_MODEL_REQUIRED`，**刻意不回落 `default_model`**：
+    回落 = 「看起来正常但这个业务点实际在用别的模型」，与「未配服务商不回落」同型的事故。
     """
 
     __tablename__ = "llm_business_providers"
@@ -219,6 +247,10 @@ class LlmBusinessProvider(Base):
     business_key: Mapped[str] = mapped_column(String(48), nullable=False)
     #: 指向 `llm_gateway_configs.provider_key`（裸列，应用层校验归属与类型匹配）
     provider_key: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    #: ⚠️ **v2.3 新增**：业务点显式选定的**具体模型名**（必须落在该服务商的模型目录里）。
+    #: 空串 = 未配置（`resolve_business_provider` 会抛 `LLM_BUSINESS_MODEL_REQUIRED`）。
+    #: 存量行由迁移回填为该服务商当时的 `default_model`（只回填一次，之后强制显式）。
+    model_name: Mapped[str] = mapped_column(String(128), nullable=False, default="")
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=shanghai_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=shanghai_now, onupdate=shanghai_now)

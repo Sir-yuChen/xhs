@@ -5,20 +5,41 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { PageHeader } from "../../components/layout/app-shell";
 import {
+  buildProviderOptions,
+  commitDecision,
+  isAllCatalogEmpty,
+  isSelectableForRow,
+  isStepOneLocked,
+} from "./provider-options";
+import {
   fetchBusinessProviderKeys,
   fetchBusinessProviders,
   fetchGatewayConfigs,
-  fetchGatewayPlatforms,
   upsertBusinessProvider,
 } from "../../lib/api";
 import type {
   BusinessKeyOption,
   BusinessProviderRow,
   LlmGatewayConfig,
-  LlmGatewayPlatformOption,
 } from "../../types";
 
-const { Text, Paragraph } = Typography;
+const { Text } = Typography;
+
+/**
+ * **本页固定的业务平台**（v2.6，设计 17 §13.2.8）。
+ *
+ * 用户口径（2026-10-02）：「小红书模型配置页面**只能配置小红书相关业务使用的模型**，
+ * 把右上角的下拉移除，**不支持切换到其它平台**。」
+ *
+ * 为什么写死 `xhs` 而不是保留一个「当前平台」态：本项目**只有一个业务平台**，
+ * 业务代码的调用点**全部**传 `'xhs'`（`resolve_business_provider(db, user, BUSINESS_KEY_*, "xhs")`）。
+ * 页面上原那个 6 平台下拉（`xhs/douyin/...`）**指向 5 个没有任何业务代码会读的映射** ——
+ * 用户切到「抖音」配置一通，业务侧**永远读不到**（调用写死 `xhs`）⇒ 典型的
+ * 「**能改但不生效**」静默坑。删掉它 = 删**假入口**，不是删后端能力：
+ * 后端的 `PLATFORM_ENUM` 与跨平台隔离（唯一键 `(user_id, platform, business_key)`）
+ * **完整保留**，将来真接抖音时后端零改动，只需把这里换回真实平台态。
+ */
+const XHS_PLATFORM = "xhs";
 
 /**
  * 模型配置页（v2.0，设计 17 §13.2.1）。
@@ -53,40 +74,31 @@ export function ModelConfigPage() {
   const [rows, setRows] = useState<BusinessProviderRow[]>([]);
   const [keys, setKeys] = useState<BusinessKeyOption[]>([]);
   const [providers, setProviders] = useState<LlmGatewayConfig[]>([]);
-  const [platforms, setPlatforms] = useState<LlmGatewayPlatformOption[]>([]);
-  const [platform, setPlatform] = useState<string>("xhs");
   const [isLoading, setIsLoading] = useState(true);
   const [savingKey, setSavingKey] = useState<string | null>(null);
 
-  const load = useCallback(
-    async (target?: string) => {
-      setIsLoading(true);
-      try {
-        const scope = target ?? platform;
-        const [mapping, keyList, providerList, platformList] = await Promise.all([
-          fetchBusinessProviders(scope),
-          fetchBusinessProviderKeys(),
-          fetchGatewayConfigs(),
-          fetchGatewayPlatforms(),
-        ]);
-        setRows(mapping.items);
-        setKeys(keyList.items);
-        setProviders(providerList.items);
-        setPlatforms(platformList.items ?? []);
-      } catch {
-        // 失败由全局拦截器报（401/400 都带结构化原因）
-      } finally {
-        setIsLoading(false);
-      }
-    },
-    [platform],
-  );
+  const load = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      // 平台固定 `xhs`（v2.6，§13.2.8）⇒ 不再拉平台枚举，也不再传可变 scope。
+      const [mapping, keyList, providerList] = await Promise.all([
+        fetchBusinessProviders(XHS_PLATFORM),
+        fetchBusinessProviderKeys(),
+        fetchGatewayConfigs(),
+      ]);
+      setRows(mapping.items);
+      setKeys(keyList.items);
+      setProviders(providerList.items);
+    } catch {
+      // 失败由全局拦截器报（401/400 都带结构化原因）
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     void load();
-    // 仅首屏拉一次；换平台走下方 Select 的 onChange
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [load]);
 
   /** 某业务点的下拉候选 = 本用户的**同 kind** 服务商（图像业务点不列文本服务商） */
   const candidatesFor = useCallback(
@@ -94,19 +106,47 @@ export function ModelConfigPage() {
     [providers],
   );
 
+  // ⚠️ ① 步（服务商）的**暂存**选择：不立刻落库。
+  //
+  // 为什么必须暂存（这是用户报「选了服务商就报错、模型永远选不了」的根因）：
+  //   后端契约是「服务商 + 模型**两者都必选**」，`provider_key` 非空而 `model_name`
+  //   为空 ⇒ 400 `LLM_BUSINESS_MODEL_REQUIRED`。若 ① 步 onChange 立刻 PUT
+  //   （带 `model_name=""`），这次写入**必然被拒** ⇒ 该行 `provider_key` 仍是空 ⇒
+  //   ② 步 `disabled` 条件 `!record.provider_key` 恒真 ⇒ 模型下拉永远打不开。
+  //   结果：用户「选了服务商 → 弹必选模型的错 → 模型却选不了」的死循环。
+  //
+  // 正解：① 步只改本地态（② 步据此启用并显示该服务商的模型目录），
+  //   **② 步选中模型时才一次性 PUT（服务商 + 模型齐全）** —— 单次请求即合法。
+  const [pendingProvider, setPendingProvider] = useState<Record<string, string>>({});
+  /** 该行「生效的」服务商 = 暂存值（若用户正在选）否则库内值。 */
+  const effectiveProviderKey = (record: BusinessProviderRow): string =>
+    pendingProvider[record.business_key] ?? record.provider_key;
+
   const onSwitch = useCallback(
-    async (row: BusinessProviderRow, providerKey: string) => {
+    async (row: BusinessProviderRow, providerKey: string, modelName: string) => {
       setSavingKey(row.business_key);
       try {
         await upsertBusinessProvider({
           platform: row.platform,
           business_key: row.business_key,
           provider_key: providerKey,
+          model_name: modelName,
         });
-        message.success(providerKey ? "已切换服务商" : "已清空该业务点的服务商");
+        // 落库成功 ⇒ 清掉该行暂存，改以服务端返回为准
+        setPendingProvider((prev) => {
+          if (!(row.business_key in prev)) return prev;
+          const next = { ...prev };
+          delete next[row.business_key];
+          return next;
+        });
+        if (!providerKey) {
+          message.success("已清空该业务点的服务商");
+        } else {
+          message.success("已切换服务商与模型");
+        }
         await load();
       } catch {
-        // 失败由全局拦截器报（类型不匹配 / 服务商不存在都带结构化原因）
+        // 失败由全局拦截器报（类型不匹配 / 服务商不存在 / 模型不在目录内都带结构化原因）
       } finally {
         setSavingKey(null);
       }
@@ -176,31 +216,116 @@ export function ModelConfigPage() {
       ),
     },
     {
-      title: "当前服务商",
+      title: "当前服务商 / 模型",
       dataIndex: "provider_key",
       render: (_v, record) => {
         const options = candidatesFor(record.kind);
         const empty = options.length === 0;
+        const saving = savingKey === record.business_key;
+        // 「生效服务商」= 暂存选择（用户刚在 ① 步点过）优先，否则库内值。
+        const chosenKey = effectiveProviderKey(record);
+        // 模型候选 = **生效服务商**的目录：暂存选择也要能立刻出模型，否则 ② 步还是空的
+        const modelOptions = (
+          chosenKey
+            ? (options.find((p) => p.provider_key === chosenKey)?.models ?? [])
+            : []
+        ).map((m) => ({ value: m, label: m }));
+        const noModelCatalog = !!chosenKey && modelOptions.length === 0;
+        // v2.3 修正：模型目录为空的服务商**不可选**（灰掉 + 说明）。
+        //   原因：模型是必选项，而空目录 ⇒ 第 ② 步下拉永远是空的 ⇒ 用户选完只能停在
+        //   「缺具体模型」的报错态、且**自己无法补救**（唯一出路是去服务商页拉取目录）。
+        //   放它可选 = 把用户引进死胡同，正是「报错但不可自救」。规则已抽到
+        //   `provider-options.ts` 并有单测钉住（见该文件顶部注释）。
+        const providerOptions = buildProviderOptions(options);
+        const allCatalogEmpty = isAllCatalogEmpty(options);
+        // ⚠️ 收紧置灰条件（用户第二次反馈「还是选不了模型」）：
+        //   `allCatalogEmpty` 只该在**本行还没绑任何服务商**时才整体禁用 ① 步。
+        //   若本行已经绑着一个空目录服务商（脏配置，如 `TEST-TEXT`），再整体禁用
+        //   就把用户锁死在报错态：合法服务商选不了（② 步必然空），连清空也点不了。
+        //   此时 ① 步必须可选 —— 已绑定项由 `isSelectableForRow` 放行，用户得以
+        //   换服务商或清空来自救。
+        const lockedByAllEmpty = isStepOneLocked(allCatalogEmpty, chosenKey);
+        const selectableOptions = providerOptions.map((o) => ({
+          ...o,
+          disabled: !isSelectableForRow(o, chosenKey),
+        }));
+        // 已绑定项若仍不可选 ⇒ 说明是「已停用」而非「无目录」（无目录已被上面放行）
+        const boundOption = providerOptions.find((o) => o.value === chosenKey);
+        const boundDisabled = boundOption?.disabledReason === "disabled";
         return (
-          <Space direction="vertical" size={2} style={{ minWidth: 320 }}>
+          <Space direction="vertical" size={4} style={{ minWidth: 340 }}>
             <Select
-              style={{ width: 320 }}
-              value={record.provider_key || undefined}
-              placeholder={empty ? "暂无可用的该类型服务商" : "选择服务商（选中即生效）"}
-              disabled={empty || savingKey === record.business_key}
-              loading={savingKey === record.business_key}
+              style={{ width: 340 }}
+              value={chosenKey || undefined}
+              placeholder={
+                empty
+                  ? "暂无可用的该类型服务商"
+                  : lockedByAllEmpty
+                    ? "该类型服务商都还没有模型目录"
+                    : "① 选择服务商"
+              }
+              disabled={empty || lockedByAllEmpty || saving}
+              loading={saving}
               allowClear
-              onChange={(value) => void onSwitch(record, value ?? "")}
-              options={options.map((p) => ({
-                value: p.provider_key,
-                label: p.enabled ? p.name : `${p.name}（已停用）`,
-                disabled: !p.enabled,
-              }))}
+              onChange={(value) => {
+                // ① 步：`commitDecision` 说 hold 就只存本地暂存，绝不落库
+                //    （此刻 PUT 必 400 ⇒ provider_key 存不下 ⇒ ② 步永远打不开）。
+                //    清空时是 commit（`provider_key=""` 合法，后端连带清空模型）。
+                const next = value ?? "";
+                if (commitDecision(next, "") === "commit") {
+                  void onSwitch(record, next, "");
+                  return;
+                }
+                setPendingProvider((prev) => ({ ...prev, [record.business_key]: next }));
+              }}
+              options={selectableOptions}
+            />
+            <Select
+              style={{ width: 340 }}
+              value={record.model_name || undefined}
+              placeholder={
+                !chosenKey
+                  ? "② 先选服务商"
+                  : noModelCatalog
+                    ? "该服务商暂无模型目录"
+                    : "② 选择具体模型（必选，选中即保存）"
+              }
+              disabled={!chosenKey || noModelCatalog || saving}
+              loading={saving}
+              allowClear
+              onChange={(value) => {
+                // ② 步：服务商 + 模型齐全 ⇒ commit，一次性落库（唯一写点）。
+                //    这里恒为 commit（providerKey 非空、modelName 非空）。
+                const nextModel = value ?? "";
+                if (commitDecision(chosenKey, nextModel) === "commit") {
+                  void onSwitch(record, chosenKey, nextModel);
+                }
+              }}
+              options={modelOptions}
+              showSearch
             />
             {empty && (
               <Text type="secondary" style={{ fontSize: 12 }}>
                 还没有{record.kind === "image" ? "图像" : "文本"}类型的服务商，请先到
                 「服务商配置」新增。
+              </Text>
+            )}
+            {allCatalogEmpty && (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                该类型的 {options.length} 个服务商都还没有模型目录；模型是必选项，
+                请先到「服务商配置」对目标服务商执行「测试」以拉取模型目录。
+              </Text>
+            )}
+            {noModelCatalog && (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                该服务商还没有模型目录（目录为空时选不出模型）。请到「服务商配置」对它
+                执行「测试」拉取模型目录；或先把本行服务商<b>清空</b>，再改选其它有目录的服务商。
+              </Text>
+            )}
+            {boundDisabled && (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                本行绑定的服务商<b>已停用</b>。请到「服务商配置」启用它，或先把本行服务商
+                <b>清空</b>再改选其它服务商。
               </Text>
             )}
           </Space>
@@ -212,12 +337,14 @@ export function ModelConfigPage() {
       dataIndex: "configured",
       width: 150,
       render: (_v, record) => {
-        if (!record.configured) return <Tag>未配置</Tag>;
+        // v2.3：服务商与模型**都**选了才算配好；只选服务商 ⇒ 未配置
+        if (!record.provider_key) return <Tag>未配置</Tag>;
         if (record.provider_enabled === false) return <Tag color="orange">服务商已停用</Tag>;
         // 类型不匹配 = 「配置过、之后又改了服务商类型」的后果；必须显出来，不许静默
         if (record.provider_model_type && record.provider_model_type !== record.kind) {
           return <Tag color="red">类型不匹配</Tag>;
         }
+        if (!record.model_name) return <Tag color="orange">缺具体模型</Tag>;
         return <Tag color="green">已配置</Tag>;
       },
     },
@@ -228,32 +355,17 @@ export function ModelConfigPage() {
       <PageHeader
         eyebrow="Model Routing"
         title="模型配置"
-        description="为每个平台的每个业务点选择服务商；选中即生效，无需保存。"
+        description="为小红书各业务点选择服务商；选中即生效，无需保存。"
         action={
-          <Space>
-            <Select
-              style={{ width: 160 }}
-              value={platform}
-              onChange={(value) => {
-                setPlatform(value);
-                void load(value);
-              }}
-              options={platforms.map((p) => ({ value: p.value, label: p.label }))}
-            />
-            <ReloadOutlined onClick={() => void load()} style={{ cursor: "pointer" }} />
-          </Space>
+          <ReloadOutlined onClick={() => void load()} style={{ cursor: "pointer" }} />
         }
       />
       <Card>
-        <Paragraph type="secondary" style={{ marginBottom: 16 }}>
-          服务商在「服务商配置」页单独维护（名称 / 地址 / 令牌 / 模型类型）。本页只负责把
-          业务点指向某个服务商 —— 业务代码按固定 key 取用，改这一行即刻生效。
-        </Paragraph>
         <Alert
           type="info"
           showIcon
           style={{ marginBottom: 12 }}
-          message="未配置的业务点在业务调用时会报「该业务点还没配服务商」，不会回落到其它服务商。"
+          message="服务商与具体模型都必选：先选服务商，再选它下面的具体模型；选中模型即保存。只选服务商不选模型，业务调用会报「该业务点还没配模型」，不会回落到服务商的默认模型，也不会回落到其它服务商。"
         />
         <Table
           rowKey="_key"

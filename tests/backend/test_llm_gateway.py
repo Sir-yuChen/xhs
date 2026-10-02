@@ -21,7 +21,7 @@ from sqlalchemy import select
 
 from backend.app.core.security import decrypt_text
 from backend.app.core.time import shanghai_now
-from backend.app.models import LlmGatewayConfig
+from backend.app.models import LlmGatewayAlert, LlmGatewayConfig
 
 
 def _auth_header(api_client) -> dict:
@@ -71,6 +71,105 @@ def test_create_and_serialize_hides_tokens(api_client, db_factory):
         assert row is not None
         assert "sk-gateway-secret" not in row.access_token
         assert decrypt_text(row.access_token) == "sk-gateway-secret"
+
+
+def test_create_seeds_default_alerts(api_client, db_factory):
+    """建网关 ⇒ 自动补种**默认预警规则**（设计 17 §4.5，2026-10-02）。
+
+    口径（用户裁决：**预警规则设置后即可生效**）：
+    - 播种源 = `config/initial_data/llm_gateway_alerts.json`，**恰好 2 条**；
+    - 两条均 `enabled=true`（落库即生效，不是「先摆着不开」）；
+    - 门槛保守：`fail_rate gt 0.5`（24h 失败率过半）+ `health eq 0`（探测失败）；
+    - **不播 `calls` 绝对量阈值**（各网关用量量级不同，播绝对值必然误报）。
+    """
+    headers = _auth_header(api_client)
+    resp = api_client.post(
+        "/api/llm/gateway-configs",
+        json={
+            "name": "带种子的网关",
+            "platform": "xhs",
+            "model_type": "text",
+            "base_url": "http://127.0.0.1:3000",
+            "access_token": "sk-seed",
+            "default_model": "m",
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 201, resp.text
+    gateway_id = resp.json()["id"]
+
+    with db_factory() as db:
+        rows = db.scalars(
+            select(LlmGatewayAlert).where(LlmGatewayAlert.gateway_id == gateway_id)
+        ).all()
+        # 恰好两条默认规则，且都已开启
+        assert len(rows) == 2, [r.metric for r in rows]
+        assert all(r.enabled is True for r in rows)
+        keys = {(r.metric, r.operator, float(r.threshold)) for r in rows}
+        assert keys == {("fail_rate", "gt", 0.5), ("health", "eq", 0.0)}
+        # 绝不播 calls 绝对量阈值
+        assert all(r.metric != "calls" for r in rows)
+
+
+def test_create_seeding_is_idempotent(api_client, db_factory):
+    """播种**幂等**：对同一网关重复调用不产生重复行（设计 17 §4.5）。
+
+    同时守住「用户改过/删过的规则不还魂」：删掉一条后再补种，只补回缺失的那条。
+    """
+    from backend.app.services import llm_gateway_monitor_service
+
+    headers = _auth_header(api_client)
+    resp = api_client.post(
+        "/api/llm/gateway-configs",
+        json={
+            "name": "幂等网关",
+            "platform": "xhs",
+            "model_type": "text",
+            "base_url": "http://127.0.0.1:3000",
+            "access_token": "sk-idem",
+            "default_model": "m",
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 201, resp.text
+    gateway_id = resp.json()["id"]
+
+    # 直接再调一次播种 ⇒ 一条都不新建
+    with db_factory() as db:
+        created = llm_gateway_monitor_service.ensure_default_alerts_for_gateway(
+            db, user_id=1, gateway_id=gateway_id
+        )
+        assert created == 0
+        assert (
+            len(db.scalars(select(LlmGatewayAlert).where(LlmGatewayAlert.gateway_id == gateway_id)).all())
+            == 2
+        )
+
+    # 删掉 health 那条 ⇒ 再播种只补回它（fail_rate 不重复插）
+    with db_factory() as db:
+        db.query(LlmGatewayAlert).filter(
+            LlmGatewayAlert.gateway_id == gateway_id,
+            LlmGatewayAlert.metric == "health",
+        ).delete()
+        db.commit()
+        created = llm_gateway_monitor_service.ensure_default_alerts_for_gateway(
+            db, user_id=1, gateway_id=gateway_id
+        )
+        assert created == 1
+        rows = db.scalars(select(LlmGatewayAlert).where(LlmGatewayAlert.gateway_id == gateway_id)).all()
+        assert len(rows) == 2
+        assert {r.metric for r in rows} == {"fail_rate", "health"}
+
+
+def test_loader_ignores_bad_alert_file(monkeypatch):
+    """播种源缺失 / 坏 ⇒ 返回 0 条，**不臆造默认值**（与定时任务种子同纪律）。"""
+    from backend.app.core import initial_data
+
+    monkeypatch.setattr(initial_data, "_load_payload", lambda _name: None)
+    assert initial_data.load_initial_gateway_alerts() == []
+
+    monkeypatch.setattr(initial_data, "_load_payload", lambda _name: {"gateway_alerts": "not-a-list"})
+    assert initial_data.load_initial_gateway_alerts() == []
 
 
 def test_create_assigns_unique_provider_code(api_client):
@@ -639,6 +738,122 @@ def test_alert_cross_user_404(api_client):
     assert resp.status_code == 404
 
 
+# ───────────── v2.3：预警三级作用域（全网关 / 服务商 / 具体模型）─────────────
+
+
+def _create_alert(api_client, headers, **overrides):
+    """建一条预警规则（默认全网关作用域，可覆盖任意字段）。"""
+    payload = {
+        "gateway_id": None,
+        "platform": "",
+        "function": "",
+        "model_name": "",
+        "metric": "calls",
+        "operator": "gt",
+        "threshold": 1,
+    }
+    payload.update(overrides)
+    return api_client.post("/api/llm/gateway-alerts", json=payload, headers=headers)
+
+
+def test_alert_scope_all_gateway(api_client):
+    """全网关作用域：`gateway_id` 省略/null + `model_name=""` ⇒ scope=`all`。"""
+    headers = _auth_header(api_client)
+    resp = _create_alert(api_client, headers)
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["gateway_id"] is None
+    assert body["model_name"] == ""
+    assert body["scope"] == "all"
+
+
+def test_alert_scope_provider(api_client):
+    """服务商作用域：`gateway_id`=id + `model_name=""` ⇒ scope=`gateway`。"""
+    headers = _auth_header(api_client)
+    gw = _create_gateway(api_client, headers)
+    resp = _create_alert(api_client, headers, gateway_id=gw["id"])
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["gateway_id"] == gw["id"]
+    assert body["model_name"] == ""
+    assert body["scope"] == "gateway"
+
+
+def test_alert_scope_model(api_client):
+    """具体模型作用域：`gateway_id`=id + `model_name` 非空 ⇒ scope=`model`。"""
+    headers = _auth_header(api_client)
+    gw = _create_gateway(api_client, headers)
+    resp = _create_alert(api_client, headers, gateway_id=gw["id"], model_name="deepseek-v4-pro")
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["gateway_id"] == gw["id"]
+    assert body["model_name"] == "deepseek-v4-pro"
+    assert body["scope"] == "model"
+
+
+def test_alert_scope_conflict_all_plus_model_400(api_client):
+    """全网关 + 指定模型 ⇒ 400 `LLM_ALERT_SCOPE_CONFLICT`（唯一非法组合）。
+
+    全网关不绑单个服务商，而「某个模型」必须依附某个服务商才有意义；
+    两者并存只会产生一条语义不明、永远不命中的规则 —— 提前拦掉。
+    """
+    headers = _auth_header(api_client)
+    resp = _create_alert(api_client, headers, gateway_id=None, model_name="deepseek-v4-pro")
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["detail"]["code"] == "LLM_ALERT_SCOPE_CONFLICT"
+
+
+def test_alert_scope_gateway_id_not_owned_404(api_client):
+    """服务商作用域指向**别人**的服务商 ⇒ 404（不泄露他人网关）。"""
+    headers = _auth_header(api_client)
+    other = _other_auth(api_client)
+    gw = _create_gateway(api_client, headers)
+    resp = _create_alert(api_client, other, gateway_id=gw["id"])
+    assert resp.status_code == 404, resp.text
+    assert resp.json()["detail"]["code"] == "LLM_GATEWAY_NOT_FOUND"
+
+
+def test_alert_list_without_gateway_filter_returns_all_scopes(api_client, db_factory):
+    """列表**不带 gateway_id 过滤** ⇒ 三种作用域全部返回（含全网关的 NULL 行）。
+
+    ⚠️ 关键回归点：全网关规则 `gateway_id IS NULL`，若列表按某个 gateway_id 过滤，
+    这些规则会**永远看不到**（用户以为规则消失了）。前端刷新页时必须不带过滤。
+    """
+    headers = _auth_header(api_client)
+    gw = _create_gateway(api_client, headers)
+    # 建服务商会按用户自动补种默认规则（§4.5）⇒ 先清掉，只留本用例自己造的三种作用域。
+    with db_factory() as db:
+        db.query(LlmGatewayAlert).delete()
+        db.commit()
+    _create_alert(api_client, headers)  # all
+    _create_alert(api_client, headers, gateway_id=gw["id"])  # gateway
+    _create_alert(api_client, headers, gateway_id=gw["id"], model_name="m-1")  # model
+
+    resp = api_client.get("/api/llm/gateway-alerts", headers=headers)
+    assert resp.status_code == 200
+    scopes = sorted(i["scope"] for i in resp.json()["items"])
+    assert scopes == ["all", "gateway", "model"]
+
+
+def test_alert_list_gateway_filter_excludes_null_rows(api_client, db_factory):
+    """带 `gateway_id` 过滤 ⇒ 只剩该服务商的行；全网关（NULL）行被排除。
+
+    这是过滤的**定义行为**（不是缺陷）；本用例把它钉住，避免有人误把它当 bug「修掉」。
+    """
+    headers = _auth_header(api_client)
+    gw = _create_gateway(api_client, headers)
+    with db_factory() as db:
+        db.query(LlmGatewayAlert).delete()  # 清掉自动补种的默认规则
+        db.commit()
+    _create_alert(api_client, headers)  # all
+    _create_alert(api_client, headers, gateway_id=gw["id"])  # gateway
+
+    resp = api_client.get(f"/api/llm/gateway-alerts?gateway_id={gw['id']}", headers=headers)
+    assert resp.status_code == 200
+    scopes = [i["scope"] for i in resp.json()["items"]]
+    assert scopes == ["gateway"]
+
+
 # ───────────────────────── v1.6：用量展示（§7.5）─────────────────────────
 
 
@@ -719,6 +934,12 @@ def test_monitor_fires_notification_on_threshold(api_client, db_factory, monkeyp
     headers = _auth_header(api_client)
     gw = _create_gateway(api_client, headers)
 
+    # 建网关端点会**按用户自动补种默认预警规则**（设计 17 §4.5，2026-10-02）⇒
+    # 本用例要精确断言 fired 数，先把种子规则清掉，只留自己加的那条。
+    with db_factory() as db:
+        db.query(LlmGatewayAlert).delete()
+        db.commit()
+
     # 造台账：3 次成功调用
     with db_factory() as db:
         db.add_all([
@@ -762,6 +983,11 @@ def test_monitor_health_alert(api_client, db_factory):
     headers = _auth_header(api_client)
     gw = _create_gateway(api_client, headers)  # healthy 默认 False 且 last_health_at=None
 
+    # 同上：先清掉端点自动补种的默认规则，避免与用例自己那条 health 规则重复计数。
+    with db_factory() as db:
+        db.query(LlmGatewayAlert).delete()
+        db.commit()
+
     with db_factory() as db:
         db.add(LlmGatewayAlert(
             user_id=1, gateway_id=gw["id"],
@@ -788,6 +1014,92 @@ def test_monitor_health_alert(api_client, db_factory):
         notifs = db.scalars(select(Notification).where(Notification.source_type == "llm_gateway_alert")).all()
         assert len(notifs) == 1
         assert "健康" in notifs[0].title
+
+
+def test_monitor_all_gateway_scope_hits_each_provider(api_client, db_factory):
+    """**全网关作用域**（方案 A）：遍历用户名下全部服务商，逐个判、逐个发（v2.3）。
+
+    造 2 个服务商各 2 次调用、全网关规则 `调用量 > 1` ⇒ `fired == 2`，
+    两条通知分别指明**是哪个服务商**超限（否则用户不知道该去看谁）。
+    """
+    from backend.app.models import LlmGatewayAlert, LlmGatewayUsageLog, Notification
+    from backend.app.services.llm_gateway_monitor_service import run_llm_gateway_monitor_once
+
+    headers = _auth_header(api_client)
+    gw1 = _create_gateway(api_client, headers, name="gw1")
+    gw2 = _create_gateway(api_client, headers, name="gw2")
+
+    with db_factory() as db:
+        db.query(LlmGatewayAlert).delete()  # 清掉端点自动补种的默认规则
+        db.commit()
+
+    with db_factory() as db:
+        for gw in (gw1, gw2):
+            db.add_all([
+                LlmGatewayUsageLog(user_id=1, gateway_id=gw["id"], platform="xhs", function="generate", status="success"),
+                LlmGatewayUsageLog(user_id=1, gateway_id=gw["id"], platform="xhs", function="generate", status="success"),
+            ])
+        # 全网关作用域：gateway_id=None, model_name=""
+        db.add(LlmGatewayAlert(
+            user_id=1, gateway_id=None, platform="", function="", model_name="",
+            metric="calls", operator="gt", threshold=1, window_seconds=86400,
+        ))
+        db.commit()
+
+    result = run_llm_gateway_monitor_once(1)
+    assert result["fired"] == 2, f"全网关规则应命中每个服务商各一次，实际 {result['fired']}"
+
+    with db_factory() as db:
+        notifs = db.scalars(select(Notification).where(Notification.source_type == "llm_gateway_alert")).all()
+        assert len(notifs) == 2
+        bodies = " ".join(n.body for n in notifs)
+        assert "gw1" in bodies and "gw2" in bodies, "每条通知必须指明是哪个服务商超限"
+
+
+def test_monitor_model_scope_filters_usage_by_model(api_client, db_factory):
+    """**具体模型作用域**：台账按 `model_name` 再过滤（只统计该模型）。
+
+    造同一服务商下 m1 三次、m2 零次；规则 = 服务商 + `model_name="m1"` + `调用量 > 2`
+    ⇒ 命中（m1 三次）；再改成 `model_name="m2"` ⇒ 不命中（m2 无数据，**不用 0 冒充**）。
+    """
+    from backend.app.models import LlmGatewayAlert, LlmGatewayUsageLog, Notification
+    from backend.app.services.llm_gateway_monitor_service import run_llm_gateway_monitor_once
+
+    headers = _auth_header(api_client)
+    gw = _create_gateway(api_client, headers)
+
+    with db_factory() as db:
+        db.query(LlmGatewayAlert).delete()
+        db.commit()
+
+    with db_factory() as db:
+        db.add_all([
+            LlmGatewayUsageLog(user_id=1, gateway_id=gw["id"], model_name="m1", status="success"),
+            LlmGatewayUsageLog(user_id=1, gateway_id=gw["id"], model_name="m1", status="success"),
+            LlmGatewayUsageLog(user_id=1, gateway_id=gw["id"], model_name="m1", status="success"),
+        ])
+        db.add(LlmGatewayAlert(
+            user_id=1, gateway_id=gw["id"], platform="", function="", model_name="m1",
+            metric="calls", operator="gt", threshold=2, window_seconds=86400,
+        ))
+        db.commit()
+
+    result = run_llm_gateway_monitor_once(1)
+    assert result["fired"] == 1, "m1 有 3 次调用，应命中"
+
+    # 换成 m2（无台账数据）⇒ 不命中，且**不新增**通知
+    with db_factory() as db:
+        alert = db.scalar(select(LlmGatewayAlert))
+        alert.model_name = "m2"
+        alert.last_fired_at = None  # 清掉同日去重（本用例第 1 段已发过一次）
+        db.commit()
+
+    result = run_llm_gateway_monitor_once(1)
+    assert result["fired"] == 0, "m2 无台账数据 ⇒ 不触发（无数据不用 0 冒充）"
+    with db_factory() as db:
+        notifs = db.scalars(select(Notification).where(Notification.source_type == "llm_gateway_alert")).all()
+        assert len(notifs) == 1, "只有 m1 那次应发通知"
+
 
 # ───────────── v1.9：未保存时拉模型目录（models-preview）+ 单条详情 ─────────────
 

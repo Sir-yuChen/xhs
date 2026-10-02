@@ -5449,7 +5449,7 @@ def test_generate_detail_image_uses_own_business_point_and_persists_asset(tmp_pa
                     base_url="https://api.example.test/v1",
                     access_token=encrypt_text("«redacted:sk-…»"),
                     default_model="detail-image-model",
-                    models_json="[]",
+                    models_json=json.dumps(["detail-image-model"]),
                     enabled=True,
                     model_type="image",
                     healthy=True,
@@ -5462,6 +5462,8 @@ def test_generate_detail_image_uses_own_business_point_and_persists_asset(tmp_pa
                     platform="xhs",
                     business_key=BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE.key,
                     provider_key="TEST-IMAG",
+                    # v2.3：业务入口必须显式带 model_name。
+                    model_name="detail-image-model",
                     enabled=True,
                 )
             )
@@ -8037,7 +8039,7 @@ def _seed_provider_and_mappings(token: str, model_type: str, model_name: str, ap
                     # 直接写明文会让 `decrypt_text` 抛 InvalidToken。
                     access_token=encrypt_text(api_key),
                     default_model=model_name,
-                    models_json="[]",
+                    models_json=json.dumps([model_name]),
                     enabled=True,
                     model_type=model_type,
                     healthy=True,
@@ -8052,6 +8054,8 @@ def _seed_provider_and_mappings(token: str, model_type: str, model_name: str, ap
                         platform="xhs",
                         business_key=spec.key,
                         provider_key=key,
+                        # v2.3：业务入口必须显式带 model_name（不再回落 default_model）。
+                        model_name=model_name,
                         enabled=True,
                     )
                 )

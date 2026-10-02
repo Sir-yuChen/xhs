@@ -975,6 +975,14 @@ export type BusinessProviderRow = {
   provider_name: string | null;
   provider_enabled: boolean | null;
   provider_model_type: BusinessProviderKind | null;
+  /**
+   * v2.3：已选**具体模型**（服务商下的某个模型）。空串 = 只选了服务商、还没选模型。
+   * ⚠️ 服务商 + 模型**两者都必选**，缺一调用即失败（不复用服务商的 `default_model`）。
+   */
+  model_name: string;
+  /** v2.3：该服务商的模型目录（前端模型下拉候选，由 `models_json` 解析） */
+  provider_models: string[];
+  /** v2.3：**服务商与模型都选了**才算配置好（只选服务商 ⇒ false） */
   configured: boolean;
   enabled: boolean;
 };
@@ -994,6 +1002,12 @@ export type BusinessProviderUpsertPayload = {
   business_key: string;
   /** 空串 = 清空映射（回到「未配置」） */
   provider_key: string;
+  /**
+   * v2.3：具体模型。`provider_key` 非空时**必填**（空 ⇒ 400 `LLM_BUSINESS_MODEL_REQUIRED`），
+   * 且必须在服务商模型目录内（否则 400 `LLM_BUSINESS_MODEL_NOT_IN_CATALOG`）。
+   * `provider_key` 为空时后端会一并清空。
+   */
+  model_name?: string;
 };
 
 
@@ -1065,10 +1079,24 @@ export type LlmGatewayStats = {
 // ⚠️ ~~`LlmGatewayToken` / `LlmGatewayTokenPayload`~~ **v1.9 删除**：令牌映射已整表退场
 // （设计 17 §7.1a）。原来的两个类型 + `lib/api.ts` 的 4 个请求函数一并移除。
 
-// —— 预警规则（设计 17 §7.1b，v1.6）——
+// —— 预警规则（设计 17 §7.1b，v1.6；v2.3 三级作用域）——
+//
+// 作用域由 `gateway_id` + `model_name` **两个字段共同表达**（后端不存 `scope` 枚举，
+// 由 `_serialize_alert` 派生出只读的 `scope` 供列表渲染）：
+//   · `gateway_id === null`  && `model_name === ""`  → **全网关**（逐服务商独立评估）
+//   · `gateway_id` 为具体 id && `model_name === ""`  → **指定服务商**
+//   · `gateway_id` 为具体 id && `model_name` 非空    → **指定服务商 + 具体模型**
+// 唯一非法组合：全网关 + 指定模型（后端 400 `LLM_ALERT_SCOPE_CONFLICT`）。
+export type LlmGatewayAlertScope = "all" | "gateway" | "model";
+
 export type LlmGatewayAlert = {
   id: number;
-  gateway_id: number;
+  /** `null` = 全网关 */
+  gateway_id: number | null;
+  /** 只读派生字段：`all` / `gateway` / `model`（由后端序列化下发） */
+  scope: LlmGatewayAlertScope;
+  /** 空串 = 未限定具体模型（服务商级 / 全网关级） */
+  model_name: string;
   platform: string;
   function: string;
   metric: string;
@@ -1083,7 +1111,10 @@ export type LlmGatewayAlert = {
 };
 
 export type LlmGatewayAlertPayload = {
-  gateway_id: number;
+  /** 省略 / `null` = 全网关 */
+  gateway_id?: number | null;
+  /** 非空 ⇒ 具体模型作用域（必须先指定服务商） */
+  model_name?: string;
   platform?: string;
   function?: string;
   metric: string;

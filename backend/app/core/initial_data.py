@@ -38,6 +38,9 @@ SCHEDULED_JOBS_FILENAME = "scheduled_jobs.json"
 #: 运行时配置初始化数据文件名（设计 10 §7.3，2026-09-27）
 SYSTEM_SETTINGS_FILENAME = "system_settings.json"
 
+#: LLM 网关预警规则初始化数据文件名（设计 17 §4.5，2026-10-02）
+GATEWAY_ALERTS_FILENAME = "llm_gateway_alerts.json"
+
 
 def _project_root() -> Path:
     """与 `core/config.py::_load_yaml_config()` 同一口径（frozen 下 = `_internal/`）。"""
@@ -257,4 +260,97 @@ def load_initial_system_settings() -> list[dict[str, Any]]:
         if item is not None:
             normalized.append(item)
     logger.info("initial_data: 载入 %s 条运行时配置初始化数据", len(normalized))
+    return normalized
+
+
+def _normalize_gateway_alert(raw: Any) -> dict[str, Any] | None:
+    """单条预警规则初始化数据 → 规范 dict；字段非法 ⇒ `None`（丢弃该条 + warning）。
+
+    白名单从 `api/llm_gateway_monitor.py` 的常量取 —— **不在这里重抄一份**
+    （`metric`/`operator` 枚举漂移即缺陷，与 `_normalize_scheduled_job` 同纪律）。
+    `gateway_id` **不在种子里**：它由播种方按「刚创建的网关 / 用户已有网关」填，
+    种子只描述**规则本身**（一条规则可套用到任何网关）。
+    """
+    # 惰性 import：`core` 层不在模块级依赖 `api`（避免 core ↔ api 的导入环）。
+    from backend.app.api.llm_gateway_monitor import ALERT_METRICS, ALERT_OPERATORS
+
+    if not isinstance(raw, dict):
+        logger.warning("initial_data: 预警规则条目不是对象（%r），已跳过", type(raw).__name__)
+        return None
+
+    metric = str(raw.get("metric") or "").strip()
+    if metric not in ALERT_METRICS:
+        logger.warning(
+            "initial_data: 预警规则 metric=%r 不在白名单 %s，已跳过该条",
+            metric,
+            list(ALERT_METRICS),
+        )
+        return None
+
+    operator = str(raw.get("operator") or "gt").strip()
+    if operator not in ALERT_OPERATORS:
+        logger.warning(
+            "initial_data: 预警规则 operator=%r 不在白名单 %s，已跳过该条",
+            operator,
+            list(ALERT_OPERATORS),
+        )
+        return None
+
+    threshold = raw.get("threshold")
+    if not isinstance(threshold, (int, float)) or isinstance(threshold, bool):
+        logger.warning("initial_data: 预警规则 threshold=%r 不是数字，已跳过该条", threshold)
+        return None
+
+    window_seconds = raw.get("window_seconds", 86400)
+    if not isinstance(window_seconds, int) or isinstance(window_seconds, bool) or window_seconds <= 0:
+        logger.warning(
+            "initial_data: 预警规则 window_seconds=%r 非法，改用 86400", window_seconds
+        )
+        window_seconds = 86400
+
+    level = str(raw.get("level") or "warning").strip()
+    if level not in ("info", "warning", "error"):
+        level = "warning"
+
+    return {
+        "platform": str(raw.get("platform") or "").strip(),
+        "function": str(raw.get("function") or "").strip(),
+        #: v2.3：具体模型作用域（`""` = 该服务商全模型）。种子默认不指定模型。
+        "model_name": str(raw.get("model_name") or "").strip()[:128],
+        "metric": metric,
+        "operator": operator,
+        "threshold": float(threshold),
+        "window_seconds": window_seconds,
+        "level": level,
+        "enabled": bool(raw.get("enabled", True)),
+    }
+
+
+def load_initial_gateway_alerts() -> list[dict[str, Any]]:
+    """LLM 网关预警规则初始化数据（规范化后的列表；任何问题 ⇒ warning + 可用部分）。
+
+    与 `load_initial_scheduled_jobs` 同构（双路解析、坏数据不致命）。
+    ⚠️ 与定时任务**播种时机不同**：预警规则**依附于网关**（`gateway_id` 非空），
+    所以不在 lifespan 里盲目播种，而是在**创建/首次出现网关配置时**按用户补种
+    （`ensure_default_alerts_for_gateway`）—— 没有网关时播下去就是一批悬空行。
+    """
+    payload = _load_payload(GATEWAY_ALERTS_FILENAME)
+    if payload is None:
+        return []
+    if not isinstance(payload, dict):
+        logger.warning("initial_data: %s 顶层不是对象，已忽略", GATEWAY_ALERTS_FILENAME)
+        return []
+    rows = payload.get("gateway_alerts")
+    if not isinstance(rows, list):
+        logger.warning(
+            "initial_data: %s 缺少 gateway_alerts 数组，已忽略", GATEWAY_ALERTS_FILENAME
+        )
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    for raw in rows:
+        item = _normalize_gateway_alert(raw)
+        if item is not None:
+            normalized.append(item)
+    logger.info("initial_data: 载入 %s 条预警规则初始化数据", len(normalized))
     return normalized

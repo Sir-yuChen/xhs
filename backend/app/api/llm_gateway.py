@@ -13,6 +13,7 @@ from backend.app.core.security import decrypt_text, encrypt_text
 from backend.app.core.time import shanghai_now
 from backend.app.models import LlmBusinessProvider, LlmGatewayConfig, User
 from backend.app.schemas.common import paginated
+from backend.app.services import llm_gateway_monitor_service
 
 # ⚠️ 工作平台公共维度（设计 17 §7.1 v1.4，2026-09-29 用户口径「多平台公共的大模型网关」）：
 # 网关是平台无关的基础设施，不挂 /xhs/ 前缀；数据层本就 (user_id, name) 隔离，零迁移。
@@ -148,6 +149,32 @@ class GatewayConfigUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+def _parse_models_json(models_json: str | None) -> list[str]:
+    """解析服务商 `models_json` 模型目录为模型名列表（坏数据 ⇒ `[]`，不抛）。
+
+    v2.3：`upsert_business_provider` 用它校验「选的模型是否在该服务商目录里」。
+    ⚠️ 坏 JSON / 非列表一律返回 `[]`（**不臆造模型名**）—— 调用方据此区分
+    「目录为空」（放行，有些上游 /models 不全）与「目录非空但没这个模型」（400）。
+    """
+    import json as _json
+
+    try:
+        data = _json.loads(models_json or "[]")
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    names: list[str] = []
+    for item in data:
+        if isinstance(item, str):
+            names.append(item)
+        elif isinstance(item, dict):
+            ident = item.get("id") or item.get("name")
+            if ident:
+                names.append(str(ident))
+    return names
+
+
 def _serialize_config(config: LlmGatewayConfig) -> dict:
     """序列化：令牌字段永不返回，只给 has_access_token 布尔（§10 安全设计）。
 
@@ -155,13 +182,7 @@ def _serialize_config(config: LlmGatewayConfig) -> dict:
     v1.7：`local_db_path` 出参移除（New API 特化字段，列保留不删、新代码不读写）。
     v1.9：新增 `provider_key`（唯一 KEY，前端只读展示）与 `platform`（使用平台）。
     """
-    import json as _json
-
-    try:
-        models = _json.loads(config.models_json or "[]")
-        models = models if isinstance(models, list) else []
-    except Exception:
-        models = []
+    models = _parse_models_json(config.models_json)
     return {
         "id": config.id,
         "name": config.name,
@@ -320,6 +341,11 @@ def create_gateway_config(
     db.add(config)
     db.commit()
     db.refresh(config)
+    # 设计 17 §4.5（2026-10-02）：新网关按「默认预警规则」补种（enabled=true 即生效）。
+    # 幂等：同网关已有同名规则不重复插。存量网关**不**主动补种（不替用户开通知开关）。
+    llm_gateway_monitor_service.ensure_default_alerts_for_gateway(
+        db, user_id=current_user.id, gateway_id=config.id
+    )
     return _serialize_config(config)
 
 
@@ -723,14 +749,21 @@ class BusinessProviderUpsertRequest(BaseModel):
 
     ⚠️ `business_key` 与 `platform` 一起构成**唯一键**（`(user_id, platform, business_key)`）；
     改这一行 = 实时切换服务商。
+
+    ⚠️ **v2.3 必选「服务商 + 具体模型」**（2026-10-02 用户口径「两者都应是必须选择，
+    不指定具体的模型无法调用成功」）：`provider_key` 非空时 `model_name` **必须非空**，
+    且必须落在该服务商的模型目录（`models_json`）里。
+
     ⚠️ `provider_key` 传**空串** = 清空映射（回到「未配置」态）—— 刻意不另开 DELETE 端点：
     「删一条映射」与「把映射指向空」在数据上同形（§13.2.3 唯一键决定一行一业务点），
-    多一个端点只会多一处语义分叉。
+    多一个端点只会多一处语义分叉。此时 `model_name` 一并清空（无服务商则无模型可言）。
     """
 
     platform: str = Field(min_length=1, max_length=32)
     business_key: str = Field(min_length=1, max_length=48)
     provider_key: str = Field(default="", max_length=64)
+    #: v2.3：具体模型名；`provider_key` 非空时必填（见端点校验）。
+    model_name: str = Field(default="", max_length=128)
 
     model_config = ConfigDict(extra="forbid")
 
@@ -764,12 +797,15 @@ def list_business_providers(
     name_of = {c.provider_key: c.name for c in configs}
     enabled_of = {c.provider_key: bool(c.enabled) for c in configs}
     type_of = {c.provider_key: c.model_type for c in configs}
+    #: v2.3：服务商 → 模型目录（前端模型下拉联动用；一次查完，别在循环里 N+1）
+    models_of = {c.provider_key: _parse_models_json(c.models_json) for c in configs}
 
     items = []
     for item in BUSINESS_KEYS:
         key = (platform or PLATFORM_ENUM[0][0], item.key)
         row = by_key.get(key)
         pk = (row.provider_key if row else "") or ""
+        model_name = (row.model_name if row else "") or ""
         items.append({
             "platform": key[0],
             "business_key": item.key,
@@ -783,7 +819,11 @@ def list_business_providers(
             "provider_enabled": enabled_of.get(pk) if pk else None,
             #: 映射指向的服务商当前类型（诊断「类型不匹配」用；配置正确时应恒等于 kind）
             "provider_model_type": type_of.get(pk) if pk else None,
-            "configured": bool(pk),
+            #: v2.3：已选具体模型 + 该服务商的模型目录（前端模型下拉候选）
+            "model_name": model_name,
+            "provider_models": models_of.get(pk, []) if pk else [],
+            #: 已配置 = 服务商与模型**都**选了（只选服务商不算配好，调用会失败）
+            "configured": bool(pk and model_name),
             "enabled": bool(row.enabled) if row else True,
         })
     return {"items": items, "platforms": [{"value": v, "label": l} for v, l in PLATFORM_ENUM]}
@@ -795,13 +835,16 @@ def upsert_business_provider(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """**实时切换服务商**（§13.2.6）—— 改一行即生效，无「保存」按钮。
+    """**实时切换服务商 + 具体模型**（§13.2.6）—— 改一行即生效，无「保存」按钮。
 
-    三步校验（任一不过都 400/404，**不写脏引用**）：
+    校验（任一不过都 400/404，**不写脏引用**）：
       1. `business_key` 必须是已登记的业务点（`is_valid_business_key`）；
       2. `provider_key` 非空时必须在**本用户**的服务商里存在 ⇒ 否则 404；
       3. `provider_key` 非空时其 `model_type` 必须等于业务点的 `kind`
-         ⇒ 否则 400（否则会拿文本模型去打图像接口，报一个看不懂的上游错）。
+         ⇒ 否则 400（否则会拿文本模型去打图像接口，报一个看不懂的上游错）；
+      4. **v2.3**：`provider_key` 非空时 `model_name` **必须非空**且落在该服务商的
+         模型目录（`models_json`）里 ⇒ 否则 400 —— 用户口径「两者都应是必须选择，
+         不指定具体的模型无法调用成功」。
     """
     from backend.app.services.business_provider_keys import get_business_key
 
@@ -817,6 +860,7 @@ def upsert_business_provider(
         )
 
     provider_key = (payload.provider_key or "").strip()
+    model_name = (payload.model_name or "").strip()
 
     if provider_key:
         config = db.scalar(
@@ -845,6 +889,34 @@ def upsert_business_provider(
                     ),
                 },
             )
+        # v2.3：必须显式选具体模型（两者都必选）。
+        if not model_name:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "LLM_BUSINESS_MODEL_REQUIRED",
+                    "message": (
+                        f"业务点「{item.label or item.key}」必须选择具体模型"
+                        f"（服务商「{config.name}」）"
+                    ),
+                },
+            )
+        # 模型必须在该服务商的目录里（目录为空时放行 —— 目录是「上游拉到什么」，
+        # 有些上游的 /models 不含全部可用模型，硬拦会误伤；只在目录非空时校验）。
+        available = _parse_models_json(config.models_json)
+        if available and model_name not in available:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "LLM_BUSINESS_MODEL_NOT_IN_CATALOG",
+                    "message": (
+                        f"模型「{model_name}」不在服务商「{config.name}」的模型目录里"
+                    ),
+                },
+            )
+    else:
+        # 清空映射 ⇒ 模型一并清空（无服务商则无模型可言）
+        model_name = ""
 
     row = db.scalar(
         select(LlmBusinessProvider).where(
@@ -859,10 +931,12 @@ def upsert_business_provider(
             platform=payload.platform,
             business_key=item.key,
             provider_key=provider_key,
+            model_name=model_name,
         )
         db.add(row)
     else:
         row.provider_key = provider_key
+        row.model_name = model_name
     db.commit()
     db.refresh(row)
     return {
@@ -870,7 +944,8 @@ def upsert_business_provider(
         "business_key": row.business_key,
         "kind": item.kind,
         "provider_key": row.provider_key,
-        "configured": bool(row.provider_key),
+        "model_name": row.model_name,
+        "configured": bool(row.provider_key and row.model_name),
     }
 
 

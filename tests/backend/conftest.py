@@ -390,6 +390,32 @@ LATER_MIGRATION_TABLES: dict[str, str] = {
         " updated_at DATETIME NOT NULL,"
         " PRIMARY KEY (id))"
     ),
+    # ⚠️ `b2c3d4e5f6a7`（2026-10-02，设计 17 §4.5 v2.3）：预警规则三级作用域 ——
+    #    它 `batch_alter_table(llm_gateway_alerts)` 加 `model_name`、放宽 `gateway_id`。
+    #    建这张表的 `n5o6p7q8r9s0` 在**全部** stamp 点之前（链上第 55 / 共 61），
+    #    故 `upgrade head` 区间内**不会**重建它 ⇒ 夹具必须先给形状，
+    #    否则 `no such table: llm_gateway_alerts`（2026-10-02 实测，三个迁移用例齐红）。
+    #    ⚠️ 与 `scheduled_job_logs` / `llm_business_providers` 同型例外：**表不在区间内、
+    #    迁移只读不改结构**（`batch_alter_table` 走 SQLite 重建，要求表已存在）。
+    #    列清单 = 与该迁移 `PRAGMA table_info` / 重建 SELECT 对齐的最小形状。
+    "llm_gateway_alerts": (
+        "CREATE TABLE llm_gateway_alerts ("
+        " id INTEGER NOT NULL,"
+        " user_id INTEGER NOT NULL,"
+        " gateway_id INTEGER NOT NULL,"
+        " platform VARCHAR(32) NOT NULL DEFAULT '',"
+        " function VARCHAR(32) NOT NULL DEFAULT '',"
+        " metric VARCHAR(16) NOT NULL,"
+        " operator VARCHAR(8) NOT NULL DEFAULT 'gt',"
+        " threshold FLOAT NOT NULL,"
+        " window_seconds INTEGER NOT NULL DEFAULT 86400,"
+        " level VARCHAR(16) NOT NULL DEFAULT 'warning',"
+        " enabled BOOLEAN NOT NULL DEFAULT 1,"
+        " last_fired_at DATETIME,"
+        " created_at DATETIME NOT NULL,"
+        " updated_at DATETIME NOT NULL,"
+        " PRIMARY KEY (id))"
+    ),
     # `b3c4d5e6f7a8`（2026-09-30，设计 18 / ADR-021）：隔离键从店铺收敛到平台账号 ——
     # 加 `platform_accounts.seller_id`（带 shops 回填）、`shop_products` 换键重建、
     # `note_comments.platform_account_id`、`scheduled_job_logs` 列改名、drop `shops`。

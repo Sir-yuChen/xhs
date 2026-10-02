@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from sqlalchemy import inspect, select
 
@@ -26,6 +28,7 @@ from backend.app.services.business_provider_keys import (
     MODEL_TYPE_TEXT,
 )
 from backend.app.services.llm_gateway_client import (
+    BusinessModelRequiredError,
     BusinessProviderNotConfiguredError,
     BusinessProviderTypeMismatchError,
     ProviderDisabledError,
@@ -45,7 +48,15 @@ def _register(api_client, username: str) -> dict:
     return {"Authorization": f"Bearer {resp.json()['access_token']}"}
 
 
-def _create_provider(api_client, headers, name: str, model_type: str = "text") -> dict:
+def _create_provider(
+    api_client, headers, name: str, model_type: str = "text", models: list[str] | None = None
+) -> dict:
+    """建服务商。`models` 非空时**直接把它写进 `models_json` 模型目录**。
+
+    ⚠️ `POST /gateway-configs` **不落目录**（目录由「测试连接 / 拉取模型」写入，见
+    `_serialize_config` 的 `models` 来自 `models_json`）；测试里造「目录非空」用于验证
+    v2.3 的目录校验分支，必须直连 ORM 写 `models_json`，不能指望创建端点。
+    """
     resp = api_client.post(
         "/api/llm/gateway-configs",
         json={
@@ -59,7 +70,21 @@ def _create_provider(api_client, headers, name: str, model_type: str = "text") -
         headers=headers,
     )
     assert resp.status_code == 201, resp.text
-    return resp.json()
+    body = resp.json()
+    if models:
+        _set_models_catalog(body["id"], models)
+    return body
+
+
+def _set_models_catalog(config_id: int, models: list[str]) -> None:
+    """直连临时库把 `models_json` 写成给定目录（模拟「拉取模型」后的状态）。"""
+    from backend.app.core.database import SessionLocal
+
+    with SessionLocal() as db:
+        row = db.get(LlmGatewayConfig, config_id)
+        assert row is not None, f"服务商 #{config_id} 不存在"
+        row.models_json = json.dumps(models, ensure_ascii=False)
+        db.commit()
 
 
 def _user_by_name(api_client, db_factory, username: str) -> User:
@@ -68,10 +93,28 @@ def _user_by_name(api_client, db_factory, username: str) -> User:
         return db.scalar(select(User).where(User.username == username))
 
 
-def _upsert(api_client, headers, business_key: str, provider_key: str, platform: str = "xhs"):
+def _upsert(
+    api_client,
+    headers,
+    business_key: str,
+    provider_key: str,
+    platform: str = "xhs",
+    model_name: str = "deepseek-v4-flash",
+):
+    """PUT 一条「业务点 → 服务商 + 具体模型」映射。
+
+    ⚠️ **v2.3**：`model_name` 是**必填**（用户口径「两者都应是必须选择」）——
+    默认给 `_create_provider` 目录里那个合法模型，让各用例只聚焦自己要验证的分支；
+    要测「缺模型」的分支请显式传 `model_name=""`。
+    """
     return api_client.put(
         "/api/llm/business-providers",
-        json={"platform": platform, "business_key": business_key, "provider_key": provider_key},
+        json={
+            "platform": platform,
+            "business_key": business_key,
+            "provider_key": provider_key,
+            "model_name": model_name,
+        },
         headers=headers,
     )
 
@@ -81,16 +124,29 @@ def _upsert(api_client, headers, business_key: str, provider_key: str, platform:
 # --------------------------------------------------------------------------- #
 
 def test_resolve_hit_returns_provider_context(api_client, db_factory):
-    """命中：返回服务商上下文，且 model_name 来自该服务商。"""
+    """命中：返回服务商上下文，`model_name` = **用户在映射里选的那个模型**。
+
+    ⚠️ v2.3：断言「显式选的 ≠ 服务商 `default_model`」—— 后者是 `deepseek-v4-flash`，
+    这里是 `deepseek-v4-pro`。若实现偷偷回落默认模型，本用例即失败（防静默回落）。
+    """
     headers = _register(api_client, "bp_hit")
-    provider = _create_provider(api_client, headers, "hit-provider", MODEL_TYPE_TEXT)
-    assert _upsert(api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"]).status_code == 200
+    provider = _create_provider(
+        api_client, headers, "hit-provider", MODEL_TYPE_TEXT,
+        models=["deepseek-v4-flash", "deepseek-v4-pro"],
+    )
+    resp = _upsert(
+        api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"],
+        model_name="deepseek-v4-pro",
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["model_name"] == "deepseek-v4-pro"
 
     user = _user_by_name(api_client, db_factory, "bp_hit")
     with db_factory() as db:
         ctx = resolve_business_provider(db, user, BUSINESS_KEY_GENERATE_NOTE)
     assert ctx.provider_key == provider["provider_key"]
-    assert ctx.model_name == "deepseek-v4-flash"
+    assert ctx.model_name == "deepseek-v4-pro"
+    assert ctx.model_name != "deepseek-v4-flash", "不得回落到服务商默认模型"
 
 
 def test_resolve_missing_mapping_raises_and_never_falls_back(api_client, db_factory):
@@ -124,6 +180,7 @@ def test_resolve_type_mismatch_raises(api_client, db_factory):
                 platform="xhs",
                 business_key=BUSINESS_KEY_GENERATE_NOTE.key,
                 provider_key=image_provider["provider_key"],
+                model_name="some-image-model",
             )
         )
         db.commit()
@@ -160,6 +217,7 @@ def test_resolve_provider_not_found_raises(api_client, db_factory):
                 platform="xhs",
                 business_key=BUSINESS_KEY_GENERATE_NOTE.key,
                 provider_key="NOPE-0000",
+                model_name="whatever-model",
             )
         )
         db.commit()
@@ -329,9 +387,10 @@ def test_clear_mapping_returns_to_unconfigured(api_client, db_factory):
 
     user = _user_by_name(api_client, db_factory, "bp_clear")
     with db_factory() as db:
-        # ⚠️ 清空后**行仍在、provider_key 为空** ⇒ 解析层走到 resolve_provider_context，
-        # 因 key 为空抛 ProviderNotFoundError（与「行不存在」是两种错误，都要能定位）。
-        with pytest.raises(ProviderNotFoundError):
+        # ⚠️ v2.3：清空后**行仍在、provider_key 与 model_name 都为空** ⇒ 解析层在
+        # 「模型必选」这步先拦（比 provider_key 检查更靠前）⇒ `BusinessModelRequiredError`。
+        # 这和「行不存在」（`BusinessProviderNotConfiguredError`）仍是两种错误，都要能定位。
+        with pytest.raises(BusinessModelRequiredError):
             resolve_business_provider(db, user, BUSINESS_KEY_GENERATE_NOTE)
 
 
@@ -387,3 +446,143 @@ def test_model_configs_endpoints_absent_from_openapi(api_client):
     assert not any("model-config" in p for p in schema["paths"]), "退场端点不得出现在 schema"
     assert "/api/llm/business-providers" in schema["paths"]
     assert "/api/llm/business-provider-keys" in schema["paths"]
+
+
+# --------------------------------------------------------------------------- #
+# ⑩ v2.3：具体模型必选（用户口径「两者都应是必须选择，不指定具体模型无法调用成功」）
+# --------------------------------------------------------------------------- #
+
+def test_upsert_without_model_400(api_client):
+    """只选服务商、不选模型 ⇒ 400 `LLM_BUSINESS_MODEL_REQUIRED`（不写脏行）。
+
+    用户口径原文：**不指定具体的模型无法调用成功** —— 若端点放行，用户会配出一个
+    「看起来配好了」却 100% 调不通的映射（最难查的形态）。
+    """
+    headers = _register(api_client, "bp_nomodel")
+    provider = _create_provider(api_client, headers, "nomodel-provider", MODEL_TYPE_TEXT)
+
+    resp = _upsert(
+        api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"],
+        model_name="",
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["detail"]["code"] == "LLM_BUSINESS_MODEL_REQUIRED"
+
+    # 纯空白同样视为缺模型（不靠 strip 之外的宽松）
+    resp = _upsert(
+        api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"],
+        model_name="   ",
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["detail"]["code"] == "LLM_BUSINESS_MODEL_REQUIRED"
+
+
+def test_upsert_model_not_in_catalog_400(api_client):
+    """模型不在服务商目录里 ⇒ 400 `LLM_BUSINESS_MODEL_NOT_IN_CATALOG`。
+
+    目录非空时才校验（目录 = 上游 `/models` 拉到什么；空目录放行，见端点注释）。
+    """
+    headers = _register(api_client, "bp_badmodel")
+    provider = _create_provider(
+        api_client, headers, "cat-provider", MODEL_TYPE_TEXT,
+        models=["deepseek-v4-flash", "deepseek-v4-pro"],
+    )
+
+    resp = _upsert(
+        api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"],
+        model_name="gpt-nonexistent",
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["detail"]["code"] == "LLM_BUSINESS_MODEL_NOT_IN_CATALOG"
+
+
+def test_upsert_model_in_catalog_ok(api_client):
+    """目录里的模型 ⇒ 200，且回显 `model_name` / `configured=True`。"""
+    headers = _register(api_client, "bp_okmodel")
+    provider = _create_provider(
+        api_client, headers, "cat-ok", MODEL_TYPE_TEXT,
+        models=["deepseek-v4-flash", "deepseek-v4-pro"],
+    )
+    resp = _upsert(
+        api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"],
+        model_name="deepseek-v4-pro",
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["model_name"] == "deepseek-v4-pro"
+    assert body["configured"] is True
+
+
+def test_clear_mapping_also_clears_model(api_client, db_factory):
+    """清空 `provider_key` ⇒ 模型一并清空（无服务商则无模型可言）。"""
+    headers = _register(api_client, "bp_clearmodel")
+    provider = _create_provider(
+        api_client, headers, "clearmodel", MODEL_TYPE_TEXT, models=["deepseek-v4-pro"],
+    )
+    assert _upsert(
+        api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"],
+        model_name="deepseek-v4-pro",
+    ).status_code == 200
+
+    resp = _upsert(api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, "", model_name="")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["provider_key"] == ""
+    assert body["model_name"] == ""
+    assert body["configured"] is False
+
+    user = _user_by_name(api_client, db_factory, "bp_clearmodel")
+    with db_factory() as db:
+        row = db.scalar(
+            select(LlmBusinessProvider).where(
+                LlmBusinessProvider.user_id == user.id,
+                LlmBusinessProvider.business_key == BUSINESS_KEY_GENERATE_NOTE.key,
+            )
+        )
+        assert row is not None and row.model_name == "", "清空映射必须连模型一起清"
+
+
+def test_list_exposes_model_name_and_provider_models(api_client):
+    """映射行端点下发 `model_name` / `provider_models` / `configured`（前端下拉联动）。"""
+    headers = _register(api_client, "bp_listmodel")
+    provider = _create_provider(
+        api_client, headers, "listmodel", MODEL_TYPE_TEXT,
+        models=["deepseek-v4-flash", "deepseek-v4-pro"],
+    )
+    assert _upsert(
+        api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"],
+        model_name="deepseek-v4-pro",
+    ).status_code == 200
+
+    resp = api_client.get("/api/llm/business-providers?platform=xhs", headers=headers)
+    assert resp.status_code == 200
+    rows = {r["business_key"]: r for r in resp.json()["items"]}
+    row = rows[BUSINESS_KEY_GENERATE_NOTE.key]
+    assert row["model_name"] == "deepseek-v4-pro"
+    assert row["provider_models"] == ["deepseek-v4-flash", "deepseek-v4-pro"]
+    assert row["configured"] is True
+
+    # 未配置的行：模型为空、目录为空、configured=False
+    other = rows[BUSINESS_KEY_GENERATE_COVER.key]
+    assert other["model_name"] == ""
+    assert other["provider_models"] == []
+    assert other["configured"] is False
+
+
+def test_resolve_uses_mapping_model_and_ignores_disabled_default(api_client, db_factory):
+    """解析层取映射里选的模型；服务商 `default_model` 不同也不回落。"""
+    headers = _register(api_client, "bp_resolvemodel")
+    # default_model 固定为 deepseek-v4-flash（见 _create_provider）
+    provider = _create_provider(
+        api_client, headers, "resolvemodel", MODEL_TYPE_TEXT,
+        models=["deepseek-v4-flash", "deepseek-v4-pro"],
+    )
+    assert _upsert(
+        api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"],
+        model_name="deepseek-v4-pro",
+    ).status_code == 200
+
+    user = _user_by_name(api_client, db_factory, "bp_resolvemodel")
+    with db_factory() as db:
+        ctx = resolve_business_provider(db, user, BUSINESS_KEY_GENERATE_NOTE)
+    assert ctx.model_name == "deepseek-v4-pro"

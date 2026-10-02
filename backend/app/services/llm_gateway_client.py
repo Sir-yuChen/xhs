@@ -98,6 +98,25 @@ class BusinessProviderTypeMismatchError(LLMGatewayError):
         )
 
 
+class BusinessModelRequiredError(LLMGatewayError):
+    """业务入口映射未指定**具体模型**（`llm_business_providers.model_name` 为空）。
+
+    v2.3（2026-10-02 用户口径「两者都应是必须选择，不指定具体的模型无法调用成功」）：
+    业务入口必须**同时**选定「服务商 + 该服务商下的某个具体模型」。
+
+    ⚠️ **刻意不回落 `default_model`**（v2.3 之前的口径）：回落 = 「看着正常，但这个
+    业务点实际在用服务商的兜底默认模型，而不是用户以为的那个」—— 与
+    `BusinessProviderNotConfiguredError` 同型的事故形态（用错了还不报错）。
+    正确的出路是让用户去「模型配置页」为该业务点选一个具体模型。
+    """
+
+    def __init__(self, business_key: str = "", platform: str = PLATFORM_XHS) -> None:
+        super().__init__(
+            f"该业务点还没选具体模型（{platform}/{business_key}），请到模型配置页选择服务商与模型",
+            code="LLM_BUSINESS_MODEL_REQUIRED",
+        )
+
+
 def _kind_label(kind: str) -> str:
     """`text`/`image` → 中文（错误文案用；未知值原样返回，不造名 —— DEF-057）。"""
     return {"text": "文本", "image": "图像"}.get(kind or "", kind or "")
@@ -231,10 +250,15 @@ def resolve_business_provider(
     用户口径：「业务中的使用点映射成固定 key，不同平台和不同的业务可以实时切换服务商」
     （设计 17 §13.2）。
 
-    三步，任一步不满足都**抛错、绝不回落**（§13.2.3 定稿）：
+    ⚠️ **v2.3**：口径补完为「**服务商 + 具体模型**两者都必须选定，不指定具体模型
+    无法调用成功」（2026-10-02）。故第 1.5 步新增「映射必须有 model_name」校验。
+
+    四步，任一步不满足都**抛错、绝不回落**（§13.2.3 定稿）：
 
     1. 查 `llm_business_providers` 的 `(user_id, platform, business_key)`
        —— 无行 ⇒ `BusinessProviderNotConfiguredError`；
+    1.5. 映射的 `model_name` 为空 ⇒ `BusinessModelRequiredError`
+       （**不回落 `default_model`** —— 那是 v2.3 前的静默兜底，已废除）；
     2. 业务点的 `kind`（见 `services/business_provider_keys`）必须等于
        服务商 `model_type` —— 不等 ⇒ `BusinessProviderTypeMismatchError`
        （**提前拦**：否则会拿文本模型去打图像接口，报一个看不懂的上游错）；
@@ -264,6 +288,11 @@ def resolve_business_provider(
     if mapping is None:
         raise BusinessProviderNotConfiguredError(key, platform)
 
+    # v2.3：必须显式选模型（不回落 default_model）。
+    model_name = (mapping.model_name or "").strip()
+    if not model_name:
+        raise BusinessModelRequiredError(key, platform)
+
     ctx = resolve_provider_context(db, user.id, mapping.provider_key)
 
     # 类型匹配：业务点的能力类别必须与服务商声明的一致（§13.2.1a）
@@ -279,7 +308,7 @@ def resolve_business_provider(
 
     return ResolvedModelContext(
         base_url=ctx.base_url,
-        model_name=ctx.default_model,
+        model_name=model_name,
         user_id=user.id,
         api_key=ctx.api_key,
         provider_key=ctx.provider_key,

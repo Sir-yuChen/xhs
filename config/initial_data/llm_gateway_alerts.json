@@ -1,0 +1,30 @@
+{
+  "_comment": "应用初始化数据 · LLM 网关预警规则（设计 17 §4.5）。语义：**新建服务商配置时**按用户补种这批保守默认规则（enabled=true 即生效），只补『该服务商名下缺失的规则』，已有规则一律不覆盖（用户改过/删过的不还魂）。门槛刻意保守 —— 只在『明显异常』时打扰用户：24h 失败率过半、或健康探测失败。不播 calls 绝对量阈值（不同服务商用量差异极大，播绝对值必然误报）。规则可删可改（§4.5.1）。作用域三级（v2.3）：platform/function/model_name 皆空 = 该服务商全量；本种子按「服务商」维度播（不播全网关、不播具体模型 —— 那两种由用户按需自建）。改默认规则清单改本文件，不要写死在代码里。",
+  "version": 2,
+  "gateway_alerts": [
+    {
+      "platform": "",
+      "function": "",
+      "model_name": "",
+      "metric": "fail_rate",
+      "operator": "gt",
+      "threshold": 0.5,
+      "window_seconds": 86400,
+      "level": "warning",
+      "enabled": true,
+      "remark": "该服务商近 24h 失败率过半即告警"
+    },
+    {
+      "platform": "",
+      "function": "",
+      "model_name": "",
+      "metric": "health",
+      "operator": "eq",
+      "threshold": 0,
+      "window_seconds": 86400,
+      "level": "error",
+      "enabled": true,
+      "remark": "健康探测失败（不可达）；从未探测不触发"
+    }
+  ]
+}

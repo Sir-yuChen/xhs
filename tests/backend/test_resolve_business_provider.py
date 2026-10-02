@@ -74,13 +74,27 @@ def _seed_gateway(
     return config
 
 
-def _seed_mapping(db: Session, user: User, business_key: str, provider_key: str) -> None:
+def _seed_mapping(
+    db: Session,
+    user: User,
+    business_key: str,
+    provider_key: str,
+    *,
+    model_name: str = "deepseek-v4-flash",
+) -> None:
+    """种一条映射行。
+
+    ⚠️ v2.3（设计 17 §13.2.3）：映射必须带**具体模型**（`model_name` 非空），
+    否则 `resolve_business_provider` 会抛 `LLM_BUSINESS_MODEL_REQUIRED` —— 默认给一个
+    合法值，让「四态」用例聚焦各自想测的失败分支（要测缺模型请显式传 `model_name=""`）。
+    """
     db.add(
         LlmBusinessProvider(
             user_id=user.id,
             platform="xhs",
             business_key=business_key,
             provider_key=provider_key,
+            model_name=model_name,
             enabled=True,
         )
     )
@@ -201,20 +215,65 @@ def test_disabled_provider_raises_and_does_not_fall_back(db_factory):
 # --------------------------------------------------------------------------- #
 
 
-def test_text_business_key_resolves_to_provider_default_model(db_factory):
-    """命中 ⇒ 上下文用服务商的 `default_model`（§13.2.4：模型名从服务商来）。"""
+def test_text_business_key_resolves_to_selected_model_not_default(db_factory):
+    """命中 ⇒ 上下文用**映射行显式选择的模型**，**不是**服务商的 `default_model`（v2.3）。
+
+    ⚠️ 这条用例在 v2.3 改写了语义：旧版（§13.2.4）是「模型名从服务商的 `default_model` 来」，
+    现在改为「业务入口必须显式选模型」。**故意让两者不同**（`default_model` =
+    `deepseek-v4-flash`、映射选 `deepseek-v4-pro`）—— 若实现回落到 `default_model`，
+    本用例必红。
+    """
     with db_factory() as db:
         user = _seed_user(db)
         _seed_gateway(db, user, provider_key="BP-TEXT", model_type="text",
                       default_model="deepseek-v4-flash")
-        _seed_mapping(db, user, BUSINESS_KEY_GENERATE_NOTE.key, "BP-TEXT")
+        _seed_mapping(db, user, BUSINESS_KEY_GENERATE_NOTE.key, "BP-TEXT",
+                      model_name="deepseek-v4-pro")
 
         ctx = llm_gateway_client.resolve_business_provider(db, user, BUSINESS_KEY_GENERATE_NOTE)
 
     assert ctx.base_url == "https://api.example.test/v1"
-    assert ctx.model_name == "deepseek-v4-flash"
+    assert ctx.model_name == "deepseek-v4-pro"
+    assert ctx.model_name != "deepseek-v4-flash", "不许回落到服务商 default_model"
     assert ctx.api_key == "***"  # 解密后的明文（服务层内，不进日志/响应）
     assert ctx.provider_key == "BP-TEXT"
+
+
+def test_mapping_without_model_raises_model_required(db_factory):
+    """映射**只选了服务商、没选模型** ⇒ `LLM_BUSINESS_MODEL_REQUIRED`，**不回落** `default_model`。
+
+    ⚠️ 落点判据：服务商有可用的 `default_model`，映射行 `model_name=""` ——
+    回落会「看起来正常但用的不是用户选的模型」，正是 v2.3 要禁的静默回落。
+    """
+    from backend.app.services.llm_gateway_client import BusinessModelRequiredError
+
+    with db_factory() as db:
+        user = _seed_user(db)
+        _seed_gateway(db, user, provider_key="BP-TEXT", model_type="text",
+                      default_model="deepseek-v4-flash")
+        _seed_mapping(db, user, BUSINESS_KEY_GENERATE_NOTE.key, "BP-TEXT", model_name="")
+
+        with pytest.raises(BusinessModelRequiredError) as excinfo:
+            llm_gateway_client.resolve_business_provider(db, user, BUSINESS_KEY_GENERATE_NOTE)
+
+    err = excinfo.value
+    assert err.code == "LLM_BUSINESS_MODEL_REQUIRED"
+    # 可读：带上 platform / business_key，用户知道去哪一行补选模型
+    assert "generate_note" in err.message
+    assert "xhs" in err.message
+
+
+def test_whitespace_model_is_treated_as_missing(db_factory):
+    """模型名只有空白 ⇒ 等同缺模型（`.strip()` 后判空，不给空白字符串开后门）。"""
+    from backend.app.services.llm_gateway_client import BusinessModelRequiredError
+
+    with db_factory() as db:
+        user = _seed_user(db)
+        _seed_gateway(db, user, provider_key="BP-TEXT", model_type="text")
+        _seed_mapping(db, user, BUSINESS_KEY_GENERATE_NOTE.key, "BP-TEXT", model_name="   ")
+
+        with pytest.raises(BusinessModelRequiredError):
+            llm_gateway_client.resolve_business_provider(db, user, BUSINESS_KEY_GENERATE_NOTE)
 
 
 def test_mapping_is_user_scoped(db_factory):

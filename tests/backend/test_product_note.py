@@ -203,7 +203,7 @@ def _setup(tmp_path):
                 base_url="http://127.0.0.1:9",
                 access_token="",
                 default_model="fake-model",
-                models_json="[]",
+                models_json='["fake-model"]',
                 enabled=True,
                 model_type="text",
                 healthy=True,
@@ -215,6 +215,8 @@ def _setup(tmp_path):
                 platform="xhs",
                 business_key=BUSINESS_KEY_GENERATE_NOTE.key,
                 provider_key="FAKE-KEY1",
+                # v2.3：业务入口必须显式带 model_name，且须在服务商目录内。
+                model_name="fake-model",
                 enabled=True,
             )
         )

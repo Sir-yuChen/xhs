@@ -3,8 +3,9 @@
 架构 A（2026-09-29 用户口径「令牌按平台发、平台下按功能发；预警做站内通知」）：
 - 令牌映射 `llm_gateway_tokens`：业务功能 (platform × function) → 上游令牌名。
   v1.7：上游是任意 OpenAI 兼容端点，令牌密钥在上游服务商侧签发，本组端点只管映射关系。
-- 预警规则 `llm_gateway_alerts`：用量阈值 / 失败率阈值 / 网关健康，监控任务轮询
-  本地台账对照触发，超限写 `notifications` 站内通知。
+- 预警规则 `llm_gateway_alerts`：**三级作用域**（v2.3）—— 全网关（`gateway_id` 为
+  `NULL`）/ 服务商 / 具体模型（`model_name` 非空），监控任务轮询本地台账对照触发，
+  超限写 `notifications` 站内通知。
 - 用量展示：从本地台账 `llm_gateway_usage_logs` 聚合（唯一真相源），不再依赖
   `llm_gateway_snapshots` 也不打任何上游管理 API（取代 v1.3 方案）。
 
@@ -85,8 +86,11 @@ def _serialize_alert(a: LlmGatewayAlert) -> dict:
     return {
         "id": a.id,
         "gateway_id": a.gateway_id,
+        #: v2.3：作用域（全网关 = gateway_id 为 None）——前端据此渲染/回填三选一
+        "scope": "all" if a.gateway_id is None else ("model" if a.model_name else "gateway"),
         "platform": a.platform,
         "function": a.function,
+        "model_name": a.model_name,
         "metric": a.metric,
         "operator": a.operator,
         "threshold": a.threshold,
@@ -100,9 +104,24 @@ def _serialize_alert(a: LlmGatewayAlert) -> dict:
 
 
 class GatewayAlertCreateRequest(BaseModel):
-    gateway_id: int
+    """创建预警规则（v2.3 三级作用域）。
+
+    作用域由两个字段共同表达（**互斥规则见 `_validate_alert_scope`**）：
+
+    | 作用域 | `gateway_id` | `model_name` |
+    |---|---|---|
+    | 全网关 | `null` | `""`（必须） |
+    | 服务商 | 具体 id | `""` |
+    | 具体模型 | 具体 id | 非空 |
+
+    ⚠️ `gateway_id` **改可空**（`null` = 全网关）：不用哨兵值，语义直白。
+    """
+
+    gateway_id: Optional[int] = None
     platform: str = ""
     function: str = ""
+    #: v2.3：具体模型名（`""` = 该服务商全模型；仅在指定服务商时有意义）
+    model_name: str = Field(default="", max_length=128)
     metric: str = Field(min_length=1, max_length=16)
     operator: str = "gt"
     threshold: float
@@ -133,6 +152,23 @@ def _validate_alert(payload_metric: str, payload_operator: str) -> None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"code": "LLM_ALERT_OPERATOR_UNSUPPORTED", "message": f"operator 需为 {ALERT_OPERATORS} 之一"},
+        )
+
+
+def _validate_alert_scope(gateway_id: Optional[int], model_name: str) -> None:
+    """校验三级作用域的字段组合（v2.3）。
+
+    唯一非法组合：**全网关 + 指定模型** —— 全网关不绑单个服务商，而「某个模型」
+    必须依附某个服务商才有意义；两者并存只会产生一条语义不明、永远不会命中的规则。
+    （其余组合都合法：`None`+`""`=全网关、`id`+`""`=服务商、`id`+非空=具体模型。）
+    """
+    if gateway_id is None and model_name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "LLM_ALERT_SCOPE_CONFLICT",
+                "message": "「全网关」作用域不能指定模型；按具体模型预警请先指定服务商",
+            },
         )
 
 
@@ -168,15 +204,21 @@ def create_gateway_alert(
     db: Session = Depends(get_db),
 ):
     _validate_alert(payload.metric, payload.operator)
-    gw = db.get(LlmGatewayConfig, payload.gateway_id)
-    if gw is None or gw.user_id != current_user.id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail={"code": "LLM_GATEWAY_NOT_FOUND", "message": "网关配置不存在"})
+    model_name = (payload.model_name or "").strip()
+    _validate_alert_scope(payload.gateway_id, model_name)
+
+    # 服务商作用域必须验证归属；全网关（gateway_id=None）跳过。
+    if payload.gateway_id is not None:
+        gw = db.get(LlmGatewayConfig, payload.gateway_id)
+        if gw is None or gw.user_id != current_user.id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail={"code": "LLM_GATEWAY_NOT_FOUND", "message": "服务商不存在"})
 
     alert = LlmGatewayAlert(
         user_id=current_user.id,
         gateway_id=payload.gateway_id,
         platform=payload.platform,
         function=payload.function,
+        model_name=model_name,
         metric=payload.metric,
         operator=payload.operator,
         threshold=payload.threshold,

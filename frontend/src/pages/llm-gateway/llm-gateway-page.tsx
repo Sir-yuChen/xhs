@@ -1,21 +1,17 @@
 import {
   AlertOutlined,
   ApiOutlined,
-  ExportOutlined,
   FundOutlined,
-  LogoutOutlined,
-  MenuFoldOutlined,
-  MenuUnfoldOutlined,
   ReloadOutlined,
-  UserOutlined,
 } from "@ant-design/icons";
-import { App, Avatar, Button, Card, Form, Input, InputNumber, Layout, Menu, Modal, Popconfirm, Select, Space, Switch, Table, Tag, Tooltip, Typography } from "antd";
+import { App, Button, Card, Col, Form, Input, InputNumber, Modal, Popconfirm, Row, Select, Space, Switch, Table, Tag, Tooltip, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
 import { PageHeader } from "../../components/layout/app-shell";
-import { useAuth } from "../../hooks/use-auth";
+import { WorkspaceShell } from "../../components/layout/workspace-shell";
+import { buildGatewayTree, isExpandableProvider, type GatewayTreeRow } from "./gateway-tree";
 import { UsageDashboardPanel } from "./usage-dashboard-panel";
 import {
   createGatewayConfig,
@@ -33,13 +29,13 @@ import {
 import type {
   LlmGatewayAlert,
   LlmGatewayAlertPayload,
+  LlmGatewayAlertScope,
   LlmGatewayConfig,
   LlmGatewayConfigPayload,
   LlmGatewayPlatformOption,
   LlmGatewayStats,
 } from "../../types";
 
-const { Sider, Header, Content } = Layout;
 const { Text } = Typography;
 
 // 行内简短展示用
@@ -47,6 +43,10 @@ function statsLine(stats: LlmGatewayStats["today"]): string {
   if (!stats) return "-";
   return `调用 ${stats.calls} · 成功 ${stats.success_calls} · Tokens ${stats.total_tokens} · 均耗 ${stats.avg_latency_ms}ms`;
 }
+
+// 服务商列表 = **父子树**（2026-10-02 用户口径「服务商列表使用父子树，父是服务商，
+// 子是服务商下的具体模型」）—— 构建逻辑抽到 `./gateway-tree.ts`，见该文件顶部注释
+// 说明「为何用 Table 可展开子行而非 Tree」以及「子行为何只承载模型名」。
 
 // 2026-09-29 设计 17 §7.1 v1.5：大模型网关 = 独立公共模块，有自己的工作区壳，
 // **壳层布局与小红书工作区（AppShell）保持一致**（Sider 220 可折叠 + logo 行 / 48px 顶栏 /
@@ -79,85 +79,24 @@ const DEFAULT_PATH = PAGE_ITEMS[0].path;
 
 // 挂载在 `/llm-gateway` 下的壳：一个 Sider + 一个 Header + 一个 Content，
 // 4 个页面各自是这条路由的子路由 —— 「菜单 = 独立页面」，但壳层只有一份。
+// 2026-10-02：壳层改为复用 `WorkspaceShell`（与小红书 AppShell 同一份），
+// 顺带补齐了此前网关页缺失的「主题切换 + 消息提醒」顶栏动作。
 export function LlmGatewayPage() {
-  const auth = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
 
   // 当前段：`/llm-gateway/<seg>` 的 `<seg>`；空 = 尚未选页（由内部 index 重定向兜底）
   const seg = location.pathname.replace(/^\/llm-gateway\/?/, "").split("/")[0] ?? "";
-  const [collapsed, setCollapsed] = useState(false);
-
-  const siderWidth = collapsed ? 64 : 220;
 
   return (
-    <Layout style={{ minHeight: "100vh" }}>
-      <Sider
-        collapsed={collapsed}
-        width={220}
-        collapsedWidth={64}
-        theme="dark"
-        trigger={null}
-        style={{
-          height: "100vh",
-          position: "fixed",
-          left: 0,
-          top: 0,
-          bottom: 0,
-          borderRight: "1px solid #303030",
-          overflow: "hidden",
-        }}
-      >
-        <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-          {/* Logo —— 与 AppShell 一致，点击回平台选择 */}
-          <div
-            style={{ padding: collapsed ? "14px 0" : "14px 16px", display: "flex", alignItems: "center", justifyContent: collapsed ? "center" : "space-between", borderBottom: "1px solid #303030", flexShrink: 0, cursor: "pointer" }}
-            onClick={() => navigate("/platform-select")}
-          >
-            <Space align="center" size={collapsed ? 0 : 8}>
-              <img src="/logo.jpg" alt="Logo" style={{ width: 28, height: 28, borderRadius: 6, objectFit: "cover", flexShrink: 0 }} />
-              {!collapsed && <span style={{ fontWeight: 600, fontSize: 14, color: "rgba(255,255,255,.85)" }}>大模型网关</span>}
-            </Space>
-            {!collapsed && <Button type="text" size="small" icon={<MenuFoldOutlined />} onClick={(e) => { e.stopPropagation(); setCollapsed(true); }} style={{ color: "rgba(255,255,255,.35)" }} />}
-          </div>
-          {collapsed && (
-            <div style={{ textAlign: "center", padding: "6px 0", borderBottom: "1px solid #262626", flexShrink: 0 }}>
-              <Button type="text" size="small" icon={<MenuUnfoldOutlined />} onClick={() => setCollapsed(false)} style={{ color: "rgba(255,255,255,.35)" }} />
-            </div>
-          )}
-
-          {/* Main nav —— 3 个**独立页面**（用量看板 / 服务商 / 预警规则；v1.9 令牌映射页已移除），
-              点击即切换子路由，`selectedKeys` 高亮当前页。 */}
-          <div style={{ flex: 1, overflowY: "auto", overflowX: "hidden" }}>
-            <Menu
-              theme="dark"
-              mode="inline"
-              selectedKeys={[seg]}
-              onClick={({ key }) => navigate(`/llm-gateway/${key}`)}
-              style={{ borderRight: 0 }}
-              items={PAGE_ITEMS.map((p) => ({ key: p.key, icon: p.icon, label: p.label }))}
-            />
-          </div>
-
-          {/* Footer —— 与 AppShell 一致：底部菜单 + 用户行 */}
-          <div style={{ flexShrink: 0, borderTop: "1px solid #303030" }}>
-            <div style={{ padding: collapsed ? "8px 0" : "8px 16px", borderTop: "1px solid #262626", display: "flex", alignItems: "center", gap: 8, justifyContent: collapsed ? "center" : "flex-start" }}>
-              <Avatar size={22} icon={<UserOutlined />} style={{ background: "#722ed1", flexShrink: 0, fontSize: 11 }}>{(auth.user?.username ?? "U")[0].toUpperCase()}</Avatar>
-              {!collapsed && (
-                <>
-                  <Text type="secondary" ellipsis style={{ fontSize: 12, flex: 1, lineHeight: "22px" }}>{auth.user?.username ?? "用户"}</Text>
-                  <Button type="text" icon={<LogoutOutlined />} onClick={() => void auth.logout()} size="small" style={{ color: "rgba(255,255,255,0.35)", flexShrink: 0 }} />
-                </>
-              )}
-            </div>
-          </div>
-        </div>
-      </Sider>
-
-      <Layout style={{ marginLeft: siderWidth, transition: "margin-left 0.2s" }}>
-        <GatewayRoutes />
-      </Layout>
-    </Layout>
+    <WorkspaceShell
+      brand="大模型网关"
+      mainItems={PAGE_ITEMS.map((p) => ({ key: p.key, icon: p.icon, label: p.label }))}
+      selectedKeys={[seg]}
+      onNavigate={(key) => navigate(`/llm-gateway/${key}`)}
+    >
+      <GatewayRoutes />
+    </WorkspaceShell>
   );
 }
 
@@ -195,7 +134,7 @@ function GatewayRoutes() {
   );
 }
 
-// 顶栏 + 内容容器：三个页面共用这一份骨架（避免每页各写一遍 Header/Content）。
+// 内容骨架：三个页面共用的页头（顶栏与 Content 容器由 `WorkspaceShell` 提供，这里不再重复）。
 function GatewaySection({
   eyebrow,
   title,
@@ -211,11 +150,8 @@ function GatewaySection({
 }) {
   return (
     <>
-      <Header style={{ padding: "0 24px", display: "flex", alignItems: "center", justifyContent: "flex-end", borderBottom: "1px solid #303030", height: 48, lineHeight: "48px" }} />
-      <Content style={{ padding: 24, minHeight: "calc(100vh - 48px)", overflow: "auto" }}>
-        <PageHeader eyebrow={eyebrow} title={title} description={description} action={action} />
-        {children}
-      </Content>
+      <PageHeader eyebrow={eyebrow} title={title} description={description} action={action} />
+      {children}
     </>
   );
 }
@@ -252,7 +188,6 @@ function GatewaysPage() {
   const [testingId, setTestingId] = useState<number | null>(null);
   const [togglingId, setTogglingId] = useState<number | null>(null);
   const [statsMap, setStatsMap] = useState<Record<number, LlmGatewayStats>>({});
-  const [selectedId, setSelectedId] = useState<number | null>(null);
   // 「使用平台」枚举**由后端下发**（v1.9 D3）—— 前端不写死选项
   const [platformOptions, setPlatformOptions] = useState<LlmGatewayPlatformOption[]>([]);
   // v1.9：模型下拉的候选（由**服务商**决定 ⇒ 点「拉取模型」时按表单当前地址+令牌现拉）
@@ -280,40 +215,32 @@ function GatewaysPage() {
     try {
       const data = await fetchGatewayConfigs();
       setGateways(data.items);
-      if (data.items.length > 0 && selectedId === null) {
-        setSelectedId(data.items[0].id);
-      }
+      // 列表挂载即拉**全部**服务商的调用量（调用量列按行展示，不再依赖「选中」交互）
+      const items = data.items;
+      void Promise.all(
+        items.map(async (g) => {
+          try {
+            const body = await fetchGatewayStats(g.id);
+            setStatsMap((prev) => ({ ...prev, [g.id]: body }));
+          } catch {
+            // 取不到 = 空态（不是错误）：统计列显示占位，不弹红
+            setStatsMap((prev) => ({ ...prev, [g.id]: { id: g.id, available: false, today: null, week: null } }));
+          }
+        })
+      );
     } catch {
       // 取不到由全局拦截器报；这里保证表格空态可见
     } finally {
       setLoading(false);
     }
-  }, [selectedId]);
+  }, []);
 
   useEffect(() => {
     void load();
   }, [load]);
 
-  const loadStats = useCallback(async (id: number) => {
-    try {
-      const body = await fetchGatewayStats(id);
-      setStatsMap((prev) => ({ ...prev, [id]: body }));
-    } catch {
-      // 取不到 = 空态（不是错误）：统计列显示占位，不弹红
-      setStatsMap((prev) => ({ ...prev, [id]: { id, available: false, today: null, week: null } }));
-    }
-  }, []);
-
-  // 选中服务商时拉统计（轻型，行内展示）
-  useEffect(() => {
-    if (selectedId === null) return;
-    void loadStats(selectedId);
-  }, [selectedId, loadStats]);
-
-  const selectedGateway = useMemo(
-    () => gateways.find((g) => g.id === selectedId) ?? gateways[0] ?? null,
-    [gateways, selectedId]
-  );
+  // 服务商 → 父子树（父 = 服务商，子 = 其模型目录）。数据源 = `gateways`（每项含 `models`）。
+  const treeData = useMemo(() => buildGatewayTree<LlmGatewayConfig>(gateways), [gateways]);
 
   const openCreate = () => {
     setEditing(null);
@@ -394,7 +321,6 @@ function GatewaysPage() {
       const result = await testGatewayConfig(g.id);
       message.success(`${g.name}：${result.message}`);
       await load();
-      if (selectedId === g.id) await loadStats(g.id);
     } catch {
       // 失败由拦截器报
     } finally {
@@ -429,36 +355,58 @@ function GatewaysPage() {
     }
   };
 
-  const columns: ColumnsType<LlmGatewayConfig> = [
+  // 列定义按**树节点**（`GatewayTreeRow`）书写，而不是 `LlmGatewayConfig`：
+  // 父行（服务商）渲染完整字段；子行（模型）只在「名称」列显示模型名、其余列以 `-` 占位。
+  // ⚠️ 每个 `render` 都用 `row.kind === "provider"` 早返回 —— 这是**同一个表格两套行形态**
+  // 的唯一分叉点；不抽两份列定义（同一语义不留两份实现，DEF-044 同型风险）。
+  const columns: ColumnsType<GatewayTreeRow<LlmGatewayConfig>> = [
     {
       title: "名称",
-      dataIndex: "name",
-      width: 140,
-      render: (name: string) => <Text strong>{name}</Text>,
+      key: "name",
+      width: 260,
+      render: (_v, row) => {
+        if (row.kind === "model") {
+          // 子行：模型名（缩进由表格的展开层级自带，这里只标一个图标区分「这是模型」）
+          return (
+            <Space size={6}>
+              <span style={{ color: "#8c8c8c" }}>└</span>
+              <Text code>{row.model}</Text>
+            </Space>
+          );
+        }
+        return <Text strong>{row.gateway.name}</Text>;
+      },
     },
     {
       // ⚠️ v1.9 新增（用户口径「连接配置页面新增唯一KEY，新增后不可编辑」）：
       // 表格里是**只读展示 + 可复制**（业务代码要用它，抄错代价高）；
       // 弹窗内不提供输入框 —— 服务端也拒改（PATCH 传它 ⇒ 422）。
+      // ⚠️ 子行（模型）**没有**服务编码 —— 它属于父级服务商，这里留 `-`。
       title: "服务编码",
-      dataIndex: "provider_key",
+      key: "provider_key",
       width: 190,
-      render: (key: string) => (
-        <Typography.Text
-          code
-          copyable={key ? { text: key, tooltips: ["复制 KEY", "已复制"] } : false}
-        >
-          {key || "-"}
-        </Typography.Text>
-      ),
+      render: (_v, row) => {
+        if (row.kind === "model") return <Text type="secondary">-</Text>;
+        const key = row.gateway.provider_key;
+        return (
+          <Typography.Text
+            code
+            copyable={key ? { text: key, tooltips: ["复制 KEY", "已复制"] } : false}
+          >
+            {key || "-"}
+          </Typography.Text>
+        );
+      },
     },
     {
       // ⚠️ v1.9 新增（用户口径「新增使用平台，后端新增枚举下拉选择必选」）：
       // 显示后端枚举的**中文名**（label），值仍是枚举键。
       title: "使用平台",
-      dataIndex: "platform",
+      key: "platform",
       width: 110,
-      render: (value: string) => {
+      render: (_v, row) => {
+        if (row.kind === "model") return <Text type="secondary">-</Text>;
+        const value = row.gateway.platform;
         const label = platformOptions.find((o) => o.value === value)?.label;
         // 枚举未加载/值不在枚举内 ⇒ 原样显示枚举键（**不造名**，缺值口径）
         return <Tag>{label ?? value ?? "-"}</Tag>;
@@ -466,31 +414,46 @@ function GatewaysPage() {
     },
     {
       title: "类型",
-      dataIndex: "model_type",
+      key: "model_type",
       width: 90,
-      render: (value: string) => (
-        <Tag color={value === "image" ? "purple" : "blue"}>
-          {value === "image" ? "图像" : "文本"}
-        </Tag>
-      ),
+      render: (_v, row) => {
+        if (row.kind === "model") return <Text type="secondary">-</Text>;
+        const value = row.gateway.model_type;
+        return (
+          <Tag color={value === "image" ? "purple" : "blue"}>
+            {value === "image" ? "图像" : "文本"}
+          </Tag>
+        );
+      },
     },
     {
       title: "地址",
-      dataIndex: "base_url",
-      render: (url: string) => <Text type="secondary">{url}</Text>,
+      key: "base_url",
+      render: (_v, row) =>
+        row.kind === "model" ? (
+          <Text type="secondary">-</Text>
+        ) : (
+          <Text type="secondary">{row.gateway.base_url}</Text>
+        ),
     },
     {
       title: "默认模型",
-      dataIndex: "default_model",
+      key: "default_model",
       width: 180,
-      render: (m: string) => (m ? <Text code>{m}</Text> : <Text type="secondary">-</Text>),
+      render: (_v, row) => {
+        if (row.kind === "model") return <Text type="secondary">-</Text>;
+        const m = row.gateway.default_model;
+        return m ? <Text code>{m}</Text> : <Text type="secondary">-</Text>;
+      },
     },
     {
       title: "调用量（今日/近7日）",
       key: "stats",
       width: 260,
-      render: (_v, record) => {
-        const s = statsMap[record.id];
+      render: (_v, row) => {
+        // 调用量是**服务商维度**的台账聚合（模型维度不单独统计）—— 子行留 `-`。
+        if (row.kind === "model") return <Text type="secondary">-</Text>;
+        const s = statsMap[row.gateway.id];
         if (!s?.available) return <Text type="secondary">{s?.message ?? "-"}</Text>;
         return (
           <Typography.Paragraph style={{ margin: 0, fontSize: 12 }} type="secondary" ellipsis={{ rows: 2 }}>
@@ -505,52 +468,74 @@ function GatewaysPage() {
       title: "令牌",
       key: "tokens",
       width: 90,
-      render: (_v, record) =>
-        record.has_access_token ? <Tag color="green">已配置</Tag> : <Text type="secondary">无</Text>,
+      render: (_v, row) =>
+        row.kind === "model" ? (
+          <Text type="secondary">-</Text>
+        ) : row.gateway.has_access_token ? (
+          <Tag color="green">已配置</Tag>
+        ) : (
+          <Text type="secondary">无</Text>
+        ),
     },
     {
       title: "健康",
-      dataIndex: "healthy",
+      key: "healthy",
       width: 90,
-      render: (healthy: boolean, record) => (
-        <Tooltip title={record.last_health_at ? `最近探测 ${record.last_health_at}` : "尚未探测"}>
-          <Tag color={healthy ? "green" : "orange"}>{healthy ? "正常" : "未探测"}</Tag>
-        </Tooltip>
-      ),
+      render: (_v, row) => {
+        // 健康探测是**服务商维度**的（`/{id}/test` 打的是服务商地址）—— 模型不单独探活。
+        if (row.kind === "model") return <Text type="secondary">-</Text>;
+        const g = row.gateway;
+        return (
+          <Tooltip title={g.last_health_at ? `最近探测 ${g.last_health_at}` : "尚未探测"}>
+            <Tag color={g.healthy ? "green" : "orange"}>{g.healthy ? "正常" : "未探测"}</Tag>
+          </Tooltip>
+        );
+      },
     },
     {
       // ⚠️ v1.9 新增（用户口径「新增停用开启功能」）：替代被移除的「删除」。
       // 停用语义 = **业务取不到该服务商**（后端抛 LLM_PROVIDER_DISABLED，不回落）。
+      // ⚠️ 只作用于**服务商**（父行）；模型没有独立的启停（服务商停用即其下模型全不可用）。
       title: "启用",
       key: "enabled",
       width: 90,
-      render: (_v, record) => (
-        <Tooltip title={record.enabled ? "点击停用（业务将取不到该服务商）" : "点击启用"}>
-          <Switch
-            size="small"
-            checked={record.enabled}
-            loading={togglingId === record.id}
-            onChange={(next) => void toggleEnabled(record, next)}
-          />
-        </Tooltip>
-      ),
+      render: (_v, row) => {
+        if (row.kind === "model") return <Text type="secondary">-</Text>;
+        const g = row.gateway;
+        return (
+          <Tooltip title={g.enabled ? "点击停用（业务将取不到该服务商）" : "点击启用"}>
+            <Switch
+              size="small"
+              checked={g.enabled}
+              loading={togglingId === g.id}
+              onChange={(next) => void toggleEnabled(g, next)}
+            />
+          </Tooltip>
+        );
+      },
     },
     {
+      // 操作同样是**服务商维度**的（测试打的是服务商地址、编辑编辑的是服务商行）。
+      // 子行（模型）不提供任何操作 —— 模型由服务商「拉取模型」刷新，不是独立可编辑对象。
       title: "操作",
       key: "actions",
       width: 130,
-      render: (_v, record) => (
-        <Space size="small">
-          <Button type="link" size="small" loading={testingId === record.id} onClick={() => void runTest(record)}>
-            测试
-          </Button>
-          <Button type="link" size="small" onClick={() => openEdit(record)}>
-            编辑
-          </Button>
-          {/* ⚠️ v1.9：「删除」按钮 + Popconfirm **整段移除**（用户口径「移除删除功能」）。
-              替代入口 = 上面的启用开关。后端 DELETE 保留为 410 墓碑，前端不再调用。 */}
-        </Space>
-      ),
+      render: (_v, row) => {
+        if (row.kind === "model") return <Text type="secondary">-</Text>;
+        const g = row.gateway;
+        return (
+          <Space size="small">
+            <Button type="link" size="small" loading={testingId === g.id} onClick={() => void runTest(g)}>
+              测试
+            </Button>
+            <Button type="link" size="small" onClick={() => openEdit(g)}>
+              编辑
+            </Button>
+            {/* ⚠️ v1.9：「删除」按钮 + Popconfirm **整段移除**（用户口径「移除删除功能」）。
+                替代入口 = 上面的启用开关。后端 DELETE 保留为 410 墓碑，前端不再调用。 */}
+          </Space>
+        );
+      },
     },
   ];
 
@@ -567,41 +552,27 @@ function GatewaysPage() {
     >
       <Card
         extra={
-          <Space size={12} align="center">
-            {selectedGateway ? (
-              <>
-                <Text type="secondary" style={{ fontSize: 12 }}>选中：</Text>
-                <Select
-                  size="small"
-                  style={{ minWidth: 180 }}
-                  value={selectedGateway.id}
-                  onChange={(id: number) => setSelectedId(id)}
-                  options={gateways.map((g) => ({ value: g.id, label: g.name }))}
-                />
-                <Button
-                  size="small"
-                  icon={<ExportOutlined />}
-                  onClick={() => window.open(selectedGateway.base_url, "_blank", "noopener")}
-                >
-                  新窗口打开
-                </Button>
-              </>
-            ) : null}
-            <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={() => void load()}>
-              刷新
-            </Button>
-          </Space>
+          <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={() => void load()}>
+            刷新
+          </Button>
         }
       >
-        <Table<LlmGatewayConfig>
-          rowKey="id"
+        <Table<GatewayTreeRow<LlmGatewayConfig>>
+          rowKey="key"
           size="small"
           loading={loading}
           columns={columns}
-          dataSource={gateways}
+          dataSource={treeData}
           pagination={false}
-          onRow={(record) => ({ onClick: () => setSelectedId(record.id), style: { cursor: "pointer" } })}
-          rowClassName={(record) => (record.id === selectedId ? "gw-row-selected" : "")}
+          // ⚠️ 父子树（2026-10-02 用户口径）：父 = 服务商，子 = 服务商下的具体模型。
+          // 每行自带 `children`（见 `buildGatewayTree`）⇒ 表格自动渲染展开箭头。
+          // `defaultExpandAllRows` 只在**首次挂载**生效，因此把「全展开」设成默认
+          // （服务商数量有限，模型目录正是用户要看的）；用户可手动折叠。
+          expandable={{
+            defaultExpandAllRows: true,
+            // 无模型的父行不给展开箭头（避免出现「点了没反应」的空箭头）
+            rowExpandable: isExpandableProvider,
+          }}
           locale={{ emptyText: "还没有服务商 —— 点右上「新增服务商」添加第一个" }}
         />
       </Card>
@@ -733,34 +704,47 @@ function useGatewayOptions() {
 // + lib/api.ts 4 个请求函数 + LlmGatewayToken 两个类型，全部随
 // llm_gateway_tokens 表退场（设计 17 §7.1a）。
 
-// ── ④ 预警规则（独立页面） ──
+// ── ④ 预警规则（独立页面；v2.3 三级作用域） ──
+//
+// 作用域三级（设计 17 §7.1b）：
+//   ① 全网关  → 逐服务商独立评估，谁的指标超阈值就给谁发通知（Plan A）
+//   ② 服务商  → 只评估指定服务商
+//   ③ 具体模型 → 只评估指定服务商的指定模型
+// 唯一非法组合 = 全网关 + 指定模型（后端 400 `LLM_ALERT_SCOPE_CONFLICT`）。
+//
+// ⚠️ 列表**不按网关过滤**：后端 `gateway_id` 过滤会把 `gateway_id=null` 的**全网关规则滤掉**，
+// 所以这里全量拉取，只在渲染时把「所属服务商」列拍平（全网关行显示「全网关」标签）。
 function AlertsPage() {
   const { message } = App.useApp();
   const { gateways, options: gatewayOptions } = useGatewayOptions();
   const [form] = Form.useForm<LlmGatewayAlertPayload>();
   const [alerts, setAlerts] = useState<LlmGatewayAlert[]>([]);
   const [loading, setLoading] = useState(false);
-  const [selectedGatewayId, setSelectedGatewayId] = useState<number | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<LlmGatewayAlert | null>(null);
+  /** 表单内**作用域单选**（不提交给后端，只驱动 gateway_id / model_name 两字段） */
+  const [formScope, setFormScope] = useState<LlmGatewayAlertScope>("all");
+  /** 表单内**当前选中的服务商**（模型下拉候选来自它） */
+  const [formGatewayId, setFormGatewayId] = useState<number | null>(null);
 
-  useEffect(() => {
-    if (selectedGatewayId === null && gateways.length > 0) {
-      setSelectedGatewayId(gateways[0].id);
-    }
-  }, [gateways, selectedGatewayId]);
+  const gatewayNameOf = useMemo(() => {
+    const m = new Map<number, string>();
+    gateways.forEach((g) => m.set(g.id, g.name));
+    return m;
+  }, [gateways]);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await fetchGatewayAlerts({ gateway_id: selectedGatewayId ?? undefined });
+      // 全量拉取（**不传 gateway_id**），让全网关规则也在列表里可见
+      const data = await fetchGatewayAlerts();
       setAlerts(data.items);
     } catch {
       setAlerts([]);
     } finally {
       setLoading(false);
     }
-  }, [selectedGatewayId]);
+  }, []);
 
   useEffect(() => {
     void load();
@@ -769,13 +753,19 @@ function AlertsPage() {
   const openCreate = () => {
     setEditing(null);
     form.resetFields();
+    // 默认「全网关」（覆盖所有服务商，最不容易漏配）
+    setFormScope("all");
+    setFormGatewayId(null);
+    form.setFieldsValue({ operator: "gt", window_seconds: 86400, level: "warning", metric: "fail_rate" } as LlmGatewayAlertPayload);
     setModalOpen(true);
   };
 
   const openEdit = (a: LlmGatewayAlert) => {
     setEditing(a);
+    const scope: LlmGatewayAlertScope = a.scope ?? (a.gateway_id === null ? "all" : a.model_name ? "model" : "gateway");
+    setFormScope(scope);
+    setFormGatewayId(a.gateway_id ?? null);
     form.setFieldsValue({
-      gateway_id: a.gateway_id,
       platform: a.platform,
       function: a.function,
       metric: a.metric,
@@ -784,14 +774,25 @@ function AlertsPage() {
       window_seconds: a.window_seconds,
       level: a.level,
       enabled: a.enabled,
-    });
+    } as LlmGatewayAlertPayload);
     setModalOpen(true);
   };
 
   const submit = async () => {
     const values = await form.validateFields();
+    const gatewayId = formScope === "all" ? null : formGatewayId;
+    const modelName = formScope === "model" ? (values.model_name ?? "").trim() : "";
+    if (formScope !== "all" && gatewayId === null) {
+      message.warning("请选择服务商");
+      return;
+    }
+    if (formScope === "model" && !modelName) {
+      message.warning("请选择具体模型");
+      return;
+    }
     try {
       if (editing) {
+        // 作用域不可改（同网关不可改的旧纪律）：只允许改阈值类字段
         await updateGatewayAlert(editing.id, {
           threshold: values.threshold,
           operator: values.operator,
@@ -802,7 +803,8 @@ function AlertsPage() {
         message.success("已更新预警规则");
       } else {
         await createGatewayAlert({
-          gateway_id: values.gateway_id,
+          gateway_id: gatewayId,
+          model_name: modelName,
           platform: values.platform ?? "",
           function: values.function ?? "",
           metric: values.metric,
@@ -833,9 +835,46 @@ function AlertsPage() {
 
   const columns: ColumnsType<LlmGatewayAlert> = [
     {
-      title: "范围",
+      title: "作用域",
       key: "scope",
-      width: 160,
+      width: 130,
+      render: (_v, r) => {
+        const scope: LlmGatewayAlertScope = r.scope ?? (r.gateway_id === null ? "all" : r.model_name ? "model" : "gateway");
+        if (scope === "all") return <Tag color="geekblue">全网关</Tag>;
+        if (scope === "model") return <Tag color="purple">具体模型</Tag>;
+        return <Tag color="blue">指定服务商</Tag>;
+      },
+    },
+    {
+      title: "所属服务商 / 模型",
+      key: "target",
+      width: 220,
+      render: (_v, r) => {
+        const scope: LlmGatewayAlertScope = r.scope ?? (r.gateway_id === null ? "all" : r.model_name ? "model" : "gateway");
+        if (scope === "all") {
+          return (
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              全部服务商（逐个独立评估）
+            </Text>
+          );
+        }
+        const gwName = r.gateway_id === null ? "-" : gatewayNameOf.get(r.gateway_id) ?? `#${r.gateway_id}`;
+        return (
+          <Space direction="vertical" size={0}>
+            <Text>{gwName}</Text>
+            {scope === "model" && (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                模型：{r.model_name}
+              </Text>
+            )}
+          </Space>
+        );
+      },
+    },
+    {
+      title: "平台 / 功能",
+      key: "pf",
+      width: 140,
       render: (_v, r) => <Text>{`${r.platform || "全平台"} / ${r.function || "全功能"}`}</Text>,
     },
     {
@@ -860,7 +899,7 @@ function AlertsPage() {
     {
       title: "窗口",
       dataIndex: "window_seconds",
-      width: 100,
+      width: 90,
       render: (s: number) => <Text type="secondary">{Math.round(s / 3600)}h</Text>,
     },
     {
@@ -878,13 +917,13 @@ function AlertsPage() {
     {
       title: "最近触发",
       dataIndex: "last_fired_at",
-      width: 180,
+      width: 170,
       render: (v: string | null) => (v ? <Text type="secondary">{v}</Text> : <Text type="secondary">-</Text>),
     },
     {
       title: "操作",
       key: "actions",
-      width: 150,
+      width: 130,
       render: (_v, record) => (
         <Space size="small">
           <Button type="link" size="small" onClick={() => openEdit(record)}>
@@ -900,11 +939,19 @@ function AlertsPage() {
     },
   ];
 
+  /** 模型下拉候选 = 所选服务商的模型目录（未选服务商 / 目录为空 ⇒ 空态） */
+  const modelOptions = useMemo(() => {
+    if (formGatewayId === null) return [];
+    const gw = gateways.find((g) => g.id === formGatewayId);
+    const models: string[] = gw?.models ?? [];
+    return models.map((m) => ({ value: m, label: m }));
+  }, [gateways, formGatewayId]);
+
   return (
     <GatewaySection
       eyebrow="LLM Gateway"
       title="预警规则"
-      description="用量 / 失败率 / 健康 三类阈值规则。由定时任务「LLM 网关预警」轮询本地台账，超阈值即写站内通知。"
+      description="用量 / 失败率 / 健康 三类阈值规则，作用域支持「全网关 / 指定服务商 / 指定服务商 + 具体模型」三级。由定时任务「LLM 网关预警」轮询本地台账，超阈值即写站内通知。"
       action={
         <Button type="primary" onClick={openCreate}>
           新增预警规则
@@ -913,23 +960,12 @@ function AlertsPage() {
     >
       <Card
         extra={
-          <Space size={12} align="center">
-            <Text type="secondary" style={{ fontSize: 12 }}>网关：</Text>
-            <Select
-              size="small"
-              style={{ minWidth: 180 }}
-              value={selectedGatewayId ?? undefined}
-              onChange={(id: number) => setSelectedGatewayId(id)}
-              options={gatewayOptions}
-              placeholder="选择网关"
-            />
-            <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={() => void load()}>
-              刷新
-            </Button>
-          </Space>
+          <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={() => void load()}>
+            刷新
+          </Button>
         }
       >
-        {gateways.length === 0 ? (
+        {gateways.length === 0 && alerts.length === 0 ? (
           <Typography.Paragraph type="secondary" style={{ margin: 0 }}>
             还没有服务商 —— 请先在「服务商」页新增一个。
           </Typography.Paragraph>
@@ -956,41 +992,104 @@ function AlertsPage() {
         destroyOnClose
       >
         <Form form={form} layout="vertical" autoComplete="off">
-          <Form.Item name="gateway_id" label="网关" rules={[{ required: true, message: "请选择网关" }]}>
-            <Select disabled={!!editing} placeholder="选择网关" options={gatewayOptions} />
-          </Form.Item>
-          <Form.Item name="platform" label="平台（留空 = 全平台）">
-            <Input autoComplete="off" placeholder="xhs" />
-          </Form.Item>
-          <Form.Item name="function" label="功能（留空 = 全功能）">
-            <Input autoComplete="off" placeholder="generate" />
-          </Form.Item>
-          <Form.Item name="metric" label="指标" rules={[{ required: true, message: "请选择指标" }]}>
+          <Form.Item label="作用域" required>
             <Select
-              placeholder="选择指标"
+              value={formScope}
+              disabled={!!editing}
+              onChange={(v: LlmGatewayAlertScope) => {
+                setFormScope(v);
+                if (v === "all") {
+                  setFormGatewayId(null);
+                }
+              }}
               options={[
-                { value: "calls", label: "调用量" },
-                { value: "fail_rate", label: "失败率" },
-                { value: "health", label: "健康状态" },
+                { value: "all", label: "全网关（所有服务商逐个独立评估）" },
+                { value: "gateway", label: "指定服务商" },
+                { value: "model", label: "指定服务商 + 具体模型" },
               ]}
             />
           </Form.Item>
-          <Form.Item name="operator" label="操作符" initialValue="gt">
-            <Select
-              options={[
-                { value: "gt", label: "大于 >" },
-                { value: "gte", label: "大于等于 ≥" },
-                { value: "lt", label: "小于 <" },
-                { value: "eq", label: "等于 =" },
-              ]}
-            />
-          </Form.Item>
-          <Form.Item name="threshold" label="阈值" rules={[{ required: true, message: "请填写阈值" }]} extra="失败率填 0~1（如 0.3 = 30%）；其余填绝对值">
-            <InputNumber style={{ width: "100%" }} min={0} />
-          </Form.Item>
-          <Form.Item name="window_seconds" label="统计窗口（秒）" initialValue={86400} extra="默认 86400 = 24 小时">
-            <InputNumber style={{ width: "100%" }} min={60} />
-          </Form.Item>
+          {formScope !== "all" && (
+            <Form.Item label="服务商" required extra={editing ? "作用域不可修改" : undefined}>
+              <Select
+                value={formGatewayId ?? undefined}
+                disabled={!!editing}
+                placeholder="选择服务商"
+                options={gatewayOptions}
+                onChange={(id: number) => {
+                  setFormGatewayId(id);
+                  // 换服务商 ⇒ 已选模型可能不在新目录里 ⇒ 清掉，避免提交一个不存在的模型
+                  form.setFieldValue("model_name", undefined);
+                }}
+              />
+            </Form.Item>
+          )}
+          {formScope === "model" && (
+            <Form.Item
+              name="model_name"
+              label="具体模型"
+              required
+              extra={modelOptions.length === 0 ? "该服务商暂无模型目录，请先到「服务商」页拉取模型" : undefined}
+              rules={[{ required: true, message: "请选择具体模型" }]}
+            >
+              <Select
+                placeholder={formGatewayId === null ? "请先选择服务商" : "选择模型"}
+                disabled={formGatewayId === null || modelOptions.length === 0}
+                options={modelOptions}
+                showSearch
+              />
+            </Form.Item>
+          )}
+          <Row gutter={16}>
+            <Col span={12}>
+              <Form.Item name="platform" label="平台（留空 = 全平台）">
+                <Input autoComplete="off" placeholder="xhs" />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="function" label="功能（留空 = 全功能）">
+                <Input autoComplete="off" placeholder="generate" />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Row gutter={16}>
+            <Col span={12}>
+              <Form.Item name="metric" label="指标" rules={[{ required: true, message: "请选择指标" }]}>
+                <Select
+                  placeholder="选择指标"
+                  options={[
+                    { value: "calls", label: "调用量" },
+                    { value: "fail_rate", label: "失败率" },
+                    { value: "health", label: "健康状态" },
+                  ]}
+                />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="operator" label="操作符" initialValue="gt">
+                <Select
+                  options={[
+                    { value: "gt", label: "大于 >" },
+                    { value: "gte", label: "大于等于 ≥" },
+                    { value: "lt", label: "小于 <" },
+                    { value: "eq", label: "等于 =" },
+                  ]}
+                />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Row gutter={16}>
+            <Col span={12}>
+              <Form.Item name="threshold" label="阈值" rules={[{ required: true, message: "请填写阈值" }]} extra="失败率填 0~1（如 0.3 = 30%）；其余填绝对值">
+                <InputNumber style={{ width: "100%" }} min={0} />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="window_seconds" label="统计窗口（秒）" initialValue={86400} extra="默认 86400 = 24 小时">
+                <InputNumber style={{ width: "100%" }} min={60} />
+              </Form.Item>
+            </Col>
+          </Row>
           <Form.Item name="level" label="通知级别" initialValue="warning">
             <Select
               options={[
