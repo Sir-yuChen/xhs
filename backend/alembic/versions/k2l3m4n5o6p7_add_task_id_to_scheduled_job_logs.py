@@ -41,9 +41,13 @@ def upgrade() -> None:
     columns = {column["name"] for column in inspector.get_columns("scheduled_job_logs")}
     if "task_id" in columns:
         return
+    # 索引守卫与列守卫各查各的（理由同 `j1k2l3m4n5o6`：SQLite 改列名不连带改索引名，
+    # 幂等复跑时列守卫可能放行而索引其实还在）。
+    indexes = {index["name"] for index in inspector.get_indexes("scheduled_job_logs")}
     with op.batch_alter_table("scheduled_job_logs", schema=None) as batch_op:
         batch_op.add_column(sa.Column("task_id", sa.Integer(), nullable=True))
-        batch_op.create_index("ix_scheduled_job_logs_task_id", ["task_id"])
+        if "ix_scheduled_job_logs_task_id" not in indexes:
+            batch_op.create_index("ix_scheduled_job_logs_task_id", ["task_id"])
 
 
 def downgrade() -> None:

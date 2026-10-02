@@ -51,11 +51,19 @@ def upgrade() -> None:
     columns = {column["name"] for column in inspector.get_columns("scheduled_job_logs")}
     if "account_id" in columns:
         return
+    # ⚠️ 2026-09-30 补**索引**守卫（不能只看列）：后续迁移 `b3c4d5e6f7a8`（ADR-021）把
+    #    本列改名成 `platform_account_id`，而 **SQLite 改列名不会连带改索引名** ⇒
+    #    `ix_scheduled_job_logs_account_id` 仍留在表上。于是「stamp 回父版本再 upgrade head」
+    #    的幂等复跑里，本迁移的**列守卫看不出来**（`account_id` 确实已不在列集合里），
+    #    直接 create_index 就撞 `index ix_scheduled_job_logs_account_id already exists`。
+    #    列守卫与索引守卫**必须各查各的**（列没了不等于索引没了）。
+    indexes = {index["name"] for index in inspector.get_indexes("scheduled_job_logs")}
     with op.batch_alter_table("scheduled_job_logs", schema=None) as batch_op:
         batch_op.add_column(sa.Column("account_id", sa.Integer(), nullable=True))
-        batch_op.create_index(
-            "ix_scheduled_job_logs_account_id", ["account_id"]
-        )
+        if "ix_scheduled_job_logs_account_id" not in indexes:
+            batch_op.create_index(
+                "ix_scheduled_job_logs_account_id", ["account_id"]
+            )
 
 
 def downgrade() -> None:
