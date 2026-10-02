@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { PlatformSelector } from "../../components/layout/platform-selector";
+import { useThemePalette } from "../../app/providers";
 import { useAuth } from "../../hooks/use-auth";
 import { fetchPlatforms } from "../../lib/api";
 import { fallbackPlatforms } from "../../lib/platforms";
@@ -14,6 +15,7 @@ const { Title, Text } = Typography;
 export function PlatformSelectPage() {
   const auth = useAuth();
   const navigate = useNavigate();
+  const p = useThemePalette();
   const [platforms, setPlatforms] = useState<PlatformMeta[]>(fallbackPlatforms);
 
   useEffect(() => {
@@ -24,7 +26,7 @@ export function PlatformSelectPage() {
     <div
       style={{
         minHeight: "100vh",
-        background: "#0a0a0a",
+        background: p.pageBg,
         padding: "48px 40px",
       }}
     >
@@ -76,7 +78,7 @@ export function PlatformSelectPage() {
           extra={
             <Card
               hoverable
-              style={{ borderColor: "#303030", cursor: "pointer" }}
+              style={{ borderColor: p.border, cursor: "pointer" }}
               styles={{ body: { padding: "20px 24px" } }}
               onClick={() => navigate("/llm-gateway")}
             >
@@ -109,7 +111,7 @@ export function PlatformSelectPage() {
                   <Tag color="purple" style={{ margin: 0, borderRadius: 4 }}>
                     公共
                   </Tag>
-                  <ArrowRightOutlined style={{ color: "rgba(255,255,255,0.45)", fontSize: 14 }} />
+                  <ArrowRightOutlined style={{ color: p.textTertiary, fontSize: 14 }} />
                 </div>
               </div>
             </Card>

@@ -2,6 +2,7 @@ import { ArrowLeftOutlined } from "@ant-design/icons";
 import { Button, Result, Typography } from "antd";
 import { useNavigate, useParams } from "react-router-dom";
 
+import { useThemePalette } from "../../app/providers";
 import { getPlatform } from "../../lib/platforms";
 
 const { Paragraph } = Typography;
@@ -10,6 +11,7 @@ export function ComingSoonPage() {
   const { platformId } = useParams();
   const platform = getPlatform(platformId);
   const navigate = useNavigate();
+  const p = useThemePalette();
 
   return (
     <div
@@ -18,7 +20,7 @@ export function ComingSoonPage() {
         alignItems: "center",
         justifyContent: "center",
         minHeight: "100vh",
-        background: "#0a0a0a",
+        background: p.pageBg,
       }}
     >
       <Result

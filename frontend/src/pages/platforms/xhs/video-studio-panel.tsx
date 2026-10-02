@@ -1,6 +1,8 @@
 import { VideoCameraOutlined } from "@ant-design/icons";
 import { Card, Empty, Typography } from "antd";
 
+import { useThemePalette } from "../../../app/providers";
+
 const { Text } = Typography;
 
 /**
@@ -12,13 +14,14 @@ const { Text } = Typography;
  * 悄悄做实，也不把占位撤掉让用户以为曾有的功能丢了。
  */
 export function VideoStudioPanel() {
+  const p = useThemePalette();
   return (
     <Card
-      style={{ background: "#1a1a1a", borderRadius: 8, border: "1px solid #303030" }}
+      style={{ background: p.cardBg, borderRadius: 8, border: `1px solid ${p.border}` }}
       styles={{ body: { padding: 48 } }}
     >
       <Empty
-        image={<VideoCameraOutlined style={{ fontSize: 64, color: "#8c8c8c" }} />}
+        image={<VideoCameraOutlined style={{ fontSize: 64, color: p.textTertiary }} />}
         imageStyle={{ height: 80 }}
         description={
           <div>

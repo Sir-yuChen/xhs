@@ -34,6 +34,7 @@ import type { Dayjs } from "dayjs";
 import { useEffect, useState } from "react";
 
 import { PageHeader } from "../../../components/layout/app-shell";
+import { useThemePalette } from "../../../app/providers";
 import {
   deletePublishJob,
   fetchAccounts,
@@ -74,15 +75,15 @@ function isFutureScheduledAt(value: string): boolean {
   return Number.isFinite(timestamp) && timestamp > Date.now();
 }
 
-const panelStyle: React.CSSProperties = {
-  background: "#1a1a1a",
-  borderRadius: 8,
-  border: "1px solid #303030",
-};
-
 const cardBodyStyle: React.CSSProperties = { padding: 16 };
 
 export function XhsPublishPage() {
+  const p = useThemePalette();
+  const panelStyle: React.CSSProperties = {
+    background: p.cardBg,
+    borderRadius: 8,
+    border: `1px solid ${p.border}`,
+  };
   const [jobs, setJobs] = useState<PublishJob[]>([]);
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [assets, setAssets] = useState<PublishAsset[]>([]);
@@ -321,7 +322,7 @@ export function XhsPublishPage() {
               }
               extra={<Tag>{filteredJobs.length} 个</Tag>}
               style={panelStyle}
-              styles={{ body: { padding: 0 }, header: { borderBottom: "1px solid #303030" } }}
+              styles={{ body: { padding: 0 }, header: { borderBottom: `1px solid ${p.border}` } }}
             >
               <List
                 dataSource={filteredJobs}
@@ -392,11 +393,11 @@ export function XhsPublishPage() {
                       <Card
                         title={<Space><EyeOutlined /><span>内容预览</span></Space>}
                         style={panelStyle}
-                        styles={{ body: cardBodyStyle, header: { borderBottom: "1px solid #303030" } }}
+                        styles={{ body: cardBodyStyle, header: { borderBottom: `1px solid ${p.border}` } }}
                         extra={<Text type="secondary" style={{ fontSize: 12 }}>内容修改请前往草稿工坊</Text>}
                       >
                         <Title level={5} style={{ marginBottom: 8 }}>{selectedJob.title || "未填写标题"}</Title>
-                        <Paragraph style={{ whiteSpace: "pre-wrap", color: "rgba(255,255,255,.65)", fontSize: 13, marginBottom: 16 }}>
+                        <Paragraph style={{ whiteSpace: "pre-wrap", color: p.textSecondary, fontSize: 13, marginBottom: 16 }}>
                           {selectedJob.body || "暂无正文"}
                         </Paragraph>
 
@@ -458,7 +459,7 @@ export function XhsPublishPage() {
                       <Card
                         title={<Space><CalendarOutlined /><span>发布参数</span></Space>}
                         style={{ ...panelStyle, marginBottom: 16 }}
-                        styles={{ body: cardBodyStyle, header: { borderBottom: "1px solid #303030" } }}
+                        styles={{ body: cardBodyStyle, header: { borderBottom: `1px solid ${p.border}` } }}
                       >
                         <Form layout="vertical" size="small">
                           <Form.Item label="发布账号" required>
@@ -523,7 +524,7 @@ export function XhsPublishPage() {
                           </Space>
                         }
                         style={panelStyle}
-                        styles={{ body: cardBodyStyle, header: { borderBottom: "1px solid #303030" } }}
+                        styles={{ body: cardBodyStyle, header: { borderBottom: `1px solid ${p.border}` } }}
                       >
                         <List
                           size="small"

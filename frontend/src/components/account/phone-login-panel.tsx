@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { confirmXhsPhoneLogin, detailMessage, sendXhsPhoneCode } from "../../lib/api";
 import { loginChannelLabel, loginConfirmed } from "../../lib/login-state";
+import { useThemePalette } from "../../app/providers";
 import type { PlatformAccount } from "../../types";
 import { LoginSubmitMask } from "./login-submit-mask";
 
@@ -43,6 +44,7 @@ export function PhoneLoginPanel({
   targetAccountId,
   onRenewed,
 }: PhoneLoginPanelProps) {
+  const p = useThemePalette();
   const [phone, setPhone] = useState("");
   const [code, setCode] = useState("");
   const [sessionId, setSessionId] = useState<number | null>(null);
@@ -169,15 +171,14 @@ export function PhoneLoginPanel({
 
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%", position: "relative" }}>
-      <Text style={{ color: "rgba(255,255,255,0.65)" }}>{statusText}</Text>
+      <Text style={{ color: p.textSecondary }}>{statusText}</Text>
 
       <Form layout="vertical">
-        <Form.Item label={<span style={{ color: "rgba(255,255,255,0.88)" }}>手机号</span>}>
+        <Form.Item label={<span style={{ color: p.text }}>手机号</span>}>
           <Input
             value={phone}
             onChange={(e) => setPhone(e.target.value)}
             placeholder="请输入手机号"
-            style={{ background: "#1f1f1f", borderColor: "#303030", color: "rgba(255,255,255,0.88)" }}
           />
         </Form.Item>
       </Form>
@@ -193,12 +194,11 @@ export function PhoneLoginPanel({
       </Button>
 
       <Form layout="vertical">
-        <Form.Item label={<span style={{ color: "rgba(255,255,255,0.88)" }}>验证码</span>}>
+        <Form.Item label={<span style={{ color: p.text }}>验证码</span>}>
           <Input
             value={code}
             onChange={(e) => setCode(e.target.value)}
             placeholder="请输入验证码"
-            style={{ background: "#1f1f1f", borderColor: "#303030", color: "rgba(255,255,255,0.88)" }}
           />
         </Form.Item>
       </Form>

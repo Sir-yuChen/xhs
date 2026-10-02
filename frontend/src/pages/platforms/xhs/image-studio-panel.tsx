@@ -39,6 +39,7 @@ import {
   uploadAssetFile,
 } from "../../../lib/api";
 import { formatShanghaiTime } from "../../../lib/time";
+import { useThemePalette } from "../../../app/providers";
 import type { GeneratedImageAsset, UserImageFile } from "../../../types";
 
 const { Text, Paragraph } = Typography;
@@ -59,6 +60,7 @@ function isRenderableImage(value: string): boolean {
  * 面板头部行（工坊页只保留一个骨架标题，三个工坊各自不再各扛一个页面标题）。
  */
 export function ImageStudioPanel() {
+  const p = useThemePalette();
   const [assets, setAssets] = useState<GeneratedImageAsset[]>([]);
   const [userImages, setUserImages] = useState<UserImageFile[]>([]);
   const [prompt, setPrompt] = useState("");
@@ -266,10 +268,10 @@ export function ImageStudioPanel() {
                           display: "flex",
                           alignItems: "center",
                           justifyContent: "center",
-                          background: "#1a1a1a",
+                          background: p.mediaBg,
                         }}
                       >
-                        <PictureOutlined style={{ fontSize: 20, color: "#666" }} />
+                        <PictureOutlined style={{ fontSize: 20, color: p.textTertiary }} />
                       </div>
                     )}
                     <Button
@@ -303,15 +305,15 @@ export function ImageStudioPanel() {
                     width: 60,
                     height: 60,
                     borderRadius: 4,
-                    border: "1px dashed #444",
+                    border: `1px dashed ${p.borderStrong}`,
                     display: "flex",
                     alignItems: "center",
                     justifyContent: "center",
                     cursor: "pointer",
-                    background: "#1a1a1a",
+                    background: p.mediaBg,
                   }}
                 >
-                  <PlusOutlined style={{ fontSize: 20, color: "#666" }} />
+                  <PlusOutlined style={{ fontSize: 20, color: p.textTertiary }} />
                 </div>
               </Space>
             </div>
@@ -361,7 +363,7 @@ export function ImageStudioPanel() {
                 </Text>
                 <div
                   style={{
-                    background: "#1a1a1a",
+                    background: p.mediaBg,
                     borderRadius: 6,
                     padding: 8,
                     textAlign: "center",
@@ -431,7 +433,7 @@ export function ImageStudioPanel() {
             {description && (
               <Paragraph
                 style={{
-                  background: "#262626",
+                  background: p.cardBgElevated,
                   padding: 12,
                   borderRadius: 6,
                   fontSize: 13,
@@ -486,7 +488,7 @@ export function ImageStudioPanel() {
                               marginBottom: 6,
                               overflow: "hidden",
                               borderRadius: 4,
-                              background: "#1a1a1a",
+                              background: p.mediaBg,
                             }}
                           >
                             {isRenderableImage(asset.file_path) ? (
@@ -593,7 +595,7 @@ export function ImageStudioPanel() {
                               marginBottom: 6,
                               overflow: "hidden",
                               borderRadius: 4,
-                              background: "#1a1a1a",
+                              background: p.mediaBg,
                             }}
                           >
                             <Image
@@ -679,7 +681,7 @@ export function ImageStudioPanel() {
                             display: "flex",
                             alignItems: "center",
                             justifyContent: "center",
-                            background: "#1a1a1a",
+                            background: p.mediaBg,
                           }}
                         >
                           <img
@@ -726,7 +728,7 @@ export function ImageStudioPanel() {
                             display: "flex",
                             alignItems: "center",
                             justifyContent: "center",
-                            background: "#1a1a1a",
+                            background: p.mediaBg,
                           }}
                         >
                           {isRenderableImage(asset.file_path) ? (

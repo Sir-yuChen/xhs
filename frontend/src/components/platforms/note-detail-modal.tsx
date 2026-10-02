@@ -44,6 +44,7 @@ import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
 
 import { detailMessage } from "../../lib/api";
+import { useThemePalette } from "../../app/providers";
 
 const { Text } = Typography;
 
@@ -339,6 +340,7 @@ export function NoteDetailBody({
   mediaEmpty?: ReactNode;
   children?: ReactNode;
 }) {
+  const p = useThemePalette();
   const [mediaIndex, setMediaIndex] = useState(0);
   const [downloadingUrl, setDownloadingUrl] = useState("");
 
@@ -395,7 +397,7 @@ export function NoteDetailBody({
             </div>
           ) : mediaUrls.length > 0 ? (
             <div>
-              <div style={{ position: "relative", background: "#141414", borderRadius: 8, overflow: "hidden" }}>
+              <div style={{ position: "relative", background: p.mediaBg, borderRadius: 8, overflow: "hidden" }}>
                 <img
                   src={currentImage}
                   alt=""

@@ -46,6 +46,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { PageHeader } from "../../../components/layout/app-shell";
+import { useThemePalette } from "../../../app/providers";
 import {
   addDraftAsset,
   deleteDraft,
@@ -156,6 +157,7 @@ function SortableImageThumb({ asset, onEdit, onRemove, onView }: { asset: DraftA
 /* ── component ─────────────────────────────────────────────────────── */
 
 export function XhsDraftsPage() {
+  const p = useThemePalette();
   const navigate = useNavigate();
 
   const [drafts, setDrafts] = useState<Draft[]>([]);
@@ -558,9 +560,9 @@ export function XhsDraftsPage() {
               <div
                 onClick={() => setUploadModalOpen(true)}
                 style={{
-                  width: 60, height: 60, borderRadius: 4, border: "1px dashed #434343",
+                  width: 60, height: 60, borderRadius: 4, border: `1px dashed ${p.borderStrong}`,
                   display: "flex", alignItems: "center", justifyContent: "center",
-                  cursor: "pointer", background: "rgba(255,255,255,0.04)",
+                  cursor: "pointer", background: p.fillWeak,
                 }}
               >
                 <PlusOutlined style={{ fontSize: 20, color: "#8c8c8c" }} />
@@ -588,7 +590,7 @@ export function XhsDraftsPage() {
               style={{
                 display: "flex", alignItems: "center", gap: 8,
                 padding: "4px 8px", borderRadius: 4,
-                background: "rgba(255,255,255,0.04)",
+                background: p.fillWeak,
               }}
             >
               <PlayCircleOutlined style={{ fontSize: 18, color: "#1668dc" }} />
@@ -614,8 +616,8 @@ export function XhsDraftsPage() {
             onClick={() => setUploadModalOpen(true)}
             style={{
               display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-              padding: "4px 8px", borderRadius: 4, border: "1px dashed #434343",
-              cursor: "pointer", background: "rgba(255,255,255,0.04)",
+              padding: "4px 8px", borderRadius: 4, border: `1px dashed ${p.borderStrong}`,
+              cursor: "pointer", background: p.fillWeak,
             }}
           >
             <PlusOutlined style={{ fontSize: 16, color: "#8c8c8c" }} />
@@ -830,9 +832,9 @@ export function XhsDraftsPage() {
                 {/* Empty state when no assets */}
                 {imageAssets.length === 0 && videoAssets.length === 0 && (
                   <div onClick={() => setUploadModalOpen(true)} style={{
-                    width: "100%", height: 80, borderRadius: 8, border: "1px dashed #434343",
+                    width: "100%", height: 80, borderRadius: 8, border: `1px dashed ${p.borderStrong}`,
                     display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column",
-                    cursor: "pointer", background: "rgba(255,255,255,0.04)", gap: 4,
+                    cursor: "pointer", background: p.fillWeak, gap: 4,
                   }}>
                     <PlusOutlined style={{ fontSize: 24, color: "#8c8c8c" }} />
                     <Text type="secondary" style={{ fontSize: 12 }}>添加素材</Text>
@@ -856,7 +858,7 @@ export function XhsDraftsPage() {
                     <div>
                       <Row gutter={16} style={{ marginBottom: 16 }}>
                         <Col span={12}>
-                          <div style={{ padding: 8, background: "rgba(255,255,255,0.04)", borderRadius: 8, textAlign: "center" }}>
+                          <div style={{ padding: 8, background: p.fillWeak, borderRadius: 8, textAlign: "center" }}>
                             <Text type="secondary" style={{ fontSize: 11, display: "block", marginBottom: 4 }}>当前素材</Text>
                             {isImage ? (
                               <img src={asset.url || asset.local_path} style={{ width: 140, height: 140, objectFit: "cover", borderRadius: 6 }} referrerPolicy="no-referrer" />
@@ -868,12 +870,12 @@ export function XhsDraftsPage() {
                           </div>
                         </Col>
                         <Col span={12}>
-                          <div style={{ padding: 8, background: "rgba(255,255,255,0.04)", borderRadius: 8, textAlign: "center", height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+                          <div style={{ padding: 8, background: p.fillWeak, borderRadius: 8, textAlign: "center", height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
                             <Text type="secondary" style={{ fontSize: 11, display: "block", marginBottom: 4 }}>优化后预览</Text>
                             {optimizeResult ? (
                               <img src={optimizeResult} style={{ width: 140, height: 140, objectFit: "cover", borderRadius: 6 }} referrerPolicy="no-referrer" />
                             ) : (
-                              <div style={{ width: 140, height: 140, border: "1px dashed #434343", borderRadius: 6, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                              <div style={{ width: 140, height: 140, border: `1px dashed ${p.borderStrong}`, borderRadius: 6, display: "flex", alignItems: "center", justifyContent: "center" }}>
                                 <Text type="secondary" style={{ fontSize: 12 }}>{isOptimizing ? "生成中..." : "等待生成"}</Text>
                               </div>
                             )}
@@ -897,7 +899,7 @@ export function XhsDraftsPage() {
                               ))}
                               <div
                                 onClick={() => setRefPickerOpen(true)}
-                                style={{ width: 40, height: 40, borderRadius: 4, border: "1px dashed #434343", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", background: "rgba(255,255,255,0.04)" }}
+                                style={{ width: 40, height: 40, borderRadius: 4, border: `1px dashed ${p.borderStrong}`, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", background: p.fillWeak }}
                               >
                                 <PlusOutlined style={{ fontSize: 14, color: "#8c8c8c" }} />
                               </div>

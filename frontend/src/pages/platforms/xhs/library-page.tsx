@@ -60,6 +60,7 @@ import {
   readError,
 } from "../../../components/platforms/note-detail-modal";
 import type { QuietError } from "../../../components/platforms/note-detail-modal";
+import { useThemePalette } from "../../../app/providers";
 import {
   batchCreateDraftsFromNotes,
   batchPublishSavedNotes,
@@ -218,10 +219,11 @@ function LoadMoreBar(props: {
   failure: QuietError | null;
   onLoadMore: () => void;
 }) {
+  const p = useThemePalette();
   const { hasMore, loading, loaded, total, failure, onLoadMore } = props;
   if (!hasMore && !failure) {
     return (
-      <div style={{ textAlign: "center", padding: "16px 0", color: "rgba(255,255,255,.35)", fontSize: 12 }}>
+      <div style={{ textAlign: "center", padding: "16px 0", color: p.textMuted, fontSize: 12 }}>
         {loaded > 0 ? `已全部加载（共 ${loaded} 条）` : ""}
       </div>
     );
@@ -372,6 +374,7 @@ function PublishStatusTag({
 }
 
 export function XhsLibraryPage() {
+  const p = useThemePalette();
   const navigate = useNavigate();
   // 全站消息提醒统一走 antd message（设计 04 §3.6，2026-09-25 用户口径：
   // 「所有消息提醒参考 antd 成熟组件，不要在页面暂用空间」）—— 批量 / 详情的
@@ -1732,9 +1735,9 @@ export function XhsLibraryPage() {
                 */}
                 <Card hoverable size="small" style={{ overflow: "hidden" }} onClick={() => void openDetail(note)}
                   cover={
-                    <div style={{ position: "relative", background: "#262626" }}>
+                    <div style={{ position: "relative", background: p.mediaBg }}>
                       <Checkbox checked={selectedNoteIdSet.has(note.id)} onClick={(e) => { e.stopPropagation(); toggleNoteSelection(note.id); }} style={{ position: "absolute", top: 8, left: 8, zIndex: 2 }} />
-                      {cover ? <img src={cover} alt={note.title} referrerPolicy="no-referrer" style={{ width: "100%", aspectRatio: "1/1", objectFit: "cover", display: "block" }} /> : <div style={{ width: "100%", aspectRatio: "1/1", display: "flex", alignItems: "center", justifyContent: "center", color: "rgba(255,255,255,.2)", fontSize: 28 }}><PictureOutlined /></div>}
+                      {cover ? <img src={cover} alt={note.title} referrerPolicy="no-referrer" style={{ width: "100%", aspectRatio: "1/1", objectFit: "cover", display: "block" }} /> : <div style={{ width: "100%", aspectRatio: "1/1", display: "flex", alignItems: "center", justifyContent: "center", color: p.fillIcon, fontSize: 28 }}><PictureOutlined /></div>}
                       <Tag color={kind.includes("video") ? "purple" : "blue"} style={{ position: "absolute", top: 8, right: 8 }} icon={kind.includes("video") ? <PlayCircleOutlined /> : <PictureOutlined />}>{kind.includes("video") ? "视频" : "图文"}</Tag>
                       {/*
                         封面左下角一排（§29.5）：发布状态（可点切换）→ 同步按钮

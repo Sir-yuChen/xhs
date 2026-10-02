@@ -24,6 +24,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { z } from "zod";
 
 import { useAuth } from "../../hooks/use-auth";
+import { useThemePalette } from "../../app/providers";
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -49,6 +50,7 @@ export function LoginPage() {
   const auth = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
+  const p = useThemePalette();
   const [mode, setMode] = useState<AuthMode>("login");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -100,7 +102,7 @@ export function LoginPage() {
     <div
       style={{
         minHeight: "100vh",
-        background: "#0a0a0a",
+        background: p.pageBg,
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
@@ -153,7 +155,7 @@ export function LoginPage() {
           <Title
             level={2}
             style={{
-              color: "#fff",
+              color: p.text,
               marginBottom: 12,
               lineHeight: 1.4,
             }}
@@ -179,7 +181,7 @@ export function LoginPage() {
                   </Space>
                 }
                 value={128}
-                valueStyle={{ color: "#fff", fontSize: 28 }}
+                valueStyle={{ color: p.text, fontSize: 28 }}
               />
             </Col>
             <Col span={8}>
@@ -191,7 +193,7 @@ export function LoginPage() {
                   </Space>
                 }
                 value={14}
-                valueStyle={{ color: "#fff", fontSize: 28 }}
+                valueStyle={{ color: p.text, fontSize: 28 }}
               />
             </Col>
             <Col span={8}>
@@ -203,7 +205,7 @@ export function LoginPage() {
                   </Space>
                 }
                 value={7}
-                valueStyle={{ color: "#fff", fontSize: 28 }}
+                valueStyle={{ color: p.text, fontSize: 28 }}
               />
             </Col>
           </Row>
@@ -213,8 +215,8 @@ export function LoginPage() {
         <Col xs={24} md={12}>
           <Card
             style={{
-              background: "#1a1a1a",
-              borderColor: "#303030",
+              background: p.cardBg,
+              borderColor: p.border,
               borderRadius: 12,
             }}
             styles={{
@@ -227,7 +229,7 @@ export function LoginPage() {
               style={{ marginBottom: 20 }}
             >
               <LockOutlined
-                style={{ fontSize: 16, color: "rgba(255,255,255,0.65)" }}
+                style={{ fontSize: 16, color: p.textSecondary }}
               />
               <Text strong style={{ fontSize: 15 }}>
                 {mode === "login" ? "平台登录" : "注册平台账号"}

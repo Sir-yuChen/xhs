@@ -2,6 +2,7 @@ import { Modal, Segmented, Typography } from "antd";
 import { useState } from "react";
 
 import { loginChannelLabel } from "../../lib/login-state";
+import { useThemePalette } from "../../app/providers";
 import type { PlatformAccount } from "../../types";
 import { PhoneLoginPanel } from "./phone-login-panel";
 import { QianfanEmailLoginPanel } from "./qianfan-email-login-panel";
@@ -86,6 +87,7 @@ function qrAccountType(channel: string): "pc" | "creator" | "qianfan" {
 }
 
 export function RenewLoginModal({ target, onClose, onRenewed }: RenewLoginModalProps) {
+  const p = useThemePalette();
   const [method, setMethod] = useState<RenewMethod>(DEFAULT_METHOD);
   const channelText = target ? loginChannelLabel(target.channel) : "";
   const isFirstTime = target?.state === "missing";
@@ -131,8 +133,8 @@ export function RenewLoginModal({ target, onClose, onRenewed }: RenewLoginModalP
       onCancel={onClose}
       destroyOnClose
       styles={{
-        header: { background: "#1f1f1f", borderBottom: "1px solid #303030" },
-        body: { background: "#141414", padding: 20 },
+        header: { background: p.cardBg, borderBottom: `1px solid ${p.border}` },
+        body: { background: p.cardBg, padding: 20 },
       }}
     >
       {target ? (

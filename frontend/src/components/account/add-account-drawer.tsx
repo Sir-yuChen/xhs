@@ -1,6 +1,7 @@
 import { App, Modal, Segmented } from "antd";
 import { useState } from "react";
 
+import { useThemePalette } from "../../app/providers";
 import type { PlatformAccount } from "../../types";
 import { PhoneLoginPanel } from "./phone-login-panel";
 import { QianfanEmailLoginPanel } from "./qianfan-email-login-panel";
@@ -48,6 +49,7 @@ const loginMethodOptions: Record<AccountType, { label: string; value: LoginMetho
 };
 
 export function AddAccountDrawer({ open, onClose, onBound }: AddAccountDrawerProps) {
+  const p = useThemePalette();
   const [accountType, setAccountType] = useState<AccountType>("pc");
   const [method, setMethod] = useState<LoginMethod>("qr");
   // 全站消息提醒统一走 antd message（设计 04 §3.6，2026-09-25 用户口径：
@@ -80,10 +82,10 @@ export function AddAccountDrawer({ open, onClose, onBound }: AddAccountDrawerPro
     <Modal
       title={
         <div>
-          <div style={{ fontSize: 12, color: "rgba(255,255,255,0.45)", marginBottom: 4, textTransform: "uppercase", letterSpacing: 1 }}>
+          <div style={{ fontSize: 12, color: p.textTertiary, marginBottom: 4, textTransform: "uppercase", letterSpacing: 1 }}>
             XHS Account
           </div>
-          <div style={{ fontSize: 18, fontWeight: 600, color: "rgba(255,255,255,0.88)" }}>添加小红书账号</div>
+          <div style={{ fontSize: 18, fontWeight: 600, color: p.text }}>添加小红书账号</div>
         </div>
       }
       open={open}
@@ -105,9 +107,9 @@ export function AddAccountDrawer({ open, onClose, onBound }: AddAccountDrawerPro
       styles={{
         // antd 6 Modal 的语义样式的「容器」= 对话框本体（无 content 键）；
         // 固定 75vh + flex 列布局：header 自适应、body 吃剩余高度并可滚动。
-        container: { height: "75vh", display: "flex", flexDirection: "column", background: "#141414" },
-        header: { background: "#1f1f1f", borderBottom: "1px solid #303030" },
-        body: { background: "#141414", padding: 24, flex: 1, overflowY: "auto" },
+        container: { height: "75vh", display: "flex", flexDirection: "column", background: p.cardBg },
+        header: { background: p.cardBg, borderBottom: `1px solid ${p.border}` },
+        body: { background: p.cardBg, padding: 24, flex: 1, overflowY: "auto" },
         // 页面底色本身就是深色（#141414），antd 默认的 `rgba(0,0,0,0.45)` 蒙版
         // 在这上面**几乎看不出来**（用户口径「绑定时添加页面蒙版」）。
         // 显式给一层看得见的遮罩：加不透明度 + 轻微模糊，让「弹窗外的页面被压住」

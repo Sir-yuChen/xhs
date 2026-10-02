@@ -71,6 +71,7 @@ import {
   uploadAssetFile,
 } from "../../../lib/api";
 import { formatShanghaiTime } from "../../../lib/time";
+import { useThemePalette } from "../../../app/providers";
 import type { DraftAsset } from "../../../lib/api";
 import type { Draft, GeneratedImageAsset, SavedNote, UserImageFile } from "../../../types";
 
@@ -198,6 +199,7 @@ function SortableRewriteImage({ asset, onEdit, onRemove, onView }: { asset: Draf
  * 区分：改草稿功能**必须改本文件**（合并后由 `note-workshop-page.tsx` 引用）。
  */
 export function DraftsWorkshopPanel() {
+  const p = useThemePalette();
   const [activeMode, setActiveMode] = useState<AiContentMode>("rewrite");
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [selectedDraftId, setSelectedDraftId] = useState<number | null>(null);
@@ -736,9 +738,9 @@ export function DraftsWorkshopPanel() {
                         <div
                           onClick={() => setUploadModalOpen(true)}
                           style={{
-                            width: 60, height: 60, borderRadius: 4, border: "1px dashed #434343",
+                            width: 60, height: 60, borderRadius: 4, border: `1px dashed ${p.borderStrong}`,
                             display: "flex", alignItems: "center", justifyContent: "center",
-                            cursor: "pointer", background: "rgba(255,255,255,0.04)",
+                            cursor: "pointer", background: p.fillWeak,
                           }}
                         >
                           <PlusOutlined style={{ fontSize: 20, color: "#8c8c8c" }} />
@@ -907,7 +909,7 @@ export function DraftsWorkshopPanel() {
 
             {rewritePreview !== null && (
               <Card size="small" title="改写结果" style={{ marginBottom: 16, background: "#1a2332", borderColor: "#1668dc40" }}>
-                <Paragraph style={{ whiteSpace: "pre-wrap", color: "rgba(255,255,255,.75)", fontSize: 13, maxHeight: 240, overflow: "auto" }}>{rewritePreview}</Paragraph>
+                <Paragraph style={{ whiteSpace: "pre-wrap", color: p.textSecondary, fontSize: 13, maxHeight: 240, overflow: "auto" }}>{rewritePreview}</Paragraph>
                 <Space style={{ marginTop: 8 }}>
                   <Button type="primary" size="small" onClick={applyRewrite}>采用</Button>
                   <Button size="small" onClick={discardRewrite}>放弃</Button>
@@ -1012,7 +1014,7 @@ export function DraftsWorkshopPanel() {
               <div>
                 <Row gutter={16} style={{ marginBottom: 16 }}>
                   <Col span={12}>
-                    <div style={{ padding: 8, background: "rgba(255,255,255,0.04)", borderRadius: 8, textAlign: "center" }}>
+                    <div style={{ padding: 8, background: p.fillWeak, borderRadius: 8, textAlign: "center" }}>
                       <Text type="secondary" style={{ fontSize: 11, display: "block", marginBottom: 4 }}>当前素材</Text>
                       {isImage ? (
                         <Image
@@ -1031,7 +1033,7 @@ export function DraftsWorkshopPanel() {
                     </div>
                   </Col>
                   <Col span={12}>
-                    <div style={{ padding: 8, background: "rgba(255,255,255,0.04)", borderRadius: 8, textAlign: "center" }}>
+                    <div style={{ padding: 8, background: p.fillWeak, borderRadius: 8, textAlign: "center" }}>
                       <Text type="secondary" style={{ fontSize: 11, display: "block", marginBottom: 4 }}>优化后预览</Text>
                       {optimizeResult ? (
                         <Image
@@ -1043,7 +1045,7 @@ export function DraftsWorkshopPanel() {
                           preview={{ mask: <EyeOutlined style={{ fontSize: 16 }} /> }}
                         />
                       ) : (
-                        <div style={{ width: 180, height: 180, margin: "0 auto", border: "1px dashed #434343", borderRadius: 6, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                        <div style={{ width: 180, height: 180, margin: "0 auto", border: `1px dashed ${p.borderStrong}`, borderRadius: 6, display: "flex", alignItems: "center", justifyContent: "center" }}>
                           <Text type="secondary" style={{ fontSize: 12 }}>{isOptimizing ? "生成中..." : "等待生成"}</Text>
                         </div>
                       )}
@@ -1068,7 +1070,7 @@ export function DraftsWorkshopPanel() {
                         <div
                           onMouseDown={(e) => e.preventDefault()}
                           onClick={() => setRefPickerOpen(true)}
-                          style={{ width: 40, height: 40, borderRadius: 4, border: "1px dashed #434343", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", background: "rgba(255,255,255,0.04)" }}
+                          style={{ width: 40, height: 40, borderRadius: 4, border: `1px dashed ${p.borderStrong}`, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", background: p.fillWeak }}
                         >
                           <PlusOutlined style={{ fontSize: 14, color: "#8c8c8c" }} />
                         </div>

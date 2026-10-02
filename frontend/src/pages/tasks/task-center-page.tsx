@@ -62,6 +62,7 @@ import {
 import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useState } from "react";
 
+import { useThemePalette } from "../../app/providers";
 import { JobFormModal } from "../../components/schedule/job-form-modal";
 import { JobLogDetailModal } from "../../components/schedule/job-log-detail-modal";
 import { JobLogProgress } from "../../components/schedule/job-log-progress";
@@ -97,9 +98,9 @@ import type {
 const { Text } = Typography;
 const { RangePicker } = DatePicker;
 
-const cardStyle = { background: "#1f1f1f", borderColor: "#303030" };
-
 export function TaskCenterPage() {
+  const p = useThemePalette();
+  const cardStyle = { background: p.cardBg, borderColor: p.border };
   const [activeTab, setActiveTab] = useState("jobs");
   // 全站消息提醒统一走 antd message（设计 04 §3.6，2026-09-25 用户口径：
   // 「所有消息提醒参考 antd 成熟组件，不要在页面暂用空间」）—— 取代 2026-09-24

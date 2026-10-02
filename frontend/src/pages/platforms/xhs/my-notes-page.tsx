@@ -44,6 +44,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 import { PageHeader } from "../../../components/layout/app-shell";
+import { useThemePalette } from "../../../app/providers";
 import {
   FILTER_CACHE_KEYS,
   MY_NOTES_TAB_VALUES,
@@ -377,8 +378,9 @@ function mergeSearchResults(
 }
 
 function Metric({ icon, value, title }: { icon: ReactNode; value: number; title: string }) {
+  const p = useThemePalette();
   return (
-    <Space size={4} title={title} style={{ fontSize: 12, color: "rgba(255,255,255,0.45)" }}>
+    <Space size={4} title={title} style={{ fontSize: 12, color: p.textTertiary }}>
       {icon}
       <span>{formatMetric(value)}</span>
     </Space>
@@ -386,6 +388,7 @@ function Metric({ icon, value, title }: { icon: ReactNode; value: number; title:
 }
 
 export function XhsMyNotesPage() {
+  const p = useThemePalette();
   // 全站消息提醒统一走 antd message（设计 04 §3.6，2026-09-25 用户口径：
   // 「所有消息提醒参考 antd 成熟组件，不要在页面暂用空间」）—— `App.useApp()`
   // 替代静态 `message` 导入，实例继承 ConfigProvider 的主题与 locale。
@@ -1115,7 +1118,7 @@ export function XhsMyNotesPage() {
                 onClick={() => void openNote(note)}
                 cover={
                   note.cover_url ? (
-                    <div style={{ position: "relative", height: 180, overflow: "hidden", background: "#141414" }}>
+                    <div style={{ position: "relative", height: 180, overflow: "hidden", background: p.mediaBg }}>
                       <img
                         src={note.cover_url}
                         alt={note.title || note.note_id}
@@ -1128,8 +1131,8 @@ export function XhsMyNotesPage() {
                       )}
                     </div>
                   ) : (
-                    <div style={{ height: 180, display: "flex", alignItems: "center", justifyContent: "center", background: "#141414" }}>
-                      <PictureOutlined style={{ fontSize: 28, color: "rgba(255,255,255,0.25)" }} />
+                    <div style={{ height: 180, display: "flex", alignItems: "center", justifyContent: "center", background: p.mediaBg }}>
+                      <PictureOutlined style={{ fontSize: 28, color: p.fillIcon }} />
                     </div>
                   )
                 }
@@ -1329,7 +1332,7 @@ export function XhsMyNotesPage() {
                   onClick={() => void openNote(note)}
                   cover={
                     note.cover_url ? (
-                      <div style={{ position: "relative", height: 160, overflow: "hidden", background: "#141414" }}>
+                      <div style={{ position: "relative", height: 160, overflow: "hidden", background: p.mediaBg }}>
                         <img
                           src={note.cover_url}
                           alt={note.title || note.note_id}
@@ -1337,8 +1340,8 @@ export function XhsMyNotesPage() {
                         />
                       </div>
                     ) : (
-                      <div style={{ height: 160, display: "flex", alignItems: "center", justifyContent: "center", background: "#141414" }}>
-                        <PictureOutlined style={{ fontSize: 26, color: "rgba(255,255,255,0.25)" }} />
+                      <div style={{ height: 160, display: "flex", alignItems: "center", justifyContent: "center", background: p.mediaBg }}>
+                        <PictureOutlined style={{ fontSize: 26, color: p.fillIcon }} />
                       </div>
                     )
                   }

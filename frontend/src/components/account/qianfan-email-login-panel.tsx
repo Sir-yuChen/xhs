@@ -4,6 +4,7 @@ import { useState } from "react";
 
 import { detailMessage, loginXhsQianfanByEmail } from "../../lib/api";
 import { loginConfirmed } from "../../lib/login-state";
+import { useThemePalette } from "../../app/providers";
 import type { PlatformAccount } from "../../types";
 import { LoginSubmitMask } from "./login-submit-mask";
 
@@ -37,6 +38,7 @@ export function QianfanEmailLoginPanel({
   onConfirmed,
   onRenewed,
 }: QianfanEmailLoginPanelProps) {
+  const p = useThemePalette();
   const [email, setEmail] = useState("");
   const [pwd, setPwd] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -117,24 +119,22 @@ export function QianfanEmailLoginPanel({
         `current-password` / `username` 会主动填充，对 `new-password` 不会）。
       */}
       <Form layout="vertical" autoComplete="off">
-        <Form.Item label={<span style={{ color: "rgba(255,255,255,0.88)" }}>邮箱</span>}>
+        <Form.Item label={<span style={{ color: p.text }}>邮箱</span>}>
           <Input
             value={email}
             onChange={(event) => setEmail(event.target.value)}
             placeholder="name@example.com"
             name="qianfan-login-email"
             autoComplete="off"
-            style={{ background: "#1f1f1f", borderColor: "#303030", color: "rgba(255,255,255,0.88)" }}
           />
         </Form.Item>
-        <Form.Item label={<span style={{ color: "rgba(255,255,255,0.88)" }}>密码</span>}>
+        <Form.Item label={<span style={{ color: p.text }}>密码</span>}>
           <Input.Password
             value={pwd}
             onChange={(event) => setPwd(event.target.value)}
             placeholder="千帆商家后台密码"
             name="qianfan-login-password"
             autoComplete="new-password"
-            style={{ background: "#1f1f1f", borderColor: "#303030", color: "rgba(255,255,255,0.88)" }}
           />
         </Form.Item>
       </Form>

@@ -33,6 +33,7 @@ import {
 import { useEffect, useState } from "react";
 
 import { PageHeader } from "../../../components/layout/app-shell";
+import { useThemePalette } from "../../../app/providers";
 import { ScheduleFields } from "../../../components/schedule/schedule-fields";
 import {
   createAutoTask,
@@ -85,17 +86,17 @@ function getStatusTag(s: string) {
   return <Tag color={cfg.color}>{cfg.label}</Tag>;
 }
 
-const panelStyle: React.CSSProperties = {
-  background: "#1a1a1a",
-  borderRadius: 8,
-  border: "1px solid #303030",
-};
-
 const cardBodyStyle: React.CSSProperties = {
   padding: 16,
 };
 
 export function AutoOpsPage() {
+  const p = useThemePalette();
+  const panelStyle: React.CSSProperties = {
+    background: p.cardBg,
+    borderRadius: 8,
+    border: `1px solid ${p.border}`,
+  };
   const [tasks, setTasks] = useState<AutoTask[]>([]);
   const [pcAccounts, setPcAccounts] = useState<PlatformAccount[]>([]);
   const [creatorAccounts, setCreatorAccounts] = useState<PlatformAccount[]>([]);
@@ -297,7 +298,7 @@ export function AutoOpsPage() {
             <Col xs={24} md={12} xl={8} key={task.id}>
               <Card
                 style={panelStyle}
-                styles={{ body: cardBodyStyle, header: { borderBottom: "1px solid #303030" } }}
+                styles={{ body: cardBodyStyle, header: { borderBottom: `1px solid ${p.border}` } }}
                 title={
                   <Space>
                     <ThunderboltOutlined style={{ color: task.status === "active" ? "#52c41a" : "#8c8c8c" }} />
@@ -436,7 +437,7 @@ export function AutoOpsPage() {
             </Space>
           }
           style={panelStyle}
-          styles={{ body: cardBodyStyle, header: { borderBottom: "1px solid #303030" } }}
+          styles={{ body: cardBodyStyle, header: { borderBottom: `1px solid ${p.border}` } }}
         >
           <Descriptions column={{ xs: 1, md: 2, lg: 4 }} size="small">
             <Descriptions.Item label="关键词">{lastRunResult.detail?.keyword ?? "-"}</Descriptions.Item>
@@ -479,7 +480,7 @@ export function AutoOpsPage() {
             </Space>
           }
           style={panelStyle}
-          styles={{ body: cardBodyStyle, header: { borderBottom: "1px solid #303030" } }}
+          styles={{ body: cardBodyStyle, header: { borderBottom: `1px solid ${p.border}` } }}
           extra={
             <Button type="text" onClick={() => setShowCreate(false)}>
               取消

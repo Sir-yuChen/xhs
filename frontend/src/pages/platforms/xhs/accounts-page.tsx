@@ -31,6 +31,7 @@ import { useEffect, useRef, useState } from "react";
 import { AddAccountDrawer } from "../../../components/account/add-account-drawer";
 import { RenewLoginModal, type RenewTarget } from "../../../components/account/renew-login-modal";
 import { SyncOptionsModal, type SyncOptions } from "../../../components/platforms/sync-options-modal";
+import { useThemePalette } from "../../../app/providers";
 import {
   deleteAccount,
   fetchAccounts,
@@ -134,6 +135,7 @@ function readErrorDetail(error: unknown): string {
 }
 
 export function XhsAccountsPage() {
+  const p = useThemePalette();
   const [accounts, setAccounts] = useState<PlatformAccount[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -691,7 +693,7 @@ export function XhsAccountsPage() {
       {/* Section card */}
       <Card
         title={
-          <span style={{ color: "rgba(255,255,255,0.88)", fontWeight: 600 }}>已绑定账号</span>
+          <span style={{ color: p.text, fontWeight: 600 }}>已绑定账号</span>
         }
         extra={
           <Space size={8}>
@@ -703,7 +705,7 @@ export function XhsAccountsPage() {
             </Button>
           </Space>
         }
-        style={{ background: "#1f1f1f", borderColor: "#303030" }}
+        style={{ background: p.cardBg, borderColor: p.border }}
         styles={{ body: { padding: 24 } }}
       >
         {error ? <Alert type="error" message={error} showIcon style={{ marginBottom: 16 }} /> : null}
@@ -714,14 +716,14 @@ export function XhsAccountsPage() {
           </div>
         ) : accounts.length === 0 ? (
           <Empty
-            image={<SafetyCertificateOutlined style={{ fontSize: 48, color: "rgba(255,255,255,0.25)" }} />}
+            image={<SafetyCertificateOutlined style={{ fontSize: 48, color: p.fillIcon }} />}
             imageStyle={{ height: 64 }}
             description={
               <Space direction="vertical" size={4}>
-                <Text strong style={{ color: "rgba(255,255,255,0.65)" }}>
+                <Text strong style={{ color: p.textSecondary }}>
                   还没有绑定小红书账号
                 </Text>
-                <Text style={{ color: "rgba(255,255,255,0.35)", fontSize: 13 }}>
+                <Text style={{ color: p.textMuted, fontSize: 13 }}>
                   先绑定一个账号，即可同步笔记、店铺商品与互动数据。
                 </Text>
               </Space>
@@ -758,8 +760,8 @@ export function XhsAccountsPage() {
                   <Card
                     size="small"
                     style={{
-                      background: "#1a1a1a",
-                      borderColor: isCreator ? "#303050" : "#303030",
+                      background: p.cardBg,
+                      borderColor: isCreator ? "#303050" : p.border,
                       borderLeft: `3px solid ${isCreator ? "#722ed1" : "#1668dc"}`,
                     }}
                     styles={{ body: { padding: 20 } }}
@@ -775,7 +777,7 @@ export function XhsAccountsPage() {
                         size={44}
                         src={account.avatar_url || undefined}
                         icon={!account.avatar_url ? <UserOutlined /> : undefined}
-                        style={{ background: "#262626", flexShrink: 0 }}
+                        style={{ background: p.cardBgElevated, flexShrink: 0 }}
                       >
                         {!account.avatar_url ? (account.nickname?.slice(0, 1).toUpperCase() || "X") : undefined}
                       </Avatar>
@@ -799,7 +801,7 @@ export function XhsAccountsPage() {
                             style={{
                               minWidth: 0,
                               maxWidth: "100%",
-                              color: "rgba(255,255,255,0.88)",
+                              color: p.text,
                               fontSize: 15,
                             }}
                           >
@@ -860,7 +862,7 @@ export function XhsAccountsPage() {
                         <Text
                           type="secondary"
                           ellipsis
-                          style={{ display: "block", fontSize: 12, color: "rgba(255,255,255,0.35)" }}
+                          style={{ display: "block", fontSize: 12, color: p.textMuted }}
                         >
                           {profileValue(account, "red_id") || "-"}
                         </Text>
@@ -890,23 +892,23 @@ export function XhsAccountsPage() {
                     <Row gutter={12} style={{ marginBottom: 8 }}>
                       <Col span={8}>
                         <Statistic
-                          title={<span style={{ color: "rgba(255,255,255,0.45)", fontSize: 12 }}>粉丝</span>}
+                          title={<span style={{ color: p.textTertiary, fontSize: 12 }}>粉丝</span>}
                           value={profileValue(account, "followers") ?? "0"}
-                          valueStyle={{ color: "rgba(255,255,255,0.88)", fontSize: 14 }}
+                          valueStyle={{ color: p.text, fontSize: 14 }}
                         />
                       </Col>
                       <Col span={8}>
                         <Statistic
-                          title={<span style={{ color: "rgba(255,255,255,0.45)", fontSize: 12 }}>关注</span>}
+                          title={<span style={{ color: p.textTertiary, fontSize: 12 }}>关注</span>}
                           value={profileValue(account, "following") ?? "0"}
-                          valueStyle={{ color: "rgba(255,255,255,0.88)", fontSize: 14 }}
+                          valueStyle={{ color: p.text, fontSize: 14 }}
                         />
                       </Col>
                       <Col span={8}>
                         <Statistic
-                          title={<span style={{ color: "rgba(255,255,255,0.45)", fontSize: 12 }}>获赞数</span>}
+                          title={<span style={{ color: p.textTertiary, fontSize: 12 }}>获赞数</span>}
                           value={profileValue(account, "likes") ?? "0"}
-                          valueStyle={{ color: "rgba(255,255,255,0.88)", fontSize: 14 }}
+                          valueStyle={{ color: p.text, fontSize: 14 }}
                         />
                       </Col>
                     </Row>
@@ -926,7 +928,7 @@ export function XhsAccountsPage() {
                           display: "block",
                           fontSize: 12,
                           marginBottom: 12,
-                          color: "rgba(255,255,255,0.35)",
+                          color: p.textMuted,
                         }}
                       >
                         {metricsNote}
@@ -938,7 +940,7 @@ export function XhsAccountsPage() {
                       <Text
                         type="secondary"
                         ellipsis={{ tooltip: account.status_message }}
-                        style={{ display: "block", fontSize: 12, marginBottom: 12, color: "rgba(255,255,255,0.35)" }}
+                        style={{ display: "block", fontSize: 12, marginBottom: 12, color: p.textMuted }}
                       >
                         {account.status_message}
                       </Text>
@@ -968,7 +970,7 @@ export function XhsAccountsPage() {
                     <div
                       style={{
                         paddingTop: 12,
-                        borderTop: "1px solid #303030",
+                        borderTop: `1px solid ${p.border}`,
                       }}
                     >
                       {/* 时间行同样 `…` 收起 + tip 看全（窄列里日期常被挤成半截）。 */}
@@ -976,7 +978,7 @@ export function XhsAccountsPage() {
                         ellipsis={{ tooltip: updatedText }}
                         style={{
                           fontSize: 11,
-                          color: "rgba(255,255,255,0.3)",
+                          color: p.textMuted,
                           display: "block",
                           marginBottom: 8,
                         }}

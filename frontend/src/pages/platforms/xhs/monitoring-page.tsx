@@ -24,6 +24,7 @@ import {
 import { useEffect, useState } from "react";
 
 import { PageHeader } from "../../../components/layout/app-shell";
+import { useThemePalette } from "../../../app/providers";
 import {
   createMonitoringTarget,
   deleteMonitoringTarget,
@@ -69,6 +70,7 @@ function snapshotMetric(
 }
 
 export function XhsMonitoringPage() {
+  const p = useThemePalette();
   const [targets, setTargets] = useState<MonitoringTarget[]>([]);
   const [snapshotsByTarget, setSnapshotsByTarget] = useState<
     Record<number, MonitoringSnapshot>
@@ -226,7 +228,7 @@ export function XhsMonitoringPage() {
       />
 
       <Card
-        style={{ background: "#1f1f1f", borderColor: "#303030", marginBottom: 24 }}
+        style={{ background: p.cardBg, borderColor: p.border, marginBottom: 24 }}
       >
         <Form layout="inline" style={{ flexWrap: "wrap", gap: 8 }}>
           <Form.Item>
@@ -276,7 +278,7 @@ export function XhsMonitoringPage() {
           <Spin tip="正在加载监控目标..." />
         </div>
       ) : targets.length === 0 ? (
-        <Card style={{ background: "#1f1f1f", borderColor: "#303030" }}>
+        <Card style={{ background: p.cardBg, borderColor: p.border }}>
           <Empty description="暂无监控目标。" />
         </Card>
       ) : (
@@ -292,7 +294,7 @@ export function XhsMonitoringPage() {
                     </Tag>
                   </Space>
                 }
-                style={{ background: "#1f1f1f", borderColor: "#303030" }}
+                style={{ background: p.cardBg, borderColor: p.border }}
               >
                 <Text type="secondary" style={{ display: "block", marginBottom: 8 }}>
                   {target.value}

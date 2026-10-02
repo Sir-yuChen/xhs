@@ -52,10 +52,6 @@ body {
   transition: background 0.15s ease;
 }
 
-.ant-table-tbody > tr:hover > td {
-  background: #1a1a2e !important;
-}
-
 .ant-tag {
   transition: transform 0.15s ease, opacity 0.15s ease;
 }

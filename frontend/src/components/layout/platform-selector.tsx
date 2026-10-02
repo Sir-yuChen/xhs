@@ -3,6 +3,7 @@ import { Card, Col, Row, Tag, Typography } from "antd";
 import type { ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 
+import { useThemePalette } from "../../app/providers";
 import type { PlatformMeta } from "../../types";
 
 const { Text, Title } = Typography;
@@ -16,6 +17,7 @@ export function PlatformSelector({
   extra?: ReactNode;
 }) {
   const navigate = useNavigate();
+  const p = useThemePalette();
 
   return (
     <Row gutter={[20, 20]}>
@@ -29,7 +31,7 @@ export function PlatformSelector({
             <Card
               hoverable
               style={{
-                borderColor: "#303030",
+                borderColor: p.border,
                 cursor: "pointer",
               }}
               styles={{
@@ -89,11 +91,11 @@ export function PlatformSelector({
                   </Tag>
                   {platform.enabled ? (
                     <ArrowRightOutlined
-                      style={{ color: "rgba(255,255,255,0.45)", fontSize: 14 }}
+                      style={{ color: p.textTertiary, fontSize: 14 }}
                     />
                   ) : (
                     <ClockCircleOutlined
-                      style={{ color: "rgba(255,255,255,0.25)", fontSize: 14 }}
+                      style={{ color: p.textMuted, fontSize: 14 }}
                     />
                   )}
                 </div>

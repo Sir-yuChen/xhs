@@ -25,6 +25,7 @@ import {
 import { useCallback, useEffect, useState } from "react";
 
 import { PageHeader } from "../../../components/layout/app-shell";
+import { useThemePalette } from "../../../app/providers";
 import {
   createMonitoringTarget,
   deleteMonitoringTarget,
@@ -36,11 +37,6 @@ import { formatShanghaiTime } from "../../../lib/time";
 import type { MonitoringTarget, MonitoringSnapshot } from "../../../types";
 
 const { Text } = Typography;
-
-const cardStyle: React.CSSProperties = {
-  background: "#1f1f1f",
-  borderColor: "#303030",
-};
 
 function extractEngagement(snapshot: MonitoringSnapshot | undefined): {
   likes: number;
@@ -69,6 +65,8 @@ function getRefreshInterval(target: MonitoringTarget): number {
 }
 
 export function XhsBenchmarksPage() {
+  const p = useThemePalette();
+  const cardStyle: React.CSSProperties = { background: p.cardBg, borderColor: p.border };
   const [targets, setTargets] = useState<MonitoringTarget[]>([]);
   const [snapshots, setSnapshots] = useState<Record<number, MonitoringSnapshot[]>>({});
   const [expandedTargetId, setExpandedTargetId] = useState<number | null>(null);
@@ -371,7 +369,7 @@ export function XhsBenchmarksPage() {
                       gap: 16,
                       marginBottom: 12,
                       padding: "8px 12px",
-                      background: "#141414",
+                      background: p.mediaBg,
                       borderRadius: 6,
                     }}
                   >

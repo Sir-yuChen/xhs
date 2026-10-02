@@ -24,6 +24,7 @@ import {
 import { useEffect, useState } from "react";
 
 import { PageHeader } from "../../../components/layout/app-shell";
+import { useThemePalette } from "../../../app/providers";
 import {
   createKeywordGroup,
   deleteKeywordGroup,
@@ -47,6 +48,7 @@ function joinKeywords(keywords: string[]): string {
 }
 
 export function XhsKeywordsPage() {
+  const p = useThemePalette();
   const [groups, setGroups] = useState<KeywordGroup[]>([]);
   const [detailsByGroup, setDetailsByGroup] = useState<
     Record<number, KeywordGroupDetail>
@@ -192,7 +194,7 @@ export function XhsKeywordsPage() {
       />
 
       <Card
-        style={{ background: "#1f1f1f", borderColor: "#303030", marginBottom: 24 }}
+        style={{ background: p.cardBg, borderColor: p.border, marginBottom: 24 }}
       >
         <Form layout="inline" style={{ flexWrap: "wrap", gap: 8 }}>
           <Form.Item>
@@ -239,7 +241,7 @@ export function XhsKeywordsPage() {
           <Spin tip="正在加载关键词组..." />
         </div>
       ) : groups.length === 0 ? (
-        <Card style={{ background: "#1f1f1f", borderColor: "#303030" }}>
+        <Card style={{ background: p.cardBg, borderColor: p.border }}>
           <Empty description="暂无关键词组。" />
         </Card>
       ) : (
@@ -255,7 +257,7 @@ export function XhsKeywordsPage() {
                       <Tag color="blue">xhs</Tag>
                     </Space>
                   }
-                  style={{ background: "#1f1f1f", borderColor: "#303030" }}
+                  style={{ background: p.cardBg, borderColor: p.border }}
                 >
                   <Text type="secondary" style={{ display: "block", marginBottom: 12 }}>
                     {joinKeywords(group.keywords)}

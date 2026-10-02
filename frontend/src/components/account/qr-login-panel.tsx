@@ -10,6 +10,7 @@ import {
   pollXhsLoginSession
 } from "../../lib/api";
 import { loginChannelLabel, loginConfirmed, LOGIN_WAIT_LIMIT_MS } from "../../lib/login-state";
+import { useThemePalette } from "../../app/providers";
 import type { PlatformAccount, XhsQrLoginSession } from "../../types";
 import { LoginSubmitMask } from "./login-submit-mask";
 
@@ -37,6 +38,7 @@ type QrLoginPanelProps = {
 };
 
 export function QrLoginPanel({ accountType, onConfirmed, targetAccountId, onRenewed }: QrLoginPanelProps) {
+  const p = useThemePalette();
   const [session, setSession] = useState<XhsQrLoginSession | null>(null);
   const [statusText, setStatusText] = useState("准备生成二维码");
   const [isLoading, setIsLoading] = useState(false);
@@ -262,10 +264,10 @@ export function QrLoginPanel({ accountType, onConfirmed, targetAccountId, onRene
             justifyContent: "center",
             padding: 24,
             minHeight: 220,
-            background: "#1f1f1f",
+            background: p.cardBg,
           },
         }}
-        style={{ borderColor: "#303030" }}
+        style={{ borderColor: p.border }}
       >
         {session?.qr_image_data_url ? (
           <img
@@ -281,9 +283,9 @@ export function QrLoginPanel({ accountType, onConfirmed, targetAccountId, onRene
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-              background: "#262626",
+              background: p.cardBgElevated,
               borderRadius: 8,
-              color: "rgba(255,255,255,0.3)",
+              color: p.fillIcon,
               fontSize: 28,
               fontWeight: 700,
             }}
@@ -294,7 +296,7 @@ export function QrLoginPanel({ accountType, onConfirmed, targetAccountId, onRene
       </Card>
 
       <div style={{ textAlign: "center" }}>
-        <Text strong style={{ display: "block", marginBottom: 4, color: "rgba(255,255,255,0.88)" }}>
+        <Text strong style={{ display: "block", marginBottom: 4, color: p.text }}>
           {statusText}
         </Text>
         {session?.qr_url ? (
