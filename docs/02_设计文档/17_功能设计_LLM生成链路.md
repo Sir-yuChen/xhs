@@ -480,9 +480,9 @@ v1.9 起新行**恒落 `""`**。
 | gateway_id | Integer | FK llm_gateway_configs.id, index | ✅ | 监控的网关 |
 | platform | String(32) | 默认 "" | ✅ | 平台维度（空 = 该网关全平台） |
 | function | String(32) | 默认 "" | ✅ | 功能维度（空 = 该平台全功能） |
-| metric | String(16) | 非空 | ✅ | `quota`/`calls`/`fail_rate`/`health` |
-| operator | String(8) | 非空 | ✅ | `gt`/`gte`/`lt`（health 用 `eq`） |
-| threshold | Float | 非空 | ✅ | 阈值（quota/tokens/calls 为绝对值；fail_rate 为 0–1） |
+| metric | String(16) | 非空 | ✅ | `calls`/`fail_rate`/`health`（白名单 `ALERT_METRICS`，`quota` 已退场） |
+| operator | String(8) | 非空 | ✅ | `gt`/`gte`/`lt`/`eq`（白名单 `ALERT_OPERATORS`；health 恒用 `eq`） |
+| threshold | Float | 非空 | ✅ | 阈值（calls 为绝对值；fail_rate 为 0–1；health 用 0/1） |
 | window_seconds | Integer | 默认 86400 | ✅ | 统计窗口（秒；默认 24h） |
 | level | String(16) | 默认 "warning" | ✅ | 通知级别（`info`/`warning`/`error`） |
 | enabled | Boolean | 默认 True | ✅ | 停用 = 不触发 |
@@ -490,6 +490,13 @@ v1.9 起新行**恒落 `""`**。
 | created_at / updated_at | DateTime | default / onupdate | ✅ | |
 
 - **去重**：同规则同日只发一次（`last_fired_at` 当天已发 ⇒ 跳过），避免轮询刷屏。
+
+> ⚠️ **v2.2（2026-10-02）字段口径校准**：上表 `metric` / `operator` / `threshold` 三行的取值
+> **以代码白名单为唯一真相源** —— `ALERT_METRICS = ("calls","fail_rate","health")`、
+> `ALERT_OPERATORS = ("gt","gte","lt","eq")`（`backend/app/api/llm_gateway_monitor.py`），
+> 校验入口 `_validate_alert()`，非法值 ⇒ 400 `LLM_ALERT_METRIC_UNSUPPORTED` /
+> `LLM_ALERT_OPERATOR_UNSUPPORTED`。**历史文档里的 `quota` 指标从未落地实现**（v1.6 草案遗留），
+> 已从本表删除；`tokens` 亦非本表指标（跑量入口是 `calls`）。
 
 > ⚠️ **v2.2（2026-10-02）：`health` 指标「从未探测」不算不健康**（缺陷修复，见 §4.5 ⚠️）。
 > 判据 = `last_health_at is not None AND healthy is False` ⇒ 才触发；**`last_health_at is None`
