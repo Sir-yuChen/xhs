@@ -15,6 +15,7 @@ from backend.app.models.llm_gateway import (
     LlmGatewayUsageLog,
 )
 from backend.app.models.login_session import LoginSession
+from backend.app.models.material import MaterialFile, MaterialFolder
 from backend.app.models.monitoring import MonitoringSnapshot, MonitoringTarget
 from backend.app.models.note import Note, NoteAsset, NoteComment, NoteTopic, Topic
 from backend.app.models.notification import Notification
@@ -45,6 +46,8 @@ __all__ = [
     "LlmGatewayAlert",
     "LlmGatewayUsageLog",
     "LoginSession",
+    "MaterialFile",
+    "MaterialFolder",
     "MonitoringSnapshot",
     "MonitoringTarget",
     "Note",

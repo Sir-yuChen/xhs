@@ -1098,6 +1098,31 @@ final_prompt =
 
 > 端点合计：素材库 **7**。
 
+> ✅ **T3 落地记录（2026-10-02）· 数据层 + 服务层（API 端点进行中）**：§3.3 / §3.4 两表 + §6.1
+> 扫描/索引/缩略图已实现，落地文件：
+>
+> - **数据层**：`backend/app/models/material.py`（`MaterialFolder` / `MaterialFile`，
+>   唯一约束 `(user_id, path)` / `(folder_id, rel_path)` 逐字对齐 §3.3 / §3.4）+
+>   迁移 `backend/alembic/versions/9b8c7d6e5f4a_material_library.py`
+>   （`down_revision="f8a9b0c1d2e3"`，幂等 upgrade / 干净 downgrade 已脚本验证）。
+> - **服务层**：`backend/app/services/material_scan_service.py`。要点：
+>   - `is_safe_material_path()` 六条拦截（空 / 盘符根 / 文件系统根 / 系统目录黑名单前缀 /
+>     不存在 / 非目录 / 无读权限）；⚠️ **系统目录判定先于存在性判定** —— `C:\Windows` 这类
+>     必然存在的目录必须靠黑名单拦，不能等到 `exists()` 之后；
+>   - 缩略图**根目录** `storage/materials/thumbs/{folder_id}/f{folder_id}-{file_id}.jpg`
+>     （`thumbs_dir()` 取 `get_settings().storage_dir`，⚠️ **不新增 core 模块**）；
+>   - 缩略图 URL 用 **`folder_id` + 文件名**而非原始路径 ⇒ 不把用户本机目录结构暴露进 URL；
+>   - **视频降级**：项目无 opencv ⇒ `thumb_url=""` + 尺寸留空（前端显类型图标，不是破图）；
+>   - **坏图片降级**：单文件 `except` 吞掉 ⇒ 仍索引、仅无缩略图，**不让一个坏文件废掉整次扫描**；
+>   - **增量**：`mtime` 差 < 1.0s 判未变 ⇒ `skipped`；源文件消失 ⇒ 删索引行（用户源文件不动）；
+>   - ⚠️ **`file_count` 统计前必须 `db.flush()` + `db.expire_all()`** —— `db.delete()` 只标记，
+>     不 flush 会让 count 把已删行数进去（实测差 1，`file_count=1` 而实际 0）；
+>   - 后台扫描 `scan_folder_in_background()`：daemon 线程 + **自建 SessionLocal**（请求 Session
+>     已关）+ 异常全吞记日志（daemon 线程异常无人接管）。
+> - **测试**：`tests/backend/test_material_scan_service.py`（18 用例 / 全 PASS），覆盖路径安全、
+>   增量、类型与缩略图、**只读边界 C2（扫描前后源文件字节与 mtime 不变）**、归属隔离。
+> - ⏳ **未完成**：§7.3 七端点（folders 4 + files 3）待实现。
+
 ### 7.4 生成（新增，~4 端点）
 
 **`POST /api/xhs/product-notes/generate-llm`**（单篇入队）
