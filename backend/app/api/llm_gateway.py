@@ -11,7 +11,12 @@ from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user
 from backend.app.core.security import decrypt_text, encrypt_text
 from backend.app.core.time import shanghai_now
-from backend.app.models import LlmBusinessProvider, LlmGatewayConfig, User
+from backend.app.models import (
+    LlmBusinessProvider,
+    LlmGatewayConfig,
+    LlmGatewayModel,
+    User,
+)
 from backend.app.schemas.common import paginated
 from backend.app.services import llm_gateway_monitor_service
 
@@ -109,42 +114,112 @@ def _generate_provider_key(db: Session, user_id: int, name: str) -> str:
     )
 
 
+def _next_model_key(db: Session, user_id: int, provider_key: str) -> str:
+    """生成模型的人类可读唯一 ID（**服务商内**自然序号：`1`、`2`、`3`…）。
+
+    用户口径（2026-10-02）：「模型也是跟服务商一样需要有一个人为可读的唯一ID，
+    比如 1，2，3 的自然序号」。
+
+    ⚠️ **服务商内唯一，不跨服务商全局递增** —— 每个服务商都从 `1` 开始，
+    因为用户脑子里记的是「DeepSeek 那个服务商的第 2 个模型」，不是全局第 37 个。
+    ⚠️ 取值 = 该服务商内**已有 `model_key` 的数值最大值 + 1**（不是行数 +1）：
+    删掉中间某个模型后，序号**不回收**（回收会让新旧文档指向同一个编号，比留空号更糟）。
+    ⚠️ 非数字的 `model_key`（理论上只有手工改库才会出现）**跳过不参与取最大值**，
+    不让一条脏数据把计数打回 `1` 而造成重号。
+    """
+    existing = db.scalars(
+        select(LlmGatewayModel.model_key).where(
+            LlmGatewayModel.user_id == user_id,
+            LlmGatewayModel.provider_key == provider_key,
+        )
+    ).all()
+    largest = 0
+    for value in existing:
+        text = (value or "").strip()
+        if text.isdigit():
+            largest = max(largest, int(text))
+    return str(largest + 1)
+
+
+class GatewayModelInput(BaseModel):
+    """服务商下**单个模型**的配置项（v2.7，§13.2.9.9）。
+
+    承载**能力类型**（`model_type`）与**使用平台**（`platform`）—— 二者 v2.7 已从服务商层
+    下沉到模型层（§13.2.9.4）。同一服务商可有多个模型、各带不同类型/平台。
+
+    ⚠️ `model_type` / `platform` 都是**用户声明，不是上游回报**（§13.2.1a 纪律延续）：
+    上游 `/models` 不返回能力类型 ⇒ 必须由用户标；**缺省不猜**，由端点校验兜底。
+    """
+
+    model_name: str = Field(min_length=1, max_length=128)
+    #: 能力类型，须在 `MODEL_TYPES` 内（`text` / `image` / `multimodal` / `video`）。
+    model_type: str = Field(default="", max_length=16)
+    #: 使用平台（**v2.9 起为多值数组**，§13.2.11.3）：一个模型可被多个平台共用
+    #: （用户口径「**支持多个平台公共一个服务商下的一个具体模型**」）。
+    #: 每个元素须在 `PLATFORM_VALUES` 内；空数组 = 还没在任何平台配过（允许，展示为 `-`）。
+    #: ⚠️ 写入时机不变（§13.2.9.7）：配置动作发生在哪个平台，就把该平台**并入**此数组
+    #: （**并入不是覆盖** —— 覆盖会让多平台共用无法累积）。
+    platform: list[str] = Field(default_factory=list)
+    enabled: bool = True
+    remark: str = Field(default="", max_length=255)
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class GatewayConfigCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=128)
-    #: v1.9 必填（D3）：使用平台，须在 `PLATFORM_VALUES` 内
-    platform: str = Field(min_length=1, max_length=32)
-    #: v2.0 必填（§13.2.1）：模型类型，`text` / `image`。
-    #: 「模型配置页」按它过滤下拉候选，M2 的类型匹配校验也读它。
-    #: ⚠️ 新增时**必填**（前端下拉必选）：默认值 `text` 是留给存量行的，
-    #: 新表单不给默认 —— 用户口径「新增使用平台，后端新增枚举下拉选择必选」同型。
-    model_type: str = Field(default="", max_length=16)
     base_url: str = Field(default=DEFAULT_BASE_URL, max_length=512)
     #: v1.9 必填（用户口径「访问令牌必填」）；空 ⇒ 400 LLM_PROVIDER_TOKEN_REQUIRED
     access_token: str = ""
-    #: v1.9 必填（用户口径「默认模型必填」）；空 ⇒ 400 LLM_PROVIDER_MODEL_REQUIRED
-    default_model: str = Field(default="", max_length=128)
+    #: ⚠️ **v2.8 起无 `default_model`**（列已删，§13.2.10）：模型真相源 = `llm_gateway_models` 模型行；
+    #: 业务点必须显式选模型（`resolve_business_provider` **不回落**任何默认）。旧前端继续传 ⇒ 422
+    #: （`extra="forbid"`，有意为之）。
+    #: ⚠️ **v2.7**：模型列表随服务商一并创建 —— 每个模型带自己的 type/platform/enabled/remark。
+    #: 取代 v2.0 的「服务商级 `model_type` + `platform`」（§13.2.9.5）。
+    #: 允许为空列表（先建服务商、稍后再配模型）—— 但此时业务点还指不了它（无类型可判）。
+    models: list[GatewayModelInput] = Field(default_factory=list)
 
     # ⚠️ `extra="forbid"` 同时兜住两件事：① 前端误传 `provider_key` ⇒ 422（不可编辑）；
     # ② 拼错字段名不会静默忽略（否则「我填了 platform 怎么没生效」无从排查）。
+    # ⚠️ **v2.7 起 `model_type` / `platform` 不再是本模型字段** ⇒ 旧前端若继续传会 422
+    # （这是**有意**的：静默忽略会让「我配了类型怎么没生效」变成无解之谜）。
     model_config = ConfigDict(extra="forbid")
 
 
 class GatewayConfigUpdateRequest(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=128)
-    #: v1.9：使用平台可改（服务商换适用范围是合理操作）
-    platform: Optional[str] = Field(default=None, min_length=1, max_length=32)
-    #: v2.0：模型类型**可改**（但改了会让**已指向它的映射失效** —— 后端类型校验拦，
-    #: 前端要在编辑弹窗提示这个后果，不许静默）。
-    model_type: Optional[str] = Field(default=None, max_length=16)
     base_url: Optional[str] = Field(default=None, max_length=512)
     # 改 token 时留空 = 保持不变（防误清）；传非空才更新
     access_token: Optional[str] = None
-    default_model: Optional[str] = Field(default=None, max_length=128)
+    #: v2.8：`default_model` 字段已随列删除（§13.2.10）—— 模型变更走 `models` 子列表 /
+    #: 专用子资源端点；旧前端继续传 ⇒ 422（`extra="forbid"`）。
     enabled: Optional[bool] = None
+    #: ⚠️ **v2.7**：模型列表 —— **只增改不删**（§13.2.9.9）：
+    #: 传了的 (provider_key, model_name) ⇒ upsert；**未传的既有行不动**。
+    #: 删除模型走专用端点 `DELETE /{id}/models/{model_id}`（避免「漏传一个就静默删行」）。
+    #: `None`（缺省）= 完全不碰模型层；`[]` = 也什么都不做（不删）。
+    models: Optional[list[GatewayModelInput]] = None
     # ⚠️ **刻意不声明 `provider_key`**（用户口径「新增后不可编辑」）：
     # 加上 `extra="forbid"` ⇒ 请求里带它一律 422。
     # ⚠️ 这是**服务端**约束 —— 前端把输入框藏起来只是表层（前端可绕过），
     # 「不可编辑」必须由服务端拒绝才算数。
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class GatewayModelUpdateRequest(BaseModel):
+    """改模型行（`PATCH /{id}/models/{model_id}`，v2.7）。
+
+    ⚠️ **全部可选**（PATCH 语义：传什么改什么）—— 与 `GatewayConfigUpdateRequest` 同型。
+    `model_name` **不在可改字段里**：它是唯一约束的一半，改名等于「换一个模型」，
+    直接删旧行 + 建新行更诚实（改名会让映射以旧名指向的行突然换了身份）。
+    """
+
+    model_type: Optional[str] = Field(default=None, max_length=16)
+    #: ⚠️ v2.9：改多值数组。传 `[]` = 清空该模型的平台列表；传 `None`（缺省）= 不动。
+    platform: Optional[list[str]] = None
+    enabled: Optional[bool] = None
+    remark: Optional[str] = Field(default=None, max_length=255)
 
     model_config = ConfigDict(extra="forbid")
 
@@ -175,25 +250,338 @@ def _parse_models_json(models_json: str | None) -> list[str]:
     return names
 
 
-def _serialize_config(config: LlmGatewayConfig) -> dict:
+def _parse_platforms(raw: str | None) -> list[str]:
+    """解析模型行 `platform` 列为平台列表（v2.9，**列存 JSON 数组字符串**）。
+
+    ⚠️ **兼容旧数据**：v2.9 前该列是**单值字符串**（如 `"xhs"`）。迁移已把存量转成
+    JSON 数组，但为防止「没跑迁移的库」直接读到裸值，这里做**宽入**处理：
+    裸字符串 `"xhs"` 按单元素数组 `["xhs"]` 解析（**不静默丢平台**）。
+    坏 JSON / 非法类型 ⇒ `[]`（**不臆造平台**，同 `_parse_models_json` 纪律）。
+    """
+    import json as _json
+
+    text = (raw or "").strip()
+    if not text:
+        return []
+    if not text.startswith("["):
+        # 旧单值形态（v2.9 前）——当作单元素数组，不丢数据
+        return [text]
+    try:
+        data = _json.loads(text)
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    return [str(item).strip() for item in data if str(item).strip()]
+
+
+def _dump_platforms(platforms: list[str] | None) -> str:
+    """平台列表 → 落库字符串（JSON 数组；**去重 + 保序**，v2.9）。
+
+    ⚠️ 去重在这里做（**唯一收敛点**）：同一平台重复传入不该落成 `["xhs","xhs"]`
+    —— 前端多选理论上不会重复，但 API 直调会。
+    """
+    import json as _json
+
+    seen: list[str] = []
+    for item in platforms or []:
+        value = str(item).strip()
+        if value and value not in seen:
+            seen.append(value)
+    return _json.dumps(seen, ensure_ascii=False)
+
+
+def _merge_platforms(existing: list[str], incoming: list[str]) -> list[str]:
+    """**并入**平台（不是覆盖）—— 用户口径「支持多个平台共用一个模型」（§13.2.11.3）。
+
+    ⚠️ 语义：已有 `["xhs"]` + 传入 `["douyin"]` ⇒ `["xhs","douyin"]`。
+    这与「在某平台配置该模型时，把当前平台写入」的口径一致：**在第二个平台配置
+    同一个模型，是「追加一个使用平台」，不是「把第一个平台挤掉」**。
+    ⚠️ 清空平台走 `PATCH` 显式传 `platform=[]`（见 `update_gateway_model`）——
+    那时语义是**覆盖为空**，不经本函数。
+    """
+    merged = list(existing)
+    for item in incoming:
+        value = str(item).strip()
+        if value and value not in merged:
+            merged.append(value)
+    return merged
+
+
+def _serialize_model(model: LlmGatewayModel) -> dict:
+    """序列化模型行（v2.7 建立；v2.9 起 `platform` 为**数组**；v2.10 补健康字段）。
+
+    ⚠️ **没有令牌字段** —— 凭据在服务商层，模型行只有类型/平台/启停/备注/健康。
+    """
+    return {
+        "id": model.id,
+        "provider_key": model.provider_key,
+        #: ⚠️ v2.10：人类可读唯一 ID（服务商内自然序号，如 `1` / `2`）—— 前端子表首列展示，
+        #: 与 `id`（DB 全局自增）区分开：用户口头指代用这个。
+        "model_key": model.model_key,
+        "model_name": model.model_name,
+        "model_type": model.model_type,
+        #: ⚠️ v2.9：出参 `platform` 是**字符串数组**（前端多选标签直接渲染）。
+        "platform": _parse_platforms(model.platform),
+        "enabled": model.enabled,
+        "remark": model.remark,
+        #: ⚠️ v2.10：健康下沉到模型维度（用户口径「健康，启用开关，在模型维度展示」）。
+        #: 出参两个字段**必须一起给** —— 前端判据是 `last_health_at is not None AND healthy`，
+        #: 只给 `healthy` 会让「从未探测」（默认 False）显示成「异常」。
+        "healthy": model.healthy,
+        "last_health_at": model.last_health_at.isoformat() if model.last_health_at else None,
+        "created_at": model.created_at.isoformat() if model.created_at else None,
+        "updated_at": model.updated_at.isoformat() if model.updated_at else None,
+    }
+
+
+def _load_models(db: Session, user_id: int, provider_keys: list[str]) -> dict[str, list[dict]]:
+    """按服务商批量取模型行（**一次查完，别在循环里 N+1**）。
+
+    ⚠️ 只返回**用户声明过**的模型行（`llm_gateway_models`），
+    不是 `models_json` 的候选池 —— 两者分工见 §13.2.9.4。
+    """
+    if not provider_keys:
+        return {}
+    rows = db.scalars(
+        select(LlmGatewayModel)
+        .where(
+            LlmGatewayModel.user_id == user_id,
+            LlmGatewayModel.provider_key.in_(provider_keys),
+        )
+        .order_by(LlmGatewayModel.id.asc())
+    ).all()
+    # ⚠️ v2.10：模型行需要带「被哪些业务点使用」—— 前端据此把停用开关置灰
+    # （用户口径「已在使用的模型无法停用」）。**一次查完所有映射**，别在循环里 N+1。
+    mappings = db.scalars(
+        select(LlmBusinessProvider).where(LlmBusinessProvider.user_id == user_id)
+    ).all()
+    usage_by_model: dict[tuple[str, str], list[dict[str, str]]] = {}
+    from backend.app.services.business_provider_keys import _BUSINESS_KEY_BY_KEY as _BKEY
+
+    for mp in mappings:
+        name = (mp.model_name or "").strip()
+        if not name:
+            continue
+        spec = _BKEY.get(mp.business_key)
+        usage_by_model.setdefault((mp.provider_key, name), []).append({
+            "business_key": mp.business_key,
+            "label": (spec.label if spec else "") or mp.business_key,
+            "kind": (spec.kind if spec else ""),
+            "platform": mp.platform,
+        })
+
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        item = _serialize_model(row)
+        item["usages"] = usage_by_model.get((row.provider_key, row.model_name), [])
+        grouped.setdefault(row.provider_key, []).append(item)
+    return grouped
+
+
+def _sync_provider_models_core(
+    db: Session,
+    current_user: User,
+    config: LlmGatewayConfig,
+    *,
+    platform: str = "",
+) -> dict:
+    """**同步服务商模型**（v2.9）—— 拉目录 + AI 归纳类型 + upsert 模型行。**唯一实现**。
+
+    用户口径（2026-10-02）：「配置服务商时应直接父子树展示该服务商下所有模型，
+    不需要再进入编辑后添加模型，模型的类型……**你来调用总结**」+「添加服务商时默认拉取一次，
+    操作列新增『同步服务商模型』按钮」。
+
+    ⚠️ 本函数是「创建时自动拉一次」与「操作列同步按钮」的**同一份实现**
+    （DEF-044：同一语义不留两份实现），故抽成 helper，两个调用点都走这里。
+
+    动作序列（每步都可单独失败，失败语义见下）：
+      ① 拉 `GET {base_url}/models`（**没有令牌 ⇒ 直接返回 `skipped`，不算失败**）；
+      ② 落 `config.models_json`（目录真相源，前端候选池）；
+      ③ 调一次 LLM 把整批模型名归纳成类型（`FUNCTION_CLASSIFY` 记账）；
+      ④ upsert 模型行：**已存在的行只补 `model_type` 且仅在原来是空值时补**
+         （不覆盖用户手工改过的类型 —— 用户的判断优先于 AI）；
+         不存在的行新建（类型取归纳结果，无则 `text`），`platform` 并入当前平台。
+
+    ⚠️ **失败不抛**：目录拉不到（网络/401）⇒ 返回 `ok=False` + `reason`，
+    让**创建动作本身照常成功**（服务商能建起来，用户稍后重试同步）。
+    只有「目录拉取失败」这一件事被如实回报，不把创建打成失败。
+
+    returns: `{"ok", "reason", "catalog_count", "created", "updated", "classified", "total"}`
+    """
+    import requests as http_requests
+
+    from backend.app.services.model_type_classifier import classify_model_types
+
+    import json as _json
+
+    base_url = (config.base_url or "").rstrip("/")
+    access_token = decrypt_text(config.access_token) if config.access_token else ""
+
+    summary = {
+        "ok": False,
+        "reason": "",
+        "catalog_count": 0,
+        "created": 0,
+        "updated": 0,
+        "classified": 0,
+        "total": 0,
+    }
+
+    # ① 无令牌 ⇒ 拉不到目录，如实回报但不判失败（服务商先建好照样有意义）
+    if not access_token:
+        summary["reason"] = "未配置访问令牌，跳过模型同步"
+        return summary
+
+    try:
+        mresp = http_requests.get(
+            f"{base_url}/models",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=15,
+        )
+    except Exception as exc:  # noqa: BLE001 —— 网络失败 ⇒ 回报，不抛
+        summary["reason"] = f"服务商不可达: {str(exc)[:120]}"
+        return summary
+
+    if mresp.status_code >= 400:
+        summary["reason"] = (
+            "访问令牌无效或已过期" if mresp.status_code == 401
+            else f"服务商不可达 (HTTP {mresp.status_code}) @ {base_url}/models"
+        )
+        return summary
+
+    try:
+        body = mresp.json()
+    except Exception:  # noqa: BLE001
+        summary["reason"] = f"服务商返回的不是 JSON @ {base_url}/models"
+        return summary
+
+    catalog = [item.get("id", "") for item in body.get("data", []) if item.get("id")]
+    summary["catalog_count"] = len(catalog)
+
+    # ② 目录落库（真相源）
+    config.models_json = _json.dumps(catalog, ensure_ascii=False)
+    db.flush()
+
+    if not catalog:
+        summary["ok"] = True
+        summary["reason"] = "服务商未返回模型列表"
+        db.commit()
+        return summary
+
+    # ③ AI 归纳整批类型（归纳需要一个文本模型来跑；优先用已声明过的 text/multimodal 行，
+    #    否则用目录第一个模型当归纳器 —— 归纳只是「猜类型」，用哪个模型跑不影响结果正确性）
+    existing_rows = {
+        m.model_name: m
+        for m in db.scalars(
+            select(LlmGatewayModel).where(
+                LlmGatewayModel.user_id == current_user.id,
+                LlmGatewayModel.provider_key == config.provider_key,
+            )
+        ).all()
+    }
+    runner = next(
+        (m for m in existing_rows.values() if m.model_type in ("text", "multimodal")),
+        None,
+    )
+    runner_name = runner.model_name if runner is not None else catalog[0]
+
+    classify_result = classify_model_types(
+        model_config=_GatewayProbeConfig(
+            base_url=base_url,
+            model_name=runner_name,
+            provider_key=config.provider_key,
+            user_id=current_user.id,
+        ),
+        api_key=access_token,
+        model_names=catalog,
+        platform=platform,
+    )
+    summary["classified"] = classify_result.classified
+    summary["total"] = classify_result.total
+
+    # ④ upsert 模型行
+    for name in catalog:
+        inferred = classify_result.mapping.get(name, "text")
+        row = existing_rows.get(name)
+        if row is None:
+            platform_list = [platform] if platform else []
+            db.add(
+                LlmGatewayModel(
+                    user_id=current_user.id,
+                    provider_key=config.provider_key,
+                    # ⚠️ v2.10：人类可读唯一 ID（服务商内自然序号）
+                    model_key=_next_model_key(db, current_user.id, config.provider_key),
+                    model_name=name,
+                    model_type=inferred,
+                    platform=_dump_platforms(platform_list),
+                    enabled=True,
+                )
+            )
+            summary["created"] += 1
+        else:
+            # 只补「原来为空」的类型 —— 用户手工标过的优先于 AI 判断（AI 是锦上添花，不是覆盖）
+            if not row.model_type:
+                row.model_type = inferred
+                summary["updated"] += 1
+            # platform 并入（多平台累积，不覆盖）
+            if platform:
+                merged = _merge_platforms(_parse_platforms(row.platform), [platform])
+                row.platform = _dump_platforms(merged)
+
+    db.commit()
+
+    summary["ok"] = True
+    parts = [f"目录 {len(catalog)} 个模型"]
+    if summary["created"] or summary["updated"]:
+        parts.append(f"新建 {summary['created']} / 补类型 {summary['updated']}")
+    if classify_result.ok:
+        parts.append(f"AI 归纳 {classify_result.classified}/{classify_result.total}")
+    else:
+        parts.append(classify_result.reason or "AI 归纳不可用，类型按文本处理")
+    summary["reason"] = "; ".join(parts)
+    return summary
+
+
+class _GatewayProbeConfig:
+    """归纳调用用的最小模型上下文（`complete_text` 只读这四样）。
+
+    ⚠️ 不复用 `ResolvedModelContext`：那个类型带业务语义（映射解析的产物），
+    而归纳是「配置期」动作、**不走业务映射**（此刻还没有任何映射）。
+    用一个 4 字段的哑对象最诚实 —— 不会让人误以为归纳经过了业务点解析。
+    """
+
+    __slots__ = ("base_url", "model_name", "provider_key", "user_id")
+
+    def __init__(self, *, base_url: str, model_name: str, provider_key: str, user_id: int) -> None:
+        self.base_url = base_url
+        self.model_name = model_name
+        self.provider_key = provider_key
+        self.user_id = user_id
+
+
+def _serialize_config(config: LlmGatewayConfig, models: list[dict] | None = None) -> dict:
     """序列化：令牌字段永不返回，只给 has_access_token 布尔（§10 安全设计）。
 
     v1.6：`models` = models_json 解析出的模型目录（供前端下拉；无则空列表）。
     v1.7：`local_db_path` 出参移除（New API 特化字段，列保留不删、新代码不读写）。
     v1.9：新增 `provider_key`（唯一 KEY，前端只读展示）与 `platform`（使用平台）。
+    ⚠️ **v2.7（§13.2.9.9）**：
+      - `platform` / `model_type` **出参移除**（已下沉到模型层）；
+      - `models` 由「字符串数组（目录）」升级为**结构数组**（用户声明过的模型行，含
+        type/platform/enabled）；原目录候选池改名为 `catalog`（拉上游 `/models` 的结果）。
     """
-    models = _parse_models_json(config.models_json)
+    catalog = _parse_models_json(config.models_json)
     return {
         "id": config.id,
         "name": config.name,
         "provider_key": config.provider_key,
-        "platform": config.platform,
-        # v2.0（§13.2.1）：模型类型 —— 「模型配置页」按它过滤下拉候选
-        # （图像业务点只列 image 类型服务商），M2 的类型匹配校验也读它。
-        "model_type": config.model_type,
         "base_url": config.base_url,
-        "default_model": config.default_model,
-        "models": models,
+        #: v2.8：`default_model` 出参已移除（列已删，§13.2.10）。
+        #: v2.7：**用户声明过的模型行**（结构数组，含 model_type / platform / enabled）。
+        "models": models if models is not None else [],
+        #: v2.7：上游 `/models` 拉到什么（字符串数组，下拉候选池；未配置的模型不在此列）。
+        "catalog": catalog,
         "has_access_token": bool(config.access_token),
         "enabled": config.enabled,
         "healthy": config.healthy,
@@ -237,33 +625,83 @@ def _validate_platform(value: str | None) -> str:
     return value
 
 
-def _validate_model_type(value: str | None, *, required: bool) -> str | None:
-    """校验模型类型（§13.2.1）。
+def _validate_model_row(item: "GatewayModelInput", *, platform_default: str = "") -> None:
+    """校验单个模型行（v2.7 建立，§13.2.9.6）：类型 ∈ `MODEL_TYPES`、平台 ⊆ `PLATFORM_VALUES`。
 
-    `required=True`（新增）⇒ 空值 400；`required=False`（编辑）⇒ 空值视为「不修改」，
-    由调用方决定是否落库。取值须在 `MODEL_TYPES` 内。
+    ⚠️ 类型**必填**（用户声明，不猜、不给默认）——
+    缺省即 400，而不是静默填 `text`：静默填会让「我配的是图像，怎么按文本调用了」
+    变成无解之谜（同 §13.2.1a「判不准时也不猜 image」的纪律）。
+    ⚠️ **平台 v2.9 起允许多值也可为空**（用户口径「多个平台共用一个模型」）：
+    旧口径「平台必填」**已被取代** —— 现在空数组是合法态（模型刚同步进来、还没在任何
+    平台配过；展示为 `-`）。非空时**逐个**校验都在 `PLATFORM_VALUES` 内。
+
+    `platform_default` = 平台上下文（§13.2.9.7）：调用方若在某个平台上下文里配置模型，
+    可把当前平台作为**请求未带 platform 时**的兜底 —— **仅在此显式传入时生效**，
+    不在本函数内隐式取全局值（隐式会让「谁写的这行」无从追查）。
     """
     from backend.app.services.business_provider_keys import MODEL_TYPES
 
-    if not value:
-        if required:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "code": "LLM_PROVIDER_MODEL_TYPE_REQUIRED",
-                    "message": f"模型类型必填，且需为 {sorted(MODEL_TYPES)} 之一",
-                },
-            )
-        return None
-    if value not in MODEL_TYPES:
+    if not item.model_name.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "LLM_PROVIDER_MODEL_NAME_REQUIRED", "message": "模型名必填"},
+        )
+    model_type = (item.model_type or "").strip()
+    if model_type not in MODEL_TYPES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
                 "code": "LLM_PROVIDER_MODEL_TYPE_REQUIRED",
-                "message": f"模型类型须为 {sorted(MODEL_TYPES)} 之一",
+                "message": (
+                    f"模型「{item.model_name}」的能力类型必填，"
+                    f"且需为 {sorted(MODEL_TYPES)} 之一"
+                ),
             },
         )
-    return value
+    #: ⚠️ v2.9：platform 是多值数组；空数组合法（允许「还没配过平台」）。
+    #: 兜底：请求未带 platform 且调用方给了平台上下文 ⇒ 用上下文平台（§13.2.9.7）。
+    platforms = [str(p).strip() for p in (item.platform or []) if str(p).strip()]
+    if not platforms and platform_default:
+        platforms = [platform_default]
+    for value in platforms:
+        if value not in PLATFORM_VALUES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "LLM_PROVIDER_PLATFORM_REQUIRED",
+                    "message": (
+                        f"模型「{item.model_name}」的使用平台「{value}」非法，"
+                        f"需为 {sorted(PLATFORM_VALUES)} 之一"
+                    ),
+                },
+            )
+
+
+def _validate_models(items: list["GatewayModelInput"], *, platform_default: str = "") -> list["GatewayModelInput"]:
+    """校验一批模型行：逐个过 `_validate_model_row` + **同批重名拦**（v2.7）。
+
+    ⚠️ **同批重名**（同一请求里同一 `model_name` 出现两次）⇒ 400：
+    DB 唯一约束 `(user_id, provider_key, model_name)` 会拦，但那会抛
+    `IntegrityError`（500 且文案不可读）；提前拦能给出**可读的** 400。
+    """
+    seen: set[str] = set()
+    cleaned: list[GatewayModelInput] = []
+    for item in items:
+        _validate_model_row(item, platform_default=platform_default)
+        name = item.model_name.strip()
+        if name in seen:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "LLM_PROVIDER_MODEL_DUPLICATE",
+                    "message": f"模型「{name}」在本次请求里重复出现",
+                },
+            )
+        seen.add(name)
+        if name != item.model_name:
+            item = item.model_copy(update={"model_name": name})
+        cleaned.append(item)
+    return cleaned
 
 
 def _get_owned_config(db: Session, current_user: User, config_id: int) -> LlmGatewayConfig:
@@ -295,12 +733,15 @@ def create_gateway_config(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """新增服务商（v1.9）。
+    """新增服务商（v1.9；v2.7 模型列表随建）。
 
-    ⚠️ **三件必填**（用户口径「访问令牌和默认模型必填」「使用平台必选」）：
+    ⚠️ **两件必填**（用户口径「访问令牌和默认模型必填」）：
     任一为空/非法 ⇒ 400 结构化错误（**不静默用默认值补齐** —— 补齐等于替用户
     编造一份凭据，第一次调用才发现是错的）。
     ⚠️ `provider_key` **由服务端生成**（D1），请求体不收该字段。
+    ⚠️ **v2.7（§13.2.9.9）**：`platform` / `model_type` 不再是服务商字段 ——
+    改为 `models: [{model_name, model_type, platform, ...}]`，每个模型自带类型与平台。
+    每个模型行都要过一次校验（类型 ∈ `MODEL_TYPES`、平台 ∈ `PLATFORM_VALUES`）。
     """
     exists = db.scalar(
         select(LlmGatewayConfig).where(
@@ -314,31 +755,42 @@ def create_gateway_config(
             detail={"code": "LLM_GATEWAY_NAME_EXISTS", "message": "服务商名称已存在"},
         )
 
-    _validate_platform(payload.platform)
-    # v2.0（§13.2.1）：新增时模型类型**必填**（下拉必选，同「使用平台」纪律）
-    model_type = _validate_model_type(payload.model_type, required=True)
+    # v2.7：校验每个模型行的类型与平台（任一非法 ⇒ 400，不静默纠偏）
+    model_rows = _validate_models(payload.models)
     if not (payload.access_token or "").strip():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"code": "LLM_PROVIDER_TOKEN_REQUIRED", "message": "访问令牌必填"},
         )
-    if not (payload.default_model or "").strip():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"code": "LLM_PROVIDER_MODEL_REQUIRED", "message": "默认模型必填"},
-        )
+    # v2.8：`LLM_PROVIDER_MODEL_REQUIRED`（默认模型必填）校验已随 `default_model` 列删除（§13.2.10）。
 
     config = LlmGatewayConfig(
         user_id=current_user.id,
         provider_key=_generate_provider_key(db, current_user.id, payload.name),
         name=payload.name,
-        platform=payload.platform,
-        model_type=model_type,
         base_url=_clean_base_url(payload.base_url or DEFAULT_BASE_URL),
         access_token=encrypt_text(payload.access_token) if payload.access_token else "",
-        default_model=payload.default_model,
     )
     db.add(config)
+    db.flush()  # 取 config.id / provider_key 后再落模型行（同一事务）
+    # ⚠️ v2.10：一批模型在同请求里创建 ⇒ 先取一次基点，再按位置递增。
+    # 不能每行都调 `_next_model_key` —— 前面的行还没 flush，查库看不到它们，
+    # 会让整批拿到同一个序号（重号）。
+    next_key = int(_next_model_key(db, current_user.id, config.provider_key))
+    for offset, item in enumerate(model_rows):
+        db.add(
+            LlmGatewayModel(
+                user_id=current_user.id,
+                provider_key=config.provider_key,
+                model_key=str(next_key + offset),
+                model_name=item.model_name,
+                model_type=item.model_type,
+                # ⚠️ v2.9：platform 是多值列表 ⇒ 落库为 JSON 数组字符串（去重 + 保序）
+                platform=_dump_platforms(item.platform),
+                enabled=item.enabled,
+                remark=item.remark,
+            )
+        )
     db.commit()
     db.refresh(config)
     # 设计 17 §4.5（2026-10-02）：新网关按「默认预警规则」补种（enabled=true 即生效）。
@@ -346,7 +798,16 @@ def create_gateway_config(
     llm_gateway_monitor_service.ensure_default_alerts_for_gateway(
         db, user_id=current_user.id, gateway_id=config.id
     )
-    return _serialize_config(config)
+    # ⚠️ v2.9（用户口径 2026-10-02「**添加服务商时默认拉取一次**」）：
+    # 建完即拉一次目录 + AI 归纳类型。**失败不抛**（`_sync_provider_models_core` 内部收敛）——
+    # 服务商能建起来是第一位的，同步失败只如实回报，用户可在操作列点「同步服务商模型」重试。
+    sync = _sync_provider_models_core(db, current_user, config)
+    result = _serialize_config(
+        config, _load_models(db, current_user.id, [config.provider_key]).get(config.provider_key, [])
+    )
+    # ⚠️ 把同步结果挂在响应上（不额外查库）：前端据此提示「已同步 N 个模型」或失败原因
+    result["sync"] = sync
+    return result
 
 
 @router.patch("/{config_id}")
@@ -356,25 +817,22 @@ def update_gateway_config(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """编辑服务商（v1.9）。
+    """编辑服务商（v1.9；v2.7 支持随改 upsert 模型行）。
 
     ⚠️ **停用/开启**（`enabled`）的业务语义（D4，§3.8）：停用 ⇒ **业务取不到该服务商**
     —— 调用链按 `provider_key` 解析时命中 `enabled=False` ⇒ 抛结构化错误
     `LLM_PROVIDER_DISABLED`，**不静默回落到其它服务商**（回落 = 用错凭据调用，
     用户看不到任何提示，只会困惑「为什么调用的是 A 却报 B 的错」）。
     前端表格的开关即此字段的唯一入口。
+
+    ⚠️ **v2.7（§13.2.9.9）**：`platform` / `model_type` 不再是服务商字段；
+    改为 `models` 列表 —— **只增改不删**（未传的既有模型行不动；删除走
+    `DELETE /{id}/models/{model_id}`）。
     """
     config = _get_owned_config(db, current_user, config_id)
 
-    # v2.0：模型类型可改；留空 = 不修改（同 access_token 的「编辑态留空」口径）。
-    new_model_type = _validate_model_type(payload.model_type, required=False)
-    if new_model_type is not None:
-        config.model_type = new_model_type
-
     if payload.name is not None:
         config.name = payload.name
-    if payload.platform is not None:
-        config.platform = _validate_platform(payload.platform)
     if payload.base_url is not None:
         new_base = _clean_base_url(payload.base_url)
         # 改 base_url 后 healthy 自动置 False（需重新探测，§7.1 契约）
@@ -383,17 +841,343 @@ def update_gateway_config(
             config.healthy = False
     if payload.access_token is not None:
         config.access_token = encrypt_text(payload.access_token) if payload.access_token else config.access_token
-    if payload.default_model is not None:
-        config.default_model = payload.default_model
+    # v2.8：`default_model` 处理已随列删除（§13.2.10）。
     if payload.enabled is not None:
         config.enabled = payload.enabled
     # ⚠️ `provider_key` **不在此处更新**（用户口径「新增后不可编辑」）。
     # 请求体带它 ⇒ 422（`GatewayConfigUpdateRequest` 未声明该字段 + extra="forbid"）。
     # 服务编码一旦生成即是对外契约（业务代码引用它），改名会让引用悬空。
 
+    # v2.7：模型行 upsert（**只增改不删**）
+    if payload.models:
+        cleaned = _validate_models(payload.models)
+        existing = {
+            m.model_name: m
+            for m in db.scalars(
+                select(LlmGatewayModel).where(
+                    LlmGatewayModel.user_id == current_user.id,
+                    LlmGatewayModel.provider_key == config.provider_key,
+                )
+            ).all()
+        }
+        # ⚠️ v2.10：本批新增的行要拿**连续且不与既有重号**的 `model_key` ——
+        # 同 `create` 里那条：一次性取基点，再按位置递增（逐行查库会因未 flush 而重号）。
+        next_key = int(_next_model_key(db, current_user.id, config.provider_key))
+        for item in cleaned:
+            row = existing.get(item.model_name)
+            if row is None:
+                db.add(
+                    LlmGatewayModel(
+                        user_id=current_user.id,
+                        provider_key=config.provider_key,
+                        model_key=str(next_key),
+                        model_name=item.model_name,
+                        model_type=item.model_type,
+                        # ⚠️ v2.9：多值列表 ⇒ JSON 数组字符串
+                        platform=_dump_platforms(item.platform),
+                        enabled=item.enabled,
+                        remark=item.remark,
+                    )
+                )
+                next_key += 1
+            else:
+                row.model_type = item.model_type
+                # ⚠️ v2.9：PATCH 语义 = **覆盖**（传什么写什么）——
+                # 未传 platform（空数组）即清空该模型的平台列表。
+                # 「多平台累积」由调用方（前端/SDK）先并入再传，见 `_merge_platforms`。
+                row.platform = _dump_platforms(item.platform)
+                row.enabled = item.enabled
+                row.remark = item.remark
+
     db.commit()
     db.refresh(config)
-    return _serialize_config(config)
+    return _serialize_config(
+        config,
+        _load_models(db, current_user.id, [config.provider_key]).get(config.provider_key, []),
+    )
+
+
+@router.post("/{config_id}/sync-models")
+def sync_gateway_models(
+    config_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """**同步服务商模型**（v2.9，设计 17 §13.2.11.5）—— 操作列的「同步服务商模型」按钮。
+
+    用户口径（2026-10-02）：「配置服务商时应直接父子树展示该服务商下所有模型，
+    不需要再进入编辑后添加模型，模型的类型……你来调用总结」+「操作列新增『同步服务商模型』按钮」。
+
+    动作 = 拉目录 + AI 归纳类型 + upsert 模型行（**与创建时自动拉取同一份实现**，
+    见 `_sync_provider_models_core`，DEF-044）。
+
+    ⚠️ **总是 200**（除非越权 404）：同步结果的好坏在响应体的 `ok` / `reason` 里，
+    不靠 HTTP 状态码 —— 这是「动作已执行、结果是另一件事」的语义（同 `/test` 的口径）。
+    前端据 `ok` 决定提示色（成功绿 / 失败黄，且**必须**展示 `reason`，不吞）。
+    """
+    config = _get_owned_config(db, current_user, config_id)
+    sync = _sync_provider_models_core(db, current_user, config)
+    db.refresh(config)
+    return {
+        "id": config.id,
+        "sync": sync,
+        "catalog": _parse_models_json(config.models_json),
+        "models": _load_models(db, current_user.id, [config.provider_key]).get(config.provider_key, []),
+    }
+
+
+# ⚠️ **路由顺序**：`/{config_id}/models` 与 `/{config_id}/models/{model_id}` 之间
+# **不能插进 `@router.get("/models")` 这类字面量同级路径** —— `/models` 会被
+# `/{config_id}/models` 抢走（Starlette 按声明顺序匹配，`config_id="models"` 解析 int 失败 ⇒ 404）。
+# v2.9 的「服务商 × 模型」**两级列表**就落在本文件内，用**一个**端点
+# `GET /llm/gateway-configs/models-tree`（在下方 `def list_gateway_models` 之后定义）——
+# 为什么不让前端自己把 `GET /` + 每服务商 `GET /{id}/models` 拼起来：
+#   服务商 N 个 ⇒ N+1 次请求，且中间的失败态要前端自己合成（第 3 个失败算整表失败还是空？）。
+#   一个端点 = 一次查库（`_load_models` 已支持多 provider_key 批量取）+ 一个确定的失败语义。
+
+
+@router.get("/{config_id}/models")
+def list_gateway_models(
+    config_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """列出该服务商下**用户声明过**的模型行（v2.7，§13.2.9.9）。
+
+    ⚠️ 返回的是 `llm_gateway_models` 的行（含 type/platform），**不是** `models_json`
+    目录候选池 —— 后者在 `GET /{id}` 的 `catalog` 字段里（§13.2.9.4 分工）。
+    """
+    config = _get_owned_config(db, current_user, config_id)
+    models = _load_models(db, current_user.id, [config.provider_key]).get(config.provider_key, [])
+    return {"items": models}
+
+
+@router.get("/models-tree")
+def get_gateway_models_tree(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """服务商 × 模型**两级列表**（v2.9，用户口径「服务商使用父子列表展示」）。
+
+    出参 = 服务商数组，每项 = `_serialize_config` 的服务商字段 + `models`（该服务商下
+    的全部模型行）。前端据此渲染**父子两张独立表**（父表列 = 服务商维度；
+    子表列 = 模型维度），**不需要再为每个服务商各发一次 `GET /{id}/models`**。
+
+    ⚠️ **为什么要有这个端点**（而不是让前端拼 N+1 次请求）：
+      ① 一次查库：`_load_models` 本就按 provider_key 批量取（**不做 N+1**）；
+      ② 失败语义确定：前端拼装时「第 3 个服务商的模型没拉到」到底是整表算失败还是
+         某行算空？这里没有这个模糊地带 —— 取不到就是整个端点失败（一次请求一个结果）。
+    ⚠️ 语义与 `GET /` **完全一致**（同样的过滤 / 排序 / 分页 / 序列化），只是每项的
+    `models` 真的装了模型行 —— `GET /` 出于「列表不必带子表」的历史原因下发了空数组
+    （见 `_serialize_config` 的 `models` 形参默认 `None ⇒ []`），前端不想为每行再拉一次时
+    就用本端点。两者共用同一个序列化函数，**同一语义不留两份实现**。
+
+    ⚠️ 出参**不带令牌**（`_serialize_config` 只给 `has_access_token`）；
+    模型行也没有令牌字段（凭据在服务商层）。
+    """
+    configs = db.scalars(
+        select(LlmGatewayConfig)
+        .where(LlmGatewayConfig.user_id == current_user.id)
+        .order_by(LlmGatewayConfig.id.desc())
+    ).all()
+    models_of = _load_models(db, current_user.id, [c.provider_key for c in configs])
+    items = [
+        _serialize_config(c, models_of.get(c.provider_key, []))
+        for c in configs
+    ]
+    return paginated(items, page, page_size)
+
+
+@router.post("/{config_id}/models", status_code=status.HTTP_201_CREATED)
+def create_gateway_model(
+    config_id: int,
+    payload: GatewayModelInput,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """为服务商新增一个模型行（v2.7，§13.2.9.9）。
+
+    校验：类型 ∈ `MODEL_TYPES`、平台 ∈ `PLATFORM_VALUES`（`_validate_model_row`）；
+    同服务商下同名模型已存在 ⇒ 409（不静默覆盖，避免「我以为改了其实没改」）。
+    """
+    config = _get_owned_config(db, current_user, config_id)
+    _validate_model_row(payload)
+    exists = db.scalar(
+        select(LlmGatewayModel).where(
+            LlmGatewayModel.user_id == current_user.id,
+            LlmGatewayModel.provider_key == config.provider_key,
+            LlmGatewayModel.model_name == payload.model_name.strip(),
+        )
+    )
+    if exists is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "LLM_PROVIDER_MODEL_EXISTS",
+                "message": f"模型「{payload.model_name}」已在本服务商下配置过",
+            },
+        )
+    row = LlmGatewayModel(
+        user_id=current_user.id,
+        provider_key=config.provider_key,
+        # ⚠️ v2.10：人类可读唯一 ID（服务商内自然序号）
+        model_key=_next_model_key(db, current_user.id, config.provider_key),
+        model_name=payload.model_name.strip(),
+        model_type=payload.model_type,
+        # ⚠️ v2.9：多值列表 ⇒ JSON 数组字符串
+        platform=_dump_platforms(payload.platform),
+        enabled=payload.enabled,
+        remark=payload.remark,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return _serialize_model(row)
+
+
+def _business_usages_of_model(
+    db: Session, user_id: int, provider_key: str, model_name: str
+) -> list[dict[str, str]]:
+    """该**模型行**正在被哪些业务点引用（v2.10，2026-10-02 用户口径）。
+
+    用户口径：「已在使用的模型无法停用」—— 判据是「有没有业务点映射指向它」，
+    真相源 = `llm_business_providers`（v2.3 起业务点必须显式选定服务商 + 模型）。
+
+    返回结构数组（供前端/测试展示「被谁在用」）：`[{business_key, label, kind, platform}]`。
+    ⚠️ 匹配口径 = `(provider_key, model_name)` **两者都命中**（同一模型名可能存在于
+    多个服务商下，只按名字匹配会误伤）。空 `model_name` 不参与（不可能被引用）。
+    """
+    from backend.app.services.business_provider_keys import _BUSINESS_KEY_BY_KEY
+
+    if not provider_key or not model_name:
+        return []
+    rows = db.scalars(
+        select(LlmBusinessProvider).where(
+            LlmBusinessProvider.user_id == user_id,
+            LlmBusinessProvider.provider_key == provider_key,
+            LlmBusinessProvider.model_name == model_name,
+        )
+    ).all()
+    out: list[dict[str, str]] = []
+    for row in rows:
+        spec = _BUSINESS_KEY_BY_KEY.get(row.business_key)
+        out.append({
+            "business_key": row.business_key,
+            "label": (spec.label if spec else "") or row.business_key,
+            "kind": (spec.kind if spec else ""),
+            "platform": row.platform,
+        })
+    return out
+
+
+def _get_owned_model(db: Session, current_user: User, config: LlmGatewayConfig, model_id: int) -> LlmGatewayModel:
+    """取该服务商下的模型行（三重归属：用户 / 服务商 / 行 id）。越权或不存在 ⇒ 404。"""
+    row = db.get(LlmGatewayModel, model_id)
+    if (
+        row is None
+        or row.user_id != current_user.id
+        or row.provider_key != config.provider_key
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "LLM_PROVIDER_MODEL_NOT_FOUND", "message": "模型配置不存在"},
+        )
+    return row
+
+
+@router.patch("/{config_id}/models/{model_id}")
+def update_gateway_model(
+    config_id: int,
+    model_id: int,
+    payload: "GatewayModelUpdateRequest",
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """改模型行（类型 / 平台 / 启停 / 备注）（v2.7，§13.2.9.9）。
+
+    ⚠️ **改 `model_type` 会让已指向该模型的业务点映射失效** —— 后端类型校验
+    （`resolve_business_provider`）会拦，前端须在编辑弹窗提示这个后果（不许静默）。
+    """
+    config = _get_owned_config(db, current_user, config_id)
+    row = _get_owned_model(db, current_user, config, model_id)
+
+    if payload.model_type is not None:
+        from backend.app.services.business_provider_keys import MODEL_TYPES
+
+        if payload.model_type not in MODEL_TYPES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "LLM_PROVIDER_MODEL_TYPE_REQUIRED",
+                    "message": f"模型类型须为 {sorted(MODEL_TYPES)} 之一",
+                },
+            )
+        row.model_type = payload.model_type
+    if payload.platform is not None:
+        # ⚠️ v2.9：platform 是多值数组。
+        # `[]`（显式传空）= **清空**该模型的平台列表（PATCH 覆盖语义）；
+        # 非空时逐值校验 ∈ `PLATFORM_VALUES`。
+        platforms = [str(p).strip() for p in payload.platform if str(p).strip()]
+        for value in platforms:
+            _validate_platform(value)
+        row.platform = _dump_platforms(platforms)
+    if payload.enabled is not None:
+        # ⚠️ v2.10（2026-10-02 用户口径「已在使用的模型无法停用」）：
+        # 停用前必须检查有没有业务点映射指向它 —— 有 ⇒ 400 结构化拒绝（**不静默停用**）。
+        # 为什么拦在**停用**这一侧（而不是允许停用、等调用时报错）：
+        #   1. 映射指向已停用模型 = 该业务点**每次调用都必失败**（`resolve_business_provider`
+        #      会按业务点直接取到它），属于「配好了但永远跑不通」的死配置；
+        #   2. 允许停用会让故障延迟到「用户点生成笔记时」才暴露，那时现场已离开配置页，
+        #      排查成本高得多（同 DEF-048「看起来正常但实际不可用」的事故形态）。
+        # 出路：先到「模型配置页」把指向它的业务点改到别的模型，再回来停用。
+        # ⚠️ 启用（False→True）**不拦**：那是在修复上面那个死配置。
+        if payload.enabled is False and row.enabled:
+            usages = _business_usages_of_model(
+                db, current_user.id, row.provider_key, row.model_name
+            )
+            if usages:
+                labels = "、".join(u["label"] for u in usages)
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": "LLM_MODEL_IN_USE_BY_BUSINESS",
+                        "message": (
+                            f"模型「{row.model_name}」正在被 {len(usages)} 个业务点使用"
+                            f"（{labels}），请先在模型配置页改到别的模型再停用"
+                        ),
+                        "usages": usages,
+                    },
+                )
+        row.enabled = payload.enabled
+    if payload.remark is not None:
+        row.remark = payload.remark
+
+    db.commit()
+    db.refresh(row)
+    return _serialize_model(row)
+
+
+@router.delete("/{config_id}/models/{model_id}", status_code=status.HTTP_200_OK)
+def delete_gateway_model(
+    config_id: int,
+    model_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """删除模型行（v2.7，§13.2.9.9）。
+
+    ⚠️ **真删**（与服务商「410 墓碑」不同）：模型行是**用户声明**，删了不影响凭据；
+    但若已有业务点映射指向它，`resolve_business_provider` 会抛
+    `LLM_BUSINESS_MODEL_NOT_CONFIGURED`（**明确报错，不静默降级**）——
+    删除前前端应提示「有 N 个业务点正在用它」。
+    """
+    config = _get_owned_config(db, current_user, config_id)
+    row = _get_owned_model(db, current_user, config, model_id)
+    db.delete(row)
+    db.commit()
+    return {"deleted": model_id}
 
 
 @router.delete("/{config_id}", include_in_schema=False)
@@ -566,8 +1350,12 @@ def test_gateway_config(
     """健康探测 + 模型列表（§7.1 v1.7：纯 OpenAI 兼容，无 New API 特化探测）。
 
     顺序：① `GET {base_url}/models`（带 access_token，取模型目录；401 ⇒ 令牌错）
-    →（可选）② 一次极小 chat 请求验证 default_model。
+    →（可选）② 一次极小 chat 请求验证**模型行的第一个模型**。
     结果写 healthy / last_health_at；令牌错 401 LLM_GATEWAY_AUTH_FAILED。
+
+    ⚠️ **v2.8（§13.2.10）**：第②步的探活模型不再是 `default_model`（列已删）——
+    改为取该服务商**模型行的第一条 text 类型模型**（按 id 升序）；
+    **无 text 模型行时跳过 chat 探测**（只探 `/models` 目录），不臆造一个模型名去试。
 
     ⚠️ v1.7 移除 v1.4–v1.6 的第①步 `GET {base}/api/status`（New API 可达性探测）——
     那是 New API 专有接口，非 OpenAI 标准；上游任何形态（三方直连 / 自托管网关）统一走
@@ -632,14 +1420,24 @@ def test_gateway_config(
                 },
             )
 
-    # ② 极小 chat 请求验证 default_model（仅当配置了 default_model 且有令牌）
+    # ② 极小 chat 请求验证模型（v2.8：取模型行第一条 text 类型模型；无则跳过）
+    # ⚠️ **不猜模型名** —— 目录里有名字 ≠ 用户标过它是 text 类型（§13.2.1a 纪律延续）。
+    probe_model = db.scalars(
+        select(LlmGatewayModel)
+        .where(
+            LlmGatewayModel.user_id == current_user.id,
+            LlmGatewayModel.provider_key == config.provider_key,
+            LlmGatewayModel.model_type == "text",
+        )
+        .order_by(LlmGatewayModel.id.asc())
+    ).first()
     chat_message = ""
-    if access_token and config.default_model:
+    if access_token and probe_model is not None:
         try:
             cresp = http_requests.post(
                 f"{base_url}/chat/completions",
                 headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
-                json={"model": config.default_model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 5},
+                json={"model": probe_model.model_name, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 5},
                 timeout=15,
             )
             if cresp.status_code < 400:
@@ -651,6 +1449,24 @@ def test_gateway_config(
 
     config.healthy = True
     config.last_health_at = shanghai_now()
+    # ⚠️ **v2.10：健康下沉到模型维度**（用户口径「健康，启用开关，在模型维度展示」）。
+    # 本次探测只要走到这里，就说明**该服务商的凭据与地址是通的** —— 而凭据/地址是
+    # 其下**所有模型共用**的（§13.2.9.2 用户口径「服务商信息是其下的模型公用的」），
+    # 故服务商下的模型行统一置为「已探测且正常」。
+    # ⚠️ **不逐个模型发 chat 请求**：N 个模型 = N 次上游调用，探测端点会变成慢接口，
+    # 且多数上游对不存在的模型名返回 404 而非「不健康」（会把探测结果污染成假阴性）。
+    # 判据仍严格：`healthy=True` **且** `last_health_at` 非空才算「正常」（前端同判）。
+    # ⚠️ 失败路径（上面各 `except`）**不给模型行盖章** —— 保持原有值：
+    # 「探测失败」不等于「模型坏了」（可能只是网络抖动），不该把上一轮的好结果抹掉。
+    probe_time = shanghai_now()
+    for row in db.scalars(
+        select(LlmGatewayModel).where(
+            LlmGatewayModel.user_id == current_user.id,
+            LlmGatewayModel.provider_key == config.provider_key,
+        )
+    ).all():
+        row.healthy = True
+        row.last_health_at = probe_time
     # v1.6：模型目录持久化到 models_json（前端默认模型下拉由目录驱动）
     import json as _json
 
@@ -796,8 +1612,11 @@ def list_business_providers(
     ).all()
     name_of = {c.provider_key: c.name for c in configs}
     enabled_of = {c.provider_key: bool(c.enabled) for c in configs}
-    type_of = {c.provider_key: c.model_type for c in configs}
-    #: v2.3：服务商 → 模型目录（前端模型下拉联动用；一次查完，别在循环里 N+1）
+    #: v2.7：服务商 → **模型行列表**（含 name/type/platform/enabled）。
+    #: 取代 v2.0 的 `type_of = {provider_key: config.model_type}`（服务商已无 model_type）。
+    #: 前端据此做「选完服务商后，模型下拉按业务点 kind 过滤」（§13.2.9.6）。
+    provider_models = _load_models(db, current_user.id, [c.provider_key for c in configs])
+    #: v2.3：服务商 → 模型**目录**（上游候选池，字符串数组；供前端提示「还没配的候选」）
     models_of = {c.provider_key: _parse_models_json(c.models_json) for c in configs}
 
     items = []
@@ -806,6 +1625,12 @@ def list_business_providers(
         row = by_key.get(key)
         pk = (row.provider_key if row else "") or ""
         model_name = (row.model_name if row else "") or ""
+        #: v2.7：该映射所选模型在模型层的类型（诊断「类型不匹配」用；配置正确时应恒等于 kind）
+        model_type = ""
+        for m in provider_models.get(pk, []):
+            if m["model_name"] == model_name:
+                model_type = m["model_type"]
+                break
         items.append({
             "platform": key[0],
             "business_key": item.key,
@@ -817,11 +1642,13 @@ def list_business_providers(
             "provider_key": pk,
             "provider_name": name_of.get(pk) if pk else None,
             "provider_enabled": enabled_of.get(pk) if pk else None,
-            #: 映射指向的服务商当前类型（诊断「类型不匹配」用；配置正确时应恒等于 kind）
-            "provider_model_type": type_of.get(pk) if pk else None,
+            #: v2.7：映射所选**模型**的当前类型（诊断用；恒等于 kind 才是配好的）
+            "provider_model_type": model_type or None,
             #: v2.3：已选具体模型 + 该服务商的模型目录（前端模型下拉候选）
             "model_name": model_name,
             "provider_models": models_of.get(pk, []) if pk else [],
+            #: v2.7：该服务商的**模型行**（带 type/platform，供「模型下拉按 kind 过滤」）
+            "provider_model_rows": provider_models.get(pk, []) if pk else [],
             #: 已配置 = 服务商与模型**都**选了（只选服务商不算配好，调用会失败）
             "configured": bool(pk and model_name),
             "enabled": bool(row.enabled) if row else True,
@@ -840,8 +1667,11 @@ def upsert_business_provider(
     校验（任一不过都 400/404，**不写脏引用**）：
       1. `business_key` 必须是已登记的业务点（`is_valid_business_key`）；
       2. `provider_key` 非空时必须在**本用户**的服务商里存在 ⇒ 否则 404；
-      3. `provider_key` 非空时其 `model_type` 必须等于业务点的 `kind`
-         ⇒ 否则 400（否则会拿文本模型去打图像接口，报一个看不懂的上游错）；
+      3. ⚠️ **v2.7**：`provider_key` 非空时 `model_name` 必须**已配置成模型行**
+         （`llm_gateway_models`）⇒ 否则 400 `LLM_BUSINESS_MODEL_NOT_CONFIGURED`；
+         且该模型行的 `model_type` 必须等于业务点的 `kind`
+         ⇒ 否则 400（否则会拿文本模型去打图像接口，报一个看不懂的上游错）。
+         ~~旧口径：服务商的 `model_type` 必须等于 kind~~（v2.7 已被取代，判据下沉到模型层）。
       4. **v2.3**：`provider_key` 非空时 `model_name` **必须非空**且落在该服务商的
          模型目录（`models_json`）里 ⇒ 否则 400 —— 用户口径「两者都应是必须选择，
          不指定具体的模型无法调用成功」。
@@ -878,17 +1708,6 @@ def upsert_business_provider(
                     "message": "服务商不存在或不属于当前用户",
                 },
             )
-        if config.model_type != item.kind:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "code": "LLM_BUSINESS_PROVIDER_TYPE_MISMATCH",
-                    "message": (
-                        f"业务点「{item.key}」需要 {item.kind} 类型服务商，"
-                        f"而「{config.name}」是 {config.model_type} 类型"
-                    ),
-                },
-            )
         # v2.3：必须显式选具体模型（两者都必选）。
         if not model_name:
             raise HTTPException(
@@ -911,6 +1730,42 @@ def upsert_business_provider(
                     "code": "LLM_BUSINESS_MODEL_NOT_IN_CATALOG",
                     "message": (
                         f"模型「{model_name}」不在服务商「{config.name}」的模型目录里"
+                    ),
+                },
+            )
+        # ⚠️ v2.7（§13.2.9.6）：类型匹配改判**模型行** —— 目录里有名字 ≠ 用户标过类型。
+        model_row = db.scalar(
+            select(LlmGatewayModel).where(
+                LlmGatewayModel.user_id == current_user.id,
+                LlmGatewayModel.provider_key == provider_key,
+                LlmGatewayModel.model_name == model_name,
+            )
+        )
+        if model_row is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "LLM_BUSINESS_MODEL_NOT_CONFIGURED",
+                    "message": (
+                        f"模型「{model_name}」还没标注能力类型，"
+                        f"请先到服务商配置页配置该模型"
+                    ),
+                },
+            )
+        # ⚠️ v2.9（§13.2.11.4）：判据与 `resolve_business_provider` **同一份**
+        # （`_type_satisfies`）—— 多态模型（multimodal）可服务 text/image 两类业务点。
+        # ⚠️ 两处判据**必须同改**：本端点拦在写入前，调用层拦在解析时；
+        # 若这里用严格相等而调用层用放宽，会出现「配得进但调不通」（最难查的形态）。
+        from backend.app.services.llm_gateway_client import _type_satisfies
+
+        if not _type_satisfies(kind=item.kind, model_type=model_row.model_type):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "LLM_BUSINESS_PROVIDER_TYPE_MISMATCH",
+                    "message": (
+                        f"业务点「{item.key}」需要 {item.kind} 类型模型，"
+                        f"而「{config.name}」下的「{model_name}」是 {model_row.model_type} 类型"
                     ),
                 },
             )
@@ -967,7 +1822,11 @@ def list_business_provider_keys(
     `商品列表-商品详情-生成商品详情图`）。**只读展示**，空列表 = 只由 API 直接调用、
     界面无入口 —— **如实留空，不编入口**（同「缺值不造假」纪律）。
     """
-    from backend.app.services.business_provider_keys import BUSINESS_KEYS
+    from backend.app.services.business_provider_keys import (
+        BUSINESS_KEYS,
+        MODEL_TYPE_LABELS,
+        MODEL_TYPES,
+    )
 
     return {
         "items": [
@@ -979,8 +1838,13 @@ def list_business_provider_keys(
             }
             for item in BUSINESS_KEYS
         ],
+        #: ⚠️ v2.7：`model_types` 是**模型级**能力类型枚举（下拉用），与业务点 `kind` 同源
+        #: （`MODEL_TYPES`）。原字面量已改为从常量读 —— 避免与 `business_provider_keys`
+        #: 各留一份（DEF-044：同一语义不留两份实现）。
+        #: ⚠️ v2.9：中文映射改读 `MODEL_TYPE_LABELS`（本端点原写死 `{text:文本,image:图像}`，
+        #: 扩枚举后会静默漏掉 multimodal/video ⇒ 改成读唯一映射点）。
         "model_types": [
-            {"value": "text", "label": "文本"},
-            {"value": "image", "label": "图像"},
+            {"value": value, "label": MODEL_TYPE_LABELS.get(value, value)}
+            for value in sorted(MODEL_TYPES)
         ],
     }

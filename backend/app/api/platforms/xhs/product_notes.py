@@ -378,9 +378,12 @@ class GenerateLlmNoteRequest(BaseModel):
     gateway_config_id: int | None = Field(default=None, ge=1)
     #: 覆盖默认模型名；空 = 用该业务点映射到的服务商的默认模型（`resolve_business_provider`）。
     model_name: str = Field(default="", max_length=128)
-    #: 默认商品图直链（T7 媒体生成落地前唯一可用来源，见 §3.6）。
+    #: 媒体来源四选一（设计 17 §13.4.1）：`product_image` / `material` /
+    #: `reference_image` / `ai_generate`。
     media_source: str = Field(default=MEDIA_SOURCE_PRODUCT_IMAGE, max_length=32)
-    #: 素材选择 / 参考图 / 封面开关等（T3/T7 落地后才用得上；本期透传留痕）。
+    #: 媒体参数载体（§13.4.1）：`material` ⇒ `material_file_ids`；
+    #: `reference_image` ⇒ `reference_image_urls?`；`ai_generate` ⇒
+    #: `prompt?` / `reference_image_urls?` / `count?`。不落库，只进队列项行体。
     media_options: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -392,7 +395,9 @@ class BatchGenerateLlmNotesRequest(BaseModel):
     template_id: int | None = Field(default=None, ge=1)
     gateway_config_id: int | None = Field(default=None, ge=1)
     model_name: str = Field(default="", max_length=128)
+    #: 媒体来源四选一（同单篇，设计 17 §13.4.1）。
     media_source: str = Field(default=MEDIA_SOURCE_PRODUCT_IMAGE, max_length=32)
+    #: 媒体参数载体（§13.4.1；同单篇）。
     media_options: dict[str, Any] = Field(default_factory=dict)
     #: 上限与一期 `GENERATE_BATCH_MAX_ITEMS` 对齐（批量是显式动作，超限分多次）。
     max_items: int = Field(default=GEN_LLM_BATCH_MAX_ITEMS, ge=1, le=GEN_LLM_BATCH_MAX_ITEMS)

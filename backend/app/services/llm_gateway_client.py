@@ -84,17 +84,48 @@ class BusinessProviderNotConfiguredError(LLMGatewayError):
 
 
 class BusinessProviderTypeMismatchError(LLMGatewayError):
-    """业务点的 `kind` 与服务商的 `model_type` 不一致（§13.2.1a 定稿）。
+    """业务点的 `kind` 与**所选模型**的 `model_type` 不一致（§13.2.9.6，v2.7）。
 
-    ⚠️ 这个校验必须**提前**做：把 `generate_cover`（图像类）指到文本服务商，
+    ⚠️ **v2.7 起判据从「服务商 `model_type`」改为「模型行 `model_type`」**：
+    能力类型已下沉到模型层（服务商层无 `model_type` 列），
+    §13.2.1a 原口径「业务点 kind = 服务商 model_type」**已被取代**。
+
+    ⚠️ 这个校验必须**提前**做：把 `generate_cover`（图像类）指到文本模型，
     不校验的后果是调用时拿文本模型去打 `/images/generations`，
     报一个看不懂的上游错；拦在校验层，错误才有指向性。
     """
 
-    def __init__(self, business_key: str = "", want: str = "", got: str = "") -> None:
+    def __init__(self, business_key: str = "", want: str = "", got: str = "", model_name: str = "") -> None:
         super().__init__(
-            f"「{business_key}」是{_kind_label(want)}类业务，不能指向{_kind_label(got)}服务商",
+            (
+                f"「{business_key}」是{_kind_label(want)}类业务，"
+                f"不能指向{_kind_label(got)}模型「{model_name}」"
+                if model_name
+                else f"「{business_key}」是{_kind_label(want)}类业务，不能指向{_kind_label(got)}模型"
+            ),
             code="LLM_BUSINESS_PROVIDER_TYPE_MISMATCH",
+        )
+
+
+class BusinessModelNotConfiguredError(LLMGatewayError):
+    """映射所选模型**在模型层没有行**（`llm_gateway_models` 查不到）—— §13.2.9.6，v2.7 新增。
+
+    ⚠️ v2.3 只要求模型名落在 `models_json` 目录里；v2.7 还要求它在**模型层有类型声明**
+    （否则无法判 `business_key.kind` 是否匹配）。目录是「上游回报的候选池」，
+    模型层才是「用户声明过类型/平台」的地方 —— 二者**不许混用**（§13.2.9.4）。
+
+    出路：让用户去「服务商配置页」为该模型标注能力类型（**不猜**，同不造假纪律）。
+    """
+
+    def __init__(self, business_key: str = "", model_name: str = "", platform: str = PLATFORM_XHS) -> None:
+        super().__init__(
+            (
+                f"模型「{model_name}」还没标注能力类型（{platform}/{business_key}），"
+                f"请先到服务商配置页配置该模型"
+                if model_name
+                else "所选模型还没标注能力类型，请先到服务商配置页配置该模型"
+            ),
+            code="LLM_BUSINESS_MODEL_NOT_CONFIGURED",
         )
 
 
@@ -118,8 +149,45 @@ class BusinessModelRequiredError(LLMGatewayError):
 
 
 def _kind_label(kind: str) -> str:
-    """`text`/`image` → 中文（错误文案用；未知值原样返回，不造名 —— DEF-057）。"""
-    return {"text": "文本", "image": "图像"}.get(kind or "", kind or "")
+    """`text`/`image`/`multimodal`/`video` → 中文（错误文案用）。
+
+    ⚠️ v2.9：改读 `business_provider_keys.MODEL_TYPE_LABELS`（**唯一映射点**）——
+    本函数原写死 `{text:文本, image:图像}`，扩枚举后会静默把 `multimodal`/`video`
+    渲染成英文原值（不报错但文案退化，DEF-044 同型）。
+    未知值原样返回，**不造名** —— DEF-057。
+    """
+    from backend.app.services.business_provider_keys import MODEL_TYPE_LABELS
+
+    return MODEL_TYPE_LABELS.get(kind or "", kind or "")
+
+
+def _type_satisfies(*, kind: str, model_type: str) -> bool:
+    """业务点能力需求 `kind` 是否被模型声明的 `model_type` 满足（§13.2.11.4，v2.9）。
+
+    判据（**只有这一处**，调用层不许散写相等比较）：
+
+    | 业务点 kind | 可被哪些 model_type 满足 |
+    |---|---|
+    | `text` | `text` ✅ · `multimodal` ✅（多态模型必然支持对话）· `image` ❌ · `video` ❌ |
+    | `image` | `image` ✅ · `multimodal` ✅（多态模型可出图）· `text` ❌ · `video` ❌ |
+    | `video` | `video` ✅（当前无此 kind 的业务点，先备着） |
+
+    ⚠️ **为什么 `multimodal` 要放宽**：v2.9 前判据是 `==`（严格相等）。扩枚举后若仍用
+    严格相等，用户在目录里把一个「多态」模型指到「改写笔记」（text 类）业务点会被拒 ——
+    但多态模型打 `/chat/completions` 完全可用，拒绝是**误伤**（把能用的配不出）。
+    ⚠️ **为什么 `image` 不认 `text`**：文本模型打 `/images/generations` 必失败，
+    这类「方向性」不兼容必须拦住（否则报一个看不懂的上游错，§13.2.9.6 原口径）。
+    ⚠️ 未知 `model_type`（不该发生，写入时已校验枚举）⇒ 判不满足，**不猜**（DEF-057）。
+    """
+    if not model_type:
+        # 空类型 = 用户没标 ⇒ 上面已用 `model_model_type and ...` 短路，这里兜底不满足
+        return False
+    if model_type == kind:
+        return True
+    # 多态模型（multimodal）同时可服务 text 与 image 两类业务点
+    if model_type == "multimodal" and kind in ("text", "image"):
+        return True
+    return False
 
 
 class ProviderDisabledError(LLMGatewayError):
@@ -150,16 +218,23 @@ class ProviderNotFoundError(LLMGatewayError):
 class ProviderContext:
     """业务调用所需的**服务商上下文**（v1.9，设计 17 §4.3.1）。
 
+    ⚠️ **v2.7：`platform` 字段移除**（设计 17 §13.2.9.7）——
+    「使用平台」已从服务商层下沉到模型层，服务商上下文不再承载平台信息。
+    调用方若确需平台，请读**模型行**的 `platform`（`resolve_business_provider` 内部按需读）；
+    全局默认平台见 `PLATFORM_XHS`。
+
+    ⚠️ **v2.8：`default_model` 字段移除**（设计 17 §13.2.10）—— 该列已删，
+    服务商上下文不再承载任何模型名；模型真相源 = `llm_gateway_models` 模型行，
+    由 `resolve_business_provider` 按业务点显式取。
+
     `api_key` 是**解密后**的明文令牌 —— ⚠️ **不得进日志、不得进响应体**
     （§10 安全设计：日志/响应一律 `[REDACTED]`）。
     """
 
     provider_id: int
     provider_key: str
-    platform: str
     base_url: str
     api_key: str
-    default_model: str
 
 
 def resolve_provider_context(db: Session, user_id: int, provider_key: str | None) -> ProviderContext:
@@ -196,10 +271,8 @@ def resolve_provider_context(db: Session, user_id: int, provider_key: str | None
     return ProviderContext(
         provider_id=config.id,
         provider_key=config.provider_key,
-        platform=config.platform,
         base_url=config.base_url,
         api_key=decrypt_text(config.access_token) if config.access_token else "",
-        default_model=config.default_model,
     )
 
 
@@ -253,6 +326,10 @@ def resolve_business_provider(
     ⚠️ **v2.3**：口径补完为「**服务商 + 具体模型**两者都必须选定，不指定具体模型
     无法调用成功」（2026-10-02）。故第 1.5 步新增「映射必须有 model_name」校验。
 
+    ⚠️ **v2.7（§13.2.9.6）**：判据从「服务商 `model_type`」改为「**模型行 `model_type`**」——
+    能力类型已下沉到模型层（服务商层无该列）。映射所选模型**必须已在模型层配置成行**，
+    否则抛 `BusinessModelNotConfiguredError`（目录里有名字不等于用户标过类型）。
+
     四步，任一步不满足都**抛错、绝不回落**（§13.2.3 定稿）：
 
     1. 查 `llm_business_providers` 的 `(user_id, platform, business_key)`
@@ -260,7 +337,8 @@ def resolve_business_provider(
     1.5. 映射的 `model_name` 为空 ⇒ `BusinessModelRequiredError`
        （**不回落 `default_model`** —— 那是 v2.3 前的静默兜底，已废除）；
     2. 业务点的 `kind`（见 `services/business_provider_keys`）必须等于
-       服务商 `model_type` —— 不等 ⇒ `BusinessProviderTypeMismatchError`
+       **模型行** `model_type` —— 模型行不存在 ⇒ `BusinessModelNotConfiguredError`；
+       不等 ⇒ `BusinessProviderTypeMismatchError`
        （**提前拦**：否则会拿文本模型去打图像接口，报一个看不懂的上游错）；
     3. 复用 `resolve_provider_context()` 取凭据 —— 它自己负责
        「服务商不存在」与「服务商停用」两种结构化错误。
@@ -295,16 +373,23 @@ def resolve_business_provider(
 
     ctx = resolve_provider_context(db, user.id, mapping.provider_key)
 
-    # 类型匹配：业务点的能力类别必须与服务商声明的一致（§13.2.1a）
-    config = db.scalars(
-        select(LlmGatewayConfig).where(
-            LlmGatewayConfig.user_id == user.id,
-            LlmGatewayConfig.provider_key == ctx.provider_key,
+    # 类型匹配：业务点的能力类别必须与**所选模型**声明的一致（§13.2.9.6，v2.7）
+    # ⚠️ v2.7 起判据在**模型层**（`llm_gateway_models`），不再是服务商 `model_type`。
+    from backend.app.models.llm_gateway import LlmGatewayModel
+
+    model_row = db.scalars(
+        select(LlmGatewayModel).where(
+            LlmGatewayModel.user_id == user.id,
+            LlmGatewayModel.provider_key == ctx.provider_key,
+            LlmGatewayModel.model_name == model_name,
         )
     ).first()
-    provider_model_type = (getattr(config, "model_type", "") or "").strip()
-    if provider_model_type and provider_model_type != spec.kind:
-        raise BusinessProviderTypeMismatchError(key, spec.kind, provider_model_type)
+    if model_row is None:
+        # 目录里有名字、但用户从没在模型层标注过 ⇒ 判不了类型，**不猜**
+        raise BusinessModelNotConfiguredError(key, model_name, platform)
+    model_model_type = (model_row.model_type or "").strip()
+    if model_model_type and not _type_satisfies(kind=spec.kind, model_type=model_model_type):
+        raise BusinessProviderTypeMismatchError(key, spec.kind, model_model_type, model_name)
 
     return ResolvedModelContext(
         base_url=ctx.base_url,

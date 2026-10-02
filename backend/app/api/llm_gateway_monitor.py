@@ -280,6 +280,7 @@ def _usage_filter(
     gateway_id: Optional[int],
     platform: Optional[str],
     function: Optional[str],
+    model_name: Optional[str],
     start: Optional[datetime],
     end: Optional[datetime],
 ):
@@ -290,6 +291,8 @@ def _usage_filter(
         stmt = stmt.where(LlmGatewayUsageLog.platform == platform)
     if function:
         stmt = stmt.where(LlmGatewayUsageLog.function == function)
+    if model_name:
+        stmt = stmt.where(LlmGatewayUsageLog.model_name == model_name)
     if start is not None:
         stmt = stmt.where(LlmGatewayUsageLog.created_at >= start)
     if end is not None:
@@ -332,6 +335,7 @@ def usage_overview(
     gateway_id: Optional[int] = None,
     platform: Optional[str] = None,
     function: Optional[str] = None,
+    model_name: Optional[str] = None,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -340,7 +344,7 @@ def usage_overview(
 
     def _bucket(days: int) -> dict:
         stmt = _usage_filter(
-            select(LlmGatewayUsageLog), current_user, gateway_id, platform, function,
+            select(LlmGatewayUsageLog), current_user, gateway_id, platform, function, model_name,
             now - timedelta(days=days), None,
         )
         return _usage_bucket(db, stmt)
@@ -364,6 +368,7 @@ def usage_daily(
     gateway_id: Optional[int] = None,
     platform: Optional[str] = None,
     function: Optional[str] = None,
+    model_name: Optional[str] = None,
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
     current_user: User = Depends(get_current_user),
@@ -379,7 +384,7 @@ def usage_daily(
     end_dt = datetime.combine(end_date, datetime.max.time())
 
     stmt = _usage_filter(
-        select(LlmGatewayUsageLog), current_user, gateway_id, platform, function,
+        select(LlmGatewayUsageLog), current_user, gateway_id, platform, function, model_name,
         start_dt, end_dt,
     )
     rows = db.execute(
@@ -418,6 +423,7 @@ def usage_daily(
 def usage_breakdown(
     dimension: str = Query(..., description="platform|function|model"),
     gateway_id: Optional[int] = None,
+    model_name: Optional[str] = None,
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
     current_user: User = Depends(get_current_user),
@@ -449,7 +455,7 @@ def usage_breakdown(
     end_dt = datetime.combine(end_date, datetime.max.time())
 
     stmt = _usage_filter(
-        select(LlmGatewayUsageLog), current_user, gateway_id, None, None, start_dt, end_dt,
+        select(LlmGatewayUsageLog), current_user, gateway_id, None, None, model_name, start_dt, end_dt,
     )
     rows = db.execute(
         stmt.with_only_columns(

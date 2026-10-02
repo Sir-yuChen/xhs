@@ -10,12 +10,15 @@
 ## kind 的语义与用途
 
 每个 key 带 `kind`（`text` / `image`），供 M2 的**类型匹配校验**使用：
-映射时 `business_key` 的 kind **必须等于**服务商 `llm_gateway_configs.model_type`，
-不等则 400 `LLM_BUSINESS_PROVIDER_TYPE_MISMATCH`（§13.2.1a）。
+映射时 `business_key` 的 kind **必须等于**该映射所选**模型行**的
+`llm_gateway_models.model_type`，不等则 400 `LLM_BUSINESS_PROVIDER_TYPE_MISMATCH`。
+⚠️ **v2.7 起判据在模型层**（§13.2.9.6）—— 原文「必须等于服务商
+`llm_gateway_configs.model_type`」（§13.2.1a）**已被取代**：能力类型已下沉到模型，
+服务商层不再有 `model_type` 列。
 
 ⚠️ kind 刻意只两值：`text` = 打 `POST {base_url}/chat/completions`，
 `image` = 打 `POST {base_url}/images/generations`。新能力 = 新增一个枚举值，
-**零表结构改动**（§13.2.1a 的可扩展性论证）。
+**零表结构改动**（§13.2.1a 的可扩展性论证，v2.7 后依然成立）。
 
 ⚠️ 本模块是 API 层与前端下发共用的**唯一真相源** —— 前端业务点清单由
 后端端点读这里的常量下发，不在前端再抄一份（DEF-044：同一语义不留两份实现）。
@@ -29,9 +32,39 @@ from typing import Final, NamedTuple
 MODEL_TYPE_TEXT: Final[str] = "text"
 #: 图像类（打 `POST {base_url}/images/generations`）
 MODEL_TYPE_IMAGE: Final[str] = "image"
+#: 多态类（v2.9 新增）：既能对话又能出图/理解图片，如 gpt-4o、qwen-vl 系列。
+#: ⚠️ **调用层路由**：统一走 `POST {base_url}/chat/completions`（多态模型的上游入口就是 chat），
+#: 与 `text` 同路；`image` 才是唯一走 `/images/generations` 的类型（§13.2.11.4）。
+MODEL_TYPE_MULTIMODAL: Final[str] = "multimodal"
+#: 视频类（v2.9 新增）：文生视频 / 图生视频，如 sora、kling、veo 系列。
+#: ⚠️ **当前无业务点消费**（`BUSINESS_KEYS` 里没有 kind=video 的条目）——
+#: 枚举先落地以便模型目录能如实标注；真正接线见 §13.4.4 视频链路。
+MODEL_TYPE_VIDEO: Final[str] = "video"
 
-#: 服务商/业务点支持的模型类型全集（§13.2.1a；新增能力只改这里）。
-MODEL_TYPES: Final[frozenset[str]] = frozenset({MODEL_TYPE_TEXT, MODEL_TYPE_IMAGE})
+#: 能力类型全集（§13.2.1a；新增能力只改这里）。
+#: ⚠️ v2.7：本集合是**模型行** `model_type` 的枚举源（服务商层已无该列，§13.2.9.5）。
+#: ⚠️ v2.9 由 `{text, image}` 扩为四值（用户 2026-10-02 口径「**图片，多态，视频，或文本等等**」）；
+#: 中文映射见 `MODEL_TYPE_LABELS`，**不要在别处再写一份**（DEF-044 同一语义不留两份实现）。
+MODEL_TYPES: Final[frozenset[str]] = frozenset(
+    {MODEL_TYPE_TEXT, MODEL_TYPE_IMAGE, MODEL_TYPE_MULTIMODAL, MODEL_TYPE_VIDEO}
+)
+
+#: 类型 → 中文展示名（**唯一映射点**）。
+#: ⚠️ 用户口径里的「图片」对应 `image`（能出图的模型）；「多态」对应 `multimodal`；
+#: 「视频」「文本」顾名思义。前端类型下拉、表格类型列、模型配置页筛选**全部读这一份**。
+MODEL_TYPE_LABELS: Final[dict[str, str]] = {
+    MODEL_TYPE_TEXT: "文本",
+    MODEL_TYPE_IMAGE: "图片",
+    MODEL_TYPE_MULTIMODAL: "多态",
+    MODEL_TYPE_VIDEO: "视频",
+}
+
+#: 走「对话」入口的类型（`POST {base_url}/chat/completions`）。
+#: ⚠️ 调用层路由**唯一判据** —— 凡是需要决定「打 chat 还是打 images」的地方读这个集合，
+#: 不要散写 `== MODEL_TYPE_TEXT`（v2.9 扩枚举后那样写会把 multimodal 漏掉）。
+CHAT_ENTRY_MODEL_TYPES: Final[frozenset[str]] = frozenset(
+    {MODEL_TYPE_TEXT, MODEL_TYPE_MULTIMODAL}
+)
 
 
 class BusinessKey(NamedTuple):

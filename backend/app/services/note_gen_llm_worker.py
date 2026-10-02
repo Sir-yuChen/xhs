@@ -73,6 +73,10 @@ from backend.app.models.user import User
 from backend.app.services import llm_gateway_client, note_queue_service
 from backend.app.services.business_provider_keys import BUSINESS_KEY_GENERATE_NOTE
 from backend.app.services.llm_gateway_client import LLMGatewayError
+from backend.app.services.media_generation import (
+    MediaGenerationError,
+    build_note_media,
+)
 from backend.app.services.note_gen_llm_service import (
     GeneratedNote,
     NoteGenerationError,
@@ -285,6 +289,7 @@ def _enqueue_llm_item(
     gateway_config_id: Optional[int] = None,
     model_name: str = "",
     media_source: str = MEDIA_SOURCE_PRODUCT_IMAGE,
+    media_options: Optional[dict] = None,
 ) -> tuple[Task, bool]:
     """入队一条 LLM 生成项（内部用：`enqueue_item` 直插 + 行体全部字段）。
 
@@ -303,6 +308,7 @@ def _enqueue_llm_item(
         gateway_config_id=gateway_config_id,
         model_name=model_name,
         media_source=media_source,
+        media_options=media_options,
         item_name=str(getattr(row, "item_title", "") or ""),
     )
     task_row, created = note_queue_service.enqueue_item(
@@ -338,6 +344,7 @@ def start_llm_generate_note(
     gateway_config_id: Optional[int] = None,
     model_name: str = "",
     media_source: str = MEDIA_SOURCE_PRODUCT_IMAGE,
+    media_options: Optional[dict] = None,
     source: str = note_queue_service.SOURCE_PRODUCT_NOTE_GENERATE_LLM_SINGLE,
 ) -> dict:
     """单篇 LLM 生成**入队即返回**（设计 17 §7.4）。
@@ -370,6 +377,7 @@ def start_llm_generate_note(
         gateway_config_id=gateway_config_id,
         model_name=model_name,
         media_source=media_source,
+        media_options=media_options,
     )
     record_id = 0
     if not created:
@@ -427,6 +435,7 @@ def start_llm_batch_generate(
     gateway_config_id: Optional[int] = None,
     model_name: str = "",
     media_source: str = MEDIA_SOURCE_PRODUCT_IMAGE,
+    media_options: Optional[dict] = None,
     max_items: int = GEN_LLM_BATCH_MAX_ITEMS,
 ) -> dict:
     """批量 LLM 生成入队（设计 17 §7.4）：逐项过门禁，通过项按序入队。
@@ -481,6 +490,7 @@ def start_llm_batch_generate(
                 gateway_config_id=gateway_config_id,
                 model_name=model_name,
                 media_source=media_source,
+                media_options=media_options,
             )
         except BaseException as error:  # noqa: BLE001 - 单项失败不阻断（一口锅不能被一颗坏豆子毁掉）
             db.rollback()
@@ -609,12 +619,13 @@ def _local_note_id() -> str:
 
 
 def _media_assets_for(row: ShopProduct, media_source: str) -> list[dict]:
-    """按 `media_source` 决定笔记媒体（设计 17 §3.6 / §7.4）。
+    """**同步兜底**媒体清单（只处理商品图直链；其余来源走 `build_note_media`）。
 
-    ⚠️ **T7（媒体生成）尚未落地**：本期只有 `product_image`（商品图直链，
-    复刻一期生成的做法）可用；`ai_generate` / `material` / `reference_image`
-    需要 T3 素材库与 T7 图像生成 —— 这里**照实返回空列表**（不造假图片），
-    由 worker 记为「媒体待补」，不阻塞笔记落库（正文才是本队列的产物）。
+    ⚠️ **T7 已落地**（设计 17 §13.4）：真媒体产出走
+    :func:`backend.app.services.media_generation.build_note_media`（需要网络 IO /
+    事务，由调用方在 `_persist_generated_note` 里执行）。本函数只保留
+    **纯同步**的商品图直链分支，供**不持 db 的调用点**（如快照 `media_count`
+    估算）复用 —— 保持「无副作用」。
     """
     if media_source != MEDIA_SOURCE_PRODUCT_IMAGE:
         return []
@@ -632,21 +643,38 @@ def _media_assets_for(row: ShopProduct, media_source: str) -> list[dict]:
 def _persist_generated_note(
     db: Session,
     *,
+    user: User,
     row: ShopProduct,
     account_id: Optional[int],
     generated: GeneratedNote,
     record: GenerationRecord,
     media_source: str,
+    media_options: Optional[dict] = None,
 ) -> dict[str, Any]:
     """把生成产物落库（**调用方持事务**；本函数只 `flush`，不 `commit`）。
 
     落五处：`notes` + `note_topics`（经 `apply_sync_topics`，**唯一话题入口**）
-    + `note_assets` + `note_generation_links`（本地主键级关系，§3.7）
+    + `note_assets`（经 `build_note_media`，T7）+ `aigc_media_assets`（AIGC 溯源）
+    + `note_generation_links`（本地主键级关系，§3.7）
     + 回写 `generation_records`（`status=success` + 标题 / 正文 / 话题 + 耗时）。
 
     护栏**已在上游拦截**（`generate_full_note` 返回 `ok=False` 时不会走到这里）
     ⇒ 本函数只处理「通过」的产物。
+
+    ⚠️ **媒体失败不废正文**（§13.4.2）：`build_note_media` 内部对「出图 / 下载失败」
+    已降级为空媒体；此处只接住**配置级** `MediaGenerationError`（业务点未配 /
+    素材不存在）—— 那种情况**整条记失败**（用户该知道媒体没成），不落半条笔记。
     """
+    # ---- T7：媒体产出（可能调上游出图，故先于 note 落库执行；失败即整条失败） ----
+    media_entries, aigc_origins = build_note_media(
+        db,
+        user=user,
+        row=row,
+        media_source=media_source,
+        media_options=media_options,
+        record=record,
+    )
+
     note = Note(
         user_id=row.user_id,
         platform_account_id=account_id,        platform="xhs",
@@ -676,7 +704,7 @@ def _persist_generated_note(
     # ⇒ 不传 `platform_ids`（缺值留空，不造假）。
     apply_sync_topics(db, note, generated.topics)
 
-    for entry in _media_assets_for(row, media_source):
+    for entry in media_entries:
         db.add(
             NoteAsset(
                 note_id=note.id,
@@ -686,6 +714,10 @@ def _persist_generated_note(
                 sort_order=entry["sort_order"],
             )
         )
+
+    # AIGC 溯源（§13.4.3）：与笔记落库**同一事务**；非 AI 来源（商品图 / 素材）无溯源行。
+    for origin in aigc_origins:
+        db.add(origin)
 
     # 本地主键级「生成笔记 ↔ 商品」关系（§3.7）。与一期 `note_goods`（平台 ID 级）
     # 并存：两者维度不同，不是两份实现（见 `NoteGenerationLink` docstring）。
@@ -715,7 +747,7 @@ def _persist_generated_note(
         "model_name": generated.model_name,
         "latency_ms": generated.latency_ms,
         "media_source": media_source,
-        "media_count": len(_media_assets_for(row, media_source)),
+        "media_count": len(media_entries),
     }
 
 
@@ -780,6 +812,9 @@ def _run_one_llm_generate(item_id: int) -> None:
             shop_product_id = 0
         template_id = payload.get("template_id")
         media_source = str(payload.get("media_source") or MEDIA_SOURCE_PRODUCT_IMAGE)
+        media_options = payload.get("media_options")
+        if not isinstance(media_options, dict):
+            media_options = None
         account_id = note_queue_service.account_id_of(item)
         user_id = int(item.user_id)
         if not shop_product_id:
@@ -905,14 +940,28 @@ def _run_one_llm_generate(item_id: int) -> None:
                 code="LLM_ITEM_INVALID",
             )
             return
-        outcome = _persist_generated_note(
-            db,
-            row=row,
-            account_id=owner_account_id,
-            generated=generated,
-            record=record,
-            media_source=media_source,
-        )
+        try:
+            outcome = _persist_generated_note(
+                db,
+                user=user,
+                row=row,
+                account_id=owner_account_id,
+                generated=generated,
+                record=record,
+                media_source=media_source,
+                media_options=media_options,
+            )
+        except MediaGenerationError as error:
+            # ---- 媒体配置级失败（业务点未配 / 素材不存在）⇒ 整条失败（不落半条笔记） ----
+            db.rollback()
+            _mark_record_failed(
+                db, item=item, user_id=user_id, code=error.code, message=error.message
+            )
+            db.flush()
+            note_queue_service.finish_item(
+                db, item, ok=False, reason=error.message, code=error.code
+            )
+            return
         db.commit()
         note_queue_service.finish_item(
             db,

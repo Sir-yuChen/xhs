@@ -46,6 +46,8 @@ FUNCTION_TITLE = "title"
 FUNCTION_TAG = "tag"
 FUNCTION_POLISH = "polish"
 FUNCTION_DESCRIBE = "describe"
+#: v2.9：模型类型归纳（拉取目录后由 AI 判 text/image/multimodal/video）
+FUNCTION_CLASSIFY = "classify"
 
 #: 状态取值（台账 `status` 列）
 STATUS_SUCCESS = "success"

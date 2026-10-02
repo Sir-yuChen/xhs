@@ -11,6 +11,7 @@ from backend.app.models.llm_gateway import (
     LlmBusinessProvider,
     LlmGatewayAlert,
     LlmGatewayConfig,
+    LlmGatewayModel,
     LlmGatewaySnapshot,
     LlmGatewayUsageLog,
 )
@@ -42,6 +43,7 @@ __all__ = [
     "KeywordGroup",
     "LlmBusinessProvider",
     "LlmGatewayConfig",
+    "LlmGatewayModel",
     "LlmGatewaySnapshot",
     "LlmGatewayAlert",
     "LlmGatewayUsageLog",
