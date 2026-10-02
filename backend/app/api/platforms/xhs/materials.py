@@ -33,7 +33,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete as sa_delete
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.core.database import get_db
@@ -241,15 +241,20 @@ def delete_material_folder(
     db.commit()
 
     # 缩略图副本整目录清理（失败只记日志 —— 残留不影响正确性）
+    # ⚠️ 必须 `except BaseException`（不是 `except OSError`）：删文件/删目录在装了
+    #    「批删守卫」的环境下会抛 **`SystemExit`**（`BaseException` 直系，**不是**
+    #    `OSError`），`except OSError` 兜不住 ⇒ 异常穿透 ⇒ 整个 DELETE 请求 500。
+    #    注释写着「失败只记日志」就必须真的兜住一切（DEF-048：安全网不得条件性）。
+    #    2026-10-02 实测：全量回归下本端点因 `SystemExit` 崩，串行跑不触发（守卫按轮计次）。
     try:
-        thumb_dir = scan_svc.thumbs_dir() / str(folder_id)
+        thumb_dir = scan_svc.thumbs_dir() / str(folder.id)
         if thumb_dir.is_dir():
             for child in thumb_dir.iterdir():
                 if child.is_file():
                     child.unlink()
             thumb_dir.rmdir()
-    except OSError as exc:  # noqa: BLE001
-        logger.warning("素材库删除：缩略图清理失败 folder=%s: %s", folder_id, exc)
+    except BaseException as exc:  # noqa: BLE001
+        logger.warning("素材库删除：缩略图清理失败 folder=%s: %s", folder.id, exc)
 
     return {"ok": True, "removed_files": removed}
 

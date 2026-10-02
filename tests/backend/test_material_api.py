@@ -197,6 +197,40 @@ def test_folder_delete_removes_index_but_not_source_files(api_client: Any, tmp_p
     assert src.exists() and src.stat().st_size > 0
 
 
+def test_folder_delete_survives_thumbnail_cleanup_failure(
+    api_client: Any, tmp_path: Path, monkeypatch: Any
+):
+    """缩略图清理炸了也必须返回 200 —— 「失败只记日志」不能是空话（DEF-048 同型）。
+
+    ⚠️ 真机场景：装了「批删守卫」的环境里 `Path.unlink()` 抛的是 **`SystemExit`**
+    （`BaseException` 直系，**不是 `OSError`**）。端点若写 `except OSError` 就兜不住
+    ⇒ 异常穿透 ⇒ 整个 DELETE 请求 500（2026-10-02 全量回归实测红）。
+    本用例把守卫形态钉死：抛 `SystemExit` 时端点仍返回 200、索引行照删、
+    用户源文件不动 —— 变异（把兜底改回 `except OSError`）必然红。
+    """
+    token, _ = _register(api_client)
+    media = tmp_path / "media"
+    src = media / "keep.jpg"
+    _make_image(src)
+    fid = api_client.post(
+        "/api/xhs/materials/folders", json={"name": "a", "path": str(media)}, headers=_auth(token)
+    ).json()["id"]
+    _wait_scan(api_client, token, fid)
+
+    # 模拟批删守卫：unlink 直接抛 SystemExit（不是 OSError）
+    def _boom(self: Path) -> None:
+        raise SystemExit(1)
+
+    monkeypatch.setattr(Path, "unlink", _boom)
+
+    r = api_client.delete(f"/api/xhs/materials/folders/{fid}", headers=_auth(token))
+    assert r.status_code == 200, r.text
+    assert r.json()["removed_files"] == 1
+    assert api_client.get("/api/xhs/materials/folders", headers=_auth(token)).json() == []
+    assert api_client.get("/api/xhs/materials/files", headers=_auth(token)).json()["total"] == 0
+    assert src.exists() and src.stat().st_size > 0
+
+
 def test_folder_scan_endpoint_accepted(api_client: Any, tmp_path: Path):
     token, _ = _register(api_client)
     media = tmp_path / "media"
@@ -266,15 +300,33 @@ def test_folder_list_is_per_user(api_client: Any, tmp_path: Path):
 
 # ───────────────────────── 文件列表 ───────────────────────── #
 
+def _wait_first_scan(api_client: Any, token: str, fid: int, timeout: float = 8.0) -> str:
+    """等**建库首扫**真正落库（`last_scan_at` 非 None），返回该时间戳。
+
+    ⚠️ `POST /folders` 是 **202 + 异步首扫**：端点返回时首扫可能还没提交事务。
+    若此时立刻取 `last_scan_at` 当「扫描前基线」，会拿到 `None` ⇒ 后续
+    `_wait_scan(after=None)` 一看到首扫提交就返回，**手动扫描尚未落库** ⇒
+    断言读到 0 条（2026-10-02 实测 `test_files_filter_by_type_and_keyword`
+    确定性失败的真因）。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        state = _folder_state(api_client, token, fid)
+        if state is not None and state["last_scan_at"] is not None:
+            return state["last_scan_at"]
+        time.sleep(0.05)
+    raise AssertionError(f"建库首扫未在 {timeout}s 内完成 folder={fid}")
+
+
 def _seed_files(api_client: Any, token: str, media: Path, fid: int) -> None:
     """在目录里造 2 图 + 1 视频，然后**手动触发一次扫描**并等它落库。
 
     ⚠️ 不能只造文件就等 `last_scan_at`：`POST /folders` 建库时的首扫可能已经跑完
     （目录当时是空的或只有部分文件）⇒ 会读到**上一次**的扫描结果。
-    先记下当前 `last_scan_at`，手动 `POST /scan`，再等它变新（见 `_wait_scan`）。
+    ⚠️ 更要紧的是**先等首扫真正落库**再记基线 —— 否则基线是 `None`，
+    `_wait_scan` 会把「首扫提交」误当成本次手动扫描完成（见 `_wait_first_scan`）。
     """
-    before = _folder_state(api_client, token, fid)
-    after = before["last_scan_at"] if before else None
+    after = _wait_first_scan(api_client, token, fid)
 
     _make_image(media / "apple.jpg", (100, 100))
     _make_image(media / "banana.png", (200, 50))
