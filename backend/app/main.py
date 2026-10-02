@@ -13,6 +13,7 @@ from backend.app.api.platforms.xhs import (
     analytics,
     crawl,
     creator,
+    materials,
     monitoring,
     pc,
     product_notes,
@@ -177,6 +178,7 @@ def create_app() -> FastAPI:
     app.include_router(creator.router, prefix="/api")
     app.include_router(qianfan.router, prefix="/api")
     app.include_router(product_notes.router, prefix="/api")
+    app.include_router(materials.router, prefix="/api")
     app.include_router(crawl.router, prefix="/api")
     app.include_router(monitoring.router, prefix="/api")
     app.include_router(auto_tasks.router, prefix="/api")

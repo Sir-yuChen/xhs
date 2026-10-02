@@ -27,7 +27,18 @@ from typing import Any, Iterable
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+try:  # 优先 Pillow 原生重采样枚举（Pillow ≥ 9.1）
+    from PIL import Image, ImageOps
+    from PIL.Image import Resampling
+
+    _LANCZOS = Resampling.LANCZOS
+except ImportError:  # pragma: no cover - 兼容旧版 Pillow / 缺 Pillow 时由调用处降级
+    Image = None  # type: ignore[assignment]
+    ImageOps = None  # type: ignore[assignment]
+    _LANCZOS = None  # type: ignore[assignment]
+
 from backend.app.core.config import get_settings
+from backend.app.core.database import SessionLocal
 from backend.app.core.time import shanghai_now
 from backend.app.models import MaterialFile, MaterialFolder
 
@@ -152,7 +163,8 @@ def _make_image_thumb(source: Path, folder_id: int, file_id: int) -> tuple[int |
     **一个坏文件不该让整次扫描失败**。
     """
     try:
-        from PIL import Image
+        if Image is None:
+            raise RuntimeError("Pillow 不可用，跳过缩略图")
 
         with Image.open(source) as im:
             width, height = im.size
@@ -161,11 +173,8 @@ def _make_image_thumb(source: Path, folder_id: int, file_id: int) -> tuple[int |
             target_dir.mkdir(parents=True, exist_ok=True)
             target = target_dir / f"f{folder_id}-{file_id}.jpg"
 
-            resample = getattr(Image, "Resampling", Image).LANCZOS
-            from PIL import ImageOps
-
             thumb = ImageOps.fit(im.convert("RGB"), (THUMB_SIZE, THUMB_SIZE),
-                                 method=resample, centering=(0.5, 0.5))
+                                 method=_LANCZOS, centering=(0.5, 0.5))
             thumb.save(target, format="JPEG", quality=82, optimize=True)
         return width, height, _thumb_rel_url(folder_id, str(file_id))
     except Exception as exc:  # noqa: BLE001 —— 单文件失败不影响整批（设计 17 §6.1 健壮性）
@@ -294,10 +303,12 @@ def scan_folder_in_background(user_id: int, folder_id: int) -> None:
 
     ⚠️ 自建 Session（不能复用请求的 Session —— 请求已返回、Session 已关）。
     ⚠️ 异常必须吞掉并记日志：daemon 线程里的异常无人接管，会静默丢。
+    ⚠️ `SessionLocal` **必须模块层导入**（与其他服务同款）：`tests/backend/conftest.py`
+       的 `patch_service_sessions()` 用 AST 扫**模块层**节点来打桩测试库；若在这里
+       `from … import SessionLocal`，桩打不到 ⇒ 线程落到生产库、静默失败
+       （2026-10-02 实测：`last_scan_at` 永远为 None，缩略图却已落盘）。
     """
     def _run() -> None:
-        from backend.app.core.database import SessionLocal
-
         db = SessionLocal()
         try:
             folder = db.get(MaterialFolder, folder_id)

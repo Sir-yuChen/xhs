@@ -108,7 +108,7 @@ def db_path(tmp_path: Path) -> Path:
 
 
 def service_session_modules() -> list[str]:
-    """列出**所有**「模块层持有 Session 工厂」的后端模块（点分模块名）。
+    """列出**所有**持有可能自开 Session 的工厂的后端模块（点分模块名）。
 
     两种形态都算（项目里并存，都必须打桩）：
 
@@ -120,6 +120,16 @@ def service_session_modules() -> list[str]:
     用 `ast` 扫语法树而不是字符串匹配：注释 / 文档里提到这些名字不算数
     （负向断言禁裸 `in`，这里同理）。
 
+    ⚠️ **函数体内导入也算**（2026-10-02 起）：`ast.walk()` 遍历整棵树而不是只看
+    `tree.body`。理由是真实踩过 —— `material_scan_service` 曾在 `_run()` 里
+    `from backend.app.core.database import SessionLocal`（函数级 import），
+    AST 扫模块层时看不见它 ⇒ 桩打不到 ⇒ **后台 daemon 线程落到生产库**，
+    表现是「测试全红但缩略图已落盘、`last_scan_at` 永远是 None」。
+    函数级 import 确实拿不到模块属性可打桩（名称只在函数内可见），所以这类模块
+    必须**在模块层持有**（`SessionLocal` 或 `_session_factory`）才能被打桩 ——
+    本函数把它们扫出来，`patch_service_sessions()` 才有机会替换；
+    同时 `test_testing_spec_guards.py` 的守卫会钉住「函数级 import 不算合规持有」。
+
     ⚠️ **不硬编码名单**：硬编码迟早漏掉新模块，而漏掉的代价是「测试默默写生产库」
     （2026-09-27 已发生两次）。语法错的模块直接抛出，不静默跳过。
     """
@@ -129,7 +139,9 @@ def service_session_modules() -> list[str]:
     modules: list[str] = []
     for path in sorted((ROOT / "backend" / "app").rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in tree.body:  # 只看模块层：函数内的 import / 赋值不影响模块属性
+        # ⚠️ 遍历整棵树（含函数体）：函数级 import 也是「会自开 Session 的模块」，
+        #    漏掉它 = 线程静默连生产库（2026-10-02 material_scan_service 实测）。
+        for node in ast.walk(tree):
             targets: list[ast.expr] = []
             if isinstance(node, ast.Assign):
                 targets = list(node.targets)

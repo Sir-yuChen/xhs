@@ -1070,10 +1070,16 @@ final_prompt =
 
 > 端点合计：提示词 **8**（modules 4 + templates 4）。
 
-### 7.3 素材库（新增，~7 端点）
+### 7.3 素材库（新增，8 端点）
 
 **`GET /api/xhs/materials/folders`**（文件夹列表）
 - 返回 `[{id, name, path, enabled, last_scan_at, file_count}]`。
+
+**`GET /api/xhs/materials/folders/{id}`**（单个文件夹）
+- 返回单对象（同上字段）；**手动刷新后的轮询判据**（见下 `POST …/scan`）。
+- ⚠️ **修订（2026-10-02）**：本端点原写在本节正文里（旧 L1090）却**漏进 §7.6 计数**
+  （旧表记「folders 4」，实含本端点应为 5）。按「文档先行」补齐计数：
+  素材库 7 → **8**（folders 5 + files 3）；端点合计 35 → **36**。
 
 **`POST /api/xhs/materials/folders`**（新增文件夹）
 - 请求：`{name, path}`；`path` 过 `is_safe_material_path()`，不合法 400 `MATERIAL_PATH_UNSAFE`；
@@ -1096,7 +1102,7 @@ final_prompt =
 **`GET /api/xhs/materials/files/{id}/file`**（取文件内容，供面板预览/发布用）
 - 返回本地文件字节流（`FileResponse`；不存在 404 `MATERIAL_FILE_MISSING`）。
 
-> 端点合计：素材库 **7**。
+> 端点合计：素材库 **8**（folders 5 + files 3）。
 
 > ✅ **T3 落地记录（2026-10-02）· 数据层 + 服务层（API 端点进行中）**：§3.3 / §3.4 两表 + §6.1
 > 扫描/索引/缩略图已实现，落地文件：
@@ -1217,10 +1223,10 @@ final_prompt =
 | 令牌映射 | 4 | gateway-tokens CRUD（v1.6 新增） |
 | 预警规则 | 4 | gateway-alerts CRUD（v1.6 新增） |
 | 提示词模板 | 8 | modules 4 + templates 4 |
-| 素材库 | 7 | folders 4 + files 3 |
+| 素材库 | 8 | folders 5 + files 3（v2.2：补 `GET /folders/{id}`，原漏计） |
 | 生成 | 4 | 单/批/队列/重试 |
 | 用量展示 | 3 | overview/daily/breakdown（v1.6/v1.7 台账聚合） |
-| **合计** | **35** | 连接 5 + 令牌 4 + 预警 4 + 模板 8 + 素材 7 + 生成 4 + 用量 3 = 35 |
+| **合计** | **36** | 连接 5 + 令牌 4 + 预警 4 + 模板 8 + 素材 8 + 生成 4 + 用量 3 = 36 |
 
 - **不引入任何外挂网关**（v1.7）：上游渠道/模型管理由用户在上游侧自理（三方服务商后台，或自托管网关的自有控制台），
   项目侧**不建对应端点、不做内嵌**；
