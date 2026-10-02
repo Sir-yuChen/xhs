@@ -39,6 +39,8 @@ import {
   syncAccountMetrics,
   syncAccountNotes,
   syncAccountNotesStatus,
+  syncGoodsNotes,
+  syncGoodsNotesStatus,
   syncShopGoods,
   syncShopGoodsStatus,
 } from "../../../lib/api";
@@ -47,11 +49,12 @@ import type {
   XhsSyncLastResult,
   XhsSyncTaskStatus,
 } from "../../../lib/api";
-import { loginChannelRows, loginTagTip } from "../../../lib/login-state";
+import { loginChannelLabel, loginChannelRows, loginTagTip } from "../../../lib/login-state";
 import {
   channelState,
   channelUnavailable,
   goodsGate,
+  goodsNoteSyncPlan,
   goodsResultText,
   noteSyncPlan,
   syncResultText,
@@ -100,6 +103,25 @@ const statusLabelMap: Record<string, string> = {
  * 纯函数、可被行为脚本直接驱动；本页面只留接线。
  */
 
+/**
+ * 一条**账号级同步链路**的接线（**§44**，2026-09-30 拆成三条）。
+ *
+ * 为什么做成数据而不是三份 `if`：首查、5s 轮询、按钮态三处都要「按链路 × 账号」遍历，
+ * 写三遍必然在其中一遍上漂移（漏掉商品笔记 = 它的按钮永远切不回「同步笔记」，
+ * 正是 H9 那类「看着像在跑，其实再也没更新过」）。链路的**差异**只有这五项，
+ * 其余纪律（判据 / 终态提示 / 竞态防护）三条完全共用。
+ */
+interface SyncChannel {
+  kind: "notes" | "goods_notes" | "goods";
+  fetchStatus: (accountId: number) => Promise<XhsSyncTaskStatus>;
+  setIds: (updater: (current: Set<number>) => Set<number>) => void;
+  /** 当前在跑的账号集合（按钮态由它驱动）。 */
+  ids: Set<number>;
+  /** 结果行的量词（笔记「条」/ 商品「件」）。 */
+  unit: string;
+  formatResult: (result: XhsSyncLastResult | null, unit: string) => string;
+}
+
 /** 把后端的失败详情转成可读文案（卡片内展示，不弹全局提示）。 */
 function readErrorDetail(error: unknown): string {
   const detail = (error as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
@@ -119,13 +141,19 @@ export function XhsAccountsPage() {
   /** 每个账号最近一次「互动数据」的结果说明（不可得原因 / 同步失败原因），只在卡片内展示。 */
   const [metricsNotes, setMetricsNotes] = useState<Record<number, string>>({});
   /**
-   * 正在跑「同步笔记」/「同步店铺商品」的账号。
+   * 正在跑「同步笔记」/「同步商品笔记」/「同步店铺商品」的账号。
    *
    * **唯一用途 = 按钮文案在「同步笔记 ↔ 同步中」之间切换**（2026-09-27 用户口径：
    * 「点击后展示的同步任务进度卡移除，只需要将同步笔记按钮改成同步中即可」）——
    * 卡片里不再有进度区块，进度 / 结果 / 失败原因一律去任务中心的「任务日志」看。
+   *
+   * ⚠️ **§44（2026-09-30）起「同步笔记」与「同步商品笔记」各自一个集合**：它们是两个
+   * 独立任务（`xhs_note_sync` / `xhs_goods_note_sync`）与两条独立日志流 ⇒ 各自独立
+   * 轮询、各自独立按钮态。合并回一个集合会让「商品笔记在跑」把普通笔记按钮也点亮
+   * （正是拆分要修的语义）。
    */
   const [noteSyncIds, setNoteSyncIds] = useState<Set<number>>(() => new Set());
+  const [goodsNoteSyncIds, setGoodsNoteSyncIds] = useState<Set<number>>(() => new Set());
   const [goodsSyncIds, setGoodsSyncIds] = useState<Set<number>>(() => new Set());
   /**
    * 轮询节拍。每轮结束 +1 —— 用来让下面的 effect **重新排下一次 timeout**。
@@ -156,17 +184,28 @@ export function XhsAccountsPage() {
    */
   const [arkPrompt, setArkPrompt] = useState<PlatformAccount | null>(null);
   /**
-   * 同步笔记「均不可用」时要提示的账号（§19.3，用户 2026-09-21 口径：
-   * 「均不可用则异常提示登录 pc 和千帆后再次触发同步笔记按钮」）。
+   * 「同步**商品笔记**」时千帆会话不可用要提示的账号（**§44**，2026-09-30 用户拍板拆分）。
    *
-   * www / ark（creator 账号再加 creator）三个平台全部「确定不可用」时才弹；
-   * 弹窗内按缺的平台给续期入口。`unknown` 一律放行让同步真发一次
-   * （DEF-057：没问到 ≠ 不可用），失败原因由后端结构化给到卡片。
+   * 与上面的 `arkPrompt` 是**同一个门禁平台（ark）但两条不同链路**：`arkPrompt` 属于
+   * 「同步商品」（店铺商品台账，`shop_products`），本状态属于「同步商品笔记」
+   * （千帆 `goods-note/list` 的挂链笔记，`notes` + `note_goods`）。文案必须分开写 ——
+   * 用户看到「补登千帆」却不知道是为了哪件事，就等于没说清。
+   */
+  const [goodsNotePrompt, setGoodsNotePrompt] = useState<PlatformAccount | null>(null);
+  /**
+   * 「同步笔记」（普通笔记）创作者会话不可用时要提示的账号（§21.4 + **§44**）。
+   *
+   * **创作者平台会话是单一硬门禁**（用户 2026-09-22 口径：「同步笔记按钮该账号必须存在
+   * 有效的创作者登录会话，不存在有效创作者平台登录会话的提示补齐后再触发」）；
+   * `unknown` 一律放行让同步真发一次（DEF-057：没问到 ≠ 不可用）。
+   *
+   * ⚠️ §44 起商品笔记（ark 门禁）**不再**走这里 —— 它有自己的 `goodsNotePrompt`。
    */
   const [notePrompt, setNotePrompt] = useState<PlatformAccount | null>(null);
   // §23 同步选项弹窗：门禁通过后让用户选「全量 / 时间区间」再触发。
+  // §44：`kind` 三值 —— `notes`（普通笔记）/ `goods_notes`（**商品笔记**）/ `goods`（店铺商品台账）。
   const [syncOptions, setSyncOptions] = useState<
-    { kind: "notes" | "goods"; accountId: number; nickname: string } | null
+    { kind: "notes" | "goods_notes" | "goods"; accountId: number; nickname: string } | null
   >(null);
   /**
    * 网页版（PC）会话不可用时要提示登录的账号（v1.31，用户 2026-09-21 口径：
@@ -345,6 +384,27 @@ export function XhsAccountsPage() {
   }
 
   /**
+   * 点「同步**商品笔记**」：千帆门禁（**§44**，2026-09-30 用户拍板拆分）。
+   *
+   * 硬门禁 = **ark 令牌**（商品笔记源走 `qianfan_cookies_for_account` + `has_ark_token`，
+   * 见设计 13 §44.2）—— 与「同步笔记」（creator 门禁）**不是同一个平台**，
+   * 因此两条按钮各自拦各自的：creator 不可用**不该**拦住商品笔记，反之亦然。
+   *
+   * 决策本身在 `lib/sync-gates.ts::goodsNoteSyncPlan`（纯函数、有行为脚本守着）；
+   * 这里只照做：ark 不可用 ⇒ 弹补登千帆提示；其余直接进选项弹窗。
+   * `unknown` 一律放行（DEF-057：没问到 ≠ 不可用）。
+   */
+  function handleGoodsNoteSyncClick(account: PlatformAccount) {
+    const plan = goodsNoteSyncPlan(loginChannels[account.id]);
+    if (plan.blocked) {
+      setGoodsNotePrompt(account);
+      return;
+    }
+    // §23：门禁通过后先让用户选「全量 / 时间区间」，不再直接触发。
+    setSyncOptions({ kind: "goods_notes", accountId: account.id, nickname: account.nickname });
+  }
+
+  /**
    * 触发笔记同步（§35.17：**手动触发定时任务 `system.note_sync` 的执行一次**）。
    *
    * ⚠️ **不再传 `profile_url` / `max_pages`**（设计 13 §21，2026-09-22 用户口径）：
@@ -395,6 +455,32 @@ export function XhsAccountsPage() {
   }
 
   /**
+   * 触发**商品笔记**同步（**§44**）：与 `startNoteSync` **逐字同构**，只换请求函数与集合。
+   *
+   * 同构是刻意的（DEF-044）：两条链路的差异只有后端任务类型（⇒ 源清单与硬门禁），
+   * 防重 / 入集 / 竞态防护 / 失败报真原因的纪律必须一致，否则又会长出两套各自漂移的实现。
+   *
+   * ⚠️ 入的是**独立集合** `goodsNoteSyncIds`：与「同步笔记」各自 5s 轮询、各自按钮态
+   * （合并回一个集合会让一个任务把另一个按钮也点亮）。
+   */
+  async function startGoodsNoteSync(accountId: number, options?: SyncNotesOptions) {
+    if (goodsNoteSyncIds.has(accountId)) {
+      return;
+    }
+    try {
+      const summary = await syncGoodsNotes(accountId, options);
+      if (summary.reused) {
+        message.info("该账号已有商品笔记同步任务在跑，本次未触发新执行。");
+      }
+      setGoodsNoteSyncIds((current) => new Set(current).add(accountId));
+      // 同上：本页刚触发 ⇒ 首查不许摘（三条链路共用同一份竞态防护）。
+      locallyTriggeredRef.current.add(accountId);
+    } catch (syncError) {
+      message.error(readErrorDetail(syncError));
+    }
+  }
+
+  /**
    * **首查**（§35.17.4，2026-09-27 用户口径）：进页面 / 点刷新时，对每张卡各查一次
    * 两个状态端点，**由第一个拿到的信息决定要不要轮询**。
    *
@@ -407,25 +493,62 @@ export function XhsAccountsPage() {
    * 为什么必须有这一步：账号卡的「同步中」此前只由**本页点击**点亮 ⇒ 换台设备、
    * 刷新页面、或定时任务正在跑，卡片都显示成「空闲」—— 而任务其实在跑。
    */
+  /**
+   * 三条同步链路的**唯一接线表**（§44：`notes` 普通笔记 / `goods_notes` 商品笔记 /
+   * `goods` 店铺商品）。首查、轮询、按钮态全部由它驱动 —— 新链路只在这里加一行。
+   *
+   * ⚠️ 商品笔记（`goods_notes`）与店铺商品（`goods`）**不是一回事**：前者落
+   * `notes` + `note_goods`（千帆挂链笔记），后者落 `shop_products`（SKU / 价格）。
+   */
+  const syncChannels: SyncChannel[] = [
+    {
+      kind: "notes",
+      fetchStatus: syncAccountNotesStatus,
+      setIds: setNoteSyncIds,
+      ids: noteSyncIds,
+      unit: "条",
+      formatResult: syncResultText,
+    },
+    {
+      kind: "goods_notes",
+      fetchStatus: syncGoodsNotesStatus,
+      setIds: setGoodsNoteSyncIds,
+      ids: goodsNoteSyncIds,
+      unit: "条",
+      formatResult: syncResultText,
+    },
+    {
+      kind: "goods",
+      fetchStatus: syncShopGoodsStatus,
+      setIds: setGoodsSyncIds,
+      ids: goodsSyncIds,
+      unit: "件",
+      formatResult: goodsResultText,
+    },
+  ];
+
   async function firstQuerySyncStatus(accountList: PlatformAccount[]) {
     await Promise.all(
-      accountList.flatMap((account) => [
-        querySyncStatus("notes", account.id),
-        querySyncStatus("goods", account.id),
-      ])
+      accountList.flatMap((account) =>
+        syncChannels.map((channel) => querySyncStatus(channel.kind, account.id))
+      )
     );
   }
 
   /**
-   * 首查的单个账号 × 单类任务（笔记 / 商品同构，只差状态端点）。
+   * 首查的单个账号 × 单条链路（三条链路同构，只差状态端点与集合）。
    *
    * 卡片上已经没有进度区块了，首查现在只回答**一件事**：这个账号此刻要不要继续轮询
    * （判据 `syncTaskPhase`：`active` ⇒ 入集；其余 ⇒ 不入集）。按钮文案由集合驱动，
    * 所以首查同时负责「刷新页面 / 换台设备 / 定时任务在跑」这几种情况下的按钮还原。
    */
-  async function querySyncStatus(kind: "notes" | "goods", accountId: number) {
-    const setIds = kind === "notes" ? setNoteSyncIds : setGoodsSyncIds;
-    const fetchStatus = kind === "notes" ? syncAccountNotesStatus : syncShopGoodsStatus;
+  async function querySyncStatus(kind: SyncChannel["kind"], accountId: number) {
+    const channel = syncChannels.find((item) => item.kind === kind);
+    if (!channel) {
+      // 防御性兜底：接线表里没有这条链路 ⇒ 不猜、不轮询（新链路忘了加行时不至于报错）。
+      return;
+    }
+    const { setIds, fetchStatus } = channel;
     try {
       const status = await fetchStatus(accountId);
       if (syncTaskPhase(status) === "active") {
@@ -463,9 +586,6 @@ export function XhsAccountsPage() {
    * 静默吞掉失败等于用户点了半天不知道发生了什么（失败三分法）。
    */
   async function pollSyncTasks() {
-    const noteIds = Array.from(noteSyncIds);
-    const goodsIds = Array.from(goodsSyncIds);
-
     const pollOne = async (
       accountId: number,
       fetchStatus: (id: number) => Promise<XhsSyncTaskStatus>,
@@ -500,14 +620,13 @@ export function XhsAccountsPage() {
       });
     };
 
-    await Promise.all([
-      ...noteIds.map((accountId) =>
-        pollOne(accountId, syncAccountNotesStatus, "条", syncResultText, setNoteSyncIds),
+    await Promise.all(
+      syncChannels.flatMap((channel) =>
+        Array.from(channel.ids).map((accountId) =>
+          pollOne(accountId, channel.fetchStatus, channel.unit, channel.formatResult, channel.setIds),
+        ),
       ),
-      ...goodsIds.map((accountId) =>
-        pollOne(accountId, syncShopGoodsStatus, "件", goodsResultText, setGoodsSyncIds),
-      ),
-    ]);
+    );
     setSyncPollTick((tick) => tick + 1);
   }
 
@@ -543,7 +662,7 @@ export function XhsAccountsPage() {
    * cleanup 负责卸载时真的停掉（否则离开页面后还在打后端）。
    */
   useEffect(() => {
-    if (noteSyncIds.size === 0 && goodsSyncIds.size === 0) {
+    if (noteSyncIds.size === 0 && goodsNoteSyncIds.size === 0 && goodsSyncIds.size === 0) {
       return;
     }
     const timer = setTimeout(() => {
@@ -551,7 +670,7 @@ export function XhsAccountsPage() {
     }, SYNC_POLL_INTERVAL_MS);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [noteSyncIds, goodsSyncIds, syncPollTick]);
+  }, [noteSyncIds, goodsNoteSyncIds, goodsSyncIds, syncPollTick]);
 
   return (
     <div style={{ padding: "0 0 32px" }}>
@@ -619,6 +738,7 @@ export function XhsAccountsPage() {
               const metricsNote = metricsNotes[account.id] || "";
               const isCreator = account.sub_type === "creator";
               const isNoteSyncing = noteSyncIds.has(account.id);
+              const isGoodsNoteSyncing = goodsNoteSyncIds.has(account.id);
               const isGoodsSyncing = goodsSyncIds.has(account.id);
               /** 时间行文案（同一份文本既用于显示、也用于 tip，避免两处各拼一次而漂移）。 */
               const updatedText = `更新时间：${formatDate(account.updated_at || account.created_at)}`;
@@ -841,8 +961,9 @@ export function XhsAccountsPage() {
                       窄列（lg=8）会把「同步店铺商品」压到换行位置，看起来像布局坏了。
 
                       v1.31（2026-09-21 用户口径）：按钮**不再按账号类型区分**，
-                      全部账号统一展示「同步数据 / 同步笔记 / 同步商品 / 删除」；
+                      全部账号统一展示「同步数据 / 同步笔记 / 同步商品笔记 / 同步商品 / 删除」；
                       「检查」按钮移除（登录态探活已由进入页面/刷新自动完成）。
+                      （§44 于 2026-09-30 插入「同步商品笔记」— 原「同步笔记」是混合双源。）
                     */}
                     <div
                       style={{
@@ -877,9 +998,27 @@ export function XhsAccountsPage() {
                           icon={isNoteSyncing ? <SyncOutlined spin /> : <CloudDownloadOutlined />}
                           onClick={() => handleNoteSyncClick(account)}
                           disabled={isNoteSyncing}
-                          title="把该账号的笔记同步到本地库（需千帆会话；PC 账号需先提供主页链接）"
+                          title={`把该账号的普通笔记同步到本地库（需${loginChannelLabel("creator")}会话）`}
                         >
                           {isNoteSyncing ? "同步中" : "同步笔记"}
+                        </Button>
+                        {/*
+                          「同步**商品笔记**」—— **§44**（2026-09-30 用户拍板拆分）新增。
+                          千帆 `goods-note/list` 的**挂链笔记**（落 `notes` + `note_goods`），
+                          与普通笔记是两条**独立任务 + 独立日志流 + 独立防重**。
+
+                          ⚠️ **与右边那颗「同步商品」不是一回事**（文案必须带「笔记」二字）：
+                          那颗同步的是**店铺商品台账**（SKU / 价格，落 `shop_products`）。
+                          两件事的硬门禁同为千帆，但链路、落库表、任务类型全都不同。
+                        */}
+                        <Button
+                          size="small"
+                          icon={isGoodsNoteSyncing ? <SyncOutlined spin /> : <ShopOutlined />}
+                          onClick={() => handleGoodsNoteSyncClick(account)}
+                          disabled={isGoodsNoteSyncing}
+                          title="把该账号的商品笔记（挂链笔记）同步到本地库（需千帆商家后台会话）"
+                        >
+                          {isGoodsNoteSyncing ? "同步中" : "同步商品笔记"}
                         </Button>
                         {/*
                           「同步商品」v1.31 起**所有账号都渲染**（旧版仅 Creator）。
@@ -1008,27 +1147,24 @@ export function XhsAccountsPage() {
       </Modal>
 
       {/*
-        同步笔记「均不可用」提示（§19.3，用户 2026-09-21 口径：
-        「均不可用则异常提示登录 pc 和千帆后再次触发同步笔记按钮」）。
+        「同步**商品笔记**」的千帆会话不可用提示（**§44**，2026-09-30 用户拍板拆分）。
 
-        www / ark（creator 账号再加 creator）**全部**「确定不可用」时才弹 ——
-        有一个可用就只同步那个平台，不弹窗、不打扰。弹窗按缺失的平台给续期入口
-        （PC 扫码 / 千帆扫码）；登录后登录态刷新，用户再次点击即可同步。
+        与上面那个 `arkPrompt` 是**同一个门禁平台、两条不同链路**：这里说的是商品笔记
+        （千帆 `goods-note/list` 的挂链笔记），上面说的是店铺商品台账。文案里的动作名
+        必须写全「同步商品笔记」—— 只写「同步商品」会让用户去补登之后发现补错地方。
 
-        `unknown` 不弹（DEF-057）：没问到 ≠ 不可用，放行让同步真发一次，
-        后端多原因结构化失败会由卡片结果行展示。
+        `unknown` 一律不弹（DEF-057）：没问到 ≠ 不可用，放行让同步真发一次。
       */}
       <Modal
-        open={notePrompt !== null}
-        title="同步笔记需要登录态"
-        okText="去登录"
+        open={goodsNotePrompt !== null}
+        title={`需要${loginChannelLabel("ark")}会话`}
+        okText="去补登千帆"
         cancelText="取消"
-        onCancel={() => setNotePrompt(null)}
+        onCancel={() => setGoodsNotePrompt(null)}
         onOk={() => {
-          const account = notePrompt;
-          setNotePrompt(null);
+          const account = goodsNotePrompt;
+          setGoodsNotePrompt(null);
           if (account) {
-            // 优先引导补千帆（笔记数据的最大来源）；PC 入口并列给出。
             setRenewTarget({
               account,
               channel: "ark",
@@ -1039,13 +1175,52 @@ export function XhsAccountsPage() {
       >
         <Space direction="vertical" size={8} style={{ width: "100%" }}>
           <Text style={{ fontSize: 13 }}>
-            同步笔记需要 PC 网页版或千帆商家后台的登录令牌，当前两者都不可用
-            {notePrompt && notePrompt.sub_type === "creator" ? "（创作者登录态也不可用）" : ""}。
-            请先登录，再回到这里触发同步笔记。
+            {goodsNotePrompt && channelState(loginChannels[goodsNotePrompt.id], "ark") === "expired"
+              ? `千帆登录态已失效，同步商品笔记需要可用的${loginChannelLabel("ark")}令牌。请重新登录后，再次触发同步商品笔记。`
+              : `尚未登录${loginChannelLabel("ark")}，同步商品笔记需要登录令牌。请登录后，再次触发同步商品笔记。`}
           </Text>
           <Text type="secondary" style={{ fontSize: 12 }}>
-            登录方式：小红书网页版扫码（PC）/ 千帆扫码。一次登录只更新自己那个平台的令牌；
-            只有一个平台可用时，同步会只同步该平台的笔记。
+            补登方式：扫码登录千帆，或粘贴千帆后台 Cookie。只更新本账号的千帆令牌，不影响其它平台。
+          </Text>
+        </Space>
+      </Modal>
+
+      {/*
+        「同步笔记」（普通笔记）的登录态缺失提示（§21.4 + **§44**）。
+
+        ⚠️ **§44 起这条门禁只认创作者平台会话**：~~PC 网页版或千帆商家后台任何一个可用即可~~
+        已被取代（www 源 §21.4 退场；商品笔记 §44 拆成独立任务）。所以这里不再提「两者都不可用」，
+        也不再引导补千帆 —— 补千帆对普通笔记**没有用**，会把用户引到一次无效操作上。
+
+        `unknown` 不弹（DEF-057）：没问到 ≠ 不可用，放行让同步真发一次，
+        后端给的结构化原因由轻提示展示。
+      */}
+      <Modal
+        open={notePrompt !== null}
+        title={`同步笔记需要${loginChannelLabel("creator")}登录态`}
+        okText="去登录"
+        cancelText="取消"
+        onCancel={() => setNotePrompt(null)}
+        onOk={() => {
+          const account = notePrompt;
+          setNotePrompt(null);
+          if (account) {
+            // 直接开创作者平台的续期弹窗（硬门禁就是它；开别的平台等于让用户白跑一趟）。
+            setRenewTarget({
+              account,
+              channel: "creator",
+              state: channelState(loginChannels[account.id], "creator"),
+            });
+          }
+        }}
+      >
+        <Space direction="vertical" size={8} style={{ width: "100%" }}>
+          <Text style={{ fontSize: 13 }}>
+            同步普通笔记需要{loginChannelLabel("creator")}登录会话，当前不可用。请先登录，再回到这里触发。
+          </Text>
+          <Text style={{ fontSize: 12 }} type="secondary">
+            商品笔记（挂链笔记）走另一条链路，需先补登{loginChannelLabel("ark")} ——
+            点「同步商品笔记」按钮单独补登。
           </Text>
         </Space>
       </Modal>
@@ -1124,12 +1299,16 @@ export function XhsAccountsPage() {
         title={
           syncOptions?.kind === "goods"
             ? `同步店铺商品 · ${syncOptions?.nickname ?? ""}`
-            : `同步笔记 · ${syncOptions?.nickname ?? ""}`
+            : syncOptions?.kind === "goods_notes"
+              ? `同步商品笔记 · ${syncOptions?.nickname ?? ""}`
+              : `同步笔记 · ${syncOptions?.nickname ?? ""}`
         }
         hint={
           syncOptions?.kind === "goods"
             ? "商品按上架/创建时间过滤；不选区间则翻完整个商品列表。"
-            : "笔记按发布时间过滤；不选区间则翻完整个笔记列表。"
+            : syncOptions?.kind === "goods_notes"
+              ? "商品笔记按发布时间过滤；不选区间则翻完整个商品笔记列表。"
+              : "笔记按发布时间过滤；不选区间则翻完整个笔记列表。"
         }
         onCancel={() => setSyncOptions(null)}
         onConfirm={(options: SyncOptions) => {
@@ -1142,6 +1321,9 @@ export function XhsAccountsPage() {
               : { scope: "full" };
           if (target.kind === "notes") {
             void startNoteSync(target.accountId, payload);
+          } else if (target.kind === "goods_notes") {
+            // §44：商品笔记走独立端点（`POST /accounts/{id}/goods-notes/sync`）。
+            void startGoodsNoteSync(target.accountId, payload);
           } else {
             void startGoodsSync(target.accountId, payload);
           }

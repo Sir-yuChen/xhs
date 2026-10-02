@@ -172,7 +172,8 @@ export const TASK_STATUS_COLORS: Record<string, string> = {
  * | `product_note_generate_single` | 商品列表-生成笔记按钮 | 商品列表单条「生成笔记」 |
  * | `product_note_generate_batch` | 商品列表-批量生成笔记按钮 | 商品列表「批量生成智能笔记」 |
  * | `account_card_note_sync` | 账号卡-同步笔记按钮 | 账号卡「同步笔记」（等价手动跑一次定时任务） |
- * | `account_card_goods_sync` | 账号卡-同步商品按钮 | 账号卡「同步商品」（同上） |
+ * | `account_card_goods_note_sync` | 账号卡-同步商品笔记按钮 | 账号卡「**同步商品笔记**」（§44 拆出的独立任务；与下一行**不是一回事**） |
+ * | `account_card_goods_sync` | 账号卡-同步商品按钮 | 账号卡「同步商品」（店铺商品台账，同上） |
  * | `retry` | 队列记录-重试按钮 | 本页点「重试」 |
  * | `recovery` | 应用重启恢复 | 启动恢复自动续跑的断点行 |
  * | `scheduled` | 定时任务 | 预留（队列侧暂无入口） |
@@ -191,7 +192,11 @@ export const TASK_SOURCE_LABELS: Record<string, string> = {
   note_publish_batch: "内容库-批量发布按钮",
   product_note_generate_single: "商品列表-生成笔记按钮",
   product_note_generate_batch: "商品列表-批量生成笔记按钮",
+  product_note_generate_llm_single: "商品列表-LLM生成笔记按钮",
+  product_note_generate_llm_batch: "商品列表-批量LLM生成笔记按钮",
+  llm_generate_retry: "生成记录-重试按钮",
   account_card_note_sync: "账号卡-同步笔记按钮",
+  account_card_goods_note_sync: "账号卡-同步商品笔记按钮",
   account_card_goods_sync: "账号卡-同步商品按钮",
   retry: "队列记录-重试按钮",
   recovery: "应用重启恢复",
@@ -212,7 +217,16 @@ export const TASK_SOURCE_TIPS: Record<string, string> = {
   note_publish_batch: "你在内容库点「批量发布」入队的（一次多篇）。",
   product_note_generate_single: "你在商品列表点「生成笔记」按钮入队的（一个商品 = 一条记录）。",
   product_note_generate_batch: "你在商品列表点「批量生成智能笔记」入队的（一次多个商品）。",
+  product_note_generate_llm_single:
+    "你在商品列表点「LLM 生成笔记」按钮入队的（走提示词模板 + 大模型生成，一个商品 = 一条记录）。",
+  product_note_generate_llm_batch:
+    "你在商品列表点「批量 LLM 生成笔记」入队的（走提示词模板 + 大模型生成，一次多个商品）。",
+  llm_generate_retry:
+    "你在「生成记录」里点「重试」重新入队的（这一跑来自重试，不是当初入队那次）。",
   account_card_note_sync: "你在账号卡上点「同步笔记」触发的（等价于手动跑一次定时任务，不与笔记队列抢平台额度）。",
+  account_card_goods_note_sync:
+    "你在账号卡上点「同步商品笔记」触发的（千帆挂链笔记，等价于手动跑一次 system.goods_note_sync）。"
+    + "⚠️ 与「同步商品」（店铺商品台账 / SKU 价格）是两件事。",
   account_card_goods_sync: "你在账号卡上点「同步商品」触发的（等价于手动跑一次定时任务）。",
   retry: "你在队列记录里点「重试」重新入队的（这一跑来自重试，不是当初入队那次）。",
   recovery: "应用重启后由启动恢复自动续跑的断点（上次退出时没跑完的那些，不是新任务）。",

@@ -62,7 +62,7 @@ export function channelState(
   return row?.view.state ?? "missing";
 }
 
-/** 同步笔记的三态决策（§19.3，用户 2026-09-21 口径）。 */
+/** 同步按钮的三态决策（§19.3 / §44，用户 2026-09-21 / 09-30 口径）。 */
 export interface NoteSyncPlan {
   /** 一个可用源都没有 ⇒ 不发起同步，弹窗提示分别登录。 */
   blocked: boolean;
@@ -73,21 +73,25 @@ export interface NoteSyncPlan {
 }
 
 /**
- * 点「同步笔记」时的决策（纯函数，页面只负责照做）：
+ * 点「**同步笔记**」（普通笔记）时的决策（纯函数，页面只负责照做）：
  *
  * | 创作者平台会话 | 行为 |
  * |---|---|
- * | 可用 | 直接同步（creator 源 + ark 源） |
+ * | 可用 | 直接同步（**只跑 creator 源**） |
  * | 确定不可用（missing / guest / expired） | 不发起同步，弹窗提示**补齐创作者平台登录后再触发** |
  * | unknown（未检测） | 放行，让同步真发一次（DEF-057 纪律） |
  *
  * ⚠️ **2026-09-22 起 www 源不再参与任何账号的笔记同步**（用户口径：「www 源在这里是
  * 冗余的，则移除不要，使用 creator 源」+「同步笔记按钮该账号必须存在有效的创作者
- * 登录会话，不存在有效创作者平台登录会话的提示补齐后再触发」）。因此：
+ * 登录会话，不存在有效创作者平台登录会话的提示补齐后再触发」）。
+ *
+ * ⚠️ **§44（2026-09-30 用户拍板）起商品笔记（ark 源）也拆出去了**：~~creator 跑完
+ * 再追加 ark 的填空合并（混合双源）~~ → 本函数只表达**普通笔记**（creator 单源）；
+ * 商品笔记走 `goodsNoteSyncPlan`（硬门禁 = ark，见下）。因此这里的 `arkOk` 不再影响
+ * 任何取值 —— 「creator 可用但 ark 不可用」时不该再列出一个跑不到的源。
  *
  * * `blocked` 的判据从「三源全不可用」收紧为「**创作者平台会话不可用**」——
- *   这是**单一硬门禁**，不再看 www / ark 的脸色（ark 是附属的商品笔记源，
- *   撑不起一次「同步笔记」）；
+ *   这是**单一硬门禁**，不再看 www / ark 的脸色；
  * * `needsLink` **恒为 false**：主页链接录入窗要的是 www 链路的 URL 级
  *   `xsec_token`，没有 www 源就没有它的用武之地。UI 暂留（不会触发），
  *   以免恢复 www 源时要重写一遍。
@@ -97,12 +101,9 @@ export function noteSyncPlan(
   _subType?: string | null
 ): NoteSyncPlan {
   const creatorOk = !channelUnavailable(channels, "creator");
-  const arkOk = !channelUnavailable(channels, "ark");
   const sources: string[] = [];
   if (creatorOk) {
     sources.push("creator");
-    // ark 只在 creator 成立时才列 —— 它是附属源，不是独立入口。
-    if (arkOk) sources.push("ark");
   }
   return {
     blocked: !creatorOk,
@@ -118,6 +119,31 @@ export function goodsGate(
   return {
     blocked: channelUnavailable(channels, "ark"),
     arkState: channelState(channels, "ark"),
+  };
+}
+
+/**
+ * 点「**同步商品笔记**」时的决策（**§44**，2026-09-30 用户拍板拆分）。
+ *
+ * 与 `noteSyncPlan` **同一把尺子、只换门禁平台**：硬门禁 = 千帆（ark）令牌
+ * （商品笔记源是 `qianfan_cookies_for_account` + `has_ark_token`，见设计 13 §44.2）。
+ *
+ * | 千帆（ark）会话 | 行为 |
+ * |---|---|
+ * | 可用 | 直接同步（**只跑 ark 源**：千帆 `goods-note/list` 的挂链笔记） |
+ * | 确定不可用（missing / guest / expired） | 不发起同步，弹窗提示**补登千帆后再触发** |
+ * | unknown（未检测） | 放行，让同步真发一次（DEF-057 纪律） |
+ *
+ * ⚠️ **别再把它合并回 `noteSyncPlan`**：两条硬门禁的平台不同（creator / ark），
+ * 合并后必然出现「一个平台不可用却拦住另一个按钮」或反之 —— 正是拆分要修的语义。
+ * 判据复用 `goodsGate`（同一个 ark 门禁，写两份必然在其中一份上漂移）。
+ */
+export function goodsNoteSyncPlan(channels: XhsLoginChannels | undefined): NoteSyncPlan {
+  const gate = goodsGate(channels);
+  return {
+    blocked: gate.blocked,
+    needsLink: false,
+    sources: gate.blocked ? [] : ["ark"],
   };
 }
 

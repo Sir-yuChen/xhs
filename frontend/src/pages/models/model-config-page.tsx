@@ -1,510 +1,269 @@
-import {
-  ApiOutlined,
-  CheckCircleOutlined,
-  DeleteOutlined,
-  EditOutlined,
-  FileImageOutlined,
-  KeyOutlined,
-  PlusOutlined,
-  ReloadOutlined,
-  RobotOutlined,
-  StarOutlined,
-} from "@ant-design/icons";
-import {
-  Alert,
-  App,
-  Button,
-  Card,
-  Checkbox,
-  Col,
-  Empty,
-  Form,
-  Input,
-  Popconfirm,
-  Row,
-  Segmented,
-  Space,
-  Spin,
-  Tag,
-  Typography,
-} from "antd";
-import type { FormEvent } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { ReloadOutlined } from "@ant-design/icons";
+import { Alert, App, Card, Select, Space, Spin, Table, Tag, Typography } from "antd";
+import type { ColumnsType } from "antd/es/table";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { PageHeader } from "../../components/layout/app-shell";
 import {
-  createModelConfig,
-  deleteModelConfig,
-  fetchModelConfigs,
-  setDefaultModelConfig,
-  testModelConfig,
-  updateModelConfig,
+  fetchBusinessProviderKeys,
+  fetchBusinessProviders,
+  fetchGatewayConfigs,
+  fetchGatewayPlatforms,
+  upsertBusinessProvider,
 } from "../../lib/api";
-import type { ModelConfig, ModelConfigPayload, ModelType } from "../../types";
+import type {
+  BusinessKeyOption,
+  BusinessProviderRow,
+  LlmGatewayConfig,
+  LlmGatewayPlatformOption,
+} from "../../types";
 
-const { Text } = Typography;
+const { Text, Paragraph } = Typography;
 
-const emptyForm: ModelConfigPayload = {
-  name: "",
-  model_type: "text",
-  provider: "openai-compatible",
-  model_name: "gpt-5.4",
-  base_url: "",
-  api_key: "",
-  is_default: true,
-};
-
-function defaultModelName(type: ModelType): string {
-  return type === "text" ? "gpt-5.4" : "";
-}
-
-function typeLabel(type: ModelType): string {
-  return type === "text" ? "文本模型" : "图片模型";
-}
-
-function ModelTypeIcon({ type }: { type: ModelType }) {
-  return type === "text" ? <RobotOutlined /> : <FileImageOutlined />;
-}
-
-const cardStyle = { background: "#1f1f1f", borderColor: "#303030" };
-
+/**
+ * 模型配置页（v2.0，设计 17 §13.2.1）。
+ *
+ * ## 这一页在改什么
+ *
+ * 一期这一页管的是「本地模型配置表」（`model_configs`）：用户填死一套
+ * 文本/图像模型 + 地址 + key，业务代码按「默认模型」取用。**v2.0 已整体退场**
+ * —— 服务商（`LlmGatewayConfig`）单独在「服务商配置」页配好，业务改由
+ * **固定 key** 映射到服务商（`llm_business_providers`）。
+ *
+ * 用户口径：「服务商为单独配置，业务中的使用点映射成固定 key，新增一个模型配置页，
+ * 不同平台和不同的业务可以**实时切换服务商**」。
+ *
+ * ## 三条不能丢的纪律
+ *
+ * ① **业务点清单从后端拉**（`fetchBusinessProviderKeys`）：清单真相源在后端常量
+ *    `services/business_provider_keys.py`，前端不许就地写死（写死 ⇒ 新增业务点要改
+ *    两处，前端那份会静默过期，DEF-044）。
+ * ② **选中即生效**：`onChange` 直接 `PUT`，**没有「保存」按钮** —— 用户要的是实时，
+ *    多一个保存按钮就多一个「改了但没点保存」的静默坑。
+ * ③ **业务点 key 只读**：用户只能选服务商，不能改 key（key 是代码里的调用契约）。
+ *
+ * ## 空态
+ *
+ * 下拉候选**按 kind 过滤**（图像业务点只列 image 类型服务商）。库内服务商若全是
+ * 文本类 ⇒ 图像业务点整行为空，这是**正常空态**，页面要给明确文案而不是一个空下拉
+ * （否则用户无从判断是「坏了」还是「没配」）。
+ */
 export function ModelConfigPage() {
-  const [configs, setConfigs] = useState<ModelConfig[]>([]);
-  const [form, setForm] = useState<ModelConfigPayload>(emptyForm);
-  const [isLoading, setIsLoading] = useState(true);
-  const [isSaving, setIsSaving] = useState(false);
-  const [editingId, setEditingId] = useState<number | null>(null);
-  // 全站消息提醒统一走 antd message（设计 04 §3.6，2026-09-25 用户口径：
-  // 「所有消息提醒参考 antd 成熟组件，不要在页面暂用空间」）—— 操作结果反馈
-  // 不再渲染 inline Alert 占版面；`App.useApp()` 的实例继承主题与 locale。
   const { message } = App.useApp();
-  const [testingId, setTestingId] = useState<number | null>(null);
-  const [testResults, setTestResults] = useState<Record<number, { status: string; message: string }>>({});
+  const [rows, setRows] = useState<BusinessProviderRow[]>([]);
+  const [keys, setKeys] = useState<BusinessKeyOption[]>([]);
+  const [providers, setProviders] = useState<LlmGatewayConfig[]>([]);
+  const [platforms, setPlatforms] = useState<LlmGatewayPlatformOption[]>([]);
+  const [platform, setPlatform] = useState<string>("xhs");
+  const [isLoading, setIsLoading] = useState(true);
+  const [savingKey, setSavingKey] = useState<string | null>(null);
 
-  const grouped = useMemo(
-    () => ({
-      text: configs.filter((config) => config.model_type === "text"),
-      image: configs.filter((config) => config.model_type === "image"),
-    }),
-    [configs]
+  const load = useCallback(
+    async (target?: string) => {
+      setIsLoading(true);
+      try {
+        const scope = target ?? platform;
+        const [mapping, keyList, providerList, platformList] = await Promise.all([
+          fetchBusinessProviders(scope),
+          fetchBusinessProviderKeys(),
+          fetchGatewayConfigs(),
+          fetchGatewayPlatforms(),
+        ]);
+        setRows(mapping.items);
+        setKeys(keyList.items);
+        setProviders(providerList.items);
+        setPlatforms(platformList.items ?? []);
+      } catch {
+        // 失败由全局拦截器报（401/400 都带结构化原因）
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [platform],
   );
 
-  async function loadConfigs() {
-    setIsLoading(true);
-    try {
-      const result = await fetchModelConfigs();
-      setConfigs(result.items);
-    } catch {
-      message.error("模型配置加载失败。");
-    } finally {
-      setIsLoading(false);
-    }
-  }
-
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!form.name.trim() || !form.model_name.trim()) {
-      message.warning("请填写配置名称和模型名称。");
-      return;
-    }
-
-    // DEF-032: 纵深防御——Base URL 必须是以 http(s):// 开头的合法网址。
-    // 即使浏览器的自动填充没被上面的 autoComplete 声明拦下（例如把用户名填进本字段），
-    // 脏值也无法入库。显示问题可以容忍，错误值入库不可逆。
-    const baseUrl = form.base_url.trim();
-    if (baseUrl) {
-      let isValidUrl = false;
-      try {
-        const parsed = new URL(baseUrl);
-        isValidUrl = parsed.protocol === "http:" || parsed.protocol === "https:";
-      } catch {
-        isValidUrl = false;
-      }
-      if (!isValidUrl) {
-        message.warning("Base URL 需为合法网址（以 http:// 或 https:// 开头），请检查输入内容。");
-        return;
-      }
-    }
-
-    setIsSaving(true);
-    const payload = {
-      ...form,
-      name: form.name.trim(),
-      model_name: form.model_name.trim(),
-      provider: form.provider.trim(),
-      base_url: form.base_url.trim(),
-      api_key: form.api_key.trim(),
-    };
-    try {
-      if (editingId) {
-        const updated = await updateModelConfig(editingId, payload);
-        setConfigs((current) => current.map((c) => c.id === updated.id ? updated : (updated.is_default && c.model_type === updated.model_type ? { ...c, is_default: false } : c)));
-        message.success(`${typeLabel(updated.model_type)}配置已更新。`);
-        setEditingId(null);
-      } else {
-        const created = await createModelConfig(payload);
-        setConfigs((current) => {
-          const withoutOldDefault = created.is_default
-            ? current.map((config) => config.model_type === created.model_type ? { ...config, is_default: false } : config)
-            : current;
-          return [created, ...withoutOldDefault];
-        });
-        message.success(`${typeLabel(created.model_type)}配置已保存。`);
-      }
-      setForm({ ...emptyForm, model_type: form.model_type });
-    } catch {
-      message.error("模型配置保存失败。");
-    } finally {
-      setIsSaving(false);
-    }
-  }
-
-  function handleEdit(config: ModelConfig) {
-    setEditingId(config.id);
-    setForm({
-      name: config.name,
-      model_type: config.model_type,
-      provider: config.provider,
-      model_name: config.model_name,
-      base_url: config.base_url,
-      api_key: "",
-      is_default: config.is_default,
-    });
-  }
-
-  function handleCancelEdit() {
-    setEditingId(null);
-    setForm({ ...emptyForm, model_type: form.model_type });
-  }
-
-  async function handleDelete(configId: number) {
-    try {
-      await deleteModelConfig(configId);
-      setConfigs((current) => current.filter((c) => c.id !== configId));
-      if (editingId === configId) { setEditingId(null); setForm({ ...emptyForm, model_type: form.model_type }); }
-      message.success("配置已删除。");
-    } catch {
-      message.error("配置删除失败。");
-    }
-  }
-
-  async function handleTest(configId: number) {
-    setTestingId(configId);
-    try {
-      const result = await testModelConfig(configId);
-      setTestResults((prev) => ({ ...prev, [configId]: { status: result.status, message: result.message } }));
-    } catch {
-      setTestResults((prev) => ({ ...prev, [configId]: { status: "error", message: "检查请求失败" } }));
-    } finally {
-      setTestingId(null);
-    }
-  }
-
-  async function handleSetDefault(config: ModelConfig) {
-    try {
-      const updated = await setDefaultModelConfig(config.id);
-      setConfigs((current) =>
-        current.map((item) =>
-          item.model_type === updated.model_type
-            ? { ...item, is_default: item.id === updated.id }
-            : item
-        )
-      );
-      message.success(
-        `${updated.name} 已设为默认${typeLabel(updated.model_type)}。`
-      );
-    } catch {
-      message.error("默认模型切换失败。");
-    }
-  }
-
   useEffect(() => {
-    void loadConfigs();
+    void load();
+    // 仅首屏拉一次；换平台走下方 Select 的 onChange
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /** 某业务点的下拉候选 = 本用户的**同 kind** 服务商（图像业务点不列文本服务商） */
+  const candidatesFor = useCallback(
+    (kind: string) => providers.filter((p) => p.model_type === kind),
+    [providers],
+  );
+
+  const onSwitch = useCallback(
+    async (row: BusinessProviderRow, providerKey: string) => {
+      setSavingKey(row.business_key);
+      try {
+        await upsertBusinessProvider({
+          platform: row.platform,
+          business_key: row.business_key,
+          provider_key: providerKey,
+        });
+        message.success(providerKey ? "已切换服务商" : "已清空该业务点的服务商");
+        await load();
+      } catch {
+        // 失败由全局拦截器报（类型不匹配 / 服务商不存在都带结构化原因）
+      } finally {
+        setSavingKey(null);
+      }
+    },
+    [load, message],
+  );
+
+  const rowsWithKey = useMemo(
+    () => rows.map((r) => ({ ...r, _key: `${r.platform}:${r.business_key}` })),
+    [rows],
+  );
+
+  const columns: ColumnsType<BusinessProviderRow & { _key: string }> = [
+    {
+      title: "业务点",
+      dataIndex: "business_key",
+      width: 220,
+      render: (_v, record) => {
+        // 中文名由后端随行下发（常量 `BusinessKey.label`），页面不再拿 `keys` 反查。
+        return (
+          <Space direction="vertical" size={0}>
+            <Text>{record.label || record.business_key}</Text>
+            {/* 业务点 key 只读展示：它是代码里的调用契约，用户改不了 */}
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              {record.business_key}
+            </Text>
+          </Space>
+        );
+      },
+    },
+    {
+      title: "触发源",
+      dataIndex: "triggers",
+      width: 240,
+      render: (_v, record) => {
+        // **只读**：触发源是常量元数据（`BusinessKey.triggers`），由后端随行下发，
+        // 页面只渲染、不提供编辑入口 —— 它镜像的是代码里的调用点，用户改不了。
+        // 空数组 = 只由 API 直接调用、界面无入口：**如实说明**，不编一个入口出来
+        // （同「缺值不造假」纪律）。
+        const triggers = record.triggers ?? [];
+        if (triggers.length === 0) {
+          return (
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              无界面入口（仅 API 调用）
+            </Text>
+          );
+        }
+        return (
+          <Space direction="vertical" size={2}>
+            {triggers.map((t) => (
+              <Tag key={t} style={{ margin: 0 }}>
+                {t}
+              </Tag>
+            ))}
+          </Space>
+        );
+      },
+    },
+    {
+      title: "类型",
+      dataIndex: "kind",
+      width: 90,
+      render: (value: string) => (
+        <Tag color={value === "image" ? "purple" : "blue"}>
+          {value === "image" ? "图像" : "文本"}
+        </Tag>
+      ),
+    },
+    {
+      title: "当前服务商",
+      dataIndex: "provider_key",
+      render: (_v, record) => {
+        const options = candidatesFor(record.kind);
+        const empty = options.length === 0;
+        return (
+          <Space direction="vertical" size={2} style={{ minWidth: 320 }}>
+            <Select
+              style={{ width: 320 }}
+              value={record.provider_key || undefined}
+              placeholder={empty ? "暂无可用的该类型服务商" : "选择服务商（选中即生效）"}
+              disabled={empty || savingKey === record.business_key}
+              loading={savingKey === record.business_key}
+              allowClear
+              onChange={(value) => void onSwitch(record, value ?? "")}
+              options={options.map((p) => ({
+                value: p.provider_key,
+                label: p.enabled ? p.name : `${p.name}（已停用）`,
+                disabled: !p.enabled,
+              }))}
+            />
+            {empty && (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                还没有{record.kind === "image" ? "图像" : "文本"}类型的服务商，请先到
+                「服务商配置」新增。
+              </Text>
+            )}
+          </Space>
+        );
+      },
+    },
+    {
+      title: "状态",
+      dataIndex: "configured",
+      width: 150,
+      render: (_v, record) => {
+        if (!record.configured) return <Tag>未配置</Tag>;
+        if (record.provider_enabled === false) return <Tag color="orange">服务商已停用</Tag>;
+        // 类型不匹配 = 「配置过、之后又改了服务商类型」的后果；必须显出来，不许静默
+        if (record.provider_model_type && record.provider_model_type !== record.kind) {
+          return <Tag color="red">类型不匹配</Tag>;
+        }
+        return <Tag color="green">已配置</Tag>;
+      },
+    },
+  ];
+
   return (
-    <div>
+    <>
       <PageHeader
         eyebrow="Model Routing"
         title="模型配置"
-        description="为改写、生成、封面和图片处理配置用户级文本与图片模型，后续 AI 任务会从默认配置解析调用参数。"
+        description="为每个平台的每个业务点选择服务商；选中即生效，无需保存。"
         action={
-          <Button
-            icon={<ReloadOutlined />}
-            onClick={loadConfigs}
-            loading={isLoading}
-          >
-            刷新
-          </Button>
+          <Space>
+            <Select
+              style={{ width: 160 }}
+              value={platform}
+              onChange={(value) => {
+                setPlatform(value);
+                void load(value);
+              }}
+              options={platforms.map((p) => ({ value: p.value, label: p.label }))}
+            />
+            <ReloadOutlined onClick={() => void load()} style={{ cursor: "pointer" }} />
+          </Space>
         }
       />
-
-      <Alert
-        type="info"
-        showIcon
-        style={{ marginBottom: 16 }}
-        message="推荐的 OpenAI 兼容 API 服务"
-        description={<>
-          <Typography.Link href="https://api.openai-next.com/" target="_blank" rel="noreferrer">api.openai-next.com</Typography.Link> — OpenAI 中转，Base URL: <Typography.Text code>https://api.openai-next.com/v1</Typography.Text><br />
-          <Typography.Link href="https://www.volcengine.com/product/doubao" target="_blank" rel="noreferrer">火山引擎（豆包）</Typography.Link> — 字节跳动大模型平台，Base URL: <Typography.Text code>https://ark.cn-beijing.volces.com/api/v3</Typography.Text><br />
-          <Typography.Link href="https://bailian.console.aliyun.com/" target="_blank" rel="noreferrer">阿里云百炼</Typography.Link> — 通义千问系列，Base URL: <Typography.Text code>https://dashscope.aliyuncs.com/compatible-mode/v1</Typography.Text>
-        </>}
-      />
-
-      <Row gutter={[24, 24]}>
-        <Col xs={24} lg={8}>
-          <Card
-            title={
-              <Space>
-                {editingId ? <EditOutlined /> : <PlusOutlined />}
-                <span>{editingId ? "编辑模型" : "新增模型"}</span>
-              </Space>
-            }
-            extra={editingId ? <Button size="small" onClick={handleCancelEdit}>取消编辑</Button> : undefined}
-            style={cardStyle}
-          >
-            <Segmented
-              value={form.model_type}
-              options={[
-                { label: "文本模型", value: "text" },
-                { label: "图片模型", value: "image" },
-              ]}
-              onChange={(val) =>
-                setForm((current) => ({
-                  ...current,
-                  model_type: val as ModelType,
-                  model_name: defaultModelName(val as ModelType),
-                }))
-              }
-              block
-              style={{ marginBottom: 20 }}
-            />
-
-            {/* DEF-032: 该表单含密码型输入框，浏览器会据「登录表单启发式」自动填充
-                已保存的本站凭据（Base URL 被填成用户名、API Key 被填成密码）。
-                下面的 autoComplete 声明用于让浏览器放弃该启发式；
-                同时 handleSubmit 对 base_url 做格式校验，确保脏值无法入库。 */}
-            <form onSubmit={handleSubmit} autoComplete="off">
-              <Form layout="vertical" component="div">
-                <Form.Item label="配置名称">
-                  <Input
-                    name="model-config-name"
-                    autoComplete="off"
-                    value={form.name}
-                    onChange={(e) =>
-                      setForm((current) => ({
-                        ...current,
-                        name: e.target.value,
-                      }))
-                    }
-                    placeholder="例如：默认文本模型"
-                  />
-                </Form.Item>
-                <Alert message="所有模型需兼容 OpenAI 接口规范" type="info" style={{ marginBottom: 16, fontSize: 12 }} />
-                <Form.Item label="模型名称">
-                  <Input
-                    name="model-model-name"
-                    autoComplete="off"
-                    value={form.model_name}
-                    onChange={(e) =>
-                      setForm((current) => ({
-                        ...current,
-                        model_name: e.target.value,
-                      }))
-                    }
-                    placeholder={
-                      form.model_type === "text" ? "gpt-4o-mini" : "gpt-image-1"
-                    }
-                  />
-                </Form.Item>
-                <Form.Item label="Base URL">
-                  <Input
-                    name="model-base-url"
-                    autoComplete="url"
-                    value={form.base_url}
-                    onChange={(e) =>
-                      setForm((current) => ({
-                        ...current,
-                        base_url: e.target.value,
-                      }))
-                    }
-                    placeholder="https://api.example.com/v1"
-                  />
-                </Form.Item>
-                <Form.Item label="API Key">
-                  <Input.Password
-                    name="model-api-key"
-                    autoComplete="new-password"
-                    value={form.api_key}
-                    onChange={(e) =>
-                      setForm((current) => ({
-                        ...current,
-                        api_key: e.target.value,
-                      }))
-                    }
-                    placeholder="保存后只显示是否已配置"
-                  />
-                </Form.Item>
-                <Form.Item>
-                  <Checkbox
-                    checked={form.is_default}
-                    onChange={(e) =>
-                      setForm((current) => ({
-                        ...current,
-                        is_default: e.target.checked,
-                      }))
-                    }
-                  >
-                    设为该类型默认模型
-                  </Checkbox>
-                </Form.Item>
-                <Button
-                  type="primary"
-                  htmlType="submit"
-                  icon={<KeyOutlined />}
-                  loading={isSaving}
-                  block
-                >
-                  {isSaving ? "保存中..." : editingId ? "更新配置" : "保存配置"}
-                </Button>
-              </Form>
-            </form>
-          </Card>
-        </Col>
-
-        <Col xs={24} lg={16}>
-          <Row gutter={[16, 16]}>
-            {(["text", "image"] as ModelType[]).map((type) => (
-              <Col xs={24} md={12} key={type}>
-                <Card
-                  title={
-                    <Space>
-                      <ModelTypeIcon type={type} />
-                      <span>{typeLabel(type)}</span>
-                    </Space>
-                  }
-                  style={cardStyle}
-                >
-                  {isLoading ? (
-                    <div style={{ textAlign: "center", padding: 24 }}>
-                      <Spin tip="正在加载配置..." />
-                    </div>
-                  ) : grouped[type].length === 0 ? (
-                    <Empty
-                      image={
-                        <ModelTypeIcon type={type} />
-                      }
-                      description={
-                        <div>
-                          <Text strong>暂无{typeLabel(type)}</Text>
-                          <br />
-                          <Text type="secondary">
-                            保存一个配置后，AI 改写和生成流程就能读取默认模型。
-                          </Text>
-                        </div>
-                      }
-                    />
-                  ) : (
-                    <Space
-                      direction="vertical"
-                      style={{ width: "100%" }}
-                      size="middle"
-                    >
-                      {grouped[type].map((config) => (
-                        <Card
-                          key={config.id}
-                          size="small"
-                          style={{
-                            background: "#262626",
-                            borderColor: "#303030",
-                          }}
-                        >
-                          <Space
-                            style={{
-                              width: "100%",
-                              justifyContent: "space-between",
-                            }}
-                          >
-                            <Text strong>{config.name}</Text>
-                            {config.is_default && (
-                              <Tag
-                                icon={<StarOutlined />}
-                                color="blue"
-                              >
-                                默认
-                              </Tag>
-                            )}
-                          </Space>
-                          <div style={{ marginTop: 4, marginBottom: 4 }}>
-                            <Text>{config.model_name || "未填写模型名称"}</Text>
-                          </div>
-                          <div
-                            style={{
-                              marginTop: 8,
-                              marginBottom: 8,
-                            }}
-                          >
-                            <Text
-                              type="secondary"
-                              style={{ fontSize: 12, marginRight: 12 }}
-                            >
-                              {config.base_url || "未配置 Base URL"}
-                            </Text>
-                            <Text
-                              type="secondary"
-                              style={{ fontSize: 12 }}
-                            >
-                              {config.has_api_key
-                                ? "已保存 API Key"
-                                : "未保存 API Key"}
-                            </Text>
-                          </div>
-                          <Space size={4} wrap>
-                            <Button
-                              size="small"
-                              icon={<CheckCircleOutlined />}
-                              disabled={config.is_default}
-                              onClick={() => handleSetDefault(config)}
-                            >
-                              {config.is_default ? "当前默认" : "设为默认"}
-                            </Button>
-                            <Button
-                              size="small"
-                              icon={<ApiOutlined />}
-                              loading={testingId === config.id}
-                              onClick={() => void handleTest(config.id)}
-                            >
-                              检查
-                            </Button>
-                            <Button
-                              size="small"
-                              icon={<EditOutlined />}
-                              onClick={() => handleEdit(config)}
-                            >
-                              编辑
-                            </Button>
-                            <Popconfirm title="确定删除此模型配置？" onConfirm={() => void handleDelete(config.id)}>
-                              <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
-                            </Popconfirm>
-                          </Space>
-                          {testResults[config.id] && (
-                            <div style={{ marginTop: 6 }}>
-                              <Tag color={testResults[config.id].status === "ok" ? "success" : "error"}>
-                                {testResults[config.id].status === "ok" ? "连接正常" : "连接失败"}
-                              </Tag>
-                              <Text type="secondary" style={{ fontSize: 11 }}>{testResults[config.id].message}</Text>
-                            </div>
-                          )}
-                        </Card>
-                      ))}
-                    </Space>
-                  )}
-                </Card>
-              </Col>
-            ))}
-          </Row>
-        </Col>
-      </Row>
-    </div>
+      <Card>
+        <Paragraph type="secondary" style={{ marginBottom: 16 }}>
+          服务商在「服务商配置」页单独维护（名称 / 地址 / 令牌 / 模型类型）。本页只负责把
+          业务点指向某个服务商 —— 业务代码按固定 key 取用，改这一行即刻生效。
+        </Paragraph>
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="未配置的业务点在业务调用时会报「该业务点还没配服务商」，不会回落到其它服务商。"
+        />
+        <Table
+          rowKey="_key"
+          loading={isLoading}
+          columns={columns}
+          dataSource={rowsWithKey}
+          pagination={false}
+          size="middle"
+        />
+      </Card>
+    </>
   );
 }

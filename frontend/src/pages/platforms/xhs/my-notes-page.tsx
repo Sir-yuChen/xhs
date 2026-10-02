@@ -53,7 +53,6 @@ import {
   usePersistedFilter,
 } from "../../../lib/filter-cache";
 import {
-  bindXhsQianfanShop,
   fetchAccounts,
   fetchXhsInteractionMessages,
   fetchXhsNoteComments,
@@ -73,7 +72,6 @@ import {
   type NoTrafficCandidate,
   type NoTrafficCleanupStatus,
   type NoTrafficQuery,
-  unbindXhsQianfanShop,
 } from "../../../lib/api";
 import type {
   NoteComment,
@@ -454,12 +452,10 @@ export function XhsMyNotesPage() {
   const [commentError, setCommentError] = useState<QuietError | null>(null);
   const [isLoadingComments, setIsLoadingComments] = useState(false);
 
-  // 千帆（ark）商品接线：绑定弹窗 + 同步中状态。
-  // 绑定结果本身不单独存一份 state —— 它由 `capabilities.goods` 承载
-  // （店铺名 / 总数 / 已同步数 / 同步时间都在那里），避免同一事实有两个来源。
-  const [bindModalOpen, setBindModalOpen] = useState(false);
-  const [bindCookieText, setBindCookieText] = useState("");
-  const [bindSubmitting, setBindSubmitting] = useState(false);
+  // 千帆（ark）商品接线：同步中状态。
+  // 千帆可用性由 `capabilities.goods` 承载（店铺名 / 总数 / 已同步数 / 同步时间都在那里），
+  // 避免同一事实有两个来源。⚠️ 2026-09-30 ADR-021：绑店弹窗与 `bind*` 状态已随
+  // `POST /xhs/qianfan/bind` 一并退场（千帆走账号矩阵扫码登录，不再粘贴 Cookie）。
   const [checkingHealth, setCheckingHealth] = useState(false);
 
   // Both account types are offered: a creator account can still show its own
@@ -613,27 +609,17 @@ export function XhsMyNotesPage() {
    * `handleSyncQianfanGoods(true)`，打的 `/sync-goods` 端点已移除）——
    * 映射由笔记同步 ark 源 + 本页加载时的**按需补齐**自动维护，刷新即可。
    */
-  async function handleBindQianfan() {
-    if (!selectedAccountId) return;
-    const cookieString = bindCookieText.trim();
-    if (!cookieString) {
-      message.warning("请先粘贴千帆的 Cookie");
-      return;
-    }
-    setBindSubmitting(true);
-    try {
-      const binding = await bindXhsQianfanShop(selectedAccountId, cookieString);
-      message.success(`已绑定千帆店铺：${binding.shop_name || binding.shop_user_id}`);
-      setBindModalOpen(false);
-      setBindCookieText("");
-      await reloadCapabilities();
-      refreshActive();
-    } catch (error) {
-      message.error(readError(error).message);
-    } finally {
-      setBindSubmitting(false);
-    }
-  }
+  /**
+   * ⚠️ **`handleBindQianfan()` 已删除**（ADR-021 / 设计 18，2026-09-30）：
+   * `POST /xhs/qianfan/bind` 已退场（后端显式 `410 QIANFAN_BINDING_REMOVED`）。
+   * 千帆能力现在由「**该账号自己的 `ark` 登录态**」决定 —— 要开通就去该账号的
+   * **续期弹窗**（账号矩阵里，扫码为主、粘贴降级）导入千帆登录态，那是凭据操作。
+   *
+   * 被取代的原实现（保留备查）：
+   *
+   *   const binding = await bindXhsQianfanShop(selectedAccountId, cookieString);
+   *   message.success(`已绑定千帆店铺：${binding.shop_name || binding.shop_user_id}`);
+   */
 
   // ── 无流量笔记清理（写操作，全部走后台异步 + 限流 + 批次上限）──────────────
   const [noTrafficOpen, setNoTrafficOpen] = useState(false);
@@ -758,17 +744,17 @@ export function XhsMyNotesPage() {
     }
   }
 
-  async function handleUnbindQianfan() {
-    if (!selectedAccountId) return;
-    try {
-      const result = await unbindXhsQianfanShop(selectedAccountId);
-      message.success(`已解除绑定，清理 ${result.removed} 条商品映射`);
-      await reloadCapabilities();
-      refreshActive();
-    } catch (error) {
-      message.error(readError(error).message);
-    }
-  }
+  /**
+   * ⚠️ **`handleUnbindQianfan()` 已删除**（ADR-021 / 设计 18，2026-09-30）：
+   * `POST /xhs/qianfan/unbind` 随之退场（后端显式 `410`）—— 「绑定」不再存在，
+   * 「解除绑定」自然也没有了。要断开千帆，就在账号矩阵把这个账号的 `ark`
+   * 登录态清掉/替换（凭据操作），商品映射随账号隔离保留。
+   *
+   * 被取代的原实现（保留备查）：
+   *
+   *   const result = await unbindXhsQianfanShop(selectedAccountId);
+   *   message.success(`已解除绑定，清理 ${result.removed} 条商品映射`);
+   */
 
   /**
    * True when "我发布的" is served by the creator platform.
@@ -1564,10 +1550,18 @@ export function XhsMyNotesPage() {
                       <Text style={{ fontSize: 12 }}>
                         {qianfanBinding?.status_message ||
                           goodsInfo.status_message ||
-                          "请在千帆重新登录后重新绑定。"}
+                          "请在该账号的千帆重新登录后再试。"}
                       </Text>
-                      <Button size="small" type="primary" onClick={() => setBindModalOpen(true)}>
-                        重新绑定千帆
+                      {/* ADR-021：绑定动作退场 ⇒ 出口改成「去账号矩阵补登本账号的千帆
+                          登录态」（扫码为主、粘贴降级），与别处的千帆补齐入口同一去处。 */}
+                      <Button
+                        size="small"
+                        type="primary"
+                        onClick={() => {
+                          window.location.assign("/platforms/xhs/accounts");
+                        }}
+                      >
+                        去补登千帆
                       </Button>
                     </Space>
                   }
@@ -1578,9 +1572,9 @@ export function XhsMyNotesPage() {
                   商品来源：千帆
                 </Tag>
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  店铺 {goodsInfo.shop_name || "（未命名）"}
-                  {/* 2026-09-22：原「同店 N 个账号」提示已移除 —— 店铺与账号是 1:1
-                      （用户口径：不允许「同店铺、多账号」），那句话描述的场景不再存在。 */}
+                  {/* ADR-021：店铺不再是实体 ⇒ 展示的其实是「账号昵称（千帆卖家名）」，
+                      文案改为「账号」以免读者误以为存在独立店铺对象。 */}
+                  账号 {goodsInfo.shop_name || "（未命名）"}
                   {goodsInfo.shop_total > 0
                     ? ` · 已按需补齐 ${goodsInfo.synced_notes}/${goodsInfo.shop_total} 条商品笔记`
                     : ` · 已按需补齐 ${goodsInfo.synced_notes} 条商品笔记`}
@@ -1599,17 +1593,6 @@ export function XhsMyNotesPage() {
                 >
                   立即巡检
                 </Button>
-                <Popconfirm
-                  title="解除千帆绑定？"
-                  description="将同时清掉本地已同步的商品映射，笔记详情不再显示商品。"
-                  okText="解除"
-                  cancelText="取消"
-                  onConfirm={() => void handleUnbindQianfan()}
-                >
-                  <Button size="small" type="text">
-                    解除绑定
-                  </Button>
-                </Popconfirm>
                 <Button
                   size="small"
                   icon={<DeleteOutlined />}
@@ -1635,13 +1618,17 @@ export function XhsMyNotesPage() {
               description={
                 <Space direction="vertical" size={8} style={{ width: "100%" }}>
                   <Text style={{ fontSize: 12 }}>{capabilities.capabilities.goods.reason}</Text>
+                  {/* ADR-021：`POST /qianfan/bind` 退场 ⇒ 不再有「绑定千帆」弹窗，
+                      出口统一为「去账号矩阵补登本账号的千帆登录态」。 */}
                   <Button
                     size="small"
                     type="primary"
                     icon={<ShoppingOutlined />}
-                    onClick={() => setBindModalOpen(true)}
+                    onClick={() => {
+                      window.location.assign("/platforms/xhs/accounts");
+                    }}
                   >
-                    绑定千帆（读取挂载商品）
+                    去补登千帆（读取挂载商品）
                   </Button>
                 </Space>
               }
@@ -1934,49 +1921,9 @@ export function XhsMyNotesPage() {
         )}
       </NoteDetailModal>
 
-      {/* 千帆绑定弹窗：商品数据的唯一入口（设计文档 §19）。
-          要的是**千帆自己的**登录态，不是本账号的小红书 Cookie。 */}
-      <Modal
-        open={bindModalOpen}
-        title="绑定千帆商家后台（读取笔记挂载商品）"
-        okText="绑定并同步"
-        cancelText="取消"
-        confirmLoading={bindSubmitting}
-        onOk={() => void handleBindQianfan()}
-        onCancel={() => setBindModalOpen(false)}
-        width={640}
-      >
-        <Space direction="vertical" size={10} style={{ width: "100%" }}>
-          <Text style={{ fontSize: 13 }}>
-            笔记挂载的商品只存在于千帆商家后台，且千帆使用它自己的登录态
-            ——账号的小红书 Cookie 在这里会被判为「缺失登录凭证」。请按下面三步取一份千帆
-            Cookie：
-          </Text>
-          <ol style={{ margin: 0, paddingInlineStart: 20, fontSize: 12, lineHeight: 1.9 }}>
-            <li>
-              用 Chrome 打开并登录{" "}
-              <AntLink href="https://ark.xiaohongshu.com/" target="_blank" rel="noreferrer">
-                ark.xiaohongshu.com
-              </AntLink>
-              （千帆商家后台）；
-            </li>
-            <li>F12 → Network，刷新页面，任选一条向 ark.xiaohongshu.com 发起的请求；</li>
-            <li>
-              复制请求头里的 Cookie 整串，粘贴到下面。必须包含{" "}
-              <Text code>access-token-ark.xiaohongshu.com</Text>。
-            </li>
-          </ol>
-          <Input.TextArea
-            rows={4}
-            value={bindCookieText}
-            onChange={(event) => setBindCookieText(event.target.value)}
-            placeholder="a1=...; access-token-ark.xiaohongshu.com=...; x-user-id-ark.xiaohongshu.com=..."
-          />
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            Cookie 以 Fernet 加密落库，仅用于只读同步商品笔记；接口不回显它，日志也不打印。
-          </Text>
-        </Space>
-      </Modal>
+      {/* 千帆「绑定」弹窗（粘贴 Cookie 那一套）已随 POST /xhs/qianfan/bind 于 2026-09-30 退场
+          （ADR-021：店铺实体退场，千帆能力判据收敛为「本账号 ark 令牌」，走账号矩阵扫码登录）。
+          历史实现见 git 提交与设计 18 §6。 */}
 
       {/* 无流量笔记清理：阈值可配 → 本地预览候选 → 确认后后台异步删除 */}
       <Modal

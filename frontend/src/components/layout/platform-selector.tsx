@@ -1,12 +1,20 @@
 import { ArrowRightOutlined, ClockCircleOutlined } from "@ant-design/icons";
 import { Card, Col, Row, Tag, Typography } from "antd";
+import type { ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 
 import type { PlatformMeta } from "../../types";
 
 const { Text, Title } = Typography;
 
-export function PlatformSelector({ platforms }: { platforms: PlatformMeta[] }) {
+export function PlatformSelector({
+  platforms,
+  extra,
+}: {
+  platforms: PlatformMeta[];
+  // 2026-09-29 设计 17 §7.1 v1.5：非平台级公共能力（如大模型网关）以卡片形式与平台卡片同网格展示
+  extra?: ReactNode;
+}) {
   const navigate = useNavigate();
 
   return (
@@ -94,6 +102,7 @@ export function PlatformSelector({ platforms }: { platforms: PlatformMeta[] }) {
           </Col>
         );
       })}
+      {extra ? <Col xs={24} sm={12} md={8} lg={8}>{extra}</Col> : null}
     </Row>
   );
 }

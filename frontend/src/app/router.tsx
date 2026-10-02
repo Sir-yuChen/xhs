@@ -17,6 +17,7 @@ import { XhsDashboard } from "../pages/platforms/xhs/xhs-dashboard";
 import { XhsCrawlerPage } from "../pages/platforms/xhs/crawler-page";
 import { XhsDiscoveryPage } from "../pages/platforms/xhs/discovery-page";
 import { XhsKeywordsPage } from "../pages/platforms/xhs/keywords-page";
+import { LlmGatewayPage } from "../pages/llm-gateway/llm-gateway-page";
 import { XhsLibraryPage } from "../pages/platforms/xhs/library-page";
 import { XhsMonitoringPage } from "../pages/platforms/xhs/monitoring-page";
 import { XhsMyNotesPage } from "../pages/platforms/xhs/my-notes-page";
@@ -54,6 +55,22 @@ export function AppRouter() {
             </ProtectedRoute>
           }
         />
+        {/* 2026-09-29 设计 17 §7.1 v1.5：大模型网关 = 独立公共模块，有自己的工作区壳（不进 AppShell 平台工作区），
+            与 /platform-select 同层的独立全屏页；旧路由（平台内 / 工作区内）重定向。
+            2026-10-01 §11.3（第 3 次修订）：网关内 4 个菜单改为**独立页面**（子路由）——
+            壳层仍只在 `LlmGatewayPage` 一份，页面路由从这里声明。 */}
+        <Route
+          path="/llm-gateway"
+          element={
+            <ProtectedRoute>
+              <LlmGatewayPage />
+            </ProtectedRoute>
+          }
+        >
+          {/* 子路由 = 3 个独立页面（用量看板 / 服务商 / 预警规则；v1.9 令牌映射页已移除）；
+              各自的 index 重定向、旧 ?tab= 兼容、未知段回落都在 LlmGatewayPage 内部。 */}
+          <Route path="*" element={null} />
+        </Route>
         <Route
           element={
             <ProtectedRoute>
@@ -86,6 +103,8 @@ export function AppRouter() {
               这一页管「跑完了什么」。 */}
           <Route path="/task-records" element={<TaskRecordsPage />} />
           <Route path="/models" element={<ModelConfigPage />} />
+          {/* 大模型网关已上移为独立公共模块（v1.5，见上方独立路由）；旧路由重定向保深链不死 */}
+          <Route path="/platforms/xhs/llm-gateway" element={<Navigate to="/llm-gateway" replace />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Route>
       </Routes>

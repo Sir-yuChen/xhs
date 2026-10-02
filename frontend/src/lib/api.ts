@@ -30,8 +30,20 @@ import type {
   KeywordGroup,
   KeywordGroupDetail,
   KeywordGroupPayload,
-  ModelConfig,
-  ModelConfigPayload,
+  LlmGatewayConfig,
+  LlmGatewayConfigPayload,
+  LlmGatewayPlatformOption,
+  LlmGatewayStats,
+  LlmGatewayAlert,
+  LlmGatewayAlertPayload,
+  LlmGatewayUsageOverview,
+  LlmGatewayUsageDailyItem,
+  LlmGatewayUsageBreakdownItem,
+  BusinessKeyOption,
+  BusinessKeysResponse,
+  BusinessProviderListResponse,
+  BusinessProviderRow,
+  BusinessProviderUpsertPayload,
   ModelType,
   MonitoringNote,
   MonitoringRefreshResponse,
@@ -81,6 +93,7 @@ import type {
   XhsInteractionKind,
   XhsInteractionResponse,
   XhsQianfanBinding,
+  GenerateDetailImageResult,
   XhsShopItemDetail,
   XhsShopItemsQuery,
   XhsShopItemsResponse,
@@ -1456,6 +1469,28 @@ export async function fetchXhsShopItemDetail(
 }
 
 /**
+ * **生成商品详情图**（商品详情弹窗内触发，设计 17 §13.3.3）。
+ *
+ * 走 `generate_product_detail_image` 业务点（与「生成配图」是两个业务点：配图服务笔记正文，
+ * 详情图服务商品）。⚠️ **不传图片 URL** —— 商品图由服务端按 `item_id` 从本地台账取：
+ * 让前端传 URL 等于让后端去下载任意地址（SSRF 面），且台账里就有真值。
+ *
+ * 出图较慢（服务商生图），超时给足 180s（同 `generateImageWithAi`）。
+ */
+export async function generateProductDetailImage(
+  accountId: number,
+  itemId: string,
+  prompt = ""
+): Promise<GenerateDetailImageResult> {
+  const response = await http.post<GenerateDetailImageResult>(
+    "/xhs/qianfan/generate-detail-image",
+    { platform_account_id: accountId, item_id: itemId, prompt },
+    { timeout: 180000 }
+  );
+  return response.data;
+}
+
+/**
  * 某个商品**挂了哪些笔记**（商品列表页点「N 篇」）。
  *
  * 服务端是**纯本地 join**（`shop_note_goods` 按 `item_id` 取行，标题/指标取自同步时存的
@@ -1598,35 +1633,68 @@ export async function describeImageWithAi(payload: DescribeImagePayload): Promis
   return response.data;
 }
 
-export async function fetchModelConfigs(modelType?: ModelType): Promise<Paginated<ModelConfig>> {
-  const response = await http.get<Paginated<ModelConfig>>("/model-configs", {
-    params: modelType ? { model_type: modelType } : undefined
+// —— 「平台 × 业务点 → 服务商」映射（设计 17 §13.2，v2.0）——
+//
+// ⚠️ 一期 6 个 `*ModelConfig` 请求函数已随 v2.0 退场（服务商单独配置 + 业务点映射）。
+// 同 DEF-044：端点退场则请求函数同批移除，不留影子实现。
+
+/** 业务点清单（**后端下发**，前端零硬编码 —— 新增业务点前端零改动） */
+export async function fetchBusinessProviderKeys(): Promise<BusinessKeysResponse> {
+  const response = await http.get<BusinessKeysResponse>("/llm/business-provider-keys");
+  return response.data;
+}
+
+/** 映射列表（含未配置的业务点，用于渲染空态行） */
+export async function fetchBusinessProviders(platform?: string): Promise<BusinessProviderListResponse> {
+  const response = await http.get<BusinessProviderListResponse>("/llm/business-providers", {
+    params: platform ? { platform } : undefined,
   });
   return response.data;
 }
 
-export async function createModelConfig(payload: ModelConfigPayload): Promise<ModelConfig> {
-  const response = await http.post<ModelConfig>("/model-configs", payload);
+/** **实时切换服务商**：upsert (platform, business_key) → provider_key。改一行即生效。 */
+export async function upsertBusinessProvider(
+  payload: BusinessProviderUpsertPayload,
+): Promise<{ platform: string; business_key: string; provider_key: string; configured: boolean }> {
+  const response = await http.put("/llm/business-providers", payload);
   return response.data;
 }
 
-export async function setDefaultModelConfig(configId: number): Promise<ModelConfig> {
-  const response = await http.post<ModelConfig>(`/model-configs/${configId}/set-default`);
+// —— LLM 网关配置（设计 17 §7.1，M1/T1）——
+export async function fetchGatewayConfigs(): Promise<Paginated<LlmGatewayConfig>> {
+  // 工作平台公共维度（设计 17 §7.1 v1.4）：网关不挂 /xhs/ 平台前缀
+  const response = await http.get<Paginated<LlmGatewayConfig>>("/llm/gateway-configs", { params: { page: 1, page_size: 100 } });
   return response.data;
 }
 
-export async function updateModelConfig(configId: number, payload: Partial<ModelConfigPayload>): Promise<ModelConfig> {
-  const response = await http.patch<ModelConfig>(`/model-configs/${configId}`, payload);
+export async function fetchGatewayStats(configId: number): Promise<LlmGatewayStats> {
+  const response = await http.get<LlmGatewayStats>(`/llm/gateway-configs/${configId}/stats`);
   return response.data;
 }
 
-export async function testModelConfig(configId: number): Promise<{ id: number; status: string; message: string }> {
-  const response = await http.post<{ id: number; status: string; message: string }>(`/model-configs/${configId}/test`);
+export async function createGatewayConfig(payload: LlmGatewayConfigPayload): Promise<LlmGatewayConfig> {
+  const response = await http.post<LlmGatewayConfig>("/llm/gateway-configs", payload);
   return response.data;
 }
 
-export async function deleteModelConfig(configId: number): Promise<{ id: number; status: string }> {
-  const response = await http.delete<{ id: number; status: string }>(`/model-configs/${configId}`);
+export async function updateGatewayConfig(
+  configId: number,
+  payload: Partial<LlmGatewayConfigPayload> & { enabled?: boolean }
+): Promise<LlmGatewayConfig> {
+  const response = await http.patch<LlmGatewayConfig>(`/llm/gateway-configs/${configId}`, payload);
+  return response.data;
+}
+
+// ⚠️ ~~`deleteGatewayConfig`~~ **v1.9 移除**（用户口径「移除删除功能」）：
+// 后端 DELETE 端点为 **410 墓碑**（设计 17 §7.1），前端不再有删除入口。
+// 与 `LlmGatewayToken` 的 4 个请求函数一起删（DEF-044：不留死代码）。
+
+export async function testGatewayConfig(
+  configId: number
+): Promise<{ id: number; healthy: boolean; message: string; models: string[] }> {
+  const response = await http.post<{ id: number; healthy: boolean; message: string; models: string[] }>(
+    `/llm/gateway-configs/${configId}/test`
+  );
   return response.data;
 }
 
@@ -1824,8 +1892,21 @@ export async function runScheduleJobOnce(jobId: number): Promise<{ log_id: numbe
   return response.data;
 }
 
+/**
+ * 调度日志列表（任务中心「任务日志」页签 / 队列记录页）。
+ *
+ * 一律 `_silent`：**失败的展示权归调用点**（`task-center-page` 的日志页签自己
+ * 给「任务日志加载失败，请稍后重试。」，队列记录页各自给本页上下文）。不拦的话
+ * 页面上会**同时**弹两条 —— 调用点那条 + 拦截器兜底的通用
+ * 「请求失败，请稍后重试」，后者既没有上下文也不是真原因（2026-09-30 用户口径：
+ * 「你先提示任务日志加载失败，请稍后重试，又提示请求失败，请稍后重试，
+ * 这 2 个移除后一个」）。
+ */
 export async function fetchScheduleLogs(query: ScheduleLogQuery = {}): Promise<Paginated<ScheduledJobLog>> {
-  const response = await http.get<Paginated<ScheduledJobLog>>("/schedule/logs", { params: query });
+  const response = await http.get<Paginated<ScheduledJobLog>>("/schedule/logs", {
+    params: query,
+    _silent: true,
+  } as never);
   return response.data;
 }
 
@@ -2121,8 +2202,41 @@ export async function syncAccountNotes(
   accountId: number,
   options: SyncNotesOptions = {}
 ): Promise<XhsSyncTriggerResult> {
+  return postNoteSync(`${accountId}/notes/sync`, options);
+}
+
+/**
+ * 触发**商品笔记**同步（**§44**，2026-09-30 用户拍板拆分）。
+ *
+ * **语义**：手动触发定时任务 `system.goods_note_sync` 的「执行一次」——
+ * 走千帆 `goods-note/list` 的挂链笔记（落 `notes` + `note_goods`），
+ * 与「同步笔记」（creator 列表）/「同步商品」（店铺商品台账）**都不是同一条链路**。
+ *
+ * 请求体与响应形状与 `syncAccountNotes` **逐字一致**（后端两条端点共用同一个
+ * 建行 / 记日志实现）⇒ 请求体拼装走同一个 `postNoteSync`，不写第二份（DEF-044）。
+ *
+ * **防重**：该账号已有未完成的**商品笔记**任务 → 返回同一个 `task_id` 且
+ * `reused: true`。⚠️ 与普通笔记**各自成立** —— 普通笔记在跑不阻塞本按钮。
+ */
+export async function syncGoodsNotes(
+  accountId: number,
+  options: SyncNotesOptions = {}
+): Promise<XhsSyncTriggerResult> {
+  return postNoteSync(`${accountId}/goods-notes/sync`, options);
+}
+
+/**
+ * 笔记同步触发请求体的**唯一实现**（普通笔记 / 商品笔记共用，§44）。
+ *
+ * 两条端点（`…/notes/sync` 与 `…/goods-notes/sync`）的入参语义完全相同，差别只在路径
+ * ⇒ 请求体必须只拼一次：写两份必然在其中一份上漂移（§35.15 就是漏了 `mode`）。
+ */
+async function postNoteSync(
+  path: string,
+  options: SyncNotesOptions
+): Promise<XhsSyncTriggerResult> {
   const response = await http.post<XhsSyncTriggerResult>(
-    `/accounts/${accountId}/notes/sync`,
+    `/accounts/${path}`,
     {
       // ⚠️ **不传 `max_pages` = 全量**（设计 13 §21，2026-09-22 用户口径：
       // 「不要设置翻页上限，应为全量同步」）。旧的 `?? 3` 正是「1961 条的账号
@@ -2147,6 +2261,21 @@ export async function syncAccountNotesStatus(accountId: number): Promise<XhsSync
   const response = await http.get<XhsSyncTaskStatus>(`/accounts/${accountId}/notes/sync/status`, {
     _silent: true,
   } as never);
+  return response.data;
+}
+
+/**
+ * **商品笔记**同步的进度查询（§44，前端每 5 秒轮询）。
+ *
+ * 与 `syncAccountNotesStatus` 逐字同构，只换路径。⚠️ 两条链路的状态**互相独立**
+ * （后端各有一条任务类型与一条定时任务日志流）⇒ 普通笔记在跑不会影响本按钮的
+ * 「同步中」态，反之亦然。
+ */
+export async function syncGoodsNotesStatus(accountId: number): Promise<XhsSyncTaskStatus> {
+  const response = await http.get<XhsSyncTaskStatus>(
+    `/accounts/${accountId}/goods-notes/sync/status`,
+    { _silent: true } as never
+  );
   return response.data;
 }
 
@@ -2382,5 +2511,98 @@ export async function deleteSystemSetting(key: string): Promise<SystemSettingDel
   const response = await http.delete<SystemSettingDeleteResult>(
     `/settings/${encodeURIComponent(key)}`
   );
+  return response.data;
+}
+
+// ─────────────────────────────────────────────────────────────
+// LLM 网关令牌映射 + 预警规则 + 用量展示（设计 17 §7.1a/§7.1b/§7.5，v1.6）
+// ─────────────────────────────────────────────────────────────
+
+// ⚠️ ~~令牌映射 4 个请求函数~~ **v1.9 整组移除**（用户口径「令牌映射页面移除」）：
+// `fetchGatewayTokens` / `createGatewayToken` / `updateGatewayToken` / `deleteGatewayToken`
+// 随 `llm_gateway_tokens` 表与 4 个端点一起退场（设计 17 §7.1a）。
+
+/** 「使用平台」枚举（v1.9 D3：**后端下发**，前端不许就地写死选项）
+ *  ⚠️ 路径是 `/llm/providers/platforms`（**独立前缀**，不在 `gateway-configs` 下）——
+ *  枚举是「服务商」维度的公共字典，与某条具体配置无关。 */
+export async function fetchGatewayPlatforms(): Promise<{ items: LlmGatewayPlatformOption[] }> {
+  const response = await http.get<{ items: LlmGatewayPlatformOption[] }>("/llm/providers/platforms");
+  return response.data;
+}
+
+/**
+ * **未保存**时拉取服务商模型目录（v1.9）—— 供弹窗里的「默认模型」下拉。
+ *
+ * ⚠️ 传**地址 + 令牌**而不是 `id`：新增时还没有 id；编辑时用户可能改了地址或重填令牌，
+ * 必须按表单当前值拉。编辑态令牌留空（= 不修改）时传 `id` 让后端用库里令牌兜底。
+ * ⚠️ 后端**不落库**（预览语义），目录落库发生在保存 / 测试。
+ */
+export async function previewGatewayModels(payload: {
+  base_url: string;
+  access_token?: string;
+  id?: number;
+}): Promise<{ models: string[]; message: string }> {
+  const response = await http.post<{ models: string[]; message: string }>(
+    "/llm/gateway-configs/models-preview",
+    payload
+  );
+  return response.data;
+}
+
+export async function fetchGatewayAlerts(params?: {
+  gateway_id?: number;
+  enabled?: boolean;
+}): Promise<Paginated<LlmGatewayAlert>> {
+  const response = await http.get<Paginated<LlmGatewayAlert>>("/llm/gateway-alerts", {
+    params: { page: 1, page_size: 100, ...params },
+  });
+  return response.data;
+}
+
+export async function createGatewayAlert(payload: LlmGatewayAlertPayload): Promise<LlmGatewayAlert> {
+  const response = await http.post<LlmGatewayAlert>("/llm/gateway-alerts", payload);
+  return response.data;
+}
+
+export async function updateGatewayAlert(
+  alertId: number,
+  payload: Partial<Pick<LlmGatewayAlert, "threshold" | "operator" | "window_seconds" | "level" | "enabled">>
+): Promise<LlmGatewayAlert> {
+  const response = await http.patch<LlmGatewayAlert>(`/llm/gateway-alerts/${alertId}`, payload);
+  return response.data;
+}
+
+export async function deleteGatewayAlert(alertId: number): Promise<{ id: number; status: string }> {
+  const response = await http.delete<{ id: number; status: string }>(`/llm/gateway-alerts/${alertId}`);
+  return response.data;
+}
+
+export async function fetchGatewayUsageOverview(params?: {
+  gateway_id?: number;
+  platform?: string;
+  function?: string;
+}): Promise<LlmGatewayUsageOverview> {
+  const response = await http.get<LlmGatewayUsageOverview>("/llm/usage/overview", { params });
+  return response.data;
+}
+
+export async function fetchGatewayUsageDaily(params?: {
+  gateway_id?: number;
+  platform?: string;
+  function?: string;
+  start_date?: string;
+  end_date?: string;
+}): Promise<LlmGatewayUsageDailyItem[]> {
+  const response = await http.get<LlmGatewayUsageDailyItem[]>("/llm/usage/daily", { params });
+  return response.data;
+}
+
+export async function fetchGatewayUsageBreakdown(params?: {
+  gateway_id?: number;
+  dimension: string;
+  start_date?: string;
+  end_date?: string;
+}): Promise<LlmGatewayUsageBreakdownItem[]> {
+  const response = await http.get<LlmGatewayUsageBreakdownItem[]>("/llm/usage/breakdown", { params });
   return response.data;
 }

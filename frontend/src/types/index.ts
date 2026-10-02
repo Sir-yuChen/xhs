@@ -547,6 +547,21 @@ export type XhsShopItemDetail = {
   platform_missing_at: string;
 };
 
+/** 商品详情图生成回执（`POST /xhs/qianfan/generate-detail-image`，设计 17 §13.3.3）。 */
+export type GenerateDetailImageResult = {
+  /** 服务商回传的出图地址（为空 = 服务商没回 URL，看 `asset.local_path`）。 */
+  url: string;
+  /** AIGC 溯源资产行（发布时按它取 `aigcTaskId`）。 */
+  asset: {
+    id: number;
+    /** 本地落盘路径；空串 = 服务商没回本地路径（**不拿 url 冒充**）。 */
+    local_path: string;
+    url: string | null;
+    prompt: string;
+    model_name: string;
+  };
+};
+
 export type XhsSelfContentScope = "notes" | "liked" | "collected";
 
 export type XhsSelfContentResponse = {
@@ -927,30 +942,191 @@ export type CreateDraftPayload = {
 
 export type ModelType = "text" | "image";
 
-export type ModelConfig = {
-  id: number;
-  name: string;
-  model_type: ModelType;
-  provider: string;
-  model_name: string;
-  base_url: string;
-  has_api_key: boolean;
-  is_default: boolean;
+// —— 「平台 × 业务点 → 服务商」映射（设计 17 §13.2，v2.0）——
+//
+// ⚠️ 一期 `ModelConfig`（本地模型配置表）已随 v2.0 退场：服务商是**单独配置**的
+// （`LlmGatewayConfig`），业务通过**固定 key** 映射到服务商。同 DEF-044：退场语义
+// 同批移除，不留影子类型。
+export type BusinessProviderKind = ModelType;
+
+/** 业务点定义（`GET /llm/business-provider-keys`，**后端下发**，前端零硬编码） */
+export type BusinessKeyOption = {
+  key: string;
+  kind: BusinessProviderKind;
+  label: string;
+  /**
+   * 触发源：该业务点在界面上被哪些入口触发（页面路径链，如
+   * `商品列表-商品详情-生成商品详情图`）。空数组 = 只由 API 直接调用、界面无入口。
+   */
+  triggers: string[];
 };
 
-export type ModelConfigPayload = {
-  name: string;
-  model_type: ModelType;
-  provider: string;
-  model_name: string;
-  base_url: string;
-  api_key: string;
-  is_default: boolean;
+/** 业务点 → 服务商 映射行（`GET /llm/business-providers`） */
+export type BusinessProviderRow = {
+  platform: string;
+  business_key: string;
+  kind: BusinessProviderKind;
+  /** 业务点中文名（常量元数据下发，只读展示） */
+  label: string;
+  /** 触发源：该业务点在界面上由哪些业务动作触发（只读展示；空 = 仅 API 调用） */
+  triggers: string[];
+  /** 空串 = 未配置 */
+  provider_key: string;
+  provider_name: string | null;
+  provider_enabled: boolean | null;
+  provider_model_type: BusinessProviderKind | null;
+  configured: boolean;
+  enabled: boolean;
 };
+
+export type BusinessProviderListResponse = {
+  items: BusinessProviderRow[];
+  platforms: { value: string; label: string }[];
+};
+
+export type BusinessKeysResponse = {
+  items: BusinessKeyOption[];
+  model_types: { value: BusinessProviderKind; label: string }[];
+};
+
+export type BusinessProviderUpsertPayload = {
+  platform: string;
+  business_key: string;
+  /** 空串 = 清空映射（回到「未配置」） */
+  provider_key: string;
+};
+
 
 export type RewriteDraftPayload = {
   draft_id: number;
   instruction?: string;
+};
+
+// —— LLM 网关（设计 17 §7.1，M1/T1；v1.7 任意 OpenAI 兼容上游连接配置）——
+export type LlmGatewayConfig = {
+  id: number;
+  name: string;
+  /** 服务商唯一 KEY（v1.9）：系统生成、创建后不可编辑；业务代码按它引用服务商 */
+  provider_key: string;
+  /** 使用平台（v1.9）：服务商服务哪个业务平台（枚举，后端下发） */
+  platform: string;
+  /** 模型类型（v2.0）：`text` / `image`；「模型配置页」按它过滤业务点的下拉候选 */
+  model_type: ModelType;
+  base_url: string;
+  default_model: string;
+  models: string[];
+  has_access_token: boolean;
+  enabled: boolean;
+  healthy: boolean;
+  last_health_at: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type LlmGatewayConfigPayload = {
+  name: string;
+  /** 使用平台（v1.9 必填，须在 `GET /llm/providers/platforms` 的枚举内） */
+  platform?: string;
+  /** 模型类型（v2.0 必填）：`text` / `image` */
+  model_type?: ModelType;
+  base_url?: string;
+  access_token?: string;
+  default_model?: string;
+  // ⚠️ 无 `provider_key`（v1.9）：该字段由服务端生成且**不可编辑** ——
+  // 后端 PATCH 请求体带它会 422（`extra="forbid"`），前端不许出现在 payload 里。
+};
+
+// —— 「使用平台」枚举（GET /llm/providers/platforms，v1.9 D3 后端下发）——
+export type LlmGatewayPlatformOption = {
+  value: string;
+  label: string;
+};
+
+// —— 用量统计（GET /llm/gateway-configs/{id}/stats；v1.6 起读本地台账聚合）——
+export type LlmGatewayStatsBucket = {
+  calls: number;
+  success_calls: number;
+  fail_calls: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  quota: number;
+  avg_latency_ms: number;
+};
+
+export type LlmGatewayStats = {
+  id: number;
+  available: boolean;
+  message?: string;
+  today: LlmGatewayStatsBucket | null;
+  week: LlmGatewayStatsBucket | null;
+};
+
+// ⚠️ ~~`LlmGatewayToken` / `LlmGatewayTokenPayload`~~ **v1.9 删除**：令牌映射已整表退场
+// （设计 17 §7.1a）。原来的两个类型 + `lib/api.ts` 的 4 个请求函数一并移除。
+
+// —— 预警规则（设计 17 §7.1b，v1.6）——
+export type LlmGatewayAlert = {
+  id: number;
+  gateway_id: number;
+  platform: string;
+  function: string;
+  metric: string;
+  operator: string;
+  threshold: number;
+  window_seconds: number;
+  level: string;
+  enabled: boolean;
+  last_fired_at: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type LlmGatewayAlertPayload = {
+  gateway_id: number;
+  platform?: string;
+  function?: string;
+  metric: string;
+  operator: string;
+  threshold: number;
+  window_seconds?: number;
+  level?: string;
+  enabled?: boolean;
+};
+
+// —— 用量展示（设计 17 §7.5，v1.6）——
+export type LlmGatewayUsageBucket = {
+  calls: number;
+  success: number;
+  fail: number;
+  fail_rate: number;
+  total_tokens: number;
+  avg_latency_ms: number;
+};
+
+export type LlmGatewayUsageOverview = {
+  today: LlmGatewayUsageBucket;
+  week: LlmGatewayUsageBucket;
+  month: LlmGatewayUsageBucket;
+  gateway_healthy: boolean | null;
+};
+
+export type LlmGatewayUsageDailyItem = {
+  date: string;
+  calls: number;
+  success: number;
+  fail: number;
+  total_tokens: number;
+  avg_latency_ms: number;
+};
+
+export type LlmGatewayUsageBreakdownItem = {
+  key: string;
+  calls: number;
+  success: number;
+  fail: number;
+  fail_rate: number;
+  total_tokens: number;
 };
 
 export type GenerateNotePayload = {

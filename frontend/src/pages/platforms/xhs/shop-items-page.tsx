@@ -41,7 +41,6 @@ import { useNavigate } from "react-router-dom";
 
 import {
   batchGenerateProductNotes,
-  bindXhsQianfanShop,
   deleteXhsShopItems,
   EMPTY_GENERATE_QUEUE_SNAPSHOT,
   fetchAccounts,
@@ -51,6 +50,7 @@ import {
   fetchXhsShopItemDetail,
   fetchXhsShopItems,
   generateProductNote,
+  generateProductDetailImage,
 } from "../../../lib/api";
 import type { GenerateQueueFinishedEntry, GenerateQueueSnapshot } from "../../../lib/api";
 import { yuan } from "../../../lib/format";
@@ -89,6 +89,7 @@ import {
   type SortState,
 } from "../../../lib/shop-items-view";
 import type {
+  GenerateDetailImageResult,
   PlatformAccount,
   XhsItemNote,
   XhsItemNotesResponse,
@@ -114,7 +115,9 @@ const { RangePicker } = DatePicker;
  * 四条口径（都是实测定的，别改）：
  * 1. **走本地数据**（§30.3）：列表查 `shop_products` 台账（「同步商品」任务落库），
  *    **零平台请求**；展示契约与实时查询时代逐字段一致；时效由「同步于 X」明示；
- * 2. **账号不过滤类型**（§30.1）：门禁在后端（未绑店 → 400），前端不预判；
+ * 2. **账号不过滤类型、本页零门禁**（§30.1 + ADR-021，2026-09-30）：本地台账读
+ *    不打平台 ⇒ 不看 ark 会话脸色，ark 失效时只加一行说明；打平台的动作用后端
+ *    ark 门禁（`ARK_SESSION_REQUIRED`）把关，前端不预判；
  * 3. **筛选参数名照抄千帆页面自己发的请求**（`whole_keywords` / `card_type` /
  *    `price_from|price_to`（分）/ `stock_from|stock_to` / `sales_from|sales_to`）；
  * 4. **金额进出都按分**（后端契约），展示层除以 100 —— 只有一处换算，不会两头乘。
@@ -387,9 +390,7 @@ export function XhsShopItemsPage() {
     []
   );
   const formInitialValues = useMemo(() => draftToFormValues(cachedDraft), [cachedDraft]);
-  const [bindOpen, setBindOpen] = useState(false);
-  const [bindCookie, setBindCookie] = useState("");
-  const [binding_, setBinding_] = useState(false);
+  // ⚠️ `bindOpen` / `bindCookie` / `binding_` 三个绑定弹窗状态已删除（ADR-021）。
   // 商品 → 挂链笔记反查（关系表源，设计 13 §31.6；弹窗 + tabs）
   const [notesOpen, setNotesOpen] = useState(false);
   const [notesLoading, setNotesLoading] = useState(false);
@@ -420,19 +421,25 @@ export function XhsShopItemsPage() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [detail, setDetail] = useState<XhsShopItemDetail | null>(null);
   const [detailError, setDetailError] = useState("");
+  // 商品详情图生成（设计 17 §13.3.3，v2.1）—— 三态：生成中 / 已出图 / 无。
+  // ⚠️ 出图结果**不落 detail**（它不是台账字段，是本次生成动作的产物）：单独一个 state，
+  // 关弹窗即清，避免把「刚生成的图」误当成「商品自己的图集」。
+  const [detailImageGenerating, setDetailImageGenerating] = useState(false);
+  const [detailImagePrompt, setDetailImagePrompt] = useState("");
+  const [detailImage, setDetailImage] = useState<GenerateDetailImageResult | null>(null);
 
   useEffect(() => {
     void (async () => {
       try {
         const list = await fetchAccounts();
-        // v1.32（设计 13 §30.1）：**不再按 sub_type 过滤** —— 千帆门禁由后端把着
-        // （未绑店 → 400 QIANFAN_BINDING_REQUIRED），前端按类型预判「哪类账号有
-        // 店铺」就是第二份真相源。用户口径：下拉展示所有已绑定的小红书账号。
+        // v1.32（设计 13 §30.1）：**不再按 sub_type 过滤**；ADR-021 后连「有没有
+        // 绑店」这一维也不存在了 —— 台账属于账号，所有已添加的小红书账号都能选。
+        // 前端按类型/归属预判可用性 = 第二份真相源（能力判据在后端的 ark 令牌）。
         const selectable = selectableAccounts(list);
         setAccounts(selectable);
         // 账号选择的**缓存自愈**（2026-09-26）：缓存里的账号可能已被删除、或已不在
-        // 可选集合里（未绑店等）⇒ 此时退回第一个账号；否则下拉里会挂着一个候选里
-        // 找不到的值，列表恒空而用户看不出原因。
+        // 可选集合里 ⇒ 此时退回第一个账号；否则下拉里会挂着一个候选里找不到的值，
+        // 列表恒空而用户看不出原因。
         setSelectedAccountId((current) =>
           current !== null && selectable.some((account) => account.id === current)
             ? current
@@ -537,7 +544,10 @@ export function XhsShopItemsPage() {
 
   /**
    * 账号 → 三个平台的登录态（**零平台请求**：随账号列表一起下发，设计 13 §18.5）。
-   * 前置门禁只看其中的 `ark`（千帆）—— 判据复用 `ledgerPrerequisite`（唯一实现）。
+   *
+   * ⚠️ 2026-09-30 用户口径「商品列表页查询的本地数据库，无需校验千帆是否可用」：
+   * 本页是**纯本地台账读**，`ark` 会话可用性**不再拦列表请求**。这个 map 仍保留，
+   * 用途改成「ark 失效时给一行安静说明 / 禁用打平台的按钮」，不再是前置门禁。
    */
   const channelsByAccount = useMemo(() => {
     const map: Record<number, XhsLoginChannels> = {};
@@ -546,29 +556,30 @@ export function XhsShopItemsPage() {
   }, [accounts]);
 
   /**
-   * 商品台账的**前置校验**（用户 2026-09-23 口径：「将校验当前账号下是否存在
-   * 可用的千帆账号作为前置校验」）。不通过 ⇒ 只渲染一句提示，**一个请求都不发**。
+   * 台账前置校验（`ledgerPrerequisite`）。**ADR-021 + 2026-09-30 口径后 `ok` 恒为
+   * true**（本地读零门禁）—— 保留这个 `useMemo` 是为了让「要不要发列表请求」这个
+   * 决策仍然只有一个改动点；`arkOk` 单独取出来给提示语用。
    */
   const prereq = useMemo(
     () =>
       ledgerPrerequisite(
-        binding?.bound,
         selectedAccountId === null ? undefined : channelsByAccount[selectedAccountId]
       ),
-    [binding?.bound, selectedAccountId, channelsByAccount]
+    [selectedAccountId, channelsByAccount]
   );
+
+  /** 本账号的 `ark`（千帆）会话此刻是否「确定不可用」。 */
+  const arkUnavailable = prereq.reason === "ark_unavailable";
 
   useEffect(() => {
     if (selectedAccountId === null) return;
-    // 切账号 = 换一个店铺：旧账号的绑定态**必须先清掉**。否则 `bindingLoaded` /
-    // `binding.bound` 还是上一个账号的，下面那个「绑定后拉一页」的 effect 会抢在
-    // `loadBinding` 回来之前用**新账号**调 `/items` —— 未绑店即 400，于是
-    // toast + 页面错误块 + 未绑定说明**一起冒出来**（用户看到的「乱七八糟的异常」）。
+    // 切账号 = 换一个台账归属：旧账号的响应**必须先清掉**（否则新账号会短暂看到
+    // 上一个账号的商品行 —— 隔离键已收敛到账号，串号比串店更严重）。
     setBinding(null);
     setBindingLoaded(false);
     setData(null);
     setErrorText("");
-    // 勾选也是「上一个账号的」：删除请求按 item_id 打到**新账号的店**只会删 0 行，
+    // 勾选也是「上一个账号的」：删除请求按 item_id 打到**新账号的台账**只会删 0 行，
     // 但按钮上还挂着「批量删除（30）」= 界面在说一件不会发生的事。一起清掉。
     setSelectedItemIds([]);
     void loadBinding(selectedAccountId);
@@ -578,7 +589,8 @@ export function XhsShopItemsPage() {
     if (selectedAccountId === null || !bindingLoaded) return;
     if (!prereq.ok) return;
     void load(selectedAccountId, pageNo, pageSize);
-    // 绑定状态变化后重新拉一页
+    // ⚠️ 依赖里**不再有 `binding?.bound`**：切账号时 `binding` 先被清成 null 再回来，
+    // 带上它会让「绑定后拉一页」的语义与实际（零门禁、切账号即拉）不符。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedAccountId, bindingLoaded, prereq.ok]);
 
@@ -593,26 +605,18 @@ export function XhsShopItemsPage() {
     [accounts]
   );
 
-  async function handleBind() {
-    if (!selectedAccountId || bindCookie.trim().length < 8) {
-      message.warning("请粘贴千帆 Cookie（须含 access-token-ark.xiaohongshu.com）");
-      return;
-    }
-    setBinding_(true);
-    try {
-      const bound = await bindXhsQianfanShop(selectedAccountId, bindCookie.trim());
-      setBinding(bound);
-      setBindOpen(false);
-      setBindCookie("");
-      message.success(`已绑定千帆店铺：${bound.shop_name || "（未命名）"}`);
-      setPageNo(1);
-      await load(selectedAccountId, 1, pageSize);
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : "绑定失败");
-    } finally {
-      setBinding_(false);
-    }
-  }
+  /**
+   * ⚠️ **`handleBind()` 已删除**（ADR-021 / 设计 18，2026-09-30）：
+   * `POST /xhs/qianfan/bind` 已退场（后端显式 `410 QIANFAN_BINDING_REMOVED`），
+   * 页面上的「绑定千帆（粘贴 Cookie）」按钮与那个弹窗一并移除。
+   *
+   * 千帆能力现在完全由「本账号有没有可用的 `ark` 会话」决定 —— 要开通就去
+   * **账号矩阵**给该账号导入千帆（ark）登录态，那是凭据操作，不是这里的关系操作。
+   * 被取代的原逻辑（保留备查）：
+   *
+   *   const bound = await bindXhsQianfanShop(selectedAccountId, bindCookie.trim());
+   *   message.success(`已绑定千帆店铺：${bound.shop_name || "（未命名）"}`);
+   */
 
   /** 打开「这个商品挂了哪些笔记」弹窗（关系表源，零平台请求；设计 13 §31.6）。
    *
@@ -638,7 +642,7 @@ export function XhsShopItemsPage() {
   /**
    * 单商品「生成笔记」（设计 13 §31.4 + §31.10）：入队即返回，worker 后台跑。
    *
-   * 门禁失败（未绑店 / 无令牌 / 台账无此行）仍是结构化 400/404，由全局拦截器
+   * 门禁失败（无令牌 / 台账无此行）仍是结构化 400/404，由全局拦截器
    * 摆真实原因；平台侧失败（502）发生在 worker 里，只在快照 `finished` 给一次。
    */
   async function generateNote(item: XhsShopItem) {
@@ -867,6 +871,10 @@ export function XhsShopItemsPage() {
     setDetailLoading(true);
     setDetail(null);
     setDetailError("");
+    // 每次打开都清掉上一次的出图结果与提示词：那是**上一次动作**的产物，
+    // 留着会让用户以为「这个商品已经有详情图了」。
+    setDetailImage(null);
+    setDetailImagePrompt("");
     try {
       setDetail(await fetchXhsShopItemDetail(selectedAccountId, item.item_id));
     } catch (error) {
@@ -874,6 +882,32 @@ export function XhsShopItemsPage() {
       setDetailError(error instanceof Error ? error.message : "商品详情加载失败");
     } finally {
       setDetailLoading(false);
+    }
+  }
+
+  /**
+   * 生成商品详情图（设计 17 §13.3.3，v2.1）。
+   *
+   * 只传 `accountId + itemId + prompt`：商品图由**服务端**按 item_id 从本地台账取
+   * （商品图是千帆 CDN 直链，服务商侧取不到；且让前端传 URL 是 SSRF 面）。
+   * 失败信息原样报出 —— 最常见的两种（没配服务商 / 服务商不是图像类）后端给的是
+   * 带 `code` 的可执行提示，吞成「生成失败」会让用户不知道该去配什么。
+   */
+  async function generateDetailImage() {
+    if (!selectedAccountId || !detail) return;
+    setDetailImageGenerating(true);
+    try {
+      const result = await generateProductDetailImage(
+        selectedAccountId,
+        detail.item.item_id,
+        detailImagePrompt.trim()
+      );
+      setDetailImage(result);
+      message.success("商品详情图已生成");
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "生成商品详情图失败");
+    } finally {
+      setDetailImageGenerating(false);
     }
   }
 
@@ -1198,8 +1232,8 @@ export function XhsShopItemsPage() {
             description={
               <Space direction="vertical" size={6}>
                 <Text style={{ fontSize: 13 }}>
-                  商品与千帆数据属于店铺经营侧；v1.32 起下拉不再按账号类型过滤，
-                  所有小红书账号都能选，没绑店铺的账号会在查询时提示先绑定。
+                  商品台账按**小红书账号**隔离；下拉不按账号类型过滤，所有账号都能选。
+                  千帆相关的「同步商品 / 生成笔记」需要该账号自己有可用的千帆登录态。
                 </Text>
                 <Button
                   size="small"
@@ -1216,38 +1250,33 @@ export function XhsShopItemsPage() {
           />
         ) : !bindingLoaded ? (
           <Spin />
-        ) : !prereq.ok ? (
+        ) : arkUnavailable ? (
           /*
-            前置门禁不通过（用户 2026-09-23 上机口径：「只需提示，请在账号信息卡片中
-            扫码登录千帆后再来查看，移除其它错误提示，将校验当前账号下是否存在可用的
-            千帆账号作为前置校验」）。
-
-            一个 `Alert` 说完全部：**不含**旧的三步取 Cookie 说明、**不含**「登录态已失效」
-            独立告警 —— 而且因为下面那个拉列表的 effect 已经按 `prereq.ok` 拦住，
-            这次切换**一个请求都不发**，不会再冒出列表 400 的 toast 与错误块。
+            千帆（ark）会话「确定不可用」时的**一行安静说明**（2026-09-30 起）。
+            ⚠️ **不再拦请求、不再拦页面**（用户口径「查询本地数据库无需校验千帆是否
+            可用」）：下面那个拉列表的 effect 已按 `prereq.ok`（恒 true）放行，本地台账
+            照常展示；这里只提醒「想同步/生成笔记的话得先补登千帆」，并给一个去账号矩阵
+            的入口。`unknown`（未检测/探活无结论）**不进这里** —— DEF-057 红线
+            （没问到 ≠ 不可用），与 `sync-gates.channelUnavailable` 同一把尺子。
           */
           <Alert
-            type="info"
+            type="warning"
             showIcon
-            message="当前账号没有可用的千帆登录态"
+            style={{ marginBottom: 12 }}
+            message="本账号的千帆登录态不可用（不影响查看本地台账）"
             description={
               <Space direction="vertical" size={8}>
                 <Text style={{ fontSize: 13 }}>{QIANFAN_PREREQUISITE_HINT}</Text>
-                <Space size={8} wrap>
-                  <Button
-                    type="primary"
-                    href="/platforms/xhs/accounts"
-                    onClick={(event) => {
-                      event.preventDefault();
-                      window.location.assign("/platforms/xhs/accounts");
-                    }}
-                  >
-                    去「账号矩阵」扫码登录千帆
-                  </Button>
-                  {/* 店铺绑定（账号 ↔ 店铺 1:1）与「千帆令牌」是两件事：扫码只补令牌，
-                      首次接入仍需在这里绑一次店。入口保留，但不占提示的主位。 */}
-                  <Button onClick={() => setBindOpen(true)}>绑定千帆（粘贴 Cookie）</Button>
-                </Space>
+                <Button
+                  size="small"
+                  href="/platforms/xhs/accounts"
+                  onClick={(event) => {
+                    event.preventDefault();
+                    window.location.assign("/platforms/xhs/accounts");
+                  }}
+                >
+                  去「账号矩阵」扫码登录千帆
+                </Button>
               </Space>
             }
           />
@@ -1508,7 +1537,7 @@ export function XhsShopItemsPage() {
               }}
             />
           ) : (
-            <Empty description={binding?.bound ? "点「搜索」拉取商品列表" : "绑定千帆后可查询商品"} />
+            <Empty description={bindingLoaded ? "点「搜索」拉取商品列表" : "正在加载账号信息"} />
           )}
           {data && (
             <Descriptions size="small" column={4} style={{ marginTop: 8 }}>
@@ -1630,6 +1659,52 @@ export function XhsShopItemsPage() {
               </div>
             )}
 
+            {/* 生成商品详情图（设计 17 §13.3.3，v2.1）—— 「商品列表 → 商品详情 → 生成商品详情图」
+                这条链路的界面入口。出图走 generate_product_detail_image 业务点（在「模型配置页」
+                单独挂服务商，与「生成配图」分开）。 */}
+            <div>
+              <Text strong style={{ fontSize: 13 }}>
+                生成商品详情图
+              </Text>
+              <Space direction="vertical" size={8} style={{ width: "100%", marginTop: 6 }}>
+                <Space.Compact style={{ width: "100%" }}>
+                  <Input
+                    value={detailImagePrompt}
+                    onChange={(e) => setDetailImagePrompt(e.target.value)}
+                    placeholder="补充要求（可留空，留空则按商品标题与规格自动拼提示词）"
+                    disabled={detailImageGenerating}
+                    maxLength={2000}
+                  />
+                  <Button
+                    type="primary"
+                    loading={detailImageGenerating}
+                    disabled={detail.images.length === 0}
+                    onClick={() => void generateDetailImage()}
+                  >
+                    生成
+                  </Button>
+                </Space.Compact>
+                {detail.images.length === 0 && (
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    这个商品还没同步到图片，先执行「同步商品」补齐图集（没有商品图就没有参考图，
+                    不会凭空生成一张）。
+                  </Text>
+                )}
+                {detailImage && (
+                  <Space direction="vertical" size={4}>
+                    <Image
+                      src={detailImage.url || detailImage.asset.local_path}
+                      width={160}
+                      style={{ objectFit: "cover", borderRadius: 4 }}
+                    />
+                    <Text type="secondary" style={{ fontSize: 11 }}>
+                      模型 {detailImage.asset.model_name || "-"} · 已存入素材库（#{detailImage.asset.id}）
+                    </Text>
+                  </Space>
+                )}
+              </Space>
+            </div>
+
             <div>
               <Text strong style={{ fontSize: 13 }}>
                 规格详情
@@ -1691,31 +1766,13 @@ export function XhsShopItemsPage() {
         ) : null}
       </Modal>
 
-      <Modal
-        open={bindOpen}
-        title="绑定千帆商家后台（商品列表来源）"
-        okText="绑定"
-        cancelText="取消"
-        confirmLoading={binding_}
-        onOk={() => void handleBind()}
-        onCancel={() => setBindOpen(false)}
-      >
-        <Space direction="vertical" size={10} style={{ width: "100%" }}>
-          <Text style={{ fontSize: 13 }}>
-            要的是千帆自己的登录态：登录 https://ark.xiaohongshu.com/ → F12 → Network →
-            任一请求 → 复制 Cookie，粘贴到下面（须含 access-token-ark.xiaohongshu.com）。
-          </Text>
-          <Input.TextArea
-            rows={5}
-            value={bindCookie}
-            placeholder="粘贴千帆 Cookie（形如 a1=...; access-token-ark.xiaohongshu.com=...）"
-            onChange={(event) => setBindCookie(event.target.value)}
-          />
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            Cookie 会加密落库，仅用于读取你自己店铺的商品与笔记挂链数据；只读、不做任何写操作。
-          </Text>
-        </Space>
-      </Modal>
+      {/* ⚠️ 「绑定千帆商家后台」弹窗已整块移除（ADR-021，2026-09-30）：
+          `POST /xhs/qianfan/bind` 退场（后端 410 `QIANFAN_BINDING_REMOVED`），
+          千帆能力改由「该账号自己的 ark 登录态」决定 —— 入口在账号矩阵。
+          被取代的原弹窗（保留备查）：
+            <Modal open={bindOpen} title="绑定千帆商家后台（商品列表来源）" …>
+              … 粘贴 Cookie（须含 access-token-ark.xiaohongshu.com）…
+            </Modal> */}
 
       {/*
         商品 → 挂链笔记弹窗（设计 13 §31.6）：**关系表源**（note_goods join notes），

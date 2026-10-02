@@ -13,7 +13,9 @@
  * 4. SKU 明细缺值渲染 `-`，**不渲染 0**（「读不到」≠「读到 0」）；
  * 5. **只有「上架时间」可排、且默认不排序**（见 `SORT_FIELD_BY_COLUMN` / `resolveSort`）：
  *    进来表头没有箭头，点一下才由**后端**重排（升 → 降 → 取消三级）；
- * 6. **千帆可用性是前置门禁**（见 `ledgerPrerequisite`）：不通过就一个提示、不发请求；
+ * 6. **本页是纯本地台账读，无前置门禁**（见 `ledgerPrerequisite`，2026-09-30 用户
+ *    口径「商品列表页查询的本地数据库无需校验千帆是否可用」）：ark 会话失效时照样
+ *    可看台账，`ok` 恒为 true；
  * 7. **批量删除只删本地台账行**（见 `batchDeleteBlock` / `batchDeleteHint`）：
  *    平台商品不动、关系行不动，两个连带后果写进确认框。
  */
@@ -232,35 +234,43 @@ export type LedgerPrerequisite = {
   /** 通过 ⇒ 才允许发商品列表请求（不通过时一个请求都不发）。 */
   ok: boolean;
   /**
-   * 不通过的原因：`unbound` = 没有绑店铺；`ark_unavailable` = 千帆登录态确定不可用。
+   * 不通过的原因：`unbound` = 没有绑店铺（**ADR-021 后不再产生**，保留取值给历史
+   * 调用方与行为脚本）；`ark_unavailable` = 千帆登录态确定不可用。
    * **不用于界面文案**（界面只有 `QIANFAN_PREREQUISITE_HINT` 一句）。
    */
   reason: "" | "unbound" | "ark_unavailable";
 };
 
 /**
- * 商品台账的**前置校验**（用户 2026-09-23 上机口径：「将校验当前账号下是否存在
- * 可用的千帆账号作为前置校验」）。
+ * 商品台账的**前置校验**。
  *
- * 两个条件缺一不可：
- * 1. **已绑店铺**（`binding.bound`）—— 没有店铺就没有台账（后端 `/items` 也会 400）；
- * 2. **千帆登录态不是「确定不可用」**—— 判据与账号卡片、同步按钮**同一个**
- *    `channelUnavailable`（ark 通道）：`unknown`（未检测 / 探活没结论）**放行**，
- *    那是 DEF-057 红线（没问到 ≠ 不可用）。
+ * ⚠️ **2026-09-30 用户口径：「商品列表（千帆）页查询的本地数据库，无需校验千帆
+ * 是否可用」** —— 本页是**纯本地台账读**（`/items`、`/item-detail`、
+ * `/note-cleanup/candidates`、`/item-notes` 零平台请求，后端对应端点也**已去门禁**），
+ * 所以 `ark` 会话可用性**不再是**这一页的前置条件：ark 失效时照样能看台账，
+ * 只是「同步商品」这类打平台的动作会被后端结构化拦下。
  *
- * 为什么要在前端先拦一道：不拦的话，切到一个没绑千帆的账号时会**连着冒三种提示**
- * （列表 400 的 toast + 页面错误块 + 未绑定说明），用户看到的是「乱七八糟的异常」。
- * 拦在这里 ⇒ 只剩一句话（`QIANFAN_PREREQUISITE_HINT`），且**零请求**。
+ * ⇒ `ok` **恒为 true**（零门禁）；`ark_unavailable` 只作为**给调用方自由使用的
+ * 附加信息**（页面据此在 ark 失效时加一行说明、或禁用「同步商品」按钮），
+ * 但它**不拦列表请求**。
+ *
+ * 保留下来的理由（不删函数、不删类型）：页面与 `shop_items_view.cjs` 都按
+ * 「一个前置校验函数决定要不要发请求」的形态接线，签名/取值保持稳定比删掉更省事，
+ * 且将来若再出现真正需要前置拦截的条件，改动点仍然只有一个。
+ *
+ * 演进记录（原句保留）：
+ * * *「用户 2026-09-23 上机口径：「将校验当前账号下是否存在可用的千帆账号作为
+ *   前置校验」」* —— **被 2026-09-30 口径取代**（本地读免门禁）。
+ * * *「1. **已绑店铺**（`binding.bound`）—— 没有店铺就没有台账（后端 `/items`
+ *   也会 400）」* —— **被 ADR-021 取代**：店铺实体与绑定关系已退场，
+ *   `bound` 这个入参本身也不存在了。
  */
 export function ledgerPrerequisite(
-  bound: boolean | undefined,
   channels: XhsLoginChannels | undefined
 ): LedgerPrerequisite {
-  if (!bound) {
-    return { ok: false, reason: "unbound" };
-  }
+  // 保留原因分类：给页面/测试一个可读信号，但**不影响 `ok`**。
   if (channelUnavailable(channels, "ark")) {
-    return { ok: false, reason: "ark_unavailable" };
+    return { ok: true, reason: "ark_unavailable" };
   }
   return { ok: true, reason: "" };
 }
