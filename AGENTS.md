@@ -38,6 +38,11 @@
 
 # 前端类型检查（tsconfig.json 已开 incremental + tsBuildInfoFile：二次编译 ~10s）
 cd frontend && node node_modules/typescript/bin/tsc --noEmit
+# 前端单测（Vitest，2026-10-02 引入；当前仅覆盖纯逻辑模块，environment=node）
+#   用例：src/**/*.test.ts（现：pages/llm-gateway/gateway-tree.test.ts 服务商父子树 9 条）
+#   ⚠️ tsconfig `include: ["src"]` ⇒ 测试文件也参与 `tsc`，`npm run build` 会因测试类型错而 FAIL
+#      （视为守卫生效）；测试文件不进产物（无人 import）。测试须显式 import vitest，勿依赖 globals。
+cd frontend && npm test            # = vitest run；监听态用 npm run test:watch
 # vite build **仅在「8000 吃产物 / 发布」前跑**；日常开发走 5173 热更新，不必 build
 # cd frontend && node node_modules/vite/bin/vite.js build
 
