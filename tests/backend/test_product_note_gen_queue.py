@@ -36,7 +36,7 @@ from backend.app.adapters.xhs.qianfan_api_adapter import get_qianfan_api_adapter
 from backend.app.core.database import Base, get_db
 from backend.app.main import app
 from backend.app.models import Note, NoteAsset, PlatformAccount, ShopProduct, Task, User
-from backend.app.models.shop import NoteGoods, Shop
+from backend.app.models.shop import NoteGoods
 from backend.app.models.note import NoteTopic, Topic
 from backend.app.services import note_queue_service as nqs
 from backend.app.services import product_note_gen_service as pngs
@@ -212,14 +212,14 @@ def _bind(db_factory, account_id: int, *, with_ark: bool = True, seller_id: str 
 
 
 def _add_product(db_factory, account_id: int, item_id: str, title: str = "测试桌布") -> None:
-    """落一行台账商品（`shop_id_fk` 取账号绑定的店）。"""
+    """落一行台账商品（ADR-021：归属键 = 账号 `platform_account_id`）。"""
     db = db_factory()
     try:
         account = db.get(PlatformAccount, account_id)
         db.add(
             ShopProduct(
                 user_id=account.user_id,
-                shop_id_fk=account.shop_id_fk,
+                platform_account_id=account_id,
                 item_id=item_id,
                 item_title=title,
                 price="5440",
@@ -367,10 +367,10 @@ def test_generate_save_gate_failures_never_touch_the_platform(gen_env, db_factor
         headers=headers,
     )
     assert response.status_code == 400
-    assert response.json()["detail"]["code"] == "QIANFAN_BINDING_REQUIRED"
+    assert response.json()["detail"]["code"] == "ARK_SESSION_REQUIRED"
     assert FakeGenAdapter.constructed == 0, "门禁失败时一次适配器都不该造"
 
-    # 绑店但无 ark 令牌 ⇒ 400
+    # 绑店但无 ark 令牌 ⇒ 400（ADR-021：无令牌 = 无 ark 会话，与上一档同码）
     _bind(db_factory, account_id, with_ark=False, seller_id="SELLER-NO-ARK")
     response = client.post(
         "/api/xhs/product-notes/generate-save",
@@ -378,7 +378,7 @@ def test_generate_save_gate_failures_never_touch_the_platform(gen_env, db_factor
         headers=headers,
     )
     assert response.status_code == 400
-    assert response.json()["detail"]["code"] == "QIANFAN_CREDENTIAL_MISSING"
+    assert response.json()["detail"]["code"] == "ARK_SESSION_REQUIRED"
     assert FakeGenAdapter.constructed == 0
 
     # 台账没这个商品 ⇒ 404

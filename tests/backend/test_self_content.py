@@ -44,12 +44,12 @@ from backend.app.services.account_service import (
     parse_channel_envelope,
 )
 from backend.app.services.shop_binding_service import (
+    has_ark_session,
     set_shop_state,
-    shop_for_account,
 )
 from backend.app.services.shop_goods_service import existing_rows, store_entry
 from backend.app.core.time import shanghai_now
-from tests.backend.cookie_fixtures import cookie_version
+from tests.backend.cookie_fixtures import cookie_version, give_ark_cookies
 
 client = TestClient(app)
 
@@ -453,20 +453,27 @@ def _qianfan_entry(note_id: str, item_id: str, title: str, variant: str = "") ->
 
 
 def _bind_shop(headers, account_id: int, shop_name: str = "观隅好物的店", total: int = 2, seed: bool = True):
-    """走真实端点完成绑定；挂链映射行改**直写存储层**播种。
+    """给账号开通千帆能力（ADR-021：不再有「绑店」动作）；映射行**直写存储层**播种。
 
-    v1.32 起 `POST /xhs/qianfan/sync-goods` 已移除（设计 13 §30.2）⇒ 测试不再
+    原实现打 `POST /xhs/qianfan/bind`，该端点已随店铺实体退场（返回 `410`
+    `QIANFAN_BINDING_REMOVED`）。现在等价动作是**给账号导入千帆（ark）登录态**
+    —— 凭据操作，不是绑定。`shop_name` 参数保留只为不改调用方（真值现在取自
+    账号自身 `nickname`，本夹具据此回写以保证断言仍成立）。
+
+    v1.32 起 `/xhs/qianfan/sync-goods` 已移除（设计 13 §30.2）⇒ 测试不再
     经 HTTP 播种映射，改为直接调 `store_entry`（按需补齐 / 笔记同步**同一个**
     存储实现，语义不变）。`FakeQianfanAdapter.pages` 即种子的页面来源，
     调用前设置好即可；`total` 写进 `shop_state.goods_note_total`（覆盖率分母）。
     """
-    bound = client.post(
-        "/api/xhs/qianfan/bind",
-        json={"platform_account_id": account_id, "cookie_string": "a1=x; access-token-ark.xiaohongshu.com=y"},
-        headers=headers,
-    )
-    assert bound.status_code == 200, bound.text
-    assert bound.json()["shop_name"] == shop_name
+    db0 = _session()
+    try:
+        account0 = db0.get(PlatformAccount, account_id)
+        assert account0 is not None
+        account0.nickname = shop_name
+        give_ark_cookies(db0, account0)
+        db0.commit()
+    finally:
+        db0.close()
     FakeQianfanAdapter.total = total
     if seed:
         db = _session()
@@ -484,7 +491,8 @@ def _bind_shop(headers, account_id: int, shop_name: str = "观隅好物的店", 
             db.commit()
         finally:
             db.close()
-    return bound.json()
+    #: 返回形状对齐旧端点响应：调用方只读 `shop_name`（账号昵称即真值）。
+    return {"shop_name": shop_name}
 
 
 #: 测试**统一使用的账号**：真机那个「观隅好物」（小红书号 293066917）。
@@ -1304,11 +1312,12 @@ def test_note_detail_returns_the_same_goods_the_list_carries(tmp_path):
         _bind_shop(headers, account_id)
         # 让千帆映射的 note_id 对齐 www 列表里的那条笔记（现实里本来就是同一个 note_id）。
         db = _session()
-        # 2026-09-22：`shop_account_bindings` 整表移除，映射的归属键是账号自己
-        # （`platform_account_id`）——「账号有没有店铺」改问 `shop_for_account`。
+        # 2026-09-30（ADR-021）：`shops` 实体与「绑店」动作一并退场 —— 「这个账号
+        # 有没有千帆能力」现在**只问令牌**（`has_ark_session`），不再问店铺关系
+        # （隔离键 ≠ 能力判据；账号 9 Bug 的根因就是把两者混为一谈）。
         owner = db.get(PlatformAccount, account_id)
         assert owner is not None
-        assert shop_for_account(db, account_id) is not None
+        assert has_ark_session(db, account_id), "夹具给该账号导入了 ark 会话"
         # `shop_note_goods.user_id` 是 NOT NULL（归属随账号走）：夹具必须按真实写入路径给值，
         # 少这一列会撞约束红在这里，而不是红在被测代码上。
         db.add(
@@ -1728,47 +1737,33 @@ def test_sync_goods_endpoint_is_gone(tmp_path):
         _teardown()
 
 
-def test_bind_requires_owned_account_and_hides_sensitive_fields(tmp_path):
-    """绑定同样是归属校验过的端点，且响应**只回白名单字段**。"""
-    headers, intruder_headers, ids = _setup(tmp_path)
-    try:
-        response = client.post(
-            "/api/xhs/qianfan/bind",
-            json={"platform_account_id": ids["creator"], "cookie_string": "a1=x; access-token-ark.xiaohongshu.com=y"},
-            headers=intruder_headers,
-        )
-        assert response.status_code == 404
+def test_retired_binding_endpoints_return_410(tmp_path):
+    """**已退场端点**（ADR-021 / 设计 18）：`bind` 与 `unbind` 都回 `410`，且说明补救路径。
 
-        ok = client.post(
-            "/api/xhs/qianfan/bind",
-            json={"platform_account_id": ids["creator"], "cookie_string": "a1=x; access-token-ark.xiaohongshu.com=y"},
-            headers=headers,
-        )
-        assert ok.status_code == 200
-        body = ok.text
-        assert "user_email" not in body and "alipay_smid" not in body and "config_values" not in body
-    finally:
-        _teardown()
+    这两条路径**刻意保留**（不是 `404`）：删掉的话老前端只会拿到「找不到」，
+    要排查很久；显式 `410` + 结构化 `code` 让调用方一眼知道「这个动作已经没有了、
+    该去账号矩阵导入千帆登录态」。`unbind` 同理 —— 解绑动作随店铺关系一并消失。
 
-
-def test_unbind_removes_binding_and_mapping(tmp_path):
-    """解除绑定必须连本地映射一起清掉（凭据与衍生数据都不留）。"""
+    被取代的旧用例保留说明：
+    * `test_bind_requires_owned_account_and_hides_sensitive_fields` —— 断言「绑定要过归属
+      校验 + 响应字段白名单」。归属校验本身仍由 `_owned_account` 统一承担（其余端点照测），
+      但**绑定这个动作没有了**，故只回 `410`，白名单断言已无对象。
+    * `test_unbind_removes_binding_and_mapping` —— 断言「解绑连本地映射一起清」。
+      映射现在的归属是账号（`platform_account_id`），清理由**删账号**触发，走账号删除链路，
+      不再是「解绑」这个独立动作。
+    """
     headers, _, ids = _setup(tmp_path)
     try:
-        _bind_shop(headers, ids["creator"])
-        removed = client.post(
-            "/api/xhs/qianfan/unbind", json={"platform_account_id": ids["creator"]}, headers=headers
-        ).json()
-        assert removed["bound"] is False and removed["removed"] == 1
-
-        payload = client.post(
-            "/api/xhs/pc/users/notes", json={"account_id": ids["creator"]}, headers=headers
-        ).json()
-        # 解绑后千帆的商品与指标都不再出现（第二条的 `G-1` 是创作者列表自带的，
-        # 与千帆无关，因此仍在）。
-        assert payload["items"][0]["goods"] is None
-        assert payload["items"][0].get("shop") in (None, {})
-        assert payload["goods_source"]["bound"] is False
+        for path in ("/api/xhs/qianfan/bind", "/api/xhs/qianfan/unbind"):
+            response = client.post(
+                path,
+                json={"platform_account_id": ids["creator"]},
+                headers=headers,
+            )
+            assert response.status_code == 410, f"{path} 必须回 410（不是 404/200）"
+            detail = response.json()["detail"]
+            assert detail["code"] == "QIANFAN_BINDING_REMOVED", detail
+            assert "ADR-021" in detail["message"], detail
     finally:
         _teardown()
 

@@ -57,27 +57,38 @@ def bind_shop_account(
 ):
     """把账号与一个千帆店铺关联起来，并给它一份 `ark` 令牌（= 走完 `POST /bind`）。
 
-    2026-09-22 `shop_account_bindings` 整表移除后，夹具从「写一行」变成「写三处」：
+    ⚠️ **ADR-021（2026-09-30）起 `shops` 表已退场** —— 本夹具随之收敛为「写两处」：
 
     | 写什么 | 写哪 |
     |---|---|
-    | 账号 ↔ 店铺**关系** | `platform_accounts.shop_id_fk`（1:1，部分唯一索引） |
+    | 千帆**店铺标识** | `platform_accounts.seller_id`（归属列，**不再是实体关系**） |
     | 千帆**凭据** | `account_cookie_versions` 的 `ark` 通道 |
     | **状态与游标** | `platform_accounts.shop_state`（只经 `set_shop_state`） |
 
+    被取代的旧实现原句保留：*「2026-09-22 `shop_account_bindings` 整表移除后，
+    夹具从『写一行』变成『写三处』……账号 ↔ 店铺**关系** 写 `platform_accounts.shop_id_fk`」*
+    —— 该列已于 ADR-021 摘除，故不再写；`Shop` 行也不再建。
+
+    ⚠️ **归属列 ≠ 能力判据**（ADR-021 核心不变量，账号 9 Bug 的根因）：
+    `seller_id` 只回答「这个账号属于哪个千帆店铺」，**不回答「能不能调千帆」** ——
+    后者唯一判据是 `account_cookie_versions` 里的 `ark` 令牌（`has_ark_session`）。
+    所以 `cookies_text=""` 时依然写 `seller_id`，只是没有票。
+
     **夹具必须与生产形状一致**（「测试 = 可执行口径」）：不然「看起来绑了店、
     千帆却取不到票」这类红会指错方向。`**state` 透传给 `set_shop_state`
-    （如 `goods_note_total=3`、`goods_cursor_ms=1`）。返回建好的 `Shop` 行。
+    （如 `goods_note_total=3`、`goods_cursor_ms=1`）。
+
+    返回 `account`（旧实现返回 `Shop` 行；店铺实体退场后**没有别的东西可返**，
+    调用点也不消费返回值 —— 实测只用于 `db.add` 之后的链路）。
     """
-    from backend.app.models.shop import Shop
     from backend.app.services.shop_binding_service import set_shop_state
 
-    shop = Shop(user_id=account.user_id, seller_id=seller_id, shop_name=shop_name)
-    db.add(shop)
-    db.flush()
-    account.shop_id_fk = shop.id
+    account.seller_id = seller_id
+    if shop_name:
+        # 账号昵称 ≠ 店铺名的历史数据里两者同值居多；此处只在空时补，不覆盖真昵称。
+        account.nickname = account.nickname or shop_name
     set_shop_state(account, status=shop_status, **state)
     if cookies_text:
         give_ark_cookies(db, account, cookies_text)
     db.flush()
-    return shop
+    return account

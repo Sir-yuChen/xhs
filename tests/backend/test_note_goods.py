@@ -14,7 +14,8 @@
    关系行**照样落**（旧口径「任一侧缺失 ⇒ 跳过」已废）；唯一跳过条件是条目里
    **取不到 `item_id`**；
 4. **只增不删**：二次解析时挂载变少 ⇒ 旧关系行仍在（§23：同步链路不做删除维度）；
-5. **两条调用点都覆盖**：creator 源（证据缓存路径）与 ark 源（条目自带 goods_infos）；
+5. **两条调用点都覆盖**（§44 后分属两个任务）：creator 源（证据缓存路径，**普通笔记任务**）
+   与 ark 源（条目自带 `goods_infos`，**商品笔记任务**）；
 6. **零平台请求**：解析过程只读缓存 / 调用方给的条目，不打平台；
 7. **删除链**：笔记被删 ⇒ 指向它的关系行一并删（2026-09-23 用户口径）；
 8. **读取退化**：台账缺行时 `GET /notes` 的 `goods` 只给 `item_id`（标题 / 价格留空）；
@@ -28,7 +29,6 @@ from sqlalchemy.orm import sessionmaker
 
 from backend.app.core.database import Base
 from backend.app.models import Note, NoteGoods, PlatformAccount, ShopProduct, User
-from backend.app.models.shop import ShopNoteGoods
 from backend.app.services import note_sync_service as nss
 from backend.app.services import shop_goods_service as sgs
 from tests.backend import test_note_sync as nsync
@@ -79,9 +79,11 @@ def _add_note(db, account, note_id: str) -> Note:
     return note
 
 
-def _add_product(db, shop, item_id: str, *, user_id: int) -> ShopProduct:
+def _add_product(db, account, item_id: str, *, user_id: int) -> ShopProduct:
+    """台账行按 **ADR-021 后的归属键** 落库：`platform_account_id`（不再是 `shop_id_fk`）。"""
     product = ShopProduct(
-        user_id=user_id, shop_id_fk=shop.id, item_id=item_id, item_title=f"商品 {item_id}"
+        user_id=user_id, platform_account_id=account.id, item_id=item_id,
+        item_title=f"商品 {item_id}",
     )
     db.add(product)
     db.commit()
@@ -244,7 +246,7 @@ def test_link_never_deletes_existing_rows(env):
 
 
 # --------------------------------------------------------------------------- #
-# 5) 端到端：两条笔记源都建关系
+# 5) 端到端：**两个任务各建自己那个源**的关系（2026-09-30 §44）
 # --------------------------------------------------------------------------- #
 @pytest.fixture
 def creator_env(tmp_path, monkeypatch):
@@ -285,13 +287,13 @@ def creator_env(tmp_path, monkeypatch):
     # 预置本地商品（**只**为验证「台账里有的商品能带出标题」，不再是落关系的前提）
     db = SessionLocal()
     try:
-        from backend.app.models.shop import Shop
-
-        shop = db.scalars(select(Shop)).one()
+        accounts = db.scalars(select(PlatformAccount).order_by(PlatformAccount.id)).all()
+        account = accounts[0]
         for item_id in ("ITEM-C-N1", "ITEM-C-N2", "ITEM-ARK-N1"):
             db.add(
                 ShopProduct(
-                    user_id=user_id, shop_id_fk=shop.id, item_id=item_id, item_title=item_id
+                    user_id=user_id, platform_account_id=account.id,
+                    item_id=item_id, item_title=item_id,
                 )
             )
         db.commit()
@@ -301,8 +303,13 @@ def creator_env(tmp_path, monkeypatch):
     nsync._teardown()
 
 
-def test_note_sync_links_goods_from_both_sources(creator_env):
-    """跑一次同步 ⇒ creator 源（证据缓存）与 ark 源（条目自带）的关系都落库。"""
+def test_normal_note_sync_links_only_creator_goods(creator_env):
+    """**普通笔记任务**（`only="creator"`）⇒ 只落 creator 源的挂载商品关系。
+
+    ⚠️ 本用例原名 `test_note_sync_links_goods_from_both_sources`（2026-09-30 前）：
+    那时一次同步会把两个源的关系都落库。拆成两个任务（设计 13 **§44**）后，每条链路
+    **只跑自己那个源** ⇒ ark 的挂载关系归「同步商品笔记」任务（见下一条用例）。
+    """
     _, account_id, user_id, SessionLocal = creator_env
     nsync.FakeQianfanAdapter.list_entries = [nsync._ark_note("ARK-N1")]
 
@@ -315,8 +322,29 @@ def test_note_sync_links_goods_from_both_sources(creator_env):
         # creator 源：C-N1/C-N2 的挂载商品来自按 note_ids 的现查（进证据缓存）
         assert ("C-N1", "ITEM-C-N1") in relations
         assert ("C-N2", "ITEM-C-N2") in relations
+        # ark 源**不参与**本次任务 ⇒ 它带来的关系一行都不落
+        assert not [row for row in relations if row[0].startswith("ARK-")]
+    finally:
+        db.close()
+
+
+def test_goods_note_sync_links_only_ark_goods(creator_env):
+    """**商品笔记任务**（`only="ark"`）⇒ 只落 ark 条目 inline 给出的挂载商品关系（§44）。"""
+    _, account_id, user_id, SessionLocal = creator_env
+    nsync.FakeQianfanAdapter.list_entries = [nsync._ark_note("ARK-N1")]
+
+    result = nss.run_note_sync(
+        account_id, user_id=user_id, max_pages=1, only=nss.SOURCE_ARK
+    )
+
+    assert result["status"] == "done", result
+    db = SessionLocal()
+    try:
+        relations = _relations(db)
         # ark 源：ARK-N1 的挂载商品随条目 inline 给出
         assert ("ARK-N1", "ITEM-ARK-N1") in relations
+        # creator 源**不参与**本次任务 ⇒ 它带来的关系一行都不落
+        assert not [row for row in relations if row[0].startswith("C-")]
     finally:
         db.close()
 

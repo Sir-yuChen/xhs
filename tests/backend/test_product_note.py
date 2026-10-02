@@ -24,7 +24,29 @@ from backend.app.api.ai import get_text_ai_client
 from backend.app.api.platforms.xhs.qianfan import get_qianfan_api_adapter_factory as _qf_dep
 from backend.app.core.database import Base, get_db
 from backend.app.main import app
-from backend.app.models import AiDraft, ModelConfig, PlatformAccount, PublishJob, Task, User
+from backend.app.models import AiDraft, PlatformAccount, PublishJob, Task, User
+from backend.app.models.llm_gateway import LlmBusinessProvider, LlmGatewayConfig
+class _ModelConfigStub:
+    """`ModelConfig` 的鸭子类型替身（v2.0：ORM 类已随 model_configs 表退场）。
+
+    服务层只按属性名读取（`user_id` / `provider_key` / `base_url` /
+    `model_config_id`），v2.0 的真实载体是 `ResolvedModelContext`。
+    """
+
+    def __init__(self, *, user_id=1, model_type="text", provider="p", name="m",
+                 base_url="", provider_key="", model_config_id=None, **kw):
+        self.user_id = user_id
+        self.model_type = model_type
+        self.provider = provider
+        self.name = name
+        self.base_url = base_url
+        self.provider_key = provider_key
+        self.model_config_id = model_config_id
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+
+from backend.app.services.business_provider_keys import BUSINESS_KEY_GENERATE_NOTE
 from backend.app.services.product_note_service import (
     ABSOLUTE_TERMS,
     BANNED_TERMS,
@@ -91,7 +113,7 @@ class FakeTextClient:
     def __init__(self) -> None:
         self.calls = 0
 
-    def generate_product_note(self, *, model_config, api_key, product, instruction=""):
+    def generate_product_note(self, *, model_config, api_key, product, instruction="", platform="", function=""):
         self.calls += 1
         from backend.app.services.product_note_service import parse_generated_payload
 
@@ -169,16 +191,31 @@ def _setup(tmp_path):
             user_id=user_id, platform="xhs", sub_type="creator", nickname="观隅好物", status="active"
         )
         db.add(account)
+        # v2.0（设计 17 §13.2）：业务调用改走「平台 × 业务点 → 服务商」映射，
+        # 一期 `model_configs` 已退场。这里建一条**服务商 + 映射**，
+        # 让「已配置」的路径与改造后的调用链一致（映射缺失 ⇒ 400 未配置）。
         db.add(
-            ModelConfig(
+            LlmGatewayConfig(
                 user_id=user_id,
-                name="fake",
-                model_type="text",
-                provider="openai-compatible",
-                model_name="fake-model",
+                name="fake-provider",
+                provider_key="FAKE-KEY1",
+                platform="xhs",
                 base_url="http://127.0.0.1:9",
-                encrypted_api_key="",
-                is_default=True,
+                access_token="",
+                default_model="fake-model",
+                models_json="[]",
+                enabled=True,
+                model_type="text",
+                healthy=True,
+            )
+        )
+        db.add(
+            LlmBusinessProvider(
+                user_id=user_id,
+                platform="xhs",
+                business_key=BUSINESS_KEY_GENERATE_NOTE.key,
+                provider_key="FAKE-KEY1",
+                enabled=True,
             )
         )
         db.commit()
@@ -409,7 +446,7 @@ def test_endpoint_requires_binding_and_item(tmp_path):
             headers=headers,
         )
         assert response.status_code == 400, response.text
-        assert response.json()["detail"]["code"] == "QIANFAN_BINDING_REQUIRED"
+        assert response.json()["detail"]["code"] == "ARK_SESSION_REQUIRED"
 
         _bind(SessionLocal, account_id)
         # 商品不属于本店铺 → 404（「写错商品」是最严重的错误类型）
@@ -485,7 +522,8 @@ def test_endpoint_requires_a_configured_text_model(tmp_path):
         _bind(SessionLocal, account_id)
         db = SessionLocal()
         try:
-            for row in db.scalars(select(ModelConfig)).all():
+            # v2.0：判据是「业务点没配服务商」，故删映射（而非已退场的 model_configs）
+            for row in db.scalars(select(LlmBusinessProvider)).all():
                 db.delete(row)
             db.commit()
         finally:

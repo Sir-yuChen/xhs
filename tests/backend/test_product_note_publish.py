@@ -37,7 +37,7 @@ from backend.app.api.platforms.xhs.qianfan import get_qianfan_api_adapter_factor
 from backend.app.core.database import Base, get_db
 from backend.app.main import app
 from backend.app.models import Note, NoteAsset, NoteTopic, PlatformAccount, ShopProduct, Task, Topic, User
-from backend.app.models.shop import NoteGoods, Shop
+from backend.app.models.shop import NoteGoods
 from backend.app.services import note_publish_service, product_note_gen_service
 from tests.backend.cookie_fixtures import bind_shop_account
 
@@ -304,7 +304,20 @@ def _bind_with_product(
             db, account, cookies_text=ARK_COOKIES if with_ark else None, seller_id=seller_id
         )
         db.commit()
-        shop_pk = account.shop_id_fk
+        #: ADR-021：台账归属键 = 账号（店铺实体已退场）。
+        shop_pk = account.id
+        #: 唯一键是 `(platform_account_id, item_id)`。本夹具在同一个用例里可能被多次调用
+        #: `(platform_account_id, item_id)`。本夹具在同一个用例里可能被多次调用
+        #: （依次演「无 ark → 有 ark」两档门禁）⇒ 商品行**已存在就复用**，
+        #: 不重复 INSERT（夹具的债在夹具侧还，DEF-082）。
+        existing = db.scalar(
+            select(ShopProduct).where(
+                ShopProduct.platform_account_id == shop_pk,
+                ShopProduct.item_id == ITEM_ID,
+            )
+        )
+        if existing is not None:
+            return shop_pk, existing.id
         image_urls = [f"http://qimg.example/{chr(ord('a') + i)}.jpg" for i in range(image_count)]
         raw: dict = {
             "images": [
@@ -315,7 +328,7 @@ def _bind_with_product(
             raw["video"] = {"link": video_url, "width": 720, "height": 1280}
         product = ShopProduct(
             user_id=user_id,
-            shop_id_fk=shop_pk,
+            platform_account_id=shop_pk,
             item_id=ITEM_ID,
             item_title="测试桌布",
             price="5440",
@@ -401,10 +414,10 @@ def test_generate_requires_binding_and_token(tmp_path):
             headers=headers,
         )
         assert resp.status_code == 400
-        assert resp.json()["detail"]["code"] == "QIANFAN_BINDING_REQUIRED"
+        assert resp.json()["detail"]["code"] == "ARK_SESSION_REQUIRED"
         assert FakePublishAdapter.calls == []
 
-        # 绑店但无 ark 令牌 ⇒ 400 CREDENTIAL_MISSING
+        # 绑店但无 ark 令牌 ⇒ 400（ADR-021：无令牌 = 无 ark 会话，与上一档同码）
         _bind_with_product(db_factory, account_id, with_ark=False, seller_id="SELLER-NO-ARK")
         resp = client.post(
             "/api/xhs/product-notes/generate-save",
@@ -412,7 +425,7 @@ def test_generate_requires_binding_and_token(tmp_path):
             headers=headers,
         )
         assert resp.status_code == 400
-        assert resp.json()["detail"]["code"] == "QIANFAN_CREDENTIAL_MISSING"
+        assert resp.json()["detail"]["code"] == "ARK_SESSION_REQUIRED"
         assert FakePublishAdapter.calls == []
 
         # 台账没这个商品 ⇒ 404
@@ -467,14 +480,12 @@ def test_batch_generate_isolates_failures(tmp_path, monkeypatch):
         _patch_gen_worker(monkeypatch, db_factory)
         db = db_factory()
         try:
-            from backend.app.services.shop_binding_service import account_shop_id
-
-            shop_pk = account_shop_id(db, account_id)
+            shop_pk = account_id
             # 第二件商品存在，第三件不存在（404 路径）
             db.add(
                 ShopProduct(
                     user_id=1,
-                    shop_id_fk=shop_pk,
+                    platform_account_id=shop_pk,
                     item_id="ITEM-2",
                     item_title="第二件",
                     images_json=json.dumps(["http://qimg.example/d.jpg"]),

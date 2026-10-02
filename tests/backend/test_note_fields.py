@@ -29,7 +29,6 @@ from backend.app.api.platforms.xhs.crawl import _save_normalized_notes
 from backend.app.core.database import Base, get_db
 from backend.app.main import app
 from backend.app.models import Note, NoteGoods, NoteTopic, PlatformAccount, ShopProduct, Topic, User
-from backend.app.models.shop import Shop
 from backend.app.services import note_sync_service as nss
 from backend.app.services import note_topic_service as nts
 from tests.backend.cookie_fixtures import cookie_version
@@ -232,8 +231,7 @@ def api_env(tmp_path):
         db = SessionLocal()
         try:
             user, account = _seed_account(db)
-            shop = Shop(user_id=user.id, seller_id="SELLER-1", shop_name="店")
-            db.add(shop)
+            account.seller_id = "SELLER-1"
             db.flush()
             note = Note(
                 platform_account_id=account.id, user_id=user.id,
@@ -247,7 +245,7 @@ def api_env(tmp_path):
             db.commit()
             for item_id, title in (("ITEM-1", "商品一"), ("ITEM-2", "商品二")):
                 product = ShopProduct(
-                    user_id=user.id, shop_id_fk=shop.id, item_id=item_id,
+                    user_id=user.id, platform_account_id=account.id, item_id=item_id,
                     item_title=title, price="1999", images_json='["https://img/1.jpg"]',
                 )
                 db.add(product)

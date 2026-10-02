@@ -1,0 +1,248 @@
+"""M2：`resolve_business_provider` —— 「平台 × 业务点 → 服务商」映射解析
+（设计 17 §13.2.3 / §13.2.4，v2.0）。
+
+本文件钉死四条契约，对应卡内要求「四种失败各有实测，都报可读错且不回落」：
+
+1. **映射不存在** ⇒ `LLM_BUSINESS_PROVIDER_NOT_CONFIGURED`（§13.2.3 定稿：
+   **不回落**到其它服务商或其它业务点的映射 —— 回落 = 用错服务商还不报错）。
+2. **类型不匹配** ⇒ `LLM_BUSINESS_PROVIDER_TYPE_MISMATCH`（§13.2.1a：
+   业务点的 `kind` 必须等于服务商的 `model_type`；提前拦，否则会拿文本模型
+   打 `/images/generations`，报一个看不懂的上游错）。
+3. **服务商不存在** ⇒ `LLM_PROVIDER_NOT_FOUND`（`provider_key` 指向的行没了）。
+4. **服务商停用** ⇒ `LLM_PROVIDER_DISABLED`（D4：**不回落**到其它服务商）。
+
+外加两条正路径断言（命中文本 / 命中图像）与一条跨用户隔离。
+
+⚠️ 直接测**服务层函数**（不经 HTTP）：这是「唯一入口」契约，端点层的映射
+（`api/ai.py::_business_model_context` → 400 + 结构化 code）由 `test_api.py`
+的 AI 用例覆盖，这里只管解析本身的语义。
+"""
+
+from __future__ import annotations
+
+import pytest
+from sqlalchemy.orm import Session
+
+from backend.app.core.security import encrypt_text
+from backend.app.models import LlmBusinessProvider, LlmGatewayConfig, User
+from backend.app.services import llm_gateway_client
+from backend.app.services.business_provider_keys import (
+    BUSINESS_KEY_GENERATE_COVER,
+    BUSINESS_KEY_GENERATE_NOTE,
+)
+from backend.app.services.llm_gateway_client import (
+    BusinessProviderNotConfiguredError,
+    BusinessProviderTypeMismatchError,
+    LLMGatewayError,
+    ProviderDisabledError,
+    ProviderNotFoundError,
+)
+
+
+def _seed_user(db: Session, username: str = "bp_tester") -> User:
+    user = User(username=username, password_hash="x")
+    db.add(user)
+    db.flush()
+    return user
+
+
+def _seed_gateway(
+    db: Session,
+    user: User,
+    *,
+    provider_key: str = "BP-TEXT",
+    model_type: str = "text",
+    enabled: bool = True,
+    default_model: str = "deepseek-v4-flash",
+) -> LlmGatewayConfig:
+    config = LlmGatewayConfig(
+        user_id=user.id,
+        name=f"bp-{model_type}-{provider_key}",
+        provider_key=provider_key,
+        platform="xhs",
+        base_url="https://api.example.test/v1",
+        access_token=encrypt_text("***"),
+        default_model=default_model,
+        models_json="[]",
+        model_type=model_type,
+        enabled=enabled,
+        healthy=True,
+    )
+    db.add(config)
+    db.commit()
+    db.refresh(config)
+    return config
+
+
+def _seed_mapping(db: Session, user: User, business_key: str, provider_key: str) -> None:
+    db.add(
+        LlmBusinessProvider(
+            user_id=user.id,
+            platform="xhs",
+            business_key=business_key,
+            provider_key=provider_key,
+            enabled=True,
+        )
+    )
+    db.commit()
+
+
+# --------------------------------------------------------------------------- #
+# ① 映射不存在 ⇒ NOT_CONFIGURED（不回落）
+# --------------------------------------------------------------------------- #
+
+
+def test_missing_mapping_raises_not_configured(db_factory):
+    """没配映射 ⇒ `LLM_BUSINESS_PROVIDER_NOT_CONFIGURED`，**不回落**任何服务商。
+
+    ⚠️ 落点判据：用户名下**有**一条可用文本服务商，但 `generate_note` 这个业务点
+    没指向它 —— 不回落意味着「宁可报未配置，也不自作主张用那条」。
+    """
+    with db_factory() as db:
+        user = _seed_user(db)
+        _seed_gateway(db, user)  # 有服务商，但没映射
+
+        with pytest.raises(BusinessProviderNotConfiguredError) as excinfo:
+            llm_gateway_client.resolve_business_provider(db, user, BUSINESS_KEY_GENERATE_NOTE)
+
+    err = excinfo.value
+    assert err.code == "LLM_BUSINESS_PROVIDER_NOT_CONFIGURED"
+    # 可读：文案里带 platform / business_key，用户知道去哪里配
+    assert "generate_note" in err.message
+    assert "xhs" in err.message
+
+
+def test_unknown_business_key_also_reports_not_configured(db_factory):
+    """不是已登记的 key（写错常量）⇒ 同样报未配置，不静默放行。"""
+    with db_factory() as db:
+        user = _seed_user(db)
+        with pytest.raises(BusinessProviderNotConfiguredError) as excinfo:
+            llm_gateway_client.resolve_business_provider(db, user, "not_a_real_key")
+
+    assert excinfo.value.code == "LLM_BUSINESS_PROVIDER_NOT_CONFIGURED"
+
+
+# --------------------------------------------------------------------------- #
+# ② 类型不匹配 ⇒ TYPE_MISMATCH（提前拦，不留给上游报看不懂的错）
+# --------------------------------------------------------------------------- #
+
+
+def test_type_mismatch_raises_before_any_upstream_call(db_factory):
+    """图像业务点指向文本服务商 ⇒ `LLM_BUSINESS_PROVIDER_TYPE_MISMATCH`。
+
+    ⚠️ 这个校验必须**提前**做（§13.2.1a）：不校验的后果是调用时拿文本模型打
+    `/images/generations`，报一个看不懂的上游错；拦在校验层，错误才有指向性。
+    本用例不给任何真实上游，**若解析返回了上下文就是校验没做**。
+    """
+    with db_factory() as db:
+        user = _seed_user(db)
+        _seed_gateway(db, user, provider_key="BP-TEXT", model_type="text")
+        _seed_mapping(db, user, BUSINESS_KEY_GENERATE_COVER.key, "BP-TEXT")
+
+        with pytest.raises(BusinessProviderTypeMismatchError) as excinfo:
+            llm_gateway_client.resolve_business_provider(db, user, BUSINESS_KEY_GENERATE_COVER)
+
+    err = excinfo.value
+    assert err.code == "LLM_BUSINESS_PROVIDER_TYPE_MISMATCH"
+    # 可读：告诉用户「这个业务点是图像类，不能指向文本服务商」
+    assert "图像" in err.message
+    assert "文本" in err.message
+    assert "generate_cover" in err.message
+
+
+# --------------------------------------------------------------------------- #
+# ③ 服务商不存在 ⇒ PROVIDER_NOT_FOUND（不回落到别的服务商）
+# --------------------------------------------------------------------------- #
+
+
+def test_dangling_provider_key_raises_not_found(db_factory):
+    """映射指向一个**已不存在**的 `provider_key` ⇒ `LLM_PROVIDER_NOT_FOUND`。
+
+    ⚠️ 不回落到该用户名下的其它服务商（这里故意还种了第二条可用服务商，
+    落回去就是「用错服务商还不报错」）。
+    """
+    with db_factory() as db:
+        user = _seed_user(db)
+        _seed_gateway(db, user, provider_key="BP-REAL", model_type="text")
+        _seed_mapping(db, user, BUSINESS_KEY_GENERATE_NOTE.key, "BP-GONE")
+
+        with pytest.raises(ProviderNotFoundError) as excinfo:
+            llm_gateway_client.resolve_business_provider(db, user, BUSINESS_KEY_GENERATE_NOTE)
+
+    assert excinfo.value.code == "LLM_PROVIDER_NOT_FOUND"
+    assert "BP-GONE" in excinfo.value.message
+
+
+# --------------------------------------------------------------------------- #
+# ④ 服务商停用 ⇒ PROVIDER_DISABLED（D4：不回落）
+# --------------------------------------------------------------------------- #
+
+
+def test_disabled_provider_raises_and_does_not_fall_back(db_factory):
+    """映射命中的服务商被**停用** ⇒ `LLM_PROVIDER_DISABLED`，**不回落**到别的服务商。
+
+    ⚠️ 落点判据：用户名下另有一条**同类型且可用**的服务商 —— 回落会静默用它，
+    台账也会把 A 的调用记在 B 名下（D4 的原话：「看起来正常但数据是错的」）。
+    """
+    with db_factory() as db:
+        user = _seed_user(db)
+        _seed_gateway(db, user, provider_key="BP-OTHER", model_type="text")
+        _seed_gateway(db, user, provider_key="BP-OFF", model_type="text", enabled=False)
+        _seed_mapping(db, user, BUSINESS_KEY_GENERATE_NOTE.key, "BP-OFF")
+
+        with pytest.raises(ProviderDisabledError) as excinfo:
+            llm_gateway_client.resolve_business_provider(db, user, BUSINESS_KEY_GENERATE_NOTE)
+
+    assert excinfo.value.code == "LLM_PROVIDER_DISABLED"
+
+
+# --------------------------------------------------------------------------- #
+# 正路径
+# --------------------------------------------------------------------------- #
+
+
+def test_text_business_key_resolves_to_provider_default_model(db_factory):
+    """命中 ⇒ 上下文用服务商的 `default_model`（§13.2.4：模型名从服务商来）。"""
+    with db_factory() as db:
+        user = _seed_user(db)
+        _seed_gateway(db, user, provider_key="BP-TEXT", model_type="text",
+                      default_model="deepseek-v4-flash")
+        _seed_mapping(db, user, BUSINESS_KEY_GENERATE_NOTE.key, "BP-TEXT")
+
+        ctx = llm_gateway_client.resolve_business_provider(db, user, BUSINESS_KEY_GENERATE_NOTE)
+
+    assert ctx.base_url == "https://api.example.test/v1"
+    assert ctx.model_name == "deepseek-v4-flash"
+    assert ctx.api_key == "***"  # 解密后的明文（服务层内，不进日志/响应）
+    assert ctx.provider_key == "BP-TEXT"
+
+
+def test_mapping_is_user_scoped(db_factory):
+    """跨用户隔离（DEF-066）：B 的映射对 A 不可见。"""
+    with db_factory() as db:
+        owner = _seed_user(db, "bp_owner")
+        intruder = _seed_user(db, "bp_intruder")
+        _seed_gateway(db, owner, provider_key="BP-OWNER", model_type="text")
+        _seed_mapping(db, owner, BUSINESS_KEY_GENERATE_NOTE.key, "BP-OWNER")
+
+        # intruder 名下既无服务商也无映射
+        with pytest.raises(LLMGatewayError) as excinfo:
+            llm_gateway_client.resolve_business_provider(db, intruder, BUSINESS_KEY_GENERATE_NOTE)
+
+    assert excinfo.value.code == "LLM_BUSINESS_PROVIDER_NOT_CONFIGURED"
+
+
+def test_all_four_failures_are_subclasses_of_the_gateway_base(db_factory):
+    """四种失败都是 `LLMGatewayError` 的子类 ⇒ 调用方用基类一兜即可（§13.2.3）。"""
+    assert issubclass(BusinessProviderNotConfiguredError, LLMGatewayError)
+    assert issubclass(BusinessProviderTypeMismatchError, LLMGatewayError)
+    assert issubclass(ProviderNotFoundError, LLMGatewayError)
+    assert issubclass(ProviderDisabledError, LLMGatewayError)
+    # 且各自带不同的 code（调用方按 code 给指向性提示，不能撞码）
+    codes = {
+        BusinessProviderNotConfiguredError().code,
+        BusinessProviderTypeMismatchError().code,
+        ProviderNotFoundError().code,
+        ProviderDisabledError().code,
+    }
+    assert len(codes) == 4, f"四种失败的 code 必须互不相同，实际 {codes}"

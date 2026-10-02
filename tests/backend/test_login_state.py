@@ -58,8 +58,8 @@ from backend.app.services.account_service import (  # noqa: E402
     dump_channel_envelope,
 )
 from backend.app.services.shop_binding_service import (  # noqa: E402
+    has_ark_session,
     qianfan_cookies_for_account,
-    shop_for_account,
 )
 from tests.backend.cookie_fixtures import bind_shop_account  # noqa: E402
 
@@ -354,26 +354,188 @@ class TestLayer3TellsValidFromExpiredFromUnknown:
 
     def test_ark_probe_splits_credential_error_from_other_failures(self):
         """千帆：SDK 已把「凭据失效」（`code=-13000`）与「接口变了」分开，这里只在
-        前者判 `expired`。"""
+        前者判 `expired`。⚠️ 这两种都**拿到了平台的 JSON** ⇒ 一次即止，不重试。"""
+        calls = {"n": 0}
+
+        def counted(result):  # noqa: ANN001
+            def factory(cookies):  # noqa: ANN001
+                calls["n"] += 1
+                return _FakeQianfanAdapter(result)
+
+            return factory
+
         expired, _ = login_state_service._probe_ark(
-            ARK_JAR, lambda cookies: _FakeQianfanAdapter((False, "缺失登录凭证", {"code": -13000}))
+            ARK_JAR, counted((False, "缺失登录凭证", {"code": -13000}))
         )
         assert expired == "expired"
+        assert calls["n"] == 1, "平台明确拒绝（-13000）不该重试"
 
+        calls["n"] = 0
         unknown, _ = login_state_service._probe_ark(
-            ARK_JAR, lambda cookies: _FakeQianfanAdapter((False, "接口结构变化", {"code": -1}))
+            ARK_JAR, counted((False, "接口结构变化", {"code": -1}))
         )
         assert unknown == "unknown"
-
-        unknown_none, _ = login_state_service._probe_ark(
-            ARK_JAR, lambda cookies: _FakeQianfanAdapter((False, "连接超时", None))
-        )
-        assert unknown_none == "unknown"
+        assert calls["n"] == 1, "拿到了 JSON 就说明链路通，重试只会拿到同一句"
 
         valid, _ = login_state_service._probe_ark(
             ARK_JAR, lambda cookies: _FakeQianfanAdapter((True, "ok", {"code": 0, "data": {"seller_name": "店"}}))
         )
         assert valid == "valid"
+
+    def test_ark_probe_treats_expired_credential_code_as_expired(self):
+        """⚠️ **DEF-084**（2026-09-30）：令牌**过期**时千帆回 `code=-13004`
+        （`msg="登录凭证已过期, 请重新登录"`）—— 它与 `-13000` 是**同一类事实**（凭据问题）。
+
+        真机现象：只认 `-13000` ⇒ 「已过期」被归成「未得到结论」⇒ 卡片永久停在
+        **「未检测」**，而 `unknown` **不可点** ⇒ 用户既没结论、也没有重登入口
+        （用户原话：「千帆令牌未检测依旧是一直卡未检测」）。
+
+        判据只有一份实现（`XHS_Qianfan_Apis.is_credential_error`），这里两头都钉住：
+        SDK 的码集合真的收了这个码，探针也真的按它判 `expired` 且**一次即止**。
+        """
+        from apis.xhs_qianfan_apis import XHS_Qianfan_Apis
+
+        assert -13004 in XHS_Qianfan_Apis.CREDENTIAL_ERROR_CODES
+        assert XHS_Qianfan_Apis.is_credential_error(-13004) is True
+        # 不认识的东西**不许**误判成凭据问题（错归因 = 让用户白重登，同 DEF-057 红线）
+        assert XHS_Qianfan_Apis.is_credential_error(-1) is False
+        assert XHS_Qianfan_Apis.is_credential_error(None) is False
+        assert XHS_Qianfan_Apis.is_credential_error("oops") is False
+
+        calls = {"n": 0}
+
+        def counted(result):  # noqa: ANN001
+            def factory(cookies):  # noqa: ANN001
+                calls["n"] += 1
+                return _FakeQianfanAdapter(result)
+
+            return factory
+
+        expired, reason = login_state_service._probe_ark(
+            ARK_JAR,
+            counted((False, "登录凭证已过期, 请重新登录", {"code": -13004, "success": False})),
+        )
+        assert expired == "expired", f"-13004 必须判「已失效」，实际 {expired}"
+        assert calls["n"] == 1, "平台明确拒绝（-13004）不该重试"
+        assert "登录凭证已过期" in reason, f"reason 要带平台原话，实际：{reason}"
+
+    def test_ark_probe_retries_transport_failures_then_forces_relogin(self):
+        """⚠️ v1.32 红线（2026-09-30）：**没拿到 JSON** 是可重试的，三次都失败
+        必须给出**重登入口**（`expired`），而不是永远停在 `unknown`。
+
+        真机背景：千帆卡片「一直未返回检测结果」—— 旧实现一次即弃，于是既没有
+        结论、也没有重登按钮，用户被卡死。判 `expired` 的语义是
+        「我们连不上它，请重登以确保万无一失」，reason 里**明写尝试次数**，
+        不伪造平台的拒绝原话。
+        """
+        calls = {"n": 0}
+
+        def no_json(cookies):  # noqa: ANN001
+            calls["n"] += 1
+            return _FakeQianfanAdapter((False, "连接超时", None))
+
+        state, reason = login_state_service._probe_ark(
+            ARK_JAR, no_json, attempt_timeout=1
+        )
+        assert state == "expired", f"三次都没拿到 JSON 应给重登入口，实际 {state}"
+        assert calls["n"] == login_state_service.PROBE_MAX_ATTEMPTS
+        assert "连续 3 次" in reason, f"reason 必须写清尝试次数，实际：{reason}"
+
+    def test_ark_probe_succeeds_on_a_later_attempt(self):
+        """重试**真的有用**：第 2 次拿到 JSON 就该早停，不多打一次。"""
+        calls = {"n": 0}
+
+        def flaky(cookies):  # noqa: ANN001
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _FakeQianfanAdapter((False, "连接超时", None))
+            return _FakeQianfanAdapter((True, "ok", {"code": 0, "data": {"seller_name": "店"}}))
+
+        state, _ = login_state_service._probe_ark(ARK_JAR, flaky, attempt_timeout=1)
+        assert state == "valid"
+        assert calls["n"] == 2, f"成功即停，实际打了 {calls['n']} 次"
+
+    def test_ark_probe_single_attempt_falls_back_to_legacy_semantics(self):
+        """`max_attempts=1` 是**退化为旧行为**的开关（给测试与「关掉重试」的调用方）。
+
+        ⚠️ 这里钉的是**尝试次数**：单次尝试 = 不再重试。⚠️ 注意结局仍是 `expired`
+        （v1.32 起「放弃探测」= 给重登入口），**不是**旧实现的 `unknown` ——
+        旧语义只能靠 `max_attempts=1` 的**次数**近似，结局由 v1.32 的策略决定。
+        """
+        calls = {"n": 0}
+
+        def no_json(cookies):  # noqa: ANN001
+            calls["n"] += 1
+            return _FakeQianfanAdapter((False, "连接超时", None))
+
+        state, reason = login_state_service._probe_ark(
+            ARK_JAR, no_json, max_attempts=1, attempt_timeout=1
+        )
+        assert calls["n"] == 1, f"max_attempts=1 只该打一次，实际 {calls['n']}"
+        assert state == "expired", f"放弃探测应给重登入口，实际 {state}"
+        assert "连续 1 次" in reason, f"reason 应写清次数，实际：{reason}"
+
+    def test_ark_probe_enforces_a_hard_timeout_on_a_hung_adapter(self):
+        """⚠️ v1.32 红线：SDK 的 `timeout=` 管不住「被平台挂住」—— 必须有**墙钟兜底**。
+
+        ⚠️⚠️ 这个用例的**真正判据是 `elapsed`**：只要 `_call_with_timeout` 内部
+        不小心 `join()` 了（`with` 语句 / `shutdown(wait=True)`），时间断言立刻红。
+        实测反例：挂 30s 的 adapter 让整函数等了 30.0s。
+        """
+        import time as _time
+
+        def hung(cookies):  # noqa: ANN001
+            _time.sleep(30)  # 远超 attempt_timeout
+            return _FakeQianfanAdapter((True, "ok", {"code": 0}))
+
+        started = _time.monotonic()
+        state, reason = login_state_service._probe_ark(
+            ARK_JAR, hung, max_attempts=1, attempt_timeout=1
+        )
+        elapsed = _time.monotonic() - started
+        assert elapsed < 5, f"挂住的 adapter 必须被墙钟切断，实际等了 {elapsed:.1f}s"
+        assert state == "expired", f"放弃探测应给重登入口，实际 {state}"
+        assert "未返回" in reason, f"reason 应说明超时，实际：{reason}"
+
+    def test_retry_policy_constants_stay_bounded(self):
+        """重试策略是**有界**的，且这把尺子只有一份实现（守卫防误改）。
+
+        ⚠️ 三条都要钉：`1 < MAX_ATTEMPTS <= 5`（1 = 退化成旧的一次即弃，
+        >5 = 刷新账号页变成等半分钟）、`ATTEMPT_TIMEOUT` 落在 3–20s、
+        `RETRY_BACKOFF > 0`（0 = 三连失败打在同一个坏窗口上，等于不重试）。
+        """
+        assert 1 < login_state_service.PROBE_MAX_ATTEMPTS <= 5, (
+            f"重试次数必须有界且 >1，实际 {login_state_service.PROBE_MAX_ATTEMPTS}"
+        )
+        assert 3 <= login_state_service.PROBE_ATTEMPT_TIMEOUT <= 20, (
+            f"单次超时要落在 3–20s，实际 {login_state_service.PROBE_ATTEMPT_TIMEOUT}"
+        )
+        assert login_state_service.PROBE_RETRY_BACKOFF > 0, "退避必须 >0，否则三连失败等于一次失败"
+
+    def test_timeout_thread_pool_is_daemon(self):
+        """⚠️ v1.32 红线：超时兜底线程**必须是 daemon** —— 否则挂住的探针线程会让
+        Python 退出（含 pytest 收尾）`join()` 它，把「不阻塞调用方」变成又等一轮。
+
+        实测反例：`daemon=False` 时，一个 sleep 30s 的 adapter 让整个进程等了 30s。
+        """
+        import threading as _threading
+        import time as _time
+
+        pool = login_state_service._daemon_pool()
+        try:
+            pool.submit(lambda: _time.sleep(5))
+            _time.sleep(0.3)
+            workers = [
+                t
+                for t in _threading.enumerate()
+                if t.name.startswith(login_state_service.PROBE_TIMEOUT_THREAD_PREFIX)
+            ]
+            assert workers, "线程池必须真的起了线程"
+            assert all(t.daemon for t in workers), (
+                f"兜底线程必须全是 daemon，实际：{[(t.name, t.daemon) for t in workers]}"
+            )
+        finally:
+            pool.shutdown(wait=False)
 
     def test_creator_probe_splits_the_three_outcomes(self):
         """创作者平台探针（`/api/galaxy/user/info`）同样三种结局，不能压成两种。"""
@@ -1316,7 +1478,7 @@ def test_renew_does_not_touch_the_ark_channel(tmp_path: Path):
                 shop_name="店",
             )
             db.commit()
-            account_id, shop_id = account.id, account.shop_id_fk
+            account_id = account.id
         finally:
             db.close()
 
@@ -1360,9 +1522,9 @@ def test_renew_does_not_touch_the_ark_channel(tmp_path: Path):
             jars = channel_jars(db, account_id)
             assert "ark-old" in jars.get(CHANNEL_ARK, ""), jars
             assert "ark-bound" not in jars.get(CHANNEL_ARK, ""), "夹具没有第二份 ark 令牌"
-            assert shop_id is not None
-            shop = shop_for_account(db, account_id)
-            assert shop is not None and shop.id == shop_id, "续期不得动店铺关系"
+            #: ADR-021：不再有「店铺关系」这个对象 —— 续期要守的是
+            #: 「**账号自己的 ark 会话不被别人的续期动到**」（隔离键 ≠ 能力判据）。
+            assert has_ark_session(db, account_id), "续期不得动账号自己的 ark 会话"
 
             # 账号自己的 ark 通道还在 ⇒ 千帆继续用它；创作者那份新令牌**不喂给千帆**
             cookies = qianfan_cookies_for_account(db, account_id)
@@ -1732,11 +1894,15 @@ class TestQianfanQrLogin:
             app.dependency_overrides.clear()
 
     def test_qianfan_renewal_refuses_a_different_shop(self, tmp_path: Path):
-        """账号已绑定 A 店，扫了 B 店的码 ⇒ 报错 + **一个字节都不写**（§18.8 ③A 同型）。"""
+        """账号已绑 A 卖家，扫了 B 卖家的码 ⇒ 报错 + **一个字节都不写**（§18.8 ③A 同型）。
+
+        ADR-021：比较对象从「店铺实体」换成**账号自己的 `seller_id`**（归属列），
+        纪律不变 —— 对不上就一个字节都不写。
+        """
         session_factory, headers, ids = self._env(tmp_path, "qf-renew-mismatch")
         db = session_factory()
         try:
-            #: 2026-09-22：店铺关系写 `platform_accounts.shop_id_fk`（原来是绑定表一行），
+            #: ADR-021：归属写账号行 `seller_id`（`shops` 实体已退场），
             #: 凭据写账号自己的 `ark` 通道。
             account = db.get(PlatformAccount, ids["account"])
             assert account is not None

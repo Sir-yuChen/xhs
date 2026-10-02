@@ -36,8 +36,6 @@ from backend.app.models import (
     Topic,
     User,
 )
-from backend.app.models.shop import Shop
-
 #: 内容库列表端点（本文件全部断言都打它）。
 NOTES_PATH = "/api/notes"
 
@@ -271,13 +269,11 @@ def test_list_relations_match_single_note_detail(api_client, seeded):
         db.flush()
         db.add(NoteTopic(note_id=note.id, topic_id=topic.id))
     # 挂链商品：一件在台账里、一件**不在**（缺值口径：只给 item_id，不造假）
-    shop = Shop(user_id=user.id, shop_name="性能测试店")
-    db.add(shop)
-    db.flush()
+    #: ADR-021：台账归属键 = `platform_account_id`（店铺实体已退场）。
     db.add(
         ShopProduct(
             user_id=user.id,
-            shop_id_fk=shop.id,
+            platform_account_id=account.id,
             item_id="ITEM-IN-LEDGER",
             item_title="台账里的商品",
             price="1990",

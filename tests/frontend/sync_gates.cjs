@@ -1,7 +1,7 @@
 /**
  * 行为验证：同步按钮的**三态门禁**与**结果行**（设计 13 §19）。
  *
- * 盯的四件事（都是「不许出现某种行为」，源码断言证明不了）：
+ * 盯的五件事（都是「不许出现某种行为」，源码断言证明不了）：
  *
  * 1. **全不可用必须拦住**：www / ark / creator 全「确定不可用」时不发起同步，
  *    弹窗提示分别登录（用户 2026-09-21 原话）；
@@ -10,7 +10,10 @@
  * 3. **分源摘要不许吞错误**：某个源失败时结果行必须带上原因（后端给了，
  *    前端抹掉 = 用户失去自救能力，DEF-058 同型）；
  * 4. **缺值渲染 `-` 不渲染 0**：`detail_total` 取不到时「不知道还剩多少」
- *    与「还剩 0 件」是两件事（硬约束⑤）。
+ *    与「还剩 0 件」是两件事（硬约束⑤）；
+ * 5. **两条门禁互不牵连**（**§44**，2026-09-30 用户拍板拆分）：「同步笔记」
+ *    只认 creator、「同步商品笔记」只认 ark —— 合并成一个计划对象必然出现
+ *    「一个平台不可用却拦住另一个按钮」，正是拆分要修的语义。
  *
  * 做法与 `login_state.cjs` 同源：esbuild 打包**真实** `lib/sync-gates.ts`，
  * 直接调用它（纯模块，不需要 antd 桩、不需要 jsdom）。
@@ -27,6 +30,9 @@
  *   SYNC_GATES_MUTATE=terminalnotice <node> …             # 期望 FAIL（§35.18）
  *   SYNC_GATES_MUTATE=progressdash <node> …               # 期望 FAIL（§35.18.6）
  *   SYNC_GATES_MUTATE=cancelsuffix <node> …               # 期望 FAIL（§35.18.6）
+ *   SYNC_GATES_MUTATE=arkleak   <node> …                  # 期望 FAIL（§44）
+ *   SYNC_GATES_MUTATE=goodsnotegate <node> …              # 期望 FAIL（§44）
+ *   SYNC_GATES_MUTATE=goodsnotesrc <node> …               # 期望 FAIL（§44）
  */
 const fs = require("fs");
 const os = require("os");
@@ -56,6 +62,10 @@ const RESERVED = {
   // I 组（§35.18.6 进度分母三态 / 取消说明剥离）—— 2026-09-27 用户报障
   progressdash: "  if (total == null) {",
   cancelsuffix: '    const note = (result.note || "").replace(/(^|；)已被用户取消$/, "");',
+  // J 组（§44：普通笔记 / 商品笔记两条独立门禁）—— 2026-09-30 用户拍板拆分
+  arkleak: "  if (creatorOk) {",
+  goodsnotegate: "    blocked: gate.blocked,",
+  goodsnotesrc: '    sources: gate.blocked ? [] : ["ark"],',
 };
 
 const MUTATE_TO = {
@@ -85,6 +95,13 @@ const MUTATE_TO = {
   progressdash: "  if (false) {",
   // 不剥取消后缀 ⇒ 结果行出现两次「取消」（「已取消 · …；已被用户取消」）
   cancelsuffix: '    const note = result.note || "";',
+  // ark 泄漏回「同步笔记」的源清单 ⇒ 又变回混合双源（§44 拆分白做）
+  arkleak:
+    '  if (creatorOk) {\n    if (!channelUnavailable(channels, "ark")) sources.push("ark");',
+  // 商品笔记的硬门禁失效 ⇒ creator 会话不可用的账号也能点（点了必失败）
+  goodsnotegate: "    blocked: false,",
+  // 商品笔记把 creator 源混进来 ⇒ 又回到「一次任务跑两个源」的旧语义
+  goodsnotesrc: '    sources: gate.blocked ? [] : ["ark", "creator"],',
 };
 
 const mutatePlugin = {
@@ -137,10 +154,14 @@ async function main() {
   fs.writeFileSync(outFile, bundled.outputFiles[0].text);
   const mod = require(outFile);
   const { noteSyncPlan, goodsGate, syncResultText, goodsResultText, channelUnavailable } = mod;
-  const { syncTaskPhase, syncTerminalNotice, syncProgressText } = mod;
+  const { syncTaskPhase, syncTerminalNotice, syncProgressText, goodsNoteSyncPlan } = mod;
 
   if (typeof noteSyncPlan !== "function") {
     console.error("FATAL 未导出 noteSyncPlan —— 若已重命名，请同步更新本脚本");
+    return 1;
+  }
+  if (typeof goodsNoteSyncPlan !== "function") {
+    console.error("FATAL 未导出 goodsNoteSyncPlan —— §44 拆分的商品笔记门禁丢了？");
     return 1;
   }
 
@@ -174,16 +195,16 @@ async function main() {
     false
   );
 
-  // C. 源清单（§21.4：**www 源已退场**，creator 强制）
+  // C. 源清单（§21.4：**www 源已退场**，且 §44 起 **ark 也退场** —— 普通笔记只有 creator）
   check(
     "C1 只 creator 可用 ⇒ sources=[creator]",
     noteSyncPlan(channels({ www: "expired", creator: "valid", ark: "expired" }), "creator"),
     { blocked: false, needsLink: false, sources: ["creator"] }
   );
   check(
-    "C2 creator + ark 可用 ⇒ sources=[creator, ark]",
+    "C2 **ark 不再混进普通笔记**（§44）：creator + ark 都可用 ⇒ 仍只列 [creator]",
     noteSyncPlan(channels({ www: "expired", creator: "valid", ark: "valid" }), "creator").sources,
-    ["creator", "ark"]
+    ["creator"]
   );
   check(
     "C3 **www 永不参与**：creator 不可用 ⇒ blocked + 空 sources（www valid 也一样）",
@@ -439,6 +460,37 @@ async function main() {
       "条"
     ),
     "已取消 · 耗时 2 分 5 秒"
+  );
+
+  // ---- J 组：两条门禁**互不牵连**（§44，2026-09-30 用户拍板拆分） ----
+  //   用户诉求：把「同步笔记」拆成「同步普通笔记」+「同步商品笔记」两个独立任务与入口，
+  //   在账号信息卡上分开展示、分开触发。拆分的**语义核心**就是这一组：
+  //   ① 商品笔记的硬门禁是 **ark**（不是 creator）；
+  //   ② 它只跑 ark 源（把 creator 混进来 = 又回到旧的多源任务）；
+  //   ③ 两条链路**各自独立**：creator 挂了不该拦住商品笔记，反之亦然
+  //      （合并成一个计划对象必然在其中一边错，这正是要防的）。
+  check(
+    "J1 商品笔记：ark 不可用 ⇒ blocked（哪怕 creator 是 valid）",
+    goodsNoteSyncPlan(channels({ www: "valid", creator: "valid", ark: "missing" })).blocked,
+    true
+  );
+  check(
+    "J2 商品笔记：ark unknown ⇒ 放行（DEF-057，让同步真发一次）",
+    goodsNoteSyncPlan(channels(unknown)).blocked,
+    false
+  );
+  check(
+    "J3 商品笔记：ark 可用 ⇒ sources 只含 [ark]（creator 不混进来，§44）",
+    goodsNoteSyncPlan(channels({ www: "expired", creator: "expired", ark: "valid" })),
+    { blocked: false, needsLink: false, sources: ["ark"] }
+  );
+  check(
+    "J4 **两条链路互不牵连**：creator 挂 / ark 通 ⇒ 笔记 blocked、商品笔记放行",
+    [
+      noteSyncPlan(channels({ www: "valid", creator: "expired", ark: "valid" }), "creator").blocked,
+      goodsNoteSyncPlan(channels({ www: "valid", creator: "expired", ark: "valid" })).blocked,
+    ],
+    [true, false]
   );
 
   console.log(`\n${passed} PASS / ${failed} FAIL`);

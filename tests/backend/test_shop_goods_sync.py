@@ -7,7 +7,7 @@
    当已下架丢掉；
 2. **解不出店铺就不同步**：`shop_id_fk` 是 NOT NULL，拿不到就 `failed`，
    **不编店铺**（缺值口径）；
-3. **凭据失效不清数据**：`-13000` → 绑定标 `invalid` + 保留全部已有商品；
+3. **凭据失效不清数据**：`CREDENTIAL_ERROR_CODES`（`-13000` 缺失 / `-13004` 已过期）→ 绑定标 `invalid` + 保留全部已有商品；
 4. **风控**：有界翻页、按账号限流（超限停本次、已同步的保留）、页间停顿；
 5. **缺值不造假**：`item_id` 缺失的条目跳过；价格取不到留空串；状态取不到留空；
 6. **§19.4 内联详情补齐**：每页列表商品落库前**先拉 SKU 明细**（批量 10），
@@ -28,7 +28,6 @@ from backend.app.core.database import Base, get_db
 from backend.app.core.time import shanghai_now
 from backend.app.main import app
 from backend.app.models import PlatformAccount, Task, User
-from backend.app.models.shop import Shop
 from backend.app.models.shop_product import ShopProduct
 from backend.app.services import shop_goods_sync_service as sgs
 from backend.app.services import account_task_service as ats
@@ -110,6 +109,20 @@ class InvalidCredentialAdapter:
         return False, "登录凭证缺失，请重新登录", {"code": -13000, "success": False}
 
 
+class ExpiredCredentialAdapter:
+    """令牌**已过期**（`code=-13004`）—— 真机实测的 msg 就是下面这句。
+
+    ⚠️ 与 `InvalidCredentialAdapter` 是**同一类事实**（凭据问题），必须得到同一个结局
+    （DEF-084，2026-09-30）。
+    """
+
+    def __init__(self, cookies: str) -> None:
+        self.cookies = cookies
+
+    def search_items(self, **kwargs):
+        return False, "登录凭证已过期, 请重新登录", {"code": -13004, "success": False}
+
+
 def _item(
     item_id: str,
     *,
@@ -149,6 +162,14 @@ def _item(
 
 
 def _setup(tmp_path, monkeypatch, *, with_binding: bool = True, shop_id_fk: bool = True):
+    """建库 + 注册用户 + 一个账号。
+
+    ⚠️ `shop_id_fk` 形参**已失去物理意义**（ADR-021：店铺实体退场，台账归属键就是
+    账号主键），保留只为不改众多调用点。它现在只控制**是否导入 ark 登录态**：
+    `shop_id_fk=False` ⇒ 账号「没凭据」（`ARK_SESSION_REQUIRED`），
+    这是旧的「有凭据但没绑店」状态在现行模型下的**唯一等价物** ——
+    因为「没绑店」这个状态已不存在（凭据即能力，隔离键 ≠ 能力判据）。
+    """
     engine = create_engine(
         f"sqlite:///{tmp_path / 'shop-goods-sync.db'}", connect_args={"check_same_thread": False}
     )
@@ -193,9 +214,8 @@ def _setup(tmp_path, monkeypatch, *, with_binding: bool = True, shop_id_fk: bool
         db.add(account)
         db.flush()
         if with_binding:
-            #: 2026-09-22：关系写账号行（`shop_id_fk`）、状态写 `shop_state`、
-            #: 凭据写账号自己的 `ark` 通道 —— `shop_account_bindings` 整表移除。
-            #: `shop_id_fk=False` 用来复现「有凭据但没绑店」：同步必须失败得可读。
+            #: ADR-021：开通千帆能力 = 给账号导入 `ark` 登录态（不再有「绑店」动作）。
+            #: `shop_id_fk=False` 复现「没有凭据」：同步必须失败得可读。
             if shop_id_fk:
                 bind_shop_account(db, account, cookies_text=ARK_COOKIES, shop_name="观隅好物的店")
             else:
@@ -213,12 +233,13 @@ def _teardown() -> None:
 
 
 def _seed_product(SessionLocal, shop_id_fk: int, item_id: str, user_id: int = 1) -> None:
+    """落一行台账。形参名保留（调用点众多），实参现在传的是**账号主键**。"""
     db = SessionLocal()
     try:
         db.add(
             ShopProduct(
                 user_id=user_id,
-                shop_id_fk=shop_id_fk,
+                platform_account_id=shop_id_fk,
                 item_id=item_id,
                 item_title="旧的",
                 synced_at=shanghai_now(),
@@ -230,9 +251,10 @@ def _seed_product(SessionLocal, shop_id_fk: int, item_id: str, user_id: int = 1)
 
 
 def _shop_pk(SessionLocal) -> int:
+    """账号主键（ADR-021：台账归属键）。原名保留以免大量调用点改签名。"""
     db = SessionLocal()
     try:
-        return int(db.scalar(select(Shop.id)))
+        return int(db.scalar(select(PlatformAccount.id)))
     finally:
         db.close()
 
@@ -852,9 +874,17 @@ def test_stops_early_when_stored_reaches_total(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# 店铺解析 + 凭据失效
+# 能力门禁（ADR-021：判据是令牌，不是绑店）+ 凭据失效
 # --------------------------------------------------------------------------- #
-def test_missing_binding_fails_without_touching_the_platform(tmp_path, monkeypatch):
+def test_missing_ark_session_fails_without_touching_the_platform(tmp_path, monkeypatch):
+    """**没有 ark 登录态** → 任务失败、一个平台请求都不发（ADR-021 门禁）。
+
+    被取代的旧断言（原句保留）：本用例原名 `test_missing_binding_fails_without_touching_the_platform`，
+    断言 `"ARK_SESSION_REQUIRED" in result["error"]`。旧判据是「有没有绑店」；
+    2026-09-30 ADR-021 把判据换成「本账号有没有可用的 ark 会话」——「绑店」这个
+    动作本身已随店铺实体退场，错误码随之改为 `ARK_SESSION_REQUIRED`
+    （唯一凭据判据 `XHS_Qianfan_Apis.is_credential_error()`，见设计 18 / §17.10）。
+    """
     _headers, account_id, user_id, _SessionLocal = _setup(tmp_path, monkeypatch, with_binding=False)
 
     result = sgs.run_shop_goods_sync(
@@ -862,33 +892,41 @@ def test_missing_binding_fails_without_touching_the_platform(tmp_path, monkeypat
     )
 
     assert result["status"] == sgs.sts.STATUS_FAILED
-    assert "QIANFAN_BINDING_REQUIRED" in result["error"]
+    assert "ARK_SESSION_REQUIRED" in result["error"]
     assert FakeItemsAdapter.calls == []
 
 
-def test_shop_unresolved_fails_and_invents_nothing(tmp_path, monkeypatch):
-    """解不出店铺 → 任务失败且**一行都不编**（`shop_products.shop_id_fk` 是 NOT NULL）。
+def test_account_unresolved_fails_and_invents_nothing(tmp_path, monkeypatch):
+    """**账号解不出**（软删 / 越权）→ 任务失败且**一行都不编**（`platform_account_id` NOT NULL）。
 
-    ⚠️ **被取代的旧断言（原句保留）**：本用例原名
-    `test_binding_without_shop_entity_fails_and_invents_nothing`，断言
-    `"SHOP_UNRESOLVED" in result["error"]`。那个 code 存在的理由，是旧模型里
+    ⚠️ **被取代的旧断言（原句保留）**：本用例原名 `test_shop_unresolved_fails_and_invents_nothing`，
+    更早的名字是 `test_binding_without_shop_entity_fails_and_invents_nothing`，
+    断言 `"SHOP_UNRESOLVED" in result["error"]`。那个 code 存在的理由，是旧模型里
     **「有绑定行、但绑定的 `shop_id_fk` 为空」**是一个**独立状态**
-    （`shop_account_bindings` 一行 + 一个 NULL 外键）。
+    （`shop_account_bindings` 一行 + 一个 NULL 外键）。2026-09-22 该表移除后
+    「没绑店」与「解不出店」合成同一个状态；**2026-09-30 ADR-021 之后连这个状态
+    也不存在了** —— 归属键就是账号主键，**没有任何关系需要解析**，剩下能「解不出」
+    的只有账号本身（`account_for_ark_gate` 的软删 / 租户闸 ⇒ `ACCOUNT_NOT_FOUND`）。
 
-    2026-09-22 `shop_account_bindings` 整表移除后，「账号有没有店铺」**就是**
-    `platform_accounts.shop_id_fk` —— 「没绑店」与「解不出店」成了**同一个状态**，
-    再也分不出第二种，所以 `SHOP_UNRESOLVED` 被 `QIANFAN_BINDING_REQUIRED` 取代
-    （见设计 13 §17.8 的修订；任务分解文档里的旧 code 按「被取代」标注）。
+    所以本用例改为**扣住账号被软删**这个真实可复现的失败态，守住同一条纪律：
+    解不出归属 ⇒ 一行不编、一个平台请求不发。
     """
-    _headers, account_id, user_id, SessionLocal = _setup(tmp_path, monkeypatch, shop_id_fk=False)
+    _headers, account_id, user_id, SessionLocal = _setup(tmp_path, monkeypatch)
+
+    db = SessionLocal()
+    try:
+        db.get(PlatformAccount, account_id).deleted_at = shanghai_now()
+        db.commit()
+    finally:
+        db.close()
 
     result = sgs.run_shop_goods_sync(
         account_id, user_id=user_id, max_pages=3, adapter_factory=FakeItemsAdapter
     )
 
     assert result["status"] == sgs.sts.STATUS_FAILED
-    assert "QIANFAN_BINDING_REQUIRED" in result["error"]
-    assert FakeItemsAdapter.calls == [], "解不出店铺时一个平台请求都不该发"
+    assert "ACCOUNT_NOT_FOUND" in result["error"]
+    assert FakeItemsAdapter.calls == [], "解不出账号时一个平台请求都不该发"
     db = SessionLocal()
     try:
         assert db.scalar(select(ShopProduct.id)) is None  # 没编出任何一行
@@ -920,6 +958,34 @@ def test_invalid_credential_marks_shop_state_but_keeps_products(tmp_path, monkey
 # --------------------------------------------------------------------------- #
 # API：防重 / 鉴权 / 参数 / 状态
 # --------------------------------------------------------------------------- #
+def test_expired_credential_also_marks_shop_state(tmp_path, monkeypatch):
+    """⚠️ **DEF-084**（2026-09-30）：令牌**过期**时千帆回的是 `code=-13004`。
+
+    它与 `-13000`（缺失）是**同一类事实**，必须得到同一个结局：账号的千帆状态标
+    `invalid`（页面的「重新登录千帆」提示据此接管）。原实现只认 `-13000` ⇒
+    「已过期」被当成**普通失败** ⇒ 页面既不提示重登，账号卡的千帆标签也永远停在
+    「未检测」—— 与用户报的「一直卡未检测」是同一个根因。
+    """
+    _headers, account_id, user_id, SessionLocal = _setup(tmp_path, monkeypatch)
+    shop_pk = _shop_pk(SessionLocal)
+    _seed_product(SessionLocal, shop_pk, "KEEP-TOO")
+
+    result = sgs.run_shop_goods_sync(
+        account_id, user_id=user_id, max_pages=3, adapter_factory=ExpiredCredentialAdapter
+    )
+
+    assert result["status"] == sgs.sts.STATUS_FAILED
+    db = SessionLocal()
+    try:
+        account = db.get(PlatformAccount, account_id)
+        assert get_shop_state(account)["status"] == "invalid", (
+            "-13004（已过期）必须与 -13000 同判为凭据失效，否则重登提示永不出现"
+        )
+        assert db.scalars(select(ShopProduct.item_id)).all() == ["KEEP-TOO"]
+    finally:
+        db.close()
+
+
 def test_second_trigger_reuses_the_active_task(tmp_path, monkeypatch):
     headers, account_id, _user_id, SessionLocal = _setup(tmp_path, monkeypatch)
     monkeypatch.setattr(ats, "ensure_account_task_worker", lambda *a, **k: None)
@@ -959,7 +1025,7 @@ def test_unbound_account_is_400(tmp_path, monkeypatch):
     )
 
     assert response.status_code == 400, response.text
-    assert response.json()["detail"]["code"] == "QIANFAN_BINDING_REQUIRED"
+    assert response.json()["detail"]["code"] == "ARK_SESSION_REQUIRED"
 
 
 def test_other_users_account_is_404(tmp_path, monkeypatch):
@@ -1027,7 +1093,7 @@ def test_status_endpoint_is_idle_then_reports_the_result(tmp_path, monkeypatch):
         db.add(
             ScheduledJobLog(
                 user_id=user_id,
-                account_id=account_id,
+                platform_account_id=account_id,
                 job_key=JOB_KEY_SHOP_GOODS_SYNC,
                 job_name="同步商品",
                 trigger_type="manual",
@@ -1153,7 +1219,7 @@ def test_list_columns_are_backfilled_from_raw_json(tmp_path, monkeypatch):
     # 同步任务的字段补足 pass 再跑一次：从 raw_json 本地回填（不打平台）
     db = SessionLocal()
     try:
-        shop_pk = db.scalar(select(Shop.id))
+        shop_pk = db.scalar(select(PlatformAccount.id))
         changed = sgs.backfill_list_columns(db, shop_pk)
         assert changed == 1
         row = db.scalars(select(ShopProduct).where(ShopProduct.item_id == "I1")).one()
@@ -1195,7 +1261,7 @@ def test_backfill_respects_the_cap(tmp_path, monkeypatch):
 
     db = SessionLocal()
     try:
-        shop_pk = db.scalar(select(Shop.id))
+        shop_pk = db.scalar(select(PlatformAccount.id))
         assert sgs.backfill_list_columns(db, shop_pk, cap=1) == 1
         assert sgs.backfill_list_columns(db, shop_pk, cap=1) == 1
         assert sgs.backfill_list_columns(db, shop_pk, cap=1) == 1

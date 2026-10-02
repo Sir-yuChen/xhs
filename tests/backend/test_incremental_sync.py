@@ -578,24 +578,27 @@ def _seed_account(db, account_id: int) -> None:
 
 
 def _seed_account_with_shop(db, account_id: int = 1) -> None:
-    """账号 + 它自己的店铺（**1:1**）—— 千帆游标住在 `account.shop_state`。
+    """账号 + 它的千帆店铺标识 —— 千帆游标住在 `account.shop_state`。
 
-    ⚠️ **被取代的旧夹具（原句保留）**：原名 `_seed_binding(db, binding_id)`，
-    建的是 `shop_account_bindings` 一行（`goods_cursor_ms` 当年是那张表的列）。
+    ⚠️ **被取代的旧夹具（原句保留，两层）**：
 
-    2026-09-22 那张表整表移除 ⇒ 游标搬到 `platform_accounts.shop_state`
-    （读写只经 `get_shop_state` / `set_shop_state`），所以夹具改为
-    「店铺行 + 账号行（带 `shop_id_fk`）」。
+    ① 原名 `_seed_binding(db, binding_id)`，建的是 `shop_account_bindings` 一行
+       （`goods_cursor_ms` 当年是那张表的列）。
+
+    ② 2026-09-22 那张表整表移除 ⇒ 游标搬到 `platform_accounts.shop_state`
+       （读写只经 `get_shop_state` / `set_shop_state`），夹具改为
+       *「店铺行 + 账号行（带 `shop_id_fk`）」*。
+
+    ③ **2026-09-30 ADR-021**：店铺实体也退场 ⇒ `Shop` 行与 `shop_id_fk` 都不再存在，
+       夹具再收敛为「账号行 + `seller_id`」。游标位置（`shop_state`）**始终没变** ——
+       这正是本用例真正要测的东西，故断言不受影响。
     """
     from backend.app.models.platform_account import PlatformAccount
-    from backend.app.models.shop import Shop
 
-    db.add(Shop(id=1, user_id=1, shop_id="s1", shop_name="t", status="active"))
-    db.flush()
     db.add(
         PlatformAccount(
             id=account_id, user_id=1, platform="xhs", sub_type="creator",
-            nickname="t", status="active", shop_id_fk=1,
+            nickname="t", status="active", seller_id="SELLER-1",
         )
     )
     db.commit()

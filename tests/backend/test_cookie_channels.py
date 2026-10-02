@@ -32,7 +32,6 @@ from backend.app.models import (  # noqa: E402
     PlatformAccount,
     User,
 )
-from backend.app.models.shop import Shop  # noqa: E402
 from backend.app.services import account_service  # noqa: E402
 from backend.app.services.account_service import (  # noqa: E402
     CHANNEL_ARK,
@@ -362,27 +361,31 @@ class TestQianfanTakesOnlyTheAccountsOwnArkChannel:
     """
 
     def _env(self, tmp_path: Path):
+        """一个账号：`seller_id` 已填（**归属**），但**没有** `ark` 令牌（**能力**）。
+
+        ⚠️ ADR-021（2026-09-30）起 `shops` 表与 `shop_id_fk` 列都已退场 ——
+        原实现建的 `Shop` 行（`Shop(user_id=…, seller_id="SELLER-1", shop_name=…)`）
+        与 `account.shop_id_fk = shop.id` 两行**无处可写**。店铺标识下沉成账号自己的
+        `seller_id`，而「绑没绑店」这个状态本身已不存在（判据只剩令牌）。
+        本节的否命题（**取不到票就返回空、绝不借**）与此无关，故原样保留。
+        """
         session_factory = _override_database(tmp_path)
         db = session_factory()
         user = User(username="shop-owner", password_hash="x")
         db.add(user)
         db.flush()
         account = PlatformAccount(
-            user_id=user.id, platform="xhs", sub_type="pc", nickname="观隅好物", status="active"
+            user_id=user.id, platform="xhs", sub_type="pc", nickname="观隅好物",
+            status="active", seller_id="SELLER-1",
         )
         db.add(account)
-        db.flush()
-        shop = Shop(user_id=user.id, seller_id="SELLER-1", shop_name="观隅好物的店")
-        db.add(shop)
-        db.flush()
-        account.shop_id_fk = shop.id
         db.commit()
-        return db, account, shop
+        return db, account
 
     def test_own_ark_channel_is_used(self, tmp_path: Path):
         from backend.app.services.shop_binding_service import qianfan_cookies_for_account
 
-        db, account, _shop = self._env(tmp_path)
+        db, account = self._env(tmp_path)
         try:
             store_channel_cookies(db=db, account=account, cookies_text=_cookie_text(ARK_JAR))
             db.commit()
@@ -396,7 +399,7 @@ class TestQianfanTakesOnlyTheAccountsOwnArkChannel:
         """绑了店 ≠ 有票：没有 ark 通道 ⇒ 空串（**不向店铺/其它账号借**）。"""
         from backend.app.services.shop_binding_service import qianfan_cookies_for_account
 
-        db, account, shop = self._env(tmp_path)
+        db, account = self._env(tmp_path)
         try:
             # 另一个账号有 ark 令牌 → 也不得被借用
             other = PlatformAccount(
@@ -411,7 +414,10 @@ class TestQianfanTakesOnlyTheAccountsOwnArkChannel:
                 "没有自有 ark 令牌就必须如实返回空 —— 借令牌会让「扫错店」静默成立"
             )
             assert qianfan_cookies_for_account(db, other.id), "前置条件：另一个账号确实有票"
-            assert shop.id == account.shop_id_fk
+            # ADR-021：归属（`seller_id`）与能力（`ark` 令牌）是两件事 ——
+            # 有归属不等于有票（旧实现用 `shop.id == account.shop_id_fk` 表达这条）。
+            assert account.seller_id == "SELLER-1"
+            assert qianfan_cookies_for_account(db, account.id) == ""
         finally:
             db.close()
             app.dependency_overrides.clear()
@@ -425,7 +431,7 @@ class TestQianfanTakesOnlyTheAccountsOwnArkChannel:
         """
         from backend.app.services.shop_binding_service import qianfan_cookies_for_account
 
-        db, account, _shop = self._env(tmp_path)
+        db, account = self._env(tmp_path)
         try:
             store_channel_cookies(db=db, account=account, cookies_text=_cookie_text(CREATOR_JAR))
             db.commit()
@@ -470,28 +476,28 @@ class TestSoftDeletedAccountsAreUnusable:
         db.commit()
         return db, user, target, helper
 
-    def test_shop_for_soft_deleted_account_is_none(self, tmp_path: Path):
-        """账号软删后，它的店铺关系不得再被解析出来（否则凭据仍会被拿去调千帆）。
+    def test_ark_session_for_soft_deleted_account_is_none(self, tmp_path: Path):
+        """账号软删后，它不得再被判定为「有可用千帆会话」（否则凭据仍会被拿去调千帆）。
 
         ⚠️ 原用例名 `test_binding_for_soft_deleted_account_is_none`（绑定解析）
-        已被取代：`shop_account_bindings` 整表移除，同一道闸迁到
-        `shop_for_account` / `account_shop_id` 上，语义不变。
+        已被取代：`shop_account_bindings` 整表移除，同一道闸曾迁到
+        `shop_for_account` / `account_shop_id` 上；**2026-09-30 ADR-021 又进一步** ——
+        店铺实体退场，闸门本身收敛为「本账号 ark 令牌可用否」，即 `has_ark_session`。
+        语义不变：软删 ⇒ 不再解析出凭证。
         """
-        from backend.app.models.shop import Shop
-        from backend.app.services.shop_binding_service import shop_for_account
+        from backend.app.services.shop_binding_service import has_ark_session
 
         db, _user, target, _helper = self._env(tmp_path)
         try:
-            shop = Shop(user_id=target.user_id, seller_id="SELLER-1", shop_name="观隅好物的店")
-            db.add(shop)
-            db.flush()
-            target.shop_id_fk = shop.id
+            # 归属列（seller_id）与能力判据（ark 令牌）分写，正是 ADR-021 的口径。
+            target.seller_id = "SELLER-1"
+            _write_row(db, target.id, {CHANNEL_ARK: "a1=x; access-token-ark.xiaohongshu.com=y"})
             db.commit()
-            assert shop_for_account(db, target.id) is not None, "前置条件：软删前应能解析出店铺"
+            assert has_ark_session(db, target.id), "前置条件：软删前应有可用 ark 会话"
 
             target.deleted_at = shanghai_now()
             db.commit()
-            assert shop_for_account(db, target.id) is None
+            assert not has_ark_session(db, target.id)
         finally:
             db.close()
             app.dependency_overrides.clear()

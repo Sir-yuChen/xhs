@@ -119,7 +119,7 @@ def test_initial_data_file_exists_and_is_parseable():
     payload = json.loads(INITIAL_DATA_FILE.read_text(encoding="utf-8"))
     rows = payload["scheduled_jobs"]
     assert isinstance(rows, list)
-    assert len(rows) == 8, "定时任务初始化数据条数变化必须同步审阅（注册表 builtin 全集）"
+    assert len(rows) == 10, "定时任务初始化数据条数变化必须同步审阅（注册表 builtin 全集）"
 
 
 def test_initial_data_keys_match_registry_builtin_set():
@@ -340,11 +340,11 @@ def test_startup_seeding_is_decoupled_from_scheduler_switch(tmp_path, monkeypatc
     TestingSessionLocal = _override_database(tmp_path)
     monkeypatch.setattr(scheduler_service, "SessionLocal", TestingSessionLocal)
     try:
-        # DEF-066：内置行按用户播种 ⇒ 先有用户才有 8 行（原全局行形态已废）
+        # DEF-066：内置行按用户播种 ⇒ 先有用户才有 10 行（原全局行形态已废）
         _make_user(TestingSessionLocal)
         # 直接调启动播种（它就是 lifespan 里那一步），不启调度器
         created = scheduler_service.seed_builtin_jobs_from_initial_data()
-        assert created == 8
+        assert created == 10
 
         db = TestingSessionLocal()
         keys = set(db.scalars(select(ScheduledJob.job_key)).all())
@@ -407,7 +407,7 @@ def test_existing_rows_are_never_overwritten(tmp_path, monkeypatch):
         db.commit()
 
         created = ensure_builtin_jobs(db)
-        assert len(created) == 7, "已存在的那一行不该再插"
+        assert len(created) == 9, "已存在的那一行不该再插"
 
         row = db.scalar(select(ScheduledJob).where(ScheduledJob.job_key == "system.note_sync"))
         assert row.name == "我改过的名字"
@@ -434,7 +434,7 @@ def test_missing_data_file_falls_back_to_code_defaults_with_warning(tmp_path, mo
             _make_user(TestingSessionLocal)
             created = ensure_builtin_jobs(db)
             db.close()
-        assert len(created) == 8, "文件缺失也要有兜底种子（不能少任务）"
+        assert len(created) == 10, "文件缺失也要有兜底种子（不能少任务）"
         assert any("不存在" in record.message for record in caplog.records)
     finally:
         app.dependency_overrides.clear()

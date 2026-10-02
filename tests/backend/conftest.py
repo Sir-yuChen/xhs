@@ -297,12 +297,188 @@ def frontend_runner() -> Callable[[str, dict[str, str] | None], Any]:
 LATER_MIGRATION_TABLES: dict[str, str] = {
     # `l3m4n5o6p7q8`（2026-09-28，设计 13 §41.6）：建 `notes(user_id, created_at)` 复合索引。
     # 夹具只需要「这张表存在 + 有这两列」——迁移只建索引，不读数据。
+    # ⚠️ 2026-09-30 补 `note_id` / `platform_account_id`：`b3c4d5e6f7a8` 给
+    #    `note_comments` 回填隔离键时要 `SELECT n.platform_account_id FROM notes n
+    #    WHERE n.note_id = note_comments.note_id` —— 少这两列就是
+    #    `no such column: n.platform_account_id`。
     "notes": (
         "CREATE TABLE notes ("
         " id INTEGER NOT NULL,"
         " user_id INTEGER,"
         " note_id VARCHAR(64),"
+        " platform_account_id INTEGER,"
         " created_at DATETIME NOT NULL,"
+        " PRIMARY KEY (id))"
+    ),
+    # `m4n5o6p7q8r9`（2026-09-29，设计 17 §3.8/§3.9）：llm 网关两张新表。
+    # 迁移区间内会自动建（幂等保护：已存在即返回），夹具只需保证「不冲突」。
+    "llm_gateway_configs": (
+        "CREATE TABLE llm_gateway_configs ("
+        " id INTEGER NOT NULL,"
+        " user_id INTEGER NOT NULL,"
+        " name VARCHAR(128) NOT NULL,"
+        " base_url VARCHAR(512) NOT NULL DEFAULT 'http://127.0.0.1:3000',"
+        " access_token TEXT NOT NULL DEFAULT '',"
+        " default_model VARCHAR(128) NOT NULL DEFAULT '',"
+        " enabled BOOLEAN NOT NULL DEFAULT 1,"
+        " healthy BOOLEAN NOT NULL DEFAULT 0,"
+        " last_health_at DATETIME,"
+        " created_at DATETIME NOT NULL,"
+        " updated_at DATETIME NOT NULL,"
+        " PRIMARY KEY (id))"
+    ),
+    "llm_gateway_snapshots": (
+        "CREATE TABLE llm_gateway_snapshots ("
+        " id INTEGER NOT NULL,"
+        " user_id INTEGER NOT NULL,"
+        " gateway_id INTEGER NOT NULL,"
+        " stat_date DATE NOT NULL,"
+        " call_count INTEGER NOT NULL DEFAULT 0,"
+        " success_count INTEGER NOT NULL DEFAULT 0,"
+        " fail_count INTEGER NOT NULL DEFAULT 0,"
+        " total_quota INTEGER NOT NULL DEFAULT 0,"
+        " total_tokens INTEGER NOT NULL DEFAULT 0,"
+        " avg_latency_ms INTEGER,"
+        " source VARCHAR(16) NOT NULL DEFAULT 'newapi',"
+        " raw_json TEXT NOT NULL DEFAULT '{}',"
+        " created_at DATETIME NOT NULL,"
+        " updated_at DATETIME NOT NULL,"
+        " PRIMARY KEY (id))"
+    ),
+    # `d5e6f7a8b9c0`（2026-10-01，设计 17 §13.1 v1.9）：服务商化 ——
+    # `llm_gateway_configs` 加 `provider_key`/`platform`、`model_configs` 加 `provider_key`、
+    # drop `llm_gateway_tokens`。
+    # ⚠️ `model_configs` 是**首迁移**（`3bd70519ad3c`）建的**一期表** —— 最小夹具没有它，
+    #    而本迁移要 `ALTER TABLE model_configs ADD COLUMN` ⇒ 缺表即
+    #    `no such table: model_configs`（实测踩到）。故给最小形状（只需表存在 + 加列不冲突）。
+    "model_configs": (
+        "CREATE TABLE model_configs ("
+        " id INTEGER NOT NULL,"
+        " user_id INTEGER,"
+        " name VARCHAR(128) NOT NULL,"
+        " model_type VARCHAR(32) NOT NULL,"
+        " provider VARCHAR(64) NOT NULL,"
+        " model_name VARCHAR(128),"
+        " base_url TEXT,"
+        " encrypted_api_key TEXT,"
+        " is_default BOOLEAN,"
+        " PRIMARY KEY (id))"
+    ),
+    "llm_gateway_tokens": (
+        # v1.9 该表被 drop；夹具先建出来，迁移才会走「存在 ⇒ drop」分支。
+        "CREATE TABLE llm_gateway_tokens ("
+        " id INTEGER NOT NULL,"
+        " user_id INTEGER NOT NULL,"
+        " gateway_id INTEGER NOT NULL,"
+        " platform VARCHAR(32) NOT NULL,"
+        " function VARCHAR(32) NOT NULL,"
+        " token_name VARCHAR(128) NOT NULL,"
+        " enabled BOOLEAN NOT NULL DEFAULT 1,"
+        " created_at DATETIME NOT NULL,"
+        " updated_at DATETIME NOT NULL,"
+        " PRIMARY KEY (id))"
+    ),
+    # `b3c4d5e6f7a8`（2026-09-30，设计 18 / ADR-021）：隔离键从店铺收敛到平台账号 ——
+    # 加 `platform_accounts.seller_id`（带 shops 回填）、`shop_products` 换键重建、
+    # `note_comments.platform_account_id`、`scheduled_job_logs` 列改名、drop `shops`。
+    # 迁移会读 `notes.platform_account_id`、`shops.id/seller_id`，故一并给最小形状。
+    # ⚠️ 只给「迁移要碰的列」，不复制生产全貌（夹具债在夹具侧还，见上方立规注释）。
+    # ⚠️ 列清单 = 「stamp 点之后的**全部**迁移读到的列」并集，不只是 ADR-021 自己那几列：
+    #    * `shop_id_fk` / `shop_state` —— `b3c4d5e6f7a8` 与 `g6h7i8j9k0l1` 都读；
+    #    * `sub_type` —— `g6h7i8j9k0l1` 合并重复账号时读（`_pick_strongest_sub_type`）；
+    #    * `external_user_id` —— `g6h7i8j9k0l1` 按小红书 ID 合并/建索引读；
+    #    * `deleted_at` —— `a0b1c2d3e4f5` 清洗 `account_ids` 时读
+    #      （`SELECT user_id, id FROM platform_accounts WHERE deleted_at IS NULL`）。
+    #    漏一列就是一条 `no such column: xxx`，而且报错被 `run_alembic` 包成
+    #    AssertionError，看起来像个与用例无关的迁移债 —— 2026-09-30 连踩两次
+    #    （先 `scheduled_job_logs already exists`、再 `no such column: deleted_at`）。
+    "platform_accounts": (
+        "CREATE TABLE platform_accounts ("
+        " id INTEGER NOT NULL,"
+        " user_id INTEGER,"
+        " platform VARCHAR(32),"
+        " sub_type VARCHAR(32),"
+        " nickname VARCHAR(128),"
+        " external_user_id VARCHAR(128),"
+        " deleted_at DATETIME,"
+        " shop_id_fk INTEGER,"
+        " shop_state TEXT NOT NULL DEFAULT '{}',"
+        " PRIMARY KEY (id))"
+    ),
+    "shops": (
+        "CREATE TABLE shops ("
+        " id INTEGER NOT NULL,"
+        " user_id INTEGER,"
+        " seller_id VARCHAR(64),"
+        " shop_id VARCHAR(64),"
+        " shop_name VARCHAR(128),"
+        " PRIMARY KEY (id))"
+    ),
+    # ⚠️ `b3c4d5e6f7a8` **重建**这张表（SQLite 改不了约束）：先
+    #    `INSERT INTO shop_products_new SELECT p.<25 列> FROM shop_products p`
+    #    再 DROP/RENAME。所以夹具必须给**它 SELECT 的那 25 列**（少一列就是
+    #    `no such column: p.stock` —— 2026-09-30 实测踩到），不能只给「看起来
+    #    跟换键有关」的几列。列清单与该迁移 `INSERT ... SELECT` 严格对齐。
+    "shop_products": (
+        "CREATE TABLE shop_products ("
+        " id INTEGER NOT NULL,"
+        " user_id INTEGER,"
+        " shop_id_fk INTEGER,"
+        " item_id VARCHAR(64),"
+        " item_title VARCHAR(512),"
+        " price VARCHAR(32),"
+        " stock INTEGER,"
+        " sales INTEGER,"
+        " category VARCHAR(128),"
+        " images_json TEXT,"
+        " status VARCHAR(32),"
+        " synced_at DATETIME,"
+        " raw_json TEXT NOT NULL DEFAULT '{}',"
+        " detail_json TEXT DEFAULT '{}',"
+        " sku_count INTEGER,"
+        " detail_synced_at DATETIME,"
+        " platform_missing_at DATETIME,"
+        " article_no VARCHAR(64),"
+        " card_type INTEGER,"
+        " price_min_fen INTEGER,"
+        " price_max_fen INTEGER,"
+        " create_time_ms INTEGER,"
+        " on_shelf_time_ms INTEGER,"
+        " off_shelf_time_ms INTEGER,"
+        " last_audit_time_ms INTEGER,"
+        " sales_30d INTEGER,"
+        " PRIMARY KEY (id))"
+    ),
+    "note_comments": (
+        "CREATE TABLE note_comments ("
+        " id INTEGER NOT NULL,"
+        " note_id VARCHAR(64),"
+        " comment_id VARCHAR(64),"
+        " content TEXT,"
+        " PRIMARY KEY (id))"
+    ),
+    # ⚠️ `scheduled_job_logs` **不在此表**（2026-09-30 修正）：它是 `y8z9a0b1c2d3`
+    #    自己 `create_table` 建的，而 stamp 在 `x7y8z9a0b1c2`（= 它的父 revision）的两个
+    #    用例（`test_scheduled_jobs.py` / `test_initial_data.py`）跑 `upgrade head` 时，
+    #    这条迁移**就在区间内**。夹具先建 ⇒ 迁移再建 ⇒
+    #    `OperationalError: table scheduled_job_logs already exists`（e3q8），
+    #    且这条错误会被 `run_alembic` 包成 AssertionError，看起来像个无关的迁移债。
+    #    stamp 更晚的那几个用例（`h8i9j0k1l2m3` / `k1l2m3n4o5p6` / `b2c3d4e5f6g7` /
+    #    `h9i0j1k2l3m4`）各自在夹具里建了 `scheduled_job_logs`，不依赖本表。
+    #    ⇒ 本表只收「迁移**只读不改**、夹具又不得不给形状」的表。
+    # `f8a9b0c1d2e3`（2026-10-01，设计 17 §13.2.5 v2.0）：业务点映射建表 +
+    # `llm_gateway_configs.model_type` 加列 + `model_configs` **退场（drop）**。
+    # ⚠️ `model_configs` 的最小形状**沿用上面的 d5e6 定义**（同表同列）——
+    #    本迁移**读**它（存量兼容：is_default 行的 base_url 归一化后反查服务商
+    #    建映射）再 drop 它 ⇒ 夹具必须先建出来，否则存量兼容分支空跑、测不到。
+    # ⚠️ `llm_business_providers` **不在本清单**：迁移对它只建不读，夹具先建会
+    #    撞 `table already exists`（同 `scheduled_job_logs` 不在此表的先例）。
+    "publish_jobs": (
+        "CREATE TABLE publish_jobs ("
+        " id INTEGER NOT NULL,"
+        " user_id INTEGER,"
+        " platform_account_id INTEGER,"
+        " status VARCHAR(32),"
         " PRIMARY KEY (id))"
     ),
 }

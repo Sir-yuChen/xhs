@@ -12,7 +12,8 @@
 3. **入队即返回 + 语义落库**：`POST /accounts/{id}/notes/sync` 不再起线程，
    且 `mode` / 时间窗**写进任务行**（worker 从行重建参数 —— 不落库就丢）；
 4. **可见性**：`GET /tasks?task_types=…` 的筛选在**后端**做（前端过滤会被分页切掉）；
-5. **保留期清理覆盖三类账号级任务**（不再是「队列记录 15 天、账号级行永久」的双轨）；
+5. **保留期清理覆盖全部账号级任务类型**（§44 起 4 类：笔记 / 商品笔记 / 商品 / 清理；
+   不再是「队列记录 15 天、账号级行永久」的双轨）；
 6. **看门狗按缺口补齐**（§42）：死掉**那一类**的 worker 要被补回来，且复位中断行时
    **跳过**还活着的那条 worker 手上的任务（不把行从它脚下抽走）。
 """
@@ -512,7 +513,11 @@ def test_account_tasks_are_filtered_by_type_on_the_backend(api_client, db_factor
 
 
 def test_retention_cleanup_covers_all_account_level_types(db_factory, monkeypatch):
-    """保留期清理覆盖三类账号级任务（原来是「队列记录 15 天、账号级行永久」的双轨）。"""
+    """保留期清理覆盖**全部**账号级任务类型（原来是「队列记录 15 天、账号级行永久」的双轨）。
+
+    ⚠️ 计数随 `ACCOUNT_TASK_TYPES` 走（§44 起 4 类：笔记同步 / 商品笔记同步 / 商品同步 /
+    无流量清理），**不许写死字面量** —— 它只是「循环确实跑遍了这张表」的证明。
+    """
     monkeypatch.setattr(ats, "_session_factory", db_factory)
     from backend.app.core.time import shanghai_now
     from datetime import timedelta
@@ -535,7 +540,9 @@ def test_retention_cleanup_covers_all_account_level_types(db_factory, monkeypatc
         db.close()
 
     result = note_queue_service.cleanup_records(db_factory(), user_id=1, retention_days=15)
-    assert result["account_tasks"] == 3, "三类账号级任务都要被保留期清理覆盖"
+    assert result["account_tasks"] == len(ACCOUNT_TYPES), (
+        "账号级任务类型都要被保留期清理覆盖（计数跟着 ACCOUNT_TASK_TYPES 走，不写死）"
+    )
     db = db_factory()
     try:
         assert db.scalars(select(Task).where(Task.task_type.in_(ACCOUNT_TYPES))).all() == []

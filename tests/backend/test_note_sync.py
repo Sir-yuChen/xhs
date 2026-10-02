@@ -171,6 +171,9 @@ class FakeCreatorAdapter:
 class FakeQianfanAdapter:
     note_id_queries: list = []
     calls = 0
+    #: 商品笔记**列表**接口被调用的次数（`note_ids` 那类查询**不算**）。
+    #: §44 用来断言「普通笔记任务一次都没打千帆列表」/「商品笔记任务没打创作者列表」。
+    list_pages = 0
     #: §19：商品笔记**列表**（不带 note_ids 的调用）返回的条目。
     #: 形状抄自 2026-09-21 真机抓包的 `goods-note/list` 响应。
     list_entries: list = []
@@ -188,6 +191,7 @@ class FakeQianfanAdapter:
                 for note_id in note_ids
             ]
             return True, "", {"data": {"note_infos": entries, "total": len(entries)}}
+        type(self).list_pages += 1
         entries = type(self).list_entries
         return True, "", {
             "data": {
@@ -273,6 +277,9 @@ def _reset_fakes() -> None:
     FakeCreatorAdapter.pages = None
     FakeQianfanAdapter.note_id_queries = []
     FakeQianfanAdapter.calls = 0
+    #: §44：商品笔记**列表**的调用计数必须一起归零 —— 它是「这条链路有没有打千帆」的判据，
+    #: 漏归零会让第二个用例读到上一个用例的累计值（断言恒真/恒假，全看用例顺序）。
+    FakeQianfanAdapter.list_pages = 0
     FakeQianfanAdapter.list_entries = []
     EXTRA_CHANNEL_COOKIES.clear()
     LIMITER["impl"] = AllowLimiter()
@@ -397,6 +404,68 @@ def pc_env_no_binding(tmp_path, monkeypatch):
     _teardown()
 
 
+@pytest.fixture
+def creator_env_no_ark(tmp_path, monkeypatch):
+    """创作者会话可用、但**没有千帆（ark）令牌**（**§44**：商品笔记的硬门禁判据）。
+
+    与 `creator_env` 只差 `with_binding=False`（那条路径同时写店铺关系 + ark 凭据）。
+    用来钉「商品笔记缺令牌 ⇒ 结构化 `ARK_SESSION_REQUIRED`，一条平台请求都不发」。
+    """
+    CURRENT[0] = CREATOR_COOKIES
+    ENV["channel"] = "creator"
+    headers, account_id, user_id, SessionLocal = _setup(
+        tmp_path, monkeypatch, sub_type="creator", with_binding=False
+    )
+    yield headers, account_id, user_id, SessionLocal
+    _teardown()
+
+
+# --------------------------------------------------------------------------- #
+# §44：单源路由（普通笔记 = creator / 商品笔记 = ark）
+# --------------------------------------------------------------------------- #
+
+def test_note_sources_only_is_the_single_router(creator_env):
+    """`_note_sources(only=…)` 是**唯一的路由开关**（§44）：两个源各有自己的硬门禁。
+
+    未知取值**必须抛 `ValueError`**，不许静默退化成某一种 —— 静默退化会让「商品笔记
+    同步」在源名打错时变成跑普通笔记，而且任务行看起来一切正常（最难查的一类错）。
+    """
+    _, account_id, _, SessionLocal = creator_env
+    db = SessionLocal()
+    try:
+        account = db.get(PlatformAccount, account_id)
+        # 缺省 = 普通笔记（creator），保持旧调用方（和端点）零感知。
+        assert [s["source"] for s in nss._note_sources(db, account)] == ["creator"]
+        assert [
+            s["source"] for s in nss._note_sources(db, account, only=nss.SOURCE_CREATOR)
+        ] == ["creator"]
+        assert [
+            s["source"] for s in nss._note_sources(db, account, only=nss.SOURCE_ARK)
+        ] == ["ark"]
+        with pytest.raises(ValueError):
+            nss._note_sources(db, account, only="creator,ark")
+    finally:
+        db.close()
+
+
+def test_source_to_task_type_mapping_is_pinned():
+    """源 → 任务类型映射钉死（§44）：漂移会让商品笔记写进普通笔记的任务类型。
+
+    两个模块对这组取值各有一份（`sync_task_service.SOURCE_TASK_TYPES` 与
+    `note_sync_service` 的源常量），`note_sync_service` 在 import 期有断言兜底；
+    这里再把**取值本身**钉一遍（改名 / 加源都必须改这条用例）。
+    """
+    assert sts.SOURCE_TASK_TYPES == {
+        "creator": sts.NOTE_SYNC_TASK_TYPE,
+        "ark": sts.GOODS_NOTE_SYNC_TASK_TYPE,
+    }
+    assert sts.NOTE_SYNC_TASK_TYPE == "xhs_note_sync"
+    assert sts.GOODS_NOTE_SYNC_TASK_TYPE == "xhs_goods_note_sync"
+    assert sts.task_type_for_source("ark") == sts.GOODS_NOTE_SYNC_TASK_TYPE
+    with pytest.raises(ValueError):
+        sts.task_type_for_source("both")
+
+
 # --------------------------------------------------------------------------- #
 # §19：三态同步（www / creator / ark 各自独立）
 # --------------------------------------------------------------------------- #
@@ -418,10 +487,13 @@ def test_missing_creator_session_fails_with_structured_reason(pc_env_no_binding)
     assert FakeQianfanAdapter.calls == 0
 
 
-def test_creator_source_failure_keeps_ark_and_reports_reason(creator_env, monkeypatch):
-    """创作者源失败但 ark 源可用 ⇒ **部分成功**（done），原因记在分源明细里。
+def test_creator_source_failure_fails_the_task_without_ark_fallback(creator_env, monkeypatch):
+    """**普通笔记任务只跑 creator 源**（§44）：它失败 ⇒ 本任务 `failed`，不拿 ark 兜底。
 
-    §19.3 的纪律不变：源与源互不阻塞，失败的那条**结构化**留在 `sources` 里。
+    ⚠️ 这条**取代**了拆分前的 `test_creator_source_failure_keeps_ark_and_reports_reason`
+    （原断言「creator 失败但 ark 可用 ⇒ done + 分源明细」）—— §44 删掉了混合双源：
+    混在一跑会把「创作者会话失效」伪装成「同步成功，只同步到商品笔记」。
+    商品笔记是**另一个任务**（`xhs_goods_note_sync`），自己有自己的门禁与结果行。
     """
     class FailingCreatorAdapter:
         def __init__(self, cookies: str) -> None:
@@ -432,14 +504,19 @@ def test_creator_source_failure_keeps_ark_and_reports_reason(creator_env, monkey
 
     monkeypatch.setattr(pc, "get_xhs_creator_api_adapter_factory", lambda: FailingCreatorAdapter)
     FakeQianfanAdapter.list_entries = [_ark_note("ARK-N1")]
-    _, account_id, user_id, _ = creator_env
+    _, account_id, user_id, SessionLocal = creator_env
 
     result = nss.run_note_sync(account_id, user_id=user_id)
 
-    assert result["status"] == sts.STATUS_DONE, result
-    by_source = {entry["source"]: entry for entry in result["sources"]}
-    assert "登录凭证缺失" in by_source["creator"]["error"]
-    assert by_source["ark"]["stored"] == 1
+    assert result["status"] == sts.STATUS_FAILED, result
+    assert "登录凭证缺失" in result["error"]
+    # **ark 一次都没打**：普通笔记任务里它不再是兜底源（§44）。
+    assert FakeQianfanAdapter.calls == 0
+    db = SessionLocal()
+    try:
+        assert db.scalars(select(Note.note_id)).all() == []
+    finally:
+        db.close()
 
 
 def test_without_creator_session_ark_is_not_enough(pc_env, monkeypatch):
@@ -463,8 +540,13 @@ def test_without_creator_session_ark_is_not_enough(pc_env, monkeypatch):
         db.close()
 
 
-def test_creator_and_ark_sources_run_when_both_usable(creator_env, monkeypatch):
-    """创作者平台 + 千帆均可用 ⇒ 两个源各自落库（§21：**www 已不参与**）。"""
+def test_normal_note_sync_runs_only_the_creator_source(creator_env, monkeypatch):
+    """创作者平台 + 千帆**都可用** ⇒ 普通笔记任务仍然**只跑 creator 源**（§44）。
+
+    ⚠️ 这条**取代**了拆分前的 `test_creator_and_ark_sources_run_when_both_usable`
+    （原断言 `set(by_source) == {"creator", "ark"}`）。它同时是「混合路径已删」的守卫：
+    **把 ark 追加写回 `_note_sources(only="creator")` 本用例必红**。
+    """
     FakeQianfanAdapter.list_entries = [_ark_note("ARK-N1")]
     _, account_id, user_id, SessionLocal = creator_env
 
@@ -472,22 +554,88 @@ def test_creator_and_ark_sources_run_when_both_usable(creator_env, monkeypatch):
 
     assert result["status"] == sts.STATUS_DONE, result
     by_source = {entry["source"]: entry for entry in result["sources"]}
-    # ⚠️ `www` **不在**清单里 —— 这是 §21.4 的那条删除，写回 www 源本用例必红。
-    assert set(by_source) == {"creator", "ark"}
+    # ⚠️ `ark` **不在**清单里 —— 这正是 §44 删掉的混合路径。
+    assert set(by_source) == {"creator"}
     assert by_source["creator"]["stored"] == 2  # C-N1 / C-N2
-    assert by_source["ark"]["stored"] == 1
+    # ark **列表**一次都没打（连商品笔记列表都没取）。
+    assert FakeQianfanAdapter.list_pages == 0
 
     db = SessionLocal()
     try:
-        assert {"C-N1", "C-N2", "ARK-N1"} <= set(db.scalars(select(Note.note_id)).all())
+        assert {"C-N1", "C-N2"} <= set(db.scalars(select(Note.note_id)).all())
+        # ARK-N1 **没有**被落库：那是商品笔记任务的活（§44）。
+        assert "ARK-N1" not in set(db.scalars(select(Note.note_id)).all())
+    finally:
+        db.close()
+
+
+def test_goods_note_sync_runs_only_the_ark_source(creator_env, monkeypatch):
+    """商品笔记任务（`only="ark"`）**只跑 ark 源**，且**不碰**账号级口径（§44）。
+
+    钉三件事：① 源清单只有 ark；② 创作者适配器一次都没打；③ `notes_count` 与
+    note 游标**不被写** —— 千帆报的 `total` 是商品笔记子集数，写进「账号笔记总数」
+    会让卡片把账号笔记数显示成子集数；游标被 ark 推进会让普通笔记的增量同步
+    跳过从未同步过的旧笔记。
+    """
+    FakeQianfanAdapter.list_entries = [_ark_note("ARK-N1")]
+    _, account_id, user_id, SessionLocal = creator_env
+    creator_calls_before = len(FakeCreatorAdapter.calls)
+
+    result = nss.run_note_sync(account_id, user_id=user_id, only=nss.SOURCE_ARK)
+
+    assert result["status"] == sts.STATUS_DONE, result
+    by_source = {entry["source"]: entry for entry in result["sources"]}
+    assert set(by_source) == {"ark"}
+    assert by_source["ark"]["stored"] == 1
+    db = SessionLocal()
+    try:
+        assert "ARK-N1" in set(db.scalars(select(Note.note_id)).all())
+        account = db.get(PlatformAccount, account_id)
+        # ① 笔记总数没被写成「商品笔记子集数」（1969 是 creator 列表的 total，
+        #    本用例里 creator 源没跑 ⇒ 必须是「没写过」而不是「被覆盖成小值」）。
+        assert "notes_count" not in json.loads(account.profile_json or "{}")
+        # ② 游标没被推进。
+        assert int(account.note_sync_cursor_ms or 0) == 0
+    finally:
+        db.close()
+    # 创作者列表一次都没打（普通笔记是另一个任务）。
+    assert len(FakeCreatorAdapter.calls) == creator_calls_before
+
+
+def test_goods_note_sync_requires_ark_token(creator_env_no_ark):
+    """商品笔记任务的硬门禁是 **ark 令牌**（§44）：没有 ⇒ 结构化失败 + **零平台请求**。
+
+    ⚠️ 这条是拆分要修的语义本身：拆分前 ark 只是混合任务的可选附加源，拿不到就
+    **静默少跑一个源**，用户看到的是「同步成功」（只是没有商品笔记）。现在它是一个
+    独立任务的门禁，缺令牌必须说出来（`ARK_SESSION_REQUIRED`），且任务类型落在
+    `xhs_goods_note_sync` 上（而不是普通笔记那条）。
+    """
+    _, account_id, user_id, SessionLocal = creator_env_no_ark
+
+    result = nss.run_note_sync(account_id, user_id=user_id, only=nss.SOURCE_ARK)
+
+    assert result["status"] == sts.STATUS_FAILED, result
+    assert "ARK_SESSION_REQUIRED" in result["error"]
+    # 一条平台请求都没发（账号级请求也没有）。
+    assert FakeQianfanAdapter.calls == 0
+    assert FakeQianfanAdapter.list_pages == 0
+    db = SessionLocal()
+    try:
+        task = db.get(Task, result["task_id"])
+        assert task.task_type == sts.GOODS_NOTE_SYNC_TASK_TYPE, (
+            "门禁失败的账也必须记在**商品笔记**的任务类型下（否则任务中心看不到这条失败）"
+        )
+        assert task.status == sts.STATUS_FAILED
     finally:
         db.close()
 
 
 def test_ark_merge_never_erases_existing_content(creator_env, monkeypatch):
-    """ark 源**填空合并**：已落库的正文 / 标题一个字节不动（§19.3.2 语义不变）。"""
-    # 创作者源这一轮**不返回 C-N1**，让 C-N1 只由 ark 源处理（否则整行覆盖会先清空正文）。
-    FakeCreatorAdapter.note_ids = ["C-OTHER"]
+    """ark 源**填空合并**：已落库的正文 / 标题一个字节不动（§19.3.2 语义不变）。
+
+    §44 起 ark 只在**商品笔记任务**（`only="ark"`）里跑 —— 它仍必须「只补空字段」：
+    直接整行覆盖会把详情补齐已经填好的正文抹成空。
+    """
     _, account_id, user_id, SessionLocal = creator_env
 
     # 先造一条「已落库、带正文」的行（模拟详情补齐已经填过正文）。
@@ -508,7 +656,7 @@ def test_ark_merge_never_erases_existing_content(creator_env, monkeypatch):
         db.close()
 
     FakeQianfanAdapter.list_entries = [_ark_note("C-N1", title="千帆侧标题")]
-    result = nss.run_note_sync(account_id, user_id=user_id)
+    result = nss.run_note_sync(account_id, user_id=user_id, only=nss.SOURCE_ARK)
     assert result["status"] == sts.STATUS_DONE, result
 
     db = SessionLocal()
@@ -819,34 +967,48 @@ def test_rate_limit_key_is_per_source():
 
 
 def test_limited_source_is_marked_limited(creator_env, monkeypatch):
-    """ark 源被限流 ⇒ `limited=True`、stored=0（**不是**「千帆 0 条笔记」）。
+    """源被限流 ⇒ `limited=True`、stored=0（**不是**「千帆 0 条笔记」）。
 
-    真机教训（2026-09-22，acct 8）：creator 源翻页耗光额度后 ark 源被挡，
-    结果行显示「千帆商品笔记 0 条」—— 把「没跑完」显示成了「没数据」。
+    真机教训（2026-09-22，acct 8）：翻页耗光额度后源被挡，结果行显示
+    「千帆商品笔记 0 条」—— 把「没跑完」显示成了「没数据」。
+
+    §44 起两条链路各自有「被限流」的可能，这里两个方向都钉：creator 源（普通笔记任务）
+    与 ark 源（商品笔记任务），判据同一条 —— 限流桶按 `<账号>:<源>` 分（§38.3），
+    所以只挡其中一个源时另一个源照常跑完。
     """
     _, account_id, user_id, _ = creator_env
 
     class PerKeyLimiter:
-        """只挡 ark 源的假限流器（按限流键判定，不按账号）。"""
+        """只挡某一个源的假限流器（按限流键判定，不按账号）。"""
+
+        def __init__(self, suffix: str) -> None:
+            self.suffix = suffix
 
         def allow(self, key) -> bool:  # noqa: ARG002
-            return str(key) != f"{account_id}:ark"
+            return not str(key).endswith(self.suffix)
 
         def wait_allow(self, key, **kwargs) -> bool:  # noqa: ARG002
             return self.allow(key)
 
-    LIMITER["impl"] = PerKeyLimiter()
+    # ① 商品笔记任务：ark 源被挡 ⇒ limited=True、stored=0（不是「千帆没笔记」）。
+    LIMITER["impl"] = PerKeyLimiter(":ark")
     FakeQianfanAdapter.list_entries = [_ark_note("ARK-N1")]
+    ark_result = nss.run_note_sync(account_id, user_id=user_id, only=nss.SOURCE_ARK)
+    ark_by_source = {entry["source"]: entry for entry in ark_result["sources"]}
+    assert set(ark_by_source) == {"ark"}
+    assert ark_by_source["ark"]["stored"] == 0
+    assert ark_by_source["ark"]["limited"] is True
 
-    result = nss.run_note_sync(account_id, user_id=user_id)
-
-    by_source = {entry["source"]: entry for entry in result["sources"]}
-    assert set(by_source) == {"creator", "ark"}
-    assert by_source["creator"]["stored"] == 2
-    assert by_source["creator"]["limited"] is False
-    # ark 源第 1 页前就被挡 ⇒ limited=True（0 条是没跑完，不是没数据）
-    assert by_source["ark"]["stored"] == 0
-    assert by_source["ark"]["limited"] is True
+    # ② 普通笔记任务：creator 源被挡 ⇒ 同上；而且**ark 源一次都没被碰**
+    #    （拆分之后两条链路不共享额度，也不再互相兜底）。
+    LIMITER["impl"] = PerKeyLimiter(":creator")
+    FakeQianfanAdapter.list_pages = 0
+    creator_result = nss.run_note_sync(account_id, user_id=user_id)
+    creator_by_source = {entry["source"]: entry for entry in creator_result["sources"]}
+    assert set(creator_by_source) == {"creator"}
+    assert creator_by_source["creator"]["stored"] == 0
+    assert creator_by_source["creator"]["limited"] is True
+    assert FakeQianfanAdapter.list_pages == 0
 
 # --------------------------------------------------------------------------- #
 # 缺值不造假（硬约束⑤）
@@ -1089,7 +1251,7 @@ def test_status_is_idle_before_any_task_and_after_one_finishes(creator_env):
         db.add(
             ScheduledJobLog(
                 user_id=user_id,
-                account_id=account_id,
+                platform_account_id=account_id,
                 job_key=JOB_KEY_NOTE_SYNC,
                 job_name="同步笔记",
                 trigger_type="manual",

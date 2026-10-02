@@ -29,7 +29,7 @@ from backend.app.adapters.xhs import creator_api_adapter
 from backend.app.core.database import Base
 from backend.app.core.time import shanghai_now
 from backend.app.models import PlatformAccount, Task, User
-from backend.app.models.shop import Shop, ShopNoteGoods
+from backend.app.models.shop import ShopNoteGoods
 from backend.app.services import no_traffic_cleanup_service as ncs
 from backend.app.services.account_service import CHANNEL_CREATOR
 from backend.app.services.shop_binding_service import set_shop_state
@@ -98,12 +98,9 @@ def _setup(tmp_path, monkeypatch):
                 CHANNEL_CREATOR,
             )
         )
-        shop = Shop(user_id=user.id, seller_id="SELLER-1", shop_name="店")
-        db.add(shop)
-        db.flush()
-        #: 关系写账号行、状态写 `shop_state`（`shop_account_bindings` 整表移除，
-        #: 2026-09-22）。清理由账号发起，所以归属键是 `platform_account_id`。
-        account.shop_id_fk = shop.id
+        #: ADR-021：店铺已退场，归属键 = `platform_account_id`，账号归属写
+        #: `seller_id`；状态仍写 `shop_state`。清理由账号发起。
+        account.seller_id = "SELLER-1"
         set_shop_state(account, status="active", goods_note_total=3)
         db.flush()
         for note_id, kwargs in (

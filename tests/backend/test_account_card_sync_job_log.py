@@ -456,3 +456,132 @@ def test_await_task_terminal_reports_missing_and_timeout_instead_of_guessing(db_
     assert finished["status"] == "done", f"应观测到终态，实得 {finished}"
     assert finished["note"] == "跑完了"
     assert finished["progress"] == {"stored": 7, "total": 7}
+
+
+# --------------------------------------------------------------------------- #
+# §44（2026-09-30 用户拍板拆分）：「同步商品笔记」是**第三条链路**
+# --------------------------------------------------------------------------- #
+def test_goods_note_click_records_its_own_log_and_task_type(api_client, db_factory):
+    """点「同步商品笔记」⇒ **自己的**任务类型 + **自己的**日志流（§44）。
+
+    与 `…/notes/sync` 逐字同构（同一个 `_start_account_sync`），差别只有三处入参：
+    `task_type` / `job_key` / `source`。这条用例把三处都钉住 —— 它们漂移的后果是
+    「商品笔记的失败记在普通笔记的任务类型下」，任务中心看得到却对不上。
+    """
+    headers = _register(api_client, "goods-note-log")
+    user_id = _user_id(db_factory, "goods-note-log")
+    account_id = _make_account(db_factory, user_id)
+
+    response = api_client.post(
+        f"/api/accounts/{account_id}/goods-notes/sync",
+        headers=headers,
+        json={"mode": "full"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["reused"] is False
+    log_id = body["log_id"]
+    assert isinstance(log_id, int), "点击必须留下一条定时任务日志"
+
+    db = db_factory()
+    try:
+        task = db.get(Task, int(body["task_id"]))
+        assert task is not None
+        # ⚠️ 任务类型是**商品笔记**那条 —— 写成 xhs_note_sync 会把两条链路混成一条。
+        assert task.task_type == sts.GOODS_NOTE_SYNC_TASK_TYPE
+        assert task.task_type != sts.NOTE_SYNC_TASK_TYPE
+        # 来源具体到按钮（与「同步笔记」「同步商品」都不同）。
+        assert task.payload["source"] == "account_card_goods_note_sync"
+        assert task.status == "pending", "端点只建行，执行归账号任务 worker"
+        assert task.payload["mode"] == "full", "同步语义必须落库（worker 从行重建）"
+    finally:
+        db.close()
+
+    # 日志落在**自己的** job_key 流上（不是 system.note_sync）。
+    logs = _logs(db_factory, "system.goods_note_sync")
+    assert len(logs) == 1, f"商品笔记点击只应记一条自己的日志，实得 {len(logs)}"
+    assert _logs(db_factory, "system.note_sync") == [], "不许串到普通笔记的日志流"
+    assert logs[0]["status"] == "running", "任务没结束，日志不许先写终态（假成功）"
+    assert logs[0]["config_snapshot"]["params_override"]["account_id"] == account_id
+
+    _finish_task(db_factory, int(body["task_id"]), status="done", note="商品笔记同步完成")
+    final = _wait_log_terminal(db_factory, log_id)
+    assert final["status"] == "success"
+    assert final["result"]["note"] == "商品笔记同步完成"
+
+
+def test_note_and_goods_note_sync_do_not_block_each_other(api_client, db_factory):
+    """**防重按任务类型分别成立**（§44）：普通笔记在跑**不**阻塞商品笔记。
+
+    拆分前两者是同一个任务类型 ⇒ 「同步笔记在跑」会让「同步商品笔记」直接复用同一个
+    任务行（点了没反应、用户以为按钮坏了）。这正是拆分要修的语义之一，所以单独立一条。
+    """
+    headers = _register(api_client, "goods-note-parallel")
+    user_id = _user_id(db_factory, "goods-note-parallel")
+    account_id = _make_account(db_factory, user_id)
+
+    note = api_client.post(f"/api/accounts/{account_id}/notes/sync", headers=headers, json={})
+    assert note.status_code == 200, note.text
+    assert note.json()["reused"] is False
+
+    goods = api_client.post(
+        f"/api/accounts/{account_id}/goods-notes/sync", headers=headers, json={}
+    )
+    assert goods.status_code == 200, goods.text
+    assert goods.json()["reused"] is False, "普通笔记在跑不该阻塞商品笔记（两条独立任务）"
+    assert goods.json()["task_id"] != note.json()["task_id"]
+    assert isinstance(goods.json()["log_id"], int)
+
+    # 同一条链路自己仍然防重（第二次点击复用，不重复记账）。
+    again = api_client.post(
+        f"/api/accounts/{account_id}/goods-notes/sync", headers=headers, json={}
+    )
+    assert again.json()["reused"] is True
+    assert again.json()["task_id"] == goods.json()["task_id"]
+    assert again.json()["log_id"] is None, "复用不是新执行 ⇒ 不记日志"
+    assert len(_logs(db_factory, "system.goods_note_sync")) == 1
+
+    db = db_factory()
+    try:
+        types = sorted(db.scalars(select(Task.task_type)).all())
+        assert types == sorted([sts.NOTE_SYNC_TASK_TYPE, sts.GOODS_NOTE_SYNC_TASK_TYPE]), (
+            "两条独立任务行都在（不是复用成同一行）"
+        )
+    finally:
+        db.close()
+
+
+def test_goods_note_status_reads_only_its_own_stream(api_client, db_factory):
+    """状态端点各看各的日志流（§44）：普通笔记在跑 ⇒ 商品笔记按钮仍是「空闲」。
+
+    判据是「**该 job_key** 下该账号最新一条日志」（§35.17.4）⇒ 两条流互相不可见。
+    ⚠️ 合并回一个 job_key 时本用例必红（商品笔记按钮会被普通笔记点亮）。
+    """
+    headers = _register(api_client, "goods-note-status")
+    user_id = _user_id(db_factory, "goods-note-status")
+    account_id = _make_account(db_factory, user_id)
+
+    idle = api_client.get(
+        f"/api/accounts/{account_id}/goods-notes/sync/status", headers=headers
+    )
+    assert idle.status_code == 200, idle.text
+    assert idle.json()["status"] == "idle", "还没跑过 ⇒ 空态（不显示同步中）"
+
+    api_client.post(f"/api/accounts/{account_id}/notes/sync", headers=headers, json={})
+
+    note_status = api_client.get(
+        f"/api/accounts/{account_id}/notes/sync/status", headers=headers
+    ).json()
+    assert note_status["status"] in ("pending", "running"), note_status
+    still_idle = api_client.get(
+        f"/api/accounts/{account_id}/goods-notes/sync/status", headers=headers
+    ).json()
+    assert still_idle["status"] == "idle", (
+        "普通笔记在跑**不该**让商品笔记按钮也显示同步中（两条独立日志流）"
+    )
+
+    api_client.post(f"/api/accounts/{account_id}/goods-notes/sync", headers=headers, json={})
+    now_active = api_client.get(
+        f"/api/accounts/{account_id}/goods-notes/sync/status", headers=headers
+    ).json()
+    assert now_active["status"] in ("pending", "running"), now_active

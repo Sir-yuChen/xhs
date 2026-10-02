@@ -1015,6 +1015,61 @@ def test_note_sync_gate_is_creator_only():
     assert "max_pages" not in note_sync_body and "maxPages" not in note_sync_body
 
 
+def test_goods_note_sync_has_its_own_button_and_gate():
+    """**§44**（2026-09-30 用户拍板拆分）：「同步商品笔记」= **独立按钮 + 独立门禁 + 独立集合**。
+
+    用户诉求原文：「把『同步笔记』拆成『同步普通笔记』+『同步商品笔记』两个独立任务 + 入口，
+    在账号信息卡分开」。这条守卫钉**接线**（判据本体的行为由 `sync_gates.cjs` 的 J1–J4 真实驱动）：
+
+    ① 判据只有一份（`lib/sync-gates.ts::goodsNoteSyncPlan`），页面不得自建第二份；
+    ② `handleGoodsNoteSyncClick` 过该门禁，被拦时弹**自己的**补登提示（`setGoodsNotePrompt`）——
+       复用 `setArkPrompt` 会让用户看到「补登千帆」却不知道为哪件事补；
+    ③ 触发走**独立请求函数** `syncGoodsNotes`（任务类型不同 ⇒ 不得复用 `syncAccountNotes`）；
+    ④ 独立轮询集 `goodsNoteSyncIds` + 三条链路共用一张接线表 `syncChannels`
+       （首查 / 轮询 / 按钮态都从它遍历，少一条链路就没有任何断言能发现）。
+
+    ⚠️ ⑤ 与「同步商品」（店铺商品台账）**必须区分**：按钮文案要带「笔记」二字，
+    否则用户在卡片上看到两个语义不同的「同步商品」。
+    """
+    source = _read(ACCOUNTS)
+    code = _code_only(source)
+    gates = _read(ROOT / "frontend/src/lib/sync-gates.ts")
+
+    # ① 判据单一来源
+    assert "export function goodsNoteSyncPlan" in gates, "商品笔记门禁本体必须在 lib/sync-gates.ts"
+    assert "function goodsNoteSyncPlan" not in source, "门禁判据不得在页面里自建第二份"
+    assert "goodsNoteSyncPlan(" in code, "页面必须真的调用它（只 import 不算接线）"
+    # 判据复用同一个 ark 门禁（goodsGate），不许另写一份 unavailable 名单
+    assert "UNAVAILABLE_STATES" not in code, "不可用名单不得在页面里重复声明"
+
+    # ② 点击处理：门禁 + 自己的提示
+    handler = _slice_between(
+        code, "function handleGoodsNoteSyncClick", "async function startNoteSync"
+    )
+    assert "goodsNoteSyncPlan(" in handler and "plan.blocked" in handler
+    assert "setGoodsNotePrompt(account)" in handler, "ark 不可用必须弹「补登千帆」提示"
+    assert 'kind: "goods_notes"' in handler, "门禁通过后必须进「商品笔记」的选项弹窗"
+    assert "同步商品笔记" in source, "按钮 / 弹窗文案必须带「笔记」二字（与店铺商品区分）"
+
+    # ③ 触发走独立请求函数
+    starter = _slice_between(
+        code, "async function startGoodsNoteSync", "const syncChannels"
+    )
+    assert "syncGoodsNotes(accountId, options)" in starter
+    assert "syncAccountNotes(" not in starter, "商品笔记不得复用普通笔记的请求函数"
+    assert "setGoodsNoteSyncIds" in starter and "goodsNoteSyncIds" in starter
+
+    # ④ 独立轮询集 + 共用接线表
+    assert "const syncChannels: SyncChannel[] = [" in code, "链路接线表必须在（新增链路只加一行）"
+    channels = _slice_between(code, "const syncChannels: SyncChannel[] = [", "async function firstQuerySyncStatus")
+    for kind in ('kind: "notes"', 'kind: "goods_notes"', 'kind: "goods"'):
+        assert kind in channels, f"接线表缺少 {kind}（漏一条 = 那条链路的按钮切不回来）"
+
+    # ⑤ 与店铺商品按钮区分：两颗按钮的文案各是各的
+    assert '{isGoodsNoteSyncing ? "同步中" : "同步商品笔记"}' in code
+    assert '{isGoodsSyncing ? "同步中" : "同步商品"}' in code
+
+
 def test_accounts_sync_progress_renders_dash_for_unknown_total():
     """分母**未知时不渲染占位符**（§35.18.6 取代旧的「渲染 `-`」口径）。
 
@@ -1078,8 +1133,10 @@ def test_accounts_sync_polling_uses_five_seconds_and_stops_on_unmount():
     assert "clearTimeout" in source, "卸载时必须清掉定时器，否则离开页面还在打后端"
     assert "EventSource" not in source, "设计明确不引入 SSE"
     # 只依赖两个 Set 会让轮询在状态不变时**静默停在第 2 次** —— 节拍必须真的进依赖数组。
-    assert "[noteSyncIds, goodsSyncIds, syncPollTick]" in source, (
-        "syncPollTick 必须出现在 effect 的依赖数组里；只在别处出现不算数"
+    # ⚠️ §44（2026-09-30）拆出「同步商品笔记」⇒ 三个 Set **全部**要在依赖里：
+    # 少一个就有「商品笔记跑着、轮询却不再重排」的同型停摆（与少 gap 的 `syncPollTick` 一样隐蔽）。
+    assert "[noteSyncIds, goodsNoteSyncIds, goodsSyncIds, syncPollTick]" in source, (
+        "三条链路的 Set 与 syncPollTick 必须全部出现在 effect 的依赖数组里；只在别处出现不算数"
     )
 
 
@@ -1272,9 +1329,10 @@ def _run_sync_gates(env: dict | None = None):
 def test_sync_gate_three_states_are_driven_for_real():
     """三态门禁 / 分源摘要 / 缺值渲染 / 取消与耗时 / 首查驱动轮询 / 终态提示有**真实打包产物**验证。
 
-    36 条 = A(2) + B(1) + C(4) + D(4) + E(5) + F(3) + G(1) + H(11) + I(5)：创作者会话不可用
-    必须拦、unknown 必须放行、源清单只含 creator(+ark)（www 已退场）、被限流的源说
-    「未跑完」不说「0 条」、详情剩余缺值渲染 `-`、cancelled 终态带耗时（E4/E5，§24.8）；
+    40 条 = A(2) + B(1) + C(4) + D(4) + E(5) + F(3) + G(1) + H(11) + I(5) + **J(4)**：
+    创作者会话不可用必须拦、unknown 必须放行、源清单只含 creator（www 于 §21.4 退场、
+    **ark 于 §44 拆出**）、被限流的源说「未跑完」不说「0 条」、详情剩余缺值渲染 `-`、
+    cancelled 终态带耗时（E4/E5，§24.8）；
     H1–H7（§35.17.4，2026-09-27）盯「**要不要继续 5s 轮询**」这个决策：在跑 ⇒ active、
     已结束（含 failed / cancelled 两个非正常终态）⇒ finished、没跑过 ⇒ idle；
     H8–H11（§35.18，2026-09-27）盯「终态要不要打扰用户」：只有 failed / cancelled
@@ -1283,10 +1341,12 @@ def test_sync_gate_three_states_are_driven_for_real():
     I1–I5（**§35.18.6**，2026-09-27 用户报障）盯**进度分母三态**与**取消说明**：
     只有无界全量才报分母、有界（`total` 缺失）只报「已落库 N 条」（**不渲染 `/ 共 -`**）、
     详情补齐阶段优先报它、取消结果行剥掉「已被用户取消」后缀。
+    J1–J4（**§44**，2026-09-30 用户拍板拆分）盯**两条门禁互不牵连**：商品笔记的硬门禁是
+    ark（不是 creator）、它只跑 ark 源、creator 挂了不妨碍商品笔记（且反之亦然）。
     """
     result = _run_sync_gates()
     assert result.returncode == 0, (result.stdout + result.stderr)[-900:]
-    assert "36 PASS / 0 FAIL" in result.stdout
+    assert "40 PASS / 0 FAIL" in result.stdout
 
 
 @pytest.mark.parametrize(
@@ -1305,6 +1365,9 @@ def test_sync_gate_three_states_are_driven_for_real():
         ("terminalnotice", "H8"),  # 成功也弹提示 ⇒ 每次同步完都打扰用户（用户口径：只留按钮态）
         ("progressdash", "I2"),    # 分母缺失仍渲染「/ 共 -」⇒ 用户读成「卡住了」（§35.18.6）
         ("cancelsuffix", "I4"),    # 不剥取消后缀 ⇒ 结果行出现两次「取消」（§35.18.6）
+        ("arkleak", "C2"),         # ark 混回普通笔记源清单 ⇒ §44 拆分白做
+        ("goodsnotegate", "J1"),   # 商品笔记的 ark 硬门禁失效 ⇒ 点了必失败
+        ("goodsnotesrc", "J3"),    # 商品笔记把 creator 混进来 ⇒ 又回到多源任务
     ],
 )
 def test_sync_gates_guards_are_load_bearing(mutate, expected):
@@ -1373,6 +1436,9 @@ def test_accounts_page_sync_state_is_driven_by_first_query():
     # 反向锚点：按钮文案仍随集合切换，且驱动它的集合还在
     assert "const isNoteSyncing = noteSyncIds.has(account.id);" in code
     assert '{isNoteSyncing ? "同步中" : "同步笔记"}' in code, "同步笔记按钮必须能显示「同步中」"
+    assert '{isGoodsNoteSyncing ? "同步中" : "同步商品笔记"}' in code, (
+        "§44 起必须有「同步商品笔记」按钮，且随集合切换（否则它永远停在可点态）"
+    )
     assert '{isGoodsSyncing ? "同步中" : "同步商品"}' in code, "同步商品按钮同规"
 
 
@@ -2724,3 +2790,95 @@ def test_failure_three_way_blocks_stay_inline_after_the_message_switch():
     assert '<Alert type="info"' in analytics and "开发优化中" in analytics, (
         "分析页「开发优化中」是常驻静态说明，不该被消息化（原设置页项目声明已按用户口径移除）"
     )
+
+
+# ---------------------------------------------------------------------------
+# v2.0 模型配置页改造（设计 17 §13.2.1 / §13.2.6）—— 页面结构守卫锚点
+#
+# 为什么这一页要单独盯：M3 把它**整页重写**了（510 行 → 241 行），旧锚点
+# （一期「默认模型」表单 / `ModelConfigPayload` / 保存按钮）全随 `model_configs`
+# 退场而消失。**旧锚点会假绿**：断言字符串已经不在文件里了，但不是因为写对了，
+# 而是因为整页换掉了 —— 必须对着新实现重新落锚，否则这一页谁改都没人管。
+#
+# 守的四件「不许回退」：
+# ① 业务点清单**从后端拉**（前端不写死 key 列表 —— 写死 = 新增业务点要改两处，
+#    前端那份静默过期，DEF-044）；
+# ② **选中即生效**（onChange 直接 PUT，没有「保存」按钮 —— 用户要的是实时，
+#    多一个按钮就多一个「改了没点保存」的静默坑）；
+# ③ 下拉候选**按 kind 过滤**（图像业务点不列文本服务商，否则选了就过不了
+#    后端类型校验，用户以为是后端坏了）；
+# ④ 空态**有文案**（没有该类型服务商时给一行说明，不是空下拉 ——
+#    空下拉无法区分「坏了」与「没配」，DEF-057 同型）。
+# ---------------------------------------------------------------------------
+
+MODEL_CONFIG_PAGE = ROOT / "frontend/src/pages/models/model-config-page.tsx"
+
+
+def test_model_config_page_lists_business_keys_from_backend():
+    """① 业务点清单**从后端拉**，不在前端写死。"""
+    code = _code_only(_read(MODEL_CONFIG_PAGE))
+    assert "fetchBusinessProviderKeys" in code, (
+        "业务点清单必须从 `/api/llm/business-provider-keys` 拉（后端常量是唯一真相源）"
+    )
+    assert "fetchBusinessProviders" in code, "映射列表必须从后端拉"
+    # 反向：前端不许出现任何业务点 key 字面量（含 label）—— 出现就是第二份清单
+    for literal in ("generate_note", "rewrite_note", "generate_title", "generate_tags",
+                    "polish_text", "generate_cover", "generate_image", "describe_image"):
+        assert literal not in code, (
+            f"页面写死了业务点 key `{literal}`：清单应从后端拉，写死 = 新增业务点要改两处"
+        )
+    # ⚠️ 只看 import 不够：把 `fetchBusinessProviderKeys()` 从 Promise.all 里删掉、
+    # import 仍留着 ⇒ 字符串断言照样绿（变异实测）。**调用必须在 load 函数体里**：
+    # 切 `load` → `candidatesFor` 这一段，两个调用都必须**带括号**出现在里面
+    # （import 行没括号；带括号 = 真在调，不是「导入了没用」）。
+    body = _slice_between(code, "const load = useCallback(", "const candidatesFor = useCallback(")
+    assert "fetchBusinessProviders(" in body, "load 必须真调 fetchBusinessProviders"
+    assert "fetchBusinessProviderKeys(" in body, (
+        "load 必须真调 fetchBusinessProviderKeys（import 留着不等于在调）"
+    )
+
+
+def test_model_config_page_switch_is_immediate_without_save_button():
+    """② 选中即生效：onChange 直接 PUT，**没有「保存」按钮**。"""
+    code = _code_only(_read(MODEL_CONFIG_PAGE))
+    assert "upsertBusinessProvider" in code, "切换必须走 PUT /api/llm/business-providers"
+    body = _slice_between(code, "const onSwitch = useCallback(", "const rowsWithKey = useMemo(")
+    # ⚠️ 断言**带缩进的顶层调用**，不是「文件里有这个字符串」：把
+    # `await upsertBusinessProvider({` 挪进 `if (false)` 死分支，字符串断言照样绿
+    # （变异实测）。调用必须是 `try` 后的第一条可执行语句（行首正好 8 空格 +
+    # `await`，注释 / 死分支都凑不出这个形态）。
+    assert "\n        await upsertBusinessProvider({" in body, (
+        "onSwitch 必须在 try 块里**直接** await upsert（死分支 / 存 state 都算回退）"
+    )
+    # 「保存」按钮 = 一期残留：用户要的是实时，留着就是「改了没点保存」的静默坑。
+    # ⚠️ 只断言**渲染成按钮的「保存」**（`>保存<`）：页面文案里「无需保存」是
+    #    正确的说明，一刀切禁词会误伤（DEF-057 同型：断言要能区分对错）。
+    assert not re.search(r">\s*保存\s*<", code), "页面不应有「保存」按钮：切换是实时的"
+    assert "handleSave" not in code and "onSave" not in code, "不应有保存提交函数"
+
+
+def test_model_config_page_filters_candidates_by_kind():
+    """③ 下拉候选按 `kind` 过滤 —— 图像业务点不列文本服务商。"""
+    code = _code_only(_read(MODEL_CONFIG_PAGE))
+    body = _slice_between(code, "const candidatesFor = useCallback(", "const onSwitch = useCallback(")
+    assert "model_type === kind" in body, (
+        "候选必须按 `provider.model_type === row.kind` 过滤（跨 kind 选了必过不了后端类型校验）"
+    )
+
+
+def test_model_config_page_shows_explicit_empty_state():
+    """④ 没有该类型服务商时给**明确文案**，不是空下拉。"""
+    code = _code_only(_read(MODEL_CONFIG_PAGE))
+    assert "暂无可用的该类型服务商" in code, (
+        "无候选时 placeholder 必须明说（空下拉分不清「坏了」还是「没配」）"
+    )
+    assert "还没有" in code and "服务商配置" in code, (
+        "空态必须给出「去哪配」的指向（请先到「服务商配置」新增）"
+    )
+
+
+def test_model_config_page_reports_type_mismatch_and_disabled():
+    """状态列必须显出「类型不匹配 / 服务商已停用」，不许只显示「已配置」。"""
+    code = _code_only(_read(MODEL_CONFIG_PAGE))
+    assert "类型不匹配" in code, "映射指向的服务商类型被改过时必须显式报红"
+    assert "服务商已停用" in code, "映射指向已停用服务商时必须显式报橙"

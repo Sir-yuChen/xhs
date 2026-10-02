@@ -14,8 +14,13 @@
  * 5. **只有「上架时间」可排、且默认不排序**（§33.3 / §33.11）：进来没有箭头，
  *    点一下才排（升 → 降 → **取消**）；非上架时间的列被点也不给排序 ——
  *    表头有箭头 = 后端真会按它排，多一个箭头就多一份误导；
- * 6. **前置门禁**（§33.4）：没绑店铺 / 千帆确定不可用 ⇒ 不通过（页面因此零请求）；
- *    而 **`unknown`（未检测）必须放行** —— DEF-057 红线：没问到 ≠ 不可用；
+ * 6. **前置校验 = 零门禁**（ADR-021 + 2026-09-30 用户口径「商品列表页查询本地数据库，
+ *    无需校验千帆是否可用」）：本页是纯本地台账读 ⇒ **没有任何拦截**，`ok` 恒为 true；
+ *    ark 是否可用只作为**附加信号**（`reason: "ark_unavailable"`）回给调用方
+ *    （页面据此加一行说明 / 禁用「同步商品」按钮），**不拦列表请求**。
+ *    * 演进记录（原句保留）：*「§33.4：没绑店铺 / 千帆确定不可用 ⇒ 不通过（页面因此
+ *      零请求）；`unknown`（未检测）必须放行」* —— **被上面这条取代**
+ *      （本地读免门禁；`unbound` 取值随 `shops` 退场不再产生）；
  * 7. **挂链笔记数筛选**（§33.8）：比较符默认「小于」，**留空 = 不筛** ——
  *    兜成「小于 0」会让一进页面就把有挂链笔记的商品全筛掉（缺省态不许筛数据）；
  * 8. **批量删除的前置判据**（§33.10）：勾选去重 / 没勾拦住 / 超上限拦住（**不静默
@@ -84,6 +89,10 @@ const MUTATE_TO = {
   sortdefault:
     '  if (!field || (order !== "ascend" && order !== "descend")) {\n    return { field: "on_shelf_time", order: "descend" };\n  }',
   // 门禁短路 ⇒ 未绑店铺 / 令牌失效也放行，页面又变成「发一个必然 400 的请求 + 一串错误」
+  // ⚠️ ADR-021 + 2026-09-30 零门禁语义后本变异仍然承重，但测的东西变了：
+  //    它不再测「门禁有没有拦请求」（`ok` 本来恒真），而是测 `ark_unavailable`
+  //    这个**附加信号**有没有如实产出 —— 短路掉这一段，页面在 ark 失效时就
+  //    少一行说明、也没法禁用「同步商品」按钮（信号丢失，不是拦截失效）。
   gateoff: "  if (false) {",
   // 留空兜成「小于 0」⇒ 一进页面就把有挂链笔记的商品全筛掉（缺省态偷偷筛数据）
   noteop:
@@ -218,38 +227,43 @@ async function main() {
     [null, null, null, null]
   );
 
-  // F：前置门禁（§33.4，用户 2026-09-23 上机口径）
+  // F：前置校验（**ADR-021 + 2026-09-30 用户口径后的零门禁语义**）
+  //   ⚠️ 用户原话：「商品列表（千帆）页查询的本地数据库，无需校验千帆是否可用」——
+  //     本页是纯本地台账读（后端 `/items` 等端点已去门禁），所以**没有任何前置拦截**：
+  //     `ok` 恒为 true。ark 是否可用**不影响放行**，只作为附加信息回给调用方
+  //     （页面据此加一行说明 / 禁用「同步商品」按钮），所以这里钉的是
+  //     「ok 恒真 + reason 如实反映 ark 可用性」两件事。
   const arkChannel = (state) => ({ ark: { state, reason: "", probed: false, label: "千帆商家后台" } });
-  check("F1 未绑店铺不通过", ledgerPrerequisite(false, arkChannel("valid")), {
-    ok: false,
-    reason: "unbound",
+  check("F1 未登录（ark missing）仍放行（本地读免门禁）", ledgerPrerequisite(arkChannel("missing")), {
+    ok: true,
+    reason: "ark_unavailable",
   });
-  check("F2 已绑但千帆确定不可用 → 不通过", ledgerPrerequisite(true, arkChannel("expired")), {
-    ok: false,
+  check("F2 ark 过期（expired）仍放行", ledgerPrerequisite(arkChannel("expired")), {
+    ok: true,
     reason: "ark_unavailable",
   });
   check(
-    "F3 未登录 / 非登录态同样不通过",
-    [ledgerPrerequisite(true, arkChannel("missing")), ledgerPrerequisite(true, arkChannel("guest"))],
+    "F3 非登录态（missing / guest）一律放行，reason 如实标注",
+    [ledgerPrerequisite(arkChannel("missing")), ledgerPrerequisite(arkChannel("guest"))],
     [
-      { ok: false, reason: "ark_unavailable" },
-      { ok: false, reason: "ark_unavailable" },
+      { ok: true, reason: "ark_unavailable" },
+      { ok: true, reason: "ark_unavailable" },
     ]
   );
   check(
-    "F4 unknown 必须放行（DEF-057：没问到 ≠ 不可用）",
-    [ledgerPrerequisite(true, arkChannel("unknown")), ledgerPrerequisite(true, undefined)],
+    "F4 unknown / 未提供 channels 都放行（DEF-057：没问到 ≠ 拦住；undefined 也不许拦）",
+    [ledgerPrerequisite(arkChannel("unknown")), ledgerPrerequisite(undefined)],
     [
       { ok: true, reason: "" },
-      { ok: false, reason: "ark_unavailable" },
+      { ok: true, reason: "ark_unavailable" },
     ]
   );
-  check("F5 已绑 + 千帆可用 → 通过", ledgerPrerequisite(true, arkChannel("valid")), {
+  check("F5 ark 可用 → 放行且无附加信息", ledgerPrerequisite(arkChannel("valid")), {
     ok: true,
     reason: "",
   });
   check(
-    "F6 不通过的提示只有一句（不分类、不追加）",
+    "F6 提示文案仍在（页面在 ark 失效时用它做一行说明，不是拦截文案）",
     QIANFAN_PREREQUISITE_HINT === "请在账号信息卡片中扫码登录千帆后再来查看。",
     true
   );

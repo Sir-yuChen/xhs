@@ -262,12 +262,15 @@ def test_scheduler_is_not_started_when_master_switch_is_off(monkeypatch):
     monkeypatch.setattr(main_module, "ensure_sync_worker", lambda: woken.append("sync"))
     monkeypatch.setattr(main_module, "ensure_publish_worker", lambda: woken.append("publish"))
     monkeypatch.setattr(main_module, "ensure_generate_worker", lambda: woken.append("generate"))
+    monkeypatch.setattr(main_module, "ensure_llm_generate_worker", lambda: woken.append("generate_llm"))
     monkeypatch.setattr(main_module, "start_sync_worker_watchdog", lambda **k: None)
     monkeypatch.setattr(main_module, "stop_sync_worker_watchdog", lambda: None)
     monkeypatch.setattr(main_module, "start_publish_worker_watchdog", lambda **k: None)
     monkeypatch.setattr(main_module, "stop_publish_worker_watchdog", lambda: None)
     monkeypatch.setattr(main_module, "start_generate_worker_watchdog", lambda **k: None)
     monkeypatch.setattr(main_module, "stop_generate_worker_watchdog", lambda: None)
+    monkeypatch.setattr(main_module, "start_llm_generate_worker_watchdog", lambda **k: None)
+    monkeypatch.setattr(main_module, "stop_llm_generate_worker_watchdog", lambda: None)
 
     app = main_module.app
 
@@ -282,8 +285,8 @@ def test_scheduler_is_not_started_when_master_switch_is_off(monkeypatch):
         assert recoveries == ["interrupted", "publishing"], (
             "启动必须先复位中断队列项、再复位卡在 publishing 的笔记"
         )
-        assert woken == ["sync", "publish", "generate"], (
-            "复位完必须**立刻**唤醒三个 worker（等看门狗 30 秒巡检 = 积压白等半分钟）"
+        assert woken == ["sync", "publish", "generate", "generate_llm"], (
+            "复位完必须**立刻**唤醒四个 worker（等看门狗 30 秒巡检 = 积压白等半分钟）"
         )
     finally:
         try:

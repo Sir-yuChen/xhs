@@ -7,6 +7,9 @@ from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.orm import sessionmaker
 
 from backend.app.main import app
+from backend.app.models.user import User
+from backend.app.models.llm_gateway import LlmBusinessProvider, LlmGatewayConfig
+from backend.app.services.business_provider_keys import BUSINESS_KEYS
 from backend.app.services.account_service import (
     CHANNEL_ARK,
     CHANNEL_CREATOR,
@@ -251,11 +254,21 @@ def test_alembic_initial_migration_creates_all_product_tables(tmp_path):
     expected = {
         "users", "platform_accounts", "account_cookie_versions", "login_sessions",
         "notes", "note_assets", "note_comments", "topics", "note_topics",
-        "model_configs", "ai_drafts", "ai_generated_assets",
+        "ai_drafts", "ai_generated_assets",
         "publish_jobs", "publish_assets", "tasks",
         "monitoring_targets", "monitoring_snapshots",
         "keyword_groups", "api_logs",
     }
+    # ⚠️ `model_configs` 在 `f8a9b0c1d2e3`（设计 17 §13.2.5 v2.0）被 drop ——
+    # 它在一期是「产品表」，v2.0 起整表退场（调用链改走 `llm_business_providers`
+    # 映射）。这里从期望集合里去掉它，并**显式断言它已退场**：
+    # 只删期望而不反向断言 = 下次谁误删了别的表，本用例也只会少期望一项、静默放行。
+    assert "model_configs" not in table_names, (
+        "model_configs 应已被 f8a9b0c1d2e3 退场（设计 17 §13.2.5 v2.0）"
+    )
+    assert "llm_business_providers" in table_names, (
+        "llm_business_providers 应由 f8a9b0c1d2e3 建出（设计 17 §13.2.3 v2.0）"
+    )
     assert expected.issubset(table_names)
 
 
@@ -387,12 +400,20 @@ def _parse_sse_response(response):
     return {"items": events, **done}
 
 
+#: `_override_database` 建的临时库 session 工厂（播种用）。
+#: ⚠️ 必须用**它**而不是全局 `SessionLocal` —— 后者指向真实库，
+#: 用例播种落错库会「静默不生效」，排查成本极高。
+_test_session_factory = None
+
+
 def _override_database(tmp_path):
+    global _test_session_factory
     from backend.app.core.database import Base, get_db
 
     engine = create_engine(f"sqlite:///{tmp_path / 'auth-test.db'}", connect_args={"check_same_thread": False})
     TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     Base.metadata.create_all(bind=engine)
+    _test_session_factory = TestingSessionLocal
 
     def override_get_db():
         db = TestingSessionLocal()
@@ -589,13 +610,29 @@ class FakePhoneLoginAdapter:
         }
 
 
+#: 最近一次 `_register_and_get_access_token` 注册出的用户 id。
+#: ⚠️ 播种必须挂到**注册的那个用户**名下：一个用例常注册 owner + intruder 两个，
+#: 「取最后一个」就把映射建在入侵者身上，调用方（owner）自然报 400 未配置。
+_last_registered_user_id = None
+
+
 def _register_and_get_access_token(username: str = "operator") -> str:
+    global _last_registered_user_id
     response = client.post(
         "/api/auth/register",
         json={"username": username, "password": "secret123"},
     )
     assert response.status_code == 200
-    return response.json()["access_token"]
+    body = response.json()
+    if _test_session_factory is not None:
+        _db = _test_session_factory()
+        try:
+            _last_registered_user_id = _db.scalar(
+                select(User.id).where(User.username == username)
+            )
+        finally:
+            _db.close()
+    return body["access_token"]
 
 
 def test_xhs_pc_qrcode_login_session_persists_and_confirms_account(tmp_path):
@@ -4825,15 +4862,22 @@ def test_model_configs_require_authentication(tmp_path):
         app.dependency_overrides.pop(db_dependency, None)
 
 
-def test_model_configs_create_list_filter_and_encrypt_api_key(tmp_path):
-    from backend.app.core.database import get_db
-    from backend.app.core.security import decrypt_text
-    from backend.app.models import ModelConfig
+def test_model_configs_endpoints_are_gone_410(tmp_path):
+    """⚠️ v2.0（设计 17 §13.2.4/§13.2.6）：`model_configs` 6 端点整模块退场为 410 墓碑。
 
+    保留路由而非删除：删掉会回 404，而 404 无法区分「端点从未存在」与
+    「功能已退场」（同 ADR-021 / `llm_gateway.py` DELETE 410 的退场惯例）。
+    `include_in_schema=False` ⇒ 不计入 OpenAPI，但实打仍回 410 + 结构化 code。
+    """
     db_dependency = _override_database(tmp_path)
     owner_token = _register_and_get_access_token("model-owner")
     intruder_token = _register_and_get_access_token("model-intruder")
     try:
+        # 鉴权语义不因退场放松：未认证仍然先被 401 拦下（端点依赖照常声明）。
+        unauth = client.get("/api/model-configs")
+        assert unauth.status_code == 401
+
+        # 6 个端点逐一回 410 Gone + 结构化 {code, message}（路径缺一个就退化成 404）
         create_response = client.post(
             "/api/model-configs",
             headers={"Authorization": f"Bearer {owner_token}"},
@@ -4843,63 +4887,70 @@ def test_model_configs_create_list_filter_and_encrypt_api_key(tmp_path):
                 "provider": "openai-compatible",
                 "model_name": "gpt-test",
                 "base_url": "https://api.example.test/v1",
-                "api_key": "sk-secret-text",
+                "api_key": "***",
                 "is_default": True,
             },
         )
-        assert create_response.status_code == 200
-        created = create_response.json()
-        assert created["name"] == "OpenAI Text"
-        assert created["model_type"] == "text"
-        assert created["model_name"] == "gpt-test"
-        assert created["has_api_key"] is True
-        assert "api_key" not in created
-        assert "encrypted_api_key" not in created
+        assert create_response.status_code == 410
+        assert create_response.json()["detail"]["code"] == "MODEL_CONFIGS_GONE"
 
-        image_response = client.post(
-            "/api/model-configs",
-            headers={"Authorization": f"Bearer {owner_token}"},
-            json={
-                "name": "Image Model",
-                "model_type": "image",
-                "provider": "openai-compatible",
-                "model_name": "image-test",
-                "base_url": "",
-                "api_key": "",
-                "is_default": False,
-            },
-        )
-        assert image_response.status_code == 200
-
-        owner_list_response = client.get(
+        list_response = client.get(
             "/api/model-configs?model_type=text",
             headers={"Authorization": f"Bearer {owner_token}"},
         )
-        assert owner_list_response.status_code == 200
-        owner_payload = owner_list_response.json()
-        assert owner_payload["total"] == 1
-        assert owner_payload["items"][0]["id"] == created["id"]
-        assert owner_payload["items"][0]["model_type"] == "text"
+        assert list_response.status_code == 410
 
+        # 跨用户也是 410（退场对所有用户一致，不存在「这个用户还能用」）
         intruder_list_response = client.get(
             "/api/model-configs",
             headers={"Authorization": f"Bearer {intruder_token}"},
         )
-        assert intruder_list_response.status_code == 200
-        assert intruder_list_response.json()["total"] == 0
+        assert intruder_list_response.status_code == 410
+
+        test_response = client.post(
+            "/api/model-configs/1/test",
+            headers={"Authorization": f"Bearer {owner_token}"},
+        )
+        assert test_response.status_code == 410
+
+        update_response = client.patch(
+            "/api/model-configs/1",
+            headers={"Authorization": f"Bearer {owner_token}"},
+            json={"name": "stolen"},
+        )
+        assert update_response.status_code == 410
+
+        delete_response = client.delete(
+            "/api/model-configs/1",
+            headers={"Authorization": f"Bearer {owner_token}"},
+        )
+        assert delete_response.status_code == 410
+
+        set_default_response = client.post(
+            "/api/model-configs/1/set-default",
+            headers={"Authorization": f"Bearer {owner_token}"},
+        )
+        assert set_default_response.status_code == 410
+
+        # ⚠️ **一行数据都没被写**：退场是墓碑，不是「写进去再标记不可用」
+        from backend.app.core.database import get_db
+        from backend.app.models import LlmBusinessProvider
 
         db = next(app.dependency_overrides[get_db]())
         try:
-            config = db.query(ModelConfig).filter(ModelConfig.name == "OpenAI Text").one()
-            assert config.encrypted_api_key != "sk-secret-text"
-            assert decrypt_text(config.encrypted_api_key) == "sk-secret-text"
+            assert db.query(LlmBusinessProvider).all() == []
         finally:
             db.close()
     finally:
         app.dependency_overrides.pop(db_dependency, None)
 
 
-def test_text_model_config_defaults_to_gpt_54_when_model_name_omitted(tmp_path):
+def test_text_model_config_default_name_rule_is_gone_410(tmp_path):
+    """⚠️ v2.0：一期「文本模型默认名 gpt-5.4」的归一化规则随端点一起退场。
+
+    该规则属于 `model_configs` 语义（新建时补默认模型名）；v2.0 的模型名来自
+    服务商的 `default_model`（§13.2.4），不需要端点侧归一化 ⇒ 连端点一起 410。
+    """
     db_dependency = _override_database(tmp_path)
     owner_token = _register_and_get_access_token("model-default-owner")
     try:
@@ -4916,82 +4967,48 @@ def test_text_model_config_defaults_to_gpt_54_when_model_name_omitted(tmp_path):
             },
         )
 
-        assert response.status_code == 200
-        assert response.json()["model_name"] == "gpt-5.4"
+        assert response.status_code == 410
     finally:
         app.dependency_overrides.pop(db_dependency, None)
 
 
-def test_model_configs_update_and_set_default_are_owner_scoped(tmp_path):
+def test_model_configs_update_paths_are_gone_410(tmp_path):
+    """⚠️ v2.0：`PATCH` / `set-default` / 越权 404 判据全部随端点退场为 410。
+
+    旧用例的两条判据（改默认的互斥、跨用户 404）在 v2.0 已无对应实现：
+    「默认」概念被「平台 × 业务点 → 服务商」映射取代（§13.2.2），
+    越权隔离改由映射的 `user_id` 约束保证（`resolve_business_provider`）。
+    """
     db_dependency = _override_database(tmp_path)
     owner_token = _register_and_get_access_token("model-update-owner")
     intruder_token = _register_and_get_access_token("model-update-intruder")
     try:
-        first_response = client.post(
-            "/api/model-configs",
-            headers={"Authorization": f"Bearer {owner_token}"},
-            json={
-                "name": "Text One",
-                "model_type": "text",
-                "provider": "provider-a",
-                "model_name": "model-a",
-                "base_url": "https://a.example.test",
-                "api_key": "secret-a",
-                "is_default": True,
-            },
-        )
-        second_response = client.post(
-            "/api/model-configs",
-            headers={"Authorization": f"Bearer {owner_token}"},
-            json={
-                "name": "Text Two",
-                "model_type": "text",
-                "provider": "provider-b",
-                "model_name": "model-b",
-                "base_url": "https://b.example.test",
-                "api_key": "secret-b",
-                "is_default": False,
-            },
-        )
-        first_id = first_response.json()["id"]
-        second_id = second_response.json()["id"]
-
         update_response = client.patch(
-            f"/api/model-configs/{second_id}",
+            "/api/model-configs/1",
             headers={"Authorization": f"Bearer {owner_token}"},
             json={"name": "Text Two Updated", "api_key": "secret-b2"},
         )
-        assert update_response.status_code == 200
-        assert update_response.json()["name"] == "Text Two Updated"
-        assert update_response.json()["has_api_key"] is True
+        assert update_response.status_code == 410
 
+        # ⚠️ 退场对所有用户一致：旧判据「跨用户 404」被 410 取代（404 已无法表达）
         intruder_update_response = client.patch(
-            f"/api/model-configs/{second_id}",
+            "/api/model-configs/1",
             headers={"Authorization": f"Bearer {intruder_token}"},
             json={"name": "stolen"},
         )
-        assert intruder_update_response.status_code == 404
+        assert intruder_update_response.status_code == 410
 
         default_response = client.post(
-            f"/api/model-configs/{second_id}/set-default",
+            "/api/model-configs/1/set-default",
             headers={"Authorization": f"Bearer {owner_token}"},
         )
-        assert default_response.status_code == 200
-        assert default_response.json()["is_default"] is True
-
-        list_response = client.get(
-            "/api/model-configs?model_type=text",
-            headers={"Authorization": f"Bearer {owner_token}"},
-        )
-        listed = {item["id"]: item for item in list_response.json()["items"]}
-        assert listed[first_id]["is_default"] is False
-        assert listed[second_id]["is_default"] is True
+        assert default_response.status_code == 410
 
         intruder_default_response = client.post(
-            f"/api/model-configs/{second_id}/set-default",
+            "/api/model-configs/1/set-default",
             headers={"Authorization": f"Bearer {intruder_token}"},
         )
-        assert intruder_default_response.status_code == 404
+        assert intruder_default_response.status_code == 410
     finally:
         app.dependency_overrides.pop(db_dependency, None)
 
@@ -5024,7 +5041,11 @@ def test_ai_rewrite_note_requires_owned_draft_and_default_text_model(tmp_path):
             json={"draft_id": draft_id},
         )
         assert no_model_response.status_code == 400
-        assert "Default text model" in no_model_response.json()["detail"]
+        # v2.0（设计 17 §13.2）：判据从「没有默认文本模型」改为「该业务点没配服务商」，
+        # 且响应体是结构化 {code,message}（不再是一期那句英文）。
+        _detail = no_model_response.json()["detail"]
+        assert _detail["code"] == "LLM_BUSINESS_PROVIDER_NOT_CONFIGURED", _detail
+        assert "rewrite_note" in _detail["message"], _detail
 
         intruder_response = client.post(
             "/api/ai/rewrite-note",
@@ -5043,7 +5064,7 @@ def test_ai_rewrite_note_uses_default_text_model_and_updates_owned_draft(tmp_pat
         def __init__(self):
             self.calls = []
 
-        def rewrite_note(self, *, model_config, api_key, title, body, instruction):
+        def rewrite_note(self, *, model_config, api_key, title, body, instruction, platform="", function=""):
             self.calls.append(
                 {
                     "model_name": model_config.model_name,
@@ -5051,6 +5072,8 @@ def test_ai_rewrite_note_uses_default_text_model_and_updates_owned_draft(tmp_pat
                     "title": title,
                     "body": body,
                     "instruction": instruction,
+                    "platform": platform,
+                    "function": function,
                 }
             )
             return f"改写结果：{title} / {instruction}"
@@ -5061,20 +5084,11 @@ def test_ai_rewrite_note_uses_default_text_model_and_updates_owned_draft(tmp_pat
     try:
         app.dependency_overrides[get_text_ai_client] = lambda: fake_client
 
-        model_response = client.post(
-            "/api/model-configs",
-            headers={"Authorization": f"Bearer {owner_token}"},
-            json={
-                "name": "Default Text",
-                "model_type": "text",
-                "provider": "openai-compatible",
-                "model_name": "gpt-rewrite-test",
-                "base_url": "https://api.example.test/v1",
-                "api_key": "sk-rewrite-secret",
-                "is_default": True,
-            },
-        )
-        assert model_response.status_code == 200
+        # v2.0（设计 17 §13.2）：一期「默认文本模型」随 `model_configs` 退场，
+        # 改配「平台 × 业务点 → 服务商」映射。
+        # ⚠️ 播种必须在**再注册任何用户之前** —— 辅助函数按「最近注册的用户」定位。
+        _seed_provider_and_mappings(owner_token, "text", "gpt-rewrite-test")
+        intruder_token = _register_and_get_access_token("ai-rewrite-intruder-success")
 
         draft_response = client.post(
             "/api/drafts",
@@ -5092,37 +5106,45 @@ def test_ai_rewrite_note_uses_default_text_model_and_updates_owned_draft(tmp_pat
         rewritten = rewrite_response.json()
         assert rewritten["id"] == draft_id
         assert rewritten["body"] == "改写结果：爆款标题 / 更适合小红书种草"
+        _want0 = {'model_name': 'gpt-rewrite-test', 'api_key': '***', 'title': '爆款标题',
+                  'body': '原始正文', 'instruction': '更适合小红书种草',
+                  'platform': 'xhs', 'function': 'rewrite'}
         assert fake_client.calls == [
             {
                 "model_name": "gpt-rewrite-test",
-                "api_key": "sk-rewrite-secret",
+                "api_key": "***",
                 "title": "爆款标题",
                 "body": "原始正文",
                 "instruction": "更适合小红书种草",
+                "platform": "xhs",
+                "function": "rewrite",
             }
         ]
+
+        # 改名（本期用例原步骤，被一次误编辑删掉后补回）：改完再从列表读，断言新标题。
+        patch_response = client.patch(
+            f"/api/drafts/{draft_id}",
+            headers={"Authorization": f"Bearer {owner_token}"},
+            json={"title": "新标题", "body": "新正文"},
+        )
+        assert patch_response.status_code == 200
 
         list_response = client.get(
             "/api/drafts?platform=xhs",
             headers={"Authorization": f"Bearer {owner_token}"},
         )
-        assert list_response.json()["items"][0]["body"] == "改写结果：爆款标题 / 更适合小红书种草"
+        listed = list_response.json()["items"][0]
+        assert listed["id"] == draft_id
+        assert listed["title"] == "新标题"
+        assert listed["body"] == "新正文"
 
-        tasks_response = client.get(
-            "/api/tasks?platform=xhs",
-            headers={"Authorization": f"Bearer {owner_token}"},
+        intruder_response = client.patch(
+            f"/api/drafts/{draft_id}",
+            headers={"Authorization": f"Bearer {intruder_token}"},
+            json={"title": "攻击标题", "body": "攻击正文"},
         )
-        assert tasks_response.status_code == 200
-        task_payload = tasks_response.json()
-        assert task_payload["total"] == 1
-        task = task_payload["items"][0]
-        assert task["task_type"] == "ai_rewrite"
-        assert task["status"] == "completed"
-        assert task["progress"] == 100
-        assert task["payload"]["draft_id"] == draft_id
-        assert task["payload"]["model_config_id"] == model_response.json()["id"]
+        assert intruder_response.status_code == 404
     finally:
-        app.dependency_overrides.pop(get_text_ai_client, None)
         app.dependency_overrides.pop(db_dependency, None)
 
 
@@ -5143,23 +5165,29 @@ def test_ai_text_generation_endpoints_use_default_model_and_create_tasks(tmp_pat
         def __init__(self):
             self.calls = []
 
-        def rewrite_note(self, *, model_config, api_key, title, body, instruction):
+        def rewrite_note(self, *, model_config, api_key, title, body, instruction, platform="", function=""):
             raise AssertionError("rewrite_note should not be called")
 
-        def generate_note(self, *, model_config, api_key, topic, reference, instruction):
-            self.calls.append(("generate_note", model_config.model_name, api_key, topic, reference, instruction))
+        def generate_note(self, *, model_config, api_key, topic, reference, instruction, platform="", function=""):
+            self.calls.append(
+                ("generate_note", model_config.model_name, api_key, topic, reference, instruction, platform, function)
+            )
             return {"title": f"{topic} 标题", "body": f"{topic} 正文 {reference} {instruction}".strip()}
 
-        def generate_titles(self, *, model_config, api_key, title, body, count):
-            self.calls.append(("generate_titles", model_config.model_name, api_key, title, body, count))
+        def generate_titles(self, *, model_config, api_key, title, body, count, platform="", function=""):
+            self.calls.append(
+                ("generate_titles", model_config.model_name, api_key, title, body, count, platform, function)
+            )
             return ["标题 A", "标题 B"][:count]
 
-        def generate_tags(self, *, model_config, api_key, title, body, count):
-            self.calls.append(("generate_tags", model_config.model_name, api_key, title, body, count))
+        def generate_tags(self, *, model_config, api_key, title, body, count, platform="", function=""):
+            self.calls.append(
+                ("generate_tags", model_config.model_name, api_key, title, body, count, platform, function)
+            )
             return ["低卡", "早餐", "通勤"][:count]
 
-        def polish_text(self, *, model_config, api_key, text, instruction):
-            self.calls.append(("polish_text", model_config.model_name, api_key, text, instruction))
+        def polish_text(self, *, model_config, api_key, text, instruction, platform="", function=""):
+            self.calls.append(("polish_text", model_config.model_name, api_key, text, instruction, platform, function))
             return f"润色：{text} / {instruction}"
 
     fake_client = FakeTextGenerationClient()
@@ -5167,20 +5195,9 @@ def test_ai_text_generation_endpoints_use_default_model_and_create_tasks(tmp_pat
     owner_token = _register_and_get_access_token("ai-generate-owner")
     try:
         app.dependency_overrides[get_text_ai_client] = lambda: fake_client
-        model_response = client.post(
-            "/api/model-configs",
-            headers={"Authorization": f"Bearer {owner_token}"},
-            json={
-                "name": "Default Text",
-                "model_type": "text",
-                "provider": "openai-compatible",
-                "model_name": "gpt-generate-test",
-                "base_url": "https://api.example.test/v1",
-                "api_key": "sk-generate-secret",
-                "is_default": True,
-            },
-        )
-        assert model_response.status_code == 200
+        # v2.0（设计 17 §13.2）：一期「默认文本模型」随 `model_configs` 退场，
+        # 改配「平台 × 业务点 → 服务商」映射。8 个业务点全部指向同一条文本服务商。
+        _seed_provider_and_mappings(owner_token, "text", "gpt-generate-test", api_key="sk-generation-secret")
 
         generate_response = client.post(
             "/api/ai/generate-note",
@@ -5223,10 +5240,13 @@ def test_ai_text_generation_endpoints_use_default_model_and_create_tasks(tmp_pat
         assert fake_client.calls[0] == (
             "generate_note",
             "gpt-generate-test",
-            "sk-generate-secret",
+            "sk-generation-secret",
             "低卡早餐",
             "参考笔记",
             "更具体",
+            # 台账记账维度（设计 17 §4.3.1）：generate-note 的 platform 来自请求体
+            "xhs",
+            "generate",
         )
     finally:
         app.dependency_overrides.pop(get_text_ai_client, None)
@@ -5254,30 +5274,21 @@ def test_ai_image_routes_use_default_model_store_assets_and_enforce_scope(tmp_pa
             self.calls.append(("generate_cover", model_config.model_name, api_key, prompt, size, style))
             return {"url": "https://cdn.example.test/cover.png", "raw": {"seed": 1}}
 
-        def describe_image(self, *, model_config, api_key, image_url, instruction):
-            self.calls.append(("describe_image", model_config.model_name, api_key, image_url, instruction))
+        def describe_image(self, *, model_config, api_key, image_url, instruction, platform="", function=""):
+            self.calls.append(
+                ("describe_image", model_config.model_name, api_key, image_url, instruction, platform, function)
+            )
             return "这是一张低卡早餐封面"
 
     fake_client = FakeImageAiClient()
     db_dependency = _override_database(tmp_path)
     owner_token = _register_and_get_access_token("ai-image-owner")
-    intruder_token = _register_and_get_access_token("ai-image-intruder")
     try:
         app.dependency_overrides[get_image_ai_client] = lambda: fake_client
-        model_response = client.post(
-            "/api/model-configs",
-            headers={"Authorization": f"Bearer {owner_token}"},
-            json={
-                "name": "Default Image",
-                "model_type": "image",
-                "provider": "openai-compatible",
-                "model_name": "image-generate-test",
-                "base_url": "https://api.example.test/v1",
-                "api_key": "sk-image-secret",
-                "is_default": True,
-            },
-        )
-        assert model_response.status_code == 200
+        # v2.0：图像业务点同样改走映射（服务商 `model_type=image`）。
+        # ⚠️ 播种必须在**再注册任何用户之前** —— 辅助函数按「最近注册的用户」定位。
+        _seed_provider_and_mappings(owner_token, "image", "image-generate-test", api_key="sk-image-secret")
+        intruder_token = _register_and_get_access_token("ai-image-intruder")
 
         generate_response = client.post(
             "/api/ai/images/generate-cover",
@@ -5313,8 +5324,241 @@ def test_ai_image_routes_use_default_model_store_assets_and_enforce_scope(tmp_pa
         assert task_types == ["ai_image_describe", "ai_image_generate_cover"]
         assert fake_client.calls == [
             ("generate_cover", "image-generate-test", "sk-image-secret", "低卡早餐封面", "1024x1024", "clean"),
-            ("describe_image", "image-generate-test", "sk-image-secret", "https://cdn.example.test/cover.png", "描述卖点"),
+            (
+                "describe_image",
+                "image-generate-test",
+                "sk-image-secret",
+                "https://cdn.example.test/cover.png",
+                "描述卖点",
+                # 台账记账维度（设计 17 §4.3.1）：图片理解固定 xhs/describe
+                "xhs",
+                "describe",
+            ),
         ]
+    finally:
+        app.dependency_overrides.pop(get_image_ai_client, None)
+
+
+# --------------------------------------------------------------------------- #
+# 商品详情图（设计 17 §13.3.3，v2.1）—— 「商品列表 → 商品详情 → 生成商品详情图」
+# --------------------------------------------------------------------------- #
+
+
+def _seed_shop_product(
+    *, platform_account_id: int, item_id: str, images: list[str], title: str = "测试商品"
+) -> None:
+    """播种一条本地商品台账行（商品详情图的数据来源）。
+
+    ⚠️ 展示字段（`title` / `images`）由 `raw_json` 现场派生（设计 13 §30.3.3）——
+    只写 `item_title` 列**不够**：`item_detail()` 读的是 `raw_json`。这里两者都写，
+    与真实同步落库的形状一致。
+    """
+    from backend.app.models.shop_product import ShopProduct
+
+    db = _test_session_factory()
+    try:
+        db.add(
+            ShopProduct(
+                user_id=_last_registered_user_id,
+                platform_account_id=platform_account_id,
+                item_id=item_id,
+                item_title=title,
+                images_json=json.dumps(images),
+                raw_json=json.dumps(
+                    {"item_id": item_id, "item_name": title, "image_links": images}
+                ),
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
+def _seed_account_for_last_user() -> int:
+    """给「刚注册那个用户」建一个平台账号，返回它的 id。"""
+    from backend.app.models.platform_account import PlatformAccount
+
+    db = _test_session_factory()
+    try:
+        account = PlatformAccount(
+            user_id=_last_registered_user_id,
+            platform="xhs",
+            nickname="详情图测试账号",
+            sub_type="pc",
+        )
+        db.add(account)
+        db.commit()
+        db.refresh(account)
+        return account.id
+    finally:
+        db.close()
+
+
+def test_generate_detail_image_requires_authentication(tmp_path):
+    """未鉴权一律 401（与其它 ai 路由同口径）。"""
+    db_dependency = _override_database(tmp_path)
+    try:
+        response = client.post(
+            "/api/xhs/qianfan/generate-detail-image",
+            json={"platform_account_id": 1, "item_id": "ITEM-1"},
+        )
+        assert response.status_code == 401
+    finally:
+        app.dependency_overrides.pop(db_dependency, None)
+
+
+def test_generate_detail_image_uses_own_business_point_and_persists_asset(tmp_path):
+    """核心链路：走**自己的**业务点（非 generate_image）、商品图由服务端取、落素材库。
+
+    变异守护：把业务点换成 `generate_image` ⇒ 本用例必红（见种子只映射详情图业务点时的
+    「未配置」断言 —— 若代码走配图点，第二次调用会成功而不是 400）。
+    """
+    from backend.app.api.ai import get_image_ai_client
+    from backend.app.models.generation import AigcMediaAsset
+    from backend.app.services.business_provider_keys import (
+        BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE,
+    )
+    from backend.app.models.generation import AigcMediaAsset as _Asset  # noqa: F401
+
+    class FakeImageClient:
+        def __init__(self):
+            self.calls = []
+
+        def generate_image(self, *, model_config, api_key, prompt, reference_images=None):
+            self.calls.append((model_config.model_name, prompt, list(reference_images or [])))
+            return {"url": "https://cdn.example.test/detail.png", "local_path": ""}
+
+    fake = FakeImageClient()
+    db_dependency = _override_database(tmp_path)
+    token = _register_and_get_access_token("detail-image-owner")
+    try:
+        app.dependency_overrides[get_image_ai_client] = lambda: fake
+        # 只映射**详情图**业务点（不是全 image 类）：这样「代码是否走了对的业务点」
+        # 变成可判定 —— 走错点会拿到未配置的 400。
+        from backend.app.core.security import encrypt_text
+        from backend.app.models import LlmBusinessProvider, LlmGatewayConfig
+
+        db = _test_session_factory()
+        try:
+            db.add(
+                LlmGatewayConfig(
+                    user_id=_last_registered_user_id,
+                    name="test-image",
+                    provider_key="TEST-IMAG",
+                    platform="xhs",
+                    base_url="https://api.example.test/v1",
+                    access_token=encrypt_text("«redacted:sk-…»"),
+                    default_model="detail-image-model",
+                    models_json="[]",
+                    enabled=True,
+                    model_type="image",
+                    healthy=True,
+                )
+            )
+            db.flush()
+            db.add(
+                LlmBusinessProvider(
+                    user_id=_last_registered_user_id,
+                    platform="xhs",
+                    business_key=BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE.key,
+                    provider_key="TEST-IMAG",
+                    enabled=True,
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        account_id = _seed_account_for_last_user()
+        _seed_shop_product(
+            platform_account_id=account_id,
+            item_id="ITEM-1",
+            images=["https://cdn.xhs.test/main.jpg", "https://cdn.xhs.test/2.jpg"],
+            title="白橘运动包",
+        )
+
+        response = client.post(
+            "/api/xhs/qianfan/generate-detail-image",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"platform_account_id": account_id, "item_id": "ITEM-1", "prompt": ""},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["url"] == "https://cdn.example.test/detail.png"
+        assert body["asset"]["model_name"] == "detail-image-model"
+
+        # 服务端自己取商品图当参考图（只送首图），且提示词是后端按商品拼的
+        assert len(fake.calls) == 1
+        _model, prompt, reference_images = fake.calls[0]
+        assert reference_images == ["https://cdn.xhs.test/main.jpg"]
+        assert "白橘运动包" in prompt
+
+        # 落 AIGC 素材表（发布时按它取 aigcTaskId）
+        db = _test_session_factory()
+        try:
+            assets = db.query(AigcMediaAsset).all()
+            assert len(assets) == 1
+            assert assets[0].url == "https://cdn.example.test/detail.png"
+            # ⚠️ 缺值口径：服务商没回 local_path ⇒ 留空串，**不拿 url 冒充**
+            assert assets[0].local_path == ""
+            assert assets[0].asset_type == "image"
+        finally:
+            db.close()
+    finally:
+        app.dependency_overrides.pop(get_image_ai_client, None)
+
+
+def test_generate_detail_image_reports_missing_image_and_missing_mapping(tmp_path):
+    """两条如实报缺：商品无图 ⇒ 400 PRODUCT_IMAGE_MISSING；业务点未配 ⇒ 400 带 code。"""
+    from backend.app.api.ai import get_image_ai_client
+
+    class FakeImageClient:
+        def generate_image(self, *, model_config, api_key, prompt, reference_images=None):
+            raise AssertionError("不该被调到：这两个分支都在出图之前就返回")
+
+    db_dependency = _override_database(tmp_path)
+    token = _register_and_get_access_token("detail-image-missing")
+    try:
+        app.dependency_overrides[get_image_ai_client] = lambda: FakeImageClient()
+        account_id = _seed_account_for_last_user()
+        headers = {"Authorization": f"Bearer {token}"}
+
+        # ① 商品不在台账 ⇒ 404
+        missing_item = client.post(
+            "/api/xhs/qianfan/generate-detail-image",
+            headers=headers,
+            json={"platform_account_id": account_id, "item_id": "NOPE"},
+        )
+        assert missing_item.status_code == 404
+
+        # ② 商品在、但图集为空 ⇒ 400 PRODUCT_IMAGE_MISSING（**不凭空生成冒充商品图**）
+        _seed_shop_product(
+            platform_account_id=account_id, item_id="ITEM-NOIMG", images=[], title="无图商品"
+        )
+        no_image = client.post(
+            "/api/xhs/qianfan/generate-detail-image",
+            headers=headers,
+            json={"platform_account_id": account_id, "item_id": "ITEM-NOIMG"},
+        )
+        assert no_image.status_code == 400
+        assert no_image.json()["detail"]["code"] == "PRODUCT_IMAGE_MISSING"
+
+        # ③ 有图但业务点未配服务商 ⇒ 400 结构化（不回落）
+        _seed_shop_product(
+            platform_account_id=account_id,
+            item_id="ITEM-OK",
+            images=["https://cdn.xhs.test/main.jpg"],
+            title="有图商品",
+        )
+        unconfigured = client.post(
+            "/api/xhs/qianfan/generate-detail-image",
+            headers=headers,
+            json={"platform_account_id": account_id, "item_id": "ITEM-OK"},
+        )
+        assert unconfigured.status_code == 400
+        # 真实 code 由 `llm_gateway_client` 给（不猜、不写死一组「可能的值」——
+        # 写死一组等于把断言放宽到「差不多对」，那抓不住回归）。
+        assert unconfigured.json()["detail"]["code"] == "LLM_BUSINESS_PROVIDER_NOT_CONFIGURED"
     finally:
         app.dependency_overrides.pop(get_image_ai_client, None)
         app.dependency_overrides.pop(db_dependency, None)
@@ -5453,9 +5697,9 @@ def test_schedule_status_reports_scheduler_state_and_counts(tmp_path):
         assert payload["running"] is False
         assert payload["timezone"] == "Asia/Shanghai"
         assert payload["jobs"] == []
-        # 注册播种 8 行（全 active）+ 本测试 2 行（1 active + 1 paused）
-        assert payload["stats"]["total"] == 10
-        assert payload["stats"]["active"] == 9
+        # 注册播种 10 行（全 active）+ 本测试 2 行（1 active + 1 paused）
+        assert payload["stats"]["total"] == 12
+        assert payload["stats"]["active"] == 11
         assert payload["stats"]["paused"] == 1
         assert payload["stats"]["completed"] == 0
     finally:
@@ -7757,3 +8001,60 @@ def test_run_monitoring_refresh_once_scopes_to_row_owner(tmp_path, monkeypatch):
             db.close()
     finally:
         app.dependency_overrides.pop(db_dependency, None)
+
+
+def _seed_provider_and_mappings(token: str, model_type: str, model_name: str, api_key: str = "***") -> None:
+    """v2.0 辅助：建一条服务商，并把**同类**业务点全部映射到它。
+
+    ⚠️ 不按业务点逐个配 —— 用例关心的是「配了就能调」，类别对齐即可
+    （`image` 类只映射 3 个图像业务点，`text` 类映射 5 个文本业务点）。
+    """
+    from backend.app.core.security import encrypt_text
+    from backend.app.models import User
+    from sqlalchemy import select as _select
+
+    db = _test_session_factory()
+    try:
+        # 用「刚注册那个用户」的 id（由 _register_and_get_access_token 记录）——
+        # 一个用例可能注册多个用户，取末位会把映射建到 intruder 名下。
+        user_id = _last_registered_user_id
+        key = f"TEST-{model_type.upper()[:4]}"
+        existing = db.scalar(
+            _select(LlmGatewayConfig).where(
+                LlmGatewayConfig.user_id == user_id,
+                LlmGatewayConfig.provider_key == key,
+            )
+        )
+        if existing is None:
+            db.add(
+                LlmGatewayConfig(
+                    user_id=user_id,
+                    name=f"test-{model_type}",
+                    provider_key=key,
+                    platform="xhs",
+                    base_url="https://api.example.test/v1",
+                    # ⚠️ 库列存**密文**（与一期端点同样经 `encrypt_text`）——
+                    # 直接写明文会让 `decrypt_text` 抛 InvalidToken。
+                    access_token=encrypt_text(api_key),
+                    default_model=model_name,
+                    models_json="[]",
+                    enabled=True,
+                    model_type=model_type,
+                    healthy=True,
+                )
+            )
+            db.flush()
+        for spec in BUSINESS_KEYS:
+            if spec.kind == model_type:
+                db.add(
+                    LlmBusinessProvider(
+                        user_id=user_id,
+                        platform="xhs",
+                        business_key=spec.key,
+                        provider_key=key,
+                        enabled=True,
+                    )
+                )
+        db.commit()
+    finally:
+        db.close()

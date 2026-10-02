@@ -31,7 +31,7 @@ from backend.app.api.platforms.xhs.crawl import _save_normalized_notes
 from backend.app.api.platforms.xhs import pc
 from backend.app.core.database import Base, get_db
 from backend.app.main import app
-from backend.app.models import Note, NoteGoods, PlatformAccount, Shop, ShopProduct, User
+from backend.app.models import Note, NoteGoods, PlatformAccount, ShopProduct, User
 from backend.app.models.note import set_note_publish_status
 from backend.app.services import note_sync_service as nss
 from backend.app.services.rate_limiter import get_rate_limiter
@@ -1033,11 +1033,11 @@ def _seed_item_filter_fixture(db, *, user_id: int, account_id: int) -> dict:
     N-4 什么都不挂。四个查询（ITEM-1 / ITEM-2 / 不筛 / 未知 ID）的结果集
     **互不相同** ⇒ 不会出现「筛了跟没筛一样」的假通过。
     """
-    shop = Shop(user_id=user_id, seller_id="S-1", shop_name="测试店")
-    db.add(shop)
-    db.flush()
-    p1 = ShopProduct(user_id=user_id, shop_id_fk=shop.id, item_id="ITEM-1", item_title="商品一")
-    p2 = ShopProduct(user_id=user_id, shop_id_fk=shop.id, item_id="ITEM-2", item_title="商品二")
+    #: ADR-021：店铺实体退场 —— 账号归属写 `seller_id`，台账挂账号。
+    get_account = db.get(PlatformAccount, account_id)
+    get_account.seller_id = "S-1"
+    p1 = ShopProduct(user_id=user_id, platform_account_id=account_id, item_id="ITEM-1", item_title="商品一")
+    p2 = ShopProduct(user_id=user_id, platform_account_id=account_id, item_id="ITEM-2", item_title="商品二")
     db.add_all([p1, p2])
     db.flush()
     for note_id in ("N-1", "N-2", "N-3", "N-4"):
@@ -1139,20 +1139,20 @@ def test_notes_filter_by_item_id_does_not_leak_other_users(api_env):
         intruder = User(username="intruder", password_hash="x")
         db.add(intruder)
         db.flush()
-        intruder_shop = Shop(user_id=intruder.id, seller_id="S-9", shop_name="别人的店")
-        db.add(intruder_shop)
+        #: ADR-021：别人的商品同样挂账号（店铺实体已退场）。
+        intruder_account = PlatformAccount(
+            user_id=intruder.id, platform="xhs", sub_type="creator",
+            nickname="别人的号", status="active", seller_id="S-9",
+        )
+        db.add(intruder_account)
         db.flush()
         foreign = ShopProduct(
-            user_id=intruder.id, shop_id_fk=intruder_shop.id, item_id="ITEM-FOREIGN", item_title="别人的商品"
+            user_id=intruder.id, platform_account_id=intruder_account.id,
+            item_id="ITEM-FOREIGN", item_title="别人的商品",
         )
         db.add(foreign)
         # ⚠️ 别人的**关系行 + 笔记行**也要真建：只建商品行的话，本用例在新口径下
         # 会「因为压根没有关系行」而通过（假绿）。要证明的是 `user_id` 闸真的挡得住。
-        intruder_account = PlatformAccount(
-            user_id=intruder.id, platform="xhs", sub_type="creator",
-            nickname="别人的号", status="active",
-        )
-        db.add(intruder_account)
         db.flush()
         db.add(
             Note(

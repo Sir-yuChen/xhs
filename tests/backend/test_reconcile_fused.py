@@ -25,7 +25,6 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
-from backend.app.api.platforms.xhs import pc
 from backend.app.core.database import Base
 from backend.app.core.time import shanghai_now
 from backend.app.main import app
@@ -211,20 +210,16 @@ def test_rate_limited_sync_does_not_mark(creator_env, monkeypatch):
         db.close()
 
 
-def test_ark_only_completion_does_not_mark(creator_env, monkeypatch):
-    """只有 ark 源完整也不标：ark 只看得到商品笔记，凭它会把普通笔记全标错。"""
+def test_ark_only_completion_does_not_reconcile(creator_env):
+    """**商品笔记任务**（`only="ark"`）跑完**不做对账**：ark 只看得到商品笔记的子集，
+    凭它去做账号级对账会把普通笔记全标错。
+
+    ⚠️ 本用例原名 `test_ark_only_completion_does_not_mark`（2026-09-30 前）：那时
+    creator 与 ark 同处一个**混合任务**，所以要专门构造「creator 失败、ark 完整」来验证
+    **不拿 ark 的枚举去做账号级对账**。拆成两个任务（设计 13 **§44**）后该规则由
+    「ark 链路整条不写账号级副作用」直接保证，本用例改为直接钉住 ark 链路不对账。
+    """
     _, account_id, user_id, SessionLocal = creator_env
-
-    class FailingCreatorAdapter:
-        def __init__(self, cookies: str) -> None:
-            self.cookies = cookies
-
-        def get_posted_notes_page(self, page: int = 0, tab: int = 0):
-            return False, "登录凭证缺失，请重新登录", {"code": -13000, "success": False}
-
-    monkeypatch.setattr(
-        pc, "get_xhs_creator_api_adapter_factory", lambda: FailingCreatorAdapter
-    )
     nsync.FakeQianfanAdapter.list_entries = [nsync._ark_note("ARK-N1")]
     db = SessionLocal()
     try:
@@ -233,10 +228,12 @@ def test_ark_only_completion_does_not_mark(creator_env, monkeypatch):
     finally:
         db.close()
 
-    result = nss.run_note_sync(account_id, user_id=user_id, max_pages=1)
+    result = nss.run_note_sync(
+        account_id, user_id=user_id, max_pages=1, only=nss.SOURCE_ARK
+    )
 
     assert result["status"] == "done", result
-    assert "对账未执行" in result["note"], result["note"]
+    assert "不做账号级正文补齐与对账" in result["note"], result["note"]
     db = SessionLocal()
     try:
         # 普通笔记不在 ark 的商品笔记集合里，但**不能**因此被标「三方不存在」。
@@ -285,13 +282,11 @@ def test_goods_sync_marks_missing_by_item_id(tmp_path, monkeypatch):
         sgtest.FakeItemsAdapter.pages = [([sgtest._item("I1")], 1, False)]
         db = SessionLocal()
         try:
-            from backend.app.models.shop import Shop
-
-            shop = db.scalars(select(Shop)).one()
+            #: ADR-021：台账归属键 = 账号（无店铺实体可查）。
             db.add(
                 ShopProduct(
                     user_id=user_id,
-                    shop_id_fk=shop.id,
+                    platform_account_id=account_id,
                     item_id="I-OLD",
                     item_title="旧商品",
                     raw_json='{"create_time": 1786584162000}',
@@ -332,12 +327,9 @@ def test_goods_sync_rate_limited_does_not_mark(tmp_path, monkeypatch):
         sgtest.LIMITER["impl"] = sgtest.DenyLimiter()
         db = SessionLocal()
         try:
-            from backend.app.models.shop import Shop
-
-            shop = db.scalars(select(Shop)).one()
             db.add(
                 ShopProduct(
-                    user_id=user_id, shop_id_fk=shop.id, item_id="I-OLD", item_title="旧商品",
+                    user_id=user_id, platform_account_id=account_id, item_id="I-OLD", item_title="旧商品",
                     raw_json='{"create_time": 1786584162000}',
                 )
             )

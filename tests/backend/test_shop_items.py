@@ -26,11 +26,20 @@ from backend.app.core.time import shanghai_now
 from backend.app.main import app
 from backend.app.models import Note, NoteAsset, NoteGoods, PlatformAccount, User
 from backend.app.models.shop_product import ShopProduct
-from backend.app.services.shop_binding_service import attach_shop, upsert_shop
 from backend.app.services.shop_goods_service import existing_rows, store_entry
 from backend.app.services.shop_goods_sync_service import store_products
+from tests.backend.cookie_fixtures import give_ark_cookies
 
 client = TestClient(app)
+
+#: `_setup()` 建起的会话工厂（供模块级辅助函数使用；每个用例自己 `_setup` 一次）。
+_SESSION_LOCAL = None
+
+
+def _session_for(account_id: int):  # noqa: ARG001  (形参保留给将来的按账号分库)
+    """开一个测试库会话（`_setup` 必须先跑过）。"""
+    assert _SESSION_LOCAL is not None, "先调 _setup(tmp_path)"
+    return _SESSION_LOCAL()
 
 
 def _ark_item(item_id: str, title: str, **overrides) -> dict:
@@ -136,6 +145,8 @@ def _setup(tmp_path):
     )
     Base.metadata.create_all(bind=engine)
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    global _SESSION_LOCAL
+    _SESSION_LOCAL = SessionLocal
 
     def override_get_db():
         db = SessionLocal()
@@ -191,23 +202,30 @@ def _teardown():
 
 
 def _bind(headers, account_id: int) -> None:
-    response = client.post(
-        "/api/xhs/qianfan/bind",
-        json={
-            "platform_account_id": account_id,
-            "cookie_string": "a1=x; access-token-ark.xiaohongshu.com=y",
-        },
-        headers=headers,
-    )
-    assert response.status_code == 200, response.text
+    """给账号导入千帆（ark）登录态（ADR-021：`POST /qianfan/bind` 已退场回 410）。
+
+    原实现打 `/api/xhs/qianfan/bind` 建店铺实体 + 关系。现在「开通千帆能力」
+    就是给账号写 `ark` 通道凭据（账号矩阵里的凭据操作），故直接走存储层。
+    """
+    db = _session_for(account_id)
+    try:
+        account = db.get(PlatformAccount, account_id)
+        assert account is not None, account_id
+        give_ark_cookies(db, account)
+        db.commit()
+    finally:
+        db.close()
 
 
 def _seed_products(session_local, account_id: int, items: list[dict]) -> None:
-    """把千帆条目**走真实归一化**落进 `shop_products`（同步任务的同一入口）。"""
+    """把千帆条目**走真实归一化**落进 `shop_products`（同步任务的同一入口）。
+
+    ADR-021：归属键 = `platform_account_id`（即账号主键），店铺实体已退场。
+    """
     db = session_local()
     try:
         account = db.get(PlatformAccount, account_id)
-        stored = store_products(db, account.user_id, account.shop_id_fk, items)
+        stored = store_products(db, account.user_id, account.id, items)
         assert len(stored) == len(items), stored
         db.commit()
     finally:
@@ -221,7 +239,7 @@ def _seed_detail(session_local, account_id: int, item_id: str, skus: list[dict])
         row = db.scalar(
             select(ShopProduct).where(
                 ShopProduct.item_id == item_id,
-                ShopProduct.shop_id_fk == db.get(PlatformAccount, account_id).shop_id_fk,
+                ShopProduct.platform_account_id == account_id,
             )
         )
         row.detail_json = json.dumps(skus, ensure_ascii=False)
@@ -252,7 +270,7 @@ def test_items_reads_local_ledger_without_touching_the_platform(tmp_path):
 
         payload = _items(headers, ids["owned"], keyword="野餐")
         assert payload["source"] == "local"
-        assert payload["shop_name"] == "观隅好物的店"
+        assert payload["shop_name"] == "观隅好物", "ADR-021：店铺名 = 账号昵称"
         assert payload["total"] == 1
         assert payload["has_more"] is False
         # 同步时间即查询时间口径（本地台账没有「当下」）
@@ -285,21 +303,17 @@ def test_items_reads_local_ledger_without_touching_the_platform(tmp_path):
 
 
 def test_items_needs_no_ark_token_for_local_read(tmp_path):
-    """读本地台账**不涉及凭据**：有店铺关系但没有 ark 令牌也能看（v1.32 设计性质）。
+    """读本地台账**不涉及凭据**：账号没有 ark 令牌也能看（用户 2026-09-30 口径）。
 
+    用户口径：「**商品列表（千帆）页查询的本地数据库，无需校验千帆是否可用**」
+    —— 本地读链路**零门禁**（ADR-021 把「本地台账读取」与「平台触碰」彻底分开）。
     实时链路时代这里会 400 `QIANFAN_CREDENTIAL_MISSING`；本地化后「看货」不再
     依赖一次可用的千帆会话 —— 只有「同步商品」才需要令牌。
     """
     headers, _, ids, SessionLocal = _setup(tmp_path)
     try:
-        db = SessionLocal()
-        try:
-            account = db.get(PlatformAccount, ids["owned"])
-            shop = upsert_shop(db, account.user_id, seller_id="SELLER-X", shop_name="无令牌的店")
-            attach_shop(db, account, shop)
-            db.commit()
-        finally:
-            db.close()
+        #: 不再「绑店」：账号本身就是归属（ADR-021）。这里刻意**不给**它 ark 凭据，
+        #: 用来证明本地读取确实零门禁。
         _seed_products(SessionLocal, ids["owned"], [_ark_item("ITEM-9", "没有令牌也能看")])
 
         payload = _items(headers, ids["owned"])
@@ -494,10 +508,20 @@ def test_items_create_time_range_filters_by_day(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# 3. 门禁四件套（不因本地化而放松）
+# 3. 本地读的门禁口径：**零门禁**（ADR-021 反转了原来的「门禁四件套」）
 # --------------------------------------------------------------------------- #
-def test_items_requires_binding(tmp_path):
-    """未绑定：给结构化 400（码 + 可执行文案），不是空列表。"""
+def test_items_needs_no_ark_session_for_local_read(tmp_path):
+    """无 ark 会话的账号读 `/items` 也是 200（空台账），**不是 400**。
+
+    ⚠️ **被取代的旧断言（原句保留）**：本用例原名 `test_items_requires_binding`，
+    断言 *「未绑定：给结构化 400（码 + 可执行文案），不是空列表」* +
+    *「`detail["code"] == "QIANFAN_BINDING_REQUIRED"`」*。
+
+    用户 2026-09-30 口径推翻它：*「商品页走的本地数据库数据，不应该校验是否存在千帆
+    店铺，所有校验应该校验的是该小红书账号下是否存在千帆可用的会话」* ——
+    而 `/items` 读的是**本地台账**（零平台请求）⇒ **连「有没有 ark 会话」都不是门禁**，
+    未登录千帆也该能看已同步的数据（登录态只决定「能不能同步新数据」）。
+    """
     headers, _, ids, _ = _setup(tmp_path)
     try:
         response = client.post(
@@ -505,11 +529,11 @@ def test_items_requires_binding(tmp_path):
             json={"platform_account_id": ids["owned"]},
             headers=headers,
         )
-        assert response.status_code == 400
-        detail = response.json()["detail"]
-        assert detail["code"] == "QIANFAN_BINDING_REQUIRED"
-        assert "绑定" in detail["message"]
-        assert FakeArkAdapter.calls == {}          # 未绑定**不发**平台请求
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["source"] == "local"
+        assert payload["items"] == [], "没同步过 ⇒ 空台账（不是错误）"
+        assert FakeArkAdapter.calls == {}          # 本地读**不发**平台请求
     finally:
         _teardown()
 
@@ -640,7 +664,7 @@ def test_item_detail_returns_row_with_skus_and_images(tmp_path):
         assert response.status_code == 200, response.text
         payload = response.json()
         assert payload["item_id"] == "ITEM-1"
-        assert payload["shop_name"] == "观隅好物的店"
+        assert payload["shop_name"] == "观隅好物", "ADR-021：店铺名 = 账号昵称"
         assert payload["item"]["title"] == "外出野餐垫防潮垫"
         assert payload["item"]["sku_count"] == 7
         assert payload["sku_count"] == 1                       # 详情补齐到的 SKU 数
@@ -705,8 +729,14 @@ def test_item_detail_404_for_unknown_item_and_ownership(tmp_path):
             json={"platform_account_id": ids["owned_unbound"], "item_id": "ITEM-1"},
             headers=headers,
         )
-        assert unbound.status_code == 400
-        assert unbound.json()["detail"]["code"] == "QIANFAN_BINDING_REQUIRED"
+        #: ⚠️ **被取代的旧断言（原句保留）**：原来断言 *「无 ark 会话 → 400
+        #: `QIANFAN_BINDING_REQUIRED`」*。ADR-021 反转（本地读零门禁）⇒ 现在
+        #: 因为**这个账号名下没有 ITEM-1** 而 404 —— 与「归属不对」同一码，
+        #: 但原因不同：这里是「本账号没同步过这件商品」。
+        assert unbound.status_code == 404, unbound.text
+        assert "QIANFAN_BINDING_REQUIRED" not in unbound.text, (
+            "本地读不该再有千帆门禁（404 的原因应是「本账号没有这件商品」）"
+        )
     finally:
         _teardown()
 
@@ -724,7 +754,7 @@ def test_item_notes_reads_relation_table_without_touching_the_platform(tmp_path)
         try:
             account = db.get(PlatformAccount, ids["owned"])
             # 台账商品（关系表的商品侧）
-            store_products(db, account.user_id, account.shop_id_fk, [_ark_item("ITEM-1", "外出野餐垫防潮垫")])
+            store_products(db, account.user_id, account.id, [_ark_item("ITEM-1", "外出野餐垫防潮垫")])
             # 同步链路落库的笔记 + 关系（= link_note_goods 的产物形状）
             note = Note(
                 user_id=account.user_id,
@@ -804,7 +834,17 @@ def test_item_notes_reads_relation_table_without_touching_the_platform(tmp_path)
         _teardown()
 
 
-def test_item_notes_requires_binding_and_ownership(tmp_path):
+def test_item_notes_needs_no_ark_session_but_enforces_ownership(tmp_path):
+    """`/item-notes` 本地读**零门禁**，但**越权仍然 404**（两件事要分开）。
+
+    ⚠️ **被取代的旧断言（原句保留）**：本用例原名
+    `test_item_notes_requires_binding_and_ownership`，断言 *「未绑定 → 400
+    `QIANFAN_BINDING_REQUIRED`」*。ADR-021 + 用户 2026-09-30 口径反转：
+    本接口纯本地（`note_goods` join `notes`，零平台请求）⇒ 无 ark 会话也返回 200。
+
+    ⚠️ **归属闸不放松**：`platform_account_id` 是隔离键（ADR-021）——
+    拿别人的账号 id 仍必须 404，否则「本地读免门禁」就变成了越权口子。
+    """
     headers, intruder_headers, ids, _ = _setup(tmp_path)
     try:
         unbound = client.post(
@@ -812,8 +852,8 @@ def test_item_notes_requires_binding_and_ownership(tmp_path):
             json={"platform_account_id": ids["owned"], "item_id": "ITEM-1"},
             headers=headers,
         )
-        assert unbound.status_code == 400
-        assert unbound.json()["detail"]["code"] == "QIANFAN_BINDING_REQUIRED"
+        assert unbound.status_code == 200, unbound.text
+        assert unbound.json()["count"] == 0, "没落过关系 ⇒ 空结果（不是错误）"
 
         _bind(headers, ids["owned"])
         assert (
@@ -885,7 +925,7 @@ def _link_notes(session_local, account_id: int, item_id: str, count: int) -> Non
         product = db.scalar(
             select(ShopProduct).where(
                 ShopProduct.item_id == item_id,
-                ShopProduct.shop_id_fk == account.shop_id_fk,
+                ShopProduct.platform_account_id == account.id,
             )
         )
         assert product is not None, item_id
@@ -1004,16 +1044,22 @@ def _delete(headers, account_id: int, item_ids: list[str]):
 
 
 def test_items_delete_removes_only_local_rows(tmp_path):
-    """批量删除：**只删本店台账行**，关系行跟着删（设计 13 §33.10 + §26.6）。
+    """批量删除：**只删本账号台账行**，关系行跟着删（设计 13 §33.10 + §26.6）。
 
     四条一起钉住（少一条这个接口的语义就是错的）：
     1. **零平台请求** —— 千帆 SDK 根本没有商品删除接口，删的是本地行；
-    2. **只删本店** —— 同一个用户另一家店里的同 item_id 行必须活下来
-       （WHERE 里 `shop_id_fk` 与 `item_id` 是一对条件，不是只按 item_id）；
+    2. **只删本账号** —— 同一用户**另一个账号**里的同 item_id 行必须活下来
+       （WHERE 里 `platform_account_id` 与 `item_id` 是一对条件，不是只按 item_id）；
     3. **`note_goods` 关系行跟着删**（⚠️ 2026-09-23 用户口径「删除商品时也需要删除
        笔记与商品的关联关系」，**推翻** v1.36 的「关系行不动」）—— 但**只删指向
-       被删商品的那些**：幸存商品的关系必须留下，另一家店的同名商品关系也必须留下；
+       被删商品的那些**：幸存商品的关系必须留下，另一个账号的同名商品关系也必须留下；
     4. **笔记本体不连坐** —— 删的是关系，不是笔记（笔记有它自己的删除链）。
+
+    ⚠️ **被取代的旧口径（原句保留）**：本用例原来围绕「**同一用户的另一家店**」构造
+    —— 原文 *「同一个用户另一家店里的同 item_id 行必须活下来（WHERE 里 `shop_id_fk`
+    与 `item_id` 是一对条件…）」*。ADR-021（2026-09-30）店铺实体退场后
+    「另一家店」**不再存在**，等价场景改为「**同一用户的另一个账号**」
+    —— 收口维度从店铺换成账号，纪律（同 item_id 跨归属不许误删）一模一样。
     """
     headers, _, ids, SessionLocal = _setup(tmp_path)
     try:
@@ -1031,14 +1077,20 @@ def test_items_delete_removes_only_local_rows(tmp_path):
         _link_notes(SessionLocal, ids["owned"], "ITEM-A", 2)
         _link_notes(SessionLocal, ids["owned"], "ITEM-C", 1)
 
-        # 同一用户的**另一家店**，里面也有一个 ITEM-B（同 item_id、不同 shop），
-        # 并且也挂 1 篇 —— 删本店 ITEM-B 时，这家店的关系**必须留下**。
+        # 同一用户的**另一个账号**，里面也有一个 ITEM-B（同 item_id、不同账号），
+        # 并且也挂 1 篇 —— 删本账号 ITEM-B 时，那个账号的关系**必须留下**。
         db = SessionLocal()
         try:
             owner = db.get(PlatformAccount, ids["owned"])
-            other_shop = upsert_shop(
-                db, owner.user_id, seller_id="SELLER-OTHER", shop_name="另一家店"
+            other_shop = PlatformAccount(
+                user_id=owner.user_id,
+                platform="xhs",
+                sub_type="creator",
+                nickname="另一个号",
+                seller_id="SELLER-OTHER",
+                status="active",
             )
+            db.add(other_shop)
             db.commit()
             other_shop_id = other_shop.id
             store_products(db, owner.user_id, other_shop_id, [_ark_item("ITEM-B", "B 商品")])
@@ -1047,8 +1099,8 @@ def test_items_delete_removes_only_local_rows(tmp_path):
             db.close()
         _link_notes(SessionLocal, ids["owned"], "ITEM-B", 1)
 
-        # 给**另一家店**那个 ITEM-B 也挂一篇（`_link_notes` 只认本账号的店，
-        # 所以这里直接建行）—— 它是「指向另一个商品行」的关系，删本店 ITEM-B 时
+        # 给**另一个账号**那个 ITEM-B 也挂一篇（`_link_notes` 只认本账号的台账，
+        # 所以这里直接建行）—— 它是「指向另一个商品行」的关系，删本账号 ITEM-B 时
         # 必须留下，否则就是把无关数据一起删了。
         db = SessionLocal()
         try:
@@ -1056,7 +1108,7 @@ def test_items_delete_removes_only_local_rows(tmp_path):
             other_product = db.scalar(
                 select(ShopProduct).where(
                     ShopProduct.item_id == "ITEM-B",
-                    ShopProduct.shop_id_fk == other_shop_id,
+                    ShopProduct.platform_account_id == other_shop_id,
                 )
             )
             assert other_product is not None
@@ -1101,21 +1153,21 @@ def test_items_delete_removes_only_local_rows(tmp_path):
             kept_other_shop = db.scalar(
                 select(func.count())
                 .select_from(ShopProduct)
-                .where(ShopProduct.shop_id_fk == other_shop_id)
+                .where(ShopProduct.platform_account_id == other_shop_id)
             )
-            assert kept_other_shop == 1, "另一个店里的同 item_id 行不许被删"
+            assert kept_other_shop == 1, "另一个账号里的同 item_id 行不许被删"
 
             # 只剩 1 条关系：ITEM-C 那 1 条。
-            # ⚠️ 2026-09-27（§26.7）：关系表按**平台商品 ID** 挂、**不带店铺维度**
-            # ⇒ 「另一家店里同名的 ITEM-B」的关系行**也会被删**（关系回答的是
-            # 「这条笔记挂了哪个平台商品」，与它在哪个店无关）。本用例里两家店同属
-            # 一个用户、item_id 撞名是刻意构造的退化场景：**商品行**（上面那条
-            # `kept_other_shop == 1`）才是按店收口的，关系行不是。
+            # ⚠️ 2026-09-27（§26.7）：关系表按**平台商品 ID** 挂、**不带归属维度**
+            # ⇒ 「另一个账号里同名的 ITEM-B」的关系行**也会被删**（关系回答的是
+            # 「这条笔记挂了哪个平台商品」，与它属哪个账号无关）。本用例里两个账号
+            # 同属一个用户、item_id 撞名是刻意构造的退化场景：**商品行**（上面那条
+            # `kept_other_shop == 1`）才是按账号收口的，关系行不是。
             assert db.scalar(select(func.count()).select_from(NoteGoods)) == 1, (
                 "关系行按 item_id 删（ITEM-A / ITEM-B 的全部关系）；ITEM-C 的必须留下"
             )
             # 笔记本体不连坐（删的是关系不是笔记）：ITEM-A 2 篇 + ITEM-B 1 篇
-            # + ITEM-C 1 篇 + 另一家店 1 篇 = 5 篇都该活着
+            # + ITEM-C 1 篇 + 另一个账号 1 篇 = 5 篇都该活着
             assert db.scalar(select(func.count()).select_from(Note)) == 5, (
                 "批量删除商品不该删笔记（5 篇挂载笔记都该活着）"
             )
@@ -1126,8 +1178,13 @@ def test_items_delete_removes_only_local_rows(tmp_path):
 
 
 def test_items_delete_rejects_empty_and_oversized(tmp_path):
-    """批量删除的四道门：空 / 全空白 → 400；超上限 → 400（**不静默截断**）；
-    未绑店 → 400；越权 → 404。"""
+    """批量删除的三道门：空 / 全空白 → 400；超上限 → 400（**不静默截断**）；越权 → 404。
+
+    ⚠️ **被取代的旧断言（原句保留）**：原 docstring 写 *「批量删除的四道门：
+    空 / 全空白 → 400；超上限 → 400（不静默截断）；**未绑店 → 400**；越权 → 404」*。
+    第四道「未绑店 400」随 ADR-021 退场（本地删零门禁，用户 2026-09-30 口径），
+    改为「无 ark 会话 ⇒ 也能删本地行（200，删 0 行）」。
+    """
     headers, _, ids, SessionLocal = _setup(tmp_path)
     try:
         _bind(headers, ids["owned"])
@@ -1144,12 +1201,13 @@ def test_items_delete_rejects_empty_and_oversized(tmp_path):
         assert detail["code"] == "QIANFAN_ITEM_IDS_TOO_MANY"
         assert detail["limit"] == MAX_BATCH_DELETE, "要回上限值，客户端才能说清「超了多少」"
 
-        # 自己的号但没绑店（与 `/items` 同一口径）
+        #: 自己的号但没 ark 会话（ADR-021：本地删零门禁）⇒ 也能删本地行，
+        #: 只是没同步过 ⇒ 删 0 行（**不是** 400）。
         response = _delete(headers, ids["owned_unbound"], ["ITEM-A"])
-        assert response.status_code == 400, response.text
-        assert response.json()["detail"]["code"] == "QIANFAN_BINDING_REQUIRED"
+        assert response.status_code == 200, response.text
+        assert response.json()["deleted"] == 0, "没同步过 ⇒ 没有行可删"
 
-        # 别人的账号 → 404（越权与「未绑店」是两回事）
+        # 别人的账号 → 404（越权与「本地有没有数据」是两回事）
         response = _delete(headers, ids["foreign"], ["ITEM-A"])
         assert response.status_code == 404, response.text
     finally:

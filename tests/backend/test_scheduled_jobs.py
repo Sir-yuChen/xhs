@@ -16,6 +16,8 @@ from __future__ import annotations
 from datetime import timedelta
 from pathlib import Path
 
+import sqlite3
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
@@ -122,12 +124,18 @@ def _user_of(token: str) -> int:
 # --------------------------------------------------------------------------- #
 # 注册表白名单
 # --------------------------------------------------------------------------- #
-def test_registry_has_exactly_nine_entries():
-    """注册表全量 9 项（8 系统 + 1 业务管线）；键集合钉死 —— 新增任务类型 = 发版。"""
+def test_registry_has_exactly_eleven_entries():
+    """注册表全量 11 项（10 系统 + 1 业务管线）；键集合钉死 —— 新增任务类型 = 发版。
+
+    §44（2026-09-30）：「账号笔记同步」的混合双源拆成两个独立任务 ⇒ 新增
+    `system.goods_note_sync`（**商品笔记**，ark 源）。它与 `system.note_sync`（普通笔记，
+    creator 源）**各自成行**；⚠️ 与 `system.shop_goods_sync`（**店铺商品台账**，SKU/价格）
+    不是一回事，两条键都必须在表里。
+    """
     from backend.app.services.job_registry import job_registry
 
     registry = job_registry()
-    assert len(registry) == 9
+    assert len(registry) == 11
     assert set(registry) == {
         "system.due_publish",
         "system.monitoring_refresh",
@@ -136,7 +144,9 @@ def test_registry_has_exactly_nine_entries():
         "system.no_traffic_cleanup",
         "system.note_sync",
         "system.shop_goods_sync",
+        "system.goods_note_sync",
         "system.queue_record_cleanup",
+        "system.llm_gateway_monitor",
         "auto_ops.keyword_pipeline",
     }
 
@@ -407,7 +417,7 @@ def test_schedule_status_counts_only_my_rows(tmp_path, monkeypatch):
     try:
         owner = _register("status-owner")
         intruder = _register("status-intruder")
-        # 主人有 8 个内置行；入侵者先手动建一个自己的
+        # 主人有 10 个内置行；入侵者先手动建一个自己的
         _seed_builtin(SessionLocal, owner)
         response = client.post(
             "/api/schedule/jobs",
@@ -422,9 +432,9 @@ def test_schedule_status_counts_only_my_rows(tmp_path, monkeypatch):
 
         owner_stats = client.get("/api/schedule/status", headers=_auth(owner)).json()["stats"]
         intruder_stats = client.get("/api/schedule/status", headers=_auth(intruder)).json()["stats"]
-        assert owner_stats["total"] == 8
-        # 入侵者注册时也播种了 8 行 + 自己新建 1 行 = 9（只见自己的，不见主人的）
-        assert intruder_stats["total"] == 9, "入侵者只应看到自己的行"
+        assert owner_stats["total"] == 10
+        # 入侵者注册时也播种了 10 行 + 自己新建 1 行 = 11（只见自己的，不见主人的）
+        assert intruder_stats["total"] == 11, "入侵者只应看到自己的行"
     finally:
         app.dependency_overrides.clear()
 
@@ -453,7 +463,7 @@ def test_list_targets_returns_registry_with_existing_counts(tmp_path):
         assert response.status_code == 200, response.text
         items = response.json()["items"]
         keys = {item["job_key"] for item in items}
-        # 注册表全量都在（含 8 个内置 + 1 个普通）
+        # 注册表全量都在（含 10 个内置 + 1 个普通）
         assert keys == set(job_registry().keys())
         assert len(items) == len(job_registry())
 
@@ -1571,7 +1581,7 @@ def test_ensure_builtin_jobs_seeds_from_application_initial_data(tmp_path, monke
     原断言的**意图保留**（值不许漂）：只是对照源从迁移常量换成数据文件。
 
     ⚠️ **DEF-066（2026-09-24）再修订**：内置行**按用户各持一份**（原全局共享单行
-    `user_id IS NULL` 已废）⇒ 本用例钉 per-user 播种：每个用户 8 行、值逐字段
+    `user_id IS NULL` 已废）⇒ 本用例钉 per-user 播种：每个用户 10 行、值逐字段
     等于数据文件、二次调用不插行、**库里不允许再有 NULL 行**。
     """
     from backend.app.core.initial_data import load_initial_scheduled_jobs
@@ -1584,7 +1594,7 @@ def test_ensure_builtin_jobs_seeds_from_application_initial_data(tmp_path, monke
         second_user = _make_user(SessionLocal, "seed-second")
         db = SessionLocal()
         first = ensure_builtin_jobs(db)
-        assert len(first) == 16, "两个用户 × 8 个内置目标"
+        assert len(first) == 20, "两个用户 × 10 个内置目标"
         second = ensure_builtin_jobs(db)
         assert second == [], "幂等：已存在的 (user, job_key) 不插行"
         rows = list(db.scalars(select(ScheduledJob).where(ScheduledJob.is_builtin.is_(True))))
@@ -1650,7 +1660,7 @@ def test_sync_jobs_from_db_registers_active_rows_only(tmp_path, monkeypatch):
     SessionLocal = _override_database(tmp_path)
     _patch_service_sessions(monkeypatch, SessionLocal)
     try:
-        # DEF-066：内置行按用户播种 ⇒ 先有用户，sync 里的 ensure 才会铺出 8 行。
+        # DEF-066：内置行按用户播种 ⇒ 先有用户，sync 里的 ensure 才会铺出 10 行。
         # 测试行用 auto_ops 键（不用 system.* —— 同用户同 key 会被判重挡掉，
         # 那是「只补缺失」的正确语义，不能用来造假数字）。
         user_id = _make_user(SessionLocal, "sync-register")
@@ -1673,10 +1683,10 @@ def test_sync_jobs_from_db_registers_active_rows_only(tmp_path, monkeypatch):
         scheduler = build_scheduler()
         stats = sync_jobs_from_db(scheduler)
         ids = {job.id for job in scheduler.get_jobs()}
-        # 活跃行 = 测试行 1 + 应用初始化数据播种的 8 行（R24 起全 active）；
-        # 其中 `system.no_traffic_cleanup` 是 manual 档、**不参与调度装配** ⇒ 注册 8。
-        assert stats["registered"] == 8
-        assert len(ids) == 8
+        # 活跃行 = 测试行 1 + 应用初始化数据播种的 10 行（R24 起全 active）；
+        # 其中 `system.no_traffic_cleanup` 是 manual 档、**不参与调度装配** ⇒ 注册 10。
+        assert stats["registered"] == 10
+        assert len(ids) == 10
         assert all(job_id.startswith("job_") for job_id in ids)
     finally:
         app.dependency_overrides.clear()
@@ -2239,6 +2249,7 @@ def test_migration_a0b1c2d3e4f5_isolates_task_center(tmp_path):
                 platform VARCHAR(32) DEFAULT 'xhs',
                 sub_type VARCHAR(32),
                 nickname VARCHAR(128) DEFAULT '',
+                external_user_id VARCHAR(128),
                 deleted_at DATETIME,
                 PRIMARY KEY (id),
                 FOREIGN KEY(user_id) REFERENCES users (id)
@@ -2711,3 +2722,246 @@ def test_dedupe_seeded_scheduled_jobs_migration(tmp_path):
     assert [row[0] for row in snapshot()] == [1, 3, 4, 5], (
         "重复执行不得再删任何行（本迁移必须幂等）"
     )
+
+
+def test_migration_d5e6f7a8b9c0_backfills_blank_default_model(tmp_path):
+    """真跑 `upgrade`，钉住 v1.9 服务商化迁移的**存量 `default_model` 回填**（设计 17 §13.1）。
+
+    背景：v1.9 起「默认模型必填」，但 v1.9 **之前** `default_model` 允许空串 ⇒ 存量行可能是空。
+    留空 = 一条永远调不通、而用户看不出原因的服务商（`_complete()` 会因缺 model_name 直接
+    `ValueError`）。故迁移必须回填，且两条路径各自钉住：
+
+    ① `models_json` 目录里**有**模型 ⇒ 取**第一个**可用模型名（真实的、能直接调通）；
+    ② 目录**也空** ⇒ 落占位文案（**不猜真实模型名** —— 那是替用户编造凭据，§5 硬约束 5）。
+
+    ⚠️ 反向守卫：若有人把回填整段删掉（或改成「留空」，或改成「猜个真名」），本用例必红。
+    """
+    import sqlite3
+
+    db_path = tmp_path / "backfill.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE users (
+                id INTEGER NOT NULL,
+                username VARCHAR(80) NOT NULL,
+                password_hash VARCHAR(128) NOT NULL,
+                created_at DATETIME NOT NULL,
+                role VARCHAR(32) DEFAULT 'user',
+                PRIMARY KEY (id)
+            );
+            CREATE TABLE llm_gateway_configs (
+                id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                name VARCHAR(128) NOT NULL,
+                base_url VARCHAR(512) NOT NULL DEFAULT 'http://127.0.0.1:3000',
+                access_token TEXT NOT NULL DEFAULT '',
+                local_db_path VARCHAR(512) NOT NULL DEFAULT '',
+                default_model VARCHAR(128) NOT NULL DEFAULT '',
+                models_json TEXT NOT NULL DEFAULT '[]',
+                enabled BOOLEAN NOT NULL DEFAULT 1,
+                healthy BOOLEAN NOT NULL DEFAULT 0,
+                last_health_at DATETIME,
+                created_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL,
+                PRIMARY KEY (id)
+            );
+            """
+        )
+        # 两条存量行：① 目录有模型但 default_model 空；② 目录与模型都空。
+        conn.execute(
+            "INSERT INTO llm_gateway_configs "
+            "(id, user_id, name, default_model, models_json, created_at, updated_at) "
+            "VALUES (1, 1, 'has-catalog', '', '[\"deepseek-v4-flash\", \"other\"]', '2026-01-01', '2026-01-01')"
+        )
+        conn.execute(
+            "INSERT INTO llm_gateway_configs "
+            "(id, user_id, name, default_model, models_json, created_at, updated_at) "
+            "VALUES (2, 1, 'no-catalog', '   ', '[]', '2026-01-01', '2026-01-01')"
+        )
+        # ③ 已填好的行不许被覆盖（回填只针对空值）
+        conn.execute(
+            "INSERT INTO llm_gateway_configs "
+            "(id, user_id, name, default_model, models_json, created_at, updated_at) "
+            "VALUES (3, 1, 'filled', 'KEEP-ME', '[\"whatever\"]', '2026-01-01', '2026-01-01')"
+        )
+        # 本迁移还要 ALTER `model_configs`（D5 加 provider_key）⇒ 夹具须有它。
+        # 走项目公共助手（缺表清单集中一处，DEF-082 的修法）。
+        create_later_migration_tables(conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+    # ⚠️ 先 `stamp` 到本迁移的**父 revision**（`c4d5e6f7a8b9`），再 `upgrade head`：
+    # 夹具只建了本迁移要碰的表，从不跑前面的迁移链（同项目既有三个迁移用例的做法）。
+    # 少了这一步，alembic 会从**首迁移**开跑 ⇒ `table users already exists`。
+    run_alembic(db_path, "stamp", "c4d5e6f7a8b9")
+    run_alembic(db_path, "upgrade", "head")
+
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = dict(conn.execute("SELECT id, default_model FROM llm_gateway_configs").fetchall())
+    finally:
+        conn.close()
+
+    # ① 目录有模型 ⇒ 取第一个
+    assert rows[1] == "deepseek-v4-flash", "目录里有模型时应取第一个可用模型名"
+    # ② 目录也空 ⇒ 占位文案（非空、且不是编造的真实模型名）
+    assert rows[2].strip(), "空 default_model 必须被回填，不得留空"
+    assert rows[2] != "deepseek-v4-flash", "目录为空时不得凭空猜一个真实模型名"
+    assert "补填" in rows[2], f"占位文案需让用户看出要补（实测得到 {rows[2]!r}）"
+    # ③ 已填值零改动
+    assert rows[3] == "KEEP-ME", "已有 (非空) default_model 不得被覆盖"
+
+
+PARENT_V20 = "d5e6f7a8b9c0"
+
+
+def _seed(db_path):
+    """最小夹具：本迁移要碰的三张表 + 两条存量行。"""
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE llm_gateway_configs (
+                id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                name VARCHAR(128) NOT NULL,
+                provider_key VARCHAR(64) NOT NULL DEFAULT '',
+                platform VARCHAR(32) NOT NULL DEFAULT 'xhs',
+                base_url VARCHAR(512) NOT NULL DEFAULT 'http://127.0.0.1:3000',
+                access_token TEXT NOT NULL DEFAULT '',
+                local_db_path VARCHAR(512) NOT NULL DEFAULT '',
+                default_model VARCHAR(128) NOT NULL DEFAULT '',
+                models_json TEXT NOT NULL DEFAULT '[]',
+                enabled BOOLEAN NOT NULL DEFAULT 1,
+                healthy BOOLEAN NOT NULL DEFAULT 0,
+                last_health_at DATETIME,
+                created_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL,
+                PRIMARY KEY (id)
+            );
+            """
+        )
+        # 一条服务商：base_url 带**尾斜杠**（验归一化）
+        conn.execute(
+            "INSERT INTO llm_gateway_configs "
+            "(id, user_id, name, provider_key, platform, base_url, default_model, created_at, updated_at) "
+            "VALUES (1, 1, '匹配得上', 'PROV-MATCH', 'xhs', 'https://api.deepseek.com/v1/', 'm', '2026-01-01', '2026-01-01')"
+        )
+        conn.execute(
+            "INSERT INTO llm_gateway_configs "
+            "(id, user_id, name, provider_key, platform, base_url, default_model, created_at, updated_at) "
+            "VALUES (2, 1, '地址不匹配', 'PROV-OTHER', 'xhs', 'https://api.other.com/v1', 'm', '2026-01-01', '2026-01-01')"
+        )
+        # 本迁移还要 ALTER / DROP `model_configs` ⇒ 用项目公共助手补齐缺表
+        # （缺表清单集中一处，DEF-082 的修法：不从别的用例拷样板）。
+        create_later_migration_tables(conn)
+        conn.commit()
+
+        # `model_configs` 的三条存量行（判「匹配才建映射」）
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(model_configs)")}
+        assert "is_default" in cols and "base_url" in cols, f"model_configs 列不全：{sorted(cols)}"
+        for row in (
+            # ① is_default=1 且 base_url（归一化）匹配上 ⇒ 应建映射
+            (1, 1, "https://api.deepseek.com/v1", "text", 1),
+            # ② is_default=1 但地址谁都不匹配 ⇒ 不建
+            (2, 1, "https://api.nowhere.com/v1", "text", 1),
+            # ③ is_default=0 ⇒ 不建（只迁默认行）
+            (3, 1, "https://api.deepseek.com/v1", "text", 0),
+        ):
+            conn.execute(
+                "INSERT INTO model_configs "
+                "(id, user_id, name, model_type, provider, model_name, base_url, is_default) "
+                "VALUES (?, ?, ?, ?, 'openai-compatible', 'demo', ?, ?)",
+                (row[0], row[1], f"cfg-{row[0]}", row[3], row[2], row[4]),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+
+# ─────────────── v2.0 业务点映射迁移（f8a9b0c1d2e3，M4）───────────────
+
+def test_v20_business_provider_migration(tmp_path):
+    db_path = tmp_path / "v20.db"
+    _seed(db_path)
+
+    # ⚠️ 先 stamp 到父 revision 再 upgrade head：夹具只建了本迁移要碰的表，
+    # 从不跑前面的迁移链（同项目既有迁移用例做法）。
+    run_alembic(db_path, "stamp", PARENT_V20)
+    run_alembic(db_path, "upgrade", "head")
+
+    conn = sqlite3.connect(db_path)
+    try:
+        # ① 新表 + 唯一索引
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "llm_business_providers" in tables, "映射表未建"
+        indexes = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+        assert "uq_llm_business_providers_user_platform_business_key" in indexes, "三段唯一索引未建"
+
+        # ② model_type 加列 + 存量回填 text
+        rows = dict(conn.execute("SELECT id, model_type FROM llm_gateway_configs").fetchall())
+        assert rows[1] == "text", f"存量服务商 model_type 应回填 text，实测 {rows[1]!r}"
+        assert rows[2] == "text"
+
+        # ③ 只有「归一化地址匹配 + is_default=1」那条建了映射，且是文本类
+        mappings = list(
+            conn.execute(
+                "SELECT user_id, platform, business_key, provider_key FROM llm_business_providers"
+            )
+        )
+        # 迁移把匹配上的服务商铺到**该平台的全部文本类业务点**（5 个，
+        # 见 business_provider_keys 的文本类常量）—— 图像类一律不建（§13.2.5：
+        # 存量服务商 model_type 回填 text，不敢替用户猜图像能力）。
+        assert len(mappings) == 5, f"应建 5 条文本类映射，实测 {len(mappings)} 条：{mappings}"
+        keys = {m[2] for m in mappings}
+        assert keys == {"generate_note", "rewrite_note", "generate_title", "generate_tags", "polish_text"}, (
+            f"映射的业务点集合不对：{sorted(keys)}"
+        )
+        uid, platform, business_key, provider_key = mappings[0]
+        assert provider_key == "PROV-MATCH", f"应指向地址匹配的服务商，实测 {provider_key!r}"
+        assert platform == "xhs"
+        # 归一化口径：尾部斜杠差异不影响匹配（本用例的服务商 base_url 带尾斜杠）
+        assert business_key, "业务点 key 不得为空"
+
+        # ④ model_configs 表已 drop
+        assert "model_configs" not in tables, "model_configs 应随本迁移退场"
+    finally:
+        conn.close()
+
+    # ⑤ 幂等：stamp 回父 revision 再 upgrade ⇒ 零变化
+    run_alembic(db_path, "stamp", PARENT_V20)
+    run_alembic(db_path, "upgrade", "head")
+    conn = sqlite3.connect(db_path)
+    try:
+        after = list(
+            conn.execute("SELECT user_id, platform, business_key, provider_key FROM llm_business_providers")
+        )
+        assert len(after) == 5, f"重跑不得产生重复映射，实测 {len(after)} 条"
+    finally:
+        conn.close()
+
+
+def test_v20_downgrade_recreates_empty_table(tmp_path):
+    """downgrade 只把 `model_configs` 表**重建为空表** —— 设计取舍，不是 bug。
+
+    §13.2.5：drop 前已把能迁的配置迁到映射表；回退时**不回填**模型配置
+    （那是「另一条真相源」，回填等于让两条链路同时生效）。
+    """
+    db_path = tmp_path / "v20_down.db"
+    _seed(db_path)
+    run_alembic(db_path, "stamp", PARENT_V20)
+    run_alembic(db_path, "upgrade", "head")
+    run_alembic(db_path, "downgrade", PARENT_V20)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "model_configs" in tables, "回退应重建 model_configs 表（否则改不回来）"
+        count = conn.execute("SELECT COUNT(*) FROM model_configs").fetchone()[0]
+        assert count == 0, f"回退后应为空表（设计取舍：不回填），实测 {count} 行"
+    finally:
+        conn.close()

@@ -7,7 +7,8 @@
 3. **不毁数据**：标 `invalid` **不清空**已同步的 `shop_note_goods`；
 4. **低频有界**：按 `health_checked_at` 判到期，未到期直接跳过（手动触发也不刷请求）；
 5. **通知只发一次**：状态翻转时通知，后续轮次只刷新时间与原因（否则 24 小时 4 条同样的铃铛）；
-6. **鉴权**：越权 404、未绑定 404（没有凭据就没有可巡检的对象）。
+6. **鉴权**：越权 404；**没有 `ark` 会话 → 404 `ARK_SESSION_REQUIRED`**
+   （ADR-021：判据是令牌，不再是「有没有绑店」）。
 """
 from __future__ import annotations
 
@@ -29,6 +30,7 @@ from backend.app.services.shop_health_service import (
     account_health_due,
     run_shop_health_checks,
 )
+from tests.backend.cookie_fixtures import give_ark_cookies
 
 client = TestClient(app)
 
@@ -131,16 +133,26 @@ def _teardown():
     app.dependency_overrides.clear()
 
 
-def _bind(headers, account_id: int) -> None:
-    response = client.post(
-        "/api/xhs/qianfan/bind",
-        json={
-            "platform_account_id": account_id,
-            "cookie_string": "a1=x; access-token-ark.xiaohongshu.com=y",
-        },
-        headers=headers,
-    )
-    assert response.status_code == 200, response.text
+def _bind(headers, account_id: int, *, SessionLocal=None) -> None:
+    """给账号**写一份 `ark` 令牌**（= 走完 ADR-021 之后的能力授予）。
+
+    被取代的旧实现原句保留：*「`POST /api/xhs/qianfan/bind` 带 `cookie_string`
+    （绑店 + 存令牌）」* —— 该端点已随 ADR-021 退场（`410 / QIANFAN_BINDING_REMOVED`，
+    且不再进 OpenAPI），绑店这个动作**连语义都没有了**。
+
+    为什么改直写令牌：ADR-021 之后「能不能调千帆」的唯一判据是 `ark` 通道有没有令牌
+    （`has_ark_session`）。原来借 `POST /bind` 顺带写令牌，现在只能直写 ——
+    与 `_sync()` 直调存储层是同一个理由：**端点退场了，测试就直落到留下来的那一层**。
+    """
+    if SessionLocal is None:  # 兼容只想写令牌、不在意落库时机的调用点
+        return
+    db = SessionLocal()
+    try:
+        account = db.get(PlatformAccount, account_id)
+        give_ark_cookies(db, account)
+        db.commit()
+    finally:
+        db.close()
 
 
 #: 播种用的挂链映射条目（与 FakeArkAdapter.get_goods_note_page 的夹具同形）。
@@ -191,7 +203,7 @@ def test_health_check_marks_invalid_and_keeps_synced_mapping(tmp_path):
     """失效 → `invalid` + 可读原因 + 一次通知；**已同步映射必须原样保留**（不毁数据）。"""
     headers, _, ids, SessionLocal = _setup(tmp_path)
     try:
-        _bind(headers, ids["owned"])
+        _bind(headers, ids["owned"], SessionLocal=SessionLocal)
         _sync(SessionLocal, ids["owned"])
         FakeArkAdapter.calls = {}
         FakeArkAdapter.mode = "expired"
@@ -230,9 +242,9 @@ def test_health_check_marks_invalid_and_keeps_synced_mapping(tmp_path):
 
 def test_health_check_is_read_only(tmp_path):
     """巡检只允许打 `seller/info/v2`：不得出现同步、商品列表或任何其他调用。"""
-    headers, _, ids, _ = _setup(tmp_path)
+    headers, _, ids, SessionLocal = _setup(tmp_path)
     try:
-        _bind(headers, ids["owned"])
+        _bind(headers, ids["owned"], SessionLocal=SessionLocal)
         FakeArkAdapter.calls = {}
 
         client.post(
@@ -249,7 +261,7 @@ def test_health_check_keeps_active_shop_state(tmp_path):
     """有效 → 仍 `active`，`status_message` 清空，并记下巡检时间。"""
     headers, _, ids, SessionLocal = _setup(tmp_path)
     try:
-        _bind(headers, ids["owned"])
+        _bind(headers, ids["owned"], SessionLocal=SessionLocal)
         db = SessionLocal()
         try:
             set_shop_state(
@@ -276,7 +288,7 @@ def test_scheduled_check_skips_accounts_checked_recently(tmp_path):
     """低频有界：周期未到就跳过（`checked=0`，且平台一次都没被调）。"""
     headers, _, ids, SessionLocal = _setup(tmp_path)
     try:
-        _bind(headers, ids["owned"])
+        _bind(headers, ids["owned"], SessionLocal=SessionLocal)
         db = SessionLocal()
         try:
             now = shanghai_now()
@@ -300,7 +312,7 @@ def test_scheduled_check_notifies_only_on_transition(tmp_path):
     """失效只通知一次：第二个周期仍失效时只刷新时间，不再写第二条铃铛。"""
     headers, _, ids, SessionLocal = _setup(tmp_path)
     try:
-        _bind(headers, ids["owned"])
+        _bind(headers, ids["owned"], SessionLocal=SessionLocal)
         FakeArkAdapter.mode = "expired"
         db = SessionLocal()
         try:
@@ -318,19 +330,25 @@ def test_scheduled_check_notifies_only_on_transition(tmp_path):
         _teardown()
 
 
-def test_health_check_requires_a_shop_and_ownership(tmp_path):
-    """越权 404、未绑定 404 —— 与 bind/unbind 同一口径。"""
-    headers, intruder_headers, ids, _ = _setup(tmp_path)
+def test_health_check_requires_ark_session_and_ownership(tmp_path):
+    """越权 404；**没有 `ark` 会话 → 404 `ARK_SESSION_REQUIRED`**（ADR-021：判据是令牌）。
+
+    被取代的旧断言原句保留：*「未绑定 404 —— 与 bind/unbind 同一口径」+
+    `assert "先绑定" in unbound.json()["detail"]`* —— 「未绑店」这个状态
+    已随 ADR-021 退场，判据换成「本账号有没有千帆令牌」，错误码也就跟着换了。
+    """
+    headers, intruder_headers, ids, SessionLocal = _setup(tmp_path)
     try:
         unbound = client.post(
             "/api/xhs/qianfan/health-check",
             json={"platform_account_id": ids["owned"]},
             headers=headers,
         )
-        assert unbound.status_code == 404
-        assert "先绑定" in unbound.json()["detail"]
+        assert unbound.status_code == 404, unbound.text
+        assert unbound.json()["detail"]["code"] == "ARK_SESSION_REQUIRED"
+        assert "先绑定" not in unbound.text, "不得再给「去绑店」这种指错方向的指引"
 
-        _bind(headers, ids["owned"])
+        _bind(headers, ids["owned"], SessionLocal=SessionLocal)
         stranger = client.post(
             "/api/xhs/qianfan/health-check",
             json={"platform_account_id": ids["owned"]},

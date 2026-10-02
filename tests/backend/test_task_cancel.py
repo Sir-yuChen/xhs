@@ -384,7 +384,7 @@ def test_status_payload_reports_timing_from_latest_log(env):
         db.add(
             ScheduledJobLog(
                 user_id=user_id,
-                account_id=account_id,
+                platform_account_id=account_id,
                 job_name="账号笔记同步",
                 job_key="system.note_sync",
                 job_trigger_type="manual",
@@ -432,7 +432,7 @@ def test_status_payload_running_log_means_syncing(env):
         db.add(
             ScheduledJobLog(
                 user_id=user_id,
-                account_id=account_id,
+                platform_account_id=account_id,
                 job_name="账号笔记同步",
                 job_key="system.note_sync",
                 job_trigger_type="manual",
@@ -492,7 +492,7 @@ def test_cancel_endpoint_closes_running_log(env):
         db.add(
             ScheduledJobLog(
                 user_id=user_id,
-                account_id=account_id,
+                platform_account_id=account_id,
                 job_name="账号笔记同步",
                 job_key="system.note_sync",
                 job_trigger_type="manual",
@@ -565,7 +565,7 @@ def test_close_orphan_running_logs_writes_terminal_state(env):
         db.add(
             ScheduledJobLog(
                 user_id=user_id,
-                account_id=account_id,
+                platform_account_id=account_id,
                 job_name="账号笔记同步",
                 job_key="system.note_sync",
                 job_trigger_type="manual",

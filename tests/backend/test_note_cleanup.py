@@ -8,7 +8,8 @@
 4. **条件可配置**：时间区间、30 日阅读开关、阈值真的生效，不是写死全库；
 5. **分页**：`total` 与窗口一致，翻页不丢不重；
 6. **诚实边界**：响应必带 `coverage`（本地池大小 / 店铺笔记总数），让人知道池子多大；
-7. **鉴权**：越权 404、未绑定 404（与同模块其他端点同一口径）。
+7. **鉴权**：越权 404（账号不属于当前用户）；⚠️ **未绑千帆不是错**（ADR-021 起本地读零门禁
+   ⇒ 200 + 空池 + `bound: false`，见设计 18 §5）。
 """
 from __future__ import annotations
 
@@ -24,7 +25,7 @@ from backend.app.core.database import Base, get_db
 from backend.app.core.time import shanghai_now
 from backend.app.main import app
 from backend.app.models import PlatformAccount, User
-from backend.app.models.shop import Shop, ShopNoteGoods
+from backend.app.models.shop import ShopNoteGoods
 from tests.backend.cookie_fixtures import bind_shop_account
 
 client = TestClient(app)
@@ -72,11 +73,17 @@ def _entry(
     gmv: int | None = 0,
     browse_30d: int | None = 0,
     days_ago: int = 10,
+    item_id: str | None = None,
 ) -> dict:
-    """构造一条千帆商品笔记原文；`None` 表示该字段在原文里**不存在**。"""
+    """构造一条千帆商品笔记原文；`None` 表示该字段在原文里**不存在**。
+
+    `item_id` 缺省取 `ITEM-<note_id>` —— 映射行的 `item_id` 列非空（模型 `String(64)`），
+    不传就落不进去（NOT NULL 违反），而这条用例集根本不关心商品 ID。
+    """
     entry = {
         "note_id": note_id,
         "note_title": title,
+        "item_id": item_id if item_id is not None else f"ITEM-{note_id}",
         "note_image": f"http://qimg.example/{note_id}.jpg",
         "publish_time": _millis(days_ago),
         "xsec_token": "fake-token",
@@ -127,13 +134,18 @@ def _setup(tmp_path, *, with_binding: bool = True):
         db.flush()
         owner_account_id = None
         if with_binding:
-            #: 2026-09-22：`shop_account_bindings` 整表移除 —— 关系写账号行的
-            #: `shop_id_fk`，状态写 `shop_state`。映射的归属键随之从 `binding_id`
-            #: 换成 `platform_account_id`（**换列不改语义**：绑定当年就是账号级的）。
+            #: ADR-021：`shops` 已退场 —— 账号归属写 `seller_id`，状态写
+            #: `shop_state`。映射的归属键随之从 `binding_id` 换成
+            #: `platform_account_id`（**换列不改语义**：绑定当年就是账号级的）。
+            #:
+            #: ⚠️ **必须留默认的 `ark` 令牌**（不能再传 `cookies_text=""`）：
+            #: 旧口径下「绑了店」本身就是读候选池的凭据，所以当年可以只要状态不要票；
+            #: ADR-021 把判据换成 `has_ark_session`（= `ark` 通道有令牌）之后，
+            #: 没票的账号走的是 `list_candidates` 的「无登录态」早退分支 ⇒ 恒空池，
+            #: 于是整份用例集会以「ZERO-1 不在候选里」这种指错方向的方式集体变红。
             bind_shop_account(
                 db,
                 account,
-                cookies_text="",
                 shop_name="观隅好物的店",
                 goods_note_total=1968,
             )
@@ -156,7 +168,7 @@ def _seed(SessionLocal, owner_account_id: int, entries: list[dict]) -> None:
                     user_id=account.user_id,
                     platform_account_id=owner_account_id,
                     note_id=entry["note_id"],
-                    item_id=entry.get("item_id", "ITEM-1"),
+                    item_id=entry["item_id"],
                     item_title=entry.get("item_title", "商品"),
                     entry_json=json.dumps(entry, ensure_ascii=False),
                     synced_at=shanghai_now(),
@@ -386,13 +398,21 @@ def test_coverage_makes_pool_size_explicit(tmp_path):
         assert result["coverage"]["goods_note_total"] == 1968
         # 分子 < 分母 时这个差距是可见的
         assert result["total"] <= result["coverage"]["pool"]
-        assert result["shop_name"] == "观隅好物的店"
+        # ADR-021：店铺名 = 账号昵称（千帆 seller_name 与昵称同源，不再有 shops 表）
+        assert result["shop_name"] == "观隅好物"
     finally:
         _teardown()
 
 
-def test_unbound_account_is_404(tmp_path):
-    """没绑千帆就没有候选池（缺值口径：不能把空池包装成「0 条无流量」）。"""
+def test_unbound_account_reads_an_empty_pool(tmp_path):
+    """没绑千帆 ⇒ **不是错误**，是空池（ADR-021：纯本地读，零门禁）。
+
+    被取代的旧断言原句保留：*「没绑千帆就没有候选池（缺值口径：不能把空池包装成
+    「0 条无流量」）…… `assert response.status_code == 404` /
+    `detail["code"] == "QIANFAN_BINDING_REQUIRED"`」* —— 该 404 门禁已随
+    2026-09-30 用户口径「本地库查询无需校验千帆是否可用」移除（设计 18 §5）。
+    现在未登录也能读已同步的数据；**取不到东西 ≠ 出错**，按失败三分法给空态即可。
+    """
     headers, account_id, _, _ = _setup(tmp_path, with_binding=False)
     try:
         response = client.post(
@@ -400,8 +420,13 @@ def test_unbound_account_is_404(tmp_path):
             json={"platform_account_id": account_id},
             headers=headers,
         )
-        assert response.status_code == 404, response.text
-        assert response.json()["detail"]["code"] == "QIANFAN_BINDING_REQUIRED"
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["candidates"] == []
+        assert body["total"] == 0
+        assert body["coverage"] == {"pool": 0, "goods_note_total": 0}
+        assert body["bound"] is False, "空池要自曝「没登录态」，别冒充「0 条无流量」"
+        assert "QIANFAN_BINDING_REQUIRED" not in response.text
     finally:
         _teardown()
 
