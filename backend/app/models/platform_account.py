@@ -38,7 +38,7 @@ class PlatformAccount(Base):
         #: （`www` / `creator` / `ark`）。
         #:
         #: **为什么是部分索引**：`external_user_id` 为空的行不参与约束 —— 「空」不构成
-        #: 身份，若参与，多个空 id 账号（例如按店铺建的千帆账号）会互相冲突。
+        #: 身份，若参与，多个空 id 账号（例如只导入千帆会话、还没拿到小红书 id 的账号）会互相冲突。
         #: 空 id 的重复改由业务层用 `(user_id, platform, sub_type, nickname)` 兜底匹配
         #: 拦住（见 `account_service.upsert_platform_account_from_login`）。
         Index(
@@ -49,22 +49,13 @@ class PlatformAccount(Base):
             unique=True,
             sqlite_where=text("external_user_id IS NOT NULL AND external_user_id <> ''"),
         ),
-        #: **店铺 1:1**（用户 2026-09-22 口径，迁移 `m5n6o7p8q9r0`）：
-        #: 一个店铺最多被一个账号引用。
-        #:
-        #: **为什么是部分索引**（与上面那条同型）：
-        #: * `shop_id_fk IS NOT NULL` —— 「未绑店」不是一个占用；不加这条，
-        #:   多行 NULL 会互相冲突（而那正是缺值口径要的形状）。
-        #: * `deleted_at IS NULL` —— **软删账号不再占用店铺**（DEF-055 的新形态）：
-        #:   账号删了就当作没绑过，否则一条删掉的账号会**永久顶住**这个店的唯一约束，
-        #:   用户重新导入同一账号时 `attach_shop` 直接撞 IntegrityError（表现为 500，
-        #:   而不是一句能自救的话）。
-        Index(
-            "uq_platform_accounts_shop_id_fk",
-            "shop_id_fk",
-            unique=True,
-            sqlite_where=text("shop_id_fk IS NOT NULL AND deleted_at IS NULL"),
-        ),
+        #: ⚠️ **`uq_platform_accounts_shop_id_fk` 已退场**（ADR-021 / 设计 18，
+        #: 迁移 `a1b2c3d4e5f6`）：**店铺不再是实体**，`shops` 表与
+        #: `platform_accounts.shop_id_fk` 一并删除。被取代的旧注释原句保留：
+        #: *「**店铺 1:1**（用户 2026-09-22 口径，迁移 `m5n6o7p8q9r0`）：
+        #: 一个店铺最多被一个账号引用。」*
+        #: —— 关系形态被取代，但当时那两条「为什么是部分索引」的理由
+        #: （NULL 不占位 / 软删释放）在新的身份索引上仍然成立。
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
@@ -82,17 +73,26 @@ class PlatformAccount(Base):
     note_sync_cursor_ms: Mapped[int] = mapped_column(BigInteger, default=0)
     #: 同毫秒并列时的 tie-breaker（防止两条同 `publish_time` 的笔记漏行）。
     note_sync_cursor_note_id: Mapped[str] = mapped_column(String(64), default="", index=True)
-    #: 千帆店铺（`shops.id`）。**「账号 ↔ 店铺」的关系只有这一处**。
+    #: **千帆店铺标识（卖家 ID）—— 店铺不再是实体，它只是本账号的一个属性**
+    #: （ADR-021 / 设计 18，迁移 `a1b2c3d4e5f6`）。
     #:
-    #: 2026-09-22 起由 `shop_account_bindings` 搬到这里（那张表整表移除）。
-    #: **粒度是 1:1，且由 DB 强制**（用户口径：*不允许再出现「同店铺、多账号」场景；
-    #: 一个店铺下只需存**多个平台的会话令牌*** —— 令牌本来就都在该账号自己的
-    #: `account_cookie_versions` 里）。唯一性由上面的**部分唯一索引**
-    #: `uq_platform_accounts_shop_id_fk` 承担（所以这里**不能**再写 `unique=True`：
-    #: 那是列级全量唯一，会把「未绑店的多行 NULL」和「软删账号的残留引用」也卷进去）。
-    shop_id_fk: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("shops.id"), index=True, nullable=True
-    )
+    #: 千帆 `GET /api/edith/seller/info/v2` 回的 `user_id`（形如
+    #: `6a3250e427a0000000000000`）落在这里。原先是 `shops` 表的 `seller_id`
+    #: 列，经 `platform_accounts.shop_id_fk` 间接可达 —— 本次下沉为账号字段，
+    #: `shops` 表整表退场。
+    #:
+    #: **为什么不再是实体**（用户 2026-09-30 口径）：*「绑定账号后，不要再建店铺
+    #: 行数据，账号下存在三个平台的令牌，使用对应平台接口时则对应的使用该平台的
+    #: 登录令牌」*。店铺没有独立身份 —— 它就是某个小红书商家账号在千帆侧的名字，
+    #: 一对一是数据事实而不是要被强制的关系，所以不需要一张表和一条唯一约束。
+    #:
+    #: ⚠️ **本列不是能力判据**：「能不能用千帆」看的是 `ark` 通道有没有令牌
+    #: （`qianfan_cookies_for_account()`），**不是**本列有没有值。账号 9 的
+    #: Bug 正是把能力判据写成了归属判据（`shop_id_fk IS NULL` ⇒ 判定不可用），
+    #: 而它其实持有效 `ark` 令牌。**归属用归属列，调接口用令牌有效性**。
+    #:
+    #: 缺值口径：千帆没返回就**留空、不编造**（DEF-057 / 缺值不造假）。
+    seller_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     #: 千帆（ark）侧的**状态与游标**，JSON 文本。原绑定行的那几个字段搬到这里：
     #:
     #:   ``{"status","status_message","health_checked_at",
@@ -104,7 +104,9 @@ class PlatformAccount(Base):
     #: 的 `get_shop_state()` / `set_shop_state()`（**唯一实现**，内部赋新 dict），
     #: 任何调用点都不该自己 `json.loads` 这一列再原地改。
     #:
-    #: 店铺名 / 卖家 ID **不在这里**：它们是 `shops` 表的真值（同一份数据不留两处）。
+    #: 店铺名 / 卖家 ID **不在这里**：ADR-021 之后**店铺名就是本账号昵称**
+    #: （千帆 `seller_name` 与昵称同源），卖家 ID 是上面的 `seller_id` 列 ——
+    #: 同一份数据不留两处，也不再有第三方表可查。
     shop_state: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now, onupdate=shanghai_now)
@@ -112,7 +114,7 @@ class PlatformAccount(Base):
     #:
     #: 删除**不落地物理删**：行留在原位，唯一索引因此永久成立，重新导入同一账号时
     #: upsert 会命中本行并**复活**（清空本列），而不是新建一条 —— 从根上消灭
-    #: 「删了再导入又来一条」的重复源；同时它名下 `notes` / 店铺绑定不会变成孤儿。
+    #: 「删了再导入又来一条」的重复源；同时它名下 `notes` / 商品台账不会变成孤儿。
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 

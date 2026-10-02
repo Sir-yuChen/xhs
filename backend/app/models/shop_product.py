@@ -17,23 +17,34 @@ class ShopProduct(Base):
     笔记生成取用），与 `GET /xhs/qianfan/items` 的「看当下状态」是两种用途，
     两者并存、不互相替代。
 
-    **为什么是 `shop_id_fk` 而不是绑定 ID**：商品属于店铺实体，不属于某条
-    绑定（企业店主 + 多子账号读同一个店，商品是同一批）。`shops` 表在 T-32
-    已落地为 N:M 实体表，可解析。
+    **归属键 = `platform_account_id`（ADR-021 / 设计 18，迁移 `a1b2c3d4e5f6`）**：
+    商品归**账号**所有，不归某个店铺实体。被取代的旧结论原句保留：
 
-    **`shop_id_fk` 不允许空**：一个商品必须属于一个店铺实体；解不出 `shops`
-    行 → 同步失败留任务行说明原因，**不编店铺**（缺值口径，不造假）。
+    *「**为什么是 `shop_id_fk` 而不是绑定 ID**：商品属于店铺实体，不属于某条
+    绑定（企业店主 + 多子账号读同一个店，商品是同一批）。`shops` 表在 T-32
+    已落地为 N:M 实体表，可解析。」*
+
+    ⇒ 2026-09-30 用户口径「**所有数据以小红书账号做数据隔离**」：`shops` 退场，
+    商品直接挂账号。原先「一个店铺的商品是同一批」的前提已随 N:M 被否决而消失
+    （2026-09-22 已拍板不允许同店多账号），所以按账号隔离才是唯一正确的粒度。
+
+    **`platform_account_id` 不允许空**：一个商品必须属于一个账号；定位不到账号
+    ⇒ 同步失败留任务行说明原因，**不编账号**（缺值口径，不造假）。
     """
 
     __tablename__ = "shop_products"
     __table_args__ = (
-        UniqueConstraint("shop_id_fk", "item_id", name="uq_shop_products_shop_item"),
+        UniqueConstraint(
+            "platform_account_id", "item_id", name="uq_shop_products_account_item"
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
-    #: 指向 `shops.id`（T-32 的 N:M 店铺实体）。**不允许空**。
-    shop_id_fk: Mapped[int] = mapped_column(ForeignKey("shops.id"), index=True, nullable=False)
+    #: 指向 `platform_accounts.id`。**不允许空**（ADR-021：归属键即隔离键）。
+    platform_account_id: Mapped[int] = mapped_column(
+        ForeignKey("platform_accounts.id"), index=True, nullable=False
+    )
     #: 千帆商品 ID（`search_item_v2` 条目的 `item_id`）。
     item_id: Mapped[str] = mapped_column(String(64), default="")
     item_title: Mapped[str] = mapped_column(String(512), default="")

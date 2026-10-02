@@ -9,56 +9,20 @@ from backend.app.core.database import Base
 from backend.app.core.time import shanghai_now
 
 
-class Shop(Base):
-    """千帆店铺实体（**T-32 起落地**）。
+"""千帆侧模型：**店铺已不再是实体**（ADR-021 / 设计 18）。
 
-    为什么需要这张表：原来「账号 → 店铺」直接存在**账号行**上（`shop_user_id` /
-    `shop_name`），并用 `UNIQUE(platform_account_id)` 把它锁成 **1:1** —— 一个账号
-    只能读一个店铺。所以把店铺抽成实体，关系收成账号侧的一个外键
-    （`platform_accounts.shop_id_fk`），店铺名 / 卖家 ID 只留在这里一份。
+本文件曾含 `Shop` 表（T-32 的店铺实体）。2026-09-30 用户口径「所有数据以
+小红书账号做数据隔离」⇒ `shops` 表整表退场、`seller_id` 下沉为
+`platform_accounts` 的字段（迁移 `a1b2c3d4e5f6`）。此处只保留两张**按账号
+归属**的关系表：
 
-    ⚠️ **被取代的旧动机（原句保留）**：当时抽店铺表的理由是 *「企业店主 + 多子账号」
-    的真实形态是 N:1：多个子账号要读同一个店铺*。**2026-09-22 用户拍板否掉了 N:1**：
-    *不会再出现「同店铺、多账号」场景，一个店铺下只需存多个平台的会话令牌*。
-    ⇒ 关系回到 **1:1**，并且这次**由 DB 强制**（`shop_id_fk` 带 `unique=True`）；
-    「一个店铺被几个账号读」不再是产品事实，`shop_account_count` 随之从接口移除。
-    抽店铺实体这件事本身保留 —— 店铺名 / 卖家 ID 是真值，不该冗余在账号行上。
+* `shop_note_goods` —— 商品笔记的本地映射（商品挂链）
+* `note_goods`     —— 笔记 ↔ 商品 多对多（平台 ID 级）
 
-    ⚠️ 2026-09-22：原来的关系表 `shop_account_bindings` **整表移除**（用户拍板）。
-    它当年同时兼任「关系 / 千帆凭据仓库 / 同步状态机」三件事，是「一个语义两份
-    真相源」的温床 —— 拆开后：关系→`platform_accounts.shop_id_fk`、凭据→
-    `account_cookie_versions` 的 `ark` 通道、状态与游标→`platform_accounts.shop_state`。
-
-    **只建现在有消费者的字段**（不写没人读的列）：
-    `capabilities_json` / `capabilities_verified_at` / `shop_type` / `raw_json`
-    属 M3 能力探测（T-301~T-305），现在没有任何代码读它们，等那时再加。
-
-    **唯一约束用 `(user_id, seller_id)` 而不是设计 §9.1 计划的 `(seller_id, shop_id)`**：
-    千帆 `GET /api/edith/seller/info/v2` 只回 `user_id`（卖家 ID，本表 `seller_id`）
-    与 `seller_name`，**没有独立的店铺 ID**（实测白名单见
-    `api/platforms/xhs/qianfan.py::_shop_from_seller_info`）。`shop_id` 先留空 +
-    加 `user_id` 前缀（同一平台卖家 ID 在不同用户下是不同的实体），等 M2 拿到店铺 ID
-    再把约束收紧到 `(seller_id, shop_id)`。
-    """
-
-    __tablename__ = "shops"
-    __table_args__ = (
-        UniqueConstraint("user_id", "seller_id", name="uq_shops_user_seller"),
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
-    #: 千帆侧卖家 `user_id`（实测形如 `6a3250e427a0000000000000`）。
-    seller_id: Mapped[str] = mapped_column(String(64), default="")
-    #: 平台侧店铺 ID —— 千帆当前接口**不返回**，留空待 M2 补齐（不留空则宁可为空，不造假）。
-    shop_id: Mapped[str] = mapped_column(String(64), default="")
-    shop_name: Mapped[str] = mapped_column(String(128), default="")
-    #: `active` / `suspended` / `closed`（设计 §9.1）。当前只有 `active` 一种来源。
-    status: Mapped[str] = mapped_column(String(32), default="active")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=shanghai_now, onupdate=shanghai_now
-    )
+被取代的旧结论原句保留：*「千帆店铺实体（T-32 起落地）……店铺名 / 卖家 ID 是
+真值，不该冗余在账号行上。」* —— 该判断的前提（店铺是独立实体、可被多账号
+引用）已随 2026-09-22「不允许同店多账号」否决而消失，故实体退场。
+"""
 
 
 class ShopNoteGoods(Base):
@@ -116,7 +80,8 @@ class NoteGoods(Base):
     笔记与商品之间得关系单独一张关系表」）—— 分工不变，**只有本表的键换了**：
 
     * `notes` 装**笔记信息**（身份 `(user_id, note_id)`，`note_id` 是平台 ID）；
-    * `shop_products` 装**商品信息**（身份 `(shop_id_fk, item_id)`，`item_id` 是平台 ID）；
+    * `shop_products` 装**商品信息**（身份 `(platform_account_id, item_id)`，`item_id` 是平台 ID；
+      ADR-021：归属键是账号，不再是 `shop_id_fk`）；
     * 本表只装**关系** —— 一篇笔记可挂多个商品、一个商品可被多篇笔记挂载（M2M），
       由唯一键 `(user_id, note_id, item_id)` 强制（重复解析幂等，不产生重复行）。
 

@@ -123,13 +123,17 @@ class ScheduledJobLog(Base):
     user_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("users.id"), nullable=True, index=True
     )
-    #: 执行时快照的**平台账号**（迁移 `j1k2l3m4n5o6`）：账号卡「同步中」的判据 =
+    #: 执行时快照的**平台账号**（迁移 `j1k2l3m4n5o6` 建列，`b3c4d5e6f7a8` 随 ADR-021
+    #: ——设计 18 §6.3「列名漂移」——改名为 `platform_account_id`，与全库隔离键命名
+    #: 统一）：账号卡「同步中」的判据 =
     #: 「该账号**最新一条**同步任务日志的状态」（2026-09-27 用户口径「账号信息卡的
     #: 判断逻辑应只需要关注最新一条的同步笔记任务日志的状态即可」）—— 没有这一列就
     #: 只能靠 `task_id` 关联，而账号卡路径上那个字段是空的（两条路都断）。
     #: **刻意不加外键**：日志是历史快照（同 `user_id` 的理由 —— 账号删了，日志仍要
     #: 能回答「当时是哪个账号」）。存量行为 NULL ⇒ 不参与「最新一条」候选。
-    account_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    platform_account_id: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, index=True
+    )
     #: 执行时快照的**业务任务号**（迁移 `k2l3m4n5o6p7`）：`run_targeted_job` 一直收得到它，
     #: 只是此前没有列可存 ⇒ 日志与任务行只能靠「同秒启动」猜（重启重跑后 `started_at`
     #: 差了近 2 小时，猜法直接失效）。有了它，**孤儿日志收口**才能精确回查任务行真实终态

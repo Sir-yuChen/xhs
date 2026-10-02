@@ -351,6 +351,11 @@ class NoteComment(Base):
     parent_comment_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     created_at_remote: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     raw_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    #: 账号归属（ADR-021 / 迁移 `b3c4d5e6f7a8`）：此前本表隔离是**隐含的**（只有
+    #: `note_id` 这一条路，离开 `notes` 就说不清是谁的数据），现按
+    #: `note_id → notes.platform_account_id` 回填成显式列。**刻意不加外键**：
+    #: 同 `notes` 的口径 —— 账号删了，历史评论仍要能回答「当时属于哪个账号」。
+    platform_account_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
 
 # ⛔ `Tag` / `note_tags`（原「用户标签」表 + 连接表）已于 2026-09-25 **整表移除**

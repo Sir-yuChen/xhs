@@ -3,8 +3,12 @@
 ## 语义边界（务必遵守）
 
 ``sub_type`` **只表达协议链路**——决定 adapter / 请求域名 / Cookie 域。
-它 **不表达业务含义**：「有没有店铺」是业务维度，由 ``platform_accounts.shop_id_fk``
-是否为 NULL 推导（2026-09-22 起；原为 ``shop_account_bindings`` 的存在性，该表已整表移除），
+它 **不表达业务含义**：能不能用千帆（ark）由账号自己的 ``ark`` 通道令牌决定
+（``shop_binding_service.has_ark_session()``），**不由店铺归属推导**。
+（历史：「有没有店铺」曾是业务维度，由 ``platform_accounts.shop_id_fk`` 是否为 NULL
+推导（2026-09-22 起）；``shop_id_fk`` 已随 ADR-021 退场，更早的 ``shop_account_bindings``
+表也已整表移除。⚠️ 换句话说，**从来就不该**用归属判据回答能力问题 —— 账号 9 的 Bug
+正是这么来的。）
 **禁止**用 ``sub_type`` 判断"是不是店铺账号"（ADR-009）。
 
 ## 为什么要显式枚举
