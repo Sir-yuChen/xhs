@@ -20,6 +20,7 @@ import pytest
 from sqlalchemy import select
 
 from backend.app.core.security import decrypt_text
+from backend.app.core.time import shanghai_now
 from backend.app.models import LlmGatewayConfig
 
 
@@ -749,12 +750,17 @@ def test_monitor_fires_notification_on_threshold(api_client, db_factory, monkeyp
 
 
 def test_monitor_health_alert(api_client, db_factory):
-    """health 指标：网关 healthy=False ⇒ 触发健康预警。"""
-    from backend.app.models import LlmGatewayAlert, Notification
+    """health 指标：**探测过且不健康** ⇒ 触发；**从未探测** ⇒ 不触发（v2.2 缺陷修复）。
+
+    ⚠️ v2.2（设计 17 §4.5）：原实现只看 `healthy`，而该列**默认 False** ⇒ 任何新建服务商在
+    第一次点「测试连接」之前都会发一条假的「健康探测失败（不可达）」通知（实测复现 fired=1）。
+    新判据 = `last_health_at is not None AND healthy is False`。
+    """
+    from backend.app.models import LlmGatewayAlert, LlmGatewayConfig, Notification
     from backend.app.services.llm_gateway_monitor_service import run_llm_gateway_monitor_once
 
     headers = _auth_header(api_client)
-    gw = _create_gateway(api_client, headers)  # healthy 默认 False
+    gw = _create_gateway(api_client, headers)  # healthy 默认 False 且 last_health_at=None
 
     with db_factory() as db:
         db.add(LlmGatewayAlert(
@@ -763,11 +769,25 @@ def test_monitor_health_alert(api_client, db_factory):
         ))
         db.commit()
 
+    # ① 从未探测 ⇒ 不发（「没测过」不是「测失败」）
+    result = run_llm_gateway_monitor_once(1)
+    assert result["fired"] == 0, "从未探测的服务商不该触发健康预警"
+    with db_factory() as db:
+        assert db.scalars(select(Notification).where(Notification.source_type == "llm_gateway_alert")).all() == []
+
+    # ② 探测过且不健康 ⇒ 发
+    with db_factory() as db:
+        row = db.get(LlmGatewayConfig, gw["id"])
+        row.healthy = False
+        row.last_health_at = shanghai_now()
+        db.commit()
+
     result = run_llm_gateway_monitor_once(1)
     assert result["fired"] == 1
     with db_factory() as db:
         notifs = db.scalars(select(Notification).where(Notification.source_type == "llm_gateway_alert")).all()
         assert len(notifs) == 1
+        assert "健康" in notifs[0].title
 
 # ───────────── v1.9：未保存时拉模型目录（models-preview）+ 单条详情 ─────────────
 

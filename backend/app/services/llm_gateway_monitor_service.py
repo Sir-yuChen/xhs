@@ -35,6 +35,13 @@ def _metric_value(db: Session, alert: LlmGatewayAlert, user_id: int) -> float | 
         gw = db.get(LlmGatewayConfig, alert.gateway_id)
         if gw is None or gw.user_id != user_id:
             return None
+        # ⚠️ v2.2 修复（设计 17 §4.5）：**「从未探测」≠「探测失败」**。
+        # `healthy` 列默认 False，若直接按 `healthy=False` 触发，则**任何新建服务商在第一次
+        # 点「测试连接」之前**都会命中 health eq 0 ⇒ 发出一条假的「健康探测失败（不可达）」通知。
+        # 判据 = 探测过（last_health_at 有值）且结果为不健康，才返回 0.0（可触发）；
+        # 从未探测 ⇒ 返回 None（不触发，与 fail_rate 无数据同型）。
+        if gw.last_health_at is None:
+            return None
         # 0 = 不健康（healthy=False），1 = 健康
         return 0.0 if not gw.healthy else 1.0
 

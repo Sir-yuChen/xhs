@@ -491,6 +491,11 @@ v1.9 起新行**恒落 `""`**。
 
 - **去重**：同规则同日只发一次（`last_fired_at` 当天已发 ⇒ 跳过），避免轮询刷屏。
 
+> ⚠️ **v2.2（2026-10-02）：`health` 指标「从未探测」不算不健康**（缺陷修复，见 §4.5 ⚠️）。
+> 判据 = `last_health_at is not None AND healthy is False` ⇒ 才触发；**`last_health_at is None`
+> （建了但从未跑过 `/test`）⇒ 返回 `None` 不触发**。原口径「`healthy=False` 即触发」会让**每一条
+> 新建服务商**在首次探测前就发一条假的「健康探测失败（不可达）」通知 —— 实测复现 1 fired。
+
 ### 3.13 `llm_gateway_usage_logs`（本地调用台账，v1.6 新增 ✅）
 
 > 语义：**项目侧每次经网关发起的 LLM 调用记一行**（v1.6 用户口径「两个数据库合并 —— 数据层全归主库」）。
@@ -718,6 +723,24 @@ v1.9 起新行**恒落 `""`**。
   预警与展示都按这两个维度切片，与 `llm_gateway_tokens` 映射对齐。
 - **预警去重**：同一规则同一天只发一次通知（`llm_gateway_alerts.last_fired_at` 防抖），避免轮询周期内刷屏。
 - **通知**：复用一期 `notification_service` + `notifications` 表（站内通知中心，`level=warning/error`），**不接外部推送**。
+
+> ⚠️ **`health` 指标的可触发前提（v2.2 修复，2026-10-02）**：`last_health_at IS NOT NULL` ——
+> **「从未探测」≠「探测失败」**。`healthy` 列默认 `False`，若直接按 `healthy=False` 触发，
+> 则**任何新建服务商在第一次点「测试连接」之前**都会命中「健康探测失败（不可达）」，
+> 发出一条与事实相反的站内通知（用户看到「不可达」但其实从没探测过）。
+> - 判据：`last_health_at is None` ⇒ 返回 `None`（不触发，与 `fail_rate` 无数据同型）；
+> - 仅当**探测过且结果为不健康**（`last_health_at` 有值 + `healthy=False`）才触发；
+> - 文案区分：探测过失败 ⇒ 「健康探测失败（不可达）」；从未探测 ⇒ 不通知（用户未测试，无话可说）。
+> 实测复现：未探测网关 + `health eq 0` 规则 ⇒ 旧代码 `fired=1`（假通知），修复后 `fired=0`。
+
+### 4.5.1 预警规则 CRUD 与「不可删除」纪律（v2.2 补充）
+
+- 预警规则**可删除**（`DELETE /api/llm/gateway-alerts/{id}` 真删，返回 `{"status":"deleted"}`）——
+  ⚠️ **与「服务商不可删除」（§7.1 D-删，410 墓碑）刻意不同**：服务商的 `provider_key` 会**落到业务数据里**
+  （`llm_business_providers` 引用）⇒ 删了会让业务悬空；而预警规则**只被监控任务读、不被任何业务数据引用**
+  ⇒ 真删无悬空风险。**判据 = 是否被业务数据引用，不是「表重不重要」**（避免把 D-删 误推广成全表禁删）。
+- 规则字段校验走 `_validate_alert()`：`metric` ∈ {`calls`,`fail_rate`,`health`}、
+  `operator` ∈ {`gt`,`gte`,`lt`,`eq`}；非法 ⇒ 400 结构化原因。
 
 > ⚠️ 与 v1.1/v1.3 的差异：**Token/额度明细不重复落 New API 侧权威**（本地台账已是权威，DEF-044 单一真相源）。
 
