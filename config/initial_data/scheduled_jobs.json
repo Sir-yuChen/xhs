@@ -99,6 +99,19 @@
       "remark": "系统内置任务（应用初始化数据，随安装附有；调度属性可调）"
     },
     {
+      "job_key": "system.order_sync",
+      "name": "店铺订单同步",
+      "trigger_type": "cron",
+      "cron_expression": "0 30 6 * * *",
+      "misfire_policy": "once",
+      "concurrent": "forbid",
+      "params": {
+        "account_ids": []
+      },
+      "status": "active",
+      "remark": "系统内置任务（M6 方向 6 · 订单一期只读：拉千帆订单落本地台账，无写操作）"
+    },
+    {
       "job_key": "system.queue_record_cleanup",
       "name": "队列记录清理",
       "trigger_type": "cron",
@@ -126,7 +139,7 @@
       "trigger_type": "cron",
       "cron_expression": "0 5 * * * *",
       "misfire_policy": "once",
-      "concurrent": "f",
+      "concurrent": "forbid",
       "params": {},
       "status": "active",
       "remark": "系统内置任务（应用初始化数据，随安装附有；调度属性可调）"
@@ -137,7 +150,7 @@
       "trigger_type": "cron",
       "cron_expression": "0 35 * * * *",
       "misfire_policy": "once",
-      "concurrent": "f",
+      "concurrent": "forbid",
       "params": {},
       "status": "active",
       "remark": "系统内置任务（应用初始化数据，随安装附有；调度属性可调）"

@@ -17,6 +17,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from backend.app.core.database import Base
+from tests.backend.conftest import seed_owner_rows
 from backend.app.models.monitoring import ShopMetricSnapshot
 from backend.app.models.shop_product import ShopProduct
 from backend.app.services import shop_metrics_service as svc
@@ -25,7 +26,18 @@ from backend.app.services import shop_metrics_service as svc
 def _session(tmp_path, name="shop_metrics.db"):
     engine = create_engine(f"sqlite:///{tmp_path / name}")
     Base.metadata.create_all(engine)
+    # ⚠️ FK=ON 后必须播种父行（同 test_note_metrics，2026-10-04）。
+    seed_owner_rows(engine, user_id=1, account_id=1)
     return sessionmaker(bind=engine)()
+
+
+def _ensure_user(db, user_id):
+    """保证 `users` 行存在（FK=ON 后 `shop_products.user_id` 有外键；跨租户用例用 id=2）。"""
+    from backend.app.models.user import User
+
+    if db.get(User, user_id) is None:
+        db.add(User(id=user_id, username=f"u{user_id}", password_hash="x"))
+        db.flush()
 
 
 def _product(
@@ -41,6 +53,7 @@ def _product(
     sales=0,
     sales_30d=0,
 ):
+    _ensure_user(db, user_id)
     product = ShopProduct(
         user_id=user_id,
         platform_account_id=1,

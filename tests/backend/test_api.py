@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.orm import sessionmaker
 
+from tests.backend.conftest import seed_owner_rows
 from backend.app.main import app
 from backend.app.models.user import User
 from backend.app.models.llm_gateway import LlmBusinessProvider, LlmGatewayConfig, LlmGatewayModel
@@ -421,6 +422,13 @@ def _override_database(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'auth-test.db'}", connect_args={"check_same_thread": False})
     TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     Base.metadata.create_all(bind=engine)
+    # ⚠️ 全局 FK=ON（core/database.py，M5 引入）后必须播种父行：本文件插
+    # platform_accounts / tasks 等，(user_id, platform_account_id) 指向
+    # users / platform_accounts，而父表此前没人建行（2026-10-04 实测多条红）。
+    seed_owner_rows(engine, user_id=1, account_id=1)
+    # 本文件有跨租户用例（`user_id=999` 的「别人家」账号）⇒ 那些行也要建
+    # 出来，否则 FK=ON 下插不进去（2026-10-04）。
+    seed_owner_rows(engine, user_id=999)
     _test_session_factory = TestingSessionLocal
 
     def override_get_db():
@@ -6434,8 +6442,8 @@ def test_schedule_status_reports_scheduler_state_and_counts(tmp_path):
         assert payload["timezone"] == "Asia/Shanghai"
         assert payload["jobs"] == []
         # 注册播种 12 行（全 active）+ 本测试 2 行（1 active + 1 paused）
-        assert payload["stats"]["total"] == 14
-        assert payload["stats"]["active"] == 13
+        assert payload["stats"]["total"] == 15
+        assert payload["stats"]["active"] == 14
         assert payload["stats"]["paused"] == 1
         assert payload["stats"]["completed"] == 0
     finally:
@@ -8485,6 +8493,8 @@ def test_scheduled_jobs_are_registered_from_db_rows(tmp_path, monkeypatch):
     )
     TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     Base.metadata.create_all(bind=engine)
+    # ⚠️ 同 `_override_database`：FK=ON 后父行必须存在（2026-10-04）。
+    seed_owner_rows(engine, user_id=1, account_id=1)
     monkeypatch.setattr(sched, "SessionLocal", TestingSessionLocal)
 
     db = TestingSessionLocal()

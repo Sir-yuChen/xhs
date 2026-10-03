@@ -14,6 +14,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from backend.app.core.database import Base
+from tests.backend.conftest import seed_owner_rows
 from backend.app.models.monitoring import NoteMetricSnapshot
 from backend.app.models.note import Note
 from backend.app.services import note_metrics_service as svc
@@ -22,10 +23,23 @@ from backend.app.services import note_metrics_service as svc
 def _session(tmp_path, name="metrics.db"):
     engine = create_engine(f"sqlite:///{tmp_path / name}")
     Base.metadata.create_all(engine)
+    # ⚠️ FK=ON 后必须播种父行：本文件插 notes(user_id=1)，而 users 行没人建
+    # （2026-10-04 实测：不播则 10 条用例 FOREIGN KEY constraint failed）。
+    seed_owner_rows(engine, user_id=1, account_id=1)
     return sessionmaker(bind=engine)()
 
 
+def _ensure_user(db, user_id):
+    """保证 `users` 行存在（FK=ON 后 `notes.user_id` 有外键；跨租户用例用 id=2）。"""
+    from backend.app.models.user import User
+
+    if db.get(User, user_id) is None:
+        db.add(User(id=user_id, username=f"u{user_id}", password_hash="x"))
+        db.flush()
+
+
 def _note(db, *, user_id=1, note_id="n1", raw=None, title="笔记"):
+    _ensure_user(db, user_id)
     note = Note(
         user_id=user_id,
         platform_account_id=1,

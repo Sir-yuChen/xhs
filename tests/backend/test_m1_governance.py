@@ -41,11 +41,14 @@ from backend.app.main import app
 def _isolated_session(tmp_path, name: str = "m1-governance.db"):
     """建一个隔离的 SQLite 库并返回 Session（每个用例一个库，互不干扰）。"""
     from backend.app.core.database import Base
+    from tests.backend.conftest import seed_owner_rows
 
     engine = create_engine(
         f"sqlite:///{tmp_path / name}", connect_args={"check_same_thread": False}
     )
     Base.metadata.create_all(bind=engine)
+    # ⚠️ 全局 FK=ON 后必须播种父行（2026-10-04 实测 2 条红）。
+    seed_owner_rows(engine, user_id=1, account_id=1)
     return sessionmaker(autocommit=False, autoflush=False, bind=engine)()
 
 

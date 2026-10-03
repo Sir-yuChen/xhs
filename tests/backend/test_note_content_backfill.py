@@ -34,7 +34,8 @@ sys.path.insert(0, str(ROOT))
 from sqlalchemy import create_engine, select  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
 
-from backend.app.core.database import Base, get_db  # noqa: E402
+from backend.app.core.database import Base, get_db
+from tests.backend.conftest import seed_owner_rows  # noqa: E402
 from backend.app.core.time import shanghai_now  # noqa: E402
 from backend.app.models import Note, NoteAsset, PlatformAccount, User  # noqa: E402
 from backend.app.services.account_service import (  # noqa: E402
@@ -67,6 +68,10 @@ def _override_database(tmp_path: Path) -> Any:
     )
     testing_session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     Base.metadata.create_all(bind=engine)
+    # ⚠️ 全局 FK=ON（core/database.py，M5 引入）后必须播种父行：本文件大量插
+    # platform_accounts / notes，(user_id, platform_account_id) 指向 users /
+    # platform_accounts，而这两个父表此前没人建行（2026-10-04 实测 21 条红）。
+    seed_owner_rows(engine, user_id=1, account_id=1)
 
     def override_get_db() -> Any:
         db = testing_session()
@@ -99,8 +104,16 @@ def _build_db(tmp_path: Path, *, own_www: bool = True) -> Any:
     )
     # 同一账号的另一个链路（pc）。它归属另一个用户（`user_id + 1000`）：
     # 连租户都不在一起，更不该被读到。
+    # ⚠️ **那个用户必须真建出来**（2026-10-04）：全局 FK=ON 后
+    # `platform_accounts.user_id -> users.id` 生效，只给个 id 不建行 ⇒
+    # `FOREIGN KEY constraint failed`（此前 FK=OFF 时能过）。
+    sibling_user = User(
+        id=user.id + 1000, username=f"hydrate-sibling-{user.id}", password_hash="x"
+    )
+    db.add(sibling_user)
+    db.flush()
     sibling = PlatformAccount(
-        user_id=user.id + 1000, platform="xhs", sub_type="pc",
+        user_id=sibling_user.id, platform="xhs", sub_type="pc",
         nickname=GUANYU_NICKNAME, profile_json=GUANYU_PROFILE, status="active",
     )
     db.add_all([creator, sibling])
@@ -796,6 +809,8 @@ def _session(tmp_path: Path, name: str) -> Any:
         f"sqlite:///{tmp_path / name}", connect_args={"check_same_thread": False}
     )
     Base.metadata.create_all(bind=engine)
+    # ⚠️ 全局 FK=ON 后必须播种父行（同 `_override_database`，2026-10-04）。
+    seed_owner_rows(engine, user_id=1, account_id=1)
     return sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 

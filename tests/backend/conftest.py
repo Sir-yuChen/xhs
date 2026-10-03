@@ -107,6 +107,55 @@ def db_path(tmp_path: Path) -> Path:
     return tmp_path / "test.db"
 
 
+def seed_owner_rows(engine: Engine, *, user_id: int = 1, account_id: int | None = None) -> None:
+    """播种外键父行（`users`，可选 `platform_accounts`），幂等。
+
+    ## 为什么需要它（2026-10-04）
+
+    M5 的改动把 `PRAGMA foreign_keys=ON` 注册到 **`Engine` 类**上（`core/database.py`）
+    —— 为的是让「删工作流保留历史」的 `ON DELETE SET NULL` 真正生效。代价是
+    **所有** engine（含各测试文件自己 `create_engine` 的那些）都开始强制外键。
+
+    此前这些测试「能过」，只是因为 SQLite 默认 `foreign_keys=OFF` ——
+    它们插 `platform_accounts(user_id=1)` / `notes(user_id=1)` 时**从不建 `users` 行**。
+    FK 一开，64 条用例立刻红（`FOREIGN KEY constraint failed`）。
+
+    ⚠️ **这是测试夹具的缺陷，不是 FK=ON 的错**：外键约束本来就该是开的
+    （它能让「删父留子」这类脏数据在测试期就暴露）。修法是让夹具自洽，
+    **不是**把 PRAGMA 关回去。
+
+    ⚠️ **父行必须先 `flush()` 再插子行**：同一 commit 里 SQLAlchemy 不保证语句顺序，
+    实测 `platform_accounts.user_id -> users.id` 会撞外键。
+
+    用法（在各测试文件自己的建库助手末尾加一行）::
+
+        from tests.backend.conftest import seed_owner_rows
+        engine = create_engine(...); Base.metadata.create_all(engine)
+        seed_owner_rows(engine, user_id=1, account_id=1)
+    """
+    from backend.app.models.platform_account import PlatformAccount  # noqa: PLC0415
+    from backend.app.models.user import User  # noqa: PLC0415
+
+    factory = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    db = factory()
+    try:
+        if db.get(User, user_id) is None:
+            db.add(User(id=user_id, username=f"test-user-{user_id}", password_hash="x"))
+            db.flush()
+        if account_id is not None and db.get(PlatformAccount, account_id) is None:
+            db.add(
+                PlatformAccount(
+                    id=account_id,
+                    user_id=user_id,
+                    platform="xhs",
+                    nickname=f"test-account-{account_id}",
+                )
+            )
+        db.commit()
+    finally:
+        db.close()
+
+
 def service_session_modules() -> list[str]:
     """列出**所有**持有可能自开 Session 的工厂的后端模块（点分模块名）。
 

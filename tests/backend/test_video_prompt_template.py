@@ -52,6 +52,7 @@ def video_env(tmp_path, monkeypatch):
     from sqlalchemy.orm import sessionmaker
 
     from backend.app.core.database import Base
+    from tests.backend.conftest import seed_owner_rows
     from backend.app.services import media_generation as mg
 
     engine = create_engine(
@@ -59,6 +60,9 @@ def video_env(tmp_path, monkeypatch):
     )
     TestingSession = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     Base.metadata.create_all(bind=engine)
+    # ⚠️ 全局 FK=ON 后必须播种父行（本文件插 shop_products(user_id=1,
+    # platform_account_id=1)，2026-10-04 实测 6 条红）。
+    seed_owner_rows(engine, user_id=1, account_id=1)
 
     db = TestingSession()
     row = ShopProduct(

@@ -124,18 +124,22 @@ def _user_of(token: str) -> int:
 # --------------------------------------------------------------------------- #
 # 注册表白名单
 # --------------------------------------------------------------------------- #
-def test_registry_has_exactly_thirteen_entries():
-    """注册表全量 13 项（12 系统 + 1 业务管线）；键集合钉死 —— 新增任务类型 = 发版。
+def test_registry_has_exactly_fifteen_entries():
+    """注册表全量 15 项（13 系统内置 + 1 业务管线 + 1 工作流前缀）；键集合钉死 —— 新增任务类型 = 发版。
 
     §44（2026-09-30）：「账号笔记同步」的混合双源拆成两个独立任务 ⇒ 新增
     `system.goods_note_sync`（**商品笔记**，ark 源）。它与 `system.note_sync`（普通笔记，
     creator 源）**各自成行**；⚠️ 与 `system.shop_goods_sync`（**店铺商品台账**，SKU/价格）
     不是一回事，两条键都必须在表里。
+
+    ⚠️ 2026-10-04：M5/M6 新增 `workflow.`（工作流前缀，**动态**）与 `system.order_sync`
+    （订单只读同步）⇒ 13 → 15。⚠️ 种子里**只有 13 个内置行**：`workflow.` 与
+    `auto_ops.keyword_pipeline` 是**运行时动态建**的，不在 `scheduled_jobs.json` 里。
     """
     from backend.app.services.job_registry import job_registry
 
     registry = job_registry()
-    assert len(registry) == 13
+    assert len(registry) == 15
     assert set(registry) == {
         "system.due_publish",
         "system.monitoring_refresh",
@@ -149,7 +153,9 @@ def test_registry_has_exactly_thirteen_entries():
         "system.llm_gateway_monitor",
         "system.note_metrics_collect",
         "system.shop_metrics_collect",
+        "system.order_sync",
         "auto_ops.keyword_pipeline",
+        "workflow.",
     }
 
 
@@ -419,7 +425,7 @@ def test_schedule_status_counts_only_my_rows(tmp_path, monkeypatch):
     try:
         owner = _register("status-owner")
         intruder = _register("status-intruder")
-        # 主人有 12 个内置行；入侵者先手动建一个自己的
+        # 主人有 13 个内置行；入侵者先手动建一个自己的
         _seed_builtin(SessionLocal, owner)
         response = client.post(
             "/api/schedule/jobs",
@@ -434,9 +440,9 @@ def test_schedule_status_counts_only_my_rows(tmp_path, monkeypatch):
 
         owner_stats = client.get("/api/schedule/status", headers=_auth(owner)).json()["stats"]
         intruder_stats = client.get("/api/schedule/status", headers=_auth(intruder)).json()["stats"]
-        assert owner_stats["total"] == 12
+        assert owner_stats["total"] == 13
         # 入侵者注册时也播种了 12 行 + 自己新建 1 行 = 13（只见自己的，不见主人的）
-        assert intruder_stats["total"] == 13, "入侵者只应看到自己的行"
+        assert intruder_stats["total"] == 14, "入侵者只应看到自己的行"
     finally:
         app.dependency_overrides.clear()
 
@@ -465,7 +471,7 @@ def test_list_targets_returns_registry_with_existing_counts(tmp_path):
         assert response.status_code == 200, response.text
         items = response.json()["items"]
         keys = {item["job_key"] for item in items}
-        # 注册表全量都在（含 12 个内置 + 1 个普通）
+        # 注册表全量都在（含 13 个内置 + 1 个普通）
         assert keys == set(job_registry().keys())
         assert len(items) == len(job_registry())
 
@@ -1596,7 +1602,7 @@ def test_ensure_builtin_jobs_seeds_from_application_initial_data(tmp_path, monke
         second_user = _make_user(SessionLocal, "seed-second")
         db = SessionLocal()
         first = ensure_builtin_jobs(db)
-        assert len(first) == 24, "两个用户 × 12 个内置目标"
+        assert len(first) == 26, "两个用户 × 13 个内置目标"
         second = ensure_builtin_jobs(db)
         assert second == [], "幂等：已存在的 (user, job_key) 不插行"
         rows = list(db.scalars(select(ScheduledJob).where(ScheduledJob.is_builtin.is_(True))))
@@ -1687,8 +1693,8 @@ def test_sync_jobs_from_db_registers_active_rows_only(tmp_path, monkeypatch):
         ids = {job.id for job in scheduler.get_jobs()}
         # 活跃行 = 测试行 1 + 应用初始化数据播种的 12 行（R24 起全 active）；
         # 其中 `system.no_traffic_cleanup` 是 manual 档、**不参与调度装配** ⇒ 注册 12。
-        assert stats["registered"] == 12
-        assert len(ids) == 12
+        assert stats["registered"] == 13
+        assert len(ids) == 13
         assert all(job_id.startswith("job_") for job_id in ids)
     finally:
         app.dependency_overrides.clear()
@@ -1913,6 +1919,15 @@ def test_migration_converts_legacy_auto_tasks_four_ways(tmp_path):
                 created_at DATETIME
             )
             """
+        )
+        # ⚠️ **必须真插一行 `users`（2026-10-04）**：建表还不够 ——
+        # 全局 `PRAGMA foreign_keys=ON`（`core/database.py` 注册在 Engine 类上，M5 引入）
+        # 之后，迁移里 `INSERT INTO scheduled_jobs (user_id=1, …)` 会撞
+        # `FOREIGN KEY constraint failed`（此前 FK=OFF，缺行也能过）。
+        # 外键指向的行必须由夹具造出来，不能假定「迁移自己会建」。
+        conn.execute(
+            "INSERT INTO users (id, username, password_hash, is_active, created_at)"
+            " VALUES (1, 'legacy-user', 'x', 1, datetime('now'))"
         )
         conn.execute(
             """
@@ -2669,6 +2684,21 @@ def test_dedupe_seeded_scheduled_jobs_migration(tmp_path):
     try:
         # 最小夹具：只建本迁移要碰的表（数据迁移，不反射整库）。
         # `remark` 必须建 —— 本迁移的判据就落在它上面。
+        # ⚠️ `users` 也要建**并插行**（2026-10-04）：全局 FK=ON 之后，
+        # `scheduled_jobs.user_id` 的外键会对上面的 INSERT 生效 ⇒ 缺行即
+        # `FOREIGN KEY constraint failed`（本夹具用到 user 1 / user 2 两个）。
+        conn.execute(
+            "CREATE TABLE users ("
+            " id INTEGER PRIMARY KEY, username VARCHAR(64),"
+            " password_hash VARCHAR(255), is_active BOOLEAN DEFAULT 1,"
+            " created_at DATETIME)"
+        )
+        for uid in (1, 2):
+            conn.execute(
+                "INSERT INTO users (id, username, password_hash, is_active, created_at)"
+                " VALUES (?, ?, 'x', 1, datetime('now'))",
+                (uid, f"dedupe-user-{uid}"),
+            )
         conn.execute(
             "CREATE TABLE scheduled_jobs ("
             " id INTEGER NOT NULL, user_id INTEGER, name VARCHAR(128) NOT NULL,"

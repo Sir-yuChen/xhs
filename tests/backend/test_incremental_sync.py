@@ -561,15 +561,23 @@ def _make_db(tmp_path):
     from sqlalchemy.orm import Session
 
     from backend.app.core.database import Base
+    from tests.backend.conftest import seed_owner_rows
 
     engine = create_engine(f"sqlite:///{tmp_path / 't.db'}")
     Base.metadata.create_all(engine)
+    # ⚠️ FK=ON 后必须播种父行：_seed_account 插 platform_accounts(user_id=1)，
+    # 而 users 行没人建（2026-10-04 实测 7 条红）。
+    seed_owner_rows(engine, user_id=1, account_id=1)
     return Session(engine)
 
 
 def _seed_account(db, account_id: int) -> None:
     from backend.app.models.platform_account import PlatformAccount
 
+    # ⚠️ 幂等：`_make_db` 已播种 account 1（FK=ON 的需要），本助手再插同 id 会撞
+    # `UNIQUE constraint failed: platform_accounts.id`（2026-10-04 实测 3 条红）。
+    if db.get(PlatformAccount, account_id) is not None:
+        return
     db.add(PlatformAccount(
         id=account_id, user_id=1, platform="xhs", sub_type="creator",
         nickname="t", status="active",
@@ -595,6 +603,11 @@ def _seed_account_with_shop(db, account_id: int = 1) -> None:
     """
     from backend.app.models.platform_account import PlatformAccount
 
+    # ⚠️ 幂等（同 `_seed_account` 的理由：`_make_db` 已播种 account 1）。
+    existing = db.get(PlatformAccount, account_id)
+    if existing is not None:
+        db.commit()
+        return
     db.add(
         PlatformAccount(
             id=account_id, user_id=1, platform="xhs", sub_type="creator",
