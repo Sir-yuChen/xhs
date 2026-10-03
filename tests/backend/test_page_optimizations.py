@@ -3352,3 +3352,33 @@ def test_detail_image_generate_button_says_generate_main_or_detail():
     assert 'const activeGroupLabel = activeGroup === "product" ? "原始主图" : "原始详情图";' in page, (
         "参考图来源标题被一起改掉了（它本该保留「原始主图」的说法）"
     )
+
+
+def test_video_prompt_uses_public_templates():
+    """v2.26：**视频提示词也能选公共模板**（设计 17 §13.8）。
+
+    用户口径的延伸：「不整合只借鉴思路」+ 全流程统一 —— 视频是四类媒体里
+    最后一个没接模板的（`prompt_templates.task_type` 早就含 `video`，
+    能力留好了没人用）。
+
+    守四件（少一件就退回「模板是摆设」）：
+    ① 弹窗里有视频模板下拉；② 按 `task_type === "video"` 过滤（不与图片串用）；
+    ③ 提交时把 `template_id` 放进 `media_options`；④ 手输**不被裁剪**
+       （后端要靠它做「补充要求」）。
+    """
+    modal = _code_only(_read(LLM_GEN_MODAL))
+
+    # ① 下拉存在（锚点是下拉自身，不是文案里的同名字 —— 见上面那条守卫的教训）
+    assert 'name="video_template_id"' in modal, "视频区没有模板下拉 —— 模板没用上"
+    # ② 按 video 过滤
+    assert 't.task_type === "video"' in modal, (
+        "视频模板下拉没按 task_type=video 过滤（会选到图片模板）"
+    )
+    # ③ 提交时发出去
+    assert "template_id: values.video_template_id" in modal, (
+        "视频模板没被发给后端（选了等于没选）"
+    )
+    # ④ 手输不被裁剪（与模板并存 —— 后端要用它当「补充要求」）
+    assert "prompt: values.video_prompt" in modal, (
+        "选了模板就把手输裁掉了 —— 后端拿不到补充要求"
+    )

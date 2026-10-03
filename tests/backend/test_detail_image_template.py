@@ -72,8 +72,9 @@ def test_initial_data_ships_consistency_module_and_two_templates():
     for fragment in ("统一光位", "保留商品真实材质", "禁止改变产品形状"):
         assert fragment in consistency["content"], f"一致性约束缺「{fragment}」"
 
+    # v2.26：三张模板 —— 详情图(image) / 主图(cover) / 视频(video)
     task_types = {t["task_type"] for t in templates}
-    assert task_types == {"image", "cover"}, f"种子模板任务类型不对：{task_types}"
+    assert task_types == {"image", "cover", "video"}, f"种子模板任务类型不对：{task_types}"
     for template in templates:
         assert template["is_default"] is True, "种子模板必须是默认（否则弹窗不会自动选中）"
         assert template["module_names"], "种子模板必须引用一致性模块（否则一致性不生效）"
@@ -134,7 +135,8 @@ def test_register_seeds_prompt_templates_for_new_user(tmp_path):
             uid = _uid()
             templates = db.query(PromptTemplate).filter_by(user_id=uid).all()
             modules = db.query(PromptModule).filter_by(user_id=uid).all()
-            assert len(templates) == 2, f"注册后应有 2 张内置模板，实得 {len(templates)}"
+            # v2.26：3 张模板（image / cover / video）
+            assert len(templates) == 3, f"注册后应有 3 张内置模板，实得 {len(templates)}"
             assert len(modules) == 2, f"注册后应有 2 个内置模块，实得 {len(modules)}"
 
             # ① 模块先于模板：模板引用的 module_ids 必须**都解析得到**
@@ -146,8 +148,8 @@ def test_register_seeds_prompt_templates_for_new_user(tmp_path):
 
             # ② 每个 task_type 恰好一张默认（弹窗按 task_type 找默认）
             defaults = [t for t in templates if t.is_default]
-            assert len(defaults) == 2
-            assert {t.task_type for t in defaults} == {"image", "cover"}
+            assert len(defaults) == 3
+            assert {t.task_type for t in defaults} == {"image", "cover", "video"}
         finally:
             db.close()
     finally:
@@ -761,3 +763,32 @@ def test_style_reference_is_optional_zero_regression(tmp_path):
     finally:
         app.dependency_overrides.pop(db_dependency, None)
         app.dependency_overrides.pop(get_image_ai_client, None)
+
+
+def test_seed_templates_use_only_legal_slots():
+    """**种子模板的骨架只能引用合法槽位**（机械守卫，不是因为犯过两次才写）。
+
+    背景（真教训）：写 §13.6 / §13.8 的种子时**两次**都自造了槽位名
+    （`{item_title}` / `{item_spec}`），而渲染器的白名单里没有它们 ——
+    ⇒ 用户一选模板就 400「未知插槽」。两次都是**写完种子才发现**的。
+
+    所以把「种子骨架 ⊂ 合法槽位」变成一条会红的断言：
+    种子是随包分发的**数据**，改它不需要动代码，最容易在评审视线外漂移。
+    """
+    from backend.app.services import prompt_renderer
+
+    payload = load_initial_prompt_templates()
+    # 生成阶段模板可把 title/body/topics 当「输出示例」引用（与 llm_prompts 同口径）
+    extra = ("title", "body", "topics")
+
+    problems: list[str] = []
+    for template in payload["templates"]:
+        unknown = prompt_renderer.find_unknown_slots(template["prompt_skeleton"], extra)
+        if unknown:
+            problems.append(f"{template['name']}: {unknown}")
+
+    assert not problems, (
+        "种子模板引用了不存在的槽位（用户一选就 400）：" + "；".join(problems)
+    )
+    # 白名单本身也要非空（防空转：白名单被清空时上面的断言恒真）
+    assert prompt_renderer.ALLOWED_SLOTS, "槽位白名单为空 —— 守卫退化成恒真"

@@ -100,6 +100,35 @@ def requirement_lines(use: str = USE_DETAIL) -> tuple[str, ...]:
     return (*layout_lines(use), *QUALITY_LINES, *GENERATION_SAFETY_LINES, *PLATFORM_SAFE_LINES)
 
 
+def missing_requirement_lines(use: str, rendered: str) -> tuple[str, ...]:
+    """**模板已覆盖的约束行就不再补**（v2.26，唯一实现）。
+
+    判重必须抹掉三层差异 —— 否则等于没判（真机逐层实测出来的）：
+
+    | 差异 | 库常量 | 模板模块正文 |
+    |---|---|---|
+    | 行首 | `- ` 前缀 | 无前缀 |
+    | 行尾 | `；` | `。` |
+    | 指代 | 「**图中**不要出现…」 | 「**画面中**不要出现…」 |
+
+    只做前两层时「不要出现文字水印」仍会重复（措辞几乎一样但逐字不等）。
+
+    ⚠️ **为什么是公共函数而不是各调用点各写**：图片链路（`detail_image_prompt`）
+    与视频链路（`media_generation`）都要这一步；各写一份必然分叉
+    （DEF-044「同一语义不留两份实现」）—— 本函数落地时两处**确实**已经写重复了一次。
+    """
+    decor = ("- ", "；", "。", ";", ".", " ", "图中", "画面中", "画面上")
+
+    def _bare(text: str) -> str:
+        out = text
+        for token in decor:
+            out = out.replace(token, "")
+        return out
+
+    rendered_bare = _bare(rendered or "")
+    return tuple(line for line in requirement_lines(use) if _bare(line) not in rendered_bare)
+
+
 def requirement_block(use: str = USE_DETAIL) -> str:
     """带标题的约束段（供拼进 prompt 的调用点用）。"""
     return "\n".join(("出图要求：", *requirement_lines(use)))

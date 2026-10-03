@@ -391,7 +391,30 @@ def _assets_from_video(
     )
 
     options = media_options if isinstance(media_options, dict) else {}
-    prompt = str(options.get("prompt") or "").strip() or _default_video_prompt(row)
+    # v2.26（§13.8）：**公共提示词模板优先**（与图片链路同一把尺子）：
+    # 模板 > 手输 prompt > 内置兜底。选了模板 ⇒ 手输降级为「补充要求」。
+    #
+    # ⚠️ `int()` 转换与「渲染模板」**分开处理**：若把两者裹在同一个 try 里，
+    # `MediaGenerationError`（模板不存在 / 越权 / 插槽错）会被误报成「参数无效」
+    # —— 那是两个完全不同的自救动作（改参数 vs 去看模板）。
+    prompt = ""
+    raw_template_id = options.get("template_id")
+    if raw_template_id:
+        try:
+            template_id = int(raw_template_id)
+        except (TypeError, ValueError) as exc:
+            raise MediaGenerationError(
+                f"视频提示词模板参数无效：{raw_template_id!r}", code="PROMPT_TEMPLATE_INVALID"
+            ) from exc
+        prompt = _template_video_prompt(
+            db,
+            user,
+            template_id=template_id,
+            row=row,
+            extra_prompt=str(options.get("prompt") or "").strip(),
+        )
+    if not prompt:
+        prompt = str(options.get("prompt") or "").strip() or _default_video_prompt(row)
 
     # 时长夹到 [1, MAX_VIDEO_DURATION]；坏值退默认（不因为一个脏参数整条失败）。
     try:
@@ -471,6 +494,80 @@ def _default_video_prompt(row: ShopProduct) -> str:
         parts.append(f"商品：{title}")
     parts.append(image_prompt.requirement_inline(image_prompt.USE_VIDEO))
     return "；".join(parts)
+
+
+def _template_video_prompt(
+    db: Session,
+    user: Any,
+    *,
+    template_id: int,
+    row: ShopProduct,
+    extra_prompt: str = "",
+) -> str:
+    """用公共提示词模板渲染**视频**提示词（v2.26，设计 17 §13.8）。
+
+    与图片链路同一条尺子（§13.6.3）：渲染交给 `prompt_renderer`（§5.1 唯一实现），
+    用途档用 `USE_VIDEO`（竖版 9:16 + 动态场景 —— 与图片的 3:4 静帧不同）。
+
+    ⚠️ **不静默回落**：模板不存在 / 不属于本用户 ⇒ 抛 `MediaGenerationError`
+    （不降级成手输）—— 用户显式选了模板，「以为用了、其实没用」比报错更坏。
+    ⚠️ **不做「模板 + 兜底约束」的去重**：视频的兜底是 `_default_video_prompt`（整段），
+    而模板渲染自带模块；两者不叠加，模板就是模板（图片链路那边的判重是因为
+    服务层会无条件追加，这里没有那个追加）。
+    """
+    from backend.app.models.prompt import PromptModule, PromptTemplate
+    from backend.app.services import prompt_renderer
+
+    template = db.scalar(
+        select(PromptTemplate).where(
+            PromptTemplate.id == template_id,
+            PromptTemplate.user_id == getattr(user, "id", None),
+        )
+    )
+    if template is None:
+        raise MediaGenerationError(
+            f"提示词模板 #{template_id} 不存在或不属于当前用户", code="PROMPT_TEMPLATE_NOT_FOUND"
+        )
+
+    module_ids = [int(mid) for mid in (template.module_ids or []) if isinstance(mid, int)]
+    modules: list[Any] = []
+    if module_ids:
+        modules = list(
+            db.scalars(
+                select(PromptModule).where(
+                    PromptModule.user_id == getattr(user, "id", None),
+                    PromptModule.id.in_(module_ids),
+                    PromptModule.enabled.is_(True),
+                )
+            )
+        )
+
+    # ⚠️ 商品映射**必须复用** `load_product_dict_from_ledger`（唯一实现）：
+    # ORM 列名与槽位名**不同**（`item_title` vs `title`、`sales` vs `sales_total`），
+    # 自己 `getattr(row, field)` 取会**一个都取不到**（静默少信息、不报错）——
+    # 这正是该函数 docstring 里写的那类漂移（DEF-044）。
+    from backend.app.services.shop_products_service import load_product_dict_from_ledger
+
+    product = load_product_dict_from_ledger(row)
+
+    try:
+        body = prompt_renderer.render_prompt(
+            skeleton=str(getattr(template, "prompt_skeleton", "") or ""),
+            modules=modules,
+            product=product,
+        )
+    except prompt_renderer.PromptRenderError as error:
+        raise MediaGenerationError(error.message, code=error.code) from error
+
+    parts = [body.strip()] if body.strip() else []
+    # 视频构图约束（USE_VIDEO）—— 模板管风格，约束管成图硬要求（同 §13.6.2 分工）。
+    # 判重走公共实现（§13.6.3 同一套归一化，唯一实现）
+    missing = image_prompt.missing_requirement_lines(image_prompt.USE_VIDEO, body)
+    if missing:
+        parts.append("\n".join(("出图要求：", *missing)))
+    if extra_prompt.strip():
+        parts.append(f"【补充要求】{extra_prompt.strip()}")
+    return "\n\n".join(part for part in parts if part.strip())
 
 
 # --------------------------------------------------------------------------- #

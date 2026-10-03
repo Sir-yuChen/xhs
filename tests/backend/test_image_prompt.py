@@ -153,3 +153,32 @@ def test_every_use_has_shape_and_safety(use):
     lines = image_prompt.requirement_lines(use)
     assert len(lines) >= len(image_prompt.GENERATION_SAFETY_LINES) + 1
     assert any("构图" in line for line in lines), f"{use} 缺少构图行"
+
+
+def test_requirement_dedupe_is_shared_between_image_and_video_links():
+    """判重是**唯一实现**，图片与视频链路共用（防两份实现分叉，DEF-044）。
+
+    背景：v2.26 落地视频模板时，图片链路与视频链路**各自写了一份**归一化判重
+    （行首前缀 / 行尾标点 / 指代词），两份措辞不同、迟早分叉。已收敛到
+    `image_prompt.missing_requirement_lines`，本用例钉住「不要再分叉」。
+    """
+    import pathlib as _pathlib
+
+    from backend.app.services import image_prompt
+
+    # ① 公共函数存在且语义正确：已覆盖的行不返回
+    rendered = image_prompt.requirement_block(image_prompt.USE_VIDEO).replace("- ", "")
+    missing = image_prompt.missing_requirement_lines(image_prompt.USE_VIDEO, rendered)
+    assert missing == (), f"已覆盖的约束仍被判为缺失：{missing}"
+
+    # ② 未覆盖 ⇒ 全部返回（安全网不能条件性）
+    assert image_prompt.missing_requirement_lines(image_prompt.USE_VIDEO, "") == (
+        image_prompt.requirement_lines(image_prompt.USE_VIDEO)
+    )
+
+    # ③ 两个调用点都**没有**自己的 _bare / _DECOR（有 = 又分叉了）
+    root = _pathlib.Path("backend/app/services")
+    for name in ("detail_image_prompt.py", "media_generation.py"):
+        source = (root / name).read_text(encoding="utf-8")
+        assert "_DECOR" not in source, f"{name} 又写了一份归一化常量"
+        assert "missing_requirement_lines" in source, f"{name} 没有复用公共判重"

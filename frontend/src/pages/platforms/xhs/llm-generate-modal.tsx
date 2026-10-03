@@ -159,6 +159,10 @@ export function LlmGenerateModal({
               }
             : VIDEO_SOURCES.includes(mediaSource)
               ? {
+                  // v2.26（§13.8）：模板与手输**两个字段都发**（后端定优先级：
+                  // 模板 > 手输 > 兜底）—— 前端不做「选了模板就丢掉手输」的裁剪，
+                  // 那样后端拿不到「补充要求」（手输要作为附加要求进 prompt）。
+                  ...(values.video_template_id ? { template_id: values.video_template_id } : {}),
                   ...(values.video_prompt ? { prompt: values.video_prompt } : {}),
                   ...(values.video_duration ? { duration: values.video_duration } : {}),
                 }
@@ -304,6 +308,25 @@ export function LlmGenerateModal({
 
           {VIDEO_SOURCES.includes(mediaSource) && (
             <>
+              {/* v2.26（§13.8）：**公共提示词模板**（与图片链路同一把尺子）。
+                  模板 > 手输 > 内置兜底；选了模板则手输降级为「补充要求」。 */}
+              <Form.Item
+                name="video_template_id"
+                label="提示词模板（可选）"
+                extra="在「笔记工坊 → 提示词模板」维护；选了它则下方提示词作为补充要求追加"
+              >
+                <Select
+                  allowClear
+                  placeholder="选择公共提示词模板（留空则用手写提示词）"
+                  options={templates
+                    .filter((t) => t.task_type === "video")
+                    .map((t) => ({
+                      value: t.id,
+                      label: t.is_default ? `${t.name}（默认）` : t.name,
+                    }))}
+                  notFoundContent="还没有视频模板，可在「笔记工坊 → 提示词模板」新建"
+                />
+              </Form.Item>
               <Form.Item
                 name="video_prompt"
                 label="视频提示词（可选）"
