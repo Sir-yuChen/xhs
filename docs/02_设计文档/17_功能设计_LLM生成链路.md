@@ -2025,6 +2025,40 @@ Embeddings+rerank 44 / Audio 4 —— **同一个 key 下面挂着多种输出�
   调用时两者**不做相等校验**（映射指向模型即可；模型 platform 是展示与筛选维度）——
   若未来接入第二平台，再决定是否加该校验。⚠️ **本轮不加**，避免把「多平台表达力」做成「多平台硬校验」。
 
+##### 13.2.9.7a 去重（2026-10-03 用户口径补录）
+
+> 用户原话：「**使用平台需要去重，每个平台只需要添加一次，存在则不在添加**」
+
+| 项 | 落点 |
+|---|---|
+| 判据 | `_merge_platforms` 的 `value not in merged`（**唯一收敛点**，调用方不另写一份） |
+| 语义 | **同一平台配 N 次，列表里仍只有一个** |
+| 为什么重要 | 不去重的后果不是「多余字符」：展示会重复，且「这个模型配过几个平台」变得不可信（同一平台配 10 次会被读成 10 个平台） |
+
+##### 13.2.9.7b 「配置时同步」的落地补记（2026-10-03，修一处**漏实现**）
+
+⚠️ 落地时发现：**「配置时同步」在 `PUT /api/llm/business-providers` 上原本是漏实现的** ——
+该端点读到了模型行（`model_row`）却**只用它做类型校验**，没写 `platform`。
+
+**真机现象**：用户在「模型配置」页选了服务商 + 模型，服务商列表里该模型的「使用平台」仍是 `-`。
+
+**修法**（`upsert_business_provider`，写映射之前）：
+
+```python
+if provider_key and model_name and model_row is not None:
+    merged = _merge_platforms(_parse_platforms(model_row.platform), [payload.platform])
+    model_row.platform = _dump_platforms(merged)
+```
+
+⚠️ **两个落地坑**（真机实测到，已写进注释防回退）：
+
+1. **`platform` 列是 `String(255)` 的 JSON 数组字符串**，**不是** SQLAlchemy `JSON` 类型 ——
+   直接 `row.platform = ["xhs"]` 会 `sqlite3.ProgrammingError: type 'list' is not supported`
+   （实测 28 条用例里 14 条同时红）。**必须**走 `_parse_platforms` / `_dump_platforms` 收敛点。
+2. **`model_row` 必须显式初始化 `None`**：它只在 `provider_key` 非空时赋值，
+   而「配置时同步」判据在两条路之后 ⇒ 不初始化会在**清空映射**那条路 `NameError`（崩溃而非业务错）。
+
+
 #### 13.2.9.8 迁移结论（`down_revision = b2c3d4e5f6a7`，脚本核验，非凭记忆）
 
 1. **建表** `llm_gateway_models`（+ 唯一约束 `(user_id, provider_key, model_name)` + `user_id` 索引）。

@@ -299,6 +299,14 @@ def _merge_platforms(existing: list[str], incoming: list[str]) -> list[str]:
     同一个模型，是「追加一个使用平台」，不是「把第一个平台挤掉」**。
     ⚠️ 清空平台走 `PATCH` 显式传 `platform=[]`（见 `update_gateway_model`）——
     那时语义是**覆盖为空**，不经本函数。
+
+    ## 去重（2026-10-03 用户口径，原话）
+
+    > 「**使用平台需要去重，每个平台只需要添加一次，存在则不在添加**」
+
+    ⇒ 判据落在这里的 `value not in merged`（**唯一收敛点**，不要在调用方另写一份）。
+    这是「配置时并入」的下游保证：**同一平台配 N 次，列表里仍只有一个**。
+    不去重的后果不是「多余字符」：展示会重复，且「这个模型配过几个平台」变得不可信。
     """
     merged = list(existing)
     for item in incoming:
@@ -1705,6 +1713,10 @@ def upsert_business_provider(
 
     provider_key = (payload.provider_key or "").strip()
     model_name = (payload.model_name or "").strip()
+    #: 命中的模型行（**显式初始化**）：下面「配置时同步」要用它写 `platform`，
+    #: 而清空映射那条路不会赋值 ⇒ 不初始化会在 `model_row is not None` 处 NameError。
+    #: 不靠「provider_key 非空才走到」的隐式依赖 —— 那种正确性一改条件就断。
+    model_row: LlmGatewayModel | None = None
 
     if provider_key:
         config = db.scalar(
@@ -1786,6 +1798,30 @@ def upsert_business_provider(
     else:
         # 清空映射 ⇒ 模型一并清空（无服务商则无模型可言）
         model_name = ""
+
+    # ⚠️ v2.26（§13.2.9.7「配置时同步」）——**把当前平台并入模型行的 `platform`**。
+    #
+    # 用户原话：「再具体平台配置该服务商下的具体模型时，将当前平台的设置
+    # 为当前服务商下的模型的使用平台」⇒ 写入时机 = 在某个平台上下文里配置该模型时。
+    # 本端点的 `payload.platform`（模型配置页的 `xhs`）正是那个上下文。
+    #
+    # ⚠️ **此前这是漏实现的**：本函数读到了 `model_row` 却只用它做类型校验，
+    # 没写 `platform` ⇒ 用户在模型配置页选了服务商+模型，服务商列表里该模型的
+    # 「使用平台」仍是 `-`（真机实测用户报告的现象）。
+    # 设计早就写了（§13.2.9.7），是代码没跟上。
+    #
+    # ⚠️ **并入不是覆盖**（§13.2.9.7 / 模型类 `platform` 注释）：
+    # 覆盖会让「多平台共用一个模型」无法累积 —— 在 A 平台配一次、B 平台再配一次后，
+    # 只剩 B。去重是为了不写重复项，不是取最后一次。
+    if provider_key and model_name and model_row is not None:
+        # ⚠️ **落库必须走唯一收敛点**（`_parse_platforms` / `_dump_platforms`）：
+        # `platform` 列是 **JSON 数组字符串**（`String(255)`，不是 SQLAlchemy JSON）——
+        # 直接赋 Python list 会 `sqlite3.ProgrammingError: type 'list' is not supported`
+        # （真机实测，28 条用例里 14 条同时红）。这与 529 行的既有写法**同一模式**。
+        merged = _merge_platforms(
+            _parse_platforms(model_row.platform), [payload.platform]
+        )
+        model_row.platform = _dump_platforms(merged)
 
     row = db.scalar(
         select(LlmBusinessProvider).where(

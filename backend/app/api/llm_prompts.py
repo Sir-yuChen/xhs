@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -24,8 +25,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.app.core.database import get_db
+from backend.app.core.database import SessionLocal, get_db
 from backend.app.core.deps import get_current_user
+
+logger = logging.getLogger(__name__)
 from backend.app.models import (
     GenerationRecord,
     PromptModule,
@@ -575,9 +578,11 @@ def seed_builtin_prompt_templates_for_all_users() -> int:
 
     ⚠️ 用**独立 Session**（:启动阶段没有请求级 db 依赖）。
     """
-    from backend.app.core.database import SessionLocal
     from backend.app.models.user import User
 
+    # ⚠️ `SessionLocal` 在**模块层**持有（不是函数内 import）——
+    # `conftest.patch_service_sessions` 按模块属性打桩，函数级 import 打不到 ⇒
+    # 测试会**默默写生产库**（2026-09-27 已发生两次，见该守卫的 docstring）。
     db = SessionLocal()
     try:
         user_ids = list(db.scalars(select(User.id)))

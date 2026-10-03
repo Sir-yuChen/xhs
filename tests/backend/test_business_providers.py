@@ -20,6 +20,10 @@ import pytest
 from sqlalchemy import inspect, select
 
 from backend.app.models import LlmBusinessProvider, LlmGatewayConfig, User
+from backend.app.api.llm_gateway import (
+    _dump_platforms,
+    _parse_platforms,
+)
 from backend.app.services.business_provider_keys import (
     BUSINESS_KEYS,
     BUSINESS_KEY_GENERATE_COVER,
@@ -606,3 +610,179 @@ def test_resolve_uses_mapping_model_and_ignores_disabled_default(api_client, db_
     with db_factory() as db:
         ctx = resolve_business_provider(db, user, BUSINESS_KEY_GENERATE_NOTE)
     assert ctx.model_name == "deepseek-v4-pro"
+
+
+# --------------------------------------------------------------------------- #
+# v2.26（§13.2.9.7「配置时同步」）：在平台配置模型 ⇒ 该平台并入模型行的 platform
+# --------------------------------------------------------------------------- #
+
+
+def _clear_model_platforms(db_factory, username: str) -> None:
+    """把该用户所有模型行的 `platform` 清空（造「还没在任何平台配过」的起点）。
+
+    ⚠️ 必须清空才有意义：`_create_provider` 建行时已写 `platform: ["xhs"]`
+    （见其 docstring），不清空的话「并入」是**空操作**，用例会假绿。
+    """
+    from backend.app.models import LlmGatewayModel
+    from sqlalchemy import select as _select
+
+    user = _user_by_name(None, db_factory, username)
+    with db_factory() as db:
+        for row in db.scalars(_select(LlmGatewayModel).where(LlmGatewayModel.user_id == user.id)):
+            # ⚠️ 列是 JSON 字符串（不是 SQLAlchemy JSON）⇒ 必须用收敛点，不能赋 list
+            row.platform = "[]"
+        db.commit()
+
+
+def _model_platforms(db_factory, username: str, model_name: str) -> list[str]:
+    from backend.app.models import LlmGatewayModel
+    from sqlalchemy import select as _select
+
+    user = _user_by_name(None, db_factory, username)
+    with db_factory() as db:
+        row = db.scalar(
+            _select(LlmGatewayModel).where(
+                LlmGatewayModel.user_id == user.id,
+                LlmGatewayModel.model_name == model_name,
+            )
+        )
+        return _parse_platforms(row.platform) if row else []
+
+
+def test_upsert_merges_platform_into_model_row(api_client, db_factory):
+    """**在平台配置模型 ⇒ 该平台并入模型行的 `platform`**（§13.2.9.7）。
+
+    用户口径原话：「再具体平台配置该服务商下的具体模型时，将当前平台的设置为当前
+    服务商下的模型的**使用平台**」。
+
+    ⚠️ 落地前这是**漏实现**：端点读到了 `model_row` 却只用它做类型校验，没写
+    `platform` ⇒ 真机现象 = 用户在模型配置页选了服务商+模型，服务商列表里该模型的
+    「使用平台」仍是 `-`。本用例钉住「必须写」。
+
+    起点必须**显式清空** `platform`（`_create_provider` 建行时已写 `xhs`，
+    不清空则并入是空操作、用例恒真）。
+    """
+    headers = _register(api_client, "platform-merge")
+    provider = _create_provider(api_client, headers, "合并平台", model_type=MODEL_TYPE_TEXT)
+    _clear_model_platforms(db_factory, "platform-merge")
+    assert _model_platforms(db_factory, "platform-merge", "deepseek-v4-flash") == []
+
+    _upsert(api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"], platform="xhs")
+
+    assert _model_platforms(db_factory, "platform-merge", "deepseek-v4-flash") == ["xhs"], (
+        "在 xhs 平台配置了模型，模型行的 platform 却没写 xhs（§13.2.9.7 漏实现）"
+    )
+
+
+def test_upsert_platform_merge_is_idempotent(api_client, db_factory):
+    """重复配置**不产生重复项**（并入是「去重追加」，不是「每次 append」）。
+
+    否则同一个模型配两次就变成 `["xhs", "xhs"]` —— 展示会重复，且无法判断
+    「配过几个平台」。
+    """
+    headers = _register(api_client, "platform-idem")
+    provider = _create_provider(api_client, headers, "幂等平台", model_type=MODEL_TYPE_TEXT)
+    _clear_model_platforms(db_factory, "platform-idem")
+
+    for _ in range(3):
+        _upsert(api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"], platform="xhs")
+
+    assert _model_platforms(db_factory, "platform-idem", "deepseek-v4-flash") == ["xhs"]
+
+
+def test_upsert_merge_accumulates_not_overwrites(api_client, db_factory):
+    """**并入不是覆盖**（§13.2.9.7）：已有别的平台时**保留**它。
+
+    覆盖会让「多平台共用一个模型」无法累积 —— 在 A 平台配过、再到 B 平台配，
+    只剩 B，A 的记录凭空消失。
+    """
+    headers = _register(api_client, "platform-accum")
+    provider = _create_provider(api_client, headers, "累积平台", model_type=MODEL_TYPE_TEXT)
+
+    # 造「已在别的平台配过」：直接写一个非 xhs 平台（本用例只验合并语义，
+    # 不依赖第二平台真的存在于白名单 —— 白名单校验只作用于**入参**）
+    from backend.app.models import LlmGatewayModel
+    from sqlalchemy import select as _select
+
+    user = _user_by_name(None, db_factory, "platform-accum")
+    with db_factory() as db:
+        row = db.scalar(
+            _select(LlmGatewayModel).where(
+                LlmGatewayModel.user_id == user.id,
+                LlmGatewayModel.model_name == "deepseek-v4-flash",
+            )
+        )
+        row.platform = _dump_platforms(["douyin"])
+        db.commit()
+
+    _upsert(api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"], platform="xhs")
+
+    merged = _model_platforms(db_factory, "platform-accum", "deepseek-v4-flash")
+    assert "douyin" in merged, "原有的平台被覆盖掉了（并入≠覆盖）"
+    assert "xhs" in merged, "新平台没并进去"
+    assert len(merged) == len(set(merged)), f"出现重复项：{merged}"
+
+
+def test_clearing_mapping_does_not_crash_or_touch_platform(api_client, db_factory):
+    """**清空映射**（provider_key 为空）⇒ 不崩、**也不动** `platform`。
+
+    ⚠️ 这条守的是实现细节的正确性：`model_row` 只在 `provider_key` 非空时赋值，
+    若不在函数开头显式初始化，清空映射那条路会 `NameError`（不是业务错，是崩溃）。
+    且「清空映射」改的是**映射层**，与「模型被用在哪些平台」无关 ⇒ 不该顺手清空。
+    """
+    headers = _register(api_client, "platform-clear")
+    provider = _create_provider(api_client, headers, "清空平台", model_type=MODEL_TYPE_TEXT)
+
+    _upsert(api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"], platform="xhs")
+    before = _model_platforms(db_factory, "platform-clear", "deepseek-v4-flash")
+
+    # 清空映射（provider_key=""）
+    resp = _upsert(api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, "", platform="xhs")
+    assert resp.status_code == 200, resp.text
+
+    after = _model_platforms(db_factory, "platform-clear", "deepseek-v4-flash")
+    assert after == before, "清空映射时顺手改了模型的使用平台（两者是不同的东西）"
+
+
+def test_platform_dedupe_existing_platform_not_added_again(api_client, db_factory):
+    """**使用平台去重：已存在的平台不再添加**（2026-10-03 用户口径，原话）。
+
+    > 「使用平台需要去重，每个平台只需要添加一次，存在则不在添加」
+
+    与 `test_upsert_platform_merge_is_idempotent` 的区别：那条在 **空列表起点** 上验
+    （并入一次 → `["xhs"]`，只证明「写进去了」）；本条的起点**已经有 xhs**，
+    验的是「**再配一次不追加第二个**」—— 判据是 `_merge_platforms` 的 `value not in merged`。
+
+    ⚠️ 为什么单独立一条：不去重的实现（`[*existing, new]`）**能通过**空起点用例
+    （`[] + xhs = ["xhs"]`）—— 只有「起点已含该平台」才暴露它。
+    """
+    from backend.app.models import LlmGatewayModel
+    from sqlalchemy import select as _select
+
+    headers = _register(api_client, "platform-dedupe")
+    provider = _create_provider(api_client, headers, "去重平台", model_type=MODEL_TYPE_TEXT)
+
+    # 起点：已含 xhs（模拟「上次已经在这个平台配过」）
+    user = _user_by_name(None, db_factory, "platform-dedupe")
+    with db_factory() as db:
+        row = db.scalar(
+            _select(LlmGatewayModel).where(
+                LlmGatewayModel.user_id == user.id,
+                LlmGatewayModel.model_name == "deepseek-v4-flash",
+            )
+        )
+        row.platform = _dump_platforms(["xhs"])
+        db.commit()
+
+    # 再在同一平台配 3 次
+    for _ in range(3):
+        resp = _upsert(
+            api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"],
+            platform="xhs",
+        )
+        assert resp.status_code == 200, resp.text
+
+    platforms = _model_platforms(db_factory, "platform-dedupe", "deepseek-v4-flash")
+    assert platforms == ["xhs"], (
+        f"已存在的平台被重复添加了（应去重）：{platforms}"
+    )
