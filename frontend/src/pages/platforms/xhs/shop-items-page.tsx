@@ -150,6 +150,77 @@ function priceText(item: XhsShopItem): string {
   return `¥${lo} ~ ¥${hi}`;
 }
 
+/**
+ * 参考图勾选组（v2.15，设计 17 §13.3.6）。
+ *
+ * 一行缩略图，点一张切换勾选（边框高亮表示已选）。**不引入 antd Checkbox 组** ——
+ * 图的「勾选」最直观的呈现就是缩略图本身带上选中边框，加一个 checkbox 反而要在
+ * 「看图」与「找勾」之间来回看。
+ *
+ * ⚠️ 空组不隐藏、给一行说明：用户要能分清「这个商品没有详情图」与「详情图加载失败」。
+ */
+function ReferenceImagePicker({
+  label,
+  urls,
+  selected,
+  onToggle,
+  emptyHint = "暂无图片",
+}: {
+  label: string;
+  urls: string[];
+  selected: string[];
+  onToggle: (url: string) => void;
+  emptyHint?: string;
+}) {
+  return (
+    <div>
+      <Text type="secondary" style={{ fontSize: 12 }}>
+        {label}（{urls.length}）
+      </Text>
+      {urls.length === 0 ? (
+        <div style={{ marginTop: 4 }}>
+          <Text type="secondary" style={{ fontSize: 11 }}>
+            {emptyHint}
+          </Text>
+        </div>
+      ) : (
+        <Space size={6} wrap style={{ marginTop: 4 }}>
+          {urls.map((url) => {
+            const active = selected.includes(url);
+            return (
+              <div
+                key={url}
+                role="button"
+                tabIndex={0}
+                onClick={() => onToggle(url)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") onToggle(url);
+                }}
+                style={{
+                  cursor: "pointer",
+                  border: active ? "2px solid #1677ff" : "1px solid rgba(0,0,0,0.15)",
+                  borderRadius: 4,
+                  padding: 1,
+                  lineHeight: 0,
+                }}
+                title={active ? "点击取消选择" : "点击选择作为参考图"}
+              >
+                <Image
+                  src={url}
+                  width={64}
+                  height={64}
+                  style={{ objectFit: "cover", borderRadius: 2 }}
+                  preview={false}
+                />
+              </div>
+            );
+          })}
+        </Space>
+      )}
+    </div>
+  );
+}
+
 /** 轮询间隔：与内容库三张进度卡同一节奏（用户口径「数据 5 秒更新一次」）。 */
 const QUEUE_POLL_INTERVAL_MS = 5000;
 
@@ -454,6 +525,10 @@ export function XhsShopItemsPage() {
   const [detailImageGenerating, setDetailImageGenerating] = useState(false);
   const [detailImagePrompt, setDetailImagePrompt] = useState("");
   const [detailImage, setDetailImage] = useState<GenerateDetailImageResult | null>(null);
+  // v2.15：商品图集（主图 / 原详情图）与勾选的参考图。
+  const [detailImageDetail, setDetailImageDetail] = useState<XhsShopItemDetail | null>(null);
+  const [detailImageRefs, setDetailImageRefs] = useState<string[]>([]);
+  const [detailImageLoading, setDetailImageLoading] = useState(false);
 
   useEffect(() => {
     void (async () => {
@@ -964,22 +1039,45 @@ export function XhsShopItemsPage() {
   /**
    * 打开「生成商品详情图」独立弹窗（v2.12，列表操作列入口）。
    *
-   * 每次打开**重置三态**（prompt / 出图 / 报错）—— 弹窗是「一次生成动作」的载体，
-   * 带着上一个商品的结果重开会把 A 的图挂在 B 的名下（与 `batchDeleteHint` 同一条纪律：
-   * 跨商品的操作上下文不能串）。
+   * v2.15：打开时**拉一次商品详情**取两套图（主图 / 原商品详情图）供勾选 ——
+   * 图集是只读本地台账的（`/item-detail` 零平台请求），所以这个请求很轻。
+   *
+   * 每次打开**重置三态**（prompt / 出图 / 报错）+ 勾选（默认勾主图首张）——
+   * 弹窗是「一次生成动作」的载体，带着上一个商品的结果重开会把 A 的图挂在 B 名下
+   * （与 `batchDeleteHint` 同一条纪律：跨商品的操作上下文不能串）。
    */
   function openDetailImage(item: XhsShopItem) {
     setDetailImageItem(item);
     setDetailImagePrompt("");
     setDetailImage(null);
+    setDetailImageLoading(true);
     setDetailImageOpen(true);
+    setDetailImageRefs([]); // 待详情回来后默认勾首图
+    void (async () => {
+      if (!selectedAccountId) return;
+      try {
+        const detail = await fetchXhsShopItemDetail(selectedAccountId, item.item_id);
+        setDetailImageDetail(detail);
+        // 默认勾**商品主图首张**（与旧行为一致：不勾也能生成，见后端回落）
+        const first = (detail.product_images || [])[0] || (detail.images || [])[0] || "";
+        setDetailImageRefs(first ? [first] : []);
+      } catch (error) {
+        // 取不到图集 ⇒ 不阻断弹窗（用户仍可点生成，后端会给结构化缺图原因）
+        setDetailImageDetail(null);
+        message.warning(
+          error instanceof Error ? error.message : "商品图集加载失败，仍可尝试生成"
+        );
+      } finally {
+        setDetailImageLoading(false);
+      }
+    })();
   }
 
   /**
-   * 生成商品详情图（设计 17 §13.3.3，v2.1；v2.12 改由独立弹窗驱动）。
+   * 生成商品详情图（设计 17 §13.3.3，v2.1；v2.12 改由独立弹窗驱动；v2.15 支持勾选参考图）。
    *
-   * 只传 `accountId + itemId + prompt`：商品图由**服务端**按 item_id 从本地台账取
-   * （商品图是千帆 CDN 直链，服务商侧取不到；且让前端传 URL 是 SSRF 面）。
+   * 只传 `accountId + itemId + prompt + 勾选的参考图`：候选图来自服务端下发的台账图集，
+   * 后端按白名单校验（不接受任意 URL —— SSRF 防线）。
    * 失败信息原样报出 —— 最常见的两种（没配服务商 / 服务商不是图像类）后端给的是
    * 带 `code` 的可执行提示，吞成「生成失败」会让用户不知道该去配什么。
    */
@@ -990,7 +1088,8 @@ export function XhsShopItemsPage() {
       const result = await generateProductDetailImage(
         selectedAccountId,
         detailImageItem.item_id,
-        detailImagePrompt.trim()
+        detailImagePrompt.trim(),
+        detailImageRefs
       );
       setDetailImage(result);
       message.success("商品详情图已生成");
@@ -1921,6 +2020,45 @@ export function XhsShopItemsPage() {
             </Descriptions.Item>
             <Descriptions.Item label="商品ID">{detailImageItem?.item_id || "-"}</Descriptions.Item>
           </Descriptions>
+
+          {/* v2.15 参考图勾选（§13.3.6）：主图 / **原商品详情图**两组，多选。
+              不勾 ⇒ 后端沿用商品首图（旧行为不变）。 */}
+          <Spin spinning={detailImageLoading}>
+            <Space direction="vertical" size={8} style={{ width: "100%" }}>
+              <Text strong style={{ fontSize: 13 }}>
+                参考图（勾选后作为生成依据，可多选）
+              </Text>
+              <ReferenceImagePicker
+                label="商品主图"
+                urls={detailImageDetail?.product_images || []}
+                selected={detailImageRefs}
+                onToggle={(url) =>
+                  setDetailImageRefs((current) =>
+                    current.includes(url)
+                      ? current.filter((u) => u !== url)
+                      : [...current, url]
+                  )
+                }
+              />
+              <ReferenceImagePicker
+                label="原商品详情图"
+                urls={detailImageDetail?.detail_images || []}
+                selected={detailImageRefs}
+                onToggle={(url) =>
+                  setDetailImageRefs((current) =>
+                    current.includes(url)
+                      ? current.filter((u) => u !== url)
+                      : [...current, url]
+                  )
+                }
+                emptyHint="这个商品没有详情图（平台侧未提供，或还没同步到）"
+              />
+              <Text type="secondary" style={{ fontSize: 11 }}>
+                已选 {detailImageRefs.length} 张{detailImageRefs.length === 0 ? "（不选则默认用商品首图）" : ""}
+              </Text>
+            </Space>
+          </Spin>
+
           <Input.TextArea
             value={detailImagePrompt}
             onChange={(e) => setDetailImagePrompt(e.target.value)}

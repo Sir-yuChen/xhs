@@ -537,7 +537,19 @@ export type XhsShopItemDetail = {
   shop_name: string;
   /** 与列表 `items[]` 元素同构的基本信息。 */
   item: XhsShopItem;
+  /** 商品图集（主图 + 详情图合并去重；详情弹窗展示用）。 */
   images: string[];
+  /**
+   * 商品**主图**（`raw_json.images`）—— 生成详情图时可选参考图分组 ①（v2.15）。
+   */
+  product_images: string[];
+  /**
+   * **原商品详情图**（`raw_json.image_descriptions`，竖长图）—— 参考图分组 ②（v2.15 新增）。
+   *
+   * ⚠️ 与 `product_images` 是**两套不同的图**（真机实测：主图 10 张方图、
+   * 详情图 5 张竖长图），不是同一组的子集。
+   */
+  detail_images: string[];
   skus: XhsShopItemSku[];
   /** SKU 数（详情补齐口径；没补过 = null）。 */
   sku_count: number | null;

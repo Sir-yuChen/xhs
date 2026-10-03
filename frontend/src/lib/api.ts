@@ -1498,11 +1498,20 @@ export async function fetchXhsShopItemDetail(
 export async function generateProductDetailImage(
   accountId: number,
   itemId: string,
-  prompt = ""
+  prompt = "",
+  referenceImageUrls: string[] = []
 ): Promise<GenerateDetailImageResult> {
   const response = await http.post<GenerateDetailImageResult>(
     "/xhs/qianfan/generate-detail-image",
-    { platform_account_id: accountId, item_id: itemId, prompt },
+    {
+      platform_account_id: accountId,
+      item_id: itemId,
+      prompt,
+      // v2.15：勾选的参考图（主图 / 原商品详情图）。空数组 ⇒ 后端沿用商品首图。
+      // ⚠️ 这里只传**从台账勾选的** URL —— 后端会按台账白名单校验，
+      // 传别的会 400（保留 SSRF 防线）。
+      ...(referenceImageUrls.length ? { reference_image_urls: referenceImageUrls } : {}),
+    },
     { timeout: 180000 }
   );
   return response.data;

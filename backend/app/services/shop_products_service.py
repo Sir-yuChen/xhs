@@ -110,6 +110,38 @@ def _image_links(item: dict[str, Any]) -> list[str]:
     return links
 
 
+def product_image_links(item: dict[str, Any]) -> list[str]:
+    """**商品主图**（`raw_json.images`）—— 与详情图**分开**（v2.15，设计 17 §13.3.6）。
+
+    ⚠️ 与 `_image_links` 的区别是**刻意的**：`_image_links` 是「商品图集」的展示口径
+    （主图 + 详情图合并去重，列表/详情弹窗用它）；本函数只取 `images`，
+    是「生成详情图时可选参考图」的主图分组。
+    """
+    links: list[str] = []
+    for row in item.get("images") or []:
+        if isinstance(row, dict):
+            link = _first_text(row.get("link"), row.get("url"))
+            if link and link not in links:
+                links.append(link)
+    return links
+
+
+def detail_image_links(item: dict[str, Any]) -> list[str]:
+    """**原商品详情图**（`raw_json.image_descriptions`）—— 竖长图，与主图分开（v2.15）。
+
+    真机实测（2026-10-02）：主图 10 张（方图，~800×800）、详情图 5 张（竖长图，
+    如 2480×2824 / 1500×2322）。此前两者被混进 `_image_links`，
+    详情图生成链路只用得上 `images[:1]`（主图）⇒ **原详情图从未被用作参考**。
+    """
+    links: list[str] = []
+    for row in item.get("image_descriptions") or []:
+        if isinstance(row, dict):
+            link = _first_text(row.get("link"))
+            if link and link not in links:
+                links.append(link)
+    return links
+
+
 def status_key_from_raw(item: dict[str, Any]) -> str:
     """商品状态键（v1.32 补记，设计 13 §30.3.2）。
 
@@ -611,9 +643,16 @@ def item_detail(
         str(row.item_id or ""), 0
     )
 
+    # v2.15（§13.3.6）：主图 / 详情图**分开下发**，供「生成详情图」弹窗勾选参考图。
+    raw_item = _parse_raw(row)
+
     return {
         "item": item,
         "images": images,
+        #: 商品主图（`raw_json.images`）—— 生成详情图时可选参考图分组 ①。
+        "product_images": product_image_links(raw_item),
+        #: 原商品详情图（`raw_json.image_descriptions`）—— 参考图分组 ②（v2.15 新增）。
+        "detail_images": detail_image_links(raw_item),
         "skus": skus,
         "sku_count": row.sku_count,
         #: 空串 = 没补过详情（与「补过但 0 SKU」是两件事）。

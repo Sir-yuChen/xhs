@@ -5346,13 +5346,23 @@ def test_ai_image_routes_use_business_model_store_assets_and_enforce_scope(tmp_p
 
 
 def _seed_shop_product(
-    *, platform_account_id: int, item_id: str, images: list[str], title: str = "测试商品"
+    *,
+    platform_account_id: int,
+    item_id: str,
+    images: list[str],
+    title: str = "测试商品",
+    detail_images: list[str] | None = None,
 ) -> None:
     """播种一条本地商品台账行（商品详情图的数据来源）。
 
     ⚠️ 展示字段（`title` / `images`）由 `raw_json` 现场派生（设计 13 §30.3.3）——
     只写 `item_title` 列**不够**：`item_detail()` 读的是 `raw_json`。这里两者都写，
     与真实同步落库的形状一致。
+
+    ⚠️ **v2.15 修正**：`raw_json` 必须用**平台真实字段名** `images` /
+    `image_descriptions`（此前写的是自造的 `image_links`，而平台根本没有这个键
+    ⇒ 一切「从 raw 取图」的断言都在对着空列表做，**看着绿但没测到东西**）。
+    真机形状：`images: [{link, width, height, …}]`、`image_descriptions: [{link, …}]`。
     """
     from backend.app.models.shop_product import ShopProduct
 
@@ -5366,7 +5376,14 @@ def _seed_shop_product(
                 item_title=title,
                 images_json=json.dumps(images),
                 raw_json=json.dumps(
-                    {"item_id": item_id, "item_name": title, "image_links": images}
+                    {
+                        "item_id": item_id,
+                        "item_name": title,
+                        "images": [{"link": url} for url in images],
+                        "image_descriptions": [
+                            {"link": url} for url in (detail_images or [])
+                        ],
+                    }
                 ),
             )
         )
@@ -5572,6 +5589,144 @@ def test_generate_detail_image_reports_missing_image_and_missing_mapping(tmp_pat
         # 真实 code 由 `llm_gateway_client` 给（不猜、不写死一组「可能的值」——
         # 写死一组等于把断言放宽到「差不多对」，那抓不住回归）。
         assert unconfigured.json()["detail"]["code"] == "LLM_BUSINESS_PROVIDER_NOT_CONFIGURED"
+    finally:
+        app.dependency_overrides.pop(get_image_ai_client, None)
+        app.dependency_overrides.pop(db_dependency, None)
+
+
+def test_detail_image_reference_images_must_come_from_the_product(tmp_path):
+    """v2.15（§13.3.6）：勾选的参考图**必须来自该商品台账**，否则 400。
+
+    这条守的是 SSRF 防线：允许前端自由传 URL ⇒ 后端变成「下载任意地址」的跳板。
+    同时验证「原商品详情图」确实能作为参考（本需求的核心）。
+    """
+    from backend.app.api.ai import get_image_ai_client
+    from backend.app.core.security import encrypt_text
+    from backend.app.models import LlmBusinessProvider, LlmGatewayConfig, LlmGatewayModel
+    from backend.app.services.business_provider_keys import (
+        BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE,
+    )
+
+    class FakeImageClient:
+        def __init__(self):
+            self.calls = []
+
+        def generate_image(self, *, model_config, api_key, prompt, reference_images=None):
+            self.calls.append(list(reference_images or []))
+            return {"url": "https://cdn.example.test/out.png", "local_path": ""}
+
+    fake = FakeImageClient()
+    db_dependency = _override_database(tmp_path)
+    token = _register_and_get_access_token("detail-image-refs")
+    try:
+        app.dependency_overrides[get_image_ai_client] = lambda: fake
+        db = _test_session_factory()
+        try:
+            db.add(
+                LlmGatewayConfig(
+                    user_id=_last_registered_user_id,
+                    name="ref-image",
+                    provider_key="REF-IMAG",
+                    base_url="https://api.example.test/v1",
+                    access_token=encrypt_text("«redacted:sk-…»"),
+                    models_json=json.dumps(["ref-model"]),
+                    enabled=True,
+                    healthy=True,
+                )
+            )
+            db.flush()
+            db.add(
+                LlmGatewayModel(
+                    user_id=_last_registered_user_id,
+                    provider_key="REF-IMAG",
+                    model_name="ref-model",
+                    model_type="image",
+                    platform="xhs",
+                    enabled=True,
+                )
+            )
+            db.flush()
+            db.add(
+                LlmBusinessProvider(
+                    user_id=_last_registered_user_id,
+                    platform="xhs",
+                    business_key=BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE.key,
+                    provider_key="REF-IMAG",
+                    model_name="ref-model",
+                    enabled=True,
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        account_id = _seed_account_for_last_user()
+        _seed_shop_product(
+            platform_account_id=account_id,
+            item_id="ITEM-REF",
+            images=["https://cdn.xhs.test/main.jpg"],
+            detail_images=[
+                "https://cdn.xhs.test/d1.jpg",
+                "https://cdn.xhs.test/d2.jpg",
+            ],
+            title="带详情图的商品",
+        )
+        headers = {"Authorization": f"Bearer {token}"}
+        url = "/api/xhs/qianfan/generate-detail-image"
+
+        # ① 勾**原商品详情图** ⇒ 用它当参考（本需求核心：详情图可用）
+        resp = client.post(
+            url,
+            headers=headers,
+            json={
+                "platform_account_id": account_id,
+                "item_id": "ITEM-REF",
+                "reference_image_urls": ["https://cdn.xhs.test/d2.jpg"],
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        assert fake.calls[-1] == ["https://cdn.xhs.test/d2.jpg"]
+
+        # ② 主图 + 详情图混勾 ⇒ 两张都送（顺序保持勾选顺序）
+        resp2 = client.post(
+            url,
+            headers=headers,
+            json={
+                "platform_account_id": account_id,
+                "item_id": "ITEM-REF",
+                "reference_image_urls": [
+                    "https://cdn.xhs.test/main.jpg",
+                    "https://cdn.xhs.test/d1.jpg",
+                ],
+            },
+        )
+        assert resp2.status_code == 200, resp2.text
+        assert fake.calls[-1] == [
+            "https://cdn.xhs.test/main.jpg",
+            "https://cdn.xhs.test/d1.jpg",
+        ]
+
+        # ③ 传**台账里没有的 URL** ⇒ 400（SSRF 防线：不接受任意地址）
+        outside = client.post(
+            url,
+            headers=headers,
+            json={
+                "platform_account_id": account_id,
+                "item_id": "ITEM-REF",
+                "reference_image_urls": ["https://evil.example/steal.jpg"],
+            },
+        )
+        assert outside.status_code == 400, outside.text
+        assert outside.json()["detail"]["code"] == "REFERENCE_IMAGE_NOT_FOUND"
+
+        # ④ 不勾 ⇒ 回落商品首图（旧行为不变）
+        resp4 = client.post(
+            url,
+            headers=headers,
+            json={"platform_account_id": account_id, "item_id": "ITEM-REF"},
+        )
+        assert resp4.status_code == 200, resp4.text
+        assert fake.calls[-1] == ["https://cdn.xhs.test/main.jpg"]
     finally:
         app.dependency_overrides.pop(get_image_ai_client, None)
         app.dependency_overrides.pop(db_dependency, None)

@@ -683,6 +683,60 @@ def test_item_detail_returns_row_with_skus_and_images(tmp_path):
         _teardown()
 
 
+def test_item_detail_splits_product_images_and_detail_images(tmp_path):
+    """v2.15（§13.3.6）：`/item-detail` **分开**下发主图与详情图。
+
+    真机实证：`images`（主图）与 `image_descriptions`（详情图）是**两套不同的图**
+    （10 张方图 vs 5 张竖长图）。此前 `_image_links` 把两者合并，导致「生成详情图」
+    只能拿到主图 —— **原商品详情图从未被用作参考**（这正是本需求的由来）。
+    """
+    headers, _, ids, SessionLocal = _setup(tmp_path)
+    try:
+        _bind(headers, ids["owned"])
+        _seed_products(
+            SessionLocal,
+            ids["owned"],
+            [
+                _ark_item(
+                    "ITEM-1",
+                    "外出野餐垫防潮垫",
+                    images=[
+                        {"link": "http://qimg.example/main-1.jpg"},
+                        {"link": "http://qimg.example/main-2.jpg"},
+                    ],
+                    image_descriptions=[
+                        {"link": "http://qimg.example/detail-1.jpg"},
+                        {"link": "http://qimg.example/detail-2.jpg"},
+                        {"link": "http://qimg.example/detail-3.jpg"},
+                    ],
+                )
+            ],
+        )
+        response = client.post(
+            "/api/xhs/qianfan/item-detail",
+            json={"platform_account_id": ids["owned"], "item_id": "ITEM-1"},
+            headers=headers,
+        )
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        # 主图 / 详情图各自成组（不混、不互相包含）
+        assert payload["product_images"] == [
+            "http://qimg.example/main-1.jpg",
+            "http://qimg.example/main-2.jpg",
+        ]
+        assert payload["detail_images"] == [
+            "http://qimg.example/detail-1.jpg",
+            "http://qimg.example/detail-2.jpg",
+            "http://qimg.example/detail-3.jpg",
+        ]
+        # 合并口径 `images` 仍保留（详情弹窗展示用）——两者都在里面
+        assert "http://qimg.example/main-1.jpg" in payload["images"]
+        assert "http://qimg.example/detail-1.jpg" in payload["images"]
+        assert FakeArkAdapter.calls == {}  # 纯本地
+    finally:
+        _teardown()
+
+
 def test_item_detail_empty_when_never_backfilled(tmp_path):
     """没补过详情：`skus=[]` + `detail_synced_at=""`（**不是 0 行已同步**）。"""
     headers, _, ids, SessionLocal = _setup(tmp_path)

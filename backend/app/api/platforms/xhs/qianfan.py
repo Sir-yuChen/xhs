@@ -1020,11 +1020,12 @@ def sync_shop_goods_status(
 
 
 class GenerateDetailImageRequest(BaseModel):
-    """商品详情图生成请求（设计 17 §13.3.3，v2.1）。
+    """商品详情图生成请求（设计 17 §13.3.3，v2.1；v2.15 加参考图勾选）。
 
-    ⚠️ **刻意不给 `image_url`**：商品图由后端按 `item_id` 从本地台账取。
-    让前端传 URL = 前端可传任意 URL 让后端去下载（SSRF 面），且台账里就有真值 ——
-    多一份「传的和台账不一致」的静默分叉。
+    ⚠️ **刻意不给任意 `image_url`**：候选参考图只能来自**该商品台账里的图**
+    （主图 `images` 或详情图 `image_descriptions`），由服务端按白名单校验
+    （`reference_image_urls` 里的每个 URL 必须能在台账里找到）。
+    让前端自由传 URL = 后端变成「下载任意地址」的跳板（SSRF 面）。
     """
 
     platform_account_id: int
@@ -1032,8 +1033,15 @@ class GenerateDetailImageRequest(BaseModel):
     #: 用户补充要求；为空 ⇒ 后端按商品标题/规格拼默认提示词（不硬编码在端点里，
     #: 见 `_default_detail_image_prompt`）。
     prompt: str = Field(default="", max_length=2000)
+    #: 参考图（v2.15，§13.3.6）：从该商品的**主图 / 详情图**里勾选，最多 5 张。
+    #: 空 ⇒ 沿用旧行为（取商品首图）。**每个 URL 都要过白名单**，见类 docstring。
+    reference_image_urls: list[str] = Field(default_factory=list, max_length=5)
 
     model_config = ConfigDict(extra="forbid")
+
+
+#: 生成详情图时最多送几张参考图（§13.3.6；服务商侧参考图多了会超上限）。
+MAX_DETAIL_IMAGE_REFERENCES: int = 5
 
 
 def _default_detail_image_prompt(item: dict[str, Any], skus: list[dict[str, Any]]) -> str:
@@ -1098,7 +1106,29 @@ def generate_detail_image(
         )
 
     images = [url for url in (detail.get("images") or []) if url]
-    if not images:
+    # v2.15（§13.3.6）：参考图可选 —— 勾选的主图 / 详情图，**必须过台账白名单**。
+    allowed: set[str] = set(detail.get("product_images") or []) | set(
+        detail.get("detail_images") or []
+    )
+    picked: list[str] = []
+    for url in payload.reference_image_urls or []:
+        candidate = str(url or "").strip()
+        if not candidate:
+            continue
+        if candidate not in allowed:
+            # 不在台账里 ⇒ 拒绝（保留 SSRF 防线：不接受任意 URL）。
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "REFERENCE_IMAGE_NOT_FOUND",
+                    "message": "勾选的参考图不在这个商品的台账图集里（可能已变更，刷新后重试）",
+                },
+            )
+        if candidate not in picked:
+            picked.append(candidate)
+    # 勾了就用勾的；没勾 → 沿用旧行为（商品首图）。两者都空 ⇒ 如实报缺。
+    reference_images = picked[:MAX_DETAIL_IMAGE_REFERENCES] or images[:1]
+    if not reference_images:
         # 如实报缺：没有商品图就没有参考图，**不凭空生成一张冒充商品图**
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1131,7 +1161,7 @@ def generate_detail_image(
             "item_id": payload.item_id,
             "prompt": prompt,
             "model_config_id": model_config.id,
-            "reference_images": images[:1],
+            "reference_images": reference_images,
         },
     )
     db.add(task)
@@ -1142,9 +1172,9 @@ def generate_detail_image(
             model_config=model_config,
             api_key=api_key,
             prompt=prompt,
-            # 参考图只送**首图**：商品图集动辄 10+ 张，全送会超服务商上限
-            # （且详情图以首图为主体是电商惯例）。
-            reference_images=images[:1],
+            # 参考图 = 用户勾选的（最多 5 张）；未勾选时回落商品首图
+            # （v2.15 §13.3.6：勾选优先，旧行为不变）。
+            reference_images=reference_images,
         )
     except Exception as exc:  # noqa: BLE001 - 服务商五花八门，一律结构化转出
         task.status = "failed"
