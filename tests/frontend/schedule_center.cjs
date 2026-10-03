@@ -617,7 +617,18 @@ async function main() {
   // R20/R22 加强（2026-09-24 用户口径「**数据库物理删除**」）：分组不只是从 UI 藏起来，
   // 而是**连列带逻辑一起退**（迁移 k1l2m3n4o5p6 —— 与本轮真实库实跑对应）。
   // 下面这几条把「物理删除」钉死，防止它被悄悄改回「只去 UI、列还在」。
-  check("R22 目标清单类型里没有 group 字段", !api.includes("group: \"DEFAULT\"") && !api.includes("group: string"));
+  // ⚠️ **锚点必须收紧到 schedule 区域**：原先查整个 `api.ts` 全文，
+  // 而 2026-10-03 商品详情图加了 `regenerate?: { group: string; index: number }`
+  // —— 它含 `group: string` 字面量 ⇒ 这条断言被**无关字段撞成假红**。
+  // 收紧为「schedule 目标类型声明区」（`ScheduleTarget` 那一段）后不再误伤。
+  const scheduleTypeSec = (() => {
+    const i = api.indexOf("ScheduleTarget");
+    return i >= 0 ? api.slice(i, i + 1200) : "";
+  })();
+  check(
+    "R22 目标清单类型里没有 group 字段",
+    !scheduleTypeSec.includes('group: "DEFAULT"') && !scheduleTypeSec.includes("group: string")
+  );
   check("R22 日志详情弹窗不再取 snapshot.job_group", !detail.includes("snapshot.job_group"));
   check("R22 schedule 模块不再导出 JOB_GROUP_LABELS", !scheduleCode.includes("JOB_GROUP_LABELS"));
   check("R22 schedule 模块不再导出 jobGroupLabel", !scheduleCode.includes("export function jobGroupLabel"));

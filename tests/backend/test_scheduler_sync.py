@@ -227,6 +227,11 @@ def test_scheduler_is_not_started_when_master_switch_is_off(monkeypatch):
     #    而没被发现。守卫：`test_lifespan_steps_are_all_stubbed_by_this_module`。
     monkeypatch.setattr(main_module, "seed_builtin_jobs_from_initial_data", lambda: 0)
     monkeypatch.setattr(main_module, "seed_builtin_settings_from_initial_data", lambda: 0)
+    # v2.24 内置提示词模板播种：**按用户各写一行**（自开 Session）⇒ 与上面两条同一条理由，
+    # 不桩就会拿真实运行库写 `prompt_modules` / `prompt_templates`。
+    monkeypatch.setattr(
+        main_module, "seed_builtin_prompt_templates_for_all_users", lambda *a, **k: 0
+    )
     monkeypatch.setattr(main_module, "recover_account_tasks", lambda *a, **k: 0)
     monkeypatch.setattr(main_module, "ensure_account_task_worker", lambda: None)
     monkeypatch.setattr(main_module, "start_account_task_watchdog", lambda *a, **k: None)
