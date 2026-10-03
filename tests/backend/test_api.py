@@ -6,7 +6,6 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.orm import sessionmaker
 
-from tests.backend.conftest import seed_owner_rows
 from backend.app.main import app
 from backend.app.models.user import User
 from backend.app.models.llm_gateway import LlmBusinessProvider, LlmGatewayConfig, LlmGatewayModel
@@ -422,13 +421,6 @@ def _override_database(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'auth-test.db'}", connect_args={"check_same_thread": False})
     TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     Base.metadata.create_all(bind=engine)
-    # ⚠️ 全局 FK=ON（core/database.py，M5 引入）后必须播种父行：本文件插
-    # platform_accounts / tasks 等，(user_id, platform_account_id) 指向
-    # users / platform_accounts，而父表此前没人建行（2026-10-04 实测多条红）。
-    seed_owner_rows(engine, user_id=1, account_id=1)
-    # 本文件有跨租户用例（`user_id=999` 的「别人家」账号）⇒ 那些行也要建
-    # 出来，否则 FK=ON 下插不进去（2026-10-04）。
-    seed_owner_rows(engine, user_id=999)
     _test_session_factory = TestingSessionLocal
 
     def override_get_db():
@@ -2336,6 +2328,12 @@ def test_xhs_pc_note_detail_never_uses_a_foreign_accounts_session(tmp_path):
         )
         # 同平台、**不同用户、不同昵称**的账号：会话**有效**。
         # 它与目标账号无关 —— 存在与否都不影响结论。
+        # ⚠️ **该租户必须先建出来**（2026-10-04）：全局 FK=ON 后
+        # `platform_accounts.user_id -> users.id` 生效，只给 id 不建行 ⇒
+        # `FOREIGN KEY constraint failed`（此前 FK=OFF 时能过）。
+        if db.get(User, 999) is None:
+            db.add(User(id=999, username="foreign-tenant-999", password_hash="x"))
+            db.flush()
         foreign_account = PlatformAccount(
             user_id=999, platform="xhs", sub_type="pc", nickname="晨晨家", status="active"
         )
@@ -2444,6 +2442,13 @@ def test_xhs_pc_note_detail_refuses_even_when_a_usable_sibling_session_exists(tm
             cookie_version(creator_account.id, '{"a1":"creator-a1","galaxy_creator_session_id":"x"}', CHANNEL_CREATOR)
         )
         # 诱惑项：同昵称 + 同小红书号 + 有效会话。
+        # ⚠️ 它归属的租户要先建出来（2026-10-04）：全局 FK=ON 后
+        # `platform_accounts.user_id -> users.id` 生效，缺行即撞外键。
+        from backend.app.models import User as _U4
+
+        if db.get(_U4, 2) is None:
+            db.add(_U4(id=2, username="sibling-tenant-2", password_hash="x"))
+            db.flush()
         sibling = PlatformAccount(
             user_id=2, platform="xhs", sub_type="pc", nickname="观隅好物",
             profile_json=json.dumps({"red_id": "293066917"}), status="active"
@@ -6587,10 +6592,28 @@ def test_manual_clean_endpoints_respect_cleanable_statuses(tmp_path):
         db = next(app.dependency_overrides[get_db]())
         try:
             now = shanghai_now()
+            # ⚠️ **用注册出来的真实 user_id，不要写死 1**（2026-10-04）：
+            # 全局 FK=ON 后 `tasks.user_id -> users.id` 生效，而夹具库里
+            # 用户的 id 是自增的 —— 写死 1 会在「1 被别人占了」时撞外键
+            # （实测报 `FOREIGN KEY constraint failed`，参数里是 user_id=2）。
+            # 本文件已有 `_last_registered_user_id` 这一既有惯例，直接复用。
+            owner_id = _last_registered_user_id
+            # ⚠️ 注册出来的 id 未必是 1（库里可能已有行）⇒ **按库里实际存在的行**兜底：
+            # 若该 id 在 users 里不存在，就地补建（FK=ON 的硬要求，2026-10-04）。
+            from backend.app.models import User as _User
+
+            if db.get(_User, owner_id) is None:
+                db.add(_User(id=owner_id, username=f"clean-owner-{owner_id}", password_hash="x"))
+                db.flush()
+            # 本用例还要一个「别家」的用户（clean-all 不该动它的行，DEF-066）。
+            _other = 99
+            if db.get(_User, _other) is None:
+                db.add(_User(id=_other, username="clean-other-99", password_hash="x"))
+                db.flush()
 
             def _row(task_type: str, status: str, **payload) -> Task:
                 row = Task(
-                    user_id=1, platform="xhs", task_type=task_type, status=status,
+                    user_id=owner_id, platform="xhs", task_type=task_type, status=status,
                     progress=100 if status == "done" else 0,
                     payload={"source": "note_sync_single", **payload},
                     started_at=now, finished_at=now,
@@ -6651,6 +6674,15 @@ def test_manual_clean_endpoints_respect_cleanable_statuses(tmp_path):
         # 造一条新的 done + 别家的一条 done ⇒ 一键清只清本用户
         db3 = next(app.dependency_overrides[get_db]())
         try:
+            # ⚠️ 这两个 id 必须**真实存在于 users**（2026-10-04）：全局 FK=ON 后
+            # `tasks.user_id -> users.id` 生效。用固定 1/2 会在「库里没有该行」时
+            # 撞外键（实测 `FOREIGN KEY constraint failed`）。
+            from backend.app.models import User as _U2
+
+            for _uid in (1, 2):
+                if db3.get(_U2, _uid) is None:
+                    db3.add(_U2(id=_uid, username=f"clean-tid-{_uid}", password_hash="x"))
+            db3.flush()
             mine = Task(
                 user_id=1, platform="xhs", task_type="xhs_note_sync_item", status="done",
                 progress=100, payload={"source": "note_sync_single"}, started_at=now, finished_at=now,
@@ -6714,6 +6746,13 @@ def test_batch_clean_is_atomic_and_blocked_by_unfinished_items(tmp_path):
         db = next(app.dependency_overrides[get_db]())
         try:
             now = shanghai_now()
+            # ⚠️ 下面的 `user_id=1` 必须真实存在于 users（2026-10-04）：
+            # 全局 FK=ON 后 `tasks.user_id -> users.id` 生效。
+            from backend.app.models import User as _U3
+
+            if db.get(_U3, 1) is None:
+                db.add(_U3(id=1, username="batch-clean-owner", password_hash="x"))
+                db.flush()
 
             def _batch(batch_no: str) -> Task:
                 row = Task(
@@ -8494,7 +8533,6 @@ def test_scheduled_jobs_are_registered_from_db_rows(tmp_path, monkeypatch):
     TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     Base.metadata.create_all(bind=engine)
     # ⚠️ 同 `_override_database`：FK=ON 后父行必须存在（2026-10-04）。
-    seed_owner_rows(engine, user_id=1, account_id=1)
     monkeypatch.setattr(sched, "SessionLocal", TestingSessionLocal)
 
     db = TestingSessionLocal()

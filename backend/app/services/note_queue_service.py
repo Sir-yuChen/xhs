@@ -270,6 +270,12 @@ SOURCE_ACCOUNT_CARD_NOTE_SYNC = "account_card_note_sync"
 """
 
 SOURCE_ACCOUNT_CARD_GOODS_SYNC = "account_card_goods_sync"
+SOURCE_ACCOUNT_CARD_ORDER_SYNC = "account_card_order_sync"
+"""账号卡 · 「同步订单」按钮（`POST /api/xhs/qianfan/orders/sync`，设计 16 §7）。
+
+与「同步商品」（**店铺商品台账**）分开记账：订单同步落 `orders` 等 5 张只读表，
+任务日志的来源列要能区分这两个按钮（§35.12「来源要具体到按钮」）。
+"""
 """账号卡 · 「同步商品」按钮（`POST /api/xhs/qianfan/sync-shop-goods`，设计 13 §35.17）。"""
 
 SOURCE_ACCOUNT_CARD_GOODS_NOTE_SYNC = "account_card_goods_note_sync"
@@ -1443,6 +1449,13 @@ def clean_records(
         for child in children:
             swallowed.add(int(child.id))
             db.delete(child)
+        # ⚠️ **必须 flush 把子行的 DELETE 先发出去，再删父行**（2026-10-04 实测）：
+        # `tasks.parent_task_id -> tasks.id` 是自引用外键，全局 `PRAGMA
+        # foreign_keys=ON`（core/database.py）之后，SQLAlchemy 的 unit of work
+        # **不保证**按 `delete()` 调用顺序发语句 —— 实测它先发父行的 DELETE
+        # ⇒ `FOREIGN KEY constraint failed`，整批清理失败（真机同样会中招，
+        # 不只是测试）。flush 一次把顺序钉死；代价是每批一次额外往返。
+        db.flush()
         db.delete(batch)
         batch_stats["cleaned"] += 1
         cleaned += 1
