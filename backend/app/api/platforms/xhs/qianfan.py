@@ -1826,6 +1826,10 @@ class SaveDetailImagesRequest(BaseModel):
     #: 缺省 / 缺失项 ⇒ 文件名用 `图-NN`（如实反映「不知道分组」，不造）。
     asset_groups: dict[str, str] | None = None
 
+    # v2.13 的硬约束（见 test_shop_goods_sync 的参数化白名单）：请求模型必须
+    # `extra="forbid"` —— 客户端多传字段时 422 炸出声，而不是被静默吞掉。
+    model_config = ConfigDict(extra="forbid")
+
 
 @router.post("/save-detail-images")
 def save_detail_images(
@@ -1889,6 +1893,9 @@ class ItemGenerationsRequest(BaseModel):
     item_id: str = Field(min_length=1, max_length=64)
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=20, ge=1, le=100)
+
+    # 同上（v2.13）：未知字段必须 422，不静默吞。
+    model_config = ConfigDict(extra="forbid")
 
 
 @router.post("/item-generations")

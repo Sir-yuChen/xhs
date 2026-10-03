@@ -91,6 +91,14 @@ def test_xhs_direct_request_env_temporarily_removes_proxy_variables(monkeypatch)
 
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:10809")
     monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:10809")
+    # ⚠️ `_PROXY_ENV_PRESENT` 是**进程级缓存**（只判一次，见 request_env 的注释）：
+    # xdist 并行时同进程内别的用例可能已经把它缓存成 False
+    # （`test_login_state` 的若干用例显式 monkeypatch 成 None 后再判，判完留在 False）。
+    # 这里要用的是「有代理」分支，必须把缓存重置，否则本用例会走「无代理」的
+    # 不持锁快速路径、`PROXY_ENV_KEYS` 一个都不被摘 ⇒ 断言恒红。
+    monkeypatch.setattr(
+        "backend.app.adapters.xhs.request_env._PROXY_ENV_PRESENT", None
+    )
 
     with direct_xhs_request_env():
         assert all(key not in os.environ for key in PROXY_ENV_KEYS)
@@ -5446,6 +5454,19 @@ def test_generate_detail_image_uses_own_business_point_and_persists_asset(tmp_pa
             self.calls.append((model_config.model_name, prompt, list(reference_images or [])))
             return {"url": "https://cdn.example.test/detail.png", "local_path": ""}
 
+        # v2.29：详情图链路改调批量接口（一次要 n 张）；记录与逐张路径等价，
+        # 既有 `len(fake.calls)` 断言不用改。
+        def generate_images(self, *, model_config, api_key, prompt, reference_images=None, count=1):
+            return [
+                self.generate_image(
+                    model_config=model_config,
+                    api_key=api_key,
+                    prompt=prompt,
+                    reference_images=reference_images,
+                )
+                for _ in range(count)
+            ]
+
     fake = FakeImageClient()
     db_dependency = _override_database(tmp_path)
     token = _register_and_get_access_token("detail-image-owner")
@@ -5549,13 +5570,15 @@ def test_generate_detail_image_uses_own_business_point_and_persists_asset(tmp_pa
 
 
 def test_generate_detail_image_supports_count_and_reports_partial_failure(tmp_path):
-    """v2.18：**生成张数**（用户口径「新增一个条件，生成多少张图片」）。
+    """v2.18/v2.29：**生成张数**（用户口径「新增一个条件，生成多少张图片」）+ 半成功。
 
-    守四件：
-    ① `count=3` ⇒ 上游被调 **3 次**（逐张串行，不依赖上游 `n` 参数）；
-    ② 落 **3 条**素材行、`assets` 回 3 个 id（`url`/`asset` 仍是首张，向后兼容）；
-    ③ **半成功**：第 2 张抛错 ⇒ 200 + `errors` 一条（不因一张失败丢掉另外两张）；
-    ④ 全部失败 ⇒ 502（不假装成功）。
+    守五件：
+    ① `count=3` ⇒ 上游被调 **3 次**（v2.29：一次批量要 3 张，服务商少回 2 张 ⇒
+       补张 1 次，合计 3 次 —— 请求数仍是「张数」级，不会被新批量路径吃掉）；
+    ② 落 **2 条**素材行、`assets` 回 2 个 id（`url`/`asset` 仍是首张，向后兼容）；
+    ③ **半成功**：v2.29 起一组是一次批量请求（原子单元），组内半成功只剩
+       「服务商少回 + 补张失败」这一种形态 ⇒ 200 + `errors` 一条（不因一张失败
+       丢掉另外两张）；④ 全部失败 ⇒ 502（不假装成功）。
     """
     from backend.app.api.ai import get_image_ai_client
     from backend.app.models.generation import AigcMediaAsset
@@ -5564,14 +5587,36 @@ def test_generate_detail_image_supports_count_and_reports_partial_failure(tmp_pa
     )
 
     class FlakyImageClient:
+        """v2.29 的半成功形态：服务商**少回张数**（一批 3 张只回 2 张）+ **补张失败**。
+
+        ⚠️ v2.29 起每组是**一次**批量请求 —— 一批是一个原子单元（要么拿回 n 张，
+        要么一张没有），组内不再逐张 ⇒ 旧的「第 2 张抛错」形态没有了。
+        组内半成功只剩一种合法形态：批量返回**不足**（服务商忽略 ``n``）⇒
+        调用方按缺张补齐 ⇒ 补张抛错。本用例守的正是这条**补张路径**：
+        拿到 2 张 + 1 条 error，而不是整组 502。
+        """
+
         def __init__(self):
             self.calls = 0
 
         def generate_image(self, *, model_config, api_key, prompt, reference_images=None):
             self.calls += 1
-            if self.calls == 2:
+            if self.calls == 3:
                 raise RuntimeError("上游限流")
             return {"url": f"https://cdn.example.test/detail-{self.calls}.png", "local_path": ""}
+
+        def generate_images(self, *, model_config, api_key, prompt, reference_images=None, count=1):
+            # 模拟「服务商忽略 n」：要 3 张只回 2 张（count=1 时仍如实回 1 张）。
+            returned = max(count - 1, 1)
+            return [
+                self.generate_image(
+                    model_config=model_config,
+                    api_key=api_key,
+                    prompt=prompt,
+                    reference_images=reference_images,
+                )
+                for _ in range(returned)
+            ]
 
     fake = FlakyImageClient()
     db_dependency = _override_database(tmp_path)
@@ -5644,7 +5689,7 @@ def test_generate_detail_image_supports_count_and_reports_partial_failure(tmp_pa
         )
         assert response.status_code == 200, response.text
         body = response.json()
-        # ① 逐张发请求（3 次；第 2 次抛错）
+        # ① 一次批量（3 张）+ 一次补张 = 3 次上游调用（补张抛错，不计成功）
         assert fake.calls == 3
         # ② 成功的两张都落库并回传；`url`/`asset` 仍是首张（向后兼容）
         assert [a["id"] for a in body["assets"]] == [body["asset"]["id"], body["assets"][1]["id"]]
@@ -5662,6 +5707,9 @@ def test_generate_detail_image_supports_count_and_reports_partial_failure(tmp_pa
         # ④ 全部失败 ⇒ 502（不假装成功）
         class DeadImageClient:
             def generate_image(self, *, model_config, api_key, prompt, reference_images=None):
+                raise RuntimeError("服务商挂了")
+
+            def generate_images(self, *, model_config, api_key, prompt, reference_images=None, count=1):
                 raise RuntimeError("服务商挂了")
 
         app.dependency_overrides[get_image_ai_client] = lambda: DeadImageClient()
@@ -5699,16 +5747,35 @@ def test_generate_detail_image_result_is_grouped(tmp_path):
     )
 
     class HalfFailClient:
-        """第 1 张失败、其余成功（用来验证「某组全灭仍出现」）。"""
+        """第 2 个组（detail）**整批**失败 —— 用来验证「某组全灭仍出现」。
+
+        ⚠️ v2.29 起每组是**一次**批量请求（`generate_images`），组内不再逐张 ⇒
+        「某组一张没成」只能 modeled 成**该组整批抛错**（一批是一个原子单元：
+        要么拿回 n 张，要么一张没有），不再是「组内第 1 张抛错」。
+        """
 
         def __init__(self):
+            self.batches = 0
             self.calls = 0
 
         def generate_image(self, *, model_config, api_key, prompt, reference_images=None):
             self.calls += 1
-            if self.calls == 1:
-                raise RuntimeError("第一张就挂")
             return {"url": f"https://cdn.example.test/g{self.calls}.png", "local_path": ""}
+
+        def generate_images(self, *, model_config, api_key, prompt, reference_images=None, count=1):
+            self.batches += 1
+            # 组固定按 product → detail 顺序执行；第 2 批 = detail 组，整批挂掉。
+            if self.batches == 2:
+                raise RuntimeError("详情图整批失败")
+            return [
+                self.generate_image(
+                    model_config=model_config,
+                    api_key=api_key,
+                    prompt=prompt,
+                    reference_images=reference_images,
+                )
+                for _ in range(count)
+            ]
 
     fake = HalfFailClient()
     db_dependency = _override_database(tmp_path)
@@ -5785,7 +5852,7 @@ def test_generate_detail_image_result_is_grouped(tmp_path):
         groups = only_product.json()["groups"]
         assert [g["group"] for g in groups] == ["product"], "只要求一组却造出了别的组"
 
-        # 两组都勾 ⇒ 两组都在（第 1 张失败 ⇒ 主图组 2/3）
+        # 两组都勾 ⇒ 两组都在（详情组整批失败 ⇒ 该组 succeeded=0 但仍出现）
         both = client.post(
             url,
             headers={"Authorization": f"Bearer {token}"},
@@ -5838,6 +5905,18 @@ def test_generate_detail_image_regenerates_single_image(tmp_path):
         def generate_image(self, *, model_config, api_key, prompt, reference_images=None):
             self.calls.append(list(reference_images or []))
             return {"url": f"https://cdn.example.test/r{len(self.calls)}.png", "local_path": ""}
+
+        # v2.29：批量接口；单张重做时 count=1 ⇒ 仍然只调一次。
+        def generate_images(self, *, model_config, api_key, prompt, reference_images=None, count=1):
+            return [
+                self.generate_image(
+                    model_config=model_config,
+                    api_key=api_key,
+                    prompt=prompt,
+                    reference_images=reference_images,
+                )
+                for _ in range(count)
+            ]
 
     fake = CountingClient()
     db_dependency = _override_database(tmp_path)
@@ -5989,6 +6068,10 @@ def test_generate_detail_image_reports_missing_image_and_missing_mapping(tmp_pat
         def generate_image(self, *, model_config, api_key, prompt, reference_images=None):
             raise AssertionError("不该被调到：这些分支都在出图之前就返回")
 
+        # v2.29：详情图走批量接口；同样不该被调到。
+        def generate_images(self, *, model_config, api_key, prompt, reference_images=None, count=1):
+            raise AssertionError("不该被调到：这些分支都在出图之前就返回")
+
     db_dependency = _override_database(tmp_path)
     token = _register_and_get_access_token("detail-image-missing")
     try:
@@ -6071,6 +6154,18 @@ def test_detail_image_reference_images_must_come_from_the_product(tmp_path):
         def generate_image(self, *, model_config, api_key, prompt, reference_images=None):
             self.calls.append(list(reference_images or []))
             return {"url": "https://cdn.example.test/out.png", "local_path": ""}
+
+        # v2.29：详情图走批量接口；记录与逐张路径等价，既有断言不用改。
+        def generate_images(self, *, model_config, api_key, prompt, reference_images=None, count=1):
+            return [
+                self.generate_image(
+                    model_config=model_config,
+                    api_key=api_key,
+                    prompt=prompt,
+                    reference_images=reference_images,
+                )
+                for _ in range(count)
+            ]
 
     fake = FakeImageClient()
     db_dependency = _override_database(tmp_path)

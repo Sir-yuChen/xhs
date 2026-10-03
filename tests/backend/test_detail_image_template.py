@@ -162,17 +162,40 @@ def test_register_seeds_prompt_templates_for_new_user(tmp_path):
 
 
 class _RecordingImageClient:
-    """记录每次收到的 prompt 与参考图（用来断言模板/风格图真的进了上游请求）。"""
+    """记录每次收到的 prompt 与参考图（用来断言模板/风格图真的进了上游请求）。
+
+    ⚠️ v2.29 起 详情图链路改调 ``generate_images``（一次要 n 张），
+    ``generate_image`` 只作为「服务商忽略 ``n`` 时的补张」路径。
+    两个接口都要实现，否则代理对象没有该方法 ⇒ 502。
+    """
 
     def __init__(self):
         self.prompts: list[str] = []
         #: 每次调用收到的参考图列表（长度与顺序都要能验 —— 风格图约定是**最后一张**）
         self.references: list[list[str]] = []
+        #: 批量接口（v2.29）被调了几次、每次要几张 —— 用来断言「一批 n 张」真的发了
+        self.batch_calls: list[int] = []
 
     def generate_image(self, *, model_config, api_key, prompt, reference_images=None):
         self.prompts.append(prompt)
         self.references.append(list(reference_images or []))
         return {"url": f"https://cdn.example.test/t{len(self.prompts)}.png", "local_path": ""}
+
+    def generate_images(
+        self, *, model_config, api_key, prompt, reference_images=None, count=1
+    ):
+        # 服务商如实返回 count 张（每张各自一条 prompt / 参考图记录，
+        # 与旧的逐张串行路径在记录上等价 ⇒ 既有断言不用改）。
+        self.batch_calls.append(count)
+        return [
+            self.generate_image(
+                model_config=model_config,
+                api_key=api_key,
+                prompt=prompt,
+                reference_images=reference_images,
+            )
+            for _ in range(count)
+        ]
 
 
 def _seed_image_provider() -> None:

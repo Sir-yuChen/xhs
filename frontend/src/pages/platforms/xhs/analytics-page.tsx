@@ -23,6 +23,7 @@ import {
   Spin,
   Statistic,
   Table,
+  Tabs,
   Tag,
   Typography,
 } from "antd";
@@ -46,6 +47,9 @@ import type {
   AnalyticsTopContent,
   DashboardOverview,
 } from "../../../types";
+// M2 数据仪表盘（设计 17 §13.10）：作为本页的**第二个页签**挂入 ——
+// 一期「内容洞察」内容一行不改（新功能独立成文件，宿主只做挂载，改动面最小）。
+import { MetricsDashboardPanel } from "./metrics-dashboard-panel";
 
 const { Text } = Typography;
 
@@ -176,6 +180,19 @@ export function XhsAnalyticsPage() {
   return (
     <div>
       <Alert type="info" showIcon message="数据洞察模块正在开发优化中，当前为基础版本，更多分析维度即将上线。" style={{ marginBottom: 16 }} />
+      <Tabs
+        defaultActiveKey="insight"
+        items={[
+          { key: "insight", label: "内容洞察", children: renderInsightTab() },
+          { key: "metrics", label: "指标监控", children: <MetricsDashboardPanel /> },
+        ]}
+      />
+    </div>
+  );
+
+  function renderInsightTab() {
+    return (
+      <>
       <PageHeader
         eyebrow="XHS Analytics"
         title="数据洞察"
@@ -425,6 +442,7 @@ export function XhsAnalyticsPage() {
           </Card>
         </>
       )}
-    </div>
-  );
+      </>
+    );
+  }
 }

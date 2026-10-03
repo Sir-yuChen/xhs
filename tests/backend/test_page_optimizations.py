@@ -3731,3 +3731,120 @@ def test_shop_items_action_column_is_two_per_row():
         assert label in action, f"操作列少了「{label}」"
     # ⚠️ 回归防线：旧的单行 Space 容器必须已经不在操作列里
     assert "<Space size={4}>" not in action, "操作列仍是单行 Space（四个按钮挤一行）"
+
+
+# --------------------------------------------------------------------------- #
+# M2 切片 3：指标仪表盘面板（设计 17 §13.10）
+# --------------------------------------------------------------------------- #
+METRICS_PANEL = ROOT / "frontend/src/pages/platforms/xhs/metrics-dashboard-panel.tsx"
+METRICS_LIB = ROOT / "frontend/src/lib/metrics-format.ts"
+ANALYTICS_PAGE = ROOT / "frontend/src/pages/platforms/xhs/analytics-page.tsx"
+
+
+def test_metrics_panel_calls_all_four_request_functions():
+    """面板必须**真的调用**切片 1/2 交付的 4 个请求函数。
+
+    ⚠️ 这条守卫的存在理由（本切片的**核心风险**）：切片 2 加了 4 个请求函数但
+    **零调用方** —— 那是「接口做完了、页面没接」的假闭环。
+
+    ⚠️ **判据是「调用」不是「出现」（2026-10-04 变异实测教训）**：
+    第一版只断言 `fn in code` ⇒ 删掉调用点的变异 **ESCAPED**
+    （名字还留在 `import { ... }` 里，断言照样绿）。
+    ⇒ 必须断言**调用形态**（后面紧跟 `(`），且 `import` 行不算
+    —— 用「去掉 import 行后再数」实现。
+    """
+    import re as _re
+
+    code = _code_only(_read(METRICS_PANEL))
+    # ⚠️ 剥掉所有 import 语句，只留函数体 —— 否则「名字出现在 import 里」
+    # 就能满足断言（这正是第一版假绿的源头）。
+    body = _re.sub(r"import\s*\{[^}]*\}\s*from\s*\"[^\"]+\";", "", code, flags=_re.S)
+    body = _re.sub(r"import\s+[^;]+;", "", body)
+
+    for fn in (
+        "fetchNoteMetricsTrend",
+        "fetchShopMetricsTrend",
+        "collectNoteMetrics",
+        "collectShopMetrics",
+    ):
+        assert fn + "(" in body, f"面板没有真正调用 {fn}(（只在 import 里出现 ≠ 被调用）"
+
+
+def test_metrics_panel_mounted_as_tab_in_host_page():
+    """面板必须挂进宿主页面的页签 —— 否则「组件写了但没人渲染」= 白做。
+
+    ⚠️ 变异守护：把 `items` 里的指标监控页签删掉 ⇒ 本用例必红。
+    ⚠️ 同时钉住**宿主一期内容不被破坏**（「内容洞察」页签仍在）。
+    """
+    host = _code_only(_read(ANALYTICS_PAGE))
+    assert "MetricsDashboardPanel" in host, "宿主页面没引用指标面板"
+    assert "<MetricsDashboardPanel />" in host, "面板没有被渲染（只 import 不渲染）"
+    assert "内容洞察" in host, "宿主一期「内容洞察」页签被误删"
+
+
+def test_metrics_panel_empty_state_instead_of_zero_line():
+    """空数据必须走 `Empty` 空态，**不得把空数组喂给 recharts**。
+
+    ⚠️ 变异守护：把 `noteEmpty ? <Empty .../> : ...` 三段式改成直接渲染图表
+    ⇒ `isEmptySeries` 不再出现在条件里、或 `Empty` 计数减少 ⇒ 本用例必红。
+
+    为什么重要：空数组喂 recharts 会画出一条贴 0 的基线，视觉上等价于
+    「数据是 0」；而真相是「那天没采」（trend 只返回有快照的天）。
+    """
+    code = _code_only(_read(METRICS_PANEL))
+    assert "isEmptySeries" in code, "面板没有用统一的空态判据"
+    assert code.count("Empty") >= 2, "笔记/商品两个面板都该有空态分支"
+    # 空态判据必须真的在**条件**里用（不是 import 了放着）
+    assert "noteEmpty ?" in code and "shopEmpty ?" in code, "空态判据没进条件分支"
+
+
+def test_metrics_panel_price_uses_range_text_not_sum():
+    """价格展示必须走 `priceRangeText`（区间文案），**不得就地求和**。
+
+    ⚠️ 变异守护：
+      * 改成 `${min + max}` / `${(min+max)/100}` ⇒ 本用例必红（`priceRangeText` 不再被调用）；
+      * 直接把 `price_min_fen` 当数值渲染 ⇒ 少 100 倍且语义错（区间 ≠ 单值）。
+    """
+    code = _code_only(_read(METRICS_PANEL))
+    assert "priceRangeText(" in code, "价格没有走区间文案（可能被求和或不换算）"
+    assert "price_min_fen + price_max_fen" not in code, "价格被求和了（没有业务含义）"
+    assert "price_min_fen +" not in code, "价格被求和了"
+
+
+def test_metrics_format_lib_does_not_import_react():
+    """纯逻辑库**不得** import React/antd —— 否则 vitest 的 node 环境跑不了。
+
+    ⚠️ 变异守护：往 `metrics-format.ts` 里加 `import { Card } from "antd"` ⇒ 本用例必红
+    （连带 `npm test` 也会因为环境不对而失败）。
+    """
+    code = _code_only(_read(METRICS_LIB))
+    assert "from \"react\"" not in code, "纯逻辑库不该依赖 React"
+    assert "from \"antd\"" not in code, "纯逻辑库不该依赖 antd"
+    assert "from \"recharts\"" not in code, "纯逻辑库不该依赖 recharts"
+
+
+def test_metrics_format_lib_never_pads_missing_days():
+    """`toNoteChartData` / `toShopChartData` **不得**补零天。
+
+    ⚠️ 变异守护：在实现里补日期（按 min~max 生成连续天并填 0）⇒ 本用例必红。
+
+    补零 = 把「那天没采」画成「那天掉到 0」（伪造数据，硬约束⑤）。
+    正确行为：原样 `map`，缺失的天表现为点与点之间跨度更大。
+    """
+    lib = _code_only(_read(METRICS_LIB))
+    note_fn = _slice_between(lib, "export function toNoteChartData", "export function toShopChartData")
+    shop_fn = _slice_between(lib, "export function toShopChartData", "export function engagementPieData")
+    for name, body in (("toNoteChartData", note_fn), ("toShopChartData", shop_fn)):
+        assert ".map(" in body, f"{name} 应原样透传（map）"
+        # 禁日期推演：出现 Date/循环生成连续天的写法即视为补零
+        for forbidden in ("new Date(", "for (let", "while ("):
+            assert forbidden not in body, f"{name} 疑似在补日期（出现 {forbidden}）"
+
+
+def test_metrics_vitest_case_file_is_wired():
+    """前端用例文件必须存在且真的 import vitest（项目规范：测试须显式 import）。"""
+    case_file = ROOT / "frontend/src/lib/metrics-format.test.ts"
+    assert case_file.exists(), "缺少 metrics-format 的 vitest 用例"
+    case = _read(case_file)
+    assert 'from "vitest"' in case, "用例必须显式 import vitest（不依赖 globals）"
+    assert "describe(" in case and "it(" in case, "用例里没有 describe/it"
