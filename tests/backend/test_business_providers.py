@@ -842,3 +842,54 @@ def test_platform_dedupe_existing_platform_not_added_again(api_client, db_factor
     assert platforms == {"xhs": 1}, (
         f"已存在的平台被重复添加 / 计数被累加了（应去重且幂等）：{platforms}"
     )
+
+
+def test_platform_count_zero_never_reaches_storage_or_reader(api_client, db_factory):
+    """**计数归 0 的平台在存储层与读取层都不得留痕**（v2.28 §13.2.9.7c）。
+
+    ## 为什么单独立一条（变异验证挖出来的缺口）
+
+    归零移除有**两道**：`_bump_platform`（写入侧 pop）与 `_parse_platforms`
+    （读取侧丢弃 `<= 0`）。**只拆一道测不出来**（另一道兜住）——
+    实测「只拆写入侧」与「只拆读取侧」都是 0 红，**两道一起拆也 0 红** ⇒
+    说明此前**没有任何用例**盯过「落库字符串里不许有 0 键」这件事。
+
+    为什么这条值得守：用户口径是「计数减到 0 ⇒ 该平台**可以被移除**」。
+    若 `{"xhs": 0}` 漏下去，页面会渲染出一个 `xhs` 标签（计数 0 不显示 × N
+    的分支是后加的），用户看到「这个模型还在被 xhs 用」——**展示与事实相反**，
+    正是本次改动要消灭的那个现象（只是从「永久保留」变成「保留个 0」）。
+
+    守三件：① 落库字符串里没有 `: 0`；② 读取结果没有 0 值键；③ 归零后键整个消失。
+    """
+    import json as _json
+
+    headers = _register(api_client, "platform-zero")
+    provider = _create_provider(api_client, headers, "零计数", model_type=MODEL_TYPE_TEXT)
+    _clear_model_platforms(db_factory, "platform-zero")
+
+    _upsert(api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"], platform="xhs")
+    # 撤走唯一的引用 ⇒ 计数 1 → 0
+    _upsert(api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, "", platform="xhs")
+
+    # ① 落库字符串（**原始列值**，不经解析）不含 0 计数
+    from backend.app.models import LlmGatewayModel
+    from sqlalchemy import select as _select
+
+    user = _user_by_name(None, db_factory, "platform-zero")
+    with db_factory() as db:
+        row = db.scalar(
+            _select(LlmGatewayModel).where(
+                LlmGatewayModel.user_id == user.id,
+                LlmGatewayModel.model_name == "deepseek-v4-flash",
+            )
+        )
+        raw = row.platform or ""
+    assert ": 0" not in raw and ":0" not in raw, (
+        f"计数归 0 的平台仍写进了存储（用户口径：减到 0 就该移除）：{raw!r}"
+    )
+    assert _json.loads(raw) == {}, f"归零后该平台应从存储里消失，实际 {raw!r}"
+
+    # ② 读取侧也不得吐 0 值键（两道防线都要在）
+    parsed = _model_platforms(db_factory, "platform-zero", "deepseek-v4-flash")
+    assert parsed == {}, f"归零平台仍在读取结果里：{parsed}"
+    assert all(n > 0 for n in parsed.values()), "读取结果里出现了 0 计数"

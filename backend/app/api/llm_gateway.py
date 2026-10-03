@@ -1920,7 +1920,7 @@ def upsert_business_provider(
     changed = (previous_provider_key, previous_model_name) != (provider_key, model_name)
     if changed:
         # ① **减**：旧模型在该平台的引用 −1（减到 0 即移除该平台 —— 用户口径）
-        if False and previous_provider_key and previous_model_name:
+        if previous_provider_key and previous_model_name:
             old_row = _find_model_row(db, current_user.id, previous_provider_key, previous_model_name)
             if old_row is not None:
                 old_row.platform = _dump_platforms(
