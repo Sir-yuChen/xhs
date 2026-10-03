@@ -160,13 +160,16 @@ def test_register_seeds_prompt_templates_for_new_user(tmp_path):
 
 
 class _RecordingImageClient:
-    """记录每次收到的 prompt（用来断言模板内容真的进了上游请求）。"""
+    """记录每次收到的 prompt 与参考图（用来断言模板/风格图真的进了上游请求）。"""
 
     def __init__(self):
         self.prompts: list[str] = []
+        #: 每次调用收到的参考图列表（长度与顺序都要能验 —— 风格图约定是**最后一张**）
+        self.references: list[list[str]] = []
 
     def generate_image(self, *, model_config, api_key, prompt, reference_images=None):
         self.prompts.append(prompt)
+        self.references.append(list(reference_images or []))
         return {"url": f"https://cdn.example.test/t{len(self.prompts)}.png", "local_path": ""}
 
 
@@ -508,3 +511,253 @@ def test_template_prompt_backfills_uncovered_constraints(tmp_path):
     assert "竖版 3:4" in out, "模板没覆盖构图时未补上"
     assert "统一光位" in out, "模板没覆盖一致性时未补上"
     assert "不要出现文字水印" in out, "模板没覆盖合规时未补上"
+
+
+# --------------------------------------------------------------------------- #
+# 第三层：风格参考图（§13.7，借鉴 gcc-model-gen 的「风格继承」）
+# --------------------------------------------------------------------------- #
+
+
+def _seed_material_image(*, filename: str = "style.png", file_type: str = "image") -> int:
+    """给当前用户播一个素材库文件夹 + 一个文件，返回文件 id。"""
+    from backend.app.models.material import MaterialFile, MaterialFolder
+    from backend.app.core.time import shanghai_now
+
+    db = _db()
+    try:
+        folder = MaterialFolder(
+            user_id=_uid(), name="风格库", path="D:/tmp/style-lib", file_count=1
+        )
+        db.add(folder)
+        db.flush()
+        row = MaterialFile(
+            user_id=_uid(),
+            folder_id=folder.id,
+            filename=filename,
+            file_type=file_type,
+            rel_path=filename,
+            size_bytes=1024,
+            # ⚠️ `mtime` 是 **DateTime**（不是 unix 整数）—— 增量扫描判据，见模型注解
+            mtime=shanghai_now(),
+        )
+        db.add(row)
+        db.commit()
+        return row.id
+    finally:
+        db.close()
+
+
+def test_style_reference_survives_full_reference_list(tmp_path):
+    """**商品图满 6 张时风格图仍要送达**（真机实测发现的缺陷）。
+
+    背景：`fallback_refs = picked[:6]` 是「商品图 ≤6」，风格图**追加在末尾**
+    成了第 7 张；而下游还会再切一次 `[:6]` —— 切掉的正好是**最后一张 = 风格图**
+    ⇒ 风格图**永远送不到上游**，而所有「小数据」用例都照样绿（因为只勾一两张时
+    前面还有空位，切不到它）。这就是「看起来是对的」的缺陷形态。
+
+    所以本用例必须**勾满 6 张**再验风格图仍在 —— 少于 6 张测不出这个 bug。
+    """
+    from backend.app.api.ai import get_image_ai_client
+
+    fake = _RecordingImageClient()
+    db_dependency = _override_database(tmp_path)
+    token = _register_and_get_access_token("style-full")
+    try:
+        app.dependency_overrides[get_image_ai_client] = lambda: fake
+        _seed_image_provider()
+        account_id = _seed_account_for_last_user()
+        urls = [f"https://cdn.xhs.test/f{i}.jpg" for i in range(6)]
+        _seed_shop_product(
+            platform_account_id=account_id, item_id="ITEM-STYLE-5", images=urls
+        )
+        file_id = _seed_material_image(filename="style-full.png")
+
+        response = TestClient(app).post(
+            "/api/xhs/qianfan/generate-detail-image",
+            json={
+                "platform_account_id": account_id,
+                "item_id": "ITEM-STYLE-5",
+                "reference_image_urls": urls,
+                "count": 3,
+                "style_reference_file_id": file_id,
+                "refine_prompt": False,
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 200, response.text
+        assert fake.references, "没有发出图请求"
+        sent = fake.references[0]
+        assert len(sent) == 7, f"应 6 张商品图 + 1 张风格图 = 7，实得 {sent}"
+        assert "materials/files" in sent[-1], (
+            "风格图不在最后一位（或已被截断切掉）—— 6 张商品图时最容易发生"
+        )
+    finally:
+        app.dependency_overrides.pop(db_dependency, None)
+        app.dependency_overrides.pop(get_image_ai_client, None)
+
+
+def test_style_reference_is_appended_and_named_in_prompt(tmp_path):
+    """风格图被**追加到最后**，且 prompt 里**点名**它是风格参考。
+
+    两点都要守：
+    ① 图真的附上了（否则「借风格」无从谈起）；
+    ② prompt 里说明了哪张是风格图 —— `reference_images` 是无序列表，
+       不说清模型会把风格图当商品图（把样板里的东西画进商品）。
+    """
+    from backend.app.api.ai import get_image_ai_client
+
+    fake = _RecordingImageClient()
+    db_dependency = _override_database(tmp_path)
+    token = _register_and_get_access_token("style-ref")
+    try:
+        app.dependency_overrides[get_image_ai_client] = lambda: fake
+        _seed_image_provider()
+        account_id = _seed_account_for_last_user()
+        _seed_shop_product(
+            platform_account_id=account_id,
+            item_id="ITEM-STYLE-1",
+            images=["https://cdn.xhs.test/s1.jpg"],
+        )
+        file_id = _seed_material_image()
+
+        response = TestClient(app).post(
+            "/api/xhs/qianfan/generate-detail-image",
+            json={
+                "platform_account_id": account_id,
+                "item_id": "ITEM-STYLE-1",
+                "reference_image_urls": ["https://cdn.xhs.test/s1.jpg"],
+                "count": 3,
+                "style_reference_file_id": file_id,
+                "refine_prompt": False,
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 200, response.text
+        assert fake.prompts, "没有发出图请求"
+        sent = fake.prompts[0]
+        assert "风格参考" in sent, "prompt 里没有点名风格参考图"
+        # 上游收到的是「商品图 + 风格图」两张
+        assert len(fake.references[0]) == 2, f"参考图应 2 张（商品+风格），实得 {fake.references[0]}"
+        assert any("/materials/files/" in u for u in fake.references[0]), (
+            "风格图（素材库文件 URL）没被附给上游"
+        )
+    finally:
+        app.dependency_overrides.pop(db_dependency, None)
+        app.dependency_overrides.pop(get_image_ai_client, None)
+
+
+def test_style_reference_not_owned_returns_404_without_generating(tmp_path):
+    """风格图不属于本用户 ⇒ 404 且**不发出图请求**（不静默忽略）。
+
+    静默忽略的观感是「出图成功」，但用户挑的风格图根本没参与 ——
+    与 §13.6.3「不静默回落」同一纪律。
+    """
+    from backend.app.api.ai import get_image_ai_client
+
+    fake = _RecordingImageClient()
+    db_dependency = _override_database(tmp_path)
+    token = _register_and_get_access_token("style-owner")
+    try:
+        app.dependency_overrides[get_image_ai_client] = lambda: fake
+        _seed_image_provider()
+        account_id = _seed_account_for_last_user()
+        _seed_shop_product(
+            platform_account_id=account_id,
+            item_id="ITEM-STYLE-2",
+            images=["https://cdn.xhs.test/s2.jpg"],
+        )
+
+        response = TestClient(app).post(
+            "/api/xhs/qianfan/generate-detail-image",
+            json={
+                "platform_account_id": account_id,
+                "item_id": "ITEM-STYLE-2",
+                "reference_image_urls": ["https://cdn.xhs.test/s2.jpg"],
+                "style_reference_file_id": 999999,
+                "refine_prompt": False,
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 404, response.text
+        assert response.json()["detail"]["code"] == "STYLE_REFERENCE_NOT_FOUND"
+        assert not fake.prompts, "风格图不存在却仍然出图（静默忽略）"
+    finally:
+        app.dependency_overrides.pop(db_dependency, None)
+        app.dependency_overrides.pop(get_image_ai_client, None)
+
+
+def test_style_reference_must_be_image(tmp_path):
+    """风格图必须是图片（视频文件 ⇒ 400，理由说清楚）。"""
+    from backend.app.api.ai import get_image_ai_client
+
+    fake = _RecordingImageClient()
+    db_dependency = _override_database(tmp_path)
+    token = _register_and_get_access_token("style-video")
+    try:
+        app.dependency_overrides[get_image_ai_client] = lambda: fake
+        _seed_image_provider()
+        account_id = _seed_account_for_last_user()
+        _seed_shop_product(
+            platform_account_id=account_id,
+            item_id="ITEM-STYLE-3",
+            images=["https://cdn.xhs.test/s3.jpg"],
+        )
+        file_id = _seed_material_image(filename="clip.mp4", file_type="video")
+
+        response = TestClient(app).post(
+            "/api/xhs/qianfan/generate-detail-image",
+            json={
+                "platform_account_id": account_id,
+                "item_id": "ITEM-STYLE-3",
+                "reference_image_urls": ["https://cdn.xhs.test/s3.jpg"],
+                "style_reference_file_id": file_id,
+                "refine_prompt": False,
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 400, response.text
+        assert response.json()["detail"]["code"] == "STYLE_REFERENCE_NOT_IMAGE"
+        assert not fake.prompts
+    finally:
+        app.dependency_overrides.pop(db_dependency, None)
+        app.dependency_overrides.pop(get_image_ai_client, None)
+
+
+def test_style_reference_is_optional_zero_regression(tmp_path):
+    """**不传风格图 ⇒ 行为与旧版完全一致**（可选增强，不是必填）。
+
+    这是成对的另一半：只守「传了就生效」会让「变成必填」也变绿，
+    而那会破坏既有调用方（旧请求没有这个字段）。
+    """
+    from backend.app.api.ai import get_image_ai_client
+
+    fake = _RecordingImageClient()
+    db_dependency = _override_database(tmp_path)
+    token = _register_and_get_access_token("style-optional")
+    try:
+        app.dependency_overrides[get_image_ai_client] = lambda: fake
+        _seed_image_provider()
+        account_id = _seed_account_for_last_user()
+        _seed_shop_product(
+            platform_account_id=account_id,
+            item_id="ITEM-STYLE-4",
+            images=["https://cdn.xhs.test/s4.jpg"],
+        )
+
+        response = TestClient(app).post(
+            "/api/xhs/qianfan/generate-detail-image",
+            json={
+                "platform_account_id": account_id,
+                "item_id": "ITEM-STYLE-4",
+                "reference_image_urls": ["https://cdn.xhs.test/s4.jpg"],
+                "count": 3,
+                "refine_prompt": False,
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 200, response.text
+        assert len(fake.references[0]) == 1, "不传风格图时参考图应只有商品图那一张"
+        assert "风格参考" not in fake.prompts[0], "不传风格图却出现了风格说明"
+    finally:
+        app.dependency_overrides.pop(db_dependency, None)
+        app.dependency_overrides.pop(get_image_ai_client, None)

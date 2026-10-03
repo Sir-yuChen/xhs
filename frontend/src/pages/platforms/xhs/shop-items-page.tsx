@@ -1353,6 +1353,16 @@ export function XhsShopItemsPage() {
 
   /** v2.22：当前 Tab 的组名 / 参考图（footer 按钮与守卫都读它）。 */
   const activeGroupLabel = activeGroup === "product" ? "原始主图" : "原始详情图";
+  /**
+   * v2.25：**生成按钮的标签**（用户口径「底部按钮应『生成主图/生成详情图』，
+   * 不是『生成原始图/生成原始详情图』」）。
+   *
+   * ⚠️ **不能复用 `activeGroupLabel`**：那个词描述的是**参考图的来源**
+   * （「原始主图」= 商品原始图，用于「可选参考图」那块的分组标题），
+   * 而按钮说的是**要生成什么**（「生成主图」）。
+   * 同一变量担两个语义 ⇒ 改一处会同时改错的另一处（本轮就是这么来的）。
+   */
+  const activeGenerateLabel = activeGroup === "product" ? "主图" : "详情图";
   const activeGroupUrls =
     activeGroup === "product"
       ? detailImageDetail?.product_images || []
@@ -2307,7 +2317,7 @@ export function XhsShopItemsPage() {
                 disabled={activeGroupRefs.length === 0 || detailImageLoading}
                 onClick={() => void generateDetailImage()}
               >
-                生成{activeGroupLabel}
+                生成{activeGenerateLabel}
               </Button>
             </Tooltip>
           </Space>

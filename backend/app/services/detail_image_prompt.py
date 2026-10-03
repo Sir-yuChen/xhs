@@ -139,6 +139,21 @@ def build_item_brief(item: dict[str, Any], skus: list[dict[str, Any]], prompt: s
     return "\n".join(lines)
 
 
+def style_reference_note() -> str:
+    """风格参考图的**说明句**（§13.7，唯一实现 —— 措辞只有一份）。
+
+    为什么必须**点名**：`reference_images` 在上游是一个**无序列表**，
+    模型无法从列表本身分辨哪张是「商品本体」、哪张是「风格样板」。
+    不说清的话它会以为都是商品图，从而把风格图里的东西当商品元素画进去
+    （实测前置推理：语义只能由 prompt 交代）。
+    """
+    return (
+        "【风格参考】附带图片中最后一张是风格参考图（不是商品本体）："
+        "请仅借鉴它的光位、色调、画面质感与构图密度，"
+        "商品外观一律以其余商品参考图为准。"
+    )
+
+
 def render_template_prompt(
     *,
     template: Any,

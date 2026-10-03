@@ -1101,8 +1101,63 @@ class GenerateDetailImageRequest(BaseModel):
     #: `{"product": {"template_id": 3}, "detail": {"template_id": 5}}`；
     #: 未出现的组回落顶层 `template_id`。
     group_templates: dict | None = None
+    #: v2.25：**风格参考图**（设计 17 §13.7，借鉴 gcc-model-gen 的「风格继承」思路）。
+    #: 值是**素材库文件 ID**（`material_files.id`），**不是 URL** —— 出图端点已有
+    #: SSRF 防线（参考图须过台账白名单），收 URL 等于开第二个口子。
+    #: 语义：把这张图作为**风格样板**附给模型（借它的光位/色调/质感），
+    #: 商品外观仍以商品参考图为准。不传 ⇒ 行为与旧版完全一致。
+    style_reference_file_id: int | None = Field(default=None, ge=1)
 
     model_config = ConfigDict(extra="forbid")
+
+
+def _resolve_style_reference(
+    db: Session,
+    current_user: User,
+    *,
+    file_id: int | None,
+) -> tuple[str, str]:
+    """把**风格参考图**（素材库文件 ID）解析成上游可取的 URL + 提示词说明（§13.7）。
+
+    返回 `(url, note)`；不传 ⇒ `("", "")`（可选增强，零回归）。
+
+    ⚠️ **只收文件 ID，不收 URL**：出图端点已有 SSRF 防线（商品参考图必须过台账
+    白名单），若风格图收 URL 就等于开了第二个「下载任意地址」的口子。
+    文件 ID 的归属校验走既有唯一实现（与素材端点同口径）。
+
+    ⚠️ **归属不符 ⇒ 404，不静默忽略**：静默忽略的观感是「出图成功了」，
+    但用户精心挑的风格图**根本没参与**（与 §13.6.3「不静默回落」同一纪律）。
+    """
+    if not file_id:
+        return "", ""
+
+    from backend.app.models.material import MaterialFile
+
+    row = db.scalar(
+        select(MaterialFile).where(
+            MaterialFile.id == file_id,
+            MaterialFile.user_id == current_user.id,
+        )
+    )
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": "STYLE_REFERENCE_NOT_FOUND",
+                "message": "风格参考图不存在或不属于当前用户",
+            },
+        )
+    if row.file_type != "image":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "STYLE_REFERENCE_NOT_IMAGE",
+                "message": "风格参考图必须是图片文件",
+            },
+        )
+    # 复用素材端点同一个取字节 URL（`/api/xhs/materials/files/{id}/file`）——
+    # `ai_service._resolve_image_ref` 认这个前缀并转 base64 送上游。
+    return f"/api/xhs/materials/files/{row.id}/file", detail_image_prompt.style_reference_note()
 
 
 def _render_detail_image_template(
@@ -1397,6 +1452,15 @@ def generate_detail_image(
         )
     reference_images = picked[:MAX_DETAIL_IMAGE_REFERENCES]
 
+    # v2.25（§13.7）：**风格参考图**（可选）—— 素材库文件 ID 解析成可取的 URL，
+    # 作为**最后一张**附给上游（说明句会点名「最后一张是风格图」）。
+    # ⚠️ 不占商品参考图的名额：两者是两个字段、两个上限（否则选风格图会少选商品图）。
+    style_url, style_note = _resolve_style_reference(
+        db, current_user, file_id=payload.style_reference_file_id
+    )
+    if style_url:
+        reference_images = [*reference_images, style_url]
+
     # 业务点 → 服务商（不回落；未配置 / 类型不符 ⇒ 400 结构化）。
     # ⚠️ 复用 `ai.py::_business_model_context`（**同一份**错误映射实现）：
     # 自己再写一遍 `resolve + except LLMGatewayError → 400` = 同一语义两份实现（DEF-044），
@@ -1421,6 +1485,10 @@ def generate_detail_image(
         prompt = (payload.prompt or "").strip() or _default_detail_image_prompt(
             detail.get("item") or {}, detail.get("skus") or []
         )
+    # v2.25（§13.7）：风格参考说明 —— 加在 `prompt` 上（组循环从它派生），
+    # 于是**每个组**都带上（风格是「怎么画」的约束，与画哪一组无关）。
+    if style_note:
+        prompt = f"{prompt}\n\n{style_note}"
     # v2.18/v2.20：张数收敛到常量区间（Pydantic 的 ge/le 已拦非法值，这里再夹一次 ——
     # 常量改小时端点仍然安全，不依赖模型的字段约束）。
     count = max(
@@ -1468,6 +1536,14 @@ def generate_detail_image(
     # ⇒ 组的「存在性」改为由 `group_settings`（即该 Tab 有没有被要求生成）决定，
     # 参考图则**统一用全部已勾图**（`fallback_refs`）。
     fallback_refs = picked[:MAX_DETAIL_IMAGE_REFERENCES]
+    # v2.25（§13.7）：风格图对**每个组**都生效（它是「怎么画」的约束，不是「画什么」）。
+    #
+    # ⚠️ **必须在截断之后追加**：`fallback_refs` 是「商品图 ≤6 张」，而下游
+    # `group_refs[:MAX_DETAIL_IMAGE_REFERENCES]` 还会再切一次 —— 若先把风格图
+    # 追加成 7 张再切，切掉的正好是**最后一张 = 风格图**（真机实测发现的缺陷：
+    # 风格图永远送不到上游，而「看起来是对的」）。
+    if style_url:
+        fallback_refs = [*fallback_refs, style_url]
 
     groups: list[dict[str, Any]] = []
     for key, label in (
@@ -1509,7 +1585,9 @@ def generate_detail_image(
             {
                 "key": key,
                 "label": label,
-                "refs": effective_refs[:MAX_DETAIL_IMAGE_REFERENCES],
+                # ⚠️ v2.25：不在此截断 —— `effective_refs` 已是「商品图 ≤6 + 风格图」，
+                # 再切会把末尾的风格图切掉（下游 1687 行同样不切）。
+                "refs": effective_refs,
                 "prompt": group_prompt,
                 "count": group_count,
             }
@@ -1608,7 +1686,10 @@ def generate_detail_image(
                     # v2.22：**本组自己的提示词**（每组可独立设置）。
                     prompt=group_prompt,
                     # 参考图 = **本组**勾选的（不跨组混送）。
-                    reference_images=group_refs[:MAX_DETAIL_IMAGE_REFERENCES],
+                    # ⚠️ v2.25：这里**不再截断** —— `group_refs` 在组装时已经
+                    # 截成「商品图 ≤6 + 风格图 ≤1」，再切一次会把风格图切掉
+                    # （它在列表**末尾**，正是被切的位置）。
+                    reference_images=group_refs,
                 )
             except Exception as exc:  # noqa: BLE001 - 服务商五花八门，一律结构化转出
                 errors.append(f"{group_label} 第 {output_index} 张：{exc}")

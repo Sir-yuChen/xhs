@@ -3327,3 +3327,28 @@ def test_detail_image_uses_public_prompt_templates():
     assert "templateId?: number" in api and "groupTemplates?: Record<string, { template_id?: number }>" in api, (
         "请求函数缺少模板参数签名"
     )
+
+
+def test_detail_image_generate_button_says_generate_main_or_detail():
+    """v2.25：底部按钮文案 = 「生成主图 / 生成详情图」（用户口径）。
+
+    用户口径原文：「生成AI商品图底部按钮应生成主图/生成详情图，
+    不是生成原始图/生成原始详情图」。
+
+    ⚠️ 根因是**一个变量担两个语义**：`activeGroupLabel`（=「原始主图」/「原始详情图」）
+    本来是给「可选参考图」那块做**来源**标题的，按钮复用了它 ⇒ 显示成「生成原始主图」。
+    正确做法是**两个独立变量**（`activeGenerateLabel` 说「生成什么」，
+    `activeGroupLabel` 说「参考图来自哪」）—— 守这条，别让它们再合并。
+    """
+    page = _code_only(_read(SHOP_ITEMS_PAGE))
+    assert 'const activeGenerateLabel = activeGroup === "product" ? "主图" : "详情图";' in page, (
+        "缺少生成按钮的独立标签（不要复用 activeGroupLabel）"
+    )
+    assert "生成{activeGenerateLabel}" in page, "按钮文案没改用生成标签"
+    assert "生成{activeGroupLabel}" not in page, (
+        "按钮仍在复用 activeGroupLabel ⇒ 会显示成「生成原始主图」"
+    )
+    # 参考图那块仍要用「原始」口径（来源描述）—— 两件事不能只剩一件
+    assert 'const activeGroupLabel = activeGroup === "product" ? "原始主图" : "原始详情图";' in page, (
+        "参考图来源标题被一起改掉了（它本该保留「原始主图」的说法）"
+    )
