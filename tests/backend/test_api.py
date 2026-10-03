@@ -5516,6 +5516,8 @@ def test_generate_detail_image_uses_own_business_point_and_persists_asset(tmp_pa
                 "prompt": "",
                 # v2.19：参考图必选（不勾 ⇒ 400 REFERENCE_IMAGE_REQUIRED）。
                 "reference_image_urls": ["https://cdn.xhs.test/main.jpg"],
+                # v2.20：显式 3 张（默认即 3，这里显式写死断言更稳）。
+                "count": 3,
             },
         )
         assert response.status_code == 200
@@ -5523,8 +5525,9 @@ def test_generate_detail_image_uses_own_business_point_and_persists_asset(tmp_pa
         assert body["url"] == "https://cdn.example.test/detail.png"
         assert body["asset"]["model_name"] == "detail-image-model"
 
-        # 服务端自己取商品图当参考图（只送首图），且提示词是后端按商品拼的
-        assert len(fake.calls) == 1
+        # 勾的参考图原样送出，且提示词是后端拼的
+        assert len(fake.calls) == 3, "count=3 ⇒ 逐张发 3 次"
+        assert len(body["assets"]) == 3
         _model, prompt, reference_images = fake.calls[0]
         assert reference_images == ["https://cdn.xhs.test/main.jpg"]
         assert "白橘运动包" in prompt
@@ -5533,7 +5536,7 @@ def test_generate_detail_image_uses_own_business_point_and_persists_asset(tmp_pa
         db = _test_session_factory()
         try:
             assets = db.query(AigcMediaAsset).all()
-            assert len(assets) == 1
+            assert len(assets) == 3, "count=3 ⇒ 落 3 条素材行"
             assert assets[0].url == "https://cdn.example.test/detail.png"
             # ⚠️ 缺值口径：服务商没回 local_path ⇒ 留空串，**不拿 url 冒充**
             assert assets[0].local_path == ""
@@ -5666,7 +5669,7 @@ def test_generate_detail_image_supports_count_and_reports_partial_failure(tmp_pa
                 "platform_account_id": account_id,
                 "item_id": "ITEM-N",
                 "prompt": "",
-                "count": 2,
+                "count": 3,
                 "reference_image_urls": ["https://cdn.xhs.test/main.jpg"],
             },
         )
@@ -5677,13 +5680,14 @@ def test_generate_detail_image_supports_count_and_reports_partial_failure(tmp_pa
 
 
 def test_generate_detail_image_count_is_bounded(tmp_path):
-    """v2.18：张数**有界** —— 0 / 5 / 负数都被 422 拦下（不静默夹到合法值）。
+    """v2.18/v2.20：张数**有界** 3 ~ 10（用户口径「最多 10 张最少 3 张」）——
+    2 / 11 / 0 / 负数都被 422 拦下（不静默夹到合法值）。
 
     ⚠️ `count` 每张 = 一次上游请求，无上限就是「一次点击烧 N 次额度」。
     """
     db_dependency = _override_database(tmp_path)
     token = _register_and_get_access_token("detail-image-count-bound")
-    for bad in (0, 5, -1):
+    for bad in (0, 2, 11, -1):
         response = client.post(
             "/api/xhs/qianfan/generate-detail-image",
             headers={"Authorization": f"Bearer {token}"},

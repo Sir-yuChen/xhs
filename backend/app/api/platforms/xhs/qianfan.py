@@ -1033,6 +1033,19 @@ def sync_shop_goods_status(
     )
 
 
+#: 生成详情图时最多送几张参考图（§13.3.6；服务商侧参考图多了会超上限）。
+MAX_DETAIL_IMAGE_REFERENCES: int = 5
+
+#: v2.18/v2.20：生成张数范围（用户口径「最多 10 张最少 3 张」）。
+#: ⚠️ 每张 = 一次独立的上游请求（串行）⇒ 有上限止损；下限 3 是因为生成详情图
+#: 通常要成组使用（单张价值低，用户总要多来几张挑）。
+#: ⚠️ 定义在**请求模型之前**：`GenerateDetailImageRequest.count` 的 `default/ge/le`
+#: 直接引用它们（定义在后 = 类体求值时 NameError）。
+MIN_DETAIL_IMAGE_COUNT: int = 3
+MAX_DETAIL_IMAGE_COUNT: int = 10
+DEFAULT_DETAIL_IMAGE_COUNT: int = 3
+
+
 class GenerateDetailImageRequest(BaseModel):
     """商品详情图生成请求（设计 17 §13.3.3，v2.1；v2.15 加参考图勾选）。
 
@@ -1050,10 +1063,11 @@ class GenerateDetailImageRequest(BaseModel):
     #: 参考图（v2.15，§13.3.6）：从该商品的**主图 / 详情图**里勾选，最多 5 张。
     #: 空 ⇒ 沿用旧行为（取商品首图）。**每个 URL 都要过白名单**，见类 docstring。
     reference_image_urls: list[str] = Field(default_factory=list, max_length=5)
-    #: v2.18：**生成张数**（1~4，默认 1）。用户口径「生成商品详情图功能新增一个条件，
-    #: 生成多少张图片」。⚠️ 不是所有服务商都认 `n` 参数 ⇒ 实现上**逐张发请求**
-    #: （`MAX_DETAIL_IMAGE_COUNT` 次），不依赖上游的多图能力，行为可预期。
-    count: int = Field(default=1, ge=1, le=4)
+    #: v2.18：**生成张数**（3~10，默认 3）。用户口径「生成商品详情图功能新增一个条件，
+    #: 生成多少张图片」；v2.20 改范围「最多 10 张最少 3 张」。
+    #: ⚠️ 不是所有服务商都认 `n` 参数 ⇒ 实现上**逐张发请求**
+    #: （`count` 次），不依赖上游的多图能力，行为可预期。
+    count: int = Field(default=DEFAULT_DETAIL_IMAGE_COUNT, ge=MIN_DETAIL_IMAGE_COUNT, le=MAX_DETAIL_IMAGE_COUNT)
     #: v2.19：**落盘到的素材库文件夹**（`material_folders.id`）。
     #: 用户口径「图片支持下载到本地指定的素材库中也就是本地指定文件夹下」。
     #: 不传 ⇒ 只落 AIGC 资产（旧行为不变）；传了但文件夹不属于本用户 ⇒ 404。
@@ -1067,9 +1081,6 @@ class GenerateDetailImageRequest(BaseModel):
 
 #: 生成详情图时最多送几张参考图（§13.3.6；服务商侧参考图多了会超上限）。
 MAX_DETAIL_IMAGE_REFERENCES: int = 5
-
-#: v2.18：一次最多生成几张详情图（每张 = 一次独立的上游请求，故有上限止损）。
-MAX_DETAIL_IMAGE_COUNT: int = 4
 
 
 def _default_detail_image_prompt(item: dict[str, Any], skus: list[dict[str, Any]]) -> str:
@@ -1304,9 +1315,11 @@ def generate_detail_image(
     prompt = (payload.prompt or "").strip() or _default_detail_image_prompt(
         detail.get("item") or {}, detail.get("skus") or []
     )
-    # v2.18：张数收敛到常量上限（Pydantic 的 le=4 已拦非法值，这里再夹一次 ——
+    # v2.18/v2.20：张数收敛到常量区间（Pydantic 的 ge/le 已拦非法值，这里再夹一次 ——
     # 常量改小时端点仍然安全，不依赖模型的字段约束）。
-    count = max(1, min(int(payload.count or 1), MAX_DETAIL_IMAGE_COUNT))
+    count = max(
+        MIN_DETAIL_IMAGE_COUNT, min(int(payload.count or DEFAULT_DETAIL_IMAGE_COUNT), MAX_DETAIL_IMAGE_COUNT)
+    )
 
     # v2.19（§13.3.7）：用户口径「将商品名称、商品参数信息和选择的参考图以及提示词和
     # 生成的图片要求**全部整理扔给大模型**」。用**文本/多态模型**把商品信息整理成

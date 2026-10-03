@@ -2147,16 +2147,45 @@ def test_detail_image_modal_uses_two_column_layout():
 
 
 def test_detail_image_modal_has_count_selector():
-    """v2.18：弹窗要能选**生成张数**（用户口径「新增一个条件，生成多少张图片」）。
+    """v2.18/v2.20：弹窗要能选**生成张数**，范围 **3 ~ 10**（用户口径「最多 10 张最少 3 张」）。
 
-    守三件：① 有「生成张数」标签；② `Radio.Group` 绑 `detailImageCount`；
-    ③ 张数确实传给了请求函数（不传 = 界面能选但后端永远收 1 张，最典型的假接线）。
+    守四件：① 有「生成张数」标签；② 输入控件的上下界就是 3 / 10；③ 绑 state 且可改；
+    ④ 张数确实传给了请求函数（不传 = 界面能选但后端永远收默认值，最典型的假接线）。
     """
     page = _code_only(_read(SHOP_ITEMS_PAGE))
     block = _slice_between(page, 'title="生成AI商品图"', "</Modal>")
     assert "生成张数" in block, "弹窗缺少「生成张数」条件"
-    assert "detailImageCount" in block, "张数选择器未绑定 state"
+    assert "min={3}" in block and "max={10}" in block, "张数范围不是 3~10"
+    assert "detailImageCount" in block, "张数控件未绑定 state"
     assert "setDetailImageCount" in block, "张数不可改"
+    # ④ 张数真正传进请求函数（假接线守卫：能选 ≠ 生效）
+    generate_fn = _slice_between(page, "async function generateDetailImage", "function ")
+    assert "detailImageCount" in generate_fn, "张数未传给请求函数（选了也不生效）"
+
+
+def test_detail_image_reference_groups_are_separate_blocks():
+    """v2.20：**主图 / 详情图分为两大块**，不混搭（用户口径「不要混搭在一起」）。
+
+    守三件：① 两组各自成块（`ReferenceImagePicker` 内部是带边框的卡片容器）；
+    ② 每组有**本组**全选 / 清空（且只影响本组 —— 清空按本组 url 集合过滤，不整清）；
+    ③ 组名与计数在组头（`共 N 张 · 已选 M`），而不是两行紧挨着靠小字区分。
+    """
+    page = _code_only(_read(SHOP_ITEMS_PAGE))
+    picker = _slice_between(page, "function ReferenceImagePicker", "QUEUE_POLL_INTERVAL_MS")
+    # ① 卡片容器（边框 + 圆角）
+    assert 'border: "1px solid' in picker and "borderRadius: 6" in picker, (
+        "两组未各自包成独立卡片（会看起来像同一份图的分段）"
+    )
+    # ② 组头：组名 + 本组计数 + 本组全选/清空
+    assert "共 {urls.length} 张" in picker, "组头缺少本组总数"
+    assert "已选 {pickedInGroup}" in picker, "组头缺少本组已选数（会让人误读成全局计数）"
+    assert "onSelectAll" in picker and "onClearGroup" in picker, "缺少本组全选/清空"
+    # 清空必须按**本组集合**过滤（整清 = 跨组串，正是「混搭」的另一种形态）
+    assert "group.has(u)" in page, "清空未按本组 url 集合过滤（会误清另一组）"
+    # ③ 两个 picker 调用点都传了本组回调
+    block = _slice_between(page, 'title="生成AI商品图"', "</Modal>")
+    assert block.count("onSelectAll=") == 2, "两组未各自绑定全选"
+    assert block.count("onClearGroup=") == 2, "两组未各自绑定清空"
 
 
 def test_detail_image_generate_button_requires_reference():

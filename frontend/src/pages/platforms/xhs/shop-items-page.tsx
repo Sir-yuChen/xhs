@@ -25,7 +25,6 @@ import {
   Input,
   InputNumber,
   Modal,
-  Radio,
   Row,
   Select,
   Space,
@@ -152,35 +151,71 @@ function priceText(item: XhsShopItem): string {
 }
 
 /**
- * 参考图勾选组（v2.15，设计 17 §13.3.6）。
+ * 参考图勾选组（v2.15，设计 17 §13.3.6；v2.20 改为**独立卡片块**）。
  *
  * 一行缩略图，点一张切换勾选（边框高亮表示已选）。**不引入 antd Checkbox 组** ——
  * 图的「勾选」最直观的呈现就是缩略图本身带上选中边框，加一个 checkbox 反而要在
  * 「看图」与「找勾」之间来回看。
  *
  * ⚠️ 空组不隐藏、给一行说明：用户要能分清「这个商品没有详情图」与「详情图加载失败」。
+ *
+ * ⚠️ **v2.20 用户口径「主图和详情图分为两大块，不要混搭在一起」**：
+ * 两组各自包成**带边框 + 淡背景的独立卡片**（含组名、已选计数、本组全选/清空），
+ * 而不是过去两行紧挨着、只靠一行小字区分的形态 —— 那种形态下用户容易误以为
+ * 是同一份图的两个分段，勾选时也分不清自己勾的是哪一组。
  */
 function ReferenceImagePicker({
   label,
   urls,
   selected,
   onToggle,
+  onSelectAll,
+  onClearGroup,
   emptyHint = "暂无图片",
 }: {
   label: string;
   urls: string[];
   selected: string[];
   onToggle: (url: string) => void;
+  onSelectAll: () => void;
+  onClearGroup: () => void;
   emptyHint?: string;
 }) {
+  const pickedInGroup = urls.filter((url) => selected.includes(url)).length;
   return (
-    <div>
-      {/* ⚠️ `display: block`：`Text` 渲染成 `<span>`（行内元素），与下面的图片行
-          是同级兄弟 ⇒ 不加会被排到**同一行**（标题右边挤着图片）。
-          2026-10-03 用户口径：「原商品详情图（5）标题不要和图片一行，应换行展示」。 */}
-      <Text type="secondary" style={{ fontSize: 12, display: "block" }}>
-        {label}（{urls.length}）
-      </Text>
+    <div
+      style={{
+        border: "1px solid rgba(0,0,0,0.1)",
+        borderRadius: 6,
+        padding: "8px 10px",
+        background: "rgba(0,0,0,0.015)",
+      }}
+    >
+      {/* 组头：组名 + 本组计数 + 本组全选/清空（操作**只影响本组**，不跨组串） */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+        <Text strong style={{ fontSize: 12 }}>
+          {label}
+        </Text>
+        <Text type="secondary" style={{ fontSize: 11 }}>
+          共 {urls.length} 张 · 已选 {pickedInGroup}
+        </Text>
+        {urls.length > 0 ? (
+          <span style={{ marginLeft: "auto", fontSize: 11 }}>
+            <Button type="link" size="small" style={{ padding: 0 }} onClick={onSelectAll}>
+              全选
+            </Button>
+            <Button
+              type="link"
+              size="small"
+              style={{ padding: 0, marginLeft: 8 }}
+              onClick={onClearGroup}
+              disabled={pickedInGroup === 0}
+            >
+              清空
+            </Button>
+          </span>
+        ) : null}
+      </div>
       {urls.length === 0 ? (
         <div style={{ marginTop: 4 }}>
           <Text type="secondary" style={{ fontSize: 11, display: "block" }}>
@@ -533,7 +568,7 @@ export function XhsShopItemsPage() {
   const [detailImageDetail, setDetailImageDetail] = useState<XhsShopItemDetail | null>(null);
   const [detailImageRefs, setDetailImageRefs] = useState<string[]>([]);
   /** v2.18：生成张数（1~4）。用户口径「新增一个条件，生成多少张图片」。 */
-  const [detailImageCount, setDetailImageCount] = useState(1);
+  const [detailImageCount, setDetailImageCount] = useState(3);
   const [detailImageLoading, setDetailImageLoading] = useState(false);
 
   useEffect(() => {
@@ -1059,7 +1094,7 @@ export function XhsShopItemsPage() {
     setDetailImageLoading(true);
     setDetailImageOpen(true);
     setDetailImageRefs([]); // 待详情回来后默认勾首图
-    setDetailImageCount(1); // v2.18：张数一并复位（同一条「跨商品不串」纪律）
+    setDetailImageCount(3); // v2.18：张数一并复位（同一条「跨商品不串」纪律；默认 3）
     void (async () => {
       if (!selectedAccountId) return;
       try {
@@ -2066,17 +2101,16 @@ export function XhsShopItemsPage() {
                 </Descriptions.Item>
               </Descriptions>
 
-              {/* v2.15 参考图勾选（§13.3.6）：主图 / **原商品详情图**两组，多选。
-                  不勾 ⇒ 后端沿用商品首图（旧行为不变）。 */}
+              {/* v2.15/v2.20 参考图勾选（§13.3.6）：**主图 / 原商品详情图两大块**，
+                  各自独立成卡片（组名 + 本组计数 + 本组全选/清空）。 */}
               <Spin spinning={detailImageLoading}>
-                <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                <Space direction="vertical" size={10} style={{ width: "100%" }}>
                   <Space size={6}>
                     <Text strong style={{ fontSize: 13 }}>
                       参考图
                     </Text>
                     <Text type="secondary" style={{ fontSize: 11 }}>
-                      点击缩略图勾选 · 已选 {detailImageRefs.length} 张
-                      {detailImageRefs.length === 0 ? "（不选则默认用商品首图）" : ""}
+                      必须至少勾选一张 · 共选 {detailImageRefs.length} 张
                     </Text>
                   </Space>
                   <ReferenceImagePicker
@@ -2090,6 +2124,18 @@ export function XhsShopItemsPage() {
                           : [...current, url]
                       )
                     }
+                    onSelectAll={() =>
+                      setDetailImageRefs((current) => [
+                        ...current,
+                        ...(detailImageDetail?.product_images || []).filter(
+                          (url) => !current.includes(url)
+                        ),
+                      ])
+                    }
+                    onClearGroup={() => {
+                      const group = new Set(detailImageDetail?.product_images || []);
+                      setDetailImageRefs((current) => current.filter((u) => !group.has(u)));
+                    }}
                   />
                   <ReferenceImagePicker
                     label="原商品详情图"
@@ -2102,6 +2148,18 @@ export function XhsShopItemsPage() {
                           : [...current, url]
                       )
                     }
+                    onSelectAll={() =>
+                      setDetailImageRefs((current) => [
+                        ...current,
+                        ...(detailImageDetail?.detail_images || []).filter(
+                          (url) => !current.includes(url)
+                        ),
+                      ])
+                    }
+                    onClearGroup={() => {
+                      const group = new Set(detailImageDetail?.detail_images || []);
+                      setDetailImageRefs((current) => current.filter((u) => !group.has(u)));
+                    }}
                     emptyHint="这个商品没有详情图（平台侧未提供，或还没同步到）"
                   />
                 </Space>
@@ -2130,18 +2188,24 @@ export function XhsShopItemsPage() {
                   生成张数
                 </Text>
                 <div style={{ marginTop: 4 }}>
-                  <Radio.Group
-                    value={detailImageCount}
-                    onChange={(e) => setDetailImageCount(e.target.value)}
-                    disabled={detailImageGenerating}
-                    optionType="button"
-                    buttonStyle="solid"
-                    size="small"
-                    options={[1, 2, 3, 4].map((n) => ({
-                      label: `${n} 张${n > 2 ? "（较慢）" : ""}`,
-                      value: n,
-                    }))}
-                  />
+                  <Space size={6} align="center">
+                    <InputNumber
+                      min={3}
+                      max={10}
+                      value={detailImageCount}
+                      onChange={(value) =>
+                        setDetailImageCount(
+                          Math.max(3, Math.min(10, Number(value) || 3))
+                        )
+                      }
+                      disabled={detailImageGenerating}
+                      style={{ width: 110 }}
+                      addonAfter="张"
+                    />
+                    <Text type="secondary" style={{ fontSize: 11 }}>
+                      3 ~ 10 张（每张 = 一次生成请求，张数越多越慢）
+                    </Text>
+                  </Space>
                 </div>
               </div>
             </Space>

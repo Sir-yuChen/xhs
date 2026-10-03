@@ -1500,7 +1500,7 @@ export async function generateProductDetailImage(
   itemId: string,
   prompt = "",
   referenceImageUrls: string[] = [],
-  count = 1
+  count = 3
 ): Promise<GenerateDetailImageResult> {
   const response = await http.post<GenerateDetailImageResult>(
     "/xhs/qianfan/generate-detail-image",
@@ -1512,8 +1512,8 @@ export async function generateProductDetailImage(
       // ⚠️ 这里只传**从台账勾选的** URL —— 后端会按台账白名单校验，
       // 传别的会 400（保留 SSRF 防线）。
       ...(referenceImageUrls.length ? { reference_image_urls: referenceImageUrls } : {}),
-      // v2.18：生成张数（1~4）。1 张时不传（保持旧请求体形态）。
-      ...(count > 1 ? { count } : {}),
+      // v2.18/v2.20：生成张数（3~10）。默认 3 ⇒ 总是显式传（后端默认值也随之一致）。
+      count,
     },
     // ⚠️ v2.18：张数越多耗时越长（**逐张串行请求**，每张上游 timeout 180s）
     // ⇒ 超时按张数放大，否则多图必然在前端先超时（后端还在跑，用户看到假失败）。
