@@ -74,7 +74,11 @@ def test_create_and_serialize_hides_tokens(api_client, db_factory):
     # v2.7：模型行随创建落库并回传（结构数组）
     assert [m["model_name"] for m in body["models"]] == ["deepseek-v4-flash"]
     assert body["models"][0]["model_type"] == "text"
-    assert body["models"][0]["platform"] == ["xhs"]
+    # v2.28：`platform` 由标识数组改为**引用计数**（`{"xhs": 1}`）。
+    # 入参仍是 `["xhs"]`（用户口径「使用平台」），出参是计数 —— 计数 = 业务点引用个数。
+    assert body["models"][0]["platform"] == {"xhs": 1}
+    # 同步下发的键列表（前端渲染用），顺序稳定
+    assert body["models"][0]["platforms"] == ["xhs"]
 
     # 库里是加密文本，不是明文
     with db_factory() as db:

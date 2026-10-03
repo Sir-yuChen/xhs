@@ -687,6 +687,37 @@ export function XhsShopItemsPage() {
   const [detailImageOpen, setDetailImageOpen] = useState(false);
   const [detailImageItem, setDetailImageItem] = useState<XhsShopItem | null>(null);
   const [detailImageGenerating, setDetailImageGenerating] = useState(false);
+  /**
+   * v2.28：**生成耗时**（用户口径「弹窗加蒙版并统计耗时，防止被关闭」）。
+   *
+   * ⚠️ 为什么要有它：出图是**逐张串行**的真上游调用（实测单张 29–96 秒，
+   * 10 张可能十几分钟）。此前只有一个转圈，用户既不知道「跑了多久」、
+   * 也不知道「还要多久」—— 而弹窗**随时可关**，关掉就看不到结果了。
+   *
+   * `null` = 未在生成；数字 = 起始时间戳（`Date.now()`）。
+   */
+  /**
+   * v2.28：弹窗标题。生成中**追加耗时**（用户口径「统计耗时」）——
+   * 但基础文案 `"生成AI商品图"` 保持不变（它是页面守卫切范围的锚点）。
+   */
+  const detailImageTitle = detailImageGenerating
+    ? `生成AI商品图 · 生成中 ${detailImageElapsed}s（请勿关闭，关闭会看不到结果）`
+    : "生成AI商品图";
+  const [detailImageStartedAt, setDetailImageStartedAt] = useState<number | null>(null);
+  //: 每 500ms 刷一次的「已耗时（秒）」——只为显示，不参与判据。
+  const [detailImageElapsed, setDetailImageElapsed] = useState(0);
+
+  useEffect(() => {
+    if (detailImageStartedAt === null) {
+      setDetailImageElapsed(0);
+      return;
+    }
+    setDetailImageElapsed(Math.floor((Date.now() - detailImageStartedAt) / 1000));
+    const timer = window.setInterval(() => {
+      setDetailImageElapsed(Math.floor((Date.now() - detailImageStartedAt) / 1000));
+    }, 500);
+    return () => window.clearInterval(timer);
+  }, [detailImageStartedAt]);
   const [detailImage, setDetailImage] = useState<GenerateDetailImageResult | null>(null);
   // v2.15：商品图集（主图 / 原详情图）与勾选的参考图。
   const [detailImageDetail, setDetailImageDetail] = useState<XhsShopItemDetail | null>(null);
@@ -1299,6 +1330,7 @@ export function XhsShopItemsPage() {
   async function generateDetailImage(regenerate?: { group: string; index: number }) {
     if (!selectedAccountId || !detailImageItem) return;
     setDetailImageGenerating(true);
+    setDetailImageStartedAt(Date.now()); // v2.28：开始计时（弹窗里显示已耗时）
     // v2.21：记住重做目标（只让**那一张**转圈，不整组变灰 —— 用户要能看出在重做哪张）。
     setDetailImageRegenerating(regenerate || null);
     try {
@@ -1347,6 +1379,7 @@ export function XhsShopItemsPage() {
       message.error(error instanceof Error ? error.message : "生成商品AI图失败");
     } finally {
       setDetailImageGenerating(false);
+      setDetailImageStartedAt(null); // v2.28：停表
       setDetailImageRegenerating(null);
     }
   }
@@ -2295,12 +2328,23 @@ export function XhsShopItemsPage() {
           `Row/Col` 而非 `flex`：与全站栅格口径一致（窄视口自动折行单列）。 */}
       <Modal
         open={detailImageOpen}
-        title="生成AI商品图"
+        // v2.28：生成中**禁止关闭**（用户口径「弹窗加蒙版并统计耗时，防止被关闭」）。
+        // ⚠️ 出图是逐张串行的真上游调用（实测单张 29–96 秒）—— 关掉弹窗不会取消后端
+        //    请求，只是让用户看不到结果、白等一场（还可能重复点一次、白烧额度）。
+        //    `closable={false}` 去掉右上角 ×；`maskClosable={false}` 挡住点蒙版关；
+        //    footer 的「关闭」按钮在生成中禁用 —— **三个口子全堵**。
+        closable={!detailImageGenerating}
+        maskClosable={!detailImageGenerating}
+        title={detailImageTitle}
+        data-generating={detailImageGenerating ? "1" : "0"}
         width="75vw"
-        onCancel={() => setDetailImageOpen(false)}
+        onCancel={() => {
+          if (detailImageGenerating) return; // 兜底：键盘 Esc 也走这里
+          setDetailImageOpen(false);
+        }}
         footer={
           <Space>
-            <Button onClick={() => setDetailImageOpen(false)}>关闭</Button>
+            <Button onClick={() => setDetailImageOpen(false)} disabled={detailImageGenerating}>关闭</Button>
             {/* v2.19：**必须勾选原始参考图**才能生成（用户口径「必须选择原始参考图才可以
                 点击生成按钮」）。禁用态给出原因（Tooltip），不让用户对着灰按钮猜。
                 ⚠️ 只按**当前 Tab** 的勾选判断 —— 各 Tab 独立配置，按钮语义也是各自的。 */}
@@ -2323,6 +2367,32 @@ export function XhsShopItemsPage() {
           </Space>
         }
       >
+        {/* v2.28：**生成中蒙版**（用户口径「点击生成图按钮后，弹窗加蒙版并统计耗时，
+            防止被关闭」）。
+            ⚠️ 蒙版只盖**配置区**（商品信息 + 三个 Tab），**结果区不盖** ——
+            用户要能看见新图一张张出来（盖住结果等于把「在跑」变成「黑屏」）。
+            `pointerEvents: none` 是有意的：蒙版是「别改了」的视觉提示，
+            真正的门禁是各控件的 `disabled={detailImageGenerating}`（已在位）。 */}
+        {detailImageGenerating && (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              padding: "8px 12px",
+              marginBottom: 12,
+              borderRadius: 6,
+              background: "rgba(0,0,0,0.04)",
+              border: "1px solid rgba(0,0,0,0.08)",
+            }}
+          >
+            <Spin size="small" />
+            <Text strong>正在出图… 已耗时 {detailImageElapsed} 秒</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              逐张串行调用上游，单张约 30–100 秒；生成期间弹窗不可关闭（关闭会看不到结果）
+            </Text>
+          </div>
+        )}
         <Descriptions size="small" column={2} style={{ marginBottom: 12 }}>
           <Descriptions.Item label="商品">
             {detailImageItem?.title || detailImageItem?.item_id || "-"}

@@ -31,8 +31,13 @@ export interface GatewayModelRow {
   id?: number;
   model_name: string;
   model_type?: string;
-  /** v2.9：多值（一个模型可被多个平台共用）；旧数据单值时后端已归一成数组。 */
-  platform?: string[] | null;
+  /**
+   * v2.28：**引用计数**（`{"xhs": 2}` = xhs 下有 2 个业务点在用这个模型）。
+   * 取代 v2.9 的 `string[]`；后端 `_parse_platforms` 宽入（旧数组 ⇒ `{"xhs": 1}`）。
+   */
+  platform?: Record<string, number> | null;
+  /** v2.28：`platform` 的键列表（后端同步下发，渲染直接用）。 */
+  platforms?: string[] | null;
   enabled?: boolean;
   /** 备注（后端字段早已存在；子表「备注」列展示，缺值不造假 ⇒ 空串）。 */
   remark?: string;
@@ -65,8 +70,13 @@ export type GatewayTreeRow<S extends GatewayTreeSource = GatewayTreeSource> =
       modelId: number | null;
       model: string;
       modelType: string;
-      /** v2.9：多值平台数组（已剥空值；无平台 = 空数组）。 */
+      /** v2.28：平台标识列表（已剥空值；**计数为 0 的已由后端丢弃**）。 */
       platforms: string[];
+      /**
+       * v2.28：平台 → **使用次数**（`{"xhs": 2}` = xhs 下 2 个业务点在用）。
+       * 渲染「xhs × 2」用；缺值 = `{}`（不造假）。
+       */
+      platformCounts: Record<string, number>;
       enabled: boolean;
       /** 备注（空串 = 无；子表按缺值口径渲染 `-`）。 */
       remark: string;
@@ -102,7 +112,23 @@ export function buildGatewayTree<S extends GatewayTreeSource>(gateways: S[]): Ga
       modelId: m.id ?? null,
       model: m.model_name,
       modelType: m.model_type ?? "",
-      platforms: (m.platform ?? []).filter(Boolean),
+      // v2.28 宽入（§13.2.9.7c）：`platform` 是**引用计数** `{"xhs": 2}`；旧形态
+      // 是数组 `["xhs"]` ⇒ 一律归一到「只保留计数 > 0 的键」。
+      // ⚠️ **不能只 `.filter(Boolean)`**：对象形态下那会把整个计数对象当成一个真值元素
+      // （渲染出一个 `[object Object]` 标签）—— 类型变更后最典型的静默退化。
+      ...(() => {
+        const raw: unknown = m.platform;
+        const counts: Record<string, number> = {};
+        if (Array.isArray(raw)) {
+          for (const item of raw) if (item) counts[String(item)] = 1;
+        } else if (raw && typeof raw === "object") {
+          for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+            const n = Number(value);
+            if (key && Number.isFinite(n) && n > 0) counts[key] = n;
+          }
+        }
+        return { platforms: Object.keys(counts), platformCounts: counts };
+      })(),
       enabled: m.enabled ?? true,
       remark: m.remark ?? "",
       // v2.10：模型级健康两字段**原样带回**（缺值不造假：未探测就是 false + null，

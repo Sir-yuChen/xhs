@@ -2138,7 +2138,7 @@ def test_detail_image_modal_uses_tabs_for_groups():
     ⑤ 每组的状态**按组存**（`detailImageGroupConfigs`），不是共用一份。
     """
     page = _code_only(_read(SHOP_ITEMS_PAGE))
-    block = _slice_between(page, 'title="生成AI商品图"', "</Modal>")
+    block = _slice_between(page, "open={detailImageOpen}", "</Modal>")
     assert 'width="75vw"' in block, "弹窗宽度不是「全屏 75%」（用户口径）"
     assert "<Tabs" in block, "未使用 Tab 拆分"
     assert "detailImageGroupTabs" in block, "Tab 未由组清单驱动（会写死两份）"
@@ -2156,7 +2156,7 @@ def test_detail_image_modal_has_count_selector():
     ④ 张数确实传给了请求函数（不传 = 界面能选但后端永远收默认值，最典型的假接线）。
     """
     page = _code_only(_read(SHOP_ITEMS_PAGE))
-    block = _slice_between(page, 'title="生成AI商品图"', "</Modal>")
+    block = _slice_between(page, "open={detailImageOpen}", "</Modal>")
     assert "生成张数" in block, "弹窗缺少「生成张数」条件"
     assert "min={3}" in block and "max={10}" in block, "张数范围不是 3~10"
     # v2.22：张数**按组**存（每组自己的张数），不再是一个全局 state
@@ -2190,7 +2190,7 @@ def test_detail_image_reference_groups_are_separate_blocks():
     # ⚠️ v2.23：主图与详情图**合并为一组**后，不再有「按本组过滤」的问题
     # （旧断言 `group.has(u)` 是两卡片时代的产物，随合并一并退场）。
     # ③ 两个 picker 调用点都传了本组回调（v2.23：每组 Tab 里都列**全部**两组图）
-    block = _slice_between(page, 'title="生成AI商品图"', "</Modal>")
+    block = _slice_between(page, "open={detailImageOpen}", "</Modal>")
     # v2.23：合并成一组 ⇒ 一个 picker、一个清空；且不再有「全选」
     assert block.count('label="可选参考图"') == 1, "参考图应只有一组（合并后）"
     assert "onSelectAll" not in block, "「全选」应已移除"
@@ -2209,7 +2209,7 @@ def test_detail_image_reference_section_is_optional_reference():
     ③ 两类都在**同一个 Tab 内**列出（不是各 Tab 一半）。
     """
     page = _code_only(_read(SHOP_ITEMS_PAGE))
-    block = _slice_between(page, 'title="生成AI商品图"', "</Modal>")
+    block = _slice_between(page, "open={detailImageOpen}", "</Modal>")
     # v2.23：主图与详情图**合并为一组「可选参考图」**（用户口径「放一组内」）
     assert 'label="可选参考图"' in block, "参考图未合并为「可选参考图」一组"
     assert "maxSelectable={6}" in block, "参考图未设 6 张上限（用户口径「最多选 6 张」）"
@@ -2253,7 +2253,7 @@ def test_detail_image_supports_single_regenerate():
     assert "regenerating?.group === groupKey" in result, "重做态未用于单张 loading"
     # 传的是该张的组与序号（不是写死的）
     assert "onRegenerate(asset.group_index || 1)" in result, "重做未带上该张的序号（会重错图）"
-    block = _slice_between(page, 'title="生成AI商品图"', "</Modal>")
+    block = _slice_between(page, "open={detailImageOpen}", "</Modal>")
     # 传的是 **本 Tab 的组** + 该张序号（不是写死的）
     assert "group: tab.key" in block, "重做未带上当前组"
     assert "void generateDetailImage({ group: tab.key, index })" in block, (
@@ -2274,7 +2274,7 @@ def test_detail_image_generate_button_requires_reference():
     不让用户对着灰按钮猜；③ 张数确实传给了请求函数（能选 ≠ 生效，最典型的假接线）。
     """
     page = _code_only(_read(SHOP_ITEMS_PAGE))
-    block = _slice_between(page, 'title="生成AI商品图"', "</Modal>")
+    block = _slice_between(page, "open={detailImageOpen}", "</Modal>")
     # v2.22：按**当前 Tab** 的勾选判断（各 Tab 独立配置 ⇒ 按钮语义也是各自的）
     assert "activeGroupRefs.length === 0" in block, "生成按钮未与参考图勾选挂钩"
     assert "disabled={" in block, "生成按钮缺少禁用态"
@@ -3281,7 +3281,7 @@ def test_detail_image_uses_public_prompt_templates():
     ⑤ 请求函数真的把 `template_id` / `group_templates` 放进 body。
     """
     page = _code_only(_read(SHOP_ITEMS_PAGE))
-    block = _slice_between(page, 'title="生成AI商品图"', "</Modal>")
+    block = _slice_between(page, "open={detailImageOpen}", "</Modal>")
 
     # ① 下拉存在
     #    ⚠️ 锚点必须是**下拉自身**的 JSX，不能只查「提示词模板」这四个字 ——
@@ -3382,3 +3382,41 @@ def test_video_prompt_uses_public_templates():
     assert "prompt: values.video_prompt" in modal, (
         "选了模板就把手输裁掉了 —— 后端拿不到补充要求"
     )
+
+
+def test_detail_image_modal_is_masked_and_timed_while_generating():
+    """v2.28：生成中**加蒙版 + 统计耗时 + 防止被关闭**（用户口径原文）。
+
+    > 「点击生成图按钮后，弹窗加蒙版并统计耗时，防止被关闭」
+
+    为什么要三条一起守（少一条用户就还是会被关掉/白等）：
+      * 出图是**逐张串行**的真上游调用（实测单张 29–96 秒，10 张可十几分钟）；
+      * 关掉弹窗**不会取消后端请求** —— 只是让用户看不到结果，还可能重复点一次白烧额度。
+
+    守五件：
+    ① 生成中 `closable={false}`（右上角 × 消失）；
+    ② 生成中 `maskClosable={false}`（点蒙版不关）；
+    ③ footer「关闭」按钮生成中 `disabled`；
+    ④ `onCancel` 里有生成中直接 return 的兜底（**键盘 Esc 也走这里** —— 只去掉 ×
+       是挡不住 Esc 的，这一条最容易被漏）；
+    ⑤ 标题/蒙版条显示**已耗时秒数**，且计时**有起有止**（不置 null 会一直跳）。
+    """
+    page = _code_only(_read(SHOP_ITEMS_PAGE))
+
+    # ① ②
+    assert "closable={!detailImageGenerating}" in page, "生成中仍可点右上角 × 关闭"
+    assert "maskClosable={!detailImageGenerating}" in page, "生成中仍可点蒙版关闭"
+    # ③
+    assert 'disabled={detailImageGenerating}>关闭</Button>' in page, (
+        "生成中 footer 的「关闭」按钮没禁用"
+    )
+    # ④ onCancel 兜底（Esc）
+    on_cancel = _slice_between(page, "onCancel={() => {", "}}")
+    assert "if (detailImageGenerating) return;" in on_cancel, (
+        "onCancel 没挡住生成中的关闭（键盘 Esc 会绕过 × 与蒙版）"
+    )
+    # ⑤ 耗时：显示 + 起止
+    assert "detailImageElapsed" in page, "没有显示已耗时"
+    assert "setDetailImageStartedAt(Date.now())" in page, "生成开始时没打时间戳"
+    # 停表那一句在**生成函数**的 `finally` 里（不在 Modal JSX 内）⇒ 查 `page` 全文。
+    assert page.count("setDetailImageStartedAt(null)") >= 1, "计时没有在结束时停表（会一直跳）"

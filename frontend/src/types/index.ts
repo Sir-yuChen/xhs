@@ -1126,11 +1126,21 @@ export type LlmGatewayModelRow = {
   model_name: string;
   model_type: ModelType | "";
   /**
-   * ⚠️ **v2.9 类型变更**：由 `string`（单值）改为 `string[]`（多值）——
-   * 一个模型可被**多个平台共用**（用户口径「多平台共用同一模型」）。
-   * 出参恒为数组（后端 `_parse_platforms` 归一，旧单值也包成 `["xhs"]`）。
+   * ⚠️ **v2.28 类型变更**：由 `string[]`（平台标识数组）改为**引用计数**——
+   * `{"xhs": 2}` 表示「xhs 平台下有 2 个业务点正在用这个模型」。
+   *
+   * 用户口径（2026-10-03 原话）：
+   * > 「所有使用平台字段应该存储为 **json，平台标识和使用次数**，当使用次数被减到为 0 时
+   * > ……该平台可以被移除」。
+   *
+   * 出参恒为对象（后端 `_parse_platforms` 宽入：旧数组 `["xhs"]` ⇒ `{"xhs": 1}`）。
    */
-  platform: string[];
+  platform: Record<string, number>;
+  /**
+   * v2.28：`platform` 的**键列表**（后端同步下发）—— 渲染直接用，避免前端到处 `.Object.keys`。
+   * 计数归 0 的平台**不出现在这里**（后端已丢弃）。
+   */
+  platforms: string[];
   enabled: boolean;
   remark?: string;
   /**

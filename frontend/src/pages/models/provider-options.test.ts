@@ -17,7 +17,7 @@ import {
 
 /** 造一个模型行（v2.7/v2.8：服务商下的模型是结构数组，不是字符串数组；v2.9：platform 多值）。 */
 function row(model_name: string, model_type = "text", enabled = true) {
-  return { model_name, model_type, platform: ["xhs"], enabled };
+  return { model_name, model_type, platform: { xhs: 1 }, enabled };
 }
 
 /**

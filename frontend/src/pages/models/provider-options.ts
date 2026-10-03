@@ -17,12 +17,18 @@ export type ProviderCandidate = {
    * 不再是上游候选池 —— 候选池搬到了 `catalog: string[]`。
    * 「无模型目录」判据改看它（服务商下没有可用模型行 = ② 步选不出模型）。
    *
-   * ⚠️ **v2.9**：`platform` 由单值改为 `string[]`（一个模型可被多个平台共用）。
-   * 本模块只用 `model_name` / `enabled` 判「有无可用模型」，平台不参与判定 ——
+   * ⚠️ **v2.9**：`platform` 由单值改为多值。
+   * ⚠️ **v2.28**：再改为**引用计数** `Record<string, number>`（`{"xhs": 2}`）。
+   * 本模块只用 `model_name` / `enabled` 判「有无可用模型」，平台**不参与判定** ——
    * 但类型要与后端出参（`LlmGatewayModelRow`）对齐，否则传进来就类型不兼容。
    */
   models:
-    | { model_name: string; model_type?: string; platform?: string[] | null; enabled?: boolean }[]
+    | {
+        model_name: string;
+        model_type?: string;
+        platform?: Record<string, number> | null;
+        enabled?: boolean;
+      }[]
     | null
     | undefined;
 };

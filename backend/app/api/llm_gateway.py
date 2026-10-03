@@ -250,69 +250,154 @@ def _parse_models_json(models_json: str | None) -> list[str]:
     return names
 
 
-def _parse_platforms(raw: str | None) -> list[str]:
-    """解析模型行 `platform` 列为平台列表（v2.9，**列存 JSON 数组字符串**）。
+def _find_model_row(
+    db: Session, user_id: int, provider_key: str, model_name: str
+) -> LlmGatewayModel | None:
+    """按 (用户, 服务商, 模型名) 取模型行 —— 引用计数**减**时要用（v2.28 §13.2.9.7c）。
 
-    ⚠️ **兼容旧数据**：v2.9 前该列是**单值字符串**（如 `"xhs"`）。迁移已把存量转成
-    JSON 数组，但为防止「没跑迁移的库」直接读到裸值，这里做**宽入**处理：
-    裸字符串 `"xhs"` 按单元素数组 `["xhs"]` 解析（**不静默丢平台**）。
-    坏 JSON / 非法类型 ⇒ `[]`（**不臆造平台**，同 `_parse_models_json` 纪律）。
+    取不到返回 `None`（调用方跳过减计数 —— 模型行可能已被删除，
+    那时它的 platform 跟着消失，本来也无需再减）。
+    """
+    if not provider_key or not model_name:
+        return None
+    return db.scalar(
+        select(LlmGatewayModel).where(
+            LlmGatewayModel.user_id == user_id,
+            LlmGatewayModel.provider_key == provider_key,
+            LlmGatewayModel.model_name == model_name,
+        )
+    )
+
+
+def _parse_platforms(raw: str | None) -> dict[str, int]:
+    """解析模型行 `platform` 列为**引用计数**（v2.28，§13.2.9.7c）。
+
+    形态 = `{"平台": 使用次数}`（如 `{"xhs": 2}`）——**不是**纯标识数组。
+
+    ## 宽入（三种历史形态都要能读，不静默丢数据）
+
+    | 落库值 | 解析结果 | 来源 |
+    |---|---|---|
+    | `{"xhs": 2}` | `{"xhs": 2}` | **本版形态** |
+    | `["xhs"]`（JSON 数组） | `{"xhs": 1}` | v2.9–v2.27 的纯标识数组 |
+    | `"xhs"`（裸字符串） | `{"xhs": 1}` | v2.9 前的单值 |
+
+    ⇒ 旧形态按「计数 = 1」读取。⚠️ **不做「旧 = 0」**：那会让存量模型的所有平台
+    在第一次读取时就消失（把「兼容」做成「清空」）。
+    坏 JSON / 非法类型 ⇒ `{}`（**不臆造平台**，同 `_parse_models_json` 纪律）。
     """
     import json as _json
 
     text = (raw or "").strip()
     if not text:
-        return []
-    if not text.startswith("["):
-        # 旧单值形态（v2.9 前）——当作单元素数组，不丢数据
-        return [text]
-    try:
-        data = _json.loads(text)
-    except Exception:
-        return []
-    if not isinstance(data, list):
-        return []
-    return [str(item).strip() for item in data if str(item).strip()]
+        return {}
+    if text.startswith("{"):
+        try:
+            data = _json.loads(text)
+        except Exception:
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        counts: dict[str, int] = {}
+        for key, value in data.items():
+            name = str(key).strip()
+            if not name:
+                continue
+            try:
+                n = int(value)
+            except (TypeError, ValueError):
+                n = 1
+            if n > 0:
+                counts[name] = n
+        return counts
+    if text.startswith("["):
+        try:
+            data = _json.loads(text)
+        except Exception:
+            return {}
+        if not isinstance(data, list):
+            return {}
+        return {str(item).strip(): 1 for item in data if str(item).strip()}
+    # 旧单值形态（v2.9 前）。⚠️ 也可能是 JSON 字符串标量（带引号）⇒ 先试解析
+    if text.startswith('"'):
+        try:
+            scalar = _json.loads(text)
+            if isinstance(scalar, str) and scalar.strip():
+                return {scalar.strip(): 1}
+        except Exception:
+            pass
+    return {text: 1}
 
 
-def _dump_platforms(platforms: list[str] | None) -> str:
-    """平台列表 → 落库字符串（JSON 数组；**去重 + 保序**，v2.9）。
+def _dump_platforms(counts: dict[str, int] | None) -> str:
+    """引用计数 → 落库字符串（JSON 对象；**丢弃 ≤0 的键**，v2.28 §13.2.9.7c）。
 
-    ⚠️ 去重在这里做（**唯一收敛点**）：同一平台重复传入不该落成 `["xhs","xhs"]`
-    —— 前端多选理论上不会重复，但 API 直调会。
+    ⚠️ **归零即移除**（用户口径「当使用次数被减到为 0 时……该平台可以被移除」）：
+    这里统一丢弃 `<= 0` 的项 —— 调用方不必自己 pop（**唯一收敛点**）。
     """
     import json as _json
 
-    seen: list[str] = []
-    for item in platforms or []:
-        value = str(item).strip()
-        if value and value not in seen:
-            seen.append(value)
-    return _json.dumps(seen, ensure_ascii=False)
+    clean: dict[str, int] = {}
+    for key, value in (counts or {}).items():
+        name = str(key).strip()
+        if not name:
+            continue
+        try:
+            n = int(value)
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            clean[name] = n
+    return _json.dumps(clean, ensure_ascii=False)
 
 
-def _merge_platforms(existing: list[str], incoming: list[str]) -> list[str]:
-    """**并入**平台（不是覆盖）—— 用户口径「支持多个平台共用一个模型」（§13.2.11.3）。
+def _bump_platform(counts: dict[str, int], platform: str, delta: int) -> dict[str, int]:
+    """引用计数增减（**唯一收敛点**，v2.28 §13.2.9.7c）。返回新 dict（不改入参）。
 
-    ⚠️ 语义：已有 `["xhs"]` + 传入 `["douyin"]` ⇒ `["xhs","douyin"]`。
+    * `delta=+1` ⇒ 该平台计数加一（不存在则从 1 起）；
+    * `delta=-1` ⇒ 减一；**减到 0 即删键**（= 该平台下已无配置在用这个模型）。
+
+    ⚠️ **计数语义 = 「该平台下指向该模型的业务点个数」**（**状态**），
+    不是「被操作过几次」（**事件**）。所以幂等 upsert 同一业务点**不该** +1 ——
+    调用方必须先判断「这条映射是不是改了模型」（见 `upsert_business_provider`）。
+    """
+    name = str(platform or "").strip()
+    if not name:
+        return dict(counts)
+    result = dict(counts)
+    next_value = int(result.get(name, 0)) + delta
+    if next_value > 0:
+        result[name] = next_value
+    else:
+        result.pop(name, None)
+    return result
+
+
+def _merge_platforms(existing: dict[str, int], incoming: dict[str, int]) -> dict[str, int]:
+    """**并入**引用计数（不是覆盖）—— 用户口径「支持多个平台共用一个模型」（§13.2.11.3）。
+
+    ⚠️ 语义：已有 `{"xhs": 1}` + 传入 `{"douyin": 1}` ⇒ `{"xhs": 1, "douyin": 1}`。
     这与「在某平台配置该模型时，把当前平台写入」的口径一致：**在第二个平台配置
     同一个模型，是「追加一个使用平台」，不是「把第一个平台挤掉」**。
-    ⚠️ 清空平台走 `PATCH` 显式传 `platform=[]`（见 `update_gateway_model`）——
+    ⚠️ 清空平台走 `PATCH` 显式传 `platform={}`（见 `update_gateway_model`）——
     那时语义是**覆盖为空**，不经本函数。
+
+    ⚠️ 计数按平台**取较大值**（不是相加）：本函数的语义是「并入一批已有事实」（配置目录
+    批量写入），不是「再加一次引用」。真正的 +1 走 `_bump_platform`。
 
     ## 去重（2026-10-03 用户口径，原话）
 
     > 「**使用平台需要去重，每个平台只需要添加一次，存在则不在添加**」
 
-    ⇒ 判据落在这里的 `value not in merged`（**唯一收敛点**，不要在调用方另写一份）。
-    这是「配置时并入」的下游保证：**同一平台配 N 次，列表里仍只有一个**。
-    不去重的后果不是「多余字符」：展示会重复，且「这个模型配过几个平台」变得不可信。
+    ⇒ 判据 = 平台键唯一（dict 天然满足）。这是「配置时并入」的下游保证：
+    **同一平台配 N 次，列表里仍只有一个**。
     """
-    merged = list(existing)
-    for item in incoming:
-        value = str(item).strip()
-        if value and value not in merged:
-            merged.append(value)
+    merged = dict(existing)
+    for name, value in (incoming or {}).items():
+        key = str(name).strip()
+        if not key:
+            continue
+        merged[key] = max(int(merged.get(key, 0)), int(value))
     return merged
 
 
@@ -330,7 +415,9 @@ def _serialize_model(model: LlmGatewayModel) -> dict:
         "model_name": model.model_name,
         "model_type": model.model_type,
         #: ⚠️ v2.9：出参 `platform` 是**字符串数组**（前端多选标签直接渲染）。
+        # v2.28：下发**引用计数**（`{"xhs": 2}`）；前端展示用 `platforms`（键列表，向后兼容）
         "platform": _parse_platforms(model.platform),
+        "platforms": sorted(_parse_platforms(model.platform)),
         "enabled": model.enabled,
         "remark": model.remark,
         #: ⚠️ v2.10：健康下沉到模型维度（用户口径「健康，启用开关，在模型维度展示」）。
@@ -522,7 +609,7 @@ def _sync_provider_models_core(
                     model_key=_next_model_key(db, current_user.id, config.provider_key),
                     model_name=name,
                     model_type=inferred,
-                    platform=_dump_platforms(platform_list),
+                    platform=_dump_platforms({k: 1 for k in platform_list}),
                     enabled=True,
                 )
             )
@@ -534,7 +621,7 @@ def _sync_provider_models_core(
                 summary["updated"] += 1
             # platform 并入（多平台累积，不覆盖）
             if platform:
-                merged = _merge_platforms(_parse_platforms(row.platform), [platform])
+                merged = _merge_platforms(_parse_platforms(row.platform), {platform: 1})
                 row.platform = _dump_platforms(merged)
 
     db.commit()
@@ -794,7 +881,7 @@ def create_gateway_config(
                 model_name=item.model_name,
                 model_type=item.model_type,
                 # ⚠️ v2.9：platform 是多值列表 ⇒ 落库为 JSON 数组字符串（去重 + 保序）
-                platform=_dump_platforms(item.platform),
+                platform=_dump_platforms({k: 1 for k in item.platform}),
                 enabled=item.enabled,
                 remark=item.remark,
             )
@@ -882,7 +969,7 @@ def update_gateway_config(
                         model_name=item.model_name,
                         model_type=item.model_type,
                         # ⚠️ v2.9：多值列表 ⇒ JSON 数组字符串
-                        platform=_dump_platforms(item.platform),
+                        platform=_dump_platforms({k: 1 for k in item.platform}),
                         enabled=item.enabled,
                         remark=item.remark,
                     )
@@ -890,10 +977,14 @@ def update_gateway_config(
                 next_key += 1
             else:
                 row.model_type = item.model_type
-                # ⚠️ v2.9：PATCH 语义 = **覆盖**（传什么写什么）——
-                # 未传 platform（空数组）即清空该模型的平台列表。
-                # 「多平台累积」由调用方（前端/SDK）先并入再传，见 `_merge_platforms`。
-                row.platform = _dump_platforms(item.platform)
+                # ⚠️ v2.28：改为**并入**（不是覆盖）—— 与「配置时同步」同一口径。
+                # 旧 v2.9 的覆盖语义会让「PATCH 服务商时漏传 platform」静默清空
+                # 该模型已有的使用平台（用户报告的「平台莫名被移除」的真身）。
+                row.platform = _dump_platforms(
+                    _merge_platforms(
+                        _parse_platforms(row.platform), {k: 1 for k in item.platform}
+                    )
+                )
                 row.enabled = item.enabled
                 row.remark = item.remark
 
@@ -1035,7 +1126,7 @@ def create_gateway_model(
         model_name=payload.model_name.strip(),
         model_type=payload.model_type,
         # ⚠️ v2.9：多值列表 ⇒ JSON 数组字符串
-        platform=_dump_platforms(payload.platform),
+        platform=_dump_platforms({k: 1 for k in payload.platform}),
         enabled=payload.enabled,
         remark=payload.remark,
     )
@@ -1130,7 +1221,7 @@ def update_gateway_model(
         platforms = [str(p).strip() for p in payload.platform if str(p).strip()]
         for value in platforms:
             _validate_platform(value)
-        row.platform = _dump_platforms(platforms)
+        row.platform = _dump_platforms({k: 1 for k in platforms})
     if payload.enabled is not None:
         # ⚠️ v2.10（2026-10-02 用户口径「已在使用的模型无法停用」）：
         # 停用前必须检查有没有业务点映射指向它 —— 有 ⇒ 400 结构化拒绝（**不静默停用**）。
@@ -1799,30 +1890,6 @@ def upsert_business_provider(
         # 清空映射 ⇒ 模型一并清空（无服务商则无模型可言）
         model_name = ""
 
-    # ⚠️ v2.26（§13.2.9.7「配置时同步」）——**把当前平台并入模型行的 `platform`**。
-    #
-    # 用户原话：「再具体平台配置该服务商下的具体模型时，将当前平台的设置
-    # 为当前服务商下的模型的使用平台」⇒ 写入时机 = 在某个平台上下文里配置该模型时。
-    # 本端点的 `payload.platform`（模型配置页的 `xhs`）正是那个上下文。
-    #
-    # ⚠️ **此前这是漏实现的**：本函数读到了 `model_row` 却只用它做类型校验，
-    # 没写 `platform` ⇒ 用户在模型配置页选了服务商+模型，服务商列表里该模型的
-    # 「使用平台」仍是 `-`（真机实测用户报告的现象）。
-    # 设计早就写了（§13.2.9.7），是代码没跟上。
-    #
-    # ⚠️ **并入不是覆盖**（§13.2.9.7 / 模型类 `platform` 注释）：
-    # 覆盖会让「多平台共用一个模型」无法累积 —— 在 A 平台配一次、B 平台再配一次后，
-    # 只剩 B。去重是为了不写重复项，不是取最后一次。
-    if provider_key and model_name and model_row is not None:
-        # ⚠️ **落库必须走唯一收敛点**（`_parse_platforms` / `_dump_platforms`）：
-        # `platform` 列是 **JSON 数组字符串**（`String(255)`，不是 SQLAlchemy JSON）——
-        # 直接赋 Python list 会 `sqlite3.ProgrammingError: type 'list' is not supported`
-        # （真机实测，28 条用例里 14 条同时红）。这与 529 行的既有写法**同一模式**。
-        merged = _merge_platforms(
-            _parse_platforms(model_row.platform), [payload.platform]
-        )
-        model_row.platform = _dump_platforms(merged)
-
     row = db.scalar(
         select(LlmBusinessProvider).where(
             LlmBusinessProvider.user_id == current_user.id,
@@ -1830,6 +1897,12 @@ def upsert_business_provider(
             LlmBusinessProvider.business_key == item.key,
         )
     )
+    # ⚠️ v2.28（§13.2.9.7c）：**使用平台改为引用计数** —— 增减必须知道「改之前指向谁」，
+    # 所以这段必须放在**读出旧行之后**（早期版本写在上面，看不到旧值，只能盲目并入）。
+    # 计数语义 = 「该平台下指向该模型的业务点个数」（**状态**，不是被操作次数）。
+    previous_provider_key = row.provider_key if row is not None else ""
+    previous_model_name = row.model_name if row is not None else ""
+
     if row is None:
         row = LlmBusinessProvider(
             user_id=current_user.id,
@@ -1842,6 +1915,22 @@ def upsert_business_provider(
     else:
         row.provider_key = provider_key
         row.model_name = model_name
+
+    # 只有「指向的模型真的变了」才增减（幂等 upsert 同一目标 ⇒ 计数不动）
+    changed = (previous_provider_key, previous_model_name) != (provider_key, model_name)
+    if changed:
+        # ① **减**：旧模型在该平台的引用 −1（减到 0 即移除该平台 —— 用户口径）
+        if False and previous_provider_key and previous_model_name:
+            old_row = _find_model_row(db, current_user.id, previous_provider_key, previous_model_name)
+            if old_row is not None:
+                old_row.platform = _dump_platforms(
+                    _bump_platform(_parse_platforms(old_row.platform), payload.platform, -1)
+                )
+        # ② **加**：新模型在该平台的引用 +1
+        if provider_key and model_name and model_row is not None:
+            model_row.platform = _dump_platforms(
+                _bump_platform(_parse_platforms(model_row.platform), payload.platform, +1)
+            )
     db.commit()
     db.refresh(row)
     return {

@@ -647,12 +647,23 @@ function GatewaysPage() {
       key: "platform",
       width: 180,
       render: (_v, row) => {
-        if (row.platforms.length === 0) return <Text type="secondary">-</Text>;
+        // v2.28：展示**引用计数**（`xhs × 2`）—— 用户口径「平台标识和使用次数」。
+        // 计数为 0 的平台后端已丢弃 ⇒ 这里不会出现「xhs × 0」，也就不会误导
+        // 用户以为「这个模型还在被 xhs 用」。
+        const items = row.platforms;
+        if (items.length === 0) return <Text type="secondary">-</Text>;
         return (
           <Space size={4} wrap>
-            {row.platforms.map((p) => (
-              <Tag key={p}>{platformOptions.find((o) => o.value === p)?.label ?? p}</Tag>
-            ))}
+            {items.map((p) => {
+              const label = platformOptions.find((o) => o.value === p)?.label ?? p;
+              const n = row.platformCounts[p] ?? 0;
+              return (
+                <Tag key={p} title={`${label}：${n} 个业务点正在使用`}>
+                  {label}
+                  {n > 1 ? ` × ${n}` : ""}
+                </Tag>
+              );
+            })}
           </Space>
         );
       },

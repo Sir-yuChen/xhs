@@ -14,11 +14,11 @@ function gw(id: number, name: string, models: GatewayModelRow[] | null) {
   return { id, name, models };
 }
 
-/** 造一条模型行（v2.7：类型 / 平台是模型的属性；v2.9：platform 是多值数组）。 */
+/** 造一条模型行（v2.7：类型 / 平台是模型的属性；v2.28：platform 是**引用计数**）。 */
 function m(
   name: string,
   modelType = "text",
-  platform: string[] = ["xhs"],
+  platform: Record<string, number> = { xhs: 1 },
   id?: number,
 ): GatewayModelRow {
   return { id, model_name: name, model_type: modelType, platform, enabled: true };
@@ -41,7 +41,7 @@ describe("buildGatewayTree —— 服务商列表父子树", () => {
     const tree = buildGatewayTree([
       gw(1, "DeepSeek 官方", [
         m("deepseek-v4.1-flash"),
-        m("deepseek-v4.1-pro", "image", ["douyin"]),
+        m("deepseek-v4.1-pro", "image", { douyin: 1 }),
       ]),
       gw(2, "智谱", [m("glm-4.6")]),
     ]);
@@ -72,14 +72,14 @@ describe("buildGatewayTree —— 服务商列表父子树", () => {
   });
 
   it("v2.9：platform 多值保真（一个模型被多个平台共用）", () => {
-    const [p] = buildGatewayTree([gw(1, "共用行", [m("gpt-4o", "multimodal", ["xhs", "douyin", "kuaishou"])])]);
+    const [p] = buildGatewayTree([gw(1, "共用行", [m("gpt-4o", "multimodal", { xhs: 1, douyin: 1, kuaishou: 1 })])]);
     const child = asModel(asProvider(p).children[0]);
     expect(child.platforms).toEqual(["xhs", "douyin", "kuaishou"]);
   });
 
   it("v2.9：platform 数组里的空值被剥掉（缺值不造假 ⇒ 不留空标签）", () => {
     const [p] = buildGatewayTree([
-      gw(1, "脏数据", [{ model_name: "m", platform: ["xhs", "", "douyin"] }]),
+      gw(1, "脏数据", [{ model_name: "m", platform: { xhs: 1, "": 1, douyin: 1 } }]),
     ]);
     expect(asModel(asProvider(p).children[0]).platforms).toEqual(["xhs", "douyin"]);
   });
@@ -164,7 +164,7 @@ describe("buildGatewayTree —— 服务商列表父子树", () => {
   });
 
   it("v2.9：带 id 的模型行把 id 带进节点（类型下拉就地改类型要用）", () => {
-    const [p] = buildGatewayTree([gw(1, "有 id", [m("m", "text", ["xhs"], 42)])]);
+    const [p] = buildGatewayTree([gw(1, "有 id", [m("m", "text", { xhs: 1 }, 42)])]);
     const child = asModel(asProvider(p).children[0]);
     expect(child.modelId).toBe(42);
     // key 也带 id —— 模型改名后 React 不复用错行

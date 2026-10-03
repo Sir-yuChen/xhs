@@ -28,6 +28,7 @@ from backend.app.services.business_provider_keys import (
     BUSINESS_KEYS,
     BUSINESS_KEY_GENERATE_COVER,
     BUSINESS_KEY_GENERATE_NOTE,
+    BUSINESS_KEY_GENERATE_TITLE,
     MODEL_TYPE_IMAGE,
     MODEL_TYPE_TEXT,
     MODEL_TYPES,
@@ -634,7 +635,12 @@ def _clear_model_platforms(db_factory, username: str) -> None:
         db.commit()
 
 
-def _model_platforms(db_factory, username: str, model_name: str) -> list[str]:
+def _model_platforms(db_factory, username: str, model_name: str) -> dict[str, int]:
+    """返回该模型行的**使用平台引用计数**（`{"xhs": 2}`，v2.28 §13.2.9.7c）。
+
+    ⚠️ 旧版返回 `list[str]`（纯标识数组）；v2.28 起 `platform` 列语义改为
+    「平台 → 使用次数」⇒ 断言全部改按**计数**写（`{"xhs": 1}` 而非 `["xhs"]`）。
+    """
     from backend.app.models import LlmGatewayModel
     from sqlalchemy import select as _select
 
@@ -646,7 +652,7 @@ def _model_platforms(db_factory, username: str, model_name: str) -> list[str]:
                 LlmGatewayModel.model_name == model_name,
             )
         )
-        return _parse_platforms(row.platform) if row else []
+        return _parse_platforms(row.platform) if row else {}
 
 
 def test_upsert_merges_platform_into_model_row(api_client, db_factory):
@@ -665,11 +671,11 @@ def test_upsert_merges_platform_into_model_row(api_client, db_factory):
     headers = _register(api_client, "platform-merge")
     provider = _create_provider(api_client, headers, "合并平台", model_type=MODEL_TYPE_TEXT)
     _clear_model_platforms(db_factory, "platform-merge")
-    assert _model_platforms(db_factory, "platform-merge", "deepseek-v4-flash") == []
+    assert _model_platforms(db_factory, "platform-merge", "deepseek-v4-flash") == {}
 
     _upsert(api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"], platform="xhs")
 
-    assert _model_platforms(db_factory, "platform-merge", "deepseek-v4-flash") == ["xhs"], (
+    assert _model_platforms(db_factory, "platform-merge", "deepseek-v4-flash") == {"xhs": 1}, (
         "在 xhs 平台配置了模型，模型行的 platform 却没写 xhs（§13.2.9.7 漏实现）"
     )
 
@@ -687,7 +693,9 @@ def test_upsert_platform_merge_is_idempotent(api_client, db_factory):
     for _ in range(3):
         _upsert(api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"], platform="xhs")
 
-    assert _model_platforms(db_factory, "platform-idem", "deepseek-v4-flash") == ["xhs"]
+    # ⚠️ v2.28：计数语义 = 「该平台下指向该模型的**业务点个数**」（状态），
+    # 不是「被操作过几次」（事件）⇒ 同一业务点配 3 次仍是 1，**不是 3**。
+    assert _model_platforms(db_factory, "platform-idem", "deepseek-v4-flash") == {"xhs": 1}
 
 
 def test_upsert_merge_accumulates_not_overwrites(api_client, db_factory):
@@ -712,7 +720,7 @@ def test_upsert_merge_accumulates_not_overwrites(api_client, db_factory):
                 LlmGatewayModel.model_name == "deepseek-v4-flash",
             )
         )
-        row.platform = _dump_platforms(["douyin"])
+        row.platform = _dump_platforms({"douyin": 1})
         db.commit()
 
     _upsert(api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"], platform="xhs")
@@ -720,28 +728,82 @@ def test_upsert_merge_accumulates_not_overwrites(api_client, db_factory):
     merged = _model_platforms(db_factory, "platform-accum", "deepseek-v4-flash")
     assert "douyin" in merged, "原有的平台被覆盖掉了（并入≠覆盖）"
     assert "xhs" in merged, "新平台没并进去"
-    assert len(merged) == len(set(merged)), f"出现重复项：{merged}"
+    assert merged == {"douyin": 1, "xhs": 1}, f"计数不符：{merged}"
 
 
-def test_clearing_mapping_does_not_crash_or_touch_platform(api_client, db_factory):
-    """**清空映射**（provider_key 为空）⇒ 不崩、**也不动** `platform`。
+def test_clearing_mapping_decrements_platform_count(api_client, db_factory):
+    """**清空映射**（provider_key 为空）⇒ 不崩，且该平台的引用计数 **−1**。
 
-    ⚠️ 这条守的是实现细节的正确性：`model_row` 只在 `provider_key` 非空时赋值，
-    若不在函数开头显式初始化，清空映射那条路会 `NameError`（不是业务错，是崩溃）。
-    且「清空映射」改的是**映射层**，与「模型被用在哪些平台」无关 ⇒ 不该顺手清空。
+    ## ⚠️ 语义变更（v2.28 §13.2.9.7c，取代本用例的旧断言）
+
+    旧断言是「清空映射**不动** platform」（当时把「映射层」与「模型被用在哪些平台」
+    当两件事）。用户 2026-10-03 口径把这个关系**倒过来了**：
+
+    > 「当小红书模型配置页列表的**所有配置均不使用该模型了**，才可以将该模型下的
+    > 小红书平台移除……当使用次数被减到为 0 时……该平台可以被移除」
+
+    ⇒ 「清空某个业务点的映射」正是**不再使用该模型**的一种形态，必须减计数。
+    （旧的「不动」会让这个模型被 0 个业务点使用后仍占着 `xhs`。）
+
+    同时仍守住原来的实现细节正确性：`model_row` / 旧值必须在函数开头就取到，
+    否则清空那条路 `NameError`（崩溃不是业务错）。
+
+    计数从 1 减到 0 ⇒ **该平台被移除**（`{}`）。
     """
     headers = _register(api_client, "platform-clear")
     provider = _create_provider(api_client, headers, "清空平台", model_type=MODEL_TYPE_TEXT)
+    # 起点清零：建服务商时目录写入会带 platform（那是「服务商声明」，不是「被使用」）
+    # ⇒ 必须显式清空，否则起点是 `{"xhs": 1}`、加减验不出来（同 platform-merge 用例）。
+    _clear_model_platforms(db_factory, "platform-clear")
 
     _upsert(api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"], platform="xhs")
-    before = _model_platforms(db_factory, "platform-clear", "deepseek-v4-flash")
+    assert _model_platforms(db_factory, "platform-clear", "deepseek-v4-flash") == {"xhs": 1}
 
-    # 清空映射（provider_key=""）
+    # 清空映射（provider_key=""）⇒ 该业务点不再用这个模型
     resp = _upsert(api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, "", platform="xhs")
     assert resp.status_code == 200, resp.text
 
     after = _model_platforms(db_factory, "platform-clear", "deepseek-v4-flash")
-    assert after == before, "清空映射时顺手改了模型的使用平台（两者是不同的东西）"
+    assert after == {}, (
+        f"清空映射后该平台引用计数应归 0 并被移除（用户口径：全部不再使用才移除），实际 {after}"
+    )
+
+
+def test_platform_count_survives_until_last_reference_goes(api_client, db_factory):
+    """**两个业务点用同一个模型 ⇒ 计数 2；只在最后一个撤走时才移除平台**（用户口径核心）。
+
+    > 「当小红书模型配置页列表的**所有配置均不使用该模型了**，才可以将该模型下的
+    > 小红书平台移除」
+
+    这是引用计数与「配一次就永久留着」的**分水岭用例**：
+      * 配 `generate_note` + `generate_title` ⇒ `{"xhs": 2}`；
+      * 撤走 `generate_note` ⇒ 仍是 `{"xhs": 1}`（**还有人在用，不许移除**）；
+      * 再撤走 `generate_title` ⇒ `{}`（**这才移除**）。
+
+    ⚠️ 若实现按「被操作过几次」（+1/-1 事件）而不是「几个业务点在用」（状态），
+    重复配置同一条会把计数顶高，撤走时永远减不到 0 ⇒ 平台永远移除不掉。
+    """
+    headers = _register(api_client, "platform-count")
+    provider = _create_provider(api_client, headers, "计数", model_type=MODEL_TYPE_TEXT)
+    _clear_model_platforms(db_factory, "platform-count")
+
+    _upsert(api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"], platform="xhs")
+    _upsert(api_client, headers, BUSINESS_KEY_GENERATE_TITLE.key, provider["provider_key"], platform="xhs")
+    assert _model_platforms(db_factory, "platform-count", "deepseek-v4-flash") == {"xhs": 2}, (
+        "两个业务点在用同一个模型，计数应为 2"
+    )
+
+    # 撤走第一个 ⇒ 还有人在用，平台**必须留着**
+    _upsert(api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, "", platform="xhs")
+    assert _model_platforms(db_factory, "platform-count", "deepseek-v4-flash") == {"xhs": 1}, (
+        "还有业务点在用，平台被提前移除了（用户口径：全部不再使用才移除）"
+    )
+
+    # 撤走最后一个 ⇒ 这才移除
+    _upsert(api_client, headers, BUSINESS_KEY_GENERATE_TITLE.key, "", platform="xhs")
+    assert _model_platforms(db_factory, "platform-count", "deepseek-v4-flash") == {}, (
+        "所有业务点都不再用这个模型了，平台应该被移除"
+    )
 
 
 def test_platform_dedupe_existing_platform_not_added_again(api_client, db_factory):
@@ -762,17 +824,10 @@ def test_platform_dedupe_existing_platform_not_added_again(api_client, db_factor
     headers = _register(api_client, "platform-dedupe")
     provider = _create_provider(api_client, headers, "去重平台", model_type=MODEL_TYPE_TEXT)
 
-    # 起点：已含 xhs（模拟「上次已经在这个平台配过」）
-    user = _user_by_name(None, db_factory, "platform-dedupe")
-    with db_factory() as db:
-        row = db.scalar(
-            _select(LlmGatewayModel).where(
-                LlmGatewayModel.user_id == user.id,
-                LlmGatewayModel.model_name == "deepseek-v4-flash",
-            )
-        )
-        row.platform = _dump_platforms(["xhs"])
-        db.commit()
+    # 起点清空 ⇒ 下面「配 1 次」才真的把计数推到 1。
+    # ⚠️ 旧版起点人工写了 `{"xhs": 1}`，那会让「配 1 次」变成 2 —— 用例自己
+    #    把起点和被测行为混在一起了（那时是数组形态，`in` 判重看不出这个错）。
+    _clear_model_platforms(db_factory, "platform-dedupe")
 
     # 再在同一平台配 3 次
     for _ in range(3):
@@ -783,6 +838,7 @@ def test_platform_dedupe_existing_platform_not_added_again(api_client, db_factor
         assert resp.status_code == 200, resp.text
 
     platforms = _model_platforms(db_factory, "platform-dedupe", "deepseek-v4-flash")
-    assert platforms == ["xhs"], (
-        f"已存在的平台被重复添加了（应去重）：{platforms}"
+    # v2.28：平台键唯一（dict 天然）⇒ 已存在不会变成两个；且**计数不累加**（同一业务点）。
+    assert platforms == {"xhs": 1}, (
+        f"已存在的平台被重复添加 / 计数被累加了（应去重且幂等）：{platforms}"
     )
