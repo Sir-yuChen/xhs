@@ -1135,15 +1135,20 @@ export function XhsShopItemsPage() {
         detailImageCount
       );
       setDetailImage(result);
-      // v2.18：半成功（部分张失败）如实报出来 —— 不能只报「已生成」，
-      // 否则用户以为 4 张都出来了（缺值口径：不假报完成）。
+      // v2.18/v2.20：半成功（部分张失败）如实报出来 —— 不能只报「已生成」，
+      // 否则用户以为都出来了（缺值口径：不假报完成）。
+      // ⚠️ 张数是**每组**的 count ⇒ 总张数要按组数算。
       const partial = result.errors?.length || 0;
+      const totalDone = result.assets?.length || 1;
+      const groupCount = result.groups?.length || 1;
       if (partial) {
         message.warning(
-          `已生成 ${result.assets?.length || 1} 张，${partial} 张失败：${result.errors?.[0] || ""}`
+          `已生成 ${totalDone} 张，${partial} 张失败：${result.errors?.[0] || ""}`
         );
       } else {
-        message.success(`商品详情图已生成 ${result.assets?.length || 1} 张`);
+        message.success(
+          `已生成 ${totalDone} 张（${groupCount} 组 × ${detailImageCount} 张）`
+        );
       }
     } catch (error) {
       message.error(error instanceof Error ? error.message : "生成商品详情图失败");
@@ -2203,7 +2208,7 @@ export function XhsShopItemsPage() {
                       addonAfter="张"
                     />
                     <Text type="secondary" style={{ fontSize: 11 }}>
-                      3 ~ 10 张（每张 = 一次生成请求，张数越多越慢）
+                      每组 3 ~ 10 张（勾选两组 ⇒ 总张数为 2 倍；每张 = 一次生成请求）
                     </Text>
                   </Space>
                 </div>
@@ -2230,22 +2235,62 @@ export function XhsShopItemsPage() {
               }}
             >
               {detailImage ? (
-                <Space direction="vertical" size={6} style={{ width: "100%" }}>
-                  {/* v2.18：多张时逐张列出（每张都有独立素材库编号，可分别取用）。 */}
-                  {(detailImage.assets?.length
-                    ? detailImage.assets
-                    : [detailImage.asset]
-                  ).map((asset, index) => (
-                    <div key={asset.id}>
-                      <Image
-                        src={asset.url || asset.local_path}
-                        width="100%"
-                        style={{ objectFit: "contain", borderRadius: 4 }}
-                      />
-                      <Text type="secondary" style={{ fontSize: 11 }}>
-                        第 {index + 1} 张 · 模型 {asset.model_name || "-"} · 已存入素材库
-                        （#{asset.id}）
-                      </Text>
+                <Space direction="vertical" size={14} style={{ width: "100%" }}>
+                  {/* v2.20：结果**按组分两大块**（用户口径「生成的结果也要分主图和详情图，
+                      这是两大块」）。每组一块，各自标「成功/要了几张」。
+
+                      ⚠️ 分组用后端下发的 `groups`（不在前端 groupBy —— 那会让
+                      「某组一张没成时该组仍要出现」这条口径在前端再实现一遍）。 */}
+                  {(detailImage.groups || []).map((group) => (
+                    <div
+                      key={group.group}
+                      style={{
+                        border: "1px solid rgba(0,0,0,0.1)",
+                        borderRadius: 6,
+                        padding: "8px 10px",
+                        background: "rgba(0,0,0,0.015)",
+                      }}
+                    >
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 8,
+                          marginBottom: 6,
+                        }}
+                      >
+                        <Text strong style={{ fontSize: 12 }}>
+                          {group.group_label}
+                        </Text>
+                        <Text
+                          type={group.succeeded < group.requested ? "warning" : "secondary"}
+                          style={{ fontSize: 11 }}
+                        >
+                          {group.succeeded}/{group.requested} 张
+                          {group.succeeded < group.requested ? "（有失败）" : ""}
+                        </Text>
+                      </div>
+                      {group.assets.length === 0 ? (
+                        <Text type="secondary" style={{ fontSize: 11 }}>
+                          这一组没有生成成功（原因见下方失败信息）
+                        </Text>
+                      ) : (
+                        <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                          {group.assets.map((asset) => (
+                            <div key={asset.id}>
+                              <Image
+                                src={asset.url || asset.local_path}
+                                width="100%"
+                                style={{ objectFit: "contain", borderRadius: 4 }}
+                              />
+                              <Text type="secondary" style={{ fontSize: 11 }}>
+                                第 {asset.group_index || 1} 张 · 模型{" "}
+                                {asset.model_name || "-"} · 素材库（#{asset.id}）
+                              </Text>
+                            </div>
+                          ))}
+                        </Space>
+                      )}
                     </div>
                   ))}
                   {detailImage.errors?.length ? (

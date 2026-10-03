@@ -1263,10 +1263,14 @@ def generate_detail_image(
 
     images = [url for url in (detail.get("images") or []) if url]
     # v2.15（§13.3.6）：参考图可选 —— 勾选的主图 / 详情图，**必须过台账白名单**。
-    allowed: set[str] = set(detail.get("product_images") or []) | set(
-        detail.get("detail_images") or []
-    )
+    # v2.20：白名单按**组**建（同一张图不会同时在两组），以便勾选结果直接归组，
+    # 生成时**按组各发各的请求**（分组是事实，不是事后推断）。
+    product_allowed: set[str] = set(detail.get("product_images") or [])
+    detail_allowed: set[str] = set(detail.get("detail_images") or [])
+    allowed: set[str] = product_allowed | detail_allowed
     picked: list[str] = []
+    picked_product: list[str] = []
+    picked_detail: list[str] = []
     for url in payload.reference_image_urls or []:
         candidate = str(url or "").strip()
         if not candidate:
@@ -1282,6 +1286,11 @@ def generate_detail_image(
             )
         if candidate not in picked:
             picked.append(candidate)
+            # 归组（按勾选顺序；同一张图只进一组）。
+            if candidate in product_allowed:
+                picked_product.append(candidate)
+            else:
+                picked_detail.append(candidate)
     # ⚠️ v2.19：**必须勾选参考图**（用户口径「必须选择原始参考图才可以点击生成按钮」）。
     # 去掉「不勾就回落商品首图」的旧行为 —— 前后端同一判据，不留「能点但被拒」的不一致。
     if not picked:
@@ -1303,6 +1312,10 @@ def generate_detail_image(
             },
         )
     reference_images = picked[:MAX_DETAIL_IMAGE_REFERENCES]
+    reference_groups = {
+        "product": picked_product[:MAX_DETAIL_IMAGE_REFERENCES],
+        "detail": picked_detail[:MAX_DETAIL_IMAGE_REFERENCES],
+    }
 
     # 业务点 → 服务商（不回落；未配置 / 类型不符 ⇒ 400 结构化）。
     # ⚠️ 复用 `ai.py::_business_model_context`（**同一份**错误映射实现）：
@@ -1357,6 +1370,8 @@ def generate_detail_image(
             "prompt": prompt,
             "model_config_id": model_config.id,
             "reference_images": reference_images,
+            # v2.20：**按组**记录参考图（排障时能看出每组各送了什么；生成也按它分组）。
+            "reference_groups": reference_groups,
             # v2.18：生成张数一并入 payload（排障时能看出「这次要了几张」）。
             "count": count,
             # v2.19：提示词来源（llm = 文本模型整理；local = 回落本地拼接）+ 整理说明。
@@ -1368,47 +1383,69 @@ def generate_detail_image(
     db.add(task)
     db.flush()
 
-    # v2.18：**逐张发请求**（不依赖上游 `n` 参数 —— 各家支持不一，行为不可预期）。
-    # ⚠️ 一张失败不丢已生成的：先把成功的落库，再把失败如实报出来（半成功可交付）。
+    # v2.20：**按组拆分生成**（设计 17 §13.3.7.5，用户口径「生成的结果也要分主图和
+    # 详情图，这是两大块」）。
+    #
+    # ⚠️ **为什么不在一次调用里混着送**：出图请求把两组参考图混在一起时，上游返回的
+    # 结果**不带「这张是按哪组生成的」标记** —— 事后无法可靠分组（只能靠猜）。
+    # 按组各发各的请求，分组就成了**事实**（请求时就定的），而不是事后推断。
+    #
+    # ⚠️ 张数是**每组**的张数（勾了两组 ⇒ 最多 2 × count 张）。这一点必须让用户
+    # 看得见 —— 弹窗里组头已显示各组选中数，生成后的结果也按组分别标注张数。
+    groups: list[tuple[str, str, list[str]]] = []
+    if picked_product:
+        groups.append(("product", "商品主图", picked_product))
+    if picked_detail:
+        groups.append(("detail", "原商品详情图", picked_detail))
+
     assets: list[dict[str, Any]] = []
     errors: list[str] = []
-    for index in range(count):
-        try:
-            result = image_ai_client.generate_image(
-                model_config=model_config,
-                api_key=api_key,
-                prompt=prompt,
-                # 参考图 = 用户勾选的（最多 5 张）；未勾选时回落商品首图
-                # （v2.15 §13.3.6：勾选优先，旧行为不变）。
-                reference_images=reference_images,
-            )
-        except Exception as exc:  # noqa: BLE001 - 服务商五花八门，一律结构化转出
-            errors.append(f"第 {index + 1} 张：{exc}")
-            continue
+    total = count * len(groups)
+    done = 0
+    for group_key, group_label, group_refs in groups:
+        for index in range(count):
+            try:
+                result = image_ai_client.generate_image(
+                    model_config=model_config,
+                    api_key=api_key,
+                    prompt=prompt,
+                    # 参考图 = **本组**勾选的（不再跨组混送）。
+                    reference_images=group_refs[:MAX_DETAIL_IMAGE_REFERENCES],
+                )
+            except Exception as exc:  # noqa: BLE001 - 服务商五花八门，一律结构化转出
+                errors.append(f"{group_label} 第 {index + 1} 张：{exc}")
+                done += 1
+                continue
 
-        url = result.get("url") or ""
-        asset = AigcMediaAsset(
-            user_id=current_user.id,
-            asset_type="image",
-            # ⚠️ 缺值口径：服务商没回本地路径时留空串（**不拿 url 冒充 local_path** ——
-            # 那是两个语义，冒充会让「素材库」显示一条不存在的本地文件）。
-            local_path=result.get("local_path") or "",
-            url=url or None,
-            prompt=prompt,
-            model_name=model_config.model_name,
-        )
-        db.add(asset)
-        db.flush()
-        assets.append(
-            {
-                "id": asset.id,
-                "local_path": asset.local_path,
-                "url": asset.url,
-                "prompt": asset.prompt,
-                "model_name": asset.model_name,
-            }
-        )
-        task.progress = 10 + int(90 * (index + 1) / count)
+            url = result.get("url") or ""
+            asset = AigcMediaAsset(
+                user_id=current_user.id,
+                asset_type="image",
+                # ⚠️ 缺值口径：服务商没回本地路径时留空串（**不拿 url 冒充 local_path** ——
+                # 那是两个语义，冒充会让「素材库」显示一条不存在的本地文件）。
+                local_path=result.get("local_path") or "",
+                url=url or None,
+                prompt=prompt,
+                model_name=model_config.model_name,
+            )
+            db.add(asset)
+            db.flush()
+            assets.append(
+                {
+                    "id": asset.id,
+                    "local_path": asset.local_path,
+                    "url": asset.url,
+                    "prompt": asset.prompt,
+                    "model_name": asset.model_name,
+                    #: 分组标记（前端按它分两大块渲染；`product` / `detail`）。
+                    "group": group_key,
+                    "group_label": group_label,
+                    #: 组内第几张（1 起）。
+                    "group_index": index + 1,
+                }
+            )
+            done += 1
+            task.progress = 10 + int(90 * done / max(1, total))
 
     if not assets:
         # 一张都没成 ⇒ 整次失败（把上游原文如实带出，不吞）。
@@ -1431,10 +1468,26 @@ def generate_detail_image(
     }
     db.commit()
 
+    # v2.20：**分组汇总**（前端按它直接分两大块渲染）。
+    # ⚠️ 由后端算好下发，而不是让前端自己 `groupBy` —— 分组口径（含「某组一张没成」
+    # 时仍要出现该组）属于业务语义，放前端 = 同一套规则再实现一遍（DEF-044）。
+    group_summaries = [
+        {
+            "group": group_key,
+            "group_label": group_label,
+            "requested": count,
+            "succeeded": len([a for a in assets if a["group"] == group_key]),
+            "assets": [a for a in assets if a["group"] == group_key],
+        }
+        for group_key, group_label, _refs in groups
+    ]
+
     return {
         # `url` = 首张（**向后兼容**旧前端：单张时代它是唯一返回值）。
         "url": assets[0]["url"] or "",
         "assets": assets,
+        #: v2.20：按组的结果（**主图 / 详情图两大块**）。
+        "groups": group_summaries,
         "errors": errors,
         "asset": assets[0],
     }

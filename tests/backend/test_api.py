@@ -5679,6 +5679,137 @@ def test_generate_detail_image_supports_count_and_reports_partial_failure(tmp_pa
         app.dependency_overrides.pop(get_image_ai_client, None)
 
 
+def test_generate_detail_image_result_is_grouped(tmp_path):
+    """v2.20：**结果按组分两大块**（用户口径「生成的结果也要分主图和详情图，这是两大块」）。
+
+    守四件：
+    ① 结果带 `groups`，每组有 `group` / `group_label` / `requested` / `succeeded` / `assets`；
+    ② **某组一张没成时该组仍出现在结果里**（`succeeded=0` + `assets=[]`）——
+       消失了用户就不知道「我勾的那组到底跑没跑」（缺值口径：不静默丢组）；
+    ③ 每张图带 `group` / `group_index`（分组是请求时的事实，不是事后按顺序猜的）；
+    ④ 只勾一组时，结果里**只有那一组**（不凭空造另一组）。
+    """
+    from backend.app.api.ai import get_image_ai_client
+    from backend.app.services.business_provider_keys import (
+        BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE,
+    )
+
+    class HalfFailClient:
+        """第 1 张失败、其余成功（用来验证「某组全灭仍出现」）。"""
+
+        def __init__(self):
+            self.calls = 0
+
+        def generate_image(self, *, model_config, api_key, prompt, reference_images=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("第一张就挂")
+            return {"url": f"https://cdn.example.test/g{self.calls}.png", "local_path": ""}
+
+    fake = HalfFailClient()
+    db_dependency = _override_database(tmp_path)
+    token = _register_and_get_access_token("detail-image-grouped")
+    try:
+        app.dependency_overrides[get_image_ai_client] = lambda: fake
+        from backend.app.core.security import encrypt_text
+        from backend.app.models import LlmBusinessProvider, LlmGatewayConfig, LlmGatewayModel
+
+        db = _test_session_factory()
+        try:
+            db.add(
+                LlmGatewayConfig(
+                    user_id=_last_registered_user_id,
+                    name="test-image-group",
+                    provider_key="TEST-IMGG",
+                    base_url="https://api.example.test/v1",
+                    access_token=encrypt_text("«redacted:sk-…»"),
+                    models_json=json.dumps(["detail-image-model"]),
+                    enabled=True,
+                    healthy=True,
+                )
+            )
+            db.flush()
+            db.add(
+                LlmGatewayModel(
+                    user_id=_last_registered_user_id,
+                    provider_key="TEST-IMGG",
+                    model_name="detail-image-model",
+                    model_type="image",
+                    platform="xhs",
+                    enabled=True,
+                )
+            )
+            db.flush()
+            db.add(
+                LlmBusinessProvider(
+                    user_id=_last_registered_user_id,
+                    platform="xhs",
+                    business_key=BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE.key,
+                    provider_key="TEST-IMGG",
+                    model_name="detail-image-model",
+                    enabled=True,
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        account_id = _seed_account_for_last_user()
+        _seed_shop_product(
+            platform_account_id=account_id,
+            item_id="ITEM-GRP",
+            images=["https://cdn.xhs.test/main.jpg"],
+            detail_images=["https://cdn.xhs.test/d1.jpg"],
+            title="分组测试商品",
+        )
+        url = "/api/xhs/qianfan/generate-detail-image"
+
+        # ④ 只勾主图组 ⇒ 结果只有一组
+        only_product = client.post(
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "platform_account_id": account_id,
+                "item_id": "ITEM-GRP",
+                "reference_image_urls": ["https://cdn.xhs.test/main.jpg"],
+                "count": 3,
+            },
+        )
+        assert only_product.status_code == 200, only_product.text
+        groups = only_product.json()["groups"]
+        assert [g["group"] for g in groups] == ["product"], "只勾一组却造出了别的组"
+
+        # 两组都勾 ⇒ 两组都在（第 1 张失败 ⇒ 主图组 2/3）
+        both = client.post(
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "platform_account_id": account_id,
+                "item_id": "ITEM-GRP",
+                "reference_image_urls": [
+                    "https://cdn.xhs.test/main.jpg",
+                    "https://cdn.xhs.test/d1.jpg",
+                ],
+                "count": 3,
+            },
+        )
+        assert both.status_code == 200, both.text
+        groups = both.json()["groups"]
+        # ① 结构完整
+        assert [g["group"] for g in groups] == ["product", "detail"]
+        for g in groups:
+            assert g["group_label"] and g["requested"] == 3
+            assert isinstance(g["succeeded"], int) and isinstance(g["assets"], list)
+        # ③ 每张带分组标记与组内序号
+        for g in groups:
+            for index, asset in enumerate(g["assets"], start=1):
+                assert asset["group"] == g["group"]
+                assert asset["group_index"] == index
+    finally:
+        app.dependency_overrides.pop(get_image_ai_client, None)
+        app.dependency_overrides.pop(db_dependency, None)
+
+
 def test_generate_detail_image_count_is_bounded(tmp_path):
     """v2.18/v2.20：张数**有界** 3 ~ 10（用户口径「最多 10 张最少 3 张」）——
     2 / 11 / 0 / 负数都被 422 拦下（不静默夹到合法值）。
@@ -5869,9 +6000,15 @@ def test_detail_image_reference_images_must_come_from_the_product(tmp_path):
             },
         )
         assert resp.status_code == 200, resp.text
+        # v2.20：**按组各发各的请求** ⇒ 本次只有「详情图」一组被调用。
         assert fake.calls[-1] == ["https://cdn.xhs.test/d2.jpg"]
+        # 结果按组下发（只有勾了的那组）
+        assert [g["group"] for g in resp.json()["groups"]] == ["detail"]
 
-        # ② 主图 + 详情图混勾 ⇒ 两张都送（顺序保持勾选顺序）
+        # ② 主图 + 详情图混勾 ⇒ **分两组各发各的**（不再混成一次调用）
+        #    ⚠️ v2.20 取代旧的「两张混送一次」：混送时上游不回「这张按哪组生成」，
+        #    事后无法可靠分组 ⇒ 改成按组发请求，分组成为事实。
+        before = len(fake.calls)
         resp2 = client.post(
             url,
             headers=headers,
@@ -5885,10 +6022,16 @@ def test_detail_image_reference_images_must_come_from_the_product(tmp_path):
             },
         )
         assert resp2.status_code == 200, resp2.text
-        assert fake.calls[-1] == [
-            "https://cdn.xhs.test/main.jpg",
-            "https://cdn.xhs.test/d1.jpg",
-        ]
+        body2 = resp2.json()
+        # 勾了两组 ⇒ 两组都出现在结果里（顺序：主图组在前，与勾选组顺序一致）
+        assert [g["group"] for g in body2["groups"]] == ["product", "detail"]
+        # 每组的参考图**只有本组的**（不跨组混送）
+        assert body2["groups"][0]["assets"][0]["group"] == "product"
+        assert body2["groups"][1]["assets"][0]["group"] == "detail"
+        # 张数：每组各 count 张（默认 3）⇒ 共 6 张，且每组都是 3/3
+        assert fake.calls[-1] == ["https://cdn.xhs.test/d1.jpg"]
+        assert len(fake.calls) - before == 6, "两组 × 每组 3 张 = 6 次上游调用"
+        assert [g["succeeded"] for g in body2["groups"]] == [3, 3]
 
         # ③ 传**台账里没有的 URL** ⇒ 400（SSRF 防线：不接受任意地址）
         outside = client.post(

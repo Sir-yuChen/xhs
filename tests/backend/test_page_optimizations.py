@@ -2188,6 +2188,25 @@ def test_detail_image_reference_groups_are_separate_blocks():
     assert block.count("onClearGroup=") == 2, "两组未各自绑定清空"
 
 
+def test_detail_image_result_is_grouped_in_ui():
+    """v2.20：**生成结果也按组分两大块**（用户口径「生成的结果也要分主图和详情图，
+    这是两大块」）。
+
+    守三件：① 结果区按后端下发的 `groups` 渲染（不在前端自己 groupBy）；
+    ② 每组显示「成功/要了几张」；③ 某组全灭时该组仍渲染（给一行说明而不是消失）。
+    """
+    page = _code_only(_read(SHOP_ITEMS_PAGE))
+    block = _slice_between(page, 'title="生成AI商品图"', "</Modal>")
+    assert "detailImage.groups" in block, "结果未按后端下发的 groups 分组渲染"
+    assert "group.succeeded" in block and "group.requested" in block, (
+        "每组未显示「成功/要了几张」"
+    )
+    assert "group.assets.length === 0" in block, "某组全灭时没有兜底渲染（该组会静默消失）"
+    assert "group_label" in block, "组名未用后端下发的中文名"
+    # ⚠️ 不许在页面里自己按 group 分组（那是分组口径的第二份实现）
+    assert "filter((a) => a.group" not in block, "页面自己做了分组（应由后端下发）"
+
+
 def test_detail_image_generate_button_requires_reference():
     """v2.19：**必须勾选参考图**才能点「生成」（用户口径「必须选择原始参考图才可以
     点击生成按钮」）。

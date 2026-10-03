@@ -571,12 +571,34 @@ export type GenerateDetailImageResult = {
     url: string | null;
     prompt: string;
     model_name: string;
+    /**
+     * v2.20：这张图属于哪组参考图（`product` = 商品主图 / `detail` = 原商品详情图）。
+     * ⚠️ 分组是**请求时就定的事实**（端点按组各发各的请求），不是事后按顺序猜的。
+     */
+    group?: "product" | "detail";
+    /** 组中文名（后端下发，前端不在本地维护映射表）。 */
+    group_label?: string;
+    /** 组内第几张（1 起）。 */
+    group_index?: number;
   };
   /**
-   * v2.18：**本次生成的全部图**（张数由请求的 `count` 决定，1~4）。
+   * v2.18：**本次生成的全部图**（张数由请求的 `count` 决定）。
    * `asset` / `url` 保留 = 首张（向后兼容单张时代的调用方）。
    */
   assets?: GenerateDetailImageResult["asset"][];
+  /**
+   * v2.20：**按组的结果**（主图 / 详情图两大块）—— 前端直接按它分块渲染，
+   * 不在本地再 groupBy 一遍（分组口径由后端唯一裁定，DEF-044）。
+   */
+  groups?: {
+    group: "product" | "detail";
+    group_label: string;
+    /** 该组本次要了几张。 */
+    requested: number;
+    /** 该组实际成了几张（失败要从这里一眼看出）。 */
+    succeeded: number;
+    assets: GenerateDetailImageResult["asset"][];
+  }[];
   /** v2.18：逐张失败原因（半成功时才非空；全部失败 ⇒ 端点直接 502，不走这里）。 */
   errors?: string[];
 };
