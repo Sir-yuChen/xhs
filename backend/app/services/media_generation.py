@@ -45,6 +45,8 @@ from backend.app.models.generation import (
     MEDIA_SOURCE_MATERIAL,
     MEDIA_SOURCE_PRODUCT_IMAGE,
     MEDIA_SOURCE_REFERENCE_IMAGE,
+    MEDIA_SOURCE_VIDEO_AI,
+    MEDIA_SOURCE_VIDEO_REFERENCE,
     MEDIA_SOURCES,
 )
 
@@ -52,10 +54,15 @@ logger = logging.getLogger(__name__)
 
 #: 单张媒体下载上限（防上游回传巨型文件拖垮 worker）。
 MAX_MEDIA_BYTES = 40 * 1024 * 1024
+#: 单个视频下载上限（§13.4.4）：视频比图片大得多，独立给上限（用图片的 40MB 会误杀正常视频）。
+MAX_VIDEO_BYTES = 300 * 1024 * 1024
 #: `ai_generate` 出图张数上限（§13.4.1：默认 1、上限 4）。
 MAX_AI_GENERATE_COUNT = 4
 #: 参考图最多送几张（商品图集动辄 10+ 张，全送会超服务商上限，同 §13.3.3 口径）。
 MAX_REFERENCE_IMAGES = 1
+#: 视频时长上限（秒）与默认值（§13.4.4）。
+MAX_VIDEO_DURATION = 10
+DEFAULT_VIDEO_DURATION = 5
 
 
 class MediaGenerationError(Exception):
@@ -136,13 +143,22 @@ def _media_dir() -> Path:
 
 
 def _download_to_media(url: str, *, user_id: int) -> tuple[str, str]:
-    """把上游回传的图片 URL 下载到 `storage/media/`。
+    """把上游回传的图片 URL 下载到 `storage/media/`（`expected_kind="image"` 的薄包装）。"""
+    return _download_media(url, user_id=user_id, expected_kind="image")
+
+
+def _download_media(url: str, *, user_id: int, expected_kind: str) -> tuple[str, str]:
+    """把上游回传的媒体 URL 下载到 `storage/media/`。
 
     返回 `(本地绝对路径, 本地下载 URL)`；失败抛 `ValueError`（由调用方降级）。
 
     ⚠️ **只写 `storage/media/`**，文件名带归属前缀 `xhs-asset-u{user_id}-`（与
     `files.py::_validate_owner_media_name` 的合法前缀白名单一致 —— 否则媒体
     文件服务会 404 这个文件）。
+
+    ⚠️ `expected_kind` = `"image"` / `"video"`：**Content-Type 必须匹配**才落盘
+    （上游回一个 HTML 错误页时不能当媒体存下来）。两种类型**共用这一份落盘实现**
+    —— 分两份会在「大小上限 / 半条不留 / 空文件判定」上各写一遍（DEF-044）。
     """
     if not isinstance(url, str) or not url.strip():
         raise ValueError("媒体 URL 为空")
@@ -161,9 +177,10 @@ def _download_to_media(url: str, *, user_id: int) -> tuple[str, str]:
     except requests.RequestException as exc:
         raise ValueError(f"媒体下载失败：{exc}") from exc
     content_type = str(response.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-    if content_type and not content_type.startswith("image/"):
-        raise ValueError(f"上游返回的不是图片（Content-Type={content_type}）")
-    extension = mimetypes.guess_extension(content_type or "") or ".png"
+    if content_type and not content_type.startswith(f"{expected_kind}/"):
+        raise ValueError(f"上游返回的不是{expected_kind}（Content-Type={content_type}）")
+    default_ext = ".png" if expected_kind == "image" else ".mp4"
+    extension = mimetypes.guess_extension(content_type or "") or default_ext
     if extension == ".jpe":
         extension = ".jpg"
     file_name = f"xhs-asset-u{user_id}-{uuid4().hex}{extension}"
@@ -177,7 +194,9 @@ def _download_to_media(url: str, *, user_id: int) -> tuple[str, str]:
                 if not chunk:
                     continue
                 written += len(chunk)
-                if written > MAX_MEDIA_BYTES:
+                # 视频比图片大得多，单独给上限（图片上限会误杀正常视频）。
+                limit = MAX_MEDIA_BYTES if expected_kind == "image" else MAX_VIDEO_BYTES
+                if written > limit:
                     raise ValueError("媒体文件超过大小上限")
                 handle.write(chunk)
     except Exception:
@@ -340,6 +359,107 @@ def _assets_from_ai(
 
 
 # --------------------------------------------------------------------------- #
+# 视频来源（§13.4.4 v2.14）：异步链路（提交 → 轮询 → 下载）
+# --------------------------------------------------------------------------- #
+def _assets_from_video(
+    db: Session,
+    *,
+    user: Any,
+    row: ShopProduct,
+    media_source: str,
+    media_options: Optional[dict],
+    record: Any,
+) -> tuple[list[dict], list[AigcMediaAsset]]:
+    """`video_ai_generate` / `video_reference`：调视频模型 → 下载落盘 → 记溯源。
+
+    ⚠️ **同一纪律**：视频失败 ⇒ 降级返回空媒体（不废正文，§13.4.2）；
+    只有**配置级**错误（业务点未配 / 类型不符）才抛 `MediaGenerationError`。
+    """
+    from backend.app.api.ai import _business_model_context
+    from backend.app.services.business_provider_keys import BUSINESS_KEY_GENERATE_VIDEO
+    from backend.app.services.video_generation import (
+        DEFAULT_VIDEO_SIZE,
+        OpenAICompatibleVideoClient,
+    )
+
+    options = media_options if isinstance(media_options, dict) else {}
+    prompt = str(options.get("prompt") or "").strip() or _default_video_prompt(row)
+
+    # 时长夹到 [1, MAX_VIDEO_DURATION]；坏值退默认（不因为一个脏参数整条失败）。
+    try:
+        duration = int(options.get("duration") or DEFAULT_VIDEO_DURATION)
+    except (TypeError, ValueError):
+        duration = DEFAULT_VIDEO_DURATION
+    duration = max(1, min(duration, MAX_VIDEO_DURATION))
+    size = str(options.get("size") or "").strip() or DEFAULT_VIDEO_SIZE
+
+    reference_image = ""
+    if media_source == MEDIA_SOURCE_VIDEO_REFERENCE:
+        # 图生视频：参考图 = 台账首图（同 §13.4.2 口径，不让前端传 URL）。
+        reference_urls = _str_list(options, "reference_image_urls")
+        if not reference_urls:
+            reference_urls = _product_image_urls(row)[:MAX_REFERENCE_IMAGES]
+        if not reference_urls:
+            raise MediaGenerationError(
+                "这个商品还没有同步到图片，无法作为参考图生成视频。",
+                code="PRODUCT_IMAGE_MISSING",
+            )
+        reference_image = reference_urls[0]
+
+    # 配置级错误（未配视频业务点 / 类型不符）⇒ 冒泡，由 worker 决定失败该条。
+    model_config, api_key = _business_model_context(db, user, BUSINESS_KEY_GENERATE_VIDEO)
+
+    client = OpenAICompatibleVideoClient()
+    try:
+        result = client.generate_video(
+            model_config=model_config,
+            api_key=api_key,
+            prompt=prompt,
+            reference_image=reference_image,
+            duration=duration,
+            size=size,
+        )
+        remote_url = str(result.get("url") or "")
+        local_path, local_url = _download_media(remote_url, user_id=int(user.id), expected_kind="video")
+    except Exception as error:  # noqa: BLE001 - 生成/下载失败降级，不废正文
+        if isinstance(error, MediaGenerationError):
+            raise
+        logger.warning(
+            "video generation degraded (source=%s, product=%s): %s",
+            media_source,
+            getattr(row, "id", None),
+            error,
+        )
+        return [], []
+
+    return (
+        [{"asset_type": "video", "url": local_url, "local_path": local_path, "sort_order": 0}],
+        [
+            AigcMediaAsset(
+                user_id=int(user.id),
+                generation_record_id=(int(record.id) if record is not None else None),
+                asset_type="video",
+                local_path=local_path,
+                url=remote_url,
+                prompt=prompt,
+                model_name=str(getattr(model_config, "model_name", "") or ""),
+            )
+        ],
+    )
+
+
+def _default_video_prompt(row: ShopProduct) -> str:
+    """按商品信息拼默认视频提示词（用户没填 prompt 时用）。
+
+    只用台账里**真实存在**的字段（同 `_default_image_prompt` 纪律：不编卖点）。
+    """
+    title = str(getattr(row, "title", "") or "").strip()
+    if title:
+        return f"电商商品展示短视频，商品：{title}；竖版构图，突出商品主体与使用场景"
+    return "电商商品展示短视频；竖版构图，突出商品主体与使用场景"
+
+
+# --------------------------------------------------------------------------- #
 # 入口
 # --------------------------------------------------------------------------- #
 def build_note_media(
@@ -362,6 +482,18 @@ def build_note_media(
         return _assets_from_material(db, user_id=int(user.id), media_options=media_options), []
     if source in (MEDIA_SOURCE_AI_GENERATE, MEDIA_SOURCE_REFERENCE_IMAGE):
         return _assets_from_ai(
+            db,
+            user=user,
+            row=row,
+            media_source=source,
+            media_options=media_options,
+            record=record,
+        )
+    # 视频来源（§13.4.4 v2.14）：与图片**同一入口**，按 media_options 的 `media_kind`
+    # 分流到视频链路。⚠️ 不新开一个入口参数 —— 那会让「图片/视频」两条链路各拿一份
+    # media_source 校验（DEF-044）。
+    if source in (MEDIA_SOURCE_VIDEO_AI, MEDIA_SOURCE_VIDEO_REFERENCE):
+        return _assets_from_video(
             db,
             user=user,
             row=row,

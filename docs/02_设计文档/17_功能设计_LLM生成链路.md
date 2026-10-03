@@ -2518,13 +2518,51 @@ JSON 结构（请求模型里是 `Optional[dict]`，**不落库**，只进队列
 - ⚠️ **落库时机**：与笔记落库**同一事务**（§8.2「一条笔记的落库是一个事务」），
   媒体生成成功后 `db.add(AigcMediaAsset)` + `db.flush()`，随 `_persist_generated_note` 一起 commit。
 
-### 13.4.4 视频生成（下一轮预留，本轮不做）
+### 13.4.4 视频生成（v2.14 定稿，2026-10-02）
 
-- 需新增 `model_type=video`（`business_provider_keys.MODEL_TYPES` + `_validate_model_type` +
-  服务商页下拉）+ 视频业务点（`generate_video`，kind=`video`）+ 视频客户端
-  （`POST {base_url}/videos/generations` → 轮询 `GET {base_url}/videos/generations/{id}` → 下载）。
-- 异步轮询嵌进 LLM 生成 worker（复用 `wait_allow` 限流 + 状态机 `queued→running→success/failed`）。
-- `aigc_media_assets.asset_type = video`。
+> **原「下一轮预留」已落地为定稿**（原句保留在下方「前置结论」里，不静默删除）。
+
+**上游协议**（OpenAI 兼容风格的视频接口，与图片的「一次返回」不同 —— 视频是**异步任务**）：
+
+| 步骤 | 请求 | 说明 |
+|---|---|---|
+| ① 提交 | `POST {base_url}/videos/generations` | body：`{model, prompt, image?, duration?, size?}`；返回 `{id}` |
+| ② 轮询 | `GET {base_url}/videos/generations/{id}` | 返回 `{status, url?}`；`status ∈ queued/running/succeeded/failed` |
+| ③ 下载 | `GET {url}` | 落 `storage/media/`，校验 `Content-Type` 是 `video/*` |
+
+**业务点**：新增 `generate_video`（kind=`video`，label「生成视频」），
+与 `generate_image` **分开挂服务商**（图像与视频模型可能不同供应商）。
+
+**`media_source` 复用**：`ai_generate`（文生视频）/ `reference_image`（图生视频，参考图 = 台账首图）；
+`product_image` / `material` 对视频**不适用** ⇒ 传了给 400 `LLM_MEDIA_SOURCE_INVALID_FOR_VIDEO`
+（**不静默退化成图片**：那会让用户以为选了视频却拿到一张图）。
+
+**`media_options`**：
+
+| 字段 | 说明 |
+|---|---|
+| `prompt?: str` | 视频提示词（空则由后端按商品拼默认） |
+| `duration?: int` | 时长秒数（默认 5，上限 10；上游不支持则忽略） |
+| `size?: str` | 分辨率（默认 `720x1280` 竖版；空则用默认） |
+
+**异步轮询嵌进 LLM 生成 worker**：复用 `CrawlRateLimiter.wait_allow()` 限流 +
+状态机 `queued → running → succeeded/failed`；**总超时 10 分钟**（视频慢），
+超时记 `failed` + 原因，**不无限等**（无界的等待就是没有刹车点）。
+
+**落库**：`aigc_media_assets.asset_type = "video"`；`prompt` / `model_name` / `local_path` 照图片口径。
+本轮**不建表、不迁移**（复用既有表与列）。
+
+**失败口径同图片**：视频生成失败 ⇒ 笔记照常落库（正文是产物），`note_assets` 无视频，
+worker 日志告警 —— 一个坏视频不废掉整篇正文。
+
+**前端**：生成配置弹窗的媒体来源按**模型类型可用性**动态显示 ——
+选了 kind=`video` 的服务商时只出「AI 生成视频 / 参考图生成视频」两项。
+
+#### 前置结论（原「下一轮预留」，保留供审计）
+
+- 需新增 `model_type=video`（已就位：`business_provider_keys.MODEL_TYPE_VIDEO` +
+  `MODEL_TYPES` 四值枚举 + 服务商页下拉，v2.9 落地）+ 视频业务点（**本轮新建 `generate_video`**）
+  + 视频客户端（**本轮新建**）。
 
 ### 13.4.5 前端：LLM 生成入口 + 生成配置弹窗 + 媒体来源四选一
 

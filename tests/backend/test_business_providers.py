@@ -26,6 +26,7 @@ from backend.app.services.business_provider_keys import (
     BUSINESS_KEY_GENERATE_NOTE,
     MODEL_TYPE_IMAGE,
     MODEL_TYPE_TEXT,
+    MODEL_TYPES,
 )
 from backend.app.services.llm_gateway_client import (
     BusinessModelRequiredError,
@@ -418,8 +419,11 @@ def test_list_includes_unconfigured_rows(api_client):
     items = resp.json()["items"]
     assert len(items) == len(BUSINESS_KEYS)
     assert all(i["configured"] is False for i in items)
-    # 每个业务点都带 kind（前端按它过滤下拉候选）
-    assert all(i["kind"] in (MODEL_TYPE_TEXT, MODEL_TYPE_IMAGE) for i in items)
+    # 每个业务点都带 kind（前端按它过滤下拉候选）。
+    # ⚠️ v2.14（2026-10-02）：新增 `generate_video`（kind=video）⇒ 白名单从
+    # 「text/image 两值」扩为 `MODEL_TYPES` 全集。**不是放松断言** —— 仍要求 kind
+    # 落在后端唯一枚举里（写错一个值照样红），只是枚举本身长大了。
+    assert all(i["kind"] in MODEL_TYPES for i in items)
 
 
 # --------------------------------------------------------------------------- #

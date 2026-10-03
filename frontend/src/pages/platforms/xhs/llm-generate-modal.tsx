@@ -36,7 +36,7 @@ import type { LlmMediaSource, MaterialFile, PromptTemplate } from "../../../type
 
 const { Text } = Typography;
 
-/** 媒体来源四选一（与后端 `MEDIA_SOURCE_*` 常量同名）。 */
+/** 媒体来源四选一（与后端 `MEDIA_SOURCE_*` 常量同名；v2.14 加两个视频来源）。 */
 const MEDIA_SOURCE_OPTIONS: { value: LlmMediaSource; label: string; hint: string }[] = [
   {
     value: "product_image",
@@ -58,7 +58,20 @@ const MEDIA_SOURCE_OPTIONS: { value: LlmMediaSource; label: string; hint: string
     label: "AI 生成",
     hint: "文生图（可填提示词）；带参考图则走图生图。生成张数上限 4",
   },
+  {
+    value: "video_ai_generate",
+    label: "AI 生成视频",
+    hint: "文生视频（异步任务，可能几分钟；失败不影响正文落库）",
+  },
+  {
+    value: "video_reference",
+    label: "参考图生成视频",
+    hint: "以商品首图为参考图做图生视频（异步任务，可能几分钟）",
+  },
 ];
+
+/** 视频来源（本弹窗按此分流参数区）。 */
+const VIDEO_SOURCES: LlmMediaSource[] = ["video_ai_generate", "video_reference"];
 
 export function LlmGenerateModal({
   open,
@@ -135,7 +148,7 @@ export function LlmGenerateModal({
       const values = await form.validateFields();
       setSubmitting(true);
 
-      // media_options 按来源组装（与后端 §13.4.1 的结构一一对应）
+      // media_options 按来源组装（与后端 §13.4.1 / §13.4.4 的结构一一对应）
       const mediaOptions =
         mediaSource === "material"
           ? { material_file_ids: values.material_file_ids || [] }
@@ -144,7 +157,12 @@ export function LlmGenerateModal({
                 ...(values.ai_prompt ? { prompt: values.ai_prompt } : {}),
                 ...(values.ai_count ? { count: values.ai_count } : {}),
               }
-            : {};
+            : VIDEO_SOURCES.includes(mediaSource)
+              ? {
+                  ...(values.video_prompt ? { prompt: values.video_prompt } : {}),
+                  ...(values.video_duration ? { duration: values.video_duration } : {}),
+                }
+              : {};
 
       const result = await generateLlmNote({
         platformAccountId: accountId,
@@ -282,6 +300,31 @@ export function LlmGenerateModal({
               message="参考图自动取商品的台账首图"
               description="不用手动填 URL —— 后端按商品 ID 从本地台账取图（避免任意 URL 下载）。商品没有图时会报缺，不会凭空生成。"
             />
+          )}
+
+          {VIDEO_SOURCES.includes(mediaSource) && (
+            <>
+              <Form.Item
+                name="video_prompt"
+                label="视频提示词（可选）"
+                extra="留空则由后端按商品信息拼默认提示词"
+              >
+                <Input.TextArea
+                  rows={3}
+                  maxLength={2000}
+                  placeholder="例如：手持商品展示，缓慢环绕，暖光，竖版"
+                />
+              </Form.Item>
+              <Form.Item name="video_duration" label="时长（秒）" initialValue={5} extra="上限 10">
+                <InputNumber min={1} max={10} style={{ width: 100 }} />
+              </Form.Item>
+              <Alert
+                type="warning"
+                showIcon
+                message="视频是异步任务，可能等几分钟"
+                description="提交后由后台轮询上游（最长 10 分钟）；视频生成失败不影响正文落库 —— 笔记照常产出，只是没有视频。"
+              />
+            </>
           )}
         </Form>
       </Space>

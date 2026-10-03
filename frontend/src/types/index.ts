@@ -1841,19 +1841,29 @@ export type PromptTemplate = {
   updated_at?: string | null;
 };
 
-/** 媒体来源四选一（设计 17 §13.4.1）。 */
-export type LlmMediaSource = "product_image" | "material" | "reference_image" | "ai_generate";
+/** 媒体来源（设计 17 §13.4.1 / §13.4.4 v2.14：图片四选一 + 视频两选一）。 */
+export type LlmMediaSource =
+  | "product_image"
+  | "material"
+  | "reference_image"
+  | "ai_generate"
+  | "video_ai_generate"
+  | "video_reference";
 
 /** `media_source` 的参数载体（与来源一一对应，结构随来源变）。 */
 export type LlmMediaOptions = {
   /** `material` 来源：勾选的素材文件 id。 */
   material_file_ids?: number[];
-  /** `reference_image` / `ai_generate` 来源：参考图 URL（为空则后端按台账首图取）。 */
+  /** `reference_image` / `ai_generate` / 视频来源：参考图 URL（为空则后端按台账首图取）。 */
   reference_image_urls?: string[];
-  /** `ai_generate` 来源：文生图提示词（空则后端按商品拼默认）。 */
+  /** `ai_generate` / 视频来源：提示词（空则后端按商品拼默认）。 */
   prompt?: string;
   /** `ai_generate` 来源：生成张数（默认 1，上限 4）。 */
   count?: number;
+  /** 视频来源：时长秒数（默认 5，上限 10）。 */
+  duration?: number;
+  /** 视频来源：分辨率（默认 `720x1280` 竖版）。 */
+  size?: string;
 };
 
 /** LLM 生成队列快照（键名 `generated` —— 底座通用形状是 `synced`，此处显式改名）。 */

@@ -2106,10 +2106,18 @@ def test_t9_panels_are_wired_into_workshop():
     assert "finally" not in card, "进度卡轮询摘除写了 finally（H9 铁律：会让队列停在那一刻）"
     assert "generated" in card, "进度卡未消费 `generated` 键（底座通用形状是 synced）"
 
-    # ④ 生成配置弹窗：媒体来源四选一齐全
+    # ④ 生成配置弹窗：媒体来源齐全（图片四选一 + 视频两选一，§13.4.4 v2.14）
     modal = _code_only(_read(LLM_GEN_MODAL))
-    for source in ("product_image", "material", "reference_image", "ai_generate"):
+    for source in (
+        "product_image",
+        "material",
+        "reference_image",
+        "ai_generate",
+        "video_ai_generate",
+        "video_reference",
+    ):
         assert source in modal, f"生成配置弹窗缺少媒体来源 {source}"
+    assert "VIDEO_SOURCES" in modal, "弹窗未按视频来源分流参数区（视频没界面入口）"
 
 
 def test_library_card_shows_note_type_tag():

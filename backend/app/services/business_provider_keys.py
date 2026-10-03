@@ -138,6 +138,20 @@ BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE = BusinessKey(
     ("商品列表-商品详情-生成商品详情图",),
 )
 
+# --------------------------------------------------------------------------- #
+# 视频类（kind = `video`）：1 个（§13.4.4 v2.14，2026-10-02）
+# --------------------------------------------------------------------------- #
+
+#: 文生视频 / 图生视频（notes 的「视频笔记」媒体来源）。
+#: ⚠️ 与 `generate_image` **分开挂服务商**：图像与视频模型通常不是同一供应商
+#: （且视频贵得多，用户要能单独指到便宜/可信的那家）。
+BUSINESS_KEY_GENERATE_VIDEO = BusinessKey(
+    "generate_video",
+    MODEL_TYPE_VIDEO,
+    "生成视频",
+    ("商品列表-LLM生成-媒体来源选视频",),
+)
+
 #: 全部业务点（顺序即前端「模型配置页」的业务点清单顺序）。
 #:
 #: ⚠️ 加业务点**只改这里**：新增一个 `BusinessKey` 常量并加入本元组，
@@ -152,6 +166,7 @@ BUSINESS_KEYS: Final[tuple[BusinessKey, ...]] = (
     BUSINESS_KEY_GENERATE_IMAGE,
     BUSINESS_KEY_DESCRIBE_IMAGE,
     BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE,
+    BUSINESS_KEY_GENERATE_VIDEO,
 )
 
 #: key → BusinessKey 反查表（映射解析与校验用；O(1)，不在调用点线性扫描）。

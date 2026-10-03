@@ -28,12 +28,22 @@ MEDIA_SOURCE_AI_GENERATE = "ai_generate"
 MEDIA_SOURCE_MATERIAL = "material"
 MEDIA_SOURCE_PRODUCT_IMAGE = "product_image"
 MEDIA_SOURCE_REFERENCE_IMAGE = "reference_image"
-MEDIA_SOURCES = (
+#: 视频来源（§13.4.4 v2.14）：与图片**分开取值**（媒体来源决定调哪条客户端链路）。
+MEDIA_SOURCE_VIDEO_AI = "video_ai_generate"
+MEDIA_SOURCE_VIDEO_REFERENCE = "video_reference"
+#: 图片来源（可复用商品原图 / 素材库）。
+IMAGE_MEDIA_SOURCES = (
     MEDIA_SOURCE_AI_GENERATE,
     MEDIA_SOURCE_MATERIAL,
     MEDIA_SOURCE_PRODUCT_IMAGE,
     MEDIA_SOURCE_REFERENCE_IMAGE,
 )
+#: 视频来源（只有 AI 生成 / 参考图两种 —— 商品原图与素材库对视频无意义）。
+VIDEO_MEDIA_SOURCES = (
+    MEDIA_SOURCE_VIDEO_AI,
+    MEDIA_SOURCE_VIDEO_REFERENCE,
+)
+MEDIA_SOURCES = IMAGE_MEDIA_SOURCES + VIDEO_MEDIA_SOURCES
 
 #: `aigc_media_assets.asset_type` 两值（设计 17 §3.6）。
 ASSET_TYPE_IMAGE = "image"
