@@ -49,8 +49,7 @@ import requests
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.app.models import MaterialFile, MaterialFolder
-from backend.app.models import AigcMediaAsset
+from backend.app.models import AigcMediaAsset, MaterialFolder
 from backend.app.services.material_scan_service import is_safe_material_path
 
 #: 顶层目录名（AI 产物与用户手放文件的分界）。

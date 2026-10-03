@@ -2944,6 +2944,30 @@ export function materialThumbUrl(thumbUrl: string): string {
   return thumbUrl;
 }
 
+/**
+ * **带鉴权取素材图**，返回 `blob:` URL（v2.29.2 —— 修「素材库图片不显示」的**真根因**）。
+ *
+ * ## 为什么不能用 `<img src="/api/...">`
+ *
+ * 后端 `get_current_user` 只认 **`Authorization: Bearer …`**
+ * （`core/deps.py` 的 `OAuth2PasswordBearer`，**没有 cookie 鉴权**）。
+ * 而浏览器加载 `<img src>` **发不出自定义请求头** ⇒ 那个请求必然 **401** ⇒ 破图。
+ *
+ * ⚠️ 这与「缩略图端点不存在」是**两个独立的 bug**：补了端点之后，
+ * `<img src>` 仍然取不到图 —— 用户反馈「素材库中图依旧未展示」正是这一层。
+ *
+ * 范式与 `downloadExportFile` 同源：走 axios（**拦截器自动带 token**）
+ * → `responseType: "blob"` → `createObjectURL`。
+ *
+ * ⚠️ **调用方负责 `revokeObjectURL`**（否则 blob 常驻内存；列表翻页会累积）。
+ * 见 `material-library-panel.tsx` 的 `useEffect` 清理。
+ */
+export async function fetchMaterialImageObjectUrl(url: string): Promise<string> {
+  const endpoint = url.startsWith("/api") ? url.slice(4) : url;
+  const response = await http.get<Blob>(endpoint, { responseType: "blob" });
+  return window.URL.createObjectURL(response.data);
+}
+
 /** 单条 LLM 生成（入队即返回，设计 17 §7.4）。 */
 export async function generateLlmNote(payload: {
   platformAccountId: number;

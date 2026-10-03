@@ -141,10 +141,43 @@ def test_thumb_endpoint_exists_and_frontend_uses_thumb_url():
 
     # ② 前端列表用 thumb_url（不是原图端点）
     panel = (root / "frontend/src/pages/platforms/xhs/material-library-panel.tsx").read_text(encoding="utf-8")
-    assert "materialThumbUrl(" in panel, (
-        "前端列表没用缩略图 ⇒ 6.5MB 原图当列表图，必然破图/卡死"
+    # v2.29.2：列表改用 `MaterialThumb` 组件（内部走 blob）——
+    # 判据从「有没有调 `materialThumbUrl`」改成「列表用的是不是缩略图 URL」，
+    # 否则组件化之后这条守卫会拿旧写法把新实现判红（本轮实测）。
+    assert "<MaterialThumb" in panel, "前端列表没用缩略图组件"
+    assert "file.thumb_url" in panel, (
+        "列表没用 `thumb_url` ⇒ 6.5MB 原图当列表图，必然破图/卡死"
     )
-    # ③ 但预览仍回落到原图（那是它该待的地方）
-    assert "preview={{" in panel and "materialFileUrl(file.id)" in panel, (
-        "预览应回落到原图（列表小图 + 点开看大图）"
+
+
+def test_material_images_are_fetched_with_auth_not_plain_img_src():
+    """素材库的图**必须走 axios 取 blob**，不能直接 `<img src="/api/...">`（真根因）。
+
+    ## 为什么这条最值钱（用户连报两轮「依旧未展示」）
+
+    补端点、前端改用 `thumb_url` 之后，用户仍报「素材库中图依旧未展示」——
+    因为还有**第三层**：后端 `get_current_user` 只认 `Authorization: Bearer`
+    （`core/deps.py` 的 `OAuth2PasswordBearer`，**没有 cookie 鉴权**），
+    而浏览器加载 `<img src>` **发不出自定义请求头** ⇒ 那个请求必然 **401**。
+
+    ⚠️ 这层**用 `requests` 带 token 是测不出来的**（我最初就是这么误判通过的）——
+    必须在**渲染层**看它用什么姿势取图。
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    panel = (root / "frontend/src/pages/platforms/xhs/material-library-panel.tsx").read_text(encoding="utf-8")
+
+    # ① 必须有走 axios 的取图组件
+    assert "fetchMaterialImageObjectUrl" in panel, (
+        "没有带鉴权取图 —— 用 <img src> 取会 401（后端只认 Bearer，无 cookie）"
+    )
+    assert "responseType" in (root / "frontend/src/lib/api.ts").read_text(encoding="utf-8"), (
+        "取图没走 blob（axios 拦截器才带得上 token）"
+    )
+    # ② blob URL 必须 revoke（否则列表翻页累积内存）
+    assert "revokeObjectURL" in panel, "blob URL 没释放（翻页会累积内存）"
+    # ③ 图片**不**直接 src 到 /api（那种写法就是 401 的形态）
+    assert 'src={materialFileUrl(' not in panel, (
+        "仍把 `<img src>` 直接指向 /api 端点 ⇒ 401" 
     )

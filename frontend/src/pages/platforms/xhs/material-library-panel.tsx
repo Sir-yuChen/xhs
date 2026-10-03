@@ -21,7 +21,6 @@ import {
   Image,
   Input,
   Modal,
-  Pagination,
   Popconfirm,
   Segmented,
   Space,
@@ -48,6 +47,7 @@ import {
   scanMaterialFolder,
   updateMaterialFolder,
   materialThumbUrl,
+  fetchMaterialImageObjectUrl,
 } from "../../../lib/api";
 import type { MaterialFile, MaterialFolder } from "../../../types";
 
@@ -68,6 +68,164 @@ function formatSize(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+/**
+ * 素材缩略图（v2.29.2）—— **必须走 axios 取 blob**，不能用 `<img src="/api/...">`。
+ *
+ * 真机根因：后端只认 `Authorization: Bearer`（**没有 cookie 鉴权**），
+ * 而 `<img src>` 发不出自定义请求头 ⇒ 那个请求必然 401 ⇒ 破图。
+ * 所以这里用 `fetchMaterialImageObjectUrl`（axios 拦截器自动带 token）
+ * 拿 `blob:` URL 给 `<img>`。
+ *
+ * ⚠️ **必须 revoke**：组件卸载 / url 变化时释放，否则列表翻页会累积 blob 内存。
+ */
+function MaterialThumb({
+  url,
+  fallbackId,
+  previewUrl,
+  title,
+}: {
+  url: string;
+  fallbackId: number;
+  /** v2.29.5：**大图预览地址**（原图端点）—— 用户口径「点击应支持大图预览」。 */
+  previewUrl?: string;
+  /** 预览弹窗标题（文件名）。 */
+  title?: string;
+}) {
+  // ⚠️ `MaterialThumb` 是组件外的独立组件 ⇒ 必须自己取 message
+  // （不能用外层 `MaterialLibraryPanel` 的那个 —— 作用域不通）
+  const { message } = App.useApp();
+  const [objectUrl, setObjectUrl] = useState<string>("");
+  const [failed, setFailed] = useState(false);
+  //: v2.29.5：大图（懒加载 —— 只有用户点了才去取原图，避免列表把 6.5MB 图都拉一遍）
+  const [previewObjectUrl, setPreviewObjectUrl] = useState<string>("");
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewLoading, setPreviewLoading] = useState(false);
+
+  useEffect(() => {
+    let revoked = false;
+    let created = "";
+    setFailed(false);
+    if (!url) {
+      // 没有缩略图 URL（老索引行 / 视频）⇒ 回落到原图端点
+      setObjectUrl("");
+      return;
+    }
+    void (async () => {
+      try {
+        const objectUrlValue = await fetchMaterialImageObjectUrl(url);
+        if (revoked) {
+          window.URL.revokeObjectURL(objectUrlValue);
+          return;
+        }
+        created = objectUrlValue;
+        setObjectUrl(objectUrlValue);
+      } catch {
+        setFailed(true);
+      }
+    })();
+    return () => {
+      revoked = true;
+      if (created) window.URL.revokeObjectURL(created);
+    };
+  }, [url, fallbackId]);
+
+  /**
+   * v2.29.5：点开大图（用户口径「点击应支持大图预览」）。
+   *
+   * ⚠️ **懒加载**：只有用户点了才去取原图 —— 列表里几十张 6.5 MB 图
+   * 全部预取会卡死（这正是缩略图存在的理由）。所以预览图**单独一份 objectUrl**，
+   * 与列表用的缩略图分开（两者的释放时机也不同）。
+   */
+  async function openPreview() {
+    if (!previewUrl) return;
+    setPreviewOpen(true);
+    if (previewObjectUrl) return; // 已经取过，直接用
+    setPreviewLoading(true);
+    try {
+      setPreviewObjectUrl(await fetchMaterialImageObjectUrl(previewUrl));
+    } catch {
+      message.error("大图加载失败");
+    } finally {
+      setPreviewLoading(false);
+    }
+  }
+
+  // 预览 objectUrl 的释放（**与缩略图分开管**：两者的生命周期不同）
+  useEffect(
+    () => () => {
+      if (previewObjectUrl) window.URL.revokeObjectURL(previewObjectUrl);
+    },
+    [previewObjectUrl]
+  );
+
+  const previewModal = previewUrl ? (
+    <Modal
+      open={previewOpen}
+      title={title}
+      footer={null}
+      width="80vw"
+      centered
+      onCancel={() => setPreviewOpen(false)}
+      styles={{ body: { textAlign: "center" } }}
+    >
+      {previewLoading && <Spin />}
+      {!previewLoading && previewObjectUrl && (
+        <img
+          src={previewObjectUrl}
+          alt={title || ""}
+          style={{ maxWidth: "100%", maxHeight: "75vh", objectFit: "contain" }}
+        />
+      )}
+      {!previewLoading && !previewObjectUrl && (
+        <Text type="secondary">大图加载失败</Text>
+      )}
+    </Modal>
+  ) : null;
+
+  if (failed || !objectUrl) {
+    // 加载中 / 取不到 ⇒ 占位（**不留破图** —— 破图比空位更让人以为坏了）
+    return (
+      <div
+        style={{
+          width: "100%",
+          height: "100%",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "rgba(0,0,0,0.03)",
+        }}
+      >
+        <Text type="secondary" style={{ fontSize: 11 }}>
+          {failed ? "缩略图取不到" : "加载中…"}
+        </Text>
+      </div>
+    );
+  }
+  return (
+    <>
+      <img
+        src={objectUrl}
+        alt=""
+        onClick={(event) => {
+          // ⚠️ 必须 stopPropagation：卡片的 onClick 是「选中」——
+          // 不拦住的话点图会同时选中 + 开预览（用户点「看大图」不该改变勾选）。
+          event.stopPropagation();
+          void openPreview();
+        }}
+        style={{
+          width: "100%",
+          height: "100%",
+          objectFit: "cover",
+          display: "block",
+          cursor: previewUrl ? "zoom-in" : "default",
+        }}
+      />
+      {previewModal}
+    </>
+  );
+}
+
+
 export function MaterialLibraryPanel({
   onSelectionChange,
 }: {
@@ -83,6 +241,10 @@ export function MaterialLibraryPanel({
   const [filesTotal, setFilesTotal] = useState(0);
   const [filesLoading, setFilesLoading] = useState(false);
   const [page, setPage] = useState(1);
+  /** v2.29.3：还有没有下一页（判据来自后端 `total`；无限滚动的刹车）。 */
+  const [hasMore, setHasMore] = useState(false);
+  /** 哨兵元素的引用（滚进视口就加载下一页）。 */
+  const loadMoreRef = useRef<HTMLDivElement | null>(null);
   const [keyword, setKeyword] = useState("");
   const [typeFilter, setTypeFilter] = useState<TypeFilter>("all");
 
@@ -109,8 +271,17 @@ export function MaterialLibraryPanel({
     return list;
   }, []);
 
+  /**
+   * 拉素材文件（v2.29.3：**无限滚动** —— 用户口径「素材文件不要使用分页，
+   * 使用无限滚动下拉」）。
+   *
+   * `append=false` = 换筛选/换文件夹（**重置**列表）；`append=true` = 滚到底（**追加**）。
+   * ⚠️ 追加时**不能覆盖** `files` —— 覆盖会让滚到底变成「内容整段跳掉」（用户会以为丢了）。
+   * ⚠️ 用 `nextPage`（而不是 state `page`）发请求：滚到底连续触发时 state 还没更新，
+   *    读 state 会**重复请求同一页**（数据重复 + 无限滚动卡住）。
+   */
   const loadFiles = useCallback(
-    async (folderId: number | null, nextPage = page) => {
+    async (folderId: number | null, nextPage = 1, append = false) => {
       setFilesLoading(true);
       try {
         const result = await fetchMaterialFiles({
@@ -120,18 +291,24 @@ export function MaterialLibraryPanel({
           page: nextPage,
           pageSize: FILE_PAGE_SIZE,
         });
-        setFiles(result.items);
+        setFiles((current) => (append ? [...current, ...result.items] : result.items));
         setFilesTotal(result.total);
+        setPage(nextPage);
+        //: 还能不能再拉（**判据来自后端 total**，不猜）
+        setHasMore(nextPage * FILE_PAGE_SIZE < result.total);
       } catch (error) {
-        setFiles([]);
-        setFilesTotal(0);
+        if (!append) {
+          setFiles([]);
+          setFilesTotal(0);
+        }
         // 取不到 ⇒ 一行安静说明（不是红块：这是列表查询的正常失败面）
         message.error(error instanceof Error ? error.message : "素材文件加载失败");
+        setHasMore(false);
       } finally {
         setFilesLoading(false);
       }
     },
-    [keyword, typeFilter, page, message]
+    [keyword, typeFilter, message]
   );
 
   useEffect(() => {
@@ -149,9 +326,43 @@ export function MaterialLibraryPanel({
   }, []);
 
   useEffect(() => {
-    void loadFiles(activeFolderId, page);
+    // 换文件夹 / 换筛选 ⇒ **重置**（page=1、覆盖）
+    void loadFiles(activeFolderId, 1, false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeFolderId, page, typeFilter]);
+  }, [activeFolderId, typeFilter]);
+  //: 关键词变化也重置（原先靠 `page` 变化触发；无限滚动下页是滚出来的，不能靠它）
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void loadFiles(activeFolderId, 1, false);
+    }, 250); // 输入防抖（每敲一个字就请求一次太吵）
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [keyword]);
+
+  /**
+   * v2.29.3：**滚到底自动加载**（无限滚动）—— `IntersectionObserver` 观察哨兵元素。
+   *
+   * ⚠️ 为什么不用 `onScroll` 算 `scrollTop + clientHeight >= scrollHeight`：
+   * 那种写法要在滚动事件里读布局（强制同步回流），且**容易在连续滚动时重复触发**；
+   * IntersectionObserver 由浏览器在合成层判定，天然去重、且离屏时不跑。
+   *
+   * 三重刹车（缺一个就会「滚到底疯狂请求」）：`hasMore` + `filesLoading` + 哨兵存在。
+   */
+  useEffect(() => {
+    const node = loadMoreRef.current;
+    if (!node || !hasMore || filesLoading) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          void loadFiles(activeFolderId, page + 1, true);
+        }
+      },
+      { rootMargin: "120px" } // 提前 120px 预加载（滚到底时数据已就位，不闪）
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasMore, filesLoading, page, activeFolderId]);
 
   // 组件卸载时收掉扫描轮询（不留后台定时器）。
   useEffect(
@@ -307,8 +518,9 @@ export function MaterialLibraryPanel({
                     cursor: "pointer",
                   }}
                   onClick={() => {
+                    // v2.29.3：只改文件夹 —— 「重置到第一页」由 `activeFolderId`
+                    // 的 `useEffect` 统一负责（这里再 setPage(1) 会**多发一次请求**）
                     setActiveFolderId(folder.id);
-                    setPage(1);
                   }}
                 >
                   <Space direction="vertical" size={2} style={{ width: "100%" }}>
@@ -376,8 +588,8 @@ export function MaterialLibraryPanel({
               size="small"
               value={typeFilter}
               onChange={(value) => {
+                // 同上：重置交给 `typeFilter` 的 useEffect
                 setTypeFilter(value as TypeFilter);
-                setPage(1);
               }}
               options={[
                 { label: "全部", value: "all" },
@@ -393,17 +605,11 @@ export function MaterialLibraryPanel({
               style={{ width: 200 }}
               value={keyword}
               onChange={(e) => setKeyword(e.target.value)}
-              onPressEnter={() => {
-                setPage(1);
-                void loadFiles(activeFolderId, 1);
-              }}
+              onPressEnter={() => void loadFiles(activeFolderId, 1, false)}
             />
             <Button
               size="small"
-              onClick={() => {
-                setPage(1);
-                void loadFiles(activeFolderId, 1);
-              }}
+              onClick={() => void loadFiles(activeFolderId, 1, false)}
             >
               搜索
             </Button>
@@ -424,7 +630,18 @@ export function MaterialLibraryPanel({
           />
         ) : (
           <>
-            <Space size={10} wrap>
+            {/* v2.29.5：**一行 6 张、宽度自适应**（用户口径 2026-10-03）。
+                ⚠️ 用 CSS Grid 而不是 `Space wrap`：`Space` 是固定宽度卡片**靠左排**，
+                最后一行不满时左边对齐、右边空 —— 而且卡片不会随容器变宽而变大。
+                `repeat(6, 1fr)` 让 6 列**均分容器**（窗口变宽每张跟着变宽），
+                `gap` 统一间距（不用 `Space` 的 margin 技巧）。 */}
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(6, minmax(0, 1fr))",
+                gap: 10,
+              }}
+            >
               {files.map((file) => {
                 const selected = selectedIds.includes(file.id);
                 const isImage = file.file_type === "image";
@@ -435,14 +652,27 @@ export function MaterialLibraryPanel({
                     hoverable
                     onClick={() => toggleSelect(file.id)}
                     style={{
-                      width: 168,
+                      // 宽度交给网格（`1fr` 均分，窗口变宽每张跟着变宽）——
+                      // 不再固定 168px（那会让「一行 6 张」在窄屏溢出、宽屏留白）
+                      width: "100%",
                       borderColor: selected ? "#1677ff" : undefined,
                       cursor: "pointer",
                     }}
                     cover={
+                      // v2.29.4：**文字叠在图片上**（用户口径「缩略图小，把图片名称和属性
+                      // 放图片上」）⇒ 容器 `position: relative`，文字条绝对定位在底部。
+                      // ⚠️ 文字条底色是**半透明黑**（不是纯色块）：图片内容不变，
+                      // 只是压一层可读背景 —— 纯色块会遮掉图的下半部分。
+                      // ⚠️ 这段注释必须用 `//` 而**不能**用 `{/* */}`：它处在
+                      // `cover={...}` 的**表达式位置**，`{...}` 会被解析成对象（真机实测报 TS1005）。
                       <div
                         style={{
-                          height: 120,
+                          position: "relative",
+                          // v2.29.5：**正方形（1:1）**而不是固定 120px 高 ——
+                          // 一行 6 张时每张宽度随窗口变，固定高度会让格子变扁
+                          // （越宽越扁）。`aspect-ratio` 让高度**跟着宽度走**，
+                          // 无论窗口多宽都是规整的方阵。
+                          aspectRatio: "1 / 1",
                           display: "flex",
                           alignItems: "center",
                           justifyContent: "center",
@@ -451,19 +681,14 @@ export function MaterialLibraryPanel({
                         }}
                       >
                         {isImage ? (
-                          // ⚠️ v2.29：**列表一律用缩略图**（`thumb_url`）。
-                          // 此前两个分支都拿 `materialFileUrl(file.id)`（原图端点）——
-                          // 原图 6.5MB/1776×2368，列表里几十张一起加载必然破图/卡死
-                          // （用户现象「图没有在页面正常展示，无法加载该图片」）。
-                          // 预览（点开看大图）才回落到原图，那才是它该待的地方。
-                          <Image
-                            src={file.thumb_url ? materialThumbUrl(file.thumb_url) : materialFileUrl(file.id)}
-                            height={120}
-                            style={{ objectFit: "cover" }}
-                            preview={{
-                              src: materialFileUrl(file.id),
-                              mask: "预览",
-                            }}
+                          // ⚠️ v2.29.2：**必须走 `MaterialThumb`**（axios 取 blob）——
+                          // `<img src="/api/...">` 带不了 Authorization 头，后端只认
+                          // Bearer 没有 cookie ⇒ 那种写法必然 401 破图（真机根因）。
+                          <MaterialThumb
+                            url={file.thumb_url || materialFileUrl(file.id)}
+                            fallbackId={file.id}
+                            previewUrl={materialFileUrl(file.id)}
+                            title={file.filename}
                           />
                         ) : (
                           // 视频无缩略图是**设计如此**（后端不为视频抽帧）
@@ -474,33 +699,58 @@ export function MaterialLibraryPanel({
                             </Text>
                           </Space>
                         )}
+                        {/* 叠在图片底部的信息条（文件名 + 大小 + 尺寸） */}
+                        <div
+                          style={{
+                            position: "absolute",
+                            left: 0,
+                            right: 0,
+                            bottom: 0,
+                            padding: "3px 6px",
+                            background: "rgba(0,0,0,0.55)",
+                            color: "#fff",
+                            fontSize: 11,
+                            lineHeight: "15px",
+                          }}
+                        >
+                          <Tooltip title={file.filename}>
+                            <div
+                              style={{
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {file.filename}
+                            </div>
+                          </Tooltip>
+                          <div style={{ opacity: 0.85 }}>
+                            {formatSize(file.size_bytes)}
+                            {file.width && file.height ? ` · ${file.width}×${file.height}` : ""}
+                          </div>
+                        </div>
                       </div>
                     }
                   >
-                    <Space direction="vertical" size={0} style={{ width: "100%" }}>
-                      <Tooltip title={file.filename}>
-                        <Text ellipsis style={{ fontSize: 12, maxWidth: 140, display: "block" }}>
-                          {file.filename}
-                        </Text>
-                      </Tooltip>
-                      <Text type="secondary" style={{ fontSize: 11 }}>
-                        {formatSize(file.size_bytes)}
-                        {file.width && file.height ? ` · ${file.width}×${file.height}` : ""}
-                      </Text>
-                    </Space>
+                    {/* 卡片 body 留空 —— 文件名/属性已叠在图上（同一信息不留两份）。
+                        `Cover` 模式下 body 为空仍会占一点高度 ⇒ 用 0 尺寸占位收掉。 */}
+                    <div style={{ display: "none" }} />
                   </Card>
                 );
               })}
-            </Space>
+            </div>
             <div style={{ marginTop: 12, textAlign: "right" }}>
-              <Pagination
-                size="small"
-                current={page}
-                pageSize={FILE_PAGE_SIZE}
-                total={filesTotal}
-                showSizeChanger={false}
-                onChange={(next) => setPage(next)}
-              />
+              {/* v2.29.3：**无限滚动哨兵**（用户口径「不要使用分页，使用无限滚动下拉」）。
+                  滚进视口（提前 120px）就追加下一页；`hasMore === false` 时
+                  改为「已全部加载」——那种「到底了」的确认感是分页控件给不了的。 */}
+              <div ref={loadMoreRef} style={{ textAlign: "center", padding: "12px 0" }}>
+                {filesLoading && <Spin size="small" />}
+                {!hasMore && files.length > 0 && (
+                  <Text type="secondary" style={{ fontSize: 11 }}>
+                    已全部加载（共 {filesTotal} 个）
+                  </Text>
+                )}
+              </div>
             </div>
           </>
         )}

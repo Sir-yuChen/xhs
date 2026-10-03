@@ -23,7 +23,6 @@ import {
 import { Tabs } from "antd";
 import { useSearchParams } from "react-router-dom";
 
-import { PageHeader } from "../../../components/layout/app-shell";
 import { DraftsWorkshopPanel } from "./drafts-workshop-panel";
 import { ImageStudioPanel } from "./image-studio-panel";
 import { MaterialLibraryPanel } from "./material-library-panel";
@@ -45,11 +44,13 @@ export function XhsNoteWorkshopPage() {
 
   return (
     <div>
-      <PageHeader
-        eyebrow="XHS Note Workshop"
-        title="笔记工坊"
-        description="图片生成、视频处理与草稿改写在一个页面内分区完成，互不干扰。"
-      />
+      {/* v2.29.2：**页头整块移除**（用户口径 2026-10-03：
+          「XHS Note Workshop / 笔记工坊 / 图片生成、视频处理与草稿改写在一个页面内
+           分区完成，互不干扰 —— 这些文本和标题全部移除，占用了太多空间」）。
+          ⇒ 三行（英文小标题 / 中文大标题 / 灰说明）全删，页面直接从 Tabs 开始。
+          ⚠️ 侧栏菜单项仍叫「笔记工坊」（那是导航标识，与页头不是一回事，
+          删了用户就找不到入口了）；`PageHeader` 组件本身保留 ——
+          其它页面还在用（别处删它会连带报错）。 */}
       <Tabs
         activeKey={activeTab}
         onChange={(key) => {
