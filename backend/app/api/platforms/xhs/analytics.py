@@ -30,9 +30,49 @@ from backend.app.services.shop_metrics_service import (
     trend_series as shop_trend_series,
 )
 from backend.app.services.sqlite_retry import LockRetryExhausted
-from backend.app.models import AiDraft, KeywordGroup, MonitoringTarget, Note, NoteComment, NoteTopic, PlatformAccount, PublishJob, Topic, User
+#: 热点驱动生成（M3 方向 2，设计 17 §13.11）—— 别名导入：stat_date_of 与指标侧同名。
+from backend.app.services.hot_topic_service import (
+    collect_topics_for_item,
+    list_matches as list_topic_matches,
+    list_topics as list_hot_topics,
+    match_topics_to_goods,
+    stat_date_of as hot_topic_stat_date_of,
+)
+from backend.app.adapters.xhs.qianfan_api_adapter import get_qianfan_api_adapter_factory
+from backend.app.services.shop_binding_service import qianfan_cookies_for_account
+#: 话题的平台正文形态（#名字[话题]#）—— 唯一实现，本文件不另写（DEF-044）。
+from backend.app.services.note_topic_service import topic_token
+from backend.app.services.note_gen_llm_service import NoteGenerationError
+#: 入队入口在 worker 模块（不在 service）—— 别照名字猜模块（实踩一次）。
+from backend.app.services.note_gen_llm_worker import start_llm_generate_note
+from backend.app.api.platforms.xhs.product_notes import (
+    _ledger_product,
+    _llm_generation_error,
+    _owned_account,
+)
+from backend.app.models import AiDraft, HotTopic, KeywordGroup, MonitoringTarget, Note, NoteComment, NoteTopic, PlatformAccount, PublishJob, ShopProduct, Topic, User
 
 router = APIRouter(prefix="/xhs/analytics", tags=["xhs-analytics"])
+
+
+class PlatformHotTopicRefresh(BaseModel):
+    """采集平台热点话题的入参（设计 17 §13.11）。
+
+    必须给 item_ids：平台接口按商品调用，
+    没有「不选商品拉全站热搜榜」的能力。
+    """
+
+    item_ids: list[str] = Field(default_factory=list)
+
+
+class PlatformHotTopicGenerate(BaseModel):
+    """按热点词驱动生成（设计 16 §3.2）。"""
+
+    item_id: str
+    topic: str
+    platform_account_id: int
+    template_id: int | None = None
+    media_source: str | None = "goods"
 
 
 class AnalyticsReportRequest(BaseModel):
@@ -606,6 +646,176 @@ def create_report(
         "download_url": f"/api/files/exports/{file_name}",
         "summary": report_payload["summary"],
     }
+
+
+@router.post("/platform-hot-topics/refresh")
+def refresh_platform_hot_topics(
+    payload: PlatformHotTopicRefresh,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    adapter_factory: Any = Depends(get_qianfan_api_adapter_factory),
+):
+    """采集平台按商品推荐的热度词（设计 17 §13.11，M3 方向 2）。
+
+    口径：平台接口 aigc-publish/attributes 按 item_id 调用
+    => 回来的是「与该商品相关」的平台热度词，不是全站热搜榜。
+    只读：POST 只是平台的查询形式（body 传商品 ID）。
+    无令牌 / 接口失败 => 结构化错误，不造话题。
+    """
+    item_ids = [str(i).strip() for i in payload.item_ids if str(i).strip()]
+    if not item_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "ITEM_IDS_REQUIRED", "message": "请至少选择一个商品"},
+        )
+
+    owned = {
+        row.item_id: row
+        for row in db.scalars(
+            select(ShopProduct).where(
+                ShopProduct.user_id == current_user.id, ShopProduct.item_id.in_(item_ids)
+            )
+        ).all()
+    }
+    unknown = [i for i in item_ids if i not in owned]
+    if unknown:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": "PRODUCT_NOT_FOUND",
+                "message": "商品不在本账号台账：%s" % ", ".join(unknown[:3]),
+            },
+        )
+
+    account_cookies = {}
+    topics_written = 0
+    matches_written = 0
+    failed = []
+
+    for item_id in item_ids:
+        product = owned[item_id]
+        account_id = product.platform_account_id
+        if account_id not in account_cookies:
+            account_cookies[account_id] = qianfan_cookies_for_account(db, account_id)
+        cookies = account_cookies[account_id]
+        if not cookies:
+            failed.append({"item_id": item_id, "reason": "该商品所属账号尚未导入千帆（ark）令牌"})
+            continue
+
+        try:
+            adapter = adapter_factory(cookies)
+            success, message, payload = adapter.aigc_publish_attributes(item_id)
+        except Exception as exc:  # noqa: BLE001 —— 单个商品失败不拖垮整批
+            failed.append({"item_id": item_id, "reason": "%s: %s" % (type(exc).__name__, exc)})
+            continue
+
+        if not success or not isinstance(payload, dict):
+            failed.append({"item_id": item_id, "reason": str(message)[:200] or "接口失败"})
+            continue
+
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        topics_written += collect_topics_for_item(
+            db,
+            user_id=current_user.id,
+            item_id=item_id,
+            attributes=data,
+            platform_account_id=account_id,
+        )
+        matches_written += match_topics_to_goods(
+            db, user_id=current_user.id, attributes=data, item_id=item_id
+        )
+
+    return {
+        "items": len(item_ids),
+        "topics": topics_written,
+        "matches": matches_written,
+        "failed": failed,
+        "stat_date": hot_topic_stat_date_of(shanghai_now()),
+        "source_note": "平台按所选商品推荐的热度词（非全站热搜榜）",
+    }
+
+
+@router.post("/platform-hot-topics/generate")
+def generate_from_platform_hot_topic(
+    payload: PlatformHotTopicGenerate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """按选中的平台热度词入队一次 LLM 生成（设计 16 §3.2「复用方向1 生成」）。
+
+    复用而不重造（DEF-044）：生成走 start_llm_generate_note
+    （与 /api/xhs/product-notes/generate-llm 同一个入口）。
+    终态与方向 1 同一个出口 —— 轮询 GET /api/xhs/product-notes/generate-llm-queue。
+    """
+    topic = payload.topic.strip()
+    if not topic:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "TOPIC_REQUIRED", "message": "请选择要驱动生成的话题"},
+        )
+
+    owned = db.scalars(
+        select(HotTopic).where(HotTopic.user_id == current_user.id, HotTopic.topic == topic)
+    ).first()
+    if owned is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": "TOPIC_NOT_COLLECTED",
+                "message": "该话题不在已采集的平台热度词里，请先采集",
+            },
+        )
+
+    account = _owned_account(db, current_user, payload.platform_account_id)
+    row = _ledger_product(db, current_user, account, payload.item_id)
+
+    tag = topic_token(topic)
+    try:
+        receipt = start_llm_generate_note(
+            db,
+            current_user.id,
+            shop_product_id=int(row.id),
+            account_id=int(account.id),
+            template_id=payload.template_id,
+            media_source=payload.media_source or "goods",
+            hot_topic=topic,
+        )
+    except NoteGenerationError as error:
+        raise _llm_generation_error(error)
+
+    return {
+        "ok": True,
+        "topic": topic,
+        "topic_tag": tag,
+        "platform_account_id": int(account.id),
+        "item_id": payload.item_id,
+        **receipt,
+    }
+
+
+@router.get("/platform-hot-topics")
+def list_platform_hot_topics(
+    item_id: Optional[str] = None,
+    limit: int = Query(100, ge=1, le=500),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """列出已采集的平台热度词（按平台热度降序）。"""
+    return {
+        "items": list_hot_topics(db, user_id=current_user.id, item_id=item_id, limit=limit),
+        "source_note": "平台按所选商品推荐的热度词（非全站热搜榜）",
+    }
+
+
+@router.get("/platform-hot-topics/matches")
+def list_platform_hot_topic_matches(
+    item_id: Optional[str] = None,
+    limit: int = Query(100, ge=1, le=500),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """话题↔商品匹配结果（按相关度降序，附可解释成分 match_reason）。"""
+    return {"items": list_topic_matches(db, user_id=current_user.id, item_id=item_id, limit=limit)}
 
 
 @router.get("/benchmarks")
