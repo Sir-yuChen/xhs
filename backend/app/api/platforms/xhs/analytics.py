@@ -4,7 +4,7 @@ import json
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -16,6 +16,12 @@ from backend.app.core.config import get_settings
 from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user
 from backend.app.core.time import shanghai_now
+from backend.app.services.note_metrics_service import (
+    collect_snapshots,
+    note_metrics,
+    stat_date_of,
+    trend_series,
+)
 from backend.app.models import AiDraft, KeywordGroup, MonitoringTarget, Note, NoteComment, NoteTopic, PlatformAccount, PublishJob, Topic, User
 
 router = APIRouter(prefix="/xhs/analytics", tags=["xhs-analytics"])
@@ -26,12 +32,6 @@ class AnalyticsReportRequest(BaseModel):
     format: Literal["json"] = "json"
 
 
-METRIC_KEYS = {
-    "likes": ("likes", "liked_count", "like_count"),
-    "collects": ("collects", "collected_count", "collect_count"),
-    "comments": ("comments", "comment_count"),
-    "shares": ("shares", "share_count"),
-}
 
 
 def _as_int(value: Any) -> int:
@@ -52,24 +52,14 @@ def _as_int(value: Any) -> int:
     return 0
 
 
-def _raw_value(raw: dict[str, Any], keys: tuple[str, ...]) -> int:
-    for key in keys:
-        if key in raw:
-            return _as_int(raw.get(key))
-        data = raw.get("data")
-        if isinstance(data, dict) and key in data:
-            return _as_int(data.get(key))
-        note = raw.get("note")
-        if isinstance(note, dict) and key in note:
-            return _as_int(note.get(key))
-    return 0
-
-
 def _note_metrics(note: Note) -> dict[str, int]:
-    raw = note.raw_json or {}
-    metrics = {name: _raw_value(raw, keys) for name, keys in METRIC_KEYS.items()}
-    metrics["engagement"] = sum(metrics.values())
-    return metrics
+    """单篇笔记指标（**委托公共口径**，v2.24）。
+
+    ⚠️ 口径定义已下沉到 `services/note_metrics_service.py` —— 采集层（写快照）与
+    展示层（本模块）**必须同一份**，否则「页面上看到的互动数」与「趋势里的数」
+    会对不上，且没人能归因（DEF-044）。
+    """
+    return note_metrics(note)
 
 
 def _owned_notes_statement(current_user: User):
@@ -342,6 +332,54 @@ def _write_report_file(current_user: User, payload: dict[str, Any]) -> tuple[str
     file_path = export_dir / file_name
     file_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return file_name, file_path
+
+
+@router.post("/metrics/collect")
+def collect_note_metrics(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """**采集当日笔记指标快照**（设计 17 §13.5.2，M2 方向 3）。
+
+    把该用户全部已同步笔记的平台侧指标（点赞/收藏/评论/分享/**阅读**）按**当天**
+    落一条快照。同日重复调用**覆盖**（唯一键 + upsert），不是追加。
+
+    ⚠️ **纯本地操作、零平台请求**：数据源是 `notes.raw_json`（同步时就已落库）
+    —— 所以这个端点可以随时调，不消耗平台额度、不触发风控。
+
+    ⚠️ **不回填历史**：raw_json 只有最后一版，拿它当「历史某天」就是编造数据。
+    趋势从本次采集起逐日积累。
+    """
+    written = collect_snapshots(db, user_id=current_user.id)
+    return {
+        "stat_date": stat_date_of(shanghai_now()),
+        "collected": written,
+    }
+
+
+@router.get("/metrics/trend")
+def note_metrics_trend(
+    days: int = Query(30, ge=0, le=365),
+    note_pk: Optional[int] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """**笔记指标趋势**（按日聚合；设计 17 §13.5.3，M2 方向 3）。
+
+    - `days`：取最近 N 天（默认 30；`0` = 不限）。
+    - `note_pk`：只看某一篇（不传 = 该用户全部笔记的合计）。
+
+    ⚠️ **只返回有快照的天**，不补零 —— 缺失的天用 0 填充会把「那天没采」
+    画成「那天互动掉到 0」（伪造数据，违反缺值口径）。
+    """
+    series = trend_series(db, user_id=current_user.id, days=days, note_pk=note_pk)
+    return {
+        "platform": "xhs",
+        "days": days,
+        "note_pk": note_pk,
+        "series": series,
+        "points": len(series),
+    }
 
 
 @router.get("/overview")

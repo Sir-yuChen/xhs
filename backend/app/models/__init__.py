@@ -17,7 +17,11 @@ from backend.app.models.llm_gateway import (
 )
 from backend.app.models.login_session import LoginSession
 from backend.app.models.material import MaterialFile, MaterialFolder
-from backend.app.models.monitoring import MonitoringSnapshot, MonitoringTarget
+from backend.app.models.monitoring import (
+    MonitoringSnapshot,
+    MonitoringTarget,
+    NoteMetricSnapshot,
+)
 from backend.app.models.note import Note, NoteAsset, NoteComment, NoteTopic, Topic
 from backend.app.models.notification import Notification
 from backend.app.models.platform_account import AccountCookieVersion, PlatformAccount
