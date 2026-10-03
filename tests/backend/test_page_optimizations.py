@@ -2154,9 +2154,17 @@ def test_material_files_have_delete_upload_and_switchable_preview():
     assert "deleteMaterialFilesBatch" in panel, "没有接批量删除请求"
     assert "disabled={selectedIds.length === 0}" in panel, "批量删除没做「无勾选时禁用」"
     assert "onClick={handleDeleteSelected}" in panel, "批量删除按钮没绑到处理函数"
-    # v2.31b：批量删除按钮必须在**顶部工具栏**（用户口径「顶部添加批量删除按钮」）
-    toolbar = _slice_between(panel, "title=\"素材文件夹\"", "foldersLoading ? (")
-    assert "批量删除" in toolbar, "批量删除按钮不在顶部工具栏（用户口径「顶部添加」）"
+    # v2.31c（用户口径「批量删除放素材文件区域内，不要放顶部文件夹，可能存在多个文件夹」）：
+    # **勾选相关操作必须在「素材文件」卡内**，且**不许**出现在「素材文件夹」卡里。
+    # ⚠️ 判据是**作用域**：勾选作用于当前文件夹的**文件**，而文件夹卡管的是**文件夹本身**
+    #    （且可能有多个）—— 挂在文件夹卡上会让作用域错位。
+    file_card = _slice_between(panel, "title={`素材文件", "已全部加载")
+    folder_card = _slice_between(panel, 'title="素材文件夹"', "foldersLoading ? (")
+    for label in ("已选 {selectedIds.length} 个文件", "批量删除", "全选"):
+        assert label in file_card, f"「{label}」不在素材文件卡内（用户口径：放素材文件区域）"
+        assert label not in folder_card, (
+            f"「{label}」仍在素材文件夹卡里（用户口径：不要放顶部文件夹）"
+        )
     batch_fn = _slice_between(panel, "function handleDeleteSelected(", "async function handleUpload(")
     assert re.search(r"^\s*modal\.confirm\(({)?$", batch_fn, re.M), (
         "批量删除没有**真正被调用**的确认框"

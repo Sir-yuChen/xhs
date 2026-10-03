@@ -637,58 +637,6 @@ export function MaterialLibraryPanel({
         title="素材文件夹"
         extra={
           <Space size={8}>
-            <Tag color="blue">已选 {selectedIds.length} 个文件</Tag>
-            {/* v2.31（用户口径「复选框勾选」）：加了复选框就必须给**全选 / 清空** ——
-                逐个勾几十张是纯体力活，而用户要批量删除时正是「全选再删」这个动作。
-                ⚠️ 只在**全选/部分选**两种语义间切换（部分选中时显示「全选」而不是「取消全选」，
-                否则用户点一下反而全清空，与他的意图相反）。 */}
-            <Button
-              size="small"
-              disabled={files.length === 0}
-              onClick={() => {
-                const allSelected = files.length > 0 && files.every((f) => selectedIds.includes(f.id));
-                setSelectedIds(allSelected ? [] : files.map((f) => f.id));
-              }}
-            >
-              {files.length > 0 && files.every((f) => selectedIds.includes(f.id))
-                ? "取消全选"
-                : "全选"}
-            </Button>
-            {/* v2.31：**上传**（用户口径「添加」）—— 只对**当前选中文件夹**可上传，
-                没选文件夹时禁用（上传要有落点，不能猜一个默认目录）。 */}
-            <Button
-              size="small"
-              icon={<UploadOutlined />}
-              loading={uploading}
-              disabled={activeFolderId === null}
-              onClick={() => uploadInputRef.current?.click()}
-            >
-              上传
-            </Button>
-            {/* 隐藏的原生文件选择器：浏览器只允许由用户手势直接触发（所以点上面的按钮转调它） */}
-            <input
-              ref={uploadInputRef}
-              type="file"
-              accept="image/*,video/*"
-              multiple
-              style={{ display: "none" }}
-              onChange={(event) => {
-                void handleUpload(event.target.files);
-                // 清空 value：否则连续选**同一个文件**不会触发 change（DOM 认为值没变）
-                event.target.value = "";
-              }}
-            />
-            {/* v2.31：**批量删除**（用户口径「删除，批量删除」）—— 没勾选时禁用，
-                而不是隐藏（隐藏会让用户以为没这个功能）。 */}
-            <Button
-              danger
-              size="small"
-              icon={<DeleteOutlined />}
-              disabled={selectedIds.length === 0}
-              onClick={handleDeleteSelected}
-            >
-              批量删除
-            </Button>
             <Button
               icon={<ReloadOutlined />}
               size="small"
@@ -807,6 +755,64 @@ export function MaterialLibraryPanel({
                 { label: "视频", value: "video" },
               ]}
             />
+            {/* v2.31c（用户口径「批量删除放素材文件区域内，不要放顶部文件夹，
+                可能存在多个文件夹」）：**勾选相关的操作全部放在「素材文件」卡** ——
+                ⚠️ 判据是「作用域」：勾选作用于**当前文件夹的素材文件**，
+                而「素材文件夹」卡管的是**文件夹本身**（且可能有多个）。
+                把「已选 N / 全选 / 批量删除」挂在文件夹卡上会让作用域错位
+                （看起来像在操作文件夹）。「上传」同理 —— 它落到当前文件夹。 */}
+            <Tag color="blue">已选 {selectedIds.length} 个文件</Tag>
+            {/* v2.31（用户口径「复选框勾选」）：加了复选框就必须给**全选 / 清空** ——
+                逐个勾几十张是纯体力活，而用户要批量删除时正是「全选再删」这个动作。
+                ⚠️ 只在**全选/部分选**两种语义间切换（部分选中时显示「全选」而不是「取消全选」，
+                否则用户点一下反而全清空，与他的意图相反）。 */}
+            <Button
+              size="small"
+              disabled={files.length === 0}
+              onClick={() => {
+                const allSelected = files.length > 0 && files.every((f) => selectedIds.includes(f.id));
+                setSelectedIds(allSelected ? [] : files.map((f) => f.id));
+              }}
+            >
+              {files.length > 0 && files.every((f) => selectedIds.includes(f.id))
+                ? "取消全选"
+                : "全选"}
+            </Button>
+            {/* v2.31：**上传**（用户口径「添加」）—— 只对**当前选中文件夹**可上传，
+                没选文件夹时禁用（上传要有落点，不能猜一个默认目录）。 */}
+            <Button
+              size="small"
+              icon={<UploadOutlined />}
+              loading={uploading}
+              disabled={activeFolderId === null}
+              onClick={() => uploadInputRef.current?.click()}
+            >
+              上传
+            </Button>
+            {/* 隐藏的原生文件选择器：浏览器只允许由用户手势直接触发（所以点上面的按钮转调它） */}
+            <input
+              ref={uploadInputRef}
+              type="file"
+              accept="image/*,video/*"
+              multiple
+              style={{ display: "none" }}
+              onChange={(event) => {
+                void handleUpload(event.target.files);
+                // 清空 value：否则连续选**同一个文件**不会触发 change（DOM 认为值没变）
+                event.target.value = "";
+              }}
+            />
+            {/* v2.31：**批量删除**（用户口径「删除，批量删除」）—— 没勾选时禁用，
+                而不是隐藏（隐藏会让用户以为没这个功能）。 */}
+            <Button
+              danger
+              size="small"
+              icon={<DeleteOutlined />}
+              disabled={selectedIds.length === 0}
+              onClick={handleDeleteSelected}
+            >
+              批量删除
+            </Button>
             <Input
               size="small"
               allowClear
