@@ -187,11 +187,47 @@ def patch_service_sessions(monkeypatch: Any, session_factory: Callable[[], Sessi
 
 @pytest.fixture()
 def db_engine(db_path: Path) -> Engine:
-    """建好全部表的 engine。"""
+    """建好全部表的 engine。
+
+    ⚠️ **顺带播种 `users` id=1 与 `platform_accounts` id=10**（2026-10-04 加）。
+    原因：隔离修好（见 `db_session`）之后，一批此前**静默读生产库**的用例
+    立刻暴露了「它们依赖生产库里已存在的 users / platform_accounts 行」——
+    测试库是空的，于是 `INSERT INTO material_folders (user_id=1)`、`notes
+    (platform_account_id=10)` 之类会 `FOREIGN KEY constraint failed`。
+
+    ⚠️ 这**不是**放宽容忍度，而是把「夹具库必须自洽」补上：外键指向的行由夹具
+    自己造，用例不必各自重复播种（重复播种 = 20 处各写一份，迟早漏一处）。
+    """
     engine = make_engine(db_path)
     _base().metadata.create_all(bind=engine)
+    _seed_baseline_rows(engine)
     yield engine
     engine.dispose()
+
+
+def _seed_baseline_rows(engine: Engine) -> None:
+    """播种外键基线行（`users` / `platform_accounts`），幂等。"""
+    from backend.app.models.platform_account import PlatformAccount  # noqa: PLC0415
+    from backend.app.models.user import User  # noqa: PLC0415
+
+    factory = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    db = factory()
+    try:
+        # ⚠️ 必须**先 flush 父行再插子行**：同一个 commit 里 SQLAlchemy 不保证
+        # 按声明顺序发语句，实测 `platform_accounts.user_id -> users.id` 会撞
+        # `FOREIGN KEY constraint failed`（种子行自己就违反外键）。
+        if db.get(User, 1) is None:
+            db.add(User(id=1, username="test-user-1", password_hash="x"))
+            db.flush()
+        if db.get(PlatformAccount, 10) is None:
+            db.add(
+                PlatformAccount(
+                    id=10, user_id=1, platform="xhs", nickname="test-account-10"
+                )
+            )
+        db.commit()
+    finally:
+        db.close()
 
 
 @pytest.fixture()
@@ -206,8 +242,21 @@ def db_factory(db_engine: Engine) -> Callable[[], Session]:
 
 
 @pytest.fixture()
-def db_session(db_factory: Callable[[], Session]) -> Iterator[Session]:
-    """单个 Session（不需要「请求后再查」的用例用它更短）。"""
+def db_session(
+    db_factory: Callable[[], Session], monkeypatch
+) -> Iterator[Session]:
+    """单个 Session（不需要「请求后再查」的用例用它更短）。
+
+    ⚠️ **本夹具同时打桩全部服务模块的 Session 工厂**（2026-10-04 加）：
+    此前只有 `api_client` 打桩，于是「用 `db_session` + 直接调服务函数」的用例
+    会**静默打到生产库**。实测事故：`test_workflows.py` 的 `run_workflow_job`
+    用例往 `data/spider_xhs.db` 写了 21 条 `workflow_runs` + 12 条 `workflow_nodes`
+    （workflow_service 自开 Session，本夹具不管它）。
+
+    教训：**隔离必须是夹具的属性，不能是「用例记得申请哪个夹具」的约定** ——
+    后者迟早在某个新用例上漏掉，而漏掉的代价是污染真实数据。
+    """
+    patch_service_sessions(monkeypatch, db_factory)
     session = db_factory()
     yield session
     session.close()

@@ -37,6 +37,18 @@ def _make_video_stub(path: Path) -> None:
 
 
 def _seed_folder(db: Any, user_id: int, name: str, path: str) -> MaterialFolder:
+    """造素材目录行（**连带保证 `users` 行存在**）。
+
+    ⚠️ 2026-10-04 加：隔离修好之后，此前「静默读生产库」的用例暴露了自己依赖
+    生产中已存在的 users 行。跨用户用例用 `user_id=7` 这类夹具库没有的 id ⇒
+    `FOREIGN KEY constraint failed`。外键指向的行由**造数助手自己**造出来，
+    比在 20 个用例里各播一次种可靠（漏一处就是一条假红）。
+    """
+    from backend.app.models.user import User
+
+    if db.get(User, user_id) is None:
+        db.add(User(id=user_id, username=f"mat-test-{user_id}", password_hash="x"))
+        db.flush()
     folder = MaterialFolder(user_id=user_id, name=name, path=path, enabled=True)
     db.add(folder)
     db.commit()
