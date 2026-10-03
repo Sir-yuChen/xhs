@@ -523,11 +523,32 @@ class OpenAICompatibleImageClient:
             response.raise_for_status()
         except requests.HTTPError as exc:
             detail = ""
+            code = ""
             try:
                 error_payload = _load_json_response(exc.response) if exc.response else {}
-                detail = error_payload.get("error", {}).get("message", "") if isinstance(error_payload, dict) else ""
+                if isinstance(error_payload, dict):
+                    err = error_payload.get("error")
+                    if isinstance(err, dict):
+                        detail = err.get("message", "")
+                        code = err.get("code", "")
             except Exception:
                 pass
+            # ⚠️ **把上游的机器话翻成人话**（真机实测：千问额度耗尽时上游返回 403 +
+            # `Free quota exhausted…`，但 SDK 的 HTTPError 文案是
+            # `403 Client Error: Forbidden for url: …`，`detail` 一旦取不到
+            # 用户就只能看到一串 URL —— 既不知道原因、也不知道该做什么）。
+            # 只为**已知的、用户能自救的**情况给译文；其余原样透传（不臆造原因）。
+            if detail and "quota" in detail.lower():
+                detail = (
+                    f"服务商额度不足（{code or 'insufficient_quota'}）："
+                    f"{detail} —— 请到服务商控制台充值，或关闭「仅用免费额度」模式。"
+                )
+            elif not detail and exc.response is not None and exc.response.status_code in (401, 403):
+                detail = (
+                    f"服务商拒绝了这次请求（HTTP {exc.response.status_code}）："
+                    "常见原因是额度耗尽 / 令牌无该模型权限 / 令牌已失效 —— "
+                    "请到「大模型网关 → 服务商」点「测试」确认，并核对账户余额。"
+                )
             raise ValueError(f"图片生成失败: {detail or exc}") from exc
         payload = _load_json_response(response)
         try:

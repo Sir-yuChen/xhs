@@ -696,13 +696,6 @@ export function XhsShopItemsPage() {
    *
    * `null` = 未在生成；数字 = 起始时间戳（`Date.now()`）。
    */
-  /**
-   * v2.28：弹窗标题。生成中**追加耗时**（用户口径「统计耗时」）——
-   * 但基础文案 `"生成AI商品图"` 保持不变（它是页面守卫切范围的锚点）。
-   */
-  const detailImageTitle = detailImageGenerating
-    ? `生成AI商品图 · 生成中 ${detailImageElapsed}s（请勿关闭，关闭会看不到结果）`
-    : "生成AI商品图";
   const [detailImageStartedAt, setDetailImageStartedAt] = useState<number | null>(null);
   //: 每 500ms 刷一次的「已耗时（秒）」——只为显示，不参与判据。
   const [detailImageElapsed, setDetailImageElapsed] = useState(0);
@@ -718,6 +711,14 @@ export function XhsShopItemsPage() {
     }, 500);
     return () => window.clearInterval(timer);
   }, [detailImageStartedAt]);
+
+  /**
+   * v2.28：弹窗标题。生成中**追加耗时**（用户口径「统计耗时」）——
+   * 但基础文案 `"生成AI商品图"` 保持不变（它是页面守卫切范围的锚点）。
+   */
+  const detailImageTitle = detailImageGenerating
+    ? `生成AI商品图 · 生成中 ${detailImageElapsed}s（请勿关闭，关闭会看不到结果）`
+    : "生成AI商品图";
   const [detailImage, setDetailImage] = useState<GenerateDetailImageResult | null>(null);
   // v2.15：商品图集（主图 / 原详情图）与勾选的参考图。
   const [detailImageDetail, setDetailImageDetail] = useState<XhsShopItemDetail | null>(null);
