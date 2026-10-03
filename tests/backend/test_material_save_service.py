@@ -181,3 +181,50 @@ def test_material_images_are_fetched_with_auth_not_plain_img_src():
     assert 'src={materialFileUrl(' not in panel, (
         "仍把 `<img src>` 直接指向 /api 端点 ⇒ 401" 
     )
+
+
+def test_thumbnail_scales_without_cropping():
+    """缩略图**只等比缩放、不裁切**（v2.29.6 —— 治「双重裁切」）。
+
+    ## 为什么这条值得守
+
+    后端原先用 `ImageOps.fit(..., (SIZE, SIZE))` = **居中裁成正方形**，
+    而前端格子是 `objectFit: "cover"`（**再裁一次**）⇒ **双重裁切**：
+    一张 1776×2368 的竖图，后端先切掉上下 25%，前端再从剩下的方图里切，
+    商品主体很容易被切掉（用户现象「缩略图太模糊 / 图不对」）。
+
+    正确分工：**后端只管「变小」（等比、保住全部画面），前端管「显示成方形」**。
+
+    ⚠️ 判据是**行为级**（真生成一张竖图缩略图看尺寸），不是源码字符串匹配 ——
+    「有没有调 `fit`」这种判据在换写成别 API 时会漏。
+    """
+    from pathlib import Path
+
+    from PIL import Image
+
+    from backend.app.services.material_scan_service import THUMB_SIZE, _make_image_thumb
+
+    # 造一张真竖图（宽:高 = 3:4），放到临时目录
+    src = Path(__file__).parent / "_tmp_thumb_portrait.png"
+    src.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (900, 1200), (200, 120, 80)).save(src)
+    try:
+        w, h, url = _make_image_thumb(src, folder_id=99999, file_id=1)
+        assert (w, h) == (900, 1200), "应回原图尺寸（尺寸字段 = 原图，供前端展示属性）"
+        assert url, "缩略图 URL 生成失败"
+        # 缩略图**本体**：等比缩放 ⇒ 宽高比与原图一致（3:4），且不超上限
+        from backend.app.services.material_scan_service import thumbs_dir
+
+        target = thumbs_dir() / "99999" / "f99999-1.jpg"
+        assert target.is_file(), "缩略图没落盘"
+        tw, th = Image.open(target).size
+        assert abs(tw / th - 900 / 1200) < 0.01, (
+            f"缩略图宽高比 {tw}/{th} 与原图 3:4 不符 ⇒ 被裁切了（双重裁切的源头）"
+        )
+        assert max(tw, th) <= THUMB_SIZE, f"缩略图超过上限 {THUMB_SIZE}：{tw}×{th}"
+        assert max(tw, th) == THUMB_SIZE, "应缩放**到**上限（否则高清屏下仍糊）"
+    finally:
+        src.unlink(missing_ok=True)
+        t = thumbs_dir() / "99999" / "f99999-1.jpg"
+        t.unlink(missing_ok=True)
+        (thumbs_dir() / "99999").rmdir() if (thumbs_dir() / "99999").is_dir() else None

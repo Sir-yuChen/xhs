@@ -48,16 +48,23 @@ logger = logging.getLogger(__name__)
 IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".avi", ".mkv"})
 
-#: 缩略图规格（**320 × 320 cover**，v2.29.5 由 80 上调）。
+#: 缩略图规格（**720 × 720 cover**）。
 #:
-#: ⚠️ **为什么从 80 提到 320**：素材库改成「一行 6 张、宽度自适应」之后，
-#: 每张格子的实际渲染宽度约 150–260px（取决于窗口宽）。80px 的图被放大到 200px 显示
-#: ⇒ **明显模糊**（用户现象「图片模糊」）。
+#: ## 尺寸是怎么定的（一次算清楚，别再来回调）
 #:
-#: 为什么不干脆用原图：原图实测 1776×2368 / **6.5 MB**，列表几十张一起加载会卡死
-#: （这正是缩略图存在的理由）。320px 覆盖 6 列布局的最宽渲染尺寸（约 260px）还有余量，
-#: 单张约 15–30 KB —— 比原图小两个数量级，又不会糊。
-THUMB_SIZE = 320
+#: 清晰度要求 = **渲染宽度 × 设备像素比（DPR）**：
+#: * 六宫格下每张渲染宽度约 **150–260px**（取决于窗口宽）；
+#: * 用户本机屏幕缩放 **175%** ⇒ DPR 约 **1.75**；
+#: * ⇒ 需要 ≥ 260 × 1.75 ≈ **455px** 才不糊。
+#:
+#: 取 **720** 是为留下余量（宽屏下格子还会更宽、DPR 2.0 的设备也不少见），
+#: 单张约 **80–150 KB** —— 仍比原图（1776×2368 / **6.5 MB**）小一到两个数量级，
+#: 列表几十张一起加载不会卡。
+#:
+#: ⚠️ 演进：80（旧固定小卡片）→ 320（六宫格首版，**高 DPI 屏下仍糊** —— 用户实测
+#: 「缩略图太模糊，至少需要高清」）→ **720**。
+#: ⚠️ **改这个常量后必须清索引行重扫**：扫描按 `mtime` 增量，文件没变不会重做缩略图。
+THUMB_SIZE = 720
 
 
 def thumbs_dir() -> Path:
@@ -181,9 +188,21 @@ def _make_image_thumb(source: Path, folder_id: int, file_id: int) -> tuple[int |
             target_dir.mkdir(parents=True, exist_ok=True)
             target = target_dir / f"f{folder_id}-{file_id}.jpg"
 
-            thumb = ImageOps.fit(im.convert("RGB"), (THUMB_SIZE, THUMB_SIZE),
-                                 method=_LANCZOS, centering=(0.5, 0.5))
-            thumb.save(target, format="JPEG", quality=82, optimize=True)
+            # ⚠️ **只等比缩放，不裁切**（v2.29.6）。
+            #
+            # 原先用 `ImageOps.fit(..., (SIZE, SIZE))` = **居中裁成正方形** ——
+            # 而前端格子也是 `objectFit: "cover"`（**再裁一次**）
+            # ⇒ **双重裁切**：一张 1776×2368 的竖图，后端先切掉上下 25%，
+            #    前端再从剩下的方图里切一次，商品主体很容易被切掉。
+            #
+            # 分工应该是**各管一段**：后端负责「变小」（等比缩放、保住全部画面），
+            # 前端负责「显示成方形」（`cover` 裁一次，且**按格子形状裁**，
+            # 格子宽高比变了裁切位置也跟着对）。
+            #
+            # `thumbnail()` 只缩不放（原图比上限小时保持原尺寸，不做无谓放大）。
+            thumb = im.convert("RGB")
+            thumb.thumbnail((THUMB_SIZE, THUMB_SIZE), _LANCZOS)
+            thumb.save(target, format="JPEG", quality=85, optimize=True)
         return width, height, _thumb_rel_url(folder_id, str(file_id))
     except Exception as exc:  # noqa: BLE001 —— 单文件失败不影响整批（设计 17 §6.1 健壮性）
         logger.warning("素材缩略图生成失败 %s: %s", source, exc)
