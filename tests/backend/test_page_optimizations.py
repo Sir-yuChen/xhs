@@ -2136,7 +2136,7 @@ def test_detail_image_modal_uses_two_column_layout():
     page = _code_only(_read(SHOP_ITEMS_PAGE))
     # 只取弹窗那一段（从注释头到 `</Modal>`），避免命中页面别处的 Row/Col
     block = _slice_between(page, 'title="生成商品详情图"', "</Modal>")
-    assert "width={760}" in block, "弹窗未加宽到 760（窄弹窗放不下两栏）"
+    assert 'width="60vw"' in block, "弹窗宽度不是「全屏 60%」（用户口径）"
     assert "<Row" in block and block.count("<Col") >= 2, "弹窗未改成左右两栏"
     assert "生成结果" in block, "右栏缺少「生成结果」区（出图要即时可见，不能被压到底部）"
     assert "ReferenceImagePicker" in block, "参考图勾选丢了"

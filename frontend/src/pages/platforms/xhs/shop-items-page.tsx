@@ -1999,13 +1999,15 @@ export function XhsShopItemsPage() {
 
           ⚠️ **v2.16 重排理由**（用户口径「重新布局一下」）：原版 560 宽、从上到下一路堆叠
           （商品信息 → 参考图两组 → 提示词 → 结果）⇒ 参考图缩略图挤成窄条、出图结果被
-          压在弹窗最底部（要滚动才看得到）。改为 **760 宽 + 左右两栏**：
+          压在弹窗最底部（要滚动才看得到）。改为**左右两栏**：
           左栏 = 配置（商品 + 参考图 + 提示词），右栏 = 出图结果（生成后即时可见，不滚）。
+          宽度 **`60vw`**（全屏 60%，用户口径）—— 60vw 在宽屏上会很高，
+          故同时给内容区 `maxHeight` + 滚动，弹窗本体不超出视口。
           `Row/Col` 而非 `flex`：与全站栅格口径一致（窄视口自动折行单列）。 */}
       <Modal
         open={detailImageOpen}
         title="生成商品详情图"
-        width={760}
+        width="60vw"
         onCancel={() => setDetailImageOpen(false)}
         footer={
           <Space>
@@ -2020,9 +2022,10 @@ export function XhsShopItemsPage() {
           </Space>
         }
       >
-        <Row gutter={16}>
+        {/* 60vw 宽屏下弹窗会很高 ⇒ 内容区限高滚动，弹窗本体不超出视口 */}
+        <Row gutter={16} style={{ maxHeight: "68vh", overflowY: "auto" }}>
           {/* 左栏：配置（商品信息 / 参考图勾选 / 补充要求） */}
-          <Col span={14}>
+          <Col span={12}>
             <Space direction="vertical" size={12} style={{ width: "100%" }}>
               <Descriptions size="small" column={1}>
                 <Descriptions.Item label="商品">
@@ -2092,14 +2095,15 @@ export function XhsShopItemsPage() {
           </Col>
 
           {/* 右栏：出图结果（生成后即时可见；未生成时给一行说明，不留空白） */}
-          <Col span={10}>
+          <Col span={12}>
             <Text strong style={{ fontSize: 13 }}>
               生成结果
             </Text>
             <div
               style={{
                 marginTop: 6,
-                minHeight: 260,
+                minHeight: 320,
+                height: "calc(100% - 26px)",
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
