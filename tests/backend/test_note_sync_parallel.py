@@ -28,6 +28,11 @@ from backend.app.services import note_sync_service as nss
 
 
 def _seed_account(db, *, nickname: str) -> int:
+    # ⚠️ FK=ON（2026-10-04）：`platform_accounts.user_id -> users.id` 有外键，
+    # 父行必须存在（`db_factory` 按契约不播种）。
+    from tests.backend.conftest import seed_owner_rows as _seed
+
+    _seed(db.get_bind(), user_id=1)
     account = PlatformAccount(
         user_id=1, platform="xhs", sub_type="creator", nickname=nickname, status="active"
     )

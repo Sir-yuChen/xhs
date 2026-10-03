@@ -155,6 +155,10 @@ def _seed_item(
     """落一条真的队列项，返回 `(task_id, note_pk)`。"""
     db = db_factory()
     try:
+        # ⚠️ FK=ON（2026-10-04）：`db_factory` 按契约不播种，父行就地补。
+        from tests.backend.conftest import seed_owner_rows as _seed
+
+        _seed(db.get_bind(), user_id=1)
         account = PlatformAccount(
             user_id=1, platform="xhs", sub_type="creator", nickname="守活店", status="active"
         )

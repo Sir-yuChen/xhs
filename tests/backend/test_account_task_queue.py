@@ -86,6 +86,11 @@ def _user_id(db_factory, username: str) -> int:
 def _make_account(db_factory, user_id: int, nickname: str = "测试店") -> int:
     db = db_factory()
     try:
+        # ⚠️ FK=ON（2026-10-04）：`db_factory` 按契约不播种，父行就地补
+        # （本助手带 user_id 参数，跨租户用例会传别的 id）。
+        from tests.backend.conftest import seed_owner_rows as _seed
+
+        _seed(db.get_bind(), user_id=user_id)
         account = PlatformAccount(
             user_id=user_id, platform="xhs", sub_type="creator", nickname=nickname, status="active"
         )
@@ -107,6 +112,10 @@ def _make_task(
 ) -> int:
     db = db_factory()
     try:
+        # ⚠️ FK=ON（2026-10-04）：`db_factory` 按契约不播种。
+        from tests.backend.conftest import seed_owner_rows as _seed
+
+        _seed(db.get_bind(), user_id=user_id)
         payload = {"account_id": account_id, "source": "manual"}
         payload.update(payload_extra or {})
         task = Task(
@@ -525,6 +534,10 @@ def test_retention_cleanup_covers_all_account_level_types(db_factory, monkeypatc
     long_ago = shanghai_now() - timedelta(days=40)
     db = db_factory()
     try:
+        # ⚠️ FK=ON（2026-10-04）：父行就地补（`db_factory` 不播种）。
+        from tests.backend.conftest import seed_owner_rows as _seed
+
+        _seed(db.get_bind(), user_id=1)
         for task_type in ACCOUNT_TYPES:
             task = Task(
                 user_id=1,

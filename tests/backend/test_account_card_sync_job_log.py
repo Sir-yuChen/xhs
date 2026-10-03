@@ -70,6 +70,11 @@ def _user_id(db_factory, username: str) -> int:
 def _make_account(db_factory, user_id: int, nickname: str = "账号卡号") -> int:
     db = db_factory()
     try:
+        # ⚠️ FK=ON（2026-10-04）：`db_factory` 按契约不播种，父行就地补
+        # （本助手带 user_id 参数，跨租户用例会传别的 id）。
+        from tests.backend.conftest import seed_owner_rows as _seed
+
+        _seed(db.get_bind(), user_id=user_id)
         account = PlatformAccount(
             user_id=user_id, platform="xhs", sub_type="creator", nickname=nickname, status="active"
         )
@@ -439,6 +444,9 @@ def test_await_task_terminal_reports_missing_and_timeout_instead_of_guessing(db_
 
     db = db_factory()
     try:
+        from tests.backend.conftest import seed_owner_rows as _seed2
+
+        _seed2(db.get_bind(), user_id=1)
         row = Task(user_id=1, platform="xhs", task_type="xhs_note_sync", status="running")
         db.add(row)
         db.commit()

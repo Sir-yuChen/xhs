@@ -58,25 +58,31 @@ def test_db_session_fixture_patches_service_sessions():
     )
 
 
-def test_db_engine_fixture_seeds_baseline_rows():
-    """`db_engine` 必须播种 `users` / `platform_accounts` 基线行。
+def test_db_engine_fixture_does_not_seed_rows():
+    """`db_engine` **不得**播种任何行 —— 契约是「新库应当是空的」。
 
-    ⚠️ 变异守护：删掉 `_seed_baseline_rows(...)` 调用 ⇒ 本用例必红。
-    没有它，隔离修好之后 `INSERT INTO material_folders (user_id=1)` 之类
-    会 `FOREIGN KEY constraint failed`（实测 16 条红）。
+    ⚠️ 这条守卫的方向曾经写反过（2026-10-04）：一度要求 `db_engine` 播种
+    `users` / `platform_accounts` 基线行，结果红了 20+ 条 ——
+    `test_conftest_fixtures::test_db_session_fixture_is_usable` 的契约是
+    `assert count == 0`（「新库应当是空的」），`test_llm_gateway` 等也依赖空库。
+
+    **外键父行由需要它的文件自己造**（`seed_owner_rows` 的用法），
+    不在公共夹具里替所有用例决定。
+
+    ⚠️ 变异守护：在 `db_engine` 里加回 `_seed_baseline_rows(...)` ⇒ 本用例必红。
     """
     source = _conftest_source()
     start = source.index("def db_engine(")
     end = source.index("\ndef ", start + 1)
     body = source[start:end]
-    assert "_seed_baseline_rows(" in body, (
-        "db_engine 必须播种外键基线行 —— 否则用例依赖「生产库里恰好有 user 1」"
-        "这种隐式前提"
+    assert "_seed_baseline_rows(" not in body, (
+        "db_engine 不得播种 —— 夹具契约为「新库应当是空的」"
+        "（`test_conftest_fixtures` 会红，且一批依赖空库的用例断言失真）"
     )
 
 
 def test_seed_baseline_flushes_parent_before_child():
-    """播种必须**先 flush 父行**（`users`）再插子行（`platform_accounts`）。
+    """`seed_owner_rows` 必须**先 flush 父行**（`users`）再插子行（`platform_accounts`）。
 
     ⚠️ 变异守护：删掉 `db.flush()` ⇒ 本用例必红。
     实测：同一 commit 里 SQLAlchemy 不保证按声明顺序发语句，
@@ -84,7 +90,7 @@ def test_seed_baseline_flushes_parent_before_child():
     （种子行自己就违反外键，表现为**全部用例 setup 失败**）。
     """
     source = _conftest_source()
-    start = source.index("def _seed_baseline_rows(")
+    start = source.index("def seed_owner_rows(")
     end = source.index("\ndef ", start + 1)
     body = source[start:end]
     user_add = body.index("User(")
