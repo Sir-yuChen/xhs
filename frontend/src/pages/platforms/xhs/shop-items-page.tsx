@@ -2470,7 +2470,15 @@ export function XhsShopItemsPage() {
                         ② 图片 **另起一行**铺开（`Space wrap` 按宽度自己折行）。
                         ⇒ 用横向 `Space` 装两个 `Text`（`align="baseline"` 让字号不同的
                         两段文字基线对齐，不靠 `lineHeight` 硬凑）。 */}
-                    <Space size={8} align="baseline" style={{ marginBottom: 6 }}>
+                    {/* ⚠️ **必须 `display: block`**：antd 的 `Space` 默认是
+                        `display: inline-flex` ⇒ 它与下面那个装图片的 `Space`
+                        **会并排在同一行**（用户实测报「图片还是和说明文案在一行中」）。
+                        文字行是块级独占一行，图片行自然落到下一行。 */}
+                    <Space
+                      size={8}
+                      align="baseline"
+                      style={{ display: "flex", marginBottom: 6 }}
+                    >
                       <Text strong style={{ fontSize: 12 }}>
                         本类原始图预览
                       </Text>
@@ -2499,12 +2507,21 @@ export function XhsShopItemsPage() {
                     )}
                   </div>
 
-                  {/* ③ 公共提示词模板（本组独立，v2.24） */}
+                  {/* ③④ **提示词模板 + 生成张数同一行**（用户口径 2026-10-03：
+                      「生成张数与提示词模板下拉放一行中展示」）。
+                      ⚠️ 模板是长下拉、张数是窄数字框 ⇒ **不要**用两个 `flex: 1`
+                      平分（张数框会被拉得很宽、数字孤零零居中）。模板 `flex: 1`
+                      吃掉剩余宽度，张数固定 ~110px。两者 `align="flex-end"`
+                      让输入框底边对齐（标签字号不同、高度不同）。 */}
                   <div>
-                    <Text strong style={{ fontSize: 13 }}>
-                      提示词模板
-                    </Text>
-                    <Select
+                    <Space size={12} align="end" style={{ width: "100%" }}>
+                      {/* 用户口径 2026-10-03：「提示词模板 **一行的 70% 宽**」
+                          ⇒ `flex: "0 0 70%"`（不伸缩、固定占 70%），右侧张数靠左排。 */}
+                      <div style={{ flex: "0 0 70%", minWidth: 0 }}>
+                        <Text strong style={{ fontSize: 13 }}>
+                          提示词模板
+                        </Text>
+                        <Select
                       style={{ width: "100%", marginTop: 4 }}
                       allowClear
                       placeholder="选择公共提示词模板（留空则用手写提示词）"
@@ -2523,7 +2540,33 @@ export function XhsShopItemsPage() {
                           label: t.is_default ? `${t.name}（默认）` : t.name,
                         }))}
                       notFoundContent="还没有模板，可在「笔记工坊 → 提示词模板」新建"
-                    />
+                        />
+                      </div>
+
+                      {/* ④ 生成张数（本组独立）—— 与模板同行，见上方注释 */}
+                      <div>
+                        <Text strong style={{ fontSize: 13 }}>
+                          生成张数
+                        </Text>
+                        <div style={{ marginTop: 4 }}>
+                          <InputNumber
+                            min={3}
+                            max={10}
+                            value={detailImageGroupConfigs[tab.key]?.count ?? 3}
+                            onChange={(value) => {
+                              const next = Math.max(3, Math.min(10, Number(value) || 3));
+                              setDetailImageGroupConfigs((current) => ({
+                                ...current,
+                                [tab.key]: { ...current[tab.key], count: next },
+                              }));
+                            }}
+                            disabled={detailImageGenerating}
+                            style={{ width: 110 }}
+                            addonAfter="张"
+                          />
+                        </div>
+                      </div>
+                    </Space>
                   </div>
 
                   {/* ③b 提示词 / 补充要求（本组独立） */}
@@ -2551,34 +2594,6 @@ export function XhsShopItemsPage() {
                     />
                   </div>
 
-                  {/* ④ 生成张数（本组独立） */}
-                  <div>
-                    <Text strong style={{ fontSize: 13 }}>
-                      生成张数
-                    </Text>
-                    <div style={{ marginTop: 4 }}>
-                      <Space size={6} align="center">
-                        <InputNumber
-                          min={3}
-                          max={10}
-                          value={detailImageGroupConfigs[tab.key]?.count ?? 3}
-                          onChange={(value) => {
-                            const next = Math.max(3, Math.min(10, Number(value) || 3));
-                            setDetailImageGroupConfigs((current) => ({
-                              ...current,
-                              [tab.key]: { ...current[tab.key], count: next },
-                            }));
-                          }}
-                          disabled={detailImageGenerating}
-                          style={{ width: 110 }}
-                          addonAfter="张"
-                        />
-                        <Text type="secondary" style={{ fontSize: 11 }}>
-                          3 ~ 10 张（每张 = 一次生成请求）
-                        </Text>
-                      </Space>
-                    </div>
-                  </div>
 
                   {/* ⑤ 本组结果 */}
                   <DetailImageGroupResult

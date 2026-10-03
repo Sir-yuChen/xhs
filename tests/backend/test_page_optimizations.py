@@ -3462,3 +3462,38 @@ def test_every_modal_is_vertically_centered():
         f"以下 {len(offenders)} 个 Modal 没有垂直居中（antd 默认顶部对齐，"
         f"用户口径「所有弹窗均应修复成居中」）：{offenders}"
     )
+
+
+def test_preview_block_text_row_is_block_level_so_images_wrap():
+    """「本类原始图预览」区：**文字一行、图片另起一行**（用户口径 2026-10-03）。
+
+    > 「标题和说明文案一行，图片单独一行」
+    > 「图片单独放一行，目前还是和说明文案在一行中」（反馈：还没生效）
+
+    ## 这个坑的根因（值得记）
+
+    那段 JSX 是**两个兄弟 `Space`**（第一个装文字、第二个装图片）。
+    antd 的 `Space` 默认 `display: inline-flex` ⇒ **两个 `Space` 会并排在同一行**，
+    哪怕代码里写得「看起来是两行」。⇒ 文字行必须显式 `display: flex`（或 block）
+    才独占一行、把图片行挤到下一行。
+
+    ⚠️ 所以判据不是「有没有两个 Space」，而是「文字行那个 Space **是不是块级**」——
+    只数节点个数的断言会让「inline-flex 并排」这种形态照样通过。
+    """
+    page = _code_only(_read(SHOP_ITEMS_PAGE))
+
+    # 定位标题那一行（从最近的 `<Space` 起、到 `</Space>` 止）
+    i = page.index("本类原始图预览")
+    start = page.rindex("<Space", 0, i)          # 标题所在的那行 Space
+    row = page[start : page.index("</Space>", i) + len("</Space>")]
+
+    # ① 该行必须是块级（inline-flex 会和图片行并排 —— 用户实测的现象）
+    assert 'display: "flex"' in row or 'display: "block"' in row, (
+        "标题+说明那一行的 Space 不是块级（antd Space 默认 inline-flex ⇒ "
+        "它会与图片行并排，用户实测「图片还是和说明文案在一行中」）"
+    )
+    # ② 标题与说明**同在**这一行
+    assert "本类原始图预览" in row, "标题不在这一行"
+    assert "共 " in row and "张" in row, "说明文案不在标题同一行"
+    # ③ 图片**不在**这一行（另一个 Space 才装图片）
+    assert "tab.urls.map" not in row, "图片被塞进了文字行（应与文字分行）"
