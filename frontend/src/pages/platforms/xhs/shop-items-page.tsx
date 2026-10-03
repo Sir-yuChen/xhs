@@ -56,6 +56,8 @@ import {
   generateProductNote,
   generateProductDetailImage,
   syncShopGoods,
+  saveDetailImages,
+  fetchMaterialFolders,
 } from "../../../lib/api";
 import type { GenerateQueueFinishedEntry, GenerateQueueSnapshot } from "../../../lib/api";
 import { yuan } from "../../../lib/format";
@@ -97,6 +99,7 @@ import {
 } from "../../../lib/shop-items-view";
 import type {
   GenerateDetailImageResult,
+  MaterialFolder,
   PlatformAccount,
   PromptTemplate,
   XhsItemNote,
@@ -165,12 +168,17 @@ function DetailImageGroupResult({
   regenerating,
   generating,
   onRegenerate,
+  selectedIds,
+  onToggleSelect,
 }: {
   groupKey: string;
   groups: GenerateDetailImageResult["groups"];
   regenerating: { group: string; index: number } | null;
   generating: boolean;
   onRegenerate: (index: number) => void;
+  /** v2.29：已勾选待保存的结果 id（跨组共用一份 —— 「全部保存」要能一次拿全）。 */
+  selectedIds: number[];
+  onToggleSelect: (assetId: number) => void;
 }) {
   const group = (groups || []).find((item) => item.group === groupKey);
   if (!group) {
@@ -200,22 +208,62 @@ function DetailImageGroupResult({
           这一组没有生成成功（原因见下方失败信息）
         </Text>
       ) : (
-        <Space direction="vertical" size={10} style={{ width: "100%" }}>
+        // v2.29：**缩略图网格 + 勾选**（用户口径「生成的图使用缩小图展示」）。
+        // ⚠️ 旧版是 width="100%" 的整幅大图 —— 出 10 张要滚很久，且
+        // 「选择性保存」没有勾选载体。改成固定 150×150 的网格，
+        // 点缩略图切换选中（选中项描边 + 角标），与「参考图勾选」同一套交互。
+        // ⚠️ 这段注释必须用 `//` 而**不能**用 `{/* */}` —— 它处在 `? :` 的
+        // **表达式位置**，`{...}` 会被解析成对象字面量（实测报 TS1005/TS1382）。
+        <Space size={10} wrap>
           {group.assets.map((asset) => {
             const busy =
               regenerating?.group === groupKey &&
               regenerating?.index === (asset.group_index || 1);
+            const picked = selectedIds.includes(asset.id);
             return (
-              <div key={asset.id}>
-                <Image
-                  src={asset.url || asset.local_path}
-                  width="100%"
-                  style={{ objectFit: "contain", borderRadius: 4 }}
-                />
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 2 }}>
+              <div key={asset.id} style={{ width: 150 }}>
+                <div
+                  onClick={() => onToggleSelect(asset.id)}
+                  style={{
+                    position: "relative",
+                    cursor: "pointer",
+                    border: picked
+                      ? "2px solid #1677ff"
+                      : "1px solid rgba(0,0,0,0.12)",
+                    borderRadius: 4,
+                    overflow: "hidden",
+                    lineHeight: 0,
+                  }}
+                  title={picked ? "点击取消选择" : "点击选择（可保存到素材库）"}
+                >
+                  <Image
+                    src={asset.url || asset.local_path}
+                    width={picked ? 146 : 148}
+                    height={146}
+                    style={{ objectFit: "contain" }}
+                    preview={{ src: asset.url || asset.local_path }}
+                  />
+                  {picked && (
+                    <span
+                      style={{
+                        position: "absolute",
+                        top: 2,
+                        right: 2,
+                        background: "#1677ff",
+                        color: "#fff",
+                        fontSize: 11,
+                        lineHeight: "16px",
+                        padding: "0 5px",
+                        borderRadius: 8,
+                      }}
+                    >
+                      ✓
+                    </span>
+                  )}
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 2 }}>
                   <Text type="secondary" style={{ fontSize: 11 }}>
-                    第 {asset.group_index || 1} 张 · 模型 {asset.model_name || "-"} · 素材库（#
-                    {asset.id}）
+                    第 {asset.group_index || 1} 张
                   </Text>
                   {/* v2.21：单张重做 —— 只重跑这一张（不整组重跑）。 */}
                   <Button
@@ -699,6 +747,18 @@ export function XhsShopItemsPage() {
   const [detailImageStartedAt, setDetailImageStartedAt] = useState<number | null>(null);
   //: 每 500ms 刷一次的「已耗时（秒）」——只为显示，不参与判据。
   const [detailImageElapsed, setDetailImageElapsed] = useState(0);
+  /**
+   * v2.29：**已勾选待保存的结果 id**（用户口径「支持选择性保存到指定素材库」）。
+   * 跨组共用一份 —— 「全部保存」要能一次拿全两组的图；按组各存一份会让
+   * 「全选」变成两个独立的集合（前端要合并，且两处状态可能不同步）。
+   */
+  const [detailImageSelectedIds, setDetailImageSelectedIds] = useState<number[]>([]);
+  /** v2.29：保存进行中（按钮 loading；与「生成中」分开 —— 两者互不阻塞）。 */
+  const [detailImageSaving, setDetailImageSaving] = useState(false);
+  /** v2.29：保存目标素材库文件夹（默认第一个；用户可改）。 */
+  const [detailImageMaterialFolderId, setDetailImageMaterialFolderId] = useState<number | null>(null);
+  /** v2.29：素材库文件夹清单（保存目标下拉的数据源）。 */
+  const [materialFolders, setMaterialFolders] = useState<MaterialFolder[]>([]);
 
   useEffect(() => {
     if (detailImageStartedAt === null) {
@@ -1273,6 +1333,20 @@ export function XhsShopItemsPage() {
     setDetailImageGroupConfigs({});
     setActiveGroup("product");
     setDetailImageRegenerating(null); // v2.21：重做态一并复位
+    // v2.29：勾选与保存目标一并复位（跨商品不串 —— 同上面那条纪律）
+    setDetailImageSelectedIds([]);
+    setDetailImageMaterialFolderId(null);
+    // v2.29：拉素材库清单（保存目标下拉的数据源；与模板一样**只在首次打开时拉**）
+    if (materialFolders.length === 0) {
+      void (async () => {
+        try {
+          setMaterialFolders(await fetchMaterialFolders());
+        } catch {
+          // 拉不到就保持空 —— 保存时会给「还没有素材库文件夹」的可执行提示，
+          // 不在这里弹错（弹了也做不了什么，反而干扰主流程）
+        }
+      })();
+    }
     // v2.24：拉公共提示词模板（首次打开才拉 —— 模板是用户级的，与商品无关）
     if (!detailImageTemplatesLoaded) {
       void (async () => {
@@ -1396,6 +1470,56 @@ export function XhsShopItemsPage() {
    * 而按钮说的是**要生成什么**（「生成主图」）。
    * 同一变量担两个语义 ⇒ 改一处会同时改错的另一处（本轮就是这么来的）。
    */
+  /**
+   * v2.29：把生成结果保存到素材库（用户口径「支持选择性保存到指定素材库，
+   * 支持全部保存到指定素材库」）。
+   *
+   * `scope="selected"` 存勾选的、`scope="all"` 存本次全部结果 ——
+   * **同一个后端端点**（`asset_ids` 给几张就存几张）：不另开 `save-all`，
+   * 那是同一件事的两份实现（DEF-044），且「全部」的定义在前端手里。
+   *
+   * ⚠️ **`asset_groups` 必须一起传**：分组事实只在生成响应里（每张的 `group`），
+   * 后端反查不到（`Task.payload` 没有 asset 明细、`AigcMediaAsset` 没有 group 列）
+   * ⇒ 不传就只能写 `图-NN`，用户看不出哪张是主图、哪张是详情图。
+   */
+  async function saveDetailImagesToMaterial(scope: "selected" | "all") {
+    const allAssets = (detailImage?.groups || []).flatMap((g) => g.assets || []);
+    const targets = scope === "all" ? allAssets.map((a) => a.id) : detailImageSelectedIds;
+    if (targets.length === 0) {
+      message.warning(scope === "all" ? "本次还没有可保存的结果" : "请先勾选要保存的图");
+      return;
+    }
+    const folderId = detailImageMaterialFolderId ?? materialFolders[0]?.id;
+    if (!folderId) {
+      message.warning("还没有素材库文件夹，请先到「笔记工坊 → 素材库」新建");
+      return;
+    }
+    setDetailImageSaving(true);
+    try {
+      const groups: Record<string, string> = {};
+      for (const asset of allAssets) {
+        if (asset.group) groups[String(asset.id)] = asset.group;
+      }
+      const result = await saveDetailImages({
+        folder_id: folderId,
+        asset_ids: targets,
+        asset_groups: groups,
+      });
+      const failed = result.errors?.length ?? 0;
+      if (failed) {
+        message.warning(
+          `已保存 ${result.saved.length} 张到「${result.folder_name}」，${failed} 张失败`
+        );
+      } else {
+        message.success(`已保存 ${result.saved.length} 张到「${result.folder_name}」`);
+      }
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "保存到素材库失败");
+    } finally {
+      setDetailImageSaving(false);
+    }
+  }
+
   const activeGenerateLabel = activeGroup === "product" ? "主图" : "详情图";
   const activeGroupUrls =
     activeGroup === "product"
@@ -2373,27 +2497,44 @@ export function XhsShopItemsPage() {
           </Space>
         }
       >
-        {/* v2.28：**生成中蒙版**（用户口径「点击生成图按钮后，弹窗加蒙版并统计耗时，
-            防止被关闭」）。
-            ⚠️ 蒙版只盖**配置区**（商品信息 + 三个 Tab），**结果区不盖** ——
-            用户要能看见新图一张张出来（盖住结果等于把「在跑」变成「黑屏」）。
-            `pointerEvents: none` 是有意的：蒙版是「别改了」的视觉提示，
-            真正的门禁是各控件的 `disabled={detailImageGenerating}`（已在位）。 */}
+        {/* ⚠️ 蒙版是 `position: absolute; inset: 0` ⇒ **必须有定位父级**，
+            否则会以最近的 positioned 祖先（可能是页面）为基准铺满全屏。
+            这里包一层 `position: relative` 的容器把蒙版**约束在弹窗内容区**。 */}
+        <div style={{ position: "relative" }}>
+        {/* v2.29：**整弹窗蒙版**（用户口径「改成弹窗整体加蒙版」）。
+            ⚠️ v2.28 是一条约 30px 高的**提示条**（不挡任何东西）——
+            用户要的是「整个弹窗被盖住」的视觉阻断。现在用绝对定位铺满内容区，
+            半透明遮罩 + 居中的转圈与耗时。
+            ⚠️ **`pointerEvents: "none"` 保留**：遮罩自己不拦点击，门禁仍由
+            各控件的 `disabled={detailImageGenerating}` 承担（两处都拦 = 一份判据
+            两个实现，DEF-044）；且**不盖 Modal 的关闭按钮区**（那在 header，
+            内容区之外）—— 关闭与否由 `closable` / `onCancel` 决定，与遮罩无关。 */}
         {detailImageGenerating && (
           <div
             style={{
+              position: "absolute",
+              inset: 0,
+              zIndex: 10,
+              background: "rgba(255,255,255,0.72)",
+              backdropFilter: "blur(1px)",
               display: "flex",
+              flexDirection: "column",
               alignItems: "center",
+              justifyContent: "center",
               gap: 10,
-              padding: "8px 12px",
-              marginBottom: 12,
-              borderRadius: 6,
-              background: "rgba(0,0,0,0.04)",
-              border: "1px solid rgba(0,0,0,0.08)",
+              pointerEvents: "none",
             }}
           >
-            <Spin size="small" />
-            <Text strong>正在出图… 已耗时 {detailImageElapsed} 秒</Text>
+            <Spin size="large" />
+            <Text strong style={{ fontSize: 14 }}>
+              正在出图… 已耗时 {detailImageElapsed} 秒
+            </Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              逐张串行调用上游，单张约 30–100 秒
+            </Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              生成期间弹窗不可关闭（关闭会看不到结果）
+            </Text>
             <Text type="secondary" style={{ fontSize: 12 }}>
               逐张串行调用上游，单张约 30–100 秒；生成期间弹窗不可关闭（关闭会看不到结果）
             </Text>
@@ -2550,11 +2691,13 @@ export function XhsShopItemsPage() {
                         </Text>
                         <div style={{ marginTop: 4 }}>
                           <InputNumber
-                            min={3}
+                            // 下限 1（用户口径 2026-10-03「生成张数调整最低一张」）；
+                            // 默认仍 3 —— 与后端 MIN/DEFAULT 保持一致（改一边就是漂移）。
+                            min={1}
                             max={10}
                             value={detailImageGroupConfigs[tab.key]?.count ?? 3}
                             onChange={(value) => {
-                              const next = Math.max(3, Math.min(10, Number(value) || 3));
+                              const next = Math.max(1, Math.min(10, Number(value) || 3));
                               setDetailImageGroupConfigs((current) => ({
                                 ...current,
                                 [tab.key]: { ...current[tab.key], count: next },
@@ -2601,10 +2744,71 @@ export function XhsShopItemsPage() {
                     groups={detailImage?.groups || []}
                     regenerating={detailImageRegenerating}
                     generating={detailImageGenerating}
+                    selectedIds={detailImageSelectedIds}
+                    onToggleSelect={(id) =>
+                      setDetailImageSelectedIds((current) =>
+                        current.includes(id)
+                          ? current.filter((x) => x !== id)
+                          : [...current, id]
+                      )
+                    }
                     onRegenerate={(index) =>
                       void generateDetailImage({ group: tab.key, index })
                     }
                   />
+
+        {/* v2.29：**保存到素材库**（弹窗级一条，不属某一组 —— 用户口径
+            「支持选择性保存…支持全部保存」，两种语义共用这一个入口）。
+            ⚠️ 素材库下拉在这里（而不是每组各一个）：保存目标是**本次动作**的属性，
+            不是某一组图的属性 —— 按组放会让人以为「两组能存到不同地方」。 */}
+        {detailImage && (detailImage.groups || []).some((g) => (g.assets || []).length > 0) && (
+          <div
+            style={{
+              marginTop: 10,
+              paddingTop: 10,
+              borderTop: "1px solid rgba(0,0,0,0.08)",
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              flexWrap: "wrap",
+            }}
+          >
+            <Text strong style={{ fontSize: 13 }}>
+              保存到素材库
+            </Text>
+            <Select
+              style={{ width: 220 }}
+              size="small"
+              placeholder="选择素材库文件夹"
+              value={detailImageMaterialFolderId ?? materialFolders[0]?.id}
+              onChange={(value) => setDetailImageMaterialFolderId(value ?? null)}
+              options={materialFolders.map((f) => ({
+                value: f.id,
+                label: `${f.name}（${f.path}）`,
+              }))}
+              notFoundContent="还没有素材库文件夹，请先到「笔记工坊 → 素材库」新建"
+            />
+            <Button
+              size="small"
+              loading={detailImageSaving}
+              disabled={detailImageSelectedIds.length === 0}
+              onClick={() => void saveDetailImagesToMaterial("selected")}
+            >
+              保存勾选（{detailImageSelectedIds.length}）
+            </Button>
+            <Button
+              size="small"
+              type="primary"
+              loading={detailImageSaving}
+              onClick={() => void saveDetailImagesToMaterial("all")}
+            >
+              全部保存
+            </Button>
+            <Text type="secondary" style={{ fontSize: 11 }}>
+              每次保存会新建一个子目录（ai-生成/时间戳），组名进文件名
+            </Text>
+          </div>
+        )}
                   <DetailImageGroupErrors
                     groupKey={tab.key}
                     errors={detailImage?.errors || []}
@@ -2615,7 +2819,8 @@ export function XhsShopItemsPage() {
             ),
           }))}
         />
-      </Modal>
+              </div>
+</Modal>
 
       {/* LLM 生成配置弹窗（T9，设计 17 §7.4）：选模板 + 媒体来源四选一。
           与「生成商品详情图」同型：弹窗自带商品上下文，打开即重置（跨商品不串）。 */}

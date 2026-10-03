@@ -5951,14 +5951,16 @@ def test_generate_detail_image_regenerates_single_image(tmp_path):
 
 
 def test_generate_detail_image_count_is_bounded(tmp_path):
-    """v2.18/v2.20：张数**有界** 3 ~ 10（用户口径「最多 10 张最少 3 张」）——
-    2 / 11 / 0 / 负数都被 422 拦下（不静默夹到合法值）。
+    """v2.18/v2.20/v2.28.4：张数**有界** **1 ~ 10**（下限 2026-10-03 由 3 改 1）——
+    0 / 11 / -1 被 422 拦下（不静默夹到合法值）；⚠️ **2 现在是合法值**
+    （旧下限 3 时它在被拒之列，改下限后必须同时把它从「坏值」里拿掉，
+    否则这条用例会拿旧口径把新行为判红）。
 
     ⚠️ `count` 每张 = 一次上游请求，无上限就是「一次点击烧 N 次额度」。
     """
     db_dependency = _override_database(tmp_path)
     token = _register_and_get_access_token("detail-image-count-bound")
-    for bad in (0, 2, 11, -1):
+    for bad in (0, 11, -1):
         response = client.post(
             "/api/xhs/qianfan/generate-detail-image",
             headers={"Authorization": f"Bearer {token}"},

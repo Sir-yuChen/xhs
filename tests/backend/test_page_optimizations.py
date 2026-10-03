@@ -2153,15 +2153,19 @@ def test_detail_image_modal_uses_tabs_for_groups():
 
 
 def test_detail_image_modal_has_count_selector():
-    """v2.18/v2.20：弹窗要能选**生成张数**，范围 **3 ~ 10**（用户口径「最多 10 张最少 3 张」）。
+    """v2.18/v2.20/v2.28.4：弹窗要能选**生成张数**，范围 **1 ~ 10**。
 
-    守四件：① 有「生成张数」标签；② 输入控件的上下界就是 3 / 10；③ 绑 state 且可改；
+    ⚠️ 下限 **3 → 1**（用户口径 2026-10-03「生成张数调整最低一张」）：
+    原下限 3 替用户做了「总要成组出图」的决定，但「先出一张看效果」
+    （调试期 / 额度紧张时）也应当允许；默认值仍 3。
+
+    守四件：① 有「生成张数」标签；② 输入控件的上下界就是 1 / 10；③ 绑 state 且可改；
     ④ 张数确实传给了请求函数（不传 = 界面能选但后端永远收默认值，最典型的假接线）。
     """
     page = _code_only(_read(SHOP_ITEMS_PAGE))
     block = _slice_between(page, "open={detailImageOpen}", "</Modal>")
     assert "生成张数" in block, "弹窗缺少「生成张数」条件"
-    assert "min={3}" in block and "max={10}" in block, "张数范围不是 3~10"
+    assert "min={1}" in block and "max={10}" in block, "张数范围不是 1~10"
     # v2.22：张数**按组**存（每组自己的张数），不再是一个全局 state
     assert "detailImageGroupConfigs[tab.key]?.count" in block, "张数未按组绑定"
     assert "setDetailImageGroupConfigs" in block, "张数不可改"
@@ -3497,3 +3501,51 @@ def test_preview_block_text_row_is_block_level_so_images_wrap():
     assert "共 " in row and "张" in row, "说明文案不在标题同一行"
     # ③ 图片**不在**这一行（另一个 Space 才装图片）
     assert "tab.urls.map" not in row, "图片被塞进了文字行（应与文字分行）"
+
+
+def test_detail_image_mask_covers_whole_modal_and_results_are_thumbnails():
+    """v2.29：**整弹窗蒙版** + 结果用**缩略图** + 保存到素材库（用户口径原文）。
+
+    > 「正在出图… 已耗时 10 秒 … 改成弹窗**整体**加蒙版」
+    > 「生成结果的结果图太大了，生成的图使用**缩小图**展示」
+    > 「支持**选择性保存**到指定素材库，支持**全部保存**到指定素材库」
+
+    守四件：
+    ① 蒙版是 `position: absolute; inset: 0`（**整体**覆盖，不是一条提示）；
+    ② 它有个 `position: relative` 的父级（否则 absolute 会以页面为基准铺满全屏
+       —— 这是最容易出的错，tsc 看不出来）；
+    ③ 结果图是**固定尺寸缩略图**（不再 `width="100%"` 整幅大图）；
+    ④ 两种保存入口都在，且**共用同一个请求函数**（不写两份）。
+    """
+    page = _code_only(_read(SHOP_ITEMS_PAGE))
+
+    # ① ②
+    assert 'position: "absolute"' in page and 'inset: 0' in page, (
+        "生成中的蒙版不是整体覆盖（应为 absolute + inset:0）"
+    )
+    # ⚠️ 判据必须**紧邻**蒙版 —— 页面里有 3 处 `position: "relative"`，
+    # 用「蒙版之前出现过」会被**别处**的 relative 满足（实测变异 `norel`
+    # 拆掉蒙版自己的父级后判据照样通过 = 假绿）。取蒙版前 400 字符内。
+    mask_at = page.index('inset: 0')
+    nearby = page[max(0, mask_at - 400) : mask_at]
+    assert 'position: "relative"' in nearby, (
+        "蒙版没有紧邻的 position:relative 父级 —— absolute 会以页面为基准铺满全屏"
+    )
+
+    # ③ 结果缩略图（固定尺寸），且不再有整幅 width="100%" 的结果图
+    result_block = _slice_between(page, "function DetailImageGroupResult", "function DetailImageGroupErrors")
+    assert "height={146}" in result_block or "height={148}" in result_block, (
+        "结果图没有用固定尺寸缩略图（用户口径「结果图太大了，用缩小图展示」）"
+    )
+    assert 'width="100%"' not in result_block, "结果图仍是整幅大图"
+
+    # ④ 两种保存 + 共用一个请求函数
+    assert "saveDetailImagesToMaterial" in page, "没有保存到素材库的逻辑"
+    assert page.count("saveDetailImagesToMaterial(") >= 3, (  # 定义 1 + 调用 2
+        "「保存勾选」与「全部保存」两个入口没有都接上"
+    )
+    assert "saveDetailImages(" in page, "没有调用保存请求函数"
+    # 分组必须一起传（后端反查不到）
+    assert "asset_groups" in page, (
+        "保存时没传 asset_groups ⇒ 文件名只能写「图-NN」，用户看不出主图/详情图"
+    )

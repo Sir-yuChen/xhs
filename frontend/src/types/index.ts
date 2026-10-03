@@ -1838,6 +1838,17 @@ export type AppNotification = {
 // ─────────────────────────── T9：LLM 生成链路（设计 17） ───────────────────────────
 
 /** 素材文件夹（`GET /api/xhs/materials/folders` 元素，设计 17 §7.3）。 */
+/** 保存生成结果到素材库的响应（`POST /xhs/qianfan/save-detail-images`，v2.29 §13.3.10）。 */
+export type SaveDetailImagesResult = {
+  folder_id: number;
+  folder_name: string;
+  /** 本次新建的子目录（相对素材库根，形如 `ai-生成/20261003-173045-a1b2`）。 */
+  dir: string;
+  saved: { asset_id: number; rel_path: string; filename: string }[];
+  /** 逐张的失败原因（部分成功按成功处理 —— 与出图口径一致）。 */
+  errors?: string[];
+};
+
 export type MaterialFolder = {
   id: number;
   name: string;

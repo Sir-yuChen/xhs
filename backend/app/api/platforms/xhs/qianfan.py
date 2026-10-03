@@ -1039,11 +1039,19 @@ def sync_shop_goods_status(
 MAX_DETAIL_IMAGE_REFERENCES: int = 6
 
 #: v2.18/v2.20：生成张数范围（用户口径「最多 10 张最少 3 张」）。
-#: ⚠️ 每张 = 一次独立的上游请求（串行）⇒ 有上限止损；下限 3 是因为生成详情图
-#: 通常要成组使用（单张价值低，用户总要多来几张挑）。
+#: ⚠️ 每张 = 一次独立的上游请求（串行）⇒ 有上限止损。
+#: ⚠️ **下限 3 → 1**（用户口径 2026-10-03：「生成张数调整最低一张」）。
+#: 原下限 3 的理由是「详情图通常成组使用」，但那**替用户做了决定** ——
+#: 想先出一张看效果（尤其调试期、额度紧张时）也应当允许。
+#: 默认值保持 3（多数场景仍要多张挑，不改默认不改变既有体验）。
 #: ⚠️ 定义在**请求模型之前**：`GenerateDetailImageRequest.count` 的 `default/ge/le`
 #: 直接引用它们（定义在后 = 类体求值时 NameError）。
-MIN_DETAIL_IMAGE_COUNT: int = 3
+#: 生成商品详情图的任务类型（`Task.task_type`；建任务处与本端点的反查**共用**，
+#: 写死两处就是漂移源 —— 改一处忘一处会让「保存到素材库」静默查不到分组）。
+DETAIL_IMAGE_TASK_TYPE = "ai_product_detail_image"
+
+
+MIN_DETAIL_IMAGE_COUNT: int = 1
 MAX_DETAIL_IMAGE_COUNT: int = 10
 DEFAULT_DETAIL_IMAGE_COUNT: int = 3
 
@@ -1622,7 +1630,7 @@ def generate_detail_image(
     task = Task(
         user_id=current_user.id,
         platform="xhs",
-        task_type="ai_product_detail_image",
+        task_type=DETAIL_IMAGE_TASK_TYPE,
         status="running",
         progress=10,
         payload={
@@ -1676,26 +1684,45 @@ def generate_detail_image(
         group_refs = item["refs"]
         group_prompt = item["prompt"]
         group_count = item["count"]
-        for index in range(group_count):
+        # ⚠️ **v2.29：一次请求要 N 张**（用户口径「为何是串行」）。
+        # 真机实测（2026-10-03）：当前服务商认 `n` —— `n=3` 一次回 3 张、57.8 秒；
+        # 逐张串行要 3 × ~40s ≈ 120s，且**请求数 3 倍**（白烧限流额度）。
+        # 回落见下：服务商忽略 `n` 时按缺张逐张补（旧的串行实现保留为补张路径）。
+        try:
+            batch = image_ai_client.generate_images(
+                model_config=model_config,
+                api_key=api_key,
+                prompt=group_prompt,
+                # 参考图 = **本组**勾选的（不跨组混送）。
+                # ⚠️ v2.25：这里**不再截断** —— `group_refs` 在组装时已经
+                # 截成「商品图 ≤6 + 风格图 ≤1」，再切一次会把风格图切掉
+                # （它在列表**末尾**，正是被切的位置）。
+                reference_images=group_refs,
+                count=group_count,
+            )
+        except Exception as exc:  # noqa: BLE001 - 服务商五花八门，一律结构化转出
+            errors.append(f"{group_label} 第 1~{group_count} 张：{exc}")
+            done += group_count
+            continue
+
+        # 服务商可能忽略 `n`（只回 1 张）⇒ 按缺张逐张补足（不重试已拿到的）
+        while len(batch) < group_count:
+            try:
+                batch.append(
+                    image_ai_client.generate_image(
+                        model_config=model_config,
+                        api_key=api_key,
+                        prompt=group_prompt,
+                        reference_images=group_refs,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{group_label} 第 {len(batch) + 1} 张：{exc}")
+                break
+
+        for index, result in enumerate(batch):
             # 单张重做时只跑一次（count=1），用**原始序号**标记结果。
             output_index = regen_index if regen_group else index + 1
-            try:
-                result = image_ai_client.generate_image(
-                    model_config=model_config,
-                    api_key=api_key,
-                    # v2.22：**本组自己的提示词**（每组可独立设置）。
-                    prompt=group_prompt,
-                    # 参考图 = **本组**勾选的（不跨组混送）。
-                    # ⚠️ v2.25：这里**不再截断** —— `group_refs` 在组装时已经
-                    # 截成「商品图 ≤6 + 风格图 ≤1」，再切一次会把风格图切掉
-                    # （它在列表**末尾**，正是被切的位置）。
-                    reference_images=group_refs,
-                )
-            except Exception as exc:  # noqa: BLE001 - 服务商五花八门，一律结构化转出
-                errors.append(f"{group_label} 第 {output_index} 张：{exc}")
-                done += 1
-                continue
-
             url = result.get("url") or ""
             asset = AigcMediaAsset(
                 user_id=current_user.id,
@@ -1770,3 +1797,81 @@ def generate_detail_image(
         "errors": errors,
         "asset": assets[0],
     }
+
+class SaveDetailImagesRequest(BaseModel):
+    """把生成结果存进素材库（v2.29 §13.3.10）。
+
+    用户口径（2026-10-03）：
+    > 「**支持选择性保存**到指定素材库，支持**全部保存**到指定素材库」
+
+    ⇒ **一个端点两种语义**：`asset_ids` 给几张就存几张（给全部 id = 「全部保存」）。
+    不另开一个 `save-all` 端点 —— 那是同一件事的两份实现（DEF-044），
+    且「全部」的定义在前端手里（它才知道当前展示了哪些）。
+    """
+
+    folder_id: int = Field(ge=1, description="素材库文件夹 id（material_folders.id）")
+    asset_ids: list[int] = Field(min_length=1, max_length=200, description="要保存的生成结果 id 列表")
+    #: v2.29：**资产 → 分组**（`{"7": "product", "8": "detail"}`）—— 由**前端**传。
+    #:
+    #: ⚠️ 为什么不是后端自己查：分组事实（哪张是主图、哪张是详情图）只存在于
+    #: **生成那一刻的响应**里；落库的 `Task.payload` 只有平铺的 `asset_ids` +
+    #: `group_plans`（**不含 asset 明细**），`AigcMediaAsset` 更没有 group 列。
+    #: 后端反查 = 查不到还得猜（猜错比「没分组」更坏）；前端手上正好有
+    #: `assets[].group` ⇒ **谁有事实谁提供**。
+    #: 缺省 / 缺失项 ⇒ 文件名用 `图-NN`（如实反映「不知道分组」，不造）。
+    asset_groups: dict[str, str] | None = None
+
+
+@router.post("/save-detail-images")
+def save_detail_images(
+    payload: SaveDetailImagesRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """**把生成结果保存到素材库**（v2.29 §13.3.10）。
+
+    ## 落盘策略（目录与命名 —— 用户口径「你来决定」）
+
+    ```
+    <素材库根>/ai-生成/20261003-173045-a1b2/主图-01.png
+    <素材库根>/ai-生成/20261003-173045-a1b2/详情图-01.png
+    ```
+
+    * 顶层 `ai-生成/`：与用户手放的文件**分界**，一眼能分辨机器产物；
+    * **每次保存一个新子目录**（用户口径）：`时间戳-短码`，
+      短码防「同一秒两批生成」撞进同一目录；
+    * 文件名 `组名-两位序号.ext`：组名用中文（与界面一致），
+      两位补零 ⇒ 字典序=自然序。
+
+    ⚠️ **分组由前端传入**（`asset_groups`）—— 生成响应里每张都带 `group`，
+    前端手上就有；后端反查不到（`Task.payload` 没有 asset 明细）。
+    取不到就写 `图-NN`，**不猜**（缺值不造假）。
+    """
+    from backend.app.services.material_save_service import (
+        MaterialSaveError,
+        save_assets_to_folder,
+    )
+
+    # 资产 → 分组：**前端传的**（它手上有生成响应的 `assets[].group`）。
+    # ⚠️ 后端**不反查**：`Task.payload` 只有平铺 `asset_ids`（无 asset 明细）、
+    # `AigcMediaAsset` 无 group 列 ⇒ 反查必落空、只能猜（猜错比没分组更坏）。
+    asset_groups = {
+        int(key): str(value)
+        for key, value in (payload.asset_groups or {}).items()
+        if str(key).isdigit()
+    }
+
+    try:
+        result = save_assets_to_folder(
+            db,
+            user_id=current_user.id,
+            folder_id=payload.folder_id,
+            asset_ids=payload.asset_ids,
+            asset_groups=asset_groups,
+        )
+    except MaterialSaveError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "MATERIAL_SAVE_FAILED", "message": str(exc)},
+        ) from exc
+    return result

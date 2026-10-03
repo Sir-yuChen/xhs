@@ -560,6 +560,103 @@ class OpenAICompatibleImageClient:
             raise ValueError("Image response missing url or b64_json")
         return {"url": image_ref, "raw": payload}
 
+    def generate_images(
+        self,
+        *,
+        model_config: Any,
+        api_key: str,
+        prompt: str,
+        reference_images: list[str] | None = None,
+        count: int = 1,
+    ) -> list[dict[str, Any]]:
+        """**一次请求要 N 张**（OpenAI 兼容的 `n` 参数）—— v2.29。
+
+        用户口径（2026-10-03 原话）：
+        > 「应该把商品信息参考图提示词一起全部打包给大模型进行出图，**为何是串行**」
+
+        ## 为什么现在才敢用 `n`
+
+        旧实现**逐张发请求**（`for index in range(count)`），代码注释写的理由是
+        「不是所有服务商都认 `n` 参数」。**真机实测（2026-10-03）**：当前服务商
+        （千问 compatible-mode）**认** —— `n=3` 一次返回 3 张、耗时 **57.8 秒**；
+        而逐张串行需要 3 × ~40s ≈ 120 秒。**请求数从 3 降到 1**，既快又省限流额度。
+
+        ⚠️ **回落**：`n > 1` 但响应只回 1 张（服务商忽略 `n`）⇒ 调用方按缺张补齐
+        （见 `qianfan.generate_detail_image` 的补齐循环）。这里**只如实返回拿到几张**，
+        不伪造、不重试（重试属于调用方的策略）。
+
+        返回：`[{"url": ..., "raw": ...}, ...]`（至少 1 项；0 项直接抛错）。
+        """
+        self._validate(model_config=model_config, api_key=api_key)
+        if count <= 1:
+            return [
+                self.generate_image(
+                    model_config=model_config,
+                    api_key=api_key,
+                    prompt=prompt,
+                    reference_images=reference_images,
+                )
+            ]
+
+        endpoint = f"{model_config.base_url.rstrip('/')}/images/generations"
+        body: dict[str, Any] = {
+            "model": model_config.model_name,
+            "prompt": prompt,
+            "n": count,
+            "response_format": "url",
+        }
+        if reference_images:
+            resolved = [self._resolve_image_ref(url) for url in reference_images]
+            body["image"] = resolved[0] if len(resolved) == 1 else resolved
+            if len(resolved) > 1:
+                body["sequential_image_generation"] = "disabled"
+            body["watermark"] = False
+        try:
+            response = requests.post(
+                endpoint,
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json=body,
+                timeout=300,  # N 张同批 ⇒ 上限比单张宽松（实测 n=3 约 58s）
+            )
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            detail = ""
+            code = ""
+            try:
+                error_payload = _load_json_response(exc.response) if exc.response else {}
+                if isinstance(error_payload, dict):
+                    err = error_payload.get("error")
+                    if isinstance(err, dict):
+                        detail = err.get("message", "")
+                        code = err.get("code", "")
+            except Exception:
+                pass
+            if detail and "quota" in detail.lower():
+                detail = (
+                    f"服务商额度不足（{code or 'insufficient_quota'}）："
+                    f"{detail} —— 请到服务商控制台充值，或关闭「仅用免费额度」模式。"
+                )
+            elif not detail and exc.response is not None and exc.response.status_code in (401, 403):
+                detail = (
+                    f"服务商拒绝了这次请求（HTTP {exc.response.status_code}）："
+                    "常见原因是额度耗尽 / 令牌无该模型权限 / 令牌已失效 —— "
+                    "请到「大模型网关 → 服务商」点「测试」确认，并核对账户余额。"
+                )
+            raise ValueError(f"图片生成失败: {detail or exc}") from exc
+
+        payload = _load_json_response(response)
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, list) or not data:
+            raise ValueError("Image response missing data[]")
+        results: list[dict[str, Any]] = []
+        for item in data:
+            ref = (item or {}).get("url") or (item or {}).get("b64_json")
+            if isinstance(ref, str) and ref:
+                results.append({"url": ref, "raw": payload})
+        if not results:
+            raise ValueError("Image response missing url or b64_json")
+        return results
+
     @staticmethod
     def _resolve_image_ref(url: str) -> str:
         if url.startswith("http://") or url.startswith("https://"):

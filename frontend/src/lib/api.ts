@@ -102,6 +102,7 @@ import type {
   XhsShopItemsDeleteResult,
   XhsShopItemStatus,
   MaterialFolder,
+  SaveDetailImagesResult,
   MaterialFile,
   PromptModule,
   PromptTemplate,
@@ -2997,6 +2998,28 @@ export async function fetchLlmGenerateQueue(): Promise<LlmGenerateQueueSnapshot>
 export async function retryLlmGenerate(recordId: number): Promise<{ ok: boolean }> {
   const response = await http.post<{ ok: boolean }>(
     `/xhs/product-notes/generate-llm/${recordId}/retry`
+  );
+  return response.data;
+}
+
+/**
+ * 把生成结果保存到素材库（v2.29 §13.3.10）。
+ *
+ * 用户口径：「**支持选择性保存**到指定素材库，支持**全部保存**到指定素材库」
+ * ⇒ 一个端点两种语义（`asset_ids` 给几张就存几张），不另开 `save-all`
+ * （那是同一件事的两份实现，且「全部」的定义在前端手里）。
+ *
+ * `asset_groups` = `{"<asset_id>": "product"|"detail"}` —— **必须传**：
+ * 分组事实只在生成响应里，后端反查不到（不传就只能写「图-NN」）。
+ */
+export async function saveDetailImages(payload: {
+  folder_id: number;
+  asset_ids: number[];
+  asset_groups?: Record<string, string>;
+}): Promise<SaveDetailImagesResult> {
+  const response = await http.post<SaveDetailImagesResult>(
+    "/xhs/qianfan/save-detail-images",
+    payload
   );
   return response.data;
 }
