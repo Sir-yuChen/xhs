@@ -2720,6 +2720,10 @@ Tooltip 说明原因；后端同样拒绝。只改一头 = 「能点但被拒」
 > ⚠️ **视频生成（图生视频）明确排到下一轮**：视频是**异步任务链路**（提交 → 轮询 →
 > 下载，分钟级），与图片的同步调用（`/images/generations` 一次返回）差异大，且需新增
 > `model_type=video` + `/videos/generations` 客户端 + 异步轮询，独立成需求（§13.4.4 预留）。
+>
+> ⚠️ **上句已被取代（v2.14，2026-10-03）**：视频生成**已按上述形态落地** ——
+> `services/video_generation.py` 的 `OpenAICompatibleVideoClient` 正是「提交 → 轮询 → 下载」
+> 异步链路（10 分钟超时 + 可取消）。此处保留原句供审计（硬约束①不静默删除）。
 
 ### 13.4.1 `media_options` 精确结构（补全 §7.4 原「文生图·图生视频·图文拼图等」）
 
@@ -2871,7 +2875,13 @@ worker 日志告警 —— 一个坏视频不废掉整篇正文。
 只读边界文案 / 进度卡禁 finally / 媒体来源四选一）；**变异 2/2 CAUGHT**（进度卡塞 finally /
 摘掉素材页签 均精确变红）。
 
-⚠️ **仍未做**：视频生成（§13.4.4，图生视频异步链路）—— 独立成需求，下一轮做。
+~~⚠️ **仍未做**：视频生成（§13.4.4，图生视频异步链路）—— 独立成需求，下一轮做。~~
+
+> ⚠️ **上句已被 v2.14（2026-10-03）取代**（原句保留供审计，**不静默删除**）：
+> **视频生成已落地** —— `services/video_generation.py`（`OpenAICompatibleVideoClient`：提交 →
+> 轮询 → 下载，10 分钟超时 + 可取消）、业务点 `generate_video`（第 10 个，`kind=video`）、
+> `media_generation.py` 的 `_assets_from_video()` 与 `MAX_VIDEO_BYTES = 300MB`、
+> 测试 `tests/backend/test_video_generation.py`（9 条）。**M1 至此全部落地。**
 
 ### 13.4.7.1 连带修复：迁移幂等（`default_model` 列守卫）
 
