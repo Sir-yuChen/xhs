@@ -207,8 +207,8 @@ function ReferenceImagePicker({
               >
                 <Image
                   src={url}
-                  width={64}
-                  height={64}
+                  width={76}
+                  height={76}
                   style={{ objectFit: "cover", borderRadius: 2 }}
                   preview={false}
                 />
@@ -1989,16 +1989,23 @@ export function XhsShopItemsPage() {
         ) : null}
       </Modal>
 
-      {/* 「生成商品详情图」独立弹窗（设计 17 §13.3.3，v2.1；**v2.12 从详情弹窗迁出**）。
+      {/* 「生成商品详情图」独立弹窗（设计 17 §13.3.3，v2.1；v2.12 从详情弹窗迁出；
+          v2.16 重排为**左右两栏**）。
           用户口径（2026-10-02）：「商品的 AI 生成详情图主图功能在商品列表操作列使用
           单独弹窗实现，不要在编辑或详情弹窗中实现」。
           弹窗自带 item 上下文（`detailImageItem`）—— 打开即重置三态，跨商品不串结果。
-          商品无图时**不拦按钮**（图集可能在台账里还没同步到，但服务端会拿到 item_id 后
-          按台账取图，取不到给 `PRODUCT_IMAGE_MISSING`）—— 如实报缺，不造图。 */}
+          商品无图时**不拦按钮**（服务端会拿到 item_id 后按台账取图，
+          取不到给 `PRODUCT_IMAGE_MISSING`）—— 如实报缺，不造图。
+
+          ⚠️ **v2.16 重排理由**（用户口径「重新布局一下」）：原版 560 宽、从上到下一路堆叠
+          （商品信息 → 参考图两组 → 提示词 → 结果）⇒ 参考图缩略图挤成窄条、出图结果被
+          压在弹窗最底部（要滚动才看得到）。改为 **760 宽 + 左右两栏**：
+          左栏 = 配置（商品 + 参考图 + 提示词），右栏 = 出图结果（生成后即时可见，不滚）。
+          `Row/Col` 而非 `flex`：与全站栅格口径一致（窄视口自动折行单列）。 */}
       <Modal
         open={detailImageOpen}
         title="生成商品详情图"
-        width={560}
+        width={760}
         onCancel={() => setDetailImageOpen(false)}
         footer={
           <Space>
@@ -2013,78 +2020,117 @@ export function XhsShopItemsPage() {
           </Space>
         }
       >
-        <Space direction="vertical" size={12} style={{ width: "100%" }}>
-          <Descriptions size="small" column={1}>
-            <Descriptions.Item label="商品">
-              {detailImageItem?.title || detailImageItem?.item_id || "-"}
-            </Descriptions.Item>
-            <Descriptions.Item label="商品ID">{detailImageItem?.item_id || "-"}</Descriptions.Item>
-          </Descriptions>
+        <Row gutter={16}>
+          {/* 左栏：配置（商品信息 / 参考图勾选 / 补充要求） */}
+          <Col span={14}>
+            <Space direction="vertical" size={12} style={{ width: "100%" }}>
+              <Descriptions size="small" column={1}>
+                <Descriptions.Item label="商品">
+                  {detailImageItem?.title || detailImageItem?.item_id || "-"}
+                </Descriptions.Item>
+                <Descriptions.Item label="商品ID">
+                  {detailImageItem?.item_id || "-"}
+                </Descriptions.Item>
+              </Descriptions>
 
-          {/* v2.15 参考图勾选（§13.3.6）：主图 / **原商品详情图**两组，多选。
-              不勾 ⇒ 后端沿用商品首图（旧行为不变）。 */}
-          <Spin spinning={detailImageLoading}>
-            <Space direction="vertical" size={8} style={{ width: "100%" }}>
-              <Text strong style={{ fontSize: 13 }}>
-                参考图（勾选后作为生成依据，可多选）
-              </Text>
-              <ReferenceImagePicker
-                label="商品主图"
-                urls={detailImageDetail?.product_images || []}
-                selected={detailImageRefs}
-                onToggle={(url) =>
-                  setDetailImageRefs((current) =>
-                    current.includes(url)
-                      ? current.filter((u) => u !== url)
-                      : [...current, url]
-                  )
-                }
-              />
-              <ReferenceImagePicker
-                label="原商品详情图"
-                urls={detailImageDetail?.detail_images || []}
-                selected={detailImageRefs}
-                onToggle={(url) =>
-                  setDetailImageRefs((current) =>
-                    current.includes(url)
-                      ? current.filter((u) => u !== url)
-                      : [...current, url]
-                  )
-                }
-                emptyHint="这个商品没有详情图（平台侧未提供，或还没同步到）"
-              />
-              <Text type="secondary" style={{ fontSize: 11 }}>
-                已选 {detailImageRefs.length} 张{detailImageRefs.length === 0 ? "（不选则默认用商品首图）" : ""}
-              </Text>
-            </Space>
-          </Spin>
+              {/* v2.15 参考图勾选（§13.3.6）：主图 / **原商品详情图**两组，多选。
+                  不勾 ⇒ 后端沿用商品首图（旧行为不变）。 */}
+              <Spin spinning={detailImageLoading}>
+                <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                  <Space size={6}>
+                    <Text strong style={{ fontSize: 13 }}>
+                      参考图
+                    </Text>
+                    <Text type="secondary" style={{ fontSize: 11 }}>
+                      点击缩略图勾选 · 已选 {detailImageRefs.length} 张
+                      {detailImageRefs.length === 0 ? "（不选则默认用商品首图）" : ""}
+                    </Text>
+                  </Space>
+                  <ReferenceImagePicker
+                    label="商品主图"
+                    urls={detailImageDetail?.product_images || []}
+                    selected={detailImageRefs}
+                    onToggle={(url) =>
+                      setDetailImageRefs((current) =>
+                        current.includes(url)
+                          ? current.filter((u) => u !== url)
+                          : [...current, url]
+                      )
+                    }
+                  />
+                  <ReferenceImagePicker
+                    label="原商品详情图"
+                    urls={detailImageDetail?.detail_images || []}
+                    selected={detailImageRefs}
+                    onToggle={(url) =>
+                      setDetailImageRefs((current) =>
+                        current.includes(url)
+                          ? current.filter((u) => u !== url)
+                          : [...current, url]
+                      )
+                    }
+                    emptyHint="这个商品没有详情图（平台侧未提供，或还没同步到）"
+                  />
+                </Space>
+              </Spin>
 
-          <Input.TextArea
-            value={detailImagePrompt}
-            onChange={(e) => setDetailImagePrompt(e.target.value)}
-            placeholder="补充要求（可留空，留空则按商品标题与规格自动拼提示词）"
-            disabled={detailImageGenerating}
-            maxLength={2000}
-            rows={3}
-          />
-          {detailImage ? (
-            <Space direction="vertical" size={4}>
-              <Image
-                src={detailImage.url || detailImage.asset.local_path}
-                width={220}
-                style={{ objectFit: "cover", borderRadius: 4 }}
-              />
-              <Text type="secondary" style={{ fontSize: 11 }}>
-                模型 {detailImage.asset.model_name || "-"} · 已存入素材库（#{detailImage.asset.id}）
-              </Text>
+              <div>
+                <Text strong style={{ fontSize: 13 }}>
+                  补充要求
+                </Text>
+                <Input.TextArea
+                  style={{ marginTop: 4 }}
+                  value={detailImagePrompt}
+                  onChange={(e) => setDetailImagePrompt(e.target.value)}
+                  placeholder="可留空，留空则按商品标题与规格自动拼提示词"
+                  disabled={detailImageGenerating}
+                  maxLength={2000}
+                  rows={3}
+                />
+              </div>
             </Space>
-          ) : (
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              出图后存入素材库并落 AIGC 溯源。商品图由服务端按商品 ID 从本地台账取
-              （没有商品图就没有参考图，不会凭空生成一张）。
+          </Col>
+
+          {/* 右栏：出图结果（生成后即时可见；未生成时给一行说明，不留空白） */}
+          <Col span={10}>
+            <Text strong style={{ fontSize: 13 }}>
+              生成结果
             </Text>
-          )}
-        </Space>
+            <div
+              style={{
+                marginTop: 6,
+                minHeight: 260,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                border: "1px dashed rgba(0,0,0,0.15)",
+                borderRadius: 6,
+                padding: 8,
+              }}
+            >
+              {detailImage ? (
+                <Space direction="vertical" size={6} style={{ width: "100%" }}>
+                  <Image
+                    src={detailImage.url || detailImage.asset.local_path}
+                    width="100%"
+                    style={{ objectFit: "contain", borderRadius: 4 }}
+                  />
+                  <Text type="secondary" style={{ fontSize: 11 }}>
+                    模型 {detailImage.asset.model_name || "-"} · 已存入素材库
+                    （#{detailImage.asset.id}）
+                  </Text>
+                </Space>
+              ) : (
+                <Text type="secondary" style={{ fontSize: 12, textAlign: "center" }}>
+                  出图后显示在这里，并存入素材库、落 AIGC 溯源。
+                  <br />
+                  商品图由服务端按商品 ID 从本地台账取（没有商品图就没有参考图，
+                  不会凭空生成一张）。
+                </Text>
+              )}
+            </div>
+          </Col>
+        </Row>
       </Modal>
 
       {/* LLM 生成配置弹窗（T9，设计 17 §7.4）：选模板 + 媒体来源四选一。

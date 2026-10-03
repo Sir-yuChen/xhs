@@ -2120,6 +2120,32 @@ def test_t9_panels_are_wired_into_workshop():
     assert "VIDEO_SOURCES" in modal, "弹窗未按视频来源分流参数区（视频没界面入口）"
 
 
+# --------------------------------------------------------------------------- #
+# 2026-10-03 v2.16：「生成商品详情图」弹窗左右两栏布局
+# --------------------------------------------------------------------------- #
+SHOP_ITEMS_PAGE = ROOT / "frontend/src/pages/platforms/xhs/shop-items-page.tsx"
+
+
+def test_detail_image_modal_uses_two_column_layout():
+    """生成详情图弹窗 = **左右两栏**（设计 17 §13.3.3 v2.16，用户口径「重新布局一下」）。
+
+    原版 560 宽、从上到下一路堆叠 ⇒ 参考图缩略图挤成窄条、出图结果被压在弹窗最底部。
+    守四件：① 弹窗加宽到 760；② 左右两栏（`Row` + 两个 `Col`）；
+    ③ 右栏是「生成结果」（出图即时可见，不用滚到底）；④ 参考图勾选仍在左栏。
+    """
+    page = _code_only(_read(SHOP_ITEMS_PAGE))
+    # 只取弹窗那一段（从注释头到 `</Modal>`），避免命中页面别处的 Row/Col
+    block = _slice_between(page, 'title="生成商品详情图"', "</Modal>")
+    assert "width={760}" in block, "弹窗未加宽到 760（窄弹窗放不下两栏）"
+    assert "<Row" in block and block.count("<Col") >= 2, "弹窗未改成左右两栏"
+    assert "生成结果" in block, "右栏缺少「生成结果」区（出图要即时可见，不能被压到底部）"
+    assert "ReferenceImagePicker" in block, "参考图勾选丢了"
+    # 左栏（配置）在前、右栏（结果）在后 —— 阅读顺序：先配置后结果
+    assert block.index("ReferenceImagePicker") < block.index("生成结果"), (
+        "参考图勾选应在左栏（配置），结果在右栏"
+    )
+
+
 def test_library_card_shows_note_type_tag():
     """类型标签的**可见性口径**：卡片上不展示，鼠标悬停卡片才显示（2026-09-23，§25.7.3）。
 
