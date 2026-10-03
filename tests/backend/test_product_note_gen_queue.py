@@ -576,6 +576,11 @@ def test_run_one_generate_survives_system_exit(clean_generate_globals, gen_env, 
     monkeypatch.setattr(pngs, "generate_note_for_item", _boom)
 
     db = db_factory()
+    # ⚠️ FK=ON（2026-10-04）：`tasks.user_id` / `platform_account_id` 有外键，
+    # 父行必须存在 —— 本用例用 `db_factory`（不播种），故就地补。
+    from tests.backend.conftest import seed_owner_rows as _seed
+
+    _seed(db.get_bind(), user_id=1, account_id=1)
     try:
         row, _ = nqs.enqueue_item(
             db,
@@ -722,6 +727,11 @@ def test_stop_generate_worker_stops_claiming_and_exits(
 def test_recover_interrupted_covers_gen_items(clean_generate_globals, db_factory):
     """启动恢复（`recover_interrupted`）连商品生成队列一起复位（`QUEUE_ITEM_TASK_TYPES` 收口）。"""
     db = db_factory()
+    # ⚠️ FK=ON（2026-10-04）：`tasks.user_id -> users.id` 有外键，父行必须存在 ——
+    # 本用例用 `db_factory`（**不播种**，见 conftest 该夹具的契约），故就地补。
+    from tests.backend.conftest import seed_owner_rows as _seed
+
+    _seed(db.get_bind(), user_id=1, account_id=1)
     try:
         row, _ = nqs.enqueue_item(
             db,

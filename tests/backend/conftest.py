@@ -249,7 +249,10 @@ def db_engine(db_path: Path) -> Engine:
     """
     engine = make_engine(db_path)
     _base().metadata.create_all(bind=engine)
-    _seed_baseline_rows(engine)
+    # ⚠️ **刻意不播种任何行**（2026-10-04）：`test_conftest_fixtures.py` 的契约是
+    # 「新库应当是空的」，而大量用例（如 `test_llm_gateway`）也依赖「库里没有东西」
+    # 才断言得准。曾经在这里加过 `users`/`platform_accounts` 基线行 ⇒ 一次红 20+ 条。
+    # **外键父行由需要它的文件自己造**（见 `seed_owner_rows` 的用法）。
     yield engine
     engine.dispose()
 

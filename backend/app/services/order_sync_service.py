@@ -877,7 +877,7 @@ def _save_order_cursor(db: Session, account_id: int, cursor_ms: int) -> None:
 
 def _mark_credential_state(db: Session, account: PlatformAccount, message: str, payload: Any) -> None:
     """凭据失效 ⇒ 标记账号千帆态为 invalid（已有订单一行不删，与商品同步同口径）。"""
-    from apis.xhs_qianfan_apis import ORDER_PAGE_SIZE_LIMIT, XHS_Qianfan_Apis
+    from apis.xhs_qianfan_apis import XHS_Qianfan_Apis
 
     code = (payload or {}).get("code") if isinstance(payload, dict) else None
     if not XHS_Qianfan_Apis.is_credential_error(code):

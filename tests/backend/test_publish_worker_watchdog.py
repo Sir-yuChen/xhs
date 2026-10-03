@@ -125,6 +125,11 @@ def _wait_until(predicate, timeout: float = 5.0) -> bool:
 def _account_id(db_factory) -> int:
     db = db_factory()
     try:
+        # ⚠️ FK=ON（2026-10-04）：`platform_accounts.user_id -> users.id` 有外键，
+        # 父行必须存在（`db_factory` 按契约**不播种**）。一处补，本文件 9 条用例都过。
+        from tests.backend.conftest import seed_owner_rows as _seed
+
+        _seed(db.get_bind(), user_id=1)
         account = PlatformAccount(
             user_id=1, platform="xhs", sub_type="creator", nickname="发布守活店", status="active"
         )
@@ -635,6 +640,10 @@ def test_publish_snapshot_is_user_scoped(db_factory):
     """发布快照只回**当前用户**的队列项（多租户隔离，DEF-066 同规）。"""
     db = db_factory()
     try:
+        # ⚠️ 跨租户行也要有真实 owner（FK=ON，2026-10-04）。
+        from tests.backend.conftest import seed_owner_rows as _seed
+
+        _seed(db.get_bind(), user_id=999)
         other = Task(
             user_id=999,
             platform="xhs",

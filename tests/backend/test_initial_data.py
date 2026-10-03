@@ -407,7 +407,10 @@ def test_existing_rows_are_never_overwritten(tmp_path, monkeypatch):
         db.commit()
 
         created = ensure_builtin_jobs(db)
-        assert len(created) == 11, "已存在的那一行不该再插"
+        # ⚠️ 12 = 种子的 13 个内置行 − 已存在的那 1 行（`system.note_sync`）。
+        # 2026-10-04 收口：M5/M6 新增 `workflow.` / `system.order_sync` 后
+        # 种子由 11 增至 13（`workflow.` 是运行时动态建的，不在种子里）。
+        assert len(created) == 12, "已存在的那一行不该再插"
 
         row = db.scalar(select(ScheduledJob).where(ScheduledJob.job_key == "system.note_sync"))
         assert row.name == "我改过的名字"
