@@ -34,6 +34,7 @@ import {
   Tag,
   Tooltip,
   Typography,
+  Checkbox,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import dayjs from "dayjs";
@@ -222,11 +223,20 @@ function DetailImageGroupResult({
             const picked = selectedIds.includes(asset.id);
             return (
               <div key={asset.id} style={{ width: 150 }}>
+                {/*
+                  ⚠️ **勾选不能挂在外层 div 的 onClick 上**（v2.29 真机实测）：
+                  antd `Image` 的 `preview` **自己接管点击**（内部 `stopPropagation`）
+                  ⇒ 外层 onClick 根本收不到，现象就是用户说的
+                  「生成的图点击就会预览大图，**无法被选中**」。
+
+                  ⇒ 拆成两个**互不抢**的入口：
+                    * **点图片** = 看大图（`preview` 保留，这是有用行为）；
+                    * **点右上角复选框** = 选择/取消（勾选语义明确，无歧义）。
+                  比「点图切换选择」更清楚 —— 那种做法永远不会知道用户是想看还是想选。
+                */}
                 <div
-                  onClick={() => onToggleSelect(asset.id)}
                   style={{
                     position: "relative",
-                    cursor: "pointer",
                     border: picked
                       ? "2px solid #1677ff"
                       : "1px solid rgba(0,0,0,0.12)",
@@ -234,7 +244,6 @@ function DetailImageGroupResult({
                     overflow: "hidden",
                     lineHeight: 0,
                   }}
-                  title={picked ? "点击取消选择" : "点击选择（可保存到素材库）"}
                 >
                   <Image
                     src={asset.url || asset.local_path}
@@ -243,23 +252,21 @@ function DetailImageGroupResult({
                     style={{ objectFit: "contain" }}
                     preview={{ src: asset.url || asset.local_path }}
                   />
-                  {picked && (
-                    <span
-                      style={{
-                        position: "absolute",
-                        top: 2,
-                        right: 2,
-                        background: "#1677ff",
-                        color: "#fff",
-                        fontSize: 11,
-                        lineHeight: "16px",
-                        padding: "0 5px",
-                        borderRadius: 8,
-                      }}
-                    >
-                      ✓
-                    </span>
-                  )}
+                  <Checkbox
+                    checked={picked}
+                    onChange={() => onToggleSelect(asset.id)}
+                    style={{
+                      position: "absolute",
+                      top: 4,
+                      left: 4,
+                      zIndex: 2,
+                      background: "rgba(255,255,255,0.9)",
+                      borderRadius: 4,
+                      padding: "0 4px",
+                      lineHeight: "18px",
+                    }}
+                    title={picked ? "取消选择" : "选择（可保存到素材库）"}
+                  />
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 2 }}>
                   <Text type="secondary" style={{ fontSize: 11 }}>

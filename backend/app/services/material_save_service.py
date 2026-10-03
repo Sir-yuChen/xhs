@@ -155,18 +155,48 @@ def save_assets_to_folder(
             continue
 
         rel_path = str(dest.relative_to(root)).replace("\\", "/")
-        _upsert_index_row(db, user_id=user_id, folder_id=folder.id, dest=dest, root=root, rel_path=rel_path)
+        # ⚠️ **不在这里建索引行**（v2.29 真机实测踩到）：
+        # 手工行缺 `width`/`height`/**`thumb_url`** ⇒ 素材库面板渲染空白
+        # （用户现象「素材库中的图片全部无法展示」）。而且**事后补跑扫描也救不回来** ——
+        # 扫描是**按 mtime 增量**的，我这里写了 mtime ⇒ 扫描认为「没变化」直接跳过。
+        # ⇒ 唯一正确做法：**只落文件，索引交给扫描**（建行 + 算尺寸 + 出缩略图
+        # 的唯一实现；重写一遍必然在某条分支上分叉，DEF-044）。
         saved.append(
             {"asset_id": asset.id, "rel_path": rel_path, "filename": filename}
         )
 
     db.commit()
+
+    # ⚠️ **必须再跑一次扫描**（v2.29，真机实测踩到）：
+    # 手工写的索引行缺 `width` / `height` / **`thumb_url`** ⇒ 素材库面板
+    # 显示不出缩略图（前端读 `thumb_url`，空串就渲染成空白）——
+    # 用户的现象是「素材库中的图片全部无法展示」。
+    #
+    # 为什么不在这里自己算尺寸/生成缩略图：那是**扫描服务的职责**
+    # （它已经处理了「视频无缩略图」「损坏图回落」等分支）。
+    # 重写一遍 = 同一语义两份实现（DEF-044），且必然在某条分支上分叉。
+    # 扫描是**按 mtime 增量**的：刚写的文件 mtime 未变 ⇒ 只补元数据，
+    # 不会重复插入行（唯一键 `(folder_id, rel_path)` 也在兜底）。
+    # ⚠️ 索引行**完全依赖**这次扫描（不再自建）⇒ 扫描失败必须**显式报出**：
+    # 静默吞掉的话，用户看到「保存成功」却在素材库里找不到文件（最难查的一类）。
+    scanned = None
+    if saved:
+        from backend.app.services.material_scan_service import scan_folder
+
+        try:
+            scanned = scan_folder(db, folder)
+        except Exception as exc:  # noqa: BLE001
+            raise MaterialSaveError(
+                f"文件已写入磁盘，但素材库索引失败（文件不会被列出）：{exc}"
+            ) from exc
+
     return {
         "folder_id": folder.id,
         "folder_name": folder.name,
         "dir": str((Path(AI_ROOT_DIRNAME) / target_dir.name)).replace("\\", "/"),
         "saved": saved,
         **( {"errors": errors} if errors else {}),
+        **( {"scan": scanned} if scanned else {}),
     }
 
 
@@ -199,36 +229,3 @@ def _download_to(url: str, dest: Path) -> None:
             if chunk:
                 handle.write(chunk)
 
-
-def _upsert_index_row(
-    db: Session, *, user_id: int, folder_id: int, dest: Path, root: Path, rel_path: str
-) -> None:
-    """落 `material_files` 索引行（**素材库面板靠它才看得见**）。
-
-    ⚠️ 扫描是**按 mtime 增量**的：这里直接写索引行（含真实 mtime），
-    下次扫描看到 mtime 未变就跳过 —— 不会重复插入。
-    唯一键 `(folder_id, rel_path)` 已存在时更新（覆盖同名重下）。
-    """
-    stat = dest.stat()
-    existing = db.scalar(
-        select(MaterialFile).where(
-            MaterialFile.folder_id == folder_id,
-            MaterialFile.rel_path == rel_path,
-        )
-    )
-    mtime = datetime.fromtimestamp(stat.st_mtime)
-    if existing is not None:
-        existing.size_bytes = stat.st_size
-        existing.mtime = mtime
-        return
-    db.add(
-        MaterialFile(
-            user_id=user_id,
-            folder_id=folder_id,
-            filename=dest.name,
-            file_type="image",
-            rel_path=rel_path,
-            size_bytes=stat.st_size,
-            mtime=mtime,
-        )
-    )

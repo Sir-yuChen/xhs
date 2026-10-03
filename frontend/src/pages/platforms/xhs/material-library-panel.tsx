@@ -47,6 +47,7 @@ import {
   materialFileUrl,
   scanMaterialFolder,
   updateMaterialFolder,
+  materialThumbUrl,
 } from "../../../lib/api";
 import type { MaterialFile, MaterialFolder } from "../../../types";
 
@@ -449,20 +450,20 @@ export function MaterialLibraryPanel({
                           overflow: "hidden",
                         }}
                       >
-                        {isImage && file.thumb_url ? (
+                        {isImage ? (
+                          // ⚠️ v2.29：**列表一律用缩略图**（`thumb_url`）。
+                          // 此前两个分支都拿 `materialFileUrl(file.id)`（原图端点）——
+                          // 原图 6.5MB/1776×2368，列表里几十张一起加载必然破图/卡死
+                          // （用户现象「图没有在页面正常展示，无法加载该图片」）。
+                          // 预览（点开看大图）才回落到原图，那才是它该待的地方。
                           <Image
-                            src={materialFileUrl(file.id)}
+                            src={file.thumb_url ? materialThumbUrl(file.thumb_url) : materialFileUrl(file.id)}
                             height={120}
                             style={{ objectFit: "cover" }}
-                            preview={{ mask: "预览" }}
-                          />
-                        ) : isImage ? (
-                          // 图片索引里但缩略图 URL 为空 ⇒ 用原图端点兜底
-                          <Image
-                            src={materialFileUrl(file.id)}
-                            height={120}
-                            style={{ objectFit: "cover" }}
-                            preview={{ mask: "预览" }}
+                            preview={{
+                              src: materialFileUrl(file.id),
+                              mask: "预览",
+                            }}
                           />
                         ) : (
                           // 视频无缩略图是**设计如此**（后端不为视频抽帧）

@@ -2926,6 +2926,24 @@ export function materialFileUrl(fileId: number): string {
   return `/api/xhs/materials/files/${fileId}/file`;
 }
 
+/**
+ * 素材**缩略图** URL（v2.29 —— 修「素材库图片不显示」）。
+ *
+ * ## 为什么要单独一个函数
+ *
+ * 后端 `material_scan_service._thumb_rel_url()` 已经算好并落库了 `thumb_url`
+ * （形如 `/api/xhs/materials/folders/1/thumbs/1`），但**前端此前根本没用它** ——
+ * 两个分支都拿 `materialFileUrl(file.id)`（**原图端点**）当 `src`。
+ * 原图实测 1776×2368 / **6.5 MB** ⇒ 加载慢、易被掐 ⇒ 页面显示破图
+ * （用户现象「图没有在页面正常展示，无法加载该图片」）。
+ *
+ * 这里直接吃后端下发的 `thumb_url`（**不自己拼**：拼装规则在后端一处，
+ * 前端再拼一份就是两个实现，改一处必漏一处）。
+ */
+export function materialThumbUrl(thumbUrl: string): string {
+  return thumbUrl;
+}
+
 /** 单条 LLM 生成（入队即返回，设计 17 §7.4）。 */
 export async function generateLlmNote(payload: {
   platformAccountId: number;

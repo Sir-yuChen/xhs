@@ -382,3 +382,72 @@ def _guess_media_type(filename: str) -> str:
         ".avi": "video/x-msvideo",
         ".mkv": "video/x-matroska",
     }.get(suffix, "application/octet-stream")
+
+
+@router.get("/folders/{folder_id}/thumbs/{file_id}")
+def get_material_thumb(
+    folder_id: int,
+    file_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """素材缩略图（**`thumb_url` 指向的就是这里**，设计 17 §3.4）。
+
+    ## ⚠️ 这个端点此前**根本不存在**（2026-10-03 真机实测发现）
+
+    `material_scan_service._thumb_rel_url()` 生成的 URL 一直是
+    `/api/xhs/materials/folders/{folder_id}/thumbs/{file_id}`，
+    但**没有任何路由提供它** —— 扫描把文件、尺寸、缩略图都算好了、索引行也写对了，
+    前端拿到的 `thumb_url` 却是 **404** ⇒ **素材库里的图片全部显示不出来**
+    （用户现象：「正常图在素材库中无法展示」）。
+
+    这类 bug 的形态很典型：**生产者（URL 字符串）与消费者（路由）各写各的**，
+    两边单独看都对，中间没有一条断言把它们绑在一起。
+
+    契约：`{file_id}` 是 `material_files.id`（不是文件名）——
+    与 `_thumb_rel_url(folder_id, str(file_id))` 的拼装一致。
+    缩略图**按 id 命名**（`f{folder_id}-{file_id}.jpg`）⇒ 取文件不必查 rel_path，
+    但仍要**校验归属**（否则任何人改 id 就能看别人的图）。
+    """
+    from backend.app.services.material_scan_service import thumbs_dir
+
+    # 归属校验：文件夹必须是本人的
+    folder = db.scalar(
+        select(MaterialFolder).where(
+            MaterialFolder.id == folder_id,
+            MaterialFolder.user_id == current_user.id,
+        )
+    )
+    if folder is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "MATERIAL_FOLDER_NOT_FOUND", "message": "素材库文件夹不存在"},
+        )
+    # 行也必须是本人的（**双重校验**：文件夹对了、行不属于自己仍然要拦）
+    row = db.scalar(
+        select(MaterialFile).where(
+            MaterialFile.id == file_id,
+            MaterialFile.folder_id == folder_id,
+            MaterialFile.user_id == current_user.id,
+        )
+    )
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "MATERIAL_FILE_NOT_FOUND", "message": "素材文件不存在"},
+        )
+
+    target = thumbs_dir() / str(folder_id) / f"f{folder_id}-{file_id}.jpg"
+    if not target.is_file():
+        # 缩略图缺失（老索引行 / 生成失败过）⇒ 404 + 可执行原因。
+        # ⚠️ **不回落原图**：原图可能几十 MB，回落等于把「缩略图」语义偷偷换掉，
+        #    且会把用户本机大文件直接吐给浏览器（两者都不该在「缩略图」名下发生）。
+        #    正确出路是重扫（`POST /folders/{id}/scan`）补齐。
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": "MATERIAL_THUMB_MISSING",
+                "message": "缩略图不存在，请对该素材库执行一次「刷新」（会重新生成）",
+            },
+        )
+    return FileResponse(target, media_type="image/jpeg")
