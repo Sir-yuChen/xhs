@@ -1532,7 +1532,20 @@ export function XhsShopItemsPage() {
     activeGroup === "product"
       ? detailImageDetail?.product_images || []
       : detailImageDetail?.detail_images || [];
-  const activeGroupRefs = detailImageRefs.filter((url) => activeGroupUrls.includes(url));
+  /**
+   * ⚠️ **不能按组过滤**（v2.29.7 修「详情图 Tab 勾了图按钮还是灰」）。
+   *
+   * 历史：勾选区（`ReferenceImagePicker`）曾经**按组**显示（主图一组、详情图一组），
+   * 那时「本组勾了几张」= 「按钮能不能点」。后来（v2.23 用户口径）两组合并成
+   * **一个「可选参考图」**（`product_images ++ detail_images`），但**按钮判据没跟着改** ——
+   * 于是「在详情图 Tab 里勾了主图那组的图」会被 `filter` 全部滤掉 ⇒ `length === 0`
+   * ⇒ **按钮恒灰**（用户现象：「详情图中已经选择了参考图…但右下角的生成详情图按钮
+   * 无法点击是灰色」）。
+   *
+   * ⇒ 判据与勾选区**同一口径**：**勾了就能生成**（送哪几张由图本身决定，
+   * 与当前 Tab 无关 —— 后端本来就按 `reference_image_urls` 收，不按组收）。
+   */
+  const activeGroupRefs = detailImageRefs;
 
   /**
    * v2.22：Tab 清单（**唯一来源**）—— 主图 / 详情图各自一套配置与结果。
@@ -2487,9 +2500,7 @@ export function XhsShopItemsPage() {
                 ⚠️ 只按**当前 Tab** 的勾选判断 —— 各 Tab 独立配置，按钮语义也是各自的。 */}
             <Tooltip
               title={
-                activeGroupRefs.length === 0
-                  ? `请先在「${activeGroupLabel}」里勾选至少一张参考图`
-                  : ""
+                activeGroupRefs.length === 0 ? "请先在「可选参考图」里勾选至少一张图" : ""
               }
             >
               <Button
@@ -2565,7 +2576,42 @@ export function XhsShopItemsPage() {
             用户在 A 填的提示词会在切到 B 后被顶掉（「混搭」在状态层的形态）。 */}
         <Tabs
           activeKey={activeGroup}
-          onChange={(key) => setActiveGroup(key as "product" | "detail")}
+          onChange={(key) => {
+            const next = key as "product" | "detail";
+            if (next === activeGroup) return;
+            setActiveGroup(next);
+            /* ⚠️ **切换 Tab 后的复位口径**（用户口径 2026-10-03，两轮澄清后定稿）：
+               > 「切换tab时要清除历史tab中的内容」
+               > 「每次切换tab后，**参考图、补充要求清空**，**其它恢复默认值**」
+
+               | 项 | 处理 |
+               |---|---|
+               | 参考图勾选 | **清空**（用户明确） |
+               | 补充要求（手输提示词） | **清空**（用户明确） |
+               | 提示词模板 | **回该 Tab 的默认模板**（`is_default`，与首次打开一致） |
+               | 生成张数 | **回默认 3** |
+               | 生成结果 / 勾选待保存 / 失败信息 | **清空**（上一个 Tab 的结果不该留在这里） |
+
+               ⚠️ 这**取代**了 v2.22 的「每组状态按组存、切 Tab 不丢」——
+               那时担心「在 A 填的提示词切到 B 后被顶掉」；但 v2.23 把两个勾选区
+               合并成一个之后，「留着上一个 Tab 的勾选与结果」反而误导：
+               用户以为「这是在本 Tab 配的」，其实是从另一个 Tab 带过来的。
+               ⇒ 现在「换 Tab = 换一套全新配置」。 */
+            const defaultTemplateId = (taskType: string) =>
+              detailImageTemplates.find((t) => t.is_default && t.task_type === taskType)?.id;
+            setDetailImageRefs([]);
+            setDetailImageGroupConfigs({
+              // 「恢复默认值」= 模板回默认、张数回 3 —— 与首次打开弹窗时的预填一致
+              [next]: {
+                templateId: defaultTemplateId(next === "product" ? "cover" : "image"),
+                prompt: "",
+                count: 3,
+              },
+            });
+            setDetailImage(null);
+            setDetailImageSelectedIds([]);
+            setDetailImageRegenerating(null);
+          }}
           items={detailImageGroupTabs.map((tab) => ({
             key: tab.key,
             label: (

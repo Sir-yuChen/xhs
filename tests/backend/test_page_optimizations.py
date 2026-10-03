@@ -2282,10 +2282,13 @@ def test_detail_image_generate_button_requires_reference():
     """
     page = _code_only(_read(SHOP_ITEMS_PAGE))
     block = _slice_between(page, "open={detailImageOpen}", "</Modal>")
-    # v2.22：按**当前 Tab** 的勾选判断（各 Tab 独立配置 ⇒ 按钮语义也是各自的）
+    # v2.29.7：判据是「**勾了就能生成**」（不再按 Tab 过滤参考图）——
+    # 两个勾选区已在 v2.23 合并成一个，按组过滤会让「在另一个 Tab 里勾的图」
+    # 全被滤掉、按钮恒灰（真机 bug）。
     assert "activeGroupRefs.length === 0" in block, "生成按钮未与参考图勾选挂钩"
     assert "disabled={" in block, "生成按钮缺少禁用态"
-    assert "请先在" in block and "勾选至少一张参考图" in block, "禁用态未说明原因"
+    # 文案改了（不再点「在 XX Tab 里勾」—— 勾选区已经不属于某一个 Tab 了）
+    assert "勾选至少一张" in block, "禁用态未说明原因"
     # ③ 张数真正传进请求函数（假接线守卫：能选 ≠ 生效）
     generate_fn = _slice_between(page, "async function generateDetailImage", "function ")
     assert "groupSettings" in generate_fn, "按组配置未传给请求函数（填了也不生效）"
@@ -3549,3 +3552,51 @@ def test_detail_image_mask_covers_whole_modal_and_results_are_thumbnails():
     assert "asset_groups" in page, (
         "保存时没传 asset_groups ⇒ 文件名只能写「图-NN」，用户看不出主图/详情图"
     )
+
+
+def test_detail_image_tab_switch_resets_config():
+    """切换 Tab 后：**参考图 / 补充要求清空，其它恢复默认值**（用户口径 2026-10-03）。
+
+    > 「生成AI商品图弹出中，切换tab时要清除历史tab中的内容」
+    > 「每次切换tab后，参考图，补充要求清空，其它恢复默认值」
+
+    取代 v2.22 的「每组状态按组存、切 Tab 不丢」—— v2.23 把两个勾选区合并成
+    一个之后，「留着上一个 Tab 的勾选与结果」反而误导（用户以为是在本 Tab 配的）。
+
+    守四件：① 清参考图；② 清补充要求（`prompt: ""`）；③ 模板回默认
+    （按当前 Tab 的 task_type 找 `is_default`）；④ 张数回 3；⑤ 结果也清。
+    """
+    page = _code_only(_read(SHOP_ITEMS_PAGE))
+    # Tabs 的 onChange 块
+    block = _slice_between(page, "onChange={(key) => {", "items={detailImageGroupTabs")
+
+    assert "setDetailImageRefs([])" in block, "切换 Tab 没清参考图"
+    assert 'prompt: ""' in block, "切换 Tab 没清补充要求"
+    assert "is_default && t.task_type" in block or "is_default" in block, (
+        "切换 Tab 后模板没回默认值"
+    )
+    assert "count: 3" in block, "切换 Tab 后张数没回默认 3"
+    assert "setDetailImage(null)" in block, "切换 Tab 没清上一个 Tab 的结果"
+
+
+def test_generate_button_does_not_filter_refs_by_tab():
+    """生成按钮的可用判据 = **勾了就能生成**，**不按 Tab 过滤参考图**（真 bug 修复）。
+
+    真机现象：用户在「原始详情图」Tab 里勾了图（勾选区是主图+详情图**合并**的一份），
+    但按钮**恒灰**。
+
+    根因：按钮判据还是「本 Tab 那组里有几张」
+    （`detailImageRefs.filter(url => activeGroupUrls.includes(url))`），
+    而在详情图 Tab 里勾的若是**主图那组**的图 ⇒ 全被滤掉 ⇒ `length === 0`。
+
+    ⚠️ 这是 v2.23「两组合并成一个可选参考图」时**漏改的判据**：
+    勾选区合并了、按钮判据没跟着合并 ⇒ 两处口径不一致。
+    后端本来就按 `reference_image_urls` 收（不按组收），所以按组过滤**没有依据**。
+    """
+    page = _code_only(_read(SHOP_ITEMS_PAGE))
+    assert "const activeGroupRefs = detailImageRefs;" in page, (
+        "按钮判据又变成按 Tab 过滤了 ⇒ 在另一个 Tab 里勾的图不算，按钮恒灰"
+    )
+    # 勾选区必须是**合并**的（两处口径要一致）
+    assert "...(detailImageDetail?.product_images || [])" in page
+    assert "...(detailImageDetail?.detail_images || [])" in page
