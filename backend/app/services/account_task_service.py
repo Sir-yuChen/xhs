@@ -171,6 +171,9 @@ def _dispatch_account_task(item_id: int) -> Optional[dict]:
         mode = str(payload.get("mode") or "auto")
         time_from_ms = int(payload.get("time_from_ms") or 0)
         time_to_ms = int(payload.get("time_to_ms") or 0)
+        # 商品同步的状态范围（§30.3.2，2026-10-02）。缺值 = 老任务行 ⇒ 退回 `all`
+        # （`normalize_item_status` 认坏值；这里传 None 也走同一条兜底）。
+        item_status = payload.get("item_status")
     finally:
         db.close()
 
@@ -230,6 +233,7 @@ def _dispatch_account_task(item_id: int) -> Optional[dict]:
             mode=mode,
             time_from_ms=time_from_ms,
             time_to_ms=time_to_ms,
+            item_status=item_status,
         )
 
     logger.warning("account task worker: 不认识的类型 %s（task=%s）", task_type, item_id)

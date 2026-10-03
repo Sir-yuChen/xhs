@@ -71,7 +71,16 @@ router = APIRouter(prefix="/xhs/qianfan", tags=["xhs-qianfan"])
 
 
 class ShopAccountRequest(BaseModel):
+    """按账号查询商品相关的请求（v2.13：补 `extra="forbid"`）。
+
+    ⚠️ 与 `ShopItemsRequest` 同一条纪律：Pydantic 默认 `extra="ignore"` 会把未知字段
+    **静默丢弃**（不报错、不写日志），表现与「代码写错」完全一样（REF §B 实踩过）。
+    加 forbid ⇒ 新旧不匹配在第一跳就 422 炸出声。
+    """
+
     platform_account_id: int
+
+    model_config = ConfigDict(extra="forbid")
 
 
 class ItemNotesRequest(BaseModel):
@@ -80,12 +89,16 @@ class ItemNotesRequest(BaseModel):
     platform_account_id: int
     item_id: str = Field(min_length=1, max_length=64)
 
+    model_config = ConfigDict(extra="forbid")
+
 
 class ItemDetailRequest(BaseModel):
     """商品详情弹窗的数据请求（v1.32，设计 13 §30.3.6；**纯本地**）。"""
 
     platform_account_id: int
     item_id: str = Field(min_length=1, max_length=64)
+
+    model_config = ConfigDict(extra="forbid")
 
 
 #: 挂链笔记数筛选的比较符白名单（v1.34，用户口径「商品列表搜索条件添加挂链笔记数，
@@ -193,6 +206,8 @@ class NoteCleanupCandidatesRequest(BaseModel):
     browse_num_max: float | None = Field(default=None, ge=0)
     pay_order_cnt_max: float | None = Field(default=None, ge=0)
     pay_gmv_max: float | None = Field(default=None, ge=0)
+
+    model_config = ConfigDict(extra="forbid")
 
 
 def _first_text(*values: Any) -> str:
@@ -880,6 +895,13 @@ class SyncShopGoodsRequest(BaseModel):
     start_date: str = ""
     #: 结束日期 `YYYY-MM-DD`（`scope=range` 时生效，含当天一整天）。
     end_date: str = ""
+    #: **商品状态范围**（设计 13 §30.3.2，2026-10-02 用户口径「商品同步更新需求为同步
+    #: 全部状态的商品」）：`all`（**默认**）= 平台侧全部状态；也可只同步某一个状态
+    #: （取值 = `QIANFAN_ITEM_STATUSES` 的键，与平台页面 7 个 tab 同源）。
+    #: 坏值 ⇒ `all`（退回信息最全的取值，不静默少同步）。
+    item_status: str = "all"
+
+    model_config = ConfigDict(extra="forbid")
 
 
 @router.post("/sync-shop-goods")
@@ -933,6 +955,7 @@ def sync_shop_goods(
     mode = sync_task_service.normalize_mode(payload.mode)
     max_pages = sync_task_service.clamp_pages(payload.max_pages)
     page_size = sync_task_service.clamp_page_size(payload.page_size)
+    item_status = sync_task_service.normalize_item_status(payload.item_status)
     summary = shop_goods_sync_service.start_shop_goods_sync(
         payload.platform_account_id,
         user_id=current_user.id,
@@ -942,6 +965,7 @@ def sync_shop_goods(
         mode=mode,
         time_from_ms=time_from_ms,
         time_to_ms=time_to_ms,
+        item_status=item_status,
         max_pages=max_pages,
         page_size=page_size,
     )
@@ -1008,6 +1032,8 @@ class GenerateDetailImageRequest(BaseModel):
     #: 用户补充要求；为空 ⇒ 后端按商品标题/规格拼默认提示词（不硬编码在端点里，
     #: 见 `_default_detail_image_prompt`）。
     prompt: str = Field(default="", max_length=2000)
+
+    model_config = ConfigDict(extra="forbid")
 
 
 def _default_detail_image_prompt(item: dict[str, Any], skus: list[dict[str, Any]]) -> str:

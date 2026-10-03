@@ -2045,7 +2045,7 @@ def test_three_workshops_merge_into_one_page_with_tabs():
     for key in ('"/platforms/xhs/image-studio"', '"/platforms/xhs/video-studio"', '"/platforms/xhs/drafts"'):
         assert key not in shell, f"菜单旧 key {key} 未移除"
 
-    # ③ Tabs 三页签 + 三面板
+    # ③ Tabs 页签 + 面板（2026-10-02 T9 追加 materials / prompts 两个页签）
     for key in ('key: "images"', 'key: "videos"', 'key: "drafts"'):
         assert key in page, f"工坊页缺少页签 {key}"
     for panel in ("ImageStudioPanel", "VideoStudioPanel", "DraftsWorkshopPanel"):
@@ -2067,6 +2067,49 @@ def test_three_workshops_merge_into_one_page_with_tabs():
     assert "/platforms/xhs/note-workshop?tab=drafts" in library, (
         "内容库「加入草稿工坊」应跳规范 URL（旧路径只剩重定向兜底）"
     )
+
+
+# --------------------------------------------------------------------------- #
+# 2026-10-02 T9：素材库面板 + 提示词模板面板（设计 17 §7.2 / §7.3）
+# --------------------------------------------------------------------------- #
+MATERIAL_PANEL = ROOT / "frontend/src/pages/platforms/xhs/material-library-panel.tsx"
+PROMPT_PANEL = ROOT / "frontend/src/pages/platforms/xhs/prompt-template-panel.tsx"
+LLM_GEN_MODAL = ROOT / "frontend/src/pages/platforms/xhs/llm-generate-modal.tsx"
+LLM_GEN_CARD = ROOT / "frontend/src/pages/platforms/xhs/llm-generate-progress-card.tsx"
+
+
+def test_t9_panels_are_wired_into_workshop():
+    """T9 面板接线（设计 17 §7.2 / §7.3 / §7.4）。
+
+    守四件：① 两个新页签挂在工坊页上（不是建了文件没人引 —— 那就是死代码）；
+    ② 素材库面板的**只读边界**：删除文案必须讲明「不删磁盘文件」；
+    ③ 生成进度卡**轮询摘除禁写 finally**（H9 铁律：写 finally 会在取数失败时停掉轮询，
+       队列永远停在那一刻）；④ 生成配置弹窗的**媒体来源四选一**齐全。
+    """
+    page = _code_only(_read(NOTE_WORKSHOP))
+    for key in ('key: "materials"', 'key: "prompts"'):
+        assert key in page, f"工坊页缺少 T9 页签 {key}"
+    for panel in ("MaterialLibraryPanel", "PromptTemplatePanel"):
+        assert panel in page, f"工坊页未挂 T9 面板 {panel}"
+    for path in (MATERIAL_PANEL, PROMPT_PANEL, LLM_GEN_MODAL, LLM_GEN_CARD):
+        assert path.exists(), f"T9 文件缺失：{path.name}"
+
+    # ② 素材库：删除必须讲明不删磁盘文件（只读边界，硬约束 ②）
+    material = _code_only(_read(MATERIAL_PANEL))
+    assert "磁盘" in material and ("未删除" in material or "不会被删除" in material), (
+        "素材库删除入口必须讲明「不删磁盘原文件」（只读边界）"
+    )
+    assert "materialFileUrl" in material, "素材缩略图未走 materialFileUrl（内容端点）"
+
+    # ③ 进度卡：轮询摘除禁写 finally
+    card = _code_only(_read(LLM_GEN_CARD))
+    assert "finally" not in card, "进度卡轮询摘除写了 finally（H9 铁律：会让队列停在那一刻）"
+    assert "generated" in card, "进度卡未消费 `generated` 键（底座通用形状是 synced）"
+
+    # ④ 生成配置弹窗：媒体来源四选一齐全
+    modal = _code_only(_read(LLM_GEN_MODAL))
+    for source in ("product_image", "material", "reference_image", "ai_generate"):
+        assert source in modal, f"生成配置弹窗缺少媒体来源 {source}"
 
 
 def test_library_card_shows_note_type_tag():

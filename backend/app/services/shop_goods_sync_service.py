@@ -359,6 +359,7 @@ def _sync_with_task(
     mode: str = sts.SYNC_MODE_AUTO,
     time_from_ms: int = 0,
     time_to_ms: int = 0,
+    item_status: str = sts.SYNC_ITEM_STATUS_ALL,
 ) -> dict[str, Any]:
     from backend.app.services.shop_binding_service import (
         qianfan_cookies_for_account,
@@ -464,7 +465,7 @@ def _sync_with_task(
         success, message, raw_payload = adapter.search_items(
             page_no=page_no,
             page_size=page_size,
-            status="all",  # 同步全部状态，不只售卖中
+            status=item_status,  # 默认 all：同步全部状态，不只售卖中（§30.3.2）
             sort_field="create_time",
             order="desc",
             create_time_from=window_from,
@@ -1078,6 +1079,7 @@ def run_shop_goods_sync(
     mode: str = sts.SYNC_MODE_AUTO,
     time_from_ms: int = 0,
     time_to_ms: int = 0,
+    item_status: str = sts.SYNC_ITEM_STATUS_ALL,
 ) -> dict[str, Any]:
     """执行一次店铺商品同步（供后台线程 / 调度器调用）。**不向上抛异常。**
 
@@ -1139,6 +1141,7 @@ def run_shop_goods_sync(
             db, task, account, platform_account_id, adapter_factory,
             max_pages=max_pages, page_size=page_size, mode=mode,
             time_from_ms=time_from_ms, time_to_ms=time_to_ms,
+            item_status=sts.normalize_item_status(item_status),
         )
         return {"task_id": task.id, "status": task.status, "error": "", **result}
     except SyncFailure as exc:
@@ -1169,6 +1172,7 @@ def start_shop_goods_sync(
     mode: str = sts.SYNC_MODE_AUTO,
     time_from_ms: int = 0,
     time_to_ms: int = 0,
+    item_status: str = sts.SYNC_ITEM_STATUS_ALL,
 ) -> dict[str, Any]:
     """建任务行 + 唤醒账号任务 worker，**立即返回**任务摄要。
 
@@ -1194,7 +1198,13 @@ def start_shop_goods_sync(
             page_size=page_size,
             # §35.16：执行改由账号任务 worker 从**任务行**重建参数 ⇒ 同步语义必须落库
             # （原线程版靠 args 传，行里没有）。漏写 = 用户选的「全量 / 时间区间」静默丢失。
-            extra={"mode": mode, "time_from_ms": time_from_ms, "time_to_ms": time_to_ms},
+            extra={
+                "mode": mode,
+                "time_from_ms": time_from_ms,
+                "time_to_ms": time_to_ms,
+                # 状态范围同样必须落库（用户可选「全部状态 / 某个状态」，§30.3.2）。
+                "item_status": sts.normalize_item_status(item_status),
+            },
         )
         db.commit()
         db.refresh(task)

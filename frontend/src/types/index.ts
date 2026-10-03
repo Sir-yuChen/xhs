@@ -1774,3 +1774,105 @@ export type AppNotification = {
   read: boolean;
   created_at: string;
 };
+
+// ─────────────────────────── T9：LLM 生成链路（设计 17） ───────────────────────────
+
+/** 素材文件夹（`GET /api/xhs/materials/folders` 元素，设计 17 §7.3）。 */
+export type MaterialFolder = {
+  id: number;
+  name: string;
+  path: string;
+  enabled: boolean;
+  /** 首次扫描还没跑完时为 null（**不是空串**：NULL 与「扫过但为 0」是两件事）。 */
+  last_scan_at: string | null;
+  file_count: number;
+};
+
+/** 素材文件（`GET /api/xhs/materials/files` 元素，设计 17 §7.3）。 */
+export type MaterialFile = {
+  id: number;
+  folder_id: number;
+  filename: string;
+  /** `image` / `video`（后端落库时的枚举，前端按它分流缩略图）。 */
+  file_type: string;
+  rel_path: string;
+  size_bytes: number;
+  mtime: number;
+  width: number | null;
+  height: number | null;
+  /** 缩略图相对 URL（视频无缩略图时为 null —— 设计即如此，不是缺陷）。 */
+  thumb_url: string | null;
+};
+
+/** 提示词模块（可组合复用的片段，`prompt_modules`）。 */
+export type PromptModule = {
+  id: number;
+  name: string;
+  category: string;
+  content: string;
+  sort_order: number;
+  enabled: boolean;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+/** 提示词模板里展开的模块引用（`_serialize_template` 的 `modules`）。 */
+export type PromptTemplateModuleRef = {
+  id: number;
+  name: string;
+  content: string;
+  sort_order: number;
+};
+
+/** 提示词模板（两层结构的上层，`prompt_templates`）。 */
+export type PromptTemplate = {
+  id: number;
+  name: string;
+  /** 任务类型（与后端枚举同源，决定这个模板给哪条链路用）。 */
+  task_type: string;
+  /** 骨架正文，含 `{插槽}`；渲染时用模块内容填充。 */
+  prompt_skeleton: string;
+  module_ids: number[];
+  is_default: boolean;
+  version?: number;
+  /** 仅列表端点展开（创建 / 更新响应里可能没有）。 */
+  modules?: PromptTemplateModuleRef[];
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+/** 媒体来源四选一（设计 17 §13.4.1）。 */
+export type LlmMediaSource = "product_image" | "material" | "reference_image" | "ai_generate";
+
+/** `media_source` 的参数载体（与来源一一对应，结构随来源变）。 */
+export type LlmMediaOptions = {
+  /** `material` 来源：勾选的素材文件 id。 */
+  material_file_ids?: number[];
+  /** `reference_image` / `ai_generate` 来源：参考图 URL（为空则后端按台账首图取）。 */
+  reference_image_urls?: string[];
+  /** `ai_generate` 来源：文生图提示词（空则后端按商品拼默认）。 */
+  prompt?: string;
+  /** `ai_generate` 来源：生成张数（默认 1，上限 4）。 */
+  count?: number;
+};
+
+/** LLM 生成队列快照（键名 `generated` —— 底座通用形状是 `synced`，此处显式改名）。 */
+export type LlmGenerateQueueSnapshot = {
+  generated: number;
+  failed: number;
+  total: number;
+  running: number;
+  queued: number;
+  finished: LlmGenerateFinishedEntry[];
+  today?: { ok: number; failed: number; pending: number };
+};
+
+/** 队列终态条目（失败原因**只在这里给一次**，不落笔记行）。 */
+export type LlmGenerateFinishedEntry = {
+  item_id: string;
+  item_name?: string;
+  status: string;
+  note_id?: number | null;
+  note_title?: string;
+  reason?: string;
+};

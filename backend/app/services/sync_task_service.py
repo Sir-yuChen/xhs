@@ -124,6 +124,35 @@ SYNC_MODE_INCREMENTAL = "incremental"
 SYNC_MODE_AUTO = "auto"
 
 
+#: 商品同步的**状态范围**（设计 13 §30.3.2；2026-10-02 用户口径「商品同步更新需求为
+#: 同步全部状态的商品」）。
+#:
+#: * ``all`` = **不传 `card_type`**，翻页拿平台侧全部状态（售卖中 / 已下架 / 已冻结 /
+#:   整改 / 审核中 / 审核驳回 / 审核通过），**默认值**；
+#: * 其余取值 = 只同步该状态（取值域 = `apis.xhs_qianfan_apis.QIANFAN_ITEM_STATUSES`，
+#:   与平台页面 7 个 tab 同源）。
+#:
+#: ⚠️ 默认必须是 ``all`` 而不是 ``on_shelf``：台账是「本地唯一的商品真相源」，
+#: 缺了已下架/已冻结的商品，列表页的状态筛选与「删除商品」的连带判断都会静默失真
+#: （看起来正常，只是少了一半商品）。
+SYNC_ITEM_STATUS_ALL = "all"
+
+
+def normalize_item_status(value: Any) -> str:
+    """把请求里的商品状态范围归一化。
+
+    坏值 → ``all``（**不**退成某个具体状态：把拼写错误退成「只同步售卖中」会让
+    一次手滑变成「台账静默少掉已下架 / 已冻结的商品」，与 `normalize_mode` 同一条
+    纪律 —— 坏值退回**信息最全**的那个取值，而不是信息最少的）。
+    """
+    from apis.xhs_qianfan_apis import QIANFAN_ITEM_STATUSES
+
+    text = str(value if value is not None else "").strip().lower()
+    if text in QIANFAN_ITEM_STATUSES:
+        return text
+    return SYNC_ITEM_STATUS_ALL
+
+
 def normalize_mode(value: Any) -> str:
     """把请求里的 mode 归一化；坏值 / 空值 → ``auto``（不 500）。"""
     text = str(value if value is not None else "").strip().lower()

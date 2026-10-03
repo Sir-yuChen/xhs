@@ -12,17 +12,26 @@
  * antd `Tabs` 默认保活（`destroyInactiveTabPane=false`）：页签首次激活后跨切换
  * 不丢面板内 state；未激活过的页签不渲染 ⇒ 不会三个工坊一起打接口。
  */
-import { FileTextOutlined, PictureOutlined, ToolOutlined, VideoCameraOutlined } from "@ant-design/icons";
+import {
+  FileTextOutlined,
+  FolderOpenOutlined,
+  HighlightOutlined,
+  PictureOutlined,
+  ToolOutlined,
+  VideoCameraOutlined,
+} from "@ant-design/icons";
 import { Tabs } from "antd";
 import { useSearchParams } from "react-router-dom";
 
 import { PageHeader } from "../../../components/layout/app-shell";
 import { DraftsWorkshopPanel } from "./drafts-workshop-panel";
 import { ImageStudioPanel } from "./image-studio-panel";
+import { MaterialLibraryPanel } from "./material-library-panel";
+import { PromptTemplatePanel } from "./prompt-template-panel";
 import { VideoStudioPanel } from "./video-studio-panel";
 
 /** tab key 与 URL query 取值（旧路由重定向按它落 tab；未知值回落 images）。 */
-const NOTE_WORKSHOP_TABS = ["images", "videos", "drafts"] as const;
+const NOTE_WORKSHOP_TABS = ["images", "videos", "drafts", "materials", "prompts"] as const;
 type NoteWorkshopTab = (typeof NOTE_WORKSHOP_TABS)[number];
 
 function normalizeTab(value: string | null): NoteWorkshopTab {
@@ -78,6 +87,26 @@ export function XhsNoteWorkshopPage() {
               </span>
             ),
             children: <DraftsWorkshopPanel />,
+          },
+          {
+            key: "materials",
+            label: (
+              <span>
+                <FolderOpenOutlined />
+                素材库
+              </span>
+            ),
+            children: <MaterialLibraryPanel />,
+          },
+          {
+            key: "prompts",
+            label: (
+              <span>
+                <HighlightOutlined />
+                提示词模板
+              </span>
+            ),
+            children: <PromptTemplatePanel />,
           },
         ]}
       />

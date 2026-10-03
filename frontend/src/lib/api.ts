@@ -100,6 +100,14 @@ import type {
   XhsShopItemsQuery,
   XhsShopItemsResponse,
   XhsShopItemsDeleteResult,
+  XhsShopItemStatus,
+  MaterialFolder,
+  MaterialFile,
+  PromptModule,
+  PromptTemplate,
+  LlmMediaSource,
+  LlmMediaOptions,
+  LlmGenerateQueueSnapshot,
   XhsItemNotesResponse,
   XhsAccountLoginState,
   XhsQrLoginSession,
@@ -1256,6 +1264,13 @@ export async function syncShopGoods(payload: {
   scope?: SyncScope;
   startDate?: string;
   endDate?: string;
+  /**
+   * 商品状态范围（设计 13 §30.3.2，2026-10-02）。
+   *
+   * 不传 = 后端默认 `all`（**同步全部状态**：售卖中 / 已下架 / 已冻结 / 整改 /
+   * 审核中 / 审核驳回 / 审核通过）。传某个状态键则只同步那一种。
+   */
+  itemStatus?: XhsShopItemStatus;
 }): Promise<XhsSyncTriggerResult> {
   const response = await http.post<XhsSyncTriggerResult>(
     "/xhs/qianfan/sync-shop-goods",
@@ -1267,6 +1282,7 @@ export async function syncShopGoods(payload: {
       ...(payload.scope ? { scope: payload.scope } : {}),
       ...(payload.startDate ? { start_date: payload.startDate } : {}),
       ...(payload.endDate ? { end_date: payload.endDate } : {}),
+      ...(payload.itemStatus ? { item_status: payload.itemStatus } : {}),
     },
     { _silent: true } as never
   );
@@ -1471,7 +1487,7 @@ export async function fetchXhsShopItemDetail(
 }
 
 /**
- * **生成商品详情图**（商品详情弹窗内触发，设计 17 §13.3.3）。
+ * **生成商品详情图**（商品列表**操作列**独立弹窗内触发，设计 17 §13.3.3；v2.12 从详情弹窗迁出）。
  *
  * 走 `generate_product_detail_image` 业务点（与「生成配图」是两个业务点：配图服务笔记正文，
  * 详情图服务商品）。⚠️ **不传图片 URL** —— 商品图由服务端按 `item_id` 从本地台账取：
@@ -2681,5 +2697,276 @@ export async function fetchGatewayUsageBreakdown(params?: {
   end_date?: string;
 }): Promise<LlmGatewayUsageBreakdownItem[]> {
   const response = await http.get<LlmGatewayUsageBreakdownItem[]>("/llm/usage/breakdown", { params });
+  return response.data;
+}
+
+// ─────────────────────── T9：提示词 / 素材库 / LLM 生成（设计 17 §7.2–§7.4） ───────────────────────
+
+/** 提示词模块列表（`GET /api/xhs/llm/prompt-modules`；**分页形状**，非裸数组）。 */
+export async function fetchPromptModules(params: {
+  category?: string;
+  page?: number;
+  pageSize?: number;
+} = {}): Promise<Paginated<PromptModule>> {
+  const response = await http.get<Paginated<PromptModule>>("/xhs/llm/prompt-modules", {
+    params: {
+      ...(params.category ? { category: params.category } : {}),
+      ...(params.page ? { page: params.page } : {}),
+      ...(params.pageSize ? { page_size: params.pageSize } : {}),
+    },
+  });
+  return response.data;
+}
+
+/** 新建提示词模块。 */
+export async function createPromptModule(payload: {
+  name: string;
+  category?: string;
+  content: string;
+  sort_order?: number;
+  enabled?: boolean;
+}): Promise<PromptModule> {
+  const response = await http.post<PromptModule>("/xhs/llm/prompt-modules", payload);
+  return response.data;
+}
+
+/** 修改提示词模块（局部更新）。 */
+export async function updatePromptModule(
+  moduleId: number,
+  payload: Partial<{
+    name: string;
+    category: string;
+    content: string;
+    sort_order: number;
+    enabled: boolean;
+  }>
+): Promise<PromptModule> {
+  const response = await http.patch<PromptModule>(`/xhs/llm/prompt-modules/${moduleId}`, payload);
+  return response.data;
+}
+
+/** 删除提示词模块。 */
+export async function deletePromptModule(moduleId: number): Promise<void> {
+  await http.delete(`/xhs/llm/prompt-modules/${moduleId}`);
+}
+
+/** 提示词模板列表（`GET /api/xhs/llm/prompt-templates`；**分页形状**，`modules` 已展开）。 */
+export async function fetchPromptTemplates(params: {
+  taskType?: string;
+  page?: number;
+  pageSize?: number;
+} = {}): Promise<Paginated<PromptTemplate>> {
+  const response = await http.get<Paginated<PromptTemplate>>("/xhs/llm/prompt-templates", {
+    params: {
+      ...(params.taskType ? { task_type: params.taskType } : {}),
+      ...(params.page ? { page: params.page } : {}),
+      ...(params.pageSize ? { page_size: params.pageSize } : {}),
+    },
+  });
+  return response.data;
+}
+
+/** 新建提示词模板。 */
+export async function createPromptTemplate(payload: {
+  name: string;
+  task_type: string;
+  prompt_skeleton: string;
+  module_ids?: number[];
+  is_default?: boolean;
+}): Promise<PromptTemplate> {
+  const response = await http.post<PromptTemplate>("/xhs/llm/prompt-templates", payload);
+  return response.data;
+}
+
+/** 修改提示词模板（局部更新）。 */
+export async function updatePromptTemplate(
+  templateId: number,
+  payload: Partial<{
+    name: string;
+    task_type: string;
+    prompt_skeleton: string;
+    module_ids: number[];
+    is_default: boolean;
+  }>
+): Promise<PromptTemplate> {
+  const response = await http.patch<PromptTemplate>(
+    `/xhs/llm/prompt-templates/${templateId}`,
+    payload
+  );
+  return response.data;
+}
+
+/** 删除提示词模板。 */
+export async function deletePromptTemplate(templateId: number): Promise<void> {
+  await http.delete(`/xhs/llm/prompt-templates/${templateId}`);
+}
+
+/**
+ * 渲染预览（`POST /api/xhs/llm/prompt-templates/render-preview`）。
+ *
+ * 拿一个真实商品跑一遍插槽填充，让用户在保存模板前就看到最终提示词 ——
+ * 而不是等生成失败了才知道插槽写错了。`shopProductId` 可为空（只渲骨架）。
+ */
+export async function previewPromptTemplate(
+  templateId: number,
+  shopProductId?: number
+): Promise<{ rendered: string; missing_slots?: string[] }> {
+  const response = await http.post<{ rendered: string; missing_slots?: string[] }>(
+    "/xhs/llm/prompt-templates/render-preview",
+    { template_id: templateId, ...(shopProductId ? { shop_product_id: shopProductId } : {}) }
+  );
+  return response.data;
+}
+
+/** 素材文件夹列表（`GET /api/xhs/materials/folders`）。 */
+export async function fetchMaterialFolders(): Promise<MaterialFolder[]> {
+  const response = await http.get<MaterialFolder[]>("/xhs/materials/folders");
+  return response.data;
+}
+
+/** 新建素材文件夹（后端 202：扫描是后台线程，返回时文件数可能还是 0）。 */
+export async function createMaterialFolder(payload: {
+  name: string;
+  path: string;
+}): Promise<MaterialFolder> {
+  const response = await http.post<MaterialFolder>("/xhs/materials/folders", payload);
+  return response.data;
+}
+
+/** 重命名 / 启停素材文件夹。 */
+export async function updateMaterialFolder(
+  folderId: number,
+  payload: Partial<{ name: string; enabled: boolean }>
+): Promise<MaterialFolder> {
+  const response = await http.patch<MaterialFolder>(`/xhs/materials/folders/${folderId}`, payload);
+  return response.data;
+}
+
+/** 删除素材文件夹（**只删索引行，不物理删磁盘文件** —— 只读边界）。 */
+export async function deleteMaterialFolder(folderId: number): Promise<{ removed_files: number }> {
+  const response = await http.delete<{ removed_files: number }>(
+    `/xhs/materials/folders/${folderId}`
+  );
+  return response.data;
+}
+
+/** 触发重扫（后端 202：扫描在后台跑，需轮询文件夹列表看 `last_scan_at`）。 */
+export async function scanMaterialFolder(folderId: number): Promise<{ first_scan: boolean }> {
+  const response = await http.post<{ first_scan: boolean }>(
+    `/xhs/materials/folders/${folderId}/scan`
+  );
+  return response.data;
+}
+
+/** 素材文件列表 + 搜索（`GET /api/xhs/materials/files`）。 */
+export async function fetchMaterialFiles(
+  params: {
+    folderId?: number;
+    keyword?: string;
+    fileType?: "image" | "video";
+    sort?: "mtime" | "filename" | "size";
+    order?: "asc" | "desc";
+    page?: number;
+    pageSize?: number;
+  } = {}
+): Promise<Paginated<MaterialFile>> {
+  const response = await http.get<Paginated<MaterialFile>>("/xhs/materials/files", {
+    params: {
+      ...(params.folderId ? { folder_id: params.folderId } : {}),
+      ...(params.keyword ? { keyword: params.keyword } : {}),
+      ...(params.fileType ? { file_type: params.fileType } : {}),
+      ...(params.sort ? { sort: params.sort } : {}),
+      ...(params.order ? { order: params.order } : {}),
+      ...(params.page ? { page: params.page } : {}),
+      ...(params.pageSize ? { page_size: params.pageSize } : {}),
+    },
+  });
+  return response.data;
+}
+
+/**
+ * 素材文件的原始内容 URL（`<img src>` / 预览用，**不经 axios**）。
+ *
+ * ⚠️ 故意返回 URL 字符串而不是发请求：浏览器要直接 `<img src>` 加载，
+ * 走 axios 会把二进制读进内存再转 blob URL（还要管回收）。
+ * 鉴权由 cookie 承担（与页面同源）。
+ */
+export function materialFileUrl(fileId: number): string {
+  return `/api/xhs/materials/files/${fileId}/file`;
+}
+
+/** 单条 LLM 生成（入队即返回，设计 17 §7.4）。 */
+export async function generateLlmNote(payload: {
+  platformAccountId: number;
+  itemId: string;
+  templateId: number;
+  gatewayConfigId?: number;
+  modelName?: string;
+  mediaSource?: LlmMediaSource;
+  mediaOptions?: LlmMediaOptions;
+}): Promise<{ ok: boolean; status: string; item_id: string; already_queued?: boolean }> {
+  const response = await http.post<{
+    ok: boolean;
+    status: string;
+    item_id: string;
+    already_queued?: boolean;
+  }>(
+    "/xhs/product-notes/generate-llm",
+    {
+      platform_account_id: payload.platformAccountId,
+      item_id: payload.itemId,
+      template_id: payload.templateId,
+      ...(payload.gatewayConfigId ? { gateway_config_id: payload.gatewayConfigId } : {}),
+      ...(payload.modelName ? { model_name: payload.modelName } : {}),
+      ...(payload.mediaSource ? { media_source: payload.mediaSource } : {}),
+      ...(payload.mediaOptions ? { media_options: payload.mediaOptions } : {}),
+    },
+    { _silent: true } as never
+  );
+  return response.data;
+}
+
+/** 批量 LLM 生成（入队即返回；单项失败不阻断）。 */
+export async function batchGenerateLlmNotes(payload: {
+  platformAccountId: number;
+  itemIds: readonly string[];
+  templateId: number;
+  gatewayConfigId?: number;
+  modelName?: string;
+  mediaSource?: LlmMediaSource;
+  mediaOptions?: LlmMediaOptions;
+  maxItems?: number;
+}): Promise<{ ok: boolean; queued: number; skipped?: number }> {
+  const response = await http.post<{ ok: boolean; queued: number; skipped?: number }>(
+    "/xhs/product-notes/batch-generate-llm",
+    {
+      platform_account_id: payload.platformAccountId,
+      item_ids: [...payload.itemIds],
+      template_id: payload.templateId,
+      ...(payload.gatewayConfigId ? { gateway_config_id: payload.gatewayConfigId } : {}),
+      ...(payload.modelName ? { model_name: payload.modelName } : {}),
+      ...(payload.mediaSource ? { media_source: payload.mediaSource } : {}),
+      ...(payload.mediaOptions ? { media_options: payload.mediaOptions } : {}),
+      ...(payload.maxItems ? { max_items: payload.maxItems } : {}),
+    },
+    { _silent: true } as never
+  );
+  return response.data;
+}
+
+/** LLM 生成队列快照（5s 轮询；键名 `generated`）。 */
+export async function fetchLlmGenerateQueue(): Promise<LlmGenerateQueueSnapshot> {
+  const response = await http.get<LlmGenerateQueueSnapshot>(
+    "/xhs/product-notes/generate-llm-queue",
+    { _silent: true } as never
+  );
+  return response.data;
+}
+
+/** 重试一条失败的生成记录。 */
+export async function retryLlmGenerate(recordId: number): Promise<{ ok: boolean }> {
+  const response = await http.post<{ ok: boolean }>(
+    `/xhs/product-notes/generate-llm/${recordId}/retry`
+  );
   return response.data;
 }

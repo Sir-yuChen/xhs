@@ -3,9 +3,12 @@ import {
   DatabaseOutlined,
   DeleteOutlined,
   FileAddOutlined,
+  PictureOutlined,
+  RobotOutlined,
   ReloadOutlined,
   SearchOutlined,
   ShoppingOutlined,
+  SyncOutlined,
 } from "@ant-design/icons";
 import {
   Alert,
@@ -51,6 +54,7 @@ import {
   fetchXhsShopItems,
   generateProductNote,
   generateProductDetailImage,
+  syncShopGoods,
 } from "../../../lib/api";
 import type { GenerateQueueFinishedEntry, GenerateQueueSnapshot } from "../../../lib/api";
 import { yuan } from "../../../lib/format";
@@ -66,6 +70,8 @@ import {
   type ShopItemsFilterDraft,
 } from "../../../lib/filter-cache";
 import { NoteDetailBody } from "../../../components/platforms/note-detail-modal";
+import { LlmGenerateModal } from "./llm-generate-modal";
+import { LlmGenerateProgressCard } from "./llm-generate-progress-card";
 import {
   accountLabel,
   batchDeleteBlock,
@@ -416,14 +422,35 @@ export function XhsShopItemsPage() {
   const genIdleRoundsRef = useRef(0);
   /** 批量删除进行中（v1.36）：只用来给按钮上 loading，判据本身在 lib（`batchDeleteBlock`）。 */
   const [batchDeleting, setBatchDeleting] = useState(false);
+  /**
+   * 「同步商品」按钮态（v2.13，设计 13 §30.3.2）。
+   *
+   * 同步是**后台任务**（全量翻页 + 限流等待，可能几十秒到几分钟）⇒ 按钮只表示
+   * 「这次点击的触发请求在途」，**不代表同步跑完**。跑完与否看台账「同步于」时间
+   * 与账号矩阵的任务日志 —— 不在这里假装有进度（进度卡的判据在后端任务行）。
+   */
+  const [goodsSyncing, setGoodsSyncing] = useState(false);
+  // LLM 生成（T9，设计 17 §7.4）：与一期「生成笔记」是两个队列，状态各自独立。
+  const [llmGenerateOpen, setLlmGenerateOpen] = useState(false);
+  const [llmGenerateItem, setLlmGenerateItem] = useState<XhsShopItem | null>(null);
+  /** 已登记进 LLM 生成轮询的商品（操作列按钮据此转圈）。 */
+  const [llmQueueItemIds, setLlmQueueItemIds] = useState<Set<string>>(new Set());
+  /** 正在提交 LLM 生成弹窗的商品 id（防重复点开）。 */
+  const [llmGenerating, setLlmGenerating] = useState<string | null>(null);
   // 商品详情弹窗（v1.32：点标题打开；数据来自 /item-detail，纯本地）
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detail, setDetail] = useState<XhsShopItemDetail | null>(null);
   const [detailError, setDetailError] = useState("");
-  // 商品详情图生成（设计 17 §13.3.3，v2.1）—— 三态：生成中 / 已出图 / 无。
+  // 商品详情图生成（设计 17 §13.3.3，v2.1；**v2.12 移到列表操作列独立弹窗**）——
+  // 三态：生成中 / 已出图 / 无。
   // ⚠️ 出图结果**不落 detail**（它不是台账字段，是本次生成动作的产物）：单独一个 state，
   // 关弹窗即清，避免把「刚生成的图」误当成「商品自己的图集」。
+  // ⚠️ v2.12（2026-10-02 用户口径「商品的 AI 生成详情图主图功能在商品列表操作列使用
+  //    单独弹窗实现，不要在编辑或详情弹窗中实现」）⇒ 弹窗自带 `item` 上下文，
+  //    **不再依赖 `detail`**（详情弹窗那条链路已整段移除）。
+  const [detailImageOpen, setDetailImageOpen] = useState(false);
+  const [detailImageItem, setDetailImageItem] = useState<XhsShopItem | null>(null);
   const [detailImageGenerating, setDetailImageGenerating] = useState(false);
   const [detailImagePrompt, setDetailImagePrompt] = useState("");
   const [detailImage, setDetailImage] = useState<GenerateDetailImageResult | null>(null);
@@ -830,6 +857,55 @@ export function XhsShopItemsPage() {
     }
   }
 
+  /** LLM 生成入队成功 → 登记进轮询集合（操作列按钮转圈，进度卡开跑）。 */
+  function handleLlmQueued(itemId: string) {
+    setLlmQueueItemIds((current) => new Set(current).add(itemId));
+    setLlmGenerating(null);
+  }
+
+  /** LLM 生成某条终态 → 失败如实报原因（原因只在快照 finished 里给一次）。 */
+  function handleLlmFinished(entry: { item_id: string; status: string; reason?: string }) {
+    setLlmQueueItemIds((current) => {
+      if (!current.has(entry.item_id)) return current;
+      const next = new Set(current);
+      next.delete(entry.item_id);
+      return next;
+    });
+    if (entry.status === "failed" && entry.reason) {
+      message.error(`生成失败：${entry.reason}`);
+    }
+    // 成功不弹消息：卡片上的「生成成功」计数已经在说话（避免每篇一条弹窗）
+  }
+
+  /**
+   * 同步该账号的**全部状态**商品到本地台账（v2.13，设计 13 §30.3.2）。
+   *
+   * 2026-10-02 用户口径「商品同步更新需求为同步全部状态的商品」：不传 `itemStatus`
+   * ⇒ 后端用默认 `all`（平台侧不传 `card_type`，翻页拿全部状态）。台账是「商品列表
+   * 页的唯一数据源」，少了已下架 / 已冻结 / 审核态，列表的状态筛选与批量删除的
+   * 连带判断都会静默失真。
+   *
+   * 触发是**异步回执**（后台任务）：成功后只报「已开始同步」，进度看账号矩阵的
+   * 任务日志 / 台账「同步于」时间。⚠️ 不做前端乐观刷新 —— 同步没跑完就重拉列表，
+   * 只是把同一份旧数据渲染一遍（看起来像「同步没好」）。
+   */
+  async function syncAllStatusGoods() {
+    if (!selectedAccountId) return;
+    setGoodsSyncing(true);
+    try {
+      const result = await syncShopGoods({ platformAccountId: selectedAccountId });
+      if (result.reused) {
+        message.info("该账号已有商品同步任务在执行，未重复触发");
+      } else {
+        message.success("已开始同步全部状态商品（后台执行，进度见账号矩阵任务日志）");
+      }
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "触发同步失败");
+    } finally {
+      setGoodsSyncing(false);
+    }
+  }
+
   /** 删除按钮的入口：先按 lib 判据分流（拒绝就给一句准话），再弹确认框。 */
   function handleBatchDelete() {
     const block = batchDeleteBlock(selectedItemIds);
@@ -886,7 +962,21 @@ export function XhsShopItemsPage() {
   }
 
   /**
-   * 生成商品详情图（设计 17 §13.3.3，v2.1）。
+   * 打开「生成商品详情图」独立弹窗（v2.12，列表操作列入口）。
+   *
+   * 每次打开**重置三态**（prompt / 出图 / 报错）—— 弹窗是「一次生成动作」的载体，
+   * 带着上一个商品的结果重开会把 A 的图挂在 B 的名下（与 `batchDeleteHint` 同一条纪律：
+   * 跨商品的操作上下文不能串）。
+   */
+  function openDetailImage(item: XhsShopItem) {
+    setDetailImageItem(item);
+    setDetailImagePrompt("");
+    setDetailImage(null);
+    setDetailImageOpen(true);
+  }
+
+  /**
+   * 生成商品详情图（设计 17 §13.3.3，v2.1；v2.12 改由独立弹窗驱动）。
    *
    * 只传 `accountId + itemId + prompt`：商品图由**服务端**按 item_id 从本地台账取
    * （商品图是千帆 CDN 直链，服务商侧取不到；且让前端传 URL 是 SSRF 面）。
@@ -894,12 +984,12 @@ export function XhsShopItemsPage() {
    * 带 `code` 的可执行提示，吞成「生成失败」会让用户不知道该去配什么。
    */
   async function generateDetailImage() {
-    if (!selectedAccountId || !detail) return;
+    if (!selectedAccountId || !detailImageItem) return;
     setDetailImageGenerating(true);
     try {
       const result = await generateProductDetailImage(
         selectedAccountId,
-        detail.item.item_id,
+        detailImageItem.item_id,
         detailImagePrompt.trim()
       );
       setDetailImage(result);
@@ -1191,6 +1281,35 @@ export function XhsShopItemsPage() {
               生成笔记
             </Button>
           </Tooltip>
+          {/* LLM 生成（T9，设计 17 §7.4）：走项目自己的 LLM 生成链路（与千帆后台智能生成
+              是两个队列、两条链路）。开的是**生成配置弹窗**（选模板 + 媒体来源四选一）。 */}
+          <Tooltip title="用项目自己的大模型链路生成笔记（选模板 / 媒体来源，入队后台执行）">
+            <Button
+              type="link"
+              size="small"
+              icon={<RobotOutlined spin={llmQueueItemIds.has(item.item_id)} />}
+              disabled={llmGenerating !== null}
+              onClick={() => {
+                setLlmGenerateItem(item);
+                setLlmGenerateOpen(true);
+              }}
+            >
+              LLM 生成
+            </Button>
+          </Tooltip>
+          {/* 生成商品详情图（设计 17 §13.3.3，v2.1；v2.12 移到操作列独立弹窗）：
+              AI 出图给**商品**用（与「生成笔记」的正文配图是两个业务点）。
+              开的是独立弹窗（`openDetailImage`），不在编辑 / 详情弹窗里。 */}
+          <Tooltip title="AI 生成该商品的详情图 / 主图（独立弹窗，可填补充要求）">
+            <Button
+              type="link"
+              size="small"
+              icon={<PictureOutlined />}
+              onClick={() => openDetailImage(item)}
+            >
+              生成详情图
+            </Button>
+          </Tooltip>
         </Space>
       ),
     },
@@ -1439,6 +1558,21 @@ export function XhsShopItemsPage() {
                         }}
                       />
                     </Tooltip>
+                    {/* 「同步全部状态商品」（设计 13 §30.3.2，v2.13 / 2026-10-02 用户口径
+                        「商品同步更新需求为同步全部状态的商品」）：显式一条入口 ——
+                        同步商品是**台账的唯一数据来源**，而台账是「本地唯一真相源」，
+                        所以默认同步**平台侧全部状态**（不传 card_type），
+                        不让用户以为「只同步了售卖中的」。 */}
+                    <Tooltip title="从千帆同步该账号的全部状态商品（售卖中 / 已下架 / 已冻结 / 整改 / 审核中 / 审核驳回 / 审核通过）到本地台账，后台执行">
+                      <Button
+                        icon={<SyncOutlined spin={goodsSyncing} />}
+                        loading={goodsSyncing}
+                        disabled={!selectedAccountId}
+                        onClick={() => void syncAllStatusGoods()}
+                      >
+                        同步商品
+                      </Button>
+                    </Tooltip>
                   </Space>
                 </Form.Item>
               </Col>
@@ -1480,6 +1614,27 @@ export function XhsShopItemsPage() {
                   批量生成智能笔记{selectedItemIds.length > 0 ? `（${selectedItemIds.length}）` : ""}
                 </Button>
               </Tooltip>
+              {/* 批量同步商品（v2.13，设计 13 §30.3.2）：触发该账号的**全量全部状态**同步。
+                  ⚠️ 平台侧没有「只同步这几个商品」的读接口（`search_item_v2` 是按页翻，
+                  `get_skus_by_item_ids` 只补规格）⇒ 批量语义落到「同步整店」，并在提示里
+                  如实说明「勾选只是让你知道待同步的是哪几个，实际会刷新整店台账」——
+                  不假装能按勾选裁剪（那是界面在说一件不会发生的事）。 */}
+              <Tooltip
+                title={
+                  selectedItemIds.length > 0
+                    ? `同步该账号的全部状态商品（勾选的 ${selectedItemIds.length} 个会在其中；平台按页同步，不支持只同步几个）`
+                    : "先在表格里勾选商品"
+                }
+              >
+                <Button
+                  icon={<SyncOutlined />}
+                  disabled={selectedItemIds.length === 0}
+                  loading={goodsSyncing}
+                  onClick={() => void syncAllStatusGoods()}
+                >
+                  批量同步商品{selectedItemIds.length > 0 ? `（${selectedItemIds.length}）` : ""}
+                </Button>
+              </Tooltip>
               {/* 批量删除（v1.36）：**只删本地台账行** —— 平台商品不动、关系行不动。
                   两个连带后果写在确认框正文里（`batchDeleteHint`），按钮上的 Tooltip
                   只说「删什么、上限多少」，不重复那两句（换成两处说同一件事）。 */}
@@ -1503,6 +1658,15 @@ export function XhsShopItemsPage() {
             </Space>
           }
         >
+          {/* LLM 生成进度卡（T9，设计 17 §7.4）：有待处理 / 跑过才渲染，空闲不占版面。 */}
+          {llmQueueItemIds.size > 0 && (
+            <div style={{ marginBottom: 12 }}>
+              <LlmGenerateProgressCard
+                activeItemIds={llmQueueItemIds}
+                onFinishedEntry={handleLlmFinished}
+              />
+            </div>
+          )}
           {data ? (
             <Table<XhsShopItem>
               rowKey="item_id"
@@ -1659,51 +1823,11 @@ export function XhsShopItemsPage() {
               </div>
             )}
 
-            {/* 生成商品详情图（设计 17 §13.3.3，v2.1）—— 「商品列表 → 商品详情 → 生成商品详情图」
-                这条链路的界面入口。出图走 generate_product_detail_image 业务点（在「模型配置页」
-                单独挂服务商，与「生成配图」分开）。 */}
-            <div>
-              <Text strong style={{ fontSize: 13 }}>
-                生成商品详情图
-              </Text>
-              <Space direction="vertical" size={8} style={{ width: "100%", marginTop: 6 }}>
-                <Space.Compact style={{ width: "100%" }}>
-                  <Input
-                    value={detailImagePrompt}
-                    onChange={(e) => setDetailImagePrompt(e.target.value)}
-                    placeholder="补充要求（可留空，留空则按商品标题与规格自动拼提示词）"
-                    disabled={detailImageGenerating}
-                    maxLength={2000}
-                  />
-                  <Button
-                    type="primary"
-                    loading={detailImageGenerating}
-                    disabled={detail.images.length === 0}
-                    onClick={() => void generateDetailImage()}
-                  >
-                    生成
-                  </Button>
-                </Space.Compact>
-                {detail.images.length === 0 && (
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    这个商品还没同步到图片，先执行「同步商品」补齐图集（没有商品图就没有参考图，
-                    不会凭空生成一张）。
-                  </Text>
-                )}
-                {detailImage && (
-                  <Space direction="vertical" size={4}>
-                    <Image
-                      src={detailImage.url || detailImage.asset.local_path}
-                      width={160}
-                      style={{ objectFit: "cover", borderRadius: 4 }}
-                    />
-                    <Text type="secondary" style={{ fontSize: 11 }}>
-                      模型 {detailImage.asset.model_name || "-"} · 已存入素材库（#{detailImage.asset.id}）
-                    </Text>
-                  </Space>
-                )}
-              </Space>
-            </div>
+            {/* 生成商品详情图（设计 17 §13.3.3，v2.1；**v2.12 移到列表操作列独立弹窗**）
+                —— 整段从详情弹窗移除（用户口径「不要在编辑或详情弹窗中实现」），
+                入口改到列表「操作」列的按钮（`openDetailImage`）。
+                原实现（内联区块 + 结果缩略图）保留在 git 历史与设计 17 §13.3.3 的
+                被取代记录里，不在此处留半份。 */}
 
             <div>
               <Text strong style={{ fontSize: 13 }}>
@@ -1765,6 +1889,76 @@ export function XhsShopItemsPage() {
           </Space>
         ) : null}
       </Modal>
+
+      {/* 「生成商品详情图」独立弹窗（设计 17 §13.3.3，v2.1；**v2.12 从详情弹窗迁出**）。
+          用户口径（2026-10-02）：「商品的 AI 生成详情图主图功能在商品列表操作列使用
+          单独弹窗实现，不要在编辑或详情弹窗中实现」。
+          弹窗自带 item 上下文（`detailImageItem`）—— 打开即重置三态，跨商品不串结果。
+          商品无图时**不拦按钮**（图集可能在台账里还没同步到，但服务端会拿到 item_id 后
+          按台账取图，取不到给 `PRODUCT_IMAGE_MISSING`）—— 如实报缺，不造图。 */}
+      <Modal
+        open={detailImageOpen}
+        title="生成商品详情图"
+        width={560}
+        onCancel={() => setDetailImageOpen(false)}
+        footer={
+          <Space>
+            <Button onClick={() => setDetailImageOpen(false)}>关闭</Button>
+            <Button
+              type="primary"
+              loading={detailImageGenerating}
+              onClick={() => void generateDetailImage()}
+            >
+              生成
+            </Button>
+          </Space>
+        }
+      >
+        <Space direction="vertical" size={12} style={{ width: "100%" }}>
+          <Descriptions size="small" column={1}>
+            <Descriptions.Item label="商品">
+              {detailImageItem?.title || detailImageItem?.item_id || "-"}
+            </Descriptions.Item>
+            <Descriptions.Item label="商品ID">{detailImageItem?.item_id || "-"}</Descriptions.Item>
+          </Descriptions>
+          <Input.TextArea
+            value={detailImagePrompt}
+            onChange={(e) => setDetailImagePrompt(e.target.value)}
+            placeholder="补充要求（可留空，留空则按商品标题与规格自动拼提示词）"
+            disabled={detailImageGenerating}
+            maxLength={2000}
+            rows={3}
+          />
+          {detailImage ? (
+            <Space direction="vertical" size={4}>
+              <Image
+                src={detailImage.url || detailImage.asset.local_path}
+                width={220}
+                style={{ objectFit: "cover", borderRadius: 4 }}
+              />
+              <Text type="secondary" style={{ fontSize: 11 }}>
+                模型 {detailImage.asset.model_name || "-"} · 已存入素材库（#{detailImage.asset.id}）
+              </Text>
+            </Space>
+          ) : (
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              出图后存入素材库并落 AIGC 溯源。商品图由服务端按商品 ID 从本地台账取
+              （没有商品图就没有参考图，不会凭空生成一张）。
+            </Text>
+          )}
+        </Space>
+      </Modal>
+
+      {/* LLM 生成配置弹窗（T9，设计 17 §7.4）：选模板 + 媒体来源四选一。
+          与「生成商品详情图」同型：弹窗自带商品上下文，打开即重置（跨商品不串）。 */}
+      <LlmGenerateModal
+        open={llmGenerateOpen}
+        accountId={selectedAccountId}
+        itemId={llmGenerateItem?.item_id || ""}
+        itemTitle={llmGenerateItem?.title || ""}
+        onClose={() => setLlmGenerateOpen(false)}
+        onQueued={handleLlmQueued}
+      />
 
       {/* ⚠️ 「绑定千帆商家后台」弹窗已整块移除（ADR-021，2026-09-30）：
           `POST /xhs/qianfan/bind` 退场（后端 410 `QIANFAN_BINDING_REMOVED`），

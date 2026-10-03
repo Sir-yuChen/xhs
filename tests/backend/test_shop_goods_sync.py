@@ -303,6 +303,91 @@ def test_sync_asks_for_all_statuses_and_stays_on_one_page_at_a_time(tmp_path, mo
     assert [call["page_no"] for call in FakeItemsAdapter.calls] == [1, 2]
 
 
+def test_sync_defaults_to_all_statuses_when_status_is_omitted(tmp_path, monkeypatch):
+    """v2.13（设计 13 §30.3.2）：**默认同步全部状态**。
+
+    2026-10-02 用户口径「商品同步更新需求为同步全部状态的商品」。判据是**平台请求
+    里的 `status`**，不是「函数签名上有没有默认值」—— 台账是列表页的唯一数据源，
+    少了已下架 / 已冻结，状态筛选与批量删除的连带判断会静默失真。
+    """
+    _headers, account_id, user_id, _ = _setup(tmp_path, monkeypatch)
+    FakeItemsAdapter.pages = [([_item("I1")], 1, False)]
+
+    sgs.run_shop_goods_sync(account_id, user_id=user_id, max_pages=1, adapter_factory=FakeItemsAdapter)
+
+    assert [call["status"] for call in FakeItemsAdapter.calls] == ["all"]
+
+
+def test_sync_can_be_narrowed_to_one_status(tmp_path, monkeypatch):
+    """显式传状态键 ⇒ 只同步那一种（与平台页面 7 个 tab 同源）。"""
+    _headers, account_id, user_id, _ = _setup(tmp_path, monkeypatch)
+    FakeItemsAdapter.pages = [([_item("I1")], 1, False)]
+
+    sgs.run_shop_goods_sync(
+        account_id,
+        user_id=user_id,
+        max_pages=1,
+        adapter_factory=FakeItemsAdapter,
+        item_status="off_shelf",
+    )
+
+    assert [call["status"] for call in FakeItemsAdapter.calls] == ["off_shelf"]
+
+
+def test_bad_item_status_falls_back_to_all_not_to_a_narrower_scope(tmp_path, monkeypatch):
+    """坏值 ⇒ `all`，**不是**退成某个具体状态。
+
+    把拼写错误退成「只同步售卖中」= 一次手滑让台账静默少掉已下架 / 已冻结的商品
+    （与 `normalize_mode` 同一条纪律：坏值退回**信息最全**的取值）。
+    """
+    _headers, account_id, user_id, _ = _setup(tmp_path, monkeypatch)
+    FakeItemsAdapter.pages = [([_item("I1")], 1, False)]
+
+    sgs.run_shop_goods_sync(
+        account_id,
+        user_id=user_id,
+        max_pages=1,
+        adapter_factory=FakeItemsAdapter,
+        item_status="sold_out_typo",
+    )
+
+    assert [call["status"] for call in FakeItemsAdapter.calls] == ["all"]
+
+
+def test_qianfan_request_models_all_forbid_unknown_fields():
+    """qianfan 路由**每个**请求模型都必须 `extra="forbid"`（v2.13 补齐 6 处）。
+
+    **这条是拿真实事故换来的**（REF §B）：Pydantic 默认 `extra="ignore"` 把未知字段
+    **静默丢弃**（不报错、不写日志）。「挂链笔记数筛选未生效」那次，代码从头就是对的，
+    错在跑着的后端是旧进程 —— 它的模型里没有新字段，参数被静默吞掉，表现与「代码写错」
+    完全一样，排查比的是进程年龄。加 forbid ⇒ 新旧不匹配在第一跳就 422 炸出声。
+
+    ⚠️ 断言的是**全部**模型（枚举本模块的 `BaseModel` 子类），不是只挑 `ShopItemsRequest`
+    —— 只测一个的话，下次新增模型漏加 forbid 照样静默。
+    """
+    import inspect
+
+    from pydantic import BaseModel
+
+    from backend.app.api.platforms.xhs import qianfan as qf
+
+    models = {
+        name: obj
+        for name, obj in vars(qf).items()
+        if inspect.isclass(obj)
+        and issubclass(obj, BaseModel)
+        and obj is not BaseModel
+        and obj.__module__ == qf.__name__
+        # 响应模型（只出不进）不受这条约束：未知字段不会被客户端传进来。
+        and not name.endswith(("Response", "Result"))
+    }
+    assert models, "没找到请求模型 —— 守卫自己失效了"
+    missing = [
+        name for name, cls in models.items() if cls.model_config.get("extra") != "forbid"
+    ]
+    assert not missing, f"这些请求模型缺 extra=\"forbid\"：{missing}"
+
+
 def test_items_without_id_are_skipped_not_counted(tmp_path, monkeypatch):
     """没有 `item_id` 的条目跳过，且**不计入 stored**（没有主键就没有行的身份）。"""
     _headers, account_id, user_id, SessionLocal = _setup(tmp_path, monkeypatch)
