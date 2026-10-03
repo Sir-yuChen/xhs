@@ -3065,3 +3065,34 @@ export async function saveDetailImages(payload: {
   );
   return response.data;
 }
+
+/**
+ * 某商品的 **AI 生成记录**（v2.30 §13.3.11）。
+ *
+ * 用户口径：「进入素材库后无法再区分与产品的关系」⇒ 给生成结果建立**商品关联**，
+ * 在商品列表操作列提供查看入口。
+ *
+ * ⚠️ 只返回**有关联**的（老图 `item_id` 为空，不出现）—— 不猜、不回溯。
+ */
+export async function fetchItemGenerations(payload: {
+  platform_account_id: number;
+  item_id: string;
+  page?: number;
+  page_size?: number;
+}): Promise<{
+  items: {
+    id: number;
+    asset_type: string;
+    url: string;
+    local_path: string;
+    prompt: string;
+    model_name: string;
+    created_at: string;
+  }[];
+  total: number;
+  page: number;
+  page_size: number;
+}> {
+  const response = await http.post("/xhs/qianfan/item-generations", payload);
+  return response.data;
+}

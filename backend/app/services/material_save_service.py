@@ -42,7 +42,6 @@ from __future__ import annotations
 import re
 import secrets
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 import requests
@@ -50,7 +49,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.models import AigcMediaAsset, MaterialFolder
-from backend.app.services.material_scan_service import is_safe_material_path
+from backend.app.services.material_storage import (
+    MaterialStorageError,
+    get_material_storage,
+)
 
 #: 顶层目录名（AI 产物与用户手放文件的分界）。
 AI_ROOT_DIRNAME = "ai-生成"
@@ -112,8 +114,9 @@ def save_assets_to_folder(
     if folder is None:
         raise MaterialSaveError("素材库文件夹不存在或不属于当前用户")
 
-    root = Path(folder.path)
-    ok, reason = is_safe_material_path(str(root))
+    storage = get_material_storage()
+    root = folder.path
+    ok, reason = storage.validate_root(root)
     if not ok:
         raise MaterialSaveError(f"素材库路径不可用：{reason}")
 
@@ -128,11 +131,12 @@ def save_assets_to_folder(
     if not assets:
         raise MaterialSaveError("没有可保存的生成结果（可能不属于当前用户）")
 
-    target_dir = root / AI_ROOT_DIRNAME / new_batch_dirname()
+    # v2.31：目录构造走**存储抽象**（本地 = 真建目录；将来云上是空操作，key 前缀天然如此）
+    batch_dirname = new_batch_dirname()
     try:
-        target_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise MaterialSaveError(f"无法创建目录 {target_dir}：{exc}") from exc
+        storage.make_dir(root, f"{AI_ROOT_DIRNAME}/{batch_dirname}")
+    except MaterialStorageError as exc:
+        raise MaterialSaveError(str(exc)) from exc
 
     saved: list[dict[str, Any]] = []
     errors: list[str] = []
@@ -145,15 +149,13 @@ def save_assets_to_folder(
         label = GROUP_LABELS.get(group, group or "图")
         ext = _ext_from_url(asset.url or "")
         filename = f"{label}-{counters[group]:02d}{ext}"
-        dest = target_dir / filename
+        rel_path = f"{AI_ROOT_DIRNAME}/{batch_dirname}/{filename}"
 
         try:
-            _download_to(asset.url or "", dest)
+            _download_to(storage, root, rel_path, asset.url or "")
         except Exception as exc:  # noqa: BLE001 —— 一张失败不拖累整批
             errors.append(f"{filename}：{exc}")
             continue
-
-        rel_path = str(dest.relative_to(root)).replace("\\", "/")
         # ⚠️ **不在这里建索引行**（v2.29 真机实测踩到）：
         # 手工行缺 `width`/`height`/**`thumb_url`** ⇒ 素材库面板渲染空白
         # （用户现象「素材库中的图片全部无法展示」）。而且**事后补跑扫描也救不回来** ——
@@ -192,7 +194,7 @@ def save_assets_to_folder(
     return {
         "folder_id": folder.id,
         "folder_name": folder.name,
-        "dir": str((Path(AI_ROOT_DIRNAME) / target_dir.name)).replace("\\", "/"),
+        "dir": f"{AI_ROOT_DIRNAME}/{batch_dirname}",
         "saved": saved,
         **( {"errors": errors} if errors else {}),
         **( {"scan": scanned} if scanned else {}),
@@ -210,8 +212,12 @@ def _group_of_asset(asset: AigcMediaAsset, asset_groups: dict[int, str]) -> str:
     return asset_groups.get(asset.id, "")
 
 
-def _download_to(url: str, dest: Path) -> None:
-    """把一个结果 URL 下到 `dest`（流式，避免整张图进内存再落盘）。"""
+def _download_to(storage, root: str, relative: str, url: str) -> None:
+    """把一个结果 URL 写到「根 + 相对标识」处（v2.31：走**存储抽象**）。
+
+    ⚠️ 流式写入（**不整张进内存**）—— 原图实测 6.5 MB，几十张一起下会把内存打满。
+    抽象层的 `write_stream` 就是为了保住这个性质（云实现里对应 multipart 上传）。
+    """
     if not url:
         raise MaterialSaveError("结果没有图片地址（服务商未返回 url）")
     if url.startswith("data:"):
@@ -219,12 +225,9 @@ def _download_to(url: str, dest: Path) -> None:
         import base64
 
         _, _, payload = url.partition(",")
-        dest.write_bytes(base64.b64decode(payload))
+        storage.write(root, relative, base64.b64decode(payload))
         return
     response = requests.get(url, timeout=DOWNLOAD_TIMEOUT_SECONDS, stream=True)
     response.raise_for_status()
-    with dest.open("wb") as handle:
-        for chunk in response.iter_content(chunk_size=64 * 1024):
-            if chunk:
-                handle.write(chunk)
+    storage.write_stream(root, relative, response.iter_content(chunk_size=64 * 1024))
 

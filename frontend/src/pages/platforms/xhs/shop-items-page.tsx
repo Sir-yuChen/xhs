@@ -9,6 +9,7 @@ import {
   SearchOutlined,
   ShoppingOutlined,
   SyncOutlined,
+  HistoryOutlined,
 } from "@ant-design/icons";
 import {
   Alert,
@@ -59,6 +60,7 @@ import {
   syncShopGoods,
   saveDetailImages,
   fetchMaterialFolders,
+  fetchItemGenerations,
 } from "../../../lib/api";
 import type { GenerateQueueFinishedEntry, GenerateQueueSnapshot } from "../../../lib/api";
 import { yuan } from "../../../lib/format";
@@ -740,6 +742,18 @@ export function XhsShopItemsPage() {
   //    单独弹窗实现，不要在编辑或详情弹窗中实现」）⇒ 弹窗自带 `item` 上下文，
   //    **不再依赖 `detail`**（详情弹窗那条链路已整段移除）。
   const [detailImageOpen, setDetailImageOpen] = useState(false);
+  /**
+   * v2.30（§13.3.11）：**生成记录弹窗**（用户口径「商品列表操作列新增查看入口」）。
+   * 解决「进入素材库后无法再区分与产品的关系」—— 这里按商品查历次 AI 生成结果。
+   */
+  const [generationsOpen, setGenerationsOpen] = useState(false);
+  const [generationsItem, setGenerationsItem] = useState<XhsShopItem | null>(null);
+  const [generations, setGenerations] = useState<
+    { id: number; url: string; prompt: string; model_name: string; created_at: string }[]
+  >([]);
+  const [generationsLoading, setGenerationsLoading] = useState(false);
+  /** 该商品生成了多少张（**总数，不是当前页**）。 */
+  const [generationsTotal, setGenerationsTotal] = useState(0);
   const [detailImageItem, setDetailImageItem] = useState<XhsShopItem | null>(null);
   const [detailImageGenerating, setDetailImageGenerating] = useState(false);
   /**
@@ -1330,6 +1344,35 @@ export function XhsShopItemsPage() {
    * 弹窗是「一次生成动作」的载体，带着上一个商品的结果重开会把 A 的图挂在 B 名下
    * （与 `batchDeleteHint` 同一条纪律：跨商品的操作上下文不能串）。
    */
+  /**
+   * v2.30：打开某商品的**生成记录**弹窗（用户口径「商品列表操作列新增查看入口」）。
+   *
+   * ⚠️ 空态要**说清为什么空**：老图没有关联（v2.30 之前生成的 `item_id` 为空）
+   * ⇒ 显示「该商品还没有生成记录（v2.30 之前生成的不计入）」，
+   * 而不是一句干巴巴的「暂无数据」（用户会以为是坏了）。
+   */
+  async function openGenerations(item: XhsShopItem) {
+    setGenerationsItem(item);
+    setGenerationsOpen(true);
+    setGenerations([]);
+    setGenerationsTotal(0);
+    setGenerationsLoading(true);
+    try {
+      const result = await fetchItemGenerations({
+        platform_account_id: selectedAccountId || 0,
+        item_id: item.item_id,
+        page: 1,
+        page_size: 60,
+      });
+      setGenerations(result.items);
+      setGenerationsTotal(result.total);
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "生成记录加载失败");
+    } finally {
+      setGenerationsLoading(false);
+    }
+  }
+
   function openDetailImage(item: XhsShopItem) {
     setDetailImageItem(item);
     setDetailImage(null);
@@ -1874,6 +1917,18 @@ export function XhsShopItemsPage() {
               onClick={() => openDetailImage(item)}
             >
               生成AI商品图
+            </Button>
+          </Tooltip>
+          {/* v2.30（§13.3.11）：**查看该商品的 AI 生成记录** —— 用户口径
+              「进入素材库后无法再区分与产品的关系」⇒ 关联落在资产行上，这里提供入口。 */}
+          <Tooltip title="查看该商品历次 AI 生成的结果（按时间倒序）">
+            <Button
+              type="link"
+              size="small"
+              icon={<HistoryOutlined />}
+              onClick={() => void openGenerations(item)}
+            >
+              生成记录
             </Button>
           </Tooltip>
         </Space>
@@ -2455,6 +2510,96 @@ export function XhsShopItemsPage() {
             </div>
           </Space>
         ) : null}
+      </Modal>
+
+      {/* v2.30（§13.3.11）：**商品生成记录**弹窗 —— 用户口径
+          「因为进入素材库后无法再区分与产品的关系」。
+          只读；按时间倒序；空态说明「为什么空」（不是干巴巴的「暂无数据」）。 */}
+      <Modal
+        centered
+        open={generationsOpen}
+        title={
+          generationsItem
+            ? `生成记录 · ${generationsItem.title || generationsItem.item_id}`
+            : "生成记录"
+        }
+        footer={null}
+        width="75vw"
+        onCancel={() => setGenerationsOpen(false)}
+        styles={{ body: { maxHeight: "70vh", overflow: "auto" } }}
+      >
+        {generationsLoading ? (
+          <div style={{ textAlign: "center", padding: 24 }}>
+            <Spin />
+          </div>
+        ) : generations.length === 0 ? (
+          <Empty
+            image={Empty.PRESENTED_IMAGE_SIMPLE}
+            description={
+              <span style={{ fontSize: 12 }}>
+                该商品还没有 AI 生成记录。
+                <br />
+                （v2.30 之前生成的图没有商品关联，此处不计入 —— 去「生成AI商品图」生成一次即可看到）
+              </span>
+            }
+          />
+        ) : (
+          <>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              共 {generationsTotal} 张，按时间倒序
+            </Text>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(6, minmax(0, 1fr))",
+                gap: 10,
+                marginTop: 10,
+              }}
+            >
+              {generations.map((row) => (
+                <div key={row.id}>
+                  <div
+                    style={{
+                      position: "relative",
+                      aspectRatio: "1 / 1",
+                      background: "rgba(0,0,0,0.03)",
+                      borderRadius: 4,
+                      overflow: "hidden",
+                    }}
+                  >
+                    {/* ⚠️ 这里**不能复用素材库的 `MaterialThumb`** —— 那个走
+                        `/api/xhs/materials/folders/{id}/thumbs/{file_id}`（需要 token）。
+                        生成记录里的 `url` 是**上游返回的带签名直链**（OSS 预签名，
+                        自带鉴权、有有效期）⇒ 直接 `<img src>` 就行。
+                        ⚠️ 有效期是真实约束：过期的签名会 403 —— 想长期留存要
+                        「保存到素材库」（那时走素材库那套带 token 的取图）。 */}
+                    <img
+                      src={row.url}
+                      alt=""
+                      style={{
+                        width: "100%",
+                        height: "100%",
+                        objectFit: "contain",
+                        display: "block",
+                        cursor: "zoom-in",
+                      }}
+                      onClick={() => {
+                        // 点开看大图（新窗口 —— 上游直链本身就是原图）
+                        window.open(row.url, "_blank", "noopener,noreferrer");
+                      }}
+                    />
+                  </div>
+                  <Text type="secondary" style={{ fontSize: 11, display: "block" }}>
+                    {row.created_at}
+                  </Text>
+                  <Text type="secondary" style={{ fontSize: 11 }} ellipsis>
+                    {row.model_name || "-"}
+                  </Text>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
       </Modal>
 
       {/* 「生成商品详情图」独立弹窗（设计 17 §13.3.3，v2.1；v2.12 从详情弹窗迁出；

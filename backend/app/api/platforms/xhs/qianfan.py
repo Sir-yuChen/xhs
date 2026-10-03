@@ -32,7 +32,7 @@ from typing import Any, Optional
 import requests
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from backend.app.adapters.xhs.qianfan_api_adapter import (
@@ -1733,6 +1733,11 @@ def generate_detail_image(
                 url=url or None,
                 prompt=prompt,
                 model_name=model_config.model_name,
+                # v2.30（§13.3.11）：**与商品建立关联** —— 用户口径「进入素材库后
+                # 无法再区分与产品的关系」。关联是**资产的固有属性**，写在资产行上
+                # （不是寄存在 tasks.payload —— 那是过程记录、有保留期）。
+                item_id=payload.item_id,
+                platform_account_id=payload.platform_account_id,
             )
             db.add(asset)
             db.flush()
@@ -1875,3 +1880,89 @@ def save_detail_images(
             detail={"code": "MATERIAL_SAVE_FAILED", "message": str(exc)},
         ) from exc
     return result
+
+
+class ItemGenerationsRequest(BaseModel):
+    """查某商品的 AI 生成记录（v2.30 §13.3.11）。"""
+
+    platform_account_id: int = Field(ge=1)
+    item_id: str = Field(min_length=1, max_length=64)
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=20, ge=1, le=100)
+
+
+@router.post("/item-generations")
+def item_generations(
+    payload: ItemGenerationsRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """**某商品的 AI 生成记录**（v2.30 §13.3.11）—— 商品列表「生成记录」入口的数据源。
+
+    ## 为什么需要它（用户口径的原话）
+
+    > 「根据商品信息生成素材如何与商品产生关联，在商品列表操作列新增查看入口」
+    > 「因为**进入素材库后无法再区分与产品的关系**」
+
+    素材库存的是**文件**，不是**来源**；而生成结果表 `aigc_media_assets`
+    此前**没有商品字段** —— 关联**根本不存在**（结构缺口，不是「不好查」）。
+    v2.30 给资产行加了 `item_id` + `platform_account_id`，本端点按它查。
+
+    ## 口径
+
+    * **只读**、纯本地（零平台请求）；
+    * 按 `created_at` **倒序**（最近生成的在最前 —— 用户点进来最想看的）；
+    * ⚠️ **只返回有关联的**（`item_id` 为空的老行不出现）：老图只有任务 payload
+      里可能有 item_id，但「payload 里有」≠「这张图属于这个商品」
+      ⇒ 不猜、不回溯（如实反映「不知道」，同「缺值不造假」口径）。
+
+    ## 已知缺口
+
+    **分组（主图 / 详情图）不在返回里** —— `AigcMediaAsset` 没有 `group` 列，
+    分组事实只在生成当时的响应里。本版按**时间**列，不按组分块
+    （按组看是独立需求，要再加列 + 迁移）。
+    """
+    from backend.app.models import AigcMediaAsset
+
+    # 归属校验：账号必须是本人的（否则改个 id 就能看别人的生成记录）
+    account = db.scalar(
+        select(PlatformAccount).where(
+            PlatformAccount.id == payload.platform_account_id,
+            PlatformAccount.user_id == current_user.id,
+        )
+    )
+    if account is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "ACCOUNT_NOT_FOUND", "message": "平台账号不存在或不属于当前用户"},
+        )
+
+    conditions = [
+        AigcMediaAsset.user_id == current_user.id,
+        AigcMediaAsset.platform_account_id == payload.platform_account_id,
+        AigcMediaAsset.item_id == payload.item_id,
+    ]
+    total = db.scalar(select(func.count(AigcMediaAsset.id)).where(*conditions)) or 0
+    rows = db.scalars(
+        select(AigcMediaAsset)
+        .where(*conditions)
+        .order_by(AigcMediaAsset.created_at.desc(), AigcMediaAsset.id.desc())
+        .offset((payload.page - 1) * payload.page_size)
+        .limit(payload.page_size)
+    ).all()
+
+    items = [
+        {
+            "id": row.id,
+            "asset_type": row.asset_type,
+            "url": row.url or "",
+            "local_path": row.local_path or "",
+            "prompt": (row.prompt or "")[:300],
+            "model_name": row.model_name or "",
+            "created_at": row.created_at.strftime("%Y-%m-%d %H:%M:%S")
+            if row.created_at
+            else "",
+        }
+        for row in rows
+    ]
+    return {"items": items, "total": total, "page": payload.page, "page_size": payload.page_size}

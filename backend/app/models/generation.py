@@ -141,6 +141,18 @@ class AigcMediaAsset(Base):
     prompt: Mapped[str] = mapped_column(Text, default="")
     #: 用哪个模型生成。
     model_name: Mapped[str] = mapped_column(String(128), default="")
+    #: v2.30（§13.3.11）：**商品关联** —— 这张图是为哪个商品生成的。
+    #:
+    #: ⚠️ 用**业务 ID**（`shop_products.item_id`）而不是台账主键：台账重同步会换
+    #: 主键，业务 ID 不会。可空 = 与商品无关的生成（如笔记配图）——**不造假**。
+    #:
+    #: ⚠️ **历史行不回填**（迁移只加列）：旧图只有任务 payload 里可能有 item_id，
+    #: 但「payload 里有」≠「这张图属于这个商品」（一次任务可能出多张不同组的图）
+    #: ⇒ 旧的保持空，如实反映「不知道」。
+    item_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    #: v2.30：**平台账号** —— 多账号下同一个 `item_id` 是可能的（不同店铺）
+    #: ⇒ 只按 item_id 关联会串号，必须带上账号维度。
+    platform_account_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now)
 
 
