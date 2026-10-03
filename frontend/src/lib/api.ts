@@ -2927,6 +2927,53 @@ export function materialFileUrl(fileId: number): string {
 }
 
 /**
+ * 删除一个素材文件（**真删源文件，但进回收站**，v2.31）。
+ *
+ * ⚠️ 与「删除文件夹」语义**不同**：那个只删索引（源文件不动），这个会动用户磁盘。
+ * 所以前端**必须二次确认**，且确认文案要写清「移入回收站」（可捞回）。
+ */
+export async function deleteMaterialFile(fileId: number): Promise<void> {
+  await http.delete(`/xhs/materials/files/${fileId}`);
+}
+
+/**
+ * 批量删除素材文件（v2.31，**一次上限 50**）。
+ *
+ * ⚠️ 后端超限**整体拒绝**（不部分执行）⇒ 这里如实把后端的错误码透出去，
+ * 让调用方显示原因（不吞成「删除失败」这种查不下去的话）。
+ */
+export async function deleteMaterialFilesBatch(fileIds: number[]): Promise<{
+  deleted: number;
+  skipped: number[];
+}> {
+  const response = await http.post<{ deleted: number; skipped: number[] }>(
+    "/xhs/materials/files/delete-batch",
+    { file_ids: fileIds }
+  );
+  return response.data;
+}
+
+/**
+ * 上传一个文件进素材文件夹（v2.31）。
+ *
+ * ⚠️ 走 `FormData`（**不手动设 Content-Type**）：`multipart/form-data` 的
+ * `boundary` 必须由浏览器生成，手设会让后端解析失败。
+ */
+export async function uploadMaterialFile(
+  folderId: number,
+  file: File
+): Promise<MaterialFile & { path: string }> {
+  const form = new FormData();
+  form.append("folder_id", String(folderId));
+  form.append("file", file);
+  const response = await http.post<MaterialFile & { path: string }>(
+    "/xhs/materials/files/upload",
+    form
+  );
+  return response.data;
+}
+
+/**
  * 素材**缩略图** URL（v2.29 —— 修「素材库图片不显示」）。
  *
  * ## 为什么要单独一个函数

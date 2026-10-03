@@ -13,12 +13,12 @@
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │ L5  前端 SPA                                                     │
-│     React 19 + antd 6 · 31 页面 · 184 请求函数                    │
+│     React 19 + antd 6 · 31 页面 · 190 请求函数                    │
 │     app/router.tsx → pages/** → components/** → lib/api.ts       │
 └───────────────────────────┬─────────────────────────────────────┘
                             │ HTTP /api（Bearer）
 ┌───────────────────────────▼─────────────────────────────────────┐
-│ L4  API 路由层（30 个 router / 232 端点）                          │
+│ L4  API 路由层（31 个 router / 238 端点）                          │
 │     auth · platforms · accounts · login-sessions · notes ·        │
 │     files · drafts · ai · tasks · model-configs · tags ·          │
 │     notifications · keyword-groups · publish ·                    │

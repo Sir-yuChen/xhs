@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import re
+
 import os
 import re
 import subprocess
@@ -2076,6 +2078,84 @@ def test_three_workshops_merge_into_one_page_with_tabs():
 # 2026-10-02 T9：素材库面板 + 提示词模板面板（设计 17 §7.2 / §7.3）
 # --------------------------------------------------------------------------- #
 MATERIAL_PANEL = ROOT / "frontend/src/pages/platforms/xhs/material-library-panel.tsx"
+
+
+def test_material_files_have_delete_upload_and_switchable_preview():
+    """素材文件区：**上传 / 删除 / 批量删除 / 大图预览 + 左右切换**（v2.31）。
+
+    用户口径原文：「素材文件区域添加，删除，批量删除，大图预览，且支持左右切换，
+    注意删除会真实删除本地文本，添加提示二次校验」
+
+    ## 判据必须是「**绑定关系**」而不是「关键词存在」
+
+    ⚠️ 第一版守卫只 `assert "modal.confirm(" in panel` 这类**存在性**判据，
+    变异实测 **3/4 无效**（把确认框改成 `if (false) modal.confirm(`、
+    把「移入回收站」删掉、把 `onOpenPreview` 改成空函数 —— **全都照样绿**）。
+    存在性判据守不住任何东西：它只证明「代码里出现过这几个字」。
+
+    ⇒ 改成断言**谁绑在谁身上**：
+    * 删除按钮的 onClick 必须真的调到 `handleDeleteFile`；
+    * `handleDeleteFile` 里必须有 `modal.confirm(`（不是别处有）；
+    * 确认文案必须在 `handleDeleteFile` 的**作用域内**；
+    * 点图的 `onOpenPreview` 必须真的 `setPreviewIndex(index)`。
+    """
+    panel = _code_only(_read(MATERIAL_PANEL))
+
+    # ① 上传：按钮必须绑「已选文件夹」+ 真的触发文件选择
+    assert "uploadMaterialFile" in panel, "没有接上传请求"
+    upload_btn = _slice_between(panel, "loading={uploading}", "上传")
+    assert "disabled={activeFolderId === null}" in upload_btn, (
+        "上传按钮没有绑定「必须先选文件夹」（没落点会写到不该写的地方）"
+    )
+    assert "uploadInputRef.current?.click()" in upload_btn, "上传按钮没真的打开文件选择器"
+
+    # ② 单张删除：**必须绑到删除处理函数**，且该函数内**必须有确认框**
+    assert "deleteMaterialFile" in panel, "没有接单张删除请求"
+    assert "onClick={(event) => {" in panel and "handleDeleteFile(file)" in panel, (
+        "删除图标没有绑到 handleDeleteFile（变异实测：绑成空函数时旧守卫照样绿）"
+    )
+    delete_fn = _slice_between(panel, "function handleDeleteFile(", "function handleDeleteSelected(")
+    # ⚠️ 判据必须**匹配语句本身**（行首 `modal.confirm(`），不能只 `in` 一下：
+    #    变异实测 —— 改成 `if (false) modal.confirm(` 时旧的 `in` 判据**照样绿**
+    #    （字面上仍包含 `modal.confirm(`）⇒ 等于确认框被摘掉却没有守卫。
+    assert re.search(r"^\s*modal\.confirm\(({)?$", delete_fn, re.M), (
+        "handleDeleteFile 里没有**真正被调用**的确认框（`if (false) modal.confirm(` 必须能红）"
+    )
+    # 文案必须在**本确认框的 content 块内**。
+    # ⚠️ 不能取「从 modal.confirm 往后再 1200 字符」那种窗口：实测会**跨到批量删除**
+    #    的确认框（那里也有「移入回收站」）⇒ 删掉单张这句时照样绿（无效变异）。
+    #    正确做法 = 切到 `content: (` 与 `okText:` 之间（就是本框正文）。
+    single_content = _slice_between(delete_fn, "content: (", "okText:")
+    assert "移入回收站" in single_content, (
+        "单张删除的确认文案没说清「移入回收站」—— 用户无法判断能否捞回（口径要「删得可逆」）"
+    )
+    assert "deleteMaterialFile(file.id)" in delete_fn, "确认框里没真的调删除"
+
+    # ③ 批量删除：同样绑处理函数 + 处理函数内有确认框 + 无勾选禁用
+    assert "deleteMaterialFilesBatch" in panel, "没有接批量删除请求"
+    assert "disabled={selectedIds.length === 0}" in panel, "批量删除没做「无勾选时禁用」"
+    assert "onClick={handleDeleteSelected}" in panel, "批量删除按钮没绑到处理函数"
+    batch_fn = _slice_between(panel, "function handleDeleteSelected(", "async function handleUpload(")
+    assert re.search(r"^\s*modal\.confirm\(({)?$", batch_fn, re.M), (
+        "批量删除没有**真正被调用**的确认框"
+    )
+
+    # ④ 预览左右切换：**结构判据**（弹窗在父级 + 按索引）
+    assert "files[previewIndex]" in panel, (
+        "预览没读父级 files —— 弹窗还在子组件里，结构上无法左右切换"
+    )
+    assert "stepPreview(" in panel, "没有左右切换的实现"
+    assert "ArrowLeft" in panel and "ArrowRight" in panel, "键盘左右键没接"
+    assert "onOpenPreview={() => setPreviewIndex(index)}" in panel, (
+        "点图没真的设置 previewIndex（变异实测：改成空函数时旧守卫照样绿）"
+    )
+    # 越界不循环：`stepPreview` 里必须有边界 return
+    step_fn = _slice_between(panel, "function stepPreview(", "return (")
+    assert "next < 0 || next >= files.length" in step_fn, (
+        "左右切换没有边界判定（越界会翻到 undefined / 静默循环）"
+    )
+
+
 PROMPT_PANEL = ROOT / "frontend/src/pages/platforms/xhs/prompt-template-panel.tsx"
 LLM_GEN_MODAL = ROOT / "frontend/src/pages/platforms/xhs/llm-generate-modal.tsx"
 LLM_GEN_CARD = ROOT / "frontend/src/pages/platforms/xhs/llm-generate-progress-card.tsx"
@@ -3600,3 +3680,24 @@ def test_generate_button_does_not_filter_refs_by_tab():
     # 勾选区必须是**合并**的（两处口径要一致）
     assert "...(detailImageDetail?.product_images || [])" in page
     assert "...(detailImageDetail?.detail_images || [])" in page
+
+
+def test_shop_items_action_column_is_two_per_row():
+    """商品操作列 **一行两个操作**（v2.31，用户口径「商品操作列：一行两个操作功能」）。
+
+    为什么守「容器是 grid 两列」而不是「有 4 个按钮」：
+    4 个按钮本来就在（一个 `Space` 水平排 **1 行 4 个**）—— 用户要的是**换行位置**。
+    ⚠️ 换行必须**声明式**：用 `Flex wrap` 时换行由容器宽度决定（3+1 或 2+2 取决于列宽），
+    只有 `grid-template-columns: 1fr 1fr` 才是「无论多宽都两列」。
+    """
+    page = _code_only(_read(SHOP_ITEMS_PAGE))
+    action = _slice_between(page, 'title: "操作"', "];")
+
+    assert "gridTemplateColumns" in action, "操作列不是 grid 容器（换行位置会随列宽漂移）"
+    assert '"1fr 1fr"' in action, "不是两列 grid"
+    # 四个按钮都要撑满格子（否则两列左对齐、点击热区不一致）
+    assert action.count("block") >= 4, f"4 个操作按钮应都带 block，实际 {action.count('block')} 个"
+    for label in ("生成笔记", "LLM 生成", "AI商品图", "生成记录"):
+        assert label in action, f"操作列少了「{label}」"
+    # ⚠️ 回归防线：旧的单行 Space 容器必须已经不在操作列里
+    assert "<Space size={4}>" not in action, "操作列仍是单行 Space（四个按钮挤一行）"

@@ -32,14 +32,19 @@ import {
 import {
   DeleteOutlined,
   FolderAddOutlined,
+  LeftOutlined,
   PlayCircleOutlined,
   ReloadOutlined,
+  RightOutlined,
   SearchOutlined,
+  UploadOutlined,
 } from "@ant-design/icons";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   createMaterialFolder,
+  deleteMaterialFile,
+  deleteMaterialFilesBatch,
   deleteMaterialFolder,
   fetchMaterialFiles,
   fetchMaterialFolders,
@@ -48,6 +53,7 @@ import {
   updateMaterialFolder,
   materialThumbUrl,
   fetchMaterialImageObjectUrl,
+  uploadMaterialFile,
 } from "../../../lib/api";
 import type { MaterialFile, MaterialFolder } from "../../../types";
 
@@ -83,6 +89,7 @@ function MaterialThumb({
   fallbackId,
   previewUrl,
   title,
+  onOpenPreview,
 }: {
   url: string;
   fallbackId: number;
@@ -90,16 +97,16 @@ function MaterialThumb({
   previewUrl?: string;
   /** 预览弹窗标题（文件名）。 */
   title?: string;
+  /**
+   * v2.31：点图时**通知父级开预览**（而不是自己开弹窗）。
+   *
+   * ⚠️ 为什么预览上提到父级：用户要「左右切换」⇒ 弹窗必须知道**同列表的其他图**，
+   * 而本组件只拿到自己这一张（自己开弹窗就切不了 = 上一版的做法）。
+   */
+  onOpenPreview?: () => void;
 }) {
-  // ⚠️ `MaterialThumb` 是组件外的独立组件 ⇒ 必须自己取 message
-  // （不能用外层 `MaterialLibraryPanel` 的那个 —— 作用域不通）
-  const { message } = App.useApp();
   const [objectUrl, setObjectUrl] = useState<string>("");
   const [failed, setFailed] = useState(false);
-  //: v2.29.5：大图（懒加载 —— 只有用户点了才去取原图，避免列表把 6.5MB 图都拉一遍）
-  const [previewObjectUrl, setPreviewObjectUrl] = useState<string>("");
-  const [previewOpen, setPreviewOpen] = useState(false);
-  const [previewLoading, setPreviewLoading] = useState(false);
 
   useEffect(() => {
     let revoked = false;
@@ -129,59 +136,6 @@ function MaterialThumb({
     };
   }, [url, fallbackId]);
 
-  /**
-   * v2.29.5：点开大图（用户口径「点击应支持大图预览」）。
-   *
-   * ⚠️ **懒加载**：只有用户点了才去取原图 —— 列表里几十张 6.5 MB 图
-   * 全部预取会卡死（这正是缩略图存在的理由）。所以预览图**单独一份 objectUrl**，
-   * 与列表用的缩略图分开（两者的释放时机也不同）。
-   */
-  async function openPreview() {
-    if (!previewUrl) return;
-    setPreviewOpen(true);
-    if (previewObjectUrl) return; // 已经取过，直接用
-    setPreviewLoading(true);
-    try {
-      setPreviewObjectUrl(await fetchMaterialImageObjectUrl(previewUrl));
-    } catch {
-      message.error("大图加载失败");
-    } finally {
-      setPreviewLoading(false);
-    }
-  }
-
-  // 预览 objectUrl 的释放（**与缩略图分开管**：两者的生命周期不同）
-  useEffect(
-    () => () => {
-      if (previewObjectUrl) window.URL.revokeObjectURL(previewObjectUrl);
-    },
-    [previewObjectUrl]
-  );
-
-  const previewModal = previewUrl ? (
-    <Modal
-      open={previewOpen}
-      title={title}
-      footer={null}
-      width="80vw"
-      centered
-      onCancel={() => setPreviewOpen(false)}
-      styles={{ body: { textAlign: "center" } }}
-    >
-      {previewLoading && <Spin />}
-      {!previewLoading && previewObjectUrl && (
-        <img
-          src={previewObjectUrl}
-          alt={title || ""}
-          style={{ maxWidth: "100%", maxHeight: "75vh", objectFit: "contain" }}
-        />
-      )}
-      {!previewLoading && !previewObjectUrl && (
-        <Text type="secondary">大图加载失败</Text>
-      )}
-    </Modal>
-  ) : null;
-
   if (failed || !objectUrl) {
     // 加载中 / 取不到 ⇒ 占位（**不留破图** —— 破图比空位更让人以为坏了）
     return (
@@ -210,7 +164,7 @@ function MaterialThumb({
           // ⚠️ 必须 stopPropagation：卡片的 onClick 是「选中」——
           // 不拦住的话点图会同时选中 + 开预览（用户点「看大图」不该改变勾选）。
           event.stopPropagation();
-          void openPreview();
+          onOpenPreview?.();
         }}
         style={{
           width: "100%",
@@ -224,7 +178,6 @@ function MaterialThumb({
           cursor: previewUrl ? "zoom-in" : "default",
         }}
       />
-      {previewModal}
     </>
   );
 }
@@ -236,7 +189,7 @@ export function MaterialLibraryPanel({
   /** 勾选变化回传给宿主（生成配置弹窗的素材来源用它）。 */
   onSelectionChange?: (fileIds: number[]) => void;
 }) {
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const [folders, setFolders] = useState<MaterialFolder[]>([]);
   const [foldersLoading, setFoldersLoading] = useState(false);
   const [activeFolderId, setActiveFolderId] = useState<number | null>(null);
@@ -249,11 +202,25 @@ export function MaterialLibraryPanel({
   const [hasMore, setHasMore] = useState(false);
   /** 哨兵元素的引用（滚进视口就加载下一页）。 */
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
+  /** v2.31：上传用的隐藏 `<input type=file>`（点按钮触发它 — 原生文件选择器只能这么开）。 */
+  const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const [keyword, setKeyword] = useState("");
   const [typeFilter, setTypeFilter] = useState<TypeFilter>("all");
 
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [creating, setCreating] = useState(false);
+  /**
+   * v2.31：大图预览 —— **按索引**记（不是记文件对象）。
+   *
+   * ⚠️ 必须按**索引**：用户要「左右切换」⇒ 要靠 `files[index ± 1]` 取相邻图；
+   * 记 file 对象就得每次回列表 `findIndex`（列表还在无限滚动增长，容易对不上）。
+   */
+  const [previewIndex, setPreviewIndex] = useState<number | null>(null);
+  //: 预览大图的 objectUrl（**懒加载**：只有开了预览才去取原图）
+  const [previewObjectUrl, setPreviewObjectUrl] = useState<string>("");
+  const [previewLoading, setPreviewLoading] = useState(false);
+  //: v2.31：上传中（按钮 loading，防重复点）
+  const [uploading, setUploading] = useState(false);
   const [newName, setNewName] = useState("");
   const [newPath, setNewPath] = useState("");
   const [renaming, setRenaming] = useState<MaterialFolder | null>(null);
@@ -475,6 +442,193 @@ export function MaterialLibraryPanel({
     );
   }
 
+  /**
+   * v2.31：打开大图预览（按索引，支持左右切换）。
+   *
+   * ⚠️ 懒加载：只有开了预览才去取**原图**（列表里几十张 6.5 MB 图全预取会卡死 ——
+   * 这正是缩略图存在的理由）。切到下一张时**释放上一张**的 objectUrl。
+   */
+  useEffect(() => {
+    if (previewIndex === null) {
+      setPreviewObjectUrl("");
+      return;
+    }
+    const file = files[previewIndex];
+    if (!file) {
+      setPreviewIndex(null);
+      return;
+    }
+    let revoked = false;
+    let created = "";
+    setPreviewLoading(true);
+    void (async () => {
+      try {
+        const next = await fetchMaterialImageObjectUrl(materialFileUrl(file.id));
+        if (revoked) {
+          window.URL.revokeObjectURL(next);
+          return;
+        }
+        created = next;
+        setPreviewObjectUrl(next);
+      } catch {
+        message.error("大图加载失败");
+        setPreviewObjectUrl("");
+      } finally {
+        if (!revoked) setPreviewLoading(false);
+      }
+    })();
+    return () => {
+      revoked = true;
+      if (created) window.URL.revokeObjectURL(created);
+    };
+  }, [previewIndex, files, message]);
+
+  /**
+   * v2.31：删除一个文件（**真删源文件，但进回收站**）—— 必须二次确认。
+   *
+   * ⚠️ 确认文案要**写清三件事**（用户口径「添加提示二次校验」）：
+   *   ① 删的是哪个文件（文件名）② 会动磁盘 ③ **可捞回**（进回收站，不是销毁）。
+   *   只写「确定删除吗？」用户无法判断风险 —— 那是走过场，不是二次确认。
+   */
+  function handleDeleteFile(file: MaterialFile) {
+    modal.confirm({
+      title: "删除素材文件",
+      content: (
+        <div>
+          <div>
+            将删除：
+            <Text strong>{file.filename}</Text>
+          </div>
+          <div style={{ marginTop: 4 }}>
+            <Text type="secondary">
+              会真实删除磁盘文件（移入回收站，可在系统回收站还原）。
+            </Text>
+          </div>
+        </div>
+      ),
+      okText: "删除",
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      centered: true,
+      onOk: async () => {
+        try {
+          await deleteMaterialFile(file.id);
+          message.success(`已删除「${file.filename}」（已移入回收站）`);
+          setSelectedIds((current) => current.filter((id) => id !== file.id));
+          await loadFiles(activeFolderId, 1, false);
+        } catch (error) {
+          message.error(error instanceof Error ? error.message : "删除失败");
+        }
+      },
+    });
+  }
+
+  /**
+   * v2.31：批量删除（**上限 50**，后端超限整体拒绝）。
+   *
+   * ⚠️ 确认文案列**前 5 个文件名 + 总数**：只报「共 N 个」用户无法核对勾对没有，
+   * 而批量删除一次动几十个磁盘文件，勾错的代价很大。
+   */
+  function handleDeleteSelected() {
+    if (selectedIds.length === 0) return;
+    const names = files.filter((f) => selectedIds.includes(f.id)).map((f) => f.filename);
+    const shown = names.slice(0, 5);
+    modal.confirm({
+      title: `批量删除 ${selectedIds.length} 个素材文件`,
+      content: (
+        <div>
+          <div>将删除以下文件：</div>
+          <ul style={{ margin: "6px 0 6px 18px", padding: 0 }}>
+            {shown.map((name) => (
+              <li key={name}>{name}</li>
+            ))}
+          </ul>
+          {names.length > shown.length && (
+            <div>
+              <Text type="secondary">…等共 {names.length} 个</Text>
+            </div>
+          )}
+          <div style={{ marginTop: 4 }}>
+            <Text type="secondary">
+              会真实删除磁盘文件（移入回收站，可在系统回收站还原）。一次最多 50 个。
+            </Text>
+          </div>
+        </div>
+      ),
+      okText: "全部删除",
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      centered: true,
+      onOk: async () => {
+        try {
+          const result = await deleteMaterialFilesBatch(selectedIds);
+          const skipped = result.skipped.length;
+          message.success(
+            skipped > 0
+              ? `已删除 ${result.deleted} 个（${skipped} 个已不存在，自动跳过）`
+              : `已删除 ${result.deleted} 个（已移入回收站）`
+          );
+          setSelectedIds([]);
+          await loadFiles(activeFolderId, 1, false);
+        } catch (error) {
+          message.error(error instanceof Error ? error.message : "批量删除失败");
+        }
+      },
+    });
+  }
+
+  /** v2.31：上传文件到当前文件夹（`<input type=file>` 选中后触发）。 */
+  async function handleUpload(fileList: FileList | null) {
+    if (!fileList || fileList.length === 0 || activeFolderId === null) return;
+    setUploading(true);
+    try {
+      for (const file of Array.from(fileList)) {
+        // 逐个上传：单个失败**不拖累**其余（如实报哪一个失败）
+        try {
+          await uploadMaterialFile(activeFolderId, file);
+        } catch (error) {
+          message.error(
+            `「${file.name}」上传失败：${error instanceof Error ? error.message : "未知原因"}`
+          );
+        }
+      }
+      message.success("上传完成");
+      await loadFiles(activeFolderId, 1, false);
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  /** 预览弹窗里切到相邻一张（左右方向键 / 按钮共用）。 */
+  function stepPreview(delta: number) {
+    setPreviewIndex((current) => {
+      if (current === null) return current;
+      const next = current + delta;
+      // 越界时不循环（用户按到头就该停，循环会让人以为「又回到第一张」是 bug）
+      if (next < 0 || next >= files.length) return current;
+      return next;
+    });
+  }
+
+  /**
+   * v2.31：预览开着时用**键盘左右键**切换。
+   *
+   * ⚠️ 必须判定 `previewIndex === null` 直接不挂监听 —— 否则在**列表页**按左右键
+   * 也会触发切换（但那时没有预览，`setPreviewIndex` 是 no-op，看似无害），
+   * 却会与将来任何列表级键盘交互**抢事件**。
+   */
+  useEffect(() => {
+    if (previewIndex === null) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "ArrowLeft") stepPreview(-1);
+      else if (event.key === "ArrowRight") stepPreview(1);
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps —— `stepPreview` 每次渲染都是新引用，
+    // 放进依赖会让监听每渲染都重挂（没必要；它只读 `files.length`，而 files 变了会走下面的依赖）
+  }, [previewIndex, files.length]);
+
   return (
     <Space direction="vertical" size={12} style={{ width: "100%" }}>
       <Card
@@ -483,6 +637,41 @@ export function MaterialLibraryPanel({
         extra={
           <Space size={8}>
             <Tag color="blue">已选 {selectedIds.length} 个文件</Tag>
+            {/* v2.31：**上传**（用户口径「添加」）—— 只对**当前选中文件夹**可上传，
+                没选文件夹时禁用（上传要有落点，不能猜一个默认目录）。 */}
+            <Button
+              size="small"
+              icon={<UploadOutlined />}
+              loading={uploading}
+              disabled={activeFolderId === null}
+              onClick={() => uploadInputRef.current?.click()}
+            >
+              上传
+            </Button>
+            {/* 隐藏的原生文件选择器：浏览器只允许由用户手势直接触发（所以点上面的按钮转调它） */}
+            <input
+              ref={uploadInputRef}
+              type="file"
+              accept="image/*,video/*"
+              multiple
+              style={{ display: "none" }}
+              onChange={(event) => {
+                void handleUpload(event.target.files);
+                // 清空 value：否则连续选**同一个文件**不会触发 change（DOM 认为值没变）
+                event.target.value = "";
+              }}
+            />
+            {/* v2.31：**批量删除**（用户口径「删除，批量删除」）—— 没勾选时禁用，
+                而不是隐藏（隐藏会让用户以为没这个功能）。 */}
+            <Button
+              danger
+              size="small"
+              icon={<DeleteOutlined />}
+              disabled={selectedIds.length === 0}
+              onClick={handleDeleteSelected}
+            >
+              批量删除
+            </Button>
             <Button
               icon={<ReloadOutlined />}
               size="small"
@@ -646,7 +835,7 @@ export function MaterialLibraryPanel({
                 gap: 10,
               }}
             >
-              {files.map((file) => {
+              {files.map((file, index) => {
                 const selected = selectedIds.includes(file.id);
                 const isImage = file.file_type === "image";
                 return (
@@ -662,6 +851,21 @@ export function MaterialLibraryPanel({
                       borderColor: selected ? "#1677ff" : undefined,
                       cursor: "pointer",
                     }}
+                    /* v2.31：单张**删除**入口（用户口径「删除」）。
+                       ⚠️ 用 `actions`（antd 卡片操作条）而不是绝对定位的悬浮按钮：
+                       悬浮按钮会盖住图片右下角的尺寸信息。
+                       ⚠️ 必须 `stopPropagation`：否则点删除会**连带触发卡片的「选中」**。 */
+                    actions={[
+                      <Tooltip title="删除（移入回收站，可从系统回收站还原）" key="delete">
+                        <DeleteOutlined
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleDeleteFile(file);
+                          }}
+                          style={{ color: "#ff4d4f" }}
+                        />
+                      </Tooltip>,
+                    ]}
                     cover={
                       // v2.29.4：**文字叠在图片上**（用户口径「缩略图小，把图片名称和属性
                       // 放图片上」）⇒ 容器 `position: relative`，文字条绝对定位在底部。
@@ -693,6 +897,9 @@ export function MaterialLibraryPanel({
                             fallbackId={file.id}
                             previewUrl={materialFileUrl(file.id)}
                             title={file.filename}
+                            /* v2.31：点图**通知父级开预览**（按索引）—— 这样弹窗知道
+                               完整列表，才能左右切换（预览上提的理由见 MaterialThumb 注释）。 */
+                            onOpenPreview={() => setPreviewIndex(index)}
                           />
                         ) : (
                           // 视频无缩略图是**设计如此**（后端不为视频抽帧）
@@ -736,8 +943,10 @@ export function MaterialLibraryPanel({
                       </div>
                     }
                   >
-                    {/* 卡片 body 留空 —— 文件名/属性已叠在图上（同一信息不留两份）。
-                        `Cover` 模式下 body 为空仍会占一点高度 ⇒ 用 0 尺寸占位收掉。 */}
+                    {/* v2.31：单张**删除**入口（用户口径「删除」）。
+                        ⚠️ 用 `actions`（antd 的卡片操作条）而**不是**绝对定位的悬浮按钮：
+                        绝对定位会盖住图片右下角的尺寸信息，且「悬停才出现」在触摸屏上点不到。
+                        ⚠️ `stopPropagation` 必须加：不加会连带触发卡片的「选中」。 */}
                     <div style={{ display: "none" }} />
                   </Card>
                 );
@@ -798,6 +1007,56 @@ export function MaterialLibraryPanel({
           onChange={(e) => setRenameValue(e.target.value)}
           placeholder="文件夹名称"
         />
+      </Modal>
+
+      {/* v2.31：**大图预览 + 左右切换**（用户口径「大图预览，且支持左右切换」）。
+          ⚠️ 三条设计决定：
+          ① 预览的目标由 `previewIndex`（**索引**）决定 —— 切上一张/下一张才可能实现；
+          ② 越界**不循环**（按到头就停 —— 循环会让人以为「又回到第一张」是 bug）；
+          ③ 键盘左右键也切（用户看大图时手在键盘上，逼他移回鼠标点箭头是无谓的负担）。 */}
+      <Modal
+        open={previewIndex !== null}
+        title={
+          previewIndex !== null && files[previewIndex]
+            ? `${files[previewIndex].filename}（${previewIndex + 1} / ${files.length}）`
+            : ""
+        }
+        footer={null}
+        width="85vw"
+        centered
+        onCancel={() => setPreviewIndex(null)}
+        styles={{ body: { textAlign: "center", position: "relative" } }}
+      >
+        <div style={{ position: "relative", minHeight: "60vh" }}>
+          {/* 左箭头：到头（第一张）时禁用，而不是隐藏 */}
+          <Button
+            shape="circle"
+            size="large"
+            icon={<LeftOutlined />}
+            disabled={previewIndex === null || previewIndex <= 0}
+            onClick={() => stepPreview(-1)}
+            style={{ position: "absolute", left: 8, top: "50%", zIndex: 2 }}
+          />
+          {previewLoading && <Spin />}
+          {!previewLoading && previewObjectUrl && (
+            <img
+              src={previewObjectUrl}
+              alt=""
+              style={{ maxWidth: "100%", maxHeight: "75vh", objectFit: "contain" }}
+            />
+          )}
+          {!previewLoading && !previewObjectUrl && (
+            <Text type="secondary">大图加载失败</Text>
+          )}
+          <Button
+            shape="circle"
+            size="large"
+            icon={<RightOutlined />}
+            disabled={previewIndex === null || previewIndex >= files.length - 1}
+            onClick={() => stepPreview(1)}
+            style={{ position: "absolute", right: 8, top: "50%", zIndex: 2 }}
+          />
+        </div>
       </Modal>
     </Space>
   );

@@ -795,11 +795,11 @@ export function XhsShopItemsPage() {
 
   /**
    * v2.28：弹窗标题。生成中**追加耗时**（用户口径「统计耗时」）——
-   * 但基础文案 `"生成AI商品图"` 保持不变（它是页面守卫切范围的锚点）。
+   * 但基础文案 `"AI商品图"` 保持不变（它是页面守卫切范围的锚点）。
    */
   const detailImageTitle = detailImageGenerating
-    ? `生成AI商品图 · 生成中 ${detailImageElapsed}s（请勿关闭，关闭会看不到结果）`
-    : "生成AI商品图";
+    ? `AI商品图 · 生成中 ${detailImageElapsed}s（请勿关闭，关闭会看不到结果）`
+    : "AI商品图";
   const [detailImage, setDetailImage] = useState<GenerateDetailImageResult | null>(null);
   // v2.15：商品图集（主图 / 原详情图）与勾选的参考图。
   const [detailImageDetail, setDetailImageDetail] = useState<XhsShopItemDetail | null>(null);
@@ -1868,9 +1868,19 @@ export function XhsShopItemsPage() {
     {
       title: "操作",
       key: "action",
-      width: 130,
+      // v2.31（用户口径「商品操作列：一行两个操作功能」）：四个操作排 **2 × 2**。
+      // ⚠️ 用 grid 而不是 `Flex wrap` —— 换行位置由**列宽**决定（浏览器按剩余空间算），
+      // 容器宽度一变就可能变成 3+1；grid 是**声明式两列**，与容器宽度无关。
+      width: 190,
       render: (_value, item) => (
-        <Space size={4}>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "1fr 1fr",
+            gap: 4,
+            alignItems: "center",
+          }}
+        >
           {/* 生成笔记（设计 13 §31.4，用户需求③；§31.10 起入队即返回）：
               调千帆后台智能生成一篇挂本商品的笔记（待发布，之后到内容库发布）。
               loading 判据 = 快照的 running + queued（队列在执行这一项），
@@ -1879,6 +1889,7 @@ export function XhsShopItemsPage() {
             <Button
               type="link"
               size="small"
+              block
               icon={<FileAddOutlined spin={genQueueItemIds.has(item.item_id)} />}
               loading={generatingItemId === item.item_id || genQueueItemIds.has(item.item_id)}
               disabled={
@@ -1896,6 +1907,7 @@ export function XhsShopItemsPage() {
             <Button
               type="link"
               size="small"
+              block
               icon={<RobotOutlined spin={llmQueueItemIds.has(item.item_id)} />}
               disabled={llmGenerating !== null}
               onClick={() => {
@@ -1913,10 +1925,11 @@ export function XhsShopItemsPage() {
             <Button
               type="link"
               size="small"
+              block
               icon={<PictureOutlined />}
               onClick={() => openDetailImage(item)}
             >
-              生成AI商品图
+              AI商品图
             </Button>
           </Tooltip>
           {/* v2.30（§13.3.11）：**查看该商品的 AI 生成记录** —— 用户口径
@@ -1925,13 +1938,14 @@ export function XhsShopItemsPage() {
             <Button
               type="link"
               size="small"
+              block
               icon={<HistoryOutlined />}
               onClick={() => void openGenerations(item)}
             >
               生成记录
             </Button>
           </Tooltip>
-        </Space>
+        </div>
       ),
     },
   ];
@@ -2539,7 +2553,7 @@ export function XhsShopItemsPage() {
               <span style={{ fontSize: 12 }}>
                 该商品还没有 AI 生成记录。
                 <br />
-                （v2.30 之前生成的图没有商品关联，此处不计入 —— 去「生成AI商品图」生成一次即可看到）
+                （v2.30 之前生成的图没有商品关联，此处不计入 —— 去「AI商品图」生成一次即可看到）
               </span>
             }
           />

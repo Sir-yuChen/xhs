@@ -28,3 +28,6 @@ curl_cffi
 
 # 桌面启动器（packaging/launcher.py）的托盘图标依赖；打包随 PyInstaller 进包
 pystray
+
+# v2.31：素材删除走**可逆**删除（进回收站，不是 unlink）—— 纯 Python，无编译依赖
+send2trash>=1.8.0

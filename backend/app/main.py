@@ -13,6 +13,7 @@ from backend.app.api.platforms.xhs import (
     analytics,
     crawl,
     creator,
+    material_files,
     materials,
     monitoring,
     pc,
@@ -184,6 +185,8 @@ def create_app() -> FastAPI:
     app.include_router(qianfan.router, prefix="/api")
     app.include_router(product_notes.router, prefix="/api")
     app.include_router(materials.router, prefix="/api")
+    # v2.31：素材**文件**的增删（会动用户磁盘 ⇒ 另一套语义，单独成模块）
+    app.include_router(material_files.router, prefix="/api")
     app.include_router(crawl.router, prefix="/api")
     app.include_router(monitoring.router, prefix="/api")
     app.include_router(auto_tasks.router, prefix="/api")
