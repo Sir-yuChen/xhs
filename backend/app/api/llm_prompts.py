@@ -486,3 +486,111 @@ def render_template_preview(
         ) from error
 
     return {"id": template.id, "name": template.name, "prompt": prompt}
+
+
+def seed_builtin_prompt_templates(db: Session, *, user_id: int) -> int:
+    """为某用户播种内置提示词模块与模板（v2.24，设计 17 §13.5.4）。返回**新建行数**。
+
+    **幂等**：按 `(user_id, name)` 判重 —— 用户改过 / 删过的行**不重建、不覆盖**。
+    这点与「代码常量」有本质区别：种子是**起点**，库里的是**用户的**。
+
+    调用时机：应用启动时为**已有用户**播种（`main.py::lifespan`），以及**注册新用户**
+    后播种（否则新用户第一次打开出图弹窗仍然没有模板可选 —— 那正是本轮的缺口）。
+
+    ⚠️ **模块先于模板**：模板靠 `module_names` 引用模块 id，顺序反了会解析不到。
+    """
+    from backend.app.core.initial_data import load_initial_prompt_templates
+
+    payload = load_initial_prompt_templates()
+    modules_spec = payload.get("modules") or []
+    templates_spec = payload.get("templates") or []
+    if not modules_spec and not templates_spec:
+        return 0
+
+    created = 0
+
+    # ---- ① 模块（按 name 判重，拿到 name → id 供模板引用） ----
+    name_to_module: dict[str, PromptModule] = {}
+    if modules_spec:
+        existing_modules = {
+            row.name: row
+            for row in db.scalars(
+                select(PromptModule).where(PromptModule.user_id == user_id)
+            )
+        }
+        for spec in modules_spec:
+            row = existing_modules.get(spec["name"])
+            if row is None:
+                row = PromptModule(
+                    user_id=user_id,
+                    name=spec["name"],
+                    category=spec["category"],
+                    content=spec["content"],
+                    sort_order=spec["sort_order"],
+                    enabled=True,
+                )
+                db.add(row)
+                created += 1
+            name_to_module[spec["name"]] = row
+        db.flush()  # 拿到新行的 id
+
+    # ---- ② 模板（按 name 判重；module_names → module_ids） ----
+    if templates_spec:
+        existing_templates = {
+            row.name
+            for row in db.scalars(
+                select(PromptTemplate).where(PromptTemplate.user_id == user_id)
+            )
+        }
+        for spec in templates_spec:
+            if spec["name"] in existing_templates:
+                continue
+            module_ids = [
+                name_to_module[name].id
+                for name in spec["module_names"]
+                if name in name_to_module
+            ]
+            # 默认模板按 (user_id, task_type) 唯一：先清旧的，避免撞唯一约束
+            if spec["is_default"]:
+                _clear_default_for_task_type(db, user_id, spec["task_type"])
+            db.add(
+                PromptTemplate(
+                    user_id=user_id,
+                    name=spec["name"],
+                    task_type=spec["task_type"],
+                    prompt_skeleton=spec["prompt_skeleton"],
+                    module_ids=module_ids,
+                    is_default=spec["is_default"],
+                    version=1,
+                )
+            )
+            created += 1
+
+    return created
+
+
+def seed_builtin_prompt_templates_for_all_users() -> int:
+    """应用启动时给**每个已有用户**播种（与 `seed_builtin_settings_from_initial_data`
+    同型：失败只记 warning 不抛 —— 起服务不能被子系统问题拖死）。
+
+    ⚠️ 用**独立 Session**（:启动阶段没有请求级 db 依赖）。
+    """
+    from backend.app.core.database import SessionLocal
+    from backend.app.models.user import User
+
+    db = SessionLocal()
+    try:
+        user_ids = list(db.scalars(select(User.id)))
+        total = 0
+        for uid in user_ids:
+            total += seed_builtin_prompt_templates(db, user_id=uid)
+        if total:
+            db.commit()
+            logger.info("应用初始化数据：为 %s 个用户补种 %s 行提示词模块/模板", len(user_ids), total)
+        return total
+    except Exception as exc:  # noqa: BLE001 - 起服务不能被子系统问题拖死
+        db.rollback()
+        logger.warning("提示词模板播种失败（已跳过，可在模板页手动新建）：%s", exc)
+        return 0
+    finally:
+        db.close()

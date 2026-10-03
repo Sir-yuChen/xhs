@@ -56,6 +56,7 @@ from backend.app.services.scheduler_service import (
     stop_scheduler_watchdog,
 )
 from backend.app.services.settings_service import seed_builtin_settings_from_initial_data
+from backend.app.api.llm_prompts import seed_builtin_prompt_templates_for_all_users
 
 
 @asynccontextmanager
@@ -69,6 +70,10 @@ async def lifespan(app: FastAPI):
     # 缺失不覆盖」语义。**必须早于任何运行期读点**（限流器 / worker 池都要读它）——
     # 虽然读点自身有「DB 无行 ⇒ 回落 settings」的兜底，但先播种才能让设置页一打开就有行。
     seed_builtin_settings_from_initial_data()
+    # 内置提示词模板 / 模块（设计 17 §13.5.4，v2.24）：用户口径「生成AI商品图 没有公共
+    # 提示模板相关逻辑」⇒ 没有种子时出图弹窗的下拉是**空的**，选了也无内容，
+    # 「公共模板保证一致性」就落不了地。与上面两项同一语义：随安装附有 + 只补缺失不覆盖。
+    seed_builtin_prompt_templates_for_all_users()
     settings = get_settings()
     scheduler = start_scheduler() if settings.scheduler_enabled else None
     app.state.scheduler = scheduler

@@ -3265,3 +3265,65 @@ def test_model_config_page_drops_redundant_intro_paragraph():
     assert "该业务点下没有可用模型" in code, (
         "「服务商在该业务点下无可用模型」的按行提示必须保留（原集中式 Alert 的等价物）"
     )
+
+
+def test_detail_image_uses_public_prompt_templates():
+    """v2.24：**出图必须能用公共提示词模板**（设计 17 §13.6）。
+
+    用户口径原文：「之前你把一致性抽取成公共模板了，但是未使用，在生成图片时应选择
+    公共提示词模板，保证图片商品的一致性」。
+
+    守五件（少一件都退回到「模板是摆设」）：
+    ① 弹窗里**有**模板下拉（不是只在后端接了）；
+    ② 下拉按组过滤 `task_type`（主图用含叠字位的 cover、详情图用 image）；
+    ③ 打开弹窗时**拉模板**并**预选默认**（默认不选 = 用户得自己找，一致性落不了地）；
+    ④ 提交时把**组级模板**发给后端（选了不发 = 无效）；
+    ⑤ 请求函数真的把 `template_id` / `group_templates` 放进 body。
+    """
+    page = _code_only(_read(SHOP_ITEMS_PAGE))
+    block = _slice_between(page, 'title="生成AI商品图"', "</Modal>")
+
+    # ① 下拉存在
+    #    ⚠️ 锚点必须是**下拉自身**的 JSX，不能只查「提示词模板」这四个字 ——
+    #    旁边那句说明文案里也有同样的字（实测：删掉下拉守卫照样绿 = 假断言）。
+    #    ⚠️ 两件东西在**两个不同的位置**：下拉在弹窗 JSX 里，拉取在 openDetailImage 里
+    #    （写成「都 in block」会永远红 —— 拉取代码不在弹窗块内）。
+    assert "<Select" in block and "detailImageTemplates" in block, (
+        "弹窗里没有模板下拉 —— 模板没用上"
+    )
+    assert "placeholder=\"选择公共提示词模板（留空则用手写提示词）\"" in block, (
+        "下拉不是「选模板」那个（锚点漂到别处了）"
+    )
+    # ② 按组过滤 task_type（主图=cover，详情图=image）
+    assert 'tab.key === "product" ? "cover" : "image"' in block, (
+        "模板下拉没按组过滤 task_type（主图/详情图会选到同一类模板）"
+    )
+    assert "t.is_default" in block, "下拉没有区分默认模板"
+    # ③ 打开时拉 + 预选默认
+    opener = _slice_between(page, "function openDetailImage", "function ")
+    assert "fetchPromptTemplates" in opener, "打开弹窗时没有拉公共提示词模板"
+    #    ⚠️ 断言必须落在**赋值**上：只查 `is_default && t.task_type === taskType`
+    #    会漏掉「条件在、赋值被删」的变异（实测：删掉赋值那行守卫照样绿 = 假守卫）。
+    assert "if (fallback) next[key] = { ...next[key], templateId: fallback.id }" in opener, (
+        "没有预选默认模板 —— 用户得自己去找，一致性约束落不了地"
+    )
+    # ④ 提交时**组装**组级模板并作为参数传给请求函数
+    #    ⚠️ 页面里是**驼峰变量** `groupTemplates`；下划线字段名 `group_templates`
+    #    只出现在 api.ts（页面不直接拼 body）—— 断言要按各自的存在面写。
+    assert "const groupTemplates" in page, (
+        "提交时没有组装组级模板（选了模板等于没选）"
+    )
+    assert "groupTemplates[tab.key] = { template_id: tid }" in page, (
+        "组级模板没有按组取值（会全部落到同一组）"
+    )
+    submit = _slice_between(page, "async function generateDetailImage", "setDetailImage(result)")
+    assert "groupTemplates" in submit, "组级模板没被传进请求函数调用"
+    # ⑤ 请求函数真的发出去
+    api = _read(ROOT / "frontend/src/lib/api.ts")
+    assert "template_id: templateId" in api, "请求函数未把顶层模板发给后端"
+    assert "group_templates: groupTemplates" in api, (
+        "请求函数未把组级模板发给后端"
+    )
+    assert "templateId?: number" in api and "groupTemplates?: Record<string, { template_id?: number }>" in api, (
+        "请求函数缺少模板参数签名"
+    )

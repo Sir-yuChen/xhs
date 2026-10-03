@@ -1089,8 +1089,84 @@ class GenerateDetailImageRequest(BaseModel):
     #: v2.19：是否先用**文本模型**把商品信息整理成提示词（用户口径「全部整理扔给大模型」）。
     #: 默认 True；整理失败**自动回落**本地拼接（不阻断出图），原因在响应 `prompt_source`。
     refine_prompt: bool = True
+    #: v2.24：**公共提示词模板**（设计 17 §13.5.4 / §7.2，用户口径「生成AI商品图 没有
+    #: 公共提示模板相关逻辑」）。传 `prompt_templates.id` ⇒ 用该模板**渲染**出提示词
+    #: （基础指令 + 引用模块 + 骨架 + 商品字段注入，`prompt_renderer` 唯一实现）。
+    #:
+    #: ⚠️ **优先级**：模板 > 手输 `prompt` > 内置默认。选了模板就按模板走 ——
+    #: 否则「选了模板却还用手输」会让人以为模板没生效（判据只能有一个赢家）。
+    #: 模板不属于本用户 ⇒ 404；模板不存在 ⇒ 404（不静默回落，避免「以为用了模板」）。
+    template_id: int | None = Field(default=None, ge=1)
+    #: v2.24：**每组各自的模板**（主图 / 详情图可各选一个）。形如
+    #: `{"product": {"template_id": 3}, "detail": {"template_id": 5}}`；
+    #: 未出现的组回落顶层 `template_id`。
+    group_templates: dict | None = None
 
     model_config = ConfigDict(extra="forbid")
+
+
+def _render_detail_image_template(
+    db: Session,
+    current_user: User,
+    *,
+    template_id: int,
+    item: dict[str, Any],
+    skus: list[dict[str, Any]],
+    extra_prompt: str = "",
+) -> tuple[str, str]:
+    """用公共提示词模板渲染详情图提示词（v2.24，设计 17 §13.5.4）。
+
+    返回 `(提示词, 说明)`；说明供响应 `prompt_source` 如实标注用了哪个模板。
+
+    ⚠️ **不静默回落**：模板不存在 / 不属于本用户 ⇒ 404；骨架含未知插槽 ⇒ 400。
+    既然用户**显式选了**模板，「以为用了、其实没用」比报错更坏。
+    """
+    from backend.app.models.prompt import PromptModule, PromptTemplate
+    from backend.app.services import prompt_renderer
+
+    template = db.scalar(
+        select(PromptTemplate).where(
+            PromptTemplate.id == template_id,
+            PromptTemplate.user_id == current_user.id,
+        )
+    )
+    if template is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": "PROMPT_TEMPLATE_NOT_FOUND",
+                "message": f"提示词模板 #{template_id} 不存在或不属于当前用户",
+            },
+        )
+
+    module_ids = [int(mid) for mid in (template.module_ids or []) if isinstance(mid, int)]
+    modules: list[PromptModule] = []
+    if module_ids:
+        modules = list(
+            db.scalars(
+                select(PromptModule).where(
+                    PromptModule.user_id == current_user.id,
+                    PromptModule.id.in_(module_ids),
+                    PromptModule.enabled.is_(True),
+                )
+            )
+        )
+
+    try:
+        rendered = detail_image_prompt.render_template_prompt(
+            template=template,
+            modules=modules,
+            item=item,
+            skus=skus,
+            extra_prompt=extra_prompt,
+        )
+    except prompt_renderer.PromptRenderError as error:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": error.code, "message": error.message},
+        ) from error
+
+    return rendered, f"模板「{template.name}」"
 
 
 def _default_detail_image_prompt(item: dict[str, Any], skus: list[dict[str, Any]]) -> str:
@@ -1329,9 +1405,22 @@ def generate_detail_image(
         db, current_user, BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE
     )
 
-    prompt = (payload.prompt or "").strip() or _default_detail_image_prompt(
-        detail.get("item") or {}, detail.get("skus") or []
-    )
+    # v2.24（§13.5.4）：**公共提示词模板优先**（用户口径「生成图片时应选择公共提示词
+    # 模板，保证图片商品的一致性」）。模板渲染出提示词 ⇒ 手输 `prompt` 降为
+    # 「补充要求」追加在末尾；没选模板时才回落到「手输 > 内置默认」的旧链路。
+    prompt = ""
+    template_note = ""
+    if payload.template_id is not None:
+        template_prompt, template_note = _render_detail_image_template(
+            db, current_user, template_id=payload.template_id,
+            item=detail.get("item") or {}, skus=detail.get("skus") or [],
+            extra_prompt=payload.prompt or "",
+        )
+        prompt = template_prompt
+    if not prompt:
+        prompt = (payload.prompt or "").strip() or _default_detail_image_prompt(
+            detail.get("item") or {}, detail.get("skus") or []
+        )
     # v2.18/v2.20：张数收敛到常量区间（Pydantic 的 ge/le 已拦非法值，这里再夹一次 ——
     # 常量改小时端点仍然安全，不依赖模型的字段约束）。
     count = max(
@@ -1393,7 +1482,23 @@ def generate_detail_image(
         effective_refs = fallback_refs
         if not effective_refs:
             continue
+        # v2.24：**组级模板优先**（主图 / 详情图可各选一个模板 —— 用户口径「使用 tab，
+        # 各自的提示词模板」）。组没指定模板 ⇒ 用顶层模板渲染出的 `prompt`。
         group_prompt = str(setting.get("prompt") or "").strip() or prompt
+        group_template_id = None
+        if isinstance(payload.group_templates, dict):
+            raw_tid = (payload.group_templates.get(key) or {})
+            if isinstance(raw_tid, dict) and raw_tid.get("template_id"):
+                try:
+                    group_template_id = int(raw_tid["template_id"])
+                except (TypeError, ValueError):
+                    group_template_id = None
+        if group_template_id is not None:
+            group_prompt, _ = _render_detail_image_template(
+                db, current_user, template_id=group_template_id,
+                item=detail.get("item") or {}, skus=detail.get("skus") or [],
+                extra_prompt=str(setting.get("prompt") or "").strip(),
+            )
         try:
             group_count = int(setting.get("count") or count)
         except (TypeError, ValueError):
@@ -1465,7 +1570,9 @@ def generate_detail_image(
             ],
             # v2.19：提示词来源（llm = 文本模型整理；local = 回落本地拼接）+ 整理说明。
             "prompt_source": prompt_source,
-            **({"refine_note": refine_note} if refine_note else {}),
+            **( {"template_note": template_note} if template_note else {}),
+            **( {"prompt_preview": prompt[:300]} if template_note else {}),
+            **( {"refine_note": refine_note} if refine_note else {}),
             **({"material_folder_id": payload.material_folder_id} if payload.material_folder_id else {}),
         },
     )

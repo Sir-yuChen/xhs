@@ -49,6 +49,7 @@ import {
   fetchAccounts,
   fetchGenerateQueue,
   fetchXhsItemNotes,
+  fetchPromptTemplates,
   fetchXhsQianfanBinding,
   fetchXhsShopItemDetail,
   fetchXhsShopItems,
@@ -97,6 +98,7 @@ import {
 import type {
   GenerateDetailImageResult,
   PlatformAccount,
+  PromptTemplate,
   XhsItemNote,
   XhsItemNotesResponse,
   XhsLoginChannels,
@@ -703,8 +705,15 @@ export function XhsShopItemsPage() {
    * 填的内容会在切到「详情图」后被顶掉，那正是「混搭」在状态层的形态。
    */
   const [detailImageGroupConfigs, setDetailImageGroupConfigs] = useState<
-    Record<string, { prompt?: string; count?: number }>
+    Record<string, { prompt?: string; count?: number; templateId?: number }>
   >({});
+  /**
+   * v2.24：**公共提示词模板**（用户口径「生成图片时应选择公共提示词模板，保证图片商品的
+   * 一致性」）。打开弹窗时拉一次（与 `llm-generate-modal` 同一范式：模板是用户级的，
+   * 与具体商品无关 ⇒ 只拉一次，切商品不重复拉）。
+   */
+  const [detailImageTemplates, setDetailImageTemplates] = useState<PromptTemplate[]>([]);
+  const [detailImageTemplatesLoaded, setDetailImageTemplatesLoaded] = useState(false);
   const [detailImageLoading, setDetailImageLoading] = useState(false);
 
   useEffect(() => {
@@ -1232,6 +1241,33 @@ export function XhsShopItemsPage() {
     setDetailImageGroupConfigs({});
     setActiveGroup("product");
     setDetailImageRegenerating(null); // v2.21：重做态一并复位
+    // v2.24：拉公共提示词模板（首次打开才拉 —— 模板是用户级的，与商品无关）
+    if (!detailImageTemplatesLoaded) {
+      void (async () => {
+        try {
+          const page = await fetchPromptTemplates({ pageSize: 100 });
+          setDetailImageTemplates(page.items);
+          // 有默认模板时**预选上**：用户口径是「应选择公共提示词模板」——
+          // 默认不选等于让人自己去找，一致性约束就落不了地（但**不强制**：
+          // 用户清空后仍可走「手输 / 内置默认」，那种情况后端行为不变）。
+          setDetailImageGroupConfigs((current) => {
+            const next = { ...current };
+            for (const key of ["product", "detail"] as const) {
+              const taskType = key === "product" ? "cover" : "image";
+              const fallback = page.items.find((t) => t.is_default && t.task_type === taskType);
+              if (fallback) next[key] = { ...next[key], templateId: fallback.id };
+            }
+            return next;
+          });
+        } catch (error) {
+          message.warning(
+            error instanceof Error ? error.message : "提示词模板加载失败，可继续手写提示词"
+          );
+        } finally {
+          setDetailImageTemplatesLoaded(true);
+        }
+      })();
+    }
     void (async () => {
       if (!selectedAccountId) return;
       try {
@@ -1271,6 +1307,9 @@ export function XhsShopItemsPage() {
       // 目标组没勾本组图时，后端回落到全部已勾图（v2.23 用户口径「参考图列出所有图」）。
       const targetGroup = regenerate?.group || activeGroup;
       const groupSettings: Record<string, { prompt: string; count: number }> = {};
+      // v2.24：组级模板（与 groupSettings **平行**的另一张表 —— 提示词与模板是两件事，
+      // 混在一张表里会让「选了模板又填了提示词」的语义变模糊）。
+      const groupTemplates: Record<string, { template_id: number }> = {};
       for (const tab of detailImageGroupTabs) {
         const picked = detailImageRefs.some((url) => tab.urls.includes(url));
         if (!picked && tab.key !== targetGroup) continue;
@@ -1278,6 +1317,8 @@ export function XhsShopItemsPage() {
           prompt: detailImageGroupConfigs[tab.key]?.prompt || "",
           count: detailImageGroupConfigs[tab.key]?.count ?? 3,
         };
+        const tid = detailImageGroupConfigs[tab.key]?.templateId;
+        if (tid) groupTemplates[tab.key] = { template_id: tid };
       }
       const result = await generateProductDetailImage(
         selectedAccountId,
@@ -1286,7 +1327,9 @@ export function XhsShopItemsPage() {
         detailImageRefs,
         3,
         regenerate,
-        groupSettings
+        groupSettings,
+        undefined,
+        groupTemplates
       );
       setDetailImage(result);
       // v2.18/v2.20：半成功（部分张失败）如实报出来 —— 不能只报「已生成」，
@@ -2369,10 +2412,41 @@ export function XhsShopItemsPage() {
                     )}
                   </div>
 
-                  {/* ③ 提示词 / 补充要求（本组独立） */}
+                  {/* ③ 公共提示词模板（本组独立，v2.24） */}
                   <div>
                     <Text strong style={{ fontSize: 13 }}>
-                      提示词 / 补充要求
+                      提示词模板
+                    </Text>
+                    <Select
+                      style={{ width: "100%", marginTop: 4 }}
+                      allowClear
+                      placeholder="选择公共提示词模板（留空则用手写提示词）"
+                      value={detailImageGroupConfigs[tab.key]?.templateId}
+                      onChange={(value) =>
+                        setDetailImageGroupConfigs((current) => ({
+                          ...current,
+                          [tab.key]: { ...current[tab.key], templateId: value ?? undefined },
+                        }))
+                      }
+                      disabled={detailImageGenerating}
+                      options={detailImageTemplates
+                        .filter((t) => t.task_type === (tab.key === "product" ? "cover" : "image"))
+                        .map((t) => ({
+                          value: t.id,
+                          label: t.is_default ? `${t.name}（默认）` : t.name,
+                        }))}
+                      notFoundContent="还没有模板，可在「笔记工坊 → 提示词模板」新建"
+                    />
+                    <Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 4 }}>
+                      模板在「笔记工坊 → 提示词模板」维护（含一致性约束），选它就按模板出图；
+                      下方「补充要求」会追加在模板末尾。
+                    </Text>
+                  </div>
+
+                  {/* ③b 提示词 / 补充要求（本组独立） */}
+                  <div>
+                    <Text strong style={{ fontSize: 13 }}>
+                      {detailImageGroupConfigs[tab.key]?.templateId ? "补充要求（可留空）" : "提示词 / 补充要求"}
                     </Text>
                     <Input.TextArea
                       style={{ marginTop: 4 }}

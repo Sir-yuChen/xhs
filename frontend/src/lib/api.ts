@@ -1502,7 +1502,12 @@ export async function generateProductDetailImage(
   referenceImageUrls: string[] = [],
   count = 3,
   regenerate?: { group: string; index: number },
-  groupSettings?: Record<string, { prompt?: string; count?: number }>
+  groupSettings?: Record<string, { prompt?: string; count?: number }>,
+  //: v2.24：**公共提示词模板**（用户口径「生成图片时应选择公共提示词模板，保证图片商品的
+  //: 一致性」）。`templateId` 是顶层默认；`groupTemplates` 按组覆盖（主图/详情图各选一个）。
+  //: ⚠️ 优先级：组级 > 顶层 > 手输 prompt > 内置默认（判据只能有一个赢家）。
+  templateId?: number,
+  groupTemplates?: Record<string, { template_id?: number }>
 ): Promise<GenerateDetailImageResult> {
   const response = await http.post<GenerateDetailImageResult>(
     "/xhs/qianfan/generate-detail-image",
@@ -1520,6 +1525,11 @@ export async function generateProductDetailImage(
       ...(regenerate ? { regenerate } : {}),
       // v2.22：每组各自配置（提示词 / 张数）。不传 = 用顶层兜底。
       ...(groupSettings ? { group_settings: groupSettings } : {}),
+      // v2.24：公共提示词模板（选了才传 —— 不传时后端走「手输 > 内置默认」的旧链路）。
+      ...(templateId ? { template_id: templateId } : {}),
+      ...(groupTemplates && Object.keys(groupTemplates).length
+        ? { group_templates: groupTemplates }
+        : {}),
     },
     // ⚠️ v2.18：张数越多耗时越长（**逐张串行请求**，每张上游 timeout 180s）
     // ⇒ 超时按张数放大，否则多图必然在前端先超时（后端还在跑，用户看到假失败）。

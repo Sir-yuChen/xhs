@@ -26,7 +26,6 @@ v2.18 及以前：端点把「商品标题 + 规格名 + 价格」拼成一句�
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 
@@ -138,6 +137,77 @@ def build_item_brief(item: dict[str, Any], skus: list[dict[str, Any]], prompt: s
         ]
     )
     return "\n".join(lines)
+
+
+def render_template_prompt(
+    *,
+    template: Any,
+    modules: list[Any],
+    item: dict[str, Any],
+    skus: list[dict[str, Any]],
+    extra_prompt: str = "",
+) -> str:
+    """把**公共提示词模板**渲染成详情图提示词（v2.24，设计 17 §13.5.4）。
+
+    用户口径「生成AI商品图 没有公共提示模板相关逻辑」—— 此前弹窗的提示词是
+    **用户手输的自由文本**，与项目公共模板系统（`prompt_templates` /
+    `prompt_modules` / `prompt_renderer`）没有任何关系；于是「在模板页精心调好的
+    风格约束」对商品图出图**完全不起作用**，用户得在两个页面各维护一份。
+
+    拼接顺序**完全交给** `prompt_renderer.render_prompt`（§5.1 唯一实现）：
+    基础指令 + Σ(引用模块) + 骨架（商品字段经插槽注入）。本函数**只做两件事**：
+    ① 把商品 / 规格整理成 `product` 映射喂给渲染器；② 拼上出图约束与用户补充要求。
+
+    渲染失败（骨架里有未知插槽）**原样抛 `PromptRenderError`** —— 交给端点映射
+    成 400。⚠️ **不回落**：选了模板却静默用默认提示词，等于让用户以为模板生效了。
+    """
+    from backend.app.services import prompt_renderer
+
+    # 商品映射：键名必须与 `prompt_renderer.PRODUCT_FIELD_SLOTS` **严格一致**
+    # （即 `product_note_service.PRODUCT_FIELDS` + `price_text`）——
+    # ⚠️ 自造键（如 `item_title`）会被渲染器当**未知插槽**直接 400，
+    # 而合法槽位清单由渲染器给出，这里不许另立一套名字（DEF-044）。
+    product: dict[str, Any] = {}
+    for field in prompt_renderer.PRODUCT_FIELD_SLOTS:
+        raw = item.get(field)
+        if raw not in (None, ""):
+            product[field] = raw
+    # 商品名在台账里叫 `title`（真实字段名），模板用 `{title}` 引用
+    if not product.get("title"):
+        product["title"] = str(item.get("title") or "").strip()
+
+    skeleton = str(getattr(template, "prompt_skeleton", "") or "")
+    body = prompt_renderer.render_prompt(skeleton=skeleton, modules=modules, product=product)
+
+    parts = [body.strip()] if body.strip() else []
+    # 出图约束（公共库，v2.21）：**只补模板没覆盖到的那部分**。
+    #
+    # ⚠️ **为什么要逐条判重**：种子模板本身已引用「一致性锁 / 平台合规」两个模块，
+    # 若这里再无脑追加 `requirement_block()`，同一组约束会在 prompt 里出现**两遍**
+    # （真机实测：一致性三条与合规一条各重复一次）。重复不是「更保险」——
+    # 它让 prompt 变长，且同一约束出现两种措辞时模型会各取一半。
+    #
+    # ⚠️ 比对必须**归一化**，三层差异都要抹掉（真机逐层实测出来的）：
+    # ① 行首 `- ` 前缀（库常量有、模块正文没有）；
+    # ② 行尾标点（库 `；`、模块 `。`）；
+    # ③ **指代词差异**（库「**图中**不要出现文字水印」、种子里写「**画面中**不要出现…」）
+    #    —— 措辞几乎一样但逐字不等 ⇒ 仍会重复。
+    # 所以判据取「去掉装饰 + 去掉常见指代词」后的核心串比对。
+    _DECOR = ("- ", "；", "。", ";", ".", " ", "图中", "画面中", "画面上")
+
+    def _bare(text: str) -> str:
+        out = text
+        for token in _DECOR:
+            out = out.replace(token, "")
+        return out
+
+    body_bare = _bare(body)
+    missing = [line for line in image_prompt.requirement_lines(image_prompt.USE_DETAIL) if _bare(line) not in body_bare]
+    if missing:
+        parts.append("\n".join(("出图要求：", *missing)))
+    if extra_prompt.strip():
+        parts.append(f"【补充要求】{extra_prompt.strip()}")
+    return "\n\n".join(part for part in parts if part.strip())
 
 
 def refine_prompt(

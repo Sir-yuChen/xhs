@@ -41,6 +41,9 @@ SYSTEM_SETTINGS_FILENAME = "system_settings.json"
 #: LLM 网关预警规则初始化数据文件名（设计 17 §4.5，2026-10-02）
 GATEWAY_ALERTS_FILENAME = "llm_gateway_alerts.json"
 
+#: 内置提示词模板 / 模块初始化数据文件名（设计 17 §13.5.4，v2.24）
+PROMPT_TEMPLATES_FILENAME = "prompt_templates.json"
+
 
 def _project_root() -> Path:
     """与 `core/config.py::_load_yaml_config()` 同一口径（frozen 下 = `_internal/`）。"""
@@ -354,3 +357,94 @@ def load_initial_gateway_alerts() -> list[dict[str, Any]]:
             normalized.append(item)
     logger.info("initial_data: 载入 %s 条预警规则初始化数据", len(normalized))
     return normalized
+
+
+def load_initial_prompt_templates() -> dict[str, list[dict[str, Any]]]:
+    """内置提示词模板 / 模块初始化数据（v2.24，设计 17 §13.5.4）。
+
+    返回 `{"modules": [...], "templates": [...]}`；任何问题 ⇒ warning + 可用部分
+    （与 `load_initial_scheduled_jobs` 同构：坏种子不致命，但不能静默）。
+
+    ## 为什么要往这里放「一致性约束」
+
+    用户口径「之前你把一致性抽取成公共模板了，但是未使用，在生成图片时应选择公共
+    提示词模板，保证图片商品的一致性」——
+
+    v2.21 把防漂移三条抽进了 `services/image_prompt.py`，但那是**代码常量**：
+    用户在模板页看不到、改不了，且弹窗里**选不到任何模板**（`prompt_templates`
+    表是空的）⇒ 「公共模板」这件事在出图链路上等于没发生。
+
+    本种子把同一组约束**放进模板模块**（`category="style"`），于是：
+    ① 出图时下拉里**真的有模板可选**，默认就选中它；
+    ② 用户能按自己的品类调措辞，改的是库里的模板行，不改代码。
+
+    ⚠️ 与 `image_prompt.py` 的关系**不是二选一**：那份常量仍由
+    `requirement_block()` 作为**兜底约束**追加（没选模板时也要有硬要求），
+    两者互补 —— 模板管「风格与一致性」，常量管「成图底线」。
+    """
+    payload = _load_payload(PROMPT_TEMPLATES_FILENAME)
+    if payload is None:
+        return {"modules": [], "templates": []}
+    if not isinstance(payload, dict):
+        logger.warning("initial_data: %s 顶层不是对象，已忽略", PROMPT_TEMPLATES_FILENAME)
+        return {"modules": [], "templates": []}
+
+    # 惰性 import：`core` 层不在模块级依赖 `models`（避免 core ↔ models 的导入环，
+    # 与 `_normalize_gateway_alert` 取 api 常量同一纪律）。
+    from backend.app.models.prompt import PROMPT_TASK_TYPES
+
+    modules: list[dict[str, Any]] = []
+    for raw in payload.get("modules") or []:
+        if not isinstance(raw, dict):
+            logger.warning("initial_data: 提示词模块条目不是对象，已跳过")
+            continue
+        name = str(raw.get("name") or "").strip()
+        content = str(raw.get("content") or "").strip()
+        if not name or not content:
+            logger.warning("initial_data: 提示词模块缺 name/content，已跳过：%r", name)
+            continue
+        modules.append(
+            {
+                "name": name,
+                "category": str(raw.get("category") or "style").strip() or "style",
+                "content": content,
+                "sort_order": int(raw.get("sort_order") or 0),
+            }
+        )
+
+    templates: list[dict[str, Any]] = []
+    for raw in payload.get("templates") or []:
+        if not isinstance(raw, dict):
+            logger.warning("initial_data: 提示词模板条目不是对象，已跳过")
+            continue
+        name = str(raw.get("name") or "").strip()
+        task_type = str(raw.get("task_type") or "").strip()
+        skeleton = str(raw.get("prompt_skeleton") or "").strip()
+        if not name or not skeleton:
+            logger.warning("initial_data: 提示词模板缺 name/prompt_skeleton，已跳过：%r", name)
+            continue
+        # task_type 白名单**从模型常量取**，不在这里重抄一份（漂移即缺陷）
+        if task_type not in PROMPT_TASK_TYPES:
+            logger.warning(
+                "initial_data: 提示词模板 task_type=%r 不在白名单 %s，已跳过该条",
+                task_type,
+                list(PROMPT_TASK_TYPES),
+            )
+            continue
+        names = raw.get("module_names") or []
+        templates.append(
+            {
+                "name": name,
+                "task_type": task_type,
+                "prompt_skeleton": skeleton,
+                "is_default": bool(raw.get("is_default")),
+                "module_names": [str(n).strip() for n in names if str(n).strip()],
+            }
+        )
+
+    logger.info(
+        "initial_data: 载入 %s 个提示词模块 / %s 张提示词模板初始化数据",
+        len(modules),
+        len(templates),
+    )
+    return {"modules": modules, "templates": templates}

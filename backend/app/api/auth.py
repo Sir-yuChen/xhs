@@ -90,6 +90,18 @@ def register(
         db.rollback()
         logger.warning("register: seed runtime settings for user %s failed: %s", user.id, exc)
 
+    # 设计 17 §13.5.4（v2.24）：内置提示词模板 / 模块同样**按用户各持一份** ⇒ 注册即播种。
+    # ⚠️ 少了这一步，新用户第一次打开「生成 AI 商品图」仍然**选不到任何模板**
+    # （启动播种只覆盖「启动时已存在的用户」）—— 那正是本轮要修的缺口。
+    try:
+        from backend.app.api.llm_prompts import seed_builtin_prompt_templates
+
+        seed_builtin_prompt_templates(db, user_id=user.id)
+        db.commit()
+    except Exception as exc:  # noqa: BLE001 - 注册不被子系统问题拖死
+        db.rollback()
+        logger.warning("register: seed prompt templates for user %s failed: %s", user.id, exc)
+
     return _token_response(user)
 
 
