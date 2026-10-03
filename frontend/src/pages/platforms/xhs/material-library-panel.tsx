@@ -215,7 +215,11 @@ function MaterialThumb({
         style={{
           width: "100%",
           height: "100%",
-          objectFit: "cover",
+          // v2.29.6：**`contain` 而不是 `cover`**（用户口径「只缩放不裁切」）。
+          // `cover` 会为填满正方形格子而**裁掉图片边缘**（竖图裁上下、横图裁左右）——
+          // 后端已经改成等比缩放了，前端再裁一次就是**双重裁切**，
+          // 且商品主体常在边缘（被切掉）⇒ 完整显示优先，留白可接受。
+          objectFit: "contain",
           display: "block",
           cursor: previewUrl ? "zoom-in" : "default",
         }}
