@@ -693,6 +693,12 @@ def _builtin_seed_defaults() -> dict[str, dict[str, Any]]:
             "cron": _cron_every_n_hours(hours("xhs_shop_goods_sync_interval_hours", 6)),
             "status": "active" if bool(getattr(settings, "xhs_shop_goods_sync_enabled", False)) else "paused",
         },
+        # 2026-10-03 M2 切片 2（设计 17 §13.9）：两个指标快照采集。
+        # ⚠️ **无开关**（兜底恒 `active`）：采集是纯本地零平台请求，没有「该不该跑」
+        # 的成本问题；关掉它只会让趋势断档。真要停，用户在任务中心暂停即可。
+        # ⚠️ 分钟错开（5 / 35）见 `job_registry` 的同一注释（减少写锁竞争，DEF-085）。
+        "system.note_metrics_collect": {"cron": "0 5 * * * *", "status": "active"},
+        "system.shop_metrics_collect": {"cron": "0 35 * * * *", "status": "active"},
     }
 
 

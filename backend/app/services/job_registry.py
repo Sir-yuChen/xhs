@@ -84,6 +84,10 @@ def _build_registry() -> dict[str, JobSpec]:
     from backend.app.services import scheduler_service
     from backend.app.services.auto_ops_service import run_keyword_pipeline
     from backend.app.services.llm_gateway_monitor_service import run_llm_gateway_monitor_once
+    from backend.app.services.metric_scheduler_service import (
+        run_note_metrics_collect_once,
+        run_shop_metrics_collect_once,
+    )
     from backend.app.services.note_queue_service import cleanup_queue_records
     from backend.app.services.shop_health_service import run_shop_health_checks_once
 
@@ -185,6 +189,34 @@ def _build_registry() -> dict[str, JobSpec]:
             params_editable=(),
             default_trigger_type="cron",
             default_cron="0 0 7 * * *",
+        ),
+        JobSpec(
+            # 2026-10-03 M2 数据仪表盘切片 2（设计 17 §13.9）：笔记指标快照采集。
+            # ⚠️ **纯本地零平台请求**（数据源 = 已落库的 `notes.raw_json`），
+            # 故频率不受平台限流约束；但仍**不调高到每分钟** —— 写锁是共享资源，
+            # 采集频率只要不低于源数据的更新频率即可（笔记同步默认 6 小时一次）。
+            key="system.note_metrics_collect",
+            name="笔记指标快照采集",
+            func=run_note_metrics_collect_once,
+            builtin=True,
+            user_scoped=True,
+            params_editable=(),
+            default_trigger_type="cron",
+            # 每小时第 5 分。**避开整点**：整点是同步/发布/巡检的集中时段，
+            # 错峰减少 SQLite 写锁竞争（DEF-085 的直接教训）。
+            default_cron="0 5 * * * *",
+        ),
+        JobSpec(
+            # 2026-10-03 M2 数据仪表盘切片 2（设计 17 §13.9）：商品指标快照采集。
+            # ⚠️ 与笔记采集**错开 30 分钟**（第 35 分），避免两个采集同时抢写锁。
+            key="system.shop_metrics_collect",
+            name="店铺商品指标快照采集",
+            func=run_shop_metrics_collect_once,
+            builtin=True,
+            user_scoped=True,
+            params_editable=(),
+            default_trigger_type="cron",
+            default_cron="0 35 * * * *",
         ),
         JobSpec(
             key="auto_ops.keyword_pipeline",

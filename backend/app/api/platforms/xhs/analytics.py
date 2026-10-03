@@ -22,6 +22,14 @@ from backend.app.services.note_metrics_service import (
     stat_date_of,
     trend_series,
 )
+#: 商品指标侧（M2 切片 2）—— **别名导入**：两侧的 `collect_snapshots` /
+#: `trend_series` / `stat_date_of` 同名（刻意同形，见 `shop_metrics_service` 的
+#: 模块 docstring），直接 import 会覆盖笔记侧的名字。
+from backend.app.services.shop_metrics_service import (
+    collect_snapshots as collect_shop_snapshots,
+    trend_series as shop_trend_series,
+)
+from backend.app.services.sqlite_retry import LockRetryExhausted
 from backend.app.models import AiDraft, KeywordGroup, MonitoringTarget, Note, NoteComment, NoteTopic, PlatformAccount, PublishJob, Topic, User
 
 router = APIRouter(prefix="/xhs/analytics", tags=["xhs-analytics"])
@@ -350,7 +358,19 @@ def collect_note_metrics(
     ⚠️ **不回填历史**：raw_json 只有最后一版，拿它当「历史某天」就是编造数据。
     趋势从本次采集起逐日积累。
     """
-    written = collect_snapshots(db, user_id=current_user.id)
+    # ⚠️ 撞写锁用尽 ⇒ **503（可重试）**，不是 500（服务端内部错误）。
+    # 多用户同分钟并发采集时写锁竞争是**可预期**的；报 500 会让用户以为功能坏了，
+    # 也会把「瞬时竞争」算进服务端错误率（口径污染）。前端/用户看到 503 应稍后重试。
+    try:
+        written = collect_snapshots(db, user_id=current_user.id)
+    except LockRetryExhausted as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "SNAPSHOT_DB_BUSY",
+                "message": "数据库繁忙（多个采集任务并发），请稍后重试",
+            },
+        ) from exc
     return {
         "stat_date": stat_date_of(shanghai_now()),
         "collected": written,
@@ -377,6 +397,69 @@ def note_metrics_trend(
         "platform": "xhs",
         "days": days,
         "note_pk": note_pk,
+        "series": series,
+        "points": len(series),
+    }
+
+
+@router.post("/shop-metrics/collect")
+def collect_shop_metrics(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """**采集当日商品指标快照**（设计 17 §13.9.2，M2 方向 3 切片 2）。
+
+    把该用户全部商品的交易侧指标（库存/销量/近 30 天销量/价格区间）按**当天**
+    落一条快照。同日重复调用**覆盖**（唯一键 + upsert），不是追加。
+
+    ⚠️ **纯本地操作、零平台请求**：数据源是 `shop_products`（同步时就已落库）
+    —— 随时可调，不消耗平台额度、不触发风控。
+
+    ⚠️ **不回填历史**：`shop_products` 只有「最后一次同步的值」，拿它当
+    「历史某天」就是编造数据（硬约束⑤）。趋势从本次采集起逐日积累。
+    """
+    # ⚠️ 同笔记侧：撞锁用尽 ⇒ 503 可重试，不是 500。
+    try:
+        written = collect_shop_snapshots(db, user_id=current_user.id)
+    except LockRetryExhausted as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "SNAPSHOT_DB_BUSY",
+                "message": "数据库繁忙（多个采集任务并发），请稍后重试",
+            },
+        ) from exc
+    return {
+        "stat_date": stat_date_of(shanghai_now()),
+        "collected": written,
+    }
+
+
+@router.get("/shop-metrics/trend")
+def shop_metrics_trend(
+    days: int = Query(30, ge=0, le=365),
+    product_pk: Optional[int] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """**商品指标趋势**（按日聚合；设计 17 §13.9.2，M2 方向 3 切片 2）。
+
+    - `days`：取最近 N 天（默认 30；`0` = 不限）。
+    - `product_pk`：只看某个商品（不传 = 该用户全部商品的合计）。
+
+    ⚠️ **价格取区间最值**（`min(price_min_fen)` ~ `max(price_max_fen)`），
+    不求和 —— 价格求和没有业务含义（同 `shop_metrics_service.trend_series`）。
+
+    ⚠️ **只返回有快照的天**，不补零（与笔记侧同口径）—— 缺失的天用 0 填充会把
+    「那天没采」画成「那天销量掉到 0」（伪造数据，违反缺值口径）。
+    """
+    series = shop_trend_series(
+        db, user_id=current_user.id, days=days, product_pk=product_pk
+    )
+    return {
+        "platform": "xhs",
+        "days": days,
+        "product_pk": product_pk,
         "series": series,
         "points": len(series),
     }

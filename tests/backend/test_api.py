@@ -6338,9 +6338,9 @@ def test_schedule_status_reports_scheduler_state_and_counts(tmp_path):
         assert payload["running"] is False
         assert payload["timezone"] == "Asia/Shanghai"
         assert payload["jobs"] == []
-        # 注册播种 10 行（全 active）+ 本测试 2 行（1 active + 1 paused）
-        assert payload["stats"]["total"] == 12
-        assert payload["stats"]["active"] == 11
+        # 注册播种 12 行（全 active）+ 本测试 2 行（1 active + 1 paused）
+        assert payload["stats"]["total"] == 14
+        assert payload["stats"]["active"] == 13
         assert payload["stats"]["paused"] == 1
         assert payload["stats"]["completed"] == 0
     finally:

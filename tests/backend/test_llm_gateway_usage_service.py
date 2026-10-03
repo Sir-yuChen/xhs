@@ -53,6 +53,7 @@ class _ModelConfigStub:
 
 
 from backend.app.services import llm_gateway_usage_service as usage
+from backend.app.services import sqlite_retry
 
 
 @pytest.fixture(autouse=True)
@@ -482,3 +483,149 @@ def test_function_constants_match_contract():
         usage.FUNCTION_POLISH,
         usage.FUNCTION_DESCRIBE,
     ) == ("rewrite", "generate", "title", "tag", "polish", "describe")
+
+
+# ---------------------------------------------------------------------------
+# 6. 撞锁重试（DEF-085）
+# ---------------------------------------------------------------------------
+
+def _operational_error(message: str):
+    """构造一个 SQLAlchemy `OperationalError`（真类，不是替身）。"""
+    from sqlalchemy.exc import OperationalError
+
+    return OperationalError("INSERT INTO llm_gateway_usage_logs", {}, Exception(message))
+
+
+def test_record_usage_retries_on_lock_then_succeeds(monkeypatch, db_factory):
+    """撞锁**重试**，第 2 次成功 ⇒ 返回 True 且台账**真的有一行**。
+
+    这是 DEF-085 的核心判据：修前「一次撞锁即静默丢台账」，修后必须落库。
+    仅断言 `ok is True` 不够 —— 变异「把重试删掉但仍返回 True」会假绿，
+    故同时断言库里的行数与真实的下游 Session 调用次数。
+    """
+    real_factory = db_factory  # autouse 夹具已把它打进 usage.SessionLocal
+    with real_factory() as db:
+        user = _seed_user(db)
+        gateway = _seed_gateway(db, user, base_url="https://api.example.test/v1")
+        db.commit()
+        user_id, gateway_id = user.id, gateway.id
+
+    commit_calls = {"n": 0}
+
+    class FlakySession:
+        """第 1 次 commit 抛锁异常（模拟并发写锁竞争），第 2 次放行。"""
+
+        def __init__(self, session):
+            self._session = session
+
+        def add(self, obj):
+            return self._session.add(obj)
+
+        def commit(self):
+            commit_calls["n"] += 1
+            if commit_calls["n"] == 1:
+                self._session.rollback()
+                raise _operational_error("database is locked")
+            return self._session.commit()
+
+        def close(self):
+            return self._session.close()
+
+    monkeypatch.setattr(usage, "SessionLocal", lambda: FlakySession(real_factory()))
+    monkeypatch.setattr(sqlite_retry.time, "sleep", lambda _s: None)
+
+    ok = usage.record_usage(
+        user_id=user_id, gateway_id=gateway_id, platform="xhs",
+        function=usage.FUNCTION_GENERATE, model_name="m",
+        prompt_tokens=1, completion_tokens=1, latency_ms=1,
+        status=usage.STATUS_SUCCESS,
+    )
+
+    assert ok is True
+    assert commit_calls["n"] == 2, "必须真的重试了一次再成功"
+
+    with real_factory() as db:
+        rows = db.scalars(select(LlmGatewayUsageLog)).all()
+    assert len(rows) == 1, "重试成功后台账必须真的落库（不能只返回 True）"
+
+
+def test_record_usage_gives_up_after_retries_and_still_returns_false(monkeypatch, db_factory):
+    """锁一直不放 ⇒ 重试用尽后返回 False，且**不抛穿**（DEF-048 不变）。"""
+    attempts = {"n": 0}
+
+    class AlwaysLocked:
+        def add(self, obj):
+            pass
+
+        def commit(self):
+            attempts["n"] += 1
+            raise _operational_error("database is locked")
+
+        def rollback(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(usage, "SessionLocal", lambda: AlwaysLocked())
+    monkeypatch.setattr(sqlite_retry.time, "sleep", lambda _s: None)
+
+    ok = usage.record_usage(
+        user_id=1, gateway_id=1, platform="xhs", function=usage.FUNCTION_GENERATE,
+        model_name="m", prompt_tokens=1, completion_tokens=1, latency_ms=1,
+        status=usage.STATUS_SUCCESS,
+    )
+
+    assert ok is False
+    assert attempts["n"] == sqlite_retry.RETRY_ATTEMPTS, "重试次数必须等于常量，不多不少"
+
+
+def test_record_usage_does_not_retry_non_lock_errors(monkeypatch):
+    """确定性错误（no such table）**不重试** —— 重试多少次都一样，只浪费业务线程。"""
+    attempts = {"n": 0}
+
+    class BoomSession:
+        def add(self, obj):
+            pass
+
+        def commit(self):
+            attempts["n"] += 1
+            raise _operational_error("no such table: llm_gateway_usage_logs")
+
+        def rollback(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(usage, "SessionLocal", lambda: BoomSession())
+    monkeypatch.setattr(sqlite_retry.time, "sleep", lambda _s: None)
+
+    ok = usage.record_usage(
+        user_id=1, gateway_id=1, platform="xhs", function=usage.FUNCTION_GENERATE,
+        model_name="m", prompt_tokens=1, completion_tokens=1, latency_ms=1,
+        status=usage.STATUS_SUCCESS,
+    )
+
+    assert ok is False
+    assert attempts["n"] == 1, "非锁类错误必须一次即止（不得空转重试）"
+
+
+@pytest.mark.parametrize(
+    "message, expected",
+    [
+        ("database is locked", True),
+        ("sqlite3.OperationalError: database is locked", True),
+        ("no such table: foo", False),
+        ("UNIQUE constraint failed: x.y", False),
+        ("disk I/O error", False),
+    ],
+)
+def test_is_lock_error_only_matches_lock_contention(message, expected):
+    """判据必须**只认锁竞争**：把 `no such table` 也当锁 ⇒ 确定性错误被无谓重试。"""
+    assert sqlite_retry.is_lock_error(_operational_error(message)) is expected
+
+
+def test_is_lock_error_rejects_non_operational_errors():
+    """非 SQLAlchemy 异常一律不重试（例如业务层 ValueError）。"""
+    assert sqlite_retry.is_lock_error(ValueError("database is locked")) is False

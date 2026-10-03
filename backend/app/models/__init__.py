@@ -21,6 +21,7 @@ from backend.app.models.monitoring import (
     MonitoringSnapshot,
     MonitoringTarget,
     NoteMetricSnapshot,
+    ShopMetricSnapshot,
 )
 from backend.app.models.note import Note, NoteAsset, NoteComment, NoteTopic, Topic
 from backend.app.models.notification import Notification

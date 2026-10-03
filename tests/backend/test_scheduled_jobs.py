@@ -124,8 +124,8 @@ def _user_of(token: str) -> int:
 # --------------------------------------------------------------------------- #
 # 注册表白名单
 # --------------------------------------------------------------------------- #
-def test_registry_has_exactly_eleven_entries():
-    """注册表全量 11 项（10 系统 + 1 业务管线）；键集合钉死 —— 新增任务类型 = 发版。
+def test_registry_has_exactly_thirteen_entries():
+    """注册表全量 13 项（12 系统 + 1 业务管线）；键集合钉死 —— 新增任务类型 = 发版。
 
     §44（2026-09-30）：「账号笔记同步」的混合双源拆成两个独立任务 ⇒ 新增
     `system.goods_note_sync`（**商品笔记**，ark 源）。它与 `system.note_sync`（普通笔记，
@@ -135,7 +135,7 @@ def test_registry_has_exactly_eleven_entries():
     from backend.app.services.job_registry import job_registry
 
     registry = job_registry()
-    assert len(registry) == 11
+    assert len(registry) == 13
     assert set(registry) == {
         "system.due_publish",
         "system.monitoring_refresh",
@@ -147,6 +147,8 @@ def test_registry_has_exactly_eleven_entries():
         "system.goods_note_sync",
         "system.queue_record_cleanup",
         "system.llm_gateway_monitor",
+        "system.note_metrics_collect",
+        "system.shop_metrics_collect",
         "auto_ops.keyword_pipeline",
     }
 
@@ -417,7 +419,7 @@ def test_schedule_status_counts_only_my_rows(tmp_path, monkeypatch):
     try:
         owner = _register("status-owner")
         intruder = _register("status-intruder")
-        # 主人有 10 个内置行；入侵者先手动建一个自己的
+        # 主人有 12 个内置行；入侵者先手动建一个自己的
         _seed_builtin(SessionLocal, owner)
         response = client.post(
             "/api/schedule/jobs",
@@ -432,9 +434,9 @@ def test_schedule_status_counts_only_my_rows(tmp_path, monkeypatch):
 
         owner_stats = client.get("/api/schedule/status", headers=_auth(owner)).json()["stats"]
         intruder_stats = client.get("/api/schedule/status", headers=_auth(intruder)).json()["stats"]
-        assert owner_stats["total"] == 10
-        # 入侵者注册时也播种了 10 行 + 自己新建 1 行 = 11（只见自己的，不见主人的）
-        assert intruder_stats["total"] == 11, "入侵者只应看到自己的行"
+        assert owner_stats["total"] == 12
+        # 入侵者注册时也播种了 12 行 + 自己新建 1 行 = 13（只见自己的，不见主人的）
+        assert intruder_stats["total"] == 13, "入侵者只应看到自己的行"
     finally:
         app.dependency_overrides.clear()
 
@@ -463,7 +465,7 @@ def test_list_targets_returns_registry_with_existing_counts(tmp_path):
         assert response.status_code == 200, response.text
         items = response.json()["items"]
         keys = {item["job_key"] for item in items}
-        # 注册表全量都在（含 10 个内置 + 1 个普通）
+        # 注册表全量都在（含 12 个内置 + 1 个普通）
         assert keys == set(job_registry().keys())
         assert len(items) == len(job_registry())
 
@@ -1594,7 +1596,7 @@ def test_ensure_builtin_jobs_seeds_from_application_initial_data(tmp_path, monke
         second_user = _make_user(SessionLocal, "seed-second")
         db = SessionLocal()
         first = ensure_builtin_jobs(db)
-        assert len(first) == 20, "两个用户 × 10 个内置目标"
+        assert len(first) == 24, "两个用户 × 12 个内置目标"
         second = ensure_builtin_jobs(db)
         assert second == [], "幂等：已存在的 (user, job_key) 不插行"
         rows = list(db.scalars(select(ScheduledJob).where(ScheduledJob.is_builtin.is_(True))))
@@ -1642,7 +1644,7 @@ def test_register_seeds_builtin_jobs_for_the_new_user(tmp_path, monkeypatch):
             ).all()
             assert {row.job_key for row in rows} == {
                 row["job_key"] for row in load_initial_scheduled_jobs()
-            }, "注册完打开任务中心就应有这 7 条"
+            }, "注册完打开任务中心就应有这 12 条"
         finally:
             db.close()
 
@@ -1683,10 +1685,10 @@ def test_sync_jobs_from_db_registers_active_rows_only(tmp_path, monkeypatch):
         scheduler = build_scheduler()
         stats = sync_jobs_from_db(scheduler)
         ids = {job.id for job in scheduler.get_jobs()}
-        # 活跃行 = 测试行 1 + 应用初始化数据播种的 10 行（R24 起全 active）；
-        # 其中 `system.no_traffic_cleanup` 是 manual 档、**不参与调度装配** ⇒ 注册 10。
-        assert stats["registered"] == 10
-        assert len(ids) == 10
+        # 活跃行 = 测试行 1 + 应用初始化数据播种的 12 行（R24 起全 active）；
+        # 其中 `system.no_traffic_cleanup` 是 manual 档、**不参与调度装配** ⇒ 注册 12。
+        assert stats["registered"] == 12
+        assert len(ids) == 12
         assert all(job_id.startswith("job_") for job_id in ids)
     finally:
         app.dependency_overrides.clear()

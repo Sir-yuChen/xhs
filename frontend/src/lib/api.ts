@@ -322,6 +322,69 @@ export async function fetchXhsCommentInsights(): Promise<AnalyticsCommentInsight
   return response.data;
 }
 
+// ---- 指标日快照（M2 数据仪表盘，设计 17 §13.5 / §13.9）----------------------
+// ⚠️ 采集端点**纯本地零平台请求**（数据源是已落库的笔记/商品行），可随时调用。
+
+/** 快照采集回执：`stat_date` 是被采集的统计日，`collected` 是落库行数。 */
+export type MetricsCollectResult = {
+  stat_date: string;
+  collected: number;
+};
+
+/** 笔记指标趋势的按日聚合点（**只含有快照的天**，不补零）。 */
+export type NoteMetricsTrendPoint = {
+  stat_date: string;
+  likes: number;
+  collects: number;
+  comments: number;
+  shares: number;
+  views: number;
+  engagement: number;
+};
+
+/** 商品指标趋势的按日聚合点（价格是**区间最值**，不是求和）。 */
+export type ShopMetricsTrendPoint = {
+  stat_date: string;
+  stock: number;
+  sales: number;
+  sales_30d: number;
+  price_min_fen: number;
+  price_max_fen: number;
+  cart_count: number;
+};
+
+export async function collectNoteMetrics(): Promise<MetricsCollectResult> {
+  const response = await http.post<MetricsCollectResult>("/xhs/analytics/metrics/collect");
+  return response.data;
+}
+
+export async function fetchNoteMetricsTrend(params: {
+  days?: number;
+  note_pk?: number;
+} = {}): Promise<NoteMetricsTrendPoint[]> {
+  const response = await http.get<{ series: NoteMetricsTrendPoint[] }>(
+    "/xhs/analytics/metrics/trend",
+    { params }
+  );
+  return response.data.series;
+}
+
+export async function collectShopMetrics(): Promise<MetricsCollectResult> {
+  const response = await http.post<MetricsCollectResult>("/xhs/analytics/shop-metrics/collect");
+  return response.data;
+}
+
+export async function fetchShopMetricsTrend(params: {
+  days?: number;
+  product_pk?: number;
+} = {}): Promise<ShopMetricsTrendPoint[]> {
+  const response = await http.get<{ series: ShopMetricsTrendPoint[] }>(
+    "/xhs/analytics/shop-metrics/trend",
+    { params }
+  );
+  return response.data.series;
+}
+
 export async function createXhsAnalyticsReport(
   payload: AnalyticsReportPayload = { format: "json" }
 ): Promise<AnalyticsReportResponse> {

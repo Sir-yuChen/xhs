@@ -36,6 +36,15 @@ from sqlalchemy.orm import Session
 from backend.app.core.time import shanghai_now
 from backend.app.models.note import Note
 from backend.app.models.monitoring import NoteMetricSnapshot
+from backend.app.services.sqlite_retry import retry_on_lock
+
+#: 每批写入行数。实测 3623 篇逐行 execute ≈ 6 秒持锁 ⇒ 撞锁概率高；
+#: 200 行/批把持锁切成毫秒级片段（3623 篇 = 19 批，总耗时不变但窗口小得多）。
+#: 取 200（不是 5000）：批越大单批持锁越久、越容易在并发下抢不到锁（实测 5 路
+#: 并发时 500 行/批仍会撞到重试用尽）；同时批太小又等于没批（退回逐行 execute
+#: 正是 DEF-085 里持锁 6 秒的原因）。⚠️ SQLite 变量上限 32766，每行 10 参 ⇒ 200 行
+#: = 2000 个参数，安全。
+_SNAPSHOT_BATCH = 200
 
 #: 指标 → `raw_json` 里的候选键（**顺序即优先级**，见模块 docstring）。
 #: `views` 是 v2.24 补的（原缺口）；其余四项沿用一期口径，名字一字未改。
@@ -162,36 +171,66 @@ def collect_snapshots(db: Session, *, user_id: int, stat_date: str | None = None
         )
     ).all()
 
-    written = 0
+    rows = []
     for note in notes:
         metrics = note_metrics(note)
-        statement = sqlite_insert(NoteMetricSnapshot).values(
-            user_id=note.user_id,
-            note_pk=note.id,
-            stat_date=day,
-            likes=metrics["likes"],
-            collects=metrics["collects"],
-            comments=metrics["comments"],
-            shares=metrics["shares"],
-            views=metrics["views"],
-            engagement=metrics["engagement"],
+        rows.append(
+            {
+                "user_id": note.user_id,
+                "note_pk": note.id,
+                "stat_date": day,
+                "likes": metrics["likes"],
+                "collects": metrics["collects"],
+                "comments": metrics["comments"],
+                "shares": metrics["shares"],
+                "views": metrics["views"],
+                "engagement": metrics["engagement"],
+            }
         )
-        # 冲突 ⇒ 用新值覆盖（同日取最新；见函数 docstring 的覆盖语义）。
-        statement = statement.on_conflict_do_update(
+    if not rows:
+        return 0
+
+    # ⚠️ **批量写 + 撞锁重试**（DEF-085 的另一处同型缺陷，2026-10-04 实测）：
+    #
+    # 原实现**逐行 `execute()`**：3623 篇 = 3623 条 INSERT，持写锁约 6 秒。
+    # 而定时任务是**每个用户一个 job**（DEF-066 行主隔离）⇒ 多用户在**同一分钟**
+    # 并发采集，持锁久的那一个必然与别人互撞。实测 17 个用户的采集任务在
+    # `00:05:00~00:05:06` 交错执行，唯一有数据的 user 2（3623 篇）**失败**：
+    #   `OperationalError: database is locked [INSERT INTO note_metric_snapshots ...]`
+    # 其它用户 `collected: 0`（没有数据）反而「成功」—— 也就是说**数据越多越容易失败**，
+    # 这是最坏的失效方向（快照的价值恰恰在于有数据的账号）。
+    #
+    # 两条修法并用：
+    # ① **每批一次 executemany**（`_SNAPSHOT_BATCH` 行/批）：持锁时间从「秒级」降到
+    #    「毫秒级」，从源头减少窗口；
+    # ② `retry_on_lock` 兜住残余的瞬时竞争（别的链路正好在提交）。
+    #
+    # ⚠️ **语义零变化**：仍是 `ON CONFLICT DO UPDATE`（同日覆盖、不是追加），
+    # 只是把「逐行 execute」换成「批量 execute」—— SQL 逐字相同。
+    written = 0
+    for start in range(0, len(rows), _SNAPSHOT_BATCH):
+        chunk = rows[start : start + _SNAPSHOT_BATCH]
+        batch = sqlite_insert(NoteMetricSnapshot).values(chunk)
+        batch = batch.on_conflict_do_update(
             index_elements=["note_pk", "stat_date"],
             set_={
-                "likes": statement.excluded.likes,
-                "collects": statement.excluded.collects,
-                "comments": statement.excluded.comments,
-                "shares": statement.excluded.shares,
-                "views": statement.excluded.views,
-                "engagement": statement.excluded.engagement,
+                "likes": batch.excluded.likes,
+                "collects": batch.excluded.collects,
+                "comments": batch.excluded.comments,
+                "shares": batch.excluded.shares,
+                "views": batch.excluded.views,
+                "engagement": batch.excluded.engagement,
             },
         )
-        db.execute(statement)
-        written += 1
+        retry_on_lock(
+            lambda b=batch: db.execute(b),
+            what=f"笔记指标快照采集（user_id={user_id}，第 {start // _SNAPSHOT_BATCH + 1} 批）",
+        )
+        written += len(chunk)
 
-    db.commit()
+    retry_on_lock(
+        db.commit, what=f"笔记指标快照提交（user_id={user_id}）"
+    )
     return written
 
 

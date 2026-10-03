@@ -87,3 +87,59 @@ class NoteMetricSnapshot(Base):
     #: 四项互动之和（冗余；避免每次查询都写 `likes+collects+comments+shares`）。
     engagement: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now)
+
+
+class ShopMetricSnapshot(Base):
+    """商品指标**日快照**（设计 17 §13.9，M2 方向 3 切片 2，2026-10-03）。
+
+    ## 为什么与 `NoteMetricSnapshot` 分表
+
+    两者**主键语义不同**（笔记按 `note_pk`，商品按 `product_pk`），指标集合**零重叠**
+    （笔记是内容侧的曝光/互动，商品是交易侧的销量/库存/价格）。合表会让每一列对
+    另一半行恒为 0 —— 那正是「用 0 冒充缺值」，违反缺值口径（硬约束⑤）。
+
+    ⇒ **两张同构的快照表**，每一条判据与 `NoteMetricSnapshot` 逐字一致：
+    `(实体主键, stat_date)` 唯一 + upsert + **存快照值不存增量**。
+
+    ## 判据
+
+    | 列 | 语义 | 缺值口径 |
+    |---|---|---|
+    | `stat_date` | **统计日**（`YYYY-MM-DD`，上海时区） | 必填；同商品同日唯一 |
+    | `stock` / `sales` / `sales_30d` | 该日**快照值** | 解析不到 ⇒ `0` |
+    | `price_min_fen` / `price_max_fen` | 价格区间（**整数分**） | 同上 |
+    | `cart_count` | 加购数 | ⚠️ 平台侧当前**无该指标** ⇒ 恒 `0`（列留位，不造假） |
+
+    ⚠️ **价格用「分」存整数**：直接复用 `shop_products.price_min_fen` /
+    `price_max_fen`（真机实测两列都是 INTEGER 且 1982/1983 行有值），
+    **不解析** `price` 那个 `"10680~55977"` 形态的字符串 —— 字符串是平台的展示形态、
+    会变；分列是同步时归一化好的稳定口径。金额一律整数分（浮点累加不精确）。
+
+    ⚠️ **不回填历史**：`shop_products` 只有「最后一次同步的值」，拿它当「历史某天」
+    就是编造数据。表从空表开始，由采集逐日沉淀。
+    """
+
+    __tablename__ = "shop_metric_snapshots"
+    __table_args__ = (
+        UniqueConstraint("product_pk", "stat_date", name="uq_shop_metric_product_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    #: 归属用户（**租户隔离**：趋势查询一律按它收口）。
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
+    #: 指向 `shop_products.id`（本地主键，不是平台 `item_id` —— 平台 ID 会变）。
+    product_pk: Mapped[int] = mapped_column(
+        ForeignKey("shop_products.id"), index=True, nullable=False
+    )
+    #: 统计日（`YYYY-MM-DD` 字符串 —— 字典序即日期序，且无时区歧义）。
+    stat_date: Mapped[str] = mapped_column(String(10), index=True, nullable=False)
+    stock: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    sales: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: 近 30 天销量（平台 `sale_qty30`，同步时已解析进 `shop_products.sales_30d`）。
+    sales_30d: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: 价格区间（**分**）。直接取自 `shop_products` 的同名列，不做任何换算。
+    price_min_fen: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    price_max_fen: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: 加购数 —— 平台侧当前无此指标，列留位（恒 0），**不造假**。
+    cart_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now)

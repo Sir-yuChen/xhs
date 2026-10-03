@@ -30,9 +30,9 @@ from sqlalchemy import select
 
 from backend.app.core.database import SessionLocal
 from backend.app.models import LlmGatewayConfig, LlmGatewayUsageLog
+from backend.app.services.sqlite_retry import retry_on_lock
 
 logger = logging.getLogger(__name__)
-
 
 # --------------------------------------------------------------------------
 # 功能常量（设计 17 §3.11 / §4.3.1）
@@ -147,10 +147,19 @@ def record_usage(
     返回是否写入成功；**从不抛异常** —— 记账失败只 warning，
     绝不让一次已成功的业务调用因为台账问题而失败（DEF-048）。
 
-    ⚠️ **v1.9**：`token_name` **恒落 `""`** —— 令牌映射（`llm_gateway_tokens`）已整表退场
+    ⚠️ **v1.9**：`token_name` **恒落空串** —— 令牌映射（`llm_gateway_tokens`）已整表退场
     （设计 17 §7.1a），不再有映射可查。列保留（历史行审计），只是不再写入。
+
+    ⚠️ **撞锁重试（DEF-085）**：本函数**另开一条连接**，而它总是在业务主会话
+    尚未 `commit` 时被调用（`ai_service._complete` 在 action 内记账）—— 业务会话
+    持有的写锁与本 INSERT 直接冲突。常驻服务下定时任务 / 同步 worker 并发写时
+    `database is locked` 频繁出现，一次失败即**静默丢台账** —— 而台账是
+    **唯一用量真相源**（用量看板 / 预警全依赖它），静默丢数据比业务失败更难发现。
+
+    ⇒ 撞锁**重试**（指数退避）；只有重试用尽才 warning + 返回 False。
+    **不得**改成「抛出去让业务失败」—— 记账是旁路，业务语义不受影响（DEF-048 不变）。
     """
-    try:
+    def _insert_once() -> None:
         db = SessionLocal()
         try:
             db.add(
@@ -172,11 +181,19 @@ def record_usage(
             db.commit()
         finally:
             db.close()
+
+    try:
+        # 撞锁重试走**共用实现**（`sqlite_retry.retry_on_lock`）——
+        # 判据与退避只在那一处，本项目已有三处同型链路（台账 + 两个快照采集）。
+        retry_on_lock(
+            _insert_once,
+            what=f"LLM 台账写入（user_id={user_id}, gateway_id={gateway_id}）",
+        )
         return True
-    except Exception:  # noqa: BLE001 —— 见 docstring：安全网不得抛穿
+    except Exception as exc:  # noqa: BLE001 —— 见 docstring：安全网不得抛穿
         logger.warning(
-            "LLM 台账写入失败（user_id=%s, gateway_id=%s, %s/%s）",
-            user_id, gateway_id, platform, function, exc_info=True,
+            "LLM 台账写入失败（user_id=%s, gateway_id=%s, %s/%s）：%s",
+            user_id, gateway_id, platform, function, exc, exc_info=True,
         )
         return False
 

@@ -162,7 +162,15 @@ def _recorded_text_task(
         payload=payload,
     )
     db.add(task)
-    db.flush()
+    # ⚠️ **必须先 commit 再跑 action**（DEF-085 的根因修复）：
+    # `flush()` 只把 INSERT 发出去，事务**仍然开着并持有 SQLite 写锁**；
+    # 而 action 是一次真实 LLM 调用（数秒到数十秒）。记账（`record_usage`）
+    # **另开连接**写 `llm_gateway_usage_logs` ⇒ 全程撞 `database is locked`，
+    # 5s busy_timeout 等不过一个 30s 的上游调用 ⇒ **每次调用都静默丢台账**。
+    # commit 后锁只持有毫秒级，记账才有机会落库。
+    # 语义不变：task 行照样先落库（失败时再改状态），只是不再把「跑业务」
+    # 圈在事务里 —— 那本来也不该在事务里。
+    db.commit()
     try:
         result = action()
     except ValueError as exc:
@@ -200,7 +208,10 @@ def _recorded_image_task(
         payload=payload,
     )
     db.add(task)
-    db.flush()
+    # ⚠️ 同 `_recorded_text_task`：**先 commit 再跑 action**（DEF-085）——
+    # `flush()` 会持有 SQLite 写锁直到事务结束，而 action 是一次真实的
+    # 图像生成调用（更慢，数十秒），记账另开连接必然撞锁 ⇒ 静默丢台账。
+    db.commit()
     try:
         result = action()
     except ValueError as exc:
