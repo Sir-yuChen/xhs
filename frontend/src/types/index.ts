@@ -572,6 +572,13 @@ export type GenerateDetailImageResult = {
     prompt: string;
     model_name: string;
   };
+  /**
+   * v2.18：**本次生成的全部图**（张数由请求的 `count` 决定，1~4）。
+   * `asset` / `url` 保留 = 首张（向后兼容单张时代的调用方）。
+   */
+  assets?: GenerateDetailImageResult["asset"][];
+  /** v2.18：逐张失败原因（半成功时才非空；全部失败 ⇒ 端点直接 502，不走这里）。 */
+  errors?: string[];
 };
 
 export type XhsSelfContentScope = "notes" | "liked" | "collected";
@@ -998,6 +1005,15 @@ export type BusinessProviderRow = {
   provider_name: string | null;
   provider_enabled: boolean | null;
   provider_model_type: BusinessProviderKind | null;
+  /**
+   * v2.17：**兼容性判据由后端唯一裁定**（`_type_satisfies`）—— 多态模型
+   * （`multimodal`）可服务 text / image 两类业务点。
+   *
+   * ⚠️ 前端**不许**自己写 `provider_model_type === kind` 比较：那是判据的第二份实现，
+   * 必然与后端漂移（2026-10-03 实测：多模态服务商在模型配置页被误报「类型不匹配」，
+   * 而后端写入校验明明允许）。判据唯一源在后端，这里只读它渲染。
+   */
+  type_satisfied?: boolean;
   /**
    * v2.3：已选**具体模型**（服务商下的某个模型）。空串 = 只选了服务商、还没选模型。
    * ⚠️ 服务商 + 模型**两者都必选**，缺一调用即失败（不回落任何服务商级默认模型，v2.8 起连该列都已删）。

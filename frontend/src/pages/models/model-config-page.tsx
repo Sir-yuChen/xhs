@@ -374,8 +374,11 @@ export function ModelConfigPage() {
         // v2.3：服务商与模型**都**选了才算配好；只选服务商 ⇒ 未配置
         if (!record.provider_key) return <Tag>未配置</Tag>;
         if (record.provider_enabled === false) return <Tag color="orange">服务商已停用</Tag>;
-        // 类型不匹配 = 「配置过、之后又改了服务商类型」的后果；必须显出来，不许静默
-        if (record.provider_model_type && record.provider_model_type !== record.kind) {
+        // v2.17：**类型判据改读后端下发的 `type_satisfied`**（多态模型可服务 text/image）。
+        // ⚠️ 原实现自己写 `provider_model_type !== record.kind` 严格相等 —— 那是判据的
+        // 第二份实现，与后端 `_type_satisfies` 漂移 ⇒ 多模态服务商被**误报「类型不匹配」**
+        // （后端写入校验明明允许）。判据唯一源在后端，前端只渲染（DEF-044）。
+        if (record.model_name && record.type_satisfied === false) {
           return <Tag color="red">类型不匹配</Tag>;
         }
         if (!record.model_name) return <Tag color="orange">缺具体模型</Tag>;

@@ -1631,6 +1631,17 @@ def list_business_providers(
             if m["model_name"] == model_name:
                 model_type = m["model_type"]
                 break
+        #: v2.17：**兼容性判据由后端唯一裁定并下发**（`_type_satisfies`）——
+        #: 多态模型（multimodal）可服务 text / image 两类业务点。
+        #: ⚠️ 前端**不许**自己写 `model_type == kind` 比较：那是本判据的第二份实现，
+        #: 必然与 `_type_satisfies` 漂移（2026-10-03 用户实测：多模态服务商在模型配置页
+        #: 被误报「类型不匹配」，而后端写入校验**允许**该配置 —— 两处判据不一致，
+        #: 正是 DEF-044「同一语义不留两份实现」的违约）。
+        from backend.app.services.llm_gateway_client import _type_satisfies
+
+        type_satisfied = (
+            bool(model_type) and _type_satisfies(kind=item.kind, model_type=model_type)
+        )
         items.append({
             "platform": key[0],
             "business_key": item.key,
@@ -1644,6 +1655,9 @@ def list_business_providers(
             "provider_enabled": enabled_of.get(pk) if pk else None,
             #: v2.7：映射所选**模型**的当前类型（诊断用；恒等于 kind 才是配好的）
             "provider_model_type": model_type or None,
+            #: v2.17：**兼容性判据**（后端唯一裁定）—— 前端「类型不匹配」只看这个布尔，
+            #: 不再自己比较 `provider_model_type === kind`（多态模型会被误报）。
+            "type_satisfied": type_satisfied,
             #: v2.3：已选具体模型 + 该服务商的模型目录（前端模型下拉候选）
             "model_name": model_name,
             "provider_models": models_of.get(pk, []) if pk else [],

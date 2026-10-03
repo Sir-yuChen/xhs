@@ -21,9 +21,15 @@
 from __future__ import annotations
 
 import json
+import logging
+import mimetypes
+import shutil
 from datetime import datetime
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Optional
 
+import requests
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
@@ -36,10 +42,16 @@ from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user, get_owned_active_account
 from backend.app.core.time import shanghai_now
 from backend.app.api.ai import get_image_ai_client
-from backend.app.services.ai_service import ImageAiClient
+from backend.app.services.ai_service import ImageAiClient, OpenAICompatibleTextClient
 from backend.app.services.business_provider_keys import (
     BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE,
+    BusinessKey,
 )
+from backend.app.services import detail_image_prompt
+from backend.app.services.llm_gateway_client import _type_satisfies
+from backend.app.models.material import MaterialFolder
+from backend.app.services.material_scan_service import is_safe_material_path
+from backend.app.services.media_generation import _media_dir
 from backend.app.models.platform_account import PlatformAccount
 from backend.app.models.note import Note, NoteAsset
 from backend.app.models.shop import NoteGoods
@@ -68,6 +80,8 @@ from backend.app.services.shop_binding_service import (
 from backend.app.models.user import User
 
 router = APIRouter(prefix="/xhs/qianfan", tags=["xhs-qianfan"])
+
+logger = logging.getLogger(__name__)
 
 
 class ShopAccountRequest(BaseModel):
@@ -1036,12 +1050,26 @@ class GenerateDetailImageRequest(BaseModel):
     #: 参考图（v2.15，§13.3.6）：从该商品的**主图 / 详情图**里勾选，最多 5 张。
     #: 空 ⇒ 沿用旧行为（取商品首图）。**每个 URL 都要过白名单**，见类 docstring。
     reference_image_urls: list[str] = Field(default_factory=list, max_length=5)
+    #: v2.18：**生成张数**（1~4，默认 1）。用户口径「生成商品详情图功能新增一个条件，
+    #: 生成多少张图片」。⚠️ 不是所有服务商都认 `n` 参数 ⇒ 实现上**逐张发请求**
+    #: （`MAX_DETAIL_IMAGE_COUNT` 次），不依赖上游的多图能力，行为可预期。
+    count: int = Field(default=1, ge=1, le=4)
+    #: v2.19：**落盘到的素材库文件夹**（`material_folders.id`）。
+    #: 用户口径「图片支持下载到本地指定的素材库中也就是本地指定文件夹下」。
+    #: 不传 ⇒ 只落 AIGC 资产（旧行为不变）；传了但文件夹不属于本用户 ⇒ 404。
+    material_folder_id: int | None = None
+    #: v2.19：是否先用**文本模型**把商品信息整理成提示词（用户口径「全部整理扔给大模型」）。
+    #: 默认 True；整理失败**自动回落**本地拼接（不阻断出图），原因在响应 `prompt_source`。
+    refine_prompt: bool = True
 
     model_config = ConfigDict(extra="forbid")
 
 
 #: 生成详情图时最多送几张参考图（§13.3.6；服务商侧参考图多了会超上限）。
 MAX_DETAIL_IMAGE_REFERENCES: int = 5
+
+#: v2.18：一次最多生成几张详情图（每张 = 一次独立的上游请求，故有上限止损）。
+MAX_DETAIL_IMAGE_COUNT: int = 4
 
 
 def _default_detail_image_prompt(item: dict[str, Any], skus: list[dict[str, Any]]) -> str:
@@ -1066,6 +1094,123 @@ def _default_detail_image_prompt(item: dict[str, Any], skus: list[dict[str, Any]
         parts.append("可选规格：" + "、".join(seen[:4]))
     parts.append("竖版长图构图，干净背景，突出商品主体与卖点排版")
     return "；".join(parts)
+
+
+def _save_to_material_folder(
+    db: Session,
+    *,
+    user_id: int,
+    folder_id: int,
+    url: str,
+    filename_hint: str,
+) -> dict[str, Any]:
+    """把出图**下载到用户指定的素材库文件夹**（设计 17 §13.3.7，v2.19）。
+
+    用户口径：「图片支持下载到本地指定的素材库中也就是本地指定文件夹下」。
+
+    ⚠️ **与 `_download_media` 的区别**：那个写 `storage/media/`（本项目的托管目录，
+    给「素材库面板的 media 来源」用）；本函数写**用户自己的绝对路径目录**
+    （`material_folders.path`）—— 那是用户在素材库页配置的真实文件夹。
+
+    ⚠️ **只落文件，不建 `material_files` 索引行**：索引由用户点「扫描」时按真实文件
+    生成（`material_scan_service.scan_folder`）。在这里插索引行 = 与扫描抢同一份真相源，
+    且会与「只索引不搬移」的既有口径打架（§3.4）。
+    """
+    folder = db.scalar(
+        select(MaterialFolder).where(
+            MaterialFolder.id == folder_id, MaterialFolder.user_id == user_id
+        )
+    )
+    if folder is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="指定的素材库文件夹不存在（或不属于当前用户）",
+        )
+
+    safe, reason = is_safe_material_path(folder.path)
+    if not safe:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"素材库文件夹路径不可写：{reason}",
+        )
+
+    if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+        # 本地 media URL ⇒ 直接复制（已在磁盘上）。
+        if url.startswith("/api/files/media/"):
+            source = _media_dir() / url.split("/")[-1]
+            if not source.is_file():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="出图本地文件不存在，无法存入素材库",
+                )
+            target_dir = Path(folder.path)
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target = target_dir / f"{filename_hint}{source.suffix or '.png'}"
+            shutil.copyfile(source, target)
+            return {"path": str(target), "folder_id": folder.id, "filename": target.name}
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"无法识别的出图地址：{str(url)[:64]}",
+        )
+
+    try:
+        response = requests.get(url, timeout=120)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"出图下载失败，无法存入素材库：{exc}",
+        ) from exc
+
+    content_type = str(response.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+    if content_type and not content_type.startswith("image/"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"上游返回的不是图片（Content-Type={content_type}），未存入素材库",
+        )
+    extension = mimetypes.guess_extension(content_type or "") or ".png"
+    if extension == ".jpe":
+        extension = ".jpg"
+
+    target_dir = Path(folder.path)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / f"{filename_hint}{extension}"
+    target.write_bytes(response.content)
+    return {"path": str(target), "folder_id": folder.id, "filename": target.name}
+
+
+def _text_model_context(
+    db: Session, user: User, business_key: BusinessKey
+) -> tuple[Any | None, Any | None, str]:
+    """取**文本/多态模型**上下文（详情图提示词整理用，v2.19）。
+
+    ⚠️ **与 `_business_model_context` 的关键区别：缺配置不抛异常，返回 `(None, None, "")`**
+    —— 整理是可选的增强层，缺失时由调用方**回落本地拼接**。
+    用同一个业务点 key 解析：用户可能给该业务点挂的是**多态**模型（既能整理又能出图），
+    也可能只挂了 image 类 ⇒ 那时类型不符 ⇒ 同样回落（不报错）。
+
+    ⚠️ **不复用 `_business_model_context`**：那个按业务点 `kind` 校验（image 类业务点
+    只接受 image/multimodal 模型，且失败即 400）—— 我们要的是「拿得到就用、拿不到就算」，
+    语义不同。但**解析入口仍是同一份** `resolve_business_provider`（不另写一份查找）。
+    """
+    try:
+        from backend.app.services.llm_gateway_client import resolve_business_provider
+
+        ctx = resolve_business_provider(db, user, business_key.key)
+    except Exception as exc:  # noqa: BLE001 - 未配 / 停用 / 类型不符都回落
+        logger.debug("详情图提示词整理：文本模型不可用（%s）", exc)
+        return None, None, ""
+
+    model_type = str(getattr(ctx, "model_type", "") or "")
+    if not _type_satisfies(kind="text", model_type=model_type):
+        # 挂的是纯 image 模型（打不了 /chat/completions）⇒ 回落，不报错。
+        return None, None, ""
+
+    config = SimpleNamespace(
+        base_url=ctx.base_url,
+        model_name=ctx.model_name,
+    )
+    return OpenAICompatibleTextClient(), config, ctx.api_key
 
 
 @router.post("/generate-detail-image")
@@ -1126,10 +1271,19 @@ def generate_detail_image(
             )
         if candidate not in picked:
             picked.append(candidate)
-    # 勾了就用勾的；没勾 → 沿用旧行为（商品首图）。两者都空 ⇒ 如实报缺。
-    reference_images = picked[:MAX_DETAIL_IMAGE_REFERENCES] or images[:1]
-    if not reference_images:
-        # 如实报缺：没有商品图就没有参考图，**不凭空生成一张冒充商品图**
+    # ⚠️ v2.19：**必须勾选参考图**（用户口径「必须选择原始参考图才可以点击生成按钮」）。
+    # 去掉「不勾就回落商品首图」的旧行为 —— 前后端同一判据，不留「能点但被拒」的不一致。
+    if not picked:
+        # 如实报缺：没有参考图就没有生成依据，不凭空生成一张。
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "REFERENCE_IMAGE_REQUIRED",
+                "message": "请先勾选至少一张参考图（商品主图或原商品详情图）再生成",
+            },
+        )
+    if not images:
+        # 台账里根本没图 ⇒ 引导去同步商品（与上一条区分：这是「没得选」，不是「没选」）。
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
@@ -1137,6 +1291,7 @@ def generate_detail_image(
                 "message": "这个商品还没有同步到图片，先执行「同步商品」补齐图集再试",
             },
         )
+    reference_images = picked[:MAX_DETAIL_IMAGE_REFERENCES]
 
     # 业务点 → 服务商（不回落；未配置 / 类型不符 ⇒ 400 结构化）。
     # ⚠️ 复用 `ai.py::_business_model_context`（**同一份**错误映射实现）：
@@ -1149,6 +1304,33 @@ def generate_detail_image(
     prompt = (payload.prompt or "").strip() or _default_detail_image_prompt(
         detail.get("item") or {}, detail.get("skus") or []
     )
+    # v2.18：张数收敛到常量上限（Pydantic 的 le=4 已拦非法值，这里再夹一次 ——
+    # 常量改小时端点仍然安全，不依赖模型的字段约束）。
+    count = max(1, min(int(payload.count or 1), MAX_DETAIL_IMAGE_COUNT))
+
+    # v2.19（§13.3.7）：用户口径「将商品名称、商品参数信息和选择的参考图以及提示词和
+    # 生成的图片要求**全部整理扔给大模型**」。用**文本/多态模型**把商品信息整理成
+    # 一段结构化出图提示词；整理失败**回落本地拼接**（`prompt_source` 如实说明），
+    # 不因「润色模型没配」把整个功能判死。
+    prompt_source = "local"
+    refine_note = ""
+    if payload.refine_prompt:
+        text_client, text_config, text_key = _text_model_context(
+            db, current_user, BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE
+        )
+        if text_client is not None:
+            refined, refine_note = detail_image_prompt.refine_prompt(
+                item=detail.get("item") or {},
+                skus=detail.get("skus") or [],
+                prompt=payload.prompt or "",
+                reference_images=reference_images,
+                text_client=text_client,
+                model_config=text_config,
+                api_key=text_key,
+            )
+            if refined:
+                prompt = refined
+                prompt_source = "llm"
 
     task = Task(
         user_id=current_user.id,
@@ -1162,57 +1344,84 @@ def generate_detail_image(
             "prompt": prompt,
             "model_config_id": model_config.id,
             "reference_images": reference_images,
+            # v2.18：生成张数一并入 payload（排障时能看出「这次要了几张」）。
+            "count": count,
+            # v2.19：提示词来源（llm = 文本模型整理；local = 回落本地拼接）+ 整理说明。
+            "prompt_source": prompt_source,
+            **({"refine_note": refine_note} if refine_note else {}),
+            **({"material_folder_id": payload.material_folder_id} if payload.material_folder_id else {}),
         },
     )
     db.add(task)
     db.flush()
 
-    try:
-        result = image_ai_client.generate_image(
-            model_config=model_config,
-            api_key=api_key,
+    # v2.18：**逐张发请求**（不依赖上游 `n` 参数 —— 各家支持不一，行为不可预期）。
+    # ⚠️ 一张失败不丢已生成的：先把成功的落库，再把失败如实报出来（半成功可交付）。
+    assets: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for index in range(count):
+        try:
+            result = image_ai_client.generate_image(
+                model_config=model_config,
+                api_key=api_key,
+                prompt=prompt,
+                # 参考图 = 用户勾选的（最多 5 张）；未勾选时回落商品首图
+                # （v2.15 §13.3.6：勾选优先，旧行为不变）。
+                reference_images=reference_images,
+            )
+        except Exception as exc:  # noqa: BLE001 - 服务商五花八门，一律结构化转出
+            errors.append(f"第 {index + 1} 张：{exc}")
+            continue
+
+        url = result.get("url") or ""
+        asset = AigcMediaAsset(
+            user_id=current_user.id,
+            asset_type="image",
+            # ⚠️ 缺值口径：服务商没回本地路径时留空串（**不拿 url 冒充 local_path** ——
+            # 那是两个语义，冒充会让「素材库」显示一条不存在的本地文件）。
+            local_path=result.get("local_path") or "",
+            url=url or None,
             prompt=prompt,
-            # 参考图 = 用户勾选的（最多 5 张）；未勾选时回落商品首图
-            # （v2.15 §13.3.6：勾选优先，旧行为不变）。
-            reference_images=reference_images,
+            model_name=model_config.model_name,
         )
-    except Exception as exc:  # noqa: BLE001 - 服务商五花八门，一律结构化转出
+        db.add(asset)
+        db.flush()
+        assets.append(
+            {
+                "id": asset.id,
+                "local_path": asset.local_path,
+                "url": asset.url,
+                "prompt": asset.prompt,
+                "model_name": asset.model_name,
+            }
+        )
+        task.progress = 10 + int(90 * (index + 1) / count)
+
+    if not assets:
+        # 一张都没成 ⇒ 整次失败（把上游原文如实带出，不吞）。
         task.status = "failed"
         task.progress = 100
-        task.payload = {**(task.payload or {}), "error": str(exc)}
+        task.payload = {**(task.payload or {}), "error": "; ".join(errors)[:500]}
         db.commit()
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"生成商品详情图失败：{exc}",
-        ) from exc
+            detail=f"生成商品详情图失败：{'; '.join(errors) or '未知原因'}",
+        )
 
+    # 半成功：有成功的就按成功处理（`errors` 如实下发，前端给提示）。
     task.status = "completed"
     task.progress = 100
-
-    url = result.get("url") or ""
-    asset = AigcMediaAsset(
-        user_id=current_user.id,
-        asset_type="image",
-        # ⚠️ 缺值口径：服务商没回本地路径时留空串（**不拿 url 冒充 local_path** ——
-        # 那是两个语义，冒充会让「素材库」显示一条不存在的本地文件）。
-        local_path=result.get("local_path") or "",
-        url=url or None,
-        prompt=prompt,
-        model_name=model_config.model_name,
-    )
-    db.add(asset)
-    db.flush()
-    task.payload = {**(task.payload or {}), "asset_id": asset.id}
+    task.payload = {
+        **(task.payload or {}),
+        "asset_ids": [a["id"] for a in assets],
+        **({"errors": errors} if errors else {}),
+    }
     db.commit()
-    db.refresh(asset)
 
     return {
-        "url": url,
-        "asset": {
-            "id": asset.id,
-            "local_path": asset.local_path,
-            "url": asset.url,
-            "prompt": asset.prompt,
-            "model_name": asset.model_name,
-        },
+        # `url` = 首张（**向后兼容**旧前端：单张时代它是唯一返回值）。
+        "url": assets[0]["url"] or "",
+        "assets": assets,
+        "errors": errors,
+        "asset": assets[0],
     }

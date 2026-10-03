@@ -5510,7 +5510,13 @@ def test_generate_detail_image_uses_own_business_point_and_persists_asset(tmp_pa
         response = client.post(
             "/api/xhs/qianfan/generate-detail-image",
             headers={"Authorization": f"Bearer {token}"},
-            json={"platform_account_id": account_id, "item_id": "ITEM-1", "prompt": ""},
+            json={
+                "platform_account_id": account_id,
+                "item_id": "ITEM-1",
+                "prompt": "",
+                # v2.19：参考图必选（不勾 ⇒ 400 REFERENCE_IMAGE_REQUIRED）。
+                "reference_image_urls": ["https://cdn.xhs.test/main.jpg"],
+            },
         )
         assert response.status_code == 200
         body = response.json()
@@ -5538,13 +5544,173 @@ def test_generate_detail_image_uses_own_business_point_and_persists_asset(tmp_pa
         app.dependency_overrides.pop(get_image_ai_client, None)
 
 
+def test_generate_detail_image_supports_count_and_reports_partial_failure(tmp_path):
+    """v2.18：**生成张数**（用户口径「新增一个条件，生成多少张图片」）。
+
+    守四件：
+    ① `count=3` ⇒ 上游被调 **3 次**（逐张串行，不依赖上游 `n` 参数）；
+    ② 落 **3 条**素材行、`assets` 回 3 个 id（`url`/`asset` 仍是首张，向后兼容）；
+    ③ **半成功**：第 2 张抛错 ⇒ 200 + `errors` 一条（不因一张失败丢掉另外两张）；
+    ④ 全部失败 ⇒ 502（不假装成功）。
+    """
+    from backend.app.api.ai import get_image_ai_client
+    from backend.app.models.generation import AigcMediaAsset
+    from backend.app.services.business_provider_keys import (
+        BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE,
+    )
+
+    class FlakyImageClient:
+        def __init__(self):
+            self.calls = 0
+
+        def generate_image(self, *, model_config, api_key, prompt, reference_images=None):
+            self.calls += 1
+            if self.calls == 2:
+                raise RuntimeError("上游限流")
+            return {"url": f"https://cdn.example.test/detail-{self.calls}.png", "local_path": ""}
+
+    fake = FlakyImageClient()
+    db_dependency = _override_database(tmp_path)
+    token = _register_and_get_access_token("detail-image-count")
+    try:
+        app.dependency_overrides[get_image_ai_client] = lambda: fake
+        from backend.app.core.security import encrypt_text
+        from backend.app.models import LlmBusinessProvider, LlmGatewayConfig, LlmGatewayModel
+
+        db = _test_session_factory()
+        try:
+            db.add(
+                LlmGatewayConfig(
+                    user_id=_last_registered_user_id,
+                    name="test-image-count",
+                    provider_key="TEST-IMGC",
+                    base_url="https://api.example.test/v1",
+                    access_token=encrypt_text("«redacted:sk-…»"),
+                    models_json=json.dumps(["detail-image-model"]),
+                    enabled=True,
+                    healthy=True,
+                )
+            )
+            db.flush()
+            db.add(
+                LlmGatewayModel(
+                    user_id=_last_registered_user_id,
+                    provider_key="TEST-IMGC",
+                    model_name="detail-image-model",
+                    model_type="image",
+                    platform="xhs",
+                    enabled=True,
+                )
+            )
+            db.flush()
+            db.add(
+                LlmBusinessProvider(
+                    user_id=_last_registered_user_id,
+                    platform="xhs",
+                    business_key=BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE.key,
+                    provider_key="TEST-IMGC",
+                    model_name="detail-image-model",
+                    enabled=True,
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        account_id = _seed_account_for_last_user()
+        _seed_shop_product(
+            platform_account_id=account_id,
+            item_id="ITEM-N",
+            images=["https://cdn.xhs.test/main.jpg"],
+            title="多张测试商品",
+        )
+
+        response = client.post(
+            "/api/xhs/qianfan/generate-detail-image",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "platform_account_id": account_id,
+                "item_id": "ITEM-N",
+                "prompt": "",
+                "count": 3,
+                "reference_image_urls": ["https://cdn.xhs.test/main.jpg"],
+            },
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        # ① 逐张发请求（3 次；第 2 次抛错）
+        assert fake.calls == 3
+        # ② 成功的两张都落库并回传；`url`/`asset` 仍是首张（向后兼容）
+        assert [a["id"] for a in body["assets"]] == [body["asset"]["id"], body["assets"][1]["id"]]
+        assert len(body["assets"]) == 2
+        assert body["url"] == body["asset"]["url"] == "https://cdn.example.test/detail-1.png"
+        # ③ 半成功如实报出（不假报「全部生成」）
+        assert len(body["errors"]) == 1 and "上游限流" in body["errors"][0]
+
+        db = _test_session_factory()
+        try:
+            assert db.query(AigcMediaAsset).count() == 2
+        finally:
+            db.close()
+
+        # ④ 全部失败 ⇒ 502（不假装成功）
+        class DeadImageClient:
+            def generate_image(self, *, model_config, api_key, prompt, reference_images=None):
+                raise RuntimeError("服务商挂了")
+
+        app.dependency_overrides[get_image_ai_client] = lambda: DeadImageClient()
+        failed = client.post(
+            "/api/xhs/qianfan/generate-detail-image",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "platform_account_id": account_id,
+                "item_id": "ITEM-N",
+                "prompt": "",
+                "count": 2,
+                "reference_image_urls": ["https://cdn.xhs.test/main.jpg"],
+            },
+        )
+        assert failed.status_code == 502
+        assert "服务商挂了" in failed.json()["detail"]
+    finally:
+        app.dependency_overrides.pop(get_image_ai_client, None)
+
+
+def test_generate_detail_image_count_is_bounded(tmp_path):
+    """v2.18：张数**有界** —— 0 / 5 / 负数都被 422 拦下（不静默夹到合法值）。
+
+    ⚠️ `count` 每张 = 一次上游请求，无上限就是「一次点击烧 N 次额度」。
+    """
+    db_dependency = _override_database(tmp_path)
+    token = _register_and_get_access_token("detail-image-count-bound")
+    for bad in (0, 5, -1):
+        response = client.post(
+            "/api/xhs/qianfan/generate-detail-image",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "platform_account_id": 1,
+                "item_id": "ITEM-X",
+                "prompt": "",
+                "count": bad,
+                "reference_image_urls": ["https://cdn.xhs.test/main.jpg"],
+            },
+        )
+        assert response.status_code == 422, f"count={bad} 应被拦下，实际 {response.status_code}"
+
+
 def test_generate_detail_image_reports_missing_image_and_missing_mapping(tmp_path):
-    """两条如实报缺：商品无图 ⇒ 400 PRODUCT_IMAGE_MISSING；业务点未配 ⇒ 400 带 code。"""
+    """如实报缺三态（v2.19 更新）：商品不在台账 ⇒ 404；**没勾参考图** ⇒ 400
+    `REFERENCE_IMAGE_REQUIRED`；台账无图可勾 ⇒ 400 `PRODUCT_IMAGE_MISSING`；
+    业务点未配 ⇒ 400 带 code。
+
+    ⚠️ v2.19 起参考图**必选**（用户口径「必须选择原始参考图才可以点击生成按钮」），
+    故「有图商品但没勾」也会 400 —— 这是**刻意**的：前后端同一判据。
+    """
     from backend.app.api.ai import get_image_ai_client
 
     class FakeImageClient:
         def generate_image(self, *, model_config, api_key, prompt, reference_images=None):
-            raise AssertionError("不该被调到：这两个分支都在出图之前就返回")
+            raise AssertionError("不该被调到：这些分支都在出图之前就返回")
 
     db_dependency = _override_database(tmp_path)
     token = _register_and_get_access_token("detail-image-missing")
@@ -5561,7 +5727,8 @@ def test_generate_detail_image_reports_missing_image_and_missing_mapping(tmp_pat
         )
         assert missing_item.status_code == 404
 
-        # ② 商品在、但图集为空 ⇒ 400 PRODUCT_IMAGE_MISSING（**不凭空生成冒充商品图**）
+        # ② 商品在、图集为空、且没勾 ⇒ REFERENCE_IMAGE_REQUIRED
+        #    （**不凭空生成冒充商品图**；「没选」先于「没得选」判，两者 code 不同）
         _seed_shop_product(
             platform_account_id=account_id, item_id="ITEM-NOIMG", images=[], title="无图商品"
         )
@@ -5571,19 +5738,32 @@ def test_generate_detail_image_reports_missing_image_and_missing_mapping(tmp_pat
             json={"platform_account_id": account_id, "item_id": "ITEM-NOIMG"},
         )
         assert no_image.status_code == 400
-        assert no_image.json()["detail"]["code"] == "PRODUCT_IMAGE_MISSING"
+        assert no_image.json()["detail"]["code"] == "REFERENCE_IMAGE_REQUIRED"
 
-        # ③ 有图但业务点未配服务商 ⇒ 400 结构化（不回落）
+        # ②b 有图但**没勾**参考图 ⇒ 同样 400 REFERENCE_IMAGE_REQUIRED（v2.19 新契约）
         _seed_shop_product(
             platform_account_id=account_id,
-            item_id="ITEM-OK",
+            item_id="ITEM-NOPICK",
             images=["https://cdn.xhs.test/main.jpg"],
-            title="有图商品",
+            title="有图未勾",
         )
+        no_pick = client.post(
+            "/api/xhs/qianfan/generate-detail-image",
+            headers=headers,
+            json={"platform_account_id": account_id, "item_id": "ITEM-NOPICK"},
+        )
+        assert no_pick.status_code == 400
+        assert no_pick.json()["detail"]["code"] == "REFERENCE_IMAGE_REQUIRED"
+
+        # ③ 有图 + 勾了但业务点未配服务商 ⇒ 400 结构化（不回落）
         unconfigured = client.post(
             "/api/xhs/qianfan/generate-detail-image",
             headers=headers,
-            json={"platform_account_id": account_id, "item_id": "ITEM-OK"},
+            json={
+                "platform_account_id": account_id,
+                "item_id": "ITEM-NOPICK",
+                "reference_image_urls": ["https://cdn.xhs.test/main.jpg"],
+            },
         )
         assert unconfigured.status_code == 400
         # 真实 code 由 `llm_gateway_client` 给（不猜、不写死一组「可能的值」——
@@ -5719,14 +5899,17 @@ def test_detail_image_reference_images_must_come_from_the_product(tmp_path):
         assert outside.status_code == 400, outside.text
         assert outside.json()["detail"]["code"] == "REFERENCE_IMAGE_NOT_FOUND"
 
-        # ④ 不勾 ⇒ 回落商品首图（旧行为不变）
+        # ④ 不勾 ⇒ 400 REFERENCE_IMAGE_REQUIRED
+        #    ⚠️ v2.19 **取代**旧的「不勾则回落商品首图」：用户口径「必须选择原始参考图
+        #    才可以点击生成按钮」。旧行为让「没选」与「选了」产出同样结果，
+        #    用户无法通过对结果的控制（只能事后换图重试）。
         resp4 = client.post(
             url,
             headers=headers,
             json={"platform_account_id": account_id, "item_id": "ITEM-REF"},
         )
-        assert resp4.status_code == 200, resp4.text
-        assert fake.calls[-1] == ["https://cdn.xhs.test/main.jpg"]
+        assert resp4.status_code == 400, resp4.text
+        assert resp4.json()["detail"]["code"] == "REFERENCE_IMAGE_REQUIRED"
     finally:
         app.dependency_overrides.pop(get_image_ai_client, None)
         app.dependency_overrides.pop(db_dependency, None)

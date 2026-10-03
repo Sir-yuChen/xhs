@@ -2121,7 +2121,7 @@ def test_t9_panels_are_wired_into_workshop():
 
 
 # --------------------------------------------------------------------------- #
-# 2026-10-03 v2.16：「生成商品详情图」弹窗左右两栏布局
+# 2026-10-03 v2.16：「生成AI商品图」弹窗左右两栏布局
 # --------------------------------------------------------------------------- #
 SHOP_ITEMS_PAGE = ROOT / "frontend/src/pages/platforms/xhs/shop-items-page.tsx"
 
@@ -2135,8 +2135,8 @@ def test_detail_image_modal_uses_two_column_layout():
     """
     page = _code_only(_read(SHOP_ITEMS_PAGE))
     # 只取弹窗那一段（从注释头到 `</Modal>`），避免命中页面别处的 Row/Col
-    block = _slice_between(page, 'title="生成商品详情图"', "</Modal>")
-    assert 'width="60vw"' in block, "弹窗宽度不是「全屏 60%」（用户口径）"
+    block = _slice_between(page, 'title="生成AI商品图"', "</Modal>")
+    assert 'width="75vw"' in block, "弹窗宽度不是「全屏 75%」（用户口径）"
     assert "<Row" in block and block.count("<Col") >= 2, "弹窗未改成左右两栏"
     assert "生成结果" in block, "右栏缺少「生成结果」区（出图要即时可见，不能被压到底部）"
     assert "ReferenceImagePicker" in block, "参考图勾选丢了"
@@ -2144,6 +2144,36 @@ def test_detail_image_modal_uses_two_column_layout():
     assert block.index("ReferenceImagePicker") < block.index("生成结果"), (
         "参考图勾选应在左栏（配置），结果在右栏"
     )
+
+
+def test_detail_image_modal_has_count_selector():
+    """v2.18：弹窗要能选**生成张数**（用户口径「新增一个条件，生成多少张图片」）。
+
+    守三件：① 有「生成张数」标签；② `Radio.Group` 绑 `detailImageCount`；
+    ③ 张数确实传给了请求函数（不传 = 界面能选但后端永远收 1 张，最典型的假接线）。
+    """
+    page = _code_only(_read(SHOP_ITEMS_PAGE))
+    block = _slice_between(page, 'title="生成AI商品图"', "</Modal>")
+    assert "生成张数" in block, "弹窗缺少「生成张数」条件"
+    assert "detailImageCount" in block, "张数选择器未绑定 state"
+    assert "setDetailImageCount" in block, "张数不可改"
+
+
+def test_detail_image_generate_button_requires_reference():
+    """v2.19：**必须勾选参考图**才能点「生成」（用户口径「必须选择原始参考图才可以
+    点击生成按钮」）。
+
+    守三件：① 按钮 disabled 与参考图数量挂钩；② 禁用时给出原因（Tooltip），
+    不让用户对着灰按钮猜；③ 张数确实传给了请求函数（能选 ≠ 生效，最典型的假接线）。
+    """
+    page = _code_only(_read(SHOP_ITEMS_PAGE))
+    block = _slice_between(page, 'title="生成AI商品图"', "</Modal>")
+    assert "detailImageRefs.length === 0" in block, "生成按钮未与参考图勾选挂钩"
+    assert "disabled={" in block, "生成按钮缺少禁用态"
+    assert "请先勾选至少一张参考图" in block, "禁用态未说明原因"
+    # ③ 张数真正传进请求函数（假接线守卫：能选 ≠ 生效）
+    generate_fn = _slice_between(page, "async function generateDetailImage", "function ")
+    assert "detailImageCount" in generate_fn, "张数未传给请求函数（选了也不生效）"
 
 
 def test_library_card_shows_note_type_tag():

@@ -25,6 +25,7 @@ import {
   Input,
   InputNumber,
   Modal,
+  Radio,
   Row,
   Select,
   Space,
@@ -174,12 +175,15 @@ function ReferenceImagePicker({
 }) {
   return (
     <div>
-      <Text type="secondary" style={{ fontSize: 12 }}>
+      {/* ⚠️ `display: block`：`Text` 渲染成 `<span>`（行内元素），与下面的图片行
+          是同级兄弟 ⇒ 不加会被排到**同一行**（标题右边挤着图片）。
+          2026-10-03 用户口径：「原商品详情图（5）标题不要和图片一行，应换行展示」。 */}
+      <Text type="secondary" style={{ fontSize: 12, display: "block" }}>
         {label}（{urls.length}）
       </Text>
       {urls.length === 0 ? (
         <div style={{ marginTop: 4 }}>
-          <Text type="secondary" style={{ fontSize: 11 }}>
+          <Text type="secondary" style={{ fontSize: 11, display: "block" }}>
             {emptyHint}
           </Text>
         </div>
@@ -528,6 +532,8 @@ export function XhsShopItemsPage() {
   // v2.15：商品图集（主图 / 原详情图）与勾选的参考图。
   const [detailImageDetail, setDetailImageDetail] = useState<XhsShopItemDetail | null>(null);
   const [detailImageRefs, setDetailImageRefs] = useState<string[]>([]);
+  /** v2.18：生成张数（1~4）。用户口径「新增一个条件，生成多少张图片」。 */
+  const [detailImageCount, setDetailImageCount] = useState(1);
   const [detailImageLoading, setDetailImageLoading] = useState(false);
 
   useEffect(() => {
@@ -1053,6 +1059,7 @@ export function XhsShopItemsPage() {
     setDetailImageLoading(true);
     setDetailImageOpen(true);
     setDetailImageRefs([]); // 待详情回来后默认勾首图
+    setDetailImageCount(1); // v2.18：张数一并复位（同一条「跨商品不串」纪律）
     void (async () => {
       if (!selectedAccountId) return;
       try {
@@ -1089,10 +1096,20 @@ export function XhsShopItemsPage() {
         selectedAccountId,
         detailImageItem.item_id,
         detailImagePrompt.trim(),
-        detailImageRefs
+        detailImageRefs,
+        detailImageCount
       );
       setDetailImage(result);
-      message.success("商品详情图已生成");
+      // v2.18：半成功（部分张失败）如实报出来 —— 不能只报「已生成」，
+      // 否则用户以为 4 张都出来了（缺值口径：不假报完成）。
+      const partial = result.errors?.length || 0;
+      if (partial) {
+        message.warning(
+          `已生成 ${result.assets?.length || 1} 张，${partial} 张失败：${result.errors?.[0] || ""}`
+        );
+      } else {
+        message.success(`商品详情图已生成 ${result.assets?.length || 1} 张`);
+      }
     } catch (error) {
       message.error(error instanceof Error ? error.message : "生成商品详情图失败");
     } finally {
@@ -1406,7 +1423,7 @@ export function XhsShopItemsPage() {
               icon={<PictureOutlined />}
               onClick={() => openDetailImage(item)}
             >
-              生成详情图
+              生成AI商品图
             </Button>
           </Tooltip>
         </Space>
@@ -2006,24 +2023,37 @@ export function XhsShopItemsPage() {
           `Row/Col` 而非 `flex`：与全站栅格口径一致（窄视口自动折行单列）。 */}
       <Modal
         open={detailImageOpen}
-        title="生成商品详情图"
-        width="60vw"
+        title="生成AI商品图"
+        width="75vw"
         onCancel={() => setDetailImageOpen(false)}
         footer={
           <Space>
             <Button onClick={() => setDetailImageOpen(false)}>关闭</Button>
-            <Button
-              type="primary"
-              loading={detailImageGenerating}
-              onClick={() => void generateDetailImage()}
+            {/* v2.19：**必须勾选原始参考图**才能生成（用户口径「必须选择原始参考图才可以
+                点击生成按钮」）。禁用态给出原因（Tooltip），不让用户对着灰按钮猜。
+                ⚠️ 前端禁用只是引导 —— 后端仍要求非空参考图（去掉回落首图的旧行为），
+                两道防线同改，否则「前端能点、后端拒绝」又是一种不一致。 */}
+            <Tooltip
+              title={
+                detailImageRefs.length === 0
+                  ? "请先勾选至少一张参考图（商品主图或原商品详情图）"
+                  : ""
+              }
             >
-              生成
-            </Button>
+              <Button
+                type="primary"
+                loading={detailImageGenerating}
+                disabled={detailImageRefs.length === 0 || detailImageLoading}
+                onClick={() => void generateDetailImage()}
+              >
+                生成
+              </Button>
+            </Tooltip>
           </Space>
         }
       >
-        {/* 60vw 宽屏下弹窗会很高 ⇒ 内容区限高滚动，弹窗本体不超出视口 */}
-        <Row gutter={16} style={{ maxHeight: "68vh", overflowY: "auto" }}>
+        {/* 75vw 宽屏下弹窗会很高 ⇒ 内容区限高滚动，弹窗本体不超出视口 */}
+        <Row gutter={16} style={{ maxHeight: "72vh", overflowY: "auto" }}>
           {/* 左栏：配置（商品信息 / 参考图勾选 / 补充要求） */}
           <Col span={12}>
             <Space direction="vertical" size={12} style={{ width: "100%" }}>
@@ -2091,6 +2121,29 @@ export function XhsShopItemsPage() {
                   rows={3}
                 />
               </div>
+
+              {/* v2.18 生成张数（用户口径「新增一个条件，生成多少张图片」）。
+                  1~4，默认 1。⚠️ 每张 = 一次独立的上游请求（串行）⇒ 张数越多越慢，
+                  故在选项后缀写明「较慢」的取舍提示，而不是让用户自己撞。 */}
+              <div>
+                <Text strong style={{ fontSize: 13 }}>
+                  生成张数
+                </Text>
+                <div style={{ marginTop: 4 }}>
+                  <Radio.Group
+                    value={detailImageCount}
+                    onChange={(e) => setDetailImageCount(e.target.value)}
+                    disabled={detailImageGenerating}
+                    optionType="button"
+                    buttonStyle="solid"
+                    size="small"
+                    options={[1, 2, 3, 4].map((n) => ({
+                      label: `${n} 张${n > 2 ? "（较慢）" : ""}`,
+                      value: n,
+                    }))}
+                  />
+                </div>
+              </div>
             </Space>
           </Col>
 
@@ -2114,15 +2167,28 @@ export function XhsShopItemsPage() {
             >
               {detailImage ? (
                 <Space direction="vertical" size={6} style={{ width: "100%" }}>
-                  <Image
-                    src={detailImage.url || detailImage.asset.local_path}
-                    width="100%"
-                    style={{ objectFit: "contain", borderRadius: 4 }}
-                  />
-                  <Text type="secondary" style={{ fontSize: 11 }}>
-                    模型 {detailImage.asset.model_name || "-"} · 已存入素材库
-                    （#{detailImage.asset.id}）
-                  </Text>
+                  {/* v2.18：多张时逐张列出（每张都有独立素材库编号，可分别取用）。 */}
+                  {(detailImage.assets?.length
+                    ? detailImage.assets
+                    : [detailImage.asset]
+                  ).map((asset, index) => (
+                    <div key={asset.id}>
+                      <Image
+                        src={asset.url || asset.local_path}
+                        width="100%"
+                        style={{ objectFit: "contain", borderRadius: 4 }}
+                      />
+                      <Text type="secondary" style={{ fontSize: 11 }}>
+                        第 {index + 1} 张 · 模型 {asset.model_name || "-"} · 已存入素材库
+                        （#{asset.id}）
+                      </Text>
+                    </div>
+                  ))}
+                  {detailImage.errors?.length ? (
+                    <Text type="warning" style={{ fontSize: 11 }}>
+                      {detailImage.errors.length} 张失败：{detailImage.errors[0]}
+                    </Text>
+                  ) : null}
                 </Space>
               ) : (
                 <Text type="secondary" style={{ fontSize: 12, textAlign: "center" }}>

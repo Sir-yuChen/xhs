@@ -624,3 +624,74 @@ class OpenAICompatibleImageClient:
             error_message="",
         )
         return content.strip()
+
+    def chat(
+        self,
+        *,
+        model_config: Any,
+        api_key: str,
+        instruction: str,
+        image_urls: list[str] | None = None,
+        platform: str = "",
+        function: str = "",
+    ) -> str:
+        """通用对话（可带图）—— **详情图提示词整理**用（设计 17 §13.3.7，v2.19）。
+
+        与 `describe_image` 的区别：那个是「理解一张图」，本方法接受**多张**参考图 +
+        一段长说明（商品名/参数/要求），产出自由文本（这里是出图提示词）。
+
+        ⚠️ 走 `/chat/completions`（**不是** `/images/generations`）⇒ 需要**文本/多态**
+        模型；调用方（`detail_image_prompt.refine_prompt`）负责「没配就回落」，
+        本方法只管发请求与记账（v1.7 台账口径同 `describe_image`）。
+        """
+        self._validate(model_config=model_config, api_key=api_key)
+        endpoint = f"{model_config.base_url.rstrip('/')}/chat/completions"
+        content: list[dict[str, Any]] = [{"type": "text", "text": instruction}]
+        for url in image_urls or []:
+            ref = str(url or "").strip()
+            if ref:
+                content.append({"type": "image_url", "image_url": {"url": ref}})
+        started = time.perf_counter()
+        try:
+            response = requests.post(
+                endpoint,
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={
+                    "model": model_config.model_name,
+                    "messages": [
+                        {"role": "system", "content": "你是电商视觉设计助手。"},
+                        {"role": "user", "content": content},
+                    ],
+                },
+                timeout=120,
+            )
+            response.raise_for_status()
+            payload = _load_json_response(response)
+            try:
+                answer = payload["choices"][0]["message"]["content"]
+            except (KeyError, IndexError, TypeError) as exc:
+                raise ValueError("AI response missing choices[0].message.content") from exc
+            if not isinstance(answer, str) or not answer.strip():
+                raise ValueError("AI chat response is empty")
+        except Exception as exc:  # noqa: BLE001
+            self._record_usage_quietly(
+                model_config=model_config,
+                platform=platform,
+                function=function,
+                payload=None,
+                latency_ms=_elapsed_ms(started),
+                status=STATUS_FAILED,
+                error_message=_brief_error(exc),
+            )
+            raise
+
+        self._record_usage_quietly(
+            model_config=model_config,
+            platform=platform,
+            function=function,
+            payload=payload,
+            latency_ms=_elapsed_ms(started),
+            status=STATUS_SUCCESS,
+            error_message="",
+        )
+        return answer.strip()
