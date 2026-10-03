@@ -1500,7 +1500,9 @@ export async function generateProductDetailImage(
   itemId: string,
   prompt = "",
   referenceImageUrls: string[] = [],
-  count = 3
+  count = 3,
+  regenerate?: { group: string; index: number },
+  groupSettings?: Record<string, { prompt?: string; count?: number }>
 ): Promise<GenerateDetailImageResult> {
   const response = await http.post<GenerateDetailImageResult>(
     "/xhs/qianfan/generate-detail-image",
@@ -1514,6 +1516,10 @@ export async function generateProductDetailImage(
       ...(referenceImageUrls.length ? { reference_image_urls: referenceImageUrls } : {}),
       // v2.18/v2.20：生成张数（3~10）。默认 3 ⇒ 总是显式传（后端默认值也随之一致）。
       count,
+      // v2.21：单张重做（只重跑该组第 N 张）。不传 = 整组生成。
+      ...(regenerate ? { regenerate } : {}),
+      // v2.22：每组各自配置（提示词 / 张数）。不传 = 用顶层兜底。
+      ...(groupSettings ? { group_settings: groupSettings } : {}),
     },
     // ⚠️ v2.18：张数越多耗时越长（**逐张串行请求**，每张上游 timeout 180s）
     // ⇒ 超时按张数放大，否则多图必然在前端先超时（后端还在跑，用户看到假失败）。

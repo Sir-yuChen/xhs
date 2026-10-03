@@ -151,6 +151,117 @@ function priceText(item: XhsShopItem): string {
 }
 
 /**
+ * 某一组的生成结果块（v2.22，设计 17 §13.3.7.9）。
+ *
+ * ⚠️ 按组渲染，**不在前端 groupBy** —— 分组口径由后端下发（`groups`），
+ * 且「某组一张没成时该组仍要出现」也是后端保证的（前端只负责画出来）。
+ * ⚠️ 只画**本组**：主图 Tab 不该看到详情图的结果（反之亦然）—— 那是「混搭」。
+ */
+function DetailImageGroupResult({
+  groupKey,
+  groups,
+  regenerating,
+  generating,
+  onRegenerate,
+}: {
+  groupKey: string;
+  groups: GenerateDetailImageResult["groups"];
+  regenerating: { group: string; index: number } | null;
+  generating: boolean;
+  onRegenerate: (index: number) => void;
+}) {
+  const group = (groups || []).find((item) => item.group === groupKey);
+  if (!group) {
+    // 本组还没生成过（或本次没勾本组）⇒ 如实说明，不留白。
+    return (
+      <Text type="secondary" style={{ fontSize: 12 }}>
+        本组还没有生成结果。勾选参考图后点右下角「生成」。
+      </Text>
+    );
+  }
+  return (
+    <div>
+      <Space size={8} align="center" style={{ marginBottom: 6 }}>
+        <Text strong style={{ fontSize: 13 }}>
+          生成结果
+        </Text>
+        <Text
+          type={group.succeeded < group.requested ? "warning" : "secondary"}
+          style={{ fontSize: 11 }}
+        >
+          {group.succeeded}/{group.requested} 张
+          {group.succeeded < group.requested ? "（有失败）" : ""}
+        </Text>
+      </Space>
+      {group.assets.length === 0 ? (
+        <Text type="secondary" style={{ fontSize: 11 }}>
+          这一组没有生成成功（原因见下方失败信息）
+        </Text>
+      ) : (
+        <Space direction="vertical" size={10} style={{ width: "100%" }}>
+          {group.assets.map((asset) => {
+            const busy =
+              regenerating?.group === groupKey &&
+              regenerating?.index === (asset.group_index || 1);
+            return (
+              <div key={asset.id}>
+                <Image
+                  src={asset.url || asset.local_path}
+                  width="100%"
+                  style={{ objectFit: "contain", borderRadius: 4 }}
+                />
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 2 }}>
+                  <Text type="secondary" style={{ fontSize: 11 }}>
+                    第 {asset.group_index || 1} 张 · 模型 {asset.model_name || "-"} · 素材库（#
+                    {asset.id}）
+                  </Text>
+                  {/* v2.21：单张重做 —— 只重跑这一张（不整组重跑）。 */}
+                  <Button
+                    type="link"
+                    size="small"
+                    style={{ padding: 0, fontSize: 11 }}
+                    loading={busy}
+                    disabled={generating && !busy}
+                    onClick={() => onRegenerate(asset.group_index || 1)}
+                  >
+                    重做这张
+                  </Button>
+                </div>
+              </div>
+            );
+          })}
+        </Space>
+      )}
+    </div>
+  );
+}
+
+
+/**
+ * 某一组的失败信息（v2.22）—— **只显示与本组相关**的失败项。
+ *
+ * ⚠️ 后端的 `errors` 是全局列表（形如「商品主图 第 2 张：…」），本组件按组名前缀过滤。
+ * 不过滤的话，主图 Tab 会显示详情图的失败原因 —— 用户会以为是自己这组出的问题。
+ */
+function DetailImageGroupErrors({
+  groupKey,
+  errors,
+  label,
+}: {
+  groupKey: string;
+  errors: string[];
+  label: string;
+}) {
+  const mine = (errors || []).filter((text) => text.startsWith(label));
+  if (mine.length === 0) return null;
+  return (
+    <Text type="warning" style={{ fontSize: 11 }}>
+      {mine.length} 张失败：{mine[0]}
+    </Text>
+  );
+}
+
+/**
  * 参考图勾选组（v2.15，设计 17 §13.3.6；v2.20 改为**独立卡片块**）。
  *
  * 一行缩略图，点一张切换勾选（边框高亮表示已选）。**不引入 antd Checkbox 组** ——
@@ -160,28 +271,29 @@ function priceText(item: XhsShopItem): string {
  * ⚠️ 空组不隐藏、给一行说明：用户要能分清「这个商品没有详情图」与「详情图加载失败」。
  *
  * ⚠️ **v2.20 用户口径「主图和详情图分为两大块，不要混搭在一起」**：
- * 两组各自包成**带边框 + 淡背景的独立卡片**（含组名、已选计数、本组全选/清空），
- * 而不是过去两行紧挨着、只靠一行小字区分的形态 —— 那种形态下用户容易误以为
- * 是同一份图的两个分段，勾选时也分不清自己勾的是哪一组。
+ * 两组各自包成**带边框 + 淡背景的独立卡片**（含组名、已选计数、本组全选/清空）。
+ * v2.22 起每组进一步独立到各自的 Tab 里（§13.3.7.9）。
  */
 function ReferenceImagePicker({
   label,
   urls,
   selected,
   onToggle,
-  onSelectAll,
   onClearGroup,
+  maxSelectable,
   emptyHint = "暂无图片",
 }: {
   label: string;
   urls: string[];
   selected: string[];
   onToggle: (url: string) => void;
-  onSelectAll: () => void;
   onClearGroup: () => void;
+  /** v2.23：本组最多可选几张（`undefined` = 不限制）。达上限时未选中的图置灰。 */
+  maxSelectable?: number;
   emptyHint?: string;
 }) {
   const pickedInGroup = urls.filter((url) => selected.includes(url)).length;
+  const reachedLimit = maxSelectable !== undefined && selected.length >= maxSelectable;
   return (
     <div
       style={{
@@ -198,16 +310,17 @@ function ReferenceImagePicker({
         </Text>
         <Text type="secondary" style={{ fontSize: 11 }}>
           共 {urls.length} 张 · 已选 {pickedInGroup}
+          {maxSelectable !== undefined ? ` / 最多 ${maxSelectable} 张` : ""}
         </Text>
         {urls.length > 0 ? (
           <span style={{ marginLeft: "auto", fontSize: 11 }}>
-            <Button type="link" size="small" style={{ padding: 0 }} onClick={onSelectAll}>
-              全选
-            </Button>
+            {/* v2.23：**取消「全选」**（用户口径）—— 参考图是有上限的（最多 6 张），
+                「全选」在这类有约束的选择里容易一次性顶满、再逐个取消，比逐个勾更费事。
+                只保留「清空」。 */}
             <Button
               type="link"
               size="small"
-              style={{ padding: 0, marginLeft: 8 }}
+              style={{ padding: 0 }}
               onClick={onClearGroup}
               disabled={pickedInGroup === 0}
             >
@@ -226,23 +339,33 @@ function ReferenceImagePicker({
         <Space size={6} wrap style={{ marginTop: 4 }}>
           {urls.map((url) => {
             const active = selected.includes(url);
+            // v2.23：达上限后，未选中的图不可再点（置灰 + 不给 pointer）。
+            const blocked = reachedLimit && !active;
             return (
               <div
                 key={url}
                 role="button"
                 tabIndex={0}
-                onClick={() => onToggle(url)}
+                onClick={() => (blocked ? undefined : onToggle(url))}
                 onKeyDown={(event) => {
+                  if (blocked) return;
                   if (event.key === "Enter" || event.key === " ") onToggle(url);
                 }}
                 style={{
-                  cursor: "pointer",
+                  cursor: blocked ? "not-allowed" : "pointer",
+                  opacity: blocked ? 0.45 : 1,
                   border: active ? "2px solid #1677ff" : "1px solid rgba(0,0,0,0.15)",
                   borderRadius: 4,
                   padding: 1,
                   lineHeight: 0,
                 }}
-                title={active ? "点击取消选择" : "点击选择作为参考图"}
+                title={
+                  blocked
+                    ? `最多选 ${maxSelectable} 张，已达上限`
+                    : active
+                      ? "点击取消选择"
+                      : "点击选择作为参考图"
+                }
               >
                 <Image
                   src={url}
@@ -562,13 +685,26 @@ export function XhsShopItemsPage() {
   const [detailImageOpen, setDetailImageOpen] = useState(false);
   const [detailImageItem, setDetailImageItem] = useState<XhsShopItem | null>(null);
   const [detailImageGenerating, setDetailImageGenerating] = useState(false);
-  const [detailImagePrompt, setDetailImagePrompt] = useState("");
   const [detailImage, setDetailImage] = useState<GenerateDetailImageResult | null>(null);
   // v2.15：商品图集（主图 / 原详情图）与勾选的参考图。
   const [detailImageDetail, setDetailImageDetail] = useState<XhsShopItemDetail | null>(null);
   const [detailImageRefs, setDetailImageRefs] = useState<string[]>([]);
-  /** v2.18：生成张数（1~4）。用户口径「新增一个条件，生成多少张图片」。 */
-  const [detailImageCount, setDetailImageCount] = useState(3);
+  /** v2.21：单张重做的目标（`null` = 整组生成中/空闲）—— 只让那一张转圈。 */
+  const [detailImageRegenerating, setDetailImageRegenerating] = useState<{
+    group: string;
+    index: number;
+  } | null>(null);
+  /** v2.22：当前 Tab（主图 / 详情图**完全拆开**，各自一套配置）。 */
+  const [activeGroup, setActiveGroup] = useState<"product" | "detail">("product");
+  /**
+   * v2.22：**每组各自的配置**（提示词 / 张数）。
+   *
+   * ⚠️ 按组存（不是共用一个 prompt/count）—— 共用一个 state 时，用户在「主图」Tab
+   * 填的内容会在切到「详情图」后被顶掉，那正是「混搭」在状态层的形态。
+   */
+  const [detailImageGroupConfigs, setDetailImageGroupConfigs] = useState<
+    Record<string, { prompt?: string; count?: number }>
+  >({});
   const [detailImageLoading, setDetailImageLoading] = useState(false);
 
   useEffect(() => {
@@ -1063,10 +1199,9 @@ export function XhsShopItemsPage() {
     setDetailLoading(true);
     setDetail(null);
     setDetailError("");
-    // 每次打开都清掉上一次的出图结果与提示词：那是**上一次动作**的产物，
+    // 每次打开都清掉上一次的出图结果：那是**上一次动作**的产物，
     // 留着会让用户以为「这个商品已经有详情图了」。
     setDetailImage(null);
-    setDetailImagePrompt("");
     try {
       setDetail(await fetchXhsShopItemDetail(selectedAccountId, item.item_id));
     } catch (error) {
@@ -1083,18 +1218,20 @@ export function XhsShopItemsPage() {
    * v2.15：打开时**拉一次商品详情**取两套图（主图 / 原商品详情图）供勾选 ——
    * 图集是只读本地台账的（`/item-detail` 零平台请求），所以这个请求很轻。
    *
-   * 每次打开**重置三态**（prompt / 出图 / 报错）+ 勾选（默认勾主图首张）——
+   * 每次打开**重置全部状态**（各组配置 / 出图 / 报错 / 勾选）——
    * 弹窗是「一次生成动作」的载体，带着上一个商品的结果重开会把 A 的图挂在 B 名下
    * （与 `batchDeleteHint` 同一条纪律：跨商品的操作上下文不能串）。
    */
   function openDetailImage(item: XhsShopItem) {
     setDetailImageItem(item);
-    setDetailImagePrompt("");
     setDetailImage(null);
     setDetailImageLoading(true);
     setDetailImageOpen(true);
     setDetailImageRefs([]); // 待详情回来后默认勾首图
-    setDetailImageCount(3); // v2.18：张数一并复位（同一条「跨商品不串」纪律；默认 3）
+    // v2.22：各组配置（提示词 / 张数）与当前 Tab 一并复位（同一条「跨商品不串」纪律）。
+    setDetailImageGroupConfigs({});
+    setActiveGroup("product");
+    setDetailImageRegenerating(null); // v2.21：重做态一并复位
     void (async () => {
       if (!selectedAccountId) return;
       try {
@@ -1123,39 +1260,81 @@ export function XhsShopItemsPage() {
    * 失败信息原样报出 —— 最常见的两种（没配服务商 / 服务商不是图像类）后端给的是
    * 带 `code` 的可执行提示，吞成「生成失败」会让用户不知道该去配什么。
    */
-  async function generateDetailImage() {
+  async function generateDetailImage(regenerate?: { group: string; index: number }) {
     if (!selectedAccountId || !detailImageItem) return;
     setDetailImageGenerating(true);
+    // v2.21：记住重做目标（只让**那一张**转圈，不整组变灰 —— 用户要能看出在重做哪张）。
+    setDetailImageRegenerating(regenerate || null);
     try {
+      // v2.22/v2.23：**每组各自配置**随请求下发。
+      // ⚠️ 组的「存在性」= 本组有勾图 **或** 它是本次生成的目标组。
+      // 目标组没勾本组图时，后端回落到全部已勾图（v2.23 用户口径「参考图列出所有图」）。
+      const targetGroup = regenerate?.group || activeGroup;
+      const groupSettings: Record<string, { prompt: string; count: number }> = {};
+      for (const tab of detailImageGroupTabs) {
+        const picked = detailImageRefs.some((url) => tab.urls.includes(url));
+        if (!picked && tab.key !== targetGroup) continue;
+        groupSettings[tab.key] = {
+          prompt: detailImageGroupConfigs[tab.key]?.prompt || "",
+          count: detailImageGroupConfigs[tab.key]?.count ?? 3,
+        };
+      }
       const result = await generateProductDetailImage(
         selectedAccountId,
         detailImageItem.item_id,
-        detailImagePrompt.trim(),
+        "",
         detailImageRefs,
-        detailImageCount
+        3,
+        regenerate,
+        groupSettings
       );
       setDetailImage(result);
       // v2.18/v2.20：半成功（部分张失败）如实报出来 —— 不能只报「已生成」，
       // 否则用户以为都出来了（缺值口径：不假报完成）。
-      // ⚠️ 张数是**每组**的 count ⇒ 总张数要按组数算。
       const partial = result.errors?.length || 0;
       const totalDone = result.assets?.length || 1;
-      const groupCount = result.groups?.length || 1;
       if (partial) {
         message.warning(
           `已生成 ${totalDone} 张，${partial} 张失败：${result.errors?.[0] || ""}`
         );
       } else {
-        message.success(
-          `已生成 ${totalDone} 张（${groupCount} 组 × ${detailImageCount} 张）`
-        );
+        message.success(`已生成 ${totalDone} 张`);
       }
     } catch (error) {
-      message.error(error instanceof Error ? error.message : "生成商品详情图失败");
+      message.error(error instanceof Error ? error.message : "生成商品AI图失败");
     } finally {
       setDetailImageGenerating(false);
+      setDetailImageRegenerating(null);
     }
   }
+
+  /** v2.22：当前 Tab 的组名 / 参考图（footer 按钮与守卫都读它）。 */
+  const activeGroupLabel = activeGroup === "product" ? "原始主图" : "原始详情图";
+  const activeGroupUrls =
+    activeGroup === "product"
+      ? detailImageDetail?.product_images || []
+      : detailImageDetail?.detail_images || [];
+  const activeGroupRefs = detailImageRefs.filter((url) => activeGroupUrls.includes(url));
+
+  /**
+   * v2.22：Tab 清单（**唯一来源**）—— 主图 / 详情图各自一套配置与结果。
+   *
+   * ⚠️ 用数组驱动 `Tabs`，不在 JSX 里写两份 —— 两份会在「加第三种图」时漏改一处。
+   */
+  const detailImageGroupTabs = [
+    {
+      key: "product" as const,
+      label: "原始主图",
+      urls: detailImageDetail?.product_images || [],
+      emptyHint: "这个商品没有主图（先执行「同步商品」补齐图集）",
+    },
+    {
+      key: "detail" as const,
+      label: "原始详情图",
+      urls: detailImageDetail?.detail_images || [],
+      emptyHint: "这个商品没有详情图（平台侧未提供，或还没同步到）",
+    },
+  ];
 
   const statusHint = statusFilterHint(form.getFieldValue("status") || "on_shelf");
 
@@ -2071,245 +2250,199 @@ export function XhsShopItemsPage() {
             <Button onClick={() => setDetailImageOpen(false)}>关闭</Button>
             {/* v2.19：**必须勾选原始参考图**才能生成（用户口径「必须选择原始参考图才可以
                 点击生成按钮」）。禁用态给出原因（Tooltip），不让用户对着灰按钮猜。
-                ⚠️ 前端禁用只是引导 —— 后端仍要求非空参考图（去掉回落首图的旧行为），
-                两道防线同改，否则「前端能点、后端拒绝」又是一种不一致。 */}
+                ⚠️ 只按**当前 Tab** 的勾选判断 —— 各 Tab 独立配置，按钮语义也是各自的。 */}
             <Tooltip
               title={
-                detailImageRefs.length === 0
-                  ? "请先勾选至少一张参考图（商品主图或原商品详情图）"
+                activeGroupRefs.length === 0
+                  ? `请先在「${activeGroupLabel}」里勾选至少一张参考图`
                   : ""
               }
             >
               <Button
                 type="primary"
-                loading={detailImageGenerating}
-                disabled={detailImageRefs.length === 0 || detailImageLoading}
+                loading={detailImageGenerating && !detailImageRegenerating}
+                disabled={activeGroupRefs.length === 0 || detailImageLoading}
                 onClick={() => void generateDetailImage()}
               >
-                生成
+                生成{activeGroupLabel}
               </Button>
             </Tooltip>
           </Space>
         }
       >
-        {/* 75vw 宽屏下弹窗会很高 ⇒ 内容区限高滚动，弹窗本体不超出视口 */}
-        <Row gutter={16} style={{ maxHeight: "72vh", overflowY: "auto" }}>
-          {/* 左栏：配置（商品信息 / 参考图勾选 / 补充要求） */}
-          <Col span={12}>
-            <Space direction="vertical" size={12} style={{ width: "100%" }}>
-              <Descriptions size="small" column={1}>
-                <Descriptions.Item label="商品">
-                  {detailImageItem?.title || detailImageItem?.item_id || "-"}
-                </Descriptions.Item>
-                <Descriptions.Item label="商品ID">
-                  {detailImageItem?.item_id || "-"}
-                </Descriptions.Item>
-              </Descriptions>
+        <Descriptions size="small" column={2} style={{ marginBottom: 12 }}>
+          <Descriptions.Item label="商品">
+            {detailImageItem?.title || detailImageItem?.item_id || "-"}
+          </Descriptions.Item>
+          <Descriptions.Item label="商品ID">
+            {detailImageItem?.item_id || "-"}
+          </Descriptions.Item>
+        </Descriptions>
 
-              {/* v2.15/v2.20 参考图勾选（§13.3.6）：**主图 / 原商品详情图两大块**，
-                  各自独立成卡片（组名 + 本组计数 + 本组全选/清空）。 */}
+        {/* v2.22（§13.3.7.9）：**主图 / 详情图完全拆分为两个 Tab**（用户口径
+            「将生成主图和详情图完全拆分开，使用 tab，各自的提示词模板、补充要求、
+            生成张数」）。
+
+            ⚠️ 每个 Tab 是**一套完整且独立的配置**：参考图勾选 / 提示词 / 张数 / 结果。
+            切 Tab 不丢各自的状态（`groupConfigs` 按组存）—— 若共用一个 state，
+            用户在 A 填的提示词会在切到 B 后被顶掉（「混搭」在状态层的形态）。 */}
+        <Tabs
+          activeKey={activeGroup}
+          onChange={(key) => setActiveGroup(key as "product" | "detail")}
+          items={detailImageGroupTabs.map((tab) => ({
+            key: tab.key,
+            label: (
+              <span>
+                {tab.label}
+              </span>
+            ),
+            children: (
               <Spin spinning={detailImageLoading}>
-                <Space direction="vertical" size={10} style={{ width: "100%" }}>
-                  <Space size={6}>
-                    <Text strong style={{ fontSize: 13 }}>
-                      参考图
-                    </Text>
-                    <Text type="secondary" style={{ fontSize: 11 }}>
-                      必须至少勾选一张 · 共选 {detailImageRefs.length} 张
-                    </Text>
-                  </Space>
+                <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                  {/* ① 可选参考图（v2.23 用户口径：「把原始主图、原始详情图**放一组内**，
+                      该组为**可选参考图**，只有用户选了就一并扔给大模型，**最多选 6 张**」）——
+                      ⇒ **合并成一个组**（不再分两个小卡片），组内顺序 = 主图 → 详情图，
+                      上限 6 张（前后端同一上限）。选中哪些就一并送模型。 */}
                   <ReferenceImagePicker
-                    label="商品主图"
-                    urls={detailImageDetail?.product_images || []}
+                    label="可选参考图"
+                    urls={[
+                      ...(detailImageDetail?.product_images || []),
+                      ...(detailImageDetail?.detail_images || []),
+                    ]}
                     selected={detailImageRefs}
+                    maxSelectable={6}
                     onToggle={(url) =>
                       setDetailImageRefs((current) =>
                         current.includes(url)
                           ? current.filter((u) => u !== url)
-                          : [...current, url]
+                          : current.length >= 6
+                            ? current // 已达上限 ⇒ 不再追加（按钮已置灰，这里兜底）
+                            : [...current, url]
                       )
                     }
-                    onSelectAll={() =>
-                      setDetailImageRefs((current) => [
-                        ...current,
-                        ...(detailImageDetail?.product_images || []).filter(
-                          (url) => !current.includes(url)
-                        ),
-                      ])
-                    }
-                    onClearGroup={() => {
-                      const group = new Set(detailImageDetail?.product_images || []);
-                      setDetailImageRefs((current) => current.filter((u) => !group.has(u)));
-                    }}
+                    onClearGroup={() => setDetailImageRefs([])}
+                    emptyHint="这个商品还没有图片（先执行「同步商品」补齐图集）"
                   />
-                  <ReferenceImagePicker
-                    label="原商品详情图"
-                    urls={detailImageDetail?.detail_images || []}
-                    selected={detailImageRefs}
-                    onToggle={(url) =>
-                      setDetailImageRefs((current) =>
-                        current.includes(url)
-                          ? current.filter((u) => u !== url)
-                          : [...current, url]
-                      )
-                    }
-                    onSelectAll={() =>
-                      setDetailImageRefs((current) => [
-                        ...current,
-                        ...(detailImageDetail?.detail_images || []).filter(
-                          (url) => !current.includes(url)
-                        ),
-                      ])
-                    }
-                    onClearGroup={() => {
-                      const group = new Set(detailImageDetail?.detail_images || []);
-                      setDetailImageRefs((current) => current.filter((u) => !group.has(u)));
+                  {/* ② 本类预览（v2.23 用户口径：「可选参考图**新增一块**展示该 Tab
+                      对应的原始主图/详情图，**只是给用户预览**」）——
+                      ⇒ 只展示、**不可勾选**（不是第二个选择区）：让用户看清「本 Tab
+                      生成的是哪一类图」以及「这一类原始图长什么样」，避免与实际送出的
+                      参考图混淆（可勾选的那组在上面）。 */}
+                  <div
+                    style={{
+                      border: "1px dashed rgba(0,0,0,0.14)",
+                      borderRadius: 6,
+                      padding: "8px 10px",
                     }}
-                    emptyHint="这个商品没有详情图（平台侧未提供，或还没同步到）"
+                  >
+                    {/* ⚠️ 标题与说明**各占一行**（用户口径「不要和图片一行」）：
+                        两者都是行内元素，不加 `display: block` 会挤在同一行。 */}
+                    <Text strong style={{ fontSize: 12, display: "block" }}>
+                      本类原始图预览
+                    </Text>
+                    <Text
+                      type="secondary"
+                      style={{ fontSize: 11, display: "block", marginBottom: 6 }}
+                    >
+                      {tab.label} · 共 {tab.urls.length} 张 · 仅供预览，不参与勾选
+                    </Text>
+                    {tab.urls.length === 0 ? (
+                      <Text type="secondary" style={{ fontSize: 11 }}>
+                        {tab.emptyHint}
+                      </Text>
+                    ) : (
+                      <Space size={6} wrap>
+                        {tab.urls.map((url) => (
+                          <Image
+                            key={url}
+                            src={url}
+                            width={64}
+                            height={64}
+                            style={{
+                              objectFit: "cover",
+                              borderRadius: 2,
+                              border: "1px solid rgba(0,0,0,0.12)",
+                            }}
+                          />
+                        ))}
+                      </Space>
+                    )}
+                  </div>
+
+                  {/* ③ 提示词 / 补充要求（本组独立） */}
+                  <div>
+                    <Text strong style={{ fontSize: 13 }}>
+                      提示词 / 补充要求
+                    </Text>
+                    <Input.TextArea
+                      style={{ marginTop: 4 }}
+                      value={detailImageGroupConfigs[tab.key]?.prompt ?? ""}
+                      onChange={(e) =>
+                        setDetailImageGroupConfigs((current) => ({
+                          ...current,
+                          [tab.key]: { ...current[tab.key], prompt: e.target.value },
+                        }))
+                      }
+                      placeholder={
+                        tab.key === "product"
+                          ? "主图口径：干净背景、突出商品本体（留空则按商品信息自动生成）"
+                          : "详情图口径：卖点拆解、细节特写、场景化（留空则按商品信息自动生成）"
+                      }
+                      disabled={detailImageGenerating}
+                      maxLength={2000}
+                      rows={3}
+                    />
+                  </div>
+
+                  {/* ④ 生成张数（本组独立） */}
+                  <div>
+                    <Text strong style={{ fontSize: 13 }}>
+                      生成张数
+                    </Text>
+                    <div style={{ marginTop: 4 }}>
+                      <Space size={6} align="center">
+                        <InputNumber
+                          min={3}
+                          max={10}
+                          value={detailImageGroupConfigs[tab.key]?.count ?? 3}
+                          onChange={(value) => {
+                            const next = Math.max(3, Math.min(10, Number(value) || 3));
+                            setDetailImageGroupConfigs((current) => ({
+                              ...current,
+                              [tab.key]: { ...current[tab.key], count: next },
+                            }));
+                          }}
+                          disabled={detailImageGenerating}
+                          style={{ width: 110 }}
+                          addonAfter="张"
+                        />
+                        <Text type="secondary" style={{ fontSize: 11 }}>
+                          3 ~ 10 张（每张 = 一次生成请求）
+                        </Text>
+                      </Space>
+                    </div>
+                  </div>
+
+                  {/* ⑤ 本组结果 */}
+                  <DetailImageGroupResult
+                    groupKey={tab.key}
+                    groups={detailImage?.groups || []}
+                    regenerating={detailImageRegenerating}
+                    generating={detailImageGenerating}
+                    onRegenerate={(index) =>
+                      void generateDetailImage({ group: tab.key, index })
+                    }
+                  />
+                  <DetailImageGroupErrors
+                    groupKey={tab.key}
+                    errors={detailImage?.errors || []}
+                    label={tab.label}
                   />
                 </Space>
               </Spin>
-
-              <div>
-                <Text strong style={{ fontSize: 13 }}>
-                  补充要求
-                </Text>
-                <Input.TextArea
-                  style={{ marginTop: 4 }}
-                  value={detailImagePrompt}
-                  onChange={(e) => setDetailImagePrompt(e.target.value)}
-                  placeholder="可留空，留空则按商品标题与规格自动拼提示词"
-                  disabled={detailImageGenerating}
-                  maxLength={2000}
-                  rows={3}
-                />
-              </div>
-
-              {/* v2.18 生成张数（用户口径「新增一个条件，生成多少张图片」）。
-                  1~4，默认 1。⚠️ 每张 = 一次独立的上游请求（串行）⇒ 张数越多越慢，
-                  故在选项后缀写明「较慢」的取舍提示，而不是让用户自己撞。 */}
-              <div>
-                <Text strong style={{ fontSize: 13 }}>
-                  生成张数
-                </Text>
-                <div style={{ marginTop: 4 }}>
-                  <Space size={6} align="center">
-                    <InputNumber
-                      min={3}
-                      max={10}
-                      value={detailImageCount}
-                      onChange={(value) =>
-                        setDetailImageCount(
-                          Math.max(3, Math.min(10, Number(value) || 3))
-                        )
-                      }
-                      disabled={detailImageGenerating}
-                      style={{ width: 110 }}
-                      addonAfter="张"
-                    />
-                    <Text type="secondary" style={{ fontSize: 11 }}>
-                      每组 3 ~ 10 张（勾选两组 ⇒ 总张数为 2 倍；每张 = 一次生成请求）
-                    </Text>
-                  </Space>
-                </div>
-              </div>
-            </Space>
-          </Col>
-
-          {/* 右栏：出图结果（生成后即时可见；未生成时给一行说明，不留空白） */}
-          <Col span={12}>
-            <Text strong style={{ fontSize: 13 }}>
-              生成结果
-            </Text>
-            <div
-              style={{
-                marginTop: 6,
-                minHeight: 320,
-                height: "calc(100% - 26px)",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                border: "1px dashed rgba(0,0,0,0.15)",
-                borderRadius: 6,
-                padding: 8,
-              }}
-            >
-              {detailImage ? (
-                <Space direction="vertical" size={14} style={{ width: "100%" }}>
-                  {/* v2.20：结果**按组分两大块**（用户口径「生成的结果也要分主图和详情图，
-                      这是两大块」）。每组一块，各自标「成功/要了几张」。
-
-                      ⚠️ 分组用后端下发的 `groups`（不在前端 groupBy —— 那会让
-                      「某组一张没成时该组仍要出现」这条口径在前端再实现一遍）。 */}
-                  {(detailImage.groups || []).map((group) => (
-                    <div
-                      key={group.group}
-                      style={{
-                        border: "1px solid rgba(0,0,0,0.1)",
-                        borderRadius: 6,
-                        padding: "8px 10px",
-                        background: "rgba(0,0,0,0.015)",
-                      }}
-                    >
-                      <div
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 8,
-                          marginBottom: 6,
-                        }}
-                      >
-                        <Text strong style={{ fontSize: 12 }}>
-                          {group.group_label}
-                        </Text>
-                        <Text
-                          type={group.succeeded < group.requested ? "warning" : "secondary"}
-                          style={{ fontSize: 11 }}
-                        >
-                          {group.succeeded}/{group.requested} 张
-                          {group.succeeded < group.requested ? "（有失败）" : ""}
-                        </Text>
-                      </div>
-                      {group.assets.length === 0 ? (
-                        <Text type="secondary" style={{ fontSize: 11 }}>
-                          这一组没有生成成功（原因见下方失败信息）
-                        </Text>
-                      ) : (
-                        <Space direction="vertical" size={8} style={{ width: "100%" }}>
-                          {group.assets.map((asset) => (
-                            <div key={asset.id}>
-                              <Image
-                                src={asset.url || asset.local_path}
-                                width="100%"
-                                style={{ objectFit: "contain", borderRadius: 4 }}
-                              />
-                              <Text type="secondary" style={{ fontSize: 11 }}>
-                                第 {asset.group_index || 1} 张 · 模型{" "}
-                                {asset.model_name || "-"} · 素材库（#{asset.id}）
-                              </Text>
-                            </div>
-                          ))}
-                        </Space>
-                      )}
-                    </div>
-                  ))}
-                  {detailImage.errors?.length ? (
-                    <Text type="warning" style={{ fontSize: 11 }}>
-                      {detailImage.errors.length} 张失败：{detailImage.errors[0]}
-                    </Text>
-                  ) : null}
-                </Space>
-              ) : (
-                <Text type="secondary" style={{ fontSize: 12, textAlign: "center" }}>
-                  出图后显示在这里，并存入素材库、落 AIGC 溯源。
-                  <br />
-                  商品图由服务端按商品 ID 从本地台账取（没有商品图就没有参考图，
-                  不会凭空生成一张）。
-                </Text>
-              )}
-            </div>
-          </Col>
-        </Row>
+            ),
+          }))}
+        />
       </Modal>
 
       {/* LLM 生成配置弹窗（T9，设计 17 §7.4）：选模板 + 媒体来源四选一。

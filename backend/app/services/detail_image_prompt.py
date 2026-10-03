@@ -30,6 +30,8 @@ import json
 import logging
 from typing import Any
 
+from backend.app.services import image_prompt
+
 logger = logging.getLogger(__name__)
 
 #: 交给文本模型时，参考图最多附几张（再多提示词会失控，且部分服务商有上限）。
@@ -64,6 +66,25 @@ def _sku_lines(skus: list[dict[str, Any]], limit: int = 12) -> list[str]:
         if parts:
             lines.append(" / ".join(parts))
     return lines
+
+
+#: 出图要求（**一致性锁**，设计 17 §13.3.7.7，v2.21）。
+#:
+#: ⚠️ **v2.21 起改为复用公共约束库** `services/image_prompt.py` —— 原先这里自己写了一
+#: 份，导致「详情图有防漂移约束、笔记配图/视频没有」，且「竖版构图」这类句子在 3 处
+#: 各写一遍。公共约束库按**用途**分档（`USE_DETAIL` / `USE_COVER` / `USE_VIDEO`），
+#: 防漂移三条全用途共享。
+IMAGE_REQUIREMENT_LINES: tuple[str, ...] = image_prompt.requirement_lines(image_prompt.USE_DETAIL)
+
+
+def requirement_block() -> str:
+    """出图要求段（**唯一实现**）—— 供文本模型整理与本地拼接共用。
+
+    ⚠️ 两处必须同源：`build_item_brief`（喂文本模型）与 `_default_detail_image_prompt`
+    （回落本地拼接）若各写一份，「整理成功」与「整理失败」两条路的出图约束会不一致 ——
+    用户会看到「有时风格统一、有时不统一」，且无法归因。
+    """
+    return "\n".join(("出图要求：", *IMAGE_REQUIREMENT_LINES))
 
 
 def build_item_brief(item: dict[str, Any], skus: list[dict[str, Any]], prompt: str) -> str:
@@ -109,13 +130,9 @@ def build_item_brief(item: dict[str, Any], skus: list[dict[str, Any]], prompt: s
         lines.append("")
         lines.append(f"用户补充要求（优先满足）：{user_prompt}")
 
+    lines.append(requirement_block())
     lines.extend(
         [
-            "",
-            "出图要求：",
-            "- 竖版构图，适合电商商品详情页展示；",
-            "- 突出商品主体与核心卖点，画面干净、有质感、光线自然；",
-            "- 图中不要出现文字水印、logo 或价格标签；",
             "",
             "请只输出这段画面提示词本身（中文，200 字以内），不要解释、不要分点。",
         ]
@@ -187,9 +204,11 @@ def brief_preview(item: dict[str, Any], skus: list[dict[str, Any]], prompt: str)
 
 
 __all__ = [
+    "IMAGE_REQUIREMENT_LINES",
     "MAX_PROMPT_CHARS",
     "MAX_PROMPT_IMAGES",
     "brief_preview",
     "build_item_brief",
     "refine_prompt",
+    "requirement_block",
 ]

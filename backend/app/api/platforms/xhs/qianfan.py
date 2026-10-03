@@ -47,7 +47,7 @@ from backend.app.services.business_provider_keys import (
     BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE,
     BusinessKey,
 )
-from backend.app.services import detail_image_prompt
+from backend.app.services import detail_image_prompt, image_prompt
 from backend.app.services.llm_gateway_client import _type_satisfies
 from backend.app.models.material import MaterialFolder
 from backend.app.services.material_scan_service import is_safe_material_path
@@ -1033,8 +1033,10 @@ def sync_shop_goods_status(
     )
 
 
-#: 生成详情图时最多送几张参考图（§13.3.6；服务商侧参考图多了会超上限）。
-MAX_DETAIL_IMAGE_REFERENCES: int = 5
+#: 生成详情图时最多送几张参考图（§13.3.6）。
+#: v2.23：5 → **6**（用户口径「最多选 6 张」；主图与详情图合并成**同一组**后共用这个上限）。
+#: ⚠️ 定义在**请求模型之前**（`Field(max_length=…)` 在类体求值时引用它）。
+MAX_DETAIL_IMAGE_REFERENCES: int = 6
 
 #: v2.18/v2.20：生成张数范围（用户口径「最多 10 张最少 3 张」）。
 #: ⚠️ 每张 = 一次独立的上游请求（串行）⇒ 有上限止损；下限 3 是因为生成详情图
@@ -1060,27 +1062,35 @@ class GenerateDetailImageRequest(BaseModel):
     #: 用户补充要求；为空 ⇒ 后端按商品标题/规格拼默认提示词（不硬编码在端点里，
     #: 见 `_default_detail_image_prompt`）。
     prompt: str = Field(default="", max_length=2000)
-    #: 参考图（v2.15，§13.3.6）：从该商品的**主图 / 详情图**里勾选，最多 5 张。
+    #: 参考图（v2.15，§13.3.6）：从该商品的**主图 / 详情图**里勾选。
     #: 空 ⇒ 沿用旧行为（取商品首图）。**每个 URL 都要过白名单**，见类 docstring。
-    reference_image_urls: list[str] = Field(default_factory=list, max_length=5)
+    #: v2.23：上限 5 → **6**（用户口径「最多选 6 张」；两类合并成一组后共用这个上限）。
+    reference_image_urls: list[str] = Field(default_factory=list, max_length=MAX_DETAIL_IMAGE_REFERENCES)
     #: v2.18：**生成张数**（3~10，默认 3）。用户口径「生成商品详情图功能新增一个条件，
     #: 生成多少张图片」；v2.20 改范围「最多 10 张最少 3 张」。
-    #: ⚠️ 不是所有服务商都认 `n` 参数 ⇒ 实现上**逐张发请求**
-    #: （`count` 次），不依赖上游的多图能力，行为可预期。
+    #: ⚠️ 这不是所有服务商都认 `n` 参数 ⇒ 实现上**逐张发请求**（`count` 次）。
+    #: ⚠️ v2.22：**每组**各自一张数（见 `group_settings`）；本字段是**兜底**，
+    #: 未在 `group_settings` 里指定的组用它（保持旧调用方兼容）。
     count: int = Field(default=DEFAULT_DETAIL_IMAGE_COUNT, ge=MIN_DETAIL_IMAGE_COUNT, le=MAX_DETAIL_IMAGE_COUNT)
+    #: v2.22：**每组独立配置**（用户口径「主图和详情图完全拆分开…各自的提示词模板、
+    #: 补充要求、生成张数」）。形如：
+    #: `{"product": {"prompt": "…", "count": 5}, "detail": {"prompt": "…", "count": 6}}`。
+    #: 未出现的组 ⇒ 回落顶层 `prompt` / `count`。
+    group_settings: dict | None = None
     #: v2.19：**落盘到的素材库文件夹**（`material_folders.id`）。
     #: 用户口径「图片支持下载到本地指定的素材库中也就是本地指定文件夹下」。
     #: 不传 ⇒ 只落 AIGC 资产（旧行为不变）；传了但文件夹不属于本用户 ⇒ 404。
     material_folder_id: int | None = None
+    #: v2.21：**单张重做**（设计 17 §13.3.7.8）。指定某组第几张时**只重跑那一张**
+    #: （不重跑整组）—— 市场共识做法（Pixii `Spot Edit` / GreenOnion redo individual），
+    #: 避免「一张不满意、整组白烧」。
+    #: 形如 `{"group": "product", "index": 2}`；给了它就**忽略 `count`**（只出一张）。
+    regenerate: dict | None = None
     #: v2.19：是否先用**文本模型**把商品信息整理成提示词（用户口径「全部整理扔给大模型」）。
     #: 默认 True；整理失败**自动回落**本地拼接（不阻断出图），原因在响应 `prompt_source`。
     refine_prompt: bool = True
 
     model_config = ConfigDict(extra="forbid")
-
-
-#: 生成详情图时最多送几张参考图（§13.3.6；服务商侧参考图多了会超上限）。
-MAX_DETAIL_IMAGE_REFERENCES: int = 5
 
 
 def _default_detail_image_prompt(item: dict[str, Any], skus: list[dict[str, Any]]) -> str:
@@ -1104,6 +1114,11 @@ def _default_detail_image_prompt(item: dict[str, Any], skus: list[dict[str, Any]
                 seen.append(name)
         parts.append("可选规格：" + "、".join(seen[:4]))
     parts.append("竖版长图构图，干净背景，突出商品主体与卖点排版")
+    # v2.21（§13.3.7.7）：**一致性锁** —— 回落路径也带上公共约束库的防漂移三条。
+    # ⚠️ 这段是**直接送出图模型的最终 prompt**（不经文本模型），故用公共库的
+    # 防漂移与合规约束；构图那句上面已写，不重复。
+    parts.extend(image_prompt.GENERATION_SAFETY_LINES)
+    parts.extend(image_prompt.PLATFORM_SAFE_LINES)
     return "；".join(parts)
 
 
@@ -1263,14 +1278,12 @@ def generate_detail_image(
 
     images = [url for url in (detail.get("images") or []) if url]
     # v2.15（§13.3.6）：参考图可选 —— 勾选的主图 / 详情图，**必须过台账白名单**。
-    # v2.20：白名单按**组**建（同一张图不会同时在两组），以便勾选结果直接归组，
-    # 生成时**按组各发各的请求**（分组是事实，不是事后推断）。
-    product_allowed: set[str] = set(detail.get("product_images") or [])
-    detail_allowed: set[str] = set(detail.get("detail_images") or [])
-    allowed: set[str] = product_allowed | detail_allowed
+    # v2.23：主图与详情图**合并为一组「可选参考图」**（用户口径）⇒ 白名单合成一个集合，
+    # 不再按来源归组（分组的语义已移到「生成哪一类图」的 Tab 上）。
+    allowed: set[str] = set(detail.get("product_images") or []) | set(
+        detail.get("detail_images") or []
+    )
     picked: list[str] = []
-    picked_product: list[str] = []
-    picked_detail: list[str] = []
     for url in payload.reference_image_urls or []:
         candidate = str(url or "").strip()
         if not candidate:
@@ -1286,11 +1299,6 @@ def generate_detail_image(
             )
         if candidate not in picked:
             picked.append(candidate)
-            # 归组（按勾选顺序；同一张图只进一组）。
-            if candidate in product_allowed:
-                picked_product.append(candidate)
-            else:
-                picked_detail.append(candidate)
     # ⚠️ v2.19：**必须勾选参考图**（用户口径「必须选择原始参考图才可以点击生成按钮」）。
     # 去掉「不勾就回落商品首图」的旧行为 —— 前后端同一判据，不留「能点但被拒」的不一致。
     if not picked:
@@ -1312,10 +1320,6 @@ def generate_detail_image(
             },
         )
     reference_images = picked[:MAX_DETAIL_IMAGE_REFERENCES]
-    reference_groups = {
-        "product": picked_product[:MAX_DETAIL_IMAGE_REFERENCES],
-        "detail": picked_detail[:MAX_DETAIL_IMAGE_REFERENCES],
-    }
 
     # 业务点 → 服务商（不回落；未配置 / 类型不符 ⇒ 400 结构化）。
     # ⚠️ 复用 `ai.py::_business_model_context`（**同一份**错误映射实现）：
@@ -1358,6 +1362,80 @@ def generate_detail_image(
                 prompt = refined
                 prompt_source = "llm"
 
+    # v2.22（§13.3.7.9）：**每组独立配置**（用户口径「主图和详情图完全拆分开，
+    # 使用 tab，各自的提示词模板、补充要求、生成张数」）。
+    #
+    # ⚠️ 组设置从 `payload.group_settings` 取，**缺项回落顶层** `prompt`/`count`
+    # （旧调用方只传顶层也照常工作 —— 不破坏兼容）。
+    # ⚠️ 张数/提示词都在**请求时**定下来，写进 `groups`，后面循环直接读 ——
+    # 不再在循环里回落判断（一处判断，避免两份实现）。
+    def _group_setting(key: str) -> dict[str, Any]:
+        raw = (payload.group_settings or {}).get(key)
+        return raw if isinstance(raw, dict) else {}
+
+    # v2.23（用户口径「把原始主图、原始详情图**放一组内**，该组为**可选参考图**，
+    # 只有用户选了就一并扔给大模型，**最多选 6 张**」）：
+    # 参考图**不再按来源分组** —— 前端只有一组「可选参考图」，勾中的一并送模型。
+    # ⇒ 组的「存在性」改为由 `group_settings`（即该 Tab 有没有被要求生成）决定，
+    # 参考图则**统一用全部已勾图**（`fallback_refs`）。
+    fallback_refs = picked[:MAX_DETAIL_IMAGE_REFERENCES]
+
+    groups: list[dict[str, Any]] = []
+    for key, label in (
+        ("product", "原始主图"),
+        ("detail", "原始详情图"),
+    ):
+        setting = _group_setting(key)
+        # 组存在 ⇒ 该组被显式要求生成（前端只送有勾图的组 + 本次目标组）。
+        # ⚠️ 顶层没传 `group_settings` 时（旧调用方）⇒ **两组都跑**（保持兼容）。
+        if not setting and payload.group_settings is not None:
+            continue
+        effective_refs = fallback_refs
+        if not effective_refs:
+            continue
+        group_prompt = str(setting.get("prompt") or "").strip() or prompt
+        try:
+            group_count = int(setting.get("count") or count)
+        except (TypeError, ValueError):
+            group_count = count
+        # 夹到合法区间（前端已限，这里再夹一次 —— 不依赖前端）。
+        group_count = max(MIN_DETAIL_IMAGE_COUNT, min(group_count, MAX_DETAIL_IMAGE_COUNT))
+        groups.append(
+            {
+                "key": key,
+                "label": label,
+                "refs": effective_refs[:MAX_DETAIL_IMAGE_REFERENCES],
+                "prompt": group_prompt,
+                "count": group_count,
+            }
+        )
+
+    # v2.21（§13.3.7.8）：**单张重做** —— 只重跑指定的那一张。
+    # ⚠️ 用途：一组里某张不满意时，不必整组重跑（整组重跑会白烧已成功的那几张，
+    # 且新图换掉满意的旧图）。市场共识做法（Pixii `Spot Edit` / GreenOnion redo）。
+    # ⚠️ 本段必须在 `task = Task(...)` **之前**：payload 里要写重做目标。
+    regen_group = ""
+    regen_index = 0
+    if isinstance(payload.regenerate, dict):
+        regen_group = str(payload.regenerate.get("group") or "").strip()
+        try:
+            regen_index = int(payload.regenerate.get("index") or 0)
+        except (TypeError, ValueError):
+            regen_index = 0
+        valid_groups = {item["key"] for item in groups}
+        if regen_group not in valid_groups or regen_index < 1:
+            # 如实报错，不静默退化成「整组重跑」（那会烧掉用户没打算动的图）。
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "REGENERATE_TARGET_INVALID",
+                    "message": "单张重做的目标无效（该组没有勾选参考图，或序号不是正整数）",
+                },
+            )
+        # 只跑目标那一组，且只出一张。
+        groups = [item for item in groups if item["key"] == regen_group]
+        groups[0]["count"] = 1
+
     task = Task(
         user_id=current_user.id,
         platform="xhs",
@@ -1370,10 +1448,21 @@ def generate_detail_image(
             "prompt": prompt,
             "model_config_id": model_config.id,
             "reference_images": reference_images,
-            # v2.20：**按组**记录参考图（排障时能看出每组各送了什么；生成也按它分组）。
-            "reference_groups": reference_groups,
+            # v2.21：单张重做时记录目标（排障能区分「整组生成」与「重做某张」）。
+            **({"regenerate": {"group": regen_group, "index": regen_index}} if regen_group else {}),
             # v2.18：生成张数一并入 payload（排障时能看出「这次要了几张」）。
             "count": count,
+            # v2.22：**每组最终的提示词与张数**（排障时能看出每组实际用了什么；
+            # 组设置与顶层兜底的合并在请求时就已完成，这里记录结果）。
+            "group_plans": [
+                {
+                    "group": item["key"],
+                    "count": item["count"],
+                    "prompt": item["prompt"][:300],
+                    "refs": item["refs"][:MAX_DETAIL_IMAGE_REFERENCES],
+                }
+                for item in groups
+            ],
             # v2.19：提示词来源（llm = 文本模型整理；local = 回落本地拼接）+ 整理说明。
             "prompt_source": prompt_source,
             **({"refine_note": refine_note} if refine_note else {}),
@@ -1390,30 +1479,32 @@ def generate_detail_image(
     # 结果**不带「这张是按哪组生成的」标记** —— 事后无法可靠分组（只能靠猜）。
     # 按组各发各的请求，分组就成了**事实**（请求时就定的），而不是事后推断。
     #
-    # ⚠️ 张数是**每组**的张数（勾了两组 ⇒ 最多 2 × count 张）。这一点必须让用户
-    # 看得见 —— 弹窗里组头已显示各组选中数，生成后的结果也按组分别标注张数。
-    groups: list[tuple[str, str, list[str]]] = []
-    if picked_product:
-        groups.append(("product", "商品主图", picked_product))
-    if picked_detail:
-        groups.append(("detail", "原商品详情图", picked_detail))
-
+    # ⚠️ 张数是**每组**的张数（勾了两组 ⇒ 最多 2 × count 张）。
+    # ⚠️ `groups` / 重做解析已在 `task = Task(...)` 之前完成（payload 要写它们）。
     assets: list[dict[str, Any]] = []
     errors: list[str] = []
-    total = count * len(groups)
+    total = sum(item["count"] for item in groups)
     done = 0
-    for group_key, group_label, group_refs in groups:
-        for index in range(count):
+    for item in groups:
+        group_key = item["key"]
+        group_label = item["label"]
+        group_refs = item["refs"]
+        group_prompt = item["prompt"]
+        group_count = item["count"]
+        for index in range(group_count):
+            # 单张重做时只跑一次（count=1），用**原始序号**标记结果。
+            output_index = regen_index if regen_group else index + 1
             try:
                 result = image_ai_client.generate_image(
                     model_config=model_config,
                     api_key=api_key,
-                    prompt=prompt,
-                    # 参考图 = **本组**勾选的（不再跨组混送）。
+                    # v2.22：**本组自己的提示词**（每组可独立设置）。
+                    prompt=group_prompt,
+                    # 参考图 = **本组**勾选的（不跨组混送）。
                     reference_images=group_refs[:MAX_DETAIL_IMAGE_REFERENCES],
                 )
             except Exception as exc:  # noqa: BLE001 - 服务商五花八门，一律结构化转出
-                errors.append(f"{group_label} 第 {index + 1} 张：{exc}")
+                errors.append(f"{group_label} 第 {output_index} 张：{exc}")
                 done += 1
                 continue
 
@@ -1440,8 +1531,8 @@ def generate_detail_image(
                     #: 分组标记（前端按它分两大块渲染；`product` / `detail`）。
                     "group": group_key,
                     "group_label": group_label,
-                    #: 组内第几张（1 起）。
-                    "group_index": index + 1,
+                    #: 组内第几张（1 起）；单张重做时是**原始序号**（该组里的位置）。
+                    "group_index": output_index,
                 }
             )
             done += 1
@@ -1473,13 +1564,13 @@ def generate_detail_image(
     # 时仍要出现该组）属于业务语义，放前端 = 同一套规则再实现一遍（DEF-044）。
     group_summaries = [
         {
-            "group": group_key,
-            "group_label": group_label,
-            "requested": count,
-            "succeeded": len([a for a in assets if a["group"] == group_key]),
-            "assets": [a for a in assets if a["group"] == group_key],
+            "group": item["key"],
+            "group_label": item["label"],
+            "requested": item["count"],
+            "succeeded": len([a for a in assets if a["group"] == item["key"]]),
+            "assets": [a for a in assets if a["group"] == item["key"]],
         }
-        for group_key, group_label, _refs in groups
+        for item in groups
     ]
 
     return {

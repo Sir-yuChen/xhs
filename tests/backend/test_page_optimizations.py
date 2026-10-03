@@ -2126,24 +2126,27 @@ def test_t9_panels_are_wired_into_workshop():
 SHOP_ITEMS_PAGE = ROOT / "frontend/src/pages/platforms/xhs/shop-items-page.tsx"
 
 
-def test_detail_image_modal_uses_two_column_layout():
-    """生成详情图弹窗 = **左右两栏**（设计 17 §13.3.3 v2.16，用户口径「重新布局一下」）。
+def test_detail_image_modal_uses_tabs_for_groups():
+    """生成图弹窗 = **主图 / 详情图两个 Tab**（设计 17 §13.3.7.9 v2.22，用户口径
+    「弹窗中将生成主图和详情图完全拆分开，使用 tab，各自的提示词模板，补充要求，生成张数」）。
 
-    原版 560 宽、从上到下一路堆叠 ⇒ 参考图缩略图挤成窄条、出图结果被压在弹窗最底部。
-    守四件：① 弹窗加宽到 760；② 左右两栏（`Row` + 两个 `Col`）；
-    ③ 右栏是「生成结果」（出图即时可见，不用滚到底）；④ 参考图勾选仍在左栏。
+    ⚠️ v2.22 **取代** v2.16 的「左右两栏」布局：两栏解决的是「结果被压到底部」，
+    但主图/详情图的**配置**仍是共用的（一份提示词、一个张数）—— Tab 才是「完全拆开」。
+
+    守五件：① 75vw 宽度保留；② 用 `Tabs` 且 items 由 `detailImageGroupTabs` 驱动；
+    ③ 每组有**自己的**提示词输入与张数输入；④ 每组有自己的一块结果；
+    ⑤ 每组的状态**按组存**（`detailImageGroupConfigs`），不是共用一份。
     """
     page = _code_only(_read(SHOP_ITEMS_PAGE))
-    # 只取弹窗那一段（从注释头到 `</Modal>`），避免命中页面别处的 Row/Col
     block = _slice_between(page, 'title="生成AI商品图"', "</Modal>")
     assert 'width="75vw"' in block, "弹窗宽度不是「全屏 75%」（用户口径）"
-    assert "<Row" in block and block.count("<Col") >= 2, "弹窗未改成左右两栏"
-    assert "生成结果" in block, "右栏缺少「生成结果」区（出图要即时可见，不能被压到底部）"
-    assert "ReferenceImagePicker" in block, "参考图勾选丢了"
-    # 左栏（配置）在前、右栏（结果）在后 —— 阅读顺序：先配置后结果
-    assert block.index("ReferenceImagePicker") < block.index("生成结果"), (
-        "参考图勾选应在左栏（配置），结果在右栏"
-    )
+    assert "<Tabs" in block, "未使用 Tab 拆分"
+    assert "detailImageGroupTabs" in block, "Tab 未由组清单驱动（会写死两份）"
+    # 每组各自的提示词与张数
+    assert "detailImageGroupConfigs[tab.key]?.prompt" in block, "提示词未按组存"
+    assert "detailImageGroupConfigs[tab.key]?.count" in block, "张数未按组存"
+    # 每组各自的结果块
+    assert "DetailImageGroupResult" in block, "每组没有自己的结果块"
 
 
 def test_detail_image_modal_has_count_selector():
@@ -2156,11 +2159,12 @@ def test_detail_image_modal_has_count_selector():
     block = _slice_between(page, 'title="生成AI商品图"', "</Modal>")
     assert "生成张数" in block, "弹窗缺少「生成张数」条件"
     assert "min={3}" in block and "max={10}" in block, "张数范围不是 3~10"
-    assert "detailImageCount" in block, "张数控件未绑定 state"
-    assert "setDetailImageCount" in block, "张数不可改"
-    # ④ 张数真正传进请求函数（假接线守卫：能选 ≠ 生效）
+    # v2.22：张数**按组**存（每组自己的张数），不再是一个全局 state
+    assert "detailImageGroupConfigs[tab.key]?.count" in block, "张数未按组绑定"
+    assert "setDetailImageGroupConfigs" in block, "张数不可改"
+    # ④ 每组配置真正传进请求函数（假接线守卫：能填 ≠ 生效）
     generate_fn = _slice_between(page, "async function generateDetailImage", "function ")
-    assert "detailImageCount" in generate_fn, "张数未传给请求函数（选了也不生效）"
+    assert "groupSettings" in generate_fn, "按组配置未传给请求函数"
 
 
 def test_detail_image_reference_groups_are_separate_blocks():
@@ -2179,13 +2183,42 @@ def test_detail_image_reference_groups_are_separate_blocks():
     # ② 组头：组名 + 本组计数 + 本组全选/清空
     assert "共 {urls.length} 张" in picker, "组头缺少本组总数"
     assert "已选 {pickedInGroup}" in picker, "组头缺少本组已选数（会让人误读成全局计数）"
-    assert "onSelectAll" in picker and "onClearGroup" in picker, "缺少本组全选/清空"
-    # 清空必须按**本组集合**过滤（整清 = 跨组串，正是「混搭」的另一种形态）
-    assert "group.has(u)" in page, "清空未按本组 url 集合过滤（会误清另一组）"
-    # ③ 两个 picker 调用点都传了本组回调
+    # v2.23：**取消「全选」**（用户口径）—— 只保留「清空」
+    assert "onClearGroup" in picker, "缺少「清空」"
+    assert "onSelectAll" not in picker, "「全选」应已移除（v2.23 用户口径）"
+    assert "reachedLimit" in picker, "达上限后未做置灰处理"
+    # ⚠️ v2.23：主图与详情图**合并为一组**后，不再有「按本组过滤」的问题
+    # （旧断言 `group.has(u)` 是两卡片时代的产物，随合并一并退场）。
+    # ③ 两个 picker 调用点都传了本组回调（v2.23：每组 Tab 里都列**全部**两组图）
     block = _slice_between(page, 'title="生成AI商品图"', "</Modal>")
-    assert block.count("onSelectAll=") == 2, "两组未各自绑定全选"
-    assert block.count("onClearGroup=") == 2, "两组未各自绑定清空"
+    # v2.23：合并成一组 ⇒ 一个 picker、一个清空；且不再有「全选」
+    assert block.count('label="可选参考图"') == 1, "参考图应只有一组（合并后）"
+    assert "onSelectAll" not in block, "「全选」应已移除"
+    # 参考图列出**该商品下的所有图**（主图 + 详情图都在同一组里）
+    assert "detailImageDetail?.product_images" in block and "detailImageDetail?.detail_images" in block, (
+        "参考图未同时列出主图与详情图（用户口径：列出该商品下的所有图）"
+    )
+
+
+def test_detail_image_reference_section_is_optional_reference():
+    """v2.23：参考图区 = **「可选参考图」**，其下含**原始主图 / 原始详情图**两类
+    （用户口径「参考图应列出该商品下的所有图，包括主图和详情图」+
+    「原始主图和原始详情图归为可选参考图」）。
+
+    守三件：① 有「可选参考图」这个统称标题；② 两类各有自己的分组标题且带「原始」前缀；
+    ③ 两类都在**同一个 Tab 内**列出（不是各 Tab 一半）。
+    """
+    page = _code_only(_read(SHOP_ITEMS_PAGE))
+    block = _slice_between(page, 'title="生成AI商品图"', "</Modal>")
+    # v2.23：主图与详情图**合并为一组「可选参考图」**（用户口径「放一组内」）
+    assert 'label="可选参考图"' in block, "参考图未合并为「可选参考图」一组"
+    assert "maxSelectable={6}" in block, "参考图未设 6 张上限（用户口径「最多选 6 张」）"
+    # 组内同时含主图与详情图（合并，不是两个卡片）
+    assert "detailImageDetail?.product_images" in block
+    assert "detailImageDetail?.detail_images" in block
+    # v2.23：新增**预览块**（该 Tab 对应的那类原图，仅供预览）
+    assert "本类原始图预览" in block, "缺少本类原始图预览块"
+    assert "仅供预览" in block, "预览块未标明「不参与勾选」"
 
 
 def test_detail_image_result_is_grouped_in_ui():
@@ -2196,15 +2229,41 @@ def test_detail_image_result_is_grouped_in_ui():
     ② 每组显示「成功/要了几张」；③ 某组全灭时该组仍渲染（给一行说明而不是消失）。
     """
     page = _code_only(_read(SHOP_ITEMS_PAGE))
-    block = _slice_between(page, 'title="生成AI商品图"', "</Modal>")
-    assert "detailImage.groups" in block, "结果未按后端下发的 groups 分组渲染"
-    assert "group.succeeded" in block and "group.requested" in block, (
+    # v2.22：结果块抽成子组件（按组渲染），断言落在组件定义上
+    result = _slice_between(page, "function DetailImageGroupResult", "function DetailImageGroupErrors")
+    assert "groups" in result and ".find((item) => item.group === groupKey)" in result, (
+        "结果未按组从后端下发的 groups 中取"
+    )
+    assert "group.succeeded" in result and "group.requested" in result, (
         "每组未显示「成功/要了几张」"
     )
-    assert "group.assets.length === 0" in block, "某组全灭时没有兜底渲染（该组会静默消失）"
-    assert "group_label" in block, "组名未用后端下发的中文名"
-    # ⚠️ 不许在页面里自己按 group 分组（那是分组口径的第二份实现）
-    assert "filter((a) => a.group" not in block, "页面自己做了分组（应由后端下发）"
+    assert "group.assets.length === 0" in result, "某组全灭时没有兜底渲染（该组会静默消失）"
+
+
+def test_detail_image_supports_single_regenerate():
+    """v2.21：**单张重做**（设计 17 §13.3.7.8）。
+
+    守三件：① 结果区每张有「重做这张」入口；② 点击时**带上该张的组与序号**；
+    ③ 重做目标存了 state（用来只让那一张转圈，不是整组变灰）。
+    """
+    page = _code_only(_read(SHOP_ITEMS_PAGE))
+    # v2.22：结果块在子组件里，断言落在组件定义上
+    result = _slice_between(page, "function DetailImageGroupResult", "function DetailImageGroupErrors")
+    assert "重做这张" in result, "结果区缺少单张重做入口"
+    assert "regenerating?.group === groupKey" in result, "重做态未用于单张 loading"
+    # 传的是该张的组与序号（不是写死的）
+    assert "onRegenerate(asset.group_index || 1)" in result, "重做未带上该张的序号（会重错图）"
+    block = _slice_between(page, 'title="生成AI商品图"', "</Modal>")
+    # 传的是 **本 Tab 的组** + 该张序号（不是写死的）
+    assert "group: tab.key" in block, "重做未带上当前组"
+    assert "void generateDetailImage({ group: tab.key, index })" in block, (
+        "重做调用未带组与序号（会重错图）"
+    )
+    # 请求函数确实把它发出去了（能点 ≠ 生效）
+    api = _read(ROOT / "frontend/src/lib/api.ts")
+    assert "regenerate" in api and "...(regenerate ? { regenerate } : {})" in api, (
+        "请求函数未把单张重做参数发给后端"
+    )
 
 
 def test_detail_image_generate_button_requires_reference():
@@ -2216,12 +2275,13 @@ def test_detail_image_generate_button_requires_reference():
     """
     page = _code_only(_read(SHOP_ITEMS_PAGE))
     block = _slice_between(page, 'title="生成AI商品图"', "</Modal>")
-    assert "detailImageRefs.length === 0" in block, "生成按钮未与参考图勾选挂钩"
+    # v2.22：按**当前 Tab** 的勾选判断（各 Tab 独立配置 ⇒ 按钮语义也是各自的）
+    assert "activeGroupRefs.length === 0" in block, "生成按钮未与参考图勾选挂钩"
     assert "disabled={" in block, "生成按钮缺少禁用态"
-    assert "请先勾选至少一张参考图" in block, "禁用态未说明原因"
+    assert "请先在" in block and "勾选至少一张参考图" in block, "禁用态未说明原因"
     # ③ 张数真正传进请求函数（假接线守卫：能选 ≠ 生效）
     generate_fn = _slice_between(page, "async function generateDetailImage", "function ")
-    assert "detailImageCount" in generate_fn, "张数未传给请求函数（选了也不生效）"
+    assert "groupSettings" in generate_fn, "按组配置未传给请求函数（填了也不生效）"
 
 
 def test_library_card_shows_note_type_tag():

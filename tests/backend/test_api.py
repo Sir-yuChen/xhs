@@ -5525,9 +5525,10 @@ def test_generate_detail_image_uses_own_business_point_and_persists_asset(tmp_pa
         assert body["url"] == "https://cdn.example.test/detail.png"
         assert body["asset"]["model_name"] == "detail-image-model"
 
-        # 勾的参考图原样送出，且提示词是后端拼的
-        assert len(fake.calls) == 3, "count=3 ⇒ 逐张发 3 次"
-        assert len(body["assets"]) == 3
+        # v2.23：仅一组（未传 group_settings ⇒ 旧契约两组都跑；这里传了只留 product）
+        # ⚠️ 未传 group_settings 时两组都跑 ⇒ 3 张 × 2 组。
+        assert len(fake.calls) == 6, "两组 × 每组 count=3 = 6 次上游调用"
+        assert len(body["assets"]) == 6
         _model, prompt, reference_images = fake.calls[0]
         assert reference_images == ["https://cdn.xhs.test/main.jpg"]
         assert "白橘运动包" in prompt
@@ -5536,7 +5537,7 @@ def test_generate_detail_image_uses_own_business_point_and_persists_asset(tmp_pa
         db = _test_session_factory()
         try:
             assets = db.query(AigcMediaAsset).all()
-            assert len(assets) == 3, "count=3 ⇒ 落 3 条素材行"
+            assert len(assets) == 6, "两组 × 每组 count=3 ⇒ 落 6 条素材行"
             assert assets[0].url == "https://cdn.example.test/detail.png"
             # ⚠️ 缺值口径：服务商没回 local_path ⇒ 留空串，**不拿 url 冒充**
             assert assets[0].local_path == ""
@@ -5637,6 +5638,8 @@ def test_generate_detail_image_supports_count_and_reports_partial_failure(tmp_pa
                 "prompt": "",
                 "count": 3,
                 "reference_image_urls": ["https://cdn.xhs.test/main.jpg"],
+                # v2.23：显式只生成「原始主图」这一组（否则两组都跑）。
+                "group_settings": {"product": {"count": 3}},
             },
         )
         assert response.status_code == 200, response.text
@@ -5671,6 +5674,7 @@ def test_generate_detail_image_supports_count_and_reports_partial_failure(tmp_pa
                 "prompt": "",
                 "count": 3,
                 "reference_image_urls": ["https://cdn.xhs.test/main.jpg"],
+                "group_settings": {"product": {"count": 3}},
             },
         )
         assert failed.status_code == 502
@@ -5764,7 +5768,7 @@ def test_generate_detail_image_result_is_grouped(tmp_path):
         )
         url = "/api/xhs/qianfan/generate-detail-image"
 
-        # ④ 只勾主图组 ⇒ 结果只有一组
+        # ④ 明确只要一组 ⇒ 结果只有一组
         only_product = client.post(
             url,
             headers={"Authorization": f"Bearer {token}"},
@@ -5773,11 +5777,13 @@ def test_generate_detail_image_result_is_grouped(tmp_path):
                 "item_id": "ITEM-GRP",
                 "reference_image_urls": ["https://cdn.xhs.test/main.jpg"],
                 "count": 3,
+                # v2.23：组的存在性由 group_settings 决定
+                "group_settings": {"product": {"count": 3}},
             },
         )
         assert only_product.status_code == 200, only_product.text
         groups = only_product.json()["groups"]
-        assert [g["group"] for g in groups] == ["product"], "只勾一组却造出了别的组"
+        assert [g["group"] for g in groups] == ["product"], "只要求一组却造出了别的组"
 
         # 两组都勾 ⇒ 两组都在（第 1 张失败 ⇒ 主图组 2/3）
         both = client.post(
@@ -5805,6 +5811,140 @@ def test_generate_detail_image_result_is_grouped(tmp_path):
             for index, asset in enumerate(g["assets"], start=1):
                 assert asset["group"] == g["group"]
                 assert asset["group_index"] == index
+    finally:
+        app.dependency_overrides.pop(get_image_ai_client, None)
+        app.dependency_overrides.pop(db_dependency, None)
+
+
+def test_generate_detail_image_regenerates_single_image(tmp_path):
+    """v2.21：**单张重做**（设计 17 §13.3.7.8，市场共识：Pixii Spot Edit / GreenOnion redo）。
+
+    守四件：
+    ① 指定 `regenerate={"group","index"}` ⇒ 上游**只被调 1 次**（不重跑整组）；
+    ② 只送**该组**的参考图（不跨组）；
+    ③ 结果的 `group_index` 是**原始序号**（重做第 2 张 ⇒ 回 2，不是 1）；
+    ④ 目标无效（该组没勾 / 序号非正整数）⇒ 400 `REGENERATE_TARGET_INVALID`，
+       **不静默退化成整组重跑**（那会烧掉用户没打算动的图）。
+    """
+    from backend.app.api.ai import get_image_ai_client
+    from backend.app.services.business_provider_keys import (
+        BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE,
+    )
+
+    class CountingClient:
+        def __init__(self):
+            self.calls = []
+
+        def generate_image(self, *, model_config, api_key, prompt, reference_images=None):
+            self.calls.append(list(reference_images or []))
+            return {"url": f"https://cdn.example.test/r{len(self.calls)}.png", "local_path": ""}
+
+    fake = CountingClient()
+    db_dependency = _override_database(tmp_path)
+    token = _register_and_get_access_token("detail-image-regen")
+    try:
+        app.dependency_overrides[get_image_ai_client] = lambda: fake
+        from backend.app.core.security import encrypt_text
+        from backend.app.models import LlmBusinessProvider, LlmGatewayConfig, LlmGatewayModel
+
+        db = _test_session_factory()
+        try:
+            db.add(
+                LlmGatewayConfig(
+                    user_id=_last_registered_user_id,
+                    name="test-image-regen",
+                    provider_key="TEST-IMGR",
+                    base_url="https://api.example.test/v1",
+                    access_token=encrypt_text("«redacted:sk-…»"),
+                    models_json=json.dumps(["detail-image-model"]),
+                    enabled=True,
+                    healthy=True,
+                )
+            )
+            db.flush()
+            db.add(
+                LlmGatewayModel(
+                    user_id=_last_registered_user_id,
+                    provider_key="TEST-IMGR",
+                    model_name="detail-image-model",
+                    model_type="image",
+                    platform="xhs",
+                    enabled=True,
+                )
+            )
+            db.flush()
+            db.add(
+                LlmBusinessProvider(
+                    user_id=_last_registered_user_id,
+                    platform="xhs",
+                    business_key=BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE.key,
+                    provider_key="TEST-IMGR",
+                    model_name="detail-image-model",
+                    enabled=True,
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        account_id = _seed_account_for_last_user()
+        _seed_shop_product(
+            platform_account_id=account_id,
+            item_id="ITEM-REGEN",
+            images=["https://cdn.xhs.test/main.jpg"],
+            detail_images=["https://cdn.xhs.test/d1.jpg"],
+            title="重做测试商品",
+        )
+        url = "/api/xhs/qianfan/generate-detail-image"
+        headers = {"Authorization": f"Bearer {token}"}
+        payload_base = {
+            "platform_account_id": account_id,
+            "item_id": "ITEM-REGEN",
+            "reference_image_urls": [
+                "https://cdn.xhs.test/main.jpg",
+                "https://cdn.xhs.test/d1.jpg",
+            ],
+            "count": 3,
+        }
+
+        # ① 重做「主图组第 2 张」⇒ 只调 1 次
+        before = len(fake.calls)
+        resp = client.post(url, headers=headers, json={**payload_base, "regenerate": {"group": "product", "index": 2}})
+        assert resp.status_code == 200, resp.text
+        assert len(fake.calls) - before == 1, "单张重做应只调一次上游（不重跑整组）"
+        # ② v2.23：参考图是**合并组里勾选的全部**（不再按来源只送本组）
+        assert fake.calls[-1] == [
+            "https://cdn.xhs.test/main.jpg",
+            "https://cdn.xhs.test/d1.jpg",
+        ]
+        body = resp.json()
+        # ③ 序号是原始序号（2，不是 1）
+        assert [g["group"] for g in body["groups"]] == ["product"]
+        assert body["groups"][0]["succeeded"] == 1
+        assert body["assets"][0]["group_index"] == 2
+
+        # ④ 目标无效：该组**不在本次生成范围**（group_settings 里没有它）
+        bad_group = client.post(
+            url,
+            headers=headers,
+            json={
+                **payload_base,
+                # 只要求生成主图组，却要重做详情图 ⇒ 该组不在本次范围
+                "group_settings": {"product": {"count": 3}},
+                "regenerate": {"group": "detail", "index": 1},
+            },
+        )
+        assert bad_group.status_code == 400
+        assert bad_group.json()["detail"]["code"] == "REGENERATE_TARGET_INVALID"
+
+        # ④ 目标无效：序号不是正整数
+        bad_index = client.post(
+            url,
+            headers=headers,
+            json={**payload_base, "regenerate": {"group": "product", "index": 0}},
+        )
+        assert bad_index.status_code == 400
+        assert bad_index.json()["detail"]["code"] == "REGENERATE_TARGET_INVALID"
     finally:
         app.dependency_overrides.pop(get_image_ai_client, None)
         app.dependency_overrides.pop(db_dependency, None)
@@ -5997,17 +6137,18 @@ def test_detail_image_reference_images_must_come_from_the_product(tmp_path):
                 "platform_account_id": account_id,
                 "item_id": "ITEM-REF",
                 "reference_image_urls": ["https://cdn.xhs.test/d2.jpg"],
+                # v2.23：显式只生成「原始详情图」这一组。
+                "group_settings": {"detail": {"count": 3}},
             },
         )
         assert resp.status_code == 200, resp.text
-        # v2.20：**按组各发各的请求** ⇒ 本次只有「详情图」一组被调用。
+        # 参考图**原样送出**（v2.23：主图与详情图合并为一组「可选参考图」，
+        # 不再按来源分别送 ⇒ 勾了什么就送什么）。
         assert fake.calls[-1] == ["https://cdn.xhs.test/d2.jpg"]
-        # 结果按组下发（只有勾了的那组）
+        # 结果只有被要求的那一组
         assert [g["group"] for g in resp.json()["groups"]] == ["detail"]
 
-        # ② 主图 + 详情图混勾 ⇒ **分两组各发各的**（不再混成一次调用）
-        #    ⚠️ v2.20 取代旧的「两张混送一次」：混送时上游不回「这张按哪组生成」，
-        #    事后无法可靠分组 ⇒ 改成按组发请求，分组成为事实。
+        # ② 主图 + 详情图混勾 ⇒ 两组各 count 张，**参考图是同一份勾选**（v2.23 合并为一组）
         before = len(fake.calls)
         resp2 = client.post(
             url,
@@ -6023,13 +6164,13 @@ def test_detail_image_reference_images_must_come_from_the_product(tmp_path):
         )
         assert resp2.status_code == 200, resp2.text
         body2 = resp2.json()
-        # 勾了两组 ⇒ 两组都出现在结果里（顺序：主图组在前，与勾选组顺序一致）
+        # 未传 group_settings ⇒ 两组都跑（兼容）
         assert [g["group"] for g in body2["groups"]] == ["product", "detail"]
-        # 每组的参考图**只有本组的**（不跨组混送）
-        assert body2["groups"][0]["assets"][0]["group"] == "product"
-        assert body2["groups"][1]["assets"][0]["group"] == "detail"
-        # 张数：每组各 count 张（默认 3）⇒ 共 6 张，且每组都是 3/3
-        assert fake.calls[-1] == ["https://cdn.xhs.test/d1.jpg"]
+        # ⚠️ v2.23：**两张参考图一起送**（合并组的语义 —— 勾了的一并扔给模型）
+        assert fake.calls[-1] == [
+            "https://cdn.xhs.test/main.jpg",
+            "https://cdn.xhs.test/d1.jpg",
+        ]
         assert len(fake.calls) - before == 6, "两组 × 每组 3 张 = 6 次上游调用"
         assert [g["succeeded"] for g in body2["groups"]] == [3, 3]
 

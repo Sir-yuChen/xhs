@@ -39,6 +39,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.core.config import get_settings
 from backend.app.models import MaterialFile, ShopProduct
+from backend.app.services import image_prompt
 from backend.app.models.generation import (
     AigcMediaAsset,
     MEDIA_SOURCE_AI_GENERATE,
@@ -262,9 +263,16 @@ def _assets_from_material(
 
 
 def _default_image_prompt(row: ShopProduct) -> str:
-    """`ai_generate` 未给 prompt 时，按商品拼一个通用出图提示词（不造假、可追溯）。"""
+    """`ai_generate` 未给 prompt 时，按商品拼一个通用出图提示词（不造假、可追溯）。
+
+    ⚠️ v2.21：出图约束改走**公共约束库** `services/image_prompt.py`（用途 `USE_COVER`）
+    —— 此前这里自己写「干净背景的商品封面图…竖版构图，突出卖点」，与详情图那份措辞
+    不一致，且**没有防漂移约束**（同一条约束在 3 处各写一遍的典型后果）。
+    """
     title = str(getattr(row, "item_title", "") or "").strip()
-    return f"为小红书笔记生成一张干净背景的商品封面图，主体：{title or '商品'}，竖版构图，突出卖点"
+    parts = [f"为小红书笔记生成一张干净背景的商品封面图，主体：{title or '商品'}"]
+    parts.append(image_prompt.requirement_inline(image_prompt.USE_COVER))
+    return "；".join(parts)
 
 
 def _assets_from_ai(
@@ -452,11 +460,17 @@ def _default_video_prompt(row: ShopProduct) -> str:
     """按商品信息拼默认视频提示词（用户没填 prompt 时用）。
 
     只用台账里**真实存在**的字段（同 `_default_image_prompt` 纪律：不编卖点）。
+
+    ⚠️ v2.21：约束段走公共库的 `USE_VIDEO` 用途 —— 视频的构图口径（9:16 + 动态场景）
+    与图片（3:4 + 静帧）**不同**，故用用途分档而不是照抄图片那份（这正是公共库
+    设计成「按用途组合」而非「一个大字符串」的原因）。
     """
     title = str(getattr(row, "title", "") or "").strip()
+    parts = ["电商商品展示短视频"]
     if title:
-        return f"电商商品展示短视频，商品：{title}；竖版构图，突出商品主体与使用场景"
-    return "电商商品展示短视频；竖版构图，突出商品主体与使用场景"
+        parts.append(f"商品：{title}")
+    parts.append(image_prompt.requirement_inline(image_prompt.USE_VIDEO))
+    return "；".join(parts)
 
 
 # --------------------------------------------------------------------------- #
