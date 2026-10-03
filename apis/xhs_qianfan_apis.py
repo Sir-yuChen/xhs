@@ -51,6 +51,13 @@ AIGC_TASK_STATUS_COMPLETED = "COMPLETED"
 #:  body、发布要等平台落库，15s 实测不够（写超时 / 读超时都踩过，2026-09-23）。
 WRITE_TIMEOUT = 60
 
+#: 订单同步的单页上限（`fulfillment/order/page` 的 `page_size`）。
+#: 订单页自己发的是 20；设 50 让一轮同步少打几页。平台未实测拒绝过大值，
+#: 保守取 50 与商品同步的 `DEFAULT_PAGE_SIZE` 同口径。
+#:
+#: ⚠️ 定义在**类之前**（`get_order_page` 的默认参数在类体求值时引用它）。
+ORDER_PAGE_SIZE_LIMIT = 50
+
 #: 进程级共享会话（设计 13 §18.18.8）。`requests.Session` 是线程安全的（urllib3
 #: 连接池自带锁），复用它让同一 host 的连续请求省掉 DNS + TLS + HTTP/2 握手 ——
 #: 实测「新建连接 157–213 ms」vs「复用连接 40–48 ms」（令牌探针链路只读实测）。
@@ -618,9 +625,219 @@ class XHS_Qianfan_Apis:
             "/app-note/publish",
         )
 
+    # ------------------------------------------------------------------ #
+    # 订单模块（设计 16 §7，M6 方向 6 · **一期只读**）
+    #
+    # 真机实测（2026-10-04，账号 8「观隅好物的店」3 笔真实订单）：
+    # 这批接口**与商品接口同链路 —— 无需 `X-s` / `X-t` / `X-S-Common` 签名**，
+    # 只带千帆自己的 Cookie 即可（订单页自己发的请求带签名，去掉签名后
+    # 接口照样 `code=0` 返回真实数据，对照实验见下方 `get_order_page` 的
+    # 真机记录）。这与 `get_seller_info` / `search_items` 完全同构。
+    #
+    # ⚠️ **本节全部是只读探测接口**。发货 / 售后处理（写操作）在 M7，
+    # 且必须显式 + 二次确认（设计 16 §7.4），不在这里。
+    # ------------------------------------------------------------------ #
+
+    def get_order_page(
+        self,
+        page_no: int = 1,
+        page_size: int = ORDER_PAGE_SIZE_LIMIT,
+        *,
+        start_time_ms: int = 0,
+        end_time_ms: int = 0,
+    ) -> tuple[bool, str, dict | None]:
+        """订单列表一页（`POST /api/edith/fulfillment/order/page`，只读）。
+
+        ## 真机实测（2026-10-04，账号 8，无签名直连）
+
+        | 请求 | 结果 |
+        |---|---|
+        | `start_time=0, end_time=0` | **15s 读超时**（窗口不合法，平台挂死） |
+        | 近 90 天窗口 | `code=0`，`total=0`（窗口内确实无单） |
+        | 近 365 天窗口 | `code=0`，`total=3`，`packages` 3 条真实订单 |
+        | `start_time=1`（近全部） | `code=0`，`total=3`，同上 |
+
+        ⚠️ **`time_range_list` 的窗口不能是 `0/0`** —— 平台不报错而是挂到超时。
+        增量同步调用方必须保证窗口有界（同步服务用「同步游标 → 当前时间」，
+        全量用「近 365 天」，见 `order_sync_service`）。
+
+        ## 响应结构（`data`）
+
+        ```jsonc
+        {
+          "total": 3,
+          "packages": [{                // 一个 package = 一个订单的主包裹
+            "orderId": "79878431779939393",
+            "packageId": "P798784317799393931",
+            "status": 7, "statusDesc": "已完成",
+            "afterSaleStatus": 1, "afterSaleStatusDesc": "无售后",
+            "typeDesc": "现货订单",
+            "totalOrderAmount": 61.72, "actualPaid": 61.72, "shippingFee": 0,
+            "orderedAt": "2026-07-05 14:18:37", "paidAt": "...",
+            "shippedAt": "...", "finishedAt": "...", "promiseLastShipAt": "...",
+            "updatedAt": "...",
+            "expressNo": "79016621445635", "expressCompanyName": "中通速递",
+            "sellerMarkInfo": {"sellerMarkNote": "...", "operator": "...", "updated_at": "..."},
+            "skus": [{ "skuId", "itemId", "skuName", "skuSpecification",
+                       "skuQuantity", "skuSoldPrice", "skuTotalPaidAmount",
+                       "afterSaleStatus", "afterSaleStatusDesc", "image", ... }],
+            "userInfo": { "nickName", "name", "phone", "province", "city",
+                          "district", "town", "address", "street" }
+          }]
+        }
+        ```
+
+        ⚠️ **`orderId`（订单号）是幂等键**；`packageId` 是取详情/物流的键。
+        一个 `orderId` 对应一个主 `packageId`（`skus` 在 package 内）。
+
+        ⚠️ 隐私字段（`userInfo.name/phone/address`）千帆默认**部分脱敏**
+        （`及*` / `184***3034` / 尾段 `***`），虚拟号订单更只有脱敏串 ——
+        平台给什么存什么，不猜不补（缺值口径）。完整值场景在 M7 发货链路。
+        """
+        body: dict = {
+            "page_no": int(page_no),
+            "page_size": int(page_size),
+            "order_tag_list": [],
+            "order_type_list": [],
+            "status": [],
+            "seller_mark_priority_list": [],
+            "seller_mark_note_status_list": [],
+            "overdue_status": -2,
+            "sort_by": {"sort_field": "ordered_at", "desc": True},
+            "need_declare_info": True,
+            "need_declare_times": True,
+            "allow_es_fallback": True,
+        }
+        if start_time_ms or end_time_ms:
+            body["time_range_list"] = [
+                {"time_type": 3, "start_time": int(start_time_ms), "end_time": int(end_time_ms)}
+            ]
+        return self._post(
+            "/api/edith/fulfillment/order/page",
+            body,
+            "/app-order/order/query",
+            timeout=WRITE_TIMEOUT,
+        )
+
+    def get_order_detail(self, package_id: str) -> tuple[bool, str, dict | None]:
+        """订单详情（`POST /api/edith/fulfillment/order/detail`，只读）。
+
+        ⚠️ **入参是 `package_id`（不是 `order_id`）** —— 真机实测：
+        传 `order_id` 平台回 `code=-1, "required param check: package_id"`。
+
+        响应 `data.fulfillment_package`：字段是列表条目的**超集** ——
+        多出物流轨迹（`delivery_packages`）、售后单（`after_sale_list`）、
+        运费险（`carriage_insurance`）、支付方式（`pay_unit_lite`）、
+        签收时间（`confirmed_at` / `finished_at`）等。同步服务用它补详情。
+        """
+        return self._post(
+            "/api/edith/fulfillment/order/detail",
+            {"package_id": str(package_id or "")},
+            "/app-order/order/query",
+            timeout=WRITE_TIMEOUT,
+        )
+
+    def get_order_stats(self, start_time_ms: int, end_time_ms: int) -> tuple[bool, str, dict | None]:
+        """订单状态统计（`POST /api/edith/fulfillment/order_stats`，只读）。
+
+        响应 `data.data` 是一组计数（各状态/标签的订单数），顺序与平台
+        tab 一致。只用于「订单监控」的概览数字；**列表不同步它**（列表页
+        的分页数据由 `get_order_page` 给）。
+        """
+        body = {
+            "conditions": [
+                {
+                    "order_start_time": int(start_time_ms),
+                    "order_end_time": int(end_time_ms),
+                    "status_list": [1, 2, 21, 26, 4, 5, 55, 6, 65, 998],
+                }
+            ]
+        }
+        return self._post(
+            "/api/edith/fulfillment/order_stats",
+            body,
+            "/app-order/order/query",
+            timeout=WRITE_TIMEOUT,
+        )
+
+    def get_after_sale_page(
+        self,
+        page: int = 1,
+        number: int = 20,
+        *,
+        status_in: tuple[int, ...] = (1, 3, 12),
+    ) -> tuple[bool, str, dict | None]:
+        """售后单列表一页（`GET /api/edith/after-sales/returns/v3`，只读）。
+
+        真机实测（2026-10-04，账号 8）：默认查询参数照抄售后工作台页自己
+        发的请求（`page / number / pending_handle_duration_in=18 /
+        goods_source[]=[1,2] / sort=deadline_for_sort_v1 / order=asc /
+        status_in=1,3,12`），响应 `data.after_sales[]` + 一组状态计数。
+
+        `status_in` 是平台售后状态码：`1` 待商家处理 / `3` 待商家收货 /
+        `12` 平台介入…（页面筛选档）。**注意这是售后工作台的码，与订单的
+        `after_sale_status` 不是同一套**。
+
+        ⚠️ 售后列表是**独立维度**：一期只把 `after_sales` 表挂在订单详情的
+        `after_sale_list` 上（同步订单时顺带落），本接口供 M7 处理链路定位
+        待处理售后单用；M6 同步**不依赖**它。
+        """
+        params = {
+            "page": int(page),
+            "number": int(number),
+            "pending_handle_duration_in": 18,
+            "sort": "deadline_for_sort_v1",
+            "order": "asc",
+            "status_in": ",".join(str(s) for s in status_in),
+        }
+        return self._get(
+            "/api/edith/after-sales/returns/v3",
+            params,
+            "/app-order/aftersale/list",
+        )
+
 
 XHSQianfanApis = XHS_Qianfan_Apis
 
+#: 千帆订单状态码（`fulfillment/order/page` 的 `status`）—— 真机实测
+#: （2026-10-04 账号 8 的 3 笔真实订单 + 订单页 `order_stats` 请求的
+#: `status_list` 筛选档，与页面 tab 同源）：
+#:
+#: | 码 | 含义 | 证据 |
+#: |---|---|---|
+#: | 1 | 待付款 | `order_stats` 请求的条件组 |
+#: | 2 / 21 / 26 | 待发货 | 同上（21/26 是待发货的子档） |
+#: | 4 / 5 / 55 | 已发货待收货 | 同上 |
+#: | 6 / 65 | 已完成 | 同上 |
+#: | 7 | 已完成 | 真实订单 79878431779939393 的 `status=7, statusDesc=已完成` |
+#: | 998 | 已关闭/已取消 | 真实订单 80398468036720022 / 79991062927303330 |
+#:
+#: ⚠️ 本表**只做排障对照**：本地状态归属由 `models/order.py::ORDER_STATUS_MAP`
+#: 与 `resolve_order_status()` 唯一承载（状态映射逐值钉死、不散落 if）。
+QIANFAN_ORDER_STATUS_CODES: dict[int, str] = {
+    1: "待付款",
+    2: "待发货",
+    21: "待发货",
+    26: "待发货",
+    4: "已发货待收货",
+    5: "已发货待收货",
+    55: "已发货待收货",
+    6: "已完成",
+    65: "已完成",
+    7: "已完成",
+    998: "已关闭/已取消",
+}
+
+#: 千帆售后状态码（`after_sale_status`）—— 真机实测：
+#: `1` 无售后 / `2` 售后中 / `3` 售后完成 / `4` 售后关闭。
+QIANFAN_AFTERSALE_STATUS_CODES: dict[int, str] = {
+    1: "无售后",
+    2: "售后中",
+    3: "售后完成",
+    4: "售后关闭",
+}
+
+#: 订单状态码的中文对照（定义见上面 `QIANFAN_ORDER_STATUS_CODES`）。
 #: 商品列表的状态筛选（`search_filter.card_type`）。
 #: **全部取自页面自己发的请求**（2026-09-19 逐个 tab 点击抓包），不是猜的：
 #: 售卖中=2（1994 条）/ 已下架=3 / 已冻结=4 / 审核中=5 / 审核驳回=6 / 审核通过=7 / 整改=10。
@@ -652,6 +869,9 @@ __all__ = [
     "XHSQianfanApis",
     "QIANFAN_ITEM_STATUSES",
     "QIANFAN_ITEM_STATUS_LABELS",
+    "QIANFAN_ORDER_STATUS_CODES",
+    "QIANFAN_AFTERSALE_STATUS_CODES",
+    "ORDER_PAGE_SIZE_LIMIT",
     "SKU_BATCH_SIZE",
     "AIGC_TASK_STATUS_RUNNING",
     "AIGC_TASK_STATUS_COMPLETED",

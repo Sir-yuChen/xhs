@@ -112,6 +112,28 @@ BUSINESS_KEY_GENERATE_TAGS = BusinessKey("generate_tags", MODEL_TYPE_TEXT, "生�
 BUSINESS_KEY_POLISH_TEXT = BusinessKey("polish_text", MODEL_TYPE_TEXT, "文本润色")
 
 # --------------------------------------------------------------------------- #
+# 文本类 · 商品侧（kind = `text`）：2 个（设计 20 §3.2，M4 方向 4）
+# --------------------------------------------------------------------------- #
+
+#: 商品标题润色。⚠️ 与 `polish_text`（笔记文本润色）/ `generate_title`（笔记标题）
+#: 是**四个不同的业务点**：那两个服务**笔记**，本组服务**商品** —— 提示词、长度约束、
+#: 平台口径全不同（商品标题有平台字数上限、不能含广告法违禁词；笔记标题没有）
+#: ⇒ 用户要能分别挂服务商（§13.2 的设计目标）。
+BUSINESS_KEY_POLISH_PRODUCT_TITLE = BusinessKey(
+    "polish_product_title",
+    MODEL_TYPE_TEXT,
+    "商品标题润色",
+    ("商品列表-商品详情-AI润色-标题",),
+)
+#: 商品卖点生成。语义同上（「场景 + 痛点 + 解决方案」，不得编造参数）。
+BUSINESS_KEY_GENERATE_SELLING_POINT = BusinessKey(
+    "generate_selling_point",
+    MODEL_TYPE_TEXT,
+    "商品卖点生成",
+    ("商品列表-商品详情-AI润色-卖点",),
+)
+
+# --------------------------------------------------------------------------- #
 # 图像类（kind = `image`）：4 个
 # --------------------------------------------------------------------------- #
 
@@ -162,6 +184,8 @@ BUSINESS_KEYS: Final[tuple[BusinessKey, ...]] = (
     BUSINESS_KEY_GENERATE_TITLE,
     BUSINESS_KEY_GENERATE_TAGS,
     BUSINESS_KEY_POLISH_TEXT,
+    BUSINESS_KEY_POLISH_PRODUCT_TITLE,
+    BUSINESS_KEY_GENERATE_SELLING_POINT,
     BUSINESS_KEY_GENERATE_COVER,
     BUSINESS_KEY_GENERATE_IMAGE,
     BUSINESS_KEY_DESCRIBE_IMAGE,

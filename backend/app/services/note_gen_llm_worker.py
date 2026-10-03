@@ -345,6 +345,7 @@ def start_llm_generate_note(
     model_name: str = "",
     media_source: str = MEDIA_SOURCE_PRODUCT_IMAGE,
     media_options: Optional[dict] = None,
+    hot_topic: str = "",
     source: str = note_queue_service.SOURCE_PRODUCT_NOTE_GENERATE_LLM_SINGLE,
 ) -> dict:
     """单篇 LLM 生成**入队即返回**（设计 17 §7.4）。
@@ -377,7 +378,12 @@ def start_llm_generate_note(
         gateway_config_id=gateway_config_id,
         model_name=model_name,
         media_source=media_source,
-        media_options=media_options,
+        # ⚠️ **热词驱动（M3 方向 2）走 `media_options` 这条已通的管道**：
+        # 它是入队行体里**已经**全程透传到 worker 的字段（`_llm_payload` →
+        # `payload["media_options"]` → worker 读出 → `_finalize_generated`）。
+        # 不新开一条 payload 键 = 不做第二次表单（DEF-044）。
+        # 语义上它只是「本次生成的附加参数袋」，不是「媒体专属」。
+        media_options=({**(media_options or {}), "hot_topic": hot_topic} if hot_topic else media_options),
     )
     record_id = 0
     if not created:
@@ -815,6 +821,11 @@ def _run_one_llm_generate(item_id: int) -> None:
         media_options = payload.get("media_options")
         if not isinstance(media_options, dict):
             media_options = None
+        #: 热词驱动（M3）：话题名随 `media_options` 一起落库，这里取出来交给
+        #: `generate_full_note(extra=…)` ⇒ 渲染进 Prompt（`{hot_topic}` 插槽）。
+        hot_topic = ""
+        if media_options:
+            hot_topic = str(media_options.get("hot_topic") or "").strip()
         account_id = note_queue_service.account_id_of(item)
         user_id = int(item.user_id)
         if not shop_product_id:
@@ -884,6 +895,9 @@ def _run_one_llm_generate(item_id: int) -> None:
                 api_key=context.api_key,
                 skeleton=skeleton,
                 modules=modules,
+                #: 热词驱动：把话题交给 Prompt 渲染（模板可用 `{hot_topic}` 引用；
+                #: **模板没引用就当没有** —— 与 `extra` 的既有语义一致，不硬塞）。
+                extra=({"hot_topic": hot_topic} if hot_topic else None),
             )
         except NoteGenerationError as error:
             _mark_record_failed(

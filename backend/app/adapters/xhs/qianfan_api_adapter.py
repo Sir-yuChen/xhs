@@ -117,6 +117,31 @@ class XhsQianfanApiAdapter:
         with direct_xhs_request_env():
             return self._api().get_demand_detail(demand_id)
 
+    # ------------------------------------------------------------------ #
+    # 订单模块（设计 16 §7，M6 方向 6 · 一期只读）—— 与只读方法同一形态：
+    # 环境包装 + 委托，不改 `(success, msg, payload)` 三元组。
+    # ------------------------------------------------------------------ #
+
+    def get_order_page(self, **kwargs: Any) -> tuple[bool, str, Any]:
+        """订单列表一页（参数语义见 SDK `get_order_page` 的 docstring）。"""
+        with direct_xhs_request_env():
+            return self._api().get_order_page(**kwargs)
+
+    def get_order_detail(self, package_id: str) -> tuple[bool, str, Any]:
+        """订单详情（入参是 `package_id`，见 SDK docstring 的真机记录）。"""
+        with direct_xhs_request_env():
+            return self._api().get_order_detail(package_id)
+
+    def get_order_stats(self, start_time_ms: int, end_time_ms: int) -> tuple[bool, str, Any]:
+        """订单状态统计（订单监控概览用）。"""
+        with direct_xhs_request_env():
+            return self._api().get_order_stats(start_time_ms, end_time_ms)
+
+    def get_after_sale_page(self, **kwargs: Any) -> tuple[bool, str, Any]:
+        """售后单列表一页（参数语义见 SDK `get_after_sale_page` 的 docstring）。"""
+        with direct_xhs_request_env():
+            return self._api().get_after_sale_page(**kwargs)
+
 
 def get_qianfan_api_adapter_factory():
     """千帆适配器工厂（FastAPI 依赖）。

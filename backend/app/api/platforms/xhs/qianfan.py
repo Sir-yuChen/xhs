@@ -41,7 +41,7 @@ from backend.app.adapters.xhs.qianfan_api_adapter import (
 from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user, get_owned_active_account
 from backend.app.core.time import shanghai_now
-from backend.app.api.ai import get_image_ai_client
+from backend.app.api.ai import get_image_ai_client, get_text_ai_client
 from backend.app.services.ai_service import ImageAiClient, OpenAICompatibleTextClient
 from backend.app.services.business_provider_keys import (
     BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE,
@@ -58,10 +58,17 @@ from backend.app.models.shop import NoteGoods
 from backend.app.models.task import Task
 from backend.app.services.shop_health_service import check_account_health
 from backend.app.services import scheduled_job_runner, sync_task_service
+from backend.app.services import order_sync_service
 from backend.app.services import shop_goods_sync_service
 from backend.app.services import shop_products_service
-from backend.app.services.job_registry import JOB_KEY_SHOP_GOODS_SYNC
-from backend.app.services.note_queue_service import SOURCE_ACCOUNT_CARD_GOODS_SYNC
+from backend.app.services.job_registry import (
+    JOB_KEY_SHOP_GOODS_SYNC,
+    JOB_KEY_ORDER_SYNC,
+)
+from backend.app.services.note_queue_service import (
+    SOURCE_ACCOUNT_CARD_GOODS_SYNC,
+    SOURCE_ACCOUNT_CARD_ORDER_SYNC,
+)
 from backend.app.services.sync_task_service import (
     ABSOLUTE_PAGE_CAP,
     DEFAULT_MAX_PAGES,
@@ -1973,3 +1980,530 @@ def item_generations(
         for row in rows
     ]
     return {"items": items, "total": total, "page": payload.page, "page_size": payload.page_size}
+
+
+# =========================================================================== #
+# M4 方向 4 · 商品编辑优化（设计 20，2026-10-04）
+#
+# ⚠️ **先说边界**：设计 16 §5.1 的 `(2b) 批量改价 / 上下架` **判为不可交付** ——
+# 千帆 SDK 11 个端点逐个核对，**零个商品写接口**（详见设计 20 §0 的判据表）。
+# 本组端点交付「可得的那一半」：分组 / 编辑（纯本地）/ AI 润色 / CSV 导出。
+# 所有写操作**只动本地台账**，平台商品零修改。
+# =========================================================================== #
+
+#: 导出 CSV 的行数上限（设计 20 §2.2）。
+#: ⚠️ **前后端同值**：常量只在后端这一处定义，前端读端点下发的值，不抄第二份
+#: （`MAX_BATCH_DELETE` 同一纪律 —— 两份必然漂移，漂移就是「前端放行后端拒」）。
+MAX_EXPORT_ROWS: int = 5000
+
+#: 「不传 = 不动」的 sentinel —— **不是 `None`**（设计 20 §2.2 口径①）。
+#: Pydantic 拿不到键时填它，API 层据此区分「省略键」与「显式传 null」。
+_UNSET = object()
+
+
+class ProductGroupCreateRequest(BaseModel):
+    """建分组（设计 20 §2.1）。"""
+
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=64)
+
+
+class ProductGroupUpdateRequest(BaseModel):
+    """改分组名（设计 20 §2.1）。"""
+
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=64)
+
+
+class ItemEditRequest(BaseModel):
+    """商品本地编辑（设计 20 §2.1 端点 5）。
+
+    ⚠️ **PATCH 语义的两态**（设计 20 §2.2 口径①）：
+    * **省略键** = 保持原值（默认值是 `_UNSET` sentinel，**不是 `None`**）；
+    * **显式传 `null`** = 清空。
+
+    用 `Optional[X] = _UNSET` 而不是 `= None`：后者会把两件事混成一件
+    （用户只想改分组，结果标题被清空了 —— PATCH 最常见的静默错值）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    platform_account_id: int = Field(ge=1)
+    item_id: str = Field(min_length=1, max_length=64)
+    #: 目标分组 id；`null` = 移出分组；省略 = 不动。
+    group_id: Optional[int] = Field(default=_UNSET, ge=1)  # type: ignore[assignment]
+    #: 采纳的 AI 标题；`null` = 清空；省略 = 不动。
+    ai_title: Optional[str] = Field(default=_UNSET, max_length=512)  # type: ignore[assignment]
+    #: 采纳的 AI 卖点；`null` = 清空；省略 = 不动。
+    ai_selling_point: Optional[str] = Field(default=_UNSET)  # type: ignore[assignment]
+
+
+class ItemsExportRequest(BaseModel):
+    """CSV 导出（设计 20 §2.1 端点 6）。
+
+    筛选字段与 `ShopItemsRequest` **逐字段一致**（复用同一份 `_apply_filters`，
+    不重新实现 —— 两份筛选实现 = 「列表看到的」和「导出的」不是同一个集合，
+    这是导出最常见的故障）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    platform_account_id: int = Field(ge=1)
+    #: 关键词（与列表同口径：名称 / ID / 货号 / 商家编码，逗号分隔多条）。
+    keyword: str = Field(default="", max_length=200)
+    status: str = "all"
+    price_from: float | None = Field(default=None, ge=0)
+    price_to: float | None = Field(default=None, ge=0)
+    stock_from: int | None = Field(default=None, ge=0)
+    stock_to: int | None = Field(default=None, ge=0)
+    sales_from: int | None = Field(default=None, ge=0)
+    sales_to: int | None = Field(default=None, ge=0)
+    note_count_op: str = "lt"
+    note_count: int | None = Field(default=None, ge=0)
+    create_time_from: str | int | None = None
+    create_time_to: str | int | None = None
+    sort_field: str = "create_time"
+    order: str = "desc"
+    #: 分组筛选（M4 新增）：不传 = 不筛分组；`0` = 未分组；`>0` = 指定分组。
+    group_id: Optional[int] = Field(default=None, ge=0)
+
+
+class ItemPolishRequest(BaseModel):
+    """商品标题 / 卖点 AI 润色（设计 20 §3.1）。
+
+    ⚠️ **结果不落库**：润色只回**备选**（标题 3 个 + 卖点 3 个），用户**采纳**
+    才写进 `ai_title` / `ai_selling_point`（走 `PATCH /items/edit`）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    platform_account_id: int = Field(ge=1)
+    item_id: str = Field(min_length=1, max_length=64)
+    #: 提示词模板 id（可选；`task_type=text` 的商品模板，设计 20 §3.3）。
+    template_id: Optional[int] = Field(default=None, ge=1)
+    #: 补充要求（没选模板时作为主提示词；选了模板则追加在末尾）。
+    instruction: str = Field(default="", max_length=2000)
+
+
+def _group_error_to_http(error: Exception) -> HTTPException:
+    """`ProductGroupError` → HTTPException（code → 状态码，唯一映射点）。"""
+    from backend.app.services.product_groups_service import ProductGroupError
+
+    if not isinstance(error, ProductGroupError):
+        raise error
+    code = error.code or ""
+    if code.endswith("_NOT_FOUND"):
+        status_code = status.HTTP_404_NOT_FOUND
+    elif code.endswith("_NAME_EXISTS"):
+        status_code = status.HTTP_409_CONFLICT
+    else:
+        status_code = status.HTTP_400_BAD_REQUEST
+    return HTTPException(status_code=status_code, detail={"code": code, "message": str(error)})
+
+
+@router.get("/product-groups")
+def list_product_groups(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """**商品分组列表**（设计 20 §2 端点 1；**纯本地**，零平台请求）。
+
+    每项带 `product_count`，口径 = **当前用户的全部账号**（分组挂 `user_id`，
+    可以装多个账号的商品 ⇒ 不能按某个账号过滤，否则计数与列表对不上）。
+    计数为 0 的分组**照常返回**（用户可以建空分组先摆着）。
+    """
+    from backend.app.services import product_groups_service
+
+    return {"items": product_groups_service.list_groups(db, user_id=current_user.id)}
+
+
+@router.post("/product-groups", status_code=status.HTTP_201_CREATED)
+def create_product_group(
+    payload: ProductGroupCreateRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """**建分组**（设计 20 §2 端点 2）。
+
+    同名 ⇒ **409 `PRODUCT_GROUP_NAME_EXISTS`**（不静默覆盖 —— 覆盖会让旧分组里
+    的商品一夜换堆）。并发下的唯一索引冲突也**回退到 409**，不抛 500。
+    """
+    from backend.app.services import product_groups_service
+
+    try:
+        return product_groups_service.create_group(db, user_id=current_user.id, name=payload.name)
+    except Exception as exc:
+        raise _group_error_to_http(exc) from exc
+
+
+@router.patch("/product-groups/{group_id}")
+def update_product_group(
+    group_id: int,
+    payload: ProductGroupUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """**改分组名**（设计 20 §2 端点 3）。
+
+    归属校验失败 ⇒ **404**（不报 403：不泄露分组存在性）。
+    名字没变 ⇒ 不写库（避免 `updated_at` 无意义跳动）。
+    """
+    from backend.app.services import product_groups_service
+
+    try:
+        return product_groups_service.rename_group(
+            db, group_id=group_id, user_id=current_user.id, name=payload.name
+        )
+    except Exception as exc:
+        raise _group_error_to_http(exc) from exc
+
+
+@router.delete("/product-groups/{group_id}")
+def delete_product_group(
+    group_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """**删分组**（设计 20 §2 端点 4）。
+
+    ⚠️ **商品一件不删**：分组是弱关联，删的是**组织方式**。
+    引用它的 `shop_products.group_id` 先被**清空**，响应回传 `released`
+    （本次解除了几件商品的分组 —— 让用户知道影响面）。
+
+    ⚠️ **不靠 FK 的 `ON DELETE SET NULL`**：SQLite 的 `ADD COLUMN` 不支持带 FK
+    的列，且显式清空能在响应里报告影响面（设计 20 §4.4）。
+    """
+    from backend.app.services import product_groups_service
+
+    try:
+        return product_groups_service.delete_group(
+            db, group_id=group_id, user_id=current_user.id
+        )
+    except Exception as exc:
+        raise _group_error_to_http(exc) from exc
+
+
+@router.patch("/items/edit")
+def edit_shop_item(
+    payload: ItemEditRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """**商品本地编辑**（设计 20 §2 端点 5；**纯本地写**，零平台请求）。
+
+    可编辑三项：`group_id`（分组）/ `ai_title`（采纳的 AI 标题）/
+    `ai_selling_point`（采纳的 AI 卖点）。
+
+    ## 什么**不**能在这里改（边界，写清避免误解）
+
+    ⚠️ **商品真实标题 / 价格 / 库存 / 上下架状态都不改** —— 那些是平台数据，
+    改它们要走千帆写接口（**SDK 零商品写接口，设计 20 §0 判为不可交付**）。
+    本端点改的是**本地台账上的用户标注**：分组是用户自己的组织方式，
+    `ai_title` / `ai_selling_point` 是用户**采纳**的 AI 草稿（平台标题仍在 `item_title`）。
+
+    ## PATCH 语义的两态（设计 20 §2.2 口径①）
+
+    | 请求体 | 行为 |
+    |---|---|
+    | 省略键 | 保持原值 |
+    | 显式 `null` | 清空（`group_id` = 移出分组） |
+
+    `updated[]` 只回**真正变了**的字段（新值 != 旧值）—— 前端据此提示
+    「已更新分组」而不是「已更新商品」（全字段都报「已更新」等于没说）。
+    """
+    from backend.app.services import product_groups_service
+
+    account = _owned_account(db, current_user, payload.platform_account_id)
+
+    touched: dict[str, bool] = {
+        "group_id": payload.group_id is not _UNSET,
+        "ai_title": payload.ai_title is not _UNSET,
+        "ai_selling_point": payload.ai_selling_point is not _UNSET,
+    }
+    try:
+        return product_groups_service.edit_product(
+            db,
+            platform_account_id=account.id,
+            item_id=payload.item_id,
+            group_id=payload.group_id if touched["group_id"] else None,
+            ai_title=payload.ai_title if touched["ai_title"] else None,
+            ai_selling_point=payload.ai_selling_point if touched["ai_selling_point"] else None,
+            touched=touched,
+        )
+    except Exception as exc:
+        raise _group_error_to_http(exc) from exc
+
+
+@router.post("/items/polish")
+def polish_shop_item(
+    payload: ItemPolishRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    text_ai_client: OpenAICompatibleTextClient = Depends(get_text_ai_client),
+):
+    """**商品标题 / 卖点 AI 润色**（设计 20 §3.1）。
+
+    与「生成商品详情图」是**同一条纪律**（§13.3.3）：服务商 `api_key` 在服务端、
+    绝不下发前端。本端点用**两个业务点**（`polish_product_title` /
+    `generate_selling_point`，都是 `kind=text`），与笔记侧的 `polish_text` /
+    `generate_title` **分开挂服务商** —— 商品标题有平台字数上限、不能含广告法
+    违禁词，提示词与笔记不是同一套（设计 20 §3.2）。
+
+    失败一律**结构化、不回落**（同 `_business_model_context`）。
+
+    ## 返回
+
+    ```json
+    {
+      "title_candidates": ["...", "...", "..."],
+      "selling_point_candidates": ["...", "...", "..."],
+      "source_title": "平台原标题（对照用）",
+      "model_name": "本次用的模型"
+    }
+    ```
+
+    ⚠️ **一次给 3 个备选**（市场惯例：只给一个等于没给，用户没有可比较的对象）。
+    ⚠️ **不落库**：`ai_title` / `ai_selling_point` 只在用户**采纳**后写
+    （`PATCH /items/edit`）。润色过程在 `llm_gateway_usage_logs` 有调用记录。
+    """
+    from backend.app.api.ai import _business_model_context
+    from backend.app.services import product_polish_service
+
+    _owned_account(db, current_user, payload.platform_account_id)
+
+    return product_polish_service.polish_product(
+        db,
+        current_user=current_user,
+        platform_account_id=payload.platform_account_id,
+        item_id=payload.item_id,
+        template_id=payload.template_id,
+        instruction=payload.instruction,
+        text_ai_client=text_ai_client,
+        resolve_context=lambda key: _business_model_context(db, current_user, key),
+    )
+
+
+@router.post("/items/export")
+def export_shop_items(
+    payload: ItemsExportRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """**导出商品 CSV**（设计 20 §2 端点 6；**纯本地**，零平台请求）。
+
+    ## 三个必须钉住的口径（设计 20 §2.2）
+
+    1. **筛选 = 列表筛选**：复用 `shop_products_service.export_rows`（内部走的是
+       列表同一个 `_apply_filters`），**不重新实现一份** —— 两份筛选实现 =
+       「列表看到的」和「导出的」不是同一个集合（导出最常见的故障）。
+    2. **排序 = 列表排序**（`_apply_order`）：CSV 与屏幕顺序一致，用户对账时
+       眼睛在两处来回看，顺序不一致会误判「少了几行」。
+    3. **字段 = 列表字段**：导出列与 `normalize_item_from_raw` **同一个构造函数**。
+       `ai_title` 有值导它、没有导 `item_title`（用户要的是「能用的标题」）。
+
+    ## 上限
+
+    `> MAX_EXPORT_ROWS`（5000）⇒ 400 `QIANFAN_EXPORT_TOO_MANY`，**不静默截断**
+    （截断的 CSV 是一个「看起来完整」的假全量，用户会拿它去对账）。
+    """
+    import csv
+    import io
+
+    from fastapi.responses import StreamingResponse
+
+    account = _owned_account(db, current_user, payload.platform_account_id)
+
+    try:
+        time_from = _epoch_millis(payload.create_time_from, end_of_day=False)
+        time_to = _epoch_millis(payload.create_time_to, end_of_day=True)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "QIANFAN_TIME_RANGE_INVALID", "message": str(error)},
+        ) from error
+
+    try:
+        rows = shop_products_service.export_rows(
+            db,
+            payload,
+            platform_account_id=account.id,
+            from_ms=time_from,
+            to_ms=time_to,
+            price_from_fen=_price_fen(payload.price_from),
+            price_to_fen=_price_fen(payload.price_to),
+            max_rows=MAX_EXPORT_ROWS,
+        )
+    except shop_products_service.ExportTooManyError as error:
+        # ⚠️ 不静默截断：截断的 CSV 是「看起来完整」的假全量，用户会拿它对账。
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "QIANFAN_EXPORT_TOO_MANY",
+                "message": str(error),
+                "limit": error.limit,
+                "actual": error.actual,
+            },
+        ) from error
+
+    buffer = io.StringIO()
+    # ⚠️ BOM（UTF-8 BOM）：Excel 中文不乱码（国产办公场景的硬需求）。
+    buffer.write("﻿")
+    writer = csv.writer(buffer)
+    writer.writerow(shop_products_service.CSV_HEADERS)
+    for row in rows:
+        writer.writerow(row)
+
+    filename = datetime.now().strftime("商品台账-%Y%m%d-%H%M%S.csv")
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Export-Rows": str(len(rows)),
+        },
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 订单模块（设计 16 §7，M6 方向 6 · 一期只读）
+#
+# 与商品列表同构：列表 / 详情 / 指标全部读**本地台账**（`orders` 等 5 张表，
+# 零平台请求）；同步是唯一打千帆的动作，且必须先有 ark 登录态。
+# --------------------------------------------------------------------------- #
+
+
+class OrderListRequest(BaseModel):
+    """订单列表入参（全部本地筛选，与 `ShopItemsRequest` 同口径）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    platform_account_id: int = Field(..., description="账号矩阵里的账号 id")
+    status: str = Field("", description="订单状态白名单（ORDER_STATUSES 的 key，空 = 不筛）")
+    keyword: str = Field("", description="订单号 / 买家昵称 / 商品名 / SKU / 快递单号 模糊搜")
+    date_from: Optional[str] = Field(None, description="YYYY-MM-DD，按 created_at 筛")
+    date_to: Optional[str] = Field(None)
+    page: int = Field(1, ge=1)
+    page_size: int = Field(20, ge=1, le=100)
+    include_full: bool = Field(
+        False,
+        description="True 才回完整收件人信息（姓名 / 手机 / 地址）；默认脱敏。",
+    )
+
+
+class OrderSyncRequest(BaseModel):
+    """触发一次订单同步（语义 = 手动跑一次定时任务，与 `/sync-shop-goods` 同构）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    platform_account_id: int = Field(..., description="账号矩阵里的账号 id")
+    max_pages: Optional[int] = Field(None, ge=1, description="空 = 翻完为止")
+
+
+@router.post("/orders")
+def order_list(
+    payload: OrderListRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """订单列表（**本地台账**，零平台请求；未登录千帆也能看已同步的数据）。
+
+    收件人信息默认**脱敏**（`mask_sensitive`）；`include_full=True` 才给原值。
+    """
+    account = _owned_account(db, current_user, payload.platform_account_id)
+    status_key = (payload.status or "").strip()
+    if status_key and status_key not in order_sync_service.ORDER_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "QIANFAN_ORDER_STATUS_UNSUPPORTED",
+                "message": f"不支持的订单状态：{status_key}",
+                "supported": ["", *order_sync_service.ORDER_STATUSES],
+            },
+        )
+    result = order_sync_service.list_orders(
+        db,
+        user_id=current_user.id,
+        platform_account_id=account.id,
+        status=status_key,
+        keyword=(payload.keyword or "").strip(),
+        date_from=payload.date_from,
+        date_to=payload.date_to,
+        page=payload.page,
+        page_size=payload.page_size,
+        include_full=bool(payload.include_full),
+    )
+    return {
+        "platform_account_id": payload.platform_account_id,
+        "source": "local",
+        "shop_name": _shop_display_name(db, account),
+        "status": status_key,
+        "page": result["page"],
+        "page_size": result["page_size"],
+        "total": result["total"],
+        "count": len(result["items"]),
+        "items": result["items"],
+    }
+
+
+@router.post("/orders/sync")
+def order_sync_trigger(
+    payload: OrderSyncRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """触发一次订单同步（后台跑，与 `/sync-shop-goods` 同构）。
+
+    响应 `{log_id, status, account_id}` —— 任务进度走**首查**
+    `GET …/sync-shop-goods/status`（按 task_id 查，与商品同步同接口）。
+    """
+    account = _owned_account(db, current_user, payload.platform_account_id)
+    if not has_ark_session(db, account.id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "ARK_SESSION_REQUIRED",
+                "message": "该账号没有可用的千帆（ark）登录态，无法同步订单。"
+                           "先在账号矩阵导入其千帆登录态后再同步。",
+            },
+        )
+    max_pages = sync_task_service.clamp_pages(payload.max_pages)
+    summary = order_sync_service.start_order_sync(
+        payload.platform_account_id,
+        user_id=current_user.id,
+        source=SOURCE_ACCOUNT_CARD_ORDER_SYNC,
+        max_pages=max_pages,
+    )
+    task_id = summary.get("task_id")
+    log_id = None
+    if task_id and not summary.get("reused"):
+        log_id = scheduled_job_runner.run_targeted_job(
+            user_id=current_user.id,
+            job_key=JOB_KEY_ORDER_SYNC,
+            task_id=int(task_id),
+            task_type=order_sync_service.ORDER_SYNC_TASK_TYPE,
+            account_id=payload.platform_account_id,
+            params_extra={
+                "account_id": payload.platform_account_id,
+                "account_name": account.nickname or "",
+                "max_pages": max_pages,
+            },
+            progress_probe=sync_task_service.task_progress_probe(int(task_id)),
+        )
+    return {**summary, "log_id": log_id}
+
+
+@router.get("/orders/metrics")
+def order_metrics_endpoint(
+    platform_account_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """订单监控指标（设计 16 §7.7，本地聚合，零平台请求）。"""
+    account = _owned_account(db, current_user, platform_account_id)
+    return {
+        "platform_account_id": payload_metrics_account_id(account),
+        "metrics": order_sync_service.order_metrics(
+            db, user_id=current_user.id, platform_account_id=account.id
+        ),
+    }
+
+
+def payload_metrics_account_id(account: PlatformAccount) -> int:
+    return account.id

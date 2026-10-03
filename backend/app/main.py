@@ -19,10 +19,12 @@ from backend.app.api.platforms.xhs import (
     pc,
     product_notes,
     qianfan,
+    workflows,
 )
 from backend.app.core.config import get_settings
 from backend.app.core.database import SessionLocal, init_db
 from backend.app.services import note_queue_service
+from backend.app.services import workflow_engine
 from backend.app.services.account_task_service import (
     ensure_account_task_worker,
     recover_account_tasks,
@@ -118,6 +120,10 @@ async def lifespan(app: FastAPI):
     # `QUEUE_ITEM_TASK_TYPES` 里 ⇒ 上面那次复位覆盖不到，此前永远卡在「同步中」——
     # 卡片与记录页显示「同步中」却再也不会结束（真缺陷，DEF-048 同型）。单独复位。
     recover_account_tasks()
+    # 自动化工作流的僵死 run 收敛（设计 19 §5.3 / §7.3）：把「进程被杀时还在
+    # running 的 run」收敛成 failed(interrupted)，**不自动续跑**（重跑由人决定）。
+    # paused 的 run 原样保留（本来就等人审核）。
+    workflow_engine.recover_workflow_runs()
     # 复位完**立刻唤醒**四个 worker：积压的 `pending` 项不该等看门狗 30 秒巡检才被
     # 发现（唤醒带兜底超时的长等待，无活可干时它们自动回去睡）。
     ensure_sync_worker()
@@ -190,6 +196,8 @@ def create_app() -> FastAPI:
     app.include_router(crawl.router, prefix="/api")
     app.include_router(monitoring.router, prefix="/api")
     app.include_router(auto_tasks.router, prefix="/api")
+    # 自动化工作流（设计 19，M5 方向 5）：11 个端点，全部 user_id 隔离
+    app.include_router(workflows.router, prefix="/api")
     app.include_router(schedule.router, prefix="/api")
     # 运行时配置中心（设计 10 §7）：设置页的列表 / 增删改查
     app.include_router(settings_api.router, prefix="/api")

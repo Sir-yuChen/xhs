@@ -24,6 +24,16 @@ from typing import Any, Callable, Optional
 JOB_KEY_NOTE_SYNC = "system.note_sync"
 JOB_KEY_GOODS_NOTE_SYNC = "system.goods_note_sync"
 JOB_KEY_SHOP_GOODS_SYNC = "system.shop_goods_sync"
+JOB_KEY_ORDER_SYNC = "system.order_sync"
+
+#: M6 方向 6（设计 16 §7）订单同步。与 `JOB_KEY_SHOP_GOODS_SYNC` 分开：
+#: 落不同的表、不同的任务类型，任务中心是两行独立的任务。
+
+#: 自动化工作流注册到调度器的 job_key **前缀**（设计 19 §7.1）。
+#: 具体 job_key 形如 ``workflow.<workflow_id>`` —— 一个工作流一行 job。
+#: ⚠️ 注册表按**精确 key** 查（``get_job_spec``），前缀本身不是一个可调度任务；
+#:    工作流在 ``workflow_service._sync_scheduler`` 建出的行才携带真实 id 后缀。
+WORKFLOW_JOB_KEY_PREFIX = "workflow."
 
 
 @dataclass(frozen=True)
@@ -90,6 +100,7 @@ def _build_registry() -> dict[str, JobSpec]:
     )
     from backend.app.services.note_queue_service import cleanup_queue_records
     from backend.app.services.shop_health_service import run_shop_health_checks_once
+    from backend.app.services.workflow_service import run_workflow_job
 
     specs = [
         JobSpec(
@@ -176,6 +187,18 @@ def _build_registry() -> dict[str, JobSpec]:
             default_cron="0 0 */6 * * *",
         ),
         JobSpec(
+            # M6 方向 6（设计 16 §7）：订单一期只读 —— 拉 `fulfillment/order/page`
+            # 落 `orders` 等 5 张表，不触任何写操作。
+            key=JOB_KEY_ORDER_SYNC,
+            name="店铺订单同步",
+            func=scheduler_service.run_scheduled_order_syncs,
+            builtin=True,
+            user_scoped=True,
+            params_editable=("account_ids",),
+            default_trigger_type="cron",
+            default_cron="0 30 */6 * * *",
+        ),
+        JobSpec(
             # 2026-09-25 用户口径「笔记任务记录清理应扩展为队列详情记录清理……
             # 任务名称修改为队列记录清理」：任务键与中文名同步改（迁移
             # `c2d3e4f5a6b7` 把存量行与历史日志一起改名，不静默留旧键）。
@@ -238,6 +261,21 @@ def _build_registry() -> dict[str, JobSpec]:
             user_scoped=True,
             default_trigger_type="cron",
             default_cron="0 */10 * * * *",  # 每 10 分钟轮询一次
+        ),
+        JobSpec(
+            # 设计 19 §7.1：工作流的 cron/at 触发注册成一个 job。
+            # job_key 形如 workflow.<id>，由 workflow_service 建行时写入；
+            # params.workflow_id 是唯一参数（params_editable=() ⇒ 用户改不动它）。
+            key=WORKFLOW_JOB_KEY_PREFIX,
+            name="自动化工作流",
+            func=run_workflow_job,
+            builtin=False,
+            user_scoped=True,
+            params_required=("workflow_id",),
+            params_editable=(),
+            default_trigger_type="cron",
+            default_cron="0 0 9 * * *",
+            allow_concurrent=False,
         ),
     ]
     return {spec.key: spec for spec in specs}

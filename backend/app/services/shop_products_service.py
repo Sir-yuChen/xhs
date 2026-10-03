@@ -665,3 +665,140 @@ def item_detail(
             row.platform_missing_at.strftime("%Y-%m-%d %H:%M") if row.platform_missing_at else ""
         ),
     }
+
+
+# --------------------------------------------------------------------------- #
+# CSV 导出（设计 20 §4.5，M4 方向 4）
+#
+# ⚠️ 三条与列表**同源**的纪律 —— 导出最常见的故障就是「导出的与列表看到的
+# 不是同一个集合」，根因永远是「筛选 / 排序 / 字段映射另写了一份」：
+#   1. 筛选走 `_apply_filters`（与 `query_items` 同一个函数）；
+#   2. 排序走 `_apply_order`（与列表同序，对账时眼睛在两处来回看，顺序不一致
+#      会误判「少了几行」）；
+#   3. 字段走 `normalize_item_from_raw`（列表的**唯一**契约构造函数）。
+# --------------------------------------------------------------------------- #
+
+#: CSV 表头（与 `normalize_item_from_raw` 的字段一一对应；顺序即列顺序）。
+#: ⚠️ `AI标题` 列的口径：有采纳值用采纳值，否则回落平台原标题 —— 列名里写清
+#: 「无则原标题」，不让用户以为是「AI 生成了空」。
+CSV_HEADERS: tuple[str, ...] = (
+    "商品ID",
+    "商品标题",
+    "AI标题（无则原标题）",
+    "AI卖点",
+    "货号",
+    "价格（元）",
+    "库存",
+    "SKU数",
+    "近30天销量",
+    "累计销量",
+    "挂链笔记数",
+    "状态",
+    "分类",
+    "创建时间",
+    "上架时间",
+    "同步时间",
+)
+
+
+def _row_to_csv(row: ShopProduct) -> list[str]:
+    """台账行 → CSV 一行（**复用 `normalize_item_from_raw`**，不另写字段映射）。"""
+    item = normalize_item_from_raw(_parse_raw(row))
+    price_text = ""
+    price_min = item.get("price_min_fen")
+    price_max = item.get("price_max_fen")
+    if isinstance(price_min, (int, float)) and price_min:
+        if isinstance(price_max, (int, float)) and price_max and price_max != price_min:
+            price_text = f"{price_min / 100:.2f} ~ {price_max / 100:.2f}"
+        else:
+            price_text = f"{price_min / 100:.2f}"
+
+    def _num(value: Any) -> str:
+        return "" if value is None else str(value)
+
+    return [
+        str(item.get("item_id") or ""),
+        str(item.get("title") or ""),
+        #: AI 标题有值用 AI 标题，否则平台原标题（用户要的是「能用的标题」）。
+        str(row.ai_title or item.get("title") or ""),
+        str(row.ai_selling_point or ""),
+        str(item.get("article_no") or ""),
+        price_text,
+        _num(item.get("stock")),
+        _num(item.get("sku_count")),
+        _num(item.get("sales_30d")),
+        _num(item.get("sales_total")),
+        _num(item.get("note_count")),
+        str(item.get("status_label") or ""),
+        str(item.get("category") or ""),
+        str(item.get("create_time") or ""),
+        str(item.get("on_shelf_time") or ""),
+        row.synced_at.strftime("%Y-%m-%d %H:%M:%S") if row.synced_at else "",
+    ]
+
+
+class ExportTooManyError(RuntimeError):
+    """导出行数超限（带 `limit`，供 API 层映射 400）。"""
+
+    def __init__(self, message: str, *, limit: int, actual: int) -> None:
+        super().__init__(message)
+        self.limit = limit
+        self.actual = actual
+
+
+def export_rows(
+    db: Session,
+    payload: Any,
+    *,
+    platform_account_id: int,
+    from_ms: Optional[int],
+    to_ms: Optional[int],
+    price_from_fen: Optional[int] = None,
+    price_to_fen: Optional[int] = None,
+    max_rows: int,
+) -> list[list[str]]:
+    """按**当前筛选条件**导出台账行（设计 20 §4.5）。
+
+    ⚠️ **超限整体拒绝**（`ExportTooManyError`），**不静默截断** —— 截断的 CSV
+    是一个「看起来完整」的假全量，用户会拿它去对账（比「导不出来」更危险）。
+    """
+    stmt = select(ShopProduct).where(ShopProduct.platform_account_id == platform_account_id)
+    stmt = _apply_filters(
+        stmt,
+        payload,
+        from_ms=from_ms,
+        to_ms=to_ms,
+        price_from_fen=price_from_fen,
+        price_to_fen=price_to_fen,
+    )
+
+    #: M4 分组筛选（设计 20 §2.1）：`0` = 未分组，`>0` = 指定分组。
+    #: ⚠️ `group_id` 是本地 id，天然只在**本账号**内有效，不需要额外租户口径。
+    #: ⚠️ 与价格 / 时间筛选不同，分组**可以**代入 NULL 比较：「未分组」是**确凿的
+    #: 状态**（`group_id IS NULL`），不是「读不到」⇒ 照常筛（硬约束⑤的例外口径）。
+    requested_group = getattr(payload, "group_id", None)
+    if requested_group is not None:
+        if int(requested_group) == 0:
+            stmt = stmt.where(ShopProduct.group_id.is_(None))
+        else:
+            stmt = stmt.where(ShopProduct.group_id == int(requested_group))
+
+    stmt = _apply_order(
+        stmt,
+        sort_field=(getattr(payload, "sort_field", "") or "create_time"),
+        order=(getattr(payload, "order", "") or "desc"),
+    )
+
+    total = int(
+        db.scalar(select(func.count()).select_from(stmt.order_by(None).subquery())) or 0
+    )
+    if total > int(max_rows):
+        raise ExportTooManyError(
+            f"导出上限 {max_rows} 行，当前筛选条件下有 {total} 行。"
+            "请收窄筛选条件（如按创建时间分段）后再导出。",
+            limit=int(max_rows),
+            actual=total,
+        )
+
+    rows = db.scalars(stmt).all()
+    return [_row_to_csv(row) for row in rows]

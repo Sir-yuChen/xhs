@@ -1587,6 +1587,80 @@ def run_scheduled_shop_goods_syncs(
     return _targeted_outcome(results, what="商品同步")
 
 
+def run_scheduled_order_syncs(
+    user_id: int,
+    account_ids: Optional[Sequence[int]] = None,
+) -> Optional[dict[str, Any]]:
+    """调度器入口：给每个**绑定了店铺的创作者账号**跑一次订单同步（限行主本人，DEF-066）。
+
+    与 `run_scheduled_shop_goods_syncs` 同构（不重叠 / 不重入 / 账号间停顿 / 省流），
+    但同步的是**订单**（`order_sync_service.run_order_sync`，只读落库，M6 方向 6）。
+
+    **没 ark 登录态的账号**：批量模式安静跳过（跑也是无意义的失败）；定向模式收进
+    `results` 当失败 —— 用户点了名，必须知道「这个账号还没千帆登录态」。
+    """
+    from backend.app.models.platform_account import PlatformAccount
+    from backend.app.services import sync_task_service as sts
+    from backend.app.services.note_queue_service import SOURCE_SCHEDULED
+    from backend.app.services.shop_binding_service import has_ark_session
+    from backend.app.services.order_sync_service import run_order_sync, ORDER_SYNC_TASK_TYPE
+
+    targeted = bool(account_ids)
+    gap = _sync_account_gap_seconds()
+    results: list[dict[str, Any]] = []
+    db = SessionLocal()
+    try:
+        statement = select(PlatformAccount).where(
+            PlatformAccount.user_id == user_id,
+            PlatformAccount.platform == "xhs",
+            PlatformAccount.deleted_at.is_(None),
+        )
+        if account_ids:
+            statement = statement.where(PlatformAccount.id.in_(list(account_ids)))
+        accounts = db.scalars(statement).all()
+        for account in accounts:
+            try:
+                if not has_ark_session(db, account.id):
+                    if targeted:
+                        results.append(
+                            {
+                                "account_id": account.id,
+                                "status": "failed",
+                                "error": "该账号没有可用的千帆登录态，无法同步订单（请先登录该账号的千帆）",
+                            }
+                        )
+                    continue
+                if sts.find_active_task(db, ORDER_SYNC_TASK_TYPE, account.id) is not None:
+                    if targeted:
+                        results.append(
+                            {
+                                "account_id": account.id,
+                                "status": "running",
+                                "note": "该账号已有订单同步任务在跑，本次不重入",
+                            }
+                        )
+                    continue
+                run_order_sync(
+                    account.id,
+                    user_id=account.user_id,
+                    source=SOURCE_SCHEDULED,
+                )
+            except Exception as exc:  # noqa: BLE001 - 单个账号失败不拖垮整轮
+                logger.warning("scheduled order sync for account %s failed: %s", account.id, exc)
+                if targeted:
+                    results.append({"account_id": account.id, "status": "failed", "error": str(exc)})
+            if gap:
+                time.sleep(gap)
+    except Exception as exc:  # noqa: BLE001 - 调度器调用，必须吞异常
+        logger.error("run_scheduled_order_syncs failed: %s", exc)
+    finally:
+        db.close()
+
+    if not targeted:
+        return None
+    return _targeted_outcome(results, what="订单同步")
+
+
 def run_scheduled_cleanups(user_id: int, account_ids: Optional[Sequence[int]] = None) -> None:
     """调度器入口：给有待清理候选的账号跑**一批**（限行主本人，DEF-066）。
 

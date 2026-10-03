@@ -6,6 +6,7 @@ from backend.app.models.generation import (
     GenerationRecord,
     NoteGenerationLink,
 )
+from backend.app.models.hot_topic import HotTopic, TopicGoodsMatch
 from backend.app.models.keyword_group import KeywordGroup
 from backend.app.models.llm_gateway import (
     LlmBusinessProvider,
@@ -25,7 +26,15 @@ from backend.app.models.monitoring import (
 )
 from backend.app.models.note import Note, NoteAsset, NoteComment, NoteTopic, Topic
 from backend.app.models.notification import Notification
+from backend.app.models.order import (
+    AfterSale,
+    Order,
+    OrderItem,
+    OrderRemark,
+    OrderShipment,
+)
 from backend.app.models.platform_account import AccountCookieVersion, PlatformAccount
+from backend.app.models.product_group import ProductGroup
 from backend.app.models.prompt import PromptModule, PromptTemplate
 from backend.app.models.publish import PublishAsset, PublishJob
 from backend.app.models.scheduled_job import ScheduledJob, ScheduledJobLog
@@ -34,9 +43,17 @@ from backend.app.models.shop_product import ShopProduct
 from backend.app.models.system_setting import SystemSetting
 from backend.app.models.task import Task
 from backend.app.models.user import User
+from backend.app.models.workflow import (
+    Workflow,
+    WorkflowNode,
+    WorkflowRun,
+    WorkflowRunLog,
+    WorkflowScheduledPublish,
+)
 
 __all__ = [
     "AccountCookieVersion",
+    "AfterSale",
     "AiDraft",
     "AiGeneratedAsset",
     "AigcMediaAsset",
@@ -63,7 +80,12 @@ __all__ = [
     "NoteGenerationLink",
     "NoteGoods",
     "Notification",
+    "Order",
+    "OrderItem",
+    "OrderRemark",
+    "OrderShipment",
     "PlatformAccount",
+    "ProductGroup",
     "PromptModule",
     "PromptTemplate",
     "PublishAsset",

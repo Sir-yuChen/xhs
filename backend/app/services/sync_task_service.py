@@ -33,6 +33,15 @@ NOTE_SYNC_TASK_TYPE = "xhs_note_sync"
 SHOP_GOODS_SYNC_TASK_TYPE = "xhs_shop_goods_sync"
 """同步**店铺商品台账**（SKU / 价格，不是笔记）。"""
 
+ORDER_SYNC_TASK_TYPE = "xhs_order_sync"
+"""M6 方向 6（设计 16 §7）订单同步的任务类型。
+
+与 `SHOP_GOODS_SYNC_TASK_TYPE`（店铺商品台账）**不是一回事**：这里同步的是
+**订单**（`orders` / `order_items` / `order_shipments` / `after_sales`，
+全部只读落库）。任务行判重入 / 页面显示任务类型都按这个 key 分流，
+两个同步互不阻挡（各跑各的任务行）。"""
+
+
 GOODS_NOTE_SYNC_TASK_TYPE = "xhs_goods_note_sync"
 """同步**商品笔记**（千帆 `goods-note/list` 的挂链笔记，硬门禁 = ark 令牌）。
 

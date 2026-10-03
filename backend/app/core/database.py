@@ -68,6 +68,30 @@ def _configure_sqlite_connection(dbapi_connection, connection_record) -> None:
     cursor.close()
 
 
+# ⚠️ **全局打开 SQLite 外键约束**：SQLite 默认 OFF（与 Postgres 相反），
+# ON DELETE SET NULL / CASCADE 全部不生效 ⇒ 删工作流时 workflow_runs.workflow_id
+# 不会被置 NULL（设计 19 §6.1「删工作流保留历史」靠它落地）。
+# 注册在 **Engine 类**上而不是本模块的 engine 实例上：测试夹具
+# （tests/backend/conftest.py::make_engine）自己 create_engine，实例级监听
+# 管不到它们 ⇒ 删工作流的 SET NULL 在测试里不生效。全局事件覆盖所有 engine。
+from sqlalchemy.engine import Engine as _Engine  # noqa: E402
+
+
+@event.listens_for(_Engine, "do_connect")
+def _sqlite_enable_foreign_keys(dialect, connection_record, cargs, cparams):
+    if dialect.name != "sqlite":
+        return
+    # do_connect 回调里连接还没建好；返回 None 时 SQLAlchemy 会用默认流程建连接，
+    # 建好后走 ``connect`` 事件（见下）——两段配合：do_connect 判方言，connect 打 PRAGMA
+    connection_record.info["_want_fk"] = True
+
+
+@event.listens_for(_Engine, "connect")
+def _sqlite_enable_foreign_keys_connect(dbapi_connection, connection_record):
+    if connection_record.info.get("_want_fk"):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+
 def _enable_wal(bind=engine) -> None:
     """把库切到 WAL 模式（**持久化在文件头里**，只需成功一次）。
 
