@@ -642,7 +642,8 @@ export function ImageStudioPanel() {
 
       {/* ---- Reference Image Picker Modal ---- */}
       <Modal
-        title="选择图片"
+                centered
+                title="选择图片"
         open={refPickerOpen}
         onCancel={() => setRefPickerOpen(false)}
         footer={null}

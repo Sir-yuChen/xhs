@@ -80,7 +80,8 @@ export function SyncOptionsModal(props: {
 
   return (
     <Modal
-      open={open}
+            centered
+            open={open}
       title={title}
       onCancel={onCancel}
       onOk={() => handleConfirm()}

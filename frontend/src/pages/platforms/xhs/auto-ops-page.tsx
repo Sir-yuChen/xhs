@@ -579,7 +579,8 @@ export function AutoOpsPage() {
 
       {/* Edit Modal */}
       <Modal
-        title="编辑自动运营任务"
+                centered
+                title="编辑自动运营任务"
         open={editTask !== null}
         onOk={handleSaveEdit}
         onCancel={() => setEditTask(null)}

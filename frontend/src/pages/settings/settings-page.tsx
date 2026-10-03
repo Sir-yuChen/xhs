@@ -329,7 +329,8 @@ export function SettingsPage() {
       </Row>
 
       <Modal
-        open={modalOpen}
+                centered
+                open={modalOpen}
         title={editing ? `编辑配置 · ${editing.key}` : "新增配置"}
         okText="保存"
         cancelText="取消"

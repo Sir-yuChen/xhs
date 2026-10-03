@@ -844,7 +844,8 @@ export function XhsDraftsPage() {
 
               {/* Optimize modal */}
               <Modal
-                title="素材优化"
+                                centered
+                                title="素材优化"
                 open={optimizeModalOpen}
                 onCancel={() => { setOptimizeModalOpen(false); setOptimizeAssetId(null); setOptimizePrompt(""); setOptimizeRefImages([]); setOptimizeResult(null); }}
                 footer={null}
@@ -969,7 +970,7 @@ export function XhsDraftsPage() {
               </Modal>
 
               {/* Reference image picker modal */}
-              <Modal title="选择参考图" open={refPickerOpen} onCancel={() => { setRefPickerOpen(false); setRefPickerUrlInput(""); }} footer={null} width={560}>
+              <Modal centered title="选择参考图" open={refPickerOpen} onCancel={() => { setRefPickerOpen(false); setRefPickerUrlInput(""); }} footer={null} width={560}>
                 <Tabs size="small" items={[
                   {
                     key: "user",
@@ -1020,7 +1021,7 @@ export function XhsDraftsPage() {
               </Modal>
 
               {/* Upload modal */}
-              <Modal title="上传素材" open={uploadModalOpen} onCancel={() => setUploadModalOpen(false)} footer={null} width={480}>
+              <Modal centered title="上传素材" open={uploadModalOpen} onCancel={() => setUploadModalOpen(false)} footer={null} width={480}>
                 <Upload.Dragger
                   accept=".jpg,.jpeg,.png,.gif,.webp,.mp4,.mov,.avi,.mkv"
                   multiple

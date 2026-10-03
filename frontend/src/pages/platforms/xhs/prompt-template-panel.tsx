@@ -397,7 +397,8 @@ export function PromptTemplatePanel() {
       />
 
       <Modal
-        open={moduleModalOpen}
+                centered
+                open={moduleModalOpen}
         title={editingModule ? "编辑模块" : "新建模块"}
         onCancel={() => setModuleModalOpen(false)}
         onOk={() => void submitModule()}
@@ -429,7 +430,8 @@ export function PromptTemplatePanel() {
       </Modal>
 
       <Modal
-        open={templateModalOpen}
+                centered
+                open={templateModalOpen}
         title={editingTemplate ? "编辑模板" : "新建模板"}
         width={680}
         onCancel={() => setTemplateModalOpen(false)}
@@ -481,7 +483,8 @@ export function PromptTemplatePanel() {
       </Modal>
 
       <Modal
-        open={previewOpen}
+                centered
+                open={previewOpen}
         title="渲染预览"
         width={680}
         onCancel={() => setPreviewOpen(false)}

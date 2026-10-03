@@ -120,7 +120,8 @@ export function JobLogDetailModal({
 
   return (
     <Modal
-      title={log ? `执行详情 · ${log.job_name}` : "执行详情"}
+            centered
+            title={log ? `执行详情 · ${log.job_name}` : "执行详情"}
       open={open}
       onCancel={onCancel}
       onOk={onCancel}

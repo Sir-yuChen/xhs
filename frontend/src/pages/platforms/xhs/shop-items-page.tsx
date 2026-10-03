@@ -2147,7 +2147,8 @@ export function XhsShopItemsPage() {
 
       {/* 商品详情弹窗（v1.32，设计 13 §30.3.6）：基本信息 + 图集 + 规格详情 */}
       <Modal
-        open={detailOpen}
+                centered
+                open={detailOpen}
         title="商品详情"
         width="80%"
         footer={
@@ -2338,6 +2339,10 @@ export function XhsShopItemsPage() {
         maskClosable={!detailImageGenerating}
         title={detailImageTitle}
         data-generating={detailImageGenerating ? "1" : "0"}
+        // v2.28.2：**垂直居中**（用户口径「生成AI商品图没有居中，你调整一下」）。
+        // ⚠️ antd 的 Modal **默认是顶部对齐**（`top: 100px`），加 `centered` 才垂直居中
+        // （官方文档：centered 设为 true 时使用 flex 布局使弹窗垂直居中）。
+        centered
         width="75vw"
         onCancel={() => {
           if (detailImageGenerating) return; // 兜底：键盘 Esc 也走这里
@@ -2459,22 +2464,23 @@ export function XhsShopItemsPage() {
                       padding: "8px 10px",
                     }}
                   >
-                    {/* ⚠️ 标题与说明**各占一行**（用户口径「不要和图片一行」）：
-                        两者都是行内元素，不加 `display: block` 会挤在同一行。 */}
-                    <Text strong style={{ fontSize: 12, display: "block" }}>
-                      本类原始图预览
-                    </Text>
-                    <Text
-                      type="secondary"
-                      style={{ fontSize: 11, display: "block", marginBottom: 6 }}
-                    >
-                      {tab.label} · 共 {tab.urls.length} 张 · 仅供预览，不参与勾选
-                    </Text>
-                    {tab.urls.length === 0 ? (
-                      <Text type="secondary" style={{ fontSize: 11 }}>
-                        {tab.emptyHint}
+                    {/* 定稿（用户口径 2026-10-03，三轮澄清）：
+                        ① 标题 + 说明 **同一行**（「本类原始图预览  原始主图 · 共 10 张 ·
+                           仅供预览，不参与勾选」）—— 用户原话「文本放一行内展示」；
+                        ② 图片 **另起一行**铺开（`Space wrap` 按宽度自己折行）。
+                        ⇒ 用横向 `Space` 装两个 `Text`（`align="baseline"` 让字号不同的
+                        两段文字基线对齐，不靠 `lineHeight` 硬凑）。 */}
+                    <Space size={8} align="baseline" style={{ marginBottom: 6 }}>
+                      <Text strong style={{ fontSize: 12 }}>
+                        本类原始图预览
                       </Text>
-                    ) : (
+                      <Text type="secondary" style={{ fontSize: 11 }}>
+                        {tab.urls.length === 0
+                          ? `${tab.label} · 共 0 张 · ${tab.emptyHint}`
+                          : `${tab.label} · 共 ${tab.urls.length} 张 · 仅供预览，不参与勾选`}
+                      </Text>
+                    </Space>
+                    {tab.urls.length > 0 && (
                       <Space size={6} wrap>
                         {tab.urls.map((url) => (
                           <Image
@@ -2518,10 +2524,6 @@ export function XhsShopItemsPage() {
                         }))}
                       notFoundContent="还没有模板，可在「笔记工坊 → 提示词模板」新建"
                     />
-                    <Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 4 }}>
-                      模板在「笔记工坊 → 提示词模板」维护（含一致性约束），选它就按模板出图；
-                      下方「补充要求」会追加在模板末尾。
-                    </Text>
                   </div>
 
                   {/* ③b 提示词 / 补充要求（本组独立） */}
@@ -2615,7 +2617,7 @@ export function XhsShopItemsPage() {
           `POST /xhs/qianfan/bind` 退场（后端 410 `QIANFAN_BINDING_REMOVED`），
           千帆能力改由「该账号自己的 ark 登录态」决定 —— 入口在账号矩阵。
           被取代的原弹窗（保留备查）：
-            <Modal open={bindOpen} title="绑定千帆商家后台（商品列表来源）" …>
+            <Modal centered open={bindOpen} title="绑定千帆商家后台（商品列表来源）" …>
               … 粘贴 Cookie（须含 access-token-ark.xiaohongshu.com）…
             </Modal> */}
 
@@ -2625,14 +2627,14 @@ export function XhsShopItemsPage() {
         两栏版式（NoteDetailBody）—— 同一语义不留两份实现。
       */}
       <Modal
-        open={notesOpen}
+                open={notesOpen}
+        centered
         // 尺寸（v1.36 用户口径「挂链笔记弹窗全屏 75%」）：宽高都取视口的 75%。
         // 原来的 80vw 是「尽量大」，与商品详情弹窗（80%）几乎同宽 —— 两个弹窗
         // 看起来一样大、层级感反而没了；收到 75% 后它是「一个更大的详情浮层」，
         // 与列表的对比更清楚。**不再设 maxWidth**：设了它就不是 75% 了
         // （宽屏上 75vw > 1600 会被截回，口径与实际不符）。
         width="75vw"
-        centered
         // `overflow: "auto"` 而不是 `"hidden"`：75vw 下两栏装不下的视口区间只剩
         // ~900–918px（75vw−48 要 ≥ 300+320+20），与 `.note-detail-body` 那个
         // 900px 媒体查询几乎首尾相接 —— 留 `auto` 只是把那 18px 的缝补上：

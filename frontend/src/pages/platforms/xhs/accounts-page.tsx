@@ -1070,7 +1070,8 @@ export function XhsAccountsPage() {
         取消 = 什么都不发（不打平台）；空链接时确定按钮 disabled。
       */}
       <Modal
-        open={linkAccount !== null}
+                centered
+                open={linkAccount !== null}
         title="同步笔记需要主页链接"
         okText="开始同步"
         cancelText="取消"
@@ -1119,7 +1120,8 @@ export function XhsAccountsPage() {
         「不可用」，放行让同步真发一次，失败原因由后端给到卡片（DEF-057 红线）。
       */}
       <Modal
-        open={arkPrompt !== null}
+                centered
+                open={arkPrompt !== null}
         title="需要千帆商家后台会话"
         okText="去补登千帆"
         cancelText="取消"
@@ -1158,7 +1160,8 @@ export function XhsAccountsPage() {
         `unknown` 一律不弹（DEF-057）：没问到 ≠ 不可用，放行让同步真发一次。
       */}
       <Modal
-        open={goodsNotePrompt !== null}
+                centered
+                open={goodsNotePrompt !== null}
         title={`需要${loginChannelLabel("ark")}会话`}
         okText="去补登千帆"
         cancelText="取消"
@@ -1198,7 +1201,8 @@ export function XhsAccountsPage() {
         后端给的结构化原因由轻提示展示。
       */}
       <Modal
-        open={notePrompt !== null}
+                centered
+                open={notePrompt !== null}
         title={`同步笔记需要${loginChannelLabel("creator")}登录态`}
         okText="去登录"
         cancelText="取消"
@@ -1239,7 +1243,8 @@ export function XhsAccountsPage() {
         `unknown`（未检测）放行：那是「没问到」而不是「不可用」（DEF-057 红线）。
       */}
       <Modal
-        open={webPrompt !== null}
+                centered
+                open={webPrompt !== null}
         title="需要网页版会话"
         okText="去登录"
         cancelText="取消"

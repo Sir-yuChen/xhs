@@ -587,7 +587,8 @@ export function NoteDetailModal({
 
   return (
     <Modal
-      open={open}
+            centered
+            open={open}
       onCancel={onClose}
       width="80vw"
       style={{ top: "10vh", maxWidth: 1600, paddingBottom: 0 }}

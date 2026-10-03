@@ -102,7 +102,8 @@ export function CronBuilderModal({ open, initialCron, onOk, onCancel }: CronBuil
 
   return (
     <Modal
-      title="Cron 表达式构建器"
+            centered
+            title="Cron 表达式构建器"
       open={open}
       width={640}
       onCancel={onCancel}

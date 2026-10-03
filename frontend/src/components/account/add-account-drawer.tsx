@@ -80,7 +80,8 @@ export function AddAccountDrawer({ open, onClose, onBound }: AddAccountDrawerPro
 
   return (
     <Modal
-      title={
+            centered
+            title={
         <div>
           <div style={{ fontSize: 12, color: p.textTertiary, marginBottom: 4, textTransform: "uppercase", letterSpacing: 1 }}>
             XHS Account
@@ -103,7 +104,6 @@ export function AddAccountDrawer({ open, onClose, onBound }: AddAccountDrawerPro
        * （§33.10 挂链笔记弹窗 `hidden` 裁右栏的教训）。
        */
       width="50vw"
-      centered
       styles={{
         // antd 6 Modal 的语义样式的「容器」= 对话框本体（无 content 键）；
         // 固定 75vh + flex 列布局：header 自适应、body 吃剩余高度并可滚动。

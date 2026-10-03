@@ -196,7 +196,8 @@ export function LlmGenerateModal({
 
   return (
     <Modal
-      open={open}
+            centered
+            open={open}
       title="LLM 生成笔记"
       width={640}
       onCancel={onClose}

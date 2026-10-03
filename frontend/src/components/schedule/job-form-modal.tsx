@@ -196,7 +196,8 @@ export function JobFormModal({ open, job, onCancel, onSaved }: JobFormModalProps
 
   return (
     <Modal
-      title={isEdit ? `编辑任务 · ${job?.name ?? ""}` : "新建调度任务"}
+            centered
+            title={isEdit ? `编辑任务 · ${job?.name ?? ""}` : "新建调度任务"}
       open={open}
       onCancel={onCancel}
       onOk={() => void submit()}

@@ -506,7 +506,8 @@ export function MaterialLibraryPanel({
       </Card>
 
       <Modal
-        open={creating}
+                centered
+                open={creating}
         title="新建素材文件夹"
         onCancel={() => setCreating(false)}
         onOk={() => void handleCreate()}
@@ -530,7 +531,8 @@ export function MaterialLibraryPanel({
       </Modal>
 
       <Modal
-        open={renaming !== null}
+                centered
+                open={renaming !== null}
         title="重命名素材文件夹"
         onCancel={() => setRenaming(null)}
         onOk={() => void handleRename()}

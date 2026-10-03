@@ -119,7 +119,8 @@ export function RenewLoginModal({ target, onClose, onRenewed }: RenewLoginModalP
 
   return (
     <Modal
-      open={target !== null}
+            centered
+            open={target !== null}
       title={
         <span style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
           <span>{isFirstTime ? "补齐登录令牌" : "重新登录"}</span>

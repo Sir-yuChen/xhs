@@ -1930,7 +1930,8 @@ export function XhsMyNotesPage() {
 
       {/* 无流量笔记清理：阈值可配 → 本地预览候选 → 确认后后台异步删除 */}
       <Modal
-        open={noTrafficOpen}
+                centered
+                open={noTrafficOpen}
         title="清理无流量笔记"
         width={680}
         onCancel={() => setNoTrafficOpen(false)}

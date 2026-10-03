@@ -810,7 +810,8 @@ function GatewaysPage() {
       </Card>
 
       <Modal
-        open={modalOpen}
+                centered
+                open={modalOpen}
         title={editing ? "编辑服务商" : "新增服务商"}
         okText="保存"
         cancelText="取消"
@@ -1181,7 +1182,8 @@ function AlertsPage() {
       </Card>
 
       <Modal
-        open={modalOpen}
+                centered
+                open={modalOpen}
         title={editing ? "编辑预警规则" : "新增预警规则"}
         okText="保存"
         cancelText="取消"

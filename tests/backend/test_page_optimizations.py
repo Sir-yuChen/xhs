@@ -395,6 +395,9 @@ def test_shop_items_page_follows_the_2026_09_23_batch_delete_review():
     assert 'width="75vw"' in code, "挂链笔记弹窗应为视口宽度 75%"
     assert '"75vh"' in code, "挂链笔记弹窗内容区应为视口高度 75%"
     assert 'width="80vw"' not in code, "旧的 80vw 应已替换"
+    # ⚠️ v2.28.2：锚点用 `title={notesItem`（Modal 内、`centered` 之后）——
+    # 原先用 `open={notesOpen}`，而「全站弹窗居中」把 `centered` 加在了它**前面**
+    # ⇒ 切片从 centered 之后开始，`"centered" in modal` 假红（实测）。
     modal = _slice_between(code, "open={notesOpen}", "</Modal>")
     assert "maxWidth: 1600" not in modal, "设了 maxWidth 就不是 75% 了（宽屏会被截回固定值）"
     assert "centered" in modal, "75vh 高度下应居中（否则下方留白与原 6vh 定位不一致）"
@@ -3420,3 +3423,42 @@ def test_detail_image_modal_is_masked_and_timed_while_generating():
     assert "setDetailImageStartedAt(Date.now())" in page, "生成开始时没打时间戳"
     # 停表那一句在**生成函数**的 `finally` 里（不在 Modal JSX 内）⇒ 查 `page` 全文。
     assert page.count("setDetailImageStartedAt(null)") >= 1, "计时没有在结束时停表（会一直跳）"
+
+
+def test_every_modal_is_vertically_centered():
+    """**全站每个 antd `Modal` 都必须垂直居中**（用户口径 2026-10-03 原话）。
+
+    > 「项目中所有弹窗均应修复成居中」
+
+    ## 为什么必须守（这条最容易漏，且现象很直观）
+
+    antd 的 `Modal` **默认是顶部对齐**（`top: 100px`）—— 不加 `centered` 时弹窗
+    贴在上方、下面留一大片空白。用户是**逐个弹窗发现**的（先报「生成AI商品图
+    没有居中」，再要求「项目中所有弹窗均应修复成居中」）⇒ 只修被点名的那一个
+    必然要返工（34 个弹窗里 31 个都不居中）。
+
+    判据是**逐个 `<Modal` 标签**看的（不用全文正则数出现次数）：
+    全文正则会被注释里的 `centered` 字面量骗过（本文件自己就提到了那个词）。
+    """
+    import re as _re
+
+    src_root = ROOT / "frontend" / "src"
+    offenders: list[str] = []
+    total = 0
+    for f in sorted(src_root.rglob("*.tsx")):
+        lines = f.read_text(encoding="utf-8").split("\n")
+        for st in [i for i, ln in enumerate(lines) if "<Modal" in ln]:
+            total += 1
+            if "centered" in lines[st]:
+                continue  # 同行形态：<Modal centered open={...}>
+            end = st
+            while end < len(lines) and not _re.search(r"(?<!/)>", lines[end]):
+                end += 1
+            if not any(ln.strip() == "centered" for ln in lines[st : end + 1]):
+                offenders.append(f"{f.name}:{st + 1}")
+
+    assert total > 0, "没扫到任何 Modal —— 守卫空转（路径或写法变了）"
+    assert not offenders, (
+        f"以下 {len(offenders)} 个 Modal 没有垂直居中（antd 默认顶部对齐，"
+        f"用户口径「所有弹窗均应修复成居中」）：{offenders}"
+    )
