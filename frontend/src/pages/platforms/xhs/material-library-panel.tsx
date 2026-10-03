@@ -17,6 +17,7 @@ import {
   App,
   Button,
   Card,
+  Checkbox,
   Empty,
   Image,
   Input,
@@ -637,6 +638,22 @@ export function MaterialLibraryPanel({
         extra={
           <Space size={8}>
             <Tag color="blue">已选 {selectedIds.length} 个文件</Tag>
+            {/* v2.31（用户口径「复选框勾选」）：加了复选框就必须给**全选 / 清空** ——
+                逐个勾几十张是纯体力活，而用户要批量删除时正是「全选再删」这个动作。
+                ⚠️ 只在**全选/部分选**两种语义间切换（部分选中时显示「全选」而不是「取消全选」，
+                否则用户点一下反而全清空，与他的意图相反）。 */}
+            <Button
+              size="small"
+              disabled={files.length === 0}
+              onClick={() => {
+                const allSelected = files.length > 0 && files.every((f) => selectedIds.includes(f.id));
+                setSelectedIds(allSelected ? [] : files.map((f) => f.id));
+              }}
+            >
+              {files.length > 0 && files.every((f) => selectedIds.includes(f.id))
+                ? "取消全选"
+                : "全选"}
+            </Button>
             {/* v2.31：**上传**（用户口径「添加」）—— 只对**当前选中文件夹**可上传，
                 没选文件夹时禁用（上传要有落点，不能猜一个默认目录）。 */}
             <Button
@@ -843,7 +860,13 @@ export function MaterialLibraryPanel({
                     key={file.id}
                     size="small"
                     hoverable
-                    onClick={() => toggleSelect(file.id)}
+                    /* v2.31b（用户口径「复选框勾选」）：**卡片不再承担勾选** ——
+                       勾选**只**由左上角复选框负责（单一职责）。
+                       ⚠️ 这是刻意的**行为收紧**：卡片上同时挂着「点图看大图」，
+                       再让整卡可点 ⇒ 想看图的人一动鼠标就把图选中了
+                       （用户要显式复选框，正是为了消除这种误选）。
+                       变异实测：保留卡片 onClick 时「复选框 onChange 改空函数」**照样绿**
+                       —— 那种「假复选框」正是本轮要杜绝的形态。 */
                     style={{
                       // 宽度交给网格（`1fr` 均分，窗口变宽每张跟着变宽）——
                       // 不再固定 168px（那会让「一行 6 张」在窄屏溢出、宽屏留白）
@@ -851,21 +874,6 @@ export function MaterialLibraryPanel({
                       borderColor: selected ? "#1677ff" : undefined,
                       cursor: "pointer",
                     }}
-                    /* v2.31：单张**删除**入口（用户口径「删除」）。
-                       ⚠️ 用 `actions`（antd 卡片操作条）而不是绝对定位的悬浮按钮：
-                       悬浮按钮会盖住图片右下角的尺寸信息。
-                       ⚠️ 必须 `stopPropagation`：否则点删除会**连带触发卡片的「选中」**。 */
-                    actions={[
-                      <Tooltip title="删除（移入回收站，可从系统回收站还原）" key="delete">
-                        <DeleteOutlined
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            handleDeleteFile(file);
-                          }}
-                          style={{ color: "#ff4d4f" }}
-                        />
-                      </Tooltip>,
-                    ]}
                     cover={
                       // v2.29.4：**文字叠在图片上**（用户口径「缩略图小，把图片名称和属性
                       // 放图片上」）⇒ 容器 `position: relative`，文字条绝对定位在底部。
@@ -940,13 +948,63 @@ export function MaterialLibraryPanel({
                             {file.width && file.height ? ` · ${file.width}×${file.height}` : ""}
                           </div>
                         </div>
+                        {/* v2.31（用户口径「删除放图片右上角」）：删除图标**叠在图片右上角**。
+                            ⚠️ 三条要点：
+                            ① `stopPropagation` 必须加 —— 不加会连带触发卡片的「选中」；
+                            ② 底色是**半透明黑圆底**而不是纯图标：图片内容不可控（浅色图上
+                               红色图标会看不清），圆底保证任何图上都可见；
+                            ③ **不用「悬停才出现」** —— 触摸屏没有 hover，且用户要的是
+                               「一眼看到有删除」。 */}
+                        <Tooltip title="删除（移入回收站，可从系统回收站还原）">
+                          <span
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              handleDeleteFile(file);
+                            }}
+                            style={{
+                              position: "absolute",
+                              top: 4,
+                              right: 4,
+                              zIndex: 2,
+                              width: 22,
+                              height: 22,
+                              borderRadius: 11,
+                              background: "rgba(0,0,0,0.55)",
+                              color: "#fff",
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              cursor: "pointer",
+                            }}
+                          >
+                            <DeleteOutlined style={{ fontSize: 12 }} />
+                          </span>
+                        </Tooltip>
+                        {/* v2.31（用户口径「复选框勾选」）：**左上角复选框** ——
+                            上一版靠「点卡片即选中」（隐式），用户要求**显式勾选**：
+                            隐式选中在「点图看大图」与「选中」共用一个手势时最容易误选。 */}
+                        <span
+                          onClick={(event) => event.stopPropagation()}
+                          style={{
+                            position: "absolute",
+                            top: 4,
+                            left: 4,
+                            zIndex: 2,
+                            background: "rgba(255,255,255,0.9)",
+                            borderRadius: 4,
+                            padding: "0 3px",
+                            lineHeight: "16px",
+                          }}
+                        >
+                          <Checkbox
+                            checked={selected}
+                            onChange={() => toggleSelect(file.id)}
+                          />
+                        </span>
                       </div>
                     }
                   >
-                    {/* v2.31：单张**删除**入口（用户口径「删除」）。
-                        ⚠️ 用 `actions`（antd 的卡片操作条）而**不是**绝对定位的悬浮按钮：
-                        绝对定位会盖住图片右下角的尺寸信息，且「悬停才出现」在触摸屏上点不到。
-                        ⚠️ `stopPropagation` 必须加：不加会连带触发卡片的「选中」。 */}
+                    {/* 卡片 body 留空 —— 文件名/属性已叠在图上（同一信息不留两份）。 */}
                     <div style={{ display: "none" }} />
                   </Card>
                 );

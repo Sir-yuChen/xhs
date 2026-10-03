@@ -2111,9 +2111,28 @@ def test_material_files_have_delete_upload_and_switchable_preview():
 
     # ② 单张删除：**必须绑到删除处理函数**，且该函数内**必须有确认框**
     assert "deleteMaterialFile" in panel, "没有接单张删除请求"
-    assert "onClick={(event) => {" in panel and "handleDeleteFile(file)" in panel, (
+    assert "handleDeleteFile(file)" in panel, (
         "删除图标没有绑到 handleDeleteFile（变异实测：绑成空函数时旧守卫照样绿）"
     )
+    # v2.31b：删除图标**叠在图片右上角**（用户口径「删除放图片右上角」）
+    delete_mark = panel[panel.index("handleDeleteFile(file)"):]
+    delete_block = delete_mark[:900]
+    assert "position: \"absolute\"" in delete_block and "top: 4" in delete_block and "right: 4" in delete_block, (
+        "删除图标没有定位到图片右上角（用户口径）"
+    )
+    # v2.31b：**左上角复选框**（用户口径「复选框勾选」）——
+    # ⚠️ 上一版是「点卡片即选中」（隐式），用户明确要显式勾选
+    assert "<Checkbox" in panel, "没有复选框（用户口径明确要「复选框勾选」）"
+    assert "checked={selected}" in panel and "toggleSelect(file.id)" in panel, (
+        "复选框没绑到勾选状态（画了框但点不动 = 假复选框）"
+    )
+    # ⚠️ 勾选**只**由复选框负责：卡片上不许再挂「点卡片即勾选」。
+    #    变异实测 —— 卡片仍可点选时，把复选框 onChange 改成空函数**照样绿**（假复选框）。
+    assert "onClick={() => toggleSelect(file.id)}" not in panel, (
+        "卡片仍在承担勾选 —— 会让「点图看大图」误触选中（用户要显式复选框正是为消除误选）"
+    )
+    # v2.31b：**全选 / 取消全选**（加了复选框就必须有，否则逐个勾几十张是体力活）
+    assert "取消全选" in panel and '"全选"' in panel, "工具栏没有全选/取消全选"
     delete_fn = _slice_between(panel, "function handleDeleteFile(", "function handleDeleteSelected(")
     # ⚠️ 判据必须**匹配语句本身**（行首 `modal.confirm(`），不能只 `in` 一下：
     #    变异实测 —— 改成 `if (false) modal.confirm(` 时旧的 `in` 判据**照样绿**
@@ -2135,6 +2154,9 @@ def test_material_files_have_delete_upload_and_switchable_preview():
     assert "deleteMaterialFilesBatch" in panel, "没有接批量删除请求"
     assert "disabled={selectedIds.length === 0}" in panel, "批量删除没做「无勾选时禁用」"
     assert "onClick={handleDeleteSelected}" in panel, "批量删除按钮没绑到处理函数"
+    # v2.31b：批量删除按钮必须在**顶部工具栏**（用户口径「顶部添加批量删除按钮」）
+    toolbar = _slice_between(panel, "title=\"素材文件夹\"", "foldersLoading ? (")
+    assert "批量删除" in toolbar, "批量删除按钮不在顶部工具栏（用户口径「顶部添加」）"
     batch_fn = _slice_between(panel, "function handleDeleteSelected(", "async function handleUpload(")
     assert re.search(r"^\s*modal\.confirm\(({)?$", batch_fn, re.M), (
         "批量删除没有**真正被调用**的确认框"
