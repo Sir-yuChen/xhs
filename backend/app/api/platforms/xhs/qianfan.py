@@ -25,6 +25,7 @@ import logging
 import mimetypes
 import shutil
 from datetime import datetime
+from urllib.parse import quote
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional
@@ -2351,12 +2352,20 @@ def export_shop_items(
     for row in rows:
         writer.writerow(row)
 
-    filename = datetime.now().strftime("商品台账-%Y%m%d-%H%M%S.csv")
+    # ⚠️ **文件名不得直接进响应头**（DEF-091）：Starlette 按 **latin-1** 编码响应头，
+    # 中文 filename ⇒ `UnicodeEncodeError` ⇒ 导出**必 500**（任何一次导出都炸，
+    # 不是边界情况）。修法 = RFC 5987 的 `filename*=UTF-8''<pct-encoded>`
+    # 并**同时给一个纯 ASCII 的 `filename=` 回退**（老客户端认它）。
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    ascii_name = f"shop-items-{stamp}.csv"
+    utf8_name = quote(f"商品台账-{stamp}.csv", safe="")
     return StreamingResponse(
         iter([buffer.getvalue()]),
         media_type="text/csv; charset=utf-8",
         headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Disposition": (
+                f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{utf8_name}'
+            ),
             "X-Export-Rows": str(len(rows)),
         },
     )
