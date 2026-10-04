@@ -54,6 +54,7 @@ from backend.app.services.material_scan_service import is_safe_material_path
 from backend.app.services.media_generation import _media_dir
 from backend.app.models.platform_account import PlatformAccount
 from backend.app.models.note import Note, NoteAsset
+from backend.app.models.order import Order
 from backend.app.models.shop import NoteGoods
 from backend.app.models.task import Task
 from backend.app.services.shop_health_service import check_account_health
@@ -2387,6 +2388,46 @@ class OrderListRequest(BaseModel):
     )
 
 
+class OrderDetailRequest(BaseModel):
+    """订单详情入参（**本地台账**，零平台请求）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    platform_account_id: int = Field(..., description="账号矩阵里的账号 id")
+    order_no: str = Field(..., min_length=1, description="平台订单号")
+    include_full: bool = Field(
+        False, description="True 才回完整收件人信息；默认脱敏。"
+    )
+
+
+class OrderRemarkRequest(BaseModel):
+    """写一条**本地**订单备注（设计 16 §7.2）。
+
+    ⚠️ **不碰平台**：千帆的卖家备注写接口未授权（硬约束②只读）。
+    这里写的备注只存在于本机台账，不同步到平台。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    platform_account_id: int = Field(..., description="账号矩阵里的账号 id")
+    order_no: str = Field(..., min_length=1, description="平台订单号")
+    content: str = Field("", description="备注内容；空串 = 删除该备注")
+    kind: str = Field("订单", description="备注类型：订单 / 包裹（设计 16 §7.2）")
+
+
+class OrderExportRequest(OrderListRequest):
+    """订单导出入参 —— **筛选条件与列表完全同构**（导出的就是筛出来的那批）。
+
+    继承而非另写一份：两处各写一套筛选，必然分叉成「导出的和看到的不一样」。
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    limit: int = Field(
+        1000, ge=1, le=10000, description="导出行数上限（防一次拉爆内存）"
+    )
+
+
 class OrderSyncRequest(BaseModel):
     """触发一次订单同步（语义 = 手动跑一次定时任务，与 `/sync-shop-goods` 同构）。"""
 
@@ -2487,6 +2528,155 @@ def order_sync_trigger(
             progress_probe=sync_task_service.task_progress_probe(int(task_id)),
         )
     return {**summary, "log_id": log_id}
+
+
+@router.post("/orders/detail")
+def order_detail_endpoint(
+    payload: OrderDetailRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """订单详情（**本地台账**，零平台请求；收件人默认脱敏）。
+
+    越权 / 不存在 ⇒ 404 且**不区分**「不是你的」与「不存在」——
+    区分了就等于告诉调用方「这个订单号是别人的」。
+    """
+    account = _owned_account(db, current_user, payload.platform_account_id)
+    order = db.scalar(
+        select(Order).where(
+            Order.user_id == current_user.id,
+            Order.platform_account_id == account.id,
+            Order.order_no == payload.order_no,
+        )
+    )
+    if order is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": "ORDER_NOT_FOUND",
+                "message": f"订单不存在或不属于当前账号：{payload.order_no}",
+            },
+        )
+    return {
+        "platform_account_id": payload.platform_account_id,
+        "source": "local",
+        "order": order_sync_service.order_summary(
+            db, order, include_full=bool(payload.include_full)
+        ),
+    }
+
+
+@router.post("/orders/remark")
+def order_remark_endpoint(
+    payload: OrderRemarkRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """写一条**本地**订单备注（设计 16 §7.2）。
+
+    ⚠️ **这是本机台账写入，不是平台写操作**：千帆卖家备注写接口未授权
+    （硬约束②只读 + 用户 2026-09-19 授权清单仅「删除笔记」一项）。
+    页面必须如实告知用户「此备注只存本地」。
+    """
+    account = _owned_account(db, current_user, payload.platform_account_id)
+    order = db.scalar(
+        select(Order).where(
+            Order.user_id == current_user.id,
+            Order.platform_account_id == account.id,
+            Order.order_no == payload.order_no,
+        )
+    )
+    if order is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": "ORDER_NOT_FOUND",
+                "message": f"订单不存在或不属于当前账号：{payload.order_no}",
+            },
+        )
+    row = order_sync_service.upsert_remark(
+        db, user_id=current_user.id, order=order, content=payload.content, kind=payload.kind
+    )
+    db.commit()
+    return {
+        "ok": True,
+        "deleted": row is None,
+        "remark": (
+            None
+            if row is None
+            else {
+                "id": row.id,
+                "kind": row.kind,
+                "content": row.content,
+                "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+            }
+        ),
+    }
+
+
+@router.post("/orders/export")
+def order_export_endpoint(
+    payload: OrderExportRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """订单导出（**CSV 文本**，不落文件 —— 由前端触发下载）。
+
+    ⚠️ **导出走完整值**（收件人姓名 / 手机 / 地址）：设计 16 §7.2 口径 ——
+    履约数据完整落库，防护在**展示层**；打单 / 发货场景本来就需要原值。
+    页面在触发导出前必须显式提示「将包含完整收件信息」。
+    """
+    account = _owned_account(db, current_user, payload.platform_account_id)
+    status_key = (payload.status or "").strip()
+    if status_key and status_key not in order_sync_service.ORDER_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "QIANFAN_ORDER_STATUS_UNSUPPORTED",
+                "message": f"不支持的订单状态：{status_key}",
+                "supported": ["", *order_sync_service.ORDER_STATUSES],
+            },
+        )
+    result = order_sync_service.list_orders(
+        db,
+        user_id=current_user.id,
+        platform_account_id=account.id,
+        status=status_key,
+        keyword=(payload.keyword or "").strip(),
+        date_from=payload.date_from,
+        date_to=payload.date_to,
+        page=1,
+        page_size=min(payload.limit, 100),
+        include_full=True,
+    )
+    # 上限之外再翻页捞（list_orders 单页上限 100）；`limit` 封顶 10000。
+    rows = list(result["items"])
+    page = 2
+    while len(rows) < payload.limit and len(result["items"]) == 100:
+        result = order_sync_service.list_orders(
+            db,
+            user_id=current_user.id,
+            platform_account_id=account.id,
+            status=status_key,
+            keyword=(payload.keyword or "").strip(),
+            date_from=payload.date_from,
+            date_to=payload.date_to,
+            page=page,
+            page_size=100,
+            include_full=True,
+        )
+        if not result["items"]:
+            break
+        rows.extend(result["items"])
+        page += 1
+    rows = rows[: payload.limit]
+    return {
+        "platform_account_id": payload.platform_account_id,
+        "count": len(rows),
+        "truncated": len(rows) >= payload.limit,
+        "filename": order_sync_service.export_filename(),
+        "csv": order_sync_service.orders_to_csv(rows),
+    }
 
 
 @router.get("/orders/metrics")

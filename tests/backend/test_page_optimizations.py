@@ -3942,3 +3942,181 @@ def test_workflow_lib_does_not_import_ui_frameworks():
     code = _read(WORKFLOW_LIB)
     assert 'from "antd"' not in code, "lib 不得依赖 antd（纯逻辑）"
     assert 'from "react"' not in code, "lib 不得依赖 react（纯逻辑）"
+
+
+# --------------------------------------------------------------------------- #
+# M6 订单页（设计 16 §7，一期只读）
+# --------------------------------------------------------------------------- #
+ORDERS_PAGE = ROOT / "frontend/src/pages/platforms/xhs/orders-page.tsx"
+ORDERS_LIB = ROOT / "frontend/src/lib/order-format.ts"
+
+
+def _function_block(code: str, name: str) -> str:
+    """截出 `function <name>(...) { ... }` 的函数体（用于**只在函数内**断言）。
+
+    ⚠️ 不要在整份文件里断言短语 —— 同名/近义短语可能在别处出现，
+    这会让「把判据改坏」的变异**逃逸**（2026-10-04 实测两次）。
+    """
+    import re as _re
+
+    m = _re.search(r"(?:export\s+)?function\s+" + name + r"\s*\(", code)
+    if not m:
+        return ""
+    start = code.index("{", m.end())
+    depth = 0
+    for i in range(start, len(code)):
+        if code[i] == "{":
+            depth += 1
+        elif code[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return code[start:i + 1]
+    return code[start:]
+
+
+def test_orders_page_calls_all_six_request_functions():
+    """订单页必须接线到 6 个请求函数（否则页面是空壳）。
+
+    ⚠️ 判据是**调用形态**（`fetchOrders(` 而非仅名字出现）：只断言名字时，
+    「import 了但没调用」也能过（2026-10-04 在 M2/M5 各踩过一次）。
+    """
+    import re as _re
+
+    code = _code_only(_read(ORDERS_PAGE))
+    # ⚠️ 只看「函数名出现」不够：把 `await fetchOrders({...})` 改成
+    # `await Promise.all([Promise.resolve(null), ...])` 时名字仍在 import 里
+    # ⇒ 第一版 **ESCAPED**（2026-10-04 实测）。判据改成**真调用形态**：
+    # 必须出现 `fetchXxx(` 且调用后**把返回值赋给变量或用 await**。
+    for fn in (
+        "fetchOrders",
+        "fetchOrderDetail",
+        "fetchOrderMetrics",
+        "syncOrders",
+        "exportOrders",
+        "saveOrderRemark",
+    ):
+        # 接受三种真实调用形态：
+        #   await fn(...)          —— 直接等
+        #   const x = await fn(...) / const x = fn(...)  —— 赋值
+        #   Promise.all([fn(...), ...])  —— 并发（实参里裸调用）
+        # 必须**出现在调用位置**，不能只在 import 列表里。
+        call = _re.search(
+            r"await\s+" + fn + r"\s*\("
+            r"|const\s+\w+\s*=\s*(?:await\s+)?" + fn + r"\s*\("
+            r"|(?:all|race)\s*\(\s*\[?[\s\S]{0,400}?" + fn + r"\s*\(",
+            code,
+        )
+        assert call, f"订单页没有真正调用 {fn}（名字出现不等于调用）"
+
+
+def test_orders_page_uses_lib_for_vocabulary_not_inline():
+    """展示判据必须**从 lib/order-format 导入**，不内联重写（DEF-044）。
+
+    遮蔽同名函数也算重写 —— 判据是「在 import 列表里」。
+    """
+    import re as _re
+
+    code = _code_only(_read(ORDERS_PAGE))
+    imports = _re.findall(
+        r"import\s*\{([^}]*)\}\s*from\s*\"[^\"]*order-format\";", code, flags=_re.S
+    )
+    assert imports, "订单页没有从 lib/order-format 导入任何东西"
+    imported = {p.strip() for block in imports for p in block.split(",") if p.strip()}
+    for fn in ("orderStatusText", "orderStatusColor", "moneyText", "orderItemsSummary", "timeText"):
+        assert fn in imported, f"订单页没有从 lib/order-format 导入 {fn}"
+
+
+def test_orders_page_never_renders_blank_money_as_zero():
+    """**缺值口径**：金额 / 退款率 / 时长的渲染必须经 lib 的 `-` 判据。
+
+    ⚠️ 页面里若直接写 `value ?? 0` 或 `Number(value)`，缺值就变成 0 ——
+    「没这个数」与「这个数是 0」是两回事（缺值口径）。
+    """
+    import re as _re
+
+    code = _code_only(_read(ORDERS_PAGE))
+    # ⚠️ 只盯**金额 / 比率 / 时长**这几类字段的补零 —— 「订单条数」缺值补 0
+    # 是对的（条数为 0 就是没有订单），第一版把 `list.total ?? 0` 也判成违规
+    # ⇒ 假阳性。判据收窄到「这些字段名 + 补零写法」同现。
+    # ⚠️ 第一版把「字段名」和「?? 0」限在同一行 40 字符内 ⇒ 变异把
+    # `moneyText(value)` 改成 `moneyText(value ?? 0)` 时，字段名在**上面几行**
+    # 的 `dataIndex`，够不着 ⇒ **ESCAPED**（2026-10-04 实测）。
+    # 判据改成：**任何 moneyText/percentText/hoursText 的实参里出现补零**即违规 ——
+    # 这几个函数本身就是「缺值 → -」的唯一实现，往实参里补 0 就是绕过它。
+    for fn in ("moneyText", "percentText", "hoursText"):
+        for m in _re.finditer(fn + r"\(([^)]*)\)", code):
+            arg = m.group(1)
+            assert "?? 0" not in arg and "|| 0" not in arg, (
+                f"{fn} 的实参里把缺值补成 0：{fn}({arg})"
+            )
+    # 另外：禁止 `Number(...)` 直接吞掉 null（会变 NaN，渲染成 "NaN" 而不是 -）
+    assert "Number(detail.pay_amount" not in code
+    assert "Number(detail.total_amount" not in code
+def test_orders_page_has_no_platform_write_actions():
+    """**一期只读**：页面不许出现发货 / 改价 / 售后审核入口（平台写接口未授权）。
+
+    判据：请求函数清单里**没有**发货类函数被调用 —— 这是「写操作未授权」
+    这条硬约束在页面层的落点，不能只写在文档里。
+    """
+    code = _code_only(_read(ORDERS_PAGE))
+    for forbidden in (
+        "shipOrder(",
+        "deliverOrder(",
+        "confirmShipment(",
+        "refundOrder(",
+        "auditAfterSale(",
+        "updateOrderPrice(",
+    ):
+        assert forbidden not in code, f"订单页出现写操作入口：{forbidden}"
+
+
+def test_orders_page_marks_remark_as_local_only():
+    """备注是**本地**写 —— 页面必须如实标注（不许让用户以为同步到平台）。"""
+    code = _code_only(_read(ORDERS_PAGE))
+    # ⚠️ 第一版用「或」把两个判据放一起，且 `"本地"` 太宽（页脚那句
+    # 「属平台写操作」的注释里也有「本地」）⇒ 删掉标注句时 **ESCAPED**。
+    # 判据收紧为**具体短语**，两条都要在。
+    assert "仅存本地" in code, "订单页没有标注备注『仅存本地』"
+    assert "不同步到平台" in code, "订单页没有说明备注不同步到平台"
+
+
+def test_orders_page_warns_before_export():
+    """导出**含完整收件信息** ⇒ 必须先提示再执行（不是「点完才知道」）。"""
+    code = _code_only(_read(ORDERS_PAGE))
+    assert "EXPORT_WARNING" in code, "订单页导出前没有用 lib 的告警文案"
+    assert "modal.confirm" in code, "订单页导出没有二次确认"
+
+
+def test_orders_page_modal_is_centered_and_viewport_sized_drawer():
+    """弹窗居中 + 抽屉按视口百分比（用户既有 UI 偏好）。"""
+    code = _code_only(_read(ORDERS_PAGE))
+    assert 'width="60vw"' in code, "详情抽屉没有按视口百分比设宽"
+
+
+def test_order_lib_missing_value_returns_dash_not_zero():
+    """**lib 层**的缺值判据：`moneyText(null)` 必须是 `-`，不许退化成 `￥0.00`。
+
+    ⚠️ 这条守的是 `lib/order-format.ts` **本身** —— 页面守卫只看页面，
+    把 lib 的 `return "-"` 改成 `return "￥0.00"` 时页面守卫**看不见**
+    （2026-10-04 变异实测 ESCAPED）。vitest 已覆盖运行时行为，
+    这里做一层**静态兜底**（防止 lib 被改而 vitest 恰好没跑）。
+    """
+    code = _read(ORDERS_LIB)
+    # 每个取值函数都必须有「缺值 → -」的分支
+    for fn in ("moneyText", "percentText", "hoursText", "timeText"):
+        block = _function_block(code, fn)
+        assert 'return "-";' in block, f"order-format.{fn} 缺少「缺值 → -」分支"
+
+
+def test_order_lib_status_never_invents_a_name():
+    """**表外状态原样显示**（不造名）—— 判据是「没有兜底改名」的写法。
+
+    把 `return text` 改成 `return ORDER_STATUSES.includes(text) ? text : "其他"`
+    时，用户就看不到平台实际给的状态了（DEF-057 同型）。
+    """
+    code = _read(ORDERS_LIB)
+    block = _function_block(code, "orderStatusText")
+    for invented in ("其他", "未知", "OTHER", "UNKNOWN"):
+        assert invented not in block, (
+            f"orderStatusText 造了一个状态名：{invented}（表外值应原样返回）"
+        )

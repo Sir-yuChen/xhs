@@ -44,6 +44,7 @@ from backend.app.core.database import SessionLocal
 from backend.app.core.time import SHANGHAI_TZ, shanghai_now
 from backend.app.models.order import (
     AFTERSALE_STATUS_PENDING,
+    ORDER_REMARK_KIND_ORDER,
     ORDER_STATUS_MAP,
     ORDER_STATUSES,
     AfterSale,
@@ -296,6 +297,13 @@ def upsert_order(
     返回落库的 ``Order``（缺 ``order_no`` 的条目返回 ``None``）。
     """
     order_no = normalized["order_no"]
+    # ⚠️ **空单号必须挡在这里**（2026-10-04 实测补）：docstring 许诺「缺 order_no
+    # 返回 None」，但实现只判 `normalized["order_no"]`（有键即可）——
+    # 于是空串会落一行 `order_no=''`，而该列有唯一约束 ⇒ **第二笔空单号订单
+    # 同步直接撞 UNIQUE 崩掉整个同步任务**。缺值口径：缺标识就不落（不造）。
+    if not str(order_no or "").strip():
+        normalized.pop("skus", None)
+        return None
     skus = normalized.pop("skus")
     order = db.scalar(
         select(Order).where(
@@ -1057,10 +1065,16 @@ def list_orders(
         statement = statement.where(Order.created_at <= _parse_date(date_to, end_of_day=True))
 
     total = db.scalar(select(func.count()).select_from(statement.subquery())) or 0
+    # ⚠️ **先归一参数再回显**（2026-10-04 实测补）：原实现只把 `page_size` 收窄在
+    # `LIMIT` 上，返回体里回的却是**原始入参** ⇒ 前端传 100000 时页面显示
+    # 「每页 100000 条」而实际只拿到 100 条（分页器算出的总页数也是错的）。
+    # 口径：返回体回显**服务端实际采用值**，调用方据此渲染分页器。
+    page = max(int(page or 1), 1)
+    page_size = max(min(int(page_size or 20), 100), 1)
     rows = db.scalars(
         statement.order_by(Order.created_at.desc())
         .offset(max((page - 1) * page_size, 0))
-        .limit(max(min(page_size, 100), 1))
+        .limit(page_size)
     ).all()
     return {
         "total": int(total),
@@ -1068,6 +1082,132 @@ def list_orders(
         "page_size": page_size,
         "items": [order_summary(db, row, include_full=include_full) for row in rows],
     }
+
+
+def upsert_remark(
+    db: Session,
+    *,
+    user_id: int,
+    order: Order,
+    content: str,
+    kind: str = ORDER_REMARK_KIND_ORDER,
+) -> Optional[OrderRemark]:
+    """写一条**本地**订单备注（设计 16 §7.2）。
+
+    ⚠️ **这是本地标记，不是平台写操作** —— 平台的「卖家备注」写接口未授权
+    （硬约束②只读 + 用户 2026-09-19 授权清单里只有「删除笔记」一个写操作）。
+    用户在这里写的备注**只存在于本机台账**，不会同步到千帆。
+
+    ## 口径：一条订单 + 一种 kind ⇒ 一条备注（**覆盖，不追历史**）
+
+    设计 16 §7.2 的表形状是「订单备注」而非「备注流水」；页面也是一个
+    输入框（当前值 + 保存）。若改成 append，页面就得处理「显示哪一条」，
+    且用户改三个字会产生三条记录 —— 不是这张表要表达的东西。
+
+    `content` 为空 ⇒ 删除该备注（用户清空输入框 = 不备注，不是存一条空串；
+    空串会让页面显示一个「有备注」的空行）。
+    """
+    row = db.scalar(
+        select(OrderRemark).where(
+            OrderRemark.order_id == order.id, OrderRemark.kind == kind
+        )
+    )
+    text = (content or "").strip()
+    if not text:
+        if row is not None:
+            db.delete(row)
+            db.flush()
+        return None
+    if row is None:
+        row = OrderRemark(
+            order_id=order.id, user_id=user_id, kind=kind, content=text
+        )
+        db.add(row)
+    else:
+        row.content = text
+    db.flush()
+    return row
+
+
+#: 导出 CSV 的列（**顺序固定** —— 用户拿去做透视/对账，列序变了脚本就崩）。
+#: 收件人三列给**完整值**（设计 16 §7.2：履约场景需要原值，防护在展示层）。
+EXPORT_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("订单号", "order_no"),
+    ("状态", "status"),
+    ("买家昵称", "buyer_nick"),
+    ("收件人", "receiver_name"),
+    ("手机号", "receiver_phone"),
+    ("收货地址", "receiver_address"),
+    ("商品", "_items_text"),
+    ("应付金额", "pay_amount"),
+    ("订单金额", "total_amount"),
+    ("运费", "freight"),
+    ("优惠", "discount"),
+    ("支付方式", "pay_method"),
+    ("物流公司", "logistics_company"),
+    ("快递单号", "tracking_no"),
+    ("下单时间", "created_at"),
+    ("付款时间", "pay_time"),
+    ("发货时间", "ship_time"),
+    ("完成时间", "finish_time"),
+)
+
+
+def export_filename() -> str:
+    """导出文件名（带时间戳，避免两次导出互相覆盖）。"""
+    return f"xhs_orders_{shanghai_now().strftime('%Y%m%d_%H%M%S')}.csv"
+
+
+def _csv_cell(value: Any) -> str:
+    """CSV 单元格 -> **只做公式注入防护**，引号/逗号交给 csv.writer。
+
+    **不要在这里自己加引号**（2026-10-04 实测踩到）：csv.writer 已经按
+    RFC 4180 处理引号与分隔符；这里再裹一层 => 值被双重转义，Excel 打开
+    时多出可见引号。同一件事只有一个实现（DEF-044）：转义归 csv 模块，
+    本函数只管安全前缀。
+
+    **前导 = + - @ 要加单引号前缀**：Excel / WPS 会把它们当公式执行
+    （CSV 注入）。订单号、买家昵称是平台来的外部数据，商家点开导出文件时
+    不该有被当公式执行的风险。纯数字（如 -12.5）不算公式，放行。
+    """
+    if value is None:
+        return ""
+    text = str(value)
+    head = text[:1]
+    if head in ("=", "+", "@") or (head == "-" and not text[1:2].isdigit()):
+        return "'" + text
+    return text
+
+
+def orders_to_csv(rows: list[dict[str, Any]]) -> str:
+    """订单摘要 list → CSV 文本（含 BOM，Excel 打开不乱码）。
+
+    ⚠️ 用 `csv` 模块而不是手工拼 `join`：买家昵称 / 商品名里的逗号、引号、
+    换行都会破坏手工拼接的列结构（实测平台昵称里有带逗号的）。
+    """
+    import csv as _csv
+    import io as _io
+
+    buf = _io.StringIO()
+    writer = _csv.writer(buf, lineterminator="\r\n")
+    writer.writerow([label for label, _ in EXPORT_COLUMNS])
+    for row in rows:
+        line = []
+        for _, key in EXPORT_COLUMNS:
+            if key == "_items_text":
+                items = row.get("items") or []
+                text = " | ".join(
+                    f"{i.get('item_name') or ''}"
+                    + (f"（{i.get('sku')}）" if i.get("sku") else "")
+                    + f" x{i.get('quantity') or 0}"
+                    for i in items
+                )
+                line.append(text)
+            else:
+                line.append(row.get(key))
+        writer.writerow([_csv_cell(c) for c in line])
+    # BOM：Excel 认 UTF-8 BOM，否则中文列名乱码
+    return "﻿" + buf.getvalue()
 
 
 def _parse_date(value: str, *, end_of_day: bool = False) -> datetime:

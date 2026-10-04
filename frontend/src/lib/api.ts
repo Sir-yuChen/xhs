@@ -3403,3 +3403,238 @@ export async function reviewWorkflowNode(
   );
   return response.data;
 }
+
+// ---------------------------------------------------------------------------
+// 订单模块（设计 16 §7，M6 · 一期只读）
+//
+// ⚠️ **一期只读**：这里没有任何「发货 / 改价 / 售后审核」的写接口 ——
+// 平台的写接口未授权（硬约束②）。**备注是本地写**（`order_remarks` 表），
+// 不同步到平台，页面必须如实告知用户。
+// ---------------------------------------------------------------------------
+
+/** 订单状态（与后端 `models/order.py` 的 ORDER_STATUSES 逐值一致）。
+ *
+ * ⚠️ 是 `待收货` 不是 `已发货` —— 平台语义是「已发货待收货」。
+ */
+export type OrderStatus =
+  | "待付款"
+  | "待发货"
+  | "待收货"
+  | "已完成"
+  | "售后中"
+  | "已关闭"
+  | "";
+
+/** 全部订单状态（筛选器用它；**顺序即页面展示顺序**）。 */
+export const ORDER_STATUSES: OrderStatus[] = [
+  "待付款",
+  "待发货",
+  "待收货",
+  "已完成",
+  "售后中",
+  "已关闭",
+];
+
+export interface OrderItemRow {
+  id: number;
+  item_id?: string | null;
+  /** 已匹配到的本地商品 id（千帆商品不在台账时为 null）。 */
+  shop_product_id?: number | null;
+  item_name: string;
+  item_image?: string | null;
+  sku?: string | null;
+  quantity: number;
+  unit_price?: number | null;
+  amount?: number | null;
+  refund_status?: string | null;
+}
+
+export interface OrderShipmentRow {
+  id: number;
+  package_id?: string | null;
+  logistics_company?: string | null;
+  tracking_no?: string | null;
+  ship_time?: string | null;
+  sign_time?: string | null;
+  warehouse_desc?: string | null;
+}
+
+export interface OrderAfterSaleRow {
+  id: number;
+  after_sale_id?: string | null;
+  type?: string | null;
+  reason?: string | null;
+  status?: string | null;
+  amount?: number | null;
+  apply_time?: string | null;
+  handle_time?: string | null;
+  handle_result?: string | null;
+}
+
+export interface OrderRemarkRow {
+  id: number;
+  kind: string;
+  content: string;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface OrderRow {
+  id: number;
+  order_no: string;
+  package_id?: string | null;
+  platform_account_id: number;
+  type_desc?: string | null;
+  buyer_nick: string;
+  /** ⚠️ 默认**脱敏**（`张*` / `189****2857`）；`includeFull` 才给库里原值。 */
+  receiver_name?: string | null;
+  receiver_phone?: string | null;
+  receiver_address?: string | null;
+  receiver_province?: string | null;
+  receiver_city?: string | null;
+  status: OrderStatus | string;
+  /** 平台原始状态码（**表外值原样显示、不造名**）。 */
+  platform_status?: string | null;
+  total_amount?: number | null;
+  pay_amount?: number | null;
+  freight?: number | null;
+  discount?: number | null;
+  pay_method?: string | null;
+  order_source?: string | null;
+  logistics_company?: string | null;
+  tracking_no?: string | null;
+  created_at?: string | null;
+  pay_time?: string | null;
+  ship_time?: string | null;
+  finish_time?: string | null;
+  promise_ship_time?: string | null;
+  synced_at?: string | null;
+  seller_mark?: string | null;
+  items?: OrderItemRow[];
+  shipments?: OrderShipmentRow[];
+  after_sales?: OrderAfterSaleRow[];
+  remarks?: OrderRemarkRow[];
+}
+
+export interface OrderListParams {
+  platformAccountId: number;
+  status?: OrderStatus | string;
+  keyword?: string;
+  dateFrom?: string;
+  dateTo?: string;
+  page?: number;
+  pageSize?: number;
+  /** true 才回完整收件人信息；**默认脱敏**。 */
+  includeFull?: boolean;
+}
+
+export interface OrderListResult {
+  platform_account_id: number;
+  source: string;
+  shop_name?: string | null;
+  status: string;
+  page: number;
+  page_size: number;
+  total: number;
+  count: number;
+  items: OrderRow[];
+}
+
+export async function fetchOrders(params: OrderListParams): Promise<OrderListResult> {
+  const response = await http.post<OrderListResult>("/xhs/qianfan/orders", {
+    platform_account_id: params.platformAccountId,
+    status: params.status ?? "",
+    keyword: params.keyword ?? "",
+    date_from: params.dateFrom ?? null,
+    date_to: params.dateTo ?? null,
+    page: params.page ?? 1,
+    page_size: params.pageSize ?? 20,
+    include_full: params.includeFull ?? false,
+  });
+  return response.data;
+}
+
+export async function fetchOrderDetail(
+  platformAccountId: number,
+  orderNo: string,
+  includeFull = false,
+): Promise<OrderRow> {
+  const response = await http.post<{ order: OrderRow }>("/xhs/qianfan/orders/detail", {
+    platform_account_id: platformAccountId,
+    order_no: orderNo,
+    include_full: includeFull,
+  });
+  return response.data.order;
+}
+
+export async function syncOrders(platformAccountId: number): Promise<Record<string, unknown>> {
+  const response = await http.post<Record<string, unknown>>("/xhs/qianfan/orders/sync", {
+    platform_account_id: platformAccountId,
+  });
+  return response.data;
+}
+
+export interface OrderMetrics {
+  order_count: number;
+  gmv: number;
+  avg_order_value?: number | null;
+  paid_count: number;
+  finished_count: number;
+  refund_count: number;
+  refund_rate?: number | null;
+  avg_ship_hours?: number | null;
+  /** ⚠️ 每个状态都有键（缺值 0），前端不用补样板。 */
+  by_status: Record<string, number>;
+}
+
+export async function fetchOrderMetrics(platformAccountId: number): Promise<OrderMetrics> {
+  const response = await http.get<{ metrics: OrderMetrics }>("/xhs/qianfan/orders/metrics", {
+    params: { platform_account_id: platformAccountId },
+  });
+  return response.data.metrics;
+}
+
+/** ⚠️ **本地**备注（不碰平台）—— 空 `content` = 删除该备注。 */
+export async function saveOrderRemark(
+  platformAccountId: number,
+  orderNo: string,
+  content: string,
+  kind = "订单",
+): Promise<{ ok: boolean; deleted: boolean; remark: OrderRemarkRow | null }> {
+  const response = await http.post<{
+    ok: boolean;
+    deleted: boolean;
+    remark: OrderRemarkRow | null;
+  }>("/xhs/qianfan/orders/remark", {
+    platform_account_id: platformAccountId,
+    order_no: orderNo,
+    content,
+    kind,
+  });
+  return response.data;
+}
+
+export interface OrderExportResult {
+  platform_account_id: number;
+  count: number;
+  truncated: boolean;
+  filename: string;
+  /** ⚠️ 含**完整**收件人信息（履约口径）—— 下载前必须显式提示用户。 */
+  csv: string;
+}
+
+export async function exportOrders(
+  platformAccountId: number,
+  params: Omit<OrderListParams, "platformAccountId" | "page" | "pageSize" | "includeFull"> = {},
+  limit = 1000,
+): Promise<OrderExportResult> {
+  const response = await http.post<OrderExportResult>("/xhs/qianfan/orders/export", {
+    platform_account_id: platformAccountId,
+    status: params.status ?? "",
+    keyword: params.keyword ?? "",
+    date_from: params.dateFrom ?? null,
+    date_to: params.dateTo ?? null,
+    limit,
+  });
+  return response.data;
+}
