@@ -3848,3 +3848,97 @@ def test_metrics_vitest_case_file_is_wired():
     case = _read(case_file)
     assert 'from "vitest"' in case, "用例必须显式 import vitest（不依赖 globals）"
     assert "describe(" in case and "it(" in case, "用例里没有 describe/it"
+
+
+# --------------------------------------------------------------------------- #
+# M5 自动化工作流页（设计 19）
+# --------------------------------------------------------------------------- #
+WORKFLOW_PAGE = ROOT / "frontend/src/pages/platforms/xhs/workflow-page.tsx"
+WORKFLOW_LIB = ROOT / "frontend/src/lib/workflow-format.ts"
+ROUTER = ROOT / "frontend/src/app/router.tsx"
+APP_SHELL = ROOT / "frontend/src/components/layout/app-shell.tsx"
+
+
+def test_workflow_page_calls_all_eleven_request_functions():
+    """工作流页必须**真的调用** M5 交付的 11 个请求函数。
+
+    ⚠️ 判据是**调用形态**不是「出现」（2026-10-04 变异实测教训，同
+    `test_metrics_panel_calls_all_four_request_functions`）：只断言名字出现在
+    文件里 ⇒ 删掉调用点的变异 ESCAPED（名字还留在 import 里）。
+    ⇒ 剥掉 import 后断言 `fn(`。
+    """
+    import re as _re
+
+    code = _code_only(_read(WORKFLOW_PAGE))
+    body = _re.sub(r"import\s*\{[^}]*\}\s*from\s*\"[^\"]+\";", "", code, flags=_re.S)
+    body = _re.sub(r"import\s+[^;]+;", "", body)
+
+    for fn in (
+        "fetchWorkflows",
+        "createWorkflow",
+        "fetchWorkflowDetail",
+        "updateWorkflow",
+        "deleteWorkflow",
+        "runWorkflow",
+        "fetchWorkflowRuns",
+        "fetchWorkflowRunDetail",
+        "cancelWorkflowRun",
+        "rerunWorkflowNode",
+        "reviewWorkflowNode",
+    ):
+        assert fn + "(" in body, f"工作流页没有真正调用 {fn}(（只在 import 里出现 ≠ 被调用）"
+
+
+def test_workflow_page_renders_in_router_and_menu():
+    """页面必须**接线路由与菜单** —— 否则「组件写了但进不去」= 白做。"""
+    router = _code_only(_read(ROUTER))
+    shell = _code_only(_read(APP_SHELL))
+    assert "/platforms/xhs/workflows" in router, "路由表里没有工作流页"
+    assert "<WorkflowPage />" in router, "路由没有渲染 WorkflowPage"
+    assert "/platforms/xhs/workflows" in shell, "侧栏菜单里没有工作流入口"
+
+
+def test_workflow_page_uses_lib_not_inline_vocabulary():
+    """页面必须**从 `lib/workflow-format.ts` 导入**判据，**不内联重写词表**。
+
+    ⚠️ 内联重写 = 同一语义两处维护（DEF-044）：改一处忘另一处，
+    页面显示与守卫断言就会分叉。
+
+    ⚠️ **判据是「导入形态」不是「名字出现」**（2026-10-04 变异实测教训，
+    与 `test_metrics_panel_calls_all_four_request_functions` 同一条）：
+    第一版只断言 `fn in code` ⇒ 变异「用本地函数遮蔽 lib 同名函数」
+    **ESCAPED**（名字还在文件里，断言照样绿）。
+    ⇒ 必须断言这几个名字出现在**来自 lib 的 import 语句**里。
+    """
+    import re as _re
+
+    code = _code_only(_read(WORKFLOW_PAGE))
+    # 抓出所有来自 lib 的 import 块
+    imports = _re.findall(
+        r"import\s*\{([^}]*)\}\s*from\s*\"[^\"]*workflow-format\";", code, flags=_re.S
+    )
+    assert imports, "工作流页没有从 lib/workflow-format 导入任何东西（疑似内联重写词表）"
+    imported = {part.strip() for block in imports for part in block.split(",") if part.strip()}
+    for fn in ("runStatusText", "runStatusColor", "nodeLabel", "durationText", "chainText"):
+        assert fn in imported, (
+            f"工作流页没有从 lib/workflow-format **导入** {fn}（同名本地函数遮蔽也算重写词表）"
+        )
+
+
+def test_workflow_page_never_renders_blank_duration_as_zero():
+    """**缺值口径**：未结束的 run 耗时显示 `-`，**不得渲染成 `0`**。
+
+    ⚠️ 变异守护：把 `durationText` 的未结束分支改成返回 `"0 秒"` ⇒
+    本用例与 `workflow-format.test.ts` 必红。
+    """
+    lib = _code_only(_read(WORKFLOW_LIB))
+    # 未结束（finishedAt 为空）⇒ 返回 "-"，不是 "0 秒"
+    assert 'return "-";' in lib, "durationText 的缺值分支必须返回 `-`"
+    assert '"0 秒"' not in lib, "不得把「未结束」渲染成 `0 秒`（那是两件事）"
+
+
+def test_workflow_lib_does_not_import_ui_frameworks():
+    """纯逻辑库不得依赖 antd / react —— 它要能被行为脚本直接驱动。"""
+    code = _read(WORKFLOW_LIB)
+    assert 'from "antd"' not in code, "lib 不得依赖 antd（纯逻辑）"
+    assert 'from "react"' not in code, "lib 不得依赖 react（纯逻辑）"

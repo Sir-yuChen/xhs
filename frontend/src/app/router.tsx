@@ -10,6 +10,7 @@ import { SettingsPage } from "../pages/settings/settings-page";
 import { TaskCenterPage } from "../pages/tasks/task-center-page";
 import { TaskRecordsPage } from "../pages/tasks/task-records-page";
 import { AutoOpsPage } from "../pages/platforms/xhs/auto-ops-page";
+import { WorkflowPage } from "../pages/platforms/xhs/workflow-page";
 import { XhsAccountsPage } from "../pages/platforms/xhs/accounts-page";
 import { XhsAnalyticsPage } from "../pages/platforms/xhs/analytics-page";
 import { XhsBenchmarksPage } from "../pages/platforms/xhs/benchmarks-page";
@@ -96,6 +97,9 @@ export function AppRouter() {
           <Route path="/platforms/xhs/benchmarks" element={<XhsBenchmarksPage />} />
           <Route path="/platforms/xhs/publish" element={<XhsPublishPage />} />
           <Route path="/platforms/xhs/auto-ops" element={<AutoOpsPage />} />
+          {/* 自动化工作流（设计 19 / M5）：编排 选题→生成→审核→发布→监控。
+              人工审核节点默认不自动放行（§3.3 硬约束）。 */}
+          <Route path="/platforms/xhs/workflows" element={<WorkflowPage />} />
           <Route path="/platforms/xhs/:section" element={<XhsSectionPage />} />
           <Route path="/tasks" element={<TaskCenterPage />} />
           {/* 2026-09-25 §35.9 ⑥：任务记录（执行记录，复用 /tasks 端点）——

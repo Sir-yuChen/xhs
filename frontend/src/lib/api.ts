@@ -3206,3 +3206,200 @@ export async function fetchItemGenerations(payload: {
   const response = await http.post("/xhs/qianfan/item-generations", payload);
   return response.data;
 }
+
+// ---------------------------------------------------------------------------
+// 自动化工作流（设计 19 / M5，11 个端点）
+//
+// ⚠️ 路径前缀是 `/platforms/xhs/`（不是 `/xhs/`）—— 抄路径前先看 router 声明。
+// ⚠️ 节点类型 / 状态的**唯一真相源**在后端模型层（`models/workflow.py` 的
+//    `NODE_TYPES` / `RUN_STATUSES`），前端 `lib/workflow-format.ts` 只做展示映射，
+//    **不重抄词表**（DEF-057 同型：表外值原样显示，不造名）。
+// ---------------------------------------------------------------------------
+
+export interface WorkflowNodePayload {
+  node_type: string;
+  node_key: string;
+  node_name?: string;
+  seq?: number;
+  config?: Record<string, unknown>;
+  enabled?: boolean;
+}
+
+export interface WorkflowListItem {
+  id: number;
+  name: string;
+  status: string;
+  trigger_type: string;
+  cron_expression: string;
+  node_count: number;
+  last_run?: {
+    id: number;
+    status: string;
+    started_at: string | null;
+    finished_at: string | null;
+  } | null;
+}
+
+export interface WorkflowDetail extends WorkflowListItem {
+  run_at: string | null;
+  misfire_policy: string;
+  global_params: Record<string, unknown>;
+  remark: string;
+  graph: { nodes: string[]; edges: [string, string][] } | null;
+  nodes: {
+    id: number;
+    node_type: string;
+    node_key: string;
+    node_name: string;
+    seq: number;
+    enabled: boolean;
+    config: Record<string, unknown>;
+  }[];
+}
+
+export interface WorkflowRunSummary {
+  id: number;
+  workflow_id: number | null;
+  workflow_name: string;
+  status: string;
+  trigger_source: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface WorkflowRunDetail extends WorkflowRunSummary {
+  nodes: {
+    id: number;
+    node_key: string;
+    node_type: string;
+    status: string;
+    started_at: string | null;
+    finished_at: string | null;
+    error_type: string;
+    error_message: string;
+    detail: Record<string, unknown>;
+  }[];
+  /** 审核节点的待办（`note_id -> 摘要`）；空表示无需人工介入。 */
+  pending_reviews: {
+    node_key: string;
+    note_id: number;
+    note_title: string;
+  }[];
+}
+
+export async function fetchWorkflows(params: {
+  status?: string;
+  page?: number;
+  page_size?: number;
+} = {}): Promise<{ items: WorkflowListItem[]; total: number; page: number; page_size: number }> {
+  const response = await http.get<{
+    items: WorkflowListItem[];
+    total: number;
+    page: number;
+    page_size: number;
+  }>("/platforms/xhs/workflows", { params });
+  return response.data;
+}
+
+export async function createWorkflow(payload: {
+  name: string;
+  trigger_type: string;
+  cron_expression?: string;
+  run_at?: string;
+  misfire_policy?: string;
+  global_params?: Record<string, unknown>;
+  remark?: string;
+  nodes?: WorkflowNodePayload[];
+}): Promise<{ id: number; name: string; status: string }> {
+  const response = await http.post<{ id: number; name: string; status: string }>(
+    "/platforms/xhs/workflows",
+    payload,
+  );
+  return response.data;
+}
+
+export async function fetchWorkflowDetail(workflowId: number): Promise<WorkflowDetail> {
+  const response = await http.get<WorkflowDetail>(`/platforms/xhs/workflows/${workflowId}`);
+  return response.data;
+}
+
+export async function updateWorkflow(
+  workflowId: number,
+  payload: Partial<{
+    name: string;
+    trigger_type: string;
+    cron_expression: string;
+    run_at: string;
+    misfire_policy: string;
+    global_params: Record<string, unknown>;
+    remark: string;
+    status: string;
+    nodes: WorkflowNodePayload[];
+  }>,
+): Promise<{ id: number; name: string; status: string }> {
+  const response = await http.put<{ id: number; name: string; status: string }>(
+    `/platforms/xhs/workflows/${workflowId}`,
+    payload,
+  );
+  return response.data;
+}
+
+export async function deleteWorkflow(workflowId: number): Promise<{ deleted: boolean }> {
+  const response = await http.delete<{ deleted: boolean }>(`/platforms/xhs/workflows/${workflowId}`);
+  return response.data;
+}
+
+export async function runWorkflow(workflowId: number): Promise<{ run_id: number; status: string }> {
+  const response = await http.post<{ run_id: number; status: string }>(
+    `/platforms/xhs/workflows/${workflowId}/run`,
+    {},
+  );
+  return response.data;
+}
+
+export async function fetchWorkflowRuns(
+  workflowId: number,
+  params: { page?: number; page_size?: number } = {},
+): Promise<{ items: WorkflowRunSummary[]; total: number }> {
+  const response = await http.get<{ items: WorkflowRunSummary[]; total: number }>(
+    `/platforms/xhs/workflows/${workflowId}/runs`,
+    { params },
+  );
+  return response.data;
+}
+
+export async function fetchWorkflowRunDetail(runId: number): Promise<WorkflowRunDetail> {
+  const response = await http.get<WorkflowRunDetail>(`/platforms/xhs/workflow-runs/${runId}`);
+  return response.data;
+}
+
+export async function cancelWorkflowRun(runId: number): Promise<{ cancelled: boolean }> {
+  const response = await http.post<{ cancelled: boolean }>(
+    `/platforms/xhs/workflow-runs/${runId}/cancel`,
+    {},
+  );
+  return response.data;
+}
+
+export async function rerunWorkflowNode(
+  runId: number,
+  nodeKey: string,
+): Promise<{ queued: boolean }> {
+  const response = await http.post<{ queued: boolean }>(
+    `/platforms/xhs/workflow-runs/${runId}/nodes/${nodeKey}/rerun`,
+    {},
+  );
+  return response.data;
+}
+
+export async function reviewWorkflowNode(
+  runId: number,
+  nodeKey: string,
+  decisions: Record<number, string>,
+): Promise<{ applied: number }> {
+  const response = await http.post<{ applied: number }>(
+    `/platforms/xhs/workflow-runs/${runId}/nodes/${nodeKey}/review`,
+    { decisions },
+  );
+  return response.data;
+}

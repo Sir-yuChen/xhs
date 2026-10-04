@@ -14,6 +14,7 @@ import {
   SendOutlined,
   SettingOutlined,
   ShoppingOutlined,
+  PartitionOutlined,
   ThunderboltOutlined,
   ToolOutlined,
 } from "@ant-design/icons";
@@ -46,6 +47,8 @@ const mainNavItems: MenuProps["items"] = [
   { key: "/platforms/xhs/note-workshop", icon: <ToolOutlined />, label: "笔记工坊" },
   { key: "/platforms/xhs/publish", icon: <SendOutlined />, label: "发布中心" },
   { key: "/platforms/xhs/auto-ops", icon: <ThunderboltOutlined />, label: "自动运营" },
+  // 设计 19 / M5：编排式工作流（与「自动运营」不同 —— 那个是单点动作，这个是多节点链路）。
+  { key: "/platforms/xhs/workflows", icon: <PartitionOutlined />, label: "自动化工作流" },
 ];
 
 const footerNavItems: MenuProps["items"] = [
