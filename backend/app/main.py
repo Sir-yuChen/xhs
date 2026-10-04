@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -21,8 +22,11 @@ from backend.app.api.platforms.xhs import (
     qianfan,
     workflows,
 )
+from backend.app.core.api_audit import ApiAuditMiddleware
 from backend.app.core.config import get_settings
 from backend.app.core.database import SessionLocal, init_db
+from backend.app.core.selfcheck import log_startup_selfcheck
+from backend.app.core.singleton import acquire_scheduler_lease, release_scheduler_lease
 from backend.app.services import note_queue_service
 from backend.app.services import workflow_engine
 from backend.app.services.account_task_service import (
@@ -61,9 +65,20 @@ from backend.app.services.scheduler_service import (
 from backend.app.services.settings_service import seed_builtin_settings_from_initial_data
 from backend.app.api.llm_prompts import seed_builtin_prompt_templates_for_all_users
 
+logger = logging.getLogger(__name__)
+
+
+def _data_dir_for_lease(settings) -> Path:
+    """运行库所在目录 —— 租约与 DB 同进同出（部署时一起搬家）。"""
+    return Path(settings.database_sqlite_path).resolve().parent
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 启动自检（DEF-028）：Node 签名运行时缺失时**全系统的平台调用都会失败**，
+    # 而失败形态是每个请求各报一次看不懂的错。这里一次性说清（只 WARN 不阻断 ——
+    # 看本地已同步数据不需要签名）。
+    app.state.selfcheck = log_startup_selfcheck()
     init_db()
     # 应用初始化数据（设计 15 §4.5）：定时任务基线**随安装自动附有**。
     # ⚠️ 位置在调度器之前且**不受 `scheduler_enabled` 影响** —— 桌面版默认不启调度器，
@@ -78,7 +93,25 @@ async def lifespan(app: FastAPI):
     # 「公共模板保证一致性」就落不了地。与上面两项同一语义：随安装附有 + 只补缺失不覆盖。
     seed_builtin_prompt_templates_for_all_users()
     settings = get_settings()
-    scheduler = start_scheduler() if settings.scheduler_enabled else None
+    # 多实例闸（T-108 / DEF-003）：`BackgroundScheduler` 与 FastAPI 同进程，
+    # `max_instances=1` 只约束单进程内 ⇒ 误开第二个后端会让**同一批定时任务跑两遍**
+    # （重复发文三个入口之一）。抢不到租约的进程**不启动调度器**（其余 API / worker
+    # 照常，那些链路各有自己的 DB 级幂等），并把原因**如实记进日志** ——
+    # 静默跳过正是 DEF-048 那类「看着在跑其实没跑」。
+    scheduler_lease_acquired, scheduler_lease_reason = True, "未启用多实例闸（scheduler 关闭）"
+    if settings.scheduler_enabled:
+        scheduler_lease_acquired, scheduler_lease_reason = acquire_scheduler_lease(
+            _data_dir_for_lease(settings)
+        )
+        if not scheduler_lease_acquired:
+            logger.warning("调度器未启动：%s", scheduler_lease_reason)
+    app.state.scheduler_lease_acquired = scheduler_lease_acquired
+    app.state.scheduler_lease_reason = scheduler_lease_reason
+    scheduler = (
+        start_scheduler()
+        if settings.scheduler_enabled and scheduler_lease_acquired
+        else None
+    )
     app.state.scheduler = scheduler
     if scheduler is not None:
         # 守活（DEF-067）：APScheduler 主循环一遇异常就整线程死掉且不自愈
@@ -142,6 +175,8 @@ async def lifespan(app: FastAPI):
         stop_scheduler_watchdog()
         # 取 `app.state` 上的**当前**实例：看门狗可能已经换过一台。
         shutdown_scheduler(getattr(app.state, "scheduler", None))
+        # 释放多实例租约（T-108）—— 只在**确实持有**时删（`atexit` 是兜底）。
+        release_scheduler_lease()
 
 
 def create_app() -> FastAPI:
@@ -156,6 +191,9 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    # API 审计（DEF-019 / T-18）：`api_logs` 自建表起零写入点。
+    # 只记「审计前缀下的写 + 任何失败」，不落 query/body（敏感值不进表）。
+    app.add_middleware(ApiAuditMiddleware)
 
     @app.get("/api/health", tags=["health"])
     def health() -> dict:

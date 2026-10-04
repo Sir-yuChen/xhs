@@ -57,18 +57,28 @@ def _sign_token(payload: dict) -> str:
     return f"{signing_input}.{_base64url_encode(signature)}"
 
 
-def _create_token(user_id: int, expires_delta: timedelta, token_type: str) -> str:
+def _create_token(user_id: int, expires_delta: timedelta, token_type: str, token_version: int = 0) -> str:
     expires_at = datetime.now(timezone.utc) + expires_delta
-    payload = {"user_id": user_id, "token_type": token_type, "exp": int(expires_at.timestamp())}
+    payload = {
+        "user_id": user_id,
+        "token_type": token_type,
+        "exp": int(expires_at.timestamp()),
+        # DEF-022：令牌版本参与签名 ⇒ 改密 / 登出后旧 refresh token 立即失效
+        "ver": int(token_version),
+    }
     return _sign_token(payload)
 
 
-def create_access_token(user_id: int) -> str:
-    return _create_token(user_id, timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES), "access")
+def create_access_token(user_id: int, token_version: int = 0) -> str:
+    return _create_token(
+        user_id, timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES), "access", token_version
+    )
 
 
-def create_refresh_token(user_id: int) -> str:
-    return _create_token(user_id, timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS), "refresh")
+def create_refresh_token(user_id: int, token_version: int = 0) -> str:
+    return _create_token(
+        user_id, timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS), "refresh", token_version
+    )
 
 
 def decode_token(token: str) -> dict:

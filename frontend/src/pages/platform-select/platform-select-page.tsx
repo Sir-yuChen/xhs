@@ -1,5 +1,5 @@
 import { ApiOutlined, ArrowRightOutlined, LogoutOutlined } from "@ant-design/icons";
-import { Button, Card, Space, Tag, Typography } from "antd";
+import { Alert, Button, Card, Space, Spin, Tag, Typography } from "antd";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
@@ -7,7 +7,6 @@ import { PlatformSelector } from "../../components/layout/platform-selector";
 import { useThemePalette } from "../../app/providers";
 import { useAuth } from "../../hooks/use-auth";
 import { fetchPlatforms } from "../../lib/api";
-import { fallbackPlatforms } from "../../lib/platforms";
 import type { PlatformMeta } from "../../types";
 
 const { Title, Text } = Typography;
@@ -16,10 +15,17 @@ export function PlatformSelectPage() {
   const auth = useAuth();
   const navigate = useNavigate();
   const p = useThemePalette();
-  const [platforms, setPlatforms] = useState<PlatformMeta[]>(fallbackPlatforms);
+  // T-17 / DEF-023：**不再用前端副本兜底**（那会掩盖后端故障）。
+  // 初始空 + 加载态；失败 ⇒ 错误态（让用户知道是后端的问题，不是「只有小红书一个平台」）。
+  const [platforms, setPlatforms] = useState<PlatformMeta[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetchPlatforms().then(setPlatforms);
+    fetchPlatforms()
+      .then(setPlatforms)
+      .catch(() => setLoadError("平台列表加载失败 —— 后端服务可能未启动或不可达。"))
+      .finally(() => setIsLoading(false));
   }, []);
 
   return (
@@ -71,6 +77,21 @@ export function PlatformSelectPage() {
             退出登录
           </Button>
         </div>
+
+        {/* T-17 / DEF-023：加载中 / 失败态必须显式（不再用前端副本兜底掩盖后端故障） */}
+        {isLoading ? (
+          <div style={{ textAlign: "center", padding: "48px 0" }}>
+            <Spin tip="正在加载平台列表..." />
+          </div>
+        ) : loadError ? (
+          <Alert
+            type="error"
+            showIcon
+            message="平台列表加载失败"
+            description={loadError}
+            style={{ marginBottom: 24 }}
+          />
+        ) : null}
 
         {/* 2026-09-29 设计 17 §7.1 v1.5：大模型网关 = 工作平台级公共能力，入口为平台选择页的独立卡片（不在任何平台内） */}
         <PlatformSelector

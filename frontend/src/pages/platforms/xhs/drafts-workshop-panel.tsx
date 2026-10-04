@@ -195,8 +195,9 @@ function SortableRewriteImage({ asset, onEdit, onRemove, onView }: { asset: Draf
  * 草稿工坊**面板**（2026-09-25 §36：原 `rewrite-page.tsx`（router 实际引用的
  * 草稿页），现为「笔记工坊 → 草稿工坊」页签的内容）。
  *
- * ⚠️ 与死代码 `drafts-page.tsx`（同样导出 `XhsDraftsPage`、无任何引用）的
- * 区分：改草稿功能**必须改本文件**（合并后由 `note-workshop-page.tsx` 引用）。
+ * ⚠️ 改草稿功能**必须改本文件**（由 `note-workshop-page.tsx` 引用）。
+ * 曾经还有一个零引用的 `drafts-page.tsx`（同样导出 `XhsDraftsPage`），
+ * 已于 2026-10-04（T-106 / DEF-013）删除 —— 改名撞车是它的唯一价值。
  */
 export function DraftsWorkshopPanel() {
   const p = useThemePalette();

@@ -959,6 +959,19 @@ class TestLibraryDetailEndpoint:
             self._cleanup()
 
 
+def _function_source(path, name: str) -> str:
+    """取 `path` 里名为 `name` 的函数**源码段**（AST 定位，不看注释里的提及）。"""
+    import ast as _ast
+    from pathlib import Path as _Path
+
+    src = _Path(path).read_text(encoding="utf-8")
+    tree = _ast.parse(src)
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.FunctionDef) and node.name == name:
+            return _ast.get_source_segment(src, node) or ""
+    return ""
+
+
 class TestExploreSsrDetailRoute:
     """§19.13.8（2026-09-28）：详情改走 explore SSR，不必再为每篇翻 `user_posted` 全表。
 
@@ -1157,22 +1170,18 @@ class TestExploreSsrDetailRoute:
         assert "WWW_DETAIL_TOKEN_FLAG" not in source
 
     def test_full_list_sdk_calls_stay_on_the_registered_whitelist(self):
-        """全量循环 SDK 方法只允许**已登记的**三处调用；新增即红（C5 / §19.13.9）。
+        """全量循环 SDK 方法**一处都不许有**（C5）；自建翻页必须有刹车。
 
-        本次改动的实质是「删掉一条为拿令牌而翻到底的兜底」⇒ 同类逻辑必须能被拦住。
-        扫描范围 = `backend/app/adapters/xhs/*.py` 里**每个方法**实际调用的 SDK 全量
-        方法名（AST，不看注释，注释提一句不算）。
+        ## 2026-10-04 更新（DEF-033 修复后）
 
-        现状（2026-09-28 全项目排查 + 处置）**两处**，各有理由：
-          * `get_user_notes` → 数据抓取 / 监控巡检（DEF-033 已登记）；
-          * `get_note_comments` → 评论抓取（用户主动、按需）。
+        原先白名单是两处（`get_user_notes` / `get_note_comments`，都直接调 SDK 的
+        `*_all_*` 无插槽方法）。本轮回合**把这两处也改掉了** —— 现在 `get_user_notes`
+        与 `get_note_comments` 都是**本层自建翻页 + 每页 `wait_allow()`**，不再调
+        SDK 的全量方法。
 
-        ⚠️ 原第三处 `get_published_notes`（`GET /api/xhs/creator/published`，一期遗留、
-        无 UI 使用）**已删除**：它与 `POST /api/xhs/pc/users/notes` 数据 100% 重复，且是
-        当时唯一还在「翻到底」的读端点（设计 13 §19.13.9）。
-
-        ⚠️ **不许新增**。真需要翻全量时，先看有没有单页方法 + 外层刹车（限流
-        `wait_allow` + `ABSOLUTE_PAGE_CAP`），像笔记 / 商品同步那样。
+        ⇒ 判据随之**收紧到零容忍**：适配器里**任何**对 `*_all_*` 的调用即红。
+        同时补一条**正向**判据：既然改成了自建翻页，就必须**真的带着刹车**
+        （`wait_allow`）—— 否则「删掉全量调用」只是把无刹车从 SDK 搬到了适配器。
         """
         import ast
         from pathlib import Path
@@ -1188,7 +1197,6 @@ class TestExploreSsrDetailRoute:
             "get_all_metions",
             "get_all_new_connections",
         }
-        allowed = {"get_user_notes", "get_note_comments"}
 
         adapters_dir = Path(__file__).resolve().parents[2] / "backend/app/adapters/xhs"
         offenders: set[str] = set()
@@ -1203,11 +1211,19 @@ class TestExploreSsrDetailRoute:
                 if called & full_list:
                     offenders.add(fn.name)
 
-        assert offenders == allowed, (
-            f"全量循环 SDK 调用集变了 —— 新增 {sorted(offenders - allowed)}、"
-            f"消失 {sorted(allowed - offenders)}。新增必须先论证刹车在哪（C5）；"
-            "消失请一并更新白名单。"
+        assert not offenders, (
+            f"适配器里出现对 SDK **无插槽全量方法**的调用（硬约束 C5 禁止）：{sorted(offenders)}。"
+            "要翻全量请自建翻页 + 每页 `wait_allow()`（见 `get_user_notes` / `get_note_comments`）。"
         )
+
+        # 正向判据：自建翻页的两个方法必须真的带刹车。
+        for name in ("get_user_notes", "get_note_comments"):
+            fn_src = _function_source(adapters_dir / "pc_api_adapter.py", name)
+            assert "while" in fn_src, f"{name} 应自建翻页（缺 while）"
+            assert "wait_allow" in fn_src, (
+                f"{name} 自建了翻页但**没有限流刹车**（每页必须过 `wait_allow()`）—— "
+                "这等于把无刹车从 SDK 搬进了适配器（C5）"
+            )
 
     def test_pending_without_token_count_reports_only_the_blocked_ones(self, tmp_path: Path):
         """缺令牌计数只收「待补齐 **且** 无令牌」的篇（用于如实报数，不触发任何刷新）。"""

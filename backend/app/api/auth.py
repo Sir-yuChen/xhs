@@ -37,9 +37,11 @@ def _serialize_user(user: User) -> dict:
 
 
 def _token_response(user: User) -> dict:
+    # DEF-022：令牌携带 `token_version`，改密 / 登出后旧令牌立即失效。
+    version = int(user.token_version or 0)
     return {
-        "access_token": create_access_token(user.id),
-        "refresh_token": create_refresh_token(user.id),
+        "access_token": create_access_token(user.id, version),
+        "refresh_token": create_refresh_token(user.id, version),
         "token_type": "bearer",
         "user": _serialize_user(user),
     }
@@ -105,12 +107,62 @@ def register(
     return _token_response(user)
 
 
+#: 登录失败限流（DEF-030 / T-21）：连续失败 N 次锁定 M 秒。
+#: ⚠️ **只按用户名单键**（不按 IP）—— 本应用是桌面单机、无反向代理，
+#: 按 IP 会把「同一台机器上的正常用户」一起锁掉；按用户名锁才对准攻击面
+#: （猜某个账号的密码）。代价是攻击者可以枚举**不存在的**用户名（那不会触发锁定），
+#: 但它拿不到任何信息（存在与不存在都回同一句 401）。
+LOGIN_MAX_FAILURES = 5
+LOGIN_LOCKOUT_SECONDS = 300.0
+
+#: `{username的小写: deque(失败时间戳)}` —— 进程级内存态。
+#: ⚠️ 重启即清空：本机制防的是**在线爆破**（几分钟内几百次），不是持久封禁；
+#: 要持久化就得加表，而桌面单机场景不值得为它加一张表。
+_login_failures: dict[str, list[float]] = {}
+
+
+def _login_locked_for(username: str, now: float) -> float:
+    """返回还需等待的秒数（0 = 未锁定）。"""
+    key = username.strip().lower()
+    stamps = _login_failures.get(key)
+    if not stamps:
+        return 0.0
+    # 只用窗口内的失败计数（窗口外的旧失败不算）
+    recent = [t for t in stamps if now - t < LOGIN_LOCKOUT_SECONDS]
+    _login_failures[key] = recent
+    if len(recent) >= LOGIN_MAX_FAILURES:
+        return max(0.0, LOGIN_LOCKOUT_SECONDS - (now - recent[-1]))
+    return 0.0
+
+
+def _record_login_failure(username: str, now: float) -> None:
+    _login_failures.setdefault(username.strip().lower(), []).append(now)
+
+
+def _clear_login_failures(username: str) -> None:
+    _login_failures.pop(username.strip().lower(), None)
+
+
 @router.post("/login")
 def login(credentials: AuthCredentials, db: Session = Depends(get_db)):
+    import time as _time
+
     username = credentials.username.strip()
+    now = _time.monotonic()
+    # DEF-030：连续失败达阈值 ⇒ 429（带 Retry-After，让调用方知道等多久）。
+    wait = _login_locked_for(username, now)
+    if wait > 0:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"登录失败次数过多，请 {int(wait) + 1} 秒后再试。",
+            headers={"Retry-After": str(int(wait) + 1)},
+        )
     user = db.scalar(select(User).where(User.username == username))
     if user is None or not verify_password(credentials.password, user.password_hash):
+        _record_login_failure(username, now)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
+    # 成功 ⇒ 清掉该用户名的失败计数（不让「之前失败过」影响下次）
+    _clear_login_failures(username)
     return _token_response(user)
 
 
@@ -123,12 +175,50 @@ def refresh_token(payload: RefreshRequest, db: Session = Depends(get_db)):
     user = db.get(User, decoded["user_id"])
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
-    return {"access_token": create_access_token(user.id), "token_type": "bearer"}
+    # DEF-022：版本不匹配 ⇒ 该 refresh token 已被撤销（改密 / 登出 / 强制下线）。
+    if int(decoded.get("ver") or 0) != int(user.token_version or 0):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token has been revoked",
+        )
+    return {
+        "access_token": create_access_token(user.id, int(user.token_version or 0)),
+        "token_type": "bearer",
+    }
 
 
 @router.post("/logout")
-def logout():
-    return {"status": "ok"}
+def logout(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """登出：**真的撤销**已签发的 refresh token（DEF-022）。
+
+    ⚠️ 实现 = 把 `users.token_version` +1 —— 无状态令牌没有「删掉某一个」的手段，
+    能做的只有「让这一代全部失效」。因此登出会同时失效该用户**所有设备**的 refresh
+    token（access token 最长 30 分钟后自然过期）。这是**刻意的取舍**：
+    宁可多失效几个，也不要留一个「点了登出却还能续期」的洞。
+    """
+    current_user.token_version = int(current_user.token_version or 0) + 1
+    db.add(current_user)
+    db.commit()
+    return {"status": "ok", "revoked": True}
+
+
+@router.post("/revoke-all-sessions")
+def revoke_all_sessions(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """强制下线**所有**会话（含当前这条）—— 改密后应当调用。
+
+    与 `/logout` 是同一套机制（都靠 `token_version`），分开命名是为了让「改密后
+    该干什么」这件事在 API 面上有明确答案：调它，而不是靠用户自己记得重新登录。
+    """
+    current_user.token_version = int(current_user.token_version or 0) + 1
+    db.add(current_user)
+    db.commit()
+    return {"status": "ok", "revoked": True}
 
 
 @router.get("/me")

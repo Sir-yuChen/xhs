@@ -1,7 +1,6 @@
 import axios from "axios";
 import { message } from "antd";
 
-import { fallbackPlatforms } from "./platforms";
 import type { CleanResultShape } from "./task-records";
 import type {
   XhsItemEditPayload,
@@ -299,13 +298,16 @@ export async function logout(): Promise<void> {
   }
 }
 
+/**
+ * 平台注册表（后端 `core/platforms.py` 是唯一真相源）。
+ *
+ * ⚠️ **T-17 / DEF-023**：原实现失败时静默返回前端的 `fallbackPlatforms` 副本 ——
+ * 那是**掩盖后端故障**（页面照常显示六个平台，而实际后端可能整个挂掉）。
+ * 现在失败就抛，由页面渲染错误态；前端**不再维护第二份平台清单**。
+ */
 export async function fetchPlatforms(): Promise<PlatformMeta[]> {
-  try {
-    const response = await http.get<Paginated<PlatformMeta>>("/platforms");
-    return response.data.items;
-  } catch {
-    return fallbackPlatforms;
-  }
+  const response = await http.get<Paginated<PlatformMeta>>("/platforms");
+  return response.data.items;
 }
 
 export async function fetchXhsOverview(): Promise<DashboardOverview> {
@@ -2187,6 +2189,23 @@ export async function fetchMonitoringTargets(): Promise<Paginated<MonitoringTarg
 
 export async function createMonitoringTarget(payload: MonitoringTargetPayload): Promise<MonitoringTarget> {
   const response = await http.post<MonitoringTarget>("/xhs/monitoring/targets", payload);
+  return response.data;
+}
+
+/**
+ * 暂停 / 恢复监控目标（DEF-012 / T-112）。
+ *
+ * ⚠️ 复用既有的 `PATCH /xhs/monitoring/targets/{id}`（`status: active|paused`）——
+ * 后端从 2026-09-18 起就支持，缺的只是前端入口（**不给后端加重复端点**，DEF-044）。
+ * 暂停 = 巡检跳过它（`monitoring_crawl_service` 只取 `status == active`）。
+ */
+export async function setMonitoringTargetStatus(
+  targetId: number,
+  status: "active" | "paused"
+): Promise<MonitoringTarget> {
+  const response = await http.patch<MonitoringTarget>(`/xhs/monitoring/targets/${targetId}`, {
+    status,
+  });
   return response.data;
 }
 

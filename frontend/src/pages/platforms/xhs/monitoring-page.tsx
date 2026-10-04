@@ -1,5 +1,7 @@
 import {
   DeleteOutlined,
+  PauseOutlined,
+  PlayCircleOutlined,
   PlusOutlined,
   ReloadOutlined,
   SyncOutlined,
@@ -19,6 +21,7 @@ import {
   Spin,
   Statistic,
   Tag,
+  Tooltip,
   Typography,
 } from "antd";
 import { useEffect, useState } from "react";
@@ -32,6 +35,7 @@ import {
   fetchMonitoringTargetNotes,
   fetchMonitoringTargets,
   refreshMonitoringTarget,
+  setMonitoringTargetStatus,
 } from "../../../lib/api";
 import { formatShanghaiTime } from "../../../lib/time";
 import type {
@@ -210,6 +214,28 @@ export function XhsMonitoringPage() {
     }
   }
 
+  /**
+   * 暂停 / 恢复监控目标（DEF-012 / T-112）。
+   *
+   * ⚠️ 暂停后巡检**跳过**它（`monitoring_crawl_service` 只取 `status == active`），
+   * 但**历史快照与命中笔记都保留** —— 恢复后接得上，不是删除。
+   */
+  async function toggleTargetStatus(target: MonitoringTarget) {
+    const nextStatus = target.status === "active" ? "paused" : "active";
+    setIsWorking(true);
+    try {
+      const updated = await setMonitoringTargetStatus(target.id, nextStatus);
+      setTargets((currentTargets) =>
+        currentTargets.map((item) => (item.id === updated.id ? updated : item))
+      );
+      message.success(nextStatus === "paused" ? "已暂停监控。" : "已恢复监控。");
+    } catch {
+      message.error(nextStatus === "paused" ? "暂停失败。" : "恢复失败。");
+    } finally {
+      setIsWorking(false);
+    }
+  }
+
   return (
     <div>
       <PageHeader
@@ -362,6 +388,22 @@ export function XhsMonitoringPage() {
                   >
                     手动刷新
                   </Button>
+                  {/* DEF-012 / T-112：暂停 / 恢复（后端 `status` 早就支持，缺的是入口） */}
+                  <Tooltip
+                    title={
+                      target.status === "active"
+                        ? "暂停后巡检跳过该目标，历史快照与命中笔记保留"
+                        : "恢复后巡检重新纳入该目标"
+                    }
+                  >
+                    <Button
+                      icon={target.status === "active" ? <PauseOutlined /> : <PlayCircleOutlined />}
+                      onClick={() => void toggleTargetStatus(target)}
+                      disabled={isWorking}
+                    >
+                      {target.status === "active" ? "暂停" : "恢复"}
+                    </Button>
+                  </Tooltip>
                   <Button
                     icon={<DeleteOutlined />}
                     danger

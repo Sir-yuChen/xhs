@@ -59,6 +59,11 @@ class FakeGenAdapter:
     """
 
     calls: list[str] = []
+    #: 每个调用发生在哪条线程（**判「是否在请求线程里跑了生成」的唯一可靠判据**）。
+    #: ⚠️ 不能用「响应返回瞬间 `calls` 是否为空」当判据 —— 那是**竞态**：
+    #: 后台 worker 只要在那几毫秒里起了头，断言就假红（实测：给端点加一个
+    #: 审计中间件后立刻复现）。真正的不变量是「生成**不在请求线程**里跑」。
+    call_threads: list[str] = []
     constructed = 0
     fail_task = False
     attributes_order: list[str] = []
@@ -73,6 +78,7 @@ class FakeGenAdapter:
         if FakeGenAdapter.hold is not None:
             FakeGenAdapter.hold.wait(timeout=10)
         FakeGenAdapter.calls.append("attributes")
+        FakeGenAdapter.call_threads.append(threading.current_thread().name)
         FakeGenAdapter.attributes_order.append(str(item_id))
         return True, "ok", {
             "code": 0,
@@ -108,10 +114,12 @@ class FakeGenAdapter:
 
     def sellerpoint_aigc(self, *, biz_id, aigc_context):
         FakeGenAdapter.calls.append("sellerpoint_aigc")
+        FakeGenAdapter.call_threads.append(threading.current_thread().name)
         return True, "ok", {"code": 0, "data": {"task_id": "TASK-1"}}
 
     def aigc_task_result(self, task_id):
         FakeGenAdapter.calls.append("aigc_task_result")
+        FakeGenAdapter.call_threads.append(threading.current_thread().name)
         detail = {
             "success": not FakeGenAdapter.fail_task,
             "errMsg": "平台生成失败（测试）" if FakeGenAdapter.fail_task else "",
@@ -276,10 +284,26 @@ def test_generate_save_enqueues_and_worker_creates_note(gen_env, db_factory):
     assert body["item_id"] == ITEM_ID
     assert "already_queued" not in body
 
-    # 同步段不该跑生成链路（三步一次都没发生）
-    assert FakeGenAdapter.calls == [], "生成必须在后台 worker 里跑"
+    # 同步段不该跑生成链路。
+    # ⚠️ **判据必须等 worker 跑完再下**，不能在这里查 `call_threads`：
+    #    此刻它可能是空的（worker 还没被唤醒）⇒ 断言「都跑在 worker 上」会在
+    #    空集合上假红（实测：给端点加一个审计中间件后 1/6 概率复现）。
+    #    真正的不变量是「**所有**生成调用都发生在 `note-generate-worker` 上」——
+    #    它是关于**整段过程**的性质，只能在过程结束后检查。
+    request_thread = threading.current_thread().name
 
     assert pngs.wait_generate_done(timeout=15), "后台 worker 未在超时内跑完"
+
+    assert FakeGenAdapter.call_threads, "生成链路一次都没跑（worker 没执行）"
+    assert request_thread not in FakeGenAdapter.call_threads, (
+        f"生成链路**在请求线程里跑了**（入队语义被破坏）：{FakeGenAdapter.call_threads}"
+    )
+    assert all(
+        t == pngs.GENERATE_WORKER_THREAD_NAME for t in FakeGenAdapter.call_threads
+    ), (
+        f"生成调用跑在了非 worker 线程上：{FakeGenAdapter.call_threads}"
+        f"（应全部是 {pngs.GENERATE_WORKER_THREAD_NAME}）"
+    )
 
     db = db_factory()
     try:

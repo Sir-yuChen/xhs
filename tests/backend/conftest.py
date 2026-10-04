@@ -83,7 +83,22 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def _base():
-    """惰性取 `Base`（首次调用才 import models，之后走模块缓存）。"""
+    """惰性取 `Base`（首次调用才 import models，之后走模块缓存）。
+
+    ⚠️ **必须先 import `backend.app.models`**（2026-10-04 修）：`Base.metadata`
+    只登记**已被 import 过的**模型类，而 `core/database.py` 只在 `init_db()` 里
+    import 它们（那是生产路径，测试不走）。此前只取 `Base` ⇒ 若本进程**还没有**
+    任何用例触发过 `backend.app.main`（它会传递地 import models），
+    `create_all` 建出的是**空库**。
+    表现是**顺序依赖的假红**：同一文件里先跑的用例（用了 `api_client`）把 models
+    带进来，后面的就正常；单独跑 `-n0` 或恰好排在前面时 `no such table: users`。
+    （实测：`test_m9_governance.py` 单独跑时命中。）
+
+    import 只登记元数据、**不播种任何行** ⇒ `test_conftest_fixtures` 的
+    「新库是空的」契约不受影响。
+    """
+    import backend.app.models  # noqa: F401, PLC0415 - 登记全部表到 metadata
+
     from backend.app.core.database import Base  # noqa: PLC0415
 
     return Base

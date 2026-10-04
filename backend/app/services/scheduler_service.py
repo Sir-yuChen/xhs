@@ -421,6 +421,12 @@ def run_monitoring_refresh_once(user_id: int, platform: str = "xhs") -> dict[str
     ⚠️ 原 `run_monitoring_refresh_for_all_users`（全库 active targets）**已被删除**：
     内置行按用户各持一份 ⇒ 一行触发只刷行主人的 targets。匹配仍按
     `Note.user_id == target.user_id`（target 自带归属，双保险）。
+
+    ⚠️ **T-111 / DEF-016（2026-10-04）**：`crawl_interval_minutes` 此前是**死配置**
+    （只被序列化下发、调度不读）⇒ 用户改了周期不生效，且没有任何提示。
+    现在它是**真正的节流闸**：距上次刷新不足 `crawl_interval_minutes` 的目标
+    本轮跳过（`skipped_count` 如实回报），到点的才刷。这样「周期」这个字段
+    对用户是**真的**（与限流额度去硬编码 DEF-076 同一类修复）。
     """
     db = SessionLocal()
     try:
@@ -438,10 +444,28 @@ def run_monitoring_refresh_once(user_id: int, platform: str = "xhs") -> dict[str
             .order_by(MonitoringTarget.id.asc())
         ).all()
 
-        items = [_refresh_monitoring_target(db, target, now, platform) for target in targets]
+        items: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        for target in targets:
+            interval = max(int(target.crawl_interval_minutes or 60), 1)
+            last = target.last_refreshed_at
+            if last is not None and (now - last).total_seconds() < interval * 60:
+                # 未到点：跳过（带原因如实回报 —— 静默跳过正是 DEF-048 那类问题）
+                skipped.append(
+                    {
+                        "target_id": target.id,
+                        "reason": "not_due",
+                        "crawl_interval_minutes": interval,
+                        "last_refreshed_at": last.isoformat(),
+                    }
+                )
+                continue
+            items.append(_refresh_monitoring_target(db, target, now, platform))
         db.commit()
         return {
             "refreshed_count": len(items),
+            "skipped_count": len(skipped),
+            "skipped": skipped,
             "items": items,
         }
     finally:
@@ -940,7 +964,12 @@ def build_scheduler(*, jobstores: Optional[dict[str, Any]] = None) -> Background
 
 
 def start_scheduler() -> BackgroundScheduler:
-    """生产入口：装配（带持久化 job store）+ 启动同步 + 启动。"""
+    """生产入口：装配（带持久化 job store）+ 启动同步 + 启动。
+
+    ⚠️ **T-108 / DEF-003：本函数只负责**启动**；多实例防护在 `single_instance_guard`
+    （`core/singleton.py`）—— `main.lifespan` 先过闸，抢不到租约的进程**根本不进来**。
+    在这里再加一道锁会与 apscheduler 的 jobstore 抢同一个 DB 写点（反而更脆）。
+    """
     jobstores = _persistent_jobstores()
     scheduler = build_scheduler(jobstores=jobstores)
     sync_jobs_from_db(scheduler, store=jobstores.get("default"))

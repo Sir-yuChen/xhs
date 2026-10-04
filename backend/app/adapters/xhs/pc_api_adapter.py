@@ -63,6 +63,52 @@ class XhsPcApiAdapter:
         with direct_xhs_request_env():
             return self._api().get_note_info(url=url)
 
+    def search_user(self, keyword: str, page: int = 1) -> Any:
+        """搜索用户（T-107：`POST /search/users` 的真实现，单页 + 限流插槽）。
+
+        ⚠️ 单页 by design（同 `search_note`）：翻页由调用方决定，不在这里 `while True`。
+        """
+        from backend.app.services.rate_limiter import get_rate_limiter
+
+        get_rate_limiter().wait_allow(f"search_user:{self.user_id or 'anon'}")
+        with direct_xhs_request_env():
+            return self._api().search_user(query=keyword, page=page)
+
+    def get_homefeed_channels(self) -> Any:
+        """主页频道列表（T-107：`GET /homefeed/channels` 的真实现）。"""
+        from backend.app.services.rate_limiter import get_rate_limiter
+
+        get_rate_limiter().wait_allow(f"homefeed:{self.user_id or 'anon'}")
+        with direct_xhs_request_env():
+            return self._api().get_homefeed_all_channel()
+
+    def get_homefeed_recommend(
+        self,
+        category: str,
+        cursor_score: str = "",
+        refresh_type: int = 1,
+        note_index: int = 0,
+        *,
+        num: int = 20,
+    ) -> Any:
+        """主页推荐（T-107：`POST /homefeed/recommend` 的真实现，**单次请求**）。
+
+        ⚠️ 用单次的 `get_homefeed_recommend`，**不用** `get_homefeed_recommend_by_num`
+        —— 后者按 `require_num` 循环请求，属硬约束 C5 禁止的无插槽全量方法。
+        调用方要更多内容自己带 `cursor_score` 再来一次。
+        """
+        from backend.app.services.rate_limiter import get_rate_limiter
+
+        get_rate_limiter().wait_allow(f"homefeed:{self.user_id or 'anon'}")
+        with direct_xhs_request_env():
+            return self._api().get_homefeed_recommend(
+                category=category,
+                cursor_score=cursor_score,
+                refresh_type=refresh_type,
+                note_index=note_index,
+                num=num,
+            )
+
     def get_note_info_html(self, url: str) -> Any:
         """详情走 explore 页面 SSR（设计 13 §19.13.8）：**一次 GET 拿全**，不挑令牌来源。
 
@@ -77,12 +123,110 @@ class XhsPcApiAdapter:
         return fetch_note_detail_payload(url)
 
     def get_note_comments(self, note_url: str) -> Any:
+        """笔记评论（一级 + 每条的子评论）：**逐页翻完**，每页都过一次限流器。
+
+        ⚠️ **2026-10-04（DEF-033 同类修复）**：原实现直接调 SDK 的
+        `get_note_all_comment` —— 它内部是 `while True` 一级评论 + **对每条一级评论
+        再 `while True` 子评论**（嵌套无插槽），硬约束 C5 明文禁止。现在改为本层自建：
+        每个请求（一级页 / 每条子评论页）前都 `wait_allow()`，超限**等待**不停止。
+
+        返回 `(success, message, out_comment_list)`，其中每条一级评论带 `sub_comments`
+        （与 SDK 原形状一致，调用方零改动）。
+        """
+        import urllib.parse
+
+        from backend.app.services.rate_limiter import get_rate_limiter
+
+        parsed = urllib.parse.urlparse(note_url or "")
+        note_id = parsed.path.split("/")[-1]
+        query = urllib.parse.parse_qs(parsed.query)
+        xsec_token = (query.get("xsec_token") or [""])[0]
+
+        limiter = get_rate_limiter()
+        out_comments: list[Any] = []
         with direct_xhs_request_env():
-            return self._api().get_note_all_comment(url=note_url)
+            api = self._api()
+            cursor = ""
+            while True:
+                limiter.wait_allow(note_id or "unknown")
+                success, message, raw = api.get_note_out_comment(note_id, cursor, xsec_token)
+                if not success:
+                    return False, message, out_comments
+                data = (raw or {}).get("data") or {}
+                page_comments = data.get("comments") or []
+                for comment in page_comments:
+                    # 子评论逐页（原 SDK 同样是嵌套循环，这里是它的**带刹车**等价物）
+                    sub_cursor = ""
+                    subs: list[Any] = []
+                    while True:
+                        limiter.wait_allow(note_id or "unknown")
+                        sub_ok, _sub_msg, sub_raw = api.get_note_inner_comment(
+                            comment, sub_cursor, xsec_token
+                        )
+                        if not sub_ok:
+                            break
+                        sub_data = (sub_raw or {}).get("data") or {}
+                        page_subs = sub_data.get("comments") or []
+                        subs.extend(page_subs)
+                        if not sub_data.get("has_more") or not page_subs:
+                            break
+                        sub_cursor = str(sub_data.get("cursor") or "")
+                        if not sub_cursor:
+                            break
+                    comment["sub_comments"] = subs
+                out_comments.extend(page_comments)
+                if not data.get("has_more") or not page_comments:
+                    break
+                cursor = str(data.get("cursor") or "")
+                if not cursor:
+                    break
+        return True, "", out_comments
 
     def get_user_notes(self, user_url: str) -> Any:
+        """用户主页笔记：**逐页翻到没有下一页为止**，每页都过一次限流器。
+
+        ⚠️ **2026-10-04（DEF-033 / T-107 同批）**：原实现直接调 SDK 的
+        `get_user_all_notes` —— 那个方法内部 `while True` **没有分页/限流插槽**
+        （硬约束 C5 明文禁止：调用即失控，中间没有刹车点）。现在改为**本层自建翻页**：
+        每页前 `wait_allow()`（超限**等待**而不是停止），直到 `has_more` 为 false。
+
+        ⚠️ 与 `get_user_posted_page`（单页，供「我的笔记」用）的区别：那个是**用户点
+        「加载更多」驱动**，这个是**一次性把该用户的主页翻完**（抓取/监控链路要全量）。
+        两者共用底层单页方法 `get_user_note_info`，**各有各的刹车点**。
+        """
+        import urllib.parse
+
+        from backend.app.services.rate_limiter import get_rate_limiter
+
+        parsed = urllib.parse.urlparse(user_url or "")
+        user_id = parsed.path.split("/")[-1]
+        query = urllib.parse.parse_qs(parsed.query)
+        xsec_token = (query.get("xsec_token") or [""])[0]
+        xsec_source = (query.get("xsec_source") or ["pc_search"])[0]
+
+        limiter = get_rate_limiter()
+        notes: list[Any] = []
+        cursor = ""
         with direct_xhs_request_env():
-            return self._api().get_user_all_notes(user_url=user_url)
+            api = self._api()
+            while True:
+                # ⚠️ 每页都过限流器：超限**等待**（return False 只在长超时后发生），
+                # 不在这里停止 —— 与设计 13 §21「要求翻到平台没有下一页为止」一致。
+                limiter.wait_allow(user_id or "unknown")
+                success, message, raw = api.get_user_note_info(
+                    user_id, cursor, xsec_token, xsec_source
+                )
+                if not success:
+                    return False, message, notes
+                data = (raw or {}).get("data") or {}
+                page_notes = data.get("notes") or []
+                notes.extend(page_notes)
+                if not data.get("has_more") or not page_notes:
+                    break
+                cursor = str(data.get("cursor") or "")
+                if not cursor:
+                    break
+        return True, "", notes
 
     def get_self_info(self) -> Any:
         with direct_xhs_request_env():

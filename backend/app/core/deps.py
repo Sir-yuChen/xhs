@@ -66,6 +66,14 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
             detail="User not found",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    # DEF-022：令牌版本不匹配 ⇒ 已被撤销（改密 / 登出 / 强制下线）。
+    # 缺 `ver` 的老令牌按版本 0 处理（向后兼容），但版本一旦被抬到 >0 就全部失效。
+    if int(payload.get("ver") or 0) != int(user.token_version or 0):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has been revoked",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     return user
 
 

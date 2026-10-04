@@ -5,8 +5,8 @@ import re
 import urllib.parse
 from typing import Any, Literal, NamedTuple, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -36,7 +36,6 @@ from backend.app.services.shop_goods_service import (
     missing_note_ids,
     sync_note_ids,
 )
-from backend.app.services.mock_data import sample_notes
 from backend.app.services.no_traffic_cleanup_service import (
     DEFAULT_DELETE_BATCH,
     run_no_traffic_cleanup_background,
@@ -965,9 +964,62 @@ def search_notes(
     }
 
 
+class SearchUsersRequest(BaseModel):
+    """搜索用户请求（T-107）。**必须带账号 id** —— 检索范围只认该账号自己的会话。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    account_id: int
+    keyword: str = Field(min_length=1, max_length=120)
+    page: int = Field(default=1, ge=1)
+
+
 @router.post("/search/users")
-def search_users():
-    return {"total": 1, "items": [{"id": "demo-user", "nickname": "运营研究员"}]}
+def search_users(
+    payload: SearchUsersRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    adapter_factory=Depends(get_xhs_pc_api_adapter_factory),
+):
+    """搜索用户（**真实现**，T-107 取代原 mock）。
+
+    ⚠️ 检索范围只认**这个账号自己的**网页会话（2026-09-22 用户拍板：每个账号
+    只使用自己账号对应的平台有效登录令牌）—— 与 `/search/notes` 同一口径。
+    """
+    cookies = _get_owned_pc_account_cookies(db, current_user, payload.account_id)
+    success, message, raw_payload = adapter_factory(cookies).search_user(
+        payload.keyword, page=payload.page
+    )
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=message or "XHS user search failed",
+        )
+    data = (raw_payload or {}).get("data") or {}
+    items = data.get("users") or data.get("items") or []
+    normalized = [_normalize_user_item(item) for item in items if isinstance(item, dict)]
+    return {
+        "total": data.get("total") or len(normalized),
+        "page": payload.page,
+        "has_more": bool(data.get("has_more", False)),
+        "items": normalized,
+        "raw": raw_payload,
+    }
+
+
+def _normalize_user_item(item: dict[str, Any]) -> dict[str, Any]:
+    """搜索结果的**用户条目**归一化（缺值留空，不造；硬约束⑤）。"""
+    user = item.get("user") if isinstance(item.get("user"), dict) else item
+    return {
+        "user_id": _first_text(user.get("user_id"), user.get("id")),
+        "nickname": _first_text(user.get("nickname"), user.get("name")),
+        "red_id": _first_text(user.get("red_id")),
+        "avatar_url": _first_text(user.get("image"), user.get("images"), user.get("avatar")),
+        "desc": _first_text(user.get("desc")),
+        "fans": user.get("fans") if isinstance(user.get("fans"), int) else None,
+        "note_count": user.get("note_num") if isinstance(user.get("note_num"), int) else None,
+        "xsec_token": _first_text(item.get("xsec_token")),
+    }
 
 
 @router.post("/notes/detail")
@@ -2295,11 +2347,78 @@ def user_search(
     }
 
 
+class HomefeedRecommendRequest(BaseModel):
+    """主页推荐请求（T-107）。翻页由调用方带 `cursor_score` 再请求 —— 单次请求。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    account_id: int
+    category: str = "homefeed_recommend"
+    cursor_score: str = ""
+    refresh_type: int = 1
+    note_index: int = Field(default=0, ge=0)
+    num: int = Field(default=20, ge=1, le=50)
+
+
 @router.get("/homefeed/channels")
-def homefeed_channels():
-    return {"items": [{"id": "homefeed_recommend", "name": "推荐"}]}
+def homefeed_channels(
+    account_id: int = Query(..., ge=1),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    adapter_factory=Depends(get_xhs_pc_api_adapter_factory),
+):
+    """主页频道列表（**真实现**，T-107 取代原 mock）。"""
+    cookies = _get_owned_pc_account_cookies(db, current_user, account_id)
+    success, message, raw_payload = adapter_factory(cookies).get_homefeed_channels()
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=message or "XHS homefeed channels failed",
+        )
+    data = (raw_payload or {}).get("data") or {}
+    raw_channels = data.get("channel") or data.get("channels") or []
+    channels = [
+        {
+            "id": _first_text(item.get("id"), item.get("channel_id")),
+            "name": _first_text(item.get("name"), item.get("title")),
+        }
+        for item in raw_channels
+        if isinstance(item, dict)
+    ]
+    return {"items": channels, "raw": raw_payload}
 
 
 @router.post("/homefeed/recommend")
-def homefeed_recommend():
-    return {"items": sample_notes()}
+def homefeed_recommend(
+    payload: HomefeedRecommendRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    adapter_factory=Depends(get_xhs_pc_api_adapter_factory),
+):
+    """主页推荐（**真实现**，T-107 取代原 mock）。**单次请求**，翻页由调用方带游标。"""
+    cookies = _get_owned_pc_account_cookies(db, current_user, payload.account_id)
+    success, message, raw_payload = adapter_factory(cookies).get_homefeed_recommend(
+        category=payload.category,
+        cursor_score=payload.cursor_score,
+        refresh_type=payload.refresh_type,
+        note_index=payload.note_index,
+        num=payload.num,
+    )
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=message or "XHS homefeed recommend failed",
+        )
+    data = (raw_payload or {}).get("data") or {}
+    raw_items = data.get("items") or []
+    normalized = [
+        _normalize_search_item(item)
+        for item in raw_items
+        if isinstance(item, dict)
+    ]
+    return {
+        "items": normalized,
+        "cursor_score": _first_text(data.get("cursor_score")),
+        "has_more": bool(data.get("has_more", False)),
+        "raw": raw_payload,
+    }

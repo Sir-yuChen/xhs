@@ -3038,7 +3038,8 @@ MESSAGE_FEEDBACK_PAGES = (
     # 2026-09-25 §36：原 rewrite-page.tsx（草稿工坊）面板化，仍带操作反馈 ⇒ 跟替文件名
     "frontend/src/pages/platforms/xhs/drafts-workshop-panel.tsx",
     "frontend/src/pages/platforms/xhs/auto-ops-page.tsx",
-    "frontend/src/pages/platforms/xhs/drafts-page.tsx",
+    # ⚠️ `drafts-page.tsx` 已于 2026-10-04 删除（T-106 / DEF-013：与
+    # `drafts-workshop-panel.tsx` 同名导出、零引用）。草稿功能改上面那个面板。
     "frontend/src/pages/platforms/xhs/benchmarks-page.tsx",
     # 2026-09-25 §36：原 image-studio-page.tsx（图片工坊）面板化
     "frontend/src/pages/platforms/xhs/image-studio-panel.tsx",

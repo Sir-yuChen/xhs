@@ -239,6 +239,18 @@ def test_scheduler_is_not_started_when_master_switch_is_off(monkeypatch):
     monkeypatch.setattr(main_module, "start_scheduler_watchdog", lambda *a, **k: None)
     monkeypatch.setattr(main_module, "stop_scheduler_watchdog", lambda: None)
     monkeypatch.setattr(main_module, "shutdown_scheduler", lambda *a, **k: None)
+    # ⚠️ M9 新增两步**同样必须桩掉**：
+    #    ① `log_startup_selfcheck()` —— 真跑 `node --version`（起子进程；不写库但也
+    #       不该在单测里真的执行环境探测）；
+    #    ② `acquire_scheduler_lease()` —— 会在**真实 data/ 目录**创建租约文件
+    #       （比写库更隐蔽：它不碰 DB，但会留下一个锁文件，且抢到/抢不到会
+    #       改变 `start_scheduler` 是否被调用 —— 正是本用例要断言的因果链）。
+    #    `_data_dir_for_lease` 纯函数（只算路径）⇒ 无需桩，登记进白名单。
+    monkeypatch.setattr(main_module, "log_startup_selfcheck", lambda *a, **k: {"node_ok": True})
+    monkeypatch.setattr(
+        main_module, "acquire_scheduler_lease", lambda *a, **k: (True, "SPY-LEASE")
+    )
+    monkeypatch.setattr(main_module, "release_scheduler_lease", lambda *a, **k: None)
 
     started: list[object] = []
     monkeypatch.setattr(
@@ -304,7 +316,7 @@ def test_scheduler_is_not_started_when_master_switch_is_off(monkeypatch):
 # 进真 lifespan 的用例：**每个**步骤都必须打桩（防「测试写生产库」）
 # --------------------------------------------------------------------------- #
 #: `lifespan` 里**允许不打桩**的裸名调用（纯读 / 内置，无副作用）。
-LIFESPAN_STUB_FREE_CALLS = {"get_settings", "getattr"}
+LIFESPAN_STUB_FREE_CALLS = {"get_settings", "getattr", "_data_dir_for_lease"}
 
 #: 上面那个「进真 lifespan」用例的函数名（桩清单从它体内取，见守卫）。
 LIFESPAN_TEST_NAME = "test_scheduler_is_not_started_when_master_switch_is_off"
