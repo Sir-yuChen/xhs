@@ -353,6 +353,79 @@ def test_memory_budget_guards_are_load_bearing(mutate: str, expected: str):
 
 
 # --------------------------------------------------------------------------- #
+# 业务链路验收手册自洽守卫（2026-10-04 立规 · `04_测试文档/01` §14.4）
+# --------------------------------------------------------------------------- #
+# `10_第二阶段业务链路全链路验收手册.md` 是「用户验收主路径」。它的**链路总览表**
+# 与**正文链路**是同一件事的两份写法 —— 加了链路忘改总览（或反之）是这类文档最典型
+# 的漂移，肉眼看不到。规矩不接线就是纸面规矩，故落成机械判据。
+LINK_VERIFY_SCRIPT = (
+    ROOT / ".workbuddy" / "skills" / "xhs-doc-stats-verify" / "verify_acceptance_links.py"
+)
+
+
+#: 变异脚本（同时提供 `--baseline` / `--only` 两种模式，见下）。
+LINK_MUTATE_SCRIPT = (
+    ROOT / ".workbuddy" / "scripts" / "mutate_verify_acceptance_links.py"
+)
+
+
+def _run_link_mutator(*args: str) -> subprocess.CompletedProcess[str]:
+    """跑变异脚本的某个模式。
+
+    ⚠️ **基线也走变异脚本的 `--baseline`，不直接跑守卫脚本**：变异是**原地改文件**，
+    `-n auto` 下别的 worker 可能正把变异体写在盘上 ⇒ 直接跑守卫会读到变异内容而**假红**
+    （实测：7 个变异参数化在 xdist 下必红）。`--baseline` 持同一把跨进程文件锁，才是稳的。
+    """
+    return subprocess.run(
+        [sys.executable, str(LINK_MUTATE_SCRIPT), *args],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+
+def test_acceptance_link_manual_is_self_consistent():
+    """功能点全链路验收清单必须自洽。
+
+    判据六件：①链路编号连续 ②总览表==正文 ③四要素齐 ④覆盖列==细目
+    ⑤功能点与勾选位 1:1 且编号不重复 ⑥README + AGENTS 两处索引已登记。
+    """
+    result = _run_link_mutator("--baseline")
+    assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+    assert "OVERALL: PASS" in result.stdout, result.stdout
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected"),
+    [
+        ("toc_drop_last_chain", "总览表行数"),
+        ("toc_wrong_step_count", "步数不符"),
+        ("remove_verdict_block", "缺要素"),
+        ("remove_breakpoint_block", "缺要素"),
+        ("readme_unregistered", "README"),
+        ("agents_unregistered", "AGENTS"),
+        ("chain_number_gap", "编号不连续"),
+        ("drop_functional_point", "覆盖列声明的功能点缺失"),
+        ("drop_point_marker", "不是 1:1"),
+        ("duplicate_functional_point", "覆盖列"),
+    ],
+)
+def test_acceptance_link_guard_is_load_bearing(mutate: str, expected: str):
+    """变异验证：**不另抄一份变异逻辑**，直接复用 `.workbuddy/scripts/mutate_verify_acceptance_links.py`。
+
+    这样「守卫会不会红」这件事只有一个实现（DEF-044 教训）。脚本自己负责还原与
+    收尾复核，故这里只断言它在对应变异下确实报出预期的 FAIL 文案。
+    """
+    result = _run_link_mutator("--only", mutate)
+    assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+    assert f"[{mutate}] CAUGHT" in result.stdout, result.stdout
+    assert expected in result.stdout, result.stdout
+
+
+# --------------------------------------------------------------------------- #
 # 模块层 Session 工厂必须全部打桩（2026-09-27 立规）
 # --------------------------------------------------------------------------- #
 #: 打桩清单**必须**覆盖的最小集合（判据落在具体模块上，不是「列表非空」）。

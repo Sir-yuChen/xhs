@@ -51,6 +51,10 @@ cd frontend && npm test            # = vitest run；监听态用 npm run test:wa
 "C:/Users/admin/AppData/Local/Programs/Python/Python312/python.exe" .workbuddy/skills/xhs-doc-stats-verify/verify_doc_stats.py
 #   ② 文档 vs 实测（声明的端点/表/请求函数/页面数 vs 代码实际值；**离线**，~1.5s，不需服务在跑）
 "C:/Users/admin/AppData/Local/Programs/Python/Python312/python.exe" .workbuddy/skills/xhs-doc-stats-verify/verify_doc_counts.py
+#   ③ 功能点全链路验收清单自洽（链路编号连续 / 总览==正文 / 四要素齐 / 覆盖列==细目 /
+#      功能点与勾选位 1:1 / README+AGENTS 已登记；
+#      **离线**，<0.1s。开发完毕后必须更新该手册并跑它 —— 规则见 `04_测试文档/01` §14.4）
+"C:/Users/admin/AppData/Local/Programs/Python/Python312/python.exe" .workbuddy/skills/xhs-doc-stats-verify/verify_acceptance_links.py
 
 # 正式版发版（打包 -> 校验 -> 冒烟 -> 清残留 -> 打 tag -> Gitee Release，七阶段一键）
 #   powershell -NoProfile -ExecutionPolicy Bypass -File packaging\release.ps1 -Version x.y.z
@@ -101,6 +105,7 @@ pytest $(python .workbuddy/scripts/pick_tests.py) -q   # 直接跑选出的文�
 |---|---|
 | 代码级测试（pytest / tsc / 变异） | **每个需求当场跑**，不许攒 |
 | 文档回写 + 双校验脚本 | **每个需求当场跑**，不许攒 |
+| **功能点全链路验收清单更新**（开发完必须做） | **每个需求当场做**，不许攒 —— 新增前端入口必须新开一条链路或接入既有链路，并挂上对应功能点细目；判据 `verify_acceptance_links.py`（详见 `04_测试文档/01` §14） |
 | 迁移 | **每条单独上** + 库副本三向实测，不许攒 |
 | **真机冒烟（要用户在场）** | **✅ 攒批**：每个需求收尾只跑自动判据，把「只能肉眼确认」的事项追加进 `docs/04_测试文档/08_真机验收攒批清单.md`；攒 **2–3 个需求**后**一次性**请用户过目 |
 
@@ -204,7 +209,7 @@ pytest $(python .workbuddy/scripts/pick_tests.py) -q   # 直接跑选出的文�
 
 | 任务 | 真相源 |
 |---|---|
-| **第二阶段二开（2026-09-29 规划，待开工）** | 总体：`docs/01_需求文档/05_需求规格_第二阶段二开.md`；详细（链路/字段级模型/业务逻辑/落库规划）：`docs/02_设计文档/16_功能设计_第二阶段二开.md`；验收：`docs/04_测试文档/07_第二阶段验收测试方案.md`（DoD/TC）+ **`09_第二阶段功能点全链路验收清单.md`（用户手动逐条：107 条 × 入口/操作/期望/判定）**。**先做 M0 文档蒸馏**（体积 -50%），M1 起按方向实现 |
+| **第二阶段二开（2026-09-29 规划，待开工）** | 总体：`docs/01_需求文档/05_需求规格_第二阶段二开.md`；详细（链路/字段级模型/业务逻辑/落库规划）：`docs/02_设计文档/16_功能设计_第二阶段二开.md`；验收：`docs/04_测试文档/07_第二阶段验收测试方案.md`（DoD/TC）+ **`09_第二阶段功能点全链路验收清单.md`（用户验收唯一入口：12 条业务链路 × 串联前端入口 + 107 个功能点 × 入口/操作/期望/判定）**。**先做 M0 文档蒸馏**（体积 -50%），M1 起按方向实现 |
 | **M1 LLM 生成链路（详细设计）** | **`docs/02_设计文档/17_功能设计_LLM生成链路.md`**（2026-09-29 阶段二产出，v1.3：**网关集成 New API**（QuantumNous/new-api，本机 :3000，渠道=服务商/令牌=账号，自带数据看板+`/api/log/stat`），项目侧仅 `llm_gateway_configs`/`llm_gateway_snapshots` + prompt 模板 + 素材库 + 生成；~9 新表 + ~27 端点；取代 16 §10/§11 的方向 1 口径；**WB2API/自研网关方案已废弃**） |
 | 「我的笔记」/商品/千帆 | `docs/02_设计文档/12_…§19、§24`（笔记↔商品映射）、**§25（商品列表页 + 搜索条件）**；需求 `docs/01_需求文档/03_…`（R1–R11 / D1–D17）与 `01/02_二开需求规格_商品笔记自动化.md`（R6） |
 | **定时任务 / 调度器 / 调度日志** | **`docs/02_设计文档/15_功能设计_定时任务中心.md`**（2026-09-24 重构方案；`08` §1.1/§1.2/§2/§2.1 的被取代原句以注释保留） |
