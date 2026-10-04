@@ -19,54 +19,47 @@ from __future__ import annotations
 import csv
 import io
 
-from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, select
-from sqlalchemy.orm import sessionmaker
+import pytest
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from backend.app.api.platforms.xhs.qianfan import MAX_EXPORT_ROWS
-from backend.app.core.database import Base, get_db
-from backend.app.main import app
+from backend.app.core.database import Base
+from backend.app.core.security import create_access_token
 from backend.app.models import PlatformAccount, User
 from backend.app.models.shop_product import ShopProduct
+from tests.backend.conftest import seed_owner_rows
 
-client = TestClient(app)
+
+class _Ctx:
+    """本文件各用例共用的一份上下文（两用户 + owner 两个账号 + 一个外人账号）。"""
+
+    def __init__(self, client, headers, intruder_headers, ids, db_factory):
+        self.client = client
+        self.headers = headers
+        self.intruder_headers = intruder_headers
+        self.ids = ids
+        self.db_factory = db_factory
 
 
-def _setup(tmp_path):
-    """建临时库 + 两用户（owner / intruder）+ owner 的两个平台账号。
+@pytest.fixture()
+def ctx(api_client, db_factory):
+    """建两用户（owner / intruder）+ owner 的两个平台账号。
 
     ⚠️ **两个账号是刻意的** —— `product_count` 的跨账号聚合只有两个账号才测得出来
     （单账号时「跨账号聚合」与「只数当前账号」结果恒等，变异抓不住）。
+
+    ⚠️ **用 `conftest` 的公共夹具**（`api_client` / `db_factory`），不自己抄
+    `create_engine + create_all + dependency_overrides` 三件套 —— 项目硬规矩之一，
+    由 `test_testing_spec_guards.py` 强制。
     """
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'product-edit.db'}", connect_args={"check_same_thread": False}
-    )
-    Base.metadata.create_all(bind=engine)
-    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    owner_id = 2
+    intruder_id = 3
+    seed_owner_rows(db_factory().get_bind(), user_id=owner_id, account_id=101)
+    seed_owner_rows(db_factory().get_bind(), user_id=intruder_id, account_id=102)
 
-    def override_get_db():
-        db = SessionLocal()
-        try:
-            yield db
-        finally:
-            db.close()
-
-    app.dependency_overrides[get_db] = override_get_db
-
-    def register(username: str) -> str:
-        response = client.post(
-            "/api/auth/register", json={"username": username, "password": "secret123"}
-        )
-        assert response.status_code == 200, response.text
-        return response.json()["access_token"]
-
-    owner_headers = {"Authorization": f"Bearer {register('owner')}"}
-    intruder_headers = {"Authorization": f"Bearer {register('intruder')}"}
-
-    db = SessionLocal()
+    db = db_factory()
     try:
-        owner_id = db.scalar(select(User.id).where(User.username == "owner"))
-        intruder_id = db.scalar(select(User.id).where(User.username == "intruder"))
         acc_a = PlatformAccount(
             user_id=owner_id, platform="xhs", sub_type="creator", nickname="账号A", status="active"
         )
@@ -86,10 +79,13 @@ def _setup(tmp_path):
         }
     finally:
         db.close()
-    return owner_headers, intruder_headers, ids, SessionLocal
+
+    headers = {"Authorization": f"Bearer {create_access_token(owner_id)}"}
+    intruder_headers = {"Authorization": f"Bearer {create_access_token(intruder_id)}"}
+    return _Ctx(api_client, headers, intruder_headers, ids, db_factory)
 
 
-def _add_product(SessionLocal, account_id: int, item_id: str, title: str = "测试商品", **cols):
+def _add_product(db_factory, account_id: int, item_id: str, title: str = "测试商品", **cols):
     """往台账塞一行（走 `store_products` —— 与生产同一条落库路径）。
 
     ⚠️ **不走裸 `ShopProduct(...)`**：列表 / 导出的字段全部从 `raw_json` 派生
@@ -99,7 +95,7 @@ def _add_product(SessionLocal, account_id: int, item_id: str, title: str = "测�
     from backend.app.models import PlatformAccount
     from backend.app.services.shop_goods_sync_service import store_products
 
-    db = SessionLocal()
+    db = db_factory()
     try:
         account = db.get(PlatformAccount, account_id)
         stored = store_products(db, account.user_id, account.id, [_ark_item(item_id, title)])
@@ -163,35 +159,35 @@ def _ark_item(item_id: str, title: str, **overrides) -> dict:
 class TestGroupCrud:
     """分组 CRUD + 跨账号计数（设计 20 §2.1 端点 1–4）。"""
 
-    def test_create_rename_delete_with_release_count(self, tmp_path):
-        headers, _, ids, SessionLocal = _setup(tmp_path)
+    def test_create_rename_delete_with_release_count(self, ctx):
+        headers, ids, db_factory = ctx.headers, ctx.ids, ctx.db_factory
 
-        created = client.post(
+        created = ctx.client.post(
             "/api/xhs/qianfan/product-groups", json={"name": "春季上新"}, headers=headers
         )
         assert created.status_code == 201, created.text
         gid = created.json()["id"]
         assert created.json()["name"] == "春季上新"
 
-        listed = client.get("/api/xhs/qianfan/product-groups", headers=headers)
+        listed = ctx.client.get("/api/xhs/qianfan/product-groups", headers=headers)
         assert listed.status_code == 200
         assert [g["id"] for g in listed.json()["items"]] == [gid]
 
-        renamed = client.patch(
+        renamed = ctx.client.patch(
             f"/api/xhs/qianfan/product-groups/{gid}", json={"name": "夏季上新"}, headers=headers
         )
         assert renamed.status_code == 200, renamed.text
         assert renamed.json()["name"] == "夏季上新"
 
         # 挂两件商品进分组，删分组必须报告影响面（released = 2）
-        _add_product(SessionLocal, ids["a"], "ITEM-1", group_id=gid)
-        _add_product(SessionLocal, ids["a"], "ITEM-2", group_id=gid)
-        deleted = client.delete(f"/api/xhs/qianfan/product-groups/{gid}", headers=headers)
+        _add_product(db_factory, ids["a"], "ITEM-1", group_id=gid)
+        _add_product(db_factory, ids["a"], "ITEM-2", group_id=gid)
+        deleted = ctx.client.delete(f"/api/xhs/qianfan/product-groups/{gid}", headers=headers)
         assert deleted.status_code == 200, deleted.text
         assert deleted.json()["released"] == 2
 
         # ⚠️ 商品一件不删，只是没了分组（分组是弱关联）
-        db = SessionLocal()
+        db = db_factory()
         try:
             rows = db.scalars(select(ShopProduct)).all()
             assert len(rows) == 2
@@ -199,30 +195,30 @@ class TestGroupCrud:
         finally:
             db.close()
 
-    def test_duplicate_name_conflicts_not_silently_overwritten(self, tmp_path):
-        headers, _, _, _ = _setup(tmp_path)
-        first = client.post(
+    def test_duplicate_name_conflicts_not_silently_overwritten(self, ctx):
+        headers = ctx.headers
+        first = ctx.client.post(
             "/api/xhs/qianfan/product-groups", json={"name": "重名组"}, headers=headers
         )
         assert first.status_code == 201
 
-        again = client.post(
+        again = ctx.client.post(
             "/api/xhs/qianfan/product-groups", json={"name": "重名组"}, headers=headers
         )
         assert again.status_code == 409, again.text
         # 建完重名之后仍然只有一行（不静默覆盖 = 不产生第二行也不改第一行）
-        listed = client.get("/api/xhs/qianfan/product-groups", headers=headers).json()
+        listed = ctx.client.get("/api/xhs/qianfan/product-groups", headers=headers).json()
         assert len(listed["items"]) == 1
 
-    def test_other_users_group_is_invisible(self, tmp_path):
+    def test_other_users_group_is_invisible(self, ctx):
         """跨用户隔离：B 动 A 的分组 ⇒ 404（不是 403、不是 200）。"""
-        headers, intruder_headers, _, _ = _setup(tmp_path)
-        gid = client.post(
+        headers, intruder_headers = ctx.headers, ctx.intruder_headers
+        gid = ctx.client.post(
             "/api/xhs/qianfan/product-groups", json={"name": "A的组"}, headers=headers
         ).json()["id"]
 
         assert (
-            client.patch(
+            ctx.client.patch(
                 f"/api/xhs/qianfan/product-groups/{gid}",
                 json={"name": "改别人的"},
                 headers=intruder_headers,
@@ -230,30 +226,30 @@ class TestGroupCrud:
             == 404
         )
         assert (
-            client.delete(
+            ctx.client.delete(
                 f"/api/xhs/qianfan/product-groups/{gid}", headers=intruder_headers
             ).status_code
             == 404
         )
         assert (
-            client.get("/api/xhs/qianfan/product-groups", headers=intruder_headers).json()["items"]
+            ctx.client.get("/api/xhs/qianfan/product-groups", headers=intruder_headers).json()["items"]
             == []
         )
 
-    def test_product_count_aggregates_across_own_accounts(self, tmp_path):
+    def test_product_count_aggregates_across_own_accounts(self, ctx):
         """`product_count` 数的是**该用户全部账号**的商品（变异点①）。
 
         ⚠️ 变异：改成「只数当前账号」⇒ 本用例必红（账号 B 那件漏计）。
         """
-        headers, _, ids, SessionLocal = _setup(tmp_path)
-        gid = client.post(
+        headers, ids, db_factory = ctx.headers, ctx.ids, ctx.db_factory
+        gid = ctx.client.post(
             "/api/xhs/qianfan/product-groups", json={"name": "跨账号组"}, headers=headers
         ).json()["id"]
 
-        _add_product(SessionLocal, ids["a"], "ITEM-A", group_id=gid)
-        _add_product(SessionLocal, ids["b"], "ITEM-B", group_id=gid)
+        _add_product(db_factory, ids["a"], "ITEM-A", group_id=gid)
+        _add_product(db_factory, ids["b"], "ITEM-B", group_id=gid)
 
-        listed = client.get("/api/xhs/qianfan/product-groups", headers=headers).json()
+        listed = ctx.client.get("/api/xhs/qianfan/product-groups", headers=headers).json()
         row = next(g for g in listed["items"] if g["id"] == gid)
         assert row["product_count"] == 2, "账号 A + 账号 B 各一件"
 
@@ -261,20 +257,20 @@ class TestGroupCrud:
 class TestProductEdit:
     """`PATCH /items/edit` 的 PATCH 语义（设计 20 §2.2 口径①）。"""
 
-    def test_omitted_key_keeps_value_and_null_clears(self, tmp_path):
+    def test_omitted_key_keeps_value_and_null_clears(self, ctx):
         """**两种语义分开测**（变异点②）。
 
         ⚠️ 变异：把 sentinel 改成 `Optional[..., None]` ⇒ 省略键会被当显式 null
         清空 ⇒ 本用例第一段必红。
         """
-        headers, _, ids, SessionLocal = _setup(tmp_path)
-        gid = client.post(
+        headers, ids, db_factory = ctx.headers, ctx.ids, ctx.db_factory
+        gid = ctx.client.post(
             "/api/xhs/qianfan/product-groups", json={"name": "组1"}, headers=headers
         ).json()["id"]
-        _add_product(SessionLocal, ids["a"], "ITEM-1", ai_title="原标题", ai_selling_point="原卖点")
+        _add_product(db_factory, ids["a"], "ITEM-1", ai_title="原标题", ai_selling_point="原卖点")
 
         # ① 只传 group_id ⇒ 另外两项**保持原值**（不传 = 不动）
-        only_group = client.patch(
+        only_group = ctx.client.patch(
             "/api/xhs/qianfan/items/edit",
             json={"platform_account_id": ids["a"], "item_id": "ITEM-1", "group_id": gid},
             headers=headers,
@@ -287,7 +283,7 @@ class TestProductEdit:
         assert body["updated"] == ["group_id"]
 
         # ② 显式传 null ⇒ 清空
-        cleared = client.patch(
+        cleared = ctx.client.patch(
             "/api/xhs/qianfan/items/edit",
             json={"platform_account_id": ids["a"], "item_id": "ITEM-1", "ai_title": None},
             headers=headers,
@@ -297,12 +293,12 @@ class TestProductEdit:
         assert cleared.json()["ai_selling_point"] == "原卖点", "没传的那项仍不动"
         assert cleared.json()["updated"] == ["ai_title"]
 
-    def test_updated_lists_only_changed_fields(self, tmp_path):
+    def test_updated_lists_only_changed_fields(self, ctx):
         """`updated[]` 只列**真正变了**的列（送回同值 ⇒ 空数组）。"""
-        headers, _, ids, SessionLocal = _setup(tmp_path)
-        _add_product(SessionLocal, ids["a"], "ITEM-1", ai_title="同值")
+        headers, ids, db_factory = ctx.headers, ctx.ids, ctx.db_factory
+        _add_product(db_factory, ids["a"], "ITEM-1", ai_title="同值")
 
-        same = client.patch(
+        same = ctx.client.patch(
             "/api/xhs/qianfan/items/edit",
             json={"platform_account_id": ids["a"], "item_id": "ITEM-1", "ai_title": "同值"},
             headers=headers,
@@ -310,34 +306,34 @@ class TestProductEdit:
         assert same.status_code == 200, same.text
         assert same.json()["updated"] == [], "值没变就不该报「已更新」"
 
-        changed = client.patch(
+        changed = ctx.client.patch(
             "/api/xhs/qianfan/items/edit",
             json={"platform_account_id": ids["a"], "item_id": "ITEM-1", "ai_title": "新值"},
             headers=headers,
         )
         assert changed.json()["updated"] == ["ai_title"]
 
-    def test_editing_other_accounts_item_is_404(self, tmp_path):
-        headers, _, ids, SessionLocal = _setup(tmp_path)
-        _add_product(SessionLocal, ids["foreign"], "ITEM-X")
+    def test_editing_other_accounts_item_is_404(self, ctx):
+        headers, ids, db_factory = ctx.headers, ctx.ids, ctx.db_factory
+        _add_product(db_factory, ids["foreign"], "ITEM-X")
 
         # owner 拿自己的账号 A 去改别人账号的商品 ⇒ 台账里查不到 ⇒ 404
-        response = client.patch(
+        response = ctx.client.patch(
             "/api/xhs/qianfan/items/edit",
             json={"platform_account_id": ids["a"], "item_id": "ITEM-X", "ai_title": "偷改"},
             headers=headers,
         )
         assert response.status_code == 404, response.text
 
-    def test_group_id_must_belong_to_caller(self, tmp_path):
+    def test_group_id_must_belong_to_caller(self, ctx):
         """把商品挂到**别人的分组 id** ⇒ 404，不静默收下。"""
-        headers, intruder_headers, ids, SessionLocal = _setup(tmp_path)
-        foreign_gid = client.post(
+        headers, intruder_headers, ids, db_factory = ctx.headers, ctx.intruder_headers, ctx.ids, ctx.db_factory
+        foreign_gid = ctx.client.post(
             "/api/xhs/qianfan/product-groups", json={"name": "别人的组"}, headers=intruder_headers
         ).json()["id"]
-        _add_product(SessionLocal, ids["a"], "ITEM-1")
+        _add_product(db_factory, ids["a"], "ITEM-1")
 
-        response = client.patch(
+        response = ctx.client.patch(
             "/api/xhs/qianfan/items/edit",
             json={"platform_account_id": ids["a"], "item_id": "ITEM-1", "group_id": foreign_gid},
             headers=headers,
@@ -348,13 +344,13 @@ class TestProductEdit:
 class TestExport:
     """CSV 导出（设计 20 §2.1 端点 6 + §4.5）。"""
 
-    def test_export_matches_list_selection_and_has_bom(self, tmp_path):
+    def test_export_matches_list_selection_and_has_bom(self, ctx):
         """导出集合 = 列表集合（同一筛选），且带 UTF-8 BOM + 中文文件名不崩（DEF-091）。"""
-        headers, _, ids, SessionLocal = _setup(tmp_path)
-        _add_product(SessionLocal, ids["a"], "ITEM-1", "野餐垫")
-        _add_product(SessionLocal, ids["a"], "ITEM-2", "防晒衣")
+        headers, ids, db_factory = ctx.headers, ctx.ids, ctx.db_factory
+        _add_product(db_factory, ids["a"], "ITEM-1", "野餐垫")
+        _add_product(db_factory, ids["a"], "ITEM-2", "防晒衣")
 
-        listed = client.post(
+        listed = ctx.client.post(
             "/api/xhs/qianfan/items",
             json={"platform_account_id": ids["a"], "keyword": "野餐"},
             headers=headers,
@@ -362,7 +358,7 @@ class TestExport:
         assert listed.status_code == 200, listed.text
         total = listed.json()["total"]
 
-        exported = client.post(
+        exported = ctx.client.post(
             "/api/xhs/qianfan/items/export",
             json={"platform_account_id": ids["a"], "keyword": "野餐"},
             headers=headers,
@@ -378,13 +374,13 @@ class TestExport:
         rows = list(csv.reader(io.StringIO(raw.decode("utf-8-sig"))))
         assert len(rows) - 1 == total, "CSV 数据行数必须等于列表 total（同一筛选）"
 
-    def test_export_falls_back_to_platform_title_when_no_ai_title(self, tmp_path):
+    def test_export_falls_back_to_platform_title_when_no_ai_title(self, ctx):
         """`ai_title` 有值导它、没有导 `item_title`（用户要的是「能用的标题」）。"""
-        headers, _, ids, SessionLocal = _setup(tmp_path)
-        _add_product(SessionLocal, ids["a"], "ITEM-1", "原标题", ai_title="AI标题")
-        _add_product(SessionLocal, ids["a"], "ITEM-2", "另一个原标题")
+        headers, ids, db_factory = ctx.headers, ctx.ids, ctx.db_factory
+        _add_product(db_factory, ids["a"], "ITEM-1", "原标题", ai_title="AI标题")
+        _add_product(db_factory, ids["a"], "ITEM-2", "另一个原标题")
 
-        exported = client.post(
+        exported = ctx.client.post(
             "/api/xhs/qianfan/items/export",
             json={"platform_account_id": ids["a"]},
             headers=headers,
@@ -393,21 +389,21 @@ class TestExport:
         assert "AI标题" in text
         assert "另一个原标题" in text
 
-    def test_export_over_limit_is_rejected_not_truncated(self, tmp_path, monkeypatch):
+    def test_export_over_limit_is_rejected_not_truncated(self, ctx, monkeypatch):
         """超限**整体拒绝**（变异点③）。
 
         ⚠️ 变异：去掉上限判定（静默截断）⇒ 本用例必红 —— 截断的 CSV 是
         「看起来完整」的假全量，用户会拿它对账。
         """
-        headers, _, ids, SessionLocal = _setup(tmp_path)
+        headers, ids, db_factory = ctx.headers, ctx.ids, ctx.db_factory
         # 把上限压到 1 行，造出「超限」确定态（不用真塞 5000 行）
         import backend.app.api.platforms.xhs.qianfan as qf
 
         monkeypatch.setattr(qf, "MAX_EXPORT_ROWS", 1)
-        _add_product(SessionLocal, ids["a"], "ITEM-1")
-        _add_product(SessionLocal, ids["a"], "ITEM-2")
+        _add_product(db_factory, ids["a"], "ITEM-1")
+        _add_product(db_factory, ids["a"], "ITEM-2")
 
-        response = client.post(
+        response = ctx.client.post(
             "/api/xhs/qianfan/items/export",
             json={"platform_account_id": ids["a"]},
             headers=headers,
@@ -416,12 +412,12 @@ class TestExport:
         assert response.json()["detail"]["code"] == "QIANFAN_EXPORT_TOO_MANY"
         assert response.json()["detail"]["limit"] == 1
 
-    def test_export_is_account_scoped(self, tmp_path):
-        headers, _, ids, SessionLocal = _setup(tmp_path)
-        _add_product(SessionLocal, ids["a"], "ITEM-1", "自己的商品")
-        _add_product(SessionLocal, ids["foreign"], "ITEM-X", "别人的商品")
+    def test_export_is_account_scoped(self, ctx):
+        headers, ids, db_factory = ctx.headers, ctx.ids, ctx.db_factory
+        _add_product(db_factory, ids["a"], "ITEM-1", "自己的商品")
+        _add_product(db_factory, ids["foreign"], "ITEM-X", "别人的商品")
 
-        exported = client.post(
+        exported = ctx.client.post(
             "/api/xhs/qianfan/items/export",
             json={"platform_account_id": ids["a"]},
             headers=headers,
@@ -434,12 +430,12 @@ class TestExport:
 class TestPolish:
     """`POST /items/polish` 的 AI 润色（设计 20 §3）。"""
 
-    def test_polish_without_provider_is_structured_400(self, tmp_path):
+    def test_polish_without_provider_is_structured_400(self, ctx):
         """未配服务商 ⇒ **400 结构化**（不回落、不静默用别的服务商）。"""
-        headers, _, ids, SessionLocal = _setup(tmp_path)
-        _add_product(SessionLocal, ids["a"], "ITEM-1", "野餐垫")
+        headers, ids, db_factory = ctx.headers, ctx.ids, ctx.db_factory
+        _add_product(db_factory, ids["a"], "ITEM-1", "野餐垫")
 
-        response = client.post(
+        response = ctx.client.post(
             "/api/xhs/qianfan/items/polish",
             json={"platform_account_id": ids["a"], "item_id": "ITEM-1"},
             headers=headers,
@@ -449,10 +445,10 @@ class TestPolish:
         assert isinstance(detail, dict), "失败必须结构化（不是裸字符串）"
         assert detail.get("code")
 
-    def test_polish_returns_three_candidates_and_does_not_persist(self, tmp_path, monkeypatch):
+    def test_polish_returns_three_candidates_and_does_not_persist(self, ctx, monkeypatch):
         """备选各 3 个 + **润色不落库**（采纳才落）。"""
-        headers, _, ids, SessionLocal = _setup(tmp_path)
-        _add_product(SessionLocal, ids["a"], "ITEM-1", "野餐垫")
+        headers, ids, db_factory = ctx.headers, ctx.ids, ctx.db_factory
+        _add_product(db_factory, ids["a"], "ITEM-1", "野餐垫")
 
         import types
 
@@ -477,7 +473,7 @@ class TestPolish:
         )
         monkeypatch.setattr(polish_svc, "_split_candidates", lambda text, count=3: text.split("|"))
 
-        response = client.post(
+        response = ctx.client.post(
             "/api/xhs/qianfan/items/polish",
             json={"platform_account_id": ids["a"], "item_id": "ITEM-1"},
             headers=headers,
@@ -488,7 +484,7 @@ class TestPolish:
         assert len(body["selling_point_candidates"]) == 3
 
         # ⚠️ 润色是「草稿」，没采纳 ⇒ 库里 ai_title 仍是 NULL
-        db = SessionLocal()
+        db = db_factory()
         try:
             row = db.scalars(select(ShopProduct).where(ShopProduct.item_id == "ITEM-1")).one()
             assert row.ai_title is None, "润色结果不得直接落库"
