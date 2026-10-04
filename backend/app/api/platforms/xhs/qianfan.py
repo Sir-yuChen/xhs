@@ -178,6 +178,10 @@ class ShopItemsRequest(BaseModel):
     create_time_to: str | int | None = None
     sort_field: str = "create_time"
     order: str = "desc"
+    #: 分组筛选（M4 新增，设计 20 §5）：不传 = 不筛；`0` = **未分组**；`>0` = 指定分组。
+    #: ⚠️ 与价格 / 时间不同，「未分组」是**确凿状态**（`group_id IS NULL`）⇒ 照常筛
+    #: （硬约束⑤的例外口径，同挂链笔记数）。
+    group_id: int | None = Field(default=None, ge=0)
 
 
 class ShopItemsDeleteRequest(BaseModel):

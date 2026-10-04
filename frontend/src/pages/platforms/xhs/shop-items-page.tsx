@@ -2,6 +2,8 @@ import {
   CopyOutlined,
   DatabaseOutlined,
   DeleteOutlined,
+  DownloadOutlined,
+  EditOutlined,
   FileAddOutlined,
   PictureOutlined,
   RobotOutlined,
@@ -48,8 +50,10 @@ import {
   batchGenerateProductNotes,
   deleteXhsShopItems,
   EMPTY_GENERATE_QUEUE_SNAPSHOT,
+  exportShopItems,
   fetchAccounts,
   fetchGenerateQueue,
+  fetchProductGroups,
   fetchXhsItemNotes,
   fetchPromptTemplates,
   fetchXhsQianfanBinding,
@@ -64,6 +68,13 @@ import {
 } from "../../../lib/api";
 import type { GenerateQueueFinishedEntry, GenerateQueueSnapshot } from "../../../lib/api";
 import { yuan } from "../../../lib/format";
+import ProductEditModal from "./product-edit-modal";
+import {
+  ALL_GROUPS_SENTINEL,
+  exportBlockReason,
+  groupFilterOptions,
+  groupFilterParam,
+} from "../../../lib/product-edit";
 import {
   EMPTY_SHOP_ITEMS_DRAFT,
   FILTER_CACHE_KEYS,
@@ -111,6 +122,7 @@ import type {
   XhsNoteCountOp,
   XhsQianfanBinding,
   XhsShopItem,
+  XhsProductGroup,
   XhsShopItemDetail,
   XhsShopItemStatus,
   XhsShopItemsQuery,
@@ -748,6 +760,18 @@ export function XhsShopItemsPage() {
    */
   const [generationsOpen, setGenerationsOpen] = useState(false);
   const [generationsItem, setGenerationsItem] = useState<XhsShopItem | null>(null);
+  /**
+   * M4 商品编辑（设计 20 §5）：操作列独立弹窗 + 列表工具栏的**分组筛选 / 导出 CSV**。
+   *
+   * ⚠️ 编辑弹窗**不塞进详情弹窗**（§13.3.5 既定口径：操作列的独立弹窗）。
+   * `editingItem` 非空即弹窗打开 —— 「打开」与「编辑哪个商品」是同一件事，
+   * 不拆成两个 state（拆了就会出现「打开着但不指向任何商品」的中间态）。
+   */
+  const [editingItem, setEditingItem] = useState<XhsShopItem | null>(null);
+  const [groups, setGroups] = useState<XhsProductGroup[]>([]);
+  /** 分组筛选值：`ALL_GROUPS_SENTINEL` = 不筛（默认）。 */
+  const [groupFilter, setGroupFilter] = useState<number>(ALL_GROUPS_SENTINEL);
+  const [exporting, setExporting] = useState(false);
   const [generations, setGenerations] = useState<
     { id: number; url: string; prompt: string; model_name: string; created_at: string }[]
   >([]);
@@ -898,6 +922,10 @@ export function XhsShopItemsPage() {
         ...(sortArg
           ? { sort_field: sortArg.field, order: sortArg.order === "ascend" ? "asc" : "desc" }
           : {}),
+        // M4：分组筛选（`undefined` = 不筛；`0` = 未分组）
+        ...(groupFilterParam(groupFilter) !== undefined
+          ? { group_id: groupFilterParam(groupFilter) as number }
+          : {}),
       };
       setLoading(true);
       setErrorText("");
@@ -912,7 +940,7 @@ export function XhsShopItemsPage() {
         setLoading(false);
       }
     },
-    [form, pageNo, pageSize, sort]
+    [form, pageNo, pageSize, sort, groupFilter]
   );
 
   /**
@@ -986,6 +1014,20 @@ export function XhsShopItemsPage() {
     void loadBinding(selectedAccountId);
   }, [selectedAccountId, loadBinding]);
 
+  /**
+   * 拉分组清单（列表工具栏的分组筛选 + 编辑弹窗共用一份）。
+   *
+   * ⚠️ **不阻塞列表**：分组拉不到就退空（分组是可选的组织方式）。
+   */
+  const loadGroups = useCallback(async () => {
+    try {
+      const result = await fetchProductGroups();
+      setGroups(result.items);
+    } catch {
+      setGroups([]);
+    }
+  }, []);
+
   useEffect(() => {
     if (selectedAccountId === null || !bindingLoaded) return;
     if (!prereq.ok) return;
@@ -994,6 +1036,12 @@ export function XhsShopItemsPage() {
     // 带上它会让「绑定后拉一页」的语义与实际（零门禁、切账号即拉）不符。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedAccountId, bindingLoaded, prereq.ok]);
+
+  // M4：分组清单随账号切换刷新（筛选下拉 + 编辑弹窗共用）。
+  useEffect(() => {
+    if (selectedAccountId === null) return;
+    void loadGroups();
+  }, [selectedAccountId, loadGroups]);
 
   const accountOptions = useMemo(
     () =>
@@ -1370,6 +1418,44 @@ export function XhsShopItemsPage() {
       message.error(error instanceof Error ? error.message : "生成记录加载失败");
     } finally {
       setGenerationsLoading(false);
+    }
+  }
+
+  /**
+   * 导出当前筛选条件下的 CSV（设计 20 §2.1 端点 6）。
+   *
+   * ⚠️ 超限**不发请求**（`exportBlockReason` 与后端上限同值）—— 后端会整批 400，
+   * 前端先拦省一次往返；且判据同值（两份不同上限 = 用户看到的与实际的不是一回事）。
+   */
+  async function exportCsv() {
+    if (!selectedAccountId) return;
+    const total = data?.total ?? 0;
+    const blocked = exportBlockReason(total);
+    if (blocked) {
+      message.warning(blocked);
+      return;
+    }
+    setExporting(true);
+    try {
+      const blob = await exportShopItems({
+        ...formValuesToDraft(form.getFieldsValue()),
+        platform_account_id: selectedAccountId,
+        group_id: groupFilterParam(groupFilter),
+      } as XhsShopItemsQuery);
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      // ⚠️ 中文文件名让浏览器自己定（后端响应头已按 RFC 5987 带了 UTF-8 名）
+      anchor.download = "";
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      message.success(`已导出 ${total} 行`);
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "导出失败，请稍后重试。");
+    } finally {
+      setExporting(false);
     }
   }
 
@@ -1866,6 +1952,20 @@ export function XhsShopItemsPage() {
       ),
     },
     {
+      // M4（设计 20 §5）：**分组列**（Tag 展示分组名，未分组显示 `-`）。
+      // ⚠️ 名称由**后端下发**（`group_name`）—— 前端只有 id 查不出名字，
+      // 也不在前端 groupBy（分组口径是后端的）。
+      title: "分组",
+      key: "group",
+      width: 110,
+      render: (_: unknown, item: XhsShopItem) =>
+        item.group_name ? (
+          <Tag color="blue">{item.group_name}</Tag>
+        ) : (
+          <Text type="secondary">-</Text>
+        ),
+    },
+    {
       title: "操作",
       key: "action",
       // v2.31（用户口径「商品操作列：一行两个操作功能」）：四个操作排 **2 × 2**。
@@ -1943,6 +2043,19 @@ export function XhsShopItemsPage() {
               onClick={() => void openGenerations(item)}
             >
               生成记录
+            </Button>
+          </Tooltip>
+          {/* M4（设计 20 §5）：**商品编辑** —— 操作列独立弹窗（不塞进详情弹窗）。
+              内置三区块 Tabs：标题/卖点润色+采纳 / 分组 / SKU·价格只读。 */}
+          <Tooltip title="编辑商品（AI 润色标题卖点、改分组；平台改价不可得，仅只读查看）">
+            <Button
+              type="link"
+              size="small"
+              block
+              icon={<EditOutlined />}
+              onClick={() => setEditingItem(item)}
+            >
+              编辑
             </Button>
           </Tooltip>
         </div>
@@ -2206,6 +2319,25 @@ export function XhsShopItemsPage() {
                         onClick={() => void syncAllStatusGoods()}
                       >
                         同步商品
+                      </Button>
+                    </Tooltip>
+                    {/* M4（设计 20 §5）：**分组筛选**（全部分组 / 未分组 / <分组名>）
+                        + **导出 CSV**（按当前筛选，与列表同一集合）。 */}
+                    <Select
+                      style={{ minWidth: 150 }}
+                      value={groupFilter}
+                      options={groupFilterOptions(groups)}
+                      onChange={(value) => setGroupFilter(value)}
+                      placeholder="全部分组"
+                    />
+                    <Tooltip title="按当前筛选条件导出商品台账 CSV（超限会先提示收窄条件）">
+                      <Button
+                        icon={<DownloadOutlined />}
+                        loading={exporting}
+                        disabled={!selectedAccountId}
+                        onClick={() => void exportCsv()}
+                      >
+                        导出 CSV
                       </Button>
                     </Tooltip>
                   </Space>
@@ -3148,6 +3280,18 @@ export function XhsShopItemsPage() {
           )}
         </div>
       </Modal>
+      {/* M4（设计 20 §5）：商品编辑弹窗 —— 操作列独立入口，不塞进详情弹窗。
+          落库成功（分组/采纳标题）后刷新列表，让「分组」列与新标题即时可见。 */}
+      <ProductEditModal
+        open={editingItem !== null}
+        platformAccountId={selectedAccountId ?? 0}
+        item={editingItem}
+        onClose={() => setEditingItem(null)}
+        onSaved={() => {
+          if (selectedAccountId) void load(selectedAccountId, pageNo, pageSize);
+          void loadGroups();
+        }}
+      />
     </div>
   );
 }

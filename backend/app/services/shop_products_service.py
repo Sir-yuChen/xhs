@@ -29,6 +29,7 @@ from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from backend.app.models.platform_account import PlatformAccount
+from backend.app.models.product_group import ProductGroup
 from backend.app.models.shop import NoteGoods
 from backend.app.models.shop_product import ShopProduct
 
@@ -498,6 +499,15 @@ def _apply_filters(
             stmt = stmt.where(relation_count >= bound)
         elif op == "gt":
             stmt = stmt.where(relation_count > bound)
+
+    #: M4 分组筛选（设计 20 §5）：与导出的 `export_rows` 同一条判据 ——
+    #: ⚠️ 两处各写一份 = 「列表看到的」和「导出的」不是同一个集合（导出最常见的故障）。
+    requested_group = getattr(payload, "group_id", None)
+    if requested_group is not None:
+        if int(requested_group) == 0:
+            stmt = stmt.where(ShopProduct.group_id.is_(None))
+        else:
+            stmt = stmt.where(ShopProduct.group_id == int(requested_group))
     return stmt
 
 
@@ -579,12 +589,31 @@ def query_items(
     counts = _relation_note_counts(db, [str(row.item_id or "") for row in rows])
     for item, row in zip(items, rows):
         item["note_count"] = counts.get(str(row.item_id or ""), 0)
+        #: M4：分组（本地列，平台原始数据里没有它 ⇒ 在归一化之后挂上）。
+        #: ⚠️ `group_name` 可能为空（分组被删 / 行还没挂分组）⇒ 前端渲染 `-`。
+        item["group_id"] = row.group_id
+        item["ai_title"] = row.ai_title or ""
+        item["ai_selling_point"] = row.ai_selling_point or ""
     #: 台账同步时间 = 本账号 max(synced_at)（**没有行 → 空串**，上层渲染 `-`）。
     latest_sync = db.scalar(
         select(func.max(ShopProduct.synced_at)).where(
             ShopProduct.platform_account_id == platform_account_id
         )
     )
+    #: M4 分组名：一次查表做映射（**不在前端 groupBy** —— 分组口径由后端下发，
+    #: 前端只有 `group_id` 是查不出名字的）。空值 = 该商品没分组，前端渲染 `-`。
+    group_ids = {int(item["group_id"]) for item in items if item.get("group_id") is not None}
+    group_names: dict[int, str] = {}
+    if group_ids:
+        group_names = {
+            int(row.id): str(row.name or "")
+            for row in db.scalars(
+                select(ProductGroup).where(ProductGroup.id.in_(group_ids))
+            ).all()
+        }
+    for item in items:
+        gid = item.get("group_id")
+        item["group_name"] = group_names.get(int(gid), "") if gid is not None else ""
     return {
         "total": total,
         "count": len(items),
@@ -771,17 +800,6 @@ def export_rows(
         price_from_fen=price_from_fen,
         price_to_fen=price_to_fen,
     )
-
-    #: M4 分组筛选（设计 20 §2.1）：`0` = 未分组，`>0` = 指定分组。
-    #: ⚠️ `group_id` 是本地 id，天然只在**本账号**内有效，不需要额外租户口径。
-    #: ⚠️ 与价格 / 时间筛选不同，分组**可以**代入 NULL 比较：「未分组」是**确凿的
-    #: 状态**（`group_id IS NULL`），不是「读不到」⇒ 照常筛（硬约束⑤的例外口径）。
-    requested_group = getattr(payload, "group_id", None)
-    if requested_group is not None:
-        if int(requested_group) == 0:
-            stmt = stmt.where(ShopProduct.group_id.is_(None))
-        else:
-            stmt = stmt.where(ShopProduct.group_id == int(requested_group))
 
     stmt = _apply_order(
         stmt,

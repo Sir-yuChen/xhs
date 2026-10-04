@@ -392,6 +392,14 @@ export type XhsShopItem = {
   on_shelf_time: string;
   update_time: string;
   xsec_token: string;
+  /** M4：本地分组 id（`null` = 未分组）。 */
+  group_id?: number | null;
+  /** M4：分组名（后端下发；空 = 未分组，前端渲染 `-`）。 */
+  group_name?: string;
+  /** M4：AI 采纳的标题（空 = 未采纳；标题列 Tooltip 展示对照）。 */
+  ai_title?: string;
+  /** M4：AI 采纳的卖点。 */
+  ai_selling_point?: string;
 };
 
 export type XhsShopItemsQuery = {
@@ -419,6 +427,8 @@ export type XhsShopItemsQuery = {
   note_count?: number;
   sort_field?: string;
   order?: "asc" | "desc";
+  /** M4：分组筛选（`0` = 未分组；不传 = 不筛）。 */
+  group_id?: number;
 };
 
 /** 挂链笔记数筛选的比较符（v1.34）；白名单与后端 `qianfan.NOTE_COUNT_OPS` 逐个相等。 */
@@ -529,6 +539,42 @@ export type XhsShopItemSku = {
   weight: number | null;
   buyable: boolean | null;
   freeze: boolean | null;
+};
+
+/** 商品分组（设计 20 §2.1 端点 1–4）。 */
+export type XhsProductGroup = {
+  id: number;
+  name: string;
+  /** ⚠️ 当前用户**全部账号**的商品数（跨账号聚合，不是某个账号的）。 */
+  product_count: number;
+  created_at?: string;
+  updated_at?: string;
+};
+
+/** `PATCH /items/edit` 的执行体（**只带改过的键**；见 `lib/product-edit.ts`）。 */
+export type XhsItemEditPayload = {
+  platform_account_id: number;
+  item_id: string;
+  group_id?: number | null;
+  ai_title?: string | null;
+  ai_selling_point?: string | null;
+};
+
+/** 编辑结果：`updated[]` 只列**真改过**的字段（空数组 = 什么都没改）。 */
+export type XhsItemEditResult = {
+  item_id: string;
+  group_id: number | null;
+  ai_title: string | null;
+  ai_selling_point: string | null;
+  updated: string[];
+};
+
+/** AI 润色结果（**不落库** —— 采纳才走 `editShopItem`）。 */
+export type XhsItemPolishResult = {
+  title_candidates: string[];
+  selling_point_candidates: string[];
+  source_title: string;
+  model_name: string;
 };
 
 export type XhsShopItemDetail = {

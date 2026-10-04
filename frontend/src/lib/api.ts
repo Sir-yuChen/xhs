@@ -4,6 +4,12 @@ import { message } from "antd";
 import { fallbackPlatforms } from "./platforms";
 import type { CleanResultShape } from "./task-records";
 import type {
+  XhsItemEditPayload,
+  XhsItemEditResult,
+  XhsItemPolishResult,
+  XhsProductGroup,
+} from "../types";
+import type {
   AuthPayload,
   AutoTask,
   AutoTaskCreatePayload,
@@ -1548,6 +1554,67 @@ export async function fetchXhsShopItemDetail(
     item_id: itemId,
   });
   return response.data;
+}
+
+// --------------------------------------------------------------------------- //
+// M4「商品编辑优化」（设计 20）：分组 / 本地编辑 / AI 润色 / CSV 导出
+//
+// ⚠️ 边界：**改价 / 上下架不可交付**（千帆 SDK 零商品写接口，设计 20 §0）——
+// 这里**不写**它们的方法（写了就是「看起来能改」的假能力）。
+// --------------------------------------------------------------------------- //
+
+/** 商品分组列表（**当前用户全部账号**；`product_count` 是跨账号聚合值）。 */
+export async function fetchProductGroups(): Promise<{ items: XhsProductGroup[] }> {
+  const response = await http.get<{ items: XhsProductGroup[] }>("/xhs/qianfan/product-groups");
+  return response.data;
+}
+
+/** 建分组（重名 ⇒ 409，不静默覆盖）。 */
+export async function createProductGroup(name: string): Promise<XhsProductGroup> {
+  const response = await http.post<XhsProductGroup>("/xhs/qianfan/product-groups", { name });
+  return response.data;
+}
+
+/** 改分组名（归属校验失败 ⇒ 404）。 */
+export async function renameProductGroup(groupId: number, name: string): Promise<XhsProductGroup> {
+  const response = await http.patch<XhsProductGroup>(`/xhs/qianfan/product-groups/${groupId}`, {
+    name,
+  });
+  return response.data;
+}
+
+/** 删分组（**商品一件不删**，只清 `group_id`；`released` = 解除了几件）。 */
+export async function deleteProductGroup(groupId: number): Promise<{ released: number }> {
+  const response = await http.delete<{ released: number }>(
+    `/xhs/qianfan/product-groups/${groupId}`
+  );
+  return response.data;
+}
+
+/** `PATCH /items/edit` 的执行体（**只带改过的键**，见 `lib/product-edit.ts`）。 */
+/** 商品本地编辑（**纯本地写**，零平台请求；平台标题 / 价格不在这里改）。 */
+export async function editShopItem(payload: XhsItemEditPayload): Promise<XhsItemEditResult> {
+  const response = await http.patch<XhsItemEditResult>("/xhs/qianfan/items/edit", payload);
+  return response.data;
+}
+
+/** 商品标题 / 卖点 AI 润色（走两个业务点；未配服务商 ⇒ 400 结构化）。 */
+export async function polishShopItem(payload: {
+  platform_account_id: number;
+  item_id: string;
+  template_id?: number | null;
+  instruction?: string;
+}): Promise<XhsItemPolishResult> {
+  const response = await http.post<XhsItemPolishResult>("/xhs/qianfan/items/polish", payload);
+  return response.data;
+}
+
+/** 导出商品 CSV（按**当前筛选**；超限后端整批 400，前端先用 `exportBlockReason` 拦）。 */
+export async function exportShopItems(query: XhsShopItemsQuery): Promise<Blob> {
+  const response = await http.post("/xhs/qianfan/items/export", query, {
+    responseType: "blob",
+  });
+  return response.data as Blob;
 }
 
 /**
