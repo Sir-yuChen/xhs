@@ -67,6 +67,18 @@ SHOP_STATE_DEFAULTS: dict[str, Any] = {
 }
 
 
+def shop_display_name(account: PlatformAccount) -> str:
+    """店铺展示名（**全项目唯一实现**）。
+
+    店铺实体已退场（ADR-021 / 设计 18），店名取「账号昵称」—— 千帆
+    `get_seller_info()` 回的 `seller_name` 在登录时就写进了账号昵称的更新链路，
+    这里不额外存一份名字（**同一语义不留两份实现**）。
+
+    ⚠️ 商品页与订单页都要展示「所属店铺」⇒ 两处引用同一个函数，不许各写一份。
+    """
+    return (account.nickname or "").strip()
+
+
 def get_shop_state(account: PlatformAccount) -> dict[str, Any]:
     """该账号的千帆侧状态（**缺键补默认、坏 JSON 返回默认**，不抛）。
 

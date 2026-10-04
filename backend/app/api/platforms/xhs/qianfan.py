@@ -307,12 +307,13 @@ def _account_shop_summary(db: Session, account: PlatformAccount) -> dict[str, An
 
 
 def _shop_display_name(db: Session, account: PlatformAccount) -> str:
-    """店铺展示名 —— 店铺不是实体了，所以取「账号昵称」（千帆卖家名与之同源）。
+    """店铺展示名（**委托给服务层唯一实现**，不在 API 层再写一份）。
 
-    千帆 `get_seller_info()` 回的 `seller_name` 在登录时就写进了账号昵称的
-    更新链路；这里不额外存一份名字（**同一语义不留两份实现**）。
+    见 `shop_binding_service.shop_display_name` —— 商品页与订单页共用同一份。
     """
-    return (account.nickname or "").strip()
+    from backend.app.services.shop_binding_service import shop_display_name
+
+    return shop_display_name(account)
 
 
 @router.post("/bind", include_in_schema=False)
@@ -2486,7 +2487,11 @@ def order_list(
     return {
         "platform_account_id": payload.platform_account_id,
         "source": "local",
-        "shop_name": _shop_display_name(db, account),
+        # 店铺维度：**直接透传服务层的值**，不在这里另算一份
+        # （DEF-044：端点再拼一次 = 两份实现，且实测会漏字段 —— 上一版
+        #  这里自己拼 `shop_name` 却把 `seller_id` 丢了，返回恒 `None`）。
+        "shop_name": result["shop_name"],
+        "seller_id": result["seller_id"],
         "status": status_key,
         "page": result["page"],
         "page_size": result["page_size"],
@@ -2570,11 +2575,18 @@ def order_detail_endpoint(
                 "message": f"订单不存在或不属于当前账号：{payload.order_no}",
             },
         )
+    shop_ctx = order_sync_service._shop_context(db, account.id)
     return {
         "platform_account_id": payload.platform_account_id,
         "source": "local",
+        "shop_name": shop_ctx["shop_name"],
+        "seller_id": shop_ctx["seller_id"],
         "order": order_sync_service.order_summary(
-            db, order, include_full=bool(payload.include_full)
+            db,
+            order,
+            include_full=bool(payload.include_full),
+            shop_name=shop_ctx["shop_name"],
+            seller_id=shop_ctx["seller_id"],
         ),
     }
 

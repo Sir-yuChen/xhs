@@ -918,8 +918,40 @@ def mask_sensitive(value: Optional[str]) -> str:
     return text[0] + "*" * (min(len(text), 4) - 1)
 
 
-def order_summary(db: Session, order: Order, *, include_full: bool = False) -> dict[str, Any]:
-    """订单 → 列表/详情用的 dict。``include_full=True`` 才给完整履约值。"""
+def _shop_context(db: Session, platform_account_id: Optional[int]) -> dict[str, str]:
+    """店铺维度上下文（店名 + seller_id）—— 订单列表 / 详情共用。
+
+    ⚠️ ADR-021 后**店铺实体已退场**，「账号 = 店铺」1:1 ⇒ 店名取账号昵称
+    （`shop_binding_service.shop_display_name` **唯一实现**，与商品页同源）。
+    账号不存在（被删 / 传错 id）⇒ 返回空串（**不造店名**，硬约束⑤）。
+    """
+    from backend.app.services.shop_binding_service import shop_display_name
+
+    if not platform_account_id:
+        return {"shop_name": "", "seller_id": ""}
+    account = db.get(PlatformAccount, int(platform_account_id))
+    if account is None:
+        return {"shop_name": "", "seller_id": ""}
+    return {"shop_name": shop_display_name(account), "seller_id": account.seller_id or ""}
+
+
+def order_summary(
+    db: Session,
+    order: Order,
+    *,
+    include_full: bool = False,
+    shop_name: str = "",
+    seller_id: str = "",
+) -> dict[str, Any]:
+    """订单 → 列表/详情用的 dict。``include_full=True`` 才给完整履约值。
+
+    ## 店铺维度（2026-10-04 用户口径「订单模块也需要是店铺维度」）
+
+    店铺实体已退场（ADR-021）⇒「账号 = 店铺」1:1，店名取账号昵称
+    （`shop_binding_service.shop_display_name` 唯一实现）。`shop_name` /
+    `seller_id` 由**调用方批量预取**后传入，不在本函数里逐行查账号
+    （列表 N 行 ⇒ N 次查库 = N+1 查询）。
+    """
     items = db.scalars(
         select(OrderItem).where(OrderItem.order_id == order.id).order_by(OrderItem.id.asc())
     ).all()
@@ -938,6 +970,9 @@ def order_summary(db: Session, order: Order, *, include_full: bool = False) -> d
         "order_no": order.order_no,
         "package_id": order.package_id,
         "platform_account_id": order.platform_account_id,
+        #: 店铺维度（设计 16 §7.2；ADR-021 后账号 = 店铺）—— 商品页同口径。
+        "shop_name": shop_name,
+        "seller_id": seller_id,
         "type_desc": order.type_desc,
         "buyer_nick": order.buyer_nick,
         "receiver_name": order.receiver_name_full if full else mask_sensitive(order.receiver_name_full),
@@ -1076,11 +1111,25 @@ def list_orders(
         .offset(max((page - 1) * page_size, 0))
         .limit(page_size)
     ).all()
+    #: 店铺维度上下文（批量预取一次，不在 order_summary 里逐行查账号）。
+    shop_ctx = _shop_context(db, platform_account_id)
     return {
         "total": int(total),
         "page": page,
         "page_size": page_size,
-        "items": [order_summary(db, row, include_full=include_full) for row in rows],
+        "shop_name": shop_ctx.get("shop_name", ""),
+        "seller_id": shop_ctx.get("seller_id", ""),
+        "platform_account_id": int(platform_account_id) if platform_account_id else None,
+        "items": [
+            order_summary(
+                db,
+                row,
+                include_full=include_full,
+                shop_name=shop_ctx.get("shop_name", ""),
+                seller_id=shop_ctx.get("seller_id", ""),
+            )
+            for row in rows
+        ],
     }
 
 

@@ -671,3 +671,115 @@ class TestPlatformMayAlreadyMask:
         # 关键：二次脱敏**不增加**遮罩数量（幂等）
         assert twice == once, f"脱敏不幂等：{once!r} → {twice!r}"
         assert "189" in twice, "首位信息被抹掉了"
+
+
+# --------------------------------------------------------------------------- #
+# 店铺维度（2026-10-04 用户口径「订单模块也需要是店铺维度」）
+# --------------------------------------------------------------------------- #
+
+
+class TestShopDimension:
+    """订单模块必须有**店铺维度**（与商品页同口径）。
+
+    ## 口径（ADR-021 之后）
+
+    店铺实体已退场，**「账号 = 店铺」1:1** ⇒ 店名取自账号昵称
+    （`shop_binding_service.shop_display_name` **唯一实现**，商品页同源）。
+    订单列表 / 详情都要下发 `shop_name` / `seller_id`，让「这单属于哪个店」
+    在页面上有一等表达（而不是只给一个 `platform_account_id`）。
+    """
+
+    def test_list_orders_exposes_shop_name_and_seller_id(self, db, account):
+        """列表返回体带 `shop_name` / `seller_id`（店铺维度由**后端下发**）。"""
+        account.nickname = "观隅好物"
+        account.seller_id = "6a3250e427a0000000000000"
+        db.commit()
+        svc.upsert_order(db, _normalized("O-SHOP-1"), account_id=account.id)
+
+        result = svc.list_orders(db, user_id=2, platform_account_id=account.id)
+        assert result["shop_name"] == "观隅好物"
+        assert result["seller_id"] == "6a3250e427a0000000000000"
+
+    def test_order_rows_carry_shop_name(self, db, account):
+        """**每一行**也带店铺名（前端表格 / 导出不再靠 `platform_account_id` 猜）。"""
+        account.nickname = "蜜柚事集"
+        db.commit()
+        svc.upsert_order(db, _normalized("O-SHOP-2"), account_id=account.id)
+
+        result = svc.list_orders(db, user_id=2, platform_account_id=account.id)
+        row = next(r for r in result["items"] if r["order_no"] == "O-SHOP-2")
+        assert row["shop_name"] == "蜜柚事集"
+        assert row["platform_account_id"] == account.id
+
+    def test_shop_name_is_empty_when_account_missing_not_invented(self, db):
+        """账号不存在（被删 / 非法 id）⇒ 空串，**不造店名**（硬约束⑤）。"""
+        ctx = svc._shop_context(db, 999999)
+        assert ctx["shop_name"] == ""
+        assert ctx["seller_id"] == ""
+
+    def test_shop_name_never_falls_back_to_another_account(self, db, account):
+        """查不到账号时**不得回落**到别的店名 —— 宁可空，不可张冠李戴。"""
+        svc.upsert_order(db, _normalized("O-SHOP-3"), account_id=account.id)
+        # 用一个不存在的账号 id 查上下文（不是回落到 account 7 的店名）
+        ctx = svc._shop_context(db, 999998)
+        assert ctx["shop_name"] != (account.nickname or "").strip() or ctx["shop_name"] == ""
+
+    def test_detail_exposes_shop_name(self, db, account):
+        """详情返回体同样带店铺名（页面「店铺」区在详情里也对得上）。"""
+        account.nickname = "观隅好物"
+        db.commit()
+        order = svc.upsert_order(db, _normalized("O-SHOP-4"), account_id=account.id)
+        ctx = svc._shop_context(db, account.id)
+        summary = svc.order_summary(
+            db, order, shop_name=ctx["shop_name"], seller_id=ctx["seller_id"]
+        )
+        assert summary["shop_name"] == "观隅好物"
+
+    def test_shop_display_name_is_the_single_implementation(self):
+        """店名口径**只有一份实现**（商品页与订单页共用，DEF-044）。
+
+        ⚠️ 变异：API 层再写一份 `(account.nickname or "").strip()`
+        ⇒ 判定它没有委托给服务层 ⇒ 本用例必红。
+        """
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[2]
+        qianfan_src = (
+            root / "backend" / "app" / "api" / "platforms" / "xhs" / "qianfan.py"
+        ).read_text(encoding="utf-8")
+        binding_src = (
+            root / "backend" / "app" / "services" / "shop_binding_service.py"
+        ).read_text(encoding="utf-8")
+
+        assert "def shop_display_name" in binding_src, "服务层必须有唯一实现"
+        # API 层的 _shop_display_name 必须**委托**，不许自己 strip
+        assert "shop_display_name(account)" in qianfan_src
+        assert 'return (account.nickname or "").strip()' not in qianfan_src, (
+            "API 层又写了一份店名口径（两份实现）"
+        )
+
+
+class TestShopDimensionEndpointWiring:
+    """端点必须**透传**服务层的店铺字段，不许自己另拼一份（回归守卫）。
+
+    ⚠️ 实测踩过：`/orders` 端点最初自己算 `shop_name` 却**丢掉 `seller_id`**
+    ⇒ 返回恒 `None`（而账号明明有 `seller_id`）。根因是「端点又拼一遍」——
+    这种「同一件事两份实现」的漏字段是静默的（页面只是少一列，不报错）。
+    """
+
+    def test_orders_endpoint_passes_through_seller_id(self):
+        """源码守卫：`/orders` 返回体不得自己调 `_shop_display_name`。"""
+        from pathlib import Path
+
+        src = (
+            Path(__file__).resolve().parents[2]
+            / "backend" / "app" / "api" / "platforms" / "xhs" / "qianfan.py"
+        ).read_text(encoding="utf-8")
+
+        # 订单列表端点的返回体块必须引用 result["shop_name"] / result["seller_id"]
+        assert '"shop_name": result["shop_name"]' in src, (
+            "订单列表端点没有透传服务层的 shop_name（自己拼 = 会漏字段）"
+        )
+        assert '"seller_id": result["seller_id"]' in src, (
+            "订单列表端点漏传 seller_id（实测曾恒 None）"
+        )

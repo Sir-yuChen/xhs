@@ -86,6 +86,14 @@ export function OrdersPage() {
 
   const [rows, setRows] = useState<OrderRow[]>([]);
   const [total, setTotal] = useState(0);
+  /**
+   * **所属店铺**（2026-10-04 用户口径「订单模块也需要是店铺维度」）。
+   *
+   * ⚠️ ADR-021 后店铺实体已退场，「账号 = 店铺」1:1 —— 店名由**后端下发**
+   * （`list_orders` 的 `shop_name`），前端不自己拼（账号名 ≠ 店名，且口径要
+   * 与商品页同一份实现）。空串 = 后端未给（账号被删 / 非法 id）⇒ 渲染 `-`。
+   */
+  const [shopName, setShopName] = useState("");
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -134,6 +142,7 @@ export function OrdersPage() {
         ]);
         setRows(list.items ?? []);
         setTotal(list.total ?? 0);
+        setShopName(list.shop_name ?? "");
         setMetrics(m);
       } catch (error) {
         message.error(`订单列表加载失败：${(error as Error).message}`);
@@ -357,11 +366,14 @@ export function OrdersPage() {
           <Space wrap>
             <Select
               style={{ width: 200 }}
-              placeholder="账号"
+              placeholder="店铺 / 账号"
               value={accountId ?? undefined}
               onChange={(value) => setAccountId(value)}
               options={Object.entries(accounts).map(([id, name]) => ({
                 value: Number(id),
+                // 店铺维度（2026-10-04 用户口径）：账号 = 店铺 1:1，店名即账号名
+                // （ADR-021 后店名取自账号昵称）⇒ 下拉文案标注「店铺」，让用户
+                // 一眼看出这个筛选是按店维度的。
                 label: name,
               }))}
             />
@@ -394,6 +406,15 @@ export function OrdersPage() {
           </Space>
         }
       >
+        {/* 店铺维度（2026-10-04 用户口径「订单模块也需要是店铺维度」）：
+            与商品页同一口径 —— ADR-021 后店铺实体退场、账号 = 店铺 1:1，
+            店名由后端下发（前端不自己拼）。空 ⇒ `-`（缺值口径）。 */}
+        <Descriptions size="small" column={2} style={{ marginBottom: 8 }}>
+          <Descriptions.Item label="店铺">{shopName || "-"}</Descriptions.Item>
+          <Descriptions.Item label="订单来源">
+            本地台账（同步订单任务落库 · 数据归属该店铺）
+          </Descriptions.Item>
+        </Descriptions>
         <Table<OrderRow>
           rowKey="id"
           size="small"
