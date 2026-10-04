@@ -328,10 +328,13 @@ def test_progress_pump_writes_while_running_and_never_overwrites_terminal(db_fac
         db.close()
 
     readings = iter([40, 40, 80])
-    pump = scheduled_job_runner._ProgressPump(log_id, lambda: next(readings, 80), interval=0.05)
+    # ⚠️ 间隔必须**显著长于一次采样的开销**（采样 = 建库 + 查询 + 关库，高负载下可 >100ms）。
+    #    原先取 0.05s 时，全量并发跑会整段跳过 40 直接看到 80（DEF-092：实测 `实得 [0, 80]`）——
+    #    不是泵没写中间值，而是**测试没来得及采样**。0.5s 让「中间值窗口」稳稳覆盖采样周期。
+    pump = scheduled_job_runner._ProgressPump(log_id, lambda: next(readings, 80), interval=0.5)
     pump.start()
     try:
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 10
         seen: list[int] = []
         while time.monotonic() < deadline:
             db = db_factory()
@@ -343,7 +346,7 @@ def test_progress_pump_writes_while_running_and_never_overwrites_terminal(db_fac
                 seen.append(value)
             if value == 80:
                 break
-            time.sleep(0.02)
+            time.sleep(0.05)
         assert 40 in seen, f"运行期间应写入中间进度（泵在写 running 行），实得 {seen}"
         assert seen[-1] == 80
     finally:
