@@ -3275,6 +3275,120 @@ export async function fetchItemGenerations(payload: {
 }
 
 // ---------------------------------------------------------------------------
+// 订单二期写操作（设计 16 §7.4，M7）—— **真实平台写、不可撤回**
+//
+// ⚠️ 两层确认：`confirmed` + `confirm_token`（预览接口下发的内容指纹）。
+// 前端**必须先调 preview** 拿 token，用户确认后原样回传 —— 不自己算 token。
+// ---------------------------------------------------------------------------
+
+export interface OrderWritePreviewParams {
+  platformAccountId: number;
+  kind: "ship" | "ship_batch" | "after_sale";
+  orderNo?: string;
+  items?: Array<{ order_no: string; company_code?: string; tracking_no?: string }>;
+  afterSaleId?: string;
+  action?: "agree" | "reject";
+  rejectReason?: string;
+  companyCode?: string;
+  trackingNo?: string;
+}
+
+export interface OrderWritePreviewResult {
+  platform_account_id: number;
+  shop_name: string;
+  kind: string;
+  count: number;
+  /** 二次确认凭据 —— 原样回传给写端点。 */
+  confirm_token: string;
+  items: Array<Record<string, unknown>>;
+}
+
+/** 写操作预览（**纯本地、零平台请求**）：拿影响面 + 二次确认凭据。 */
+export async function previewOrderWrite(
+  params: OrderWritePreviewParams,
+): Promise<OrderWritePreviewResult> {
+  const response = await http.post<OrderWritePreviewResult>("/xhs/qianfan/orders/ship/preview", {
+    platform_account_id: params.platformAccountId,
+    kind: params.kind,
+    order_no: params.orderNo ?? "",
+    items: params.items ?? [],
+    after_sale_id: params.afterSaleId ?? "",
+    action: params.action ?? "",
+    reject_reason: params.rejectReason ?? "",
+    company_code: params.companyCode ?? "",
+    tracking_no: params.trackingNo ?? "",
+  });
+  return response.data;
+}
+
+/** **单笔发货**（真实写、不可撤回）。 */
+export async function shipOrder(payload: {
+  platformAccountId: number;
+  orderNo: string;
+  companyCode: string;
+  trackingNo: string;
+  confirmToken: string;
+}): Promise<Record<string, unknown>> {
+  const response = await http.post<{ result: Record<string, unknown> }>(
+    "/xhs/qianfan/orders/ship",
+    {
+      platform_account_id: payload.platformAccountId,
+      order_no: payload.orderNo,
+      company_code: payload.companyCode,
+      tracking_no: payload.trackingNo,
+      confirmed: true,
+      confirm_token: payload.confirmToken,
+    },
+  );
+  return response.data.result;
+}
+
+export interface OrderBatchShipResult {
+  requested: number;
+  succeeded: Array<{ order_no: string; tracking_no?: string }>;
+  failed: Array<{ order_no: string; code: string; message: string; current_status?: string }>;
+  succeeded_count: number;
+  failed_count: number;
+}
+
+/** **批量发货**（真实写、不可撤回；回执分层）。 */
+export async function shipOrdersBatch(payload: {
+  platformAccountId: number;
+  items: Array<{ order_no: string; company_code: string; tracking_no: string }>;
+  confirmToken: string;
+}): Promise<OrderBatchShipResult> {
+  const response = await http.post<OrderBatchShipResult>("/xhs/qianfan/orders/ship-batch", {
+    platform_account_id: payload.platformAccountId,
+    items: payload.items,
+    confirmed: true,
+    confirm_token: payload.confirmToken,
+  });
+  return response.data;
+}
+
+/** **售后审核**（同意 / 拒绝；真实写、不可撤回）。 */
+export async function handleAfterSale(payload: {
+  platformAccountId: number;
+  afterSaleId: string;
+  action: "agree" | "reject";
+  rejectReason?: string;
+  confirmToken: string;
+}): Promise<Record<string, unknown>> {
+  const response = await http.post<{ result: Record<string, unknown> }>(
+    "/xhs/qianfan/after-sales/handle",
+    {
+      platform_account_id: payload.platformAccountId,
+      after_sale_id: payload.afterSaleId,
+      action: payload.action,
+      reject_reason: payload.rejectReason ?? "",
+      confirmed: true,
+      confirm_token: payload.confirmToken,
+    },
+  );
+  return response.data.result;
+}
+
+// ---------------------------------------------------------------------------
 // 自动化工作流（设计 19 / M5，11 个端点）
 //
 // ⚠️ 路径前缀是 `/platforms/xhs/`（不是 `/xhs/`）—— 抄路径前先看 router 声明。

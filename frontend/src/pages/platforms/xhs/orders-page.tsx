@@ -25,6 +25,7 @@ import {
   SyncOutlined,
 } from "@ant-design/icons";
 import {
+  Alert,
   App,
   Button,
   Card,
@@ -32,6 +33,7 @@ import {
   Descriptions,
   Drawer,
   Input,
+  Modal,
   Row,
   Select,
   Space,
@@ -52,10 +54,23 @@ import {
   fetchOrderDetail,
   fetchOrderMetrics,
   fetchOrders,
+  handleAfterSale,
+  previewOrderWrite,
   saveOrderRemark,
+  shipOrder,
+  shipOrdersBatch,
   syncOrders,
 } from "../../../lib/api";
 import type { OrderMetrics, OrderRow } from "../../../lib/api";
+import {
+  afterSaleConfirmText,
+  batchShipBlockReason,
+  canHandleAfterSale,
+  canShipOrder,
+  LOGISTICS_COMPANIES,
+  shipConfirmText,
+  shipOutcomeText,
+} from "../../../lib/order-write";
 import { accountNameMap } from "../../../lib/task-records";
 import type { AccountNameMap } from "../../../lib/task-records";
 import {
@@ -102,6 +117,26 @@ export function OrdersPage() {
   const [detail, setDetail] = useState<OrderRow | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [remarkDraft, setRemarkDraft] = useState("");
+
+  /**
+   * M7 发货 / 售后（**真实平台写、不可撤回**）。
+   *
+   * ⚠️ 流程固定为：`previewOrderWrite`（拿 confirm_token）→ 用户确认 →
+   * 原样回传 token 调写端点。**前端不自己算 token**（那是后端的口径）。
+   */
+  const [shipTarget, setShipTarget] = useState<OrderRow | null>(null);
+  const [shipOpen, setShipOpen] = useState(false);
+  const [shipCompany, setShipCompany] = useState(LOGISTICS_COMPANIES[0]?.code ?? "SF");
+  const [shipTracking, setShipTracking] = useState("");
+  const [shipSubmitting, setShipSubmitting] = useState(false);
+  const [afterSaleTarget, setAfterSaleTarget] = useState<{
+    orderNo: string;
+    afterSaleId: string;
+    amount?: number | null;
+  } | null>(null);
+  const [afterSaleOpen, setAfterSaleOpen] = useState(false);
+  const [afterSaleReason, setAfterSaleReason] = useState("");
+  const [afterSaleSubmitting, setAfterSaleSubmitting] = useState(false);
 
   // 账号清单（只放账号名，与账号下拉同口径；不随筛选重复拉）
   useEffect(() => {
@@ -159,7 +194,84 @@ export function OrdersPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountId, status, includeFull]);
 
-  const onSync = async () => {
+    /**
+   * **发货**（M7，真实写、不可撤回）。
+   *
+   * ⚠️ 顺序：预览拿 token → 弹窗二次确认 → 原样回传 token 调写端点。
+   * 前端不自己算 token（那是后端口径），也不吞平台原文（失败原因原样展示）。
+   */
+  const doShip = async () => {
+    if (!accountId || !shipTarget) return;
+    setShipSubmitting(true);
+    try {
+      const preview = await previewOrderWrite({
+        platformAccountId: accountId,
+        kind: "ship",
+        orderNo: shipTarget.order_no,
+        companyCode: shipCompany,
+        trackingNo: shipTracking,
+      });
+      const result = await shipOrder({
+        platformAccountId: accountId,
+        orderNo: shipTarget.order_no,
+        companyCode: shipCompany,
+        trackingNo: shipTracking,
+        confirmToken: preview.confirm_token,
+      });
+      message.success(`已发货：${shipTarget.order_no}`);
+      setShipOpen(false);
+      setShipTarget(null);
+      setShipTracking("");
+      void load(page);
+      // 平台原文一并带出（可追溯）
+      if (result?.platform_message) {
+        message.info(String(result.platform_message));
+      }
+    } catch (error) {
+      const text =
+        (error as { response?: { data?: { detail?: { message?: string } } } })?.response?.data
+          ?.detail?.message ?? (error as Error).message;
+      message.error(`发货失败：${text}`);
+    } finally {
+      setShipSubmitting(false);
+    }
+  };
+
+  /** **售后审核**（M7，真实写、不可撤回）—— 同意 / 拒绝都走这里。 */
+  const doHandleAfterSale = async (action: "agree" | "reject") => {
+    if (!accountId || !afterSaleTarget) return;
+    setAfterSaleSubmitting(true);
+    try {
+      const preview = await previewOrderWrite({
+        platformAccountId: accountId,
+        kind: "after_sale",
+        afterSaleId: afterSaleTarget.afterSaleId,
+        action,
+        rejectReason: afterSaleReason,
+      });
+      await handleAfterSale({
+        platformAccountId: accountId,
+        afterSaleId: afterSaleTarget.afterSaleId,
+        action,
+        rejectReason: afterSaleReason,
+        confirmToken: preview.confirm_token,
+      });
+      message.success(action === "reject" ? "已拒绝该售后" : "已同意该售后");
+      setAfterSaleOpen(false);
+      setAfterSaleTarget(null);
+      setAfterSaleReason("");
+      void load(page);
+    } catch (error) {
+      const text =
+        (error as { response?: { data?: { detail?: { message?: string } } } })?.response?.data
+          ?.detail?.message ?? (error as Error).message;
+      message.error(`处理失败：${text}`);
+    } finally {
+      setAfterSaleSubmitting(false);
+    }
+  };
+
+const onSync = async () => {
     if (!accountId) return;
     setSyncing(true);
     try {
@@ -287,6 +399,62 @@ export function OrdersPage() {
       dataIndex: "created_at",
       width: 120,
       render: (value: string) => timeText(value),
+    },
+    {
+      // M7 写操作入口（设计 16 §7.4）：**仅目标状态才渲染按钮** ——
+      // 非待发货 / 非待处理不给假入口（点了才知道不行是坏体验，也是坏设计）。
+      // ⚠️ 前端不渲染 ≠ 后端放行：后端仍会再判一次（两处各自承担自己的职责）。
+      title: "操作",
+      key: "action",
+      width: 150,
+      render: (_: unknown, row) => {
+        const pendingAfterSale = (row.after_sales ?? []).find(
+          (item) => item.status === "待处理",
+        );
+        return (
+          <Space size={4} wrap>
+            {canShipOrder(row.status) ? (
+              <Tooltip title="对这笔真实订单执行发货（不可撤回，需二次确认）">
+                <Button
+                  type="link"
+                  size="small"
+                  style={{ padding: 0 }}
+                  onClick={() => {
+                    setShipTarget(row);
+                    setShipOpen(true);
+                  }}
+                >
+                  发货
+                </Button>
+              </Tooltip>
+            ) : null}
+            {pendingAfterSale && canHandleAfterSale(pendingAfterSale.status) ? (
+              <Tooltip title="处理这条售后（同意 / 拒绝，不可撤回）">
+                <Button
+                  type="link"
+                  size="small"
+                  style={{ padding: 0 }}
+                  onClick={() => {
+                    setAfterSaleTarget({
+                      orderNo: row.order_no,
+                      afterSaleId: String(pendingAfterSale.after_sale_id ?? ""),
+                      amount: pendingAfterSale.amount ?? null,
+                    });
+                    setAfterSaleOpen(true);
+                  }}
+                >
+                  售后
+                </Button>
+              </Tooltip>
+            ) : null}
+            {!canShipOrder(row.status) && !pendingAfterSale ? (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                -
+              </Text>
+            ) : null}
+          </Space>
+        );
+      },
     },
   ];
 
@@ -541,11 +709,101 @@ export function OrdersPage() {
             </Card>
 
             <Paragraph type="secondary" style={{ margin: 0, fontSize: 12 }}>
-              一期只读：发货、改价、售后审核属平台写操作，未授权，本页不提供。
+              发货与售后审核是**真实平台写操作、不可撤回**（M7，2026-10-04 门禁已解除）：
+            仅对「待发货」/「待处理」的行给出入口，且必须经二次确认；改价等其余写操作仍未授权。
             </Paragraph>
           </div>
         ) : null}
       </Drawer>
+      {/* M7：**发货二次确认**（真实写、不可撤回）—— 用户必须看到影响面再确认。 */}
+      <Modal
+        centered
+        open={shipOpen}
+        title={`发货确认 · ${shipTarget?.order_no ?? ""}`}
+        okText="确认发货（不可撤回）"
+        cancelText="取消"
+        okButtonProps={{ danger: true, loading: shipSubmitting }}
+        onOk={() => void doShip()}
+        onCancel={() => {
+          setShipOpen(false);
+          setShipTarget(null);
+        }}
+      >
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="这是对真实订单的发货操作，提交后不可撤回。"
+          description={shipConfirmText([
+            { order_no: shipTarget?.order_no ?? "", tracking_no: shipTracking },
+          ])}
+        />
+        <Space direction="vertical" style={{ width: "100%" }}>
+          <Text>物流公司</Text>
+          <Select
+            style={{ width: "100%" }}
+            value={shipCompany}
+            onChange={(value) => setShipCompany(value)}
+            options={LOGISTICS_COMPANIES.map((c) => ({ value: c.code, label: c.name }))}
+          />
+          <Text>运单号</Text>
+          <Input
+            value={shipTracking}
+            onChange={(event) => setShipTracking(event.target.value)}
+            placeholder="请输入运单号"
+          />
+        </Space>
+      </Modal>
+
+      {/* M7：**售后处理**（真实写、不可撤回）—— 同意 / 拒绝各自独立确认。 */}
+      <Modal
+        centered
+        open={afterSaleOpen}
+        title="售后处理确认"
+        footer={null}
+        onCancel={() => {
+          setAfterSaleOpen(false);
+          setAfterSaleTarget(null);
+        }}
+      >
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="售后处理是对真实售后单的操作，提交后不可撤回。"
+          description={afterSaleConfirmText(
+            "agree",
+            afterSaleTarget?.afterSaleId ?? "",
+            afterSaleTarget?.amount ?? null,
+          )}
+        />
+        <Space direction="vertical" style={{ width: "100%" }}>
+          <Text>拒绝理由（选择拒绝时必填）</Text>
+          <Input.TextArea
+            value={afterSaleReason}
+            onChange={(event) => setAfterSaleReason(event.target.value)}
+            rows={2}
+            placeholder="例如：商品已拆封，不符合退货条件"
+          />
+          <Space>
+            <Button
+              type="primary"
+              loading={afterSaleSubmitting}
+              onClick={() => void doHandleAfterSale("agree")}
+            >
+              同意售后（不可撤回）
+            </Button>
+            <Button
+              danger
+              loading={afterSaleSubmitting}
+              disabled={!afterSaleReason.trim()}
+              onClick={() => void doHandleAfterSale("reject")}
+            >
+              拒绝售后（不可撤回）
+            </Button>
+          </Space>
+        </Space>
+      </Modal>
     </div>
   );
 }

@@ -305,6 +305,59 @@ class XHS_Qianfan_Apis:
             "/app-item/list/shelf",
         )
 
+    # ------------------------------------------------------------------ #
+    # 订单二期写操作（设计 16 §7.4，M7）—— **真实平台写链路、不可撤回**
+    #
+    # ⚠️ 与发布（`publish_note`）同性质：仅限**用户本人店铺**、**用户显式点击
+    # 触发**（每次独立二次确认）。**绝不自动触发**（不进定时任务 / 工作流）。
+    #
+    # ⚠️ **端点存在性已证实**（2026-10-04 只读探测，设计 16 §7.4.1），但
+    # **精确请求体 schema 未取证** —— 只读抓不到提交体 ⇒ 下面这些 `body`
+    # 是**按探测到的端点名 + 页面字段名的最优推断**，首次真实发货前必须
+    # 用一笔真实订单核对（`probe_m7_ship_endpoints.py` 的后续步骤）。
+    # ------------------------------------------------------------------ #
+
+    def pre_check_before_delivery(self, body: dict) -> tuple[bool, str, dict | None]:
+        """发货前校验（`POST /api/edith/fulfillment/pre_check_before_delivery`）。
+
+        只读语义的**预检**（不落任何状态）—— 真实发货前先问平台「这单能不能发」，
+        避免「点了发货才发现不可发」。响应 `code=0` 即通过。
+        """
+        return self._post(
+            "/api/edith/fulfillment/pre_check_before_delivery",
+            body if isinstance(body, dict) else {},
+            "/app-fulfillment-order/order/shipping",
+            timeout=WRITE_TIMEOUT,
+        )
+
+    def single_online_delivery(self, body: dict) -> tuple[bool, str, dict | None]:
+        """**单个订单发货**（`POST /api/edith/fulfillment/single_online_delivery`）。
+
+        ⚠️ **真实写操作、不可撤回** —— 调用前必须已完成显式 + 二次确认。
+
+        `body` 字段（按页面字段名推断，**首发时核对**）：`package_id`（包裹 id）、
+        `express_company_code`（物流公司编码）、`express_no`（运单号）等。
+        """
+        return self._post(
+            "/api/edith/fulfillment/single_online_delivery",
+            body if isinstance(body, dict) else {},
+            "/app-fulfillment-order/order/shipping",
+            timeout=WRITE_TIMEOUT,
+        )
+
+    def after_sale_audit(self, body: dict) -> tuple[bool, str, dict | None]:
+        """**售后审核**（`POST /api/edith/after-sales/audit/`）—— 同意 / 拒绝。
+
+        ⚠️ **真实写操作、不可撤回**。`body` 字段（推断，**首发时核对**）：
+        `after_sale_id`、`audit_type`（同意/拒绝）、`reject_reason` 等。
+        """
+        return self._post(
+            "/api/edith/after-sales/audit/",
+            body if isinstance(body, dict) else {},
+            "/app-fulfillment-aftersale",
+            timeout=WRITE_TIMEOUT,
+        )
+
     def search_items(
         self,
         *,

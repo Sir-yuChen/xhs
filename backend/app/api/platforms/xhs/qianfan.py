@@ -55,7 +55,7 @@ from backend.app.services.material_scan_service import is_safe_material_path
 from backend.app.services.media_generation import _media_dir
 from backend.app.models.platform_account import PlatformAccount
 from backend.app.models.note import Note, NoteAsset
-from backend.app.models.order import Order
+from backend.app.models.order import AfterSale, Order
 from backend.app.models.shop import NoteGoods
 from backend.app.models.task import Task
 from backend.app.services.shop_health_service import check_account_health
@@ -2722,3 +2722,365 @@ def order_metrics_endpoint(
 
 def payload_metrics_account_id(account: PlatformAccount) -> int:
     return account.id
+
+
+# --------------------------------------------------------------------------- #
+# 订单二期写操作（设计 16 §7.4，M7 方向 6）—— **真实平台写、不可撤回**
+#
+# ⚠️ 端点存在性已证实（§7.4.1 只读探测，2026-10-04）；**请求体 schema 待首发核对**。
+# ⚠️ 与发布（`note/publish`）同性质：仅限本人店铺 + 用户**显式点击**触发，
+#    **两层确认**缺一不可，且**不进定时任务 / 不进工作流**（绝不自动触发）。
+# --------------------------------------------------------------------------- #
+
+
+class OrderShipRequest(BaseModel):
+    """**单个订单发货**（设计 16 §7.4 A；真实写、不可撤回）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    platform_account_id: int = Field(..., description="账号矩阵里的账号 id")
+    order_no: str = Field(..., min_length=1, description="平台订单号")
+    company_code: str = Field("", description="物流公司编码（express_company_code）")
+    tracking_no: str = Field("", description="运单号（express_no）")
+    confirmed: bool = Field(False, description="第一层确认：用户已知这是真实写操作")
+    confirm_token: str = Field("", description="第二层确认：预览接口下发的指纹，原样回传")
+
+
+class OrderShipBatchItem(BaseModel):
+    """批量发货的一条（订单号 + 各自物流 / 运单号）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    order_no: str = Field(..., min_length=1)
+    company_code: str = Field("")
+    tracking_no: str = Field("")
+
+
+class OrderShipBatchRequest(BaseModel):
+    """**批量发货**（设计 16 §7.4 A.2/A.6）—— 一次确认覆盖整批。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    platform_account_id: int = Field(..., description="账号矩阵里的账号 id")
+    items: list[OrderShipBatchItem] = Field(default_factory=list)
+    confirmed: bool = Field(False)
+    confirm_token: str = Field("")
+
+
+class AfterSaleHandleRequest(BaseModel):
+    """**售后审核**（设计 16 §7.4 B；真实写、不可撤回）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    platform_account_id: int = Field(..., description="账号矩阵里的账号 id")
+    after_sale_id: str = Field(..., min_length=1, description="千帆售后单 ID")
+    action: str = Field(..., description="agree（同意）/ reject（拒绝）")
+    reject_reason: str = Field("", description="拒绝理由（action=reject 时必填）")
+    confirmed: bool = Field(False)
+    confirm_token: str = Field("")
+
+
+class OrderWritePreviewRequest(BaseModel):
+    """**写操作预览**（算二次确认凭据；**纯本地、零平台请求**）。
+
+    前端在确认弹窗里先调它拿到 `confirm_token` + 影响面，用户确认后原样带回。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    platform_account_id: int = Field(..., ge=1)
+    kind: str = Field(..., description="ship / ship_batch / after_sale")
+    order_no: str = Field("", description="单笔发货的目标单号")
+    items: list[OrderShipBatchItem] = Field(default_factory=list, description="批量发货用")
+    after_sale_id: str = Field("", description="售后审核用")
+    action: str = Field("", description="售后审核动作")
+    reject_reason: str = Field("")
+    company_code: str = Field("")
+    tracking_no: str = Field("")
+
+
+def _order_write_error_to_http(error: Any) -> HTTPException:
+    """`OrderWriteError` → HTTP（结构化）。门禁类 400，找不到类 404。"""
+    from backend.app.services.order_write_service import OrderWriteError
+
+    if not isinstance(error, OrderWriteError):  # pragma: no cover
+        return HTTPException(status_code=500, detail={"code": "INTERNAL", "message": str(error)})
+    not_found = {"ORDER_NOT_FOUND", "ORDER_AFTERSALE_NOT_FOUND"}
+    code = status.HTTP_404_NOT_FOUND if error.code in not_found else status.HTTP_400_BAD_REQUEST
+    return HTTPException(status_code=code, detail={"code": error.code, "message": str(error), **error.extra})
+
+
+def _owned_order(db: Session, current_user: User, account_id: int, order_no: str) -> Order:
+    """取本账号的一笔订单（越权 / 不存在 ⇒ 404，不区分二者）。"""
+    from backend.app.services.order_write_service import OrderWriteError
+
+    order = db.scalars(
+        select(Order).where(
+            Order.user_id == current_user.id,
+            Order.platform_account_id == account_id,
+            Order.order_no == str(order_no or "").strip(),
+        )
+    ).first()
+    if order is None:
+        raise OrderWriteError(f"订单不存在或不属于当前账号：{order_no}", code="ORDER_NOT_FOUND")
+    return order
+
+
+def _owned_after_sale(db: Session, current_user: User, account_id: int, after_sale_id: str) -> Any:
+    """取本账号的一条售后单（越权 / 不存在 ⇒ 404）。"""
+    from backend.app.services.order_write_service import OrderWriteError
+
+    row = db.scalars(
+        select(AfterSale)
+        .join(Order, Order.id == AfterSale.order_id)
+        .where(
+            AfterSale.user_id == current_user.id,
+            AfterSale.after_sale_id == str(after_sale_id or "").strip(),
+            Order.platform_account_id == account_id,
+        )
+    ).first()
+    if row is None:
+        raise OrderWriteError(
+            f"售后单不存在或不属于当前账号：{after_sale_id}", code="ORDER_AFTERSALE_NOT_FOUND"
+        )
+    return row
+
+
+def _ark_adapter_for(db: Session, account: PlatformAccount, factory: Any) -> Any:
+    """按账号取 ark 适配器（**不借会话**：拿不到令牌 ⇒ 结构化 400）。"""
+    from backend.app.services.shop_binding_service import qianfan_cookies_for_account
+
+    cookies = qianfan_cookies_for_account(db, account.id)
+    if not cookies:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "ARK_SESSION_REQUIRED",
+                "message": "该账号没有可用的千帆（ark）登录态，无法执行发货 / 售后。"
+                "先在账号矩阵导入其千帆登录态。",
+            },
+        )
+    return factory(account, cookies)
+
+
+@router.post("/orders/ship/preview")
+def order_ship_preview(
+    payload: OrderWritePreviewRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """**发货 / 售后预览**（纯本地、零平台请求）—— 算二次确认凭据 + 影响面。
+
+    前端在确认弹窗里先调它：拿到 `confirm_token` 与「将对哪几笔做什么」，
+    用户点「确认」后把 token 原样回传给真正的写端点。
+    ⚠️ 本端点**不校验状态门禁**（那是写端点的事），只做「内容 → 指纹」。
+    """
+    from backend.app.services import order_write_service as ows
+
+    account = _owned_account(db, current_user, payload.platform_account_id)
+    kind = (payload.kind or "").strip()
+
+    if kind == "ship":
+        try:
+            order = _owned_order(db, current_user, account.id, payload.order_no)
+        except Exception as exc:  # noqa: BLE001
+            raise _order_write_error_to_http(exc) from exc
+        # ⚠️ 用**同一份素材构造**（`ows.ship_confirm_material`）算指纹 ——
+        # 这里另拼一份 = 预览下发的 token 永远过不了写端点的校验。
+        material = ows.ship_confirm_material(
+            order,
+            company_code=payload.company_code,
+            tracking_no=payload.tracking_no,
+        )
+        return {
+            "platform_account_id": account.id,
+            "shop_name": _shop_display_name(db, account),
+            "kind": kind,
+            "count": 1,
+            "confirm_token": ows.confirm_token_for(material),
+            "items": [material],
+        }
+
+    if kind == "ship_batch":
+        specs = []
+        for raw in payload.items:
+            try:
+                order = _owned_order(db, current_user, account.id, raw.order_no)
+            except Exception as exc:  # noqa: BLE001
+                raise _order_write_error_to_http(exc) from exc
+            specs.append(
+                {
+                    "order_no": order.order_no,
+                    "package_id": order.package_id,
+                    "company_code": raw.company_code,
+                    "tracking_no": raw.tracking_no,
+                }
+            )
+        material = ows.batch_ship_confirm_material(specs)
+        return {
+            "platform_account_id": account.id,
+            "shop_name": _shop_display_name(db, account),
+            "kind": kind,
+            "count": len(specs),
+            "confirm_token": ows.confirm_token_for(material),
+            "items": specs,
+        }
+
+    if kind == "after_sale":
+        try:
+            row = _owned_after_sale(db, current_user, account.id, payload.after_sale_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _order_write_error_to_http(exc) from exc
+        material = ows.after_sale_confirm_material(
+            row, action=payload.action, reject_reason=payload.reject_reason
+        )
+        return {
+            "platform_account_id": account.id,
+            "shop_name": _shop_display_name(db, account),
+            "kind": kind,
+            "count": 1,
+            "confirm_token": ows.confirm_token_for(material),
+            "items": [material],
+        }
+
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail={"code": "ORDER_WRITE_BAD_KIND", "message": f"不支持的预览类型：{kind}"},
+    )
+
+
+@router.post("/orders/ship")
+def order_ship(
+    payload: OrderShipRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    adapter_factory: Any = Depends(get_qianfan_api_adapter_factory),
+):
+    """**发货单笔订单**（设计 16 §7.4 A）—— **真实平台写、不可撤回**。
+
+    | 约定 | 做法 |
+    |---|---|
+    | 两层确认 | `confirmed=True` **且** `confirm_token` = 请求体指纹；缺一 ⇒ 400，**一次都不打平台** |
+    | 门禁 | 必须 `待发货`，否则 400 `ORDER_NOT_SHIPPABLE`，**一次都不打平台** |
+    | 归属 | 越权 / 不存在 ⇒ 404 |
+    | 失败 | 先 `rollback()`，状态与物流行都不变，原因原样带出可重试 |
+    | 自动触发 | **绝不**（不进定时任务 / 工作流） |
+    """
+    from backend.app.services import order_write_service as ows
+
+    account = _owned_account(db, current_user, payload.platform_account_id)
+    # ⚠️ 归属校验的 `OrderWriteError` 也要映射成 404（否则逃逸成 500，实测踩过）
+    try:
+        order = _owned_order(db, current_user, account.id, payload.order_no)
+    except Exception as exc:  # noqa: BLE001
+        raise _order_write_error_to_http(exc) from exc
+    # ⚠️ 适配器解析**在 try 之外**：拿不到 ark 令牌要回 400 结构化原因，
+    # 不能被下面的通用异常处理吞成 500（实测踩过）。
+    adapter = _ark_adapter_for(db, account, adapter_factory)
+    try:
+        result = ows.ship_order(
+            db,
+            adapter=adapter,
+            order=order,
+            company_code=payload.company_code,
+            tracking_no=payload.tracking_no,
+            confirmed=payload.confirmed,
+            confirm_token=payload.confirm_token,
+        )
+    except Exception as exc:  # noqa: BLE001 - 统一映射成结构化 HTTP
+        raise _order_write_error_to_http(exc) from exc
+    return {"platform_account_id": account.id, "source": "platform", "result": result}
+
+
+@router.post("/orders/ship-batch")
+def order_ship_batch(
+    payload: OrderShipBatchRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    adapter_factory: Any = Depends(get_qianfan_api_adapter_factory),
+):
+    """**批量发货**（设计 16 §7.4 A.2/A.6）—— 逐条独立、回执**分层**。
+
+    ⚠️ 上限 `MAX_BATCH_SHIP`（+ 前端同值）；空 ⇒ 400；去重保序（同 `items/delete`）。
+    一条失败不拖垮整批（`succeeded[]` / `failed[]` 各自带原因）。
+    """
+    from backend.app.services import order_write_service as ows
+
+    account = _owned_account(db, current_user, payload.platform_account_id)
+    seen: set[str] = set()
+    order_nos: list[str] = []
+    for raw in payload.items:
+        key = str(raw.order_no or "").strip()
+        if key and key not in seen:
+            seen.add(key)
+            order_nos.append(key)
+    if not order_nos:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "ORDER_SHIP_ITEMS_REQUIRED", "message": "没有选择要发货的订单。"},
+        )
+    if len(order_nos) > ows.MAX_BATCH_SHIP:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "ORDER_SHIP_ITEMS_TOO_MANY",
+                "message": f"单次最多发货 {ows.MAX_BATCH_SHIP} 笔，本次选了 {len(order_nos)} 笔。",
+                "limit": ows.MAX_BATCH_SHIP,
+            },
+        )
+    try:
+        orders = [_owned_order(db, current_user, account.id, no) for no in order_nos]
+    except Exception as exc:  # noqa: BLE001
+        raise _order_write_error_to_http(exc) from exc
+    adapter = _ark_adapter_for(db, account, adapter_factory)
+    specs = {
+        str(raw.order_no).strip(): {
+            "company_code": (raw.company_code or "").strip(),
+            "tracking_no": (raw.tracking_no or "").strip(),
+        }
+        for raw in payload.items
+        if str(raw.order_no or "").strip()
+    }
+    result = ows.ship_orders_batch(
+        db,
+        adapter_for=lambda order: adapter,
+        orders=orders,
+        specs_by_order_no=specs,
+        confirmed=payload.confirmed,
+        confirm_token=payload.confirm_token,
+    )
+    return {"platform_account_id": account.id, "source": "platform", **result}
+
+
+@router.post("/after-sales/handle")
+def after_sale_handle(
+    payload: AfterSaleHandleRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    adapter_factory: Any = Depends(get_qianfan_api_adapter_factory),
+):
+    """**售后审核**（同意 / 拒绝；设计 16 §7.4 B）—— **真实平台写、不可撤回**。
+
+    与发货同一把尺子：两层确认 → 门禁（必须 `待处理`）→ 打平台 → 落库。
+    """
+    from backend.app.services import order_write_service as ows
+
+    account = _owned_account(db, current_user, payload.platform_account_id)
+    try:
+        row = _owned_after_sale(db, current_user, account.id, payload.after_sale_id)
+    except Exception as exc:  # noqa: BLE001
+        raise _order_write_error_to_http(exc) from exc
+    adapter = _ark_adapter_for(db, account, adapter_factory)
+    try:
+        result = ows.handle_after_sale(
+            db,
+            adapter=adapter,
+            after_sale=row,
+            action=payload.action,
+            reject_reason=payload.reject_reason,
+            confirmed=payload.confirmed,
+            confirm_token=payload.confirm_token,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise _order_write_error_to_http(exc) from exc
+    return {"platform_account_id": account.id, "source": "platform", "result": result}

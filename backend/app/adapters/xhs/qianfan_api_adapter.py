@@ -142,6 +142,28 @@ class XhsQianfanApiAdapter:
         with direct_xhs_request_env():
             return self._api().get_after_sale_page(**kwargs)
 
+    # ------------------------------------------------------------------ #
+    # 订单二期写操作（M7，设计 16 §7.4）—— **真实平台写、不可撤回**
+    #
+    # ⚠️ 与发布（`publish_note`）同性质：仅限本人店铺 + 用户显式触发。
+    # 端点存在性已证实（§7.4.1 只读探测）；**请求体 schema 待首发核对**。
+    # ------------------------------------------------------------------ #
+
+    def pre_check_before_delivery(self, body: Any) -> tuple[bool, str, Any]:
+        """发货前预检（只读语义，不落状态）。"""
+        with direct_xhs_request_env():
+            return self._api().pre_check_before_delivery(body)
+
+    def single_online_delivery(self, body: Any) -> tuple[bool, str, Any]:
+        """**单个订单发货**（真实写、不可撤回）。"""
+        with direct_xhs_request_env():
+            return self._api().single_online_delivery(body)
+
+    def after_sale_audit(self, body: Any) -> tuple[bool, str, Any]:
+        """**售后审核**（同意 / 拒绝；真实写、不可撤回）。"""
+        with direct_xhs_request_env():
+            return self._api().after_sale_audit(body)
+
 
 def get_qianfan_api_adapter_factory():
     """千帆适配器工厂（FastAPI 依赖）。

@@ -4052,22 +4052,70 @@ def test_orders_page_never_renders_blank_money_as_zero():
     # 另外：禁止 `Number(...)` 直接吞掉 null（会变 NaN，渲染成 "NaN" 而不是 -）
     assert "Number(detail.pay_amount" not in code
     assert "Number(detail.total_amount" not in code
-def test_orders_page_has_no_platform_write_actions():
-    """**一期只读**：页面不许出现发货 / 改价 / 售后审核入口（平台写接口未授权）。
+def test_orders_page_write_entries_are_gated_and_confirmed():
+    """**M7**：写入口**只对可操作状态出现**，且**必须带二次确认**（设计 16 §7.4）。
 
-    判据：请求函数清单里**没有**发货类函数被调用 —— 这是「写操作未授权」
-    这条硬约束在页面层的落点，不能只写在文档里。
+    ⚠️ 本守卫**取代**了 `test_orders_page_has_no_platform_write_actions`
+    （2026-10-04 之前「一期只读」的旧契约，原句见 docstring 下面）。
+
+    > 原句：**一期只读**：页面不许出现发货 / 改价 / 售后审核入口（平台写接口未授权）。
+
+    门禁解除后判据反转：**不是"不许有写入口"，而是"有的写入口必须被门禁 + 二次确认夹住"**。
+    两件事必须同时成立，否则会出现「按钮在、点了 400」（本项目踩过）或
+    「能点、点完直接写真实平台」（更贵）。
     """
     code = _code_only(_read(ORDERS_PAGE))
-    for forbidden in (
-        "shipOrder(",
-        "deliverOrder(",
-        "confirmShipment(",
-        "refundOrder(",
-        "auditAfterSale(",
-        "updateOrderPrice(",
-    ):
-        assert forbidden not in code, f"订单页出现写操作入口：{forbidden}"
+
+    # ① 写入口确实存在（否则下面的断言全是空转）—— 只认 M7 批准的那两个
+    assert "shipOrder(" in code, "M7 写入口缺失（发货）"
+    assert "handleAfterSale(" in code, "M7 写入口缺失（售后）"
+
+    # ② 仍然禁止的写操作（未授权）：改价 / 退款等
+    for forbidden in ("updateOrderPrice(", "deliverOrder(", "refundOrder(", "confirmShipment("):
+        assert forbidden not in code, f"订单页出现未授权的写操作入口：{forbidden}"
+
+    # ③ **门禁**：入口必须挂在状态判据上（不给假入口）。
+    # ⚠️ 判据是**两个按钮各自的 `canXxx(...) ?` 三元的完整形态**，不是一个
+    # `canShipOrder(` 子串 —— 后者在页面里有 2 处（三元的条件 + 兜底 `-` 的取反），
+    # 只把**三元的条件**改成 `true` 时子串断言照样通过（2026-10-04 变异实测 ESCAPED）。
+    assert "{canShipOrder(row.status) ? (" in code, "发货入口没有挂在状态门禁上"
+    assert "{pendingAfterSale && canHandleAfterSale(pendingAfterSale.status) ? (" in code, (
+        "售后入口没有挂在状态门禁上"
+    )
+
+    # ④ **二次确认**：**两条链路都**必须先 `await` 预览拿 token，再原样回传。
+    # ⚠️ 必须是「两处」（`count == 2`）—— 只查「有没有」时，把**发货**那条
+    # 的预览删掉、售后那条还在，断言照样过（2026-10-04 变异实测 ESCAPED）。
+    assert code.count("const preview = await previewOrderWrite(") == 2, (
+        "发货与售后两条链路都必须 await 预览拿确认凭据（缺一条即算未接）"
+    )
+    assert code.count("confirmToken: preview.confirm_token") == 2, (
+        "两条链路都必须把预览下发的 token 原样回传（前端不自己算）"
+    )
+
+    # ⑤ 确认文案**由 lib 单一实现**生成（不许页面自己拼一句差不多的）
+    assert "shipConfirmText(" in code, "发货确认文案没有走 lib（同一语义两处实现）"
+    assert "afterSaleConfirmText(" in code, "售后确认文案没有走 lib"
+
+    # ⑥ 首次渲染只读：M7 的两个确认弹窗默认关闭（不许自动弹）
+    assert "shipOpen" in code and "afterSaleOpen" in code, "确认弹窗状态缺失"
+
+
+def test_m7_batch_ship_limit_is_same_on_both_sides():
+    """批量发货上限：前端常量与后端 `MAX_BATCH_SHIP` **必须同值**。
+
+    为什么要钉：这个数字前端拦一次、后端拦一次；两边不等时表现是
+    「界面说拦住了 / 其实发出去了」或「界面拦了后端从不执行」—— 两种都很难查。
+    （同型守卫已有 `test_shop_items_batch_delete_limit_matches_backend`。）
+    """
+    from backend.app.services.order_write_service import MAX_BATCH_SHIP as backend_limit
+
+    view = _read(ROOT / "frontend/src/lib/order-write.ts")
+    matched = re.search(r"export const MAX_BATCH_SHIP = (\d+);", view)
+    assert matched, "前端应在 lib/order-write.ts 里定义 MAX_BATCH_SHIP"
+    assert int(matched.group(1)) == backend_limit, (
+        f"前端 {matched.group(1)} ≠ 后端 {backend_limit}"
+    )
 
 
 def test_orders_page_marks_remark_as_local_only():
