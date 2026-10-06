@@ -399,6 +399,25 @@ async function main() {
   check("提交只发白名单键 account_ids", form.includes("params = { account_ids: accountIds }"));
   check("账号下拉只展示账号名称", form.includes("account.nickname ||") && !form.includes("sub_type"));
 
+  // 2026-10-05 用户口径：「优化定时任务支持携带参数，将清理记录表任务、记录表保留时间
+  // 设置为任务携带的参数，**每次执行任务时可修改**，默认记录表保留最新 15 天」
+  // +「定时任务参数在定时任务**新增和编辑**弹窗中支持配置」。
+  // ⚠️ 必须建 / 改同款：只在新建立可见 ⇒ 编辑态看不到「当前是几天」，
+  //    也就改不了（旧实现只给非账号维度的**新建**态一个裸 JSON 框）。
+  check(
+    "保留期参数按 params_editable 驱动（建/改同款）",
+    form.includes('editableKeys.includes("retention_days")')
+  );
+  check("保留期提交只发白名单键 retention_days",
+        form.includes("params = { retention_days: retentionDays }"));
+  check("保留期有数字控件（不是裸 JSON）",
+        form.includes("<InputNumber") && form.includes('addonAfter="天"'));
+  check("保留期默认 15 天", form.includes("const DEFAULT_RETENTION_DAYS = 15"));
+  check("保留期控件不受「仅新建」限制",
+        form.includes("{retentionScoped && ("));
+  check("旧裸 JSON 框仍只服务「非账号维度 + 非保留期」的新建态",
+        form.includes("!isEdit && !accountScoped && !retentionScoped"));
+
   // --------------------------------------------------------------- //
   // 6. 列表列口径（用户 2026-09-24：撤下次/上次运行，加任务类型）
   // --------------------------------------------------------------- //

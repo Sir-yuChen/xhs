@@ -91,7 +91,6 @@ import {
 import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { PageHeader } from "../../components/layout/app-shell";
 import type { QueueSummary } from "../../lib/api";
 import {
   cancelTask,
@@ -352,6 +351,7 @@ export function TaskRecordsPage() {
   const onCleanBatch = useCallback(
     (row: TaskRecord) => {
       modal.confirm({
+        centered: true,
         title: `清理批次 ${row.batch_no}？`,
         content: `将清理这个批次与它的全部 ${row.summary?.total ?? 0} 条明细记录（不影响笔记本身，也不影响平台数据）。`,
         okText: "清理整批",
@@ -377,6 +377,7 @@ export function TaskRecordsPage() {
   const onCleanItem = useCallback(
     (row: TaskRecord) => {
       modal.confirm({
+        centered: true,
         title: `清理记录 #${row.id}？`,
         content:
           "清理后这条执行记录不再显示（不影响笔记本身，也不影响平台数据；批次记录与同批其它明细保留）。",
@@ -402,6 +403,7 @@ export function TaskRecordsPage() {
   const onCleanSelected = useCallback(() => {
     if (!selectedIds.length) return;
     modal.confirm({
+      centered: true,
       title: `清理选中的 ${selectedIds.length} 条记录？`,
       content:
         "只有已完成 / 已取消的记录会被清理；选中批次 = 整批清理（连它的全部明细一起）。批内有正在执行 / 待执行（或待重试）明细的批次不会被清理 —— 整批是原子动作，不做半清。",
@@ -424,9 +426,10 @@ export function TaskRecordsPage() {
   /** 一键清除全部可清记录（done / cancelled；待重试 / 进行中后端不碰）。 */
   const onCleanAll = useCallback(() => {
     modal.confirm({
+      centered: true,
       title: "一键清除全部执行记录？",
       content:
-        "将清除全部**已完成 / 已取消**的队列记录：整批可清的批次连明细一起清除。批内有正在执行 / 待执行（或待重试）明细的批次，与它可清的明细都**不会**被清除 —— 不把还在使用的批次清成残的。此操作不可恢复。",
+        "将清除全部已完成 / 已取消的队列记录：整批可清的批次连明细一起清除。批内有正在执行 / 待执行（或待重试）明细的批次，与它可清的明细都不会被清除 —— 不把还在使用的批次清成残的。此操作不可恢复。",
       okText: "全部清除",
       okButtonProps: { danger: true },
       cancelText: "取消",
@@ -741,34 +744,11 @@ export function TaskRecordsPage() {
 
   return (
     <div>
-      <PageHeader
-        eyebrow="队列记录"
-        title="队列记录"
-        description={
-          <Space size={4}>
-            <span>各后台队列的管理与**每一条记录**的详情、执行情况（记录保留 15 天，每天 07:00 自动清理）</span>
-            {/* 说明走 Tooltip 不占版面（2026-09-25 用户口径「使用 tip 展示说明」）：
-                一次讲清四件事 —— 本页是什么、批次怎么来、和任务日志的分工、
-                队列清单从哪来。 */}
-            <Tooltip
-              title={
-                <div style={{ maxWidth: 360 }}>
-                  <div>
-                    本页只收**队列**记录：一次入队动作 = 一个**批次号**（父节点），批次下面是逐条明细（子节点，展开可看）。
-                  </div>
-                  <div style={{ marginTop: 6 }}>
-                    账号级全量同步、商品同步、AI 生成、抓取 / 监控等**不是队列**的执行记录不在这里 —— 那些在账号卡片与「任务中心 · 任务日志」看。
-                  </div>
-                  <div style={{ marginTop: 6 }}>「任务中心 · 任务日志」记「什么时候跑」（调度视角，1 次调度 1 行）；本页记「队列里每条跑成什么样」。</div>
-                  <div style={{ marginTop: 6 }}>批次号可用于查询（支持只输入尾段，如 7K2M）；队列清单由后端下发，新队列上线后这里自动多出来。</div>
-                </div>
-              }
-            >
-              <QuestionCircleOutlined style={{ color: "rgba(0,0,0,.45)", cursor: "help" }} />
-            </Tooltip>
-          </Space>
-        }
-      />
+      {/* 2026-10-05 用户口径「移除所有页面页面头」：原「队列记录 / 队列记录 / 说明行
+          + Tooltip」整块（两行标题与侧栏菜单项逐字重复）。其中**说明正文按用户口径
+          整段移除**（「…文本移除」）—— 本轮先收进「队列管理」页签顶部，随后被
+          用户点掉；说明的承载面（队列卡自带计数与「队列类型」行、记录的「批次号」列）
+          本身已在页面上，不再需要一段总说明。 */}
 
       {/* 2026-09-25 用户口径「把列表重构队列管理，分为两个 tab 队列管理和队列执行记录」：
           Tab 1 队列管理 = 队列清单与实时概览；Tab 2 队列执行记录 = 每一条的详情与执行情况。 */}
@@ -780,6 +760,7 @@ export function TaskRecordsPage() {
             key: "queues",
             label: "队列管理",
             children: (
+              <>
               <Row gutter={12}>
                 {queues.map((queue) => (
                   <Col key={queue.key} xs={24} sm={12} lg={8} style={{ marginBottom: 12 }}>
@@ -832,6 +813,7 @@ export function TaskRecordsPage() {
                   </Col>
                 )}
               </Row>
+              </>
             ),
           },
           {

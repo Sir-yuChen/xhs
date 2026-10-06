@@ -4,7 +4,7 @@
 **缺陷形态**：`sync_task_service.close_running_logs_for_task` 用了 `shanghai_now()`
 却没 import ⇒ 被调用时抛 `NameError`。它编译期抓不到（`python -m compileall` 只查语法）、
 测试也抓不到（原有用例都没造 `running` 日志行 ⇒ 函数返回 0 直接跳过，那行从未被执行）
-⇒ 只能靠静态检查。本文件守护 `.workbuddy/scripts/check_undefined_names.py`。
+⇒ 只能靠静态检查。本文件守护 `.hermes/scripts/check_undefined_names.py`。
 
 **两个后果都很坏**（这就是它值得一个常驻守卫的原因）：
 * `tasks.py::cancel_task` 没兜底 ⇒ 接口 500，而取消在它之前就已 commit
@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / ".workbuddy" / "scripts" / "check_undefined_names.py"
+SCRIPT = ROOT / ".hermes" / "scripts" / "check_undefined_names.py"
 
 
 def _run(*args: str) -> subprocess.CompletedProcess:

@@ -77,6 +77,30 @@ def _session_request(method: str, url: str, **kwargs):
         _http_session.cookies.clear()
 
 
+def _dsl_pair_or_empty() -> str:
+    """取一个 `_dsl` 并拼成 `<ms>;<dsl>`；**取不到就退空串**（不阻断请求）。
+
+    `_dsl` 由平台下发（5 分钟缓存），只参与 `x-s-common` 的生成。写接口实测
+    **不校验 `x-s-common`**（去掉照样 200），所以这里刻意**不做重试、不抛异常** ——
+    为了一个非必需字段把整次写操作判死是错的取舍。
+
+    ⚠️ 用 `xhs_pc.dsl.get_dsl` 而不是 `xhs_creator` 的那个：前者是 PC Web 的
+    `window._dsl`（ark 与 PC 同属 `www.xiaohongshu.com` 域下的 Web 侧），
+    creator 那个是「服务端 DS 程序」形态（要 `_dsf`），本链路用不上。
+    """
+    try:
+        import time as _time
+
+        from xhs_utils.xhs_pc.dsl import get_dsl
+
+        value = str(get_dsl() or "").strip()
+        if not value:
+            return ""
+        return f"{int(_time.time() * 1000)};{value}"
+    except Exception:  # noqa: BLE001 - 非必需字段，取不到就退空
+        return ""
+
+
 class XHS_Qianfan_Apis:
     """千帆商家后台的只读客户端（Cookie 即登录态）。"""
 
@@ -357,6 +381,254 @@ class XHS_Qianfan_Apis:
             "/app-fulfillment-aftersale",
             timeout=WRITE_TIMEOUT,
         )
+
+    # ------------------------------------------------------------------ #
+    # 商品**写**接口（2026-10-05 真机打通，设计 20 §11）
+    #
+    # ⚠️ 与只读接口的**关键差别**：这条链路的请求**必须带签名**
+    # （`x-s` / `x-t` / `x-s-common`）。只带 Cookie 会被平台返 **406**
+    # （`{"code":-1,"success":false}`，不是登录态失效）—— 详见 `_signed_post`。
+    #
+    # ⚠️ 这是**交易侧写操作**：会影响在售商品、删除不可恢复。
+    # 调用方（`shop_item_operate_service`）必须已完成显式确认 + 二次确认，
+    # 且**只对用户自己店铺**、**用户显式触发**（不进定时自动链路）。
+    # ------------------------------------------------------------------ #
+
+    def batch_update_availability(
+        self, item_ids: "list[str] | tuple[str, ...] | set[str]", *, available: bool
+    ) -> tuple[bool, str, dict | None]:
+        """**批量上架 / 下架**（`POST /api/edith/product/batch_update_availability_v3`）。
+
+        真机取证（2026-10-05，账号 8）：浏览器「批量操作 → 上架 / 下架」两个菜单项
+        **同源同一函数**（`eh(true)` / `eh(false)` → `onBatchEditShelf`），发的就是本端点。
+
+        | 字段 | 语义 |
+        |---|---|
+        | `available` | `True` = 上架，`False` = 下架 |
+        | `itemIds` | 商品 ID 列表（**只传 item 级**；sku 级上下架走 `skuIds`，本项目不用） |
+        | `skuIds` | 固定空数组（规格级上下架不在本项目范围） |
+        | `asyncExec` | `True` ⇒ 平台返回 `data.taskId`（长任务）；`False` ⇒ 同步执行 |
+        | `byModifyTool` | 固定 `True`（页面实抓值 —— 走的是「批量操作工具」这条链） |
+
+        响应：成功 `{"code":200,"success":true,"data":{"taskId":"81432"}}`（真机原文）。
+        部分失败时平台在 `data.failData: [{itemId, reasons:[{message}]}]` 里逐条给原因
+        （与 `batch_delete_items` 同形）。
+
+        ⚠️ **`asyncExec: True` 时返回的 `taskId` 是平台侧长任务号** —— 本项目**不轮询**
+        它（要再逆一个 `long_task/task/detail`），以**自己的逐条调用结果**为准；
+        `taskId` 只记入任务 payload 留痕（设计 20 §11 D15）。
+        """
+        ids = [str(item).strip() for item in (item_ids or []) if str(item).strip()]
+        if not ids:
+            return False, "item_ids 为空", None
+        body = {
+            "available": bool(available),
+            "itemIds": ids,
+            "skuIds": [],
+            # ⚠️ 与页面一致：批量工具走异步通道（平台侧对大批量本来就是异步）。
+            "asyncExec": True,
+            "byModifyTool": True,
+        }
+        return self._signed_post(
+            "/api/edith/product/batch_update_availability_v3",
+            body,
+            "/app-item/list/shelf",
+        )
+
+    def batch_delete_items(
+        self, item_ids: "list[str] | tuple[str, ...] | set[str]"
+    ) -> tuple[bool, str, dict | None]:
+        """**批量删除商品**（`POST /api/edith/product/batch_delete_sku`）。
+
+        真机取证（2026-10-05）：千帆「批量操作 → 删除」→ `onBatchDel` 发的就是本端点。
+
+        | 字段 | 语义 |
+        |---|---|
+        | `itemIds` | 商品 ID 列表 |
+        | `skuIds` | 固定空数组（规格级删除不在本项目范围） |
+        | `options.asyncExec` | `True` ⇒ 平台异步（返回 `taskId`） |
+
+        ⚠️ **不可恢复**：平台侧删除商品没有撤销入口。调用方必须先过
+        「显式确认 + 二次确认」（设计 20 §11 D3）。
+        """
+        ids = [str(item).strip() for item in (item_ids or []) if str(item).strip()]
+        if not ids:
+            return False, "item_ids 为空", None
+        body = {"itemIds": ids, "skuIds": [], "options": {"asyncExec": True}}
+        return self._signed_post(
+            "/api/edith/product/batch_delete_sku",
+            body,
+            "/app-item/list/shelf",
+        )
+
+    def _signed_post(
+        self, api: str, body: dict, referer: str
+    ) -> tuple[bool, str, dict | None]:
+        """**带签名的 POST**（商品写接口专用；只读接口不需要它）。
+
+        ## 为什么只读不需要、写必须
+
+        2026-10-05 真机对照（同一 Cookie、同一端点）：
+
+        | 请求 | 结果 |
+        |---|---|
+        | 只带 Cookie（只读 `search_item_v2`） | **200 code=200** |
+        | 只带 Cookie（写 `batch_update_availability_v3`） | **406 `{"code":-1,"success":false}`** |
+        | 带 `x-s`/`x-t`/`x-s-common`（写） | **200 `{"code":200,"success":true,"data":{"taskId":"81432"}}`** |
+
+        ⇒ 写链路的**签名由平台强制**（就是设计 20 §0 里那句「必须带 `X-s`/`X-t`」）。
+
+        ## 签名参数（三个必须偏离 PC 默认值，否则 406）
+
+        复用本仓 `xhs_utils/xhs_core/js/sign.js`（PC / creator 两条链路在用的同一套
+        Node 签名运行时），但 **ark 这第三个 appId 有它自己的档位**：
+
+        | 参数 | PC 默认 | **ark 实测可用** |
+        |---|---|---|
+        | `appId` | `xhs-pc-web` | **`itemark`** |
+        | `signVersion` | `4.3.7` | **`4.4.4`** |
+        | `tier` | `0301` | **`0101`** |
+
+        浏览器真实 `X-s` 解出来是
+        `{"x0":"4.4.4","x1":"itemark","x2":"Windows","x3":"mns0101_…","x4":"object","x5":"<md5>"}`
+        —— 与上面三个值逐字段对齐（`x5` = `md5(api + JSON.stringify(body))`，
+        已用真机流量核对命中）。
+
+        ## 失败语义（**必须可分辨**）
+
+        * 拿不到签名材料（无 `a1` / DS 取不到 / Node 不在）⇒ `(False, "签名材料不可用…", None)`
+          —— **不是**登录态问题，重登没用；
+        * 平台返 406 ⇒ `(False, "平台拒绝了请求签名…", payload)` —— 同上；
+        * 平台返 `code=-13000/-13004` ⇒ 走既有的凭据判据（`is_credential_error`）。
+
+        ⚠️ **不打印 Cookie / 签名值**（硬约束②）。
+        """
+        import subprocess
+
+        from xhs_utils.xhs_core.runtime import _JS_DIR as _CORE_JS_DIR
+
+        cookie = (self.cookies or "").strip()
+        if "a1=" not in cookie:
+            return (
+                False,
+                "签名材料不可用：该账号的千帆 Cookie 里没有 a1，无法生成请求签名"
+                "（这不是登录态问题，请重新导出完整 Cookie）。",
+                None,
+            )
+
+        # 会话态（seq / envConst / envFpTail / loadts）由 profile 现取 —— 每次请求
+        # 一个 `seq`，与浏览器一致（同一 seq 连发多个请求会被平台判重）。
+        try:
+            from xhs_utils.xhs_pc.state import PcDeviceProfile
+
+            profile = PcDeviceProfile(cookies=cookie)
+            ctx = profile.next_sign_context(api)
+            payload = {
+                "api": api,
+                "data": body,
+                "cookie": cookie,
+                "a1": profile.cookie_map.get("a1", ""),
+                "b1": str(profile.current_b1(ctx["now"])),
+                #: ⚠️ `_dsl` 需要一个 `dsllt` 前缀（`<ms>;<dsl>`）。取不到就退空串 ——
+                #: `sign.js` 只在 `xs_common` 里用它，缺失时 `x-s-common` 为空，
+                #: 而**写接口实测不校验 `x-s-common`**（去掉照样 200），故不阻断。
+                "dslPair": _dsl_pair_or_empty(),
+                "tier": "0101",
+                "now": ctx["now"],
+                "version": ctx["version"],
+                "loadts": ctx["loadts"],
+                "seq": ctx["seq"],
+                "envConst": ctx["envConst"],
+                "envFpTail": ctx["envFpTail"],
+                "webBuild": ctx["webBuild"],
+                #: ⚠️ 三个 ark 专用值 —— 用 PC 默认值会 406（见 docstring 表）。
+                "signVersion": "4.4.4",
+                "appId": "itemark",
+                "platform": "Windows",
+            }
+        except Exception as error:  # noqa: BLE001 - 组装失败也要变成可读原因
+            return (
+                False,
+                f"签名材料不可用：{type(error).__name__}: {error}（这不是登录态问题）",
+                None,
+            )
+
+        try:
+            proc = subprocess.run(
+                ["node", "sign.js", json.dumps(payload, ensure_ascii=False)],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                cwd=_CORE_JS_DIR,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            return (
+                False,
+                f"签名运行时不可用（Node）：{type(error).__name__}: {error}（这不是登录态问题）",
+                None,
+            )
+        signed: dict | None = None
+        for line in reversed([s.strip() for s in (proc.stdout or "").splitlines() if s.strip()]):
+            if line.startswith("{") and '"x3"' in line:
+                try:
+                    signed = json.loads(line)
+                except ValueError:
+                    continue
+                break
+        if not signed or not signed.get("xs"):
+            tail = (proc.stderr or proc.stdout or "").strip().splitlines()
+            return (
+                False,
+                "请求签名生成失败：" + (" / ".join(tail[-3:]) or "sign.js 无输出")
+                + "（这不是登录态问题）",
+                None,
+            )
+
+        headers = {
+            **self._headers(referer),
+            "Content-Type": "application/json",
+            "x-s": str(signed["xs"]),
+            "x-t": str(signed.get("xt") or ""),
+        }
+        if signed.get("xs_common"):
+            headers["x-s-common"] = str(signed["xs_common"])
+
+        try:
+            response = _session_request(
+                "POST",
+                self.base_url + api,
+                data=json.dumps(body, ensure_ascii=False, separators=(",", ":")),
+                headers=headers,
+                cookies=self._cookie_dict(),
+                timeout=WRITE_TIMEOUT,
+            )
+        except Exception as error:  # noqa: BLE001
+            return False, f"千帆写接口请求失败：{type(error).__name__}: {error}", None
+
+        # ⚠️ **406 是签名被拒**，不是登录态失效（真机原文
+        # `{"code":-1,"success":false}`）。必须与凭据问题分开报 ——
+        # 错归因会让用户白重登一百次。
+        if response.status_code == 406:
+            return (
+                False,
+                "平台拒绝了本次请求的签名（HTTP 406）。通常是平台改版导致签名档位变化，"
+                "需要更新签名参数；重登账号不会解决。",
+                None,
+            )
+        try:
+            payload = response.json()
+        except ValueError:
+            return False, f"千帆写接口返回了非 JSON 响应（HTTP {response.status_code}）", None
+        if not isinstance(payload, dict):
+            return False, "千帆写接口返回了非预期的响应体", None
+        code = payload.get("code")
+        if self.is_credential_error(code):
+            return False, str(payload.get("msg") or "千帆登录态失效"), payload
+        if code not in (0, 200, None) or payload.get("success") is False:
+            return False, str(payload.get("msg") or f"千帆写接口返回 code={code}"), payload
+        return True, str(payload.get("msg") or "成功"), payload
 
     def search_items(
         self,

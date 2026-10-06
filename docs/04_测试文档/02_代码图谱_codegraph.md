@@ -13,12 +13,12 @@
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │ L5  前端 SPA                                                     │
-│     React 19 + antd 6 · 34 页面 · 223 请求函数                    │
+│     React 19 + antd 6 · 34 页面 · 224 请求函数                    │
 │     app/router.tsx → pages/** → components/** → lib/api.ts       │
 └───────────────────────────┬─────────────────────────────────────┘
                             │ HTTP /api（Bearer）
 ┌───────────────────────────▼─────────────────────────────────────┐
-│ L4  API 路由层（32 个 router / 273 端点）                          │
+│ L4  API 路由层（32 个 router / 274 端点）                          │
 │     auth · platforms · accounts · login-sessions · notes ·        │
 │     files · drafts · ai · tasks · model-configs · tags ·          │
 │     notifications · keyword-groups · publish ·                    │
@@ -310,7 +310,7 @@ shops ──┬──▶ platform_accounts            （1:1：platform_accounts
 
 | # | 位置 | 规模 | 判定依据 |
 |---|---|---|---|
-| 1 | ~~`backend/app/services/task_service.py`~~ | 整模块 | ✅ **已删除**（2026-09-28，归档至 `.workbuddy/tmp/dead-code-archive/`） |
+| 1 | ~~`backend/app/services/task_service.py`~~ | 整模块 | ✅ **已删除**（2026-09-28，归档至 `.hermes/tmp/dead-code-archive/`） |
 | 2 | ~~`backend/app/services/mock_data.py` 的 `dashboard_overview` / `sample_accounts` / `sample_model_configs`~~（另含 `sample_tasks`） | 4 个函数 | ✅ **已删除**（2026-09-28）。⚠️ **模块本身保留**：`sample_notes` 被 `api/platforms/xhs/pc.py` 的 mock 端点引用 |
 | 3 | ~~`backend/app/api/platforms/xhs/pc.py note_comments_placeholder()`~~ | 1 函数 | ✅ **已删除**（2026-09-28） |
 | 4 | ~~`backend/app/core/task_runner.py` 的 `InProcessTaskRunner`~~ | 整模块 | ✅ **已删除**（2026-09-28，归档同上） |

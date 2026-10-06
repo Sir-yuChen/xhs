@@ -1,6 +1,6 @@
 """删除执行链回归测试（创作者中心 note/delete）。
 
-设计源：`.workbuddy/note-delete-chain.md`（2026-09-19 浏览器实测）。
+设计源：`.hermes/note-delete-chain.md`（2026-09-19 浏览器实测）。
 
 钉死的契约：
 1. 删除是**两步**：先 ``permission/validate``（空 body）再 ``note/delete``（body 只有 note_id）。

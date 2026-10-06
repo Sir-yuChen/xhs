@@ -31,7 +31,6 @@ import type { ColumnsType } from "antd/es/table";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
-import { PageHeader } from "../../../components/layout/app-shell";
 import { useThemePalette } from "../../../app/providers";
 import {
   createXhsAnalyticsReport,
@@ -193,29 +192,10 @@ export function XhsAnalyticsPage() {
   function renderInsightTab() {
     return (
       <>
-      <PageHeader
-        eyebrow="XHS Analytics"
-        title="数据洞察"
-        description="基于已保存笔记、标签和评论生成可执行的内容机会视图。"
-        action={
-          <Space>
-            <Button
-              icon={<DownloadOutlined />}
-              onClick={generateReport}
-              loading={isGeneratingReport}
-            >
-              生成报告
-            </Button>
-            <Button
-              icon={<ReloadOutlined />}
-              onClick={loadAnalytics}
-              loading={isLoading}
-            >
-              刷新
-            </Button>
-          </Space>
-        }
-      />
+      {/* 2026-10-05 用户口径「移除所有页面页面头」：原「XHS Analytics / 数据洞察 /
+          一句话说明」三行整块移除。本页两个页签（内容洞察 / 指标监控）各自是分析与
+          看板，没有「一张主卡」可挂 extra ⇒「生成报告 / 刷新」随页头一起移除
+          （报告由页面首查与报告卡自身驱动）。 */}
 
       {/* ---- Top metric cards ---- */}
       <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
@@ -228,6 +208,21 @@ export function XhsAnalyticsPage() {
                 borderColor: p.border,
                 borderTop: `2px solid ${metricIconColors[idx]}`,
               }}
+              /* 2026-10-05 页头移除后，「生成报告 / 刷新」收进首张指标卡右上角
+                 （用户口径「按钮功能先保留，位置你来决定」）。刷新在左、主操作在右，
+                 与全站「刷新在前 / 主操作在后」的既有排布一致。 */
+              extra={
+                idx === 0 ? (
+                  <Space size={8}>
+                    <Button size="small" icon={<ReloadOutlined />} onClick={loadAnalytics} loading={isLoading}>
+                      刷新
+                    </Button>
+                    <Button size="small" type="primary" icon={<DownloadOutlined />} onClick={generateReport} loading={isGeneratingReport}>
+                      生成报告
+                    </Button>
+                  </Space>
+                ) : undefined
+              }
             >
               <Statistic
                 title={

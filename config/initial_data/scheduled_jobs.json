@@ -113,12 +113,14 @@
     },
     {
       "job_key": "system.queue_record_cleanup",
-      "name": "队列记录清理",
+      "name": "清理记录表",
       "trigger_type": "cron",
       "cron_expression": "0 0 7 * * *",
       "misfire_policy": "once",
       "concurrent": "forbid",
-      "params": {},
+      "params": {
+        "retention_days": 15
+      },
       "status": "active",
       "remark": "系统内置任务（应用初始化数据，随安装附有；队列详情记录保留期固定 15 天，只清终态记录）"
     },

@@ -9,7 +9,6 @@ import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
-import { PageHeader } from "../../components/layout/app-shell";
 import { WorkspaceShell } from "../../components/layout/workspace-shell";
 import {
   buildGatewayTree,
@@ -167,41 +166,21 @@ function GatewayRoutes() {
   );
 }
 
-// 内容骨架：三个页面共用的页头（顶栏与 Content 容器由 `WorkspaceShell` 提供，这里不再重复）。
-function GatewaySection({
-  eyebrow,
-  title,
-  description,
-  action,
-  children,
-}: {
-  eyebrow: string;
-  title: string;
-  description: string;
-  action?: ReactNode;
-  children: ReactNode;
-}) {
-  return (
-    <>
-      <PageHeader eyebrow={eyebrow} title={title} description={description} action={action} />
-      {children}
-    </>
-  );
+// 内容骨架：三个页面共用的容器（顶栏与 Content 容器由 `WorkspaceShell` 提供，这里不再重复）。
+//
+// 2026-10-05 用户口径「移除所有页面页面头」：原 `GatewaySection` 要传
+// eyebrow / title / description / action 并渲染一个 `PageHeader` —— **整块页头已移除**
+// （三行与侧栏菜单项重复），`GatewaySection` 收成**纯透传容器**。
+// ⚠️ 刻意**保留**这个组件而不是在三个页面里各写一次 `<>…</>`：它是「网关页内容骨架」
+//    的唯一锚点，删掉就等于把「壳层只此一份」的边界擦掉（日后加壳层级布局会各写一份）。
+function GatewaySection({ children }: { children: ReactNode }) {
+  return <>{children}</>;
 }
 
 // ── ① 用量看板（独立页面，只读） ──
 function UsagePage({ onGoGateways }: { onGoGateways: () => void }) {
   return (
-    <GatewaySection
-      eyebrow="LLM Gateway"
-      title="用量看板"
-      description="本地调用台账的只读视图 —— 今日 / 近 7 日 / 近 30 日调用量、成功率、Token 与延迟，按平台 / 功能 / 模型三维拆分。"
-      action={
-        <Button icon={<ApiOutlined />} onClick={onGoGateways}>
-          服务商配置
-        </Button>
-      }
-    >
+    <GatewaySection>
       {/* 内容组件与壳层解耦（`UsageDashboardPanel` 只渲染内容） */}
       <UsageDashboardPanel />
     </GatewaySection>
@@ -750,21 +729,18 @@ function GatewaysPage() {
 
 
   return (
-    <GatewaySection
-      eyebrow="LLM Gateway"
-      title="服务商"
-      description="任意 OpenAI 兼容端点（三方服务商直连，或自托管的兼容网关）。服务商在所有平台间共用；业务代码按「服务编码」引用它们。展开一行可查看该服务商的模型清单。"
-      action={
-        <Button type="primary" onClick={openCreate}>
-          新增服务商
-        </Button>
-      }
-    >
+    <GatewaySection>
       <Card
+        title="服务商"
         extra={
-          <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={() => void load()}>
-            刷新
-          </Button>
+          <Space>
+            <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={() => void load()}>
+              刷新
+            </Button>
+            <Button type="primary" size="small" onClick={openCreate}>
+              新增服务商
+            </Button>
+          </Space>
         }
       >
         {/* 父表 = **服务商**（表头见 `providerColumns`）。展开行里是子表 = **模型**。 */}
@@ -1147,21 +1123,18 @@ function AlertsPage() {
   }, [gateways, formGatewayId]);
 
   return (
-    <GatewaySection
-      eyebrow="LLM Gateway"
-      title="预警规则"
-      description="用量 / 失败率 / 健康 三类阈值规则，作用域支持「全网关 / 指定服务商 / 指定服务商 + 具体模型」三级。由定时任务「LLM 网关预警」轮询本地台账，超阈值即写站内通知。"
-      action={
-        <Button type="primary" onClick={openCreate}>
-          新增预警规则
-        </Button>
-      }
-    >
+    <GatewaySection>
       <Card
+        title="预警规则"
         extra={
-          <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={() => void load()}>
-            刷新
-          </Button>
+          <Space>
+            <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={() => void load()}>
+              刷新
+            </Button>
+            <Button type="primary" size="small" onClick={openCreate}>
+              新增预警规则
+            </Button>
+          </Space>
         }
       >
         {gateways.length === 0 && alerts.length === 0 ? (

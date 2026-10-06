@@ -16,7 +16,7 @@
  * R20（2026-09-24 用户口径「这个分组就不需要了」）：**分组字段整条移除** ——
  * 分组是代码侧归属（注册表声明），不是用户可填的东西，摆在表单里只会误导。
  */
-import { Alert, Form, Input, Modal, Select, Space, Typography } from "antd";
+import { Alert, Form, Input, InputNumber, Modal, Select, Space, Typography } from "antd";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { createScheduleJob, fetchAccounts, fetchScheduleTargets, updateScheduleJob } from "../../lib/api";
@@ -34,6 +34,11 @@ const DEFAULT_SCHEDULE: ScheduleIn = {
 };
 
 /** 兜底默认目标（targets 还没拉到时的占位；正常路径必有真值）。 */
+/** 记录表保留期默认值（天）。**与后端 `record_cleanup_service.DEFAULT_RETENTION_DAYS`
+ *  同值** —— 前端只在「新建态给个初始值」时用，真正的校验与兜底在后端
+ *  （`validate_retention_days` / `_coerce_retention_days`），这里不是第二份真相源。 */
+const DEFAULT_RETENTION_DAYS = 15;
+
 const FALLBACK_TARGET: ScheduleTarget = {
   job_key: "auto_ops.keyword_pipeline",
   name: "自动运营管线",
@@ -81,8 +86,15 @@ export function JobFormModal({ open, job, onCancel, onSaved }: JobFormModalProps
   const accountScoped = Boolean(
     (job?.params_editable ?? selectedTarget.params_editable)?.includes("account_ids")
   );
+  // 保留期参数（公共「清理记录表」任务）：用户口径「记录表保留时间设置为任务携带的参数，
+  // 每次执行任务时可修改，默认记录表保留最新 15 天」——**建 / 改都要能配**，
+  // 所以不能复用下面那段「仅新建可见」的裸 JSON 高级框（编辑态会看不见当前值）。
+  const editableKeys = job?.params_editable ?? selectedTarget.params_editable ?? [];
+  const retentionScoped = editableKeys.includes("retention_days");
   const [accounts, setAccounts] = useState<PlatformAccount[]>([]);
   const [accountIds, setAccountIds] = useState<number[]>([]);
+  //: 记录表保留期（天）。默认与后端 `DEFAULT_RETENTION_DAYS` 同值。
+  const [retentionDays, setRetentionDays] = useState<number>(DEFAULT_RETENTION_DAYS);
 
   const loadTargets = useCallback(async () => {
     try {
@@ -126,11 +138,19 @@ export function JobFormModal({ open, job, onCancel, onSaved }: JobFormModalProps
           ? (job.params.account_ids as number[])
           : []
       );
+      const rawRetention = job.params?.retention_days;
+      const parsedRetention = Number(rawRetention);
+      setRetentionDays(
+        Number.isFinite(parsedRetention) && parsedRetention >= 1
+          ? parsedRetention
+          : DEFAULT_RETENTION_DAYS
+      );
     } else {
       setName("");
       setJobKey(FALLBACK_TARGET.job_key);
       setSchedule(DEFAULT_SCHEDULE);
       setParamsText("{}");
+      setRetentionDays(DEFAULT_RETENTION_DAYS);
       setRemark("");
       setAccountIds([]);
     }
@@ -149,7 +169,12 @@ export function JobFormModal({ open, job, onCancel, onSaved }: JobFormModalProps
       return;
     }
     let params: Record<string, unknown> | undefined;
-    if (accountScoped) {
+    if (retentionScoped) {
+      // 保留期任务的参数**只发白名单里的键**（其余键由代码拥有，写了就 400
+      // `JOB_PARAMS_NOT_EDITABLE`）。校验交给后端 `validate_retention_days`
+      // —— 前端不复制一份「1..3650」的判据（同一件事两份实现迟早漂移）。
+      params = { retention_days: retentionDays };
+    } else if (accountScoped) {
       // 账号维度目标（建 / 改同一把尺子）：只发白名单里的 account_ids（空 = 本人全部账号）
       params = { account_ids: accountIds };
     } else if (!isEdit) {
@@ -278,7 +303,29 @@ export function JobFormModal({ open, job, onCancel, onSaved }: JobFormModalProps
           />
         </Form.Item>
 
-        {!isEdit && !accountScoped && (
+        {retentionScoped && (
+          <Form.Item label="记录表保留时间">
+            <Space>
+              <InputNumber
+                min={1}
+                max={3650}
+                value={retentionDays}
+                onChange={(value: number | null) =>
+                  setRetentionDays(
+                    typeof value === "number" && value >= 1 ? value : DEFAULT_RETENTION_DAYS
+                  )
+                }
+                addonAfter="天"
+                style={{ width: 180 }}
+              />
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                早于该天数的记录在执行任务时被清理，默认 15 天
+              </Text>
+            </Space>
+          </Form.Item>
+        )}
+
+        {!isEdit && !accountScoped && !retentionScoped && (
           <Form.Item label="调用参数">
             <Input.TextArea
               value={paramsText}

@@ -45,7 +45,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging\release.ps1 -Versi
 | 2 打包 | 清 `packaging/{dist,build}` + 删旧安装包 → `build.ps1 -Version` | 构建 exit≠0 |
 | 3 校验 | 产物存在且 ≥80MB、**包内 `frontend/dist/assets/index-*.js` 与源码 dist 逐名一致**、`version_info.txt` 版本号、构建自检「全部通过」且无 `[LEAK]`/`[MISSING]` | 任一不符 |
 | 4 冒烟 | `smoke-test.ps1`（静默安装 → health → openapi paths → 端口回退 → 卸载） | 冒烟非「全部通过」 |
-| 5 清残留 | 删 `.workbuddy/tmp/smoke-install` | 清理被拦只告警 |
+| 5 清残留 | 删 `.hermes/tmp/smoke-install` | 清理被拦只告警 |
 | 6 打 tag | 附注 tag（正文含提交号 / 体积 / sha256）+ push | tag 已存在 / push 失败 |
 | 7 发布 | `gitee_release.py`：建或复用 Release、更新说明、**同名附件 `--replace` 覆盖** | API 调用失败 |
 
@@ -94,7 +94,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging\release.ps1 -Versi
 | `docs/`、`tests/`、`pytest`、tkinter、IPython、notebook | 文档与测试链，运行期零使用（pytest 约 10MB+） | spec `excludes` + 构建自检（`tests` / `pytest` / `_pytest` / `docs`） |
 | `static/`（v1 期界面截图）、`author/`（Logo / 收款码） | 与运行时无关的展示资产；`static/` 已于 2026-09-26 从仓库移除 | 构建自检 `_internal\static` / `_internal\author` |
 | `data/`（开发库与历史备份）、`backend/app/storage/` | 运行期数据，安装后在用户目录生成；把开发库打进去 = 泄露真实数据 | 构建自检 `data` / `_internal\data`；两者都不在 `datas` 白名单 |
-| `.git/`、`.workbuddy/` | 版本历史、本地规范与日志 | 构建自检 |
+| `.git/`、`.hermes/` | 版本历史、本地规范与日志 | 构建自检 |
 | `frontend/src/`、`frontend/node_modules/` | 前端源码与构建期依赖，只发 `frontend/dist` 产物 | 构建自检（`frontend\src` / `frontend\node_modules`） |
 | crypto-js 以外的 node 依赖 | 签名运行时只需要 crypto-js | 构建自检：安装根 `node_modules` 只允许 crypto-js |
 | cv2 的 `data/`（haarcascade 等模型，约 10MB） | 本仓 cv2 只用 `imdecode` / `imencode` / `VideoCapture`，无级联分类器用法 | `build.ps1` 第 7a 步直接删 |
@@ -153,7 +153,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging\release.ps1 -Versi
 - **`cv2/data` 裁剪失败只告警、不中断**（2026-09-26 起）：那 10MB 是体积优化不是正确性判据，
   删不掉就让包大一点，不该让整包构建失败。日志里认 `[WARN] cv2/data trim failed` 那行。
 - **⚠️ 跑完 `smoke-test.ps1` 必须先清掉它留下的静默安装残留，再手工装包验证**
-  （2026-09-26 实测踩到）：冒烟是 `/VERYSILENT /DIR=.workbuddy\tmp\smoke-install` 装的，
+  （2026-09-26 实测踩到）：冒烟是 `/VERYSILENT /DIR=.hermes\tmp\smoke-install` 装的，
   中途失败会 `exit` 掉、卸载步骤不执行 ⇒ **卸载表里留下一条同 `AppId` 的条目**，指向那个
   随后被清空的目录。之后手工双击安装器，Inno 判定「已安装过」就会**整页跳过
   「选择目标位置」**（`UsePreviousAppDir=yes` 的既定行为），看起来像「包坏了不能选目录」——

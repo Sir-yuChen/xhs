@@ -1,6 +1,6 @@
 """无流量清理：搜索条件（CleanupQuery）与阈值共同决定候选池。
 
-设计源：2026-09-19 千帆后台「笔记管理」页实测（`.workbuddy/note-delete-chain.md`
+设计源：2026-09-19 千帆后台「笔记管理」页实测（`.hermes/note-delete-chain.md`
 与本次千帆调研）。关键事实：
 
 * 千帆搜索框发 ``GET /api/edith/goods-note/list?...&mix_search_word=地垫``，

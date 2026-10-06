@@ -14,14 +14,12 @@ import { WorkflowPage } from "../pages/platforms/xhs/workflow-page";
 import { OrdersPage } from "../pages/platforms/xhs/orders-page";
 import { XhsAccountsPage } from "../pages/platforms/xhs/accounts-page";
 import { XhsAnalyticsPage } from "../pages/platforms/xhs/analytics-page";
-import { XhsBenchmarksPage } from "../pages/platforms/xhs/benchmarks-page";
+import { XhsMonitoringPage } from "../pages/platforms/xhs/monitoring-page";
 import { XhsDashboard } from "../pages/platforms/xhs/xhs-dashboard";
-import { XhsCrawlerPage } from "../pages/platforms/xhs/crawler-page";
 import { XhsDiscoveryPage } from "../pages/platforms/xhs/discovery-page";
 import { XhsKeywordsPage } from "../pages/platforms/xhs/keywords-page";
 import { LlmGatewayPage } from "../pages/llm-gateway/llm-gateway-page";
 import { XhsLibraryPage } from "../pages/platforms/xhs/library-page";
-import { XhsMonitoringPage } from "../pages/platforms/xhs/monitoring-page";
 import { XhsMyNotesPage } from "../pages/platforms/xhs/my-notes-page";
 import { XhsNoteWorkshopPage } from "../pages/platforms/xhs/note-workshop-page";
 import { XhsShopItemsPage } from "../pages/platforms/xhs/shop-items-page";
@@ -86,7 +84,8 @@ export function AppRouter() {
           <Route path="/platforms/xhs/discovery" element={<XhsDiscoveryPage />} />
           <Route path="/platforms/xhs/my-notes" element={<XhsMyNotesPage />} />
           <Route path="/platforms/xhs/shop-items" element={<XhsShopItemsPage />} />
-          <Route path="/platforms/xhs/crawler" element={<XhsCrawlerPage />} />
+          {/* 数据抓取已并入「笔记发现」的「批量抓取」页签（设计 21 切片 B）：旧路由重定向，深链不死。 */}
+          <Route path="/platforms/xhs/crawler" element={<Navigate to="/platforms/xhs/discovery?tab=crawl" replace />} />
           <Route path="/platforms/xhs/keywords" element={<XhsKeywordsPage />} />
           <Route path="/platforms/xhs/library" element={<XhsLibraryPage />} />
           {/* 2026-09-25 §36：图片 / 视频 / 草稿三坊合并为「笔记工坊」一页（Tabs 隔离）。
@@ -95,7 +94,10 @@ export function AppRouter() {
           <Route path="/platforms/xhs/image-studio" element={<Navigate to="/platforms/xhs/note-workshop?tab=images" replace />} />
           <Route path="/platforms/xhs/video-studio" element={<Navigate to="/platforms/xhs/note-workshop?tab=videos" replace />} />
           <Route path="/platforms/xhs/drafts" element={<Navigate to="/platforms/xhs/note-workshop?tab=drafts" replace />} />
-          <Route path="/platforms/xhs/benchmarks" element={<XhsBenchmarksPage />} />
+          {/* 竞品监控已并入「监控中心」（设计 21 切片 A）：旧路由重定向，深链不死。
+              monitoring-page 是 benchmarks-page 的超集（4 种目标类型 vs 仅 note_url）。 */}
+          <Route path="/platforms/xhs/benchmarks" element={<Navigate to="/platforms/xhs/monitoring" replace />} />
+          <Route path="/platforms/xhs/monitoring" element={<XhsMonitoringPage />} />
           <Route path="/platforms/xhs/publish" element={<XhsPublishPage />} />
           <Route path="/platforms/xhs/auto-ops" element={<AutoOpsPage />} />
           {/* 自动化工作流（设计 19 / M5）：编排 选题→生成→审核→发布→监控。

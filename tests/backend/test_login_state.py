@@ -1187,7 +1187,7 @@ class TestQrPanelHasNoSecondDetailParser:
 class TestFrontendBehaviourScripts:
     """行为验证：源码断言证明不了「函数怎么跑」（DEF-058 的教训）。
 
-    2026-09-25 P0-4 提速（调研报告 `.workbuddy/reports/2026-09-24_测试回归耗时调研与提速方案.md`）：
+    2026-09-25 P0-4 提速（调研报告 `.hermes/reports/2026-09-24_测试回归耗时调研与提速方案.md`）：
     契约 + 全部变异合并为**每个脚本一次** node 进程（`--self-check` 模式），
     module 级 fixture 跑一次、9 个用例解析同一份输出。原来是 9 个用例各起一个
     进程（其中 6 个是变异），占全量回归约 100s；现在两次进程（~0.5s + ~16s）。

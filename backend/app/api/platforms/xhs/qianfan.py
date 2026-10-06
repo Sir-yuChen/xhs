@@ -63,6 +63,7 @@ from backend.app.services import scheduled_job_runner, sync_task_service
 from backend.app.services import order_sync_service
 from backend.app.services import shop_goods_sync_service
 from backend.app.services import shop_products_service
+from backend.app.services import shop_item_operate_service as operate_service
 from backend.app.services.job_registry import (
     JOB_KEY_SHOP_GOODS_SYNC,
     JOB_KEY_ORDER_SYNC,
@@ -133,6 +134,14 @@ NOTE_COUNT_OPS: tuple[str, ...] = ("lt", "lte", "eq", "gte", "gt")
 #: 悄悄只删前 200 条，用户看到「成功」却少了行 —— 那是更坏的结果）。
 MAX_BATCH_DELETE: int = 200
 
+#: 批量**商品操作**（上架 / 下架 / 删除**平台商品**）单次上限（2026-10-05 需求 7）。
+#: ⚠️ 与 `MAX_BATCH_DELETE` **不是同一个上限**，语义也不同：
+#: * `MAX_BATCH_DELETE` 管「删本地台账行」（零平台请求，删错只是本地少一行，下次同步会回来）；
+#: * 本值管「改**平台**商品」（下架影响在售、删除不可恢复）⇒ 更保守。
+#: 与 `shop_item_operate_service.MAX_ITEMS_PER_TASK` **必须同值**（前后端同值纪律：
+#: 两处不同值 = 前端放行后端拒，或反之静默截断）。
+MAX_OPERATE_ITEMS: int = 200
+
 
 class ShopItemsRequest(BaseModel):
     """商品列表查询条件。
@@ -178,10 +187,8 @@ class ShopItemsRequest(BaseModel):
     create_time_to: str | int | None = None
     sort_field: str = "create_time"
     order: str = "desc"
-    #: 分组筛选（M4 新增，设计 20 §5）：不传 = 不筛；`0` = **未分组**；`>0` = 指定分组。
-    #: ⚠️ 与价格 / 时间不同，「未分组」是**确凿状态**（`group_id IS NULL`）⇒ 照常筛
-    #: （硬约束⑤的例外口径，同挂链笔记数）。
-    group_id: int | None = Field(default=None, ge=0)
+    #: ⚠️ 分组筛选（`group_id`）已随「彻底移除商品分组」退场（2026-10-05）。
+    #: 删字段而不是留着 —— 留着会让 `group_id` 被静默忽略（用户以为筛过了）。
 
 
 class ShopItemsDeleteRequest(BaseModel):
@@ -777,6 +784,13 @@ def shop_items(
         price_to_fen=_price_fen(payload.price_to),
     )
     state = get_shop_state(account)
+    #: 店铺冻结标记（`seller_freeze`）：**本地无法从商品行推出**（它不随条目下发），
+    #: 只能由写操作的失败回执写入 `shop_state`（见 `shop_item_operate_service`）。
+    #: 在这里注入到每一条上，供 `allowed_actions` 判「能不能改」——
+    #: 冻结店三个动作全不可做（千帆原文：「您的店铺被冻结，解冻后可发布、编辑商品」）。
+    if state.get("seller_freeze"):
+        for item in page["items"]:
+            item["seller_freeze"] = True
     return {
         "platform_account_id": payload.platform_account_id,
         "source": "local",
@@ -2008,20 +2022,6 @@ MAX_EXPORT_ROWS: int = 5000
 _UNSET = object()
 
 
-class ProductGroupCreateRequest(BaseModel):
-    """建分组（设计 20 §2.1）。"""
-
-    model_config = ConfigDict(extra="forbid")
-    name: str = Field(min_length=1, max_length=64)
-
-
-class ProductGroupUpdateRequest(BaseModel):
-    """改分组名（设计 20 §2.1）。"""
-
-    model_config = ConfigDict(extra="forbid")
-    name: str = Field(min_length=1, max_length=64)
-
-
 class ItemEditRequest(BaseModel):
     """商品本地编辑（设计 20 §2.1 端点 5）。
 
@@ -2030,14 +2030,16 @@ class ItemEditRequest(BaseModel):
     * **显式传 `null`** = 清空。
 
     用 `Optional[X] = _UNSET` 而不是 `= None`：后者会把两件事混成一件
-    （用户只想改分组，结果标题被清空了 —— PATCH 最常见的静默错值）。
+    （用户只想改卖点，结果标题被清空了 —— PATCH 最常见的静默错值）。
+
+    ⚠️ `group_id` 已随「彻底移除商品分组」退场（2026-10-05）。它**不是**简单删字段
+    就完事：`extra="forbid"` 会让旧前端继续传 `group_id` 时拿到 422（而不是静默丢掉），
+    这正是我们要的 —— 静默丢弃会让用户以为「改了分组」。
     """
 
     model_config = ConfigDict(extra="forbid")
     platform_account_id: int = Field(ge=1)
     item_id: str = Field(min_length=1, max_length=64)
-    #: 目标分组 id；`null` = 移出分组；省略 = 不动。
-    group_id: Optional[int] = Field(default=_UNSET, ge=1)  # type: ignore[assignment]
     #: 采纳的 AI 标题；`null` = 清空；省略 = 不动。
     ai_title: Optional[str] = Field(default=_UNSET, max_length=512)  # type: ignore[assignment]
     #: 采纳的 AI 卖点；`null` = 清空；省略 = 不动。
@@ -2069,8 +2071,7 @@ class ItemsExportRequest(BaseModel):
     create_time_to: str | int | None = None
     sort_field: str = "create_time"
     order: str = "desc"
-    #: 分组筛选（M4 新增）：不传 = 不筛分组；`0` = 未分组；`>0` = 指定分组。
-    group_id: Optional[int] = Field(default=None, ge=0)
+    #: ⚠️ 分组筛选（`group_id`）已随分组功能退场（2026-10-05，导出与列表同一条判据）。
 
 
 class ItemPolishRequest(BaseModel):
@@ -2089,102 +2090,295 @@ class ItemPolishRequest(BaseModel):
     instruction: str = Field(default="", max_length=2000)
 
 
-def _group_error_to_http(error: Exception) -> HTTPException:
-    """`ProductGroupError` → HTTPException（code → 状态码，唯一映射点）。"""
-    from backend.app.services.product_groups_service import ProductGroupError
+def _item_error_to_http(error: Exception) -> HTTPException:
+    """商品本地编辑类错误 → HTTPException（code → 状态码，唯一映射点）。
 
-    if not isinstance(error, ProductGroupError):
+    ⚠️ 宿主原为 `product_groups_service.ProductGroupError`；2026-10-05 分组退场后
+    改为 `shop_products_service.ProductEditError`（同一语义、同一映射规则）。
+    """
+    from backend.app.services.shop_products_service import ProductEditError
+
+    if not isinstance(error, ProductEditError):
         raise error
     code = error.code or ""
     if code.endswith("_NOT_FOUND"):
         status_code = status.HTTP_404_NOT_FOUND
-    elif code.endswith("_NAME_EXISTS"):
-        status_code = status.HTTP_409_CONFLICT
     else:
         status_code = status.HTTP_400_BAD_REQUEST
     return HTTPException(status_code=status_code, detail={"code": code, "message": str(error)})
 
 
-@router.get("/product-groups")
-def list_product_groups(
+# --------------------------------------------------------------------------- #
+# 商品分组已退场（2026-10-05 用户口径「彻底移除商品分组相关逻辑」）
+#
+# ⚠️ **墓碑不静默删路由**：直接删掉这 4 条路径的话，旧前端 / 旧书签拿到的是
+# 「404 不存在」，分不清「从来没有过」与「我们撤了、原因是分组功能整体退场」。
+# 所以保留路径 + `include_in_schema=False`（不进 OpenAPI ⇒ 端点数确实减少）
+# + 显式 410 + 可读原因（与 `bind_shop_removed` / `unbind_shop_removed` 同款先例）。
+# --------------------------------------------------------------------------- #
+
+#: 分组退场的统一响应体（4 条路径共用一份 —— 同一件事不留 4 份文案）。
+_PRODUCT_GROUPS_GONE = {
+    "code": "PRODUCT_GROUPS_REMOVED",
+    "message": "商品分组功能已整体移除（2026-10-05）。商品的本地组织请用商品列表的搜索条件 + 导出 CSV。",
+}
+
+
+@router.get("/product-groups", include_in_schema=False)
+def list_product_groups():
+    """**已退场**：商品分组列表（2026-10-05 分组功能整体移除）。"""
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=_PRODUCT_GROUPS_GONE)
+
+
+@router.post("/product-groups", include_in_schema=False)
+def create_product_group():
+    """**已退场**：建分组（2026-10-05 分组功能整体移除）。"""
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=_PRODUCT_GROUPS_GONE)
+
+
+@router.patch("/product-groups/{group_id}", include_in_schema=False)
+def update_product_group(group_id: int):
+    """**已退场**：改分组名（2026-10-05 分组功能整体移除）。"""
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=_PRODUCT_GROUPS_GONE)
+
+
+@router.delete("/product-groups/{group_id}", include_in_schema=False)
+def delete_product_group(group_id: int):
+    """**已退场**：删分组（2026-10-05 分组功能整体移除）。"""
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=_PRODUCT_GROUPS_GONE)
+
+
+#: ⚠️ 两个「单次上限」**必须同值**（前后端同值纪律：前端放行后端拒 = 用户点了个
+#: 注定失败的按钮；后端放行前端拦 = 静默少做）。这条断言在导入时就会响。
+assert operate_service.MAX_ITEMS_PER_TASK == MAX_OPERATE_ITEMS, (
+    "商品操作单次上限漂移：operate_service.MAX_ITEMS_PER_TASK="
+    f"{operate_service.MAX_ITEMS_PER_TASK} vs qianfan.MAX_OPERATE_ITEMS={MAX_OPERATE_ITEMS}"
+)
+
+
+class ItemOperateRequest(BaseModel):
+    """批量上架 / 下架 / 删除**平台商品**（2026-10-05 需求 7）。
+
+    ⚠️ 与 `ShopItemsDeleteRequest`（删**本地台账行**）是**两件不同的事**：
+
+    | 请求 | 动谁 |
+    |---|---|
+    | `POST /items/delete` | **本地台账行**（零平台请求），平台商品不动 |
+    | `POST /items/operate` | **平台商品**（真实写操作），台账由下一轮同步对账 |
+
+    ⚠️ 本请求是**交易侧写操作**：下架会影响在售商品、删除**不可恢复**。
+    前端已做「显式确认 + 二次确认」（`Modal.confirm`），服务端这里只做参数校验收口。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    platform_account_id: int = Field(ge=1)
+    #: 动作（白名单 = `shop_item_operate_gates.ALL_ACTIONS`，未知 ⇒ 400 不猜）。
+    action: str = Field(min_length=1, max_length=16)
+    #: 商品 ID 列表（去重保序；空 ⇒ 400；超 `MAX_ITEMS_PER_TASK` ⇒ 400）。
+    item_ids: list[str] = Field(min_length=1, max_length=MAX_OPERATE_ITEMS)
+
+
+class ItemsSyncRequest(BaseModel):
+    """同步**指定商品**到本地台账（2026-10-05 需求 6）。
+
+    ⚠️ 与 `SyncShopGoodsRequest`（整店同步）是两件事：这里只更新**命中的那几个**
+    商品，**不删任何旧行**、不改台账范围。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    platform_account_id: int = Field(ge=1)
+    #: 要同步的商品 ID（去重保序；空 ⇒ 400；超 `MAX_SYNC_ITEMS` ⇒ 400）。
+    item_ids: list[str] = Field(min_length=1, max_length=MAX_OPERATE_ITEMS)
+    #: 2026-10-06：合并「批量同步商品信息」后，同一个条件弹窗的**时间区间**
+    #: 对按 ID 同步这条路也要生效（原来只认 ID，区间无处可传）。
+    #: `full` ⇒ 不设下界；`range` ⇒ 透给平台按**创建时间**过滤（与整店同口径）。
+    scope: str = ""
+    start_date: str = ""
+    end_date: str = ""
+
+
+@router.post("/items/sync")
+def shop_items_sync(
+    payload: ItemsSyncRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """**商品分组列表**（设计 20 §2 端点 1；**纯本地**，零平台请求）。
+    """**按指定商品 ID 同步最新数据到本地台账**（2026-10-05 需求 6）。
 
-    每项带 `product_count`，口径 = **当前用户的全部账号**（分组挂 `user_id`，
-    可以装多个账号的商品 ⇒ 不能按某个账号过滤，否则计数与列表对不上）。
-    计数为 0 的分组**照常返回**（用户可以建空分组先摆着）。
+    ## 平台侧没有「按 item_id 拉商品」的读接口 —— 这是本端点的**代价**
+
+    真机核对（2026-10-05）：`product/search_item_v2` 只支持分页 + 筛选；
+    `get_skus_by_item_ids` 只回规格、不回商品本体。⇒ 实现是**把指定 ID 当筛选条件
+    发出去、按页扫描，只把精确命中的那几个落库**（`whole_keywords` 是模糊匹配，
+    所以本地还要按精确 id 再筛一遍 —— 否则标题里凑巧含该串的商品也会被写进台账）。
+
+    **同步执行**（不是后台任务）：这个动作的目的是「马上看到那几个商品的最新数据」，
+    丢给后台就得再设计一套进度查询；代价是请求可能持续较久（要翻页），
+    如实写在响应 `note` 与前端弹窗里（不假装是「精准单查」）。
+
+    ⚠️ **只补不删**：命中之外的商品一行不动（与全量同步的「翻完删旧行」刻意不同 ——
+    指定同步只对「用户点名的那几个」负责）。
     """
-    from backend.app.services import product_groups_service
+    account = _owned_account(db, current_user, payload.platform_account_id)
 
-    return {"items": product_groups_service.list_groups(db, user_id=current_user.id)}
-
-
-@router.post("/product-groups", status_code=status.HTTP_201_CREATED)
-def create_product_group(
-    payload: ProductGroupCreateRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """**建分组**（设计 20 §2 端点 2）。
-
-    同名 ⇒ **409 `PRODUCT_GROUP_NAME_EXISTS`**（不静默覆盖 —— 覆盖会让旧分组里
-    的商品一夜换堆）。并发下的唯一索引冲突也**回退到 409**，不抛 500。
-    """
-    from backend.app.services import product_groups_service
-
-    try:
-        return product_groups_service.create_group(db, user_id=current_user.id, name=payload.name)
-    except Exception as exc:
-        raise _group_error_to_http(exc) from exc
-
-
-@router.patch("/product-groups/{group_id}")
-def update_product_group(
-    group_id: int,
-    payload: ProductGroupUpdateRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """**改分组名**（设计 20 §2 端点 3）。
-
-    归属校验失败 ⇒ **404**（不报 403：不泄露分组存在性）。
-    名字没变 ⇒ 不写库（避免 `updated_at` 无意义跳动）。
-    """
-    from backend.app.services import product_groups_service
-
-    try:
-        return product_groups_service.rename_group(
-            db, group_id=group_id, user_id=current_user.id, name=payload.name
+    seen: set[str] = set()
+    item_ids: list[str] = []
+    for raw in payload.item_ids:
+        value = str(raw or "").strip()
+        if value and value not in seen:
+            seen.add(value)
+            item_ids.append(value)
+    if not item_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "QIANFAN_ITEM_IDS_REQUIRED", "message": "没有要同步的商品。"},
         )
-    except Exception as exc:
-        raise _group_error_to_http(exc) from exc
+    if len(item_ids) > MAX_OPERATE_ITEMS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "QIANFAN_ITEM_IDS_TOO_MANY",
+                "message": f"单次最多同步 {MAX_OPERATE_ITEMS} 个商品，本次填了 {len(item_ids)} 个。",
+                "limit": MAX_OPERATE_ITEMS,
+            },
+        )
+
+    from backend.app.services.shop_binding_service import has_ark_session
+
+    if not has_ark_session(db, account.id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "ARK_SESSION_REQUIRED",
+                "message": "该账号没有可用的千帆（ark）登录态，无法同步商品。"
+                           "先在账号矩阵导入其千帆登录态后再试。",
+            },
+        )
+
+    result = shop_goods_sync_service.sync_specified_items(
+        account.id,
+        user_id=current_user.id,
+        item_ids=item_ids,
+        #: 条件弹窗选择（2026-10-06 合并后两条路共用一份条件）。
+        scope=payload.scope,
+        start_date=payload.start_date,
+        end_date=payload.end_date,
+    )
+    return {"platform_account_id": payload.platform_account_id, **result}
 
 
-@router.delete("/product-groups/{group_id}")
-def delete_product_group(
-    group_id: int,
+@router.post("/items/operate")
+def shop_items_operate(
+    payload: ItemOperateRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """**删分组**（设计 20 §2 端点 4）。
+    """**批量上架 / 下架 / 删除平台商品**（2026-10-05 需求 7；**真实写操作**）。
 
-    ⚠️ **商品一件不删**：分组是弱关联，删的是**组织方式**。
-    引用它的 `shop_products.group_id` 先被**清空**，响应回传 `released`
-    （本次解除了几件商品的分组 —— 让用户知道影响面）。
+    ## 为什么是「手动触发式任务」而不是同步循环
 
-    ⚠️ **不靠 FK 的 `ON DELETE SET NULL`**：SQLite 的 `ADD COLUMN` 不支持带 FK
-    的列，且显式清空能在响应里报告影响面（设计 20 §4.4）。
+    用户口径（需求 7）：统一走**手动触发式任务**，任务中心**任务列表不展示**，
+    参照「清理无流量笔记」。⇒ 本端点只**建任务行 + 起后台线程 + 立即返回**
+    （`task_id`），逐条执行在 `shop_item_operate_service.run_item_operate` 里，
+    进度 / 结果由 `GET /items/operate/{task_id}` 给（前端弹窗轮询）。
+
+    ## 门禁（需求 7「不支持的只记录不执行」）
+
+    每条商品先过 `shop_item_operate_gates.support_reason(action, item)`：
+    不支持的**只写进结果**（`result="skipped"` + 中文原因），**不发写请求**。
+    判据的**唯一实现**在那一个模块（前端按列表下发的 `allowed_actions[]` 渲染按钮，
+    不在前端复算）。
+
+    ## 错误
+
+    | 错误 | 语义 |
+    |---|---|
+    | 400 `QIANFAN_OPERATE_ACTION_UNSUPPORTED` | `action` 不在白名单（回支持列表） |
+    | 400 `QIANFAN_ITEM_IDS_REQUIRED` | 去重去空白后为空（不静默成功） |
+    | 400 `QIANFAN_ITEM_IDS_TOO_MANY` | 超上限（**不静默截断**） |
+    | 400 `ARK_SESSION_REQUIRED` | 该账号没有可用的千帆登录态（写操作硬门禁） |
+
+    ⚠️ **写操作必须有登录态**（与「删本地台账行」不同）：后者零平台请求、无门禁；
+    前者打平台，没令牌就是「点了也不会发生」。
     """
-    from backend.app.services import product_groups_service
+    from backend.app.services import shop_item_operate_service as operate_service
+    from backend.app.services.shop_binding_service import has_ark_session
 
-    try:
-        return product_groups_service.delete_group(
-            db, group_id=group_id, user_id=current_user.id
+    account = _owned_account(db, current_user, payload.platform_account_id)
+
+    action = (payload.action or "").strip()
+    if action not in operate_service.gates.ALL_ACTIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "QIANFAN_OPERATE_ACTION_UNSUPPORTED",
+                "message": f"不支持的商品操作：{payload.action}",
+                "supported": list(operate_service.gates.ALL_ACTIONS),
+            },
         )
-    except Exception as exc:
-        raise _group_error_to_http(exc) from exc
+
+    # 去重保序（与 `/items/delete` 同一纪律：请求条数≠实际条数时不许虚报）。
+    seen: set[str] = set()
+    item_ids: list[str] = []
+    for raw in payload.item_ids:
+        value = str(raw or "").strip()
+        if value and value not in seen:
+            seen.add(value)
+            item_ids.append(value)
+    if not item_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "QIANFAN_ITEM_IDS_REQUIRED", "message": "没有选择要操作的商品。"},
+        )
+    if len(item_ids) > MAX_OPERATE_ITEMS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "QIANFAN_ITEM_IDS_TOO_MANY",
+                "message": f"单次最多操作 {MAX_OPERATE_ITEMS} 个商品，本次选了 {len(item_ids)} 个。",
+                "limit": MAX_OPERATE_ITEMS,
+            },
+        )
+
+    # ⚠️ 写平台 ⇒ 必须有该账号自己的 ark 令牌（不借会话、不发探活）。
+    if not has_ark_session(db, account.id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "ARK_SESSION_REQUIRED",
+                "message": "该账号没有可用的千帆（ark）登录态，无法执行商品操作。"
+                           "先在账号矩阵导入其千帆登录态后再试。",
+            },
+        )
+
+    summary = operate_service.start_item_operate(
+        platform_account_id=account.id,
+        user_id=current_user.id,
+        action=action,
+        item_ids=item_ids,
+    )
+    return summary
+
+
+@router.get("/items/operate/{task_id}")
+def shop_items_operate_status(
+    task_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """商品操作任务的**逐条结果**（前端弹窗轮询；需求 7「接口同步结果在弹窗中展示」）。
+
+    非本用户的任务 ⇒ **404**（不泄露存在性 —— 与分组时代同一条纪律）。
+    """
+    from backend.app.services import shop_item_operate_service as operate_service
+
+    snapshot = operate_service.task_snapshot(db, task_id, user_id=current_user.id)
+    if snapshot is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="商品操作任务不存在。",
+        )
+    return snapshot
 
 
 @router.patch("/items/edit")
@@ -2195,47 +2389,45 @@ def edit_shop_item(
 ):
     """**商品本地编辑**（设计 20 §2 端点 5；**纯本地写**，零平台请求）。
 
-    可编辑三项：`group_id`（分组）/ `ai_title`（采纳的 AI 标题）/
+    可编辑两项（⚠️ 分组项已随分组功能退场，2026-10-05）：`ai_title`（采纳的 AI 标题）/
     `ai_selling_point`（采纳的 AI 卖点）。
 
     ## 什么**不**能在这里改（边界，写清避免误解）
 
-    ⚠️ **商品真实标题 / 价格 / 库存 / 上下架状态都不改** —— 那些是平台数据，
-    改它们要走千帆写接口（**SDK 零商品写接口，设计 20 §0 判为不可交付**）。
-    本端点改的是**本地台账上的用户标注**：分组是用户自己的组织方式，
-    `ai_title` / `ai_selling_point` 是用户**采纳**的 AI 草稿（平台标题仍在 `item_title`）。
+    ⚠️ **商品真实标题 / 价格 / 库存 / 上下架状态都不改** —— 那些是平台数据。
+    本端点改的是**本地台账上的用户标注**（`ai_title` / `ai_selling_point` 是用户
+    **采纳**的 AI 草稿，平台标题仍在 `item_title`）。
+    ⚠️ 平台商品本身的上下架 / 删除走 `POST /items/operate`（**写平台**，另一条链路）。
 
     ## PATCH 语义的两态（设计 20 §2.2 口径①）
 
     | 请求体 | 行为 |
     |---|---|
     | 省略键 | 保持原值 |
-    | 显式 `null` | 清空（`group_id` = 移出分组） |
+    | 显式 `null` | 清空 |
 
     `updated[]` 只回**真正变了**的字段（新值 != 旧值）—— 前端据此提示
-    「已更新分组」而不是「已更新商品」（全字段都报「已更新」等于没说）。
+    「已更新 AI 标题」而不是「已更新商品」（全字段都报「已更新」等于没说）。
     """
-    from backend.app.services import product_groups_service
+    from backend.app.services import shop_products_service
 
     account = _owned_account(db, current_user, payload.platform_account_id)
 
     touched: dict[str, bool] = {
-        "group_id": payload.group_id is not _UNSET,
         "ai_title": payload.ai_title is not _UNSET,
         "ai_selling_point": payload.ai_selling_point is not _UNSET,
     }
     try:
-        return product_groups_service.edit_product(
+        return shop_products_service.edit_product(
             db,
             platform_account_id=account.id,
             item_id=payload.item_id,
-            group_id=payload.group_id if touched["group_id"] else None,
             ai_title=payload.ai_title if touched["ai_title"] else None,
             ai_selling_point=payload.ai_selling_point if touched["ai_selling_point"] else None,
             touched=touched,
         )
     except Exception as exc:
-        raise _group_error_to_http(exc) from exc
+        raise _item_error_to_http(exc) from exc
 
 
 @router.post("/items/polish")

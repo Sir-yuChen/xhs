@@ -696,10 +696,12 @@ def _builtin_seed_defaults() -> dict[str, dict[str, Any]]:
             "cron": _cron_every_n_hours(hours("qianfan_health_check_interval_hours", 6)),
             "status": "active" if bool(getattr(settings, "qianfan_health_check_enabled", True)) else "paused",
         },
-        "system.no_traffic_cleanup": {
-            "cron": _cron_every_n_hours(hours("no_traffic_cleanup_interval_hours", 6)),
-            "status": "active" if bool(getattr(settings, "no_traffic_cleanup_enabled", True)) else "paused",
-        },
+        # ⚠️ 2026-10-05 用户口径：无流量清理**没有自动跑的形态** —— 它是手动触发任务
+        #    （入口只有「我的笔记」页按钮）。原先这条读 `no_traffic_cleanup_interval_hours`
+        #    的 cron 兜底是**僵尸**：注册表 `default_trigger_type` 已是 manual，装配层
+        #    按 trigger_type 直接跳过（见 `schedule_triggers.py` 对 manual 的拒绝）。
+        #    保留条目只为「初始化数据缺该键」的兼容路径，值一律按手动档给。
+        "system.no_traffic_cleanup": {"status": "active"},
         "system.note_sync": {
             "cron": _cron_every_n_hours(hours("xhs_note_sync_interval_hours", 6)),
             "status": "active" if bool(getattr(settings, "xhs_note_sync_enabled", False)) else "paused",

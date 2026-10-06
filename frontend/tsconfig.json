@@ -15,7 +15,7 @@
     "isolatedModules": true,
     "noEmit": true,
     "incremental": true,
-    "tsBuildInfoFile": "../.workbuddy/tmp/tsconfig.tsbuildinfo",
+    "tsBuildInfoFile": "../.hermes/tmp/tsconfig.tsbuildinfo",
     "jsx": "react-jsx"
   },
   "include": ["src"],

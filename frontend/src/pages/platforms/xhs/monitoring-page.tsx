@@ -26,7 +26,6 @@ import {
 } from "antd";
 import { useEffect, useState } from "react";
 
-import { PageHeader } from "../../../components/layout/app-shell";
 import { useThemePalette } from "../../../app/providers";
 import {
   createMonitoringTarget,
@@ -83,7 +82,7 @@ export function XhsMonitoringPage() {
     Record<number, MonitoringNote[]>
   >({});
   const [targetType, setTargetType] =
-    useState<MonitoringTargetPayload["target_type"]>("keyword");
+    useState<MonitoringTargetPayload["target_type"]>("note_url");
   const [name, setName] = useState("");
   const [value, setValue] = useState("");
   const [isLoading, setIsLoading] = useState(true);
@@ -238,12 +237,15 @@ export function XhsMonitoringPage() {
 
   return (
     <div>
-      <PageHeader
-        eyebrow="XHS Monitoring"
-        title="竞品监控"
-        description="维护关键词、账号、品牌和笔记 URL 目标，后续可接入定时抓取和趋势快照。"
-        action={
+      {/* 2026-10-05 用户口径「移除所有页面页面头」：原「XHS Monitoring / 竞品监控 /
+          一句话说明」三行整块移除（页面标题与侧栏「监控中心」语义重复，合并后本页
+          本就覆盖 4 种目标类型）；「刷新」收进下方新增目标卡右上角。 */}
+      <Card
+        style={{ background: p.cardBg, borderColor: p.border, marginBottom: 24 }}
+        title="新增监控目标"
+        extra={
           <Button
+            size="small"
             icon={<ReloadOutlined />}
             onClick={loadTargets}
             loading={isLoading}
@@ -251,10 +253,6 @@ export function XhsMonitoringPage() {
             刷新
           </Button>
         }
-      />
-
-      <Card
-        style={{ background: p.cardBg, borderColor: p.border, marginBottom: 24 }}
       >
         <Form layout="inline" style={{ flexWrap: "wrap", gap: 8 }}>
           <Form.Item>

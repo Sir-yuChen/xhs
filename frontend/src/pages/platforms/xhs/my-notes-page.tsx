@@ -1,18 +1,19 @@
 import {
-  DeleteOutlined,
   CommentOutlined,
   CopyOutlined,
+  DeleteOutlined,
   FileTextOutlined,
   HeartOutlined,
+  HistoryOutlined,
   LinkOutlined,
   LoadingOutlined,
   PictureOutlined,
   PlayCircleOutlined,
   ReloadOutlined,
+  SafetyCertificateOutlined,
+  SearchOutlined,
   ShareAltOutlined,
   ShoppingOutlined,
-  SearchOutlined,
-  SafetyCertificateOutlined,
   StarOutlined,
   UserOutlined,
 } from "@ant-design/icons";
@@ -39,11 +40,11 @@ import {
   Tag,
   Tooltip,
   Typography,
+  Table,
 } from "antd";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
-import { PageHeader } from "../../../components/layout/app-shell";
 import { useThemePalette } from "../../../app/providers";
 import {
   FILTER_CACHE_KEYS,
@@ -67,10 +68,13 @@ import {
   fetchXhsQianfanBinding,
   checkXhsQianfanShopHealth,
   fetchNoTrafficCandidates,
+  fetchNoTrafficCleanupActive,
+  fetchNoTrafficCleanupLogs,
   startNoTrafficCleanup,
   fetchNoTrafficCleanupStatus,
   type NoTrafficThresholds,
   type NoTrafficCandidate,
+  type NoTrafficCleanupLogItem,
   type NoTrafficCleanupStatus,
   type NoTrafficQuery,
 } from "../../../lib/api";
@@ -387,6 +391,17 @@ function Metric({ icon, value, title }: { icon: ReactNode; value: number; title:
   );
 }
 
+/**
+ * 表格数字单元格：**缺值渲染 `—`，不渲染 0**（硬约束⑤「读不到 ≠ 读到 0」）。
+ *
+ * 无流量候选的三个指标（阅读量 / 支付订单 / 支付金额）都来自千帆同步的
+ * `entry_json`，未同步的笔记根本没有这个键 —— 显示 0 会让用户以为「真的没人看」，
+ * 进而把一篇其实没数据的笔记删掉。
+ */
+function numberCell(value: number | null | undefined): string {
+  return value === null || value === undefined ? "—" : String(value);
+}
+
 export function XhsMyNotesPage() {
   const p = useThemePalette();
   // 全站消息提醒统一走 antd message（设计 04 §3.6，2026-09-25 用户口径：
@@ -642,13 +657,34 @@ export function XhsMyNotesPage() {
   );
   const [noTrafficCandidates, setNoTrafficCandidates] = useState<NoTrafficCandidate[]>([]);
   const [noTrafficTotal, setNoTrafficTotal] = useState(0);
+  //: 候选列表当前页（从 1 起）。分页在后端做（`limit` = 每页条数）。
+  const [noTrafficPage, setNoTrafficPage] = useState(1);
+  //: 勾选待清理的候选笔记 id（「清理指定笔记」的入参）。
+  const [noTrafficSelected, setNoTrafficSelected] = useState<string[]>([]);
+  const [noTrafficPageSize, setNoTrafficPageSize] = useState(20);
   const [noTrafficCoverage, setNoTrafficCoverage] = useState<string>("");
   const [cleanupRunning, setCleanupRunning] = useState(false);
   const [cleanupStatus, setCleanupStatus] = useState<NoTrafficCleanupStatus | null>(null);
+  //: 该账号**是否有清理在跑**（用户口径：「存在正在清理无流量笔记的任务时，
+  //: 清理无流量按钮展示为『正在清理无流量笔记』且不可点击」）。它**独立于弹窗**：
+  //: 弹窗点击后即关闭，任务态要留在页面上，所以不能靠 `noTrafficOpen` 派生。
+  const [cleanupActiveTaskId, setCleanupActiveTaskId] = useState<number | null>(null);
+  //: 清理日志弹窗（用户口径「新增一个查询清理无流量笔记日志详情按钮」）。
+  const [cleanupLogOpen, setCleanupLogOpen] = useState(false);
+  const [cleanupLogRows, setCleanupLogRows] = useState<NoTrafficCleanupLogItem[]>([]);
+  const [cleanupLogTotal, setCleanupLogTotal] = useState(0);
+  const [cleanupLogPage, setCleanupLogPage] = useState(1);
+  const [cleanupLogLoading, setCleanupLogLoading] = useState(false);
   const cleanupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  /** 预览无流量候选（纯本地查询，零平台请求）。 */
-  async function handlePreviewNoTraffic() {
+  /**
+   * 预览无流量候选（纯本地查询，零平台请求）。
+   *
+   * ⚠️ **只换页码时不改筛选条件**：翻页、改每页条数、首次预览**共用本函数**，
+   * `page` 由调用方给（改条件时必须显式回第 1 页 —— 否则在第 3 页改条件会
+   * 请求新条件下的第 3 页，用户看到一张空表还以为没筛出来）。
+   */
+  async function handlePreviewNoTraffic(page = 1) {
     if (!selectedAccountId) return;
     setNoTrafficLoading(true);
     setNoTrafficCandidates([]);
@@ -658,10 +694,17 @@ export function XhsMyNotesPage() {
         selectedAccountId,
         noTrafficThresholds,
         noTrafficQuery,
-        50
+        page,
+        noTrafficPageSize
       );
       setNoTrafficCandidates(result.candidates);
       setNoTrafficTotal(result.total);
+      // 页码以后端**回显**为准（越界请求它会回落成最后一页）：前端不自己夹一次，
+      // 否则分页器显示的页与表格内容可能对不上。
+      setNoTrafficPage(result.page);
+      // ⚠️ 勾选**跨页保留**，这里**不清空、也不按当页过滤** —— 按当前页过滤会把上一页
+      //    勾的 id 全丢掉（那是「跨页勾选」的反面）。真正「已不在候选池」的 id 由
+      //    后端在清理时拦下并回 `not_in_pool`（不删、如实报数），前端不猜。
       setNoTrafficCoverage(
         `候选池 ${result.coverage.synced_notes} 条已同步映射 · ${result.coverage.reason}`
       );
@@ -672,19 +715,26 @@ export function XhsMyNotesPage() {
     }
   }
 
-  /** 轮询后台清理任务状态，直到 done/failed。 */
+  /** 轮询后台清理任务状态，直到 done/failed。
+   *
+   * ⚠️ **弹窗关掉后仍继续轮询**（用户口径「点击后弹窗关闭」）—— 结算提示与
+   * 「正在清理无流量笔记」按钮态都靠这条循环收敛，它不属于弹窗的生命周期。
+   */
   async function pollCleanupStatus(taskId: number) {
     try {
       const status = await fetchNoTrafficCleanupStatus(taskId);
       setCleanupStatus(status);
       if (status.status === "pending" || status.status === "running") {
+        setCleanupActiveTaskId(taskId);
         cleanupTimerRef.current = setTimeout(() => void pollCleanupStatus(taskId), 2000);
         return;
       }
       setCleanupRunning(false);
+      setCleanupActiveTaskId(null);
       if (status.status === "done") {
         message.success(`清理完成：删除 ${status.deleted} 篇，跳过 ${status.skipped} 篇`);
         refreshActive();
+        if (cleanupLogOpen) void loadCleanupLogs(1);
       } else {
         message.warning(
           `清理结束（有失败）：删除 ${status.deleted} · 跳过 ${status.skipped} · 失败 ${status.failed}`
@@ -692,23 +742,82 @@ export function XhsMyNotesPage() {
       }
     } catch (error) {
       setCleanupRunning(false);
+      setCleanupActiveTaskId(null);
       message.error(readError(error).message);
     }
   }
 
+  /** 查清理日志（日志弹窗列表用）。 */
+  async function loadCleanupLogs(page = 1) {
+    if (!selectedAccountId) return;
+    setCleanupLogLoading(true);
+    try {
+      const data = await fetchNoTrafficCleanupLogs({
+        accountId: selectedAccountId,
+        page,
+        limit: 20,
+      });
+      setCleanupLogRows(data.items);
+      setCleanupLogTotal(data.total);
+      setCleanupLogPage(data.page);
+    } catch (error) {
+      message.error(readError(error).message);
+    } finally {
+      setCleanupLogLoading(false);
+    }
+  }
+
+  /** 进页面 / 切账号时探一次「有没有在跑的清理」——刷新后按钮态也能恢复。 */
+  useEffect(() => {
+    if (!selectedAccountId) {
+      setCleanupActiveTaskId(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const active = await fetchNoTrafficCleanupActive(selectedAccountId);
+        if (cancelled) return;
+        setCleanupActiveTaskId(active.running ? active.task_id : null);
+        // 在跑 ⇒ 接回轮询（页面刷新 / 换账号后不会丢掉那条任务）。
+        if (active.running && active.task_id) void pollCleanupStatus(active.task_id);
+      } catch {
+        // 探测失败不打扰用户：按钮退回「清理无流量」，点了后端仍会挡住重复触发。
+        if (!cancelled) setCleanupActiveTaskId(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedAccountId]);
+
   /** 确认后开始清理：后端立即起后台线程，前端只轮询状态。 */
-  async function handleStartCleanup() {
+  async function handleStartCleanup(noteIds: string[] = []) {
     if (!selectedAccountId || !noTrafficTotal) return;
     setCleanupRunning(true);
     setCleanupStatus(null);
     try {
+      // 两个入口共用本函数：`noteIds` 非空 = 清理指定笔记，空 = 清理全部候选。
+      // ⚠️ 指定清理时 `batch_limit` 取**勾选数**（不是固定的 20）—— 否则用户勾了
+      //    30 篇只会删掉前 20 篇，而界面写着「清理指定 30 篇」。
       const { task_id } = await startNoTrafficCleanup(
         selectedAccountId,
         noTrafficThresholds,
         noTrafficQuery,
-        20
+        noteIds.length ? Math.min(noteIds.length, 50) : 20,
+        noteIds
       );
-      message.info(`清理任务已创建（#${task_id}），后台执行中…`);
+      message.info(
+        noteIds.length
+          ? `清理任务已创建，本批 ${noteIds.length} 篇，后台执行中…`
+          : "清理任务已创建，后台执行中…"
+      );
+      // ⚠️ 用户口径「点击后弹窗关闭」：任务已交后端，弹窗留着只会挡住页面。
+      //    任务态改由**页面按钮**承担（见 `cleanupActiveTaskId` 的注释）。
+      setCleanupActiveTaskId(task_id);
+      setNoTrafficOpen(false);
+      setNoTrafficSelected([]);
       void pollCleanupStatus(task_id);
     } catch (error) {
       setCleanupRunning(false);
@@ -1487,18 +1596,21 @@ export function XhsMyNotesPage() {
 
   return (
     <div>
-      <PageHeader
-        eyebrow="小红书 · 账号自有内容"
+      {/* 2026-10-05 用户口径「移除所有页面页面头」：原「小红书 · 账号自有内容 /
+          我的笔记 / 实时读取说明」三行整块移除（用户明确点名这一块要删）。
+          「刷新」收进下方账号与身份卡的右上角 —— 它需要的 `selectedAccountId`
+          正是那张卡里的账号下拉选的。 */}
+
+      <Card
+        size="small"
+        style={{ marginBottom: 16 }}
         title="我的笔记"
-        description="实时读取当前账号在小红书平台侧的笔记与互动数据；本页数据不落库，仅引用平台 CDN 直链。"
-        action={
+        extra={
           <Button icon={<ReloadOutlined />} onClick={refreshActive} disabled={!selectedAccountId}>
             刷新
           </Button>
         }
-      />
-
-      <Card size="small" style={{ marginBottom: 16 }}>
+      >
         <Space direction="vertical" size={12} style={{ width: "100%" }}>
           <Space wrap size={12}>
             <Text type="secondary" style={{ fontSize: 12 }}>账号</Text>
@@ -1596,17 +1708,40 @@ export function XhsMyNotesPage() {
                 >
                   立即巡检
                 </Button>
+                {/* 用户口径：「存在正在清理无流量笔记的任务时，清理无流量按钮展示为
+                    『正在清理无流量笔记』按钮且不可点击」。 */}
+                <Tooltip
+                  title={
+                    cleanupActiveTaskId
+                      ? "正在清理无流量笔记，完成后可再次发起"
+                      : ""
+                  }
+                >
+                  <Button
+                    size="small"
+                    icon={<DeleteOutlined />}
+                    disabled={cleanupActiveTaskId !== null}
+                    onClick={() => {
+                      setNoTrafficOpen(true);
+                      setNoTrafficCandidates([]);
+                      setNoTrafficTotal(0);
+                      setCleanupStatus(null);
+                    }}
+                  >
+                    {cleanupActiveTaskId ? "正在清理无流量笔记" : "清理无流量"}
+                  </Button>
+                </Tooltip>
+                {/* 用户口径：「新增一个查询清理无流量笔记日志详情按钮，弹窗列表展示
+                    该日志记录」—— 与清理按钮同排，是这一功能的第二个入口。 */}
                 <Button
                   size="small"
-                  icon={<DeleteOutlined />}
+                  icon={<HistoryOutlined />}
                   onClick={() => {
-                    setNoTrafficOpen(true);
-                    setNoTrafficCandidates([]);
-                    setNoTrafficTotal(0);
-                    setCleanupStatus(null);
+                    setCleanupLogOpen(true);
+                    void loadCleanupLogs(1);
                   }}
                 >
-                  清理无流量
+                  清理日志
                 </Button>
               </Space>
             </Space>
@@ -1930,13 +2065,48 @@ export function XhsMyNotesPage() {
 
       {/* 无流量笔记清理：阈值可配 → 本地预览候选 → 确认后后台异步删除 */}
       <Modal
-                centered
-                open={noTrafficOpen}
+        centered
+        open={noTrafficOpen}
         title="清理无流量笔记"
-        width={680}
+        // 尺寸（2026-10-05 用户口径「弹窗固定全屏的 70%，笔记列表表格内滚动」）：
+        // 宽高都取视口的 70%，**不设固定像素** —— 与商品侧两个弹窗（75vw / 75vh）
+        // 同一套「按视口比例」写法，只是这里略小一档（筛选区 + 列表同屏）。
+        // **不设 maxWidth**：设了它宽屏上就不是 70% 了，口径与实际不符。
+        width="70vw"
+        // 高度 = 视口 70%，**不猜像素**：`content` 设成 flex 列，header / footer 由
+        // antd 自己占位，`body` 吃剩下的一整块（`flex: 1 + minHeight: 0`）。
+        // 先前用 `calc(70vh - 168px)` 猜页脚高度 —— 实测页脚换行后比预估矮，
+        // body 反而溢出 40px 被裁（弹窗总高只剩 64.3vh，不是 70%）。
+        styles={{
+          // antd 6 的语义名是 `container`（≈ antd 5 的 `.ant-modal-content`），
+          // **没有 `content`** —— 写错会 TS2353，不是静默忽略。
+          container: { height: "70vh", display: "flex", flexDirection: "column" },
+          body: {
+            flex: 1,
+            minHeight: 0,
+            overflow: "hidden",
+            display: "flex",
+            flexDirection: "column",
+          },
+        }}
         onCancel={() => setNoTrafficOpen(false)}
         footer={
-          <Space>
+          // 页脚 = 报账 + 两个清理入口。**位置固定**（`container` 是 flex 列、
+          // body 吃剩余高度）⇒ 表格再长也不会把按钮顶出视野。
+          <Space wrap size={12}>
+            {/* 「清理前 / 清理后多少条」：清理前 = 候选池总数（预览后即时可知）；
+                清理后 = 后端**重算**的候选池（不是 before - deleted 的估算）。 */}
+            <Text type="secondary" style={{ fontSize: 13 }}>
+              {cleanupStatus?.before_total != null
+                ? `清理前 ${cleanupStatus.before_total} 条`
+                : noTrafficTotal
+                  ? `候选 ${noTrafficTotal} 条`
+                  : "尚未预览"}
+              {cleanupStatus?.after_total != null
+                ? ` → 清理后 ${cleanupStatus.after_total} 条`
+                : ""}
+              {noTrafficSelected.length ? ` · 已选 ${noTrafficSelected.length} 篇` : ""}
+            </Text>
             <Button onClick={() => setNoTrafficOpen(false)}>关闭</Button>
             <Button
               icon={<SearchOutlined />}
@@ -1945,10 +2115,32 @@ export function XhsMyNotesPage() {
             >
               预览候选
             </Button>
+            {/* 入口 ①：清理**指定**笔记（列表勾选）。没勾就禁用并说明，
+                不是「点了没反应」。 */}
             <Popconfirm
-              title={`确认删除符合条件的笔记？`}
-              description={`本次最多删除 20 篇（批次上限），推广中的笔记会自动跳过。后台异步执行，可随时关闭本窗口。`}
-              okText="开始清理"
+              title={`确认删除勾选的 ${noTrafficSelected.length} 篇笔记？`}
+              description="只删勾选的；推广中的自动跳过。"
+              okText="清理选中"
+              cancelText="取消"
+              disabled={!noTrafficSelected.length || cleanupRunning}
+              onConfirm={() => void handleStartCleanup(noTrafficSelected)}
+            >
+              <Tooltip title={noTrafficSelected.length ? "" : "先在列表左侧勾选要清理的笔记"}>
+                <Button
+                  danger
+                  icon={<DeleteOutlined />}
+                  loading={cleanupRunning}
+                  disabled={!noTrafficSelected.length}
+                >
+                  清理指定笔记（{noTrafficSelected.length} 篇）
+                </Button>
+              </Tooltip>
+            </Popconfirm>
+            {/* 入口 ②：清理**全部**候选（按当前阈值 + 查询条件，单批上限 20）。 */}
+            <Popconfirm
+              title="确认按当前条件清理全部候选？"
+              description="最多删 20 篇，推广中的自动跳过。"
+              okText="清理全部"
               cancelText="取消"
               disabled={!noTrafficTotal || cleanupRunning}
               onConfirm={() => void handleStartCleanup()}
@@ -1960,14 +2152,36 @@ export function XhsMyNotesPage() {
                 loading={cleanupRunning}
                 disabled={!noTrafficTotal}
               >
-                开始清理（{noTrafficTotal} 篇）
+                清理全部（{noTrafficTotal} 篇）
               </Button>
             </Popconfirm>
           </Space>
         }
       >
-        <Space direction="vertical" size={12} style={{ width: "100%" }}>
-          <div>
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            height: "100%",
+            gap: 12,
+            minHeight: 0,
+          }}
+        >
+          {/* 筛选 + 阈值 + 覆盖说明 + 清理状态：一整块**不参与压缩**（flexShrink: 0）
+              —— 被压扁的话输入框会被截掉半行，而它们才是这个弹窗的操作面板。 */}
+          <div
+            style={{
+              flexShrink: 0,
+              border: `1px solid ${p.border}`,
+              borderRadius: 8,
+              padding: "10px 12px",
+              background: p.fillWeak,
+            }}
+          >
+            <Text strong style={{ fontSize: 13 }}>
+              筛选条件
+            </Text>
+            <div style={{ height: 8 }} />
             <Space wrap size={8}>
               <Input
                 allowClear
@@ -1998,7 +2212,6 @@ export function XhsMyNotesPage() {
                 ]}
               />
             </Space>
-          </div>
           <Divider style={{ margin: "2px 0" }} />
           <Space wrap size={12}>
             <Text style={{ fontSize: 13 }}>阅读量 ≤</Text>
@@ -2006,24 +2219,26 @@ export function XhsMyNotesPage() {
               min={0}
               max={100000}
               value={noTrafficThresholds.max_browse}
-              onChange={(value) =>
+              onChange={(value) => {
                 setNoTrafficThresholds((prev) => ({
                   ...prev,
                   max_browse: Number(value) || 0,
-                }))
-              }
+                }));
+                setNoTrafficPage(1); // 改条件回第 1 页（同 note_type 的注释）
+              }}
             />
             <Text style={{ fontSize: 13 }}>支付订单 ≤</Text>
             <InputNumber
               min={0}
               max={100000}
               value={noTrafficThresholds.max_pay_order}
-              onChange={(value) =>
+              onChange={(value) => {
                 setNoTrafficThresholds((prev) => ({
                   ...prev,
                   max_pay_order: Number(value) || 0,
-                }))
-              }
+                }));
+                setNoTrafficPage(1); // 改条件回第 1 页（同 note_type 的注释）
+              }}
             />
             <Text style={{ fontSize: 13 }}>支付金额 ≤</Text>
             <InputNumber
@@ -2031,12 +2246,13 @@ export function XhsMyNotesPage() {
               max={10000000}
               step={0.01}
               value={noTrafficThresholds.max_pay_gmv}
-              onChange={(value) =>
+              onChange={(value) => {
                 setNoTrafficThresholds((prev) => ({
                   ...prev,
                   max_pay_gmv: Number(value) || 0,
-                }))
-              }
+                }));
+                setNoTrafficPage(1); // 改条件回第 1 页（同 note_type 的注释）
+              }}
             />
           </Space>
           {noTrafficCoverage && (
@@ -2053,50 +2269,229 @@ export function XhsMyNotesPage() {
               }
             />
           )}
-          {noTrafficLoading ? (
-            <div style={{ textAlign: "center", padding: "32px 0" }}>
-              <Spin indicator={<LoadingOutlined spin />} />{" "}
-              <Text type="secondary">正在本地查询候选…</Text>
+          </div>
+          {/* 候选列表：表格 + **表内滚动**（用户口径「笔记列表表格内滚动」）。
+              `flex: 1 + minHeight: 0` 是 flex 容器内出现滚动条的前提 ——
+              `minHeight` 不给 0 的话，表格会把父容器撑高、滚到弹窗外层去。 */}
+          <div
+            style={{
+              flex: 1,
+              minHeight: 0,
+              display: "flex",
+              flexDirection: "column",
+              border: `1px solid ${p.border}`,
+              borderRadius: 8,
+              overflow: "hidden",
+            }}
+          >
+            <div
+              style={{
+                padding: "8px 12px",
+                borderBottom: `1px solid ${p.border}`,
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+              }}
+            >
+              <Text strong style={{ fontSize: 13 }}>
+                候选笔记
+              </Text>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {noTrafficTotal
+                  ? `共 ${noTrafficTotal} 条 · 已选 ${noTrafficSelected.length} 条`
+                  : "尚未预览"}
+              </Text>
             </div>
-          ) : noTrafficCandidates.length ? (
-            <Space direction="vertical" size={6} style={{ width: "100%" }}>
-              {noTrafficCandidates.map((candidate) => (
-                <Card key={candidate.note_id} size="small">
-                  <Space align="start" style={{ width: "100%" }}>
-                    {candidate.cover && (
-                      <img
-                        src={candidate.cover}
-                        alt=""
-                        style={{
-                          width: 48,
-                          height: 48,
-                          objectFit: "cover",
-                          borderRadius: 6,
-                        }}
-                      />
-                    )}
-                    <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ flex: 1, minHeight: 0 }}>
+            {noTrafficLoading ? (
+              <div style={{ textAlign: "center", padding: "32px 0" }}>
+                <Spin indicator={<LoadingOutlined spin />} />{" "}
+                <Text type="secondary">正在本地查询候选…</Text>
+              </div>
+            ) : (
+              <Table<NoTrafficCandidate>
+                size="small"
+                rowKey="note_id"
+                // 勾选（「清理指定笔记」）：跨页保留 —— 用户在第 1 页勾了两篇、
+                // 翻到第 2 页再勾一篇，点清理应该删 3 篇，不是只删当页的。
+                rowSelection={{
+                  selectedRowKeys: noTrafficSelected,
+                  onChange: (keys) => setNoTrafficSelected(keys as string[]),
+                  // 不做「全选当前页」以外的全选（用户既有偏好：有上限的多选不设全选按钮）
+                  columnWidth: 42,
+                }}
+                // 缺值一律 `—`，**不渲染 0**（「读不到」≠「读到 0」，硬约束⑤）
+                dataSource={noTrafficCandidates}
+                // 分页在后端（本地查询也要按页取，否则 3000+ 条候选会一次渲染完）。
+                // 页码/页大小走受控值，改条件时由调用方显式回第 1 页。
+                pagination={{
+                  current: noTrafficPage,
+                  pageSize: noTrafficPageSize,
+                  total: noTrafficTotal,
+                  showSizeChanger: true,
+                  pageSizeOptions: [10, 20, 50, 100],
+                  size: "small",
+                  showTotal: (total: number) => `共 ${total} 篇候选`,
+                  onChange: (nextPage: number, nextSize: number) => {
+                    const sizeChanged = nextSize !== noTrafficPageSize;
+                    setNoTrafficPageSize(nextSize);
+                    void handlePreviewNoTraffic(sizeChanged ? 1 : nextPage);
+                  },
+                }}
+                // `y` 交给 antd 需要一个具体长度，而外层 `.ant-table-body` 已经是
+                // flex 撑满的 ⇒ 用 `max-content` 高度的容器配 `flex: 1` 会打架，
+                // 所以这里仍给长度，但**按视口算**（不写死像素）：
+                // 70vh 减去「弹窗标题 + 不压缩的筛选区 + 表头 + 分页器」的实测高度。
+                scroll={{ y: "calc(70vh - 420px)" }}
+                locale={{
+                  emptyText: (
+                    <Empty description="先点「预览候选」查看符合条件的笔记" />
+                  ),
+                }}
+                columns={[
+                  {
+                    title: "封面",
+                    dataIndex: "cover",
+                    width: 76,
+                    render: (cover: string) =>
+                      cover ? (
+                        <img
+                          src={cover}
+                          alt=""
+                          style={{
+                            width: 48,
+                            height: 48,
+                            objectFit: "cover",
+                            borderRadius: 6,
+                          }}
+                        />
+                      ) : (
+                        <Text type="secondary">—</Text>
+                      ),
+                  },
+                  {
+                    title: "标题",
+                    dataIndex: "title",
+                    render: (title: string) => (
                       <Text ellipsis style={{ fontSize: 13 }}>
-                        {candidate.title || "（无标题）"}
+                        {title || "（无标题）"}
                       </Text>
-                      <div>
-                        <Text type="secondary" style={{ fontSize: 12 }}>
-                          阅读 {candidate.browse_num ?? "—"} · 支付订单{" "}
-                          {candidate.pay_order_cnt ?? "—"} · 支付金额{" "}
-                          {candidate.pay_gmv ?? "—"}
-                        </Text>
-                      </div>
-                    </div>
-                  </Space>
-                </Card>
-              ))}
-            </Space>
-          ) : (
-            !noTrafficTotal && (
-              <Empty description="先点「预览候选」查看符合条件的笔记" />
-            )
-          )}
-        </Space>
+                    ),
+                  },
+                  {
+                    title: "阅读量",
+                    dataIndex: "browse_num",
+                    width: 100,
+                    align: "right",
+                    render: (value: number | null) => numberCell(value),
+                  },
+                  {
+                    title: "支付订单",
+                    dataIndex: "pay_order_cnt",
+                    width: 100,
+                    align: "right",
+                    render: (value: number | null) => numberCell(value),
+                  },
+                  {
+                    title: "支付金额",
+                    dataIndex: "pay_gmv",
+                    width: 110,
+                    align: "right",
+                    render: (value: number | null) => numberCell(value),
+                  },
+                ]}
+              />
+            )}
+            </div>
+          </div>
+        </div>
+      </Modal>
+
+      {/* 清理日志详情（用户口径「查询清理无流量笔记日志详情按钮，弹窗列表展示该
+          日志记录」）。数据源 = 独立表 `no_traffic_cleanup_logs`，不随队列记录
+          清理消失（客户口径「日志表独立」）。 */}
+      <Modal
+        centered
+        open={cleanupLogOpen}
+        title="清理无流量笔记 · 操作日志"
+        width="70vw"
+        onCancel={() => setCleanupLogOpen(false)}
+        footer={
+          <Space>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              共 {cleanupLogTotal} 次
+            </Text>
+            <Button onClick={() => setCleanupLogOpen(false)}>关 闭</Button>
+          </Space>
+        }
+      >
+        <Table<NoTrafficCleanupLogItem>
+          rowKey={(row) => String(row.id)}
+          size="small"
+          loading={cleanupLogLoading}
+          dataSource={cleanupLogRows}
+          pagination={{
+            current: cleanupLogPage,
+            pageSize: 20,
+            total: cleanupLogTotal,
+            showSizeChanger: false,
+            onChange: (page) => void loadCleanupLogs(page),
+          }}
+          locale={{ emptyText: "还没有清理记录" }}
+          scroll={{ x: 1100 }}
+          columns={[
+            {
+              title: "操作时间",
+              dataIndex: "created_at",
+              width: 160,
+              render: (value: string | null) => (value ? value.replace("T", " ").slice(0, 19) : "—"),
+            },
+            {
+              title: "账号",
+              dataIndex: "account_name",
+              width: 140,
+              // ⚠️ 缺名兜底**不用 `账号 #${id}`** 那种形态：仓库有一条按文件生效的
+              //    守卫（`test_account_dropdowns_show_only_the_account_name`）拦这个
+              //    标记，它是为「下拉标签不许拼 id」立的；这里同样不该拼。
+              render: (value: string, row) => value || (row.account_id ? `账号 ${row.account_id}` : "—"),
+            },
+            {
+              title: "状态",
+              dataIndex: "status",
+              width: 90,
+              render: (value: string) => {
+                const map: Record<string, { text: string; color: string }> = {
+                  running: { text: "执行中", color: "blue" },
+                  done: { text: "完成", color: "green" },
+                  failed: { text: "有失败", color: "red" },
+                };
+                const hit = map[value] ?? { text: value || "—", color: "default" };
+                return <Tag color={hit.color}>{hit.text}</Tag>;
+              },
+            },
+            {
+              title: "清理前 / 后",
+              key: "range",
+              width: 130,
+              render: (_, row) => `${row.before_total} → ${row.after_total}`,
+            },
+            { title: "删除", dataIndex: "deleted", width: 70, align: "right" },
+            { title: "跳过", dataIndex: "skipped", width: 70, align: "right" },
+            {
+              title: "失败",
+              dataIndex: "failed",
+              width: 70,
+              align: "right",
+              render: (value: number) =>
+                value ? <Text type="danger">{value}</Text> : <Text type="secondary">0</Text>,
+            },
+            {
+              title: "失败原因",
+              dataIndex: "reason",
+              render: (value: string) => value || "—",
+            },
+          ]}
+        />
       </Modal>
     </div>
   );

@@ -156,102 +156,36 @@ def _ark_item(item_id: str, title: str, **overrides) -> dict:
     return base
 
 
-class TestGroupCrud:
-    """分组 CRUD + 跨账号计数（设计 20 §2.1 端点 1–4）。"""
+class TestProductGroupsRemoved:
+    """**分组已彻底退场**（2026-10-05 用户口径「彻底移除商品分组相关逻辑」）。
 
-    def test_create_rename_delete_with_release_count(self, ctx):
-        headers, ids, db_factory = ctx.headers, ctx.ids, ctx.db_factory
+    ⚠️ 原 `TestGroupCrud` 四条的载体（4 个 CRUD 端点 + `product_groups` 表 +
+    `shop_products.group_id` 列）**都不存在了**，所以那四条不是「改判据」而是
+    **没有可断言的实现** ⇒ 整类删除，换成这一条「退场守卫」：
+    路径必须回 410 墓碑（不是 404 —— 404 会让前端把它当「路由写错」而不是「功能没了」），
+    且 ORM metadata 里不许再有那张表（`create_all` 会把迁移已 drop 的表建回来，
+    2026-10-01 v2.0 的 `ModelConfig` 就踩过这个坑）。
 
-        created = ctx.client.post(
-            "/api/xhs/qianfan/product-groups", json={"name": "春季上新"}, headers=headers
-        )
-        assert created.status_code == 201, created.text
-        gid = created.json()["id"]
-        assert created.json()["name"] == "春季上新"
+    ⚠️ 请求函数 / 类型 / 前端筛选下拉的退场由 `verify_doc_counts.py` 与
+    `tsc --noEmit` 兜（它们不在这里断言）。
+    """
 
-        listed = ctx.client.get("/api/xhs/qianfan/product-groups", headers=headers)
-        assert listed.status_code == 200
-        assert [g["id"] for g in listed.json()["items"]] == [gid]
-
-        renamed = ctx.client.patch(
-            f"/api/xhs/qianfan/product-groups/{gid}", json={"name": "夏季上新"}, headers=headers
-        )
-        assert renamed.status_code == 200, renamed.text
-        assert renamed.json()["name"] == "夏季上新"
-
-        # 挂两件商品进分组，删分组必须报告影响面（released = 2）
-        _add_product(db_factory, ids["a"], "ITEM-1", group_id=gid)
-        _add_product(db_factory, ids["a"], "ITEM-2", group_id=gid)
-        deleted = ctx.client.delete(f"/api/xhs/qianfan/product-groups/{gid}", headers=headers)
-        assert deleted.status_code == 200, deleted.text
-        assert deleted.json()["released"] == 2
-
-        # ⚠️ 商品一件不删，只是没了分组（分组是弱关联）
-        db = db_factory()
-        try:
-            rows = db.scalars(select(ShopProduct)).all()
-            assert len(rows) == 2
-            assert all(r.group_id is None for r in rows)
-        finally:
-            db.close()
-
-    def test_duplicate_name_conflicts_not_silently_overwritten(self, ctx):
+    def test_group_endpoints_are_tombstoned(self, ctx):
         headers = ctx.headers
-        first = ctx.client.post(
-            "/api/xhs/qianfan/product-groups", json={"name": "重名组"}, headers=headers
-        )
-        assert first.status_code == 201
-
-        again = ctx.client.post(
-            "/api/xhs/qianfan/product-groups", json={"name": "重名组"}, headers=headers
-        )
-        assert again.status_code == 409, again.text
-        # 建完重名之后仍然只有一行（不静默覆盖 = 不产生第二行也不改第一行）
-        listed = ctx.client.get("/api/xhs/qianfan/product-groups", headers=headers).json()
-        assert len(listed["items"]) == 1
-
-    def test_other_users_group_is_invisible(self, ctx):
-        """跨用户隔离：B 动 A 的分组 ⇒ 404（不是 403、不是 200）。"""
-        headers, intruder_headers = ctx.headers, ctx.intruder_headers
-        gid = ctx.client.post(
-            "/api/xhs/qianfan/product-groups", json={"name": "A的组"}, headers=headers
-        ).json()["id"]
-
         assert (
-            ctx.client.patch(
-                f"/api/xhs/qianfan/product-groups/{gid}",
-                json={"name": "改别人的"},
-                headers=intruder_headers,
+            ctx.client.get("/api/xhs/qianfan/product-groups", headers=headers).status_code
+            == 410
+        )
+        assert (
+            ctx.client.post(
+                "/api/xhs/qianfan/product-groups", json={"name": "x"}, headers=headers
             ).status_code
-            == 404
-        )
-        assert (
-            ctx.client.delete(
-                f"/api/xhs/qianfan/product-groups/{gid}", headers=intruder_headers
-            ).status_code
-            == 404
-        )
-        assert (
-            ctx.client.get("/api/xhs/qianfan/product-groups", headers=intruder_headers).json()["items"]
-            == []
+            == 410
         )
 
-    def test_product_count_aggregates_across_own_accounts(self, ctx):
-        """`product_count` 数的是**该用户全部账号**的商品（变异点①）。
-
-        ⚠️ 变异：改成「只数当前账号」⇒ 本用例必红（账号 B 那件漏计）。
-        """
-        headers, ids, db_factory = ctx.headers, ctx.ids, ctx.db_factory
-        gid = ctx.client.post(
-            "/api/xhs/qianfan/product-groups", json={"name": "跨账号组"}, headers=headers
-        ).json()["id"]
-
-        _add_product(db_factory, ids["a"], "ITEM-A", group_id=gid)
-        _add_product(db_factory, ids["b"], "ITEM-B", group_id=gid)
-
-        listed = ctx.client.get("/api/xhs/qianfan/product-groups", headers=headers).json()
-        row = next(g for g in listed["items"] if g["id"] == gid)
-        assert row["product_count"] == 2, "账号 A + 账号 B 各一件"
+    #: ⚠️ 表 / 列的退场判据**不在这里**再断言一遍 —— 它们是 `TestGuards`
+    #: 里两条同源守卫（`test_product_groups_table_is_not_registered_in_metadata`
+    #: 与 `test_shop_products_has_m4_columns`），一处实现一处断言（DEF-044）。
 
 
 class TestProductEdit:
@@ -264,23 +198,22 @@ class TestProductEdit:
         清空 ⇒ 本用例第一段必红。
         """
         headers, ids, db_factory = ctx.headers, ctx.ids, ctx.db_factory
-        gid = ctx.client.post(
-            "/api/xhs/qianfan/product-groups", json={"name": "组1"}, headers=headers
-        ).json()["id"]
         _add_product(db_factory, ids["a"], "ITEM-1", ai_title="原标题", ai_selling_point="原卖点")
 
-        # ① 只传 group_id ⇒ 另外两项**保持原值**（不传 = 不动）
-        only_group = ctx.client.patch(
+        # ① 只传 ai_title ⇒ 另一项**保持原值**（不传 = 不动）
+        #
+        #    ⚠️ 2026-10-05：原第一段用 `group_id` 做「省略键」的载体，分组退场后
+        #    改成 `ai_selling_point`（同一语义，换一个还存在的列）。
+        only_title = ctx.client.patch(
             "/api/xhs/qianfan/items/edit",
-            json={"platform_account_id": ids["a"], "item_id": "ITEM-1", "group_id": gid},
+            json={"platform_account_id": ids["a"], "item_id": "ITEM-1", "ai_title": "新标题"},
             headers=headers,
         )
-        assert only_group.status_code == 200, only_group.text
-        body = only_group.json()
-        assert body["group_id"] == gid
-        assert body["ai_title"] == "原标题", "省略的键必须保持原值"
-        assert body["ai_selling_point"] == "原卖点"
-        assert body["updated"] == ["group_id"]
+        assert only_title.status_code == 200, only_title.text
+        body = only_title.json()
+        assert body["ai_title"] == "新标题"
+        assert body["ai_selling_point"] == "原卖点", "省略的键必须保持原值"
+        assert body["updated"] == ["ai_title"]
 
         # ② 显式传 null ⇒ 清空
         cleared = ctx.client.patch(
@@ -325,20 +258,22 @@ class TestProductEdit:
         )
         assert response.status_code == 404, response.text
 
-    def test_group_id_must_belong_to_caller(self, ctx):
-        """把商品挂到**别人的分组 id** ⇒ 404，不静默收下。"""
-        headers, intruder_headers, ids, db_factory = ctx.headers, ctx.intruder_headers, ctx.ids, ctx.db_factory
-        foreign_gid = ctx.client.post(
-            "/api/xhs/qianfan/product-groups", json={"name": "别人的组"}, headers=intruder_headers
-        ).json()["id"]
+    def test_edit_rejects_unknown_key(self, ctx):
+        """**已退场的 `group_id` 不许再被收下**（2026-10-05 分组彻底移除）。
+
+        ⚠️ 这是 `_UNSET` sentinel 之外的另一半保证：`extra="forbid"` ⇒ 前端若还留着
+        旧代码发 `group_id`，真机会拿到 422（结构化），而不是被**静默忽略**
+        （静默忽略 = 用户以为改了分组、其实什么都没发生）。
+        """
+        headers, ids, db_factory = ctx.headers, ctx.ids, ctx.db_factory
         _add_product(db_factory, ids["a"], "ITEM-1")
 
         response = ctx.client.patch(
             "/api/xhs/qianfan/items/edit",
-            json={"platform_account_id": ids["a"], "item_id": "ITEM-1", "group_id": foreign_gid},
+            json={"platform_account_id": ids["a"], "item_id": "ITEM-1", "group_id": 7},
             headers=headers,
         )
-        assert response.status_code == 404, response.text
+        assert response.status_code == 422, response.text
 
 
 class TestExport:
@@ -495,17 +430,20 @@ class TestPolish:
 class TestGuards:
     """结构守卫（设计 20 §6 最后一行 + 变异点④）。"""
 
-    def test_product_groups_table_registered_in_metadata(self):
-        """`product_groups` 必须在 `Base.metadata`（防 ORM 类漏建 ⇒ 与迁移分叉）。"""
-        assert "product_groups" in Base.metadata.tables
-        assert {"id", "user_id", "name"} <= set(
-            Base.metadata.tables["product_groups"].columns.keys()
-        )
+    def test_product_groups_table_is_not_registered_in_metadata(self):
+        """**反向**守卫：`product_groups` **不许**在 `Base.metadata`。
+
+        ⚠️ 2026-10-05 分组彻底移除 —— 原判据是「必须在」，现在翻成「必须不在」。
+        理由同 v2.0 的 `ModelConfig`：ORM 类不删 ⇒ `create_all()` 会把迁移已 drop
+        的表建回来（测试里重建、真机上是「删了又回来」）。
+        """
+        assert "product_groups" not in Base.metadata.tables
 
     def test_shop_products_has_m4_columns(self):
-        """`shop_products` 加的三列必须都在。"""
+        """`shop_products` 的编辑列必须都在（`group_id` 已退场，2026-10-05）。"""
         cols = set(Base.metadata.tables["shop_products"].columns.keys())
-        assert {"group_id", "ai_title", "ai_selling_point"} <= cols
+        assert {"ai_title", "ai_selling_point"} <= cols
+        assert "group_id" not in cols, "`group_id` 已随迁移 `h1i2j3k4l5m6` 删除"
 
     def test_polish_chain_does_not_bypass_business_provider(self):
         """润色链路**不得旁路直连上游**（变异点④的承重面）。

@@ -233,7 +233,14 @@ export function WorkspaceShell({
             <Avatar size={28} style={{ background: "#1668dc", fontSize: 12, cursor: "default" }}>{(auth.user?.username ?? "U")[0].toUpperCase()}</Avatar>
           </Space>
         </Header>
-        <Content style={{ padding: 24, minHeight: "calc(100vh - 48px)", overflow: "auto" }}>
+        {/*
+          内容区内边距 = **15px**（2026-10-05 用户口径「内容区域与菜单边框，间距太大了，
+          上和左间距统一 15px 即可」）。
+          ⚠️ 统一的是**上 / 左**两处：`padding: "15px 24px 24px 15px"` ——
+          左（与 Sider 相邻）与上（与 48px 顶栏相邻）都收到 15px；右 / 下保持 24px，
+          否则页面底部最后一张卡会贴着窗口下沿、右侧表格列也会贴边裁掉滚动条。
+        */}
+        <Content style={{ padding: "15px 24px 24px 15px", minHeight: "calc(100vh - 48px)", overflow: "auto" }}>
           {children}
         </Content>
       </Layout>

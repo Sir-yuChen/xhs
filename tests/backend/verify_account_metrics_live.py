@@ -4,13 +4,13 @@
 并且整条链路走 HTTP（TestClient 打到 FastAPI），与前端看到的行为一致。
 
 安全边界：
-  * 用 `data/spider_xhs.db` 的**副本**（`.workbuddy/tmp/verify_metrics.db`），
+  * 用 `data/spider_xhs.db` 的**副本**（`.hermes/tmp/verify_metrics.db`），
     真实库只读不写；
   * 只读请求，无写操作（发布/删除一律不碰）；
   * 请求数有界：otherinfo ≤ 3 次 + 三份列表各 1 次 + 搜索 1 次。
 
 用法：
-    PYTHONPATH=. python .workbuddy/tmp/verify_metrics_live.py
+    PYTHONPATH=. python .hermes/tmp/verify_metrics_live.py
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 
 def main() -> int:
     source = ROOT / "data" / "spider_xhs.db"
-    target = ROOT / ".workbuddy" / "tmp" / "verify_metrics.db"
+    target = ROOT / ".hermes" / "tmp" / "verify_metrics.db"
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(source, target)
 

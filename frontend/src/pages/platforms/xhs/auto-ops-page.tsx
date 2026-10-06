@@ -32,7 +32,6 @@ import {
 } from "antd";
 import { useEffect, useState } from "react";
 
-import { PageHeader } from "../../../components/layout/app-shell";
 import { useThemePalette } from "../../../app/providers";
 import { ScheduleFields } from "../../../components/schedule/schedule-fields";
 import {
@@ -257,18 +256,19 @@ export function AutoOpsPage() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <PageHeader
-        eyebrow="XHS Auto Operations"
-        title="自动运营"
-        description="设置关键词、自动抓取热门笔记、AI 改写后自动创建发布任务，实现全自动内容生产管线。"
-        action={
-          <Button icon={<ReloadOutlined />} onClick={loadData} loading={isLoading}>
-            刷新
-          </Button>
-        }
-      />
+      {/* 2026-10-05 用户口径「移除所有页面页面头」：原「XHS Auto Operations / 自动运营 /
+          管线说明」三行整块移除。本页是**全宽卡网格**（无「主卡」可挂 extra），
+          刷新是用户自己的操作工具 ⇒ 随页头一起移除；自动运营任务由后端定时驱动，
+          进页面本来就会重新拉取（首查），删掉不丢任何能力。 */}
 
-      {/* Task List */}
+      {/* 2026-10-05 页头移除后，「刷新」改为**页首右对齐工具行**（用户口径「按钮功能先保留，
+          位置你来决定」）：本页三态（加载 / 空态 / 任务网格）没有一张常驻主卡可挂 extra，
+          挂在任何一张里都会在另外两态消失 ⇒ 独立成一行，三态下位置恒定、占高仅一行。 */}
+      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
+        <Button icon={<ReloadOutlined />} onClick={loadData} loading={isLoading}>
+          刷新
+        </Button>
+      </div>
       {isLoading ? (
         <Card style={panelStyle} styles={{ body: cardBodyStyle }}>
           <div style={{ textAlign: "center", padding: 48 }}>

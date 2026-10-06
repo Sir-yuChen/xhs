@@ -303,7 +303,7 @@ export function LlmGenerateModal({
               type="info"
               showIcon
               message="参考图自动取商品的台账首图"
-              description="不用手动填 URL —— 后端按商品 ID 从本地台账取图（避免任意 URL 下载）。商品没有图时会报缺，不会凭空生成。"
+              description="无需填 URL（后端按商品 ID 取本地台账的图）；没有图会报缺，不会凭空生成。"
             />
           )}
 
@@ -346,7 +346,7 @@ export function LlmGenerateModal({
                 type="warning"
                 showIcon
                 message="视频是异步任务，可能等几分钟"
-                description="提交后由后台轮询上游（最长 10 分钟）；视频生成失败不影响正文落库 —— 笔记照常产出，只是没有视频。"
+                description="提交后后台轮询（最长 10 分钟）；视频失败不影响正文落库。"
               />
             </>
           )}

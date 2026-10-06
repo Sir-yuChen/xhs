@@ -121,7 +121,9 @@ def test_xhs_adapters_isolate_sdk_calls_from_broken_system_proxy():
 
 
 def test_crawler_page_exports_spider_style_excel():
-    source = open("frontend/src/pages/platforms/xhs/crawler-page.tsx", encoding="utf-8").read()
+    # 2026-10-04 设计 21 切片 B：crawler-page.tsx 并入「笔记发现 → 批量抓取」，
+    # 页面内容面板化为 bulk-crawl-panel.tsx（Excel 导出逻辑随迁）。
+    source = open("frontend/src/pages/platforms/xhs/bulk-crawl-panel.tsx", encoding="utf-8").read()
 
     assert "noteExcelHeaders" in source
     assert "笔记id" in source
@@ -130,7 +132,7 @@ def test_crawler_page_exports_spider_style_excel():
 
 
 def test_crawler_page_uses_antd_table():
-    source = open("frontend/src/pages/platforms/xhs/crawler-page.tsx", encoding="utf-8").read()
+    source = open("frontend/src/pages/platforms/xhs/bulk-crawl-panel.tsx", encoding="utf-8").read()
 
     assert "antd" in source
     assert "Table" in source

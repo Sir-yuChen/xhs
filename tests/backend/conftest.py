@@ -69,6 +69,8 @@ def test_something(api_client, db_factory):
 """
 from __future__ import annotations
 
+import tempfile
+
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Callable
@@ -324,9 +326,86 @@ def db_session(
     后者迟早在某个新用例上漏掉，而漏掉的代价是污染真实数据。
     """
     patch_service_sessions(monkeypatch, db_factory)
+    # DEF-094：素材缩略图的落盘根目录也要搬走 —— 否则「用 db_session + 直调素材服务」
+    # 会读**生产库**的文件夹行、把缩略图原地覆盖到生产 storage（实测事故）。
+    sandbox_material_storage_always()
     session = db_factory()
     yield session
     session.close()
+
+
+def sandbox_material_storage(monkeypatch: Any, root: Path) -> Path:
+    """把**素材缩略图/上传物**的落盘根目录指到 `root`（测试自己的 tmp），返回它。
+
+    ## 为什么必须有这件（DEF-094，2026-10-05 实测事故）
+
+    `Settings.storage_dir` 是**写死的相对路径** `backend/app/storage`，且 `thumbs_dir()`
+    每次调用都现算 —— 于是**任何**调素材扫描的用例都会：
+    ① 读**生产库**里的文件夹行（拿到用户的素材目录，例如 `D:/work/XHS/SCK`），
+    ② 把缩略图**原地覆盖**到生产 storage（`thumbs/{fid}/f{nid}-{nid}.jpg`）。
+
+    实测：只跑一遍素材扫描用例，就把用户素材库里两张缩略图覆盖了
+    （358 → 482 字节）+ 新增一张 —— 页面显示「缩略图取不到」正是这么来的。
+    这与「按 AST 打桩全部 Session 工厂」是同一类债：**隔离必须是夹具的属性，
+    不能靠用例记得去申请**（2026-10-04 那次事故的教训，这里换了条链路重演）。
+
+    ⚠️ 只打桩 `thumbs_dir`（服务模块体内的引用），**不改 `Settings.storage_dir`**：
+    后者同时被导出（`storage/exports`）、发布（`tmp_note_publish`）、生成媒体
+    （`storage/media`）用着，全局搬走会动到别人的真实文件。
+
+    ⚠️ 必须打桩在**服务模块上**：`_make_image_thumb` / 缩略图端点是
+    `from ...material_scan_service import thumbs_dir`（模块级名字），改 `Settings`
+    对它无效。
+    """
+    from backend.app.services import material_scan_service  # noqa: PLC0415
+
+    target = Path(root) / "material_storage"
+    thumbs = target / "materials" / "thumbs"
+    thumbs.mkdir(parents=True, exist_ok=True)
+
+    def _thumbs_dir() -> Path:
+        return thumbs
+
+    # ⚠️ 必须带同一个标记：`db_session` / `api_client` 里的兜底版本靠它判断
+    #    「已经有沙箱了，别再盖一层」。不带标记的话，夹具执行顺序一变
+    #    （兜底后跑）就会把用例自己的 tmp 沙箱顶掉 ⇒ 用例断言落空（实测踩到）。
+    _thumbs_dir._hermes_sandboxed = True  # type: ignore[attr-defined]
+    monkeypatch.setattr(material_scan_service, "thumbs_dir", _thumbs_dir)
+    return target
+
+
+@pytest.fixture()
+def material_storage(tmp_path, monkeypatch) -> Path:
+    """用它的用例 = 「素材落盘写进 tmp_path，不碰生产 storage」。
+
+    没申请它的用例仍可能经 `db_session` 走到素材服务 —— 那条路由
+    `db_session` 自己兜（见该夹具的 body），**两道**都在。
+    """
+    return sandbox_material_storage(monkeypatch, tmp_path)
+
+
+def sandbox_material_storage_always() -> None:
+    """兜底版本：文件系统级一次性隔离（供 `db_session` / `api_client` 用）。
+
+    ⚠️ 它**不接收 `monkeypatch`**（夹具体里的 `monkeypatch` 绑在各自的 tmp 上，
+    这里要的是「进程级隔离」），所以直接 `setattr` —— 被测代码只会把它改成 tmp 下的
+    路径，**不会**改成生产路径，泄漏的方向是安全的。
+    """
+    import tempfile  # noqa: PLC0415
+
+    from backend.app.services import material_scan_service  # noqa: PLC0415
+
+    if getattr(material_scan_service.thumbs_dir, "_hermes_sandboxed", False):
+        return  # 已经是沙箱（夹具版或本函数自己装过）⇒ 不再盖一层
+
+    target = Path(tempfile.mkdtemp(prefix="hermes-material-sandbox-")) / "materials" / "thumbs"
+    target.mkdir(parents=True, exist_ok=True)
+
+    def _thumbs_dir() -> Path:
+        return target
+
+    _thumbs_dir._hermes_sandboxed = True  # type: ignore[attr-defined]
+    material_scan_service.thumbs_dir = _thumbs_dir
 
 
 @pytest.fixture()
@@ -351,6 +430,8 @@ def api_client(db_engine: Engine, monkeypatch):
 
     factory = sessionmaker(autocommit=False, autoflush=False, bind=db_engine)
     patch_service_sessions(monkeypatch, factory)
+    # DEF-094：素材端点（新建文件夹 / 重扫 / 上传 / 缩略图）会落盘 —— 一律搬进 tmp。
+    sandbox_material_storage(monkeypatch, Path(tempfile.mkdtemp(prefix="hermes-material-api-")))
 
     def override_get_db() -> Any:
         db = factory()

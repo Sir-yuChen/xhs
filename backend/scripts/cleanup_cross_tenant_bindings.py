@@ -49,7 +49,7 @@ IntegrityError 换成 409 + 人话。所以本文件保留下来只为**留痕**
     # 指定库（默认 data/spider_xhs.db）
     python backend/scripts/cleanup_cross_tenant_bindings.py --db data/spider_xhs.db
 
-⚠️ **跑之前先备份**：`cp data/spider_xhs.db .workbuddy/tmp/pre_cleanup_backup.db`。
+⚠️ **跑之前先备份**：`cp data/spider_xhs.db .hermes/tmp/pre_cleanup_backup.db`。
 脚本**不做**任何备份（把备份交给调用方，才能保证它一定发生在同一个文件系统上）。
 
 ## 判据（只删**同时满足**以下两条的行）

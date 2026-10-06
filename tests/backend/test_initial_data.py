@@ -540,7 +540,7 @@ def test_build_has_a_positive_assertion_for_every_initial_data_file():
 def test_smoke_test_checks_every_initial_data_file_and_its_rows():
     """冒烟必须：① 文件清单含每个数据文件；② 可解析；③ **库里真的铺了行**。
 
-    判据落在「行」上而不是「文件」上（`.workbuddy/skills/xhs-app-initial-data` §3）：
+    判据落在「行」上而不是「文件」上（`.hermes/skills/xhs-app-initial-data` §3）：
     文件在而没播种 = 用户打开任务中心 / 设置页还是空的。
     """
     smoke_text = SMOKE_TEST_PS1.read_text(encoding="utf-8-sig")

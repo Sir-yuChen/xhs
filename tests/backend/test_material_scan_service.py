@@ -272,3 +272,45 @@ def test_scan_rows_carry_folder_owner(tmp_path: Path, db_session: Any):
 
     row = db_session.scalars(select(MaterialFile)).one()
     assert row.user_id == 7 == folder.user_id
+
+
+# --------------------------------------------------------------------------- #
+# ⑥ 隔离：缩略图必须落进**沙箱**，不许碰生产 storage（DEF-094，2026-10-05）
+# --------------------------------------------------------------------------- #
+def test_scan_writes_thumbs_into_the_sandboxed_root(tmp_path: Path, material_storage, db_session: Any):
+    """扫描产出的缩略图必须落在 (`material_storage`) 里，且**生产 storage 一个字节不动**。
+
+    DEF-094 实测事故：`Settings.storage_dir` 是写死的相对路径，`thumbs_dir()` 每次
+    现算 ⇒ 任何调扫描的用例都会把缩略图**原地覆盖**到 `backend/app/storage/materials/thumbs/`。
+    只跑一遍用例就把用户素材库的两张缩略图改了（358 → 482 字节）。
+
+    ⚠️ 判据用**快照对比**而不是「文件不存在」：夹具库里的行 id 从小整数开始，
+    文件名与生产文件**会撞名**（`f1-1.jpg`），「存在」这件事本身说明不了任何问题 ——
+    真正的判据是**内容/修改时间没被这轮改写**。
+    """
+    prod_dir = Path("backend/app/storage/materials/thumbs/1")
+    before = {
+        p.name: (p.stat().st_size, p.stat().st_mtime_ns)
+        for p in prod_dir.glob("*.jpg")
+    }
+
+    src_dir = tmp_path / "src"
+    _make_image(src_dir / "a.jpg", (300, 200))
+    folder = _seed_folder(db_session, user_id=1, name="t", path=str(src_dir))
+
+    svc.scan_folder(db_session, folder)
+
+    row = db_session.scalars(select(MaterialFile)).one()
+    assert row.thumb_url, "图片必须生成缩略图（url 是端点契约）"
+    fid = folder.id
+    produced = material_storage / "materials" / "thumbs" / str(fid) / f"f{fid}-{row.id}.jpg"
+    assert produced.is_file(), f"缩略图没落进沙箱：{produced}"
+
+    after = {
+        p.name: (p.stat().st_size, p.stat().st_mtime_ns)
+        for p in prod_dir.glob("*.jpg")
+    }
+    changed = {k for k in set(before) | set(after) if before.get(k) != after.get(k)}
+    assert not changed, (
+        f"生产 storage 的缩略图被测试改动了：{sorted(changed)} —— 素材隔离漏了（DEF-094 复现）"
+    )

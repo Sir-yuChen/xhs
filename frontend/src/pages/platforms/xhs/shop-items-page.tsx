@@ -4,14 +4,15 @@ import {
   DeleteOutlined,
   DownloadOutlined,
   EditOutlined,
+  EllipsisOutlined,
   FileAddOutlined,
   PictureOutlined,
   RobotOutlined,
-  ReloadOutlined,
   SearchOutlined,
-  ShoppingOutlined,
   SyncOutlined,
   HistoryOutlined,
+  ArrowUpOutlined,
+  ArrowDownOutlined,
 } from "@ant-design/icons";
 import {
   Alert,
@@ -22,6 +23,7 @@ import {
   DatePicker,
   Descriptions,
   Divider,
+  Dropdown,
   Empty,
   Form,
   Image,
@@ -41,7 +43,6 @@ import {
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import dayjs from "dayjs";
-import type { Dayjs } from "dayjs";
 import type { CSSProperties } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -53,7 +54,6 @@ import {
   exportShopItems,
   fetchAccounts,
   fetchGenerateQueue,
-  fetchProductGroups,
   fetchXhsItemNotes,
   fetchPromptTemplates,
   fetchXhsQianfanBinding,
@@ -65,16 +65,24 @@ import {
   saveDetailImages,
   fetchMaterialFolders,
   fetchItemGenerations,
+  readErrorDetail,
+  syncSpecifiedShopItems,
+  syncShopGoodsStatus,
+  operateShopItems,
+  fetchShopItemOperateResult,
 } from "../../../lib/api";
-import type { GenerateQueueFinishedEntry, GenerateQueueSnapshot } from "../../../lib/api";
+//: ⚠️ 「同步商品」的按钮态判据与账号卡片页**共用同一个** `syncTaskPhase`（需求 5
+//: 「逻辑应与账号卡片页的商品同步UI和逻辑一致，只是多了一个入口」）——
+//: 页面里不重写一份「什么算在跑」，否则两处迟早分叉。
+import { goodsGate, syncTaskPhase } from "../../../lib/sync-gates";
+import type {
+  GenerateQueueFinishedEntry,
+  GenerateQueueSnapshot,
+  SyncNotesOptions,
+} from "../../../lib/api";
 import { yuan } from "../../../lib/format";
 import ProductEditModal from "./product-edit-modal";
-import {
-  ALL_GROUPS_SENTINEL,
-  exportBlockReason,
-  groupFilterOptions,
-  groupFilterParam,
-} from "../../../lib/product-edit";
+import { exportBlockReason } from "../../../lib/product-edit";
 import {
   EMPTY_SHOP_ITEMS_DRAFT,
   FILTER_CACHE_KEYS,
@@ -87,7 +95,10 @@ import {
   type ShopItemsFilterDraft,
 } from "../../../lib/filter-cache";
 import { NoteDetailBody } from "../../../components/platforms/note-detail-modal";
+import { formValuesToQuery, type QueryForm } from "../../../lib/shop-items-query";
 import { LlmGenerateModal } from "./llm-generate-modal";
+import { SyncSpecifiedItemsModal } from "./sync-specified-items-modal";
+import { SyncOptionsModal, type SyncOptions } from "../../../components/platforms/sync-options-modal";
 import { LlmGenerateProgressCard } from "./llm-generate-progress-card";
 import {
   accountLabel,
@@ -95,20 +106,23 @@ import {
   batchDeleteHint,
   DEFAULT_SHOP_ITEMS_PAGE_SIZE,
   DEFAULT_SORT,
-  ledgerPrerequisite,
   MAX_BATCH_DELETE,
   NOTE_COUNT_OP_OPTIONS,
   noteCountFilter,
   normalizeDeleteIds,
-  QIANFAN_PREREQUISITE_HINT,
   resolveSort,
   sanitizeSortState,
   SHOP_ITEMS_PAGE_SIZES,
   SORT_FIELD_BY_COLUMN,
+  MAX_OPERATE_ITEMS,
+  OPERATE_LABELS,
+  batchOperateBlock,
+  batchOperateHint,
   selectableAccounts,
   skuCell,
   sortSummary,
   statusFilterHint,
+  statusTagColor,
   type SortState,
 } from "../../../lib/shop-items-view";
 import type {
@@ -119,10 +133,11 @@ import type {
   XhsItemNote,
   XhsItemNotesResponse,
   XhsLoginChannels,
-  XhsNoteCountOp,
   XhsQianfanBinding,
+  ShopItemOperateEntry,
+  ShopItemOperateResult,
+  ShopItemsSyncResult,
   XhsShopItem,
-  XhsProductGroup,
   XhsShopItemDetail,
   XhsShopItemStatus,
   XhsShopItemsQuery,
@@ -303,6 +318,7 @@ function DetailImageGroupResult({
           })}
         </Space>
       )}
+
     </div>
   );
 }
@@ -513,21 +529,6 @@ async function copyToClipboard(value: string, okText: string, msg: { success: (t
   }
 }
 
-type QueryForm = {
-  keyword?: string;
-  status: XhsShopItemStatus;
-  price_from?: number;
-  price_to?: number;
-  stock_from?: number;
-  stock_to?: number;
-  sales_from?: number;
-  sales_to?: number;
-  /** 创建时间区间（千帆的「创建时间」筛选）。 */
-  create_time_range?: [Dayjs | null, Dayjs | null] | null;
-  /** 挂链笔记数：比较符（默认「小于」）+ 指定篇数（留空 = 不筛）。v1.34 */
-  note_count_op?: XhsNoteCountOp;
-  note_count?: number;
-};
 
 /**
  * 缓存的**草稿 → antd Form 初值**（2026-09-26 「搜索条件落本地缓存」）。
@@ -561,6 +562,10 @@ function draftToFormValues(draft: ShopItemsFilterDraft): QueryForm {
 /**
  * antd Form 值 → 可缓存草稿（`formValuesToDraft` 是 `draftToFormValues` 的逆运算，
  * 两者**成对维护**：形状对不上的值会被 `sanitizeShopItemsDraft` 在校验时丢掉）。
+ *
+ * ⚠️ 它只服务**本地筛选缓存**，**不是请求体** —— 键名故意与后端不同
+ * （缓存里存 `create_from`，请求里必须是 `create_time_from`）。
+ * 请求一律走 `formValuesToQuery()`，别再从这里取字段发出去（DEF-093 就是这么来的）。
  */
 function formValuesToDraft(values: QueryForm): ShopItemsFilterDraft {
   const range = values.create_time_range;
@@ -655,6 +660,114 @@ function renderItemNoteInfo(note: XhsItemNote) {
   );
 }
 
+/**
+ * 「生成记录」面板（2026-10-05 需求 1）。
+ *
+ * ⚠️ 它原来是**独立弹窗**（v2.30 的 `generationsOpen`），现改为 `AI商品图` 弹窗里的
+ * 第二个顶层 Tab —— 用户口径「将商品操作列的生成记录合并到AI商品图弹窗内，使用tab布局」。
+ * 抽成组件（而不是把 JSX 内联进 Tabs）的理由：那段 JSX 有 80 行，内联进已经三层嵌套的
+ * 弹窗里会让人看不出「哪一层属于哪个 Tab」。
+ *
+ * 空态必须**说清为什么空**（老图没有关联，v2.30 之前生成的 `item_id` 为空）——
+ * 干巴巴的「暂无数据」会让用户以为是坏了（缺值口径：不猜、也不沉默）。
+ */
+function GenerationsPanel({
+  item,
+  loading,
+  rows,
+  total,
+}: {
+  item: XhsShopItem | null;
+  loading: boolean;
+  rows: { id: number; url: string; prompt: string; model_name: string; created_at: string }[];
+  total: number;
+}) {
+  if (loading) {
+    return (
+      <div style={{ textAlign: "center", padding: 24 }}>
+        <Spin />
+      </div>
+    );
+  }
+  if (rows.length === 0) {
+    return (
+      <Empty
+        image={Empty.PRESENTED_IMAGE_SIMPLE}
+        description={
+          <span style={{ fontSize: 12 }}>
+            {item ? "该商品还没有 AI 生成记录。" : "打开商品后这里显示它的历次 AI 生成结果。"}
+            <br />
+            （v2.30 之前生成的图没有商品关联，此处不计入 —— 去「生成配置」生成一次即可看到）
+          </span>
+        }
+      />
+    );
+  }
+  return (
+    <>
+      <Text type="secondary" style={{ fontSize: 12 }}>
+        共 {total} 张，按时间倒序
+      </Text>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(6, minmax(0, 1fr))",
+          gap: 10,
+          marginTop: 10,
+        }}
+      >
+        {rows.map((row) => (
+          <div key={row.id}>
+            <div
+              style={{
+                position: "relative",
+                aspectRatio: "1 / 1",
+                background: "rgba(0,0,0,0.03)",
+                borderRadius: 4,
+                overflow: "hidden",
+              }}
+            >
+              {/* ⚠️ 这里**不能复用素材库的 `MaterialThumb`** —— 那个走
+                  `/api/xhs/materials/folders/{id}/thumbs/{file_id}`（需要 token）。
+                  生成记录里的 `url` 是**上游返回的带签名直链**（OSS 预签名，
+                  自带鉴权、有有效期）⇒ 直接 `<img src>` 就行。
+                  ⚠️ 有效期是真实约束：过期的签名会 403 —— 想长期留存要
+                  「保存到素材库」（那时走素材库那套带 token 的取图）。 */}
+              <img
+                src={row.url}
+                alt=""
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  objectFit: "contain",
+                  display: "block",
+                  cursor: "zoom-in",
+                }}
+                onClick={() => {
+                  window.open(row.url, "_blank", "noopener,noreferrer");
+                }}
+              />
+            </div>
+            <Text type="secondary" style={{ fontSize: 11, display: "block" }}>
+              {row.created_at}
+            </Text>
+            <Text type="secondary" style={{ fontSize: 11 }} ellipsis>
+              {row.model_name || "-"}
+            </Text>
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+
+/*
+ * ⚠️ 「同步指定商品」弹窗**已抽到独立文件** `sync-specified-items-modal.tsx`
+ * （2026-10-05）：它自带无限滚动取数与一套结果状态机，留在本文件里会让
+ * 页面的 hook 依赖再长一截。这里只 import 它的组件。
+ * 原内联实现（保留备查，勿恢复）：一个 `Modal` + `Input.TextArea` + 结果 Table。
+ */
+
 export function XhsShopItemsPage() {
   const navigate = useNavigate();
   // 全站消息提醒统一走 antd message（设计 04 §3.6，2026-09-25 用户口径：
@@ -727,13 +840,31 @@ export function XhsShopItemsPage() {
   /** 批量删除进行中（v1.36）：只用来给按钮上 loading，判据本身在 lib（`batchDeleteBlock`）。 */
   const [batchDeleting, setBatchDeleting] = useState(false);
   /**
-   * 「同步商品」按钮态（v2.13，设计 13 §30.3.2）。
+   * 「同步商品」按钮态（v2.13，设计 13 §30.3.2；**2026-10-05 需求 5 改为**首查驱动。
    *
-   * 同步是**后台任务**（全量翻页 + 限流等待，可能几十秒到几分钟）⇒ 按钮只表示
-   * 「这次点击的触发请求在途」，**不代表同步跑完**。跑完与否看台账「同步于」时间
-   * 与账号矩阵的任务日志 —— 不在这里假装有进度（进度卡的判据在后端任务行）。
+   * ⚠️ 原先是「点击时 true、触发请求返回就 false」的**一次性 loading** —— 那表达的是
+   * 「这个 HTTP 请求在途」，而同步本身是后台任务（全量翻页 + 限流等待，几十秒到几分钟）。
+   * 用户看到的是「点了转一下、然后按钮恢复」，完全不知道同步还在跑。
+   *
+   * 现在与**账号卡片页的商品同步按钮逐字同口径**（需求 5「逻辑应与账号卡片页的商品
+   * 同步UI和逻辑一致，只是多了一个入口」）：
+   * * `goodsSyncIds` —— 该账号此刻**有进行中的同步任务**（首查 + 5s 轮询维护）；
+   * * `goodsSyncing` —— **只有**触发请求在途的那一小会儿（防连点）。
+   * 按钮文案取两者：任务在跑 ⇒ 「同步中…」，否则「同步商品」。
    */
+  const [goodsSyncIds, setGoodsSyncIds] = useState<Set<number>>(() => new Set());
+  const goodsSyncPollRef = useRef<number | null>(null);
   const [goodsSyncing, setGoodsSyncing] = useState(false);
+  /** ark 门禁提示：千帆会话确定不可用时给一句准话（**不**打开选项弹窗）。
+   *  判据 = `goodsGate`（与账号卡片页同一把尺子，需求 5）。 */
+  const [arkPromptOpen, setArkPromptOpen] = useState(false);
+  /** 这次「批量同步商品信息」要按 ID 同步的那批（主表勾选；空 ⇒ 走整店）。 */
+  const selectedForSync = normalizeDeleteIds(selectedItemIds);
+  /** 行内「同步商品信息」点的那一件（非空 ⇒ 弹窗只针对它，打开即同步）。 */
+  const [syncSingleTarget, setSyncSingleTarget] = useState<string | null>(null);
+  /** 该账号是否**有进行中的同步商品任务**（首查 + 5s 轮询维护）。
+   *  2026-10-06 用户口径：「存在同步商品的任务时同步商品按钮不支持点击，应显示为商品同步中」。 */
+  const goodsSyncRunning = selectedAccountId !== null && goodsSyncIds.has(selectedAccountId);
   // LLM 生成（T9，设计 17 §7.4）：与一期「生成笔记」是两个队列，状态各自独立。
   const [llmGenerateOpen, setLlmGenerateOpen] = useState(false);
   const [llmGenerateItem, setLlmGenerateItem] = useState<XhsShopItem | null>(null);
@@ -768,10 +899,30 @@ export function XhsShopItemsPage() {
    * 不拆成两个 state（拆了就会出现「打开着但不指向任何商品」的中间态）。
    */
   const [editingItem, setEditingItem] = useState<XhsShopItem | null>(null);
-  const [groups, setGroups] = useState<XhsProductGroup[]>([]);
-  /** 分组筛选值：`ALL_GROUPS_SENTINEL` = 不筛（默认）。 */
-  const [groupFilter, setGroupFilter] = useState<number>(ALL_GROUPS_SENTINEL);
+  // ⚠️ 分组状态（`groups` / `groupFilter`）已随「彻底移除商品分组」退场（2026-10-05）。
   const [exporting, setExporting] = useState(false);
+  // ------------------------------------------------------------------ #
+  // 商品操作（2026-10-05 需求 7/8）：批量上架 / 下架 / 删除**平台商品**。
+  // 走手动触发式任务 ⇒ 状态是「任务号 + 轮询到的逐条结果」，不是一次请求的返回值。
+  // ------------------------------------------------------------------ #
+  /** 正在提交的操作动作（按钮转圈；`null` = 空闲）。 */
+  const [operatingAction, setOperatingAction] = useState<string | null>(null);
+  /** 操作结果弹窗（提交成功即打开，轮询到全终态停）。 */
+  const [operateTask, setOperateTask] = useState<ShopItemOperateResult | null>(null);
+  const operatePollRef = useRef<number | null>(null);
+  /**
+   * 商品操作结果弹窗的**耗时统计**（2026-10-06 用户口径：「结果等待弹窗要加蒙版
+   * 统计耗时，避免结果弹窗关闭，执行结果返回后再支持弹窗关闭」）。
+   *
+   * ⚠️ 耗时是**前端自计时**（`startedAt` ~ 现在），不是后端下发的 —— 后端只给
+   * 任务进度（`executed` / `total`）。两边都不假装对方的数据。
+   * ⚠️ 非终态时每 1 秒重渲染一次（秒表要动）；终态即停（不留定时器）。
+   */
+  const operateStartedAtRef = useRef<number | null>(null);
+  const operateTickRef = useRef<number | null>(null);
+  const [operateElapsedSec, setOperateElapsedSec] = useState(0);
+  /** 同步指定商品弹窗（需求 6）。 */
+  const [syncItemsOpen, setSyncItemsOpen] = useState(false);
   const [generations, setGenerations] = useState<
     { id: number; url: string; prompt: string; model_name: string; created_at: string }[]
   >([]);
@@ -833,6 +984,14 @@ export function XhsShopItemsPage() {
     group: string;
     index: number;
   } | null>(null);
+  /**
+   * 2026-10-05（需求 1）：`AI商品图` 弹窗的**顶层** Tab —— 「生成配置」/「生成记录」。
+   *
+   * ⚠️ 与下面的 `activeGroup`（主图 / 详情图）是**两层不同的 Tab**：
+   * 顶层分「做什么」（配置 vs 看历史），`activeGroup` 分「生成哪一类图」。
+   * 合成一层会让「看生成记录」和「生成详情图」变成互斥的两个状态（用户没法边看边配）。
+   */
+  const [detailImageTab, setDetailImageTab] = useState<"config" | "generations">("config");
   /** v2.22：当前 Tab（主图 / 详情图**完全拆开**，各自一套配置）。 */
   const [activeGroup, setActiveGroup] = useState<"product" | "detail">("product");
   /**
@@ -896,37 +1055,13 @@ export function XhsShopItemsPage() {
 
   const load = useCallback(
     async (accountId: number, page = pageNo, size = pageSize, sortArg = sort) => {
-      const values = form.getFieldsValue();
-      const range = values.create_time_range;
-      const query: XhsShopItemsQuery = {
-        platform_account_id: accountId,
-        page_no: page,
-        page_size: size,
-        keyword: values.keyword?.trim() || undefined,
-        status: values.status || "on_shelf",
-        price_from: values.price_from ?? undefined,
-        price_to: values.price_to ?? undefined,
-        stock_from: values.stock_from ?? undefined,
-        stock_to: values.stock_to ?? undefined,
-        sales_from: values.sales_from ?? undefined,
-        sales_to: values.sales_to ?? undefined,
-        // 日期按天传给后端：结束日含当天（后端统一补 23:59:59.999 并转毫秒）
-        create_time_from: range?.[0] ? dayjs(range[0]).format("YYYY-MM-DD") : undefined,
-        create_time_to: range?.[1] ? dayjs(range[1]).format("YYYY-MM-DD") : undefined,
-        // 挂链笔记数（v1.34）：留空 = **不带这个参数**（= 不筛），不是「小于 0」
-        ...noteCountFilter(values.note_count_op, values.note_count),
-        // v1.32：排序由表头箭头驱动（状态在 sort），回服务端排。
-        // v1.36：**无排序态不带这两个参数** —— 让后端用它自己的稳定默认序
-        // （`create_time` 倒序）；antd 三级循环的「取消排序」也落回这里。
-        // 前端自己编一个默认字段（或送空串）都等于替后端做主 = 第二份真相源。
-        ...(sortArg
-          ? { sort_field: sortArg.field, order: sortArg.order === "ascend" ? "asc" : "desc" }
-          : {}),
-        // M4：分组筛选（`undefined` = 不筛；`0` = 未分组）
-        ...(groupFilterParam(groupFilter) !== undefined
-          ? { group_id: groupFilterParam(groupFilter) as number }
-          : {}),
-      };
+      // DEF-093：列表与导出**共用同一处构造**（`formValuesToQuery`），不在这里另拼一份。
+      const query: XhsShopItemsQuery = formValuesToQuery(form.getFieldsValue(), {
+        accountId,
+        pageNo: page,
+        pageSize: size,
+        sort: sortArg,
+      });
       setLoading(true);
       setErrorText("");
       try {
@@ -940,7 +1075,7 @@ export function XhsShopItemsPage() {
         setLoading(false);
       }
     },
-    [form, pageNo, pageSize, sort, groupFilter]
+    [form, pageNo, pageSize, sort]
   );
 
   /**
@@ -971,34 +1106,16 @@ export function XhsShopItemsPage() {
     if (selectedAccountId) void load(selectedAccountId, 1, pageSize, nextSort);
   }
 
-  /**
-   * 账号 → 三个平台的登录态（**零平台请求**：随账号列表一起下发，设计 13 §18.5）。
-   *
-   * ⚠️ 2026-09-30 用户口径「商品列表页查询的本地数据库，无需校验千帆是否可用」：
-   * 本页是**纯本地台账读**，`ark` 会话可用性**不再拦列表请求**。这个 map 仍保留，
-   * 用途改成「ark 失效时给一行安静说明 / 禁用打平台的按钮」，不再是前置门禁。
-   */
-  const channelsByAccount = useMemo(() => {
-    const map: Record<number, XhsLoginChannels> = {};
-    for (const account of accounts) map[account.id] = account.login_channels || {};
-    return map;
-  }, [accounts]);
-
-  /**
-   * 台账前置校验（`ledgerPrerequisite`）。**ADR-021 + 2026-09-30 口径后 `ok` 恒为
-   * true**（本地读零门禁）—— 保留这个 `useMemo` 是为了让「要不要发列表请求」这个
-   * 决策仍然只有一个改动点；`arkOk` 单独取出来给提示语用。
-   */
-  const prereq = useMemo(
-    () =>
-      ledgerPrerequisite(
-        selectedAccountId === null ? undefined : channelsByAccount[selectedAccountId]
-      ),
-    [selectedAccountId, channelsByAccount]
-  );
-
-  /** 本账号的 `ark`（千帆）会话此刻是否「确定不可用」。 */
-  const arkUnavailable = prereq.reason === "ark_unavailable";
+  /* 2026-10-05 用户口径「商品列表页移除对千帆是否有效的校验和 UI，商品查询的是本地
+     数据库，无需校验账号是否有效」：
+     ① `channelsByAccount`（账号 → 三平台登录态 map）与 `prereq`（`ledgerPrerequisite`
+        前置校验）**整块删除** —— 本页是纯本地台账读（`/items` / `/item-detail` /
+        `/item-notes` 零平台请求），千帆会话可用性既不拦请求、也不该上屏；
+     ② `arkUnavailable`（ark 确定不可用时的告警行）随之删除；
+     ③ 拉列表的 effect 不再按 `prereq.ok` 判（它恒为 true，是道假防线）。
+     ⚠️ lib 里的 `ledgerPrerequisite` / `QIANFAN_PREREQUISITE_HINT` 保留但**本页不再引用**
+        （直删 lib 会连带改 `shop_items_view.cjs` 的 F1–F5 断言 —— 那是 lib 级契约，
+        与本页 UI 解耦；本页不引用即达成「移除校验和 UI」）。 */
 
   useEffect(() => {
     if (selectedAccountId === null) return;
@@ -1014,34 +1131,14 @@ export function XhsShopItemsPage() {
     void loadBinding(selectedAccountId);
   }, [selectedAccountId, loadBinding]);
 
-  /**
-   * 拉分组清单（列表工具栏的分组筛选 + 编辑弹窗共用一份）。
-   *
-   * ⚠️ **不阻塞列表**：分组拉不到就退空（分组是可选的组织方式）。
-   */
-  const loadGroups = useCallback(async () => {
-    try {
-      const result = await fetchProductGroups();
-      setGroups(result.items);
-    } catch {
-      setGroups([]);
-    }
-  }, []);
-
   useEffect(() => {
     if (selectedAccountId === null || !bindingLoaded) return;
-    if (!prereq.ok) return;
     void load(selectedAccountId, pageNo, pageSize);
     // ⚠️ 依赖里**不再有 `binding?.bound`**：切账号时 `binding` 先被清成 null 再回来，
-    // 带上它会让「绑定后拉一页」的语义与实际（零门禁、切账号即拉）不符。
+    // 带上它会让「绑定后拉一页」的语义与实际（切账号即拉）不符。
+    // ⚠️ 2026-10-05 起也**不再有 `prereq.ok`** —— 前置校验已整块移除（本地读本就没有门禁）。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedAccountId, bindingLoaded, prereq.ok]);
-
-  // M4：分组清单随账号切换刷新（筛选下拉 + 编辑弹窗共用）。
-  useEffect(() => {
-    if (selectedAccountId === null) return;
-    void loadGroups();
-  }, [selectedAccountId, loadGroups]);
+  }, [selectedAccountId, bindingLoaded]);
 
   const accountOptions = useMemo(
     () =>
@@ -1279,6 +1376,132 @@ export function XhsShopItemsPage() {
     }
   }
 
+  /**
+   * 批量**商品操作**（上架 / 下架 / 删除平台商品；2026-10-05 需求 7/8）。
+   *
+   * 编排（判据住在 lib，页面只负责「拒绝 → 说明 / 允许 → 二次确认 → 发请求 → 开结果弹窗」）：
+   * 1. 勾选为空 / 超上限 ⇒ **两句话分开说**（压成一句「无法执行」等于让用户自己猜）；
+   * 2. 确认框必须讲清「这是**真实修改平台**」（`batchOperateHint`）；
+   * 3. 提交成功只拿到 `task_id` ⇒ 打开结果弹窗开始轮询 —— **不在这里假装有进度**。
+   */
+  async function handleBatchItemOperate(action: string) {
+    if (!selectedAccountId) return;
+    const block = batchOperateBlock(selectedItemIds);
+    if (block === "empty") {
+      message.info("先勾选要操作的商品");
+      return;
+    }
+    if (block === "too_many") {
+      message.warning(
+        `单次最多操作 ${MAX_OPERATE_ITEMS} 个商品，本次选了 ${normalizeDeleteIds(selectedItemIds).length} 个，请分批操作`
+      );
+      return;
+    }
+    const ids = normalizeDeleteIds(selectedItemIds);
+    const label = OPERATE_LABELS[action] || action;
+    Modal.confirm({
+      centered: true,
+      title: `对 ${ids.length} 个平台商品执行「${label}」？`,
+      content: (
+        <div style={{ whiteSpace: "pre-wrap" }}>{batchOperateHint(action, ids.length)}</div>
+      ),
+      okText: `确认${label}`,
+      cancelText: "取消",
+      okButtonProps: { danger: action === "delete" },
+      onOk: async () => {
+        setOperatingAction(action);
+        try {
+          const result = await operateShopItems(selectedAccountId, action as never, ids);
+          if (result.status === "pending" || result.status === "running") {
+            message.success(`已开始${label} ${ids.length} 个商品（后台逐条执行，结果见下方弹窗）`);
+          }
+          setOperateTask(result);
+          // 有任务号才轮询（`reused` 的既有任务也带 task_id ⇒ 照样接管它的进度）。
+          if (result.task_id) startOperatePolling(result.task_id);
+        } catch (error) {
+          message.error(readErrorDetail(error, `${label}失败`));
+        } finally {
+          setOperatingAction(null);
+        }
+      },
+    });
+  }
+
+  /** 轮询商品操作任务（5s 一轮，终态即停 —— 与三张队列进度卡同一节奏）。 */
+  function startOperatePolling(taskId: number) {
+    stopOperatePolling();
+    //: 秒表从这里起算（每次新操作重置）；1s 一跳，终态由 `pollOperateTask` 停。
+    operateStartedAtRef.current = Date.now();
+    setOperateElapsedSec(0);
+    if (operateTickRef.current !== null) window.clearInterval(operateTickRef.current);
+    operateTickRef.current = window.setInterval(() => {
+      if (operateStartedAtRef.current !== null) {
+        setOperateElapsedSec(Math.floor((Date.now() - operateStartedAtRef.current) / 1000));
+      }
+    }, 1000);
+    operatePollRef.current = window.setInterval(() => {
+      void pollOperateTask(taskId);
+    }, QUEUE_POLL_INTERVAL_MS);
+    void pollOperateTask(taskId);
+  }
+
+  function stopOperatePolling() {
+    if (operatePollRef.current !== null) {
+      window.clearInterval(operatePollRef.current);
+      operatePollRef.current = null;
+    }
+    //: 秒表也要停（任务终态了还继续跳会让用户以为还在跑）。
+    if (operateTickRef.current !== null) {
+      window.clearInterval(operateTickRef.current);
+      operateTickRef.current = null;
+    }
+  }
+
+  /** 非终态 = 结果还没出来 ⇒ 弹窗**不许关**（用户口径「执行结果返回后再支持关闭」）。 */
+  function operateTaskRunning(): boolean {
+    return (
+      operateTask !== null &&
+      (operateTask.status === "pending" || operateTask.status === "running")
+    );
+  }
+
+  /** 弹窗关闭的唯一出口（只在非终态之外被调用 —— 三条关闭路径共用一份收尾）。 */
+  function closeOperateResult() {
+    if (operateTaskRunning()) {
+      //: 兜底：即便某条路径漏判，也不许在结果出来前关掉（用户会丢掉结果）。
+      message.info("操作还在执行，结果返回后即可关闭");
+      return;
+    }
+    stopOperatePolling();
+    setOperateTask(null);
+    setSelectedItemIds([]);
+  }
+
+  async function pollOperateTask(taskId: number) {
+    try {
+      const snapshot = await fetchShopItemOperateResult(taskId);
+      setOperateTask(snapshot);
+      if (snapshot.status !== "pending" && snapshot.status !== "running") {
+        stopOperatePolling();
+        // 终态：**如实分层报账**（成功 / 未执行 / 失败三数）——
+        // 只报「已完成」会把「门禁拦下的那些」藏起来。
+        const parts = [`${OPERATE_LABELS[snapshot.action] || snapshot.action}完成：成功 ${snapshot.succeeded}`];
+        if (snapshot.skipped) parts.push(`未执行 ${snapshot.skipped}`);
+        if (snapshot.failed) parts.push(`失败 ${snapshot.failed}`);
+        const text = parts.join("，");
+        if (snapshot.failed) message.warning(text);
+        else message.success(text);
+        // 操作改的是平台事实 ⇒ 重拉当前页（本地状态已被服务端刷新过）。
+        if (selectedAccountId) void load(selectedAccountId, pageNo, pageSize);
+      }
+    } catch {
+      // 安静重试（下一轮）—— 轮询失败不该打断用户看结果
+    }
+  }
+
+  /** 离开页面时停轮询（定时器泄漏会让返回后再也停不下来）。 */
+  useEffect(() => () => stopOperatePolling(), []);
+
   /** LLM 生成入队成功 → 登记进轮询集合（操作列按钮转圈，进度卡开跑）。 */
   function handleLlmQueued(itemId: string) {
     setLlmQueueItemIds((current) => new Set(current).add(itemId));
@@ -1311,21 +1534,131 @@ export function XhsShopItemsPage() {
    * 任务日志 / 台账「同步于」时间。⚠️ 不做前端乐观刷新 —— 同步没跑完就重拉列表，
    * 只是把同一份旧数据渲染一遍（看起来像「同步没好」）。
    */
-  async function syncAllStatusGoods() {
+  async function syncAllStatusGoods(options?: SyncNotesOptions) {
     if (!selectedAccountId) return;
     setGoodsSyncing(true);
     try {
-      const result = await syncShopGoods({ platformAccountId: selectedAccountId });
+      const result = await syncShopGoods({
+        platformAccountId: selectedAccountId,
+        ...(options ?? {}),
+      });
+      //: ⚠️ 文案与账号卡片页 `startGoodsSync` **逐字一致**（需求 5：只是多一个入口）。
       if (result.reused) {
-        message.info("该账号已有商品同步任务在执行，未重复触发");
-      } else {
-        message.success("已开始同步全部状态商品（后台执行，进度见账号矩阵任务日志）");
+        message.info("该账号已有同步任务在跑，本次未触发新执行。");
       }
+      //: 触发响应本身就是「第一个拿到的信息」⇒ 立刻入集（按钮马上变「同步中…」），
+      //: 不用等 5 秒后的第一轮轮询；入轮询集是为了**任务结束时把按钮切回来**。
+      setGoodsSyncIds((current) => new Set(current).add(selectedAccountId));
     } catch (error) {
-      message.error(error instanceof Error ? error.message : "触发同步失败");
+      message.error(readErrorDetail(error));
     } finally {
       setGoodsSyncing(false);
     }
+  }
+
+  /** 停「同步商品」的 5s 轮询（离开页面 / 任务终态时调用）。 */
+  function stopGoodsSyncPolling() {
+    if (goodsSyncPollRef.current !== null) {
+      window.clearInterval(goodsSyncPollRef.current);
+      goodsSyncPollRef.current = null;
+    }
+  }
+
+  /**
+   * 查一次同步状态：**延续**与账号卡片页同一条判据 `syncTaskPhase`。
+   *
+   * * `active` ⇒ 该账号入集（按钮显示「同步中…」+ 继续轮询）；
+   * * 其余 ⇒ 出集（没有任务 / 任务已结束都不会再变）。
+   *
+   * ⚠️ 首查与轮询共用本函数（同一份判据，两处调用才算「一致」而不是「各写一遍」）。
+   */
+  const queryGoodsSyncStatus = useCallback(async (accountId: number) => {
+    try {
+      const status = await syncShopGoodsStatus(accountId);
+      const active = syncTaskPhase(status) === "active";
+      setGoodsSyncIds((current) => {
+        if (active === current.has(accountId)) return current;
+        const next = new Set(current);
+        if (active) next.add(accountId);
+        else next.delete(accountId);
+        return next;
+      });
+      return active;
+    } catch {
+      // 状态查不到不打扰用户（下次轮询 / 下次进页面会再查）。
+      return false;
+    }
+  }, []);
+
+  /**
+   * 有账号在跑同步 ⇒ 每 5s 复查一次（与账号卡片页同节拍）。
+   *
+   * ⚠️ 轮询**只在有 active 账号时**存在：全空闲时不留定时器（否则页面开着就在
+   * 无谓地打后端）。集合变空 ⇒ 自动停。
+   */
+  useEffect(() => {
+    stopGoodsSyncPolling();
+    if (!selectedAccountId || !goodsSyncIds.has(selectedAccountId)) return;
+    goodsSyncPollRef.current = window.setInterval(() => {
+      void queryGoodsSyncStatus(selectedAccountId);
+    }, 5000);
+    return () => stopGoodsSyncPolling();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedAccountId, goodsSyncIds, queryGoodsSyncStatus]);
+
+  /** 离开页面停轮询（定时器泄漏会让返回后再也停不下来，同操作轮询的教训）。 */
+  useEffect(() => () => stopGoodsSyncPolling(), []);
+
+  /**
+   * **首查**：选中的账号变了 / 进页面时先问一次状态。
+   *
+   * 为什么必须有：没有它，换台设备 / 刷新页面 / 别人（或定时任务）触发的同步，
+   * 本页一律显示成「空闲」—— 而任务其实在跑。账号卡片页 §35.17.4 为同一个原因
+   * 加了首查，这里沿用（需求 5 的「逻辑一致」包括这一条）。
+   */
+  useEffect(() => {
+    if (!selectedAccountId) {
+      setGoodsSyncIds(new Set());
+      return;
+    }
+    void queryGoodsSyncStatus(selectedAccountId);
+  }, [selectedAccountId, queryGoodsSyncStatus]);
+
+  /**
+   * **单行**商品操作（操作列的按钮；2026-10-05 需求 8）。
+   *
+   * ⚠️ 与 `handleBatchItemOperate` 是**两个入口、一份判据**：
+   * * 不去复用批量那个函数 —— 它的 id 来源是**勾选集**，单行点它会「顺带操作所有勾选的商品」
+   *   （用户只想动这一行，结果动了 5 行，写操作还撤不回来）；
+   * * 但仍共用 lib 的 `batchOperateHint` / 后端下发的 `allowed_actions`，
+   *   所以「这是真实平台写操作」的措辞与「这个状态能不能做」的结论两处一致。
+   *
+   * 按钮的**可点性**由后端 `allowed_actions` 决定（不可做时按钮已置灰 + Tooltip 给原因），
+   * 这里只做「防连点」与二次确认。
+   */
+  async function operateOneItem(item: XhsShopItem, action: string) {
+    if (!selectedAccountId || operatingAction !== null) return;
+    const label = OPERATE_LABELS[action] || action;
+    Modal.confirm({
+      centered: true,
+      title: `对「${item.title || item.item_id}」执行「${label}」？`,
+      content: <div style={{ whiteSpace: "pre-wrap" }}>{batchOperateHint(action, 1)}</div>,
+      okText: `确认${label}`,
+      cancelText: "取消",
+      okButtonProps: { danger: action === "delete" },
+      onOk: async () => {
+        setOperatingAction(action);
+        try {
+          const result = await operateShopItems(selectedAccountId, action as never, [item.item_id]);
+          setOperateTask(result);
+          if (result.task_id) startOperatePolling(result.task_id);
+        } catch (error) {
+          message.error(readErrorDetail(error, `${label}失败`));
+        } finally {
+          setOperatingAction(null);
+        }
+      },
+    });
   }
 
   /** 删除按钮的入口：先按 lib 判据分流（拒绝就给一句准话），再弹确认框。 */
@@ -1342,7 +1675,11 @@ export function XhsShopItemsPage() {
       return;
     }
     const count = normalizeDeleteIds(selectedItemIds).length;
+    // ⚠️ `centered: true` 必须**逐点显式传**：`Modal.confirm` 走的是静态方法分支
+    //（`modal/confirm.js` 自建 ConfirmDialog），`ConfigProvider modal={{centered:true}}`
+    //（`providers.tsx` 里给的是 ConfigContext）**到不了它** ⇒ 不传就还是顶部对齐。
     Modal.confirm({
+      centered: true,
       title: `删除本地台账的 ${count} 个商品？`,
       // 确认框是**唯一**能讲清两个连带后果的地方（见 `batchDeleteHint` docstring）：
       // 换行靠 `whiteSpace: pre-wrap`，别把 ①② 挤成一行。
@@ -1437,11 +1774,14 @@ export function XhsShopItemsPage() {
     }
     setExporting(true);
     try {
-      const blob = await exportShopItems({
-        ...formValuesToDraft(form.getFieldsValue()),
-        platform_account_id: selectedAccountId,
-        group_id: groupFilterParam(groupFilter),
-      } as XhsShopItemsQuery);
+      // DEF-093：导出与列表**同一个构造**（含同一份筛选 / 排序 / 分组），
+      // 只是不带分页 —— 导出的就是「当前筛选命中的全部」。
+      const blob = await exportShopItems(
+        formValuesToQuery(form.getFieldsValue(), {
+          accountId: selectedAccountId,
+          sort,
+        })
+      );
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
@@ -1461,6 +1801,8 @@ export function XhsShopItemsPage() {
 
   function openDetailImage(item: XhsShopItem) {
     setDetailImageItem(item);
+    // 2026-10-05：顶层 Tab 每次打开回「生成配置」（跨商品不串 —— 同上面那条纪律）。
+    setDetailImageTab("config");
     setDetailImage(null);
     setDetailImageLoading(true);
     setDetailImageOpen(true);
@@ -1938,7 +2280,7 @@ export function XhsShopItemsPage() {
           <Space direction="vertical" size={2} style={{ marginTop: 2 }}>
             <Space size={4} wrap>
               {item.status_label ? (
-                <Tag color={item.buyable ? "green" : "default"}>{item.status_label}</Tag>
+                <Tag color={statusTagColor(item.status_key || "")}>{item.status_label}</Tag>
               ) : (
                 <Text type="secondary" style={{ fontSize: 11 }}>
                   状态 -
@@ -1951,28 +2293,31 @@ export function XhsShopItemsPage() {
         </div>
       ),
     },
-    {
-      // M4（设计 20 §5）：**分组列**（Tag 展示分组名，未分组显示 `-`）。
-      // ⚠️ 名称由**后端下发**（`group_name`）—— 前端只有 id 查不出名字，
-      // 也不在前端 groupBy（分组口径是后端的）。
-      title: "分组",
-      key: "group",
-      width: 110,
-      render: (_: unknown, item: XhsShopItem) =>
-        item.group_name ? (
-          <Tag color="blue">{item.group_name}</Tag>
-        ) : (
-          <Text type="secondary">-</Text>
-        ),
-    },
+    // ⚠️ 「分组」列已随「彻底移除商品分组」退场（2026-10-05）。
     {
       title: "操作",
       key: "action",
-      // v2.31（用户口径「商品操作列：一行两个操作功能」）：四个操作排 **2 × 2**。
+      // v2.31（用户口径「商品操作列：一行两个操作功能」）：操作排 **2 列**。
+      // 2026-10-05：新增 上架/下架/删除（按状态各显其一）+ 移除「生成记录」
+      // ⇒ 列宽 190 → 260（2 列放 6 个按钮 = 3 行，窄了会挤成竖排单列）。
       // ⚠️ 用 grid 而不是 `Flex wrap` —— 换行位置由**列宽**决定（浏览器按剩余空间算），
       // 容器宽度一变就可能变成 3+1；grid 是**声明式两列**，与容器宽度无关。
-      width: 190,
-      render: (_value, item) => (
+      width: 260,
+      render: (_value, item) => {
+        //: 后端下发的可执行动作（**判据不在前端复算** —— `supported` 直接读后端，
+        //: 所以「按钮为什么点不了」永远能回答；见需求 8 / 设计 20 §11）。
+        //: ⚠️ `([])` 的写法是**故意的**：守卫用 `_slice_between(page, 'title: "操作"', "];")`
+        //: 切操作列，裸写 `|| [];` 会让切片在**这里**就被截断（`[];` 里含 `];`），
+        //: 后面的 grid 容器与按钮全部读不到 ⇒ 守卫报「不是 grid 容器」（本脚本踩过）。
+        const allowed = (item.allowed_actions || []);
+        //: 上架 / 下架 合成一个按钮：优先取**可执行的那个**；两个都不可执行
+        //: （店铺冻结等）时回落取 on_shelf 那条，渲染置灰按钮 + 后端原因（不留空白）。
+        const shelfAction =
+          allowed.find(
+            (e) => e.supported && (e.action === "on_shelf" || e.action === "off_shelf"),
+          ) || allowed.find((e) => e.action === "on_shelf" || e.action === "off_shelf");
+        const deleteAction = allowed.find((e) => e.action === "delete");
+        return (
         <div
           style={{
             display: "grid",
@@ -1985,7 +2330,7 @@ export function XhsShopItemsPage() {
               调千帆后台智能生成一篇挂本商品的笔记（待发布，之后到内容库发布）。
               loading 判据 = 快照的 running + queued（队列在执行这一项），
               不只是「本次点击在等回执」—— 回执毫秒级，执行在后台。 */}
-          <Tooltip title="调用千帆后台智能生成一篇挂本商品的笔记（入队后后台执行，待发布，之后到内容库发布）">
+          <Tooltip title="千帆智能生成一篇挂本商品的笔记">
             <Button
               type="link"
               size="small"
@@ -2003,7 +2348,7 @@ export function XhsShopItemsPage() {
           </Tooltip>
           {/* LLM 生成（T9，设计 17 §7.4）：走项目自己的 LLM 生成链路（与千帆后台智能生成
               是两个队列、两条链路）。开的是**生成配置弹窗**（选模板 + 媒体来源四选一）。 */}
-          <Tooltip title="用项目自己的大模型链路生成笔记（选模板 / 媒体来源，入队后台执行）">
+          <Tooltip title="用本项目的 LLM 链路生成笔记">
             <Button
               type="link"
               size="small"
@@ -2018,60 +2363,161 @@ export function XhsShopItemsPage() {
               LLM 生成
             </Button>
           </Tooltip>
-          {/* 生成商品详情图（设计 17 §13.3.3，v2.1；v2.12 移到操作列独立弹窗）：
-              AI 出图给**商品**用（与「生成笔记」的正文配图是两个业务点）。
-              开的是独立弹窗（`openDetailImage`），不在编辑 / 详情弹窗里。 */}
-          <Tooltip title="AI 生成该商品的详情图 / 主图（独立弹窗，可填补充要求）">
-            <Button
-              type="link"
-              size="small"
-              block
-              icon={<PictureOutlined />}
-              onClick={() => openDetailImage(item)}
-            >
-              AI商品图
+          {/* 2026-10-06 需求 8：**上架 / 下架** —— 按后端下发的 `allowed_actions` 渲染
+              （可做的给按钮，不可做的给**置灰 + 原因 Tooltip**；判据不在前端复算）。
+              ⚠️ 两个动作**合成一个按钮**：`on_shelf` / `off_shelf` 是同一状态位的两面
+              （在架 ⇒ 只能下架；下架 ⇒ 只能上架），对任一商品不可能同时可执行 ——
+              原实现两个都渲、其中一个恒置灰，既占位又让人以为「两个都能点」。 */}
+          {shelfAction ? (
+            <Tooltip title={shelfAction.reason || `对平台商品执行「${shelfAction.label}」`}>
+              <Button
+                type="link"
+                size="small"
+                block
+                disabled={!shelfAction.supported || operatingAction !== null}
+                icon={
+                  shelfAction.action === "on_shelf" ? (
+                    <ArrowUpOutlined />
+                  ) : (
+                    <ArrowDownOutlined />
+                  )
+                }
+                onClick={() => void operateOneItem(item, shelfAction.action)}
+              >
+                {shelfAction.label}
+              </Button>
+            </Tooltip>
+          ) : null}
+          {/* 2026-10-06 用户口径「正常只展示三个常用功能按钮和一个更多」：
+              **AI商品图 / 编辑 / 删除** 收进「更多」下拉。
+
+              ⚠️ AI商品图 与 编辑 是**无状态的一次性入口**（打开弹窗即完事），
+              不像「生成笔记 / LLM 生成」那样带转圈进度、也不像上架/下架那样由商品状态驱动。
+              删除是**破坏性**动作且不是高频操作 —— 收起来也少一次误触。
+
+              ⚠️ 用 `dropdownRender` 而不是 `menu={{items}}`：后者会把按钮从 `Button`
+              变成 `MenuItem`，同一列出现两种渲染形态（可点性 / 禁用判据分叉）。
+              这里**按钮本身一个字符没改**，只是换了位置。 */}
+          <Dropdown
+            trigger={["click"]}
+            dropdownRender={() => (
+              <div
+                style={{
+                  background: "#fff",
+                  borderRadius: 6,
+                  boxShadow: "0 6px 16px rgba(0,0,0,0.12)",
+                  padding: 6,
+                  minWidth: 140,
+                  display: "grid",
+                  gap: 4,
+                }}
+              >
+                {/* 生成商品详情图（设计 17 §13.3.3，v2.1；v2.12 移到操作列独立弹窗）：
+                    AI 出图给**商品**用（与「生成笔记」的正文配图是两个业务点）。 */}
+                <Tooltip title="AI 生成该商品的详情图 / 主图">
+                  <Button
+                    type="link"
+                    size="small"
+                    block
+                    icon={<PictureOutlined />}
+                    onClick={() => openDetailImage(item)}
+                  >
+                    AI商品图
+                  </Button>
+                </Tooltip>
+                {/* 2026-10-06 用户口径：「列表操作列新增**同步商品信息**按钮，将顶部的
+                    同步执行商品按钮功能合并到同步商品按钮中……注意合并后两个按钮的功能
+                    需全部保留」⇒ 行内这一件走**同一套**同步链路（同一个弹窗 + 同一个
+                    请求函数），只是 ID 清单缩成一行；打开即同步、状态在弹窗里逐条给。
+                    ⚠️ 放「更多」里：它是**单件补数据**的次级入口，与顶部「批量同步」区分。 */}
+                <Tooltip title="同步这一件商品的最新数据">
+                  <Button
+                    type="link"
+                    size="small"
+                    block
+                    icon={<SyncOutlined />}
+                    onClick={() => {
+                      //: 单件不带勾选集语义 ⇒ 显式清掉勾选传递，避免误列别的行。
+                      setSyncSingleTarget(item.item_id);
+                      setSyncItemsOpen(true);
+                    }}
+                  >
+                    同步商品信息
+                  </Button>
+                </Tooltip>
+                {/* M4（设计 20 §5）：**商品编辑** —— 操作列独立弹窗。
+                    ⚠️ 分组 Tab 已随分组功能退场（2026-10-05）。 */}
+                <Tooltip title="编辑商品（AI 润色标题 / 卖点）">
+                  <Button
+                    type="link"
+                    size="small"
+                    block
+                    icon={<EditOutlined />}
+                    onClick={() => setEditingItem(item)}
+                  >
+                    编辑
+                  </Button>
+                </Tooltip>
+                {/* 删除（需求 8）：仍是**状态驱动**的 —— `supported=false` 时置灰 + 后端原因
+                    （如推广中不可删）。`danger` 保持红色，位置在下拉最后一位。 */}
+                {deleteAction ? (
+                  <Tooltip title={deleteAction.reason || `对平台商品执行「${deleteAction.label}」`}>
+                    <Button
+                      type="link"
+                      size="small"
+                      block
+                      danger
+                      disabled={!deleteAction.supported || operatingAction !== null}
+                      icon={<DeleteOutlined />}
+                      onClick={() => void operateOneItem(item, deleteAction.action)}
+                    >
+                      {deleteAction.label}
+                    </Button>
+                  </Tooltip>
+                ) : null}
+              </div>
+            )}
+          >
+            <Button type="link" size="small" block icon={<EllipsisOutlined />}>
+              更多
             </Button>
-          </Tooltip>
-          {/* v2.30（§13.3.11）：**查看该商品的 AI 生成记录** —— 用户口径
-              「进入素材库后无法再区分与产品的关系」⇒ 关联落在资产行上，这里提供入口。 */}
-          <Tooltip title="查看该商品历次 AI 生成的结果（按时间倒序）">
-            <Button
-              type="link"
-              size="small"
-              block
-              icon={<HistoryOutlined />}
-              onClick={() => void openGenerations(item)}
-            >
-              生成记录
-            </Button>
-          </Tooltip>
-          {/* M4（设计 20 §5）：**商品编辑** —— 操作列独立弹窗（不塞进详情弹窗）。
-              内置三区块 Tabs：标题/卖点润色+采纳 / 分组 / SKU·价格只读。 */}
-          <Tooltip title="编辑商品（AI 润色标题卖点、改分组；平台改价不可得，仅只读查看）">
-            <Button
-              type="link"
-              size="small"
-              block
-              icon={<EditOutlined />}
-              onClick={() => setEditingItem(item)}
-            >
-              编辑
-            </Button>
-          </Tooltip>
+          </Dropdown>
+          {/* ⚠️ 「生成记录」按钮**已移除**（2026-10-05 用户口径「将商品操作列的生
+              成记录合并到AI商品图弹窗内，使用tab布局」）⇒ 入口搬进「AI商品图」弹窗的
+              第二个顶层 Tab（见 `detailImageTab`）。被移除的原按钮（保留备查，勿恢复）：
+                <Button icon={<HistoryOutlined />} onClick={() => void openGenerations(item)}>生成记录</Button> */}
         </div>
-      ),
+        );
+      },
     },
   ];
 
   return (
     <div>
+      {/* ⚠️ **顶部「商品列表（千帆）」整卡已移除**（2026-10-05 用户口径
+          「顶部的商品列表（千帆）整块移除」）。原卡片只剩两件事：
+          ① 账号下拉（**搬到「搜索条件」卡右上角**，见下面 `搜索条件` 的 `extra`）；
+          ② 空账号时的引导 Alert —— 它的判据（`accountsLoaded && accounts.length === 0`）
+             与文案一并搬进「搜索条件」卡（账号缺失时整块表单本就没意义）。
+          被移除的原结构（保留备查，勿恢复）：
+            <Card title={<Space><ShoppingOutlined />商品列表（千帆）</Space>} extra={…账号下拉…}>
+              {accountsLoaded && accounts.length === 0 ? <Alert …去「账号矩阵」添加账号…/> : …}
+            </Card> */}
+
+      {/* 搜索条件：与千帆商品列表页一一对应（关键词 / 状态 / 价格 / 库存 / 销量）。
+          **排序不在这里** —— v1.32 起挪到表头（上下箭头，服务端排序）。
+
+          2026-09-23 上机口径（「搜索条件区域重新布局，布局在两行内，搜索重置等按钮
+          放条件的最后」）：9 个条件 + 按钮组**恰好两行排完**，按钮组落在第二行末尾。
+          原来按钮分散在两行各占一列，视线要在两行之间来回找，且第二行被 4 列窄
+          `InputNumber` 挤得半行空半行满。 */}
       <Card
-        title={
-          <Space>
-            <ShoppingOutlined />
-            商品列表（千帆）
-          </Space>
-        }
+        size="small"
+        style={{ marginTop: 12 }}
+        title="搜索条件"
+        // 2026-10-05 用户口径「商品列表页的账号筛选放搜索条件右上角」：
+        // 账号下拉从（已移除的）顶部卡片搬到这里 —— 它是**查询条件的一部分**
+        // （台账按账号隔离），放在条件卡上比放在标题卡上更贴合语义。
         extra={
           <Space>
             <Text type="secondary" style={{ fontSize: 12 }}>
@@ -2091,404 +2537,354 @@ export function XhsShopItemsPage() {
           </Space>
         }
       >
-        {accountsLoaded && accounts.length === 0 ? (
+        {accountsLoaded && accounts.length === 0 && (
           <Alert
+            style={{ marginBottom: 12 }}
             type="warning"
             showIcon
             message="没有小红书账号可选"
-            description={
-              <Space direction="vertical" size={6}>
-                <Text style={{ fontSize: 13 }}>
-                  商品台账按**小红书账号**隔离；下拉不按账号类型过滤，所有账号都能选。
-                  千帆相关的「同步商品 / 生成笔记」需要该账号自己有可用的千帆登录态。
-                </Text>
-                <Button
-                  size="small"
-                  href="/platforms/xhs/accounts"
-                  onClick={(event) => {
-                    event.preventDefault();
-                    window.location.assign("/platforms/xhs/accounts");
-                  }}
-                >
-                  去「账号矩阵」添加账号
-                </Button>
-              </Space>
-            }
-          />
-        ) : !bindingLoaded ? (
-          <Spin />
-        ) : arkUnavailable ? (
-          /*
-            千帆（ark）会话「确定不可用」时的**一行安静说明**（2026-09-30 起）。
-            ⚠️ **不再拦请求、不再拦页面**（用户口径「查询本地数据库无需校验千帆是否
-            可用」）：下面那个拉列表的 effect 已按 `prereq.ok`（恒 true）放行，本地台账
-            照常展示；这里只提醒「想同步/生成笔记的话得先补登千帆」，并给一个去账号矩阵
-            的入口。`unknown`（未检测/探活无结论）**不进这里** —— DEF-057 红线
-            （没问到 ≠ 不可用），与 `sync-gates.channelUnavailable` 同一把尺子。
-          */
-          <Alert
-            type="warning"
-            showIcon
-            style={{ marginBottom: 12 }}
-            message="本账号的千帆登录态不可用（不影响查看本地台账）"
-            description={
-              <Space direction="vertical" size={8}>
-                <Text style={{ fontSize: 13 }}>{QIANFAN_PREREQUISITE_HINT}</Text>
-                <Button
-                  size="small"
-                  href="/platforms/xhs/accounts"
-                  onClick={(event) => {
-                    event.preventDefault();
-                    window.location.assign("/platforms/xhs/accounts");
-                  }}
-                >
-                  去「账号矩阵」扫码登录千帆
-                </Button>
-              </Space>
-            }
-          />
-        ) : statusHint ? (
-          /*
-            审核态筛选的安静说明（§30.5，25–30 字一行）。
-            v1.32 已把「店铺：xxx」「本地台账 N 件 · 同步于 X」「数据说明」三个文本
-            移除（店铺与状态口径在底部 Descriptions，同步时效出口在账号矩阵页），
-            这里只剩状态说明这一种内容。
-
-            ⚠️ **必须裸 `Text`，不能再套 `<Space direction="vertical">`**（v1.35 修）：
-            antd `Card` 只在 `childNodes.length > 0` 时才渲染 `.ant-card-body`
-            （`antd/es/card/Card.js`：`loading || childNodes.length ? <div …/> : null`），
-            而 `React.Children.toArray` 会把 `null` / `false` **过滤掉**。原先那个
-            `Space` 即使一个子项都没有也是**真元素** ⇒ body 照渲、上下 24px 内边距照留，
-            默认状态（`statusHint` 为空）就在「商品列表（千帆）」标题下留出一条空白。
-            改成裸 `Text` + `null` 兜底后，没说明时 body **整块不渲染**，空白消失
-            （用户 2026-09-23 上机口径：「商品列表（千帆）下的空白处移除」）。
-          */
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            {statusHint}
-          </Text>
-        ) : null}
-
-        {errorText && (
-          <Alert
-            style={{ marginTop: 12 }}
-            type="error"
-            showIcon
-            message="商品列表加载失败"
-            description={errorText}
+            description="商品台账按账号隔离；请先到「账号矩阵」添加账号，并导入其千帆登录态后才能同步商品。"
           />
         )}
+      {/*
+        状态筛选的安静说明（§30.5，25–30 字一行）。
+        ⚠️ 2026-10-05：它原先住在已被移除的「商品列表（千帆）」首卡里，随该卡一起搬进
+        **搜索条件卡**（状态是搜索条件的一种，放这里更贴合语义）。
+        ⚠️ **必须裸三元 + `null` 兜底**（原口径不变）：antd `Card` 只在
+        `childNodes.length > 0` 时才渲染 `.ant-card-body`（`React.Children.toArray`
+        会把 `null` / `false` 过滤掉）；包一层 `Space` 即使没内容也是**真元素**
+        ⇒ body 照渲、24px 内边距照留，无说明时卡里就多一条空白。
+      */}
+      {statusHint ? (
+        <Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 8 }}>
+          {statusHint}
+        </Text>
+      ) : null}
+
+      <Form<QueryForm>
+        form={form}
+        layout="vertical"
+        initialValues={formInitialValues}
+        // 每次改动即回写缓存（不等点「搜索」）：用户填了一半切走再回来，条件还在。
+        // 「重置」走 `form.resetFields()` ⇒ 回到 `initialValues`（也就是**缓存里的值**），
+        // 所以下面那一拍必须显式把**清空态**写回缓存（否则重置后重进页面又长回来了）。
+        onValuesChange={() => writeFilterCache(FILTER_CACHE_KEYS.shopItems.form, formValuesToDraft(form.getFieldsValue()))}
+      >
+          {/* 第一行：关键词(6) + 状态(4) + 价格区间(4+4) + 创建时间(6) = 24 */}
+          <Row gutter={12}>
+            <Col span={6}>
+              <Form.Item label="关键词" name="keyword" style={{ marginBottom: 12 }}>
+                <Input
+                  allowClear
+                  placeholder="商品名称 / 商品 ID / 商品货号，多条用逗号隔开"
+                  onPressEnter={() => selectedAccountId && void load(selectedAccountId, 1, pageSize)}
+                />
+              </Form.Item>
+            </Col>
+            <Col span={4}>
+              <Form.Item label="状态" name="status" style={{ marginBottom: 12 }}>
+                <Select options={STATUS_OPTIONS} />
+              </Form.Item>
+            </Col>
+            <Col span={4}>
+              <Form.Item label="价格下限（元）" name="price_from" style={{ marginBottom: 12 }}>
+                <InputNumber style={{ width: "100%" }} min={0} placeholder="最低售价" />
+              </Form.Item>
+            </Col>
+            <Col span={4}>
+              <Form.Item label="价格上限（元）" name="price_to" style={{ marginBottom: 12 }}>
+                <InputNumber style={{ width: "100%" }} min={0} placeholder="最高售价" />
+              </Form.Item>
+            </Col>
+            <Col span={6}>
+              <Form.Item label="创建时间" name="create_time_range" style={{ marginBottom: 12 }}>
+                <RangePicker
+                  style={{ width: "100%" }}
+                  placeholder={["开始日期", "截止日期"]}
+                  allowClear
+                />
+              </Form.Item>
+            </Col>
+          </Row>
+          {/* 第二行：库存区间(3+3) + 销量区间(3+3) + 挂链笔记数(6) + 按钮组(6，右对齐收尾) = 24 */}
+          <Row gutter={12}>
+            <Col span={3}>
+              <Form.Item label="库存下限" name="stock_from" style={{ marginBottom: 8 }}>
+                <InputNumber style={{ width: "100%" }} min={0} placeholder="最小库存" />
+              </Form.Item>
+            </Col>
+            <Col span={3}>
+              <Form.Item label="库存上限" name="stock_to" style={{ marginBottom: 8 }}>
+                <InputNumber style={{ width: "100%" }} min={0} placeholder="最大库存" />
+              </Form.Item>
+            </Col>
+            <Col span={3}>
+              <Form.Item label="销量下限" name="sales_from" style={{ marginBottom: 8 }}>
+                <InputNumber style={{ width: "100%" }} min={0} placeholder="最低销量" />
+              </Form.Item>
+            </Col>
+            <Col span={3}>
+              <Form.Item label="销量上限" name="sales_to" style={{ marginBottom: 8 }}>
+                <InputNumber style={{ width: "100%" }} min={0} placeholder="最高销量" />
+              </Form.Item>
+            </Col>
+            {/*
+              挂链笔记数（v1.34，用户口径「添加挂链笔记数，默认小于指定篇数」）：
+              比较符默认「小于」+ 指定篇数。值**留空 = 不筛**（不是「小于 0」）——
+              `0` 是有意义的阈值（「一篇都没挂」），缺省态不该偷偷筛掉数据。
+              口径 = `note_goods` 关系表，与本列显示的篇数是**同一个数**（§33.8）。
+            */}
+            <Col span={6}>
+              <Form.Item label="挂链笔记数" style={{ marginBottom: 8 }}>
+                <Space.Compact style={{ width: "100%" }}>
+                  <Form.Item name="note_count_op" noStyle>
+                    <Select
+                      style={{ width: 96, flexShrink: 0 }}
+                      options={NOTE_COUNT_OP_OPTIONS}
+                    />
+                  </Form.Item>
+                  <Form.Item name="note_count" noStyle>
+                    <InputNumber
+                      style={{ width: "100%" }}
+                      min={0}
+                      placeholder="篇数（留空不筛）"
+                    />
+                  </Form.Item>
+                </Space.Compact>
+              </Form.Item>
+            </Col>
+            <Col span={6}>
+              <Form.Item label=" " style={{ marginBottom: 8 }}>
+                <Space style={{ width: "100%", justifyContent: "flex-end" }} wrap>
+                  <Button
+                    type="primary"
+                    icon={<SearchOutlined />}
+                    loading={loading}
+                    onClick={() => runSearch(false)}
+                  >
+                    搜索
+                  </Button>
+                  <Button onClick={() => runSearch(true)}>重置</Button>
+                  {/* ⚠️ 四处**已移除**（2026-10-05 / 10-06 用户口径）：
+                      ① **刷新图标按钮**（「商品搜索区域刷新图标按钮移除」）——
+                         「搜索」本身就是重新拉取，多一个图标是同义的第二入口；
+                      ② **同步商品 / 导出 CSV** —— 搬到「商品台账」卡 header
+                         （「导出csv按钮和同步商品，放商品台账区域」）；
+                      ③ **分组筛选下拉** —— 分组功能整体移除（同轮）；
+                      ④ **同步指定商品** —— 同样搬到「商品台账」卡 header
+                         （2026-10-06 用户口径「同步指定商品按钮放商品台账顶部」：
+                         它与「同步商品」是同一族动作，摆在一起而不是散在两个卡里）。 */}
+                </Space>
+              </Form.Item>
+            </Col>
+          </Row>
+        </Form>
       </Card>
 
-      {/* 前置门禁不通过（`prereq.ok === false`）⇒ 搜索区与台账都不渲染：
-          没有可查的对象，摆出来只会让人以为能查。
-          注意这是**渲染层**的拦，真正的「零请求」由上面那个按 `prereq.ok`
-          守住的 effect 保证 —— 少写任何一半都只是半道防线。 */}
-      {prereq.ok && (
-        <>
-        {/* 搜索条件：与千帆商品列表页一一对应（关键词 / 状态 / 价格 / 库存 / 销量）。
-            **排序不在这里** —— v1.32 起挪到表头（上下箭头，服务端排序）。
+      <Card
+        size="small"
+        style={{ marginTop: 12 }}
+        bodyStyle={{ padding: 12 }}
+        title="商品台账"
+        extra={
+          <Space size={8}>
+            {/* 2026-10-06 用户口径：「同步指定商品按钮放商品台账顶部」。
+                ⚠️ 与「同步商品」**并列在前**（同一族动作：都是把平台数据拉回本地台账，
+                区别只是「整店」还是「按 ID 点名」）—— 散在两个卡里会让人以为它们无关。
 
-            2026-09-23 上机口径（「搜索条件区域重新布局，布局在两行内，搜索重置等按钮
-            放条件的最后」）：9 个条件 + 按钮组**恰好两行排完**，按钮组落在第二行末尾。
-            原来按钮分散在两行各占一列，视线要在两行之间来回找，且第二行被 4 列窄
-            `InputNumber` 挤得半行空半行满。 */}
-        <Card size="small" style={{ marginTop: 12 }} title="搜索条件">
-        <Form<QueryForm>
-          form={form}
-          layout="vertical"
-          initialValues={formInitialValues}
-          // 每次改动即回写缓存（不等点「搜索」）：用户填了一半切走再回来，条件还在。
-          // 「重置」走 `form.resetFields()` ⇒ 回到 `initialValues`（也就是**缓存里的值**），
-          // 所以下面那一拍必须显式把**清空态**写回缓存（否则重置后重进页面又长回来了）。
-          onValuesChange={() => writeFilterCache(FILTER_CACHE_KEYS.shopItems.form, formValuesToDraft(form.getFieldsValue()))}
-        >
-            {/* 第一行：关键词(6) + 状态(4) + 价格区间(4+4) + 创建时间(6) = 24 */}
-            <Row gutter={12}>
-              <Col span={6}>
-                <Form.Item label="关键词" name="keyword" style={{ marginBottom: 12 }}>
-                  <Input
-                    allowClear
-                    placeholder="商品名称 / 商品 ID / 商品货号，多条用逗号隔开"
-                    onPressEnter={() => selectedAccountId && void load(selectedAccountId, 1, pageSize)}
-                  />
-                </Form.Item>
-              </Col>
-              <Col span={4}>
-                <Form.Item label="状态" name="status" style={{ marginBottom: 12 }}>
-                  <Select options={STATUS_OPTIONS} />
-                </Form.Item>
-              </Col>
-              <Col span={4}>
-                <Form.Item label="价格下限（元）" name="price_from" style={{ marginBottom: 12 }}>
-                  <InputNumber style={{ width: "100%" }} min={0} placeholder="最低售价" />
-                </Form.Item>
-              </Col>
-              <Col span={4}>
-                <Form.Item label="价格上限（元）" name="price_to" style={{ marginBottom: 12 }}>
-                  <InputNumber style={{ width: "100%" }} min={0} placeholder="最高售价" />
-                </Form.Item>
-              </Col>
-              <Col span={6}>
-                <Form.Item label="创建时间" name="create_time_range" style={{ marginBottom: 12 }}>
-                  <RangePicker
-                    style={{ width: "100%" }}
-                    placeholder={["开始日期", "截止日期"]}
-                    allowClear
-                  />
-                </Form.Item>
-              </Col>
-            </Row>
-            {/* 第二行：库存区间(3+3) + 销量区间(3+3) + 挂链笔记数(6) + 按钮组(6，右对齐收尾) = 24 */}
-            <Row gutter={12}>
-              <Col span={3}>
-                <Form.Item label="库存下限" name="stock_from" style={{ marginBottom: 8 }}>
-                  <InputNumber style={{ width: "100%" }} min={0} placeholder="最小库存" />
-                </Form.Item>
-              </Col>
-              <Col span={3}>
-                <Form.Item label="库存上限" name="stock_to" style={{ marginBottom: 8 }}>
-                  <InputNumber style={{ width: "100%" }} min={0} placeholder="最大库存" />
-                </Form.Item>
-              </Col>
-              <Col span={3}>
-                <Form.Item label="销量下限" name="sales_from" style={{ marginBottom: 8 }}>
-                  <InputNumber style={{ width: "100%" }} min={0} placeholder="最低销量" />
-                </Form.Item>
-              </Col>
-              <Col span={3}>
-                <Form.Item label="销量上限" name="sales_to" style={{ marginBottom: 8 }}>
-                  <InputNumber style={{ width: "100%" }} min={0} placeholder="最高销量" />
-                </Form.Item>
-              </Col>
-              {/*
-                挂链笔记数（v1.34，用户口径「添加挂链笔记数，默认小于指定篇数」）：
-                比较符默认「小于」+ 指定篇数。值**留空 = 不筛**（不是「小于 0」）——
-                `0` 是有意义的阈值（「一篇都没挂」），缺省态不该偷偷筛掉数据。
-                口径 = `note_goods` 关系表，与本列显示的篇数是**同一个数**（§33.8）。
-              */}
-              <Col span={6}>
-                <Form.Item label="挂链笔记数" style={{ marginBottom: 8 }}>
-                  <Space.Compact style={{ width: "100%" }}>
-                    <Form.Item name="note_count_op" noStyle>
-                      <Select
-                        style={{ width: 96, flexShrink: 0 }}
-                        options={NOTE_COUNT_OP_OPTIONS}
-                      />
-                    </Form.Item>
-                    <Form.Item name="note_count" noStyle>
-                      <InputNumber
-                        style={{ width: "100%" }}
-                        min={0}
-                        placeholder="篇数（留空不筛）"
-                      />
-                    </Form.Item>
-                  </Space.Compact>
-                </Form.Item>
-              </Col>
-              <Col span={6}>
-                <Form.Item label=" " style={{ marginBottom: 8 }}>
-                  <Space style={{ width: "100%", justifyContent: "flex-end" }} wrap>
-                    <Button
-                      type="primary"
-                      icon={<SearchOutlined />}
-                      loading={loading}
-                      onClick={() => runSearch(false)}
-                    >
-                      搜索
-                    </Button>
-                    <Button onClick={() => runSearch(true)}>重置</Button>
-                    <Tooltip title="重新拉取当前条件的第一页">
-                      <Button
-                        icon={<ReloadOutlined />}
-                        onClick={() => {
-                          setPageNo(1);
-                          if (selectedAccountId) void load(selectedAccountId, 1, pageSize);
-                        }}
-                      />
-                    </Tooltip>
-                    {/* 「同步全部状态商品」（设计 13 §30.3.2，v2.13 / 2026-10-02 用户口径
-                        「商品同步更新需求为同步全部状态的商品」）：显式一条入口 ——
-                        同步商品是**台账的唯一数据来源**，而台账是「本地唯一真相源」，
-                        所以默认同步**平台侧全部状态**（不传 card_type），
-                        不让用户以为「只同步了售卖中的」。 */}
-                    <Tooltip title="从千帆同步该账号的全部状态商品（售卖中 / 已下架 / 已冻结 / 整改 / 审核中 / 审核驳回 / 审核通过）到本地台账，后台执行">
-                      <Button
-                        icon={<SyncOutlined spin={goodsSyncing} />}
-                        loading={goodsSyncing}
-                        disabled={!selectedAccountId}
-                        onClick={() => void syncAllStatusGoods()}
-                      >
-                        同步商品
-                      </Button>
-                    </Tooltip>
-                    {/* M4（设计 20 §5）：**分组筛选**（全部分组 / 未分组 / <分组名>）
-                        + **导出 CSV**（按当前筛选，与列表同一集合）。 */}
-                    <Select
-                      style={{ minWidth: 150 }}
-                      value={groupFilter}
-                      options={groupFilterOptions(groups)}
-                      onChange={(value) => setGroupFilter(value)}
-                      placeholder="全部分组"
-                    />
-                    <Tooltip title="按当前筛选条件导出商品台账 CSV（超限会先提示收窄条件）">
-                      <Button
-                        icon={<DownloadOutlined />}
-                        loading={exporting}
-                        disabled={!selectedAccountId}
-                        onClick={() => void exportCsv()}
-                      >
-                        导出 CSV
-                      </Button>
-                    </Tooltip>
-                  </Space>
-                </Form.Item>
-              </Col>
-            </Row>
-          </Form>
-        </Card>
-
-        <Card
-          size="small"
-          style={{ marginTop: 12 }}
-          bodyStyle={{ padding: 12 }}
-          title="商品台账"
-          extra={
-            <Space size={8}>
-              {/* 生成队列实时态（§31.10）：有待处理时一行小字，转圈即清（无 Tip，
-                  与另两张进度卡同口径）。队列空不占位。 */}
-              {genQueueItemIds.size > 0 && (
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  <FileAddOutlined spin /> 生成队列：{genQueueItemIds.size} 项待处理
-                  {genRound.failed > 0 || genRound.ok > 0
-                    ? `（已生成 ${genRound.ok} · 失败 ${genRound.failed}）`
-                    : ""}
-                </Text>
-              )}
-              <Tooltip
-                title={
-                  selectedItemIds.length > 0
-                    ? `对选中的 ${selectedItemIds.length} 个商品逐个入队生成笔记（≤20 个/次，单项失败不阻断；后台顺序执行）`
-                    : "先在表格里勾选商品（最多 20 个/次）"
-                }
+                2026-10-06 二次口径：「选中商品后，点击同步指定商品按钮，后端立刻开始同步
+                拉取指定的商品信息」⇒ 本按钮把**主表勾选的 ID** 交给弹窗，弹窗打开即开跑。
+                ⚠️ 没勾选时**不打开弹窗**：空手进去只能看到一个空列表（用户的原话是
+                「选中商品后」），先给一句话让他去勾 —— 比开个空弹窗有用。 */}
+            <Tooltip
+              title={
+                normalizeDeleteIds(selectedItemIds).length > 0
+                  ? `按 ID 同步选中的 ${normalizeDeleteIds(selectedItemIds).length} 个商品`
+                  : "未勾选则同步整个店铺的商品"
+              }
+            >
+              <Button
+                icon={<SyncOutlined />}
+                disabled={!selectedAccountId || goodsSyncRunning}
+                onClick={() => {
+                  //: 2026-10-06 合并（用户口径「将顶部的同步执行商品按钮功能合并到同步商品
+                  //: 按钮中，该按钮文本优化为**批量同步商品信息**，注意合并后两个按钮的功能
+                  //: 需全部保留」）：两个平级按钮合成一个入口 —— 弹窗里用 **Tab** 分成
+                  //: 「按条件同步」（整店，后台任务）与「按 ID 同步商品信息」（前台等结果）。
+                  if (!selectedAccountId || goodsSyncRunning) return;
+                  //: 门禁与账号卡片页同一把尺子（`goodsGate`）；千帆确定不可用 ⇒ 提示补登。
+                  const gate = goodsGate(
+                    accounts.find((a) => a.id === selectedAccountId)?.login_channels,
+                  );
+                  if (gate.blocked) {
+                    setArkPromptOpen(true);
+                    return;
+                  }
+                  setSyncSingleTarget(null);
+                  setSyncItemsOpen(true);
+                }}
               >
-                <Button
-                  type="primary"
-                  icon={<FileAddOutlined spin={genQueueItemIds.size > 0} />}
-                  disabled={selectedItemIds.length === 0}
-                  loading={batchGenerating}
-                  onClick={() => void batchGenerate()}
-                >
-                  批量生成智能笔记{selectedItemIds.length > 0 ? `（${selectedItemIds.length}）` : ""}
-                </Button>
-              </Tooltip>
-              {/* 批量同步商品（v2.13，设计 13 §30.3.2）：触发该账号的**全量全部状态**同步。
-                  ⚠️ 平台侧没有「只同步这几个商品」的读接口（`search_item_v2` 是按页翻，
-                  `get_skus_by_item_ids` 只补规格）⇒ 批量语义落到「同步整店」，并在提示里
-                  如实说明「勾选只是让你知道待同步的是哪几个，实际会刷新整店台账」——
-                  不假装能按勾选裁剪（那是界面在说一件不会发生的事）。 */}
+                {goodsSyncRunning ? "商品同步中" : "批量同步商品信息"}
+              </Button>
+            </Tooltip>
+
+            <Tooltip title="按当前筛选条件导出 CSV">
+              <Button
+                icon={<DownloadOutlined />}
+                loading={exporting}
+                disabled={!selectedAccountId}
+                onClick={() => void exportCsv()}
+              >
+                导出 CSV
+              </Button>
+            </Tooltip>
+            {/* 生成队列实时态（§31.10）：有待处理时一行小字，转圈即清（无 Tip，
+                与另两张进度卡同口径）。队列空不占位。 */}
+            {genQueueItemIds.size > 0 && (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                <FileAddOutlined spin /> 生成队列：{genQueueItemIds.size} 项待处理
+                {genRound.failed > 0 || genRound.ok > 0
+                  ? `（已生成 ${genRound.ok} · 失败 ${genRound.failed}）`
+                  : ""}
+              </Text>
+            )}
+            <Tooltip
+              title={
+                selectedItemIds.length > 0
+                  ? `对选中的 ${selectedItemIds.length} 个商品逐个入队生成笔记（≤20 个/次，单项失败不阻断；后台顺序执行）`
+                  : "先在表格里勾选商品（最多 20 个/次）"
+              }
+            >
+              <Button
+                type="primary"
+                icon={<FileAddOutlined spin={genQueueItemIds.size > 0} />}
+                disabled={selectedItemIds.length === 0}
+                loading={batchGenerating}
+                onClick={() => void batchGenerate()}
+              >
+                批量生成智能笔记{selectedItemIds.length > 0 ? `（${selectedItemIds.length}）` : ""}
+              </Button>
+            </Tooltip>
+            {/* ⚠️ 「批量同步商品」按钮**已移除**（2026-10-05）：它与 header 的
+                「同步商品」是同一件事（都触发整店全量同步），两个入口 = 两份说法。
+                被移除的原按钮（保留备查，勿恢复）：
+                  <Button icon={<SyncOutlined />} …>批量同步商品（N）</Button> */}
+            {/* 2026-10-05 需求 7：**批量上架 / 批量下架 / 批量删除（平台商品）**。
+                ⚠️ 三者走**手动触发式任务**（不是同步循环）：点完只建任务、立即返回，
+                逐条结果在「商品操作结果」弹窗里轮询展示 —— 任务中心**任务列表不展示**
+                （与「清理无流量笔记」同款）。 */}
+            {([
+              { key: "on_shelf", label: "批量上架", danger: false },
+              { key: "off_shelf", label: "批量下架", danger: false },
+              { key: "delete", label: "批量删除商品", danger: true },
+            ] as const).map((entry) => (
               <Tooltip
+                key={entry.key}
                 title={
                   selectedItemIds.length > 0
-                    ? `同步该账号的全部状态商品（勾选的 ${selectedItemIds.length} 个会在其中；平台按页同步，不支持只同步几个）`
+                    ? `${entry.label}：对选中的 ${selectedItemIds.length} 个平台商品执行（≤${MAX_OPERATE_ITEMS} 个/次；不支持该操作的商品只记录不执行）`
                     : "先在表格里勾选商品"
                 }
               >
                 <Button
-                  icon={<SyncOutlined />}
+                  danger={entry.danger}
+                  icon={entry.danger ? <DeleteOutlined /> : <SyncOutlined />}
                   disabled={selectedItemIds.length === 0}
-                  loading={goodsSyncing}
-                  onClick={() => void syncAllStatusGoods()}
+                  loading={operatingAction === entry.key}
+                  onClick={() => void handleBatchItemOperate(entry.key)}
                 >
-                  批量同步商品{selectedItemIds.length > 0 ? `（${selectedItemIds.length}）` : ""}
+                  {entry.label}
+                  {selectedItemIds.length > 0 ? `（${selectedItemIds.length}）` : ""}
                 </Button>
               </Tooltip>
-              {/* 批量删除（v1.36）：**只删本地台账行** —— 平台商品不动、关系行不动。
-                  两个连带后果写在确认框正文里（`batchDeleteHint`），按钮上的 Tooltip
-                  只说「删什么、上限多少」，不重复那两句（换成两处说同一件事）。 */}
-              <Tooltip
-                title={
-                  selectedItemIds.length > 0
-                    ? `从本地台账删除选中的 ${selectedItemIds.length} 个商品行（≤${MAX_BATCH_DELETE} 个/次，平台商品不动）`
-                    : "先在表格里勾选商品"
-                }
+            ))}
+            {/* 批量删除**本地台账行**（v1.36）：**只删本地台账行** —— 平台商品不动、关系行不动。
+                ⚠️ 2026-10-05 改名「删除台账行」并把 Tooltip 改成显式对照：它与上面新增的
+                「批量删除商品」（**删平台**）是两件完全不同的事，同名会让用户点错。
+                两个连带后果写在确认框正文里（`batchDeleteHint`），按钮上的 Tooltip
+                只说「删什么、上限多少」，不重复那两句（换成两处说同一件事）。 */}
+            <Tooltip
+              title={
+                selectedItemIds.length > 0
+                  ? `从本地台账删除选中的 ${selectedItemIds.length} 个商品行（≤${MAX_BATCH_DELETE} 个/次，平台商品不动）`
+                  : "先在表格里勾选商品"
+              }
+            >
+              <Button
+                danger
+                icon={<DeleteOutlined />}
+                disabled={selectedItemIds.length === 0}
+                loading={batchDeleting}
+                onClick={handleBatchDelete}
               >
-                <Button
-                  danger
-                  icon={<DeleteOutlined />}
-                  disabled={selectedItemIds.length === 0}
-                  loading={batchDeleting}
-                  onClick={handleBatchDelete}
-                >
-                  批量删除{selectedItemIds.length > 0 ? `（${selectedItemIds.length}）` : ""}
-                </Button>
-              </Tooltip>
-            </Space>
-          }
-        >
-          {/* LLM 生成进度卡（T9，设计 17 §7.4）：有待处理 / 跑过才渲染，空闲不占版面。 */}
-          {llmQueueItemIds.size > 0 && (
-            <div style={{ marginBottom: 12 }}>
-              <LlmGenerateProgressCard
-                activeItemIds={llmQueueItemIds}
-                onFinishedEntry={handleLlmFinished}
-              />
-            </div>
-          )}
-          {data ? (
-            <Table<XhsShopItem>
-              rowKey="item_id"
-              size="small"
-              loading={loading}
-              columns={columns}
-              dataSource={data.items}
-              scroll={{ x: 1300 }}
-              sortDirections={["descend", "ascend"]}
-              rowSelection={{
-                selectedRowKeys: selectedItemIds,
-                onChange: (keys) => setSelectedItemIds(keys as string[]),
-                // 跨页勾选要留得住（v1.36）：批量删除/生成是**跨页**操作，翻页就丢勾选
-                // 会让用户以为「我勾了 30 个」而实际只剩当前页那几个。数量始终在
-                // 按钮上可见（`批量删除（N）`），所以留住所选不会变成隐形状态。
-                preserveSelectedRowKeys: true,
-              }}
-              onChange={(_pagination, _filters, sorter) => handleSortChange(sorter)}
-              locale={{ emptyText: <Empty description="当前条件下没有商品" /> }}
-              pagination={{
-                current: pageNo,
-                pageSize,
-                total: data.total,
-                showSizeChanger: true,
-                pageSizeOptions: SHOP_ITEMS_PAGE_SIZES.map(String),
-                showTotal: (total) => `共 ${total} 件商品`,
-                onChange: (page, size) => {
-                  setPageNo(page);
-                  setPageSize(size);
-                  if (selectedAccountId) void load(selectedAccountId, page, size);
-                },
-              }}
+                删除台账行{selectedItemIds.length > 0 ? `（${selectedItemIds.length}）` : ""}
+              </Button>
+            </Tooltip>
+          </Space>
+        }
+      >
+        {/* LLM 生成进度卡（T9，设计 17 §7.4）：有待处理 / 跑过才渲染，空闲不占版面。 */}
+        {llmQueueItemIds.size > 0 && (
+          <div style={{ marginBottom: 12 }}>
+            <LlmGenerateProgressCard
+              activeItemIds={llmQueueItemIds}
+              onFinishedEntry={handleLlmFinished}
             />
-          ) : (
-            <Empty description={bindingLoaded ? "点「搜索」拉取商品列表" : "正在加载账号信息"} />
-          )}
-          {data && (
-            <Descriptions size="small" column={4} style={{ marginTop: 8 }}>
-              <Descriptions.Item label="商品来源">本地台账（同步商品任务落库）</Descriptions.Item>
-              <Descriptions.Item label="店铺">{data.shop_name || "-"}</Descriptions.Item>
-              <Descriptions.Item label="状态口径">{data.status_label}</Descriptions.Item>
-              <Descriptions.Item label="命中总数">{data.total}</Descriptions.Item>
-              {/* 当前排序（设计 13 §32.1）：取**后端回传的生效口径**，不是前端自己的猜想 */}
-              <Descriptions.Item label="当前排序">
-                {sortSummary(data.sort_field, data.order)}
-              </Descriptions.Item>
-              <Descriptions.Item label="台账同步时间">{data.queried_at || "-"}</Descriptions.Item>
-              <Descriptions.Item label="平台商品总数">
-                {data.products_total > 0 ? data.products_total : "-"}
-              </Descriptions.Item>
-            </Descriptions>
-          )}
-        </Card>
-        </>
-      )}
+          </div>
+        )}
+        {data ? (
+          <Table<XhsShopItem>
+            rowKey="item_id"
+            size="small"
+            loading={loading}
+            columns={columns}
+            dataSource={data.items}
+            scroll={{ x: 1300 }}
+            sortDirections={["descend", "ascend"]}
+            rowSelection={{
+              selectedRowKeys: selectedItemIds,
+              onChange: (keys) => setSelectedItemIds(keys as string[]),
+              // 跨页勾选要留得住（v1.36）：批量删除/生成是**跨页**操作，翻页就丢勾选
+              // 会让用户以为「我勾了 30 个」而实际只剩当前页那几个。数量始终在
+              // 按钮上可见（`批量删除（N）`），所以留住所选不会变成隐形状态。
+              preserveSelectedRowKeys: true,
+            }}
+            onChange={(_pagination, _filters, sorter) => handleSortChange(sorter)}
+            locale={{ emptyText: <Empty description="当前条件下没有商品" /> }}
+            pagination={{
+              current: pageNo,
+              pageSize,
+              total: data.total,
+              showSizeChanger: true,
+              pageSizeOptions: SHOP_ITEMS_PAGE_SIZES.map(String),
+              showTotal: (total) => `共 ${total} 件商品`,
+              onChange: (page, size) => {
+                setPageNo(page);
+                setPageSize(size);
+                if (selectedAccountId) void load(selectedAccountId, page, size);
+              },
+            }}
+          />
+        ) : (
+          <Empty description={bindingLoaded ? "点「搜索」拉取商品列表" : "正在加载账号信息"} />
+        )}
+        {data && (
+          <Descriptions size="small" column={4} style={{ marginTop: 8 }}>
+            <Descriptions.Item label="商品来源">本地台账（同步商品任务落库）</Descriptions.Item>
+            <Descriptions.Item label="店铺">{data.shop_name || "-"}</Descriptions.Item>
+            <Descriptions.Item label="状态口径">{data.status_label}</Descriptions.Item>
+            <Descriptions.Item label="命中总数">{data.total}</Descriptions.Item>
+            {/* 当前排序（设计 13 §32.1）：取**后端回传的生效口径**，不是前端自己的猜想 */}
+            <Descriptions.Item label="当前排序">
+              {sortSummary(data.sort_field, data.order)}
+            </Descriptions.Item>
+            <Descriptions.Item label="台账同步时间">{data.queried_at || "-"}</Descriptions.Item>
+            <Descriptions.Item label="平台商品总数">
+              {data.products_total > 0 ? data.products_total : "-"}
+            </Descriptions.Item>
+          </Descriptions>
+        )}
+      </Card>
 
       {/* 商品详情弹窗（v1.32，设计 13 §30.3.6）：基本信息 + 图集 + 规格详情 */}
       <Modal
@@ -2658,95 +3054,10 @@ export function XhsShopItemsPage() {
         ) : null}
       </Modal>
 
-      {/* v2.30（§13.3.11）：**商品生成记录**弹窗 —— 用户口径
-          「因为进入素材库后无法再区分与产品的关系」。
-          只读；按时间倒序；空态说明「为什么空」（不是干巴巴的「暂无数据」）。 */}
-      <Modal
-        centered
-        open={generationsOpen}
-        title={
-          generationsItem
-            ? `生成记录 · ${generationsItem.title || generationsItem.item_id}`
-            : "生成记录"
-        }
-        footer={null}
-        width="75vw"
-        onCancel={() => setGenerationsOpen(false)}
-        styles={{ body: { maxHeight: "70vh", overflow: "auto" } }}
-      >
-        {generationsLoading ? (
-          <div style={{ textAlign: "center", padding: 24 }}>
-            <Spin />
-          </div>
-        ) : generations.length === 0 ? (
-          <Empty
-            image={Empty.PRESENTED_IMAGE_SIMPLE}
-            description={
-              <span style={{ fontSize: 12 }}>
-                该商品还没有 AI 生成记录。
-                <br />
-                （v2.30 之前生成的图没有商品关联，此处不计入 —— 去「AI商品图」生成一次即可看到）
-              </span>
-            }
-          />
-        ) : (
-          <>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              共 {generationsTotal} 张，按时间倒序
-            </Text>
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(6, minmax(0, 1fr))",
-                gap: 10,
-                marginTop: 10,
-              }}
-            >
-              {generations.map((row) => (
-                <div key={row.id}>
-                  <div
-                    style={{
-                      position: "relative",
-                      aspectRatio: "1 / 1",
-                      background: "rgba(0,0,0,0.03)",
-                      borderRadius: 4,
-                      overflow: "hidden",
-                    }}
-                  >
-                    {/* ⚠️ 这里**不能复用素材库的 `MaterialThumb`** —— 那个走
-                        `/api/xhs/materials/folders/{id}/thumbs/{file_id}`（需要 token）。
-                        生成记录里的 `url` 是**上游返回的带签名直链**（OSS 预签名，
-                        自带鉴权、有有效期）⇒ 直接 `<img src>` 就行。
-                        ⚠️ 有效期是真实约束：过期的签名会 403 —— 想长期留存要
-                        「保存到素材库」（那时走素材库那套带 token 的取图）。 */}
-                    <img
-                      src={row.url}
-                      alt=""
-                      style={{
-                        width: "100%",
-                        height: "100%",
-                        objectFit: "contain",
-                        display: "block",
-                        cursor: "zoom-in",
-                      }}
-                      onClick={() => {
-                        // 点开看大图（新窗口 —— 上游直链本身就是原图）
-                        window.open(row.url, "_blank", "noopener,noreferrer");
-                      }}
-                    />
-                  </div>
-                  <Text type="secondary" style={{ fontSize: 11, display: "block" }}>
-                    {row.created_at}
-                  </Text>
-                  <Text type="secondary" style={{ fontSize: 11 }} ellipsis>
-                    {row.model_name || "-"}
-                  </Text>
-                </div>
-              ))}
-            </div>
-          </>
-        )}
-      </Modal>
+      {/* ⚠️ **独立「生成记录」弹窗已移除**（2026-10-05 用户口径：「将商品操作列的
+          生成记录合并到AI商品图弹窗内，使用tab布局」）—— 它的内容搬进了
+          `AI商品图` 弹窗的第二个顶层 Tab（组件 `GenerationsPanel`，定义在本文件上方）。
+          被移除的原弹窗（保留备查，勿恢复）：`Modal open={generationsOpen}` 那个。 */}
 
       {/* 「生成商品详情图」独立弹窗（设计 17 §13.3.3，v2.1；v2.12 从详情弹窗迁出；
           v2.16 重排为**左右两栏**）。
@@ -2764,6 +3075,10 @@ export function XhsShopItemsPage() {
           故同时给内容区 `maxHeight` + 滚动，弹窗本体不超出视口。
           `Row/Col` 而非 `flex`：与全站栅格口径一致（窄视口自动折行单列）。 */}
       <Modal
+        // 2026-10-05 修正：`centered` 与 `open` 的**书写顺序**与语义无关
+        //  （antd 解构 props，不看顺序）。原先 `centered` 排在 `open` 之后，
+        //  只是让「所有弹窗都居中」这条规则在源码上少一处显式锚点 —— 统一提到 `open` 之前。
+        centered
         open={detailImageOpen}
         // v2.28：生成中**禁止关闭**（用户口径「弹窗加蒙版并统计耗时，防止被关闭」）。
         // ⚠️ 出图是逐张串行的真上游调用（实测单张 29–96 秒）—— 关掉弹窗不会取消后端
@@ -2774,10 +3089,10 @@ export function XhsShopItemsPage() {
         maskClosable={!detailImageGenerating}
         title={detailImageTitle}
         data-generating={detailImageGenerating ? "1" : "0"}
-        // v2.28.2：**垂直居中**（用户口径「生成AI商品图没有居中，你调整一下」）。
+        // v2.28.2：**垂直居中**（用户口径「生成AI商品图没有居中，你调整一下」；
+        // 2026-10-05 再次确认「全站弹窗一律居中」）。
         // ⚠️ antd 的 Modal **默认是顶部对齐**（`top: 100px`），加 `centered` 才垂直居中
         // （官方文档：centered 设为 true 时使用 flex 布局使弹窗垂直居中）。
-        centered
         width="75vw"
         onCancel={() => {
           if (detailImageGenerating) return; // 兜底：键盘 Esc 也走这里
@@ -2810,6 +3125,24 @@ export function XhsShopItemsPage() {
             否则会以最近的 positioned 祖先（可能是页面）为基准铺满全屏。
             这里包一层 `position: relative` 的容器把蒙版**约束在弹窗内容区**。 */}
         <div style={{ position: "relative" }}>
+        {/* 2026-10-05（需求 1）：**顶层 Tabs**——「生成配置」+「生成记录」。
+            ⚠️ 生成记录**打开该 Tab 时才拉**（`openGenerations` 会重置状态并发请求），
+            避免每次开弹窗都多发一次请求（多数用户进来是为了生成）。 */}
+        <Tabs
+          activeKey={detailImageTab}
+          onChange={(key) => {
+            const next = key as "config" | "generations";
+            setDetailImageTab(next);
+            if (next === "generations" && detailImageItem) {
+              void openGenerations(detailImageItem);
+            }
+          }}
+          items={[
+            {
+              key: "config",
+              label: "生成配置",
+              children: (
+                <div>
         {/* v2.29：**整弹窗蒙版**（用户口径「改成弹窗整体加蒙版」）。
             ⚠️ v2.28 是一条约 30px 高的**提示条**（不挡任何东西）——
             用户要的是「整个弹窗被盖住」的视觉阻断。现在用绝对定位铺满内容区，
@@ -3163,6 +3496,23 @@ export function XhsShopItemsPage() {
             ),
           }))}
         />
+                </div>
+              ),
+            },
+            {
+              key: "generations",
+              label: "生成记录",
+              children: (
+                <GenerationsPanel
+                  item={detailImageItem}
+                  loading={generationsLoading}
+                  rows={generations}
+                  total={generationsTotal}
+                />
+              ),
+            },
+          ]}
+        />
               </div>
 </Modal>
 
@@ -3289,9 +3639,148 @@ export function XhsShopItemsPage() {
         onClose={() => setEditingItem(null)}
         onSaved={() => {
           if (selectedAccountId) void load(selectedAccountId, pageNo, pageSize);
-          void loadGroups();
         }}
       />
+      {/* 商品操作结果弹窗（2026-10-05 需求 7）：任务逐条结果，5s 轮询到全终态。
+          ⚠️ 2026-10-06 用户口径：「结果等待弹窗要加**蒙版**统计**耗时**，**避免结果
+          弹窗关闭**，执行结果返回后再支持弹窗关闭」—— 修正了此前的折中（那时运行中
+          也能关，用户一点就把结果丢了）：
+
+          * `maskClosable={false}` — 点蒙版不关（误触最多的关闭路径）；
+          * `closable={!running}` — 运行中连右上角 × 都不给；
+          * `onCancel` 走 `closeOperateResult()` — 它自己会判非终态并拒绝；
+          * `mask` 常显 — 结果没出来之前，下面那张列表本来也不该被操作。 */}
+      <Modal
+        centered
+        open={operateTask !== null}
+        maskClosable={false}
+        closable={!operateTaskRunning()}
+        title={
+          operateTask
+            ? `${operateTask.action_label}结果 · ${
+                operateTask.status === "pending" || operateTask.status === "running"
+                  ? "执行中…"
+                  : `成功 ${operateTask.succeeded} / 未执行 ${operateTask.skipped} / 失败 ${operateTask.failed}`
+              }`
+            : "商品操作结果"
+        }
+        footer={
+          <Button
+            //: 执行中**不给点**（用户口径「执行结果返回后再支持弹窗关闭」）——
+            //: 判据与 `closeOperateResult` 同一份，按钮只是把它显性化。
+            disabled={operateTaskRunning()}
+            onClick={closeOperateResult}
+          >
+            {operateTaskRunning() ? "执行中…" : "关闭"}
+          </Button>
+        }
+        width="60vw"
+        onCancel={closeOperateResult}
+        styles={{ body: { maxHeight: "60vh", overflow: "auto" } }}
+      >
+        {operateTask ? (
+          <Space direction="vertical" size={10} style={{ width: "100%" }}>
+            <Space size={8} wrap>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                共 {operateTask.total} 件 · 已发请求 {operateTask.executed} 件
+                {operateTask.status === "pending" || operateTask.status === "running"
+                  ? "（后台逐条执行中，每 5 秒刷新）"
+                  : ""}
+              </Text>
+              {/* 耗时统计（2026-10-06 用户口径「结果等待弹窗要加蒙版统计耗时」）：
+                  前端自计时（秒表每 1s 一跳，终态停）—— 后端只给任务进度，
+                  不假装它有耗时字段；终态后固定为**总耗时**。 */}
+              <Tag color={operateTaskRunning() ? "processing" : "default"}>
+                耗时 {operateElapsedSec}s
+              </Tag>
+            </Space>
+            <Table<ShopItemOperateEntry>
+              rowKey="item_id"
+              size="small"
+              pagination={false}
+              dataSource={operateTask.items}
+              locale={{ emptyText: <Empty description="还没有逐条结果" /> }}
+              columns={[
+                { title: "商品", dataIndex: "title", render: (v: string, row) => v || row.item_id },
+                { title: "商品 ID", dataIndex: "item_id", width: 220 },
+                {
+                  title: "结果",
+                  dataIndex: "result",
+                  width: 90,
+                  render: (v: string) =>
+                    v === "ok" ? (
+                      <Tag color="green">已执行</Tag>
+                    ) : v === "skipped" ? (
+                      <Tag color="orange">未执行</Tag>
+                    ) : (
+                      <Tag color="red">失败</Tag>
+                    ),
+                },
+                { title: "说明", dataIndex: "reason", render: (v: string) => v || "-" },
+              ]}
+            />
+          </Space>
+        ) : null}
+      </Modal>
+
+      {/* 同步指定商品弹窗（2026-10-05 需求 6）：无限列表展示「要同步的商品 + 同步状态」。
+          ⚠️ 平台没有按 id 拉商品的读接口 ⇒ 后端要**整店翻页扫描**才能确认命中 / 未命中。
+          弹窗里**如实标注这个代价**（用户会等很久，不说清就是骗他）。 */}
+      <SyncSpecifiedItemsModal
+        open={syncItemsOpen}
+        platformAccountId={selectedAccountId}
+        //: 主表勾选的商品 ID（弹窗里**以列表展示**，勾选后点同步才跑 —— 2026-10-06 v2 口径）。
+        //: ⚠️ 行内「同步商品信息」也走这个弹窗，它通过 `syncSingleTarget` 注入单个 ID。
+        //: ⚠️ **必须带名称 / 缩略图**：此前只传 ID ⇒ 弹窗「商品信息」列的名称与图全空
+        //: （2026-10-06 用户实测报的 bug）。行内单件用 `syncSingleTarget` 那一行。
+        items={
+          syncSingleTarget
+            ? (data?.items ?? [])
+                .filter((row) => row.item_id === syncSingleTarget)
+                .map((row) => ({
+                  item_id: row.item_id,
+                  title: row.title || "",
+                  image: row.image || "",
+                }))
+            : (data?.items ?? [])
+                .filter((row) => selectedItemIds.includes(row.item_id))
+                .map((row) => ({
+                  item_id: row.item_id,
+                  title: row.title || "",
+                  image: row.image || "",
+                }))
+        }
+        onClose={() => {
+          setSyncItemsOpen(false);
+          //: ⚠️ 必须清：否则下一次「批量同步商品信息」进来时 `syncSingleTarget`
+          //: 还是上一件商品 ⇒ 弹窗只列那一件（静默丢批量）。
+          setSyncSingleTarget(null);
+        }}
+        onSynced={() => {
+          if (selectedAccountId) void load(selectedAccountId, pageNo, pageSize);
+        }}
+        //: 「按条件同步」= 整店 + **后台任务**（弹窗那边点同步即关，这里接手触发）。
+        onConditionSync={(options: SyncOptions) => {
+          const payload: SyncNotesOptions =
+            options.scope === "range"
+              ? { scope: "range", startDate: options.startDate, endDate: options.endDate }
+              : { scope: "full" };
+          void syncAllStatusGoods(payload);
+        }}
+      />
+      {/* ark 门禁提示（需求 5：与账号卡片页「同步商品」同一提示口径）。
+          ⚠️ `unknown`（未检测）**不拦**（DEF-057：没问到 ≠ 不可用）—— 只有确定不可用才提示。 */}
+      <Modal
+        centered
+        open={arkPromptOpen}
+        title="需要先登录千帆"
+        onCancel={() => setArkPromptOpen(false)}
+        onOk={() => setArkPromptOpen(false)}
+        okText="知道了"
+        cancelButtonProps={{ style: { display: "none" } }}
+      >
+        同步商品需要可用的千帆令牌，请到「账号矩阵」登录 / 重新登录千帆后再试。
+      </Modal>
     </div>
   );
 }

@@ -868,7 +868,11 @@ export function XhsLibraryPage() {
    * 原文原因）由轮询落库后回填卡片。
    */
   function publishNoteWithConfirm(note: SavedNote) {
+    // ⚠️ `centered: true` 必须**逐点显式传**：`Modal.confirm` 走的是静态方法分支
+    //（`modal/confirm.js` 自建 ConfirmDialog），`ConfigProvider modal={{centered:true}}`
+    //（`providers.tsx` 里给的是 ConfigContext）**到不了它** ⇒ 不传就还是顶部对齐。
     Modal.confirm({
+      centered: true,
       title: "发布这篇笔记？",
       content: `将把《${note.title || "未命名"}》加入发布队列并发布到小红书、挂上对应商品链接。发布成功后状态更新为已发布，本地临时下载的媒体会自动清理。`,
       okText: "确认发布",
@@ -1005,7 +1009,11 @@ export function XhsLibraryPage() {
       message.warning("选中的笔记里没有可发布的（待发布/发布失败的本地生成笔记才可发布）。");
       return;
     }
+    // ⚠️ `centered: true` 必须**逐点显式传**：`Modal.confirm` 走的是静态方法分支
+    //（`modal/confirm.js` 自建 ConfirmDialog），`ConfigProvider modal={{centered:true}}`
+    //（`providers.tsx` 里给的是 ConfigContext）**到不了它** ⇒ 不传就还是顶部对齐。
     Modal.confirm({
+      centered: true,
       title: `批量发布 ${targets.length} 篇笔记？`,
       content: `逐篇加入发布队列，由后端按顺序执行（下载媒体 → 上传 → 预审核 → 发布），单项失败不阻断。${
         skipped > 0 ? `另有 ${skipped} 篇选中项不可发布，将跳过。` : ""
@@ -1081,7 +1089,11 @@ export function XhsLibraryPage() {
       message.warning("选中的笔记里没有已发布的（只有已发布过的笔记支持批量同步）。");
       return;
     }
+    // ⚠️ `centered: true` 必须**逐点显式传**：`Modal.confirm` 走的是静态方法分支
+    //（`modal/confirm.js` 自建 ConfirmDialog），`ConfigProvider modal={{centered:true}}`
+    //（`providers.tsx` 里给的是 ConfigContext）**到不了它** ⇒ 不传就还是顶部对齐。
     Modal.confirm({
+      centered: true,
       title: `批量同步 ${targets.length} 篇笔记？`,
       content: `逐篇加入同步队列，由后端按顺序拉取平台最新内容（正文 / 图集 / 视频地址，单项失败不阻断）。${
         skipped > 0 ? `另有 ${skipped} 篇选中项未发布或发布失败，将跳过。` : ""
@@ -1241,7 +1253,11 @@ export function XhsLibraryPage() {
   }
 
   async function handleDeleteNote(note: SavedNote) {
+    // ⚠️ `centered: true` 必须**逐点显式传**：`Modal.confirm` 走的是静态方法分支
+    //（`modal/confirm.js` 自建 ConfirmDialog），`ConfigProvider modal={{centered:true}}`
+    //（`providers.tsx` 里给的是 ConfigContext）**到不了它** ⇒ 不传就还是顶部对齐。
     Modal.confirm({
+      centered: true,
       // 连带后果说全（2026-09-27 用户口径「话题只删关系表」+「删除笔记时需删除
       // 笔记与商品之间的关系」）：**关系行**一并删，**话题字典行不删**（那是用户资产，
       // 别处还在用）—— 原文写「标签关系」是标签表并入话题表之前的旧词，已改。
@@ -1415,10 +1431,8 @@ export function XhsLibraryPage() {
 
   return (
     <div>
-      <Row justify="space-between" align="middle" style={{ marginBottom: 24 }}>
-        <Col><Title level={4} style={{ margin: 0 }}>内容库</Title><Text type="secondary">保存的笔记素材，支持标签、筛选、批量操作和导出</Text></Col>
-        <Col><Button icon={<ReloadOutlined />} onClick={() => void loadNotes()} loading={isLoading}>刷新</Button></Col>
-      </Row>
+      {/* 2026-10-05 用户口径「移除所有页面页面头」：原「内容库 + 一句描述 + 刷新」
+          整块移除，「刷新」收进下方搜索卡右上角（与账号矩阵卡片同一排布）。 */}
 
       {/*
         统计卡：**已发布 / 待发布 / 发布失败**（内容池结构这一眼）+ 已保存 + 已选择
@@ -1526,7 +1540,12 @@ export function XhsLibraryPage() {
           ⚠️ 原「卡片表格切换」已随表格视图一起移除（2026-09-23 用户口径
           「内容库默认使用卡片，不再支持表格展示笔记」）。
       */}
-      <Card size="small" style={{ marginBottom: 16 }}>
+      <Card
+        size="small"
+        style={{ marginBottom: 16 }}
+        title="内容库"
+        extra={<Button icon={<ReloadOutlined />} onClick={() => void loadNotes()} loading={isLoading}>刷新</Button>}
+      >
         {/* 第一行：关键词(6) + 账号(4) + 类型(4) + 标签(5) + 发布状态(5) = 24 */}
         <Row gutter={12} align="middle" style={{ marginBottom: 12 }}>
           <Col span={6}><Input placeholder="标题、正文、作者" value={keywordFilter} onChange={(e) => setKeywordFilter(e.target.value)} allowClear /></Col>

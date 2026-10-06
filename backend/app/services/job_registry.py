@@ -25,6 +25,14 @@ JOB_KEY_NOTE_SYNC = "system.note_sync"
 JOB_KEY_GOODS_NOTE_SYNC = "system.goods_note_sync"
 JOB_KEY_SHOP_GOODS_SYNC = "system.shop_goods_sync"
 JOB_KEY_ORDER_SYNC = "system.order_sync"
+#: 2026-10-05 用户口径：队列记录清理**升级为公共「清理记录表」任务**
+#: （`system.queue_record_cleanup`）—— 定期清理项目中所有指定记录表。
+#: 键**保持不变**（存量行与历史日志快照不迁移即可继续对上），中文名改「清理记录表」。
+JOB_KEY_RECORD_CLEANUP = "system.queue_record_cleanup"
+#: 2026-10-05 用户口径：清理无流量笔记是**手动触发任务**，入口只有「我的笔记」页按钮。
+#: 该键保留在注册表里（任务中心可点「立即执行」、可看日志），但**默认 trigger_type=manual**
+#: （迁移 `y8z9a0b1c2d3` 播的就是 manual ⇒ 从来没有自动跑过）。
+JOB_KEY_NO_TRAFFIC_CLEANUP = "system.no_traffic_cleanup"
 
 #: M6 方向 6（设计 16 §7）订单同步。与 `JOB_KEY_SHOP_GOODS_SYNC` 分开：
 #: 落不同的表、不同的任务类型，任务中心是两行独立的任务。
@@ -98,7 +106,10 @@ def _build_registry() -> dict[str, JobSpec]:
         run_note_metrics_collect_once,
         run_shop_metrics_collect_once,
     )
-    from backend.app.services.note_queue_service import cleanup_queue_records
+    from backend.app.services.record_cleanup_service import (
+        run_record_cleanup,
+        validate_retention_days,
+    )
     from backend.app.services.shop_health_service import run_shop_health_checks_once
     from backend.app.services.workflow_service import run_workflow_job
 
@@ -142,14 +153,20 @@ def _build_registry() -> dict[str, JobSpec]:
             default_cron="0 0 */6 * * *",
         ),
         JobSpec(
-            key="system.no_traffic_cleanup",
+            key=JOB_KEY_NO_TRAFFIC_CLEANUP,
             name="无流量笔记清理",
             func=scheduler_service.run_scheduled_cleanups,
             builtin=True,
             user_scoped=True,
             params_editable=("account_ids",),
-            default_trigger_type="cron",
-            default_cron="0 0 */6 * * *",
+            # ⚠️ **`manual`，不是 `cron`**（2026-10-05 用户口径「没有自动清理笔记的逻辑，
+            #    定时任务列表没有清理无流量笔记任务……清理无流量笔记任务为手动触发任务，
+            #    入口只有我的笔记页的清理无流量按钮」）：
+            #    迁移 `y8z9a0b1c2d3` 播的本来就是这个值，本次把它**写进注册表默认**，
+            #    消掉原先 `default_cron="0 0 */6 * * *"` 这个与实际不符的僵尸兜底
+            #    （配置里有 `no_traffic_cleanup_interval_hours` 时会被装配成定时跑）。
+            default_trigger_type="manual",
+            default_cron="",
         ),
         JobSpec(
             key=JOB_KEY_NOTE_SYNC,
@@ -202,14 +219,16 @@ def _build_registry() -> dict[str, JobSpec]:
             # 2026-09-25 用户口径「笔记任务记录清理应扩展为队列详情记录清理……
             # 任务名称修改为队列记录清理」：任务键与中文名同步改（迁移
             # `c2d3e4f5a6b7` 把存量行与历史日志一起改名，不静默留旧键）。
-            key="system.queue_record_cleanup",
-            name="队列记录清理",
-            func=cleanup_queue_records,
+            key=JOB_KEY_RECORD_CLEANUP,
+            name="清理记录表",
+            func=run_record_cleanup,
             builtin=True,
             user_scoped=True,
-            # 无自定义参数：保留期是**固定口径**（15 天），不做成可调项 ——
-            # 可调会让「能翻多久的历史」每人不同，排查时对不上口径。
-            params_editable=(),
+            # ⚠️ 2026-10-05 用户口径**取代**了 2026-09-27 的「保留期固定口径、不可调」：
+            #    保留期改为任务参数 `retention_days`（默认 15 天），在任务中心的
+            #    新增 / 编辑弹窗里配，每次执行时读取。原句与对照表见设计 15 §4.5。
+            params_editable=("retention_days",),
+            params_validator=validate_retention_days,
             default_trigger_type="cron",
             default_cron="0 0 7 * * *",
         ),

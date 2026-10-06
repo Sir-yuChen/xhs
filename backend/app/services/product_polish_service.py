@@ -17,7 +17,9 @@
    `_business_model_context`）—— **不许旁路直连上游**。api_key 在服务端、
    绝不下发；旁路 = 绕过「业务点 → 服务商」的租户隔离与类型校验。
 2. **结果不落库**：本模块只回**备选**（标题 / 卖点各 3 个）。用户**采纳**才写
-   `shop_products.ai_title` / `ai_selling_point`（走 `product_groups_service.edit_product`）。
+   `shop_products.ai_title` / `ai_selling_point`（走 `shop_products_service.edit_product`）。
+   ⚠️ 宿主原为 `product_groups_service.edit_product`，2026-10-05 分组退场后迁到
+   `shop_products_service`（分组服务整模块删除，但编辑能力本身保留）。
    润色**过程**在 `llm_gateway_usage_logs` 有调用记录（v1.7 台账口径），
    不为「润色历史」新建表（§13.2 同一语义不留两份实现）。
 3. **缺值不编造**：商品没有的字段（品牌 / 卖点参数缺失）就不写进提示词 ——

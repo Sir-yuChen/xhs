@@ -195,6 +195,7 @@ def list_no_traffic_candidates(
     thresholds: Optional[TrafficThresholds] = None,
     limit: int = DEFAULT_BATCH_LIMIT,
     query: Optional[CleanupQuery] = None,
+    page: int = 1,
 ) -> dict[str, Any]:
     """列出无流量候选。
 
@@ -207,8 +208,9 @@ def list_no_traffic_candidates(
       这就是「按搜索条件 + 阈值」共同决定候选池。
 
     返回 ``{candidates, total, thresholds, query, coverage}``：
-    * ``candidates`` — 最多 ``limit`` 条（清理批次有上限，见 ``DEFAULT_BATCH_LIMIT``）；
-    * ``total`` — 符合条件的总数（分页只影响返回条数，不影响计数）；
+    * ``candidates`` — **第 ``page`` 页**、每页 ``limit`` 条（从 1 起）；
+    * ``total`` — 符合条件的**总数**（跨页不变，前端据此算页数）；
+    * ``page`` — 回显实际采用的页码（越界的页会回落成最后一页，见下）；
     * ``coverage`` — 候选池覆盖率说明，让前端讲清边界。
     """
     thresholds = thresholds or TrafficThresholds()
@@ -229,6 +231,9 @@ def list_no_traffic_candidates(
         return {
             "candidates": [],
             "total": 0,
+            "page": 1,
+            "page_count": 1,
+            "page_size": max(1, int(limit or DEFAULT_BATCH_LIMIT)),
             "thresholds": thresholds.to_dict(),
             "query": query.to_dict(),
             "coverage": {
@@ -281,7 +286,18 @@ def list_no_traffic_candidates(
         matched.append(candidate)
 
     total = len(matched)
-    page = matched[: max(1, int(limit or DEFAULT_BATCH_LIMIT))]
+    # 分页（2026-10-05 用户口径「笔记列表实现分页」）：**先算 total 再切片** ——
+    # 这也让「清理」侧的调用（`limit=batch_limit`、不传 page）语义**逐字不变**
+    # （第 1 页 = 原来那批前 N 条）。
+    size = max(1, int(limit or DEFAULT_BATCH_LIMIT))
+    page_count = max(1, (total + size - 1) // size) if total else 1
+    page_no = max(1, int(page or 1))
+    # 越界的页回落成**最后一页**（不是空集）：删完几篇后 total 会变小，用户停在末页
+    # 时不该看到一张空表 —— 空表会让人以为「筛选没生效」。
+    if page_no > page_count:
+        page_no = page_count
+    start = (page_no - 1) * size
+    page_rows = matched[start:start + size]
     reason = (
         "候选池仅包含已同步千帆挂链映射的笔记；未同步/未绑定千帆的笔记不在池内"
     )
@@ -292,8 +308,11 @@ def list_no_traffic_candidates(
             + "；其余边界同上"
         )
     return {
-        "candidates": page,
+        "candidates": page_rows,
         "total": total,
+        "page": page_no,
+        "page_count": page_count,
+        "page_size": size,
         "thresholds": thresholds.to_dict(),
         "query": query.to_dict(),
         "coverage": {

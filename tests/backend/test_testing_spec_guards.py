@@ -259,6 +259,7 @@ def _wired_by(script: str) -> list[str]:
         "qr_session_identity.cjs",
         "schedule_center.cjs",
         "settings_view.cjs",
+        "shop_items_query.cjs",
         "shop_items_view.cjs",
         "sync_gates.cjs",
     ],
@@ -290,82 +291,43 @@ def test_wiring_guard_is_not_vacuous():
 # 记忆预算守卫（2026-09-25）
 #
 # 这一组守的是「会话收尾纪律」—— 此前它**只写在文档里**，没有任何机械校验，
-# 于是主记忆从 8KB 漂到 12.9KB（+61%），同时 `.workbuddy/memory/2026-09-24.md`
+# 于是主记忆从 8KB 漂到 12.9KB（+61%），同时 `.hermes/memory/2026-09-24.md`
 # 损坏了 15% 也没人知道。规矩不接线就是纸面规矩。
 # ---------------------------------------------------------------------------
 
-#: 记忆预算脚本在 `.workbuddy/scripts/`（不是 `.cjs`），所以不进上面那张 .cjs 清单。
-MEMORY_BUDGET_SCRIPT = ROOT / ".workbuddy" / "scripts" / "verify_memory_budget.py"
-
-
-def _run_memory_budget(**env: str) -> subprocess.CompletedProcess[str]:
-    environment = os.environ.copy()
-    environment.update(env)
-    return subprocess.run(
-        [sys.executable, str(MEMORY_BUDGET_SCRIPT)],
-        cwd=str(ROOT),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env=environment,
-        check=False,
-    )
-
-
-def test_memory_budget_script_is_wired_and_green():
-    """主记忆 / `REF_*.md` / 日志的**预算 + 可解码性**必须全绿。
-
-    2026-09-25 实测三件事，各自都值得一条钉子：
-
-    ① 主记忆立了「≤8KB」却长期无人机械校验 ⇒ 实际 12.9KB。**实测地板 ≈10KB**
-       （把叙述性内容全部下移到 `REF §G` 后仍要 10KB，再压只能删规则），
-       故额度校准为 **12KB**（留 ~2KB 给后续新规范）。
-    ② 单日日志**从来没有上限**：7 天合计 368KB / 144,537 token，单文件最高
-       60.7KB。现钉 **≤25KB**（立规前的历史文件在白名单里只报不判）。
-    ③ `.workbuddy/memory/2026-09-24.md` 已损坏 15%（5,529 个字符的末字节被 `?`
-       顶掉 ⇒ 整份文件 UTF-8 解码抛异常）。它此前只是「文档里说按需 grep」，
-       **没有任何脚本碰过它**，所以烂了很久没暴露 ⇒ 可解码性必须有判据。
-    """
-    result = _run_memory_budget()
-    assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
-    assert "0 FAIL" in result.stdout, result.stdout
-
-
-@pytest.mark.parametrize(
-    ("mutate", "expected"),
-    [
-        ("memory", "主记忆 "),
-        ("ref", "REF "),
-        ("log", "日志超限"),
-        ("utf8", "UTF-8 判据失灵"),
-    ],
-)
-def test_memory_budget_guards_are_load_bearing(mutate: str, expected: str):
-    """变异验证：额度／判据被压坏时脚本必须变红（否则它没在守任何东西）。
-
-    断言带 `FAIL  ` **前缀**：只找 `主记忆` 的话，全绿时那行 `PASS  MEMORY.md`
-    同样命中，等于什么都没断言（DEF-058 的教训）。
-    """
-    result = _run_memory_budget(MEMORY_BUDGET_MUTATE=mutate)
-    assert result.returncode != 0, f"{mutate} 变异必须让脚本失败：stdout={result.stdout}"
-    assert f"FAIL  {expected}" in result.stdout, f"stdout={result.stdout}"
+#: 记忆预算脚本在 `.hermes/scripts/`（不是 `.cjs`），所以不进上面那张 .cjs 清单。
+# --------------------------------------------------------------------------- #
+# 【已退役 2026-10-05】记忆预算守卫（`verify_memory_budget.py`）
+# --------------------------------------------------------------------------- #
+# 原口径（2026-09-25 立规）：`.workbuddy/memory/` 下的主记忆 ≤12KB、`REF_*.md` 单文件
+# ≤25KB、单日日志 ≤25KB 且全部必须是合法 UTF-8。
+#
+# **为什么退场**：用户 2026-10-05 口径「项目不再使用 WorkBuddy，后续完全使用 Hermes
+# 开发」⇒ 记忆不再以**文件**为真相源，改为**蒸馏入向量库**（Hindsight bank=hermes，
+# 检索走 `hindsight_recall`）。约束的对象（那些文件）随之消失，判据没有载体。
+#
+# ⚠️ **退役 ≠ 结论被推翻**：三条实测教训（主记忆曾从声明 8KB 漂到 12.9KB 无人报警；
+# 单日日志曾 7 天 368KB；`.workbuddy/memory/2026-09-24.md` UTF-8 损坏 15% 长期无人发现）
+# 仍然是本仓的真教训，原文见 `docs/04_测试文档/01` 的记忆预算小节与当日日志。
+# 若将来又把长期记忆落成文件，**预算 + 可解码性判据必须一起回来**（两件事：额度要有
+# 机械判据、内容要能解码）。
+# --------------------------------------------------------------------------- #
 
 
 # --------------------------------------------------------------------------- #
 # 业务链路验收手册自洽守卫（2026-10-04 立规 · `04_测试文档/01` §14.4）
 # --------------------------------------------------------------------------- #
-# `10_第二阶段业务链路全链路验收手册.md` 是「用户验收主路径」。它的**链路总览表**
+# `09_第二阶段功能点全链路验收清单.md` 是「用户验收主路径」。它的**链路总览表**
 # 与**正文链路**是同一件事的两份写法 —— 加了链路忘改总览（或反之）是这类文档最典型
 # 的漂移，肉眼看不到。规矩不接线就是纸面规矩，故落成机械判据。
 LINK_VERIFY_SCRIPT = (
-    ROOT / ".workbuddy" / "skills" / "xhs-doc-stats-verify" / "verify_acceptance_links.py"
+    ROOT / ".hermes" / "skills" / "xhs-doc-stats-verify" / "verify_acceptance_links.py"
 )
 
 
 #: 变异脚本（同时提供 `--baseline` / `--only` 两种模式，见下）。
 LINK_MUTATE_SCRIPT = (
-    ROOT / ".workbuddy" / "scripts" / "mutate_verify_acceptance_links.py"
+    ROOT / ".hermes" / "scripts" / "mutate_verify_acceptance_links.py"
 )
 
 
@@ -403,6 +365,8 @@ def test_acceptance_link_manual_is_self_consistent():
     [
         ("toc_drop_last_chain", "总览表行数"),
         ("toc_wrong_step_count", "步数不符"),
+        # 链路末尾允许挂「预走查实测」辅助表 ⇒ 守卫必须只认表头写着「步」的那种表
+        ("step_table_counts_aux_table", "步数不符"),
         ("remove_verdict_block", "缺要素"),
         ("remove_breakpoint_block", "缺要素"),
         ("readme_unregistered", "README"),
@@ -414,7 +378,7 @@ def test_acceptance_link_manual_is_self_consistent():
     ],
 )
 def test_acceptance_link_guard_is_load_bearing(mutate: str, expected: str):
-    """变异验证：**不另抄一份变异逻辑**，直接复用 `.workbuddy/scripts/mutate_verify_acceptance_links.py`。
+    """变异验证：**不另抄一份变异逻辑**，直接复用 `.hermes/scripts/mutate_verify_acceptance_links.py`。
 
     这样「守卫会不会红」这件事只有一个实现（DEF-044 教训）。脚本自己负责还原与
     收尾复核，故这里只断言它在对应变异下确实报出预期的 FAIL 文案。

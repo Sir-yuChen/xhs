@@ -381,6 +381,15 @@ export type XhsShopItem = {
   note_ids: string[];
   category: string;
   status_label: string;
+  /**
+   * 状态筛选键（`on_shelf` / `off_shelf` / `frozen` / `auditing` / `audit_rejected` /
+   * `audit_passed` / `rectify`；未知为空串）。
+   *
+   * ⚠️ 后端**两条路径都下发**它（同步落库时按 `status_key_from_raw` 落、本地台账
+   * 路径兜底用 `status` 列），上下架门禁按它判 —— 前端**上色也用它**，
+   * 与文案同源（2026-10-06：状态 tag 颜色不许再取 `buyable`）。
+   */
+  status_key?: string;
   buyable: boolean;
   frozen: boolean;
   deleted: boolean;
@@ -392,14 +401,13 @@ export type XhsShopItem = {
   on_shelf_time: string;
   update_time: string;
   xsec_token: string;
-  /** M4：本地分组 id（`null` = 未分组）。 */
-  group_id?: number | null;
-  /** M4：分组名（后端下发；空 = 未分组，前端渲染 `-`）。 */
-  group_name?: string;
-  /** M4：AI 采纳的标题（空 = 未采纳；标题列 Tooltip 展示对照）。 */
+  /** M4：AI 采纳的标题（空 = 未采纳；标题列 Tooltip 展示对照）。
+   *  ⚠️ `group_id` / `group_name` 已随「彻底移除商品分组」退场（2026-10-05）。 */
   ai_title?: string;
   /** M4：AI 采纳的卖点。 */
   ai_selling_point?: string;
+  /** 2026-10-05 需求 8：该商品当前**可做的动作**（后端唯一判据下发）。 */
+  allowed_actions?: ShopItemAllowedAction[];
 };
 
 export type XhsShopItemsQuery = {
@@ -427,8 +435,7 @@ export type XhsShopItemsQuery = {
   note_count?: number;
   sort_field?: string;
   order?: "asc" | "desc";
-  /** M4：分组筛选（`0` = 未分组；不传 = 不筛）。 */
-  group_id?: number;
+  // ⚠️ 分组筛选（`group_id`）已随「彻底移除商品分组」退场（2026-10-05）。
 };
 
 /** 挂链笔记数筛选的比较符（v1.34）；白名单与后端 `qianfan.NOTE_COUNT_OPS` 逐个相等。 */
@@ -541,21 +548,74 @@ export type XhsShopItemSku = {
   freeze: boolean | null;
 };
 
-/** 商品分组（设计 20 §2.1 端点 1–4）。 */
-export type XhsProductGroup = {
-  id: number;
-  name: string;
-  /** ⚠️ 当前用户**全部账号**的商品数（跨账号聚合，不是某个账号的）。 */
-  product_count: number;
-  created_at?: string;
-  updated_at?: string;
+// --------------------------------------------------------------------------- //
+// 商品操作（2026-10-05 需求 6/7/8，设计 20 §11）
+// --------------------------------------------------------------------------- //
+
+/** 三个商品动作（**白名单唯一来源** = 后端 `shop_item_operate_gates.ALL_ACTIONS`）。 */
+export type ShopItemOperateAction = "on_shelf" | "off_shelf" | "delete";
+
+/**
+ * 一件商品的**可做动作**（后端下发，需求 8 的按钮判据）。
+ *
+ * ⚠️ `supported: false` 的项**也要渲染**（置灰 + Tooltip 给 `reason`）——
+ * 只渲染可做的，用户就问不出「为什么这个商品没有上架按钮」。
+ * ⚠️ 前端**不得**自己推导 `supported`（同一件事两个实现必然分叉）。
+ */
+export type ShopItemAllowedAction = {
+  action: ShopItemOperateAction;
+  label: string;
+  supported: boolean;
+  /** 不可做时的中文原因（平台原文口径）；可做时为空串。 */
+  reason: string;
+};
+
+/** 商品操作任务的**逐条结果**（`GET /items/operate/{task_id}`）。 */
+export type ShopItemOperateEntry = {
+  item_id: string;
+  title: string;
+  /** `ok` = 已执行成功；`skipped` = 门禁没过，**只记录不执行**；`failed` = 平台拒绝。 */
+  result: "ok" | "skipped" | "failed";
+  reason: string;
+};
+
+export type ShopItemOperateResult = {
+  task_id: number;
+  /** `pending` / `running` / `done` / `failed`。 */
+  status: string;
+  action: string;
+  action_label: string;
+  platform_account_id: number;
+  total: number;
+  succeeded: number;
+  skipped: number;
+  failed: number;
+  /** 真正发过写请求的条数（成功 + 失败）—— 与 `skipped` 对照看「门禁拦了几条」。 */
+  executed: number;
+  error: string;
+  finished_at: string;
+  items: ShopItemOperateEntry[];
+};
+
+/** 同步指定商品的结果（`POST /items/sync`）。 */
+export type ShopItemsSyncResult = {
+  platform_account_id: number;
+  /** 实际落库更新的商品数。 */
+  synced: number;
+  /** 请求里但平台侧没找到的 item_id（**如实回**，不当作成功）。 */
+  not_found: string[];
+  /** 平台侧本次扫描的总数（说明「为什么要翻整店」）。 */
+  scanned: number;
+  /** 命中数（= `synced` 的另一种说法，供弹窗展示）。 */
+  matched: number;
+  note: string;
 };
 
 /** `PATCH /items/edit` 的执行体（**只带改过的键**；见 `lib/product-edit.ts`）。 */
 export type XhsItemEditPayload = {
   platform_account_id: number;
   item_id: string;
-  group_id?: number | null;
+  // ⚠️ 分组已退场（2026-10-05）；接口带 `extra="forbid"` ⇒ 再传 `group_id` 会 422。
   ai_title?: string | null;
   ai_selling_point?: string | null;
 };
@@ -563,7 +623,6 @@ export type XhsItemEditPayload = {
 /** 编辑结果：`updated[]` 只列**真改过**的字段（空数组 = 什么都没改）。 */
 export type XhsItemEditResult = {
   item_id: string;
-  group_id: number | null;
   ai_title: string | null;
   ai_selling_point: string | null;
   updated: string[];

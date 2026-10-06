@@ -36,7 +36,7 @@ T4（`note_gen_llm_service`，359 行）+ T6（`note_gen_llm_worker`，1250 行�
 ⚠️ **测试卫生**（与其余 worker 测试同规）：生成 worker 是**进程级全局线程**，
 夹具必须显式请求 `monkeypatch`（teardown 时先收 worker、再恢复 `_session_factory`），
 否则残留 worker 会拿**真库**认领测试塞的假行 = 数据隔离事故
-（`.workbuddy/memory/MEMORY.md` 的 T3 实测记录过同型事故）。
+（`.hermes/memory/MEMORY.md` 的 T3 实测记录过同型事故）。
 """
 
 from __future__ import annotations

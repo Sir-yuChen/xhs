@@ -102,6 +102,16 @@ export function AppProviders({ children }: AppProvidersProps) {
     <ThemeContext.Provider value={{ mode, toggle }}>
       <ConfigProvider
         locale={zhCN}
+        // 全站弹窗一律居中（用户口径「检查项目所有页面的弹窗，设置为页面居中」）。
+        // ⚠️ 只靠给每个 `<Modal>` 加 `centered` 是不够的 —— `Modal.confirm` /
+        //    `App.useApp().modal.confirm` 走的是**静态方法**分支（`modal/confirm.js`
+        //    自己 `createElement(ConfirmDialog)`，`ConfirmDialog.js` 里的
+        //    `useComponentConfig("modal")` **只读 ConfigContext**，
+        //    不读 ConfigProvider 的 `components.modal` 配置）
+        //    ⇒ 必须在 ConfigContext 这一层给 `modal: { centered: true }`，
+        //    全站 14 个二次确认框才跟着居中（`Modal.js` 里是
+        //    `centered ?? contextCentered`，显式传 false 仍可单点否决）。
+        modal={{ centered: true }}
         theme={{
           algorithm: isDark ? theme.darkAlgorithm : theme.defaultAlgorithm,
           token: isDark ? darkTokens : lightTokens,

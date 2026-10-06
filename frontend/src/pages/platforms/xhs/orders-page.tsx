@@ -47,7 +47,6 @@ import {
 import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { PageHeader } from "../../../components/layout/app-shell";
 import {
   exportOrders,
   fetchAccounts,
@@ -290,6 +289,7 @@ const onSync = async () => {
     if (!accountId) return;
     // ⚠️ 导出**含完整收件信息** —— 必须先告知再执行（不是「点完才知道」）
     modal.confirm({
+      centered: true,
       title: "导出订单",
       content: EXPORT_WARNING,
       okText: "继续导出",
@@ -462,24 +462,8 @@ const onSync = async () => {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <PageHeader
-        eyebrow="小红书运营"
-        title="订单管理"
-        description="千帆订单台账（一期只读：同步 / 查看 / 筛选 / 导出 / 本地备注；发货与售后为下一期）"
-        action={
-          <Space>
-            <Button icon={<SyncOutlined />} loading={syncing} onClick={() => void onSync()}>
-              同步订单
-            </Button>
-            <Button icon={<ReloadOutlined />} onClick={() => void load(page)}>
-              刷新
-            </Button>
-            <Button icon={<DownloadOutlined />} onClick={onExport}>
-              导出
-            </Button>
-          </Space>
-        }
-      />
+      {/* 2026-10-05 用户口径「移除所有页面页面头」：原「小红书运营 / 订单管理 /
+          台账说明」三行整块移除；「同步订单 / 刷新 / 导出」收进下方「订单列表」卡右上角。 */}
 
       {/* ① 监控卡 */}
       <Card size="small" title="订单监控">
@@ -532,6 +516,15 @@ const onSync = async () => {
         title="订单列表"
         extra={
           <Space wrap>
+            <Button size="small" icon={<SyncOutlined />} loading={syncing} onClick={() => void onSync()}>
+              同步订单
+            </Button>
+            <Button size="small" icon={<ReloadOutlined />} onClick={() => void load(page)}>
+              刷新
+            </Button>
+            <Button size="small" icon={<DownloadOutlined />} onClick={onExport}>
+              导出
+            </Button>
             <Select
               style={{ width: 200 }}
               placeholder="店铺 / 账号"
@@ -709,7 +702,7 @@ const onSync = async () => {
             </Card>
 
             <Paragraph type="secondary" style={{ margin: 0, fontSize: 12 }}>
-              发货与售后审核是**真实平台写操作、不可撤回**（M7，2026-10-04 门禁已解除）：
+              发货与售后审核是真实平台写操作、不可撤回（M7，2026-10-04 门禁已解除）：
             仅对「待发货」/「待处理」的行给出入口，且必须经二次确认；改价等其余写操作仍未授权。
             </Paragraph>
           </div>

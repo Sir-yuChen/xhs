@@ -46,7 +46,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $Root = Split-Path -Parent $PSScriptRoot
-$TmpDir = Join-Path $Root ".workbuddy\tmp"
+$TmpDir = Join-Path $Root ".hermes\tmp"
 if (!(Test-Path $TmpDir)) { New-Item -ItemType Directory -Path $TmpDir -Force | Out-Null }
 
 if ([string]::IsNullOrEmpty($TagName)) { $TagName = "v$Version" }

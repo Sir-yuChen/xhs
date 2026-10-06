@@ -20,9 +20,8 @@ import {
   Typography,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { PlusOutlined, ReloadOutlined, SafetyCertificateOutlined, SettingOutlined } from "@ant-design/icons";
+import { PlusOutlined, ReloadOutlined, SettingOutlined } from "@ant-design/icons";
 
-import { PageHeader } from "../../components/layout/app-shell";
 import {
   createSystemSetting,
   deleteSystemSetting,
@@ -250,11 +249,8 @@ export function SettingsPage() {
 
   return (
     <div>
-      <PageHeader
-        eyebrow="Workspace"
-        title="设置"
-        description="用户空间、安全、文件存储和系统参数会集中在这里。"
-      />
+      {/* 2026-10-05 用户口径「移除所有页面页面头」：原「Workspace / 设置 / 一句描述」
+          三行整块移除（与侧栏菜单项重复）；本页第一张卡「系统参数」自带标题与刷新入口。 */}
 
       {/*
         2026-09-26 用户口径「设置页面移除项目声明」：原第二张「项目声明」卡
@@ -262,6 +258,10 @@ export function SettingsPage() {
         导入随之下线。
         2026-09-27（设计 10 §7）：本页新增「系统参数」卡 —— 运行时配置中心的
         列表 + 增删改查；「安全边界」保留为第二张卡。
+        2026-10-05 用户口径「设置页的安全边界模块移除」：该卡**整块删除**
+        （正文那句「双重归属校验 / Cookie 与模型 Key 统一加密存储」是**实现声明**，
+        不是可配置项；清单类说明不该占版面）⇒ 本页现在只剩「系统参数」一张卡。
+        原句保留备查，不静默删除。
       */}
       <Row gutter={[16, 16]}>
         <Col xs={24}>
@@ -290,7 +290,7 @@ export function SettingsPage() {
             }
           >
             <Paragraph type="secondary" style={{ marginBottom: 12 }}>
-              标记「实时生效」的参数改完**立即作用于运行中的任务**（无需重启）；
+              标记「实时生效」的参数改完立即作用于运行中的任务（无需重启）；
               标记「仅存档」的键没有运行时读点，改它不影响程序行为。
               限流额度调大 = 同步更快，但平台风控是真实的，建议逐步调整并观察。
             </Paragraph>
@@ -310,20 +310,6 @@ export function SettingsPage() {
               pagination={false}
               locale={{ emptyText: loadError ? "取不到配置（见上方说明）" : "还没有配置项" }}
             />
-          </Card>
-        </Col>
-        <Col xs={24}>
-          <Card
-            title={
-              <span>
-                <SafetyCertificateOutlined style={{ marginRight: 8 }} />
-                安全边界
-              </span>
-            }
-          >
-            <Paragraph>
-              所有资源将通过平台用户和平台账号双重归属校验。Cookie 与模型 Key 由后端统一加密存储。
-            </Paragraph>
           </Card>
         </Col>
       </Row>

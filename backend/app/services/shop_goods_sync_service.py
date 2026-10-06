@@ -51,6 +51,7 @@ from backend.app.models.shop_product import ShopProduct
 from backend.app.models.task import Task
 from backend.app.services import sync_task_service as sts
 from backend.app.services import task_cancel
+from backend.app.adapters.xhs.qianfan_api_adapter import get_qianfan_api_adapter_factory
 from backend.app.services.rate_limiter import get_rate_limiter
 
 logger = logging.getLogger(__name__)
@@ -1131,10 +1132,6 @@ def run_shop_goods_sync(
         platform_account_id = _resolve_account_id(db, account)  # 解不出账号 → 抛（不编账号）
 
         if adapter_factory is None:
-            from backend.app.adapters.xhs.qianfan_api_adapter import (
-                get_qianfan_api_adapter_factory,
-            )
-
             adapter_factory = get_qianfan_api_adapter_factory()
 
         result = _sync_with_task(
@@ -1221,3 +1218,211 @@ def start_shop_goods_sync(
 
     account_task_service.ensure_account_task_worker()
     return {"reused": False, **summary}
+
+
+# --------------------------------------------------------------------------- #
+# 指定商品同步（2026-10-05 需求 6，设计 20 §11）
+# --------------------------------------------------------------------------- #
+
+#: 「同步指定商品」单次上限（与 `qianfan.MAX_OPERATE_ITEMS` 同值纪律）。
+MAX_SYNC_ITEMS: int = 200
+
+
+class SpecifiedSyncResult(dict):
+    """`sync_specified_items` 的返回契约（dict 子类只为可读，不额外加行为）。"""
+
+
+def sync_specified_items(
+    account_id: int,
+    *,
+    user_id: int,
+    item_ids: list[str],
+    page_size: int = sts.DEFAULT_PAGE_SIZE,
+    adapter_factory: Any = None,
+    scope: str = "",
+    start_date: str = "",
+    end_date: str = "",
+) -> dict[str, Any]:
+    """按**指定商品 ID** 拉平台最新数据并更新本地台账（需求 6）。**不向上抛异常。**
+
+    ## 为什么实现是「整店扫描 + 只落命中」
+
+    平台侧**没有**「按 item_id 拉商品」的读接口（2026-10-05 真机核对：
+    `product/search_item_v2` 只支持分页 + 筛选条件；`product/get_skus_by_item_ids`
+    只回规格、不回商品本体；`product/get_channel_item_by_item_ids` 只回渠道品）。
+    ⇒ 唯一可行路径是**把指定 id 当作筛选条件之一发出去**（`whole_keywords` 支持
+    名称 / ID / 货号 / 商家编码），平台会按页返回命中项，直到没有下一页。
+
+    ⚠️ **`whole_keywords` 是模糊匹配**（实测搜 ID 会命中含该串的标题）⇒ 结果必须
+    **在本地按精确 `item_id` 再筛一次**，否则会把「标题里凑巧含这段数字」的商品
+    也写进台账（用户看到台账里多出没要求的商品 = 更坏的错）。命中集合以
+    **本地精确集合**为准，`not_found` 也按它算。
+
+    ## 与「同步商品」（全量）的差别
+
+    | | 全量同步 | 指定同步 |
+    |---|---|---|
+    | 落库范围 | 本次范围内**全部**商品 | **只有**命中的指定 id |
+    | 删旧行 | 翻完会删 | **永不删**（只补不删，避免误伤） |
+    | 用途 | 台账对账 | 补几个商品的最新数据 |
+
+    返回：`{synced, not_found, scanned, matched, note}`。
+    """
+    #: 去重保序（调用方可能重复传；「请求几条」与「处理几条」不许虚报）。
+    wanted: list[str] = []
+    seen: set[str] = set()
+    for raw in item_ids or []:
+        value = str(raw or "").strip()
+        if value and value not in seen:
+            seen.add(value)
+            wanted.append(value)
+    if not wanted:
+        return {
+            "synced": 0,
+            "not_found": [],
+            "scanned": 0,
+            "matched": 0,
+            "note": "没有要同步的商品。",
+        }
+
+    db = SessionLocal()
+    try:
+        account = db.get(PlatformAccount, account_id)
+        if account is None:
+            return {
+                "synced": 0,
+                "not_found": wanted,
+                "scanned": 0,
+                "matched": 0,
+                "note": "账号不存在。",
+            }
+        from backend.app.services.shop_binding_service import (
+            has_ark_session,
+            qianfan_cookies_for_account,
+        )
+
+        if not has_ark_session(db, account.id):
+            return {
+                "synced": 0,
+                "not_found": wanted,
+                "scanned": 0,
+                "matched": 0,
+                "note": "该账号没有可用的千帆登录态。",
+            }
+
+        cookies = qianfan_cookies_for_account(db, account.id)
+        if not cookies:
+            return {
+                "synced": 0,
+                "not_found": wanted,
+                "scanned": 0,
+                "matched": 0,
+                "note": "该账号缺少千帆（ark）令牌。",
+            }
+        if adapter_factory is None:
+            adapter_factory = get_qianfan_api_adapter_factory()
+        adapter = adapter_factory(cookies)
+
+        limiter = get_rate_limiter()
+        #: 时间区间（2026-10-06）：与整店同步**同一个解析器**（`resolve_time_window`），
+        #: 口径不许两处各写一份。`full` ⇒ `(0, 0)` ⇒ 不传下界。
+        from backend.app.services.sync_task_service import resolve_time_window
+
+        _from_ms, _to_ms = resolve_time_window(scope, start_date, end_date)
+        #: ⚠️ 平台参数单位是**秒**且按 `>=` 比较（DEF-045）：毫秒下界须 `//1000 + 1`，
+        #: 否则同一秒内毫秒更小的旧行会被圈进来（与整店同步同一处踩过的坑）。
+        window_from = (_from_ms // 1000 + 1) if _from_ms > 0 else None
+        #: 命中集合（**本地精确**口径，见 docstring）。
+        matched: dict[str, dict[str, Any]] = {}
+        scanned = 0
+        #: 关键字用「逗号串」一次带上（平台的 `whole_keywords` 就是多词 OR）。
+        keyword = ",".join(wanted)
+        page_no = 1
+        while True:
+            if page_no > sts.ABSOLUTE_PAGE_CAP:
+                break
+            if not limiter.wait_allow(f"{account.id}:goods"):
+                break
+            success, _message, raw_payload = adapter.search_items(
+                page_no=page_no,
+                page_size=page_size,
+                keyword=keyword,
+                #: 2026-10-06：合并「按 ID 同步」与「整店同步」后，同一个弹窗的
+                #: 条件（全量 / 时间区间）对**两条路**都要生效 —— 原实现只认 ID、
+                #: 区间无处可传。`scope=range` 时把区间透给平台（按**创建时间**过滤，
+                #: 与整店同步同口径）。
+                create_time_from=window_from,
+                #: ⚠️ **状态必须传 `all`**：要补的商品可能已下架 / 审核中，
+                #: 按默认的「售卖中」筛会漏掉它们（而用户就是要它最新的状态）。
+                status=sts.SYNC_ITEM_STATUS_ALL,
+                sort_field="create_time",
+                order="desc",
+            )
+            if not success:
+                break
+            data = raw_payload.get("data") if isinstance(raw_payload, dict) else None
+            total = _int_or_none((data or {}).get("total"))
+            items = [
+                row for row in ((data or {}).get("items") or []) if isinstance(row, dict)
+            ]
+            if not items:
+                break
+            scanned += len(items)
+            for row in items:
+                row_id = _first_text(row.get("item_id"))
+                if row_id in seen:
+                    matched[row_id] = row
+            #: 找到全部 + 拿够 total ⇒ 提前停（平台是按页给的，不必翻到底）。
+            if len(matched) >= len(wanted):
+                break
+            if total is not None and page_no * page_size >= int(total):
+                break
+            page_no += 1
+
+        if not matched:
+            return {
+                "synced": 0,
+                "not_found": wanted,
+                "scanned": scanned,
+                "matched": 0,
+                "note": f"扫描 {scanned} 件，没有命中要同步的商品（ID 是否正确 / 商品是否已删除）。",
+            }
+
+        #: SKU 详情一并补（与全量同步同一条链：列表 + 规格一次性 upsert）。
+        skus = _fetch_page_skus(
+            account, adapter, item_ids=list(matched.keys()), limiter=limiter
+        )
+        stored = store_products(
+            db,
+            account.user_id,
+            account.id,
+            list(matched.values()),
+            skus_map=skus["skus_map"],
+            detail_time=skus["time"],
+        )
+        #: ⚠️ `store_products` **自己不 commit**（事务边界归调用方）—— 全量同步那条链由
+        #: `_sync_with_task` 统一提交，这里没有外层 ⇒ 少这一句 = 接口报「更新了 N 件」
+        #: 而库里一行没变（本地实测踩到：查台账得到空集）。**真 bug，已修**。
+        db.commit()
+        not_found = [item_id for item_id in wanted if item_id not in matched]
+        return {
+            "synced": len(stored),
+            "not_found": not_found,
+            "scanned": scanned,
+            "matched": len(matched),
+            "note": (
+                f"平台扫描 {scanned} 件，命中 {len(matched)} 件，更新本地 {len(stored)} 件"
+                + (f"；{len(not_found)} 件未在平台找到" if not_found else "")
+            ),
+        }
+    except Exception as exc:  # noqa: BLE001 - 端点调用，必须吞异常变成可读原因
+        logger.error("sync_specified_items failed (account=%s): %s", account_id, exc)
+        return {
+            "synced": 0,
+            "not_found": wanted,
+            "scanned": 0,
+            "matched": 0,
+            "note": f"同步失败：{exc}",
+        }
+    finally:
+        db.close()

@@ -53,7 +53,6 @@ import {
 import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { PageHeader } from "../../../components/layout/app-shell";
 import {
   cancelWorkflowRun,
   createWorkflow,
@@ -209,6 +208,7 @@ export function WorkflowPage() {
 
   const onDelete = (row: WorkflowListItem) => {
     modal.confirm({
+      centered: true,
       title: `删除工作流「${row.name}」？`,
       content: "运行历史会保留（run 的 workflow_id 置空），节点配置一并删除。",
       okButtonProps: { danger: true },
@@ -358,21 +358,8 @@ export function WorkflowPage() {
 
   return (
     <>
-      <PageHeader
-        eyebrow="XHS Workflow"
-        title="自动化工作流"
-        description="编排「选题 → 生成 → 审核 → 发布 → 监控」链路；人工审核节点默认不自动放行。"
-        action={
-          <Space>
-            <Button icon={<ReloadOutlined />} onClick={() => void load()}>
-              刷新
-            </Button>
-            <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
-              新建工作流
-            </Button>
-          </Space>
-        }
-      />
+      {/* 2026-10-05 用户口径「移除所有页面页面头」：原「XHS Workflow / 自动化工作流 /
+          编排说明」三行整块移除；「刷新」与「新建工作流」收进下方「工作流列表」卡右上角。 */}
 
       <Row gutter={[16, 16]}>
         <Col span={6}>
@@ -423,7 +410,20 @@ export function WorkflowPage() {
         />
       ) : null}
 
-      <Card style={{ marginTop: 16 }} title="工作流列表">
+      <Card
+        style={{ marginTop: 16 }}
+        title="工作流列表"
+        extra={
+          <Space>
+            <Button size="small" icon={<ReloadOutlined />} onClick={() => void load()}>
+              刷新
+            </Button>
+            <Button size="small" type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
+              新建工作流
+            </Button>
+          </Space>
+        }
+      >
         {items.length === 0 && !loading ? (
           <Empty description="还没有工作流。新建一个，节点链会自动补上触发器。" />
         ) : (

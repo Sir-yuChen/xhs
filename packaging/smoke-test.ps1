@@ -21,7 +21,7 @@ $Root = Split-Path -Parent $ScriptDir
 
 if (-not $SetupExe) { $SetupExe = Join-Path $Root "spider-xhs-setup-1.0.0.exe" }
 if (-not (Test-Path $SetupExe)) { Write-Host "ERROR: 安装器不存在 $SetupExe" -ForegroundColor Red; exit 1 }
-if (-not $InstallDir) { $InstallDir = Join-Path $Root ".workbuddy\tmp\smoke-install" }
+if (-not $InstallDir) { $InstallDir = Join-Path $Root ".hermes\tmp\smoke-install" }
 
 function Write-Step([string]$m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Fail([string]$m) { Write-Host "ERROR: $m" -ForegroundColor Red; exit 1 }
@@ -36,7 +36,7 @@ if (Test-Path $InstallDir) { Remove-Item $InstallDir -Recurse -Force }
 
 # --- 1. 静默安装 -------------------------------------------------------------
 Write-Step "静默安装到 $InstallDir"
-$installLog = Join-Path $Root ".workbuddy\tmp\smoke-install.log"
+$installLog = Join-Path $Root ".hermes\tmp\smoke-install.log"
 $proc = Start-Process -FilePath $SetupExe -ArgumentList @(
     "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CURRENTUSER",
     "/DIR=$InstallDir", "/LOG=$installLog"
@@ -243,7 +243,7 @@ Write-Host "  管道式解析（cwd = 安装根）OK"
 # 6c. 真签名计算：sign.js CLI + 完整载荷（纯本地计算，零网络）。
 #     必填入参见 sign.js::signFull：cookie(a1) / loadts / seq / envConst /
 #     envFpTail(14 元素数组)。
-$inputJson = Join-Path $Root ".workbuddy\tmp\smoke-sign-input.json"
+$inputJson = Join-Path $Root ".hermes\tmp\smoke-sign-input.json"
 $payload = '{"api":"/api/sns/web/v1/user/posted","data":{"cursor":"","num":30},"cookie":"a1=68f8a5e0f1c34d9e8b2a7c6d5e4f3a2b; webId=smoke-test; loadts=1709905283","loadts":1709905283,"seq":1,"envConst":"smoke","envFpTail":[1,2,3,4,5,6,7,8,9,10,11,12,13,14],"tier":"0301"}'
 # ⚠️ 必须写【无 BOM】UTF-8：PS5.1 的 Set-Content -Encoding utf8 会带 BOM，
 # node 的 JSON.parse 会被 BOM 卡死（SyntaxError: Unexpected token）。

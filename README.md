@@ -176,9 +176,9 @@ python main.py --with-frontend
 
 | 文件 | 作用 |
 |---|---|
-| `.workbuddy/scripts/run-app.py` | 监督进程（用 `pythonw.exe` 运行，无控制台窗口）：拉起后端与前端，任一个挂掉 5 秒后自动重启 |
-| `.workbuddy/scripts/register-app-task.ps1` | 注册/更新计划任务并立即启动 |
-| `.workbuddy/scripts/stop-app.ps1` | 停止任务并回收 8000 / 5173 端口 |
+| `.hermes/scripts/run-app.py` | 监督进程（用 `pythonw.exe` 运行，无控制台窗口）：拉起后端与前端，任一个挂掉 5 秒后自动重启 |
+| `.hermes/scripts/register-app-task.ps1` | 注册/更新计划任务并立即启动 |
+| `.hermes/scripts/stop-app.ps1` | 停止任务并回收 8000 / 5173 端口 |
 
 两个入口：
 
@@ -186,12 +186,12 @@ python main.py --with-frontend
   注意：改前端后要 `cd frontend && npm run build`，8000 才会看到新代码。
 - http://127.0.0.1:5173 —— Vite dev server（改代码即时热更新，`/api` 反代到 8000）。
 
-日志：`.workbuddy/logs/app.log`（后端输出 + 每次重启记录）、`.workbuddy/logs/vite.log`。
+日志：`.hermes/logs/app.log`（后端输出 + 每次重启记录）、`.hermes/logs/vite.log`。
 
 ```bash
 # 启动 / 停止 / 取消自启
-powershell -NoProfile -ExecutionPolicy Bypass -File .workbuddy/scripts/register-app-task.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File .workbuddy/scripts/stop-app.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .hermes/scripts/register-app-task.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .hermes/scripts/stop-app.ps1
 schtasks /delete /tn "XHS-AllInOne-App" /f
 ```
 
@@ -284,12 +284,12 @@ scheduler:
 # 跑某个测试文件（pytest.ini 已固化 -n auto 并行 + junit 判据自动落盘）
 pytest tests/backend/test_note_sync.py -q -x --lf
 
-# 全量回归（判定只看 .workbuddy/reports/reg.xml 四数，退出码会假性变 1）
+# 全量回归（判定只看 .hermes/reports/reg.xml 四数，退出码会假性变 1）
 pytest tests/ -q
 
-# 按 git 改动自动选该跑的测试文件（.workbuddy 本地工具）
-python .workbuddy/scripts/pick_tests.py
-pytest $(python .workbuddy/scripts/pick_tests.py) -q
+# 按 git 改动自动选该跑的测试文件（.hermes 本地工具）
+python .hermes/scripts/pick_tests.py
+pytest $(python .hermes/scripts/pick_tests.py) -q
 ```
 
 ---

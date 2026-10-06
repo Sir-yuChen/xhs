@@ -1,7 +1,6 @@
 import {
   AimOutlined,
   BarChartOutlined,
-  CloudDownloadOutlined,
   DashboardOutlined,
   DatabaseOutlined,
   HistoryOutlined,
@@ -37,10 +36,9 @@ const mainNavItems: MenuProps["items"] = [
   { key: "/platforms/xhs/discovery", icon: <SearchOutlined />, label: "笔记发现" },
   { key: "/platforms/xhs/my-notes", icon: <ProfileOutlined />, label: "我的笔记" },
   { key: "/platforms/xhs/shop-items", icon: <ShoppingOutlined />, label: "商品列表" },
-  { key: "/platforms/xhs/crawler", icon: <CloudDownloadOutlined />, label: "数据抓取" },
   { key: "/platforms/xhs/keywords", icon: <KeyOutlined />, label: "关键词组" },
   { key: "/platforms/xhs/analytics", icon: <BarChartOutlined />, label: "数据洞察" },
-  { key: "/platforms/xhs/benchmarks", icon: <AimOutlined />, label: "竞品监控" },
+  { key: "/platforms/xhs/monitoring", icon: <AimOutlined />, label: "监控中心" },
   { key: "/platforms/xhs/library", icon: <DatabaseOutlined />, label: "内容库" },
   // 2026-09-25 §36：图片 / 视频 / 草稿三坊合并为「笔记工坊」一项（页内 Tabs 隔离）。
   // 旧菜单项 image-studio / video-studio / drafts 整项移除（含图标 import）。
@@ -64,20 +62,19 @@ const footerNavItems: MenuProps["items"] = [
 export function AppShell() {
   return (
     <WorkspaceShell brand="Spider XHS" mainItems={mainNavItems} footerItems={footerNavItems}>
-      <KeepAliveRouteOutlet include={[/\/platforms\/xhs\/discovery/, /\/platforms\/xhs\/crawler/]} />
+      {/* 路由缓存：笔记发现（含「搜索发现 / 批量抓取」两 Tab）—— tab 是 query，
+          pathname 恒为 /discovery/，故一条正则即覆盖两 Tab（设计 21 切片 B）。 */}
+      <KeepAliveRouteOutlet include={[/\/platforms\/xhs\/discovery/]} />
     </WorkspaceShell>
   );
 }
 
-export function PageHeader({ eyebrow, title, description, action }: { eyebrow: string; title: string; description: ReactNode; action?: ReactNode }) {
-  return (
-    <Row justify="space-between" align="top" style={{ marginBottom: 24 }}>
-      <Col>
-        <Text type="secondary" style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: 1 }}>{eyebrow}</Text>
-        <Title level={3} style={{ margin: "4px 0 4px" }}>{title}</Title>
-        <Text type="secondary">{description}</Text>
-      </Col>
-      {action && <Col>{action}</Col>}
-    </Row>
-  );
-}
+/*
+ * `PageHeader`（eyebrow + 标题 + 描述 + 右侧操作区）**已整块移除**（2026-10-05 用户口径
+ * 「移除所有页面页面头」）—— 全站最后一个引用它的页面（任务中心）在 2026-09-27 就已删掉
+ * 页头，`.hermes/skill` 与 README/Docs 里的入口无需再指到这里。
+ *
+ * ⚠️ 这里**不能留一个空壳导出**：`verify_doc_counts.py` 的死代码判据是「不被 frontend/src
+ * 任何 import 引用」，留空壳会让「有没有人用」永远为真，页头就会以「组件还在」为理由
+ * 悄悄回来。删干净比留壳更能锁住结果。
+ */

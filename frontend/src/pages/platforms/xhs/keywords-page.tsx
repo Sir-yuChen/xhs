@@ -23,7 +23,6 @@ import {
 } from "antd";
 import { useEffect, useState } from "react";
 
-import { PageHeader } from "../../../components/layout/app-shell";
 import { useThemePalette } from "../../../app/providers";
 import {
   createKeywordGroup,
@@ -178,12 +177,14 @@ export function XhsKeywordsPage() {
 
   return (
     <div>
-      <PageHeader
-        eyebrow="XHS Keywords"
-        title="关键词组"
-        description="维护选题、赛道和品牌关键词组，从已保存笔记中观察命中量和互动机会。"
-        action={
+      {/* 2026-10-05 用户口径「移除所有页面页面头」：原「XHS Keywords / 关键词组 /
+          一句话说明」三行整块移除（与侧栏菜单项重复）；「刷新」收进下方新增卡右上角。 */}
+      <Card
+        style={{ background: p.cardBg, borderColor: p.border, marginBottom: 24 }}
+        title="新增关键词组"
+        extra={
           <Button
+            size="small"
             icon={<ReloadOutlined />}
             disabled={isLoading}
             onClick={loadGroups}
@@ -191,10 +192,6 @@ export function XhsKeywordsPage() {
             刷新
           </Button>
         }
-      />
-
-      <Card
-        style={{ background: p.cardBg, borderColor: p.border, marginBottom: 24 }}
       >
         <Form layout="inline" style={{ flexWrap: "wrap", gap: 8 }}>
           <Form.Item>

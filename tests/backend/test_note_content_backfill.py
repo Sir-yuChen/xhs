@@ -978,7 +978,7 @@ class TestExploreSsrDetailRoute:
     旧契约（§19.13.6 ⑤）是「每篇详情前先用 www 会话翻 `user_posted` 拿网页侧令牌」
     —— 1951 条 ÷ 30/页 ≈ 66 页、页间停顿 5s × 抖动 ⇒ **5–8 分钟/篇**，批量 N 篇 =
     N 次全表扫描。真机实测（真实窗口 Chrome + CDP，探针
-    `.workbuddy/scripts/probe_note_detail_by_id.py`）证明：**explore 页面的 SSR 里
+    `.hermes/scripts/probe_note_detail_by_id.py`）证明：**explore 页面的 SSR 里
     就带着详情**，一次 GET 拿全，且**不挑令牌来源**（千帆 / 创作者令牌同样成功）。
 
     本类守三层契约：

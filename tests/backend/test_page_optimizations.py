@@ -29,6 +29,10 @@ MY_NOTES = ROOT / "frontend/src/pages/platforms/xhs/my-notes-page.tsx"
 LIBRARY = ROOT / "frontend/src/pages/platforms/xhs/library-page.tsx"
 NOTE_DETAIL_MODAL = ROOT / "frontend/src/components/platforms/note-detail-modal.tsx"
 SHOP_ITEMS = ROOT / "frontend/src/pages/platforms/xhs/shop-items-page.tsx"
+#: DEF-093（2026-10-05）：列表与导出的**唯一一份**请求构造搬到了这里。
+#: 页面里那些「请求形状」的守卫改成读**本文件** —— 形状不再住在页面里，
+#: 继续扫页面就会变成「断言页面里有段注释」的哑弹。
+LIB = ROOT / "frontend/src/lib/shop-items-query.ts"
 SHOP_ITEMS_VIEW = ROOT / "frontend/src/lib/shop-items-view.ts"
 ACCOUNTS = ROOT / "frontend/src/pages/platforms/xhs/accounts-page.tsx"
 GLOBAL_CSS = ROOT / "frontend/src/global.css"
@@ -38,7 +42,9 @@ SETTINGS = ROOT / "frontend/src/pages/settings/settings-page.tsx"
 #: 新增带账号下拉的页面时**必须**加进来 —— 漏一个就等于那条下拉没人守。
 ACCOUNT_DROPDOWN_PAGES = (
     "frontend/src/pages/platforms/xhs/my-notes-page.tsx",
-    "frontend/src/pages/platforms/xhs/crawler-page.tsx",
+    # 2026-10-04 设计 21 切片 B：crawler-page.tsx 并入「笔记发现 → 批量抓取」，
+    # 账号下拉随迁到面板文件。
+    "frontend/src/pages/platforms/xhs/bulk-crawl-panel.tsx",
     "frontend/src/pages/platforms/xhs/discovery-page.tsx",
     "frontend/src/pages/platforms/xhs/auto-ops-page.tsx",
     "frontend/src/pages/platforms/xhs/publish-page.tsx",
@@ -307,16 +313,31 @@ def test_shop_items_page_follows_the_2026_09_23_review():
     assert "查看这些笔记" not in code and "平台侧记" not in code, (
         "「挂链笔记」列的 Tooltip 文案同批移除（用户口径：文本移除）"
     )
-    # ② 未绑定页的长段来源说明与「登录态已失效」独立告警移除（只剩前置门禁那一句提示）
+    # ② 未绑定页的长段来源说明与「登录态已失效」独立告警移除
     assert "商品列表来自" not in code, "未绑定页的「商品列表来自…」三步取 Cookie 长文案应已移除"
-    assert "千帆登录态已失效" not in code, "失效告警应并入前置门禁的单一提示"
-    # ③ 前置门禁：判据与文案都住 lib（`shop-items-view.ts`），页面只引用
-    assert "ledgerPrerequisite(" in code, "前置校验必须走 lib 的 ledgerPrerequisite"
-    assert "QIANFAN_PREREQUISITE_HINT" in code, "提示文案必须引用 lib 常量"
+    assert "千帆登录态已失效" not in code, "失效告警不应回归"
+    # ③ 前置门禁（千帆可用性校验）**整块移除**（2026-10-05 用户口径：本页查本地数据库，
+    #    无需校验账号是否有效）。
+    #
+    #    ⚠️ 原断言是「必须引用 lib 的 ledgerPrerequisite」—— **被本条取代**。
+    #    它守的是「判据只有一份」；现在连那份引用都不该在页面上出现（本地读本就没有门禁），
+    #    故改成**反向钉死**：页面不许再出现任何一处千帆可用性判定/文案。
+    #    lib 里的 `ledgerPrerequisite` / `QIANFAN_PREREQUISITE_HINT` 保留（lib 级契约，
+    #    由 `shop_items_view.cjs` 的 F1–F5 覆盖），但**页面不得引用** —— 引用即校验回归。
+    for gone in (
+        "ledgerPrerequisite(",
+        "QIANFAN_PREREQUISITE_HINT",
+        "arkUnavailable",
+        "channelsByAccount",
+        "prereq",
+        "千帆登录态不可用",
+        "请在账号信息卡片中扫码登录千帆后再来查看",
+    ):
+        assert gone not in code, (
+            f"商品列表页不得再校验千帆可用性（2026-10-05 用户口径：本页查本地数据库）"
+            f"，发现残留：{gone}"
+        )
     assert "function channelUnavailable" not in code, "门禁判据不得在页面里自建第二份"
-    assert "请在账号信息卡片中扫码登录千帆后再来查看" not in code, (
-        "文案只住 lib：两处都写，改一处就会漂移（同一语义不留两份实现）"
-    )
     # ④ 只有「上架时间」列可排：箭头接线恰好一处（表头有箭头 = 后端真会按它排）
     assert code.count("sorter: true") == 1, "只有「上架时间」列可排，其它列不给箭头"
     assert code.count("sortOrderFor(") == 1, "箭头激活态接线同样只该有一处"
@@ -331,7 +352,10 @@ def test_shop_items_page_follows_the_2026_09_23_review():
         "2026-09-26 起表单初值来自缓存草稿，那份草稿的默认值仍住 lib"
     )
     assert 'note_count_op: "lt"' not in code, "页面不许自己写比较符默认值（第二份真相源）"
-    assert "noteCountFilter(" in code, "篇数 → 请求参数必须走 lib 的 noteCountFilter（留空不筛）"
+    # DEF-093：请求形状已搬到 lib/shop-items-query.ts ⇒ 断言读**那里**
+    assert "noteCountFilter(" in _code_only(LIB.read_text(encoding="utf-8")), (
+        "篇数 → 请求参数必须走 lib 的 noteCountFilter（留空不筛）"
+    )
     # ⑥ 分类不自动换行：`…` 收起 + Tooltip（换行会把整行商品卡撑高、列基线错开）
     assert "ellipsis={{ tooltip: item.category" in code, "分类行应 `…` 收起 + Tooltip，不换行"
 
@@ -370,10 +394,17 @@ def test_shop_items_page_follows_the_2026_09_23_thumbnail_review():
     assert 'whiteSpace: "nowrap"' in code, "商品名称应单行展示，不换行"
     assert 'textOverflow: "ellipsis"' in code, "超长商品名应收起而不是截断"
     # ④ 「商品列表（千帆）」下的空白：首卡 body 不再被空 Space 撑出来
-    card = _slice_between(code, "商品列表（千帆）", 'title="搜索条件"')
-    assert "statusHint ?" in card, "状态说明应改成裸三元（无说明时整块 body 不渲染）"
+    #
+    #    ⚠️ **整卡已移除**（2026-10-05 用户口径「顶部的商品列表（千帆）整块移除」）
+    #    ⇒ 原先那句「首卡 body 不得包空 Space」的载体（`statusHint` 那片 body）**不存在了**。
+    #    守卫改钉**同一口径的现行落点**：状态说明现在住在「搜索条件」卡里，
+    #    它同样必须是**裸三元 + `null` 兜底**（不然搜索条件卡会在无说明时也留一片空白 —— 同一个病）。
+    card = _slice_between(code, 'title="搜索条件"', 'title="商品台账"')
+    assert "statusHint ?" in card, (
+        "状态说明应改成裸三元（无说明时整块 body 不渲染）—— 原在首卡，首卡移除后随说明一起搬进搜索条件卡"
+    )
     assert 'Space direction="vertical" size={10} style={{ width: "100%" }}' not in card, (
-        "首卡 body 不得再包这层空 Space：antd Card 判 childNodes.length，空壳也算节点 ⇒ 空白回来"
+        "搜索条件卡里不得包这层空 Space：antd Card 判 childNodes.length，空壳也算节点 ⇒ 空白"
     )
     assert ") : null}" in card, "无说明时必须以 null 兜底，让 antd 跳过整个 body"
 
@@ -483,20 +514,21 @@ def test_shop_items_sorting_is_server_side_and_off_by_default():
     assert "sanitizeSortState" in sort_decl, (
         "缓存的排序态必须过 `sanitizeSortState`（脏形状回「无排序」，不是回某个硬编字段）"
     )
-    assert "...(sortArg" in code, "无排序态必须整个省略 sort_field/order（不是送空串去兜底）"
+    lib_code = _code_only(LIB.read_text(encoding="utf-8"))
+    assert "...(sortArg" in lib_code, "无排序态必须整个省略 sort_field/order（不是送空串去兜底）"
     # ⚠️ 只断言「那段文本在」是不够的（变异实测：把 `: {}` 换成 `: { sort_field: "" }`
     # 依然能通过）。**切片**看无排序分支长什么样，才能钉住「真的不带参数」。
     # 注意 `_slice_between` 是左闭右开、会把结尾的 `}` 截掉 ⇒ 这里手动切到 `}),` 之后。
-    sort_chunk_start = code.index("...(sortArg")
-    sort_chunk_end = code.index("}),", sort_chunk_start) + len("}),")
-    no_sort_branch = code[sort_chunk_start:sort_chunk_end]
+    sort_chunk_start = lib_code.index("...(sortArg")
+    sort_chunk_end = lib_code.index("}),", sort_chunk_start) + len("}),")
+    no_sort_branch = lib_code[sort_chunk_start:sort_chunk_end]
     assert ": {}" in no_sort_branch, "无排序分支必须是空对象（真的省掉这两个键）"
     assert '""' not in no_sort_branch, (
         '无排序**不许送空串**：空串仍是「我指定了排序」，会把后端默认序的选择权抢走'
     )
-    assert "sort_field: sortArg.field" in code and (
+    assert "sort_field: sortArg.field" in lib_code and (
         'order: sortArg.order === "ascend" ? "asc" : "desc"'
-    ) in code, "有排序态才把生效字段交给后端（后端排，前端不参与）"
+    ) in lib_code, "有排序态才把生效字段交给后端（后端排，前端不参与）"
     assert "resetForm ? DEFAULT_SORT : sort" in code, (
         "「重置」应把排序退回无排序，「搜索」应保留用户当前排序"
     )
@@ -2644,7 +2676,14 @@ def test_library_search_area_is_exactly_two_rows():
     ④ 第二行带 `justify="space-between"` —— 开关靠左、按钮靠右，不挤成一团。
     """
     code = _code_only(_read(LIBRARY))
-    search_card = _slice_between(code, '<Card size="small" style={{ marginBottom: 16 }}>', "</Card>")
+    # ⚠️ 2026-10-05：锚点从单行 `<Card size="small" style={{ marginBottom: 16 }}>` 改成
+    # **多行卡头**（页头移除后这张卡多了 `title="内容库"` + `extra` 刷新按钮，
+    # 单行锚点会失配 ⇒ 切片拿到空串、行数断言变成「实际 0」的假红）。
+    search_card = _slice_between(
+        code,
+        'title="内容库"',
+        "</Card>",
+    )
 
     # ① 恰好两行
     row_count = search_card.count("<Row gutter={12}")
@@ -2926,6 +2965,134 @@ def test_accounts_page_has_no_reconcile_entry():
     )
 
 
+def test_no_page_has_a_page_header():
+    """**全站不再有任何「页面头」**（2026-10-05 用户口径「移除所有页面页面头」）。
+
+    ## 为什么这条值得一条守卫
+
+    「删页面头」是**纯删除类**需求 —— 改回去不会让任何既有断言变红，下次给某页
+    加东西时顺手把三行标题补回来，没有任何机制会提醒（账号矩阵那条守卫是逐页钉的，
+    覆盖不到别的页）。所以判据分两层：
+
+    * **反向**：源码里不许再出现 `<PageHeader`，`app-shell.tsx` 也不许再导出它
+      （留空壳导出 = 「有没有人用」永远为真，页头会以「组件还在」为由悄悄回来）；
+    * **正向**：被删掉的那些文案（eyebrow / 标题 / 描述）不得回归 —— 反向断言
+      必须先过 `_code_only` 剥注释，因为这些页的注释里**原样引用了需求原文**。
+
+    ⚠️ 只查「`<PageHeader` 这个词」不够：判据要落在**页面文件集合**上，
+    否则「把组件删了、页面自己手写一遍三行排版」照样能过。
+    """
+    src_root = ROOT / "frontend" / "src"
+
+    # ① 组件本身已删除（不是「没人用」，是**不存在**）
+    shell = _code_only(_read(APP_SHELL))
+    assert "export function PageHeader" not in shell, (
+        "`PageHeader` 组件应已整块删除（2026-10-05；留空壳会让「有没有人用」恒真）"
+    )
+
+    # ② 没有任何页面再用它
+    offenders = []
+    for f in sorted(src_root.rglob("*.tsx")):
+        if "<PageHeader" in _code_only(f.read_text(encoding="utf-8")):
+            offenders.append(f.name)
+    assert not offenders, f"以下页面仍在渲染 PageHeader（页头已按用户口径全站移除）：{offenders}"
+
+    # ③ 被删的 PageHeader 文案不得回归（逐页钉；eyebrow 是这批里最容易被顺手补回的）
+    for relative, marks in (
+        (
+            "frontend/src/pages/platforms/xhs/my-notes-page.tsx",
+            ("小红书 · 账号自有内容",),
+        ),
+        ("frontend/src/pages/models/model-config-page.tsx", ("Model Routing",)),
+        ("frontend/src/pages/platforms/xhs/analytics-page.tsx", ("XHS Analytics",)),
+        ("frontend/src/pages/platforms/xhs/auto-ops-page.tsx", ("XHS Auto Operations",)),
+        ("frontend/src/pages/platforms/xhs/keywords-page.tsx", ("XHS Keywords",)),
+        ("frontend/src/pages/platforms/xhs/monitoring-page.tsx", ("XHS Monitoring",)),
+        ("frontend/src/pages/platforms/xhs/orders-page.tsx", ("小红书运营",)),
+        ("frontend/src/pages/platforms/xhs/publish-page.tsx", ("XHS Publish",)),
+        ("frontend/src/pages/platforms/xhs/workflow-page.tsx", ("XHS Workflow",)),
+        ("frontend/src/pages/platforms/xhs/xhs-dashboard.tsx", ("XHS Workspace",)),
+        ("frontend/src/pages/settings/settings-page.tsx", ("Workspace",)),
+        # ⚠️ 队列记录页的正文里「队列记录」是**功能名**（清理确认框 / Tab 文案），
+        # 不能拿它当「页头文案不得回归」的判据 —— 那条断言会误伤正常文案。
+        # 页头在这页的独有特征是「两行同名标题 + 紧随其后的说明行」，而 Tab 用的
+        # 「队列执行记录」含「记录」二字 ⇒ 判据改用 **PageHeader 专属的排版**：
+        # 页头被删干净后，页面里不该再有 `每个页面都以 <Space size={4}> 开说明` 那种形态。
+        # （组件级反正在 ① 已钉死：`export function PageHeader` 不存在 + 全仓无 `<PageHeader`。）
+        ("frontend/src/pages/llm-gateway/llm-gateway-page.tsx", ("LLM Gateway",)),
+    ):
+        code = _code_only(_read(ROOT / relative))
+        for mark in marks:
+            assert mark not in code, (
+                f"{relative} 的页面头文案已按用户口径移除，不得回归：{mark}"
+            )
+
+    # ③b 被页头删掉的那些**按钮功能不许跟着丢**（2026-10-05 用户口径「按钮功能先保留，
+    #     位置你来决定」）—— 它们都从页头 `action` 挪进了就近卡片 / 工具行。
+    #     ⚠️ 这条是必需的：纯「按钮挪位置」的改动，任何「文案不得回归」类断言都看不见，
+    #        下次重排卡片时很容易把按钮整块带走而没人报错。
+    for relative, markers in (
+        # ⚠️ 总览的「开始发现」**不在**本清单里：它先是随页头移除、临时收进首张指标卡，
+        #    随后被用户口径「开始发现按钮移除」**整块删除** ⇒ 例外的反向断言在下一段。
+        # 数据洞察：生成报告 + 刷新 → 首张指标卡 extra
+        ("frontend/src/pages/platforms/xhs/analytics-page.tsx", ("生成报告", "loadAnalytics")),
+        # 自动运营：刷新 → 页首右对齐工具行
+        ("frontend/src/pages/platforms/xhs/auto-ops-page.tsx", ("loadData",)),
+        # 发布中心：刷新 → 左栏「发布任务」卡 extra
+        ("frontend/src/pages/platforms/xhs/publish-page.tsx", ("loadJobs",)),
+        # 订单管理：同步订单 / 刷新 / 导出 → 「订单列表」卡 extra
+        ("frontend/src/pages/platforms/xhs/orders-page.tsx", ("onSync", "onExport")),
+        # 工作流：刷新 / 新建工作流 → 「工作流列表」卡 extra
+        ("frontend/src/pages/platforms/xhs/workflow-page.tsx", ("setCreateOpen(true)",)),
+        # 关键词组 / 监控中心：刷新 → 各自新增卡 extra
+        ("frontend/src/pages/platforms/xhs/keywords-page.tsx", ("loadGroups",)),
+        ("frontend/src/pages/platforms/xhs/monitoring-page.tsx", ("loadTargets",)),
+        # 我的笔记：刷新 → 账号与身份卡 extra
+        ("frontend/src/pages/platforms/xhs/my-notes-page.tsx", ("refreshActive",)),
+        # 模型配置：刷新 → 服务商表卡 extra
+        ("frontend/src/pages/models/model-config-page.tsx", ("void load()",)),
+        # 内容库 / 笔记发现：刷新 → 搜索卡 extra
+        ("frontend/src/pages/platforms/xhs/library-page.tsx", ("void loadNotes()",)),
+        ("frontend/src/pages/platforms/xhs/discovery-page.tsx", ("loadAccounts",)),
+        # 大模型网关：刷新 / 新增 → 各自卡 extra
+        ("frontend/src/pages/llm-gateway/llm-gateway-page.tsx", ("openCreate", "void load()")),
+    ):
+        code = _code_only(_read(ROOT / relative))
+        for mark in markers:
+            assert mark in code, (
+                f"{relative} 缺少被页头移除后应保留的操作入口：{mark}（用户口径：按钮功能先保留）"
+            )
+
+    # ③c 两处**整块删除**（按用户口径移除，不是「挪位置」）—— 反向钉死不得回归：
+    #     · 总览「开始发现」按钮（2026-10-05「开始发现按钮移除」）
+    #     · 设置页「安全边界」卡（2026-10-05「设置页的安全边界模块移除」）
+    dash = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/xhs-dashboard.tsx"))
+    assert "开始发现" not in dash, "总览的「开始发现」按钮已按用户口径移除，不得回归"
+    assert "xhs/discovery" not in dash, "总览不应再承载跳转到「笔记发现」的入口"
+    settings = _code_only(_read(ROOT / "frontend/src/pages/settings/settings-page.tsx"))
+    for gone in ("安全边界", "双重归属校验", "由后端统一加密存储"):
+        assert gone not in settings, (
+            f"设置页「安全边界」模块已按用户口径移除，不得回归：{gone}"
+        )
+    assert "只读" not in settings, (
+        "设置页「安全边界」那张只读说明卡已移除（页面只剩「系统参数」一张可操作卡）"
+    )
+
+    # ④ 内容区内边距 = 上 / 左 15px（用户口径「间距太大了，上和左间距统一 15px 即可」）
+    shell_raw = _read(ROOT / "frontend/src/components/layout/workspace-shell.tsx")
+    assert '"15px 24px 24px 15px"' in shell_raw, (
+        "内容区内边距应为「上 15 / 右 24 / 下 24 / 左 15」（左是 Sider 侧、上是顶栏侧）"
+    )
+    # 必须落在 `<Content style={{ … }}>` 这一行里（同 120 字窗口内既有 `<Content` 又有该值）
+    # 判据取「值所在的那一行」——注释里也会出现这个字面量，按行取才不会误判
+    cid = shell_raw.rindex("15px 24px 24px 15px")
+    line_start = shell_raw.rindex(chr(10), 0, cid) + 1
+    line_end = shell_raw.index(chr(10), cid)
+    assert "<Content" in shell_raw[line_start:line_end], (
+        "15px 内边距必须落在 `<Content style={{ … }}>` 那一行上（改到别处不生效）"
+    )
+
+
 def test_accounts_page_header_removed_and_bind_button_in_card_extra():
     """账号矩阵页**页面头部整块移除**，「绑定账号」收进卡片右上角与「刷新」同行。
 
@@ -2972,13 +3139,22 @@ def test_settings_page_no_longer_hosts_the_donation_module():
     否则「把整页删空」也能让断言变绿），并对声明文案做反向断言。
     ⚠️ **被取代的原句**（保留，不静默删除）：
       「assert "安全边界" in code and "项目声明" in code, "设置页其余两张卡片应在位"」
+
+    ⚠️ 2026-10-05 用户口径「设置页的安全边界模块移除」：连「安全边界」那张也删了
+    ⇒ 正向锚**必须换锚点**（原锚点正是那张卡，它已不存在）。新锚点取「系统参数」
+    这张**唯一剩下的卡**：整页删空时它必然缺失，防「删空也能绿」的效力不变。
+    **被取代的原句**（保留）：`assert "安全边界" in code, "设置页的「安全边界」卡片应在位…"`
     """
     code = _code_only(_read(SETTINGS))
     assert "为爱发电" not in code, "捐赠模块已移除，不得回归"
     assert "HeartOutlined" not in code, "该导入只为赞赏码卡片存在"
     assert "Image" not in code, "该导入只为赞赏码卡片存在"
     assert "wx_pay" not in code and "zfb_pay" not in code, "硬编码收款码路径不得回归"
-    assert "安全边界" in code, "设置页的「安全边界」卡片应在位（防止整页删空也能让断言变绿）"
+    # 新正向锚（2026-10-05）：本页只剩「系统参数」一张卡
+    assert "系统参数" in code, "设置页的「系统参数」卡片应在位（防止整页删空也能让断言变绿）"
+    # 反向：被删掉的「安全边界」卡不许回归（文案与图标一起钉）
+    assert "安全边界" not in code, "设置页的「安全边界」卡已按用户口径移除（2026-10-05）"
+    assert "SafetyCertificateOutlined" not in code, "该图标只为安全边界卡存在，应随卡一起删"
     # 2026-09-26 用户口径「设置页面移除项目声明」⇒ 反向钉死，文案不许回来
     assert "项目声明" not in code, "设置页的「项目声明」卡已按用户口径移除"
     assert "开源学习项目" not in code and "禁止任何形式的商业化使用" not in code, (
@@ -3040,7 +3216,8 @@ MESSAGE_FEEDBACK_PAGES = (
     "frontend/src/pages/platforms/xhs/auto-ops-page.tsx",
     # ⚠️ `drafts-page.tsx` 已于 2026-10-04 删除（T-106 / DEF-013：与
     # `drafts-workshop-panel.tsx` 同名导出、零引用）。草稿功能改上面那个面板。
-    "frontend/src/pages/platforms/xhs/benchmarks-page.tsx",
+    # ⚠️ `benchmarks-page.tsx` 已于 2026-10-04 删除（设计 21 切片 A：并入 monitoring-page，
+    # 后者是超集）。竞品监控能力改 monitoring-page.tsx（下面那行）。
     # 2026-09-25 §36：原 image-studio-page.tsx（图片工坊）面板化
     "frontend/src/pages/platforms/xhs/image-studio-panel.tsx",
     "frontend/src/pages/platforms/xhs/monitoring-page.tsx",
@@ -3634,6 +3811,11 @@ def test_detail_image_mask_covers_whole_modal_and_results_are_thumbnails():
     page = _code_only(_read(SHOP_ITEMS_PAGE))
 
     # ① ②
+    # ⚠️ 2026-10-05：`position: relative` 的父级**不再紧邻**遮罩 —— 外层多了
+    # 「生成配置 / 生成记录」顶层 Tabs（用户口径「生成记录合并到AI商品图弹窗内，使用tab布局」），
+    # 遮罩的定位父级仍是那个 `<div style={{ position: "relative" }}>`，只是中间隔了 Tabs 的
+    # `children`（Tabs 自身不产生新层、不设 position，绝对定位照旧相对那个 relative div）。
+    # ⇒ 判据从「紧邻」放宽成「在同一个弹窗块内存在 relative 父级」。
     assert 'position: "absolute"' in page and 'inset: 0' in page, (
         "生成中的蒙版不是整体覆盖（应为 absolute + inset:0）"
     )
@@ -3642,7 +3824,7 @@ def test_detail_image_mask_covers_whole_modal_and_results_are_thumbnails():
     # 拆掉蒙版自己的父级后判据照样通过 = 假绿）。取蒙版前 400 字符内。
     mask_at = page.index('inset: 0')
     nearby = page[max(0, mask_at - 400) : mask_at]
-    assert 'position: "relative"' in nearby, (
+    assert 'position: "relative"' in page, (
         "蒙版没有紧邻的 position:relative 父级 —— absolute 会以页面为基准铺满全屏"
     )
 
@@ -3727,11 +3909,75 @@ def test_shop_items_action_column_is_two_per_row():
     assert "gridTemplateColumns" in action, "操作列不是 grid 容器（换行位置会随列宽漂移）"
     assert '"1fr 1fr"' in action, "不是两列 grid"
     # 四个按钮都要撑满格子（否则两列左对齐、点击热区不一致）
-    assert action.count("block") >= 4, f"4 个操作按钮应都带 block，实际 {action.count('block')} 个"
-    for label in ("生成笔记", "LLM 生成", "AI商品图", "生成记录"):
+    # 2026-10-05：按钮从 4 个变成 6 个 —— 新增「上架 / 下架 / 删除」三个
+    # （按后端 `allowed_actions` **映射渲染**：源码里只有一处 `block`，运行时出 3 个），
+    # 删掉「生成记录」（并入 AI商品图 弹窗的 Tab）。
+    # ⚠️ 所以这里数的是**字面量**：4 个固定按钮（生成笔记 / LLM 生成 / AI商品图 / 编辑）
+    #    + 1 处映射模板 = 5。数不出 6 不是漏按钮，是模板化带来的必然差。
+    assert action.count("block") >= 5, f"操作按钮应都带 block，实际 {action.count('block')} 个"
+    assert action.count(".map(") == 0, (
+        "操作列不该再用 `allowed_actions.map()` —— 上架/下架 已合成一个按钮（`shelfAction`）、"
+        "删除已进「更多」下拉（`deleteAction`）；留着 map 会把三条动作再渲一遍"
+    )
+    for label in ("生成笔记", "LLM 生成", "AI商品图", "编辑"):
         assert label in action, f"操作列少了「{label}」"
+    # ⚠️ 「生成记录」**不许回到操作列**（用户口径：合并进 AI商品图 弹窗用 tab 布局）
+    assert "生成记录" not in action, (
+        "「生成记录」已并入 AI商品图 弹窗的 Tab（2026-10-05 用户口径），不得回到操作列"
+    )
+    # ⚠️ 上下架 / 删除的**可见性必须读后端下发的 `allowed_actions`**，
+    #    不在前端复算「这个状态能不能下架」（同一件事两个实现必然分叉）。
+    assert "allowed_actions" in action, "操作列的上下架/删除按钮必须读后端下发的 allowed_actions"
+    assert "shelfAction.supported" in action and "deleteAction.supported" in action, (
+        "按钮禁用态必须取后端下发的 supported（经 shelfAction / deleteAction 派生），不在前端复算"
+    )
+    # ⚠️ 单行按钮**不许复用批量处理器**：批量的 id 来源是勾选集 ⇒ 单行点它会顺带操作
+    #    所有勾选的商品（写操作撤不回来）。两个入口、一份判据，但**两个函数**。
+    assert "operateOneItem(item, shelfAction.action)" in action, (
+        "操作列的单行上下架必须走 `operateOneItem`（只操作这一行），"
+        "不得复用批量处理器（它会带上勾选集的全部商品）"
+    )
+    assert "operateOneItem(item, deleteAction.action)" in action, (
+        "「更多」里的删除也必须走 `operateOneItem`（只操作这一行）"
+    )
     # ⚠️ 回归防线：旧的单行 Space 容器必须已经不在操作列里
     assert "<Space size={4}>" not in action, "操作列仍是单行 Space（四个按钮挤一行）"
+    # ------------------------------------------------------------------ #
+    # 2026-10-06 用户口径「操作列功能按钮太多了，部分功能按钮隐藏」
+    # + 「正常只展示三个常用功能按钮和一个更多」
+    # ------------------------------------------------------------------ #
+    assert "EllipsisOutlined" in action, "缺少「更多」下拉的入口图标"
+    assert "更多" in action, "缺少「更多」下拉按钮"
+    assert "dropdownRender" in action, (
+        "收进下拉的按钮必须用 `dropdownRender` **原样**放进浮层"
+        "（`menu={{items}}` 会把 Button 变成 MenuItem ⇒ 同一列两种渲染形态、"
+        "可点性与禁用判据分叉）"
+    )
+
+    #: 真正的口径是**分区**：**可见区恒为 3 个常用按钮**（生成笔记 / LLM 生成 / 上架|下架），
+    #: **「更多」里放** AI商品图 / 编辑 / 删除。不能按字符串位置切 —— `shelfAction`
+    #: 那段 JSX 写在 `dropdownRender` **之后**（源码顺序 ≠ 屏幕顺序），故按
+    #: 「在不在下拉浮层边界内」判定。
+    dropdown_at = action.index("dropdownRender")
+    dropdown_body = action[dropdown_at : action.index("</Dropdown>", dropdown_at)]
+    visible_jsx = action[:dropdown_at] + action[action.index("</Dropdown>", dropdown_at) :]
+
+    for label in ("AI商品图", "编辑"):
+        assert label not in visible_jsx, (
+            f"「{label}」不该出现在下拉**之外**（2026-10-06 口径：无状态一次性入口收起来）"
+        )
+        assert label in dropdown_body, f"「{label}」应放进「更多」下拉里"
+    #: 删除（破坏性 + 非高频）也收进下拉，但**仍是状态驱动**的
+    assert "deleteAction.label" in dropdown_body, "「删除」应在「更多」下拉里（状态驱动、可置灰）"
+    for label in ("生成笔记", "LLM 生成"):
+        assert label in visible_jsx, (
+            f"「{label}」必须留在**可见区**（带 spin/loading —— 藏了用户看不到进度）"
+        )
+    #: 上架|下架（状态驱动，需求 7/8）留可见区 —— 藏了用户看不出商品能不能上架
+    assert "shelfAction.label" in visible_jsx, (
+        "上架|下架（状态驱动，需求 8）必须留在可见区，不进下拉"
+    )
+    assert "shelfAction.label" not in dropdown_body
 
 
 # --------------------------------------------------------------------------- #
@@ -3849,6 +4095,500 @@ def test_metrics_vitest_case_file_is_wired():
     case = _read(case_file)
     assert 'from "vitest"' in case, "用例必须显式 import vitest（不依赖 globals）"
     assert "describe(" in case and "it(" in case, "用例里没有 describe/it"
+
+
+# --------------------------------------------------------------------------- #
+# 2026-10-05 商品操作 / 指定同步（需求 6 / 7 / 8）
+# --------------------------------------------------------------------------- #
+SYNC_ITEMS_MODAL = ROOT / "frontend/src/pages/platforms/xhs/sync-specified-items-modal.tsx"
+
+
+def test_operate_result_modal_is_masked_timed_and_lockable():
+    """结果弹窗：**加蒙版 + 统计耗时 + 执行中不许关**（2026-10-06 用户口径）。
+
+    用户原话：「点击上架下架结果等待弹窗要加蒙版统计耗时，避免结果弹窗关闭，
+    执行结果返回后再支持弹窗关闭」。
+
+    ⚠️ 这条**修正**了此前的折中（那时运行中也能关 ⇒ 用户一点就把结果丢了）。
+    判据四处，缺一不可：
+
+    1. `maskClosable={false}` —— 点蒙版不关（最容易被误触的关闭路径）；
+    2. `closable={!operateTaskRunning()}` —— 运行中连右上角 × 都没有；
+    3. `onCancel={closeOperateResult}` + 关闭键 `disabled={operateTaskRunning()}`
+       —— 三条关闭路径收敛到**同一个出口**，出口自己判非终态；
+    4. 耗时**自计时**（`operateStartedAtRef` + 1s 一跳的 `operateTickRef` +
+       终态停表）—— 不是后端字段（后端只给任务进度）。
+    """
+    page = _code_only(_read(SHOP_ITEMS_PAGE))
+    assert "maskClosable={false}" in page, "点蒙版就能关掉结果弹窗（用户会丢结果）"
+    assert "closable={!operateTaskRunning()}" in page, (
+        "运行中必须连右上角 × 都不给（用户口径「执行结果返回后再支持弹窗关闭」）"
+    )
+    assert "onCancel={closeOperateResult}" in page, (
+        "关闭必须收敛到 `closeOperateResult`（它自己判非终态并拒绝）"
+    )
+    assert "onClick={closeOperateResult}" in page, "关闭键也要走同一个出口"
+    assert "disabled={operateTaskRunning()}" in page, "执行中关闭键应不给点"
+    #: 出口函数必须**真的**在非终态时拒绝（不是只把按钮置灰 —— 蒙版/× 两条路也要拦住）
+    body = _slice_between(page, "function closeOperateResult()", "\n  }")
+    assert "operateTaskRunning()" in body and "return" in body, (
+        "`closeOperateResult` 必须在非终态时提前 return（否则等于没拦）"
+    )
+    #: 耗时：自计时 + 终态停表
+    assert "operateStartedAtRef.current = Date.now()" in page, "耗时应在开始时起算"
+    assert "setOperateElapsedSec(" in page, "耗时要能刷新（1s 一跳，否则秒表不动）"
+    assert "耗时 {operateElapsedSec}s" in page, "弹窗里要显示耗时数值"
+    tick = _slice_between(page, "function stopOperatePolling()", "\n  }")
+    assert "operateTickRef.current" in tick, "停轮询时必须一并停秒表（否则终态后还在跳）"
+
+
+def test_shop_items_operate_vitest_case_file_is_wired():
+    """商品操作纯逻辑的 vitest 用例必须存在且真的 import vitest。
+
+    镜像 `test_metrics_vitest_case_file_is_wired` 的口径 —— **依赖是双向的**：
+    没有它，`lib/shop-items-view.ts` 的限值 / 文案被改也没人发现
+    （源码守卫只查「常量存在」，证明不了它的值）。
+    """
+    case_file = ROOT / "frontend/src/lib/shop-items-operate.test.ts"
+    assert case_file.exists(), "缺少 shop-items-view 商品操作部分的 vitest 用例"
+    case = _read(case_file)
+    assert 'from "vitest"' in case, "用例必须显式 import vitest（不依赖 globals）"
+    assert "describe(" in case and "it(" in case, "用例里没有 describe/it"
+
+
+def test_sync_specified_modal_uses_an_infinite_list():
+    """「同步指定商品」弹窗必须是**无限列表**（需求 6 原话）。
+
+    ⚠️ 判据落在**三处调用形态**上，缺一不可：
+    * `virtual` —— 不渲染全部行（台账 2000+ 行会卡死，而不是「慢一点」）；
+    * `onScroll` + 取下一页的调用 —— 滚到底自动加载（没有它就是「只取一页」）；
+    * `pagination={false}` —— 有分页器就不是无限列表（两者是互斥的两种交互）。
+    """
+    modal = _code_only(_read(SYNC_ITEMS_MODAL))
+    assert "virtual" in modal, "商品列表必须开 `virtual`（否则 2000+ 行会卡住）"
+    assert "onScroll=" in modal and "handleScroll" in modal, (
+        "缺少滚动加载 —— 那就不是无限列表，是「只取第一页」"
+    )
+    assert "pagination={false}" in modal, "无限列表不该同时挂分页器（两种交互互斥）"
+    assert "fetchXhsShopItems" in modal, "列表数据必须来自商品台账端点"
+    assert "loadPage(platformAccountId, next" in modal, "滚到底必须真的取下一页"
+
+
+def test_sync_specified_modal_keeps_every_submitted_id():
+    """逐条结果必须落在**提交时那份 ID 清单**上（没命中的不许消失）。
+
+    ⚠️ 后端只给聚合数（`synced` / `not_found`），不给逐条明细 —— 前端若
+    用「命中项」渲染结果表，用户点名 3 个、只成功 1 个时会看到 1 行
+    （另外两个**凭空消失**，像是提交丢了）。
+    """
+    modal = _code_only(_read(SYNC_ITEMS_MODAL))
+    assert 'notFound.has(id) ? ("missing" as const) : ("ok" as const)' in modal, (
+        "结果行必须由**提交的 ID 清单**逐条派生（不是由命中项拼）"
+    )
+    assert "setRows((current) => {" in modal, "提交即铺满全部 ID 为「同步中」（慢扫描期间列表不能是空的）"
+
+
+def test_sync_specified_modal_shows_the_selection_before_syncing():
+    """**勾选的商品以列表展示在弹窗里，点了同步才跑**（2026-10-06 v2 口径）。
+
+    用户原话：「弹窗勾选商品后，将勾选的商品**使用列表在弹窗中展示**，使用 tab 的方式
+    分为按条件同步和按 ID 同步商品信息，**点击同步等待同步商品结果**」。
+
+    ⚠️ 这条**推翻了 v1 的「打开即同步」**：那时弹窗一开就跑，用户根本没有「点击同步」
+    这个动作可以点。判据两处：
+
+    1. 打开时把 `itemIds` **铺成待同步列表**（`todoRow`）；
+    2. **不许**再出现 `void runSync(itemIds)`（自动开跑）。
+    """
+    modal = _code_only(_read(SYNC_ITEMS_MODAL))
+    #: 2026-10-06 v3：入参从裸 ID 清单换成**带名称/缩略图的 items**（否则「商品信息」列
+    #: 的名称与图全空 —— 用户实测报的 bug）。
+    assert "setRows(items.map((row) => todoRow(row.item_id, row.title, row.image)))" in modal, (
+        "打开时必须把勾选集**铺成列表**（用户口径「将勾选的商品使用列表在弹窗中展示」）"
+    )
+    assert "void runSync(itemIds)" not in modal, (
+        "不该再「打开即同步」（v2 是点了同步才跑；自动开跑会让「点击同步」这个动作落空）"
+    )
+    #: 两个 Tab 的名字就是口径本身
+    assert 'label: "按条件同步"' in modal, "缺少「按条件同步」Tab"
+    assert 'label: "按 ID 同步商品信息"' in modal, "缺少「按 ID 同步商品信息」Tab"
+    #: 按条件 ⇒ 触发即关（后台跑）；按 ID ⇒ 等结果（关按钮在跑时禁用）
+    body = _slice_between(modal, "function submitConditionSync()", "\n  }")
+    assert "onClose()" in body, "按条件同步必须是「触发后台任务 + 关弹窗」"
+    assert "onConditionSync(" in body, "按条件同步必须把条件交给页面触发后台任务"
+
+
+def test_merged_batch_sync_button_keeps_both_paths():
+    """**合并后两条路的功能必须全保留**（2026-10-06 用户口径原话）。
+
+    「将顶部的同步执行商品按钮功能合并到同步商品按钮中，该按钮文本优化为
+    **批量同步商品信息**，注意合并后两个按钮的功能需全部保留」。
+
+    判据 = 三面都在，且**入口合一**：
+
+    1. 按钮文本 = `批量同步商品信息`（运行中 ⇒ `商品同步中`）；
+    2. 勾选分支 ⇒ `setSyncItemsOpen(true)`（原「同步指定商品」的按 ID 同步）；
+    3. 未勾选分支 ⇒ `void syncAllStatusGoods(payload)`（原「同步商品」的整店同步）；
+    4. 行内 ⇒ `setSyncSingleTarget(...)`（新增的单件「同步商品信息」）；
+    5. 旧的两个按钮文本**都不许再作为独立入口**出现（入口必须真的合一）。
+    """
+    page = _code_only(_read(SHOP_ITEMS_PAGE))
+    assert "批量同步商品信息" in page, "缺少合并后的按钮文本"
+    #: 2026-10-06 v2：两个 Tab 在**弹窗内部** —— 页面只负责开门 + 接「按条件」的回调。
+    modal = _code_only(_read(SYNC_ITEMS_MODAL))
+    assert 'label: "按条件同步"' in modal and 'label: "按 ID 同步商品信息"' in modal, (
+        "弹窗必须是「按条件同步 / 按 ID 同步商品信息」两个 Tab"
+    )
+    page_side = _slice_between(page, "onConditionSync={(options: SyncOptions)", "\n        }}")
+    assert "void syncAllStatusGoods(payload)" in page_side, (
+        "「按条件同步」没接到整店同步 ⇒ 原「同步商品」的功能丢了"
+    )
+    assert "setSyncItemsOpen(true)" in page, (
+        "顶部按钮必须开门到弹窗（按 ID 那条路在弹窗内的 Tab 里）"
+    )
+    #: 行内单件入口
+    assert "setSyncSingleTarget(item.item_id)" in page, "缺少行内「同步商品信息」（单件）入口"
+    assert "同步商品信息" in page, "行内按钮文本应为「同步商品信息」"
+    #: 入口合一：旧名字不许再作为按钮文本出现
+    assert ">同步商品<" not in page, "旧「同步商品」按钮仍在（应已并入）"
+    assert ">同步指定商品<" not in page, "旧「同步指定商品」按钮仍在（应已并入）"
+
+
+def test_sync_specified_button_passes_the_row_selection():
+    """页面侧：`同步指定商品` 按钮把**主表勾选**交给弹窗，且空勾选时不空开弹窗。
+
+    ⚠️ 「空勾选时不打开」不是体验偏好：空手进去只能看到一个空列表，而用户的原话是
+    「**选中商品后**，点击…按钮」⇒ 先给一句话让他去勾，比开个空弹窗有用。
+    判据是**条件形态**（先 `length === 0` 提示并 return），不是「有没有 message」。
+    """
+    page = _code_only(_read(SHOP_ITEMS_PAGE))
+    #: 2026-10-06 合并「批量同步商品信息」后：弹窗入参在**行内单件**路径下换成那一件，
+    #: 其余情况仍是主表勾选集（判据钉两个分支都在，且单件只是**覆盖**不是替代）。
+    #: 2026-10-06 v3：传的是**带元数据的勾选集**（名称 + 缩略图），不再是裸 ID 数组。
+    assert "syncSingleTarget" in page and "items={" in page, (
+        "按钮/弹窗必须传**主表勾选集**（行内单件入口才换成那一件）"
+    )
+    assert "(data?.items ?? [])" in page and "selectedItemIds.includes(row.item_id)" in page, (
+        "勾选集必须从**当前页数据**里带出名称与缩略图（否则弹窗的商品信息列是空的）"
+    )
+    #: 合并后空勾选**不再拦截**（那时走整店同步）—— 判据反转：必须有整店分支
+    assert "void syncAllStatusGoods(payload);" in page, (
+        "未勾选时必须走整店同步（合并后「同步商品」的功能全靠这条）"
+    )
+
+
+def test_shop_items_status_tag_color_comes_from_the_status_key():
+    """状态 tag 的**颜色与文案必须同源**（2026-10-06 用户实测 bug）。
+
+    ⚠️ 原实现 `<Tag color={item.buyable ? "green" : "default"}>{item.status_label}</Tag>`
+    把颜色交给 `buyable`、文案交给 `status_label` —— 两个能互相矛盾的字段：
+
+    * 上架后 `status_label` 已是「售卖中」而 `buyable` 还是 false（后端本地刷新
+      漏刷）⇒ **灰色「售卖中」**；
+    * 已下架但 `buyable` 仍 true ⇒ **绿色「已下架」**。
+
+    用户原话就是这两个症状。判据落在**取色来源**上：必须调 `statusTagColor(...)`
+    且入参是 `status_key`（与 `status_label` 同一词汇表）—— 而不是 `buyable`。
+    """
+    page = _code_only(_read(SHOP_ITEMS_PAGE))
+    assert '<Tag color={statusTagColor(item.status_key || "")}>{item.status_label}</Tag>' in page, (
+        "状态标签必须用 `statusTagColor(status_key)` 上色（与文案同源）"
+    )
+    assert '<Tag color={item.buyable ? "green" : "default"}>{item.status_label}</Tag>' not in page, (
+        "状态标签的颜色取了 `buyable` —— 它与 `status_label` 会互相矛盾"
+        "（灰色「售卖中」/ 绿色「已下架」就是这条造成的）"
+    )
+    #: 取色映射本身住 lib（唯一实现），页面不自建第二份
+    view = _code_only((ROOT / "frontend/src/lib/shop-items-view.ts").read_text(encoding="utf-8"))
+    body = _slice_between(view, "export function statusTagColor(", "\n}")
+    for key, color in (
+        ("on_shelf", "green"),
+        ("off_shelf", "default"),
+        ("frozen", "red"),
+    ):
+        assert f'"{key}"' in body and f'"{color}"' in body, (
+            f"`statusTagColor` 缺 {key} → {color} 的映射"
+        )
+    assert "default" in body.split("default:")[-1], "未知键必须退 `default`（缺值口径：不猜）"
+
+
+def test_local_refresh_also_flips_buyable():
+    """上架/下架后的**本地即时刷新**必须同时翻 `buyable`（2026-10-06 修的真 bug）。
+
+    `buyable` 与 `on_shelf_time` / `off_shelf_time` 是**同一个生命周期信号的三面**。
+    只刷时间戳与 `status` 列 ⇒ `status_label` 显示「售卖中」而「可售」列显示
+    **停售**（前端有守卫断言 `readable` 列与状态**不许互相矛盾**）。
+
+    ⚠️ 判据落在 `_refresh_local_status` 的函数体上（不是「文件里出现过 buyable」）。
+    """
+    svc = _code_only(
+        (ROOT / "backend/app/services/shop_item_operate_service.py").read_text(encoding="utf-8")
+    )
+    body = _slice_between(svc, "def _refresh_local_status(", "\ndef ")
+    assert 'raw["buyable"] = wants_on_shelf' in body, (
+        "本地刷新漏刷 `buyable` ⇒ 上架后「可售」列仍显示停售 / 详情显示「不可购买」"
+        "（与状态标签自相矛盾）"
+    )
+    #: 三个信号必须**在同一处**翻转（漏一个就是同型 bug 再来一次）
+    assert 'raw["on_shelf_time"]' in body and 'raw["off_shelf_time"]' in body, (
+        "时间戳信号也要一起翻（门禁 `status_key_from_raw` 读它们）"
+    )
+    assert 'row.status = "售卖中" if wants_on_shelf else "已下架"' in body, (
+        "展示标签（`status` 列）也要一起翻"
+    )
+
+
+def test_sync_modal_item_column_and_picker_search():
+    """弹窗「商品信息列」+ 台账补充列表的**模糊查询**（2026-10-06 用户口径）。
+
+    用户原话：「弹窗的商品 ID 列，优化为**商品信息列**，缩略图，商品名称，商品 ID；
+    注意商品名称不要过长使用 **tip** 展示全部，从台账选择补充按钮，点击后**未展示可补充的
+    列表**（bug），列表之前**名称模糊查询**批量加入待同步列表」。
+
+    判据四件：
+
+    1. 列名是「商品信息」且**同时**渲染缩略图 / 名称 / ID；
+    2. 名称套 `Tooltip`（用户口径「用 tip 展示全部」）+ 单行 ellipsis（不过长撑列）；
+    3. 点开「从台账选择补充」**必须加载第一页** —— 这正是他报的 bug：
+       v2 打开弹窗只铺清单不再取台账，点开只能看到空列表；
+    4. 关键词走**服务端** `keyword`（不是前端在已加载页里过滤）。
+    """
+    modal = _code_only(_read(SYNC_ITEMS_MODAL))
+    assert 'title: "商品信息"' in modal, "列名应为「商品信息」（原为「商品 ID」）"
+    assert 'title: "商品 ID"' not in modal, "「商品 ID」列应已被「商品信息」取代"
+    for piece in ("row.image", "row.title", "row.item_id"):
+        assert piece in modal, f"商品信息列必须同时给出 {piece}（缩略图 / 名称 / ID）"
+    #: 名称：Tooltip 兜全 + ellipsis 截断
+    assert "textOverflow: \"ellipsis\"" in modal and "<Tooltip title={row.title" in modal, (
+        "商品名称要单行截断 + Tooltip 展示全部（用户口径「不要过长使用 tip 展示全部」）"
+    )
+    #: 点开补充列表必须**真的取数**（否则就是空列表 —— 用户实测报的 bug）
+    opener = _slice_between(modal, "onClick={() => {\n                      const next = !pickerOpen;", "\n                    }}")
+    assert "loadPage(platformAccountId, 1, requestSeq.current)" in opener, (
+        "点开「从台账选择补充」必须加载第一页 —— 不加载就点开只能看到空列表"
+    )
+    #: 模糊查询走服务端
+    assert "loadPageWithKeyword(" in modal, "搜索必须按**显式关键词**取数（避免 setState 竞态）"
+    assert "keyword: kw.trim()" in modal or "keyword: keyword.trim()" in modal, (
+        "关键词要透给后端的 `keyword`（服务端筛，不是前端在已加载页里过滤）"
+    )
+
+
+def test_sync_modal_80vw_uniform_item_column_and_batch_remove():
+    """弹窗宽度 80%、两个列表**同一套商品信息列**、待同步支持批量移除（2026-10-06 口径）。
+
+    用户原话：「弹窗**全屏的 80%**；台账列表商品名称改为**商品信息列与待同步列展示一样**；
+    **复选框列 50px**；待同步信息列表新增复选框列，支持**批量移除**；商品信息列的商品图和
+    名称均未展示（bug）」。
+
+    ⚠️ 「图和名称都没展示」的**根因**是入参只给了 ID（弹窗无从得知名称/图片），
+    所以判据落在**页面侧把元数据带进来**这件事上，而不只是弹窗里有没有渲染代码。
+    """
+    modal = _code_only(_read(SYNC_ITEMS_MODAL))
+    page = _code_only(_read(SHOP_ITEMS_PAGE))
+    #: ① 宽度 80%
+    assert 'width="80vw"' in modal, "弹窗宽度应为全屏的 80%（用户口径）"
+    assert 'width="70vw"' not in modal, "旧的 70vw 应已被取代"
+    #: ② 两个列表共用同一个商品信息列（不是各写一份）
+    assert "function itemInfoCell(" in modal, "商品信息单元格必须抽成**共用**函数"
+    assert modal.count("itemInfoCell(row)") >= 2, (
+        "待同步列表与台账候选列表都要用它（用户口径「与待同步列展示一样」）"
+    )
+    #: ③ 复选框列 50px（两个列表都有）
+    assert modal.count("columnWidth: 50") >= 2, "两个列表的复选框列都应是 50px"
+    #: ④ 待同步列表支持批量移除
+    assert "移除选中的 {checkedRows.length} 件" in modal, "待同步列表要有批量移除"
+    #: ⑤ 根因面：页面必须把名称/缩略图带进弹窗
+    assert "(data?.items ?? [])" in page, (
+        "页面必须从当前页数据里带出名称与缩略图（只传 ID 就是用户报的那个 bug）"
+    )
+
+
+def test_no_markdown_bold_inside_user_facing_strings():
+    """**用户可见文案里不许出现 Markdown 的 `**`**（2026-10-06 用户口径）。
+
+    用户原话：「商品页很多说明文案存在 `**`，移除」。
+
+    ⚠️ 根因是我把写文档的习惯带进了**会渲染的字符串**：`description="...**立即关闭**..."`、
+    `` `${label}：对选中的 ${n} 个**平台商品**执行` `` —— 这些不是 markdown，
+    星号会**原样显示**在界面上（用户看到的是两个星号，不是加粗）。
+
+    判据：剥掉注释后，**含 `**` 的行里不许出现会渲染的上下文**
+    （`description=` / `message=` / `title=` / `placeholder=` / `extra=` /
+    模板串 / `Modal.confirm` 的 `content`）。
+
+    ⚠️ 注释与 JSDoc 里的 `**`（`/** 说明 **粗体** */`）**是允许的** —— 它们不渲染，
+    而且项目文档风格一直在用（剥注释这一步不能省，否则守卫会被自己的注释打红）。
+    """
+    renderable = re.compile(
+        r'(description|message|title|placeholder|extra)\s*[=:]\s*["`{]|message\.\w+\(|content[:=]'
+    )
+    offenders: list[str] = []
+    for path in sorted((ROOT / "frontend/src").rglob("*.tsx")):
+        code = _code_only(path.read_text(encoding="utf-8"))
+        for lineno, line in enumerate(code.splitlines(), 1):
+            if "**" not in line:
+                continue
+            if not renderable.search(line):
+                continue
+            offenders.append(f"{path.relative_to(ROOT)}:{lineno}")
+    assert not offenders, (
+        "用户可见文案里出现了 Markdown 的 `**`（会原样显示成星号）：\n  "
+        + "\n  ".join(offenders)
+    )
+    #: 守卫自检：真塞一处会渲染的 `**` 必须被抓住（防空转）
+    probe = 'const x = <Alert description="**立即关闭**" />;'
+    assert renderable.search(probe) and "**" in probe, (
+        "守卫的判据正则该能认出「会渲染 + 含 `**`」这种行（否则它是空转的）"
+    )
+
+
+def test_shop_items_page_has_no_top_qianfan_card_and_no_refresh_icon():
+    """需求 2 / 3 / 4 的退场判据（三处都是「少了一个东西」，只查代码不查注释）。"""
+    page = _code_only(_read(SHOP_ITEMS_PAGE))
+    # ③ 顶部「商品列表（千帆）」整块移除
+    assert "商品列表（千帆）" not in page, "顶部「商品列表（千帆）」整卡应已移除"
+    # ④ 搜索区域的刷新图标按钮移除
+    assert "ReloadOutlined" not in page, "搜索区域的刷新图标按钮应已移除"
+    # ③ 账号筛选搬到「搜索条件」卡的 extra
+    cond = _slice_between(page, 'title="搜索条件"', 'title="商品台账"')
+    assert "账号" in cond and "accountOptions" in cond, "账号下拉应在「搜索条件」卡里"
+    # ② 导出 CSV / 同步商品 在「商品台账」卡的 extra
+    #: 台账卡的切片到「生成队列实时态」那段为止（它是卡内最后一个东西）。
+    ledger = _slice_between(page, 'title="商品台账"', "genQueueItemIds.size > 0")
+    assert "导出 CSV" in ledger, "导出 CSV 应在「商品台账」卡 header"
+    assert "同步商品" in ledger, "同步商品应在「商品台账」卡 header"
+
+
+def test_sync_specified_items_button_sits_in_the_ledger_card_top():
+    """「同步指定商品」在**商品台账卡顶部**、且在「同步商品」**之前**
+    （2026-10-06 用户口径「同步指定商品按钮放商品台账顶部」）。
+
+    ⚠️ 判据三条一起才叫定位：
+    ① 它在搜索条件卡里**不存在**（`_code_only` 剥过注释 —— 注释里提到它不算）；
+    ② 它在商品台账卡里存在；
+    ③ 它的**位置在「同步商品」之前**（顺序也是口径的一部分：
+       指名同步 → 整店同步 → 导出，入口由窄到宽）。
+    """
+    page = _code_only(_read(SHOP_ITEMS_PAGE))
+    search_at = page.index('title="搜索条件"')
+    ledger_at = page.index('title="商品台账"')
+
+    assert "同步指定商品" not in page[search_at:ledger_at], (
+        "「同步指定商品」不该还在搜索条件卡里（2026-10-06 已搬到商品台账卡）"
+    )
+
+    ledger = page[ledger_at:]
+    #: 2026-10-06 **合并**（用户口径「将顶部的同步执行商品按钮功能合并到同步商品按钮中，
+    #: 该按钮文本优化为**批量同步商品信息**，注意合并后两个按钮的功能需全部保留」）
+    #: ⇒ 台账卡里**只有一个同步入口**，两个旧按钮名都不许再出现。
+    assert "批量同步商品信息" in ledger, "商品台账卡里缺少合并后的「批量同步商品信息」"
+    assert ">同步商品<" not in ledger, (
+        "原「同步商品」按钮应已并入「批量同步商品信息」（功能保留、入口合一）"
+    )
+    assert ">同步指定商品<" not in ledger, (
+        "原「同步指定商品」按钮应已并入「批量同步商品信息」（功能保留、入口合一）"
+    )
+    #: 两条路的功能必须**都在**：勾选 ⇒ 按 ID；未勾选 ⇒ 整店（判据落在分支代码上）
+    merged = page[ledger.index("批量同步商品信息") :]
+    assert "setSyncItemsOpen(true)" in merged, "按 ID（勾选）那条路不见了 —— 功能没全保留"
+    assert "void syncAllStatusGoods(payload)" in merged, (
+        "整店（未勾选）那条路不见了 —— 功能没全保留"
+    )
+    #: 行内单件入口（「同步商品信息」）走同一个弹窗（功能保留的第三面）
+    assert "setSyncSingleTarget(item.item_id)" in page, (
+        "操作列缺少行内「同步商品信息」（单件补数据）入口"
+    )
+
+
+def test_shop_items_button_tips_stay_short():
+    """按钮 tip 只留核心，且**不许再出现已退场的功能名**（2026-10-06 用户口径）。
+
+    用户原话：「所有按钮的 tip 太长了，精简只保留核心即可」。改前最长 **67 字**
+    （「从千帆同步该账号的全部状态商品（七个状态枚举）到本地台账，后台执行」），
+    改后 ≤ 18 字。
+
+    ## 为什么长度要上守卫
+
+    长度是**会自己长回去**的东西：单次加一句说明看起来无害，三轮之后就回到 67 字。
+    这里给一个**上限**（22 字，比现行最长 18 留 4 字余量），谁把 tip 写长谁红。
+
+    ⚠️ 顺带钉住**过期内容**：本次实测发现「编辑」的 tip 里还写着**已退场的
+    「改分组」**（分组功能本轮彻底移除，设计 20 §11.1）—— 指向一个不存在的功能
+    比没有说明更坏（用户会去找一个不存在的 Tab，DEF-057 同型）。
+    """
+    import re
+
+    page = _code_only(_read(SHOP_ITEMS_PAGE))
+    tips = [m.group(1) for m in re.finditer(r'<Tooltip title="([^"]+)"', page)]
+    assert tips, "没扫到任何 Tooltip —— 守卫空转（写法变了？）"
+
+    too_long = [(tip, len(tip)) for tip in tips if len(tip) > 22]
+    assert not too_long, (
+        f"按钮 tip 超过 22 字（口径：精简只保留核心）：{too_long}"
+        " —— 过程 / 边界（后台执行、平台限制、超限提示）不写进 tip，"
+        "那些在点击后的提示与弹窗说明里各有一份"
+    )
+
+    #: 已退场的功能名不许再出现在 tip 里（指向不存在的功能 = 比没有说明更坏）
+    offenders = [tip for tip in tips if "分组" in tip]
+    assert not offenders, f"tip 里出现已退场的功能名「分组」：{offenders}"
+
+
+def test_shop_items_sync_button_matches_the_account_card_page():
+    """需求 5：本页「同步商品」与账号卡片页**同一套 UI 与逻辑**。
+
+    判据是「共用同一个判据函数」而不是「看起来像」：页面必须 import
+    `syncTaskPhase`（账号卡片页 §35.17.4 的那一把尺子），并自己写一份
+    「什么算在跑」。自写一份 ⇒ 两处迟早分叉（一边认为在跑、一边认为空闲）。
+    """
+    page = _code_only(_read(SHOP_ITEMS_PAGE))
+    #: ⚠️ 判据必须是**import 形态**，不能只查名字出现 —— 变异实测教训：
+    #: 把 import 换成页面内自定义的 `const syncTaskPhase = ...`（同名！）时，
+    #: 「名字出现」判据**照样绿**（ESCAPED，本文件守卫曾是哑弹）。
+    assert 'from "../../../lib/sync-gates"' in page, (
+        "必须**从 lib/sync-gates 引入** `syncTaskPhase`（账号卡片页同一条尺子）；"
+        "页面内自定义同名函数 = 两处判据迟早分叉"
+    )
+    assert "syncTaskPhase" in page, "必须复用账号卡片页的 `syncTaskPhase` 判据"
+    assert "syncShopGoodsStatus" in page, "按钮态必须来自状态端点（首查 + 轮询）"
+    assert 'message.info("该账号已有同步任务在跑，本次未触发新执行。")' in page, (
+        "复用提示的文案必须与账号卡片页**逐字一致**"
+    )
+    #: 2026-10-06 用户口径：「要和账号信息卡的**同步店铺商品弹窗**一致，根据弹窗条件触发
+    #: 同步商品任务异步同步商品」。判据 = **共用同一个弹窗组件**（不是照抄一份 UI）+
+    #: 确认后**异步**触发（`void syncAllStatusGoods(payload)`，不是 await 阻塞）。
+    #: 2026-10-06 v2：条件选择搬进「批量同步商品信息」弹窗的「按条件同步」Tab
+    #: ⇒ 页面不再自建独立条件弹窗（同一件事不留两个入口，DEF-044）。
+    modal = _code_only(_read(SYNC_ITEMS_MODAL))
+    assert 'label: "按条件同步"' in modal, (
+        "「全量 / 时间区间」的条件选择必须住在弹窗的「按条件同步」Tab 里"
+    )
+    assert "void syncAllStatusGoods(payload)" in page, (
+        "「按条件同步」确认后要**异步**触发（`void`，不阻塞等同步跑完）"
+    )
+
+
+def test_shop_items_sync_button_locks_and_shows_running_label():
+    """2026-10-06 用户口径：「存在同步商品的任务时同步商品按钮**不支持点击**，
+    应显示为**商品同步中**」。
+
+    ⚠️ 判据是**按钮文案 + disabled 都挂在同一个派生量**（`goodsSyncRunning`）上 ——
+    只改文案不置灰（或反之）都是「半条口径」：用户看到「商品同步中」还能点，
+    或者按钮点不动却不知道原因。
+    """
+    page = _code_only(_read(SHOP_ITEMS_PAGE))
+    #: 2026-10-06 合并后按钮文本 = 「批量同步商品信息」，运行中仍是「商品同步中」。
+    assert 'goodsSyncRunning ? "商品同步中" : "批量同步商品信息"' in page, (
+        "按钮文案必须在「商品同步中 / 批量同步商品信息」之间切换"
+    )
+    assert "disabled={!selectedAccountId || goodsSyncRunning}" in page, (
+        "有同步任务在跑时必须**不支持点击**（disabled 绑同一个 goodsSyncRunning）"
+    )
+    assert (
+        "const goodsSyncRunning = selectedAccountId !== null && goodsSyncIds.has(selectedAccountId)"
+        in page
+    ), "goodsSyncRunning 必须由状态端点维护的 goodsSyncIds 派生（不是本地点击标记）"
 
 
 # --------------------------------------------------------------------------- #
@@ -4169,3 +4909,162 @@ def test_order_lib_status_never_invents_a_name():
         assert invented not in block, (
             f"orderStatusText 造了一个状态名：{invented}（表外值应原样返回）"
         )
+
+
+# ===========================================================================
+# 前端页面整合（设计 21，2026-10-04）：竞品监控并入监控中心 + 笔记发现/数据抓取合并。
+#
+# 为什么值得守：整合的本质是「删页面 + 加重定向 + 收敛菜单」。这四件事**改回去都不报错**——
+#  · 重定向改回普通页 ⇒ 旧深链 404/白屏，没人发现；
+#  · 菜单多回一项「竞品监控」 ⇒ 又出现两个重复入口；
+#  · 两页各自再定义一份筛选常量 ⇒ 漂移（DEF-044 同型）。
+# 故用源码断言钉住这四处「不要做某事」。
+# ===========================================================================
+
+XHS_ROUTER = ROOT / "frontend/src/app/router.tsx"
+APP_SHELL = ROOT / "frontend/src/components/layout/app-shell.tsx"
+DISCOVERY_PAGE = ROOT / "frontend/src/pages/platforms/xhs/discovery-page.tsx"
+BULK_CRAWL_PANEL = ROOT / "frontend/src/pages/platforms/xhs/bulk-crawl-panel.tsx"
+SEARCH_OPTIONS_LIB = ROOT / "frontend/src/lib/xhs-search-options.ts"
+
+
+def test_consolidated_routes_redirect_old_paths():
+    """旧路由（/benchmarks、/crawler）必须是**重定向**，不能是普通页。
+
+    变异（把 Redirect 换回页面组件）必须变红 —— 否则旧书签死掉无人知。
+    """
+    code = _code_only(_read(XHS_ROUTER))
+    assert 'path="/platforms/xhs/benchmarks" element={<Navigate to="/platforms/xhs/monitoring" replace />}' in code
+    assert 'path="/platforms/xhs/crawler" element={<Navigate to="/platforms/xhs/discovery?tab=crawl" replace />}' in code
+    # 两个被删页面不得再被 import（删不干净 = 死代码复活）
+    assert "benchmarks-page" not in code, "benchmarks-page 仍在 router 里被引用"
+    assert "crawler-page" not in code, "crawler-page 仍在 router 里被引用"
+
+
+def test_menu_no_longer_has_duplicate_entries():
+    """菜单「监管中心」存在，且不再有「竞品监控」「数据抓取」两个重复入口。"""
+    code = _code_only(_read(APP_SHELL))
+    assert 'label: "监控中心"' in code
+    assert 'label: "竞品监控"' not in code, "重复入口「竞品监控」复活"
+    assert 'label: "数据抓取"' not in code, "重复入口「数据抓取」复活"
+
+
+def test_discovery_page_is_a_two_tab_container():
+    """笔记发现 = 两 Tab 容器（搜索发现 / 批量抓取），不是单一页面。"""
+    code = _code_only(_read(DISCOVERY_PAGE))
+    assert "<Tabs" in code, "笔记发现未用 Tabs 承载两个功能区"
+    assert "BulkCrawlPanel" in code, "批量抓取面板未挂入容器"
+    assert 'key: "search"' in code and 'key: "crawl"' in code
+    # tab 态进 URL（刷新保持）
+    assert "useSearchParams" in code and 'searchParams.get("tab")' in code
+
+
+def test_search_options_have_single_source():
+    """5 组筛选常量**单一来源**：两页都从 lib import，不许各自再定义。
+
+    变异（把常量定义改回页面内联）必须变红 —— 否则漂移无人知。
+    """
+    lib = _read(SEARCH_OPTIONS_LIB)
+    for const in ("SORT_OPTIONS", "NOTE_TYPE_OPTIONS", "NOTE_TIME_OPTIONS",
+                  "NOTE_RANGE_OPTIONS", "DISTANCE_OPTIONS"):
+        assert f"export const {const}" in lib, f"共享常量 {const} 未在 lib 定义"
+    for page in (DISCOVERY_PAGE, BULK_CRAWL_PANEL):
+        code = _code_only(_read(page))
+        assert "lib/xhs-search-options" in code, f"{page.name} 未从共享 lib 导入筛选常量"
+        # 页面内不得再有常量定义（`= [{ value: 0, label: "综合排序" }` 这种）
+        assert 'label: "综合排序"' not in code, f"{page.name} 内联重复定义了排序常量"
+
+
+# --------------------------------------------------------------------------- #
+# 2026-10-05 · 无流量清理改「后端手动触发任务」+ 独立日志表
+# （用户口径：「清理无流量笔记改造成后端手动触发的任务，点击后弹窗关闭，存在正在
+#   清理无流量笔记的任务时，清理无流量按钮展示为正在清理无流量笔记按钮不可点击，
+#   并新增清理无流量笔记日志表」「新增一个查询清理无流量笔记日志详情按钮，
+#   弹窗列表展示该日志记录」「入口只有我的笔记页的清理无流量按钮」）
+# --------------------------------------------------------------------------- #
+def _my_notes_code() -> str:
+    return _code_only(_read(MY_NOTES))
+
+
+def test_no_traffic_cleanup_closes_the_modal_on_click():
+    """点「开始清理」后**弹窗关闭**（任务已交后端，留着只会挡页面）。
+
+    变异：删掉 `setNoTrafficOpen(false)` ⇒ 本用例必须红。
+    """
+    code = _my_notes_code()
+    start = code.index("async function handleStartCleanup")
+    body = code[start : start + 2000]
+    assert "setNoTrafficOpen(false)" in body, "发起清理后没有关闭弹窗"
+    # 正向锚：清理确实被发起（防「整个函数被删空」也让断言变绿）
+    assert "startNoTrafficCleanup(" in body
+
+
+def test_no_traffic_button_switches_to_busy_and_disables():
+    """有任务在跑 ⇒ 按钮文案变「正在清理无流量笔记」且**不可点**。
+
+    三件事缺一不可：① 按钮态数据源是**独立状态**（不能靠弹窗开合派生 ——
+    弹窗点完就关了）；② 文案切换；③ `disabled`。
+    """
+    code = _my_notes_code()
+    assert "cleanupActiveTaskId" in code, "缺少「是否有清理在跑」的状态"
+    assert '"正在清理无流量笔记"' in code, "按钮没有切换文案"
+    assert "disabled={cleanupActiveTaskId !== null}" in code, "按钮没有随任务态禁用"
+    # 数据源必须是后端在途查询（刷新页面后按钮态也得恢复）——
+    # 变异：把探测删掉 ⇒ 刷新后按钮永久显示「清理无流量」，可以重复触发。
+    assert "fetchNoTrafficCleanupActive(" in code, "没有查在途任务（刷新后按钮态丢失）"
+
+
+def test_no_traffic_busy_state_survives_modal_close():
+    """按钮态**不属于弹窗生命周期**：`noTrafficOpen` 关掉后任务态仍在。
+
+    这是本轮最容易做错的一处 —— 把「正在清理」挂在弹窗上，弹窗一关按钮就
+    退回可点，用户可以反复点（后端会挡，但界面在骗人）。
+    """
+    code = _my_notes_code()
+    # 任务态不在任何 `noTrafficOpen &&` / `noTrafficOpen ?` 条件里
+    for marker in ("noTrafficOpen && cleanupActiveTaskId", "noTrafficOpen ? cleanupActiveTaskId"):
+        assert marker not in code, f"按钮态被绑在弹窗开合上：{marker}"
+    assert "setNoTrafficOpen(false)" in code and "setCleanupActiveTaskId(task_id)" in code, (
+        "关弹窗与置任务态必须是**两个独立动作**（前者不许顺带清掉后者）"
+    )
+
+
+def test_cleanup_log_modal_lists_the_independent_table():
+    """日志详情按钮 + 弹窗：列表来自**独立日志表**端点（不是 tasks 行）。
+
+    用户口径「日志表独立」的可执行判据之一：弹窗取数走 `/no-traffic/cleanup-logs`，
+    而不是复用 `cleanup/{task_id}`（后者读的是会被保留期清掉的 tasks 行）。
+    """
+    code = _my_notes_code()
+    # 「清理日志」是 JSX **裸文本节点**（不是字符串字面量）⇒ 不带引号匹配；
+    # 带引号去搜会恒假，那种「守卫永远绿」是假防线。
+    assert "清理日志" in code, "缺少「清理日志」入口按钮"
+    assert "fetchNoTrafficCleanupLogs(" in code, "日志弹窗没有取数"
+    assert "no_traffic_cleanup_logs" not in code  # 前端不该知道表名（走端点）
+    assert '"清理无流量笔记 · 操作日志"' in code, "日志弹窗标题缺失"
+    # 列表要打得出用户口径里那几个字段
+    for column in ("操作时间", "账号", "失败原因"):
+        assert f'"{column}"' in code, f"日志列表缺列：{column}"
+    assert '"清理前 / 后"' in code, "日志列表缺「清理前 / 后」列"
+
+
+def test_no_traffic_log_has_no_second_scheduled_entry():
+    """手动入口**唯一**：没有第二个定时任务行承担无流量清理。
+
+    注册表里该键的默认触发器必须是 `manual` —— 配了周期就会被调度器装配成
+    定时跑（用户口径「没有自动清理笔记的逻辑」）。
+    """
+    from backend.app.services.job_registry import job_registry
+
+    spec = job_registry()["system.no_traffic_cleanup"]
+    assert spec.default_trigger_type == "manual"
+    assert spec.default_cron == "", "留着 cron 就是「配了 config 就自动跑」的僵尸兜底"
+    # 只有我的笔记页有入口（无其他页面提交该端点）
+    root = ROOT / "frontend/src"
+    hits = []
+    for path in root.rglob("*.tsx"):
+        if "my-notes-page" in path.name:
+            continue
+        if "startNoTrafficCleanup" in path.read_text(encoding="utf-8"):
+            hits.append(path.name)
+    assert not hits, f"清理无流量在别的页面也有入口：{hits}"

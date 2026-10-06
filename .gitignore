@@ -63,6 +63,10 @@ spider-xhs-setup-*.exe
 # 均属本地资产，远程仓库只放业务源码、测试、文档。
 /.workbuddy/
 
+# .hermes 整体不上云（2026-10-05 由 .workbuddy 迁移而来：项目改用 Hermes 开发，
+# 本地规范 / 脚本 / 技能 / 日志都在这里；原 .workbuddy 已移除）
+/.hermes/
+
 # author/：只保留 README 引用的 logo.jpg；其余为个人二维码 / 社交 / 打赏码
 author/*
 !author/logo.jpg

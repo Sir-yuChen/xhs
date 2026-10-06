@@ -64,6 +64,14 @@ SHOP_STATE_DEFAULTS: dict[str, Any] = {
     # 「平台 0 件」—— 读取侧按缺值口径渲染）。
     "products_total": 0,
     "products_synced_at": "",
+    #: 2026-10-05（设计 20 §11）：平台侧**扣住本店商品操作**的标志。
+    #: `sellerFreeze` = 店铺被冻结 —— 千帆对冻结店**拒绝一切商品写操作**
+    #: （bundle 原文：「您的店铺被冻结，解冻后可发布、编辑商品」）。
+    #: ⚠️ 这不是「我猜的」：它是商品列表接口 `search_item_v2` 的
+    #: `with_item_lock_info` 之外、页面在控制器里另取的一个状态，本地无法从
+    #: 商品行推出 ⇒ 由**写操作的失败回执**如实写入（见 `shop_item_operate_service`）。
+    #: 默认 `False` = 未观测到冻结（缺值口径：不知道就不拦，让平台自己拒绝并回原因）。
+    "seller_freeze": False,
 }
 
 

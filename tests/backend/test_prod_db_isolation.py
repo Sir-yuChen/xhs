@@ -137,3 +137,85 @@ def test_workflow_tables_in_production_are_not_touched(table: str):
     assert _count(table) == before, (
         f"真实库 {table} 行数被测试改动 —— 说明服务层 Session 未打到夹具库"
     )
+
+
+# --------------------------------------------------------------------------- #
+# ③ 落盘隔离：素材缩略图不得写生产 storage（DEF-094，2026-10-05）
+#
+# 与 ① ② 是**同一条链路的另一个面**：Session 打桩挡住了「写到生产库」，
+# 但素材扫描还会**落盘**到 `Settings.storage_dir` 派生出的固定目录 ——
+# 两条腿，只堵一条，页面上照样能看到「缩略图取不到」。
+# --------------------------------------------------------------------------- #
+STORAGE_THUMBS = ROOT / "backend" / "app" / "storage" / "materials" / "thumbs"
+
+
+def test_db_session_fixture_sandboxes_material_storage():
+    """`db_session` 必须把素材落盘根目录搬进沙箱（源码级断言）。
+
+    ⚠️ 变异守护：删掉 `sandbox_material_storage_always()` ⇒ 本用例必红。
+    （配套行为判据见 `test_material_scan_service.py`，变异脚本
+    `.hermes/scripts/mutate_verify_material_storage_isolation.py`。）
+    """
+    source = _conftest_source()
+    start = source.index("def db_session(")
+    end = source.index("\ndef ", start + 1)
+    body = source[start:end]
+    assert "sandbox_material_storage_always()" in body, (
+        "db_session 必须搬走素材落盘根目录，否则「用 db_session + 调素材扫描」的用例"
+        "会读生产库的文件夹行、把缩略图原地覆盖到生产 storage（DEF-094 实测）"
+    )
+
+
+def test_api_client_fixture_sandboxes_material_storage():
+    """`api_client` 同理（素材端点：新建文件夹 / 重扫 / 上传 / 缩略图都会落盘）。"""
+    source = _conftest_source()
+    start = source.index("def api_client(")
+    end = source.index("\ndef ", start + 1)
+    body = source[start:end]
+    assert "sandbox_material_storage(" in body, (
+        "api_client 必须搬走素材落盘根目录 —— 素材端点全部会写缩略图/上传物"
+    )
+
+
+def test_material_thumbs_in_production_are_not_touched_by_a_scan(tmp_path, db_session):
+    """**行为判据**：走夹具把临时目录扫一遍后，生产 thumbs 目录**不多不少**。
+
+    ⚠️ 变异守护：关掉兜底隔离 ⇒ 本用例必红（实测确认，见
+    `.hermes/scripts/mutate_verify_material_storage_isolation.py`）。
+
+    这条与 `test_workflow_tables_in_production_are_not_touched` 是同一判据的两个面：
+    那条看**写库**，这条看**落盘**。只堵住 Session 打桩，素材扫描照样会写生产 storage。
+    """
+    if not STORAGE_THUMBS.exists():
+        pytest.skip("无生产 thumbs 目录，跳过（新克隆环境）")
+    before = sorted(p.relative_to(STORAGE_THUMBS).as_posix() for p in STORAGE_THUMBS.rglob("*.jpg"))
+
+    from PIL import Image
+
+    from backend.app.models import MaterialFile, MaterialFolder
+    from backend.app.models.user import User
+    from backend.app.services import material_scan_service as svc
+
+    assert "hermes-material" in str(svc.thumbs_dir()) or "material_storage" in str(
+        svc.thumbs_dir()
+    ) or "pytest-of-" in str(svc.thumbs_dir()), (
+        f"素材落盘根目录没被搬走：{svc.thumbs_dir()}"
+    )
+
+    src_dir = tmp_path / "src"
+    src_dir.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (240, 160), (10, 120, 200)).save(src_dir / "probe.jpg")
+
+    if db_session.get(User, 1) is None:
+        db_session.add(User(id=1, username="iso-probe", password_hash="x"))
+        db_session.flush()
+    folder = MaterialFolder(user_id=1, name="iso-probe", path=str(src_dir), enabled=True)
+    db_session.add(folder)
+    db_session.commit()
+    db_session.refresh(folder)
+
+    svc.scan_folder(db_session, folder)
+    assert db_session.query(MaterialFile).count() == 1
+
+    after = sorted(p.relative_to(STORAGE_THUMBS).as_posix() for p in STORAGE_THUMBS.rglob("*.jpg"))
+    assert after == before, f"生产 thumbs 被动过：{set(after) ^ set(before)}"

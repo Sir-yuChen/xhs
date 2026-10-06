@@ -1,16 +1,14 @@
 import {
-  DashboardOutlined,
   DatabaseOutlined,
   HeartOutlined,
   RobotOutlined,
   SafetyCertificateOutlined,
   ScheduleOutlined,
 } from "@ant-design/icons";
-import { Button, Card, Col, Empty, List, Row, Statistic, Typography } from "antd";
+import { Card, Col, Empty, List, Row, Statistic, Typography } from "antd";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
-import { PageHeader } from "../../../components/layout/app-shell";
 import { useThemePalette } from "../../../app/providers";
 import { fetchXhsOverview } from "../../../lib/api";
 import type { DashboardOverview } from "../../../types";
@@ -47,19 +45,16 @@ export function XhsDashboard() {
 
   return (
     <div>
-      <PageHeader
-        eyebrow="XHS Workspace"
-        title="小红书运营总览"
-        description="把抓取、洞察、AI 创作和发布任务放在同一张操作台上。"
-        action={
-          <Link to="/platforms/xhs/discovery">
-            <Button type="primary" icon={<DashboardOutlined />}>
-              开始发现
-            </Button>
-          </Link>
-        }
-      />
+      {/* 2026-10-05 用户口径「移除所有页面页面头」：原「XHS Workspace / 小红书运营总览 /
+          一句话说明」整块移除（与侧栏「总览」菜单项重复）。本页是纯看板，
+          「开始发现」原本是页头里唯一的主操作，改由**首张指标卡**承接不成立
+          （指标卡无语义位置）⇒ 直接移除，入口在侧栏「笔记发现」逐字可达。 */}
 
+      {/*
+        2026-10-05 用户口径「开始发现按钮移除」：该按钮**整块删除**
+        （上一轮页头移除后曾临时收进首张指标卡 extra，本轮按用户口径彻底去掉）。
+        入口在侧栏「笔记发现」逐字可达，仪表盘不再承载跳转操作。
+      */}
       <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
         {metrics.map((metric) => (
           <Col xs={12} sm={12} md={6} key={metric.label}>

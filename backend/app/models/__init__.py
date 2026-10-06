@@ -18,6 +18,7 @@ from backend.app.models.llm_gateway import (
 )
 from backend.app.models.login_session import LoginSession
 from backend.app.models.material import MaterialFile, MaterialFolder
+from backend.app.models.no_traffic_cleanup_log import NoTrafficCleanupLog
 from backend.app.models.monitoring import (
     MonitoringSnapshot,
     MonitoringTarget,
@@ -34,7 +35,8 @@ from backend.app.models.order import (
     OrderShipment,
 )
 from backend.app.models.platform_account import AccountCookieVersion, PlatformAccount
-from backend.app.models.product_group import ProductGroup
+#: ⚠️ `ProductGroup` 已随「彻底移除商品分组」退场（2026-10-05）—— 不再注册该 ORM 类，
+#: 否则 `create_all()` 会把迁移已 drop 的 `product_groups` 表建回来。
 from backend.app.models.prompt import PromptModule, PromptTemplate
 from backend.app.models.publish import PublishAsset, PublishJob
 from backend.app.models.scheduled_job import ScheduledJob, ScheduledJobLog
@@ -78,6 +80,7 @@ __all__ = [
     "NoteAsset",
     "NoteComment",
     "NoteGenerationLink",
+    "NoTrafficCleanupLog",
     "NoteGoods",
     "Notification",
     "Order",
@@ -85,7 +88,6 @@ __all__ = [
     "OrderRemark",
     "OrderShipment",
     "PlatformAccount",
-    "ProductGroup",
     "PromptModule",
     "PromptTemplate",
     "PublishAsset",

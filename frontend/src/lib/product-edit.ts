@@ -8,10 +8,13 @@
  * ⚠️ 一条硬口径：**PATCH 的「不传」与「传 null」是两件事**。前端拼请求体时
  * 绝不能把没编辑的字段塞成 `null`（那等于清空）—— 本模块的
  * `buildEditPayload` 就是这条的唯一实现。
+ *
+ * ⚠️ `group_id` 已随「彻底移除商品分组」退场（2026-10-05）。后端模型带
+ * `extra="forbid"` ⇒ 前端再拼 `group_id` 只会拿到 422，所以这里也一起删干净。
  */
 
-/** 商品编辑可改的三个字段（设计 20 §2.1 端点 5）。 */
-export const EDITABLE_FIELDS = ["group_id", "ai_title", "ai_selling_point"] as const;
+/** 商品编辑可改的两个字段（设计 20 §2.1 端点 5）。 */
+export const EDITABLE_FIELDS = ["ai_title", "ai_selling_point"] as const;
 export type EditableField = (typeof EDITABLE_FIELDS)[number];
 
 /** 编辑表单的当前值（`undefined` = 用户没碰过这一项）。 */
@@ -38,7 +41,6 @@ export function buildEditPayload(
 
 /** 后端 `updated[]` 的代码名 → 中文提示（后端只回代码，中文名在前端一处）。 */
 const UPDATED_LABELS: Record<string, string> = {
-  group_id: "分组",
   ai_title: "AI 标题",
   ai_selling_point: "AI 卖点",
 };
@@ -79,28 +81,4 @@ export function adoptCandidate(
   value: string,
 ): EditFormState {
   return { ...form, [field]: value };
-}
-
-/** 分组筛选下拉的「未分组」哨兵值（与后端 `group_id=0` 同值）。 */
-export const UNGROUPED_SENTINEL = 0;
-
-/** 分组下拉选项（含「未分组」与「全部分组」两个特殊项）。 */
-export function groupFilterOptions(groups: Array<{ id: number; name: string }>): Array<{
-  value: number;
-  label: string;
-}> {
-  return [
-    { value: -1, label: "全部分组" },
-    { value: UNGROUPED_SENTINEL, label: "未分组" },
-    ...groups.map((group) => ({ value: group.id, label: group.name })),
-  ];
-}
-
-/** 「全部分组」哨兵（不发 `group_id` 参数）。 */
-export const ALL_GROUPS_SENTINEL = -1;
-
-/** 分组下拉值 → 请求参数（`undefined` = 不筛）。 */
-export function groupFilterParam(value: number): number | undefined {
-  if (value === ALL_GROUPS_SENTINEL) return undefined;
-  return value;
 }

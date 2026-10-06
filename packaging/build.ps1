@@ -298,7 +298,7 @@ $forbidden = @(
     # 这些目前都没进包，加正向断言是为了防哪天改 spec / 组装逻辑时被带进来。
     @{ Path = (Join-Path $Bundle "_internal\static"); Label = "static/（v1 期界面截图，2026-09-26 已从仓库移除）" },
     @{ Path = (Join-Path $Bundle "_internal\author"); Label = "author/（Logo / 收款码等无关资产）" },
-    @{ Path = (Join-Path $Bundle "_internal\.workbuddy"); Label = ".workbuddy/（本地规范/记忆/日志）" },
+    @{ Path = (Join-Path $Bundle "_internal\.hermes"); Label = ".hermes/（本地规范/记忆/日志）" },
     @{ Path = (Join-Path $Bundle "_internal\.git"); Label = ".git/" },
     @{ Path = (Join-Path $Bundle "data"); Label = "data/（开发库与备份，安装后由运行期生成）" },
     @{ Path = (Join-Path $Bundle "docs"); Label = "docs/（工程文档）" },

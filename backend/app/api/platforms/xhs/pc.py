@@ -7,14 +7,19 @@ from typing import Any, Literal, NamedTuple, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from backend.app.adapters.xhs.pc_api_adapter import XhsPcApiAdapter
 from backend.app.adapters.xhs.qianfan_api_adapter import get_qianfan_api_adapter_factory
 from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user, get_owned_active_account
-from backend.app.models import PlatformAccount, Task, User
+from backend.app.models import (
+    NoTrafficCleanupLog,
+    PlatformAccount,
+    Task,
+    User,
+)
 from backend.app.models.shop import ShopNoteGoods
 from backend.app.services.account_service import (
     CHANNEL_ARK,
@@ -38,6 +43,7 @@ from backend.app.services.shop_goods_service import (
 )
 from backend.app.services.no_traffic_cleanup_service import (
     DEFAULT_DELETE_BATCH,
+    running_cleanup_for_account,
     run_no_traffic_cleanup_background,
 )
 from backend.app.services.no_traffic_service import (
@@ -1145,8 +1151,10 @@ class NoTrafficCandidatesRequest(BaseModel):
     account_id: int
     thresholds: TrafficThresholdsRequest = Field(default_factory=TrafficThresholdsRequest)
     query: CleanupQueryRequest = Field(default_factory=CleanupQueryRequest)
-    #: 返回条数上限（预览用，默认 50）。
+    #: **每页条数**（预览用，默认 50）。分页见 `page`。
     limit: int = Field(default=50, ge=1, le=500)
+    #: 第几页（从 1 起；越界回落成最后一页，见服务层 docstring）。
+    page: int = Field(default=1, ge=1)
 
 
 class NoTrafficCleanupRequest(BaseModel):
@@ -1157,6 +1165,9 @@ class NoTrafficCleanupRequest(BaseModel):
     query: CleanupQueryRequest = Field(default_factory=CleanupQueryRequest)
     #: 单批删除上限（后端还会再夹一次硬上限 DEFAULT_DELETE_BATCH）。
     batch_limit: int = Field(default=20, ge=1, le=50)
+    #: **指定笔记清理**（列表勾选）：非空 = 只删这些（且必须仍在候选池内）；
+    #: 空 = 按阈值 + 查询条件全量清（上限见 `DEFAULT_DELETE_BATCH`）。
+    note_ids: list[str] = Field(default_factory=list, max_length=500)
 
 
 class SearchSelfContentRequest(BaseModel):
@@ -1988,7 +1999,9 @@ def no_traffic_candidates(
     account, _ = _account_cookies_auto(db, current_user, payload.account_id)
     thresholds = TrafficThresholds.from_dict(payload.thresholds)
     query = CleanupQuery.from_dict(payload.query)
-    result = list_no_traffic_candidates(db, account.id, thresholds, limit=payload.limit, query=query)
+    result = list_no_traffic_candidates(
+        db, account.id, thresholds, limit=payload.limit, query=query, page=payload.page
+    )
     return {
         **result,
         "candidates": [serialize_candidate(c) for c in result["candidates"]],
@@ -2014,9 +2027,40 @@ def no_traffic_cleanup(
         thresholds=thresholds,
         query=query,
         batch_limit=min(payload.batch_limit, DEFAULT_DELETE_BATCH),
+        note_ids=[str(n) for n in payload.note_ids] or None,
         user_id=current_user.id,
     )
+    # 日志行是**后台线程**开的（那时才算得出「清理前多少条」）⇒ 回执里不保证有 log_id；
+    # 前端要展示日志就查列表端点（它按账号 + 时间倒序，最新一条就是本次）。
     return {"task_id": task_id, "status": "pending"}
+
+
+@router.get("/users/no-traffic/cleanup/active")
+def no_traffic_cleanup_active(
+    account_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """该账号此刻**是否有清理在跑**（「正在清理无流量笔记」按钮态的数据源）。
+
+    ⚠️ **必须注册在 `/users/no-traffic/cleanup/{task_id}` 之前**：否则 `active`
+    会被那条路径吃掉当成 `task_id` 去 `int()` 转换 ⇒ 422。
+    （同类坑见 `GET /notes/sync-queue` / `hydrate-queue` 的路由顺序注释。）
+
+    返回 `{"running": bool, "task_id": int|None, "log_id": int|None, "status": str}`
+    —— `task_id` 让前端把弹窗关闭后剩下的轮询接回同一条任务。
+    """
+    account, _ = _account_cookies_auto(db, current_user, account_id)
+    task = running_cleanup_for_account(db, account.id, current_user.id)
+    if task is None:
+        return {"running": False, "task_id": None, "log_id": None, "status": ""}
+    payload = task.payload if isinstance(task.payload, dict) else {}
+    return {
+        "running": True,
+        "task_id": task.id,
+        "log_id": payload.get("log_id"),
+        "status": task.status,
+    }
 
 
 @router.get("/users/no-traffic/cleanup/{task_id}")
@@ -2042,6 +2086,54 @@ def no_traffic_cleanup_status(
         "total": payload.get("total", 0),
         "note": payload.get("note", ""),
         "details": payload.get("details", []),
+        # 「清理前 / 清理后 多少条笔记」（用户口径）：清理后是**重算**的候选池总数，
+        # 不是 before - deleted 的估算（估算会把跳过/失败算成已清）。
+        "before_total": payload.get("before_total"),
+        "after_total": payload.get("after_total"),
+        #: 勾选了但**已不在候选池**的笔记（改过阈值 / 已被删）—— 不删、如实报。
+        "not_in_pool": payload.get("not_in_pool", []),
+    }
+
+
+@router.get("/users/no-traffic/cleanup-logs")
+def no_traffic_cleanup_logs(
+    account_id: Optional[int] = None,
+    page: int = 1,
+    limit: int = 20,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """清理无流量笔记的**操作日志**（用户口径「新增一个查询清理无流量笔记日志详情按钮，
+    弹窗列表展示该日志记录」）。
+
+    按**当前用户**收口（跨租户不可见）；`account_id` 给了就再收窄到一个账号。
+    时间倒序。字段见 `NoTrafficCleanupLog.to_dict()`：账号 / 阈值 / 清理前多少条 /
+    删了几篇 / 跳过 / 失败 / 失败原因 / 操作时间 / 结果时间。
+    """
+    page = max(1, int(page or 1))
+    limit = min(max(1, int(limit or 20)), 200)
+    where = [NoTrafficCleanupLog.user_id == current_user.id]
+    if account_id:
+        where.append(NoTrafficCleanupLog.account_id == int(account_id))
+    total = int(
+        db.scalar(select(func.count()).select_from(NoTrafficCleanupLog).where(*where)) or 0
+    )
+    rows = (
+        db.scalars(
+            select(NoTrafficCleanupLog)
+            .where(*where)
+            .order_by(NoTrafficCleanupLog.id.desc())
+            .offset((page - 1) * limit)
+            .limit(limit)
+        )
+        .all()
+    )
+    return {
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "page_count": max(1, (total + limit - 1) // limit),
+        "items": [row.to_dict() for row in rows],
     }
 
 

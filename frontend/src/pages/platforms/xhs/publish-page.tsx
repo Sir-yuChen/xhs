@@ -33,7 +33,6 @@ import dayjs from "dayjs";
 import type { Dayjs } from "dayjs";
 import { useEffect, useState } from "react";
 
-import { PageHeader } from "../../../components/layout/app-shell";
 import { useThemePalette } from "../../../app/providers";
 import {
   deletePublishJob,
@@ -268,16 +267,9 @@ export function XhsPublishPage() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <PageHeader
-        eyebrow="XHS Publish"
-        title="发布中心"
-        description="预览草稿内容，配置发布参数后触发 Creator 发布。内容修改请前往草稿工坊。"
-        action={
-          <Button icon={<ReloadOutlined />} onClick={loadJobs} loading={isLoading}>
-            刷新
-          </Button>
-        }
-      />
+      {/* 2026-10-05 用户口径「移除所有页面页面头」：原「XHS Publish / 发布中心 /
+          一句话说明」三行整块移除；「刷新」收进左栏「发布任务」卡右上角
+          （与「N 个」计数同行）。 */}
 
       {isLoading ? (
         <Card style={panelStyle} styles={{ body: cardBodyStyle }}>
@@ -320,7 +312,14 @@ export function XhsPublishPage() {
                   />
                 </Space>
               }
-              extra={<Tag>{filteredJobs.length} 个</Tag>}
+              extra={
+                <Space size={8}>
+                  <Tag>{filteredJobs.length} 个</Tag>
+                  <Button size="small" icon={<ReloadOutlined />} onClick={loadJobs} loading={isLoading}>
+                    刷新
+                  </Button>
+                </Space>
+              }
               style={panelStyle}
               styles={{ body: { padding: 0 }, header: { borderBottom: `1px solid ${p.border}` } }}
             >

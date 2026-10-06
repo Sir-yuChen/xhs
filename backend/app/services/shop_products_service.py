@@ -29,9 +29,15 @@ from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from backend.app.models.platform_account import PlatformAccount
-from backend.app.models.product_group import ProductGroup
+#: ⚠️ `ProductGroup` 已随「彻底移除商品分组」退场（2026-10-05）。不要再 import 它 ——
+#: ORM 类留着会让 `create_all()` 把迁移已 drop 的 `product_groups` 表建回来。
 from backend.app.models.shop import NoteGoods
 from backend.app.models.shop_product import ShopProduct
+#: ⚠️ `shop_item_operate_gates` **不在模块顶部 import**：它反向依赖本模块的
+#: `load_product_dict_from_ledger`（操作任务要用台账行判门禁）⇒ 顶部互相 import 会
+#: 撞「部分初始化模块」（运行时 `NameError: name '…' is not defined`，
+#: 而 import 语句本身看着完全正常）。改为**在函数内 import**（DEF-044 同款纪律：
+#: 环依赖的解法是延迟导入，不是复制一份实现）。
 
 #: 排序字段 → 列（设计 13 §30.3.2）。未知字段由调用方的门禁挡掉（400），
 #: 这里只做「已知 → 列」的映射，默认创建时间倒序。
@@ -228,6 +234,9 @@ def normalize_item_from_raw(item: dict[str, Any]) -> dict[str, Any]:
         "note_ids": note_ids,
         "category": _category_path(item.get("categories")),
         "status_label": status_label_from_raw(item),
+        #: 状态筛选键（**权威实现只有一处**：`status_key_from_raw`）。上下架门禁按它判
+        #: 「这个商品现在能不能上/下」。⚠️ 不在这里重算一遍 —— 两份口径必然漂移。
+        "status_key": status_key_from_raw(item),
         "buyable": bool(item.get("buyable")),
         "frozen": bool(item.get("item_freeze")),
         "deleted": bool(item.get("deleted")),
@@ -239,6 +248,29 @@ def normalize_item_from_raw(item: dict[str, Any]) -> dict[str, Any]:
         "on_shelf_time": _ts_text(item.get("on_shelf_time")),
         "update_time": _ts_text(item.get("update_time")),
         "xsec_token": _first_text(item.get("xsec_token")),
+        # ------------------------------------------------------------------ #
+        # 上下架 / 删除的**门禁输入**（2026-10-05，需求 7/8）。
+        # ⚠️ 这几个字段是 `shop_item_operate_gates` 的判据来源 —— 判据只在那里实现，
+        #    这里只负责把原料按白名单搬出来（不整体透传 raw_json）。
+        # ------------------------------------------------------------------ #
+        #: 平台在售活动的标志（定金预售等）—— 拦截下架 / 删除。
+        "is_item_attend_promotion": bool(item.get("is_item_attend_promotion")),
+        #: 平台给出的「这件商品哪些操作被锁」列表（`lockField`/`lockDimension`/
+        #: `lockDesc`）。只为三个动作服务，故裁到需要的键（不搬整条）。
+        "item_lock_infos": [
+            {
+                "lockField": _first_text(row.get("lockField")),
+                "lockDimension": _first_text(row.get("lockDimension")),
+                "lockDesc": _first_text(row.get("lockDesc")),
+            }
+            for row in (item.get("item_lock_infos") or [])
+            if isinstance(row, dict)
+        ],
+        #: 平台处罚结果（真机 1 = 正常）。上架时判违规。
+        "item_punish_result": _int_or_none(item.get("item_punish_result")),
+        #: ⚠️ `item_audit_status`（审核状态）**没有**作为独立字段下发 ——
+        #: 已在上面 `audit_status` 里（同名字段的既有键）。缺值口径：取不到就是
+        #: `None`，上架门禁按「不判违规」处理（不把「不知道」当「违规」）。
     }
 
 
@@ -370,7 +402,12 @@ def load_product_dict_from_ledger(row: ShopProduct) -> dict[str, Any]:
     """
     raw = _parse_raw(row)
     if raw:
-        return normalize_item_from_raw(raw)
+        out = normalize_item_from_raw(raw)
+        #: 上下架门禁的**输入之一**：raw 里没有的写操作标志（真机上恒为 False，
+        #: 但缺了它，`support_reason` 会读到 `None` 而**无法区分**「没在活动」
+        #: 与「不知道」）。台账列没有这一维，按 `raw` 里的值原样补齐缺省即可。
+        out.setdefault("is_item_attend_promotion", bool(raw.get("is_item_attend_promotion")))
+        return out
     return {
         "item_id": row.item_id or "",
         "title": row.item_title or "",
@@ -384,6 +421,10 @@ def load_product_dict_from_ledger(row: ShopProduct) -> dict[str, Any]:
         # 缺值留 None，**不造 0**（硬约束⑤）。
         "sku_count": row.sku_count,
         "on_sale_sku_count": None,
+        #: 状态筛选键：`raw_json` 坏掉时才走这条兜底，而 `status` 列就是同步时按
+        #: `status_key_from_raw` 落的键（同一口径的来源）⇒ 直接用它。
+        #: ⚠️ 不给这个键，上下架门禁会把所有商品判成「未知状态、不可操作」。
+        "status_key": str(row.status or ""),
     }
 
 
@@ -500,14 +541,16 @@ def _apply_filters(
         elif op == "gt":
             stmt = stmt.where(relation_count > bound)
 
-    #: M4 分组筛选（设计 20 §5）：与导出的 `export_rows` 同一条判据 ——
-    #: ⚠️ 两处各写一份 = 「列表看到的」和「导出的」不是同一个集合（导出最常见的故障）。
-    requested_group = getattr(payload, "group_id", None)
-    if requested_group is not None:
-        if int(requested_group) == 0:
-            stmt = stmt.where(ShopProduct.group_id.is_(None))
-        else:
-            stmt = stmt.where(ShopProduct.group_id == int(requested_group))
+    #: 分组已退场（2026-10-05 用户口径「彻底移除商品分组相关逻辑」）：
+    #: `shop_products.group_id` 列与 `product_groups` 表一起退场 ⇒ 这里不再有
+    #: 分组筛选分支。原实现（保留备查，勿恢复）：
+    #:
+    #:   requested_group = getattr(payload, "group_id", None)
+    #:   if requested_group is not None:
+    #:       if int(requested_group) == 0:
+    #:           stmt = stmt.where(ShopProduct.group_id.is_(None))
+    #:       else:
+    #:           stmt = stmt.where(ShopProduct.group_id == int(requested_group))
     return stmt
 
 
@@ -589,31 +632,30 @@ def query_items(
     counts = _relation_note_counts(db, [str(row.item_id or "") for row in rows])
     for item, row in zip(items, rows):
         item["note_count"] = counts.get(str(row.item_id or ""), 0)
-        #: M4：分组（本地列，平台原始数据里没有它 ⇒ 在归一化之后挂上）。
-        #: ⚠️ `group_name` 可能为空（分组被删 / 行还没挂分组）⇒ 前端渲染 `-`。
-        item["group_id"] = row.group_id
+        #: AI 采纳的标题 / 卖点（分组列已随分组功能退场，2026-10-05）。
         item["ai_title"] = row.ai_title or ""
         item["ai_selling_point"] = row.ai_selling_point or ""
+        #: 上下架 / 删除的**可做动作清单**（2026-10-05 需求 8）：判据的**唯一实现**
+        #: 在 `shop_item_operate_gates`，这里只把结果挂上 —— 前端按 `supported`
+        #: 渲染按钮，**不在前端复算**（同一件事两个实现必然分叉）。
+        from backend.app.services import shop_item_operate_gates
+
+        item["allowed_actions"] = shop_item_operate_gates.allowed_actions(
+            item, status_key=item.get("status_key") or str(row.status or "")
+        )
     #: 台账同步时间 = 本账号 max(synced_at)（**没有行 → 空串**，上层渲染 `-`）。
     latest_sync = db.scalar(
         select(func.max(ShopProduct.synced_at)).where(
             ShopProduct.platform_account_id == platform_account_id
         )
     )
-    #: M4 分组名：一次查表做映射（**不在前端 groupBy** —— 分组口径由后端下发，
-    #: 前端只有 `group_id` 是查不出名字的）。空值 = 该商品没分组，前端渲染 `-`。
-    group_ids = {int(item["group_id"]) for item in items if item.get("group_id") is not None}
-    group_names: dict[int, str] = {}
-    if group_ids:
-        group_names = {
-            int(row.id): str(row.name or "")
-            for row in db.scalars(
-                select(ProductGroup).where(ProductGroup.id.in_(group_ids))
-            ).all()
-        }
-    for item in items:
-        gid = item.get("group_id")
-        item["group_name"] = group_names.get(int(gid), "") if gid is not None else ""
+    #: 分组名映射已随分组功能退场（2026-10-05）：`product_groups` 表与
+    #: `shop_products.group_id` 列都不存在了，列表项里也不再下发 `group_id` /
+    #: `group_name`。原实现（保留备查，勿恢复）：
+    #:
+    #:   group_ids = {int(item["group_id"]) for item in items ...}
+    #:   group_names = {...db.scalars(select(ProductGroup).where(...))...}
+    #:   for item in items: item["group_name"] = group_names.get(...) or ""
     return {
         "total": total,
         "count": len(items),
@@ -764,6 +806,93 @@ def _row_to_csv(row: ShopProduct) -> list[str]:
         str(item.get("on_shelf_time") or ""),
         row.synced_at.strftime("%Y-%m-%d %H:%M:%S") if row.synced_at else "",
     ]
+
+
+class ProductEditError(RuntimeError):
+    """商品本地编辑的结构化错误（带 `code`，供 API 层映射 HTTP 状态）。
+
+    ⚠️ 宿主由 `product_groups_service` 迁到本模块（2026-10-05 分组退场）——
+    分组服务整模块删除，但它顺手承载的「商品本地编辑」是**仍然需要的功能**，
+    不能跟着一起没（否则 `PATCH /items/edit` 与润色采纳链路一起断）。
+    """
+
+    def __init__(self, message: str, *, code: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def edit_product(
+    db: Session,
+    *,
+    platform_account_id: int,
+    item_id: str,
+    ai_title: Optional[str] = None,
+    ai_selling_point: Optional[str] = None,
+    touched: Optional[dict[str, bool]] = None,
+) -> dict[str, Any]:
+    """商品本地编辑（设计 20 §2.1 端点 5 的执行体）—— **纯本地写，零平台请求**。
+
+    ## 「不传 = 不动」vs「传 null = 清空」（PATCH 语义的核心）
+
+    可编辑字段在 API 层用 **sentinel 默认值**（不是 `None`）区分两种语义：
+
+    * 请求体**没有**这个键 ⇒ 保持原值（`touched[key] is False`）；
+    * 请求体**显式**给 `null` ⇒ 清空（写成 `None`）。
+
+    ⚠️ 直接写 `Optional[str] = None` 会把两件事混成一件 —— 这是 PATCH 语义最常见
+    的静默错值（用户只想改卖点，结果标题被清空了）。
+
+    ## `updated[]`
+
+    只回**真正变了**的字段（新值与旧值不同才算）。前端据此提示「已更新 AI 标题」
+    而不是「已更新商品」—— 全字段都报「已更新」等于没说。
+
+    ## 归属校验在 API 层（`_owned_account`）
+
+    本函数收到的 `platform_account_id` 已经过 `_owned_account` 校验（含软删闸），
+    这里只按它定位商品行；传别的账号的 `item_id` ⇒ 查不到行 ⇒ 404。
+
+    ⚠️ **可编辑字段只有 `ai_title` / `ai_selling_point`**（分组列随分组功能退场，
+    2026-10-05）。商品**真实**标题 / 价格 / 库存仍然一个都不改（那是平台数据）。
+    """
+    row = db.scalars(
+        select(ShopProduct).where(
+            ShopProduct.platform_account_id == platform_account_id,
+            ShopProduct.item_id == str(item_id or "").strip(),
+        )
+    ).first()
+    if row is None:
+        raise ProductEditError(
+            "本账号的商品台账里没有这个商品（先同步商品再试）。",
+            code="PRODUCT_ITEM_NOT_FOUND",
+        )
+
+    #: API 层已解析好的「哪些字段被显式传了」。
+    flags = touched or {}
+    updated: list[str] = []
+
+    if flags.get("ai_title"):
+        value = (ai_title or "").strip() or None
+        if row.ai_title != value:
+            row.ai_title = value
+            updated.append("ai_title")
+    if flags.get("ai_selling_point"):
+        value = (ai_selling_point or "").strip() or None
+        if row.ai_selling_point != value:
+            row.ai_selling_point = value
+            updated.append("ai_selling_point")
+
+    # ⚠️ `ShopProduct` 没有 `updated_at` 列 —— 不写时间戳（加了反而是没有来源的假字段）。
+    # 「这次改了什么」由返回的 `updated[]` 承担，它比一个时间戳信息量大得多。
+    db.commit()
+    db.refresh(row)
+
+    return {
+        "item_id": row.item_id or "",
+        "ai_title": row.ai_title,
+        "ai_selling_point": row.ai_selling_point,
+        "updated": updated,
+    }
 
 
 class ExportTooManyError(RuntimeError):

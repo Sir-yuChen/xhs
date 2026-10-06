@@ -103,9 +103,10 @@ class ShopProduct(Base):
     # ------------------------------------------------------------------ #
     # 以下三列：M4「商品编辑优化」（设计 20 §1.2，迁移 `g0a1b2c3d4e5`）。
     # ------------------------------------------------------------------ #
-    #: 所属**本地分组**（`product_groups.id`）。**NULL = 未分组**（不是 0 / -1）。
-    #: ⚠️ 无 FK：删分组由服务层显式清空本列（见 `product_groups_service.delete_group`）。
-    group_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    #: ⚠️ 本地分组列 `group_id` 已随「彻底移除商品分组」退场（2026-10-05），
+    #: 由迁移 drop。原列定义（保留备查，勿恢复）：
+    #:
+    #:   group_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
     #: AI 润色后**被采纳**的商品标题。**NULL = 没采纳过**，空串 = 采纳了但内容为空
     #: （两个不同的界面状态，缺值口径⑤）。润色**过程**不落本列（设计 20 §3.1）。
     ai_title: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)

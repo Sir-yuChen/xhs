@@ -5,32 +5,29 @@
  * 单独弹窗实现，不要在编辑或详情弹窗中实现」⇒ 商品编辑同样独立。
  *
  * ## 三个硬口径
- * 1. **平台改价 / 上下架不可得** —— 千帆 SDK 零商品写接口（设计 20 §0），
- *    弹窗里**只读**展示价格 / SKU，并**明确标注**原因（不是留个空按钮）。
+ * 1. **本弹窗只改本地台账**：`ai_title` / `ai_selling_point`（采纳的 AI 草稿）+
+ *    SKU / 价格**只读**查看。⚠️ **平台的**上下架 / 删除走**列表操作列**的
+ *    上架 / 下架 / 删除按钮（那条链路是真实写平台，已不在本弹窗的职责里）。
  * 2. **润色不落库** —— 备选只在弹窗里暂存，用户点「采纳」才写 `ai_title` /
  *    `ai_selling_point`（`PATCH /items/edit`）。
  * 3. **只提交改过的字段** —— 走 `lib/product-edit.ts::buildEditPayload`，
  *    未碰的字段**不进请求体**（塞 null 会被后端读成**清空**）。
+ *
+ * ⚠️ 「分组」Tab 已随「彻底移除商品分组」退场（2026-10-05）。
  */
 import { App, Button, Empty, Input, Modal, Radio, Skeleton, Space, Tabs, Tag, Typography } from "antd";
 import { useCallback, useEffect, useState } from "react";
 
 import {
   editShopItem,
-  fetchProductGroups,
   fetchXhsShopItemDetail,
   polishShopItem,
 } from "../../../lib/api";
-import type {
-  XhsItemPolishResult,
-  XhsProductGroup,
-  XhsShopItem,
-} from "../../../types";
+import type { XhsItemPolishResult, XhsShopItem } from "../../../types";
 import {
   adoptCandidate,
   buildEditPayload,
   type EditFormState,
-  UNGROUPED_SENTINEL,
   updatedSummary,
 } from "../../../lib/product-edit";
 
@@ -41,14 +38,13 @@ export interface ProductEditModalProps {
   platformAccountId: number;
   item: XhsShopItem | null;
   onClose: () => void;
-  /** 落库成功后通知列表刷新（分组名 / 采纳标题会变）。 */
+  /** 落库成功后通知列表刷新（采纳的标题 / 卖点会变）。 */
   onSaved?: () => void;
 }
 
 /** 三区块 Tabs —— 用户偏好「分块不混在一起」，不堆在一屏里。 */
 const TAB_ITEMS = [
   { key: "polish", label: "标题 / 卖点" },
-  { key: "group", label: "分组" },
   { key: "sku", label: "SKU / 价格" },
 ];
 
@@ -62,8 +58,7 @@ export function ProductEditModal({
   const { message } = App.useApp();
   const [tab, setTab] = useState("polish");
   const [form, setForm] = useState<EditFormState>({});
-  const [groups, setGroups] = useState<XhsProductGroup[]>([]);
-  const [groupsLoaded, setGroupsLoaded] = useState(false);
+  // ⚠️ 分组清单状态（`groups` / `groupsLoaded`）已随分组功能退场（2026-10-05）。
   const [polish, setPolish] = useState<XhsItemPolishResult | null>(null);
   const [polishing, setPolishing] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -82,25 +77,7 @@ export function ProductEditModal({
     setDetailLoaded(false);
   }, [open, itemId]);
 
-  // 分组清单（同一个弹窗内不重复拉；列表工具栏那次刷新不共享）
-  useEffect(() => {
-    if (!open || groupsLoaded) return;
-    let alive = true;
-    fetchProductGroups()
-      .then((result) => {
-        if (alive) setGroups(result.items);
-      })
-      .catch(() => {
-        // 分组拉不到不阻塞编辑（分组是可选的组织方式），静默退空
-        if (alive) setGroups([]);
-      })
-      .finally(() => {
-        if (alive) setGroupsLoaded(true);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [open, groupsLoaded]);
+  // ⚠️ 分组清单的拉取 effect 已随分组功能退场（2026-10-05）。
 
   const loadDetail = useCallback(async () => {
     if (!platformAccountId || !itemId || detailLoaded) return;
@@ -138,10 +115,12 @@ export function ProductEditModal({
     setSaving(true);
     try {
       const result = await editShopItem(
-        buildEditPayload({ platform_account_id: platformAccountId, item_id: itemId }, form) as {
+        buildEditPayload(
+          { platform_account_id: platformAccountId, item_id: itemId },
+          form,
+        ) as {
           platform_account_id: number;
           item_id: string;
-          group_id?: number | null;
           ai_title?: string | null;
           ai_selling_point?: string | null;
         },
@@ -185,6 +164,8 @@ export function ProductEditModal({
 
   return (
     <Modal
+      // 2026-10-05：`centered` 提到 `open` 之前（全站弹窗统一形态）。
+      centered
       open={open}
       title={`编辑商品${item?.title ? ` · ${item.title}` : ""}`}
       onCancel={onClose}
@@ -193,7 +174,6 @@ export function ProductEditModal({
       okText="保存"
       cancelText="取消"
       width="75vw"
-      centered
       destroyOnClose
     >
       <Tabs
@@ -235,30 +215,8 @@ export function ProductEditModal({
                 </>
               ) : null}
 
-              {entry.key === "group" ? (
-                <Space direction="vertical" style={{ width: "100%" }}>
-                  <Text type="secondary">
-                    分组只影响本地台账的组织方式，**不影响平台商品**。
-                  </Text>
-                  <Radio.Group
-                    value={form.group_id === undefined ? undefined : form.group_id}
-                    onChange={(event) => setForm((prev) => ({ ...prev, group_id: event.target.value }))}
-                  >
-                    <Space direction="vertical">
-                      <Radio value={null}>移出分组</Radio>
-                      {groups.map((group) => (
-                        <Radio key={group.id} value={group.id}>
-                          {group.name}
-                          <Tag style={{ marginLeft: 8 }}>{group.product_count} 件</Tag>
-                        </Radio>
-                      ))}
-                    </Space>
-                  </Radio.Group>
-                  {groups.length === 0 && groupsLoaded ? (
-                    <Text type="secondary">还没有分组，先去商品列表建一个。</Text>
-                  ) : null}
-                </Space>
-              ) : null}
+              {/* ⚠️ 「分组」Tab 的分支已随分组功能退场（2026-10-05）。原分支
+                  （保留备查，勿恢复）：<Radio.Group value={form.group_id}>…</Radio.Group> */}
 
               {entry.key === "sku" ? (
                 <>
@@ -286,10 +244,8 @@ export function ProductEditModal({
           ),
         }))}
       />
-      {/* 未分组哨兵值与后端同值（0）—— 显式引用，避免魔法数字散落 */}
-      <Text type="secondary" style={{ display: "none" }}>
-        {UNGROUPED_SENTINEL}
-      </Text>
+      {/* ⚠️ 未分组哨兵值（`UNGROUPED_SENTINEL`）的隐式引用已随分组功能退场
+          （2026-10-05）—— 它当初存在的唯一理由是「避免魔法数字散落」。 */}
     </Modal>
   );
 }

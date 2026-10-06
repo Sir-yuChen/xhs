@@ -2792,7 +2792,7 @@ Tooltip 说明原因；后端同样拒绝。只改一头 = 「能点但被拒」
 > 用户原话：「商品同步更新需求为**同步全部状态的商品**和对应对应操作列的功能和商品列表的批量功能」。
 
 **真机只读调研**（2026-10-02，CDP + 项目自己的 ark 会话，账号 8 观隅好物；见
-`.workbuddy/tmp/research_20261002_qianfan_ops.md`）：
+`.hermes/tmp/research_20261002_qianfan_ops.md`）：
 
 - 平台商品列表有 **8 个状态 tab**：全部 / 售卖中 / 已下架 / 已冻结 / 整改 / 审核中 / 审核驳回 /
   审核通过 —— 与 `apis.xhs_qianfan_apis.QIANFAN_ITEM_STATUSES`（7 值 + 全部）**逐字吻合**。
@@ -3654,7 +3654,7 @@ shop_products ──❌── aigc_media_assets
 | `tsc --noEmit` | **0 error** |
 | `vite build` | 通过（产物含「指标监控」页签与面板全部文案） |
 | 接线守卫 | **+7**（`test_page_optimizations.py`）⇒ 该文件 **167 passed** |
-| 变异验证 | 见 `.workbuddy/scripts/mutate_verify_metrics_dashboard.py` |
+| 变异验证 | 见 `.hermes/scripts/mutate_verify_metrics_dashboard.py` |
 | 页面文件数 | 31 → **32**（新增 `metrics-dashboard-panel.tsx`） |
 | 端点 / 表 | **零变化**（复用切片 1/2 的 4 个端点，**刻意不新增**） |
 

@@ -752,7 +752,19 @@ def test_cleanup_handler_uses_its_own_session_and_default_retention(queue_env, d
 # 6) 种子与注册表（随包初始化任务）
 # --------------------------------------------------------------------------- #
 def test_cleanup_job_is_seeded_as_daily_cron_at_seven():
-    """初始化任务：`system.queue_record_cleanup` 每天 07:00、cron、active、内置。"""
+    """初始化任务：`system.queue_record_cleanup` 每天 07:00、cron、active、内置。
+
+    ⚠️ **2026-10-05 用户口径取代了两条旧断言**（原句保留在下方 docstring）：
+    「将队列清理任务改造升级为公共的清理记录表任务 `system.queue_record_cleanup`……
+    优化定时任务支持携带参数，将清理记录表任务、记录表保留时间设置为任务携带的参数，
+    每次执行任务时可修改，默认记录表保留最新 15 天」。
+
+    * 中文名 `队列记录清理` → **`清理记录表`**（2026-09-25 那条「名改为队列记录清理」
+      的口径**被本次取代**：任务范围从「队列记录」扩到「所有指定记录表」）；
+    * `params_editable == ()` → **`("retention_days",)`**（2026-09-27 的
+      「保留期是固定口径，不做成可调项，可调会让『能翻多久的历史』每人不同」
+      **被本次取代**：用户明确要求做成任务参数、每次执行可改）。
+    """
     from backend.app.core.initial_data import load_initial_scheduled_jobs
     from backend.app.services.job_registry import job_registry
 
@@ -761,18 +773,18 @@ def test_cleanup_job_is_seeded_as_daily_cron_at_seven():
     assert spec.user_scoped is True, "执行函数收 user_id 并只清行主本人的记录"
     assert spec.default_trigger_type == "cron"
     assert spec.default_cron == "0 0 7 * * *", "每天 7 点（6 位 cron：秒 分 时 日 月 周）"
-    assert spec.params_editable == (), "保留期是固定口径，不做成可调项"
-    # 2026-09-25 用户口径「任务名称修改为队列记录清理」：中文名是任务中心显示的
-    # 那一列（前端不存映射表），键与名必须一起改（迁移 `c2d3e4f5a6b7` 改存量行）。
-    assert spec.name == "队列记录清理"
+    assert spec.params_editable == ("retention_days",), "保留期是任务参数，建 / 改都可配"
+    assert spec.name == "清理记录表"
 
     seeded = {row["job_key"]: row for row in load_initial_scheduled_jobs()}
     row = seeded["system.queue_record_cleanup"]
-    assert row["name"] == "队列记录清理", "种子行的中文名与键同步改（唯一真相源是 config JSON）"
+    assert row["name"] == "清理记录表", "种子行的中文名与键同步改（唯一真相源是 config JSON）"
     assert row["trigger_type"] == "cron"
     assert row["cron_expression"] == "0 0 7 * * *"
     assert row["status"] == "active"
-    assert row["params"] == {}
+    # 默认保留期随种子显式下发（用户口径「默认记录表保留最新 15 天」）——
+    # 缺它时执行侧会退同一默认值，但界面上就看不到「当前是几天」。
+    assert row["params"] == {"retention_days": 15}
 
 
 def test_queue_registry_drives_the_records_page():

@@ -1,4 +1,4 @@
-"""存量话题标记修复脚本的回归（`.workbuddy/scripts/merge_legacy_topic_markers.py`）。
+"""存量话题标记修复脚本的回归（`.hermes/scripts/merge_legacy_topic_markers.py`）。
 
 守什么：**清洗是「修复」而不是「删除」**。老脚本只摘正文不补关系，跑完那 64 篇
 零关系的笔记会变成「本地无话题」—— 而平台正文里 `#名字[话题]#` 本身就是平台的
@@ -9,7 +9,7 @@
 3. **幂等**：跑第二遍零改动（防误重跑造成二次破坏）；
 4. dry-run 一个字节都不写。
 
-脚本是 `.workbuddy/scripts/` 下的运维件（不入生产包），故用 importlib 从文件加载，
+脚本是 `.hermes/scripts/` 下的运维件（不入生产包），故用 importlib 从文件加载，
 再拿公共夹具 `db_factory` 的测试库直接调它的 `repair(db, apply=…)`。
 """
 
@@ -25,7 +25,7 @@ from backend.app.models import Note, NoteTopic, PlatformAccount, Topic, User
 
 SCRIPT = (
     pathlib.Path(__file__).resolve().parents[2]
-    / ".workbuddy"
+    / ".hermes"
     / "scripts"
     / "merge_legacy_topic_markers.py"
 )

@@ -15,39 +15,16 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { crawlXhsDataStream, fetchAccounts } from "../../../lib/api";
+import {
+  DISTANCE_OPTIONS as distanceOptions,
+  NOTE_RANGE_OPTIONS as noteRangeOptions,
+  NOTE_TIME_OPTIONS as noteTimeOptions,
+  NOTE_TYPE_OPTIONS as noteTypeOptions,
+  SORT_OPTIONS as sortOptions,
+} from "../../../lib/xhs-search-options";
 import type { PlatformAccount, XhsDataCrawlItem, XhsDataCrawlMode } from "../../../types";
 
 const { Title, Text } = Typography;
-
-const sortOptions = [
-  { value: 0, label: "综合排序" },
-  { value: 1, label: "最新" },
-  { value: 2, label: "最多点赞" },
-  { value: 3, label: "最多评论" },
-  { value: 4, label: "最多收藏" },
-];
-const noteTypeOptions = [
-  { value: 0, label: "不限类型" },
-  { value: 1, label: "视频笔记" },
-  { value: 2, label: "普通笔记" },
-];
-const noteTimeOptions = [
-  { value: 0, label: "不限时间" },
-  { value: 1, label: "一天内" },
-  { value: 2, label: "一周内" },
-  { value: 3, label: "半年内" },
-];
-const noteRangeOptions = [
-  { value: 0, label: "不限范围" },
-  { value: 1, label: "已看过" },
-  { value: 2, label: "未看过" },
-  { value: 3, label: "已关注" },
-];
-const distanceOptions = [
-  { value: 0, label: "不限距离" },
-  { value: 1, label: "同城" },
-  { value: 2, label: "附近" },
-];
 
 function splitUrls(value: string): string[] {
   return value.split(/\r?\n|,/).map((url) => url.trim()).filter(Boolean);
@@ -160,7 +137,13 @@ function exportRowsToExcel(items: XhsDataCrawlItem[]) {
   window.URL.revokeObjectURL(url);
 }
 
-export function XhsCrawlerPage() {
+/**
+ * 「批量抓取」**面板**（设计 21 切片 B，2026-10-04：原 `crawler-page.tsx` 独立页面，
+ * 现为「笔记发现 → 批量抓取」页签的内容）。
+ *
+ * 只渲染内容，**不含页头**（页头由容器 `discovery-page.tsx` 统一提供）。
+ */
+export function BulkCrawlPanel() {
   const [accounts, setAccounts] = useState<PlatformAccount[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState<number | null>(null);
   const [mode, setMode] = useState<XhsDataCrawlMode>("note_urls");
@@ -243,11 +226,7 @@ export function XhsCrawlerPage() {
 
   return (
     <div>
-      <Row justify="space-between" align="middle" style={{ marginBottom: 24 }}>
-        <Col>
-          <Title level={4} style={{ margin: 0 }}>数据抓取</Title>
-          <Text type="secondary">搜索结果、笔记详情和评论抓取，失败项单独标注并可导出 Excel</Text>
-        </Col>
+      <Row justify="end" align="middle" style={{ marginBottom: 16 }}>
         <Col>
           <Button icon={<ReloadOutlined />} onClick={loadAccounts} loading={isLoadingAccounts}>刷新账号</Button>
         </Col>

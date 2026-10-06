@@ -63,7 +63,7 @@ class XhsCreatorApiAdapter:
         """Delete one published note via the Creator note-manager (write, irreversible).
 
         Two platform calls, in order — both measured on the live creator center
-        (``.workbuddy/note-delete-chain.md``):
+        (``.hermes/note-delete-chain.md``):
 
         1. ``POST .../permission/validate?note_id=<id>&function_type=delete``
            (empty body) — the gate the page fires when the delete button is

@@ -76,6 +76,41 @@ export function skuCell(value: number | null | undefined): string {
 }
 
 /**
+ * 商品状态 tag 的颜色 —— **按状态键**，不是按「能不能买」（2026-10-06 修）。
+ *
+ * ⚠️ 原实现是 `<Tag color={item.buyable ? "green" : "default"}>{item.status_label}</Tag>`
+ * —— **颜色取 `buyable`、文案取 `status_label`**，两个可以互相矛盾的字段：
+ * 上架后（`_refresh_local_status` 漏刷 `buyable` 的那些行）文案已是「售卖中」而
+ * `buyable` 还是 false ⇒ **灰色「售卖中」**；反之已下架但 `buyable` 仍 true 的行
+ * ⇒ **绿色「已下架」**。用户 2026-10-06 实测报告的原话就是这两个症状。
+ *
+ * 判据与上色**必须同一个字段**（单一真相源）：这里按 `status_key`（后端下发的
+ * 状态筛选键，与 `STATUS_OPTIONS` / `QIANFAN_ITEM_STATUSES` 同一词汇表）取色，
+ * 文案 `status_label` 也由同一个键派生 ⇒ 不可能再打架。
+ *
+ * ⚠️ 未知键给 `default`（灰）—— 缺值口径：不知道是什么状态就别用颜色暗示。
+ * 取色偏「一眼可辨」而不是好看：在售绿、下架灰、异常（冻结/驳回/整改）红、待审橙。
+ */
+export function statusTagColor(statusKey: string): string {
+  switch (statusKey) {
+    case "on_shelf":
+      return "green";
+    case "off_shelf":
+      return "default";
+    case "audit_passed":
+      return "cyan";
+    case "auditing":
+      return "orange";
+    case "audit_rejected":
+    case "rectify":
+    case "frozen":
+      return "red";
+    default:
+      return "default";
+  }
+}
+
+/**
  * 挂链笔记数筛选的比较符（v1.34，用户口径「商品列表搜索条件添加挂链笔记数，
  * **默认小于指定篇数**」）。
  *
@@ -337,9 +372,69 @@ export function batchDeleteBlock(keys: readonly (string | number)[] | undefined)
  */
 export function batchDeleteHint(count: number): string {
   return (
-    `将从本地台账删除 ${count} 个商品行。\n\n` +
-    "① 这些商品的笔记↔商品关联关系一并删除（笔记本身不受影响，商品被同步写回后需重新解析挂载）；\n" +
-    "② 平台侧仍有这些商品，下次「同步商品」会把它们重新写回台账。"
+    `将从本地台账删除 ${count} 个商品行。\n` +
+    "笔记↔商品关联关系一并删除（笔记不受影响）；平台侧商品仍在，下次「同步商品」会重新写回台账。"
   );
 }
 
+
+// --------------------------------------------------------------------------- #
+// 批量**商品操作**（上架 / 下架 / 删除平台商品；2026-10-05 需求 7/8）
+//
+// ⚠️ 与上面的「批量删除**台账行**」是**两件不同的事**，判据与文案都不得共用：
+//   * 台账行删除 = 零平台请求，删错下次同步会回来；
+//   * 商品操作   = **真实写平台**，下架影响在售、删除不可恢复。
+// 同名会让用户在两者之间点错（本文件把两者的名称与提示都写死，页面直接取用）。
+// --------------------------------------------------------------------------- #
+
+/**
+ * 商品操作单次上限。**必须与后端 `qianfan.MAX_OPERATE_ITEMS` /
+ * `shop_item_operate_service.MAX_ITEMS_PER_TASK` 逐个相等**
+ * （`test_page_optimizations.py` 直接读本文件比对两侧真值）。
+ */
+export const MAX_OPERATE_ITEMS = 200;
+
+/** 三个动作的中文名（**唯一来源**：确认框、按钮、结果弹窗都取它）。 */
+export const OPERATE_LABELS: Record<string, string> = {
+  on_shelf: "上架",
+  off_shelf: "下架",
+  delete: "删除",
+};
+
+/** `batchOperateBlock` 的判据：`""` = 可以发；否则是不让发的原因。 */
+export type BatchOperateBlock = "" | "empty" | "too_many";
+
+/** 能不能发批量商品操作（三种取值各有出口，与 `batchDeleteBlock` 同型）。 */
+export function batchOperateBlock(
+  keys: readonly (string | number)[] | undefined
+): BatchOperateBlock {
+  const ids = normalizeDeleteIds(keys);
+  if (!ids.length) {
+    return "empty";
+  }
+  if (ids.length > MAX_OPERATE_ITEMS) {
+    return "too_many";
+  }
+  return "";
+}
+
+/**
+ * 批量商品操作的确认框正文 —— **必须写清这是不可撤回的平台写操作**。
+ *
+ * ⚠️ 与 `batchDeleteHint`（台账行）刻意不同：那边说「下次同步会写回来」，
+ * 这边**恰恰相反**，说「平台侧真的改了、本地台账要等同步才对账」。
+ * 两句搞反 = 用户在最危险的操作上得到最放松的心理预期。
+ *
+ * 删除额外多一句「不可恢复」—— 平台侧商品删除没有撤销入口。
+ */
+export function batchOperateHint(action: string, count: number): string {
+  const label = OPERATE_LABELS[action] || action;
+  const lines = [
+    `将对 ${count} 个平台商品执行「${label}」—— 会真实修改千帆店铺，不是只改本地台账。`,
+    "不支持的商品只记录、不执行；本地状态即时刷新，最终以平台为准。",
+  ];
+  if (action === "delete") {
+    lines.push("⚠️ 删除不可恢复，请确认。");
+  }
+  return lines.join("\n");
+}

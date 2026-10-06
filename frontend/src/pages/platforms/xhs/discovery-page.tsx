@@ -13,21 +13,23 @@ import {
   SearchOutlined,
   StarOutlined,
 } from "@ant-design/icons";
-import { Alert, Badge, Button, Card, Col, Descriptions, Drawer, Empty, Input, Row, Select, Space, Spin, Tag, Typography } from "antd";
+import { Alert, Badge, Button, Card, Col, Descriptions, Drawer, Empty, Input, Row, Select, Space, Spin, Tabs, Tag, Typography } from "antd";
 import { FormEvent, MouseEvent, useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 
 import { fetchAccounts, fetchSavedNoteIds, fetchXhsNoteComments, fetchXhsNoteDetail, saveXhsNotesToLibrary, searchXhsNotes } from "../../../lib/api";
 import { useThemePalette } from "../../../app/providers";
+import { BulkCrawlPanel } from "./bulk-crawl-panel";
+import {
+  DISTANCE_OPTIONS as distanceOptions,
+  NOTE_RANGE_OPTIONS as noteRangeOptions,
+  NOTE_TIME_OPTIONS as noteTimeOptions,
+  NOTE_TYPE_OPTIONS as noteTypeOptions,
+  SORT_OPTIONS as sortOptions,
+} from "../../../lib/xhs-search-options";
 import type { NoteComment, PlatformAccount, XhsSearchNote, XhsSearchOptions } from "../../../types";
 
 const { Title, Text, Paragraph } = Typography;
-
-const sortOptions = [{ value: 0, label: "综合排序" }, { value: 1, label: "最新" }, { value: 2, label: "最多点赞" }, { value: 3, label: "最多评论" }, { value: 4, label: "最多收藏" }];
-const noteTypeOptions = [{ value: 0, label: "不限类型" }, { value: 1, label: "视频笔记" }, { value: 2, label: "普通笔记" }];
-const noteTimeOptions = [{ value: 0, label: "不限时间" }, { value: 1, label: "一天内" }, { value: 2, label: "一周内" }, { value: 3, label: "半年内" }];
-const noteRangeOptions = [{ value: 0, label: "不限范围" }, { value: 1, label: "已看过" }, { value: 2, label: "未看过" }, { value: 3, label: "已关注" }];
-const distanceOptions = [{ value: 0, label: "不限距离" }, { value: 1, label: "同城" }, { value: 2, label: "附近" }];
 
 function formatMetric(value: number): string {
   if (value >= 10000) return `${(value / 10000).toFixed(value >= 100000 ? 0 : 1)}w`;
@@ -71,7 +73,7 @@ function getNoteKindLabel(note: XhsSearchNote): "视频" | "图文" {
 }
 function stopCardClick(e: MouseEvent<HTMLElement>) { e.stopPropagation(); }
 
-export function XhsDiscoveryPage() {
+function SearchPanel() {
   const p = useThemePalette();
   const [accounts, setAccounts] = useState<PlatformAccount[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState<number | null>(null);
@@ -198,12 +200,13 @@ export function XhsDiscoveryPage() {
 
   return (
     <div>
-      <Row justify="space-between" align="middle" style={{ marginBottom: 24 }}>
-        <Col><Title level={4} style={{ margin: 0 }}>笔记发现</Title><Text type="secondary">按关键词或链接查找笔记，查看详情、评论和原文，保存到内容库</Text></Col>
-        <Col><Button icon={<ReloadOutlined />} onClick={loadAccounts} loading={isLoadingAccounts}>刷新账号</Button></Col>
-      </Row>
-
-      <Card style={{ marginBottom: 24 }}>
+      {/* 2026-10-05 用户口径「移除所有页面页面头」：原「笔记发现 + 一句描述 + 刷新账号」
+          整块移除，「刷新账号」收进下方搜索卡右上角。 */}
+      <Card
+        style={{ marginBottom: 24 }}
+        title="笔记发现"
+        extra={<Button icon={<ReloadOutlined />} onClick={loadAccounts} loading={isLoadingAccounts}>刷新账号</Button>}
+      >
         <form onSubmit={(e) => { e.preventDefault(); void runSearch(1, false); }}>
           <Row gutter={[12, 12]}>
             <Col span={6}><div style={{ marginBottom: 4 }}><Text type="secondary" style={{ fontSize: 12 }}>搜索账号</Text></div><Select value={selectedAccountId} onChange={setSelectedAccountId} placeholder="选择 PC 账号" style={{ width: "100%" }} options={pcAccountOptions} /></Col>
@@ -372,6 +375,47 @@ export function XhsDiscoveryPage() {
           </div>
         )}
       </Drawer>
+    </div>
+  );
+}
+
+/**
+ * 笔记发现**容器页**（设计 21 切片 B，2026-10-04）。
+ *
+ * 用户口径：「数据抓取」与「笔记发现」是同一件事（搜/抓小红书笔记 → 落库），
+ * 合并为一页两 Tab；菜单只留「笔记发现」一项，旧 `/crawler` 路由重定向到
+ * `?tab=crawl`（深链不死）。tab 态进 URL query（沿用 §36 笔记工坊范式）。
+ *
+ * ⚠️ 两个 Tab 的面板各自保留自己的状态（`Tabs` 默认保活），不共用一套 state ——
+ * 「搜索发现」是逐页搜索 + 单条入库，「批量抓取」是 SSE 流式批量 + 导出 Excel，
+ * 两者数据形状与交互都不同，硬塞一份 state 只会互相干扰。
+ */
+const DISCOVERY_TABS = ["search", "crawl"] as const;
+type DiscoveryTab = (typeof DISCOVERY_TABS)[number];
+
+function normalizeDiscoveryTab(value: string | null): DiscoveryTab {
+  const key = (value ?? "").trim();
+  return (DISCOVERY_TABS as readonly string[]).includes(key) ? (key as DiscoveryTab) : "search";
+}
+
+export function XhsDiscoveryPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeTab = normalizeDiscoveryTab(searchParams.get("tab"));
+
+  return (
+    <div>
+      <Tabs
+        activeKey={activeTab}
+        onChange={(key) => {
+          const next = new URLSearchParams(searchParams);
+          next.set("tab", key);
+          setSearchParams(next, { replace: true });
+        }}
+        items={[
+          { key: "search", label: "搜索发现", children: <SearchPanel /> },
+          { key: "crawl", label: "批量抓取", children: <BulkCrawlPanel /> },
+        ]}
+      />
     </div>
   );
 }

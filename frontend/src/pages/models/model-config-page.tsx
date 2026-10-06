@@ -1,9 +1,8 @@
 import { ReloadOutlined } from "@ant-design/icons";
-import { App, Card, Cascader, Space, Spin, Table, Tag, Typography } from "antd";
+import { App, Button, Card, Cascader, Space, Spin, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { PageHeader } from "../../components/layout/app-shell";
 import {
   buildModelOptions,
   buildProviderOptions,
@@ -389,15 +388,17 @@ export function ModelConfigPage() {
 
   return (
     <>
-      <PageHeader
-        eyebrow="Model Routing"
+      {/* 2026-10-05 用户口径「移除所有页面页面头」：原「Model Routing / 模型配置 /
+          一句话说明」三行整块移除；刷新图标收进下方服务商表卡片右上角。 */}
+
+      <Card
         title="模型配置"
-        description="为小红书各业务点选择服务商；选中即生效，无需保存。"
-        action={
-          <ReloadOutlined onClick={() => void load()} style={{ cursor: "pointer" }} />
+        extra={
+          <Button size="small" icon={<ReloadOutlined />} loading={isLoading} onClick={() => void load()}>
+            刷新
+          </Button>
         }
-      />
-      <Card>
+      >
         <Table
           rowKey="_key"
           loading={isLoading}

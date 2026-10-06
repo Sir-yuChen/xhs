@@ -2636,8 +2636,14 @@ def test_migration_c2d3e4f5a6b7_renames_cleanup_job(tmp_path):
     ).get_current_head()
     assert version == expected_head, "迁移链前进到新 head"
     # ① 旧键行改名（不新增行 —— 一任务两行会让种子再补一份、清理跑两遍）
+    # ⚠️ 中文名断言的是 **head 时刻的最终值**：本迁移（2026-09-25）把名字改成
+    #    「队列记录清理」后，2026-10-05 的 `d2e3f4a5b6c7` 又改成了「清理记录表」
+    #    （任务范围从「队列记录」扩到「所有指定记录表」，用户口径）。
+    #    夹具从 `b2c3d4e5f6g7` 跑到 head，所以看到的是后者 —— 写死中间态会让这条
+    #    用例在每次改名时红一次，而它真正要钉的是「旧键行了被改名 + 没多出一行」。
+    #    原句：`assert jobs == [(1, "队列记录清理", ...), (2, "账号笔记同步", ...)]`
     assert jobs == [
-        (1, "队列记录清理", "system.queue_record_cleanup"),
+        (1, "清理记录表", "system.queue_record_cleanup"),
         (2, "账号笔记同步", "system.note_sync"),
     ]
     # ② 历史日志快照跟着改（任务中心按 job_key 筛选，劈成两半历史就查不到）

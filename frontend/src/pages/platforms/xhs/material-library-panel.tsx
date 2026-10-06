@@ -493,6 +493,7 @@ export function MaterialLibraryPanel({
    */
   function handleDeleteFile(file: MaterialFile) {
     modal.confirm({
+      centered: true,
       title: "删除素材文件",
       content: (
         <div>
@@ -510,7 +511,6 @@ export function MaterialLibraryPanel({
       okText: "删除",
       okButtonProps: { danger: true },
       cancelText: "取消",
-      centered: true,
       onOk: async () => {
         try {
           await deleteMaterialFile(file.id);
@@ -535,6 +535,7 @@ export function MaterialLibraryPanel({
     const names = files.filter((f) => selectedIds.includes(f.id)).map((f) => f.filename);
     const shown = names.slice(0, 5);
     modal.confirm({
+      centered: true,
       title: `批量删除 ${selectedIds.length} 个素材文件`,
       content: (
         <div>
@@ -559,7 +560,6 @@ export function MaterialLibraryPanel({
       okText: "全部删除",
       okButtonProps: { danger: true },
       cancelText: "取消",
-      centered: true,
       onOk: async () => {
         try {
           const result = await deleteMaterialFilesBatch(selectedIds);
@@ -1079,6 +1079,9 @@ export function MaterialLibraryPanel({
           ② 越界**不循环**（按到头就停 —— 循环会让人以为「又回到第一张」是 bug）；
           ③ 键盘左右键也切（用户看大图时手在键盘上，逼他移回鼠标点箭头是无谓的负担）。 */}
       <Modal
+        // 2026-10-05：`centered` 提到 `open` 之前 —— 与全站其余弹窗同一书写形态
+        // （antd 解构 props，顺序无语义影响；统一是为了「全站弹窗一律居中」可被静态锚点验到）。
+        centered
         open={previewIndex !== null}
         title={
           previewIndex !== null && files[previewIndex]
@@ -1087,7 +1090,6 @@ export function MaterialLibraryPanel({
         }
         footer={null}
         width="85vw"
-        centered
         onCancel={() => setPreviewIndex(null)}
         styles={{ body: { textAlign: "center", position: "relative" } }}
       >

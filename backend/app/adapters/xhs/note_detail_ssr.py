@@ -7,7 +7,7 @@
 每篇都要先 `refresh_www_detail_tokens` 翻完整个 `user_posted`（1951 条 ÷ 30/页 ≈ 66 页，
 页间停顿 5s × 抖动 ⇒ **5–8 分钟/篇**，批量 N 篇 = N 次全表扫描）。
 
-真机对照（真实窗口 Chrome + CDP 抓包，探针 `.workbuddy/scripts/probe_note_detail_by_id.py`）：
+真机对照（真实窗口 Chrome + CDP 抓包，探针 `.hermes/scripts/probe_note_detail_by_id.py`）：
 
 | 访问方式 | 结果 |
 |---|---|

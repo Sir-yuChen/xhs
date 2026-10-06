@@ -1516,6 +1516,7 @@ def cleanup_records(
     *,
     user_id: int,
     retention_days: int = DEFAULT_RETENTION_DAYS,
+    cutoff: Optional[datetime] = None,
 ) -> dict:
     """删掉本用户**超过保留期**的终态队列详情记录（`QUEUE_RECORD_TYPES`）。
 
@@ -1538,7 +1539,8 @@ def cleanup_records(
     返回 `{"retention_days": n, "cutoff": iso, "items": n, "batches": n,
     "account_tasks": n}`。
     """
-    cutoff = shanghai_now() - timedelta(days=int(retention_days))
+    if cutoff is None:
+        cutoff = shanghai_now() - timedelta(days=int(retention_days))
     # 类型**从注册表派生**（不写死两个）：新队列上线时清理范围自动跟上。
     item_types = tuple(spec.item_task_type for spec in QUEUE_REGISTRY)
     batch_types = tuple(spec.batch_task_type for spec in QUEUE_REGISTRY)

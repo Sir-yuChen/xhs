@@ -42,6 +42,7 @@ import {
   syncAccountNotesStatus,
   syncGoodsNotes,
   syncGoodsNotesStatus,
+  readErrorDetail,
   syncShopGoods,
   syncShopGoodsStatus,
 } from "../../../lib/api";
@@ -123,16 +124,11 @@ interface SyncChannel {
   formatResult: (result: XhsSyncLastResult | null, unit: string) => string;
 }
 
-/** 把后端的失败详情转成可读文案（卡片内展示，不弹全局提示）。 */
-function readErrorDetail(error: unknown): string {
-  const detail = (error as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
-  if (typeof detail === "string") return detail;
-  if (detail && typeof detail === "object") {
-    const shaped = detail as { message?: string; platform_message?: string };
-    return shaped.message || shaped.platform_message || "同步失败";
-  }
-  return (error as Error)?.message || "同步失败";
-}
+/*
+ * ⚠️ 私有实现 `readErrorDetail` **已移入 `lib/api.ts`**（2026-10-05）：商品台账页也要
+ * 同一句话（需求 5：两个入口一套逻辑）⇒ 一份实现、两处 import（DEF-044）。
+ * 本文件改为从 `lib/api` import 它，行为逐字不变（默认兜底仍传「同步失败」）。
+ */
 
 export function XhsAccountsPage() {
   const p = useThemePalette();
@@ -633,7 +629,11 @@ export function XhsAccountsPage() {
   }
 
   async function handleDelete(account: PlatformAccount) {
+    // ⚠️ `centered: true` 必须**逐点显式传**：`Modal.confirm` 走的是静态方法分支
+    //（`modal/confirm.js` 自建 ConfirmDialog），`ConfigProvider modal={{centered:true}}`
+    //（`providers.tsx` 里给的是 ConfigContext）**到不了它** ⇒ 不传就还是顶部对齐。
     Modal.confirm({
+      centered: true,
       title: "删除账号",
       content: `删除账号「${account.nickname || account.external_user_id || account.id}」？本地保存的账号 Cookie 也会移除。`,
       okText: "确认删除",

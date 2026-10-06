@@ -3,10 +3,12 @@ import { message } from "antd";
 
 import type { CleanResultShape } from "./task-records";
 import type {
+  ShopItemOperateAction,
+  ShopItemOperateResult,
+  ShopItemsSyncResult,
   XhsItemEditPayload,
   XhsItemEditResult,
   XhsItemPolishResult,
-  XhsProductGroup,
 } from "../types";
 import type {
   AuthPayload,
@@ -208,6 +210,26 @@ export function detailMessage(detail: unknown): string {
     }
   }
   return "";
+}
+
+/**
+ * 把一次请求失败转成**可读文案**（页面内展示用，不弹全局 toast）。
+ *
+ * ⚠️ 单独抽出来是因为它此前在 `accounts-page.tsx` 里**私有实现了一份**
+ * （只服务那一个页面），而「商品台账」页也要同一句话（需求 5：两个入口同一套逻辑）
+ * ⇒ 若各写一份，两边对「后端给了什么原因」的解读迟早分叉（DEF-044）。
+ * 现在这份是唯一实现，`accounts-page` 也已改为 import 它。
+ *
+ * 三级兜底：后端 detail（字符串 / 对象里的 message / platform_message）→
+ * 原生 `Error.message` → `fallback`。
+ */
+export function readErrorDetail(error: unknown, fallback = "操作失败"): string {
+  const detail = detailMessage(
+    (error as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
+  );
+  if (detail) return detail;
+  const message = (error as Error)?.message;
+  return typeof message === "string" && message.trim() ? message.trim() : fallback;
 }
 
 http.interceptors.response.use(
@@ -1410,6 +1432,12 @@ export interface NoTrafficQuery {
 export interface NoTrafficCandidatesResult {
   candidates: NoTrafficCandidate[];
   total: number;
+  /** 实际采用的页码（越界请求会回落成最后一页）。 */
+  page: number;
+  /** 总页数（按 `total` / `page_size` 算，后端给）。 */
+  page_count: number;
+  /** 实际采用的每页条数。 */
+  page_size: number;
   thresholds: NoTrafficThresholds;
   query: NoTrafficQuery;
   coverage: { synced_notes: number; pool_total: number; reason: string };
@@ -1419,11 +1447,14 @@ export async function fetchNoTrafficCandidates(
   accountId: number,
   thresholds: NoTrafficThresholds,
   query: NoTrafficQuery,
-  limit = 50
+  page = 1,
+  pageSize = 50
 ): Promise<NoTrafficCandidatesResult> {
+  // 分页（2026-10-05）：`page` 从 1 起；后端回显实际页码（越界回落末页）
+  // 与 `page_count`，前端按回显值对齐分页器 —— 不自己算第二份。
   const response = await http.post<NoTrafficCandidatesResult>(
     "/xhs/pc/users/no-traffic/candidates",
-    { account_id: accountId, thresholds, query, limit }
+    { account_id: accountId, thresholds, query, limit: pageSize, page }
   );
   return response.data;
 }
@@ -1432,11 +1463,20 @@ export async function startNoTrafficCleanup(
   accountId: number,
   thresholds: NoTrafficThresholds,
   query: NoTrafficQuery,
-  batchLimit = 20
+  batchLimit = 20,
+  noteIds: string[] = []
 ): Promise<{ task_id: number; status: string }> {
+  // `noteIds` 非空 = **清理指定笔记**（列表勾选）；空 = **清理全部候选**
+  // （上限 `batch_limit`）。两条入口后端共用同一条执行链，差别只在候选集。
   const response = await http.post<{ task_id: number; status: string }>(
     "/xhs/pc/users/no-traffic/cleanup",
-    { account_id: accountId, thresholds, query, batch_limit: batchLimit }
+    {
+      account_id: accountId,
+      thresholds,
+      query,
+      batch_limit: batchLimit,
+      ...(noteIds.length ? { note_ids: noteIds } : {}),
+    }
   );
   return response.data;
 }
@@ -1451,6 +1491,12 @@ export interface NoTrafficCleanupStatus {
   total: number;
   note: string;
   details: { note_id: string; ok: boolean; reason?: string }[];
+  /** 清理**前**候选池总条数（未开跑时为 null）。 */
+  before_total?: number | null;
+  /** 清理**后**候选池总条数（重算，不是 `before - deleted` 估算）。 */
+  after_total?: number | null;
+  /** 勾选了但已不在候选池的笔记（改过阈值 / 已被删）—— 不删、如实报。 */
+  not_in_pool?: string[];
 }
 
 export async function fetchNoTrafficCleanupStatus(
@@ -1458,6 +1504,78 @@ export async function fetchNoTrafficCleanupStatus(
 ): Promise<NoTrafficCleanupStatus> {
   const response = await http.get<NoTrafficCleanupStatus>(
     `/xhs/pc/users/no-traffic/cleanup/${taskId}`
+  );
+  return response.data;
+}
+
+/** 该账号此刻是否有清理在跑（「正在清理无流量笔记」按钮态的数据源）。 */
+export interface NoTrafficCleanupActive {
+  running: boolean;
+  task_id: number | null;
+  log_id: number | null;
+  status: string;
+}
+
+export async function fetchNoTrafficCleanupActive(
+  accountId: number
+): Promise<NoTrafficCleanupActive> {
+  const response = await http.get<NoTrafficCleanupActive>(
+    "/xhs/pc/users/no-traffic/cleanup/active",
+    { params: { account_id: accountId } }
+  );
+  return response.data;
+}
+
+/** 清理无流量笔记的**操作日志**一行（独立表 `no_traffic_cleanup_logs`）。 */
+export interface NoTrafficCleanupLogItem {
+  id: number;
+  account_id: number | null;
+  account_name: string;
+  task_id: number | null;
+  trigger_type: string;
+  thresholds: Record<string, unknown>;
+  query: Record<string, unknown>;
+  note_ids: string[];
+  batch_limit: number;
+  before_total: number;
+  after_total: number;
+  total: number;
+  deleted: number;
+  skipped: number;
+  failed: number;
+  not_in_pool: number;
+  status: string;
+  reason: string;
+  details: { note_id: string; ok: boolean; reason?: string }[];
+  created_at: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  duration_ms: number;
+}
+
+export interface NoTrafficCleanupLogPage {
+  total: number;
+  page: number;
+  limit: number;
+  page_count: number;
+  items: NoTrafficCleanupLogItem[];
+}
+
+/** 查清理日志（用户口径「查询清理无流量笔记日志详情按钮，弹窗列表展示」）。 */
+export async function fetchNoTrafficCleanupLogs(params: {
+  accountId?: number;
+  page?: number;
+  limit?: number;
+}): Promise<NoTrafficCleanupLogPage> {
+  const response = await http.get<NoTrafficCleanupLogPage>(
+    "/xhs/pc/users/no-traffic/cleanup-logs",
+    {
+      params: {
+        ...(params.accountId ? { account_id: params.accountId } : {}),
+        page: params.page ?? 1,
+        limit: params.limit ?? 20,
+      },
+    }
   );
   return response.data;
 }
@@ -1565,31 +1683,75 @@ export async function fetchXhsShopItemDetail(
 // 这里**不写**它们的方法（写了就是「看起来能改」的假能力）。
 // --------------------------------------------------------------------------- //
 
-/** 商品分组列表（**当前用户全部账号**；`product_count` 是跨账号聚合值）。 */
-export async function fetchProductGroups(): Promise<{ items: XhsProductGroup[] }> {
-  const response = await http.get<{ items: XhsProductGroup[] }>("/xhs/qianfan/product-groups");
-  return response.data;
-}
+// ⚠️ 商品分组 4 个请求函数（`fetchProductGroups` / `createProductGroup` /
+// `renameProductGroup` / `deleteProductGroup`）已随「彻底移除商品分组」退场
+// （2026-10-05）。后端对应路径保留为 **410 墓碑**（`PRODUCT_GROUPS_REMOVED`），
+// 前端不再有任何调用方 —— 留住这些函数就是留住一条会 410 的死路径。
 
-/** 建分组（重名 ⇒ 409，不静默覆盖）。 */
-export async function createProductGroup(name: string): Promise<XhsProductGroup> {
-  const response = await http.post<XhsProductGroup>("/xhs/qianfan/product-groups", { name });
-  return response.data;
-}
+// --------------------------------------------------------------------------- //
+// 商品操作（2026-10-05 需求 7/8，设计 20 §11）
+//
+// ⚠️ 与下面 `editShopItem`（改本地台账）**不是一回事**：
+// 这三个函数打的是**平台**（上下架 / 删除真商品），不可撤回。
+// --------------------------------------------------------------------------- //
 
-/** 改分组名（归属校验失败 ⇒ 404）。 */
-export async function renameProductGroup(groupId: number, name: string): Promise<XhsProductGroup> {
-  const response = await http.patch<XhsProductGroup>(`/xhs/qianfan/product-groups/${groupId}`, {
-    name,
+/**
+ * 同步**指定商品**到本地台账（需求 6）。
+ *
+ * ⚠️ 平台侧**没有**「按 item_id 拉商品」的读接口（真机调研：`search_item_v2` 只支持
+ * 整页 + 筛选，`get_skus_by_item_ids` 只回规格）。⇒ 后端实现是「把指定 id 作为过滤条件、
+ * 整店翻页扫描后**只落命中 id**」，所以**慢**（要翻完才能确认没命中）。
+ * 弹窗里如实标注这个代价，不假装是「精准单查」。
+ */
+export async function syncSpecifiedShopItems(
+  platformAccountId: number,
+  itemIds: string[],
+  /**
+   * 期间条件（`{scope:"full"}` 或 `{scope:"range", startDate, endDate}`）。
+   *
+   * ⚠️ 2026-10-06 合并「批量同步商品信息」后，同一个条件弹窗的区间对**按 ID 同步**
+   * 这条路也要生效（原来只认 ID，区间无处可传）。不传 = 后端按 `full` 处理。
+   */
+  options?: SyncNotesOptions,
+): Promise<ShopItemsSyncResult> {
+  const response = await http.post<ShopItemsSyncResult>("/xhs/qianfan/items/sync", {
+    platform_account_id: platformAccountId,
+    item_ids: itemIds,
+    ...(options?.scope ? { scope: options.scope } : {}),
+    ...(options?.startDate ? { start_date: options.startDate } : {}),
+    ...(options?.endDate ? { end_date: options.endDate } : {}),
   });
   return response.data;
 }
 
-/** 删分组（**商品一件不删**，只清 `group_id`；`released` = 解除了几件）。 */
-export async function deleteProductGroup(groupId: number): Promise<{ released: number }> {
-  const response = await http.delete<{ released: number }>(
-    `/xhs/qianfan/product-groups/${groupId}`
-  );
+/**
+ * 批量上架 / 下架 / 删除**平台商品**（需求 7；**真实写操作**）。
+ *
+ * 返回**任务回执**（`task_id`），不是执行结果 —— 逐条结果要拿 `task_id` 轮询
+ * {@link fetchShopItemOperateResult}（手动触发式任务，与「清理无流量笔记」同款）。
+ */
+export async function operateShopItems(
+  platformAccountId: number,
+  action: ShopItemOperateAction,
+  /**
+   * ⚠️ **必须显式传 id 清单**（不给默认值 = 不给「顺手操作整页」的机会）：
+   * 批量入口传勾选集、单行入口传 `[item.item_id]`。
+   * 曾把它写成「由调用方自行 memo 出 id 集」⇒ 单行按钮误走了批量处理器
+   * （见 `handleItemOperate` / `operateOneItem` 的注释）。
+   */
+  itemIds: string[],
+): Promise<ShopItemOperateResult> {
+  const response = await http.post<ShopItemOperateResult>("/xhs/qianfan/items/operate", {
+    platform_account_id: platformAccountId,
+    action,
+    item_ids: itemIds,
+  });
+  return response.data;
+}
+
+/** 商品操作任务的**逐条结果**（弹窗轮询；`items[]` 里每条的 `result` 三态）。 */
+export async function fetchShopItemOperateResult(taskId: number): Promise<ShopItemOperateResult> {
+  const response = await http.get<ShopItemOperateResult>(`/xhs/qianfan/items/operate/${taskId}`);
   return response.data;
 }
 
