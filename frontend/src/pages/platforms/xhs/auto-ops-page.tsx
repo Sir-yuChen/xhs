@@ -1,71 +1,21 @@
 /**
- * 自动运营宿主页（设计 22 §3，2026-10-06）—— 「自动运营」与「自动化工作流」合并入口。
+ * 自动运营页（设计 22 §3；2026-10-07 撤销「与自动化工作流合并」）。
  *
- * ## 为什么合并
+ * ## 变更史（不静默删除）
  *
- * 两者是**同一个心智**下的两层能力（用户口径「自动化运行和自动化工作流合并」）：
+ * 2026-10-06：本页曾是**宿主页**，把「自动运营」（单点动作）与「自动化工作流」
+ * （多节点编排链路）合并成两个 Tab，旧路由 `/workflows` 重定向到 `?tab=workflows`。
  *
- * - 「自动运营」= **单点动作**（采集 → AI 改写 → 生成草稿）；
- * - 「自动化工作流」= **多节点编排链路**（选题 → 生成 → 审核 → 发布 → 监控）。
+ * 2026-10-07：**用户口径「把工作流相关逻辑表等完整移除，直接使用定时任务完成即可」**
+ * ⇒ 「自动化工作流」整条特性退场（5 张表 + 引擎 + 节点 + 11 端点 + 该 Tab 的 panel 全删）。
+ * 只剩一个 Tab 时宿主与 Tab 机制本身就没有意义（一个 Tab 的分段控件是纯冗余），
+ * 故本页退回**直接渲染 `AutoOpsPanel`**，不再有 Tabs / URL tab 态 / 旧路由重定向。
  *
- * ## ⚠️ 只合前端口子，**不合并后端**
- *
- * 两套数据面完全不同（`auto_tasks` 表 vs `workflows` / `workflow_runs` / `workflow_nodes`），
- * 合并成一个端点会把「一个入口两套 UI」变成「一个端点两套分支」（DEF-044 反面）。
- * 所以本页只做**挂载**：两个 panel 各自独立成文件，宿主只加 Tab。
- *
- * tab 状态进 URL query（`?tab=ops|workflows`）：可分享、刷新保持；
- * 旧路由 `/workflows` 由 router 重定向到 `?tab=workflows`（深链不死）。
+ * ⚠️ `?tab=workflows` 深链**不保留兼容**：它指向的能力已不存在，静默落到「自动运营」
+ * 会让用户以为在看工作流。老书签落到本页只会看到自动运营（无报错），这是可接受的。
  */
-import { PartitionOutlined, ThunderboltOutlined } from "@ant-design/icons";
-import { Tabs } from "antd";
-import { useSearchParams } from "react-router-dom";
-
 import { AutoOpsPanel } from "./auto-ops-panel";
-import { WorkflowPanel } from "./workflow-page";
-
-const AUTO_OPS_TABS = ["ops", "workflows"] as const;
-type AutoOpsTab = (typeof AUTO_OPS_TABS)[number];
-
-function normalizeTab(value: string | null): AutoOpsTab {
-  const key = (value ?? "").trim();
-  return (AUTO_OPS_TABS as readonly string[]).includes(key) ? (key as AutoOpsTab) : "ops";
-}
 
 export function AutoOpsPage() {
-  const [searchParams, setSearchParams] = useSearchParams();
-  const activeTab = normalizeTab(searchParams.get("tab"));
-
-  return (
-    <Tabs
-      activeKey={activeTab}
-      onChange={(key) => {
-        const next = new URLSearchParams(searchParams);
-        next.set("tab", key);
-        setSearchParams(next, { replace: true });
-      }}
-      items={[
-        {
-          key: "ops",
-          label: (
-            <span>
-              <ThunderboltOutlined />
-              自动运营
-            </span>
-          ),
-          children: <AutoOpsPanel />,
-        },
-        {
-          key: "workflows",
-          label: (
-            <span>
-              <PartitionOutlined />
-              自动化工作流
-            </span>
-          ),
-          children: <WorkflowPanel />,
-        },
-      ]}
-    />
-  );
+  return <AutoOpsPanel />;
 }

@@ -48,13 +48,6 @@ from backend.app.models.shop_product import ShopProduct
 from backend.app.models.system_setting import SystemSetting
 from backend.app.models.task import Task
 from backend.app.models.user import User
-from backend.app.models.workflow import (
-    Workflow,
-    WorkflowNode,
-    WorkflowRun,
-    WorkflowRunLog,
-    WorkflowScheduledPublish,
-)
 
 __all__ = [
     "AccountCookieVersion",

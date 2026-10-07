@@ -6449,7 +6449,9 @@ def test_schedule_status_reports_scheduler_state_and_counts(tmp_path):
         assert payload["timezone"] == "Asia/Shanghai"
         assert payload["jobs"] == []
         # 注册播种 12 行（全 active）+ 本测试 2 行（1 active + 1 paused）
-        assert payload["stats"]["total"] == 15
+        # 2026-10-07：工作流退场使注册表少一项（已随 1e2e5ac 生效），但**每个用户**
+        # 播种的内置任务行仍为 16（`auto_ops.keyword_pipeline` 非 builtin 不播种）。
+        assert payload["stats"]["total"] == 16
         assert payload["stats"]["active"] == 14
         assert payload["stats"]["paused"] == 1
         assert payload["stats"]["completed"] == 0

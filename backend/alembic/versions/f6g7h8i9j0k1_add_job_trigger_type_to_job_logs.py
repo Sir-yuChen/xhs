@@ -26,14 +26,41 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    with op.batch_alter_table("scheduled_job_logs", schema=None) as batch_op:
-        batch_op.add_column(
-            sa.Column("job_trigger_type", sa.String(length=16), nullable=False, server_default="")
+    """加 `job_trigger_type` 列 + 索引。
+
+    ⚠️ **必须幂等**（2026-10-07 补；与 `j1k2l3m4n5o6` / `k2l3m4n5o6p7` / `c9d0e1f2a3b4`
+    ／`f2a3b4c5d6e7` 等同规制）：迁移用例与**真库**都有「表已由 `create_all()` 建好、
+    列已在、只是 revision 还没走到」的形态（本机真库就是：`scheduled_job_logs.job_trigger_type`
+    已存在，而 `alembic_version` 停在 `f4a5b6c7d8e9`）。无守卫 ⇒
+    `duplicate column name: job_trigger_type`，整个 `upgrade head` 当场失败
+    —— 而这条迁移在**两条链的交汇处**，失败会连带挡住后面所有迁移。
+    """
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    if "scheduled_job_logs" not in inspector.get_table_names():
+        return  # 表都没有 ⇒ 无需加列
+    columns = {c["name"] for c in inspector.get_columns("scheduled_job_logs")}
+    if "job_trigger_type" not in columns:
+        with op.batch_alter_table("scheduled_job_logs", schema=None) as batch_op:
+            batch_op.add_column(
+                sa.Column("job_trigger_type", sa.String(length=16), nullable=False, server_default="")
+            )
+    indexes = {i["name"] for i in inspector.get_indexes("scheduled_job_logs")}
+    if "ix_scheduled_job_logs_job_trigger_type" not in indexes:
+        op.create_index(
+            "ix_scheduled_job_logs_job_trigger_type", "scheduled_job_logs", ["job_trigger_type"]
         )
-    op.create_index("ix_scheduled_job_logs_job_trigger_type", "scheduled_job_logs", ["job_trigger_type"])
 
 
 def downgrade() -> None:
-    op.drop_index("ix_scheduled_job_logs_job_trigger_type", "scheduled_job_logs")
-    with op.batch_alter_table("scheduled_job_logs", schema=None) as batch_op:
-        batch_op.drop_column("job_trigger_type")
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    if "scheduled_job_logs" not in inspector.get_table_names():
+        return
+    indexes = {i["name"] for i in inspector.get_indexes("scheduled_job_logs")}
+    if "ix_scheduled_job_logs_job_trigger_type" in indexes:
+        op.drop_index("ix_scheduled_job_logs_job_trigger_type", "scheduled_job_logs")
+    columns = {c["name"] for c in inspector.get_columns("scheduled_job_logs")}
+    if "job_trigger_type" in columns:
+        with op.batch_alter_table("scheduled_job_logs", schema=None) as batch_op:
+            batch_op.drop_column("job_trigger_type")

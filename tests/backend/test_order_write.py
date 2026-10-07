@@ -589,14 +589,17 @@ class TestAfterSaleHandle:
 class TestNoAutoTrigger:
     """纪律 6：**绝不自动触发**（源码守卫）。"""
 
-    def test_ship_service_is_not_referenced_by_scheduler_or_workflow(self):
-        """发货 / 售后**不得**出现在定时任务注册表或工作流节点里。"""
+    def test_ship_service_is_not_referenced_by_scheduler(self):
+        """发货 / 售后**不得**出现在定时任务注册表 / 调度种子里。"""
         from pathlib import Path
 
         root = Path(__file__).resolve().parents[2]
         candidates = [
             root / "backend" / "app" / "services" / "job_registry.py",
-            root / "backend" / "app" / "services" / "workflow_engine.py",
+            # ⚠️ 2026-10-07：`workflow_engine.py` 已随工作流特性整条移除（用户口径
+            # 「把工作流相关逻辑表等完整移除」），候选里不再列它 —— 本用例本来
+            # `if not path.exists(): continue`，但留着死路径会让「文件被删」看起来
+            # 像「守卫被摘掉」。自动触发面**只剩**任务注册表 + 调度种子两处。
             root / "config" / "initial_data" / "scheduled_jobs.json",
         ]
         for path in candidates:

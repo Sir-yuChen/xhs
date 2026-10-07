@@ -124,8 +124,8 @@ def _user_of(token: str) -> int:
 # --------------------------------------------------------------------------- #
 # 注册表白名单
 # --------------------------------------------------------------------------- #
-def test_registry_has_exactly_sixteen_entries():
-    """注册表全量 16 项（14 系统内置 + 1 业务管线 + 1 工作流前缀）；键集合钉死 —— 新增任务类型 = 发版。
+def test_registry_has_exactly_fifteen_entries():
+    """注册表全量 **15** 项（14 系统内置 + 1 业务管线 `auto_ops.keyword_pipeline`）；键集合钉死 —— 新增任务类型 = 发版。
 
     §44（2026-09-30）：「账号笔记同步」的混合双源拆成两个独立任务 ⇒ 新增
     `system.goods_note_sync`（**商品笔记**，ark 源）。它与 `system.note_sync`（普通笔记，
@@ -135,13 +135,16 @@ def test_registry_has_exactly_sixteen_entries():
     ⚠️ 2026-10-04：M5/M6 新增 `workflow.`（工作流前缀，**动态**）与 `system.order_sync`
     （订单只读同步）⇒ 13 → 15。
 
+    ⚠️ 2026-10-07：**工作流整条特性退场**（用户口径「把工作流相关逻辑表等完整移除，
+    直接使用定时任务完成即可」）⇒ `workflow.` 这一项从注册表删除 ⇒ 16 → 15。
+
     ⚠️ 2026-10-06：新增 `system.note_data_sync`（离线笔记数据同步，商业+普通两类，
     千帆数据中心 butterfly/data 接口）⇒ 15 → 16。
     """
     from backend.app.services.job_registry import job_registry
 
     registry = job_registry()
-    assert len(registry) == 16
+    assert len(registry) == 15
     assert set(registry) == {
         "system.due_publish",
         "system.monitoring_refresh",
@@ -158,7 +161,6 @@ def test_registry_has_exactly_sixteen_entries():
         "system.shop_metrics_collect",
         "system.order_sync",
         "auto_ops.keyword_pipeline",
-        "workflow.",
     }
 
 

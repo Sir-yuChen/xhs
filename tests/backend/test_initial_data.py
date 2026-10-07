@@ -410,6 +410,8 @@ def test_existing_rows_are_never_overwritten(tmp_path, monkeypatch):
         # ⚠️ 13 = 种子的 14 个内置行 − 已存在的那 1 行（`system.note_sync`）。
         # 2026-10-04 收口：M5/M6 新增 `workflow.` / `system.order_sync` 后
         # 种子由 11 增至 13；2026-10-06 新增 `system.note_data_sync` ⇒ 14。
+        # 2026-10-07：`workflow.` 退场（工作流特性整条移除），但它是 `builtin=False`
+        #   ⇒ **本就不在种子行里**，故种子数 14 不变（这一步只影响注册表白名单）。
         assert len(created) == 13, "已存在的那一行不该再插"
 
         row = db.scalar(select(ScheduledJob).where(ScheduledJob.job_key == "system.note_sync"))

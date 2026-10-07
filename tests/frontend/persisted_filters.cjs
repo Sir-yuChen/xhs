@@ -52,8 +52,21 @@ const RESERVED = {
   draft: "    status: asNonEmptyString(fields.status, EMPTY_SHOP_ITEMS_DRAFT.status),",
   // 两个页面用同一个 key ⇒ 互相覆盖对方的筛选
   dupkey: '    keyword: "xhs.filters.library.keyword",',
-  // 页签集合少一个 ⇒ 缓存里那个页签被静默退回默认
-  tabs: 'export const MY_NOTES_TAB_VALUES = ["notes", "liked", "collected", "interactions"] as const;',
+  // 页签集合少一个 ⇒ 缓存里那个页签被静默退回默认。
+  // ⚠️ 2026-10-07：真值已是**多行数组**（含 "goods" / "normal"，设计 17 §13.x）⇒
+  //   锚点必须与 `filter-cache.ts` **逐字同形**（含每行缩进与 `] as const;` 在行首），
+  //   单行锚点会静默失配 ⇒ 替换没发生 ⇒ 变异变成哑弹（实测踩过）。
+  //   变异体 = 真值少一行 `  "collected",`（页签被静默退回默认）。
+  tabs: [
+    'export const MY_NOTES_TAB_VALUES = [',
+    '  "notes",',
+    '  "goods",',
+    '  "normal",',
+    '  "liked",',
+    '  "collected",',
+    '  "interactions",',
+    '] as const;',
+  ].join("\n"),
 };
 
 const MUTATE_TO = {
@@ -63,9 +76,16 @@ const MUTATE_TO = {
   fields: "    return raw as T;",
   draft: "    status: fields.status,",
   dupkey: '    keyword: "xhs.filters.my-notes.tab",',
-  tabs: 'export const MY_NOTES_TAB_VALUES = ["notes", "liked", "collected"] as const;',
+  tabs: [
+    'export const MY_NOTES_TAB_VALUES = [',
+    '  "notes",',
+    '  "goods",',
+    '  "normal",',
+    '  "liked",',
+    '  "interactions",',
+    '] as const;',
+  ].join("\n"),
 };
-
 const mutatePlugin = {
   name: "filter-cache-mutate",
   setup(build) {
@@ -259,8 +279,12 @@ async function main() {
   check("D2 全局无重复键（重复 = 两页互相覆盖）", new Set(allKeys).size, allKeys.length);
 
   // ---------------------------------------------------------------- E. 页签
+  // ⚠️ 2026-10-07 校正：真值已含 "goods" / "normal"（「我的笔记」商业 / 普通两类，
+  //   设计 17 §13.x 落库），本期望未同步 ⇒ E1 长期假红。按 `filter-cache.ts` 实际取值校正。
   check("E1 我的笔记页签顺序（渲染顺序与合法取值同一份）", MY_NOTES_TAB_VALUES, [
     "notes",
+    "goods",
+    "normal",
     "liked",
     "collected",
     "interactions",

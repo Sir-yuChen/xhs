@@ -39,12 +39,6 @@ JOB_KEY_NOTE_DATA_SYNC = "system.note_data_sync"
 #: M6 方向 6（设计 16 §7）订单同步。与 `JOB_KEY_SHOP_GOODS_SYNC` 分开：
 #: 落不同的表、不同的任务类型，任务中心是两行独立的任务。
 
-#: 自动化工作流注册到调度器的 job_key **前缀**（设计 19 §7.1）。
-#: 具体 job_key 形如 ``workflow.<workflow_id>`` —— 一个工作流一行 job。
-#: ⚠️ 注册表按**精确 key** 查（``get_job_spec``），前缀本身不是一个可调度任务；
-#:    工作流在 ``workflow_service._sync_scheduler`` 建出的行才携带真实 id 后缀。
-WORKFLOW_JOB_KEY_PREFIX = "workflow."
-
 
 @dataclass(frozen=True)
 class JobSpec:
@@ -113,7 +107,6 @@ def _build_registry() -> dict[str, JobSpec]:
         validate_retention_days,
     )
     from backend.app.services.shop_health_service import run_shop_health_checks_once
-    from backend.app.services.workflow_service import run_workflow_job
 
     specs = [
         JobSpec(
@@ -298,21 +291,6 @@ def _build_registry() -> dict[str, JobSpec]:
             default_trigger_type="cron",
             default_cron="0 */10 * * * *",  # 每 10 分钟轮询一次
         ),
-        JobSpec(
-            # 设计 19 §7.1：工作流的 cron/at 触发注册成一个 job。
-            # job_key 形如 workflow.<id>，由 workflow_service 建行时写入；
-            # params.workflow_id 是唯一参数（params_editable=() ⇒ 用户改不动它）。
-            key=WORKFLOW_JOB_KEY_PREFIX,
-            name="自动化工作流",
-            func=run_workflow_job,
-            builtin=False,
-            user_scoped=True,
-            params_required=("workflow_id",),
-            params_editable=(),
-            default_trigger_type="cron",
-            default_cron="0 0 9 * * *",
-            allow_concurrent=False,
-        ),
     ]
     return {spec.key: spec for spec in specs}
 
@@ -323,23 +301,11 @@ def job_registry() -> dict[str, JobSpec]:
 
 
 def get_job_spec(key: str) -> JobSpec:
-    """按键取声明；未知键抛 `KeyError`（API 层映射 400 `JOB_KEY_UNSUPPORTED`）。
-
-    ⚠️ **前缀键要能解析出带后缀的真实 job_key**（2026-10-07 实测修 DEF-098）：
-    工作流行的 `job_key` 形如 ``workflow.<workflow_id>``，注册表里只有前缀
-    ``"workflow."`` 这一条声明 —— 直接精确匹配会让 ``get_job_spec("workflow.1")``
-    抛 `KeyError`，于是 `_register_job_in_scheduler` 走「unknown job_key」分支**永不装配**
-    （`next_run_time` 恒 NULL、到点不跑、手动触发也进不了执行体），而界面/DB/它自己的
-    文档全都写着「已注册」。凡是**按前缀成族**的 job_key，一律在前缀上兜一层。
-    """
+    """按键取声明；未知键抛 `KeyError`（API 层映射 400 `JOB_KEY_UNSUPPORTED`）。"""
     registry = _build_registry()
-    spec = registry.get(key)
-    if spec is not None:
-        return spec
-    # 前缀族（当前只有 workflow.*）：按最长前缀命中，避免逐字符拼 key。
-    if key.startswith(WORKFLOW_JOB_KEY_PREFIX):
-        return registry[WORKFLOW_JOB_KEY_PREFIX]
-    raise KeyError(key)
+    if key not in registry:
+        raise KeyError(key)
+    return registry[key]
 
 
 def validate_params(spec: JobSpec, params: dict[str, Any] | None) -> None:

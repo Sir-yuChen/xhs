@@ -3014,12 +3014,12 @@ def test_no_page_has_a_page_header():
         ("frontend/src/pages/models/model-config-page.tsx", ("Model Routing",)),
         ("frontend/src/pages/platforms/xhs/analytics-page.tsx", ("XHS Analytics",)),
         # 2026-10-06 设计 22 §3：正文迁到 auto-ops-panel.tsx（宿主页只剩 Tabs）。
+        # 2026-10-07 工作流退场 ⇒ 宿主页连 Tabs 也撤了，退回直接渲染 AutoOpsPanel。
         ("frontend/src/pages/platforms/xhs/auto-ops-panel.tsx", ("XHS Auto Operations",)),
         ("frontend/src/pages/platforms/xhs/keywords-page.tsx", ("XHS Keywords",)),
         ("frontend/src/pages/platforms/xhs/monitoring-page.tsx", ("XHS Monitoring",)),
         ("frontend/src/pages/platforms/xhs/orders-page.tsx", ("小红书运营",)),
         ("frontend/src/pages/platforms/xhs/publish-page.tsx", ("XHS Publish",)),
-        ("frontend/src/pages/platforms/xhs/workflow-page.tsx", ("XHS Workflow",)),
         ("frontend/src/pages/platforms/xhs/xhs-dashboard.tsx", ("XHS Workspace",)),
         ("frontend/src/pages/settings/settings-page.tsx", ("Workspace",)),
         # ⚠️ 队列记录页的正文里「队列记录」是**功能名**（清理确认框 / Tab 文案），
@@ -3053,8 +3053,6 @@ def test_no_page_has_a_page_header():
         ("frontend/src/pages/platforms/xhs/publish-page.tsx", ("loadJobs",)),
         # 订单管理：同步订单 / 刷新 / 导出 → 「订单列表」卡 extra
         ("frontend/src/pages/platforms/xhs/orders-page.tsx", ("onSync", "onExport")),
-        # 工作流：刷新 / 新建工作流 → 「工作流列表」卡 extra
-        ("frontend/src/pages/platforms/xhs/workflow-page.tsx", ("setCreateOpen(true)",)),
         # 关键词组 / 监控中心：刷新 → 各自新增卡 extra
         ("frontend/src/pages/platforms/xhs/keywords-page.tsx", ("loadGroups",)),
         ("frontend/src/pages/platforms/xhs/monitoring-page.tsx", ("loadTargets",)),
@@ -4676,108 +4674,14 @@ def test_shop_items_sync_button_locks_and_shows_running_label():
 
 
 # --------------------------------------------------------------------------- #
-# M5 自动化工作流页（设计 19）
+# M5 自动化工作流页（设计 19）—— ⛔ 2026-10-07 整条特性退场，本段 6 条守卫已删除
+#
+# 退场原因（实测三个硬缺口）见 docs/02_设计文档/19_功能设计_自动化工作流.md 头部横幅。
+# ⚠️ 原 6 条守卫（调用 11 个请求函数 / 路由与菜单 / lib 单一词表 / 时长缺值不补 0 /
+#   lib 不引 UI 框架 / 页面结构）随页面文件一并退场 ——
+#   它们守的对象已不存在，留着只会让「文件被删」看起来像「守卫被摘掉」。
+# 替代守卫见 `test_menu_integration.py::TestWorkflowRetired`（钉「不得再回来」）。
 # --------------------------------------------------------------------------- #
-WORKFLOW_PAGE = ROOT / "frontend/src/pages/platforms/xhs/workflow-page.tsx"
-WORKFLOW_LIB = ROOT / "frontend/src/lib/workflow-format.ts"
-ROUTER = ROOT / "frontend/src/app/router.tsx"
-APP_SHELL = ROOT / "frontend/src/components/layout/app-shell.tsx"
-
-
-def test_workflow_page_calls_all_eleven_request_functions():
-    """工作流页必须**真的调用** M5 交付的 11 个请求函数。
-
-    ⚠️ 判据是**调用形态**不是「出现」（2026-10-04 变异实测教训，同
-    `test_metrics_panel_calls_all_four_request_functions`）：只断言名字出现在
-    文件里 ⇒ 删掉调用点的变异 ESCAPED（名字还留在 import 里）。
-    ⇒ 剥掉 import 后断言 `fn(`。
-    """
-    import re as _re
-
-    code = _code_only(_read(WORKFLOW_PAGE))
-    body = _re.sub(r"import\s*\{[^}]*\}\s*from\s*\"[^\"]+\";", "", code, flags=_re.S)
-    body = _re.sub(r"import\s+[^;]+;", "", body)
-
-    for fn in (
-        "fetchWorkflows",
-        "createWorkflow",
-        "fetchWorkflowDetail",
-        "updateWorkflow",
-        "deleteWorkflow",
-        "runWorkflow",
-        "fetchWorkflowRuns",
-        "fetchWorkflowRunDetail",
-        "cancelWorkflowRun",
-        "rerunWorkflowNode",
-        "reviewWorkflowNode",
-    ):
-        assert fn + "(" in body, f"工作流页没有真正调用 {fn}(（只在 import 里出现 ≠ 被调用）"
-
-
-def test_workflow_page_renders_in_router_and_menu():
-    """页面必须**接线路由与菜单** —— 否则「组件写了但进不去」= 白做。
-
-    ⚠️ 2026-10-06 设计 22 §3 更新：工作流**并入「自动运营」宿主页作 tab** ⇒
-    判据从「路由渲染 `<WorkflowPage />` + 菜单有独立项」改为「宿主页渲染
-    `<WorkflowPanel />` + 旧路由重定向 + 宿主菜单项在」。被取代的原句保留：
-        assert "<WorkflowPage />" in router
-        assert "/platforms/xhs/workflows" in shell
-    """
-    router = _code_only(_read(ROUTER))
-    shell = _code_only(_read(APP_SHELL))
-    auto_ops = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/auto-ops-page.tsx"))
-    assert "/platforms/xhs/workflows" in router, "路由表里没有工作流旧路由（深链重定向）"
-    assert "WorkflowPanel" in auto_ops, "宿主页没有挂载 WorkflowPanel"
-    assert "/platforms/xhs/auto-ops?tab=workflows" in router, "旧路由未重定向到宿主 tab"
-    assert "/platforms/xhs/auto-ops" in shell, "侧栏菜单里没有自动运营（工作流）入口"
-
-
-def test_workflow_page_uses_lib_not_inline_vocabulary():
-    """页面必须**从 `lib/workflow-format.ts` 导入**判据，**不内联重写词表**。
-
-    ⚠️ 内联重写 = 同一语义两处维护（DEF-044）：改一处忘另一处，
-    页面显示与守卫断言就会分叉。
-
-    ⚠️ **判据是「导入形态」不是「名字出现」**（2026-10-04 变异实测教训，
-    与 `test_metrics_panel_calls_all_four_request_functions` 同一条）：
-    第一版只断言 `fn in code` ⇒ 变异「用本地函数遮蔽 lib 同名函数」
-    **ESCAPED**（名字还在文件里，断言照样绿）。
-    ⇒ 必须断言这几个名字出现在**来自 lib 的 import 语句**里。
-    """
-    import re as _re
-
-    code = _code_only(_read(WORKFLOW_PAGE))
-    # 抓出所有来自 lib 的 import 块
-    imports = _re.findall(
-        r"import\s*\{([^}]*)\}\s*from\s*\"[^\"]*workflow-format\";", code, flags=_re.S
-    )
-    assert imports, "工作流页没有从 lib/workflow-format 导入任何东西（疑似内联重写词表）"
-    imported = {part.strip() for block in imports for part in block.split(",") if part.strip()}
-    for fn in ("runStatusText", "runStatusColor", "nodeLabel", "durationText", "chainText"):
-        assert fn in imported, (
-            f"工作流页没有从 lib/workflow-format **导入** {fn}（同名本地函数遮蔽也算重写词表）"
-        )
-
-
-def test_workflow_page_never_renders_blank_duration_as_zero():
-    """**缺值口径**：未结束的 run 耗时显示 `-`，**不得渲染成 `0`**。
-
-    ⚠️ 变异守护：把 `durationText` 的未结束分支改成返回 `"0 秒"` ⇒
-    本用例与 `workflow-format.test.ts` 必红。
-    """
-    lib = _code_only(_read(WORKFLOW_LIB))
-    # 未结束（finishedAt 为空）⇒ 返回 "-"，不是 "0 秒"
-    assert 'return "-";' in lib, "durationText 的缺值分支必须返回 `-`"
-    assert '"0 秒"' not in lib, "不得把「未结束」渲染成 `0 秒`（那是两件事）"
-
-
-def test_workflow_lib_does_not_import_ui_frameworks():
-    """纯逻辑库不得依赖 antd / react —— 它要能被行为脚本直接驱动。"""
-    code = _read(WORKFLOW_LIB)
-    assert 'from "antd"' not in code, "lib 不得依赖 antd（纯逻辑）"
-    assert 'from "react"' not in code, "lib 不得依赖 react（纯逻辑）"
-
-
 # --------------------------------------------------------------------------- #
 # M6 订单页（设计 16 §7，一期只读）
 # --------------------------------------------------------------------------- #

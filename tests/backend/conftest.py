@@ -318,9 +318,11 @@ def db_session(
 
     ⚠️ **本夹具同时打桩全部服务模块的 Session 工厂**（2026-10-04 加）：
     此前只有 `api_client` 打桩，于是「用 `db_session` + 直接调服务函数」的用例
-    会**静默打到生产库**。实测事故：`test_workflows.py` 的 `run_workflow_job`
-    用例往 `data/spider_xhs.db` 写了 21 条 `workflow_runs` + 12 条 `workflow_nodes`
-    （workflow_service 自开 Session，本夹具不管它）。
+    会**静默打到生产库**。实测事故（2026-10-04）：一个「直接调服务函数」的用例往
+    `data/spider_xhs.db` 写了 21 条业务行（服务自开 Session，本夹具不管它），
+    另有同批 4 条 `workflows` + 22 条 `workflow_runs` + 12 条 `workflow_nodes`。
+    ⚠️ 触发它的那个模块（工作流）**已于 2026-10-07 整条移除**，但**这条纪律与打桩本身
+    必须留下** —— 漏打桩的代价是污染真实数据，与哪个模块无关。
 
     教训：**隔离必须是夹具的属性，不能是「用例记得申请哪个夹具」的约定** ——
     后者迟早在某个新用例上漏掉，而漏掉的代价是污染真实数据。

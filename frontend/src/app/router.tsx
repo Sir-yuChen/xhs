@@ -105,7 +105,6 @@ export function AppRouter() {
           {/* 自动化工作流（设计 19 / M5）：编排 选题→生成→审核→发布→监控。
               人工审核节点默认不自动放行（§3.3 硬约束）。
               2026-10-06 设计 22 §3：并入「自动运营」宿主页作 tab ⇒ 旧路由重定向，深链不死。 */}
-          <Route path="/platforms/xhs/workflows" element={<Navigate to="/platforms/xhs/auto-ops?tab=workflows" replace />} />
           <Route path="/platforms/xhs/orders" element={<OrdersPage />} />
           <Route path="/platforms/xhs/:section" element={<XhsSectionPage />} />
           <Route path="/tasks" element={<TaskCenterPage />} />

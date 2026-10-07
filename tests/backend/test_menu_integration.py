@@ -9,7 +9,7 @@
 |---|---|
 | N1 图片空间 | 菜单有项、路由有页；**只读**（页面无上传/移动/删除/下载入口） |
 | N2 发布中心并入笔记工坊 | 主菜单**无**独立项；旧路由重定向到 `?tab=publish`；tab key 已登记 |
-| N3 自动运营 ∥ 工作流合并 | 主菜单**无**独立「自动化工作流」项；旧路由重定向到 `?tab=workflows` |
+| N3 自动运营（工作流已退场）| 主菜单/子菜单**无**工作流入口；无 `?tab=workflows` 重定向；源码文件已从盘上删除 |
 | N4 数据洞察去按钮 | 页面**无**「刷新」「生成报告」按钮、无 `generateReport`、无死 import |
 | N5 提示移除 | 页面**无**「正在开发优化中」文案 |
 | N6 执行一次参数弹窗 | 见 `tests/frontend/schedule_center.cjs`（行为脚本，另有断言） |
@@ -318,35 +318,64 @@ class TestPublishMovedIntoWorkshop:
 
 
 # --------------------------------------------------------------------------- #
-# N3 自动运营 + 自动化工作流 合并
+# N3 自动运营（2026-10-07：工作流整条特性退场）
+#
+# 变更史：2026-10-06 本组叫 `TestWorkflowMergedIntoAutoOps`，断言「自动运营」与
+# 「自动化工作流」两个 Tab 并存。2026-10-07 用户口径「把工作流相关逻辑表等完整移除，
+# 直接使用定时任务完成即可」⇒ 工作流退场 ⇒ 本组改为**退场守卫**（防止它以任何形式回来）。
+# 原断言已被这组替代，理由即上面这两句（不静默删除）。
 # --------------------------------------------------------------------------- #
-class TestWorkflowMergedIntoAutoOps:
-    def test_main_menu_dropped_workflows_entry(self):
-        """主菜单**不再**有独立「自动化工作流」项。"""
+class TestWorkflowRetired:
+    def test_no_workflow_entry_anywhere_in_nav(self):
+        """主菜单 / 子菜单都**不得**再有工作流入口。"""
         code = _code_only(SHELL)
         assert '"/platforms/xhs/workflows"' not in code
+        assert "自动化工作流" not in code
 
-    def test_auto_ops_host_has_both_tabs(self):
-        code = _code_only(AUTO_OPS)
-        assert "AutoOpsPanel" in code
-        assert "WorkflowPanel" in code
-        assert '"workflows"' in code
-        assert "自动化工作流" in code
+    def test_auto_ops_host_is_a_plain_page(self):
+        """宿主页退回**直接渲染** AutoOpsPanel —— 单 Tab 的分段控件是冗余。
 
-    def test_old_route_redirects_to_workflows_tab(self):
-        router = _read(ROUTER)
-        assert 'path="/platforms/xhs/workflows"' in router
-        assert "/platforms/xhs/auto-ops?tab=workflows" in router
-
-    def test_backends_are_not_merged(self):
-        """⚠️ 只合前端口子，**不合并后端**：两套数据面各自独立。
-
-        合并成一个端点会把「一个入口两套 UI」变成「一个端点两套分支」（DEF-044 反面）。
+        ⚠️ 判据落在「调用形态」而不是「符号出现」：宿主页自己的 docstring 会提到
+        `WorkflowPanel`（讲变更史），只看符号存在就永远绿（变异逃逸）。
         """
         code = _code_only(AUTO_OPS)
-        # 宿主只挂载两个 panel，不 import 任何数据服务。
-        assert "auto_tasks" not in code and "fetchAutoTasks" not in code
-        assert "fetchWorkflows" not in code
+        assert "<AutoOpsPanel" in code
+        assert "WorkflowPanel" not in code
+        assert "useSearchParams" not in code
+
+    def test_workflow_route_is_gone(self):
+        """旧路由**不再**存在（不做重定向 —— 它指向的能力已不存在）。"""
+        router = _read(ROUTER)
+        assert 'path="/platforms/xhs/workflows"' not in router
+        assert "tab=workflows" not in router
+
+    def test_workflow_sources_are_deleted(self):
+        """后端 5 个模块 + 前端 3 个文件必须**真的不在盘上**。
+
+        比「搜不到引用」硬：文件还在、只是没人 import，搜引用照样是绿的 ——
+        而「留在盘上」正是下次有人手滑 import 回去的入口。
+        """
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[2]
+        gone = [
+            "backend/app/models/workflow.py",
+            "backend/app/services/workflow_engine.py",
+            "backend/app/services/workflow_nodes.py",
+            "backend/app/services/workflow_service.py",
+            "backend/app/api/platforms/xhs/workflows.py",
+            "frontend/src/pages/platforms/xhs/workflow-page.tsx",
+            "frontend/src/lib/workflow-format.ts",
+            "frontend/src/lib/workflow-format.test.ts",
+        ]
+        present = [rel for rel in gone if (root / rel).exists()]
+        assert not present, f"工作流退场后这些文件仍在盘上：{present}"
+
+    def test_api_client_has_no_workflow_functions(self):
+        """`lib/api.ts` 不得再有工作流请求函数 / 类型。"""
+        code = _read(API_TS)
+        for name in ("fetchWorkflows", "WorkflowListItem", "WorkflowRunDetail", "workflow-runs"):
+            assert name not in code, f"lib/api.ts 仍含 {name}"
 
 
 # --------------------------------------------------------------------------- #

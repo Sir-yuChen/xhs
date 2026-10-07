@@ -17,8 +17,10 @@
 1. **`db_session` 必须打桩**（源码级断言，防止有人把那一行删掉）；
 2. **`db_engine` 必须播种外键基线行**（`users` / `platform_accounts`）——
    否则隔离修好后，一批用例会因「夹具库自洽性缺失」而红；
-3. **行为级证明**：用 `db_session` 调 `run_workflow_job` 后，
+3. **行为级证明**：用 `db_session` 调**自开 Session 的服务**后，
    **真实库的行数不变**（这是唯一不可伪造的判据）。
+   ⚠️ 2026-10-07：原判据用的是 `run_workflow_job`（工作流服务），该特性已整条移除
+   ⇒ 现在的行为级证明落在**素材缩略图落盘面**（见文件末尾两条 `..._sandboxes_material_storage`）。
 """
 
 from __future__ import annotations
@@ -32,6 +34,10 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 CONFTEST = ROOT / "tests" / "backend" / "conftest.py"
 PROD_DB = ROOT / "data" / "spider_xhs.db"
+#: 生产素材缩略图目录 —— 下面两条「落盘面」守卫盯的就是它不被测试改写。
+#: ⚠️ 这个常量原本夹在工作流那条用例附近，2026-10-07 删工作流用例时被连带删掉
+#:    ⇒ 两条落盘守卫当场 `NameError`。教训：删除用例时**只删用例体**，常量另议。
+STORAGE_THUMBS = ROOT / "backend" / "app" / "storage" / "materials" / "thumbs"
 
 
 def _conftest_source() -> str:
@@ -114,39 +120,12 @@ def _count(table: str) -> int:
             return -1
 
 
-@pytest.mark.parametrize("table", ["workflows", "workflow_runs", "workflow_nodes"])
-def test_workflow_tables_in_production_are_not_touched(table: str):
-    """**行为判据**：用 `db_session` 调工作流服务后，真实库行数不变。
-
-    ⚠️ 变异守护：把 `db_session` 里的打桩去掉 ⇒ 本用例必红
-    （服务自开 Session 会真的往生产库插行）。
-
-    这条是**不可伪造的判据** —— 源码断言可以被绕过，行数变化不会。
-    """
-    before = _count(table)
-    if before < 0:
-        pytest.skip(f"真实库无 {table} 表")
-
-    from backend.app.services.workflow_service import run_workflow_job
-
-    # 用一个必然不存在的 id：走 "workflow not found" 分支，**不产生业务副作用**，
-    # 但只要 Session 未被打桩，它连的就是真实库（下面的行数就是判据）。
-    result = run_workflow_job(10**9, user_id=1)
-    assert result.get("skipped") is True
-
-    assert _count(table) == before, (
-        f"真实库 {table} 行数被测试改动 —— 说明服务层 Session 未打到夹具库"
-    )
-
-
-# --------------------------------------------------------------------------- #
-# ③ 落盘隔离：素材缩略图不得写生产 storage（DEF-094，2026-10-05）
-#
-# 与 ① ② 是**同一条链路的另一个面**：Session 打桩挡住了「写到生产库」，
-# 但素材扫描还会**落盘**到 `Settings.storage_dir` 派生出的固定目录 ——
-# 两条腿，只堵一条，页面上照样能看到「缩略图取不到」。
-# --------------------------------------------------------------------------- #
-STORAGE_THUMBS = ROOT / "backend" / "app" / "storage" / "materials" / "thumbs"
+# ⚠️ 2026-10-07：`test_workflow_tables_in_production_are_not_touched` 整条**退场** ——
+# 它守的是「工作流服务自开 Session 会写生产库」，而工作流整条特性已删（用户口径
+# 「把工作流相关逻辑表等完整移除」）⇒ 服务模块不存在，判据无处可依。
+# ⚠️ **但那条判据揭示的夹具纪律仍然有效、且仍有守卫**：见下面两条
+# `..._sandboxes_material_storage`（落盘面）与本文件其余 Session 打桩断言（写库面）。
+# 原用例与事故记录（22 行 workflow_runs 落到真实库）向上保留在本文件 docstring 里。
 
 
 def test_db_session_fixture_sandboxes_material_storage():
@@ -183,8 +162,9 @@ def test_material_thumbs_in_production_are_not_touched_by_a_scan(tmp_path, db_se
     ⚠️ 变异守护：关掉兜底隔离 ⇒ 本用例必红（实测确认，见
     `.hermes/scripts/mutate_verify_material_storage_isolation.py`）。
 
-    这条与 `test_workflow_tables_in_production_are_not_touched` 是同一判据的两个面：
-    那条看**写库**，这条看**落盘**。只堵住 Session 打桩，素材扫描照样会写生产 storage。
+    这条与**已退场**的 `test_workflow_tables_in_production_are_not_touched`（2026-10-07
+    随工作流特性删除）曾是同一判据的两个面：那条看**写库**，这条看**落盘** ——
+    「只堵住 Session 打桩，素材扫描照样会写生产 storage」这个缺口至今有效，故本用例保留。
     """
     if not STORAGE_THUMBS.exists():
         pytest.skip("无生产 thumbs 目录，跳过（新克隆环境）")

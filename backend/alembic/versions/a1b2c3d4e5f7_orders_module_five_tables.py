@@ -1,7 +1,7 @@
 """orders module (design 16 §7.2, M6 direction 6): 5 read-only order tables
 
 Revision ID: a1b2c3d4e5f7
-Revises: z9a0b1c2d3e4, q8r9s0t1u2v3
+Revises: z9a0b1c2d3e4, f2a3b4c5d6e7
 Create Date: 2026-10-04
 
 M6 方向 6 · 订单模块一期只读：建 5 张表（orders / order_items /
@@ -23,14 +23,14 @@ import sqlalchemy as sa
 
 
 revision: str = "a1b2c3d4e5f7"
-# ⚠️ 双父节点（merge）：本迁移同时挂在两条已存在的链上 ——
-#   * ``z9a0b1c2d3e4`` = 已提交的调度任务中心迁移（代码库主线，任何人在干净库上
-#     ``alembic upgrade head`` 都经过它）；
-#   * ``q8r9s0t1u2v3`` = 自动化工作流迁移，本机开发库已 apply（表已在库里），
-#     但其文件尚未随 M5 提交。
-# 双父保证两种环境都能 upgrade 到 head：干净库从 z9 走过来，本机库从 q8 走过来。
-# 若 q8 在提交前被改名/删除，把本行改回单父 ``z9a0b1c2d3e4`` 即可（库里的表不受影响）。
-down_revision: Union[str, Sequence[str], None] = ("z9a0b1c2d3e4", "q8r9s0t1u2v3")
+# ⚠️ 双父（merge）：本迁移同时挂在两条已存在的链上 ——
+#   * ``z9a0b1c2d3e4`` = 已提交的调度任务中心迁移（代码库主线，干净库上 upgrade 经过它）；
+#   * ``f2a3b4c5d6e7`` = M3 热点迁移（**本机真库已 apply**；2026-10-07 由工作流迁移
+#     改为它 —— 工作流整条特性退场后，那条迁移被删除，本行的另一父必须换成本机库
+#     真实走过的链，否则 `alembic_version` 停在别处时 upgrade 会重放整条链
+#     （而链上多条加列迁移**没有幂等守卫** ⇒ `duplicate column name`）。
+# 双父保证两类环境都能 upgrade 到 head：干净库从 z9 走过来，本机库从 f2 走过来。
+down_revision: Union[str, Sequence[str], None] = ("z9a0b1c2d3e4", "f2a3b4c5d6e7")
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
@@ -38,7 +38,7 @@ depends_on: Union[str, Sequence[str], None] = None
 def _table_exists(conn, table: str) -> bool:
     """SQLite 判表存在（本迁移的**幂等守卫**）。
 
-    ⚠️ **必须幂等**（与 `c9d0e1f2a3b4` / `e1f2a3b4c5d6` / `f2a3b4c5d6e7` / `q8r9s0t1u2v3` 同规制）：
+    ⚠️ **必须幂等**（与 `c9d0e1f2a3b4` / `e1f2a3b4c5d6` / `f2a3b4c5d6e7` 同规制）：
     迁移用例的常规打法是「stamp 回父 revision 再 `upgrade head`」，而那些夹具库
     由 `Base.metadata.create_all()` 建 ⇒ 表**已经在了**。无守卫 ⇒
     `sqlalchemy.exc.OperationalError: table orders already exists`
