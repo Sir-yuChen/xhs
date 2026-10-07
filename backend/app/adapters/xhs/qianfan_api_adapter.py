@@ -128,10 +128,14 @@ class XhsQianfanApiAdapter:
         with direct_xhs_request_env():
             return self._api().register_material_files(seller_id, items)
 
-    def upload_web_permit(self, file_count: int = 1) -> tuple[bool, str, Any]:
-        """申请图片上传凭证（图片空间上传第 1 步；复用发布链路的同一实现）。"""
+    def upload_web_permit(self, file_count: int = 1, **kwargs: Any) -> tuple[bool, str, Any]:
+        """申请图片上传凭证（图片空间上传第 1 步）。
+
+        ⚠️ 图片空间必须走 **`biz_name=ark&scene=goods_image`**（由端点传入），
+        否则预分配 ID 落 `spectrum/` 桶 ⇒ 登记后取图 404（裂图）。
+        """
         with direct_xhs_request_env():
-            return self._api().upload_web_permit(file_count)
+            return self._api().upload_web_permit(file_count, **kwargs)
 
     def upload_file(self, **kwargs: Any) -> tuple[bool, str, Any]:
         """把本地文件 PUT 到 ROS（图片空间上传第 2 步）。"""
@@ -176,10 +180,14 @@ class XhsQianfanApiAdapter:
         with direct_xhs_request_env():
             return self._api().aigc_task_result(task_id)
 
-    def upload_web_permit(self, file_count: int = 1) -> tuple[bool, str, Any]:
-        """申请图片上传凭证（`uploadTempPermits`：addr + token + 预分配 fileIds）。"""
+    def upload_web_permit(self, file_count: int = 1, **kwargs: Any) -> tuple[bool, str, Any]:
+        """申请图片上传凭证（`uploadTempPermits`：addr + token + 预分配 fileIds）。
+
+        ⚠️ 图片空间传 `biz_name=ark&scene=goods_image`（落 `arkgoods/`）；发布链路默认
+        `spectrum/image`。scene 传错 ⇒ 登记后取图 404。
+        """
         with direct_xhs_request_env():
-            return self._api().upload_web_permit(file_count)
+            return self._api().upload_web_permit(file_count, **kwargs)
 
     def upload_file(self, *, upload_addr: str, file_id: str, token: str, file_path: str) -> tuple[bool, str, Any]:
         """PUT 本地文件到 ROS（token 不打印、不落库）。"""

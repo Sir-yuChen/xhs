@@ -1137,26 +1137,31 @@ class XHS_Qianfan_Apis:
             "/app-note/publish",
         )
 
-    def upload_web_permit(self, file_count: int = 1) -> tuple[bool, str, dict | None]:
+    def upload_web_permit(
+        self, file_count: int = 1, *, biz_name: str = "spectrum", scene: str = "image",
+        referer: str = "/app-note/publish",
+    ) -> tuple[bool, str, dict | None]:
         """申请图片上传凭证（`GET /api/edith/upload/web/permit`）。
 
-        2026-09-23 真机抓包（发布页选文件后发）：
-        `?biz_name=spectrum&scene=image&file_count=1&version=1`。
-        响应 `data.uploadTempPermits[]` 每项含：
+        ⚠️ **`biz_name` / `scene` 必须按业务点传对**（2026-10-07 真机抓包）：
+        图片空间（`/app-system/pictureSpace`）用的是 **`biz_name=ark&scene=goods_image`**
+        —— 预分配 `fileIds` 落在 **`arkgoods/<id>`** 桶，登记后链接
+        `https://qimg.xiaohongshu.com/arkgoods/<id>` **可正常显示**；
+        发布链路（`/app-note/publish`）才是 `spectrum/image`（落 `spectrum/<id>`）。
+        用错 scene ⇒ 文件 PUT 到 `spectrum/` 桶而图片空间按 `arkgoods/` 取 ⇒ **裂图**。
 
-        * `uploadAddr`：ROS 上传域名（实测 `ros-upload.xiaohongshu.com`）；
-        * `token`：上传令牌（**不打印、不落库**，只透传给 :meth:`upload_file`）；
-        * `fileIds[]`：**预分配**的文件 ID（形如 `spectrum/2Ip9…`）—— 上传目标路径
-          与最终 `images_list.file_id` 都是它；
-        * `expireTime` / `startTime`：凭证有效期（毫秒）。
-
-        ⚠️ 一次申请对应 `file_count` 个文件；批量上传按文件数一次申请、
-        逐文件 PUT，不要一个文件一次申请（页面自己也是一次多文件）。
+        响应 `data.uploadTempPermits[]` 每项含 `uploadAddr` / `token` / `fileIds[]` /
+        `expireTime`；**按 `qos` 降序取第一个**（平台前端 `sort((a,b)=>b.qos-a.qos)[0]`）。
         """
         return self._get(
             "/api/edith/upload/web/permit",
-            {"biz_name": "spectrum", "scene": "image", "file_count": max(1, int(file_count)), "version": 1},
-            "/app-note/publish",
+            {
+                "biz_name": str(biz_name),
+                "scene": str(scene),
+                "file_count": max(1, int(file_count)),
+                "version": 1,
+            },
+            referer,
         )
 
     def upload_file(self, *, upload_addr: str, file_id: str, token: str, file_path: str) -> tuple[bool, str, dict | None]:
@@ -1195,7 +1200,14 @@ class XHS_Qianfan_Apis:
             except ValueError:
                 reason = f"HTTP {response.status_code} {response.text[:120]}"
             return False, f"上传文件失败：{reason}", None
-        return True, "成功", None
+        # ⚠️ **PUT 的响应头里带 `X-Ros-Preview-Url`**（2026-10-07 真机抓包）——
+        # 登记条目 `uploaderInfoModel` 要的就是这个**带签名的预览地址**；丢弃它会让
+        # 图片空间条目登记成功但按公开 CDN 取图 **404**（裂图）。
+        return True, "成功", {
+            "preview_url": response.headers.get("X-Ros-Preview-Url", ""),
+            "etag": response.headers.get("Etag", ""),
+            "content_type": response.headers.get("Content-Type", ""),
+        }
 
     def publish_note(self, body: dict) -> tuple[bool, str, dict | None]:
         """发布商品笔记（`POST /api/edith/note/publish`）。

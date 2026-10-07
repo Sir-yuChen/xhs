@@ -3912,8 +3912,11 @@ def picture_space_upload(
         )
 
     adapter = _ark_adapter_for(db, account, adapter_factory)
-    # 1) 申请凭证（单文件）
-    ok, msg, permit_raw = adapter.upload_web_permit(1)
+    # 1) 申请凭证（单文件）—— ⚠️ 图片空间必须 `biz_name=ark&scene=goods_image`
+    #    （真机抓包）；用发布链路的 spectrum/image 会把文件 PUT 到别的桶 ⇒ 登记后取图 404。
+    ok, msg, permit_raw = adapter.upload_web_permit(
+        1, biz_name="ark", scene="goods_image", referer="/app-system/pictureSpace"
+    )
     if not ok or not isinstance(permit_raw, dict):
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -3925,7 +3928,8 @@ def picture_space_upload(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail={"code": "MATERIAL_UPLOAD_FAILED", "message": "平台没有返回上传凭证"},
         )
-    permit = permits[0]
+    # 平台前端按 `qos` 降序取第一个（真机 bundle `sort((a,b)=>b.qos-a.qos)[0]`）。
+    permit = sorted(permits, key=lambda x: x.get("qos") or 0, reverse=True)[0]
     file_ids = permit.get("fileIds") or []
     if not file_ids:
         raise HTTPException(
@@ -3941,7 +3945,7 @@ def picture_space_upload(
     tmp_path = tmp_dir / Path(payload.file_name).name
     try:
         tmp_path.write_bytes(raw)
-        ok, msg, _ = adapter.upload_file(
+        ok, msg, put_meta = adapter.upload_file(
             upload_addr=upload_addr, file_id=file_id, token=token, file_path=str(tmp_path)
         )
         if not ok:
@@ -3949,6 +3953,8 @@ def picture_space_upload(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail={"code": "MATERIAL_UPLOAD_FAILED", "message": msg},
             )
+        # PUT 响应头带 `X-Ros-Preview-Url`（带签名的预览地址）—— 登记时要回填给平台。
+        preview_url = (put_meta or {}).get("preview_url", "") if isinstance(put_meta, dict) else ""
     finally:
         try:
             tmp_path.unlink(missing_ok=True)
@@ -3978,6 +3984,7 @@ def picture_space_upload(
         size=len(raw),
         width=width,
         height=height,
+        preview_url=preview_url,
         father_directory_id=payload.father_directory_id,
     )
     ok, msg, raw_resp = adapter.register_material_files(account.seller_id or "", [item])

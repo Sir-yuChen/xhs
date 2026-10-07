@@ -656,12 +656,12 @@ class TestWriteItemShape:
     def test_upload_item_shape(self):
         """上传登记条目（`type:2` + `additionalData` 装扩展名/尺寸/path）。
 
-        ⚠️ 真机 JS bundle：文件与文件夹共用 `batch_add`，靠 `type` 区分（2=文件）；
-        `path` 必须以 `material_space/` 开头（平台按它定位云上对象）；
-        `name` 是**无扩展名基名**（扩展名单独放 `additionalData.extension`）。
+        ⚠️ 真机 JS 抓包（2026-10-07）：文件与文件夹共用 `batch_add`，靠 `type` 区分（2=文件）；
+        `path` **就是预分配 fileId 本身**（`arkgoods/<id>` 或 `spectrum/<id>`），
+        **绝不加 `material_space/` 前缀**；`name` 是**无扩展名基名**。
         """
         got = ps.build_upload_item(
-            "SELLER", file_id="spectrum/abc", file_name="我的图.jpeg", size=2048,
+            "SELLER", file_id="arkgoods/abc", file_name="我的图.jpeg", size=2048,
             width=800, height=600,
         )
         assert got["type"] == 2 and got["sellerId"] == "SELLER"
@@ -669,11 +669,25 @@ class TestWriteItemShape:
         assert got["size"] == 2048
         ad = got["additionalData"]
         assert ad["extension"] == ".jpeg"
-        assert ad["path"] == "material_space/spectrum/abc", "path 必须以 material_space/ 开头且不重复前缀"
+        assert ad["path"] == "arkgoods/abc", "path 就是 fileId，不加 material_space/ 前缀"
         assert ad["width"] == "800" and ad["height"] == "600"
-        # 已带前缀的 file_id 不得再拼一层（真机实测踩过 material_space/material_space/…）。
-        again = ps.build_upload_item("S", file_id="material_space/x", file_name="a.png", size=1)
-        assert again["additionalData"]["path"] == "material_space/x"
+        # ⚠️ `uploaderInfoModel` 必须是**对象**（含 PUT 给回的带签名 `url`），
+        # 不是字符串 —— 字符串会让条目在、取图 404（2026-10-07 真机 bug）。
+        uim = ad["uploaderInfoModel"]
+        assert isinstance(uim, dict), "uploaderInfoModel 必须是对象"
+        assert uim["bizName"] == "ark" and uim["scene"] == "goods_image"
+        assert uim["fileId"] == "arkgoods/abc"
+        assert uim["isSecret"] is True and uim["cloudType"] == 4
+        assert uim["url"] == ""  # 未传 preview_url 时为空串（不造）
+        # 传了 preview_url ⇒ 原样进 url。
+        got_p = ps.build_upload_item(
+            "S", file_id="arkgoods/x", file_name="a.jpg", size=1,
+            preview_url="https://ros-preview.xhscdn.com/arkgoods/x?sign=abc&t=1",
+        )
+        assert got_p["additionalData"]["uploaderInfoModel"]["url"].endswith("sign=abc&t=1")
+        # 任何 fileId 都原样落 path（不再拼前缀）。
+        again = ps.build_upload_item("S", file_id="spectrum/x", file_name="a.png", size=1)
+        assert again["additionalData"]["path"] == "spectrum/x"
 
     def test_upload_item_omits_blank_dimensions(self):
         """⚠️ 尺寸缺值 ⇒ **整个键不发**，绝不发空串（2026-10-07 真机 bug「For input string: ""」）。
@@ -696,6 +710,50 @@ class TestWriteItemShape:
         )
         assert got3["additionalData"]["width"] == "12"
         assert got3["additionalData"]["height"] == "34"
+
+    def test_upload_uses_picture_space_scene(self, qianfan_client, monkeypatch):
+        """⚠️ 图片空间上传**必须** `biz_name=ark&scene=goods_image`（2026-10-07 真机抓包）。
+
+        用发布链路的 `spectrum/image` ⇒ 文件落 `spectrum/` 桶而图片空间按 `arkgoods/` 取
+        ⇒ 登记成功但**裂图**。本用例钉死端点传的 scene + 按 qos 取凭证。
+        """
+        import base64 as _b64
+
+        api, account_id = qianfan_client
+        calls = {}
+
+        class _UploadStub:
+            def upload_web_permit(self, file_count=1, **kwargs):
+                calls["permit"] = {"file_count": file_count, **kwargs}
+                return True, "", {"data": {"uploadTempPermits": [
+                    {"qos": 1, "uploadAddr": "ros-upload.xiaohongshu.com",
+                     "token": "t-low", "fileIds": ["spectrum/low"]},
+                    {"qos": 2, "uploadAddr": "ros-upload-ali.xiaohongshu.com",
+                     "token": "t-high", "fileIds": ["arkgoods/high"]},
+                ]}}
+
+            def upload_file(self, **kwargs):
+                calls["put_file_id"] = kwargs.get("file_id")
+                return True, "", None
+
+            def register_material_files(self, seller_id, items):
+                calls["registered"] = items[0]
+                return True, "", None
+
+        from backend.app.api.platforms.xhs import qianfan as qmod
+        monkeypatch.setattr(qmod, "_ark_adapter_for", lambda db, acc, factory, _a=_UploadStub(): _a, raising=False)
+
+        res = api.post(
+            "/api/xhs/qianfan/picture-space/upload",
+            json={"platform_account_id": account_id, "file_name": "a.jpg",
+                  "content_base64": _b64.b64encode(b"JPEGDATA").decode()},
+        )
+        assert res.status_code == 200, res.text
+        assert calls["permit"].get("biz_name") == "ark", "必须 biz_name=ark"
+        assert calls["permit"].get("scene") == "goods_image", "必须 scene=goods_image"
+        # 取 qos 最高的那个（2 > 1）⇒ fileId 应是 arkgoods/high。
+        assert calls["put_file_id"] == "arkgoods/high", "须按 qos 取凭证（不能盲取 [0]）"
+        assert calls["registered"]["additionalData"]["path"] == "arkgoods/high", "path 就是 fileId"
 
     def test_upload_rejects_bad_base64_and_empty(self, qianfan_client):
         """上传端点：非法 base64 / 空文件必须在**调平台之前**就 400。"""

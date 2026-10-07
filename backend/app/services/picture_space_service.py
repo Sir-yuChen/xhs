@@ -447,30 +447,45 @@ def build_upload_item(
     size: int,
     width: int | None = None,
     height: int | None = None,
+    preview_url: str = "",
     father_directory_id: str = "0",
 ) -> dict[str, Any]:
-    """上传后**登记**图片空间时一条 `type:2` 条目（真机 JS bundle 的 add 调用体形状）。
+    """上传后**登记**图片空间时一条 `type:2` 条目（真机抓包 `batch_add` 请求体）。
 
-    ⚠️ 平台把「扩展名 / 尺寸 / path」都塞在 `additionalData`：
-    * `path` = `material_space/<fileId>`（fileId 由 `upload_web_permit` 预分配）；
-    * `name` = **无扩展名基名**（扩展名单独放 `additionalData.extension`）；
-    * `uploaderInfoModel` 是平台自己的元数据开关串（真机抓包逐字复制，缺它会报错）。
+    ⚠️ 真机实抓的形状（2026-10-07）——与初版差异极大：
+
+    ```json
+    {"sellerId":"…","type":2,"fatherDirectoryId":"0","name":"123","size":254242,
+     "additionalData":{"width":"1440","height":"1440","extension":".jpg",
+       "path":"arkgoods/<id>",
+       "uploaderInfoModel":{"url":"https://ros-preview.xhscdn.com/arkgoods/<id>?sign=…&t=…",
+         "bizName":"ark","scene":"goods_image","fileId":"arkgoods/<id>",
+         "isSecret":true,"cloudType":4}}}
+    ```
+
+    * `path` = **预分配 `fileId` 原样**（`arkgoods/<id>`）——**不**加 `material_space/` 前缀；
+    * `uploaderInfoModel` 是**对象**（含 PUT 响应头给回的**带签名** `url`），不是字符串；
+    * `name` = **无扩展名基名**（扩展名单独放 `additionalData.extension`）。
     """
     base, _, ext = str(file_name).rpartition(".")
     name = base if base and ext else str(file_name)
     extension = f".{ext}" if base and ext else ""
-    # `file_id` 是 `upload_web_permit` 预分配的 ID（形如 `spectrum/2Ip9…`）；
-    # `path` 要以 `material_space/` 开头（真机条目实样）。
-    raw_file_id = str(file_id or "").strip()
-    path = raw_file_id if raw_file_id.startswith("material_space/") else f"material_space/{raw_file_id}"
+    # `path` 就是预分配 fileId 本身（`arkgoods/<id>` 或 `spectrum/<id>`）。
+    path = str(file_id or "").strip()
     additional: dict[str, Any] = {
         "extension": extension,
         "path": path,
         "productCount": "0",
-        "uploaderInfoModel": (
-            '{"cloudType":0,"isSecret":false,"setBizName":false,"setCloudType":false,'
-            '"setFileId":false,"setIsSecret":false,"setScene":false,"setUrl":false}'
-        ),
+        # 平台按这个「上传者信息」把对象登记到云并发布公开链接；`url` 必须是 PUT 时
+        # 响应头 `X-Ros-Preview-Url` 给的**带签名**地址（缺它 ⇒ 条目在、取图 404）。
+        "uploaderInfoModel": {
+            "url": str(preview_url or ""),
+            "bizName": "ark",
+            "scene": "goods_image",
+            "fileId": path,
+            "isSecret": True,
+            "cloudType": 4,
+        },
     }
     # ⚠️ **尺寸缺值时不要写空串**（2026-10-07 真机 bug「For input string: ""」）：
     # 平台是 Java 后端，`additionalData.width/height` 会被 `Integer.parseInt` 解析；
