@@ -66,6 +66,7 @@ import { useThemePalette } from "../../app/providers";
 import { JobFormModal } from "../../components/schedule/job-form-modal";
 import { JobLogDetailModal } from "../../components/schedule/job-log-detail-modal";
 import { JobLogProgress } from "../../components/schedule/job-log-progress";
+import { RunJobModal } from "../../components/schedule/run-job-modal";
 import {
   cancelTask,
   changeScheduleJobStatus,
@@ -128,6 +129,8 @@ export function TaskCenterPage() {
   const [targetNames, setTargetNames] = useState<Record<string, string>>({});
   const [jobFormOpen, setJobFormOpen] = useState(false);
   const [editingJob, setEditingJob] = useState<ScheduledJob | null>(null);
+  // 设计 22 §5：「执行一次」有可编辑参数 ⇒ 弹参数弹窗（无参数任务走 `Popconfirm`）。
+  const [runJobTarget, setRunJobTarget] = useState<ScheduledJob | null>(null);
   // 日志详情弹窗（执行时配置快照 + 日志明细）
   const [detailLog, setDetailLog] = useState<ScheduledJobLog | null>(null);
 
@@ -257,8 +260,42 @@ export function TaskCenterPage() {
     try {
       await runScheduleJobOnce(job.id);
       message.success(`任务「${job.name}」已入队执行，记录见「任务日志」页签。`);
-    } catch {
-      message.error(`任务「${job.name}」执行失败。`);
+    } catch (err) {
+      // 后端回的结构化原因（如参数校验 / 归属失败）要带给用户，不吃成笼统「失败」。
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      message.error(detail || `任务「${job.name}」执行失败。`);
+    } finally {
+      setActionLoading(false);
+    }
+  }
+
+  /**
+   * 「执行一次」入口（设计 22 §5，2026-10-06 用户口径）。
+   *
+   * * 任务**有可编辑参数** ⇒ 弹参数弹窗，允许改本次参数后执行；
+   * * 任务**无参数** ⇒ `Popconfirm` 二次确认后直接执行。
+   *
+   * 判据是 `params_editable`（后端注册表下发，前端不硬编码）——
+   * 与「编辑弹窗能改哪些参数」是**同一个字段**，不会分叉。
+   */
+  function requestRunJob(job: ScheduledJob) {
+    if ((job.params_editable ?? []).length > 0) {
+      setRunJobTarget(job);
+    }
+    // 无参数任务：点按钮不做事，交给外层 `Popconfirm` 的「确定」触发 `runJobOnce`。
+  }
+
+  async function submitRunJob(params: Record<string, unknown>) {
+    const job = runJobTarget;
+    if (!job) return;
+    setActionLoading(true);
+    try {
+      await runScheduleJobOnce(job.id, params);
+      message.success(`任务「${job.name}」已按本次参数入队执行，记录见「任务日志」页签。`);
+      setRunJobTarget(null);
+    } catch (err) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      message.error(detail || `任务「${job.name}」执行失败。`);
     } finally {
       setActionLoading(false);
     }
@@ -381,14 +418,25 @@ export function TaskCenterPage() {
               {record.status === "active" ? "暂停" : "恢复"}
             </Button>
           )}
-          <Button
-            size="small"
-            icon={<SyncOutlined />}
-            disabled={actionLoading}
-            onClick={() => runJobOnce(record)}
+          {/* 设计 22 §5：「执行一次」——有可编辑参数 ⇒ 参数弹窗；无参数 ⇒ 二次确认。
+              用 `Popconfirm` 包住整个按钮：有参数的实例点「确定」只是打开弹窗
+              （`requestRunJob` 走弹窗分支），无参数的实例点「确定」直接跑。 */}
+          <Popconfirm
+            title={`确定立即执行任务「${record.name}」？`}
+            okText="执行"
+            cancelText="取消"
+            disabled={actionLoading || (record.params_editable ?? []).length > 0}
+            onConfirm={() => runJobOnce(record)}
           >
-            执行一次
-          </Button>
+            <Button
+              size="small"
+              icon={<SyncOutlined />}
+              disabled={actionLoading}
+              onClick={() => requestRunJob(record)}
+            >
+              执行一次
+            </Button>
+          </Popconfirm>
           <Button
             size="small"
             icon={<EditOutlined />}
@@ -770,6 +818,16 @@ export function TaskCenterPage() {
           void loadJobs();
           void loadStatus();
         }}
+      />
+
+      {/* 设计 22 §5：「执行一次」参数弹窗（只对有可编辑参数的任务弹）。
+          弹窗里改的参数**只对这一次执行生效**，不写回任务行配置。 */}
+      <RunJobModal
+        open={runJobTarget !== null}
+        job={runJobTarget}
+        submitting={actionLoading}
+        onCancel={() => setRunJobTarget(null)}
+        onSubmit={(params) => void submitRunJob(params)}
       />
 
       {/* 日志详情：执行时的配置快照 + 日志明细 */}

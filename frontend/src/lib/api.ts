@@ -106,6 +106,16 @@ import type {
   XhsShopItemDetail,
   XhsShopItemsQuery,
   XhsShopItemsResponse,
+  PictureSpaceItem,
+  PictureSpaceItemsQuery,
+  PictureSpaceItemsResponse,
+  PictureSpaceResizeCheck,
+  PictureSpaceUsage,
+  PictureSpaceTreeNode,
+  PictureSpaceWriteResult,
+  PictureSpaceDeletePreview,
+  PictureSpaceTask,
+  PictureSpaceUploadResult,
   XhsShopItemsDeleteResult,
   XhsShopItemStatus,
   MaterialFolder,
@@ -425,6 +435,24 @@ export async function createXhsAnalyticsReport(
 export async function fetchAccounts(platform = "xhs"): Promise<PlatformAccount[]> {
   const response = await http.get<Paginated<PlatformAccount>>("/accounts", { params: { platform } });
   return response.data.items;
+}
+
+/**
+ * 分页取账号（**无限下拉**用，2026-10-06 用户口径「账号下拉框应支持当前所有小红书账号，
+ * 无限下拉未实现」）。
+ *
+ * 与 `fetchAccounts` 的区别：那个只取第一页（返回数组），本函数回**整页对象**
+ * （含 `total`），供下拉滚动到底时判断「还有没有下一页」。
+ */
+export async function fetchAccountsPage(
+  platform = "xhs",
+  page = 1,
+  pageSize = 20
+): Promise<Paginated<PlatformAccount>> {
+  const response = await http.get<Paginated<PlatformAccount>>("/accounts", {
+    params: { platform, page, page_size: pageSize },
+  });
+  return response.data;
 }
 
 /**
@@ -1400,11 +1428,148 @@ export async function syncShopGoodsStatus(platformAccountId: number): Promise<Xh
   return response.data;
 }
 
-/** 无流量判定阈值：三项全部 <= 阈值才算无流量（后端不写死，由用户配置）。 */
+// --------------------------------------------------------------------------- #
+// 「我的笔记」离线数据（2026-10-06 需求）：商业/普通 Tab 查本地库 + 导入 xlsx。
+// --------------------------------------------------------------------------- #
+
+export interface OfflineNotesResult {
+  total: number;
+  page: number;
+  page_size: number;
+  items: unknown[];
+}
+
+export async function fetchOfflineNotes(
+  category: string,
+  platformAccountId?: number,
+  page = 1,
+  pageSize = 20,
+  keyword?: string,
+  itemId?: string
+): Promise<OfflineNotesResult> {
+  const response = await http.get<OfflineNotesResult>("/notes/offline", {
+    params: {
+      ...(category ? { category } : {}),
+      ...(platformAccountId != null ? { platform_account_id: platformAccountId } : {}),
+      ...(keyword && keyword.trim() ? { keyword: keyword.trim() } : {}),
+      ...(itemId && itemId.trim() ? { item_id: itemId.trim() } : {}),
+      page,
+      page_size: pageSize,
+    },
+  });
+  return response.data;
+}
+
+/** 商业/普通 Tab 复选框批量删除（2026-10-06）：delete_platform=false 只删本地，true 删本地+平台。 */
+export async function batchDeleteNotes(
+  noteIds: string[],
+  deletePlatform: boolean
+): Promise<{ deleted: number; failed: { note_id: string; reason: string }[]; results: { note_id: string; ok: boolean; reason?: string }[] }> {
+  const response = await http.post<{
+    deleted: number;
+    failed: { note_id: string; reason: string }[];
+    results: { note_id: string; ok: boolean; reason?: string }[];
+  }>("/notes/batch-delete", { note_ids: noteIds, delete_platform: deletePlatform }, { _silent: true } as never);
+  return response.data;
+}
+
+/** 商业/普通 Tab 手动同步（2026-10-06）：按日期范围（≤90天）从千帆数据中心拉离线笔记数据。 */
+export async function syncNoteData(
+  accountId: number,
+  category: string,
+  startDate?: string,
+  endDate?: string
+): Promise<{ ok: boolean; status: string; category: string; log_id: number | null }> {
+  const response = await http.post<{ ok: boolean; status: string; category: string; log_id: number | null }>(
+    "/notes/sync-data",
+    {
+      account_id: accountId,
+      category,
+      ...(startDate ? { start_date: startDate } : {}),
+      ...(endDate ? { end_date: endDate } : {}),
+    },
+    { _silent: true } as never
+  );
+  return response.data;
+}
+
+export async function importNoteData(
+  file: File,
+  category: string,
+  accountId: number
+): Promise<{ ok: boolean; status: string; category: string }> {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("category", category);
+  form.append("account_id", String(accountId));
+  const response = await http.post<{ ok: boolean; status: string; category: string }>(
+    "/notes/import-data",
+    form,
+    { headers: { "Content-Type": "multipart/form-data" }, _silent: true } as never
+  );
+  return response.data;
+}
+
+/** 点击离线笔记卡片时实时拉详情并落库（正文/媒体/话题拆分，2026-10-06 需求）。 */
+export async function hydrateOfflineNoteDetail(noteId: string): Promise<{
+  note_id: string;
+  title: string;
+  content: string;
+  author_name: string;
+  account_name: string;
+  cover_url: string;
+  asset_urls: string[];
+  video_url: string;
+  topics: { id: number; name: string; color: string }[];
+  raw_json: Record<string, unknown>;
+  /** 详情补齐结果：ok / no_url（缺 token）/ failed（拉取失败）/ already_hydrated。失败时正文/媒体留空，前端据此刻安静提示。 */
+  hydrate_status: string;
+  /** 挂载商品（后端 `_serialize_note.goods` 形状：`{item_id, item_title, price, images, stock, sales, variant}`）。 */
+  goods: {
+    item_id: string;
+    item_title: string;
+    price: string;
+    images: string[];
+    stock: number | null;
+    sales: number | null;
+    variant: string;
+  }[];
+}> {
+  const response = await http.post<{
+    note_id: string;
+    title: string;
+    content: string;
+    author_name: string;
+    account_name: string;
+    cover_url: string;
+    asset_urls: string[];
+    video_url: string;
+    topics: { id: number; name: string; color: string }[];
+    raw_json: Record<string, unknown>;
+    hydrate_status: string;
+    goods: {
+      item_id: string;
+      item_title: string;
+      price: string;
+      images: string[];
+      stock: number | null;
+      sales: number | null;
+      variant: string;
+    }[];
+  }>(`/notes/${noteId}/hydrate`);
+  return response.data;
+}
+
+/** 无流量判定阈值：可选核心指标，null = 不参与判定（2026-10-06 方案 A）。 */
 export interface NoTrafficThresholds {
-  max_browse: number;
-  max_pay_order: number;
-  max_pay_gmv: number;
+  max_browse: number | null;
+  max_pay_order: number | null;
+  max_pay_gmv: number | null;
+  /** 2026-10-06 方案 A：可选互动指标（null = 不参与判定）。 */
+  max_like: number | null;
+  max_collect: number | null;
+  max_comment: number | null;
+  max_share: number | null;
 }
 
 export interface NoTrafficCandidate {
@@ -1427,6 +1592,8 @@ export interface NoTrafficQuery {
   keyword: string;
   note_type: string;
   published_before: number | null;
+  /** 2026-10-06 方案 A：笔记分类（"" 不限 / goods / normal）。 */
+  category: string;
 }
 
 export interface NoTrafficCandidatesResult {
@@ -1454,7 +1621,8 @@ export async function fetchNoTrafficCandidates(
   // 与 `page_count`，前端按回显值对齐分页器 —— 不自己算第二份。
   const response = await http.post<NoTrafficCandidatesResult>(
     "/xhs/pc/users/no-traffic/candidates",
-    { account_id: accountId, thresholds, query, limit: pageSize, page }
+    { account_id: accountId, thresholds, query, limit: pageSize, page },
+    { _silent: true } as never
   );
   return response.data;
 }
@@ -1476,7 +1644,8 @@ export async function startNoTrafficCleanup(
       query,
       batch_limit: batchLimit,
       ...(noteIds.length ? { note_ids: noteIds } : {}),
-    }
+    },
+    { _silent: true } as never
   );
   return response.data;
 }
@@ -1503,7 +1672,8 @@ export async function fetchNoTrafficCleanupStatus(
   taskId: number
 ): Promise<NoTrafficCleanupStatus> {
   const response = await http.get<NoTrafficCleanupStatus>(
-    `/xhs/pc/users/no-traffic/cleanup/${taskId}`
+    `/xhs/pc/users/no-traffic/cleanup/${taskId}`,
+    { _silent: true } as never
   );
   return response.data;
 }
@@ -1526,7 +1696,29 @@ export async function fetchNoTrafficCleanupActive(
   return response.data;
 }
 
-/** 清理无流量笔记的**操作日志**一行（独立表 `no_traffic_cleanup_logs`）。 */
+/** 清理无流量笔记的**操作日志**一行（独立表 `no_traffic_cleanup_logs`）。
+ *
+ * ⚠️ 2026-10-06 用户口径「清理无流量的主要对象是笔记，**所有主体应是笔记维度**」：
+ * 批次行内联 `items[]`（笔记维度明细），列表以**父子两层**渲染 ——
+ * 批次行答「这次整体怎么样」，展开行答「**这一篇**被删了没有、为什么」。
+ */
+export interface NoTrafficCleanupItemRow {
+  id: number;
+  log_id: number | null;
+  task_id: number | null;
+  account_id: number | null;
+  account_name: string;
+  note_id: string;
+  note_title: string;
+  note_cover: string;
+  /** `deleted` / `skipped` / `failed` / `not_in_pool` / `not_attempted`。 */
+  result: string;
+  reason: string;
+  published_at: number | null;
+  operated_at: string | null;
+  created_at: string | null;
+}
+
 export interface NoTrafficCleanupLogItem {
   id: number;
   account_id: number | null;
@@ -1545,8 +1737,18 @@ export interface NoTrafficCleanupLogItem {
   failed: number;
   not_in_pool: number;
   status: string;
+  /** **本次失败原因**（首条失败笔记的平台原文）。⚠️ 不是候选池覆盖度说明
+   * —— 那句在 `coverage_note`（DEF-095）。 */
   reason: string;
+  /** 候选池覆盖度说明（信息性备注，不显示在「失败原因」列）。 */
+  coverage_note: string;
+  /** 本批是否被**中止**（平台风控 / 凭据类失败 ⇒ 剩余笔记不再发请求）。 */
+  aborted: boolean;
+  abort_reason: string;
+  /** 兼容字段：`{note_id, ok, reason}` 形态的旧明细快照。 */
   details: { note_id: string; ok: boolean; reason?: string }[];
+  /** **笔记维度明细**（一篇一行，用户口径「主体应是笔记维度」）。 */
+  items: NoTrafficCleanupItemRow[];
   created_at: string | null;
   started_at: string | null;
   finished_at: string | null;
@@ -1575,7 +1777,8 @@ export async function fetchNoTrafficCleanupLogs(params: {
         page: params.page ?? 1,
         limit: params.limit ?? 20,
       },
-    }
+      _silent: true,
+    } as never
   );
   return response.data;
 }
@@ -1615,7 +1818,8 @@ export async function checkXhsQianfanShopHealth(
 ): Promise<XhsQianfanBinding & { checked_now: boolean; flipped_to_invalid: boolean }> {
   const response = await http.post<XhsQianfanBinding & { checked_now: boolean; flipped_to_invalid: boolean }>(
     "/xhs/qianfan/health-check",
-    { platform_account_id: accountId }
+    { platform_account_id: accountId },
+    { _silent: true } as never
   );
   return response.data;
 }
@@ -1635,6 +1839,207 @@ export async function checkXhsQianfanShopHealth(
 export async function fetchXhsShopItems(query: XhsShopItemsQuery): Promise<XhsShopItemsResponse> {
   const response = await http.post<XhsShopItemsResponse>("/xhs/qianfan/items", query);
   return response.data;
+}
+
+/**
+ * 图片空间列表（设计 22 §1.3）——**千帆云只读代理，本地零落库**。
+ *
+ * ⚠️ 与「素材库」（`fetchMaterialFiles`，本地磁盘）不是一回事：本函数拿的是
+ * 千帆云上的图片资产（15G 配额）。列表端点平台**强制签名**（后端 `_signed_post`），
+ * 但本调用本身是只读查询。
+ */
+export async function fetchPictureSpaceItems(
+  query: PictureSpaceItemsQuery
+): Promise<PictureSpaceItemsResponse> {
+  const response = await http.post<PictureSpaceItemsResponse>(
+    "/xhs/qianfan/picture-space/items",
+    query
+  );
+  return response.data;
+}
+
+/** 图片空间配额（只读；取不到 ⇒ `used_space`/`total_space` 为 `null`，页面不渲染配额条）。 */
+export async function fetchPictureSpaceUsage(accountId: number): Promise<PictureSpaceUsage> {
+  const response = await http.get<PictureSpaceUsage>("/xhs/qianfan/picture-space/usage", {
+    params: { platform_account_id: accountId },
+  });
+  return response.data;
+}
+
+/** 图片空间**扩容条件**（只读；弹窗打开时调，2026-10-07）。 */
+export async function fetchPictureSpaceResizeConditions(
+  accountId: number
+): Promise<PictureSpaceResizeCheck> {
+  const response = await http.get<PictureSpaceResizeCheck>(
+    "/xhs/qianfan/picture-space/resize/check",
+    { params: { platform_account_id: accountId } }
+  );
+  return response.data;
+}
+
+/** **申请扩容**（写；成功后重取配额）。 */
+export async function resizePictureSpace(
+  accountId: number
+): Promise<PictureSpaceWriteResult> {
+  const response = await http.post<PictureSpaceWriteResult>("/xhs/qianfan/picture-space/resize", {
+    platform_account_id: accountId,
+  });
+  return response.data;
+}
+
+/** 图片空间目录树（只读；本页只用根节点）。 */
+export async function fetchPictureSpaceTree(accountId: number): Promise<PictureSpaceTreeNode> {
+  const response = await http.get<PictureSpaceTreeNode>("/xhs/qianfan/picture-space/tree", {
+    params: { platform_account_id: accountId },
+  });
+  return response.data;
+}
+
+/**
+ * 图片空间写操作（设计 22 §1.5）—— **用户显式操作**，非后台自动写。
+ *
+ * ⚠️ 全部需要 ark 签名（平台强制）。`items` 传列表里已有的归一化条目
+ * （后端反推成平台形状，前端不必回传原始 JSON）。
+ */
+
+/** 新建文件夹（文件夹名 ≤20 字）。 */
+export async function createPictureSpaceFolder(
+  accountId: number,
+  name: string
+): Promise<PictureSpaceWriteResult> {
+  const response = await http.post<PictureSpaceWriteResult>("/xhs/qianfan/picture-space/folders", {
+    platform_account_id: accountId,
+    name,
+  });
+  return response.data;
+}
+
+/** 移动到目录（平台侧可逆；`fatherDirectoryId` = 目标目录 id，`"0"` = 根）。 */
+export async function movePictureSpaceItems(
+  accountId: number,
+  items: PictureSpaceItem[],
+  fatherDirectoryId: string
+): Promise<PictureSpaceWriteResult> {
+  const response = await http.post<PictureSpaceWriteResult>("/xhs/qianfan/picture-space/move", {
+    platform_account_id: accountId,
+    items,
+    father_directory_id: fatherDirectoryId,
+  });
+  return response.data;
+}
+
+/** 删除 / 彻底删除前预览（二次确认凭据，纯本地）。`action`：`delete` | `permanent-delete`。 */
+export async function previewPictureSpaceDelete(
+  accountId: number,
+  items: PictureSpaceItem[],
+  action: "delete" | "permanent-delete" = "delete"
+): Promise<PictureSpaceDeletePreview> {
+  const response = await http.post<PictureSpaceDeletePreview>("/xhs/qianfan/picture-space/preview", {
+    platform_account_id: accountId,
+    items,
+    action,
+  });
+  return response.data;
+}
+
+/** 批量删除（**进平台回收站**，需 `confirmed` + `confirm_token`）。 */
+export async function deletePictureSpaceItems(
+  accountId: number,
+  items: PictureSpaceItem[],
+  confirmToken: string
+): Promise<PictureSpaceWriteResult> {
+  const response = await http.post<PictureSpaceWriteResult>("/xhs/qianfan/picture-space/delete", {
+    platform_account_id: accountId,
+    items,
+    confirmed: true,
+    confirm_token: confirmToken,
+  });
+  return response.data;
+}
+
+/** **从回收站还原**（平台侧可逆，不需要两层确认）。 */
+export async function restorePictureSpaceItems(
+  accountId: number,
+  items: PictureSpaceItem[]
+): Promise<PictureSpaceWriteResult> {
+  const response = await http.post<PictureSpaceWriteResult>("/xhs/qianfan/picture-space/restore", {
+    platform_account_id: accountId,
+    items,
+  });
+  return response.data;
+}
+
+/** **彻底删除**（回收站，不可还原，需 `confirmed` + `confirm_token`）。 */
+export async function permanentDeletePictureSpaceItems(
+  accountId: number,
+  items: PictureSpaceItem[],
+  confirmToken: string
+): Promise<PictureSpaceWriteResult> {
+  const response = await http.post<PictureSpaceWriteResult>(
+    "/xhs/qianfan/picture-space/permanent-delete",
+    {
+      platform_account_id: accountId,
+      items,
+      confirmed: true,
+      confirm_token: confirmToken,
+    }
+  );
+  return response.data;
+}
+
+/** 批量下载（平台打包成异步任务，返回 task_id）。 */
+export async function downloadPictureSpaceItems(
+  accountId: number,
+  items: PictureSpaceItem[]
+): Promise<PictureSpaceWriteResult> {
+  const response = await http.post<PictureSpaceWriteResult>("/xhs/qianfan/picture-space/download", {
+    platform_account_id: accountId,
+    items,
+  });
+  return response.data;
+}
+
+/** 查图片空间异步任务（下载打包进度 / 结果）。 */
+export async function fetchPictureSpaceTask(
+  accountId: number,
+  taskId: string
+): Promise<PictureSpaceTask> {
+  const response = await http.get<PictureSpaceTask>(`/xhs/qianfan/picture-space/task/${taskId}`, {
+    params: { platform_account_id: accountId },
+  });
+  return response.data;
+}
+
+/**
+ * **上传本地图片**到图片空间（设计 22 §1.5）。
+ *
+ * 前端把文件读成 base64 传上来；后端三步（申请凭证 → PUT 到 ROS → 登记条目）。
+ */
+export async function uploadPictureSpaceFile(
+  accountId: number,
+  file: File
+): Promise<PictureSpaceUploadResult> {
+  const contentBase64 = await fileToBase64(file);
+  const response = await http.post<PictureSpaceUploadResult>("/xhs/qianfan/picture-space/upload", {
+    platform_account_id: accountId,
+    file_name: file.name,
+    content_base64: contentBase64,
+  });
+  return response.data;
+}
+
+/** `File` → base64（不含 `data:` 前缀）。 */
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result ?? "");
+      const comma = result.indexOf(",");
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
 }
 
 /**
@@ -2295,8 +2700,20 @@ export async function changeScheduleJobStatus(
   return response.data;
 }
 
-export async function runScheduleJobOnce(jobId: number): Promise<{ log_id: number; status: string }> {
-  const response = await http.post<{ log_id: number; status: string }>(`/schedule/jobs/${jobId}/run`);
+/**
+ * 「执行一次」（设计 22 §5）。
+ *
+ * `params` 传了 ⇒ **只对这一次**生效（不写回任务行配置）：用户改的是「这次用什么
+ * 参数跑」，不是「把定时配置改掉」。不传 ⇒ 按任务行配置执行 —— 无参数任务走这条。
+ */
+export async function runScheduleJobOnce(
+  jobId: number,
+  params?: Record<string, unknown>
+): Promise<{ log_id: number; status: string }> {
+  const response = await http.post<{ log_id: number; status: string }>(
+    `/schedule/jobs/${jobId}/run`,
+    params ? { params } : {}
+  );
   return response.data;
 }
 

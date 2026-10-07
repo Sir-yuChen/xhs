@@ -1,3 +1,4 @@
+import dayjs from "dayjs";
 import {
   CommentOutlined,
   CopyOutlined,
@@ -15,6 +16,8 @@ import {
   ShareAltOutlined,
   ShoppingOutlined,
   StarOutlined,
+  SyncOutlined,
+  UploadOutlined,
   UserOutlined,
 } from "@ant-design/icons";
 import {
@@ -23,14 +26,18 @@ import {
   Avatar,
   Button,
   Card,
+  Checkbox,
   Col,
+  DatePicker,
   Descriptions,
   Divider,
   Empty,
+  Image,
   InputNumber,
   Input,
   Modal,
   Popconfirm,
+  Radio,
   Row,
   Segmented,
   Select,
@@ -41,6 +48,7 @@ import {
   Tooltip,
   Typography,
   Table,
+  Upload,
 } from "antd";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
@@ -54,6 +62,7 @@ import {
   asFiniteNumber,
   usePersistedFilter,
 } from "../../../lib/filter-cache";
+import { loginChannelRows } from "../../../lib/login-state";
 import {
   fetchAccounts,
   fetchXhsInteractionMessages,
@@ -67,13 +76,21 @@ import {
   fetchXhsSelfSearch,
   fetchXhsQianfanBinding,
   checkXhsQianfanShopHealth,
+  fetchOfflineNotes,
+  importNoteData,
+  syncNoteData,
+  hydrateOfflineNoteDetail,
+  fetchScheduleLogs,
+  batchDeleteNotes,
   fetchNoTrafficCandidates,
   fetchNoTrafficCleanupActive,
   fetchNoTrafficCleanupLogs,
   startNoTrafficCleanup,
   fetchNoTrafficCleanupStatus,
+  fetchXhsAccountLoginStates,
   type NoTrafficThresholds,
   type NoTrafficCandidate,
+  type NoTrafficCleanupItemRow,
   type NoTrafficCleanupLogItem,
   type NoTrafficCleanupStatus,
   type NoTrafficQuery,
@@ -85,6 +102,7 @@ import type {
   XhsGoodsSource,
   XhsInteractionKind,
   XhsInteractionMessage,
+  XhsLoginChannels,
   XhsQianfanBinding,
   XhsSearchNote,
   XhsSelfCapabilities,
@@ -107,28 +125,6 @@ import type { QuietError } from "../../../components/platforms/note-detail-modal
 
 const { Text, Paragraph, Link: AntLink } = Typography;
 
-/** 复制到剪贴板：优先 Clipboard API，非安全上下文（如局域网 IP 访问）退回 execCommand。 */
-/** 复制反馈的 message 实例由调用方（组件内 `App.useApp()`）传入 —— 模块级函数拿不到 hook。 */
-async function copyToClipboard(value: string, okText: string, msg: { success: (text: string) => void; error: (text: string) => void }): Promise<void> {
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(value);
-    } else {
-      const holder = document.createElement("textarea");
-      holder.value = value;
-      holder.style.position = "fixed";
-      holder.style.opacity = "0";
-      document.body.appendChild(holder);
-      holder.select();
-      document.execCommand("copy");
-      document.body.removeChild(holder);
-    }
-    msg.success(okText);
-  } catch {
-    msg.error("复制失败，请手动选中后复制");
-  }
-}
-
 /**
  * 详情响应与列表行的合并（DEF-047）。
  *
@@ -145,10 +141,18 @@ function mergeNoteDetail(
   detail: XhsSearchNote,
   fallbackUrl: string,
 ): XhsSearchNote {
+  // 详情端点回填的 `goods` 只带标题/图/规格，**不带价格**（补价只在列表端点做）；
+  // 若直接 `detail.goods ?? note.goods`，非空的 `detail.goods` 会用空 price 覆盖掉
+  // 列表行补过价的 price —— 现象就是「价格闪现一下又消失」（2026-10-06 用户报出）。
+  // 这里做**字段级回填**：detail.goods 的 price 为空时，保留 note.goods 的那一份。
+  const goods: NoteGoods | null =
+    detail.goods && note.goods
+      ? { ...detail.goods, price: detail.goods.price || note.goods.price }
+      : (detail.goods ?? note.goods ?? null);
   return {
     ...note,
     ...detail,
-    goods: detail.goods ?? note.goods ?? null,
+    goods,
     shop: detail.shop ?? note.shop ?? null,
     note_url: detail.note_url || fallbackUrl,
   };
@@ -209,6 +213,57 @@ function mountGoods(goods: NoteGoods | null, shop: XhsSearchNote["shop"]): Mount
 }
 
 // ---------------------------------------------------------------------------
+// 2026-10-06：离线笔记（商业/普通）详情弹窗的**指标全面展示**。
+// metrics 键来自后端 `note_data_service._note_row_from_butterfly`（24+ 个指标，
+// 覆盖 xlsx 全部列）。按分组渲染，缺值不显示（硬约束⑤缺值口径）。
+// ---------------------------------------------------------------------------
+
+/** 指标键 → 中文标签，按「互动 / 观看 / 商品」三组。缺值（undefined/null）不渲染。 */
+const OFFLINE_METRICS_GROUPS: { label: string; metrics: [string, string][] }[] = [
+  {
+    label: "互动",
+    metrics: [
+      ["read_count", "阅读"],
+      ["like_count", "点赞"],
+      ["collect_count", "收藏"],
+      ["comment_count", "评论"],
+      ["share_count", "分享"],
+      ["follow_count", "关注"],
+      ["danmaku_count", "弹幕"],
+    ],
+  },
+  {
+    label: "观看",
+    metrics: [
+      ["avg_view_time", "平均观看时长"],
+      ["full_view_rate", "完播率"],
+      ["video_duration", "视频时长"],
+    ],
+  },
+  {
+    label: "商品",
+    metrics: [
+      ["pay_gmv", "支付金额"],
+      ["pay_order_cnt", "支付订单"],
+      ["pay_user_cnt", "支付人数"],
+      ["item_click_cnt", "商品点击"],
+      ["item_click_uv", "点击人数"],
+      ["item_click_pv_rate", "点击率(PV)"],
+      ["pay_pv_rate", "支付转化率(PV)"],
+      ["pay_uv_rate", "支付转化率(UV)"],
+      ["refund_gmv", "退款金额"],
+      ["refund_order_cnt", "退款订单"],
+      ["refund_user_cnt", "退款人数"],
+      ["cart_item_cnt", "加购件数"],
+      ["lead_user_page_view_cnt", "引流店铺主页次数"],
+      ["lead_user_page_pay_gmv", "引流店铺主页支付金额"],
+      ["lead_live_view_cnt", "引流直播间次数"],
+      ["lead_live_pay_gmv", "引流直播间支付金额"],
+    ],
+  },
+];
+
+// ---------------------------------------------------------------------------
 // Self content page: my notes / liked / collected / interaction messages.
 // Design source: docs/02_设计文档/12_功能设计_我的笔记与互动数据.md
 //
@@ -241,7 +296,10 @@ function mountGoods(goods: NoteGoods | null, shop: XhsSearchNote["shop"]): Mount
 //      failure here means "nothing to show", never "show someone else's data".
 // ---------------------------------------------------------------------------
 
-type TabKey = XhsSelfContentScope | "interactions";
+// 2026-10-06 需求「我的笔记页面重构」：新增「商业笔记」（goods）与「普通笔记」（normal）
+// 两个离线页签。`XhsSelfContentScope` 是线上三分类（notes/liked/collected），
+// 离线两个是**新的取值域**，故 TabKey 显式扩展，不并进 XhsSelfContentScope。
+type TabKey = XhsSelfContentScope | "interactions" | "goods" | "normal";
 
 type PanelState<T> = {
   items: T[];
@@ -293,16 +351,24 @@ const EMPTY_NO_TRAFFIC_THRESHOLDS: NoTrafficThresholds = {
   max_browse: 0,
   max_pay_order: 0,
   max_pay_gmv: 0,
+  // 2026-10-06 方案 A：可选互动指标，默认不参与判定。
+  max_like: null,
+  max_collect: null,
+  max_comment: null,
+  max_share: null,
 };
 
 const EMPTY_NO_TRAFFIC_QUERY: NoTrafficQuery = {
   keyword: "",
   note_type: "",
   published_before: null,
+  category: "",
 };
 
 const TAB_LABELS: Record<TabKey, string> = {
-  notes: "我发布的",
+  notes: "全部笔记",
+  goods: "商业笔记",
+  normal: "普通笔记",
   liked: "我赞过的",
   collected: "我收藏的",
   interactions: "互动消息",
@@ -335,8 +401,12 @@ function noteKindLabel(note: XhsSearchNote): "视频" | "图文" {
 }
 
 function noteExternalUrl(note: XhsSearchNote): string {
-  if (note.note_url) return note.note_url;
-  return note.note_id ? `https://www.xiaohongshu.com/explore/${note.note_id}` : "";
+  // 只认带 token 的 `note_url`：无 token 的 explore 链接会被平台 302 → 404
+  // （error_code=300031），拼出来就是个必失效的「假链接」（DEF-053 同款）。
+  // 离线笔记在 hydrate 回查后 `note_url` 会带上新鲜 token；回查失败（平台已不可见）
+  // 则返回空串，前端不渲染「在小红书打开」。
+  if (note.note_url && note.note_url.includes("xsec_token=")) return note.note_url;
+  return "";
 }
 
 /**
@@ -402,6 +472,31 @@ function numberCell(value: number | null | undefined): string {
   return value === null || value === undefined ? "—" : String(value);
 }
 
+/**
+ * 笔记维度的**处置结果** → 展示文案与配色（用户口径「主体应是笔记维度」）。
+ *
+ * ⚠️ 五值来自后端常量 `CLEANUP_ITEM_RESULTS`，**前端不另造一套名字**：
+ * 认不出的取值**原样显示**（不翻译、不猜 —— 硬约束⑤「缺值不造假」的同款纪律）。
+ * 特别是 `not_attempted`（本批被风控中止、这篇没轮到）与 `failed`（打了但失败）
+ * 必须分得开 —— 用户看到「未执行」才知道该重试，看到「失败」才知道该查原因。
+ */
+function cleanupItemResult(result: string): { text: string; color: string } {
+  switch (result) {
+    case "deleted":
+      return { text: "已删除", color: "green" };
+    case "skipped":
+      return { text: "已跳过", color: "orange" };
+    case "failed":
+      return { text: "失败", color: "red" };
+    case "not_in_pool":
+      return { text: "不在候选池", color: "default" };
+    case "not_attempted":
+      return { text: "未执行", color: "default" };
+    default:
+      return { text: result || "—", color: "default" };
+  }
+}
+
 export function XhsMyNotesPage() {
   const p = useThemePalette();
   // 全站消息提醒统一走 antd message（设计 04 §3.6，2026-09-25 用户口径：
@@ -409,6 +504,10 @@ export function XhsMyNotesPage() {
   // 替代静态 `message` 导入，实例继承 ConfigProvider 的主题与 locale。
   const { message } = App.useApp();
   const [accounts, setAccounts] = useState<PlatformAccount[]>([]);
+  // 2026-10-06：三平台登录态的**探活结果**（L3，覆盖列表自带的 L1/L2「未检测」）。
+  // 进入页面 / 刷新时自动探一次（账号矩阵页同款），失败静默保持「未检测」。
+  const [loginChannels, setLoginChannels] = useState<Record<number, XhsLoginChannels>>({});
+  const loginProbeInFlight = useRef(false);
   // 账号选择 + 页签 + 互动分类**落本地缓存**（2026-09-26 用户口径「筛选条件和账号
   // 选择后放本地缓存，避免每次均需要重新选择」）：`usePersistedFilter` 与 `useState`
   // 同形，初值优先取缓存、变化即回写。账号经 `asFiniteNumber` 校验（只能是数字或
@@ -438,6 +537,39 @@ export function XhsMyNotesPage() {
     liked: emptyPanel<XhsSearchNote>(),
     collected: emptyPanel<XhsSearchNote>(),
   });
+  // 2026-10-06 需求：商业/普通笔记两个**离线**页签（走本地库，零平台请求）。
+  const [offlinePanels, setOfflinePanels] = useState<Record<"goods" | "normal", PanelState<XhsSearchNote>>>({
+    goods: emptyPanel<XhsSearchNote>(),
+    normal: emptyPanel<XhsSearchNote>(),
+  });
+  // 导入离线笔记数据文件（xlsx）的弹窗与上传状态。
+  const [importOpen, setImportOpen] = useState(false);
+  const [importCategory, setImportCategory] = useState<"goods" | "normal">("goods");
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importUploading, setImportUploading] = useState(false);
+  // 2026-10-06：导入改走任务日志入口后，「文件解析执行中」状态来自后台日志
+  // （不是上传瞬间）。记录正在解析的 category，按钮据此显示执行中 + 轮询日志收口。
+  const [importingCategory, setImportingCategory] = useState<"goods" | "normal" | null>(null);
+  // 2026-10-06：复选框批量删除 —— 选中集（按 category 分开）、删除弹窗、搜索/商品ID。
+  const [offlineSelected, setOfflineSelected] = useState<Record<"goods" | "normal", Set<string>>>({
+    goods: new Set(),
+    normal: new Set(),
+  });
+  const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
+  const [batchDeleteCategory, setBatchDeleteCategory] = useState<"goods" | "normal">("goods");
+  const [batchDeleteMode, setBatchDeleteMode] = useState<"local" | "platform">("local");
+  const [batchDeleting, setBatchDeleting] = useState(false);
+  const [offlineKeyword, setOfflineKeyword] = useState<Record<"goods" | "normal", string>>({
+    goods: "",
+    normal: "",
+  });
+  const [offlineItemId, setOfflineItemId] = useState("");
+  // 2026-10-06：手动同步日期范围（弹窗内 RangePicker，≤90天）+ 同步中状态（按 category）。
+  const [syncDateRange, setSyncDateRange] = useState<[string, string] | null>(null);
+  const [syncingCategory, setSyncingCategory] = useState<"goods" | "normal" | null>(null);
+  const [syncOpen, setSyncOpen] = useState(false);
+  const [syncCategory, setSyncCategory] = useState<"goods" | "normal">("goods");
+  const [syncSubmitting, setSyncSubmitting] = useState(false);
   const [interactionKind, setInteractionKind] = usePersistedFilter<XhsInteractionKind>(
     FILTER_CACHE_KEYS.myNotes.interactionKind, "like_collect", asEnum(INTERACTION_KIND_VALUES)
   );
@@ -462,6 +594,8 @@ export function XhsMyNotesPage() {
   const [selectedNote, setSelectedNote] = useState<XhsSearchNote | null>(null);
   const [detailNote, setDetailNote] = useState<XhsSearchNote | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  // 2026-10-06：离线笔记（商业/普通）详情弹窗的指标（`raw_json.metrics` 全面展示）。
+  const [offlineMetrics, setOfflineMetrics] = useState<Record<string, number> | null>(null);
   // 详情/评论失败的承载：`text` 是给界面的**一行短文案**，`full` 是后端原话（Tooltip 里看）。
   // v1.27 之前详情失败只弹 toast、`detailError` 永远是 null —— 于是 `hasFullMetrics`
   // 的 `!detailError` 一直是真，作者当年写的那道闸其实是**死的**；现在它真正生效。
@@ -496,6 +630,35 @@ export function XhsMyNotesPage() {
     [xhsAccounts],
   );
 
+  // 2026-10-06：当前选中账号的三平台登录态。探活结果（L3）优先，回退列表自带（L1/L2）。
+  // 「小红书号」后面那三个 tag 的数据源 —— 账号矩阵页同款（lib/login-state.ts 唯一实现）。
+  const currentAccountLoginChannels = useMemo(
+    () =>
+      loginChannels[selectedAccountId ?? -1] ||
+      accounts.find((a) => a.id === selectedAccountId)?.login_channels ||
+      {},
+    [loginChannels, accounts, selectedAccountId],
+  );
+
+  // 2026-10-06：进页面 / 刷新自动探一次三平台登录态（L3，账号矩阵页同款）。
+  // 失败静默 —— 保持列表自带的「未检测」，不编「已失效」（§18.5 红线）。
+  async function autoCheckLoginStates() {
+    if (loginProbeInFlight.current) return;
+    loginProbeInFlight.current = true;
+    try {
+      const payload = await fetchXhsAccountLoginStates({ probe: true });
+      const next: Record<number, XhsLoginChannels> = {};
+      for (const item of payload.accounts) {
+        next[item.platform_account_id] = item.channels;
+      }
+      setLoginChannels(next);
+    } catch {
+      // 探活没结论就保持现状（「未检测」），刷新可再探一次。
+    } finally {
+      loginProbeInFlight.current = false;
+    }
+  }
+
   // Guards against a stale response from a previously selected account
   // overwriting the current account's data.
   const requestSeq = useRef(0);
@@ -516,6 +679,8 @@ export function XhsMyNotesPage() {
           }
           return first?.id ?? null;
         });
+        // 进页面自动探一次三平台登录态（L3）：不 await，探活要几秒，不能卡页面 loading。
+        void autoCheckLoginStates();
       } catch {
         setIdentityError("账号列表加载失败。");
       } finally {
@@ -549,6 +714,10 @@ export function XhsMyNotesPage() {
       notes: emptyPanel<XhsSearchNote>(),
       liked: emptyPanel<XhsSearchNote>(),
       collected: emptyPanel<XhsSearchNote>(),
+    });
+    setOfflinePanels({
+      goods: emptyPanel<XhsSearchNote>(),
+      normal: emptyPanel<XhsSearchNote>(),
     });
     setInteractionPanel(emptyPanel<XhsInteractionMessage>());
     setIsLoadingIdentity(true);
@@ -895,13 +1064,17 @@ export function XhsMyNotesPage() {
    */
   useEffect(() => {
     const panel =
-      activeTab === "interactions" ? interactionPanel : notePanels[activeTab as XhsSelfContentScope];
+      activeTab === "interactions"
+        ? interactionPanel
+        : activeTab === "goods" || activeTab === "normal"
+          ? offlinePanels[activeTab]
+          : notePanels[activeTab as XhsSelfContentScope];
     pagingRef.current = {
       loading: Boolean(panel?.loading),
       hasMore: Boolean(panel?.hasMore),
       blocked: Boolean(panel?.error),
     };
-  }, [activeTab, interactionPanel, notePanels]);
+  }, [activeTab, interactionPanel, notePanels, offlinePanels]);
 
   /**
    * Scroll-triggered paging (R7 / design doc §20).
@@ -930,6 +1103,12 @@ export function XhsMyNotesPage() {
           void loadInteractionPage(interactionPanel.cursor, true);
           return;
         }
+        if (activeTab === "goods" || activeTab === "normal") {
+          const panel = offlinePanels[activeTab];
+          const page = Math.floor(panel.items.length / 20) + 1;
+          void loadOfflinePage(activeTab, page, true);
+          return;
+        }
         const scope = activeTab as XhsSelfContentScope;
         void loadNotePage(scope, notePanels[scope].cursor, true);
       },
@@ -938,12 +1117,18 @@ export function XhsMyNotesPage() {
     observer.observe(node);
     return () => observer.disconnect();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, searchResult, sentinelRef.current, notePanels, interactionPanel, capabilities]);
+  }, [activeTab, searchResult, sentinelRef.current, notePanels, interactionPanel, capabilities, offlinePanels]);
 
   /** The only way forward after a failed page: an explicit user click (§20). */
   function retryActivePage() {
     if (activeTab === "interactions") {
       void loadInteractionPage(interactionPanel.cursor, true);
+      return;
+    }
+    if (activeTab === "goods" || activeTab === "normal") {
+      const panel = offlinePanels[activeTab];
+      const page = Math.floor(panel.items.length / 20) + 1;
+      void loadOfflinePage(activeTab, page, true);
       return;
     }
     const scope = activeTab as XhsSelfContentScope;
@@ -1067,6 +1252,187 @@ export function XhsMyNotesPage() {
     }
   }
 
+  /** 2026-10-06 需求：加载**离线**商业/普通笔记（走本地库，零平台请求）。 */
+  async function loadOfflinePage(category: "goods" | "normal", page = 1, append = false) {
+    if (!selectedAccountId) return;
+    const seq = requestSeq.current;
+    setOfflinePanels((current) => ({ ...current, [category]: { ...current[category], loading: true, error: null } }));
+    try {
+      const kw = offlineKeyword[category];
+      const itemId = category === "goods" ? offlineItemId : "";
+      const data = await fetchOfflineNotes(category, selectedAccountId, page, 20, kw, itemId);
+      if (seq !== requestSeq.current) return;
+      setOfflinePanels((current) => ({
+        ...current,
+        [category]: {
+          items: (append
+            ? [...current[category].items, ...(data.items as XhsSearchNote[])]
+            : (data.items as XhsSearchNote[])
+          ).map((item) => {
+            // `_serialize_note` 的 `goods` 是**数组**（`note_goods` 多对多），与
+            // XhsSearchNote 的 `goods`（NoteGoods 单数）语义不同 —— 列表行不带
+            // 单数 goods，挂载商品统一由详情弹窗 hydrate 后走 `shop.goods`。
+            // 2026-10-06：离线笔记的互动四数据在 `raw_json.metrics`（键 like_count/
+            // collect_count/comment_count/share_count，来自千帆 xlsx）。提取到顶层
+            // `likes/collects/comments/shares`，列表卡片即可渲染（缺值 0，不造假）。
+            const rawJson = (item as XhsSearchNote & { raw_json?: Record<string, unknown> }).raw_json;
+            const metrics = (rawJson?.metrics ?? {}) as Record<string, unknown>;
+            return {
+              ...item,
+              goods: null,
+              likes: Number(metrics.like_count ?? 0),
+              collects: Number(metrics.collect_count ?? 0),
+              comments: Number(metrics.comment_count ?? 0),
+              shares: Number(metrics.share_count ?? 0),
+            };
+          }),
+          cursor: "",
+          hasMore: page * 20 < data.total,
+          loading: false,
+          error: null,
+          loaded: true,
+        },
+      }));
+    } catch (error) {
+      if (seq !== requestSeq.current) return;
+      const { message: reason, code } = readError(error);
+      setOfflinePanels((current) => ({
+        ...current,
+        [category]: { ...current[category], loading: false, error: quietError(reason, code), loaded: true },
+      }));
+    }
+  }
+
+  /** 2026-10-06 需求：提交导入 xlsx（后端走任务日志入口异步解析，站内通知推送统计）。 */
+  async function handleImportNoteData() {
+    if (!selectedAccountId || !importFile) return;
+    setImportUploading(true);
+    try {
+      await importNoteData(importFile, importCategory, selectedAccountId);
+      message.success("导入任务已提交，解析完成后将通过站内消息通知");
+      setImportOpen(false);
+      setImportFile(null);
+      // 标记「文件解析执行中」，按钮态据此显示，轮询日志收口后自动恢复。
+      setImportingCategory(importCategory);
+    } catch (error) {
+      message.error(readError(error).message);
+    } finally {
+      setImportUploading(false);
+    }
+  }
+
+  // 2026-10-06：轮询任务日志，收口「文件解析执行中」按钮态 —— 后台解析结束后
+  // （`system.note_data_sync` 下没有 running 的「离线笔记数据导入」日志）清空标记。
+  useEffect(() => {
+    if (!importingCategory || !selectedAccountId) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const logs = await fetchScheduleLogs({
+          job_key: "system.note_data_sync",
+          status: "running",
+          page_size: 50,
+        });
+        const importing = (logs.items ?? []).some(
+          (log) => (log.job_name || "") === "离线笔记数据导入",
+        );
+        if (!cancelled && !importing) setImportingCategory(null);
+      } catch {
+        // 查询失败不打断轮询，等下一轮再收口（不因一次查询失败就误判「已结束」）。
+      }
+    };
+    const timer = setInterval(() => void poll(), 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [importingCategory, selectedAccountId]);
+
+  // 2026-10-06：复选框批量删除（只删本地 / 删本地+平台），完成后清选中并刷新列表。
+  async function handleBatchDelete() {
+    const ids = Array.from(offlineSelected[batchDeleteCategory]);
+    if (!ids.length) return;
+    setBatchDeleting(true);
+    try {
+      const result = await batchDeleteNotes(ids, batchDeleteMode === "platform");
+      if (result.failed.length) {
+        message.warning(`已删除 ${result.deleted} 篇，${result.failed.length} 篇失败（详见原因）`);
+      } else {
+        message.success(`已删除 ${result.deleted} 篇笔记`);
+      }
+      setBatchDeleteOpen(false);
+      // 清空该 category 的选中集，并刷新列表。
+      setOfflineSelected((current) => ({ ...current, [batchDeleteCategory]: new Set() }));
+      setOfflinePanels((current) => ({
+        ...current,
+        [batchDeleteCategory]: emptyPanel<XhsSearchNote>(),
+      }));
+      void loadOfflinePage(batchDeleteCategory, 1, false);
+    } catch (error) {
+      message.error(readError(error).message);
+    } finally {
+      setBatchDeleting(false);
+    }
+  }
+
+  // 切换勾选（复选框）。
+  function toggleOfflineSelect(category: "goods" | "normal", noteId: string) {
+    setOfflineSelected((current) => {
+      const next = new Set(current[category]);
+      if (next.has(noteId)) next.delete(noteId);
+      else next.add(noteId);
+      return { ...current, [category]: next };
+    });
+  }
+
+  // 2026-10-06：手动同步离线笔记数据（弹窗内选日期范围，≤90天），后台执行 + 轮询日志收口。
+  async function handleSyncNoteData(category: "goods" | "normal") {
+    if (!selectedAccountId) return;
+    setSyncSubmitting(true);
+    setSyncingCategory(category);
+    try {
+      await syncNoteData(
+        selectedAccountId,
+        category,
+        syncDateRange?.[0],
+        syncDateRange?.[1],
+      );
+      message.success("同步任务已提交，后台执行中…");
+      // 关闭弹窗 + 清空日期选择，等下次同步重新选。
+      setSyncOpen(false);
+      setSyncDateRange(null);
+      // 收口「同步中」按钮态：轮询 system.note_data_sync 下 running 的「离线笔记数据同步」日志。
+      const poll = async () => {
+        try {
+          const logs = await fetchScheduleLogs({
+            job_key: "system.note_data_sync",
+            status: "running",
+            page_size: 50,
+          });
+          const syncing = (logs.items ?? []).some(
+            (log) => (log.job_name || "") === "离线笔记数据同步",
+          );
+          if (!syncing) {
+            setSyncingCategory(null);
+            // 同步完成，刷新列表。
+            setOfflinePanels((current) => ({ ...current, [category]: emptyPanel<XhsSearchNote>() }));
+            void loadOfflinePage(category, 1, false);
+          } else {
+            setTimeout(() => void poll(), 3000);
+          }
+        } catch {
+          setTimeout(() => void poll(), 3000);
+        }
+      };
+      setTimeout(() => void poll(), 3000);
+    } catch (error) {
+      setSyncingCategory(null);
+      message.error(readError(error).message);
+    } finally {
+      setSyncSubmitting(false);
+    }
+  }
+
   // Lazy load: a tab only issues its first request once activated, and switching
   // back does not refetch. This is the main rate-limit guard (design doc §12).
   //
@@ -1078,6 +1444,11 @@ export function XhsMyNotesPage() {
     if (!selectedAccountId) return;
     if (activeTab === "interactions") {
       if (!interactionPanel.loaded && !interactionPanel.loading) void loadInteractionPage("", false);
+      return;
+    }
+    if (activeTab === "goods" || activeTab === "normal") {
+      const panel = offlinePanels[activeTab];
+      if (!panel.loaded && !panel.loading) void loadOfflinePage(activeTab, 1, false);
       return;
     }
     const panel = notePanels[activeTab];
@@ -1113,6 +1484,28 @@ export function XhsMyNotesPage() {
   async function refreshNoteDetail() {
     const note = selectedNote;
     if (!selectedAccountId || !note) return;
+
+    // 2026-10-06：商业/普通（离线）笔记的「刷新」必须走 hydrate（落库详情），
+    // 不能走线上 `fetchXhsNoteDetail`（www feed）—— 离线笔记没有 web_session，
+    // 线上详情拿不到正文/媒体，`mergeNoteDetail` 会用空值覆盖已拉取的正文/媒体。
+    if (activeTab === "goods" || activeTab === "normal") {
+      const seq = requestSeq.current;
+      setDetailError(null);
+      setDetailLoading(true);
+      try {
+        const hydrated = await hydrateOfflineNoteDetail(note.note_id);
+        if (seq !== requestSeq.current) return;
+        applyHydratedOfflineNote(note, hydrated);
+      } catch (error) {
+        if (seq !== requestSeq.current) return;
+        const { message: reason, code } = readError(error);
+        setDetailError(quietError(reason, code));
+      } finally {
+        if (seq === requestSeq.current) setDetailLoading(false);
+      }
+      return;
+    }
+
     const url = noteExternalUrl(note);
     if (!url) {
       message.warning("缺少笔记链接，无法加载详情。");
@@ -1182,25 +1575,153 @@ export function XhsMyNotesPage() {
     }
   }
 
+  /**
+   * 2026-10-06：商业/普通笔记（离线数据）点击卡片 —— 实时拉详情**并落库**。
+   *
+   * 与 `openNote`（全部笔记 tab，线上不落库）的关键区别：
+   * 详情走 `POST /notes/{note_id}/hydrate`（后端匿名 SSR 拉平台详情 → 落库正文/
+   * 媒体/话题拆分），返回落库后的完整笔记。评论仍复用「全部笔记」的线上端点
+   * （`fetchXhsNoteComments`，实时展示不落库）。
+   */
+  /**
+   * 把 hydrate 端点返回的离线笔记详情映射成 XhsSearchNote 并写入 detailNote。
+   *
+   * 2026-10-06：`openOfflineNote`（打开）与 `refreshNoteDetail`（刷新）共用的**唯一**
+   * 映射实现 —— 挂载商品转 NoteGoods 契约、指标单独存、发布时间映射等只在这里写一遍
+   * （DEF-044：一个语义一份实现）。
+   */
+  function applyHydratedOfflineNote(note: XhsSearchNote, hydrated: Awaited<ReturnType<typeof hydrateOfflineNoteDetail>>) {
+    // 落库后的指标（`raw_json.metrics`）单独存，详情弹窗「离线指标」区块全面展示。
+    const metrics = (hydrated.raw_json?.metrics ?? {}) as Record<string, number>;
+    setOfflineMetrics(Object.keys(metrics).length ? metrics : null);
+    // 挂载商品：离线笔记走 `note_goods` join `shop_products`，转成 `NoteGoods` 契约
+    // （与「全部笔记」tab 的挂载商品**同一形状** —— `mountGoods` 的 goods 分支渲染，
+    // 第三行含店铺名 + 商品 ID）。取第一件（离线数据一篇通常挂一件；多件时首件展示，
+    // 与全部笔记 tab 的单数 NoteGoods 口径一致）。
+    // price 是「分」字符串（如 "4852~7652" 区间 / "8660" 单值），换算成元（同后端 `_price_text`）。
+    const firstGood = hydrated.goods?.[0];
+    const priceInFen = firstGood?.price ?? "";
+    const priceInYuan = (() => {
+      const parts = priceInFen.split("~").map((s) => s.trim()).filter(Boolean);
+      const nums = parts.map((p) => Number(p)).filter((n) => Number.isFinite(n));
+      if (nums.length === 0) return "";
+      const yuan = nums.map((n) => (n / 100).toFixed(2));
+      return yuan.length === 1 ? yuan[0] : yuan.join("~");
+    })();
+    const offlineGoods: NoteGoods | null = firstGood?.item_id
+      ? {
+          goods_id: firstGood.item_id,
+          title: firstGood.item_title || "",
+          price: priceInYuan,
+          image: firstGood.images?.[0] ?? "",
+          url: "",
+          shop_name: hydrated.account_name || "",
+          variant: firstGood.variant || "",
+        }
+      : null;
+    const merged: XhsSearchNote = {
+      ...note,
+      note_id: hydrated.note_id || note.note_id,
+      title: hydrated.title || note.title,
+      content: hydrated.content || note.content,
+      author_name: hydrated.author_name || note.author_name,
+      cover_url: hydrated.cover_url || note.cover_url,
+      // 挂载商品走 `NoteGoods` 单数契约（与全部笔记 tab 一致）；离线列表行的 `goods`
+      // 是 `_serialize_note` 的**数组**，透传会被 `mountGoods` 读成空壳卡片，故显式覆盖。
+      goods: offlineGoods,
+      image_urls: hydrated.asset_urls && hydrated.asset_urls.length ? hydrated.asset_urls : note.image_urls,
+      video_url: hydrated.video_url || note.video_url,
+      tags: hydrated.topics ? hydrated.topics.map((t) => t.name) : note.tags,
+      likes: metrics.like_count ?? note.likes,
+      collects: metrics.collect_count ?? note.collects,
+      comments: metrics.comment_count ?? note.comments,
+      shares: metrics.share_count ?? note.shares,
+      // 「在小红书打开」链接：hydrate 回查后 `raw_json.note_url` 带**新鲜** xsec_token
+      // （按 note_id 回查，见后端 hydrate 端点）。旧 token / 无 token 的 explore 链接
+      // 会被平台 302 → 404（error_code=300031「当前笔记暂时无法浏览」）。
+      note_url: (hydrated.raw_json?.note_url as string | undefined) || note.note_url,
+      // 发布时间：离线笔记在 `raw_json.time`（字符串，如 "2026-08-13 09:22"），
+      // 映射到 `timestamp` 让「发布时间」那一项能展示（`formatRemoteTime` 原样透传字符串）。
+      timestamp: (hydrated.raw_json?.time as string | number | undefined) ?? note.timestamp,
+    };
+    setDetailNote(merged);
+  }
+
+  async function openOfflineNote(note: XhsSearchNote) {
+    setSelectedNote(note);
+    setDetailNote(note);
+    setDetailError(null);
+    setComments([]);
+    setCommentError(null);
+    setOfflineMetrics(null);
+
+    const seq = requestSeq.current;
+    setDetailLoading(true);
+    try {
+      const hydrated = await hydrateOfflineNoteDetail(note.note_id);
+      if (seq !== requestSeq.current) return;
+      applyHydratedOfflineNote(note, hydrated);
+    } catch (error) {
+      if (seq !== requestSeq.current) return;
+      const { message: reason, code } = readError(error);
+      setDetailError(quietError(reason, code));
+    } finally {
+      if (seq === requestSeq.current) setDetailLoading(false);
+    }
+
+    // 评论：离线笔记的 note_url 在 raw_json 里（带 xsec_token），复用线上评论端点。
+    const url = noteExternalUrl(note);
+    if (url && selectedAccountId) {
+      setIsLoadingComments(true);
+      try {
+        const page = await fetchXhsNoteComments({ account_id: selectedAccountId, note_url: url });
+        if (seq !== requestSeq.current) return;
+        setComments(page.items);
+      } catch (error) {
+        if (seq !== requestSeq.current) return;
+        const { message: reason, code } = readError(error);
+        setCommentError(quietError(reason, code));
+      } finally {
+        if (seq === requestSeq.current) setIsLoadingComments(false);
+      }
+    }
+  }
+
   function closeNote() {
     setSelectedNote(null);
     setDetailNote(null);
     setDetailError(null);
     setComments([]);
     setCommentError(null);
+    setOfflineMetrics(null);
   }
 
   function refreshActive() {
+    // 刷新同时重探三平台登录态（L3），登录态跟着页面一起刷新。
+    void autoCheckLoginStates();
     if (activeTab === "interactions") {
       setInteractionPanel(emptyPanel<XhsInteractionMessage>());
       void loadInteractionPage("", false);
+      return;
+    }
+    if (activeTab === "goods" || activeTab === "normal") {
+      setOfflinePanels((current) => ({ ...current, [activeTab]: emptyPanel<XhsSearchNote>() }));
+      void loadOfflinePage(activeTab, 1, false);
       return;
     }
     patchNotePanel(activeTab, emptyPanel<XhsSearchNote>());
     void loadNotePage(activeTab, "", false);
   }
 
-  const renderNoteGrid = (panel: PanelState<XhsSearchNote>) => {
+  const renderNoteGrid = (
+    panel: PanelState<XhsSearchNote>,
+    onCardClick?: (note: XhsSearchNote) => void,
+    selection?: {
+      selectedIds: Set<string>;
+      onToggle: (noteId: string) => void;
+    },
+    isOffline = false,
+  ) => {
     if (panel.loading && panel.items.length === 0) {
       return (
         <div style={{ padding: "48px 0", textAlign: "center" }}>
@@ -1224,7 +1745,7 @@ export function XhsMyNotesPage() {
               <Card
                 hoverable
                 size="small"
-                onClick={() => void openNote(note)}
+                onClick={() => void (onCardClick ?? openNote)(note)}
                 cover={
                   note.cover_url ? (
                     <div style={{ position: "relative", height: 180, overflow: "hidden", background: p.mediaBg }}>
@@ -1233,6 +1754,14 @@ export function XhsMyNotesPage() {
                         alt={note.title || note.note_id}
                         style={{ width: "100%", height: "100%", objectFit: "cover" }}
                       />
+                      {selection && note.note_id && (
+                        <Checkbox
+                          checked={selection.selectedIds.has(note.note_id)}
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={() => selection.onToggle(note.note_id)}
+                          style={{ position: "absolute", left: 8, top: 8 }}
+                        />
+                      )}
                       {noteKindLabel(note) === "视频" && (
                         <PlayCircleOutlined
                           style={{ position: "absolute", right: 8, bottom: 8, fontSize: 24, color: "#fff" }}
@@ -1240,7 +1769,15 @@ export function XhsMyNotesPage() {
                       )}
                     </div>
                   ) : (
-                    <div style={{ height: 180, display: "flex", alignItems: "center", justifyContent: "center", background: p.mediaBg }}>
+                    <div style={{ height: 180, display: "flex", alignItems: "center", justifyContent: "center", background: p.mediaBg, position: "relative" }}>
+                      {selection && note.note_id && (
+                        <Checkbox
+                          checked={selection.selectedIds.has(note.note_id)}
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={() => selection.onToggle(note.note_id)}
+                          style={{ position: "absolute", left: 8, top: 8 }}
+                        />
+                      )}
                       <PictureOutlined style={{ fontSize: 28, color: p.fillIcon }} />
                     </div>
                   )
@@ -1250,23 +1787,34 @@ export function XhsMyNotesPage() {
                   title={<span style={{ fontSize: 13 }}>{note.title || "（无标题）"}</span>}
                   description={
                     <div>
-                      <Space size={12} wrap style={{ marginBottom: 6 }}>
-                        {/*
-                          Only the like count is rendered. The list payload's
-                          interact_info carries {liked, liked_count, sticky} and
-                          nothing else, so showing 收藏/评论/分享 here would
-                          print a hard 0 for data that simply was not sent —
-                          an outright lie to an operator. The full four appear
-                          in the modal, where the detail response supplies them.
-                          (design doc §18.2 / §18.3)
-                        */}
-                        <Metric icon={<HeartOutlined />} value={note.likes} title="点赞" />
-                        <Text type="secondary" style={{ fontSize: 11 }}>
-                          其余互动数据点开后可见
-                        </Text>
-                      </Space>
+                      {!isOffline && (
+                        <Space size={12} wrap style={{ marginBottom: 6 }}>
+                          {/*
+                            Only the like count is rendered. The list payload's
+                            interact_info carries {liked, liked_count, sticky} and
+                            nothing else, so showing 收藏/评论/分享 here would
+                            print a hard 0 for data that simply was not sent —
+                            an outright lie to an operator. The full four appear
+                            in the modal, where the detail response supplies them.
+                            (design doc §18.2 / §18.3)
+                          */}
+                          <Metric icon={<HeartOutlined />} value={note.likes} title="点赞" />
+                          <Text type="secondary" style={{ fontSize: 11 }}>
+                            其余互动数据点开后可见
+                          </Text>
+                        </Space>
+                      )}
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                        <Space size={6}>
+                        <Space size={6} wrap>
+                          {isOffline ? (
+                            <>
+                              {/* 2026-10-06：离线（商业/普通）笔记底部一行展示四互动数据 + 图文 tag。 */}
+                              <Metric icon={<HeartOutlined style={{ color: "#ff4d4f" }} />} value={note.likes} title="点赞" />
+                              <Metric icon={<StarOutlined style={{ color: "#faad14" }} />} value={note.collects} title="收藏" />
+                              <Metric icon={<CommentOutlined style={{ color: "#1677ff" }} />} value={note.comments} title="评论" />
+                              <Metric icon={<ShareAltOutlined style={{ color: "#52c41a" }} />} value={note.shares} title="分享" />
+                            </>
+                          ) : null}
                           <Tag color={noteKindLabel(note) === "视频" ? "purple" : "blue"} style={{ marginInlineEnd: 0 }}>
                             {noteKindLabel(note)}
                           </Tag>
@@ -1330,6 +1878,126 @@ export function XhsMyNotesPage() {
         )}
         {/* 滚动哨兵：进入视口（提前 240px）即拉下一页 */}
         <div ref={sentinelRef} style={{ height: 1 }} />
+      </div>
+    );
+  };
+
+  /** 2026-10-06 需求：商业/普通笔记离线页签的渲染（导入按钮 + 清理 + 刷新 + 卡片列表）。 */
+  const renderOfflinePanel = (category: "goods" | "normal") => {
+    const panel = offlinePanels[category];
+    const catLabel = category === "goods" ? "商业笔记" : "普通笔记";
+    return (
+      <div>
+        <Space wrap size={8} style={{ marginBottom: 16 }}>
+          {/* 2026-10-06：手动同步 —— 点击弹窗内选日期范围（≤90 天）。 */}
+          <Button
+            icon={<SyncOutlined />}
+            loading={syncingCategory === category}
+            onClick={() => {
+              setSyncCategory(category);
+              setSyncOpen(true);
+            }}
+          >
+            {syncingCategory === category ? "同步中" : "同步"}
+          </Button>
+          <Button
+            icon={<UploadOutlined />}
+            loading={importingCategory === category}
+            onClick={() => {
+              setImportCategory(category);
+              setImportOpen(true);
+              setImportFile(null);
+            }}
+          >
+            {importingCategory === category ? "文件解析执行中" : "导入数据文件"}
+          </Button>
+          {/* 2026-10-06 需求 7：无流量清理迁移到商业/普通 tab，按 category 过滤。 */}
+          <Tooltip title={cleanupActiveTaskId ? "正在清理无流量笔记，完成后可再次发起" : ""}>
+            <Button
+              icon={<DeleteOutlined />}
+              disabled={cleanupActiveTaskId !== null}
+              onClick={() => {
+                setNoTrafficQuery((prev) => ({ ...prev, category }));
+                setNoTrafficOpen(true);
+                setNoTrafficCandidates([]);
+                setNoTrafficTotal(0);
+                setCleanupStatus(null);
+              }}
+            >
+              {cleanupActiveTaskId ? "正在清理无流量笔记" : "清理无流量"}
+            </Button>
+          </Tooltip>
+          {/* 2026-10-06：复选框批量删除（只删本地 / 删本地+平台）。 */}
+          <Button
+            danger
+            icon={<DeleteOutlined />}
+            disabled={offlineSelected[category].size === 0}
+            onClick={() => {
+              setBatchDeleteCategory(category);
+              setBatchDeleteMode("local");
+              setBatchDeleteOpen(true);
+            }}
+          >
+            批量删除{offlineSelected[category].size > 0 ? `（${offlineSelected[category].size}）` : ""}
+          </Button>
+          <Button
+            icon={<HistoryOutlined />}
+            onClick={() => {
+              setCleanupLogOpen(true);
+              void loadCleanupLogs(1);
+            }}
+          >
+            清理日志
+          </Button>
+          <Button
+            icon={<ReloadOutlined />}
+            onClick={() => {
+              setOfflineSelected((current) => ({ ...current, [category]: new Set() }));
+              setOfflinePanels((current) => ({ ...current, [category]: emptyPanel<XhsSearchNote>() }));
+              void loadOfflinePage(category, 1, false);
+            }}
+          >
+            刷新
+          </Button>
+          {/* 2026-10-06：名称模糊查询 +（商业）商品 ID 查询。 */}
+          <Input.Search
+            allowClear
+            placeholder="按标题模糊查询"
+            style={{ width: 220 }}
+            value={offlineKeyword[category]}
+            onChange={(e) =>
+              setOfflineKeyword((current) => ({ ...current, [category]: e.target.value }))
+            }
+            onSearch={() => {
+              setOfflineSelected((current) => ({ ...current, [category]: new Set() }));
+              setOfflinePanels((current) => ({ ...current, [category]: emptyPanel<XhsSearchNote>() }));
+              void loadOfflinePage(category, 1, false);
+            }}
+          />
+          {category === "goods" && (
+            <Input.Search
+              allowClear
+              placeholder="按商品 ID 查询对应笔记"
+              style={{ width: 220 }}
+              value={offlineItemId}
+              onChange={(e) => setOfflineItemId(e.target.value)}
+              onSearch={() => {
+                setOfflineSelected((current) => ({ ...current, [category]: new Set() }));
+                setOfflinePanels((current) => ({ ...current, [category]: emptyPanel<XhsSearchNote>() }));
+                void loadOfflinePage(category, 1, false);
+              }}
+            />
+          )}
+        </Space>
+        {renderNoteGrid(
+          panel,
+          openOfflineNote,
+          {
+            selectedIds: offlineSelected[category],
+            onToggle: (noteId) => toggleOfflineSelect(category, noteId),
+          },
+          true,
+        )}
       </div>
     );
   };
@@ -1576,6 +2244,10 @@ export function XhsMyNotesPage() {
         />
         {renderInteractions()}
       </div>
+    ) : key === "goods" || key === "normal" ? (
+      <div>
+        {renderOfflinePanel(key)}
+      </div>
     ) : (
       <div>
         {renderSearchBar()}
@@ -1587,7 +2259,7 @@ export function XhsMyNotesPage() {
         ) : searchResult ? (
           renderSearchResults(searchResult)
         ) : (
-          renderNoteGrid(notePanels[key])
+          renderNoteGrid(notePanels[key as XhsSelfContentScope])
         )}
       </div>
     );
@@ -1623,11 +2295,6 @@ export function XhsMyNotesPage() {
               onChange={(value) => setSelectedAccountId(value)}
             />
             {isLoadingIdentity && <Spin size="small" indicator={<LoadingOutlined spin />} />}
-            {capabilities && (
-              <Tag color={capabilities.session_source ? "green" : "orange"}>
-                {capabilities.session_source === "own" ? "网页会话可用" : "无网页会话"}
-              </Tag>
-            )}
           </Space>
 
           {identity && (
@@ -1639,8 +2306,26 @@ export function XhsMyNotesPage() {
                 <Space size={8} wrap>
                   <Text strong>{identity.nickname || "（昵称未解析）"}</Text>
                   {identity.red_id && <Tag>小红书号 {identity.red_id}</Tag>}
+                  {/* 2026-10-06：小红书号后面展示三个平台登录会话状态（千帆/创作者/网页版）。
+                      顺序/短名/状态文案全来自 lib/login-state.ts（唯一实现，账号矩阵页同款）。 */}
+                  {loginChannelRows(currentAccountLoginChannels).map((row) => (
+                    <Tag
+                      key={row.channel}
+                      style={{
+                        marginRight: 0,
+                        flexShrink: 0,
+                        fontSize: 11,
+                        lineHeight: "18px",
+                        color: row.view.color,
+                        borderColor: row.view.color,
+                        background: "transparent",
+                        cursor: "default",
+                      }}
+                    >
+                      {row.shortLabel} {row.view.label}
+                    </Tag>
+                  ))}
                   {identity.ip_location && <Tag>{identity.ip_location}</Tag>}
-                  {identity.link && <Tag color="geekblue">{identity.link === "creator" ? "创作者平台" : "网页版"}</Tag>}
                 </Space>
                 <div>
                   <Text type="secondary" style={{ fontSize: 12 }}>user_id: {identity.user_id}</Text>
@@ -1690,9 +2375,6 @@ export function XhsMyNotesPage() {
                   {/* ADR-021：店铺不再是实体 ⇒ 展示的其实是「账号昵称（千帆卖家名）」，
                       文案改为「账号」以免读者误以为存在独立店铺对象。 */}
                   账号 {goodsInfo.shop_name || "（未命名）"}
-                  {goodsInfo.shop_total > 0
-                    ? ` · 已按需补齐 ${goodsInfo.synced_notes}/${goodsInfo.shop_total} 条商品笔记`
-                    : ` · 已按需补齐 ${goodsInfo.synced_notes} 条商品笔记`}
                   {goodsInfo.synced_at ? ` · ${goodsInfo.synced_at}` : ""}
                 </Text>
                 <Text type="secondary" style={{ fontSize: 12 }}>
@@ -1708,41 +2390,8 @@ export function XhsMyNotesPage() {
                 >
                   立即巡检
                 </Button>
-                {/* 用户口径：「存在正在清理无流量笔记的任务时，清理无流量按钮展示为
-                    『正在清理无流量笔记』按钮且不可点击」。 */}
-                <Tooltip
-                  title={
-                    cleanupActiveTaskId
-                      ? "正在清理无流量笔记，完成后可再次发起"
-                      : ""
-                  }
-                >
-                  <Button
-                    size="small"
-                    icon={<DeleteOutlined />}
-                    disabled={cleanupActiveTaskId !== null}
-                    onClick={() => {
-                      setNoTrafficOpen(true);
-                      setNoTrafficCandidates([]);
-                      setNoTrafficTotal(0);
-                      setCleanupStatus(null);
-                    }}
-                  >
-                    {cleanupActiveTaskId ? "正在清理无流量笔记" : "清理无流量"}
-                  </Button>
-                </Tooltip>
-                {/* 用户口径：「新增一个查询清理无流量笔记日志详情按钮，弹窗列表展示
-                    该日志记录」—— 与清理按钮同排，是这一功能的第二个入口。 */}
-                <Button
-                  size="small"
-                  icon={<HistoryOutlined />}
-                  onClick={() => {
-                    setCleanupLogOpen(true);
-                    void loadCleanupLogs(1);
-                  }}
-                >
-                  清理日志
-                </Button>
+                {/* 2026-10-06 需求 7：无流量清理按钮 + 日志弹窗已迁移到「商业笔记 /
+                    「普通笔记」两个离线页签（按 category 过滤），此处原入口移除。 */}
               </Space>
             </Space>
           )}
@@ -1808,6 +2457,117 @@ export function XhsMyNotesPage() {
         items={tabItems}
       />
 
+      {/* 2026-10-06 需求：导入离线笔记数据文件（xlsx）弹窗。 */}
+      <Modal
+        open={importOpen}
+        centered
+        title={`导入${importCategory === "goods" ? "商业" : "普通"}笔记数据文件`}
+        okText="导入"
+        confirmLoading={importUploading}
+        onOk={() => void handleImportNoteData()}
+        onCancel={() => {
+          setImportOpen(false);
+          setImportFile(null);
+        }}
+        okButtonProps={{ disabled: !importFile }}
+      >
+        <Space direction="vertical" size={12} style={{ width: "100%" }}>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            上传千帆数据中心导出的 .xlsx 笔记数据文件，后端异步解析落库，完成后通过站内消息通知统计结果。
+          </Text>
+          <Upload
+            accept=".xlsx"
+            maxCount={1}
+            beforeUpload={(file) => {
+              setImportFile(file);
+              return false; // 不自动上传，手动提交
+            }}
+            onRemove={() => setImportFile(null)}
+            fileList={importFile ? [{ uid: "1", name: importFile.name }] : []}
+          >
+            <Button icon={<UploadOutlined />}>选择 .xlsx 文件</Button>
+          </Upload>
+        </Space>
+      </Modal>
+
+      {/* 2026-10-06：复选框批量删除弹窗 —— 单选框，默认「只删本地」，可选「删本地+平台」。 */}
+      <Modal
+        open={batchDeleteOpen}
+        centered
+        title={`批量删除${batchDeleteCategory === "goods" ? "商业" : "普通"}笔记`}
+        okText="删除"
+        okButtonProps={{ danger: true }}
+        confirmLoading={batchDeleting}
+        onOk={() => void handleBatchDelete()}
+        onCancel={() => setBatchDeleteOpen(false)}
+      >
+        <Space direction="vertical" size={12} style={{ width: "100%" }}>
+          <Text>
+            已选中 <Text strong>{offlineSelected[batchDeleteCategory].size}</Text> 篇笔记。
+          </Text>
+          <Radio.Group
+            value={batchDeleteMode}
+            onChange={(e) => setBatchDeleteMode(e.target.value as "local" | "platform")}
+          >
+            <Space direction="vertical">
+              <Radio value="local">
+                只删除本地数据
+                <div style={{ fontSize: 12, color: "#888" }}>
+                  仅移除本地记录，不影响平台上的笔记。
+                </div>
+              </Radio>
+              <Radio value="platform">
+                删除本地 + 平台数据
+                <div style={{ fontSize: 12, color: "#888" }}>
+                  先删除平台笔记，成功后同步删除本地记录（不可恢复）。
+                </div>
+              </Radio>
+            </Space>
+          </Radio.Group>
+        </Space>
+      </Modal>
+
+      {/* 2026-10-06：手动同步弹窗 —— 弹窗内选日期范围（≤90 天）。 */}
+      <Modal
+        open={syncOpen}
+        centered
+        title={`同步${syncCategory === "goods" ? "商业" : "普通"}笔记数据`}
+        okText="同步"
+        confirmLoading={syncSubmitting}
+        onOk={() => void handleSyncNoteData(syncCategory)}
+        onCancel={() => setSyncOpen(false)}
+      >
+        <Space direction="vertical" size={12} style={{ width: "100%" }}>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            选择要同步的日期范围（最长 90 天）。留空则同步最近 90 天。
+          </Text>
+          <DatePicker.RangePicker
+            value={
+              syncDateRange
+                ? [dayjs(syncDateRange[0]), dayjs(syncDateRange[1])]
+                : null
+            }
+            onChange={(range) => {
+              if (range && range[0] && range[1]) {
+                setSyncDateRange([
+                  range[0].format("YYYY-MM-DD"),
+                  range[1].format("YYYY-MM-DD"),
+                ]);
+              } else {
+                setSyncDateRange(null);
+              }
+            }}
+            disabledDate={(current) =>
+              current &&
+              (current > dayjs().endOf("day") ||
+                current < dayjs().subtract(90, "day").startOf("day"))
+            }
+            placeholder={["开始日期", "截止日期"]}
+            style={{ width: "100%" }}
+          />
+        </Space>
+      </Modal>
+
       {/*
         详情弹窗走**共用组件**（`components/platforms/note-detail-modal.tsx`）：
         版式（80vw / 72vh 双栏）、左栏媒体区、失败三分法、评论四态都在那一份实现里，
@@ -1859,13 +2619,35 @@ export function XhsMyNotesPage() {
                   </div>
                 )}
 
-                <Descriptions column={1} size="small" bordered>
-                  <Descriptions.Item label="基础信息">
-                    <Space size={6} wrap>
-                      <Tag icon={<FileTextOutlined />}>{noteKindLabel(noteForDetail)}</Tag>
+                {/* 2026-10-06 重新布局：去掉 bordered 表格框，改「浅色信息块 + 分组」，
+                    信息分块清晰（基础信息 / 互动 / 数据指标 / 千帆 / 链接）。 */}
+                <div
+                  style={{
+                    background: p.mediaBg,
+                    borderRadius: 8,
+                    padding: "12px 16px",
+                    fontSize: 13,
+                    marginTop: 12,
+                  }}
+                >
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: "8px 24px", alignItems: "center" }}>
+                    <span>
+                      <Text type="secondary">作者</Text>{" "}
+                      <Text strong>{noteForDetail.author_name || "—"}</Text>
+                    </span>
+                    <span>
+                      <Text type="secondary">类型</Text>{" "}
+                      <Tag style={{ marginInlineEnd: 0 }}>{noteKindLabel(noteForDetail)}</Tag>
+                    </span>
+                    <span>
+                      <Text type="secondary">发布时间</Text>{" "}
+                      <Text>{formatRemoteTime(noteForDetail.timestamp) || "—"}</Text>
+                    </span>
+                    <span>
+                      <Text type="secondary">笔记 ID</Text>{" "}
                       <Tag
                         icon={<CopyOutlined />}
-                        style={{ cursor: "pointer" }}
+                        style={{ cursor: "pointer", marginInlineEnd: 0 }}
                         onClick={() => {
                           if (!noteForDetail.note_id) return;
                           navigator.clipboard
@@ -1876,62 +2658,78 @@ export function XhsMyNotesPage() {
                       >
                         {noteForDetail.note_id || "—"}
                       </Tag>
-                      <Tag icon={<UserOutlined />}>{noteForDetail.author_name || "—"}</Tag>
-                    </Space>
-                  </Descriptions.Item>
-                  <Descriptions.Item label="发布时间">{formatRemoteTime(noteForDetail.timestamp) || "—"}</Descriptions.Item>
-                  <Descriptions.Item label="互动数据">
-                    <Space size={12} wrap>
-                      {detailMetric(<HeartOutlined />, noteForDetail.likes, "点赞")}
-                      {detailMetric(<StarOutlined />, noteForDetail.collects, "收藏")}
-                      {detailMetric(<CommentOutlined />, noteForDetail.comments, "评论")}
-                      {detailMetric(<ShareAltOutlined />, noteForDetail.shares, "分享")}
-                    </Space>
-                  </Descriptions.Item>
-                  {/*
-                    千帆（店铺侧）指标：创作者账号的数据来自千帆商品笔记列表。
-                    只渲染千帆真的返回了的项 —— 缺值不填 0（设计文档 §18.2 口径）。
-                  */}
-                  {noteForDetail.shop && (
-                    <Descriptions.Item label="千帆数据">
-                      <Space size={12} wrap>
-                        {noteForDetail.shop.browse_num !== null &&
-                          noteForDetail.shop.browse_num !== undefined && (
-                            <Text style={{ fontSize: 12 }}>
-                              阅读 {noteForDetail.shop.browse_num}
-                            </Text>
-                          )}
-                        {noteForDetail.shop.browse_num_30d !== null &&
-                          noteForDetail.shop.browse_num_30d !== undefined && (
-                            <Text style={{ fontSize: 12 }}>
-                              近 30 日阅读 {noteForDetail.shop.browse_num_30d}
-                            </Text>
-                          )}
-                        {noteForDetail.shop.pay_gmv !== null &&
-                          noteForDetail.shop.pay_gmv !== undefined && (
-                            <Text style={{ fontSize: 12 }}>
-                              支付金额 ¥{noteForDetail.shop.pay_gmv}
-                            </Text>
-                          )}
-                        {noteForDetail.shop.pay_order_cnt !== null &&
-                          noteForDetail.shop.pay_order_cnt !== undefined && (
-                            <Text style={{ fontSize: 12 }}>
-                              支付订单 {noteForDetail.shop.pay_order_cnt}
-                            </Text>
-                          )}
-                      </Space>
-                    </Descriptions.Item>
-                  )}
-                  <Descriptions.Item label="原始链接">
-                    {noteExternalUrl(noteForDetail) ? (
-                      <AntLink href={noteExternalUrl(noteForDetail)} target="_blank" rel="noreferrer">
-                        <LinkOutlined /> 在小红书打开
-                      </AntLink>
-                    ) : (
-                      "—"
-                    )}
-                  </Descriptions.Item>
-                </Descriptions>
+                      {noteExternalUrl(noteForDetail) && (
+                        <AntLink
+                          href={noteExternalUrl(noteForDetail)}
+                          target="_blank"
+                          rel="noreferrer"
+                          style={{ marginLeft: 12, fontSize: 12 }}
+                        >
+                          <LinkOutlined /> 在小红书打开
+                        </AntLink>
+                      )}
+                    </span>
+                  </div>
+                </div>
+
+                {/* 互动数据（4 指标横排） */}
+                <div style={{ marginTop: 16 }}>
+                  <Text strong style={{ fontSize: 13, display: "block", marginBottom: 8 }}>
+                    互动数据
+                  </Text>
+                  <Space size={20} wrap>
+                    {detailMetric(<HeartOutlined style={{ color: "#ff4d4f" }} />, noteForDetail.likes, "点赞")}
+                    {detailMetric(<StarOutlined style={{ color: "#faad14" }} />, noteForDetail.collects, "收藏")}
+                    {detailMetric(<CommentOutlined style={{ color: "#1677ff" }} />, noteForDetail.comments, "评论")}
+                    {detailMetric(<ShareAltOutlined style={{ color: "#52c41a" }} />, noteForDetail.shares, "分享")}
+                  </Space>
+                </div>
+
+                {/* 2026-10-06：离线笔记（商业/普通）的指标全面展示 —— 数据来自
+                    离线落库的 `raw_json.metrics`（24+ 个指标，按互动/观看/商品分组）。
+                    缺值不渲染（硬约束⑤缺值口径）。 */}
+                {offlineMetrics && (
+                  <div style={{ marginTop: 16 }}>
+                    <Text strong style={{ fontSize: 13, display: "block", marginBottom: 8 }}>
+                      数据指标
+                    </Text>
+                    {/* 2026-10-06：一类一行（互动/观看/商品各起一行），类内 chips 超行允许
+                        换行，类与类之间用**虚线**分割（去掉灰色小标题，分割用虚线表达）。 */}
+                    {OFFLINE_METRICS_GROUPS.map((group, groupIndex) => {
+                      const entries = group.metrics.filter(
+                        ([key]) =>
+                          offlineMetrics[key] !== undefined &&
+                          offlineMetrics[key] !== null,
+                      );
+                      if (entries.length === 0) return null;
+                      return (
+                        <div
+                          key={group.label}
+                          style={{
+                            display: "flex",
+                            flexWrap: "wrap",
+                            gap: 8,
+                            padding: "4px 0",
+                            // 最后一项不画虚线（避免区块底部多一条悬空的线）
+                            borderBottom:
+                              groupIndex < OFFLINE_METRICS_GROUPS.length - 1
+                                ? "1px dashed #d9d9d9"
+                                : "none",
+                          }}
+                        >
+                          {entries.map(([key, label]) => (
+                            <Tag
+                              key={key}
+                              style={{ marginInlineEnd: 0, fontSize: 12, padding: "2px 10px" }}
+                            >
+                              {label} <Text strong>{offlineMetrics[key]}</Text>
+                            </Tag>
+                          ))}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
 
                 {/*
                   挂载商品（设计 12 v1.20 / DEF-047）：**只有一个区块、一套版式**。
@@ -1985,7 +2783,7 @@ export function XhsMyNotesPage() {
                                     <Text
                                       type="secondary"
                                       ellipsis={{ tooltip: g.variant }}
-                                      style={{ fontSize: 12, minWidth: 0 }}
+                                      style={{ fontSize: 12, minWidth: 0, maxWidth: 300, display: "inline-block" }}
                                     >
                                       {g.variant}
                                     </Text>
@@ -2013,39 +2811,6 @@ export function XhsMyNotesPage() {
                                   </Text>
                                 )}
                               </Space>
-                              {g.url && (
-                                <div style={{ marginTop: 6 }}>
-                                  <Space size={6} align="center">
-                                    <Text type="secondary" style={{ fontSize: 12 }}>
-                                      商品链接
-                                    </Text>
-                                    {/* 文本展示 + 点击复制（用户 2026-09-19 定：不再跳转，
-                                        要的是把链接拷去别处用）。长链接省略显示，复制的是完整值。 */}
-                                    <Tooltip title="点击复制">
-                                      <Text
-                                        style={{
-                                          fontSize: 12,
-                                          maxWidth: 300,
-                                          cursor: "pointer",
-                                          color: "#1677ff",
-                                        }}
-                                        ellipsis
-                                        onClick={() => void copyToClipboard(g.url, "商品链接已复制", message)}
-                                      >
-                                        {g.url}
-                                      </Text>
-                                    </Tooltip>
-                                    <Tooltip title="点击复制">
-                                      <Button
-                                        type="text"
-                                        size="small"
-                                        icon={<CopyOutlined />}
-                                        onClick={() => void copyToClipboard(g.url, "商品链接已复制", message)}
-                                      />
-                                    </Tooltip>
-                                  </Space>
-                                </div>
-                              )}
                             </div>
                           </div>
                         </Card>
@@ -2255,6 +3020,65 @@ export function XhsMyNotesPage() {
               }}
             />
           </Space>
+          <div style={{ height: 6 }} />
+          <Space wrap size={12}>
+            <Text style={{ fontSize: 13 }}>点赞 ≤</Text>
+            <InputNumber
+              min={0}
+              max={1000000}
+              placeholder="不限"
+              value={noTrafficThresholds.max_like}
+              onChange={(value) => {
+                setNoTrafficThresholds((prev) => ({
+                  ...prev,
+                  max_like: value === null ? null : Number(value),
+                }));
+                setNoTrafficPage(1);
+              }}
+            />
+            <Text style={{ fontSize: 13 }}>收藏 ≤</Text>
+            <InputNumber
+              min={0}
+              max={1000000}
+              placeholder="不限"
+              value={noTrafficThresholds.max_collect}
+              onChange={(value) => {
+                setNoTrafficThresholds((prev) => ({
+                  ...prev,
+                  max_collect: value === null ? null : Number(value),
+                }));
+                setNoTrafficPage(1);
+              }}
+            />
+            <Text style={{ fontSize: 13 }}>评论 ≤</Text>
+            <InputNumber
+              min={0}
+              max={1000000}
+              placeholder="不限"
+              value={noTrafficThresholds.max_comment}
+              onChange={(value) => {
+                setNoTrafficThresholds((prev) => ({
+                  ...prev,
+                  max_comment: value === null ? null : Number(value),
+                }));
+                setNoTrafficPage(1);
+              }}
+            />
+            <Text style={{ fontSize: 13 }}>分享 ≤</Text>
+            <InputNumber
+              min={0}
+              max={1000000}
+              placeholder="不限"
+              value={noTrafficThresholds.max_share}
+              onChange={(value) => {
+                setNoTrafficThresholds((prev) => ({
+                  ...prev,
+                  max_share: value === null ? null : Number(value),
+                }));
+                setNoTrafficPage(1);
+              }}
+            />
+          </Space>
           {noTrafficCoverage && (
             <Alert type="info" showIcon message={noTrafficCoverage} />
           )}
@@ -2409,7 +3233,13 @@ export function XhsMyNotesPage() {
 
       {/* 清理日志详情（用户口径「查询清理无流量笔记日志详情按钮，弹窗列表展示该
           日志记录」）。数据源 = 独立表 `no_traffic_cleanup_logs`，不随队列记录
-          清理消失（客户口径「日志表独立」）。 */}
+          清理消失（客户口径「日志表独立」）。
+
+          ⚠️ 2026-10-06 用户口径「清理无流量的主要对象是笔记，**所有主体应是笔记
+          维度**，记录操作日志时也应该是笔记维度」⇒ 列表改**父子两层**：
+          批次行（这次整体怎么样）+ 展开行（**这一篇**被删了没有、为什么）。
+          展开区是**一张独立的笔记表**（自带表头），不是把子行塞进父表 ——
+          与网关页「父子表头各自独立」同款。 */}
       <Modal
         centered
         open={cleanupLogOpen}
@@ -2439,6 +3269,77 @@ export function XhsMyNotesPage() {
           }}
           locale={{ emptyText: "还没有清理记录" }}
           scroll={{ x: 1100 }}
+          // ⛔ **白屏修复同款一行**：`items` 是数据里的字段名（不是 antd 的
+          //    `children`），但这里显式关掉「树数据自动探测」以防将来改名踩坑 ——
+          //    父表只走 `expandedRowRender`（网关页的教训：两条渲染路径同时跑会崩）。
+          childrenColumnName="__no_tree__"
+          expandable={{
+            rowExpandable: (row) => (row.items?.length ?? 0) > 0,
+            expandedRowRender: (row) => (
+              <Table<NoTrafficCleanupItemRow>
+                rowKey={(item) => String(item.id)}
+                size="small"
+                dataSource={row.items}
+                pagination={false}
+                showHeader
+                columns={[
+                  {
+                    title: "笔记",
+                    key: "note",
+                    render: (_, item) => (
+                      <Space size={8} align="start">
+                        {item.note_cover && (
+                          <Image
+                            src={item.note_cover}
+                            alt=""
+                            width={32}
+                            height={32}
+                            style={{ borderRadius: 4, objectFit: "cover" }}
+                            preview={false}
+                          />
+                        )}
+                        <Text style={{ fontSize: 13 }}>
+                          {item.note_title || "（标题未知）"}
+                        </Text>
+                      </Space>
+                    ),
+                  },
+                  {
+                    title: "笔记 ID",
+                    dataIndex: "note_id",
+                    width: 220,
+                    render: (value: string) => (
+                      <Typography.Text code copyable={value ? { text: value } : false}>
+                        {value || "—"}
+                      </Typography.Text>
+                    ),
+                  },
+                  {
+                    title: "结果",
+                    dataIndex: "result",
+                    width: 110,
+                    render: (value: string) => {
+                      const hit = cleanupItemResult(value);
+                      return <Tag color={hit.color}>{hit.text}</Tag>;
+                    },
+                  },
+                  {
+                    title: "原因",
+                    dataIndex: "reason",
+                    // 缺值渲染 `—`（读到空 ≠ 没有原因；删除成功本来就没有原因）。
+                    render: (value: string) => value || "—",
+                  },
+                  {
+                    title: "操作时间",
+                    dataIndex: "operated_at",
+                    width: 160,
+                    render: (value: string | null) =>
+                      value ? value.replace("T", " ").slice(0, 19) : "—",
+                  },
+                ]}
+              />
+            ),
+          }}
           columns={[
             {
               title: "操作时间",
@@ -2470,6 +3371,17 @@ export function XhsMyNotesPage() {
               },
             },
             {
+              title: "笔记",
+              key: "items",
+              width: 120,
+              // **笔记维度**的入口可见性：这一批动了几篇笔记（展开看逐篇）。
+              render: (_, row) => (
+                <Text type="secondary">
+                  {row.items?.length ? `${row.items.length} 篇（展开查看）` : "—"}
+                </Text>
+              ),
+            },
+            {
               title: "清理前 / 后",
               key: "range",
               width: 130,
@@ -2487,8 +3399,22 @@ export function XhsMyNotesPage() {
             },
             {
               title: "失败原因",
-              dataIndex: "reason",
-              render: (value: string) => value || "—",
+              key: "reason",
+              // ⚠️ DEF-095：这里只渲染**本次失败原因**（`reason`）。候选池覆盖度
+              //    说明（`coverage_note`）**不显示在这一列** —— 它此前被错写进
+              //    `reason`，于是平台风控失败时界面显示「候选池仅包含已同步千帆
+              //    挂链映射的笔记…」，把用户指向完全错误的方向。
+              render: (_, row) => {
+                const parts: string[] = [];
+                if (row.reason) parts.push(row.reason);
+                // 中止（风控/凭据）加一句说明：本批没跑完，不是「只有这一篇失败」。
+                if (row.aborted) {
+                  parts.push(`本批已中止（未执行完）${row.abort_reason ? `：${row.abort_reason}` : ""}`);
+                }
+                const text = parts.join(" ");
+                if (!text) return "—";
+                return <Text type={row.failed ? "danger" : "secondary"}>{text}</Text>;
+              },
             },
           ]}
         />

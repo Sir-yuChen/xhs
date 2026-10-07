@@ -66,8 +66,20 @@ export const FILTER_CACHE_KEYS = {
   },
 } as const;
 
-/** 「我的笔记」四个页签（渲染顺序 + 合法取值**同一份**，页面拿它渲染 Tab 栏）。 */
-export const MY_NOTES_TAB_VALUES = ["notes", "liked", "collected", "interactions"] as const;
+/** 「我的笔记」页签（渲染顺序 + 合法取值**同一份**，页面拿它渲染 Tab 栏）。
+
+2026-10-06 需求「我的笔记页面重构」：新增「商业笔记」（离线 goods）与「普通笔记」
+（离线 normal）两个页签；「我发布的」改名「全部笔记」（走线上，不落库）。
+「我赞过的 / 我收藏的 / 互动消息」是**互动数据**维度，与「笔记类型」无关，保留。
+*/
+export const MY_NOTES_TAB_VALUES = [
+  "notes",
+  "goods",
+  "normal",
+  "liked",
+  "collected",
+  "interactions",
+] as const;
 
 // --------------------------------------------------------------------------- #
 // 存储层：localStorage 的最小封装（容错全在这里）

@@ -291,6 +291,334 @@ class XHS_Qianfan_Apis:
             "/app-note/note-list",
         )
 
+    #: 数据中心「笔记数据」blockKey → category（2026-10-06 真机抓包）。
+    #: 商品笔记 / 普通笔记两个页面各自一个 DataList 数据块。
+    NOTE_DATA_BLOCK_KEYS: dict[str, str] = {
+        "goods": "arkSellerNoteGoodsNoteDataList",
+        "normal": "arkSellerNoteNormalNoteDataList",
+    }
+
+    def get_note_data_list(
+        self,
+        *,
+        category: str,
+        page: int = 1,
+        size: int = 50,
+        date_select_type: str = "recent_1",
+        date_type: int = 1,
+        start_date: str = "",
+        end_date: str = "",
+    ) -> tuple[bool, str, dict | None]:
+        """千帆数据中心「笔记数据」列表一页（`POST /api/edith/butterfly/data`）。
+
+        2026-10-06 真机抓包：页面 `/app-datacenter/note-data/goods`（商品笔记）与
+        `/normal`（普通笔记）的「笔记」数据块。**无签名直连**（与 `get_goods_note_page`
+        同构；下载 xlsx 的 `long_task/task/submit` 才要 datacenterark 签名，C4 不接入）。
+
+        `category` ∈ `{"goods", "normal"}` ⇒ 映射到对应 `blockKey`。分页走
+        `page` / `size`（页面可选 10/20/30/40/50）。
+
+        时间维度（2026-10-06 前端 JS 取证，取值枚举见下）：
+        `date_select_type` ∈ `{now, custom, recent_1, recent_7, recent_14, recent_15,
+        recent_30, recent_90, recent_180, day, week, month, quarter, year, activity,
+        sofar, multiMonth}`；`date_type`(int) 映射 `recent_1→1 / recent_7→2 /
+        recent_30→3 / recent_90→90 / recent_180→180 / now→-1 / day→1 / week→4 / month→5`。
+
+        「**自定义日期范围**」（`date_select_type="custom"`）额外带 `start_date` /
+        `end_date`（`YYYY-MM-DD`），写入 filterMap 的 `startDate` / `endDate` ——
+        平台前端 JS 取证（`D` 函数）确认这个字段名。
+
+        返回 `data[0].data[]`：每行是 `{"value": ..., "ratio": ...}` 包裹结构
+        （`ex` 偶见于比率字段）。⚠️ `value` 可能是 0 / 空串 / None / 嵌套 dict，
+        调用方解包时按缺值口径处理（不造假）。
+        """
+        block_key = self.NOTE_DATA_BLOCK_KEYS.get(category)
+        if block_key is None:
+            return False, f"未知笔记类型：{category}（合法值：goods / normal）", None
+        filter_map: dict[str, object] = {
+            "dateSelectType": str(date_select_type),
+            "dateType": int(date_type),
+            "publishTimeWindowCode": 0,
+        }
+        # 自定义日期范围：额外带 startDate / endDate（平台字段名，前端 JS 取证）。
+        if start_date:
+            filter_map["startDate"] = str(start_date)
+        if end_date:
+            filter_map["endDate"] = str(end_date)
+        body = {
+            "requestBody": {
+                "blockElements": [{
+                    "filterMap": filter_map,
+                    "orderBy": [{"field": "notePayGmv", "orderBy": "desc"}],
+                    "page": max(1, int(page)),
+                    "size": max(1, min(int(size), 50)),
+                    "blockKey": block_key,
+                }]
+            }
+        }
+        return self._post(
+            f"/api/edith/butterfly/data?type={block_key}",
+            body,
+            f"/app-datacenter/note-data/{category}",
+        )
+
+
+    def search_material_space(
+        self,
+        body: dict,
+        *,
+        referer: str = "/app-system/pictureSpace",
+    ) -> tuple[bool, str, dict | None]:
+        """图片空间列表一页（`POST /api/edith/product/material_space/search_directory_manageable`）。
+
+        **⚠️ 必须带签名**（`_signed_post`）——这是本项目里**第一个「只读但需要签名」**的
+        千帆端点。2026-10-06 真机对照（同一 Cookie、同一 body）：
+
+        | 请求 | 结果 |
+        |---|---|
+        | 只带 Cookie（无签名） | **`{"code":-1,"success":false}`** |
+        | 带 `x-s`/`x-t`（ark 档位） | **`{"code":200,...,"data":{"total":4910,...}}`** |
+
+        ⇒ 与 `search_item_v2`（只读、无签名可直连）**不同**，本端点平台强制签名。
+        签名机制复用 `_signed_post`（写链路在用的同一实现，`appId=itemark` /
+        `signVersion=4.4.4` / `tier=0101`），**但本端点本身是只读查询**（不改平台状态）。
+        硬约束②的判据是「有没有副作用」，不是「带没带签名」。
+
+        `body` 由调用方（路由层）按白名单组装，逐字见真机抓包：
+
+        ```json
+        {"filter": {"keyword": "", "statuses": [1], "basicTypes": [1, 2],
+                    "fatherDirectoryId": ""},
+         "order": {"orderList": [{"field": "name", "asc": true}]},
+         "pageIndex": 1, "pageSize": 100, "option": {"withDetail": true}}
+        ```
+
+        * `basicTypes`：**1=文件夹 2=文件**；
+        * `statuses`：`[1]`=正常；
+        * `fatherDirectoryId`：`""`=全部 / `"0"`=根下；
+        * 返回 `data.directoryManageables[]`（条目字段见 `material_space_items()`）。
+        """
+        return self._signed_post(
+            "/api/edith/product/material_space/search_directory_manageable",
+            body,
+            referer,
+        )
+
+    def get_material_directory(
+        self,
+        seller_id: str,
+        *,
+        referer: str = "/app-system/pictureSpace",
+    ) -> tuple[bool, str, dict | None]:
+        """图片空间**目录树**（`POST /api/edith/product/material_space/get_directory`）。
+
+        无签名直连（2026-10-06 真机实测 200）。`option.withEntireTree=true` 取整棵树；
+        返回 `data.directoryManageable`（单根对象，`additionalData.isLeaf` 判有无子级）。
+        """
+        body = {"sellerId": str(seller_id), "option": {"withEntireTree": True}}
+        return self._post("/api/edith/product/material_space/get_directory", body, referer)
+
+    def get_material_space_usage(
+        self,
+        *,
+        referer: str = "/app-system/pictureSpace",
+    ) -> tuple[bool, str, dict | None]:
+        """图片空间**配额**（`GET /api/edith/product/material_space/get_seller_space_usage`）。
+
+        无签名直连。返回 `data.{totalSpace, usedSpace, whiteSeller}`（**注意 `code` 是 `0`
+        不是 `200`** —— `_get` 的 `code not in (0, None)` 判据已兼容）。
+        """
+        return self._get(
+            "/api/edith/product/material_space/get_seller_space_usage", None, referer
+        )
+
+    # ------------------------------------------------------------------ #
+    # 图片空间**写链路**（设计 22 §1.5，2026-10-06「操作按钮功能全部要做」）
+    #
+    # ⚠️ 与只读探测的边界（硬约束②）：「探测 / 调研 / 取证」一律只读，而这里是
+    # **用户在本系统内对自己图片空间的显式操作**（与商品写链路 `batch_update_availability`
+    # / 发货同一性质）⇒ 走「用户显式点击 + 本店归属 + 两层确认」。全部**必须签名**
+    # （真机实测无签名 `code=-1`）。
+    # ------------------------------------------------------------------ #
+
+    def add_material_directories(
+        self, seller_id: str, items: list[dict]
+    ) -> tuple[bool, str, dict | None]:
+        """**新建文件夹**（`batch_add_directory_manageable`）—— 需签名。
+
+        `items` 逐条形状（真机 JS bundle 取证）：
+
+        ```json
+        {"sellerId": "<seller>", "type": 1, "name": "<文件夹名>", "size": 0,
+         "additionalData": {"level": "0", "productCount": "0", "isLeaf": "true"}}
+        ```
+        """
+        body = {
+            "sellerId": str(seller_id),
+            "directoryManageables": items,
+            "option": {"async": False},
+        }
+        return self._signed_post(
+            "/api/edith/product/material_space/batch_add_directory_manageable",
+            body,
+            "/app-system/pictureSpace",
+        )
+
+    def edit_material_manageables(
+        self, seller_id: str, items: list[dict]
+    ) -> tuple[bool, str, dict | None]:
+        """**移动 / 重命名 / 删除（进回收站）/ 还原**（`batch_edit_directory_manageable`）—— 需签名。
+
+        ⚠️ **平台要求传完整条目**（不是只传 id）。三种用法**字段完全不同**
+        （2026-10-07 真机 JS bundle `332.d754c099.js` 取证，见各 builder 的 docstring）：
+
+        * **移动** → `{…原条目…, fatherDirectoryId: <目标目录 id>}`（**不动 `status`**）；
+        * **删除** → `{…原条目…, status: 4}`（`4 = RECYCLE_BIN`，进回收站）；
+        * **还原** → `{…原条目…, status: 1}`（`1 = USABLE`，从回收站还原）。
+
+        ⚠️ 曾经的错误实现：移动也置 `status:4` ⇒ **把文件移进回收站**（数据丢失级 bug）。
+        """
+        body = {
+            "sellerId": str(seller_id),
+            "directoryManageables": items,
+            "option": {"async": False},
+        }
+        return self._signed_post(
+            "/api/edith/product/material_space/batch_edit_directory_manageable",
+            body,
+            "/app-system/pictureSpace",
+        )
+
+    def delete_material_manageables(
+        self, seller_id: str, elements: list[dict]
+    ) -> tuple[bool, str, dict | None]:
+        """**彻底删除**（`batch_delete_directory_manageable`）—— 需签名，**不可还原**。
+
+        ⚠️ 请求键是 **`directoryManageableElements`**（不是 `directoryManageables`！），
+        每条只要 `{id, type}`（真机 JS bundle `417.d61d3cd8.js` 逐字取证：
+
+        ```json
+        {"sellerId": "…", "directoryManageableElements": [{"id": "…", "type": 2}],
+         "option": {"async": true}}
+        ```
+
+        此前用 `directoryManageables` 键发，平台一律回「文件信息不能为空」⇒ 被**误判**
+        成「平台不接受该端点」。选对键后它正是回收站的「彻底删除」。
+        """
+        body = {
+            "sellerId": str(seller_id),
+            "directoryManageableElements": elements,
+            "option": {"async": True},
+        }
+        return self._signed_post(
+            "/api/edith/product/material_space/batch_delete_directory_manageable",
+            body,
+            "/app-system/pictureSpace",
+        )
+
+    def download_material_files(
+        self, seller_id: str, links: list[dict], *, name: str = "", is_async: bool = True
+    ) -> tuple[bool, str, dict | None]:
+        """**批量下载**（`batch_download_files`，平台打包成任务）—— 需签名。
+
+        ⚠️ 请求键是 **`links`**（不是 `directoryManageables`）；每条形状
+        （真机 JS bundle `332.d754c099.js` `case 9` 逐字取证）：
+
+        ```json
+        // 文件：   {"type": 2, "link": "<additionalData.link 的 https url>", "name": "<名>", "extension": "<.ext>"}
+        // 文件夹： {"type": 1, "directoryId": "<id>"}
+        ```
+
+        ⚠️ `isAsync` **必传**（真机实测缺它 ⇒ `code=-1 required param check: isAsync`）。
+        返回任务 id，轮询 `query_material_task(task_id)` 取打包结果地址。
+        """
+        body = {
+            "sellerId": str(seller_id),
+            "links": links,
+            "isAsync": bool(is_async),
+        }
+        if name:
+            body["name"] = str(name)
+        return self._signed_post(
+            "/api/edith/product/material_space/batch_download_files",
+            body,
+            "/app-system/pictureSpace",
+        )
+
+    def query_material_task(self, task_id: str) -> tuple[bool, str, dict | None]:
+        """查图片空间的异步任务（`GET /api/edith/product/query_task_status`）—— 无需签名。
+
+        返回 `data.task`（下载打包等异步任务的进度 / 结果）。
+        """
+        return self._get(
+            "/api/edith/product/query_task_status",
+            {"taskId": str(task_id)},
+            "/app-system/pictureSpace",
+        )
+
+    def check_resize_material_space(self) -> tuple[bool, str, dict | None]:
+        """**查扩容条件**（`POST material_space/check_resize_material_space`）—— 需签名。
+
+        真机 JS bundle `332.d754c099.js` 取证：`CheckResizeStorageModal` 打开时调它，
+        返回 `conditionResults[]`，每条：
+
+        ```json
+        {"type": 1|…|4, "checkPass": true|false, "desc": "<条件原文>", "current": "<当前值>"}
+        ```
+
+        * `checkPass` 全为真 ⇒ **可申请扩容**（`i` 计算式：`0===len || some(!checkPass)`）；
+        * `type === 4` 的 `current` = 「当前空间大小」（数字）——决定是否还需扩容；
+        * 平台 UI 用 `Alert` 逐条渲染（`checkPass ? success : danger`，`description=desc`）。
+        """
+        return self._signed_post(
+            "/api/edith/product/material_space/check_resize_material_space",
+            {},
+            "/app-system/pictureSpace",
+        )
+
+    def resize_material_space(self) -> tuple[bool, str, dict | None]:
+        """**执行扩容**（`POST material_space/resize_material_space`）—— 需签名。
+
+        ⚠️ 真机 JS bundle：`resize_material_space` **body 为空 `{}`**（无需参数；
+        扩容额度由平台按条件判定）。成功后前端 `getStorage()` 重取配额 + toast「扩容成功」。
+        """
+        return self._signed_post(
+            "/api/edith/product/material_space/resize_material_space",
+            {},
+            "/app-system/pictureSpace",
+        )
+
+    def register_material_files(
+        self, seller_id: str, items: list[dict]
+    ) -> tuple[bool, str, dict | None]:
+        """把**已上传到云的文件**登记进图片空间（`batch_add_directory_manageable`，`type:2`）。
+
+        图片空间上传 = 两步（与发布链路同形）：
+
+        1. `upload_web_permit` 拿预分配 `fileId` + `uploadAddr` + `token`；
+        2. `upload_file` 把字节 PUT 上去；
+        3. **本方法**把上传结果登记成图片空间条目（`type:2`），列表才看得到。
+
+        `items` 逐条形状（真机 JS bundle 的 add 调用体：文件也是 `batch_add`，
+        与文件夹共用端点，靠 `type` 区分）：
+
+        ```json
+        {"sellerId": …, "type": 2, "fatherDirectoryId": "0",
+         "name": "<无扩展名基名>", "size": <字节>,
+         "additionalData": {"width": "800", "height": "800", "extension": ".jpeg",
+                            "path": "material_space/<fileId>", "uploaderInfoModel": "…"}}
+        ```
+        """
+        body = {
+            "sellerId": str(seller_id),
+            "directoryManageables": items,
+            "option": {"async": False},
+        }
+        return self._signed_post(
+            "/api/edith/product/material_space/batch_add_directory_manageable",
+            body,
+            "/app-system/pictureSpace",
+        )
 
     def get_skus_by_item_ids(
         self, item_ids: "list[str] | tuple[str, ...] | set[str]"
@@ -460,6 +788,36 @@ class XHS_Qianfan_Apis:
             body,
             "/app-item/list/shelf",
         )
+
+    def batch_delete_notes(
+        self, note_ids: "list[str] | tuple[str, ...] | set[str]"
+    ) -> tuple[bool, str, dict | None]:
+        """**批量删除笔记**（`POST /api/edith/note/batch_delete_note`）。
+
+        真机取证（2026-10-06，账号 8）：千帆「笔记管理」页列表顶部**勾选笔记 →
+        顶部「删除」按钮**，发的就是本端点。body 字段名是 **`note_ids`**（下划线，
+        平台参数校验原话 ``check: note_ids, name: note_ids: list params value is
+        required`` 钉死了这个键名，不是 JS 里的 camelCase `noteIds`）。
+
+        ⚠️ 与商品删除（`batch_delete_items`）的关键差别：
+
+        * **不需要签名**：本接口走 `_post`（纯 Cookie）即可，与只读的
+          `goods-note/list` 同等级 —— 实测带不带签名都返回同样的参数校验响应
+          （说明平台对这条链路**不强制 `x-s`**，与商品写接口的 406 强制不同）。
+        * **不可恢复**：平台侧删除笔记没有撤销入口。调用方（无流量清理）必须
+          已完成显式确认，且只对**用户自己店铺**、用户显式触发。
+
+        | 字段 | 语义 |
+        |---|---|
+        | `note_ids` | 笔记 ID 列表（**下划线**，复数） |
+
+        响应：成功 ``{"code":0,"success":true,"msg":"成功","data":{}}``（真机原文）。
+        """
+        ids = [str(item).strip() for item in (note_ids or []) if str(item).strip()]
+        if not ids:
+            return False, "note_ids 为空", None
+        body = {"note_ids": ids}
+        return self._post("/api/edith/note/batch_delete_note", body, "/app-note/note-list")
 
     def _signed_post(
         self, api: str, body: dict, referer: str

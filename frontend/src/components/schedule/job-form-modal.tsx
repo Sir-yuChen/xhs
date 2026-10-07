@@ -1,26 +1,42 @@
 /**
  * 调度任务的新建 / 编辑弹窗（设计 15 §9.1 / §8）。
  *
- * - 新建：调用目标 + 名称 + 调度字段 + 参数 + 备注；
- * - **账号维度目标**（`params_editable` 含 `account_ids`，首批 5 个账号维度系统任务）：
- *   **建 / 改同款「执行账号」多选**（DEF-066；空 = 本人全部账号）—— 归属校验上线后
- *   手抄 account_ids 只会换来 400 `ACCOUNT_NOT_OWNED`，控件必须跟上；其余键由代码
- *   拥有，不发（后端同口径 400 `JOB_PARAMS_NOT_EDITABLE`）。
- * - 非账号维度目标的新建：参数仍是高级用法 JSON 框（必填键提示照旧）。
+ * - 新建：调用目标 + 名称 + 调度字段 + 参数（KV 输入框）+ 备注；
+ * - 编辑：同上，调用目标禁用（不可改 key）。
+ *
+ * ## 调用参数 = KV 输入框（2026-10-06 用户口径）
+ *
+ * 「定时任务的调用参数新增和修改使用 kv 输入框配置，kv 必填；编辑弹窗也使
+ * key，v 为多个值时使用逗号分隔（如执行账号）」。所以**所有**任务的调用参数
+ * 统一成一套 KV 编辑器：
+ *
+ * * 每一行 = key（从注册表 `params_editable ∪ params_required` 选）+ value；
+ * * **key / value 都必填**（不能留空行）；
+ * * value 多值用**逗号分隔**（如 `account_ids = "1,2,3"`），后端按 key 类型解析；
+ * * key 白名单由后端下发（`params_editable`），前端**不硬编码键名** —— 新增
+ *   参数只改注册表，前端零改动。
+ *
+ * 键的**展示名**（label）这里给一份回退映射；后端没下发展示名时用 key 本身。
+ * 已知键：`account_ids` 执行账号 / `retention_days` 记录表保留天数 /
+ * `days` 同步时间区间（天）/ `auto_task_id` 自动任务 ID。
  *
  * R18（2026-09-24 用户口径「调用目标应支持所有的任务目标，包括已经创建过任务
  * 的目标」）：调用目标下拉**不再硬编码**，改从 `GET /schedule/targets` 拉注册表
- * 全量；已建过任务的目标标注「已创建 N 个」但**仍可选**（同一目标可有多条不同
- * 调度的任务行）。原先只列 1 项、内置键一律 400 拒建的两条限制都已移除。
+ * 全量；已建过任务的目标标注「已创建 N 个」但**仍可选**。
  *
- * R20（2026-09-24 用户口径「这个分组就不需要了」）：**分组字段整条移除** ——
- * 分组是代码侧归属（注册表声明），不是用户可填的东西，摆在表单里只会误导。
+ * R20（2026-09-24 用户口径「这个分组就不需要了」）：**分组字段整条移除**。
  */
-import { Alert, Form, Input, InputNumber, Modal, Select, Space, Typography } from "antd";
+import { Alert, Button, Form, Input, Modal, Select, Space, Typography } from "antd";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { createScheduleJob, fetchAccounts, fetchScheduleTargets, updateScheduleJob } from "../../lib/api";
 import type { PlatformAccount, ScheduleIn, ScheduledJob, ScheduleTarget } from "../../types";
+import {
+  ParamsEditor,
+  paramsObjectToRows,
+  paramsRowsToObject,
+} from "./params-editor";
+import type { ParamRow } from "./params-editor";
 import { ScheduleFields } from "./schedule-fields";
 
 const { Text } = Typography;
@@ -33,12 +49,6 @@ const DEFAULT_SCHEDULE: ScheduleIn = {
   enabled: true,
 };
 
-/** 兜底默认目标（targets 还没拉到时的占位；正常路径必有真值）。 */
-/** 记录表保留期默认值（天）。**与后端 `record_cleanup_service.DEFAULT_RETENTION_DAYS`
- *  同值** —— 前端只在「新建态给个初始值」时用，真正的校验与兜底在后端
- *  （`validate_retention_days` / `_coerce_retention_days`），这里不是第二份真相源。 */
-const DEFAULT_RETENTION_DAYS = 15;
-
 const FALLBACK_TARGET: ScheduleTarget = {
   job_key: "auto_ops.keyword_pipeline",
   name: "自动运营管线",
@@ -50,6 +60,14 @@ const FALLBACK_TARGET: ScheduleTarget = {
   default_cron: "0 0 9 * * *",
   default_misfire_policy: "once",
   existing_count: 0,
+};
+
+/** 参数 key → 展示名（**回退**用；后端将来下发 label 时优先用后端的）。 */
+export const PARAM_LABELS: Record<string, string> = {
+  account_ids: "执行账号",
+  retention_days: "记录表保留天数",
+  days: "同步时间区间（天）",
+  auto_task_id: "自动任务 ID",
 };
 
 export type JobFormModalProps = {
@@ -65,13 +83,16 @@ export function JobFormModal({ open, job, onCancel, onSaved }: JobFormModalProps
   const [name, setName] = useState("");
   const [jobKey, setJobKey] = useState(FALLBACK_TARGET.job_key);
   const [schedule, setSchedule] = useState<ScheduleIn>(DEFAULT_SCHEDULE);
-  const [paramsText, setParamsText] = useState("{}");
+  const [paramRows, setParamRows] = useState<ParamRow[]>([]);
   const [remark, setRemark] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   // R18：可调度目标清单（注册表全量 + 各目标已建任务数）
   const [targets, setTargets] = useState<ScheduleTarget[]>([]);
+  // 账号多选的数据源（仅 `account_ids` 键用）；KV 输入框 value 填逗号分隔的 id，
+  // 但给用户一个账号名提示（extra 里列「账号 id = 昵称」）。
+  const [accounts, setAccounts] = useState<PlatformAccount[]>([]);
 
   const selectedTarget = useMemo(
     () =>
@@ -81,20 +102,13 @@ export function JobFormModal({ open, job, onCancel, onSaved }: JobFormModalProps
     [targets, job?.job_key, jobKey]
   );
 
-  // 自定义参数：账号多选（**账号维度目标**的建 / 改同款 —— DEF-066 起新建态也有，
-  // 归属校验上线后手抄 account_ids 只会换来 400，控件必须跟上；空 = 本人全部账号）
-  const accountScoped = Boolean(
-    (job?.params_editable ?? selectedTarget.params_editable)?.includes("account_ids")
-  );
-  // 保留期参数（公共「清理记录表」任务）：用户口径「记录表保留时间设置为任务携带的参数，
-  // 每次执行任务时可修改，默认记录表保留最新 15 天」——**建 / 改都要能配**，
-  // 所以不能复用下面那段「仅新建可见」的裸 JSON 高级框（编辑态会看不见当前值）。
-  const editableKeys = job?.params_editable ?? selectedTarget.params_editable ?? [];
-  const retentionScoped = editableKeys.includes("retention_days");
-  const [accounts, setAccounts] = useState<PlatformAccount[]>([]);
-  const [accountIds, setAccountIds] = useState<number[]>([]);
-  //: 记录表保留期（天）。默认与后端 `DEFAULT_RETENTION_DAYS` 同值。
-  const [retentionDays, setRetentionDays] = useState<number>(DEFAULT_RETENTION_DAYS);
+  // 可编辑参数键（白名单 + 必填键）—— KV 编辑器据此渲染每一行。
+  const editableKeys = useMemo(() => {
+    const keys = new Set<string>();
+    (job?.params_editable ?? selectedTarget.params_editable ?? []).forEach((k) => keys.add(k));
+    (job ? [] : selectedTarget.params_required ?? []).forEach((k) => keys.add(k));
+    return [...keys];
+  }, [job, selectedTarget]);
 
   const loadTargets = useCallback(async () => {
     try {
@@ -131,36 +145,22 @@ export function JobFormModal({ open, job, onCancel, onSaved }: JobFormModalProps
         concurrent: job.concurrent as ScheduleIn["concurrent"],
         enabled: job.status === "active",
       });
-      setParamsText(JSON.stringify(job.params ?? {}, null, 2));
+      setParamRows(paramsObjectToRows(job.params ?? {}));
       setRemark(job.remark ?? "");
-      setAccountIds(
-        Array.isArray(job.params?.account_ids)
-          ? (job.params.account_ids as number[])
-          : []
-      );
-      const rawRetention = job.params?.retention_days;
-      const parsedRetention = Number(rawRetention);
-      setRetentionDays(
-        Number.isFinite(parsedRetention) && parsedRetention >= 1
-          ? parsedRetention
-          : DEFAULT_RETENTION_DAYS
-      );
     } else {
       setName("");
       setJobKey(FALLBACK_TARGET.job_key);
       setSchedule(DEFAULT_SCHEDULE);
-      setParamsText("{}");
-      setRetentionDays(DEFAULT_RETENTION_DAYS);
+      setParamRows([]);
       setRemark("");
-      setAccountIds([]);
     }
   }, [open, job, loadTargets]);
 
   useEffect(() => {
-    if (open && accountScoped) {
+    if (open && editableKeys.includes("account_ids")) {
       void loadAccounts();
     }
-  }, [open, accountScoped, loadAccounts]);
+  }, [open, editableKeys, loadAccounts]);
 
   async function submit() {
     setError(null);
@@ -168,28 +168,18 @@ export function JobFormModal({ open, job, onCancel, onSaved }: JobFormModalProps
       setError("请填写任务名称");
       return;
     }
-    let params: Record<string, unknown> | undefined;
-    if (retentionScoped) {
-      // 保留期任务的参数**只发白名单里的键**（其余键由代码拥有，写了就 400
-      // `JOB_PARAMS_NOT_EDITABLE`）。校验交给后端 `validate_retention_days`
-      // —— 前端不复制一份「1..3650」的判据（同一件事两份实现迟早漂移）。
-      params = { retention_days: retentionDays };
-    } else if (accountScoped) {
-      // 账号维度目标（建 / 改同一把尺子）：只发白名单里的 account_ids（空 = 本人全部账号）
-      params = { account_ids: accountIds };
-    } else if (!isEdit) {
-      // 新建（非账号维度）：完整参数由用户给（JSON，高级用法）
-      try {
-        const parsed = JSON.parse(paramsText || "{}");
-        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-          throw new Error("参数必须是 JSON 对象");
-        }
-        params = parsed;
-      } catch (err) {
-        setError(`参数不是合法 JSON 对象：${(err as Error).message}`);
+    // KV 必填校验（用户口径「kv 必填」）：key 和 value 都不能空。
+    for (const row of paramRows) {
+      if (!row.key.trim()) {
+        setError("参数 key 不能为空");
+        return;
+      }
+      if (!row.value.trim()) {
+        setError(`参数「${PARAM_LABELS[row.key] ?? row.key}」的 value 不能为空`);
         return;
       }
     }
+    const params = paramsRowsToObject(paramRows);
     setSaving(true);
     try {
       let saved: ScheduledJob;
@@ -197,7 +187,7 @@ export function JobFormModal({ open, job, onCancel, onSaved }: JobFormModalProps
         saved = await updateScheduleJob(job.id, {
           name: name.trim(),
           schedule,
-          ...(params ? { params } : {}),
+          ...(Object.keys(params).length > 0 ? { params } : {}),
           remark: remark.trim(),
         });
       } else {
@@ -205,7 +195,7 @@ export function JobFormModal({ open, job, onCancel, onSaved }: JobFormModalProps
           name: name.trim(),
           job_key: jobKey,
           schedule,
-          params: params ?? {},
+          params,
           remark: remark.trim(),
         });
       }
@@ -219,16 +209,24 @@ export function JobFormModal({ open, job, onCancel, onSaved }: JobFormModalProps
     }
   }
 
+  // 账号名提示（account_ids 值逗号分隔时，给用户一个「id = 昵称」对照）。
+  const accountHint = useMemo(() => {
+    if (!editableKeys.includes("account_ids") || accounts.length === 0) return "";
+    return accounts
+      .map((a) => `${a.id}=${a.nickname || `账号${a.id}`}`)
+      .join("，");
+  }, [editableKeys, accounts]);
+
   return (
     <Modal
-            centered
-            title={isEdit ? `编辑任务 · ${job?.name ?? ""}` : "新建调度任务"}
+      centered
+      title={isEdit ? `编辑任务 · ${job?.name ?? ""}` : "新建调度任务"}
       open={open}
       onCancel={onCancel}
       onOk={() => void submit()}
       confirmLoading={saving}
       okText="保存"
-      width={640}
+      width={680}
       destroyOnClose
     >
       <Space direction="vertical" size="middle" style={{ width: "100%" }}>
@@ -264,7 +262,6 @@ export function JobFormModal({ open, job, onCancel, onSaved }: JobFormModalProps
               </Text>
             </div>
           )}
-          {/* R20：分组字段整条移除，不再展示 */}
         </Form.Item>
 
         <ScheduleFields
@@ -273,21 +270,19 @@ export function JobFormModal({ open, job, onCancel, onSaved }: JobFormModalProps
           allowConcurrent={selectedTarget.allow_concurrent}
         />
 
-        {accountScoped && (
-          <Form.Item label="执行账号" extra="不选 = 本人全部账号（默认行为）">
-            <Select
-              mode="multiple"
-              value={accountIds}
-              onChange={(values: number[]) => setAccountIds(values)}
-              placeholder="选择要执行的账号（可多选，仅本人账号）"
-              options={accounts.map((account) => ({
-                value: account.id,
-                // 只展示账号名称（账号下拉纪律）：类型/状态/店铺名不进 label
-                label: account.nickname || `账号 ${account.id}`,
-              }))}
-              optionFilterProp="label"
-              style={{ width: "100%" }}
-            />
+        {/* 调用参数 = KV 输入框（**key 与 value 都是自由文本**，2026-10-06 用户口径
+            「k 不要使用下拉框选择」）。共用 `ParamsEditor`，与「执行一次」弹窗同一实现。 */}
+        {editableKeys.length > 0 && (
+          <Form.Item
+            label="调用参数"
+            required
+            extra={
+              editableKeys.includes("account_ids") && accountHint
+                ? `账号对照：${accountHint}`
+                : `可用参数：${editableKeys.join(" / ")}`
+            }
+          >
+            <ParamsEditor rows={paramRows} onChange={setParamRows} />
           </Form.Item>
         )}
 
@@ -302,48 +297,6 @@ export function JobFormModal({ open, job, onCancel, onSaved }: JobFormModalProps
             ]}
           />
         </Form.Item>
-
-        {retentionScoped && (
-          <Form.Item label="记录表保留时间">
-            <Space>
-              <InputNumber
-                min={1}
-                max={3650}
-                value={retentionDays}
-                onChange={(value: number | null) =>
-                  setRetentionDays(
-                    typeof value === "number" && value >= 1 ? value : DEFAULT_RETENTION_DAYS
-                  )
-                }
-                addonAfter="天"
-                style={{ width: 180 }}
-              />
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                早于该天数的记录在执行任务时被清理，默认 15 天
-              </Text>
-            </Space>
-          </Form.Item>
-        )}
-
-        {!isEdit && !accountScoped && !retentionScoped && (
-          <Form.Item label="调用参数">
-            <Input.TextArea
-              value={paramsText}
-              rows={4}
-              spellCheck={false}
-              onChange={(event) => setParamsText(event.target.value)}
-            />
-            {/* R18：提示由注册表数据组装，不再写死单个目标的文案 */}
-            {selectedTarget.params_required.length > 0 && (
-              <div>
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  格式提示：必填键 {selectedTarget.params_required.join(" / ")}（JSON
-                  对象）
-                </Text>
-              </div>
-            )}
-          </Form.Item>
-        )}
 
         <Form.Item label="备注">
           <Input

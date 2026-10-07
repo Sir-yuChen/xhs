@@ -2062,3 +2062,127 @@ export type LlmGenerateFinishedEntry = {
   note_title?: string;
   reason?: string;
 };
+
+/**
+ * 图片空间（千帆云）条目（设计 22 §1.3）——**只读、本地零落库**。
+ *
+ * 与本地「素材库」（`MaterialFile`）**不是一回事**：那个是本地磁盘目录扫描，
+ * 这个是千帆云上的图片资产（15G 配额）。两者名字像、数据面完全不同。
+ */
+export type PictureSpaceItem = {
+  id: string;
+  /** 1 = 文件夹，2 = 文件（平台枚举）。 */
+  type: number | null;
+  /** 平台基名（文件是无扩展名的 uuid）。 */
+  name: string;
+  /** 后端拼回的全名（`name + extension`）—— 列表显示这个。 */
+  display_name: string;
+  extension: string;
+  /** 字节。 */
+  size: number;
+  /** 尺寸（平台可能缺 ⇒ `null`，前端渲染 `-`，**不补 0**）。 */
+  width: number | null;
+  height: number | null;
+  /** 直链（无扩展名，可直接当 `<img src>`）。 */
+  link: string;
+  product_count: number;
+  /** `product_count > 0` ⇒ 已引用（列表「是否引用」列）。 */
+  referenced: boolean;
+  /** epoch ms（原样透传，前端负责格式化）。 */
+  create_time: number | null;
+  /** 回收站「删除时间」：平台 `updateTime`（epoch ms；主视图可能为 `null`）。 */
+  update_time: number | null;
+};
+
+/** `POST /xhs/qianfan/picture-space/items` 的响应。 */
+export type PictureSpaceItemsResponse = {
+  total: number;
+  page: number;
+  page_size: number;
+  items: PictureSpaceItem[];
+};
+
+/** `POST /xhs/qianfan/picture-space/items` 的请求。 */
+export type PictureSpaceItemsQuery = {
+  platform_account_id: number;
+  keyword?: string;
+  /** 1=文件夹 2=文件；不传 = 两者都取。 */
+  basic_types?: number[];
+  father_directory_id?: string;
+  /** 排序字段白名单：`name` / `createTime` / `size` / `updateTime`（表外值后端 400）。 */
+  order_field?: string;
+  order_asc?: boolean;
+  page?: number;
+  page_size?: number;
+  /** 回收站视图（真机 `/pictureSpace/recycle`）：`statuses=[4]` + 只取文件 + 按删除时间倒序。 */
+  recycle?: boolean;
+};
+
+/** `GET /xhs/qianfan/picture-space/usage` 的响应（配额取不到 ⇒ 前两者 `null`）。 */
+export type PictureSpaceUsage = {
+  used_space: number | null;
+  total_space: number | null;
+  white_seller: boolean;
+};
+
+/** 图片空间**扩容条件**（`GET /xhs/qianfan/picture-space/resize/check`，2026-10-07）。 */
+export type PictureSpaceResizeCondition = {
+  type: number | null;
+  /** 条件是否通过（平台 `checkPass`）。 */
+  pass: boolean;
+  /** 平台条件原文（原样透传，不造）。 */
+  desc: string;
+  /** 当前值（`type=4` 时为当前空间大小）。 */
+  current: string;
+};
+
+export type PictureSpaceResizeCheck = {
+  conditions: PictureSpaceResizeCondition[];
+  /** 全部条件通过 ⇒ 可申请扩容。 */
+  can_apply: boolean;
+  white_seller: boolean;
+  /** 剩余扩容次数（页脚「剩余扩容次数：N次」）。 */
+  remaining: number;
+};
+
+/** `GET /xhs/qianfan/picture-space/tree` 的响应（根节点）。 */
+export type PictureSpaceTreeNode = {
+  id: string;
+  name: string;
+  seller_id: string;
+  is_leaf: boolean;
+  product_count: number;
+};
+
+/** 图片空间写操作的结果（新建 / 移动 / 下载）。 */
+export type PictureSpaceWriteResult = {
+  platform_account_id: number;
+  success: boolean;
+  name?: string;
+  moved?: number;
+  task_id?: string;
+};
+
+/** 图片空间删除预览（二次确认凭据 + 影响面）。 */
+export type PictureSpaceDeletePreview = {
+  platform_account_id: number;
+  action: string;
+  count: number;
+  item_ids: string[];
+  /** 前 5 条文件名（确认框展示「将删除哪些」）。 */
+  sample_names: string[];
+  confirm_token: string;
+};
+
+/** 图片空间异步任务（下载打包）。 */
+export type PictureSpaceTask = {
+  task_id: string;
+  task: Record<string, unknown>;
+};
+
+/** 上传本地图片到图片空间的结果。 */
+export type PictureSpaceUploadResult = {
+  platform_account_id: number;
+  file_name: string;
+  success: boolean;
+};

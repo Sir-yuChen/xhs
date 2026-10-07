@@ -119,7 +119,7 @@ def test_initial_data_file_exists_and_is_parseable():
     payload = json.loads(INITIAL_DATA_FILE.read_text(encoding="utf-8"))
     rows = payload["scheduled_jobs"]
     assert isinstance(rows, list)
-    assert len(rows) == 13, "定时任务初始化数据条数变化必须同步审阅（注册表 builtin 全集）"
+    assert len(rows) == 14, "定时任务初始化数据条数变化必须同步审阅（注册表 builtin 全集）"
 
 
 def test_initial_data_keys_match_registry_builtin_set():
@@ -344,7 +344,7 @@ def test_startup_seeding_is_decoupled_from_scheduler_switch(tmp_path, monkeypatc
         _make_user(TestingSessionLocal)
         # 直接调启动播种（它就是 lifespan 里那一步），不启调度器
         created = scheduler_service.seed_builtin_jobs_from_initial_data()
-        assert created == 13
+        assert created == 14
 
         db = TestingSessionLocal()
         keys = set(db.scalars(select(ScheduledJob.job_key)).all())
@@ -407,10 +407,10 @@ def test_existing_rows_are_never_overwritten(tmp_path, monkeypatch):
         db.commit()
 
         created = ensure_builtin_jobs(db)
-        # ⚠️ 12 = 种子的 13 个内置行 − 已存在的那 1 行（`system.note_sync`）。
+        # ⚠️ 13 = 种子的 14 个内置行 − 已存在的那 1 行（`system.note_sync`）。
         # 2026-10-04 收口：M5/M6 新增 `workflow.` / `system.order_sync` 后
-        # 种子由 11 增至 13（`workflow.` 是运行时动态建的，不在种子里）。
-        assert len(created) == 12, "已存在的那一行不该再插"
+        # 种子由 11 增至 13；2026-10-06 新增 `system.note_data_sync` ⇒ 14。
+        assert len(created) == 13, "已存在的那一行不该再插"
 
         row = db.scalar(select(ScheduledJob).where(ScheduledJob.job_key == "system.note_sync"))
         assert row.name == "我改过的名字"
@@ -437,7 +437,7 @@ def test_missing_data_file_falls_back_to_code_defaults_with_warning(tmp_path, mo
             _make_user(TestingSessionLocal)
             created = ensure_builtin_jobs(db)
             db.close()
-        assert len(created) == 13, "文件缺失也要有兜底种子（不能少任务）"
+        assert len(created) == 14, "文件缺失也要有兜底种子（不能少任务）"
         assert any("不存在" in record.message for record in caplog.records)
     finally:
         app.dependency_overrides.clear()

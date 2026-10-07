@@ -22,9 +22,6 @@ from typing import Any, Optional
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.app.models import PlatformAccount
-from backend.app.models.shop import ShopNoteGoods
-
 #: 三项指标的默认阈值（用户可覆盖，**不写死 0**）。
 DEFAULT_MAX_BROWSE = 0
 DEFAULT_MAX_PAY_ORDER = 0
@@ -32,10 +29,6 @@ DEFAULT_MAX_PAY_GMV = 0.0
 
 #: 单批清理上限（平台写操作风控：一次最多删这么多篇）。
 DEFAULT_BATCH_LIMIT = 20
-
-#: 千帆标题搜索一页取多少条（搜索是过滤前置，命中即落库补指标）。
-SEARCH_PAGE_SIZE = 50
-
 
 def _as_number(value: Any) -> Optional[float]:
     """千帆数值字段可能是 int / float / 字符串 / None；统一成 float 或 None。"""
@@ -60,6 +53,9 @@ class CleanupQuery:
     note_type: str = ""
     #: 只清理发布时间早于该 Unix 时间戳（秒）的笔记；``None`` 不限。
     published_before: Optional[int] = None
+    #: 笔记分类（2026-10-06 方案 A）：``""`` 不限 / ``goods`` 商业笔记 / ``normal`` 普通笔记。
+    #: 数据源切到 `notes` 表后，按 `note_category` 过滤 —— 不同 tab 只清理对应类型。
+    category: str = ""
 
     @classmethod
     def from_dict(cls, data: Optional[dict[str, Any]]) -> "CleanupQuery":
@@ -73,13 +69,20 @@ class CleanupQuery:
         note_type = str(data.get("note_type") or "").strip()
         raw_before = data.get("published_before")
         published_before = int(raw_before) if _as_number(raw_before) is not None else None
-        return cls(keyword=keyword, note_type=note_type, published_before=published_before)
+        category = str(data.get("category") or "").strip()
+        return cls(
+            keyword=keyword,
+            note_type=note_type,
+            published_before=published_before,
+            category=category,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "keyword": self.keyword,
             "note_type": self.note_type,
             "published_before": self.published_before,
+            "category": self.category,
         }
 
     def matches(self, candidate: "CleanupCandidate") -> bool:
@@ -100,11 +103,28 @@ class CleanupQuery:
 
 @dataclass
 class TrafficThresholds:
-    """无流量判定阈值，每个指标都可单独配。"""
+    """无流量判定阈值（每个指标都可单独配）。
 
-    max_browse: int = DEFAULT_MAX_BROWSE
-    max_pay_order: int = DEFAULT_MAX_PAY_ORDER
-    max_pay_gmv: float = DEFAULT_MAX_PAY_GMV
+    2026-10-06 需求「方案 A」：判定指标从**固定三项**（阅读/支付订单/支付金额）
+    扩为**可选核心指标**（阅读/支付订单/支付金额/点赞/收藏/评论/分享）。语义：
+
+    * 阈值 `None` = 该指标**不参与判定**（用户没勾选）；
+    * 阈值非 `None` = 该指标必须 `<= 阈值`。
+    * 「无流量」= **所有非 None 的指标都 <= 阈值**；至少一个指标非 None 才判定
+      （全部 None = 没有判定依据，不判为无流量）。
+
+    默认值保留旧三项（`0`），新增四项默认 `None`（向后兼容：旧调用只传三项，
+    新四项不参与判定，行为与旧版一致）。
+    """
+
+    max_browse: Optional[int] = DEFAULT_MAX_BROWSE
+    max_pay_order: Optional[int] = DEFAULT_MAX_PAY_ORDER
+    max_pay_gmv: Optional[float] = DEFAULT_MAX_PAY_GMV
+    # 2026-10-06 新增可选互动指标（默认 None = 不参与判定）。
+    max_like: Optional[int] = None
+    max_collect: Optional[int] = None
+    max_comment: Optional[int] = None
+    max_share: Optional[int] = None
 
     @classmethod
     def from_dict(cls, data: Optional[dict[str, Any]]) -> "TrafficThresholds":
@@ -115,10 +135,33 @@ class TrafficThresholds:
             data = data.model_dump()
         if not isinstance(data, dict):
             return cls()
+
+        def _opt_int(key: str, default: Optional[int]) -> Optional[int]:
+            raw = data.get(key, default)
+            if raw is None:
+                return None
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                return default
+
+        def _opt_float(key: str, default: Optional[float]) -> Optional[float]:
+            raw = data.get(key, default)
+            if raw is None:
+                return None
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                return default
+
         return cls(
-            max_browse=_int_field(data, "max_browse", DEFAULT_MAX_BROWSE),
-            max_pay_order=_int_field(data, "max_pay_order", DEFAULT_MAX_PAY_ORDER),
-            max_pay_gmv=_float_field(data, "max_pay_gmv", DEFAULT_MAX_PAY_GMV),
+            max_browse=_opt_int("max_browse", DEFAULT_MAX_BROWSE),
+            max_pay_order=_opt_int("max_pay_order", DEFAULT_MAX_PAY_ORDER),
+            max_pay_gmv=_opt_float("max_pay_gmv", DEFAULT_MAX_PAY_GMV),
+            max_like=_opt_int("max_like", None),
+            max_collect=_opt_int("max_collect", None),
+            max_comment=_opt_int("max_comment", None),
+            max_share=_opt_int("max_share", None),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -126,7 +169,28 @@ class TrafficThresholds:
             "max_browse": self.max_browse,
             "max_pay_order": self.max_pay_order,
             "max_pay_gmv": self.max_pay_gmv,
+            "max_like": self.max_like,
+            "max_collect": self.max_collect,
+            "max_comment": self.max_comment,
+            "max_share": self.max_share,
         }
+
+    def active_metrics(self) -> dict[str, float]:
+        """返回「参与判定的指标 → 阈值」映射（非 None 项）。"""
+        mapping = {
+            "read_count": self.max_browse,
+            "pay_order_cnt": self.max_pay_order,
+            "pay_gmv": self.max_pay_gmv,
+            "like_count": self.max_like,
+            "collect_count": self.max_collect,
+            "comment_count": self.max_comment,
+            "share_count": self.max_share,
+        }
+        out: dict[str, float] = {}
+        for key, value in mapping.items():
+            if value is not None:
+                out[key] = float(value)
+        return out
 
 
 @dataclass
@@ -144,6 +208,12 @@ class CleanupCandidate:
     pay_order_cnt: Optional[int]
     publish_time: Optional[int]
     synced_at: str
+    #: 笔记分类（``goods`` 商业 / ``normal`` 普通 / ``""`` 未知）—— 删除执行器按它
+    #: 分流删除通道（商业 → 千帆 batch_delete_note，普通 → 创作者 delete_note）。
+    note_category: str = ""
+    #: 本地 `notes.id`（主键）。删除执行器平台删成功后按它定位本地行做 `purge_note`
+    #: （2026-10-06：无流量清理此前只删平台、漏删本地 notes 表）。
+    local_id: int = 0
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
 
@@ -187,6 +257,32 @@ def is_no_traffic(entry: dict[str, Any], thresholds: TrafficThresholds) -> bool:
         and pay_cnt <= thresholds.max_pay_order
         and pay_gmv <= thresholds.max_pay_gmv
     )
+
+
+def is_no_traffic_by_metrics(
+    metrics: dict[str, Any], thresholds: TrafficThresholds
+) -> bool:
+    """基于**离线数据中心指标**（`notes.raw_json.metrics`）的无流量判定（方案 A）。
+
+    语义：`thresholds.active_metrics()` 里每个非 None 的指标，都必须在 `metrics`
+    里存在且 `<= 阈值`。任一指标缺失 → 该笔记**不判为无流量**（缺值不是无流量，
+    与旧口径同一条纪律）。至少一个指标非 None 才判定；全 None = 无判定依据，不判。
+
+    ⚠️ 指标键对齐 `note_data_service` 的 metrics 键（`read_count` / `pay_gmv` /
+    `pay_order_cnt` / `like_count` / `collect_count` / `comment_count` / `share_count`）。
+    """
+    if not isinstance(metrics, dict) or not metrics:
+        return False
+    active = thresholds.active_metrics()
+    if not active:
+        return False
+    for key, threshold in active.items():
+        value = _as_number(metrics.get(key))
+        if value is None:
+            return False  # 缺值不是无流量
+        if value > threshold:
+            return False
+    return True
 
 
 def list_no_traffic_candidates(
@@ -243,44 +339,64 @@ def list_no_traffic_candidates(
             },
         }
 
-    # 有搜索条件：先服务端搜 + 落库，再本地筛（搜索是过滤前置）。
+    # 有搜索条件：**本地标题匹配**（零平台请求）。方案 A 下候选池是离线数据中心
+    # 数据（`notes`），标题已在 `notes.title` 里，关键词搜索本地 `LIKE` 即可 ——
+    # 不再打千帆 `mix_search_word`（那条路补的是 `shop_note_goods` 挂链映射，
+    # 与新数据源脱节）。
     searched = 0
     search_error = ""
-    if query.keyword:
-        searched, search_error = _search_and_store(db, account_id, query.keyword)
 
-    rows = db.scalars(
-        select(ShopNoteGoods)
-        .where(ShopNoteGoods.platform_account_id == account_id)
-        .order_by(ShopNoteGoods.synced_at.desc())
-    ).all()
+    # 数据源（方案 A）：`notes` 表（离线数据中心数据），按账号 + 笔记分类过滤。
+    from backend.app.models import Note
+
+    stmt = select(Note).where(
+        Note.platform_account_id == account_id,
+    )
+    if query.category:
+        # 指定分类 = 只清理该类（需求 7「不同 tab 只清理对应类型」）。
+        stmt = stmt.where(Note.note_category == query.category)
+    else:
+        # 未指定 = 所有离线数据中心笔记（note_category 非空），向后兼容。
+        stmt = stmt.where(Note.note_category != "")
+    if query.keyword:
+        keyword_like = f"%{query.keyword.strip()}%"
+        stmt = stmt.where(Note.title.ilike(keyword_like))
+    note_rows = db.scalars(stmt.order_by(Note.created_at.desc())).all()
 
     matched: list[CleanupCandidate] = []
-    for row in rows:
-        entry = _entry_metrics(row.entry_json)
-        if not entry or not is_no_traffic(entry, thresholds):
+    for note in note_rows:
+        raw = note.raw_json if isinstance(note.raw_json, dict) else {}
+        metrics = raw.get("metrics") if isinstance(raw.get("metrics"), dict) else {}
+        if not is_no_traffic_by_metrics(metrics, thresholds):
             continue
+        # 发布时间：优先 raw_json.metrics 或 raw_json.published_at，退 None。
+        published_at_str = raw.get("published_at") or ""
+        publish_time = None
+        if isinstance(published_at_str, str) and published_at_str:
+            try:
+                from datetime import datetime as _dt
+                publish_time = int(_dt.strptime(published_at_str, "%Y-%m-%d %H:%M:%S").timestamp())
+            except (ValueError, TypeError):
+                publish_time = None
         candidate = CleanupCandidate(
-            note_id=str(row.note_id or ""),
-            title=str(entry.get("note_title") or row.item_title or ""),
-            cover=str(entry.get("note_image") or row.item_image or ""),
-            browse_num=_as_number(entry.get("browse_num")),
-            browse_num_30d=_as_number(entry.get("note_browse_num30d")),
-            likes=_as_number(entry.get("like_num")),
-            collects=_as_number(entry.get("collect_num")),
-            comments=_as_number(entry.get("comment_num")),
-            shares=_as_number(entry.get("share_num")),
-            pay_gmv=_as_number(entry.get("note_pay_gmv")),
-            pay_order_cnt=_as_number(entry.get("note_pay_order_cnt")),
-            publish_time=(
-                int(entry["publish_time"])
-                if _as_number(entry.get("publish_time")) is not None
-                else None
-            ),
-            synced_at=row.synced_at.strftime("%Y-%m-%d %H:%M:%S") if row.synced_at else "",
-            raw=entry,
+            note_id=str(note.note_id or ""),
+            title=str(note.title or ""),
+            cover=str(raw.get("cover_url") or ""),
+            browse_num=_as_number(metrics.get("read_count")),
+            browse_num_30d=None,
+            likes=_as_number(metrics.get("like_count")),
+            collects=_as_number(metrics.get("collect_count")),
+            comments=_as_number(metrics.get("comment_count")),
+            shares=_as_number(metrics.get("share_count")),
+            pay_gmv=_as_number(metrics.get("pay_gmv")),
+            pay_order_cnt=_as_number(metrics.get("pay_order_cnt")),
+            publish_time=publish_time,
+            synced_at=note.created_at.strftime("%Y-%m-%d %H:%M:%S") if note.created_at else "",
+            note_category=str(note.note_category or ""),
+            local_id=note.id,
+            raw=raw,
         )
-        # 搜索条件过滤（note_type / published_before；keyword 已由服务端搜过）。
+        # 搜索条件过滤（note_type / published_before / category）。
         if not query.matches(candidate):
             continue
         matched.append(candidate)
@@ -298,14 +414,13 @@ def list_no_traffic_candidates(
         page_no = page_count
     start = (page_no - 1) * size
     page_rows = matched[start:start + size]
-    reason = (
-        "候选池仅包含已同步千帆挂链映射的笔记；未同步/未绑定千帆的笔记不在池内"
-    )
+    cat_label = {"goods": "商业笔记", "normal": "普通笔记"}.get(query.category, "全部")
+    reason = f"候选池 = {cat_label}（离线数据中心数据）；未同步离线的笔记不在池内"
     if query.keyword:
         reason = (
-            f"已按关键词「{query.keyword}」搜索千帆笔记（命中 {searched} 条并落库）"
+            f"已按关键词「{query.keyword}」在本地标题中匹配"
             + (f"；搜索失败：{search_error}" if search_error else "")
-            + "；其余边界同上"
+            + f"；候选池 = {cat_label}（离线数据中心数据）"
         )
     return {
         "candidates": page_rows,
@@ -316,46 +431,11 @@ def list_no_traffic_candidates(
         "thresholds": thresholds.to_dict(),
         "query": query.to_dict(),
         "coverage": {
-            "synced_notes": len(rows),
-            "pool_total": len(rows),
+            "synced_notes": len(note_rows),
+            "pool_total": len(note_rows),
             "reason": reason,
         },
     }
-
-
-def _search_and_store(db: Session, account_id: int, keyword: str) -> tuple[int, str]:
-    """千帆服务端标题搜索（``mix_search_word``），命中落库。返回 (命中数, 错误)。"""
-    from backend.app.adapters.xhs.qianfan_api_adapter import get_qianfan_api_adapter_factory
-    from backend.app.services.shop_binding_service import qianfan_cookies_for_account
-    from backend.app.services.shop_goods_service import existing_rows, store_entry
-
-    account = db.get(PlatformAccount, account_id)
-    if account is None:
-        return 0, "账号不存在或已被删除"
-    try:
-        # 千帆凭据只认**本账号自己的 ark 通道**（2026-09-22 起不再有绑定表兜底）。
-        cookies = qianfan_cookies_for_account(db, account_id)
-        if not cookies:
-            return 0, "该账号尚未导入千帆（ark）令牌"
-        adapter = get_qianfan_api_adapter_factory()(cookies)
-        success, message, payload = adapter.get_goods_note_page(
-            page_num=1, page_size=SEARCH_PAGE_SIZE, mix_search_word=keyword
-        )
-    except Exception as exc:  # noqa: BLE001 - 搜索失败不阻塞，降级为本地池
-        return 0, f"{type(exc).__name__}: {exc}"
-
-    if not success:
-        return 0, str(message)
-
-    data = payload.get("data") if isinstance(payload, dict) else None
-    entries = [item for item in ((data or {}).get("note_infos") or []) if isinstance(item, dict)]
-    rows = existing_rows(db, account_id)
-    stored = 0
-    for entry in entries:
-        if store_entry(db, account.user_id, account_id, rows, entry):
-            stored += 1
-    db.commit()
-    return stored, ""
 
 
 def serialize_candidate(candidate: CleanupCandidate) -> dict[str, Any]:

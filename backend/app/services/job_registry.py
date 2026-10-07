@@ -33,6 +33,8 @@ JOB_KEY_RECORD_CLEANUP = "system.queue_record_cleanup"
 #: 该键保留在注册表里（任务中心可点「立即执行」、可看日志），但**默认 trigger_type=manual**
 #: （迁移 `y8z9a0b1c2d3` 播的就是 manual ⇒ 从来没有自动跑过）。
 JOB_KEY_NO_TRAFFIC_CLEANUP = "system.no_traffic_cleanup"
+#: 离线笔记数据同步（「我的笔记」商业/普通两类，2026-10-06 需求）。
+JOB_KEY_NOTE_DATA_SYNC = "system.note_data_sync"
 
 #: M6 方向 6（设计 16 §7）订单同步。与 `JOB_KEY_SHOP_GOODS_SYNC` 分开：
 #: 落不同的表、不同的任务类型，任务中心是两行独立的任务。
@@ -200,6 +202,21 @@ def _build_registry() -> dict[str, JobSpec]:
             builtin=True,
             user_scoped=True,
             params_editable=("account_ids",),
+            default_trigger_type="cron",
+            default_cron="0 0 */6 * * *",
+        ),
+        JobSpec(
+            # 「我的笔记」离线数据同步（2026-10-06 需求）：千帆数据中心商业 + 普通
+            # 两类笔记，走 butterfly/data 列表接口（无签名直连）落库。与上面的
+            # 笔记同步（creator/ark 三方同步）是**两件事**：那个同步到 `note_type=synced`
+            # 的线上笔记，这个落 `note_category=goods/normal` 的离线数据中心笔记。
+            key=JOB_KEY_NOTE_DATA_SYNC,
+            name="离线笔记数据同步",
+            func=scheduler_service.run_scheduled_note_data_syncs,
+            builtin=True,
+            user_scoped=True,
+            # 2026-10-06：新增「时间区间」参数 `days`（同步最近 N 天，上限 90）。
+            params_editable=("account_ids", "days"),
             default_trigger_type="cron",
             default_cron="0 0 */6 * * *",
         ),

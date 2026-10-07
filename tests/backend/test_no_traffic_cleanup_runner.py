@@ -20,18 +20,23 @@
 """
 from __future__ import annotations
 
-import json
-
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 
 from backend.app.adapters.xhs import creator_api_adapter
+from backend.app.adapters.xhs import qianfan_api_adapter
 from backend.app.core.database import Base
 from backend.app.core.time import shanghai_now
-from backend.app.models import NoTrafficCleanupLog, PlatformAccount, Task, User
-from backend.app.models.shop import ShopNoteGoods
+from backend.app.models import (
+    NoTrafficCleanupItem,
+    NoTrafficCleanupLog,
+    Note,
+    PlatformAccount,
+    Task,
+    User,
+)
 from backend.app.services import no_traffic_cleanup_service as ncs
-from backend.app.services.account_service import CHANNEL_CREATOR
+from backend.app.services.account_service import CHANNEL_ARK, CHANNEL_CREATOR
 from backend.app.services.shop_binding_service import set_shop_state
 from tests.backend.cookie_fixtures import cookie_version
 
@@ -59,15 +64,40 @@ class FakeCreatorApiAdapter:
         return True, "ok", {}
 
 
+class FakeQianfanApiAdapter:
+    """只实现千帆批量删除，并记录**每次调用**的 note_ids（验证分片）。"""
+
+    deleted: list = []          # 累计所有被删 note_id（flatten）
+    calls: list = []            # 每次调用的 note_ids 列表（验证分片边界）
+
+    def __init__(self, cookies: str) -> None:
+        self.cookies = cookies
+
+    def batch_delete_notes(self, note_ids):
+        type(self).deleted.extend(note_ids)
+        type(self).calls.append(list(note_ids))
+        return True, "成功", {}
+
+
 def _entry(note_id: str, *, browse: int = 0, orders: int = 0, gmv: int = 0) -> dict:
+    """生成 `notes.raw_json` 形状（方案 A 数据源：`metrics` 键 + 发布时间）。
+
+    ⚠️ 方案 A（2026-10-06）后候选池从 `notes.raw_json.metrics` 读指标，
+    键名是 `read_count` / `pay_gmv` / `pay_order_cnt`（对齐 `note_data_service`），
+    不再是旧的 `browse_num` / `note_pay_gmv` / `note_pay_order_cnt`。
+    """
     return {
-        "note_id": note_id,
-        "note_title": f"笔记 {note_id}",
-        "publish_time": 1_760_000_000_000,
-        "browse_num": browse,
-        "note_pay_order_cnt": orders,
-        "note_pay_gmv": gmv,
-        "note_browse_num30d": 0,
+        "title": f"笔记 {note_id}",
+        "published_at": "2026-08-01 00:00:00",
+        "metrics": {
+            "read_count": browse,
+            "pay_order_cnt": orders,
+            "pay_gmv": gmv,
+            "like_count": 0,
+            "collect_count": 0,
+            "comment_count": 0,
+            "share_count": 0,
+        },
     }
 
 
@@ -117,20 +147,21 @@ def _setup(tmp_path, monkeypatch):
         account.seller_id = "SELLER-1"
         set_shop_state(account, status="active", goods_note_total=3)
         db.flush()
+        # 方案 A：候选数据源 = `notes`（note_category='goods' + raw_json.metrics）。
         for note_id, kwargs in (
             ("ZERO-1", {}),                                    # 三项全零 → 候选
             ("HAS-READ", {"browse": 7}),                       # 有人看 → 不删
             ("ZERO-2", {}),                                    # 三项全零 → 候选
         ):
             db.add(
-                ShopNoteGoods(
+                Note(
                     user_id=user.id,
                     platform_account_id=account.id,
+                    platform="xhs",
                     note_id=note_id,
-                    item_id="ITEM-1",
-                    item_title="商品",
-                    entry_json=json.dumps(_entry(note_id, **kwargs), ensure_ascii=False),
-                    synced_at=shanghai_now(),
+                    title=f"笔记 {note_id}",
+                    note_category="goods",
+                    raw_json=_entry(note_id, **kwargs),
                 )
             )
         db.commit()
@@ -157,6 +188,11 @@ def test_cleanup_runner_reads_cookies_and_deletes_the_candidates(tmp_path, monke
         task = db.scalars(select(Task).where(Task.task_type == ncs.CLEANUP_TASK_TYPE)).one()
         assert task.status == ncs.STATUS_DONE
         assert task.payload["deleted"] == 2
+        # 2026-10-06：平台删成功后必须**同步删本地 notes 表**（此前只删平台、漏删本地）。
+        remaining = set(
+            db.scalars(select(Note.note_id).where(Note.note_id.in_(["ZERO-1", "ZERO-2", "HAS-READ"]))).all()
+        )
+        assert remaining == {"HAS-READ"}, f"本地应只剩未删的 HAS-READ，实际 {remaining}"
     finally:
         db.close()
 
@@ -377,7 +413,14 @@ def test_log_row_is_kept_even_when_the_task_row_is_gone(tmp_path, monkeypatch):
 
 
 def test_failed_cleanup_records_the_reason(tmp_path, monkeypatch):
-    """失败要落 `failed` + **原因原文**（用户口径「失败原因」，硬约束⑤不造假）。"""
+    """失败要落 `failed` + **原因原文**（用户口径「失败原因」，硬约束⑤不造假）。
+
+    ⚠️ 本用例的失败原文**含「账号存在风险，请重新登录」** —— 2026-10-06 起它同时
+    触发 DEF-097 的**账号级短路**（剩余笔记不再发请求）⇒ `failed == 1` 而不是 2。
+    这是**刻意**的行为：同一句风控告警重复打第二篇没有任何产出。两件事分别由
+    `test_account_level_failure_aborts_the_batch_and_never_calls_the_rest`（短路）
+    与 `test_failed_cleanup_records_the_reason`（原因留痕）各自钉住。
+    """
     account_id, SessionLocal = _setup(tmp_path, monkeypatch)
 
     class Boom(FakeCreatorApiAdapter):
@@ -391,11 +434,355 @@ def test_failed_cleanup_records_the_reason(tmp_path, monkeypatch):
     db = SessionLocal()
     try:
         log = db.scalars(select(NoTrafficCleanupLog)).one()
-        assert log.status == "failed", "全篇失败 ⇒ 终态 failed"
-        assert log.failed == 2, "两篇候选都失败"
+        assert log.status == "failed", "失败 ⇒ 终态 failed"
+        assert log.failed == 1, "风控短路：只打第一篇（DEF-097）"
         assert any(
             "账号存在风险" in str(item.get("reason") or "") for item in (log.details or [])
         ), "失败原因保留平台原文（不猜、不吞）"
+    finally:
+        db.close()
+
+
+def test_account_level_failure_aborts_the_batch_and_never_calls_the_rest(tmp_path, monkeypatch):
+    """**账号级**失败（风控 / 凭据）⇒ 本批中止，剩下的笔记**一次请求都不发**（DEF-097）。
+
+    真机现场（2026-10-06，账号 8）：平台回 `code=906 账号存在风险，请重新登录` 时，
+    「清理全部」会朝一个**已被风控告警**的账号连打 20 次权限校验 —— 没有一次会成功，
+    纯粹加重风控。判据必须落在**调用次数**上（只看 `failed` 数分不出「短路」与
+    「逐篇都失败」）。
+    """
+    account_id, SessionLocal = _setup(tmp_path, monkeypatch)
+    calls: list[str] = []
+
+    class Risk(FakeCreatorApiAdapter):
+        def validate_delete_permission(self, note_id: str):
+            calls.append(note_id)
+            return False, "账号存在风险，请重新登录", {"code": 906}
+
+    monkeypatch.setattr(creator_api_adapter, "XhsCreatorApiAdapter", Risk)
+
+    result = ncs.run_no_traffic_cleanup(account_id, user_id=1)
+
+    assert len(calls) == 1, f"账号级失败后不该再打第二篇，实际打了 {calls}"
+    assert result["aborted"] is True
+    assert "账号存在风险" in result["abort_reason"]
+
+    db = SessionLocal()
+    try:
+        log = db.scalars(select(NoTrafficCleanupLog)).one()
+        assert log.aborted is True, "中止事实要落库"
+        assert "账号存在风险" in log.abort_reason
+        # `reason` 是**失败原因**，不是覆盖度文案（DEF-095）。
+        assert "账号存在风险" in log.reason, log.reason
+        assert "候选池" not in log.reason, "覆盖度文案不许再冒充失败原因"
+        assert "候选池" in log.coverage_note, "覆盖度改走 coverage_note"
+    finally:
+        db.close()
+
+
+def test_unreached_notes_are_recorded_as_not_attempted(tmp_path, monkeypatch):
+    """中止后**没轮到的笔记**落 `result="not_attempted"`，**不是** `failed`。
+
+    ⚠️ 这条判据是变异验证逼出来的（`notattemptedmissing` 变异**没被抓住**）：
+    此前只断言了「剩余笔记没发请求」，没断言它们**怎么记账**。两者是两件事 ——
+    记成 `failed` 就够让用户以为「打了但失败了」，进而**去查一个不存在的失败原因**；
+    记成 `not_attempted` 才答得出「这篇根本没轮到，重试即可」。
+
+    一条管**账号级中止**（风控），一条管**限流中止** —— 两条路的收尾是两份代码，
+    必须各钉一次（共用一条断言会漏掉另一条）。
+    """
+    # ① 账号级（风控）
+    account_id, SessionLocal = _setup(tmp_path, monkeypatch)
+
+    class Risk(FakeCreatorApiAdapter):
+        def validate_delete_permission(self, note_id: str):
+            return False, "账号存在风险，请重新登录", {}
+
+    monkeypatch.setattr(creator_api_adapter, "XhsCreatorApiAdapter", Risk)
+    ncs.run_no_traffic_cleanup(account_id, user_id=1)
+
+    db = SessionLocal()
+    try:
+        rows = {i.note_id: i for i in db.scalars(select(NoTrafficCleanupItem)).all()}
+        assert set(rows) == {"ZERO-1", "ZERO-2"}, "两篇都要有账"
+        # ⚠️ **不假设谁先谁后**：候选顺序来自 `synced_at desc`，夹具里两篇同一时刻
+        #    建行 ⇒ 顺序无关紧要，断言写成「恰好一篇 failed、恰好一篇 not_attempted」。
+        results = sorted(i.result for i in rows.values())
+        assert results == ["failed", "not_attempted"], f"实际 {results}"
+        un = next(i for i in rows.values() if i.result == "not_attempted")
+        assert "未执行" in un.reason
+    finally:
+        db.close()
+
+    # ② 限流中止（另一份收尾代码）
+    # ⚠️ 同一个 `tmp_path` 装不下两个库（`_setup` 按固定文件名建库，第二次会撞
+    #    `users.username` 唯一约束）⇒ 换子目录，且**必须先建目录**，否则 SQLite
+    #    报 `unable to open database file`。
+    (tmp_path / "rl").mkdir()
+    account_id2, SessionLocal2 = _setup(tmp_path / "rl", monkeypatch)
+
+    class NoQuota(type(ncs.CrawlRateLimiter())):
+        def allow(self, account_id: int) -> bool:  # type: ignore[override]
+            return False
+
+    monkeypatch.setattr(ncs, "_lock", NoQuota())
+    ncs.run_no_traffic_cleanup(account_id2, user_id=1)
+
+    db = SessionLocal2()
+    try:
+        rows = {i.note_id: i for i in db.scalars(select(NoTrafficCleanupItem)).all()}
+        assert set(rows) == {"ZERO-1", "ZERO-2"}, "限流也得给两篇都记账"
+        assert all(i.result == "not_attempted" for i in rows.values()), (
+            f"限流 ⇒ 一篇都没打成 ⇒ 全是 not_attempted，实际 {[i.result for i in rows.values()]}"
+        )
+        log = db.scalars(select(NoTrafficCleanupLog)).one()
+        assert log.aborted is True and "限流" in log.abort_reason
+    finally:
+        db.close()
+
+
+def test_single_note_failure_does_not_abort_the_batch(tmp_path, monkeypatch):
+    """**单篇级**失败（这一篇的问题）⇒ 照旧往下跑（短路的反面判据）。
+
+    只认账号级特征，认不出时宁可多跑 —— 误判中止会让「有一篇坏了就整批不跑」，
+    那比多打几次请求糟得多。
+    """
+    account_id, SessionLocal = _setup(tmp_path, monkeypatch)
+    calls: list[str] = []
+
+    class OneBad(FakeCreatorApiAdapter):
+        def validate_delete_permission(self, note_id: str):
+            calls.append(note_id)
+            if note_id == "ZERO-1":
+                return False, "该笔记已被删除", {}
+            return True, "ok", {"data": {"is_note_in_promotion": False}}
+
+    monkeypatch.setattr(creator_api_adapter, "XhsCreatorApiAdapter", OneBad)
+
+    result = ncs.run_no_traffic_cleanup(account_id, user_id=1)
+
+    assert len(calls) == 2, f"单篇失败不该中止本批，实际 {calls}"
+    assert result["aborted"] is False
+    assert result["failed"] == 1 and result["deleted"] == 1
+
+
+def test_log_reason_is_empty_when_nothing_failed(tmp_path, monkeypatch):
+    """**DEF-095 判据 ①**：没有失败时 `reason` 是**空**，覆盖度文案在 `coverage_note`。
+
+    修复前它恒等于 `payload["note"]`（覆盖度文案）—— 于是「一次全部成功的清理」
+    也会在「失败原因」列显示一句覆盖度说明，同一句话在成功与失败两种场景下都出现，
+    列的语义就不成立了。
+    """
+    account_id, SessionLocal = _setup(tmp_path, monkeypatch)
+
+    ncs.run_no_traffic_cleanup(account_id, user_id=1)
+
+    db = SessionLocal()
+    try:
+        log = db.scalars(select(NoTrafficCleanupLog)).one()
+        assert log.deleted == 2, "前置：两篇都删掉了"
+        assert log.reason == "", f"没有失败就不该有失败原因，实际 {log.reason!r}"
+        assert "候选池" in log.coverage_note, "覆盖度说明仍如实保留"
+    finally:
+        db.close()
+
+
+def test_log_reason_is_the_failure_not_the_coverage_blurb(tmp_path, monkeypatch):
+    """**DEF-095 判据 ②**：有失败时 `reason` 是**那条失败的平台原文**。
+
+    ⚠️ 修复前的现场：平台风控失败，界面「失败原因」列显示
+    「候选池仅包含已同步千帆挂链映射的笔记…」—— 一句**正常态**的覆盖度说明，
+    与本次为何失败毫无关系，把用户指向完全错误的方向。
+    """
+    account_id, SessionLocal = _setup(tmp_path, monkeypatch)
+
+    class Deny(FakeCreatorApiAdapter):
+        def validate_delete_permission(self, note_id: str):
+            return False, "无权限删除该笔记", {}
+
+    monkeypatch.setattr(creator_api_adapter, "XhsCreatorApiAdapter", Deny)
+
+    ncs.run_no_traffic_cleanup(account_id, user_id=1)
+
+    db = SessionLocal()
+    try:
+        log = db.scalars(select(NoTrafficCleanupLog)).one()
+        assert "无权限删除该笔记" in log.reason, log.reason
+        assert "候选池" not in log.reason, "覆盖度文案不许再冒充失败原因"
+        assert "候选池" in log.coverage_note, "覆盖度改走 coverage_note"
+    finally:
+        db.close()
+
+
+def test_cleanup_writes_one_item_row_per_note(tmp_path, monkeypatch):
+    """**笔记维度主体**（用户 2026-10-06 口径）：一篇笔记 = 一行，结果逐篇可查。
+
+    「清理无流量的主要对象是笔记，**所有主体应是笔记维度**，记录操作日志时也应该是
+    笔记维度」⇒ 批次行答「这次整体怎么样」，明细行答「**这一篇**被删了没有、为什么」。
+    """
+    account_id, SessionLocal = _setup(tmp_path, monkeypatch)
+    FakeCreatorApiAdapter.in_promotion = {"ZERO-1"}  # 这篇被跳过
+
+    ncs.run_no_traffic_cleanup(account_id, user_id=1)
+
+    db = SessionLocal()
+    try:
+        log = db.scalars(select(NoTrafficCleanupLog)).one()
+        items = db.scalars(
+            select(NoTrafficCleanupItem).order_by(NoTrafficCleanupItem.note_id)
+        ).all()
+        by_note = {item.note_id: item for item in items}
+        assert set(by_note) == {"ZERO-1", "ZERO-2"}, f"两篇候选各一行，实际 {sorted(by_note)}"
+        assert by_note["ZERO-1"].result == "skipped", "推广中 ⇒ skipped"
+        assert by_note["ZERO-2"].result == "deleted", "真删 ⇒ deleted"
+
+        # 笔记主体字段：标题 / 账号 / 归属 / 关联批次行 / 操作时间。
+        assert by_note["ZERO-2"].note_title == "笔记 ZERO-2", "标题快照（平台删了也答得出）"
+        assert by_note["ZERO-2"].account_id == account_id
+        assert by_note["ZERO-2"].user_id == 1
+        assert by_note["ZERO-2"].log_id == log.id, "挂到本批次行"
+        assert by_note["ZERO-2"].operated_at is not None, "操作时间（用户口径）"
+        # `deleted` 那篇没有原因；`skipped` 那篇有。
+        assert by_note["ZERO-2"].reason == "", "删除成功不编原因"
+        assert "推广" in by_note["ZERO-1"].reason
+    finally:
+        db.close()
+
+
+def test_items_are_kept_when_the_batch_log_row_is_purged(tmp_path, monkeypatch):
+    """批次行被保留期删掉 ⇒ 明细行**仍在**（`log_id` 置空）。
+
+    「某篇笔记当初为什么没删掉」这个答案不该随批次记录过期而消失 —— 这就是明细
+    独立成表、且 `log_id` 用 `SET NULL` 的理由。
+    """
+    account_id, SessionLocal = _setup(tmp_path, monkeypatch)
+    ncs.run_no_traffic_cleanup(account_id, user_id=1)
+
+    db = SessionLocal()
+    try:
+        log = db.scalars(select(NoTrafficCleanupLog)).one()
+        db.delete(log)
+        db.commit()
+        db.expire_all()
+        assert db.scalars(select(NoTrafficCleanupLog)).all() == [], "前置：批次行没了"
+        items = db.scalars(select(NoTrafficCleanupItem)).all()
+        assert len(items) == 2, "明细不受批次行删除影响"
+        assert all(item.log_id is None for item in items), "log_id 置空（SET NULL）"
+        # 归属信息冗余存着 ⇒ 批次行没了也读得懂。
+        assert all(item.user_id == 1 and item.account_id == account_id for item in items)
+    finally:
+        db.close()
+
+
+def test_not_in_pool_notes_are_recorded_as_items_too(tmp_path, monkeypatch):
+    """勾选但**已不在候选池**的笔记也留一行（`not_in_pool`）——用户勾过就必须有答案。"""
+    account_id, SessionLocal = _setup(tmp_path, monkeypatch)
+    ncs.run_no_traffic_cleanup(
+        account_id, note_ids=["ZERO-1", "GONE-1"], user_id=1
+    )
+
+    db = SessionLocal()
+    try:
+        items = {
+            item.note_id: item
+            for item in db.scalars(select(NoTrafficCleanupItem)).all()
+        }
+        assert "GONE-1" in items, "勾了但不在池：必须留痕"
+        assert items["GONE-1"].result == "not_in_pool"
+        assert "不在当前候选池" in items["GONE-1"].reason
+    finally:
+        db.close()
+
+
+def test_record_cleanup_registry_also_covers_the_note_items():
+    """明细表登记在「清理记录表」范围内，且**排在批次行之前**（先子后父）。"""
+    from backend.app.services.record_cleanup_service import RECORD_CLEANERS
+
+    keys = [c.key for c in RECORD_CLEANERS]
+    assert "no_traffic_cleanup_item" in keys, "笔记维度明细必须进清理范围"
+    assert keys.index("no_traffic_cleanup_item") < keys.index("no_traffic_cleanup_log"), (
+        "先清明细再清批次行（子行在前）"
+    )
+
+
+def test_record_cleanup_purges_the_notes_items_by_operated_at(tmp_path, monkeypatch):
+    """明细表按**操作时间**判期：超期的删、未超期的一行不动。
+
+    ⚠️ 明细**没有「进行中」这一态**（它是批次收尾时一次性写下的已发生事实）⇒
+    判据只看 `operated_at`，不看 `result`。这条与批次行（看 `status`）**刻意不同**。
+    """
+    from datetime import timedelta
+
+    from backend.app.core.time import shanghai_now
+    from backend.app.services import record_cleanup_service as rcs
+
+    account_id, SessionLocal = _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(rcs, "SessionLocal", SessionLocal)
+
+    old = shanghai_now() - timedelta(days=40)
+    fresh = shanghai_now() - timedelta(days=1)
+    db = SessionLocal()
+    try:
+        for result, when in (("deleted", old), ("failed", old), ("deleted", fresh)):
+            db.add(
+                NoTrafficCleanupItem(
+                    user_id=1,
+                    account_id=account_id,
+                    note_id=f"N-{result}-{when.date()}",
+                    result=result,
+                    operated_at=when,
+                )
+            )
+        db.commit()
+    finally:
+        db.close()
+
+    result = rcs.run_record_cleanup(1, retention_days=15)
+
+    assert result["cleaned"]["no_traffic_cleanup_item"] == 2, "超期 2 条（未超期的不动）"
+    db = SessionLocal()
+    try:
+        rows = db.scalars(select(NoTrafficCleanupItem)).all()
+        assert len(rows) == 1, "只剩未超期那条"
+        assert rows[0].operated_at > old
+    finally:
+        db.close()
+
+
+def test_record_cleanup_never_purges_another_users_items(tmp_path, monkeypatch):
+    """跨租户：清理只动行主本人的明细（别人的一行不动）。"""
+    from datetime import timedelta
+
+    from backend.app.core.time import shanghai_now
+    from backend.app.services import record_cleanup_service as rcs
+
+    account_id, SessionLocal = _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(rcs, "SessionLocal", SessionLocal)
+    old = shanghai_now() - timedelta(days=40)
+
+    db = SessionLocal()
+    try:
+        db.add(
+            NoTrafficCleanupItem(
+                user_id=1, account_id=account_id, note_id="MINE", operated_at=old
+            )
+        )
+        db.add(
+            NoTrafficCleanupItem(
+                user_id=_OTHER_USER_ID["id"], account_id=account_id,
+                note_id="THEIRS", operated_at=old,
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    rcs.run_record_cleanup(1, retention_days=15)
+
+    db = SessionLocal()
+    try:
+        left = db.scalars(select(NoTrafficCleanupItem)).all()
+        assert [row.note_id for row in left] == ["THEIRS"], "别人的明细不许被清"
     finally:
         db.close()
 
@@ -728,3 +1115,172 @@ def test_thread_path_also_records_the_retention_of_the_run(tmp_path, monkeypatch
         assert log.status in ("done", "failed")
     finally:
         db.close()
+
+
+def test_goods_notes_delete_via_qianfan_and_normal_via_creator(tmp_path, monkeypatch):
+    """商业笔记走千帆 `batch_delete_notes`，普通笔记走 creator `delete_note`（分流）。
+
+    2026-10-06 需求「清理无流量商业笔记走千帆平台的笔记删除」。
+    """
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'split.db'}", connect_args={"check_same_thread": False}
+    )
+    Base.metadata.create_all(bind=engine)
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+    monkeypatch.setattr(ncs, "SessionLocal", SessionLocal)
+    monkeypatch.setattr(creator_api_adapter, "XhsCreatorApiAdapter", FakeCreatorApiAdapter)
+    monkeypatch.setattr(qianfan_api_adapter, "XhsQianfanApiAdapter", FakeQianfanApiAdapter)
+    monkeypatch.setattr(ncs, "_lock", ncs.CrawlRateLimiter())
+    FakeCreatorApiAdapter.deleted = []
+    FakeCreatorApiAdapter.in_promotion = set()
+    FakeQianfanApiAdapter.deleted = []
+    FakeQianfanApiAdapter.calls = []
+
+    db = SessionLocal()
+    try:
+        user = User(username="owner", password_hash="x")
+        db.add(user)
+        db.flush()
+        account = PlatformAccount(user_id=user.id, platform="xhs", sub_type="creator", nickname="我的号")
+        db.add(account)
+        db.flush()
+        # creator + ark 两种 cookies 都给（分流依赖 ark cookies 存在）
+        db.add(cookie_version(account.id, "access-token-creator.xiaohongshu.com=ctok; customer-sso-sid=sso", CHANNEL_CREATOR))
+        db.add(cookie_version(account.id, "a1=xyz; access-token-ark=atok; customer-sso-sid=arksso", CHANNEL_ARK))
+        account.seller_id = "SELLER-1"
+        set_shop_state(account, status="active", goods_note_total=2)
+        db.flush()
+        # 一条商业笔记（goods）+ 一条普通笔记（normal），都无流量
+        db.add(Note(
+            user_id=user.id, platform_account_id=account.id, platform="xhs",
+            note_id="GOODS-1", title="商业笔记", note_category="goods", raw_json=_entry("GOODS-1"),
+        ))
+        db.add(Note(
+            user_id=user.id, platform_account_id=account.id, platform="xhs",
+            note_id="NORMAL-1", title="普通笔记", note_category="normal", raw_json=_entry("NORMAL-1"),
+        ))
+        db.commit()
+        account_id = account.id
+    finally:
+        db.close()
+
+    result = ncs.run_no_traffic_cleanup(account_id, user_id=1)
+
+    # 分流：商业 → 千帆，普通 → creator
+    assert sorted(FakeQianfanApiAdapter.deleted) == ["GOODS-1"], FakeQianfanApiAdapter.deleted
+    assert sorted(FakeCreatorApiAdapter.deleted) == ["NORMAL-1"], FakeCreatorApiAdapter.deleted
+    assert result["deleted"] == 2, result
+    assert result["failed"] == 0, result
+
+
+def test_goods_note_falls_back_to_creator_when_no_ark_cookies(tmp_path, monkeypatch):
+    """无 ark cookies 时，商业笔记退回 creator 链路（不因缺令牌而漏删/误判）。"""
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'fallback.db'}", connect_args={"check_same_thread": False}
+    )
+    Base.metadata.create_all(bind=engine)
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+    monkeypatch.setattr(ncs, "SessionLocal", SessionLocal)
+    monkeypatch.setattr(creator_api_adapter, "XhsCreatorApiAdapter", FakeCreatorApiAdapter)
+    monkeypatch.setattr(qianfan_api_adapter, "XhsQianfanApiAdapter", FakeQianfanApiAdapter)
+    monkeypatch.setattr(ncs, "_lock", ncs.CrawlRateLimiter())
+    FakeCreatorApiAdapter.deleted = []
+    FakeCreatorApiAdapter.in_promotion = set()
+    FakeQianfanApiAdapter.deleted = []
+    FakeQianfanApiAdapter.calls = []
+
+    db = SessionLocal()
+    try:
+        user = User(username="owner", password_hash="x")
+        db.add(user)
+        db.flush()
+        account = PlatformAccount(user_id=user.id, platform="xhs", sub_type="creator", nickname="我的号")
+        db.add(account)
+        db.flush()
+        # 只给 creator cookies，不给 ark
+        db.add(cookie_version(account.id, "access-token-creator.xiaohongshu.com=ctok; customer-sso-sid=sso", CHANNEL_CREATOR))
+        account.seller_id = "SELLER-1"
+        set_shop_state(account, status="active", goods_note_total=1)
+        db.flush()
+        db.add(Note(
+            user_id=user.id, platform_account_id=account.id, platform="xhs",
+            note_id="GOODS-1", title="商业笔记", note_category="goods", raw_json=_entry("GOODS-1"),
+        ))
+        db.commit()
+        account_id = account.id
+    finally:
+        db.close()
+
+    result = ncs.run_no_traffic_cleanup(account_id, user_id=1)
+
+    # 无 ark cookies → 千帆 adapter 为 None → 退回 creator
+    assert FakeQianfanApiAdapter.deleted == []
+    assert sorted(FakeCreatorApiAdapter.deleted) == ["GOODS-1"]
+    assert result["deleted"] == 1, result
+
+
+def test_goods_batch_capped_at_50_and_normal_at_20(tmp_path, monkeypatch):
+    """商业笔记单批 ≤50（千帆一次批量删），普通笔记单批 ≤20（creator 逐篇，历史不变）。"""
+    from backend.app.services.no_traffic_service import CleanupQuery
+
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'cap.db'}", connect_args={"check_same_thread": False}
+    )
+    Base.metadata.create_all(bind=engine)
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+    monkeypatch.setattr(ncs, "SessionLocal", SessionLocal)
+    monkeypatch.setattr(creator_api_adapter, "XhsCreatorApiAdapter", FakeCreatorApiAdapter)
+    monkeypatch.setattr(qianfan_api_adapter, "XhsQianfanApiAdapter", FakeQianfanApiAdapter)
+    monkeypatch.setattr(ncs, "_lock", ncs.CrawlRateLimiter(max_per_minute=1000))
+    FakeCreatorApiAdapter.deleted = []
+    FakeCreatorApiAdapter.in_promotion = set()
+    FakeQianfanApiAdapter.deleted = []
+    FakeQianfanApiAdapter.calls = []
+
+    db = SessionLocal()
+    try:
+        user = User(username="owner", password_hash="x")
+        db.add(user)
+        db.flush()
+        account = PlatformAccount(user_id=user.id, platform="xhs", sub_type="creator", nickname="我的号")
+        db.add(account)
+        db.flush()
+        db.add(cookie_version(account.id, "access-token-creator.xiaohongshu.com=ctok; customer-sso-sid=sso", CHANNEL_CREATOR))
+        db.add(cookie_version(account.id, "a1=xyz; access-token-ark=atok; customer-sso-sid=arksso", CHANNEL_ARK))
+        account.seller_id = "SELLER-1"
+        set_shop_state(account, status="active", goods_note_total=60)
+        db.flush()
+        # 60 条商业 + 30 条普通，都无流量
+        for i in range(60):
+            db.add(Note(
+                user_id=user.id, platform_account_id=account.id, platform="xhs",
+                note_id=f"G-{i:03d}", title=f"商业{i}", note_category="goods", raw_json=_entry(f"G-{i:03d}"),
+            ))
+        for i in range(30):
+            db.add(Note(
+                user_id=user.id, platform_account_id=account.id, platform="xhs",
+                note_id=f"N-{i:03d}", title=f"普通{i}", note_category="normal", raw_json=_entry(f"N-{i:03d}"),
+            ))
+        db.commit()
+        account_id = account.id
+    finally:
+        db.close()
+
+    # ① 商业笔记 tab：query.category="goods" → 千帆一次批量删 ≤50
+    result_goods = ncs.run_no_traffic_cleanup(
+        account_id, user_id=1, batch_limit=20, query=CleanupQuery(category="goods")
+    )
+    assert len(FakeQianfanApiAdapter.calls) == 1, FakeQianfanApiAdapter.calls
+    assert len(FakeQianfanApiAdapter.calls[0]) == 50, "商业单批截断到 50"
+    assert FakeCreatorApiAdapter.deleted == [], "商业笔记不走 creator"
+    assert result_goods["deleted"] == 50, result_goods
+
+    # ② 普通笔记 tab：query.category="normal" → creator 逐篇 ≤20
+    result_normal = ncs.run_no_traffic_cleanup(
+        account_id, user_id=1, batch_limit=20, query=CleanupQuery(category="normal")
+    )
+    assert len(FakeCreatorApiAdapter.deleted) == 20, "普通单批截断到 20"
+    assert result_normal["deleted"] == 20, result_normal

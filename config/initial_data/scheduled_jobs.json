@@ -156,6 +156,19 @@
       "params": {},
       "status": "active",
       "remark": "系统内置任务（应用初始化数据，随安装附有；调度属性可调）"
+    },
+    {
+      "job_key": "system.note_data_sync",
+      "name": "离线笔记数据同步",
+      "trigger_type": "cron",
+      "cron_expression": "0 0 */6 * * *",
+      "misfire_policy": "once",
+      "concurrent": "forbid",
+      "params": {
+        "account_ids": []
+      },
+      "status": "active",
+      "remark": "系统内置任务（2026-10-06 需求：千帆数据中心商业+普通两类笔记离线落库，默认每 6 小时一次）"
     }
   ]
 }

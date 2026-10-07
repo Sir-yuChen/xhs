@@ -78,9 +78,9 @@ export function shipConfirmText(
   const count = items.filter((item) => String(item.order_no ?? "").trim()).length;
   if (count <= 1) {
     const one = items.find((item) => String(item.order_no ?? "").trim());
-    return `将对订单 ${one?.order_no ?? "-"} 执行**真实发货**（运单号 ${one?.tracking_no || "未填"}）。此操作不可撤回。`;
+    return `将对订单 ${one?.order_no ?? "-"} 执行真实发货（运单号 ${one?.tracking_no || "未填"}）。此操作不可撤回。`;
   }
-  return `将对 ${count} 笔订单执行**真实发货**。此操作不可撤回。`;
+  return `将对 ${count} 笔订单执行真实发货。此操作不可撤回。`;
 }
 
 /** 售后审核的影响面文案（同意 / 拒绝）。 */
@@ -91,7 +91,7 @@ export function afterSaleConfirmText(
 ): string {
   const money = typeof amount === "number" ? `退款金额 ¥${amount.toFixed(2)}` : "退款金额未知";
   const verb = action === "reject" ? "拒绝" : "同意";
-  return `将对售后单 ${afterSaleId} 执行**真实${verb}**（${money}）。此操作不可撤回。`;
+  return `将对售后单 ${afterSaleId} 执行真实${verb}（${money}）。此操作不可撤回。`;
 }
 
 /**

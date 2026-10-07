@@ -17,6 +17,7 @@ import {
   FolderOpenOutlined,
   HighlightOutlined,
   PictureOutlined,
+  SendOutlined,
   ToolOutlined,
   VideoCameraOutlined,
 } from "@ant-design/icons";
@@ -26,11 +27,12 @@ import { useSearchParams } from "react-router-dom";
 import { DraftsWorkshopPanel } from "./drafts-workshop-panel";
 import { ImageStudioPanel } from "./image-studio-panel";
 import { MaterialLibraryPanel } from "./material-library-panel";
+import { XhsPublishPage } from "./publish-page";
 import { PromptTemplatePanel } from "./prompt-template-panel";
 import { VideoStudioPanel } from "./video-studio-panel";
 
 /** tab key 与 URL query 取值（旧路由重定向按它落 tab；未知值回落 images）。 */
-const NOTE_WORKSHOP_TABS = ["images", "videos", "drafts", "materials", "prompts"] as const;
+const NOTE_WORKSHOP_TABS = ["images", "videos", "drafts", "publish", "materials", "prompts"] as const;
 type NoteWorkshopTab = (typeof NOTE_WORKSHOP_TABS)[number];
 
 function normalizeTab(value: string | null): NoteWorkshopTab {
@@ -89,6 +91,18 @@ export function XhsNoteWorkshopPage() {
               </span>
             ),
             children: <DraftsWorkshopPanel />,
+          },
+          {
+            // 设计 22 §2（2026-10-06）：原「发布中心」独立菜单项并入本页作 tab。
+            // 放在「草稿工坊」之后 —— 草稿 → 发布是自然下游。
+            key: "publish",
+            label: (
+              <span>
+                <SendOutlined />
+                发布中心
+              </span>
+            ),
+            children: <XhsPublishPage />,
           },
           {
             key: "materials",

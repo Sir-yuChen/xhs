@@ -124,8 +124,8 @@ def _user_of(token: str) -> int:
 # --------------------------------------------------------------------------- #
 # 注册表白名单
 # --------------------------------------------------------------------------- #
-def test_registry_has_exactly_fifteen_entries():
-    """注册表全量 15 项（13 系统内置 + 1 业务管线 + 1 工作流前缀）；键集合钉死 —— 新增任务类型 = 发版。
+def test_registry_has_exactly_sixteen_entries():
+    """注册表全量 16 项（14 系统内置 + 1 业务管线 + 1 工作流前缀）；键集合钉死 —— 新增任务类型 = 发版。
 
     §44（2026-09-30）：「账号笔记同步」的混合双源拆成两个独立任务 ⇒ 新增
     `system.goods_note_sync`（**商品笔记**，ark 源）。它与 `system.note_sync`（普通笔记，
@@ -133,13 +133,15 @@ def test_registry_has_exactly_fifteen_entries():
     不是一回事，两条键都必须在表里。
 
     ⚠️ 2026-10-04：M5/M6 新增 `workflow.`（工作流前缀，**动态**）与 `system.order_sync`
-    （订单只读同步）⇒ 13 → 15。⚠️ 种子里**只有 13 个内置行**：`workflow.` 与
-    `auto_ops.keyword_pipeline` 是**运行时动态建**的，不在 `scheduled_jobs.json` 里。
+    （订单只读同步）⇒ 13 → 15。
+
+    ⚠️ 2026-10-06：新增 `system.note_data_sync`（离线笔记数据同步，商业+普通两类，
+    千帆数据中心 butterfly/data 接口）⇒ 15 → 16。
     """
     from backend.app.services.job_registry import job_registry
 
     registry = job_registry()
-    assert len(registry) == 15
+    assert len(registry) == 16
     assert set(registry) == {
         "system.due_publish",
         "system.monitoring_refresh",
@@ -149,6 +151,7 @@ def test_registry_has_exactly_fifteen_entries():
         "system.note_sync",
         "system.shop_goods_sync",
         "system.goods_note_sync",
+        "system.note_data_sync",
         "system.queue_record_cleanup",
         "system.llm_gateway_monitor",
         "system.note_metrics_collect",
@@ -440,9 +443,9 @@ def test_schedule_status_counts_only_my_rows(tmp_path, monkeypatch):
 
         owner_stats = client.get("/api/schedule/status", headers=_auth(owner)).json()["stats"]
         intruder_stats = client.get("/api/schedule/status", headers=_auth(intruder)).json()["stats"]
-        assert owner_stats["total"] == 13
-        # 入侵者注册时也播种了 12 行 + 自己新建 1 行 = 13（只见自己的，不见主人的）
-        assert intruder_stats["total"] == 14, "入侵者只应看到自己的行"
+        assert owner_stats["total"] == 14
+        # 入侵者注册时也播种了 14 行 + 自己新建 1 行 = 15（只见自己的，不见主人的）
+        assert intruder_stats["total"] == 15, "入侵者只应看到自己的行"
     finally:
         app.dependency_overrides.clear()
 
@@ -1602,7 +1605,7 @@ def test_ensure_builtin_jobs_seeds_from_application_initial_data(tmp_path, monke
         second_user = _make_user(SessionLocal, "seed-second")
         db = SessionLocal()
         first = ensure_builtin_jobs(db)
-        assert len(first) == 26, "两个用户 × 13 个内置目标"
+        assert len(first) == 28, "两个用户 × 14 个内置目标"
         second = ensure_builtin_jobs(db)
         assert second == [], "幂等：已存在的 (user, job_key) 不插行"
         rows = list(db.scalars(select(ScheduledJob).where(ScheduledJob.is_builtin.is_(True))))
@@ -1691,10 +1694,10 @@ def test_sync_jobs_from_db_registers_active_rows_only(tmp_path, monkeypatch):
         scheduler = build_scheduler()
         stats = sync_jobs_from_db(scheduler)
         ids = {job.id for job in scheduler.get_jobs()}
-        # 活跃行 = 测试行 1 + 应用初始化数据播种的 12 行（R24 起全 active）；
-        # 其中 `system.no_traffic_cleanup` 是 manual 档、**不参与调度装配** ⇒ 注册 12。
-        assert stats["registered"] == 13
-        assert len(ids) == 13
+        # 活跃行 = 测试行 1 + 应用初始化数据播种的 13 行（R24 起全 active）；
+        # 其中 `system.no_traffic_cleanup` 是 manual 档、**不参与调度装配** ⇒ 注册 13。
+        assert stats["registered"] == 14
+        assert len(ids) == 14
         assert all(job_id.startswith("job_") for job_id in ids)
     finally:
         app.dependency_overrides.clear()

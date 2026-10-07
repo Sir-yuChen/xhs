@@ -180,11 +180,17 @@ def _validate_account_ids(db: Session, current_user: User, account_ids: object) 
     （`system.no_traffic_cleanup` 是平台删除操作 ⇒ 跨租户破坏性触发）。
     系统任务行按用户各持一份后，「账号归属按当前用户收口」仍是硬约束：
     行的 params 由行主写，执行时按行主收口，两边都不许引用别人的账号。
+
+    2026-10-06 KV 改造：也接受**逗号分隔字符串**（`"1,2,3"`）—— 前端 KV 输入框
+    提交多值用逗号分隔，这里统一解析成 int 数组再走归属校验。
     """
+    if isinstance(account_ids, str):
+        raw_values: list[object] = [part.strip() for part in account_ids.split(",") if part.strip()]
+        account_ids = raw_values
     if not isinstance(account_ids, list):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="ACCOUNT_IDS_INVALID: account_ids 必须是数组",
+            detail="ACCOUNT_IDS_INVALID: account_ids 必须是数组或逗号分隔字符串",
         )
     ids: list[int] = []
     for value in account_ids:
@@ -212,6 +218,86 @@ def _validate_account_ids(db: Session, current_user: User, account_ids: object) 
             detail=f"ACCOUNT_NOT_OWNED: 账号 {missing} 不存在或不属于当前用户",
         )
     return ids
+
+
+def _coerce_days(value: object) -> int:
+    """`days` 参数解析（KV 提交字符串 → int，上限 90）。"""
+    try:
+        days = int(str(value).strip())
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="DAYS_INVALID: days 必须是整数",
+        )
+    if days < 1 or days > 90:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="DAYS_OUT_OF_RANGE: days 必须在 1..90 之间",
+        )
+    return days
+
+
+def _coerce_retention_days(value: object) -> int:
+    """`retention_days` 参数解析（KV 提交字符串 → int）。"""
+    try:
+        days = int(str(value).strip())
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="RETENTION_DAYS_INVALID: retention_days 必须是整数",
+        )
+    if days < 1 or days > 3650:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="RETENTION_DAYS_OUT_OF_RANGE: retention_days 必须在 1..3650 之间",
+        )
+    return days
+
+
+def _validate_run_params(
+    db: Session,
+    current_user: User,
+    job: ScheduledJob,
+    incoming: dict,
+) -> dict:
+    """校验「执行一次」的参数覆盖，返回**已收敛**的 override（设计 22 §5）。
+
+    与 `_apply_custom_params` 共用**同一把尺子**（白名单 + 归属 + 深校验），
+    区别只有一条：本函数**不写回** `job.params` —— 参数只对这一次执行生效。
+
+    白名单是**硬要求**（不只是 UI 约定）：`auto_task_id` / `workflow_id` 这类
+    参数由代码拥有，放行等于让用户越权跑别人的任务。
+    """
+    try:
+        spec = get_job_spec(job.job_key)
+    except KeyError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="JOB_KEY_UNSUPPORTED"
+        ) from None
+    editable = set(spec.params_editable)
+    disallowed = [key for key in incoming if key not in editable]
+    if disallowed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"JOB_PARAMS_NOT_EDITABLE: 参数 {sorted(disallowed)} 由代码拥有，不可修改",
+        )
+    # 合并**行配置 + 本次覆盖**后整体深校验 —— 只校验覆盖部分会漏「行里本就有非法值」。
+    merged: dict = dict(job.params or {})
+    for key, value in incoming.items():
+        if key == "account_ids":
+            merged[key] = _validate_account_ids(db, current_user, value)
+        elif key == "days":
+            merged[key] = _coerce_days(value)
+        elif key == "retention_days":
+            merged[key] = _coerce_retention_days(value)
+        else:
+            merged[key] = value
+    if spec.params_validator is not None:
+        try:
+            spec.params_validator(merged, db, current_user)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
+    return merged
 
 
 def _apply_custom_params(
@@ -244,6 +330,10 @@ def _apply_custom_params(
     for key, value in incoming.items():
         if key == "account_ids":
             merged[key] = _validate_account_ids(db, current_user, value)
+        elif key == "days":
+            merged[key] = _coerce_days(value)
+        elif key == "retention_days":
+            merged[key] = _coerce_retention_days(value)
         else:
             merged[key] = value
     if spec.params_validator is not None:
@@ -278,6 +368,10 @@ def _validate_create_params(
     cleaned = dict(params)
     if "account_ids" in cleaned:
         cleaned["account_ids"] = _validate_account_ids(db, current_user, cleaned["account_ids"])
+    if "days" in cleaned:
+        cleaned["days"] = _coerce_days(cleaned["days"])
+    if "retention_days" in cleaned:
+        cleaned["retention_days"] = _coerce_retention_days(cleaned["retention_days"])
     if spec.params_validator is not None:
         try:
             spec.params_validator(cleaned, db, current_user)
@@ -531,15 +625,42 @@ def change_job_status(
     return _serialize_job(job, _live_next_run_map(request).get(job.id))
 
 
+class RunJobRequest(BaseModel):
+    """「执行一次」请求体（设计 22 §5）。
+
+    `params` 缺省 = 直接按任务行配置执行（无参数任务走这条路，前端二次确认即可）。
+    传了就**只对这一次**生效，不写回任务行 —— 用户改的是「这次用什么参数跑」，
+    不是「把定时配置改掉」。
+    """
+
+    params: Optional[dict] = None
+
+
 @router.post("/jobs/{job_id}/run")
 def run_job_once(
     job_id: int,
+    body: Optional[RunJobRequest] = None,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """执行一次（若依「执行一次」）：后台线程跑，立即返回日志行 id。"""
+    """执行一次（若依「执行一次」）：后台线程跑，立即返回日志行 id。
+
+    **2026-10-06 设计 22 §5 新增**：可带 `params` 覆盖本次执行的参数 ——
+    例如执行账号（`account_ids`）、记录表保留天数（`retention_days`）都能在
+    手动触发前改成这次要用的值。
+
+    | 约定 | 做法 |
+    |---|---|
+    | 白名单 | `params` 只允许 `spec.params_editable` 里的键，表外 ⇒ 400 `JOB_PARAMS_NOT_EDITABLE` |
+    | 归属 | `account_ids` 过账号归属校验（`_validate_account_ids`） |
+    | 深校验 | 行配置 + 本次覆盖**合并后**过 `spec.params_validator`（如 `retention_days` 范围） |
+    | **不写回** | 覆盖参数**不 commit 回 `job.params`**，只用于本次（下一次定时/手动仍按行配置） |
+    """
     job = _get_visible_job(db, current_user, job_id)
-    log_id = run_job_in_background(job.id, trigger_type="manual")
+    override: Optional[dict] = None
+    if body is not None and body.params:
+        override = _validate_run_params(db, current_user, job, body.params)
+    log_id = run_job_in_background(job.id, trigger_type="manual", params_override=override)
     return {"log_id": log_id, "status": "running"}
 
 

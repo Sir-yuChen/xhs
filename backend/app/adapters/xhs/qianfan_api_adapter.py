@@ -30,10 +30,122 @@ class XhsQianfanApiAdapter:
         with direct_xhs_request_env():
             return self._api().get_goods_note_page(**kwargs)
 
+    def get_note_data_list(
+        self,
+        *,
+        category: str,
+        page: int = 1,
+        size: int = 50,
+        date_select_type: str = "recent_1",
+        date_type: int = 1,
+        start_date: str = "",
+        end_date: str = "",
+    ) -> tuple[bool, str, Any]:
+        """千帆数据中心「笔记数据」列表一页（`POST /api/edith/butterfly/data`）。
+
+        这是「我的笔记」离线落库的数据源（2026-10-06 真机抓包）：页面
+        `/app-datacenter/note-data/goods`（商品笔记）与 `/normal`（普通笔记）的
+        「笔记」数据块，由 `blockKey` 区分：
+
+        * `category == "goods"` ⇒ `arkSellerNoteGoodsNoteDataList`（商品笔记）
+        * `category == "normal"` ⇒ `arkSellerNoteNormalNoteDataList`（普通笔记）
+
+        返回 `data[0].data[]`，每行字段是 `{"value": ..., "ratio": ...}` 包裹结构
+        （`ex` 偶见于比率字段），调用方负责解包 `value`。字段覆盖 xlsx 全部列且更全
+        （见 `note_data_service` 的字段映射）。
+
+        ⚠️ 无签名直连（与 `get_goods_note_page` 同构）—— 下载 xlsx 的
+        `long_task/task/submit` 要 datacenterark 签名（C4 不接入），列表接口不需要。
+        """
+        with direct_xhs_request_env():
+            return self._api().get_note_data_list(
+                category=category,
+                page=page,
+                size=size,
+                date_select_type=date_select_type,
+                date_type=date_type,
+                start_date=start_date,
+                end_date=end_date,
+            )
+
     def search_items(self, **kwargs: Any) -> tuple[bool, str, Any]:
         """商品列表一页（参数语义见 SDK `search_items` 的 docstring）。"""
         with direct_xhs_request_env():
             return self._api().search_items(**kwargs)
+
+    def search_material_space(self, body: dict) -> tuple[bool, str, Any]:
+        """图片空间列表一页（**只读查询，但平台强制签名**，见 SDK docstring）。"""
+        with direct_xhs_request_env():
+            return self._api().search_material_space(body)
+
+    def get_material_directory(self, seller_id: str) -> tuple[bool, str, Any]:
+        """图片空间目录树（无签名直连）。"""
+        with direct_xhs_request_env():
+            return self._api().get_material_directory(seller_id)
+
+    def get_material_space_usage(self) -> tuple[bool, str, Any]:
+        """图片空间配额（无签名直连）。"""
+        with direct_xhs_request_env():
+            return self._api().get_material_space_usage()
+
+    def add_material_directories(self, seller_id: str, items: list) -> tuple[bool, str, Any]:
+        """**新建文件夹**（图片空间写链路，见 SDK docstring）。"""
+        with direct_xhs_request_env():
+            return self._api().add_material_directories(seller_id, items)
+
+    def edit_material_manageables(self, seller_id: str, items: list) -> tuple[bool, str, Any]:
+        """**移动 / 重命名**（图片空间写链路）。"""
+        with direct_xhs_request_env():
+            return self._api().edit_material_manageables(seller_id, items)
+
+    def delete_material_manageables(self, seller_id: str, items: list) -> tuple[bool, str, Any]:
+        """**批量删除**（进平台回收站）。"""
+        with direct_xhs_request_env():
+            return self._api().delete_material_manageables(seller_id, items)
+
+    def download_material_files(self, seller_id: str, items: list, *, name: str = "") -> tuple[bool, str, Any]:
+        """**批量下载**（平台打包任务）。"""
+        with direct_xhs_request_env():
+            return self._api().download_material_files(seller_id, items, name=name)
+
+    def query_material_task(self, task_id: str) -> tuple[bool, str, Any]:
+        """查图片空间异步任务（下载打包进度 / 结果）。"""
+        with direct_xhs_request_env():
+            return self._api().query_material_task(task_id)
+
+    def check_resize_material_space(self) -> tuple[bool, str, Any]:
+        """**查扩容条件**（图片空间扩容，见 SDK docstring）。"""
+        with direct_xhs_request_env():
+            return self._api().check_resize_material_space()
+
+    def resize_material_space(self) -> tuple[bool, str, Any]:
+        """**执行扩容**（图片空间扩容，见 SDK docstring）。"""
+        with direct_xhs_request_env():
+            return self._api().resize_material_space()
+
+    def register_material_files(self, seller_id: str, items: list) -> tuple[bool, str, Any]:
+        """把已上传到云的文件登记进图片空间（`batch_add` + `type:2`）。"""
+        with direct_xhs_request_env():
+            return self._api().register_material_files(seller_id, items)
+
+    def upload_web_permit(self, file_count: int = 1) -> tuple[bool, str, Any]:
+        """申请图片上传凭证（图片空间上传第 1 步；复用发布链路的同一实现）。"""
+        with direct_xhs_request_env():
+            return self._api().upload_web_permit(file_count)
+
+    def upload_file(self, **kwargs: Any) -> tuple[bool, str, Any]:
+        """把本地文件 PUT 到 ROS（图片空间上传第 2 步）。"""
+        with direct_xhs_request_env():
+            return self._api().upload_file(**kwargs)
+
+    def batch_delete_notes(self, note_ids: Any) -> tuple[bool, str, Any]:
+        """**批量删除笔记**（千帆 `note/batch_delete_note`，无签名，真实写、不可撤回）。
+
+        供无流量清理按 `note_category=goods` 分流：商业笔记走千帆删除链路。
+        详见 SDK `batch_delete_notes` 的 docstring。
+        """
+        with direct_xhs_request_env():
+            return self._api().batch_delete_notes(note_ids)
 
     def get_skus_by_item_ids(self, item_ids: Any) -> tuple[bool, str, Any]:
         """按商品 ID 批量取 SKU 级明细（≤10 个/批，实测上限；设计 13 §19.1.2）。

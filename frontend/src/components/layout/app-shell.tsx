@@ -5,15 +5,15 @@ import {
   DatabaseOutlined,
   HistoryOutlined,
   KeyOutlined,
+  PictureOutlined,
   ProfileOutlined,
   RobotOutlined,
   SafetyCertificateOutlined,
   ScheduleOutlined,
   SearchOutlined,
-  SendOutlined,
   SettingOutlined,
   ShoppingOutlined,
-  PartitionOutlined, ShoppingCartOutlined,
+  ShoppingCartOutlined,
   ThunderboltOutlined,
   ToolOutlined,
 } from "@ant-design/icons";
@@ -36,17 +36,20 @@ const mainNavItems: MenuProps["items"] = [
   { key: "/platforms/xhs/discovery", icon: <SearchOutlined />, label: "笔记发现" },
   { key: "/platforms/xhs/my-notes", icon: <ProfileOutlined />, label: "我的笔记" },
   { key: "/platforms/xhs/shop-items", icon: <ShoppingOutlined />, label: "商品列表" },
+  // 图片空间（设计 22 §1）：千帆云图片资产**只读**浏览（与「笔记工坊 → 素材库」
+  // 那个**本地磁盘**目录不是一回事）。放在商品列表之后 —— 与千帆后台的资产类相邻。
+  { key: "/platforms/xhs/picture-space", icon: <PictureOutlined />, label: "图片空间" },
   { key: "/platforms/xhs/keywords", icon: <KeyOutlined />, label: "关键词组" },
   { key: "/platforms/xhs/analytics", icon: <BarChartOutlined />, label: "数据洞察" },
   { key: "/platforms/xhs/monitoring", icon: <AimOutlined />, label: "监控中心" },
   { key: "/platforms/xhs/library", icon: <DatabaseOutlined />, label: "内容库" },
   // 2026-09-25 §36：图片 / 视频 / 草稿三坊合并为「笔记工坊」一项（页内 Tabs 隔离）。
   // 旧菜单项 image-studio / video-studio / drafts 整项移除（含图标 import）。
+  // 2026-10-06 设计 22 §2：「发布中心」并入本页作 tab ⇒ 主菜单删该项（`SendOutlined` import 一并迁走）。
   { key: "/platforms/xhs/note-workshop", icon: <ToolOutlined />, label: "笔记工坊" },
-  { key: "/platforms/xhs/publish", icon: <SendOutlined />, label: "发布中心" },
+  // 自动运营 = 宿主页（页内两 tab：自动运营 / 自动化工作流）。
+  // 2026-10-06 设计 22 §3：原「自动化工作流」独立菜单项并入本页 ⇒ 该项删除。
   { key: "/platforms/xhs/auto-ops", icon: <ThunderboltOutlined />, label: "自动运营" },
-  // 设计 19 / M5：编排式工作流（与「自动运营」不同 —— 那个是单点动作，这个是多节点链路）。
-  { key: "/platforms/xhs/workflows", icon: <PartitionOutlined />, label: "自动化工作流" },
   { key: "/platforms/xhs/orders", icon: <ShoppingCartOutlined />, label: "订单管理" },
 ];
 

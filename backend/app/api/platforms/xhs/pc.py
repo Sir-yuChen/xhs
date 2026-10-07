@@ -15,6 +15,7 @@ from backend.app.adapters.xhs.qianfan_api_adapter import get_qianfan_api_adapter
 from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user, get_owned_active_account
 from backend.app.models import (
+    NoTrafficCleanupItem,
     NoTrafficCleanupLog,
     PlatformAccount,
     Task,
@@ -1127,22 +1128,33 @@ class InteractionMessagesRequest(BaseModel):
 
 
 class TrafficThresholdsRequest(BaseModel):
-    """无流量判定阈值（**全部可配，不写死 0**）：三项全部 <= 阈值才算无流量。"""
+    """无流量判定阈值（**全部可配，不写死 0**）。
 
-    max_browse: int = Field(default=0, ge=0, le=100000, description="阅读量上限")
-    max_pay_order: int = Field(default=0, ge=0, le=100000, description="支付订单数上限")
-    max_pay_gmv: float = Field(default=0.0, ge=0.0, le=10000000.0, description="支付金额上限")
+    2026-10-06 方案 A：指标从固定三项扩为**可选核心指标**。`None` = 不参与判定；
+    非 None = 该指标必须 <= 阈值。「无流量」= 所有非 None 指标都 <= 阈值。
+    """
+
+    max_browse: Optional[int] = Field(default=0, ge=0, le=100000, description="阅读量上限")
+    max_pay_order: Optional[int] = Field(default=0, ge=0, le=100000, description="支付订单数上限")
+    max_pay_gmv: Optional[float] = Field(default=0.0, ge=0.0, le=10000000.0, description="支付金额上限")
+    # 2026-10-06 方案 A：可选互动指标（默认 None = 不参与判定）。
+    max_like: Optional[int] = Field(default=None, ge=0, le=100000, description="点赞数上限（None=不参与）")
+    max_collect: Optional[int] = Field(default=None, ge=0, le=100000, description="收藏数上限（None=不参与）")
+    max_comment: Optional[int] = Field(default=None, ge=0, le=100000, description="评论数上限（None=不参与）")
+    max_share: Optional[int] = Field(default=None, ge=0, le=100000, description="分享数上限（None=不参与）")
 
 
 class CleanupQueryRequest(BaseModel):
     """清理的搜索条件（可选）：与阈值共同决定候选池。"""
 
-    #: 标题关键词；空 = 不限。走千帆服务端搜索（千帆笔记管理页同款接口）。
+    #: 标题关键词；空 = 不限。走本地标题匹配（方案 A 起零平台请求）。
     keyword: str = Field(default="", max_length=60)
     #: 笔记类型："" 不限 / "normal" 图文 / "video" 视频。
     note_type: str = Field(default="", max_length=16)
     #: 只清理发布时间早于该时间戳（秒）的笔记；None = 不限。
     published_before: Optional[int] = Field(default=None, ge=0)
+    #: 笔记分类（2026-10-06 方案 A）："" 不限 / "goods" 商业笔记 / "normal" 普通笔记。
+    category: str = Field(default="", max_length=16)
 
 
 class NoTrafficCandidatesRequest(BaseModel):
@@ -2109,6 +2121,14 @@ def no_traffic_cleanup_logs(
     按**当前用户**收口（跨租户不可见）；`account_id` 给了就再收窄到一个账号。
     时间倒序。字段见 `NoTrafficCleanupLog.to_dict()`：账号 / 阈值 / 清理前多少条 /
     删了几篇 / 跳过 / 失败 / 失败原因 / 操作时间 / 结果时间。
+
+    ⚠️ **每行内联 `items[]`（笔记维度明细，2026-10-06 用户口径）**：
+    「清理无流量的主要对象是笔记，**所有主体应是笔记维度**」⇒ 逐篇处置事实（哪篇笔记 /
+    结果 / 为什么）不再挤在 `details` JSON 列里等人解析，而是落 `no_traffic_cleanup_items`
+    并按批次行内联下发。形状与 `GET /tasks` 的 `children` 同款（**父子两层**）。
+
+    一次 20 行 × 每批上限 20 篇 = 最多 400 条明细 —— `DEFAULT_DELETE_BATCH` 是硬顶，
+    不会有更大的批，所以一次拉完是安全的。
     """
     page = max(1, int(page or 1))
     limit = min(max(1, int(limit or 20)), 200)
@@ -2128,12 +2148,28 @@ def no_traffic_cleanup_logs(
         )
         .all()
     )
+    # 笔记维度明细：**按本页批次行**一次查完（不是每行一次查询 —— N+1）。
+    # 按 `operated_at` 升序：与用户实际点删除的先后一致（比按 id 更贴近事实）。
+    items_by_log: dict[int, list[dict[str, Any]]] = {}
+    log_ids = [row.id for row in rows]
+    if log_ids:
+        item_rows = db.scalars(
+            select(NoTrafficCleanupItem)
+            .where(NoTrafficCleanupItem.log_id.in_(log_ids))
+            .order_by(NoTrafficCleanupItem.operated_at.asc(), NoTrafficCleanupItem.id.asc())
+        ).all()
+        for item in item_rows:
+            if item.log_id is None:
+                continue
+            items_by_log.setdefault(int(item.log_id), []).append(item.to_dict())
     return {
         "total": total,
         "page": page,
         "limit": limit,
         "page_count": max(1, (total + limit - 1) // limit),
-        "items": [row.to_dict() for row in rows],
+        "items": [
+            {**row.to_dict(), "items": items_by_log.get(int(row.id), [])} for row in rows
+        ],
     }
 
 

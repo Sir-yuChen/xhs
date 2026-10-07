@@ -591,7 +591,7 @@ export function NoteDetailModal({
             open={open}
       onCancel={onClose}
       width="80vw"
-      style={{ top: "10vh", maxWidth: 1600, paddingBottom: 0 }}
+      style={{ maxWidth: 1600, paddingBottom: 0 }}
       styles={{
         body: {
           // 固定 `height`（不是 `maxHeight`）⇒ 短笔记与长笔记之间不跳版；

@@ -18,7 +18,10 @@ from backend.app.models.llm_gateway import (
 )
 from backend.app.models.login_session import LoginSession
 from backend.app.models.material import MaterialFile, MaterialFolder
-from backend.app.models.no_traffic_cleanup_log import NoTrafficCleanupLog
+from backend.app.models.no_traffic_cleanup_log import (
+    NoTrafficCleanupItem,
+    NoTrafficCleanupLog,
+)
 from backend.app.models.monitoring import (
     MonitoringSnapshot,
     MonitoringTarget,
@@ -80,6 +83,7 @@ __all__ = [
     "NoteAsset",
     "NoteComment",
     "NoteGenerationLink",
+    "NoTrafficCleanupItem",
     "NoTrafficCleanupLog",
     "NoteGoods",
     "Notification",

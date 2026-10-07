@@ -384,39 +384,50 @@ async function main() {
   check("新建默认 cron（每天 9:00）", fields.includes("DEFAULT_CRON = CRON_PRESETS[2].cron"));
 
   // --------------------------------------------------------------- //
-  // 5. 自定义参数：账号多选（用户 2026-09-24 口径，白名单驱动）
+  // 5. 自定义参数：KV 输入框（2026-10-06 用户口径，白名单驱动）
   // --------------------------------------------------------------- //
   const form = readSource(
     path.join(PROJECT, "frontend/src/components/schedule/job-form-modal.tsx")
   );
-  // DEF-066：账号多选按 params_editable 驱动，且**建 / 改同款**（原 `job?.params_editable`
-  // 仅在编辑态出现 ⇒ 新建态只能手抄 JSON，归属校验上线后必然 400，控件必须跟上）
+  // 2026-10-06 用户口径「定时任务调用参数新增/修改用 kv 输入框，kv 必填；编辑弹窗
+  // 也使 key；v 多值用逗号分隔（如执行账号）」⇒ 三套旧控件（账号多选 / 保留期数字 /
+  // 裸 JSON）统一成**一套 KV 编辑器**，白名单来自后端 `params_editable`。
   check(
-    "账号多选按 params_editable 驱动（建/改同款）",
-    form.includes('(job?.params_editable ?? selectedTarget.params_editable)?.includes("account_ids")')
+    "KV 参数按 params_editable 驱动（建/改同款）",
+    form.includes('job?.params_editable ?? selectedTarget.params_editable')
   );
-  check("账号多选控件存在", form.includes('mode="multiple"'));
-  check("提交只发白名单键 account_ids", form.includes("params = { account_ids: accountIds }"));
-  check("账号下拉只展示账号名称", form.includes("account.nickname ||") && !form.includes("sub_type"));
+  // 2026-10-06 用户口径追加「k 不要使用下拉框选择」⇒ KV 编辑器抽成共享组件
+  // `params-editor.tsx`（key / value **都是自由文本输入**），新建/编辑与「执行一次」
+  // 弹窗共用同一实现 —— 所以这几条判据指向共享组件，不再指 job-form-modal。
+  const kvEditor = readSource(
+    path.join(PROJECT, "frontend/src/components/schedule/params-editor.tsx")
+  );
+  check("KV 编辑器有 key/value 两个输入", kvEditor.includes('placeholder="key') && kvEditor.includes('placeholder='));
+  check("KV key 是自由文本输入（不是下拉）", kvEditor.includes("<Input") && !kvEditor.includes("<Select"));
+  check("KV value 多值逗号分隔提示", kvEditor.includes("多个值用逗号分隔"));
+  check("KV 必填校验（key 不能空）", form.includes("参数 key 不能为空"));
+  check("KV 必填校验（value 不能空）", form.includes("value 不能为空"));
+  // account_ids：value 逗号分隔 → 提交时转 int 数组（后端仍收数组）。
+  check("account_ids 逗号分隔转数组", kvEditor.includes('.split(",")'));
+  // 参数展示名映射（回退 label，不硬编码后端下发之外的键名）。
+  check("参数 key 有展示名映射", form.includes("const PARAM_LABELS"));
+  check("执行账号 key 有展示名", form.includes('account_ids: "执行账号"'));
+  // days（离线笔记同步时间区间）与 retention_days 都进展示名映射。
+  check("时间区间 days 有展示名", form.includes('days: "同步时间区间'));
+  check("保留期 retention_days 有展示名", form.includes('retention_days: "记录表保留天数'));
 
-  // 2026-10-05 用户口径：「优化定时任务支持携带参数，将清理记录表任务、记录表保留时间
-  // 设置为任务携带的参数，**每次执行任务时可修改**，默认记录表保留最新 15 天」
-  // +「定时任务参数在定时任务**新增和编辑**弹窗中支持配置」。
-  // ⚠️ 必须建 / 改同款：只在新建立可见 ⇒ 编辑态看不到「当前是几天」，
-  //    也就改不了（旧实现只给非账号维度的**新建**态一个裸 JSON 框）。
-  check(
-    "保留期参数按 params_editable 驱动（建/改同款）",
-    form.includes('editableKeys.includes("retention_days")')
+  // --------------------------------------------------------------- //
+  // 5b. 「执行一次」参数弹窗（设计 22 §5）
+  // --------------------------------------------------------------- //
+  const runModal = readSource(
+    path.join(PROJECT, "frontend/src/components/schedule/run-job-modal.tsx")
   );
-  check("保留期提交只发白名单键 retention_days",
-        form.includes("params = { retention_days: retentionDays }"));
-  check("保留期有数字控件（不是裸 JSON）",
-        form.includes("<InputNumber") && form.includes('addonAfter="天"'));
-  check("保留期默认 15 天", form.includes("const DEFAULT_RETENTION_DAYS = 15"));
-  check("保留期控件不受「仅新建」限制",
-        form.includes("{retentionScoped && ("));
-  check("旧裸 JSON 框仍只服务「非账号维度 + 非保留期」的新建态",
-        form.includes("!isEdit && !accountScoped && !retentionScoped"));
+  // 关键语义：本次参数不写回任务配置（否则用户会以为改了定时配置）。
+  check("执行一次弹窗说明「只对本次生效」", runModal.includes("只对本次执行生效"));
+  check("执行一次弹窗复用共享 KV 编辑器", runModal.includes("ParamsEditor"));
+  // 有可编辑参数才弹窗（无参数走 Popconfirm 二次确认）。
+  check("任务中心按 params_editable 决定弹窗", page.includes("params_editable ?? []).length > 0"));
+  check("无参数任务走二次确认", page.includes("<Popconfirm"));
 
   // --------------------------------------------------------------- //
   // 6. 列表列口径（用户 2026-09-24：撤下次/上次运行，加任务类型）

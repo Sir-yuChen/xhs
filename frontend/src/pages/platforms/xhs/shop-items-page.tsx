@@ -855,6 +855,19 @@ export function XhsShopItemsPage() {
   const [goodsSyncIds, setGoodsSyncIds] = useState<Set<number>>(() => new Set());
   const goodsSyncPollRef = useRef<number | null>(null);
   const [goodsSyncing, setGoodsSyncing] = useState(false);
+  /**
+   * **页面级等待**（2026-10-06 用户口径：「商品列表的所有功能的等待均应在合适的时机
+   * 添加页面**蒙版**和**统计耗时**，避免结果窗口关闭」）。
+   *
+   * ⚠️ 统一成一个标签而不是每个动作各写一份：文案 + 耗时 + 蒙版三件事必须**同时**
+   * 出现与消失，分散写就会出现「有的转圈有的不转」「有的有耗时有的没有」。
+   * `null` = 没有等待；非空 = 正在等待（值是给用户看的动作名）。
+   */
+  const [waitLabel, setWaitLabel] = useState<string | null>(null);
+  /** 等待起算时刻 + 1s 一跳的秒表（与结果弹窗同一套做法；结束即停表）。 */
+  const waitStartedAtRef = useRef<number | null>(null);
+  const waitTickRef = useRef<number | null>(null);
+  const [waitElapsedSec, setWaitElapsedSec] = useState(0);
   /** ark 门禁提示：千帆会话确定不可用时给一句准话（**不**打开选项弹窗）。
    *  判据 = `goodsGate`（与账号卡片页同一把尺子，需求 5）。 */
   const [arkPromptOpen, setArkPromptOpen] = useState(false);
@@ -1063,6 +1076,7 @@ export function XhsShopItemsPage() {
         sort: sortArg,
       });
       setLoading(true);
+      beginWait("加载商品列表");
       setErrorText("");
       try {
         setData(await fetchXhsShopItems(query));
@@ -1073,6 +1087,7 @@ export function XhsShopItemsPage() {
         message.error(text);
       } finally {
         setLoading(false);
+        endWait();
       }
     },
     [form, pageNo, pageSize, sort]
@@ -1427,6 +1442,32 @@ export function XhsShopItemsPage() {
     });
   }
 
+  /**
+   * 进入等待：起表 + 挂蒙版。**幂等**（已在等待时不重起秒表 —— 否则耗时被反复清零）。
+   */
+  function beginWait(label: string) {
+    setWaitLabel(label);
+    if (waitStartedAtRef.current === null) {
+      waitStartedAtRef.current = Date.now();
+      setWaitElapsedSec(0);
+      if (waitTickRef.current !== null) window.clearInterval(waitTickRef.current);
+      waitTickRef.current = window.setInterval(() => {
+        if (waitStartedAtRef.current !== null) {
+          setWaitElapsedSec(Math.floor((Date.now() - waitStartedAtRef.current) / 1000));
+        }
+      }, 1000);
+    }
+  }
+  /** 结束等待：**清标签 + 停表**（两个都要，漏一个就是「蒙版没了数字还在跳」）。 */
+  function endWait() {
+    setWaitLabel(null);
+    waitStartedAtRef.current = null;
+    if (waitTickRef.current !== null) {
+      window.clearInterval(waitTickRef.current);
+      waitTickRef.current = null;
+    }
+  }
+
   /** 轮询商品操作任务（5s 一轮，终态即停 —— 与三张队列进度卡同一节奏）。 */
   function startOperatePolling(taskId: number) {
     stopOperatePolling();
@@ -1501,6 +1542,10 @@ export function XhsShopItemsPage() {
 
   /** 离开页面时停轮询（定时器泄漏会让返回后再也停不下来）。 */
   useEffect(() => () => stopOperatePolling(), []);
+  /** 离开页面必须停表（定时器泄漏会让返回后数字还在跳）。 */
+  useEffect(() => () => {
+    if (waitTickRef.current !== null) window.clearInterval(waitTickRef.current);
+  }, []);
 
   /** LLM 生成入队成功 → 登记进轮询集合（操作列按钮转圈，进度卡开跑）。 */
   function handleLlmQueued(itemId: string) {
@@ -1537,6 +1582,7 @@ export function XhsShopItemsPage() {
   async function syncAllStatusGoods(options?: SyncNotesOptions) {
     if (!selectedAccountId) return;
     setGoodsSyncing(true);
+    beginWait("同步商品");
     try {
       const result = await syncShopGoods({
         platformAccountId: selectedAccountId,
@@ -1553,6 +1599,7 @@ export function XhsShopItemsPage() {
       message.error(readErrorDetail(error));
     } finally {
       setGoodsSyncing(false);
+      endWait();
     }
   }
 
@@ -1704,6 +1751,7 @@ export function XhsShopItemsPage() {
     if (!selectedAccountId) return;
     setDetailOpen(true);
     setDetailLoading(true);
+    beginWait("加载商品详情");
     setDetail(null);
     setDetailError("");
     // 每次打开都清掉上一次的出图结果：那是**上一次动作**的产物，
@@ -1716,6 +1764,7 @@ export function XhsShopItemsPage() {
       setDetailError(error instanceof Error ? error.message : "商品详情加载失败");
     } finally {
       setDetailLoading(false);
+      endWait();
     }
   }
 
@@ -1742,6 +1791,7 @@ export function XhsShopItemsPage() {
     setGenerations([]);
     setGenerationsTotal(0);
     setGenerationsLoading(true);
+    beginWait("加载生成记录");
     try {
       const result = await fetchItemGenerations({
         platform_account_id: selectedAccountId || 0,
@@ -1755,6 +1805,7 @@ export function XhsShopItemsPage() {
       message.error(error instanceof Error ? error.message : "生成记录加载失败");
     } finally {
       setGenerationsLoading(false);
+      endWait();
     }
   }
 
@@ -1773,6 +1824,7 @@ export function XhsShopItemsPage() {
       return;
     }
     setExporting(true);
+    beginWait("导出 CSV");
     try {
       // DEF-093：导出与列表**同一个构造**（含同一份筛选 / 排序 / 分组），
       // 只是不带分页 —— 导出的就是「当前筛选命中的全部」。
@@ -1796,6 +1848,7 @@ export function XhsShopItemsPage() {
       message.error(error instanceof Error ? error.message : "导出失败，请稍后重试。");
     } finally {
       setExporting(false);
+      endWait();
     }
   }
 
@@ -1883,6 +1936,7 @@ export function XhsShopItemsPage() {
   async function generateDetailImage(regenerate?: { group: string; index: number }) {
     if (!selectedAccountId || !detailImageItem) return;
     setDetailImageGenerating(true);
+    beginWait("生成商品AI图");
     setDetailImageStartedAt(Date.now()); // v2.28：开始计时（弹窗里显示已耗时）
     // v2.21：记住重做目标（只让**那一张**转圈，不整组变灰 —— 用户要能看出在重做哪张）。
     setDetailImageRegenerating(regenerate || null);
@@ -1932,6 +1986,7 @@ export function XhsShopItemsPage() {
       message.error(error instanceof Error ? error.message : "生成商品AI图失败");
     } finally {
       setDetailImageGenerating(false);
+      endWait();
       setDetailImageStartedAt(null); // v2.28：停表
       setDetailImageRegenerating(null);
     }
@@ -2492,7 +2547,17 @@ export function XhsShopItemsPage() {
     },
   ];
 
+  const waitRunning = waitLabel !== null;
   return (
+    //: 页面级等待蒙版（2026-10-06 用户口径）：**整页被盖住 + 显示耗时**，等待期间下面的
+    //: 按钮一律点不到 ⇒ 也就不会出现「等结果时结果窗口被关掉」。
+    //: ⚠️ 用 `Spin` 包整页而不是给每个按钮加 `loading`：口径是「**所有功能**的等待都要
+    //: 有蒙版」，按钮级 loading 只表达「这个按钮在转」，表达不了「整页在等」。
+    <Spin
+      spinning={waitRunning}
+      tip={waitRunning ? `${waitLabel}… 耗时 ${waitElapsedSec}s` : ""}
+      size="large"
+    >
     <div>
       {/* ⚠️ **顶部「商品列表（千帆）」整卡已移除**（2026-10-05 用户口径
           「顶部的商品列表（千帆）整块移除」）。原卡片只剩两件事：
@@ -3782,5 +3847,6 @@ export function XhsShopItemsPage() {
         同步商品需要可用的千帆令牌，请到「账号矩阵」登录 / 重新登录千帆后再试。
       </Modal>
     </div>
+    </Spin>
   );
 }

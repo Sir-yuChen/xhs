@@ -108,12 +108,46 @@ def _purge_no_traffic_logs(db: Session, cutoff: datetime, user_id: Optional[int]
     return int(db.execute(stmt).rowcount or 0)
 
 
+def _purge_no_traffic_items(db: Session, cutoff: datetime, user_id: Optional[int]) -> int:
+    """无流量清理的**笔记维度明细**。
+
+    ⚠️ **必须在批次行之前清**（`RECORD_CLEANERS` 的顺序即执行顺序）：批次行的
+    `user_id` 与明细行的 `user_id` 各自冗余存着，所以先删批次行不会让明细行变得
+    无法归属 —— 但反过来的顺序会让「已经过期的明细」挂在一个已被删掉的 `log_id` 上
+    （`SET NULL` 兜得住，只是白留一次置空写）。
+
+    只按**操作时间**判期（不判状态）：明细行没有「进行中」这一态 —— 它是在批次
+    收尾时一次性写下的**已发生事实**，写下就终局。
+    """
+    from sqlalchemy import delete
+
+    from backend.app.models.no_traffic_cleanup_log import NoTrafficCleanupItem
+
+    if user_id is None:
+        logger.warning("no-traffic item cleanup skipped: no user scope")
+        return 0
+    stmt = (
+        delete(NoTrafficCleanupItem)
+        .where(
+            NoTrafficCleanupItem.user_id == int(user_id),
+            NoTrafficCleanupItem.operated_at < cutoff,
+        )
+    )
+    return int(db.execute(stmt).rowcount or 0)
+
+
 #: 可清理记录表清单。**顺序即执行顺序**，返回结果里的键与之一致。
 #: `user_scoped` 任务只清行主本人的数据 ⇒ purge 里不必再带 user_id（调用方已按
 #: 归属过滤）—— 但队列记录那一路的 `cleanup_records` 仍按 user_id 收口，
 #: 由 `run_record_cleanup` 统一注入。
 RECORD_CLEANERS: tuple[CleanableRecord, ...] = (
     CleanableRecord(key="queue", label="队列执行记录", purge=_purge_queue_records),
+    #: ⚠️ 明细**先于**批次行：明细是子行，先清子再清父（同队列记录的「先子后父」纪律）。
+    CleanableRecord(
+        key="no_traffic_cleanup_item",
+        label="无流量清理笔记明细",
+        purge=_purge_no_traffic_items,
+    ),
     CleanableRecord(
         key="no_traffic_cleanup_log",
         label="无流量笔记清理记录",

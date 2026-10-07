@@ -68,6 +68,11 @@ from backend.app.services.job_registry import (
     JOB_KEY_SHOP_GOODS_SYNC,
     JOB_KEY_ORDER_SYNC,
 )
+#: 图片空间排序字段白名单 —— **唯一来源**（service 层）。本文件不得再另存一份
+#: （2026-10-07 曾因复制一份漏 `updateTime` ⇒ 回收站视图 400）。
+from backend.app.services.picture_space_service import (
+    MATERIAL_ORDER_FIELDS as MATERIAL_ORDER_FIELDS,
+)
 from backend.app.services.note_queue_service import (
     SOURCE_ACCOUNT_CARD_GOODS_SYNC,
     SOURCE_ACCOUNT_CARD_ORDER_SYNC,
@@ -3039,7 +3044,12 @@ def _owned_after_sale(db: Session, current_user: User, account_id: int, after_sa
 
 
 def _ark_adapter_for(db: Session, account: PlatformAccount, factory: Any) -> Any:
-    """按账号取 ark 适配器（**不借会话**：拿不到令牌 ⇒ 结构化 400）。"""
+    """按账号取 ark 适配器（**不借会话**：拿不到令牌 ⇒ 结构化 400）。
+
+    ⚠️ 工厂返回的是**适配器类**，构造只吃 `cookies` 一个参数（与
+    `shop_health_service` 的 `factory(cookies)` 同口径）。传 `account` 会在
+    构造处 `TypeError` ⇒ 所有走本函数的端点（发货 / 售后 / 图片空间…）整体 500。
+    """
     from backend.app.services.shop_binding_service import qianfan_cookies_for_account
 
     cookies = qianfan_cookies_for_account(db, account.id)
@@ -3048,11 +3058,11 @@ def _ark_adapter_for(db: Session, account: PlatformAccount, factory: Any) -> Any
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
                 "code": "ARK_SESSION_REQUIRED",
-                "message": "该账号没有可用的千帆（ark）登录态，无法执行发货 / 售后。"
+                "message": "该账号没有可用的千帆（ark）登录态，无法执行该操作。"
                 "先在账号矩阵导入其千帆登录态。",
             },
         )
-    return factory(account, cookies)
+    return factory(cookies)
 
 
 @router.post("/orders/ship/preview")
@@ -3276,3 +3286,704 @@ def after_sale_handle(
     except Exception as exc:  # noqa: BLE001
         raise _order_write_error_to_http(exc) from exc
     return {"platform_account_id": account.id, "source": "platform", "result": result}
+
+
+# --------------------------------------------------------------------------- #
+# 图片空间（设计 22 §1）—— 千帆 material_space 系列接口的**只读代理**。
+#
+# ⚠️ 三条硬约定（写在这里免得后来者改坏）：
+#   ① **零落库**：本组端点不写任何表、不落任何文件，平台数据现取现渲染
+#      （用户 2026-10-06 口径「所有数据不落库本地」）；
+#   ② **只读**：只有列表 / 树 / 配额三个查询语义，**没有**上传 / 移动 / 删除 / 下载
+#      （那些是平台写接口，不进本模块）；
+#   ③ **列表端点需要签名**（真机实测：无签名 `code=-1`），树 / 配额不需要 ——
+#      签名只是机制，本组端点**都没有平台副作用**。
+# --------------------------------------------------------------------------- #
+
+#: ⚠️ 排序字段白名单**唯一来源**是 service 层（2026-10-07 修：本文件曾**另存一份**且漏了
+#: `updateTime` ⇒ 回收站视图按删除时间排序时被自己的白名单拦成 400「加载失败」——
+#: 两份清单必然漂移，禁止再复制）。下面在模块顶部 import，这里只留说明。
+
+
+class PictureSpaceItemsRequest(BaseModel):
+    """图片空间列表请求（设计 22 §1.3）。"""
+
+    platform_account_id: int
+    keyword: str = ""
+    #: 1=文件夹 2=文件；缺省 = 两者都取。
+    basic_types: Optional[list[int]] = None
+    father_directory_id: str = ""
+    order_field: str = "name"
+    order_asc: bool = True
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=100, ge=1, le=500)
+    #: 回收站视图（真机 `/pictureSpace/recycle`）：`statuses=[4]`、只取文件、按删除时间倒序。
+    recycle: bool = False
+
+    model_config = ConfigDict(extra="forbid")
+
+
+@router.post("/picture-space/items")
+def picture_space_items(
+    payload: PictureSpaceItemsRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    adapter_factory: Any = Depends(get_qianfan_api_adapter_factory),
+):
+    """**图片空间列表**（千帆 `material_space/search_directory_manageable`）—— 只读。
+
+    | 约定 | 做法 |
+    |---|---|
+    | 落库 | **零**（平台数据现取现渲染，本端点不碰任何表） |
+    | 门禁 | 必须该账号有 ark 令牌，否则 400 `ARK_SESSION_REQUIRED`（**不借会话**） |
+    | 签名 | 列表端点**必须**签名（平台强制；无签名 `code=-1`，见 SDK docstring） |
+    | 排序白名单 | `order_field` 表外 ⇒ 400 `MATERIAL_ORDER_UNSUPPORTED` |
+    | 类型白名单 | `basic_types` 表外 ⇒ 400 `MATERIAL_TYPE_UNSUPPORTED` |
+    | 分页 | `page_size` 上限 100（Pydantic 钳制，与平台页面同口径） |
+
+    返回 `{total, items[]}`（归一化契约见 `picture_space_service.normalize_search_payload`）。
+    """
+    from backend.app.services import picture_space_service as ps
+
+    if payload.order_field not in MATERIAL_ORDER_FIELDS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "MATERIAL_ORDER_UNSUPPORTED",
+                "message": f"不支持的排序字段：{payload.order_field}",
+                "supported": list(MATERIAL_ORDER_FIELDS),
+            },
+        )
+    if payload.basic_types:
+        bad = [t for t in payload.basic_types if t not in ps.MATERIAL_BASIC_TYPES]
+        if bad:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "MATERIAL_TYPE_UNSUPPORTED",
+                    "message": f"不支持的素材类型：{bad}",
+                    "supported": list(ps.MATERIAL_BASIC_TYPES),
+                },
+            )
+
+    account = _owned_account(db, current_user, payload.platform_account_id)
+    adapter = _ark_adapter_for(db, account, adapter_factory)
+    # 回收站视图（真机 `/pictureSpace/recycle`）：只列文件（basicTypes=[2]）+ statuses=[4]
+    # + 按删除时间（`updateTime`）倒序 —— 逐字对齐真机抓包。
+    if payload.recycle:
+        statuses: Optional[list[int]] = [ps.MATERIAL_STATUS_RECYCLE_BIN]
+        basic_types = payload.basic_types or [ps.MATERIAL_TYPE_FILE]
+        order_field = payload.order_field if payload.order_field != "name" else "updateTime"
+        order_asc = payload.order_asc if payload.order_field != "name" else False
+    else:
+        statuses = [ps.MATERIAL_STATUS_NORMAL]
+        basic_types = payload.basic_types
+        order_field = payload.order_field
+        order_asc = payload.order_asc
+    body = ps.build_search_body(
+        keyword=payload.keyword,
+        basic_types=basic_types,
+        father_directory_id=payload.father_directory_id,
+        order_field=order_field,
+        order_asc=order_asc,
+        page=payload.page,
+        page_size=payload.page_size,
+        statuses=statuses,
+    )
+    ok, msg, raw = adapter.search_material_space(body)
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "MATERIAL_SPACE_QUERY_FAILED", "message": msg},
+        )
+    result = ps.normalize_search_payload(raw)
+    result["page"] = payload.page
+    result["page_size"] = payload.page_size
+    return result
+
+
+@router.get("/picture-space/tree")
+def picture_space_tree(
+    platform_account_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    adapter_factory: Any = Depends(get_qianfan_api_adapter_factory),
+):
+    """**图片空间目录树**（千帆 `material_space/get_directory`）—— 只读，零落库。
+
+    `platform_account_id` 传 query。返回根节点归一化契约（见
+    `picture_space_service.normalize_directory_payload`）。
+    """
+    from backend.app.services import picture_space_service as ps
+
+    account = _owned_account(db, current_user, platform_account_id)
+    adapter = _ark_adapter_for(db, account, adapter_factory)
+    ok, msg, raw = adapter.get_material_directory(account.seller_id or "")
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "MATERIAL_SPACE_QUERY_FAILED", "message": msg},
+        )
+    return ps.normalize_directory_payload(raw)
+
+
+@router.get("/picture-space/usage")
+def picture_space_usage(
+    platform_account_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    adapter_factory: Any = Depends(get_qianfan_api_adapter_factory),
+):
+    """**图片空间配额**（千帆 `material_space/get_seller_space_usage`）—— 只读，零落库。
+
+    返回 `{used_space, total_space, white_seller}`；取不到时前两者是 `None`
+    （前端据此**不渲染**配额条，见设计 22 §1.7）。
+    """
+    from backend.app.services import picture_space_service as ps
+
+    account = _owned_account(db, current_user, platform_account_id)
+    adapter = _ark_adapter_for(db, account, adapter_factory)
+    ok, msg, raw = adapter.get_material_space_usage()
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "MATERIAL_SPACE_QUERY_FAILED", "message": msg},
+        )
+    return ps.normalize_usage_payload(raw)
+
+
+@router.get("/picture-space/resize/check")
+def picture_space_resize_check(
+    platform_account_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    adapter_factory: Any = Depends(get_qianfan_api_adapter_factory),
+):
+    """**查扩容条件**（千帆 `material_space/check_resize_material_space`）—— 只读探测。
+
+    平台「图片空间扩容」弹窗打开时调它。返回 `conditions[]` 逐条
+    `{type, pass, desc, current}` + 派生 `can_apply`（全通过 ∧ 非白名单）
+    + `remaining`（剩余扩容次数，平台页脚「剩余扩容次数：N次」）。
+    """
+    from backend.app.services import picture_space_service as ps
+
+    account = _owned_account(db, current_user, platform_account_id)
+    adapter = _ark_adapter_for(db, account, adapter_factory)
+    ok, msg, raw = adapter.check_resize_material_space()
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "MATERIAL_RESIZE_CHECK_FAILED", "message": msg},
+        )
+    return ps.normalize_resize_conditions(raw)
+
+
+@router.post("/picture-space/resize")
+def picture_space_resize(
+    payload: PictureSpaceResizeRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    adapter_factory: Any = Depends(get_qianfan_api_adapter_factory),
+):
+    """**提交扩容申请**（千帆 `material_space/resize_material_space`）—— 需签名。
+
+    真机 JS bundle：body **空 `{}`**（扩容额度由平台按条件判定）。前端在弹窗里先
+    展示 `resize/check` 的条件结果，用户点「提交」后调本端点；成功后重取配额。
+    """
+    account = _owned_account(db, current_user, payload.platform_account_id)
+    adapter = _ark_adapter_for(db, account, adapter_factory)
+    ok, msg, raw = adapter.resize_material_space()
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "MATERIAL_RESIZE_FAILED", "message": msg},
+        )
+    return {"platform_account_id": account.id, "success": True}
+
+
+# --------------------------------------------------------------------------- #
+# 图片空间**写链路**（设计 22 §1.5，2026-10-06 用户口径「操作按钮功能全部要做」）
+#
+# ⚠️ 只读边界（硬约束②）澄清：管的是「探测 / 调研 / 取证」一律只读；本组是
+# **用户在本系统内对自己图片空间的显式操作**（与商品写链路同一性质）⇒
+# 「用户显式点击 + 本店归属 + 两层确认」。全部需要 ark 签名（平台强制）。
+# --------------------------------------------------------------------------- #
+
+
+class PictureSpaceResizeRequest(BaseModel):
+    """图片空间**扩容**请求（2026-10-07 用户「新增空间扩容功能」）。
+
+    ⚠️ 平台 `resize_material_space` **body 为空 `{}`** —— 扩容额度由平台按条件判定，
+    前端只需给出账号。
+    """
+
+    platform_account_id: int
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class PictureSpaceWriteRequest(BaseModel):
+    """图片空间写操作请求（新建文件夹 / 移动 / 删除 / 下载共用）。
+
+    `items` 传**归一化契约**条目（前端列表里已有的那些；后端反推成平台形状）。
+    新建文件夹用 `name` 而非 `items`。
+    """
+
+    platform_account_id: int
+    items: Optional[list[dict]] = None
+    name: str = ""
+    #: 移动的目标目录 id（`"0"` = 根）。
+    father_directory_id: str = ""
+    #: 回收站视图（列表端点用）：`statuses=[4]` + 只取文件。
+    recycle: bool = False
+    #: 预览的动作：`delete`（进回收站）或 `permanent-delete`（彻底删）—— 决定 token 指纹。
+    action: str = "delete"
+    #: 两层确认（仅删除 / 彻底删除需要）：必须 `confirmed=True` 且 `confirm_token` 匹配。
+    confirmed: bool = False
+    confirm_token: str = ""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+def _material_confirm_token(account_id: int, action: str, item_ids: list) -> str:
+    """删除的二次确认指纹（`account + action + 排序后的 id 集`）。
+
+    与订单写链路的 `confirm_token` 同一思路：把「这次要对什么动手」编码进 token，
+    前端预览时拿到、确认时原样回传 —— 中间被改（多删 / 换账号）就不匹配。
+    """
+    import hashlib
+
+    payload = json.dumps(
+        {"account": int(account_id), "action": action, "ids": sorted(str(i) for i in item_ids)},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+
+@router.post("/picture-space/preview")
+def picture_space_preview(
+    payload: PictureSpaceWriteRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """**写操作预览**（纯本地、零平台请求）—— 算二次确认凭据 + 影响面。
+
+    与订单写链路的 `orders/ship/preview` 同一形态：返回「将对哪几条做什么」+
+    `confirm_token`。前端在确认框里展示这些信息，用户点「确定」再把 token 回传。
+    """
+    from backend.app.services import picture_space_service as ps
+
+    account = _owned_account(db, current_user, payload.platform_account_id)
+    items = ps.extract_items(payload.items)
+    ids = [str(it.get("id")) for it in items]
+    action = "permanent-delete" if payload.action == "permanent-delete" else "delete"
+    return {
+        "platform_account_id": account.id,
+        "action": action,
+        "count": len(ids),
+        "item_ids": ids,
+        "sample_names": [str((it or {}).get("display_name") or (it or {}).get("name") or "-") for it in (payload.items or [])[:5]],
+        "confirm_token": _material_confirm_token(account.id, action, ids),
+    }
+
+
+@router.post("/picture-space/folders")
+def picture_space_create_folder(
+    payload: PictureSpaceWriteRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    adapter_factory: Any = Depends(get_qianfan_api_adapter_factory),
+):
+    """**新建文件夹**（平台 `batch_add_directory_manageable`）—— 需签名。
+
+    新建是**可逆的低风险**操作（多一个空文件夹不丢数据）⇒ 不需要两层确认。
+    文件夹名 ≤20 字（与平台输入框 `maxlength` 同口径）。
+    """
+    from backend.app.services import picture_space_service as ps
+
+    account = _owned_account(db, current_user, payload.platform_account_id)
+    try:
+        name = ps.validate_folder_name(payload.name)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "MATERIAL_BAD_NAME", "message": str(exc)},
+        ) from exc
+    adapter = _ark_adapter_for(db, account, adapter_factory)
+    item = ps.build_add_item(account.seller_id or "", name)
+    ok, msg, raw = adapter.add_material_directories(account.seller_id or "", [item])
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "MATERIAL_WRITE_FAILED", "message": msg},
+        )
+    return {"platform_account_id": account.id, "name": name, "success": True}
+
+
+@router.post("/picture-space/move")
+def picture_space_move(
+    payload: PictureSpaceWriteRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    adapter_factory: Any = Depends(get_qianfan_api_adapter_factory),
+):
+    """**移动到目录**（平台 `batch_edit_directory_manageable`）—— 需签名。
+
+    ⚠️ **真机 JS bundle `332.d754c099.js` `case 3` 取证**：移动 = 回传完整原条目 +
+    `fatherDirectoryId: <目标目录 id>`，**不动 `status`**。
+    （曾错误地置 `status:4` ⇒ 那是 `RECYCLE_BIN` ⇒ 等于把文件删进回收站 —— 已纠正。）
+    """
+    from backend.app.services import picture_space_service as ps
+
+    account = _owned_account(db, current_user, payload.platform_account_id)
+    items = ps.extract_items(payload.items)
+    try:
+        ps.validate_batch(items)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "MATERIAL_BAD_SELECTION", "message": str(exc)},
+        ) from exc
+    target = payload.father_directory_id or "0"
+    adapter = _ark_adapter_for(db, account, adapter_factory)
+    platform_items = [ps.build_move_item(it, target) for it in items]
+    ok, msg, raw = adapter.edit_material_manageables(account.seller_id or "", platform_items)
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "MATERIAL_WRITE_FAILED", "message": msg},
+        )
+    return {
+        "platform_account_id": account.id,
+        "moved": len(platform_items),
+        "father_directory_id": target,
+        "success": True,
+    }
+
+
+@router.post("/picture-space/delete")
+def picture_space_delete(
+    payload: PictureSpaceWriteRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    adapter_factory: Any = Depends(get_qianfan_api_adapter_factory),
+):
+    """**批量删除**（平台 `batch_edit_directory_manageable` 置 `status=4`，进回收站）—— 需签名。
+
+    **两层确认**（与订单写链路同一把尺子）：`confirmed=True` **且**
+    `confirm_token` 与本地重算的一致，缺一 ⇒ 400，**一次都不打平台**。
+    平台侧是**可还原**的删除（进回收站），不是物理抹除；彻底删除见
+    `POST /picture-space/permanent-delete`。
+
+    ⚠️ **真机 JS bundle `332.d754c099.js` `case 14` 取证**：删除 = `batch_edit` +
+    `{...item, status: RECYCLE_BIN(4)}`（`batch_delete_*` 是彻底删除，键名不同）。
+    """
+    from backend.app.services import picture_space_service as ps
+
+    account = _owned_account(db, current_user, payload.platform_account_id)
+    items = ps.extract_items(payload.items)
+    try:
+        ps.validate_batch(items)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "MATERIAL_BAD_SELECTION", "message": str(exc)},
+        ) from exc
+    ids = [str(it.get("id")) for it in items]
+    expected = _material_confirm_token(account.id, "delete", ids)
+    if not payload.confirmed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "MATERIAL_CONFIRM_REQUIRED", "message": "删除需要二次确认"},
+        )
+    if (payload.confirm_token or "") != expected:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "MATERIAL_CONFIRM_MISMATCH", "message": "确认凭据不匹配（请重新预览）"},
+        )
+    adapter = _ark_adapter_for(db, account, adapter_factory)
+    platform_items = [ps.build_delete_item(it) for it in items]
+    # ⚠️ 真机实证：删除走 `batch_edit` 置 `status=4`（`4 = RECYCLE_BIN`，进回收站）。
+    ok, msg, raw = adapter.edit_material_manageables(account.seller_id or "", platform_items)
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "MATERIAL_WRITE_FAILED", "message": msg},
+        )
+    return {"platform_account_id": account.id, "deleted": len(platform_items), "success": True}
+
+
+@router.post("/picture-space/download")
+def picture_space_download(
+    payload: PictureSpaceWriteRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    adapter_factory: Any = Depends(get_qianfan_api_adapter_factory),
+):
+    """**批量下载**（平台 `batch_download_files`，打包成异步任务）—— 需签名。
+
+    平台把选中文件打成 zip 任务，返回 `task_id`；前端轮询
+    `GET /picture-space/task/{task_id}` 取结果地址（平台侧下载，本地不落副本）。
+    """
+    from backend.app.services import picture_space_service as ps
+
+    account = _owned_account(db, current_user, payload.platform_account_id)
+    items = ps.extract_items(payload.items)
+    try:
+        ps.validate_batch(items)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "MATERIAL_BAD_SELECTION", "message": str(exc)},
+        ) from exc
+    adapter = _ark_adapter_for(db, account, adapter_factory)
+    name = payload.name or "下载"
+    # ⚠️ 真机 JS bundle `332.d754c099.js` `case 9`：请求键 `links`（不是 directoryManageables），
+    #    文件 {type:2,link,name,extension} / 文件夹 {type:1,directoryId}。
+    links = ps.build_download_links(items)
+    ok, msg, raw = adapter.download_material_files(account.seller_id or "", links, name=name)
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "MATERIAL_WRITE_FAILED", "message": msg},
+        )
+    data = (raw or {}).get("data") or {}
+    task_id = str(data.get("taskId") or data.get("task_id") or "")
+    return {"platform_account_id": account.id, "task_id": task_id, "success": True}
+
+
+@router.get("/picture-space/task/{task_id}")
+def picture_space_task(
+    task_id: str,
+    platform_account_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    adapter_factory: Any = Depends(get_qianfan_api_adapter_factory),
+):
+    """查图片空间异步任务（下载打包进度 / 结果地址）—— 只读，零落库。"""
+    account = _owned_account(db, current_user, platform_account_id)
+    adapter = _ark_adapter_for(db, account, adapter_factory)
+    ok, msg, raw = adapter.query_material_task(task_id)
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "MATERIAL_TASK_FAILED", "message": msg},
+        )
+    data = (raw or {}).get("data") or {}
+    task = data.get("task") if isinstance(data, dict) else None
+    return {"task_id": task_id, "task": task or {}}
+
+
+@router.post("/picture-space/restore")
+def picture_space_restore(
+    payload: PictureSpaceWriteRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    adapter_factory: Any = Depends(get_qianfan_api_adapter_factory),
+):
+    """**从回收站还原**（平台 `batch_edit_directory_manageable` 置 `status=1`）—— 需签名。
+
+    ⚠️ **真机 JS bundle `417.d61d3cd8.js` 取证**：还原 = `batch_edit` +
+    `{...item, status: USABLE(1)}`，与删除同一端点、只差 status。
+    还原是**可逆的低风险**操作 ⇒ 不需要两层确认。
+    """
+    from backend.app.services import picture_space_service as ps
+
+    account = _owned_account(db, current_user, payload.platform_account_id)
+    items = ps.extract_items(payload.items)
+    try:
+        ps.validate_batch(items)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "MATERIAL_BAD_SELECTION", "message": str(exc)},
+        ) from exc
+    adapter = _ark_adapter_for(db, account, adapter_factory)
+    platform_items = [ps.build_restore_item(it) for it in items]
+    ok, msg, raw = adapter.edit_material_manageables(account.seller_id or "", platform_items)
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "MATERIAL_WRITE_FAILED", "message": msg},
+        )
+    return {"platform_account_id": account.id, "restored": len(platform_items), "success": True}
+
+
+@router.post("/picture-space/permanent-delete")
+def picture_space_permanent_delete(
+    payload: PictureSpaceWriteRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    adapter_factory: Any = Depends(get_qianfan_api_adapter_factory),
+):
+    """**彻底删除**（平台 `batch_delete_directory_manageable`）—— 需签名，**不可还原**。
+
+    **两层确认**（与删除同一把尺子，但 action 不同 ⇒ token 不可跨用）：
+    `confirmed=True` **且** `confirm_token` 匹配，缺一 ⇒ 400，**一次都不打平台**。
+
+    ⚠️ **真机 JS bundle `417.d61d3cd8.js` 取证**：请求键是 `directoryManageableElements`
+    （只 `{id,type}`），不是 `directoryManageables` —— 此前用错键被**误判**成
+    「平台不接受该端点」。
+    """
+    from backend.app.services import picture_space_service as ps
+
+    account = _owned_account(db, current_user, payload.platform_account_id)
+    items = ps.extract_items(payload.items)
+    try:
+        ps.validate_batch(items)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "MATERIAL_BAD_SELECTION", "message": str(exc)},
+        ) from exc
+    ids = [str(it.get("id")) for it in items]
+    expected = _material_confirm_token(account.id, "permanent-delete", ids)
+    if not payload.confirmed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "MATERIAL_CONFIRM_REQUIRED", "message": "彻底删除需要二次确认"},
+        )
+    if (payload.confirm_token or "") != expected:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "MATERIAL_CONFIRM_MISMATCH", "message": "确认凭据不匹配（请重新预览）"},
+        )
+    adapter = _ark_adapter_for(db, account, adapter_factory)
+    elements = ps.build_permadelete_elements(items)
+    ok, msg, raw = adapter.delete_material_manageables(account.seller_id or "", elements)
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "MATERIAL_WRITE_FAILED", "message": msg},
+        )
+    return {"platform_account_id": account.id, "deleted": len(elements), "success": True}
+
+
+class PictureSpaceUploadRequest(BaseModel):
+    """上传本地图片到图片空间（设计 22 §1.5）。
+
+    前端把文件读成 base64 传上来（避免 multipart 解析；图片本就不大）。
+    后端做三步：申请凭证 → PUT 到 ROS → 登记条目。
+    """
+
+    platform_account_id: int
+    file_name: str = Field(min_length=1, max_length=255)
+    #: 文件字节的 base64（不含 data: 前缀）。
+    content_base64: str = Field(min_length=1)
+    father_directory_id: str = "0"
+
+    model_config = ConfigDict(extra="forbid")
+
+
+@router.post("/picture-space/upload")
+def picture_space_upload(
+    payload: PictureSpaceUploadRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    adapter_factory: Any = Depends(get_qianfan_api_adapter_factory),
+):
+    """**上传本地图片**到图片空间（设计 22 §1.5）—— 三步写链路。
+
+    1. `upload_web_permit` 拿预分配 `fileId` + `uploadAddr` + `token`（仓库既有实现）；
+    2. `upload_file` 把字节 PUT 到 ROS；
+    3. `register_material_files`（`batch_add` + `type:2`）登记，列表才可见。
+
+    ⚠️ 需要 ark 签名（平台强制）。
+    """
+    import base64
+    import tempfile
+    from pathlib import Path
+
+    from backend.app.services import picture_space_service as ps
+
+    account = _owned_account(db, current_user, payload.platform_account_id)
+    try:
+        raw = base64.b64decode(payload.content_base64, validate=True)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "MATERIAL_BAD_CONTENT", "message": f"文件内容不是合法 base64：{exc}"},
+        ) from exc
+    if not raw:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "MATERIAL_EMPTY_FILE", "message": "文件内容为空"},
+        )
+
+    adapter = _ark_adapter_for(db, account, adapter_factory)
+    # 1) 申请凭证（单文件）
+    ok, msg, permit_raw = adapter.upload_web_permit(1)
+    if not ok or not isinstance(permit_raw, dict):
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "MATERIAL_UPLOAD_FAILED", "message": msg or "申请上传凭证失败"},
+        )
+    permits = (permit_raw.get("data") or {}).get("uploadTempPermits") or []
+    if not permits:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "MATERIAL_UPLOAD_FAILED", "message": "平台没有返回上传凭证"},
+        )
+    permit = permits[0]
+    file_ids = permit.get("fileIds") or []
+    if not file_ids:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "MATERIAL_UPLOAD_FAILED", "message": "上传凭证没有预分配文件 ID"},
+        )
+    file_id = str(file_ids[0])
+    upload_addr = str(permit.get("uploadAddr") or "")
+    token = str(permit.get("token") or "")
+
+    # 2) PUT 字节到 ROS（先落临时文件 —— SDK 接口吃路径）
+    tmp_dir = Path(tempfile.mkdtemp(prefix="ps-upload-"))
+    tmp_path = tmp_dir / Path(payload.file_name).name
+    try:
+        tmp_path.write_bytes(raw)
+        ok, msg, _ = adapter.upload_file(
+            upload_addr=upload_addr, file_id=file_id, token=token, file_path=str(tmp_path)
+        )
+        if not ok:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail={"code": "MATERIAL_UPLOAD_FAILED", "message": msg},
+            )
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+            tmp_dir.rmdir()
+        except OSError:
+            pass
+
+    # 3) 登记条目（列表才可见）
+    # ⚠️ 先从字节里读出**真实尺寸**再登记（2026-10-07 真机 bug「For input string: ""」）：
+    # 平台是 Java 后端，`additionalData.width/height` 会被 `Integer.parseInt` 解析——
+    # 传空串直接 `NumberFormatException`，整个上传失败。真机 JS 是 `new Image()` 读的尺寸；
+    # 拿不到（异常 / 非图片）就**不带这两个键**（缺值口径：不造假、也不送空串）。
+    width = height = None
+    try:
+        import io
+
+        from PIL import Image
+
+        with Image.open(io.BytesIO(raw)) as img:
+            width, height = img.size
+    except Exception:  # noqa: BLE001 —— 非图片或读不出，按缺值走
+        pass
+    item = ps.build_upload_item(
+        account.seller_id or "",
+        file_id=file_id,
+        file_name=payload.file_name,
+        size=len(raw),
+        width=width,
+        height=height,
+        father_directory_id=payload.father_directory_id,
+    )
+    ok, msg, raw_resp = adapter.register_material_files(account.seller_id or "", [item])
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "MATERIAL_UPLOAD_FAILED", "message": msg},
+        )
+    return {"platform_account_id": account.id, "file_name": payload.file_name, "success": True}

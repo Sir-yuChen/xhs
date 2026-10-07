@@ -46,7 +46,8 @@ ACCOUNT_DROPDOWN_PAGES = (
     # 账号下拉随迁到面板文件。
     "frontend/src/pages/platforms/xhs/bulk-crawl-panel.tsx",
     "frontend/src/pages/platforms/xhs/discovery-page.tsx",
-    "frontend/src/pages/platforms/xhs/auto-ops-page.tsx",
+    # 2026-10-06 设计 22 §3：正文（含账号下拉）迁到 auto-ops-panel.tsx（宿主页只剩 Tabs）。
+    "frontend/src/pages/platforms/xhs/auto-ops-panel.tsx",
     "frontend/src/pages/platforms/xhs/publish-page.tsx",
 )
 
@@ -935,12 +936,17 @@ def test_no_same_shop_multi_account_hint_remains():
 
 
 def test_my_notes_goods_line_still_reports_coverage():
-    """去掉解释句不等于去掉状态：覆盖率与同步时间必须还在（诚实展示的底线）。"""
+    """2026-10-06 用户要求**移除**「已按需补齐 N/M 条商品笔记」覆盖率文案。
+
+    原断言（保留）：「去掉解释句不等于去掉状态，覆盖率与同步时间必须还在」——
+    后来用户进一步要求把覆盖率也一并去掉（「清除」），商品来源状态行现在只剩：
+    账号名 + 同步时间 + 巡检时间 + 「立即巡检」按钮。同步时间仍在（`synced_at`）。
+    """
     source = _read(MY_NOTES)
-    assert "已按需补齐" in source
-    assert "条商品笔记" in source
-    # 分母未知（门店总数还没被无过滤同步拿到）时只显示 N，不显示 N/0。
-    assert "shop_total > 0" in source
+    assert "已按需补齐" not in source, "覆盖率文案已按用户要求移除，不得回归"
+    assert "条商品笔记" not in source, "覆盖率文案已按用户要求移除，不得回归"
+    # 同步时间仍在：`goodsInfo.synced_at` 逻辑保留（商品来源状态行诚实展示「上次同步时间」）。
+    assert "synced_at" in source
 
 
 def test_my_notes_goods_coverage_uses_the_fresh_notes_response():
@@ -1276,11 +1282,13 @@ def test_note_detail_merge_keeps_the_goods_the_list_already_had():
     只断言「存在」会放过它，所以这里比的是**下标**。
     """
     body = _merge_note_detail_body()
-    assert "goods: detail.goods ?? note.goods ?? null" in body, (
+    # 2026-10-06：`goods` 改成**字段级回填**（修「价格闪现消失」）：详情非空但 price
+    # 为空时保留列表行补过价的 price。回退仍走 `detail.goods ?? note.goods ?? null`。
+    assert "detail.goods ?? note.goods ?? null" in body, (
         "详情与列表的合并没有回退到 note.goods —— 详情返回 null 时会丢掉商品（DEF-047）"
     )
     spread_at = body.index("...detail")
-    goods_at = body.index("goods: detail.goods ?? note.goods ?? null")
+    goods_at = body.index("detail.goods ?? note.goods ?? null")
     assert spread_at < goods_at, (
         "goods 必须写在 `...detail` **之后**：写在前面会被展开覆盖，等于没修"
     )
@@ -3005,7 +3013,8 @@ def test_no_page_has_a_page_header():
         ),
         ("frontend/src/pages/models/model-config-page.tsx", ("Model Routing",)),
         ("frontend/src/pages/platforms/xhs/analytics-page.tsx", ("XHS Analytics",)),
-        ("frontend/src/pages/platforms/xhs/auto-ops-page.tsx", ("XHS Auto Operations",)),
+        # 2026-10-06 设计 22 §3：正文迁到 auto-ops-panel.tsx（宿主页只剩 Tabs）。
+        ("frontend/src/pages/platforms/xhs/auto-ops-panel.tsx", ("XHS Auto Operations",)),
         ("frontend/src/pages/platforms/xhs/keywords-page.tsx", ("XHS Keywords",)),
         ("frontend/src/pages/platforms/xhs/monitoring-page.tsx", ("XHS Monitoring",)),
         ("frontend/src/pages/platforms/xhs/orders-page.tsx", ("小红书运营",)),
@@ -3034,10 +3043,12 @@ def test_no_page_has_a_page_header():
     for relative, markers in (
         # ⚠️ 总览的「开始发现」**不在**本清单里：它先是随页头移除、临时收进首张指标卡，
         #    随后被用户口径「开始发现按钮移除」**整块删除** ⇒ 例外的反向断言在下一段。
-        # 数据洞察：生成报告 + 刷新 → 首张指标卡 extra
-        ("frontend/src/pages/platforms/xhs/analytics-page.tsx", ("生成报告", "loadAnalytics")),
+        # ⚠️ 数据洞察的「生成报告 / 刷新」**已整块删除**（2026-10-06 设计 22 §4 用户口径：
+        #    「内容洞察 tab 的刷新和生成报告按钮功能移除」）⇒ 它从本清单**移出**，
+        #    并加反向断言（见下方 `NO_RETURN_MARKERS`）。被取代的原句保留：
+        #      ("frontend/src/pages/platforms/xhs/analytics-page.tsx", ("生成报告", "loadAnalytics")),
         # 自动运营：刷新 → 页首右对齐工具行
-        ("frontend/src/pages/platforms/xhs/auto-ops-page.tsx", ("loadData",)),
+        ("frontend/src/pages/platforms/xhs/auto-ops-panel.tsx", ("loadData",)),
         # 发布中心：刷新 → 左栏「发布任务」卡 extra
         ("frontend/src/pages/platforms/xhs/publish-page.tsx", ("loadJobs",)),
         # 订单管理：同步订单 / 刷新 / 导出 → 「订单列表」卡 extra
@@ -3063,12 +3074,18 @@ def test_no_page_has_a_page_header():
                 f"{relative} 缺少被页头移除后应保留的操作入口：{mark}（用户口径：按钮功能先保留）"
             )
 
-    # ③c 两处**整块删除**（按用户口径移除，不是「挪位置」）—— 反向钉死不得回归：
+    # ③c 三处**整块删除**（按用户口径移除，不是「挪位置」）—— 反向钉死不得回归：
     #     · 总览「开始发现」按钮（2026-10-05「开始发现按钮移除」）
     #     · 设置页「安全边界」卡（2026-10-05「设置页的安全边界模块移除」）
+    #     · 数据洞察「生成报告 / 刷新」按钮（2026-10-06 设计 22 §4「刷新和生成报告按钮功能移除」）
     dash = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/xhs-dashboard.tsx"))
     assert "开始发现" not in dash, "总览的「开始发现」按钮已按用户口径移除，不得回归"
     assert "xhs/discovery" not in dash, "总览不应再承载跳转到「笔记发现」的入口"
+    analytics = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/analytics-page.tsx"))
+    for gone in ("生成报告", "刷新", "generateReport", "isGeneratingReport", "reportMessage"):
+        assert gone not in analytics, (
+            f"数据洞察「内容洞察」tab 的「生成报告 / 刷新」已按用户口径移除，不得回归：{gone}"
+        )
     settings = _code_only(_read(ROOT / "frontend/src/pages/settings/settings-page.tsx"))
     for gone in ("安全边界", "双重归属校验", "由后端统一加密存储"):
         assert gone not in settings, (
@@ -3213,7 +3230,8 @@ MESSAGE_FEEDBACK_PAGES = (
     "frontend/src/pages/platforms/xhs/publish-page.tsx",
     # 2026-09-25 §36：原 rewrite-page.tsx（草稿工坊）面板化，仍带操作反馈 ⇒ 跟替文件名
     "frontend/src/pages/platforms/xhs/drafts-workshop-panel.tsx",
-    "frontend/src/pages/platforms/xhs/auto-ops-page.tsx",
+    # 2026-10-06 设计 22 §3：正文含操作反馈 ⇒ 跟替到 auto-ops-panel.tsx。
+    "frontend/src/pages/platforms/xhs/auto-ops-panel.tsx",
     # ⚠️ `drafts-page.tsx` 已于 2026-10-04 删除（T-106 / DEF-013：与
     # `drafts-workshop-panel.tsx` 同名导出、零引用）。草稿功能改上面那个面板。
     # ⚠️ `benchmarks-page.tsx` 已于 2026-10-04 删除（设计 21 切片 A：并入 monitoring-page，
@@ -3298,10 +3316,14 @@ def test_failure_three_way_blocks_stay_inline_after_the_message_switch():
     )
     accounts = _code_only(_read(ACCOUNTS))
     assert '<Alert type="error"' in accounts, "账号矩阵页的加载失败红块应保留（三分法）"
-    # ⚠️ 原锚点是设置页「项目声明」（已移除），换成分析页的常驻说明块。
+    # ⚠️ 原锚点是设置页「项目声明」（已移除），曾换成分析页「开发优化中」常驻说明块；
+    #    该说明块又按 2026-10-06 设计 22 §5 用户口径（「提示移除」）删除 ⇒
+    #    本锚点改用**分析页仍在的结构性红块**（加载失败 Alert，`<Alert type="error">`）。
+    #    被取代的原句保留：
+    #      assert '<Alert type="info"' in analytics and "开发优化中" in analytics
     analytics = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/analytics-page.tsx"))
-    assert '<Alert type="info"' in analytics and "开发优化中" in analytics, (
-        "分析页「开发优化中」是常驻静态说明，不该被消息化（原设置页项目声明已按用户口径移除）"
+    assert 'type="error"' in analytics and "数据洞察加载失败" in analytics, (
+        "分析页的加载失败红块是结构呈现（三分法），不该被消息化；原「开发优化中」说明块已按用户口径移除"
     )
 
 
@@ -3739,6 +3761,7 @@ def test_every_modal_is_vertically_centered():
 
     src_root = ROOT / "frontend" / "src"
     offenders: list[str] = []
+    covered: list[str] = []  # 有 centered 但被 style.top 覆盖的（假防线）
     total = 0
     for f in sorted(src_root.rglob("*.tsx")):
         lines = f.read_text(encoding="utf-8").split("\n")
@@ -3749,13 +3772,23 @@ def test_every_modal_is_vertically_centered():
             end = st
             while end < len(lines) and not _re.search(r"(?<!/)>", lines[end]):
                 end += 1
+            block = "\n".join(lines[st : end + 1])
             if not any(ln.strip() == "centered" for ln in lines[st : end + 1]):
                 offenders.append(f"{f.name}:{st + 1}")
+            # ⚠️ 2026-10-06 加固：`centered` 会被 `style={{ top: ... }}` **覆盖**
+            # （antd 的 centered 靠 top:50% 实现，显式 style.top 会顶掉它）⇒
+            # 有 centered 却同时写了 style.top 的，是「假居中」，必须报。
+            elif _re.search(r"style=\{\{[^}]*\btop\s*:", block):
+                covered.append(f"{f.name}:{st + 1}")
 
     assert total > 0, "没扫到任何 Modal —— 守卫空转（路径或写法变了）"
     assert not offenders, (
         f"以下 {len(offenders)} 个 Modal 没有垂直居中（antd 默认顶部对齐，"
         f"用户口径「所有弹窗均应修复成居中」）：{offenders}"
+    )
+    assert not covered, (
+        f"以下 {len(covered)} 个 Modal 有 `centered` 却被 `style.top` 覆盖（假居中，"
+        f"antd 的 centered 靠 top:50% 实现，显式 style.top 会顶掉它）：{covered}"
     )
 
 
@@ -4404,6 +4437,43 @@ def test_sync_modal_80vw_uniform_item_column_and_batch_remove():
     )
 
 
+def test_shop_items_waits_all_use_the_page_mask_and_elapsed():
+    """**所有等待都要有页面蒙版 + 耗时**，且等待期间关不掉（2026-10-06 用户口径）。
+
+    用户原话：「商品列表的所有功能的等待均应在**合适的时机**添加页面**蒙版**和**统计耗时**，
+    **避免结果窗口关闭**」。
+
+    判据三件：
+
+    1. 页面根节点被 `Spin` 包住（`spinning={waitRunning}` + `tip` 带耗时）——
+       整页被盖住 ⇒ 等待期间下面的按钮点不到，就不会出现「等结果时结果窗口被关掉」；
+    2. 每个等待动作**成对**调 `beginWait("...")` / `endWait()`（数对得上）；
+    3. 秒表在结束时停（漏了就是「蒙版没了数字还在跳」）。
+    """
+    page = _code_only(_read(SHOP_ITEMS_PAGE))
+    #: ① 根级 Spin + 耗时提示
+    assert "spinning={waitRunning}" in page, "页面缺根级等待蒙版"
+    assert "耗时 ${waitElapsedSec}s" in page, "蒙版上要显示**耗时**（用户口径）"
+    assert "const waitRunning = waitLabel !== null;" in page, "缺等待判据"
+    #: ② 幂等 beginWait（不重起秒表）+ 停表
+    begin = _slice_between(page, "function beginWait(", "\n  }")
+    assert "if (waitStartedAtRef.current === null)" in begin, (
+        "`beginWait` 必须幂等 —— 重起秒表会把已耗时清零"
+    )
+    end = _slice_between(page, "function endWait()", "\n  }")
+    assert "setWaitLabel(null)" in end and "clearInterval" in end, (
+        "`endWait` 必须**清标签 + 停表**（漏一个就是「蒙版没了数字还在跳」）"
+    )
+    #: ③ 各等待点成对（数量必须一致；少一个 endWait 就是蒙版永不消失）
+    #: ⚠️ 两边都要**减去函数定义那一处**（`function beginWait(` / `function endWait()`），
+    #: 否则比的是「定义 + 调用」与「定义 + 调用」的混合数（初版就是这么写错的）。
+    assert page.count("beginWait(") == page.count("endWait()"), (
+        f"beginWait / endWait 不成对：{page.count('beginWait(')} vs {page.count('endWait()')}"
+    )
+    for label in ("加载商品列表", "同步商品", "加载商品详情", "导出 CSV", "生成商品AI图"):
+        assert f'beginWait("{label}")' in page, f"「{label}」的等待没挂蒙版"
+
+
 def test_no_markdown_bold_inside_user_facing_strings():
     """**用户可见文案里不许出现 Markdown 的 `**`**（2026-10-06 用户口径）。
 
@@ -4419,28 +4489,42 @@ def test_no_markdown_bold_inside_user_facing_strings():
 
     ⚠️ 注释与 JSDoc 里的 `**`（`/** 说明 **粗体** */`）**是允许的** —— 它们不渲染，
     而且项目文档风格一直在用（剥注释这一步不能省，否则守卫会被自己的注释打红）。
+
+    ⚠️ **判据必须覆盖 JSX 文本节点**（2026-10-06 二次口径「注意**所有说明文案**中的
+    `**` 移除」）：`<Text>商品的**价格**只能看</Text>` 这种**没有 `=` 属性**的写法
+    会被「只看 `description=` 之类」的窄判据漏掉 —— 初版就漏了
+    `product-edit-modal.tsx` 与 `lib/order-write.ts` 的 4 处，靠人工扫描才发现。
+    ⇒ 现在只要「非注释行」出现 `**` 就报，**除**纯代码/测试语境（`it(` / `describe(`
+    的描述串与 `expect` 断言 —— 那些不进 UI；`order-format.test.ts` 里的
+    `"189***2857"` 是**平台脱敏原值**，也不是 markdown）。
     """
     renderable = re.compile(
         r'(description|message|title|placeholder|extra)\s*[=:]\s*["`{]|message\.\w+\(|content[:=]'
     )
+    #: **不算**用户可见的语境：测试文件（`it(` / `expect(`）与脱敏串（`***`）。
+    test_ctx = re.compile(r'\b(it|describe|test|expect)\s*\(|"\d+\*+\d+"')
+    #: **JSDoc / 块注释的正文行**也要排除：`_code_only` 用 `/\*.*?\*/`（非贪婪）
+    #: 遇到「块注释里另有 `*/`」的写法会漏剥 ⇒ 判据自己再挡一层
+    #: （以 `*` 或 `/**` 开头的行是注释正文，不是渲染内容）。
+    comment_line = re.compile(r"^\s*(/\*\*?|\*)")
     offenders: list[str] = []
-    for path in sorted((ROOT / "frontend/src").rglob("*.tsx")):
+    for path in sorted((ROOT / "frontend/src").rglob("*.tsx")) + sorted(
+        (ROOT / "frontend/src").rglob("*.ts")
+    ):
         code = _code_only(path.read_text(encoding="utf-8"))
         for lineno, line in enumerate(code.splitlines(), 1):
             if "**" not in line:
                 continue
-            if not renderable.search(line):
+            if test_ctx.search(line) or comment_line.match(line):
                 continue
             offenders.append(f"{path.relative_to(ROOT)}:{lineno}")
     assert not offenders, (
         "用户可见文案里出现了 Markdown 的 `**`（会原样显示成星号）：\n  "
         + "\n  ".join(offenders)
     )
-    #: 守卫自检：真塞一处会渲染的 `**` 必须被抓住（防空转）
-    probe = 'const x = <Alert description="**立即关闭**" />;'
-    assert renderable.search(probe) and "**" in probe, (
-        "守卫的判据正则该能认出「会渲染 + 含 `**`」这种行（否则它是空转的）"
-    )
+    #: 守卫自检：两种真形态都要认得出（属性式 + JSX 文本节点），否则是空转的
+    assert renderable.search('const x = <Alert description="**立即关闭**" />;'), "属性式漏判"
+    assert "**" in "<Text>商品的价格**不能改**</Text>", "JSX 文本节点式漏判"
 
 
 def test_shop_items_page_has_no_top_qianfan_card_and_no_refresh_icon():
@@ -4631,12 +4715,21 @@ def test_workflow_page_calls_all_eleven_request_functions():
 
 
 def test_workflow_page_renders_in_router_and_menu():
-    """页面必须**接线路由与菜单** —— 否则「组件写了但进不去」= 白做。"""
+    """页面必须**接线路由与菜单** —— 否则「组件写了但进不去」= 白做。
+
+    ⚠️ 2026-10-06 设计 22 §3 更新：工作流**并入「自动运营」宿主页作 tab** ⇒
+    判据从「路由渲染 `<WorkflowPage />` + 菜单有独立项」改为「宿主页渲染
+    `<WorkflowPanel />` + 旧路由重定向 + 宿主菜单项在」。被取代的原句保留：
+        assert "<WorkflowPage />" in router
+        assert "/platforms/xhs/workflows" in shell
+    """
     router = _code_only(_read(ROUTER))
     shell = _code_only(_read(APP_SHELL))
-    assert "/platforms/xhs/workflows" in router, "路由表里没有工作流页"
-    assert "<WorkflowPage />" in router, "路由没有渲染 WorkflowPage"
-    assert "/platforms/xhs/workflows" in shell, "侧栏菜单里没有工作流入口"
+    auto_ops = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/auto-ops-page.tsx"))
+    assert "/platforms/xhs/workflows" in router, "路由表里没有工作流旧路由（深链重定向）"
+    assert "WorkflowPanel" in auto_ops, "宿主页没有挂载 WorkflowPanel"
+    assert "/platforms/xhs/auto-ops?tab=workflows" in router, "旧路由未重定向到宿主 tab"
+    assert "/platforms/xhs/auto-ops" in shell, "侧栏菜单里没有自动运营（工作流）入口"
 
 
 def test_workflow_page_uses_lib_not_inline_vocabulary():
@@ -5068,3 +5161,68 @@ def test_no_traffic_log_has_no_second_scheduled_entry():
         if "startNoTrafficCleanup" in path.read_text(encoding="utf-8"):
             hits.append(path.name)
     assert not hits, f"清理无流量在别的页面也有入口：{hits}"
+
+
+# --------------------------------------------------------------------------- #
+# 2026-10-06 · 清理日志主体改「笔记维度」+ `reason` 语义更正
+# （用户口径：「清理无流量的主要对象是笔记，所有主体应是笔记维度，记录操作日志时
+#   也应该是笔记维度」「清理无流量笔记失败，分析原因：候选池仅包含已同步千帆挂链
+#   映射的笔记…」）
+# --------------------------------------------------------------------------- #
+def test_cleanup_log_table_is_a_parent_child_note_dimension_tree():
+    """日志列表是**父子两层**：批次行 + 展开的笔记行（用户口径「笔记维度」）。
+
+    三件事缺一不可：① 笔记明细列有入口（「N 篇（展开查看）」）；② 展开区渲染
+    **笔记维度表**（标题 / 笔记 ID / 结果 / 原因 / 操作时间）；③ 展开区是**独立的
+    子表**（`expandedRowRender` 里放 `<Table>`），不是把子行塞进父表 —— 那样表头
+    会串味（网关页的同款口径）。
+
+    变异：把 `expandedRowRender` 删掉 ⇒ 本用例红（笔记维度无处可见）。
+    """
+    code = _my_notes_code()
+    assert "expandedRowRender" in code, "没有展开区 ⇒ 笔记维度可见不了"
+    assert "childrenColumnName=" in code, (
+        "父表必须关掉 antd 的树数据自动探测（否则与 expandedRowRender 两条渲染路径打架）"
+    )
+    # 笔记维度的列（展开区那张表）
+    for column in ("笔记 ID", "结果", "原因", "操作时间"):
+        assert f'"{column}"' in code, f"笔记明细缺列：{column}"
+    assert "NoTrafficCleanupItemRow" in code, "展开区不是按笔记明细类型渲染的"
+    # 行内可见「动了几篇笔记」（否则用户不知道这里有展开）
+    assert "篇（展开查看）" in code, "批次行没给出「这几篇」的入口提示"
+
+
+def test_cleanup_item_results_cover_the_backend_enum():
+    """结果文案映射覆盖后端**全部五个**取值，且认不出时**原样显示**（不造假）。
+
+    特别是 `not_attempted`（本批被风控中止、这篇没轮到）必须与 `failed`
+    分得开 —— 前者该重试、后者该查原因。
+    """
+    from backend.app.models.no_traffic_cleanup_log import CLEANUP_ITEM_RESULTS
+
+    code = _my_notes_code()
+    start = code.index("function cleanupItemResult")
+    body = code[start : start + 900]
+    for value in CLEANUP_ITEM_RESULTS:
+        assert f'case "{value}"' in body, f"结果 {value} 没有文案映射"
+    assert "default:" in body, "认不出的取值必须有兜底（原样显示，不许静默成空）"
+
+
+def test_cleanup_log_failure_reason_column_never_shows_the_coverage_note():
+    """**DEF-095 的前端半边**：「失败原因」列只渲染 `reason`，不许渲染 `coverage_note`。
+
+    修复前的现场：`reason` 里装着候选池覆盖度文案，于是平台风控失败时界面显示
+    「候选池仅包含已同步千帆挂链映射的笔记…」—— 用户据此追查了错误方向。
+
+    变异：把该列的 render 改回 `dataIndex: "reason"` 直读、或把 `coverage_note`
+    也拼进去 ⇒ 本用例红。
+    """
+    code = _my_notes_code()
+    start = code.index('title: "失败原因"')
+    body = code[start : start + 1200]
+    assert "row.reason" in body, "失败原因列没读 `reason`"
+    assert "coverage_note" not in body, (
+        "失败原因列不许渲染覆盖度说明（它曾经就是这样冒充失败原因的）"
+    )
+    # 中止（风控/凭据）要如实说出来：本批没跑完，不是「只有这一篇失败」。
+    assert "row.aborted" in body and "本批已中止" in body, "中止事实没告知用户"

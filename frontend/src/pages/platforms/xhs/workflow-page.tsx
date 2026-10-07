@@ -102,7 +102,7 @@ function emptyNode(nodeType: string, seq: number): WorkflowNodePayload {
   };
 }
 
-export function WorkflowPage() {
+export function WorkflowPanel() {
   const { token } = theme.useToken();
   const { message, modal } = App.useApp();
 

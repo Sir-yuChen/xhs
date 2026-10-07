@@ -19,6 +19,17 @@ NOTE_TYPE_LOCAL = "local"
 #: 同步链路命中也只升 `synced`，不回退。
 NOTE_TYPE_LOCAL_GENERATED = "local_generated"
 
+#: 笔记**分类**（「我的笔记」离线数据，2026-10-06 需求）：与小红书平台一致，
+#: 分「商业笔记」（挂载商品）与「普通笔记」两类。
+#: 判据是**千帆数据中心的数据源**（`note-data/goods` vs `note-data/normal`），
+#: 不是「笔记类型」字段（那个是图文/视频）—— 商业/普通由下载入口决定。
+NOTE_CATEGORY_GOODS = "goods"
+NOTE_CATEGORY_NORMAL = "normal"
+#: 全部合法取值（写入入口的校验依据）。
+NOTE_CATEGORIES = (NOTE_CATEGORY_GOODS, NOTE_CATEGORY_NORMAL)
+#: 空值 = 不是离线数据中心笔记（线上同步 / 采集 / 本地生成的笔记没有这个维度）。
+NOTE_CATEGORY_DEFAULT = ""
+
 #: 本地生成笔记的**发布状态机**（设计 13 §31.3.1；**口径被 §32.3 取代**）——
 #: 现在是**所有笔记**的发布状态（不再有「空 = 不适用」这一态）：
 #: `pending` 待发布 → `publishing` 发布中 → `published` 已发布 / `failed` 发布失败。
@@ -197,6 +208,15 @@ class Note(Base):
     #: 存量行由迁移按 §19.12 的已文档化不变量回填：`published=1 ⟺ 同步链路落库`。
     note_type: Mapped[str] = mapped_column(
         String(16), default=NOTE_TYPE_LOCAL, nullable=False, server_default=NOTE_TYPE_LOCAL
+    )
+    #: **笔记分类**（「我的笔记」离线数据，2026-10-06 需求）：
+    #: `goods` = 商业笔记（千帆数据中心 `note-data/goods`）/ `normal` = 普通笔记
+    #: （`note-data/normal`）/ 空 = 非数据中心笔记（线上同步 / 采集 / 本地生成）。
+    #: 与 `note_type`（synced/local/local_generated，答「谁搬来的」）**正交**：
+    #: 本列答「这条属于平台的哪类笔记」（商业/普通），两列不是一列。
+    #: 覆盖更新时按数据源刷新（一条笔记从普通转商业时，`goods` → `normal` 会跟着变）。
+    note_category: Mapped[str] = mapped_column(
+        String(16), default=NOTE_CATEGORY_DEFAULT, nullable=False, server_default=""
     )
     #: **话题（#标签名列表）**（设计 13 §28，2026-09-22 新增，迁移 `s1t2u3v4w5x6`）。
     #: Text 列存 JSON 数组（与 `shop_products.images_json` 同款记法），默认 `[]`。

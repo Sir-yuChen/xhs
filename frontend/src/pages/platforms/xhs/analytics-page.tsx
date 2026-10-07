@@ -1,10 +1,8 @@
 import {
   BarChartOutlined,
   CommentOutlined,
-  DownloadOutlined,
   FileTextOutlined,
   FireOutlined,
-  ReloadOutlined,
   TagsOutlined,
   UserOutlined,
 } from "@ant-design/icons";
@@ -33,8 +31,6 @@ import { Link } from "react-router-dom";
 
 import { useThemePalette } from "../../../app/providers";
 import {
-  createXhsAnalyticsReport,
-  downloadExportFile,
   fetchXhsCommentInsights,
   fetchXhsHotTopics,
   fetchXhsOverview,
@@ -118,9 +114,7 @@ export function XhsAnalyticsPage() {
   const [commentInsights, setCommentInsights] =
     useState<AnalyticsCommentInsight>(fallbackComments);
   const [isLoading, setIsLoading] = useState(true);
-  const [isGeneratingReport, setIsGeneratingReport] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [reportMessage, setReportMessage] = useState<string | null>(null);
 
   async function loadAnalytics() {
     setIsLoading(true);
@@ -148,21 +142,6 @@ export function XhsAnalyticsPage() {
     void loadAnalytics();
   }, []);
 
-  async function generateReport() {
-    setIsGeneratingReport(true);
-    setError(null);
-    setReportMessage(null);
-    try {
-      const report = await createXhsAnalyticsReport({ format: "json" });
-      await downloadExportFile(report.download_url, report.file_name);
-      setReportMessage(`已生成运营报告：${report.note_count} 篇笔记`);
-    } catch {
-      setError("运营报告生成失败，请稍后重试。");
-    } finally {
-      setIsGeneratingReport(false);
-    }
-  }
-
   const metrics = [
     { label: "内容库笔记", value: overview.saved_notes, icon: <FileTextOutlined /> },
     { label: "总互动", value: overview.total_engagement ?? 0, icon: <BarChartOutlined /> },
@@ -178,7 +157,6 @@ export function XhsAnalyticsPage() {
 
   return (
     <div>
-      <Alert type="info" showIcon message="数据洞察模块正在开发优化中，当前为基础版本，更多分析维度即将上线。" style={{ marginBottom: 16 }} />
       <Tabs
         defaultActiveKey="insight"
         items={[
@@ -208,21 +186,10 @@ export function XhsAnalyticsPage() {
                 borderColor: p.border,
                 borderTop: `2px solid ${metricIconColors[idx]}`,
               }}
-              /* 2026-10-05 页头移除后，「生成报告 / 刷新」收进首张指标卡右上角
-                 （用户口径「按钮功能先保留，位置你来决定」）。刷新在左、主操作在右，
-                 与全站「刷新在前 / 主操作在后」的既有排布一致。 */
-              extra={
-                idx === 0 ? (
-                  <Space size={8}>
-                    <Button size="small" icon={<ReloadOutlined />} onClick={loadAnalytics} loading={isLoading}>
-                      刷新
-                    </Button>
-                    <Button size="small" type="primary" icon={<DownloadOutlined />} onClick={generateReport} loading={isGeneratingReport}>
-                      生成报告
-                    </Button>
-                  </Space>
-                ) : undefined
-              }
+              /* 2026-10-06 设计 22 §4（用户口径）：移除「刷新」与「生成报告」两个按钮
+                 及对应逻辑。理由是这两个动作对「基础版内容洞察」没有增量价值 ——
+                 数据由进页首查驱动，报告导出能力由内容库侧承担。
+                 ⚠️ `loadAnalytics` 仍在首查 `useEffect` 里跑（页面依然加载数据）。 */
             >
               <Statistic
                 title={
@@ -245,15 +212,6 @@ export function XhsAnalyticsPage() {
         <Alert
           type="error"
           message={error}
-          showIcon
-          closable
-          style={{ marginBottom: 16 }}
-        />
-      )}
-      {reportMessage && (
-        <Alert
-          type="success"
-          message={reportMessage}
           showIcon
           closable
           style={{ marginBottom: 16 }}

@@ -144,6 +144,52 @@ body {
   }
 }
 
+/* ===== 图片空间 · 数据区滚动条隐藏（2026-10-07 用户「下拉滚动条隐藏」） ===== */
+/*
+ * 「隐藏外观，不隐藏滚动」—— 保留 `overflow:auto` 的滚动能力（滚轮 / 触板 / 键盘都能滚），
+ * 只把可见的滚动条藏掉（`scrollbar-width:none` + `::-webkit-scrollbar{display:none}`）。
+ * ⚠️ 不要改成 `overflow:hidden`：那会让多出来的行**根本滚不到**。
+ */
+.ps-scroll-hidden {
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* 旧 Edge/IE */
+}
+
+.ps-scroll-hidden::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none; /* Chrome / Safari / 新 Edge */
+}
+
+/*
+ * ===== 图片空间 · 三区布局（顶栏 / 数据区 / 分页）=====
+ * 2026-10-07 用户：「布局分为顶部操作按钮、中间数据展示、底部公共分页组件，
+ * 顶部和底部不动，只有中间数据展示可上下滚动」。
+ *
+ * ⚠️ 关键：数据区外面套的是 antd `Spin`，其 `.ant-spin-nested-loading` / `.ant-spin-container`
+ *    **默认 `height:auto`** ⇒ 里面那层 `height:100%` 的滚动 div 会按**内容高度**撑开
+ *    （`height:100%` 对 auto 父级 = auto）⇒ 把**底部分页顶出**固定高度列之外，
+ *    表现就是「底部分页没有」。所以必须把这两层也拉成撑满的 flex 项。
+ */
+.ps-scroll-host {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ps-scroll-host > .ant-spin-nested-loading,
+.ps-scroll-host .ant-spin-container {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: 100%;
+}
+
+.ps-scroll-host .ant-spin-container {
+  display: flex;
+  flex-direction: column;
+}
+
 /* ===== 我的笔记 · 详情弹窗（设计文档 §23） ===== */
 /* 弹窗外框固定高度、整体不滚动：滚动被限制在「信息区」与「评论区」内部。 */
 /* 评论区高度恒定，所以「加载中 / 空 / 失败 / 有数据」四态下版式都不跳动。 */

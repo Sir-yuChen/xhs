@@ -10,7 +10,6 @@ import { SettingsPage } from "../pages/settings/settings-page";
 import { TaskCenterPage } from "../pages/tasks/task-center-page";
 import { TaskRecordsPage } from "../pages/tasks/task-records-page";
 import { AutoOpsPage } from "../pages/platforms/xhs/auto-ops-page";
-import { WorkflowPage } from "../pages/platforms/xhs/workflow-page";
 import { OrdersPage } from "../pages/platforms/xhs/orders-page";
 import { XhsAccountsPage } from "../pages/platforms/xhs/accounts-page";
 import { XhsAnalyticsPage } from "../pages/platforms/xhs/analytics-page";
@@ -21,6 +20,7 @@ import { XhsKeywordsPage } from "../pages/platforms/xhs/keywords-page";
 import { LlmGatewayPage } from "../pages/llm-gateway/llm-gateway-page";
 import { XhsLibraryPage } from "../pages/platforms/xhs/library-page";
 import { XhsMyNotesPage } from "../pages/platforms/xhs/my-notes-page";
+import { PictureSpacePage } from "../pages/platforms/xhs/picture-space-page";
 import { XhsNoteWorkshopPage } from "../pages/platforms/xhs/note-workshop-page";
 import { XhsShopItemsPage } from "../pages/platforms/xhs/shop-items-page";
 import { XhsPublishPage } from "../pages/platforms/xhs/publish-page";
@@ -84,6 +84,8 @@ export function AppRouter() {
           <Route path="/platforms/xhs/discovery" element={<XhsDiscoveryPage />} />
           <Route path="/platforms/xhs/my-notes" element={<XhsMyNotesPage />} />
           <Route path="/platforms/xhs/shop-items" element={<XhsShopItemsPage />} />
+          {/* 图片空间（设计 22 §1）：千帆云图片资产**只读**浏览，本地零落库。 */}
+          <Route path="/platforms/xhs/picture-space" element={<PictureSpacePage />} />
           {/* 数据抓取已并入「笔记发现」的「批量抓取」页签（设计 21 切片 B）：旧路由重定向，深链不死。 */}
           <Route path="/platforms/xhs/crawler" element={<Navigate to="/platforms/xhs/discovery?tab=crawl" replace />} />
           <Route path="/platforms/xhs/keywords" element={<XhsKeywordsPage />} />
@@ -98,11 +100,12 @@ export function AppRouter() {
               monitoring-page 是 benchmarks-page 的超集（4 种目标类型 vs 仅 note_url）。 */}
           <Route path="/platforms/xhs/benchmarks" element={<Navigate to="/platforms/xhs/monitoring" replace />} />
           <Route path="/platforms/xhs/monitoring" element={<XhsMonitoringPage />} />
-          <Route path="/platforms/xhs/publish" element={<XhsPublishPage />} />
+          <Route path="/platforms/xhs/publish" element={<Navigate to="/platforms/xhs/note-workshop?tab=publish" replace />} />
           <Route path="/platforms/xhs/auto-ops" element={<AutoOpsPage />} />
           {/* 自动化工作流（设计 19 / M5）：编排 选题→生成→审核→发布→监控。
-              人工审核节点默认不自动放行（§3.3 硬约束）。 */}
-          <Route path="/platforms/xhs/workflows" element={<WorkflowPage />} />
+              人工审核节点默认不自动放行（§3.3 硬约束）。
+              2026-10-06 设计 22 §3：并入「自动运营」宿主页作 tab ⇒ 旧路由重定向，深链不死。 */}
+          <Route path="/platforms/xhs/workflows" element={<Navigate to="/platforms/xhs/auto-ops?tab=workflows" replace />} />
           <Route path="/platforms/xhs/orders" element={<OrdersPage />} />
           <Route path="/platforms/xhs/:section" element={<XhsSectionPage />} />
           <Route path="/tasks" element={<TaskCenterPage />} />

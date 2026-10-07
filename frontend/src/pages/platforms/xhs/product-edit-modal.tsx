@@ -221,7 +221,7 @@ export function ProductEditModal({
               {entry.key === "sku" ? (
                 <>
                   <Text type="warning" style={{ display: "block", marginBottom: 12 }}>
-                    ⚠️ 商品的**价格 / 库存 / 上下架只能看，不能改** —— 千帆开放接口没有商品写能力
+                    ⚠️ 商品的价格 / 库存 / 上下架只能看，不能改 —— 千帆开放接口没有商品写能力
                     （改价 / 上下架要走平台另一个未接入的写接口）。要改请到千帆后台操作。
                   </Text>
                   {!detailLoaded ? (

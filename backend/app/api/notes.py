@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Literal, Optional, Sequence
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
@@ -19,11 +19,21 @@ from backend.app.api.platforms.xhs.pc import (
 )
 from backend.app.adapters.xhs.qianfan_api_adapter import get_qianfan_api_adapter_factory
 from backend.app.core.config import get_settings
-from backend.app.core.database import get_db
+from backend.app.core.database import SessionLocal, get_db
 from backend.app.core.deps import get_current_user, get_owned_active_account
 from backend.app.core.time import shanghai_now
-from backend.app.models import AiDraft, Note, NoteAsset, NoteComment, NoteGoods, NoteTopic, PlatformAccount, Topic, User
+from backend.app.models import AiDraft, Note, NoteAsset, NoteComment, NoteGoods, NoteTopic, Notification, PlatformAccount, Topic, User
+from backend.app.services.note_purge_service import purge_note
+from backend.app.models.scheduled_job import (
+    LOG_FAILED,
+    LOG_RUNNING,
+    LOG_SUCCESS,
+    ScheduledJob,
+    ScheduledJobLog,
+)
 from backend.app.models.note import (
+    NOTE_CATEGORIES,
+    NOTE_CATEGORY_DEFAULT,
     NOTE_TYPE_LOCAL,
     NOTE_TYPE_LOCAL_GENERATED,
     NOTE_TYPE_SYNCED,
@@ -269,17 +279,35 @@ def _load_batch_goods(db: Session, notes: Sequence[Note]) -> dict[int, list[dict
             products[(user_id, item_id)] = product
 
     goods: dict[int, list[dict]] = {}
+    # 2026-10-06：规格（variant_desc）不在 `shop_products`（商品台账）里，而在
+    # `shop_note_goods`（千帆挂链映射）里 —— 按 `(user_id, item_id)` 补一次，让离线
+    # 笔记的挂载商品与「全部笔记」tab 的 `NoteGoods.variant` 同源同形。
+    variant_by_key: dict[tuple[int, str], str] = {}
+    from backend.app.models import ShopNoteGoods as _ShopNoteGoods
+
+    _variant_rows = db.scalars(
+        select(_ShopNoteGoods).where(
+            _ShopNoteGoods.item_id.in_({str(row.item_id or "") for row in rows})
+        )
+    ).all()
+    for _row in _variant_rows:
+        variant_by_key[(int(_row.user_id or 0), str(_row.item_id or ""))] = _row.variant_desc or ""
+
     for row in rows:
         note_key = note_ids_by_key.get((int(row.user_id or 0), row.note_id))
         if note_key is None:
             continue
         goods.setdefault(note_key, []).append(
-            _goods_entry(products.get((int(row.user_id or 0), str(row.item_id or ""))), row.item_id)
+            _goods_entry(
+                products.get((int(row.user_id or 0), str(row.item_id or ""))),
+                row.item_id,
+                variant_by_key.get((int(row.user_id or 0), str(row.item_id or "")), ""),
+            )
         )
     return goods
 
 
-def _goods_entry(product: Any, item_id: Any) -> dict:
+def _goods_entry(product: Any, item_id: Any, variant: str = "") -> dict:
     """一条挂载商品的序列化（**唯一实现**；`None` = 台账里没有这件商品）。
 
     ⚠️ **2026-09-27 改键（§26.7）**：关系行两个字段都是**平台 ID**
@@ -288,6 +316,9 @@ def _goods_entry(product: Any, item_id: Any) -> dict:
     **商品台账里没有这件商品是正常态**（关系落库不校验商品存在）：
     那种商品**只给 `item_id`**，标题 / 价格 / 图 / 库存留空（缺值口径，前端渲染
     「（无商品标题）」「价格待同步」），**不造假、也不拿缓存表顶替**。
+
+    `variant`（规格）来自 `shop_note_goods.variant_desc`（2026-10-06 补齐）——
+    `shop_products` 不存规格，规格只在千帆挂链映射行里；缺值留空（缺值口径）。
     """
     item_key = str(item_id or "")
     if product is None:
@@ -299,6 +330,7 @@ def _goods_entry(product: Any, item_id: Any) -> dict:
             "images": [],
             "stock": None,
             "sales": None,
+            "variant": variant,
         }
     return {
         "item_id": product.item_id,
@@ -307,6 +339,7 @@ def _goods_entry(product: Any, item_id: Any) -> dict:
         "images": _json_list(product.images_json),
         "stock": product.stock,
         "sales": product.sales,
+        "variant": variant,
     }
 
 
@@ -771,7 +804,602 @@ def get_notes(
     }
 
 
-@router.post("/batch-create-drafts")
+@router.get("/offline")
+def get_offline_notes(
+    category: Optional[str] = None,
+    platform_account_id: Optional[int] = None,
+    keyword: Optional[str] = None,
+    item_id: Optional[str] = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """「我的笔记」商业 / 普通 Tab 的**离线数据**列表（查本地库，零平台请求）。
+
+    数据源是千帆数据中心离线落库的笔记（`note_category` ∈ `goods` / `normal`）。
+    `category` 必填（`goods` / `normal`），未知值 400 `NOTE_CATEGORY_UNSUPPORTED`。
+    不传 `category` 时返回全部离线笔记（含 `note_category` 非空的）。
+
+    `keyword`（2026-10-06）：标题**模糊查询**（`LIKE %keyword%`）。
+    `item_id`（2026-10-06）：商业笔记按**商品 ID** 反查对应笔记（join `note_goods`）。
+
+    ⚠️ 路由必须注册在 `/{note_id}` 之前 —— 否则 "offline" 会被 int 转换吃掉（422）。
+    """
+    statement = select(Note).where(Note.user_id == current_user.id)
+    cat_key = (category or "").strip()
+    if cat_key:
+        if cat_key not in NOTE_CATEGORIES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "NOTE_CATEGORY_UNSUPPORTED",
+                    "message": f"不支持的笔记分类：{cat_key}",
+                    "supported": list(NOTE_CATEGORIES),
+                },
+            )
+        statement = statement.where(Note.note_category == cat_key)
+    else:
+        statement = statement.where(Note.note_category != NOTE_CATEGORY_DEFAULT)
+    if platform_account_id is not None:
+        statement = statement.where(Note.platform_account_id == platform_account_id)
+    # 标题模糊查询（2026-10-06）：空串 / 空白不筛。
+    if keyword and keyword.strip():
+        statement = statement.where(Note.title.like(f"%{keyword.strip()}%"))
+    # 商品 ID 反查（2026-10-06）：按 note_goods 关系表反查笔记 note_id 集合。
+    if item_id and item_id.strip():
+        matched_note_ids = set(
+            db.scalars(
+                select(NoteGoods.note_id).where(
+                    NoteGoods.user_id == current_user.id,
+                    NoteGoods.item_id == item_id.strip(),
+                )
+            ).all()
+        )
+        statement = statement.where(Note.note_id.in_(matched_note_ids or {""}))
+
+    total = db.scalar(select(func.count()).select_from(statement.subquery())) or 0
+    rows = db.scalars(
+        statement.order_by(Note.created_at.desc(), Note.id.desc())
+        .limit(page_size)
+        .offset((page - 1) * page_size)
+    ).all()
+    relations = _load_note_relations(db, rows)
+    return {
+        "total": int(total),
+        "page": page,
+        "page_size": page_size,
+        "items": [_serialize_note_with_topics(db, note, relations) for note in rows],
+    }
+
+
+class BatchDeleteNotesRequest(BaseModel):
+    #: 平台 note_id（字符串，不是本地主键 id）
+    note_ids: list[str] = Field(min_length=1)
+    #: True = 删本地 + 平台；False = 只删本地（默认）。
+    delete_platform: bool = False
+
+
+@router.post("/batch-delete")
+def batch_delete_notes_endpoint(
+    payload: BatchDeleteNotesRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """商业/普通 Tab 复选框**批量删除**（2026-10-06 需求）。
+
+    `note_ids` 是**平台 note_id**（不是本地主键）。两种方式（前端单选框）：
+
+    * `delete_platform=false`（默认）：**只删本地**（`purge_note`，连关系行一起删），不碰平台。
+    * `delete_platform=true`：**先删平台、成功后删本地** —— 商业笔记（goods）走千帆
+      `batch_delete_notes`（批量），普通笔记（normal）走创作者 `validate_delete_permission`
+      + `delete_note`（逐篇）。平台删除失败的笔记**本地保留**，如实返回失败原因。
+
+    返回 `{deleted: int, failed: [...], results: [...]}`。账号无对应平台 Cookie 时，
+    平台删除全部失败（本地也不删），理由如实带出。
+    """
+    from backend.app.adapters.xhs.creator_api_adapter import XhsCreatorApiAdapter
+    from backend.app.adapters.xhs.qianfan_api_adapter import XhsQianfanApiAdapter
+    from backend.app.services.account_service import (
+        CHANNEL_ARK,
+        CHANNEL_CREATOR,
+        latest_cookies_for_channel,
+    )
+
+    wanted = [str(n).strip() for n in payload.note_ids if str(n).strip()]
+    if not wanted:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="note_ids 为空")
+
+    notes = db.scalars(
+        select(Note).where(Note.user_id == current_user.id, Note.note_id.in_(wanted))
+    ).all()
+    by_note_id = {n.note_id: n for n in notes}
+
+    results: list[dict[str, Any]] = []
+    deleted = 0
+    failed: list[dict[str, Any]] = []
+
+    if not payload.delete_platform:
+        # 只删本地：直接 purge。
+        for nid in wanted:
+            note = by_note_id.get(nid)
+            if note is None:
+                results.append({"note_id": nid, "ok": False, "reason": "本地无此笔记"})
+                failed.append({"note_id": nid, "reason": "本地无此笔记"})
+                continue
+            purge_note(db, note)
+            deleted += 1
+            results.append({"note_id": nid, "ok": True})
+        db.commit()
+        return {"deleted": deleted, "failed": failed, "results": results}
+
+    # 删本地 + 平台：先删平台，成功后再删本地。
+    # 取账号 cookies（用第一笔笔记的 platform_account_id 归属账号）。
+    account_id = None
+    for n in notes:
+        if n.platform_account_id:
+            account_id = n.platform_account_id
+            break
+    if account_id is None:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="笔记缺少归属账号")
+
+    ark_cookies = latest_cookies_for_channel(db, account_id, CHANNEL_ARK) or ""
+    creator_cookies = latest_cookies_for_channel(db, account_id, CHANNEL_CREATOR) or ""
+    qianfan_adapter = XhsQianfanApiAdapter(ark_cookies) if ark_cookies else None
+    creator_adapter = XhsCreatorApiAdapter(creator_cookies) if creator_cookies else None
+
+    # 分组：goods → 千帆批量，normal/其他 → creator 逐篇。
+    goods_ids: list[str] = []
+    creator_ids: list[str] = []
+    for nid in wanted:
+        note = by_note_id.get(nid)
+        if note is None:
+            results.append({"note_id": nid, "ok": False, "reason": "本地无此笔记"})
+            failed.append({"note_id": nid, "reason": "本地无此笔记"})
+        elif note.note_category == "goods":
+            goods_ids.append(nid)
+        else:
+            creator_ids.append(nid)
+
+    # 商业笔记：千帆批量删除（一次请求删整组）。成功后逐篇 purge 本地。
+    if goods_ids:
+        if qianfan_adapter is None:
+            for nid in goods_ids:
+                results.append({"note_id": nid, "ok": False, "reason": "缺少千帆(ark)登录态"})
+                failed.append({"note_id": nid, "reason": "缺少千帆(ark)登录态"})
+        else:
+            try:
+                ok, msg, _ = qianfan_adapter.batch_delete_notes(goods_ids)
+            except Exception as exc:  # noqa: BLE001
+                ok, msg = False, f"千帆删除异常：{type(exc).__name__}: {exc}"
+            if ok:
+                for nid in goods_ids:
+                    note = by_note_id.get(nid)
+                    if note is not None:
+                        purge_note(db, note)
+                    deleted += 1
+                    results.append({"note_id": nid, "ok": True})
+            else:
+                for nid in goods_ids:
+                    results.append({"note_id": nid, "ok": False, "reason": str(msg)})
+                    failed.append({"note_id": nid, "reason": str(msg)})
+
+    # 普通笔记：creator 逐篇（先权限校验再删）。成功后 purge 本地。
+    for nid in creator_ids:
+        note = by_note_id.get(nid)
+        if note is None:
+            continue
+        if creator_adapter is None:
+            results.append({"note_id": nid, "ok": False, "reason": "缺少创作者登录态"})
+            failed.append({"note_id": nid, "reason": "缺少创作者登录态"})
+            continue
+        try:
+            ok, msg, _ = creator_adapter.validate_delete_permission(nid)
+            if not ok:
+                results.append({"note_id": nid, "ok": False, "reason": f"权限校验失败：{msg}"})
+                failed.append({"note_id": nid, "reason": f"权限校验失败：{msg}"})
+                continue
+            ok, msg, _ = creator_adapter.delete_note(nid)
+        except Exception as exc:  # noqa: BLE001
+            ok, msg = False, f"创作者删除异常：{type(exc).__name__}: {exc}"
+        if ok:
+            purge_note(db, note)
+            deleted += 1
+            results.append({"note_id": nid, "ok": True})
+        else:
+            results.append({"note_id": nid, "ok": False, "reason": str(msg)})
+            failed.append({"note_id": nid, "reason": str(msg)})
+
+    db.commit()
+    return {"deleted": deleted, "failed": failed, "results": results}
+
+
+@router.post("/{note_id}/hydrate")
+def hydrate_offline_note_detail(
+    note_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """**点击笔记卡片时实时拉详情并落库**（2026-10-06 需求，取代定时任务/导入自动拉）。
+
+    对**一条**离线笔记（`note_category` ∈ `goods` / `normal`）实时拉平台详情
+    （正文 / 媒体图视频 / 话题），**落库**：正文 → `notes.content`、媒体 →
+    `note_assets`、话题 → `topics` + `note_topics`（拆表）。数据源是笔记原链接
+    自带的 `xsec_token`（匿名 explore SSR，无需登录）。
+
+    ⚠️ 仅离线笔记支持（`note_category` 非空）；内容库/「全部笔记」tab 的线上笔记
+    走 `POST /xhs/pc/notes/detail`（不落库）。
+
+    返回序列化后的完整笔记（含落库后的 `content` / `asset_urls` / `topics` /
+    `raw_json.metrics` 指标）。幂等：已有正文+媒体则跳过（`hydrate_offline_note`）。
+    """
+    from backend.app.services.note_data_service import hydrate_offline_note
+    from backend.app.services.rate_limiter import get_rate_limiter
+    from backend.app.adapters.xhs.note_detail_ssr import fetch_note_detail_payload
+
+    note = db.scalars(
+        select(Note).where(
+            Note.note_id == note_id,
+            Note.user_id == current_user.id,
+            Note.note_category != NOTE_CATEGORY_DEFAULT,
+        )
+    ).first()
+    if note is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "OFFLINE_NOTE_NOT_FOUND", "message": "该离线笔记不存在或不属于当前账号"},
+        )
+
+    # 2026-10-06：详情拉取用 `raw_json.note_url` 里已有的 xsec_token。笔记在平台侧
+    # 已被删除/不可见时拉不到详情是**数据事实**（用户已确认，无需回查补救）——
+    # 这里只拉一次，失败就安静降级，不按 note_id 回查（回查也救不了已删除的笔记）。
+    outcome = hydrate_offline_note(
+        db,
+        note,
+        fetch_payload=fetch_note_detail_payload,
+        limiter=get_rate_limiter(),
+    )
+    # 2026-10-06：详情拉取失败（笔记平台已删除/不可见）**不 502 报错**，而是安静降级
+    # —— 返回笔记现有的离线数据（标题/指标/商品），正文/媒体留空。前端据
+    # `hydrate_status` 显示「详情暂不可用」的安静提示，而不是红块错误。
+    db.commit()
+    serialized = _serialize_note_with_topics(db, note)
+    serialized["hydrate_status"] = outcome["status"]
+    return serialized
+
+
+@router.post("/import-data")
+async def import_note_data(
+    file: UploadFile = File(...),
+    category: str = Form(...),
+    account_id: int = Form(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """导入离线笔记数据文件（商业 / 普通 Tab 的「导入」按钮，2026-10-06 需求）。
+
+    用户上传 xlsx（千帆数据中心导出的笔记数据文件），后端**异步**解析落库
+    （弹窗无需等待解析），解析完成后发**站内通知**推送统计结果。临时文件解析
+    完毕后删除。
+
+    `category` ∈ `goods` / `normal`（决定笔记分类）；`account_id` 是归属账号
+    （越权 404）。文件格式必须是 `.xlsx`。
+
+    返回立即回执 `{ok, status:"importing"}`；统计经 `notifications` 站内消息推送。
+    """
+    from backend.app.services.note_data_service import import_note_data_file
+
+    if category not in NOTE_CATEGORIES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "NOTE_CATEGORY_UNSUPPORTED",
+                "message": f"不支持的笔记分类：{category}",
+                "supported": list(NOTE_CATEGORIES),
+            },
+        )
+    # 账号归属校验（越权 404，不暴露「存在但无权」）
+    get_owned_active_account(db, current_user, account_id, platform="xhs")
+
+    if not file.filename or not file.filename.lower().endswith(".xlsx"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="只支持 .xlsx 文件")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="文件为空")
+
+    # 落临时文件（解析线程读它，读完删除）
+    tmp_dir = Path(get_settings().storage_dir) / "imports"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    tmp_path = tmp_dir / f"note-import-u{current_user.id}-{uuid4().hex}.xlsx"
+    tmp_path.write_bytes(content)
+
+    # 2026-10-06：导入改走**任务日志**入口（`scheduled_job_logs`），复用
+    # `system.note_data_sync` 任务做归属，但**不新增任务列表条目**（用户口径
+    # 「改任务不在任务列表不展示」）。这样任务中心「任务日志」能查到执行进度，
+    # 前端导入按钮据此显示「文件解析执行中」。
+    from backend.app.services import scheduler_service
+
+    db_log = SessionLocal()
+    try:
+        scheduler_service.seed_builtin_jobs_for_user(db_log, current_user.id)
+        job = db_log.scalars(
+            select(ScheduledJob).where(
+                ScheduledJob.user_id == current_user.id,
+                ScheduledJob.job_key == "system.note_data_sync",
+            )
+        ).first()
+        if job is None:
+            # 理论上 seed 后必存在；兜底仍失败则回退到无日志的后台线程解析。
+            job = None
+        log = ScheduledJobLog(
+            job_id=job.id if job is not None else None,
+            user_id=current_user.id,
+            platform_account_id=account_id,
+            job_name="离线笔记数据导入",
+            job_key="system.note_data_sync",
+            job_trigger_type=job.trigger_type if job is not None else "manual",
+            trigger_type="manual",
+            status=LOG_RUNNING,
+            progress=0,
+            message=f"正在解析{'商业' if category == 'goods' else '普通'}笔记数据文件…",
+            config_snapshot={"category": category, "account_id": account_id},
+        )
+        db_log.add(log)
+        db_log.commit()
+        db_log.refresh(log)
+        log_id = log.id
+    except Exception:  # noqa: BLE001 - 建日志失败不阻断导入
+        log_id = None
+    finally:
+        db_log.close()
+
+    # 后台线程解析 + 落库 + 发通知 + 删临时文件 + 写日志进度/终态（弹窗无需等待）
+    import threading
+
+    def _run() -> None:
+        try:
+            result = import_note_data_file(
+                account_id=account_id,
+                category=category,
+                file_path=str(tmp_path),
+                user_id=current_user.id,
+            )
+            if result.get("error"):
+                title = f"笔记数据导入失败（{category}）"
+                body = result["error"]
+                level = "error"
+                log_status = LOG_FAILED
+                log_message = f"导入失败：{result['error']}"
+                log_progress = None  # 保留泵最后一次写入的进度（缺值口径，不猜）
+            else:
+                hydrate = result.get("hydrate") or {}
+                title = "笔记数据导入完成"
+                parts = [
+                    f"{'商业笔记' if category == 'goods' else '普通笔记'}："
+                    f"解析 {result.get('fetched', 0)} 条，新增 {result.get('created', 0)} 条，"
+                    f"更新 {result.get('updated', 0)} 条",
+                ]
+                if hydrate.get("attempted"):
+                    parts.append(
+                        f"补齐详情 {hydrate.get('filled', 0)} 篇"
+                        f"（失败 {hydrate.get('failed', 0)}，缺链接 {hydrate.get('no_url', 0)}）"
+                    )
+                body = "；".join(parts)
+                level = "info"
+                log_status = LOG_SUCCESS
+                log_message = body
+                log_progress = 100
+            db_notify = SessionLocal()
+            try:
+                db_notify.add(
+                    Notification(
+                        user_id=current_user.id,
+                        title=title,
+                        body=body,
+                        level=level,
+                        source_type="note_data_import",
+                    )
+                )
+                db_notify.commit()
+            finally:
+                db_notify.close()
+            # 写日志终态（复用 SessionLocal 自建 Session）
+            if log_id is not None:
+                db_log2 = SessionLocal()
+                try:
+                    log_row = db_log2.get(ScheduledJobLog, log_id)
+                    if log_row is not None:
+                        log_row.status = log_status
+                        log_row.finished_at = shanghai_now()
+                        log_row.duration_ms = max(
+                            0, int((log_row.finished_at - log_row.started_at).total_seconds() * 1000)
+                        )
+                        if log_progress is not None:
+                            log_row.progress = log_progress
+                        log_row.message = log_message[:1000]
+                        db_log2.commit()
+                finally:
+                    db_log2.close()
+        finally:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    threading.Thread(target=_run, name=f"note-data-import-{current_user.id}", daemon=True).start()
+    return {"ok": True, "status": "importing", "category": category, "log_id": log_id}
+
+
+class SyncNoteDataRequest(BaseModel):
+    #: 归属账号（越权 404）。
+    account_id: int
+    #: `goods` / `normal`。
+    category: str
+    #: 自定义日期范围起止（`YYYY-MM-DD`，可空 = 默认近 90 日）。
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+
+
+@router.post("/sync-data")
+def sync_note_data_endpoint(
+    payload: SyncNoteDataRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """**手动同步**离线笔记数据（商业 / 普通 Tab 的「同步」按钮，2026-10-06 需求）。
+
+    与「导入 xlsx」并列的第二个离线数据入口：直接从千帆数据中心 `butterfly/data`
+    拉（无需上传文件），按**用户选择的日期范围**同步，**最长 90 天**（超出 400）。
+
+    后台线程执行（弹窗无需等待），走任务日志（`system.note_data_sync` 归属，不新增
+    任务列表条目，同「导入」口径），完成后站内通知统计。
+
+    `start_date`/`end_date` 非空 ⇒ 走自定义日期范围（`dateSelectType="custom"`）；
+    空 ⇒ 默认 `recent_90`（近 90 日）。
+    """
+    from datetime import datetime as _dt
+
+    if payload.category not in NOTE_CATEGORIES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "NOTE_CATEGORY_UNSUPPORTED",
+                "message": f"不支持的笔记分类：{payload.category}",
+                "supported": list(NOTE_CATEGORIES),
+            },
+        )
+    get_owned_active_account(db, current_user, payload.account_id, platform="xhs")
+
+    start_date = (payload.start_date or "").strip()
+    end_date = (payload.end_date or "").strip()
+    # 日期范围 ≤ 90 天（2026-10-06 用户口径「同步最长 90 天内的数据」）。
+    if start_date and end_date:
+        try:
+            s = _dt.strptime(start_date, "%Y-%m-%d")
+            e = _dt.strptime(end_date, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="日期格式应为 YYYY-MM-DD",
+            )
+        if s > e:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="开始日期不能晚于截止日期")
+        if (e - s).days > 90:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "NOTE_DATA_DATE_RANGE_TOO_LONG",
+                    "message": "同步日期范围最长 90 天",
+                },
+            )
+
+    # 走任务日志（与「导入」同一条口径：`system.note_data_sync` 归属，不新增任务条目）。
+    from backend.app.services import scheduler_service
+
+    db_log = SessionLocal()
+    try:
+        scheduler_service.seed_builtin_jobs_for_user(db_log, current_user.id)
+        job = db_log.scalars(
+            select(ScheduledJob).where(
+                ScheduledJob.user_id == current_user.id,
+                ScheduledJob.job_key == "system.note_data_sync",
+            )
+        ).first()
+        log = ScheduledJobLog(
+            job_id=job.id if job is not None else None,
+            user_id=current_user.id,
+            platform_account_id=payload.account_id,
+            job_name="离线笔记数据同步",
+            job_key="system.note_data_sync",
+            job_trigger_type=job.trigger_type if job is not None else "manual",
+            trigger_type="manual",
+            status=LOG_RUNNING,
+            progress=0,
+            message=f"正在同步{'商业' if payload.category == 'goods' else '普通'}笔记数据…",
+            config_snapshot={
+                "category": payload.category,
+                "account_id": payload.account_id,
+                "start_date": start_date or None,
+                "end_date": end_date or None,
+            },
+        )
+        db_log.add(log)
+        db_log.commit()
+        db_log.refresh(log)
+        log_id = log.id
+    except Exception:  # noqa: BLE001 - 建日志失败不阻断同步
+        log_id = None
+    finally:
+        db_log.close()
+
+    import threading
+
+    from backend.app.services.note_data_service import sync_account_note_data
+
+    def _run() -> None:
+        result = sync_account_note_data(
+            account_id=payload.account_id,
+            category=payload.category,
+            user_id=current_user.id,
+            start_date=start_date,
+            end_date=end_date,
+            date_select_type="recent_90" if not start_date else "custom",
+        )
+        if result.get("error"):
+            title = f"笔记数据同步失败（{payload.category}）"
+            body = result["error"]
+            level = "error"
+            log_status = LOG_FAILED
+            log_message = f"同步失败：{result['error']}"
+            log_progress = None
+        else:
+            title = "笔记数据同步完成"
+            body = (
+                f"{'商业笔记' if payload.category == 'goods' else '普通笔记'}："
+                f"拉取 {result.get('fetched', 0)} 条，新增 {result.get('created', 0)} 条，"
+                f"更新 {result.get('updated', 0)} 条"
+            )
+            level = "info"
+            log_status = LOG_SUCCESS
+            log_message = body
+            log_progress = 100
+        db_notify = SessionLocal()
+        try:
+            db_notify.add(
+                Notification(
+                    user_id=current_user.id,
+                    title=title,
+                    body=body,
+                    level=level,
+                    source_type="note_data_sync",
+                )
+            )
+            db_notify.commit()
+        finally:
+            db_notify.close()
+        if log_id is not None:
+            db_log2 = SessionLocal()
+            try:
+                log_row = db_log2.get(ScheduledJobLog, log_id)
+                if log_row is not None:
+                    log_row.status = log_status
+                    log_row.finished_at = shanghai_now()
+                    log_row.duration_ms = max(
+                        0, int((log_row.finished_at - log_row.started_at).total_seconds() * 1000)
+                    )
+                    if log_progress is not None:
+                        log_row.progress = log_progress
+                    log_row.message = log_message[:1000]
+                    db_log2.commit()
+            finally:
+                db_log2.close()
+
+    threading.Thread(target=_run, name=f"note-data-sync-{current_user.id}", daemon=True).start()
+    return {"ok": True, "status": "syncing", "category": payload.category, "log_id": log_id}
+
+
 def batch_create_drafts(
     payload: BatchCreateDraftsRequest,
     current_user: User = Depends(get_current_user),
@@ -821,47 +1449,6 @@ def get_note(
     """
     note = _get_owned_note(db, current_user, note_id)
     return _serialize_note_with_topics(db, note)
-
-
-def purge_note(db: Session, note: Note) -> None:
-    """删一条笔记**及其全部从属行**（标签 / 资产 / 评论 / 商品关联 / 草稿引用）。
-
-    ⚠️ **唯一的删除链实现**（§24 起对账也要删行）：手工删除与对账删除必须是
-    同一份代码，否则某一边漏清关联行就会留下孤儿数据。调用方负责 commit。
-
-    ⚠️ 2026-09-23 用户口径「删除笔记时需要删除笔记与商品的关联关系」⇒ 补上
-    **`note_goods` 关系行**（§26：`note_goods` 是笔记↔商品的多对多关系表）。
-    漏清它的实际后果（真实库已复现）：删掉 4 条本地生成笔记后留下 4 条孤儿关系行
-    （note_id 1963/1964/1965/1967 → product_id 1）。它们**不参与任何列表口径**，
-    于是「挂链笔记数」之类的关系表计数**不会**被它们污染 —— 但每次 join 都要多扫
-    几行、且数据本身自相矛盾（关系指向一条不存在的笔记）。
-    ⚠️ 与**商品台账删除**的口径刻意不同（§33.10）：删商品时关系行**不级联删**
-    （商品被同步写回时关系要原样接上）；删笔记时关系行**必须删**（笔记是真删，
-    没有「写回时接上」这回事）。同一个关系表、两个方向、两种正确处理。
-    ⚠️ 2026-09-25（§34.7）：`note_tags` ⇒ **`note_topics`**（标签表已并入话题表）——
-    同一条删除链规则：本地实体真删 ⇒ 关系行跟着走，两个方向（删笔记 / 删话题
-    词典项）同一把尺子。
-
-    ⚠️ **2026-09-27（§26.7）两处口径确认**（用户当轮两条要求）：
-
-    * 「**删除笔记时需删除笔记与商品之间的关系**」⇒ 下面 `note_goods` 那一句保留，
-      但**判据改成平台 ID + 归属**（`(user_id, note.note_id)`）—— 关系表已不存本地主键；
-    * 「**内容库页点击删除笔记时，话题只删关系表**」⇒ `note_topics` 只删**关系行**，
-      `topics` **字典行不动**（话题 / 标签是用户资产，删一篇笔记不该让别处的话题消失）。
-      这与「删话题词典项」方向不同（那边删典 ⇒ 关系行一并删，见 `api/topics.py`）。
-    """
-    db.execute(delete(NoteTopic).where(NoteTopic.note_id == note.id))
-    db.execute(delete(NoteAsset).where(NoteAsset.note_id == note.id))
-    db.execute(delete(NoteComment).where(NoteComment.note_id == note.id))
-    # 商品关联关系（§26.7）：笔记没了，指向它的关系行一并删（按平台笔记 ID + 归属）。
-    db.execute(
-        delete(NoteGoods).where(
-            NoteGoods.user_id == note.user_id, NoteGoods.note_id == note.note_id
-        )
-    )
-    # 草稿只解除引用、不连坐：AI 草稿是用户资产，笔记没了它还在（§12）。
-    db.query(AiDraft).filter(AiDraft.source_note_id == note.id).update({"source_note_id": None})
-    db.delete(note)
 
 
 @router.delete("/{note_id}")

@@ -725,6 +725,8 @@ def _builtin_seed_defaults() -> dict[str, dict[str, Any]]:
         # ⚠️ 分钟错开（5 / 35）见 `job_registry` 的同一注释（减少写锁竞争，DEF-085）。
         "system.note_metrics_collect": {"cron": "0 5 * * * *", "status": "active"},
         "system.shop_metrics_collect": {"cron": "0 35 * * * *", "status": "active"},
+        # 2026-10-06 需求：离线笔记数据同步（商业+普通，默认每 6 小时一次，恒 active）。
+        "system.note_data_sync": {"cron": "0 0 */6 * * *", "status": "active"},
     }
 
 
@@ -1743,3 +1745,86 @@ def run_scheduled_cleanups(user_id: int, account_ids: Optional[Sequence[int]] = 
         logger.error(f"run_scheduled_cleanups failed: {exc}")
     finally:
         db.close()
+
+
+def run_scheduled_note_data_syncs(
+    user_id: int,
+    account_ids: Optional[Sequence[int]] = None,
+    days: int = 90,
+) -> Optional[dict[str, Any]]:
+    """调度器入口：给账号跑一次**离线笔记数据同步**（商业 + 普通两类，限行主本人，DEF-066）。
+
+    「我的笔记」离线落库（2026-10-06 需求）：千帆数据中心 `note-data/goods`（商业）
+    与 `note-data/normal`（普通）两类，各自走 `butterfly/data` 列表接口（无签名直连），
+    分页拉全量落 `notes`（`note_category` 区分）+ `note_goods` 关系。
+
+    `days`（2026-10-06 用户口径「同步最长 90 天内数据」）：同步的时间窗口天数，
+    映射到平台预设 `date_select_type`（`1→recent_1 / 7→recent_7 / 30→recent_30 /
+    90→recent_90 / 180→recent_180`），**上限 90**（超出夹回 90）。定时任务默认 90 天。
+
+    预筛判据与 `_schedulable_goods_note_accounts` 同一把尺子：**有 ark 通道**的账号
+    （千帆数据中心要 ark 登录态）。定向模式（`account_ids` 非空）不预筛，交给
+    `sync_account_note_data` 给结构化 `error`（缺 ark 令牌 ⇒ `ARK_SESSION_REQUIRED`）。
+
+    每个账号跑两类（goods + normal），结果合并进 `results`。
+    """
+    from backend.app.models.platform_account import PlatformAccount
+    from backend.app.services.note_data_service import CATEGORIES, sync_account_note_data
+
+    targeted = bool(account_ids)
+    gap = _sync_account_gap_seconds()
+    results: list[dict[str, Any]] = []
+    # 天数 → 平台预设 date_select_type（上限 90，2026-10-06 用户口径「最长 90 天」）。
+    _days = max(1, min(int(days), 90))
+    if _days <= 1:
+        date_select_type = "recent_1"
+    elif _days <= 7:
+        date_select_type = "recent_7"
+    elif _days <= 30:
+        date_select_type = "recent_30"
+    else:
+        date_select_type = "recent_90"
+    db = SessionLocal()
+    try:
+        statement = select(PlatformAccount).where(
+            PlatformAccount.user_id == user_id,
+            PlatformAccount.platform == "xhs",
+            PlatformAccount.deleted_at.is_(None),
+        )
+        if account_ids:
+            statement = statement.where(PlatformAccount.id.in_(list(account_ids)))
+        accounts = db.scalars(statement).all()
+        if targeted:
+            candidates = list(accounts)
+        else:
+            candidates = _schedulable_goods_note_accounts(db, list(accounts))
+        for account in candidates:
+            for category in CATEGORIES:
+                try:
+                    out = sync_account_note_data(
+                        account_id=account.id,
+                        category=category,
+                        user_id=account.user_id,
+                        date_select_type=date_select_type,
+                    )
+                    if targeted or out.get("error"):
+                        results.append({"account_id": account.id, **out})
+                except Exception as exc:  # noqa: BLE001 - 单个账号失败不拖垮整轮
+                    logger.warning(
+                        "scheduled note-data sync account %s category %s failed: %s",
+                        account.id, category, exc,
+                    )
+                    if targeted:
+                        results.append(
+                            {"account_id": account.id, "category": category, "error": str(exc)}
+                        )
+            if gap:
+                time.sleep(gap)
+    except Exception as exc:  # noqa: BLE001 - 调度器调用，必须吞异常
+        logger.error(f"run_scheduled_note_data_syncs failed: {exc}")
+    finally:
+        db.close()
+
+    if not targeted:
+        return None
+    return _targeted_outcome(results, what="离线笔记数据同步")
