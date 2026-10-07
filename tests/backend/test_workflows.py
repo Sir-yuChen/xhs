@@ -38,6 +38,7 @@ from backend.app.models.workflow import (
     WorkflowScheduledPublish,
 )
 from backend.app.services import workflow_engine
+from backend.app.services.job_registry import WORKFLOW_JOB_KEY_PREFIX, get_job_spec
 from backend.app.services.workflow_engine import NodeContext, WorkflowError, resolve_params
 from backend.app.services.workflow_nodes import REGISTRY, validate_workflow
 from backend.app.services.workflow_service import _job_key, run_workflow_job, start_run
@@ -193,6 +194,35 @@ def test_tc_wf_001b_manual_workflow_registers_no_job(db_session: Session):
         select(ScheduledJob).where(ScheduledJob.job_key == _job_key(wf.id))
     ).one_or_none()
     assert job is None
+
+
+# ---------------------------------------------------------------------------
+# DEF-095 前缀 job_key 必须能解析出 JobSpec（2026-10-07 真机实测）
+# ---------------------------------------------------------------------------
+
+
+def test_prefix_job_key_resolves_to_spec():
+    """`workflow.<id>` 必须查得到 JobSpec —— 否则调度器**永不装配**这个工作流。
+
+    2026-10-07 真机实测：注册表里只有前缀 ``"workflow."`` 这一条声明，而
+    `_register_job_in_scheduler` 拿的是**带后缀**的真实 job_key（``workflow.1``）⇒
+    `get_job_spec` 抛 `KeyError` ⇒ 走「unknown job_key」分支直接 `return False`：
+    行有、日志有、界面写着「已注册」，但 APScheduler store 里 `next_run_time` **恒 NULL**，
+    到点不跑、手动触发也进不了执行体（实测点「执行一次」后日志永久挂在 running）。
+    """
+    spec = get_job_spec("workflow.1")
+    assert spec.func is run_workflow_job
+    assert spec.user_scoped is True
+    assert spec.params_required == ("workflow_id",)
+    # 前缀常量本身就是键，两者必须指同一份声明（不能各写一处）。
+    assert get_job_spec(WORKFLOW_JOB_KEY_PREFIX) is spec
+
+
+def test_unknown_job_key_still_raises():
+    """兜底不能把「前缀兜底」写成「什么都放行」——未知键仍必须 KeyError。"""
+    for bad in ("nope.x", "workflowx.1", "system.not_a_job", ""):
+        with pytest.raises(KeyError):
+            get_job_spec(bad)
 
 
 # ---------------------------------------------------------------------------

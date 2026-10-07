@@ -323,11 +323,23 @@ def job_registry() -> dict[str, JobSpec]:
 
 
 def get_job_spec(key: str) -> JobSpec:
-    """按键取声明；未知键抛 `KeyError`（API 层映射 400 `JOB_KEY_UNSUPPORTED`）。"""
+    """按键取声明；未知键抛 `KeyError`（API 层映射 400 `JOB_KEY_UNSUPPORTED`）。
+
+    ⚠️ **前缀键要能解析出带后缀的真实 job_key**（2026-10-07 实测修 DEF-098）：
+    工作流行的 `job_key` 形如 ``workflow.<workflow_id>``，注册表里只有前缀
+    ``"workflow."`` 这一条声明 —— 直接精确匹配会让 ``get_job_spec("workflow.1")``
+    抛 `KeyError`，于是 `_register_job_in_scheduler` 走「unknown job_key」分支**永不装配**
+    （`next_run_time` 恒 NULL、到点不跑、手动触发也进不了执行体），而界面/DB/它自己的
+    文档全都写着「已注册」。凡是**按前缀成族**的 job_key，一律在前缀上兜一层。
+    """
     registry = _build_registry()
-    if key not in registry:
-        raise KeyError(key)
-    return registry[key]
+    spec = registry.get(key)
+    if spec is not None:
+        return spec
+    # 前缀族（当前只有 workflow.*）：按最长前缀命中，避免逐字符拼 key。
+    if key.startswith(WORKFLOW_JOB_KEY_PREFIX):
+        return registry[WORKFLOW_JOB_KEY_PREFIX]
+    raise KeyError(key)
 
 
 def validate_params(spec: JobSpec, params: dict[str, Any] | None) -> None:
