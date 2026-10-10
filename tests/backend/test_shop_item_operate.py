@@ -214,6 +214,9 @@ def env(api_client, db_factory, monkeypatch) -> Env:
     monkeypatch.setattr(operate, "_api_factory", lambda cookies: FakeOperateApi(cookies))
     monkeypatch.setattr(operate.threading, "Thread", _NoRunThread)
     monkeypatch.setattr(sgs, "get_qianfan_api_adapter_factory", lambda: FakeSearchApi)
+    #: 2026-10-11：`items/sync` 改入队后会调 `ensure_goods_sync_worker` 起真实线程；
+    #: 测试只验证「入队成功」，不关心 worker 是否真跑 ⇒ 打桩为 no-op。
+    monkeypatch.setattr(sgs, "ensure_goods_sync_worker", lambda: None)
 
     response = api_client.post(
         "/api/auth/register", json={"username": "owner", "password": "secret123"}
@@ -962,9 +965,12 @@ def test_sync_endpoint_rejects_empty_and_oversize(env, api_client):
 
 
 def test_sync_endpoint_returns_readable_result(env, api_client, monkeypatch):
-    """端点回执：`{synced, not_found, scanned, matched, note}` 五键齐全。"""
+    """端点回执（2026-10-11 改入队）：`{enqueued, already, batch_no, note}` 键齐全。
+
+    ⚠️ 用户口径「新增一个同步商品信息队列」：`items/sync` 由同步阻塞改为**入队**，
+    worker 异步执行（`sync_specified_items` 的逐条同步逻辑不变，只是被 worker 认领后调）。
+    """
     headers, account_id, user_id, SessionLocal = env
-    FakeSearchApi.pages = [([_item("ITEM-A")], 1, False)]
     monkeypatch.setattr(sgs, "get_qianfan_api_adapter_factory", lambda: FakeSearchApi)
     response = api_client.post(
         "/api/xhs/qianfan/items/sync",
@@ -973,8 +979,8 @@ def test_sync_endpoint_returns_readable_result(env, api_client, monkeypatch):
     )
     assert response.status_code == 200, response.text
     body = response.json()
-    assert set(body) >= {"synced", "not_found", "scanned", "matched", "note"}
-    assert body["synced"] == 1
+    assert set(body) >= {"enqueued", "already", "batch_no", "note"}
+    assert body["enqueued"] == 1
 
 
 def test_front_back_max_items_are_the_same_value():

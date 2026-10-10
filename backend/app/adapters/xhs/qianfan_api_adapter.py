@@ -142,6 +142,109 @@ class XhsQianfanApiAdapter:
         with direct_xhs_request_env():
             return self._api().upload_file(**kwargs)
 
+    # ------------------------------------------------------------------ #
+    # 商品新增（存草稿箱）—— 设计 23，2026-10-07 真机打通。
+    #
+    # ⚠️ **本条链路只到草稿箱**：没有 `publish` / `submit` 任何一格。
+    # 平台侧「提交商品上架」走另外两个端点（`publish_async` +
+    # `publish_async_operate`），**本适配器不暴露它们** —— 红线落在契约层。
+    # ------------------------------------------------------------------ #
+
+    def publish_render(self, params: dict) -> tuple[bool, str, Any]:
+        """商品表单结构 / 草稿回读（需签名；三种用法见 SDK docstring）。"""
+        with direct_xhs_request_env():
+            return self._api().publish_render(params)
+
+    def create_product_draft(self, draft: dict) -> tuple[bool, str, Any]:
+        """**把商品存进草稿箱**（需签名；body 形状 `{"draft": "<json 字符串>"}`）。
+
+        ⚠️ 与「发布 / 上架」**不是同一个动作**：本方法只存档，商品不会出现在
+        商品列表里（真机：草稿只在「商品管理 → 草稿箱」可见）。
+        """
+        with direct_xhs_request_env():
+            return self._api().create_product_draft(draft)
+
+    def save_product_draft(self, draft: dict) -> tuple[bool, str, Any]:
+        """**保存商品草稿**（2026-10-11 真机新接口 `save_product_drafts`，
+        body `{"draft": <完整 itemData 对象>}`，结构与发布体一致）。
+
+        ⚠️ 取代旧的 `create_product_draft`（5 键精简体，收不下视频/货号/英文名）。
+        """
+        with direct_xhs_request_env():
+            return self._api().save_product_draft(draft)
+
+    def query_product_draft_list(self, **kwargs: Any) -> tuple[bool, str, Any]:
+        """草稿箱列表（**无需签名**，与只读接口同档）。"""
+        with direct_xhs_request_env():
+            return self._api().query_product_draft_list(**kwargs)
+
+    def search_category(self, keyword: str) -> tuple[bool, str, Any]:
+        """按关键词搜类目（无需签名；只取 `isLeaf=true` 的用）。"""
+        with direct_xhs_request_env():
+            return self._api().search_category(keyword)
+
+    def recommend_item_title(self, main_images: "list[dict]") -> tuple[bool, str, Any]:
+        """按主图推荐商品标题（只读语义的 action；平台要求签名）。
+
+        ⚠️ 入参必须是**上传后的图片对象**（含签名 `link`）——真机抓包确认
+        平台是把图喂给模型的；只传文件名会生成与图无关的标题。
+        """
+        with direct_xhs_request_env():
+            return self._api().recommend_item_title(main_images)
+
+    def recommend_category(
+        self, name: str, image_url: str = "", uploader_info_model: "dict | None" = None
+    ) -> tuple[bool, str, Any]:
+        """按标题+主图推荐类目（只读语义的 action；平台要求签名）。"""
+        with direct_xhs_request_env():
+            return self._api().recommend_category(
+                name, image_url=image_url, uploader_info_model=uploader_info_model
+            )
+
+    def predict_product_property(
+        self, category_id: str, name: str = "", *, image_urls: "list[dict] | None" = None
+    ):
+        """属性预测（只读）。⚠️ 必须带主图（`imageUrls`），否则平台恒回空数组。"""
+        return self._api().predict_product_property(category_id, name, image_urls=image_urls)
+
+    def get_support_after_sale(self, category_id: str) -> tuple[bool, str, Any]:
+        """售后服务规则（只读）—— `mustSupport` 决定「七天无理由」是否可编辑。"""
+        with direct_xhs_request_env():
+            return self._api().get_support_after_sale(category_id)
+
+    def get_seller_carriage_template(self):
+        """物流模板候选（只读）。"""
+        return self._api().get_seller_carriage_template()
+
+    def get_logistics_templates(self):
+        """物流计划（发货仓）候选（只读）—— 千帆 `publish_render` 空白表单下发。
+
+        真机 2026-10-09 实测：`publish_render({"publishType":1,"sourceType":1})`
+        返回 `data.fulfillmentInfo.logisticsPlanList`（物流计划/发货仓列表），
+        每项 `{planId, name, logisticsMode, logisticsName, ...}`。
+        与 `get_seller_carriage_template`（运费模板 `shippingTemplateList`）是**两个不同数据源**。
+        """
+        return self._api().publish_render({"publishType": 1, "sourceType": 1})
+
+    def generate_item_short_title(
+        self, name: str, *, category_id: str = ""
+    ) -> tuple[bool, str, Any]:
+        """生成导购短标题（只读语义的 action；平台要求签名）。
+
+        ⚠️ 入参是 `{title, categoryId}`（真机抓包）—— 传 `mainImages` 平台不认。
+        """
+        with direct_xhs_request_env():
+            return self._api().generate_item_short_title(name, category_id=category_id)
+
+    def is_draft_rate_limited(self, message: Any) -> bool:
+        """平台是否答「草稿限流」—— 委托 SDK 的**唯一实现**（不重写判据）。"""
+        return type(self._api()).is_draft_rate_limited(message)
+
+    def batch_delete_draft(self, draft_ids: Any) -> tuple[bool, str, Any]:
+        """**批量删除草稿**（`batch_delete_draft`，需签名；**不可恢复**）。"""
+        with direct_xhs_request_env():
+            return self._api().batch_delete_draft(list(draft_ids))
+
     def batch_delete_notes(self, note_ids: Any) -> tuple[bool, str, Any]:
         """**批量删除笔记**（千帆 `note/batch_delete_note`，无签名，真实写、不可撤回）。
 
@@ -283,6 +386,46 @@ class XhsQianfanApiAdapter:
         """**售后审核**（同意 / 拒绝；真实写、不可撤回）。"""
         with direct_xhs_request_env():
             return self._api().after_sale_audit(body)
+
+    # ------------------------------------------------------------------ #
+    # 商品发布到线上（设计 24）—— **真实上架写操作、不可撤回**
+    #
+    # ⚠️ 与设计 23 的「存草稿」完全不同：`batch_create_item` 成功 = 产生一个
+    # **在售商品**。调用方必须（设计 24 §5）：用户显式触发 + 成功第一时间下架。
+    # ------------------------------------------------------------------ #
+
+    def submit_item(self, payload: dict) -> tuple[bool, str, Any]:
+        """**提交商品发布**（`POST /api/edith/product/batch_create_item`，需签名）。
+
+        `payload` 由 `shop_item_publish.build_publish_payload` 组装
+        （`{"itemData": [...], "options": {...}, "publishMode": 1}`）。
+        """
+        items = payload.get("itemData") or []
+        mode = int(payload.get("publishMode") or 1)
+        with direct_xhs_request_env():
+            return self._api().batch_create_item(items, publish_mode=mode)
+
+    def query_publish_task(self, task_id: str) -> tuple[bool, str, Any]:
+        """轮询发布任务终态（`query_task_status`，带签名的 GET）。"""
+        with direct_xhs_request_env():
+            return self._api().query_task_status(
+                task_id, referer="/app-item/single-good/create"
+            )
+
+    def list_recent_items(self, **kwargs: Any) -> tuple[bool, str, Any]:
+        """按创建时间倒序列商品（发布后回查真实 item_id 用）。"""
+        with direct_xhs_request_env():
+            return self._api().search_items(**kwargs)
+
+    def set_items_availability(self, item_ids: Any, *, available: bool) -> tuple[bool, str, Any]:
+        """**批量上架 / 下架**（发布后红线：成功第一时间下架）。"""
+        with direct_xhs_request_env():
+            return self._api().batch_update_availability(list(item_ids), available=available)
+
+    def remove_items(self, item_ids: Any) -> tuple[bool, str, Any]:
+        """**批量删除商品**（测试商品用完删除）。"""
+        with direct_xhs_request_env():
+            return self._api().batch_delete_items(list(item_ids))
 
 
 def get_qianfan_api_adapter_factory():

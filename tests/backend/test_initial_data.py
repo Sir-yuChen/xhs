@@ -68,11 +68,21 @@ def _logging_stays_usable():
     症状极像「断言写错了」：**单独跑本文件 14 passed，全量跑连红 3 条**。
 
     这里只做一件事 —— 让 logging 回到可用（**不是**放宽断言：warning 仍必须真打）。
+
+    ⚠️ 2026-10-07 补 `backend.app.services.settings_service`：它的种子回落 warning 是
+    `test_settings_seed_falls_back_to_builtin_when_file_value_is_illegal` 的判据，而
+    在**同进程**里跑过 `command.upgrade()` 的用例（`test_api.py::test_database_*`）
+    会经 `alembic/env.py::fileConfig(disable_existing_loggers=True)` 关掉它 ——
+    名单漏一个 logger，就是一条「单跑绿、全量红」的顺序依赖。
     """
     import logging
 
     logging.disable(logging.NOTSET)
-    for name in ("backend.app.core.initial_data", "backend.app.services.scheduler_service"):
+    for name in (
+        "backend.app.core.initial_data",
+        "backend.app.services.scheduler_service",
+        "backend.app.services.settings_service",
+    ):
         logger = logging.getLogger(name)
         logger.disabled = False
         logger.propagate = True
@@ -407,11 +417,10 @@ def test_existing_rows_are_never_overwritten(tmp_path, monkeypatch):
         db.commit()
 
         created = ensure_builtin_jobs(db)
-        # ⚠️ 13 = 种子的 14 个内置行 − 已存在的那 1 行（`system.note_sync`）。
-        # 2026-10-04 收口：M5/M6 新增 `workflow.` / `system.order_sync` 后
-        # 种子由 11 增至 13；2026-10-06 新增 `system.note_data_sync` ⇒ 14。
-        # 2026-10-07：`workflow.` 退场（工作流特性整条移除），但它是 `builtin=False`
-        #   ⇒ **本就不在种子行里**，故种子数 14 不变（这一步只影响注册表白名单）。
+        # ⚠️ 12 = 种子的 13 个内置行 − 已存在的那 1 行（`system.note_sync`）。
+        # 演变：11 →（2026-10-04 M5/M6）13 →（10-06 `note_data_sync`）14
+        # →（10-07 ① `workflow.` 退场**不影响种子**，它 `builtin=False`）
+        # →（10-07 ② `system.no_traffic_cleanup` 从注册表与种子移除）**13**。
         assert len(created) == 13, "已存在的那一行不该再插"
 
         row = db.scalar(select(ScheduledJob).where(ScheduledJob.job_key == "system.note_sync"))

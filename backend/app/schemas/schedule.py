@@ -74,7 +74,7 @@ def validate_schedule(payload: ScheduleIn, *, registry_allows_concurrent: bool =
         raise ScheduleValidationError("CONCURRENT_UNSUPPORTED", payload.concurrent)
     if payload.concurrent != CONCURRENT_FORBID and not registry_allows_concurrent:
         raise ScheduleValidationError(
-            "JOB_CONCURRENT_NOT_ALLOWED", "该任务类型由注册表禁止并发（平台写操作风控）"
+            "JOB_CONCURRENT_NOT_ALLOWED", "该任务类型由注册表禁止并发"
         )
 
 

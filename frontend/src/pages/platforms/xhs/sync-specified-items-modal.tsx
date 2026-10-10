@@ -33,6 +33,7 @@ import {
   Modal,
   Radio,
   Space,
+  Spin,
   Table,
   Tabs,
   Tag,
@@ -43,7 +44,12 @@ import { SyncOutlined } from "@ant-design/icons";
 import dayjs, { type Dayjs } from "dayjs";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { fetchXhsShopItems, readErrorDetail, syncSpecifiedShopItems } from "../../../lib/api";
+import {
+  fetchQueueRecords,
+  fetchXhsShopItems,
+  readErrorDetail,
+  syncSpecifiedShopItems,
+} from "../../../lib/api";
 import type { SyncOptions } from "../../../components/platforms/sync-options-modal";
 import { MAX_OPERATE_ITEMS } from "../../../lib/shop-items-view";
 import type { XhsShopItem } from "../../../types";
@@ -52,6 +58,48 @@ const { Text } = Typography;
 
 /** 无限列表每页条数（与台账列表同一档，滚动一屏大约触发两次取数）。 */
 const PAGE_SIZE = 50;
+
+/** 轮询批次终态的间隔与上限（同步单件通常 1~2 秒；上限 2 分钟兜底）。 */
+const POLL_INTERVAL_MS = 1500;
+const POLL_MAX_ATTEMPTS = 80;
+
+type GoodsSyncOutcome = { item_id: string; status: "done" | "failed"; reason: string };
+
+/**
+ * 按批次号轮询「同步商品信息」批次树，等全部子行终态后返回逐件结果。
+ * 超时返回已知的部分结果（未终态的件不出现 ⇒ 调用方标 missing，不硬凑成功）。
+ */
+async function pollGoodsSyncBatch(batchNo: string): Promise<GoodsSyncOutcome[]> {
+  for (let attempt = 0; attempt < POLL_MAX_ATTEMPTS; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+    try {
+      const page = await fetchQueueRecords(undefined, batchNo);
+      const batch = (page.items ?? [])[0];
+      const children = (batch?.children ?? []) as Array<{
+        task_type: string;
+        payload?: Record<string, unknown> | null;
+      }>;
+      const items = children.filter((c) => c.task_type === "xhs_goods_sync_item");
+      if (!batch || items.length === 0) continue;
+      const allDone = items.every((c) => {
+        const p = (c.payload ?? {}) as { ok?: boolean };
+        return p.ok === true || p.ok === false;
+      });
+      if (!allDone) continue;
+      return items.map((c) => {
+        const p = (c.payload ?? {}) as { item_id?: string; ok?: boolean; reason?: string };
+        return {
+          item_id: String(p.item_id ?? ""),
+          status: p.ok ? ("done" as const) : ("failed" as const),
+          reason: String(p.reason ?? ""),
+        };
+      });
+    } catch {
+      //: 单次轮询失败不打断（网络抖动）；重试到上限为止。
+    }
+  }
+  return [];
+}
 
 /** 一行「要同步的商品 + 它的同步状态」。`todo` = 还没提交过（打开时铺的清单）。 */
 type SyncRow = {
@@ -122,6 +170,10 @@ export function SyncSpecifiedItemsModal({
   const [running, setRunning] = useState(false);
   const [rows, setRows] = useState<SyncRow[]>([]);
   const [summary, setSummary] = useState("");
+  /** 等待蒙版「已耗时（秒）」（2026-10-11 用户口径「等待期间加蒙版统计耗时」）。 */
+  const [waitElapsedSec, setWaitElapsedSec] = useState(0);
+  const waitStartedAtRef = useRef<number | null>(null);
+  const waitTickRef = useRef<number | null>(null);
   /** 待同步列表里勾选的行（批量移除用）。 */
   const [checkedRows, setCheckedRows] = useState<string[]>([]);
   /** 是否展开「从台账选择补充」（次级入口：台账里还没有的商品只能手输 ID）。 */
@@ -167,7 +219,29 @@ export function SyncSpecifiedItemsModal({
     }
   }, [keyword]);
 
-  /** 真正发请求：把一份 ID 清单交给后端，结果按 `not_found` 落到每一行上。 */
+  /** 进入等待：起表。**幂等**（已在等待时不重起秒表 —— 否则耗时被反复清零）。 */
+  const beginWait = useCallback(() => {
+    if (waitStartedAtRef.current === null) {
+      waitStartedAtRef.current = Date.now();
+      setWaitElapsedSec(0);
+      if (waitTickRef.current !== null) window.clearInterval(waitTickRef.current);
+      waitTickRef.current = window.setInterval(() => {
+        if (waitStartedAtRef.current !== null) {
+          setWaitElapsedSec(Math.floor((Date.now() - waitStartedAtRef.current) / 1000));
+        }
+      }, 1000);
+    }
+  }, []);
+  /** 结束等待：**停表**。 */
+  const endWait = useCallback(() => {
+    waitStartedAtRef.current = null;
+    if (waitTickRef.current !== null) {
+      window.clearInterval(waitTickRef.current);
+      waitTickRef.current = null;
+    }
+  }, []);
+
+  /** 真正发请求：把一份 ID 清单交给后端，入队后凭批次号轮询等终态。 */
   const runSync = useCallback(
     async (ids: string[]) => {
       if (!platformAccountId) return;
@@ -187,28 +261,46 @@ export function SyncSpecifiedItemsModal({
       });
       setSummary("");
       setRunning(true);
+      beginWait();
       try {
+        //: 2026-10-11 改**走同步商品信息队列**：`items/sync` 只入队（返回
+        //: `{enqueued, already, batch_no, note}`），真实同步由 worker 异步执行。
+        //: 前端凭 `batch_no` 轮询批次树，等全部子行终态后按子行 payload 回填结果。
         const result = await syncSpecifiedShopItems(platformAccountId, ids);
-        const notFound = new Set(result.not_found || []);
+        const batchNo = String(result.batch_no || "");
+        if (!batchNo) {
+          //: 没批次号 = 一次都没入队成功（全是非法 ID / 已在队列）—— 如实报。
+          setSummary(result.note || "没有可执行的商品同步项");
+          message.warning(result.note || "没有可执行的商品同步项");
+          onSynced();
+          return;
+        }
+        setSummary(`已加入同步商品信息队列（批次 ${batchNo}），执行中…`);
+        message.info(`已入队 ${result.enqueued} 件商品，执行中…`);
+        const outcome = await pollGoodsSyncBatch(batchNo);
+        const failed = outcome.filter((o) => o.status === "failed");
         setRows((current) => {
-          //: 同上：终态行也要**带着名称与缩略图**（不然结果出来后列表反而变差）。
+          //: 终态行**带着名称与缩略图**（不然结果出来后列表反而变差）。
           const known = new Map(current.map((row) => [row.item_id, row]));
-          return ids.map((id) => ({
-            item_id: id,
-            title: known.get(id)?.title ?? "",
-            image: known.get(id)?.image ?? "",
-            status: notFound.has(id) ? ("missing" as const) : ("ok" as const),
-            note: notFound.has(id)
+          return ids.map((id) => {
+            const hit = outcome.find((o) => o.item_id === id);
+            const status = !hit ? ("missing" as const) : (hit.status === "failed" ? "failed" as const : "ok" as const);
+            const note = !hit
               ? "平台侧没有这件商品（ID 是否正确 / 是否已删除）"
-              : "已更新本地台账",
-          }));
+              : hit.reason || "已更新本地台账";
+            return {
+              item_id: id,
+              title: known.get(id)?.title ?? "",
+              image: known.get(id)?.image ?? "",
+              status,
+              note,
+            };
+          });
         });
-        setSummary(result.note || `扫描 ${result.scanned} 件，命中更新 ${result.synced} 件`);
-        //: 命中不足时**如实报**（不把「3 个里只找到 1 个」说成「同步完成」）。
-        if (notFound.size) {
-          message.warning(`已更新 ${result.synced} 件，${notFound.size} 件在平台侧没有找到`);
+        if (failed.length) {
+          message.warning(`已入队 ${ids.length} 件，${failed.length} 件同步失败（原因见行说明）`);
         } else {
-          message.success(`已更新 ${result.synced} 件商品`);
+          message.success(`已更新 ${ids.length} 件商品`);
         }
         onSynced();
       } catch (error) {
@@ -222,10 +314,11 @@ export function SyncSpecifiedItemsModal({
         setSummary(text);
         message.error(text);
       } finally {
+        endWait();
         setRunning(false);
       }
     },
-    [platformAccountId, message, onSynced],
+    [platformAccountId, message, onSynced, beginWait, endWait],
   );
 
   //: 打开 ⇒ 把勾选集**铺成待同步列表**（用户口径「将勾选的商品使用列表在弹窗中展示」）。
@@ -493,10 +586,16 @@ export function SyncSpecifiedItemsModal({
         )
       }
     >
-      <Tabs
-        activeKey={tab}
-        onChange={setTab}
-        items={[
+      {/* 2026-10-11 用户口径「等待期间加蒙版统计耗时」：按 ID 同步入队后轮询等终态
+          时整块盖住，tip 带已耗时，等结果返回再撤蒙版（关不掉 = 结果不丢）。 */}
+      <Spin
+        spinning={idRunning}
+        tip={idRunning ? `同步中… 已耗时 ${waitElapsedSec}s` : ""}
+      >
+        <Tabs
+          activeKey={tab}
+          onChange={setTab}
+          items={[
           {
             key: "condition",
             label: "按条件同步",
@@ -723,7 +822,8 @@ export function SyncSpecifiedItemsModal({
             ),
           },
         ]}
-      />
+        />
+      </Spin>
       {/* 滚动条隐藏（2026-10-06 用户口径）：只藏**外观**，滚轮 / 拖拽照常 ——
           给「细滚动条」而不是 `overflow: hidden`（后者会让内容滚不动）。
           ⚠️ 挂在 `.sync-items-modal` 下，只影响本弹窗，不动全局。 */}

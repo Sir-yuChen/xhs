@@ -95,6 +95,10 @@ def _serialize_job(job: ScheduledJob, live_next_run_at: Optional[datetime] = Non
         "concurrent": job.concurrent,
         "params": job.params or {},
         "params_editable": params_editable,
+        # 2026-10-07 用户口径「调用参数不允许随意添加和删除，必须有默认值」：
+        # 前端据 `params_defaults` **预填固定行** —— 存量行（早于某参数上线）缺的键
+        # 也能显示出来，不会「新增了参数但界面上看不见」。
+        "params_defaults": dict(spec.params_defaults),
         "status": job.status,
         "remark": job.remark,
         "is_builtin": bool(job.is_builtin),
@@ -309,8 +313,10 @@ def _apply_custom_params(
     """把用户提交的参数键合并进行内 params（白名单收敛 + 深校验）。
 
     规则（设计 15 §4.1 / §5 / §4.1.1）：
-    - 只有 `spec.params_editable` 里的键可写，其余一律 400
+    - **内置任务**：只有 `spec.params_editable` 里的键可写，其余一律 400
       `JOB_PARAMS_NOT_EDITABLE`（代码拥有的参数不许用户改）；
+    - **非内置任务**（2026-10-07 用户口径「非系统内置任务可删除，可添加调用参数」）：
+      键集合不受白名单限制，用户可自由增删 —— 它自己建的、参数喂给它自己的执行函数；
     - `account_ids` 过归属校验；合并后的整体过 `spec.params_validator` 深校验。
     """
     try:
@@ -321,7 +327,9 @@ def _apply_custom_params(
         ) from None
     editable = set(spec.params_editable)
     disallowed = [key for key in incoming if key not in editable]
-    if disallowed:
+    # ⚠️ 白名单**只对内置任务**生效（2026-10-07 用户口径，详见 `_validate_create_params`
+    # 同一处注释）：非内置任务允许用户自由添加参数键。
+    if spec.builtin and disallowed:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"JOB_PARAMS_NOT_EDITABLE: 参数 {sorted(disallowed)} 由代码拥有，不可修改",
@@ -360,12 +368,22 @@ def _validate_create_params(
     """
     editable = set(spec.params_editable) | set(spec.params_required)
     disallowed = [key for key in params if key not in editable]
-    if disallowed:
+    #: 2026-10-07 用户口径：「**系统内置**任务的调用参数不可删除不可添加；**非系统内置**
+    #: 任务可删除、可添加调用参数」。⇒ 白名单**只对内置任务生效**（内置的参数集合由
+    #: 注册表 `JobSpec` 拥有，用户改不了键名）；非内置任务（用户自建的 `auto_ops` 等）
+    #: 允许自由添加键 —— 它们由用户自己创建、参数只喂给它自己的执行函数，无跨租户面。
+    if spec.builtin and disallowed:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"JOB_PARAMS_NOT_EDITABLE: 参数 {sorted(disallowed)} 由代码拥有，不可写入",
         )
     cleaned = dict(params)
+    # 默认值兜底（2026-10-07 用户口径「调用参数……必须有默认值」）：建行时把**没写的
+    # 键**按注册表默认值补齐 ⇒ 界面「显示什么」与「执行时用什么」从建行那一刻起就一致
+    # （否则用户看到预填的默认值、库里却没有，回读时又得靠前端再预填一次）。
+    for default_key, default_value in spec.params_defaults.items():
+        if cleaned.get(default_key) is None:
+            cleaned[default_key] = default_value
     if "account_ids" in cleaned:
         cleaned["account_ids"] = _validate_account_ids(db, current_user, cleaned["account_ids"])
     if "days" in cleaned:
@@ -437,6 +455,8 @@ def list_targets(
                 "allow_concurrent": bool(spec.allow_concurrent),
                 "params_required": list(spec.params_required),
                 "params_editable": list(spec.params_editable),
+                # 2026-10-07：前端据它预填「新建」弹窗的固定参数行。
+                "params_defaults": dict(spec.params_defaults),
                 "default_trigger_type": spec.default_trigger_type,
                 "default_cron": spec.default_cron,
                 "default_misfire_policy": spec.default_misfire_policy,
@@ -588,10 +608,20 @@ def delete_job(
     db: Session = Depends(get_db),
 ):
     job = _get_visible_job(db, current_user, job_id)
-    # 用户口径（2026-09-24）：「所有任务都是内置的」⇒ 内置不再是一种特权，
-    # 一律可删（原先这里 400 `JOB_BUILTIN_PROTECTED`）。原文保留：
-    #     if job.is_builtin:
-    #         raise HTTPException(400, "JOB_BUILTIN_PROTECTED: 内置任务禁止删除（可暂停）")
+    #: ⚠️ **2026-10-07 用户口径恢复了这条守卫**：「定时任务新增表字段是否为内置任务，
+    #: 列表新增展示，内容任务不允许删除，前后端添加校验逻辑」—— 内置任务
+    #: （`is_builtin=True`）**不可删除**，可暂停 / 可改调度与参数。
+    #:
+    #: 被取代的原句（2026-09-24「所有任务都是内置的 ⇒ 一律可删」）保留在此，不静默删除：
+    #:     用户口径（2026-09-24）：「所有任务都是内置的」⇒ 内置不再是一种特权，一律可删
+    #:     （原先这里 400 `JOB_BUILTIN_PROTECTED`）。
+    #: 为什么现在区分：内置行是**代码拥有的种子**（注册表 `JobSpec`），删掉后重启会按
+    #: 种子重新播种回来 ——「删了又自己回来」比「明确不让删」更难理解。
+    if job.is_builtin:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="JOB_BUILTIN_PROTECTED: 内置任务禁止删除（可暂停或改调度）",
+        )
     # 日志保留（若依同）：只把 job_id 置空，快照字段仍在。
     # ⚠️ SQLite 未开 foreign_keys PRAGMA，FK 的 ON DELETE SET NULL 不会自动触发，
     # 这里显式置空；MySQL 生产环境有 FK 兜底（双保险，不是两份实现）。

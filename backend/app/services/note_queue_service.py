@@ -77,6 +77,9 @@ TASK_TYPE_GEN_ITEM = "xhs_note_gen_item"
 #: `generation_records`）。两条链路产物契约不同（一期落 notes 即可，LLM 链路
 #: 还要落审计 + 媒体溯源），**合并会丢掉其中一边的语义**。
 TASK_TYPE_GEN_LLM_ITEM = "xhs_note_gen_llm_item"
+#: **同步商品信息队列项**（2026-10-11）：一个商品 = 一行，**不绑定笔记**（同步的是
+#: 商品台账，不是笔记）⇒ 业务主键 = `item_id`（与商品生成队列同判据）。
+TASK_TYPE_GOODS_SYNC_ITEM = "xhs_goods_sync_item"
 #: ⚠️ **详情补齐队列项（`xhs_note_hydrate_item`）已删除**（2026-09-27 用户口径：
 #: 「账号信息卡中移除补齐详情逻辑，点击同步笔记时，应获取到当前笔记的所有信息后再落库，
 #: 在一个任务中完成，不需要再点击补齐详情」）。补齐能力并入**同步任务本身**
@@ -88,6 +91,7 @@ QUEUE_ITEM_TASK_TYPES: tuple[str, ...] = (
     TASK_TYPE_PUBLISH_ITEM,
     TASK_TYPE_GEN_ITEM,
     TASK_TYPE_GEN_LLM_ITEM,
+    TASK_TYPE_GOODS_SYNC_ITEM,
 )
 
 #: **批次父行**类型（2026-09-26 用户口径「批次逻辑不再移除，生成唯一批次号」）：
@@ -99,12 +103,15 @@ TASK_TYPE_PUBLISH_BATCH = "xhs_note_publish_batch"
 TASK_TYPE_GEN_BATCH = "xhs_note_gen_batch"
 #: LLM 全自动生成的批次父行（设计 17 §8.1）。
 TASK_TYPE_GEN_LLM_BATCH = "xhs_note_gen_llm_batch"
+#: 同步商品信息批次父行（2026-10-11）。
+TASK_TYPE_GOODS_SYNC_BATCH = "xhs_goods_sync_batch"
 
 QUEUE_BATCH_TASK_TYPES: tuple[str, ...] = (
     TASK_TYPE_SYNC_BATCH,
     TASK_TYPE_PUBLISH_BATCH,
     TASK_TYPE_GEN_BATCH,
     TASK_TYPE_GEN_LLM_BATCH,
+    TASK_TYPE_GOODS_SYNC_BATCH,
 )
 
 # --------------------------------------------------------------------------- #
@@ -161,6 +168,15 @@ QUEUE_REGISTRY: tuple[QueueSpec, ...] = (
         label="LLM 生成笔记队列",
         item_task_type=TASK_TYPE_GEN_LLM_ITEM,
         batch_task_type=TASK_TYPE_GEN_LLM_BATCH,
+        note_bound=False,
+    ),
+    QueueSpec(
+        # 同步商品信息队列（2026-10-11 用户口径「新增一个同步商品信息队列」）：
+        # 一个商品 = 一行，**不绑定笔记**（同步的是商品台账）⇒ `note_bound=False`。
+        key="sync_goods",
+        label="同步商品信息队列",
+        item_task_type=TASK_TYPE_GOODS_SYNC_ITEM,
+        batch_task_type=TASK_TYPE_GOODS_SYNC_BATCH,
         note_bound=False,
     ),
 )
@@ -279,6 +295,14 @@ SOURCE_ACCOUNT_CARD_ORDER_SYNC = "account_card_order_sync"
 """账号卡 · 「同步商品」按钮（`POST /api/xhs/qianfan/sync-shop-goods`，设计 13 §35.17）。"""
 
 SOURCE_ACCOUNT_CARD_GOODS_NOTE_SYNC = "account_card_goods_note_sync"
+
+#: 同步商品信息队列的来源（2026-10-11）：三个入口各传各的按钮级来源。
+SOURCE_GOODS_SYNC_BATCH = "goods_sync_batch"
+"""商品列表 · 「批量同步商品信息」按钮。"""
+SOURCE_GOODS_SYNC_SPECIFIED = "goods_sync_specified"
+"""商品列表 · 「同步指定商品」按钮。"""
+SOURCE_GOODS_SYNC_PUBLISHED = "goods_sync_published"
+"""发布商品成功后的自动同步。"""
 """账号卡 · 「**同步商品笔记**」按钮（`POST /accounts/{id}/goods-notes/sync`，设计 13 §44）。
 
 ⚠️ 与上面的「同步商品」（**店铺商品台账**，SKU / 价格）**不是一回事**：这条是千帆
@@ -305,6 +329,10 @@ SOURCE_PRODUCT_NOTE_GENERATE_LLM_BATCH = "product_note_generate_llm_batch"
 """商品列表 · 「批量 LLM 生成笔记」按钮（`POST /xhs/product-notes/batch-generate-llm`）。"""
 
 SOURCE_LLM_GENERATE_RETRY = "llm_generate_retry"
+
+#: 「每日发布商业笔记」定时任务（设计 15 §19，2026-10-07 用户需求）：生成 / 发布
+#: 都由后台任务发起（**无人在前端点**）⇒ 队列记录页的来源列要能一眼区分它。
+SOURCE_AUTO_BUSINESS_PUBLISH = "auto_business_note_publish"
 """生成记录页点「重试」重新入队的（`POST /xhs/product-notes/generate-llm/{id}/retry`）。
 
 ⚠️ **不复用 `SOURCE_RETRY`**：那个是队列记录页的通用重试（一期），本重试的入口在
@@ -345,6 +373,7 @@ QUEUE_SOURCES: tuple[str, ...] = (
     SOURCE_PRODUCT_NOTE_GENERATE_LLM_SINGLE,
     SOURCE_PRODUCT_NOTE_GENERATE_LLM_BATCH,
     SOURCE_LLM_GENERATE_RETRY,
+    SOURCE_AUTO_BUSINESS_PUBLISH,
     SOURCE_RETRY,
     SOURCE_RECOVERY,
     SOURCE_SCHEDULED,

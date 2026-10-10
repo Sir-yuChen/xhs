@@ -600,14 +600,12 @@ export type ShopItemOperateResult = {
 /** 同步指定商品的结果（`POST /items/sync`）。 */
 export type ShopItemsSyncResult = {
   platform_account_id: number;
-  /** 实际落库更新的商品数。 */
-  synced: number;
-  /** 请求里但平台侧没找到的 item_id（**如实回**，不当作成功）。 */
-  not_found: string[];
-  /** 平台侧本次扫描的总数（说明「为什么要翻整店」）。 */
-  scanned: number;
-  /** 命中数（= `synced` 的另一种说法，供弹窗展示）。 */
-  matched: number;
+  /** 2026-10-11 改走「同步商品信息队列」：本请求实际入队的商品数。 */
+  enqueued: number;
+  /** 已在队列中（幂等命中，未重复入队）的数量。 */
+  already: number;
+  /** 本次动作的批次号（前端凭它轮询批次树拿逐件结果；空 = 没有入队成功的项）。 */
+  batch_no: string;
   note: string;
 };
 
@@ -634,6 +632,175 @@ export type XhsItemPolishResult = {
   selling_point_candidates: string[];
   source_title: string;
   model_name: string;
+};
+
+/**
+ * 商品数据包解析结果（`POST /item-drafts/parse`，**纯本地零平台请求**）。
+ *
+ * ⚠️ `price_yuan` 单位是**元**（与 `/items` 响应的分相反）。
+ */
+export type ItemDraftPackageParseResult = {
+  platform_account_id: number;
+  package_path: string;
+  sku_rows: {
+    name: string;
+    price_yuan: number | null;
+    stock: number | null;
+    image_path: string | null;
+  }[];
+  main_images: string[];
+  detail_images: string[];
+  videos: string[];
+  suggested_title: string;
+  /** 逐条如实（缺列 / 缺图 / 超 5M / 属性图…）—— **必须全渲染**，不折叠。 */
+  warnings: string[];
+  /** 上限随解析结果下发（前端**不抄常量**，见后端同值纪律）。 */
+  limits: { max_images: number; max_skus: number };
+};
+
+/** 叶子类目（`GET /item-drafts/categories` —— 只回 `isLeaf=true`）。 */
+export type ItemDraftCategory = {
+  id: string;
+  name: string;
+  level: number | null;
+  /** 该类目是否强制品牌资质（前端据此提示）。 */
+  need_brand: boolean;
+  /** 完整类目链路（一级 > 二级 > 三级 > 四级）；后端给不出时缺省。 */
+  path?: string[];
+};
+
+/** `POST /item-drafts` 的执行体（**没有任何「发布」字段** —— 红线在契约层）。 */
+export type ItemDraftCreatePayload = {
+  platform_account_id: number;
+  category_id: string;
+  name: string;
+  /** 图片引用：`string` 相对路径 或 已上传对象（2026-10-10）。 */
+  main_images: (string | Record<string, unknown>)[];
+  detail_images: (string | Record<string, unknown>)[];
+  /** 商品视频已上传对象（2026-10-11 补，真机 `itemData[0].videos[]`）。 */
+  videos?: Record<string, unknown>[];
+  /** 货号（真机 `itemData[0].articleNo`，2026-10-11 补）。 */
+  article_no?: string;
+  skus: {
+    name: string;
+    price_yuan: number | null;
+    market_price_yuan?: number | null;
+    stock: number | null;
+    image_path?: string | null;
+    available?: boolean;
+    /** 条形码（真机 `skuData[].barcode`，2026-10-10 对齐）。 */
+    barcode?: string | null;
+    /** 商家编码（真机 `skuData[].erpCode`，⚠️ 字段名是 erpCode 不是 seller_code）。 */
+    erpCode?: string | null;
+    /** 规格图已上传对象（2026-10-10 补）。 */
+    spec_image_material?: Record<string, unknown> | null;
+  }[];
+  /** 预检数据包暂存 token（相对路径按它解析成服务器绝对路径）。 */
+  precheck_token?: string;
+  /** 本地数据包文件夹绝对路径（2026-10-10 补，优先于 precheck_token）。 */
+  package_path?: string;
+};
+
+/** 新增草稿的结果（`note` 固定写明「未上架」）。 */
+export type ItemDraftCreateResult = {
+  platform_account_id: number;
+  draft_id: string;
+  name: string;
+  uploaded_images: number;
+  failed_images: { path: string; reason: string }[];
+  sku_count: number;
+  warnings: string[];
+  readback: {
+    category_id: string;
+    name: string;
+    image_count: number;
+    long_image_count: number;
+    sku_count: number;
+    read_ok: boolean;
+  };
+  note: string;
+};
+
+/** 草稿箱列表一条（`GET /item-drafts`，**实时查平台**）。 */
+export type ItemDraftRow = {
+  draft_id: string;
+  name: string;
+  status: string;
+  status_label: string;
+  created_at: string;
+  updated_at: string;
+  is_union: boolean;
+  /** 封面图 path（可能为空）。 */
+  cover?: string;
+};
+
+export type ItemDraftListResult = {
+  platform_account_id: number;
+  total: number;
+  drafts: ItemDraftRow[];
+};
+
+/** `POST /items/publish` 的执行体（设计 24 §3.1）。 */
+export type ItemPublishPayload = {
+  platform_account_id: number;
+  category_id: string;
+  name: string;
+  /** 图片引用：`string` 相对路径 或 已上传对象（2026-10-10）。 */
+  main_images: (string | Record<string, unknown>)[];
+  detail_images: (string | Record<string, unknown>)[];
+  /** 商品视频已上传对象（2026-10-11 补，真机 `itemData[0].videos[]`）。 */
+  videos?: Record<string, unknown>[];
+  /** 货号（真机 `itemData[0].articleNo`，2026-10-11 补）。 */
+  article_no?: string;
+  skus: {
+    name: string;
+    price_yuan: number | null;
+    market_price_yuan?: number | null;
+    stock: number | null;
+    image_path?: string | null;
+    available?: boolean;
+    /** 条形码（真机 `skuData[].barcode`，2026-10-10 对齐）。 */
+    barcode?: string | null;
+    /** 商家编码（真机 `skuData[].erpCode`，⚠️ 字段名是 erpCode 不是 seller_code）。 */
+    erpCode?: string | null;
+    /** 规格图已上传对象（2026-10-10 补）。 */
+    spec_image_material?: Record<string, unknown> | null;
+  }[];
+  /** 本店任一既有商品 id（取发布体骨架）；空 = 后端自动取最近创建的在售商品。 */
+  skeleton_item_id?: string;
+  /** ⚠️ 红线开关：默认 true（发布成功立即下架）。生产路径不得传 false。 */
+  off_shelf_after?: boolean;
+  /**
+   * 第一步「数据包预检」的暂存 token（设计 25 §6）。
+   *
+   * 非空时，`main_images` / `detail_images` / `skus[].image_path` 传的是
+   * **暂存内相对路径**（如 `主图/主图01.jpg`），服务端按 token 拼成绝对
+   * 路径并校验归属。空 ⇒ 沿用旧的「服务器绝对路径」写法（草稿箱发布）。
+   */
+  precheck_token?: string;
+  /** 本地数据包文件夹绝对路径（2026-10-10 补，优先于 precheck_token）。 */
+  package_path?: string;
+  /**
+   * **第二步配置快照**（用户口径 2026-10-10：「确认发布提交的参数应是第二步配置的完整参数」）。
+   *
+   * ⚠️ 背景：这些配置原本是 `PublishConfigStep2` 的**内部 state**，切步时组件卸载就丢
+   * ⇒ 提交体与第三步预览都拿不到。现在由向导持有并随提交下发。
+   * ⚠️ 后端目前只**接收留档**，尚未逐项映射进 `itemData`（需真机发布验证字段名）。
+   */
+  config?: Record<string, unknown>;
+};
+
+/** 提交商品的结果（`published` 后 `off_shelf` 应为 true —— 红线）。 */
+export type ItemPublishResult = {
+  platform_account_id: number;
+  uploaded_images: number;
+  failed_images: { path: string; reason: string }[];
+  published: boolean;
+  task_id: string;
+  item_id: string;
+  /** 是否已下架（红线执行结果）。 */
+  off_shelf: boolean;
+  fail_reasons: { index: number; name: string; message: string }[];
 };
 
 export type XhsShopItemDetail = {
@@ -1572,6 +1739,11 @@ export type ScheduledJob = {
   params: Record<string, unknown>;
   /** 用户可写的自定义参数键（注册表白名单；前端据此渲染对应表单，不硬编码键名） */
   params_editable: string[];
+  /**
+   * 每个参数的**默认值**（2026-10-07 用户口径「调用参数不允许随意添加和删除，
+   * 必须有默认值」）—— 弹窗据此**预填固定行**：存量行缺的键也能显示出来。
+   */
+  params_defaults: Record<string, unknown>;
   status: "active" | "paused" | "completed" | string;
   remark: string;
   is_builtin: boolean;
@@ -1594,6 +1766,8 @@ export type ScheduleTarget = {
   allow_concurrent: boolean;
   params_required: string[];
   params_editable: string[];
+  /** 参数的默认值（与 `ScheduledJob.params_defaults` 同源，2026-10-07）。 */
+  params_defaults: Record<string, unknown>;
   default_trigger_type: "manual" | "cron" | "at" | string;
   default_cron: string;
   default_misfire_policy: "fire_now" | "once" | "discard" | string;
@@ -2180,9 +2354,79 @@ export type PictureSpaceTask = {
   task: Record<string, unknown>;
 };
 
-/** 上传本地图片到图片空间的结果。 */
+/** 上传本地图片到图片空间的结果。
+ *
+ * ⚠️ 静默上传契约（用户口径 2026-10-08）：商品配置第一步选本地文件后**立即静默上传**，
+ * 前端**不出现**图片空间界面；`url` 直接用于弹窗内预览。
+ */
 export type PictureSpaceUploadResult = {
   platform_account_id: number;
+  /** 实际使用的文件名（后端按内容 MD5 生成）。 */
   file_name: string;
+  /** 去后缀的检索名 —— 可按它在图片空间再查一次拿正式链接。 */
+  search_name?: string;
+  /** 上传后的预览链接（带签名）；平台只回了检索名时为空串。 */
+  url?: string;
+  /** 图片空间的 fileId（标题生成的入参材料之一）。 */
+  file_id?: string;
+  width?: number | null;
+  height?: number | null;
+  size?: number;
+  extension?: string;
+  /** **发布体材料**（2026-10-10 补，后端返回）：提交/保存草稿直接用。 */
+  materialId?: string;
+  path?: string;
+  link?: string;
   success: boolean;
+};
+
+/** 类目属性定义（千帆 `getCategoryProperty`）。 */
+export type CategoryPropertyItem = {
+  /** 属性 id（提交用）。 */
+  id: string;
+  name: string;
+  /** 输入形态（平台 `propertyInputType` 归一）。 */
+  kind: "select" | "multi" | "text" | "bool";
+  options: string[];
+  values?: { name: string; value_id: string }[];
+  /** 是否关键属性（平台 `importantProp`）。 */
+  key?: boolean;
+  required?: boolean;
+  /** 是否允许自定义输入新值（平台 `customizable`；false = 只能从 `options` 选）。 */
+  customizable?: boolean;
+  units?: string[];
+};
+
+export type CategoryPropertyResult = {
+  platform_account_id: number;
+  category_id: string;
+  /** 其他属性（真机 20 项）。 */
+  desc_properties: CategoryPropertyItem[];
+  /** 销售属性 = 规格类型（真机 6 项）。 */
+  sale_properties: CategoryPropertyItem[];
+  /** 关键属性（`importantProp=true` 的那批）。 */
+  key_properties: CategoryPropertyItem[];
+  /** 该类目是否支持「无物流发货」（真机按类目下发；`null`/缺省 = 平台未给 ⇒ 前端兜底展示）。 */
+  support_no_logistics?: boolean | null;
+};
+
+/** 按标题+主图推荐的类目（千帆 `getRecommendCategory`）。 */
+export type RecommendCategoryItem = {
+  category_id: string;
+  name: string;
+  score?: number | null;
+  path?: string[];
+};
+
+export type RecommendCategoryResult = {
+  platform_account_id: number;
+  categories: RecommendCategoryItem[];
+};
+
+/** 按主图生成商品标题的结果（千帆 `getRecommendItemTitle`）。 */
+export type RecommendItemTitleResult = {
+  platform_account_id: number;
+  /** 生成的标题；平台没给就是空串（**不造假**）。 */
+  title: string;
+  raw?: Record<string, unknown>;
 };

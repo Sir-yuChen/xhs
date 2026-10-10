@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 
 import requests
 from xhs_utils.http_util import REQUEST_TIMEOUT
@@ -819,6 +820,718 @@ class XHS_Qianfan_Apis:
         body = {"note_ids": ids}
         return self._post("/api/edith/note/batch_delete_note", body, "/app-note/note-list")
 
+    # ------------------------------------------------------------------ #
+    # 商品**新增（存草稿）**链路（设计 23，2026-10-07 真机打通）
+    #
+    # ⚠️ **本条链路只到草稿箱，没有「发布」这一格** —— 不是保守，是两层原因：
+    #   ① 用户红线：新增的商品只能存草稿，不允许直接上架；
+    #   ② 平台侧「提交商品」走另一条两段写链路（`publish_async` +
+    #      `publish_async_operate`），本模块**不接入**（设计 23 §6）。
+    #   所以下面没有 `publish_*` 方法 —— 契约层面就不存在那个开关。
+    #
+    # 全部**必须带签名**（与商品写链路同一档：
+    # `appId=itemark` / `signVersion=4.4.4` / `tier=0101`）。
+    # ------------------------------------------------------------------ #
+
+    #: 平台**每分钟最多 2 个草稿**（2026-10-07 真机原文：
+    #: `提示：单店铺每分钟限制发布2个草稿！`，`code=10001`）。
+    #: 调用方按此排队（批量新增时），本层如实把该错误带回。
+    DRAFT_RATE_LIMIT_CODE: int = 10001
+
+    @classmethod
+    def is_draft_rate_limited(cls, msg: object) -> bool:
+        """平台是否答「草稿限流」。**唯一实现**（判据只此一处，不散落 `in` 判断）。"""
+        text = str(msg or "")
+        return "每分钟限制" in text or "限流" in text
+
+    def publish_render(
+        self, params: dict, *, referer: str = "/app-item/single-good/create"
+    ) -> tuple[bool, str, dict | None]:
+        """商品**表单结构 / 草稿回读**（`POST /api/edith/product/publish_render`）—— 需签名。
+
+        ⚠️ **必须带签名**（2026-10-07 实测）：无签名直连 **406
+        `{"code":-1,"success":false}`**；带 `x-s`/`x-t` 则 200。
+        这与设计 20 §0 里「`publish_render` 不可得」的旧结论**不冲突**：
+        那条结论说的是 2026-09-21 时**只读边界下**拿不到，而现在写链路
+        （`_signed_post`）已经在项目里跑通了（设计 20 §11.2），
+        所以同一个端点**换个档位就通了**。
+
+        `params` 三种用法（真机逐条验证）：
+
+        | 用法 | params | 回什么 |
+        |---|---|---|
+        | **新增**（空白表单） | `{"publishType":1,"sourceType":1}` | 28KB 空表单树（类目 61 个 + 卖家配置 + 物流计划） |
+        | **编辑既有商品** | `{"publishType":2,"sourceType":1,"itemId":"…"}` | 完整商品（45 字段 + 204 条 SKU + 图集） |
+        | **回读草稿** | `{"publishType":1,"sourceType":4,"draftId":"…"}` | 草稿里**实际存下的**字段（校验建草稿是否真落） |
+
+        `params` 会被序列化成 **JSON 字符串**放进 `{"data": "<json>"}`
+        （平台要的是「字符串里的 JSON」，不是嵌套对象）。
+
+        响应 `data` 是**字符串**（不是对象）—— 调用方 `json.loads` 再用。
+        """
+        body = {"data": json.dumps(params, ensure_ascii=False)}
+        return self._signed_post("/api/edith/product/publish_render", body, referer)
+
+    def create_product_draft(
+        self, draft: dict, *, referer: str = "/app-item/single-good/create"
+    ) -> tuple[bool, str, dict | None]:
+        """**把商品存进草稿箱**（`POST /api/edith/product/create_product_drafts`）—— 需签名。
+
+        ⚠️ 2026-10-11 真机 bundle 修正（推翻 2026-10-07 旧结论）：body 形状
+        **`{"draft": <完整 itemData 对象>}`**（`draft` 是**嵌套对象**，不是 JSON 字符串）。
+        bundle `onSaveDraft` 逐字：`if(this.draftId) postSaveProductDrafts({draft:t})
+        else postCreateProductDrafts({draft:t})` —— 新建走本接口、更新走 save。
+
+        成功响应（真机原文）：
+
+        ```json
+        {"code":200,"success":true,"msg":"ok",
+         "data":{"response":{"success":true,"code":200},
+                 "productDraftId":"6ac673ae424eb00001f69ae9"}}
+        ```
+
+        ## ⚠️ 草稿体只吃这五个字段（真机逐字段试出来的）
+
+        | 键 | 吃得下 | 回读位置 |
+        |---|---|---|
+        | `categoryId` | ✅ | `productDetail.item.categoryId` |
+        | `name` | ✅ | `productDetail.item.itemName` |
+        | `standardImages` | ✅ | `productDetail.item.standardImages`（**主图位**） |
+        | `longImages` | ✅ | `productDetail.item.longImages`（**详情图位**） |
+        | `skuData` | ✅ | `productDetail.skuList` |
+
+        **静默丢弃**（传了不报错、回读为 `[]` —— 本链路最大的坑）：
+        `itemName` / `properties` / `images` / `imageDescriptions` / **`skuList`**。
+
+        ⚠️ **`skuData` 与 `skuList` 是两个不同的字段**：**写**用 `skuData`、
+        **读**回是 `skuList`。写的时候用 `skuList` 会被**静默丢弃**（skuCount=0，
+        接口照样 200）。这个不对称坑过一次，故在此写死。
+
+        ⚠️ **SKU 的 `price` 单位是「元」不是「分」**（与商品列表的
+        `price_from_fen` 相反）。真机：传 `1280` 回读 `price: 1280`。
+        写成分（`128000`）不报错，但价格会变成 12.8 万元 —— **静默错值**。
+
+        ⚠️ 平台限流：**单店铺每分钟 2 个草稿**（`code=10001`）。
+        调用方按 :meth:`is_draft_rate_limited` 判定并重试。
+        """
+        body = {"draft": draft}
+        return self._signed_post(
+            "/api/edith/product/create_product_drafts", body, referer
+        )
+
+    def save_product_draft(
+        self, draft: dict, *, referer: str = "/app-item/single-good/create"
+    ) -> tuple[bool, str, dict | None]:
+        """**保存商品草稿**（`POST /api/edith/product/save_product_drafts`）—— 需签名。
+
+        ⚠️ 2026-10-11 真机抓包：现在的「保存草稿」按钮走的是 **本接口**（不是旧的
+        `create_product_drafts`）。body 形状 **`{"draft": <完整 itemData 对象>}`**（`draft` 是
+        **嵌套对象**，不是 JSON 字符串），结构与发布体 `batch_create_item` 的 `itemData[0]`
+        **一致**（含 `videos` / `ename` / `description` / `attributes` / `skuData` 全部字段）。
+
+        ⚠️ 与旧的 `create_product_drafts`（`{draft: "<5键json字符串>"}`，只吃
+        `categoryId/name/standardImages/longImages/skuData`）**完全不同**：旧接口已被新接口
+        取代，旧接口收不下视频/货号/英文名/属性等完整字段。
+        """
+        body = {"draft": draft}
+        return self._signed_post(
+            "/api/edith/product/save_product_drafts", body, referer
+        )
+
+    def query_product_draft_list(
+        self,
+        *,
+        page_no: int = 1,
+        page_size: int = 20,
+        search_param: dict | None = None,
+        sort_field: str | None = None,
+        order: str | None = None,
+    ) -> tuple[bool, str, dict | None]:
+        """**草稿箱列表**（`POST /api/edith/product/query_product_draft_list_v3`）。
+
+        ⚠️ **不需要签名**（2026-10-07 实测：无签名 200，与只读接口同档）——
+        与 `create_product_drafts`（**必须签名**）刻意不同。走 `_post`。
+
+        请求体取自 bundle `8591.80981179.js` 的 `fetchList`：
+
+        ```json
+        {"pageNo":1,"pageSize":20,
+         "searchParam":{"keyword":"…","createTimeFrom":<秒>,"createTimeTo":<秒>,
+                        "updateTimeFrom":<秒>,"updateTimeTo":<秒>,
+                        "lvl2CategoryIds":[…],"lvl3CategoryIds":[…],"topCategoryIds":[…]},
+         "sortField":"create_time","order":"desc"}
+        ```
+
+        响应 `data`：`{"total": N, "draftIds": [...], "productDrafts": [
+        {"id","name","status","createTime","updateTime","productUnionType","image"}]}`。
+        ⚠️ `draftIds` 与 `productDrafts` **同时下发**且顺序一致 —— 用
+        `productDrafts`（它带名字），`draftIds` 只是同物的 id 投影。
+
+        ⚠️ 草稿的 `status`：`"0"` = 待提交，`"-1"` = 已删除
+        （bundle：`"-1"===status` ⇒ tag 显示「已删除」，否则「待提交」）。
+        """
+        body: dict = {
+            "pageNo": max(1, int(page_no)),
+            "pageSize": max(1, min(int(page_size), 100)),
+        }
+        if search_param:
+            body["searchParam"] = search_param
+        if sort_field:
+            body["sortField"] = str(sort_field)
+        if order:
+            body["order"] = str(order)
+        return self._post(
+            "/api/edith/product/query_product_draft_list_v3",
+            body,
+            "/app-item/list/draft",
+        )
+
+    def batch_delete_draft(
+        self,
+        draft_ids: "list[str] | tuple[str, ...] | set[str]",
+        *,
+        referer: str = "/app-item/list/draft",
+    ) -> tuple[bool, str, dict | None]:
+        """**批量删除草稿**（`POST /api/edith/product/batch_delete_draft`）—— 需签名。
+
+        真机 bundle `8591.80981179.js` 逐字取证：body `{productDraftIds:[…], channel:2}`。
+        ⚠️ **不可恢复**（草稿删了没有撤销入口）——调用方必须显式确认。
+
+        与「删除商品」（`batch_delete_sku`）是**两个端点**：草稿在草稿箱，
+        商品在商品列表，别混用。
+        """
+        ids = [str(x).strip() for x in (draft_ids or []) if str(x).strip()]
+        if not ids:
+            return False, "productDraftIds 为空", None
+        body = {"productDraftIds": ids, "channel": 2}
+        return self._signed_post("/api/edith/product/batch_delete_draft", body, referer)
+
+    def search_category(
+        self, keyword: str, *, referer: str = "/app-item/single-good/create"
+    ) -> tuple[bool, str, dict | None]:
+        """按关键词查**类目**（`POST /api/edith/product/search_category`）—— 无需签名。
+
+        ⚠️ **无签名直连可通**（2026-10-07 实测 200，属查询语义）。
+
+        响应 `data.categories[]`，每条含 `id` / `name` / `level` /
+        **`isLeaf`**（只有 `isLeaf=true` 的才能作为商品类目）/
+        `needBrand`（该类目是否强制品牌）/ `channelList`。
+
+        调用方**只能选 `isLeaf=true`** —— 选非叶子类目建草稿会被平台打回
+        （类目树是分层的，商品必须挂在叶子上）。
+        """
+        return self._post(
+            "/api/edith/product/search_category",
+            {"keyword": str(keyword or "").strip()},
+            referer,
+        )
+
+    def predict_product_property(
+        self,
+        category_id: str,
+        name: str = "",
+        *,
+        image_urls: "list[dict] | None" = None,
+    ) -> tuple[bool, str, dict | None]:
+        """**属性预测**（千帆 `predictProductProperty`，只读）。
+
+        ## ⚠️ 入参以真机抓包为准（2026-10-09 复测）
+
+        ```
+        {"title": "<商品标题>", "categoryId": "<叶子类目 id>",
+         "imageUrls": [{"key","type":"spaceImage","materialId","name",
+                        "width","height","size","extension","path","link",
+                        "uploaderInfoModel":{…},"errors":[]}]}
+        ```
+
+        实测三态（账号 8 · 类目 `65f997293e946300016b2ec4`）：
+
+        | 入参 | 结果 |
+        |---|---|
+        | `{categoryId}` | `predictItemProperties: []` |
+        | `{title, categoryId}` | `predictItemProperties: []` |
+        | `{title, categoryId, imageUrls[…]}` | **有值**（`风格=明清古典` …） |
+
+        ⇒ **不给图 = 平台没料可预测**，恒回空数组。第一条入参名是 `title`，
+        用 `name` 平台答 `success:false`（实测）。
+
+        响应形态（每条）：
+        ```
+        {"fillType":6, "inputType":1, "propertyId":"…", "propertyName":"风格",
+         "propertyValueList":[{"value":"明清古典","valueId":"66264f7d…"}]}
+        ```
+        ⚠️ 值是 **`propertyValueList` 数组**（不是标量）—— 解析在后端端点做。
+        """
+        param: dict = {"categoryId": category_id}
+        if name:
+            param["title"] = str(name)
+        if image_urls:
+            param["imageUrls"] = list(image_urls)
+        body = {
+            "data": json.dumps(
+                {"publishType": 1, "sourceType": 1, "actions": [{"action": "predictProductProperty", "param": param}]},
+                ensure_ascii=False,
+            )
+        }
+        return self._signed_post("/api/edith/product/publish_async", body, "/app-item/good/create")
+
+    def get_seller_carriage_template(self) -> tuple[bool, str, dict | None]:
+        """取**物流模板候选**（千帆 `getSellerCarriageTemplate`，只读）。
+
+        实测入参为空即可；返回 `shippingTemplateList[]` + `defaultShippingTemplate`。
+        """
+        body = {
+            "data": json.dumps(
+                {"publishType": 1, "sourceType": 1, "actions": [{"action": "getSellerCarriageTemplate", "param": {}}]},
+                ensure_ascii=False,
+            )
+        }
+        return self._signed_post("/api/edith/product/publish_async", body, "/app-item/good/create")
+
+    def get_support_after_sale(self, category_id: str) -> tuple[bool, str, dict | None]:
+        """取类目的**售后服务规则**（千帆 `getSupportAfterSale`，只读）。
+
+        ## 真机实测（2026-10-09，八个类目对过）
+
+        响应落在 `data.fulfillmentInfo.afterSaleRule[]`，每项：
+
+        ```
+        {"name":"支持七天无理由退货","type":"freeReturn",
+         "defaultSupport":true,"mustSupport":true}
+        ```
+
+        ⚠️ **`mustSupport` 按类目不同** —— 这就是「七天无理由是否可编辑」的判据：
+
+        | 类目 | mustSupport | 含义 |
+        |---|---|---|
+        | 其他宠物服务 / 梳妆台桌 / 斗柜 | `true` | **必须支持** ⇒ 勾选强制、不可取消 |
+        | 实体服务 / 求职留学咨询 | `false` | **可选** ⇒ 用户可自己决定 |
+
+        ⚠️ 规则集本身也按类目变：如「搬家服务券」给的是
+        `未核销随时退（refundableIfUnredeemed）` + `超期自动退（autoRefundAfterExpiry）`
+        （后者带 `autoRefundAfterExpiryTimeRule[]` 时限），**不是**必有一项 freeReturn。
+        ⇒ 前端不得写死「支持七天无理由退货」这一条，要按本接口的 `name`/`type` 渲染。
+        """
+        body = {
+            "data": json.dumps(
+                {
+                    "publishType": 1,
+                    "sourceType": 1,
+                    "actions": [
+                        {"action": "getSupportAfterSale", "param": {"categoryId": category_id}}
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        }
+        return self._signed_post("/api/edith/product/publish_async", body, "/app-item/good/create")
+
+    def generate_item_short_title(
+        self,
+        name: str,
+        *,
+        category_id: str = "",
+        referer: str = "/app-item/good/create",
+    ) -> tuple[bool, str, dict | None]:
+        """生成**导购短标题**（`publish_async` 的 `generateItemShortTitle`）。
+
+        真机（2026-10-08）：发布页「导购短标题」右侧有「智能生成」按钮，
+        走的就是这条 action —— 与商品标题的 `getRecommendItemTitle` 同款口径：
+        **能自动生成的就走平台生成**，不拿本地文本冒充。
+
+        ## ⚠️ 入参以真机抓包为准（2026-10-09 复测，见 `.hermes/tmp/evidence_publish/all_edith_requests.json`）
+
+        ```
+        {"title": "<商品标题>", "categoryId": "<叶子类目 id>"}
+        ```
+
+        **不是** `name`（那是 `predictProductProperty` 的参数名），
+        也**没有** `mainImages` —— 平台只吃标题 + 类目。
+        传错参数名不会报错、只会**静默返回空短标题**（实测），所以这里按真机原样写死。
+
+        响应取值口径：`data.product.productTitle.itemShortTitle.generatedShortTitle`
+        （解析在后端端点做，本方法只负责发请求）。
+
+        该 action **需签名**（与其它写语义 action 同档）。
+
+        ## 红线
+
+        只调这一个生成文案的 action，**不碰**发布提交链路。
+        """
+        param: dict = {"title": str(name or "")}
+        if category_id:
+            param["categoryId"] = str(category_id)
+
+        body = {
+            "data": json.dumps(
+                {
+                    "publishType": 1,
+                    "sourceType": 1,
+                    "actions": [
+                        {"action": "generateItemShortTitle", "param": param}
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        }
+        return self._signed_post("/api/edith/product/publish_async", body, referer)
+
+    def recommend_category(
+        self,
+        name: str,
+        *,
+        image_url: str = "",
+        uploader_info_model: "dict | None" = None,
+        referer: str = "/app-item/good/create",
+    ) -> tuple[bool, str, dict | None]:
+        """按**标题 + 主图**推荐商品类目（`publish_async` 的 `getRecommendCategory`）。
+
+        ## 为什么是这一条（2026-10-08 真机取证）
+
+        千帆发布页在**标题采用之后**自动带出类目。抓包显示那一刻
+        **没有**类目请求 —— 因为服务端把类目**和标题一起**算好了：
+        `getRecommendItemTitle` 的响应里 `category.categoryPropertyInfo`
+        留了位置；前端另有一次 `getRecommendCategory`（bundle 逆出）。
+
+        入参（bundle `8091.*.js` 逆出，与真机一致）：
+
+        ```
+        {"name": "<商品标题>",
+         "imageUrl": "<主图签名链接>",
+         "uploaderInfoModel": {"url": "…", "bizName": "ark", "scene": "goods_image",
+                               "fileId": "arkgoods/<id>", "isSecret": true, "cloudType": 4}}
+        ```
+
+        响应 `data.recommendCategories[]`，每项：
+        `{categoryId, categoryName, marketable, score, path[]}`
+        —— `path` 就是「住宅家具 > 桌类 > 梳妆台/桌」。
+
+        ⚠️ **要签名**（只带 Cookie 重放 ⇒ 406 `{"code":-1}`，已实测）。
+
+        ## 红线
+
+        只调这一个推荐 action（纯查询语义），**不碰**发布提交链路。
+        """
+        payload: dict = {"name": str(name or "")}
+        if image_url:
+            payload["imageUrl"] = image_url
+        if uploader_info_model:
+            payload["uploaderInfoModel"] = uploader_info_model
+
+        body = {
+            "data": json.dumps(
+                {
+                    "publishType": 1,
+                    "sourceType": 1,
+                    "actions": [
+                        {"action": "getRecommendCategory", "param": payload}
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        }
+        return self._signed_post("/api/edith/product/publish_async", body, referer)
+
+    def recommend_item_title(
+        self,
+        main_images: "list[dict]",
+        *,
+        referer: str = "/app-item/good/create",
+    ) -> tuple[bool, str, dict | None]:
+        """按**主图**推荐商品标题（`publish_async` 的 `getRecommendItemTitle` action）。
+
+        ## 为什么必须这么调（2026-10-08 真机抓包）
+
+        千帆发布页在上传主图后会**自动**触发一次该 action，入参是**主图对象数组**：
+
+        ```
+        {"mainImages": [{
+           "type": "uploadImage", "name": "主图02", "width": 750, "height": 1000,
+           "extension": ".jpeg", "size": 195285,
+           "link": "https://ros-preview.xhscdn.com/arkgoods/<id>?sign=…&t=…",
+           "path": "arkgoods/<id>",
+           "uploaderInfoModel": {"url": "<同一个签名地址>", "bizName": "ark",
+                                 "scene": "goods_image", "fileId": "arkgoods/<id>",
+                                 "isSecret": True, "cloudType": 4},
+           "status": "success"}]}
+        ```
+
+        ⚠️ **`link` 是签名图链** —— 平台把**图喂给模型**，所以标题才与图相符。
+        只传文件名（或纯文本线索）会让模型看不到图，生成出与图无关的标题
+        （实测：数据包是梳妆台，却生成了「现代简约书桌…」）。
+
+        ⚠️ 该 action **要签名**（只带 Cookie 重放 ⇒ **406 `{"code":-1}`**，已实测）。
+
+        ## 红线
+
+        本方法**只调这一个只读语义的 action**（生成标题文本），
+        **不碰**发布链路的 `itemAuditPreCheck` / 提交类 action ——
+        `publish_async` 整体仍不在本模块的接入范围（设计 23 §6）。
+
+        响应里的标题字段名随平台可能变化，调用方按 `data` 内的
+        `title` → `itemTitle` → `recommendTitle` 依次取（**取不到就不猜**）。
+        """
+        body = {
+            "data": json.dumps(
+                {
+                    "publishType": 1,
+                    "sourceType": 1,
+                    "actions": [
+                        {
+                            "action": "getRecommendItemTitle",
+                            "param": {"mainImages": list(main_images)},
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        }
+        return self._signed_post("/api/edith/product/publish_async", body, referer)
+
+    def query_task_status(
+        self, task_id: str, *, referer: str = "/app-item/single-good/create"
+    ) -> tuple[bool, str, dict | None]:
+        """查**异步任务**状态（`GET /api/edith/product/query_task_status`）—— 需签名。
+
+        ⚠️ 与 `create_product_draft`（POST、需签名）不同：本端点是 **GET 且需签名**
+        （真机实测：不带签名 `{"code":-1}`，带签名 200）。这是仓库里**第一个
+        「GET 但强制签名」**的千帆端点 —— 商品的异步任务（`batch_create_item` /
+        `batch_update_availability_v3`）都靠它取回执。
+
+        签名覆盖的串是 **含 query 的完整路径**
+        （`/api/edith/product/query_task_status?taskId=…`）—— 与 POST 的
+        「路径 + JSON body」不同；:meth:`_signed_get` 负责这个差异。
+
+        响应 `data.task`：`status`（1/2 进行中，3 成功，4/5 失败或部分失败）/
+        `progress` / `totalCount` / `finishedCount` / `result`（`extraJson` 里
+        逐条 `failData[]`，形如 `[{"index":1,"name":"未知","message":"…"}]`）。
+        """
+        from urllib.parse import quote
+
+        path = f"/api/edith/product/query_task_status?taskId={quote(str(task_id))}"
+        return self._signed_get(path, referer)
+
+    def batch_create_item(
+        self,
+        items: list[dict],
+        *,
+        publish_mode: int = 1,
+        referer: str = "/app-item/single-good/create",
+    ) -> tuple[bool, str, dict | None]:
+        """**提交商品发布**（`POST /api/edith/product/batch_create_item`）—— 需签名。
+
+        ⚠️⚠️ **这是真实上架写操作**：成功即产生一个**在售商品**。
+        调用方必须（设计 24）：
+        ① 用户显式触发 + 二次确认；② 平台回执成功**第一时间下架**
+        （`batch_update_availability(available=False)`）；③ 全程留痕在 `tasks`。
+
+        ⚠️ **`publishMode`**（bundle 逆出）：`1` = 普通发布（默认）/ `2` = 基础图
+        创建 / `3` = AI 助手 —— 本项目只用 `1`。
+
+        ⚠️ **`itemData[]` 每条是一份完整的商品表单**（45+ 字段），形状必须与
+        `publish_render` 回读的 `productDetail.item` **一致**
+        （`itemName` / `categoryId` / `categoryPath` / `images` / `standardImages` /
+        `imageDescriptions` / `properties` / `shippingTemplateId` / `sellPoint` …）。
+        **本方法不组装 itemData** —— 那是 `shop_draft_service` 的职责
+        （它会用 `publish_render` 的回读骨架 + 用户填的值合并，见设计 24 §4）。
+
+        响应：`{"code":200,"data":{"taskId":"…"}}` —— 异步任务，结果用
+        :meth:`query_task_status` 轮询。
+        """
+        ids = [item for item in (items or []) if isinstance(item, dict)]
+        if not ids:
+            return False, "itemData 为空", None
+        body = {
+            "itemData": ids,
+            "options": {"asyncExec": True, "withChild": True, "retrieveResult": True},
+            "publishMode": int(publish_mode),
+        }
+        return self._signed_post(
+            "/api/edith/product/batch_create_item", body, referer
+        )
+
+    def _signed_get(
+        self, path_with_query: str, referer: str
+    ) -> tuple[bool, str, dict | None]:
+        """**带签名的 GET**（`:meth:`query_task_status` 用）。
+
+        ⚠️ 与 `_signed_post` 的两处差异（都来自真机取证）：
+        * 签名材料里的 `api` 是**含 query 的完整路径**（不含 host）；
+        * 请求发 GET，`data` 为空串（签名算法对 GET 用 `md5(api)`）。
+
+        实现上把 `_signed_post` 的签名段抽成 `_sign(api, data)`，本方法复用同
+        一份签名运行时（**不复制一份签名逻辑** —— 两份必然漂移）。
+        """
+        headers, error, signed = self._sign(path_with_query, None, referer)
+        if error is not None:
+            return False, error, None
+        try:
+            response = _session_request(
+                "GET",
+                self.base_url + path_with_query,
+                headers=headers,
+                cookies=self._cookie_dict(),
+                timeout=WRITE_TIMEOUT,
+            )
+        except Exception as error_obj:  # noqa: BLE001
+            return False, f"千帆写接口请求失败：{type(error_obj).__name__}: {error_obj}", None
+        if response.status_code == 406:
+            return (
+                False,
+                "平台拒绝了本次请求的签名（HTTP 406）。通常是平台改版导致签名档位变化，"
+                "需要更新签名参数；重登账号不会解决。",
+                None,
+            )
+        try:
+            payload = response.json()
+        except ValueError:
+            return False, f"千帆写接口返回了非 JSON 响应（HTTP {response.status_code}）", None
+        if not isinstance(payload, dict):
+            return False, "千帆写接口返回了非预期的响应体", None
+        code = payload.get("code")
+        if self.is_credential_error(code):
+            return False, str(payload.get("msg") or "千帆登录态失效"), payload
+        if code not in (0, 200, None) or payload.get("success") is False:
+            return False, str(payload.get("msg") or f"千帆写接口返回 code={code}"), payload
+        return True, str(payload.get("msg") or "成功"), payload
+
+    def _sign(
+        self, api: str, body: dict | None, referer: str
+    ) -> tuple[dict[str, str] | None, str | None, dict | None]:
+        """生成签名头。**唯一实现**（`_signed_post` / `_signed_get` 共用）。
+
+        返回 `(headers, error_message, signed_raw)`；成功时 `error_message is None`。
+        """
+        import subprocess
+
+        from xhs_utils.xhs_core.runtime import _JS_DIR as _CORE_JS_DIR
+
+        cookie = (self.cookies or "").strip()
+        if "a1=" not in cookie:
+            return (
+                None,
+                "签名材料不可用：该账号的千帆 Cookie 里没有 a1，无法生成请求签名"
+                "（这不是登录态问题，请重新导出完整 Cookie）。",
+                None,
+            )
+
+        # 会话态（seq / envConst / envFpTail / loadts）由 profile 现取 —— 每次请求
+        # 一个 `seq`，与浏览器一致（同一 seq 连发多个请求会被平台判重）。
+        try:
+            from xhs_utils.xhs_pc.state import PcDeviceProfile
+
+            profile = PcDeviceProfile(cookies=cookie)
+            ctx = profile.next_sign_context(api)
+            payload = {
+                "api": api,
+                #: ⚠️ GET 用空串（签名算法对 GET 走 `md5(api)`），POST 用 body。
+                "data": "" if body is None else body,
+                "cookie": cookie,
+                "a1": profile.cookie_map.get("a1", ""),
+                "b1": str(profile.current_b1(ctx["now"])),
+                "dslPair": _dsl_pair_or_empty(),
+                "tier": "0101",
+                "now": ctx["now"],
+                "version": ctx["version"],
+                "loadts": ctx["loadts"],
+                "seq": ctx["seq"],
+                "envConst": ctx["envConst"],
+                "envFpTail": ctx["envFpTail"],
+                "webBuild": ctx["webBuild"],
+                "signVersion": "4.4.4",
+                "appId": "itemark",
+                "platform": "Windows",
+            }
+        except Exception as error:  # noqa: BLE001 - 组装失败也要变成可读原因
+            return (
+                None,
+                f"签名材料不可用：{type(error).__name__}: {error}（这不是登录态问题）",
+                None,
+            )
+
+        # ⚠️ **签名入参必须走 `@file` 形态，不能当命令行参数传**（2026-10-07 实测）：
+        # Windows 命令行上限 32767 字符，而 `payload` 里含**整个请求体**
+        # （商品草稿体实测 ~10KB+，含图片条目 + SKU 列表）⇒ 直接当 argv 传会命中
+        # `OSError: [WinError 206] 文件名或扩展名太长`，表现为「签名运行时不可用」，
+        # **与真实原因（body 太大）完全指错方向**。
+        #
+        # ⚠️⚠️ **文件名必须每个请求唯一**（DEF-101，2026-10-09）：前端并行拉
+        # 「运费模板 + 物流模板」两个签名请求（都是 `_signed_post`），若共用一个固定
+        # `.sign_input.json`，两个线程会**同时**写/删同一个文件 —— A 写、B 覆盖、A 读
+        # 到半截 JSON、B 删掉 A 正在读的文件 ⇒ `node sign.js` 读到空/残缺输入 ⇒
+        # 报 `cookie required` / `Unexpected end of JSON input`（错误尾巴被截成
+        # `Node.js v22.23.2`）。实测 16 并发 15 失败、两个下拉恒空。
+        # 用 `tempfile.mkstemp`（原子创建、名字带 pid+随机后缀）彻底隔离并发。
+        import tempfile
+
+        fd, sign_input = tempfile.mkstemp(
+            prefix=".sign_input_", suffix=".json", dir=_CORE_JS_DIR
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, ensure_ascii=False))
+        except OSError as error:
+            try:
+                os.remove(sign_input)
+            except OSError:
+                pass
+            return (
+                None,
+                f"签名材料不可用：写入签名临时文件失败 {type(error).__name__}: {error}"
+                "（这不是登录态问题）",
+                None,
+            )
+
+        try:
+            proc = subprocess.run(
+                ["node", "sign.js", "@" + os.path.basename(sign_input)],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                cwd=_CORE_JS_DIR,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            return (
+                None,
+                f"签名运行时不可用（Node）：{type(error).__name__}: {error}（这不是登录态问题）",
+                None,
+            )
+        finally:
+            # ⚠️ **必须清掉临时文件**：里面含 Cookie（签名入参的一部分），
+            # 留在磁盘上等于把凭据写进工作目录（硬约束②：不落盘 / 不打印）。
+            try:
+                os.remove(sign_input)
+            except OSError:
+                pass
+
+        signed: dict | None = None
+        for line in reversed([s.strip() for s in (proc.stdout or "").splitlines() if s.strip()]):
+            if line.startswith("{") and '"x3"' in line:
+                try:
+                    signed = json.loads(line)
+                except ValueError:
+                    continue
+                break
+        if not signed or not signed.get("xs"):
+            tail = (proc.stderr or proc.stdout or "").strip().splitlines()
+            return (
+                None,
+                "请求签名生成失败：" + (" / ".join(tail[-3:]) or "sign.js 无输出")
+                + "（这不是登录态问题）",
+                None,
+            )
+
+        headers = {
+            **self._headers(referer),
+            "x-s": str(signed["xs"]),
+            "x-t": str(signed.get("xt") or ""),
+        }
+        if signed.get("xs_common"):
+            headers["x-s-common"] = str(signed["xs_common"])
+        return headers, None, signed
+
     def _signed_post(
         self, api: str, body: dict, referer: str
     ) -> tuple[bool, str, dict | None]:
@@ -861,97 +1574,11 @@ class XHS_Qianfan_Apis:
 
         ⚠️ **不打印 Cookie / 签名值**（硬约束②）。
         """
-        import subprocess
-
-        from xhs_utils.xhs_core.runtime import _JS_DIR as _CORE_JS_DIR
-
-        cookie = (self.cookies or "").strip()
-        if "a1=" not in cookie:
-            return (
-                False,
-                "签名材料不可用：该账号的千帆 Cookie 里没有 a1，无法生成请求签名"
-                "（这不是登录态问题，请重新导出完整 Cookie）。",
-                None,
-            )
-
-        # 会话态（seq / envConst / envFpTail / loadts）由 profile 现取 —— 每次请求
-        # 一个 `seq`，与浏览器一致（同一 seq 连发多个请求会被平台判重）。
-        try:
-            from xhs_utils.xhs_pc.state import PcDeviceProfile
-
-            profile = PcDeviceProfile(cookies=cookie)
-            ctx = profile.next_sign_context(api)
-            payload = {
-                "api": api,
-                "data": body,
-                "cookie": cookie,
-                "a1": profile.cookie_map.get("a1", ""),
-                "b1": str(profile.current_b1(ctx["now"])),
-                #: ⚠️ `_dsl` 需要一个 `dsllt` 前缀（`<ms>;<dsl>`）。取不到就退空串 ——
-                #: `sign.js` 只在 `xs_common` 里用它，缺失时 `x-s-common` 为空，
-                #: 而**写接口实测不校验 `x-s-common`**（去掉照样 200），故不阻断。
-                "dslPair": _dsl_pair_or_empty(),
-                "tier": "0101",
-                "now": ctx["now"],
-                "version": ctx["version"],
-                "loadts": ctx["loadts"],
-                "seq": ctx["seq"],
-                "envConst": ctx["envConst"],
-                "envFpTail": ctx["envFpTail"],
-                "webBuild": ctx["webBuild"],
-                #: ⚠️ 三个 ark 专用值 —— 用 PC 默认值会 406（见 docstring 表）。
-                "signVersion": "4.4.4",
-                "appId": "itemark",
-                "platform": "Windows",
-            }
-        except Exception as error:  # noqa: BLE001 - 组装失败也要变成可读原因
-            return (
-                False,
-                f"签名材料不可用：{type(error).__name__}: {error}（这不是登录态问题）",
-                None,
-            )
-
-        try:
-            proc = subprocess.run(
-                ["node", "sign.js", json.dumps(payload, ensure_ascii=False)],
-                capture_output=True,
-                text=True,
-                timeout=60,
-                cwd=_CORE_JS_DIR,
-                encoding="utf-8",
-                errors="replace",
-            )
-        except (OSError, subprocess.TimeoutExpired) as error:
-            return (
-                False,
-                f"签名运行时不可用（Node）：{type(error).__name__}: {error}（这不是登录态问题）",
-                None,
-            )
-        signed: dict | None = None
-        for line in reversed([s.strip() for s in (proc.stdout or "").splitlines() if s.strip()]):
-            if line.startswith("{") and '"x3"' in line:
-                try:
-                    signed = json.loads(line)
-                except ValueError:
-                    continue
-                break
-        if not signed or not signed.get("xs"):
-            tail = (proc.stderr or proc.stdout or "").strip().splitlines()
-            return (
-                False,
-                "请求签名生成失败：" + (" / ".join(tail[-3:]) or "sign.js 无输出")
-                + "（这不是登录态问题）",
-                None,
-            )
-
-        headers = {
-            **self._headers(referer),
-            "Content-Type": "application/json",
-            "x-s": str(signed["xs"]),
-            "x-t": str(signed.get("xt") or ""),
-        }
-        if signed.get("xs_common"):
-            headers["x-s-common"] = str(signed["xs_common"])
+        headers, error, _signed = self._sign(api, body, referer)
+        if error is not None:
+            return False, error, None
+        #: 写请求必须显式声明 JSON（签名头已由 `_sign` 带齐）。
+        headers["Content-Type"] = "application/json"
 
         try:
             response = _session_request(
@@ -1139,9 +1766,9 @@ class XHS_Qianfan_Apis:
 
     def upload_web_permit(
         self, file_count: int = 1, *, biz_name: str = "spectrum", scene: str = "image",
-        referer: str = "/app-note/publish",
+        referer: str = "/app-note/publish", file_format: str = "",
     ) -> tuple[bool, str, dict | None]:
-        """申请图片上传凭证（`GET /api/edith/upload/web/permit`）。
+        """申请上传凭证（`GET /api/edith/upload/web/permit`）。
 
         ⚠️ **`biz_name` / `scene` 必须按业务点传对**（2026-10-07 真机抓包）：
         图片空间（`/app-system/pictureSpace`）用的是 **`biz_name=ark&scene=goods_image`**
@@ -1150,17 +1777,28 @@ class XHS_Qianfan_Apis:
         发布链路（`/app-note/publish`）才是 `spectrum/image`（落 `spectrum/<id>`）。
         用错 scene ⇒ 文件 PUT 到 `spectrum/` 桶而图片空间按 `arkgoods/` 取 ⇒ **裂图**。
 
+        ⚠️ **视频走独立场景 `common_file`**（2026-10-09 bundle 逆出，`9515.*.js`）：
+        该上传器构造的是 `new Uploader({bizName:"ark", scene:"common_file"})`，
+        预分配落 **`ark-common/<id>`**。图片空间（`goods_image`）是**图片库**，
+        视频登记会答「获取上传文件[v]信息失败」（实测）⇒ 视频别走图片空间登记。
+
+        ⚠️ **`file_format`**：9515 上传器把扩展名作为 query 参数传给本接口
+        （`params:{…, fileFormat: e.fileFormat}`）—— 视频要传（如 `.mp4`）。
+
         响应 `data.uploadTempPermits[]` 每项含 `uploadAddr` / `token` / `fileIds[]` /
         `expireTime`；**按 `qos` 降序取第一个**（平台前端 `sort((a,b)=>b.qos-a.qos)[0]`）。
         """
+        params = {
+            "biz_name": str(biz_name),
+            "scene": str(scene),
+            "file_count": max(1, int(file_count)),
+            "version": 1,
+        }
+        if file_format:
+            params["fileFormat"] = str(file_format)
         return self._get(
             "/api/edith/upload/web/permit",
-            {
-                "biz_name": str(biz_name),
-                "scene": str(scene),
-                "file_count": max(1, int(file_count)),
-                "version": 1,
-            },
+            params,
             referer,
         )
 

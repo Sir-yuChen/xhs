@@ -1,0 +1,438 @@
+/**
+ * 商品配置第一步 · 样式。
+ *
+ * 布局参照千帆「商品创建」首屏：**左标签 / 右内容**两栏网格，
+ * 标签列固定宽度、内容列自适应；区块之间用分隔线。
+ *
+ * ⚠️ 这里只管**排版** —— 交互与逻辑（渐进式渲染、静默上传、立即使用 →
+ * 自动识别类目）在 `publish-config-step1.tsx`，两者与千帆一致。
+ */
+
+.publish-config-step1 {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 4px 0 8px;
+}
+
+/*: 一行 = 左标签 + 右内容 */
+/*: 顶部动作条：一键自动加载 */
+.publish-config-step1 .config-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  border-radius: 8px;
+  background: var(--ant-color-fill-quaternary, #fafafa);
+}
+
+.publish-config-step1 .toolbar-hint {
+  font-size: 12px;
+}
+
+/*: 每部分一个**外框**（用户口径 2026-10-08：「每部分的参数加一外框」）。
+    ⚠️ 从「分隔线」改成「独立卡片」——读起来是一块一块的参数，不是一条长表。 */
+.publish-config-step1 .config-row {
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  gap: 12px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+  border: 1px solid var(--ant-color-border-secondary, #f0f0f0);
+  border-radius: 8px;
+  background: var(--ant-color-bg-container, #fff);
+}
+
+.publish-config-step1 .config-row:last-of-type {
+  margin-bottom: 0;
+}
+
+.publish-config-step1 .auto-steps {
+  margin: 8px 0;
+  padding-left: 20px;
+  line-height: 24px;
+}
+
+.publish-config-step1 .auto-note {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--ant-color-text-secondary, rgba(0, 0, 0, 0.45));
+}
+
+/*: 标签列：顶部对齐 + 必填星号 */
+.publish-config-step1 .config-label {
+  padding-top: 4px;
+  font-size: 14px;
+  color: var(--ant-color-text, rgba(0, 0, 0, 0.88));
+  text-align: right;
+  white-space: nowrap;
+}
+
+.publish-config-step1 .config-label .req-star {
+  color: var(--ant-color-error, #ff4d4f);
+  margin-left: 2px;
+}
+
+.publish-config-step1 .config-body {
+  min-width: 0; /*: grid 子项允许收缩，否则长内容撑破容器 */
+}
+
+/* ---------- 商品图片 ---------- */
+
+.publish-config-step1 .image-slots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.publish-config-step1 .image-slot {
+  position: relative;
+  width: 88px;
+  height: 88px;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.publish-config-step1 .image-slot.filled {
+  border: 1px solid var(--ant-color-border, #d9d9d9);
+}
+
+.publish-config-step1 .image-slot.filled .slot-thumb {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  /*: 可点放大 —— 用 zoom-in 光标传达「能点大」。 */
+  cursor: zoom-in;
+}
+
+/*: ⚠️ 用户口径（2026-10-09）：图片左上角**不再展示名称角标**（「主图N」已移除）。
+   保留 `.slot-badge` 空规则会误导后来者以为还有角标，故整段删除。 */
+
+/*: 删除按钮悬停才显形，避免挡住图（用户口径：右上角删图标不常驻） */
+.publish-config-step1 .slot-remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 20px;
+  height: 20px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  cursor: pointer;
+}
+
+.publish-config-step1 .image-slot.filled:hover .slot-remove {
+  display: flex;
+}
+
+/*: 上传槽：与图片同尺寸的虚线框；点它弹原生下拉选文件 */
+.publish-config-step1 .image-slot.upload {
+  position: relative;
+  border: 1px dashed var(--ant-color-border, #d9d9d9);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--ant-color-fill-quaternary, #fafafa);
+}
+
+.publish-config-step1 .upload-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--ant-color-text-secondary, rgba(0, 0, 0, 0.45));
+  pointer-events: none;
+}
+
+/*: 透明覆盖整格的原生下拉 —— 视觉上是「点框选文件」 */
+.publish-config-step1 .upload-picker {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+  width: 100%;
+  height: 100%;
+}
+
+.publish-config-step1 .image-hint {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--ant-color-text-secondary, rgba(0, 0, 0, 0.45));
+}
+
+/*: 说明行 = 说明图标 + 一行短说明（详细规则收进 Tooltip，不铺正文）。 */
+.publish-config-step1 .image-hint-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--ant-color-text-secondary, rgba(0, 0, 0, 0.45));
+}
+
+.publish-config-step1 .image-hint-line .hint-icon {
+  color: var(--ant-color-text-quaternary, rgba(0, 0, 0, 0.25));
+  cursor: help;
+}
+
+/* ---------- 商品标题 ---------- */
+
+.publish-config-step1 .title-line {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.publish-config-step1 .title-line .ant-input-affix-wrapper,
+.publish-config-step1 .title-line .ant-input {
+  flex: 1;
+}
+
+.publish-config-step1 .smart-gen-btn {
+  flex: none;
+}
+
+.publish-config-step1 .title-suggest {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 13px;
+}
+
+.publish-config-step1 .suggest-tag {
+  margin: 0;
+  color: var(--ant-color-primary, #1677ff);
+  background: var(--ant-color-primary-bg, #e6f4ff);
+  border-color: transparent;
+}
+
+.publish-config-step1 .suggest-text {
+  color: var(--ant-color-text, rgba(0, 0, 0, 0.88));
+  word-break: break-all;
+}
+
+.publish-config-step1 .use-link {
+  flex: none;
+  cursor: pointer;
+}
+
+/* ---------- 商品类目 ---------- */
+
+.publish-config-step1 .cat-selected {
+  margin-bottom: 10px;
+  font-size: 13px;
+  color: var(--ant-color-text-secondary, rgba(0, 0, 0, 0.45));
+}
+
+.publish-config-step1 .cat-selected .cat-path {
+  color: var(--ant-color-text, rgba(0, 0, 0, 0.88));
+}
+
+/*: 空态**只占一行**（用户口径 2026-10-08：「类目不自动生成时只展示一行即可」）。
+    ⚠️ 不再给 min-height / 灰底 —— 那是没识别时的留白，正是要砍掉的东西。 */
+.publish-config-step1 .cat-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+/*: 有结果时才铺成一块（推荐 chip + 列表需要容器感） */
+.publish-config-step1 .cat-panel.has-result {
+  min-height: 0;
+  border-radius: 8px;
+  background: var(--ant-color-fill-quaternary, #fafafa);
+  padding: 12px;
+}
+
+/*: 空态文案：单行、次要色，不居中不撑高 */
+.publish-config-step1 .cat-empty {
+  font-size: 13px;
+  line-height: 22px;
+  color: var(--ant-color-text-secondary, rgba(0, 0, 0, 0.45));
+}
+
+.publish-config-step1 .cat-recommend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.publish-config-step1 .cat-chip {
+  margin: 0;
+  cursor: pointer;
+}
+
+.publish-config-step1 .cat-chip.active {
+  color: var(--ant-color-primary, #1677ff);
+  background: var(--ant-color-primary-bg, #e6f4ff);
+  border-color: var(--ant-color-primary, #1677ff);
+}
+
+.publish-config-step1 .cat-list {
+  max-height: 200px;
+  overflow: auto;
+}
+
+.publish-config-step1 .cat-item {
+  padding: 5px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.publish-config-step1 .cat-item:hover {
+  background: var(--ant-color-fill-tertiary, #f5f5f5);
+}
+
+.publish-config-step1 .cat-item.active {
+  color: var(--ant-color-primary, #1677ff);
+  background: var(--ant-color-primary-bg, #e6f4ff);
+}
+
+
+
+/*: 类目区标题行：左「已选类目」+ 右「搜索类目」（搜索默认隐藏） */
+.publish-config-step1 .cat-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+
+.publish-config-step1 .cat-head-title {
+  color: var(--ant-color-text-secondary, rgba(0, 0, 0, 0.45));
+}
+
+.publish-config-step1 .cat-search-toggle {
+  font-size: 13px;
+  cursor: pointer;
+}
+
+/*: 搜索框在**上面**（在已选类目之上），默认不渲染 */
+.publish-config-step1 .cat-search {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+/* ---------- 商品图片预览 ---------- */
+
+/*: `position: fixed` 铺满视口 —— 预览永远在窗口正中，与弹窗内滚动无关。 */
+.publish-config-step1 .img-preview-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 2100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.75);
+}
+
+.publish-config-step1 .img-preview-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  max-width: 90vw;
+  max-height: 90vh;
+}
+
+.publish-config-step1 .img-preview-img {
+  max-width: 90vw;
+  max-height: 78vh;
+  object-fit: contain;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.publish-config-step1 .img-preview-caption {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.publish-config-step1 .img-preview-name {
+  color: rgba(255, 255, 255, 0.6);
+  max-width: 40vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*: 左右切换按钮（只在本组内切） */
+.publish-config-step1 .img-preview-nav {
+  position: fixed;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.18);
+  color: #fff;
+  font-size: 18px;
+  cursor: pointer;
+}
+
+.publish-config-step1 .img-preview-nav:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.publish-config-step1 .img-preview-nav.prev {
+  left: 24px;
+}
+
+.publish-config-step1 .img-preview-nav.next {
+  right: 24px;
+}
+
+.publish-config-step1 .img-preview-close {
+  position: fixed;
+  top: 24px;
+  right: 24px;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.18);
+  color: #fff;
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.publish-config-step1 .img-preview-close:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.publish-config-step1 .cat-search .ant-input-affix-wrapper {
+  flex: 1;
+}
+
+/* 必填框的**表单校验**（用户口径 2026-10-10）。 */
+.config-field-error {
+  margin-top: 4px;
+  color: #ff4d4f;
+  font-size: 12px;
+  line-height: 18px;
+}

@@ -25,6 +25,9 @@ from typing import Any
 #: 平台 `type` 枚举：1 = 文件夹，2 = 文件（真机抓包确认）。
 MATERIAL_TYPE_FOLDER = 1
 MATERIAL_TYPE_FILE = 2
+#: 视频登记类型（真机 2026-10-11 抓包 `batch_add_directory_manageable` 的 `type:3`，
+#: `scene=goods_video`）。与图片 `type:2 / goods_image` 不同。
+MATERIAL_TYPE_VIDEO = 3
 
 #: 平台的「正常」状态（回收站是页面里另一个入口）。
 #: ⚠️ 真机 JS bundle `index.5dca98b8.js` 的枚举：`{USABLE:1, UPLOADING:2, UPLOAD_FAILED:3, RECYCLE_BIN:4}`。
@@ -449,8 +452,15 @@ def build_upload_item(
     height: int | None = None,
     preview_url: str = "",
     father_directory_id: str = "0",
+    item_type: int = MATERIAL_TYPE_FILE,
+    scene: str = "goods_image",
+    keep_name: bool = False,
 ) -> dict[str, Any]:
     """上传后**登记**图片空间时一条 `type:2` 条目（真机抓包 `batch_add` 请求体）。
+
+    ⚠️ 2026-10-11 视频登记复用本函数：`item_type=MATERIAL_TYPE_VIDEO(3)` +
+    `scene="goods_video"` + `keep_name=True`（视频 `name` 保留原始名「视频01」，
+    不按图片那样剥扩展名取基名）。
 
     ⚠️ 真机实抓的形状（2026-10-07）——与初版差异极大：
 
@@ -468,9 +478,9 @@ def build_upload_item(
     * `name` = **无扩展名基名**（扩展名单独放 `additionalData.extension`）。
     """
     base, _, ext = str(file_name).rpartition(".")
-    name = base if base and ext else str(file_name)
+    #: 视频 `keep_name=True` 时保留原始名（真机「视频01」）；图片才剥扩展名取基名。
+    name = str(file_name) if keep_name else (base if base and ext else str(file_name))
     extension = f".{ext}" if base and ext else ""
-    # `path` 就是预分配 fileId 本身（`arkgoods/<id>` 或 `spectrum/<id>`）。
     path = str(file_id or "").strip()
     additional: dict[str, Any] = {
         "extension": extension,
@@ -481,7 +491,7 @@ def build_upload_item(
         "uploaderInfoModel": {
             "url": str(preview_url or ""),
             "bizName": "ark",
-            "scene": "goods_image",
+            "scene": scene,
             "fileId": path,
             "isSecret": True,
             "cloudType": 4,
@@ -497,7 +507,7 @@ def build_upload_item(
         additional["height"] = str(int(height))
     return {
         "sellerId": str(seller_id),
-        "type": MATERIAL_TYPE_FILE,
+        "type": item_type,
         "fatherDirectoryId": str(father_directory_id or "0"),
         "name": name,
         "size": int(size or 0),

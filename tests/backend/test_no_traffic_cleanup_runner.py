@@ -971,18 +971,24 @@ def test_record_cleanup_without_user_scope_deletes_nothing(tmp_path, monkeypatch
         db.close()
 
 
-def test_no_traffic_cleanup_job_is_manual_not_scheduled():
-    """用户口径「没有自动清理笔记的逻辑」的**可执行判据**：注册表默认就是 manual。
+def test_no_traffic_cleanup_job_is_gone_from_the_scheduler():
+    """用户口径「无流量笔记清理任务不应在任务列表展示」的**可执行判据**。
 
-    ⚠️ 原先 `default_trigger_type="cron" + default_cron="0 0 */6 * * *"`：配置里
-    有 `no_traffic_cleanup_interval_hours` 时会被装配成定时跑 —— 与用户口径正面冲突。
+    ⚠️ 本用例的前身 `test_no_traffic_cleanup_job_is_manual_not_scheduled` 断言
+    「注册表里该键默认 `manual`、`default_cron == ""`（留着键但只能手动触发）」
+    —— **已被 2026-10-07 用户口径取代**：「无流量笔记清理任务表移除该配置」+
+    「不应在任务列表展示」⇒ 键**整体移除**（不是再降一档）。原句保留在 git 历史。
+
+    ⚠️ 保留的边界（这个「移除」不能扩大化）：清理**本身**没退场 ——
+    `/users/no-traffic/cleanup` 端点、候选池、两张日志表都还在（见本文件其余用例）。
     """
+    from backend.app.core.initial_data import load_initial_scheduled_jobs
     from backend.app.services.job_registry import job_registry
 
-    spec = job_registry()["system.no_traffic_cleanup"]
-    assert spec.default_trigger_type == "manual", "手动触发任务，不进调度装配"
-    assert spec.default_cron == "", "没有自动跑的 cron（留着就是僵尸兜底）"
-    assert spec.builtin is True
+    assert "system.no_traffic_cleanup" not in job_registry(), "任务列表/调用目标里都不该再有它"
+    assert "system.no_traffic_cleanup" not in {
+        row["job_key"] for row in load_initial_scheduled_jobs()
+    }, "随包种子里也不许再播这一行（否则新装用户又冒出来）"
 
 def test_retention_param_reaches_the_purge_cutoff(tmp_path, monkeypatch):
     """保留期参数**真的走到 cutoff**（不是被 helper 接住就完了）。

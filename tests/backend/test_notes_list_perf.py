@@ -322,6 +322,8 @@ def test_list_relations_match_single_note_detail(api_client, seeded):
     assert ledger["images"] == ["p1.jpg", "p2.jpg"]
     assert ledger["stock"] == 3 and ledger["sales"] == 7
     # 台账里没有的那件：只给 item_id，其余留空（**不造假**、不拿缓存顶替）
+    #: `variant`（规格）2026-10-06 起进返回体（设计 12 §26.7）—— 它来自
+    #: `shop_note_goods.variant_desc`，夹具未种该映射行 ⇒ 缺值留空（不是缺字段）。
     assert missing == {
         "item_id": "ITEM-NOT-IN-LEDGER",
         "item_title": "",
@@ -329,6 +331,7 @@ def test_list_relations_match_single_note_detail(api_client, seeded):
         "images": [],
         "stock": None,
         "sales": None,
+        "variant": "",
     }, f"台账缺行的商品必须按缺值口径返回：{missing!r}"
 
 

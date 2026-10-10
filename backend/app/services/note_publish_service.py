@@ -88,6 +88,35 @@ TMP_SUBDIR = "tmp_note_publish"
 #: 单个媒体下载超时（秒）。
 _DOWNLOAD_TIMEOUT = 30
 
+#: 下载媒体直链的请求头。
+#:
+#: ⚠️ **User-Agent 不能省**（2026-10-07 实测定位，用户报「下载媒体失败（第 2 个）：
+#: HTTPError 405」）：平台 CDN（tencent-cos 前置）**对没有 UA 的请求回 405**，
+#: 而不是 403 —— 症状极具误导性（405 通常读作「方法不对」，实际是「缺 UA」）。
+#: 实测矩阵（同一个直链）：
+#:
+#: | 请求 | 结果 |
+#: |---|---|
+#: | 无 UA（原实现只有 `Referer: ""`） | **405** |
+#: | `Referer: ""` + UA | **200** |
+#: | 只带 UA | **200** |
+#:
+#: ⚠️ 与 `note_detail_ssr._default_user_agent` 是**同一类坑**（那边是「没 UA 被踢到登录页」）
+#: —— 项目里已踩过一次，下载媒体这条当时漏了。
+_MEDIA_DOWNLOAD_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
+)
+
+
+def _media_download_headers() -> dict[str, str]:
+    """下载媒体用的请求头（**唯一实现**：别处不要再手拼这份 header）。
+
+    `Referer` 置空是既有口径（商品图直链带小红书 Referer 会触发防盗链），
+    UA 见 `_MEDIA_DOWNLOAD_UA` 的说明。
+    """
+    return {"Referer": "", "User-Agent": _MEDIA_DOWNLOAD_UA}
+
 #: 单篇笔记的媒体上限（张）。设计 13 §32.2.1（用户 2026-09-23 口径：图片最多 6 张）——
 #: 与生成侧的 `product_note_gen_service.MAX_NOTE_IMAGES` 同值：生成时落几张，
 #: 发布时就传几张，**上限只在一处定义会漂**，所以两侧常量必须一起看。
@@ -408,7 +437,11 @@ def _download_media(db: Session, note: Note) -> list[dict]:
             ext = _extension_for(asset.url)
             target = temp_dir / _temp_file_name(item_id, index, ext)
             try:
-                response = requests.get(asset.url, timeout=_DOWNLOAD_TIMEOUT, headers={"Referer": ""})
+                response = requests.get(
+                    asset.url,
+                    timeout=_DOWNLOAD_TIMEOUT,
+                    headers=_media_download_headers(),
+                )
                 response.raise_for_status()
                 content = response.content
             except requests.RequestException as error:

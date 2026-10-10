@@ -1629,6 +1629,15 @@ def _stub_creator_transport(monkeypatch):
     monkeypatch.setattr(creator_runtime, "run_signer", lambda *args, **kwargs: canned_sign_result)
     # params.py binds run_signer into its own module namespace at import time.
     monkeypatch.setattr(creator_params, "run_signer", lambda *args, **kwargs: canned_sign_result)
+    # ⚠️ `XhsCreatorApiAdapter._api()` 走 `shared_client(SESSION_CREATOR, CreatorHttpClient)`
+    # —— 该函数**命中进程级缓存时不调工厂** ⇒ 只 patch `CreatorHttpClient` 是**假防线**：
+    # 只要**任何**更早的用例（实测：`test_account_metrics.py` 的 creator 通道日志用例）
+    # 已经建过真实 creator 会话，这里打上的替身永远不生效，permit 会**真打平台**、
+    # 回真实 406 ⇒ `success=False` ⇒ 账号被判 `expired`（症状：单跑绿、全量红）。
+    # 故必须把该平台的缓存会话**清掉**，工厂才会被调用、替身才落到新会话上。
+    from backend.app.adapters.xhs import http_session as _http_session
+
+    _http_session.close_all()
 
 
 # A Creator a1 is 52 chars; the mns0101 x3 length (196/197/198) scales with it,
@@ -6448,11 +6457,14 @@ def test_schedule_status_reports_scheduler_state_and_counts(tmp_path):
         assert payload["running"] is False
         assert payload["timezone"] == "Asia/Shanghai"
         assert payload["jobs"] == []
-        # 注册播种 12 行（全 active）+ 本测试 2 行（1 active + 1 paused）
-        # 2026-10-07：工作流退场使注册表少一项（已随 1e2e5ac 生效），但**每个用户**
-        # 播种的内置任务行仍为 16（`auto_ops.keyword_pipeline` 非 builtin 不播种）。
+        # 播种 13 行（全 active）+ 本测试 2 行（1 active + 1 paused）⇒
+        # total 15 / active 14 / paused 1。
+        # 2026-10-07 两轮缩减：① 工作流退场（1e2e5ac）少一项 `workflow.<id>`；
+        # ② `system.no_traffic_cleanup` 从注册表与种子移除（用户口径「无流量笔记
+        # 清理任务不应在任务列表展示」）⇒ total 16 → 15、active 15 → 14
+        #（原 active 15 = 14 播种全 active + 1 测试行；现 14 = 13 + 1）。
         assert payload["stats"]["total"] == 16
-        assert payload["stats"]["active"] == 14
+        assert payload["stats"]["active"] == 15
         assert payload["stats"]["paused"] == 1
         assert payload["stats"]["completed"] == 0
     finally:

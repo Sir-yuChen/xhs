@@ -39,6 +39,11 @@ datas = [
     _data("xhs_utils/xhs_core/js", "xhs_utils/xhs_core/js"),
     _data("xhs_utils/xhs_pc/js", "xhs_utils/xhs_pc/js"),
     _data("xhs_utils/xhs_creator/js", "xhs_utils/xhs_creator/js"),
+    # OCR PowerShell 脚本（单图 + 批量）—— `image_ocr_service` 用
+    # `Path(__file__).with_name(...)` 定位；frozen 下必须显式收进包，否则
+    # 「违规词检测」整条链路在安装版上 `OCR_SCRIPT_MISSING`。
+    _data("backend/app/services/win_ocr_json.ps1", "backend/app/services"),
+    _data("backend/app/services/win_ocr_batch.ps1", "backend/app/services"),
 ]
 
 # 托盘图标要进 _internal/assets/（launcher.asset_path 在 frozen 下从

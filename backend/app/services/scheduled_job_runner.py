@@ -334,6 +334,13 @@ def execute_job(
         params = dict(job.params or {})
         if params_override:
             params.update(params_override)
+        # 默认值兜底（2026-10-07 用户口径「必须有默认值」，注册表 `params_defaults`）：
+        # 存量任务行早于某个参数上线 ⇒ 行里没有那个键。不补的话 `spec.func(**)` 会因
+        # 缺参 `TypeError`（整轮任务失败），补了则行为 = 注册表声明的默认值。
+        # ⚠️ **兜底在浅校验之前**：否则「有默认值的键」会被判成必填缺失。
+        for default_key, default_value in spec.params_defaults.items():
+            if params.get(default_key) is None:
+                params[default_key] = default_value
         try:
             validate_params(spec, params)
         except ValueError as exc:

@@ -949,3 +949,31 @@ def export_rows(
 
     rows = db.scalars(stmt).all()
     return [_row_to_csv(row) for row in rows]
+
+
+def recent_item_ids_for_account(
+    db: Session, platform_account_id: int, *, limit: int = 3
+) -> list[str]:
+    """本账号台账里**最近同步过的商品 id**（设计 23 §4.4 用）。
+
+    用途：扫出「本店在用的规格名 → 规格 id」字典（`shop_draft_service
+    .collect_ledger_variant_ids`）。⚠️ 删掉了 `detail_json` 为空的候选 ——
+    规格明细只在 `detail_json` 里，同步过详情才有 SKU 规格可读；
+    拿一条没补过详情的商品去扫等于白打一次读请求。
+
+    ⚠️ **只读本地台账，零平台请求**：本函数不验证规格是否还有效，
+    它只负责「挑几个值得去问平台的行」。挑不到 ⇒ 空列表（调用方据此走
+    「规格留空 + 警告」路径，**不猜 id**）。
+    """
+    rows = db.scalars(
+        select(ShopProduct)
+        .where(
+            ShopProduct.platform_account_id == int(platform_account_id),
+            ShopProduct.detail_json.is_not(None),
+            ShopProduct.detail_json != "",
+            ShopProduct.platform_missing_at.is_(None),
+        )
+        .order_by(ShopProduct.synced_at.desc())
+        .limit(max(1, int(limit)))
+    ).all()
+    return [str(row.item_id or "") for row in rows if str(row.item_id or "").strip()]

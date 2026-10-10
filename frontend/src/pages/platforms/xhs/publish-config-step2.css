@@ -1,0 +1,851 @@
+/** 商品配置第二部分 · 样式（设计 27）。与第一部分同一视觉口径。 */.publish-config-step2 {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+/*: 每个分区一个外框（与第一部分「每部分加一外框」同口径）。 */.publish-config-step2 .config-section {
+  border: 1px solid var(--ant-color-border-secondary, #f0f0f0);
+  border-radius: 8px;
+  background: var(--ant-color-bg-container, #fff);
+  overflow: hidden;
+}
+.publish-config-step2 .config-section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: var(--ant-color-fill-quaternary, #fafafa);
+  border-bottom: 1px solid var(--ant-color-border-secondary, #f0f0f0);
+}
+/* 真机实测：分区标题 14px / 字重 400（普通），无竖条装饰。 */
+.publish-config-step2 .config-section-title {
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--ant-color-text, rgba(0, 0, 0, 0.88));
+}
+.publish-config-step2 .config-section-body {
+  padding: 8px 14px 12px;
+}
+/*: 一行 = 左标签 + 右控件（与第一部分同栅格）。 *//* 真机实测（单品第二页）：标签 x=520、控件 x=642 ⇒ 标签列 122px；
+   标签**左对齐**（text-align: start）、行 gap = 4px。 */
+.publish-config-step2 .config-field {
+  display: grid;
+  grid-template-columns: 126px 1fr;
+  gap: 4px;
+  padding: 8px 0;
+}
+.publish-config-step2 .config-field-label {
+  padding-top: 5px;
+  font-size: 14px;
+  color: var(--ant-color-text, rgba(0, 0, 0, 0.88));
+  text-align: start;
+  white-space: nowrap;
+  box-sizing: border-box;
+}
+
+/* 标签行内的说明图标（说明性文案一律 Tooltip 承载，不占正文布局）。 */
+.publish-config-step2 .config-field-label .field-help-icon {
+  margin-left: 4px;
+  vertical-align: -1px;
+}
+.publish-config-step2 .config-field-label .req-star {
+  color: var(--ant-color-error, #ff4d4f);
+  margin-right: 4px;
+}
+.publish-config-step2 .config-field-body {
+  min-width: 0;
+}
+.publish-config-step2 .config-field-hint {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--ant-color-text-secondary, rgba(0, 0, 0, 0.45));
+}
+.publish-config-step2 .price-table {
+  width: 100%;
+}
+/*: 继承自第一部分的只读值（避免两处输入不一致）。 */.publish-config-step2 .inherited-value {
+  display: inline-block;
+  padding: 4px 0;
+  font-size: 14px;
+  color: var(--ant-color-text, rgba(0, 0, 0, 0.88));
+  min-width: 240px;
+}
+.publish-config-step2 .inherited-thumb {
+  width: 64px;
+  height: 64px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid var(--ant-color-border, #d9d9d9);
+}
+/*: 标题行：输入框 + 右侧「智能生成」（与第一部分同款）。 */.publish-config-step2 .title-line {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+.publish-config-step2 .title-line .ant-input-affix-wrapper,.publish-config-step2 .title-line .ant-input {
+  flex: 1;
+}
+.publish-config-step2 .smart-gen-btn {
+  flex: none;
+}
+/* 真机：发货模式提示行在模式行下方、与控件同缩进 */.publish-config-step2 .delivery-hint {
+  display: block;
+  padding-left: 0;
+}
+/* 真机：每个已选规格一块动态配置（规格名 + 添加规格图 + 批量上传规格图 + 规格值排序） */
+/* ⚠️ 用户口径（2026-10-10）：规格块改用**.child-block**（灰底 + 虚线框 + 父子关系）
+   ⇒ 这里不再自带左边框与左内边距（避免与外框叠加成双层框）。只保留纵向排布。 */
+.publish-config-step2 .spec-config {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* 商品属性区布局。
+   ⚠️ 用户口径（2026-10-10，**覆盖** 2026-10-09 的「一行固定 5 个」）：
+     「属性调整为**一行两个**，**输入框的宽度自适应**，**移除对多选框的 css 样式
+       使用默认**」⇒ **2 列网格**（`repeat(2, minmax(0, 1fr))`）；标签在上、控件在下；
+      控件宽度 **100% 自适应**（不再写死 200px）。 */
+.publish-config-step2 .prop-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 16px;
+  row-gap: 12px;
+  padding-left: 2px;
+  align-items: start;
+  /*: ⚠️ 用户口径（2026-10-10）：「属性区域**固定高度最高 400px**，**支持上下滚动**，
+      **低于 400px 自适应**」⇒ `max-height` + `overflow-y: auto`（与 SKU 列表同款）。 */
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+/* 多选 / 长文本：**不换行**（保持 1 格，控件内部多选值不折行）。 */
+.publish-config-step2 .prop-cell.span-2 {
+  grid-column: span 1;
+}
+
+/* 属性分组小标题（真机：「关键属性 3/4」/「其他属性 11/19」）。 */
+.publish-config-step2 .prop-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 8px;
+}
+
+.publish-config-step2 .prop-group-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ant-color-text, rgba(0, 0, 0, 0.88));
+}
+
+/* 说明图标（说明性文案一律收进 Tooltip，不占布局）。 */
+.publish-config-step2 .section-help-icon {
+  color: var(--ant-color-text-quaternary, rgba(0, 0, 0, 0.25));
+  cursor: help;
+  font-size: 13px;
+}
+
+/* ⚠️ 用户口径（2026-10-09）：**标签在上、控件在下**（不是左右两栏）——
+   早先 `align-items:center` 的左右排法会让标签与输入框**重叠**（用户实测
+   「输入框和标题重叠」）。 */
+.publish-config-step2 .prop-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  min-width: 0;
+  /*: 5 列网格：每格等宽，不按内容伸缩。 */
+  max-width: 100%;
+}
+
+.publish-config-step2 .prop-cell .prop-label {
+  /* 标签占一行，超长截断 + 悬停 title 兜全文。 */
+  display: block;
+  width: 100%;
+  color: var(--ant-color-text, rgba(0, 0, 0, 0.88));
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.publish-config-step2 .prop-cell .req-star {
+  color: var(--ant-color-error, #ff4d4f);
+  margin-right: 4px;
+}
+
+/* ⚠️ 用户口径（2026-10-10，**覆盖** 2026-10-09 的「固定 200px」）：
+   「**输入框的宽度自适应**」⇒ 控件铺满所在网格单元（100%），不再写死宽度。 */
+.publish-config-step2 .prop-cell .prop-control,
+.publish-config-step2 .prop-cell .ant-select,
+.publish-config-step2 .prop-cell .ant-input,
+.publish-config-step2 .prop-cell .ant-select-selector {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+
+/* 多选 / 长文本格：同样自适应（不再给单独的 380px 上限）。 */
+.publish-config-step2 .prop-cell.span-2 .prop-control,
+.publish-config-step2 .prop-cell.span-2 .ant-select,
+.publish-config-step2 .prop-cell.span-2 .ant-input {
+  width: 100%;
+  max-width: 100%;
+}
+
+/* 真机：「商品发布助手」是第二页顶部常驻条 +「发布提示 (N)」可展开面板。 */
+.publish-config-step2 .publish-helper {
+  border: 1px solid var(--ant-color-border-secondary, #f0f0f0);
+  border-radius: 8px;
+  background: var(--ant-color-fill-quaternary, #fafafa);
+}
+
+.publish-config-step2 .publish-helper-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+}
+
+.publish-config-step2 .publish-helper-title {
+  font-weight: 600;
+}
+
+.publish-config-step2 .publish-helper-body {
+  border-top: 1px solid var(--ant-color-border-secondary, #f0f0f0);
+  padding: 8px 14px 12px;
+  background: var(--ant-color-bg-container, #fff);
+}
+
+/* 用户口径：**两列**（字段 + 错误原因）；一行放不下用 Tooltip，不换行撑高。 */
+.publish-config-step2 .publish-helper-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 0;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.publish-config-step2 .publish-helper-field {
+  flex: 0 0 96px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.publish-config-step2 .publish-helper-reason {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 用户口径（2026-10-10）：助手按千帆分区展示 —— 分区标题行 + 「N 项必填」徽标。 */
+.publish-config-step2 .publish-helper-section {
+  margin-bottom: 10px;
+}
+
+.publish-config-step2 .publish-helper-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 0;
+}
+
+.publish-config-step2 .publish-helper-section-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.publish-config-step2 .publish-helper-section-count {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--ant-color-primary, #1677ff);
+  background: var(--ant-color-primary-bg, #e6f4ff);
+  border-radius: 4px;
+  padding: 0 6px;
+  line-height: 18px;
+}
+
+/* 真机：每个已选规格一行 —— 行内左「规格名 + 添加规格图 + 批量上传规格图」，
+   右「规格值排序(+上移/下移)」；下方规格值输入框。
+   ⚠️ `.spec-config` 主规则在上方（唯一一份）—— 这里不再重复定义。 */
+
+.publish-config-step2 .spec-config-head {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  line-height: 32px;
+}
+
+.publish-config-step2 .spec-config-head .spec-name {
+  min-width: 28px;
+}
+
+.publish-config-step2 .child-block-title .spec-sort-actions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 真机：**一个输入框一个规格值**（186px），多个框横向排列、可换行。 */
+/* 用户口径（2026-10-09）：规格值输入框**固定 200px**，但**横向排列**（多个框同一行、
+   超宽自动换行）—— 不要每个单独占一行，否则规格一多整块拉得很高。 */
+.publish-config-step2 .spec-config-values {
+  padding-left: 2px;
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.publish-config-step2 .spec-config-values .spec-value-input,
+.publish-config-step2 .spec-config-values .ant-input {
+  width: 200px;
+  flex: 0 0 200px;
+}
+
+/* 规格值一项 = **前缀缩略图 + 输入框**（用户口径 2026-10-09：输入框前缀展示规格图）。 */
+.publish-config-step2 .spec-value-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.publish-config-step2 .spec-value-thumb {
+  width: 32px;
+  height: 32px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid var(--ant-color-border, #d9d9d9);
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.publish-config-step2 .spec-value-add-img {
+  color: var(--ant-color-text-quaternary, rgba(0, 0, 0, 0.35));
+  cursor: pointer;
+}
+
+.publish-config-step2 .spec-value-hint {
+  font-size: 12px;
+  padding-left: 2px;
+}
+
+/* 图文信息 / 智能识图共用的媒体缩略图（悬停才显删除，不常驻）。 */
+.publish-config-step2 .media-thumb {
+  width: 72px;
+  height: 72px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid var(--ant-color-border, #d9d9d9);
+  display: block;
+}
+
+.publish-config-step2 .media-thumb-wrap {
+  position: relative;
+  display: inline-block;
+  line-height: 0;
+}
+
+/* 覆盖整块的透明点击层（点缩略图开大图预览）。 */
+.publish-config-step2 .media-thumb-open {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: transparent;
+  cursor: zoom-in;
+  padding: 0;
+}
+
+/* 预览弹窗内主体 + 分页切换条。 */
+.media-preview-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.media-preview-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.publish-config-step2 .media-thumb-remove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  /* 盖在点击层之上（否则点不到删除）。 */
+  z-index: 2;
+  width: 20px;
+  height: 20px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+/* ⚠️ 用户口径（2026-10-09）：删除图标**不常驻**，悬停该图才显形。 */
+.publish-config-step2 .media-thumb-wrap:hover .media-thumb-remove {
+  display: flex;
+}
+
+/* 真机：**左右两栏** —— 左栏「商品发布助手/发布提示」224px（含内边距），
+   右栏参数配置（good-detail-container）自适应；两栏间距 = 480-256-224 = 0（右栏紧贴）。 */
+.publish-config-step2 .publish-two-col {
+  display: flex;
+  align-items: flex-start;
+  gap: 24px;
+}
+
+.publish-config-step2 .publish-col-left {
+  flex: 0 0 200px;
+  position: sticky;
+  top: 12px;
+}
+
+.publish-config-step2 .publish-col-right {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* 用户口径：属性标题始终展示；无值时给一行说明（**不造假数据**）。 */
+.publish-config-step2 .prop-empty {
+  display: block;
+  padding: 4px 0;
+  font-size: 12px;
+}
+
+/* ⚠️ 原 `.delivery-varying` 的「零框 + 零缩进」规则已**删除**（2026-10-10）：
+   它在 2026-10-09 是正确口径，但已被「灰底 + 虚线框 + 父子关系」**取代**，
+   且其特异性（`.publish-config-step2 .delivery-varying`）**高于** `.child-block`
+   ⇒ 残留下来会把子块的灰底虚线框**覆盖掉**（用户实测「发货模式的 ui 布局不对」）。
+   现在发货模式子块与其它子块**共用 `.child-block` 一套样式**。 */
+
+/* 真机：点「发货模式」后出现**发货模式说明**（6 条），当前模式那条高亮。 */
+.publish-config-step2 .delivery-doc {
+  margin: 4px 0 4px 126px;
+  padding: 8px 12px;
+  background: var(--ant-color-fill-quaternary, #fafafa);
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 20px;
+  color: var(--ant-color-text-secondary, rgba(0, 0, 0, 0.45));
+}
+
+/* 发货模式**总览**一句（说明已按模式拆成 Tooltip，这里只留一行 + 图标）。 */
+.publish-config-step2 .delivery-overview {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 4px 126px;
+  font-size: 12px;
+  line-height: 20px;
+  color: var(--ant-color-text-secondary, rgba(0, 0, 0, 0.45));
+}
+
+/* 发货模式 Radio 的 label：文案 + 说明图标同行（图标不换行、不撑高按钮）。 */
+.publish-config-step2 .delivery-mode-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.publish-config-step2 .delivery-mode-option .delivery-help-icon {
+  vertical-align: middle;
+}
+
+.publish-config-step2 .delivery-doc-line {
+  padding: 2px 0;
+}
+
+.publish-config-step2 .delivery-doc-line.is-active {
+  color: var(--ant-color-text, rgba(0, 0, 0, 0.88));
+  font-weight: 500;
+}
+
+/* 真机：物流模板未选时提示「请先选择物流模板」（发货时间选项同时禁用）。 */
+.publish-config-step2 .delivery-need-template {
+  display: block;
+  margin: 4px 0 4px 126px;
+  font-size: 12px;
+}
+
+/* 现货+预售模式：展开后被折叠的预售批次候选（用户口径：默认展开）。 */
+.publish-config-step2 .presale-batch-chip {
+  padding: 2px 10px;
+  border: 1px solid var(--config-border, #e5e5e5);
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+/* 助手里的**可点配置入口**（尺码信息 / 商品资质）—— 点开才与后端交互。 */
+.publish-config-step2 .publish-helper-entry {
+  justify-content: space-between;
+  margin-top: 6px;
+}
+.publish-config-step2 .publish-helper-entry .publish-helper-field {
+  color: var(--color-text-paragraph, #4a4a4a);
+}
+
+/* 开售时间＝「定时开售」时出现的时间选择器（真机 expectedPurchaseTime）。 */
+.publish-config-step2 .shelf-time-picker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+/* 规格值规格图上传按钮（每个规格值一个，替代原先只在输入框尾部一个 +）。 */
+.publish-config-step2 .spec-value-img-btn {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed var(--ant-color-border, #d9d9d9);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ant-color-text-quaternary, rgba(0, 0, 0, 0.45));
+  cursor: pointer;
+}
+
+/* 编辑价格 / 编辑库存弹窗的行（标签 + 输入 + 批量填写按钮）。 */
+.publish-config-step2 .price-edit-field,
+.publish-config-step2 .ant-modal .price-edit-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.price-edit-field .price-edit-label {
+  width: 48px;
+  color: var(--ant-color-text, rgba(0, 0, 0, 0.88));
+}
+
+/* 价格及库存表顶部：左批量修改条 + 右「搜索规格名称」（用户口径 2026-10-09：
+   「价格及库存的搜索规格名称模糊搜索放表格右上角」）。 */
+.publish-config-step2 .price-table-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+/* 搜索框推到最右（其余按钮靠左紧凑排列，用户口径 2026-10-10：按钮间不空大块）。 */
+.publish-config-step2 .price-table-head > .ant-input-affix-wrapper,
+.publish-config-step2 .price-table-head > .ant-input-search {
+  margin-left: auto;
+}
+
+/* SKU 行级「启用/不启用」切换（用户口径 2026-10-10，真机 `sku-enabled-btn`）。
+   文案 = 点后变成的状态（启用中显示「不启用」）。 */
+.publish-config-step2 .sku-enabled-btn {
+  font-size: 12px;
+  white-space: nowrap;
+}
+.publish-config-step2 .price-row-disabled .spec-cell-text {
+  color: var(--ant-color-text-quaternary, rgba(0, 0, 0, 0.25));
+}
+
+/* 不启用的 SKU 行**整行置灰**（用户口径 2026-10-10：置灰 + 不可编辑）。 */
+.publish-config-step2 .price-row-disabled td {
+  opacity: 0.45;
+}
+.publish-config-step2 .price-row-disabled td .ant-input {
+  color: var(--ant-color-text-quaternary, rgba(0, 0, 0, 0.25));
+}
+/* 但「启用」切换链接仍要可点（否则停用的行永远无法重新启用）。 */
+.publish-config-step2 .price-row-disabled td .sku-enabled-btn {
+  opacity: 1;
+}
+
+/* 规格图选择弹窗（预检 SKU 图**卡片小图**网格；选中**红框** + 支持大图预览）。 */
+.sku-pick-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+.sku-pick-card {
+  width: 96px;
+  border: 2px solid var(--ant-color-border, #d9d9d9);
+  border-radius: 8px;
+  padding: 4px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  background: #fff;
+  box-sizing: border-box;
+}
+/* 用户口径（2026-10-10）：选中用**红框**。 */
+.sku-pick-card.picked {
+  border-color: #ff4d4f;
+  box-shadow: 0 0 0 2px rgba(255, 77, 79, 0.2);
+}
+/* ⚠️ 用户口径（2026-10-10）：「被选中的规格图不能重复被选中」——
+   已被**其它**规格值占用的图：置灰 + 不可点 + 「已使用」角标。 */
+.sku-pick-card.used {
+  cursor: not-allowed;
+  opacity: 0.5;
+  background: var(--ant-color-fill-quaternary, #fafafa);
+}
+.sku-pick-card-used {
+  font-size: 11px;
+  line-height: 18px;
+  color: var(--ant-color-text-tertiary, rgba(0, 0, 0, 0.45));
+}
+.sku-pick-card-img {
+  width: 84px;
+  height: 84px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: var(--ant-color-fill-quaternary, #fafafa);
+  border-radius: 4px;
+}
+.sku-pick-card-img img {
+  width: 84px;
+  height: 84px;
+  object-fit: cover;
+}
+.sku-pick-card-name {
+  width: 84px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--ant-color-text-secondary, rgba(0, 0, 0, 0.45));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: center;
+}
+.sku-pick-card-zoom {
+  font-size: 11px;
+  padding: 0;
+  height: 18px;
+}
+.sku-pick-thumb-placeholder {
+  font-size: 12px;
+  color: var(--ant-color-text-quaternary, rgba(0, 0, 0, 0.35));
+}
+
+/* 规格值输入框前缀里的规格图 / 加号（真·Input prefix，与输入框一体）。
+   ⚠️ antd v6 的 `.ant-input-prefix` 可能让子元素不接收点击 —— 显式放开 pointer-events，
+   否则「规格图前缀点击无响应」（用户实测 2026-10-09）。 */
+.publish-config-step2 .spec-value-input .ant-input-prefix {
+  margin-inline-end: 6px;
+  pointer-events: auto;
+  cursor: pointer;
+}
+.publish-config-step2 .spec-value-input .spec-value-thumb {
+  width: 22px;
+  height: 22px;
+  object-fit: cover;
+  border-radius: 4px;
+  cursor: pointer;
+  display: block;
+  pointer-events: auto;
+}
+.publish-config-step2 .spec-value-input .spec-value-img-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 1px dashed var(--ant-color-border, #d9d9d9);
+  border-radius: 4px;
+  color: var(--ant-color-text-quaternary, rgba(0, 0, 0, 0.45));
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+/* **统一上传槽**（商品主图 / 商品视频 / 商品详情图 共用；与「智能识图」区同一套观感）。
+   ⚠️ 用户口径（2026-10-10）：「应使用图片上传组件，详情图和视频均使用上传组件不要使用按钮」。
+   ⚠️ ⚠️ 这些槽在**组件根 div 内**（不是 portal 里的弹窗）⇒ 样式可挂在组件根下，
+   但为与 `.sku-pick-*` 口径一致、且便于日后挪进弹窗，这里写成全局类名。 */
+.unified-upload-slot {
+  position: relative;
+  width: 72px;
+  height: 72px;
+  border: 1px dashed var(--ant-color-border, #d9d9d9);
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  background: var(--ant-color-fill-quaternary, #fafafa);
+  flex: 0 0 auto;
+}
+.unified-upload-slot:hover {
+  border-color: var(--ant-color-primary, #1677ff);
+}
+.unified-upload-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  font-size: 12px;
+  color: var(--ant-color-text-secondary, rgba(0, 0, 0, 0.45));
+  pointer-events: none;
+}
+/* 真机做法：**透明铺满的 `<input type=file>`** —— 点整块都能选文件。 */
+.unified-upload-picker {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+/* **子参数块**（发货模式切换出的参数 / 商品规格勾选后的配置 / 定时开售参数）。
+   用户口径（2026-10-10）：「发货模式切换得到的不同参数属性页面 ui 缩进到与第二个
+   发货模式起头使用**灰色背景**单独**虚线框**，页面布局也要看到**父子关系**；
+   商品规格勾选后同理；定时开售同理」。
+
+   口径（取代 2026-10-09 的「去除虚线框缩进」）：
+   * **缩进**：与「第二个发货模式起头」对齐 ⇒ 视觉上从属父字段（父子关系）；
+   * **灰色背景** + **虚线框**：一眼看出「这是父项切换出来的子参数」；
+   * 块内**小标题**说明它属于哪个父项（规格块的小标题即**规格名**，
+     取代原先「最左侧再挂一个 {name} 标题」的写法）。 */
+.child-block {
+  margin: 4px 0 8px;
+  padding: 10px 12px;
+  background: var(--ant-color-fill-quaternary, #fafafa);
+  border: 1px dashed var(--ant-color-border, #d9d9d9);
+  border-radius: 6px;
+}
+/* ⚠️ 子块内的参数**不得再套 `Field`**（2026-10-10 实测）：子块已在父字段的 body 内，
+   而 `Field` 自带 126px 标签列 ⇒ **双重缩进**（标签被推进第二列，用户报「ui 布局不对」）。
+   ⇒ 子块内一律用**行式** `.child-param-row`（与「开售时间」的 `.shelf-time-picker` 同款）：
+   标签在左（定宽，与块内其它行对齐）、控件紧随、说明图标收尾。 */
+.child-param-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 6px 0;
+}
+.child-param-row .child-param-label {
+  flex: 0 0 auto;
+  min-width: 96px;
+  padding-top: 5px;
+  font-size: 13px;
+  color: var(--ant-color-text, rgba(0, 0, 0, 0.88));
+  white-space: nowrap;
+}
+/* 兜底：万一以后又有人把 `Field` 塞进子块，也不让它再叠一层标签列。 */
+.child-block .config-field {
+  grid-template-columns: auto 1fr;
+}
+.child-block-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ant-color-text, rgba(0, 0, 0, 0.88));
+}
+
+/* 父子关系（缩进对齐）：规格块是**顶层**元素（不是某个 Field 的 body），
+   故显式按父字段的**标签列宽 126px** 缩进 —— 视觉上落在「商品规格」字段下方，
+   与上面各参数的控件列同一条竖线（用户口径「页面布局也要看到父子关系」）。
+   （发货模式 / 定时开售的子块本就在各自 Field 的 body 内，天然已缩进到同一列。） */
+.publish-config-step2 .child-block.delivery-varying,
+.publish-config-step2 .child-block.spec-config {
+  margin-left: 126px;
+}
+
+/* ⚠️ 这些预览件在 **portal 之外**（PublishStep 在弹窗内联渲染），但为与
+   `.sku-pick-*` / `.unified-upload-*` 的口径一致，仍写成全局类名。 */
+.publish-preview-section {
+  border: 1px solid var(--ant-color-border-secondary, #f0f0f0);
+  border-radius: 8px;
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+.publish-preview-title {
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  background: var(--ant-color-fill-quaternary, #fafafa);
+  border-bottom: 1px solid var(--ant-color-border-secondary, #f0f0f0);
+}
+.publish-preview-body {
+  padding: 10px 12px;
+}
+.publish-preview-media {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.publish-preview-media-label {
+  font-size: 12px;
+  color: var(--ant-color-text-secondary, rgba(0, 0, 0, 0.45));
+  margin-right: 4px;
+}
+.publish-preview-thumb {
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid var(--ant-color-border, #d9d9d9);
+  cursor: zoom-in;
+  background: #000;
+}
+/* 弹窗蒙版下的极小锚点（`Spin` 需要一个子节点）。 */
+.sku-pick-spin-anchor {
+  display: block;
+  height: 0;
+}
+
+/* 第三步预览里的一行摘要（**不用列表**展示价格及库存明细）。 */
+.publish-preview-summary {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 20px;
+  color: var(--ant-color-text-secondary, rgba(0, 0, 0, 0.45));
+}
+
+/* 顶部失败原因公告里的图片上传失败明细（多处失败逐行，故不用一行 join 的 message）。 */
+.publish-fail-images {
+  max-height: 200px;
+  overflow-y: auto;
+  font-size: 12px;
+  line-height: 20px;
+}
+
+/* SKU 列表：**最高 300px**、低于则自适应（用户口径 2026-10-10：
+   「规格列表高度调整为最高 300px，低于 300px 的自适应」）。 */
+.publish-preview-sku-list {
+  margin-top: 8px;
+  max-height: 300px;
+  overflow-y: auto;
+}

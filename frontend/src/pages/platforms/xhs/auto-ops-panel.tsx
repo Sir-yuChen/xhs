@@ -579,38 +579,49 @@ export function AutoOpsPanel() {
 
       {/* Edit Modal */}
       <Modal
-                centered
-                title="编辑自动运营任务"
+        centered
+        title="编辑自动运营任务"
         open={editTask !== null}
         onOk={handleSaveEdit}
         onCancel={() => setEditTask(null)}
         confirmLoading={isSaving}
         okText="保存"
         cancelText="取消"
+        // 2026-10-07 用户口径「编辑任务和新增弹窗全部重新布局……全屏的 70%」：
+        // 与任务中心的同类弹窗**同一尺寸口径**（原先此处未设 width ⇒ 落 antd 默认 520，
+        // 比别处更窄更长）。
+        width="70%"
+        styles={{ body: { maxHeight: "70vh", overflowY: "auto", paddingTop: 12 } }}
       >
-        <Form layout="vertical" style={{ marginTop: 16 }}>
-          <Form.Item label="任务名称">
-            <Input
-              value={editName}
-              onChange={(e) => setEditName(e.target.value)}
-              maxLength={128}
-            />
-          </Form.Item>
-          <Form.Item label="关键词（每行一个）">
-            <TextArea
-              value={editKeywords}
-              onChange={(e) => setEditKeywords(e.target.value)}
-              rows={3}
-            />
-          </Form.Item>
-          <Form.Item label="AI 改写指令">
-            <TextArea
-              value={editInstruction}
-              onChange={(e) => setEditInstruction(e.target.value)}
-              rows={3}
-              maxLength={2000}
-            />
-          </Form.Item>
+        <Form layout="vertical" style={{ marginTop: 8 }}>
+          <Row gutter={16} align="top">
+            <Col xs={24} md={12}>
+              <Form.Item label="任务名称">
+                <Input
+                  value={editName}
+                  onChange={(e) => setEditName(e.target.value)}
+                  maxLength={128}
+                />
+              </Form.Item>
+              <Form.Item label="关键词（每行一个）">
+                <TextArea
+                  value={editKeywords}
+                  onChange={(e) => setEditKeywords(e.target.value)}
+                  rows={6}
+                />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={12}>
+              <Form.Item label="AI 改写指令">
+                <TextArea
+                  value={editInstruction}
+                  onChange={(e) => setEditInstruction(e.target.value)}
+                  rows={6}
+                  maxLength={2000}
+                />
+              </Form.Item>
+            </Col>
+          </Row>
 
           <Form.Item label="调度设置">
             <ScheduleFields value={editSchedule} onChange={setEditSchedule} />

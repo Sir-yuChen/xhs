@@ -29,6 +29,9 @@ export const QUEUE_ITEM_TASK_TYPES: readonly string[] = [
   "xhs_note_sync_item",
   "xhs_note_publish_item",
   "xhs_note_gen_item",
+  "xhs_note_gen_llm_item",
+  //: 2026-10-11：同步商品信息队列（一个商品 = 一行，不绑定笔记）。
+  "xhs_goods_sync_item",
 ];
 
 /**
@@ -42,6 +45,9 @@ export const QUEUE_BATCH_TASK_TYPES: readonly string[] = [
   "xhs_note_sync_batch",
   "xhs_note_publish_batch",
   "xhs_note_gen_batch",
+  "xhs_note_gen_llm_batch",
+  //: 2026-10-11：同步商品信息队列的批次父行。
+  "xhs_goods_sync_batch",
 ];
 
 /** 队列记录页认的全部类型（队列项 + 批次行）。 */
@@ -98,6 +104,10 @@ export const TASK_TYPE_LABELS: Record<string, string> = {
   xhs_note_sync_batch: "同步批次",
   xhs_note_publish_batch: "发布批次",
   xhs_note_gen_batch: "生成批次",
+  xhs_note_gen_llm_batch: "LLM 生成批次",
+  //: 2026-10-11：同步商品信息队列（队列项 + 批次）。
+  xhs_goods_sync_item: "同步商品信息",
+  xhs_goods_sync_batch: "同步商品信息批次",
   // 账号级全量同步 / 商品同步
   xhs_note_sync: "账号全量同步",
   xhs_shop_goods_sync: "店铺商品同步",
@@ -204,6 +214,10 @@ export const TASK_SOURCE_LABELS: Record<string, string> = {
   // 遗留值（迁移 d3e4f5a6b7c8 回填的存量行）：按钮级细分之前的「手动」，
   // 代码不再写它。说清是早期数据，不冒充某个具体按钮。
   manual: "页面按钮（早期数据）",
+  // 2026-10-07：「每日发布商业笔记」定时任务（设计 15 §19）—— 生成与发布都由
+  // 后台任务发起（**无人在前端点**），文案要说清「不是你点的」，否则用户在队列
+  // 记录里看到一堆记录会以为是自己误操作。
+  auto_business_note_publish: "每日发布商业笔记任务",
 };
 
 /**
@@ -234,6 +248,9 @@ export const TASK_SOURCE_TIPS: Record<string, string> = {
     "定时任务触发 —— 同一次执行在「任务中心 · 任务日志」里还有一条调度记录（那边记「什么时候跑」，本页记「跑完了什么」）。",
   manual:
     "早期数据（来源按按钮细分之前入队的）：确实是从页面上点出来的，但那时还不记录具体是哪个按钮。",
+  auto_business_note_publish:
+    "「每日发布商业笔记」定时任务自动发起的（你没点过任何按钮）：它按参数挑账号 → 挑没发过笔记的商品"
+    + " → 生成 → 发布。同一次执行在「任务中心 · 任务日志」里还有一条调度记录。",
 };
 
 /**
@@ -399,6 +416,13 @@ export function canRetryTask(status: string): boolean {
  */
 export function isProductGenItem(taskType: string): boolean {
   return taskType === GEN_ITEM_TASK_TYPE;
+}
+
+/** 同步商品信息队列项（2026-10-11：一个商品 = 一行，不绑定笔记）。 */
+export const GOODS_SYNC_ITEM_TASK_TYPE = "xhs_goods_sync_item";
+
+export function isGoodsSyncItem(taskType: string): boolean {
+  return taskType === GOODS_SYNC_ITEM_TASK_TYPE;
 }
 
 /**
@@ -581,6 +605,14 @@ export function executionDetailLines(row: QueueRecordRow): string[] {
 
   if (isProductGenItem(row.task_type)) {
     const lines = [genItemProductText(payload as { item_id?: string; item_name?: string })];
+    lines.push(_itemOutcomeLine(row, payload));
+    return lines;
+  }
+
+  //: 同步商品信息队列项：主体 = 商品 ID（一个商品一行，不绑定笔记）。
+  if (isGoodsSyncItem(row.task_type)) {
+    const itemId = String(payload.item_id ?? "").trim();
+    const lines = itemId ? [`商品 #${itemId}`] : [];
     lines.push(_itemOutcomeLine(row, payload));
     return lines;
   }

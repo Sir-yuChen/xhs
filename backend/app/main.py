@@ -14,9 +14,11 @@ from backend.app.api.platforms.xhs import (
     analytics,
     crawl,
     creator,
+    forbidden_words,
     material_files,
     materials,
     monitoring,
+    package_precheck,
     pc,
     product_notes,
     qianfan,
@@ -52,6 +54,10 @@ from backend.app.services.product_note_gen_service import (
     ensure_generate_worker,
     start_generate_worker_watchdog,
     stop_generate_worker_watchdog,
+)
+from backend.app.services.shop_goods_sync_service import (
+    ensure_goods_sync_worker,
+    stop_goods_sync_worker,
 )
 from backend.app.services.scheduler_service import (
     seed_builtin_jobs_from_initial_data,
@@ -157,6 +163,7 @@ async def lifespan(app: FastAPI):
     ensure_publish_worker()
     ensure_generate_worker()
     ensure_llm_generate_worker()
+    ensure_goods_sync_worker()
     ensure_account_task_worker()
     try:
         yield
@@ -223,6 +230,10 @@ def create_app() -> FastAPI:
     app.include_router(qianfan.router, prefix="/api")
     app.include_router(product_notes.router, prefix="/api")
     app.include_router(materials.router, prefix="/api")
+    # v2.50：违规词库（本地自维护词表，供数据包图片 OCR 精确过滤；设计 25 §2）
+    app.include_router(forbidden_words.router, prefix="/api")
+    # v2.50：数据包预检（上传 → 解析 → OCR 红框；设计 25 §4）
+    app.include_router(package_precheck.router, prefix="/api")
     # v2.31：素材**文件**的增删（会动用户磁盘 ⇒ 另一套语义，单独成模块）
     app.include_router(material_files.router, prefix="/api")
     app.include_router(crawl.router, prefix="/api")
@@ -252,6 +263,23 @@ def create_app() -> FastAPI:
                 return response
 
             app.mount("/", StaticFiles(directory=str(frontend_dist), html=True), name="frontend")
+
+            #: ⚠️ 缓存头（2026-10-10 实测补）：Starlette 的 StaticFiles **不发 Cache-Control**
+            #: ⇒ 浏览器走**启发式缓存**，`index.html` 被缓存后不再回源校验，于是长期指向
+            #: **旧的** `index-<hash>.js`（用户多轮报「依旧」的真根因 —— 服务端已是新包，
+            #: 但页面加载的是旧 hash）。
+            #: 口径：`index.html` **必须回源校验**（`no-cache`），带 hash 的 `assets/*`
+            #: **可长缓存**（内容变了 hash 必变，天然免冲突）。
+            @app.middleware("http")
+            async def _static_cache_headers(request, call_next):
+                response = await call_next(request)
+                path = request.url.path
+                if path.startswith("/assets/"):
+                    response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+                elif "." not in path.split("/")[-1]:
+                    #: SPA 入口（及客户端路由）—— 一律回源。
+                    response.headers["Cache-Control"] = "no-cache"
+                return response
 
     return app
 

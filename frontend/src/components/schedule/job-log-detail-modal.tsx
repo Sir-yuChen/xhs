@@ -38,6 +38,7 @@ import {
 } from "../../lib/schedule";
 import { formatDuration, formatShanghaiTime } from "../../lib/time";
 import type { ScheduledJobLog } from "../../types";
+import type { AccountNameMap } from "../../lib/task-records";
 
 const { Text, Paragraph } = Typography;
 
@@ -85,6 +86,15 @@ export type JobLogDetailModalProps = {
    * 实现）—— 与任务列表「调用目标」列共用同一份数据源，改一处两处同步。
    */
   targetNames?: Record<string, string>;
+  /**
+   * `账号 id → 账号名` 表（来自 `fetchAccounts()` + lib 的 `accountNameMap()`）。
+   *
+   * 用户口径（2026-10-07）：「快照配置区域的执行账号应展示**具体执行了哪些账号**」——
+   * 快照里只有 id（`params.account_ids`），名字得由调用方注入。
+   * ⚠️ 与任务记录页**同一份实现**（`AccountNameMap` + `accountNameMap()`），不另写映射。
+   * 拉不到 ⇒ 退 `账号 #id`（缺值不猜，硬约束⑤）。
+   */
+  accountNames?: AccountNameMap;
   onCancel: () => void;
 };
 
@@ -92,6 +102,7 @@ export function JobLogDetailModal({
   open,
   log,
   targetNames = {},
+  accountNames = {},
   onCancel,
 }: JobLogDetailModalProps) {
   const snapshot = log?.config_snapshot ?? null;
@@ -226,9 +237,29 @@ export function JobLogDetailModal({
                     {targetAccountName || "1 个账号"}
                   </Descriptions.Item>
                 ) : accountIds !== null ? (
-                  // 定时 / 手动「执行一次」的**任务配置**口径：空 = 本人全部账号。
+                  // 定时 / 手动「执行一次」：**逐账号列出具体是谁**（2026-10-07 用户口径
+                  // 「快照配置区域的执行账号应展示具体执行了哪些账号」）。
+                  //
+                  // 口径与上面那条的差异：任务配置里的 `account_ids` **空 = 本人全部账号**
+                  // —— 那种情况说不出具体是谁（快照里没有账号集合），**照旧显「全部账号」**，
+                  // 不猜、不临时去查库（详情弹窗是只读回看，不该产生新的取数语义）。
                   <Descriptions.Item label="执行账号" span={2}>
-                    {accountIds.length === 0 ? "全部账号" : `${accountIds.length} 个账号`}
+                    {accountIds.length === 0 ? (
+                      "全部账号"
+                    ) : (
+                      <Space direction="vertical" size={0}>
+                        {accountIds.map((id) => (
+                          // ⚠️ **只展示账号名称，不展示 id**（2026-10-07 用户口径）。
+                          // 名字取自 `accountNames`（lib 的 `accountNameMap`）；
+                          // 取不到才退 `账号 #id` —— 那是**兜底**不是常态（缺值不猜，
+                          // 但也不能显示空白，否则用户看不出这条日志跑了哪个账号）。
+                          <Text key={id}>{accountNames[String(id)] || `账号 #${id}`}</Text>
+                        ))}
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          共 {accountIds.length} 个账号
+                        </Text>
+                      </Space>
+                    )}
                   </Descriptions.Item>
                 ) : null}
                 <Descriptions.Item label="调用参数" span={2}>

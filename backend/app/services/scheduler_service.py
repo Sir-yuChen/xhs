@@ -661,10 +661,14 @@ def _cron_every_n_hours(hours: int) -> str:
     return "0 0 0 * * *"
 
 
-#: 种子行备注（R24）：初始化数据那条路径的默认文案
-_BUILTIN_SEED_REMARK = "系统内置任务（应用初始化数据，随安装附有；调度属性可调）"
-#: 兜底路径（`config/initial_data/` 里没写这个 job_key）的文案 —— 显式区分来源
-_FALLBACK_SEED_REMARK = "系统内置任务（代码默认种子，未在应用初始化数据中声明；调度属性可调）"
+#: 种子行备注（2026-10-07 用户口径「备注全部改为：系统内置任务」）：
+#: 原先按来源分两种长文案（随包初始化数据 / 代码兜底），用户看到的只是一句
+#: 来路说明、对使用没有价值 ⇒ **两种来源统一成一句话**。
+#: ⚠️ 刻意**合并成一个常量**：两个常量若留着一个不同的值，就还会漏出一种文案。
+#: 旧文案的存量行由迁移 `j1k2l3m4n5o6` 统一改写成这个值。
+_BUILTIN_SEED_REMARK = "系统内置任务"
+#: 兜底路径**同一个值**（保留别名只为不改动调用点语义，值必须与上面一致）。
+_FALLBACK_SEED_REMARK = _BUILTIN_SEED_REMARK
 
 
 def _builtin_seed_defaults() -> dict[str, dict[str, Any]]:
@@ -696,12 +700,11 @@ def _builtin_seed_defaults() -> dict[str, dict[str, Any]]:
             "cron": _cron_every_n_hours(hours("qianfan_health_check_interval_hours", 6)),
             "status": "active" if bool(getattr(settings, "qianfan_health_check_enabled", True)) else "paused",
         },
-        # ⚠️ 2026-10-05 用户口径：无流量清理**没有自动跑的形态** —— 它是手动触发任务
-        #    （入口只有「我的笔记」页按钮）。原先这条读 `no_traffic_cleanup_interval_hours`
-        #    的 cron 兜底是**僵尸**：注册表 `default_trigger_type` 已是 manual，装配层
-        #    按 trigger_type 直接跳过（见 `schedule_triggers.py` 对 manual 的拒绝）。
-        #    保留条目只为「初始化数据缺该键」的兼容路径，值一律按手动档给。
-        "system.no_traffic_cleanup": {"status": "active"},
+        # ⚠️ 2026-10-07 用户口径「无流量笔记清理任务表移除该配置」：该任务的
+        #    注册表项、随包种子与**本兜底字典**三者必须同时消失 —— 少删一处
+        #    （尤其是这里）就会让「初始化数据缺该键」的路径又把它播种回任务列表。
+        #    （原句「保留条目只为兼容路径」见 git 历史；清理本身未退场，入口仍在
+        #    「我的笔记」页。）
         "system.note_sync": {
             "cron": _cron_every_n_hours(hours("xhs_note_sync_interval_hours", 6)),
             "status": "active" if bool(getattr(settings, "xhs_note_sync_enabled", False)) else "paused",
@@ -727,6 +730,10 @@ def _builtin_seed_defaults() -> dict[str, dict[str, Any]]:
         "system.shop_metrics_collect": {"cron": "0 35 * * * *", "status": "active"},
         # 2026-10-06 需求：离线笔记数据同步（商业+普通，默认每 6 小时一次，恒 active）。
         "system.note_data_sync": {"cron": "0 0 */6 * * *", "status": "active"},
+        # 2026-10-07 用户需求「每日发布商业笔记」（设计 15 §19）：每天 9:00 跑一轮。
+        # ⚠️ 默认 active —— 与两个同步任务不同（它们默认关，因为会大量打平台只读
+        # 接口）；本任务只在**用户已配好千帆 + 有 0 篇挂链商品**时才真的出手。
+        "system.business_note_auto_publish": {"cron": "0 0 9 * * *", "status": "active"},
     }
 
 
@@ -1692,59 +1699,6 @@ def run_scheduled_order_syncs(
     if not targeted:
         return None
     return _targeted_outcome(results, what="订单同步")
-
-
-def run_scheduled_cleanups(user_id: int, account_ids: Optional[Sequence[int]] = None) -> None:
-    """调度器入口：给有待清理候选的账号跑**一批**（限行主本人，DEF-066）。
-
-    `account_ids` 非空 = 只跑指定账号（自定义参数，设计 15 §4.1）；空 = 本人的全部账号。
-    ⚠️ `user_id` 必填（行归属者，runner 注入）—— 无流量清理是**平台删除操作**，
-    跨租户触发是最有害的一条路，账号查询恒带 `PlatformAccount.user_id == user_id`。
-
-    * 不重新建任务行：用户手动发起的清理（``run_no_traffic_cleanup_background``）
-      已在跑时，``_running_cleanup`` 会让本次直接跳过。
-    * 每个账号一批（有上限），跑完就停 —— 大池子靠多轮调度分摊，绝不一次性清空。
-    """
-    from backend.app.services.no_traffic_cleanup_service import (
-        DEFAULT_DELETE_BATCH,
-        run_no_traffic_cleanup,
-    )
-    from backend.app.services.no_traffic_service import (
-        TrafficThresholds,
-        list_no_traffic_candidates,
-    )
-
-    db = SessionLocal()
-    try:
-        statement = select(PlatformAccount).where(
-            PlatformAccount.user_id == user_id,
-            PlatformAccount.platform == "xhs",
-            PlatformAccount.deleted_at.is_(None),
-        )
-        if account_ids:
-            statement = statement.where(PlatformAccount.id.in_(list(account_ids)))
-        accounts = db.scalars(statement).all()
-        for account in accounts:
-            try:
-                # 已有手动清理在跑 → 跳过，避免重复触发。
-                from backend.app.services.no_traffic_cleanup_service import (
-                    _running_cleanup,
-                )
-
-                if _running_cleanup(db, account.id) is not None:
-                    continue
-                probe = list_no_traffic_candidates(db, account.id, TrafficThresholds(), limit=1)
-                if probe["total"] == 0:
-                    continue
-                # DEF-066：Task 审计行归属**账号主人**（原不传 user_id ⇒ 兜底
-                # `user_id or 1`，任务记录落到 user 1 名下，主人看不到、user 1 看全场）。
-                run_no_traffic_cleanup(account.id, batch_limit=DEFAULT_DELETE_BATCH, user_id=account.user_id)
-            except Exception as exc:  # noqa: BLE001 - 单个账号失败不拖垮整轮
-                logger.warning(f"scheduled no-traffic cleanup for account {account.id} failed: {exc}")
-    except Exception as exc:
-        logger.error(f"run_scheduled_cleanups failed: {exc}")
-    finally:
-        db.close()
 
 
 def run_scheduled_note_data_syncs(

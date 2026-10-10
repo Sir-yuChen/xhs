@@ -115,10 +115,14 @@ def test_builtin_seeds_default_to_config_values():
     seeds = _builtin_seed_defaults()
     assert seeds["system.note_sync"]["status"] == "paused"
     assert seeds["system.shop_goods_sync"]["status"] == "paused"
-    # 巡检 / 清理默认开（与迁移种子一致）
+    # 巡检默认开（与随包种子一致）。
+    # ⚠️ 2026-10-07：原先这里还断言 `seeds["system.no_traffic_cleanup"]["status"]
+    # == "active"` —— 该任务已从注册表移除（用户口径「无流量笔记清理任务不应在
+    # 任务列表展示」），**兜底字典里也必须没有它**：兜底是「初始化数据缺该键」时
+    # 的播种来源，留一条就会把它重新播回任务列表（第三处漏删点）。
     assert seeds["system.cookie_health_check"]["status"] == "active"
     assert seeds["system.qianfan_health_check"]["status"] == "active"
-    assert seeds["system.no_traffic_cleanup"]["status"] == "active"
+    assert "system.no_traffic_cleanup" not in seeds
 
 
 def test_enabled_switches_register_single_instance_jobs(monkeypatch):

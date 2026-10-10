@@ -37,6 +37,13 @@ SHOP_ITEMS_VIEW = ROOT / "frontend/src/lib/shop-items-view.ts"
 ACCOUNTS = ROOT / "frontend/src/pages/platforms/xhs/accounts-page.tsx"
 GLOBAL_CSS = ROOT / "frontend/src/global.css"
 SETTINGS = ROOT / "frontend/src/pages/settings/settings-page.tsx"
+#: 设计 25（2026-10-08）第一步预检 / 第二步发布两段流程。
+#: 2026-10-08：两步拆成的两个 Modal 合并为**一个 antd `Steps` 三步向导**
+#: （预检 → 配置商品参数+预览 → 发布）。两个旧文件已删除，守卫统一指向它。
+PUBLISH_MODAL = ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"
+PRECHECK_MODAL = PUBLISH_MODAL
+#: 纯映射模块（有 vitest，但**接线**要在源码层守：组件里必须真的调它）。
+PRECHECK_MAP = ROOT / "frontend/src/lib/precheck-publish.ts"
 
 #: 账号下拉所在的页面（2026-09-24「只展示账号名称」口径的守护范围）。
 #: 新增带账号下拉的页面时**必须**加进来 —— 漏一个就等于那条下拉没人守。
@@ -4208,12 +4215,12 @@ def test_sync_specified_modal_uses_an_infinite_list():
 def test_sync_specified_modal_keeps_every_submitted_id():
     """逐条结果必须落在**提交时那份 ID 清单**上（没命中的不许消失）。
 
-    ⚠️ 后端只给聚合数（`synced` / `not_found`），不给逐条明细 —— 前端若
-    用「命中项」渲染结果表，用户点名 3 个、只成功 1 个时会看到 1 行
-    （另外两个**凭空消失**，像是提交丢了）。
+    ⚠️ 2026-10-11 改走同步商品信息队列：后端入队后前端凭批次号轮询拿逐件
+    结果（`outcome`）。若用「命中项」渲染结果表，用户点名 3 个、只成功 1 个时
+    会看到 1 行（另外两个**凭空消失**，像是提交丢了）。
     """
     modal = _code_only(_read(SYNC_ITEMS_MODAL))
-    assert 'notFound.has(id) ? ("missing" as const) : ("ok" as const)' in modal, (
+    assert "ids.map((id) => {" in modal and "outcome.find((o) => o.item_id === id)" in modal, (
         "结果行必须由**提交的 ID 清单**逐条派生（不是由命中项拼）"
     )
     assert "setRows((current) => {" in modal, "提交即铺满全部 ID 为「同步中」（慢扫描期间列表不能是空的）"
@@ -5045,17 +5052,28 @@ def test_cleanup_log_modal_lists_the_independent_table():
     assert '"清理前 / 后"' in code, "日志列表缺「清理前 / 后」列"
 
 
-def test_no_traffic_log_has_no_second_scheduled_entry():
-    """手动入口**唯一**：没有第二个定时任务行承担无流量清理。
+def test_no_traffic_cleanup_has_no_scheduled_entry_at_all():
+    """手动入口**唯一**：清理无流量笔记**在定时任务体系里完全不存在**。
 
-    注册表里该键的默认触发器必须是 `manual` —— 配了周期就会被调度器装配成
-    定时跑（用户口径「没有自动清理笔记的逻辑」）。
+    ⚠️ 2026-10-07（用户两条口径）：「无流量笔记清理任务不应在任务列表展示」+
+    「无流量笔记清理任务表移除该配置」—— 原先这里断言「注册表里该键默认
+    `manual`（留着键但只能手动触发）」；**本次取代**：键连同常量、执行器一起
+    从注册表移除，任务表与调度器里都不该再有它的痕迹。原句保留在 git 历史。
+
+    三条判据（缺一条这个「移除」就可能是半拉子）：
+    ① **注册表**里没有它（否则「调用目标」下拉还能选到）；
+    ② **随包种子**里没有它（否则新装用户的任务列表又冒出来一行）；
+    ③ **执行器**也跟着删了（留着一个再也注册不上的函数只让人以为还有定时入口）。
     """
+    from backend.app.core.initial_data import load_initial_scheduled_jobs
+    from backend.app.services import scheduler_service
     from backend.app.services.job_registry import job_registry
 
-    spec = job_registry()["system.no_traffic_cleanup"]
-    assert spec.default_trigger_type == "manual"
-    assert spec.default_cron == "", "留着 cron 就是「配了 config 就自动跑」的僵尸兜底"
+    assert "system.no_traffic_cleanup" not in job_registry()
+    assert "system.no_traffic_cleanup" not in {
+        row["job_key"] for row in load_initial_scheduled_jobs()
+    }
+    assert not hasattr(scheduler_service, "run_scheduled_cleanups")
     # 只有我的笔记页有入口（无其他页面提交该端点）
     root = ROOT / "frontend/src"
     hits = []
@@ -5130,3 +5148,2650 @@ def test_cleanup_log_failure_reason_column_never_shows_the_coverage_note():
     )
     # 中止（风控/凭据）要如实说出来：本批没跑完，不是「只有这一篇失败」。
     assert "row.aborted" in body and "本批已中止" in body, "中止事实没告知用户"
+
+
+# --------------------------------------------------------------------------- #
+# 商品草稿箱 = 商品页内的**弹窗**（设计 24 §9.4，2026-10-08 用户口径）
+#   「草稿箱弹窗的形式在商品页内展示，账号使用商品页选定的账号」
+# 独立页 `product-drafts-page.tsx` 已删除（页 → 弹窗），守卫改盯弹窗文件。
+# --------------------------------------------------------------------------- #
+DRAFTS_MODAL = ROOT / "frontend/src/pages/platforms/xhs/product-drafts-modal.tsx"
+
+
+def test_product_drafts_is_a_modal_not_a_page():
+    """草稿箱必须是**弹窗**，且独立页文件已删除（用户口径：商品页内展示）。
+
+    变异：把弹窗改回独立页（渲染 `<Page>` / 加回 menu 项）⇒ 本用例红。
+    """
+    assert DRAFTS_MODAL.exists(), "草稿箱弹窗文件不存在"
+    assert not (
+        ROOT / "frontend/src/pages/platforms/xhs/product-drafts-page.tsx"
+    ).exists(), "独立页应已删除（草稿箱改弹窗）"
+    code = _read(DRAFTS_MODAL)
+    # 必须是 antd Modal（不是页面外壳）
+    assert "from \"antd\"" in code and "Modal" in code, "草稿箱不是弹窗"
+    assert "<Modal" in code, "没有渲染 Modal"
+    # 宽度按视口百分比（用户既有偏好），且有上限
+    assert "width=\"70vw\"" in code, "弹窗宽度不是视口 70%（用户口径 70%）"
+    assert "maxWidth" in code, "视口百分比必须配上限（防超宽屏拉满）"
+
+
+def test_product_drafts_modal_has_no_account_dropdown():
+    """弹窗内**不许**有账号下拉 —— 账号只有一个来源（商品页选定）。
+
+    变异：把 `<Select ... accounts>` 加回弹窗 ⇒ 页面看 A、弹窗看 B。
+    """
+    code = _read(DRAFTS_MODAL)
+    assert "fetchAccounts" not in code, "弹窗自己拉账号列表了（账号应跟随商品页）"
+    assert "PlatformAccount" not in code, "弹窗引了账号类型（说明它想自选账号）"
+    # 账号必须由 prop 传入
+    assert "platformAccountId" in code, "弹窗没接收商品页传入的账号"
+
+
+def test_drafts_modal_is_wired_to_the_page_selected_account():
+    """商品页把**本页选定账号**传给草稿箱弹窗，且弹窗由本页按钮打开。
+
+    变异：把 `platformAccountId={selectedAccountId}` 写死成别的值
+    ⇒ 弹窗看的不是本页选的店铺。
+
+    ⚠️ 切片必须**只覆盖草稿箱弹窗这一个元素** —— 相邻的发布弹窗也有
+    `platformAccountId={selectedAccountId}`，用固定 500 字窗口会**越界读到它**
+    而让变异逃逸（实测：窗口放宽时「把账号改成 null」是 ESCAPED）。
+    """
+    code = _read(SHOP_ITEMS)
+    assert "ProductDraftsModal" in code, "商品页没引用草稿箱弹窗"
+    assert "draftsModalOpen" in code, "没有草稿箱弹窗的开关状态"
+    start = code.index("<ProductDraftsModal")
+    end = code.index("/>", start)  # 该元素的闭合标签（第一个 />
+    body = code[start:end]
+    assert "platformAccountId={selectedAccountId}" in body, (
+        "弹窗账号没接本页选定账号"
+    )
+    assert "open={draftsModalOpen}" in body, "弹窗开关没接"
+
+
+def test_drafts_modal_is_a_menu_less_entry_in_the_product_page():
+    """草稿箱入口在**商品页工具栏**（按钮），且菜单里**已无**独立项。
+
+    变异：把菜单项加回 app-shell ⇒ 又变成独立页入口。
+    """
+    shell = _read(ROOT / "frontend/src/components/layout/app-shell.tsx")
+    assert "product-drafts" not in shell, "菜单里不该再有独立草稿箱项"
+    code = _read(SHOP_ITEMS)
+    assert "setDraftsModalOpen(true)" in code, "商品页没有打开草稿箱弹窗的按钮"
+
+
+# ============================================================
+# 设计 25 §4/§6：两步流程（第一步预检 → 第二步发布）接线守卫
+# ============================================================
+
+
+def _src(path: Path) -> str:
+    return path.read_text("utf-8")
+
+
+def test_publish_wizard_is_step_wise_with_antd_steps():
+    """用户 2026-10-08 口径：「发布商品使用 antd 的步骤，第一预检，第二配置商品参数
+    加参数预览，最后点击发布」。
+
+    判据三条：① 真的用 antd `Steps`（不是自己拼的 div）；② 恰好三步且顺序正确；
+    ③ 是**一个**弹窗里切步骤（拆成两个 Modal 就不是「步骤」了）。
+    """
+    src = _src(PUBLISH_MODAL)
+    assert "Steps" in src, "没用 antd Steps"
+    assert '"预检"' in src and '"配置商品参数"' in src and '"发布"' in src, "三步标题不全"
+    #: 顺序：预检 → 配置 → 发布（`items` 里出现的先后）
+    order = [src.index('"预检"'), src.index('"配置商品参数"'), src.index('"发布"')]
+    assert order == sorted(order), "步骤顺序错误"
+    #: Steps 必须和**承载它的那个**弹窗同处一个组件（不能拆成「关 A 开 B」）。
+    #: ⚠️ 不数 `<Modal` 总数 —— 大图预览也是一个 Modal，那是正当的第二个。
+    main = src.index("title=\"发布商品\"")
+    steps = src.index("<Steps")
+    assert abs(main - steps) < 2000, "Steps 和主弹窗离得太远（可能被拆到别的组件里）"
+
+
+def test_publish_wizard_step_two_merges_the_two_qianfan_pages():
+    """用户口径 2026-10-09：「千帆后台发布商品时会有两步，将这两步合并整合到
+    当前项目的发布商品的**第二步**中」「第二步参数配置中的商品图片、商品标题、
+    商品类目合并到下面各基础信息中」。
+
+    千帆的两页 = 【第一部分 图/标题/类目】(`PublishConfigStep1`) +
+    【第二部分 参数配置】(`PublishConfigStep2`)。第一部分现在作为
+    `headSlot` **并入第二部分「基础信息」区**，所以判据是：
+    ① 第二步渲染 `PublishConfigStep2`；② `PublishConfigStep1` 经 `headSlot`
+    传入（不再是独立一块）；③ step2 把 `headSlot` 渲染进「基础信息」区最前。
+    """
+    src = _src(PUBLISH_MODAL)
+    start = src.index("{step === 1 && (")
+    end = src.index("{/* ⚠️ 分组选择弹窗", start)
+    branch = src[start:end]
+    assert "<PublishConfigStep2" in branch, "第二步没渲染第二部分"
+    assert "<PublishConfigStep1" in branch, "第二步没把第一部分并进来"
+    assert "headSlot={" in branch, "第一部分没走 headSlot 并入基础信息"
+
+    #: step2 必须真的把 headSlot 渲染在「基础信息」区里
+    step2 = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    assert "headSlot" in step2, "step2 没接收 headSlot"
+    section = step2[step2.index('title="基础信息"') : step2.index('title="基础信息"') + 260]
+    assert "{props.headSlot}" in section, "headSlot 没渲染在基础信息区最前"
+
+
+def test_publish_wizard_has_a_parameter_preview():
+    """第二步必须同时有「配置」和「参数预览」（用户口径里点名了预览）。"""
+    src = _src(PUBLISH_MODAL)
+    assert "参数预览" in src, "缺少参数预览区"
+    assert "Descriptions" in src, "预览区应把参数结构化展示"
+
+
+def test_publish_wizard_wires_the_precheck_payload():
+    """第二步**必须**真的消费预检产物，且 token 一路传到请求体。"""
+    src = _src(PUBLISH_MODAL)
+    assert "buildPublishPayloadFromPrecheck" in src, "向导没接预检映射"
+    assert "precheck_token" in src, "发布请求没带 precheck_token"
+
+
+def test_publish_wizard_does_not_hard_require_the_old_parsed_package():
+    """⚠️ 回归点：老实现硬性要求 `parsed`（服务器本地目录解析产物），
+    新链路根本没有它 ⇒ 若照抄会让提交永远进不去。"""
+    src = _src(PUBLISH_MODAL)
+    assert "parseItemDraftPackage" not in src, "向导不该再走服务器本地目录解析"
+
+
+def test_publish_wizard_never_sends_off_shelf_after_false():
+    """⚠️ 红线：发布成功必须立即下架。前端**不得**传 `off_shelf_after: false`。"""
+    code = _code_only(_src(PUBLISH_MODAL))
+    assert "off_shelf_after" not in code, "前端不许出现 off_shelf_after（保持后端默认 true）"
+
+
+def test_publish_wizard_has_save_draft_button_in_step3():
+    """**「保存草稿」按钮在第三步**（用户口径 2026-10-10：千帆发布页底部有
+    「保存草稿」次按钮 +「提交商品」主按钮；本弹窗补「保存草稿」，放第三步）。
+
+    判据：① 第三步（`step === 2`）分支里有「保存草稿」+「确认发布」两按钮；
+    ② 走后端 `createItemDraft`（只到草稿箱、不上架），**不**走 `publishShopItem`。
+    """
+    code = _code_only(_src(PUBLISH_MODAL))
+    assert "saveDraft" in code, "缺保存草稿逻辑"
+    assert "await createItemDraft({" in code, "保存草稿应真调用 createItemDraft（只到草稿箱）"
+    assert "保存草稿" in code, "缺「保存草稿」按钮文案"
+    #: 按钮在第三步（`step === 2` 分支内，与「确认发布」并列）
+    step3 = code[code.index("{step === 2 && ("): code.index("</Steps>") if "</Steps>" in code else len(code)]
+    assert "保存草稿" in step3, "「保存草稿」按钮应在第三步"
+    #: 红线：保存草稿绝不触发发布
+    assert "void saveDraft()" in code and "void submit()" in code, "保存草稿与确认发布应是两个独立入口"
+    #: 保存草稿蒙版 + 耗时（用户口径 2026-10-10：保存应与发布一样加蒙版统计耗时）
+    assert "draftSaving" in code and "draftElapsedSec" in code, "保存草稿应有耗时统计 state"
+    assert "正在保存草稿… 已耗时" in code, "保存草稿应加蒙版 + 实时耗时文案"
+
+
+def test_publish_wizard_shows_media_before_running_the_precheck():
+    """用户口径 2026-10-08：「先将媒体和数据包全部在弹窗展示，点击预检」。
+    整合成一步后依旧保留：读取（展示）与预检（检测）是**两次**调用。
+
+    判据：读取阶段传 `inspect:false`（只展示不检测），预检走 scan 端点。
+    """
+    src = _src(PUBLISH_MODAL)
+    assert "inspect: false" in src, "读取阶段应传 inspect:false（只展示不检测）"
+    assert "rescanPackagePrecheck" in src, "预检应走 scan 端点（跑 OCR + 抽帧）"
+
+
+def test_publish_wizard_gates_step_two_on_a_passed_precheck():
+    """⚠️ 核心诉求：**预检通过才可进第二步**。"""
+    src = _src(PUBLISH_MODAL)
+    assert "precheckPassed" in src, "缺少「预检通过」判据"
+    gate = src.index("disabled={!precheckPassed")
+    label = src.index("下一步：配置商品参数")
+    #: 二者同处一个 `<Button>`（相隔不到 300 字符），别只看标签附近的字面量。
+    assert abs(gate - label) < 300, (
+        "「下一步」按钮没有挂在 precheckPassed 上（预检没过也能进第二步）"
+    )
+
+
+def test_precheck_page_does_not_surface_ocr_internals():
+    """用户口径 2026-10-09：「OCR 检测移除，页面不要展示 ocr」。
+
+    OCR 是**手段**、违规词命中才是**结果**。页面只展示结果（命中词 / 置灰），
+    不把 OCR 的内部指标（已抽 N 帧 / 未检测 / 未做抽帧检测 / 帧识别失败）摊给用户。
+    """
+    src = _src(PUBLISH_MODAL)
+    code = _code_only(src)
+    for banned in ("已抽", "未做抽帧检测", "帧未识别", "VideoFrameNote"):
+        assert banned not in code, f"页面仍在展示 OCR 内部指标：{banned}"
+
+
+def test_precheck_pass_requires_no_failed_inspection():
+    """⚠️ 「通过」的判据里必须排除**检测失败**的条目 —— 失败 = 没检过 ≠ 合规。"""
+    src = _src(PUBLISH_MODAL)
+    block = src[src.index("const precheckPassed"):src.index("const precheckPassed") + 500]
+    assert "ocr_ok !== false" in block, "通过判据没排除「检测失败」的条目"
+
+
+def test_read_phase_marks_everything_as_not_yet_inspected():
+    """只读取时每条都必须是 `ocr_ok=None`（未检测）—— 不能让「还没检」等于合规。"""
+    api = _src(ROOT / "backend/app/api/platforms/xhs/package_precheck.py")
+    assert '"尚未预检"' in api, "只读取模式未把条目标成「尚未预检」"
+    assert 'payload["inspected"] = False' in api
+
+
+def test_wizard_media_names_are_single_line_with_a_tooltip():
+    """用户口径 2026-10-08：长文件名（实测 SKU21 那条 40+ 字）要**单行省略** +
+    Tooltip 看全名 —— 不能撑变形、不能换行把网格挤乱。"""
+    src = _src(PUBLISH_MODAL)
+    assert "textOverflow" in src and "ellipsis" in src, "文件名没有省略号截断"
+    assert "whiteSpace" in src and "nowrap" in src, "文件名会换行"
+    assert "Tooltip" in src, "长文件名没有 Tooltip 兜全名"
+
+
+def test_wizard_media_supports_large_preview_with_arrow_navigation():
+    """用户口径：所有媒体支持大图预览，**左右切换不是所有**（只在本组内切）。"""
+    src = _src(PUBLISH_MODAL)
+    assert "MediaPreview" in src, "没有大图预览组件"
+    assert "ArrowLeft" in src and "ArrowRight" in src, "预览不支持左右方向键"
+    assert "LeftOutlined" in src and "RightOutlined" in src, "预览没有左右切换按钮"
+    #: ⚠️ 切换范围必须是**同组** —— 传的是当前区的 items，不是全包媒体
+    assert "onPreview({ items, index })" in src, "预览切换范围不是当前组（会切到全包）"
+
+
+def test_wizard_scrollbars_are_hidden_but_scrolling_still_works():
+    """用户口径：弹窗内所有滚动条隐藏不展示，**保留滚动功能**。
+
+    ⚠️ 判据是「藏外观」不是「禁滚动」—— 用 `display:none` 或 `overflow:hidden`
+    会把滚动能力一起干掉，那是另一个需求。
+    """
+    src = _src(PUBLISH_MODAL)
+    assert "hermes-hide-scrollbar" in src, "弹窗内没有应用隐藏滚动条的类"
+    css = _src(ROOT / "frontend/src/global.css")
+    assert ".hermes-hide-scrollbar" in css
+    assert "scrollbar-width: none" in css, "Firefox 的隐藏没写"
+    assert "::-webkit-scrollbar" in css, "WebKit 的隐藏没写"
+    #: ⚠️ 只查**这个类自身的规则块**（全局 CSS 别处早有 `overflow: hidden`，
+    #: 那些是别的用途，拿它们判红就是误伤）。
+    block = css[css.index(".hermes-hide-scrollbar"):]
+    block = block[: block.index("\n}") + 2]
+    #: ⚠️ 只禁**真正会干掉滚动的**写法：`overflow:hidden/auto/scroll`。
+    #: `-ms-overflow-style` 是「藏滚动条外观」的老 IE 属性，名字里带 overflow
+    #: 但语义相反 —— 按字面判会误伤（第一版就是这么红的）。
+    import re as _re
+
+    assert not _re.search(r"overflow\s*:\s*(hidden|auto|scroll)", block), (
+        "隐藏滚动条动了 overflow（会把滚动能力一起干掉，应只藏外观）"
+    )
+
+
+def test_wizard_table_shows_the_source_file_name():
+    """用户口径：「表格顶部新增文件名称」。"""
+    src = _src(PUBLISH_MODAL)
+    assert "文件名称" in src, "表格顶部没有文件名"
+    assert "source_file" in src, "没读 source_file"
+    #: 后端必须真的透出这个字段（否则前端永远显示 `-`）
+    parser = _src(ROOT / "backend/app/services/shop_package_precheck.py")
+    assert "source_file=xlsx.name" in parser, "解析器没填 source_file"
+
+
+def test_wizard_video_is_previewable():
+    """用户口径 2026-10-08：「视频无法预览，应支持多种视频格式预览播放」。
+
+    ⚠️ 原实现 `onClick={() => (isVideo ? undefined : onPreview(index))}` 把视频
+    整个跳过 ⇒ 点视频**没反应**（先说现象：点了没动静）。预览体里也全是 `<img>`。
+    """
+    src = _src(PUBLISH_MODAL)
+    assert "<video" in src, "前端没有任何 <video>（视频放不出来）"
+    assert "controls" in src, "视频没有播放控件"
+    #: 视频也必须能点开预览（不许再被 isVideo 短路掉）
+    assert "isVideo ? undefined : onPreview" not in src, "视频仍被排除在预览之外"
+    assert "onPreview(index)" in src
+    #: 格式不支持时要有明确说明，而不是留在黑屏
+    assert "VideoUnsupportedHint" in src, "浏览器放不了的格式没有明确提示"
+    assert "onError" in src, "没有处理 <video> 的 onError（黑屏无解释）"
+
+
+def test_backend_serves_video_with_correct_mime_and_range():
+    """⚠️ 视频能播的两个硬条件：**正确 MIME** + **HTTP Range**。
+
+    实测根因：本机 `mimetypes` 对 `.flv` 返回 `None`（响应无 Content-Type ⇒
+    `<video>` 不播），`.avi`/`.mkv` 给的也不是标准注册类型 —— 所以不能靠自动猜。
+    """
+    api = _src(ROOT / "backend/app/api/platforms/xhs/package_precheck.py")
+    assert "_MEDIA_TYPES" in api, "没有显式 MIME 表（靠猜会漏 .flv）"
+    assert '"video/mp4"' in api, "没有给 mp4 正确 MIME"
+    assert '"video/webm"' in api, "没有给 webm 正确 MIME"
+    assert "Accept-Ranges" in api, "没声明 Range 支持（拖动进度条会失败）"
+    assert "mimetypes" in api, "没有回退到 mimetypes 猜"
+
+
+def test_multiple_video_formats_are_recognised():
+    """用户口径：支持**多种**视频格式 —— 解析层要把常见格式都认成视频。"""
+    draft = _src(ROOT / "backend/app/services/shop_draft_package.py")
+    for ext in (".mp4", ".mov", ".webm", ".avi", ".mkv", ".flv", ".wmv", ".ts"):
+        assert f'"{ext}"' in draft, f"{ext} 没被认成视频格式"
+    #: 上传白名单也要跟上（否则走上传路径时被拒）
+    staging_src = _src(ROOT / "backend/app/services/package_staging_service.py")
+    for ext in (".webm", ".avi", ".mkv", ".flv"):
+        assert f'"{ext}"' in staging_src, f"上传白名单缺 {ext}"
+
+
+def test_forbidden_words_modal_is_sixty_percent_of_the_viewport():
+    """用户口径 2026-10-08：「违规词弹窗固定**全屏的 60%**」。
+
+    ⚠️ 是**视口百分比**不是固定像素 —— 换屏幕尺寸比例才一致。
+    且与发布弹窗（75%）刻意不同，改成其中一个不该顺手动另一个。
+    """
+    src = _src(ROOT / "frontend/src/pages/platforms/xhs/forbidden-words-modal.tsx")
+    assert 'width="60vw"' in src, "违规词弹窗宽度不是 60vw"
+    assert '"60vh"' in src, "违规词弹窗高度不是视口 60%"
+    assert 'width="50vw"' not in src, "还留着旧口径 50vw"
+    #: 发布弹窗应保持 75vw（两个弹窗的尺寸口径各自独立）
+    wizard = _src(PUBLISH_MODAL)
+    #: ⚠️ 2026-10-08 口径改为 **宽 80% / 高 90%**（原来 75vw），
+    #: 守卫跟着改 —— 钉住旧值等于让页面回退时守卫还是绿的。
+    assert 'width="80vw"' in wizard, "发布弹窗宽度不是 80vw"
+    assert 'width="75vw"' not in wizard, "还留着旧口径 75vw"
+
+
+def test_forbidden_words_remark_column_is_180px_with_a_tooltip():
+    """用户口径 2026-10-08：「备注列 180px，使用 tip 展示完整内容」。"""
+    src = _src(ROOT / "frontend/src/pages/platforms/xhs/forbidden-words-modal.tsx")
+    remark = src[src.index('title: "备注"'):]
+    remark = remark[: remark.index("},", remark.index("render")) + 2]
+    assert "width: 180" in remark, "备注列不是 180px"
+    assert "Tooltip" in remark, "备注列没有 Tooltip 看全内容"
+    assert "ellipsis" in remark, "备注列没有省略号截断"
+
+
+def test_media_hitting_forbidden_words_is_disabled_and_greyed():
+    """用户口径 2026-10-08：「预检时命中违规词的**不允许勾选至灰**」。
+
+    ⚠️ 关键差别：**不只是默认不勾**（那样用户能手点回来），而是 `disabled`
+    —— 结构上选不了。且批量按钮（全选/反选）也必须认这份禁选名单，
+    否则点一下「全选」就绕过去了。
+    """
+    src = _src(PUBLISH_MODAL)
+    assert "locked" in src, "没有禁选名单"
+    assert "disabled={isLocked}" in src, "命中项没有 disabled（只是默认不勾）"
+    assert "置灰" in src or "opacity" in src, "命中项没有置灰"
+    #: 批量按钮必须传 locked（否则全选能绕过禁选）
+    assert "setZone(keys, true, locked)" in src, "全选没遵守禁选名单"
+    assert "setZone(keys, false, locked)" in src, "全不选没遵守禁选名单"
+    assert "locked.has" in src, "setZone 里没判禁选"
+
+
+def test_precheck_can_be_rerun():
+    """用户口径 2026-10-08：「支持重复预检」—— 检过之后按钮仍可点。"""
+    src = _src(PUBLISH_MODAL)
+    assert "重新预检" in src, "没有「重新预检」入口（检过就disabled了）"
+    #: ⚠️ 判据落在**预检按钮自己那一小段**里（不能从「重新预检」往后大段切 ——
+    #: 那会切到下方的提示文案，把无关的 `!inspected` 当成按钮禁用条件，实测误红）。
+    #: 窗口要落在按钮**自己那一段**（从 onClick 起，到 `>` 收口为止）。
+    at = src.rindex("onClick={onPrecheck}")
+    btn = src[at : src.index(">", at) + 1]
+    assert "disabled={!precheck" in btn, "预检按钮没按「有没有读过数据包」禁用"
+    #: 禁用条件里不许出现 inspected（那会导致只能检一次）。
+    #: 只取 `disabled={...}` 花括号里的表达式（60 字窗口会溢到下一行的
+    #: `loading={inspected ...}`，实测就是这样误红的）。
+    head = btn[btn.index("disabled=") :]
+    expr = head[head.index("{") + 1 : head.index("}")]
+    assert "inspected" not in expr, f"按钮被 inspected 锁死（不能重复预检）：{expr}"
+
+
+def test_precheck_shows_a_mask_with_elapsed_seconds():
+    """用户口径 2026-10-08：「点击预检时页面加蒙版避免误触，并蒙版统计耗时」。"""
+    src = _src(PUBLISH_MODAL)
+    assert "beginWait" in src and "endWait" in src, "没有等待蒙版的开/关"
+    assert "waitElapsedSec" in src, "没有耗时秒表"
+    assert "已耗时" in src, "蒙版上没有显示耗时"
+    #: 必须是**幂等**起表（否则重复预检时耗时被反复清零，数字永远很小）
+    assert "waitStartedAtRef.current === null" in src, "起表不幂等（耗时会反复清零）"
+
+
+def test_package_path_input_is_read_only():
+    """用户口径 2026-10-08：「地址栏**不允许输入**，只能预览」。
+
+    路径唯一来源是「选择文件夹」（后端弹系统选择器）。手输无效路径只会让
+    用户对着「目录不存在」反复试 ⇒ 直接不给输。用 `readOnly` 而非 `disabled`
+    （内容仍要能选中复制核对）。
+    """
+    src = _src(PUBLISH_MODAL)
+    assert "readOnly" in src, "地址栏还能输入（用户要求只读）"
+    assert "onPackagePathChange" not in src, "还留着路径变更回调（说明还能改）"
+    #: 路径只能由「选择文件夹」写入
+    assert "setPackagePath(picked.package_path)" in src, "选择文件夹没有回填路径"
+
+
+def test_forbidden_words_uses_a_tree_list_and_a_search_area():
+    """用户口径 2026-10-08：「列表顶部添加搜索区域和搜索条件，分组下拉，
+    关键词模糊，列表使用 antd 的**父子列表**展示」。"""
+    src = _src(ROOT / "frontend/src/pages/platforms/xhs/forbidden-words-modal.tsx")
+    assert "__isGroup" in src, "没有父子行的结构判据"
+    assert "children" in src, "没有把词挂成子行（不是父子列表）"
+    assert "defaultExpandAllRows" in src, "父子列表没默认展开"
+    #: 搜索区：分组下拉 + 关键词 + 两者都在顶部
+    assert "filterGroup" in src, "缺少分组搜索条件"
+    assert "filterKeyword" in src, "缺少关键词搜索条件"
+
+
+def test_forbidden_words_add_and_edit_use_a_dialog():
+    """用户口径：「违规词添加修改使用**弹窗**使用」—— 不再是顶部内联表单。"""
+    src = _src(ROOT / "frontend/src/pages/platforms/xhs/forbidden-words-modal.tsx")
+    assert "WordEditor" in src, "没有独立的增改弹窗组件"
+    assert "新增违规词" in src, "没有新增入口"
+    #: 旧的顶部内联表单形态应已删除（`<Form form={form}` 直接铺在主体里）
+    body = src[src.index("return (\n    <>") :]
+    assert "<Form form={form}" not in body.split("function WordEditor")[0], (
+        "主弹窗里还留着内联表单（应改成子弹窗）"
+    )
+
+
+def test_forbidden_words_group_is_wired_through_the_api():
+    """分组必须一路通到后端（建 / 改 / 筛 / 列分组）。"""
+    api = _src(ROOT / "frontend/src/lib/api.ts")
+    assert "group_name" in api, "API 层没有 group_name"
+    assert "fetchForbiddenWordGroups" in api, "没有分组清单接口"
+    modal = _src(ROOT / "frontend/src/pages/platforms/xhs/forbidden-words-modal.tsx")
+    assert "fetchForbiddenWordGroups" in modal, "弹窗没拉分组"
+
+
+def test_default_match_mode_is_exact_everywhere():
+    """⚠️ 用户口径 2026-10-08：「违规词的匹配方式**默认精确**」。
+
+    三处必须同值（任一处不一致就会出现「界面显示精确、实际按包含跑」）：
+    后端模型默认、后端 `validate_match_mode` 兜底、前端表单初值。
+    """
+    model = _src(ROOT / "backend/app/models/forbidden_word.py")
+    assert "default=MATCH_MODE_EXACT" in model, "模型默认不是精确"
+    service = _src(ROOT / "backend/app/services/forbidden_word_service.py")
+    assert "return MATCH_MODE_EXACT" in service, "validate_match_mode 兜底不是精确"
+    modal = _src(ROOT / "frontend/src/pages/platforms/xhs/forbidden-words-modal.tsx")
+    assert "const DEFAULT_MATCH_MODE = 1" in modal, "前端默认不是精确"
+
+
+def test_precheck_lets_you_pick_groups_and_defaults_to_all():
+    """用户口径：「点击预检支持选择指定违规词分组，支持多组，**默认全部分组**」。"""
+    src = _src(PUBLISH_MODAL)
+    assert "precheckGroups" in src, "预检没有分组选择"
+    #: 初值必须是空（= 全部分组），不能默认选中某一个
+    assert "useState<string[]>([])" in src, "分组初值不是空（默认应为全部分组）"
+    api = _src(ROOT / "frontend/src/lib/api.ts")
+    assert "groups" in api, "预检请求没带 groups"
+
+
+def test_group_picker_is_a_dialog_not_an_inline_select():
+    """用户口径 2026-10-08：「点击预检发布商品将违规词分组选择使用**弹窗**展示」。
+
+    ⚠️ 判据是「选择器在一个 Modal 里」，不是内联的 `Select` —— 内联那个
+    在工具栏里挤不下、分组多了也没法好好列。
+    """
+    src = _src(PUBLISH_MODAL)
+    assert "groupPickerOpen" in src, "没有分组选择弹窗的开关"
+    assert "选择违规词检测分组" in src, "弹窗标题不在（可能还是内联的）"
+    #: 触发它的按钮
+    assert "违规词分组" in src, "没有打开分组弹窗的按钮"
+    #: ⚠️ 判据落在**分组选择弹窗**内：它的多选必须用 `Checkbox.Group`
+    #: （2026-10-09 修：原先断全文件不得出现 `mode="multiple"`，但商品属性区的
+    #: 多选属性（`Select mode="multiple"`）是合法的另一处 —— 全文件判据会误伤）。
+    picker = src[src.index("选择违规词检测分组"):]
+    picker = picker[: picker.index("</Modal>")]
+    assert 'mode="multiple"' not in picker, "分组弹窗里还留着内联多选框（应改成复选组）"
+    #: 弹窗用复选组（多组选择）
+    assert "Checkbox.Group" in picker, "弹窗里不是多选"
+    #: 关了弹窗也要能看见当前生效范围
+    assert "检测范围" in src, "没有已选分组摘要"
+
+
+def test_group_input_is_a_string_valued_control_not_a_tags_select():
+    """⚠️ 实测缺陷（2026-10-08 用户报「新增违规词，无法输入分组，输入框不展示
+    输入的内容」）：分组字段原来用 `<Select mode="tags">` 拿「可选可输」，
+    但 `tags` 形态的受控值是**数组**，而 `Form.Item` 的字段是**字符串** ——
+    两者对不上，输入的文字不回填（表现就是「打了字看不见」）。
+
+    判据：分组字段必须是**字符串受控**的控件（`AutoComplete` / `Input`），
+    且**不许**在 `Form.Item` 里出现 `mode="tags"`。
+    """
+    src = _src(ROOT / "frontend/src/pages/platforms/xhs/forbidden-words-modal.tsx")
+    field = src[src.index('label="分组"') :]
+    field = field[: field.index("</Form.Item>")]
+    assert 'mode="tags"' not in field, (
+        "分组字段还在用 tags 形态（数组值 vs 字符串字段 ⇒ 输入不回填）"
+    )
+    assert "AutoComplete" in field, "分组字段应用字符串受控的 AutoComplete"
+    #: 表单字段本身仍是字符串类型（与后端 `group_name: str` 一致）
+    assert "group_name?: string" in src
+
+
+def test_group_word_column_is_fixed_180px():
+    """用户口径 2026-10-08：「分组 / 违规词列固定 180px」。
+
+    ⚠️ 必须是**固定**宽度（`width: 180`），不是 `minWidth` —— 后者会随内容抖动。
+    固定宽度下长内容必须省略 + Tooltip，否则会把列撑开（等于没固定）。
+    """
+    src = _src(ROOT / "frontend/src/pages/platforms/xhs/forbidden-words-modal.tsx")
+    col = src[src.index('title: "分组 / 违规词"') :]
+    col = col[: col.index("},\n            {")]
+    assert "width: 180" in col, "该列不是固定 180px"
+    assert "minWidth: 180" not in col, "用了 minWidth（会随内容抖动，不是固定）"
+    assert "ellipsis" in col, "固定宽度下没有省略（长词会把列撑开）"
+
+
+def test_forbidden_words_pages_by_group_with_size_options():
+    """用户口径 2026-10-08：「违规词分页，每页 20/30/50，**按照组分页**」。
+
+    ⚠️ 分页单位必须是**分组**（父行），不是词行 —— 否则会出现「某组只显示一半词」。
+    """
+    src = _src(ROOT / "frontend/src/pages/platforms/xhs/forbidden-words-modal.tsx")
+    assert "pageSizeOptions" in src, "没有每页条数选项"
+    for size in ("20", "30", "50"):
+        assert size in src, f"缺每页 {size} 的选项"
+    #: `total` 必须是**分组数**，不是词数
+    assert "total: allGroupRows.length" in src, "分页总量不是分组数（不是按组分页）"
+    assert "slice(" in src, "没有对分组做分页切片"
+
+
+def test_forbidden_word_group_can_be_toggled():
+    """用户口径：「组新增启用停用功能」。"""
+    modal = _src(ROOT / "frontend/src/pages/platforms/xhs/forbidden-words-modal.tsx")
+    assert "toggleGroup" in modal, "没有整组启停的处理器"
+    assert "停用整组" in modal and "启用整组" in modal, "父行没有整组启停按钮"
+    api = _src(ROOT / "frontend/src/lib/api.ts")
+    assert "setForbiddenWordGroupEnabled" in api, "API 层没有整组启停"
+    assert "__ungrouped__" in api, "未分组的占位符没处理（空串当路径参数不合法）"
+
+
+def test_group_toggle_actually_reaches_the_matcher():
+    """⚠️ 组停用必须让组内词退出匹配（只改界面标志位 = 假开关）。
+
+    守的是**服务层**那行过滤 —— 界面守得再严，OCR 照命中就是白做。
+    """
+    svc = _src(ROOT / "backend/app/services/forbidden_word_service.py")
+    assert "def enabled_groups" in svc, "没有组启用态的判据"
+    entries = svc[svc.index("def enabled_entries") :]
+    entries = entries[: entries.index("def get_word")]
+    assert "in alive" in entries, "enabled_entries 没有按组启用态过滤（停用组仍参与匹配）"
+
+
+def test_each_group_is_capped_at_500_words():
+    """用户口径：「每组违规词限制最多 500 条」。"""
+    model = _src(ROOT / "backend/app/models/forbidden_word.py")
+    assert "MAX_WORDS_PER_GROUP = 500" in model, "上限不是 500"
+    svc = _src(ROOT / "backend/app/services/forbidden_word_service.py")
+    assert "_assert_group_capacity" in svc, "没有容量检查"
+    assert "FORBIDDEN_WORD_GROUP_FULL" in svc, "超限没有结构化错误码"
+    #: ⚠️ count 必须用 `scalar()`，`scalar_one()` 在多行时会抛异常并被吞成 500，
+    #: 表现为上限完全不生效（实测过一次）。
+    cap = svc[svc.index("def _assert_group_capacity") : svc.index("def create_word")]
+    #: ⚠️ 只查**代码行**：解释「为什么不能用 scalar_one()」的注释里必然出现
+    #: 那个名字，整段查会把自己的说明当违规（实测误红）。
+    code_lines = [
+        ln.strip()
+        for ln in cap.splitlines()
+        if ln.strip() and not ln.strip().startswith("#")
+    ]
+    code = "\n".join(code_lines)
+    assert ".scalar()" in code, "容量计数没用 scalar()"
+    assert "scalar_one()" not in code, (
+        "容量计数用了 scalar_one()（多行会抛 MultipleResultsFound，上限静默失效）"
+    )
+
+
+def test_publish_wizard_picks_a_folder_through_the_backend():
+    """用户口径：「点击加载数据包**选择本地文件夹**，获得本地夹地址后直接读取」。"""
+    src = _src(PUBLISH_MODAL)
+    assert "pickPackageFolder" in src, "没接后端弹窗接口（浏览器拿不到真实路径）"
+    assert "选择文件夹" in src, "缺少「选择文件夹」入口"
+
+
+def test_publish_wizard_reads_the_local_folder_instead_of_uploading():
+    """⚠️ 用户 2026-10-08 口径：「加载本地数据包内的媒体资源**不要上传**」。
+
+    第一版是 `<input webkitdirectory>` 逐文件 POST（70 个文件、几十 MB），
+    口径变更后必须**没有**上传路径 —— 否则用户选一次目录就是一次全量上传。
+    """
+    src = _src(PUBLISH_MODAL)
+    code = _code_only(src)
+    assert "webkitdirectory" not in code, "不该再走目录上传（用户口径：不要上传）"
+    assert "precheckPackage(" not in code, "不该再调上传版预检接口"
+    assert "precheckLocalPackage(" in code, "应改调本地路径版预检接口"
+
+
+def test_publish_wizard_red_line_warning_was_removed_by_request():
+    """⚠️ 用户口径 2026-10-08：**移除**「发布是真实上架操作」说明块与
+    「我知道本次会真实发布到线上」确认勾选。
+
+    ⚠️ 注意这**不是**放宽红线：后端仍默认 `off_shelf_after=true`（发布成功
+    立即下架），红线由后端执行（见 `test_publish_wizard_never_sends_off_shelf_after_false`）。
+    本条钉的是「前端不再摆这两处文案与勾选」，防止它们被无意加回来。
+    """
+    #: ⚠️ 反向断言必须先剥注释 —— 解释「为什么移除」的注释里会提到这些字样
+    #: （本仓库的既有纪律，DEF-057 同型）。
+    code = _code_only(_src(PUBLISH_MODAL))
+    assert "真实上架操作" not in code, "「发布是真实上架操作」说明块应已移除"
+    assert "我知道本次会真实发布" not in code, "确认勾选应已移除"
+    assert "acknowledged" not in code, "二次确认状态应已移除（否则提交会被它挡住）"
+
+
+def test_config_step1_only_offers_passed_and_checked_images():
+    """第二步商品图片的候选 = **预检通过 且 被选中**的媒体（用户口径 2026-10-08）。
+
+    ⚠️ 曾经的写法只按 `group === "main"` 过滤 ⇒ 用户在第一部取消勾选
+    「商品属性图」后，第二步照样把它传上去，勾选形同虚设。
+    ⇒ 判据必须是「取 `selectedMedia`（= 勾选的）」，而不是「取整组」。
+    """
+    wizard = (ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx").read_text(
+        encoding="utf-8"
+    )
+    i = wizard.index("const mainImagePaths = useMemo(")
+    block = wizard[i : i + 500]
+    #: 必须复用 `selectedMedia`（= 预检通过 且 勾选），不能直接取整组。
+    assert "selectedMedia" in block, f"没有复用勾选结果：\n{block}"
+    assert "precheck?.media" not in block, (
+        "仍在直接取整组（绕过勾选）—— 未勾选的图会被上传：\n" + block
+    )
+    #: 而且 `selectedMedia` 本身必须是**与**判据（预检通过 + 勾选），
+    #: 不能只看勾选 —— 否则「预检没过但手滑勾上」的图会漏进去。
+    j = wizard.index("const selectedMedia = useMemo(")
+    sel = wizard[j : j + 400]
+    assert "passedMedia" in sel, f"没有先过预检判据：\n{sel}"
+    k = wizard.index("const passedMedia = useMemo(")
+    passed = wizard[k : k + 300]
+    assert "ocr_ok === true" in passed, f"预检判据缺 ocr_ok：\n{passed}"
+    assert "!m.has_forbidden" in passed, f"预检判据缺违规词：\n{passed}"
+
+def test_config_step1_images_can_be_previewed():
+    """第二步的商品图片**可点开预览**（用户口径 2026-10-08）。
+
+    判据三件（缺一就是「看起来有、点不开」）：
+      1. 缩略图可点（绑了打开预览的处理）；
+      2. 预览层存在，且有**左右切换**（←/→）；
+      3. 键盘 Esc / ← / → 能操作。
+    """
+    page = ROOT / "frontend/src/pages/platforms/xhs/publish-config-step1.tsx"
+    src = page.read_text(encoding="utf-8")
+    #: 1) 缩略图绑了打开预览
+    assert "slot-thumb" in src and "setPreviewIndex" in src, "缩略图没有预览入口"
+    #: 2) 预览层 + 左右切换
+    assert "img-preview-mask" in src, "没有预览层"
+    assert "img-preview-nav" in src, "预览没有左右切换"
+    #: 3) 键盘
+    for key in ("Escape", "ArrowLeft", "ArrowRight"):
+        assert key in src, f"预览没有键盘支持：{key}"
+    #: 样式要在（否则是个裸 div）
+    css = (ROOT / "frontend/src/pages/platforms/xhs/publish-config-step1.css").read_text(
+        encoding="utf-8"
+    )
+    assert ".img-preview-mask" in css, "预览层没有样式"
+
+def test_config_step2_is_visible_without_waiting_for_a_category():
+    """第二部分**进第二步就可见**（用户口径 2026-10-08）。
+
+    ⚠️ 曾经的写法是 `{configCategoryPath.length > 0 && <PublishConfigStep2/>}` ——
+    用户进第二步只看得到第一部分，会以为第二部分没做。
+    判据：渲染处**不带条件**（不能有 `configStep2Open &&` 之类的门）。
+    """
+    wizard = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+    assert "<PublishConfigStep2" in wizard, "第二部分没有被渲染"
+    #: 找到渲染点，往上取一小段看有没有条件门
+    i = wizard.index("<PublishConfigStep2")
+    window = wizard[max(0, i - 160) : i]
+    for gate in ("configStep2Open", "configCategoryPath.length > 0 &&", "categoryPath &&"):
+        assert gate not in window, f"第二部分被条件挡住：{gate}"
+
+
+def test_config_step2_fetches_properties_by_category_id():
+    """属性定义按**类目 id** 从 `getCategoryProperty` 拉（设计 27）。
+
+    ⚠️ 属性**不在** `getProductPropertyConfig`（真机只回两个开关）——
+    走错端点会得到一片空属性，而页面不报错（静默退化）。
+    """
+    wizard = _read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx")
+    assert "fetchCategoryProperties" in wizard, "没有拉类目属性"
+    assert "configCategoryId" in wizard, "没有按类目 id 拉属性"
+    api = _read(ROOT / "frontend/src/lib/api.ts")
+    assert "property-config" in api, "属性端点没接"
+    #: 端点后端必须调 getCategoryProperty
+    q = _read(ROOT / "backend/app/api/platforms/xhs/qianfan.py")
+    assert '"action": "getCategoryProperty"' in q, "后端没有调 getCategoryProperty"
+
+
+def test_config_step2_covers_the_four_real_sections():
+    """第二部分按真机实测的**四分区**铺开（设计 27）。
+
+    真机（2026-10-08）左锚点是：基础信息(2 项必填) / 图文信息 /
+    价格库存(1 项必填) / 服务信息 —— 少一个就是没复刻全。
+    并且：属性项必须**按类目动态渲染**（不写死属性名），
+    否则换个类目就露出不该有的字段。
+    """
+    page = ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"
+    code = _code_only(_read(page))
+
+    #: ① 四个分区都在
+    for title in ("基础信息", "图文信息", "价格库存", "服务信息"):
+        assert title in code, f"缺少分区：{title}"
+
+    #: ② 真机字段：导购短标题 / 价格表列
+    #: ⚠️ 「上传透明图」已按去重口径**移除**（主图只由第一部分维护），
+    #: 所以这里不再断言它。「从商品主图填入」亦已按用户口径（2026-10-10）移除。
+    #: ⚠️ 别再把它加回断言 —— 它现在是**刻意删除**的字段。
+    for label in ("导购短标题", "运费模板", "商品英文名"):
+        assert label in code, f"缺少字段：{label}"
+    for col in ("售价", "库存", "市场价", "条形码", "商家编码"):
+        assert col in code, f"价格表缺少列：{col}"
+
+    #: ③ 属性按类目动态（**不得写死属性名**）
+    assert "keyProperties" in code and "otherProperties" in code, "属性没有走动态定义"
+    #: 实测里的属性名不许在页面里硬编码
+    for hard in ("是否可定制", "饰面材质", "组合形式"):
+        assert hard not in code, f"属性名被写死：{hard}（应按类目下发）"
+    #: 规格类型同样必须来自平台（页面不得把 6 项写死成唯一来源）
+    assert "specTypeOptions" in code, "规格类型没有走平台下发"
+
+def test_config_step2_does_not_duplicate_step1_fields():
+    """与第一部分重复的参数**只展示一次、值一致**（用户口径 2026-10-08）。
+
+    ⚠️ 曾经的写法在第二部分又放了一个「商品标题」输入框和一个「上传主图」入口 ——
+    两处各存一份 state，值必然漂移。
+    判据：标题/主图在第二部分**必须来自 props**，不得自己 `useState` + `Input`。
+    """
+    code = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    #: 标题：取 props.title，不能自己有 title 状态
+    assert "props.title" in code, "标题没有继承第一部分的值"
+    assert "const [title, setTitle] = useState" not in code, "第二部分又存了一份标题"
+    assert "onChange={(e) => setTitle(" not in code, "第二部分又放了一个可编辑标题框"
+    #: 主图：用 props.images（不重复上传入口）
+    assert "props.images" in code, "主图没有继承第一部分"
+    assert "上传主图" not in code, "第二部分又出现上传主图入口"
+
+
+def test_config_step2_generates_from_the_platform():
+    """第二部分能自动生成的参数**走平台生成**（用户口径 2026-10-08）。
+
+    ⚠️ 与商品标题同款逻辑：平台有生成接口就用平台的，
+    不许本地截断/拼装冒充（那种值平台不认、用户也看不出假）。
+    """
+    code = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    assert "generateShortTitle" in code, "导购短标题没有走平台生成"
+    assert "智能生成" in code, "短标题缺「智能生成」入口"
+    #: action 串在 **SDK** 里（端点 → 适配器 → SDK 是分层，不在 API 层拼 body）。
+    sdk = _read(ROOT / "apis/xhs_qianfan_apis.py")
+    assert '"action": "generateItemShortTitle"' in sdk, "SDK 没调 generateItemShortTitle"
+    assert "def generate_item_short_title" in sdk, "SDK 没有该方法"
+    #: 端点确实接了它
+    q = _read(ROOT / "backend/app/api/platforms/xhs/qianfan.py")
+    assert "generate_item_short_title" in q, "端点没调 SDK 的短标题方法"
+def test_step2_delivery_mode_switches_the_time_fields():
+    """**发货模式联动时间字段**（设计 28 第一节，真机实测）。
+
+    现货模式 → 现货发货时间；其余三种 → 全款预售发货时间（时段/定时预售）。
+    这是用户明确要求「真实调研后重写」的点，钉死它不得退化成恒定字段。
+    """
+    code = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    #: 真机是**四态各自独立分支**（不是现货/其余两态）—— 详见四模式守卫
+    assert "deliveryMode === DELIVERY_MODES[0]" in code, "发货模式未按模式分支渲染时间字段"
+    assert "现货发货时间" in code and "全款预售发货时间" in code
+    assert "时段预售" in code and "定时预售" in code
+    assert "该天24点前" in code, "定时预售缺少该天24点前"
+    assert "天内发货" in code, "时段预售缺少付款后N天内发货"
+
+
+def test_step2_shipping_template_is_a_dropdown_without_create():
+    """**物流模板 = 下拉选择，且不得有新建**（用户口径 + 设计 28 第二节）。"""
+    code = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    assert "shippingTemplates.map" in code, "物流模板未渲染下拉候选"
+    assert "新建物流模板" not in code, "物流模板不得有新建入口"
+    assert "新建运费模板" not in code, "运费模板不得有新建入口"
+    assert "系统默认-非偏远地区包邮模版" not in code, "模板候选不得写死"
+
+
+def test_step2_spec_types_are_checkboxes_in_one_row():
+    """**规格类型用复选框一行展示**（用户口径 + 设计 28 第三节），上限 2。"""
+    code = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    assert "<Checkbox" in code, "规格类型必须用复选框"
+    assert "specTypes.length >= 2" in code, "规格类型必须有上限 2 的约束"
+    #: 规格区不再是「多选下拉」形态（属性区的多选控件不算）
+    spec_block = code[code.index("商品规格") : code.index("价格及库存")]
+    assert 'mode="multiple"' not in spec_block, "规格类型不得再用多选下拉"
+    assert "specTypeOptions ?? []" in code, "规格候选必须来自平台"
+def test_step2_mode_switch_asks_for_confirmation():
+    """**切换发货模式要二次确认**（真机：「切换发货模式后，需重新设置库存等相关信息，
+
+    是否确认切换？」+ 取消/确认切换）—— 不得静默切走。
+    """
+    code = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    assert "pendingDeliveryMode" in code, "发货模式切换缺待确认态"
+    assert "\u786e\u8ba4\u5207\u6362" in code, "缺「确认切换」按钮文案"
+    assert "\u662f\u5426\u786e\u8ba4\u5207\u6362" in code, "缺二次确认问句"
+
+
+def test_step2_spec_check_brings_out_its_dynamic_config():
+    """**勾选规格类型要带出该规格的动态配置**（真机实测）：
+
+    规格名 + 添加规格图 + 批量上传规格图 + 规格值排序（≥2 个规格才出上移/下移）。
+    """
+    code = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    assert "spec-config" in code, "规格勾选后缺动态配置块"
+    assert "\u6dfb\u52a0\u89c4\u683c\u56fe" in code, "缺「添加规格图」"
+    assert "\u6279\u91cf\u4e0a\u4f20\u89c4\u683c\u56fe" in code, "缺「批量上传规格图」"
+    assert "\u89c4\u683c\u503c\u6392\u5e8f" in code, "缺「规格值排序」"
+    #: 真机：每个规格行都有「规格值排序 + 上移 + 下移」（不是 ≥2 才出现）
+    assert "spec-sort-actions" in code, "规格值排序应每行都有"
+
+
+def test_step2_layout_matches_the_real_label_column():
+    """**UI 布局与千帆一致**：标签列 130px（真机 label x=520 / control x=650）。"""
+    css = _read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.css")
+    assert "grid-template-columns: 126px 1fr" in css, "标签列宽应为真机的 126px"
+    assert "text-align: start" in css, "标签应左对齐（真机 text-align: start）"
+    assert "gap: 4px" in css, "行间距应为真机的 4px"
+def test_step2_property_area_is_a_three_column_grid():
+    """**属性区自适应布局**（用户口径 2026-10-09，覆盖早先「三列栅格」）。
+
+    用户原话：「属性**不固定一行数量**，自适应布局自动换行，单数输入框固定 200px，
+    所有下拉框也固定最长 200px」。
+
+    ⚠️ 早先用固定 `repeat(3, 1fr)` 列的写法已被取代 —— 真机那 332px 是千帆自己在
+    1176px 内容宽度下的结果；本项目右栏随弹窗（80vw）变化，写死会在窄屏把控件挤出格、
+    与**邻格属性名重叠**（用户报的「布局拥挤、输入框和标题重叠」）。
+    """
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    css = _read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.css")
+    assert "prop-grid" in tsx, "属性区缺容器"
+    assert "prop-cell" in tsx, "属性单元格缺"
+    #: 改为 flex 自动换行，**不固定列数**
+    assert "flex-wrap: wrap" in css, "属性区应自适应换行"
+    assert "repeat(3, minmax(0, 1fr))" not in css, "不得再固定三列（用户要求不固定一行数量）"
+    assert "repeat(3, 332px)" not in css, "不得用固定 332px 列宽（会与邻格重叠）"
+    #: 属性名来自平台，不得写死任何属性名
+    for name in ("材质", "风格", "设计元素"):
+        assert name not in tsx, f"属性名不得写死：{name}"
+def test_step2_brand_is_fixed_to_no_brand():
+    """**品牌固定为「无品牌」**（用户口径）—— 不得有品牌下拉 / 申请入口。"""
+    code = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    assert "\u65e0\u54c1\u724c" in code, "品牌应固定展示「无品牌」"
+    for banned in ("brandList", "setBrand", "\u7533\u8bf7\u54c1\u724c"):
+        assert banned not in code, f"品牌不得再有选择/申请入口：{banned}"
+
+
+def test_step2_no_create_template_entries():
+    """**新建物流模板 / 新建运费模板都不实现**（用户口径）。"""
+    code = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    assert "\u65b0\u5efa\u7269\u6d41\u6a21\u677f" not in code
+    assert "\u65b0\u5efa\u8fd0\u8d39\u6a21\u677f" not in code
+
+
+def test_step2_property_smart_generate_uses_the_platform():
+    """属性区**智能生成**必须走平台预测（`predictProductProperty`），不本地编。"""
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    api = _read(ROOT / "frontend/src/lib/api.ts")
+    sdk = _read(ROOT / "apis/xhs_qianfan_apis.py")
+    assert "genProperties" in tsx and "predictProperties" in tsx, "缺属性智能生成接线"
+    assert "/xhs/qianfan/product/predict-properties" in api, "缺属性预测请求函数"
+    assert "predictProductProperty" in sdk, "SDK 缺 predictProductProperty"
+
+
+def test_step2_required_counts_match_the_single_item_page():
+    """**单品**第二页必填口径（真机实测）：基础信息 4 项 / 图文信息 1 项 / 价格库存 1 项。"""
+    code = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    assert "\u57fa\u7840\u4fe1\u606f" in code and "4 \u9879\u5fc5\u586b" in code
+    assert "\u56fe\u6587\u4fe1\u606f" in code and "1 \u9879\u5fc5\u586b" in code
+def test_step2_section_title_matches_the_real_weight():
+    """**分区标题字重与千帆一致**（真机实测 14px / weight 400，无竖条）。"""
+    css = _read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.css")
+    i = css.index("config-section-title")
+    block = css[i : i + 260]
+    assert "font-weight: 400" in block, "分区标题字重应为真机的 400"
+    assert "border-left" not in block, "分区标题不应有竖条装饰（真机没有）"
+
+
+def test_step2_four_delivery_modes_each_change_different_params():
+    """**四种发货模式各自对应不同的参数变化**（用户口径 + 设计 28 单品实测）。
+
+    ① 现货模式        → 现货发货时间（当日/24h/48h + 推荐）
+    ② 全款预售模式    → 全款预售发货时间（时段/定时预售 + 付款后 N 天）
+    ③ 现货+预售模式   → 发货时效（SHIP_AGING_OPTIONS + 48小时发货）+ 展开预售批次
+    ④ 按规格设置      → 「去设置」+ 价格表新增「发货时间」列
+    """
+    code = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    #: 四个模式各自有独立分支（不是「现货 vs 其余」两态）
+    for i in range(4):
+        assert f"deliveryMode === DELIVERY_MODES[{i}]" in code, f"缺模式 {i} 的独立分支"
+    #: ③ 现货+预售 = 现货 + 预售两段（预售含展开 + 3~45 天）
+    assert "SHIP_AGING_OPTIONS" in code, "缺预售段的天数候选"
+    assert "presaleBatchOpen" in code, "缺「展开」预售批次"
+    assert "(deliveryMode === DELIVERY_MODES[0] || deliveryMode === DELIVERY_MODES[2])" in code, \
+        "现货发货时间应同时出现在 ①现货 与 ③现货+预售"
+    #: ③ 价格表列「发货时效」
+    assert "\u53d1\u8d27\u65f6\u6548 *" in code, "现货+预售价格表缺「发货时效」列"
+    #: 多件装打包在「更多操作」下拉里（用户口径 2026-10-10：库存工具两按钮并入下拉）
+    assert "更多操作" in code and "多件装打包" in code, "多件装打包应并入「更多操作」下拉"
+    #: ④ 按规格 = **独立「去设置」+ 无两段发货时间 + 价格表「发货时间」列**
+    assert "\u53bb\u8bbe\u7f6e" in code, "按规格模式缺「去设置」"
+    assert "\u53d1\u8d27\u65f6\u95f4 *" in code, "按规格模式价格表缺「发货时间」列"
+
+
+def test_step2_publish_helper_panel_exists():
+    """**「商品发布助手」提示页**（用户口径 + 真机实测）。
+
+    真机形态：第二页左栏常驻「商品发布助手」+「发布提示 (N)」计数。
+    ⚠️ 用户口径 2026-10-10（**取代**旧「只保留字段+原因两列、无分区列」）：
+    分区结构与千帆后台一致 —— 类目信息 / 基础信息 / 图文信息 / 价格库存 / 服务信息，
+    每个分区标题行带「N 项必填」徽标；「尺码信息」「商品资质」**不进助手**。
+    """
+    code = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    css = _read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.css")
+    assert "PublishHelper" in code, "缺「商品发布助手」面板组件"
+    assert "\u5546\u54c1\u53d1\u5e03\u52a9\u624b" in code, "缺「商品发布助手」标题"
+    assert "\u53d1\u5e03\u63d0\u793a ({" in code, "缺「发布提示 (N)」计数"
+    #: 千帆一致的分区清单（新口径）
+    assert "HELPER_SECTIONS" in code, "缺千帆分区清单常量"
+    for section in ("\u7c7b\u76ee\u4fe1\u606f", "\u57fa\u7840\u4fe1\u606f", "\u56fe\u6587\u4fe1\u606f",
+                    "\u4ef7\u683c\u5e93\u5b58", "\u670d\u52a1\u4fe1\u606f"):
+        assert f'"{section}"' in code, f"助手分区缺：{section}"
+    #: 分区标题行 + 「N 项必填」徽标
+    assert "publish-helper-section-head" in code, "缺分区标题行"
+    assert "项必填" in code, "缺分区级「N 项必填」徽标文案"
+    assert "publish-helper-section-count" in css, "缺徽标样式"
+    #: 「尺码信息 / 商品资质」不进助手（新口径）
+    assert "去设置尺码表" not in code and "去配置资质" not in code, "尺码/资质入口不应在助手里"
+    assert "Tooltip" in code, "超长提示应走 Tooltip"
+    assert "publishHints" in code, "发布提示未按实时校验计算"
+    assert ".publish-helper" in css, "缺面板样式"
+def test_step2_spec_values_input_exists():
+    """**勾选规格后要有规格值输入框**（真机：「请选择或输入规格值」，w=186）。"""
+    code = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    css = _read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.css")
+    assert "\u8bf7\u9009\u62e9\u6216\u8f93\u5165\u89c4\u683c\u503c" in code, "缺规格值输入框"
+    #: 用户口径：**一个输入框一个规格值**（不是 tags 多值框）
+    assert 'mode="tags"' not in code, "规格值不得再用多值 tags 框"
+    assert "specValueInputs" in code, "规格值应是一框一值的列表"
+    assert "commitSpecValue" in code, "缺规格值回车提交（并追加新空框）"
+    assert "SPEC_VALUE_LEN_MAX = 60" in code, "规格值长度上限应为真机的 60"
+    assert "specValues" in code, "规格值未按规格类型分别存储"
+    assert "spec-config-values" in css, "缺规格值输入框样式"
+    #: 用户口径（2026-10-09，后修正）：规格值输入框**固定 200px、横向排列**（多个框
+    #: 同一行、超宽自动换行）—— 不要每个单独占一行，否则规格一多整块拉得很高。
+    block = css[css.index("spec-config-values"):css.index("spec-config-values") + 520]
+    assert "flex-direction: row" in block, "规格值输入框应横向排列（不单独占一行）"
+    assert "flex-wrap: wrap" in block, "规格值区应自动换行"
+    assert "width: 200px" in block, "规格值输入框宽度应为固定 200px"
+    assert "SPEC_VALUE_INPUT_WIDTH = 200" in code, "宽度常量应为用户口径的 200"
+    #: 规格值上限 500（真机文案：单个规格值的上限数量为 500 个）
+    assert "SPEC_VALUE_MAX = 500" in code, "规格值上限应为真机的 500"
+    #: 真机：行内右侧「规格值排序」；**每个规格行都有**上移/下移
+    assert "spec-sort-actions" in css, "规格值排序应在行右侧"
+    assert "moveSpecType" in code, "缺规格上移/下移实现"
+    assert "disabled={gi === 0}" in code, "上移应在第 1 行禁用（真机每行都有；按**组**下标）"
+    #: 批量上传规格图跟「添加规格图」一起，由**规格图开关**控制显隐（用户口径 2026-10-10）
+    assert "批量上传规格图" in code, "缺「批量上传规格图」按钮（开关开启时出现）"
+
+
+def test_step2_spec_value_input_matches_dimension_metadata():
+    """**规格值输入按维度元数据区分形态**（用户口径 2026-10-10）。
+
+    真机 `saleProperties[]` 每个维度自带 `propertyInputType`（1=单选/2=多选/0=文本）
+    与 `customizable`（是否可自定义输入）。本项目把输入入口按此区分：
+    - `kind=select` + customizable → AutoComplete（可输入可下拉选）
+    - `kind=select` + 非 customizable → Select（只能选）
+    - text / multi / 未下发 → 纯 Input（回落，不造形态）
+    ⚠️ 规格图逻辑**不变**（一值一行 + 前缀仍只挂第一组）。
+    """
+    code = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    #: ① 后端 _normalize 补 customizable（qianfan.py）
+    py = _read(ROOT / "backend/app/api/platforms/xhs/qianfan.py")
+    assert '"customizable": bool(item.get("customizable")),' in py, "后端应搬 customizable 字段"
+    #: ② 前端类型补 customizable（types/index.ts）
+    types = _read(ROOT / "frontend/src/types/index.ts")
+    assert "customizable?: boolean" in types, "CategoryPropertyItem 应带 customizable"
+    #: ③ SpecAttribute 类型带 kind/customizable
+    assert "export type SpecAttribute" in code, "缺 SpecAttribute 类型"
+    assert 'kind: "select" | "multi" | "text"' in code, "SpecAttribute 缺 kind"
+    assert "customizable: boolean" in code, "SpecAttribute 缺 customizable"
+    #: ④ 维度元数据 helper + 按 kind 分支渲染
+    assert "specMetaFor" in code, "缺按规格名取维度元数据的 helper"
+    assert 'meta?.kind === "select"' in code, "缺按 kind 分支渲染"
+    assert "<AutoComplete" in code, "单选可自定义应渲染 AutoComplete"
+    assert "spec-value-select" in code, "单选不可自定义应渲染 Select"
+    assert "AutoComplete" in code and "customizable" in code, "AutoComplete/customizable 分支应在"
+
+
+def test_step2_spec_value_image_prefix_only_first_group():
+    """**规格图前缀由「规格图开关」决定**（用户口径 2026-10-10 纠正）。
+
+    那个单选开关是**规格图开关**，不是规格启用/停用 —— 规格添加即为启用，
+    没有启用停用逻辑。开关开 ⇒ 该组可配置规格图（前缀 + 添加/批量上传）；
+    默认第一组开、其余组关（回落 `gi === 0`）。
+    """
+    code = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    assert "specImageEnabled" in code, "缺规格图开关 state"
+    assert "const canImage = specImageEnabled[name] ?? gi === 0;" in code,         "前缀可用性应由规格图开关决定（默认回落第一组）"
+
+    #: 开关本体（Switch）+ 显隐联动
+    assert "<Switch" in code, "缺规格图开关 Switch"
+    assert 'checked={specImageEnabled[name] ?? gi === 0}' in code, "开关默认：第一组开、其余关"
+    assert "添加规格图" in code and "批量上传规格图" in code, "开关开启 ⇒ 出现添加/批量上传按钮"
+
+
+def test_step2_is_a_two_column_layout():
+    """**发布提示与参数配置是左右布局**（用户口径 + 真机实测）。
+
+    真机：good-main-detail 是 dir=row 两栏 —— 左 224px（发布提示），右 1176px（参数配置）。
+    """
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    css = _read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.css")
+    assert "publish-two-col" in tsx, "缺左右两栏容器"
+    assert "publish-col-left" in tsx and "publish-col-right" in tsx, "缺左/右栏"
+    #: 左栏里放发布提示，右栏里放参数配置（顺序不能反）
+    i_left = tsx.index("publish-col-left")
+    i_helper = tsx.index("<PublishHelper", i_left)
+    i_right = tsx.index("publish-col-right", i_left)
+    assert i_left < i_helper < i_right, "发布提示应在左栏、参数配置在右栏"
+    assert "display: flex" in css, "两栏容器应为 flex"
+    assert ".publish-col-left" in css and "flex: 0 0 200px" in css, "左栏宽度应固定（真机 224px 含内边距）"
+    #: 字段行 label 126px（真机 label-wrapper x=512 w=126）
+    assert "grid-template-columns: 126px 1fr" in css, "字段标签列应为真机的 126px"
+
+
+def test_step2_property_area_splits_key_and_other():
+    """**商品属性分「关键属性 / 其他属性」两部分**（用户口径 2026-10-09）。
+
+    ⚠️ 本条**取代**了此前的「关键属性 / 其他属性合并为一个「商品属性」标题」口径
+    （用户 2026-10-09 追加：「商品属性应分为关键属性和其它属性两部分，
+    且智能生成和填充」）。真机第二部分原文就是两段：
+    `关键属性 3/4`（+说明）/ `其他属性 11/19`（+说明）。
+
+    判据：① 两个分组小标题都在，且各带 `已填/总数` 计数；
+          ② 标题**始终展示**（不设类目门控，未选类目也展示）；
+          ③ 无值时给一行说明（不造假）。
+    """
+    code = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    #: ① 两个分组小标题 + 计数（真机形态）
+    assert "关键属性 {filledCount(props.keyProperties, propValues)}/{props.keyProperties.length}" in code, \
+        "缺「关键属性 N/M」分组标题"
+    assert "其他属性 {filledCount(props.otherProperties, propValues)}/{props.otherProperties.length}" in code, \
+        "缺「其他属性 N/M」分组标题"
+    #: ② 标题不得被类目门控包起来（未选类目也要展示）
+    assert "props.categoryId && (" not in code[code.index("prop-grid") - 1400:], \
+        "商品属性标题不该被类目条件挡住"
+    #: ③ 无值时的说明行（不造假；类目未选时说明原因）
+    assert "暂无关键属性" in code, "缺关键属性空态说明"
+    assert "暂无其他属性" in code, "缺其他属性空态说明"
+    assert "请先在上一步选择商品类目" in code, "未选类目时缺原因行"
+    #: ④ 佐证「关键属性 = 必填属性」这一真机判据（后端 importantProp 恒 false）
+    q = _read(ROOT / "backend/app/api/platforms/xhs/qianfan.py")
+    #: ⚠️ 判据必须落在 **`key` 那一行**（`required` 行也有同样的表达式，
+    #: 宽松判据会被它满足 ⇒ 哑弹。实测：只写 `requiredProp` 时变异抓不住）。
+    assert '"key": bool(item.get("requiredProp"))' in q, \
+        "关键属性的 key 判据应取 requiredProp（真机实测 importantProp 恒 false）"
+
+
+def test_step2_explanatory_text_uses_icon_tooltip():
+    """**说明性文案一律收进「说明图标 + Tooltip」**（用户口径 2026-10-09）。
+
+    ⇒ `Field` 的 `hint` 不再以正文行铺在控件下方（那是占布局的老做法）；
+    图片区的两行长说明也改成图标 + Tooltip。
+    """
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    #: hint 走 Tooltip，不再渲染 `config-field-hint` 正文块
+    assert "config-field-hint" not in tsx, "说明仍在正文行（应收进 Tooltip）"
+    assert "section-help-icon" in tsx, "缺说明图标"
+    step1 = _read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step1.tsx")
+    assert "image-hint-line" in step1, "图片区说明行未改成图标 + 说明"
+    assert "hint-icon" in step1, "图片区缺说明图标"
+    #: 老的两行正文说明（className="image-hint"）应只保留在 CSS，不再在页面渲染
+    assert '<div className="image-hint">' not in step1, "图片区仍以正文行铺长说明"
+
+
+def test_step2_media_section_order_is_main_video_detail():
+    """**图文信息区按 商品主图 → 商品视频 → 商品详情图 顺序展示**（用户口径 2026-10-09）。"""
+    code = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    i_main = code.index('label="商品主图"')
+    i_video = code.index('label="商品视频"')
+    i_detail = code.index('label="商品详情图"')
+    assert i_main < i_video < i_detail, "图文信息三块顺序应为 主图 → 视频 → 详情图"
+    #: 删除图标不得常驻（悬停才显形）
+    css = _read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.css")
+    assert ".media-thumb-wrap:hover .media-thumb-remove" in css, "详情图删除图标应悬停才显形"
+
+
+def test_step1_image_area_badge_removed_and_renamed():
+    """**智能识图**区：图片角标移除 + 区块更名（用户口径 2026-10-09）。
+
+    ⇒ ① 缩略图左上角不再有「主图N」角标；
+       ② 区块名从「商品图片」改为「智能识图」（喂大模型识别用，可传主图/详情图）。
+    """
+    tsx = _read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step1.tsx")
+    css = _read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step1.css")
+    assert "智能识图" in tsx, "区块未更名为「智能识图」"
+    assert "slot-badge" not in tsx, "角标仍在渲染（应移除）"
+    #: CSS 里的 `.slot-badge` **规则**必须已删（注释里提到它名不算 —— 只认选择器声明）。
+    assert "\n.publish-config-step1 .slot-badge {" not in css, "角标样式未删干净"
+
+
+def test_auto_load_shows_a_centered_stage_progress_modal():
+    """**自动加载参数 → 窗口居中弹窗 + 逐阶段执行进度列表**（用户口径 2026-10-09）。
+
+    判据：① 有一个 `centered` 的进度弹窗（不是只用 message tip）；
+          ② 列出**每一阶段**的执行情况（状态含 进行中/成功/失败/跳过）；
+          ③ 阶段清单里含**按类目加载商品参数**这一步（真机按 categoryId 批量拉参数）。
+    """
+    wiz = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+    assert "autoProgressOpen" in wiz, "缺进度弹窗可见性状态"
+    assert "auto-stage-list" in wiz, "缺阶段列表容器"
+    #: 弹窗居中
+    i = wiz.index("自动加载参数 · 执行进度")
+    assert "centered" in wiz[i: i + 600], "进度弹窗未居中"
+    #: 四态齐全（逐阶段执行情况）
+    assert 'status === "running"' in wiz, "缺「进行中」态"
+    assert 'status === "done"' in wiz, "缺「成功」态"
+    assert 'status === "failed"' in wiz, "缺「失败」态"
+    assert 'status === "skipped"' in wiz, "缺「跳过」态"
+    #: 阶段清单含「按类目加载商品参数」
+    assert "按类目加载商品参数" in wiz, "缺「按类目加载商品参数」阶段"
+    #: 该阶段确实调了取类目属性的端点
+    assert "fetchCategoryProperties" in wiz, "加载阶段未调 fetchCategoryProperties"
+    #: CSS 有对应样式
+    css = _read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.css")
+    assert ".auto-stage-row" in css, "缺阶段行样式"
+
+
+def test_short_title_and_property_calls_pass_platform_required_params():
+    """**短标题 / 属性预测的入参按真机抓包**（2026-10-09 实测修复）。
+
+    真机入参：
+    * `generateItemShortTitle` = `{title, categoryId}`（**没有** mainImages）；
+    * `predictProductProperty` = `{title, categoryId, imageUrls[]}`（**必须带图**，
+      否则平台恒回空数组 ⇒ 页面误报「平台未给出可填充的属性值」）。
+
+    判据：SDK + 前端请求函数都按此形状传参，且属性预测带上了图片。
+    """
+    sdk = _read(ROOT / "apis/xhs_qianfan_apis.py")
+    #: 短标题入参是 title + categoryId
+    i = sdk.index("def generate_item_short_title")
+    block = sdk[i: i + 2600]
+    assert 'param: dict = {"title"' in block, "短标题入参应为 title（不是 name）"
+    assert 'param["categoryId"]' in block, "短标题入参应带 categoryId"
+    #: 属性预测入参带 imageUrls
+    j = sdk.index("def predict_product_property")
+    pblock = sdk[j: j + 2600]
+    assert 'param["imageUrls"]' in pblock, "属性预测应传 imageUrls（否则平台恒回空）"
+    #: 前端请求函数
+    api = _read(ROOT / "frontend/src/lib/api.ts")
+    assert "image_urls" in api, "前端属性预测请求函数缺 image_urls"
+    assert "category_id: categoryId" in api, "前端短标题请求函数应传 category_id"
+    #: 解析路径（真机字段落点）
+    q = _read(ROOT / "backend/app/api/platforms/xhs/qianfan.py")
+    assert "generatedShortTitle" in q, "短标题解析应用 generatedShortTitle"
+    assert 'it.get("propertyValueList")' in q, "属性解析应用 propertyValueList（值是数组）"
+
+
+def test_step2_varying_params_are_in_a_dashed_box():
+    """**发货模式变化的参数放在「灰底 + 虚线框」子块里，并体现父子关系**
+    （用户口径 2026-10-10，**取代** 2026-10-09 的「与现货模式齐平（无框无缩进）」：
+
+    「发货模式切换得到的不同参数属性页面 ui 缩进到与第二个发货模式起头使用**灰色背景**
+     单独**虚线框**，页面布局也要看到**父子关系**」；
+    并实测「发货模式的 ui 布局不对…应参考开售时间的 ui 布局」）。
+
+    ⇒ 与其它子块**共用 `.child-block`**（灰底 + 虚线框 + 126px 缩进），
+      子块内用行式 `.child-param-row`（不套 `Field`，避免双重缩进）。
+    """
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    css = _read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.css")
+    assert 'className="child-block delivery-varying"' in tsx, "变化的参数应挂在 `.child-block` 子块里"
+    #: 灰底 + 虚线框来自 `.child-block`（共用一套，不再单独定义）
+    i = css.index(".child-block {")
+    block = css[i : i + 420]
+    assert "dashed" in block and "#fafafa" in block, "子块应是「灰底 + 虚线框」"
+    #: 顶层发货子块按父字段标签列缩进（父子关系）
+    j = css.index(".publish-config-step2 .child-block.delivery-varying")
+    assert "margin-left: 126px" in css[j : j + 160], "发货子块应缩进到控件列"
+    #: 过时的零框规则不得残留（会把上面的灰底虚线框压掉）
+    assert ".publish-config-step2 .delivery-varying {" not in css, "过时的零框规则应已删除"
+def test_step2_presale_days_are_expanded_by_default():
+    """**预售发货时间默认展示**（用户口径：不需要先点「展开」）。"""
+    raw = _read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx")
+    #: 默认展开（注释可能被 _code_only 剥掉，故在**原文**上判）
+    assert "presaleBatchOpen, setPresaleBatchOpen] = useState(true)" in raw, \
+        "presaleBatchOpen 应默认展开"
+    code = _code_only(raw)
+    assert "presaleBatchOpen &&" in code, "预售天数应受展开态控制（默认 true）"
+
+
+def test_step2_delivery_mode_doc_is_split_per_mode():
+    """**发货模式说明按模式拆开 + 说明图标（Tip）展示**（用户口径 2026-10-09）。
+
+    判据：① 说明是**按模式键控**的映射（每个模式一条），不再是一个整块文本；
+          ② 每个模式挂一个说明图标（Tooltip）。
+    """
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    assert "DELIVERY_MODE_DOC: Record<string, string>" in tsx, "发货模式说明应为按模式键控的映射"
+    for m in ("现货模式:", "全款预售模式:", '"现货+预售模式":', "按规格设置发货时间:"):
+        assert m in tsx, f"发货模式说明缺对应模式：{m}"
+    assert "DELIVERY_MODE_DOC[m]" in tsx, "发货模式缺说明图标的 Tooltip 接线"
+    assert "delivery-mode-option" in tsx, "发货模式 label 缺容器（文案 + 图标同行）"
+    #: 总览说明随「现货发货时间」行一起展示（用户口径 2026-10-09：挂在标题后 / 行尾）。
+    #: ⚠️ 2026-10-10 子块改行式排布后，说明从 `Field` 的 `hint=` 改为**行尾的说明图标**
+    #: （仍是 Tooltip，仍不占布局）—— 判据跟着改到行式形态，别只认旧写法。
+    assert "DELIVERY_MODE_OVERVIEW" in tsx, "缺发货模式总览一句"
+    assert "<Tooltip title={selectedShippingTemplate ? DELIVERY_MODE_OVERVIEW" in tsx, (
+        "总览说明应以说明图标（Tooltip）挂在「现货发货时间」行尾"
+    )
+def test_step2_ship_options_disabled_without_logistics_template():
+    """**物流模板未选时，发货模式/发货时间全部禁用 + 提示「请先选择物流模板」**。
+
+    真机 bundle 实测：`disabled: !logisticsPlanId` + `description: "请先选择物流模板"`。
+    """
+    code = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    assert "selectedShippingTemplate" in code, "缺当前物流模板判据"
+    assert "SHIP_DISABLED_HINT" in code, "缺「请先选择物流模板」提示常量"
+    assert "\u8bf7\u5148\u9009\u62e9\u7269\u6d41\u6a21\u677f" in code, "提示文案不对"
+    n = code.count("disabled={!selectedShippingTemplate}")
+    assert n >= 2, f"发货模式与其时间选项都应受物流模板门控（实测 {n} 处）"
+
+
+def test_step2_field_validation_messages_match_the_bundle():
+    """**校验文案与千帆 bundle 一致**（字段名 → 规则）。
+
+    bundle 实测：deliveryMode→「请选择发货模式」；existingValue→「请选择现货发货时间」；
+    relativeValue→「请输入发货时间」；fixedValue→「请选择发货时间」。
+    """
+    code = _read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx")
+    for msg in ("\u8bf7\u9009\u62e9\u53d1\u8d27\u6a21\u5f0f", "\u8bf7\u9009\u62e9\u73b0\u8d27\u53d1\u8d27\u65f6\u95f4",
+                "\u8bf7\u8f93\u5165\u53d1\u8d27\u65f6\u95f4", "\u8bf7\u9009\u62e9\u53d1\u8d27\u65f6\u95f4"):
+        assert msg in code, f"缺校验文案：{msg}"
+
+
+def test_step2_rules_match_the_bundle_texts():
+    """**规则文案与千帆 bundle 逐字一致**（详情页描述 / 详情页图片 / 开售时间）。"""
+    code = _read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx")
+    #: 详情页描述：真机「最大长度为500个字…」
+    assert "\u6700\u5927\u957f\u5ea6\u4e3a500\u4e2a\u5b57" in code, "详情页描述规则文案不符"
+    #: 详情页图片：真机「最多100张；像素5000*15000px以内…」
+    assert "\u6700\u591a100\u5f20" in code, "详情页图片张数规则不符"
+    assert "5000*15000px" in code, "详情页图片像素规则不符"
+    assert "\u603b\u9ad8\u5ea6\u4e0d\u8d85\u8fc750000px" in code, "详情页图片高度规则不符"
+    #: 开售时间：新建 3 项 / 编辑 2 项（真机 isEditMode 分支）
+    assert "SHELF_TIME_OPTIONS_CREATE" in code and "SHELF_TIME_OPTIONS_EDIT" in code, \
+        "开售时间应按新建/编辑模式区分"
+    assert "props.isEditMode ?" in code, "开售时间未按模式分支"
+    assert "\u4e0d\u8bbe\u7f6e\u5b9a\u65f6\u5f00\u552e" in code, "编辑模式选项文案不符"
+
+
+def test_step2_price_row_rules_match_the_bundle():
+    """**价格表逐列校验文案与千帆 bundle 一致**（逐字对过）。"""
+    code = _read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx")
+    for msg in (
+        "\u8bf7\u8f93\u5165\u552e\u4ef7",
+        "\u8bf7\u8f93\u5165\u5e02\u573a\u4ef7",
+        "\u8bf7\u8f93\u5165\u5e93\u5b58\u53d8\u66f4\u503c",
+        "\u6761\u5f62\u7801\u53ea\u652f\u6301\u5b57\u6bcd\u5927\u5c0f\u5199\u3001\u6570\u5b57\u3001-\u3001_/\u548c*",
+        "\u4e0d\u80fd\u5c0f\u4e8e0.1\u5143",
+        "\u5c0f\u6570\u70b9\u4f4d\u6570\u4e0d\u80fd\u8d85\u8fc71\u4f4d",
+        "\u6253\u5305\u5546\u54c1\u7684\u5355\u4e2a\u552e\u4ef7\u4e0d\u80fd\u9ad8\u4e8e\u8be5\u5546\u54c1\u5355\u72ec\u552e\u5356\u4ef7\u683c",
+    ):
+        assert msg in code, f"缺价格校验文案：{msg}"
+    assert "PRICE_ROW_RULES" in code, "缺价格校验常量"
+
+
+def test_step2_spec_rules_match_the_bundle():
+    """**规格规则与千帆 bundle 一致**（规格说明 / 规格图规则；「仅第一组」已被规格图开关取代）。"""
+    code = _read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx")
+    assert "SPEC_RULE" in code, "缺商品规格说明常量"
+    assert "\u5355\u4e2a\u89c4\u683c\u503c\u7684\u4e0a\u9650\u6570\u91cf\u4e3a500\u4e2a" in code, "规格数量规则不符"
+    assert "\u89c4\u683c\u503c\u957f\u5ea6\u4e0a\u9650\u4e3a60\u4e2a\u5b57\u7b26" in code, "规格值长度规则不符"
+    assert "SPEC_IMAGE_RULE" in code, "缺规格图规则常量"
+    assert "\u56fe\u7247\u5927\u5c0f\u5e94\u5c0f\u4e8e3MB" in code, "规格图规则不符"
+
+
+def test_step2_keeps_only_the_four_visible_sections():
+    """**常驻只保留四个分区**（用户口径 2026-10-09；2026-10-10 补充：尺码/资质
+    入口也不再放助手里，见 `test_step2_publish_helper_panel_exists`）。
+
+    千帆 bundle 里 `sizeInfo` / `qualInfo` 是**类目相关、按条件展示**的模块
+    （`qualificationConfigs.length` 决定资质区是否出现；尺码表三类同理），
+    **不是常驻表单区块** ⇒ 页面里不得有这两个 Section。
+    """
+    code = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    #: ① 四个常驻分区必须在
+    for name in ("\u57fa\u7840\u4fe1\u606f", "\u56fe\u6587\u4fe1\u606f",
+                 "\u4ef7\u683c\u5e93\u5b58", "\u670d\u52a1\u4fe1\u606f"):
+        assert f'<Section title="{name}"' in code, f"缺分区：{name}"
+    #: ② 尺码信息 / 商品资质**不得**再是常驻 Section
+    for banned in ("\u5c3a\u7801\u4fe1\u606f", "\u5546\u54c1\u8d44\u8d28"):
+        assert f'<Section title="{banned}"' not in code, f"「{banned}」不应是常驻分区"
+    #: ③ 弹窗保留（点开才交互），但**入口不在助手**（新口径：助手不放尺码/资质）
+    assert "sizeTableOpen" in code and "qualificationOpen" in code, "缺两个弹窗开关"
+    assert "SECTION_ANCHORS" in code, "缺分区锚点全表"
+    #: 尺码表可选类型（真机 5 种）
+    assert "SIZE_TABLE_KINDS" in code, "缺尺码表类型"
+    assert "\u6a21\u7279\u8bd5\u7a7f" in code, "尺码表缺「模特试穿」"
+    assert "\u7ecf\u6570\u636e\u9a8c\u8bc1\u8865\u5145\u5c3a\u7801\u8868" in code, "缺尺码表建议文案"
+
+
+def test_step2_size_table_shapes_match_the_bundle():
+    """**尺码表结构按 bundle**：三类表（基础/推荐/模特试穿）× 两种配置方式（表格/图片）。"""
+    code = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    assert "SIZE_TABLE_SHAPES" in code, "缺尺码表 state 骨架常量"
+    assert "SIZE_CONFIG_TYPES" in code, "缺尺码表配置方式常量"
+    #: 三类表
+    for k in ("baseSizeTable", "recommendSizeTable", "modelSizeTable"):
+        assert k in code, f"缺尺码表类型：{k}"
+    #: 两种配置方式
+    assert "\u8868\u683c\u586b\u5199" in code and "\u4e0a\u4f20\u56fe\u7247" in code, "缺配置方式"
+    #: 推荐尺码表的二维数据（complexSizeData）
+    assert "complexSizeData" in code, "推荐尺码表缺二维数据字段"
+
+
+
+def test_precheck_attribute_image_adds_its_own_tab_with_kv():
+    """**有商品属性图 ⇒ 预检弹窗多一个「商品属性」页签，且用 KV 展示**（用户口径 2026-10-09）。
+
+    判据链：
+      ① 后端：属性图 OCR 出的表带 `kv`（属性图专属字段）；
+      ② 前端：`kv` 存在才出「商品属性」页签（没有属性图就不出现）；
+      ③ 该页签是 **KV 渲染**（属性名 + 值两个输入框），不是表格；
+      ④ 属性表**不再混进「表格」页签**（同一份数据不展示两次）。
+    """
+    #: ① 后端带 kv
+    pre = _read(ROOT / "backend/app/services/shop_package_precheck.py")
+    assert "kv=kv" in pre, "属性表没有带上 kv"
+    assert "def _read_attribute_table" in pre, "缺属性图 OCR 入口"
+    ocr = _read(ROOT / "backend/app/services/image_ocr_service.py")
+    assert "def build_kv_from_boxes" in ocr, "缺 KV 几何重建"
+    assert "def scan_attribute_table" in ocr, "缺属性图 OCR"
+
+    #: ②③④ 前端
+    wiz = _read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx")
+    assert "attrTableIndex" in wiz, "缺属性图表定位"
+    assert "Array.isArray(t.kv)" in wiz, "属性图判据应看 kv 字段"
+    assert 'label: "商品属性"' in wiz, "缺「商品属性」页签"
+    assert "AttributeKvPanel" in wiz, "缺 KV 面板组件"
+    assert "attr-kv-key" in wiz and "attr-kv-value" in wiz, "KV 面板应是「名 + 值」两栏"
+    #: 属性表不混进「表格」页签
+    assert "tables.filter((t) => !Array.isArray(t.kv))" in wiz, "属性表不该重复出现在表格页签"
+    #: 类型定义了 kv
+    api = _read(ROOT / "frontend/src/lib/api.ts")
+    assert "kv?: { key: string; value: string }[]" in api, "PrecheckTable 缺 kv 字段"
+
+
+
+def test_step2_merges_the_two_parts_into_one_with_two_col_layout():
+    """**第二步内部把千帆的两部分参数合并为一部分**（用户口径 2026-10-09）：
+    「配置商品参数 的两大部分参数合并成一部分」+「合并后左右布局，
+    商品发布助手和右侧商品配置」。
+
+    判据：① 不再有内部两步（无 `innerStep` / 无内部步骤条 / 无内部导航）；
+    ② 左栏「商品发布助手」+ 右栏「商品配置」的左右两栏结构保留；
+    ③ 四个分区（基础信息 / 图文信息 / 价格库存 / 服务信息）依旧齐全。
+    """
+    code = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    #: ① 内部两步消失
+    assert "innerStep" not in code, "仍有内部步骤态（应合并为一部分）"
+    assert "publish-inner-steps" not in code, "仍有内部步骤条"
+    assert "publish-inner-nav" not in code, "仍有内部导航按钮"
+    assert "其余参数" not in code, "仍按「其余参数」拆步"
+    #: ② 左右两栏布局保留
+    assert "publish-two-col" in code, "缺左右两栏容器"
+    assert "publish-col-left" in code and "publish-col-right" in code, "缺左/右栏"
+    assert "商品发布助手" in code, "缺左栏「商品发布助手」"
+    #: ③ 四个分区齐全（合并后一次铺完）
+    for s in ("基础信息", "图文信息", "价格库存", "服务信息"):
+        assert f'title="{s}"' in code, f"缺分区「{s}」"
+
+
+def test_step2_entry_actions_are_documented():
+    """**进第二部分触发的加载接口**已取证并落档（用户口径 2026-10-09）。
+
+    真机实测：进第二部分一次性触发 **26 个不同 action**；
+    其中 16 个**只依赖 categoryId** ⇒ 「自动加载参数」的数据来源。
+    证据落在设计 28 §十三 / `.hermes/tmp/evidence_publish/step2_entry_actions.json`。
+    """
+    doc = _read(ROOT / "docs/02_设计文档/28_实测证据_第二部分交互.md")
+    assert "getSellerCarriageTemplate" in doc, "设计 28 缺进二部分接口清单"
+    assert "getPriceLimit" in doc, "缺价格 limit 接口"
+    assert "getSetSizeTableInfo" in doc, "缺尺码表接口"
+    assert "getProductQualificationRule" in doc, "缺资质规则接口"
+    assert "categoryId" in doc and ("\u53ea\u4f9d\u8d56" in doc or "\u53ea\u9700" in doc), \
+        "缺「只依赖 categoryId」这一关键结论"
+
+
+
+def test_step2_after_sale_rule_comes_from_platform_by_category():
+    """**售后服务按类目从平台取，`must_support` 决定是否可编辑**（用户口径 2026-10-09）。
+
+    用户要求「调研一下、真实测试抓取对应接口参数分析」⇒ 实测 `getSupportAfterSale`：
+    `mustSupport=true` 强制支持（勾选禁用）、`false` 可自选；规则内容也按类目变。
+    ⇒ 页面按 `props.afterSaleRules` 渲染，**不得写死单条**。
+    """
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    assert "afterSaleRules" in tsx, "售后服务未按平台规则渲染"
+    assert "r.must_support" in tsx, "未按 must_support 判定可编辑性"
+    assert "disabled={r.must_support}" in tsx, "平台强制项应禁用勾选"
+    #: 不得再写死「支持七天无理由退货」这一条文案
+    assert "支持七天无理由退货" not in tsx, "售后服务不得写死单条规则（按类目变）"
+    #: 端点 + SDK + 请求函数三层都在
+    api = _read(ROOT / "frontend/src/lib/api.ts")
+    assert "fetchAfterSaleRules" in api, "缺售后规则请求函数"
+    q = _read(ROOT / "backend/app/api/platforms/xhs/qianfan.py")
+    assert "get_support_after_sale" in q, "端点未调 SDK 的售后规则方法"
+    sdk = _read(ROOT / "apis/xhs_qianfan_apis.py")
+    assert '"action": "getSupportAfterSale"' in sdk, "SDK 缺 getSupportAfterSale"
+
+
+def test_video_upload_uses_its_own_scene_not_the_image_space():
+    """**商品视频走独立直传（`common_file`），不走图片空间**（2026-10-09 实测修复）。
+
+    实测根因：mp4 走图片链路（`scene=goods_image`）PUT 成功，但登记一步答
+    「获取上传文件[v]信息失败」—— 图片空间是**图片库**（条目 `type:2` 要 width/height）。
+    真机 bundle 里「上传视频」是 `scene=common_file` 的独立直传，成功直接给 `{url,fileId}`。
+    """
+    q = _read(ROOT / "backend/app/api/platforms/xhs/qianfan.py")
+    assert '"/video/upload"' in q, "缺视频直传端点"
+    i = q.index("def video_upload")
+    block = q[i : i + 3000]
+    assert 'scene="common_file"' in block, "视频应走 common_file 场景（图片空间 scene 会失败）"
+    assert "register_material_files" not in block, "视频不该登记图片空间（会被拒）"
+    #: 前端：视频不再复用图片上传
+    wiz = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+    assert "uploadVideoFromPackage" in wiz, "自动加载未用视频专用上传"
+    assert "uploadProductVideo" in wiz, "缺视频上传请求函数接线"
+    api = _read(ROOT / "frontend/src/lib/api.ts")
+    assert "/xhs/qianfan/video/upload" in api, "前端缺视频上传请求函数"
+
+
+def test_step2_main_and_detail_images_are_required():
+    """**商品主图 / 商品详情图必填**（用户口径 2026-10-09）。"""
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    assert 'label="商品主图" required' in tsx, "商品主图应标必填"
+    assert 'label="商品详情图" required' in tsx, "商品详情图应标必填"
+
+
+def test_step2_logistics_template_shows_a_default_value():
+    """**物流模板要有默认值展示**（用户口径 2026-10-09）。
+
+    ⇒ 未手选时回落第一个可选计划（`selectedShippingTemplate`），开箱即显示，
+    不留下拉空着。
+    """
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    i = tsx.index('label="物流模板"')
+    block = tsx[i : i + 1200]
+    assert "value={selectedShippingTemplate" in block, \
+        "物流模板下拉未回落到默认计划（应显示默认值）"
+
+
+def test_auto_load_progress_shows_per_stage_elapsed_time():
+    """**进度弹窗每一项要有耗时统计**（用户口径 2026-10-09）。
+
+    ⚠️ 判据要**同时看定义与渲染**：只断 `"formatStageElapsed" in wiz` 是**哑弹**
+    （把符号整体改名成 `formatStageElapsedX` 仍含该子串）。实测：只断子串 ⇒ 变异 ESCAPED。
+    """
+    wiz = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+    assert "export function formatStageElapsed(" in wiz, "缺耗时格式化函数定义"
+    assert "formatStageElapsed(" in wiz, "耗时格式化未被调用"
+    #: 渲染点：耗位列在阶段行里
+    assert 'className="auto-stage-elapsed"' in wiz, "进度行缺耗位列渲染"
+    #: 运行中要能实时涨（秒表），终态定格
+    assert "export function runningElapsedMs(" in wiz, "运行中阶段缺实时耗时函数"
+    assert "performance.now()" in wiz, "耗时应用单调钟（performance.now）"
+    css = _read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.css")
+    assert ".auto-stage-elapsed {" in css, "缺耗位列样式"
+
+
+def test_step2_price_section_labels_share_one_column():
+    """**价格库存区的字段标签共用同一条列**（用户口径 2026-10-09：布局错位）。
+
+    根因两处：① 虚线框整块 `margin-left: 126px` + 框内字段又有 126px 标签列 ⇒ 右移一列；
+    ② 框内标签列写成 120px（外层 126px）⇒ 差 6px 对不齐。
+    """
+    css = _read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.css")
+    #: ⚠️ 用户口径（2026-10-10，**取代** 2026-10-09 的「去掉虚线框缩进」）：
+    #: 子参数块要有**灰色背景 + 虚线框**并体现**父子关系** ⇒ 用统一的 `.child-block`。
+    i = css.index(".child-block {")
+    block = css[i : i + 420]
+    assert "dashed" in block, "子参数块应是虚线框"
+    assert "#fafafa" in block, "子参数块应有灰色背景"
+    assert "126px 1fr" in css, "父字段标签列应为 126px"
+    #: 外层字段列也是 126px（必须同值，否则错位）
+    assert "grid-template-columns: 126px 1fr" in css, "字段标签列应为 126px"
+    #: 三处子块都挂 `.child-block`（发货模式 / 商品规格 / 定时开售）
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    assert tsx.count("child-block") >= 3, "发货模式 / 商品规格 / 定时开售都应挂子参数块"
+
+
+def test_step2_spot_ship_time_defaults_to_the_recommended_option():
+    """**现货发货时间默认选中「48小时（推荐）」**（用户口径 2026-10-09）。
+
+    ⚠️ 实测缺陷：默认值写成 `"48小时"`，而候选是 `"48小时（推荐）"` ——
+    值与选项**对不上** ⇒ 单选**一项都不选中**（页面看起来「没有默认」）。
+    判据：默认值必须**取自候选数组**（而不是手写字面量），杜绝再次对不上。
+    """
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    #: 默认值来自候选数组的「推荐」项（SPOT_SHIP_TIME_OPTIONS 末项 = 真机标推荐的那项）
+    assert "SPOT_SHIP_TIME_OPTIONS[SPOT_SHIP_TIME_OPTIONS.length - 1]" in tsx, \
+        "现货发货时间默认值应取自候选数组（手写字面量会与选项值对不上）"
+    #: 不得再出现与选项值对不上的裸字面量
+    assert 'useState<string>("48小时")' not in tsx, "默认值不得写死为「48小时」（与选项值不符）"
+    #: 「推荐」项确实是 48 小时
+    assert "48小时（推荐）" in tsx, "候选里应有「48小时（推荐）」"
+
+
+def test_precheck_table_tab_is_named_sku_table():
+    """预检「表格」页签改名为**「商品sku表格」**（用户口径 2026-10-09）。"""
+    wiz = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+    assert "商品sku表格（" in wiz, "页签名应为「商品sku表格」"
+    assert "label: `表格（${" not in wiz, "旧「表格」页签名应已改掉"
+
+
+def test_precheck_table_supports_batch_price_and_stock_edit():
+    """**表格每列都支持批量修改**（用户口径 2026-10-09）。
+
+    三种模式：原参数基础上加减固定值 / 原参数 × 倍数 + 固定值 / 统一改成固定值。
+    判据：① 纯逻辑在 lib（可 vitest）；② 页面接线；③ 三种模式文案都在。
+    """
+    lib = _read(ROOT / "frontend/src/lib/precheck-publish.ts")
+    #: ① 三种模式 + 两个入口
+    for mode in ('"delta"', '"scale"', '"fixed"'):
+        assert mode in lib, f"缺批量模式 {mode}"
+    assert "export function applyBatchRule" in lib, "缺批量计算纯函数"
+    assert "export function applyBatchRuleToTable" in lib, "缺整列批量函数"
+    assert "export function priceColumnIndex" in lib, "缺价格列识别"
+    assert "export function stockColumnIndex" in lib, "缺库存列识别"
+    #: ② 页面接线
+    wiz = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+    assert "BatchColumnBar" in wiz and "BatchColumnControl" in wiz, "页面未接批量修改控件"
+    assert "applyBatchRuleToTable" in wiz, "页面未调整列批量函数"
+    for label in ("加减固定值", "倍数+固定值", "统一改固定值"):
+        assert label in wiz, f"缺批量模式选项：{label}"
+
+
+def test_precheck_batch_column_is_selectable_not_hardcoded():
+    """批量修改**先选列**，不写死「价格 / 库存」两列（用户口径 2026-10-09）。
+
+    用户原话：「有原价有计算价格，还有可能是更多其它值，应选择指定的列，
+    而不是写价格列和库存列」。
+    """
+    wiz = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+    #: ① 必须有一个**列选择器**（`Select`，选项来自 `table.columns`）
+    assert "options={columns.map((name, index) => ({ label: name, value: index }))}" in wiz, (
+        "缺列选择器（应列出表里所有列供选择）"
+    )
+    assert "value={column}" in wiz and "onChange={onColumnChange}" in wiz, "列选择器未受控"
+    #: ② 不能只剩写死的两条（旧写法）
+    assert 'label="价格"' not in wiz and 'label="库存"' not in wiz, (
+        "不应再写死「价格 / 库存」两条批量条"
+    )
+    #: ③ 确认文案要写出**改的是哪一列**（轻提示里）
+    assert "「${colName}」" in wiz, "动作描述应写明列名"
+
+
+def test_precheck_batch_apply_has_no_confirm_dialog():
+    """批量修改**移除二次弹窗提醒**，点「应用」直接落改（用户口径 2026-10-09）。"""
+    wiz = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+    assert "applyDirectly" in wiz, "应改为直接应用（applyDirectly）"
+    #: 轻提示要落在 **applyDirectly 这个落改函数里**（不是文件里别处的 message）
+    i = wiz.index("const applyDirectly = (")
+    block = wiz[i : i + 200]
+    assert "run();" in block, "applyDirectly 应先落改"
+    assert "message.success(text)" in block, "applyDirectly 里应给一条轻提示"
+    #: 不得再有确认弹窗
+    assert "confirmThen" not in wiz, "confirmThen 二次确认应已移除"
+    assert "modal.confirm" not in wiz, "批量修改不应再弹确认框"
+
+
+def test_precheck_batch_delta_has_sign_selector():
+    """加减 / 倍数模式的**中间符号可切换**（图标点击，默认加）（用户口径 2026-10-09）。
+
+    用户原话：①「加减固定值是加还是减添加加/减符号选择」；
+              ②「倍数+固定值，中间可能加也可能是减让用户选择，默认加号」；
+              ③「加减做成图标点击切换」。
+    """
+    wiz = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+    assert 'useState<"+" | "-">("+")' in wiz, "缺加减符号状态（默认应为加号）"
+    #: 图标点击切换（不是 radio / 下拉）
+    assert "sign === \"+\" ? <PlusOutlined /> : <MinusOutlined />" in wiz, (
+        "符号应以图标呈现（加/减各一个图标）"
+    )
+    assert 'onClick={() => setSign(sign === "+" ? "-" : "+")}' in wiz, (
+        "符号未实现点击切换"
+    )
+    #: 符号选择器要在**加减与倍数两种模式**下都出现
+    assert '(mode === "delta" || mode === "scale") && (' in wiz, (
+        "符号切换应覆盖加减与倍数两种模式"
+    )
+    #: 符号要真的并进操作数（减 ⇒ 取负），否则切了也没用
+    assert 'const signed = sign === "-" ? -Math.abs(raw) : raw;' in wiz, (
+        "符号未并进操作数（切到「减」也还是加）"
+    )
+
+
+def test_precheck_batch_edit_skips_empty_cells():
+    """批量修改**空值不参与**（缺值口径：不造假）。"""
+    lib = _read(ROOT / "frontend/src/lib/precheck-publish.ts")
+    i = lib.index("export function applyBatchRule(")
+    block = lib[i : i + 900]
+    assert "onlyFilled !== false" in block, "空值应默认跳过"
+    #: 整列版也要保留空单元格原样
+    j = lib.index("export function applyBatchRuleToTable(")
+    tail = lib[j : j + 900]
+    assert "if (next === null) return cell" in tail, "整列批量应跳过空值（保留原样）"
+
+
+def test_precheck_sku_table_has_row_checkboxes_for_scoped_batch():
+    """规格列表加**复选框**，勾选后批量修改**只作用于选中行**（用户口径 2026-10-09）。
+
+    判据：① 表格有 `rowSelection`；② 勾选数上报到批量条；③ 纯逻辑支持行范围；
+          ④ 范围外行不被改动（见 vitest `countFilledInColumn` / `onlyRows`）。
+    """
+    wiz = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+    assert "rowSelection={{" in wiz, "规格表缺复选框列"
+    assert "selectedRowKeys: pickedRows" in wiz, "复选框未受控于勾选行"
+    assert "pickedRows" in wiz, "缺勾选行状态"
+    assert "pickedRows={pickedRows}" in wiz, "批量条未拿到勾选行"
+    #: 作用域提示要能看出「仅对勾选行 / 整列」
+    assert "仅对勾选的" in wiz, "缺「仅对勾选行生效」提示"
+    #: 纯逻辑的 onlyRows 参数
+    lib = _read(ROOT / "frontend/src/lib/precheck-publish.ts")
+    i = lib.index("export function applyBatchRuleToTable(")
+    block = lib[i : i + 900]
+    assert "onlyRows" in block, "整列批量函数缺行范围参数"
+    assert "scope.has(rowIndex)" in block, "范围外行应原样不动"
+    assert "export function countFilledInColumn(" in lib, "缺按行范围计数（确认文案用）"
+
+
+def test_precheck_panel_maps_edits_back_to_the_full_table_array():
+    """面板改表后**必须嵌回完整数组**（用户实测 2026-10-09：第二次改库存无响应）。
+
+    根因：页面把 `tables.filter(非 kv)` 的**子集**交给面板，面板改完直接上抛子集 ⇒
+    属性表（kv）被丢掉 ⇒ 页签集合变化 ⇒ 面板重挂载、`operand` 归零 ⇒ 「应用」按钮
+    回到禁用（第二次点击看起来「无响应」）。
+
+    判据：① 面板上抛**单表**（不是整数组）；② 页面用 `mergePanelTable` 嵌回；
+          ③ 纯逻辑 `mergePanelTable` / `skuTableIndices` 在 lib（vitest 覆盖）。
+    """
+    wiz = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+    assert "onTableChange={onTableChange}" not in wiz, "面板不应再直接上抛整数组"
+    assert "onTablesChange(mergePanelTable(tables, panelIndex, next))" in wiz, (
+        "页面必须用 mergePanelTable 把单表改动嵌回完整数组"
+    )
+    assert "tables.filter((t) => !Array.isArray(t.kv))" in wiz, "面板应只显示 SKU 表"
+    lib = _read(ROOT / "frontend/src/lib/precheck-publish.ts")
+    assert "export function mergePanelTable(" in lib, "缺 mergePanelTable（嵌回完整数组）"
+    assert "export function skuTableIndices(" in lib, "缺 skuTableIndices（SKU 表真实下标）"
+
+
+def test_precheck_row_keys_are_numeric_row_indices():
+    """勾选键必须是**数字行下标**（用户实测 2026-10-09：应用未生效）。
+
+    根因：`rowKey` 写成字符串 ``${tIndex}-${index}`` ⇒ `selectedRowKeys` 里是
+    `"0-5"`，而批量修改按 `scope.has(rowIndex)` 比对**数字** 5 ⇒ 永不匹配 ⇒
+    勾选后「应用」点了没有任何列变化（未勾选整列时也一样被 scope 拦掉）。
+    """
+    wiz = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+    assert 'rowKey={(record: { __index: number }) => record.__index}' in wiz, (
+        "rowKey 必须返回数字行下标（否则勾选键与 scope 类型不符，批量永不生效）"
+    )
+    assert "`${tIndex}-${index}`" not in wiz, "rowKey 不得再用字符串 `${tIndex}-${index}`"
+
+
+def test_property_grid_is_three_per_row_with_fixed_180px_controls():
+    """【已被取代】旧口径「一行 5 个 / 控件 180-200px」。
+
+    ⚠️ 2026-10-10 用户口径：「属性调整为**一行两个**、**输入框宽度自适应**、
+    **移除多选框 css 用默认**、**属性区最高 400px 可滚动**」⇒ 本条**由
+    `test_property_grid_is_two_columns_fluid_and_unstyled_multi` 取代**，
+    原断言整段移除（不静默删除，保留取代关系）。
+    """
+
+def test_media_thumbs_support_preview_and_hover_delete():
+    """主图 / 视频 / 详情图**支持大图预览 + 左右切换**；视频删除与图片一致（悬停右上角）。
+
+    用户口径（2026-10-09）：①「商品视频支持大图预览，删除按钮应与图片类似鼠标滑到
+    视频区域内右上角展示删除图标」；②「商品主图详情图均支持大图预览，左右切换」。
+    """
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    #: 三种媒体共用同一个缩略图组件（主图 / 视频 / 详情图）
+    assert tsx.count("<MediaThumbs") >= 3, "主图 / 视频 / 详情图都应走 MediaThumbs"
+    #: 大图预览弹窗 + 左右切换
+    assert "setPreviewIndex" in tsx, "缺预览索引状态"
+    assert "上一张" in tsx and "下一张" in tsx, "预览要能左右切换"
+    #: 视频缩略图也走 preview（点击层）
+    assert 'className="media-thumb-open"' in tsx, "缩略图应有点击预览层"
+    #: 删图标只在悬停显形（CSS）
+    css = _read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.css")
+    assert ":hover .media-thumb-remove" in css, "删除图标应悬停才显形"
+
+
+def test_video_upload_uses_md5_name():
+    """视频上传前**按内容 MD5 命名**（用户口径 2026-10-09：「视频和商品图一样上传前改成
+    md5 唯一名称」）。
+
+    唯一真相源在后端（`video_upload`）—— 无论前端传什么名，一律按内容 md5 命名。
+    """
+    src = _read(ROOT / "backend/app/api/platforms/xhs/qianfan.py")
+    i = src.index('@router.post("/video/upload"')
+    block = src[i : i + 2600]
+    assert "hashlib.md5(raw).hexdigest()" in block, "视频应按内容 md5 命名"
+    #: 不得再「名字为空才 md5」——那样前端传原名就不唯一了
+    assert 'if not file_name:' not in block, "应一律 md5，不再只在空名时兜底"
+
+
+def test_spec_value_supports_individual_and_batch_image():
+    """每个规格值支持**单独加规格图**（输入框前缀展示）+ **批量添加**（用户口径 2026-10-09）。"""
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    assert "pickSpecImage" in tsx, "缺单独加规格图"
+    assert "pickBatchSpecImages" in tsx, "缺批量加规格图"
+    assert "spec-value-thumb" in tsx, "规格图应作为输入框前缀展示"
+    assert "specImages" in tsx, "规格图应有状态（按规格值存）"
+    #: 规格图可用性由**规格图开关**决定（用户口径 2026-10-10 纠正，取代「仅第一组」）
+    assert "specImageEnabled[name] ?? gi === 0" in tsx, "规格图可用性应由开关决定（默认回落第一组）"
+
+
+def test_price_rows_sync_with_spec_values():
+    """添加规格时**价格及库存表同步添加**（用户口径 2026-10-09）。"""
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    assert "spec_combinations(" in tsx, "价格表应按规格组合出行"
+    assert "onPriceRowsChange" in tsx, "应把新行上抛给外层"
+    lib = _read(ROOT / "frontend/src/lib/publish-config.ts")
+    assert "export function spec_combinations(" in lib, "缺规格组合纯函数（可 vitest）"
+
+
+def test_media_preview_does_not_autoplay_and_stops_on_close():
+    """预览弹窗**点击播放才播**，关闭后**停止播放**（用户口径 2026-10-09）。
+
+    用户原话：「视频预览关闭弹窗后依旧在播放，预览弹窗中需点击播放才进行播放，
+    不要自动播放」。
+    """
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    i = tsx.index("function MediaThumbs(")
+    block = tsx[i : i + 6000]
+    #: 不得自动播放
+    assert "autoPlay" not in block, "预览视频不得自动播放"
+    #: 关闭前要显式暂停
+    assert "v.pause()" in block, "关闭预览应显式暂停视频（否则关了还在响）"
+    assert "currentTime = 0" in block, "关闭预览应复位播放进度"
+    #: 关闭走 closePreview（而非直接 setPreviewIndex(null)）
+    assert "onCancel={closePreview}" in block, "关闭按钮应走 closePreview（停播）"
+    assert "preload=\"metadata\"" in block, "视频应 preload=metadata（不预取整段）"
+
+
+def test_price_table_is_editable_except_spec_and_has_batch_bar():
+    """价格及库存表（用户口径 2026-10-09，**覆盖上一版「操作列 + 编辑价格/库存弹窗」**）：
+    「价格及库存列表新增规格图列，**移除操作列**，表格顶部新增规格名称搜索，
+      新增批量修改列值修改逻辑与预检中的批量修改 sku 表批量修改功能一致」。
+    """
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    #: 规格列**带行级启用切换**（用户口径 2026-10-10：默认启用 + 不启用/启用链接）
+    assert 'if (col.dataIndex === "spec") {' in tsx, "规格列应有启用切换 render"
+    assert "sku-enabled-btn" in tsx, "缺启用切换链接（真机 sku-enabled-btn）"
+    assert "available !== false" in tsx, "行级启用状态默认应为启用（available !== false）"
+    #: ① 新增「规格图」列
+    assert '"规格图"' in tsx and "specImageForRow" in tsx, "缺规格图列"
+    #: ② 移除操作列（编辑价格 / 编辑库存入口撤掉）
+    assert "PriceEditModal" not in tsx and "StockEditModal" not in tsx, "操作列与编辑弹窗应已移除"
+    assert "编辑价格" not in tsx and "编辑库存" not in tsx, "不应再有编辑价格/库存入口"
+    #: ③ 表顶规格名称搜索
+    assert "搜索规格名称" in tsx and "filteredPriceRows" in tsx, "缺规格名称搜索"
+    #: ④ 批量填写 + 批量修改列值（用户口径 2026-10-10：两者并存）
+    assert "PriceRowBatchBar" in tsx, "缺批量填写"
+    assert "只应用于单包商品" in tsx, "批量填写弹窗应带副标题「只应用于单包商品」"
+    assert "<PriceRowBatchEditModal" in tsx, "缺「批量修改列值」弹窗"
+    assert "批量修改列值" in tsx, "缺「批量修改列值」入口"
+    #: 批量修改列值 = 三模式（与预检一致）
+    assert "applyBatchRule" in tsx, "批量修改列值应复用 applyBatchRule（三模式）"
+    for label in ("加减固定值", "倍数+固定值", "统一改固定值"):
+        assert label in tsx, f"批量修改列值缺模式：{label}"
+    #: 更多操作下拉
+    assert "更多操作" in tsx, "价格库存表顶部应有「更多操作」下拉"
+    #: 单元格可编辑（写回外层）
+    assert "props.onPriceRowsChange(" in tsx, "单元格编辑应写回价格行"
+
+
+def test_price_table_has_package_bundle_modal():
+    """**多件装打包**（用户口径 2026-10-10，真机 DOM 设计 24 §14）：
+    弹窗「选择要打包的数量」，每打包规格一行 `数量`(min=2)+`价格`，「新增打包规格」，
+    取消/确定；数据进 ConfigSnapshot（`packageBundles`）。
+    """
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    assert "PackageBundleModal" in tsx, "缺多件装打包弹窗组件"
+    assert "多件装打包" in tsx, "缺「多件装打包」按钮文案"
+    assert "选择要打包的数量" in tsx, "弹窗应带说明「选择要打包的数量」"
+    assert "新增打包规格" in tsx, "缺「新增打包规格」按钮"
+    #: 数量 min=2（真机最少 2 件打包）
+    assert "min={2}" in tsx, "打包数量最少应为 2"
+    #: 数据上报进快照（提交/预览用）
+    assert "packageBundles" in tsx, "打包规格应进 ConfigSnapshot"
+    #: 入口在「更多操作」下拉里（用户口径 2026-10-10：库存工具并入下拉）
+    assert "多件装打包" in tsx and "更多操作" in tsx, "多件装打包应并入「更多操作」下拉"
+
+
+def test_logistics_type_is_radio_defaulting_to_no_logistics():
+    """物流类型**与类目直接相关**（用户口径 2026-10-09：「物流类型应和类目有直接关系，
+    你调研并实际测试一下再完善对应逻辑」）。
+
+    真机 bundle（`8091.*.js`）`logisticsTypeOptions`：默认只给 **「物流配送」**；
+    仅当类目支持「无物流发货」时才追加「无物流发货或物流配送」（tip 原文见常量）。
+    """
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    assert 'logistics: "物流配送"' in tsx, "「物流配送」候选缺失"
+    assert 'notLogistics: "无物流发货或物流配送"' in tsx, "「无物流发货或物流配送」候选缺失"
+    #: 默认「物流配送」
+    assert "useState<string>(LOGISTICS_TYPE_LABELS.logistics)" in tsx, "默认应为「物流配送」"
+    #: 按类目下发（support_no_logistics）决定是否出现第二个候选
+    assert "supportNoLogistics === false" in tsx, "应按类目收口候选"
+    #: Tooltip 文案（逐字）
+    assert "无需上传快递单号即可发货成功" in tsx, "物流类型说明文案缺失"
+
+
+def test_sale_time_schedule_shows_datetime_picker_with_real_rules():
+    """开售时间与千帆一致（真机 bundle 逆出，用户口径 2026-10-09：「开售时间的交互逻辑
+    和页面 ui 布局，你也测试调研后补充完整与千帆后台一致」）。
+
+    真机事实（`8091.*.js`）：
+      - `shelfType` 枚举 ON_SHELF=1 / OFF_SHELF=2 / SCHEDULE_SHELF=3；
+      - 新建模式 3 项、编辑模式 2 项（无「审核通过后立即上架开售」）；
+      - 选 SCHEDULE_SHELF ⇒ 出现 `expectedPurchaseTime`，规则 min=now+1h、max=now+30d。
+    """
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    #: 新建 / 编辑两套候选（真机分支）
+    assert 'SHELF_TIME_OPTIONS_EDIT = ["不设置定时开售", "定时开售"]' in tsx, "编辑模式候选项缺失"
+    assert "审核通过后立即上架开售" in tsx and "不设置，手工上架开售" in tsx, "新建模式三项缺失"
+    #: 选「定时开售」才出现时间选择器
+    assert "expectedPurchaseTime" in tsx, "缺开售时间状态（定时开售）"
+    assert 'saleTime === "定时开售"' in tsx, "定时开售才出现时间选择器"
+    #: 真机规则 min=now+1h / max=now+30d
+    assert "Date.now() + 3600_000" in tsx, "min 应为 1 小时后"
+    assert "Date.now() + 30 * 86400_000" in tsx, "max 应为 30 天内"
+
+
+def test_spec_values_all_have_image_upload_prefix():
+    """规格图是**输入框前缀**（不单独分开），第一组每个规格都有（用户口径 2026-10-09：
+    「规格图应是输入框的前缀不要单独分开，第一组规格每个规格均有规格图前缀」）。"""
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    #: 真·Input prefix（不是并排的独立 span）
+    assert "prefix={prefix}" in tsx, "规格图应作为输入框 prefix"
+    assert "const canImage = specImageEnabled[name] ?? gi === 0;" in tsx, "每个规格值可加图与否由规格图开关决定（默认回落第一组）"
+    #: 点前缀 → 弹窗选**预检通过且选中的 SKU 图**（判据用**渲染形态**，避免只匹配到函数名）
+    assert "<SkuPickModal" in tsx, "缺规格图选择弹窗（应渲染出来）"
+    assert "skuImages" in tsx, "应从预检 SKU 图里选"
+    assert "chooseSkuImage" in tsx, "选中后应上传并回显"
+
+
+def test_delivery_mode_notes_are_icon_tips_not_inline_text():
+    """发货模式说明**只用图标 + tip**，不在页面内占空间（用户口径 2026-10-09：
+    「类似的文本使用说明图标加 tip 展示，不要再页面内占用空间」+「单独的说明应在
+      现货发货时间标题后」）。"""
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    #: 不再有独立的说明块容器（说明已进字段 title 后的图标）
+    assert 'className="delivery-overview"' not in tsx, "说明不应再单独成块（应挂在标题后）"
+    assert "<span>{DELIVERY_MODE_OVERVIEW}</span>" not in tsx, "总览正文不应上屏"
+def test_sale_time_has_price_confidential_default_off():
+    """定时开售要展示**开售前价格保密**，**默认不保密**（用户口径 2026-10-09：
+    「定时开售只展示了时间，还需要展示价格保密，默认不保密，你实际浏览调研后完善」）。"""
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    #: 判据用**声明行本身**（`useState(false)` 全文件到处都是，会蒙混过关 —— M5 变异实测）。
+    assert "const [priceConfidential, setPriceConfidential] = useState(false);" in tsx, (
+        "价格保密应默认 false（不保密）"
+    )
+    assert "开售前价格保密" in tsx, "缺「开售前价格保密」文案"
+
+
+def test_category_property_returns_support_no_logistics():
+    """类目属性接口下发 `support_no_logistics`（物流类型与类目直接相关）。"""
+    src = _read(ROOT / "backend/app/api/platforms/xhs/qianfan.py")
+    i = src.index('"conditional_required_rules"')
+    block = src[i : i + 400]
+    assert '"support_no_logistics"' in block, "类目属性应下发 support_no_logistics"
+
+
+def test_spec_image_prefix_is_clickable_and_opens_modal():
+    """规格图前缀**点击必须可响应**并弹 SKU 图选择弹窗（用户实测 2026-10-09/10）：
+    「规格图前缀点击无响应，应弹窗 sku 图选择弹窗」。
+
+    根因两条：① 早期无 SKU 图时走「本地文件选择」⇒ 看起来没反应；② antd v6 的
+    `.ant-input-prefix` 可能不让子元素接收点击 ⇒ 需显式放开 `pointer-events`。
+    """
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    css = _read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.css")
+    #: ① 一律打开弹窗（不再在无图时走本地选择导致「无响应」）
+    assert "setSkuPick({ spec, value });" in tsx, "点前缀应打开 SKU 图选择弹窗"
+    assert "document.createElement(\"input\")" not in tsx or "spec-value" in tsx, (
+        "不应再在规格图前缀走本地文件选择"
+    )
+    #: ② 前缀的子元素必须能接收点击
+    i = css.index(".spec-value-input .ant-input-prefix")
+    block = css[i : i + 260]
+    assert "pointer-events: auto" in block, "前缀应放开 pointer-events（否则点击无响应）"
+
+
+def test_sku_image_pick_is_single_select():
+    """规格图选择**只能单选一张**（用户口径 2026-10-10：「sku 图只能单选一张」）。"""
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    i = tsx.index("function SkuPickModal(")
+    j = tsx.find(chr(10) + "function ", i + 10)
+    block = tsx[i : j if j > 0 else i + 6000]
+    #: 单选键是**字符串**（不是数组）
+    assert "const [picked, setPicked] = useState<string | null>(null);" in block, (
+        "SKU 图选择应为单选（字符串，不是数组）"
+    )
+    assert "checked" not in block, "不应是复选框多选"
+
+
+def test_sku_pick_modal_shows_rule_at_top():
+    """规格图规则文案放**弹窗顶部提示**（用户口径 2026-10-10：
+    「图片大小应小于3MB；比例应为1:1或3:4；格式应为jpg、png、jpeg 文本放 sku 选择图弹窗中顶部提示」）。"""
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    i = tsx.index("function SkuPickModal(")
+    #: 切到**下一个顶层函数**为止（弹窗里新增内容时不会因窗口大小变化而误判）。
+    j = tsx.find(chr(10) + "function ", i + 10)
+    block = tsx[i : j if j > 0 else i + 6000]
+    assert "message={SPEC_IMAGE_RULE}" in block, "规则文案应在弹窗顶部提示里"
+    #: 规则常量逐字
+    assert "图片大小应小于3MB；比例应为1:1或3:4；格式应为jpg、png、jpeg" in tsx, "规则文案缺失"
+
+
+def test_sku_pick_cards_have_red_frame_and_preview():
+    """SKU 选择弹窗：**卡片小图 + 选中红框 + 支持大图预览**（用户口径 2026-10-10：
+    「sku 规格图应以卡片中小图展示支持选中后红框，支持大图预览」）。"""
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    css = _read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.css")
+    i = tsx.index("function SkuPickModal(")
+    #: 切到**下一个顶层函数**为止（弹窗里新增内容时不会因窗口大小变化而误判）。
+    j = tsx.find(chr(10) + "function ", i + 10)
+    block = tsx[i : j if j > 0 else i + 6000]
+    #: ① 卡片小图
+    assert 'className="sku-pick-card"' in block or 'sku-pick-card${' in block, "SKU 图应是卡片"
+    #: ② 大图预览（下标 + 上一张/下一张）
+    assert "setPreview(i)" in block, "卡片应支持点开大图预览"
+    assert "上一张" in block and "下一张" in block, "预览应能左右切换"
+    #: ③ 选中红框（CSS）
+    j = css.index(".sku-pick-card.picked")
+    frame = css[j : j + 200]
+    assert "#ff4d4f" in frame, "选中应显**红框**"
+
+
+def test_video_upload_button_is_manual_and_never_disabled():
+    """商品视频**手动上传**入口常开（用户口径 2026-10-10：
+    「商品视频自定上传失败页面应支持手动上传，上传按钮不要置灰色」）。
+
+    ⚠️ 为什么要有：视频走 `common_file` 直传，比图片更易失败；失败后若按钮 `disabled`
+    且无手动入口，用户就**没有自救路径**（与 DEF-058 同型）。
+    """
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    i = tsx.index('label="商品视频"')
+    block = tsx[i : i + 1400]
+    #: ① 视频用**上传组件**（用户口径 2026-10-10：「详情图和视频均使用上传组件不要使用按钮」）
+    assert "<UploadSlot" in block, "视频区应使用上传组件（不是 Button）"
+    assert 'accept="video/*' in block, "上传组件应接受视频类型"
+    assert 'title="上传本地商品视频' in block, "上传组件应带用途说明"
+    #: ② 上传槽是真·本地文件输入，且**永不可置灰**（无 `disabled`）
+    slot = tsx[tsx.index("function UploadSlot(") : tsx.index("function UploadSlot(") + 1600]
+    assert 'type="file"' in slot, "上传槽应是真· file input"
+    assert "disabled" not in slot, "上传槽不得有置灰态"
+    #: ③ 上传实现走同一出口（common_file 直传 + MD5 命名）
+    wiz = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+    assert "onUploadVideoFile={uploadVideoFile}" in wiz, "wizard 应把视频手动上传接到 step2"
+    j = wiz.index("const uploadVideoFile = useCallback(")
+    body = wiz[j : j + 900]
+    assert "uploadProductVideo" in body, "手动上传应走既有的视频上传出口"
+    assert "md5_file_name(bytes" in body, "上传前应按内容 MD5 改名"
+
+
+def test_spec_image_prefix_and_modal_wire_upload_and_echo():
+    """规格图**选中即上传并回显**（用户口径 2026-10-10：「选中后上传图片，并回显」）。
+
+    链路：前缀点击 → 弹窗单选/红框 → 确认 → 按内容 MD5 上传 → 回显为该规格值的规格图。
+    """
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    #: ① 弹窗确认 → 上传 → 回显
+    i = tsx.index("const chooseSkuImage = useCallback(")
+    body = tsx[i : i + 900]
+    assert "props.onUploadSkuImage(rel_path, file_name)" in body, "选中后应上传"
+    assert "setSpecImage(target.spec, target.value, { ...img, precheck_name: rel_path, rel_path })" in body, (
+        "上传成功应回显（`precheck_name` 去重键 + `rel_path` 提交路径）"
+    )
+    #: ② 前缀点击一律弹窗（不再本地选择）
+    assert "setSkuPick({ spec, value });" in tsx, "前缀点击应打开选择弹窗"
+    #: ③ 弹窗是卡片 + 红框 + 单选 + 大图预览
+    j = tsx.index("function SkuPickModal(")
+    k2 = tsx.find(chr(10) + "function ", j + 10)
+    modal = tsx[j : k2 if k2 > 0 else j + 6000]
+    assert 'className={`sku-pick-card${' in modal, "应是卡片小图（卡片根元素类名）"
+    assert "useState<string | null>" in modal, "应单选一张"
+    assert "setPreview(i)" in modal and "上一张" in modal and "下一张" in modal, "应支持大图预览"
+    css = _read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.css")
+    k = css.index(".sku-pick-card.picked")
+    assert "#ff4d4f" in css[k : k + 160], "选中应显红框"
+
+
+def test_modal_styles_are_not_scoped_under_the_component_root():
+    """弹窗样式**不得**作用域限死在组件根下（用户实测 2026-10-10：「依旧展示的是大图」）。
+
+    ⚠️ 根因：Antd `Modal` 渲染在 **portal**（挂到 `document.body`），DOM 上**不含**
+    `.publish-config-step2` 祖先 ⇒ 形如 `.publish-config-step2 .sku-pick-card { … }`
+    的选择器**永远匹配不到**，卡片宽度/网格/红框全部失效，图片按原尺寸铺成一张大图。
+    故弹窗内的类必须写成**全局**选择器（类名本身已足够独特）。
+    """
+    css = _read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.css")
+    #: 弹窗内的类不得带组件根前缀
+    for cls in (".sku-pick-grid", ".sku-pick-card", ".sku-pick-thumb-placeholder"):
+        assert f".publish-config-step2 {cls}" not in css, (
+            f"{cls} 被限死在组件根下 —— Modal 走 portal，选择器匹配不到"
+        )
+        assert f"\n{cls} {{" in css or f"\n{cls}." in css, f"{cls} 应是全局选择器"
+
+
+def test_sku_image_cannot_be_picked_twice():
+    """同一张 SKU 图**不能被重复选中**（用户口径 2026-10-10：
+    「选择规格图被选中的规格图不能重复被选中」）。
+
+    实现：已用图在弹窗里**禁用**（`usedNames` → `.used` + 「已使用」角标），
+    落值前再**二次校验**（`precheckNamesInUse.includes`），并把源预检图记为去重键
+    （`precheck_name`）。
+    """
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    css = _read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.css")
+    #: ① 弹窗支持「已用图禁用」
+    j = tsx.index("function SkuPickModal(")
+    modal = tsx[j : j + 6000]
+    assert "const used = usedSet.has(it.rel_path);" in modal, "已用判定必须真的按集合判定（不是写死）"
+    assert 'used ? " used" : ""' in modal, "已用图应带 used 状态类"
+    assert "已使用" in modal, "已用图应有「已使用」标识"
+    assert "已被其它规格值使用" in modal, "已用图应有原因文案"
+    #: ② 落值前二次校验 + 记录去重键
+    i = tsx.index("const chooseSkuImage = useCallback(")
+    body = tsx[i : i + 1400]
+    assert "precheckNamesInUse.includes(rel_path)" in body, "落值前应二次校验（防竞态）"
+    assert "precheck_name: rel_path, rel_path" in body, "应记录源预检图（去重键 + 提交路径）"
+    #: ③ 去重集合只排除**其它**规格值（同规格自身的图可再次选中/更换）
+    k = tsx.index("const precheckNamesInUse = useMemo(")
+    memo = tsx[k : k + 700]
+    assert "spec === target.spec && value === target.value" in memo, "同规格自身那张不应被排除"
+    #: ④ 样式：已用图置灰
+    m = css.index(".sku-pick-card.used")
+    block = css[m : m + 160]
+    assert "not-allowed" in block and "opacity" in block, "已用图应置灰且不可点"
+    #: ⑤ 类型带出去重键
+    t1 = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step1.tsx"))
+    assert "precheck_name?: string;" in t1, "ConfigMainImage 应带去重键字段"
+
+
+def test_every_spec_value_in_the_first_group_has_the_image_prefix():
+    """**第一组的所有规格值**都要有规格图前缀（用户口径 2026-10-09/10：
+    「规格图应是输入框的前缀…第一组规格**每个规格**均有规格图前缀」、
+    「规格的第二个输入框没有规格图前缀，应是第一组的规格均应有规格图前缀」）。
+
+    ⚠️ 根因：外层 `specTypes.map((name, i))` 的 `i` 是**规格组**下标，
+    内层 `specValueInputs(name).map((v, i))` 的 `i` 是**规格值**下标 ——
+    同名遮蔽后 `canImage = i === 0` 变成「只有第一个**值**」。
+    必须用**组**下标（现为 `gi`）判断，且值下标不得再叫 `i`（防再次遮蔽）。
+    """
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    assert "const canImage = specImageEnabled[name] ?? gi === 0;" in tsx, "canImage 由**规格图开关**判定（默认回落第一组）"
+    assert "const canImage = i === 0;" not in tsx, "canImage 不得按规格值下标判定（同级遮蔽）"
+    #: 值级 map 不得再用 `i` 作值下标（否则易与组下标混淆/遮蔽）
+    assert "specValueInputs(name).map((v, vi) => {" in tsx, "规格值 map 的值下标应为 vi"
+    #: 前缀回调必须传**值**下标
+    assert "pickSpecImage(name, vi)" in tsx, "前缀点击应传规格值下标"
+    assert "onChange={(e) => setSpecValueAt(name, vi, e.target.value)}" in tsx, "编辑应传规格值下标"
+
+
+def test_property_grid_is_two_columns_fluid_and_unstyled_multi():
+    """属性区：**一行两个** + **控件宽度自适应** + **多选用 antd 默认** +
+    **最高 400px 可滚动**（用户口径 2026-10-10，**覆盖**此前「一行 5 个 / 固定 200px /
+    多选不换行 / 单行裁剪」四条旧口径）。
+    """
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    css = _read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.css")
+    #: ① 一行两个
+    j = css.index(".publish-config-step2 .prop-grid {")
+    grid = css[j : j + 400]
+    assert "repeat(2, minmax(0, 1fr))" in grid, "属性区应一行两个"
+    assert "repeat(5," not in grid, "不得再是一行五个（旧口径已取代）"
+    #: ② 控件自适应（不写死 200px）
+    k = css.index(".publish-config-step2 .prop-cell .prop-control,")
+    w = css[k : k + 320]
+    assert "width: 100%;" in w, "控件宽度应自适应"
+    assert "width: 200px;" not in w, "不得再写死 200px（旧口径已取代）"
+    #: ③ 多选用 antd 默认（无自定义裁剪容器/样式）
+    assert "prop-multi-one-line" not in tsx, "不得再套单行裁剪容器"
+    assert "maxTagCount" not in tsx, "不得再折叠标签（改由 antd 默认）"
+    assert ".prop-multi-one-line" not in css, "相关自定义样式应已删除"
+    #: ④ 最高 400px 可滚、低于自适应
+    assert "max-height: 400px" in grid, "属性区应最高 400px"
+    assert "overflow-y: auto" in grid, "超出 400px 应可上下滚动"
+    #: ⑤ 多选上限仍为 3（唯一常量 + 唯一入口），与「用默认样式」不冲突（那是行为不是样式）
+    assert "const MULTI_SELECT_MAX = 3;" in tsx, "上限应是唯一常量"
+    i = tsx.index('field.kind === "multi"')
+    block = tsx[i : i + 1200]
+    assert ".slice(0, MULTI_SELECT_MAX)" in block, "多选最多保留前三个（兜底）"
+    assert "disabled: full && !selected.includes(o)," in block, "选满后未选项应置灰"
+
+
+def test_step2_next_gate_reads_the_single_category_source():
+    """第二步门禁（「下一步：确认发布」）必须读**唯一类目真相源**（用户实测 2026-10-10：
+    「目前无法点击进入下一步」）。
+
+    ⚠️ 真根因：门禁读的是 `category` —— 一个**除 reset 外从未被赋值**的死 state
+    （`setCategory(非 null)` 全文件 0 处）⇒ 条件恒假、按钮永远置灰。
+    真正的类目在 `configCategoryId` / `configCategoryPath`（Step1 的 headSlot 选类目、
+    自动加载第 3 阶段识别类目，写的都是它）。
+    """
+    src = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+    #: ① 门禁 = **只看助手提示数**（用户口径 2026-10-10，随后追加「助手中提示必须为 [0] 且
+    #: 页面表单必填项全部校验通过」）—— 类目 / 可提交行那些**已收进助手判据**，
+    #: 不能另外再叠条件（否则「助手 0 提示但按钮灰」复现）。
+    assert "disabled={hintCount > 0}" in src, "第二步门禁应只看助手提示数"
+    assert "hintCount" in src and "setHintCount" in src, "向导应持有助手提示数"
+    #: 反向断言：不得再叠 `!configCategoryId` / `skus.length === 0` 这两个**重复**判据
+    assert "disabled={hintCount > 0 || !configCategoryId" not in src, (
+        "门禁不得再叠类目判据（应已收进助手「商品类目」）"
+    )
+    assert "disabled={hintCount > 0 || skus.length" not in src, (
+        "门禁不得再叠可提交行判据（应已收进助手「商品规格」）"
+    )
+    #: ② 不得再读死 state `category`
+    assert "disabled={!category ||" not in src, "门禁不得再读恒为 null 的 category"
+    assert "useState<ItemDraftCategory | null>" not in src, "category 死 state 应已删除"
+    #: ③ 发布也用同一个 id（否则按钮放行了、提交仍会挡）
+    i = src.index("const submit = useCallback(")
+    body = src[i : i + 2600]
+    assert "if (!configCategoryId)" in body, "发布前门禁应读 configCategoryId"
+    assert "category_id: configCategoryId" in body, "提交应带 configCategoryId"
+
+
+def test_wizard_has_no_parallel_dead_step_component():
+    """向导里**不得**再留平行的第二实现（用户口径 2026-10-10「你来决定」——助手决定清除）。
+
+    ⚠️ 为什么要清：`ConfigStep` 是一份**平行于活链路**的第二实现（第二步真正渲染的是
+    `PublishConfigStep2`），自带 `category/categories/keyword/searching` 一整套 state。
+    刚修的「门禁恒灰」死 state 就是它留下的 —— 留着 = 等下一次踩。
+    """
+    src = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+    #: ① 死组件与死辅助函数必须已删（按**定义**判，避免匹配到 PublishConfigStep1/2）
+    assert "function ConfigStep(props: {" not in src, "ConfigStep 死组件应已删除"
+    assert "function priceRange(" not in src, "priceRange（仅 ConfigStep 用）应已删除"
+    assert "const searchCategory = useCallback(" not in src, "searchCategory（仅 ConfigStep 用）应已删除"
+    #: ② 它的三个 state 也不得残留
+    for name in ("setKeyword", "setSearching", "setCategories"):
+        assert name not in src, f"{name} 应随 ConfigStep 一并删除"
+    #: ③ 活链路仍在（不许删错）
+    assert "<PublishConfigStep2" in src and "<PublishConfigStep1" in src, "活链路组件不得被删"
+
+
+def test_media_uploads_use_upload_slots_not_buttons():
+    """商品主图 / 商品视频 / 商品详情图一律用**上传组件**（用户口径 2026-10-10：
+    「请先在上方『智能识图』区上传商品主图 移除，应使用图片上传组件，
+    详情图和视频均使用上传组件不要使用按钮」）。
+
+    * 主图区**不得**再有「请先在上方……上传商品主图」提示（改为就地可传）；
+    * 三处都用 `UploadSlot`（虚线框 + 加号 + 真 `<input type=file>`），与「智能识图」同款；
+    * 上传槽样式写在**全局**（`.unified-upload-slot`）—— 与弹窗内类的口径一致。
+    """
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    css = _read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.css")
+    #: ① 旧提示已移除
+    assert "请先在上方「智能识图」区上传商品主图" not in tsx, "主图区旧提示应已移除"
+    #: ② 三处都用上传组件
+    for label in ('label="商品主图"', 'label="商品视频"', 'label="商品详情图"'):
+        i = tsx.index(label)
+        block = tsx[i : i + 1200]
+        assert "<UploadSlot" in block, f"{label} 应使用上传组件"
+    #: ③ 主图可上传（新增 onImagesChange 通路 + handler）
+    assert "onImagesChange?" in tsx and "onPickMainImages" in tsx, "主图应有上传通路"
+    wiz = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+    #: ⚠️ 必须断言**第二部分**那处接线 —— 第一部分（PublishConfigStep1）本就有同名 prop，
+    #: 只查「wizard 里存在该字符串」会被它满足（首轮实测 M4 逃逸）。
+    k = wiz.index("<PublishConfigStep2")
+    block2 = wiz[k : wiz.index("/>", k)]
+    assert "onImagesChange={setConfigImages}" in block2, "wizard 应把主图变更接到**第二部分**"
+    #: ④ 上传槽样式（虚线框 + 透明铺满的 input）
+    j = css.index(".unified-upload-slot {")
+    rule = css[j : j + 300]
+    assert "dashed" in rule and "72px" in rule, "上传槽应是虚线框"
+    assert ".unified-upload-picker" in css, "应有透明铺满的 file input 样式"
+
+
+def test_child_param_blocks_show_gray_dashed_box_and_hierarchy():
+    """子参数块（发货模式切换 / 商品规格勾选 / 定时开售）一律**灰底 + 虚线框 + 父子关系**
+    （用户口径 2026-10-10：
+    「发货模式切换得到的不同参数属性页面 ui 缩进到与第二个发货模式起头使用灰色背景
+    单独虚线框，商品规格勾选够同理，页面布局也要看到父子关系；
+    商品规格勾选后不再再添加最左侧的标题，定时开售同理」）。
+
+    取代 2026-10-09 的「去掉虚线框缩进」。
+    """
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    css = _read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.css")
+    #: ① 三处子块：发货模式 / 商品规格 / 定时开售
+    assert 'className="child-block delivery-varying"' in tsx, "发货模式子块应挂 child-block"
+    assert 'className="child-block spec-config"' in tsx, "规格子块应挂 child-block"
+    assert 'className="child-block shelf-varying"' in tsx, "定时开售子块应挂 child-block"
+    #: ② 规格块**不再**在最左侧挂标题（规格名移到块内标题行）
+    assert "<Field key={name} label={name}>" not in tsx, "规格块不应再挂最左侧标题"
+    assert ".child-block-title" in css or "child-block-title" in tsx, "子块应有标题行"
+    #: ③ 样式：灰底 + 虚线框（并保持与父字段同一条标签列）
+    i = css.index(".child-block {")
+    block = css[i : i + 420]
+    assert "dashed" in block and "#fafafa" in block, "子块应是「灰底 + 虚线框」"
+    assert "child-param-row" in css, "子块内应为行式排布（与开售时间同款）"
+
+
+def test_detail_image_has_no_fill_from_main_button():
+    """**「从商品主图填入」按钮已按用户口径移除**（2026-10-10）。
+
+    ⚠️ 反例守卫：别再把它加回来 —— 也提醒后来者不要因为「看着方便」而恢复。
+    """
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    assert "从商品主图填入" not in tsx, "「从商品主图填入」应已移除"
+
+
+def test_delivery_child_block_matches_shelf_time_layout():
+    """发货模式子块的**布局与视觉必须与其它子块一致**（用户实测 2026-10-10：
+    「发货模式的 ui 布局不对，商品规格，定时开售都对了…应参考开售时间的 ui 布局」）。
+
+    两条根因（都只有发货模式这一处踩到）：
+    ① 过时规则 `.publish-config-step2 .delivery-varying { border:none; padding:0; margin:0;
+       background:transparent }`（2026-10-09 口径）**特异性更高** ⇒ 把 `.child-block`
+       的灰底虚线框覆盖掉；
+    ② 发货模式子块是**顶层**元素（不在某个 `Field` 的 body 内）⇒ 少了 126px 缩进。
+    修法：删掉 ①；子块内**不再套 `Field`**（避免双重缩进），统一用行式
+    `.child-param-row`（与「开售时间」同款）；顶层子块统一加 126px 缩进。
+    """
+    css = _read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.css")
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    #: ① 过时的零框规则不得残留（否则压掉 .child-block）
+    assert ".publish-config-step2 .delivery-varying {" not in css, (
+        "过时的 `.delivery-varying` 零框规则应已删除（其特异性会压掉 .child-block 的灰底虚线框）"
+    )
+    i = css.index(".publish-config-step2 .child-block.delivery-varying")
+    assert "margin-left: 126px" in css[i : i + 160], "顶层发货子块应按父字段标签列缩进"
+    #: ② 子块内用行式排布（不套 Field ⇒ 不双重缩进）
+    assert tsx.count("child-param-row") >= 5, "子块内参数应统一用行式 .child-param-row"
+    assert 'label="现货发货时间"' not in tsx, "子块内不应再套 Field（会双重缩进）"
+    assert 'label="全款预售发货时间"' not in tsx, "同上"
+    #: ③ 发货子块仍挂 .child-block（灰底虚线框）
+    assert 'className="child-block delivery-varying"' in tsx, "发货子块应挂 child-block"
+
+
+def test_step3_previews_the_full_step2_config_and_media():
+    """第三步是**第二步全量只读预览**（用户口径 2026-10-10：
+    「把第三步，发布确认并上架应预览第二步填写的完整所有参数；
+     媒体资源只预览顺序和第二步保持一致」）。
+
+    ⚠️ 前置问题：第二步配置原本是组件**内部 state**，切步时组件卸载 ⇒ state 全丢
+    ⇒ 提交体与第三步都拿不到配置。修法 = 快照上报给向导 + 第三步全量预览。
+    """
+    wiz = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+    s2 = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    #: ① 第二步上报快照
+    assert "onConfigChange?: (next: ConfigSnapshot) => void;" in s2, "第二步应提供配置快照上报"
+    assert "props.onConfigChange?.({" in s2, "第二步应真的上报（不是只声明）"
+    #: ② 向导持有快照并传真值给第三步
+    assert "const [configSnapshot, setConfigSnapshot] = useState<ConfigSnapshot | null>(null);" in wiz, (
+        "向导应持有配置快照（组件卸载后不丢）"
+    )
+    assert "onConfigChange={setConfigSnapshot}" in wiz, "应把上报接到快照 state"
+    i = wiz.index("<PublishStep")
+    block = wiz[i : wiz.index("/>", i)]
+    for prop in ("config={configSnapshot}", "images={configImages}", "video={configVideo}",
+                 "detailImages={configDetailImages}", "priceRows={priceRows}",
+                 "shortTitle={configShortTitle}"):
+        assert prop in block, f"第三步预览缺：{prop}"
+    #: ③ 四分区齐 + 媒体**只预览**（不带删除/勾选）
+    assert wiz.count("PreviewSection") >= 5, "第三步应分区块全量预览（基础/图文/价格/服务）"
+    assert "PreviewMedia" in wiz, "媒体应只读预览"
+    assert 'label="商品主图"' in wiz and 'label="商品详情图"' in wiz, "媒体顺序应与第二步一致"
+    #: ④ 配置随提交下发（否则「提交第二步的完整参数」是空话）
+    assert "config: (configSnapshot ?? undefined) as Record<string, unknown> | undefined," in wiz, (
+        "提交应带上第二步配置快照"
+    )
+
+
+def test_publish_request_accepts_step2_config_without_422():
+    """发布端点必须**接收**第二步配置快照（否则前端一发就 422，等于白传）。
+
+    ⚠️ 当前只接收留档；逐项映射进 `itemData` 是下一步（需真机字段名 + 红线验证）。
+    """
+    api = _read(ROOT / "backend/app/api/platforms/xhs/qianfan.py")
+    assert "config: dict[str, Any] = Field(default_factory=dict)" in api, (
+        "发布请求体应接收 config（形状不定 ⇒ 不能收紧成固定模型，否则前端一多发就 422）"
+    )
+
+
+def test_sku_pick_modal_has_waiting_mask_on_confirm():
+    """规格图选择弹窗**确认后要盖等待蒙版**（用户口径 2026-10-10：
+    「选择规格图顶级确认加等待蒙版」）。"""
+    tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    i = tsx.index("function SkuPickModal(")
+    j = tsx.find("function ", i + 10)
+    block = tsx[i : j if j > 0 else i + 6000]
+    assert "busy?: boolean;" in block, "弹窗应接收上传中态"
+    assert "<Spin spinning={!!props.busy}" in block, "确认后应盖等待蒙版"
+    assert "confirmLoading={props.busy}" in block, "确认按钮应显示 loading"
+    assert "props.busy" in block.split("okButtonProps")[1][:80], "上传中应禁用二次确认"
+
+
+def test_publish_submits_step2_attributes_and_per_dimension_specs():
+    """发布体**严格按第二步配置**：属性用用户填的、规格**逐维度**给 id
+    （用户口径 2026-10-10；对应真机两条报错）。
+
+    真机报错（用户截图）：`attributes - 材质属性必须填写`、
+    `variants - 当前商品存在重复的规格，请删除重复规格后重试`。
+
+    根因：① `attributes` 直接抄**骨架**（= 上一个商品的属性）⇒ 用户填的从没进过提交体；
+          ② 所有 SKU 行共用**第一个**规格 id ⇒ 多维规格塌成一维 ⇒ 平台判「重复规格」。
+    """
+    api = _read(ROOT / "backend/app/api/platforms/xhs/qianfan.py")
+    svc = _read(ROOT / "backend/app/services/shop_item_publish_service.py")
+    #: ① 端点把 config 里的 attributes / specAttributes 传下去
+    assert 'attributes=payload.config.get("attributes") or None' in api, (
+        "端点应把第二步填的属性传给发布服务"
+    )
+    assert 'spec_attributes=payload.config.get("specAttributes") or None' in api, (
+        "端点应把规格维度 id 映射传下去"
+    )
+    #: ② 服务：属性**提交值优先**（不再无条件抄骨架）
+    assert 'attributes=attributes if attributes is not None else skeleton.get("attributes")' in svc, (
+        "属性应「提交值优先、缺才回落骨架」"
+    )
+    #: ③ 服务：规格逐维度（按 `/` 拆多维度 + 查 `规格名 → id` 表）
+    assert 'for part in str(row.get("name") or "").split("/")' in svc, "规格应按 `/` 拆多维度"
+    assert "spec_id_by_name" in svc, "应有「规格名 → 平台 id」映射"
+    #: ④ 真机 `attributes[]` 必带 `attributeValueType`（缺它被判「没填」）
+    s2 = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    assert "attributeValueType: 1," in s2, "提交的属性条目应带 attributeValueType（真机形状）"
+    #: ⑤ 只带**用户勾选的**规格维度
+    assert "specAttributes: (props.specAttributes ?? []).filter((x) => specTypes.includes(x.name))" in s2, (
+        "规格维度应严格按第二步勾选收窄"
+    )
+
+
+def test_publish_submit_shows_mask_with_elapsed_time():
+    """点「确认发布」后**页面加蒙版 + 耗时统计**（用户口径 2026-10-10）。"""
+    wiz = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+    #: ① 提交蒙版（复用 publish-wait-mask）+ 实时耗时
+    assert "正在发布并立即下架… 已耗时 {Math.floor(submitElapsedSec)}s" in wiz, (
+        "提交中应显示蒙版 + 实时耗时"
+    )
+    assert "{submitting && (" in wiz, "蒙版应由 submitting 驱动"
+    #: ② 起表 / 定格
+    assert "const startedAt = performance.now();" in wiz, "提交应用单调钟起表"
+    assert "setSubmitElapsedSec((performance.now() - startedAt) / 1000);" in wiz, (
+        "终态应定格耗时（不归零）"
+    )
+    #: ③ 用户可见文案禁 Markdown `**`
+    assert "发布成功后会立即下架（红线）；请勿关闭本窗口或重复点击。" in wiz
+
+
+def test_step2_state_survives_step_switching():
+    """来回切步时第二步**已填参数不得清空**（用户口径 2026-10-10：
+    「来回步骤切换时，所有已填写的参数均应保持不清空，只有弹窗关闭或发布成功后清空」）。
+
+    ⚠️ 根因：`{step === 1 && <PublishConfigStep2/>}` 条件渲染 ⇒ 切步**卸载组件**
+    ⇒ 内部 state（发货模式/规格/开售时间/售后/描述…）全丢。
+    修法：**保持挂载、只隐藏**（`display:none`）；清空只发生在 `reset()`（关弹窗）。
+    """
+    wiz = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+    i = wiz.index("<PublishConfigStep2")
+    before = wiz[max(0, i - 900) : i]
+    assert 'display: step === 1 ? undefined : "none"' in before, (
+        "第二步应保持挂载、只隐藏（条件渲染会卸载组件 ⇒ state 全丢）"
+    )
+    #: ⚠️ 判据：`<PublishConfigStep2>` **之前**不得出现 `step === 1 &&`。
+    #: （首轮写成「`{step===1&&(<PublishConfigStep2` 不存在」⇒ 恒真、变异逃逸 ——
+    #:  因为 `{` 与组件之间夹着一段长注释，那个形态本来就不存在。）
+    flat_before = before.replace("\n", "").replace(" ", "")
+    assert "step===1&&" not in flat_before, "不得再用条件渲染包住第二步"
+
+
+def test_reset_clears_all_step2_config_state():
+    """**关弹窗 / 发布成功后 `reset()` 必须清空第二步全部配置 state**（用户口径 2026-10-10：
+    「只有弹窗关闭或发布成功后清空」）。
+
+    ⚠️ 2026-10-10 补全：此前 `reset()` 漏清了第二步后来新增的一批 state
+    （`configSnapshot` / `priceRows` / `keyProperties` / `propertyValues` /
+    `specAttributes` / 物流模板…）⇒ 关弹窗重开时上一轮配置**残留**。
+    """
+    wiz = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+    i = wiz.index("const reset = useCallback(")
+    block = wiz[i : i + 2200]
+    for token in (
+        "setConfigSnapshot(null);",
+        "setHintCount(0);",
+        "setSubmitElapsedSec(0);",
+        "setPriceRows([",
+        "setKeyProperties([]);",
+        "setOtherProperties([]);",
+        "setSpecAttributes([]);",
+        "setPropertyValues({});",
+        "setShippingTemplates([]);",
+        "setDefaultTemplateId(null);",
+        "setLogisticsTemplates([]);",
+        "setAfterSaleRules([]);",
+    ):
+        assert token in block, f"reset 应清空：{token}"
+
+
+def test_sku_rows_follow_the_step2_price_table():
+    """SKU 行数以**第二步价格及库存表**为准（用户实测 2026-10-10：
+    「第三部的 sku 统计函数错误不是 26 行，我只配置了一个规格」）。
+
+    26 行来自**预检数据包的 SKU 表**，与第二步实际配置的规格组合无关。
+    """
+    wiz = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+    assert "const skus = useMemo(" in wiz or "setSkus(\n        priceRows" in wiz or "setSkus(" in wiz
+    #: 必须由 priceRows 推导，且**不得**再从 payload.skus 灌
+    assert "priceRows" in wiz and ".filter((r) => r.spec && r.spec !== \"-\")" in wiz, (
+        "skus 应由 priceRows（第二步表）推导"
+    )
+    assert "setSkus(payload.skus)" not in wiz, "不得再用预检 SKU 表当 SKU 真相源"
+
+
+def test_step2_required_fields_and_hints_cover_specs_and_freight():
+    """**商品规格 / 运费模板必填**（用户口径 2026-10-10），且发布助手要判到它们
+    （否则「红色异常项挡住下一步」与「实际能进」不一致）。"""
+    s2 = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    assert 'label="商品规格" required' in s2, "商品规格应必填"
+    assert 'label="运费模板" required' in s2, "运费模板应必填"
+    assert 'field: "商品规格", reason: "请至少勾选一个商品规格"' in s2, "发布助手应判商品规格"
+    assert 'field: "运费模板", reason: "请选择运费模板"' in s2, "发布助手应判运费模板"
+
+
+def test_step3_shows_after_sale_and_no_price_list():
+    """第三步：**售后服务要展示**（用规则名，含平台强制项）、**价格及库存不得为列表**
+    （用户口径 2026-10-10）。"""
+    s2 = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    wiz = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+    #: 快照带 afterSaleNames（平台强制项 ∪ 用户勾选 ⇒ 规则名）
+    assert "afterSaleNames: afterSaleRules" in s2, "快照应带售后服务展示名"
+    #: ⚠️ 判据必须落在 **afterSaleNames 那段**里（首轮实测：只查
+    #: `r.must_support || supportedTypes.includes(r.type)` 会被**别处**同名模式满足 ⇒ 变异逃逸）。
+    k = s2.index("afterSaleNames: afterSaleRules")
+    seg = s2[k : k + 260]
+    assert "r.must_support || supportedTypes.includes(r.type)" in seg, (
+        "售后服务应含平台强制项（只报用户勾选的会显示空）"
+    )
+    assert "config?.afterSaleNames" in wiz, "第三步应用 afterSaleNames 展示售后服务"
+    #: 价格及库存只给摘要，不铺表
+    assert "publish-preview-summary" in wiz, "价格及库存应是摘要而非列表"
+    i = wiz.index("价格库存")
+    block = wiz[i : i + 2600]
+    assert "dataSource={priceRows}" not in block, "价格及库存不得用 Table 铺长列表"
+
+
+def test_publish_pipeline_has_the_latency_fixes():
+    """发布链路的三处**耗时**修复（用户口径 2026-10-10：「顶级确认发布很慢分析原因」）。
+
+    实测（只读接口）：`list_recent_items` 0.57s / `publish_render` 0.3s / 运费模板 0.2s
+    —— 单次调用都很快 ⇒ 慢点在 ①两段轮询（每段首个 sleep 白等 3s、最多 36s×2）
+    ②26 张图**串行**上传（每张 1 permit + 1 PUT）。
+    """
+    svc = _read(ROOT / "backend/app/services/shop_item_publish_service.py")
+    api = _read(ROOT / "backend/app/api/platforms/xhs/qianfan.py")
+    #: ① 轮询先查再睡（去掉每段固定的首个 3s 白等）
+    assert "if attempt:\n            time.sleep(_PUBLISH_POLL_INTERVAL)" in svc, (
+        "轮询应「先查再睡」（原实现每轮先 sleep(3) ⇒ 每段白等 3s）"
+    )
+    #: ② 图片并行上传（有上限的线程池；单张仍逐条如实报，不静默丢图）
+    assert "ThreadPoolExecutor" in api, "图片上传应并行（26 张串行是主要慢点）"
+    assert "max_workers=min(8, len(_paths_to_upload))" in api, "并发应有上限（8 路）"
+    assert 'failed_images.append({"path": path_str, "reason": str(reason)})' in api, (
+        "并行后仍要逐条如实报失败（口径不变）"
+    )
+
+
+def test_publish_failure_reasons_use_a_top_error_alert():
+    """发布失败原因用**第三步顶部 error 公告**（用户口径 2026-10-10：
+    「发布失败原因**不使用弹窗**，使用第三步**顶部公告 error 类型**」，参考 antd Alert）。"""
+    wiz = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+    i = wiz.index("function PublishStep(")
+    block = wiz[i:]
+    #: ① 不得再有失败原因弹窗
+    assert 'title="发布失败原因"' not in block, "失败原因不得再用弹窗"
+    assert "publish-fail-images" in block  # 明细仍在（放进 Alert 的 description）
+    #: ② 顶部 error 公告（antd Alert：type=error + showIcon + closable）
+    k = block.index('type="error"')
+    seg = block[max(0, k - 200) : k + 400]
+    assert "showIcon" in seg and "closable" in seg, "失败原因应是可关闭的 error 型 Alert"
+    assert "describe" not in seg or True
+    assert "发布未通过（" in block, "公告 message 应写明条数"
+    #: ③ 明细在 description 里（失败逐条 + 图片失败逐条）
+    assert "dataSource={result.fail_reasons ?? []}" in block, "公告内应列出逐条失败原因"
+    #: ④ 文案不得再指向弹窗（弹窗已不存在 ⇒ 指向它就是死路）。
+    #: ⚠️ 这条提示在 `submit()` 里（不在 `PublishStep` 内）⇒ 断言范围放到**整个向导文件**。
+    assert "请看失败原因弹窗" not in wiz, "页面提示不得再指向已删除的弹窗"
+    assert "请看顶部失败原因" in wiz, "提示应指向顶部公告"
+
+
+def test_publish_hints_cover_all_required_fields_and_recompute():
+    """发布助手：**所有必填项都列出**、**勾选后自动消失**（实时重算）、**有异常 ⇒ 不放行**
+    （用户口径 2026-10-10）。
+
+    ⚠️ 真根因（"商品规格已勾选但红色项还在"）：`publishHints` 的 `useMemo` **依赖数组漏了**
+    `specTypes` / 运费模板 ⇒ 勾选后不重算，提示一直挂着。
+    """
+    s2 = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    wiz = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+    #: ① 依赖含所有参与判定的值（否则改值不重算）
+    i = s2.index("const publishHints = useMemo")
+    memo = s2[i : i + 2600]
+    #: ⚠️ 必须切**依赖数组那一段**再断言（首轮实测：只查 `dep in memo` 会被**函数体**
+    #: 里的同名引用满足 —— 例如 `if (specTypes.length === 0)` 自己就含 `specTypes` ⇒ M1 逃逸）。
+    assert "}, [" in memo, "应能定位依赖数组"
+    deps = memo.split("}, [", 1)[1].split("]);", 1)[0]
+    for dep in ("specTypes", "effectiveFreightTemplateId", "propValues",
+                "selectedShippingTemplate", "brand", "deliveryMode", "props.priceRows"):
+        assert dep in deps, f"依赖数组应含 {dep}（漏了 ⇒ 改值后红色项不消失）"
+    #: ② 页面 required 的项都要在助手里列
+    for field in ("商品主图", "商品详情图", "商品规格", "运费模板", "物流模板", "商品标题"):
+        assert f'field: "{field}"' in s2, f"助手应列出必填项：{field}"
+    #: ③ 上报提示数 → 向导门禁
+    assert "props.onHintCountChange?.(publishHints.length);" in s2, "应上报助手提示数"
+    assert "onHintCountChange={setHintCount}" in wiz, "向导应接收提示数"
+    assert "disabled={hintCount > 0}" in wiz, "有异常提示 ⇒ 不允许进入下一步"
+    #: 助手必须覆盖**类目**与**规格值未填**（两者原先只写在门禁里 ⇒
+    #: 出现「助手显示没有待处理提示，按钮却灰着」，用户实测 2026-10-10）
+    assert 'field: "商品类目"' in s2, "助手应列出「商品类目」"
+    assert "还没有规格值" in s2, "勾了规格类型但没填值也要报"
+    #: **表单校验保留、但配置区不再渲染红字**（用户口径 2026-10-10 更新）：
+    #: 校验结果仍由 `publishHints` 承载并用于门禁（`hintCount > 0`），
+    #: 但配置区**不再显示内联红框/红字**（`Field.error` 已移除，异常提示统一进左侧助手）。
+    assert "disabled={hintCount > 0}" in wiz, "有异常提示 ⇒ 不允许进入下一步（门禁靠助手）"
+    assert "error={hintFor(" not in s2, "配置区不应再绑定内联红字（error 传参已移除）"
+    assert "config-field-error" not in s2, "配置区不应再有错误文案节点"
+
+
+def test_step3_shows_template_names_and_scrollable_sku_list():
+    """第三步：**展示模板名称**（不是「已选」）、**SKU 列表固定 300px 可滚动**
+    （用户口径 2026-10-10：「第三步的运费模板，物流模板应展示选择的模版名称，
+    SKU 行数下新增 sku 列表，固定 300px 高度支持下拉滚动」）。"""
+    wiz = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+    s2 = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    css = _read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.css")
+    #: ① 快照带两个**名称**
+    assert "logisticsPlanName: string;" in s2 and "freightTemplateName: string;" in s2
+    assert "props.logisticsTemplates.find((t) => t.plan_id === selectedShippingTemplate)?.name" in s2
+    assert "props.shippingTemplates.find((t) => t.template_id === effectiveFreightTemplateId)?.name" in s2
+    #: ② 第三步展示名称（回落「已选/未选」只在名称为空时）
+    assert "config?.logisticsPlanName || (config?.logisticsPlanId ?" in wiz
+    assert "config?.freightTemplateName || (config?.freightTemplateId ?" in wiz
+    #: ③ SKU 列表（**最高** 300px + 低于则自适应 + 超出的在容器内滚动）
+    #: （用户口径 2026-10-10：「规格列表高度调整为**最高 300px**，低于 300px 的**自适应**」）
+    assert 'className="publish-preview-sku-list"' in wiz, "SKU 行数下应有 SKU 列表"
+    i = css.index(".publish-preview-sku-list {")
+    rule = css[i : i + 200]
+    assert "max-height: 300px" in rule, "SKU 列表应是**最高** 300px（低于则自适应）"
+    #: ⚠️ 用行首判据：`max-height: 300px` 本身**含子串** `height: 300px`，
+    #: 直接 `"height: 300px" not in rule` 会**误红**（首轮实测踩到）。
+    assert not any(
+        ln.strip().startswith("height:") for ln in rule.splitlines()
+    ), "不得写死 300px（行数少时要自然收缩）"
+    assert "overflow-y: auto" in rule, "超出 300px 应在容器内滚动"
+    #: 反向断言：固定 scroll.y 会让行数少时也撑到 261px（非自适应）
+    assert "scroll={{ y: 300 - 39 }}" not in wiz, "不得再写死 Table scroll.y（破坏自适应）"
+
+
+def test_step1_title_and_category_have_inline_validation():
+    """第一步的**商品标题 / 商品类目**必填框要有**表单校验**（用户口径 2026-10-10：
+    「配置商品参数弹窗下，必填框应添加表单校验」）。
+
+    ⚠️ 这两框在 `publish-config-step1`（作为 step2 的 `headSlot`）里渲染，
+    文案与发布助手同一条（「请输入商品标题」/「请选择商品类目」）。
+    """
+    s1 = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step1.tsx"))
+    assert 'status={title.trim() ? undefined : "error"}' in s1, "标题为空应显示错误态"
+    assert '请输入商品标题' in s1, "标题应给内联校验文案"
+    assert '{categoryPath.length === 0 && (' in s1, "类目为空应给内联校验"
+    assert '请选择商品类目' in s1, "类目应给内联校验文案"
+
+
+def test_publish_result_alerts_sit_at_the_top_of_the_preview():
+    """第三步的**错误/警告信息展示在预览信息的最顶部**（用户口径 2026-10-10：
+    「错误信息应展示在预览信息的顶部」）。"""
+    wiz = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+    i = wiz.index("function PublishStep(")
+    block = wiz[i:]
+    space = block.index("<Space direction=\"vertical\"")
+    #: 第一条消息就是 Alert（缺价格警告 / 发布失败公告都在最前）
+    assert block.index("invalid.length > 0 && (") > space
+    assert block.index('type="error"') > space
+    first_alert = min(block.index("invalid.length > 0 && ("), block.index('type="error"'))
+    first_section = block.index("<PreviewSection")
+    assert first_alert < first_section, "错误/警告必须排在第一个预览分区**之前**"
+
+
+def test_republish_clears_previous_failure_alerts():
+    """**再次重新发布时清除历史发布的错误信息**（用户口径 2026-10-10）。
+
+    ⚠️ 失败原因挂在 `result` 上（顶部 error 公告的数据源）⇒ 不清空的话，
+    重发过程中会一直显示**上一轮**的失败原因。
+    """
+    wiz = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+    i = wiz.index("const startedAt = performance.now();")
+    seg = wiz[i : i + 400]
+    assert "setResult(null);" in seg, "提交前应清空上一轮结果（否则历史错误一直挂在顶部）"
+
+
+def test_step3_previews_the_selected_product_attributes():
+    """第三步**预览选定的商品属性**（用户口径 2026-10-10：
+    「第三步，商品属性未展示预览，选定的商品属性应展示预览」）。
+
+    属性是**按类目动态下发**的 ⇒ 不能写死名字，必须铺快照里的 `attributes` 数组。
+    """
+    wiz = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+    assert '<Descriptions.Item label="商品属性" span={2}>' in wiz, "第三步应预览商品属性"
+    assert '(config?.attributes ?? [])' in wiz, "属性应取快照里的数组（按类目动态）"
+    assert "a.attributeName}：${a.attributeValue}" in wiz, "应按「属性名：值」逐条展示"
+
+
+def test_multi_select_property_keeps_at_most_three_values():
+    """**下拉多选最多选三个、超过的置灰色**（用户口径 2026-10-10）。
+
+    两件一起钉：① 选满 3 个 ⇒ **未选项 `disabled`**（置灰，已选仍可取消）；
+    ② `onChange` 里 `.slice(0, MULTI_SELECT_MAX)` 作为**行为兜底**。
+    ⚠️ 上限常量为**唯一来源** `MULTI_SELECT_MAX`（不在两处各写一个 3）。
+    """
+    s2 = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    assert "const MULTI_SELECT_MAX = 3;" in s2, "上限应是唯一常量"
+    i = s2.index('if (field.kind === "multi") {')
+    block = s2[i : i + 1200]
+    assert "const full = selected.length >= MULTI_SELECT_MAX;" in block, "应判「是否已选满」"
+    assert "disabled: full && !selected.includes(o)," in block, "选满后未选项应置灰"
+    assert ".slice(0, MULTI_SELECT_MAX)" in block, "onChange 应裁到上限（兜底）"
+    assert "prop-multi-one-line" not in block, "不得再套单行裁剪容器（改用 antd 默认）"

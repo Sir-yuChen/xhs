@@ -73,6 +73,7 @@ import {
   cleanScheduleLogs,
   deleteScheduleJob,
   deleteScheduleLogs,
+  fetchAccounts,
   fetchScheduleJobs,
   fetchScheduleLogs,
   fetchScheduleStatus,
@@ -89,6 +90,8 @@ import {
   triggerTypeFullLabel,
   triggerTypeLabel,
 } from "../../lib/schedule";
+import { accountNameMap } from "../../lib/task-records";
+import type { AccountNameMap } from "../../lib/task-records";
 import { formatDuration, formatShanghaiTime } from "../../lib/time";
 import type {
   ScheduleStatus,
@@ -115,6 +118,10 @@ export function TaskCenterPage() {
   const [actionLoading, setActionLoading] = useState(false);
 
   // 任务日志
+  //: `账号 id → 账号名`（详情弹窗「执行账号」逐条显示用）。与订单页同一实现。
+  //: 拉一次缓存住 —— 弹窗每次打开都重拉既不必要，也会让回看的**历史快照**随账号改名
+  //: 而漂移（那本就该是当时的名字，但快照没存名字，取「当前名」是次优解且要稳定）。
+  const [accountNames, setAccountNames] = useState<AccountNameMap>({});
   const [logs, setLogs] = useState<ScheduledJobLog[]>([]);
   const [logsLoading, setLogsLoading] = useState(false);
   const [logJobKey, setLogJobKey] = useState<string | undefined>(undefined);
@@ -166,6 +173,16 @@ export function TaskCenterPage() {
     }
   }, []);
 
+  const loadAccounts = useCallback(async () => {
+    try {
+      // 只放账号名，与账号下拉同口径（`accountNameMap` 是 lib 的**唯一实现**）。
+      setAccountNames(accountNameMap(await fetchAccounts("xhs")));
+    } catch {
+      // 拉不到就退 `账号 #id`（缺值不猜）；不阻断任务中心其余功能。
+      setAccountNames({});
+    }
+  }, []);
+
   const loadLogs = useCallback(async () => {
     setLogsLoading(true);
     try {
@@ -190,7 +207,8 @@ export function TaskCenterPage() {
     void loadStatus();
     void loadJobs();
     void loadTargets();
-  }, [loadStatus, loadJobs, loadTargets]);
+    void loadAccounts();
+  }, [loadStatus, loadJobs, loadTargets, loadAccounts]);
 
   useEffect(() => {
     if (activeTab === "logs") {
@@ -325,8 +343,22 @@ export function TaskCenterPage() {
       dataIndex: "name",
       key: "name",
       width: 180,
-      // 用户口径：任务名下方不再挂「内置」Tag（任务一律可编辑可删除，标不标都一样）
       render: (name: string) => <Text strong>{name}</Text>,
+    },
+    {
+      //: 2026-10-07 用户口径「定时任务新增表字段是否为内置任务，列表新增展示，
+      //: 内容任务不允许删除，前后端添加校验逻辑」—— 内置与否是**列表上要看的一眼**
+      //: （它决定这行能不能删），所以单开一列而不是挂在任务名下的 Tag。
+      title: "任务属性",
+      dataIndex: "is_builtin",
+      key: "is_builtin",
+      width: 110,
+      render: (isBuiltin: boolean) =>
+        isBuiltin ? (
+          <Tag color="blue">系统内置</Tag>
+        ) : (
+          <Tag>自定义</Tag>
+        ),
     },
     // 用户口径（2026-09-24）：「任务分组先去掉」⇒「分组」列整条移除
     {
@@ -453,16 +485,27 @@ export function TaskCenterPage() {
             description="任务日志会保留（任务名快照仍在），可随后在日志页签清理。"
             onConfirm={() => removeJob(record)}
             okButtonProps={{ danger: true }}
+            // 内置任务不给弹确认（点都点不动，弹了也没用）
+            disabled={record.is_builtin}
           >
-            {/* 用户口径：删除按钮**放开**（所有任务一律可删，内置不再是特权） */}
-            <Button
-              size="small"
-              danger
-              icon={<DeleteOutlined />}
-              disabled={actionLoading}
+            {/*
+             * 2026-10-07 用户口径「内容任务不允许删除，前后端添加校验逻辑」：
+             * 内置任务（`is_builtin`）删除按钮**置灰**，Tooltip 说明出路（改调度 / 暂停）——
+             * 后端 `DELETE /schedule/jobs/{id}` 同步拒 400 `JOB_BUILTIN_PROTECTED`，
+             * 前端这道只是**别让用户白点**，真正的门禁在后端。
+             */}
+            <Tooltip
+              title={record.is_builtin ? "系统内置任务不可删除（可暂停或改调度）" : ""}
             >
-              删除
-            </Button>
+              <Button
+                size="small"
+                danger
+                icon={<DeleteOutlined />}
+                disabled={actionLoading || record.is_builtin}
+              >
+                删除
+              </Button>
+            </Tooltip>
           </Popconfirm>
         </Space>
       ),
@@ -836,6 +879,8 @@ export function TaskCenterPage() {
         log={detailLog}
         // 调用目标中文名与列表列共用同一份 /schedule/targets（不另写映射表，DEF-044）
         targetNames={targetNames}
+        // 账号名与任务记录页共用 lib 的 `accountNameMap`（不另写映射，DEF-044）
+        accountNames={accountNames}
         onCancel={() => setDetailLog(null)}
       />
     </div>

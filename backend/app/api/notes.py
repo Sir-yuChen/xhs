@@ -1400,11 +1400,27 @@ def sync_note_data_endpoint(
     return {"ok": True, "status": "syncing", "category": payload.category, "log_id": log_id}
 
 
+@router.post("/batch-create-drafts")
 def batch_create_drafts(
     payload: BatchCreateDraftsRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    """批量把已入库笔记转成改写草稿（设计 05 §「`/api/notes/batch-create-drafts`」）。
+
+    ⚠️ **本函数此前一直是死代码**（2026-10-07 修）：函数体、请求模型
+    `BatchCreateDraftsRequest`、序列化器 `_serialize_draft` 三样都在，**唯独丢了
+    `@router.post` 装饰器** ⇒ 路由不存在。表现极具误导性：
+
+      - `GET /openapi.json` 里没有它（端点数照旧），所以**端点数口径看不出异常**；
+      - 前端内容库「批量加入草稿工坊」按钮（`createBatchRewriteDrafts`）点下去
+        必 `405 Method Not Allowed`；
+      - `test_notes_batch_create_drafts_...` 长期红，容易被当成「测试写错了」。
+
+    归属校验走 `_get_unique_owned_notes`（非本人笔记 ⇒ 404），与单篇
+    `POST /notes/{id}/...` 同一把尺子。`intent` 只影响前端文案，落库形态与
+    单篇 `POST /api/drafts` 一致（拷贝标题 / 正文 / 来源笔记 id）。
+    """
     notes = _get_unique_owned_notes(db, current_user, payload.note_ids)
     drafts: list[AiDraft] = []
     for note in notes:

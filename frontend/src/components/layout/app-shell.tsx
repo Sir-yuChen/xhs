@@ -13,6 +13,7 @@ import {
   SearchOutlined,
   SettingOutlined,
   ShoppingOutlined,
+  ContainerOutlined,
   ShoppingCartOutlined,
   ThunderboltOutlined,
   ToolOutlined,

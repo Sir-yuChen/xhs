@@ -1,0 +1,76 @@
+/**
+ * 「发布商品」向导 · 样式（仅向导自身的容器级元素）。
+ *
+ * 各步骤的表单样式在 `publish-config-step1.css` / `publish-config-step2.css`；
+ * 这里只放向导级、跨步骤共用的块（当前：自动加载参数的**执行进度列表**）。
+ *
+ * ⚠️ 与 step1/step2 同口径：**说明性文案一律收进「说明图标 + Tooltip」**；
+ *   用户可见文案禁 Markdown `**`。
+ */
+
+/* ---------- 自动加载参数 · 执行进度列表 ---------- */
+
+/* 用户口径（2026-10-09）：进度弹窗 **窗口居中**、逐阶段列出执行情况。
+   每行 = 状态图标 + 阶段名 + 结果说明。 */
+.auto-stage-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 52vh;
+  overflow-y: auto;
+}
+
+.auto-stage-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 4px;
+  border-bottom: 1px solid var(--ant-color-border-secondary, #f0f0f0);
+}
+
+.auto-stage-row:last-child {
+  border-bottom: none;
+}
+
+.auto-stage-icon {
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+}
+
+/* 跳过：中性灰点，与「成功（绿勾）/ 失败（红叉）」区分开。 */
+.auto-stage-skip-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ant-color-text-quaternary, rgba(0, 0, 0, 0.25));
+}
+
+.auto-stage-title {
+  flex: 0 0 150px;
+  font-size: 13px;
+  color: var(--ant-color-text, rgba(0, 0, 0, 0.88));
+}
+
+.auto-stage-detail {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--ant-color-text-secondary, rgba(0, 0, 0, 0.45));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 每阶段的耗时统计（用户口径 2026-10-09）——右对齐、等宽，避免跳动。 */
+.auto-stage-elapsed {
+  flex: 0 0 62px;
+  text-align: right;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ant-color-text-tertiary, rgba(0, 0, 0, 0.45));
+}

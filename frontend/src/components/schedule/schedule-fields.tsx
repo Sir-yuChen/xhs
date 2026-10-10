@@ -221,7 +221,7 @@ export function ScheduleFields({ value, onChange, allowConcurrent = false }: Sch
         {!allowConcurrent && (
           <div>
             <Text type="secondary" style={{ fontSize: 12 }}>
-              该任务类型由注册表禁止并发（平台写操作风控，设计 15 §6.4）
+              该任务类型由注册表禁止并发
             </Text>
           </div>
         )}

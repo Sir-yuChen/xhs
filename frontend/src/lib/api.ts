@@ -3,6 +3,13 @@ import { message } from "antd";
 
 import type { CleanResultShape } from "./task-records";
 import type {
+  ItemDraftCategory,
+  ItemDraftCreatePayload,
+  ItemDraftCreateResult,
+  ItemDraftListResult,
+  ItemDraftPackageParseResult,
+  ItemPublishPayload,
+  ItemPublishResult,
   ShopItemOperateAction,
   ShopItemOperateResult,
   ShopItemsSyncResult,
@@ -115,7 +122,10 @@ import type {
   PictureSpaceWriteResult,
   PictureSpaceDeletePreview,
   PictureSpaceTask,
+  CategoryPropertyResult,
   PictureSpaceUploadResult,
+  RecommendCategoryResult,
+  RecommendItemTitleResult,
   XhsShopItemsDeleteResult,
   XhsShopItemStatus,
   MaterialFolder,
@@ -2017,14 +2027,197 @@ export async function fetchPictureSpaceTask(
  */
 export async function uploadPictureSpaceFile(
   accountId: number,
-  file: File
+  file: File,
+  options: { fatherDirectoryId?: string } = {}
 ): Promise<PictureSpaceUploadResult> {
   const contentBase64 = await fileToBase64(file);
   const response = await http.post<PictureSpaceUploadResult>("/xhs/qianfan/picture-space/upload", {
     platform_account_id: accountId,
+    //: ⚠️ 刻意**不传** file.name（用户口径：文件名由后端按内容 MD5 生成，避免重名）。
+    //: 传空串 ⇒ 后端走 MD5 分支。
+    file_name: "",
+    content_base64: contentBase64,
+    father_directory_id: options.fatherDirectoryId ?? "0",
+  });
+  return response.data;
+}
+
+/** 按**主图**生成商品标题（千帆 `getRecommendItemTitle`）。
+ *
+ * ⚠️ 千帆发布页上传主图后**自动**触发的就是这一条 —— 平台把**图（带签名链接）**
+ * 喂给模型，所以标题与图相符。只传文件名会让模型看不到图、生成无关标题。
+ *
+ * ⚠️ 平台侧该 action **要签名**（只带 Cookie 重放返回 406）。
+ */
+export async function recommendItemTitle(
+  accountId: number,
+  images: {
+    link: string;
+    name?: string;
+    width?: number | null;
+    height?: number | null;
+    size?: number;
+    extension?: string;
+    file_id?: string;
+  }[],
+): Promise<RecommendItemTitleResult> {
+  const response = await http.post<RecommendItemTitleResult>(
+    "/xhs/qianfan/product/recommend-title",
+    { platform_account_id: accountId, main_images: images },
+  );
+  return response.data;
+}
+
+/** 属性**智能生成**（千帆 `predictProductProperty`，只读预测）。
+ *
+ * ⚠️ **必须带主图**（`image_urls`）—— 真机复测（2026-10-09）：无图平台恒回
+ * 空数组 ⇒ 页面提示「平台未给出可填充的属性值」。图对象与平台 `imageUrls` 同形。
+ */
+export async function predictProperties(
+  accountId: number,
+  payload: { category_id: string; title?: string; image_urls?: Record<string, unknown>[] },
+): Promise<{ properties: Record<string, unknown> }> {
+  const response = await http.post<{ properties: Record<string, unknown> }>(
+    "/xhs/qianfan/product/predict-properties",
+    {
+      account_id: accountId,
+      ...payload,
+    },
+  );
+  return response.data;
+}
+
+/** 取**物流模板候选**（千帆 `getSellerCarriageTemplate`，只读）。 */
+export type ShippingTemplate = { template_id: string; name: string };
+
+export async function fetchShippingTemplates(
+  accountId: number,
+): Promise<{ templates: ShippingTemplate[]; default_template_id: string | null }> {
+  const response = await http.post<{ templates: ShippingTemplate[]; default_template_id: string | null }>(
+    "/xhs/qianfan/product/shipping-templates",
+    { account_id: accountId },
+  );
+  return response.data;
+}
+
+/** 取**物流计划（发货仓）候选**（千帆 `publish_render` 空白表单，只读）。 */
+export type LogisticsTemplate = { plan_id: string; name: string; logistics_mode: string };
+
+export async function fetchLogisticsTemplates(
+  accountId: number,
+): Promise<{ templates: LogisticsTemplate[]; default_plan_id: string | null }> {
+  const response = await http.post<{ templates: LogisticsTemplate[]; default_plan_id: string | null }>(
+    "/xhs/qianfan/product/logistics-templates",
+    { account_id: accountId },
+  );
+  return response.data;
+}
+
+/** 生成**导购短标题**（千帆 `generateItemShortTitle`）。
+ *
+ * 与商品标题同款口径：能自动生成的就走平台，不拿本地文本冒充。
+ *
+ * ⚠️ 入参是 `{title, categoryId}`（真机抓包 2026-10-09）—— **必须给类目 id**，
+ * 且**没有** `mainImages`。缺类目平台会返回空短标题。
+ */
+export async function generateShortTitle(
+  accountId: number,
+  name: string,
+  categoryId = "",
+): Promise<{ short_title: string }> {
+  const response = await http.post<{ short_title: string }>("/xhs/qianfan/product/short-title", {
+    platform_account_id: accountId,
+    name,
+    category_id: categoryId,
+  });
+  return response.data;
+}
+
+/** 上传**商品视频**（直传，不走图片空间 —— 视频登记会被图片库拒）。
+ *
+ * 真机 bundle（`9515.*.js`）：视频走 `scene=common_file` 独立直传，
+ * 成功直接给 `{url, fileId}`。⚠️ 误走图片空间会在登记一步答
+ * 「获取上传文件[v]信息失败」（2026-10-09 实测根因）。
+ */
+export async function uploadProductVideo(
+  accountId: number,
+  file: File,
+): Promise<{
+  file_name: string;
+  file_id: string;
+  url: string;
+  extension: string;
+  size: number;
+  materialId: string;
+  path: string;
+  link: string;
+  duration: number | null;
+  width: number | null;
+  height: number | null;
+}> {
+  const contentBase64 = await fileToBase64(file);
+  const response = await http.post("/xhs/qianfan/video/upload", {
+    platform_account_id: accountId,
     file_name: file.name,
     content_base64: contentBase64,
   });
+  return response.data;
+}
+
+/** 售后服务规则（按类目；`must_support` = 平台强制支持 ⇒ 勾选不可改）。 */
+export type AfterSaleRule = {
+  name: string;
+  type: string;
+  default_support: boolean;
+  must_support: boolean;
+};
+
+export async function fetchAfterSaleRules(
+  accountId: number,
+  categoryId: string,
+): Promise<{ rules: AfterSaleRule[] }> {
+  const response = await http.post<{ rules: AfterSaleRule[] }>(
+    "/xhs/qianfan/product/after-sale-rule",
+    { platform_account_id: accountId, category_id: categoryId },
+  );
+  return response.data;
+}
+
+/** 取**类目的属性定义**（千帆 `getCategoryProperty`）。
+ *
+ * ⚠️ 属性定义**不在** `getProductPropertyConfig`（那只回两个开关）——
+ * 真机实测（2026-10-08，133KB 响应）落在 `category.categoryPropertyInfo`，
+ * 含 `descProperties[]`（其他属性）与 `saleProperties[]`（销售属性=规格类型）。
+ */
+export async function fetchCategoryProperties(
+  accountId: number,
+  categoryId: string,
+): Promise<CategoryPropertyResult> {
+  const response = await http.post<CategoryPropertyResult>(
+    "/xhs/qianfan/product/property-config",
+    { platform_account_id: accountId, category_id: categoryId },
+  );
+  return response.data;
+}
+
+/** 按**标题 + 主图**推荐商品类目（千帆 `getRecommendCategory`）。
+ *
+ * ⚠️ 这就是千帆发布页在**标题采用之后**自动带出类目的那条 action
+ * （真机 2026-10-08：点「立即使用」后「已选类目」立刻出现）。
+ * 平台侧要签名；返回按 score 降序。
+ */
+export async function recommendProductCategory(
+  accountId: number,
+  payload: {
+    name: string;
+    image_url?: string;
+    uploader_info_model?: Record<string, unknown>;
+  },
+): Promise<RecommendCategoryResult> {
+  const response = await http.post<RecommendCategoryResult>(
+    "/xhs/qianfan/product/recommend-category",
+    { platform_account_id: accountId, ...payload },
+  );
   return response.data;
 }
 
@@ -2178,12 +2371,440 @@ export async function polishShopItem(payload: {
   return response.data;
 }
 
+/* ------------------------------------------------------------------ *
+ * 违规词库（2026-10-08 用户口径；设计 25 §2）
+ *
+ * ⚠️ **为什么独立于千帆**：平台只有 `check_forbidden_keyword`（校验器：拿文本
+ * 问平台有没有违规），没有词表的增删改查，也没有「停用/启用」语义。用户要的
+ * 四个动作只能落在本地表 `forbidden_words` 上。
+ * ------------------------------------------------------------------ */
+
+/** 一条违规词（`match_mode`：1=精确 / 2=包含）。 */
+export interface ForbiddenWord {
+  id: number;
+  word: string;
+  match_mode: number;
+  enabled: boolean;
+  remark: string;
+  /** 分组名；空串 = 未分组。 */
+  group_name: string;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+/** 违规词分组（`name` 为空串表示「未分组」，前端负责显示成「未分组」）。 */
+export interface ForbiddenWordGroup {
+  name: string;
+  count: number;
+  /** 整组启用态（停用 ⇒ 组内词全部退出匹配）。 */
+  enabled: boolean;
+}
+
+/**
+ * **整组启用 / 停用**（用户口径：「组新增启用停用功能」）。
+ *
+ * ⚠️ 「未分组」用占位符 `__ungrouped__` 传（空串当路径参数不合法），
+ * 后端翻译回空串。
+ */
+export async function setForbiddenWordGroupEnabled(
+  name: string,
+  enabled: boolean,
+): Promise<{ name: string; enabled: boolean; count: number }> {
+  const key = name === "" ? "__ungrouped__" : name;
+  const response = await http.post<{ name: string; enabled: boolean; count: number }>(
+    `/xhs/forbidden-words/groups/${encodeURIComponent(key)}/enabled`,
+    { enabled },
+  );
+  return response.data;
+}
+
+/** 已有分组 + 各自词条数（预检的「指定分组」下拉用）。 */
+export async function fetchForbiddenWordGroups(): Promise<ForbiddenWordGroup[]> {
+  const response = await http.get<ForbiddenWordGroup[]>("/xhs/forbidden-words/groups");
+  return response.data;
+}
+
+/** 违规词列表（`enabledOnly` 只列启用中的 —— 那是 OCR 匹配真正用的集合）。 */
+export async function fetchForbiddenWords(
+  enabledOnly = false,
+  groupName?: string,
+): Promise<ForbiddenWord[]> {
+  const response = await http.get<ForbiddenWord[]>("/xhs/forbidden-words", {
+    params: { enabled_only: enabledOnly, ...(groupName ? { group_name: groupName } : {}) },
+  });
+  return response.data;
+}
+
+/**
+ * 新增违规词。**重复 ⇒ 后端 409**（`FORBIDDEN_WORD_DUPLICATE`）。
+ *
+ * ⚠️ 后端把「Best」与「best」、「ＢＥＳＴ」判为同一个词（归一化后比较），
+ * 所以前端**不要**自己做去重提示 —— 那样会与服务端口径不一致。
+ */
+export async function createForbiddenWord(payload: {
+  group_name?: string;
+  word: string;
+  match_mode?: number;
+  remark?: string;
+  enabled?: boolean;
+}): Promise<ForbiddenWord> {
+  const response = await http.post<ForbiddenWord>("/xhs/forbidden-words", payload);
+  return response.data;
+}
+
+/** 修改违规词（词 / 匹配模式 / 备注 / 启用态）。重复 ⇒ 409。 */
+export async function updateForbiddenWord(
+  wordId: number,
+  payload: {
+    word?: string;
+    match_mode?: number;
+    remark?: string;
+    enabled?: boolean;
+    group_name?: string;
+  },
+): Promise<ForbiddenWord> {
+  const response = await http.patch<ForbiddenWord>(`/xhs/forbidden-words/${wordId}`, payload);
+  return response.data;
+}
+
+/**
+ * 停用 / 启用违规词（软开关；停用后**不参与** OCR 匹配，行不删）。
+ *
+ * ⚠️ 独立端点而非 PATCH 的一种取值 —— 用户口径把「停用」「启用」与
+ * 「新增」「修改」并列为四个动作，前端是四个按钮，且**不读当前态**就能
+ * 把按钮摆对。
+ */
+export async function setForbiddenWordEnabled(wordId: number, enabled: boolean): Promise<ForbiddenWord> {
+  const response = await http.post<ForbiddenWord>(`/xhs/forbidden-words/${wordId}/enabled`, { enabled });
+  return response.data;
+}
+
+/** 删除违规词（**不可恢复**）。 */
+export async function deleteForbiddenWord(wordId: number): Promise<{ deleted: number }> {
+  const response = await http.delete<{ deleted: number }>(`/xhs/forbidden-words/${wordId}`);
+  return response.data;
+}
+
 /** 导出商品 CSV（按**当前筛选**；超限后端整批 400，前端先用 `exportBlockReason` 拦）。 */
 export async function exportShopItems(query: XhsShopItemsQuery): Promise<Blob> {
   const response = await http.post("/xhs/qianfan/items/export", query, {
     responseType: "blob",
   });
   return response.data as Blob;
+}
+
+/**
+ * **解析商品数据包**（`POST /item-drafts/parse`；**纯本地，零平台请求**）。
+ *
+ * 读 xlsx（SKU 表）+ 列目录下的图片 / 视频名，回给弹窗预览。
+ * ⚠️ 返回里的 `warnings[]` **必须全渲染** —— 静默过滤掉的东西，
+ * 用户到千帆页面才会发现少了什么。
+ */
+export async function parseItemDraftPackage(
+  platformAccountId: number,
+  packagePath: string,
+): Promise<ItemDraftPackageParseResult> {
+  const response = await http.post<ItemDraftPackageParseResult>("/xhs/qianfan/item-drafts/parse", {
+    platform_account_id: platformAccountId,
+    package_path: packagePath,
+  });
+  return response.data;
+}
+
+/**
+ * **按关键词搜商品类目**（`GET /item-drafts/categories`；只回叶子类目）。
+ *
+ * ⚠️ 只回 `isLeaf=true` —— 商品必须挂在叶子上，回非叶子的选项只会让人
+ * 选到一个建不出商品的类目。
+ */
+export async function searchItemDraftCategories(
+  platformAccountId: number,
+  keyword: string,
+): Promise<ItemDraftCategory[]> {
+  const response = await http.get<{ categories: ItemDraftCategory[] }>(
+    "/xhs/qianfan/item-drafts/categories",
+    { params: { platform_account_id: platformAccountId, keyword } },
+  );
+  return response.data.categories;
+}
+
+/**
+ * **新增商品 → 保存到草稿箱**（`POST /item-drafts`）。
+ *
+ * ⚠️ **只到草稿箱，不会上架** —— 接口的请求体里**没有**任何发布 / 上架字段
+ * （后端 `extra="forbid"`，多传直接 422）。红线落在契约层，不是文案承诺。
+ *
+ * 耗时较长（逐张上传图片 + 建草稿 + 回读校验），超时给足 300s。
+ */
+export async function createItemDraft(
+  payload: ItemDraftCreatePayload,
+): Promise<ItemDraftCreateResult> {
+  const response = await http.post<ItemDraftCreateResult>("/xhs/qianfan/item-drafts", payload, {
+    timeout: 300000,
+    //: ⚠️ 同 `publishShopItem`：保存草稿失败由调用方弹完整错误，全局拦截器闭嘴。
+    _silent: true,
+  } as object);
+  return response.data;
+}
+
+/**
+ * **草稿箱列表**（`GET /item-drafts`；**实时查平台**，不落本地表）。
+ *
+ * 草稿的唯一真相源在平台（用户在千帆页面继续填、平台审核都在那边），
+ * 本地存一份镜像必然漂移成「本地有、平台没有」。
+ */
+export async function fetchItemDrafts(
+  platformAccountId: number,
+  pageNo = 1,
+  pageSize = 20,
+  keyword = "",
+  sortField = "create_time",
+  order = "desc",
+): Promise<ItemDraftListResult> {
+  const response = await http.get<ItemDraftListResult>("/xhs/qianfan/item-drafts", {
+    params: {
+      platform_account_id: platformAccountId,
+      page_no: pageNo,
+      page_size: pageSize,
+      keyword,
+      sort_field: sortField,
+      order,
+    },
+  });
+  return response.data;
+}
+
+/**
+ * **批量删除草稿**（`POST /item-drafts/delete`，设计 24 §9.4）。
+ *
+ * ⚠️ **不可恢复**（草稿删了没有撤销入口）—— 调用前必须显式确认。
+ */
+export async function deleteItemDrafts(
+  platformAccountId: number,
+  draftIds: string[],
+): Promise<{ platform_account_id: number; deleted: number }> {
+  const response = await http.post<{ platform_account_id: number; deleted: number }>(
+    "/xhs/qianfan/item-drafts/delete",
+    { platform_account_id: platformAccountId, draft_ids: draftIds },
+  );
+  return response.data;
+}
+
+/**
+ * **提交商品 → 发布到线上**（`POST /items/publish`，设计 24 §4.2）。
+ *
+ * ⚠️⚠️ **真实上架写操作**：成功即产生一个在售商品。红线（用户 2026-10-08）
+ * 「发布成功第一时间下架」由后端默认执行（`off_shelf_after` 默认 true）；
+ * 前端**不得**传 `off_shelf_after: false`（那是测试钩子）。
+ *
+ * 耗时较长（逐张上传图片 + 提交 + 轮询 + 下架），超时给足 300s。
+ */
+/* ------------------------------------------------------------------ *
+ * 数据包预检（设计 25 §4）
+ * ------------------------------------------------------------------ */
+
+export type PrecheckGroup = "main" | "video" | "sku" | "detail";
+
+export interface PrecheckHit {
+  word_id: number;
+  word: string;
+  match_mode: number;
+  /** 归一化到 0–1 的红框坐标，可多个（同一词在一张图里出现多次）。 */
+  boxes: { x: number; y: number; w: number; h: number }[];
+}
+
+export interface PrecheckMediaItem {
+  group: PrecheckGroup;
+  index: number;
+  rel_path: string;
+  file_name: string;
+  size_bytes: number;
+  is_attribute_image: boolean;
+  oversized: boolean;
+  unsupported: boolean;
+  ocr_ok?: boolean | null;
+  /** `ocr_ok === null` = 没检过（抽帧失败 / 引擎缺失），前端默认不勾选 */
+  unverified_reason?: string | null;
+  error?: string;
+  error_message?: string;
+  width?: number;
+  height?: number;
+  hits?: PrecheckHit[];
+  has_forbidden?: boolean;
+  /** 视频专属：抽了几帧（图片为 `null`）。 */
+  frame_count?: number | null;
+  /** 视频专属：其中几帧没识别出来。 */
+  frames_failed?: number | null;
+  /** 视频专属：逐帧明细（第几秒、识别到什么、命中哪些词）。 */
+  frames?: { at: number; ocr_ok: boolean; text: string; hits: string[] }[];
+}
+
+export interface PrecheckTable {
+  title: string;
+  sheet_name: string;
+  columns: string[];
+  rows: (string | null)[][];
+  /** 来源 xlsx 的文件名（表格顶部展示）。 */
+  source_file?: string;
+  /**
+   * 「商品属性图」OCR 出的 **KV 对**（用户口径 2026-10-09）。
+   *
+   * 有值 ⇒ 该表是属性图，走 **KV 渲染 + 「商品属性」页签**；
+   * `null`/缺省 ⇒ 普通 xlsx 表，走表格渲染。
+   */
+  kv?: { key: string; value: string }[] | null;
+}
+
+export interface PrecheckResult {
+  /** 是否已跑过违规词检测（`false` = 只读取展示）。 */
+  inspected?: boolean;
+  package_name: string;
+  media_groups: Record<PrecheckGroup, number>;
+  media: PrecheckMediaItem[];
+  tables: PrecheckTable[];
+  warnings: string[];
+}
+
+/** 上传数据包目录 → 预检（解析 + OCR 违规词），一趟返回。 */
+export async function precheckPackage(params: {
+  packageName: string;
+  files: { relPath: string; blob: Blob }[];
+  onProgress?: (percent: number) => void;
+}): Promise<{ token: string; precheck: PrecheckResult }> {
+  const form = new FormData();
+  form.append("package_name", params.packageName);
+  for (const file of params.files) {
+    // 第三个参数必须是**相对路径**（含目录名），后端据此分区。
+    form.append("files", file.blob, file.relPath);
+  }
+  const response = await http.post<{
+    token: string;
+    precheck: PrecheckResult;
+  }>("/xhs/package-precheck", form, {
+    headers: { "Content-Type": "multipart/form-data" },
+    timeout: 600000,
+    onUploadProgress: (event) => {
+      if (event.total && params.onProgress) {
+        params.onProgress(Math.round((event.loaded / event.total) * 100));
+      }
+    },
+  });
+  return response.data;
+}
+
+/**
+ * 按**本地目录绝对路径**预检（主路径，用户 2026-10-08 口径「不要上传」）。
+ *
+ * 零字节离开本机：只把目录**路径**发给后端，媒体与表格都由服务端在本地读。
+ * ⚠️ 慢在 OCR（真包 69 张 ≈ 52s），超时给足。
+ */
+export async function precheckLocalPackage(params: {
+  packagePath: string;
+  packageName?: string;
+  /** ⚠️ `false`（默认）= 只读取展示，不跑 OCR；`true` = 连违规词检测一起跑。 */
+  inspect?: boolean;
+}): Promise<{ token: string; package_path: string; precheck: PrecheckResult }> {
+  const response = await http.post<{
+    token: string;
+    package_path: string;
+    precheck: PrecheckResult;
+  }>(
+    "/xhs/package-precheck/local",
+    {
+      package_path: params.packagePath,
+      package_name: params.packageName ?? "",
+      inspect: params.inspect ?? false,
+    },
+    { timeout: 900000 },
+  );
+  return response.data;
+}
+
+/**
+ * **弹出系统「选择文件夹」对话框**，返回用户选中的绝对路径。
+ *
+ * 用户 2026-10-08 口径：「点击加载数据包选择本地文件夹，获得本地夹地址后，
+ * 直接读取该数据包内的商品数据」。
+ *
+ * ⚠️ 由**后端**弹框：浏览器拿不到 `File` 的真实路径（`<input webkitdirectory>`
+ * 只给文件名），所以只有与用户同机的后端进程能拿到 `D:\\...`。
+ * ⚠️ 用户取消 ⇒ `cancelled=true`（不是错误，前端别弹红条）。
+ */
+export async function pickPackageFolder(): Promise<{ package_path: string; cancelled: boolean }> {
+  const response = await http.post<{ package_path: string; cancelled: boolean }>(
+    "/xhs/package-precheck/pick-folder",
+    undefined,
+    //: 用户挑目录可以很久（在资源管理器里翻），超时给足 5 分钟。
+    { timeout: 300000 },
+  );
+  return response.data;
+}
+
+/** 改了违规词库后，对已加载的包重跑一次预检。 */
+export async function rescanPackagePrecheck(
+  token: string,
+  inspect = true,
+  /** 只用这些违规词分组（空 = 全部分组，用户口径的默认）。 */
+  groups: string[] = [],
+): Promise<PrecheckResult> {
+  //: ⚠️ 入参走 **body**（不是 query）—— 分组是列表，塞 query 会退化成
+  //: `?groups=a&groups=b` 的重复键，两边都容易写错。
+  const response = await http.post<{ precheck: PrecheckResult }>(
+    `/xhs/package-precheck/${token}/scan`,
+    { inspect, groups },
+    //: `inspect=true` 会跑 69 张图 + 视频抽帧，超时给足。
+    { timeout: 900000 },
+  );
+  return response.data.precheck;
+}
+
+/** 预检**执行进度**（用户口径 2026-10-09）：跑 OCR/抽帧期间轮询。 */
+export type PrecheckProgress = {
+  phase: string | null;
+  done: number;
+  total: number;
+  percent: number;
+};
+
+export async function fetchPrecheckProgress(token: string): Promise<PrecheckProgress> {
+  const response = await http.get<PrecheckProgress>(`/xhs/package-precheck/${token}/progress`);
+  return response.data;
+}
+
+/** 取暂存包里的一张图（红框 overlay 的底图；需带鉴权 ⇒ 走 blob URL）。 */
+export async function fetchPrecheckImage(token: string, relPath: string): Promise<string> {
+  const response = await http.get(`/xhs/package-precheck/${token}/image`, {
+    params: { path: relPath },
+    responseType: "blob",
+  });
+  return URL.createObjectURL(response.data as Blob);
+}
+
+/** 丢弃暂存包（关弹窗 / 发布完成后调用）。 */
+export async function discardPackagePrecheck(token: string): Promise<void> {
+  await http.delete(`/xhs/package-precheck/${token}`);
+}
+
+/**
+ * 真实上架写操作。
+ *
+ * ⚠️⚠️ **真实上架写操作**：成功即产生一个在售商品。红线（用户 2026-10-08）
+ * 「发布成功第一时间下架」由后端默认执行（`off_shelf_after` 默认 true）；
+ * 前端**不得**传 `off_shelf_after: false`（那是测试钩子）。
+ *
+ * 耗时较长（逐张上传图片 + 提交 + 轮询 + 下架），超时给足 300s。
+ */
+export async function publishShopItem(
+  payload: ItemPublishPayload,
+): Promise<ItemPublishResult> {
+  const response = await http.post<ItemPublishResult>("/xhs/qianfan/items/publish", payload, {
+    timeout: 300000,
+    //: ⚠️ 用户口径（2026-10-10）：发布失败**由调用方弹一条完整错误**，全局拦截器
+    //: 不许再叠一句「请求失败，请稍后重试」盖掉它（两个 message 后弹的覆盖前弹的）。
+    //: `_silent` 让拦截器对 4xx/5xx 闭嘴，错误仍会 reject 到调用方 catch。
+    _silent: true,
+  } as object);
+  return response.data;
 }
 
 /**

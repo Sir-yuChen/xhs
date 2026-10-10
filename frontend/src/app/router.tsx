@@ -84,6 +84,13 @@ export function AppRouter() {
           <Route path="/platforms/xhs/discovery" element={<XhsDiscoveryPage />} />
           <Route path="/platforms/xhs/my-notes" element={<XhsMyNotesPage />} />
           <Route path="/platforms/xhs/shop-items" element={<XhsShopItemsPage />} />
+          {/* 商品草稿箱 = 商品页内的弹窗（设计 24 §9.4，2026-10-08 用户口径
+              「草稿箱弹窗的形式在商品页内展示，账号使用商品页选定的账号」）。
+              旧独立路由重定向到商品列表，深链不死。 */}
+          <Route
+            path="/platforms/xhs/product-drafts"
+            element={<Navigate to="/platforms/xhs/shop-items" replace />}
+          />
           {/* 图片空间（设计 22 §1）：千帆云图片资产**只读**浏览，本地零落库。 */}
           <Route path="/platforms/xhs/picture-space" element={<PictureSpacePage />} />
           {/* 数据抓取已并入「笔记发现」的「批量抓取」页签（设计 21 切片 B）：旧路由重定向，深链不死。 */}
@@ -106,6 +113,8 @@ export function AppRouter() {
               人工审核节点默认不自动放行（§3.3 硬约束）。
               2026-10-06 设计 22 §3：并入「自动运营」宿主页作 tab ⇒ 旧路由重定向，深链不死。 */}
           <Route path="/platforms/xhs/orders" element={<OrdersPage />} />
+          {/* 预检表格 —— 独立新页签展示 + 编辑（用户口径 2026-10-09）。
+              数据走 sessionStorage 传递（新页签没有父窗口状态）。 */}
           <Route path="/platforms/xhs/:section" element={<XhsSectionPage />} />
           <Route path="/tasks" element={<TaskCenterPage />} />
           {/* 2026-09-25 §35.9 ⑥：任务记录（执行记录，复用 /tasks 端点）——

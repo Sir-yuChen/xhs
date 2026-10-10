@@ -3,16 +3,20 @@ import {
   DatabaseOutlined,
   DeleteOutlined,
   DownloadOutlined,
+  ContainerOutlined,
   EditOutlined,
   EllipsisOutlined,
   FileAddOutlined,
+  PlusOutlined,
   PictureOutlined,
   RobotOutlined,
   SearchOutlined,
+  SendOutlined,
   SyncOutlined,
   HistoryOutlined,
   ArrowUpOutlined,
   ArrowDownOutlined,
+  SafetyCertificateOutlined,
 } from "@ant-design/icons";
 import {
   Alert,
@@ -70,6 +74,8 @@ import {
   syncShopGoodsStatus,
   operateShopItems,
   fetchShopItemOperateResult,
+  type PrecheckMediaItem,
+  type PrecheckTable,
 } from "../../../lib/api";
 //: ⚠️ 「同步商品」的按钮态判据与账号卡片页**共用同一个** `syncTaskPhase`（需求 5
 //: 「逻辑应与账号卡片页的商品同步UI和逻辑一致，只是多了一个入口」）——
@@ -98,6 +104,11 @@ import { NoteDetailBody } from "../../../components/platforms/note-detail-modal"
 import { formValuesToQuery, type QueryForm } from "../../../lib/shop-items-query";
 import { LlmGenerateModal } from "./llm-generate-modal";
 import { SyncSpecifiedItemsModal } from "./sync-specified-items-modal";
+import { ProductDraftsModal } from "./product-drafts-modal";
+import { ForbiddenWordsModal } from "./forbidden-words-modal";
+import { ProductPublishWizard } from "./product-publish-wizard";
+//: ⚠️ 默认导出（`export default`），不是具名 —— 具名导出的 `PackagePrecheckHandle`
+//: 只是给第二步留的取值句柄类型，别误当成组件名 import。
 import { SyncOptionsModal, type SyncOptions } from "../../../components/platforms/sync-options-modal";
 import { LlmGenerateProgressCard } from "./llm-generate-progress-card";
 import {
@@ -936,6 +947,16 @@ export function XhsShopItemsPage() {
   const [operateElapsedSec, setOperateElapsedSec] = useState(0);
   /** 同步指定商品弹窗（需求 6）。 */
   const [syncItemsOpen, setSyncItemsOpen] = useState(false);
+  //: 从详情弹窗发起「重抓此商品」时记下那件商品 —— 同步完成后回到它的详情
+  //: （用户口径 2026-10-09：重抓的意义就是让眼前这份数据变新）。
+  const [syncReturnItem, setSyncReturnItem] = useState<XhsShopItem | null>(null);
+  //: 草稿箱弹窗（设计 24 §9.4，2026-10-08 用户口径）：与商品列表同一账号。
+  const [draftsModalOpen, setDraftsModalOpen] = useState(false);
+  //: 违规词库弹窗（2026-10-08 用户口径）：全屏 50%，管理本地违规词库。
+  const [forbiddenWordsOpen, setForbiddenWordsOpen] = useState(false);
+  //: 发布商品向导（设计 25 §4；用户 2026-10-08 口径）：antd Steps 三步
+  //: —— 预检 → 配置商品参数+预览 → 发布。⚠️ 真实上架（红线：成功后立即下架）。
+  const [publishWizardOpen, setPublishWizardOpen] = useState(false);
   const [generations, setGenerations] = useState<
     { id: number; url: string; prompt: string; model_name: string; created_at: string }[]
   >([]);
@@ -2803,6 +2824,60 @@ export function XhsShopItemsPage() {
                 导出 CSV
               </Button>
             </Tooltip>
+            {/* 2026-10-08 用户口径：「移除新增商品按钮和逻辑，保留发布商品按钮功能」。
+                ⚠️ **保留 `ProductDraftModal` 的 import 但不再挂入口** —— 草稿箱
+                里的草稿仍要能发布（`ProductDraftsModal` → 详情 → 走发布链路），
+                所以「新增」入口退场 ≠ 删组件。真正退场的只有顶部这个按钮
+                与 `setDraftModalOpen` 的唯一调用点。 */}
+            {/* 2026-10-08 用户口径：「商品台账新增功能按钮违规词」——
+                弹窗全屏 50%（与发布弹窗的 75% 区分开），管理本地违规词库
+                （新增 / 修改 / 停用 / 启用）。词库供数据包图片 OCR 精确过滤。 */}
+            <Tooltip title="管理违规词库（图片 OCR 过滤）">
+              <Button
+                icon={<SafetyCertificateOutlined />}
+                onClick={() => setForbiddenWordsOpen(true)}
+              >
+                违规词
+              </Button>
+            </Tooltip>
+            {/* 2026-10-08 用户口径：「草稿箱弹窗的形式在商品页内展示，
+                账号使用商品页选定的账号」—— 草稿箱与商品列表是同一件事的
+                两个视图（草稿 = 还没上架的商品），故做成商品页里的弹窗，
+                账号跟随本页顶部选定的店铺。 */}
+            <Tooltip
+              title={
+                selectedAccountId
+                  ? "查看本店铺的千帆草稿箱（数据实时来自平台，不落库）"
+                  : "先选择店铺账号"
+              }
+            >
+              <Button
+                icon={<ContainerOutlined />}
+                disabled={!selectedAccountId}
+                onClick={() => setDraftsModalOpen(true)}
+              >
+                草稿箱
+              </Button>
+            </Tooltip>
+            {/* 2026-10-08 用户口径：「发布商品到线上」+ 红线「发布成功第一时间下架」。
+                ⚠️ 与「新增商品（存草稿）」是两个独立入口：这条会**真的上架**
+                （后端发布成功后自动立即下架）。弹窗里常驻红线说明 + 二次确认。 */}
+            <Tooltip
+              title={
+                selectedAccountId
+                  ? "把商品提交到线上（成功后系统自动立即下架）"
+                  : "先选择店铺账号"
+              }
+            >
+              <Button
+                danger
+                icon={<SendOutlined />}
+                disabled={!selectedAccountId}
+                onClick={() => setPublishWizardOpen(true)}
+              >
+                发布商品
+              </Button>
+            </Tooltip>
             {/* 生成队列实时态（§31.10）：有待处理时一行小字，转圈即清（无 Tip，
                 与另两张进度卡同口径）。队列空不占位。 */}
             {genQueueItemIds.size > 0 && (
@@ -2960,6 +3035,28 @@ export function XhsShopItemsPage() {
         footer={
           <Space>
             <Button onClick={() => setDetailOpen(false)}>关闭</Button>
+            {/* 重抓单品入口（2026-10-09 用户口径「重抓单品入口」）：详情弹窗里就能
+                重新拉这一件商品的最新数据，不必关弹窗再去「更多」里找。
+
+                ⚠️ 走的是**同一条**同步链路（`POST /items/sync` + `SyncSpecifiedItemsModal`），
+                只是 ID 清单缩成 `detail.item.item_id` 一行 —— DEF-044：一个语义一份实现，
+                不为详情弹窗另写一套抓取。弹窗关掉详情再开同步弹窗（两弹窗不同时在线，
+                避免蒙版叠蒙版）。同步完成后回到详情弹窗并**重新拉一次详情**（重抓的意义
+                就是让眼前这份数据变新）。 */}
+            <Button
+              icon={<SyncOutlined />}
+              disabled={!detail}
+              onClick={() => {
+                if (!detail) return;
+                setDetailOpen(false);
+                setSyncSingleTarget(detail.item.item_id);
+                setSyncItemsOpen(true);
+                //: 记下要重开的商品 —— 同步完成后回到它的详情（`syncReturnItem`）。
+                setSyncReturnItem(detail.item);
+              }}
+            >
+              重抓此商品
+            </Button>
             <Button
               type="primary"
               disabled={!detail}
@@ -3820,6 +3917,11 @@ export function XhsShopItemsPage() {
           //: ⚠️ 必须清：否则下一次「批量同步商品信息」进来时 `syncSingleTarget`
           //: 还是上一件商品 ⇒ 弹窗只列那一件（静默丢批量）。
           setSyncSingleTarget(null);
+          //: 从详情发起的「重抓此商品」：关弹窗即回到它的详情
+          //: （用户口径 2026-10-09：重抓就是为了让眼前这份数据变新）。
+          const target = syncReturnItem;
+          setSyncReturnItem(null);
+          if (target) void openDetail(target);
         }}
         onSynced={() => {
           if (selectedAccountId) void load(selectedAccountId, pageNo, pageSize);
@@ -3831,6 +3933,34 @@ export function XhsShopItemsPage() {
               ? { scope: "range", startDate: options.startDate, endDate: options.endDate }
               : { scope: "full" };
           void syncAllStatusGoods(payload);
+        }}
+      />
+      {/* ⚠️ 2026-10-08 用户口径「移除新增商品按钮和逻辑」⇒ `ProductDraftModal`
+          **整块退场**（按钮 / 状态 / import / 挂载点四件全删）。
+          草稿箱里的既有草稿仍可查看与发布 —— 走下面的 `ProductDraftsModal`，
+          所以退场的是「**从数据包新建草稿**」这条入口，不是草稿本身。 */}
+      {/* 违规词库弹窗（2026-10-08 用户口径）：全屏 50%，新增/修改/停用/启用。 */}
+      <ForbiddenWordsModal open={forbiddenWordsOpen} onClose={() => setForbiddenWordsOpen(false)} />
+      {/* 草稿箱弹窗（设计 24 §9.4，2026-10-08 用户口径）：账号跟随本页选定店铺。 */}
+      <ProductDraftsModal
+        open={draftsModalOpen}
+        platformAccountId={selectedAccountId}
+        shopName={
+          accounts.find((account) => account.id === selectedAccountId)?.nickname ?? ""
+        }
+        onClose={() => setDraftsModalOpen(false)}
+      />
+      {/* 发布商品向导（设计 25 §4；用户口径 2026-10-08）：
+          antd `Steps` 三步 —— 预检 → 配置商品参数+预览 → 发布。
+          ⚠️ 真实上架；后端发布成功后自动立即下架（红线）。 */}
+      <ProductPublishWizard
+        open={publishWizardOpen}
+        platformAccountId={selectedAccountId}
+        shopName={accounts.find((account) => account.id === selectedAccountId)?.nickname ?? ""}
+        onClose={() => setPublishWizardOpen(false)}
+        onPublished={() => {
+          //: 发布后商品进台账（也可能已下架）—— 刷新本页列表让用户看到真实状态。
+          if (selectedAccountId) void load(selectedAccountId, 1, pageSize, sort);
         }}
       />
       {/* ark 门禁提示（需求 5：与账号卡片页「同步商品」同一提示口径）。

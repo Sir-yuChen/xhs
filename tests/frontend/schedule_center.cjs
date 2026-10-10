@@ -50,6 +50,8 @@ const PAGE_TSX = path.join(PROJECT, "frontend/src/pages/tasks/task-center-page.t
 const DETAIL_TSX = path.join(PROJECT, "frontend/src/components/schedule/job-log-detail-modal.tsx");
 const PROGRESS_TSX = path.join(PROJECT, "frontend/src/components/schedule/job-log-progress.tsx");
 const GLOBAL_CSS = path.join(PROJECT, "frontend/src/global.css");
+const CRON_BUILDER_TSX = path.join(PROJECT, "frontend/src/components/schedule/cron-builder-modal.tsx");
+const AUTO_OPS_TSX = path.join(PROJECT, "frontend/src/pages/platforms/xhs/auto-ops-panel.tsx");
 const API_TS = path.join(PROJECT, "frontend/src/lib/api.ts");
 
 const MUTATE = process.env.SCHEDULE_MUTATE || "";
@@ -152,6 +154,10 @@ const MUTATE_TO = {
 };
 
 let failures = 0;
+/** 剥掉块注释与行注释（`in source` 型断言一律用它 —— DEF-056 教训：\r\n *  解释性注释会命中自己写的关键词）。 */
+function stripComments(source) {
+  return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+}
 function check(name, condition, detail) {
   if (condition) {
     console.log(`PASS ${name}`);
@@ -402,19 +408,150 @@ async function main() {
   const kvEditor = readSource(
     path.join(PROJECT, "frontend/src/components/schedule/params-editor.tsx")
   );
+  // 剥注释后的编辑器源码：`in source` 型断言一律用它（DEF-056 同型 ——
+  // 解释性注释里会写「全选」「账号对照」这些被守护的词）。
+  const kvEditorCode = stripComments(kvEditor);
   check("KV 编辑器有 key/value 两个输入", kvEditor.includes('placeholder="key') && kvEditor.includes('placeholder='));
-  check("KV key 是自由文本输入（不是下拉）", kvEditor.includes("<Input") && !kvEditor.includes("<Select"));
-  check("KV value 多值逗号分隔提示", kvEditor.includes("多个值用逗号分隔"));
-  check("KV 必填校验（key 不能空）", form.includes("参数 key 不能为空"));
+  // ⚠️ 2026-10-07：原先这条是「KV key 是自由文本（不是下拉）」判据 =
+  // `!kvEditor.includes("<Select")` —— 用户口径「当调用参数为执行账号时使用下拉
+  // 复选框」后组件里**必然**出现 `<Select`，那条宽判据被取代。收紧为**逐行判据**：
+  // key 恒为 `<Input`（历史口径「k 不要使用下拉框选择」**未变**），下拉只挂在
+  // `account_ids` 那一行的 value 上。
+  check("KV key 是自由文本输入", kvEditor.includes('placeholder="key（如 account_ids）"'));
+  check(
+    "执行账号那一行的 value 是下拉多选（mode=multiple）",
+    // ⚠️ 判据必须落在**调用形态**上：2026-10-07 加枚举下拉时把 `row.key.trim()`
+    // 提成了局部 `trimmedKey` ⇒ 原来的「含 `row.key.trim() === ACCOUNT_IDS_KEY`」
+    // 断（守卫失效但**不报错**）。锚点改成局部量赋值形态。
+    kvEditor.includes("mode=\"multiple\"") &&
+      kvEditor.includes("trimmedKey === ACCOUNT_IDS_KEY")
+  );
+  // ⚠️ 判据必须是**调用形态**，不能只查函数名是否存在：函数留着、调用点改回
+  // `String(account.id)` 时「存在性」断言照样绿（实测 ESCAPED 过一次）。
+  check("下拉选项文案走账号昵称（缺值退 账号 #id）", kvEditorCode.includes("label: accountOptionLabel(account)"));
+  // ⚠️ 判据必须落在**剥注释后**的代码上：上面这两条的对立面（「全选」/「账号对照」）
+  // 恰好会出现在我自己写的解释性注释里 ⇒ 不剥注释就是被自己的注释判红（DEF-056 同型）。
+  check("执行账号下拉不做「全选」", !kvEditorCode.includes("全选"));
+  // 2026-10-07 取代：value 不再有「多个值用逗号分隔」提示 —— 多值键（`account_ids`）
+  // 是**下拉多选**，逗号拼接是内部表示，不该让用户手打；其余键都是单值。
+  check("KV value 无「多个值用逗号分隔」提示（多值走下拉）", !kvEditorCode.includes("多个值用逗号分隔"));
+  // 2026-10-07 取代：不再有「参数 key 不能为空」——内置任务 key 只读恒有值；
+  // 非内置任务 key 为空的行由提交前过滤（`nonEmptyRows`）兜住，不弹误导性错误。
+  check("无「参数 key 不能为空」文案（key 由注册表决定）", !stripComments(form).includes("参数 key 不能为空"));
   check("KV 必填校验（value 不能空）", form.includes("value 不能为空"));
   // account_ids：value 逗号分隔 → 提交时转 int 数组（后端仍收数组）。
   check("account_ids 逗号分隔转数组", kvEditor.includes('.split(",")'));
+  // 账号数据源由调用方注入（组件自己不拉取 ⇒ 不留第二份真相源 / 不多一次往返）。
+  check("账号数据源由调用方注入（编辑弹窗）", form.includes("accounts={accounts}"));
+  // 2026-10-07 取代：原先 job-form-modal 有一行「账号对照：id=昵称」提示 ——
+  // 名字现在就在下拉选项里，那行提示是重复的第二份真相源，已删除。
+  check("不再有 id=昵称 的账号对照提示行", !stripComments(form).includes("账号对照"));
+  // 2026-10-07 用户口径「编辑任务和新增弹窗全部重新布局，目前太长了，全屏的 70%」：
+  // ① 尺寸 = 视口 70%（不写死像素）+ 内容区 70vh 内滚；② 表单**两栏**（不再单列竖排）。
+  check("新建/编辑弹窗宽度是视口 70%", form.includes('width="70%"') && !form.includes("width={680}"));
+  check("弹窗内容区 70vh 内滚", form.includes('maxHeight: "70vh"') && form.includes('overflowY: "auto"'));
+  check(
+    "表单两栏布局（调度配置 / 调用参数各一 Card）",
+    form.includes('<Row gutter={16}') &&
+      form.includes('title="调度配置"') &&
+      form.includes('title="调用参数"')
+  );
+  // 2026-10-07 用户口径「编辑任务和新增弹窗**全部**重新布局……全屏的 70%」：
+  // 「全部」= 同族的另外两个也要跟上（否则从新建弹窗里点开 Cron 构建器，
+  // 尺寸突然缩回 640 像素，看着像两个产品的弹窗）。
+  const cronBuilder = readSource(CRON_BUILDER_TSX);
+  const autoOps = readSource(AUTO_OPS_TSX);
+  check(
+    "Cron 构建器弹窗同一尺寸口径",
+    cronBuilder.includes('width="70%"') && cronBuilder.includes('maxHeight: "70vh"')
+  );
+  check(
+    "自动运营编辑弹窗同一尺寸口径",
+    autoOps.includes('width="70%"') && autoOps.includes('maxHeight: "70vh"')
+  );
+  // 2026-10-07 用户口径「tip 内容全部精简只提示核心内容即可」：
+  // 判据 = **不含**解释性的括号补充（原先每条都写成「名词（解释；补充）」）。
+  const hintBlock = kvEditorCode.slice(kvEditorCode.indexOf("KNOWN_KEY_HINTS"));
+  check("已知键提示已精简（无括号补充说明）", !/（[^）]*[；;][^）]*）/.test(hintBlock));
+  // 2026-10-07「每日发布商业笔记」参数字典（设计 15 §19）：新键的**中文名**与
+  // **枚举下拉**都要在 —— 没有中文名用户只看到 `generate_mode` 裸键；没有下拉
+  // 用户会手打出后端不认的取值（写操作，代价真实）。
+  // 2026-10-07 追加：发布失败重试三件套也在同一字典里（用户口径
+  // 「发布失败是否重试、重试次数最多 3 次、重试间隔时间」）。
+  for (const key of [
+    "limit",
+    "interval_seconds",
+    "generate_mode",
+    "retry_on_failure",
+    "max_retries",
+    "retry_interval_seconds",
+  ]) {
+    // ⚠️ 2026-10-07：`PARAM_LABELS` 已从 `job-form-modal.tsx` **下移到** `params-editor.tsx`
+    //（参数行的中文名列就在那里渲染，映射必须与渲染处同源）—— 判据随之落在 kvEditor 上；
+    // `job-form-modal` 只保留一行透传导出。
+    check(`参数 ${key} 有中文名`, kvEditor.includes(`  ${key}: "`));
+    check(`参数 ${key} 有提示文案`, kvEditor.includes(`  ${key}: "`));
+  }
+  check(
+    "generate_mode 是枚举下拉（取值固定）",
+    // ⚠️ 锚点必须是**调用形态**：只查 `PARAM_ENUM_OPTIONS` 出现过时，把查表那行
+    // 改成 `undefined`（枚举下拉永不渲染）守卫照样绿 —— 实测 ESCAPED 过一次。
+    kvEditorCode.includes("generate_mode: { qianfan:") &&
+      kvEditorCode.includes("const enumOptions = PARAM_ENUM_OPTIONS[trimmedKey];") &&
+      // 分支形态也要钉：查表留着、但渲染分支恒假（下拉永不出现）同样应被判红。
+      kvEditorCode.includes("{enumOptions ? (")
+  );
   // 参数展示名映射（回退 label，不硬编码后端下发之外的键名）。
-  check("参数 key 有展示名映射", form.includes("const PARAM_LABELS"));
-  check("执行账号 key 有展示名", form.includes('account_ids: "执行账号"'));
+  check(
+    "retry_on_failure 是枚举下拉（取值 true/false）",
+    kvEditorCode.includes("retry_on_failure: { true:") &&
+      kvEditorCode.includes('false: "不重试"')
+  );
+  check("参数 key 有展示名映射（在 params-editor，与渲染同源）", kvEditor.includes("const PARAM_LABELS"));
+  check("job-form-modal 只透传 PARAM_LABELS（不下沉第二份映射）", form.includes('export { PARAM_LABELS } from "./params-editor"') && !form.includes("const PARAM_LABELS"));
+  // 2026-10-07 用户口径「中文参数名称写到最前面，不允许编辑只能预览」。
+  check("参数行**最前面**是中文名列", /paramLabel\(row\.key\.trim\(\)\)/.test(kvEditorCode) &&
+    kvEditorCode.indexOf("paramLabel(row.key.trim())") < kvEditorCode.indexOf("value={row.key}"));
+  check("中文名列恒只读（readOnly 写死，不随 editable 变）",
+    /value=\{paramLabel\(row\.key\.trim\(\)\)\}\r?\n\s+readOnly\r?\n/.test(kvEditor));
+  check("中文名取值走 paramLabel（缺值退提示/裸 key，不猜）", kvEditor.includes("export function paramLabel"));
+  // 2026-10-07 用户口径「中文名称简短展示全部」（改后追加）：「存在单位的放后面」
+  //「英文名也展示完整」。
+  // ⚠️ 判据必须落在**剥注释后**的代码上：本文件自己的注释里就举了「发布间隔（秒）」
+  // 当反例 ⇒ 不剥注释就是被自己的注释判红（DEF-056 同型）。
+  check("中文名不含单位（单位放后面）", !/（秒）|（天）/.test(kvEditorCode));
+  //（原「中文名列统一 180px」判据已被下面那条更严的取代：只查 width 测不出 flex 压缩。）
+  check("单位作值输入框的后缀", kvEditorCode.includes("suffix={PARAM_UNITS[row.key.trim()] ?? undefined}"));
+  check("单位表存在且有秒/天两档", kvEditor.includes("export const PARAM_UNITS") &&
+    kvEditor.includes('interval_seconds: "秒"') && kvEditor.includes('days: "天"'));
+  check("中文名短（≤6 字，够放全部不留省略号）",
+    (kvEditor.match(/^\s+\w+: "([^"]+)",/gm) || []).every((l) => l.match(/"([^"]+)"/)[1].length <= 8));
+  // 2026-10-07 用户口径「中英文名称长度统一 180px」（先「200px」后改 180，原值不再保留）。
+  // 2026-10-07 用户口径「中英文名称长度统一 180px」+「参数值输入框固定 200px」：
+  // ⚠️ 判据必须同时钉 `flex: "none"` —— 只查 width 时，`Space.Compact` 把子项变可压缩
+  // flex 项后宽度被压掉，「两列同宽」在界面上并不成立（用户报「展示不一致长」即此因）。
+  check(
+    "中文列 180px / 英文列 220px 且不被 flex 压缩",
+    /width: 180, flex: "none", cursor: "default"/.test(kvEditor) &&
+      /width: 220, flex: "none", cursor: editable/.test(kvEditor)
+  );
+  // ⚠️ 必须是 **3 处**：值控件有三个分支（枚举下拉 / 账号多选 / 普通文本 Input）。
+  // 上一轮只数 2 处 ⇒ 普通文本分支漏设宽度，它 `flex-grow` 撑满剩余空间，
+  // 于是「值列依旧长短不一致」（用户实测报出）。按分支数钉死，漏一个即红。
+  check(
+    "参数值控件三个分支都固定 350px 且不被压缩",
+    (kvEditor.match(/width: 350, flex: "none"/g) || []).length === 3
+  );
+  check(
+    "参数行不用 Space.Compact（会把子项变可压缩 flex 项 ⇒ 两列不等宽）",
+    !kvEditorCode.includes("<Space.Compact")
+  );
+  check("参数行没有 Tooltip（2026-10-07 用户口径「移除tip」）", !kvEditorCode.includes("<Tooltip"));
+  check("Tooltip 不再被 import（真删不留影子）", !kvEditor.includes("Tooltip,"));
+  check("执行账号 key 有展示名", kvEditor.includes('account_ids: "执行账号"'));
   // days（离线笔记同步时间区间）与 retention_days 都进展示名映射。
-  check("时间区间 days 有展示名", form.includes('days: "同步时间区间'));
-  check("保留期 retention_days 有展示名", form.includes('retention_days: "记录表保留天数'));
+  check("时间区间 days 有展示名", kvEditor.includes('days: "同步天数'));
+  check("保留期 retention_days 有展示名", kvEditor.includes('retention_days: "保留天数'));
 
   // --------------------------------------------------------------- //
   // 5b. 「执行一次」参数弹窗（设计 22 §5）
@@ -425,6 +562,14 @@ async function main() {
   // 关键语义：本次参数不写回任务配置（否则用户会以为改了定时配置）。
   check("执行一次弹窗说明「只对本次生效」", runModal.includes("只对本次执行生效"));
   check("执行一次弹窗复用共享 KV 编辑器", runModal.includes("ParamsEditor"));
+  // 「执行一次」弹窗同一尺寸口径（形态一致，切来切去不像两个东西）
+  check(
+    "执行一次弹窗同一尺寸口径",
+    runModal.includes('width="70%"') && runModal.includes('maxHeight: "70vh"')
+  );
+  // 2026-10-07：执行账号下拉在「执行一次」弹窗里同样可用（同一份注入形态）。
+  check("账号数据源由调用方注入（执行一次弹窗）", runModal.includes("accounts={accounts}"));
+  check("账号下拉的数据来自 fetchAccounts", runModal.includes('fetchAccounts("xhs")'));
   // 有可编辑参数才弹窗（无参数走 Popconfirm 二次确认）。
   check("任务中心按 params_editable 决定弹窗", page.includes("params_editable ?? []).length > 0"));
   check("无参数任务走二次确认", page.includes("<Popconfirm"));
@@ -630,14 +775,42 @@ async function main() {
     detail.includes("targetNames?: Record<string, string>")
   );
   check("页面把 targets 传给弹窗", pageCode.includes("targetNames={targetNames}"));
+  // 2026-10-07 用户口径「执行详情弹窗·快照配置区域的执行账号应展示**具体执行了哪些账号**」：
+  // 原来只显「N 个账号」；现在逐条列名字。
+  const jobLogDetail = readSource(
+    path.join(PROJECT, "frontend/src/components/schedule/job-log-detail-modal.tsx")
+  );
+  const jobLogDetailCode = stripComments(jobLogDetail);
+  check("详情弹窗接收账号名映射（accountNames prop）", jobLogDetail.includes("accountNames?: AccountNameMap"));
+  check("页面把账号名传给详情弹窗", pageCode.includes("accountNames={accountNames}"));
+  check("页面用 lib 的 accountNameMap（不另写映射）", pageCode.includes("accountNameMap(await fetchAccounts("));
+  check(
+    "执行账号逐条列出具体账号名",
+    jobLogDetailCode.includes("accountIds.map(") && jobLogDetailCode.includes("accountNames[String(id)]")
+  );
+  // 2026-10-07 用户口径「只展示账号名称不展示 id」：名字后面**不许**再挂 `（#id）`。
+  check("账号名后不带 id 后缀", !jobLogDetailCode.includes("（#"));
+  check(
+    "缺名退 `账号 #id`（兜底，缺值不猜）",
+    jobLogDetailCode.includes("accountNames[String(id)] || `账号 #${id}`")
+  );
+  check(
+    "空 account_ids 仍显「全部账号」（不猜具体是谁）",
+    jobLogDetailCode.includes('"全部账号"')
+  );
+  check("详情弹窗仍显示账号总数（共 N 个账号）", jobLogDetailCode.includes("共 {accountIds.length} 个账号"));
 
-  // 用户口径（2026-09-24）：任务名下方**不再挂「内置」Tag**；且所有任务一律可删
+  // 🔄 2026-10-07 用户口径**取代** 2026-09-24 的「一律可删 / 不挂内置 Tag」：
+  // 「定时任务新增表字段是否为内置任务，列表新增展示，内容任务不允许删除，前后端添加校验逻辑」。
   // ⚠️ 用上面已定义的 `pageCode`（已剥注释）
-  const nameCol = colSec(pageCode.slice(0, pageCode.indexOf("const logColumns")), "任务名称");
-  check("任务名下方不再挂「内置」Tag", !nameCol.includes("内置"));
-  check("页面无「内置」字样渲染", !pageCode.includes(">内置<"));
-  check("删除按钮不再按 builtin 禁用", !pageCode.includes("record.is_builtin"));
+  check("任务列表有「任务属性」列（展示是否内置）", pageCode.slice(0, pageCode.indexOf("const logColumns")).includes('title: "任务属性"'));
+  check("内置任务渲染「系统内置」Tag", pageCode.includes("系统内置"));
+  check("非内置任务渲染「自定义」Tag", pageCode.includes("自定义"));
+  check("内置任务的删除按钮置灰", pageCode.includes("actionLoading || record.is_builtin"));
+  check("内置任务删除给出原因（Tooltip）", pageCode.includes("系统内置任务不可删除"));
+  check("内置任务不给删除确认弹窗", pageCode.includes("disabled={record.is_builtin}"));
 
+  //: `colSec` 的入参（不依赖被取代的 `nameCol`）。
   // 用户口径（2026-09-24）②：任务**分组**整条移除（列表不再有分组列）
   const listSec = pageCode.slice(0, pageCode.indexOf("const logColumns"));
   check("任务列表无「分组」列", !listSec.includes('title: "分组"'));

@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import timedelta
 from pathlib import Path
 
@@ -150,11 +151,11 @@ def test_registry_has_exactly_fifteen_entries():
         "system.monitoring_refresh",
         "system.cookie_health_check",
         "system.qianfan_health_check",
-        "system.no_traffic_cleanup",
         "system.note_sync",
         "system.shop_goods_sync",
         "system.goods_note_sync",
         "system.note_data_sync",
+        "system.business_note_auto_publish",
         "system.queue_record_cleanup",
         "system.llm_gateway_monitor",
         "system.note_metrics_collect",
@@ -277,14 +278,17 @@ def test_create_job_rejects_foreign_account_ids(tmp_path, monkeypatch):
         mine_id, _ = _make_pc_and_creator_accounts(SessionLocal, owner)
         _, theirs_id = _make_pc_and_creator_accounts(SessionLocal, intruder)
 
-        # 别人的账号 ⇒ 400（跨租户）；`system.no_traffic_cleanup` 是平台删除操作，
-        # 这条路能走通就等于「A 可以定时删 B 的笔记」
+        # 别人的账号 ⇒ 400（跨租户）。⚠️ 2026-10-07：原先这里用
+        # `system.no_traffic_cleanup` 当载体（「平台删除操作，走通就等于 A 能定时删
+        # B 的笔记」）—— 该任务已从注册表移除（用户口径「无流量笔记清理任务不应在
+        # 任务列表展示」）⇒ 换一个**仍然收 account_ids** 的平台写操作任务做载体。
+        # 判据本身没变（建行也过归属校验），载体换了而已。
         response = client.post(
             "/api/schedule/jobs",
             headers=_auth(owner),
             json={
-                "name": "越权清理",
-                "job_key": "system.no_traffic_cleanup",
+                "name": "越权同步",
+                "job_key": "system.note_sync",
                 "params": {"account_ids": [theirs_id]},
             },
         )
@@ -296,8 +300,8 @@ def test_create_job_rejects_foreign_account_ids(tmp_path, monkeypatch):
             "/api/schedule/jobs",
             headers=_auth(owner),
             json={
-                "name": "本人清理",
-                "job_key": "system.no_traffic_cleanup",
+                "name": "本人同步",
+                "job_key": "system.note_sync",
                 "params": {"account_ids": [mine_id]},
             },
         )
@@ -430,7 +434,8 @@ def test_schedule_status_counts_only_my_rows(tmp_path, monkeypatch):
     try:
         owner = _register("status-owner")
         intruder = _register("status-intruder")
-        # 主人有 13 个内置行；入侵者先手动建一个自己的
+        # 主人有 13 个内置行（2026-10-07：`no_traffic_cleanup` 移除后 14→13）；
+        # 入侵者先手动建一个自己的
         _seed_builtin(SessionLocal, owner)
         response = client.post(
             "/api/schedule/jobs",
@@ -446,7 +451,7 @@ def test_schedule_status_counts_only_my_rows(tmp_path, monkeypatch):
         owner_stats = client.get("/api/schedule/status", headers=_auth(owner)).json()["stats"]
         intruder_stats = client.get("/api/schedule/status", headers=_auth(intruder)).json()["stats"]
         assert owner_stats["total"] == 14
-        # 入侵者注册时也播种了 14 行 + 自己新建 1 行 = 15（只见自己的，不见主人的）
+        # 入侵者注册时也播种了 13 行 + 自己新建 1 行 = 14（只见自己的，不见主人的）
         assert intruder_stats["total"] == 15, "入侵者只应看到自己的行"
     finally:
         app.dependency_overrides.clear()
@@ -617,15 +622,23 @@ def _seed_builtin(SessionLocal, token: str) -> ScheduledJob:
         db.close()
 
 
-def test_any_job_can_be_deleted_and_params_stay_whitelisted(tmp_path, monkeypatch):
-    """用户口径（2026-09-24）：「所有任务都是内置的」⇒ 内置不再是一种特权。
+def test_builtin_job_cannot_be_deleted_but_schedule_stays_editable(tmp_path, monkeypatch):
+    """**内置任务不可删除**（2026-10-07 用户口径），调度属性与参数仍可改。
 
-    原断言（`test_builtin_job_cannot_be_deleted_or_have_params_changed`）中
-    「内置行删除一律 400 `JOB_BUILTIN_PROTECTED`」**已被推翻**，原文保留：
-        response = client.delete(f"/api/schedule/jobs/{job_id}", headers=_auth(token))
-        assert response.status_code == 400
-        assert response.json()["detail"].startswith("JOB_BUILTIN_PROTECTED")
-    不变的是**参数白名单**：内置与普通行仍同一把尺子（设计 15 §5）。
+    用户口径原文：「定时任务新增表字段是否为内置任务，列表新增展示，**内容任务不允许删除**，
+    前后端添加校验逻辑」+「**系统内置**任务的调用参数不可删除不可添加；**非系统内置**任务
+    可删除、可添加调用参数」。
+
+    ⚠️ 本条**推翻**了两代旧断言，原句按规矩保留在此（不静默删除）：
+
+    * 原始（内置一律保护）：
+          response = client.delete(f"/api/schedule/jobs/{job_id}", headers=_auth(token))
+          assert response.status_code == 400
+          assert response.json()["detail"].startswith("JOB_BUILTIN_PROTECTED")
+    * 2026-09-24 一度**放开**（「所有任务都是内置的 ⇒ 一律可删」）：
+          deleted = client.delete(...)
+          assert deleted.status_code == 200
+    现在回到「区分内置与否」，判据 = 注册表 `JobSpec.builtin`（行上的 `is_builtin` 由建行时写入）。
     """
     SessionLocal = _override_database(tmp_path)
     _patch_service_sessions(monkeypatch, SessionLocal)
@@ -633,8 +646,7 @@ def test_any_job_can_be_deleted_and_params_stay_whitelisted(tmp_path, monkeypatc
         token = _register("job-builtin-guard")
         job_id = _seed_builtin(SessionLocal, token)
 
-        # 自定义参数走白名单：非 params_editable 的键一律 400
-        # （内置与普通行同一把尺子，设计 15 §5）
+        # 内置任务的**参数白名单**仍生效：非 params_editable 的键一律 400
         response = client.put(
             f"/api/schedule/jobs/{job_id}",
             headers=_auth(token),
@@ -643,7 +655,7 @@ def test_any_job_can_be_deleted_and_params_stay_whitelisted(tmp_path, monkeypatc
         assert response.status_code == 400
         assert response.json()["detail"].startswith("JOB_PARAMS_NOT_EDITABLE")
 
-        # 调度属性可调（换触发器）
+        # 调度属性可调（换触发器）—— 「不可删」不等于「不可配」
         response = client.put(
             f"/api/schedule/jobs/{job_id}",
             headers=_auth(token),
@@ -652,11 +664,12 @@ def test_any_job_can_be_deleted_and_params_stay_whitelisted(tmp_path, monkeypatc
         assert response.status_code == 200
         assert response.json()["cron_expression"] == "0 0 */2 * * *"
 
-        # 推翻后的新契约：内置行**可以**删掉（所有任务一律可删）
+        # 内置行**不可删除**
         deleted = client.delete(f"/api/schedule/jobs/{job_id}", headers=_auth(token))
-        assert deleted.status_code == 200, deleted.text
-        assert deleted.json()["status"] == "deleted"
-        assert client.get(f"/api/schedule/jobs/{job_id}", headers=_auth(token)).status_code == 404
+        assert deleted.status_code == 400, deleted.text
+        assert deleted.json()["detail"].startswith("JOB_BUILTIN_PROTECTED")
+        # 行还在
+        assert client.get(f"/api/schedule/jobs/{job_id}", headers=_auth(token)).status_code == 200
     finally:
         app.dependency_overrides.clear()
 
@@ -740,12 +753,23 @@ def test_builtin_job_account_selection(tmp_path, monkeypatch):
         app.dependency_overrides.clear()
 
 
-def test_user_job_params_are_immutable_via_schedule_api(tmp_path, monkeypatch):
-    """普通行（auto_ops）的 params 由代码拥有：/schedule/jobs 改不了 ⇒ 400。"""
+def test_non_builtin_job_params_are_user_owned(tmp_path, monkeypatch):
+    """**非内置任务**的 params 由用户拥有：可自由增删键（2026-10-07 用户口径）。
+
+    用户口径：「**非系统内置**任务可删除、可添加调用参数」—— 原先「一律 400
+    `JOB_PARAMS_NOT_EDITABLE`」的判据**已收窄为只对内置任务生效**（原句保留：
+        response = client.put(..., json={"params": {"auto_task_id": auto_task_id + 100}})
+        assert response.status_code == 400
+        assert response.json()["detail"].startswith("JOB_PARAMS_NOT_EDITABLE")
+    ）。
+
+    ⚠️ 但**深校验仍生效**：`auto_task_id` 不是本人的 ⇒ `params_validator` 抛
+    「不存在或不属于当前用户」⇒ 仍 400（白名单放开不等于归属校验放开）。
+    """
     SessionLocal = _override_database(tmp_path)
     _patch_service_sessions(monkeypatch, SessionLocal)
     try:
-        token = _register("job-immutable")
+        token = _register("job-user-owned")
         auto_task_id = _make_auto_task(SessionLocal, token)
         response = client.post(
             "/api/schedule/jobs",
@@ -759,13 +783,23 @@ def test_user_job_params_are_immutable_via_schedule_api(tmp_path, monkeypatch):
         assert response.status_code == 200
         job_id = response.json()["id"]
 
+        # ① 自己加一个额外参数键 ⇒ 允许（非内置任务参数由用户拥有）
+        response = client.put(
+            f"/api/schedule/jobs/{job_id}",
+            headers=_auth(token),
+            json={"params": {"auto_task_id": auto_task_id, "my_extra": "hello"}},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["params"].get("my_extra") == "hello"
+
+        # ② 但**深校验**不能跟着放开：别人的 auto_task_id 仍 400
         response = client.put(
             f"/api/schedule/jobs/{job_id}",
             headers=_auth(token),
             json={"params": {"auto_task_id": auto_task_id + 100}},
         )
         assert response.status_code == 400
-        assert response.json()["detail"].startswith("JOB_PARAMS_NOT_EDITABLE")
+        assert "不属于当前用户" in response.json()["detail"]
     finally:
         app.dependency_overrides.clear()
 
@@ -1696,10 +1730,13 @@ def test_sync_jobs_from_db_registers_active_rows_only(tmp_path, monkeypatch):
         scheduler = build_scheduler()
         stats = sync_jobs_from_db(scheduler)
         ids = {job.id for job in scheduler.get_jobs()}
-        # 活跃行 = 测试行 1 + 应用初始化数据播种的 13 行（R24 起全 active）；
-        # 其中 `system.no_traffic_cleanup` 是 manual 档、**不参与调度装配** ⇒ 注册 13。
-        assert stats["registered"] == 14
-        assert len(ids) == 14
+        # 活跃行 = 测试行 1 + 应用初始化数据播种的 13 行（R24 起全 active）⇒ 注册 14。
+        # ⚠️ 2026-10-07：原先这里还要减一 —— `system.no_traffic_cleanup` 是 manual 档、
+        # **不参与调度装配**（播种 14 行、注册 13）。该任务已从注册表与种子**移除**
+        # （用户口径「无流量笔记清理任务不应在任务列表展示」）⇒ 播种 13 行、全 cron、
+        # 注册 14 行，两个数**从「差 1」变成「相等」**。
+        assert stats["registered"] == 15
+        assert len(ids) == 15
         assert all(job_id.startswith("job_") for job_id in ids)
     finally:
         app.dependency_overrides.clear()
@@ -2756,8 +2793,11 @@ def test_dedupe_seeded_scheduled_jobs_migration(tmp_path):
     assert [row[0] for row in jobs] == [1, 3, 4, 5], (
         "播种影子行（id 2）应被收敛，用户行（id 3）与其它任务（id 5）必须一行不动"
     )
-    # 保留行字段零改动（§4.5「已有行一律不覆盖」）
-    assert jobs[0][1] == seeded
+    # ⚠️ 2026-10-07：`remark` 已**不是**原样 —— 本用例跑的是 `upgrade head`，
+    # 区间内的 `p1q2r3s4t5u6`（备注统一）会把种子文案改写成「系统内置任务」。
+    # 「不覆盖已有行」的口径**没有变**（收敛逻辑不动 remark），这里断言的是
+    # 走完全链之后的终值（原句 `== seeded` 见 git 历史）。
+    assert jobs[0][1] == "系统内置任务"
 
     # ④ 幂等：stamp 回父 revision 再 upgrade ⇒ 零删除（收敛后条件不再命中）
     run_alembic(db_path, "stamp", "h9i0j1k2l3m4")
@@ -3027,3 +3067,110 @@ def test_v20_downgrade_recreates_empty_table(tmp_path):
         assert count == 0, f"回退后应为空表（设计取舍：不回填），实测 {count} 行"
     finally:
         conn.close()
+
+
+# --------------------------------------------------------------------------- #
+# 参数默认值（2026-10-07 用户口径「调用参数不允许随意添加和删除，必须有默认值」）
+# --------------------------------------------------------------------------- #
+class TestParamDefaults:
+    """注册表 `params_defaults` 的三条契约：键集覆盖、必有默认值、运行器兜底。"""
+
+    def test_every_declared_param_key_has_a_default(self):
+        """**每个参数键都必须有默认值** —— 新增参数漏默认值 ⇒ 守卫必红。
+
+        这条是用户口径的机械化：没有它，「加了个参数但没想清楚缺省行为」只能靠人盯。
+        """
+        from backend.app.services.job_registry import job_registry
+
+        missing: list[str] = []
+        for key, spec in job_registry().items():
+            # ⚠️ `params_required` 是**引用型必填**（如 `auto_task_id`）—— 它没有
+            # 也不该有默认值（默认一个不存在的 id 只会让执行必然失败）。所以判据是
+            # 「`params_editable` 的键**必须**有默认值」，必填键只要求被声明。
+            for param_key in spec.params_editable:
+                if param_key not in spec.params_defaults:
+                    missing.append(f"{key}.{param_key}")
+        assert not missing, f"以下可编辑参数缺默认值: {missing}"
+
+    def test_defaults_do_not_name_undeclared_keys(self):
+        """反向：`params_defaults` 里也不许有多余的键（两份真相源会打架）。"""
+        from backend.app.services.job_registry import job_registry
+
+        extra: list[str] = []
+        for key, spec in job_registry().items():
+            for param_key in spec.params_defaults:
+                if param_key not in spec.params_editable:
+                    extra.append(f"{key}.{param_key}")
+        assert not extra, f"以下默认值对应的键不在 params_editable 里: {extra}"
+
+    def test_account_scoped_tasks_default_to_all_own_accounts(self):
+        """`account_ids` 的默认值恒为 `[]`（= 本人全部账号，既有口径）。"""
+        from backend.app.services.job_registry import job_registry
+
+        for key, spec in job_registry().items():
+            if "account_ids" in spec.params_editable:
+                assert spec.params_defaults.get("account_ids") == [], key
+
+    def test_runner_fills_missing_params_from_defaults(self, tmp_path, monkeypatch):
+        """**后端兜底**：存量行的 params 缺键时，运行器按默认值补齐再调执行函数。
+
+        ⚠️ 这是「存量任务行早于某参数上线」的唯一安全网 —— 不补的话
+        `spec.func(**params)` 会因缺参 `TypeError`，整轮任务失败。
+
+        真跑 `execute_job`（不是复刻兜底逻辑 —— 复刻等于没测）。
+        """
+        from backend.app.services import job_registry, scheduled_job_runner
+        from backend.app.services.scheduled_job_runner import execute_job
+
+        SessionLocal = _override_database(tmp_path)
+        _patch_service_sessions(monkeypatch, SessionLocal)
+
+        captured: dict = {}
+
+        def fake_func(**kwargs):
+            captured.update(kwargs)
+            return {"ok": True}
+
+        # ⚠️ `JobSpec` 是 **frozen dataclass** ⇒ 不能原地改字段，用 `replace` 造替身。
+        real_spec = job_registry.get_job_spec("system.business_note_auto_publish")
+        spec = dataclasses.replace(real_spec, func=fake_func)
+        monkeypatch.setattr(job_registry, "get_job_spec", lambda k: spec, raising=False)
+        monkeypatch.setattr(scheduled_job_runner, "get_job_spec", lambda k: spec, raising=False)
+        try:
+            db = SessionLocal()
+            #: 建行前先落一个真实用户（`scheduled_jobs.user_id` 有 FK，凭空 id 会撞约束）。
+            db.add(User(id=1, username="defaults-owner", password_hash="x"))
+            db.flush()
+            # 存量行形态：params 只有四键，缺重试三件套
+            job = ScheduledJob(
+                user_id=1,
+                name="存量商业笔记任务",
+                job_key="system.business_note_auto_publish",
+                trigger_type="cron",
+                cron_expression="0 0 9 * * *",
+                status="active",
+                params={
+                    "account_ids": [],
+                    "limit": 2,
+                    "interval_seconds": 5,
+                    "generate_mode": "qianfan",
+                },
+            )
+            db.add(job)
+            db.commit()
+            db.refresh(job)
+            job_id = job.id
+            db.close()
+
+            execute_job(job_id, trigger_type="scheduled")
+        finally:
+            pass
+
+        # 兜底必须真的发生了：三个缺键按注册表默认值补齐
+        assert captured, "执行函数没被调用（兜底 or 浅校验把它挡了？）"
+        assert captured.get("retry_on_failure") is True, captured
+        assert captured.get("max_retries") == 3, captured
+        assert captured.get("retry_interval_seconds") == 30, captured
+        # 已有值**不得**被默认值覆盖
+        assert captured.get("limit") == 2, captured
+        assert captured.get("interval_seconds") == 5, captured

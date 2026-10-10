@@ -148,7 +148,7 @@ def test_task_record_logic_is_driven_for_real():
     """
     result = _run_task_records()
     assert result.returncode == 0, (result.stdout + result.stderr)[-900:]
-    assert "158 PASS / 0 FAIL" in result.stdout
+    assert "160 PASS / 0 FAIL" in result.stdout
 
 
 @pytest.mark.parametrize(

@@ -29,12 +29,22 @@ JOB_KEY_ORDER_SYNC = "system.order_sync"
 #: （`system.queue_record_cleanup`）—— 定期清理项目中所有指定记录表。
 #: 键**保持不变**（存量行与历史日志快照不迁移即可继续对上），中文名改「清理记录表」。
 JOB_KEY_RECORD_CLEANUP = "system.queue_record_cleanup"
-#: 2026-10-05 用户口径：清理无流量笔记是**手动触发任务**，入口只有「我的笔记」页按钮。
-#: 该键保留在注册表里（任务中心可点「立即执行」、可看日志），但**默认 trigger_type=manual**
-#: （迁移 `y8z9a0b1c2d3` 播的就是 manual ⇒ 从来没有自动跑过）。
-JOB_KEY_NO_TRAFFIC_CLEANUP = "system.no_traffic_cleanup"
+#: ⚠️ **`system.no_traffic_cleanup` 已于 2026-10-07 从注册表移除**（用户口径
+#: 「无流量笔记清理任务表移除该配置」+「无流量笔记清理任务不应在任务列表展示」）：
+#: 清理**只能从「我的笔记」页按钮发起**，定时任务中心里既不该有这一行、也不该
+#: 出现在「调用目标」下拉里。原先那句「键保留在注册表里（任务中心可点立即执行、
+#: 可看日志）」**被本次取代**；键名常量与 `run_scheduled_cleanups` 一并删除
+#: （留着一个再也注册不上的执行器只会让人以为还有定时入口）。
+#: 迁移 `j1k2l3m4n5o6` 负责把**存量行**从 `scheduled_jobs` 表清掉（光删注册表
+#: 只会让这些行变成 `unknown job_key` 的僵尸 —— 列表照显、点击报错）。
+#: ⚠️ 清理**本身**没有退场：`/users/no-traffic/cleanup` 端点、候选池、日志表
+#: （`no_traffic_cleanup_logs` / `_items`）与「我的笔记」页入口全部保留。
 #: 离线笔记数据同步（「我的笔记」商业/普通两类，2026-10-06 需求）。
 JOB_KEY_NOTE_DATA_SYNC = "system.note_data_sync"
+
+#: 「每日发布商业笔记」（设计 15 §19，2026-10-07 用户需求）：逐账号探活 → 取
+#: 「挂链笔记数为 0」的商品 → 按指定方式生成 → 对生成成功的笔记逐篇发布。
+JOB_KEY_BUSINESS_NOTE_AUTO_PUBLISH = "system.business_note_auto_publish"
 
 #: M6 方向 6（设计 16 §7）订单同步。与 `JOB_KEY_SHOP_GOODS_SYNC` 分开：
 #: 落不同的表、不同的任务类型，任务中心是两行独立的任务。
@@ -68,6 +78,25 @@ class JobSpec:
     `JOB_PARAMS_NOT_EDITABLE`。首批：5 个账号维度系统任务 = `("account_ids",)`
     （多选；**空 = 行主本人的全部账号**，即 2026-09-24 隔离整改前的行为范围收口到
     行主）。后续新任务按自己的参数形态声明，互不影响。"""
+    params_defaults: dict[str, Any] = field(default_factory=dict)
+    """每个参数的**默认值**（2026-10-07 用户口径「调用参数不允许随意添加和删除，
+    必须有默认值」）。
+
+    ⚠️ 这是**契约声明，不是 UI 提示**，三处都从它出发：
+
+    1. **兜底**：`scheduled_job_runner` 在执行前把缺的键按它补上 ⇒ 存量任务行
+       （早于某个参数上线）拿到新参数时**不会 `TypeError`**，行为 = 默认值；
+    2. **广播**：`GET /schedule/targets` / 任务序列化下发 `params_schema`
+       （键 + 中文名 + 默认值 + 控件类型），前端据此**渲染固定行**；
+    3. **校验**：注册表守卫断言「键集 == `params_editable ∪ params_required`」
+       且每个键都有默认值 ⇒ 新增参数时**不可能漏默认值**。
+
+    `account_ids` 的默认值恒为 `[]`（= 本人全部账号，既有口径）。
+
+    ⚠️ **不另设 `params_schema`**：控件类型由**默认值的类型**推断
+    （`list` ⇒ 多选 / `bool` ⇒ 开关 / `int` ⇒ 数字 / `str` ⇒ 文本），
+    枚举取值表仍在前端 `PARAM_ENUM_OPTIONS`（按 key）。再声明一份 schema = 第二个
+    真相源，两处迟早不一致（DEF-044）。"""
     user_scoped: bool = False
     """True = 执行函数收 `user_id` 形参，runner 注入**行归属者**（DEF-066，
     设计 15 §4.1.1）：账号维度系统任务一律 True ⇒ 账号查询恒带
@@ -97,6 +126,10 @@ def _build_registry() -> dict[str, JobSpec]:
     # 延迟 import：拆掉 scheduler_service ↔ job_registry 的导入环（见模块 docstring）。
     from backend.app.services import scheduler_service
     from backend.app.services.auto_ops_service import run_keyword_pipeline
+    from backend.app.services.business_note_publish_service import (
+        run_business_note_auto_publish,
+        validate_business_publish_params,
+    )
     from backend.app.services.llm_gateway_monitor_service import run_llm_gateway_monitor_once
     from backend.app.services.metric_scheduler_service import (
         run_note_metrics_collect_once,
@@ -134,6 +167,7 @@ def _build_registry() -> dict[str, JobSpec]:
             builtin=True,
             user_scoped=True,
             params_editable=("account_ids",),
+            params_defaults={"account_ids": []},
             default_trigger_type="cron",
             default_cron="0 0 */2 * * *",
         ),
@@ -144,24 +178,9 @@ def _build_registry() -> dict[str, JobSpec]:
             builtin=True,
             user_scoped=True,
             params_editable=("account_ids",),
+            params_defaults={"account_ids": []},
             default_trigger_type="cron",
             default_cron="0 0 */6 * * *",
-        ),
-        JobSpec(
-            key=JOB_KEY_NO_TRAFFIC_CLEANUP,
-            name="无流量笔记清理",
-            func=scheduler_service.run_scheduled_cleanups,
-            builtin=True,
-            user_scoped=True,
-            params_editable=("account_ids",),
-            # ⚠️ **`manual`，不是 `cron`**（2026-10-05 用户口径「没有自动清理笔记的逻辑，
-            #    定时任务列表没有清理无流量笔记任务……清理无流量笔记任务为手动触发任务，
-            #    入口只有我的笔记页的清理无流量按钮」）：
-            #    迁移 `y8z9a0b1c2d3` 播的本来就是这个值，本次把它**写进注册表默认**，
-            #    消掉原先 `default_cron="0 0 */6 * * *"` 这个与实际不符的僵尸兜底
-            #    （配置里有 `no_traffic_cleanup_interval_hours` 时会被装配成定时跑）。
-            default_trigger_type="manual",
-            default_cron="",
         ),
         JobSpec(
             key=JOB_KEY_NOTE_SYNC,
@@ -170,6 +189,7 @@ def _build_registry() -> dict[str, JobSpec]:
             builtin=True,
             user_scoped=True,
             params_editable=("account_ids",),
+            params_defaults={"account_ids": []},
             default_trigger_type="cron",
             default_cron="0 0 */6 * * *",
         ),
@@ -185,6 +205,7 @@ def _build_registry() -> dict[str, JobSpec]:
             builtin=True,
             user_scoped=True,
             params_editable=("account_ids",),
+            params_defaults={"account_ids": []},
             default_trigger_type="cron",
             default_cron="0 0 */6 * * *",
         ),
@@ -195,6 +216,7 @@ def _build_registry() -> dict[str, JobSpec]:
             builtin=True,
             user_scoped=True,
             params_editable=("account_ids",),
+            params_defaults={"account_ids": []},
             default_trigger_type="cron",
             default_cron="0 0 */6 * * *",
         ),
@@ -210,6 +232,7 @@ def _build_registry() -> dict[str, JobSpec]:
             user_scoped=True,
             # 2026-10-06：新增「时间区间」参数 `days`（同步最近 N 天，上限 90）。
             params_editable=("account_ids", "days"),
+            params_defaults={"account_ids": [], "days": 90},
             default_trigger_type="cron",
             default_cron="0 0 */6 * * *",
         ),
@@ -222,6 +245,7 @@ def _build_registry() -> dict[str, JobSpec]:
             builtin=True,
             user_scoped=True,
             params_editable=("account_ids",),
+            params_defaults={"account_ids": []},
             default_trigger_type="cron",
             default_cron="0 30 */6 * * *",
         ),
@@ -238,6 +262,7 @@ def _build_registry() -> dict[str, JobSpec]:
             #    保留期改为任务参数 `retention_days`（默认 15 天），在任务中心的
             #    新增 / 编辑弹窗里配，每次执行时读取。原句与对照表见设计 15 §4.5。
             params_editable=("retention_days",),
+            params_defaults={"retention_days": 15},
             params_validator=validate_retention_days,
             default_trigger_type="cron",
             default_cron="0 0 7 * * *",
@@ -269,6 +294,39 @@ def _build_registry() -> dict[str, JobSpec]:
             params_editable=(),
             default_trigger_type="cron",
             default_cron="0 35 * * * *",
+        ),
+        JobSpec(
+            # 设计 15 §19（2026-10-07 用户需求「新增定时任务 每日发布商业笔记」）：
+            # 平台写操作（生成 + 发布）⇒ 恒 forbid 并发；账号维度 ⇒ user_scoped。
+            key=JOB_KEY_BUSINESS_NOTE_AUTO_PUBLISH,
+            name="每日发布商业笔记",
+            func=run_business_note_auto_publish,
+            builtin=True,
+            user_scoped=True,
+            params_editable=(
+                "account_ids",
+                "limit",
+                "interval_seconds",
+                "generate_mode",
+                # 2026-10-07 追加：发布失败重试三件（用户口径「是否重试、最多 3 次、间隔时间」）。
+                "retry_on_failure",
+                "max_retries",
+                "retry_interval_seconds",
+            ),
+            # 默认值 = 服务层解析器的缺省（`_coerce_int` / `_coerce_bool` 的 default）——
+            # **同一份数值只在这里写一次**：运行器兜底、前端预填、测试都读它。
+            params_defaults={
+                "account_ids": [],
+                "limit": 1,
+                "interval_seconds": 30,
+                "generate_mode": "qianfan",
+                "retry_on_failure": True,
+                "max_retries": 3,
+                "retry_interval_seconds": 30,
+            },
+            params_validator=validate_business_publish_params,
+            default_trigger_type="cron",
+            default_cron="0 0 9 * * *",
         ),
         JobSpec(
             key="auto_ops.keyword_pipeline",

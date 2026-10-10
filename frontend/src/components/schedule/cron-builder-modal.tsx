@@ -105,7 +105,10 @@ export function CronBuilderModal({ open, initialCron, onOk, onCancel }: CronBuil
             centered
             title="Cron 表达式构建器"
       open={open}
-      width={640}
+      // 2026-10-07 用户口径「编辑任务和新增弹窗全部重新布局……全屏的 70%」：
+      // 它是新建 / 编辑弹窗里打开的**子弹窗** ⇒ 同一尺寸口径（宽 70% / 内容区 70vh 内滚）。
+      width="70%"
+      styles={{ body: { maxHeight: "70vh", overflowY: "auto" } }}
       onCancel={onCancel}
       onOk={() => onOk(raw.trim())}
       okText="使用该表达式"

@@ -274,3 +274,97 @@ body {
     height: 240px;
   }
 }
+
+/* ---------------------------------------------------------------- *
+ * 藏「滚动条外观」但**保留滚动功能**（用户口径 2026-10-08）：
+ * 「弹窗内所有滚动条隐藏不展示，保留滚动的功能」。
+ *
+ * ⚠️ 只隐藏视觉，`overflow` 不动 —— 用 `display:none` 会把滚动能力
+ * 一起干掉（那是另一个需求，不是这个）。
+ * ---------------------------------------------------------------- */
+.hermes-hide-scrollbar {
+  scrollbar-width: none;        /* Firefox */
+  -ms-overflow-style: none;     /* 老 Edge / IE */
+}
+.hermes-hide-scrollbar::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+/* ---------------------------------------------------------------- *
+ * 发布向导的**等待遮罩**（用户口径 2026-10-08）
+ *
+ * 「预检（违规词 OCR + 视频抽帧）… 已耗时 18s」这句**必须始终在窗口正中**：
+ * 预检要跑 70 秒以上，期间用户会滚动弹窗看媒体/表格，
+ * antd `Spin` 的 tip 是**跟着内容流**滚的 ⇒ 一滚就看不见耗时。
+ * ⇒ 用 `position: fixed` 直接挂到视口上，`flex` 居中，
+ * 文案位置与弹窗内滚动**完全无关**。
+ *
+ * 层级要盖过 antd 弹窗（默认 1000）+ 其蒙版，故给 2000。
+ * 遮罩本身也承担「防误触」：铺满视口 ⇒ 底下的按钮/勾选都点不到。
+ * ---------------------------------------------------------------- */
+.publish-wait-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.55);
+  backdrop-filter: blur(1px);
+}
+
+.publish-wait-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 24px 32px;
+  border-radius: 12px;
+  background: var(--ant-color-bg-container, #fff);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.14);
+}
+
+.publish-wait-text {
+  font-size: 14px;
+  color: var(--ant-color-text, rgba(0, 0, 0, 0.88));
+}
+
+/* 商品属性（属性图 OCR 出的 KV —— 用户口径 2026-10-09）
+   一行一对「属性名：属性值」，两个输入框都可改（OCR 错字由用户自己纠）。 */
+.attr-kv-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.attr-kv-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.attr-kv-key {
+  width: 180px;
+  flex: 0 0 180px;
+}
+
+.attr-kv-colon {
+  color: var(--ant-color-text-secondary, rgba(0, 0, 0, 0.45));
+}
+
+.attr-kv-value {
+  width: 320px;
+  flex: 0 0 320px;
+}
+
+/* 提交蒙版的副说明（与 `.publish-wait-mask` 同款卡片内的次要一行）。 */
+.publish-wait-sub {
+  max-width: 360px;
+  font-size: 12px;
+  line-height: 18px;
+  text-align: center;
+  color: var(--ant-color-text-secondary, rgba(0, 0, 0, 0.45));
+}

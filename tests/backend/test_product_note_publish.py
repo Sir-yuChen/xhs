@@ -62,6 +62,10 @@ class FakePublishAdapter:
 
     calls: list[str] = []
     published_titles: list[str] = []
+    #: 每次调用记录**发起线程名**（2026-10-07）。用来证明「生成/发布由 worker 线程
+    #: 发起」而不是在请求线程里内联跑 —— 后者正是 §31.10（生成入队）要消灭的形态，
+    #: 而「POST 回来时 calls 是否为空」只是时序假设（worker 可能已经跑完）。
+    thread_names: list[str] = []
     upload_gate: threading.Event | None = None
     upload_reached: threading.Event | None = None
     #: 平台 note_id 序号（每次成功发布自增）—— 真机每篇返回不同 ID，
@@ -74,6 +78,7 @@ class FakePublishAdapter:
     # ---- 生成链路 ----
     def aigc_publish_attributes(self, item_id, *, sku_id=""):
         FakePublishAdapter.calls.append("attributes")
+        FakePublishAdapter.thread_names.append(threading.current_thread().name)
         return True, "ok", {
             "code": 0,
             "data": {
@@ -203,6 +208,7 @@ class FakePublishAdapter:
 def _reset():
     FakePublishAdapter.calls = []
     FakePublishAdapter.published_titles = []
+    FakePublishAdapter.thread_names = []
     FakePublishAdapter.fail_task = False
     FakePublishAdapter.reject_preaudit = False
     FakePublishAdapter.fail_publish = False
@@ -362,9 +368,24 @@ def test_generate_save_enqueues_and_worker_creates_note_assets_and_relation(tmp_
         body = resp.json()
         assert body["ok"] is True
         assert body["status"] == "queued", "入队回执（不是逐项结果）"
-        assert FakePublishAdapter.calls == [], "生成必须在后台 worker 里跑"
-
+        #: 2026-10-07 修：**原判据「POST 回来时 `calls == []`」站不住** ——
+        #: 端点在返回前就 `ensure_generate_worker()` 唤醒 worker，而本夹具把
+        #: `_POLL_INTERVAL` 打成 0 ⇒ worker 常常**先于断言**把这一项跑完（稳定复现）。
+        #:
+        #: 原意是「生成不在**请求线程**里跑」，那用「立刻断言没跑」表达是**时序假设**，
+        #: 不是不变式。改成观察 **worker 线程确实参与了**（跑完也行、正在跑也行）：
+        #:   * `body["status"] == "queued"` 已证明端点只入队不回结果（上面那条）；
+        #:   * 这里再钉「生成的调用来自 worker 线程名」，与「请求线程内联跑」互斥。
         assert product_note_gen_service.wait_generate_done(timeout=15), "后台 worker 未在超时内跑完"
+        #: ⚠️ 断言放在**等 worker 跑完之后**。原判据「POST 回来时 `calls == []`」是**时序假设**
+        #: （端点在返回前就 `ensure_generate_worker()` 唤醒 worker，而夹具把 `_POLL_INTERVAL`
+        #: 打成 0 ⇒ worker 常常先于断言跑完）。真正的不变式是**发起线程**：生成必须来自
+        #: worker 线程，而不是在请求线程里内联跑（后者正是 §31.10 生成入队要消灭的形态）。
+        assert FakePublishAdapter.thread_names, "生成链路一次都没被调用"
+        assert all(
+            name == product_note_gen_service.GENERATE_WORKER_THREAD_NAME
+            for name in FakePublishAdapter.thread_names
+        ), f"生成必须在后台 worker 里跑，实际线程 {FakePublishAdapter.thread_names}"
 
         db = db_factory()
         try:
@@ -1755,3 +1776,59 @@ def test_note_publish_mutations_are_caught(mutate):
     )
     output = result.stdout + result.stderr
     assert result.returncode != 0, f"变异 {mutate} **未被抓住**（守卫只是恰好为真）：\n{output[-600:]}"
+
+
+# --------------------------------------------------------------------------- #
+# 下载媒体必须带 User-Agent（2026-10-07 用户报「下载媒体失败（第 2 个）：405」）
+# --------------------------------------------------------------------------- #
+class TestMediaDownloadHeaders:
+    """平台 CDN 对**没有 User-Agent** 的请求回 **405**（不是 403）—— 症状极具误导性。
+
+    实测矩阵（同一个 `http://qimg.xiaohongshu.com/material_space/<uuid>` 直链）：
+
+    | 请求 | 结果 |
+    |---|---|
+    | 无 UA（原实现只有 `Referer: ""`） | **405** |
+    | `Referer: ""` + UA | **200** |
+    | 只带 UA | **200** |
+
+    用户实测表现：`system.business_note_auto_publish` 真跑发布 ⇒ 第 2 张图 405 ⇒
+    整篇 `publish_status=failed`（`publish_attempts=3` 三次重试全 405，是确定性失败
+    不是抖动）。项目里**同类坑已踩过一次**（`note_detail_ssr._default_user_agent`：
+    没 UA 被判成非浏览器、踢到登录页），下载媒体这条当时漏了。
+    """
+
+    def test_headers_include_a_user_agent(self):
+        from backend.app.services import note_publish_service as svc
+
+        headers = svc._media_download_headers()
+        assert headers.get("User-Agent"), "下载媒体必须带 User-Agent（缺 ⇒ CDN 回 405）"
+        assert "Mozilla/5.0" in headers["User-Agent"], headers
+
+    def test_referer_is_still_cleared(self):
+        """`Referer` 置空是**既有口径**（带小红书 Referer 会触发防盗链）—— 别在修 UA 时改掉它。"""
+        from backend.app.services import note_publish_service as svc
+
+        assert svc._media_download_headers().get("Referer") == ""
+
+    def test_download_call_uses_the_shared_headers(self):
+        """判据落在**调用形态**上：`_download_media` 必须调它，不能手拼 header。
+
+        ⚠️ 只查「`_media_download_headers` 函数存在」会漏掉「函数在、调用点改回手拼」
+        这种回退（本仓踩过同型假绿，DEF-056）。
+        """
+        src = (
+            Path(__file__).resolve().parents[2]
+            / "backend/app/services/note_publish_service.py"
+        ).read_text(encoding="utf-8")
+        assert "headers=_media_download_headers()" in src, (
+            "下载媒体的 requests.get 必须用 `_media_download_headers()`（唯一实现）"
+        )
+
+    def test_no_bare_referer_only_get_remains(self):
+        """反向：不许再出现「只有 Referer、没有 UA」的旧写法。"""
+        src = (
+            Path(__file__).resolve().parents[2]
+            / "backend/app/services/note_publish_service.py"
+        ).read_text(encoding="utf-8")
+        assert 'headers={"Referer": ""}' not in src, "旧写法（只有 Referer、无 UA）不得回来"

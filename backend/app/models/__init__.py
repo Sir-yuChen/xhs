@@ -1,6 +1,14 @@
 from backend.app.models.ai import DEFAULT_TEXT_MODEL_NAME, AiDraft, AiGeneratedAsset, DraftAsset
 from backend.app.models.api_log import ApiLog
 from backend.app.models.auto_task import AutoTask
+from backend.app.models.forbidden_word import (
+    DEFAULT_GROUP,
+    ForbiddenWord,
+    ForbiddenWordGroupRow,
+    MATCH_MODE_CONTAINS,
+    MATCH_MODE_EXACT,
+    MATCH_MODES,
+)
 from backend.app.models.generation import (
     AigcMediaAsset,
     GenerationRecord,
@@ -59,6 +67,9 @@ __all__ = [
     "AutoTask",
     "DEFAULT_TEXT_MODEL_NAME",
     "DraftAsset",
+    "DEFAULT_GROUP",
+    "ForbiddenWord",
+    "ForbiddenWordGroupRow",
     "GenerationRecord",
     "KeywordGroup",
     "LlmBusinessProvider",
@@ -68,6 +79,9 @@ __all__ = [
     "LlmGatewayAlert",
     "LlmGatewayUsageLog",
     "LoginSession",
+    "MATCH_MODES",
+    "MATCH_MODE_CONTAINS",
+    "MATCH_MODE_EXACT",
     "MaterialFile",
     "MaterialFolder",
     "MonitoringSnapshot",

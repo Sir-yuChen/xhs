@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from typing import Any, Optional
 
@@ -1218,6 +1219,196 @@ def start_shop_goods_sync(
 
     account_task_service.ensure_account_task_worker()
     return {"reused": False, **summary}
+
+
+# --------------------------------------------------------------------------- #
+# 同步商品信息队列（2026-10-11 用户口径「新增一个同步商品信息队列」）
+# --------------------------------------------------------------------------- #
+
+def enqueue_goods_sync(
+    db: Session,
+    *,
+    user_id: int,
+    account_id: int,
+    item_ids: list[str],
+    source: str,
+    scope: str = "",
+    start_date: str = "",
+    end_date: str = "",
+) -> dict[str, Any]:
+    """把「同步指定商品」入队（一个商品 = 一个队列项，挂一个批次），立即返回。
+
+    ⚠️ 与 `sync_specified_items`（同步阻塞）**并存**：本函数是它的**异步入队版**，
+    队列 worker 认领后对单个商品调 `sync_specified_items(item_ids=[item_id])` 执行。
+    队列记录页因此能看到「同步商品信息」的执行记录与详情。
+
+    `scope`/`start_date`/`end_date` = 时间区间（「按 ID 同步」也认区间，2026-10-06），
+    透传进队列项 payload，worker 执行时取出回传（区间语义不随异步入队丢失）。
+
+    幂等：同一商品已有未终态队列项 ⇒ 不重复入队（`enqueue_item` 的 `item_id` 判重）。
+    """
+    from backend.app.services import note_queue_service as nq
+
+    wanted: list[str] = []
+    seen: set[str] = set()
+    for raw in item_ids or []:
+        value = str(raw or "").strip()
+        if value and value not in seen:
+            seen.add(value)
+            wanted.append(value)
+    if not wanted:
+        return {"enqueued": 0, "already": 0, "batch_no": "", "note": "没有要同步的商品。"}
+
+    batch = nq.BatchRequest(user_id=user_id, item_task_type=nq.TASK_TYPE_GOODS_SYNC_ITEM, source=source)
+    enqueued = 0
+    already = 0
+    for item_id in wanted:
+        row, created = nq.enqueue_item(
+            db,
+            user_id=user_id,
+            item_task_type=nq.TASK_TYPE_GOODS_SYNC_ITEM,
+            account_id=account_id,
+            item_id=item_id,
+            item_name=item_id,
+            source=source,
+            batch=batch,
+        )
+        if created:
+            enqueued += 1
+            #: 透传时间区间进 payload（worker 执行时回传，区间语义不丢）。
+            if scope or start_date or end_date:
+                pl = dict(row.payload or {})
+                pl["scope"] = str(scope or "")
+                pl["start_date"] = str(start_date or "")
+                pl["end_date"] = str(end_date or "")
+                row.payload = pl
+        else:
+            already += 1
+    db.commit()
+    #: 唤醒**商品同步** worker（自建 Session 看不到未提交的行，提交后才唤）。
+    ensure_goods_sync_worker()
+    batch_no = batch.row.batch_no if batch.row is not None else ""
+    return {
+        "enqueued": enqueued,
+        "already": already,
+        "batch_no": batch_no,
+        "note": f"已入队 {enqueued} 个商品同步项" + (f"，{already} 个已在队列中" if already else ""),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# 同步商品信息队列 worker（2026-10-11）
+# --------------------------------------------------------------------------- #
+
+#: 队列持久化：真相源是 `tasks` 表的 `xhs_goods_sync_item` 行，内存只留唤醒信号。
+_goods_wakeup = threading.Event()
+_goods_queue_lock = threading.Lock()
+_goods_worker: Optional[threading.Thread] = None
+_goods_worker_stop = threading.Event()
+
+GOODS_IDLE_POLL_SECONDS = 5.0
+
+
+def ensure_goods_sync_worker() -> None:
+    """确保有一条活着的同步商品 worker（惰性起；已活则只唤醒）。"""
+    with _goods_queue_lock:
+        if _goods_worker is None or not _goods_worker.is_alive():
+            _spawn_goods_sync_worker()
+    _goods_wakeup.set()
+
+
+def _spawn_goods_sync_worker() -> None:
+    global _goods_worker
+    _goods_worker = threading.Thread(
+        target=_goods_sync_worker_loop, name="goods-sync-worker", daemon=True
+    )
+    _goods_worker.start()
+
+
+def _goods_sync_worker_loop() -> None:
+    """DB 队列 worker：醒来 → 认领一条 → 跑一条 → 再认领 …… 认不到就回去等。"""
+    while not _goods_worker_stop.is_set():
+        _goods_wakeup.wait(timeout=GOODS_IDLE_POLL_SECONDS)
+        _goods_wakeup.clear()
+        while not _goods_worker_stop.is_set():
+            item = _claim_one_goods_sync_item()
+            if item is None:
+                break
+            try:
+                _run_one_goods_sync(item)
+            except BaseException as error:  # noqa: BLE001 - 线程不死（DEF-069）
+                logger.error("goods sync worker: run escaped (task=%s): %s", item, error, exc_info=True)
+
+
+def _claim_one_goods_sync_item() -> Optional[int]:
+    """认领一条待同步商品项，返回 `tasks.id`（无活可干 / 认领出错 ⇒ None）。"""
+    from backend.app.services import note_queue_service as nq
+
+    db = SessionLocal()
+    try:
+        item = nq.claim_next_item(db, item_task_type=nq.TASK_TYPE_GOODS_SYNC_ITEM)
+        return int(item.id) if item is not None else None
+    except BaseException:  # noqa: BLE001 - 认领失败退避，不死 worker
+        logger.exception("goods sync worker: claim failed")
+        return None
+    finally:
+        db.close()
+
+
+def _run_one_goods_sync(task_id: int) -> None:
+    """跑一条（按 `tasks.id`）：自建 Session，对单个 item_id 调 `sync_specified_items`。
+
+    ⚠️ 安全网不条件性（DEF-048）：任何异常路径都必须写终态，否则永久挂 `running`。
+    """
+    from backend.app.services import note_queue_service as nq
+
+    db = SessionLocal()
+    try:
+        item = db.get(Task, task_id)
+        if item is None:
+            return  # 行已被清理任务删掉：无事可做
+        payload = item.payload if isinstance(item.payload, dict) else {}
+        goods_item_id = str(payload.get("item_id") or "")
+        account_pk = int(payload.get("account_id") or 0)
+        if not goods_item_id or not account_pk:
+            nq.finish_item(db, item, ok=False, reason="队列项缺少商品或账号信息", code="GOODS_SYNC_ITEM_INVALID")
+            return
+        #: 同步单个商品（`sync_specified_items` 自开 Session 落库，这里只负责记账）。
+        #: 时间区间（入队时透传）回传，区间语义不丢。
+        result = sync_specified_items(
+            account_pk,
+            user_id=item.user_id,
+            item_ids=[goods_item_id],
+            scope=str(payload.get("scope") or ""),
+            start_date=str(payload.get("start_date") or ""),
+            end_date=str(payload.get("end_date") or ""),
+        )
+        if result.get("synced"):
+            nq.finish_item(db, item, ok=True)
+        else:
+            reason = str(result.get("note") or "同步失败")
+            nq.finish_item(db, item, ok=False, reason=reason, code="GOODS_SYNC_FAILED")
+    except BaseException as error:  # noqa: BLE001 - 任何异常都要写终态，不许卡死
+        logger.exception("goods sync worker: run failed (task=%s)", task_id)
+        try:
+            item = db.get(Task, task_id)
+            if item is not None:
+                nq.finish_item(db, item, ok=False, reason=f"同步异常：{error}", code="GOODS_SYNC_FAILED")
+        except BaseException:  # noqa: BLE001
+            logger.exception("goods sync worker: finish failed")
+    finally:
+        db.close()
+
+
+def stop_goods_sync_worker(*, timeout: float = 5.0) -> None:
+    """停止同步商品 worker（收尾 / 测试专用）。"""
+    global _goods_worker
+    _goods_worker_stop.set()
+    _goods_wakeup.set()
+    worker = _goods_worker
+    if worker is not None:
+        worker.join(timeout=timeout)
+    _goods_worker = None
 
 
 # --------------------------------------------------------------------------- #

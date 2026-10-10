@@ -285,8 +285,12 @@ async function main() {
     "A8 队列白名单收满队列项 + 批次父行（父子树的两级都在）",
     QUEUE_TASK_TYPES.slice().sort(),
     [
+      "xhs_goods_sync_batch",
+      "xhs_goods_sync_item",
       "xhs_note_gen_batch",
       "xhs_note_gen_item",
+      "xhs_note_gen_llm_batch",
+      "xhs_note_gen_llm_item",
       "xhs_note_publish_batch",
       "xhs_note_publish_item",
       "xhs_note_sync_batch",
@@ -294,6 +298,8 @@ async function main() {
     ]
   );
   check("A9 批次父行有中文名（同步）", taskTypeLabel("xhs_note_sync_batch"), "同步批次");
+  check("A9b 同步商品信息队列项有中文名", taskTypeLabel("xhs_goods_sync_item"), "同步商品信息");
+  check("A9c 同步商品信息批次有中文名", taskTypeLabel("xhs_goods_sync_batch"), "同步商品信息批次");
   check(
     "A10 批次类型都有中文名（不许露出生代码）",
     QUEUE_BATCH_TASK_TYPES.every((t) => String(TASK_TYPE_LABELS[t] ?? "").length > 0),
