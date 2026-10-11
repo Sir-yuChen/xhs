@@ -125,8 +125,8 @@ def _user_of(token: str) -> int:
 # --------------------------------------------------------------------------- #
 # 注册表白名单
 # --------------------------------------------------------------------------- #
-def test_registry_has_exactly_fifteen_entries():
-    """注册表全量 **15** 项（14 系统内置 + 1 业务管线 `auto_ops.keyword_pipeline`）；键集合钉死 —— 新增任务类型 = 发版。
+def test_registry_has_exactly_sixteen_entries():
+    """注册表全量 **16** 项（15 系统内置 + 1 业务管线 `auto_ops.keyword_pipeline`）；键集合钉死 —— 新增任务类型 = 发版。
 
     §44（2026-09-30）：「账号笔记同步」的混合双源拆成两个独立任务 ⇒ 新增
     `system.goods_note_sync`（**商品笔记**，ark 源）。它与 `system.note_sync`（普通笔记，
@@ -141,11 +141,14 @@ def test_registry_has_exactly_fifteen_entries():
 
     ⚠️ 2026-10-06：新增 `system.note_data_sync`（离线笔记数据同步，商业+普通两类，
     千帆数据中心 butterfly/data 接口）⇒ 15 → 16。
+
+    ⚠️ 2026-10-11：新增 `system.picture_space_cleanup`（图片空间清理未引用图片，
+    用户口径「每周一执行一次」）⇒ 15 → 16。
     """
     from backend.app.services.job_registry import job_registry
 
     registry = job_registry()
-    assert len(registry) == 15
+    assert len(registry) == 16
     assert set(registry) == {
         "system.due_publish",
         "system.monitoring_refresh",
@@ -161,6 +164,7 @@ def test_registry_has_exactly_fifteen_entries():
         "system.note_metrics_collect",
         "system.shop_metrics_collect",
         "system.order_sync",
+        "system.picture_space_cleanup",
         "auto_ops.keyword_pipeline",
     }
 
@@ -450,9 +454,9 @@ def test_schedule_status_counts_only_my_rows(tmp_path, monkeypatch):
 
         owner_stats = client.get("/api/schedule/status", headers=_auth(owner)).json()["stats"]
         intruder_stats = client.get("/api/schedule/status", headers=_auth(intruder)).json()["stats"]
-        assert owner_stats["total"] == 14
-        # 入侵者注册时也播种了 13 行 + 自己新建 1 行 = 14（只见自己的，不见主人的）
-        assert intruder_stats["total"] == 15, "入侵者只应看到自己的行"
+        assert owner_stats["total"] == 15
+        # 入侵者注册时也播种了 15 行 + 自己新建 1 行 = 16（只见自己的，不见主人的）
+        assert intruder_stats["total"] == 16, "入侵者只应看到自己的行"
     finally:
         app.dependency_overrides.clear()
 
@@ -1641,7 +1645,7 @@ def test_ensure_builtin_jobs_seeds_from_application_initial_data(tmp_path, monke
         second_user = _make_user(SessionLocal, "seed-second")
         db = SessionLocal()
         first = ensure_builtin_jobs(db)
-        assert len(first) == 28, "两个用户 × 14 个内置目标"
+        assert len(first) == 30, "两个用户 × 15 个内置目标"
         second = ensure_builtin_jobs(db)
         assert second == [], "幂等：已存在的 (user, job_key) 不插行"
         rows = list(db.scalars(select(ScheduledJob).where(ScheduledJob.is_builtin.is_(True))))
@@ -3174,3 +3178,68 @@ class TestParamDefaults:
         # 已有值**不得**被默认值覆盖
         assert captured.get("limit") == 2, captured
         assert captured.get("interval_seconds") == 5, captured
+
+
+# --------------------------------------------------------------------------- #
+# 任务序列化：未知 job_key 不得拖垮整页（2026-10-11 修 NameError）
+# --------------------------------------------------------------------------- #
+class TestJobSerializationToleratesUnknownJobKey:
+    """`_serialize_job` 遇到**不在注册表的 `job_key`**（存量脏行 / 已退场的任务）时
+    必须**如实降级**，不许抛异常。
+
+    ## 为什么这条必须有（原实现的真实 bug）
+
+    ```python
+    try:
+        spec = get_job_spec(job.job_key)          # 未命中 ⇒ 抛 KeyError
+        params_editable = list(spec.params_editable)
+    except KeyError:
+        params_editable = []                       # ← 这里 spec **从未被绑定**
+    ...
+        "params_defaults": dict(spec.params_defaults),   # ← NameError！
+    ```
+
+    `spec` 只在 `try` 里赋值 ⇒ 走 `except` 后引用它抛的是 **`NameError`**，
+    **不是 `KeyError`** ⇒ 接不住 ⇒ **整个 `GET /schedule/jobs` 500**，
+    任务中心整页打不开。
+
+    触发场景在本项目**真实发生过两次**：`system.queue_record_cleanup` 改名、
+    `workflow.*` 整条退场 —— 那两次都有存量行指着旧键。当时库处于「迁移已清干净」
+    的窗口期所以没炸；只要有一条脏行留着，用户看到的就是「任务中心白屏」。
+    """
+
+    def _job(self, job_key: str):
+        from backend.app.models.scheduled_job import ScheduledJob
+
+        return ScheduledJob(
+            user_id=1,
+            name="存量脏行",
+            job_key=job_key,
+            trigger_type="cron",
+            cron_expression="0 0 9 * * *",
+            status="active",
+            params={"whatever": 1},
+        )
+
+    def test_unknown_key_does_not_raise_and_degrades_truthfully(self):
+        from backend.app.api.schedule import _serialize_job
+
+        payload = _serialize_job(self._job("system.this_key_is_gone"))
+
+        #: 不抛异常是底线（原实现在这里 NameError）
+        assert payload["job_key"] == "system.this_key_is_gone"
+        #: 缺 spec ⇒ 两个派生字段**退化成空**（缺值不猜），而不是编一份默认参数
+        assert payload["params_editable"] == []
+        assert payload["params_defaults"] == {}
+        #: 行自身的字段照旧原样透出（用户至少能看到「有这么一行、键是什么」）
+        assert payload["name"] == "存量脏行"
+        assert payload["params"] == {"whatever": 1}
+        assert payload["cron_expression"] == "0 0 9 * * *"
+
+    def test_known_key_still_carries_the_registry_contract(self):
+        """反向：正常键必须照旧带出注册表的 editable / defaults（别把守卫写成一刀切空）。"""
+        from backend.app.api.schedule import _serialize_job
+
+        payload = _serialize_job(self._job("system.picture_space_cleanup"))
+        assert payload["params_editable"] == ["account_ids", "delete_mode"]
+        assert payload["params_defaults"]["delete_mode"] == "permanent"

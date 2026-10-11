@@ -49,6 +49,10 @@ JOB_KEY_BUSINESS_NOTE_AUTO_PUBLISH = "system.business_note_auto_publish"
 #: M6 方向 6（设计 16 §7）订单同步。与 `JOB_KEY_SHOP_GOODS_SYNC` 分开：
 #: 落不同的表、不同的任务类型，任务中心是两行独立的任务。
 
+#: 图片空间「清理未引用图片」（2026-10-11 用户需求）：每周一清一次
+#: 未引用（平台 `productCount == 0`）的图片，可选「进回收站 / 彻底删除」。
+JOB_KEY_PICTURE_SPACE_CLEANUP = "system.picture_space_cleanup"
+
 
 @dataclass(frozen=True)
 class JobSpec:
@@ -134,6 +138,10 @@ def _build_registry() -> dict[str, JobSpec]:
     from backend.app.services.metric_scheduler_service import (
         run_note_metrics_collect_once,
         run_shop_metrics_collect_once,
+    )
+    from backend.app.services.picture_space_cleanup_service import (
+        run_picture_space_cleanup,
+        validate_cleanup_params,
     )
     from backend.app.services.record_cleanup_service import (
         run_record_cleanup,
@@ -327,6 +335,26 @@ def _build_registry() -> dict[str, JobSpec]:
             params_validator=validate_business_publish_params,
             default_trigger_type="cron",
             default_cron="0 0 9 * * *",
+        ),
+        JobSpec(
+            key=JOB_KEY_PICTURE_SPACE_CLEANUP,
+            # 2026-10-11 用户需求「图片空间新增清理未引用图片定时任务，每周一执行一次」。
+            # 平台**写操作**（批量删除 / 彻底删除）⇒ 恒 forbid 并发；账号维度 ⇒ user_scoped。
+            name="清理未引用图片",
+            func=run_picture_space_cleanup,
+            builtin=True,
+            user_scoped=True,
+            #: 用户口径：「执行账号默认全部；删除到回收站或彻底删除下拉单选二选一，
+            #: 默认彻底删除」。两个键都登记到这里 ⇒ 前端自动渲染两行（`account_ids`
+            #: 走账号下拉多选、`delete_mode` 走枚举下拉，见 `params-editor`）。
+            params_editable=("account_ids", "delete_mode"),
+            params_defaults={"account_ids": [], "delete_mode": "permanent"},
+            params_validator=validate_cleanup_params,
+            default_trigger_type="cron",
+            #: 用户口径「每周一执行一次」= `0 分 0 时 * * MON`（6 位：秒 分 时 日 月 周）。
+            #: ⚠️ **用 `MON` 不用数字 `1`** —— APScheduler 的 cron 周字段同样认 0-6（0=周一），
+            #: 写数字会和「周日=0 还是周一=0」的习惯打架，英文缩写无歧义。
+            default_cron="0 0 0 * * MON",
         ),
         JobSpec(
             key="auto_ops.keyword_pipeline",

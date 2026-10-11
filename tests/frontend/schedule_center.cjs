@@ -526,21 +526,36 @@ async function main() {
     kvEditor.includes('interval_seconds: "秒"') && kvEditor.includes('days: "天"'));
   check("中文名短（≤6 字，够放全部不留省略号）",
     (kvEditor.match(/^\s+\w+: "([^"]+)",/gm) || []).every((l) => l.match(/"([^"]+)"/)[1].length <= 8));
-  // 2026-10-07 用户口径「中英文名称长度统一 180px」（先「200px」后改 180，原值不再保留）。
-  // 2026-10-07 用户口径「中英文名称长度统一 180px」+「参数值输入框固定 200px」：
-  // ⚠️ 判据必须同时钉 `flex: "none"` —— 只查 width 时，`Space.Compact` 把子项变可压缩
-  // flex 项后宽度被压掉，「两列同宽」在界面上并不成立（用户报「展示不一致长」即此因）。
+  // 2026-10-11 用户口径（**取代**上面 2026-10-07 的「中英文名称统一 180px」+「值列固定 350px」）：
+  //「调用参数的输入框超出了弹窗，将中文名称 150px 英文名 180px，参数值列自适应长度到沾满」。
+  // ⚠️ 判据三件一起钉，缺一即会退回溢出：
+  //   ① 两个固定列各 `flex: "none"`（可压缩 = 宽度不是所见值）；
+  //   ② 值列 `flex: 1` **且** `minWidth: 0`（只写 flex:1 不写 minWidth:0 时，
+  //      flex 子项默认 `min-width:auto` ⇒ 长内容（多选里堆 4 个账号名）照样撑破容器）；
+  //   ③ 行容器也 `minWidth: 0`（否则整行不窄于内容最小宽度，值列压不下去）。
   check(
-    "中文列 180px / 英文列 220px 且不被 flex 压缩",
-    /width: 180, flex: "none", cursor: "default"/.test(kvEditor) &&
-      /width: 220, flex: "none", cursor: editable/.test(kvEditor)
+    "中文列 150px / 英文列 180px 且不被 flex 压缩",
+    /width: 150, flex: "none", cursor: "default"/.test(kvEditor) &&
+      /width: 180, flex: "none", cursor: editable/.test(kvEditor)
   );
   // ⚠️ 必须是 **3 处**：值控件有三个分支（枚举下拉 / 账号多选 / 普通文本 Input）。
   // 上一轮只数 2 处 ⇒ 普通文本分支漏设宽度，它 `flex-grow` 撑满剩余空间，
   // 于是「值列依旧长短不一致」（用户实测报出）。按分支数钉死，漏一个即红。
   check(
-    "参数值控件三个分支都固定 350px 且不被压缩",
-    (kvEditor.match(/width: 350, flex: "none"/g) || []).length === 3
+    "参数值控件三个分支都自适应占满（flex:1 + minWidth:0）",
+    (kvEditor.match(/flex: 1, minWidth: 0/g) || []).length === 3
+  );
+  // ⚠️ 旧口径的固定宽度必须**一去不返**（留着任何一个都会让总宽回到溢出）：
+  // 180(中文) + 220(key) + 350×3(值) ≈ 750px，而弹窗右半栏只有约 35% 视口。
+  check(
+    "不再残留旧的固定宽度（180/220/350）",
+    !/width: 350, flex: "none"/.test(kvEditor) &&
+      !/width: 220, flex: "none"/.test(kvEditor) &&
+      !/width: 180, flex: "none", cursor: "default"/.test(kvEditor)
+  );
+  check(
+    "参数行容器带 minWidth: 0（否则整行不窄于内容最小宽度 ⇒ 仍溢出）",
+    /display: "flex", alignItems: "center", gap: 8, minWidth: 0/.test(kvEditorCode)
   );
   check(
     "参数行不用 Space.Compact（会把子项变可压缩 flex 项 ⇒ 两列不等宽）",

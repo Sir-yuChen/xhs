@@ -78,11 +78,27 @@ def _iso(value: Optional[datetime]) -> Optional[str]:
 
 def _serialize_job(job: ScheduledJob, live_next_run_at: Optional[datetime] = None) -> dict:
     # 任务类型声明（前端据此渲染自定义参数表单，不硬编码键名）
+    #
+    # ⚠️ 2026-10-11 修：原写法是
+    #     `try: spec = get_job_spec(...); params_editable = list(spec.params_editable)`
+    #     `except KeyError: params_editable = []`
+    #   —— `spec` **只在 try 块里赋值**。走 except 分支后 `spec` 从未被绑定，
+    #   紧接着那句 `dict(spec.params_defaults)` 会抛 **`UnboundLocalError`**
+    #   （`NameError` 的子类 —— 实测报错原文：
+    #   `cannot access local variable 'spec' where it is not associated with a value`），
+    #   **不是 `KeyError`**，所以**不会被这个 except 接住** ⇒ 整个任务列表端点 500。
+    #
+    #   触发场景是真实存在的：`job_key` 被改名/整条退场后，**存量行**还指着旧键
+    #   （本项目已发生过两次 —— `queue_record_cleanup` 改名、`workflow.*` 退场）。
+    #   那种行本该被「跳过 or 如实标注」，却会把**整页任务中心**打挂。
+    #   修法 = `spec` 先绑 `None`，两个派生字段各自守卫（缺 spec ⇒ 空，绝不猜）。
     try:
         spec = get_job_spec(job.job_key)
-        params_editable = list(spec.params_editable)
     except KeyError:
-        params_editable = []
+        #: 未知 job_key（存量脏行 / 已退场的任务）⇒ `spec` 保持 `None`，
+        #: 下面两个字段退化成空；**不抛异常**，别让一行脏数据拖垮整页。
+        spec = None
+    params_editable = list(spec.params_editable) if spec is not None else []
     return {
         "id": job.id,
         "user_id": job.user_id,
@@ -98,7 +114,7 @@ def _serialize_job(job: ScheduledJob, live_next_run_at: Optional[datetime] = Non
         # 2026-10-07 用户口径「调用参数不允许随意添加和删除，必须有默认值」：
         # 前端据 `params_defaults` **预填固定行** —— 存量行（早于某参数上线）缺的键
         # 也能显示出来，不会「新增了参数但界面上看不见」。
-        "params_defaults": dict(spec.params_defaults),
+        "params_defaults": dict(spec.params_defaults) if spec is not None else {},
         "status": job.status,
         "remark": job.remark,
         "is_builtin": bool(job.is_builtin),

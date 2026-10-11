@@ -734,6 +734,11 @@ def _builtin_seed_defaults() -> dict[str, dict[str, Any]]:
         # ⚠️ 默认 active —— 与两个同步任务不同（它们默认关，因为会大量打平台只读
         # 接口）；本任务只在**用户已配好千帆 + 有 0 篇挂链商品**时才真的出手。
         "system.business_note_auto_publish": {"cron": "0 0 9 * * *", "status": "active"},
+        # 2026-10-11 用户需求：图片空间「清理未引用图片」—— 用户口径「每周一执行一次」。
+        # ⚠️ 默认 **paused**：它是**平台写操作**（批量删除 + 彻底删除不可还原），
+        # 与「每日发布商业笔记」不同 —— 那个只在配好千帆后才有动作，这个一旦跑起来
+        # 就真的删图。让用户先去任务中心确认参数（尤其 `delete_mode`）再手动启用。
+        "system.picture_space_cleanup": {"cron": "0 0 0 * * MON", "status": "paused"},
     }
 
 

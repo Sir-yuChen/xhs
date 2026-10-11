@@ -6463,9 +6463,12 @@ def test_schedule_status_reports_scheduler_state_and_counts(tmp_path):
         # ② `system.no_traffic_cleanup` 从注册表与种子移除（用户口径「无流量笔记
         # 清理任务不应在任务列表展示」）⇒ total 16 → 15、active 15 → 14
         #（原 active 15 = 14 播种全 active + 1 测试行；现 14 = 13 + 1）。
-        assert payload["stats"]["total"] == 16
+        # 2026-10-11 §1.9：新增 `system.picture_space_cleanup`（**默认 paused** ——
+        # 平台写操作，用户确认参数后再启用）⇒ total 16 → 17、paused 1 → 2
+        #（active 不变：新任务不进 active）。
+        assert payload["stats"]["total"] == 17
         assert payload["stats"]["active"] == 15
-        assert payload["stats"]["paused"] == 1
+        assert payload["stats"]["paused"] == 2
         assert payload["stats"]["completed"] == 0
     finally:
         app.dependency_overrides.pop(db_dependency, None)

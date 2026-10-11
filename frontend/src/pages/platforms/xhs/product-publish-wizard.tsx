@@ -248,6 +248,11 @@ export function ProductPublishWizard({
   //: 「点击后，窗口居中展示弹窗执行进度列表，列出流程的每一阶段执行情况」）。
   const [autoProgress, setAutoProgress] = useState<AutoStage[]>([]);
   const [autoProgressOpen, setAutoProgressOpen] = useState(false);
+  /** 「上传媒体资源失败是否重试」+「重试次数」（2026-10-11 用户口径）。 */
+  //: 缺省 = **是 / 1 次**（用户口径「默认是」「默认1」）。状态放在二次确认弹窗里，
+  //: 点「确认，开始自动加载」时才真正生效（弹窗 `destroyOnClose` ⇒ 每次重开都是默认值）。
+  const [uploadRetryOnFailure, setUploadRetryOnFailure] = useState(true);
+  const [uploadMaxRetries, setUploadMaxRetries] = useState(1);
   //: 进度弹窗的 **live 秒表**：运行中的阶段耗时逐秒涨（用户口径：每项要显示耗时）。
   //: 只在弹窗打开且还有阶段在跑时起表，跑完即停（不留常驻定时器）。
   const [autoTick, setAutoTick] = useState(0);
@@ -932,8 +937,35 @@ export function ProductPublishWizard({
     [fetchPrecheckImage, platformAccountId, token],
   );
 
-  /** 自动加载参数（用户口径 2026-10-09）：一次点确认，**全自动**跑完七步。
+  /**
+   * 带重试地跑一个「成功/失败」型异步动作（2026-10-11 用户口径：
+   * 「上传媒体资源失败是否重试，默认是，以及重试次数 1-3，默认 1」）。
    *
+   * ⚠️ 判据是**回调自己的返回形态**（`{ok}` / 真值 / `null`），不是「抛没抛异常」——
+   * 本项目里上传失败是**返回 null / ok:false**（见 `uploadOneFromPackage`），
+   * 异常只是其中一条路径。只 catch 异常的重试在这条链路上等于没有。
+   *
+   * `maxRetries` 是**重试次数**（用户口径的 1–3），不是「总尝试次数」：
+   * 取 1 ⇒ 最多跑 2 回（首跑 + 1 次重试）。关闭重试 ⇒ 只跑 1 回。
+   */
+  const withUploadRetry = useCallback(
+    async <T,>(run: () => Promise<T | null>, isOk?: (value: T) => boolean): Promise<T | null> => {
+      const attempts = uploadRetryOnFailure ? Math.max(0, Math.min(3, uploadMaxRetries)) + 1 : 1;
+      let last: T | null = null;
+      for (let i = 0; i < attempts; i += 1) {
+        try {
+          last = await run();
+        } catch {
+          last = null;
+        }
+        if (last !== null && (isOk ? isOk(last) : true)) return last;
+      }
+      return last;
+    },
+    [uploadRetryOnFailure, uploadMaxRetries],
+  );
+
+  /** 自动加载参数（用户口径 2026-10-09）：一次点确认，**全自动**跑完七步。
    * 顺序（用户给的链路，不可乱序）：
    *   1. 自动上传主图
    *   2. 生成标题
@@ -994,7 +1026,8 @@ export function ProductPublishWizard({
       setStage(0, { status: "running" });
       const uploaded: ConfigMainImage[] = [];
       for (const p of mainImagePaths) {
-        const one = await uploadOneFromPackage(p.rel_path, p.file_name);
+        //: 用户口径 2026-10-11：上传失败按弹窗里配的「是否重试 + 重试次数」重跑。
+        const one = await withUploadRetry(() => uploadOneFromPackage(p.rel_path, p.file_name));
         if (one) uploaded.push(one);
       }
       if (uploaded.length === 0) {
@@ -1082,7 +1115,7 @@ export function ProductPublishWizard({
       if (detailImagePaths.length > 0) {
         const details: ConfigMainImage[] = [];
         for (const p of detailImagePaths) {
-          const one = await uploadOneFromPackage(p.rel_path, p.file_name);
+          const one = await withUploadRetry(() => uploadOneFromPackage(p.rel_path, p.file_name));
           if (one) details.push(one);
         }
         setConfigDetailImages(details);
@@ -1096,11 +1129,13 @@ export function ProductPublishWizard({
       // 5) 商品视频（取第一个）—— ⚠️ 走独立直传端点，不走图片空间
       setStage(4, { status: "running" });
       if (videoPaths.length > 0) {
-        const res = await uploadVideoFromPackage(
-          videoPaths[0].rel_path,
-          videoPaths[0].file_name,
+        //: 视频上传的失败态是 `{ok:false, reason}`（**不抛异常、也不是 null**）⇒
+        //: 必须把 `ok` 作为成功判据传进去，否则重试拿到的「失败结果」会被当成功。
+        const res = await withUploadRetry(
+          () => uploadVideoFromPackage(videoPaths[0].rel_path, videoPaths[0].file_name),
+          (r) => r.ok,
         );
-        if (res.ok) {
+        if (res?.ok) {
           setConfigVideo(res.video);
           //: 用户口径（2026-10-09）：「执行进度列表展示的是视频原始名，确认程序中执行
           //:  是否在上传前修改了视频名称为唯一 md5」⇒ 进度里**同时给出改名后的 MD5 名**，
@@ -1110,7 +1145,9 @@ export function ProductPublishWizard({
             detail: `${res.video.file_name}（原名 ${res.video.origin_name}）`,
           });
         } else {
-          setStage(4, { status: "failed", detail: res.reason });
+          //: `res` 可能是 `null`（`withUploadRetry` 在回调抛错且用尽重试时）——
+          //: 缺值不造原因，给一句稳定说明（原始原因见进度行的上一态）。
+          setStage(4, { status: "failed", detail: res?.reason ?? "视频上传失败（已用尽重试）" });
         }
       } else {
         setStage(4, { status: "skipped", detail: "数据包内无商品视频" });
@@ -1264,6 +1301,7 @@ export function ProductPublishWizard({
     recommendProductCategory,
     title,
     uploadOneFromPackage,
+    withUploadRetry,
     videoPaths,
   ]);
 
@@ -1836,6 +1874,34 @@ export function ProductPublishWizard({
           <li>按类目 + 主图智能生成商品属性</li>
         </ol>
         <p>过程中会覆盖当前的标题、类目、短标题与属性；主图/详情图会追加，不删除已有图。</p>
+        {/* 2026-10-11 用户口径：上传媒体资源失败重试开关 + 重试次数（1-3，默认 1）。 */}
+        <div style={{ marginTop: 12 }}>
+          <Space align="center" size={8} wrap>
+            <Text>上传媒体资源失败时重试</Text>
+            <Radio.Group
+              value={uploadRetryOnFailure ? "yes" : "no"}
+              onChange={(e) => setUploadRetryOnFailure(e.target.value === "yes")}
+            >
+              <Radio value="yes">是</Radio>
+              <Radio value="no">否</Radio>
+            </Radio.Group>
+            <Text>，重试次数</Text>
+            <InputNumber
+              min={1}
+              max={3}
+              step={1}
+              value={uploadMaxRetries}
+              disabled={!uploadRetryOnFailure}
+              onChange={(value) => setUploadMaxRetries(Math.max(1, Math.min(3, Number(value) || 1)))}
+              style={{ width: 80 }}
+            />
+          </Space>
+          <div>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              重试只作用于媒体上传（主图 / 详情图 / 视频）；次数为「失败后重跑的遍数」。
+            </Text>
+          </div>
+        </div>
       </Modal>
 
       {/* 执行进度弹窗（用户口径 2026-10-09：「窗口居中展示弹窗执行进度列表，

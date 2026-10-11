@@ -75,6 +75,11 @@ export const PARAM_ENUM_OPTIONS: Record<string, Record<string, string>> = {
   // 取值与后端 `_coerce_bool` 的 `_TRUE_WORDS` / `_FALSE_WORDS` **同值** ——
   // 下拉里选得出来的值后端必须认（跨语言同值由守卫钉住，别只改一侧）。
   retry_on_failure: { true: "重试", false: "不重试" },
+  // 《清理未引用图片》删除方式（2026-10-11 用户口径「删除到回收站或彻底删除下拉单选
+  // 二选一，默认彻底删除」）：取值与后端 `picture_space_cleanup_service.DELETE_MODES`
+  // **逐字同值**（`recycle` / `permanent`）—— 后端 `validate_cleanup_params` 会按它 400，
+  // 跨语言同值由守卫钉住（改一侧必红）。
+  delete_mode: { recycle: "删除到回收站", permanent: "彻底删除" },
 };
 
 /**
@@ -99,6 +104,7 @@ export const PARAM_LABELS: Record<string, string> = {
   retry_on_failure: "失败重试",
   max_retries: "重试次数",
   retry_interval_seconds: "重试间隔",
+  delete_mode: "删除方式",
 };
 
 /** 取参数中文名（缺值不猜：退到提示文案，再退到裸 key）。 */
@@ -140,6 +146,7 @@ export const KNOWN_KEY_HINTS: Record<string, string> = {
   retry_on_failure: "发布失败重试",
   max_retries: "重试次数",
   retry_interval_seconds: "重试间隔",
+  delete_mode: "删除方式",
 };
 
 /**
@@ -278,7 +285,13 @@ export function ParamsEditor({
         // 于是 inline 的 `width: 180` 在行宽不足时被按比例压掉 —— 同一个 180px 两列
         // 显示出来不一样长。改用显式 flex + 三列各 `flex: none`，宽度即所见。
         return (
-          <div key={index} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div
+            key={index}
+            // 2026-10-11：`minWidth: 0` —— 行本身是 flex 容器，且它是**外层 flex/卡片
+            // 的 flex 子项**；默认 `min-width:auto` 会让它「不窄于内容的最小宽度」
+            // ⇒ 值列再 `flex:1 minWidth:0` 也压不下去，整行照样溢出弹窗。
+            style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}
+          >
             {/*
              * 2026-10-07 用户口径「调用参数的中文参数名称写到**最前面**，不允许编辑
              * 只能预览」：行首固定一列中文名，恒 `readOnly`。
@@ -294,9 +307,9 @@ export function ParamsEditor({
             <Input
               value={paramLabel(row.key.trim())}
               readOnly
-              // 2026-10-07 用户口径「中英文名称长度统一 180px」：两列同宽，
-              // 三列（中文名 / key / 值）对齐成表，不像拼贴。
-              style={{ width: 180, flex: "none", cursor: "default" }}
+              // 2026-10-11 用户口径「中文名称 150px」：三列宽度重排（原 180px，加上
+              // key 220px + 值 350px 共 750px+，在「编辑任务」弹窗的右半栏里**溢出**）。
+              style={{ width: 150, flex: "none", cursor: "default" }}
               placeholder="参数名称"
             />
             {/* key：内置任务**只读**（参数由注册表决定）；非内置可改。无 Tooltip。 */}
@@ -304,18 +317,24 @@ export function ParamsEditor({
               value={row.key}
               readOnly={!editable}
               placeholder="key（如 account_ids）"
-              // 2026-10-07 用户口径「中英文名称长度统一 180px」：与中文名列同宽。
-              // ⚠️ 不做省略号 —— 靠列宽保证 `retry_interval_seconds` 这类长键完整可读。
-              style={{ width: 220, flex: "none", cursor: editable ? "text" : "default" }}
+              // 2026-10-11 用户口径「英文名 180px」（原 220px）。
+              // ⚠️ 不做省略号 —— 靠列宽保证 `retry_interval_seconds`（21 字符）完整可读。
+              style={{ width: 180, flex: "none", cursor: editable ? "text" : "default" }}
               onChange={
                 editable ? (event) => updateRow(index, { key: event.target.value }) : undefined
               }
             />
+            {/* 2026-10-11 用户口径「参数值列自适应长度到占满」：值列改成 **flex:1 吃满
+                剩余宽度**（原固定 350px）。⚠️ 三个分支（枚举下拉 / 账号多选 / 普通文本）
+                **必须同一套 flex 写法**，否则又回到「三个控件长短不一」的老问题
+                （2026-10-07 修过一次：那时是让三者都固定同宽；现在是让三者都填满）。
+                ⚠️ `minWidth: 0` 不可省：flex 子项默认 `min-width:auto`，长内容
+                （如多选里堆了 4 个账号名）会把行撑出容器 ⇒ 溢出照旧。 */}
             {enumOptions ? (
               <Select
                 value={row.value.trim() || undefined}
                 placeholder="请选择"
-                style={{ width: 350, flex: "none" }}
+                style={{ flex: 1, minWidth: 0 }}
                 onChange={(value: string) => updateRow(index, { value })}
                 options={Object.entries(enumOptions).map(([value, label]) => ({ value, label }))}
               />
@@ -327,7 +346,7 @@ export function ParamsEditor({
                 mode="multiple"
                 value={splitMultiValue(row.value)}
                 placeholder="留空 = 本人全部账号"
-                style={{ width: 350, flex: "none" }}
+                style={{ flex: 1, minWidth: 0 }}
                 optionFilterProp="label"
                 onChange={(values: string[]) => updateRow(index, { value: values.join(",") })}
                 options={accounts.map((account) => ({
@@ -341,11 +360,8 @@ export function ParamsEditor({
                 placeholder={KNOWN_KEY_HINTS[row.key.trim()] ?? "value"}
                 // 单位作**后缀**展示（用户口径「存在单位的放后面」）。
                 suffix={PARAM_UNITS[row.key.trim()] ?? undefined}
-                // ⚠️ **必须给宽度**（2026-10-07 修「值列长短不一致」的真凶）：
-                // 不设宽度时这个 `Input` 在 flex 容器里默认 `flex-grow:1`，会撑满
-                // 剩余空间 ⇒ 它比上面那两个固定 200px 的下拉/多选**长出一截**。
-                // 三个分支（枚举下拉 / 账号多选 / 普通文本）必须同宽同 `flex:none`。
-                style={{ width: 350, flex: "none" }}
+                // ⚠️ 与上面两个分支**同一套 flex 写法**（2026-10-11 起：吃满剩余宽度）。
+                style={{ flex: 1, minWidth: 0 }}
                 onChange={(event) => updateRow(index, { value: event.target.value })}
               />
             )}

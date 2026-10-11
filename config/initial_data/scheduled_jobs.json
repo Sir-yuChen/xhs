@@ -175,6 +175,20 @@
       },
       "status": "active",
       "remark": "系统内置任务"
+    },
+    {
+      "job_key": "system.picture_space_cleanup",
+      "name": "清理未引用图片",
+      "trigger_type": "cron",
+      "cron_expression": "0 0 0 * * MON",
+      "misfire_policy": "once",
+      "concurrent": "forbid",
+      "params": {
+        "account_ids": [],
+        "delete_mode": "permanent"
+      },
+      "status": "paused",
+      "remark": "系统内置任务"
     }
   ]
 }

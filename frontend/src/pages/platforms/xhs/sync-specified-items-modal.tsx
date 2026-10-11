@@ -1,27 +1,28 @@
 /**
- * 「批量同步商品信息」弹窗（2026-10-06 用户口径，v2）。
+ * 「批量同步商品信息」弹窗（2026-10-06 用户口径，v2 → 2026-10-11 v4）。
  *
- * 用户原话：「批量同步商品信息 · 按 ID 同步 20 个 —— 弹窗勾选商品后，将勾选的商品
+ * 用户原话（v2）：「批量同步商品信息 · 按 ID 同步 20 个 —— 弹窗勾选商品后，将勾选的商品
  * 使用**列表**在弹窗中展示，使用 **tab** 的方式分为**按条件同步**和**按 ID 同步商品信息**，
  * 点击同步等待同步商品结果，如果按条件同步则**直接关闭弹窗触发定时任务后台执行**」。
  *
- * ## 两个 Tab 是**两种执行模型**，不是两种筛选方式
+ * 🔄 **v4 追加口径（2026-10-11，用户原话逐字）**：
+ *
+ * > 优化执行 id 同步商品，点击同步按钮之后加入队列**不再轮询查询结果**，提示
+ * > **XX 条已经加入队列中，执行进度请到详情批次 XXXX 查看**，然后**关闭弹窗**
+ *
+ * ⚠️ 这条**取代**了同日 v3 的「前台等结果（整块蒙版 + 已耗时秒表 + 执行中不可关）」：
+ * 那时两条 Tab 是「条件 = 触发即关 / 按 ID = 前台等」；现在**两条都是触发即关** ——
+ * 真实同步由队列 worker 异步跑，进度统一去「队列记录」按批次号看。
  *
  * | Tab | 执行模型 | 关闭时机 |
  * |---|---|---|
- * | **按条件同步** | 触发**后台任务**（整店，按全量 / 时间区间） | **点同步即关弹窗** —— 任务在后台跑，进度去「账号矩阵 → 任务日志」看 |
- * | **按 ID 同步商品信息** | **前台等待**（后端按 ID 整店扫描后回结果） | 结果回来才关（逐条状态就在本 Tab 里） |
+ * | **按条件同步** | 触发**后台任务**（整店，按全量 / 时间区间） | **点同步即关弹窗** |
+ * | **按 ID 同步商品信息** | **入队**（每件一个队列项，挂一个批次号） | **点同步即关弹窗** |
  *
- * ⚠️ 为什么条件同步要**先关弹窗**：它是整店翻页 + 限流等待（几十秒到几分钟），
- * 留在弹窗里等就是「一个不知道要转多久的圈」；关掉它、把进度交给任务日志，
- * 用户才能干别的（与账号卡片页那套做法一致，两边同一个观感）。
- *
- * ## 逐条结果必须落在**提交时那份 ID 清单**上
- *
- * 后端返回 `{synced, not_found, scanned, matched, note}` 五个数 —— **不给逐条明细**
- * （平台按页过滤，命中的混在多页里）。做法：提交前把 ID 全部铺成「同步中」行，
- * 拿到结果按 `not_found` 标「已更新 / 未找到」。**只增不改顺序** ⇒ 用户看到的始终是
- * 「我提交过的每一个」，而不是「服务端最后返回的那批」（后者会让没命中的凭空消失）。
+ * ⇒ 弹窗里**没有**任何「等结果」的 UI：没有轮询、没有蒙版、没有秒表。用户提交后立刻
+ * 回到列表干活，结果改去「队列记录」看（那里本来就有批次树 + 逐件 payload）。
+ * 旧实现（`pollGoodsSyncBatch` / `beginWait` / `endWait` / `waitElapsedSec`）**整段删除**，
+ * 不留影子 —— 留着一个没人调的轮询只会让下一个人以为还有前台等待这条路径。
  */
 import {
   Alert,
@@ -33,7 +34,6 @@ import {
   Modal,
   Radio,
   Space,
-  Spin,
   Table,
   Tabs,
   Tag,
@@ -44,12 +44,7 @@ import { SyncOutlined } from "@ant-design/icons";
 import dayjs, { type Dayjs } from "dayjs";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import {
-  fetchQueueRecords,
-  fetchXhsShopItems,
-  readErrorDetail,
-  syncSpecifiedShopItems,
-} from "../../../lib/api";
+import { fetchXhsShopItems, readErrorDetail, syncSpecifiedShopItems } from "../../../lib/api";
 import type { SyncOptions } from "../../../components/platforms/sync-options-modal";
 import { MAX_OPERATE_ITEMS } from "../../../lib/shop-items-view";
 import type { XhsShopItem } from "../../../types";
@@ -59,56 +54,14 @@ const { Text } = Typography;
 /** 无限列表每页条数（与台账列表同一档，滚动一屏大约触发两次取数）。 */
 const PAGE_SIZE = 50;
 
-/** 轮询批次终态的间隔与上限（同步单件通常 1~2 秒；上限 2 分钟兜底）。 */
-const POLL_INTERVAL_MS = 1500;
-const POLL_MAX_ATTEMPTS = 80;
-
-type GoodsSyncOutcome = { item_id: string; status: "done" | "failed"; reason: string };
-
-/**
- * 按批次号轮询「同步商品信息」批次树，等全部子行终态后返回逐件结果。
- * 超时返回已知的部分结果（未终态的件不出现 ⇒ 调用方标 missing，不硬凑成功）。
- */
-async function pollGoodsSyncBatch(batchNo: string): Promise<GoodsSyncOutcome[]> {
-  for (let attempt = 0; attempt < POLL_MAX_ATTEMPTS; attempt += 1) {
-    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
-    try {
-      const page = await fetchQueueRecords(undefined, batchNo);
-      const batch = (page.items ?? [])[0];
-      const children = (batch?.children ?? []) as Array<{
-        task_type: string;
-        payload?: Record<string, unknown> | null;
-      }>;
-      const items = children.filter((c) => c.task_type === "xhs_goods_sync_item");
-      if (!batch || items.length === 0) continue;
-      const allDone = items.every((c) => {
-        const p = (c.payload ?? {}) as { ok?: boolean };
-        return p.ok === true || p.ok === false;
-      });
-      if (!allDone) continue;
-      return items.map((c) => {
-        const p = (c.payload ?? {}) as { item_id?: string; ok?: boolean; reason?: string };
-        return {
-          item_id: String(p.item_id ?? ""),
-          status: p.ok ? ("done" as const) : ("failed" as const),
-          reason: String(p.reason ?? ""),
-        };
-      });
-    } catch {
-      //: 单次轮询失败不打断（网络抖动）；重试到上限为止。
-    }
-  }
-  return [];
-}
-
-/** 一行「要同步的商品 + 它的同步状态」。`todo` = 还没提交过（打开时铺的清单）。 */
+/** 一行「要同步的商品 + 它的队列状态」。`todo` = 还没提交过（打开时铺的清单）。 */
 type SyncRow = {
   item_id: string;
   /** 商品名（主表勾选 / 从台账补充时已知；**手输 ID** 时为空 ⇒ 只显示 ID）。 */
   title: string;
   /** 缩略图地址（同上：手输 ID 时为空 ⇒ 显示占位）。 */
   image: string;
-  status: "todo" | "pending" | "ok" | "missing" | "failed";
+  status: "todo" | "queued" | "already";
   note: string;
 };
 
@@ -134,6 +87,32 @@ function today(): string {
 /** 待同步行（「我要同步的是这些」的清单项）。 */
 function todoRow(itemId: string, title = "", image = ""): SyncRow {
   return { item_id: itemId, title, image, status: "todo", note: "待同步" };
+}
+
+/**
+ * 入队回执 → 给用户看的**一句话**（用户口径逐字「XX 条已经加入队列中，
+ * 执行进度请到详情批次 XXXX 查看」）。
+ *
+ * ⚠️ 计数只用**后端回执的两个数**（`enqueued` / `already`），不在前端自己数：
+ * 后端会去重（重复的 ID、已在队列的件）—— 前端按提交清单数会在「有重复 /
+ * 已在队列」时说多，而用户会拿着这个数去批次里核对。
+ */
+export function enqueueNotice(result: {
+  enqueued?: number;
+  already?: number;
+  batch_no?: string;
+  note?: string;
+}): string {
+  const enqueued = Number(result.enqueued ?? 0) || 0;
+  const already = Number(result.already ?? 0) || 0;
+  const batchNo = String(result.batch_no || "");
+  if (!batchNo) {
+    //: 一次都没入队成功（全是非法 ID / 全在队列）⇒ 如实报后端那句话，不编批次号。
+    return String(result.note || "没有可执行的商品同步项");
+  }
+  const head = `${enqueued} 条已经加入队列中`;
+  const tail = already > 0 ? `（另有 ${already} 条已在队列中）` : "";
+  return `${head}${tail}，执行进度请到「队列记录」的详情批次 ${batchNo} 查看`;
 }
 
 export function SyncSpecifiedItemsModal({
@@ -169,11 +148,6 @@ export function SyncSpecifiedItemsModal({
   const [picked, setPicked] = useState<string[]>([]);
   const [running, setRunning] = useState(false);
   const [rows, setRows] = useState<SyncRow[]>([]);
-  const [summary, setSummary] = useState("");
-  /** 等待蒙版「已耗时（秒）」（2026-10-11 用户口径「等待期间加蒙版统计耗时」）。 */
-  const [waitElapsedSec, setWaitElapsedSec] = useState(0);
-  const waitStartedAtRef = useRef<number | null>(null);
-  const waitTickRef = useRef<number | null>(null);
   /** 待同步列表里勾选的行（批量移除用）。 */
   const [checkedRows, setCheckedRows] = useState<string[]>([]);
   /** 是否展开「从台账选择补充」（次级入口：台账里还没有的商品只能手输 ID）。 */
@@ -194,136 +168,89 @@ export function SyncSpecifiedItemsModal({
   /** 请求序号：切账号 / 重开弹窗后，**在途的旧响应必须丢弃**（否则列表被旧数据覆盖）。 */
   const requestSeq = useRef(0);
 
-  const loadPage = useCallback(async (accountId: number, page: number, seq: number) => {
-    setLoadingMore(true);
-    try {
-      const response = await fetchXhsShopItems({
-        platform_account_id: accountId,
-        page_no: page,
-        page_size: PAGE_SIZE,
-        //: 2026-10-06 用户口径：「列表之前名称模糊查询」⇒ 关键词透给后端（服务端筛，
-        //: 不是前端在已加载的那一页里过滤 —— 那样只会搜到「看过的」）。
-        ...(keyword.trim() ? { keyword: keyword.trim() } : {}),
-      });
-      //: ⚠️ 丢弃过期响应（账号换了 / 弹窗重开）—— 不丢的话会出现
-      //: 「列表里混着上一个账号的商品」，而用户会照着它去同步。
-      if (seq !== requestSeq.current) return;
-      setOptions((current) => (page === 1 ? response.items : [...current, ...response.items]));
-      setTotal(response.total ?? 0);
-    } catch (error) {
-      //: ⚠️ 2026-10-06 改为**要说话**：原来「安静吞掉」⇒ 用户点开「从台账选择补充」
-      //: 看到空列表，完全不知道为什么（本次实测报的就是这个观感）。
-      message.error(readErrorDetail(error, "台账列表加载失败"));
-    } finally {
-      if (seq === requestSeq.current) setLoadingMore(false);
-    }
-  }, [keyword]);
+  const loadPage = useCallback(
+    async (accountId: number, page: number, seq: number) => {
+      setLoadingMore(true);
+      try {
+        const response = await fetchXhsShopItems({
+          platform_account_id: accountId,
+          page_no: page,
+          page_size: PAGE_SIZE,
+          //: 2026-10-06 用户口径：「列表之前名称模糊查询」⇒ 关键词透给后端（服务端筛，
+          //: 不是前端在已加载的那一页里过滤 —— 那样只会搜到「看过的」）。
+          ...(keyword.trim() ? { keyword: keyword.trim() } : {}),
+        });
+        //: ⚠️ 丢弃过期响应（账号换了 / 弹窗重开）—— 不丢的话会出现
+        //: 「列表里混着上一个账号的商品」，而用户会照着它去同步。
+        if (seq !== requestSeq.current) return;
+        setOptions((current) => (page === 1 ? response.items : [...current, ...response.items]));
+        setTotal(response.total ?? 0);
+      } catch (error) {
+        //: ⚠️ 2026-10-06 改为**要说话**：原来「安静吞掉」⇒ 用户点开「从台账选择补充」
+        //: 看到空列表，完全不知道为什么（本次实测报的就是这个观感）。
+        message.error(readErrorDetail(error, "台账列表加载失败"));
+      } finally {
+        if (seq === requestSeq.current) setLoadingMore(false);
+      }
+    },
+    [keyword],
+  );
 
-  /** 进入等待：起表。**幂等**（已在等待时不重起秒表 —— 否则耗时被反复清零）。 */
-  const beginWait = useCallback(() => {
-    if (waitStartedAtRef.current === null) {
-      waitStartedAtRef.current = Date.now();
-      setWaitElapsedSec(0);
-      if (waitTickRef.current !== null) window.clearInterval(waitTickRef.current);
-      waitTickRef.current = window.setInterval(() => {
-        if (waitStartedAtRef.current !== null) {
-          setWaitElapsedSec(Math.floor((Date.now() - waitStartedAtRef.current) / 1000));
-        }
-      }, 1000);
-    }
-  }, []);
-  /** 结束等待：**停表**。 */
-  const endWait = useCallback(() => {
-    waitStartedAtRef.current = null;
-    if (waitTickRef.current !== null) {
-      window.clearInterval(waitTickRef.current);
-      waitTickRef.current = null;
-    }
-  }, []);
-
-  /** 真正发请求：把一份 ID 清单交给后端，入队后凭批次号轮询等终态。 */
+  /**
+   * 真正发请求：把一份 ID 清单交给后端**入队**，拿到批次号后**提示 + 关弹窗**
+   * （2026-10-11 v4 用户口径）。
+   *
+   * ⚠️ **这里不轮询**（v3 的 `pollGoodsSyncBatch` 整段删除）：逐件结果由队列 worker 写进
+   * 批次树，用户去「队列记录」按批次号看 —— 前端再抄一份进度就是第二个真相源。
+   */
   const runSync = useCallback(
     async (ids: string[]) => {
       if (!platformAccountId) return;
-      //: ⚠️ 提交即把**全部** ID 标成「同步中」（用户马上看到「我要同步的是这些」），
-      //: 再去补真实状态 —— 反过来的话慢扫描期间列表是空的，像是没提交成功。
-      //: ⚠️ **保留已知的名称 / 缩略图**：重铺只为把状态改成「同步中」，
-      //: 丢掉它们会让列表在同步过程中退回裸 ID（用户刚看到的商品名消失）。
-      setRows((current) => {
-        const known = new Map(current.map((row) => [row.item_id, row]));
-        return ids.map((id) => ({
-          item_id: id,
-          title: known.get(id)?.title ?? "",
-          image: known.get(id)?.image ?? "",
-          status: "pending" as const,
-          note: "",
-        }));
-      });
-      setSummary("");
       setRunning(true);
-      beginWait();
       try {
         //: 2026-10-11 改**走同步商品信息队列**：`items/sync` 只入队（返回
         //: `{enqueued, already, batch_no, note}`），真实同步由 worker 异步执行。
-        //: 前端凭 `batch_no` 轮询批次树，等全部子行终态后按子行 payload 回填结果。
         const result = await syncSpecifiedShopItems(platformAccountId, ids);
-        const batchNo = String(result.batch_no || "");
-        if (!batchNo) {
-          //: 没批次号 = 一次都没入队成功（全是非法 ID / 已在队列）—— 如实报。
-          setSummary(result.note || "没有可执行的商品同步项");
-          message.warning(result.note || "没有可执行的商品同步项");
-          onSynced();
-          return;
-        }
-        setSummary(`已加入同步商品信息队列（批次 ${batchNo}），执行中…`);
-        message.info(`已入队 ${result.enqueued} 件商品，执行中…`);
-        const outcome = await pollGoodsSyncBatch(batchNo);
-        const failed = outcome.filter((o) => o.status === "failed");
-        setRows((current) => {
-          //: 终态行**带着名称与缩略图**（不然结果出来后列表反而变差）。
-          const known = new Map(current.map((row) => [row.item_id, row]));
-          return ids.map((id) => {
-            const hit = outcome.find((o) => o.item_id === id);
-            const status = !hit ? ("missing" as const) : (hit.status === "failed" ? "failed" as const : "ok" as const);
-            const note = !hit
-              ? "平台侧没有这件商品（ID 是否正确 / 是否已删除）"
-              : hit.reason || "已更新本地台账";
-            return {
-              item_id: id,
-              title: known.get(id)?.title ?? "",
-              image: known.get(id)?.image ?? "",
-              status,
-              note,
-            };
-          });
-        });
-        if (failed.length) {
-          message.warning(`已入队 ${ids.length} 件，${failed.length} 件同步失败（原因见行说明）`);
+        const notice = enqueueNotice(result);
+        //: 行上的状态只为「再打开弹窗时看得出上次提交到哪了」；提交瞬间就关窗，
+        //: 不追求把逐件终态画出来（那正是本次去掉的轮询）。
+        //: ⚠️ 后端只回**计数**（不去重逐条回执）⇒ 全清单标「已入队」，已入队的件
+        //: 由汇总文案说明（前端不去猜哪几件、那是第二个真相源）。
+        const submitted = new Set(ids);
+        setRows((current) =>
+          current.map((row) =>
+            submitted.has(row.item_id)
+              ? { ...row, status: "queued" as const, note: "已加入同步队列，进度见队列记录" }
+              : row,
+          ),
+        );
+        if (Number(result.enqueued ?? 0) > 0 || String(result.batch_no || "")) {
+          message.success(notice);
         } else {
-          message.success(`已更新 ${ids.length} 件商品`);
+          message.warning(notice);
         }
         onSynced();
+        //: 用户口径收尾：「然后关闭弹窗」。
+        onClose();
       } catch (error) {
         //: 用 lib 的**唯一**实现（与账号卡片页同一句话，DEF-044）。
         const text = readErrorDetail(error, "同步失败");
         setRows((current) =>
           current.map((row) =>
-            row.status === "pending" ? { ...row, status: "failed", note: text } : row,
+            row.status === "todo" ? { ...row, note: `入队失败：${text}` } : row,
           ),
         );
-        setSummary(text);
         message.error(text);
       } finally {
-        endWait();
         setRunning(false);
       }
     },
-    [platformAccountId, message, onSynced, beginWait, endWait],
+    [platformAccountId, message, onSynced, onClose],
   );
 
   //: 打开 ⇒ 把勾选集**铺成待同步列表**（用户口径「将勾选的商品使用列表在弹窗中展示」）。
   //: 有勾选 ⇒ 落在「按 ID」Tab（点这个按钮就是来同步这些的）；没勾选 ⇒ 落在「按条件」。
-  //: ⚠️ 依赖里**没有** `itemIds`：它是打开那一刻页面给的值，由 `open` 这一轮读取
+  //: ⚠️ 依赖里**没有** `items`：它是打开那一刻页面给的值，由 `open` 这一轮读取
   //: （把数组放进依赖会因为父组件每次渲染新建数组而反复重置清单）。
   useEffect(() => {
     if (!open || !platformAccountId) {
@@ -335,7 +262,6 @@ export function SyncSpecifiedItemsModal({
     setTotal(0);
     setPageNo(1);
     setPicked([]);
-    setSummary("");
     setDraft("");
     setPickerOpen(false);
     setKeyword("");
@@ -413,7 +339,7 @@ export function SyncSpecifiedItemsModal({
     onClose();
   }
 
-  /** 「按 ID 同步」：发请求并**在本 Tab 等结果**。 */
+  /** 「按 ID 同步」：**入队后即关弹窗**（2026-10-11 v4 口径）。 */
   async function submitIdSync() {
     if (running) return;
     //: 优先同步「还没跑过」的那批；都跑过了 ⇒ 对当前清单重跑（拉最新数据）。
@@ -460,18 +386,12 @@ export function SyncSpecifiedItemsModal({
   }
 
   const statusTag = (status: SyncRow["status"]) =>
-    status === "pending" ? (
-      <Tag icon={<SyncOutlined spin />} color="blue">
-        同步中
-      </Tag>
-    ) : status === "todo" ? (
-      <Tag>待同步</Tag>
-    ) : status === "ok" ? (
-      <Tag color="green">已更新</Tag>
-    ) : status === "missing" ? (
-      <Tag color="orange">未找到</Tag>
+    status === "queued" ? (
+      <Tag color="blue">已入队</Tag>
+    ) : status === "already" ? (
+      <Tag color="orange">已在队列</Tag>
     ) : (
-      <Tag color="red">失败</Tag>
+      <Tag>待同步</Tag>
     );
 
   /**
@@ -528,7 +448,7 @@ export function SyncSpecifiedItemsModal({
   const resultColumns = [
     { title: "商品信息", key: "item", render: (_v: unknown, row: SyncRow) => itemInfoCell(row) },
     {
-      title: "同步状态",
+      title: "队列状态",
       dataIndex: "status",
       width: 110,
       render: (value: SyncRow["status"]) => statusTag(value),
@@ -537,7 +457,6 @@ export function SyncSpecifiedItemsModal({
   ];
 
   const rangeInvalid = scope === "range" && !startDate;
-  const idRunning = running && tab === "id";
 
   return (
     <Modal
@@ -547,20 +466,16 @@ export function SyncSpecifiedItemsModal({
       //: 2026-10-06 用户口径「弹窗全屏的 80%」。
       width="80vw"
       onCancel={onClose}
-      //: ⚠️ 按 ID 在跑时不许关（结果就在这个 Tab 里，关了就丢）——
-      //: 与上架/下架的结果弹窗同一条纪律（2026-10-06 那轮的口径）。
-      maskClosable={false}
-      closable={!idRunning}
-      //: 2026-10-06 用户口径「滚动条隐藏」。
-      //: ⚠️ 只**隐藏外观**、不禁用滚动：`scroll.y` 还在，滚轮 / 拖拽照常。
-      //: 两套写法都要给 —— Firefox 认 `scrollbar-width`，Chromium 认 `::-webkit-scrollbar`。
+      //: ⚠️ 2026-10-11 v4：两条 Tab 都是**触发即关**（不再是「按 ID 在前台等结果」）
+      //: ⇒ 不再需要「执行中不许关」那套锁（原 `maskClosable={false}` + `closable={!idRunning}`
+      //: 随 v3 的「前台等结果」一起退场）。留着它反而会让用户以为「关了会丢结果」。
       styles={{
         body: { maxHeight: "64vh", overflow: "auto" },
       }}
       className="sync-items-modal"
       footer={
-        //: ⚠️ 两个 Tab 的按钮是**两种执行模型**：条件是「触发即关」（后台跑），
-        //: 按 ID 是「等结果」（前台等）。同一个位置，语义随 Tab 变。
+        //: ⚠️ 两个 Tab 的按钮是**两种执行模型**，但收尾一致：都是「触发即关」。
+        //: 条件是后台任务（页面轮询状态），按 ID 是入队（进度去队列记录按批次号看）。
         tab === "condition" ? (
           <Space>
             <Button onClick={onClose}>取消</Button>
@@ -571,7 +486,7 @@ export function SyncSpecifiedItemsModal({
         ) : (
           <Space>
             <Button onClick={onClose} disabled={running}>
-              {running ? "同步中…" : "关闭"}
+              取消
             </Button>
             <Button
               type="primary"
@@ -586,16 +501,10 @@ export function SyncSpecifiedItemsModal({
         )
       }
     >
-      {/* 2026-10-11 用户口径「等待期间加蒙版统计耗时」：按 ID 同步入队后轮询等终态
-          时整块盖住，tip 带已耗时，等结果返回再撤蒙版（关不掉 = 结果不丢）。 */}
-      <Spin
-        spinning={idRunning}
-        tip={idRunning ? `同步中… 已耗时 ${waitElapsedSec}s` : ""}
-      >
-        <Tabs
-          activeKey={tab}
-          onChange={setTab}
-          items={[
+      <Tabs
+        activeKey={tab}
+        onChange={setTab}
+        items={[
           {
             key: "condition",
             label: "按条件同步",
@@ -646,8 +555,14 @@ export function SyncSpecifiedItemsModal({
             label: "按 ID 同步商品信息",
             children: (
               <Space direction="vertical" size={10} style={{ width: "100%" }}>
+                <Alert
+                  type="info"
+                  showIcon
+                  message="按 ID 同步（加入队列）"
+                  description="点「同步」后这批商品会加入同步队列，弹窗立即关闭；逐件执行进度去「队列记录」按批次号查看。"
+                />
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  下面是要同步的商品（主表勾选的 + 你补充的）；点「同步」后在这里等结果。
+                  下面是要同步的商品（主表勾选的 + 你补充的）。
                 </Text>
                 <Table<SyncRow>
                   rowKey="item_id"
@@ -667,7 +582,7 @@ export function SyncSpecifiedItemsModal({
                   }}
                   columns={resultColumns}
                 />
-                {/* 批量移除（勾选后一次剔掉；执行中不给动 —— 清单要与提交的一致）。 */}
+                {/* 批量移除（勾选后一次剔掉；提交中不给动 —— 清单要与提交的一致）。 */}
                 {rows.length > 0 && (
                   <Space size={8}>
                     <Button
@@ -688,11 +603,6 @@ export function SyncSpecifiedItemsModal({
                     </Text>
                   </Space>
                 )}
-                {summary ? (
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    {summary}
-                  </Text>
-                ) : null}
 
                 {/* 次级入口：补充商品（台账里还没有的只能手输 ID）。 */}
                 <Space size={8} wrap>
@@ -822,8 +732,7 @@ export function SyncSpecifiedItemsModal({
             ),
           },
         ]}
-        />
-      </Spin>
+      />
       {/* 滚动条隐藏（2026-10-06 用户口径）：只藏**外观**，滚轮 / 拖拽照常 ——
           给「细滚动条」而不是 `overflow: hidden`（后者会让内容滚不动）。
           ⚠️ 挂在 `.sync-items-modal` 下，只影响本弹窗，不动全局。 */}

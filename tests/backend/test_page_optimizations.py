@@ -4212,18 +4212,40 @@ def test_sync_specified_modal_uses_an_infinite_list():
     assert "loadPage(platformAccountId, next" in modal, "滚到底必须真的取下一页"
 
 
-def test_sync_specified_modal_keeps_every_submitted_id():
-    """逐条结果必须落在**提交时那份 ID 清单**上（没命中的不许消失）。
+def test_sync_specified_modal_enqueues_and_closes_without_polling():
+    """按 ID 同步 = **入队后提示 + 关弹窗**，**不再轮询结果**（2026-10-11 用户口径）。
 
-    ⚠️ 2026-10-11 改走同步商品信息队列：后端入队后前端凭批次号轮询拿逐件
-    结果（`outcome`）。若用「命中项」渲染结果表，用户点名 3 个、只成功 1 个时
-    会看到 1 行（另外两个**凭空消失**，像是提交丢了）。
+    用户原话：「优化执行 id 同步商品，点击同步按钮之后加入队列**不再轮询查询结果**，
+    提示 **XX 条已经加入队列中，执行进度请到详情批次 XXXX 查看**，然后**关闭弹窗**」。
+
+    ⚠️ 这条**取代**了同日 v3 的「前台等结果（整块蒙版 + 已耗时秒表 + 执行中不可关）」。
+    判据四件，缺一不可：
+
+    1. **没有轮询**：`pollGoodsSyncBatch` / `POLL_INTERVAL_MS` / `fetchQueueRecords`
+       全部不得再出现在本文件（留着就是「还在等结果」，用户口径落空）；
+    2. **没有等待 UI**：`Spin` 蒙版 / `waitElapsedSec` 秒表 / `maskClosable={false}`
+       一并退场（两条 Tab 现在都是「触发即关」，没有前台等待可言）；
+    3. 提示文案含**两个要点**（条数 + 批次号）——由 `enqueueNotice` 单点产出；
+    4. 提交成功后**关弹窗**（`onClose()` 在成功分支里，不是只 message 一下）。
     """
     modal = _code_only(_read(SYNC_ITEMS_MODAL))
-    assert "ids.map((id) => {" in modal and "outcome.find((o) => o.item_id === id)" in modal, (
-        "结果行必须由**提交的 ID 清单**逐条派生（不是由命中项拼）"
+    for gone in ("pollGoodsSyncBatch", "POLL_INTERVAL_MS", "fetchQueueRecords"):
+        assert gone not in modal, f"v4 已去掉轮询，`{gone}` 不该还在（用户口径「不再轮询查询结果」）"
+    for gone in ("waitElapsedSec", "beginWait", "endWait", "spinning={idRunning}"):
+        assert gone not in modal, f"v4 没有前台等待，`{gone}` 不该还在"
+    assert "maskClosable={false}" not in modal, (
+        "两条 Tab 都是触发即关 ⇒ 不再需要「执行中不许关」（留着会让用户以为关了会丢结果）"
     )
-    assert "setRows((current) => {" in modal, "提交即铺满全部 ID 为「同步中」（慢扫描期间列表不能是空的）"
+    #: 提示文案的唯一产出点（含「条数」与「批次号」两个要点）
+    assert "function enqueueNotice(" in modal, "入队提示文案必须单点产出（避免两处措辞分叉）"
+    notice = _slice_between(modal, "export function enqueueNotice(", "export function SyncSpecifiedItemsModal(")
+    assert "条已经加入队列中" in notice, "提示必须报**条数**（用户口径逐字）"
+    assert "batch_no" in notice and "执行进度请到" in notice, (
+        "提示必须带**批次号**并指向进度入口（用户口径逐字：进度到详情批次 XXXX 查看）"
+    )
+    #: 提交成功后关弹窗
+    body = _slice_between(modal, "const runSync = useCallback(", "[platformAccountId, message, onSynced, onClose],")
+    assert "onClose();" in body, "入队成功后必须**关闭弹窗**（用户口径「然后关闭弹窗」）"
 
 
 def test_sync_specified_modal_shows_the_selection_before_syncing():
@@ -6631,6 +6653,42 @@ def test_auto_load_progress_shows_per_stage_elapsed_time():
     assert "performance.now()" in wiz, "耗时应用单调钟（performance.now）"
     css = _read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.css")
     assert ".auto-stage-elapsed {" in css, "缺耗位列样式"
+
+
+def test_auto_load_confirm_offers_media_upload_retry_settings():
+    """「自动加载参数」确认弹窗要有**上传失败重试 + 重试次数**（2026-10-11 用户口径）。
+
+    用户原话：「第二步的自动加载参数弹窗新增**上传媒体资源失败是否重试，默认是**，
+    以及**重试次数 1-3，默认 1**」。
+
+    ⚠️ 判据四件，缺一不可（漏一件都会让「配了但没生效」或「生效了但没得配」）：
+
+    1. 弹窗里有开关（是 / 否）+ 数字框（min/max 1–3），**默认 true / 1**；
+    2. 开关关闭时数字框 `disabled`（填了也不生效的控件必须明显不可用）；
+    3. 有一个**共用的重试包装**（`withUploadRetry`）—— 不共用就会「主图重试、详情图不重试」；
+    4. 三条媒体上传链路（主图 / 详情图 / 视频）**都真的经过它**，且视频要用 `ok` 判成功
+       （视频失败是返回 `{ok:false}` 而不是抛异常 —— 只 catch 异常的重试等于没有）。
+    """
+    wiz = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+    #: ① 控件与默认值
+    assert "上传媒体资源失败时重试" in wiz, "确认弹窗缺「上传媒体资源失败是否重试」"
+    for piece in ("<Radio value=\"yes\">是</Radio>", "<Radio value=\"no\">否</Radio>"):
+        assert piece in wiz, f"重试开关缺选项：{piece}"
+    assert "useState(true)" in wiz and "useState(1)" in wiz, (
+        "默认值必须是「是 / 1 次」（用户口径「默认是」「默认1」）"
+    )
+    assert "uploadMaxRetries" in wiz and "min={1}" in wiz and "max={3}" in wiz, (
+        "重试次数必须是 1–3 的数字框"
+    )
+    #: ② 关闭重试时数字框不可用
+    assert "disabled={!uploadRetryOnFailure}" in wiz, "关掉重试后次数框应禁用"
+    #: ③ 共用包装（唯一定义点 + 真的被调用）
+    assert "const withUploadRetry = useCallback(" in wiz, "缺共用的重试包装函数"
+    assert wiz.count("withUploadRetry(") >= 3, (
+        "重试包装必须被**三条媒体链路**都用上（主图 / 详情图 / 视频）"
+    )
+    #: ④ 视频的成功判据是 `ok`（不是「没抛异常」）
+    assert "(r) => r.ok" in wiz, "视频上传必须以 `ok` 判成功，否则失败结果会被当成功"
 
 
 def test_step2_price_section_labels_share_one_column():
