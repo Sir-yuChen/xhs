@@ -13,8 +13,8 @@
 **小红书一站式智能运营平台 — 采集、分析、AI 创作、自动发布，全链路闭环**
 
 [![Gitee](https://gitee.com/Sir-yuChen/xhs/badge/star.svg?theme=dark)](https://gitee.com/Sir-yuChen/xhs)
-[![Version](https://img.shields.io/badge/version-v1.0.1-brightgreen)](https://gitee.com/Sir-yuChen/xhs/releases)
-[![Desktop](https://img.shields.io/badge/Windows-桌面安装包%20v1.0.1-0078D6)](./packaging/README.md)
+[![Version](https://img.shields.io/badge/version-v1.0.2-brightgreen)](https://gitee.com/Sir-yuChen/xhs/releases)
+[![Desktop](https://img.shields.io/badge/Windows-桌面安装包%20v1.0.2-0078D6)](./packaging/README.md)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![Node.js](https://img.shields.io/badge/nodejs-20%2B-green)](https://nodejs.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100%2B-009688)](https://fastapi.tiangolo.com/)
@@ -215,10 +215,10 @@ schtasks /delete /tn "XHS-AllInOne-App" /f
 
 ```powershell
 # 自己打包（Windows + Python 3.12 + Node 20+ + Inno Setup 6）
-powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build.ps1 -Version 1.0.1
+powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build.ps1 -Version 1.0.2
 ```
 
-产物落在**项目根目录** `spider-xhs-setup-1.0.1.exe`（约 90MB，`lzma2/max` 压缩）。
+产物落在**项目根目录** `spider-xhs-setup-1.0.2.exe`（约 88MB，`lzma2/max` 压缩）。
 数据与日志装在安装目录里（`data/` `logs/` `backend/app/storage/`），**卸载只删程序文件、数据保留**。
 详见 [`packaging/README.md`](./packaging/README.md)。
 
