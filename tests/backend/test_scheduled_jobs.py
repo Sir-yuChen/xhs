@@ -2804,8 +2804,14 @@ def test_dedupe_seeded_scheduled_jobs_migration(tmp_path):
     assert jobs[0][1] == "系统内置任务"
 
     # ④ 幂等：stamp 回父 revision 再 upgrade ⇒ 零删除（收敛后条件不再命中）
+    # ⚠️ **只升到本迁移自身（`i0j1k2l3m4n5`），不是 `head`**（2026-10-11 修）。
+    #    原写法是 `upgrade head`，当年能过只因那时 `head` 恰好就是本迁移 ——
+    #    重放区间里只有这一条**数据**迁移（幂等）。链长到 33 步后，`upgrade head`
+    #    会把区间内所有迁移**重放一遍**，其中 `z9a8b7c6d5e4` 等是 `create_table`，
+    #    对着一张已建好的表再建 ⇒ `table forbidden_words already exists`（实测）。
+    #    幂等性要验的是**本迁移重复执行**，升到它自己即是最小且正确的范围。
     run_alembic(db_path, "stamp", "h9i0j1k2l3m4")
-    run_alembic(db_path, "upgrade", "head")
+    run_alembic(db_path, "upgrade", "i0j1k2l3m4n5")
     assert [row[0] for row in snapshot()] == [1, 3, 4, 5], (
         "重复执行不得再删任何行（本迁移必须幂等）"
     )

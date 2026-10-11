@@ -51,6 +51,7 @@ import {
   Upload,
 } from "antd";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useAccountScope } from "../../../lib/account-scope";
 import type { ReactNode } from "react";
 
 import { useThemePalette } from "../../../app/providers";
@@ -510,11 +511,12 @@ export function XhsMyNotesPage() {
   const loginProbeInFlight = useRef(false);
   // 账号选择 + 页签 + 互动分类**落本地缓存**（2026-09-26 用户口径「筛选条件和账号
   // 选择后放本地缓存，避免每次均需要重新选择」）：`usePersistedFilter` 与 `useState`
-  // 同形，初值优先取缓存、变化即回写。账号经 `asFiniteNumber` 校验（只能是数字或
-  // `null`），页签 / 互动分类走 `asEnum`（取值集合就是界面上那两组下拉的集合）。
-  const [selectedAccountId, setSelectedAccountId] = usePersistedFilter<number | null>(
-    FILTER_CACHE_KEYS.myNotes.accountId, null, asFiniteNumber
-  );
+  // 同形，初值优先取缓存、变化即回写。页签 / 互动分类走 `asEnum`（取值集合就是界面上那两组下拉的集合）。
+  //
+  // ⚠️ 账号**不走**页面级旧键了（设计 32 §5.4 / A5，2026-10-11）：改用**业务线级**
+  // 的 `useAccountScope("content")` —— 与「内容库」共用同一个账号，
+  // 用户切页不再看到「账号悄悄换了一个」。旧键由 `readAccountScope` 一次性迁移。
+  const [selectedAccountId, setSelectedAccountId] = useAccountScope("content");
   const [identity, setIdentity] = useState<XhsSelfIdentity | null>(null);
   const [identityError, setIdentityError] = useState<string | null>(null);
   const [capabilities, setCapabilities] = useState<XhsSelfCapabilities | null>(null);

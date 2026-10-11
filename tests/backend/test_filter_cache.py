@@ -22,6 +22,13 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 
+#: ⚠️ **账号维度已从本表移出**（设计 32 §5.4 / A5，2026-10-11）：账号不再走页面级
+#: `FILTER_CACHE_KEYS.<page>.accountId`，改用**业务线级**的账号范围
+#: （`frontend/src/lib/account-scope.ts` 的 `useAccountScope`），
+#: 规则与守卫见 `test_sidebar_business_lines.py::TestAccountScope` 与
+#: `src/lib/account-scope.test.ts`（vitest，8 条）。
+#: 本文件只继续守**其余筛选条件**的缓存接线。
+
 #: 页面 → 必须引用的缓存键（漏一个 = 那个筛选静默不缓存）。
 #: 键字符串与 `FILTER_CACHE_KEYS` 逐字对应（改写键名时必须同时改这里 —— 那正是
 #: 我们要挡的「改了实现但没人发现旧 key 还在用」）。
@@ -37,14 +44,12 @@ PAGE_CACHE_KEYS: dict[str, tuple[str, ...]] = {
         "FILTER_CACHE_KEYS.library.hasComments",
     ),
     "frontend/src/pages/platforms/xhs/my-notes-page.tsx": (
-        "FILTER_CACHE_KEYS.myNotes.accountId",
         "FILTER_CACHE_KEYS.myNotes.tab",
         "FILTER_CACHE_KEYS.myNotes.interactionKind",
         "FILTER_CACHE_KEYS.myNotes.noTrafficThresholds",
         "FILTER_CACHE_KEYS.myNotes.noTrafficQuery",
     ),
     "frontend/src/pages/platforms/xhs/shop-items-page.tsx": (
-        "FILTER_CACHE_KEYS.shopItems.accountId",
         "FILTER_CACHE_KEYS.shopItems.form",
         "FILTER_CACHE_KEYS.shopItems.pageSize",
         "FILTER_CACHE_KEYS.shopItems.sort",

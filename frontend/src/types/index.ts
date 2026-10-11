@@ -1,5 +1,17 @@
 export type PlatformId = "xhs" | "douyin" | "kuaishou" | "weibo" | "xianyu" | "taobao";
 
+/**
+ * 业务线（设计 32 §4）。**能力派生**，不是 `sub_type`：
+ *
+ * * `shop`   店铺线 —— 千帆商家，判据 = `ark` 通道有令牌；
+ * * `content` 内容线 —— 非店铺号，判据 = `creator` 通道有令牌；
+ * * `shared` 平台级 —— 跨业务线（账号矩阵 / 数据洞察 / 监控中心 / 自动运营）。
+ *
+ * 后端唯一判据在 `backend/app/core/business_lines.py`；前端只做**呈现**。
+ */
+export type BusinessLine = "shop" | "content" | "shared";
+
+
 export type PlatformMeta = {
   id: PlatformId;
   name_cn: string;

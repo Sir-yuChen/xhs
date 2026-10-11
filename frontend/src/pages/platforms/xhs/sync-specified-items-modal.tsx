@@ -733,33 +733,16 @@ export function SyncSpecifiedItemsModal({
           },
         ]}
       />
-      {/* 滚动条隐藏（2026-10-06 用户口径）：只藏**外观**，滚轮 / 拖拽照常 ——
-          给「细滚动条」而不是 `overflow: hidden`（后者会让内容滚不动）。
-          ⚠️ 挂在 `.sync-items-modal` 下，只影响本弹窗，不动全局。 */}
-      <style>{`
-        .sync-items-modal .ant-table-body,
-        .sync-items-modal .ant-table-content,
-        .sync-items-modal .ant-modal-body {
-          scrollbar-width: thin;
-        }
-        .sync-items-modal .ant-table-body::-webkit-scrollbar,
-        .sync-items-modal .ant-table-content::-webkit-scrollbar,
-        .sync-items-modal .ant-modal-body::-webkit-scrollbar {
-          width: 6px;
-          height: 6px;
-        }
-        .sync-items-modal .ant-table-body::-webkit-scrollbar-thumb,
-        .sync-items-modal .ant-table-content::-webkit-scrollbar-thumb,
-        .sync-items-modal .ant-modal-body::-webkit-scrollbar-thumb {
-          background: rgba(0, 0, 0, 0.18);
-          border-radius: 3px;
-        }
-        .sync-items-modal .ant-table-body::-webkit-scrollbar-track,
-        .sync-items-modal .ant-table-content::-webkit-scrollbar-track,
-        .sync-items-modal .ant-modal-body::-webkit-scrollbar-track {
-          background: transparent;
-        }
-      `}</style>
+      {/* 滚动条：**已并入全局口径**（2026-10-11 用户口径「前端所有滚动条全部统一隐藏，
+          只保留功能」）⇒ 这里**不再**写局部滚动条样式。
+
+          ⚠️ 必须删掉旧的局部规则而不是留着：它写的是更具体的
+          `.sync-items-modal .ant-table-body { scrollbar-width: thin }` +
+          `::-webkit-scrollbar { width: 6px }`，**优先级高于** `global.css` 里的
+          `* { scrollbar-width: none }` ⇒ 留着就这一处会继续露出细滚动条，
+          「全部统一隐藏」当场破功。
+          规则保留在文档里（原口径）：只藏**外观**，滚轮 / 拖拽照常 ——
+          不能用 `overflow: hidden`（那会让内容滚不动）。 */}
     </Modal>
   );
 }

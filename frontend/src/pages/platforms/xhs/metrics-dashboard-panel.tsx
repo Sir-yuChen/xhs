@@ -92,8 +92,10 @@ function fmtNum(value: number): string {
   return value.toLocaleString();
 }
 
-export function MetricsDashboardPanel() {
+export function MetricsDashboardPanel({ scope = "both" }: { scope?: "note" | "shop" | "both" }) {
   const { message } = App.useApp();
+  const showNote = scope === "note" || scope === "both";
+  const showShop = scope === "shop" || scope === "both";
   const [days, setDays] = useState<number>(7);
   const [noteSeries, setNoteSeries] = useState<NoteTrendPoint[]>([]);
   const [shopSeries, setShopSeries] = useState<ShopTrendPoint[]>([]);
@@ -106,9 +108,11 @@ export function MetricsDashboardPanel() {
       setIsLoading(true);
       setError(null);
       try {
+        // ⚠️ 只拉本页要的那一侧（拆分后省一次请求）。`Promise.all` 两边都传空数组
+        // 时仍会发两次请求 —— 所以按 `showNote` / `showShop` 分别组装。
         const [notes, shops] = await Promise.all([
-          fetchNoteMetricsTrend({ days: windowDays }),
-          fetchShopMetricsTrend({ days: windowDays }),
+          showNote ? fetchNoteMetricsTrend({ days: windowDays }) : Promise.resolve([]),
+          showShop ? fetchShopMetricsTrend({ days: windowDays }) : Promise.resolve([]),
         ]);
         setNoteSeries(notes);
         setShopSeries(shops);
@@ -118,7 +122,7 @@ export function MetricsDashboardPanel() {
         setIsLoading(false);
       }
     },
-    [],
+    [showNote, showShop],
   );
 
   useEffect(() => {
@@ -129,7 +133,10 @@ export function MetricsDashboardPanel() {
   async function handleCollect() {
     setIsCollecting(true);
     try {
-      const [notes, shops] = await Promise.all([collectNoteMetrics(), collectShopMetrics()]);
+      const [notes, shops] = await Promise.all([
+        showNote ? collectNoteMetrics() : Promise.resolve({ collected: 0, stat_date: "-" }),
+        showShop ? collectShopMetrics() : Promise.resolve({ collected: 0, stat_date: "-" }),
+      ]);
       message.success(
         `采集完成：笔记 ${fmtNum(notes.collected)} 条 / 商品 ${fmtNum(shops.collected)} 条（${notes.stat_date}）`,
       );
@@ -176,8 +183,10 @@ export function MetricsDashboardPanel() {
           </Button>
         </Tooltip>
         <Text type="secondary">
-          已有快照：笔记 <Tag color="blue">{noteDays}</Tag> 天 / 商品{" "}
-          <Tag color="purple">{shopDays}</Tag> 天
+          已有快照：
+          {showNote ? <>笔记 <Tag color="blue">{noteDays}</Tag> 天</> : null}
+          {showNote && showShop ? " / " : null}
+          {showShop ? <>商品 <Tag color="purple">{shopDays}</Tag> 天</> : null}
         </Text>
       </Space>
 
@@ -186,46 +195,55 @@ export function MetricsDashboardPanel() {
       <Spin spinning={isLoading}>
         {/* ---- 总览卡 ---- */}
         <Row gutter={[16, 16]}>
-          <Col xs={12} md={6}>
-            <Card size="small">
-              <Statistic
-                title="阅读（最新快照）"
-                value={noteTotals.views}
-                prefix={<EyeOutlined />}
-              />
-            </Card>
-          </Col>
-          <Col xs={12} md={6}>
-            <Card size="small">
-              <Statistic
-                title="互动（赞藏评转）"
-                value={noteTotals.engagement}
-                prefix={<InteractionOutlined />}
-              />
-            </Card>
-          </Col>
-          <Col xs={12} md={6}>
-            <Card size="small">
-              <Statistic
-                title="商品库存"
-                value={shopTotals.stock}
-                prefix={<ShoppingOutlined />}
-              />
-            </Card>
-          </Col>
-          <Col xs={12} md={6}>
-            <Card size="small">
-              {/* ⚠️ 价格用区间文案（不是求和），且已换元 */}
-              <Statistic
-                title="商品价格区间（元）"
-                value={priceRangeText(shopTotals.price_min_fen, shopTotals.price_max_fen)}
-                prefix={<BarChartOutlined />}
-              />
-            </Card>
-          </Col>
+          {showNote ? (
+            <>
+              <Col xs={12} md={6}>
+                <Card size="small">
+                  <Statistic
+                    title="阅读（最新快照）"
+                    value={noteTotals.views}
+                    prefix={<EyeOutlined />}
+                  />
+                </Card>
+              </Col>
+              <Col xs={12} md={6}>
+                <Card size="small">
+                  <Statistic
+                    title="互动（赞藏评转）"
+                    value={noteTotals.engagement}
+                    prefix={<InteractionOutlined />}
+                  />
+                </Card>
+              </Col>
+            </>
+          ) : null}
+          {showShop ? (
+            <>
+              <Col xs={12} md={6}>
+                <Card size="small">
+                  <Statistic
+                    title="商品库存"
+                    value={shopTotals.stock}
+                    prefix={<ShoppingOutlined />}
+                  />
+                </Card>
+              </Col>
+              <Col xs={12} md={6}>
+                <Card size="small">
+                  {/* ⚠️ 价格用区间文案（不是求和），且已换元 */}
+                  <Statistic
+                    title="商品价格区间（元）"
+                    value={priceRangeText(shopTotals.price_min_fen, shopTotals.price_max_fen)}
+                    prefix={<BarChartOutlined />}
+                  />
+                </Card>
+              </Col>
+            </>
+          ) : null}
         </Row>
 
-        {/* ---- 笔记监控 ---- */}
+        {/* ---- 笔记监控（仅内容洞察页）---- */}
+        {showNote ? (
         <Card
           size="small"
           title="笔记监控"
@@ -313,8 +331,10 @@ export function MetricsDashboardPanel() {
             </>
           )}
         </Card>
+        ) : null}
 
-        {/* ---- 商品监控 ---- */}
+        {/* ---- 商品监控（仅商品洞察页）---- */}
+        {showShop ? (
         <Card
           size="small"
           title="商品监控"
@@ -371,6 +391,7 @@ export function MetricsDashboardPanel() {
             </>
           )}
         </Card>
+        ) : null}
       </Spin>
     </Space>
   );

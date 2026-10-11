@@ -8,22 +8,35 @@ body {
   min-height: 100vh;
 }
 
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+/*
+ * 滚动条：**全局隐藏外观，保留滚动能力**（2026-10-11 用户口径
+ * 「前端所有滚动条全部统一隐藏，只保留功能」）。
+ *
+ * ⚠️ 关键差别：**不是** `overflow: hidden`。这里只把滚动条的**外观**藏掉，
+ * `overflow: auto/scroll` 的滚动能力原样保留 —— 滚轮 / 触板 / 键盘 / 拖拽都照常，
+ * 只是看不到那根条。改成 `overflow:hidden` 会让超出容器的内容**根本滚不到**
+ * （这正是本项目 `global.css` 里 `.hermes-hide-scrollbar` 注释警告过的坑）。
+ *
+ * 覆盖两种实现（缺一不可，只写一种会在某个浏览器里露出来）：
+ *  * `::-webkit-scrollbar { display: none }` —— Chrome / Edge / Safari；
+ *  * `scrollbar-width: none` + `-ms-overflow-style: none` —— Firefox / 旧 Edge。
+ *
+ * ⚠️ 全站统一用 `*` 通配（含伪元素）：局部再写 `scrollbar-width: thin` 之类的
+ * 「更具体」规则会**盖过**通配规则，所以各组件里原有的细滚动条样式已一并清理
+ * （`sync-specified-items-modal.tsx` 那处）。新增组件**不要**再写滚动条样式。
+ *
+ * 放在最前面（在其它规则之前），保证它是「默认」而任何有意例外都能后置覆盖；
+ * 目前项目**没有**例外，全部统一隐藏。
+ */
+* {
+  scrollbar-width: none; /* Firefox / 新版 Edge */
+  -ms-overflow-style: none; /* 旧 Edge / IE */
 }
 
-::-webkit-scrollbar-track {
-  background: #1f1f1f;
-}
-
-::-webkit-scrollbar-thumb {
-  background: #434343;
-  border-radius: 3px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: #555;
+*::-webkit-scrollbar {
+  display: none; /* Chrome / Edge / Safari */
+  width: 0;
+  height: 0;
 }
 
 .ant-layout {

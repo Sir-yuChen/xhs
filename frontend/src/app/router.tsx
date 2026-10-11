@@ -13,6 +13,8 @@ import { AutoOpsPage } from "../pages/platforms/xhs/auto-ops-page";
 import { OrdersPage } from "../pages/platforms/xhs/orders-page";
 import { XhsAccountsPage } from "../pages/platforms/xhs/accounts-page";
 import { XhsAnalyticsPage } from "../pages/platforms/xhs/analytics-page";
+import { InsightsContentPage } from "../pages/platforms/xhs/insights-content-page";
+import { InsightsShopPage } from "../pages/platforms/xhs/insights-shop-page";
 import { XhsMonitoringPage } from "../pages/platforms/xhs/monitoring-page";
 import { XhsDashboard } from "../pages/platforms/xhs/xhs-dashboard";
 import { XhsDiscoveryPage } from "../pages/platforms/xhs/discovery-page";
@@ -81,6 +83,11 @@ export function AppRouter() {
           <Route path="/platforms/xhs/dashboard" element={<XhsDashboard />} />
           <Route path="/platforms/xhs/accounts" element={<XhsAccountsPage />} />
           <Route path="/platforms/xhs/analytics" element={<XhsAnalyticsPage />} />
+          {/* 设计 32 §6（2026-10-11 用户拍板 D2「拆」）：原「数据洞察」一页两 Tab 拆成
+              **两条业务线各自的页面** —— 内容洞察（笔记侧）/ 商品洞察（店铺侧）。
+              旧路由 `/analytics`（含 `?tab=`）由 `XhsAnalyticsPage` 内部重定向，深链不死。 */}
+          <Route path="/platforms/xhs/insights/content" element={<InsightsContentPage />} />
+          <Route path="/platforms/xhs/insights/shop" element={<InsightsShopPage />} />
           <Route path="/platforms/xhs/discovery" element={<XhsDiscoveryPage />} />
           <Route path="/platforms/xhs/my-notes" element={<XhsMyNotesPage />} />
           <Route path="/platforms/xhs/shop-items" element={<XhsShopItemsPage />} />

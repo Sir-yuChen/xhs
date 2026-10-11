@@ -44,19 +44,103 @@ const { Text } = Typography;
 export interface WorkspaceShellProps {
   /** 侧边栏 Logo 旁的标题文案（折叠时隐藏） */
   brand: string;
-  /** 主导航菜单（Sider 中部，可滚动） */
+  /** 主导航菜单（Sider 中部，可滚动）。支持 `type: "group"` 与 SubMenu（`children`）。 */
   mainItems: MenuProps["items"];
   /** 底部导航菜单（Sider 下部，固定在用户行上方） */
   footerItems?: MenuProps["items"];
   /**
-   * 当前高亮菜单的 key。默认取 `location.pathname`（子路由页需要更细的匹配时可自行传入）。
-   * 传给 antd Menu 的 `selectedKeys`。
+   * 当前高亮菜单的 key。默认由**当前路由**派生（见 :func:`resolveActiveKeys`）——
+   * 子路由页（如网关）需要更细的匹配时可自行传入。
    */
   selectedKeys?: string[];
   /** 点击菜单项：默认 `navigate(key)`；子路由页（如网关）需自定义映射时传入。 */
   onNavigate?: (key: string) => void;
   /** 页面内容（顶栏 + Content 之下） */
   children: ReactNode;
+}
+
+/** 菜单节点的最小形状（antd `ItemType` 是联合类型，这里只取我们真正用到的字段）。 */
+type MenuNode = {
+  key?: string;
+  children?: MenuNode[];
+};
+
+/** 把菜单树摊成**叶子项**（SubMenu 的父节点不可选中，故只收叶子）。 */
+function leafKeys(items: MenuProps["items"] | undefined, out: string[] = []): string[] {
+  for (const raw of items ?? []) {
+    const node = raw as MenuNode | null;
+    if (!node || typeof node !== "object") continue;
+    const children = Array.isArray(node.children) ? node.children : null;
+    // ⚠️ `type: "group"` 的组节点也有 children，但它的子项本身就是叶子 ⇒ 递归即可。
+    if (children && children.length > 0) leafKeys(children as MenuProps["items"], out);
+    else if (typeof node.key === "string" && node.key.startsWith("/")) out.push(node.key);
+  }
+  return out;
+}
+
+/** 找出某个叶子 key 的**所有祖先 key**（用于自动展开父级）。 */
+function ancestorsOf(items: MenuProps["items"] | undefined, target: string, trail: string[] = []): string[] | null {
+  for (const raw of items ?? []) {
+    const node = raw as MenuNode | null;
+    if (!node || typeof node !== "object") continue;
+    const key = typeof node.key === "string" ? node.key : "";
+    const children = Array.isArray(node.children) ? node.children : null;
+    if (children && children.length > 0) {
+      const found = ancestorsOf(children as MenuProps["items"], target, key ? [...trail, key] : trail);
+      if (found) return found;
+    } else if (key === target) {
+      return trail;
+    }
+  }
+  return null;
+}
+
+/**
+ * **高亮判据**（2026-10-11 二级菜单改造）。
+ *
+ * 菜单里有两种 key，必须分别比对（不能一律拿 `pathname` 去比）：
+ *
+ * * **普通路由键**（`/platforms/xhs/library`）⇒ 比 `pathname`；
+ * * **宿主页 + 页签键**（`/platforms/xhs/note-workshop?tab=videos`）⇒ 比
+ *   `pathname + search`。只比 pathname 的话，「笔记工坊」的 6 个页签会**同时**
+ *   高亮（它们的 pathname 相同）—— 用户看不出自己在哪个页签。
+ *
+ * 返回数组（antd 接受多个），但**正常只会命中一个**：带 query 的键优先，
+ * 命中后不再回退到无 query 的宿主键。
+ */
+export function resolveActiveKeys(
+  items: MenuProps["items"] | undefined,
+  pathname: string,
+  search: string,
+): string[] {
+  const leaves = leafKeys(items);
+  const withQuery: string[] = [];
+  const plain: string[] = [];
+  for (const key of leaves) {
+    const idx = key.indexOf("?");
+    if (idx === -1) plain.push(key);
+    else withQuery.push(key);
+  }
+  // ① 带 query 的键最具体：`pathname` 与 `search` 都要对得上。
+  for (const key of withQuery) {
+    const idx = key.indexOf("?");
+    const keyPath = key.slice(0, idx);
+    const keyQuery = key.slice(idx + 1);
+    if (pathname !== keyPath) continue;
+    // query 逐项比对（顺序无关）；搜索串可能带额外参数，只要求菜单声明的都在。
+    const current = new URLSearchParams(search);
+    const wanted = new URLSearchParams(keyQuery);
+    let ok = true;
+    wanted.forEach((value, name) => {
+      if (current.get(name) !== value) ok = false;
+    });
+    if (ok) return [key];
+  }
+  // ② 普通键：`pathname` 相等，或它是该路由的**子路径**（嵌套路由）。
+  for (const key of plain) {
+    if (pathname === key || pathname.startsWith(`${key}/`)) return [key];
+  }
+  return [];
 }
 
 /**
@@ -125,7 +209,27 @@ export function WorkspaceShell({
     if (onNavigate) onNavigate(key);
     else navigate(key);
   };
-  const activeKeys = selectedKeys ?? [location.pathname];
+  //: 高亮 + 自动展开（2026-10-11 二级菜单改造）：
+  //: ① 高亮走 `resolveActiveKeys`（区分「普通路由键」与「宿主页?tab= 键」——
+  //:    只比 pathname 会让同一宿主页的 6 个页签同时亮）；
+  //: ② 载入时把当前项的**父级链**塞进 `openKeys`，否则从深链进来父级是收起的
+  //:    （界面上看不到自己在哪）。用户手动展开/收起后以用户为准（不强制回写）。
+  const activeKeys = selectedKeys ?? resolveActiveKeys(mainItems, location.pathname, location.search);
+  const activePath = location.pathname.replace(/\/$/, "");
+  const [openKeys, setOpenKeys] = useState<string[]>(() => {
+    const key = resolveActiveKeys(mainItems, location.pathname, location.search)[0];
+    return key ? (ancestorsOf(mainItems, key) ?? []) : [];
+  });
+  useEffect(() => {
+    // 换页时若当前项不在已展开的分支里，补开它的父级链（不改用户已展开的其它分支）。
+    const key = resolveActiveKeys(mainItems, location.pathname, location.search)[0];
+    if (!key) return;
+    const wanted = ancestorsOf(mainItems, key) ?? [];
+    setOpenKeys((prev) => {
+      const missing = wanted.filter((k) => !prev.includes(k));
+      return missing.length === 0 ? prev : [...prev, ...missing];
+    });
+  }, [mainItems, activePath, location.search]);
 
   const notificationDropdownContent = (
     <div style={{ width: 360, background: c.dropBg, borderRadius: 8, border: `1px solid ${c.dropBorder}`, overflow: "hidden" }}>
@@ -194,7 +298,16 @@ export function WorkspaceShell({
 
           {/* Main nav — scrollable */}
           <div style={{ flex: 1, overflowY: "auto", overflowX: "hidden" }}>
-            <Menu theme={isDark ? "dark" : "light"} mode="inline" selectedKeys={activeKeys} onClick={handleMenuClick} items={mainItems} style={{ borderRight: 0 }} />
+            <Menu
+              theme={isDark ? "dark" : "light"}
+              mode="inline"
+              selectedKeys={activeKeys}
+              openKeys={openKeys}
+              onOpenChange={(keys) => setOpenKeys(keys as string[])}
+              onClick={handleMenuClick}
+              items={mainItems}
+              style={{ borderRight: 0 }}
+            />
           </div>
 
           {/* Footer — pinned to bottom */}

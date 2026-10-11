@@ -226,6 +226,165 @@ def test_sub_type_normalize_rejects_unknown():
         normalize_sub_type("pgy")
 
 
+def test_qianfan_link_is_known_but_not_an_unknown_value():
+    """T-102 补充（2026-10-11）：千帆（ark）链路**不是**未知取值。
+
+    真库里账号 9「开心睡大觉的店」`sub_type='qianfan'`，而它此前被当成未知值
+    ⇒ 未捕获的 `UnknownSubTypeError` ⇒ **500**。
+
+    两个类必须分开（这是本用例的全部意义）：
+
+    * `UnknownSubTypeError` = 数据脏了 ⇒ 显式失败；
+    * `SubTypeNotSupportedError` = 认识它，但这条链路没有该操作要用的东西
+      ⇒ 业务结果，调用方给可读原因。
+
+    同时钉住「不许放宽成兜底」：它**绝不能**静默返回 `pc`/`creator`。
+    """
+    from backend.app.core.account_types import (
+        SUB_TYPES,
+        SUB_TYPE_QIANFAN,
+        SubTypeNotSupportedError,
+        UnknownSubTypeError,
+        normalize_sub_type,
+    )
+
+    assert SUB_TYPE_QIANFAN == "qianfan"
+    # ⚠️ 刻意不进 SUB_TYPES —— 那个元组的契约是「按它选登录适配器」，
+    # 千帆没有登录适配器（登录走 api/login_sessions.py）。
+    assert "qianfan" not in SUB_TYPES
+
+    with pytest.raises(SubTypeNotSupportedError) as excinfo:
+        normalize_sub_type("qianfan")
+    # 是「不支持」，不是「不认识」—— 两者继承同一个 ValueError，但类型不同。
+    assert not isinstance(excinfo.value, UnknownSubTypeError)
+    assert excinfo.value.code == "LINK_HAS_NO_ADAPTER"
+    # 提示必须可执行（指向真正的下一步），且不许兜底成 pc/creator。
+    assert "login_sessions" in str(excinfo.value)
+
+
+def test_qianfan_account_does_not_500_on_login_probe():
+    """2026-10-11 真缺陷回归：千帆链路账号的登录态探活**不许 500**。
+
+    现场：账号 9。`_account_cookies_by_sub_type` 与 `_select_adapter` 两个口子
+    都会碰到 `normalize_sub_type` —— 但本操作的真实答案是「**拿不到令牌**」
+    （它只有 `ark`，探活要 www/creator），不是异常。
+    """
+    from types import SimpleNamespace
+
+    from backend.app.api import accounts as accounts_module
+
+    # ① 取令牌：千帆账号回落到 `ark` 通道（此前直接抛 ⇒ 500）。
+    captured = {}
+
+    def _fake_latest(db, account_id, channel):
+        captured["channel"] = channel
+        return "cookie-jar-text"
+
+    import backend.app.api.accounts as mod
+
+    original = mod.latest_cookies_for_channel
+    mod.latest_cookies_for_channel = _fake_latest
+    try:
+        account = SimpleNamespace(id=9, sub_type="qianfan")
+        assert mod._account_cookies_by_sub_type(None, account) == "cookie-jar-text"
+        assert captured["channel"] == "ark", "千帆链路的唯一通道就是 ark"
+    finally:
+        mod.latest_cookies_for_channel = original
+
+    # ② 选适配器：必须抛「已知但无适配器」，不得当成未知取值。
+    from backend.app.core.account_types import SubTypeNotSupportedError
+
+    with pytest.raises(SubTypeNotSupportedError):
+        accounts_module._select_adapter("qianfan", object(), object())
+
+
+def test_qianfan_account_cookie_check_records_a_reason_not_a_crash():
+    """2026-10-11 真缺陷回归：定时巡检遇到千帆账号要**留下可读原因**。
+
+    此前它抛 `UnknownSubTypeError` ⇒ 被外层 per-account `except` 吞成一行
+    warning，卡片上什么都看不到（用户只看到状态没变）。
+    """
+    from types import SimpleNamespace
+
+    from backend.app.services import scheduler_service
+
+    original = scheduler_service.normalize_sub_type
+
+    def _boom(sub_type):
+        from backend.app.core.account_types import SubTypeNotSupportedError
+
+        raise SubTypeNotSupportedError("qianfan 没有登录适配器", code="LINK_HAS_NO_ADAPTER")
+
+    account = SimpleNamespace(
+        id=9,
+        sub_type="qianfan",
+        status="active",
+        status_message="",
+        updated_at=None,
+    )
+    from datetime import datetime
+
+    marked_now = datetime(2026, 10, 11, 21, 30, 0)
+    scheduler_service.normalize_sub_type = _boom
+    try:
+        result = scheduler_service._check_single_account(None, account, marked_now)
+    finally:
+        scheduler_service.normalize_sub_type = original
+
+    # 状态没被改坏（它没过期，只是本操作做不了），但原因留在了卡片上。
+    assert result == "active"
+    assert account.status_message, "必须留下可读原因，不能静默"
+    assert account.updated_at == marked_now, "巡检过就要盖时间戳（`now` 由调用方注入）"
+
+
+def test_publish_gate_rejects_qianfan_link_without_raising():
+    """2026-10-11 真缺陷回归：发布闸门遇到千帆链路账号要**业务拒绝**，不是 500。
+
+    千帆链路没有 creator 适配器 ⇒ `normalize_sub_type` 抛
+    `SubTypeNotSupportedError`。那个异常若漏出闸门就是 500 —— 但这里的语义是
+    「这个账号不可发布」，所以必须翻成 `AccountNotPublishableError`（400 级）。
+
+    ⚠️ 同时钉住「不借会话 / 不降级放行」：千帆账号**绝不能**被放过去当 creator。
+    """
+    from types import SimpleNamespace
+
+    import pytest as _pytest
+
+    from backend.app.services.account_service import (
+        AccountNotPublishableError,
+        ensure_creator_account_for_publish,
+    )
+
+    qianfan_account = SimpleNamespace(
+        id=9,
+        user_id=1,
+        platform="xhs",
+        sub_type="qianfan",
+        status="active",
+        status_message="",
+        deleted_at=None,
+    )
+
+    with _pytest.raises(AccountNotPublishableError) as excinfo:
+        ensure_creator_account_for_publish(qianfan_account, user_id=1)
+    # 原因必须说清「是链路不支持（qianfan）」，而不是含糊的「Creator account required」。
+    # ⚠️ 断言 `detail` 而不是 `str(exc)`：`AccountRejectedError.__init__` 先
+    # `super().__init__(detail)` 再存 `self.detail`，HTTP 层读的是 `detail`。
+    assert "qianfan" in excinfo.value.detail
+
+    # 反向：真的 creator 账号不受影响（这道闸门不能变严）。
+    creator_account = SimpleNamespace(
+        id=8,
+        user_id=1,
+        platform="xhs",
+        sub_type="creator",
+        status="active",
+        status_message="",
+        deleted_at=None,
+    )
+    assert ensure_creator_account_for_publish(creator_account, user_id=1) is creator_account
+
+
 def test_select_adapter_raises_instead_of_falling_back_to_pc():
     """T-102：适配器选择必须显式分支。
 

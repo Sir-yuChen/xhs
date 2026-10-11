@@ -48,6 +48,7 @@ import {
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import dayjs from "dayjs";
+import { useAccountScope } from "../../../lib/account-scope";
 import type { CSSProperties } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -794,9 +795,10 @@ export function XhsShopItemsPage() {
   // 排序走 `sanitizeSortState`（形状对不上就回「无排序」）、条件草稿走
   // `sanitizeShopItemsDraft`（见下面 `Form` 的 initialValues）。
   // ⚠️ `pageNo`（第几页）**不缓存** —— 每次进页面从第一页开始是刻意的。
-  const [selectedAccountId, setSelectedAccountId] = usePersistedFilter<number | null>(
-    FILTER_CACHE_KEYS.shopItems.accountId, null, asFiniteNumber
-  );
+  // ⚠️ 账号改用**业务线级**的 `useAccountScope("shop")`（设计 32 §5.4 / A5，2026-10-11）：
+  // 与「图片空间」「订单管理」共用同一个账号（同属店铺线），切页不再换人。
+  // 旧键 `FILTER_CACHE_KEYS.shopItems.accountId` 由 `readAccountScope` 一次性迁移。
+  const [selectedAccountId, setSelectedAccountId] = useAccountScope("shop");
   const [binding, setBinding] = useState<XhsQianfanBinding | null>(null);
   const [bindingLoaded, setBindingLoaded] = useState(false);
   const [data, setData] = useState<XhsShopItemsResponse | null>(null);

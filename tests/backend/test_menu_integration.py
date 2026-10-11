@@ -410,10 +410,22 @@ class TestAnalyticsSlimming:
         assert "正在开发优化中" not in _read(ANALYTICS)
 
     def test_load_analytics_still_runs(self):
-        """⚠️ 删按钮**不等于**删加载 —— `loadAnalytics` 仍在首查驱动。"""
-        code = _code_only(ANALYTICS)
+        """⚠️ 删按钮**不等于**删加载。
+
+        ⚠️ **2026-10-11 重定向**（设计 32 §6 / A6）：原断言读的 `ANALYTICS`
+        （`analytics-page.tsx`）现在**只剩重定向** —— 页面内容整体搬到了
+        `insights-content-page.tsx`（内容侧）与 `insights-shop-page.tsx`（商品侧）。
+        「首查驱动加载」这条规则**没有变**，只是换了归属文件 ⇒ 断言跟着搬，
+        **不是**删除（原断言读的文件在此列明，免得后来者以为守的是旧页）。
+        """
+        host = ROOT / "frontend/src/pages/platforms/xhs/insights-content-page.tsx"
+        code = _code_only(host)
         assert "loadAnalytics" in code
         assert "useEffect" in code
+
+        # 反向：旧页确实只做跳转（内容已搬走，不该留半份实现）。
+        legacy = _code_only(ANALYTICS)
+        assert "loadAnalytics" not in legacy, "旧页不该再自己加载数据"
 
 
 # --------------------------------------------------------------------------- #

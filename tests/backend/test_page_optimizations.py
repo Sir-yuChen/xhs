@@ -2085,9 +2085,18 @@ def test_three_workshops_merge_into_one_page_with_tabs():
     用户口径：「将图片坊，视频坊，草稿坊，合并为一个页面视图tab自然隔离，新增菜单
     名称为笔记工坊」。守五件事（少任何一件就是「合并了但入口死了」或「没隔离」）：
 
+    ⚠️ **2026-10-11 第三次修订（设计 32 §5，用户口径「调整为合理的二级菜单结构」）**：
+    第 ② 条原为「菜单只剩『笔记工坊』一项，三个旧菜单项**整项**移除（含 key 与标签）」，
+    即断言 `图片工坊/视频工坊/草稿工坊` **不在** `app-shell.tsx` 里。
+    现在用户要求二级菜单，且要求层级**与页面内页签同形** ⇒ 三个工坊（连同发布中心 /
+    素材库 / 提示词模板，共 6 个）成为笔记工坊的 `?tab=` **子项**。
+    「合并成一页」这条**规则没变**（⑥ 号判据把它钉得更死：三个工坊**只能**以
+    `?tab=` 形态出现，出现独立路由就是拆回了三张页面），变的是「菜单里露几个入口」。
+    原句保留在上面，不静默删除。
+
     ① 新路由渲染工坊页；三个旧路由是 `Navigate` 重定向到对应 tab
        （深链 / 书签 / 外部链接不死）；
-    ② 菜单只剩「笔记工坊」一项，三个旧菜单项**整项**移除（含 key 与标签）；
+    ② 菜单有「笔记工坊」一项，6 个页签是它的**子项**；三个旧菜单 key **整项**移除；
     ③ 工坊页 = `Tabs` 三页签（images / videos / drafts）+ 三个面板组件
        （tab 即隔离：面板各自持状态，不是三套状态挤一个组件）；
     ④ 面板不再各扛 `PageHeader`（工坊页只保留一个骨架标题）；
@@ -2108,12 +2117,20 @@ def test_three_workshops_merge_into_one_page_with_tabs():
         assert f'to="/platforms/xhs/note-workshop?tab={tab}"' in router, f"{old} 应重定向到 tab={tab}"
     assert "<Navigate" in router, "旧路由应走 Navigate 重定向"
 
-    # ② 菜单一项
+    # ② 菜单一项 + 三个工程作为**它的子项**（⚠️ 2026-10-11 第三次修订，见 docstring）
     assert 'key: "/platforms/xhs/note-workshop"' in shell and "笔记工坊" in shell
-    for label in ("图片工坊", "视频工坊", "草稿工坊"):
-        assert label not in shell, f"菜单里不应再有「{label}」独立项（已合并进笔记工坊）"
+    shop_items = ("图片工坊", "视频工坊", "草稿工坊")
+    for label in shop_items:
+        assert f'label: "{label}"' in shell, f"「{label}」应作为笔记工坊的子项出现在菜单里"
     for key in ('"/platforms/xhs/image-studio"', '"/platforms/xhs/video-studio"', '"/platforms/xhs/drafts"'):
         assert key not in shell, f"菜单旧 key {key} 未移除"
+    # ⚠️ 反向（这一条才是「还是合并的、没拆回独立页」的判据）：三个工程**只能**
+    #    以 `?tab=` 子项形态出现 —— 出现独立路由就等于拆回了三张页面。
+    #: 计数：1 个宿主 key + **6** 个 `?tab=` 子项（图片/视频/草稿 + 发布中心/素材库/提示词模板），
+    #: 不是 `1 + len(shop_items)`（那 3 个只是标签元组）。
+    assert shell.count('"/platforms/xhs/note-workshop') == 7, (
+        "笔记工坊应恰好出现 7 次：1 个宿主 key + 6 个 `?tab=` 子项 key"
+    )
 
     # ③ Tabs 页签 + 面板（2026-10-02 T9 追加 materials / prompts 两个页签）
     for key in ('key: "images"', 'key: "videos"', 'key: "drafts"'):
@@ -3344,9 +3361,15 @@ def test_failure_three_way_blocks_stay_inline_after_the_message_switch():
     #    本锚点改用**分析页仍在的结构性红块**（加载失败 Alert，`<Alert type="error">`）。
     #    被取代的原句保留：
     #      assert '<Alert type="info"' in analytics and "开发优化中" in analytics
-    analytics = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/analytics-page.tsx"))
-    assert 'type="error"' in analytics and "数据洞察加载失败" in analytics, (
-        "分析页的加载失败红块是结构呈现（三分法），不该被消息化；原「开发优化中」说明块已按用户口径移除"
+    #
+    # ⚠️ **2026-10-11 第三次重定向**（设计 32 §6 / A6）：分析页已拆成
+    #    `insights-content-page.tsx`（内容侧）/ `insights-shop-page.tsx`（商品侧），
+    #    旧 `analytics-page.tsx` 只剩跳转 ⇒ 红块锚点跟着搬到**内容洞察页**。
+    #    「结构性红块不随 message 化搬走」这条规则没变，只是换了归属文件。
+    #    被取代的原句（读 analytics-page.tsx）保留在 docstring 里，不静默删除。
+    insights = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/insights-content-page.tsx"))
+    assert 'type="error"' in insights and "内容洞察加载失败" in insights, (
+        "内容洞察页的加载失败红块是结构呈现（三分法），不该被消息化"
     )
 
 
@@ -4081,15 +4104,29 @@ def test_metrics_panel_calls_all_four_request_functions():
 
 
 def test_metrics_panel_mounted_as_tab_in_host_page():
-    """面板必须挂进宿主页面的页签 —— 否则「组件写了但没人渲染」= 白做。
+    """面板必须被渲染 —— 否则「组件写了但没人渲染」= 白做。
 
-    ⚠️ 变异守护：把 `items` 里的指标监控页签删掉 ⇒ 本用例必红。
-    ⚠️ 同时钉住**宿主一期内容不被破坏**（「内容洞察」页签仍在）。
+    ⚠️ **2026-10-11 重定向**（设计 32 §6 / A6）：原先面板作为「指标监控」**页签**
+    挂在 `analytics-page.tsx`（一页两 Tab）。拆页后它被两个**独立页面**各挂一次，
+    且**必须带 scope**（内容洞察传 `note`、商品洞察传 `shop`）——
+    「挂进宿主」这条规则没变，变的是「宿主是谁、挂几次、带什么参数」。
+    原断言（读 `analytics-page.tsx` + 要求 `内容洞察` 页签字样）已随旧形态失效，
+    在此改写而非删除。
+
+    ⚠️ 变异守护：把任一页的 `<MetricsDashboardPanel scope=…/>` 删掉 ⇒ 本用例必红。
     """
-    host = _code_only(_read(ANALYTICS_PAGE))
-    assert "MetricsDashboardPanel" in host, "宿主页面没引用指标面板"
-    assert "<MetricsDashboardPanel />" in host, "面板没有被渲染（只 import 不渲染）"
-    assert "内容洞察" in host, "宿主一期「内容洞察」页签被误删"
+    content = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/insights-content-page.tsx"))
+    shop = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/insights-shop-page.tsx"))
+
+    for page, scope in ((content, "note"), (shop, "shop")):
+        assert "MetricsDashboardPanel" in page, "拆分后的页面没引用指标面板"
+        assert f'<MetricsDashboardPanel scope="{scope}"' in page, (
+            f"面板必须以 scope=\"{scope}\" 渲染（否则两个页面都在拉两条线的数据 = 假拆分）"
+        )
+
+    # 旧宿主只做跳转 —— 它不该再挂面板（挂了就是第三个渲染点）。
+    legacy = _code_only(_read(ANALYTICS_PAGE))
+    assert "<MetricsDashboardPanel" not in legacy, "旧页只做跳转，不该再渲染面板"
 
 
 def test_metrics_panel_empty_state_instead_of_zero_line():
@@ -8644,3 +8681,91 @@ def test_import_can_be_cancelled_midway():
 
     #: 开跑前复位（否则上一次的取消会毒到下一次）。
     assert "importCancelRef.current = false" in code, "开跑前必须重置中断标志"
+
+
+# --------------------------------------------------------------------------- #
+# 2026-10-11 用户口径：**前端所有滚动条统一隐藏，只保留功能**
+# --------------------------------------------------------------------------- #
+
+GLOBAL_CSS = ROOT / "frontend/src/global.css"
+FRONTEND_SRC = ROOT / "frontend/src"
+
+
+def test_scrollbars_are_globally_hidden_but_scrolling_still_works():
+    """全站滚动条：**隐藏外观，保留滚动能力**（不是 `overflow: hidden`）。
+
+    用户口径：「前端所有滚动条全部统一隐藏，只保留功能」。
+
+    ⚠️ 「统一」这个词最容易在某处**局部样式**上静默破功：局部规则写得更具体
+    （`.某弹窗 .ant-table-body { scrollbar-width: thin }`）就**盖过**全局的
+    `* { scrollbar-width: none }`，界面上只有那一处露出滚动条 ——
+    没有人会为此报 bug，但口径已经不是「统一」了。所以这里同时守两件事：
+
+    ① 全局口径在（两种实现都要有，缺一种会在某浏览器里露出来）；
+    ② 全仓**没有**任何组件级滚动条样式（例外必须是有意为之，且同步改这里）。
+    """
+    css_raw = GLOBAL_CSS.read_text(encoding="utf-8")
+
+    def _css_no_comments(text: str) -> str:
+        """剥掉 CSS 注释（`/* … */`）。
+
+        ⚠️ 必须剥：本文件的注释**逐字提到了** `scrollbar-width: none` /
+        `ms-overflow-style: none` / `::-webkit-scrollbar { display: none }`
+        （讲口径与原因），不剥就会拿注释满足断言 —— 实测三个变异全部 ESCAPED。
+        """
+        return re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+
+    css = _css_no_comments(css_raw)
+
+    def _rule(selector: str) -> str:
+        """取出某个选择器的**声明块**（`{ … }`，已剥注释）。
+
+        ⚠️ 按**块**断言，不按「全文件里有没有这个字符串」：同一个声明在别处
+        （旧的 `.hermes-hide-scrollbar`）也合法存在，全文件查找会被它满足
+        ⇒ 全局口径被改坏也照样绿（实测 ESCAPED）。
+        """
+        match = re.search(re.escape(selector) + r"\s*\{([^}]*)\}", css)
+        assert match, f"global.css 里找不到 `{selector}` 规则"
+        return match.group(1)
+
+    # ① 全局：两种实现缺一不可（各自在**自己的规则块**里）
+    star = _rule("*")
+    assert "scrollbar-width: none" in star, "`*` 规则缺 `scrollbar-width: none`（Firefox / 新版 Edge 会露出滚动条）"
+    assert "-ms-overflow-style: none" in star, "`*` 规则缺 `-ms-overflow-style: none`（旧 Edge 会露出滚动条）"
+    webkit = _rule("*::-webkit-scrollbar")
+    assert "display: none" in webkit, (
+        "`*::-webkit-scrollbar` 规则缺 `display: none`（Chrome / Edge / Safari 会露出滚动条）"
+    )
+    # ⚠️ 必须是「隐藏外观」而不是「关掉滚动」：`overflow: hidden` 会让内容滚不到。
+    #    在**全局两条规则**里都不许出现（别的类名下的 `overflow:hidden` 是正当布局）。
+    assert "overflow: hidden" not in star and "overflow: hidden" not in webkit, (
+        "滚动条口径不得用 `overflow: hidden` —— 那会让超出容器的内容滚不到"
+    )
+
+    # ② 全仓无例外：组件里不许再出现滚动条样式
+    def _no_comments(text: str) -> str:
+        """剥掉块注释与行注释，**保持行号不变**（注释换成等量空行）。
+
+        ⚠️ 必须剥注释：本文件的注释**大量引用**滚动条属性名（讲口径变更史），
+        不剥就会把自己写的说明当成违规样式（实测假红，报了 3 处注释行）。
+        """
+        def _blank(match: "re.Match[str]") -> str:
+            return "\n" * match.group(0).count("\n")
+        text = re.sub(r"(?m)(?<![\"'\w])/\*.*?\*/", _blank, text, flags=re.DOTALL)
+        return re.sub(r"(?m)^\s*//.*$", "", text)
+
+    offenders: list[str] = []
+    for path in FRONTEND_SRC.rglob("*"):
+        if path.suffix not in (".css", ".tsx", ".ts"):
+            continue
+        if path == GLOBAL_CSS:
+            continue
+        # 只认**样式声明**（`属性: 值`），不认注释里提到属性名。
+        for lineno, line in enumerate(_no_comments(path.read_text(encoding="utf-8")).splitlines(), 1):
+            if "webkit-scrollbar" in line or re.search(r"scrollbar-width\s*:", line) \
+                    or re.search(r"ms-overflow-style\s*:", line):
+                offenders.append(f"{path.relative_to(ROOT)}:{lineno}")
+    assert offenders == [], (
+        f"这些地方还写着滚动条样式 —— 「全部统一隐藏」会被更具体的局部规则盖过：{offenders}"
+    )
+

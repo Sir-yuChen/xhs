@@ -793,9 +793,16 @@ def run_alembic(db_path: Path, *args: str) -> None:
         errors="replace",
     )
     if result.returncode != 0:
+        # ⚠️ **头尾都给**（2026-10-11 实测教训）：此前只给 `[-2000:]`，而 alembic 的
+        #    revision 序列（`Running upgrade abc -> def, …`）在 stderr **开头**，
+        #    尾部只有那段 SQLAlchemy 调用栈 ⇒ 「跑到哪一步炸的」被截掉，
+        #    看着像迁移写坏了，实际是夹具缺表/多表。头尾都留才能一眼看出失败点。
+        head = result.stderr[:2000]
+        tail = result.stderr[-2000:]
         raise AssertionError(
             f"alembic {' '.join(args)} 失败（rc={result.returncode}，库={db_path.name}）—— "
             "迁移没跑成功，后面的断言全是空摆。真实报错：\n"
             f"--- stdout ---\n{result.stdout[-2000:]}\n"
-            f"--- stderr ---\n{result.stderr[-2000:]}"
+            f"--- stderr 开头（revision 序列在这里） ---\n{head}\n"
+            f"--- stderr 结尾（调用栈在这里） ---\n{tail}"
         )

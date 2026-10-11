@@ -17,6 +17,7 @@ from backend.app.adapters.xhs.qianfan_api_adapter import (
 from backend.app.core.account_types import (
     SUB_TYPE_CREATOR,
     SUB_TYPE_PC,
+    SubTypeNotSupportedError,
     UnknownSubTypeError,
     normalize_sub_type,
 )
@@ -26,6 +27,7 @@ from backend.app.core.time import shanghai_now
 from backend.app.models import AccountCookieVersion, PlatformAccount, User
 from backend.app.schemas.common import paginated
 from backend.app.services.account_service import (
+    CHANNEL_ARK,
     CHANNEL_CREATOR,
     CHANNEL_WWW,
     account_profile_from_user_info,
@@ -112,6 +114,10 @@ def _select_adapter(sub_type: Optional[str], pc_adapter: XhsPcLoginAdapter, crea
     故意写成**显式枚举 + raise**，而不是 ``... else pc_adapter``：
     ``sub_type`` 决定请求域名与 Cookie 域，用 ``else`` 兜底会让将来新增的
     协议链路静默走 pc 分支，错误要到 HTTP 层才暴露（T-102）。
+
+    ⚠️ **千帆（ark）链路**由 :func:`normalize_sub_type` 提前抛
+    :class:`SubTypeNotSupportedError`（已知但无适配器）—— 那个是**业务结果**，
+    调用方该给 400 + 可读原因；本函数不把它当成「未知取值」。
     """
     normalized = normalize_sub_type(sub_type)
     if normalized == SUB_TYPE_CREATOR:
@@ -459,14 +465,27 @@ def _account_cookies_by_sub_type(db: Session, account: PlatformAccount) -> str:
     它按 sub_type 偏好 creator 通道，而计数**只存在于网页版** —— 带 www 会话的
     creator 账号会被它领到取不到计数的通道上。互动数据一律走
     :func:`_www_cookies_for_metrics`。
-    """
-    from backend.app.core.account_types import SUB_TYPE_CREATOR, normalize_sub_type
 
-    preferred = (
-        CHANNEL_CREATOR
-        if normalize_sub_type(account.sub_type) == SUB_TYPE_CREATOR
-        else CHANNEL_WWW
+    ⚠️ **千帆（ark）链路**（2026-10-11）：`normalize_sub_type` 对它抛
+    `SubTypeNotSupportedError` —— 但本函数的语义是「**随便给我一份能用的令牌**」，
+    千帆账号的 `ark` 令牌正是那份令牌。所以这里**必须**单独接住，回落到
+    `CHANNEL_ARK`；漏接就是 500（账号 9 的现场）。
+    """
+    from backend.app.core.account_types import (
+        SUB_TYPE_CREATOR,
+        SubTypeNotSupportedError,
+        normalize_sub_type,
     )
+
+    try:
+        preferred = (
+            CHANNEL_CREATOR
+            if normalize_sub_type(account.sub_type) == SUB_TYPE_CREATOR
+            else CHANNEL_WWW
+        )
+    except SubTypeNotSupportedError:
+        # 千帆链路：唯一可能存在的通道就是 `ark`。
+        preferred = CHANNEL_ARK
     cookies = latest_cookies_for_channel(db, account.id, preferred)
     if cookies:
         return cookies
@@ -514,8 +533,25 @@ def check_account(
             "metrics_reason": NO_COOKIE_METRICS_REASON,
         }
 
-    normalized_sub_type = normalize_sub_type(account.sub_type)
-    adapter = _select_adapter(normalized_sub_type, pc_adapter, creator_adapter)
+    # ⚠️ **顺序即纪律**（2026-10-11）：取通道令牌**必须**排在
+    # `normalize_sub_type` / `_select_adapter` **之前** —— 千帆（ark）链路账号会
+    # 在 `normalize_sub_type` 处抛 `SubTypeNotSupportedError`，而它其实可能有可用的
+    # `ark` 令牌，「拿不到令牌」才是它真实的、可执行的答案。
+    # 原来就是这个顺序，但当时 `qianfan` 被当成「未知取值」抛未捕获异常 ⇒ 500，
+    # 提示既不可读、也不指向下一步。
+    try:
+        normalized_sub_type = normalize_sub_type(account.sub_type)
+        adapter = _select_adapter(normalized_sub_type, pc_adapter, creator_adapter)
+    except SubTypeNotSupportedError as exc:
+        # 已知链路，但**本次操作**它做不了（探活要打 www / creator 域名，千帆只有 `ark`）
+        # ⇒ 业务结果，不是故障：把原因写进卡片并给下一步，**不 500**。
+        account.status_message = str(exc)
+        db.commit()
+        db.refresh(account)
+        return {
+            **serialize_account(account),
+            "metrics_reason": exc.code,
+        }
     #: 互动数据不可得 / 未取到时的可读原因，随响应回传（前端卡片就地展示）。
     metrics_reason = ""
     try:

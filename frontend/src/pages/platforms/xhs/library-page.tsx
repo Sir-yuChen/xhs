@@ -84,6 +84,7 @@ import {
   EMPTY_SYNC_QUEUE_SNAPSHOT,
 } from "../../../lib/api";
 import { fenPriceText } from "../../../lib/format";
+import { useAccountScope } from "../../../lib/account-scope";
 import {
   FILTER_CACHE_KEYS,
   NOTE_TYPE_FILTER_ALL_VALUES,
@@ -489,6 +490,24 @@ export function XhsLibraryPage() {
   const [accountFilter, setAccountFilter] = usePersistedFilter(
     FILTER_CACHE_KEYS.library.accountId, "", asString
   );
+  // ⚠️ 内容库的账号是**筛选条件**（`""` = 不筛，见上面两行），语义与「当前账号」不同，
+  // 所以**不替换**成 `useAccountScope`。但两者要**保持同步**（设计 32 §5.4 / A5）：
+  // 用户在内容库选了账号 A，切到「我的笔记」也该是 A —— 否则同一业务线内各页各记一份，
+  // 用户看不出自己换过账号（本设计要消除的正是这个）。
+  //
+  // 同步是**双向**的：
+  //  * 本页选账号 → 写进业务线范围（供「我的笔记」等页读取）；
+  //  * 本页「重置」成不筛 → **不清**业务线范围（不筛 ≠ 把当前账号改成「无」）。
+  // ⚠️ 空串（不筛）**不许**写进范围：`sanitizeAccountId("")` ⇒ `null`，
+  //    那会把用户刚在别的页选的账号清掉。
+  const [contentAccountScope, setContentAccountScope] = useAccountScope("content");
+  useEffect(() => {
+    if (accountFilter === "") return;
+    const parsed = Number(accountFilter);
+    if (Number.isFinite(parsed) && parsed > 0 && parsed !== contentAccountScope) {
+      setContentAccountScope(parsed);
+    }
+  }, [accountFilter, contentAccountScope, setContentAccountScope]);
   const [noteTypeFilter, setNoteTypeFilter] = usePersistedFilter<NoteTypeFilter>(
     FILTER_CACHE_KEYS.library.noteType, "", asEnum(NOTE_TYPE_FILTER_ALL_VALUES)
   );

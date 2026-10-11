@@ -858,7 +858,11 @@ def ensure_creator_account_for_publish(account: Any, *, user_id: int) -> Platfor
     :raises AccountNotFoundError: 账号不存在或不属于该用户。
     :raises AccountNotPublishableError: 平台/链路不符，或账号状态不可发布。
     """
-    from backend.app.core.account_types import SUB_TYPE_CREATOR, normalize_sub_type
+    from backend.app.core.account_types import (
+        SUB_TYPE_CREATOR,
+        SubTypeNotSupportedError,
+        normalize_sub_type,
+    )
 
     if account is None:
         raise AccountNotFoundError("Account not found")
@@ -869,7 +873,17 @@ def ensure_creator_account_for_publish(account: Any, *, user_id: int) -> Platfor
         # 软删账号等同「不存在」（台账 §4.9 / I3）。**定时发布是无人值守路径**，
         # 不在这里拦住的话，一个已被用户删掉的账号仍会继续被派发任务。
         raise AccountNotFoundError("Account not found")
-    if account.platform != "xhs" or normalize_sub_type(account.sub_type) != SUB_TYPE_CREATOR:
+    if account.platform != "xhs":
+        raise AccountNotPublishableError("Creator account required")
+    # ⚠️ **千帆（ark）链路要单独判**（2026-10-11）：它没有 creator 适配器，
+    # `normalize_sub_type` 会抛 SubTypeNotSupportedError —— 那个异常若漏出去就是
+    # 500。但这里的语义是「这个账号不可发布」，所以翻成业务拒绝（与未知取值同形，
+    # 但原因更准确：不是数据脏了，是**这条链路本来就不参与发布**）。
+    try:
+        normalized = normalize_sub_type(account.sub_type)
+    except SubTypeNotSupportedError as exc:
+        raise AccountNotPublishableError(f"Creator account required（{exc}）") from exc
+    if normalized != SUB_TYPE_CREATOR:
         raise AccountNotPublishableError("Creator account required")
 
     account_status = (account.status or "").strip().lower()

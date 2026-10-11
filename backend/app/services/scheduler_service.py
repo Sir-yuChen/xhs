@@ -17,6 +17,7 @@ from backend.app.adapters.xhs.creator_api_adapter import XhsCreatorApiAdapter
 from backend.app.core.account_types import (
     SUB_TYPE_CREATOR,
     SUB_TYPE_PC,
+    SubTypeNotSupportedError,
     UnknownSubTypeError,
     normalize_sub_type,
 )
@@ -486,7 +487,17 @@ def _check_single_account(db: Session, account: PlatformAccount, now: datetime) 
     # 显式枚举而非 else 兜底：sub_type 决定域名与 Cookie 域，兜底会让将来
     # 新增的协议链路静默走 pc 分支（T-102）。未知取值抛错，由外层
     # check_all_account_cookies_once 的 per-account try/except 记录警告。
-    normalized_sub_type = normalize_sub_type(account.sub_type)
+    #
+    # ⚠️ **千帆（ark）链路是例外 —— 它不该抛错**（2026-10-11）：`qianfan` 是库里
+    # 真实存在的取值（账号 9），而「它没有 www/creator 适配器」是个**可读答案**，
+    # 不是故障。此前它抛 UnknownSubTypeError ⇒ 被外层吞成一行 warning，
+    # 且**卡片上看不到任何原因**（用户只看到状态没变）。现在如实写进 status_message。
+    try:
+        normalized_sub_type = normalize_sub_type(account.sub_type)
+    except SubTypeNotSupportedError as exc:
+        account.status_message = str(exc)
+        account.updated_at = now
+        return account.status
     if normalized_sub_type == SUB_TYPE_CREATOR:
         adapter = XhsCreatorLoginAdapter()
         channel = CHANNEL_CREATOR
