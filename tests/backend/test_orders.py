@@ -744,9 +744,11 @@ class TestShopDimension:
         from pathlib import Path
 
         root = Path(__file__).resolve().parents[2]
-        qianfan_src = (
-            root / "backend" / "app" / "api" / "platforms" / "xhs" / "qianfan.py"
-        ).read_text(encoding="utf-8")
+        #: ⚠️ 读**整包**（2026-10-11 拆包）—— 断言「这段话在千帆实现里」，
+        #:    不关心它在哪个子模块；读旧路径会 FileNotFoundError。
+        from tests.backend.conftest import read_qianfan_source
+
+        qianfan_src = read_qianfan_source(root)
         binding_src = (
             root / "backend" / "app" / "services" / "shop_binding_service.py"
         ).read_text(encoding="utf-8")
@@ -771,10 +773,9 @@ class TestShopDimensionEndpointWiring:
         """源码守卫：`/orders` 返回体不得自己调 `_shop_display_name`。"""
         from pathlib import Path
 
-        src = (
-            Path(__file__).resolve().parents[2]
-            / "backend" / "app" / "api" / "platforms" / "xhs" / "qianfan.py"
-        ).read_text(encoding="utf-8")
+        from tests.backend.conftest import read_qianfan_source
+
+        src = read_qianfan_source()
 
         # 订单列表端点的返回体块必须引用 result["shop_name"] / result["seller_id"]
         assert '"shop_name": result["shop_name"]' in src, (

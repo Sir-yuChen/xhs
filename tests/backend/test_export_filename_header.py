@@ -84,7 +84,9 @@ class TestExportFilenameHeader:
         """
         from pathlib import Path
 
-        src = Path("backend/app/api/platforms/xhs/qianfan.py").read_text(encoding="utf-8")
+        from tests.backend.conftest import read_qianfan_source
+
+        src = read_qianfan_source()
         assert "from urllib.parse import quote" in src, (
             "qianfan.py 用了 quote 但没 import（NameError ⇒ 导出 500）"
         )

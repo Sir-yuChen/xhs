@@ -337,14 +337,23 @@ def test_routes_do_not_reference_removed_shop_entities():
         )
 
     offenders = []
-    for relative in (
+    #: ⚠️ qianfan 已拆包（2026-10-11）⇒ 用**整包拼接**喂 AST（宏 `#: qianfan.py` 原句保留）：
+    #:    这是 AST 扫描，拼接后的多文件源码仍是合法 Python 片段集合，
+    #:    `ast.parse` 逐文件解析即可，故这里按文件遍历整包。
+    from tests.backend.conftest import read_qianfan_source
+
+    targets: list[str | tuple[str, str]] = [
         "backend/app/api/platforms/xhs/pc.py",
-        "backend/app/api/platforms/xhs/qianfan.py",
+        ("<qianfan 整包>", read_qianfan_source()),
         "backend/app/api/platforms/xhs/product_notes.py",
         "backend/app/api/login_sessions.py",
-    ):
-        path = ROOT / relative
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+    ]
+    for target in targets:
+        if isinstance(target, tuple):
+            label, text = target
+        else:
+            label, text = target, (ROOT / target).read_text(encoding="utf-8")
+        tree = ast.parse(text)
 
         #: 先收集所有 docstring 常量节点（说明不是引用）。
         docstrings = set()

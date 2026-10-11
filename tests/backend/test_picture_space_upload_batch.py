@@ -105,11 +105,20 @@ def batch_env(monkeypatch, api_client, db_factory):
     """
     fake = _FakeAdapter()
 
-    import backend.app.api.platforms.xhs.qianfan as qianfan
+    monkeypatch.setattr(
+        "backend.app.api.platforms.xhs.qianfan.picture_space._ark_adapter_for",
+        lambda *_a, **_k: fake,
+        raising=True,
+    )
+    #: ⚠️ 批量上传端点读的是**子模块** `picture_space._ark_adapter_for`（2026-10-11 拆包后）。
+    #: 打在包 `qianfan` 上会静默失效 ⇒ 测试真的去连平台（实测表现：
+    #: `ARK_SESSION_REQUIRED`，看着像业务坏了，其实是补丁打空）。
+    from backend.app.api.platforms.xhs.qianfan import picture_space as _ps
+
+    assert _ps._ark_adapter_for() is fake, "monkeypatch 锚点打空了（须打在 qianfan.picture_space 上）"
+
     import backend.app.services.picture_space_service as ps
     import backend.app.services.shop_draft_service as draft_svc
-
-    monkeypatch.setattr(qianfan, "_ark_adapter_for", lambda *_a, **_k: fake)
     #: 登记回读：不碰真平台，按 fileId 造一条记录（`path`/`link` 是发布体材料）。
     monkeypatch.setattr(
         draft_svc,

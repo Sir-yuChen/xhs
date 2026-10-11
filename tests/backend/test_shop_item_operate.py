@@ -993,8 +993,9 @@ def test_front_back_max_items_are_the_same_value():
     from pathlib import Path
     import re
 
-    api_py = Path(__file__).resolve().parents[2] / "backend" / "app" / "api" / "platforms" / "xhs" / "qianfan.py"
-    source = api_py.read_text(encoding="utf-8")
+    from tests.backend.conftest import read_qianfan_source
+
+    source = read_qianfan_source()  # 整包（2026-10-11 拆包）
     assert "MAX_OPERATE_ITEMS: int = 200" in source, "后端上限变了，前端常量要跟着改"
 
     ts = (

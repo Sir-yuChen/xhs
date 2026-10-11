@@ -131,15 +131,32 @@ class _StubAdapter:
 
 
 def _use_adapter(monkeypatch, adapter):
-    """让图片空间端点绕过真实适配器：直接替换模块级 `_ark_adapter_for`。
+    """让图片空间端点绕过真实适配器：直接替换**子模块**的 `_ark_adapter_for`。
 
     ⚠️ 端点调 `_ark_adapter_for(db, account, adapter_factory)` 是**模块全局查找**（调用时解析）
-    —— 覆盖这个模块属性即可，不必碰 FastAPI 依赖；monkeypatch 自动还原。
+    —— 覆盖那个模块的属性即可，不必碰 FastAPI 依赖；monkeypatch 自动还原。
+
+    ⚠️ **锚点是子模块，不是包**（2026-10-11 拆包后修）：拆包把
+    `qianfan.py` 变成 `qianfan/` 包，端点搬进 `qianfan/picture_space.py`，
+    它用 `from ._shared import _ark_adapter_for` **绑定了自己的模块全局**。
+    此时再打 `qianfan._ark_adapter_for`（包级属性）**完全无效** ——
+    端点在子模块里查名字，与包属性无关。
+    失效形态极隐蔽：`raising=False` 连报错都没有，测试却**真的去调平台**
+    （实测表现：`ARK_SESSION_REQUIRED` / 502，看着像业务坏了）。
     """
     monkeypatch.setattr(
-        "backend.app.api.platforms.xhs.qianfan._ark_adapter_for",
+        "backend.app.api.platforms.xhs.qianfan.picture_space._ark_adapter_for",
         lambda db, account, factory, _a=adapter: _a,
         raising=False,
+    )
+    #: ⚠️ **补丁生效断言**（拆包踩坑后加）：上面那条 `raising=False` 打空了也不报错，
+    #: 必须显式验证锚点真的指向端点会用的那个名字 —— 做法是**调用它并比对返回**，
+    #: 而不是 `callable(...)`（那恒真，等于没断言）。
+    from backend.app.api.platforms.xhs.qianfan import picture_space as _ps
+
+    assert _ps._ark_adapter_for(None, None, None) is adapter, (  # noqa: SLF001
+        "monkeypatch 锚点打空了 —— 端点读的是子模块的 `_ark_adapter_for`，"
+        "补丁必须打在 `qianfan.picture_space` 上（打在包 `qianfan` 上无效）"
     )
 
 
@@ -740,8 +757,14 @@ class TestWriteItemShape:
                 calls["registered"] = items[0]
                 return True, "", None
 
-        from backend.app.api.platforms.xhs import qianfan as qmod
-        monkeypatch.setattr(qmod, "_ark_adapter_for", lambda db, acc, factory, _a=_UploadStub(): _a, raising=False)
+        from backend.app.api.platforms.xhs.qianfan import picture_space as _ps
+        monkeypatch.setattr(
+            _ps, "_ark_adapter_for",
+            lambda db, acc, factory, _a=_UploadStub(): _a, raising=True,
+        )
+        #: ⚠️ 上传端点读的是**子模块**的 `_ark_adapter_for`（拆包后）——
+        #: 锚点必须打在这里；打在包 `qianfan` 上会静默失效并真的去调平台。
+        assert _ps._ark_adapter_for(None, None, None) is not None, "monkeypatch 锚点打空了"
 
         res = api.post(
             "/api/xhs/qianfan/picture-space/upload",

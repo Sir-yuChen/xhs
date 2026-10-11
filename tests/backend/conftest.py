@@ -806,3 +806,32 @@ def run_alembic(db_path: Path, *args: str) -> None:
             f"--- stderr 开头（revision 序列在这里） ---\n{head}\n"
             f"--- stderr 结尾（调用栈在这里） ---\n{tail}"
         )
+
+# --------------------------------------------------------------------------- #
+# 千帆源码读取（2026-10-11 拆包后）
+# --------------------------------------------------------------------------- #
+def read_qianfan_source(root: Path | None = None) -> str:
+    """**整包**千帆后端源码拼接（`qianfan/` 包下全部 `.py`）。
+
+    ## 为什么需要它（原 `qianfan.py` 已拆包）
+
+    拆包前有 8 个守卫直接读 `backend/app/api/platforms/xhs/qianfan.py`，
+    断言「这段实现在 qianfan 里」—— 例如导出用了 `quote` 就必须 import、
+    `shop_for_account` 必须走唯一解析函数。文件变成**包**之后：
+
+    * 继续读旧路径 ⇒ `FileNotFoundError`（读源码型守卫全红，却与被测行为无关）；
+    * 改成只读某一个子模块 ⇒ 断言范围被**悄悄缩小**（实现在 `goods.py`、
+      守卫却盯着 `publish.py`，从此恒绿）。
+
+    所以统一走本函数：**读整包**，断言语义与拆包前逐字等价 —— 只关心
+    「这段话在千帆这块实现里」，不关心它在哪个文件。
+
+    ⚠️ 调用方**不要**自己拼 `glob`（各写一份迟早漂移）。也不要用
+    `pkg.iterdir()` 之类的浅遍历 —— 将来若再分二级子包会漏读。
+    """
+    base = (root or Path(__file__).resolve().parents[2]) / "backend/app/api/platforms/xhs/qianfan"
+    assert base.is_dir(), f"千帆包不存在：{base}（拆包后又挪走了？）"
+    files = sorted(base.rglob("*.py"))
+    assert files, f"千帆包内没有 .py：{base}"
+    return "\n".join(f.read_text(encoding="utf-8") for f in files)
+

@@ -528,7 +528,9 @@ def test_package_path_takes_priority_over_precheck_token(ctx):
     import re
     from pathlib import Path
 
-    src = Path("backend/app/api/platforms/xhs/qianfan.py").read_text(encoding="utf-8")
+    from tests.backend.conftest import read_qianfan_source
+
+    src = read_qianfan_source()
 
     #: 两个端点（发布 + 保存草稿）都必须有「package_path 优先」的判据。
     #: 判据 = `if payload.package_path.strip():` 出现且在其后才是 `elif payload.precheck_token:`。
@@ -834,9 +836,11 @@ def test_publish_endpoint_syncs_published_item_via_sync_specified():
     """
     from pathlib import Path
 
-    from backend.app.api.platforms.xhs import qianfan as qf
+    from tests.backend.conftest import read_qianfan_source
 
-    src = Path(qf.__file__).read_text(encoding="utf-8")
+    #: ⚠️ `qianfan` 已拆包（2026-10-11）⇒ 读**整包**（发布端点在 `qianfan/publish.py`，
+    #:    原来读 `qf.__file__` 只会拿到包的 `__init__.py`，守卫从此恒绿）。
+    src = read_qianfan_source()
     assert "shop_goods_sync_service.enqueue_goods_sync(" in src, (
         "发布成功后必须调 `enqueue_goods_sync`（同步商品信息队列），不是另写反查落库"
     )

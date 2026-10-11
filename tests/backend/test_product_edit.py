@@ -332,9 +332,11 @@ class TestExport:
         """
         headers, ids, db_factory = ctx.headers, ctx.ids, ctx.db_factory
         # 把上限压到 1 行，造出「超限」确定态（不用真塞 5000 行）
-        import backend.app.api.platforms.xhs.qianfan as qf
+        #: ⚠️ 锚点是**子模块** `goods`（2026-10-11 拆包）：导出端点在 `goods.py` 里读
+        #:    `MAX_EXPORT_ROWS`，包级同名属性只是转发，打它**不影响**端点。
+        from backend.app.api.platforms.xhs.qianfan import goods as qf_goods
 
-        monkeypatch.setattr(qf, "MAX_EXPORT_ROWS", 1)
+        monkeypatch.setattr(qf_goods, "MAX_EXPORT_ROWS", 1)
         _add_product(db_factory, ids["a"], "ITEM-1")
         _add_product(db_factory, ids["a"], "ITEM-2")
 
@@ -453,9 +455,11 @@ class TestGuards:
         from pathlib import Path
 
         root = Path(__file__).resolve().parents[2]
-        endpoint_src = (
-            root / "backend" / "app" / "api" / "platforms" / "xhs" / "qianfan.py"
-        ).read_text(encoding="utf-8")
+        #: ⚠️ 读**整包**（2026-10-11 拆包）：断言「这段实现不在千帆里」，
+        #:    关心的是整块实现，不是某个子模块。
+        from tests.backend.conftest import read_qianfan_source
+
+        endpoint_src = read_qianfan_source(root)
         service_src = (
             root / "backend" / "app" / "services" / "product_polish_service.py"
         ).read_text(encoding="utf-8")
@@ -478,14 +482,8 @@ class TestGuards:
         """
         from pathlib import Path
 
-        src = (
-            Path(__file__).resolve().parents[2]
-            / "backend"
-            / "app"
-            / "api"
-            / "platforms"
-            / "xhs"
-            / "qianfan.py"
-        ).read_text(encoding="utf-8")
+        from tests.backend.conftest import read_qianfan_source
+
+        src = read_qianfan_source()
         assert 'filename="商品台账' not in src, "中文名不得直接进响应头（latin-1 编码会崩）"
         assert "filename*=UTF-8''" in src, "必须走 RFC 5987 编码"

@@ -65,6 +65,22 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _read_qianfan() -> str:
+    """读**整包**千帆后端源码（2026-10-11 拆包：`qianfan.py` → `qianfan/` 包）。
+
+    ⚠️ 本文件有 10 处守卫断言「这段实现在 qianfan 里」（如 `_normalize` 补 customizable、
+    后端上限常量、上传并行度）。拆包后源码分散到 5 个子模块：
+    * 继续读旧路径 ⇒ `FileNotFoundError`（守卫红得与被测行为无关）；
+    * 只读某一个子模块 ⇒ 断言范围**悄悄缩小**，从此恒绿。
+
+    所以统一读整包，断言语义与拆包前逐字等价。
+    """
+    from tests.backend.conftest import read_qianfan_source
+
+    return read_qianfan_source(ROOT)
+
+
+
 def _slice_between(source: str, start_marker: str, end_marker: str) -> str:
     """在两个标记之间切片。
 
@@ -5959,7 +5975,7 @@ def test_config_step2_fetches_properties_by_category_id():
     api = _read(ROOT / "frontend/src/lib/api.ts")
     assert "property-config" in api, "属性端点没接"
     #: 端点后端必须调 getCategoryProperty
-    q = _read(ROOT / "backend/app/api/platforms/xhs/qianfan.py")
+    q = _read_qianfan()
     assert '"action": "getCategoryProperty"' in q, "后端没有调 getCategoryProperty"
 
 
@@ -6026,7 +6042,7 @@ def test_config_step2_generates_from_the_platform():
     assert '"action": "generateItemShortTitle"' in sdk, "SDK 没调 generateItemShortTitle"
     assert "def generate_item_short_title" in sdk, "SDK 没有该方法"
     #: 端点确实接了它
-    q = _read(ROOT / "backend/app/api/platforms/xhs/qianfan.py")
+    q = _read_qianfan()
     assert "generate_item_short_title" in q, "端点没调 SDK 的短标题方法"
 def test_step2_delivery_mode_switches_the_time_fields():
     """**发货模式联动时间字段**（设计 28 第一节，真机实测）。
@@ -6688,7 +6704,7 @@ def test_step2_spec_value_input_matches_dimension_metadata():
     """
     code = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
     #: ① 后端 _normalize 补 customizable（qianfan.py）
-    py = _read(ROOT / "backend/app/api/platforms/xhs/qianfan.py")
+    py = _read_qianfan()
     assert '"customizable": bool(item.get("customizable")),' in py, "后端应搬 customizable 字段"
     #: ② 前端类型补 customizable（types/index.ts）
     types = _read(ROOT / "frontend/src/types/index.ts")
@@ -6768,7 +6784,7 @@ def test_step2_property_area_splits_key_and_other():
     assert "暂无其他属性" in code, "缺其他属性空态说明"
     assert "请先在上一步选择商品类目" in code, "未选类目时缺原因行"
     #: ④ 佐证「关键属性 = 必填属性」这一真机判据（后端 importantProp 恒 false）
-    q = _read(ROOT / "backend/app/api/platforms/xhs/qianfan.py")
+    q = _read_qianfan()
     #: ⚠️ 判据必须落在 **`key` 那一行**（`required` 行也有同样的表达式，
     #: 宽松判据会被它满足 ⇒ 哑弹。实测：只写 `requiredProp` 时变异抓不住）。
     assert '"key": bool(item.get("requiredProp"))' in q, \
@@ -6870,7 +6886,7 @@ def test_short_title_and_property_calls_pass_platform_required_params():
     assert "image_urls" in api, "前端属性预测请求函数缺 image_urls"
     assert "category_id: categoryId" in api, "前端短标题请求函数应传 category_id"
     #: 解析路径（真机字段落点）
-    q = _read(ROOT / "backend/app/api/platforms/xhs/qianfan.py")
+    q = _read_qianfan()
     assert "generatedShortTitle" in q, "短标题解析应用 generatedShortTitle"
     assert 'it.get("propertyValueList")' in q, "属性解析应用 propertyValueList（值是数组）"
 
@@ -7126,7 +7142,7 @@ def test_step2_after_sale_rule_comes_from_platform_by_category():
     #: 端点 + SDK + 请求函数三层都在
     api = _read(ROOT / "frontend/src/lib/api.ts")
     assert "fetchAfterSaleRules" in api, "缺售后规则请求函数"
-    q = _read(ROOT / "backend/app/api/platforms/xhs/qianfan.py")
+    q = _read_qianfan()
     assert "get_support_after_sale" in q, "端点未调 SDK 的售后规则方法"
     sdk = _read(ROOT / "apis/xhs_qianfan_apis.py")
     assert '"action": "getSupportAfterSale"' in sdk, "SDK 缺 getSupportAfterSale"
@@ -7139,7 +7155,7 @@ def test_video_upload_uses_its_own_scene_not_the_image_space():
     「获取上传文件[v]信息失败」—— 图片空间是**图片库**（条目 `type:2` 要 width/height）。
     真机 bundle 里「上传视频」是 `scene=common_file` 的独立直传，成功直接给 `{url,fileId}`。
     """
-    q = _read(ROOT / "backend/app/api/platforms/xhs/qianfan.py")
+    q = _read_qianfan()
     assert '"/video/upload"' in q, "缺视频直传端点"
     i = q.index("def video_upload")
     block = q[i : i + 3000]
@@ -7464,7 +7480,7 @@ def test_video_upload_uses_md5_name():
 
     唯一真相源在后端（`video_upload`）—— 无论前端传什么名，一律按内容 md5 命名。
     """
-    src = _read(ROOT / "backend/app/api/platforms/xhs/qianfan.py")
+    src = _read_qianfan()
     i = src.index('@router.post("/video/upload"')
     block = src[i : i + 2600]
     assert "hashlib.md5(raw).hexdigest()" in block, "视频应按内容 md5 命名"
@@ -7645,7 +7661,7 @@ def test_sale_time_has_price_confidential_default_off():
 
 def test_category_property_returns_support_no_logistics():
     """类目属性接口下发 `support_no_logistics`（物流类型与类目直接相关）。"""
-    src = _read(ROOT / "backend/app/api/platforms/xhs/qianfan.py")
+    src = _read_qianfan()
     i = src.index('"conditional_required_rules"')
     block = src[i : i + 400]
     assert '"support_no_logistics"' in block, "类目属性应下发 support_no_logistics"
@@ -8062,7 +8078,7 @@ def test_publish_request_accepts_step2_config_without_422():
 
     ⚠️ 当前只接收留档；逐项映射进 `itemData` 是下一步（需真机字段名 + 红线验证）。
     """
-    api = _read(ROOT / "backend/app/api/platforms/xhs/qianfan.py")
+    api = _read_qianfan()
     assert "config: dict[str, Any] = Field(default_factory=dict)" in api, (
         "发布请求体应接收 config（形状不定 ⇒ 不能收紧成固定模型，否则前端一多发就 422）"
     )
@@ -8091,7 +8107,7 @@ def test_publish_submits_step2_attributes_and_per_dimension_specs():
     根因：① `attributes` 直接抄**骨架**（= 上一个商品的属性）⇒ 用户填的从没进过提交体；
           ② 所有 SKU 行共用**第一个**规格 id ⇒ 多维规格塌成一维 ⇒ 平台判「重复规格」。
     """
-    api = _read(ROOT / "backend/app/api/platforms/xhs/qianfan.py")
+    api = _read_qianfan()
     svc = _read(ROOT / "backend/app/services/shop_item_publish_service.py")
     #: ① 端点把 config 里的 attributes / specAttributes 传下去
     assert 'attributes=payload.config.get("attributes") or None' in api, (
@@ -8248,7 +8264,7 @@ def test_publish_pipeline_has_the_latency_fixes():
     ②26 张图**串行**上传（每张 1 permit + 1 PUT）。
     """
     svc = _read(ROOT / "backend/app/services/shop_item_publish_service.py")
-    api = _read(ROOT / "backend/app/api/platforms/xhs/qianfan.py")
+    api = _read_qianfan()
     #: ① 轮询先查再睡（去掉每段固定的首个 3s 白等）
     assert "if attempt:\n            time.sleep(_PUBLISH_POLL_INTERVAL)" in svc, (
         "轮询应「先查再睡」（原实现每轮先 sleep(3) ⇒ 每段白等 3s）"
