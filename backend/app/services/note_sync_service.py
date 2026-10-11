@@ -2717,7 +2717,9 @@ def _sync_source(
         # 时间界：增量的下界是游标，用户自选区间的下界是 start_date（§23）。
         # 两者是 **and**：用户选「9-01 ~ 9-10」且账号有同步历史时，只会取
         # 「比游标新 **且** 落在 9-01~9-10」的行 —— 任何一边不满足都不该落库。
-        window_from = max(last_cursor_ms, time_from_ms) if incremental else time_from_ms
+        window_from = sts.resolve_incremental_scope(
+            incremental=incremental, cursor_ms=last_cursor_ms, time_from_ms=time_from_ms
+        )
         if window_from or time_to_ms:
             in_window, should_stop = filter_window_notes(items, window_from, time_to_ms)
             items = in_window
@@ -2972,7 +2974,9 @@ def _sync_with_task(
     # 否则自动模式永远选全量 —— 见下面 `if cursor_advanced` 的注释）。
     last_cursor_ms = sts.load_note_cursor(db, account.id) if incremental else 0
     # §27 对账范围 = 本次同步范围（在游标被推进**之前**取，推进后取到的是新游标）。
-    scope_from_ms = max(last_cursor_ms, time_from_ms) if incremental else time_from_ms
+    scope_from_ms = sts.resolve_incremental_scope(
+        incremental=incremental, cursor_ms=last_cursor_ms, time_from_ms=time_from_ms
+    )
     scope_to_ms = time_to_ms
 
     cursor_note_id = ""

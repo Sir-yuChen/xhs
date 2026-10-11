@@ -615,3 +615,82 @@ def _seed_account_with_shop(db, account_id: int = 1) -> None:
         )
     )
     db.commit()
+
+# --------------------------------------------------------------------------- #
+# §23b 增量下界 = max(游标, 自选起始日) —— **唯一实现**（2026-10-11 SSOT 收敛）
+# --------------------------------------------------------------------------- #
+class TestIncrementalScopeIsSingleSourceOfTruth:
+    """这条规则原先在**四处**各写一遍（两处 `_sync_with_task` + 两处翻页窗口）。
+
+    ⚠️ 为什么值得守：漏取一段窗口是**静默**的 —— 不报错、不告警，
+    只在数据里慢慢体现成「某些笔记/商品没同步进来」。四份拷贝里改三份
+    是这类 bug 的典型形态，所以既要测行为，也要测「没有第二份实现」。
+    """
+
+    def test_non_incremental_returns_the_chosen_start(self):
+        from backend.app.services.sync_task_service import resolve_incremental_scope
+
+        #: 全量 / 自选区间 ⇒ 下界就是用户选的起点，**不能**被游标顶上去
+        #: （否则「同步 9-01~9-10」在有历史游标的账号上会静默变成「从游标起」）。
+        assert resolve_incremental_scope(
+            incremental=False, cursor_ms=9_000, time_from_ms=1_000
+        ) == 1_000
+
+    def test_incremental_takes_the_later_of_cursor_and_start(self):
+        from backend.app.services.sync_task_service import resolve_incremental_scope
+
+        #: 增量 ⇒ 两者是 **and**：比游标新 **且** 落在自选区间内。
+        #: 游标更晚 ⇒ 取游标（用户选的起始日早已覆盖过）。
+        assert resolve_incremental_scope(
+            incremental=True, cursor_ms=9_000, time_from_ms=1_000
+        ) == 9_000
+        #: 自选起点更晚 ⇒ 取起点（老游标不该把范围拉回去）。
+        assert resolve_incremental_scope(
+            incremental=True, cursor_ms=1_000, time_from_ms=9_000
+        ) == 9_000
+
+    def test_none_values_do_not_crash(self):
+        from backend.app.services.sync_task_service import resolve_incremental_scope
+
+        #: 游标列可能是 NULL（新账号）、自选起点可能是 None（只给了结束日）。
+        assert resolve_incremental_scope(
+            incremental=True, cursor_ms=None, time_from_ms=None  # type: ignore[arg-type]
+        ) == 0
+        assert resolve_incremental_scope(
+            incremental=False, cursor_ms=None, time_from_ms=None  # type: ignore[arg-type]
+        ) == 0
+
+    def test_no_second_copy_of_the_rule_in_sync_services(self):
+        """源码级：`max(游标, 起始日)` 只允许出现在**唯一实现**里。
+
+        ⚠️ 允许两处特例，都写明了原因：
+        ① `sync_task_service.py` 内 `resolve_incremental_scope` 自身；
+        ② docstring 里的示例代码（说明这条规则「原来张什么样」）。
+
+        其余任何地方再写出这个表达式 ⇒ 又攒出一份拷贝，本用例红。
+        """
+        import re
+
+        services = ROOT / "backend/app/services"
+        offenders: list[str] = []
+        for py in services.rglob("*.py"):
+            src = py.read_text(encoding="utf-8")
+            for lineno, line in enumerate(src.splitlines(), 1):
+                if not re.search(r"max\(\s*(last_)?cursor\w*\s*,", line):
+                    continue
+                if py.name == "sync_task_service.py":
+                    continue  # 唯一实现所在文件
+                offenders.append(f"{py.relative_to(ROOT)}:{lineno}  {line.strip()[:80]}")
+        assert offenders == [], (
+            "这些地方又自己算了一遍增量下界 —— 改用 "
+            f"`sync_task_service.resolve_incremental_scope()`：{offenders}"
+        )
+
+    def test_the_single_implementation_is_actually_used_by_both_services(self):
+        """反向：两个同步服务都必须**调用**唯一实现，不是各留一份等价代码。"""
+        for rel in ("note_sync_service.py", "shop_goods_sync_service.py"):
+            src = (ROOT / "backend/app/services" / rel).read_text(encoding="utf-8")
+            assert "sts.resolve_incremental_scope(" in src, (
+                f"{rel} 没有调用唯一实现 —— 它可能又自己算了下界"
+            )
+

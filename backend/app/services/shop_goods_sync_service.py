@@ -388,7 +388,9 @@ def _sync_with_task(
     # 增量游标（毫秒）。0 = 未同步过 → 走全量。见 §17.9 / D13。
     last_cursor_ms = sts.load_goods_cursor(db, account.id) if incremental else 0
     # §27 对账范围 = 本次同步范围（在游标被推进**之前**取）。
-    scope_from_ms = max(last_cursor_ms, time_from_ms) if incremental else time_from_ms
+    scope_from_ms = sts.resolve_incremental_scope(
+        incremental=incremental, cursor_ms=last_cursor_ms, time_from_ms=time_from_ms
+    )
     scope_to_ms = time_to_ms
     # ⚠️ **增量模式的对账上界要在本轮跑完后收敛**（2026-09-23）：
     # 增量翻到「本页全是旧行」就早停了（那是**追平**，不是**翻完**），根本没有
@@ -462,7 +464,12 @@ def _sync_with_task(
         # §23：用户自选时间区间。起点取「游标」与「自选起始日」里**更晚**的那个 ——
         # 增量是「从游标往后」，区间是「夹在起止日之间」，两者是 and 不是 or。
         # ⚠️ 平台参数单位是**秒**且按 `>=` 比较（DEF-045）：毫秒下界必须 `//1000 + 1`。
-        effective_from_ms = max(last_cursor_ms, time_from_ms)
+        #: ⚠️ 这一处原来省掉了 `if incremental` 门（只在增量分支里执行，等价）。
+        #: 走唯一实现时把 `incremental=True` 显式传进去 —— 等价，且以后
+        #: 有人把这段挪出增量分支时，语义仍然正确（不会静默变成「全用自选下界」）。
+        effective_from_ms = sts.resolve_incremental_scope(
+            incremental=True, cursor_ms=last_cursor_ms, time_from_ms=time_from_ms
+        )
         window_from = (effective_from_ms // 1000 + 1) if effective_from_ms > 0 else None
         success, message, raw_payload = adapter.search_items(
             page_no=page_no,

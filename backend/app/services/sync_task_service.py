@@ -267,6 +267,35 @@ def resolve_time_window(scope: Any, start_date: Any, end_date: Any) -> tuple[int
 
 
 
+def resolve_incremental_scope(
+    *,
+    incremental: bool,
+    cursor_ms: int,
+    time_from_ms: int,
+) -> int:
+    """增量同步的**下界**（毫秒）—— `max(游标, 用户自选起始日)`；非增量 ⇒ 原样返回自选起点。
+
+    ## 为什么要有这个函数（2026-10-11，SSOT 收敛）
+
+    这条规则原先在**四个地方**各写了一遍，全是同一个表达式::
+
+        scope_from_ms = max(last_cursor_ms, time_from_ms) if incremental else time_from_ms
+
+    两处 `_sync_with_task`（笔记 / 商品）、一处笔记的翻页窗口、一处商品翻页的
+    `effective_from_ms` —— 最后一处连 `if incremental` 都省了（它只在增量分支里执行，
+    等价）。而它上游的 `load_note_cursor` / `load_goods_cursor` 本身就已经是在抽
+    同一规则的两个方言版本。
+
+    ⚠️ 这是**「增量从游标起，用户自选区间的下界也要满足，两者是 and 不是 or」**
+    这条口径的唯一实现。要改判定就改这里，别再就地改调用点 ——
+    四份拷贝里改三份的最坏结果是**同步静默漏数据**（少取一段窗口），
+    它不报错，只在数据里慢慢体现。
+    """
+    if not incremental:
+        return int(time_from_ms or 0)
+    return max(int(cursor_ms or 0), int(time_from_ms or 0))
+
+
 def load_note_cursor(db: Session, account_id: int) -> int:
     """上次成功同步的最大 ``publish_time``（**毫秒**），缺值/未同步过返回 0。
 
