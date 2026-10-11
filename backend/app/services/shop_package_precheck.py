@@ -32,7 +32,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from backend.app.services import image_ocr_service as ocr
 from backend.app.services.shop_draft_package import (
     DIR_DETAIL,
     DIR_MAIN,
@@ -40,9 +39,8 @@ from backend.app.services.shop_draft_package import (
     DIR_VIDEO,
     IMAGE_EXTS,
     MAX_IMAGE_BYTES,
-    VIDEO_EXTS,
     PackageError,
-    _is_attribute_image,
+    VIDEO_EXTS,
 )
 
 logger = logging.getLogger(__name__)
@@ -103,8 +101,6 @@ class PrecheckMedia:
     rel_path: str
     file_name: str
     size_bytes: int
-    #: 属性图这类非商品图会被标出来（不混进主图/详情图）。
-    is_attribute_image: bool = False
     #: 超过平台 5M 上限（**不静默丢弃**，前端要显示并默认不勾选）。
     oversized: bool = False
     #: 扩展名不在白名单（非图片被放进媒体目录时）。
@@ -117,7 +113,6 @@ class PrecheckMedia:
             "rel_path": self.rel_path,
             "file_name": self.file_name,
             "size_bytes": self.size_bytes,
-            "is_attribute_image": self.is_attribute_image,
             "oversized": self.oversized,
             "unsupported": self.unsupported,
         }
@@ -138,9 +133,6 @@ class PrecheckTable:
     #: ⚠️ **来源 xlsx 的文件名**（用户口径 2026-10-08：「表格顶部新增文件名称」）。
     #: 表名只说清是哪个 sheet，一个包里可能有多个 xlsx ⇒ 必须能看出出自哪份文件。
     source_file: str = ""
-    #: 「商品属性图」OCR 出来的 **KV 对**（用户口径 2026-10-09：属性图用 KV 展示）。
-    #: 非属性表为 `None` ⇒ 前端据此走**表格**渲染；有值 ⇒ 走 **KV** 渲染 + 可编辑。
-    kv: list[dict[str, str]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -149,7 +141,6 @@ class PrecheckTable:
             "columns": list(self.columns),
             "rows": [list(r) for r in self.rows],
             "source_file": self.source_file,
-            "kv": [dict(item) for item in self.kv] if self.kv is not None else None,
         }
 
 
@@ -221,6 +212,13 @@ def _scan_media(stage_root: Path) -> tuple[list[PrecheckMedia], list[str]]:
         group = group_of_rel_path(rel)
         if group is None:
             continue  # 区域外的文件（如根目录的 xlsx）不当作媒体
+        #: ⚠️ 用户口径 2026-10-11（**最终版，撤销本批次中间那版「排除属性图」**）：
+        #: 「**数据包中有什么媒体资源就展示什么，不要排除任何媒体资源**」。
+        #: ⇒ 媒体清单 = 数据包里的**全部**媒体文件，一个不减（含属性图 / 参数图）。
+        #:
+        #: ⚠️ 与「删除图片 OCR 建表」不冲突 —— 那是**表格产出**的事（见
+        #: `TestImageToTableOcrIsGone`：`build_table_from_boxes` 已整段移除）。
+        #: 本次撤销的只是「按文件名把图排除出媒体清单」这一步。
         suffix = path.suffix.lower()
         exts = VIDEO_EXTS if group == "video" else IMAGE_EXTS
         by_group[group].append(
@@ -230,7 +228,6 @@ def _scan_media(stage_root: Path) -> tuple[list[PrecheckMedia], list[str]]:
                 rel_path=rel,
                 file_name=path.name,
                 size_bytes=path.stat().st_size,
-                is_attribute_image=_is_attribute_image(path.name),
                 oversized=path.stat().st_size > MAX_IMAGE_BYTES,
                 unsupported=suffix not in exts,
             )
@@ -313,49 +310,18 @@ def _read_tables(stage_root: Path) -> tuple[list[PrecheckTable], list[str]]:
     return tables, warnings
 
 
-def _read_attribute_table(stage_root: Path) -> tuple[list[PrecheckTable], list[str]]:
-    """把「商品属性图」OCR 成**一张表格**（用户口径 2026-10-09）。
-
-    属性图是一张参数表截图（不来自 xlsx）⇒ 单独 OCR + 几何还原成行列，
-    作为 `tables` 里的**一张**表透出（前端在新页签里展示、可编辑）。
-
-    ⚠️ 不猜：识别失败 / 还原不出行列 ⇒ 返回空表 + 一条 warning，
-    不伪造一张空表格（否则用户以为包里真有这张表）。
-    """
-    attr_images = [
-        p for p in stage_root.rglob("*")
-        if p.is_file() and p.suffix.lower() in IMAGE_EXTS and _is_attribute_image(p.name)
-    ]
-    if not attr_images:
-        return [], []
-
-    target = sorted(attr_images, key=lambda p: p.name.lower())[0]
-    result = ocr.scan_attribute_table(str(target))
-    if not result.get("ok"):
-        return [], [
-            f"「{target.name}」未能识别出属性表格（{result.get('reason') or '未知原因'}），"
-            "请自行核对属性值",
-        ]
-
-    columns = list(result["columns"])
-    rows = [[str(c) for c in row] for row in result["rows"]]
-    kv = [dict(item) for item in (result.get("kv") or [])]
-    return [
-        PrecheckTable(
-            title=f"商品属性表（{target.stem}）",
-            sheet_name=target.stem,
-            columns=columns,
-            rows=rows,
-            source_file=target.name,
-            kv=kv,
-        )
-    ], []
-
-
 def precheck_package(stage_root: str | Path, package_name: str = "") -> PrecheckResult:
     """对**已上传到暂存目录**的数据包做预检（纯本地，零平台请求）。
 
     `stage_root` 是前端逐文件上传后落盘的目录（结构与用户本地目录一致）。
+
+    ⚠️ **不对图片做 OCR 建表**（用户口径 2026-10-11 最终版）：
+    「对图片 OCR → 再用词框几何还原成行列」这条路已**整段移除**
+    （`build_table_from_boxes` 连同 `_squeeze` / `_merge_cell` 一并删除）。
+    预检的 `tables` **只来自数据包里的 xlsx**（表头是 xlsx 的原值，不是 `列N` 兜底名）。
+
+    ⚠️ 媒体清单**不排除任何文件** —— 数据包里有什么媒体就展示什么
+    （含 `商品属性图.png`）；后者照常进**违规词** OCR（红线），只是不再产出表格。
     """
     root = Path(str(stage_root))
     if not root.is_dir():
@@ -363,12 +329,9 @@ def precheck_package(stage_root: str | Path, package_name: str = "") -> Precheck
 
     media, media_warnings = _scan_media(root)
     tables, table_warnings = _read_tables(root)
-    #: 属性图是**图**不是 xlsx ⇒ 单独 OCR 成一张表，并到 `tables` 尾部
-    #: （前端在新页签里展示、可编辑 —— 用户口径 2026-10-09）。
-    attr_tables, attr_warnings = _read_attribute_table(root)
     return PrecheckResult(
         package_name=package_name or root.name,
         media=media,
-        tables=[*tables, *attr_tables],
-        warnings=[*media_warnings, *table_warnings, *attr_warnings],
+        tables=tables,
+        warnings=[*media_warnings, *table_warnings],
     )

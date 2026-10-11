@@ -69,6 +69,8 @@ def _load_yaml_config() -> Dict[str, Any]:
         # 同步并行账号数（设计 13 §38.3，2026-09-27）：同一账号始终串行（账号级互斥），
         # 并行只发生在**账号之间**。运行期可在设置页改（system_settings 行覆盖本值）。
         "xhs.sync.account_parallelism": "xhs_sync_account_parallelism",
+        "xhs.sync.image_upload_parallelism": "xhs_image_upload_parallelism",
+        
         # 平台请求限流（次/分钟，按 `<账号>:<源>` 键计量；等待式，不即停）。
         # DEF-069 提速（2026-09-25）：原实现没有这一项，额度实际落到
         # `scheduler_interval_seconds`（60）兜底 —— 语义混乱且改不动。
@@ -209,6 +211,16 @@ class Settings(BaseSettings):
     #    随包种子已按用户铺设 `system_settings` 行，正常安装路径下读的是那一行
     #    （设置页可改、改完立即生效）。
     xhs_allow_duplicate_goods_publish: bool = False
+
+    # 媒体上传并发数（设计 24 §22，2026-10-11 用户口径：「方案 B，并发数默认 5，
+    # 支持在 config 表配置」）。
+    # ⚠️ 为什么敢并发：上传是**两段式** —— ① `upload/web/permit` 打小红书（**整批只 1 次**）；
+    #    ② PUT 字节打 ROS/COS **对象存储**（`https://<uploadAddr>/<fileId>`，不是小红书域名）。
+    #    单张 ~2.5s 的耗时基本全在 ② ⇒ 并发第二节**不产生平台请求**。
+    #    平台自身证据：笔记发布链路 `note_publish_service._upload_media` 早已
+    #    `upload_web_permit(len(downloaded))` 一次批量申请 N 个上传位。
+    # ⚠️ 运行期可在设置页改（`system_settings` 行优先于本值）。
+    xhs_image_upload_parallelism: int = 5
 
     # Asset storage
     asset_storage_type: str = "local"

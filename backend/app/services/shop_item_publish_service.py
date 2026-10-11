@@ -347,8 +347,11 @@ def publish_item(
 ) -> dict[str, Any]:
     """**提交商品并（红线）立刻下架** 的完整执行链（设计 24 §4.2）。
 
-    ⚠️ `off_shelf_after` 默认 `True`（红线）。显式传 `False` 只用于
-    「发布前后对比」类测试，**生产路径恒 True**。
+    ⚠️ `off_shelf_after` 默认 `True`（保守：不传就下架）。
+    ⚠️ 2026-10-11 用户**明确取消红线**：`False` 成为**正式业务值**
+    （前端「发布商品」按钮 = 直接上架、发布后不再下架）。
+    原句「显式传 `False` 只用于『发布前后对比』类测试，**生产路径恒 True**」
+    **已被取代** —— 保留于此以标记口径变更的边界（设计 24 §23）。
 
     返回 `{published, item_id, off_shelf, task_id, fail_reasons[]}`。
     """
@@ -397,6 +400,32 @@ def publish_item(
     if any("specImage" not in s for s in item_body.get("skuData") or []):
         item_body["mainSpecEnable"] = 0
     payload = pub.build_publish_payload([item_body])
+    #: ⚠️ **转储实际发出的发布体**（2026-10-11）：排查「发布后商品是已下架状态」时，
+    #: 必须看**我们到底发了什么**。`itemData[0]` 的顶层键与关键上架相关字段全打出来。
+    try:
+        _body0 = (payload.get("itemData") or [{}])[0]
+        logger.warning(
+            "[publish_item] 发布体转储 | 顶层键(%d)=%s",
+            len(_body0),
+            sorted(_body0.keys()),
+        )
+        for _k in (
+            "isAutoOffShelf", "autoOffShelfTime", "shelfTime", "saleTime",
+            "expectedPurchaseTime", "deliveryMode", "stockType", "itemStatus",
+            "available", "quantity", "skuData",
+        ):
+            if _k in _body0:
+                _v = _body0[_k]
+                if _k == "skuData" and isinstance(_v, list):
+                    _v = f"<{len(_v)} 条> 首条可用={(_v[0].get('available') if _v else None)}"
+                logger.warning("[publish_item]   发布体.%s = %r", _k, _v)
+        logger.warning(
+            "[publish_item] 发布体转储结束 | 缺失的上架相关键 = %s",
+            [k for k in ("isAutoOffShelf", "autoOffShelfTime", "shelfTime", "expectedPurchaseTime")
+             if k not in _body0],
+        )
+    except Exception as _dump_err:  # noqa: BLE001 —— 转储失败不能影响发布
+        logger.warning("[publish_item] 发布体转储失败：%r", _dump_err)
     ok, msg, resp = api.submit_item(payload)
     task_id = str(((resp or {}).get("data") or {}).get("taskId") or "") if isinstance(resp, dict) else ""
     if not ok or not task_id:
@@ -423,6 +452,15 @@ def publish_item(
         target_ids = [found] if found else []
     if len(target_ids) == 1:
         result["item_id"] = target_ids[0]
+    #: ⚠️ **下架分支的判据必须留痕**（真机排查「点发布商品却仍被下架」的核心一步）：
+    #: 这行打出 `off_shelf_after`（开关）与 `target_ids`（有对象可下架）——
+    #: 若开关是 False 却进来了，说明代码判据写错；若压根没这行，说明确实没下架。
+    logger.warning(
+        "[publish_item] 下架判定 | off_shelf_after=%r | target_ids=%s | 将下架=%s",
+        off_shelf_after,
+        target_ids,
+        bool(off_shelf_after and target_ids),
+    )
     if off_shelf_after and target_ids:
         ok2, msg2, resp2 = api.set_items_availability(target_ids, available=False)
         off_task = str(((resp2 or {}).get("data") or {}).get("taskId") or "") if isinstance(resp2, dict) else ""

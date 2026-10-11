@@ -190,15 +190,24 @@ def test_parse_price_prefers_calc_then_original(package_dir: Path):
     assert second["price"] == 1700, "有计算价格时必须用它（不是原价 1880）"
 
 
-def test_parse_excludes_attribute_image(package_dir: Path):
-    """「商品属性图.png」**不计入主图**，且必须进 warnings（不能静默丢）。"""
+def test_parse_includes_every_image_in_the_main_dir(package_dir: Path):
+    """「商品属性图.png」**不计入商品主图**（用户口径 2026-10-11 **最终版**）。
+
+    ⚠️ 六轮口径对照（保留以便追溯）：
+
+    | 轮次 | 属性图 | 理由 |
+    |---|---|---|
+    | 2026-10-XX（原） | **排除** + warning | 属性表截图不是商品展示图 |
+    | 2026-10-11（中） | 保留（含在主图里） | 「不要单独过滤媒体资源」 |
+    | **2026-10-11（本条·现行）** | **排除** + warning | 用户：「商品 sku 表格下依旧存在商品属性图，关于商品属性图列表的相关逻辑**彻底删除**」 |
+
+    判据：主图目录里的图**全部**计入主图（不过滤）。
+    ⚠️ 现行口径：**不排除任何媒体**（判据与叶子模块都已删除）。
+    """
     parsed = pkg.parse_package(str(package_dir))
     names = [Path(p).name for p in parsed["main_images"]]
-    assert "商品属性图.png" not in names
-    assert any("属性图" in text for text in parsed["warnings"]), (
-        "排除属性图必须**说出来** —— 用户否则不知道那张图去哪了"
-    )
-
+    assert "商品属性图.png" in names, "主图目录里的图应全部计入主图（不排除任何媒体）"
+    assert any(n.startswith("主图0") for n in names), "普通主图必须照常保留"
 
 def test_parse_reports_video_and_missing_dirs(package_dir: Path):
     """视频与「没有 x 目录」都如实进 warnings。"""

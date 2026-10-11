@@ -20,6 +20,7 @@ import re
 import os
 import re
 import subprocess
+import re as _re
 from pathlib import Path
 
 import pytest
@@ -42,6 +43,7 @@ SETTINGS = ROOT / "frontend/src/pages/settings/settings-page.tsx"
 #: （预检 → 配置商品参数+预览 → 发布）。两个旧文件已删除，守卫统一指向它。
 PUBLISH_MODAL = ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"
 PRECHECK_MODAL = PUBLISH_MODAL
+STEP2 = ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"
 #: 纯映射模块（有 vitest，但**接线**要在源码层守：组件里必须真的调它）。
 PRECHECK_MAP = ROOT / "frontend/src/lib/precheck-publish.ts"
 
@@ -349,9 +351,25 @@ def test_shop_items_page_follows_the_2026_09_23_review():
     # ④ 只有「上架时间」列可排：箭头接线恰好一处（表头有箭头 = 后端真会按它排）
     assert code.count("sorter: true") == 1, "只有「上架时间」列可排，其它列不给箭头"
     assert code.count("sortOrderFor(") == 1, "箭头激活态接线同样只该有一处"
-    # ⑤ 搜索条件两行、按钮组右对齐收尾（不再散在两行各占一列）；挂链笔记数筛选在列
-    assert code.count("<Row gutter={12}>") == 2, "搜索条件应恰好两行排完"
-    assert 'justifyContent: "flex-end"' in code, "搜索 / 重置等按钮应排在条件最后（右对齐）"
+    # ⑤ 搜索条件折叠（2026-10-11 用户口径「参考 antd 相关组件，默认展示一行支持折叠，
+    #    默认为折叠」「搜索区域应与上图类似布局」「搜索区域使用卡片」）：
+    #    * 用 antd `Form layout="inline"`（label 与控件同行，一行排不下自动换行）；
+    #    * 折叠 = `{searchExpanded ? ... : null}` **条件式渲染**，初值 false（默认折叠）；
+    #    * 所有条件控件统一 180px（同轮口径「所有搜索条件输入框 180px」）。
+    #    ⚠️ 原先两条断言随之失效：①「恰好两个 `<Row gutter={12}>`」是按「两行排完」量的，
+    #    现在用 `inline` 自动换行，行数不再是口径；②`Collapse` 组件形态已换成条件式渲染。
+    assert 'layout="inline"' in code, (
+        "搜索区应改用 antd `Form layout=\"inline\"`（label 与控件同行 —— 用户口径）"
+    )
+    assert "const [searchExpanded, setSearchExpanded] = useState(false);" in code, (
+        "折叠开关初值必须是 false（用户口径「默认为折叠」）"
+    )
+    assert "{searchExpanded ? (" in code and "更多筛选" in code and "收起" in code, (
+        "折叠应由「更多筛选 / 收起」切换的**条件式渲染**实现（展开态才出追加条件）"
+    )
+    assert code.count("style={{ width: 180 }}") >= 8, (
+        "所有搜索条件控件应为 180px（同轮口径：账号 / 关键词 / 状态 / 三个区间 / 挂链笔记数 / 创建时间）"
+    )
     assert 'name="note_count_op"' in code and 'name="note_count"' in code, (
         "搜索条件应有「挂链笔记数」比较符 + 篇数（v1.34 / §33.6）"
     )
@@ -3774,9 +3792,16 @@ def test_every_modal_is_vertically_centered():
             total += 1
             if "centered" in lines[st]:
                 continue  # 同行形态：<Modal centered open={...}>
+            #: ⚠️ 结束判据必须要求 `>` 出现在**行尾**（`>\s*$`）。
+            #: 旧写法 `(?<!/)>` 会被 JSX 表达式内部的 `>` 提前命中 ——
+            #: 例如 `onCancel={() => setUploadDetailOpen(null)}` 里 `=>` 的那个 `>`，
+            #: 会让块在第 3 行就「结束」，于是后面几行的 `centered` 看不见 ⇒ **假报未居中**
+            #: （2026-10-11 实测踩到：新加的详情弹窗明明写了 centered 却报缺失）。
             end = st
-            while end < len(lines) and not _re.search(r"(?<!/)>", lines[end]):
+            while end < len(lines) and not _re.search(r"[^=]>\s*$", lines[end]):
                 end += 1
+            #: 兜底：万一整段都没找到「行尾 >」，就用文件末行（避免 end 越界）。
+            end = min(end, len(lines) - 1)
             block = "\n".join(lines[st : end + 1])
             if not any(ln.strip() == "centered" for ln in lines[st : end + 1]):
                 offenders.append(f"{f.name}:{st + 1}")
@@ -5269,7 +5294,10 @@ def test_publish_wizard_is_step_wise_with_antd_steps():
     #: ⚠️ 不数 `<Modal` 总数 —— 大图预览也是一个 Modal，那是正当的第二个。
     main = src.index("title=\"发布商品\"")
     steps = src.index("<Steps")
-    assert abs(main - steps) < 2000, "Steps 和主弹窗离得太远（可能被拆到别的组件里）"
+    #: ⚠️ 阈值由 2000 放宽到 6000（2026-10-11）：判据本意是「Steps 与主弹窗**同组件**」，
+    #: 用字符距离只是近似。提交按钮拆成两个（+Popconfirm）后这里长了约 1200 字符，
+    #: 原阈值变成假红。真判据是上面那句「同处一个组件」——Steps 必须在本文件内。
+    assert abs(main - steps) < 6000, "Steps 和主弹窗离得太远（可能被拆到别的组件里）"
 
 
 def test_publish_wizard_step_two_merges_the_two_qianfan_pages():
@@ -5319,28 +5347,54 @@ def test_publish_wizard_does_not_hard_require_the_old_parsed_package():
     assert "parseItemDraftPackage" not in src, "向导不该再走服务器本地目录解析"
 
 
-def test_publish_wizard_never_sends_off_shelf_after_false():
-    """⚠️ 红线：发布成功必须立即下架。前端**不得**传 `off_shelf_after: false`。"""
+def test_publish_wizard_sends_off_shelf_after_only_via_the_button_param():
+    """⚠️ **口径已反转**（2026-10-11 用户**取消红线**）。
+
+    原条（保留对照）：「⚠️ 红线：发布成功必须立即下架。前端**不得**传
+    `off_shelf_after: false`」+ 断言「前端不许出现 off_shelf_after」。
+    该口径**已被取代** —— 提交按钮拆成「发布商品（不下架）」/「发布并下架商品」，
+    前端**必须**显式传 `off_shelf_after` 才能区分两个动作。
+
+    ⇒ 现行判据：`off_shelf_after` 的取值**只能来源**于 `submit` 的按钮参数
+    （`shelfAfterPublish`），不许页面里再冒出一个写死的 `off_shelf_after: true/false`
+    （那会让某个按钮的行为与标签不符）。
+    """
     code = _code_only(_src(PUBLISH_MODAL))
-    assert "off_shelf_after" not in code, "前端不许出现 off_shelf_after（保持后端默认 true）"
+    assert "off_shelf_after: shelfAfterPublish" in code, (
+        "off_shelf_after 必须来自 submit 的按钮参数"
+    )
+    #: 写死值只允许出现在 `submit(false)` / `submit(true)` 这两个调用点（那是按钮实参，
+    #: 由 `test_publish_buttons_are_split…` 逐一对语义）。这里只保证**没有第三个来源**。
+    assert "off_shelf_after: true" not in code and "off_shelf_after: false" not in code, (
+        "不许在页面里写死 off_shelf_after 的布尔值（只能经 shelfAfterPublish 透传）"
+    )
 
 
 def test_publish_wizard_has_save_draft_button_in_step3():
     """**「保存草稿」按钮在第三步**（用户口径 2026-10-10：千帆发布页底部有
     「保存草稿」次按钮 +「提交商品」主按钮；本弹窗补「保存草稿」，放第三步）。
 
-    判据：① 第三步（`step === 2`）分支里有「保存草稿」+「确认发布」两按钮；
+    判据：① 第三步（`step === 2`）分支里有「保存草稿」；
     ② 走后端 `createItemDraft`（只到草稿箱、不上架），**不**走 `publishShopItem`。
+    ⚠️ 2026-10-11：原判据里的「+『确认发布』」**已随按钮拆分退场** ——
+    第三步现在是「保存草稿 + 发布商品 + 发布并下架商品」三按钮
+    （拆分正确性由 `test_publish_buttons_are_split_with_tip_confirm_and_the_right_colors` 钉）。
     """
     code = _code_only(_src(PUBLISH_MODAL))
     assert "saveDraft" in code, "缺保存草稿逻辑"
     assert "await createItemDraft({" in code, "保存草稿应真调用 createItemDraft（只到草稿箱）"
     assert "保存草稿" in code, "缺「保存草稿」按钮文案"
     #: 按钮在第三步（`step === 2` 分支内，与「确认发布」并列）
-    step3 = code[code.index("{step === 2 && ("): code.index("</Steps>") if "</Steps>" in code else len(code)]
+    step3 = code[code.index("{step === 2 && ("):]
+    step3 = step3[: step3.index("</Steps>")] if "</Steps>" in step3 else step3
     assert "保存草稿" in step3, "「保存草稿」按钮应在第三步"
-    #: 红线：保存草稿绝不触发发布
-    assert "void saveDraft()" in code and "void submit()" in code, "保存草稿与确认发布应是两个独立入口"
+    #: 保存草稿绝不触发发布（两个独立入口）。
+    #: ⚠️ 2026-10-11：`submit()` 现在带参数（`submit(false)` / `submit(true)`）——
+    #: 写死 `void submit()` 会假红。
+    assert "void saveDraft()" in code, "缺保存草稿入口"
+    assert "void submit(false)" in code and "void submit(true)" in code, (
+        "发布应是两个独立入口（发布商品 / 发布并下架商品）"
+    )
     #: 保存草稿蒙版 + 耗时（用户口径 2026-10-10：保存应与发布一样加蒙版统计耗时）
     assert "draftSaving" in code and "draftElapsedSec" in code, "保存草稿应有耗时统计 state"
     assert "正在保存草稿… 已耗时" in code, "保存草稿应加蒙版 + 实时耗时文案"
@@ -6114,6 +6168,436 @@ def test_step2_publish_helper_panel_exists():
     assert "Tooltip" in code, "超长提示应走 Tooltip"
     assert "publishHints" in code, "发布提示未按实时校验计算"
     assert ".publish-helper" in css, "缺面板样式"
+def test_spec_image_thumb_is_a_sibling_not_an_input_prefix():
+    """**规格图不能挂在输入框 `prefix` 里**（用户实测 2026-10-11）。
+
+    现象：「商品规格输入框文本过多时，向右走会将规格图挤掉，再回到最左侧时，
+    规格图也无法展示」。
+
+    根因：`ant-input-prefix` 是**输入框内部**的一个 span，随文本一起横向滚动
+    ⇒ 文本一长就把图顶出可视区，滚回来也未必复原。
+
+    ⇒ 判据两条（缺一条就重现）：
+      ① 缩略图渲染在 `.spec-value-item` 里（输入框的**兄弟**），不在 `prefix={...}`；
+      ② CSS 里图是 `flex: 0 0 ...`（固定，不被文本挤动）。
+    """
+    code = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    css = _read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.css")
+    #: ① 不许再把规格图塞进 prefix。
+    assert "prefix={prefix}" not in code, (
+        "规格图不得再作为 `prefix` 传入 —— prefix 在输入框**内部**，会随文本滚动被挤掉"
+    )
+    assert "prefix={thumb}" not in code, "同上：规格图不得挂 prefix"
+    #: 兄弟节点形态必须在（`.spec-value-item` 包 {thumb}{input}）。
+    assert 'className="spec-value-item"' in code, "规格图与输入框应是兄弟节点（.spec-value-item）"
+    #: ② CSS：图固定不缩。
+    assert ".spec-value-item > .spec-value-thumb" in css, "缺「框外固定缩略图」样式"
+    blk = css[css.index(".spec-value-item > .spec-value-thumb"):]
+    blk = blk[:blk.index("}")]
+    #: ⚠️ 判据要**同时**认「不缩」与「有固定宽度」：只查 `flex: 0 0` 会被
+    #: 「删掉 flex 但留着 width」的变异逃掉（实测逃逸一次）。
+    assert "flex: 0 0" in blk and "width: 22px" in blk, (
+        "缩略图必须既固定尺寸（width）又 `flex: 0 0`（不被挤）—— 否则长文本会把它挤走"
+    )
+    #: 反向：图中不允许出现会让它被压缩的写法。
+    assert "flex: 0 1" not in blk and "flex-shrink: 1" not in blk, (
+        "缩略图不许可收缩（否则长文本会把它挤扁/挤走）"
+    )
+
+
+def test_spec_import_uploads_images_concurrently_but_still_cancellable():
+    """**规格图导入并发上传** + **取消仍真中断**（用户口径 2026-10-11 两条同时成立）。
+
+    ⚠️ 这两条**会互相打架**：改成并发最容易顺手把「取消检查」丢掉（并发回调里
+    `useState` 是闭包快照，看不见最新值）⇒ 用户点取消后剩下的图还在传。
+    ⇒ 判据必须同时钉：
+      ① 有 worker pool（`Promise.all` + 多 worker），不是 `for...await` 串行；
+      ② 取消标志仍是 **`useRef`**（不是 `useState`）；
+      ③ worker **领活前**检查标志（`if (importCancelRef.current) return;` 在取 `cursor` 之前）。
+    """
+    code = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    assert "SPEC_IMAGE_UPLOAD_CONCURRENCY" in code, "规格图上传应有并发常量"
+    #: ⚠️ 只查 `worker` 字面量太弱（加个注释就能骗过 —— 实测逃逸）。
+    #: 判据改成「**串行循环必须不存在**」+「worker pool 必须存在」两头夹。
+    seg_all = code[code.index("SPEC_IMAGE_UPLOAD_CONCURRENCY"):]
+    seg_all = seg_all[: seg_all.index("const cancelled = importCancelRef.current")]
+    assert "Promise.all(" in seg_all, "规格图上传应是 worker pool + Promise.all"
+    #: ⚠️ 光有 `Promise.all` 不够（实测逃逸两次）：
+    #:  ① 「只起 1 个 worker」= 假并发（`Promise.all([worker()])`）⇒ 必须并发度
+    #:     由常量决定：`Math.min(CONCURRENCY, total)`；
+    #:  ② 「worker 里不循环」= 每个 worker 只干一项 ⇒ 实际并发 = 项数或 1，
+    #:     必须 `for (;;)` 反复领活。
+    assert "Math.min(CONCURRENCY, total)" in seg_all, (
+        "并发度必须由 `SPEC_IMAGE_UPLOAD_CONCURRENCY` 决定（写成 1 就是假并发）"
+    )
+    assert "for (;;)" in seg_all, (
+        "worker 必须循环领活（不循环 ⇒ 每 worker 只干一项，并发度名存实亡）"
+    )
+    #: 取消必须是 ref（state 在并发回调里读不到最新值）。
+    assert "importCancelRef" in code, "取消标志必须是 ref"
+    assert "useRef(false)" in code, "取消标志必须用 useRef（不是 useState）"
+    #: 领活前先查取消标志。
+    seg = code[code.index("const worker = async () =>"):]
+    seg = seg[: seg.index("const CONCURRENCY") if "const CONCURRENCY" in seg else 1200]
+    assert "importCancelRef.current" in seg, "worker 里没有检查取消标志 ⇒ 取消后还在传"
+    idx_cancel = seg.index("importCancelRef.current")
+    idx_cursor = seg.index("const i = cursor;")
+    assert idx_cancel < idx_cursor, (
+        "取消检查必须在**领活之前**（先取 cursor 再检查 = 取消后还会多传一张）"
+    )
+
+
+def test_concurrent_upload_preserves_order_and_reports_per_image():
+    """并发上传必须**保序** + **逐张留结果**（用户口径 2026-10-11）。
+
+    > 「并发上传图片时不要打乱图片的顺序，应保证最后拿到的图片顺序与上传前保持一致」
+    > 「已上传 14 张详情图…应上传 38 张，缺少的不知道是哪些张」
+    > 「新增一个详情点击弹窗展示对应的详情」
+
+    ⚠️ 三类判据（每一类错了都是用户可见故障）：
+      ① **保序**：回填只能经 `slots[r.index]` 映射回**原下标**；
+         旧版那条「按文件名找」（`decodable.find(x => x.f.name === …)`）在两张图
+         内容相同（MD5 同名）时必然串位 ⇒ 必须不存在。
+      ② **不丢图**：取字节要**分块限流**（`UPLOAD_FETCH_CONCURRENCY`）——
+         旧版 38 路同时 `fetch` ⇒ 连接池耗尽 ⇒ 失败被 `catch` 吞成 null ⇒ 静默丢 24 张。
+      ③ **逐张留结果 + 详情入口**：`UploadOutcome` 保留下标位（失败项也在），
+         且 `detail` 要报出「N/M 张 + 有几张失败」并指向可点的详情。
+    """
+    code = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+
+    #: ① 保序。
+    assert "slots.push(i)" in code and "slots[r.index]" in code, (
+        "必须用 slots 数组把「提交下标 → 原下标」映射回来（保序的唯一办法）"
+    )
+    assert "decodable" not in code, (
+        "旧的 `decodable` 压缩法已废弃（它的按文件名兜底会在同内容图上串位）"
+    )
+
+    #: ② 分块限流取字节（不再一次打满连接池）。
+    assert "UPLOAD_FETCH_CONCURRENCY" in code, "取字节必须有并发上限（否则连接池耗尽丢图）"
+    assert "for (let start = 0; start < items.length; start += chunkSize)" in code, (
+        "取字节应为分块循环（块内并行、块间串行）"
+    )
+
+    #: ③ 逐张结果 + 详情入口。
+    assert "type UploadOutcome = {" in code, "每张图要有逐张结果类型"
+    assert "out[index].reason = `取图失败：" in code, (
+        "取图失败必须**逐张记名**（不能静默丢）—— 用户要知道缺的是哪些张"
+    )
+    assert "已上传 ${details.length}/${detailTotal} 张详情图" in code, (
+        "详情图进度必须报「N/总数」（旧版只报 N，用户看不出少了）"
+    )
+    assert "setUploadDetails" in code and "setUploadDetailOpen" in code, "缺逐张详情的状态"
+    assert "uploadDetailKeyFor" in code, "阶段标题应能定位到对应详情（可点入口）"
+    #: ⚠️ 只查「函数存在」太弱（实测逃逸：把**调用点**去掉仍绿）。
+    #: 判据必须落在**调用形态**上：标题真的按它分叉成可点 span。
+    assert "const which = uploadDetailKeyFor(s.title);" in code, (
+        "阶段行里没有真的调用 uploadDetailKeyFor（详情入口形同虚设）"
+    )
+    assert "auto-stage-title-link" in code, "可点标题的样式类没接上"
+    #: ⚠️ 用户口径（2026-10-11）追加两条：
+    #:  · 「已上传 14/38 张详情图（24 张失败…）**应将标题置红色**」
+    #:  · 「**在底部添加一个提示，点击标题可查看上传详情信息**」
+    #: ① 变红判据必须查**数据里有失败项**（不是查文案里有没有「失败」二字 ——
+    #:    文案一改就失效；只有查数据才是真判据）。
+    assert "uploadDetails[which].some((r) => !r.ok)" in code, (
+        "标题变红必须按「该份详情里真有失败项」判定（不许按文案字符串判）"
+    )
+    assert "auto-stage-title-failed" in code, "缺「标题置红」的类"
+    #: ⚠️ 用户口径追加（2026-10-11）：「出现上传失败则应修改为**红色标题和红色对号图标**」
+    #: ⇒ 图标也必须跟着变红。**绿勾 + 红字自相矛盾**，而用户第一眼看的是图标。
+    #: 判据：`done` 分支里图标颜色由「该份详情有没有失败项」决定，不能恒绿。
+    icon_seg = code[code.index('className="auto-stage-icon"'):]
+    icon_seg = icon_seg[:800]
+    #: ⚠️ 判据要「红叉在场 + 绿勾**有条件**」，不是「出现了 CloseCircleFilled」——
+    #: 只查出现会被「恒绿勾 + 别处有个红叉」骗过（实测逃逸一次）。
+    #: 取 `done` 那个分支，断言它**同时**含绿勾与红叉（= 真的按条件分叉）。
+    assert "s.status === \"done\"" in icon_seg, "缺少 done 分支"
+    done_at = icon_seg.index('s.status === "done"')
+    failed_at = icon_seg.find('s.status === "failed"', done_at)
+    done_seg = icon_seg[done_at: failed_at if failed_at > 0 else len(icon_seg)]
+    assert "CheckCircleFilled" in done_seg and "CloseCircleFilled" in done_seg, (
+        "done 分支里必须**绿勾与红叉都有**（按失败与否分叉）；只有绿勾 = 恒绿（用户看到的就是这个）"
+    )
+    #: 且分叉条件必须查数据（与标题同一判据）。
+    assert "uploadDetails[uploadDetailKeyFor(s.title)!" in done_seg, (
+        "图标分叉必须按「该份详情真有失败项」判定（与标题同一判据）"
+    )
+    #: ② 底部提示。
+    assert "auto-stage-footer-hint" in code, "缺底部提示（用户要求：点击标题可查看上传详情）"
+    assert "点击「上传商品主图」/「上传商品详情图」标题可查看逐张上传详情" in code, (
+        "底部提示文案不在"
+    )
+    css_all = _read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.css")
+    assert ".auto-stage-title-link.auto-stage-title-failed" in css_all, (
+        "缺标题置红的样式（光有类名不生效）"
+    )
+    #: ⚠️ 这类元素的样式**只有一条规则**（一个选择器出现一次）—— 写 `>= 2` 是错的
+    #: （实测：干净代码上就假红）。判据应是「选择器存在」+「规则体里有可见样式」。
+    assert ".publish-wizard .auto-stage-footer-hint" in css_all, "缺底部提示样式选择器"
+    hint_css = css_all[css_all.index(".publish-wizard .auto-stage-footer-hint") :]
+    hint_css = hint_css[: hint_css.index("}")]
+    assert "font-size" in hint_css and "color" in hint_css, "底部提示样式没实际生效的声明"
+    assert "<Modal" in code[code.index("uploadDetailOpen !== null") - 200 :], "详情应是点击弹窗"
+
+
+def test_upload_detail_modal_shows_failed_rows_with_reasons():
+    """详情弹窗要**列出失败项与原因**（不是只报个数字）。"""
+    code = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+    seg = code[code.index("uploadDetailOpen !== null") :]
+    seg = seg[: seg.index("</Modal>")]
+    assert "成功" in seg and "失败" in seg, "详情要能区分成功/失败"
+    assert "r.reason" in seg, "失败行必须显示原因（用户要知道为什么缺）"
+    assert "Tag color=\"red\"" in seg, "失败行应有醒目标记"
+
+    css = _read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.css")
+    assert ".auto-stage-title-link" in css, "可点标题要有样式（否则用户不知道能点）"
+    assert ".upload-detail-reason" in css, "失败原因要有样式"
+
+
+def test_auto_load_images_upload_concurrently():
+    """自动加载参数的主图/详情图**并发上传**（用户口径 2026-10-11 方案 B）。"""
+    code = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+    assert "uploadManyFromPackage" in code, "缺并发批量上传的封装"
+    assert "uploadPictureSpaceFiles" in code, "应调用批量上传端点（方案 B）"
+    #: 两个原来的串行循环都要换掉。
+    #: ⚠️ 2026-10-11：出口从「直接回 ConfigMainImage[]」改成「回逐张结果 UploadOutcome[]」
+    #: （用户要能看「缺的是哪些张」）⇒ 判据改成「两处都调了 uploadManyFromPackage」+
+    #: 「返回值经 .filter(o => o.ok) 取成功项」。
+    assert code.count("await uploadManyFromPackage(") >= 2, (
+        "主图与详情图都应走并发批量上传（有串行循环残留）"
+    )
+    assert "const mainOutcomes = await uploadManyFromPackage(" in code, "主图未走并发"
+    assert "const detailOutcomes = await uploadManyFromPackage(" in code, "详情图未走并发"
+    #: 反向：不许再有「逐张 await uploadOneFromPackage」的循环残留。
+    assert "await withUploadRetry(() => uploadOneFromPackage" not in code, (
+        "仍有串行逐张上传残留（应全部走并发版）"
+    )
+
+
+def test_batch_edit_dropdown_only_lists_numeric_columns_and_rounds_to_two_decimals():
+    """批量修改列值：**下拉只列数值列** + **结果两位小数四舍五入**（用户口径 2026-10-11）。
+
+    > 「批量修改列，该列必须为数值类似才可以支持在下拉中展示，
+    >   列值最终计算保留两位小数四舍五入」
+
+    ⚠️ 两条一起钉：
+      ① 下拉里**不许**出现文本列（条形码 / 商家编码）—— 加减一个数、乘一个倍数
+         对文本没意义（它们本就走 `mode === "fixed"` 的整列赋值分支）。
+      ② 计算结果必须**收敛到两位小数**，否则浮点毛刺（`18.8 × 1.7 =
+         31.960000000000004`）会原样写进价格表提交给平台。
+    """
+    step2 = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    lib = _code_only(_read(ROOT / "frontend/src/lib/precheck-publish.ts"))
+
+    #: ① 下拉只列数值列。
+    #: ⚠️ **必须扫全部 `const fields … = [` 定义**（实测逃逸一次：只切第一个会漏掉
+    #: 另一个批量修改弹窗 —— 本文件里有**两个**「批量修改列值」入口，
+    #: 口径必须一致，只改一个等于没改）。
+    fields_segs: list[str] = []
+    idx = 0
+    while True:
+        found = step2.find("const fields: { key:", idx)
+        if found < 0:
+            break
+        end = step2.index("];", found)
+        fields_segs.append(step2[found:end])
+        idx = end
+    assert fields_segs, "没找到任何批量修改下拉定义（守卫会空转）"
+    for _seg in fields_segs:
+        for label in ("售价", "库存", "市场价"):
+            assert f'label: "{label}"' in _seg, f"数值列「{label}」应在下拉里"
+        for label in ("条形码", "商家编码"):
+            assert f'label: "{label}"' not in _seg, (
+                f"文本列「{label}」不该出现在批量修改下拉里（只支持数值列）"
+            )
+
+    #: ② 两位小数四舍五入（判据落在**计算函数**上，不是页面）。
+    assert "Math.round(clamped * 100) / 100" in lib, (
+        "批量修改的结果必须 `Math.round(x*100)/100` 收敛到两位小数（否则浮点毛刺进价格表）"
+    )
+    #: 反向：不许裸返回未收敛值。
+    assert "return Math.min(max, Math.max(min, next));" not in lib, (
+        "仍有未收敛两位小数的返回路径（会被浮点毛刺污染）"
+    )
+
+
+def test_publish_buttons_are_split_with_tip_confirm_and_the_right_colors():
+    """第三步提交按钮**拆成两个**（用户口径 2026-10-11）。
+
+    > 「将提交按钮逻辑进行拆分，保留当前的保存草稿，确认发布拆分为，发布商品
+    >   （直接上架不再下架），发布并下架商品（发布成功后立刻下架）」
+    > 「红线取消，tip二次确认」
+    > 「发布商品按钮红色，保存草稿和发布并下架商品为蓝色」
+
+    ⚠️ 三类判据，缺任一条都会跑偏：
+      ① **两个按钮 + 语义**：`submit(false)` = 发布商品（不下架）；
+         `submit(true)` = 发布并下架商品。顺序/实参写反 = 红线行为与按钮标签对不上。
+      ② **tip 二次确认只挂在「发布商品」上**：它是唯一留下在售商品的动作。
+         ⚠️ 反向也要钉：旧文案「确认发布」必须消失（否则用户以为还是原来那个按钮）。
+      ③ **颜色**：「发布商品」= `danger`（红）；保存草稿 / 发布并下架 = `type="primary"`（蓝）。
+    """
+    code = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+
+    #: ① 两个按钮 + 实参语义。
+    assert "发布商品" in code and "发布并下架商品" in code, "缺拆分后的两个按钮"
+    assert "submit(false)" in code, "「发布商品」应传 submit(false)（发布后不下架）"
+    assert "submit(true)" in code, "「发布并下架商品」应传 submit(true)（发布后立刻下架）"
+    #: 旧按钮必须退场。
+    assert "确认发布</Button>" not in code and ">\n                确认发布" not in code, (
+        "旧的「确认发布」按钮应已拆分退场"
+    )
+
+    #: ② tip 二次确认挂在「发布商品」上。
+    assert "Popconfirm" in code, "「发布商品」需要 tip 二次确认（Popconfirm）"
+    pc_at = code.index("<Popconfirm")
+    pc_body = code[pc_at : pc_at + 700]
+    assert "submit(false)" in pc_body, "Popconfirm 的确认动作应是「发布商品」(submit(false))"
+    #: ⚠️ 文案口径**已被修正**（2026-10-11 真机抓包 + 实测）：
+    #:  原句要求「不会自动下架」—— 但真实行为是「商品进平台**审核**，审核通过才上架」，
+    #:  真机平台自己提交后同样不可售、且提交后**不再调上架接口**。
+    #:  ⇒ 判据改为「必须如实说明进审核」+「不许出现与事实不符的『保持在售/不会自动下架』」
+    #:    （后者会让人以为点完就已经在售了）。
+    assert "审核" in pc_body, "确认文案必须如实说明「商品进平台审核」"
+    assert "不会自动下架" not in pc_body, (
+        "不许再用「不会自动下架」（与事实不符：商品是进审核，不是立刻在售）"
+    )
+    #: ⚠️ 成功后提示同样必须如实（原句「发布成功，商品已在售（未下架）」会让人
+    #: 以为已上架成功，而真相是「进审核」）。
+    assert "已提交平台审核" in code, "成功提示必须如实说明「已提交平台审核」"
+    assert "商品已在售" not in code, (
+        "不许再出现「商品已在售」（与事实不符 —— 商品进审核，审核通过才上架）"
+    )
+    #: 反向：「发布并下架」不该被包进 Popconfirm（老路径不加门）。
+    #: ⚠️ 只查**开标签** `<Popconfirm` —— 查 `Popconfirm` 会命中闭合标签
+    #: `</Popconfirm>`（实测踩过：断言恒红）。
+    between = code[code.index("</Popconfirm>") : code.index("发布并下架商品")]
+    assert "<Popconfirm" not in between, "「发布并下架商品」不应被包在 Popconfirm 里"
+
+    #: ③ 颜色：发布商品 = danger（红）；另两个 = primary（蓝）。
+    danger_at = code.index("<Button danger")
+    danger_body = code[danger_at : danger_at + 300]
+    assert "发布商品" in danger_body, "「发布商品」应为 danger（红色）"
+    #: 保存草稿与发布并下架都是 primary。
+    assert code.count('type="primary"') >= 2, "保存草稿与发布并下架都应为主色（蓝）"
+
+
+def test_publish_mask_copy_follows_the_clicked_button():
+    """**提交遮罩的文案必须跟着用户点的按钮走**（用户实测 2026-10-11）。
+
+    > 「点击发布商品按钮弹窗中的文案未改变」
+
+    现象：点「发布商品」（不下架），遮罩却写「正在发布并**立即下架**…」
+    「发布成功后会立即下架（**红线**）」—— 文案是**反的**，而且「红线」早已取消。
+
+    ⇒ 判据：遮罩文案不许写死，必须由「本次点的哪个按钮」这个 state 分叉；
+    且旧写死串必须消失（留着就说明只改了按钮没改文案）。
+    """
+    code = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+
+    #: ① 有记录本次模式的 state（没有它就无从分叉）。
+    assert "submitShelfMode" in code, "缺「本次点的是哪个发布按钮」的状态"
+    assert "setSubmitShelfMode(shelfAfterPublish)" in code, (
+        "submit 应记下本次模式（否则遮罩文案无从分叉）"
+    )
+
+    #: ② 遮罩文案分叉：两种模式都要有各自的正文。
+    assert "正在发布并下架商品" in code, "缺「发布并下架」模式的遮罩文案"
+    assert "正在发布商品（保持在售）" in code, (
+        "缺「发布商品」模式的遮罩文案（点不下架时不能复用下架文案）"
+    )
+    assert "发布成功后商品将保持在售、不会自动下架" in code, (
+        "「发布商品」模式的副文案要明说不会自动下架"
+    )
+
+    #: ③ 旧的写死串必须退场（这是用户看到的那句）。
+    assert "正在发布并立即下架…" not in code, "旧的写死遮罩文案仍在（用户实测就是它）"
+    #: ⚠️ 「红线」二字不许再出现在**面向用户**的文案里（已取消，说了是错的）。
+    #: 注释里保留历史说明是允许的 ⇒ 只看字符串字面量。
+    for cue in ("（红线）", "红线；"):
+        assert cue not in code, f"用户可见文案里不该再有「{cue}」（红线已取消）"
+
+
+def test_submit_sends_explicit_off_shelf_after_matching_the_clicked_button():
+    """`submit` **显式传** `off_shelf_after`（红线取消后必须显式表达）。
+
+    ⚠️ 旧版是「刻意不传、靠后端默认 true 兜底」；现在两个按钮语义相反，
+    不显式传就永远分不出「发布商品」和「发布并下架」。
+    ⚠️ 同时钉**后端默认值仍是 true**（保守）—— 拆按钮不该把「默认安全」也拆掉。
+    """
+    code = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+    assert "off_shelf_after: shelfAfterPublish" in code, (
+        "submit 必须把参数透传成 off_shelf_after（否则两个按钮行为一样）"
+    )
+    assert "shelfAfterPublish: boolean" in code, "submit 的入参应声明语义化参数名"
+
+    import inspect
+
+    import backend.app.api.platforms.xhs.qianfan as qianfan
+
+    field = qianfan.ItemPublishRequest.model_fields["off_shelf_after"]
+    assert field.default is True, (
+        "后端 off_shelf_after 默认必须仍是 True（漏传的调用方拿到保守行为）"
+    )
+    #: 红线取消后**生效的**禁令必须消失。
+    #: ⚠️ 不能简单查「不得」二字 —— 我在 docstring 里**刻意保留**了历史原句
+    #: （「原口径：…前端**不得**传 `False`」+ 标注已被取代），那是口径变更的留痕，
+    #: 不是生效规则。判据 = 「不得」只能出现在「已被取代 / 原口径」这类**标记过的
+    #: 历史段落**里；独立出现的禁令句才算违规。
+    doc = inspect.getsource(qianfan.ItemPublishRequest)
+    for line in doc.splitlines():
+        if "不得" in line:
+            assert any(tag in line or tag in doc[: doc.index(line)] for tag in ("已被取代", "原口径", "原句")), (
+                f"仍有未标注为历史的禁令句：{line.strip()}"
+            )
+    #: 直接钉「新口径」必须在场（否则等于只删了旧话、没写新话）。
+    assert "红线取消" in doc or "取消红线" in doc, "类 docstring 应写明红线已取消"
+
+
+def test_submit_callback_deps_include_the_image_arrays():
+    """**提交闭包必须依赖图片数组**（用户实测 2026-10-11 的真根因）。
+
+    现象：第三步提交报「图片异常」→ 回第二步删图 → 再提交**仍报同一个错**；
+    而第三步**预览是正常的**（图确实删了）。
+    根因：`submit` 是 `useCallback`，依赖数组**漏了** `configImages` /
+    `configDetailImages` / `specImages` ⇒ 第二步删图只改 state，`submit` 不重建
+    ⇒ 提交时用**删图前**的闭包快照组装载荷；而预览直接渲染 prop ⇒ 永久最新。
+
+    ⚠️ 这类「漏依赖」不报错、不告警，真机表现只是「改了没用」—— 必须有守卫。
+    """
+    code = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+    #: 定位 `submit` 的 useCallback 依赖数组（从 `const submit = useCallback` 起，
+    #: 取到该调用结束的 `]);`）。
+    start = code.index("const submit = useCallback")
+    tail = code[start:]
+    #: ⚠️ 依赖数组的开头是 `}, [`（useCallback 的**第二个参数**）；别写成 `], [`
+    #: —— `_code_only` 剥注释后形态固定，但写错字面量会直接 ValueError（实测踩过）。
+    deps_at = tail.index("}, [")
+    #: ⚠️⚠️ **必须从 `}, [` 之后开始**（实测教训：从 `start` 起切会让函数体里的
+    #: `configDetailImages` 命中，删掉依赖也能通过 —— 一条**假守卫**，变异验证当场抓出）。
+    #: 只认 `[` 到配对 `]` 之间的内容 = 真正的依赖列表。
+    deps_open = deps_at + len("}, ")
+    deps = tail[deps_open : tail.index("]", deps_open)]
+    #: 自检：依赖列表里不该出现函数体的标志物（如 `publishShopItem(`），
+    #: 否则说明切片又切宽了（防「假守卫」回归）。
+    assert "publishShopItem(" not in deps, (
+        "依赖切片切进了函数体 ⇒ 守卫会形同虚设（必须只切 `[` 到 `]` 之间）"
+    )
+    #: ⚠️ **必须按整词匹配**：`configImages` 是 `configDetailImages` 的**子串**，
+    #: 用 `name in deps` 会让「删掉 configDetailImages」也能通过 —— 第二条假守卫
+    #: （变异验证当场抓出）。按逗号/空白切词后比对，才真正逐项判定。
+    names = {t.strip().rstrip(",") for t in re.split(r"[\s,]+", deps) if t.strip()}
+    for name in ("configImages", "configDetailImages", "specImages"):
+        assert name in names, (
+            f"`submit` 的依赖数组漏了 `{name}` ⇒ 第二步改它后提交仍用旧闭包快照"
+            "（真机表现：删了图还报同一个图片异常）"
+        )
+    #: 并且要有「材料一变就清旧错误」的 effect（否则第三步会挂着上一轮失败原因）。
+    assert "setResult((prev) => (prev && !prev.published ? null : prev))" in code, (
+        "缺「提交材料变化 ⇒ 清掉上一轮发布错误」的 effect"
+    )
+
+
 def test_step2_spec_values_input_exists():
     """**勾选规格后要有规格值输入框**（真机：「请选择或输入规格值」，w=186）。"""
     code = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
@@ -6128,11 +6612,23 @@ def test_step2_spec_values_input_exists():
     assert "spec-config-values" in css, "缺规格值输入框样式"
     #: 用户口径（2026-10-09，后修正）：规格值输入框**固定 200px、横向排列**（多个框
     #: 同一行、超宽自动换行）—— 不要每个单独占一行，否则规格一多整块拉得很高。
-    block = css[css.index("spec-config-values"):css.index("spec-config-values") + 520]
+    #: ⚠️ 别用「起点 + 固定字数」切片：注释一改就切不到目标规则（实测踩过 ——
+    #: 宽度规则被新加的说明挤出 520 字窗口 ⇒ 断言找不到）。切到**两条规则都覆盖**为止。
+    _from = css.index(".spec-config-values")
+    block = css[_from:css.index(".spec-value-item", _from)]
     assert "flex-direction: row" in block, "规格值输入框应横向排列（不单独占一行）"
     assert "flex-wrap: wrap" in block, "规格值区应自动换行"
+    #: ⚠️ 宽度口径**已被取代**（2026-10-11 用户实测「规格文本超出输入框外展示」）：
+    #: 旧的「固定 200px」正是根因（`flex:0 0` ⇒ 不长不缩，30+ 字必然被裁）。
+    #: 现行 = **按内容自适应**（`width:auto` + `min-width` 保底 + `field-sizing: content`）。
+    #: ⚠️ **口径已回到固定 200px**（用户 2026-10-11 定稿：「规格输入框还是需要固定
+    #: 200px 长度，长文本也不应该溢出展示在输入框外」）—— 宽度固定、由**输入框自身**
+    #: 的 `overflow:hidden` + `title` 保证不溢出，不再靠自适应宽度。
     assert "width: 200px" in block, "规格值输入框宽度应为固定 200px"
-    assert "SPEC_VALUE_INPUT_WIDTH = 200" in code, "宽度常量应为用户口径的 200"
+    #: ⚠️ 原两条断言「宽度固定 200px / `SPEC_VALUE_INPUT_WIDTH = 200`」**已随口径变更删除**
+    #: （2026-10-11：用户实测「规格文本超出输入框外展示」⇒ 固定宽度就是根因）。
+    #: 现在只钉**自适应**，宽度写死在别处也会被上面那条 not in 拦下。
+    #: （原「宽度常量」断言已删：常量已移除，宽度由 CSS 单点控制。）
     #: 规格值上限 500（真机文案：单个规格值的上限数量为 500 个）
     assert "SPEC_VALUE_MAX = 500" in code, "规格值上限应为真机的 500"
     #: 真机：行内右侧「规格值排序」；**每个规格行都有**上移/下移
@@ -6501,37 +6997,40 @@ def test_step2_size_table_shapes_match_the_bundle():
 
 
 
-def test_precheck_attribute_image_adds_its_own_tab_with_kv():
-    """**有商品属性图 ⇒ 预检弹窗多一个「商品属性」页签，且用 KV 展示**（用户口径 2026-10-09）。
+def test_precheck_has_no_attribute_image_tab_or_kv_anywhere():
+    """**属性图链路已整条移除**（用户口径 2026-10-11 最终版）。
 
-    判据链：
-      ① 后端：属性图 OCR 出的表带 `kv`（属性图专属字段）；
-      ② 前端：`kv` 存在才出「商品属性」页签（没有属性图就不出现）；
-      ③ 该页签是 **KV 渲染**（属性名 + 值两个输入框），不是表格；
-      ④ 属性表**不再混进「表格」页签**（同一份数据不展示两次）。
+    ⚠️ **取代** 2026-10-09 的 `test_precheck_attribute_image_adds_its_own_tab_with_kv`
+    （该用例断言的四个符号现已全部删除）：
+
+    | 轮次 | 属性图 | 
+    |---|---|
+    | 2026-10-09 | 属性图 OCR ⇒ KV 表 ⇒ 前端「商品属性」页签（KV 渲染） |
+    | **2026-10-11（本条）** | **整条链路移除**（后端不算、前端无页签、字段不存在） |
+
+    守卫方式 = 四类符号**一律 `not in`**（先 `_code_only` 剥注释，否则被迁移说明命中）。
     """
-    #: ① 后端带 kv
-    pre = _read(ROOT / "backend/app/services/shop_package_precheck.py")
-    assert "kv=kv" in pre, "属性表没有带上 kv"
-    assert "def _read_attribute_table" in pre, "缺属性图 OCR 入口"
-    ocr = _read(ROOT / "backend/app/services/image_ocr_service.py")
-    assert "def build_kv_from_boxes" in ocr, "缺 KV 几何重建"
-    assert "def scan_attribute_table" in ocr, "缺属性图 OCR"
+    pre = _code_only(_read(ROOT / "backend/app/services/shop_package_precheck.py"))
+    ocr = _code_only(_read(ROOT / "backend/app/services/image_ocr_service.py"))
+    #: ⚠️ 属性图**判据本身仍在**（它用于把属性图排除出媒体清单），搬到了叶子模块
+    #: `package_media_names.py`。这里只钉「OCR 侧」与「契约侧」的移除。
+    for symbol in ("_read_attribute_table",):
+        assert symbol not in pre, f"{symbol} 应已从预检服务移除"
+    assert not (ROOT / "backend/app/services/image_ocr_service.py").read_text(
+        encoding="utf-8"
+    ).count("scan_attribute_table"), "属性图 OCR 应已移除"
+    for symbol in ("build_kv_from_boxes", "scan_attribute_table"):
+        assert symbol not in ocr, f"{symbol} 应已从 OCR 服务移除"
+    assert "kv=kv" not in pre, "属性表不再产出 kv"
 
-    #: ②③④ 前端
-    wiz = _read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx")
-    assert "attrTableIndex" in wiz, "缺属性图表定位"
-    assert "Array.isArray(t.kv)" in wiz, "属性图判据应看 kv 字段"
-    assert 'label: "商品属性"' in wiz, "缺「商品属性」页签"
-    assert "AttributeKvPanel" in wiz, "缺 KV 面板组件"
-    assert "attr-kv-key" in wiz and "attr-kv-value" in wiz, "KV 面板应是「名 + 值」两栏"
-    #: 属性表不混进「表格」页签
-    assert "tables.filter((t) => !Array.isArray(t.kv))" in wiz, "属性表不该重复出现在表格页签"
-    #: 类型定义了 kv
-    api = _read(ROOT / "frontend/src/lib/api.ts")
-    assert "kv?: { key: string; value: string }[]" in api, "PrecheckTable 缺 kv 字段"
+    wiz = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+    for symbol in ("attrTableIndex", "AttributeKvPanel", "attr-kv-key", "attr-kv-value"):
+        assert symbol not in wiz, f"{symbol} 应已从前端移除"
+    assert "Array.isArray(t.kv)" not in wiz, "kv 判据应已移除（字段不存在）"
+    assert 'label: "商品属性"' not in wiz, "「商品属性」页签应已移除"
 
-
+    api = _code_only(_read(ROOT / "frontend/src/lib/api.ts"))
+    assert "kv?: { key: string; value: string }[]" not in api, "PrecheckTable 不该再有 kv 字段"
 
 def test_step2_merges_the_two_parts_into_one_with_two_col_layout():
     """**第二步内部把千帆的两部分参数合并为一部分**（用户口径 2026-10-09）：
@@ -6684,9 +7183,13 @@ def test_auto_load_confirm_offers_media_upload_retry_settings():
     assert "disabled={!uploadRetryOnFailure}" in wiz, "关掉重试后次数框应禁用"
     #: ③ 共用包装（唯一定义点 + 真的被调用）
     assert "const withUploadRetry = useCallback(" in wiz, "缺共用的重试包装函数"
-    assert wiz.count("withUploadRetry(") >= 3, (
-        "重试包装必须被**三条媒体链路**都用上（主图 / 详情图 / 视频）"
-    )
+    #: ⚠️ 2026-10-11 口径变更：主图 / 详情图改走 `uploadManyFromPackage`（并发批量），
+    #: **不再逐张过 `withUploadRetry`** —— 批量端点自带「单张失败重试一次」，
+    #: 且单项失败不整批失败。故这里不再要求「≥3 处调用」。
+    #: 现只要求：视频链路仍用重试包装（它是独立端点，没有批量替代）。
+    assert "withUploadRetry(" in wiz, "重试包装应仍被视频链路使用"
+    #: 反向：不许主图/详情图又退回逐张串行（那是并发被撤销的信号）。
+    assert "uploadManyFromPackage" in wiz, "主图/详情图应走并发批量上传"
     #: ④ 视频的成功判据是 `ok`（不是「没抛异常」）
     assert "(r) => r.ok" in wiz, "视频上传必须以 `ok` 判成功，否则失败结果会被当成功"
 
@@ -6867,7 +7370,10 @@ def test_precheck_panel_maps_edits_back_to_the_full_table_array():
     assert "onTablesChange(mergePanelTable(tables, panelIndex, next))" in wiz, (
         "页面必须用 mergePanelTable 把单表改动嵌回完整数组"
     )
-    assert "tables.filter((t) => !Array.isArray(t.kv))" in wiz, "面板应只显示 SKU 表"
+    #: ⚠️ 原先此处断言 `tables.filter((t) => !Array.isArray(t.kv))`（面板只显示 SKU 表）。
+    #: 属性图 KV 链移除后**不再需要这个过滤**（数据包里的表全是 SKU 表）⇒ 断言**反向**：
+    #: 该过滤应已消失（留着说明「属性表」概念还在，是回归信号）。
+    assert "Array.isArray(t.kv)" not in wiz, "kv 过滤应已随属性图链移除"
     lib = _read(ROOT / "frontend/src/lib/precheck-publish.ts")
     assert "export function mergePanelTable(" in lib, "缺 mergePanelTable（嵌回完整数组）"
     assert "export function skuTableIndices(" in lib, "缺 skuTableIndices（SKU 表真实下标）"
@@ -7057,12 +7563,23 @@ def test_sale_time_schedule_shows_datetime_picker_with_real_rules():
     assert "Date.now() + 30 * 86400_000" in tsx, "max 应为 30 天内"
 
 
-def test_spec_values_all_have_image_upload_prefix():
-    """规格图是**输入框前缀**（不单独分开），第一组每个规格都有（用户口径 2026-10-09：
-    「规格图应是输入框的前缀不要单独分开，第一组规格每个规格均有规格图前缀」）。"""
+def test_spec_values_all_have_image_upload_thumb():
+    """规格图**每个规格值都有**（第一组 / 开启规格图的组）。
+
+    ⚠️ 位置口径**已被取代**（2026-10-11 用户实测：「商品规格输入框文本过多时，向右走
+    会将规格图挤掉，再回到最左侧时，规格图也无法展示」）——
+    原口径「作为输入框的 `prefix`」正是根因：`ant-input-prefix` 在输入框**内部**，
+    随文本横向滚动 ⇒ 图被顶出可视区。
+    ⇒ 现口径：规格图是输入框的**兄弟节点**（`.spec-value-item` 直接子元素），
+    固定在框外左侧，与文本滚动无关。**「每个规格值都有图」这条语义不变。**
+    """
     tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
-    #: 真·Input prefix（不是并排的独立 span）
-    assert "prefix={prefix}" in tsx, "规格图应作为输入框 prefix"
+    #: 位置：兄弟节点（不再是 prefix）。
+    assert 'className="spec-value-item"' in tsx, "规格图应是输入框的兄弟节点（.spec-value-item）"
+    assert "prefix={prefix}" not in tsx, (
+        "规格图不得再挂 prefix（prefix 在输入框内部，随文本滚动被挤走）"
+    )
+    assert "{thumb}" in tsx, "缩略图应作为 item 的子节点渲染"
     assert "const canImage = specImageEnabled[name] ?? gi === 0;" in tsx, "每个规格值可加图与否由规格图开关决定（默认回落第一组）"
     #: 点前缀 → 弹窗选**预检通过且选中的 SKU 图**（判据用**渲染形态**，避免只匹配到函数名）
     assert "<SkuPickModal" in tsx, "缺规格图选择弹窗（应渲染出来）"
@@ -7111,10 +7628,12 @@ def test_spec_image_prefix_is_clickable_and_opens_modal():
     assert "document.createElement(\"input\")" not in tsx or "spec-value" in tsx, (
         "不应再在规格图前缀走本地文件选择"
     )
-    #: ② 前缀的子元素必须能接收点击
-    i = css.index(".spec-value-input .ant-input-prefix")
-    block = css[i : i + 260]
-    assert "pointer-events: auto" in block, "前缀应放开 pointer-events（否则点击无响应）"
+    #: ② 缩略图必须能接收点击。
+    #: ⚠️ 2026-10-11：图已从 `prefix` 移到**框外兄弟节点** ⇒ 查的不再是
+    #: `.ant-input-prefix`，而是 `.spec-value-item > .spec-value-thumb` 那段。
+    i = css.index(".spec-value-item > .spec-value-thumb")
+    block = css[i : i + 300]
+    assert "pointer-events: auto" in block, "缩略图应放开 pointer-events（否则点击无响应）"
 
 
 def test_sku_image_pick_is_single_select():
@@ -7563,9 +8082,17 @@ def test_publish_submits_step2_attributes_and_per_dimension_specs():
 def test_publish_submit_shows_mask_with_elapsed_time():
     """点「确认发布」后**页面加蒙版 + 耗时统计**（用户口径 2026-10-10）。"""
     wiz = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
-    #: ① 提交蒙版（复用 publish-wait-mask）+ 实时耗时
-    assert "正在发布并立即下架… 已耗时 {Math.floor(submitElapsedSec)}s" in wiz, (
-        "提交中应显示蒙版 + 实时耗时"
+    #: ① 提交蒙版（复用 publish-wait-mask）+ 实时耗时。
+    #: ⚠️ 2026-10-11：文案**按用户点的按钮分叉**（原写死的「正在发布并立即下架…」
+    #: 已随红线取消退场 —— 点「发布商品」时那句话说的是反的）。
+    #: 这里钉「有蒙版 + 有实时耗时」这条本质判据；三种模式的文案分叉由
+    #: `test_publish_mask_copy_follows_the_clicked_button` 钉。
+    assert "submitElapsedSec" in wiz, "提交中应显示实时耗时"
+    assert "publish-wait-mask" in wiz and "publish-wait-text" in wiz, (
+        "提交中应显示蒙版 + 文案"
+    )
+    assert "正在发布并下架商品" in wiz and "正在发布商品（保持在售）" in wiz, (
+        "遮罩文案应按本次点击的按钮分叉"
     )
     assert "{submitting && (" in wiz, "蒙版应由 submitting 驱动"
     #: ② 起表 / 定格
@@ -7573,8 +8100,11 @@ def test_publish_submit_shows_mask_with_elapsed_time():
     assert "setSubmitElapsedSec((performance.now() - startedAt) / 1000);" in wiz, (
         "终态应定格耗时（不归零）"
     )
-    #: ③ 用户可见文案禁 Markdown `**`
-    assert "发布成功后会立即下架（红线）；请勿关闭本窗口或重复点击。" in wiz
+    #: ③ 用户可见文案禁 Markdown `**`（用新分叉后的文案做样本）。
+    assert "发布成功后会立即下架；请勿关闭本窗口或重复点击。" in wiz
+    assert "**" not in wiz.split("publish-wait-text")[1][:600], (
+        "遮罩文案里不得出现 Markdown `**`"
+    )
 
 
 def test_step2_state_survives_step_switching():
@@ -7853,3 +8383,264 @@ def test_multi_select_property_keeps_at_most_three_values():
     assert "disabled: full && !selected.includes(o)," in block, "选满后未选项应置灰"
     assert ".slice(0, MULTI_SELECT_MAX)" in block, "onChange 应裁到上限（兜底）"
     assert "prop-multi-one-line" not in block, "不得再套单行裁剪容器（改用 antd 默认）"
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-11 发布商品优化轮（第三/四批口径）：列序 · 缩略图尺寸 · 右上角切换图标 · 属性图链路移除
+#
+# ⚠️ 这四条规则**写在 `.tsx` 里**（页面渲染结构），vitest 导入不到 ⇒ 只能靠源码结构守卫钉住。
+# 判据一律先过 `_code_only` 剥注释：本轮我自己写的迁移说明里就写着「不再展示」「已移除」
+# 等字样，不剪注释会恒真（DEF-057 同型）。
+# ---------------------------------------------------------------------------
+
+
+def test_wizard_hides_the_raw_image_column():
+    """原始「图片」列**不再展示**（用户口径 2026-10-11）。
+
+    那列装的是数据包 xlsx 里的一长串外部 URL，对用户没有阅读价值 —— 图已经由
+    「线上图片」列预览出来了。守卫钉住 `.filter(... !== imageCol)` 这个**过滤动作**。
+    """
+    code = _code_only(_read(PRECHECK_MODAL))
+    assert "colIndex !== imageCol" in code, "原始「图片」列应被过滤掉（不再展示）"
+
+
+def test_wizard_puts_the_spec_category_column_fourth():
+    """「规格分类」放**第 4 列**（用户口径 2026-10-11）。
+
+    列序：勾选 · 线上图片 · 本地图片 · **规格分类** · 其余数据列。
+    判据 = 规格分类列的定义**出现在数据列 map 之前**（源码顺序即列序）。
+    """
+    code = _code_only(_read(PRECHECK_MODAL))
+    spec_at = code.index('key: "__spec_category"')
+    online_at = code.index('key: "__online_image"')
+    local_at = code.index('key: "__local_image"')
+    data_at = code.index("colIndex !== imageCol")
+    assert online_at < local_at < spec_at < data_at, (
+        "列序应为 线上图片 · 本地图片 · 规格分类 · 数据列（规格分类必须是第 4 列）"
+    )
+
+
+def test_wizard_sku_thumbnails_share_one_size_constant():
+    """线上图与本地图预览**同尺寸**，以线上图为准（用户口径 2026-10-11）。
+
+    两处都走 `SKU_THUMB_SIZE` 单一常量 ⇒ 改一处两边同步；任一列写死数字就脱钩，
+    会出现「一列 72 一列 100」的视觉参差（正是本轮要修的）。
+    """
+    import re as _re
+    code = _code_only(_read(PRECHECK_MODAL))
+    assert "const SKU_THUMB_SIZE = " in code, "应有共享的缩略图尺寸常量"
+    #: ⚠️ 光数「常量出现次数」是**假守卫**（实测被 `thumbsizeunsynced` 变异 ESCAPED）：
+    #: 把其中一处换成字面量 `72`，常量仍出现 2 次 ⇒ `count >= 3` 依然绿。
+    #: 真判据 = **缩略图壳里不许再出现尺寸字面量** —— 两处必须都是 `SKU_THUMB_SIZE`。
+    import re as _re
+
+    #: ⚠️ 判据演化（本轮）：本地图尺寸**不在 TSX 里** —— `PrecheckThumb` 内部是
+    #: `width/height:100%`，尺寸由**外壳**决定（表格里 = CSS 的 `.sku-local-thumb`）。
+    #: 所以这里的守卫分两半：
+    #:   ① 线上图的 `<img>` 必须用常量（不许写死数字）；
+    #:   ② 本地图外壳的 CSS 必须与线上图**同尺寸**（都在 CSS 里读得到）。
+    thumb_i = code.index("function SkuImageThumb")
+    thumb_body = code[thumb_i:code.index("function ", thumb_i + 10)]
+    assert "SKU_THUMB_SIZE" in thumb_body, "线上图缩略图应走 SKU_THUMB_SIZE"
+    assert not _re.search(r"(?:width|height):\s*\d", thumb_body), (
+        "线上图缩略图不许写死尺寸数字（应走 SKU_THUMB_SIZE）"
+    )
+    #: ② 本地图外壳（CSS）必须与线上图同尺寸 —— 这是「一样大」的**真落点**。
+    css = _read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.css")
+    block = css[css.index(".sku-local-thumb {"):]
+    block = block[:block.index("}")]
+    assert "width: 72px" in block and "height: 72px" in block, (
+        "本地图外壳必须定为 72px 方形（与线上图 SKU_THUMB_SIZE 同值），"
+        "否则它会撑满单元格而比线上图大"
+    )
+    #: ③ `fillStyle` 不许再写死尺寸（写死会把预览弹窗里的大图压成小方块）。
+    fill_scope = code[code.index("const fillStyle"):]
+    fill_scope = fill_scope[:fill_scope.index("};")]
+    assert not _re.search(r"(?:width|height):\s*\d", fill_scope), (
+        "fillStyle 不许写死尺寸（尺寸归外壳：表格 72px / 弹窗 100%）"
+    )
+    assert "width: SKU_THUMB_COL_WIDTH" in code, "两个图列应共用同一个列宽常量"
+
+
+def test_wizard_switch_icon_sits_on_the_local_thumb():
+    """**有预览图时**，「切换规格图」图标压在图片**右上角**（用户口径 2026-10-11）。
+
+    取代本批次早先「选择图图标另起一行」的写法：有画布可覆盖时图标应该在图上
+    （省一行高度、语义更准）；**没有图**时才退化成独立的「选择」按钮（没画布可压）。
+    """
+    code = _code_only(_read(PRECHECK_MODAL))
+    assert 'className="sku-local-thumb"' in code, "本地图需要有定位容器"
+    assert 'className="sku-local-thumb-switch"' in code, "切换图标要挂在缩略图上"
+    #: 分支必须存在：无图 ⇒ 独立按钮；有图 ⇒ 缩略图 + 右上角图标。
+    assert "if (!info?.localRel) {" in code, "「无图才给独立按钮」的分支应保留"
+    css = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.css"))
+    assert ".sku-local-thumb-switch" in css, "右上角定位样式应在 CSS 里"
+    assert "position: absolute" in css
+
+
+def test_backend_has_no_attribute_image_specific_logic_left():
+    """后端**没有任何「按文件名区别对待媒体」的逻辑**（用户口径 2026-10-11 最终版）。
+
+    > 用户原话：「**数据包中有什么媒体资源就展示什么，不要排除任何媒体资源**」
+
+    ⚠️ 多轮口径收敛的终点：**不排除任何媒体**。此前的「按文件名判定属性图/参数图
+    并排除」整块撤销（判据函数、标记常量、叶子模块 `package_media_names.py` 全删）。
+    删除清单：
+      · `is_attribute_image_name` / `_ATTR_IMAGE_MARKERS`（判据）
+      · `package_media_names.py`（承载判据的叶子模块）
+      · `is_attribute_image` 契约字段 / `kv` 字段
+
+    ⚠️ 同时**保留**另一条已完成的删除：「图片 OCR 建表」（`build_table_from_boxes`
+    连同 `_squeeze` / `_merge_cell`）—— 那是**表格产出**，与媒体清单是两件事。
+    """
+    import re as _re
+    pre_src = _code_only(_read(ROOT / "backend/app/services/shop_package_precheck.py"))
+    ocr_src = _code_only(_read(ROOT / "backend/app/services/image_ocr_service.py"))
+    for symbol in ("is_attribute_image_name", "_ATTR_IMAGE_MARKERS", "is_attribute_image"):
+        assert symbol not in pre_src, f"{symbol} 应已整段移除（不排除任何媒体）"
+    assert not (ROOT / "backend/app/services/package_media_names.py").exists(), (
+        "承载属性图判据的叶子模块应已删除（无调用方）"
+    )
+    for symbol in ("build_table_from_boxes", "_merge_cell", "_squeeze"):
+        assert symbol not in ocr_src, f"{symbol} 应已整段移除（图片 OCR 建表）"
+
+
+def test_sku_name_column_shows_only_the_name_not_the_spec_category():
+    """「sku名称」列**只展示拆分后的 SKU 名称**（用户口径 2026-10-11 最终版）。
+
+    > 用户原话：「商品 sku 表格的 sku 名称列，应不再展示规格类型，取分割后只展示 sku 名称」
+
+    原值 `颜色分类:【中古风】实木三斗柜` ⇒ 这一列只展示 `【中古风】实木三斗柜`；
+    规格分类已由**第 4 列**单独展示，同一份信息不该在一行里出现两次。
+
+    ⚠️ 两个容易做错、必须同时钉住的点：
+      ① **展示用拆分值**（`parseSkuName(...).value`），不是原值；
+      ② **写回时把分类拼回去** —— 否则用户一编辑就把规格分类**静默丢掉**
+         （数据损坏，且界面上看不出来，因为那一列本来就不显示分类）。
+    """
+    code = _code_only(_read(PRECHECK_MODAL))
+    i = code.index("colIndex === nameCol")
+    #: 切到 `) : (` 为止 —— 只取**名称列这一个分支**（再往后就进 else 的通用列了）。
+    j = code.index(") : (", i)
+    seg = code[i:j]
+    assert "parseSkuName" in seg, "名称列应按 parseSkuName 拆分后展示"
+    assert _re.search(r"parseSkuName\(.*?\)\.value", seg), (
+        "展示的应是拆分出的 SKU 名称部分（`parseSkuName(...).value`）"
+    )
+    #: ② 写回必须拼回分类（`cat` + `:` + 用户输入）。
+    assert "category" in seg and "`${cat}:" in seg, (
+        "编辑名称列时必须把规格分类拼回去，否则一次编辑就丢掉分类"
+    )
+    #: ⚠️ 反面：`value=` 必须包在 `parseSkuName(...)` 里 —— 不许把原值直接交给 value。
+    #: （不用字面串判 `value={record.row[colIndex]...}`：`_code_only` 剥注释后会把
+    #:   相邻字符串粘起来，产生假阳性 ⇒ 改判「value 表达式里有 parseSkuName」。）
+    assert _re.search(r"value=\{parseSkuName\(", seg), (
+        "名称列的 value 必须经 parseSkuName 拆分（否则会带出规格分类前缀）"
+    )
+
+
+def test_spec_value_container_prevents_horizontal_overflow():
+    """规格值容器必须能**约束宽度 + 换行**（用户反馈 2026-10-11：「文本溢出输入框外」）。
+
+    现象：规格值标签跑出「商品规格」卡片。
+
+    根因链（三个都缺）：
+      ① `.spec-values` 此前**没有任何 CSS** ⇒ 裸 div，子项按内容宽度撑开；
+      ② antd 多选器默认不限制宽度，`.ant-select-selection-overflow` 是
+         `nowrap` 的 chips 行 ⇒ 标签一多就横向顶出去；
+      ③ 缺 `min-width: 0` ⇒ flex 子项默认 `min-width:auto`，想收窄也收不动。
+
+    判据 = CSS 里这三件事都得在（缺一件就会重现溢出）。
+    """
+    css = _read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.css")
+    #: ① 容器存在且是换行 flex + 不许横向溢出。
+    assert ".publish-config-step2 .spec-values {" in css, "缺 .spec-values 容器规则"
+    block = css[css.index(".publish-config-step2 .spec-values {"):]
+    block = block[:block.index("}")]
+    assert "flex-wrap: wrap" in block, "规格值容器必须允许换行"
+    assert "max-width: 100%" in block, "规格值容器必须限制最大宽度"
+    #: ③ 子项可收缩。
+    assert "min-width: 0" in css, "flex 子项必须 min-width:0（否则拒绝收缩→顶破父容器）"
+    #: ② antd chips 行必须换行 + 标签限宽。
+    assert ".ant-select-selection-overflow" in css and "flex-wrap: wrap" in css, (
+        "antd 多选器的 chips 行必须允许换行"
+    )
+    assert ".ant-select-selection-item" in css and "text-overflow: ellipsis" in css, (
+        "单个规格值标签必须限宽 + 省略号"
+    )
+    #: ⚠️ **口径定稿**（用户 2026-10-11）：「规格输入框还是需要**固定 200px** 长度，
+    #: 长文本也**不应该溢出**展示在输入框外」。
+    #: ⇒ 判据是**两条一起**（缺一条就会重现用户看到的缺陷）：
+    #:   ① 宽度**固定 200px**（整齐等宽栅格，不要随内容乱变宽）；
+    #:   ② 输入框**自身不许溢出**（`overflow:hidden` + 省略）——
+    #:      加了 ① 却不加 ② 就是用户实测的「文本溢出到框外」。
+    #: 只查**第一条规则**（`spec-config-values` 作用域下的输入框）——
+    #: 第二条与 `.ant-select` 共用（多选器的 antd 结构与 input 不同，
+    #: 对它要求 `overflow:hidden` 会把下拉箭头一起裁掉，属误伤）。
+    blk = css[css.index(".publish-config-step2 .spec-config-values .spec-value-input"):]
+    blk = blk[:blk.index("}")]
+    assert "width: 200px" in blk, "规格值输入框宽度应为固定 200px（用户定稿口径）"
+    assert "overflow: hidden" in blk, (
+        "固定宽度时必须 `overflow:hidden`，否则长文本会画出框外（用户实测缺陷）"
+    )
+    #: 内层 `<input>` 也要限宽（真正承载文字的是它）。
+    assert ".spec-value-input > input" in css, "内层 input 也要限宽"
+
+
+def test_import_can_be_cancelled_midway():
+    """导入要能**中途取消**（用户口径 2026-10-11：「导入中点击取消，则中断未导入和
+    未上传的数据，停止执行」）。
+
+    ⚠️ 判据必须是「**循环里真的会看取消标志**」，只看「取消按钮有没有置位」不够 ——
+    那个是**假守卫**：标志置了但循环从不检查，后台照样把剩下的图传完。
+
+    三个要点（少一个就会「点了取消还在跑」）：
+      ① 用 `useRef`（`useState` 在 `await` 长任务里是**闭包快照**，循环看不到新值）；
+      ② 上传循环**每张前**检查并 `break`（不是只检查一次）；
+      ③ 取消检查要在**一切写入之前**（否则点取消反把历史数据清空 = 数据丢失）。
+    """
+    code = _code_only(_read(STEP2))
+
+    #: ① ref 而非 state。
+    assert "importCancelRef" in code, "缺取消标志"
+    assert "useRef(" in code and "importCancelRef = useRef(" in code, (
+        "取消标志必须用 useRef（useState 在 await 循环里读不到新值）"
+    )
+
+    #: ② 并发 worker 里**领活前**检查取消标志。
+    #: ⚠️ 2026-10-11 口径变更：上传循环由 `for (const item of plan.images)` 改成
+    #: **worker pool**（并发上传，用户口径「规格上传也实现并发上传缩短时间」）。
+    #: 取消语义**必须保留**：worker 每轮先查标志再取 `cursor` ⇒ 取消后不再领新项。
+    worker_at = code.index("const worker = async () =>")
+    worker_body = code[worker_at : worker_at + 700]
+    assert "importCancelRef.current" in worker_body, "worker 里没有检查取消标志"
+    assert worker_body.index("importCancelRef.current") < worker_body.index("const i = cursor;"), (
+        "取消检查必须早于领活（反序 ⇒ 取消后还会多传一项）"
+    )
+    #: 反向：不许退回串行（退回即并发被撤销）。
+    assert "for (const item of plan.images)" not in code, "规格图上传退回串行了"
+
+    #: ③ 取消检查在清表之前。
+    cancel_at = code.index("if (importCancelRef.current) {")
+    #: 清表那句（规格值/specTypes/价格表置空）必须**晚于**取消检查。
+    clear_at = code.index("setSpecValues({})")
+    assert cancel_at < clear_at, (
+        "取消检查必须在清空历史数据**之前**，否则点取消会把历史数据清掉（数据丢失）"
+    )
+
+    #: 取消按钮要真的置位。
+    assert "importCancelRef.current = true" in code, "取消按钮没有置位中断标志"
+
+    #: ⚠️ 判据核心：**不许用 `confirmLoading`**。
+    #: antd 在 `confirmLoading=true` 时会把 OK 变 loading，并**连带禁用同排的
+    #: 取消按钮** ⇒ 用户点取消毫无反应（实测：「点击取消未中断也未关闭弹窗」）。
+    #: 这是本用例存在的**唯一理由** —— 取消能不能点，取决于这个 prop 用没用错。
+    modal_at = code.index('title="从预检 SKU 导入规格 / 价格 / 库存"')
+    modal_body = code[modal_at:modal_at + 2000]
+    assert "confirmLoading" not in modal_body, (
+        "导入弹窗不许用 confirmLoading（会连带禁用取消按钮）—— 用 okButtonProps.loading"
+    )
+    assert "loading: importRunning" in modal_body, "OK 的 loading 要走 okButtonProps"
+
+    #: 开跑前复位（否则上一次的取消会毒到下一次）。
+    assert "importCancelRef.current = false" in code, "开跑前必须重置中断标志"

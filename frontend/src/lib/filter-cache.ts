@@ -60,7 +60,12 @@ export const FILTER_CACHE_KEYS = {
   /** 商品列表 `/platforms/xhs/shop-items`。 */
   shopItems: {
     accountId: "xhs.filters.shop-items.account-id",
-    form: "xhs.filters.shop-items.form",
+    //: ⚠️ `.v2` 后缀是**一次性的口径变更作废**（2026-10-11 用户口径「搜索区间状态默认
+    //: 全部」）：这一版把状态默认值从 `on_shelf`（售卖中）改成 `all`（全部），而旧缓存里
+    //: 存着用户上次那份草稿（含旧默认 `on_shelf`）⇒ 打开页面看到「售卖中」，用户会以为
+    //: 新默认值没生效。换键名让旧草稿自然失效（`pageSize` / `sort` 是纯用户选择，
+    //: 与默认值口径无关，**不换** —— 换了等于顺手清掉用户还想要的东西）。
+    form: "xhs.filters.shop-items.form.v2",
     pageSize: "xhs.filters.shop-items.page-size",
     sort: "xhs.filters.shop-items.sort",
   },
@@ -294,10 +299,11 @@ export type ShopItemsFilterDraft = {
   note_count: number | null;
 };
 
-/** 商品列表表单的清空态（「重置」= 回这里）。默认状态 `on_shelf` 与页面 `initialValues` 一致。 */
+/** 商品列表表单的清空态（「重置」= 回这里）。默认状态 `all`（用户口径 2026-10-11
+ *  「搜索区间状态默认全部」）与页面 `initialValues` 一致。 */
 export const EMPTY_SHOP_ITEMS_DRAFT: ShopItemsFilterDraft = {
   keyword: "",
-  status: "on_shelf",
+  status: "all",
   price_from: null,
   price_to: null,
   stock_from: null,

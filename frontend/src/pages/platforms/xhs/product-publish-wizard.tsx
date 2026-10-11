@@ -19,9 +19,12 @@
  * Steps 的语义是**同一条流程的进度指示**，必须共用一个容器才能表达
  * 「第 1 步 / 共 3 步」。拆成两个 Modal 会退化成「弹窗 A 关了再开弹窗 B」。
  *
- * ⚠️ 红线（用户口径，本文件**不负责**实现，只管不让用户误以为安全）：
- * 发布是真实写操作，成功即产生在售商品；后端默认「发布成功后立即下架」，
- * 前端**不得**传 `off_shelf_after: false`。
+ * ⚠️ **发布是真实写操作**，成功即产生在售商品。
+ * ⚠️ 2026-10-11 用户**取消红线**：第 3 步的提交拆成两个语义明确的按钮 ——
+ *   · 「发布商品」       直接上架、**发布后不再下架**（带 tip 二次确认）；
+ *   · 「发布并下架商品」 发布成功后**立刻下架**（原红线行为）。
+ *   两者**地位相同、没有主按钮**（用户明确：「用户自己选择，没有主按钮」）。
+ * 原句「前端**不得**传 `off_shelf_after: false`」**已被取代**。
  * ⚠️ 弹窗宽度 80vw / 高 90%；文案禁 Markdown `**`。
  */
 
@@ -36,6 +39,8 @@ import {
   Input,
   InputNumber,
   Modal,
+  Popover,
+  Popconfirm,
   Progress,
   Radio,
   Select,
@@ -52,6 +57,7 @@ import {
   CheckCircleFilled,
   CloseCircleFilled,
   FolderOpenOutlined,
+  SwapOutlined,
   LeftOutlined,
   LoadingOutlined,
   MinusOutlined,
@@ -89,6 +95,7 @@ import {
   recommendProductCategory,
   generateShortTitle,
   predictProperties,
+  uploadPictureSpaceFiles,
   uploadPictureSpaceFile,
   createItemDraft,
 } from "../../../lib/api";
@@ -103,7 +110,48 @@ import {
   type BatchEditRule,
 } from "../../../lib/precheck-publish";
 import { buildImageUrls, lookup_spec_image, md5_file_name, search_keyword } from "../../../lib/publish-config";
+import {
+  countUncheckedSkuMedia,
+  DEFAULT_SKU_IMAGE_PATTERN,
+  filterCheckedSkuMedia,
+  localSkuImageList,
+  lookupLocalSkuImage,
+  selectableSkuMedia,
+  validateSkuImagePattern,
+  onlineImageColumnIndex,
+  parseSkuName,
+  passedSkuSpecs,
+  skuNameColumnIndex,
+  //: 2026-10-11 第五批（自动加载第 9 步：填 SKU 规格 / 价格库存 / 规格图）：
+  buildSkuFillPlan,
+  defaultSpecMapping,
+  passedSkuRows,
+  sourceSpecNames,
+  type PriceMappingRow,
+} from "../../../lib/precheck-publish";
 import PublishConfigStep1, { type ConfigMainImage } from "./publish-config-step1";
+
+/** 一张图的上传结果（**与入参逐位对齐**，失败项也保留）。 */
+type UploadOutcome = {
+  /** 源预检图相对路径（定位用的是它，不是文件名）。 */
+  rel_path: string;
+  /** 显示用的原文件名。 */
+  file_name: string;
+  ok: boolean;
+  image: ConfigMainImage | null;
+  /** 失败原因（成功时空串）——用户要能看到「缺的是哪些张、为什么缺」。 */
+  reason: string;
+  /** 已取回的 File（内部用；`undefined` = 这一步就失败了）。 */
+  file?: File | null;
+};
+
+/** 取字节这一侧的并发度（前端闸门）。
+ *
+ * ⚠️ 与后端 `xhs_image_upload_parallelism`（默认 5）**同值**：后端控制「PUT 的并发」，
+ * 这里控制「同时向本机后端要几张图的字节」。旧版这里**不限流**（38 张一起要）
+ * ⇒ 浏览器连接池耗尽 ⇒ 一部分 `fetch` 失败被静默丢弃（真机实测 38 变 14）。
+ */
+const UPLOAD_FETCH_CONCURRENCY = 5;
 import PublishConfigStep2, {
   type ConfigSnapshot,
   type PriceRow,
@@ -153,6 +201,17 @@ type AutoStage = {
  *
  * ⚠️ 用 `performance.now()`（单调钟）而非 `Date.now()`，系统改时间不污染耗时。
  */
+/** 阶段标题 → 该行是否有「逐张上传详情」（有则标题可点）。
+ *
+ * ⚠️ 判据用**title 前缀匹配**而不是阶段下标：阶段数组会随需求增删
+ * （新增「上传商品视频」就动过顺序），写死下标迟早错位。
+ */
+export function uploadDetailKeyFor(title: string): "main" | "detail" | null {
+  if (title.includes("主图")) return "main";
+  if (title.includes("详情图")) return "detail";
+  return null;
+}
+
 export function runningElapsedMs(stage: AutoStage, _tick: number): number {
   if (stage.status !== "running" || stage.startedAt === undefined) return 0;
   return Math.round(performance.now() - stage.startedAt);
@@ -165,6 +224,13 @@ const SPEC_TYPE_OPTIONS = ["套装明细", "颜色分类", "尺寸", "款式", "
 
 /** 「未分组」的界面文案（后端用空串表示，不能让界面显示成空白）。 */
 const UNGROUPED_LABEL = "未分组";
+
+/** **SKU 图预览尺寸**（用户口径 2026-10-11：线上图与本地图**保持一致**，以线上图为准）。
+ *
+ * 单一常量：两个列都用它 ⇒ 改一处两边同步，不会一边 72 一边 100。 */
+const SKU_THUMB_SIZE = 72;
+/** SKU 图列的列宽（容纳预览 + 边距）。 */
+const SKU_THUMB_COL_WIDTH = 110;
 
 /** 四个媒体区（顺序固定 = 用户口径的「加载模版」）。 */
 const ZONES: { key: PrecheckGroup; label: string }[] = [
@@ -282,6 +348,9 @@ export function ProductPublishWizard({
    *  只留名字 ⇒ 后端只能把所有 SKU 行塞到第一个规格 id 上
    *  ⇒ 真机报「variants - 当前商品存在重复的规格，请删除重复规格后重试」。 */
   const [specAttributes, setSpecAttributes] = useState<SpecAttribute[]>([]);
+  //: ⚠️ 规格 / 价格库存的导入**由第二步自己做**（用户口径 2026-10-11 最终版：
+  //: 规格随类目变动 ⇒ 入口放在「商品规格」区域，不在自动加载流水线里）。
+  //: 向导只负责提供数据源（`passedRows` / `specImportSources`）与上传函数。
   /** 属性值：**默认空**，第一部分执行完毕后按商品自动填充。 */
   const [propertyValues, setPropertyValues] = useState<Record<string, unknown>>({});
   /** 物流模板候选（平台下发，进第二步时拉一次）。 */
@@ -397,6 +466,19 @@ export function ProductPublishWizard({
 
   // ---- 第三步：发布 ----
   const [submitting, setSubmitting] = useState(false);
+  //: 本次提交点的是哪个按钮（`false` = 发布商品/不下架；`true` = 发布并下架）。
+  //: ⚠️ 必须有这个 state：提交遮罩的文案要按它分叉 —— 旧版文案写死
+  //: 「正在发布并立即下架…（红线）」，点「发布商品」时**说的是错的**
+  //: （用户实测 2026-10-11：「点击发布商品按钮弹窗中的文案未改变」）。
+  const [submitShelfMode, setSubmitShelfMode] = useState(true);
+  //: 上传逐张结果（主图 / 详情图）—— 供「已上传 N 张」后面的**详情**入口展示
+  //: （用户口径 2026-10-11：「新增一个详情点击弹窗展示对应的详情」）。
+  const [uploadDetails, setUploadDetails] = useState<{
+    main: UploadOutcome[];
+    detail: UploadOutcome[];
+  }>({ main: [], detail: [] });
+  //: 当前打开的是哪一份详情（null = 不展示）。
+  const [uploadDetailOpen, setUploadDetailOpen] = useState<"main" | "detail" | null>(null);
   /** **提交耗时统计**（用户口径 2026-10-10：「点击发布按钮后页面加蒙版加耗时统计」）。
    *  ⚠️ 用 `performance.now()` 单调钟（`Date.now()` 会被系统对时拨动）。 */
   const [submitElapsedSec, setSubmitElapsedSec] = useState(0);
@@ -414,6 +496,20 @@ export function ProductPublishWizard({
   /** **发布助手异常提示数**（用户口径 2026-10-10：有异常 ⇒ 不允许进入下一步）。
    *  由第二步上报（`onHintCountChange`），保证与页面上看到的红色项**同源**。 */
   const [hintCount, setHintCount] = useState(0);
+
+  /** 第一步 SKU 表格的**选择快照**（用户口径 2026-10-11 需求 4/5）。
+   *
+   *  ⚠️ 必须由**向导**持有、不能留在 `TablesPanel` 内部：第二步要按「预选通过
+   *  的 SKU 规格」生成价格库存表，而 `TablesPanel` 是一个受控展示组件、
+   *  它内部 state 会随页签切换卸载而丢。
+   *
+   *  `blocked` = 两图判定未通过的行（自动置灰 + 不勾选）；
+   *  `picked`  = 用户在表格里勾选的行（默认全选）。
+   *  两者一起喂给 `passedSkuSpecs()`（单一实现，第一步与第二步共用）。 */
+  const [skuTableSelection, setSkuTableSelection] = useState<{
+    blocked: number[];
+    picked: number[];
+  }>({ blocked: [], picked: [] });
 
   const reset = useCallback(() => {
     setStep(0);
@@ -440,6 +536,9 @@ export function ProductPublishWizard({
     setSpecImages({});
     setHintCount(0);
     setSubmitElapsedSec(0);
+    //: 上传详情也要清（否则重开弹窗看到上一轮的图清单）。
+    setUploadDetails({ main: [], detail: [] });
+    setUploadDetailOpen(null);
     setPriceRows([
       {
         key: "default",
@@ -725,6 +824,64 @@ export function ProductPublishWizard({
     [token, precheck, selectedMedia, tables],
   );
 
+  /** **预选通过**的 SKU 规格集合（用户口径 2026-10-11 需求 4/5）：
+   *  勾选了 **且** 两图判定通过的行。第二步据此生成价格库存表 ——
+   *  「未选中的不允许进入配置商品参数」。
+   *
+   *  ⚠️ 判据与第一步是**同一个函数**（`passedSkuSpecs`）—— 否则第一步勾着的
+   *  规格在第二步消失，用户会看到自相矛盾的界面。 */
+  const passedSpecs = useMemo(
+    () =>
+      passedSkuSpecs(
+        tables[0] ?? null,
+        skuTableSelection.blocked,
+        skuTableSelection.picked,
+      ),
+    [tables, skuTableSelection],
+  );
+
+  /** **预检通过且已勾选**的 SKU 整行数据（用户口径 2026-10-11 新需求）。
+   *
+   *  与 `passedSpecs` **同一套判据、同一个数据源**（`tables[0]` + 勾选态）——
+   *  两处各写一份的话，第一步勾着的规格会在第二步的某一处凭空消失（DEF-044 同型）。
+   *  `spec` 集合那个只够「过滤价格表行」；这里要**整行**（价格/库存/商家编码/本地图）。 */
+  //: ⚠️ 向导层的「**已勾选且无违规**的 SKU 图」—— `TablesPanel` 里有一份同名的
+  //: （那个作用于预检弹窗内部）。这里是**向导**作用域，供 `passedSkuRows` 查本地图。
+  //: 判据与弹窗内**同一套函数**（`selectableSkuMedia` → `filterCheckedSkuMedia`），
+  //: 否则「弹窗里勾了、到这里查不到图」两处各说各话（DEF-044 同型）。
+  const wizardCleanSkuMedia = useMemo(
+    () =>
+      filterCheckedSkuMedia(
+        selectableSkuMedia((precheck?.media ?? []).filter((m) => m.group === "sku")),
+        checked,
+      ),
+    [precheck, checked],
+  );
+  //: ⚠️ 用**默认正则**解析本地图（与预检弹窗同一套默认值）。
+  //: 若用户在本弹窗表头改过正则（那份 state 在 `TablesPanel` 内），本处仍按默认正则
+  //: 解析 —— **已知取舍**：把正则再往上提会牵动 `TablesPanel` 的 props 与预览链路
+  //: （收益小、回归面大）。这里导出的只是「按名字对齐的候选」，用户可在导入弹窗里
+  //: 用「待导入行」列核对行数，对不上就不会点确认。
+  const wizardLocalImages = useMemo(
+    () => localSkuImageList(wizardCleanSkuMedia, DEFAULT_SKU_IMAGE_PATTERN),
+    [wizardCleanSkuMedia],
+  );
+
+  const filledSkuRows = useMemo(
+    () =>
+      passedSkuRows(
+        tables[0] ?? null,
+        skuTableSelection.blocked,
+        skuTableSelection.picked,
+        wizardLocalImages,
+      ),
+    [tables, skuTableSelection, wizardLocalImages],
+  );
+
+  /** 弹窗「规格映射」要列出的**左侧项** = 数据包里出现过的规格分类名。 */
+  const mappingSources = useMemo(() => sourceSpecNames(filledSkuRows), [filledSkuRows]);
+
+
   /** 取某 SKU 行的**规格图**（已上传的图片空间条目）——
    *  SKU 名 `颜色分类:斗柜 / 尺寸:1m` ⇒ 逐维度在快照的 `specImagePaths` 里查，
    *  取**第一个命中**的（真机 `skuData[].specImage` 是单个对象）。
@@ -792,6 +949,131 @@ export function ProductPublishWizard({
   //: ⚠️ 2026-10-10：依赖加 `specImages`（`specImageRefFor`/`specImageUrlFor` 现查 `specImages`
   //: 原对象而非 `configSnapshot` 副本），否则选规格图后 `skus` 不重映射、image_path 仍空。
   }, [priceRows, configSnapshot, specImages]);
+
+  /** **并发上传**预检暂存的多张图片（方案 B 的前端侧）。
+   *
+   * 用户口径（2026-10-11）：
+   *  · 「图片资源实现并发上传，方案 B，并发数默认 5，支持在 config 表配置」；
+   *  · 「并发上传图片时不要打乱图片的顺序，应保证最后拿到的图片顺序与上传前一致」；
+   *  · 「已上传 14 张详情图…应上传 38 张，缺少的不知道是哪些张」⇒ 失败必须**报出来**。
+   *
+   * ## ⚠️ 两个曾经的真 bug（都在这个函数里，都被真机实测抓到）
+   *
+   * **① 静默丢图（38 → 14）**：旧版先 `Promise.all` 把 38 张**同时**取回字节，
+   * 再过滤出成功的提交。38 路并发打同一个后端 ⇒ 浏览器连接池耗尽
+   * （`ERR_INSUFFICIENT_RESOURCES`）⇒ 一部分 `fetch` 直接 reject ⇒ 被 `catch` 吞成
+   * `null` ⇒ **静默丢弃 24 张**，页面上只显示「已上传 14 张」，且**不知道丢的是哪些**。
+   * ⇒ 修法：**取字节也按并发数分块**（不再无限并发），且**失败项逐张记名**回传。
+   *
+   * **② 顺序错乱**：旧版把「取图失败」的项 `filter` 掉后再提交，后端回的
+   * `results[].index` 是**压缩后数组**的下标；虽然做了映射，
+   * 但兜底那条 `decodable.find(x => x.f.name === r.file_name)` 在
+   * **两张内容相同的图（MD5 同名）** 时必然命中错的那一项 ⇒ 图串位。
+   * ⇒ 修法：**保持位对齐**（失败项也占位，只是不提交），回填**只认 `results[].index`**，
+   * 删掉那条按文件名找的兜底（它是错序的来源）。
+   *
+   * ⚠️ 返回**逐张结果**（不再只回成功的数组）：调用方需要知道**哪几张失败**，
+   * 才能给用户一个「点开看详情」的入口（用户口径）。
+   */
+  const uploadManyFromPackage = useCallback(
+    async (
+      items: { rel_path: string; file_name: string }[]
+    ): Promise<UploadOutcome[]> => {
+      if (items.length === 0) return [];
+      //: 逐张结果（**与 `items` 逐位对齐**，失败项也在，带原因）。
+      const out: UploadOutcome[] = items.map((it) => ({
+        rel_path: it.rel_path,
+        file_name: it.file_name,
+        ok: false,
+        image: null,
+        reason: "",
+      }));
+
+      //: 并发度：后端配置是权威闸门，但**取字节这一侧也要限流**（旧版不限 ⇒ 连接池耗尽）。
+      //: 取值与后端默认一致（5）；`UPLOAD_FETCH_CONCURRENCY` 是前端侧闸门。
+      const chunkSize = UPLOAD_FETCH_CONCURRENCY;
+
+      //: ── 阶段 1：**分块**取字节，块内并行、块间串行（不一次打满连接池）──
+      //: 每块完成后立即收集，块与块之间让连接池有机会回收。
+      for (let start = 0; start < items.length; start += chunkSize) {
+        const slice = items.slice(start, start + chunkSize);
+        const fetched = await Promise.all(
+          slice.map(async (it, k) => {
+            const index = start + k;
+            try {
+              const objectUrl = await fetchPrecheckImage(token ?? "", it.rel_path);
+              const blob = await (await fetch(objectUrl)).blob();
+              const bytes = new Uint8Array(await blob.arrayBuffer());
+              const ext = (it.file_name.match(/\.[^.]+$/) ?? [".jpg"])[0];
+              const name = md5_file_name(bytes, { ext });
+              const file = new File([blob], name, { type: blob.type || "image/jpeg" });
+              //: ⚠️ objectURL 用完即释放 —— 旧版没释放，38 张会一直占内存。
+              URL.revokeObjectURL(objectUrl);
+              return { index, file };
+            } catch (err) {
+              //: ⚠️ **不再静默**：把失败原因留在这一项上（用户能看到是哪些张、为什么）。
+              out[index].reason = `取图失败：${err instanceof Error ? err.message : String(err)}`;
+              return null;
+            }
+          })
+        );
+        for (const one of fetched) {
+          if (one) out[one.index].file = one.file;
+        }
+      }
+
+      //: ── 阶段 2：把**成功取到字节**的项按原下标顺序提交 ──
+      //: `slots[k]` = 提交数组第 k 项对应的 **items 原下标** ⇒ 回填时用它还原位置，
+      //: 保证「最终顺序 == 上传前顺序」。
+      const slots: number[] = [];
+      const payload: File[] = [];
+      out.forEach((o, i) => {
+        if (o.file) {
+          slots.push(i);
+          payload.push(o.file);
+        }
+      });
+      if (payload.length === 0) return out;
+
+      let res: Awaited<ReturnType<typeof uploadPictureSpaceFiles>>;
+      try {
+        res = await uploadPictureSpaceFiles(platformAccountId ?? 0, payload);
+      } catch (err) {
+        const why = `批量上传失败：${err instanceof Error ? err.message : String(err)}`;
+        for (const i of slots) out[i].reason = why;
+        return out;
+      }
+
+      //: ── 阶段 3：回填。**只认 `results[].index`**（后端保证与入参逐位对齐）──
+      //: ⚠️ 删掉旧版那条「按文件名找」的兜底：两张内容相同的图 MD5 同名时会命中错项 ⇒ 串位。
+      for (const r of res.results ?? []) {
+        const slot = typeof r.index === "number" ? slots[r.index] : undefined;
+        if (slot === undefined) continue;
+        if (!r.success) {
+          out[slot].reason = r.message || "上传失败";
+          continue;
+        }
+        out[slot].ok = true;
+        out[slot].image = {
+          url: r.url || "",
+          origin_name: items[slot].file_name,
+          file_name: r.file_name,
+          search_name: r.search_name || search_keyword(r.file_name),
+          file_id: r.file_id,
+          width: r.width ?? null,
+          height: r.height ?? null,
+          size_bytes: r.size,
+          extension: r.extension ?? "",
+          local_url: "",
+          materialId: r.materialId,
+          path: r.path,
+          link: r.link,
+        };
+      }
+      return out;
+    },
+    [fetchPrecheckImage, platformAccountId, token]
+  );
 
   /** 把预检暂存的**一张图片**上传到图片空间，返回主图对象。
    *
@@ -1024,19 +1306,31 @@ export function ProductPublishWizard({
     try {
       // 1) 主图：全部上传
       setStage(0, { status: "running" });
-      const uploaded: ConfigMainImage[] = [];
-      for (const p of mainImagePaths) {
-        //: 用户口径 2026-10-11：上传失败按弹窗里配的「是否重试 + 重试次数」重跑。
-        const one = await withUploadRetry(() => uploadOneFromPackage(p.rel_path, p.file_name));
-        if (one) uploaded.push(one);
-      }
+      //: ⚠️ 2026-10-11 用户口径：主图**并发上传**（方案 B）—— 与详情图同一出口。
+      //: 旧写法串行 5 张 × 2.4s ≈ 12s（真机实测），并发后 ≈ 3s。
+      const mainOutcomes = await uploadManyFromPackage(
+        mainImagePaths.map((p) => ({ rel_path: p.rel_path, file_name: p.file_name }))
+      );
+      const uploaded: ConfigMainImage[] = mainOutcomes
+        .filter((o) => o.ok && o.image)
+        .map((o) => o.image as ConfigMainImage);
+      //: ⚠️ **逐张结果留档**（用户口径：失败要能看到是哪些张）—— 不再只报一个数字。
+      setUploadDetails((prev) => ({ ...prev, main: mainOutcomes }));
       if (uploaded.length === 0) {
         setStage(0, { status: "failed", detail: "主图全部上传失败，已停止后续阶段" });
         void message.warning("主图全部上传失败，已跳过后续步骤");
         return;
       }
       setConfigImages(uploaded);
-      setStage(0, { status: "done", detail: `已上传 ${uploaded.length} 张主图` });
+      //: 成功的按**原顺序**取（失败项跳过，顺序不乱）。
+      const mainFailed = mainOutcomes.filter((o) => !o.ok).length;
+      setStage(0, {
+        status: "done",
+        detail:
+          mainFailed > 0
+            ? `已上传 ${uploaded.length} 张主图（${mainFailed} 张失败，点标题看详情）`
+            : `已上传 ${uploaded.length} 张主图`,
+      });
 
       // 2) 标题
       setStage(1, { status: "running" });
@@ -1113,15 +1407,30 @@ export function ProductPublishWizard({
       // 4) 详情图
       setStage(3, { status: "running" });
       if (detailImagePaths.length > 0) {
-        const details: ConfigMainImage[] = [];
-        for (const p of detailImagePaths) {
-          const one = await withUploadRetry(() => uploadOneFromPackage(p.rel_path, p.file_name));
-          if (one) details.push(one);
-        }
+        //: ⚠️ 2026-10-11 用户口径：详情图**并发上传**（方案 B）。
+        //: 旧写法是 `for...await` 串行 ⇒ 38 张 × 2.5s ≈ 94s（真机实测 1m34s）。
+        //: 并发 5 后 ≈ 19s。
+        const detailOutcomes = await uploadManyFromPackage(
+          detailImagePaths.map((p) => ({ rel_path: p.rel_path, file_name: p.file_name }))
+        );
+        const details: ConfigMainImage[] = detailOutcomes
+          .filter((o) => o.ok && o.image)
+          .map((o) => o.image as ConfigMainImage);
+        setUploadDetails((prev) => ({ ...prev, detail: detailOutcomes }));
         setConfigDetailImages(details);
-        setStage(3, details.length > 0
-          ? { status: "done", detail: `已上传 ${details.length} 张详情图` }
-          : { status: "failed", detail: "详情图全部上传失败" });
+        //: ⚠️ **必须报出「应有几张 / 实际几张」**（用户实测：只显示「已上传 14 张」，
+        //: 而数据包里有 38 张，用户既不知道少了、也不知道少的是哪些）。
+        const detailFailed = detailOutcomes.filter((o) => !o.ok).length;
+        const detailTotal = detailOutcomes.length;
+        setStage(3, {
+          status: details.length > 0 ? "done" : "failed",
+          detail:
+            detailTotal === 0
+              ? "数据包内无详情图"
+              : detailFailed > 0
+                ? `已上传 ${details.length}/${detailTotal} 张详情图（${detailFailed} 张失败，点标题看详情）`
+                : `已上传 ${details.length} 张详情图`,
+        });
       } else {
         setStage(3, { status: "skipped", detail: "数据包内无详情图" });
       }
@@ -1305,7 +1614,31 @@ export function ProductPublishWizard({
     videoPaths,
   ]);
 
-  const submit = useCallback(async () => {
+  //: ⚠️ 用户实测（2026-10-11）的另一半：**回第二步做了修改（如删掉报异常的图）后，
+  //: 第三步顶部仍挂着上一轮的失败原因** —— 用户会以为「改了没用」。
+  //: 口径：**只要提交材料发生变化，旧错误即失效**（清掉），避免拿旧结论误导重试。
+  //: ⚠️ 刻意**不依赖 `result`**（只在有错误时清）——否则会与 `setResult` 形成渲染循环。
+  useEffect(() => {
+    //: 判据用 `published`（`ItemPublishResult` 的真实字段；成功 = true）。
+    setResult((prev) => (prev && !prev.published ? null : prev));
+    //: 只认这三个「提交材料」数组：它们是第二步可编辑、且直接进载荷的部分。
+  }, [configImages, configDetailImages, specImages]);
+
+  /** 提交发布。
+   *
+   * `shelfAfterPublish`（2026-10-11 用户新口径，**红线取消**）：
+   *  · `true`  = **发布并下架**（发布成功后立刻下架 —— 原红线的行为）
+   *  · `false` = **发布商品**（直接上架，发布后**不再**下架）
+   *
+   * ⚠️ 红线已于 2026-10-11 由用户明确取消：「发布后保持在售」成为正式业务入口
+   * （不再是「只用于测试的钩子」）。因此这里会**显式传** `off_shelf_after`，
+   * 而不是像旧版那样刻意不传、靠后端默认 true 兜底。
+   * ⚠️ 但后端字段**默认值仍是 true** —— 任何漏传的调用方（旧前端 / 脚本 / 测试）
+   * 拿到的仍是「立刻下架」这个更保守的行为，不会因为这次放开而静默留在架上。
+   */
+  const submit = useCallback(async (shelfAfterPublish: boolean) => {
+    //: 先记下本次模式（供提交遮罩文案分叉；失败重试时也保持同一条语义）。
+    setSubmitShelfMode(shelfAfterPublish);
     if (!platformAccountId) return;
     if (!payload) {
       void message.warning("请先完成第一步预检");
@@ -1419,20 +1752,34 @@ export function ProductPublishWizard({
         package_path: packagePath || undefined,
         //: **第二步配置快照**（用户口径 2026-10-10：提交的应是第二步配置的完整参数）。
         config: (configSnapshot ?? undefined) as Record<string, unknown> | undefined,
-        //: ⚠️ 不传 off_shelf_after —— 保持后端默认 true（红线）。
+        //: ⚠️ 2026-10-11 起**显式传**（红线取消，按用户点的按钮决定）：
+        //: `true` = 发布成功后立刻下架；`false` = 直接上架、不再下架。
+        //: 旧版刻意不传靠后端默认 true；现在两个按钮语义不同，必须显式表达。
+        off_shelf_after: shelfAfterPublish,
       });
       setResult(data);
       onPublished?.(data);
       if (data.published) {
-        //: 用户口径 2026-10-11：成功提示**放顶部**（message 默认顶部），
-        //: 且发布成功后**关闭弹窗**（商品已下架，无需留在向导里）。
-        void message.warning({
-          content: data.off_shelf ? "发布成功，已立即下架" : "发布成功但下架失败，请人工下架",
-          duration: 3,
-        });
-        if (data.off_shelf) {
-          //: 成功后关闭弹窗（稍等让顶部提示可见，再关）。发布已下架，预检 token
-          //: 无需再 discard（数据已用完），直接 onClose 关弹窗。
+        //: 成功提示**放顶部**（message 默认顶部），且发布成功后**关闭弹窗**。
+        //: ⚠️ 三种终态要能分清（否则用户不知道该不该去店里看）：
+        //:  · 要下架 + 真下架了 → 「已立即下架」
+        //:  · 要下架 + 下架失败 → 「下架失败，请人工下架」
+        //:  · **不要下架**（发布商品）→ 明说「商品已在售」——这是「留在店里」的正向告知，
+        //:    不能复用「已下架」文案（否则用户以为没上架，实际挂着了）。
+        //: ⚠️ 文案按平台真实语义（2026-10-11 抓包实证）：
+        //:  ・要下架 → 已下架 / 下架失败（平台侧真的调了下架接口）
+        //:  ・不下架 → 商品**进入审核**（不是「已在售」！真机平台提交后同样不可售，
+        //:    且提交后平台不再调上架接口 ⇒ 审核通过才自动上架）。
+        //:  原句「发布成功，商品已在售（未下架）」**是错的**（会让人以为已上架成功）。
+        const content = shelfAfterPublish
+          ? data.off_shelf
+            ? "发布成功，已立即下架"
+            : "发布成功但下架失败，请人工下架"
+          : "发布成功，商品已提交平台审核（审核通过后自动上架）";
+        void message.warning({ content, duration: 3 });
+        //: 要下架但下架失败时**不关弹窗**（留着重试/人工处理）；其余终态关窗。
+        const shouldClose = !shelfAfterPublish || data.off_shelf;
+        if (shouldClose) {
           window.setTimeout(() => onClose(), 1200);
         }
       } else {
@@ -1447,7 +1794,26 @@ export function ProductPublishWizard({
       setSubmitElapsedSec((performance.now() - startedAt) / 1000);
       setSubmitting(false);
     }
-  }, [configCategoryId, configSnapshot, message, onClose, onPublished, payload, platformAccountId, skus, title]);
+    //: ⚠️ **必须带上图片数组**（2026-10-11 用户实测「回第二步删图 → 再提交仍报同一图片异常」）：
+    //: `submit` 是 `useCallback`，闭包捕获声明时的变量。第二步删图走的是
+    //: `onDetailImagesChange` ⇒ `setConfigDetailImages(...)`，**state 变了但依赖里没有它**
+    //: ⇒ `submit` 不被重建 ⇒ 提交时仍用**删图前**的数组组装载荷 ⇒ 平台报同一个错。
+    //: 而第三步预览是直接渲染 prop（不走闭包）⇒ 「预览正常、提交是旧数据」。
+    //: 这类「漏依赖 = 静默用旧闭包」的 bug 不会报错，只会在真机上表现为「改了没用」。
+  }, [
+    configCategoryId,
+    configSnapshot,
+    configImages,
+    configDetailImages,
+    specImages,
+    message,
+    onClose,
+    onPublished,
+    payload,
+    platformAccountId,
+    skus,
+    title,
+  ]);
 
   //: 提交中每 500ms 刷一次耗时（终态由 finally 定格）。
   useEffect(() => {
@@ -1653,15 +2019,57 @@ export function ProductPublishWizard({
           )}
           {step === 2 && (
             <>
+              {/* 用户口径（2026-10-11）：**提交按钮拆成两个**
+                  「发布商品（直接上架不再下架）」/「发布并下架商品（发布成功后立刻下架）」。
+                  ⚠️ 颜色口径（用户明确，同一轮追加）：
+                    · **「发布商品」= 红色**（`danger`）—— 它是**唯一会留下在售商品**的动作，
+                      视觉上必须是最「重」的那个，让人停一下；
+                    · **「保存草稿」/「发布并下架商品」= 蓝色**（`type="primary"`）——
+                      两者都不留后患（草稿不上架；发布并下架会自动收拾干净）。
+                  ⚠️ **红线已于 2026-10-11 取消**：「发布后保持在售」成为正式入口。 */}
               <Button
+                type="primary"
                 onClick={() => void saveDraft()}
                 disabled={submitting || draftSaving}
                 loading={draftSaving}
               >
                 保存草稿
               </Button>
-              <Button type="primary" danger onClick={() => void submit()} loading={submitting}>
-                确认发布
+              {/* 「发布商品」= 留在架上 ⇒ 红色 + tip 二次确认（用户口径：「tip二次确认」）。
+                  用 Popconfirm（贴着按钮出现，不打断整页），文案明说后果。 */}
+              {/* ⚠️ **Popconfirm 必须 `placement="top"`**（2026-07-11 实测隐患）：
+                  默认 placement 会把气泡弹在**右侧**，「确认上架」按钮正好压在右边的
+                  「发布并下架商品」上 ⇒ 用户点完确认，**手一落就又点到了下架按钮**
+                  （真机现象：点「发布商品」，商品上架后立刻被下架 —— 两次点击连发）。
+                  改 `top` 让气泡在按钮**上方**，确认键远离右侧的邻居按钮。
+                  另加 `getPopupContainer` 锚定到 footer，避免气泡漂到别处。 */}
+              <Popconfirm
+                title="确认发布？"
+                //: ⚠️ 文案**按平台真实行为**（2026-10-11 真机抓包 + 实测）：
+                //:  `batch_create_item` 创建的商品天然进**审核**、审核通过前不可售
+                //:  （真机平台自己提交后同样如此，且提交后**不再调任何上架接口**）。
+                //:  原句「发布成功后商品将保持在售，不会自动下架」**与事实不符**
+                //:  —— 商品不会立刻在售，会先进审核。已在下方保留原句作口径变更标记。
+                description="商品发布后进入平台审核，审核通过后自动上架；审核期间状态为不可售。"
+                okText="确认上架"
+                cancelText="取消"
+                placement="top"
+                onConfirm={() => void submit(false)}
+                disabled={submitting || draftSaving}
+              >
+                <Button danger disabled={submitting || draftSaving} loading={submitting}>
+                  发布商品
+                </Button>
+              </Popconfirm>
+              {/* 「发布并下架」= 原红线行为 ⇒ 蓝色、不加二次确认
+                  （与旧版「确认发布」的操作成本一致，不因为拆分而给老路径加门）。 */}
+              <Button
+                type="primary"
+                onClick={() => void submit(true)}
+                disabled={draftSaving}
+                loading={submitting}
+              >
+                发布并下架商品
               </Button>
             </>
           )}
@@ -1706,6 +2114,7 @@ export function ProductPublishWizard({
           onCheckedChange={setChecked}
           tables={tables}
           onTablesChange={setTables}
+          onSkuSelectionChange={setSkuTableSelection}
         />
       )}
 
@@ -1743,6 +2152,26 @@ export function ProductPublishWizard({
           logisticsTemplatesLoading={logisticsTemplatesLoading}
           priceRows={priceRows}
           onPriceRowsChange={setPriceRows}
+          //: 需求 4：第二步只处理「预检通过的 SKU 规格」。
+          passedSpecs={passedSpecs}
+          //: 2026-10-11 最终版：规格导入是**商品规格区域**的独立入口（不在自动加载里
+          //: —— 规格随类目变动）。向导负责提供数据源、映射默认值所依据的规格类型，
+          //: 以及「上传本地图」所要的两个函数（都走向导那一份重试配置）。
+          passedRows={filledSkuRows}
+          specImportSources={mappingSources}
+          priceSourceColumns={tables[0]?.columns ?? []}
+          //: 用户改了价格库存列映射 ⇒ 按新映射**重新导出**通过行（本层持有表格与勾选态）。
+          onRebuildRows={(priceMapping, fallback) =>
+            passedSkuRows(
+              tables[0] ?? null,
+              skuTableSelection.blocked,
+              skuTableSelection.picked,
+              wizardLocalImages,
+              priceMapping,
+              fallback,
+            )
+          }
+          withUploadRetry={withUploadRetry}
           detailImages={configDetailImages}
           onDetailImagesChange={setConfigDetailImages}
           video={configVideo}
@@ -1902,6 +2331,7 @@ export function ProductPublishWizard({
             </Text>
           </div>
         </div>
+
       </Modal>
 
       {/* 执行进度弹窗（用户口径 2026-10-09：「窗口居中展示弹窗执行进度列表，
@@ -1928,13 +2358,57 @@ export function ProductPublishWizard({
             <div className="auto-stage-row" key={`${s.title}-${i}`}>
               <span className="auto-stage-icon">
                 {s.status === "running" && <LoadingOutlined />}
-                {s.status === "done" && <CheckCircleFilled style={{ color: "#52c41a" }} />}
+                {/* ⚠️ 用户口径（2026-10-11）：「商品主图详情图，**出现上传失败则应修改为
+                    红色标题和红色对号图标**」—— 阶段 status 仍是 done（流程跑完了），
+                    但这一份详情里有失败项 ⇒ **对号也要变红**，不能只红标题
+                    （绿勾 + 红字自相矛盾，用户第一眼看的是图标）。 */}
+                {s.status === "done" &&
+                  (uploadDetailKeyFor(s.title) &&
+                  uploadDetails[uploadDetailKeyFor(s.title)!].some((r) => !r.ok) ? (
+                    <CloseCircleFilled style={{ color: "#ff4d4f" }} />
+                  ) : (
+                    <CheckCircleFilled style={{ color: "#52c41a" }} />
+                  ))}
                 {s.status === "failed" && <CloseCircleFilled style={{ color: "#ff4d4f" }} />}
                 {s.status === "skipped" && (
                   <span className="auto-stage-skip-dot" aria-label="已跳过" />
                 )}
               </span>
-              <span className="auto-stage-title">{s.title}</span>
+              {/* ⚠️ 用户口径（2026-10-11）：「上传商品主图和上传商品详情图后端统计所有图片
+                  上传的详情，**新增一个详情点击弹窗**展示对应的详情」
+                  ⇒ 这两行的**标题**变成可点（带下划虚线提示），点开看逐张清单。 */}
+              {(() => {
+                const which = uploadDetailKeyFor(s.title);
+                //: ⚠️ 用户口径（2026-10-11）：「已上传 14/38 张详情图（24 张失败…）
+                //: **应将标题置红色**」⇒ 有失败时标题整体变红，一眼就能看到出事了。
+                //: 判据 = **这一份详情里真有失败项**（不是看文案里有没有「失败」二字 ——
+                //: 那样文案一改就失效；直接查数据才是真判据）。
+                const hasFailure = which
+                  ? uploadDetails[which].some((r) => !r.ok)
+                  : false;
+                return which ? (
+                  <span
+                    className={`auto-stage-title auto-stage-title-link${
+                      hasFailure ? " auto-stage-title-failed" : ""
+                    }`}
+                    role="button"
+                    tabIndex={0}
+                    title="点击查看逐张上传详情"
+                    onClick={() => setUploadDetailOpen(which)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") setUploadDetailOpen(which);
+                    }}
+                  >
+                    {s.title}
+                    {/* ⚠️ 「详情」小标**单独一行样式**（不与标题挤在一起）：
+                        用户截图里「上传商品详情图详情」连成一串分不清。改为
+                        `margin-inline-start` 拉开 + 竖线分隔，视觉上明确是附属入口。 */}
+                    <span className="auto-stage-link-hint">详情</span>
+                  </span>
+                ) : (
+                  <span className="auto-stage-title">{s.title}</span>
+                );
+              })()}
               <span className="auto-stage-detail" title={s.detail ?? ""}>
                 {s.detail ?? (s.status === "pending" ? "等待中" : "")}
               </span>
@@ -1947,6 +2421,91 @@ export function ProductPublishWizard({
             </div>
           ))}
         </div>
+        {/* ⚠️ 用户口径（2026-10-11）：「**在底部添加一个提示，点击标题可查看上传详情信息**」
+            —— 进度弹窗底部常驻一行说明，用户才知道标题能点（只靠虚下划线提示太弱）。
+            只在**真的有逐张详情**时显示（没跑过上传时不必出现这条）。 */}
+        {uploadDetails.main.length + uploadDetails.detail.length > 0 ? (
+          <div className="auto-stage-footer-hint">
+            点击「上传商品主图」/「上传商品详情图」标题可查看逐张上传详情
+          </div>
+        ) : null}
+      </Modal>
+
+      {/* **上传逐张详情弹窗**（用户口径 2026-10-11：「新增一个详情点击弹窗展示对应的详情」）。
+          ⚠️ 存在的理由：并发上传时**单张失败不再静默**，用户必须能看到
+          「应有 N 张 / 成功 M 张 / 失败的是哪些、为什么」——否则丢了 24 张也无从发现。 */}
+      <Modal
+        open={uploadDetailOpen !== null}
+        onCancel={() => setUploadDetailOpen(null)}
+        footer={null}
+        width="60vw"
+        centered
+        title={uploadDetailOpen === "main" ? "上传商品主图 · 逐张详情" : "上传商品详情图 · 逐张详情"}
+        className="upload-detail-modal"
+      >
+        {(() => {
+          const rows = uploadDetailOpen ? uploadDetails[uploadDetailOpen] : [];
+          const okCount = rows.filter((r) => r.ok).length;
+          const badCount = rows.length - okCount;
+          return (
+            <>
+              <div className="upload-detail-summary">
+                共 {rows.length} 张：成功 <b>{okCount}</b> 张
+                {badCount > 0 ? (
+                  <>
+                    ，失败 <b style={{ color: "#ff4d4f" }}>{badCount}</b> 张
+                  </>
+                ) : null}
+              </div>
+              <Table
+                size="small"
+                rowKey={(r) => r.rel_path}
+                dataSource={rows}
+                pagination={rows.length > 20 ? { pageSize: 20, showSizeChanger: false } : false}
+                scroll={{ y: 380 }}
+                columns={[
+                  {
+                    title: "序号",
+                    width: 64,
+                    render: (_v, _r, i) => i + 1,
+                  },
+                  {
+                    title: "文件",
+                    dataIndex: "file_name",
+                    //: 长名截断 + 悬停看全（与全站口径一致）。
+                    render: (v: string) => (
+                      <span title={v} className="upload-detail-name">
+                        {v}
+                      </span>
+                    ),
+                  },
+                  {
+                    title: "结果",
+                    width: 90,
+                    render: (_v, r) =>
+                      r.ok ? (
+                        <Tag color="green">成功</Tag>
+                      ) : (
+                        <Tag color="red">失败</Tag>
+                      ),
+                  },
+                  {
+                    title: "原因",
+                    //: 成功时不显原因（留空），失败时必须说清 —— 这就是用户要的「缺哪些张」。
+                    render: (_v, r) =>
+                      r.ok ? (
+                        <span className="upload-detail-ok">—</span>
+                      ) : (
+                        <span className="upload-detail-reason" title={r.reason}>
+                          {r.reason}
+                        </span>
+                      ),
+                  },
+                ]}
+              />
+            </>
+          );
+        })()}
       </Modal>
 
       {step === 2 && (
@@ -1973,11 +2532,19 @@ export function ProductPublishWizard({
         <div className="publish-wait-mask" role="status" aria-live="polite">
           <div className="publish-wait-card">
             <Spin size="large" />
+            {/* ⚠️ 文案按**用户点的按钮**分叉（不能写死）：
+                旧版写死「正在发布并立即下架…（红线）」⇒ 点「发布商品」时
+                遮罩说的是**反的**（用户实测 2026-10-11）。且红线已取消，
+                那行字本身也不再准确。 */}
             <div className="publish-wait-text">
-              正在发布并立即下架… 已耗时 {Math.floor(submitElapsedSec)}s
+              {submitShelfMode
+                ? `正在发布并下架商品… 已耗时 ${Math.floor(submitElapsedSec)}s`
+                : `正在发布商品（保持在售）… 已耗时 ${Math.floor(submitElapsedSec)}s`}
             </div>
             <div className="publish-wait-sub">
-              发布成功后会立即下架（红线）；请勿关闭本窗口或重复点击。
+              {submitShelfMode
+                ? "发布成功后会立即下架；请勿关闭本窗口或重复点击。"
+                : "发布成功后商品将保持在售、不会自动下架；请勿关闭本窗口或重复点击。"}
             </div>
           </div>
         </div>
@@ -2048,19 +2615,16 @@ function PrecheckStep(props: {
   onCheckedChange: (next: Record<string, boolean>) => void;
   tables: PrecheckTable[];
   onTablesChange: (next: PrecheckTable[]) => void;
+  /** 上报 SKU 表的选择快照（需求 4：第二步要用同一份判据过滤）。 */
+  onSkuSelectionChange: (next: { blocked: number[]; picked: number[] }) => void;
 }) {
   const {
     packagePath, onPick, picking, loading, onLoad,
     onPrecheck, inspected, precheckPassed, onPreview,
     precheckGroups, onOpenGroupPicker, groupOptions,
     token, precheck, checked, onCheckedChange, tables, onTablesChange,
+    onSkuSelectionChange,
   } = props;
-
-  /** 属性图表在 `tables` 里的下标（**存在的商品属性图**才 >= 0）。
-   *
-   *  用户口径 2026-10-09：数据包里有商品属性图 ⇒ 识别成 KV ⇒ 出一个「商品属性」页签。
-   *  判据是后端给该表填了 `kv`（属性图专属字段），不是按标题猜。 */
-  const attrTableIndex = tables.findIndex((t) => Array.isArray(t.kv));
 
   /**
    * 区域批量勾选。
@@ -2077,6 +2641,15 @@ function PrecheckStep(props: {
     }
     onCheckedChange(next);
   };
+
+  /** **因取消勾选而被移除的 SKU 图数**（用户口径 2026-10-11 要给提示）。
+   *
+   *  口径：媒体区里**可选的**（已检测 + 非违规）、但**未勾选**的 SKU 图数量 ——
+   *  这些图已从规格列表的本地图列移除，必须让用户知道原因。 */
+  const excludedByUncheck = countUncheckedSkuMedia(
+    (precheck?.media ?? []).filter((m) => m.group === "sku"),
+    checked,
+  );
 
   return (
     <div>
@@ -2239,14 +2812,38 @@ function PrecheckStep(props: {
             },
             {
               key: "tables",
-              //: 属性表（有 `kv`）**不算表格** —— 它有自己的「商品属性」页签，
-              //: 两处都出现等于同一份数据展示两次（用户口径 2026-10-09）。
               //: ⚠️ 用户口径（2026-10-09）：页签名从「表格」改为**「商品sku表格」**
               //: （该页签装的就是 SKU / 规格表）。
-              label: `商品sku表格（${tables.filter((t) => !Array.isArray(t.kv)).length}）`,
+              //: 2026-10-11：属性图 OCR 已移除 ⇒ 后端不再产出「属性 KV 表」，
+              //: 这里的 `kv` 过滤随之删掉（死判据留着会让以后误加回的表被静默隐藏）。
+              label: `商品sku表格（${tables.length}）`,
               children: (
+                <>
+                  {/* ⚠️ 用户口径 2026-10-11：媒体资源里取消勾选的 SKU 图会**连带**
+                      从规格列表移除 —— 必须给提示，否则用户只会看到本地图「莫名少了」
+                      而不知道自己取消过勾选（静默变化比不提示更糟）。 */}
+                  {excludedByUncheck > 0 && (
+                    <Alert
+                      type="warning"
+                      showIcon
+                      style={{ marginBottom: 12 }}
+                      message={
+                        `有 ${excludedByUncheck} 张 SKU 图在「媒体资源」里未勾选，` +
+                        "已从下面的规格列表中移除（本地图片列显示「无」）——" +
+                        "要恢复请回到「媒体资源 → SKU 图」重新勾选。"
+                      }
+                    />
+                  )}
                 <TablesPanel
-                  tables={tables.filter((t) => !Array.isArray(t.kv))}
+                  token={token as string}
+                  //: 需求 3：本地图列的数据源 = 数据包 `SKU/` 目录的媒体
+                  //: （按**文件名里的 SKU 名称**与表格行对齐，不是按序号）。
+                  skuMedia={precheck.media.filter((m) => m.group === "sku")}
+                  //: ⚠️ 用户口径 2026-10-11：媒体资源里**取消勾选**的 SKU 图，
+                  //: 对应的 SKU 规格行本地图**也要被移除** ⇒ 面板必须知道勾选状态。
+                  checked={checked}
+                  onSelectionChange={onSkuSelectionChange}
+                  tables={tables}
                   //: ⚠️ 面板只显示 SKU 表（`tables` 的子集），改完必须**按真实下标**
                   //: 嵌回**完整数组**再落库 —— 直接上抛子集会把属性表（kv）丢掉，
                   //: 页签随之重建、面板状态被重置（用户实测：第二次改库存无响应）。
@@ -2254,26 +2851,9 @@ function PrecheckStep(props: {
                     onTablesChange(mergePanelTable(tables, panelIndex, next))
                   }
                 />
+                </>
               ),
             },
-            //: 用户口径 2026-10-09：数据包里**存在商品属性图** ⇒ 识别成 KV 后
-            //: 新增一个「商品属性」页签展示（没有属性图就不出现该页签）。
-            ...(attrTableIndex >= 0
-              ? [
-                  {
-                    key: "attributes",
-                    label: "商品属性",
-                    children: (
-                      <AttributeKvPanel
-                        table={tables[attrTableIndex]}
-                        onChange={(next) =>
-                          onTablesChange(tables.map((t, i) => (i === attrTableIndex ? next : t)))
-                        }
-                      />
-                    ),
-                  },
-                ]
-              : []),
           ]}
         />
       )}
@@ -2484,85 +3064,6 @@ function MediaPreview(props: {
   );
 }
 
-/**
- * 预览主体：图片给 `<img>`，视频给**可播放的 `<video controls>`**。
- *
- * ⚠️ 用户口径 2026-10-08：「视频无法预览，应支持**多种视频格式**预览播放」。
- *
- * 分三态处理，每种都给出**明确**结果（不给空白框）：
- * 1. 浏览器原生可播（mp4/m4v/mov/webm/ogv）⇒ `<video controls>` 直接播；
- * 2. 浏览器放不了但有答案（avi/mkv/flv/wmv/ts…）⇒ 明确提示「当前浏览器不支持
- *    该格式」，并说明该文件**仍已做过抽帧 OCR 检测**（别让用户以为这文件漏检了）；
- * 3. 取流失败 ⇒ 说失败，不静默空白。
- */
-function PreviewBody(props: { token: string; item: PrecheckMediaItem }) {
-  const { token, item } = props;
-  const [src, setSrc] = useState<string | null>(null);
-  const [failed, setFailed] = useState(false);
-  const isVideo = item.group === "video";
-
-  useEffect(() => {
-    let revoked: string | null = null;
-    let alive = true;
-    setFailed(false);
-    setSrc(null);
-    fetchPrecheckImage(token, item.rel_path)
-      .then((url) => {
-        if (!alive) {
-          URL.revokeObjectURL(url);
-          return;
-        }
-        revoked = url;
-        setSrc(url);
-      })
-      .catch(() => alive && setFailed(true));
-    return () => {
-      alive = false;
-      if (revoked) URL.revokeObjectURL(revoked);
-    };
-  }, [token, item.rel_path]);
-
-  if (failed) return <Text style={{ color: "#fff" }}>加载失败</Text>;
-  if (!src) return <Text style={{ color: "#fff" }}>加载中…</Text>;
-
-  if (isVideo) {
-    return (
-      <div
-        style={{
-          width: "100%",
-          height: "100%",
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
-          gap: 10,
-        }}
-      >
-        <video
-          src={src}
-          controls
-          autoPlay
-          playsInline
-          //: ⚠️ `onError` 是关键分支：`<video>` 对不认识的容器/编码**不会抛异常**，
-          //: 只是黑屏不播（用户看到的就是「视频无法预览分析」）。必须显式告诉
-          //: 用户「是这个格式浏览器放不了」，而不是留一块黑。
-          onError={() => setFailed(true)}
-          style={{ maxWidth: "100%", maxHeight: "100%", background: "#000" }}
-        />
-        {failed && <VideoUnsupportedHint item={item} />}
-      </div>
-    );
-  }
-
-  return (
-    <img
-      src={src}
-      alt={item.file_name}
-      style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }}
-    />
-  );
-}
-
 /** 浏览器放不了这个视频格式时的说明。 */
 function VideoUnsupportedHint(props: { item: PrecheckMediaItem }) {
   const { item } = props;
@@ -2577,7 +3078,10 @@ function VideoUnsupportedHint(props: { item: PrecheckMediaItem }) {
   );
 }
 
-/** 单张缩略图（鉴权取流 → blob URL）。 */
+/** 单张缩略图（鉴权取流 → blob URL）。
+ *
+ * `onSize`（用户口径 2026-10-11 需求 5）：图片**本地解码后**回报真实 pixel 尺寸 ——
+ * 这是「零下载比对」里**本地一侧**的判据来源（线上那侧取平台下发的宽高）。 */
 function PrecheckThumb(props: { token: string; item: PrecheckMediaItem }) {
   const { token, item } = props;
   const [src, setSrc] = useState<string | null>(null);
@@ -2627,92 +3131,42 @@ function PrecheckThumb(props: { token: string; item: PrecheckMediaItem }) {
   );
 }
 
-/** 浏览器不支持预览时的说明用不上抽帧细节（用户口径 2026-10-09：页面不展示 OCR）。 */
-
-const fillStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  height: "100%",
-  color: "#999",
-};
-
-/* ------------------------------------------------------------------ *
- * 商品属性（属性图 OCR 出的 KV —— 用户口径 2026-10-09）
- * ------------------------------------------------------------------ */
-
-/** 属性图的 **KV 展示**：一行「属性名 → 值」，值可编辑。
+/**
+ * **线上图**小图预览（需求 3）。
  *
- *  为什么不是表格：属性图是「参数名：参数值」的成对信息，4 列网格读起来
- *  要左右跳（列1→列2 是一对、列3→列4 是另一对）；KV 一行一对最直观。
- *  ⚠️ OCR 出的错字**原样展示**（不猜不纠正）—— 用户可自己改。
+ * 线上图是 xlsx `图片` 列里的 URL（真包现状是 1688 的 `gw.alicdn.com`），
+ * 不能走预检的 `/image`（那个端点只服务**暂存包内**的本地路径，越界会 404），
+ * 所以直接当 `<img src>` 用 —— 平台是公开图床。
+ *
+ * ⚠️ 用户口径 2026-10-11（**推翻**上一版）：**放弃图片内容比对** ——
+ * 「将拆分后的 sku 名称去查本地 sku 图名进行对齐即为通过了预检」。
+ * 所以这里**只剩预览**：不发 HEAD、不算 MD5、零网络请求（风控风险归零）。
  */
-function AttributeKvPanel(props: {
-  table: PrecheckTable;
-  onChange: (next: PrecheckTable) => void;
-}) {
-  const { table, onChange } = props;
-  const kv = table.kv ?? [];
-
-  const setValue = (index: number, value: string) => {
-    onChange({ ...table, kv: kv.map((item, i) => (i === index ? { ...item, value } : item)) });
-  };
-  const setKey = (index: number, key: string) => {
-    onChange({ ...table, kv: kv.map((item, i) => (i === index ? { ...item, key } : item)) });
-  };
-
-  if (kv.length === 0) {
-    return <Empty description="没有从属性图里识别出属性（请自行核对原图）" />;
+function SkuImageThumb(props: { token: string; onlineUrl: string }) {
+  const { onlineUrl } = props;
+  if (!onlineUrl) {
+    return (
+      <Text type="secondary" style={{ fontSize: 11 }}>
+        无
+      </Text>
+    );
   }
-
   return (
-    <>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
-        <Text strong>{table.title}</Text>
-        <Tag>{kv.length} 项属性</Tag>
-        <Tooltip title={table.source_file ?? ""}>
-          <Text
-            type="secondary"
-            style={{
-              fontSize: 12,
-              maxWidth: 360,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            文件名称：{table.source_file || "-"}
-          </Text>
-        </Tooltip>
-      </div>
-      <div className="attr-kv-list">
-        {kv.map((item, index) => (
-          <div className="attr-kv-row" key={`${index}-${item.key}`}>
-            <Input
-              size="small"
-              className="attr-kv-key"
-              value={item.key}
-              placeholder="属性名"
-              onChange={(e) => setKey(index, e.target.value)}
-            />
-            <span className="attr-kv-colon">：</span>
-            <Input
-              size="small"
-              className="attr-kv-value"
-              value={item.value}
-              placeholder="属性值"
-              onChange={(e) => setValue(index, e.target.value)}
-            />
-          </div>
-        ))}
-      </div>
-    </>
+    <img
+      src={onlineUrl}
+      alt="线上图"
+      style={{
+        width: SKU_THUMB_SIZE,
+        height: SKU_THUMB_SIZE,
+        objectFit: "contain",
+        border: "1px solid #f0f0f0",
+        borderRadius: 4,
+        background: "#fafafa",
+        cursor: "zoom-in",
+      }}
+    />
   );
 }
-
-/* ------------------------------------------------------------------ *
- * 表格（列数不固定：有什么展示什么）
- * ------------------------------------------------------------------ */
 
 /** 表格里**一列的批量修改条**（价格 / 库存各一条，用户口径 2026-10-09）。
  *
@@ -2887,16 +3341,332 @@ function BatchColumnControl(props: {
 }
 
 /** 表格（列数不固定：有什么展示什么）+ **价格 / 库存批量修改**（用户口径 2026-10-09）。 */
+/**
+ * **本地 SKU 图选择弹窗**（用户口径 2026-10-11）。
+ *
+ * > 「本地图列表如果未匹配到支持弹窗选择**媒体资源中加载到无违规词的 sku 图**，
+ * >   弹窗参考第二步配置参数中的规格图弹窗实现」
+ *
+ * 与第二步的 `SkuPickModal` **同款形态**（60vw 居中 / 卡片网格 / 单选 /
+ * 缩略图 + 「预览」按钮 + 大图左右切换 / 确认回填），差别只在两处：
+ *   - 候选来源 = **预检已加载且无违规词**的 SKU 图（`has_forbidden !== true`
+ *     且 `ocr_ok === true`）—— 用户口径明确要求「无违规词」；
+ *   - 选中后回填的是**「这张 SKU 规格用哪张本地图」的映射**，供预检通过判定用。
+ *
+ * ⚠️ 候选**不含**违规图：`has_forbidden` 的图进了这里就等于把违规素材放行
+ * （与第一步「命中违规词不允许勾选至灰」同一条红线）。
+ */
+function LocalSkuImagePickModal(props: {
+  open: boolean;
+  /** 候选 SKU 图（**已过滤掉违规图**）。 */
+  items: PrecheckMediaItem[];
+  token: string;
+  /** 该行未匹配到的 SKU 名称（标题里说清给谁选）。 */
+  skuName: string;
+  onPick: (relPath: string, fileName: string) => void;
+  onClose: () => void;
+}) {
+  const { open, items, token, skuName, onPick, onClose } = props;
+  //: 用户口径同第二步：「sku 图**只能单选一张**」。
+  const [picked, setPicked] = useState<string | null>(null);
+  const [preview, setPreview] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (open) {
+      setPicked(null);
+      setPreview(null);
+    }
+  }, [open]);
+
+  const current = preview === null ? null : items[preview];
+  const step = (delta: number) => {
+    if (preview === null) return;
+    const next = preview + delta;
+    if (next < 0 || next >= items.length) return;
+    setPreview(next);
+  };
+
+  return (
+    <>
+      <Modal
+        open={open}
+        centered
+        onCancel={onClose}
+        title={`选择本地图片 —— ${skuName || "未命名规格"}`}
+        width="60vw"
+        okText="确认"
+        okButtonProps={{ disabled: picked === null }}
+        onOk={() => {
+          const hit = items.find((it) => it.rel_path === picked);
+          if (hit) onPick(hit.rel_path, hit.file_name);
+        }}
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="该规格没有按名称自动匹配到本地图，请从已加载的 SKU 图里选择一张（已排除命中违规词的图）"
+        />
+        {items.length === 0 ? (
+          <Text type="secondary">
+            数据包里没有可选的 SKU 图（请在第 1 步预检里加载并选中 SKU 图）
+          </Text>
+        ) : (
+          <div className="sku-pick-grid">
+            {items.map((it, i) => (
+              <div
+                key={it.rel_path}
+                className={`sku-pick-card${picked === it.rel_path ? " picked" : ""}`}
+                onClick={() => setPicked(it.rel_path)}
+                title={it.file_name}
+              >
+                <div className="sku-pick-card-img">
+                  <PrecheckThumb token={token} item={it} />
+                </div>
+                <div className="sku-pick-card-name">{it.file_name}</div>
+                <Button
+                  size="small"
+                  type="link"
+                  className="sku-pick-card-zoom"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setPreview(i);
+                  }}
+                >
+                  预览
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+      </Modal>
+
+      {/* 大图预览（可左右切换）—— 与第二步同款形态。 */}
+      <Modal
+        open={preview !== null}
+        centered
+        onCancel={() => setPreview(null)}
+        footer={null}
+        width="70vw"
+        styles={{ body: { textAlign: "center", padding: 8 } }}
+      >
+        {current && (
+          <>
+            <PrecheckThumb
+              token={token}
+              item={current}
+            />
+            <div style={{ marginTop: 8 }}>
+              <Button size="small" disabled={preview === null || preview <= 0} onClick={() => step(-1)}>
+                上一张
+              </Button>
+              <Text type="secondary" style={{ margin: "0 12px" }}>
+                {(preview ?? 0) + 1} / {items.length}
+              </Text>
+              <Button
+                size="small"
+                disabled={preview === null || preview >= items.length - 1}
+                onClick={() => step(1)}
+              >
+                下一张
+              </Button>
+            </div>
+          </>
+        )}
+      </Modal>
+    </>
+  );
+}
+
+/** 零渲染：把选择快照在 **effect 里**上抛（不能在 render 里 setState 父组件）。 */
+
+const fillStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  //: ⚠️ 尺寸**不在这里、也不在 `PrecheckThumb` 内部** —— 由**外壳**决定：
+  //:   表格里 = `.sku-local-thumb`（CSS，72px，与线上图 `SkuImageThumb` 同值）；
+  //:   预览弹窗里 = `.precheck-preview-body`（撑满弹窗）。
+  //: 这样同一个 `PrecheckThumb` 能在两个场景复用而尺寸各自正确
+  //: （曾在 fillStyle 里写死 72 ⇒ 预览弹窗里的图被压成 72px）。
+  width: "100%",
+  height: "100%",
+  color: "#999",
+};
+
+/**
+ * 预览主体：图片给 `<img>`，视频给**可播放的 `<video controls>`**。
+ *
+ * ⚠️ 用户口径 2026-10-08：「视频无法预览，应支持**多种视频格式**预览播放」。
+ *
+ * 分三态处理，每种都给出**明确**结果（不给空白框）：
+ * 1. 浏览器原生可播（mp4/m4v/mov/webm/ogv）⇒ `<video controls>` 直接播；
+ * 2. 浏览器放不了但有答案（avi/mkv/flv/wmv/ts…）⇒ 明确提示「当前浏览器不支持
+ *    该格式」，并说明该文件**仍已做过抽帧 OCR 检测**（别让用户以为这文件漏检了）；
+ * 3. 取流失败 ⇒ 说失败，不静默空白。
+ */
+function PreviewBody(props: { token: string; item: PrecheckMediaItem }) {
+  const { token, item } = props;
+  const [src, setSrc] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  const isVideo = item.group === "video";
+
+  useEffect(() => {
+    let revoked: string | null = null;
+    let alive = true;
+    setFailed(false);
+    setSrc(null);
+    fetchPrecheckImage(token, item.rel_path)
+      .then((url) => {
+        if (!alive) {
+          URL.revokeObjectURL(url);
+          return;
+        }
+        revoked = url;
+        setSrc(url);
+      })
+      .catch(() => alive && setFailed(true));
+    return () => {
+      alive = false;
+      if (revoked) URL.revokeObjectURL(revoked);
+    };
+  }, [token, item.rel_path]);
+
+  if (failed) return <Text style={{ color: "#fff" }}>加载失败</Text>;
+  if (!src) return <Text style={{ color: "#fff" }}>加载中…</Text>;
+
+  if (isVideo) {
+    return (
+      <div
+        style={{
+          width: "100%",
+          height: "100%",
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 10,
+        }}
+      >
+        <video
+          src={src}
+          controls
+          autoPlay
+          playsInline
+          //: ⚠️ `onError` 是关键分支：`<video>` 对不认识的容器/编码**不会抛异常**，
+          //: 只是黑屏不播（用户看到的就是「视频无法预览分析」）。必须显式告诉
+          //: 用户「是这个格式浏览器放不了」，而不是留一块黑。
+          onError={() => setFailed(true)}
+          style={{ maxWidth: "100%", maxHeight: "100%", background: "#000" }}
+        />
+        {failed && <VideoUnsupportedHint item={item} />}
+      </div>
+    );
+  }
+
+  return (
+    <img
+      src={src}
+      alt={item.file_name}
+      style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }}
+    />
+  );
+}
+
+function SelectionReporter(props: {
+  blocked: number[];
+  picked: number[];
+  onChange: (next: { blocked: number[]; picked: number[] }) => void;
+}) {
+  const { blocked, picked, onChange } = props;
+  //: ⚠️ 依赖用**序列化后的字符串**，数组每次渲染都是新引用 ⇒ 直接依赖数组
+  //:   会让 effect 每帧都跑（无限循环）。
+  const key = `${blocked.join(",")}|${picked.join(",")}`;
+  useEffect(() => {
+    onChange({ blocked, picked });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+  return null;
+}
+
 function TablesPanel(props: {
   /** 本面板显示的 SKU 表（父级完整数组的**子集**）。 */
   tables: PrecheckTable[];
   /** 上抛**本面板下标**对应的**新表**；父级负责映射回完整数组并落库。 */
   onTableChange: (tIndex: number, next: PrecheckTable) => void;
+  /** 预检 token（本地图 / 线上图预览都要经 `/image` 取流）。 */
+  token: string;
+  /** 数据包里的 SKU 图媒体（按名称对齐到表格行 —— 需求 3 的本地图列）。 */
+  skuMedia: PrecheckMediaItem[];
+  /** 媒体资源的**勾选状态**（键 `group/rel_path`）。
+   *
+   *  ⚠️ 用户口径 2026-10-11：**取消勾选的 SKU 图要连带从 SKU 规格列表移除**
+   *  （媒体区与规格表是同一份数据的两个视角，不能一处取消、另一处还在）。 */
+  checked: Record<string, boolean>;
+  /** 上报选择快照（需求 4）：`blocked` = 预选未通过的行、`picked` = 勾选的行。
+   *
+   *  ⚠️ 上抛而不是内部消化 —— 第二步要按同一份判据过滤价格库存表，而本组件的
+   *  state 会随页签切换卸载而丢。 */
+  onSelectionChange: (next: { blocked: number[]; picked: number[] }) => void;
 }) {
-  const { tables, onTableChange } = props;
+  const { tables, onTableChange, token, skuMedia, checked, onSelectionChange } = props;
   /** 每张表**勾选的行下标**（用户口径 2026-10-09：勾选后可只改选中的行）。
-   *  ⚠️ 用表下标做外层键（同名的多张表要能分开记）。 */
-  const [picked, setPicked] = useState<Record<number, number[]>>({});
+   *  ⚠️ 用表下标做外层键（同名的多张表要能分开记）。
+   *
+   *  ⚠️ 需求 4/5（用户口径 2026-10-11）：
+   *    - **默认全选**（「商品sku表格中的所有列默认全选」）；
+   *    - 未选中的行 ⇒ 预选未通过（不进第二步的价格库存列表）；
+   *    - 行内两图判定为 `different` / `unknown` ⇒ **置灰不可编辑、红框、预选未通过**，
+   *      并且**自动取消勾选**（用户口径：预检不通过则默认置灰不勾选）。
+   *  `undefined` = 尚未初始化（首次渲染按「全选」算，见 `effectivePicked`）。 */
+  const [picked, setPicked] = useState<Record<number, boolean[]>>({});
+
+  /**
+   * 本地图的**可匹配集合** —— 用户口径 2026-10-11 的**红线**：
+   *
+   * > 「预检的步骤是**先检查媒体资源是否存在违规词，然后再匹配 sku 图**，
+   * >   违规的媒体资源**不允许被选中，也不允许被匹配到**」
+   *
+   * ⚠️ 所以模糊查询的输入**必须**是过滤后的集合（这一个 `useMemo` 是唯一闸门）：
+   * 之前写成「查询用全量、只有弹窗过滤」⇒ 命中违规词的那张图**照样能被名称匹配上**
+   * 并算作「预检通过」，等于让违规素材走免检通道（与第一步「命中违规词不允许勾选」
+   * 同一条红线，却在这里破了个洞）。
+   *
+   * 两步顺序体现为两个条件同时成立：
+   *   ① **先**跑过违规词检测（`ocr_ok === true`）—— 未检测（`null`）不算通过；
+   *   ② **再**排除命中违规词的（`has_forbidden !== true`）。
+   */
+  const cleanSkuMedia = useMemo(
+    //: 两步都要（用户口径 2026-10-11）：**红线**（已检测 + 非违规）→ **再**按勾选收窄。
+    //: ⚠️ 两个函数都在 lib 里（单一实现）—— 写在组件里就没法被 vitest 覆盖。
+    () => filterCheckedSkuMedia(selectableSkuMedia(skuMedia), checked),
+    [skuMedia, checked],
+  );
+
+  /** **本地图匹配正则**（用户口径 2026-10-11：列表头「规格配置」按钮可改）。
+   *
+   *  `patternDraft` = 输入框里的**待应用**值；`pattern` = **已生效**的值。
+   *  ⚠️ 分两个 state 是刻意的：用户要能改到一半不生效，点「重新匹配」才重跑
+   *  （否则每敲一个字符就全表重算，26 行 × 每键一次 = 卡顿且没必要）。 */
+  const [patternDraft, setPatternDraft] = useState(DEFAULT_SKU_IMAGE_PATTERN);
+  const [pattern, setPattern] = useState(DEFAULT_SKU_IMAGE_PATTERN);
+
+  //: 本地图**有序列表**（按数据包加载顺序）—— 用**当前生效的正则**抽取比对键。
+  //: ⚠️ 输入是 `cleanSkuMedia`（**已排除违规图**）—— 见上面的红线。
+  const localImages = useMemo(
+    () => localSkuImageList(cleanSkuMedia, pattern),
+    [cleanSkuMedia, pattern],
+  );
+
+  //: **手动选择的本地图**（用户口径 2026-10-11：「未匹配到支持弹窗选择…」）。
+  //: key = `tIndex:rowIndex`；有值 ⇒ **覆盖**模糊匹配结果（用户的选择优先）。
+  const [manualPicks, setManualPicks] = useState<Record<string, { relPath: string; fileName: string }>>({});
+  //: 弹窗目标（哪一行在选图）。
+  const [pickTarget, setPickTarget] = useState<{ tIndex: number; rowIndex: number; skuName: string } | null>(null);
+
+  //: （弹窗候选复用上面的 `cleanSkuMedia` —— 同一份「无违规词」集合，不另起一份。）
+
+
 
   if (tables.length === 0) return <Empty description="数据包里没有可读取的表格" />;
 
@@ -2931,9 +3701,58 @@ function TablesPanel(props: {
   return (
     <>
       {tables.map((table, tIndex) => {
-        const pickedRows = picked[tIndex] ?? [];
+        const nameCol = skuNameColumnIndex(table.columns);
+        const imageCol = onlineImageColumnIndex(table.columns);
+        /** 每行的**派生判定**（需求 2/3/5）：规格分类 + 本地图 + 两图一致性。
+         *  ⚠️ 纯函数派生（不写 state）—— 用户改单元格即时重算。 */
+        const rowInfos = table.rows.map((row, rowIndex) => {
+          const skuName = nameCol >= 0 ? String(row[nameCol] ?? "").trim() : "";
+          const parsed = parseSkuName(skuName);
+          const onlineUrl = imageCol >= 0 ? String(row[imageCol] ?? "").trim() : "";
+          //: ① 用户在弹窗里**手动选过** ⇒ 直接用他的选择（用户判断优先于名称匹配）。
+          //: ⚠️ 但若那张图**已在媒体区被取消勾选**（或违规/未检测）⇒ 手选也失效
+          //: （用户口径 2026-10-11：取消勾选的图要连带移除，不能从后门留着）。
+          const manualRaw = manualPicks[`${tIndex}:${rowIndex}`];
+          const manual =
+            manualRaw &&
+            cleanSkuMedia.some((m) => m.rel_path === manualRaw.relPath)
+              ? manualRaw
+              : undefined;
+          //: ② 否则按 SKU 名称做**前后通配符模糊查询，取第一个命中**。
+          const localRel = manual?.relPath
+            ?? (skuName ? lookupLocalSkuImage(localImages, skuName) : null);
+          //: ⚠️ **预检判据（用户口径 2026-10-11，推翻上一版）**：
+          //: 「将拆分后的 sku 名称去查本地 sku 图名进行对齐即为通过了预检」。
+          //: ⇒ **不再做任何图片内容比对**（那套 MD5/HEAD 已整段移除：
+          //:   实测 1688 图床不给哈希、小红书 CDN 又需签名，且画面级判据
+          //:   在同系列图之间区分度不足 —— 判不了还不如不判）。
+          //: 现在只有一件事：**本地 `SKU/` 文件夹里有没有与 SKU 名称对上的图**。
+          const passed = !!localRel;
+          return { rowIndex, skuName, parsed, onlineUrl, localRel, passed };
+        });
+        /** 预检**未通过**的行：本地没有对齐上图的 SKU ⇒ 置灰 + 红框 + 不可勾选。
+         *
+         * ⚠️ 这正是「预选未通过」的定义（用户口径）—— 不再有 `unknown` 这一态：
+         * 对不上就是没通过，判据是确定的（是否存在该文件），不存在判不了的情况。 */
+        const blockedRows = new Set(
+          rowInfos.filter((r) => !r.passed).map((r) => r.rowIndex),
+        );
+        //: 需求 4/5：**默认全选**（用户口径「商品sku表格中的所有列默认全选」）；
+        //: 预检未通过（本地无对齐图）的行**结构上**不许被勾选。
+        //: 用户取消勾选的行同样不进第二步 —— 两者都由 `passedSkuSpecs` 收口。
+        const pickedRows = (picked[tIndex] ?? table.rows.map(() => true))
+          .map((on, i) => (on && !blockedRows.has(i) ? i : -1))
+          .filter((i) => i >= 0);
         return (
         <div key={`${table.sheet_name}-${tIndex}`} style={{ marginBottom: 20 }}>
+          {/* ⚠️ 需求 4：把本表的选择快照上抛给向导（第二步要用同一份判据）。
+              单独一个零渲染子组件做上报 —— 在 map 里直接调 setState 会
+              「渲染期更新父组件」，React 会警告且行为不确定。 */}
+          <SelectionReporter
+            blocked={[...blockedRows]}
+            picked={pickedRows}
+            onChange={onSelectionChange}
+          />
           {/* 用户口径 2026-10-08：表名 / 列×行 在左、**文件名在右上角**，同一行。 */}
           <div
             style={{
@@ -2995,25 +3814,281 @@ function TablesPanel(props: {
               //: ⚠️ 不提供「全选」按钮（用户口径：有上限的多选不要全选；这里行数大，
               //:  误点即成批改，故只留逐行勾选 + 表头全选）。
               selectedRowKeys: pickedRows,
-              onChange: (keys) =>
-                setPicked((prev) => ({ ...prev, [tIndex]: keys as number[] })),
+              //: ⚠️ 需求 4/5：预选未通过的行**结构上不可勾选**（置灰）。
+              getCheckboxProps: (record: { __index: number }) => ({
+                disabled: blockedRows.has(record.__index),
+              }),
+              onChange: (keys) => {
+                const next = table.rows.map((_, i) => keys.includes(i));
+                setPicked((prev) => ({ ...prev, [tIndex]: next }));
+              },
             }}
-            columns={table.columns.map((name, colIndex) => ({
-              title: name,
-              dataIndex: ["row", colIndex],
-              width: 160,
-              render: (_: unknown, record: { __index: number; row: (string | null)[] }) => (
-                <Input
-                  size="small"
-                  value={record.row[colIndex] ?? ""}
-                  onChange={(e) => setCell(tIndex, record.__index, colIndex, e.target.value)}
-                />
-              ),
-            }))}
+            //: ⚠️ 需求 5：预选未通过的行整行标红（红框 + 淡红底），一眼能找出来。
+            rowClassName={(record: { __index: number }) =>
+              blockedRows.has(record.__index) ? "publish-sku-row-blocked" : ""
+            }
+            columns={[
+              //: ⚠️ 用户口径 2026-10-11（二次修正）：
+              //:   - **原始「图片」列（xlsx 里那列 URL 文本）不再展示** —— 它是数据包里的一列，
+              //:     URL 一长串对用户没有阅读价值（预览已经由「线上图片」列承担）。
+              //:   - 列序：勾选 · 线上图片 · 本地图片 · **规格分类(第 4 列)** · sku名称 · 其余列。
+              //:   - **线上图与本地图预览尺寸一致**，以线上图为准（两者都走 THUMB_SIZE）。
+              ...(imageCol >= 0
+                ? [
+                    {
+                      title: "线上图片",
+                      key: "__online_image",
+                      //: 与本地图列**同宽**（用户口径：两列预览保持一致，以线上图为准）。
+                      width: SKU_THUMB_COL_WIDTH,
+                      render: (_: unknown, record: { __index: number }) => {
+                        const info = rowInfos.find((r) => r.rowIndex === record.__index);
+                        return (
+                          <SkuImageThumb token={token} onlineUrl={info?.onlineUrl ?? ""} />
+                        );
+                      },
+                    },
+                    {
+                      title: (
+                        /* **规格配置按钮**（用户口径 2026-10-11）：
+                           在「本地图片」列头放一个按钮，点开 tip 弹窗配置匹配正则；
+                           输入框预填**当前规则**，点「重新匹配」对所有 SKU 行重跑对齐。 */
+                        <Space size={4}>
+                          <span>本地图片</span>
+                          <Popover
+                            trigger="click"
+                            placement="bottomLeft"
+                            content={
+                              <div style={{ width: 380 }}>
+                                <Text type="secondary" style={{ fontSize: 12 }}>
+                                  匹配正则（捕获组 1=规格分类、2=SKU 名称）
+                                </Text>
+                                <Input
+                                  size="small"
+                                  style={{ marginTop: 6, fontFamily: "monospace" }}
+                                  value={patternDraft}
+                                  onChange={(e) => setPatternDraft(e.target.value)}
+                                  onPressEnter={() => {
+                                    if (!validateSkuImagePattern(patternDraft)) {
+                                      setPattern(patternDraft);
+                                    }
+                                  }}
+                                />
+                                {(() => {
+                                  const err = validateSkuImagePattern(patternDraft);
+                                  return err ? (
+                                    <Text type="danger" style={{ fontSize: 11 }}>
+                                      {err}
+                                    </Text>
+                                  ) : (
+                                    <Text type="secondary" style={{ fontSize: 11 }}>
+                                      示例：SKU01_颜色分类(甲) → 颜色分类:甲
+                                    </Text>
+                                  );
+                                })()}
+                                <div style={{ marginTop: 8, textAlign: "right" }}>
+                                  <Button
+                                    size="small"
+                                    onClick={() => setPatternDraft(DEFAULT_SKU_IMAGE_PATTERN)}
+                                  >
+                                    恢复默认
+                                  </Button>
+                                  <Button
+                                    size="small"
+                                    type="primary"
+                                    style={{ marginLeft: 8 }}
+                                    disabled={!!validateSkuImagePattern(patternDraft)}
+                                    //: 点「重新匹配」⇒ 生效新正则 ⇒ `localImages` 重算
+                                    //: ⇒ 所有 SKU 行重新对齐（`rowInfos` 是派生值，自动重跑）。
+                                    onClick={() => setPattern(patternDraft)}
+                                  >
+                                    重新匹配
+                                  </Button>
+                                </div>
+                              </div>
+                            }
+                          >
+                            <Button size="small" type="link" icon={<SettingOutlined />} />
+                          </Popover>
+                        </Space>
+                      ),
+                      key: "__local_image",
+                      width: SKU_THUMB_COL_WIDTH,
+                      render: (_: unknown, record: { __index: number }) => {
+                        const info = rowInfos.find((r) => r.rowIndex === record.__index);
+                        //: ⚠️ 用户口径 2026-10-11：**有预览图时**，切换规格图的图标
+                        //: 压在**图片右上角**（不再在下方另起一行）；**没有图**时才给
+                        //: 一个独立的「选择」按钮（没有画布可覆盖，只能另放）。
+                        const pick = () =>
+                          setPickTarget({
+                            tIndex,
+                            rowIndex: record.__index,
+                            skuName: info?.parsed.value || info?.skuName || "",
+                          });
+                        if (!info?.localRel) {
+                          return (
+                            <Button
+                              size="small"
+                              type="link"
+                              icon={<SwapOutlined />}
+                              disabled={cleanSkuMedia.length === 0}
+                              onClick={pick}
+                            >
+                              选择
+                            </Button>
+                          );
+                        }
+                        return (
+                          <div className="sku-local-thumb">
+                            <PrecheckThumb
+                              token={token}
+                              item={
+                                {
+                                  group: "sku",
+                                  rel_path: info.localRel,
+                                  file_name: info.localRel.split("/").pop() ?? "",
+                                } as PrecheckMediaItem
+                              }
+                            />
+                            {/* 右上角「切换规格图」图标（用户口径 2026-10-11）。 */}
+                            <Tooltip title="切换规格图">
+                              <Button
+                                size="small"
+                                className="sku-local-thumb-switch"
+                                icon={<SwapOutlined />}
+                                disabled={cleanSkuMedia.length === 0}
+                                onClick={pick}
+                              />
+                            </Tooltip>
+                          </div>
+                        );
+                      },
+                    },
+                  ]
+                : []),
+              //: 规格分类列（只读派生）。⚠️ 用户口径 2026-10-11：**放第 4 列**
+              //:（勾选 · 线上图片 · 本地图片 · **规格分类** · 其余数据列）。
+              ...(nameCol >= 0
+                ? [
+                    {
+                      title: "规格分类",
+                      key: "__spec_category",
+                      width: 120,
+                      render: (_: unknown, record: { __index: number }) => {
+                        const info = rowInfos.find((r) => r.rowIndex === record.__index);
+                        return (
+                          <Text type="secondary" style={{ fontSize: 12 }}>
+                            {info?.parsed.category || "-"}
+                          </Text>
+                        );
+                      },
+                    },
+                  ]
+                : []),
+              //: ⚠️ 用户口径 2026-10-11：**原始「图片」列不再展示** —— 预览已由
+              //: 「线上图片」列承担；那列的内容是一长串外部 URL，展示出来只是噪音。
+              ...table.columns
+                .map((name, colIndex) => ({ name, colIndex }))
+                .filter(({ colIndex }) => colIndex !== imageCol)
+                .map(({ name, colIndex }) => ({
+                title: name,
+                dataIndex: ["row", colIndex],
+                width: 160,
+                render: (_: unknown, record: { __index: number; row: (string | null)[] }) => {
+                  //: ⚠️ 用户口径 2026-10-11（**最终版**）：
+                  //: 「商品 sku 表格的 sku 名称列，应不再展示规格类型，取分割后只展示 sku 名称」。
+                  //:
+                  //: 原始值形如 `颜色分类:【中古风】实木三斗柜` ⇒ 这一列**只展示**
+                  //: `【中古风】实木三斗柜`（首个冒号之后的部分）。规格分类由**第 4 列**
+                  //: 单独展示 ⇒ 同一份信息不在一行里重复两次。
+                  //:
+                  //: ⚠️ **只改展示，不改数据**：`record.row[colIndex]`（含前缀的原值）
+                  //: 原样保留在 state 里 —— 它是表格编辑的真相源，改名会连带
+                  //: 破坏「重新匹配本地图」（`lookupLocalSkuImage` 吃的就是带前缀的原值）
+                  //: 与「规格分类」列的取值。写回单元格时才用完整值。
+                  return colIndex === nameCol ? (
+                    <Input
+                      size="small"
+                      value={parseSkuName(String(record.row[colIndex] ?? "")).value}
+                      onChange={(e) => {
+                        //: 用户改的是**名称部分** ⇒ 写回时要**拼回**「分类:名称」原形，
+                        //: 否则一次编辑就把规格分类丢了（静默数据损坏）。
+                        const cat = parseSkuName(String(record.row[colIndex] ?? "")).category;
+                        const next = cat ? `${cat}:${e.target.value}` : e.target.value;
+                        setCell(tIndex, record.__index, colIndex, next);
+                      }}
+                    />
+                  ) : (
+                    <Input
+                      size="small"
+                      value={record.row[colIndex] ?? ""}
+                      onChange={(e) => setCell(tIndex, record.__index, colIndex, e.target.value)}
+                    />
+                  );
+                },
+              })),
+              //: 需求 5（用户口径 2026-10-11 最终版）：**本地图按 SKU 名称对齐**
+              //: 即判预检通过；对不上 ⇒ 预选未通过（置灰 + 红框 + 不可勾选）。
+              //: ⚠️ 判据是**确定**的（本地文件在不在），所以没有「判不了」的中间态。
+              {
+                title: "预检",
+                key: "__verdict",
+                width: 200,
+                render: (_: unknown, record: { __index: number }) => {
+                  const info = rowInfos.find((r) => r.rowIndex === record.__index);
+                  if (!info) return null;
+                  if (info.passed) {
+                    return (
+                      <Tag color="success" style={{ fontSize: 11 }}>
+                        通过：本地图已对齐
+                      </Tag>
+                    );
+                  }
+                  return (
+                    <Space size={4} wrap>
+                      <Tag color="error" style={{ fontSize: 11 }}>
+                        未匹配到本地图
+                      </Tag>
+                      {/* 用户口径 2026-10-11：「未匹配到**支持弹窗选择**媒体资源中加载到
+                          无违规词的 sku 图」⇒ 给一个入口，而不是直接判死。 */}
+                      <Button
+                        size="small"
+                        type="link"
+                        disabled={cleanSkuMedia.length === 0}
+                        onClick={() =>
+                          setPickTarget({
+                            tIndex,
+                            rowIndex: record.__index,
+                            skuName: info.parsed.value || info.skuName,
+                          })
+                        }
+                      >
+                        选择本地图
+                      </Button>
+                    </Space>
+                  );
+                },
+              },
+            ]}
           />
         </div>
         );
       })}
+
+      {/* **本地图选择弹窗**（用户口径 2026-10-11）：名称模糊查询未命中的行，
+          支持从「已加载且无违规词」的 SKU 图里手动选一张。 */}
+      <LocalSkuImagePickModal
+        open={pickTarget !== null}
+        items={cleanSkuMedia}
+        token={token}
+        skuName={pickTarget?.skuName ?? ""}
+        onClose={() => setPickTarget(null)}
+        onPick={(relPath, fileName) => {
+          if (!pickTarget) return;
+          const key = `${pickTarget.tIndex}:${pickTarget.rowIndex}`;
+          setManualPicks((prev) => ({ ...prev, [key]: { relPath, fileName } }));
+          setPickTarget(null);
+        }}
+      />
     </>
   );
 }

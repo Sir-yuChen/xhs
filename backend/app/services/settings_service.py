@@ -67,6 +67,7 @@ LIVE_KEYS: dict[str, str] = {
     "xhs_sync_account_parallelism": "note_sync_service 同步 worker 池大小（设计 13 §38.3）",
     "xhs_sync_account_gap_seconds": "调度轮内账号间停顿",
     "xhs_allow_duplicate_goods_publish": "note_publish_service 商品重复发布门禁（设计 13 §31.5.2）",
+    "xhs_image_upload_parallelism": "媒体上传并发数（商品主图/详情图/规格图共用；设计 24 §22）",
 }
 
 #: 内置兜底默认值（第 3 层）。**只放 `LIVE_KEYS` 里的键** —— 给没有读点的键编一个默认值
@@ -82,6 +83,12 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     # 商品笔记重复发布开关（设计 13 §31.5.2，2026-09-28 用户口径）：**默认关** =
     # 同一商品已有笔记（已发布 / 正在发布）时不再发布新的，该笔记落「发布失败」。
     "xhs_allow_duplicate_goods_publish": False,
+    #: 媒体上传并发数（用户口径 2026-10-11：**默认 5**，可在 config 表调整）。
+    #: ⚠️ 为什么敢并发：上传是**两段式** —— ① `upload/web/permit` 打小红书（低频，一次）；
+    #:   ② PUT 字节打 **ROS/COS 对象存储**（`https://<uploadAddr>/<fileId>`，**不是
+    #:   小红书域名**）⇒ 并发第二节**不产生平台请求**，与风控无关。单张 ~2.5s 的耗时
+    #:   基本全在 ②，故 N 并发把 38 张从 ~94s 压到 ~19s。
+    "xhs_image_upload_parallelism": 5,
 }
 
 #: 宽松布尔文本（`coerce_value` 与 `live_bool` **共用同一份**）——

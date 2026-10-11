@@ -368,3 +368,78 @@ body {
   text-align: center;
   color: var(--ant-color-text-secondary, rgba(0, 0, 0, 0.45));
 }
+
+/* ===== 商品列表 · 台账三区布局（搜索固定 / 表体滚动 / 统计+分页固定） ===== */
+/*
+ * 2026-10-11 用户口径：「搜索条件距顶部 10px；搜索区域固定；商品台账顶部按钮与底部
+ * 分页和统计数据固定不动，只有列表内的数据支持表格列滚动」。
+ *
+ * 页面结构（`.shop-items-table` 是页面里那层 `flex:1; minHeight:0` 的 div）：
+ *   .shop-items-table          → 纵向 flex 列
+ *     .ant-spin                → flex:1  ⚠️ antd 6 的 Spin 包裹层就叫 `.ant-spin`
+ *       .ant-spin-container    → flex:1  （5.x 是 `.ant-spin-nested-loading`，写错=高度链断）
+ *         .ant-table-wrapper   → flex:1 纵向列（`rootClassName` 落在这层，不是 `.ant-table`）
+ *           .ant-table        → flex:1（表头 + 表体滚动区）
+ *           .ant-pagination   → flexShrink:0 ⇒ 钉在卡底
+ *
+ * ⚠️ 关键：这些中间层 antd 默认 `height:auto`（且 Spin 是 `display:block`）⇒ 里层按
+ *    **内容高度**撑开，把统计与分页顶出固定高度之外（表现就是「底部分页没有」）。必须
+ *    逐层拉成撑满的 flex 项（与图片空间 `.ps-scroll-host` 同一套做法）。
+ */
+.shop-items-table {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.shop-items-table .ant-spin,
+.shop-items-table .ant-spin-container {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: 100%;
+}
+
+.shop-items-table .ant-spin-container {
+  display: flex;
+  flex-direction: column;
+}
+
+.shop-items-table .ant-table-wrapper {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 表格本体吃掉分页之外的高度；`scroll={{ y: "100%" }}` 的表体 `max-height:100%`
+   由此拿到实际高度 ⇒ 行多时在**表格体内部**滚，行少时不留空。
+   ⚠️ 链条是 `spin-container > .ant-table > .ant-table-container > (header + body)`，
+      每一层都得是撑满的 flex 项（只对 `> .ant-table` 写规则会被中间层吃掉）。 */
+.shop-items-table .ant-spin-container > .ant-table {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.shop-items-table .ant-table-container {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.shop-items-table .ant-table-header {
+  flex: 0 0 auto; /* 表头固定，不参与表体高度分配 */
+}
+
+.shop-items-table .ant-table-body {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.shop-items-table .ant-pagination {
+  flex: 0 0 auto;
+  margin-bottom: 0;
+}

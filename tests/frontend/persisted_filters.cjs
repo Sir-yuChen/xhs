@@ -267,8 +267,10 @@ async function main() {
   );
   check(
     "C2d 空状态回默认（空串发给后端 = 未知状态 400）",
+    // ⚠️ 2026-10-11 口径变更：搜索区状态默认值由 `on_shelf`（售卖中）改为 `all`（全部）
+    //    ——「搜索区间状态默认全部」（用户当轮口径）。期望值随 lib 的 `EMPTY_SHOP_ITEMS_DRAFT` 走。
     sanitizeShopItemsDraft({ ...EMPTY_SHOP_ITEMS_DRAFT, status: "" }).status,
-    "on_shelf"
+    "all"
   );
 
   // ------------------------------------------------------------- D. 键清单

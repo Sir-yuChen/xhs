@@ -123,6 +123,7 @@ import type {
   PictureSpaceDeletePreview,
   PictureSpaceTask,
   CategoryPropertyResult,
+  PictureSpaceUploadBatchResult,
   PictureSpaceUploadResult,
   RecommendCategoryResult,
   RecommendItemTitleResult,
@@ -2042,6 +2043,40 @@ export async function uploadPictureSpaceFile(
   return response.data;
 }
 
+
+/** **批量并发**上传本地图片（方案 B：一次 permit + 服务端并发 PUT）。
+ *
+ * 用户口径（2026-10-11）：自动加载参数的主图/详情图、以及「从预检 SKU 导入」的规格图
+ * 都走并发上传；**并发数默认 5、可在 config 表配置**（`xhs_image_upload_parallelism`）。
+ *
+ * ⚠️ `results[]` **与入参 `files[]` 逐位对齐**（按下标回填），单项失败不整批失败。
+ * ⚠️ 为什么并发不触发风控：PUT 打的是 ROS/COS 对象存储（**不是小红书域名**），
+ *   打小红书的只有**整批一次**的 `upload/web/permit`。
+ */
+export async function uploadPictureSpaceFiles(
+  accountId: number,
+  files: File[],
+  options: { fatherDirectoryId?: string; concurrency?: number } = {}
+): Promise<PictureSpaceUploadBatchResult> {
+  const payload = await Promise.all(
+    files.map(async (file) => ({
+      //: 空名 ⇒ 后端按内容 MD5 生成（与单文件端点同口径，避免重名）。
+      file_name: "",
+      content_base64: await fileToBase64(file),
+    }))
+  );
+  const response = await http.post<PictureSpaceUploadBatchResult>(
+    "/xhs/qianfan/picture-space/upload-batch",
+    {
+      platform_account_id: accountId,
+      files: payload,
+      father_directory_id: options.fatherDirectoryId ?? "0",
+      concurrency: options.concurrency ?? 0,
+    }
+  );
+  return response.data;
+}
+
 /** 按**主图**生成商品标题（千帆 `getRecommendItemTitle`）。
  *
  * ⚠️ 千帆发布页上传主图后**自动**触发的就是这一条 —— 平台把**图（带签名链接）**
@@ -2593,9 +2628,10 @@ export async function deleteItemDrafts(
 /**
  * **提交商品 → 发布到线上**（`POST /items/publish`，设计 24 §4.2）。
  *
- * ⚠️⚠️ **真实上架写操作**：成功即产生一个在售商品。红线（用户 2026-10-08）
- * 「发布成功第一时间下架」由后端默认执行（`off_shelf_after` 默认 true）；
- * 前端**不得**传 `off_shelf_after: false`（那是测试钩子）。
+ * ⚠️⚠️ **真实上架写操作**：成功即产生一个在售商品。
+ * 「发布成功后是否下架」由调用方决定（2026-10-11 用户**取消红线**）：
+ * `off_shelf_after: true` = 发布并下架（保守默认）；`false` = 发布后保持在售。
+ * ⚠️ 原句「前端**不得**传 false（那是测试钩子）」**已被取代**。
  *
  * 耗时较长（逐张上传图片 + 提交 + 轮询 + 下架），超时给足 300s。
  */
@@ -2619,7 +2655,6 @@ export interface PrecheckMediaItem {
   rel_path: string;
   file_name: string;
   size_bytes: number;
-  is_attribute_image: boolean;
   oversized: boolean;
   unsupported: boolean;
   ocr_ok?: boolean | null;
@@ -2646,13 +2681,6 @@ export interface PrecheckTable {
   rows: (string | null)[][];
   /** 来源 xlsx 的文件名（表格顶部展示）。 */
   source_file?: string;
-  /**
-   * 「商品属性图」OCR 出的 **KV 对**（用户口径 2026-10-09）。
-   *
-   * 有值 ⇒ 该表是属性图，走 **KV 渲染 + 「商品属性」页签**；
-   * `null`/缺省 ⇒ 普通 xlsx 表，走表格渲染。
-   */
-  kv?: { key: string; value: string }[] | null;
 }
 
 export interface PrecheckResult {
@@ -2789,8 +2817,9 @@ export async function discardPackagePrecheck(token: string): Promise<void> {
  * 真实上架写操作。
  *
  * ⚠️⚠️ **真实上架写操作**：成功即产生一个在售商品。红线（用户 2026-10-08）
- * 「发布成功第一时间下架」由后端默认执行（`off_shelf_after` 默认 true）；
- * 前端**不得**传 `off_shelf_after: false`（那是测试钩子）。
+ * 「发布成功后是否下架」由调用方决定（2026-10-11 用户取消红线）：
+ * `off_shelf_after: true` = 发布并下架（保守默认）；`false` = 发布后保持在售。
+ * ⚠️ 原句「前端**不得**传 false（那是测试钩子）」**已被取代**。
  *
  * 耗时较长（逐张上传图片 + 提交 + 轮询 + 下架），超时给足 300s。
  */

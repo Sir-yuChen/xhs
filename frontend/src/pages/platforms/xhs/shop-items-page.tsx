@@ -29,6 +29,7 @@ import {
   Divider,
   Dropdown,
   Empty,
+  Flex,
   Form,
   Image,
   Input,
@@ -802,6 +803,14 @@ export function XhsShopItemsPage() {
   const [loading, setLoading] = useState(false);
   const [errorText, setErrorText] = useState("");
   const [pageNo, setPageNo] = useState(1);
+  /**
+   * 搜索条件是否展开（用户口径 2026-10-11「搜索条件默认展示一行支持折叠，默认为折叠」）。
+   *
+   * 折叠态 = 只剩卡头一行（标题 + 账号下拉 + 「展开」）；展开态 = 追加那两行条件与按钮。
+   * ⚠️ **不落缓存** —— 它是视图开关（与「我的笔记」页签那种「用户的选择」不同），
+   *    每次进页面回到「折叠」才是那句「默认为折叠」的字面意思。
+   */
+  const [searchExpanded, setSearchExpanded] = useState(false);
   const [pageSize, setPageSize] = usePersistedFilter(
     FILTER_CACHE_KEYS.shopItems.pageSize, DEFAULT_SHOP_ITEMS_PAGE_SIZE, asNumberEnum(SHOP_ITEMS_PAGE_SIZES)
   );
@@ -824,6 +833,12 @@ export function XhsShopItemsPage() {
     []
   );
   const formInitialValues = useMemo(() => draftToFormValues(cachedDraft), [cachedDraft]);
+  //: 折叠态下表单不挂载 ⇒ `initialValues` 不会自动写进 store。这里**显式写一次**，
+  //: 这样卡头的 `Form.useWatch("status")` 与「折叠时按缓存条件查询」（`formSnapshot`）
+  //: 在表单还没渲染时也拿得到正确条件。展开后 `initialValues` 再次生效（同值，不冲突）。
+  useEffect(() => {
+    form.setFieldsValue(formInitialValues);
+  }, [form, formInitialValues]);
   // ⚠️ `bindOpen` / `bindCookie` / `binding_` 三个绑定弹窗状态已删除（ADR-021）。
   // 商品 → 挂链笔记反查（关系表源，设计 13 §31.6；弹窗 + tabs）
   const [notesOpen, setNotesOpen] = useState(false);
@@ -1087,10 +1102,20 @@ export function XhsShopItemsPage() {
     }
   }, []);
 
+  /**
+   * 搜索条件表单值快照。
+   *
+   * ⚠️ 必须 `getFieldsValue(true)`（读**整个 store**），不能用默认的 `getFieldsValue()`：
+   * 后者走 field entities，而「折叠态不渲染表单」（用户口径 2026-10-11）会让 entities
+   * 不存在 ⇒ 返回空对象 ⇒ 关键词 / 价格 / 日期等条件**静默全丢**（列表按默认态查，
+   * 用户以为自己还筛着）。整个 store 在表单未挂载时依然保留着缓存里那份条件。
+   */
+  const formSnapshot = useCallback((): QueryForm => form.getFieldsValue(true) as QueryForm, [form]);
+
   const load = useCallback(
     async (accountId: number, page = pageNo, size = pageSize, sortArg = sort) => {
       // DEF-093：列表与导出**共用同一处构造**（`formValuesToQuery`），不在这里另拼一份。
-      const query: XhsShopItemsQuery = formValuesToQuery(form.getFieldsValue(), {
+      const query: XhsShopItemsQuery = formValuesToQuery(formSnapshot(), {
         accountId,
         pageNo: page,
         pageSize: size,
@@ -1850,7 +1875,7 @@ export function XhsShopItemsPage() {
       // DEF-093：导出与列表**同一个构造**（含同一份筛选 / 排序 / 分组），
       // 只是不带分页 —— 导出的就是「当前筛选命中的全部」。
       const blob = await exportShopItems(
-        formValuesToQuery(form.getFieldsValue(), {
+        formValuesToQuery(formSnapshot(), {
           accountId: selectedAccountId,
           sort,
         })
@@ -2114,7 +2139,10 @@ export function XhsShopItemsPage() {
     },
   ];
 
-  const statusHint = statusFilterHint(form.getFieldValue("status") || "on_shelf");
+  //: ⚠️ 用 `Form.useWatch` 订阅状态字段，**不能** `form.getFieldValue("status")` ——
+  //:    后者是一次性读取，不进渲染依赖 ⇒ 折叠态展开后改状态时不重算（说明文案不出现）。
+  const watchedStatus = Form.useWatch("status", form);
+  const statusHint = statusFilterHint(watchedStatus || "all");
 
   /**
    * 某列当前是否处于排序激活态（antd 的 sortOrder：'ascend' | 'descend' | null）。
@@ -2579,7 +2607,20 @@ export function XhsShopItemsPage() {
       tip={waitRunning ? `${waitLabel}… 耗时 ${waitElapsedSec}s` : ""}
       size="large"
     >
-    <div>
+    <Flex
+      vertical
+      gap={10}
+      //: **上中下三段式布局**（用户口径 2026-10-11「布局为上中下布局」「搜索区域固定；
+      //: 商品台账顶部按钮与底部分页和统计数据固定不动，只有列表内的数据支持表格列滚动」）：
+      //:   上 = 搜索条件卡（`flexShrink:0`，固定）
+      //:   中 = 商品台账卡（`flex:1`，卡内再切「卡头按钮 / 表格数据 / 统计+分页」）
+      //:   下 = 累计到台账卡底部（统计 + 分页，`flexShrink:0`，固定）
+      //: 高度与图片空间同一套口径（视口 - 顶栏 48 - 内容上下内边距 15+24）。
+      //: ⚠️ 用 antd `Flex`（不是手写 `display:flex`）—— 间距 / 方向 / 换行都由组件收口。
+      //: 高度 = 视口 - 顶栏(48) - 内容区上下内边距(15 + 24) = `100vh - 87px`（用户口径
+      //: 「底部撑满」：算准这一格才不会在底部留一条缝）。
+      style={{ height: "calc(100vh - 87px)" }}
+    >
       {/* ⚠️ **顶部「商品列表（千帆）」整卡已移除**（2026-10-05 用户口径
           「顶部的商品列表（千帆）整块移除」）。原卡片只剩两件事：
           ① 账号下拉（**搬到「搜索条件」卡右上角**，见下面 `搜索条件` 的 `extra`）；
@@ -2590,38 +2631,18 @@ export function XhsShopItemsPage() {
               {accountsLoaded && accounts.length === 0 ? <Alert …去「账号矩阵」添加账号…/> : …}
             </Card> */}
 
-      {/* 搜索条件：与千帆商品列表页一一对应（关键词 / 状态 / 价格 / 库存 / 销量）。
-          **排序不在这里** —— v1.32 起挪到表头（上下箭头，服务端排序）。
-
-          2026-09-23 上机口径（「搜索条件区域重新布局，布局在两行内，搜索重置等按钮
-          放条件的最后」）：9 个条件 + 按钮组**恰好两行排完**，按钮组落在第二行末尾。
-          原来按钮分散在两行各占一列，视线要在两行之间来回找，且第二行被 4 列窄
-          `InputNumber` 挤得半行空半行满。 */}
+      {/* **搜索区**（用户口径 2026-10-11「搜索区域使用卡片」）：**只有一层卡**（不套第二层
+          卡框 —— 条件与按钮直接排布在卡体里），标题「搜索条件」在卡头。
+          **常驻一行** = 账号 + 关键词 + 状态 + 查询 / 重置 / 更多筛选 ⌄；点「更多筛选」**追加**
+          其余条件（`Form layout="inline"` 自动换行），末位按钮变「收起 ^」。
+          ⚠️ 折叠的只有**追加条件**，按钮始终可见 —— 收起时也要能按当前条件「查询 / 重置」。
+          ⚠️ `marginTop: -5` 是刻意的：内容区自带 `padding-top: 15px`，两者相加才是
+          「距顶部栏 10px」（用户同轮口径）。
+          ⚠️ `flexShrink: 0`：整页是限定高度的三段式 flex，这一块固定不动。 */}
       <Card
         size="small"
-        style={{ marginTop: 12 }}
+        style={{ marginTop: -5, flexShrink: 0 }}
         title="搜索条件"
-        // 2026-10-05 用户口径「商品列表页的账号筛选放搜索条件右上角」：
-        // 账号下拉从（已移除的）顶部卡片搬到这里 —— 它是**查询条件的一部分**
-        // （台账按账号隔离），放在条件卡上比放在标题卡上更贴合语义。
-        extra={
-          <Space>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              账号
-            </Text>
-            <Select
-              style={{ minWidth: 260 }}
-              placeholder={accountsLoaded ? "选择小红书账号" : "加载中…"}
-              value={selectedAccountId ?? undefined}
-              options={accountOptions}
-              notFoundContent="没有小红书账号"
-              onChange={(value) => {
-                setSelectedAccountId(value);
-                setPageNo(1);
-              }}
-            />
-          </Space>
-        }
       >
         {accountsLoaded && accounts.length === 0 && (
           <Alert
@@ -2632,145 +2653,161 @@ export function XhsShopItemsPage() {
             description="商品台账按账号隔离；请先到「账号矩阵」添加账号，并导入其千帆登录态后才能同步商品。"
           />
         )}
-      {/*
-        状态筛选的安静说明（§30.5，25–30 字一行）。
-        ⚠️ 2026-10-05：它原先住在已被移除的「商品列表（千帆）」首卡里，随该卡一起搬进
-        **搜索条件卡**（状态是搜索条件的一种，放这里更贴合语义）。
-        ⚠️ **必须裸三元 + `null` 兜底**（原口径不变）：antd `Card` 只在
-        `childNodes.length > 0` 时才渲染 `.ant-card-body`（`React.Children.toArray`
-        会把 `null` / `false` 过滤掉）；包一层 `Space` 即使没内容也是**真元素**
-        ⇒ body 照渲、24px 内边距照留，无说明时卡里就多一条空白。
-      */}
-      {statusHint ? (
-        <Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 8 }}>
-          {statusHint}
-        </Text>
-      ) : null}
 
       <Form<QueryForm>
         form={form}
-        layout="vertical"
+        //: 用户口径 2026-10-11「条件和标题一行展示」⇒ `inline` 布局：label 在左、控件在右，一行排不下自动换行（不再手写 `Row/Col`）。
+        layout="inline"
         initialValues={formInitialValues}
         // 每次改动即回写缓存（不等点「搜索」）：用户填了一半切走再回来，条件还在。
         // 「重置」走 `form.resetFields()` ⇒ 回到 `initialValues`（也就是**缓存里的值**），
         // 所以下面那一拍必须显式把**清空态**写回缓存（否则重置后重进页面又长回来了）。
         onValuesChange={() => writeFilterCache(FILTER_CACHE_KEYS.shopItems.form, formValuesToDraft(form.getFieldsValue()))}
+        style={{ rowGap: 8 }}
       >
-          {/* 第一行：关键词(6) + 状态(4) + 价格区间(4+4) + 创建时间(6) = 24 */}
-          <Row gutter={12}>
-            <Col span={6}>
-              <Form.Item label="关键词" name="keyword" style={{ marginBottom: 12 }}>
-                <Input
-                  allowClear
-                  placeholder="商品名称 / 商品 ID / 商品货号，多条用逗号隔开"
-                  onPressEnter={() => selectedAccountId && void load(selectedAccountId, 1, pageSize)}
-                />
-              </Form.Item>
-            </Col>
-            <Col span={4}>
-              <Form.Item label="状态" name="status" style={{ marginBottom: 12 }}>
-                <Select options={STATUS_OPTIONS} />
-              </Form.Item>
-            </Col>
-            <Col span={4}>
-              <Form.Item label="价格下限（元）" name="price_from" style={{ marginBottom: 12 }}>
-                <InputNumber style={{ width: "100%" }} min={0} placeholder="最低售价" />
-              </Form.Item>
-            </Col>
-            <Col span={4}>
-              <Form.Item label="价格上限（元）" name="price_to" style={{ marginBottom: 12 }}>
-                <InputNumber style={{ width: "100%" }} min={0} placeholder="最高售价" />
-              </Form.Item>
-            </Col>
-            <Col span={6}>
-              <Form.Item label="创建时间" name="create_time_range" style={{ marginBottom: 12 }}>
-                <RangePicker
-                  style={{ width: "100%" }}
-                  placeholder={["开始日期", "截止日期"]}
-                  allowClear
-                />
-              </Form.Item>
-            </Col>
-          </Row>
-          {/* 第二行：库存区间(3+3) + 销量区间(3+3) + 挂链笔记数(6) + 按钮组(6，右对齐收尾) = 24 */}
-          <Row gutter={12}>
-            <Col span={3}>
-              <Form.Item label="库存下限" name="stock_from" style={{ marginBottom: 8 }}>
-                <InputNumber style={{ width: "100%" }} min={0} placeholder="最小库存" />
-              </Form.Item>
-            </Col>
-            <Col span={3}>
-              <Form.Item label="库存上限" name="stock_to" style={{ marginBottom: 8 }}>
-                <InputNumber style={{ width: "100%" }} min={0} placeholder="最大库存" />
-              </Form.Item>
-            </Col>
-            <Col span={3}>
-              <Form.Item label="销量下限" name="sales_from" style={{ marginBottom: 8 }}>
-                <InputNumber style={{ width: "100%" }} min={0} placeholder="最低销量" />
-              </Form.Item>
-            </Col>
-            <Col span={3}>
-              <Form.Item label="销量上限" name="sales_to" style={{ marginBottom: 8 }}>
-                <InputNumber style={{ width: "100%" }} min={0} placeholder="最高销量" />
-              </Form.Item>
-            </Col>
+        {/* statusHint 是「状态 = 审核态」时的安静说明（§30.5，25–30 字一行），
+            紧贴条件行之上。 */}
+        {statusHint ? (
+          <Text type="secondary" style={{ fontSize: 12, display: "block", width: "100%", marginBottom: 4 }}>
+            {statusHint}
+          </Text>
+        ) : null}
+
+        {/* ⚠️ 所有条件控件统一 `width: 180`（用户当轮口径：所有搜索条件输入框 180px）。`RangePicker` 也照此收窄，不复用整行宽度。 */}
+        {/* 账号（每次查询都要看的一项，台账按账号隔离）：2026-10-05 从顶部卡搬进搜索区，2026-10-11 去卡片后并入同一行。 */}
+        <Form.Item label="账号">
+          <Select
+            style={{ width: 180 }}
+            placeholder={accountsLoaded ? "选择小红书账号" : "加载中…"}
+            value={selectedAccountId ?? undefined}
+            options={accountOptions}
+            notFoundContent="没有小红书账号"
+            onChange={(value) => {
+              setSelectedAccountId(value);
+              setPageNo(1);
+            }}
+          />
+        </Form.Item>
+        <Form.Item label="关键词" name="keyword">
+          <Input
+            allowClear
+            style={{ width: 180 }}
+            placeholder="商品名称 / ID / 货号，逗号隔开"
+            onPressEnter={() => selectedAccountId && void load(selectedAccountId, 1, pageSize)}
+          />
+        </Form.Item>
+        <Form.Item label="状态" name="status">
+          <Select style={{ width: 180 }} options={STATUS_OPTIONS} />
+        </Form.Item>
+
+        {searchExpanded ? (
+          <>
+            {/* 区间类条件**合并成一个输入框分两段**（用户口径 2026-10-11「库存上限和库存下限类似的搜索条件应合并成一个输入框分两段」）—— 价格 / 库存 / 销量三组同形，总宽仍 180。
+            ⚠️ 字段名**不变**（`price_from|price_to` / `stock_from|stock_to` / `sales_from|sales_to`）：拆成两段只改版式，不动请求契约（`formValuesToQuery` 照旧）。 */}
+            <Form.Item label="库存区间">
+              <Space.Compact style={{ width: 180 }}>
+                <Form.Item name="stock_from" noStyle>
+                  <InputNumber style={{ width: 80 }} min={0} placeholder="最低" />
+                </Form.Item>
+                <Text type="secondary" style={{ lineHeight: "30px", padding: "0 4px" }}>~</Text>
+                <Form.Item name="stock_to" noStyle>
+                  <InputNumber style={{ width: 80 }} min={0} placeholder="最高" />
+                </Form.Item>
+              </Space.Compact>
+            </Form.Item>
+            <Form.Item label="销量区间">
+              <Space.Compact style={{ width: 180 }}>
+                <Form.Item name="sales_from" noStyle>
+                  <InputNumber style={{ width: 80 }} min={0} placeholder="最低" />
+                </Form.Item>
+                <Text type="secondary" style={{ lineHeight: "30px", padding: "0 4px" }}>~</Text>
+                <Form.Item name="sales_to" noStyle>
+                  <InputNumber style={{ width: 80 }} min={0} placeholder="最高" />
+                </Form.Item>
+              </Space.Compact>
+            </Form.Item>
             {/*
               挂链笔记数（v1.34，用户口径「添加挂链笔记数，默认小于指定篇数」）：
               比较符默认「小于」+ 指定篇数。值**留空 = 不筛**（不是「小于 0」）——
               `0` 是有意义的阈值（「一篇都没挂」），缺省态不该偷偷筛掉数据。
               口径 = `note_goods` 关系表，与本列显示的篇数是**同一个数**（§33.8）。
             */}
-            <Col span={6}>
-              <Form.Item label="挂链笔记数" style={{ marginBottom: 8 }}>
-                <Space.Compact style={{ width: "100%" }}>
-                  <Form.Item name="note_count_op" noStyle>
-                    <Select
-                      style={{ width: 96, flexShrink: 0 }}
-                      options={NOTE_COUNT_OP_OPTIONS}
-                    />
-                  </Form.Item>
-                  <Form.Item name="note_count" noStyle>
-                    <InputNumber
-                      style={{ width: "100%" }}
-                      min={0}
-                      placeholder="篇数（留空不筛）"
-                    />
-                  </Form.Item>
-                </Space.Compact>
-              </Form.Item>
-            </Col>
-            <Col span={6}>
-              <Form.Item label=" " style={{ marginBottom: 8 }}>
-                <Space style={{ width: "100%", justifyContent: "flex-end" }} wrap>
-                  <Button
-                    type="primary"
-                    icon={<SearchOutlined />}
-                    loading={loading}
-                    onClick={() => runSearch(false)}
-                  >
-                    搜索
-                  </Button>
-                  <Button onClick={() => runSearch(true)}>重置</Button>
-                  {/* ⚠️ 四处**已移除**（2026-10-05 / 10-06 用户口径）：
-                      ① **刷新图标按钮**（「商品搜索区域刷新图标按钮移除」）——
-                         「搜索」本身就是重新拉取，多一个图标是同义的第二入口；
-                      ② **同步商品 / 导出 CSV** —— 搬到「商品台账」卡 header
-                         （「导出csv按钮和同步商品，放商品台账区域」）；
-                      ③ **分组筛选下拉** —— 分组功能整体移除（同轮）；
-                      ④ **同步指定商品** —— 同样搬到「商品台账」卡 header
-                         （2026-10-06 用户口径「同步指定商品按钮放商品台账顶部」：
-                         它与「同步商品」是同一族动作，摆在一起而不是散在两个卡里）。 */}
-                </Space>
-              </Form.Item>
-            </Col>
-          </Row>
-        </Form>
+            <Form.Item label="挂链笔记数">
+              <Space.Compact style={{ width: 180 }}>
+                <Form.Item name="note_count_op" noStyle>
+                  <Select style={{ width: 72 }} options={NOTE_COUNT_OP_OPTIONS} />
+                </Form.Item>
+                <Form.Item name="note_count" noStyle>
+                  <InputNumber style={{ width: 108 }} min={0} placeholder="篇数" />
+                </Form.Item>
+              </Space.Compact>
+            </Form.Item>
+          </>
+        ) : null}
+
+        {/* 价格区间 / 创建时间也在**常驻行**（用户口径 2026-10-11「搜索条件第一行再展示两个」）：这两个是商品列表最常用的筛选，折起来反而要多点一次「更多筛选」。 */}
+        <Form.Item label="价格区间">
+          <Space.Compact style={{ width: 180 }}>
+            <Form.Item name="price_from" noStyle>
+              <InputNumber style={{ width: 80 }} min={0} placeholder="最低" />
+            </Form.Item>
+            <Text type="secondary" style={{ lineHeight: "30px", padding: "0 4px" }}>~</Text>
+            <Form.Item name="price_to" noStyle>
+              <InputNumber style={{ width: 80 }} min={0} placeholder="最高" />
+            </Form.Item>
+          </Space.Compact>
+        </Form.Item>
+        <Form.Item label="创建时间" name="create_time_range">
+          <RangePicker
+            style={{ width: 180 }}
+            placeholder={["开始日期", "截止日期"]}
+            allowClear
+          />
+        </Form.Item>
+
+        {/* 动作组（始终在末位）：查询 / 重置 / 更多筛选（展开态变「收起」）。 */}
+        <Form.Item>
+          <Space wrap>
+            <Button
+              type="primary"
+              icon={<SearchOutlined />}
+              loading={loading}
+              onClick={() => runSearch(false)}
+            >
+              查询
+            </Button>
+            <Button onClick={() => runSearch(true)}>重置</Button>
+            {/* 展开 / 收起是纯视图开关（不参与查询）。 */}
+            <Button
+              type="link"
+              icon={searchExpanded ? <ArrowUpOutlined /> : <ArrowDownOutlined />}
+              iconPosition="end"
+              onClick={() => setSearchExpanded((prev) => !prev)}
+            >
+              {searchExpanded ? "收起" : "更多筛选"}
+            </Button>
+          </Space>
+        </Form.Item>
+      </Form>
       </Card>
 
       <Card
         size="small"
-        style={{ marginTop: 12 }}
-        bodyStyle={{ padding: 12 }}
+        //: 用户口径 2026-10-11「商品台账顶部按钮与底部分页和统计数据固定不动，
+        //: 只有列表内的数据支持表格列滚动」：整页是**限定高度的纵向 flex** ——
+        //:   ① 搜索条件（上一张卡）`flexShrink: 0` 内容固定；
+        //:   ② 本台账卡 `flex: 1; minHeight: 0` 吃掉剩余高度，卡内再切成
+        //:      「卡头（按钮）`flexShrink:0` / 表格体 `flex:1; overflow:auto` /
+        //:       统计 `flexShrink:0`」三段；
+        //:   ③ 分页由 `Table` 自带（`ant-table-pagination`，它是表格容器的**兄弟**、
+        //:      贴在卡体底部）⇒ 天然不随表格体滚动。
+        //: 高度 = 视口 - 顶栏(48) - 内容上下内边距(15+24) - 搜索条件卡(折叠态约 52)
+        //:        - 两卡间距(10+12)，取 `calc(100vh - 190px)`（与图片空间同一套做法）。
+        //: 用户口径 2026-10-11「搜索条件与商品台账间隔 10」「底部撑满」：
+        //: `marginTop: 0`（间距由外层 `Flex gap={10}` 统一给，两处都给会翻倍）；
+        //: `flex: 1` 吃掉剩余高度 ⇒ 卡片底边贴到视口底部。
+        style={{ marginTop: 0, flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}
+        styles={{ body: { padding: 12, flex: 1, minHeight: 0, display: "flex", flexDirection: "column" } }}
         title="商品台账"
         extra={
           <Space size={8}>
@@ -2973,13 +3010,22 @@ export function XhsShopItemsPage() {
           </div>
         )}
         {data ? (
+          //: `className="shop-items-table"` + `scroll={{ y: "100%" }}`：只有**表格内**
+          //: 这一块滚动（用户口径「只有列表内的数据支持表格列滚动」）。
+          //: ⚠️ `y: "100%"` 而不是固定像素 —— 表体 `max-height:100%` 恰好等于外层的
+          //:    `flex:1` 高度，行多就在**表格体内部**滚、行少也不留空。
+          <div className="shop-items-table" style={{ flex: 1, minHeight: 0 }}>
           <Table<XhsShopItem>
             rowKey="item_id"
             size="small"
             loading={loading}
             columns={columns}
             dataSource={data.items}
-            scroll={{ x: 1300 }}
+            //: ⚠️ 类名挂**外层 div**（蚂蚁表格的 `className` 落到最内层的 `.ant-table`，
+            //: 拿它做 flex 布局够不到分页器与 `Spin` 包裹层）；`rootClassName` 才落在
+            //: `.ant-table-wrapper`（分页器与表格体都在它里面）。
+            rootClassName="shop-items-table"
+            scroll={{ x: 1300, y: "100%" }}
             sortDirections={["descend", "ascend"]}
             rowSelection={{
               selectedRowKeys: selectedItemIds,
@@ -2997,7 +3043,11 @@ export function XhsShopItemsPage() {
               total: data.total,
               showSizeChanger: true,
               pageSizeOptions: SHOP_ITEMS_PAGE_SIZES.map(String),
-              showTotal: (total) => `共 ${total} 件商品`,
+              //: **核心数据与分页同行**（用户口径 2026-10-11「只保留核心数据，展示一行，与分页同行」）：`showTotal` 渲染在分页行的**左侧**，与页码同一个 flex 行 ⇒ 天然「同行」；去掉原先那两行 `Descriptions`（它把分页推下去，且 7 项里大半与别处重复）。
+              //:   「商品来源」恒为本地台账（常量）、「状态口径」= 每行的状态列、
+              //:   「当前排序」= 表头箭头、同步时间 / 平台总数属账号级信息 —— 都撤了。
+              showTotal: (total) =>
+                `命中 ${total} 件商品${data.shop_name ? ` · ${data.shop_name}` : ""}`,
               onChange: (page, size) => {
                 setPageNo(page);
                 setPageSize(size);
@@ -3005,24 +3055,9 @@ export function XhsShopItemsPage() {
               },
             }}
           />
+          </div>
         ) : (
           <Empty description={bindingLoaded ? "点「搜索」拉取商品列表" : "正在加载账号信息"} />
-        )}
-        {data && (
-          <Descriptions size="small" column={4} style={{ marginTop: 8 }}>
-            <Descriptions.Item label="商品来源">本地台账（同步商品任务落库）</Descriptions.Item>
-            <Descriptions.Item label="店铺">{data.shop_name || "-"}</Descriptions.Item>
-            <Descriptions.Item label="状态口径">{data.status_label}</Descriptions.Item>
-            <Descriptions.Item label="命中总数">{data.total}</Descriptions.Item>
-            {/* 当前排序（设计 13 §32.1）：取**后端回传的生效口径**，不是前端自己的猜想 */}
-            <Descriptions.Item label="当前排序">
-              {sortSummary(data.sort_field, data.order)}
-            </Descriptions.Item>
-            <Descriptions.Item label="台账同步时间">{data.queried_at || "-"}</Descriptions.Item>
-            <Descriptions.Item label="平台商品总数">
-              {data.products_total > 0 ? data.products_total : "-"}
-            </Descriptions.Item>
-          </Descriptions>
         )}
       </Card>
 
@@ -3976,7 +4011,7 @@ export function XhsShopItemsPage() {
       >
         同步商品需要可用的千帆令牌，请到「账号矩阵」登录 / 重新登录千帆后再试。
       </Modal>
-    </div>
+    </Flex>
     </Spin>
   );
 }

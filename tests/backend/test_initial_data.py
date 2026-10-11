@@ -129,7 +129,10 @@ def test_initial_data_file_exists_and_is_parseable():
     payload = json.loads(INITIAL_DATA_FILE.read_text(encoding="utf-8"))
     rows = payload["scheduled_jobs"]
     assert isinstance(rows, list)
-    assert len(rows) == 14, "定时任务初始化数据条数变化必须同步审阅（注册表 builtin 全集）"
+    #: ⚠️ 15（原 14）—— `system.picture_space_cleanup`（图片空间清理，设计 22）落地时
+    #: 漏改这几个硬编码数字，导致本条长期红。2026-10-11 复跑时发现：与本次改动无关，
+    #: 属存量漂移；按注册表 builtin 全集（`job_registry`）审阅后确认应为 15。
+    assert len(rows) == 15, "定时任务初始化数据条数变化必须同步审阅（注册表 builtin 全集）"
 
 
 def test_initial_data_keys_match_registry_builtin_set():
@@ -354,7 +357,7 @@ def test_startup_seeding_is_decoupled_from_scheduler_switch(tmp_path, monkeypatc
         _make_user(TestingSessionLocal)
         # 直接调启动播种（它就是 lifespan 里那一步），不启调度器
         created = scheduler_service.seed_builtin_jobs_from_initial_data()
-        assert created == 14
+        assert created == 15  # 同上：注册表 builtin 全集的条数（2026-10-11 订正）
 
         db = TestingSessionLocal()
         keys = set(db.scalars(select(ScheduledJob.job_key)).all())
@@ -421,7 +424,8 @@ def test_existing_rows_are_never_overwritten(tmp_path, monkeypatch):
         # 演变：11 →（2026-10-04 M5/M6）13 →（10-06 `note_data_sync`）14
         # →（10-07 ① `workflow.` 退场**不影响种子**，它 `builtin=False`）
         # →（10-07 ② `system.no_traffic_cleanup` 从注册表与种子移除）**13**。
-        assert len(created) == 13, "已存在的那一行不该再插"
+        #: ⚠️ 14（原 13）—— 同上是注册表 builtin 全集 15 减「已存在的那一行」（2026-10-11 订正）。
+        assert len(created) == 14, "已存在的那一行不该再插"
 
         row = db.scalar(select(ScheduledJob).where(ScheduledJob.job_key == "system.note_sync"))
         assert row.name == "我改过的名字"
@@ -448,7 +452,7 @@ def test_missing_data_file_falls_back_to_code_defaults_with_warning(tmp_path, mo
             _make_user(TestingSessionLocal)
             created = ensure_builtin_jobs(db)
             db.close()
-        assert len(created) == 14, "文件缺失也要有兜底种子（不能少任务）"
+        assert len(created) == 15, "文件缺失也要有兜底种子（不能少任务）"
         assert any("不存在" in record.message for record in caplog.records)
     finally:
         app.dependency_overrides.clear()

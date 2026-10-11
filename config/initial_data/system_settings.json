@@ -41,6 +41,16 @@
       "description": "默认关闭。关闭时，同一商品只要已有笔记（已发布或正在发布），再点「发布」或「批量发布」都不会真的发出去 —— 该笔记会被标记为「发布失败」，原因是「挂载的商品已经发布过笔记」。打开后不再校验，同一商品可以发布多篇笔记。改完立即生效。",
       "requires_restart": false,
       "is_dangerous": false
+    },
+    {
+      "key": "xhs_image_upload_parallelism",
+      "value": 5,
+      "value_type": "int",
+      "category": "sync",
+      "label": "媒体上传并发数（主图/详情图/规格图）",
+      "description": "图片上传的并发度，默认 5。上传是两段式：申请凭证打小红书（整批只 1 次），PUT 字节打对象存储（不是小红书域名）⇒ 并发不产生平台请求，风控风险与串行相同。真机实测单张约 2.5s：38 张详情图串行 94s，并发 5 后约 19s。调大 = 更快，但同批文件会同时占内存与后台上传线程。改完立即生效，无需重启。",
+      "requires_restart": false,
+      "is_dangerous": false
     }
   ]
 }

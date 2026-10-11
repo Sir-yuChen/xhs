@@ -306,10 +306,38 @@
   gap: 8px;
 }
 
+/* 规格值输入框宽度（用户反馈 2026-10-11：「规格文本超出输入框外展示」）。
+   ⚠️ **根因**：旧规则写死 `width:200px; flex:0 0 200px` —— `flex-grow:0`（不长大）
+   + `flex-shrink:0`（不缩小），真包规格值最长 30+ 字（`【中古风】伸缩桌+三斗柜梳妆台+云朵镜+妆凳`
+   这类），200px 必然装不下 ⇒ 文本被裁在框外。
+   ⇒ 改**按内容自适应**：`width:auto` + `min-width` 保底 + `max-width` 防单个值独占整行。
+   配合下方的 `field-sizing: content`（支持的浏览器里真正逐字自适应）。 */
 .publish-config-step2 .spec-config-values .spec-value-input,
 .publish-config-step2 .spec-config-values .ant-input {
+  /*: ⚠️ 用户口径 2026-10-11（**定稿**）：「规格输入框还是需要**固定 200px** 长度，
+      长文本也**不应该溢出**展示在输入框外」。
+      ⇒ 宽度**固定 200px**（不再自适应）；长文本的处理交给**输入框自身**：
+        内部横向滚动 + 省略，绝不把文字画到框外。
+      ⚠️ 与上一版（`width:auto` + `field-sizing:content`）的关系：那一版让框随内容
+         变宽，用户不要那个观感 —— 要**整齐的等宽栅格**，长值能看全即可。 */
   width: 200px;
   flex: 0 0 200px;
+  max-width: 200px;
+  /*: 关键：输入框内部**不换行、不溢出**（`ant-input` 默认 `white-space:pre` 时
+      长文本会横向撑出可视区）。 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 真正承载文字的是内层 `<input>`；宽度固定后它自己横向滚动（浏览器原生能力），
+   不会把文字画到框外 —— 这正是「长文本不溢出」的落点。 */
+.publish-config-step2 .spec-config-values .spec-value-input > input,
+.publish-config-step2 .spec-config-values .ant-input > input {
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* 规格值一项 = **前缀缩略图 + 输入框**（用户口径 2026-10-09：输入框前缀展示规格图）。 */
@@ -317,16 +345,25 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  /*: 一项（缩略图 + 输入框）：**图固定、输入框可收缩**。 */
+  min-width: 0;
+  max-width: 100%;
+}
+/*: 输入框在 item 里可以收缩（窄屏），但缩的是它、不是图。 */
+.publish-config-step2 .spec-value-item > .spec-value-input {
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 .publish-config-step2 .spec-value-thumb {
   width: 32px;
   height: 32px;
+  /*: `flex: 0 0 auto` = 固定不缩 —— 输入框文本多长都挤不动规格图。 */
+  flex: 0 0 auto;
   object-fit: cover;
   border-radius: 6px;
   border: 1px solid var(--ant-color-border, #d9d9d9);
   cursor: pointer;
-  flex: 0 0 auto;
 }
 
 .publish-config-step2 .spec-value-add-img {
@@ -656,26 +693,28 @@
 /* 规格值输入框前缀里的规格图 / 加号（真·Input prefix，与输入框一体）。
    ⚠️ antd v6 的 `.ant-input-prefix` 可能让子元素不接收点击 —— 显式放开 pointer-events，
    否则「规格图前缀点击无响应」（用户实测 2026-10-09）。 */
-.publish-config-step2 .spec-value-input .ant-input-prefix {
-  margin-inline-end: 6px;
-  pointer-events: auto;
-  cursor: pointer;
-}
-.publish-config-step2 .spec-value-input .spec-value-thumb {
+/*: ⚠️ 旧的 `.spec-value-input .ant-input-prefix` 样式**已删除**（2026-10-11）：
+   规格图当时挂在输入框的 `prefix` 里，随文本横向滚动被挤走（用户实测
+   「文本过多向右滚会把规格图挤掉，回最左也展示不出」）。现在图是输入框的
+   **兄弟节点**（`.spec-value-item` 直接子元素），不参与输入框内部滚动。 */
+.publish-config-step2 .spec-value-item > .spec-value-thumb {
+  /*: 固定尺寸 + `flex: 0 0 auto` ⇒ 文本再长也挤不动它。 */
   width: 22px;
   height: 22px;
+  flex: 0 0 22px;
   object-fit: cover;
   border-radius: 4px;
   cursor: pointer;
   display: block;
   pointer-events: auto;
 }
-.publish-config-step2 .spec-value-input .spec-value-img-btn {
+.publish-config-step2 .spec-value-item > .spec-value-img-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 22px;
   height: 22px;
+  flex: 0 0 22px;
   border: 1px dashed var(--ant-color-border, #d9d9d9);
   border-radius: 4px;
   color: var(--ant-color-text-quaternary, rgba(0, 0, 0, 0.45));
@@ -847,5 +886,114 @@
 .publish-preview-sku-list {
   margin-top: 8px;
   max-height: 300px;
+  overflow-y: auto;
+}
+
+
+/* ---- 「预检通过SKU导入」弹窗的三个区域（用户口径 2026-10-11）----
+   区域一 商品 SKU 映射关系 / 区域二 价格库存映射关系表 / 区域三 其它规则。
+   用左侧色条 + 分组标题做视觉分区，不靠间距硬凑（三块内容密度不同，
+   只靠 margin 会让「哪里结束、哪里开始」看不清楚）。 */
+.import-section {
+  margin-bottom: 16px;
+  padding-left: 10px;
+  border-left: 3px solid #1677ff;
+}
+
+.import-section-title {
+  margin-bottom: 8px;
+  font-weight: 600;
+  font-size: 13px;
+  color: rgba(0, 0, 0, 0.88);
+  /*: 标题行右侧放操作按钮（用户口径：按钮放**表格顶部**）。 */
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+
+/* 导入弹窗的蒙版（用户口径 2026-10-11：点击确认加蒙版 + 耗时 + 进度）。
+   默认 Spin 包裹层的 min-height 只有一屏，内容高时蒙版盖不满 ⇒ 显式拉满。 */
+.import-spin-wrapper .ant-spin-container {
+  position: relative;
+}
+.import-spin-wrapper .ant-spin-container::after {
+  border-radius: 4px;
+}
+
+
+/* ---- 规格值容器约束（用户反馈 2026-10-11：**规格文本输入框展示到外面了**）----
+   根因：`.spec-values` 这个类**此前没有任何 CSS** ⇒ 它只是个裸 `<div>`，
+   里面的 `.spec-value-item`（inline-flex 的「缩略图 + 输入框/标签」）在**长规格值**
+   撑开时既不会被裁剪也不会换行到卡片内，视觉上就「跑出」了规格配置卡片。
+   修法：把它变成**受约束的 flex 换行容器**（与 `.spec-config-values` 同款），
+   并让子项可收缩（`min-width: 0`）—— flex 子项默认 `min-width:auto` 会拒绝缩小，
+   这正是「撑破父容器」的经典成因。 */
+.publish-config-step2 .spec-values {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px;
+  /*: 兜底：任何情况下不许横向溢出父卡片。 */
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.publish-config-step2 .spec-values > * {
+  min-width: 0;      /*: flex 子项默认 min-width:auto ⇒ 长文本会把父容器顶破 */
+  max-width: 100%;
+}
+
+/* 规格值**标签/多选**形态（kind=multi 的 chips）也要能换行、不溢出。 */
+/* ---- 规格值（kind=multi）**多选标签**的溢出修复（用户反馈 2026-10-11）----
+   现象：规格值标签「展示到外面了」（跑出规格配置卡片）。
+   根因链（三个都缺）：
+     ① `.spec-values` 没有 CSS ⇒ 裸 flex 容器，子项按内容宽度撑开；
+     ② antd `Select` 默认**不限制自身宽度** ⇒ 里面的 `.ant-select-selection-overflow`
+        是一个 `flex-wrap: nowrap` 的 chips 行 ⇒ 标签一多就横向顶出去；
+     ③ 没有 `min-width: 0` ⇒ flex 子项拒绝收缩（`min-width:auto` 是默认值），
+        父容器想收窄也收不动。
+   修法 = 容器给宽度 + chips 行允许换行 + 子项允许收缩。样式用 `.spec-value-input`
+   （多选/单选/AutoComplete/Input **四种形态都带这个类**）作用域，覆盖面最广。 */
+.publish-config-step2 .spec-value-input,
+.publish-config-step2 .spec-values .ant-select {
+  /*: ⚠️ 同主规则：**固定 200px**（用户定稿口径），长值由输入框内部滚动/省略处理。 */
+  width: 200px;
+  flex: 0 0 200px;
+  max-width: 200px;
+}
+
+.publish-config-step2 .spec-values .ant-select-selector {
+  max-width: 100%;
+  /*: 标签多到放不下时，多选器自身**长高**（换行）而不是横向溢出。 */
+  height: auto;
+  min-height: 24px;
+}
+
+.publish-config-step2 .spec-values .ant-select-selection-overflow {
+  flex-wrap: wrap;
+  max-width: 100%;
+}
+
+.publish-config-step2 .spec-values .ant-select-selection-overflow-item {
+  max-width: 100%;
+}
+
+.publish-config-step2 .spec-values .ant-select-selection-item {
+  /*: 单个标签限宽 + 省略号：一个超长规格值不再独占整行、也不再顶破卡片。 */
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+
+/* ---- 价格及库存列表高度（用户口径 2026-10-11）----
+   「最高 400px，低于 400 自适应，高于 400 实现上下滚动」。
+   实现：给 antd Table 的**滚动体**设 `max-height: 400px` + `overflow-y: auto`
+   —— 行少时内容高度自然小于 400（自适应），行多时到 400 开始滚。 */
+.publish-config-step2 .price-table-scroll {
+  max-height: 400px;
   overflow-y: auto;
 }

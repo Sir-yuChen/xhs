@@ -17,13 +17,14 @@
 <包目录>/
   <任意名>.xlsx      # SKU 表：列 = sku名称 | 图片 | 原价 | 计算价格 | 库存 | ID
   SKU/              # SKU 规格图，文件名形如 `SKU01_颜色分类(…).jpg`
-  主图/              # 主图（含「商品属性图.png」，**不计入主图**，见下）
+  主图/              # 主图（目录里的图**全部**计入主图）
   详情图/            # 详情图 / 长图
   视频/              # 视频
 ```
 
-⚠️ **`主图/` 里混着「商品属性图.png」**：那是**属性参数表**（用户后补的素材），
-不是商品主图。判据是文件名含「属性图」；它既不算主图也不算详情图 ——
+⚠️ **不排除任何媒体资源**（用户口径 2026-10-11 最终版：「数据包中有什么媒体资源
+就展示什么，不要排除任何媒体资源」）⇒ `主图/` 里有一张就传一张，
+曾按文件名剔除「属性图 / 参数图」的做法已撤销。
 因为平台草稿体**不接受 `properties`**（真机实测静默丢弃），属性只能由用户
 在千帆页面手工录入。这里**如实列进 `warnings`** 提醒，不假装能处理。
 """
@@ -34,6 +35,7 @@ import logging
 import re
 from pathlib import Path
 from typing import Any
+
 
 logger = logging.getLogger(__name__)
 
@@ -67,8 +69,6 @@ DIR_MAIN = "主图"
 DIR_DETAIL = "详情图"
 DIR_VIDEO = "视频"
 
-#: 「属性图」判据：文件名含它 ⇒ 不是商品图（见模块 docstring）。
-_ATTR_IMAGE_MARKERS: tuple[str, ...] = ("属性图", "参数图", "规格表")
 
 #: xlsx 表头 → 内部键。**按表头名匹配，不按列序** ——
 #: 列序是最容易漂移的东西（用户重排一次列就全错位，而且错得静默）。
@@ -89,11 +89,6 @@ _VARIANT_SEPARATORS: tuple[str, ...] = (":", "：")
 
 class PackageError(ValueError):
     """数据包不可解析（目录不存在 / 没有 xlsx / 一行 SKU 都没有）。"""
-
-
-def _is_attribute_image(name: str) -> bool:
-    """文件名是否是「属性图 / 参数图」这类**非商品图**素材。"""
-    return any(marker in name for marker in _ATTR_IMAGE_MARKERS)
 
 
 def _list_media(directory: Path, exts: frozenset[str]) -> list[str]:
@@ -274,15 +269,11 @@ def parse_package(package_path: str) -> dict[str, Any]:
         if path is None:
             warnings.append(f"数据包里没有「{dirname}」目录")
 
-    # 3) 主图（**剔掉属性图**）+ 大小校验
+    # 3) 主图 + 大小校验
+    #: ⚠️ 用户口径 2026-10-11（**最终版**）：「数据包中有什么媒体资源就展示什么，
+    #: **不要排除任何媒体资源**」⇒ 主图目录里的**所有**图都进主图（含属性图）。
     main_images: list[str] = []
     for path_str in _list_media(main_dir, IMAGE_EXTS) if main_dir else []:
-        if _is_attribute_image(Path(path_str).name):
-            warnings.append(
-                f"「{Path(path_str).name}」按属性图处理，不计入商品主图 —— "
-                "属性字段需在千帆商品编辑页手工录入（平台草稿体不接受属性）"
-            )
-            continue
         if Path(path_str).stat().st_size > MAX_IMAGE_BYTES:
             warnings.append(
                 f"「{Path(path_str).name}」超过平台单图 5M 上限，已跳过上传"

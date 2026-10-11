@@ -768,7 +768,11 @@ export type ItemPublishPayload = {
   }[];
   /** 本店任一既有商品 id（取发布体骨架）；空 = 后端自动取最近创建的在售商品。 */
   skeleton_item_id?: string;
-  /** ⚠️ 红线开关：默认 true（发布成功立即下架）。生产路径不得传 false。 */
+  /** 发布成功后是否立即下架。**默认 true**（保守：不传就下架）。
+   *
+   * ⚠️ 2026-10-11 用户**取消红线** ⇒ `false` 成为正式业务值
+   * （「发布商品」按钮 = 直接上架、发布后不再下架）。
+   * 原句「生产路径不得传 false」**已被取代**。 */
   off_shelf_after?: boolean;
   /**
    * 第一步「数据包预检」的暂存 token（设计 25 §6）。
@@ -790,7 +794,13 @@ export type ItemPublishPayload = {
   config?: Record<string, unknown>;
 };
 
-/** 提交商品的结果（`published` 后 `off_shelf` 应为 true —— 红线）。 */
+/** 提交商品的结果。
+ *
+ * ⚠️ `off_shelf` **只表示「是否已下架」**，不等于「发布是否成功」：
+ *  · 用户点「发布并下架」→ 期望 `off_shelf === true`；
+ *  · 用户点「发布商品」  → 期望 `off_shelf === false`（**这是正常终态，不是失败**）。
+ * 2026-10-11 用户取消红线后，两者都是成功路径 —— 前端不得把 `off_shelf === false`
+ * 一律当异常（旧文案「发布成功但下架失败」只在**用户明确要求下架**时才适用）。 */
 export type ItemPublishResult = {
   platform_account_id: number;
   uploaded_images: number;
@@ -801,6 +811,17 @@ export type ItemPublishResult = {
   /** 是否已下架（红线执行结果）。 */
   off_shelf: boolean;
   fail_reasons: { index: number; name: string; message: string }[];
+};
+
+/** 批量上传回执（`picture-space/upload-batch`）。`results[]` 与入参逐位对齐。 */
+export type PictureSpaceUploadBatchResult = {
+  platform_account_id: number;
+  /** 本次实际生效的并发数（配置值或显式覆盖）。 */
+  concurrency: number;
+  total: number;
+  succeeded: number;
+  failed: number;
+  results: (PictureSpaceUploadResult & { index: number; message?: string })[];
 };
 
 export type XhsShopItemDetail = {

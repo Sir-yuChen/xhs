@@ -370,27 +370,62 @@ def test_sheet_title_uses_the_sheet_name(tmp_path: Path):
     assert table.rows == [["A", "1"]]
 
 
-def test_attribute_image_is_recognised_and_now_scanned_by_ocr(tmp_path: Path):
-    """`商品属性图` 归主图区，**并且要进 OCR**。
+def test_no_media_is_excluded_from_the_package(tmp_path: Path):
+    """**数据包里有什么媒体就展示什么**（用户口径 2026-10-11 **最终版**）。
 
-    ⚠️ 口径变更（用户 2026-10-08「对**全部媒体**执行 OCR 违规词识别与精确
-    过滤」）：第一版把属性图排除出 OCR，理由是「它是属性表，不是展示图」——
-    但它是最可能写着「国家级 / 最佳 / 第一」的宣传图，排除它等于给违规
-    内容开免检通道。真实包 `主图/商品属性图.png` 就是这类图。
+    > 用户原话：「**数据包中有什么媒体资源就展示什么，不要排除任何媒体资源**」
+
+    ⚠️ 七轮口径对照（保留以便追溯；本条**撤销**上一版的「按文件名排除属性图」）：
+
+    | 轮次 | 属性图在媒体清单里 |
+    |---|---|
+    | 2026-10-08 | 在（归主图区） |
+    | 2026-10-11（前） | 不在（按文件名排除） |
+    | 2026-10-11（中） | 在（仅打 `is_attribute_image` 标识） |
+    | 2026-10-11（后） | 不在（按文件名排除 + 无字段） |
+    | **2026-10-11（本条·现行）** | **在**（不做任何排除判断） |
+
+    ⚠️ 与「删除图片 OCR 建表」**不冲突**：那是表格产出的事
+    （`build_table_from_boxes` 已整段移除，见 `TestImageToTableOcrIsGone`）；
+    本条只管「媒体清单不做任何过滤」。
+
+    判据 = 数据包里的媒体文件**一个不少**（含属性图 / 参数图），且**没有**
+    `is_attribute_image` 这类专属字段（上一轮收口不退化）。
     """
     root = tmp_path / "主图"
     root.mkdir(parents=True)
     (root / "商品属性图.png").write_bytes(_one_pixel_png())
+    (root / "参数图.png").write_bytes(_one_pixel_png())
     (root / "主图01.jpg").write_bytes(_one_pixel_png())
     _make_xlsx(tmp_path / "t.xlsx", {"全部": [["a"], ["1"]]})
 
     result = pre.precheck_package(tmp_path, package_name="t")
-    by_name = {m.file_name: m for m in result.media}
-    assert by_name["商品属性图.png"].is_attribute_image is True
-    assert by_name["主图01.jpg"].is_attribute_image is False
-    # 端点的 OCR 输入只排除视频（未抽帧），**属性图必须留下**
-    ocr_targets = [m for m in result.media if m.group != "video"]
-    assert "商品属性图.png" in [m.file_name for m in ocr_targets]
+    names = {m.file_name for m in result.media}
+    assert names == {"商品属性图.png", "参数图.png", "主图01.jpg"}, (
+        f"媒体清单应等于数据包里的全部媒体（不过滤），实得 {names}"
+    )
+    assert result.to_dict()["media_groups"]["main"] == 3
+    #: 属性图专属字段**不许**回归（那会让「按名字区别对待」重新长出来）。
+    assert all("is_attribute_image" not in m for m in result.to_dict()["media"])
+    #: 判据函数也已整段删除（没有任何调用方了）。
+    assert not hasattr(pre, "is_attribute_image_name")
+def test_attribute_image_no_longer_produces_a_kv_table(tmp_path: Path):
+    """属性图**不再产生「属性 KV 表」**（用户口径 2026-10-11 需求 1）。
+
+    取代 2026-10-09「属性图 OCR 成 KV 表并出一个页签」——页签已从前端移除，
+    后端也不该继续算（白跑一次 OCR，且会给前端一个没有去处的结果）。
+    """
+    (tmp_path / "主图").mkdir(parents=True)
+    (tmp_path / "主图" / "商品属性图.png").write_bytes(_one_pixel_png())
+    _make_xlsx(tmp_path / "t.xlsx", {"全部": [["sku名称"], ["颜色分类:甲"]]})
+
+    result = pre.precheck_package(tmp_path, package_name="t")
+    assert [t.title for t in result.tables] == ["全部"]
+    #: ⚠️ `PrecheckTable.kv` 字段**已删除**（属性图 KV 链整条移除）⇒ 连 `None` 都不该出现，
+    #: 序列化结果里根本不应有这个键。断言 `not in` 才能挡住「字段加回来」的回归。
+    for t in result.tables:
+        assert not hasattr(t, "kv"), "PrecheckTable.kv 应已从契约移除"
+        assert "kv" not in t.to_dict()
 
 
 def test_missing_area_directories_become_warnings_not_errors(tmp_path: Path):
@@ -437,6 +472,8 @@ class TestPrecheckEndpoints:
     @pytest.fixture()
     def package(self, tmp_path: Path):
         for area, names in (
+            #: ⚠️ 2026-10-11：属性图**不进预检媒体**（需求 1）⇒ 主图组只有 1 张。
+            #: 这里仍把它放进夹具 —— 用来钉「它被排除掉」这件事（而不是删掉用例）。
             ("主图", ["主图01.jpg", "商品属性图.png"]),
             ("详情图", ["详情图01.jpg"]),
             ("SKU", ["SKU01.jpg"]),
@@ -499,14 +536,15 @@ class TestPrecheckEndpoints:
         # 四个区域都有（视频 1 张不进 OCR）
         # ⚠️ 分组计数字段是 **`media_groups`**（不是 `groups`）。
         groups = pre_result["media_groups"]
-        assert groups["main"] == 2  # 主图01 + 商品属性图
+        #: 2026-10-11 最终口径：**不排除任何媒体** ⇒ main = 2（主图01 + 商品属性图）。
+        assert groups["main"] == 2
         assert groups["detail"] == 1
         assert groups["sku"] == 1
         assert groups["video"] == 1
-        # OCR 输入**只排除视频**（未抽帧）；属性图现在也要检
+        #: OCR 输入排除视频（未抽帧）；**图片全部进 OCR**（不排除任何媒体）。
         sent = [Path(p).name for p in stub_ocr[0]["paths"]]
         assert "1.mp4" not in sent
-        assert "商品属性图.png" in sent
+        #: 现行口径：不过滤媒体 ⇒ 属性图照常进 OCR 目标（与普通主图一视同仁）。
         assert set(sent) == {"主图01.jpg", "商品属性图.png", "详情图01.jpg", "SKU01.jpg"}
 
         # 表格一比一还原
@@ -522,7 +560,7 @@ class TestPrecheckEndpoints:
         assert hit_media[0]["hits"][0]["boxes"][0]["w"] == 0.2
 
     def test_non_ocr_media_carry_the_same_keys(self, api_client, auth, package, stub_ocr):
-        """视频与属性图**不进 OCR**，但键必须齐全（`ocr_ok=None`）。
+        """视频**不进 OCR**，但键必须齐全（`ocr_ok=None`）。
 
         ⚠️ 这不是洁癖：第一版只给 OCR 过的图补键，于是视频行的
         `ocr_ok` 是 `undefined` ⇒ 前端「默认勾选」把它当成「已检过且合规」，
@@ -543,13 +581,10 @@ class TestPrecheckEndpoints:
         assert video["hits"] == []
         assert video["has_forbidden"] is False
         assert video["unverified_reason"], "视频必须说明为什么没检"
-
-        # ── 属性图：**现在要进 OCR**（用户口径「对全部媒体执行 OCR」）──
-        # 第一版把属性图排在 OCR 之外，理由是「它是图片」—— 这恰恰是
-        # 最可能写着「国家级/最佳」的宣传图（真实包里就是）。
+        # ── 属性图：**照常在清单里、照常进违规词 OCR**（不排除任何媒体）──
+        #: ⚠️ 「不产出表格」是另一件事（`build_table_from_boxes` 已删）。
         attr = by_name["商品属性图.png"]
-        assert attr["ocr_ok"] is True, f"属性图必须进 OCR：{attr['ocr_ok']!r}"
-        assert attr["unverified_reason"] is None
+        assert attr["ocr_ok"] is True, "属性图照常检测违规词"
 
         # 进过 OCR 的普通图也是真值
         assert by_name["详情图01.jpg"]["ocr_ok"] is True
@@ -568,6 +603,11 @@ class TestPrecheckEndpoints:
         )
         assert r.status_code == 200, r.text
         required = ("ocr_ok", "hits", "has_forbidden", "unverified_reason")
+        #: ⚠️ `is_attribute_image` **已从契约删除**（2026-10-11 最终口径：属性图相关逻辑
+        #: 全部移除）。这里反向断言字段**不存在** —— 加回来就会红。
+        assert all(
+            "is_attribute_image" not in m for m in r.json()["precheck"]["media"]
+        ), "属性图专属字段应已移除"
         for item in r.json()["precheck"]["media"]:
             for key in required:
                 assert key in item, f"{item['file_name']} 缺键 {key}"
@@ -596,9 +636,9 @@ class TestPrecheckEndpoints:
         assert r.status_code == 200, r.text
         pre_result = r.json()["precheck"]
         assert any("未能完成 OCR" in w for w in pre_result["warnings"])
-        # 失败图仍要出现在结果里（前端按「未检出但保留勾选」处理）
-        scanned = [m for m in pre_result["media"] if m["group"] != "video"
-                   and not m["is_attribute_image"]]
+        # 失败图仍要出现在结果里（前端按「未检出但保留勾选」处理）。
+        #: ⚠️ 不再按属性图筛选（字段已移除）—— 非视频的都该是 OCR 失败态。
+        scanned = [m for m in pre_result["media"] if m["group"] != "video"]
         assert scanned and all(m["ocr_ok"] is False for m in scanned)
         assert all(m["error"] for m in scanned)
 
@@ -1521,162 +1561,84 @@ class TestPictureSpaceUploadMd5Name:
 
 
 
-class TestBuildTableFromBoxes:
-    """**属性图 OCR → 行列网格**（纯几何，无子进程；用户口径 2026-10-09）。
+class TestImageToTableOcrIsGone:
+    """**「对图片做 OCR 生成表格」这条链已彻底移除**（用户口径 2026-10-11 最终版）。
 
-    属性图是一张参数表截图 ⇒ 只能靠**词 box 的几何位置**还原行列。
-    这里不测 OCR 本身（那要起 PowerShell），只测几何重建。
+    现象（用户截图）：预检里出现一张标题为 **「商品属性图」**、表头是
+    **列1/列2/列3/列4** 的表格，每行还带「未匹配到本地图」—— 那正是
+    **对 `主图/商品属性图.png` 做 OCR** 后用词 box 几何还原出来的网格
+    （`列N` 是几何还原的兜底列名）。
+
+    > 用户原话：「「商品属性图」表格 = 对 商品属性图.png 做 OCR 的结果
+    > （识别出 4 列 × 15 行），**移除这个逻辑和前端表格的展示**」
+
+    ⇒ 删除清单：
+      · `build_table_from_boxes` —— 把词 box 还原成行列网格（产出 `列1/列2/…`）
+      · `_squeeze` / `_merge_cell` —— 只服务它的两个几何辅助
+
+    ⚠️ **保留** `scan_images` / `locate_hits` —— 那是**违规词检测**（OCR 出文字 →
+    查词库），与「把 OCR 结果当表格」是两件事，红线不受影响。
     """
 
-    @staticmethod
-    def _w(text: str, x: float, y: float, w: float = 40.0, h: float = 20.0) -> dict:
-        return {"text": text, "x": x, "y": y, "w": w, "h": h}
+    def test_geometry_table_builder_is_removed(self):
+        for symbol in ("build_table_from_boxes", "_squeeze", "_merge_cell"):
+            assert not hasattr(ocr, symbol), f"{symbol} 应已整段移除（图片 OCR 生成表格）"
 
-    def test_pairs_on_one_line_become_two_columns(self):
-        """同一行里「属性名」与「属性值」水平间隙大 ⇒ 断成两列。"""
-        words = [
-            self._w("品牌", 10, 0), self._w("某某", 300, 0),
-            self._w("风格", 10, 40), self._w("中古风", 300, 40),
-        ]
-        columns, rows = ocr.build_table_from_boxes(words)
-        assert len(columns) == 2
-        assert rows == [["品牌", "某某"], ["风格", "中古风"]]
+    def test_precheck_tables_come_only_from_xlsx(self, tmp_path: Path):
+        """预检的 `tables` **只能来自 xlsx** —— 任何图片（含属性图）都不产出表。"""
+        (tmp_path / "主图").mkdir(parents=True)
+        (tmp_path / "主图" / "商品属性图.png").write_bytes(_one_pixel_png())
+        (tmp_path / "主图" / "主图01.jpg").write_bytes(_one_pixel_png())
+        _make_xlsx(tmp_path / "t.xlsx", {"全部": [["sku名称"], ["颜色分类:甲"]]})
 
-    def test_four_column_grid_is_preserved(self):
-        """真机属性图是「属性|值|属性|值」四列 —— 四列都要留住。"""
-        words = [
-            self._w("品牌", 10, 0), self._w("A", 300, 0),
-            self._w("产地", 700, 0), self._w("潍坊", 1000, 0),
-            self._w("风格", 10, 40), self._w("中古风", 300, 40),
-            self._w("门数量", 700, 40), self._w("2", 1000, 40),
-        ]
-        columns, rows = ocr.build_table_from_boxes(words)
-        assert len(columns) == 4
-        assert rows[0] == ["品牌", "A", "产地", "潍坊"]
-        assert rows[1] == ["风格", "中古风", "门数量", "2"]
+        result = pre.precheck_package(tmp_path, package_name="t")
+        assert [t.title for t in result.tables] == ["全部"]
+        #: `列N` 这种几何兜底列名**不许**出现（出现过即图片 OCR 链路回归）。
+        for t in result.tables:
+            assert not any(str(c).startswith("列") for c in t.columns), (
+                f"表格列名不该是几何兜底名：{t.columns}"
+            )
 
-    def test_single_column_image_degrades_to_one_column(self):
-        """纯文本图（没有表格）⇒ 退化成单列逐行，不硬编造多列。"""
-        words = [self._w("第一行", 10, 0), self._w("第二行", 10, 40)]
-        columns, rows = ocr.build_table_from_boxes(words)
-        assert columns == ["内容"]
-        assert rows == [["第一行"], ["第二行"]]
-
-    def test_short_row_is_padded_not_dropped(self):
-        """某行缺后半段 ⇒ 补空串（保持矩形），**不丢行**。"""
-        words = [
-            self._w("A", 10, 0), self._w("B", 300, 0),
-            self._w("A", 700, 0), self._w("B", 1000, 0),
-            self._w("只有左半", 10, 40),
-        ]
-        columns, rows = ocr.build_table_from_boxes(words)
-        assert len(columns) == 4
-        assert len(rows) == 2
-        assert rows[1][0] == "只有左半"
-        assert rows[1][1] == "" and rows[1][2] == ""
-
-    def test_empty_input_returns_empty_not_a_fake_row(self):
-        """没有词 ⇒ 空结果（**不造假**：不许回一张空表让用户以为识别到了）。"""
-        assert ocr.build_table_from_boxes([]) == ([], [])
+    def test_violation_ocr_still_works_without_the_table_builder(self):
+        """**红线不受影响**：删除几何建表后，违规词检测仍可用。"""
+        assert callable(ocr.locate_hits)
+        assert callable(ocr.scan_images)
 
 
-def test_attribute_image_becomes_a_table_in_the_precheck_result(tmp_path: Path, monkeypatch):
-    """**属性图 OCR 结果并进 `tables`**（用户口径 2026-10-09）。
+def test_attribute_image_is_no_longer_ocr_ed_into_a_table(tmp_path: Path, monkeypatch):
+    """属性图**不再** OCR 成「商品属性表」（用户口径 2026-10-11 需求 1）。
 
-    ⚠️ OCR 用桩（真 OCR 要起 PowerShell）；这里只验证**装配**：
-    属性图在 → 多一张「商品属性表」；识别失败 → 只加 warning，不伪造表。
+    ⚠️ 注意与「不排除属性图」不冲突：属性图**在媒体清单里**（可勾选可预览），
+    但**不做属性表 OCR**（后端 `scan_attribute_table` 已整段移除）。
+
+    ⚠️ **取代** 2026-10-09 的 `test_attribute_image_becomes_a_table_in_the_precheck_result`
+    与 `test_attribute_image_ocr_failure_warns_instead_of_faking_a_table`（两条一起退场）：
+
+    | 轮次 | 属性图 | 理由 |
+    |---|---|---|
+    | 2026-10-09 | OCR ⇒ `tables` 多一张「商品属性表」+ KV + 前端「商品属性」页签 | 让用户核对参数 |
+    | **2026-10-11（本条）** | **整条链路移除**（后端不算、前端无页签） | 属性由第二步「智能生成商品属性」从平台取，本地截图无用 |
+
+    守卫方式：把 `scan_attribute_table` 打桩成「**一旦被调用就炸**」——
+    这样「有人把 OCR 调用加回来」会**立刻红**（比断言「表不存在」更强，
+    后者在 OCR 被调用但结果为空时仍会绿）。
     """
-    root = tmp_path / "属性"
+    root = tmp_path / "主图"
     root.mkdir(parents=True)
     (root / "商品属性图.png").write_bytes(_one_pixel_png())
-    _make_xlsx(tmp_path / "t.xlsx", {"全部": [["a"], ["1"]]})
+    _make_xlsx(tmp_path / "t.xlsx", {"全部": [["sku名称"], ["颜色分类:甲"]]})
 
-    monkeypatch.setattr(
-        ocr, "scan_attribute_table",
-        lambda path: {
-            "ok": True, "reason": "",
-            "columns": ["列1", "列2"],
-            "rows": [["品牌", "A"], ["风格", "中古风"]],
-            #: 用户口径 2026-10-09：属性图用 **KV** 展示（不是网格）。
-            "kv": [{"key": "品牌", "value": "A"}, {"key": "风格", "value": "中古风"}],
-        },
+    #: ⚠️ 强化版守卫（2026-10-11 二次收口）：`scan_attribute_table` 已**从模块里删除**，
+    #: 所以「打桩成会炸」不再可行 —— 改用**更强**的判据：函数**不存在**。
+    #: 这比打桩更强：打桩只拦「被调用」，而「函数没了」连实现都保不住。
+    assert not hasattr(ocr, "scan_attribute_table"), (
+        "属性图 OCR 的后端实现应已整段移除（用户口径 2026-10-11「商品属性图移除后端对应的相关逻辑移除」）"
     )
     result = pre.precheck_package(tmp_path, package_name="t")
-    titles = [t.title for t in result.tables]
-    assert any("商品属性表" in t for t in titles), "属性图没有变成一张表"
-    attr = next(t for t in result.tables if "商品属性表" in t.title)
-    assert attr.columns == ["列1", "列2"]
-    assert attr.rows[0] == ["品牌", "A"]
-    assert attr.source_file == "商品属性图.png"
-    #: KV 是「有属性图」的**判据**（前端据此出「商品属性」页签）
-    assert attr.kv == [{"key": "品牌", "value": "A"}, {"key": "风格", "value": "中古风"}]
-    #: 普通 xlsx 表的 kv 必须是 None（不能被前端误判成属性表）
-    xlsx_tables = [t for t in result.tables if "商品属性表" not in t.title]
-    assert xlsx_tables and all(t.kv is None for t in xlsx_tables)
+    assert [t.title for t in result.tables] == ["全部"]
+    assert not any("未能识别出属性表格" in w for w in result.warnings)
+    #: `BuildKvFromBoxes` 的几何还原函数也随链路移除（没有调用方了）。
+    assert not hasattr(ocr, "build_kv_from_boxes")
 
 
-def test_attribute_image_ocr_failure_warns_instead_of_faking_a_table(tmp_path: Path, monkeypatch):
-    """OCR 失败 ⇒ **只加 warning**，不塞一张空表（不造假）。"""
-    root = tmp_path / "属性"
-    root.mkdir(parents=True)
-    (root / "商品属性图.png").write_bytes(_one_pixel_png())
-    _make_xlsx(tmp_path / "t.xlsx", {"全部": [["a"], ["1"]]})
-
-    monkeypatch.setattr(
-        ocr, "scan_attribute_table",
-        lambda path: {"ok": False, "reason": "图上没有识别到文字", "columns": [], "rows": []},
-    )
-    result = pre.precheck_package(tmp_path, package_name="t")
-    assert not any("商品属性表" in t.title for t in result.tables), "失败时不该有表"
-    assert any("未能识别出属性表格" in w for w in result.warnings), "失败时应有 warning"
-
-
-
-class TestBuildKvFromBoxes:
-    """**属性图 → KV 对**（用户口径 2026-10-09：属性图用 KV 展示，不是网格）。"""
-
-    @staticmethod
-    def _w(text: str, x: float, y: float, w: float = 40.0, h: float = 20.0) -> dict:
-        return {"text": text, "x": x, "y": y, "w": w, "h": h}
-
-    def test_pairs_name_and_value_on_the_same_line(self):
-        words = [
-            self._w("品牌", 10, 0), self._w("某某", 300, 0),
-            self._w("产地", 10, 40), self._w("山东", 300, 40),
-        ]
-        assert ocr.build_kv_from_boxes(words) == [
-            {"key": "品牌", "value": "某某"},
-            {"key": "产地", "value": "山东"},
-        ]
-
-    def test_two_pairs_on_one_line_become_two_items(self):
-        """真机属性图一行有**两组**「名|值」（列3/列4 是另一对）。"""
-        words = [
-            self._w("品牌", 10, 0), self._w("A", 300, 0),
-            self._w("产地", 700, 0), self._w("潍坊", 1000, 0),
-        ]
-        assert ocr.build_kv_from_boxes(words) == [
-            {"key": "品牌", "value": "A"},
-            {"key": "产地", "value": "潍坊"},
-        ]
-
-    def test_ocr_spaces_between_hanzi_are_squeezed(self):
-        """OCR 常在汉字间插空格（`带 妆 镜`）—— 属性名要去掉这层空格。"""
-        words = [self._w("带 妆 镜", 10, 0), self._w("支 持", 300, 0)]
-        kv = ocr.build_kv_from_boxes(words)
-        assert kv[0]["key"] == "带妆镜"
-        assert kv[0]["value"] == "支持"
-
-    def test_english_words_keep_their_spaces(self):
-        """英文值里的空格是**真空格**，不能一起挤掉。"""
-        words = [self._w("品牌", 10, 0), self._w("Wick Dynasty", 300, 0, w=200)]
-        assert ocr.build_kv_from_boxes(words)[0]["value"] == "Wick Dynasty"
-
-    def test_lone_key_becomes_empty_value(self):
-        """只有属性名（没识别到值）⇒ 值留空，**不丢这一项**。"""
-        words = [self._w("门数量", 10, 0)]
-        assert ocr.build_kv_from_boxes(words) == [{"key": "门数量", "value": ""}]
-
-    def test_empty_input_returns_no_fake_pairs(self):
-        assert ocr.build_kv_from_boxes([]) == []
 

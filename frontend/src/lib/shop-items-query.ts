@@ -93,7 +93,9 @@ export function formValuesToQuery(
     ...(pageNo !== undefined ? { page_no: pageNo } : {}),
     ...(pageSize !== undefined ? { page_size: pageSize } : {}),
     keyword: values.keyword?.trim() || undefined,
-    status: values.status || "on_shelf",
+    //: 状态默认「全部」（用户口径 2026-10-11「搜索区间状态默认全部」）——
+    //: 与 `EMPTY_SHOP_ITEMS_DRAFT.status` 同一取值（lib 唯一一份默认值）。
+    status: values.status || "all",
     price_from: values.price_from ?? undefined,
     price_to: values.price_to ?? undefined,
     stock_from: values.stock_from ?? undefined,

@@ -47,6 +47,7 @@ import {
 import {
   DeleteOutlined,
   DownOutlined,
+  ImportOutlined,
   InfoCircleOutlined,
   LeftOutlined,
   LoadingOutlined,
@@ -61,8 +62,31 @@ import type { AfterSaleRule } from "../../../lib/api";
 import { buildImageUrls, spec_combinations } from "../../../lib/publish-config";
 import {
   applyBatchRule,
+  buildSkuFillPlan,
+  clampPriceMultiplier,
+  DEFAULT_PRICE_MULTIPLIER,
+  applyPriceMultiplier,
+  DEFAULT_PRICE_MAPPING,
+  DEFAULT_PRICE_FALLBACK_SOURCE,
+  isPriceMappingReady,
+  PRICE_TARGET_LABELS,
+  PRICE_TARGET_OPTIONS,
+  priceSourceOptions,
+  type SkuFillPlan,
+  validatePriceMapping,
+  type PriceMappingRow,
+  type PriceTargetKey,
+  MAX_SPEC_MAPPING_ROWS,
+  mappingFromRows,
+  defaultSpecMappingRows,
+  validateSpecMapping,
+  isSpecMappingReady,
+  type SpecMappingRow,
+  PRICE_MULTIPLIER_MAX,
+  PRICE_MULTIPLIER_MIN,
   type BatchEditMode,
   type BatchEditRule,
+  type PassedSkuRow,
 } from "../../../lib/precheck-publish";
 import type { ConfigMainImage } from "./publish-config-step1";
 
@@ -270,12 +294,18 @@ function PriceRowBatchBar(props: {
     seller_code: string;
   }>({ price: null, stock: null, market_price: null, barcode: "", seller_code: "" });
 
+  //: ⚠️ 用户口径（2026-10-11）：「批量修改列，**该列必须为数值类**才可以支持在
+  //: 下拉中展示」⇒ 下拉**只列数值列**（售价 / 库存 / 市场价）。
+  //: 原清单里的「条形码」（`maxLen: 28`）「商家编码」（`maxLen: 64`）是**文本列** ——
+  //: 加减一个数 / 乘一个倍数对文本没有意义（它们只走 `mode === "fixed"` 的整列赋值）。
+  //: ⚠️ 与另一个批量修改弹窗（预检价格表那个）**同一口径**，两处必须一致。
+  //: 原两项保留在下方注释，标记口径变更（不静默删除）：
+  //:     { key: "barcode", label: "条形码", numeric: false, maxLen: 28 },
+  //:     { key: "seller_code", label: "商家编码", numeric: false, maxLen: 64 },
   const fields: { key: keyof typeof values; label: string; numeric: boolean; maxLen?: number }[] = [
     { key: "price", label: "售价", numeric: true },
     { key: "stock", label: "库存", numeric: true },
     { key: "market_price", label: "市场价", numeric: true },
-    { key: "barcode", label: "条形码", numeric: false, maxLen: 28 },
-    { key: "seller_code", label: "商家编码", numeric: false, maxLen: 64 },
   ];
 
   const apply = () => {
@@ -387,12 +417,18 @@ function PriceRowBatchEditModal(props: {
 }) {
   const { open, allRows, onChange, onClose } = props;
   const { message } = App.useApp();
+  //: ⚠️ 用户口径（2026-10-11）：「批量修改列，**该列必须为数值类**才可以支持在
+  //: 下拉中展示」⇒ 下拉**只列数值列**（售价 / 库存 / 市场价）。
+  //: 原清单里的「条形码」「商家编码」是**文本列**（`numeric: false`）—— 它们本就走
+  //: `mode === "fixed"` 的整列赋值分支，一条「加减/倍数」规则对文本没有意义
+  //: （加减一个数、乘一个倍数都不是合法操作）⇒ 不该出现在这个下拉里。
+  //: ⚠️ 原两项**保留在下方注释**，标记口径变更（不静默删除）：
+  //:     { key: "barcode", label: "条形码", numeric: false },
+  //:     { key: "seller_code", label: "商家编码", numeric: false },
   const fields: { key: keyof PriceRow; label: string; numeric: boolean }[] = [
     { key: "price", label: "售价", numeric: true },
     { key: "stock", label: "库存", numeric: true },
     { key: "market_price", label: "市场价", numeric: true },
-    { key: "barcode", label: "条形码", numeric: false },
-    { key: "seller_code", label: "商家编码", numeric: false },
   ];
   const [field, setField] = useState<keyof PriceRow>("price");
   const [mode, setMode] = useState<BatchEditMode>("delta");
@@ -807,8 +843,11 @@ export const SPOT_SHIP_TIME_OPTIONS = ["当日发货", "24小时", "48小时（�
 /** 真机「全款预售发货时间」二选一。 */
 export const PRESALE_KINDS = ["时段预售", "定时预售"] as const;
 
-/** 规格值输入框宽度（**用户口径 2026-10-09：固定 200px**，覆盖真机实测的 186px）。 */
-export const SPEC_VALUE_INPUT_WIDTH = 200;
+/* 规格值输入框宽度常量**已删除**（2026-10-11）：
+   原口径「固定 200px」被用户实测推翻 ——「规格文本超出输入框外展示」的根因就是
+   写死宽度（`flex:0 0 200px` 不长不缩，30+ 字的规格值必被裁）。
+   现行 = CSS `width:auto` + `min-width` 保底 + `field-sizing: content` 按内容自适应，
+   无需 JS 端常量。留此说明避免以后有人又加回一个固定宽度。 */
 
 /** 现货+预售模式的**发货时效**候选（真机实测）。 */
 export const SHIP_AGING_OPTIONS = [
@@ -1119,6 +1158,28 @@ export type PublishConfigStep2Props = {
   /** 价格行（由已选规格组合生成）。 */
   priceRows: PriceRow[];
   onPriceRowsChange: (next: PriceRow[]) => void;
+  /** **预选通过**的 SKU 规格集合（用户口径 2026-10-11 需求 4/5）。
+   *
+   *  > 「未选中的不允许进入配置商品参数也就是预选未通过」
+   *  > 「第二步配置参数时后续逻辑注意只是有预检通过的sku规格」
+   *
+   *  第一步 SKU 表里被取消勾选、或两图判定未通过的行**不进这里**。
+   *  判据由第一步 `passedSkuSpecs()` 单一实现产出，本组件**只消费不重算**。
+   */
+  passedSpecs?: Set<string>;
+  /** **预检通过且已勾选**的 SKU 整行（供「从预检 SKU 导入」建规格/价格/库存）。 */
+  passedRows?: PassedSkuRow[];
+  /** 弹窗左侧要列出的数据包规格分类名（保序去重；由向导算好传入）。 */
+  specImportSources?: string[];
+  /** **预检表格的全部列名**（价格库存映射的来源列候选 —— 用户口径「动态可调整」）。 */
+  priceSourceColumns?: string[];
+  /** 按**用户配置的**列映射重新导出通过行（向导持有表格与勾选态，只有它能重算）。 */
+  onRebuildRows?: (
+    priceMapping: readonly PriceMappingRow[],
+    priceFallbackSource: string,
+  ) => PassedSkuRow[] | undefined;
+  /** 上传失败重试（读向导的重试开关/次数）—— 规格图上传也认这份配置。 */
+  withUploadRetry?: <T,>(run: () => Promise<T | null>, isOk?: (v: T) => boolean) => Promise<T | null>;
   /** 千帆第一部分（商品图片 / 标题 / 类目）—— 用户口径 2026-10-09：
    *  「第二步参数配置中的商品图片、商品标题、商品类目合并到下面各基础信息中」。
    *  由外层把 `PublishConfigStep1` 作为节点塞进「基础信息」区最前面。 */
@@ -1438,6 +1499,53 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
    *  规格添加即为启用，没有启用停用逻辑；开关只控制**该组是否配置规格图**。
    *  真机：第一组默认开、其余组默认关；关 ⇒ 该组的图前缀与「添加/批量上传」都不出现。 */
   const [specImageEnabled, setSpecImageEnabled] = useState<Record<string, boolean>>({});
+
+  /* ---- 「从预检 SKU 导入」弹窗（用户口径 2026-10-11 最终版） ----
+   *
+   * 独立入口（**不在**自动加载里）：规格类型随类目变动，自动加载按顺序跑死，
+   * 拿到的规格不一定是最终类目的 ⇒ 让用户在**商品规格区域**随时按当前类目重跑。
+   *
+   * 弹窗职责：让用户**明确确认**「第一步的规格分类 → 第二步的平台规格维度」映射
+   * （默认**文本精确匹配**，可手改），确认后自动解析并加载规格值 / 价格 / 库存 / 规格图。
+   */
+  const [specImportOpen, setSpecImportOpen] = useState(false);
+  /** 映射草稿（**成对关系行**，最多 2 行；两列均必填且不许重复）。 */
+  const [importMapping, setImportMapping] = useState<SpecMappingRow[]>([]);
+  /** 导入执行态（跑的时候禁用「确认导入」并显示进度文案）。 */
+  const [importRunning, setImportRunning] = useState(false);
+  /** 导入**进度**文案（用户口径 2026-10-11：「统计耗时和执行进度情况展示」）。 */
+  const [importProgress, setImportProgress] = useState<string>("");
+  /** 导入**已用秒数**（单调钟起表，终态停）。 */
+  const [importElapsed, setImportElapsed] = useState(0);
+  /** **取消标志**（用户口径 2026-10-11：「导入中点击取消，则**中断未导入和未上传的
+   *  数据，停止执行**」）。
+   *
+   *  ⚠️ 用 `useRef` 而不是 `useState`：上传循环是 `await` 里的**长任务**，
+   *  它拿到的是**闭包快照** —— state 更新对它不可见（要等下一轮渲染才生效），
+   *  循环会继续跑完。ref 是同一个可变对象，循环每次读都能看到最新值。
+   *  （同类坑本项目已踩过：DEF 系列的「取消后仍继续执行」基本都是这个成因。） */
+  const importCancelRef = useRef(false);
+  /** **挂起待填值**：导入算出的 `spec → {price, stock, sellerCode}`。
+   *
+   *  ⚠️ 为什么不直接写 `priceRows`：`specTypes`/`specValues` 一变，下面那个
+   *  「规格值 → 价格及库存表」effect 会用**笛卡尔积重建**整个表 ⇒ 直接写会被冲掉
+   *  （用户会看到「导入了但价格还是空」）。所以先挂起，等重建完成后由 effect 落值。 */
+  const [pendingSpecFills, setPendingSpecFills] = useState<
+    SkuFillPlan["rows"]
+  >([]);
+  const [importDetail, setImportDetail] = useState<string>("");
+  /** **售价倍率**（用户口径 2026-10-11：「商品售价规则是在价格与库存的原价列基础上
+   *  默认 1.7 倍，参数可调整」）。默认 1.7；改动即时生效（下次导入用新值）。 */
+  const [priceMultiplier, setPriceMultiplier] = useState<number>(DEFAULT_PRICE_MULTIPLIER);
+  /** **价格库存列映射**（用户口径：动态可调整；**默认 = 现行那套逻辑**）。
+   *  `售价 ← 原价`、`库存 ← 库存`、`商家编码 ← ID`。 */
+  const [priceMapping, setPriceMapping] = useState<PriceMappingRow[]>(
+    DEFAULT_PRICE_MAPPING.map((r) => ({ ...r })),
+  );
+  /** 售价的滞留来源列（原价取不到时用它，**不乘倍率**）。默认「计算价格」。 */
+  const [priceFallbackSource, setPriceFallbackSource] = useState<string>(
+    DEFAULT_PRICE_FALLBACK_SOURCE,
+  );
   /** **多件装打包**规格 + 弹窗开关（用户口径 2026-10-10）。 */
   const [packageBundles, setPackageBundles] = useState<PackageBundle[]>([]);
   const [packageBundleOpen, setPackageBundleOpen] = useState(false);
@@ -1717,6 +1825,167 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
     [specValues, setSpecImage, props],
   );
 
+  /** **执行导入**：按用户确认的映射，把预检 SKU 行落成规格值 / 价格 / 库存 / 规格图。
+   *
+   *  用户口径（2026-10-11 最终版）：
+   *    · 映射由用户确认（默认文本精确匹配），不猜；
+   *    · 价格取第一步 `原价`（优先）→ 空则 `计算价格`；库存取 `库存`；`ID` ⇒ 商家编码；
+   *    · 规格图上传**本地图列**那张，失败按既有重试配置重试；仍失败则**跳过上传**，
+   *      但该行的规格名/值 + 价格/库存/商家编码**照常填**。
+   *
+   *  ⚠️ 实现要点：**先**把 `specTypes`/`specValues` 落好，价格表由既有的
+   *  「规格值 → 价格及库存表」effect（笛卡尔积）**自动重建**；本函数再把
+   *  价格/库存/商家编码按 `spec` 组合文本**对齐写回**（用 pendingFill 挂起，
+   *  等价格表重建完成后由下面的 effect 落值）—— 直接写 priceRows 会被那次重建冲掉。
+   */
+  //: 导入耗时秒表（用户口径：确认后要「统计耗时」）。
+  useEffect(() => {
+    if (!importRunning) return;
+    const t0 = performance.now();
+    setImportElapsed(0);
+    const id = window.setInterval(
+      () => setImportElapsed(Math.round((performance.now() - t0) / 1000)),
+      200,
+    );
+    return () => window.clearInterval(id);
+  }, [importRunning]);
+
+  //: 规格图上传的前端并发度。
+  //: ⚠️ 真机 PUT 的并发由**后端**按 config 表 `xhs_image_upload_parallelism`（默认 5）
+  //: 控制；这里只决定「同时提交几批」。两者取一致值最省事，故默认同为 5
+  //: （前端拿不到运行时配置，写常量 + 后端仍是最终闸门，不会超发）。
+  const SPEC_IMAGE_UPLOAD_CONCURRENCY = 5;
+
+  const runSpecImport = useCallback(async () => {
+    //: 每次开跑都**重置**中断标志（否则上一次的取消会毒到这一次）。
+    importCancelRef.current = false;
+    const rows = props.passedRows ?? [];
+    const dims = (props.specAttributes ?? []).map((a) => ({
+      name: a.name,
+      id: a.id,
+      customizable: a.customizable,
+      values: a.values,
+      options: a.options,
+    }));
+    //: 成对行 ⇒ 查表结构（`buildSkuFillPlan` 消费的是这个）。
+    //: 价格库存的列映射由**用户配置**决定；行数据要按同一份映射重新导出
+    //: （`props.passedRows` 是按默认映射算的，用户改了映射就必须重算）。
+    const remapped = props.onRebuildRows?.(priceMapping, priceFallbackSource) ?? rows;
+    const plan = buildSkuFillPlan(
+      remapped,
+      dims,
+      mappingFromRows(importMapping),
+      priceMultiplier,
+    );
+    if (plan.dims.length === 0) {
+      setImportDetail(
+        `未导入：${plan.skipped.join("；") || "无可导入的规格"}`,
+      );
+      return;
+    }
+    setImportRunning(true);
+    try {
+      //: ⚠️ 用户口径：取消要**中断未导入的数据** —— 检查放在**一切写入之前**。
+      //: 若放在清表之后，用户在开跑瞬间点取消会得到「历史被清空、新数据没写」
+      //: 的最坏结果（数据丢失）。这里先看标志，**什么都不动**就退出。
+      if (importCancelRef.current) {
+        setImportDetail("已取消：未导入任何数据（历史数据保持不变）");
+        return;
+      }
+      //: ⚠️ 用户口径 2026-10-11：「导入前存在的**历史相关数据需全部清除**」。
+      //: 清的是「规格值 + 价格表」（都是上一次导入/手填的产物）；
+      //: 主图/详情图/属性等**不属于本弹窗管辖**，一律不动。
+      //:
+      //: ⚠️ **顺序至关重要**：先挂起 fills，**再**清表 + 写规格。
+      //: 三者都在同一次 React 批处理里 ⇒ 重建 effect 那一轮同时看到
+      //: 「新规格（决定有哪些行）+ 挂起值（决定填什么）」⇒ 一次算对。
+      //: 反序（先清后挂）会让重建先跑一轮、把挂起当空 ⇒ 行建好了但没值。
+      setPendingSpecFills(plan.rows);
+      setSpecValues({});
+      setSpecTypes([]);
+      props.onPriceRowsChange([]);
+      const dimPlan = plan.dims[0];
+      //: ① 规格类型 + 规格值（合并去重，不覆盖用户已填的）。
+      //: 逐维度落规格类型与值（上面已清空 ⇒ 这里是**纯写入**，不会再叠历史值）。
+      const mergedTypes: string[] = [];
+      const mergedValues: Record<string, string[]> = {};
+      for (const dp of plan.dims) {
+        mergedTypes.push(dp.dimName);
+        mergedValues[dp.dimName] = dp.values.map((v) => v.value);
+      }
+      setSpecTypes(mergedTypes);
+      setSpecValues(mergedValues);
+      //: ③ 规格图：**本地图列**那张，**并发上传**（用户口径 2026-10-11：与自动加载
+      //: 参数同一套并发能力，缩短导入耗时；并发数同样由 config 表
+      //: `xhs_image_upload_parallelism` 在**后端**生效 —— 这里只负责并发提交，
+      //: 真正打平台 PUT 的并发由 `upload-batch` 端点控制）。
+      //:
+      //: ⚠️ **取消语义必须保留**（用户口径「导入中点击取消，则中断未导入和未上传的
+      //: 数据，停止执行」）：`importCancelRef` 仍是 `useRef`（不是 state —— 并发回调
+      //: 里读 state 只能拿到闭包快照），并且**每个 worker 领活前先查标志** ⇒ 取消后
+      //: 未领的项不再上传（已在途的几张让它跑完，不产生半截文件）。
+      const total = plan.images.length;
+      let ok = 0;
+      let failed = 0;
+      let done = 0;
+      if (total === 0) setImportProgress("无规格图需要上传");
+      const run = props.withUploadRetry;
+      const upload = props.onUploadSkuImage;
+      if (total > 0 && (!run || !upload)) {
+        //: 没接上传能力时整批计入失败（与旧串行版同判据，不静默）。
+        failed = total;
+        done = total;
+      } else if (total > 0) {
+        //: worker pool：单个 worker 反复「领一项 → 上传 → 记结果 → 报进度」。
+        //: 项的下标由**共享游标**发放，天然无重复、无遗漏（不用先切片）。
+        let cursor = 0;
+        const worker = async () => {
+          for (;;) {
+            if (importCancelRef.current) return; // ⚠️ 取消：不再领新项
+            const i = cursor;
+            cursor += 1;
+            if (i >= total) return;
+            const item = plan.images[i];
+            const one = await run!(() => upload!(item.localRel, item.localFileName));
+            if (one) {
+              ok += 1;
+              //: ⚠️ 回填规格图（`setSpecImage` 支持乱序调用，key 是「维度+值」）。
+              setSpecImage(item.dimName, item.value, one);
+            } else {
+              failed += 1;
+            }
+            done += 1;
+            //: 逐张报进度 —— 并发下 `done` 是**完成数**（可能非线性），文案仍准确。
+            setImportProgress(`上传规格图 ${done}/${total}（${item.value}）`);
+          }
+        };
+        const CONCURRENCY = SPEC_IMAGE_UPLOAD_CONCURRENCY;
+        await Promise.all(
+          Array.from({ length: Math.min(CONCURRENCY, total) }, () => worker())
+        );
+      }
+      const cancelled = importCancelRef.current;
+      const bits = [
+        `规格「${dimPlan.dimName}」${dimPlan.values.length} 个值`,
+        `${plan.rows.length} 行价格库存`,
+        `规格图 ${ok} 张${failed > 0 ? `（失败 ${failed} 张，已跳过）` : ""}`,
+        //: 用户口径：取消要**说清楚停在哪**（已传 N/M 张），否则用户不知道算不算完整。
+        cancelled ? `已中断：规格图上传到 ${ok}/${total} 张` : "",
+      ].filter(Boolean);
+      //: ⚠️ 用户口径 ①「写明」：把映射关系与跳过原因一并显示（不静默）。
+      setImportDetail([...bits, ...plan.notes, ...plan.skipped].join("；"));
+      if (cancelled) {
+        void message.warning("导入已被取消（已完成的规格与价格库存保留）");
+      } else {
+        void message.success(`已导入 ${plan.rows.length} 行规格数据`);
+      }
+    } catch (err) {
+      setImportDetail(`导入失败：${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setImportRunning(false);
+    }
+  }, [props, importMapping, priceMapping, priceFallbackSource, priceMultiplier, setSpecImage]);
+
   /** 规格值 → **价格及库存表**同步（用户口径 2026-10-09：「添加规格时价格及库存列表
    *  应同步添加」）。
    *
@@ -1727,19 +1996,48 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
       specTypes.map((name) => ({ name, values: specValues[name] ?? [] })),
     );
     const byKey = new Map(props.priceRows.map((r) => [r.key, r]));
-    const next: PriceRow[] = combos.map((c) => {
+    //: ⚠️ 需求 4（2026-10-11）：**只保留预选通过的 SKU 规格**。
+    //: `c.spec` 就是 `规格名:值` 原样（与第一步 SKU 表的 `sku名称` 同形），
+    //: 所以可以直接按集合比对。集合为空（没跑预检 / 表格没读到）时**不过滤** ——
+    //: 「没数据」不等于「全不通过」，否则老链路（无预检产物）会一行规格都不剩。
+    const allowed = props.passedSpecs;
+    const visible = allowed && allowed.size > 0
+      ? combos.filter((c) => allowed.has(String(c.spec ?? "").trim()))
+      : combos;
+    //: ⚠️ **挂起值在重建这一刻直接落上**（用户口径「导入后价格库存要有值」）。
+    //: 旧实现把落值交给**另一个 effect**，而那两个 effect 的触发顺序/时机不由我们
+    //: 控制（价格表要先回传外层再回传进来），实测会「导入成功但一行都没填上」。
+    //: 现在重建与落值**在同一次计算里**完成 ⇒ 不存在时序窗口。
+    const pending = new Map(pendingSpecFills.map((f) => [f.spec, f]));
+    const next: PriceRow[] = visible.map((c) => {
+      const fill = pending.get(c.spec);
       const existing = byKey.get(c.key);
-      if (existing) return { ...existing, spec: c.spec };
+      const base: PriceRow = existing
+        ? { ...existing, spec: c.spec }
+        : {
+            key: c.key,
+            spec: c.spec,
+            price: null,
+            stock: null,
+            market_price: null,
+            barcode: "",
+            seller_code: "",
+          };
+      if (!fill) return base;
+      //: 导入是「以预检数据为准」的重建 ⇒ **覆盖**（不是只填空位）。
       return {
-        key: c.key,
-        spec: c.spec,
-        price: null,
-        stock: null,
-        market_price: null,
-        barcode: "",
-        seller_code: "",
+        ...base,
+        price: fill.price,
+        market_price: fill.marketPrice,
+        stock: fill.stock,
+        seller_code: fill.sellerCode,
       };
     });
+    //: 落过值就把挂起清掉（否则每次外层回传都重写一遍，用户手改价会被反复覆盖）。
+    if (pending.size > 0) {
+      const appliedAll = visible.every((c) => !pending.has(c.spec) || true);
+      if (appliedAll) setPendingSpecFills([]);
+    }
     //: ⚠️ 没有规格值时**不覆盖**外层给的那一行裸价（`default`），否则页面上价表会空掉。
     if (next.length === 0) return;
     //: 内容相同就不上抛（否则 effect 自触发死循环）。
@@ -1747,7 +2045,8 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
       next.length === props.priceRows.length &&
       next.every((r, i) => r.key === props.priceRows[i].key && r.spec === props.priceRows[i].spec);
     if (!same) props.onPriceRowsChange(next);
-  }, [specTypes, specValues, props.priceRows, props.onPriceRowsChange]);
+  }, [specTypes, specValues, props.priceRows, props.onPriceRowsChange, props.passedSpecs, pendingSpecFills]);
+
   /** 待确认的发货模式（真机：切换会弹「需重新设置库存…是否确认切换」）。 */
   const [pendingDeliveryMode, setPendingDeliveryMode] = useState<string | null>(null);
   /** 尺码表弹窗（真机：尺码信息 = 助手里的可点模块，点开才与后端交互）。 */
@@ -2610,6 +2909,10 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
         </div>
 
         {/* 商品规格：复选框一行展示（平台候选，上限 2）。 */}
+        {/* ⚠️ 用户口径 2026-10-11（**最终**）：「商品规格可能是根据商品类目进行变动的，
+            在**商品规格区域单独新增一个按钮弹窗**配置映射关系后自动解析加载规格数据」
+            —— 因此**不在「自动加载参数」里做**（那条流水线按顺序跑死，第 9 步拿到的
+            规格类型可能不是最终类目的）；改成本区域的独立入口，随时可重跑。 */}
         <Field label="商品规格" required hint={SPEC_RULE}>
           <Space wrap size={12}>
             {(props.specTypeOptions ?? []).map((name) => (
@@ -2621,12 +2924,386 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
                 {name}
               </Checkbox>
             ))}
+            {/* 灰色时给出原因（用户口径：灰着要能看懂为什么——静默禁用最难排查）。
+                注意必须是 JSX 注释写法：行注释写在 JSX 子节点位置会被当文本渲染出来。 */}
+            <Tooltip
+              title={
+                (props.specImportSources ?? []).length === 0
+                  ? "没有可导入的 SKU：请先在第一步预检里读取数据包，并保证有「预检通过」的 SKU 行"
+                  : "从预检通过的 SKU 导入规格 / 价格 / 库存"
+              }
+            >
+            <Button
+              size="small"
+              type="primary"
+              icon={<ImportOutlined />}
+              disabled={(props.specImportSources ?? []).length === 0}
+              onClick={() => {
+                //: 打开时用**默认映射行**（右侧取同名平台维度，最多 2 行）初始化。
+                setImportMapping(
+                  defaultSpecMappingRows(props.specImportSources ?? [], props.specAttributes ?? []),
+                );
+                setImportDetail("");
+                setSpecImportOpen(true);
+              }}
+            >
+              预检通过SKU导入
+            </Button>
+            </Tooltip>
           </Space>
         </Field>
 
         {/* 勾选规格后带出该规格的动态配置 —— ⚠️ 用户口径（2026-10-10）：
             「商品规格勾选后同理（灰底虚线框 + 父子关系），**不再添加最左侧的标题**」
             ⇒ 规格名从最左侧**移到块内标题行**（父块标题），左侧不再重复一个 {name}。 */}
+        {/* **从预检 SKU 导入**弹窗（用户口径 2026-10-11 最终版）：
+            先让用户确认「第一步规格分类 → 第二步平台规格」的映射，再自动解析加载。
+            ⚠️ 映射**默认文本精确匹配**，不一致时由用户手选 —— 不选则该项不导入
+            （宁可漏填，也不把值填错维度）。 */}
+        <Modal
+          open={specImportOpen}
+          title="从预检 SKU 导入规格 / 价格 / 库存"
+          centered
+          width={680}
+          okText="确认导入"
+          cancelText="取消"
+          //: ⚠️ **不要用 `confirmLoading`**！它在跑的时候会把 OK 按钮变 loading，
+          //: 而 antd 对 loading 态的 Modal footer 会**连带禁用同排的兄弟按钮**
+          //: ⇒ 「取消」点不动（用户实测：「点击取消未中断也未关闭弹窗」）。
+          //: 改用 `okButtonProps.loading` 只作用于 OK 自己，取消始终可点。
+          okButtonProps={{
+            loading: importRunning,
+            //: 两列必填、不重复、最多两行（用户口径）—— 不满足则**不能**确认导入。
+            disabled:
+              (props.specImportSources ?? []).length === 0 ||
+              !isSpecMappingReady(importMapping) ||
+              !isPriceMappingReady(priceMapping),
+          }}
+          //: 用户口径 2026-10-11：「点击确认导入后**不允许关闭弹窗**，除非点击
+          //: 取消按钮才可以关闭」。⇒ 跑的时候：蒙版不可点关、右上角 X 不可点；
+          //: 只有「取消」按钮能关（用户明确要的逃生口）。
+          maskClosable={!importRunning}
+          closable={!importRunning}
+          //: 取消按钮**任何状态下都可点**（它是唯一的逃生口）。
+          cancelButtonProps={{ disabled: false, loading: false }}
+          onCancel={() => {
+            //: 走到这里只可能是「取消」按钮（mask/X 在跑时已禁用）。
+            //: 用户口径 2026-10-11：「导入中点击取消，则**中断未导入和未上传的
+            //: 数据，停止执行**」⇒ 先**置中断标志**（正在跑的循环会在下一张图前
+            //: 看到它并退出），再关窗。已经传好的图**保留**（不回收已成功的上传）。
+            importCancelRef.current = true;
+            setSpecImportOpen(false);
+          }}
+          onOk={() => void runSpecImport()}
+          destroyOnClose
+        >
+          {/* **蒙版 + 耗时 + 进度**（用户口径 2026-10-11：「点击确认应加蒙版覆盖
+              统计耗时和执行进度情况展示」）—— 跑的时候整块盖住，
+              防止中途改配置产出半成品。 */}
+          <Spin
+            spinning={importRunning}
+            tip={
+              importProgress
+                ? `${importProgress} · 已用 ${importElapsed}s`
+                : `正在导入…已用 ${importElapsed}s`
+            }
+            style={{ width: "100%" }}
+            wrapperClassName="import-spin-wrapper"
+          >
+          {/* ══════════ 区域一：商品 SKU 映射关系 ══════════
+              （用户口径 2026-10-11：两列名 =「预选通过规格类型」「平台规格类型」；
+               最多 2 行、两列各自不许重复、都不能为空） */}
+          <div className="import-section">
+            <div className="import-section-title">商品 SKU 映射关系</div>
+            <Table
+              size="small"
+              rowKey={(_, i) => String(i)}
+              pagination={false}
+              dataSource={importMapping}
+              locale={{ emptyText: "还没有规格关系，请点下方「添加规格关系」" }}
+              columns={[
+                {
+                  title: "预选通过规格类型",
+                  key: "source",
+                  render: (_: unknown, row: SpecMappingRow, i: number) => {
+                    const others = importMapping
+                      .filter((r, j) => j !== i && r.source)
+                      .map((r) => r.source);
+                    return (
+                      <Select
+                        style={{ width: "100%" }}
+                        value={row.source || undefined}
+                        placeholder="请选择（预检通过）"
+                        status={!row.source.trim() ? "error" : undefined}
+                        onChange={(v) =>
+                          setImportMapping((prev) =>
+                            prev.map((r, j) => (j === i ? { ...r, source: v ?? "" } : r)),
+                          )
+                        }
+                        options={(props.specImportSources ?? []).map((name) => ({
+                          label: name,
+                          value: name,
+                          //: 用户口径：**两列均不支持重复选择** ⇒ 已被别的行用掉的不给选。
+                          disabled: others.includes(name),
+                        }))}
+                      />
+                    );
+                  },
+                },
+                {
+                  title: "平台规格类型",
+                  key: "target",
+                  render: (_: unknown, row: SpecMappingRow, i: number) => {
+                    const others = importMapping
+                      .filter((r, j) => j !== i && r.target)
+                      .map((r) => r.target);
+                    return (
+                      <Select
+                        style={{ width: "100%" }}
+                        value={row.target || undefined}
+                        placeholder="请选择（平台类目）"
+                        status={!row.target.trim() ? "error" : undefined}
+                        onChange={(v) =>
+                          setImportMapping((prev) =>
+                            prev.map((r, j) => (j === i ? { ...r, target: v ?? "" } : r)),
+                          )
+                        }
+                        options={(props.specAttributes ?? []).map((a) => ({
+                          label: a.name,
+                          value: a.name,
+                          disabled: others.includes(a.name),
+                        }))}
+                      />
+                    );
+                  },
+                },
+                {
+                  title: "操作",
+                  key: "op",
+                  width: 110,
+                  render: (_: unknown, __: SpecMappingRow, i: number) => {
+                    //: 用户口径 2026-10-11：**添加入口放操作列**，点击加一行。
+                    //: 只给**最后一行**渲染「添加」，逐行都渲染会出现多个加号
+                    //: （点哪个都一样，反而让人以为有区别）；上限 2 行时置灰。
+                    const isLast = i === importMapping.length - 1;
+                    const full = importMapping.length >= MAX_SPEC_MAPPING_ROWS;
+                    return (
+                      <Space size={0}>
+                        <Button
+                          size="small"
+                          type="link"
+                          danger
+                          icon={<DeleteOutlined />}
+                          //: 只剩一行时不给删（映射至少要有一行，否则区域空着没意义）。
+                          disabled={importMapping.length <= 1}
+                          onClick={() => setImportMapping((prev) => prev.filter((_, j) => j !== i))}
+                        />
+                        {isLast && (
+                          <Tooltip
+                            title={
+                              full
+                                ? `最多 ${MAX_SPEC_MAPPING_ROWS} 行`
+                                : "添加一行规格关系"
+                            }
+                          >
+                            <Button
+                              size="small"
+                              type="link"
+                              icon={<PlusOutlined />}
+                              disabled={full}
+                              onClick={() =>
+                                setImportMapping((prev) => [...prev, { source: "", target: "" }])
+                              }
+                            />
+                          </Tooltip>
+                        )}
+                      </Space>
+                    );
+                  },
+                },
+              ]}
+            />
+            {/* 逐行错误**即时**显示（必填 / 重复），不让用户点到「确认导入」才知道。 */}
+            {validateSpecMapping(importMapping).map((msg) => (
+              <div key={msg} style={{ marginTop: 4 }}>
+                <Text type="danger" style={{ fontSize: 12 }}>
+                  {msg}
+                </Text>
+              </div>
+            ))}
+          </div>
+
+          {/* ══════════ 区域二：价格库存映射关系表 ══════════
+              （用户口径 2026-10-11：「将价格库存列表与预检通过的列也配置成动态可调整的，
+               当前映射逻辑配置的**为默认逻辑**」⇒ 默认值就是现行那套；
+               目标列 / 来源列**都不支持重复映射**） */}
+          <div className="import-section">
+            <div className="import-section-title">价格库存映射关系表</div>
+            <Table
+              size="small"
+              rowKey={(_, i) => String(i)}
+              pagination={false}
+              dataSource={priceMapping}
+              locale={{ emptyText: "还没有映射，请点操作列的 + 添加" }}
+              columns={[
+                {
+                  //: ⚠️ 用户口径 2026-10-11：**两边均应与商品 SKU 映射关系一样自由选择**。
+                  title: "价格库存列",
+                  key: "target",
+                  render: (_: unknown, row: PriceMappingRow, i: number) => {
+                    const others = priceMapping
+                      .filter((r, j) => j !== i)
+                      .map((r) => r.target);
+                    return (
+                      <Select
+                        style={{ width: "100%" }}
+                        value={row.target || undefined}
+                        placeholder="请选择"
+                        //: 必填（用户口径「不能为空」）⇒ 未选即红框。
+                        status={!row.target ? "error" : undefined}
+                        onChange={(v) =>
+                          setPriceMapping((prev) =>
+                            prev.map((r, j) => (j === i ? { ...r, target: v as PriceTargetKey } : r)),
+                          )
+                        }
+                        options={PRICE_TARGET_OPTIONS.map((t) => ({
+                          label: PRICE_TARGET_LABELS[t],
+                          value: t,
+                          //: 目标列不许重复。
+                          disabled: others.includes(t),
+                        }))}
+                      />
+                    );
+                  },
+                },
+                {
+                  title: "预检通过列",
+                  key: "source",
+                  render: (_: unknown, row: PriceMappingRow, i: number) => {
+                    const others = priceMapping
+                      .filter((r, j) => j !== i && r.source.trim())
+                      .map((r) => r.source.trim());
+                    return (
+                      <Select
+                        style={{ width: "100%" }}
+                        value={row.source || undefined}
+                        placeholder="请选择"
+                        status={!row.source.trim() ? "error" : undefined}
+                        onChange={(v) =>
+                          setPriceMapping((prev) =>
+                            prev.map((r, j) => (j === i ? { ...r, source: v ?? "" } : r)),
+                          )
+                        }
+                        options={priceSourceOptions(props.priceSourceColumns ?? []).map((name) => ({
+                          label: name,
+                          value: name,
+                          //: 来源列也不许重复映射。
+                          disabled: others.includes(name),
+                        }))}
+                      />
+                    );
+                  },
+                },
+                {
+                  title: "操作",
+                  key: "op",
+                  width: 110,
+                  render: (_: unknown, __: PriceMappingRow, i: number) => (
+                    <Space size={0}>
+                      <Button
+                        size="small"
+                        type="link"
+                        danger
+                        icon={<DeleteOutlined />}
+                        onClick={() => setPriceMapping((prev) => prev.filter((_, j) => j !== i))}
+                      />
+                      {i === priceMapping.length - 1 && (
+                        <Tooltip title="添加一行映射">
+                          <Button
+                            size="small"
+                            type="link"
+                            icon={<PlusOutlined />}
+                            //: 用户口径「**不限制条数**」⇒ 无上限，随时可加。
+                            //: 用户口径：**添加的行应为空，不设置默认值**（两列都空）。
+                            onClick={() =>
+                              setPriceMapping((prev) => [...prev, { target: "", source: "" }])
+                            }
+                          />
+                        </Tooltip>
+                      )}
+                    </Space>
+                  ),
+                },
+              ]}
+            />
+            {/* 用户口径：多条问题「**放一行提示**」⇒ 单行、不换行堆叠。 */}
+            {validatePriceMapping(priceMapping).map((msg) => (
+              <div key={msg} style={{ marginTop: 4 }}>
+                <Text type="danger" style={{ fontSize: 12 }}>
+                  {msg}
+                </Text>
+              </div>
+            ))}
+          </div>
+
+          {/* ══════════ 区域三：其它规则 ══════════ */}
+          <div className="import-section">
+            <div className="import-section-title">其它规则</div>
+            <Space align="center" size={8} wrap>
+              {/* ⚠️ 用户口径 2026-10-11 最终版：「其它规则中应是**市场价**为原价的
+                  1.7 倍支持调整，**不是售价**」⇒ 倍率作用在**市场价**上。 */}
+              <Text>市场价计算规则：</Text>
+              <Text type="secondary">
+                「{priceMapping.find((r) => r.target === "market_price")?.source || "原价"}」×
+              </Text>
+              <InputNumber
+                min={PRICE_MULTIPLIER_MIN}
+                max={PRICE_MULTIPLIER_MAX}
+                step={0.1}
+                precision={2}
+                value={priceMultiplier}
+                onChange={(value) => setPriceMultiplier(clampPriceMultiplier(value))}
+                style={{ width: 90 }}
+              />
+              <Button size="small" type="link" onClick={() => setPriceMultiplier(DEFAULT_PRICE_MULTIPLIER)}>
+                恢复默认 {DEFAULT_PRICE_MULTIPLIER}
+              </Button>
+            </Space>
+            <div style={{ marginTop: 4 }}>
+              <Space align="center" size={8} wrap>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  取不到时回落列：
+                </Text>
+                <Select
+                  size="small"
+                  style={{ width: 160 }}
+                  value={priceFallbackSource || undefined}
+                  placeholder="不回落"
+                  allowClear
+                  onChange={(v) => setPriceFallbackSource(v ?? "")}
+                  options={priceSourceOptions(props.priceSourceColumns ?? []).map((name) => ({
+                    label: name,
+                    value: name,
+                  }))}
+                />
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  回落值不乘倍率
+                </Text>
+              </Space>
+            </div>
+          </div>
+
+          {importDetail && (
+            <Alert
+              style={{ marginTop: 12 }}
+              type={importDetail.includes("失败") ? "warning" : "success"}
+              showIcon
+              message={importDetail}
+            />
+          )}
+          </Spin>
+        </Modal>
+
         {specTypes.map((name, gi) => (
           <div className="child-block spec-config" key={name}>
             <div className="child-block-title">
@@ -2687,7 +3364,12 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
                     const img = specImages[name]?.[String(v ?? "").trim()];
                     //: ⚠️ 用户口径（2026-10-10 纠正）：可用性由**规格图开关**决定（不再硬编码第一组）。
                     const canImage = specImageEnabled[name] ?? gi === 0;
-                    const prefix =
+                    //: ⚠️⚠️ **不再作为 `prefix` 传入**（用户实测 2026-10-11：「输入框文本过多
+                    //: 向右滚会把规格图挤掉，回到最左也无法展示」）。根因：`ant-input-prefix`
+                    //: 是**输入框内部**的 span，随文本一起横向滚动 ⇒ 图被挤走。
+                    //: 现改为**输入框的兄弟节点**（`.spec-value-item` 里 thumb + input 并排）
+                    //: ⇒ 图固定在框外左侧，与文本滚动完全无关。
+                    const thumb =
                       canImage && img ? (
                       <img
                         className="spec-value-thumb"
@@ -2717,52 +3399,64 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
                   //:  `kind=select` + 非 customizable → Select（只能选不能输）；
                   //:  其它（text / multi / 未下发）→ 保持纯 Input。
                   //: ⚠️ 规格图逻辑**不变**（前缀仍只挂第一组、一值一行）。
+                  //: ⚠️⚠️ 三种形态（AutoComplete / Select / Input）统一用
+                  //: **`.spec-value-item` 包裹**：`{规格图}{输入控件}` 并排，图在**框外**。
+                  //: 用户实测（2026-10-11）：「规格输入框文本过多时向右走会将规格图挤掉，
+                  //: 再回到最左侧时规格图也无法展示」—— 根因是图当时挂在 `prefix`（输入框
+                  //: **内部**的 span），随文本一起横向滚动。抽成兄弟节点后与滚动无关。
                   if (meta?.kind === "select" && meta.values?.length) {
                     const options = (meta.options ?? []).map((o) => ({ value: o }));
-                    return meta.customizable ? (
-                      <AutoComplete
-                        key={vi}
-                        className="spec-value-input"
-                        value={v || undefined}
-                        options={options}
-                        placeholder="请选择或输入规格值"
-                        filterOption={(input, opt) =>
-                          (opt?.value ?? "").toLowerCase().includes(input.toLowerCase())
-                        }
-                        onChange={(val) => setSpecValueAt(name, vi, val)}
-                        onSelect={(val) => setSpecValueAt(name, vi, val)}
-                      >
-                        <Input
-                          value={v}
-                          maxLength={SPEC_VALUE_LEN_MAX}
-                          prefix={prefix}
-                          onPressEnter={() => commitSpecValue(name, vi)}
-                        />
-                      </AutoComplete>
-                    ) : (
-                      <Select
-                        key={vi}
-                        className="spec-value-input spec-value-select"
-                        value={v || undefined}
-                        options={options}
-                        placeholder="请选择规格值"
-                        showSearch
-                        optionFilterProp="label"
-                        onChange={(val) => setSpecValueAt(name, vi, val)}
-                      />
+                    return (
+                      <span className="spec-value-item" key={vi}>
+                        {thumb}
+                        {meta.customizable ? (
+                          <AutoComplete
+                            className="spec-value-input"
+                            value={v || undefined}
+                            options={options}
+                            placeholder="请选择或输入规格值"
+                            filterOption={(input, opt) =>
+                              (opt?.value ?? "").toLowerCase().includes(input.toLowerCase())
+                            }
+                            onChange={(val) => setSpecValueAt(name, vi, val)}
+                            onSelect={(val) => setSpecValueAt(name, vi, val)}
+                          >
+                            <Input
+                              value={v}
+                              maxLength={SPEC_VALUE_LEN_MAX}
+                              title={v || undefined}
+                              onPressEnter={() => commitSpecValue(name, vi)}
+                            />
+                          </AutoComplete>
+                        ) : (
+                          <Select
+                            className="spec-value-input spec-value-select"
+                            value={v || undefined}
+                            options={options}
+                            placeholder="请选择规格值"
+                            showSearch
+                            optionFilterProp="label"
+                            onChange={(val) => setSpecValueAt(name, vi, val)}
+                          />
+                        )}
+                      </span>
                     );
                   }
                   return (
-                    <Input
-                      key={vi}
-                      className="spec-value-input"
-                      value={v}
-                      maxLength={SPEC_VALUE_LEN_MAX}
-                      placeholder="请选择或输入规格值"
-                      prefix={prefix}
-                      onChange={(e) => setSpecValueAt(name, vi, e.target.value)}
-                      onPressEnter={() => commitSpecValue(name, vi)}
-                    />
+                    <span className="spec-value-item" key={vi}>
+                      {thumb}
+                      <Input
+                        className="spec-value-input"
+                        value={v}
+                        maxLength={SPEC_VALUE_LEN_MAX}
+                        placeholder="请选择或输入规格值"
+                        //: ⚠️ 宽度固定 200px（用户口径）⇒ 长规格值显示不下。
+                        //: 给 `title` 让用户**悬停看全文**（不靠加宽输入框解决）。
+                        title={v || undefined}
+                        onChange={(e) => setSpecValueAt(name, vi, e.target.value)}
+                        onPressEnter={() => commitSpecValue(name, vi)}
+                      />
+                    </span>
                   );
                 })}
               </div>
@@ -2830,7 +3524,10 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
             pagination={false}
             dataSource={filteredPriceRows}
             rowClassName={(row: PriceRow) => (row.available === false ? "price-row-disabled" : "")}
-            scroll={{ x: "max-content" }}
+            //: 用户口径 2026-10-11：「最高 400px，低于 400 自适应，高于 400 实现上下滚动」。
+            //: ⚠️ 用 antd 原生 `scroll.y` 而不是外裹 div 的 max-height：
+            //:   原生滚动会把**表头钉在顶部**（外裹 div 会把表头一起滚走，用户就看不到列名了）。
+            scroll={{ x: "max-content", y: 400 }}
             columns={[
               {
                 title: "规格图",

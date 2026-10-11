@@ -269,6 +269,65 @@ def test_publish_success_takes_down_immediately(monkeypatch):
     assert result["item_id"] == "ITEM-NEW"
 
 
+def test_off_shelf_after_flag_really_controls_the_off_shelf_call(monkeypatch):
+    """**`off_shelf_after=False` 必须真的不调下架接口**（2026-10-11 用户取消红线后新增）。
+
+    ⚠️ 这条此前**零覆盖** —— 整仓只有「失败不下架」的用例，没有「成功 + 明确要求
+       不下架」的用例。用户实测点「发布商品」时看到的行为仍像旧版（上架后立刻下架），
+       排查时只能靠临时探针手测；这条把这个判据固化下来。
+
+    判据（**数下架接口的调用次数**，不是看返回值 —— 返回值可以被别的分支写成 False）：
+      · `off_shelf_after=False` ⇒ `set_items_availability` 调用 **0** 次；
+      · `off_shelf_after=True`  ⇒ 调用 **1** 次。
+    """
+
+    class _FakeApi:
+        def __init__(self) -> None:
+            self.off_calls = 0
+
+        def submit_item(self, body):  # noqa: ARG002
+            return True, "ok", {"data": {"taskId": "T1"}}
+
+        def set_items_availability(self, ids, available=True):  # noqa: ARG002
+            self.off_calls += 1
+            return True, "ok", {"data": {"taskId": "T2"}}
+
+        def publish_render(self, *a, **k):  # noqa: ARG002
+            return False, "x", None
+
+        def get_seller_carriage_template(self):
+            return False, "x", None
+
+    from backend.app.services import shop_item_publish_service as svc
+
+    monkeypatch.setattr(svc, "load_item_skeleton", lambda *a, **k: {"itemId": "S1"})
+    monkeypatch.setattr(svc, "build_item_from_request", lambda **k: {"skuData": []})
+    monkeypatch.setattr(svc.pub, "build_publish_payload", lambda x: {"itemData": x})
+    #: 发布成功 + 拿到一个 itemId（下架分支的必要输入）。
+    monkeypatch.setattr(svc, "_poll_task", lambda *a, **k: (True, [], ["ITEM-1"]))
+
+    #: ① 发布商品（不下架）⇒ 一次都别调。
+    api_no = _FakeApi()
+    res_no = svc.publish_item(
+        api=api_no, name="T", category_id="C1", uploaded={},
+        main_image_paths=[], detail_image_paths=[], skus=[], variant_ids=[],
+        off_shelf_after=False,
+    )
+    assert api_no.off_calls == 0, "要求不下架却仍调用了下架接口（红线已取消，这是纯 bug）"
+    assert res_no["off_shelf"] is False, "不下架时 `off_shelf` 应为 False"
+    assert res_no["published"] is True, "`off_shelf=False` 不影响发布成功"
+
+    #: ② 发布并下架 ⇒ 调一次（守住老路径没被改坏）。
+    api_yes = _FakeApi()
+    res_yes = svc.publish_item(
+        api=api_yes, name="T", category_id="C1", uploaded={},
+        main_image_paths=[], detail_image_paths=[], skus=[], variant_ids=[],
+        off_shelf_after=True,
+    )
+    assert api_yes.off_calls == 1, "要求下架却没调下架接口"
+    assert res_yes["off_shelf"] is True, "下架成功时 `off_shelf` 应为 True"
+
+
 def test_publish_failure_does_not_off_shelf(monkeypatch):
     """发布失败 ⇒ **不下架**（没有商品可下架）+ 逐条报失败原因，不静默。"""
     monkeypatch.setattr(svc, "_PUBLISH_POLL_INTERVAL", 0)

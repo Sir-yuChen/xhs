@@ -3121,9 +3121,20 @@ class ItemPublishRequest(BaseModel):
     """**提交商品 → 发布到线上**（设计 24 §3.1）。
 
     ⚠️ 与 `ItemDraftCreateRequest` **相反**：本模型**必然产生一个在售商品**
-    （除非发布失败）。用户 2026-10-08 红线：**发布成功第一时间下架** ——
-    `off_shelf_after` 默认 `True`，是**唯一默认值得以保住红线**的写法：
-    调用方不显式关掉，就一定会下架。
+    （除非发布失败 / 或调用方选择发布后下架）。
+
+    ## `off_shelf_after` 的口径变更（2026-10-11，**用户明确取消红线**）
+
+    原口径（2026-10-08~2026-10-11）：**发布成功第一时间下架** 是红线，
+    `off_shelf_after` 默认 `True` 且前端**不得**传 `False`（那是测试钩子）。
+
+    新口径（用户 2026-10-11）：**红线取消** —— 提交按钮拆成两个业务动作：
+      · 「发布商品」       = 直接上架，**发布后不再下架** ⇒ 传 `off_shelf_after=False`
+      · 「发布并下架商品」 = 发布成功后立刻下架          ⇒ 传 `off_shelf_after=True`
+
+    ⚠️ **默认值仍保留 `True`**（刻意不改）：这样任何漏传的调用方（旧前端、脚本、
+       测试）拿到的仍是「立刻下架」这个更保守的行为 —— 拆按钮不该顺带把
+       「默认安全」也拆掉。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -3142,7 +3153,12 @@ class ItemPublishRequest(BaseModel):
     #: 本店任一既有商品的 id（取发布体骨架）；空 ⇒ 自动取最近创建的在售商品。
     skeleton_item_id: str = Field(default="", max_length=64)
     #: ⚠️ **红线开关**：默认 True（发布成功立刻下架）。生产路径不得传 False。
-    off_shelf_after: bool = Field(default=True, description="发布成功后是否立即下架（红线，默认开）")
+    #: 发布成功后是否立即下架。**默认 True**（保守：不传就下架）。
+    #: ⚠️ 2026-10-11 起红线取消，`False` 是**正式业务值**（「发布商品」按钮），
+    #: 不再是「仅测试用」的钩子 —— 见类 docstring 的口径变更说明。
+    off_shelf_after: bool = Field(
+        default=True, description="发布成功后是否立即下架（默认 True；False = 发布后保持在售）"
+    )
 
     #: 第一步「数据包预检」的暂存 token（设计 25 §6）。
     #:
@@ -3372,6 +3388,24 @@ def publish_item_to_online(
             for v in payload.videos
         ] if payload.videos else None
 
+        #: ⚠️ **全链路详细日志**（2026-10-11）：真机排查「点发布商品却仍被下架」时，
+        #: 每一步都留痕，就不必再靠猜（也不必挂调试端口抓包）。
+        #: ⚠️ 必须用 **WARNING** 级：uvicorn 默认的 log config 不给应用 logger 开 INFO
+        #: （实测前一版写的 `logger.info` **根本没落盘** —— .hermes/logs/app.log 里
+        #:   grep `off_shelf_after` 命中 0 行，白费一轮真机）。
+        logger.warning(
+            "[items/publish] ① 进入端点 | off_shelf_after=%r | account=%s | category=%s | "
+            "name=%r | skus=%d | main=%d | detail=%d | videos=%d | precheck_token=%r",
+            payload.off_shelf_after,
+            payload.platform_account_id,
+            payload.category_id,
+            payload.name[:40],
+            len(payload.skus or []),
+            len(payload.main_images or []),
+            len(payload.detail_images or []),
+            len(payload.videos or []),
+            payload.precheck_token[:16],
+        )
         result = publish_svc.publish_item(
             api=adapter,
             name=payload.name,
@@ -3394,6 +3428,23 @@ def publish_item_to_online(
             #: 物流运费模板）一并透传，此前**只接了 attributes/specAttributes 两个**。
             config=payload.config,
         )
+        #: ③ 发布结果（含 `off_shelf` —— **这是后端认为的最终状态**，与用户看到的一致吗？）
+        logger.warning(
+            "[items/publish] ③ publish_item 返回 | published=%s | item_id=%r | off_shelf=%s | "
+            "fail_reasons=%d | 期望下架=%r",
+            result.get("published"),
+            result.get("item_id"),
+            result.get("off_shelf"),
+            len(result.get("fail_reasons") or []),
+            payload.off_shelf_after,
+        )
+        #: ⚠️ **一致性自检**：用户要「不下架」时 `off_shelf` 必须是 False。
+        #: 若这里打 True（或反过来），日志一眼就能看出是「服务层没遵守开关」。
+        if not payload.off_shelf_after and result.get("off_shelf"):
+            logger.warning(
+                "[items/publish] ⚠️⚠️ 异常：用户要求保持在售（off_shelf_after=False），"
+                "但返回值 off_shelf=True —— 服务层没遵守开关！"
+            )
     except publish_svc.PublishError as error:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -5702,4 +5753,305 @@ def picture_space_upload(
         "size": len(raw),
         "extension": Path(file_name).suffix,
         "success": True,
+    }
+
+
+#: ⚠️ **平台单次 `upload/web/permit` 的 fileId 上限**（2026-10-11 真机实测）：
+#: `file_count=10 → 10` / `20 → 14` / `38 → 14` / `50 → 14`。超过就只给 14 个。
+#: ⇒ 批量上传必须**分批申请**（每批 ≤ 本值）才能拿齐 N 个 fileId。
+_PERMIT_BATCH = 14
+
+#: 每批凭证的 `uploadAddr`/`token` —— 一个 fileId 只能用**它那批**的凭证上传
+#: （不同批是不同凭证，跨批用会 401）。键是 fileId。
+_PERMIT_CRED: dict[str, tuple[str, str]] = {}
+
+
+class PictureSpaceUploadBatchRequest(BaseModel):
+    """**批量**上传本地图片（方案 B：一次 permit + 服务端并发 PUT）。
+
+    用户口径（2026-10-11）：自动加载参数的详情图 / 主图，以及「从预检 SKU 导入」
+    的规格图，都要并发上传；**并发数默认 5、可在 config 表配置**
+    （`xhs_image_upload_parallelism`）。
+
+    ⚠️ **为什么可以并发（不触发风控）**：上传是两段式 ——
+      ① `upload/web/permit` 打**小红书**（低频：**整批只申请一次**，N 个 fileId 一次拿齐）；
+      ② PUT 字节打 **ROS/COS 对象存储**（`https://<uploadAddr>/<fileId>`，**不是小红书域名**）。
+    单张 ~2.5s 的耗时基本全在 ②（传 100~230KB）⇒ 并发第二节**不产生任何平台请求**。
+    平台侧证据：笔记发布链路 `note_publish_service._upload_media` 早已用
+    `upload_web_permit(len(downloaded))` 一次批量申请 —— 说明「一次请求换 N 个上传位」
+    正是平台自身的用法。
+    """
+
+    platform_account_id: int = Field(ge=1)
+    #: 每个元素 = `{file_name, content_base64}`；`file_name` 留空则按内容 MD5 生成。
+    files: list[dict[str, Any]] = Field(min_length=1, max_length=_DRAFT_MAX_IMAGES)
+    father_directory_id: str = Field(default="0", max_length=64)
+    #: 覆盖配置的并发数（缺省 0 = 读 `xhs_image_upload_parallelism`）。
+    concurrency: int = Field(default=0, ge=0, le=32)
+
+
+@router.post("/picture-space/upload-batch")
+def picture_space_upload_batch(
+    payload: PictureSpaceUploadBatchRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    adapter_factory: Any = Depends(get_qianfan_api_adapter_factory),
+):
+    """**批量并发上传**（方案 B）—— 与单文件端点同契约，逐项返回。
+
+    ⚠️ **顺序稳定性**：返回的 `results[]` **与请求 `files[]` 逐位对齐**（前端要按下标
+       回填主图/详情图/规格图），因此**不**用 `as_completed` 的完成顺序。
+    ⚠️ **单项失败不整批失败**：每项独立带 `success` + `message`（前端逐项提示、
+       失败的图不阻断其余），与单文件端点的错误语义一致。
+
+    设计 24 §22。
+    """
+    import base64
+    import hashlib
+    import io
+    import tempfile
+    from concurrent.futures import ThreadPoolExecutor
+    from pathlib import Path
+
+    from backend.app.services import picture_space_service as ps
+    from backend.app.services import settings_service as settings_svc
+
+    account = _owned_account(db, current_user, payload.platform_account_id)
+
+    #: 并发数：显式覆盖 > 运行时配置 > 内置默认 5（`BUILTIN_DEFAULTS`）。
+    #: ⚠️ 用 `live_int`（**不是** `get_int`）—— 它是 settings_service 的运行时读点，
+    #: 带「写后立即失效」缓存；`get_int` 不存在（实测 AttributeError）。
+    concurrency = payload.concurrency or settings_svc.live_int(
+        db, current_user.id, "xhs_image_upload_parallelism", default=5
+    )
+    concurrency = max(1, min(32, concurrency))
+
+    #: 先解码 + 定名（CPU 侧，很快；放主线程便于**先行失败**给出确定原因）。
+    prepared: list[dict[str, Any]] = []
+    for index, item in enumerate(payload.files):
+        raw = b""
+        name = str(item.get("file_name") or "").strip()
+        try:
+            raw = base64.b64decode(str(item.get("content_base64") or ""), validate=True)
+        except Exception as exc:  # noqa: BLE001
+            prepared.append({"index": index, "error": f"内容不是合法 base64：{exc}"})
+            continue
+        if not raw:
+            prepared.append({"index": index, "error": "文件内容为空"})
+            continue
+        if not name:
+            ext = ".png" if raw[:4] == b"\x89PNG" else ".jpg"
+            name = f"{hashlib.md5(raw).hexdigest()}{ext}"
+        prepared.append({"index": index, "raw": raw, "file_name": name})
+
+    adapter = _ark_adapter_for(db, account, adapter_factory)
+
+    #: ① **先把凭证一次拿齐，再并发上传**（用户口径 2026-10-11）。
+    #:
+    #: ⚠️⚠️ **平台单次最多预分配 14 个 fileId**（2026-10-11 真机实测）：
+    #:   `file_count=10 → 10` / `20 → 14` / `38 → 14` / `50 → 14`（封顶 14）。
+    #:   旧实现只申请**一次**就开工 ⇒ 38 张里只有 14 张能传，
+    #:   剩下 24 张全部落「上传凭证数量不足」（= 用户实测的 14/38）。
+    #:   ⚠️ 笔记发布链路（`note_publish_service._upload_media`）也是单次申请，
+    #:   它没暴露是因为笔记媒体 ≤10 张，从没超过 14。
+    #: ⇒ 修法：**分批申请直到拿齐**（每批 ≤ `_PERMIT_BATCH`），把 fileId 攒齐再并发下载/上传。
+    needed = len(prepared)
+    file_ids: list[str] = []
+    upload_addr = ""
+    token = ""
+    #: 分批申请的上限保护：别因平台异常返回 0 个而无限循环。
+    for _round in range(0, (needed // _PERMIT_BATCH) + 3):
+        if len(file_ids) >= needed:
+            break
+        want = min(_PERMIT_BATCH, needed - len(file_ids))
+        ok, msg, permit_raw = adapter.upload_web_permit(
+            want,
+            biz_name="ark",
+            scene="goods_image",
+            referer="/app-system/pictureSpace",
+        )
+        if not ok or not isinstance(permit_raw, dict):
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail={"code": "MATERIAL_UPLOAD_FAILED", "message": msg or "申请上传凭证失败"},
+            )
+        permits = (permit_raw.get("data") or {}).get("uploadTempPermits") or []
+        if not permits:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail={"code": "MATERIAL_UPLOAD_FAILED", "message": "平台没有返回上传凭证"},
+            )
+        #: 平台前端按 `qos` 降序取第一个（真机 bundle `sort((a,b)=>b.qos-a.qos)[0]`）。
+        permit = sorted(permits, key=lambda x: x.get("qos") or 0, reverse=True)[0]
+        got = [str(x) for x in (permit.get("fileIds") or [])]
+        #: ⚠️ 每一轮的 `uploadAddr` / `token` **可能不同**（不同批次是不同凭证）——
+        #: 但一个 fileId 只能用**它那批的** addr/token 上传，所以按批留存映射。
+        for one_fid in got:
+            file_ids.append(one_fid)
+            _PERMIT_CRED[one_fid] = (str(permit.get("uploadAddr") or ""), str(permit.get("token") or ""))
+        #: 记下首批的 addr/token（兼容旧路径；实际上传按上面的映射取）。
+        if not upload_addr:
+            upload_addr = str(permit.get("uploadAddr") or "")
+            token = str(permit.get("token") or "")
+        if not got:
+            #: 平台给了空批次 ⇒ 再要也是空，直接停（避免死循环）。
+            break
+    if len(file_ids) < needed:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={
+                "code": "MATERIAL_UPLOAD_FAILED",
+                "message": (
+                    f"上传凭证不足（需要 {needed} 个，平台只预分配了 {len(file_ids)} 个）"
+                ),
+            },
+        )
+
+    results: list[dict[str, Any]] = [{} for _ in payload.files]
+
+    def _one(slot: int, slot_index: int) -> None:
+        """上传单张（**线程内**）：PUT 字节 + 登记 + 读回材料。"""
+        entry = prepared[slot]
+        index = int(entry["index"])
+        if entry.get("error"):
+            results[index] = {"index": index, "success": False, "message": entry["error"]}
+            return
+        raw = entry["raw"]
+        file_name = str(entry["file_name"])
+        if slot_index >= len(file_ids):
+            results[index] = {
+                "index": index,
+                "success": False,
+                "message": "上传凭证数量不足（平台预分配的 fileId 比文件少）",
+            }
+            return
+        file_id = file_ids[slot_index]
+        tmp_dir = Path(tempfile.mkdtemp(prefix="ps-batch-"))
+        tmp_path = tmp_dir / Path(file_name).name
+        try:
+            tmp_path.write_bytes(raw)
+            #: 单张重试一次（ROS 偶发 SSL EOF / 连接重置，与笔记链路同口径）。
+            ok2, msg2, put_meta = False, "", None
+            #: ⚠️ 用**这个 fileId 自己那批**的 addr/token（分批申请后它们不再相同）。
+            _addr, _tok = _PERMIT_CRED.get(file_id, (upload_addr, token))
+            for _attempt in range(2):
+                ok2, msg2, put_meta = adapter.upload_file(
+                    upload_addr=_addr, file_id=file_id, token=_tok, file_path=str(tmp_path)
+                )
+                if ok2:
+                    break
+            if not ok2:
+                results[index] = {"index": index, "success": False, "message": msg2}
+                return
+            preview_url = (
+                (put_meta or {}).get("preview_url", "") if isinstance(put_meta, dict) else ""
+            )
+            width = height = None
+            try:
+                from PIL import Image
+
+                with Image.open(io.BytesIO(raw)) as img:
+                    width, height = img.size
+            except Exception:  # noqa: BLE001 —— 非图片/读不出按缺值走（不造假）
+                pass
+            reg_item = ps.build_upload_item(
+                account.seller_id or "",
+                file_id=file_id,
+                file_name=file_name,
+                size=len(raw),
+                width=width,
+                height=height,
+                preview_url=preview_url,
+                father_directory_id=payload.father_directory_id,
+            )
+            ok3, msg3, raw_resp = adapter.register_material_files(
+                account.seller_id or "", [reg_item]
+            )
+            if not ok3:
+                results[index] = {"index": index, "success": False, "message": msg3}
+                return
+            from backend.app.services import shop_draft_service as draft_svc
+
+            material_id = draft_svc._registered_material_id(raw_resp) or file_id
+            record = draft_svc._fetch_material_record(
+                adapter, name=str(reg_item.get("name") or ""), material_id=material_id
+            )
+            path_value = str(
+                record.get("path")
+                or (reg_item.get("additionalData") or {}).get("path")
+                or file_id
+            )
+            link_value = str(
+                record.get("link")
+                or (reg_item.get("additionalData") or {}).get("link")
+                or f"https://qimg.xiaohongshu.com/{path_value}"
+            )
+            fallback_url = ""
+            if not preview_url and file_id:
+                fallback_url = f"https://qimg.xiaohongshu.com/arkgoods/{file_id}"
+            results[index] = {
+                "index": index,
+                "platform_account_id": account.id,
+                "file_name": file_name,
+                "search_name": Path(file_name).stem,
+                "url": preview_url or fallback_url,
+                "materialId": material_id,
+                "path": path_value,
+                "link": link_value,
+                "file_id": file_id,
+                "width": width,
+                "height": height,
+                "size": len(raw),
+                "extension": Path(file_name).suffix,
+                "success": True,
+            }
+        except Exception as exc:  # noqa: BLE001 —— 单张异常不拖垮整批
+            results[index] = {"index": index, "success": False, "message": f"{type(exc).__name__}: {exc}"}
+        finally:
+            try:
+                tmp_path.unlink(missing_ok=True)
+                tmp_dir.rmdir()
+            except OSError:
+                pass
+
+    #: 只对**已解码**的项并发（解码失败的项直接落结果，不占线程）。
+    slots = [i for i, e in enumerate(prepared) if "raw" in e]
+    if slots:
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            for n, slot in enumerate(slots):
+                pool.submit(_one, slot, n)
+
+    #: ⚠️ **兜底**：解码失败的项不在 `slots` 里 ⇒ `_one` 从没被调用 ⇒ 它的
+    #: `results[index]` 还是空 `{}`（**缺 `success` 键**）。前端按 `results[].success`
+    #: 判成功/失败 ⇒ 空对象既不是成功也不是失败，会被当成「静默成功」放过去。
+    #: 这里统一补齐（用例实测抓出：坏 base64 那项 `results[0]` 没有 `success` 字段）。
+    for slot, entry in enumerate(prepared):
+        if "raw" in entry:
+            continue
+        index = int(entry["index"])
+        results[index] = {
+            "index": index,
+            "success": False,
+            "message": str(entry.get("error") or "该项无法解码"),
+        }
+    #: 再兜一层：任何仍未填的槽位（理论不可达）也要有确定判据，不留空对象。
+    for index, item in enumerate(results):
+        if not item:
+            results[index] = {
+                "index": index,
+                "success": False,
+                "message": "未知原因（未处理）",
+            }
+
+    #: 用完即清（凭证映射只为本次批量服务，常驻会一直涨）。
+    for _fid in file_ids:
+        _PERMIT_CRED.pop(_fid, None)
+
+    return {
+        "platform_account_id": account.id,
+        "concurrency": concurrency,
+        "total": len(payload.files),
+        "succeeded": sum(1 for r in results if r.get("success")),
+        "failed": sum(1 for r in results if not r.get("success")),
+        "results": results,
     }

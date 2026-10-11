@@ -42,6 +42,13 @@ _DROP_FROM_SKELETON: frozenset[str] = frozenset({
     "unionType",
     "allowancePlan",
     "brandId",
+    #: ⚠️ `isAutoOffShelf` / `autoOffShelfTime` / `expectedPurchaseTime` 三键**仍然剥掉**。
+    #:
+    #: 2026-10-11 我曾一度认为「剥掉这三键 ⇒ 商品生下来不可售」，**该假设已被真机抓包推翻**：
+    #:  真机平台自己提交 `batch_create_item` 时，发布体 28 个顶层键里**也没有这三个**
+    #:  （抓包实证 + 提交后平台**不再调任何上架接口**）。
+    #:  且平台商品创建后本就进**审核**，审核通过前 `buyable=False` —— 这是平台设计。
+    #:  ⇒ 剥不剥都不影响上架；保留剥掉（贴近真机形态），避免引入平台不认的键。
     "isAutoOffShelf",
     "autoOffShelfTime",
     "expectedPurchaseTime",

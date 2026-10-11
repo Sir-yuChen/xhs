@@ -9,7 +9,40 @@ import {
   applyBatchRuleToTable,
   buildPublishPayloadFromPrecheck,
   countFilledInColumn,
+  DEFAULT_SKU_IMAGE_PATTERN,
+  localSkuImageList,
+  matchSkuImageName,
+  lookupLocalSkuImage,
   mergePanelTable,
+  onlineImageColumnIndex,
+  passedSkuSpecs,
+  parseSkuName,
+  countUncheckedSkuMedia,
+  filterCheckedSkuMedia,
+  selectableSkuMedia,
+  buildSkuFillPlan,
+  defaultSpecMappingRows,
+  validateSpecMapping,
+  isSpecMappingReady,
+  mappingFromRows,
+  MAX_SPEC_MAPPING_ROWS,
+  DEFAULT_PRICE_MAPPING,
+  DEFAULT_PRICE_FALLBACK_SOURCE,
+  validatePriceMapping,
+  isPriceMappingReady,
+  sourceColumnIndex,
+  PRICE_TARGET_OPTIONS,
+  type PriceMappingRow,
+  passedSkuRows,
+  sourceSpecNames,
+  applyPriceMultiplier,
+  clampPriceMultiplier,
+  DEFAULT_PRICE_MULTIPLIER,
+  PRICE_MULTIPLIER_MAX,
+  type PassedSkuRow,
+  skuImageNameFromFile,
+  validateSkuImagePattern,
+  skuNameColumnIndex,
   skuTableIndices,
   priceColumnIndex,
   stockColumnIndex,
@@ -294,7 +327,11 @@ describe("表格·价格/库存批量修改（用户口径 2026-10-09）", () =>
     const out = applyBatchRuleToTable(t, 0, { mode: "delta", operand: 0 });
     expect(out.rows.map((r) => r[0])).toEqual(["10", "10.50"]);
     const half = applyBatchRuleToTable(t, 0, { mode: "scale", factor: 1.15, operand: 0 });
-    expect(half.rows.map((r) => r[0])).toEqual(["11.50", "12.07"]);  // 12.075 → toFixed(2) = 12.07
+    //: ⚠️ **口径已变**（用户 2026-10-11：「列值最终计算保留两位小数**四舍五入**」）：
+    //: 原断言为 `12.07` —— 那是 `toFixed(2)`（银行家/截断式）的结果。
+    //: 现按**四舍五入**：`10.5 × 1.15 = 12.075` ⇒ 进位 ⇒ **12.08**。
+    //: 旧值 `12.07` 保留在此注释中作口径变更标记（不静默删除）。
+    expect(half.rows.map((r) => r[0])).toEqual(["11.50", "12.08"]);  // 12.075 四舍五入 → 12.08
   });
 });
 
@@ -356,41 +393,1038 @@ describe("倍数模式的中间符号（用户口径 2026-10-09：可加可减�
 });
 
 describe("第二次批量修改无响应（用户实测 2026-10-09）", () => {
-  /** 完整数组：属性表（kv）夹在 SKU 表前后 —— 面板只显示 SKU 表。 */
+  /** 数据包里的全部表（属性图 OCR 已于 2026-10-11 移除 ⇒ 不再有「属性 KV 表」）。 */
   const full: PrecheckTable[] = [
-    { title: "属性", sheet_name: "属性", columns: ["名称", "值"], rows: [["品牌", "X"]],
-      kv: [{ key: "品牌", value: "X" }] },
     { title: "全部", sheet_name: "全部", columns: ["sku名称", "原价", "库存"],
       rows: [["A", "100", "10"], ["B", "200", "20"]] },
     { title: "赠品", sheet_name: "赠品", columns: ["sku名称", "库存"],
       rows: [["G", "5"]] },
   ];
 
-  it("skuTableIndices：排除属性表（kv）", () => {
-    expect(skuTableIndices(full)).toEqual([1, 2]);
+  it("skuTableIndices：数据包里的表**全部**都是 SKU 表", () => {
+    expect(skuTableIndices(full)).toEqual([0, 1]);
   });
 
-  it("mergePanelTable：改面板第 0 张 ⇒ 落在完整数组下标 1；**属性表不丢**", () => {
-    const changed = applyBatchRuleToTable(full[1], 2, { mode: "delta", operand: 1 });
+  it("mergePanelTable：改面板第 0 张 ⇒ 落在完整数组下标 0；别的表不丢", () => {
+    const changed = applyBatchRuleToTable(full[0], 2, { mode: "delta", operand: 1 });
     const merged = mergePanelTable(full, 0, changed);
-    expect(merged).toHaveLength(3);
-    expect(merged[0].kv).toHaveLength(1);          // 属性表还在（根因）
-    expect(merged[1].rows.map((r) => r[2])).toEqual(["11", "21"]);
-    expect(merged[2].rows.map((r) => r[1])).toEqual(["5"]); // 别的表没被碰
+    expect(merged).toHaveLength(2);
+    expect(merged[0].rows.map((r) => r[2])).toEqual(["11", "21"]);
+    expect(merged[1].rows.map((r) => r[1])).toEqual(["5"]); // 别的表没被碰
   });
 
   it("**连续两次**改同一列都能落上（第二次不再是空操作）", () => {
     let cur = full;
-    //: 第一次：面板下标 0（= 完整下标 1），库存 +10
-    cur = mergePanelTable(cur, 0, applyBatchRuleToTable(cur[1], 2, { mode: "delta", operand: 10 }));
-    //: 第二次：库存再 +10 —— 若面板上抛的是子集，这里属性表已丢、下标错位
-    cur = mergePanelTable(cur, 0, applyBatchRuleToTable(cur[1], 2, { mode: "delta", operand: 10 }));
-    expect(cur).toHaveLength(3);
-    expect(cur[1].rows.map((r) => r[2])).toEqual(["30", "40"]); // 10→30、20→40
-    expect(cur[0].kv).toHaveLength(1);
+    cur = mergePanelTable(cur, 0, applyBatchRuleToTable(cur[0], 2, { mode: "delta", operand: 10 }));
+    cur = mergePanelTable(cur, 0, applyBatchRuleToTable(cur[0], 2, { mode: "delta", operand: 10 }));
+    expect(cur).toHaveLength(2);
+    expect(cur[0].rows.map((r) => r[2])).toEqual(["30", "40"]); // 10→30、20→40
+    expect(cur[1].rows.map((r) => r[1])).toEqual(["5"]);
   });
 
   it("面板下标越界 ⇒ 原样返回（不误改、不丢）", () => {
-    expect(mergePanelTable(full, 9, full[1])).toEqual(full);
+    expect(mergePanelTable(full, 9, full[0])).toEqual(full);
+  });
+});
+
+
+/* ------------------------------------------------------------------ *
+ * 2026-10-11 发布商品优化轮（需求 2/3/5）
+ * 数据取自真实数据包 `C:\Users\admin\Desktop\商品ID_935947169189`
+ * ------------------------------------------------------------------ */
+
+describe("需求 2 · parseSkuName（首个冒号切「规格分类 / SKU 名称」）", () => {
+  it("半角冒号：真包首行", () => {
+    expect(parseSkuName("颜色分类:【中古风】实木三斗柜")).toEqual({
+      category: "颜色分类",
+      value: "【中古风】实木三斗柜",
+    });
+  });
+
+  it("全角冒号同样认（数据包里两种都出现过）", () => {
+    expect(parseSkuName("颜色分类：【中古风】实木六斗柜")).toEqual({
+      category: "颜色分类",
+      value: "【中古风】实木六斗柜",
+    });
+  });
+
+  it("**只切第一个**冒号：值里的后续冒号原样保留（不吞用户真实规格值）", () => {
+    expect(parseSkuName("尺寸:1m:加宽")).toEqual({ category: "尺寸", value: "1m:加宽" });
+  });
+
+  it("两个冒号共存时取**最靠前**的那个", () => {
+    expect(parseSkuName("颜色:全角：后半")).toEqual({ category: "颜色", value: "全角：后半" });
+  });
+
+  it("没有冒号 ⇒ 分类空、整串当值（不猜，不把首词当分类）", () => {
+    expect(parseSkuName("实木三斗柜")).toEqual({ category: "", value: "实木三斗柜" });
+  });
+
+  it("空值 / null / undefined ⇒ 双空", () => {
+    expect(parseSkuName("")).toEqual({ category: "", value: "" });
+    expect(parseSkuName(null)).toEqual({ category: "", value: "" });
+    expect(parseSkuName(undefined)).toEqual({ category: "", value: "" });
+  });
+});
+
+describe("需求 3 · 本地 SKU 图按名称对齐", () => {
+  it("skuImageNameFromFile：去 `SKU01_` + `(...)` 还原成 `分类:值`（真包）", () => {
+    expect(
+      skuImageNameFromFile("SKU01_颜色分类(【中古风】实木三斗柜).jpg"),
+    ).toBe("颜色分类:【中古风】实木三斗柜");
+    expect(
+      skuImageNameFromFile("SKU26_颜色分类(【中古风】两个伸缩桌+六斗柜+一字板梳妆台+一字板上柜+2个妆凳).jpg"),
+    ).toBe("颜色分类:【中古风】两个伸缩桌+六斗柜+一字板梳妆台+一字板上柜+2个妆凳");
+  });
+
+  it("真包 26 行 SKU 名 **全部**能在本地图里命中（26/26）", () => {
+    //: 真包 26 个 SKU 名（与 `SKU/` 目录 26 张图一一对应）
+    const skuNames = [
+      "颜色分类:【中古风】实木三斗柜",
+      "颜色分类:【中古风】伸缩桌+三斗柜梳妆台",
+      "颜色分类:【中古风】伸缩桌+三斗柜梳妆台+云朵妆镜",
+      "颜色分类:【中古风】伸缩桌+三斗柜梳妆台+妆凳",
+      "颜色分类:【中古风】伸缩桌+三斗柜梳妆台+云朵镜+妆凳",
+      "颜色分类:【中古风】伸缩桌+三斗柜梳妆台+一字板上柜",
+      "颜色分类:【中古风】伸缩桌+三斗柜梳妆台+云朵妆镜+一字板上柜",
+      "颜色分类:【中古风】伸缩桌+三斗柜梳妆台+妆凳+一字板上柜",
+      "颜色分类:【中古风】伸缩桌+三斗柜梳妆台+云朵镜+妆凳+一字板上柜",
+      "颜色分类:【中古风】两个伸缩桌+三斗柜梳妆台",
+      "颜色分类:【中古风】两个伸缩桌+三斗柜梳妆台+2个妆凳",
+      "颜色分类:【中古风】两个伸缩桌+三斗柜梳妆台+1个云朵妆镜+2个妆凳",
+      "颜色分类:【中古风】两个伸缩桌+三斗柜+一字板梳妆台+一字板上柜+2个妆凳",
+      "颜色分类:【中古风】实木六斗柜",
+      "颜色分类:【中古风】伸缩桌+六斗柜梳妆台",
+      "颜色分类:【中古风】伸缩桌+六斗柜梳妆台+云朵妆镜",
+      "颜色分类:【中古风】伸缩桌+六斗柜梳妆台+妆凳",
+      "颜色分类:【中古风】伸缩桌+六斗柜梳妆台+云朵妆镜+妆凳",
+      "颜色分类:【中古风】伸缩桌+六斗柜梳妆台+一字板上柜",
+      "颜色分类:【中古风】伸缩桌+六斗柜梳妆台+云朵妆镜+一字板上柜",
+      "颜色分类:【中古风】伸缩桌+六斗柜梳妆台+妆凳+一字板上柜",
+      "颜色分类:【中古风】伸缩桌+六斗柜梳妆台+云朵镜+妆凳+一字板上柜",
+      "颜色分类:【中古风】两个伸缩桌+六斗柜梳妆台",
+      "颜色分类:【中古风】两个伸缩桌+六斗柜梳妆台+2个妆凳",
+      "颜色分类:【中古风】两个伸缩桌+六斗柜梳妆台+1个云朵妆镜+2个妆凳",
+      "颜色分类:【中古风】两个伸缩桌+六斗柜+一字板梳妆台+一字板上柜+2个妆凳",
+    ];
+    const files = [
+      "SKU01_颜色分类(【中古风】实木三斗柜).jpg",
+      "SKU02_颜色分类(【中古风】伸缩桌+三斗柜梳妆台).jpg",
+      "SKU03_颜色分类(【中古风】伸缩桌+三斗柜梳妆台+云朵妆镜).jpg",
+      "SKU04_颜色分类(【中古风】伸缩桌+三斗柜梳妆台+妆凳).jpg",
+      "SKU05_颜色分类(【中古风】伸缩桌+三斗柜梳妆台+云朵镜+妆凳).jpg",
+      "SKU06_颜色分类(【中古风】伸缩桌+三斗柜梳妆台+一字板上柜).jpg",
+      "SKU07_颜色分类(【中古风】伸缩桌+三斗柜梳妆台+云朵妆镜+一字板上柜).jpg",
+      "SKU08_颜色分类(【中古风】伸缩桌+三斗柜梳妆台+妆凳+一字板上柜).jpg",
+      "SKU09_颜色分类(【中古风】伸缩桌+三斗柜梳妆台+云朵镜+妆凳+一字板上柜).jpg",
+      "SKU10_颜色分类(【中古风】两个伸缩桌+三斗柜梳妆台).jpg",
+      "SKU11_颜色分类(【中古风】两个伸缩桌+三斗柜梳妆台+2个妆凳).jpg",
+      "SKU12_颜色分类(【中古风】两个伸缩桌+三斗柜梳妆台+1个云朵妆镜+2个妆凳).jpg",
+      "SKU13_颜色分类(【中古风】两个伸缩桌+三斗柜+一字板梳妆台+一字板上柜+2个妆凳).jpg",
+      "SKU14_颜色分类(【中古风】实木六斗柜).jpg",
+      "SKU15_颜色分类(【中古风】伸缩桌+六斗柜梳妆台).jpg",
+      "SKU16_颜色分类(【中古风】伸缩桌+六斗柜梳妆台+云朵妆镜).jpg",
+      "SKU17_颜色分类(【中古风】伸缩桌+六斗柜梳妆台+妆凳).jpg",
+      "SKU18_颜色分类(【中古风】伸缩桌+六斗柜梳妆台+云朵妆镜+妆凳).jpg",
+      "SKU19_颜色分类(【中古风】伸缩桌+六斗柜梳妆台+一字板上柜).jpg",
+      "SKU20_颜色分类(【中古风】伸缩桌+六斗柜梳妆台+云朵妆镜+一字板上柜).jpg",
+      "SKU21_颜色分类(【中古风】伸缩桌+六斗柜梳妆台+妆凳+一字板上柜).jpg",
+      "SKU22_颜色分类(【中古风】伸缩桌+六斗柜梳妆台+云朵镜+妆凳+一字板上柜).jpg",
+      "SKU23_颜色分类(【中古风】两个伸缩桌+六斗柜梳妆台).jpg",
+      "SKU24_颜色分类(【中古风】两个伸缩桌+六斗柜梳妆台+2个妆凳).jpg",
+      "SKU25_颜色分类(【中古风】两个伸缩桌+六斗柜梳妆台+1个云朵妆镜+2个妆凳).jpg",
+      "SKU26_颜色分类(【中古风】两个伸缩桌+六斗柜+一字板梳妆台+一字板上柜+2个妆凳).jpg",
+    ];
+    const media = files.map((f, i) => ({
+      group: "sku",
+      index: i,
+      rel_path: `SKU/${f}`,
+      file_name: f,
+    })) as PrecheckMedia[];
+    const list = localSkuImageList(media);
+    const hit = skuNames.filter((n) => lookupLocalSkuImage(list, n) !== null);
+    expect(hit).toHaveLength(26);
+    expect(lookupLocalSkuImage(list, skuNames[0])).toBe("SKU/SKU01_颜色分类(【中古风】实木三斗柜).jpg");
+  });
+
+  it("对不上就是 `null`（**不按序号兜底**，静默配错图比不配更糟）", () => {
+    const list = localSkuImageList([
+      { group: "sku", index: 0, rel_path: "SKU/SKU01_颜色分类(甲).jpg", file_name: "SKU01_颜色分类(甲).jpg" },
+    ] as PrecheckMedia[]);
+    expect(lookupLocalSkuImage(list, "颜色分类:乙")).toBeNull();
+  });
+
+  it("只有 sku 组参与（主图/详情图不进本地图查表）", () => {
+    const list = localSkuImageList([
+      { group: "main", index: 0, rel_path: "主图/主图01.jpg", file_name: "主图01.jpg" },
+    ] as PrecheckMedia[]);
+    expect(list).toHaveLength(0);
+  });
+});
+
+describe("预检顺序红线 · 违规媒体不允许被匹配到（用户口径 2026-10-11）", () => {
+  const m = (
+    file: string,
+    ocr_ok: boolean | null,
+    has_forbidden: boolean,
+  ): PrecheckMedia => ({
+    group: "sku",
+    index: 0,
+    rel_path: `SKU/${file}`,
+    file_name: file,
+    ocr_ok,
+    has_forbidden,
+  });
+
+  it("**命中违规词的图被排除**（既不许选中、也不许被匹配到）", () => {
+    const out = selectableSkuMedia([
+      m("SKU01_颜色分类(甲).jpg", true, true), // 违规
+      m("SKU02_颜色分类(乙).jpg", true, false),
+    ]);
+    expect(out.map((x) => x.file_name)).toEqual(["SKU02_颜色分类(乙).jpg"]);
+  });
+
+  it("**未检测（`ocr_ok=null`）也被排除** —— 未检不许算通过（免检通道）", () => {
+    const out = selectableSkuMedia([
+      m("SKU01_颜色分类(甲).jpg", null, false),
+      m("SKU02_颜色分类(乙).jpg", true, false),
+    ]);
+    expect(out.map((x) => x.file_name)).toEqual(["SKU02_颜色分类(乙).jpg"]);
+  });
+
+  it("**违规图不参与名称匹配**（红线：不允许被匹配到）", () => {
+    const media = [
+      m("SKU01_颜色分类(甲).jpg", true, true), // 违规 —— 名字能对上但必须匹配不到
+      m("SKU02_颜色分类(乙).jpg", true, false),
+    ];
+    const list = localSkuImageList(selectableSkuMedia(media));
+    expect(lookupLocalSkuImage(list, "颜色分类:甲")).toBeNull();
+    expect(lookupLocalSkuImage(list, "颜色分类:乙")).toBe("SKU/SKU02_颜色分类(乙).jpg");
+  });
+
+  it("非 sku 组不参与（主图/详情图不进本地图匹配）", () => {
+    const out = selectableSkuMedia([
+      { group: "main", index: 0, rel_path: "主图/主图01.jpg", file_name: "主图01.jpg", ocr_ok: true, has_forbidden: false } as PrecheckMedia,
+    ]);
+    expect(localSkuImageList(out)).toHaveLength(0);
+  });
+});
+
+describe("需求 5 · 按命名规则精确对齐本地 SKU 图（用户口径 2026-10-11 最终版）", () => {
+  /** 真包 3 张（加载顺序 = SKU01, SKU02, SKU03）。 */
+  const media: PrecheckMedia[] = [
+    "SKU01_颜色分类(【中古风】实木三斗柜).jpg",
+    "SKU02_颜色分类(【中古风】伸缩桌+三斗柜梳妆台).jpg",
+    "SKU03_颜色分类(【中古风】伸缩桌+三斗柜梳妆台+云朵妆镜).jpg",
+  ].map((f, i) => ({
+    group: "sku",
+    index: i,
+    rel_path: `SKU/${f}`,
+    file_name: f,
+  })) as PrecheckMedia[];
+
+  const list = localSkuImageList(media);
+
+  it("⚠️ **命名规则解析**：`前缀+序号_规格分类(真实SKU名)` ⇒ `规格分类:真实SKU名`", () => {
+    //: 用户口径：「前缀固定加自增序号+「_」+规格分类+括号中是真实的 sku 名称」
+    expect(skuImageNameFromFile("SKU01_颜色分类(【中古风】实木三斗柜).jpg")).toBe(
+      "颜色分类:【中古风】实木三斗柜",
+    );
+    //: 序号扩展到两位 / 三位都要能剥掉（自增序号，不是固定长度）。
+    expect(skuImageNameFromFile("SKU26_颜色分类(甲).jpg")).toBe("颜色分类:甲");
+    expect(skuImageNameFromFile("SKU100_尺寸(1m).png")).toBe("尺寸:1m");
+  });
+
+  it("**完整名精确命中** ⇒ 返回该图", () => {
+    expect(lookupLocalSkuImage(list, "颜色分类:【中古风】实木三斗柜")).toBe(
+      "SKU/SKU01_颜色分类(【中古风】实木三斗柜).jpg",
+    );
+  });
+
+  it("⚠️ **不误配前缀重叠项**（精确对齐，不是取第一个前缀命中）", () => {
+    //: 查询 `...伸缩桌+三斗柜梳妆台` 是 SKU03 名的**前缀**。
+    //: 模糊匹配会因「前缀命中」返回 SKU02（顺序在前）——但那是**碰巧**；
+    //: 精确对齐必须返回**真正相等**的 SKU02（它的完整名就是该串），
+    //: 且**绝不能**返回 SKU03。
+    expect(lookupLocalSkuImage(list, "颜色分类:【中古风】伸缩桌+三斗柜梳妆台")).toBe(
+      "SKU/SKU02_颜色分类(【中古风】伸缩桌+三斗柜梳妆台).jpg",
+    );
+    //: 只给前缀（不带完整值）⇒ **不该**命中任何一条（精确才通过）。
+    expect(lookupLocalSkuImage(list, "颜色分类:【中古风】伸缩桌")).toBeNull();
+  });
+
+  it("文件名**不符合默认规则** ⇒ 抽取键为空 ⇒ 匹配不到（走手选入口）", () => {
+    //: 默认正则要求 `前缀序号_规格分类(真实名)` 这个形状；
+    //: `SKU01_甲.jpg` 没有括号 ⇒ 解析不出 ⇒ 该行判「未匹配到」。
+    //: ⚠️ 这正是「规则可配置」的意义：用户遇到这种包，改正则就能对上，
+    //:    而不是让代码去猜（猜 = 静默错配）。
+    const noSpec = localSkuImageList([
+      { group: "sku", index: 0, rel_path: "SKU/a.jpg", file_name: "SKU01_甲.jpg" },
+    ] as PrecheckMedia[]);
+    expect(noSpec[0].key).toBe("");
+    expect(lookupLocalSkuImage(noSpec, "颜色分类:甲")).toBeNull();
+  });
+
+  it("**换成正则就能对上**（同一份文件，规则不同结果不同）", () => {
+    const custom = "^\\s*SKU\\s*\\d+\\s*[_-]?\\s*(.+)$";
+    const withCustom = localSkuImageList(
+      [{ group: "sku", index: 0, rel_path: "SKU/a.jpg", file_name: "SKU01_甲.jpg" }] as PrecheckMedia[],
+      custom,
+    );
+    //: 这条正则只有 1 个组 ⇒ 键退化为组 1（`甲`），仍能与「规格值」对上。
+    expect(withCustom[0].key).toBe("甲");
+    expect(lookupLocalSkuImage(withCustom, "颜色分类:甲")).toBe("SKU/a.jpg");
+  });
+
+  it("对不上 ⇒ null（不猜、不按序号兜底）", () => {
+    expect(lookupLocalSkuImage(list, "颜色分类:完全不存在的东西")).toBeNull();
+  });
+
+  it("空查询 / 空列表 ⇒ null", () => {
+    expect(lookupLocalSkuImage(list, "")).toBeNull();
+    expect(lookupLocalSkuImage([], "颜色分类:甲")).toBeNull();
+  });
+
+  it("⚠️ 编号不同不影响命中（对齐靠名称规则，不靠 SKU01 序号）", () => {
+    const renumbered = localSkuImageList([
+      {
+        group: "sku",
+        index: 0,
+        rel_path: "SKU/SKU99_颜色分类(【中古风】实木三斗柜).jpg",
+        file_name: "SKU99_颜色分类(【中古风】实木三斗柜).jpg",
+      },
+    ] as PrecheckMedia[]);
+    expect(lookupLocalSkuImage(renumbered, "颜色分类:【中古风】实木三斗柜")).toBe(
+      "SKU/SKU99_颜色分类(【中古风】实木三斗柜).jpg",
+    );
+  });
+
+  it("passedSkuSpecs：对上的行进第二步；对不上的行进 blockedRows", () => {
+    const table: PrecheckTable = {
+      title: "全部",
+      sheet_name: "全部",
+      columns: ["sku名称", "图片", "原价", "库存"],
+      rows: [
+        ["颜色分类:【中古风】实木三斗柜", "https://x/1.jpg", "1280", "200"],
+        ["颜色分类:完全不存在的东西", "https://x/9.jpg", "1", "1"],
+      ],
+    };
+    const got = passedSkuSpecs(table, [1], [0]);
+    expect([...got]).toEqual(["颜色分类:【中古风】实木三斗柜"]);
+  });
+});
+
+describe("需求 3 · 列定位别名", () => {
+  it("线上图列 = 真包 `图片` 列（下标 1）", () => {
+    expect(onlineImageColumnIndex(["sku名称", "图片", "原价", "计算价格", "库存", "ID"])).toBe(1);
+  });
+  it("sku 名称列 = 下标 0", () => {
+    expect(skuNameColumnIndex(["sku名称", "图片", "原价"])).toBe(0);
+  });
+  it("找不到 ⇒ -1（不猜列）", () => {
+    expect(onlineImageColumnIndex(["A", "B"])).toBe(-1);
+    expect(skuNameColumnIndex(["A", "B"])).toBe(-1);
+  });
+});
+
+
+describe("需求 4 · passedSkuSpecs（未选中的不允许进第二步）", () => {
+  const table: PrecheckTable = {
+    title: "全部",
+    sheet_name: "全部",
+    columns: ["sku名称", "图片", "原价", "计算价格", "库存", "ID"],
+    rows: [
+      ["颜色分类:甲", "https://x/1.jpg", "10", null, "5", "1"],
+      ["颜色分类:乙", "https://x/2.jpg", "20", null, "5", "1"],
+      ["颜色分类:丙", "https://x/3.jpg", "30", null, "5", "1"],
+    ],
+  };
+
+  it("默认全选 + 无拦截 ⇒ 三行全通过", () => {
+    const got = passedSkuSpecs(table, [], [0, 1, 2]);
+    expect([...got].sort()).toEqual(["颜色分类:甲", "颜色分类:丙", "颜色分类:乙"].sort());
+  });
+
+  it("**未勾选的行被排除**（用户口径：未选中的不允许进第二步）", () => {
+    const got = passedSkuSpecs(table, [], [0, 2]);
+    expect(got.has("颜色分类:乙")).toBe(false);
+    expect(got.size).toBe(2);
+  });
+
+  it("**两图判定未通过的行被排除**（即使被勾选 —— 手滑勾上也不许漏进）", () => {
+    const got = passedSkuSpecs(table, [1], [0, 1, 2]);
+    expect(got.has("颜色分类:乙")).toBe(false);
+    expect(got.size).toBe(2);
+  });
+
+  it("两个条件都要：未勾选 **或** 被拦 ⇒ 都不通过", () => {
+    const got = passedSkuSpecs(table, [0], [1, 2]);
+    expect([...got].sort()).toEqual(["颜色分类:丙", "颜色分类:乙"].sort());
+  });
+
+  it("**空 `picked` ⇒ 视为全选**（用户口径 2026-10-11：勾选态未上抛不得让结果为空）", () => {
+    //: ⚠️ **取代**原先的「全不选 ⇒ 空集」。
+    //: 根因：勾选态住在 `TablesPanel` 内、靠 `SelectionReporter` 上抛，而那个面板
+    //: **只在「媒体资源」页签挂载**。用户直接进第二步、从没打开过页签 ⇒ `picked`
+    //: 恒为 `[]` ⇒ 一行都导不出 ⇒「预检通过SKU导入」按钮恒灰（用户实测：
+    //: 「先点一下媒体资源就能用了」= 典型时序症状）。
+    //: 表格自身默认就是**全选**（`picked[tIndex] ?? rows.map(() => true)`），
+    //: 所以空集 = 全选才是同一口径；**预检未通过的行仍被 blocked 挡掉**。
+    expect(passedSkuSpecs(table, [], []).size).toBe(3);
+  });
+
+  it("空 `picked` 也不会放过预检未通过的行（blocked 仍然生效）", () => {
+    const got = passedSkuSpecs(table, [1], []);
+    expect(got.has("颜色分类:乙")).toBe(false);
+    expect(got.size).toBe(2);
+  });
+
+  it("没有 sku 名称列 / 空表 ⇒ 空集（不猜不编）", () => {
+    expect(passedSkuSpecs(null, [], [0]).size).toBe(0);
+    expect(
+      passedSkuSpecs({ title: "x", sheet_name: "x", columns: ["A", "B"], rows: [["1", "2"]] }, [], [0]).size,
+    ).toBe(0);
+  });
+
+  it("空白名称行不进集合（缺值口径：不留空键）", () => {
+    const t: PrecheckTable = {
+      title: "t", sheet_name: "t", columns: ["sku名称"], rows: [["  "], ["颜色分类:甲"]],
+    };
+    const got = passedSkuSpecs(t, [], [0, 1]);
+    expect([...got]).toEqual(["颜色分类:甲"]);
+  });
+});
+
+
+describe("规格配置 · 可配置正则（用户口径 2026-10-11）", () => {
+  it("**默认正则就把命名规则解析出来**（预填在输入框里的那条）", () => {
+    const hit = matchSkuImageName("SKU01_颜色分类(【中古风】实木三斗柜).jpg", DEFAULT_SKU_IMAGE_PATTERN);
+    expect(hit?.key).toBe("颜色分类:【中古风】实木三斗柜");
+    expect(hit?.groups).toEqual(["颜色分类", "【中古风】实木三斗柜"]);
+  });
+
+  it("默认正则对**两位/三位序号**同样有效（自增序号不是固定宽度）", () => {
+    expect(matchSkuImageName("SKU26_颜色分类(甲).jpg", DEFAULT_SKU_IMAGE_PATTERN)?.key).toBe("颜色分类:甲");
+    expect(matchSkuImageName("SKU100_尺寸(1m).png", DEFAULT_SKU_IMAGE_PATTERN)?.key).toBe("尺寸:1m");
+  });
+
+  it("扩展名**先剥掉**再交给正则（用户不必在正则里处理 .jpg）", () => {
+    //: 同一条正则对 .jpg / .png / .webp 都应命中且结果一致。
+    const pat = DEFAULT_SKU_IMAGE_PATTERN;
+    expect(matchSkuImageName("SKU01_颜色分类(甲).jpg", pat)?.key).toBe("颜色分类:甲");
+    expect(matchSkuImageName("SKU01_颜色分类(甲).png", pat)?.key).toBe("颜色分类:甲");
+    expect(matchSkuImageName("SKU01_颜色分类(甲).webp", pat)?.key).toBe("颜色分类:甲");
+  });
+
+  it("**换一条正则**就换一套解析（规则可配的实证）", () => {
+    //: 用户把规则改成「取中括号里的内容」（另一种命名习惯）
+    const custom = "^.*?\\[([^\\]]+)\\]\\s*(.+)$";
+    const hit = matchSkuImageName("图片[颜色分类]斗柜.jpg", custom);
+    expect(hit?.key).toBe("颜色分类:斗柜");
+  });
+
+  it("正则**非法** ⇒ null（不抛错，不打断渲染）", () => {
+    expect(matchSkuImageName("SKU01_颜色分类(甲).jpg", "([")).toBeNull();
+  });
+
+  it("正则能跑但**不匹配该文件名** ⇒ null", () => {
+    expect(matchSkuImageName("随便一个名字.jpg", DEFAULT_SKU_IMAGE_PATTERN)).toBeNull();
+  });
+
+  it("`validateSkuImagePattern`：合法 ⇒ null；空 / 组数不足 / 语法错 ⇒ 给说明", () => {
+    expect(validateSkuImagePattern(DEFAULT_SKU_IMAGE_PATTERN)).toBeNull();
+    expect(validateSkuImagePattern("")).toContain("不能为空");
+    //: 只有 1 个捕获组 ⇒ 抽不出「分类:名称」
+    expect(validateSkuImagePattern("^SKU\\d+_(.+)$")).toContain("2 个捕获组");
+    //: 语法错
+    expect(validateSkuImagePattern("([")).toContain("语法错误");
+  });
+
+  it("换正则后 `localSkuImageList` 的键随之变化（重新匹配的机制）", () => {
+    const media = [
+      { group: "sku", index: 0, rel_path: "SKU/SKU01_颜色分类(甲).jpg", file_name: "SKU01_颜色分类(甲).jpg" },
+    ] as PrecheckMedia[];
+    const def = localSkuImageList(media, DEFAULT_SKU_IMAGE_PATTERN);
+    expect(def[0].key).toBe(normalizeKeyForTest("颜色分类:甲"));
+    //: 用一条匹配不上的正则 ⇒ 键为空（⇒ 该行会被判「未匹配到」，给手选入口）
+    const bad = localSkuImageList(media, "^NOPE_(.+)_(.+)$");
+    expect(bad[0].key).toBe("");
+  });
+});
+
+/** 测试内的小工具：与实现同一套规范化（保持一致口径）。 */
+function normalizeKeyForTest(v: string): string {
+  return v.replace(/\s+/g, "").replace(/（/g, "(").replace(/）/g, ")").toLowerCase();
+}
+
+
+describe("媒体勾选 ↔ 规格表联动（用户口径 2026-10-11）", () => {
+  /** 可选的 SKU 图（已检测 + 非违规）。 */
+  const media = [
+    { group: "sku", index: 0, rel_path: "SKU/SKU01_颜色分类(甲).jpg", file_name: "SKU01_颜色分类(甲).jpg", ocr_ok: true, has_forbidden: false },
+    { group: "sku", index: 1, rel_path: "SKU/SKU02_颜色分类(乙).jpg", file_name: "SKU02_颜色分类(乙).jpg", ocr_ok: true, has_forbidden: false },
+  ] as PrecheckMedia[];
+
+  it("**取消勾选 ⇒ 该图不再参与匹配**（对应规格行的本地图被移除）", () => {
+    const checked: Record<string, boolean> = { "sku/SKU/SKU01_颜色分类(甲).jpg": true, "sku/SKU/SKU02_颜色分类(乙).jpg": false };
+    const clean = filterCheckedSkuMedia(selectableSkuMedia(media), checked);
+    const list = localSkuImageList(clean);
+    //: 勾着的还能匹配
+    expect(lookupLocalSkuImage(list, "颜色分类:甲")).toBe("SKU/SKU01_颜色分类(甲).jpg");
+    //: 取消勾选的**匹配不到**（⇒ 该行本地图列显示「无」）
+    expect(lookupLocalSkuImage(list, "颜色分类:乙")).toBeNull();
+  });
+
+  it("**全不勾 ⇒ 一张都匹配不到**（规格行全部移除本地图）", () => {
+    const clean = filterCheckedSkuMedia(selectableSkuMedia(media), {});
+    const list = localSkuImageList(clean);
+    expect(lookupLocalSkuImage(list, "颜色分类:甲")).toBeNull();
+    expect(lookupLocalSkuImage(list, "颜色分类:乙")).toBeNull();
+  });
+
+  it("⚠️ **默认未在 checked 里的图不算勾选**（`undefined !== true` ⇒ 移除）", () => {
+    //: 键缺失时**不能**当作已勾选 —— 否则「未勾选」会被当成「勾着」，
+    //: 提示数恒 0 且图不会移除（静默失效）。
+    const clean = filterCheckedSkuMedia(selectableSkuMedia(media), {});
+    expect(clean).toHaveLength(0);
+  });
+
+  it("红线仍在：违规/未检测的图**即使勾上也**不参与匹配", () => {
+    const dirty = [
+      { group: "sku", index: 0, rel_path: "SKU/a.jpg", file_name: "SKU01_颜色分类(丙).jpg", ocr_ok: true, has_forbidden: true },
+      { group: "sku", index: 1, rel_path: "SKU/b.jpg", file_name: "SKU02_颜色分类(丁).jpg", ocr_ok: null, has_forbidden: false },
+    ] as PrecheckMedia[];
+    const allChecked: Record<string, boolean> = { "sku/SKU/a.jpg": true, "sku/SKU/b.jpg": true };
+    const clean = filterCheckedSkuMedia(selectableSkuMedia(dirty), allChecked);
+    expect(clean).toHaveLength(0);
+  });
+
+  it("`countUncheckedSkuMedia`：只数「本来可选却没勾」的（违规/未检测不重复计）", () => {
+    const withDirty = [
+      ...media,
+      { group: "sku", index: 2, rel_path: "SKU/c.jpg", file_name: "SKU03_颜色分类(丙).jpg", ocr_ok: true, has_forbidden: true },
+      { group: "sku", index: 3, rel_path: "SKU/d.jpg", file_name: "SKU04_颜色分类(丁).jpg", ocr_ok: null, has_forbidden: false },
+    ] as PrecheckMedia[];
+    //: 两张可选、一张未勾 ⇒ 计数 1（违规/未检测那两张不进分母也不算进分子）
+    const checked: Record<string, boolean> = {
+      "sku/SKU/SKU01_颜色分类(甲).jpg": true,
+      "sku/SKU/SKU02_颜色分类(乙).jpg": false,
+    };
+    expect(countUncheckedSkuMedia(withDirty, checked)).toBe(1);
+    //: 全勾 ⇒ 0（不误报）
+    expect(
+      countUncheckedSkuMedia(withDirty, {
+        "sku/SKU/SKU01_颜色分类(甲).jpg": true,
+        "sku/SKU/SKU02_颜色分类(乙).jpg": true,
+      }),
+    ).toBe(0);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* 2026-10-11 第五批：预检 SKU 行 → 第二步规格/价格库存导入（独立入口）    */
+/* 数据取自真实数据包 `C:\Users\admin\Desktop\商品ID_935947169189`      */
+/* ------------------------------------------------------------------ */
+
+describe("构建导入计划（buildSkuFillPlan）", () => {
+  const dim = (name: string, over: Partial<{ customizable: boolean; values: { name: string; value_id: string }[] }> = {}) => ({
+    name, id: `${name}-id`, customizable: true, values: [], options: [], ...over,
+  });
+  const row = (over: Partial<PassedSkuRow>): PassedSkuRow => ({
+    rawName: "", specName: "", specValue: "", originalPrice: null, price: null, stock: null,
+    sellerCode: "", localRel: null, localFileName: "", ...over,
+  });
+
+  it("按**用户配的映射**导入（同名时右侧默认选中它）", () => {
+    const plan = buildSkuFillPlan(
+      [row({ rawName: "颜色分类:甲", specName: "颜色分类", specValue: "甲", originalPrice: 1280, price: 1280, stock: 200 })],
+      [dim("颜色分类")],
+      { 颜色分类: "颜色分类" },
+    );
+    expect(plan.dims).toHaveLength(1);
+    expect(plan.dims[0].dimName).toBe("颜色分类");
+    expect(plan.rows).toHaveLength(1);
+    expect(plan.rows[0]).toMatchObject({ spec: "颜色分类:甲", stock: 200, sellerCode: "" });
+    expect(plan.notes.join("")).toContain("文本精确匹配");
+  });
+
+  it("**没配映射 ⇒ 不导入**（宁可漏填，也不把值填错维度）", () => {
+    const plan = buildSkuFillPlan(
+      [row({ specName: "颜色分类", specValue: "甲" })],
+      [dim("颜色分类")],
+      {},                       //: 用户没配置任何规格关系
+    );
+    expect(plan.dims).toHaveLength(0);
+    expect(plan.skipped.join("")).toContain("配置规格关系");
+  });
+
+  it("**名字不一致且没给映射 ⇒ 不填并写明**（不按顺序猜）", () => {
+    const plan = buildSkuFillPlan(
+      [row({ specName: "颜色分类", specValue: "甲" })],
+      [dim("颜色")],
+    );
+    expect(plan.dims).toHaveLength(0);
+    expect(plan.skipped.join("")).toContain("颜色分类");
+    expect(plan.rows).toHaveLength(0);
+  });
+
+  it("给了用户映射 ⇒ 按映射填，并写明是「你指定的」", () => {
+    const plan = buildSkuFillPlan(
+      [row({ rawName: "颜色分类:甲", specName: "颜色分类", specValue: "甲", price: 1 })],
+      [dim("颜色")],
+      { 颜色分类: "颜色" },
+    );
+    expect(plan.dims[0].dimName).toBe("颜色");
+    expect(plan.rows[0].spec).toBe("颜色:甲");
+    expect(plan.notes.join("")).toContain("你指定的映射");
+  });
+
+  it("命中平台候选项 ⇒ standard 且带 valueId；不命中但可自定义 ⇒ custom", () => {
+    const withValues = dim("颜色", { values: [{ name: "甲", value_id: "vid-1" }] });
+    const plan = buildSkuFillPlan(
+      [
+        row({ rawName: "颜色:甲", specName: "颜色", specValue: "甲" }),
+        row({ rawName: "颜色:乙", specName: "颜色", specValue: "乙" }),
+      ],
+      [withValues],
+      { 颜色: "颜色" },
+    );
+    const [a, b] = plan.dims[0].values;
+    expect(a).toMatchObject({ value: "甲", valueId: "vid-1", match: "standard" });
+    expect(b).toMatchObject({ value: "乙", valueId: "", match: "custom" });
+  });
+
+  it("平台不允许自定义且值不在候选里 ⇒ 该值被跳过并写明原因", () => {
+    const locked = dim("颜色", { customizable: false, values: [{ name: "甲", value_id: "v1" }] });
+    const plan = buildSkuFillPlan(
+      [row({ rawName: "颜色:乙", specName: "颜色", specValue: "乙" })],
+      [locked],
+      { 颜色: "颜色" },
+    );
+    expect(plan.dims).toHaveLength(0);
+    expect(plan.skipped.join("")).toContain("不接受自定义值");
+  });
+
+  it("**两个规格分类**（两行映射）⇒ 各自进各自的维度，组合文本按平台顺序拼", () => {
+    const plan = buildSkuFillPlan(
+      [
+        row({ rawName: "颜色分类:甲", specName: "颜色分类", specValue: "甲", originalPrice: 100, price: 100, stock: 1 }),
+        row({ rawName: "尺寸:1m", specName: "尺寸", specValue: "1m", originalPrice: 100, price: 100, stock: 2 }),
+      ],
+      [dim("颜色"), dim("尺寸")],
+      { 颜色分类: "颜色", 尺寸: "尺寸" },
+    );
+    //: 两个维度都建出来了（保序 = 平台维度顺序）。
+    expect(plan.dims.map((d) => d.dimName)).toEqual(["颜色", "尺寸"]);
+    expect(plan.dims[0].values[0].value).toBe("甲");
+    expect(plan.dims[1].values[0].value).toBe("1m");
+    //: ⚠️ 组合文本必须与 `spec_combinations` 同形（`A:v / B:v2`）——
+    //: 两条数据包行各缺一个维度时**不成组合**（与笛卡尔积同判据），故此处为 0 行。
+    expect(plan.rows).toHaveLength(0);
+  });
+
+  it("**每个维度都有值的行**才成组合（与 spec_combinations 同判据）", () => {
+    const plan = buildSkuFillPlan(
+      [
+        row({ rawName: "颜色分类:甲", specName: "颜色分类", specValue: "甲", originalPrice: 100, price: 100, stock: 1 }),
+        row({ rawName: "颜色分类:乙", specName: "颜色分类", specValue: "乙", originalPrice: 100, price: 100, stock: 2 }),
+      ],
+      [dim("颜色")],
+      { 颜色分类: "颜色" },
+    );
+    expect(plan.rows.map((r) => r.spec)).toEqual(["颜色:甲", "颜色:乙"]);
+  });
+
+  it("没有通过行 / 平台没规格 ⇒ 各自写明原因", () => {
+    expect(buildSkuFillPlan([], [dim("颜色")]).skipped.join("")).toContain("预检通过");
+    expect(buildSkuFillPlan([row({ specName: "颜色", specValue: "甲" })], []).skipped.join(""))
+      .toContain("未返回该类目的规格类型");
+  });
+
+  it("规格图只收**有本地图**的行（用户口径：上传本地图列）", () => {
+    const plan = buildSkuFillPlan(
+      [
+        row({ rawName: "颜色:甲", specName: "颜色", specValue: "甲", localRel: "SKU/a.jpg", localFileName: "a.jpg" }),
+        row({ rawName: "颜色:乙", specName: "颜色", specValue: "乙" }),
+      ],
+      [dim("颜色")],
+      { 颜色: "颜色" },
+    );
+    expect(plan.images).toHaveLength(1);
+    expect(plan.images[0]).toMatchObject({ dimName: "颜色", value: "甲", localRel: "SKU/a.jpg" });
+  });
+});
+
+describe("规格关系行（最多两行 / 必填 / 不重复）", () => {
+  const dims = [
+    { name: "颜色", id: "1", customizable: true },
+    { name: "尺寸", id: "2", customizable: true },
+  ];
+
+  it("**最多两行**", () => {
+    expect(MAX_SPEC_MAPPING_ROWS).toBe(2);
+    expect(validateSpecMapping([
+      { source: "a", target: "颜色" },
+      { source: "b", target: "尺寸" },
+    ])).toEqual([]);
+    expect(validateSpecMapping([
+      { source: "a", target: "颜色" },
+      { source: "b", target: "尺寸" },
+      { source: "c", target: "款式" },
+    ]).join("")).toContain("最多");
+  });
+
+  it("**两列都不能为空**", () => {
+    expect(validateSpecMapping([{ source: "", target: "颜色" }]).join("")).toContain("不能为空");
+    expect(validateSpecMapping([{ source: "颜色分类", target: "" }]).join("")).toContain("不能为空");
+  });
+
+  it("**两列均不支持重复选择**", () => {
+    expect(validateSpecMapping([
+      { source: "颜色分类", target: "颜色" },
+      { source: "颜色分类", target: "尺寸" },
+    ]).join("")).toContain("重复");
+    expect(validateSpecMapping([
+      { source: "颜色分类", target: "颜色" },
+      { source: "尺寸", target: "颜色" },
+    ]).join("")).toContain("重复");
+  });
+
+  it("整行都空 ⇒ 不报重复（刚点「添加」不该满屏红字）", () => {
+    expect(validateSpecMapping([{ source: "", target: "" }])).toEqual([]);
+  });
+
+  it("isSpecMappingReady：至少一行填完整且无错误", () => {
+    expect(isSpecMappingReady([{ source: "颜色分类", target: "颜色" }])).toBe(true);
+    expect(isSpecMappingReady([{ source: "颜色分类", target: "" }])).toBe(false);
+    expect(isSpecMappingReady([{ source: "", target: "" }])).toBe(false);
+  });
+
+  it("默认行：同名自动配对，不同名留空（**不猜**）", () => {
+    expect(defaultSpecMappingRows(["尺寸", "颜色分类"], dims)).toEqual([
+      { source: "尺寸", target: "尺寸" },
+      { source: "颜色分类", target: "" },
+    ]);
+    //: 最多两行 ⇒ 超出的分类不进默认行
+    expect(defaultSpecMappingRows(["a", "b", "c"], dims)).toHaveLength(2);
+  });
+
+  it("mappingFromRows：只收两列都填了的行", () => {
+    expect(mappingFromRows([
+      { source: "颜色分类", target: "颜色" },
+      { source: "尺寸", target: "" },
+    ])).toEqual({ 颜色分类: "颜色" });
+  });
+});
+
+describe("导出预检通过行（passedSkuRows）", () => {
+  const table = {
+    title: "全部", sheet_name: "全部",
+    columns: ["sku名称", "图片", "原价", "计算价格", "库存", "ID"],
+    rows: [
+      ["颜色分类:甲", "u1", "1280", null, "200", "935947169189"],
+      ["颜色分类:乙", "u2", "", "990", "10", "ID2"],
+      ["颜色分类:丙", "u3", "500", "", "5", "ID3"],
+    ],
+  };
+
+  it("**原价优先**，空则回落计算价格（用户口径 ②）", () => {
+    const rows = passedSkuRows(table, [], [0, 1, 2]);
+    expect(rows[0].price).toBe(1280);   //: 原价有 ⇒ 用原价
+    expect(rows[1].price).toBe(990);    //: 原价空 ⇒ 用计算价格
+    expect(rows[2].price).toBe(500);
+    expect(rows[0].stock).toBe(200);
+    expect(rows[0].sellerCode).toBe("935947169189"); //: ID 列 ⇒ 商家编码
+  });
+
+  it("未勾选 / 预检未通过的行**不进**结果", () => {
+    expect(passedSkuRows(table, [], [0]).map((r) => r.specValue)).toEqual(["甲"]);
+    expect(passedSkuRows(table, [1], [0, 1]).map((r) => r.specValue)).toEqual(["甲"]);
+  });
+
+  it("本地图按 SKU 名称对齐（本地图列那张）", () => {
+    const imgs = [{ key: "颜色分类:甲", relPath: "SKU/SKU01_颜色分类(甲).jpg" }];
+    const rows = passedSkuRows(table, [], [0], imgs);
+    expect(rows[0].localRel).toBe("SKU/SKU01_颜色分类(甲).jpg");
+    expect(rows[0].localFileName).toBe("SKU01_颜色分类(甲).jpg");
+  });
+
+  it("sourceSpecNames：保序去重", () => {
+    expect(sourceSpecNames(passedSkuRows(table, [], [0, 1, 2]))).toEqual(["颜色分类"]);
+  });
+});
+
+describe("售价倍率（原价 × 1.7 默认，可调）", () => {
+  it("默认倍率是 1.7", () => {
+    expect(DEFAULT_PRICE_MULTIPLIER).toBe(1.7);
+  });
+
+  it("1280 × 1.7 = 2176（**不是** 2175.9999999999995，必须四舍五入到分）", () => {
+    expect(applyPriceMultiplier(1280, 1.7)).toBe(2176);
+  });
+
+  it("保留 2 位小数", () => {
+    expect(applyPriceMultiplier(100, 1.777)).toBe(177.7);
+    expect(applyPriceMultiplier(99.99, 1.7)).toBe(169.98);
+  });
+
+  it("原价缺值 ⇒ null（**不造假**，不填 0）", () => {
+    expect(applyPriceMultiplier(null, 1.7)).toBeNull();
+    expect(applyPriceMultiplier(Number.NaN, 1.7)).toBeNull();
+  });
+
+  it("clamp：非法值回默认 1.7；越界夹到 [1, 10]", () => {
+    expect(clampPriceMultiplier(undefined)).toBe(1.7);
+    expect(clampPriceMultiplier("abc")).toBe(1.7);
+    expect(clampPriceMultiplier(0.5)).toBe(1);      //: 下限 1（不打折卖）
+    expect(clampPriceMultiplier(99)).toBe(PRICE_MULTIPLIER_MAX); //: 挡手滑多打一个 0
+    expect(clampPriceMultiplier(2.5)).toBe(2.5);
+  });
+
+  it("导入计划按倍率算售价：原价 1280 ⇒ 2176", () => {
+    const plan = buildSkuFillPlan(
+      [{
+        rawName: "颜色分类:甲", specName: "颜色分类", specValue: "甲",
+        originalPrice: 1280, price: 1280, stock: 200,
+        sellerCode: "", localRel: null, localFileName: "",
+      }],
+      [{ name: "颜色分类", id: "d1", customizable: true, values: [], options: [] }],
+      { 颜色分类: "颜色分类" },
+    );
+    //: ⚠️ 用户口径最终版：**市场价** = 原价 × 1.7；**售价** = 原价原值。
+    expect(plan.rows[0].price).toBe(1280);
+    expect(plan.rows[0].marketPrice).toBe(2176);
+  });
+
+  it("原价取不到 ⇒ 用计算价格原值，**不乘**倍率", () => {
+    const plan = buildSkuFillPlan(
+      [{
+        rawName: "颜色分类:甲", specName: "颜色分类", specValue: "甲",
+        originalPrice: null, price: 990, stock: 1,
+        sellerCode: "", localRel: null, localFileName: "",
+      }],
+      [{ name: "颜色分类", id: "d1", customizable: true, values: [], options: [] }],
+      { 颜色分类: "颜色分类" },
+    );
+    expect(plan.rows[0].price).toBe(990);     //: 售价回落计算价格原值
+    expect(plan.rows[0].marketPrice).toBeNull(); //: 原价空 ⇒ 市场价没基数，不造假
+  });
+
+  it("倍率可被调用方覆盖（参数可调整）", () => {
+    const plan = buildSkuFillPlan(
+      [{
+        rawName: "颜色分类:甲", specName: "颜色分类", specValue: "甲",
+        originalPrice: 1000, price: 1000, stock: 1,
+        sellerCode: "", localRel: null, localFileName: "",
+      }],
+      [{ name: "颜色分类", id: "d1", customizable: true, values: [], options: [] }],
+      { 颜色分类: "颜色分类" },
+      2.0,
+    );
+    expect(plan.rows[0].price).toBe(1000);
+    expect(plan.rows[0].marketPrice).toBe(2000);
+  });
+});
+
+describe("价格库存列映射（动态可调；默认 = 现行逻辑）", () => {
+  const cols = ["sku名称", "图片", "原价", "计算价格", "库存", "ID"];
+
+  it("**默认映射就是现行那套**（原价→售价/市场价、库存→库存、ID→商家编码）", () => {
+    expect(DEFAULT_PRICE_MAPPING).toEqual([
+      { target: "price", source: "原价" },
+      { target: "stock", source: "库存" },
+      { target: "seller_code", source: "ID" },
+    ]);
+    //: 用户口径：**市场价不做默认映射**（不在默认行里）。
+    expect(DEFAULT_PRICE_MAPPING.some((r) => r.target === "market_price")).toBe(false);
+    expect(DEFAULT_PRICE_FALLBACK_SOURCE).toBe("计算价格");
+  });
+
+  it("sourceColumnIndex 按列名定位（可任意列 ⇒ 动态可调整）", () => {
+    expect(sourceColumnIndex(cols, DEFAULT_PRICE_MAPPING, "price")).toBe(2);
+    expect(sourceColumnIndex(cols, DEFAULT_PRICE_MAPPING, "stock")).toBe(4);
+    expect(sourceColumnIndex(cols, DEFAULT_PRICE_MAPPING, "seller_code")).toBe(5);
+    //: 换成别的列也认（用户口径：动态可调）。
+    expect(sourceColumnIndex(cols, [{ target: "price", source: "计算价格" }], "price")).toBe(3);
+    //: 不填 / 列不存在 ⇒ -1（调用方按「不自动填」处理）。
+    expect(sourceColumnIndex(cols, [{ target: "stock", source: "" }], "stock")).toBe(-1);
+    expect(sourceColumnIndex(cols, [{ target: "stock", source: "不存在" }], "stock")).toBe(-1);
+  });
+
+  it("**来源列不支持重复映射**（一列不能喂两个目标）", () => {
+    const bad: PriceMappingRow[] = [
+      { target: "price", source: "原价" },
+      { target: "stock", source: "原价" },   //: 同一列又被当库存
+    ];
+    //: 提炼后：每类只报一条、不带行号（用户口径「只保留核心」）。
+    expect(validatePriceMapping(bad)).toEqual(["来源列重复：原价"]);
+    expect(isPriceMappingReady(bad)).toBe(false);
+  });
+
+  it("目标列重复 ⇒ 报错", () => {
+    expect(validatePriceMapping([
+      { target: "price", source: "原价" },
+      { target: "price", source: "计算价格" },
+    ])[0]).toContain("价格库存列重复：售价");
+  });
+
+  it("**来源列留空 ⇒ 报错**（用户口径 2026-10-11「不能为空」）", () => {
+    const rows: PriceMappingRow[] = [
+      { target: "price", source: "原价" },
+      { target: "stock", source: "" },
+    ];
+    expect(validatePriceMapping(rows)[0]).toContain("来源列不能为空");
+    expect(isPriceMappingReady(rows)).toBe(false);
+  });
+
+  it("**不限制条数**（用户口径「不限制条数」）—— 多于 4 行也合法", () => {
+    const rows: PriceMappingRow[] = [
+      { target: "price", source: "原价" },
+      { target: "market_price", source: "计算价格" },
+      { target: "stock", source: "库存" },
+      { target: "seller_code", source: "ID" },
+    ];
+    expect(validatePriceMapping(rows)).toEqual([]);
+  });
+
+  it("**市场价可作目标列**（两边自由选择）", () => {
+    expect(PRICE_TARGET_OPTIONS).toContain("market_price");
+    expect(validatePriceMapping([{ target: "market_price", source: "原价" }])).toEqual([]);
+  });
+});
+
+describe("passedSkuRows 按映射取列", () => {
+  const table = {
+    title: "全部", sheet_name: "全部",
+    columns: ["sku名称", "图片", "原价", "计算价格", "库存", "ID"],
+    rows: [["颜色分类:甲", "u1", "1280", "990", "200", "935947169189"]],
+  };
+
+  it("默认映射 ⇒ 原价优先，空才回落计算价格", () => {
+    const [r] = passedSkuRows(table, [], [0]);
+    expect(r.originalPrice).toBe(1280);
+    expect(r.price).toBe(1280);       //: 原价有值 ⇒ 不回落
+    expect(r.stock).toBe(200);
+    expect(r.sellerCode).toBe("935947169189");
+  });
+
+  it("把售价映射到「计算价格」⇒ 就用那一列，原价字段随之变化", () => {
+    const [r] = passedSkuRows(table, [], [0], [], [
+      { target: "price", source: "计算价格" },
+      { target: "stock", source: "库存" },
+      { target: "seller_code", source: "ID" },
+    ]);
+    expect(r.originalPrice).toBe(990);
+    expect(r.price).toBe(990);
+  });
+
+  it("来源列留空 ⇒ 该字段为 null / 空串（不自动填）", () => {
+    const [r] = passedSkuRows(table, [], [0], [], [
+      { target: "price", source: "原价" },
+      { target: "stock", source: "" },
+      { target: "seller_code", source: "" },
+    ]);
+    expect(r.stock).toBeNull();
+    expect(r.sellerCode).toBe("");
+  });
+
+  it("回落列可改：原价空 + 回落指向别的列", () => {
+    const t2 = { ...table, rows: [["颜色分类:甲", "u1", "", "990", "", "ID1"]] };
+    const [r] = passedSkuRows(t2, [], [0], [], DEFAULT_PRICE_MAPPING, "计算价格");
+    expect(r.originalPrice).toBeNull();
+    expect(r.price).toBe(990);        //: 回落生效
+  });
+});
+
+describe("映射校验的报错提炼（用户口径：只保留核心）", () => {
+  it("价格映射：三类问题各报**一条**、不带行号", () => {
+    const rows: PriceMappingRow[] = [
+      { target: "price", source: "原价" },
+      { target: "price", source: "原价" },   //: 目标重复 + 来源重复
+      { target: "stock", source: "" },       //: 来源空
+    ];
+    const errors = validatePriceMapping(rows);
+    //: 用户口径「**放一行提示**」⇒ 只有一条，多类问题用 `；` 接在一行里。
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toBe("来源列不能为空；价格库存列重复：售价；来源列重复：原价");
+    //: 逐行式报错已废弃（同一件事被说三遍）。
+    expect(errors[0]).not.toContain("第 2 行");
+  });
+
+  it("目标列为空 ⇒ 报「价格库存列不能为空」（新加的空行）", () => {
+    expect(validatePriceMapping([{ target: "", source: "" }])[0]).toContain("价格库存列不能为空");
+  });
+
+  it("规格映射：同类问题也只报一条", () => {
+    expect(validateSpecMapping([
+      { source: "A", target: "X" },
+      { source: "A", target: "X" },   //: 两边都重复
+    ])).toEqual(["预选通过规格类型重复：A；平台规格类型重复：X"]);
+    expect(validateSpecMapping([{ source: "A", target: "" }])).toEqual(["两列均不能为空"]);
+    //: 整行空（刚添加）⇒ 不报错。
+    expect(validateSpecMapping([{ source: "", target: "" }])).toEqual([]);
+  });
+});
+
+describe("导入后价格表不漏行（用户反馈：导入完助手仍提示「1 行缺价格或库存」）", () => {
+  const dims = [{ name: "颜色", id: "d1", customizable: true, values: [], options: [] }];
+
+  it("**计划里每一行都带价格与库存**（否则助手会一直报缺值）", () => {
+    const plan = buildSkuFillPlan(
+      [
+        { rawName: "颜色分类:甲", specName: "颜色分类", specValue: "甲",
+          originalPrice: 1280, price: 1280, stock: 200,
+          sellerCode: "ID1", localRel: null, localFileName: "" },
+        { rawName: "颜色分类:乙", specName: "颜色分类", specValue: "乙",
+          originalPrice: 2000, price: 2000, stock: 10,
+          sellerCode: "ID2", localRel: null, localFileName: "" },
+      ],
+      dims,
+      { 颜色分类: "颜色" },
+    );
+    expect(plan.rows).toHaveLength(2);
+    //: ⚠️ **关键**：不许出现 price/stock 为 null 的行 —— 助手判据是
+    //: `r.price === null || r.stock === null` ⇒ 有一行 null 就一直报红。
+    for (const r of plan.rows) {
+      expect(r.price).not.toBeNull();
+      expect(r.stock).not.toBeNull();
+    }
+    //: spec 组合文本必须与 `spec_combinations` 同形（否则重建时对不上 key）。
+    expect(plan.rows.map((r) => r.spec)).toEqual(["颜色:甲", "颜色:乙"]);
+  });
+});
+
+
+describe("applyBatchRule 的两位小数四舍五入（用户口径 2026-10-11）", () => {
+  it("倍数 + 加减后保留两位小数（不出现浮点毛刺）", () => {
+    //: 18.8 × 1.7 = 31.960000000000004（IEEE754）—— 必须收敛成 31.96
+    expect(applyBatchRule(18.8, { mode: "scale", factor: 1.7, operand: 0 })).toBe(31.96);
+    //: 典型浮点陷阱：0.1 + 0.2
+    expect(applyBatchRule(0.1, { mode: "delta", operand: 0.2 })).toBe(0.3);
+    //: ⚠️ 别拿 `1.005` / `2.675` 当「进位」样本 —— 它们在 IEEE754 里实际是
+    //: `1.00499999…` / `2.67499999…`，`Math.round(x*100)/100` 会**不进位**（返回 1 / 2.67）。
+    //: 这不是 bug，是二进制浮点的既定事实（想真进位得用十进制库）。
+    //: 这里改用**能确定进位**的值，保证判据稳定。
+    expect(applyBatchRule(1.006, { mode: "delta", operand: 0 })).toBe(1.01);   // 1.006 → 1.01
+    expect(applyBatchRule(2.676, { mode: "delta", operand: 0 })).toBe(2.68);   // 2.676 → 2.68
+  });
+
+  it("整数保持整数（不被补成 .00）", () => {
+    expect(applyBatchRule(10, { mode: "delta", operand: 5 })).toBe(15);
+    expect(applyBatchRule(100, { mode: "scale", factor: 2, operand: 0 })).toBe(200);
+  });
+
+  it("三位以上小数会被裁到两位（不打到平台）", () => {
+    //: 平台价格最多两位小数；三位以上提交可能被拒。
+    expect(applyBatchRule(33.333, { mode: "delta", operand: 0 })).toBe(33.33);
+    expect(applyBatchRule(10, { mode: "scale", factor: 1.1111, operand: 0 })).toBe(11.11);
+  });
+
+  it("`fixed` 模式同样收敛两位", () => {
+    expect(applyBatchRule(5, { mode: "fixed", operand: 19.999 })).toBe(20);
+  });
+
+  it("空值仍按缺值口径跳过（不因四舍五入把 null 变成 0）", () => {
+    expect(applyBatchRule(null, { mode: "delta", operand: 5 })).toBeNull();
   });
 });
