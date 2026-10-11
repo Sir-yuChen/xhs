@@ -398,6 +398,17 @@ def test_live_keys_are_real_read_points():
             "backend.app.services.note_publish_service",
             "_allow_duplicate_goods_publish",
         ),
+        #: ⚠️ 这条的读点形态与上面四条**不同**（2026-10-11 补）：前四条是「模块里有个
+        #: 私有函数包了一层」，而这条直接在**端点里**调
+        #: `settings_svc.live_int(db, uid, "xhs_image_upload_parallelism")` ——
+        #: 键名字面量就写在端点函数体里。
+        #: ⇒ 读点 = 那个端点的**调用方函数**（守卫是「函数体里找得到键名」，不是
+        #: 「谁的实现里通用地读配置」）。写 `settings_service.live_int` 会被守卫判红：
+        #: 它是通用读点，函数体里没有这个键名（实测踩过）。
+        "xhs_image_upload_parallelism": (
+            "backend.app.api.platforms.xhs.qianfan.picture_space",
+            "picture_space_upload_batch",
+        ),
     }
     assert set(read_points) == set(settings_service.LIVE_KEYS), (
         "LIVE_KEYS 与测试里的读点映射必须一一对应：新增读点要两边一起加"

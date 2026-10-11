@@ -1,109 +1,123 @@
-"""千帆 shared —— 跨域共用的常量、辅助函数与第三方 import
+"""千帆 shared —— 跨域共用的常量、辅助函数与**转发面 import**。
 
 由 `qianfan.py`（6057 行 / 65 路由）按域拆分而来，**URL 与前缀一条未改**。
 路由前缀由 `__init__.py` 的 `router` 统一挂载（仍是 `/xhs/qianfan`）。
+
+## ⚠️ 这个文件里的 import **大多不是给自己用的**
+
+拆包把「一个文件的 import」变成「五个文件的 import」。原来大家同处一模块，
+`get_db` / `BaseModel` / 各 model / 各 service 谁用谁取；拆开后若让每个子模块
+各自重复 import 一遍，会出现 **5 份同样的 import 清单**（改一处漏四处）。
+
+所以这里统一收口：本文件 import 一次 → 子模块 `from ._shared import (...)`。
+代价是本文件的 `Any` / `quote` / `BaseModel` 等**在本文件里确实没被引用**——
+它们是**给子模块的转发面**，不是死 import。
+
+`test_no_unused_imports.py` 只认「本文件是否用到」，故整段 import 标 `# noqa`
+并写明原因（守卫要求的正规做法）。**不要**因为守卫报红就把它们删掉——
+删了子模块会成片 `ImportError`。
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
 
-from __future__ import annotations
+from __future__ import annotations  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-import json
+import json  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-import logging
+import logging  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-import mimetypes
+import mimetypes  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-import shutil
+import shutil  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from datetime import datetime
+from datetime import datetime  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from urllib.parse import quote
+from urllib.parse import quote  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from pathlib import Path
+from pathlib import Path  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from types import SimpleNamespace
+from types import SimpleNamespace  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from typing import Any, Optional
+from typing import Any, Optional  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-import requests
+import requests  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from fastapi import APIRouter, Body, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, status  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
 from backend.app.adapters.xhs.qianfan_api_adapter import (
     get_qianfan_api_adapter_factory,  # noqa: F401  重导出：`from ...xhs.qianfan import ...` 与测试打桩继续有效
 )
 
-from backend.app.core.database import get_db
+from backend.app.core.database import get_db  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from backend.app.core.deps import get_current_user, get_owned_active_account
+from backend.app.core.deps import get_current_user, get_owned_active_account  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from backend.app.core.time import shanghai_now
+from backend.app.core.time import shanghai_now  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from backend.app.api.ai import get_image_ai_client, get_text_ai_client
+from backend.app.api.ai import get_image_ai_client, get_text_ai_client  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from backend.app.services.ai_service import ImageAiClient, OpenAICompatibleTextClient
+from backend.app.services.ai_service import ImageAiClient, OpenAICompatibleTextClient  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
 from backend.app.services.business_provider_keys import (
     BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE,
     BusinessKey,
-)
+)  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from backend.app.services import detail_image_prompt, image_prompt
+from backend.app.services import detail_image_prompt, image_prompt  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from backend.app.services.llm_gateway_client import _type_satisfies
+from backend.app.services.llm_gateway_client import _type_satisfies  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from backend.app.models.material import MaterialFolder
+from backend.app.models.material import MaterialFolder  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from backend.app.services.material_scan_service import is_safe_material_path
+from backend.app.services.material_scan_service import is_safe_material_path  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from backend.app.services.media_generation import _media_dir
+from backend.app.services.media_generation import _media_dir  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from backend.app.models.platform_account import PlatformAccount
+from backend.app.models.platform_account import PlatformAccount  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from backend.app.models.note import Note, NoteAsset
+from backend.app.models.note import Note, NoteAsset  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from backend.app.models.order import AfterSale, Order
+from backend.app.models.order import AfterSale, Order  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from backend.app.models.shop import NoteGoods
+from backend.app.models.shop import NoteGoods  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from backend.app.models.task import Task
+from backend.app.models.task import Task  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from backend.app.services.shop_health_service import check_account_health
+from backend.app.services.shop_health_service import check_account_health  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from backend.app.services import scheduled_job_runner, sync_task_service
+from backend.app.services import scheduled_job_runner, sync_task_service  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from backend.app.services import order_sync_service
+from backend.app.services import order_sync_service  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from backend.app.services import shop_goods_sync_service
+from backend.app.services import shop_goods_sync_service  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from backend.app.services import shop_products_service
+from backend.app.services import shop_products_service  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from backend.app.services import shop_item_operate_service as operate_service
+from backend.app.services import shop_item_operate_service as operate_service  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from backend.app.services import shop_draft_package as draft_package
+from backend.app.services import shop_draft_package as draft_package  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from backend.app.services import shop_draft_service as draft_service
+from backend.app.services import shop_draft_service as draft_service  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
 from backend.app.services.job_registry import (
     JOB_KEY_SHOP_GOODS_SYNC,
     JOB_KEY_ORDER_SYNC,
-)
+)  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
 from backend.app.services.picture_space_service import (
     MATERIAL_ORDER_FIELDS as MATERIAL_ORDER_FIELDS,
-)
+)  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
 from backend.app.services.note_queue_service import (
     SOURCE_ACCOUNT_CARD_GOODS_SYNC,
     SOURCE_ACCOUNT_CARD_ORDER_SYNC,
-)
+)  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
 from backend.app.services.sync_task_service import (
     ABSOLUTE_PAGE_CAP,
@@ -113,17 +127,17 @@ from backend.app.services.sync_task_service import (
     SHOP_GOODS_SYNC_TASK_TYPE,
     SYNC_MODE_AUTO,
     SYNC_SCOPE_FULL,
-)
+)  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from backend.app.services.note_cleanup_service import CandidateQuery, list_candidates
+from backend.app.services.note_cleanup_service import CandidateQuery, list_candidates  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
 from backend.app.services.shop_binding_service import (
     get_shop_state,
     has_ark_session,
     synced_note_count,
-)
+)  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from backend.app.models.user import User
+from backend.app.models.user import User  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
 logger = logging.getLogger(__name__)
 

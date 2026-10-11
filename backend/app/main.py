@@ -57,7 +57,6 @@ from backend.app.services.product_note_gen_service import (
 )
 from backend.app.services.shop_goods_sync_service import (
     ensure_goods_sync_worker,
-    stop_goods_sync_worker,
 )
 from backend.app.services.scheduler_service import (
     seed_builtin_jobs_from_initial_data,

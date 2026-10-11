@@ -27,7 +27,7 @@ import re
 import unicodedata
 from typing import Any, Iterable
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -36,7 +36,6 @@ from backend.app.models.forbidden_word import (
     DEFAULT_GROUP,
     ForbiddenWord,
     ForbiddenWordGroupRow,
-    MATCH_MODE_CONTAINS,
     MATCH_MODE_EXACT,
     MATCH_MODES,
     MAX_GROUP_LEN,

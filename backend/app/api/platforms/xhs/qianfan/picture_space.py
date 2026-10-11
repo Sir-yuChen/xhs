@@ -950,6 +950,13 @@ class PictureSpaceUploadBatchRequest(BaseModel):
     #: 覆盖配置的并发数（缺省 0 = 读 `xhs_image_upload_parallelism`）。
     concurrency: int = Field(default=0, ge=0, le=32)
 
+    #: ⚠️ `extra="forbid"`（2026-10-11 由 `test_qianfan_request_models_all_forbid_unknown_fields`
+    #: 抓出补齐）：Pydantic 默认 `ignore` 会**静默丢弃**未知字段 —— 「挂链笔记数筛选
+    #: 未生效」那类事故就是这么来的（跑着的后端模型里没有新字段，参数被悄悄吞掉，
+    #: 表现与代码写错一模一样）。加 forbid ⇒ 新旧进程不匹配在第一跳就 422 炸出声。
+    model_config = ConfigDict(extra="forbid")
+
+
 @router.post("/picture-space/upload-batch")
 def picture_space_upload_batch(
     payload: PictureSpaceUploadBatchRequest,

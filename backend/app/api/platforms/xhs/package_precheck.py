@@ -26,6 +26,11 @@ import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+#: ⚠️ `Any` 是**真缺陷修复**（2026-10-11，未定义名字守卫抓到）：
+#: 视频抽帧的内层函数 `def _scan_video_one(vp: str) -> dict[str, Any]` 用了它，
+#: 但本文件从未 import ⇒ 一旦有视频进入预检（`video_items` 非空）就 `NameError`，
+#: 整条 `/xhs/package-precheck` 500。纯图片的包不触发，所以一直没被发现。
+from typing import Any
 
 from fastapi import (
     APIRouter,

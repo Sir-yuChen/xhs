@@ -39,7 +39,6 @@ from backend.app.services.shop_draft_package import (
     DIR_VIDEO,
     IMAGE_EXTS,
     MAX_IMAGE_BYTES,
-    PackageError,
     VIDEO_EXTS,
 )
 

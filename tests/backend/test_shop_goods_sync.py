@@ -365,22 +365,33 @@ def test_qianfan_request_models_all_forbid_unknown_fields():
     ⚠️ 断言的是**全部**模型（枚举本模块的 `BaseModel` 子类），不是只挑 `ShopItemsRequest`
     —— 只测一个的话，下次新增模型漏加 forbid 照样静默。
     """
+    import importlib
     import inspect
+    import pkgutil
 
     from pydantic import BaseModel
 
-    from backend.app.api.platforms.xhs import qianfan as qf
+    from backend.app.api.platforms import xhs as xhs_pkg
 
-    models = {
-        name: obj
-        for name, obj in vars(qf).items()
-        if inspect.isclass(obj)
-        and issubclass(obj, BaseModel)
-        and obj is not BaseModel
-        and obj.__module__ == qf.__name__
-        # 响应模型（只出不进）不受这条约束：未知字段不会被客户端传进来。
-        and not name.endswith(("Response", "Result"))
-    }
+    qf = importlib.import_module("backend.app.api.platforms.xhs.qianfan")
+
+    #: ⚠️ **必须遍历整包**（2026-10-11 拆包后修）：原来写死 `vars(qf)` +
+    #: `obj.__module__ == qf.__name__`，`qianfan` 变包之后模型全在子模块里
+    #: （`__module__` 是 `...qianfan.goods` 之类）⇒ 枚举结果**空集**，
+    #: 守卫自己就先炸「没找到请求模型」。改成扫包内全部子模块。
+    models: dict[str, type[BaseModel]] = {}
+    for info in pkgutil.iter_modules(qf.__path__):
+        sub = importlib.import_module(f"{qf.__name__}.{info.name}")
+        for name, obj in vars(sub).items():
+            if (
+                inspect.isclass(obj)
+                and issubclass(obj, BaseModel)
+                and obj is not BaseModel
+                and obj.__module__ == sub.__name__
+                # 响应模型（只出不进）不受这条约束：未知字段不会被客户端传进来。
+                and not name.endswith(("Response", "Result"))
+            ):
+                models[name] = obj
     assert models, "没找到请求模型 —— 守卫自己失效了"
     missing = [
         name for name, cls in models.items() if cls.model_config.get("extra") != "forbid"
