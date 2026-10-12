@@ -602,6 +602,51 @@ def test_goods_note_sync_runs_only_the_ark_source(creator_env, monkeypatch):
     assert len(FakeCreatorAdapter.calls) == creator_calls_before
 
 
+def test_ark_source_hydrates_detail_with_its_own_credentials(creator_env):
+    """**只登千帆（账号没有 www 会话）** ⇒ ark 源的详情补齐用**源自己的凭证**（2026-10-12）。
+
+    这是本次改动的**端到端主契约**：`ark` 条目自带 explore 地址 + `xsec_token`
+    ⇒ `_sync_source` 必须自己造 PC 适配器来打详情，**不能因为 `www_adapter is None`
+    就一条都不补**（旧行为：只登千帆的账号，商业笔记永远没有正文）。
+
+    ⚠️ 夹具用 `creator_env`（**有 ark 令牌**）：`creator_env_no_ark` 连千帆票都没有，
+    会在 `_note_sources` 的硬门禁就被拦下（那是另一个用例的事）。这里要的是
+    「有千帆票、但**没有 www 会话**」那一格 —— 删掉 www 通道即可复现。
+
+    钉两件事：① 详情真被打了（旧实现这里是空列表）；② 正文落库。
+    """
+    FakeQianfanAdapter.list_entries = [_ark_note("ARK-H1", xsec_token="ARK-TK-H1")]
+    FakePcAdapter.detail_calls = []
+    _, account_id, user_id, SessionLocal = creator_env
+    # 删掉 www 通道（模拟「只登千帆」的账号）—— ark 通道保留。
+    db = SessionLocal()
+    try:
+        from backend.app.models import AccountCookieVersion
+
+        for row in db.scalars(select(AccountCookieVersion)).all():
+            if getattr(row, "channel", "") == "www":
+                db.delete(row)
+        db.commit()
+    finally:
+        db.close()
+
+    result = nss.run_note_sync(account_id, user_id=user_id, only=nss.SOURCE_ARK)
+    assert result["status"] == sts.STATUS_DONE, result
+
+    # ① 详情请求真发出去了（旧实现这里是 0 —— 本用例的全部意义）。
+    assert FakePcAdapter.detail_calls, "只登千帆时也必须打详情（用源自己的令牌）"
+    assert any("ARK-H1" in url for url in FakePcAdapter.detail_calls), (
+        FakePcAdapter.detail_calls
+    )
+    db = SessionLocal()
+    try:
+        note = db.scalars(select(Note).where(Note.note_id == "ARK-H1")).one()
+        # ② 正文落库（列表不带正文，这一条只可能来自详情）。
+        assert note.content == "详情正文 ARK-H1", note.content
+    finally:
+        db.close()
+
+
 def test_goods_note_sync_requires_ark_token(creator_env_no_ark):
     """商品笔记任务的硬门禁是 **ark 令牌**（§44）：没有 ⇒ 结构化失败 + **零平台请求**。
 
@@ -666,6 +711,68 @@ def test_ark_merge_never_erases_existing_content(creator_env, monkeypatch):
         assert note.title == "已有标题"
         assert note.published is True  # 只升不降（§19.12）
         assert note.raw_json["ark"]["likes"] == 3
+    finally:
+        db.close()
+
+
+def test_ark_note_flag_maps_to_note_category(creator_env):
+    """千帆条目的 `note_flag == "goods_note"` ⇒ `note_category="goods"`（2026-10-12 抓包）。
+
+    这是「商业笔记 vs 普通笔记」的**平台原生判据** —— 不是本地推的。列表返回里
+    自带 `note_flag`，所以类型字段是**同步时免费拿到**的，不是第二份真相源。
+    """
+    _, account_id, user_id, SessionLocal = creator_env
+
+    FakeQianfanAdapter.list_entries = [
+        _ark_note("C-G1"),  # 夹具带 note_flag="goods_note"
+        {**_ark_note("C-N1"), "note_flag": ""},  # 平台没报 flag ⇒ 不写分类（缺值不造）
+    ]
+    result = nss.run_note_sync(account_id, user_id=user_id, only=nss.SOURCE_ARK)
+    assert result["status"] == sts.STATUS_DONE, result
+
+    db = SessionLocal()
+    try:
+        goods = db.scalars(select(Note).where(Note.note_id == "C-G1")).one()
+        assert goods.note_category == "goods", goods.note_category
+        plain = db.scalars(select(Note).where(Note.note_id == "C-N1")).one()
+        assert plain.note_category == "", (
+            "平台没报 note_flag ⇒ 分类留空（缺值不造；硬约束⑤）"
+        )
+    finally:
+        db.close()
+
+
+def test_ark_note_category_refreshes_on_existing_row(creator_env):
+    """命中既有行时按当前数据源刷新分类（普通→商业转换要跟着变）。
+
+    与 `note_data_service._upsert_note` 的「覆盖更新时按当前数据源刷新」同一口径。
+    """
+    _, account_id, user_id, SessionLocal = creator_env
+    # 先造一条「本地已落库、分类为空」的行。
+    db = SessionLocal()
+    try:
+        db.add(
+            Note(
+                user_id=user_id,
+                platform="xhs",
+                platform_account_id=account_id,
+                note_id="C-R1",
+                title="已有标题",
+                note_category="",
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    FakeQianfanAdapter.list_entries = [_ark_note("C-R1")]
+    result = nss.run_note_sync(account_id, user_id=user_id, only=nss.SOURCE_ARK)
+    assert result["status"] == sts.STATUS_DONE, result
+
+    db = SessionLocal()
+    try:
+        note = db.scalars(select(Note).where(Note.note_id == "C-R1")).one()
+        assert note.note_category == "goods", note.note_category
     finally:
         db.close()
 

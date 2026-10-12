@@ -235,7 +235,18 @@ def _note_sources(
         ark_cookies = qianfan_cookies_for_account(db, account.id)
         if not has_ark_token(ark_cookies):
             return []
-        return [{"source": SOURCE_ARK, "kind": "ark", "cookies": ark_cookies}]
+        # `ark_pc`：**ark 条目自带 explore 地址 + xsec_token**（2026-10-12 抓包实测：
+        # `goods-note/list` 的 `note_infos[].xsec_token`）⇒ 详情补齐不必借 www 会话，
+        # 用这条源的凭证自己走 explore SSR（`hydrate_note_detail` 的取数路由）。
+        # 值为 `True` 而不是适配器对象：适配器在 `_sync_source` 里按 kind 构造。
+        return [
+            {
+                "source": SOURCE_ARK,
+                "kind": "ark",
+                "cookies": ark_cookies,
+                "detail_with_own_token": True,
+            }
+        ]
 
     raise ValueError(
         f"未知的同步源 only={only!r}；已知取值：{SOURCE_CREATOR!r}（普通笔记）、"
@@ -630,12 +641,31 @@ def hydrate_note_detail(
     if account_cookies is None:
         account_cookies = _account_cookies(db, account.id, channel=CHANNEL_WWW)
     if not _has_web_session(account_cookies):
-        # 「暂不可用」不是「尝试过」：**不写** `hydrated_at`，用户补登 www 后仍会被补。
-        result.update(
-            status="no_session",
-            reason="该账号没有可用的网页版（www）会话，无法读取笔记详情",
-        )
-        return result
+        # ⚠️ **不再一律拦下**（2026-10-12 真机抓包结论，见下）：先看这条笔记能不能
+        # 用**它自带的** explore 地址 + `xsec_token` 取详情 —— 那条路只认令牌、
+        # **不认 www 会话**（`get_note_info_html` 一次 GET 拿全，§19.13.8 已实测）。
+        #
+        # 判据从「账号有没有 www 会话」改成「**这条笔记带没带令牌**」：
+        #
+        # * 带 token（典型：千帆列表返回里就有 `xsec_token`）⇒ 照常打详情，
+        #   **只登千帆的账号也能补齐商业笔记正文与图集** —— 这正是「两大业务线
+        #   隔离」要的效果（ark 源自给自足，不向 www 借会话）；
+        # * 不带 token 且没有 www 会话 ⇒ 仍给 `no_session`（一条请求都不发）。
+        #
+        # 旧实现按账号一刀切 ⇒ 只登千帆的账号每条都 `no_session`，正文永远补不到
+        # （真实库账号 8 的报障原文：「该账号没有可用的网页版（www）会话，无法读取
+        # 笔记详情」）—— 而令牌明明就在手上。
+        if "xsec_token=" not in url:
+            # 「暂不可用」不是「尝试过」：**不写** `hydrated_at`，用户补登 www 后仍会被补。
+            result.update(
+                status="no_session",
+                reason="该账号没有可用的网页版（www）会话，无法读取笔记详情",
+            )
+            return result
+        # 带令牌 ⇒ www 会话**不是必需**：匿名 / 千帆令牌都能读 SSR 详情。
+        # `account_cookies` 为空串时 `_build_pc_adapter` 也建得出适配器（请求头少几个
+        # cookie，SSR 页照样返回）—— 所以这里不提前返回，把判定权交给取数本身。
+        account_cookies = account_cookies or ""
 
     if adapter is None:
         if adapter_factory is None:
@@ -806,7 +836,11 @@ def sync_note_from_platform(
         return result
 
     limiter = get_rate_limiter()
-    if not limiter.wait_allow(f"{account.id}:www"):
+    # 限流键按**笔记类型**分线（2026-10-12）：商业笔记（`note_category="goods"`）走
+    # 千帆线，它与 www 是**两个独立额度**（平台风控按平台各自计），共用一个键会让
+    # 先跑的线把额度耗光、后跑的线干等；普通笔记仍走 `www` 键（行为不变）。
+    _lane = "ark" if str(getattr(note, "note_category", "") or "") == "goods" else "www"
+    if not limiter.wait_allow(f"{account.id}:{_lane}"):
         result.update(
             status="failed",
             reason="平台请求额度已满（等待 2 分钟仍未腾出），请稍后再试",
@@ -831,13 +865,20 @@ def sync_note_from_platform(
     # 拦的是**取数前提**而不是失败：缺令牌是用户可自救的（网页版登录 / 重新同步
     # 该笔记），所以给结构化 code + 可执行指引，不给「平台未返回内容」这种用户
     # 无法行动的归因（DEF-058）。
+    # ⚠️ **拦的是「完全没有取数前提」，不是「没有 www 会话」**（2026-10-12 修正）：
+    # 详情走 explore SSR，**只认笔记级 `xsec_token`、不认 www 会话**（§19.13.8 实测）。
+    # 令牌来自千帆列表（`goods-note/list` 的 `note_infos[].xsec_token`）⇒ 只登千帆
+    # 的账号也能读商业笔记详情。旧实现把「有令牌但没 www 会话」也拦成 `no_token`，
+    # 让用户去补一个**根本不需要**的登录 —— 归因错了（DEF-058 口径）。
+    #
+    # 真正要拦的是**本地没令牌**这一种（用户可自救：补齐登录 / 重新同步该笔记）。
     if "xsec_token=" not in _note_detail_url(note):
         result.update(
             status="no_token",
             reason=(
                 "这条笔记本地没有详情令牌（xsec_token），无法读取正文。"
-                "请先在网页版（xiaohongshu.com）登录该账号后重新同步这条笔记；"
-                "若为本地生成笔记，请先在商品笔记列表同步一次以补齐令牌。"
+                "请先同步一次千帆商品笔记列表（令牌随列表返回），"
+                "或在网页版（xiaohongshu.com）登录该账号后重新同步这条笔记。"
             ),
             code="NOTE_DETAIL_TOKEN_REQUIRED",
         )
@@ -2274,14 +2315,29 @@ def _normalize_ark_note(entry: dict[str, Any]) -> dict[str, Any]:
     两个**刻意的空缺**（不造假，硬约束⑤）：
     * ``content`` 恒为 "" —— 列表没有正文，靠 www 会话的详情回填补齐；
     * ``author_*`` 恒为 "" —— 响应没有作者块（买手笔记的作者不在店铺视角里）。
+
+    **笔记分类**（2026-10-12 抓包实测）：条目自带 `note_flag` —— 平台原生判据：
+
+    * ``"goods_note"`` ⇒ 商业笔记（挂链商品）⇒ 归一化成 ``note_category="goods"``；
+    * 其它 / 缺省 ⇒ 普通笔记。
+
+    这一个字段就是「商业笔记 vs 普通笔记」的**平台原生真相源** —— 不必另造判据，
+    也不必反推（反推 = 造第二份真相源；同 `note_type` 的纪律）。
     """
     # 指标转换委托 pc.py 唯一实现（`_metric`，缺值 0 的计数口径）。
     from backend.app.api.platforms.xhs.pc import _metric
+    from backend.app.models.note import (
+        NOTE_CATEGORY_DEFAULT,
+        NOTE_CATEGORY_GOODS,
+    )
 
     note_id = str(entry.get("note_id") or "").strip()
     xsec_token = str(entry.get("xsec_token") or "").strip()
     image = str(entry.get("note_image") or "").strip()
     publish_time = entry.get("publish_time")
+    #: `note_flag == "goods_note"` = 平台自报的商业笔记（2026-10-12 真机抓包）。
+    note_flag = str(entry.get("note_flag") or "").strip()
+    category = NOTE_CATEGORY_GOODS if note_flag == "goods_note" else NOTE_CATEGORY_DEFAULT
     return {
         "note_id": note_id,
         # 与 creator 源同一形态：explore URL + 笔记级 xsec_token（详情回填的探针要用）。
@@ -2306,6 +2362,10 @@ def _normalize_ark_note(entry: dict[str, Any]) -> dict[str, Any]:
         "timestamp": publish_time if isinstance(publish_time, (int, float)) else 0,
         # Carried through because the detail backfill needs it; never rendered.
         "xsec_token": xsec_token,
+        # 笔记分类（`goods` / 空）：平台原生 `note_flag` 的投影，供落库写
+        # `notes.note_category`（同步按钮按类型分流的判据）。
+        "note_category": category,
+        "note_flag": note_flag,
         # `goods_infos` 在 pc.py::_GOODS_CONTAINER_KEYS 里 —— 商品↔笔记映射的
         # 唯一有真值的来源（2026-09-19 实测，见 pc.py 常量注释）。
         "goods": _extract_goods(entry),
@@ -2457,6 +2517,11 @@ def _merge_ark_notes(db: Session, account: PlatformAccount, items: list[dict[str
                 # 同步链路落库 ⇒ 三方同步笔记（§25）。
                 note_type=NOTE_TYPE_SYNCED,
             )
+            # 笔记分类（2026-10-12）：千帆条目自带 `note_flag` ⇒ 写 `note_category`。
+            # 只在有真值时写（缺值不造，硬约束⑤）—— 新建行缺省是空分类。
+            category = str(normalized.get("note_category") or "").strip()
+            if category:
+                note.note_category = category
             # 千帆商品笔记 = 账号已在平台上发布的作品（设计 13 §19.12）：发布状态经
             # **唯一入口**写（§32.3.2），`published` 投影由入口同步维护。
             set_note_publish_status(note, PUBLISH_STATUS_PUBLISHED)
@@ -2488,6 +2553,11 @@ def _merge_ark_notes(db: Session, account: PlatformAccount, items: list[dict[str
             set_note_publish_status(note, PUBLISH_STATUS_PUBLISHED)
             # 只升不降（§25）：同步链路见过这条 ⇒ 三方同步笔记。
             note.note_type = NOTE_TYPE_SYNCED
+            # 笔记分类（2026-10-12）：按当前数据源刷新（`goods` / 空），与
+            # `note_data_service` 的「普通→商业转换时跟着变」同一口径。
+            category = str(normalized.get("note_category") or "").strip()
+            if category:
+                note.note_category = category
             if not note.title:
                 note.title = str(normalized.get("title") or "")
             if not note.content:
@@ -2611,6 +2681,23 @@ def _sync_source(
         )
 
         ark_adapter = get_qianfan_api_adapter_factory()(cookies)
+
+    # ⚠️ **商业笔记详情补齐用源自己的凭证**（2026-10-12 抓包结论）：ark 条目的
+    # explore 地址 + `xsec_token` 来自千帆列表（`goods-note/list`）⇒ 详情走 explore
+    # SSR 只认令牌、不认 www 会话（§19.13.8 实测）。旧实现把 ark 源的详情补齐也
+    # 绑在 `www_adapter` 上 ⇒ 只登千帆的账号永远补不到正文（用户报障原文：
+    # 「该账号没有可用的网页版（www）会话，无法读取笔记详情」）。
+    #
+    # 判据看**源**而不是账号：`source.get("detail_with_own_token")` 为真 ⇒ 借
+    # `www_adapter`，没有就自己造一个（PC 适配器对空 cookie 也建得出，SSR 页
+    # 匿名可读）。www 源（已移除）与 creator 源行为不变。
+    hydrate_cookies = www_cookies
+    hydrate_adapter = www_adapter
+    if source.get("detail_with_own_token") and hydrate_adapter is None:
+        from backend.app.api.platforms.xhs.pc import get_xhs_pc_api_adapter_factory
+
+        hydrate_cookies = cookies
+        hydrate_adapter = get_xhs_pc_api_adapter_factory()(cookies)
 
     stored = 0
     goods_stored = 0
@@ -2819,8 +2906,8 @@ def _sync_source(
             db,
             account,
             page_note_ids,
-            cookies=www_cookies,
-            adapter=www_adapter,
+            cookies=hydrate_cookies,
+            adapter=hydrate_adapter,
             limiter=limiter,
             task_id=task.id,
             on_progress=_on_page_hydrate,
@@ -3172,6 +3259,9 @@ def _sync_with_task(
         warnings.append("本次为商品笔记同步：不做账号级正文补齐与对账（由「同步笔记」承担）")
     elif www_adapter is None:
         if stored:
+            # 2026-10-12：ark 条目自带令牌 ⇒ 详情补齐走它自己的凭证（见 `_sync_source`
+            # 的 `detail_with_own_token`）。所以这里只有在**这批笔记都没带令牌**时
+            # 才如实说一句 —— 不再按「账号有没有 www 会话」一刀切。
             warnings.append("该账号没有网页版（www）会话，本轮同步的笔记未补正文与图集")
     else:
         # ⚠️ **不再刷新详情令牌**（2026-09-28 用户口径：「移除兜底，不允许出现翻页

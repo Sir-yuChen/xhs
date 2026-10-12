@@ -633,6 +633,31 @@ def test_sync_note_overwrites_stale_content(api_env):
     assert _limiter.keys == [f"{account_id}:www"]
 
 
+def test_sync_goods_note_uses_the_ark_rate_lane(api_env):
+    """商业笔记（`note_category="goods"`）的单条同步走 **`ark` 限流键**（2026-10-12）。
+
+    千帆线与 www 是**两个独立平台额度**（风控各自计）—— 共用一个键会让先跑的线
+    把额度耗光、后跑的线干等。判据是**笔记分类**（平台原生 `note_flag` 的投影），
+    不是触发方式（手动 / 定时走同一条路）。
+    """
+    headers, SessionLocal, account_id, _ = api_env
+    db = SessionLocal()
+    try:
+        account = db.get(PlatformAccount, account_id)
+        note = _add_note(db, account, HEX_NOTE_ID)
+        note.note_category = "goods"
+        db.commit()
+        note_id = note.id
+    finally:
+        db.close()
+
+    _sync_via_button(client, headers, note_id)
+    entry = _sync_finished_entry(client, headers, note_id)
+
+    assert entry["ok"] is True, entry
+    assert _limiter.keys == [f"{account_id}:ark"], _limiter.keys
+
+
 def test_sync_note_keeps_local_when_detail_empty(api_env):
     """详情正文为空 ⇒ **不抹**本地正文（不假装更新，也不毁数据）。"""
     headers, SessionLocal, account_id, detail = api_env
@@ -657,15 +682,21 @@ def test_sync_note_keeps_local_when_detail_empty(api_env):
 
 
 def test_sync_note_without_web_session_reports_no_session(api_env):
-    """账号没有 www 会话 ⇒ **队列照跑、快照给 `no_session`**（预期内取不到，不是接口异常）。
+    """账号没有 www 会话、**且这条笔记没有令牌** ⇒ 快照给 `no_session`（一条请求都不发）。
 
-    ⚠️ 2026-09-25 队列化前后**响应分层变了**：改造前端点 200 + `sync.status ==
-    "no_session"`；改造后端点 200 + 入队回执，`no_session` 只在快照 `finished`
-    里给一次（与批量同步同一个出口）。`code=WEB_SESSION_REQUIRED` 仍是前端安静
-    降级白名单里的既有 code（不新造）。
+    ⚠️ 2026-10-12 **判据上移了一层**（真机抓包结论）：详情走 explore SSR，只认笔记级
+    `xsec_token`、**不认 www 会话**。所以「没有 www 会话」本身**不再**是拦下理由 ——
+    真正拦的是「**既没有 www 会话、这条笔记也没有令牌**」这一个组合。
+
+    本用例守的正是那个组合的**后半段**：`_add_note` 造的行带令牌（夹具按真实形态给
+    `TK-TEST`）⇒ 该走详情、不该被拦。要复现「两条都没有」必须**显式去掉令牌**
+    （见 `test_sync_note_without_token_and_session_is_blocked`）。
+
+    被取代的原文（2026-09-25 口径，保留备查，不静默删除）：
+    「账号没有 www 会话 ⇒ 队列照跑、快照给 `no_session`」。
     """
     headers, SessionLocal, account_id, _ = api_env
-    # 把账号的 www 令牌删掉（只留 creator 通道）
+    # 把账号的 www 令牌删掉（只留 creator 通道）**且**这条笔记不带令牌。
     db = SessionLocal()
     try:
         from backend.app.models import AccountCookieVersion
@@ -674,7 +705,7 @@ def test_sync_note_without_web_session_reports_no_session(api_env):
         for row in db.scalars(select(AccountCookieVersion)).all():
             db.delete(row)
         db.commit()
-        note = _add_note(db, account, HEX_NOTE_ID)
+        note = _add_note(db, account, HEX_NOTE_ID, raw={"note_url": "", "xsec_token": ""})
         note_id = note.id
     finally:
         db.close()
@@ -683,12 +714,44 @@ def test_sync_note_without_web_session_reports_no_session(api_env):
 
     assert body["sync"]["status"] == "queued"
     entry = _sync_finished_entry(client, headers, note_id)
+    # 「取数前提完全没有」⇒ 拦下且给可执行指引（`no_token` 是这个组合真正该报的状态：
+    # 令牌缺失才是用户能自救的那一件）。
     assert entry["status"] == "failed", entry
-    assert entry["code"] == "WEB_SESSION_REQUIRED", entry
-    # no_session 不写 hydrated_at（账号级、可恢复）
+    assert entry["code"] == "NOTE_DETAIL_TOKEN_REQUIRED", entry
+    # 不写 hydrated_at（可恢复）
+
+
+def test_sync_note_without_web_session_but_with_token_succeeds(api_env):
+    """**只登千帆、没有 www 会话，但笔记带令牌** ⇒ 详情照样补齐（2026-10-12 核心口径）。
+
+    这是本次改动的**主契约**：ark 条目的 explore 地址 + `xsec_token` 来自千帆列表
+    ⇒ 详情不必借 www 会话。旧实现按账号一刀切 ⇒ 用户在真实库里看到
+    「该账号没有可用的网页版（www）会话，无法读取笔记详情」，而令牌明明就在手上。
+    """
+    headers, SessionLocal, account_id, _ = api_env
+    # 删掉 www 令牌（模拟「只登千帆」的账号）
     db = SessionLocal()
     try:
-        assert db.get(Note, note_id).hydrated_at is None
+        from backend.app.models import AccountCookieVersion
+
+        account = db.get(PlatformAccount, account_id)
+        for row in db.scalars(select(AccountCookieVersion)).all():
+            db.delete(row)
+        db.commit()
+        # 夹具默认给令牌（真实形态：千帆列表返回里带 `xsec_token`）。
+        note = _add_note(db, account, HEX_NOTE_ID)
+        note_id = note.id
+    finally:
+        db.close()
+
+    _sync_via_button(client, headers, note_id)
+    entry = _sync_finished_entry(client, headers, note_id)
+
+    assert entry["ok"] is True, entry
+    db = SessionLocal()
+    try:
+        # 详情被真的打到（假适配器给的正文落了库）⇒ 证明 www 会话不是必需。
+        assert db.get(Note, note_id).content == "平台最新正文"
     finally:
         db.close()
 

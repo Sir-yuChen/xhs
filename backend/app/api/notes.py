@@ -406,6 +406,11 @@ def _serialize_note(db: Session, note: Note, relations: Optional[_NoteRelations]
         # 内容库详情卡的「同步」按钮**只对 synced 渲染**（本地笔记是采集来的别人
         # 的笔记，拉平台最新内容没有意义）。列 not null，不存在第三态。
         "note_type": note.note_type,
+        # 笔记分类（2026-10-12）：`goods` = 商业笔记（千帆挂链商品）/ `normal` =
+        # 普通笔记 / `""` = 线上同步或采集来的内容。与 `note_type`（答「谁搬来的」：
+        # synced / local）**正交** —— 本列答「这条属于平台的哪类笔记」。
+        # 同步按钮据此走**不同的同步逻辑线**（商业笔记走千帆线）。
+        "note_category": note.note_category or "",
         # 话题（设计 13 §34）：走 `note_topics` 关系表 join `topics` 字典表
         # （`[{id, name, color}]`；`topics_json` 列已删，关系表是唯一读取路径）。
         # 空 = 这条笔记没有话题（不是错误）。取自 `relations`（§41.4 批量预取）。
