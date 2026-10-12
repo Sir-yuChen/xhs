@@ -33,9 +33,11 @@ from backend.app.models import (
     Note,
     NoteDatacenterStat,
     PlatformAccount,
+    ScheduledJobLog,
     Task,
     User,
 )
+from backend.app.models.scheduled_job import LOG_SUCCESS
 from backend.app.services import no_traffic_cleanup_service as ncs
 from backend.app.services.account_service import CHANNEL_ARK, CHANNEL_CREATOR
 from backend.app.services.shop_binding_service import set_shop_state
@@ -1158,6 +1160,52 @@ def test_thread_path_also_records_the_retention_of_the_run(tmp_path, monkeypatch
         assert log.deleted == 1 and log.skipped == 1
         assert log.after_total == log.before_total - log.deleted, "清理后 = 前 - 删除"
         assert log.status in ("done", "failed")
+    finally:
+        db.close()
+
+
+def test_thread_path_also_writes_a_scheduled_job_log(tmp_path, monkeypatch):
+    """线程路径（页面按钮）也要落**定时任务日志**（2026-10-13 用户口径）。
+
+    清理任务走 `_run_in_thread` 这条线程路径时，除了独立日志表
+    `no_traffic_cleanup_logs`，还必须写一条 `scheduled_job_logs`（任务中心可见），
+    且收尾成 `success` 终态 + `manual.no_traffic_cleanup` 键 + `task_id` 挂载。
+
+    ⚠️ 变异逼出来的判据：把 `_run_in_thread` 里的 `job_log = ScheduledJobLog(...)`
+    整段删掉，独立日志表照写、其余用例照绿 —— 只有这条会红。所以判据必须盯
+    「线程跑完之后 `scheduled_job_logs` 表里有没有那一行」。
+    """
+    account_id, SessionLocal = _setup(tmp_path, monkeypatch)
+
+    db = SessionLocal()
+    try:
+        task = Task(
+            user_id=1,
+            platform="xhs",
+            task_type=ncs.CLEANUP_TASK_TYPE,
+            status=ncs.STATUS_PENDING,
+            payload={"account_id": account_id, "note_ids": [], "batch_limit": 20},
+        )
+        db.add(task)
+        db.commit()
+        task_id = task.id
+    finally:
+        db.close()
+
+    ncs._run_in_thread(account_id, None, None, 20, task_id, 1, None)
+
+    db = SessionLocal()
+    try:
+        job_logs = db.scalars(select(ScheduledJobLog)).all()
+        assert len(job_logs) == 1, "线程路径（页面按钮）必须落一条定时任务日志"
+        jl = job_logs[0]
+        assert jl.job_key == "manual.no_traffic_cleanup", "键名要能对上任务中心"
+        assert jl.job_name == "清理无流量笔记", "显示名要可读"
+        assert jl.trigger_type == "manual", "手动触发"
+        assert jl.task_id == task_id, "定时任务日志要挂到它服务的那条任务行上"
+        assert jl.status == LOG_SUCCESS, "清理成功 ⇒ 定时任务日志也要收尾成 success"
+        assert jl.finished_at is not None, "要有终态时间"
+        assert jl.progress == 100, "收尾进度要打满"
     finally:
         db.close()
 
