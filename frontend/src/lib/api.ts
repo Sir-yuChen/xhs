@@ -13,6 +13,10 @@ import type {
   ShopItemOperateAction,
   ShopItemOperateResult,
   ShopItemsSyncResult,
+  SystemUpdateDownloadResult,
+  SystemUpdateInfo,
+  SystemUpdateInstallResult,
+  SystemVersionInfo,
   XhsItemEditPayload,
   XhsItemEditResult,
   XhsItemPolishResult,
@@ -4005,6 +4009,32 @@ export async function confirmXhsPhoneLogin(payload: {
 
 export async function fetchNotifications(params?: { unread?: boolean; page?: number; page_size?: number }): Promise<Paginated<AppNotification>> {
   const response = await http.get<Paginated<AppNotification>>("/notifications", { params });
+  return response.data;
+}
+
+// ── 系统更新（设计 36，2026-10-13）───────────────────────────────────────
+export async function fetchAppVersion(): Promise<SystemVersionInfo> {
+  const response = await http.get<SystemVersionInfo>("/system/version");
+  return response.data;
+}
+
+export async function checkSystemUpdate(): Promise<SystemUpdateInfo> {
+  const response = await http.get<SystemUpdateInfo>("/system/update/check");
+  return response.data;
+}
+
+export async function downloadSystemUpdate(payload: { url: string; version: string }): Promise<SystemUpdateDownloadResult> {
+  const response = await http.post<SystemUpdateDownloadResult>("/system/update/download", payload);
+  return response.data;
+}
+
+export async function installSystemUpdate(path: string): Promise<SystemUpdateInstallResult> {
+  const response = await http.post<SystemUpdateInstallResult>("/system/update/install", { path });
+  return response.data;
+}
+
+export async function fetchNotificationUnreadCount(): Promise<{ unread: number }> {
+  const response = await http.get<{ unread: number }>("/notifications/unread-count");
   return response.data;
 }
 

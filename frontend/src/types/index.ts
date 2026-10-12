@@ -2467,3 +2467,38 @@ export type RecommendItemTitleResult = {
   title: string;
   raw?: Record<string, unknown>;
 };
+
+// ─────────────────────────── 系统更新（设计 36，2026-10-13） ───────────────────────────
+
+/** `GET /api/system/version`：当前版本 + 更新源配置状态（免鉴权）。 */
+export type SystemVersionInfo = {
+  version: string;
+  source_configured: boolean;
+  platform: string;
+};
+
+/** `GET /api/system/update/check`：一次「检查更新」的结果。 */
+export type SystemUpdateInfo = {
+  current: string;
+  latest: string;
+  has_update: boolean;
+  notes: string;
+  download_url: string;
+  download_size: number;
+  source_configured: boolean;
+};
+
+/** `POST /api/system/update/download` 结果。 */
+export type SystemUpdateDownloadResult = {
+  ok: boolean;
+  path: string;
+  size: number;
+  message: string;
+};
+
+/** `POST /api/system/update/install` 结果。 */
+export type SystemUpdateInstallResult = {
+  ok: boolean;
+  launching: boolean;
+  message: string;
+};

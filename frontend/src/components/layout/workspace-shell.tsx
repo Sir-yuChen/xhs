@@ -12,10 +12,13 @@ import {
   Badge,
   Button,
   Dropdown,
+  Empty,
   Layout,
   List,
   Menu,
+  Segmented,
   Space,
+  Tag,
   Typography,
 } from "antd";
 import type { MenuProps } from "antd";
@@ -25,8 +28,15 @@ import { useLocation, useNavigate } from "react-router-dom";
 
 import { useAuth } from "../../hooks/use-auth";
 import { useThemeMode } from "../../app/providers";
-import { fetchNotifications, markAllNotificationsRead, markNotificationRead } from "../../lib/api";
+import {
+  fetchNotificationUnreadCount,
+  fetchNotifications,
+  markAllNotificationsRead,
+  markNotificationRead,
+} from "../../lib/api";
 import type { AppNotification } from "../../types";
+import { notificationTargetPath } from "../../lib/notification-routes";
+import { UpdateDialog } from "../system/update-dialog";
 
 const { Sider, Header, Content } = Layout;
 const { Text } = Typography;
@@ -185,17 +195,26 @@ export function WorkspaceShell({
   const [collapsed, setCollapsed] = useState(false);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
+  //: 通知下拉的过滤档（R2-C 2026-10-13）：全部 / 未读。（按来源/等级的细分过滤走
+  //: 后端 `source_type` / `level` 参数，下拉里给「未读」这一个最常用的粗筛。）
+  const [notifyFilter, setNotifyFilter] = useState<"all" | "unread">("all");
 
   const c = useShellPalette();
   const isDark = c.isDark;
 
   const loadNotifications = useCallback(async () => {
     try {
-      const res = await fetchNotifications({ page_size: 20 });
+      // ⚠️ 列表与未读计数**分开取**（R2-C 2026-10-13）：
+      //   旧实现用「当页 20 条里未读的条数」当未读数 ⇒ 未读超过 20 条时恒显示 20（少算）。
+      //   未读数走后端 `GET /notifications/unread-count` 全量计数；列表只取本页。
+      const [res, countRes] = await Promise.all([
+        fetchNotifications(notifyFilter === "unread" ? { unread: true, page_size: 20 } : { page_size: 20 }),
+        fetchNotificationUnreadCount(),
+      ]);
       setNotifications(res.items);
-      setUnreadCount(res.items.filter((n) => !n.read).length);
+      setUnreadCount(countRes.unread);
     } catch { /* silent */ }
-  }, []);
+  }, [notifyFilter]);
 
   useEffect(() => {
     void loadNotifications();
@@ -205,6 +224,12 @@ export function WorkspaceShell({
 
   const handleMarkRead = async (id: number) => { await markNotificationRead(id); void loadNotifications(); };
   const handleMarkAllRead = async () => { await markAllNotificationsRead(); void loadNotifications(); };
+  //: 点击某条通知：标已读 + 跳到来源页（没落点则只标已读）。R2-C 2026-10-13。
+  const handleNotificationClick = async (n: AppNotification) => {
+    if (!n.read) await handleMarkRead(n.id);
+    const target = notificationTargetPath(n.source_type, n.source_id);
+    if (target) navigate(target);
+  };
   const handleMenuClick: MenuProps["onClick"] = ({ key }) => {
     if (onNavigate) onNavigate(key);
     else navigate(key);
@@ -232,26 +257,44 @@ export function WorkspaceShell({
   }, [mainItems, activePath, location.search]);
 
   const notificationDropdownContent = (
-    <div style={{ width: 360, background: c.dropBg, borderRadius: 8, border: `1px solid ${c.dropBorder}`, overflow: "hidden" }}>
+    <div style={{ width: 380, background: c.dropBg, borderRadius: 8, border: `1px solid ${c.dropBorder}`, overflow: "hidden" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", borderBottom: `1px solid ${c.dropBorder}` }}>
-        <Text strong style={{ fontSize: 14 }}>通知</Text>
-        {unreadCount > 0 && <Button type="link" size="small" onClick={() => void handleMarkAllRead()}>全部已读</Button>}
+        <Space size={8} align="center">
+          <Text strong style={{ fontSize: 14 }}>通知</Text>
+          {unreadCount > 0 && <Tag color="red" style={{ marginInlineEnd: 0 }}>{unreadCount} 未读</Tag>}
+        </Space>
+        <Space size={4} align="center">
+          <Segmented
+            size="small"
+            value={notifyFilter}
+            onChange={(v) => setNotifyFilter(v as "all" | "unread")}
+            options={[{ label: "全部", value: "all" }, { label: "未读", value: "unread" }]}
+          />
+          {unreadCount > 0 && <Button type="link" size="small" onClick={() => void handleMarkAllRead()}>全部已读</Button>}
+        </Space>
       </div>
       <div style={{ maxHeight: 400, overflowY: "auto" }}>
         {notifications.length === 0 ? (
-          <div style={{ padding: "32px 16px", textAlign: "center", color: c.dropEmptyText }}>暂无通知</div>
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={notifyFilter === "unread" ? "没有未读通知" : "暂无通知"} style={{ padding: "24px 0" }} />
         ) : (
           <List
             dataSource={notifications}
-            renderItem={(n) => (
-              <List.Item key={n.id} style={{ padding: "10px 16px", cursor: n.read ? "default" : "pointer", background: n.read ? "transparent" : c.dropUnreadBg, borderBottom: `1px solid ${c.borderSoft}` }} onClick={() => !n.read && void handleMarkRead(n.id)}>
-                <List.Item.Meta
-                  avatar={<span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: levelColor(n.level), marginTop: 6 }} />}
-                  title={<Text style={{ fontSize: 13 }}>{n.title}</Text>}
-                  description={<div>{n.body && <Text type="secondary" style={{ fontSize: 12, display: "block" }}>{n.body}</Text>}<Text type="secondary" style={{ fontSize: 11 }}>{new Date(n.created_at).toLocaleString("zh-CN")}</Text></div>}
-                />
-              </List.Item>
-            )}
+            renderItem={(n) => {
+              const target = notificationTargetPath(n.source_type, n.source_id);
+              return (
+                <List.Item
+                  key={n.id}
+                  style={{ padding: "10px 16px", cursor: target || !n.read ? "pointer" : "default", background: n.read ? "transparent" : c.dropUnreadBg, borderBottom: `1px solid ${c.borderSoft}` }}
+                  onClick={() => void handleNotificationClick(n)}
+                >
+                  <List.Item.Meta
+                    avatar={<span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: levelColor(n.level), marginTop: 6 }} />}
+                    title={<Text style={{ fontSize: 13 }}>{n.title}</Text>}
+                    description={<div>{n.body && <Text type="secondary" style={{ fontSize: 12, display: "block" }}>{n.body}</Text>}<Space size={6}><Text type="secondary" style={{ fontSize: 11 }}>{new Date(n.created_at).toLocaleString("zh-CN")}</Text>{target && <Text type="secondary" style={{ fontSize: 11 }}>· 点击查看</Text>}</Space></div>}
+                  />
+                </List.Item>
+              );
+            }}
           />
         )}
       </div>
@@ -357,6 +400,8 @@ export function WorkspaceShell({
           {children}
         </Content>
       </Layout>
+      {/* 系统更新弹窗（设计 36，2026-10-13）：打开软件即检查；有新版本强制弹窗 */}
+      <UpdateDialog />
     </Layout>
   );
 }
