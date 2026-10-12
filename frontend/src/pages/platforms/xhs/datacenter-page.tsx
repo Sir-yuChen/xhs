@@ -1245,6 +1245,7 @@ export function XhsDatacenterPage() {
 
       {/* 导入 xlsx 弹窗 */}
       <Modal
+        centered
         open={importOpen}
         title={`导入${CATEGORY_LABELS[importCategory]}数据`}
         onCancel={() => setImportOpen(false)}
@@ -1268,6 +1269,7 @@ export function XhsDatacenterPage() {
 
       {/* 同步弹窗 */}
       <Modal
+        centered
         open={syncOpen}
         title={`同步${CATEGORY_LABELS[syncCategory]}数据`}
         onCancel={() => setSyncOpen(false)}
@@ -1285,6 +1287,7 @@ export function XhsDatacenterPage() {
 
       {/* 批量删除弹窗 */}
       <Modal
+        centered
         open={batchDeleteOpen}
         title="批量删除"
         onCancel={() => setBatchDeleteOpen(false)}
@@ -1305,6 +1308,7 @@ export function XhsDatacenterPage() {
 
       {/* 无流量清理弹窗：指标区间筛选 + 候选列表（选指定/全选）。 */}
       <Modal
+        centered
         open={cleanupOpen}
         title="清理无流量笔记"
         onCancel={() => setCleanupOpen(false)}
@@ -1395,6 +1399,7 @@ export function XhsDatacenterPage() {
 
       {/* 清理日志弹窗：树状展示（批次为父行，笔记明细为子行）+ 按批次分页 20/50/100。 */}
       <Modal
+        centered
         open={cleanupLogOpen}
         title="清理日志"
         onCancel={() => setCleanupLogOpen(false)}
@@ -1490,6 +1495,7 @@ export function XhsDatacenterPage() {
 
       {/* 商品详情弹窗（点「商品名称」列触发，参考我的笔记页挂载商品区块）。 */}
       <Modal
+        centered
         open={productDetailOpen}
         title="商品详情"
         onCancel={() => setProductDetailOpen(false)}
