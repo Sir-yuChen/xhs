@@ -91,20 +91,74 @@ def _err(code: str, message: str, http_status: int) -> HTTPException:
     return HTTPException(status_code=http_status, detail={"code": code, "message": message})
 
 
+def _ask_directory_windows() -> str:
+    """用 **Windows 原生**文件夹选择器弹框（不依赖 tkinter / 桌面会话）。
+
+    实现：`powershell.exe -NoProfile -STA` 跑一段 `System.Windows.Forms.FolderBrowserDialog`
+    （.NET 自带的「选择文件夹」对话框，Windows 资源管理器同款），stdout 打印选中路径。
+
+    ⚠️ 为什么不用 tkinter：tkinter 的 `Tk()` 需要能连上桌面会话的窗口系统，
+    在 `run-app.py` 用 `pythonw.exe` 无控制台跑的 uvicorn 工作线程里**弹不出来**
+    （`TclError: no display name`）⇒ 落到 `NO_DESKTOP`。PowerShell 的 .NET 对话框
+    走的是 Windows 原生 shell，同一台机器的桌面会话能正常弹。
+
+    ⚠️ `-STA`（单线程单元）是必须的：`FolderBrowserDialog` 是 COM 组件，需要 STA；
+    缺了它会抛「当前线程不是单线程单元」。
+    """
+    import subprocess
+
+    #: 让对话框顶到最前 + 只读目录 + 允许新建；结果用明确分隔符包住，避免路径含换行。
+    ps_script = (
+        "Add-Type -AssemblyName System.Windows.Forms;"
+        "$d = New-Object System.Windows.Forms.FolderBrowserDialog;"
+        "$d.Description = '选择商品数据包文件夹';"
+        "$d.ShowNewFolderButton = $true;"
+        "$r = $d.ShowDialog();"
+        "if ($r -eq [System.Windows.Forms.DialogResult]::OK) {"
+        "  Write-Output ('__XHS_PICKED__' + $d.SelectedPath);"
+        "} else {"
+        "  Write-Output '__XHS_CANCELLED__';"
+        "}"
+    )
+    try:
+        proc = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-STA", "-Command", ps_script],
+            capture_output=True,
+            text=True,
+            timeout=5,  # 用户口径「5 秒内必须拉起」：回退路径 5 秒内出结果
+        )
+        out = (proc.stdout or "").strip()
+        if out.startswith("__XHS_PICKED__"):
+            path = out[len("__XHS_PICKED__"):].strip()
+            if path:
+                return path
+        #: 取消 / 空路径都当「取消」处理（返回空串，端点会映射成 cancelled=True）。
+        return ""
+    except Exception:  # noqa: BLE001 - 非 Windows / PowerShell 缺失 ⇒ 退回 tkinter
+        return None
+
+
 def _ask_directory() -> str:
     """弹系统「选择文件夹」对话框，返回选中路径（取消 ⇒ 空串）。
 
+    优先级（2026-10-13 改，修「3 分钟才弹窗」）：
+    1. **tkinter** —— 同一桌面会话里秒弹（本后端 `python.exe` 跑在交互会话，tkinter
+       的 `filedialog.askdirectory` 是 Windows 原生对话框，立即弹出）；
+    2. PowerShell `FolderBrowserDialog` —— tkinter 弹不出（无桌面/无控制台）时的回退；
+    3. 都弹不出 ⇒ 抛 `NO_DESKTOP`，前端据此解锁地址栏允许手填。
+
+    ⚠️ 为什么 tkinter 优先而不是 PowerShell：PowerShell 的 `FolderBrowserDialog` 在
+    无交互窗口站 / 无控制台时 `ShowDialog()` 会**静默返回 Cancel 或卡很久**（实测
+    3 分钟才弹），而 tkinter 的 `askdirectory` 在同一桌面会话秒弹。
+
     ⚠️ tkinter 只能在**主线程**跑，而 FastAPI 的同步端点跑在 anyio 工作线程
     （实测 `is_main=False`）。两条路：
-
-    1. **主线程有活的 Tk 主循环**（GUI 宿主进程）⇒ 用 `after(0, …)` 把活排进去，
-       主线程弹框，这边等 `Event`；
-    2. 没有主循环（本项目常态：uvicorn 是控制台/裸进程）⇒ 退一步在**当前线程**
-       临时开一个 Tk —— Tk 允许多个解释器，只是不能跨线程共享同一个根窗口。
-       实测 uvicorn 工作线程里 `Tk()` 能正常创建并弹框。
+    1. **主线程有活的 Tk 主循环**（GUI 宿主进程）⇒ 用 `after(0, …)` 把活排进去；
+    2. 没有主循环 ⇒ 退一步在**当前线程**临时开一个 Tk。
 
     两种情况都给「弹不出来」留明确出口（`_err`），**不静默失败**。
     """
+
     def _dialog() -> str:
         import tkinter as tk
         from tkinter import filedialog
@@ -141,15 +195,24 @@ def _ask_directory() -> str:
         except Exception:  # noqa: BLE001 - 主循环没了，走 ②
             pass
 
-    #: ② 当前线程自己开（uvicorn 裸进程的常态）
+    #: ② 当前线程自己开 tkinter（uvicorn 裸进程的常态，同一桌面会话秒弹）
     try:
         return _dialog()
-    except Exception as error:  # noqa: BLE001 - 无桌面会话 / 无 DISPLAY
-        raise _err(
-            "NO_DESKTOP",
-            "当前运行环境无法弹出文件夹选择框，请直接填写数据包目录的绝对路径",
-            status.HTTP_400_BAD_REQUEST,
-        ) from error
+    except Exception:  # noqa: BLE001 - tkinter 弹不出 ⇒ 退回 PowerShell 原生
+        pass
+
+    #: ③ tkinter 失败 ⇒ PowerShell `FolderBrowserDialog` 回退（无桌面/无控制台环境）。
+    if os.name == "nt":
+        chosen = _ask_directory_windows()
+        if chosen:
+            return chosen
+
+    #: ④ 都弹不出 ⇒ 明确报 `NO_DESKTOP`，前端解锁地址栏允许手填。
+    raise _err(
+        "NO_DESKTOP",
+        "当前运行环境无法弹出文件夹选择框，请直接填写数据包目录的绝对路径",
+        status.HTTP_400_BAD_REQUEST,
+    )
 
 
 #: GUI 宿主进程注册自己主循环的地方（没有就是 `None`）。本项目常态为 `None`。

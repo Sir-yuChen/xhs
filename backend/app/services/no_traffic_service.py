@@ -40,11 +40,27 @@ def _as_number(value: Any) -> Optional[float]:
         return None
 
 
+#: 指标区间字段 key → 统计表列名（`CleanupQuery.metric_range_pairs` 用）。
+METRIC_COL_MAP: dict[str, str] = {
+    "read": "read_count",
+    "like": "like_count",
+    "collect": "collect_count",
+    "comment": "comment_count",
+    "share": "share_count",
+    "pay_gmv": "pay_gmv",
+    "pay_order": "pay_order_cnt",
+}
+
+
 @dataclass
 class CleanupQuery:
-    """清理/预览的搜索条件（与阈值共同决定候选池）。
+    """清理/预览的搜索条件（与指标区间共同决定候选范围）。
 
     全部可选、可组合；空值 = 该条件不生效。这是「按搜索条件清理」的过滤前置。
+
+    2026-10-12 用户口径重构：「清理无流量」= 按**笔记各指标查询范围**筛选后选指定/全选
+    批量清除 —— 每个指标字段支持一个 min~max 区间，未设为空、查询时跳过，所有条件的
+    **交集**为最终清理范围。故这里加 7 个指标的区间字段（`{metric}_min` / `{metric}_max`）。
     """
 
     #: 标题关键词（子串匹配，不区分大小写）。
@@ -53,9 +69,24 @@ class CleanupQuery:
     note_type: str = ""
     #: 只清理发布时间早于该 Unix 时间戳（秒）的笔记；``None`` 不限。
     published_before: Optional[int] = None
-    #: 笔记分类（2026-10-06 方案 A）：``""`` 不限 / ``goods`` 商业笔记 / ``normal`` 普通笔记。
-    #: 数据源切到 `notes` 表后，按 `note_category` 过滤 —— 不同 tab 只清理对应类型。
+    #: 笔记分类：``""`` 不限 / ``goods`` 商业笔记 / ``normal`` 普通笔记。
+    #: 映射到 `note_flag`（``goods`` → ``goods_note`` / ``normal`` → 非 goods_note）。
     category: str = ""
+    # ---- 指标区间（2026-10-12）：每个指标 min~max，None = 该侧不筛 ----
+    read_min: Optional[float] = None
+    read_max: Optional[float] = None
+    like_min: Optional[float] = None
+    like_max: Optional[float] = None
+    collect_min: Optional[float] = None
+    collect_max: Optional[float] = None
+    comment_min: Optional[float] = None
+    comment_max: Optional[float] = None
+    share_min: Optional[float] = None
+    share_max: Optional[float] = None
+    pay_gmv_min: Optional[float] = None
+    pay_gmv_max: Optional[float] = None
+    pay_order_min: Optional[float] = None
+    pay_order_max: Optional[float] = None
 
     @classmethod
     def from_dict(cls, data: Optional[dict[str, Any]]) -> "CleanupQuery":
@@ -70,11 +101,23 @@ class CleanupQuery:
         raw_before = data.get("published_before")
         published_before = int(raw_before) if _as_number(raw_before) is not None else None
         category = str(data.get("category") or "").strip()
+
+        def _opt(key: str) -> Optional[float]:
+            raw = data.get(key)
+            return _as_number(raw)
+
         return cls(
             keyword=keyword,
             note_type=note_type,
             published_before=published_before,
             category=category,
+            read_min=_opt("read_min"), read_max=_opt("read_max"),
+            like_min=_opt("like_min"), like_max=_opt("like_max"),
+            collect_min=_opt("collect_min"), collect_max=_opt("collect_max"),
+            comment_min=_opt("comment_min"), comment_max=_opt("comment_max"),
+            share_min=_opt("share_min"), share_max=_opt("share_max"),
+            pay_gmv_min=_opt("pay_gmv_min"), pay_gmv_max=_opt("pay_gmv_max"),
+            pay_order_min=_opt("pay_order_min"), pay_order_max=_opt("pay_order_max"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -83,10 +126,27 @@ class CleanupQuery:
             "note_type": self.note_type,
             "published_before": self.published_before,
             "category": self.category,
+            "read_min": self.read_min, "read_max": self.read_max,
+            "like_min": self.like_min, "like_max": self.like_max,
+            "collect_min": self.collect_min, "collect_max": self.collect_max,
+            "comment_min": self.comment_min, "comment_max": self.comment_max,
+            "share_min": self.share_min, "share_max": self.share_max,
+            "pay_gmv_min": self.pay_gmv_min, "pay_gmv_max": self.pay_gmv_max,
+            "pay_order_min": self.pay_order_min, "pay_order_max": self.pay_order_max,
         }
 
+    def metric_range_pairs(self) -> list[tuple[str, Optional[float], Optional[float]]]:
+        """返回「(指标键, min, max)」列表，只含至少一侧非 None 的项（供 SQL 筛选）。"""
+        pairs: list[tuple[str, Optional[float], Optional[float]]] = []
+        for key in METRIC_COL_MAP:
+            lo = getattr(self, f"{key}_min", None)
+            hi = getattr(self, f"{key}_max", None)
+            if lo is not None or hi is not None:
+                pairs.append((key, lo, hi))
+        return pairs
+
     def matches(self, candidate: "CleanupCandidate") -> bool:
-        """搜索条件过滤（**不含阈值**，阈值另见 :func:`is_no_traffic`）。"""
+        """搜索条件过滤（**不含指标区间**，区间在 SQL 层筛；阈值另见 :func:`is_no_traffic`）。"""
         if self.keyword:
             haystack = f"{candidate.title} {candidate.raw.get('display_title', '')}"
             if self.keyword.lower() not in haystack.lower():
@@ -208,9 +268,10 @@ class CleanupCandidate:
     pay_order_cnt: Optional[int]
     publish_time: Optional[int]
     synced_at: str
-    #: 笔记分类（``goods`` 商业 / ``normal`` 普通 / ``""`` 未知）—— 删除执行器按它
+    #: 平台原生分类（``goods_note`` 商业 / 空 普通或未知）—— 删除执行器按它
     #: 分流删除通道（商业 → 千帆 batch_delete_note，普通 → 创作者 delete_note）。
-    note_category: str = ""
+    #: ⚠️ 2026-10-12 设计 35：取代已退役的 `note_category`，判据统一读统计表 `note_flag`。
+    note_flag: str = ""
     #: 本地 `notes.id`（主键）。删除执行器平台删成功后按它定位本地行做 `purge_note`
     #: （2026-10-06：无流量清理此前只删平台、漏删本地 notes 表）。
     local_id: int = 0
@@ -262,13 +323,13 @@ def is_no_traffic(entry: dict[str, Any], thresholds: TrafficThresholds) -> bool:
 def is_no_traffic_by_metrics(
     metrics: dict[str, Any], thresholds: TrafficThresholds
 ) -> bool:
-    """基于**离线数据中心指标**（`notes.raw_json.metrics`）的无流量判定（方案 A）。
+    """基于**数据中心统计指标**（`note_datacenter_stats` 真实列）的无流量判定（方案 A）。
 
     语义：`thresholds.active_metrics()` 里每个非 None 的指标，都必须在 `metrics`
     里存在且 `<= 阈值`。任一指标缺失 → 该笔记**不判为无流量**（缺值不是无流量，
     与旧口径同一条纪律）。至少一个指标非 None 才判定；全 None = 无判定依据，不判。
 
-    ⚠️ 指标键对齐 `note_data_service` 的 metrics 键（`read_count` / `pay_gmv` /
+    ⚠️ 指标键对齐 `note_datacenter_stats` 的列（`read_count` / `pay_gmv` /
     `pay_order_cnt` / `like_count` / `collect_count` / `comment_count` / `share_count`）。
     """
     if not isinstance(metrics, dict) or not metrics:
@@ -339,62 +400,89 @@ def list_no_traffic_candidates(
             },
         }
 
-    # 有搜索条件：**本地标题匹配**（零平台请求）。方案 A 下候选池是离线数据中心
-    # 数据（`notes`），标题已在 `notes.title` 里，关键词搜索本地 `LIKE` 即可 ——
-    # 不再打千帆 `mix_search_word`（那条路补的是 `shop_note_goods` 挂链映射，
-    # 与新数据源脱节）。
+    # 有搜索条件：**本地标题匹配**（零平台请求）。2026-10-12 设计 35 起候选池
+    # 是 `note_datacenter_stats` 统计表（离线数据中心历史），标题优先取统计表
+    # 快照列、缺则 LEFT JOIN `notes` 取当前标题 —— 不再打千帆 `mix_search_word`。
     searched = 0
     search_error = ""
 
-    # 数据源（方案 A）：`notes` 表（离线数据中心数据），按账号 + 笔记分类过滤。
-    from backend.app.models import Note
+    # 数据源（设计 35）：`note_datacenter_stats` 统计表，按账号 + 分类过滤。
+    # 取「每 note_id 最新窗口」的那一行（同 note 多窗口时只算最新 stat_date）。
+    from backend.app.models import Note, NoteDatacenterStat
 
-    stmt = select(Note).where(
-        Note.platform_account_id == account_id,
+    stmt = select(NoteDatacenterStat).where(
+        NoteDatacenterStat.platform_account_id == account_id,
     )
     if query.category:
         # 指定分类 = 只清理该类（需求 7「不同 tab 只清理对应类型」）。
-        stmt = stmt.where(Note.note_category == query.category)
-    else:
-        # 未指定 = 所有离线数据中心笔记（note_category 非空），向后兼容。
-        stmt = stmt.where(Note.note_category != "")
+        # `goods` → note_flag == "goods_note"；`normal` → 非 goods_note。
+        if query.category == "goods":
+            stmt = stmt.where(NoteDatacenterStat.note_flag == "goods_note")
+        elif query.category == "normal":
+            stmt = stmt.where(NoteDatacenterStat.note_flag != "goods_note")
     if query.keyword:
         keyword_like = f"%{query.keyword.strip()}%"
-        stmt = stmt.where(Note.title.ilike(keyword_like))
-    note_rows = db.scalars(stmt.order_by(Note.created_at.desc())).all()
+        stmt = stmt.where(NoteDatacenterStat.title.ilike(keyword_like))
+    # 指标区间（2026-10-12）：每个指标的 min/max 直接下 SQL（闭区间），**取代阈值判定**。
+    # 阈值（`thresholds`）的 max 值也**合并成区间上界** —— 「max_browse=0」就是「read_max=0」，
+    # 与用户手设的区间同一套语义（区间比阈值多 min 一侧，更通用）。
+    # 未设的一侧不筛；所有区间取交集 = 最终清理范围。
+    #: 阈值键 → 统计表列名（把旧的 max 阈值映射成区间上界）。
+    _THRESHOLD_TO_COL = {
+        "read_count": "read_count",
+        "pay_order_cnt": "pay_order_cnt",
+        "pay_gmv": "pay_gmv",
+        "like_count": "like_count",
+        "collect_count": "collect_count",
+        "comment_count": "comment_count",
+        "share_count": "share_count",
+    }
+    for col_name, threshold in (thresholds or TrafficThresholds()).active_metrics().items():
+        col = getattr(NoteDatacenterStat, _THRESHOLD_TO_COL[col_name])
+        stmt = stmt.where(col <= threshold)
+    for metric_key, lo, hi in query.metric_range_pairs():
+        col = getattr(NoteDatacenterStat, METRIC_COL_MAP[metric_key])
+        if lo is not None:
+            stmt = stmt.where(col >= lo)
+        if hi is not None:
+            stmt = stmt.where(col <= hi)
+    stat_rows = db.scalars(stmt.order_by(NoteDatacenterStat.stat_date.desc())).all()
+
+    # 取 note → notes 归属映射（本地主键 + 当前标题/封面，供删除执行器 purge + 展示）。
+    # 2026-10-12：排除已软删（is_deleted=True）的笔记 —— 软删笔记不该再进候选池。
+    stat_note_ids = {str(s.note_id) for s in stat_rows if s.note_id}
+    note_by_id: dict[str, Note] = {}
+    if stat_note_ids:
+        note_by_id = {
+            n.note_id: n
+            for n in db.scalars(
+                select(Note).where(Note.note_id.in_(stat_note_ids), Note.is_deleted.is_(False))
+            ).all()
+        }
 
     matched: list[CleanupCandidate] = []
-    for note in note_rows:
-        raw = note.raw_json if isinstance(note.raw_json, dict) else {}
-        metrics = raw.get("metrics") if isinstance(raw.get("metrics"), dict) else {}
-        if not is_no_traffic_by_metrics(metrics, thresholds):
-            continue
-        # 发布时间：优先 raw_json.metrics 或 raw_json.published_at，退 None。
-        published_at_str = raw.get("published_at") or ""
-        publish_time = None
-        if isinstance(published_at_str, str) and published_at_str:
-            try:
-                from datetime import datetime as _dt
-                publish_time = int(_dt.strptime(published_at_str, "%Y-%m-%d %H:%M:%S").timestamp())
-            except (ValueError, TypeError):
-                publish_time = None
+    for stat in stat_rows:
+        # 2026-10-12：无流量阈值判定已**下推到 SQL 层**（见上方「阈值 max → 区间上界」合并），
+        # 这里不再逐行 `is_no_traffic_by_metrics` 判定 —— 否则「用户设的区间」会被「固定阈值」
+        # 二次覆盖，导致弹窗查询条件失效（根因：区间筛出阅读≥100，又被阈值「阅读≤0」过滤）。
+        note = note_by_id.get(stat.note_id)
         candidate = CleanupCandidate(
-            note_id=str(note.note_id or ""),
-            title=str(note.title or ""),
-            cover=str(raw.get("cover_url") or ""),
-            browse_num=_as_number(metrics.get("read_count")),
-            browse_num_30d=None,
-            likes=_as_number(metrics.get("like_count")),
-            collects=_as_number(metrics.get("collect_count")),
-            comments=_as_number(metrics.get("comment_count")),
-            shares=_as_number(metrics.get("share_count")),
-            pay_gmv=_as_number(metrics.get("pay_gmv")),
-            pay_order_cnt=_as_number(metrics.get("pay_order_cnt")),
-            publish_time=publish_time,
-            synced_at=note.created_at.strftime("%Y-%m-%d %H:%M:%S") if note.created_at else "",
-            note_category=str(note.note_category or ""),
-            local_id=note.id,
-            raw=raw,
+            note_id=str(stat.note_id or ""),
+            title=str(stat.title or (note.title if note else "") or ""),
+            cover=str(stat.cover_url or ""),
+            browse_num=_as_number(stat.read_count),
+            browse_num_30d=stat.browse_num_30d,
+            likes=_as_number(stat.like_count),
+            collects=_as_number(stat.collect_count),
+            comments=_as_number(stat.comment_count),
+            shares=_as_number(stat.share_count),
+            pay_gmv=_as_number(stat.pay_gmv),
+            pay_order_cnt=_as_number(stat.pay_order_cnt),
+            publish_time=stat.publish_time,
+            synced_at=stat.synced_at.strftime("%Y-%m-%d %H:%M:%S") if stat.synced_at else "",
+            note_flag=str(stat.note_flag or ""),
+            local_id=note.id if note else 0,
+            raw={},
         )
         # 搜索条件过滤（note_type / published_before / category）。
         if not query.matches(candidate):
@@ -415,12 +503,12 @@ def list_no_traffic_candidates(
     start = (page_no - 1) * size
     page_rows = matched[start:start + size]
     cat_label = {"goods": "商业笔记", "normal": "普通笔记"}.get(query.category, "全部")
-    reason = f"候选池 = {cat_label}（离线数据中心数据）；未同步离线的笔记不在池内"
+    reason = f"候选池 = {cat_label}（数据中心统计）；未同步离线的笔记不在池内"
     if query.keyword:
         reason = (
             f"已按关键词「{query.keyword}」在本地标题中匹配"
             + (f"；搜索失败：{search_error}" if search_error else "")
-            + f"；候选池 = {cat_label}（离线数据中心数据）"
+            + f"；候选池 = {cat_label}（数据中心统计）"
         )
     return {
         "candidates": page_rows,
@@ -431,11 +519,77 @@ def list_no_traffic_candidates(
         "thresholds": thresholds.to_dict(),
         "query": query.to_dict(),
         "coverage": {
-            "synced_notes": len(note_rows),
-            "pool_total": len(note_rows),
+            "synced_notes": len(stat_rows),
+            "pool_total": len(stat_rows),
             "reason": reason,
         },
     }
+
+
+def candidates_by_note_ids(
+    db: Session, account_id: int, note_ids: list[str]
+) -> list[CleanupCandidate]:
+    """**按明确勾选的 note_id 列表**直接查统计表构建候选（**绕过候选池分页截断**）。
+
+    2026-10-12 修复：指定笔记清理时，原来走 `list_no_traffic_candidates(limit=MAX_CANDIDATE_SCAN=500)`
+    扫候选池 —— 候选池 1928 篇时，勾选的笔记排在 500 名之后就被 `not_in_pool` 误判
+    （「不在候选池」⇒ 不删 ⇒ `deleted=0`，看起来像「清理按钮没触发」）。用户当场勾选的
+    就是明确笔记 ID，无需二次「是否在池内」校验，直接按 ID 查。
+
+    排除已软删（is_deleted=True）的笔记；`notes` 行缺失时用统计表快照列渲染。
+    """
+    from backend.app.models import Note, NoteDatacenterStat
+
+    wanted = [str(n) for n in note_ids if n]
+    if not wanted:
+        return []
+    # 每个 note_id 取最新 stat_date 的那一行（同 note 多窗口去重）。
+    stat_rows = db.scalars(
+        select(NoteDatacenterStat)
+        .where(
+            NoteDatacenterStat.platform_account_id == account_id,
+            NoteDatacenterStat.note_id.in_(wanted),
+        )
+        .order_by(NoteDatacenterStat.stat_date.desc())
+    ).all()
+    seen: set[str] = set()
+    deduped: list[Any] = []
+    for row in stat_rows:
+        key = str(row.note_id or "")
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+    note_by_id: dict[str, Note] = {
+        n.note_id: n
+        for n in db.scalars(
+            select(Note).where(Note.note_id.in_(wanted), Note.is_deleted.is_(False))
+        ).all()
+    }
+    out: list[CleanupCandidate] = []
+    for stat in deduped:
+        note = note_by_id.get(str(stat.note_id or ""))
+        out.append(
+            CleanupCandidate(
+                note_id=str(stat.note_id or ""),
+                title=str(stat.title or (note.title if note else "") or ""),
+                cover=str(stat.cover_url or ""),
+                browse_num=_as_number(stat.read_count),
+                browse_num_30d=stat.browse_num_30d,
+                likes=_as_number(stat.like_count),
+                collects=_as_number(stat.collect_count),
+                comments=_as_number(stat.comment_count),
+                shares=_as_number(stat.share_count),
+                pay_gmv=_as_number(stat.pay_gmv),
+                pay_order_cnt=_as_number(stat.pay_order_cnt),
+                publish_time=stat.publish_time,
+                synced_at=stat.synced_at.strftime("%Y-%m-%d %H:%M:%S") if stat.synced_at else "",
+                note_flag=str(stat.note_flag or ""),
+                local_id=note.id if note else 0,
+                raw={},
+            )
+        )
+    return out
 
 
 def serialize_candidate(candidate: CleanupCandidate) -> dict[str, Any]:

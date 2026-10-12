@@ -33,11 +33,13 @@ ROUTER = ROOT / "frontend/src/app/router.tsx"
 #: → 24（本轮二级菜单：笔记工坊 6 个页签从「页内 Tabs」提升为**菜单叶子**，+6）。
 #:   ⚠️ 这 6 项**不是新页面**，是同一宿主页的页签（`note-workshop?tab=…`）——
 #:   路由表一条未改，见 `test_no_menu_entry_or_route_was_lost`。
-EXPECTED_MENU_ENTRIES = 24
+#: → 25（设计 35：新增「数据中心」页面，从「我的笔记」拆出离线商业/普通 Tab）。
+EXPECTED_MENU_ENTRIES = 25
 
 #: 路由条目数。**只在「新增页面」时增长**；把页签提升为菜单叶子**不**增路由。
 #: 32（A3 前）→ 34（A6 两个新页面；旧 `/analytics` 保留为重定向，条目不减）。
-EXPECTED_ROUTE_PATHS = 34
+#: → 35（设计 35：新增 `/platforms/xhs/datacenter`）。
+EXPECTED_ROUTE_PATHS = 35
 
 #: 二级菜单（SubMenu）父级 → 该父级下必须包含的**叶子** key（设计 32 §5）。
 EXPECTED_GROUPS: dict[str, tuple[str, ...]] = {
@@ -65,6 +67,7 @@ EXPECTED_GROUPS: dict[str, tuple[str, ...]] = {
         "/platforms/xhs/picture-space",
         "/platforms/xhs/orders",
         "/platforms/xhs/insights/shop",
+        "/platforms/xhs/datacenter",
     ),
     "平台": (
         "/platforms/xhs/accounts",

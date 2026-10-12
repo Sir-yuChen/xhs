@@ -1145,7 +1145,12 @@ class TrafficThresholdsRequest(BaseModel):
 
 
 class CleanupQueryRequest(BaseModel):
-    """清理的搜索条件（可选）：与阈值共同决定候选池。"""
+    """清理的搜索条件（可选）：与指标区间共同决定候选范围。
+
+    2026-10-12：加 7 个指标的 min/max 区间字段 —— **必须与
+    `no_traffic_service.CleanupQuery.from_dict` 的键完全一致**，漏一个字段前端传的
+    条件就在这里被静默丢弃（实测：漏了全部区间字段导致「弹窗查询条件无效」）。
+    """
 
     #: 标题关键词；空 = 不限。走本地标题匹配（方案 A 起零平台请求）。
     keyword: str = Field(default="", max_length=60)
@@ -1155,6 +1160,21 @@ class CleanupQueryRequest(BaseModel):
     published_before: Optional[int] = Field(default=None, ge=0)
     #: 笔记分类（2026-10-06 方案 A）："" 不限 / "goods" 商业笔记 / "normal" 普通笔记。
     category: str = Field(default="", max_length=16)
+    #: 指标区间（2026-10-12）：min/max 各一侧，None = 该侧不筛；闭区间。
+    read_min: Optional[float] = None
+    read_max: Optional[float] = None
+    like_min: Optional[float] = None
+    like_max: Optional[float] = None
+    collect_min: Optional[float] = None
+    collect_max: Optional[float] = None
+    comment_min: Optional[float] = None
+    comment_max: Optional[float] = None
+    share_min: Optional[float] = None
+    share_max: Optional[float] = None
+    pay_gmv_min: Optional[float] = None
+    pay_gmv_max: Optional[float] = None
+    pay_order_min: Optional[float] = None
+    pay_order_max: Optional[float] = None
 
 
 class NoTrafficCandidatesRequest(BaseModel):
@@ -1177,9 +1197,10 @@ class NoTrafficCleanupRequest(BaseModel):
     query: CleanupQueryRequest = Field(default_factory=CleanupQueryRequest)
     #: 单批删除上限（后端还会再夹一次硬上限 DEFAULT_DELETE_BATCH）。
     batch_limit: int = Field(default=20, ge=1, le=50)
-    #: **指定笔记清理**（列表勾选）：非空 = 只删这些（且必须仍在候选池内）；
+    #: **指定笔记清理**（列表勾选）：非空 = 只删这些。**后端自动按 500 拆分**成多个
+    #: 子批次（用户口径「每批次最多 500 条」），前端可传超过 500 条。
     #: 空 = 按阈值 + 查询条件全量清（上限见 `DEFAULT_DELETE_BATCH`）。
-    note_ids: list[str] = Field(default_factory=list, max_length=500)
+    note_ids: list[str] = Field(default_factory=list, max_length=10000)
 
 
 class SearchSelfContentRequest(BaseModel):
@@ -2032,6 +2053,18 @@ def no_traffic_cleanup(
     同一账号已有未完成的清理任务时直接返回那一条，不重复触发。
     """
     account, _ = _account_cookies_auto(db, current_user, payload.account_id)
+    # 2026-10-13 后端校验：已有执行中的清理任务 ⇒ 拒绝新触发（409），不静默复用旧任务。
+    # 前端据此置灰按钮，但后端仍是最终闸门（防止绕过前端并发触发平台写操作）。
+    from backend.app.services.no_traffic_cleanup_service import running_cleanup_for_account
+
+    if running_cleanup_for_account(db, account.id, current_user.id) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "NO_TRAFFIC_CLEANUP_RUNNING",
+                "message": "该账号已有清理任务在执行中，请等待完成后再发起",
+            },
+        )
     thresholds = TrafficThresholds.from_dict(payload.thresholds)
     query = CleanupQuery.from_dict(payload.query)
     task_id = run_no_traffic_cleanup_background(

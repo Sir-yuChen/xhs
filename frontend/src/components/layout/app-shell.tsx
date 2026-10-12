@@ -110,6 +110,8 @@ const shopLineChildren: MenuProps["items"] = [
   { key: "/platforms/xhs/orders", icon: <ShoppingCartOutlined />, label: "订单管理" },
   // 设计 32 §6：商品洞察 = 原「数据洞察」的商品侧（拆分后归店铺线）。
   { key: "/platforms/xhs/insights/shop", icon: <LineChartOutlined />, label: "商品洞察" },
+  // 设计 35：数据中心 = 千帆数据中心的商业/普通笔记离线统计（从「我的笔记」拆出，独立成页）。
+  { key: "/platforms/xhs/datacenter", icon: <BarChartOutlined />, label: "数据中心" },
 ];
 
 /** 平台级：**不绑定单一业务线**的页面（用户拍板组名 = 「平台」）。 */

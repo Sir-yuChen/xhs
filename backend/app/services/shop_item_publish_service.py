@@ -211,6 +211,7 @@ def build_item_from_request(
                 "materialId": _spec_material.get("materialId") or "",
                 "path": _spec_material.get("path") or "",
                 "link": _spec_material.get("link") or _spec_material.get("url") or "",
+                "url": _spec_material.get("url") or "",
                 "name": _spec_material.get("file_name") or _spec_material.get("name") or "",
                 "width": _spec_material.get("width"),
                 "height": _spec_material.get("height"),
@@ -419,6 +420,14 @@ def publish_item(
                 if _k == "skuData" and isinstance(_v, list):
                     _v = f"<{len(_v)} 条> 首条可用={(_v[0].get('available') if _v else None)}"
                 logger.warning("[publish_item]   发布体.%s = %r", _k, _v)
+        #: 临时排查「获取图片信息失败」：dump 首条 sku 的 specImage 全文。
+        _skus = _body0.get("skuData") or []
+        if _skus and isinstance(_skus[0], dict):
+            import json as _json
+            logger.warning(
+                "[publish_item]   首条 sku.specImage = %s",
+                _json.dumps(_skus[0].get("specImage"), ensure_ascii=False),
+            )
         logger.warning(
             "[publish_item] 发布体转储结束 | 缺失的上架相关键 = %s",
             [k for k in ("isAutoOffShelf", "autoOffShelfTime", "shelfTime", "expectedPurchaseTime")
@@ -432,6 +441,10 @@ def publish_item(
         raise PublishError("PUBLISH_SUBMIT_FAILED", str(msg or "提交商品失败")[:300])
 
     published, fails, item_ids = _poll_task(api, task_id)
+    #: 临时排查「获取图片信息失败」：dump 平台 failData 原文。
+    if fails:
+        import json as _json
+        logger.warning("[publish_item] 平台 failData 原文 = %s", _json.dumps(fails, ensure_ascii=False))
     result: dict[str, Any] = {
         "published": published,
         "task_id": task_id,

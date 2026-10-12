@@ -113,7 +113,7 @@ def _note_engagement(note: Note) -> int:
 def _make_snapshot(db: Session, target: MonitoringTarget, user: User) -> MonitoringSnapshot:
     notes = db.scalars(
         select(Note)
-        .where(Note.user_id == user.id, Note.platform == "xhs")
+        .where(Note.user_id == user.id, Note.platform == "xhs", Note.is_deleted.is_(False))
         .order_by(Note.created_at.desc())
     ).all()
 

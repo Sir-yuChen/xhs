@@ -37,6 +37,7 @@ from backend.app.models.monitoring import (
     ShopMetricSnapshot,
 )
 from backend.app.models.note import Note, NoteAsset, NoteComment, NoteTopic, Topic
+from backend.app.models.note_datacenter_stat import NoteDatacenterStat
 from backend.app.models.notification import Notification
 from backend.app.models.order import (
     AfterSale,
@@ -89,6 +90,7 @@ __all__ = [
     "Note",
     "NoteAsset",
     "NoteComment",
+    "NoteDatacenterStat",
     "NoteGenerationLink",
     "NoTrafficCleanupItem",
     "NoTrafficCleanupLog",

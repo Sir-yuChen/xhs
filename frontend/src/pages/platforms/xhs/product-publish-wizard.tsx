@@ -264,6 +264,8 @@ export function ProductPublishWizard({
   const [packagePath, setPackagePath] = useState("");
   const [picking, setPicking] = useState(false);
   const [loading, setLoading] = useState(false);
+  //: 无图形界面（后端 `NO_DESKTOP`）时，允许手填路径（否则地址栏 readOnly 死锁）。
+  const [manualPathFallback, setManualPathFallback] = useState(false);
   //: ⚠️ 两段分开：`loadWithPath` 只**读取展示**，`runPrecheck` 才做检测。
   //: 用户口径 2026-10-08：「先将媒体和数据包全部在弹窗展示，点击预检，
   //: 预检通过才可以进去参数配置第二步」。
@@ -746,6 +748,12 @@ export function ProductPublishWizard({
       setPackagePath(picked.package_path);
       await loadWithPath(picked.package_path);
     } catch (error) {
+      //: 无图形界面（后端弹不出系统选择框）⇒ 解锁地址栏让用户手填，而不是死路。
+      if (readCode(error) === "NO_DESKTOP") {
+        setManualPathFallback(true);
+        void message.info("当前环境无法弹出文件夹选择框，请直接在地址栏填写数据包目录的绝对路径");
+        return;
+      }
       void message.error(`选择文件夹失败：${readReason(error, "选择失败")}`);
     } finally {
       setPicking(false);
@@ -1718,6 +1726,9 @@ export function ProductPublishWizard({
             spec_image_material: specMat
               ? {
                   materialId: specMat.materialId ?? "",
+                  //: ⚠️ 真机抓包（batch_create_item_body.json）规格图 specImage 的
+                  //: path/link/fileId 是**长格式** `arkgoods/1040…`（图片空间目录 path），
+                  //: 与主图的短格式 file_id 不同。这里用 `specMat.path`（长格式）。
                   path: specMat.path ?? "",
                   link: specMat.link ?? specMat.url ?? "",
                   url: specMat.url ?? "",
@@ -1874,6 +1885,8 @@ export function ProductPublishWizard({
           spec_image_material: specMat
             ? {
                 materialId: specMat.materialId ?? "",
+                //: 同提交链路：规格图 specImage 的 path/link 用**长格式** `specMat.path`
+                //: （真机抓包 `arkgoods/1040…`），不用短格式 file_id。
                 path: specMat.path ?? "",
                 link: specMat.link ?? specMat.url ?? "",
                 url: specMat.url ?? "",
@@ -2099,6 +2112,8 @@ export function ProductPublishWizard({
           onPick={() => void pickAndLoad()}
           picking={picking}
           loading={loading}
+          manualPathFallback={manualPathFallback}
+          onPackagePathChange={setPackagePath}
           onLoad={() => void loadWithPath(packagePath)}
           onPrecheck={() => void runPrecheck()}
           inspected={inspected}
@@ -2596,6 +2611,10 @@ function PrecheckStep(props: {
   onPick: () => void;
   picking: boolean;
   loading: boolean;
+  /** 无图形界面时允许手填路径（后端 `NO_DESKTOP`）。 */
+  manualPathFallback: boolean;
+  /** 手填路径时回写（仅 `manualPathFallback` 时用）。 */
+  onPackagePathChange: (next: string) => void;
   onLoad: () => void;
   onPrecheck: () => void;
   /** 是否已跑过违规词检测。 */
@@ -2619,7 +2638,7 @@ function PrecheckStep(props: {
   onSkuSelectionChange: (next: { blocked: number[]; picked: number[] }) => void;
 }) {
   const {
-    packagePath, onPick, picking, loading, onLoad,
+    packagePath, onPick, picking, loading, onLoad, manualPathFallback, onPackagePathChange,
     onPrecheck, inspected, precheckPassed, onPreview,
     precheckGroups, onOpenGroupPicker, groupOptions,
     token, precheck, checked, onCheckedChange, tables, onTablesChange,
@@ -2655,17 +2674,23 @@ function PrecheckStep(props: {
     <div>
       <Space.Compact style={{ width: "100%", marginBottom: 12 }}>
         {/* ⚠️ 用户口径 2026-10-08：「地址栏**不允许输入**，只能预览」——
-            路径唯一来源是「选择文件夹」（后端弹系统选择器）。手输无效路径
-            只会让人对着「目录不存在」反复试，不如直接不给输。
+            路径唯一来源是「选择文件夹」（后端弹系统选择器）。
+            ⚠️ 例外（2026-10-12）：后端 `NO_DESKTOP`（无图形界面弹不出框）时，
+            解锁成本可手填 —— 否则既不让弹框又不让输 = 死路。
             用 `readOnly` 而非 `disabled`：内容仍可选中复制（预览要能看全）。 */}
         <Input
           prefix={<FolderOpenOutlined />}
-          placeholder="请点击右侧「选择文件夹」"
+          placeholder={
+            manualPathFallback
+              ? "填写数据包目录的绝对路径（如 D:\\商品数据包\\商品ID_123）"
+              : "请点击右侧「选择文件夹」"
+          }
           value={packagePath}
-          readOnly
-          //: readOnly 下仍允许聚焦选中，便于用户复制路径核对；但不接受修改。
-          onKeyDown={(e) => e.preventDefault()}
-          style={{ cursor: "default" }}
+          readOnly={!manualPathFallback}
+          onChange={(e) => onPackagePathChange(e.target.value)}
+          //: readOnly 下仍允许聚焦选中，便于用户复制路径核对；手填模式放开输入。
+          onKeyDown={manualPathFallback ? undefined : (e) => e.preventDefault()}
+          style={{ cursor: manualPathFallback ? "text" : "default" }}
         />
         <Button icon={<FolderOpenOutlined />} onClick={onPick} loading={picking} disabled={loading}>
           选择文件夹
@@ -4509,4 +4534,14 @@ function readReason(error: unknown, fallback: string): string {
   }
   const text = (error as { message?: unknown })?.message;
   return typeof text === "string" && text ? text : fallback;
+}
+
+/** 取后端错误 `detail.code`（如 `NO_DESKTOP`）；无则空串。 */
+function readCode(error: unknown): string {
+  const detail = (error as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+  if (detail && typeof detail === "object") {
+    const code = (detail as { code?: unknown }).code;
+    return typeof code === "string" ? code : "";
+  }
+  return "";
 }

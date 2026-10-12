@@ -248,7 +248,7 @@ class XhsQianfanApiAdapter:
     def batch_delete_notes(self, note_ids: Any) -> tuple[bool, str, Any]:
         """**批量删除笔记**（千帆 `note/batch_delete_note`，无签名，真实写、不可撤回）。
 
-        供无流量清理按 `note_category=goods` 分流：商业笔记走千帆删除链路。
+        供无流量清理按 `note_flag == "goods_note"` 分流：商业笔记走千帆删除链路。
         详见 SDK `batch_delete_notes` 的 docstring。
         """
         with direct_xhs_request_env():

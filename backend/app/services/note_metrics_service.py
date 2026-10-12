@@ -164,6 +164,7 @@ def collect_snapshots(db: Session, *, user_id: int, stat_date: str | None = None
         select(Note).where(
             Note.user_id == user_id,
             Note.platform == "xhs",
+            Note.is_deleted.is_(False),
             Note.raw_json.is_not(None),
             func.trim(func.coalesce(func.cast(Note.raw_json, String), "")) != "",
             func.trim(func.coalesce(func.cast(Note.raw_json, String), "")) != "null",

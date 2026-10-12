@@ -82,6 +82,7 @@ export const ROUTE_BUSINESS_LINES: Record<string, BusinessLine> = {
   "/platforms/xhs/picture-space": "shop",
   "/platforms/xhs/orders": "shop",
   "/platforms/xhs/insights/shop": "shop",
+  "/platforms/xhs/datacenter": "shop",
   // 平台（跨线）
   "/platforms/xhs/accounts": "shared",
   "/platforms/xhs/monitoring": "shared",

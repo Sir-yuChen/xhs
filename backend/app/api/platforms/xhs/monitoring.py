@@ -128,6 +128,7 @@ def _matching_notes(db: Session, current_user: User, target: MonitoringTarget) -
         .where(
             Note.user_id == current_user.id,
             Note.platform == "xhs",
+            Note.is_deleted.is_(False),
         )
         .order_by(Note.created_at.desc(), Note.id.desc())
     ).all()

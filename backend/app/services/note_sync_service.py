@@ -876,10 +876,15 @@ def sync_note_from_platform(
         return result
 
     limiter = get_rate_limiter()
-    # 限流键按**笔记类型**分线（2026-10-12）：商业笔记（`note_category="goods"`）走
+    # 限流键按**笔记类型**分线（2026-10-12）：商业笔记（`note_flag == "goods_note"`）走
     # 千帆线，它与 www 是**两个独立额度**（平台风控按平台各自计），共用一个键会让
     # 先跑的线把额度耗光、后跑的线干等；普通笔记仍走 `www` 键（行为不变）。
-    _lane = "ark" if str(getattr(note, "note_category", "") or "") == "goods" else "www"
+    # ⚠️ 2026-10-12 设计 35：`note_category` 已退役，分类判据改读 `raw_json` 里的
+    # 平台原生 `note_flag`（`raw_json.ark.note_flag` 嵌套形态 / 顶层 `note_flag`）。
+    _raw = note.raw_json if isinstance(note.raw_json, dict) else {}
+    _ark = _raw.get("ark") if isinstance(_raw.get("ark"), dict) else {}
+    _flag = str(_ark.get("note_flag") or _raw.get("note_flag") or "").strip()
+    _lane = "ark" if _flag == "goods_note" else "www"
     if not limiter.wait_allow(f"{account.id}:{_lane}"):
         result.update(
             status="failed",
@@ -2117,6 +2122,7 @@ def _hydrate_page_notes(
             Note.user_id == account.user_id,
             Note.platform_account_id == account.id,
             Note.note_id.in_(ids),
+            Note.is_deleted.is_(False),
         )
     ).all()
     pending = [note for note in notes if _needs_hydration(db, note)]
@@ -2185,6 +2191,7 @@ def _hydrate_account_pending(
         .where(
             Note.user_id == account.user_id,
             Note.platform_account_id == account.id,
+            Note.is_deleted.is_(False),
         )
         .order_by(Note.id)
     ).all()
@@ -2377,18 +2384,18 @@ def _normalize_ark_note(entry: dict[str, Any]) -> dict[str, Any]:
 
     **笔记分类**（2026-10-12 抓包实测）：条目自带 `note_flag` —— 平台原生判据：
 
-    * ``"goods_note"`` ⇒ 商业笔记（挂链商品）⇒ 归一化成 ``note_category="goods"``；
+    * ``"goods_note"`` ⇒ 商业笔记（挂链商品）；
     * 其它 / 缺省 ⇒ 普通笔记。
 
     这一个字段就是「商业笔记 vs 普通笔记」的**平台原生真相源** —— 不必另造判据，
     也不必反推（反推 = 造第二份真相源；同 `note_type` 的纪律）。
+
+    ⚠️ 2026-10-12 设计 35：`note_category` 已退役。本函数**只保留 `note_flag`**
+    （供落库到 `note_datacenter_stats` 统计表 + 同步限流分线），不再产出
+    `note_category` 投影。
     """
     # 指标转换委托 pc.py 唯一实现（`_metric`，缺值 0 的计数口径）。
     from backend.app.api.platforms.xhs.pc import _metric
-    from backend.app.models.note import (
-        NOTE_CATEGORY_DEFAULT,
-        NOTE_CATEGORY_GOODS,
-    )
 
     note_id = str(entry.get("note_id") or "").strip()
     xsec_token = str(entry.get("xsec_token") or "").strip()
@@ -2396,7 +2403,6 @@ def _normalize_ark_note(entry: dict[str, Any]) -> dict[str, Any]:
     publish_time = entry.get("publish_time")
     #: `note_flag == "goods_note"` = 平台自报的商业笔记（2026-10-12 真机抓包）。
     note_flag = str(entry.get("note_flag") or "").strip()
-    category = NOTE_CATEGORY_GOODS if note_flag == "goods_note" else NOTE_CATEGORY_DEFAULT
     return {
         "note_id": note_id,
         # 与 creator 源同一形态：explore URL + 笔记级 xsec_token（详情回填的探针要用）。
@@ -2421,9 +2427,8 @@ def _normalize_ark_note(entry: dict[str, Any]) -> dict[str, Any]:
         "timestamp": publish_time if isinstance(publish_time, (int, float)) else 0,
         # Carried through because the detail backfill needs it; never rendered.
         "xsec_token": xsec_token,
-        # 笔记分类（`goods` / 空）：平台原生 `note_flag` 的投影，供落库写
-        # `notes.note_category`（同步按钮按类型分流的判据）。
-        "note_category": category,
+        # 笔记分类（平台原生 `note_flag`）：2026-10-12 设计 35 起**不再投影成
+        # `note_category`**，`note_flag` 本身供落库到统计表 + 限流分线。
         "note_flag": note_flag,
         # `goods_infos` 在 pc.py::_GOODS_CONTAINER_KEYS 里 —— 商品↔笔记映射的
         # 唯一有真值的来源（2026-09-19 实测，见 pc.py 常量注释）。
@@ -2534,6 +2539,61 @@ def _fetch_page(
     return items, cursor_out, has_more, _creator_total_strict(raw_payload)
 
 
+def _upsert_ark_stat(
+    db: Session, account: PlatformAccount, normalized: dict[str, Any], note_id: str
+) -> None:
+    """ark 源（笔记管理）落统计表（设计 35 D2）：**只写 note_flag 权威 + 快照列**。
+
+    ark 列表条目不携带数据中心完整指标（指标由 butterfly 源补），但 `note_flag` 是
+    **平台原生分类权威**（`goods_note` = 商业笔记）。故这里 UPSERT 一行统计行，
+    只落 `note_flag` + 快照（title/cover/item_*/publish_time），指标列留 NULL
+    （缺值不造）—— 后续 butterfly 同步按 `(user_id, account_id, note_id, stat_date,
+    window)` 唯一键覆盖补指标。stat_date 取当日、window 取 `recent_1`。
+    """
+    from backend.app.core.time import shanghai_now
+    from backend.app.models import NoteDatacenterStat
+
+    note_flag = str(normalized.get("note_flag") or "").strip()
+    stat_date = shanghai_now().strftime("%Y-%m-%d")
+    existing = db.scalars(
+        select(NoteDatacenterStat).where(
+            NoteDatacenterStat.user_id == account.user_id,
+            NoteDatacenterStat.platform_account_id == account.id,
+            NoteDatacenterStat.note_id == note_id,
+            NoteDatacenterStat.stat_date == stat_date,
+            NoteDatacenterStat.window == "recent_1",
+        )
+    ).first()
+    if existing is None:
+        existing = NoteDatacenterStat(
+            user_id=account.user_id,
+            platform_account_id=account.id,
+            note_id=note_id,
+            stat_date=stat_date,
+            window="recent_1",
+            note_flag=note_flag,
+        )
+        db.add(existing)
+    else:
+        # note_flag 是权威：ark 说了算（goods_note 一旦报出就不清空；空则不动）。
+        if note_flag:
+            existing.note_flag = note_flag
+    # 快照列填空式补（ark 有值才写，不冲 butterfly 已写的）。
+    if not existing.title and normalized.get("title"):
+        existing.title = str(normalized.get("title"))
+    if not existing.cover_url and normalized.get("cover_url"):
+        existing.cover_url = str(normalized.get("cover_url"))
+    if normalized.get("item_id"):
+        existing.item_id = str(normalized.get("item_id"))
+    if normalized.get("item_title"):
+        existing.item_title = str(normalized.get("item_title"))
+    if normalized.get("variant_desc"):
+        existing.variant_desc = str(normalized.get("variant_desc"))
+    pt = normalized.get("publish_time")
+    if pt and existing.publish_time is None:
+        existing.publish_time = pt
+
+
 def _merge_ark_notes(db: Session, account: PlatformAccount, items: list[dict[str, Any]]) -> int:
     """ark 源落库：**填空式合并**（§19.3.2）。返回处理条数（建 + 合并）。
 
@@ -2566,6 +2626,10 @@ def _merge_ark_notes(db: Session, account: PlatformAccount, items: list[dict[str
         note = db.scalars(
             select(Note).where(Note.user_id == account.user_id, Note.note_id == note_id)
         ).first()
+        # 2026-10-12：已软删的笔记**跳过不复活**（无流量清理软删后，ark 同步
+        # 若再落库同一条会把它「复活」回列表）。
+        if note is not None and note.is_deleted:
+            continue
         ark_raw = _raw_with_metrics(normalized)
         if note is None:
             note = Note(
@@ -2576,11 +2640,6 @@ def _merge_ark_notes(db: Session, account: PlatformAccount, items: list[dict[str
                 # 同步链路落库 ⇒ 三方同步笔记（§25）。
                 note_type=NOTE_TYPE_SYNCED,
             )
-            # 笔记分类（2026-10-12）：千帆条目自带 `note_flag` ⇒ 写 `note_category`。
-            # 只在有真值时写（缺值不造，硬约束⑤）—— 新建行缺省是空分类。
-            category = str(normalized.get("note_category") or "").strip()
-            if category:
-                note.note_category = category
             # 千帆商品笔记 = 账号已在平台上发布的作品（设计 13 §19.12）：发布状态经
             # **唯一入口**写（§32.3.2），`published` 投影由入口同步维护。
             set_note_publish_status(note, PUBLISH_STATUS_PUBLISHED)
@@ -2590,6 +2649,8 @@ def _merge_ark_notes(db: Session, account: PlatformAccount, items: list[dict[str
             note.raw_json = ark_raw
             db.add(note)
             db.flush()
+            # 设计 35 D2：ark 源把 note_flag 权威 + 快照落统计表（指标留空待 butterfly 补）。
+            _upsert_ark_stat(db, account, normalized, note_id)
             # §34：ark 条目 content 恒为空（列表无正文），声明话题也没有 ⇒ 这里是
             # 幂等 no-op；万一带了正文 / 话题，与 creator 源同一把尺子拆（唯一实现）。
             apply_sync_topics(db, note)
@@ -2612,11 +2673,6 @@ def _merge_ark_notes(db: Session, account: PlatformAccount, items: list[dict[str
             set_note_publish_status(note, PUBLISH_STATUS_PUBLISHED)
             # 只升不降（§25）：同步链路见过这条 ⇒ 三方同步笔记。
             note.note_type = NOTE_TYPE_SYNCED
-            # 笔记分类（2026-10-12）：按当前数据源刷新（`goods` / 空），与
-            # `note_data_service` 的「普通→商业转换时跟着变」同一口径。
-            category = str(normalized.get("note_category") or "").strip()
-            if category:
-                note.note_category = category
             if not note.title:
                 note.title = str(normalized.get("title") or "")
             if not note.content:
@@ -2635,6 +2691,8 @@ def _merge_ark_notes(db: Session, account: PlatformAccount, items: list[dict[str
             merged_raw = dict(raw)
             merged_raw["ark"] = ark_bucket
             note.raw_json = merged_raw
+            # 设计 35 D2：ark 源把 note_flag 权威 + 快照落统计表（指标留空待 butterfly 补）。
+            _upsert_ark_stat(db, account, normalized, note_id)
             # ⚠️ 持锁纪律（§24.7）：字段更新先落库（短事务）再按需下图 ——
             # 下载在网络侧进行，不持锁。
             db.commit()

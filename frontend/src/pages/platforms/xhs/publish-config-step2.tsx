@@ -1663,16 +1663,6 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
     [],
   );
 
-  /** 第一组规格里第一个**还没上图**的已填规格值下标（「添加规格图」默认目标）。 */
-  const firstEmptySpecValueIndex = useCallback(
-    (spec: string): number => {
-      const filled = (specValues[spec] ?? []).filter((v) => v.trim() !== "");
-      const idx = filled.findIndex((v) => !specImages[spec]?.[v]);
-      return idx < 0 ? 0 : idx;
-    },
-    [specValues, specImages],
-  );
-
   /** 点规格图前缀（或加号）→ **打开选择弹窗**（用户口径 2026-10-09）。
    *  ⚠️ 规则：**只从预检 SKU 图里选**，不弹本地文件框（用户明确「点击无响应」是因为
    *  先前没有 SKU 图时会走本地选择，交互看起来像没反应）。 */
@@ -1796,33 +1786,6 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
       }
     },
     [skuPick, setSpecImage, props, precheckNamesInUse, message],
-  );
-
-  /** 批量：一次选多张，**按规格值顺序**依次挂上（用户口径：支持批量添加规格图）。 */
-  const pickBatchSpecImages = useCallback(
-    (spec: string) => {
-      const filled = (specValues[spec] ?? []).filter((v) => v.trim() !== "");
-      if (filled.length === 0) return;
-      const input = document.createElement("input");
-      input.type = "file";
-      input.multiple = true;
-      input.accept = "image/png,image/jpeg,image/jpg";
-      input.onchange = async () => {
-        const files = Array.from(input.files ?? []);
-        if (files.length === 0 || !props.onUploadImageFile) return;
-        setSpecImageUploading((n) => n + 1);
-        try {
-          for (let k = 0; k < Math.min(files.length, filled.length); k++) {
-            const img = await props.onUploadImageFile(files[k]);
-            if (img) setSpecImage(spec, filled[k], img);
-          }
-        } finally {
-          setSpecImageUploading((n) => Math.max(0, n - 1));
-        }
-      };
-      input.click();
-    },
-    [specValues, setSpecImage, props],
   );
 
   /** **执行导入**：按用户确认的映射，把预检 SKU 行落成规格值 / 价格 / 库存 / 规格图。
@@ -2047,8 +2010,6 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
     if (!same) props.onPriceRowsChange(next);
   }, [specTypes, specValues, props.priceRows, props.onPriceRowsChange, props.passedSpecs, pendingSpecFills]);
 
-  /** 待确认的发货模式（真机：切换会弹「需重新设置库存…是否确认切换」）。 */
-  const [pendingDeliveryMode, setPendingDeliveryMode] = useState<string | null>(null);
   /** 尺码表弹窗（真机：尺码信息 = 助手里的可点模块，点开才与后端交互）。 */
   const [sizeTableOpen, setSizeTableOpen] = useState(false);
   /** 商品资质弹窗（同上）。 */
@@ -2062,11 +2023,12 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
   /** 按规格模式下，价格表「发货时间」列的天数。 */
   const [presaleColumnDays, setPresaleColumnDays] = useState<number | null>(null);
 
-  /** 切换发货模式 —— 真机有二次确认（切换后库存等要重设）。 */
+  /** 切换发货模式 —— 2026-10-13 用户口径「移除切换时温馨提示弹窗」：
+   *  直接生效，且**不重置库存等 SKU 信息、属性参数不做关联**（只改 UI 列）。 */
   const requestDeliveryMode = useCallback(
     (next: string) => {
       if (next === deliveryMode) return;
-      setPendingDeliveryMode(next);
+      setDeliveryMode(next);
     },
     [deliveryMode],
   );
@@ -3320,28 +3282,8 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
                     }
                   />
                   {specImageEnabled[name] ?? gi === 0 ? (
-                    <>
-                      <Tooltip title={SPEC_IMAGE_RULE}>
-                        <Button
-                          size="small"
-                          type="link"
-                          loading={specImageUploading > 0}
-                          onClick={() => pickSpecImage(name, firstEmptySpecValueIndex(name))}
-                        >
-                          添加规格图
-                        </Button>
-                      </Tooltip>
-                      <Tooltip title="按规格值顺序整体上传（一次选中多张）">
-                        <Button
-                          size="small"
-                          type="link"
-                          loading={specImageUploading > 0}
-                          onClick={() => pickBatchSpecImages(name)}
-                        >
-                          批量上传规格图
-                        </Button>
-                      </Tooltip>
-                    </>
+                    <>{/* 2026-10-13 用户口径：移除「添加规格图」「批量上传规格图」按钮 ——
+                         规格图只通过每个规格值输入框前缀的预览图点击切换。 */}</>
                   ) : null}
                   {/* 真机：**每个规格行都有**规格值排序 + 上移/下移（第 1 行上移禁用）。 */}
                   <span className="spec-sort-actions">
@@ -3746,21 +3688,8 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
         </Field>
       </Modal>
 
-      {/* 真机：切换发货模式有**二次确认** ——「切换发货模式后，需重新设置库存等相关信息，是否确认切换？」 */}
-      <Modal
-        open={pendingDeliveryMode !== null}
-        title="温馨提示"
-        centered
-        okText="确认切换"
-        cancelText="取消"
-        onCancel={() => setPendingDeliveryMode(null)}
-        onOk={() => {
-          if (pendingDeliveryMode) setDeliveryMode(pendingDeliveryMode);
-          setPendingDeliveryMode(null);
-        }}
-      >
-        切换发货模式后，需重新设置库存等相关信息，是否确认切换？
-      </Modal>
+      {/* 2026-10-13 用户口径：移除「切换发货模式温馨提示」弹窗 —— 切换直接生效，
+          且不重置库存/SKU、属性参数不做关联。 */}
         </div>
       </div>
     </div>

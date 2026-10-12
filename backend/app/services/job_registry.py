@@ -232,7 +232,7 @@ def _build_registry() -> dict[str, JobSpec]:
             # 「我的笔记」离线数据同步（2026-10-06 需求）：千帆数据中心商业 + 普通
             # 两类笔记，走 butterfly/data 列表接口（无签名直连）落库。与上面的
             # 笔记同步（creator/ark 三方同步）是**两件事**：那个同步到 `note_type=synced`
-            # 的线上笔记，这个落 `note_category=goods/normal` 的离线数据中心笔记。
+            # 的线上笔记，这个落 `note_datacenter_stats` 统计表的离线数据中心笔记。
             key=JOB_KEY_NOTE_DATA_SYNC,
             name="离线笔记数据同步",
             func=scheduler_service.run_scheduled_note_data_syncs,

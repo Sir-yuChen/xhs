@@ -113,7 +113,7 @@ def _note_metrics(note: Note) -> dict[str, int]:
 def _owned_notes_statement(current_user: User):
     return (
         select(Note)
-        .where(Note.user_id == current_user.id, Note.platform == "xhs")
+        .where(Note.user_id == current_user.id, Note.platform == "xhs", Note.is_deleted.is_(False))
     )
 
 

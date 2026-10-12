@@ -98,6 +98,11 @@ class NoTrafficCleanupLog(Base):
     #: 触发方式 `manual` / `scheduled`（用户口径：入口只有我的笔记页按钮 ⇒ 当前恒
     #: manual；留字段以便将来接入定时任务时不用再改表）。
     trigger_type: Mapped[str] = mapped_column(String(16), default="manual")
+    #: **批次号**（2026-10-13）：一次清理超过 500 条时后端自动拆成多个子批次，
+    #: 每个子批次 batch_no = `{唯一批次号}-{自增序号}`（如 `20261013_0030-1` / `-2`）。
+    #: 同一批次的多个子批次共享同一「基号」（去掉 `-N` 后缀），前端树状/分组按此聚合。
+    #: 旧数据（单批不超 500）为**空串**（迁移前无此概念），渲染时回退用 log.id。
+    batch_no: Mapped[str] = mapped_column(String(64), default="", server_default="")
 
     #: 执行时的筛选条件快照（阈值 + 查询条件 + 勾选的笔记）。
     thresholds: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
@@ -146,6 +151,7 @@ class NoTrafficCleanupLog(Base):
             "account_name": self.account_name,
             "task_id": self.task_id,
             "trigger_type": self.trigger_type,
+            "batch_no": self.batch_no or "",
             "thresholds": self.thresholds or {},
             "query": self.query or {},
             "note_ids": self.note_ids or [],

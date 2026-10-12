@@ -160,7 +160,9 @@ def mark_notes_missing(
     marked = 0
     healed = 0
     unknown_time = 0
-    for row in db.scalars(select(Note).where(Note.platform_account_id == account.id)).all():
+    for row in db.scalars(
+        select(Note).where(Note.platform_account_id == account.id, Note.is_deleted.is_(False))
+    ).all():
         stamp = _local_note_time_ms(row)
         if stamp <= 0:
             unknown_time += 1

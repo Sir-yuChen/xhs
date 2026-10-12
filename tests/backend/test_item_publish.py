@@ -123,12 +123,19 @@ def test_item_body_forces_platform_defaults_and_spec():
 
 def test_image_entry_has_uploader_model():
     entry = pub.build_publish_image({
-        "materialId": "m-1", "link": "https://qimg/x", "path": "arkgoods/x",
+        "materialId": "m-1", "link": "https://qimg/x",
+        "url": "https://ros-preview.xhscdn.com/arkgoods/f-1?sign=abc",
+        "path": "arkgoods/f-1",
         "extension": ".jpeg", "width": 800, "height": 800, "size": 100, "name": "n",
     })
-    assert entry["key"] == "m-1" and entry["type"] == "spaceImage"
+    #: 2026-10-13 真机抓包重写：type=uploadImage（无 key），isSecret=true，
+    #: path/fileId 用短格式 fileId（从带签名 url 提取）。
+    assert entry["type"] == "uploadImage" and "key" not in entry
     assert entry["uploaderInfoModel"]["scene"] == "goods_image"
-    assert entry["uploaderInfoModel"]["url"] == "https://qimg/x"
+    assert entry["uploaderInfoModel"]["isSecret"] is True
+    assert entry["path"] == "arkgoods/f-1"
+    assert entry["uploaderInfoModel"]["fileId"] == "arkgoods/f-1"
+    assert entry["uploaderInfoModel"]["url"] == "https://ros-preview.xhscdn.com/arkgoods/f-1?sign=abc"
 
 
 def test_image_entry_omits_missing_dimensions():
@@ -746,10 +753,11 @@ def test_build_item_from_request_shapes_uploaded_images_for_publish():
     #: ① 主图 / 详情图 / 规格图 **三处同形状**（真机一致）。
     for img in (body["images"][0], body["imageDescriptions"][0],
                 body["skuData"][0]["specImage"]):
-        assert img["type"] == "spaceImage", "应是发布体形状，不是上传返回的简化 entry"
-        assert img["key"] and img["materialId"], "key / materialId 必须有"
+        assert img["type"] == "uploadImage", "应是发布体形状，不是上传返回的简化 entry"
+        assert "key" not in img, "2026-10-13 真机抓包：uploadImage 无 key 字段"
+        assert img["materialId"], "materialId 必须有"
         assert img["uploaderInfoModel"]["bizName"] == "ark"
-        assert img["errors"] == []
+        assert img["uploaderInfoModel"]["isSecret"] is True
     #: ② 用的必须是**上传返回的**地址（link / path / materialId 三件）。
     assert body["images"][0]["link"] == "https://qimg/x"
     assert body["images"][0]["path"] == "arkgoods/x"

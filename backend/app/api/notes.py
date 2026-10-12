@@ -22,7 +22,7 @@ from backend.app.core.config import get_settings
 from backend.app.core.database import SessionLocal, get_db
 from backend.app.core.deps import get_current_user, get_owned_active_account
 from backend.app.core.time import shanghai_now
-from backend.app.models import AiDraft, Note, NoteAsset, NoteComment, NoteGoods, NoteTopic, Notification, PlatformAccount, Topic, User
+from backend.app.models import AiDraft, Note, NoteAsset, NoteComment, NoteDatacenterStat, NoteGoods, NoteTopic, Notification, PlatformAccount, Topic, User
 from backend.app.services.note_purge_service import purge_note
 from backend.app.models.scheduled_job import (
     LOG_FAILED,
@@ -32,8 +32,6 @@ from backend.app.models.scheduled_job import (
     ScheduledJobLog,
 )
 from backend.app.models.note import (
-    NOTE_CATEGORIES,
-    NOTE_CATEGORY_DEFAULT,
     NOTE_TYPE_LOCAL,
     NOTE_TYPE_LOCAL_GENERATED,
     NOTE_TYPE_SYNCED,
@@ -406,11 +404,6 @@ def _serialize_note(db: Session, note: Note, relations: Optional[_NoteRelations]
         # 内容库详情卡的「同步」按钮**只对 synced 渲染**（本地笔记是采集来的别人
         # 的笔记，拉平台最新内容没有意义）。列 not null，不存在第三态。
         "note_type": note.note_type,
-        # 笔记分类（2026-10-12）：`goods` = 商业笔记（千帆挂链商品）/ `normal` =
-        # 普通笔记 / `""` = 线上同步或采集来的内容。与 `note_type`（答「谁搬来的」：
-        # synced / local）**正交** —— 本列答「这条属于平台的哪类笔记」。
-        # 同步按钮据此走**不同的同步逻辑线**（商业笔记走千帆线）。
-        "note_category": note.note_category or "",
         # 话题（设计 13 §34）：走 `note_topics` 关系表 join `topics` 字典表
         # （`[{id, name, color}]`；`topics_json` 列已删，关系表是唯一读取路径）。
         # 空 = 这条笔记没有话题（不是错误）。取自 `relations`（§41.4 批量预取）。
@@ -699,7 +692,7 @@ def get_notes(
     """
     statement = (
         select(Note)
-        .where(Note.user_id == current_user.id)
+        .where(Note.user_id == current_user.id, Note.is_deleted.is_(False))
     )
     if platform:
         statement = statement.where(Note.platform == platform)
@@ -809,72 +802,229 @@ def get_notes(
     }
 
 
+@router.get("/goods/{item_id}")
+def get_note_goods_detail(
+    item_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """**按商品 ID 查本地台账商品详情**（数据中心「商品名称」点击弹窗用，2026-10-12）。
+
+    零平台请求：数据源 = `shop_products`（商品台账）本地行。台账里没有这件商品是
+    正常态（关系落库不校验商品存在）⇒ 仍返回一条「只有 item_id」的缺值条目
+    （标题/价格/图留空），**不造假**。序列化复用 `_goods_entry`（唯一实现）。
+
+    ⚠️ 路由必须在 `/{note_id}` 之前 —— item_id 是平台商品 ID（可能是纯数字），
+    排在 `/{note_id}`（int）之后会被抢先匹配。
+    """
+    from backend.app.services.shop_goods_service import products_by_item_id
+
+    resolved = products_by_item_id(db, current_user.id, [item_id])
+    product = resolved.get(str(item_id or ""))
+    # 规格（variant_desc）在 shop_note_goods 挂链映射里（§26.7 / 2026-10-06）。
+    variant = ""
+    from backend.app.models import ShopNoteGoods as _ShopNoteGoods
+
+    _vrow = db.scalar(
+        select(_ShopNoteGoods).where(
+            _ShopNoteGoods.user_id == current_user.id,
+            _ShopNoteGoods.item_id == str(item_id or ""),
+        )
+    )
+    if _vrow is not None:
+        variant = _vrow.variant_desc or ""
+    return _goods_entry(product, item_id, variant)
+
+
 @router.get("/offline")
 def get_offline_notes(
     category: Optional[str] = None,
     platform_account_id: Optional[int] = None,
     keyword: Optional[str] = None,
     item_id: Optional[str] = None,
+    note_id: Optional[str] = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    sort_by: Optional[str] = None,
+    sort_order: Optional[str] = Query(None, pattern="^(asc|desc)$"),
+    published_from: Optional[int] = None,
+    published_to: Optional[int] = None,
+    deleted: Optional[str] = Query(None, pattern="^(all|deleted|active)$"),
+    read_from: Optional[float] = None,
+    read_to: Optional[float] = None,
+    like_from: Optional[float] = None,
+    like_to: Optional[float] = None,
+    collect_from: Optional[float] = None,
+    collect_to: Optional[float] = None,
+    comment_from: Optional[float] = None,
+    comment_to: Optional[float] = None,
+    share_from: Optional[float] = None,
+    share_to: Optional[float] = None,
+    pay_gmv_from: Optional[float] = None,
+    pay_gmv_to: Optional[float] = None,
+    pay_order_from: Optional[float] = None,
+    pay_order_to: Optional[float] = None,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """「我的笔记」商业 / 普通 Tab 的**离线数据**列表（查本地库，零平台请求）。
+    """「数据中心」笔记列表（查本地统计表，零平台请求）。
 
-    数据源是千帆数据中心离线落库的笔记（`note_category` ∈ `goods` / `normal`）。
-    `category` 必填（`goods` / `normal`），未知值 400 `NOTE_CATEGORY_UNSUPPORTED`。
-    不传 `category` 时返回全部离线笔记（含 `note_category` 非空的）。
+    数据源是 `note_datacenter_stats` 统计表（千帆数据中心离线落库）。
+    `category` 可选（`goods` / `normal`），映射到 `note_flag`
+    （`goods` → `goods_note` / `normal` → 非 goods_note）；未知值 400
+    `NOTE_CATEGORY_UNSUPPORTED`。不传 `category` 时返回全部统计行。
 
     `keyword`（2026-10-06）：标题**模糊查询**（`LIKE %keyword%`）。
-    `item_id`（2026-10-06）：商业笔记按**商品 ID** 反查对应笔记（join `note_goods`）。
+    `item_id`（2026-10-06）：商业笔记按**商品 ID** 反查（统计表 `item_id` 列）。
+
+    `sort_by` / `sort_order`（2026-10-12）：指标列排序。`sort_by` 是**白名单**里的
+    统计表列名（`read_count` / `like_count` / `collect_count` / `comment_count` /
+    `share_count` / `pay_gmv` / `pay_order_cnt` / `publish_time` / `stat_date`），
+    非法列 400 `NOTE_SORT_UNSUPPORTED`（防注入）。缺省 `sort_order` = `desc`；
+    不传 `sort_by` = 默认排序（stat_date desc, id desc）。
+
+    `published_from` / `published_to`（2026-10-12）：发布时间区间（unix 秒，含端点）。
+    `deleted`（2026-10-12）：`deleted` = 只看已删（`platform_deleted_at` 非空），
+    `active` = 只看未删，缺省 `all` = 全部。
+
+    指标区间（2026-10-12，数据中心页「指标搜索条件」）：`read_from/read_to`、
+    `like_from/like_to`、`collect_from/collect_to`、`comment_from/comment_to`、
+    `share_from/share_to`、`pay_gmv_from/pay_gmv_to`、`pay_order_from/pay_order_to`。
+    均为可选，NULL 端点 = 该侧不筛；区间为**闭区间**（`col >= from` / `col <= to`）。
 
     ⚠️ 路由必须注册在 `/{note_id}` 之前 —— 否则 "offline" 会被 int 转换吃掉（422）。
     """
-    statement = select(Note).where(Note.user_id == current_user.id)
+    #: 可排序列白名单（防注入：只允许这些真实列名进 ORDER BY）。
+    _SORTABLE = {
+        "read_count", "like_count", "collect_count", "comment_count",
+        "share_count", "pay_gmv", "pay_order_cnt", "publish_time", "stat_date",
+    }
+    statement = select(NoteDatacenterStat).where(NoteDatacenterStat.user_id == current_user.id)
+    # 2026-10-12 软删除过滤：本地 notes 已软删（is_deleted=True）的笔记**不展示** ——
+    # 无流量清理软删后，统计表行仍在（无外键），但列表 / 详情 / 同步都该当它不存在。
+    # 用 EXISTS 排除（统计表 note_id 命中 notes 的软删行 ⇒ 过滤）。notes 里没有的行
+    # （纯粹只有统计快照、从未落 notes）不受影响，照常展示。
+    soft_deleted_subq = (
+        select(Note.id)
+        .where(
+            Note.user_id == current_user.id,
+            Note.is_deleted.is_(True),
+            Note.note_id == NoteDatacenterStat.note_id,
+        )
+        .exists()
+    )
+    statement = statement.where(~soft_deleted_subq)
     cat_key = (category or "").strip()
     if cat_key:
-        if cat_key not in NOTE_CATEGORIES:
+        if cat_key not in ("goods", "normal"):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={
                     "code": "NOTE_CATEGORY_UNSUPPORTED",
                     "message": f"不支持的笔记分类：{cat_key}",
-                    "supported": list(NOTE_CATEGORIES),
+                    "supported": ["goods", "normal"],
                 },
             )
-        statement = statement.where(Note.note_category == cat_key)
-    else:
-        statement = statement.where(Note.note_category != NOTE_CATEGORY_DEFAULT)
+        if cat_key == "goods":
+            statement = statement.where(NoteDatacenterStat.note_flag == "goods_note")
+        else:
+            statement = statement.where(NoteDatacenterStat.note_flag != "goods_note")
     if platform_account_id is not None:
-        statement = statement.where(Note.platform_account_id == platform_account_id)
+        statement = statement.where(NoteDatacenterStat.platform_account_id == platform_account_id)
     # 标题模糊查询（2026-10-06）：空串 / 空白不筛。
     if keyword and keyword.strip():
-        statement = statement.where(Note.title.like(f"%{keyword.strip()}%"))
-    # 商品 ID 反查（2026-10-06）：按 note_goods 关系表反查笔记 note_id 集合。
+        statement = statement.where(NoteDatacenterStat.title.like(f"%{keyword.strip()}%"))
+    # 商品 ID 反查（2026-10-06）：统计表 item_id 列直接筛。
     if item_id and item_id.strip():
-        matched_note_ids = set(
-            db.scalars(
-                select(NoteGoods.note_id).where(
-                    NoteGoods.user_id == current_user.id,
-                    NoteGoods.item_id == item_id.strip(),
-                )
-            ).all()
-        )
-        statement = statement.where(Note.note_id.in_(matched_note_ids or {""}))
+        statement = statement.where(NoteDatacenterStat.item_id == item_id.strip())
+    # 笔记 ID 精确查询（2026-10-12）：统计表 note_id 列直接筛。
+    if note_id and note_id.strip():
+        statement = statement.where(NoteDatacenterStat.note_id == note_id.strip())
+    # 发布时间区间（2026-10-12，unix 秒闭区间）。
+    if published_from is not None:
+        statement = statement.where(NoteDatacenterStat.publish_time >= published_from)
+    if published_to is not None:
+        statement = statement.where(NoteDatacenterStat.publish_time <= published_to)
+    # 已删除开关（2026-10-12）。
+    if deleted == "deleted":
+        statement = statement.where(NoteDatacenterStat.platform_deleted_at.is_not(None))
+    elif deleted == "active":
+        statement = statement.where(NoteDatacenterStat.platform_deleted_at.is_(None))
+    # 指标区间（2026-10-12，闭区间；NULL 端点 = 不筛该侧）。
+    metric_ranges = {
+        "read_count": (read_from, read_to),
+        "like_count": (like_from, like_to),
+        "collect_count": (collect_from, collect_to),
+        "comment_count": (comment_from, comment_to),
+        "share_count": (share_from, share_to),
+        "pay_gmv": (pay_gmv_from, pay_gmv_to),
+        "pay_order_cnt": (pay_order_from, pay_order_to),
+    }
+    for col_name, (lo, hi) in metric_ranges.items():
+        col = getattr(NoteDatacenterStat, col_name)
+        if lo is not None:
+            statement = statement.where(col >= lo)
+        if hi is not None:
+            statement = statement.where(col <= hi)
+
+    # 排序：`sort_by` 命中白名单才生效，否则按默认（stat_date desc, id desc）。
+    if sort_by:
+        if sort_by not in _SORTABLE:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "NOTE_SORT_UNSUPPORTED",
+                    "message": f"不支持的排序字段：{sort_by}",
+                    "supported": sorted(_SORTABLE),
+                },
+            )
+        col = getattr(NoteDatacenterStat, sort_by)
+        order_expr = col.desc() if (sort_order or "desc") == "desc" else col.asc()
+        #: NULL 排最后（缺值不是最小也不是最大，别把「没数据」当成「数据为零」排到前面）。
+        order_expr = col.is_(None), order_expr
+        statement = statement.order_by(*order_expr)
+    else:
+        statement = statement.order_by(NoteDatacenterStat.stat_date.desc(), NoteDatacenterStat.id.desc())
 
     total = db.scalar(select(func.count()).select_from(statement.subquery())) or 0
     rows = db.scalars(
-        statement.order_by(Note.created_at.desc(), Note.id.desc())
-        .limit(page_size)
-        .offset((page - 1) * page_size)
+        statement.limit(page_size).offset((page - 1) * page_size)
     ).all()
-    relations = _load_note_relations(db, rows)
+    # 取 note → notes 归属（本地主键 + 当前标题/封面，供展示）。
+    note_ids = {str(r.note_id) for r in rows if r.note_id}
+    note_by_id: dict[str, Note] = {}
+    if note_ids:
+        note_by_id = {
+            n.note_id: n
+            for n in db.scalars(select(Note).where(Note.note_id.in_(note_ids))).all()
+        }
+    items = []
+    for r in rows:
+        note = note_by_id.get(r.note_id)
+        items.append({
+            "note_id": r.note_id,
+            "title": r.title or (note.title if note else "") or "",
+            "note_flag": r.note_flag,
+            "item_id": r.item_id,
+            "item_title": r.item_title,
+            "publish_time": r.publish_time,
+            "read_count": r.read_count,
+            "like_count": r.like_count,
+            "collect_count": r.collect_count,
+            "comment_count": r.comment_count,
+            "share_count": r.share_count,
+            "pay_gmv": r.pay_gmv,
+            "pay_order_cnt": r.pay_order_cnt,
+            "stat_date": r.stat_date,
+            "window": r.window,
+            "platform_deleted_at": r.platform_deleted_at.isoformat() if r.platform_deleted_at else None,
+            "in_library": note is not None,
+        })
     return {
         "total": int(total),
         "page": page,
         "page_size": page_size,
-        "items": [_serialize_note_with_topics(db, note, relations) for note in rows],
+        "items": items,
     }
 
 
@@ -896,12 +1046,15 @@ def batch_delete_notes_endpoint(
     `note_ids` 是**平台 note_id**（不是本地主键）。两种方式（前端单选框）：
 
     * `delete_platform=false`（默认）：**只删本地**（`purge_note`，连关系行一起删），不碰平台。
-    * `delete_platform=true`：**先删平台、成功后删本地** —— 商业笔记（goods）走千帆
-      `batch_delete_notes`（批量），普通笔记（normal）走创作者 `validate_delete_permission`
+    * `delete_platform=true`：**先删平台、成功后删本地** —— 商业笔记（goods_note）走千帆
+      `batch_delete_notes`（批量），普通笔记（非 goods_note）走创作者 `validate_delete_permission`
       + `delete_note`（逐篇）。平台删除失败的笔记**本地保留**，如实返回失败原因。
 
     返回 `{deleted: int, failed: [...], results: [...]}`。账号无对应平台 Cookie 时，
     平台删除全部失败（本地也不删），理由如实带出。
+
+    2026-10-12 设计 35：商业/普通分流判据由 `note_category` 改 `note_flag`
+    （`note_datacenter_stats.note_flag == "goods_note"` ⇒ 商业）。
     """
     from backend.app.adapters.xhs.creator_api_adapter import XhsCreatorApiAdapter
     from backend.app.adapters.xhs.qianfan_api_adapter import XhsQianfanApiAdapter
@@ -954,7 +1107,16 @@ def batch_delete_notes_endpoint(
     qianfan_adapter = XhsQianfanApiAdapter(ark_cookies) if ark_cookies else None
     creator_adapter = XhsCreatorApiAdapter(creator_cookies) if creator_cookies else None
 
-    # 分组：goods → 千帆批量，normal/其他 → creator 逐篇。
+    # 分组：goods_note → 千帆批量，非 goods_note → creator 逐篇。
+    # 2026-10-12 设计 35：分流判据读统计表 `note_flag`（取代已退役的 `note_category`）。
+    flag_by_note_id = {
+        r.note_id: r.note_flag
+        for r in db.scalars(
+            select(NoteDatacenterStat.note_id, NoteDatacenterStat.note_flag).where(
+                NoteDatacenterStat.note_id.in_(wanted)
+            )
+        ).all()
+    }
     goods_ids: list[str] = []
     creator_ids: list[str] = []
     for nid in wanted:
@@ -962,7 +1124,7 @@ def batch_delete_notes_endpoint(
         if note is None:
             results.append({"note_id": nid, "ok": False, "reason": "本地无此笔记"})
             failed.append({"note_id": nid, "reason": "本地无此笔记"})
-        elif note.note_category == "goods":
+        elif flag_by_note_id.get(nid) == "goods_note":
             goods_ids.append(nid)
         else:
             creator_ids.append(nid)
@@ -1028,12 +1190,12 @@ def hydrate_offline_note_detail(
 ):
     """**点击笔记卡片时实时拉详情并落库**（2026-10-06 需求，取代定时任务/导入自动拉）。
 
-    对**一条**离线笔记（`note_category` ∈ `goods` / `normal`）实时拉平台详情
-    （正文 / 媒体图视频 / 话题），**落库**：正文 → `notes.content`、媒体 →
+    对**一条**离线笔记（有数据中心统计，即 `note_datacenter_stats` 有行）实时拉
+    平台详情（正文 / 媒体图视频 / 话题），**落库**：正文 → `notes.content`、媒体 →
     `note_assets`、话题 → `topics` + `note_topics`（拆表）。数据源是笔记原链接
     自带的 `xsec_token`（匿名 explore SSR，无需登录）。
 
-    ⚠️ 仅离线笔记支持（`note_category` 非空）；内容库/「全部笔记」tab 的线上笔记
+    ⚠️ 仅离线笔记支持（统计表有行）；内容库/「全部笔记」tab 的线上笔记
     走 `POST /xhs/pc/notes/detail`（不落库）。
 
     返回序列化后的完整笔记（含落库后的 `content` / `asset_urls` / `topics` /
@@ -1043,14 +1205,22 @@ def hydrate_offline_note_detail(
     from backend.app.services.rate_limiter import get_rate_limiter
     from backend.app.adapters.xhs.note_detail_ssr import fetch_note_detail_payload
 
+    # 离线笔记判定：`note_datacenter_stats` 统计表有行（2026-10-12 设计 35，
+    # 取代 `note_category != DEFAULT`）。
+    has_stats = db.scalar(
+        select(NoteDatacenterStat.id).where(
+            NoteDatacenterStat.note_id == note_id,
+            NoteDatacenterStat.user_id == current_user.id,
+        )
+    )
     note = db.scalars(
         select(Note).where(
             Note.note_id == note_id,
             Note.user_id == current_user.id,
-            Note.note_category != NOTE_CATEGORY_DEFAULT,
+            Note.is_deleted.is_(False),
         )
     ).first()
-    if note is None:
+    if note is None or has_stats is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": "OFFLINE_NOTE_NOT_FOUND", "message": "该离线笔记不存在或不属于当前账号"},
@@ -1095,13 +1265,13 @@ async def import_note_data(
     """
     from backend.app.services.note_data_service import import_note_data_file
 
-    if category not in NOTE_CATEGORIES:
+    if category not in ("goods", "normal"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
                 "code": "NOTE_CATEGORY_UNSUPPORTED",
                 "message": f"不支持的笔记分类：{category}",
-                "supported": list(NOTE_CATEGORIES),
+                "supported": ["goods", "normal"],
             },
         )
     # 账号归属校验（越权 404，不暴露「存在但无权」）
@@ -1266,13 +1436,13 @@ def sync_note_data_endpoint(
     """
     from datetime import datetime as _dt
 
-    if payload.category not in NOTE_CATEGORIES:
+    if payload.category not in ("goods", "normal"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
                 "code": "NOTE_CATEGORY_UNSUPPORTED",
                 "message": f"不支持的笔记分类：{payload.category}",
-                "supported": list(NOTE_CATEGORIES),
+                "supported": ["goods", "normal"],
             },
         )
     get_owned_active_account(db, current_user, payload.account_id, platform="xhs")
@@ -1810,6 +1980,10 @@ def batch_save_notes(
                 Note.note_id == note_payload.note_id,
             )
         ).first()
+        # 2026-10-12：已软删的笔记**跳过不复活**（无流量清理软删后，采集/监控
+        # 若再落库同一条，会把它「复活」回列表）。
+        if existing is not None and existing.is_deleted:
+            continue
         if existing is None:
             existing = Note(
                 user_id=current_user.id,

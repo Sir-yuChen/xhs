@@ -21,14 +21,9 @@ NOTE_TYPE_LOCAL_GENERATED = "local_generated"
 
 #: 笔记**分类**（「我的笔记」离线数据，2026-10-06 需求）：与小红书平台一致，
 #: 分「商业笔记」（挂载商品）与「普通笔记」两类。
-#: 判据是**千帆数据中心的数据源**（`note-data/goods` vs `note-data/normal`），
-#: 不是「笔记类型」字段（那个是图文/视频）—— 商业/普通由下载入口决定。
-NOTE_CATEGORY_GOODS = "goods"
-NOTE_CATEGORY_NORMAL = "normal"
-#: 全部合法取值（写入入口的校验依据）。
-NOTE_CATEGORIES = (NOTE_CATEGORY_GOODS, NOTE_CATEGORY_NORMAL)
-#: 空值 = 不是离线数据中心笔记（线上同步 / 采集 / 本地生成的笔记没有这个维度）。
-NOTE_CATEGORY_DEFAULT = ""
+#: ⛔ **已退役（2026-10-12，设计 35）**：分类权威改 `note_datacenter_stats.note_flag`
+#: （平台原生），本列已 DROP、常量已删。商业/普通由千帆数据中心的下载入口决定，
+#: 判据只认统计表里的 `note_flag`，不再有「两写入者、判据不同源」的问题。
 
 #: 本地生成笔记的**发布状态机**（设计 13 §31.3.1；**口径被 §32.3 取代**）——
 #: 现在是**所有笔记**的发布状态（不再有「空 = 不适用」这一态）：
@@ -209,15 +204,10 @@ class Note(Base):
     note_type: Mapped[str] = mapped_column(
         String(16), default=NOTE_TYPE_LOCAL, nullable=False, server_default=NOTE_TYPE_LOCAL
     )
-    #: **笔记分类**（「我的笔记」离线数据，2026-10-06 需求）：
-    #: `goods` = 商业笔记（千帆数据中心 `note-data/goods`）/ `normal` = 普通笔记
-    #: （`note-data/normal`）/ 空 = 非数据中心笔记（线上同步 / 采集 / 本地生成）。
-    #: 与 `note_type`（synced/local/local_generated，答「谁搬来的」）**正交**：
-    #: 本列答「这条属于平台的哪类笔记」（商业/普通），两列不是一列。
-    #: 覆盖更新时按数据源刷新（一条笔记从普通转商业时，`goods` → `normal` 会跟着变）。
-    note_category: Mapped[str] = mapped_column(
-        String(16), default=NOTE_CATEGORY_DEFAULT, nullable=False, server_default=""
-    )
+    #: ⛔ **`note_category` 已退役并 DROP（2026-10-12，设计 35）**。
+    #: 原「笔记分类」（商业/普通）判据收敛为 `note_datacenter_stats.note_flag`（平台原生），
+    #: 本列不再存在。历史数据已由数据脚本 `.hermes/scripts/migrate_datacenter_stats.py`
+    #: 迁进统计表。分类不再落在 `notes` 表上 —— 笔记删除不影响数据中心的历史统计。
     #: **话题（#标签名列表）**（设计 13 §28，2026-09-22 新增，迁移 `s1t2u3v4w5x6`）。
     #: Text 列存 JSON 数组（与 `shop_products.images_json` 同款记法），默认 `[]`。
     #:
@@ -274,6 +264,17 @@ class Note(Base):
     #: 最近一次发布失败原因（平台原文 / 网络异常，DEF-058：不许替换成通用文案）；
     #: 发布成功或重新发起发布即清空。卡片 Tooltip 与详情弹窗展示。
     publish_error: Mapped[str] = mapped_column(Text, default="", nullable=False, server_default="")
+    #: **软删除标记**（2026-10-12，无流量清理）。默认 `False` = 正常。
+    #:
+    #: 无流量清理删笔记时**不再硬删**（原 `purge_note` 真删行），改置本列 `True`：
+    #: * 所有**查询**（列表 / 详情 / 同步 / 采集命中）都排除 `is_deleted=True` 的行 ——
+    #:   软删的数据不再出现在任何前端页面；
+    #: * 同步数据中心笔记指标时**前置校验**：`is_deleted=True` 的 note_id 直接跳过，
+    #:   不再落库（否则删掉的笔记会被下一轮同步「复活」）。
+    #:
+    #: ⚠️ 硬删 `purge_note` 仍保留（笔记基础信息删除等其它链路用），无流量清理这条
+    #: 链路**不再走它**。
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default="0", index=True)
     #: 发布尝试次数（含失败；重发计数，便于排查「发了几次才成」）。
     publish_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0")
     #: 三方发布成功时间（平台返回真实 note_id 的时刻，本地时区）；只写不清。

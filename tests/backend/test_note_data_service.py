@@ -12,9 +12,10 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import select
 
-from backend.app.models import Note, NoteGoods, User
-from backend.app.models.note import NOTE_CATEGORY_GOODS, NOTE_CATEGORY_NORMAL
+from backend.app.models import Note, NoteDatacenterStat, NoteGoods, User
 from backend.app.services.note_data_service import (
+    CATEGORY_GOODS,
+    CATEGORY_NORMAL,
     NoteDataRow,
     _extract_url_from_hyperlink,
     _note_row_from_butterfly,
@@ -43,7 +44,7 @@ class TestButterflyRowMapping:
             "noteReadCnt": {"value": 38},
             "noteLikeCnt": {"value": 0},
         }
-        parsed = _note_row_from_butterfly(row, NOTE_CATEGORY_GOODS)
+        parsed = _note_row_from_butterfly(row, CATEGORY_GOODS)
         assert parsed.note_id == "6a616611000000000f009848"
         assert parsed.title == "弧形轨道浴帘顶装L形卫生间洗澡挂帘子"
         assert parsed.note_url == "https://www.xiaohongshu.com/explore/6a616611000000000f009848"
@@ -53,7 +54,7 @@ class TestButterflyRowMapping:
         assert parsed.published_at == "2026-07-23 08:53:38"
         assert parsed.item_id == "6a51962619f8df0015b08cb2"
         assert parsed.item_title == "弧形轨道浴帘"
-        assert parsed.category == NOTE_CATEGORY_GOODS
+        assert parsed.category == CATEGORY_GOODS
         assert parsed.metrics["read_count"] == 38
         assert parsed.metrics["like_count"] == 0
 
@@ -66,13 +67,13 @@ class TestButterflyRowMapping:
             "nickName": {"value": ""},
             "redId": {"value": ""},
         }
-        parsed = _note_row_from_butterfly(row, NOTE_CATEGORY_NORMAL)
+        parsed = _note_row_from_butterfly(row, CATEGORY_NORMAL)
         assert parsed.author_name == "观隅好物"
         assert parsed.author_xhs_id == "293066917"
 
     def test_missing_metrics_are_none_and_excluded(self):
         row = {"noteId": {"value": "n1"}, "noteReadCnt": {"value": None}}
-        parsed = _note_row_from_butterfly(row, NOTE_CATEGORY_NORMAL)
+        parsed = _note_row_from_butterfly(row, CATEGORY_NORMAL)
         assert "read_count" not in parsed.metrics  # None 被剔除，不造假
 
     def test_title_falls_back_to_item_name(self):
@@ -81,7 +82,7 @@ class TestButterflyRowMapping:
             "discoveryTitle": {"value": ""},
             "nitemName": {"value": "商品名"},
         }
-        parsed = _note_row_from_butterfly(row, NOTE_CATEGORY_GOODS)
+        parsed = _note_row_from_butterfly(row, CATEGORY_GOODS)
         assert parsed.title == "商品名"
 
 
@@ -100,7 +101,7 @@ class TestXlsxRowMapping:
             "笔记阅读数": 38,
             "点赞次数": 0,
         }
-        parsed = _note_row_from_xlsx(row_dict, NOTE_CATEGORY_GOODS)
+        parsed = _note_row_from_xlsx(row_dict, CATEGORY_GOODS)
         assert parsed.note_id == "6a616611000000000f009848"
         assert parsed.title == "弧形轨道浴帘"
         assert parsed.note_url == "https://www.xiaohongshu.com/explore/6a61?xsec_token=abc"
@@ -124,7 +125,7 @@ class TestXlsxRowMapping:
 
     def test_float_metric_handles_integer(self):
         row_dict = {"笔记标题": "t", "笔记ID": "n1", "笔记支付金额": 0.0, "视频时长（秒）": 9.0}
-        parsed = _note_row_from_xlsx(row_dict, NOTE_CATEGORY_GOODS)
+        parsed = _note_row_from_xlsx(row_dict, CATEGORY_GOODS)
         assert parsed.metrics["pay_gmv"] == 0.0
         assert parsed.metrics["video_duration"] == 9
 
@@ -142,13 +143,13 @@ class TestParseButterflyResponse:
                 }
             ]
         }
-        rows = parse_butterfly_response(payload, NOTE_CATEGORY_GOODS)
+        rows = parse_butterfly_response(payload, CATEGORY_GOODS)
         assert len(rows) == 2
         assert [r.note_id for r in rows] == ["n1", "n2"]
 
     def test_empty_data_returns_empty(self):
-        assert parse_butterfly_response({"data": []}, NOTE_CATEGORY_GOODS) == []
-        assert parse_butterfly_response({"data": [{"data": []}]}, NOTE_CATEGORY_GOODS) == []
+        assert parse_butterfly_response({"data": []}, CATEGORY_GOODS) == []
+        assert parse_butterfly_response({"data": [{"data": []}]}, CATEGORY_GOODS) == []
 
 
 # --------------------------------------------------------------------------- #
@@ -170,21 +171,25 @@ class TestUpsertNoteDataRows:
         db = db_factory()
         self._seed(db)
 
-        rows = [NoteDataRow(note_id="n1", title="标题1", category=NOTE_CATEGORY_GOODS)]
+        rows = [NoteDataRow(note_id="n1", title="标题1", category=CATEGORY_GOODS)]
         result = upsert_note_data_rows(db, rows, user_id=1, account_id=10)
         db.commit()
-        assert result == {"created": 1, "updated": 0, "total": 1}
+        assert result == {"created": 1, "updated": 0, "total": 1, "skipped_deleted": 0}
 
+        # 基础信息落 notes；指标/分类落统计表 note_flag == "goods_note"。
         note = db.scalar(select(Note).where(Note.note_id == "n1"))
-        assert note.note_category == NOTE_CATEGORY_GOODS
+        stat = db.scalar(select(NoteDatacenterStat).where(NoteDatacenterStat.note_id == "n1"))
+        assert stat.note_flag == "goods_note"
+        assert note.title == "标题1"
 
-        # 再落一次（覆盖更新，category 从 goods → normal）
-        rows2 = [NoteDataRow(note_id="n1", title="新标题", category=NOTE_CATEGORY_NORMAL)]
+        # 再落一次（覆盖更新，category 从 goods → normal ⇒ note_flag 清空）
+        rows2 = [NoteDataRow(note_id="n1", title="新标题", category=CATEGORY_NORMAL)]
         result2 = upsert_note_data_rows(db, rows2, user_id=1, account_id=10)
         db.commit()
-        assert result2 == {"created": 0, "updated": 1, "total": 1}
+        assert result2 == {"created": 0, "updated": 1, "total": 1, "skipped_deleted": 0}
         db.refresh(note)
-        assert note.note_category == NOTE_CATEGORY_NORMAL
+        db.refresh(stat)
+        assert stat.note_flag == ""
         assert note.title == "新标题"
 
     def test_note_goods_relation_idempotent(self, db_factory):
@@ -192,7 +197,7 @@ class TestUpsertNoteDataRows:
         self._seed(db)
 
         row = NoteDataRow(
-            note_id="n1", title="t", category=NOTE_CATEGORY_GOODS,
+            note_id="n1", title="t", category=CATEGORY_GOODS,
             item_id="item1", item_title="商品1",
         )
         upsert_note_data_rows(db, [row], user_id=1, account_id=10)
@@ -268,15 +273,22 @@ class TestHydrateOfflineNotes:
             db.add(PlatformAccount(id=10, user_id=1, platform="xhs", nickname="acc10"))
         db.commit()
 
-    def _make_note(self, db, note_id: str, *, category=NOTE_CATEGORY_GOODS, xsec_token="tok1",
+    def _make_note(self, db, note_id: str, *, category=CATEGORY_GOODS, xsec_token="tok1",
                    content="", hydrated_at=None):
         # note_id 必须是平台形态（全 hex 且 ≥16 位），`_note_detail_url` 才认（否则判 no_url）。
         raw = {"note_url": f"https://www.xiaohongshu.com/explore/{note_id}", "xsec_token": xsec_token}
         note = Note(
             user_id=1, platform_account_id=10, platform="xhs",
             note_id=note_id, title=f"标题{note_id}", content=content,
-            note_category=category, raw_json=raw,
+            raw_json=raw,
         )
+        # 数据中心统计行（2026-10-12 设计 35：`hydrate_offline_notes` 按统计表存在性判离线）。
+        db.add(NoteDatacenterStat(
+            user_id=1, platform_account_id=10, note_id=note_id,
+            stat_date="2026-10-12", window="recent_1",
+            note_flag="goods_note" if category == CATEGORY_GOODS else "",
+            title=f"标题{note_id}",
+        ))
         if hydrated_at is not None:
             note.hydrated_at = hydrated_at
         db.add(note)
@@ -324,7 +336,7 @@ class TestHydrateOfflineNotes:
         from backend.app.core.time import shanghai_now
 
         stats = hydrate_offline_notes(
-            account_id=10, user_id=1, category=NOTE_CATEGORY_GOODS,
+            account_id=10, user_id=1, category=CATEGORY_GOODS,
             session_factory=db_factory, fetch_payload=fake_fetch,
         )
         assert stats["filled"] == 1
@@ -355,7 +367,7 @@ class TestHydrateOfflineNotes:
             called["n"] += 1
             return self._payload()
         stats = hydrate_offline_notes(
-            account_id=10, user_id=1, category=NOTE_CATEGORY_GOODS,
+            account_id=10, user_id=1, category=CATEGORY_GOODS,
             session_factory=db_factory, fetch_payload=fake_fetch,
         )
         assert stats["attempted"] == 0
@@ -373,7 +385,7 @@ class TestHydrateOfflineNotes:
             called["n"] += 1
             return self._payload()
         stats = hydrate_offline_notes(
-            account_id=10, user_id=1, category=NOTE_CATEGORY_GOODS,
+            account_id=10, user_id=1, category=CATEGORY_GOODS,
             session_factory=db_factory, fetch_payload=fake_fetch,
         )
         assert stats["no_url"] == 1
@@ -391,7 +403,7 @@ class TestHydrateOfflineNotes:
         def fake_fetch(url):
             return (False, "explore 页面返回 HTTP 404", None)
         stats = hydrate_offline_notes(
-            account_id=10, user_id=1, category=NOTE_CATEGORY_GOODS,
+            account_id=10, user_id=1, category=CATEGORY_GOODS,
             session_factory=db_factory, fetch_payload=fake_fetch,
         )
         assert stats["failed"] == 1

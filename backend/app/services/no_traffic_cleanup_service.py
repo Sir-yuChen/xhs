@@ -44,10 +44,12 @@ from backend.app.models.no_traffic_cleanup_log import (
     NoTrafficCleanupLog,
 )
 from backend.app.models.platform_account import PlatformAccount
+from backend.app.models.scheduled_job import LOG_FAILED, LOG_RUNNING, LOG_SUCCESS, ScheduledJobLog
 from backend.app.models.task import Task
 from backend.app.services.no_traffic_service import (
     CleanupQuery,
     TrafficThresholds,
+    candidates_by_note_ids,
     list_no_traffic_candidates,
 )
 from backend.app.services.rate_limiter import CrawlRateLimiter
@@ -68,6 +70,10 @@ MAX_CANDIDATE_SCAN = 500
 
 #: 清理任务在 tasks 表的 task_type，用于去重与查询历史。
 CLEANUP_TASK_TYPE = "xhs_no_traffic_cleanup"
+
+#: 单批清理的 note_ids 上限（2026-10-13 用户口径「每批次最多 500 条」）。
+#: 超过此数由 `run_no_traffic_cleanup_background` 自动按 500 切片成多个子批次。
+MAX_NOTES_PER_BATCH = 500
 
 #: 单篇失败即**中止整批**的错误特征（DEF-097）。
 #:
@@ -101,6 +107,33 @@ def _looks_like_account_level_failure(message: str) -> bool:
     if not text:
         return False
     return any(marker in text for marker in ACCOUNT_LEVEL_FAILURE_MARKERS)
+
+
+#: 平台返回「笔记不存在」的特征原文（2026-10-12，无流量清理软删除）。
+#:
+#: 用户口径：「删平台前校验笔记是否存在 → 不存在则只删本地」。校验走**删除请求本身**：
+#: 平台回「笔记不存在」即视为已不存在（等价已删），**只软删本地**，不算失败。
+#:
+#: ⚠️ 只认这几句（保守）：认不出时**照旧算失败**（宁可少软删也不误判成「已删」
+#: 而把一个实际还在平台的笔记从本地抹掉）。
+NOTE_ABSENT_MARKERS = (
+    "笔记不存在",
+    "笔记已删除",
+    "笔记已被删除",
+    "note not found",
+    "note not exist",
+    "not exist",
+    "已删除",
+    "不存在",
+)
+
+
+def _looks_like_note_absent(message: str) -> bool:
+    """平台说这条笔记**已经不存在**了吗（⇒ 软删本地，不算失败）。"""
+    text = str(message or "")
+    if not text:
+        return False
+    return any(marker in text.lower() for marker in NOTE_ABSENT_MARKERS)
 
 _lock = CrawlRateLimiter()
 
@@ -172,6 +205,7 @@ def _open_log(
     query: Optional[CleanupQuery],
     batch_limit: int,
     note_ids: Optional[list[str]],
+    batch_no: str = "",
 ) -> Optional[NoTrafficCleanupLog]:
     """开一条清理日志（`status=running`），返回它。
 
@@ -186,6 +220,7 @@ def _open_log(
             account_name=_account_name(db, account_id),
             task_id=task_id,
             trigger_type="manual",
+            batch_no=batch_no,
             thresholds=(thresholds or TrafficThresholds()).to_dict(),
             query=(query or CleanupQuery()).to_dict(),
             note_ids=list(note_ids or []),
@@ -201,6 +236,30 @@ def _open_log(
     except Exception as exc:  # noqa: BLE001 - 写日志失败不许拖垮清理
         logger.warning("open no-traffic cleanup log failed: %s", exc)
         return None
+
+
+def _close_job_log(
+    db: Any,
+    job_log: ScheduledJobLog,
+    *,
+    ok: bool,
+    message: str = "",
+    exception: str = "",
+) -> None:
+    """收尾**定时任务日志**（清理任务也落任务中心，2026-10-13）。失败不抛。"""
+    try:
+        job_log.status = LOG_SUCCESS if ok else LOG_FAILED
+        job_log.finished_at = shanghai_now()
+        job_log.progress = 100
+        job_log.message = message
+        job_log.exception_info = exception
+        if job_log.started_at is not None:
+            job_log.duration_ms = int(
+                (job_log.finished_at - job_log.started_at).total_seconds() * 1000
+            )
+        db.commit()
+    except Exception as exc:  # noqa: BLE001 - 写日志失败不许拖垮清理
+        logger.warning("close no-traffic cleanup job log failed: %s", exc)
 
 
 def _close_log(
@@ -343,7 +402,7 @@ def _account_cookies(db: Any, account_id: int) -> Optional[str]:
 def _ark_cookies(db: Any, account_id: int) -> Optional[str]:
     """取账号**千帆（ark）平台**的令牌（2026-10-06 加）。
 
-    商业笔记（`note_category=goods`）的删除走千帆 `note/batch_delete_note`，需要
+    商业笔记（`note_flag == "goods_note"`）的删除走千帆 `note/batch_delete_note`，需要
     ark 通道 Cookie（与创作者平台的 `creator` 令牌互不通用）。
     """
     from backend.app.services.account_service import CHANNEL_ARK, latest_cookies_for_channel
@@ -515,23 +574,22 @@ def _cleanup_with_task(
     # 两条入口共用同一条执行链（列表勾选清理 / 全量清理），差别**只在候选集**：
     # * `note_ids` 非空 ⇒ **指定笔记**：只删这些（且必须仍在候选池里，见下）；
     # * `note_ids` 为空 ⇒ **全量**：按阈值 + 查询条件取前 `batch_limit` 条。
-    #: 勾选了但**已不在候选池**的笔记（只有指定清理才有）。
+    #: 勾选了但**查不到统计行**的笔记（只有指定清理才有）。
     #: 先声明，让下面无论走哪条分支都拿得到它（不要靠 `if note_ids` 短路「不会求值」）。
     missing: list[str] = []
     if note_ids:
-        pool = list_no_traffic_candidates(
-            db, account_id, thresholds or TrafficThresholds(), limit=MAX_CANDIDATE_SCAN, query=query
-        )
-        by_id = {c.note_id: c for c in pool["candidates"]}
+        # 2026-10-12 修复：按勾选的 note_id **直接查统计表**构建候选，绕过候选池的
+        # `MAX_CANDIDATE_SCAN=500` 分页截断（此前勾选的笔记排在 500 名之后就被
+        # `not_in_pool` 误判「不在候选池」⇒ 不删 ⇒ 看起来像「清理没触发」）。
+        found = candidates_by_note_ids(db, account_id, list(note_ids))
+        by_id = {c.note_id: c for c in found}
         wanted = [nid for nid in note_ids if nid in by_id]
-        # ⚠️ 勾选的笔记若**已不在候选池**（阈值被改小/已被删），**不删**、如实报数：
-        #    删一个「不在当前筛选口径内」的笔记 = 用户以为自己只删了看到的那批。
-        # 勾了但不在池子里的：**不删**并如实回 `not_in_pool`（不是静默跳过）
+        # 勾了但**统计表里查不到**（数据源不在统计表 / 已软删）：**不删**并如实回 `not_in_pool`。
         missing = [nid for nid in note_ids if nid not in by_id]
         items = [by_id[nid] for nid in wanted]
         if missing:
             _mutate_task_payload(task, not_in_pool=missing[:50])
-        candidates = pool
+        candidates = {"candidates": found, "coverage": {"reason": ""}}
     else:
         # 候选取数上限按分类：商业（goods）单批 ≤ GOODS_DELETE_BATCH（50，千帆批量），
         # 普通/未指定仍按 batch_limit（默认 20，历史链路不变）。
@@ -582,7 +640,7 @@ def _cleanup_with_task(
         }
 
     adapter = XhsCreatorApiAdapter(cookies)
-    # 2026-10-06：商业笔记（note_category=goods）删除走千帆 `note/batch_delete_note`，
+    # 2026-10-06：商业笔记（note_flag == "goods_note"）删除走千帆 `note/batch_delete_note`，
     # 需要 ark 通道 Cookie；取不到时商业笔记退回 creator 链路（与普通笔记同）。
     ark_cookies = _ark_cookies(db, account_id)
     qianfan_adapter = XhsQianfanApiAdapter(ark_cookies) if ark_cookies else None
@@ -591,10 +649,11 @@ def _cleanup_with_task(
     abort_reason = ""
     details: list[dict[str, Any]] = []
 
-    # 分组：商业笔记（goods）走千帆批量删除，普通笔记（normal/未知）走 creator 逐篇。
+    # 分组：商业笔记（goods_note）走千帆批量删除，普通笔记（非 goods_note）走 creator 逐篇。
+    # 2026-10-12 设计 35：分流判据由 `note_category` 改 `note_flag`（取代已退役列）。
     # 分类截断：商业单批 ≤ GOODS_DELETE_BATCH（50），普通单批 ≤ batch_limit（默认 20）。
-    goods_items = [c for c in items if c.note_category == "goods" and c.note_id][:GOODS_DELETE_BATCH]
-    creator_items = [c for c in items if c.note_category != "goods" and c.note_id][: int(batch_limit)]
+    goods_items = [c for c in items if c.note_flag == "goods_note" and c.note_id][:GOODS_DELETE_BATCH]
+    creator_items = [c for c in items if c.note_flag != "goods_note" and c.note_id][: int(batch_limit)]
 
     def _append_not_attempted(rest: list[Any], reason: str) -> None:
         for r in rest:
@@ -621,10 +680,10 @@ def _cleanup_with_task(
             }
         )
 
-    # 2026-10-06：平台删除成功后**同步删本地 notes 表**（按笔记 ID + 归属账号），
-    # 走 `purge_note`（同一删除链：笔记 + 话题关系 + 商品关系 + 资产 + 评论 + 指标快照）。
-    # 本地已无此行（此前已删 / 数据源不在 notes 表）⇒ 静默跳过，不误报失败。
-    def _purge_local(candidate: Any) -> None:
+    # 2026-10-12 软删除重构：平台删除成功后**本地软删除**（`is_deleted=True`），
+    # 不再 `purge_note` 硬删。软删后所有查询 / 同步都排除该行（见 `Note.is_deleted`）。
+    # 本地已无此行 ⇒ 静默跳过，不误报失败。
+    def _soft_delete_local(candidate: Any) -> None:
         if getattr(candidate, "local_id", 0):
             local_note = db.get(Note, candidate.local_id)
         else:
@@ -635,7 +694,7 @@ def _cleanup_with_task(
                 )
             ).first()
         if local_note is not None:
-            purge_note(db, local_note)
+            local_note.is_deleted = True
 
     # 商业笔记：千帆 `note/batch_delete_note` **分片批量**（每片 ≤ QIANFAN_DELETE_CHUNK），
     # 减少请求次数。无「推广中」/「权限校验」前置（千帆接口没有这两步，平台侧自行
@@ -656,7 +715,7 @@ def _cleanup_with_task(
             if ok:
                 deleted += len(goods_items)
                 for c in goods_items:
-                    _purge_local(c)
+                    _soft_delete_local(c)
                     details.append({"note_id": c.note_id, "ok": True})
                     _append_result(c, RESULT_DELETED)
             else:
@@ -688,6 +747,22 @@ def _cleanup_with_task(
         try:
             ok, msg, payload = adapter.validate_delete_permission(note_id)
             if not ok:
+                # 2026-10-12：「笔记不存在」= 平台侧已无此笔记 ⇒ 等价已删，只软删本地。
+                if _looks_like_note_absent(str(msg)):
+                    deleted += 1
+                    _soft_delete_local(candidate)
+                    details.append({"note_id": note_id, "ok": True, "reason": "平台已不存在该笔记，仅本地软删除"})
+                    item_rows.append(
+                        {
+                            "note_id": note_id,
+                            "note_title": candidate.title,
+                            "note_cover": candidate.cover,
+                            "published_at": candidate.publish_time,
+                            "result": RESULT_DELETED,
+                            "reason": "平台已不存在该笔记，仅本地软删除",
+                        }
+                    )
+                    continue
                 reason = f"权限校验失败：{msg}"
                 failed += 1
                 details.append({"note_id": note_id, "ok": False, "reason": reason})
@@ -728,7 +803,7 @@ def _cleanup_with_task(
             ok, msg, _ = adapter.delete_note(note_id)
             if ok:
                 deleted += 1
-                _purge_local(candidate)
+                _soft_delete_local(candidate)
                 details.append({"note_id": note_id, "ok": True})
                 item_rows.append(
                     {
@@ -741,6 +816,22 @@ def _cleanup_with_task(
                     }
                 )
             else:
+                # 2026-10-12：「笔记不存在」= 平台侧已无此笔记 ⇒ 等价已删，只软删本地。
+                if _looks_like_note_absent(str(msg)):
+                    deleted += 1
+                    _soft_delete_local(candidate)
+                    details.append({"note_id": note_id, "ok": True, "reason": "平台已不存在该笔记，仅本地软删除"})
+                    item_rows.append(
+                        {
+                            "note_id": note_id,
+                            "note_title": candidate.title,
+                            "note_cover": candidate.cover,
+                            "published_at": candidate.publish_time,
+                            "result": RESULT_DELETED,
+                            "reason": "平台已不存在该笔记，仅本地软删除",
+                        }
+                    )
+                    continue
                 failed += 1
                 details.append({"note_id": note_id, "ok": False, "reason": msg})
                 item_rows.append(
@@ -875,51 +966,74 @@ def run_no_traffic_cleanup_background(
     note_ids: Optional[list[str]] = None,
     user_id: Optional[int] = None,
 ) -> int:
-    """在**独立线程**里跑清理，立即返回任务 id（HTTP 请求不阻塞）。
+    """在**独立线程**里跑清理，立即返回首个任务 id（HTTP 请求不阻塞）。
 
-    用法：API 收到「开始清理」→ 建任务行 → 起线程 → 立即返回。
-    清理在后台慢慢跑。⚠️ 2026-10-07：原先这里写「调度器下一轮 ``run_scheduled_cleanups``
-    会接手没跑完的」—— 该调度入口已随「无流量清理不注册定时任务」删除（用户口径
-    「无流量笔记清理任务表移除该配置」），**没有下一轮接手**：一次点击跑一批，
-    没清完的部分靠用户再点一次（或提高 `batch_limit`）。
+    2026-10-13 拆分：`note_ids` 超过 `MAX_NOTES_PER_BATCH`（500）时**自动按 500 切片**，
+    每个切片 = 一个子批次（独立 task + 独立线程 + 独立日志行），`batch_no` =
+    `{时间戳基号}-{自增序号}`（如 `20261013_003000-1` / `-2`）。返回**首个子批次**的
+    task id（前端据此轮询；同一账号的后续子批次由各线程自行推进）。
+
+    ⚠️ `note_ids` 为空 = 全量清理（按指标区间），不切片、单批。
     """
     import threading
 
     query = query or CleanupQuery()
-    task_db = SessionLocal()
-    try:
-        existing = _running_cleanup(task_db, account_id)
-        if existing is not None:
-            return existing.id
-        task = Task(
-            user_id=user_id or 1,
-            platform="xhs",
-            task_type=CLEANUP_TASK_TYPE,
-            status=STATUS_PENDING,
-            payload={
-                "account_id": account_id,
-                "thresholds": (thresholds or TrafficThresholds()).to_dict(),
-                "query": query.to_dict(),
-                "batch_limit": batch_limit,
-                "note_ids": list(note_ids or []),
-                "source": "manual",
-            },
-        )
-        task_db.add(task)
-        task_db.commit()
-        task_db.refresh(task)
-        task_id = task.id
-    finally:
-        task_db.close()
-
-    thread = threading.Thread(
-        target=_run_in_thread,
-        args=(account_id, thresholds, query, batch_limit, task_id, user_id, note_ids),
-        name=f"no-traffic-cleanup-{account_id}",
-        daemon=True,
+    ids = list(note_ids or [])
+    # 空 note_ids（全量清理）= 单片；非空按 500 切片。
+    chunks: list[list[str]] = (
+        [ids[i : i + MAX_NOTES_PER_BATCH] for i in range(0, len(ids), MAX_NOTES_PER_BATCH)]
+        if ids
+        else [[]]
     )
-    thread.start()
-    return task_id
+    # 唯一批次基号（同一次清理的所有子批次共享；`-N` 后缀区分子批次）。
+    base_no = shanghai_now().strftime("%Y%m%d%H%M%S")
+    first_task_id: Optional[int] = None
+
+    for index, chunk in enumerate(chunks, start=1):
+        batch_no = f"{base_no}-{index}" if len(chunks) > 1 else base_no
+        chunk_note_ids: Optional[list[str]] = chunk if ids else None
+
+        task_db = SessionLocal()
+        try:
+            existing = _running_cleanup(task_db, account_id)
+            if existing is not None:
+                # 已有未完成任务 ⇒ 后续切片全部跳过（防重入）。
+                if first_task_id is None:
+                    first_task_id = existing.id
+                continue
+            task = Task(
+                user_id=user_id or 1,
+                platform="xhs",
+                task_type=CLEANUP_TASK_TYPE,
+                status=STATUS_PENDING,
+                payload={
+                    "account_id": account_id,
+                    "thresholds": (thresholds or TrafficThresholds()).to_dict(),
+                    "query": query.to_dict(),
+                    "batch_limit": batch_limit,
+                    "note_ids": chunk_note_ids or [],
+                    "batch_no": batch_no,
+                    "source": "manual",
+                },
+            )
+            task_db.add(task)
+            task_db.commit()
+            task_db.refresh(task)
+            task_id = task.id
+            if first_task_id is None:
+                first_task_id = task_id
+        finally:
+            task_db.close()
+
+        thread = threading.Thread(
+            target=_run_in_thread,
+            args=(account_id, thresholds, query, batch_limit, task_id, user_id, chunk_note_ids, batch_no),
+            name=f"no-traffic-cleanup-{account_id}-{index}",
+            daemon=True,
+        )
+        thread.start()
+
+    return first_task_id or 0
 
 
 def _run_in_thread(
@@ -930,6 +1044,7 @@ def _run_in_thread(
     task_id: int,
     user_id: Optional[int],
     note_ids: Optional[list[str]] = None,
+    batch_no: str = "",
 ) -> None:
     """线程体：复用既有任务行，不重新建任务。"""
     db = SessionLocal()
@@ -948,6 +1063,7 @@ def _run_in_thread(
     #    `_cleanup_with_task` 这条路，把 task_id 传下去。
     db = SessionLocal()
     log: Optional[NoTrafficCleanupLog] = None
+    job_log: Optional[ScheduledJobLog] = None
     try:
         task = db.get(Task, task_id)
         if task is None:
@@ -956,6 +1072,23 @@ def _run_in_thread(
         # 不算这一步（它只写 payload、不做只读查询），所以在这里补。
         before_total = _pool_before_total(db, account_id, thresholds, query)
         _mutate_task_payload(task, before_total=before_total)
+        db.commit()
+        # 2026-10-13 用户口径：清理任务也要落**定时任务日志**（任务中心可见）。
+        # 手动触发、无 scheduled_jobs 行 ⇒ job_id=None，job_name/key 用快照字符串。
+        job_log = ScheduledJobLog(
+            job_id=None,
+            user_id=user_id,
+            platform_account_id=account_id,
+            task_id=task_id,
+            job_name="清理无流量笔记",
+            job_key="manual.no_traffic_cleanup",
+            job_trigger_type="manual",
+            trigger_type="manual",
+            status=LOG_RUNNING,
+            started_at=shanghai_now(),
+            progress=0,
+        )
+        db.add(job_log)
         db.commit()
         # 用户口径「新增清理无流量笔记日志表……操作时间、账号、清理结果」：独立一行。
         log = _open_log(
@@ -967,6 +1100,7 @@ def _run_in_thread(
             query=query,
             batch_limit=batch_limit,
             note_ids=note_ids,
+            batch_no=batch_no,
         )
         if log is not None:
             # 挂到任务行上：`GET .../cleanup/active` 回它，前端关掉弹窗后仍能接住进度。
@@ -995,9 +1129,21 @@ def _run_in_thread(
             aborted=bool(payload.get("aborted")),
             abort_reason=str(payload.get("abort_reason") or ""),
         )
+        # 收尾定时任务日志：成功/失败 → 终态 + 进度 + 结果摘要。
+        if job_log is not None:
+            _close_job_log(
+                db,
+                job_log,
+                ok=int(done.get("failed") or 0) == 0,
+                message=f"删 {done.get('deleted', 0)} / 跳过 {done.get('skipped', 0)} / 失败 {done.get('failed', 0)}",
+                exception=_first_failure_reason(list(payload.get("details") or []))
+                or str(payload.get("abort_reason") or ""),
+            )
     except Exception as exc:  # noqa: BLE001 - 后台线程不许把异常抛出去
         logger.error(f"no_traffic cleanup thread failed (task={task_id}): {exc}")
         _close_log(db, log, status=STATUS_FAILED, reason=str(exc))
+        if job_log is not None:
+            _close_job_log(db, job_log, ok=False, message="清理异常", exception=str(exc))
         _mark_failed(db, task_id, str(exc))
     finally:
         db.close()

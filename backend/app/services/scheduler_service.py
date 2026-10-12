@@ -371,6 +371,7 @@ def _matching_notes_for_target(db: Session, target: MonitoringTarget, platform: 
         .where(
             Note.user_id == target.user_id,
             Note.platform == platform,
+            Note.is_deleted.is_(False),
         )
         .order_by(Note.created_at.desc(), Note.id.desc())
     ).all()
@@ -1726,7 +1727,7 @@ def run_scheduled_note_data_syncs(
 
     「我的笔记」离线落库（2026-10-06 需求）：千帆数据中心 `note-data/goods`（商业）
     与 `note-data/normal`（普通）两类，各自走 `butterfly/data` 列表接口（无签名直连），
-    分页拉全量落 `notes`（`note_category` 区分）+ `note_goods` 关系。
+    分页拉全量落 `notes`（基础信息）+ `note_datacenter_stats`（指标/分类，`note_flag` 区分）+ `note_goods` 关系。
 
     `days`（2026-10-06 用户口径「同步最长 90 天内数据」）：同步的时间窗口天数，
     映射到平台预设 `date_select_type`（`1→recent_1 / 7→recent_7 / 30→recent_30 /

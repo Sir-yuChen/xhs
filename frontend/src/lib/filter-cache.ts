@@ -79,8 +79,6 @@ export const FILTER_CACHE_KEYS = {
 */
 export const MY_NOTES_TAB_VALUES = [
   "notes",
-  "goods",
-  "normal",
   "liked",
   "collected",
   "interactions",

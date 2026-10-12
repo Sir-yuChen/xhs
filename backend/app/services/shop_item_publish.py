@@ -94,19 +94,51 @@ def yuan_to_fen(price_yuan: float | int | None) -> int | None:
     return int(round(float(price_yuan) * 100))
 
 
-def build_publish_image(material: dict[str, Any]) -> dict[str, Any]:
-    """一条发布体图片条目（主图 / 详情图 / 规格图 **三处同形状**，设计 24 §1.5）。
+def _file_id_from_url(url: str) -> str:
+    """从带签名的预览 url 里提取**短格式 fileId**（`arkgoods/<id>`）。
 
-    与草稿体图片条目（`shop_draft_package.build_image_entry`）的差别：
-    发布体用 `key` + `type` + `uploaderInfoModel`，**没有** `sourceLink`。
-    多出的 `errors: []` 是平台回读形态带上的，照带不报错。
+    真机 2026-10-13 抓包：发布体图片条目 `path`/`fileId` 用**上传凭证的短格式
+    fileId**（`arkgoods/M-gCs…`），不是图片空间回读的长格式 `1040…`。
+    这个 fileId 藏在 `uploaderInfoModel.url` / `link` 的带签名地址里：
+    `https://ros-preview.xhscdn.com/arkgoods/<fileId>?sign=…`。
+    """
+    import re
+
+    m = re.search(r"/arkgoods/([0-9a-zA-Z_-]+)", url or "")
+    return f"arkgoods/{m.group(1)}" if m else ""
+
+
+def build_publish_image(material: dict[str, Any]) -> dict[str, Any]:
+    """一条发布体图片条目（主图 / 详情图 / 规格图 **三处同形状**）。
+
+    2026-10-13 按真机抓包重写（此前 `spaceImage` + 长格式 path + `isSecret:false`
+    被平台拒「获取图片信息失败」）。真机成功提交体的图片条目形状：
+
+    ```json
+    {"type":"uploadImage","name":"主图02","width":750,"height":1000,
+     "extension":".jpeg","size":195285,
+     "link":"https://ros-preview.xhscdn.com/arkgoods/<fileId>?sign=…",
+     "uploadCount":1,"isCompress":true,"status":"success","stage":"database",
+     "path":"arkgoods/<fileId>",
+     "uploaderInfoModel":{"url":"https://ros-preview…?sign=…","bizName":"ark",
+       "scene":"goods_image","fileId":"arkgoods/<fileId>","isSecret":true,"cloudType":4},
+     "materialId":"<登记记录id>","msg":"上传成功"}
+    ```
+
+    关键差异（vs 旧实现）：
+    - `type` = `uploadImage`（**不是** `spaceImage`），且**无 `key`**；
+    - `path` / `fileId` = **短格式 fileId**（从带签名 url 提取，不是回读长格式）；
+    - `isSecret` = **true**（不是 false）；
+    - `link` / `uploaderInfoModel.url` = **带签名的 `ros-preview` 地址**（不是无签名 qimg）。
     """
     material_id = str(material.get("materialId") or "").strip()
-    link = str(material.get("link") or "").strip()
+    #: 带签名 url 优先（真机 link 也是带签名 ros-preview 地址）；没有才用无签名 link 兜底。
+    signed_url = str(material.get("url") or "").strip() or str(material.get("link") or "").strip()
+    #: path/fileId 用短格式 fileId：优先从带签名 url 提取；没有则用 material 自带的
+    #: path（旧链路相对路径上传时，后端 `upload_one_image` 会给正确短格式 fileId）。
+    file_id = _file_id_from_url(signed_url) or str(material.get("path") or "").strip()
     entry: dict[str, Any] = {
-        "key": material_id,
-        "type": "spaceImage",
-        "materialId": material_id,
+        "type": "uploadImage",
         "name": str(material.get("name") or "").strip(),
     }
     width, height = material.get("width"), material.get("height")
@@ -118,17 +150,23 @@ def build_publish_image(material: dict[str, Any]) -> dict[str, Any]:
     if material.get("size") is not None:
         entry["size"] = int(material["size"])
     entry["extension"] = str(material.get("extension") or "").strip()
-    entry["path"] = str(material.get("path") or "").strip()
-    entry["link"] = link
+    entry["link"] = signed_url
+    entry["uploadCount"] = 1
+    entry["isCompress"] = True
+    entry["status"] = "success"
+    entry["stage"] = "database"
+    entry["path"] = file_id
     entry["uploaderInfoModel"] = {
+        "url": signed_url,
         "bizName": "ark",
-        "cloudType": 4,
-        "fileId": str(material.get("path") or "").strip(),
-        "isSecret": False,
         "scene": "goods_image",
-        "url": link,
+        "fileId": file_id,
+        "isSecret": True,
+        "cloudType": 4,
     }
-    entry["errors"] = []
+    if material_id:
+        entry["materialId"] = material_id
+    entry["msg"] = "上传成功"
     return entry
 
 

@@ -195,14 +195,18 @@ def _material_additional(record: dict[str, Any]) -> dict[str, Any]:
 
 
 def _fetch_material_record(api: Any, *, name: str, material_id: str) -> dict[str, Any]:
-    """登记后**回读**该图片记录，取平台分配的 `path` / `link`（真机 2026-10-08）。
+    """登记后回读该图片记录，取平台分配的 path / link（真机 2026-10-08）。
 
-    登记响应只回 `{"id": "…"}`，而 `path` / `link` 是登记时新分配的 CDN id ——
-    不读回就会把上传凭证的 id 当成素材 id 发出去，平台报「获取图片信息失败」。
-    按**名称搜索 + id 精确匹配**（名称可能重名，故必须用 id 判等）。
+    登记响应只回 id，而 path / link 是登记时新分配的 CDN id —— 不读回就会把
+    上传凭证的 id 当成素材 id 发出去，平台报「获取图片信息失败」。
+    按名称搜索 + id 精确匹配（名称可能重名，故必须用 id 判等）。
 
-    ⚠️ **图片空间搜索最终一致**：真机实测登记后立刻搜**搜不到**（`n=0`），
-    约 1–2 秒后可见 ⇒ 轮询重试（最多 6 次 × 1s），避免「偶发读到空」的 flaky。
+    ⚠️ 图片空间搜索最终一致：真机实测登记后立刻搜搜不到（n=0），约 1–2 秒后可见，
+    轮询重试（最多 6 次 × 1s），避免「偶发读到空」的 flaky。
+
+    ⚠️ 2026-10-13 注：发布链路已不再依赖这里的回读 path（`build_publish_image`
+    直接从带签名 url 提取短格式 fileId）。本函数仍服务于上传端点返回 path/link
+    给前端，保持「按 name 搜单页」的原始口径，不做空 keyword 拉全量。
     """
     if not name:
         return {}

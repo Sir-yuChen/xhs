@@ -15,7 +15,8 @@ vs `note-data/normal`），不是「笔记类型」字段（那个是图文/视�
 
 ## 落库语义
 
-* `notes.note_category` 设为 `goods` / `normal`（覆盖更新时按当前数据源刷新）。
+* 2026-10-12 设计 35 起：`notes.note_category` 已退役，落库分两处 ——
+  `notes`（基础信息）与 `note_datacenter_stats`（指标/分类）。
 * 笔记本体走 `(user_id, note_id)` 覆盖更新（既有唯一键 `uq_notes_user_note`）。
 * 挂载商品走 `note_goods` 关系表（`(user_id, note_id, item_id)` 幂等），
   只增不删（§26.7 口径），商品信息不冗余进笔记表。
@@ -30,14 +31,19 @@ from sqlalchemy import select
 
 from backend.app.core.database import SessionLocal
 from backend.app.core.time import shanghai_now
-from backend.app.models import Note, NoteGoods, PlatformAccount
-from backend.app.models.note import NOTE_CATEGORY_GOODS, NOTE_CATEGORY_NORMAL, NOTE_CATEGORY_DEFAULT
-
+from backend.app.models import Note, NoteDatacenterStat, NoteGoods, PlatformAccount
+from backend.app.models.note_datacenter_stat import WINDOW_RECENT_1, WINDOW_CUSTOM
 
 #: 千帆数据中心「笔记数据」两类入口（`butterfly/data` 的 blockKey 由 SDK 映射）。
-CATEGORY_GOODS = NOTE_CATEGORY_GOODS
-CATEGORY_NORMAL = NOTE_CATEGORY_NORMAL
+#: 2026-10-12 设计 35：`category` 仍作**取数入口**（决定拉 goods 还是 normal 块），
+#: 但**不再落 `notes.note_category`**（该列已退役）。落库时 `category` 映射到
+#: 统计表的 `note_flag`：`goods` → `"goods_note"`，`normal` → `""`（普通/未知）。
+CATEGORY_GOODS = "goods"
+CATEGORY_NORMAL = "normal"
 CATEGORIES = (CATEGORY_GOODS, CATEGORY_NORMAL)
+
+#: `category` → 统计表 `note_flag`（goods 是平台自报的商业笔记）。
+_CATEGORY_TO_FLAG = {CATEGORY_GOODS: "goods_note", CATEGORY_NORMAL: ""}
 
 #: 单页条数上限（`butterfly/data` 的 `size` 档位：页面可选 10/20/30/40/50）。
 PAGE_SIZE = 50
@@ -62,11 +68,11 @@ class NoteDataRow:
     author_xhs_id: str = ""
     note_type: str = ""  # 图文 / 视频（平台原文，不是商业/普通）
     published_at: Optional[str] = None  # 笔记创建时间（平台原文字符串）
-    category: str = NOTE_CATEGORY_DEFAULT  # goods / normal
+    category: str = CATEGORY_GOODS  # goods / normal（取数入口，落库映射到 note_flag）
     # 挂载商品（商业笔记有；普通笔记无）
     item_id: str = ""
     item_title: str = ""
-    # 指标（raw_json 键，缺值 None）
+    # 指标（统计表列，缺值 None）
     metrics: dict[str, Any] = field(default_factory=dict)
 
 
@@ -317,6 +323,11 @@ def _upsert_note(db, row: NoteDataRow, *, user_id: int, account_id: int) -> Note
 
     ⚠️ 覆盖更新时**不换 `notes.id`**（`uq_notes_user_note` 命中即复用），
     `note_assets` / `note_topics` / 草稿引用不会被打断。
+
+    2026-10-12 设计 35 重构：本函数**只写 `notes` 基础信息**（标题 / 作者 / 来源原文），
+    指标与分类**不再落 `notes`**（`note_category` 已退役、`raw_json.metrics` 不再写）——
+    它们改落 `note_datacenter_stats` 统计表（见 :func:`_upsert_datacenter_stat`），
+    由调用方在同一次 commit 里一起写。
     """
     existing = db.scalars(
         select(Note).where(Note.user_id == user_id, Note.note_id == row.note_id)
@@ -335,10 +346,7 @@ def _upsert_note(db, row: NoteDataRow, *, user_id: int, account_id: int) -> Note
 
     existing.title = row.title or existing.title
     existing.author_name = row.author_name or existing.author_name
-    # note_category 按当前数据源刷新（普通→商业转换时跟着变）
-    if row.category in CATEGORIES:
-        existing.note_category = row.category
-    # raw_json 合并指标（缺值不覆盖既有值；指标是本次数据源的真相）
+    # raw_json 只保留来源原文的基础字段（指标/分类不再进 raw_json）。
     raw = dict(existing.raw_json) if isinstance(existing.raw_json, dict) else {}
     if row.note_url:
         raw["note_url"] = row.note_url
@@ -352,7 +360,6 @@ def _upsert_note(db, row: NoteDataRow, *, user_id: int, account_id: int) -> Note
         raw["item_id"] = row.item_id
     if row.item_title:
         raw["item_title"] = row.item_title
-    raw["metrics"] = row.metrics
     existing.raw_json = raw
 
     db.flush()
@@ -370,30 +377,116 @@ def _upsert_note(db, row: NoteDataRow, *, user_id: int, account_id: int) -> Note
     return existing
 
 
+def _upsert_datacenter_stat(
+    db, row: NoteDataRow, *, user_id: int, account_id: int, window: str = WINDOW_RECENT_1
+) -> None:
+    """一条 `NoteDataRow` 的指标落 `note_datacenter_stats`（UPSERT，未 commit）。
+
+    2026-10-12 设计 35：指标与分类的**唯一落库点**。`row.category` 映射到
+    `note_flag`（`goods` → `"goods_note"` / `normal` → `""`），指标直接写真实列
+    （缺值 None 不写，读方按缺值口径渲染 0 并区分原因）。
+    """
+    stat_date = shanghai_now().strftime("%Y-%m-%d")
+    note_flag = _CATEGORY_TO_FLAG.get(row.category, "")
+    m = row.metrics
+
+    def _f(key, default=None):
+        v = m.get(key)
+        return v if v is not None else default
+
+    existing = db.scalars(
+        select(NoteDatacenterStat).where(
+            NoteDatacenterStat.user_id == user_id,
+            NoteDatacenterStat.platform_account_id == account_id,
+            NoteDatacenterStat.note_id == row.note_id,
+            NoteDatacenterStat.stat_date == stat_date,
+            NoteDatacenterStat.window == window,
+        )
+    ).first()
+    if existing is None:
+        existing = NoteDatacenterStat(
+            user_id=user_id,
+            platform_account_id=account_id,
+            note_id=row.note_id,
+            stat_date=stat_date,
+            window=window,
+            note_flag=note_flag,
+        )
+        db.add(existing)
+    # 覆盖更新（同 note + 同日 + 同窗口取最新值）。
+    existing.note_flag = note_flag
+    existing.title = row.title or existing.title
+    existing.item_id = row.item_id
+    existing.item_title = row.item_title
+    # 发布时间：butterfly 的 published_at 是字符串（如 "2026-08-13 09:22"），
+    # 解析成 Unix 时间戳（秒）落 `publish_time`；解析失败留 None（缺值不造）。
+    if row.published_at:
+        try:
+            from datetime import datetime as _dt
+            existing.publish_time = int(_dt.strptime(row.published_at, "%Y-%m-%d %H:%M:%S").timestamp())
+        except (ValueError, TypeError):
+            existing.publish_time = None
+    # 互动（int）
+    for col in ("read_count", "like_count", "collect_count", "comment_count",
+                "share_count", "follow_count", "danmaku_count"):
+        v = _f(col)
+        if v is not None:
+            setattr(existing, col, int(v))
+    # 观看 / 商品 / 退款 / 引流（float）
+    for col in ("video_duration", "avg_view_time", "full_view_rate",
+                "pay_gmv", "pay_order_cnt", "pay_user_cnt", "item_click_cnt",
+                "item_click_uv", "item_click_pv_rate", "pay_pv_rate", "pay_uv_rate",
+                "refund_gmv", "refund_order_cnt", "refund_user_cnt", "cart_item_cnt",
+                "lead_user_page_view_cnt", "lead_user_page_pay_gmv",
+                "lead_live_view_cnt", "lead_live_pay_gmv"):
+        v = _f(col)
+        if v is not None:
+            setattr(existing, col, v)
+
+
 def upsert_note_data_rows(
     db,
     rows: list[NoteDataRow],
     *,
     user_id: int,
     account_id: int,
+    window: str = WINDOW_RECENT_1,
 ) -> dict[str, int]:
     """一批 `NoteDataRow` 落库。返回 `{created, updated, total}` 计数。
 
-    调用方负责 commit（批量写一次提交，不逐条 commit —— SQLite 写锁）。
+    2026-10-12 设计 35：一条 row 同时落两处 —— `notes`（基础信息）+ 统计表
+    （指标/分类）。调用方负责 commit（批量写一次提交，不逐条 commit —— SQLite 写锁）。
+
+    `window`（butterfly 的 `dateSelectType`）：默认 `recent_1`；自定义日期范围走
+    `custom`。
     """
     created = updated = 0
+    skipped_deleted = 0
     for row in rows:
         if not row.note_id:
             continue
-        existed = db.scalars(
-            select(Note.id).where(Note.user_id == user_id, Note.note_id == row.note_id)
-        ).first() is not None
+        # 前置校验（2026-10-12）：已软删除（is_deleted=True）的笔记**跳过不落库** ——
+        # 无流量清理删掉的笔记若被下一轮同步「复活」，清理就白做了。
+        # 查询取整行（不取 `Note.id`），拿 `is_deleted` 判据。
+        existing = db.scalars(
+            select(Note).where(Note.user_id == user_id, Note.note_id == row.note_id)
+        ).first()
+        if existing is not None and existing.is_deleted:
+            skipped_deleted += 1
+            continue
+        existed = existing is not None
         _upsert_note(db, row, user_id=user_id, account_id=account_id)
+        _upsert_datacenter_stat(db, row, user_id=user_id, account_id=account_id, window=window)
         if existed:
             updated += 1
         else:
             created += 1
-    return {"created": created, "updated": updated, "total": created + updated}
+    return {
+        "created": created,
+        "updated": updated,
+        "total": created + updated,
+        "skipped_deleted": skipped_deleted,
+    }
 
 
 def parse_butterfly_response(payload: dict, category: str) -> list[NoteDataRow]:
@@ -505,7 +598,10 @@ def sync_account_note_data(
             if len(rows) < PAGE_SIZE:
                 break
 
-        result = upsert_note_data_rows(db, all_rows, user_id=owner_id, account_id=account_id)
+        result = upsert_note_data_rows(
+            db, all_rows, user_id=owner_id, account_id=account_id,
+            window=effective_type,
+        )
         db.commit()
         # 2026-10-06 起：详情补齐**不再**在定时任务里自动拉（改由用户点击卡片时实时拉）。
         return {
@@ -539,7 +635,9 @@ def import_note_data_file(
             return {"category": category, "error": "ACCOUNT_NOT_FOUND"}
         owner_id = int(user_id or account.user_id or 0)
         rows = parse_xlsx_file(file_path, category)
-        result = upsert_note_data_rows(db, rows, user_id=owner_id, account_id=account_id)
+        result = upsert_note_data_rows(
+            db, rows, user_id=owner_id, account_id=account_id, window=WINDOW_CUSTOM
+        )
         db.commit()
         # 2026-10-06 起：导入**不再**自动拉详情（改由用户点击卡片时实时拉）。
         return {"category": category, "fetched": len(rows), **result}
@@ -678,14 +776,30 @@ def hydrate_offline_notes(
             return {**stats, "error": "ACCOUNT_NOT_FOUND"}
         owner_id = int(user_id or account.user_id or 0)
 
-        # 候选：该账号下、指定分类的离线笔记（`note_category` 非空 = 离线数据）。
+        # 候选：该账号下有数据中心统计的笔记（= 离线数据；`note_category` 已退役，
+        # 2026-10-12 设计 35 改用统计表 `note_datacenter_stats` 判定存在性）。
+        stat_note_ids = db.scalars(
+            select(NoteDatacenterStat.note_id).where(
+                NoteDatacenterStat.user_id == owner_id,
+                NoteDatacenterStat.platform_account_id == account_id,
+            )
+        ).all()
         stmt = select(Note).where(
             Note.user_id == owner_id,
             Note.platform_account_id == account_id,
-            Note.note_category != NOTE_CATEGORY_DEFAULT,
+            Note.note_id.in_(stat_note_ids or {""}),
         )
         if category in CATEGORIES:
-            stmt = stmt.where(Note.note_category == category)
+            flag = _CATEGORY_TO_FLAG.get(category, "")
+            stmt = stmt.where(
+                Note.note_id.in_(
+                    select(NoteDatacenterStat.note_id).where(
+                        NoteDatacenterStat.note_flag == flag,
+                        NoteDatacenterStat.user_id == owner_id,
+                        NoteDatacenterStat.platform_account_id == account_id,
+                    )
+                )
+            )
         pending = db.scalars(stmt.order_by(Note.id)).all()
 
         limiter = get_rate_limiter()

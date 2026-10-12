@@ -30,7 +30,7 @@ from backend.app.adapters.xhs import qianfan_api_adapter
 from backend.app.api.platforms.xhs import pc
 from backend.app.core.database import Base, get_db
 from backend.app.main import app
-from backend.app.models import Note, NoteAsset, PlatformAccount, Task, User
+from backend.app.models import Note, NoteAsset, NoteDatacenterStat, PlatformAccount, Task, User
 from backend.app.models.shop import ShopNoteGoods
 from tests.backend.cookie_fixtures import bind_shop_account
 from tests.backend.conftest import patch_service_sessions
@@ -716,10 +716,11 @@ def test_ark_merge_never_erases_existing_content(creator_env, monkeypatch):
 
 
 def test_ark_note_flag_maps_to_note_category(creator_env):
-    """千帆条目的 `note_flag == "goods_note"` ⇒ `note_category="goods"`（2026-10-12 抓包）。
+    """千帆条目的 `note_flag == "goods_note"` ⇒ 统计表 `note_flag="goods_note"`（2026-10-12 抓包）。
 
     这是「商业笔记 vs 普通笔记」的**平台原生判据** —— 不是本地推的。列表返回里
     自带 `note_flag`，所以类型字段是**同步时免费拿到**的，不是第二份真相源。
+    2026-10-12 设计 35 起落 `note_datacenter_stats.note_flag`（取代 `notes.note_category`）。
     """
     _, account_id, user_id, SessionLocal = creator_env
 
@@ -732,10 +733,14 @@ def test_ark_note_flag_maps_to_note_category(creator_env):
 
     db = SessionLocal()
     try:
-        goods = db.scalars(select(Note).where(Note.note_id == "C-G1")).one()
-        assert goods.note_category == "goods", goods.note_category
-        plain = db.scalars(select(Note).where(Note.note_id == "C-N1")).one()
-        assert plain.note_category == "", (
+        goods = db.scalars(
+            select(NoteDatacenterStat).where(NoteDatacenterStat.note_id == "C-G1")
+        ).one()
+        assert goods.note_flag == "goods_note", goods.note_flag
+        plain = db.scalars(
+            select(NoteDatacenterStat).where(NoteDatacenterStat.note_id == "C-N1")
+        ).one()
+        assert plain.note_flag == "", (
             "平台没报 note_flag ⇒ 分类留空（缺值不造；硬约束⑤）"
         )
     finally:
@@ -745,10 +750,11 @@ def test_ark_note_flag_maps_to_note_category(creator_env):
 def test_ark_note_category_refreshes_on_existing_row(creator_env):
     """命中既有行时按当前数据源刷新分类（普通→商业转换要跟着变）。
 
-    与 `note_data_service._upsert_note` 的「覆盖更新时按当前数据源刷新」同一口径。
+    与 `note_data_service._upsert_datacenter_stat` 的「覆盖更新时按当前数据源刷新」
+    同一口径。2026-10-12 设计 35 起落统计表 `note_flag`。
     """
     _, account_id, user_id, SessionLocal = creator_env
-    # 先造一条「本地已落库、分类为空」的行。
+    # 先造一条「本地已落库、分类为空」的行（notes + 空统计行）。
     db = SessionLocal()
     try:
         db.add(
@@ -758,7 +764,17 @@ def test_ark_note_category_refreshes_on_existing_row(creator_env):
                 platform_account_id=account_id,
                 note_id="C-R1",
                 title="已有标题",
-                note_category="",
+            )
+        )
+        db.add(
+            NoteDatacenterStat(
+                user_id=user_id,
+                platform_account_id=account_id,
+                note_id="C-R1",
+                stat_date="2026-10-12",
+                window="recent_1",
+                note_flag="",
+                title="已有标题",
             )
         )
         db.commit()
@@ -771,8 +787,10 @@ def test_ark_note_category_refreshes_on_existing_row(creator_env):
 
     db = SessionLocal()
     try:
-        note = db.scalars(select(Note).where(Note.note_id == "C-R1")).one()
-        assert note.note_category == "goods", note.note_category
+        stat = db.scalars(
+            select(NoteDatacenterStat).where(NoteDatacenterStat.note_id == "C-R1")
+        ).one()
+        assert stat.note_flag == "goods_note", stat.note_flag
     finally:
         db.close()
 

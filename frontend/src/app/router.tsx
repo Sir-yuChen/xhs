@@ -22,6 +22,7 @@ import { XhsKeywordsPage } from "../pages/platforms/xhs/keywords-page";
 import { LlmGatewayPage } from "../pages/llm-gateway/llm-gateway-page";
 import { XhsLibraryPage } from "../pages/platforms/xhs/library-page";
 import { XhsMyNotesPage } from "../pages/platforms/xhs/my-notes-page";
+import { XhsDatacenterPage } from "../pages/platforms/xhs/datacenter-page";
 import { PictureSpacePage } from "../pages/platforms/xhs/picture-space-page";
 import { XhsNoteWorkshopPage } from "../pages/platforms/xhs/note-workshop-page";
 import { XhsShopItemsPage } from "../pages/platforms/xhs/shop-items-page";
@@ -90,6 +91,7 @@ export function AppRouter() {
           <Route path="/platforms/xhs/insights/shop" element={<InsightsShopPage />} />
           <Route path="/platforms/xhs/discovery" element={<XhsDiscoveryPage />} />
           <Route path="/platforms/xhs/my-notes" element={<XhsMyNotesPage />} />
+          <Route path="/platforms/xhs/datacenter" element={<XhsDatacenterPage />} />
           <Route path="/platforms/xhs/shop-items" element={<XhsShopItemsPage />} />
           {/* 商品草稿箱 = 商品页内的弹窗（设计 24 §9.4，2026-10-08 用户口径
               「草稿箱弹窗的形式在商品页内展示，账号使用商品页选定的账号」）。

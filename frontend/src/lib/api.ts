@@ -1456,7 +1456,29 @@ export async function fetchOfflineNotes(
   page = 1,
   pageSize = 20,
   keyword?: string,
-  itemId?: string
+  itemId?: string,
+  sortBy?: string,
+  sortOrder?: "asc" | "desc",
+  filters?: {
+    publishedFrom?: number;
+    publishedTo?: number;
+    deleted?: "all" | "deleted" | "active";
+    noteId?: string;
+    readFrom?: number;
+    readTo?: number;
+    likeFrom?: number;
+    likeTo?: number;
+    collectFrom?: number;
+    collectTo?: number;
+    commentFrom?: number;
+    commentTo?: number;
+    shareFrom?: number;
+    shareTo?: number;
+    payGmvFrom?: number;
+    payGmvTo?: number;
+    payOrderFrom?: number;
+    payOrderTo?: number;
+  }
 ): Promise<OfflineNotesResult> {
   const response = await http.get<OfflineNotesResult>("/notes/offline", {
     params: {
@@ -1464,10 +1486,44 @@ export async function fetchOfflineNotes(
       ...(platformAccountId != null ? { platform_account_id: platformAccountId } : {}),
       ...(keyword && keyword.trim() ? { keyword: keyword.trim() } : {}),
       ...(itemId && itemId.trim() ? { item_id: itemId.trim() } : {}),
+      ...(sortBy ? { sort_by: sortBy, sort_order: sortOrder || "desc" } : {}),
+      ...(filters?.publishedFrom != null ? { published_from: filters.publishedFrom } : {}),
+      ...(filters?.publishedTo != null ? { published_to: filters.publishedTo } : {}),
+      ...(filters?.deleted ? { deleted: filters.deleted } : {}),
+      ...(filters?.noteId && filters.noteId.trim() ? { note_id: filters.noteId.trim() } : {}),
+      ...(filters?.readFrom != null ? { read_from: filters.readFrom } : {}),
+      ...(filters?.readTo != null ? { read_to: filters.readTo } : {}),
+      ...(filters?.likeFrom != null ? { like_from: filters.likeFrom } : {}),
+      ...(filters?.likeTo != null ? { like_to: filters.likeTo } : {}),
+      ...(filters?.collectFrom != null ? { collect_from: filters.collectFrom } : {}),
+      ...(filters?.collectTo != null ? { collect_to: filters.collectTo } : {}),
+      ...(filters?.commentFrom != null ? { comment_from: filters.commentFrom } : {}),
+      ...(filters?.commentTo != null ? { comment_to: filters.commentTo } : {}),
+      ...(filters?.shareFrom != null ? { share_from: filters.shareFrom } : {}),
+      ...(filters?.shareTo != null ? { share_to: filters.shareTo } : {}),
+      ...(filters?.payGmvFrom != null ? { pay_gmv_from: filters.payGmvFrom } : {}),
+      ...(filters?.payGmvTo != null ? { pay_gmv_to: filters.payGmvTo } : {}),
+      ...(filters?.payOrderFrom != null ? { pay_order_from: filters.payOrderFrom } : {}),
+      ...(filters?.payOrderTo != null ? { pay_order_to: filters.payOrderTo } : {}),
       page,
       page_size: pageSize,
     },
   });
+  return response.data;
+}
+
+/** 按商品 ID 查本地台账商品详情（数据中心「商品名称」点击弹窗用，2026-10-12）。 */
+export type NoteGoodsDetail = {
+  item_id: string;
+  item_title: string;
+  price: string;
+  images: string[];
+  stock: number | null;
+  sales: number | null;
+  variant: string;
+};
+export async function fetchNoteGoodsDetail(itemId: string): Promise<NoteGoodsDetail> {
+  const response = await http.get<NoteGoodsDetail>(`/notes/goods/${encodeURIComponent(itemId)}`);
   return response.data;
 }
 
@@ -1605,6 +1661,21 @@ export interface NoTrafficQuery {
   published_before: number | null;
   /** 2026-10-06 方案 A：笔记分类（"" 不限 / goods / normal）。 */
   category: string;
+  /** 2026-10-12：指标区间（min~max，null = 该侧不筛；交集 = 清理范围）。 */
+  read_min: number | null;
+  read_max: number | null;
+  like_min: number | null;
+  like_max: number | null;
+  collect_min: number | null;
+  collect_max: number | null;
+  comment_min: number | null;
+  comment_max: number | null;
+  share_min: number | null;
+  share_max: number | null;
+  pay_gmv_min: number | null;
+  pay_gmv_max: number | null;
+  pay_order_min: number | null;
+  pay_order_max: number | null;
 }
 
 export interface NoTrafficCandidatesResult {
@@ -1736,6 +1807,8 @@ export interface NoTrafficCleanupLogItem {
   account_name: string;
   task_id: number | null;
   trigger_type: string;
+  /** 批次号（2026-10-13）：同一次清理拆多批时 `{基号}-{序号}`，单批 = 基号。 */
+  batch_no: string;
   thresholds: Record<string, unknown>;
   query: Record<string, unknown>;
   note_ids: string[];

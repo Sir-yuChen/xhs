@@ -325,6 +325,7 @@ def create_item_draft(
         if isinstance(ref, dict):
             entry = {
                 "link": str(ref.get("link") or ref.get("url") or ""),
+                "url": str(ref.get("url") or ""),
                 "path": str(ref.get("path") or ""),
                 "extension": str(ref.get("extension") or ""),
                 "width": ref.get("width"),
@@ -684,6 +685,7 @@ def publish_item_to_online(
             #: ⚠️ 前端对象字段：`materialId/path/link/url/file_name/width/height/size/extension`。
             entry = {
                 "link": str(ref.get("link") or ref.get("url") or ""),
+                "url": str(ref.get("url") or ""),
                 "path": str(ref.get("path") or ""),
                 "extension": str(ref.get("extension") or ""),
                 "width": ref.get("width"),

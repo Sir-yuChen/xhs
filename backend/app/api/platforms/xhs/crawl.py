@@ -227,6 +227,10 @@ def _save_normalized_notes(
         note = db.scalars(
             select(Note).where(Note.user_id == account.user_id, Note.note_id == note_id)
         ).first()
+        # 2026-10-12：已软删的笔记**跳过不复活**（无流量清理软删后，采集若再落库同一条
+        # 会把它「复活」回列表）。
+        if note is not None and note.is_deleted:
+            continue
         if note is None:
             note = Note(
                 user_id=account.user_id,

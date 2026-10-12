@@ -634,18 +634,23 @@ def test_sync_note_overwrites_stale_content(api_env):
 
 
 def test_sync_goods_note_uses_the_ark_rate_lane(api_env):
-    """商业笔记（`note_category="goods"`）的单条同步走 **`ark` 限流键**（2026-10-12）。
+    """商业笔记（`note_flag == "goods_note"`）的单条同步走 **`ark` 限流键**（2026-10-12）。
 
     千帆线与 www 是**两个独立平台额度**（风控各自计）—— 共用一个键会让先跑的线
-    把额度耗光、后跑的线干等。判据是**笔记分类**（平台原生 `note_flag` 的投影），
-    不是触发方式（手动 / 定时走同一条路）。
+    把额度耗光、后跑的线干等。判据是**笔记分类**（平台原生 `note_flag`），
+    不是触发方式（手动 / 定时走同一条路）。2026-10-12 设计 35 起读 `raw_json` 里的
+    `note_flag`（`raw_json.ark.note_flag` 嵌套 / 顶层），取代已退役的 `note_category`。
     """
     headers, SessionLocal, account_id, _ = api_env
     db = SessionLocal()
     try:
         account = db.get(PlatformAccount, account_id)
         note = _add_note(db, account, HEX_NOTE_ID)
-        note.note_category = "goods"
+        # 商业笔记：raw_json 带平台原生 note_flag（ark 嵌套形态），并保留 note_url/xsec_token。
+        note.raw_json = {
+            **note.raw_json,
+            "ark": {"note_flag": "goods_note"},
+        }
         db.commit()
         note_id = note.id
     finally:

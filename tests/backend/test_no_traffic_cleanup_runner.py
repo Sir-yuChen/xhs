@@ -31,6 +31,7 @@ from backend.app.models import (
     NoTrafficCleanupItem,
     NoTrafficCleanupLog,
     Note,
+    NoteDatacenterStat,
     PlatformAccount,
     Task,
     User,
@@ -101,6 +102,32 @@ def _entry(note_id: str, *, browse: int = 0, orders: int = 0, gmv: int = 0) -> d
     }
 
 
+def _stat(note_id: str, *, account_id: int, user_id: int, browse: int = 0,
+          orders: int = 0, gmv: int = 0, flag: str = "goods_note", title: str = "") -> NoteDatacenterStat:
+    """生成 `note_datacenter_stats` 行（2026-10-12 设计 35：无流量候选数据源）。
+
+    指标直接落真实列（`read_count` / `pay_order_cnt` / `pay_gmv`），`note_flag` 决定
+    删除通道（`goods_note` → 千帆批量 / 空 → 创作者逐篇）。
+    """
+    return NoteDatacenterStat(
+        user_id=user_id,
+        platform_account_id=account_id,
+        note_id=note_id,
+        stat_date="2026-10-12",
+        window="recent_1",
+        note_flag=flag,
+        title=title or f"笔记 {note_id}",
+        read_count=browse,
+        like_count=0,
+        collect_count=0,
+        comment_count=0,
+        share_count=0,
+        pay_order_cnt=float(orders),
+        pay_gmv=float(gmv),
+        publish_time=1,
+    )
+
+
 def _setup(tmp_path, monkeypatch):
     engine = create_engine(
         f"sqlite:///{tmp_path / 'cleanup-runner.db'}", connect_args={"check_same_thread": False}
@@ -147,12 +174,13 @@ def _setup(tmp_path, monkeypatch):
         account.seller_id = "SELLER-1"
         set_shop_state(account, status="active", goods_note_total=3)
         db.flush()
-        # 方案 A：候选数据源 = `notes`（note_category='goods' + raw_json.metrics）。
+        # 方案 A（设计 35）：候选数据源 = `note_datacenter_stats`（真实列指标 + note_flag）。
         for note_id, kwargs in (
             ("ZERO-1", {}),                                    # 三项全零 → 候选
             ("HAS-READ", {"browse": 7}),                       # 有人看 → 不删
             ("ZERO-2", {}),                                    # 三项全零 → 候选
         ):
+            # 笔记行（本地 purge 目标）+ 统计行（候选数据源）。
             db.add(
                 Note(
                     user_id=user.id,
@@ -160,10 +188,9 @@ def _setup(tmp_path, monkeypatch):
                     platform="xhs",
                     note_id=note_id,
                     title=f"笔记 {note_id}",
-                    note_category="goods",
-                    raw_json=_entry(note_id, **kwargs),
                 )
             )
+            db.add(_stat(note_id, account_id=account.id, user_id=user.id, **kwargs))
         db.commit()
         account_id = account.id
         #: 模块级：既有用例按二元组解包，不动它们；新用例直接读这里。
@@ -188,11 +215,20 @@ def test_cleanup_runner_reads_cookies_and_deletes_the_candidates(tmp_path, monke
         task = db.scalars(select(Task).where(Task.task_type == ncs.CLEANUP_TASK_TYPE)).one()
         assert task.status == ncs.STATUS_DONE
         assert task.payload["deleted"] == 2
-        # 2026-10-06：平台删成功后必须**同步删本地 notes 表**（此前只删平台、漏删本地）。
-        remaining = set(
-            db.scalars(select(Note.note_id).where(Note.note_id.in_(["ZERO-1", "ZERO-2", "HAS-READ"]))).all()
+        # 2026-10-12 软删除：平台删成功后本地**软删**（is_deleted=True），不再硬删。
+        # ZERO-1/ZERO-2 仍在表里但标记软删，HAS-READ 保持未删。
+        deleted_rows = set(
+            db.scalars(
+                select(Note.note_id).where(
+                    Note.note_id.in_(["ZERO-1", "ZERO-2"]), Note.is_deleted.is_(True)
+                )
+            ).all()
         )
-        assert remaining == {"HAS-READ"}, f"本地应只剩未删的 HAS-READ，实际 {remaining}"
+        assert deleted_rows == {"ZERO-1", "ZERO-2"}, f"应软删 ZERO-1/ZERO-2，实际 {deleted_rows}"
+        has_read = db.scalars(
+            select(Note).where(Note.note_id == "HAS-READ")
+        ).one()
+        assert has_read.is_deleted is False, "HAS-READ 不应被软删"
     finally:
         db.close()
 
@@ -308,9 +344,11 @@ def test_specified_cleanup_refuses_notes_outside_the_pool(tmp_path, monkeypatch)
         note_ids=["ZERO-1", "NOT-A-CANDIDATE", "HAS-READ"],
     )
 
-    # HAS-READ 有人看 ⇒ 不在候选池；NOT-A-CANDIDATE 根本不存在
-    assert result["deleted"] == 1, result
-    assert FakeCreatorApiAdapter.deleted == ["ZERO-1"], FakeCreatorApiAdapter.deleted
+    # 2026-10-13：指定笔记清理改为「按勾选的 note_id 直接查统计表」，不再二次校验
+    # 「是否在候选池」（阈值）。故 HAS-READ（有流量、但有统计行）现在也会被删；
+    # 只有 NOT-A-CANDIDATE（统计表里不存在）才被 not_in_pool。
+    assert result["deleted"] == 2, result
+    assert sorted(FakeCreatorApiAdapter.deleted) == ["HAS-READ", "ZERO-1"], FakeCreatorApiAdapter.deleted
 
     db = SessionLocal()
     try:
@@ -318,7 +356,7 @@ def test_specified_cleanup_refuses_notes_outside_the_pool(tmp_path, monkeypatch)
         payload = task.payload if isinstance(task.payload, dict) else {}
     finally:
         db.close()
-    assert set(payload["not_in_pool"]) == {"NOT-A-CANDIDATE", "HAS-READ"}, payload
+    assert set(payload["not_in_pool"]) == {"NOT-A-CANDIDATE"}, payload
 
 
 def test_after_total_does_not_discount_skipped_or_failed(tmp_path, monkeypatch):
@@ -554,7 +592,8 @@ def test_single_note_failure_does_not_abort_the_batch(tmp_path, monkeypatch):
         def validate_delete_permission(self, note_id: str):
             calls.append(note_id)
             if note_id == "ZERO-1":
-                return False, "该笔记已被删除", {}
+                # 单篇级失败（非「笔记不存在」、非账号级）：无删除权限。
+                return False, "无删除权限", {}
             return True, "ok", {"data": {"is_note_in_promotion": False}}
 
     monkeypatch.setattr(creator_api_adapter, "XhsCreatorApiAdapter", OneBad)
@@ -1157,15 +1196,17 @@ def test_goods_notes_delete_via_qianfan_and_normal_via_creator(tmp_path, monkeyp
         account.seller_id = "SELLER-1"
         set_shop_state(account, status="active", goods_note_total=2)
         db.flush()
-        # 一条商业笔记（goods）+ 一条普通笔记（normal），都无流量
+        # 一条商业笔记（goods_note）+ 一条普通笔记（空 flag），都无流量
         db.add(Note(
             user_id=user.id, platform_account_id=account.id, platform="xhs",
-            note_id="GOODS-1", title="商业笔记", note_category="goods", raw_json=_entry("GOODS-1"),
+            note_id="GOODS-1", title="商业笔记",
         ))
+        db.add(_stat("GOODS-1", account_id=account.id, user_id=user.id, flag="goods_note"))
         db.add(Note(
             user_id=user.id, platform_account_id=account.id, platform="xhs",
-            note_id="NORMAL-1", title="普通笔记", note_category="normal", raw_json=_entry("NORMAL-1"),
+            note_id="NORMAL-1", title="普通笔记",
         ))
+        db.add(_stat("NORMAL-1", account_id=account.id, user_id=user.id, flag=""))
         db.commit()
         account_id = account.id
     finally:
@@ -1173,7 +1214,7 @@ def test_goods_notes_delete_via_qianfan_and_normal_via_creator(tmp_path, monkeyp
 
     result = ncs.run_no_traffic_cleanup(account_id, user_id=1)
 
-    # 分流：商业 → 千帆，普通 → creator
+    # 分流：商业 → 千帆批量，普通 → creator 逐篇
     assert sorted(FakeQianfanApiAdapter.deleted) == ["GOODS-1"], FakeQianfanApiAdapter.deleted
     assert sorted(FakeCreatorApiAdapter.deleted) == ["NORMAL-1"], FakeCreatorApiAdapter.deleted
     assert result["deleted"] == 2, result
@@ -1212,8 +1253,9 @@ def test_goods_note_falls_back_to_creator_when_no_ark_cookies(tmp_path, monkeypa
         db.flush()
         db.add(Note(
             user_id=user.id, platform_account_id=account.id, platform="xhs",
-            note_id="GOODS-1", title="商业笔记", note_category="goods", raw_json=_entry("GOODS-1"),
+            note_id="GOODS-1", title="商业笔记",
         ))
+        db.add(_stat("GOODS-1", account_id=account.id, user_id=user.id, flag="goods_note"))
         db.commit()
         account_id = account.id
     finally:
@@ -1263,13 +1305,15 @@ def test_goods_batch_capped_at_50_and_normal_at_20(tmp_path, monkeypatch):
         for i in range(60):
             db.add(Note(
                 user_id=user.id, platform_account_id=account.id, platform="xhs",
-                note_id=f"G-{i:03d}", title=f"商业{i}", note_category="goods", raw_json=_entry(f"G-{i:03d}"),
+                note_id=f"G-{i:03d}", title=f"商业{i}",
             ))
+            db.add(_stat(f"G-{i:03d}", account_id=account.id, user_id=user.id, flag="goods_note"))
         for i in range(30):
             db.add(Note(
                 user_id=user.id, platform_account_id=account.id, platform="xhs",
-                note_id=f"N-{i:03d}", title=f"普通{i}", note_category="normal", raw_json=_entry(f"N-{i:03d}"),
+                note_id=f"N-{i:03d}", title=f"普通{i}",
             ))
+            db.add(_stat(f"N-{i:03d}", account_id=account.id, user_id=user.id, flag=""))
         db.commit()
         account_id = account.id
     finally:
