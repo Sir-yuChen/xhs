@@ -89,7 +89,6 @@ import {
   startNoTrafficCleanup,
   fetchNoTrafficCleanupStatus,
   fetchXhsAccountLoginStates,
-  syncSpecifiedShopItems,
   type NoTrafficThresholds,
   type NoTrafficCandidate,
   type NoTrafficCleanupItemRow,
@@ -1389,38 +1388,6 @@ export function XhsMyNotesPage() {
   }
 
   // 2026-10-06：手动同步离线笔记数据（弹窗内选日期范围，≤90天），后台执行 + 轮询日志收口。
-  /**
-   * 把「本地台账查不到信息」的挂载商品**放进商品信息同步队列**（2026-10-12 用户口径）。
-   *
-   * 判据与详情弹窗一致：挂载商品**有 `item_id`、但标题与价格都空** —— 后端
-   * `_goods_entry` 的缺值口径（关系行在、`shop_products` 无行）。
-   *
-   * 范围 = **已加载**的离线商业笔记（`offlinePanels.goods`），不为这个动作复拉列表；
-   * 只对 `category === "goods"` 生效（普通笔记不挂商品）。
-   * 失败**不打扰**：入队是顺手补数据，卡片仍如实显示「本地查询不到」。
-   */
-  async function enqueueGoodsMissingInfo(category: "goods" | "normal") {
-    if (category !== "goods" || !selectedAccountId) return;
-    const rows = offlinePanels.goods.items ?? [];
-    const missing: string[] = [];
-    const seen = new Set<string>();
-    for (const note of rows) {
-      for (const g of mountGoods(note.goods ?? null, note.shop ?? null)) {
-        if (g.goodsId && !g.title && !g.price && !seen.has(g.goodsId)) {
-          seen.add(g.goodsId);
-          missing.push(g.goodsId);
-        }
-      }
-    }
-    if (missing.length === 0) return;
-    try {
-      const res = await syncSpecifiedShopItems(selectedAccountId, missing);
-      if (res?.note) message.info(res.note);
-    } catch {
-      // 静默：用户点的是「同步笔记」，商品补数据是附带动作，失败不该盖住主流程反馈。
-    }
-  }
-
   async function handleSyncNoteData(category: "goods" | "normal") {
     if (!selectedAccountId) return;
     setSyncSubmitting(true);
@@ -1436,10 +1403,6 @@ export function XhsMyNotesPage() {
       // 关闭弹窗 + 清空日期选择，等下次同步重新选。
       setSyncOpen(false);
       setSyncDateRange(null);
-      // 2026-10-12 用户口径：「同步笔记」时，若挂载商品在本地台账查不到信息
-      // （有 item_id、无标题无价）⇒ 把该商品 ID **放进商品信息同步队列**并触发同步。
-      // 范围 = 当前**已加载**的这批离线商业笔记（不为这个动作另拉全量列表）。
-      void enqueueGoodsMissingInfo(category);
       // 收口「同步中」按钮态：轮询 system.note_data_sync 下 running 的「离线笔记数据同步」日志。
       const poll = async () => {
         try {
@@ -2815,14 +2778,7 @@ export function XhsMyNotesPage() {
                               >
                                 {g.title || "（无商品标题）"}
                               </Text>
-                              {/* 本地台账查不到这件商品（有 ID 无标题无价）⇒ 不干放「价格待同步」，
-                                  而是如实说明「同步笔记时已自动入队补」（2026-10-12 用户口径：
-                                  商品信息查不到 ⇒ 把商品 ID 放进商品信息同步队列触发同步）。*/}
-                              {!g.title && !g.price && g.goodsId && (
-                                <Text type="warning" style={{ fontSize: 12, display: "block" }}>
-                                  本地查询不到该商品信息，点「同步笔记」会自动加入商品信息同步队列
-                                </Text>
-                              )}
+
                               {/* 规格与价格：**同一行**（规格先让位 `…`+tip，价格不压缩） */}
                               {(g.variant || g.price) && (
                                 <div className="goods-meta-row">

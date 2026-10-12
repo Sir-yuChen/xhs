@@ -2335,7 +2335,7 @@ def test_t9_panels_are_wired_into_workshop():
 # 2026-10-03 v2.16：「生成AI商品图」弹窗左右两栏布局
 # --------------------------------------------------------------------------- #
 SHOP_ITEMS_PAGE = ROOT / "frontend/src/pages/platforms/xhs/shop-items-page.tsx"
-MY_NOTES_PAGE = ROOT / "frontend/src/pages/platforms/xhs/my-notes-page.tsx"
+LIBRARY_PAGE = ROOT / "frontend/src/pages/platforms/xhs/library-page.tsx"
 
 
 def test_detail_image_modal_uses_tabs_for_groups():
@@ -4633,38 +4633,53 @@ def test_no_markdown_bold_inside_user_facing_strings():
     assert "**" in "<Text>商品的价格**不能改**</Text>", "JSX 文本节点式漏判"
 
 
-def test_sync_note_enqueues_goods_missing_local_info():
-    """点「同步笔记」时，本地查不到信息的挂载商品**必须入商品同步队列**（2026-10-12 用户口径）。
+def test_note_sync_enqueues_goods_missing_local_info():
+    """商业笔记**同步时**（单篇与批量同一条路），本地查不到信息的挂载商品必须入商品同步队列。
 
-    用户原话：「点击同步笔记按钮是如果商品id本地查询不到商品信息应将商品ID放入队列中触发同步商品信息」。
+    用户原话（2026-10-12，最终口径）：「项目中商业笔记同步笔记时存在商品在本地查询不到，
+    则需要将商品 id 放入商品同步队列执行同步商品信息的逻辑」。
 
-    判据（全部落在 `my-notes-page.tsx` 的**代码**上，剥注释后判）：
-    ① `handleSyncNoteData` 里调了 `enqueueGoodsMissingInfo(category)`（挂在同步提交之后）；
-    ② `enqueueGoodsMissingInfo` 存在，且**只对 goods 分类**生效；
-    ③ 判据与详情弹窗同源 —— 「有 goodsId、但 title 与 price 都空」
-       （后端 `_goods_entry` 缺值口径：关系行在、`shop_products` 无行）；
-    ④ 入队走既有 `syncSpecifiedShopItems`（**不另造同步路径**，DEF-044）；
-    ⑤ 卡片如实说明「本地查询不到该商品信息」+ 指引「点同步笔记会自动加入队列」。
+    判据（全部落在 `library-page.tsx` 的**代码**上，剥注释后判）：
+    ① 单篇「同步」`syncNote` 与批量 `batchSyncNotes` **都**调 `enqueueMissingGoodsInfo(...)`；
+    ② **同一份实现**（该函数只定义一次，收一个笔记列表；单篇 = 长度为 1）—— DEF-044；
+    ③ 判据与后端缺值口径同源 —— 「有 item_id、但 item_title 与 price 都空」；
+    ④ 入队走既有 `syncSpecifiedShopItems`（不另造同步路径）；
+    ⑤ 多账号按 `platform_account_id` 分组（该请求函数只收一个账号 ID）。
     """
-    page = _code_only(_read(MY_NOTES_PAGE))
-    # ① 挂在同步笔记流程里
-    sync_fn = _slice_between(page, "async function handleSyncNoteData(", "async function ")
-    assert "enqueueGoodsMissingInfo(category)" in sync_fn, (
-        "「同步笔记」提交后必须调 `enqueueGoodsMissingInfo(category)` —— 否则商品 ID 不入队"
+    page = _code_only(_read(LIBRARY_PAGE))
+    # ① 两条路都挂上
+    sync_fn = _slice_between(page, "async function syncNote(", "async function ")
+    assert "enqueueMissingGoodsInfo(" in sync_fn, "单篇「同步」必须补商品"
+    batch_fn = _slice_between(page, "async function batchSyncNotes(", "async function ")
+    assert "enqueueMissingGoodsInfo(" in batch_fn, "批量同步也必须补商品（用户最终口径）"
+    # ② 同一份实现，只定义一次
+    assert page.count("function enqueueMissingGoodsInfo(") == 1, (
+        "补商品必须**只有一份实现**（单篇与批量共用），不许各写一份"
     )
-    # ② 函数在，且只对 goods 生效
-    assert "function enqueueGoodsMissingInfo(" in page, "补商品的函数不见了"
-    helper = _slice_between(page, "function enqueueGoodsMissingInfo(", "async function handleSyncNoteData(")
-    assert 'category !== "goods"' in helper, "只应对商业笔记（goods）生效 —— 普通笔记不挂商品"
-    # ③ 判据 = 有 ID 无标题无价
-    assert "g.goodsId && !g.title && !g.price" in helper, (
-        "判据必须是「有 goodsId、但标题与价格都空」（与后端缺值口径同源）"
+    helper = _slice_between(page, "function enqueueMissingGoodsInfo(", "async function syncNote(")
+    assert "notes: SavedNote[]" in helper, "helper 应收**笔记列表**（单篇即长度为 1）"
+    # ③ 判据
+    assert "g.item_id && !g.item_title && !g.price" in helper, (
+        "判据必须是「有 item_id、但标题与价格都空」（与后端缺值口径同源）"
     )
-    # ④ 复用既有同步路径，不另造
+    # ④ 复用既有同步路径
     assert "syncSpecifiedShopItems(" in helper, "必须走既有 `/items/sync`（不另造同步路径）"
-    # ⑤ 卡片如实说明（不干放「价格待同步」）
+    # ⑤ 按账号分组（该请求函数只收一个账号 ID）—— 断言**分组结构**，不是「出现过这个名字」
+    #    ⚠️ 首版只查 `platform_account_id` 字样 ⇒ 「把账号取值改成 `?? 1`」的变异
+    #    照样绿（名字还在，分组没了）= 哑弹。改为钉住分组的两段形态：
+    #    ① 取值后**跳过没有账号的笔记**（`if (!accountId) continue;`）
+    #    ② 按账号聚合进 `byAccount`，并以 `platform_account_id` 为 Map 键
+    assert "if (!accountId) continue;" in helper, (
+        "没有账号的笔记必须跳过（`const accountId = note.platform_account_id; if (!accountId) continue;`）"
+    )
+    assert "byItemId.set(g.item_id, accountId)" in helper, (
+        "商品必须带上它所属笔记的账号 ID（否则分组入队无从谈起）"
+    )
+    assert "for (const [accountId, itemIds] of byAccount)" in helper, (
+        "必须按 accountId 分组逐个账号入队（`syncSpecifiedShopItems` 只收一个账号 ID）"
+    )
+    # 卡片如实说明（不干放「价格待同步」）
     assert "本地查询不到该商品信息" in page, "卡片应如实说明本地查不到该商品信息"
-    assert "点「同步笔记」会自动加入商品信息同步队列" in page, "应指引用户「同步笔记」会自动入队"
 
 
 def test_shop_items_page_has_no_top_qianfan_card_and_no_refresh_icon():
