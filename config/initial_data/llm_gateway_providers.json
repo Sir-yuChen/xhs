@@ -1,0 +1,72 @@
+{
+  "_comment": "应用初始化数据 · LLM 网关服务商种子（设计 37 · R4 需求，2026-10-13 用户口径「默认将 deepseek、千问、豆包、火山、智谱 等等国内常见的 6 个服务商作为种子数据配置到服务列表中，用户安装登录后只需要配置 key 并检测后即可使用」）。语义：**用户注册时**按用户播种这批服务商（不含 KEY —— key 由用户登录后自填 + 点「测试连接」），只补『该用户名下缺失的服务商』，已有的一律不覆盖（用户改过/删过的不还魂）。base_url 均取自各家公开文档的 OpenAI 兼容端点（见 providers[].doc）。models 只登记各家**稳定在售**的代表模型，model_type 取 text/image/multimodal/video（见 services/business_provider_keys.MODEL_TYPES），platform 恒 xhs（一期只服务小红书平台）。⚠️ 不要在这里塞任何 KEY/token。改默认清单改本文件，不要写死在代码里。⚠️ 默认业务点映射**不在此文件**（它是代码常量，见 services/llm_gateway_seed_service.py::DEFAULT_BUSINESS_MAP，与 BUSINESS_KEYS 同纪律）—— 一处真相源，别在 JSON 里再抄一份。",
+  "version": 1,
+  "providers": [
+    {
+      "name": "DeepSeek",
+      "base_url": "https://api.deepseek.com/v1",
+      "doc": "https://api-docs.deepseek.com/",
+      "remark": "深度求索 · 通用对话/推理（OpenAI 兼容）",
+      "models": [
+        { "model_name": "deepseek-chat", "model_type": "text" },
+        { "model_name": "deepseek-reasoner", "model_type": "text" }
+      ]
+    },
+    {
+      "name": "阿里通义千问",
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "doc": "https://help.aliyun.com/zh/model-studio/compatibility-of-openai-with-dashscope",
+      "remark": "阿里云百炼 (DashScope) · OpenAI 兼容模式",
+      "models": [
+        { "model_name": "qwen-plus", "model_type": "text" },
+        { "model_name": "qwen-max", "model_type": "text" },
+        { "model_name": "qwen-vl-max", "model_type": "multimodal" },
+        { "model_name": "wanx2.1-t2i-turbo", "model_type": "image" }
+      ]
+    },
+    {
+      "name": "火山方舟",
+      "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+      "doc": "https://www.volcengine.com/docs/82379/1399008",
+      "remark": "字节跳动 · 火山方舟（豆包模型挂此平台；需先在控制台建推理接入点或直接填模型 ID）",
+      "models": [
+        { "model_name": "doubao-seed-1-6-250615", "model_type": "multimodal" },
+        { "model_name": "doubao-seed-1-6-flash-250615", "model_type": "text" },
+        { "model_name": "doubao-seedream-3-0-t2i-250415", "model_type": "image" }
+      ]
+    },
+    {
+      "name": "智谱GLM",
+      "base_url": "https://open.bigmodel.cn/api/paas/v4",
+      "doc": "https://docs.bigmodel.cn/cn/guide/develop/openai/introduction",
+      "remark": "智谱 AI · 开放平台 (BigModel)",
+      "models": [
+        { "model_name": "glm-4-plus", "model_type": "text" },
+        { "model_name": "glm-4-flash", "model_type": "text" },
+        { "model_name": "glm-4v-plus", "model_type": "multimodal" },
+        { "model_name": "cogview-3-plus", "model_type": "image" }
+      ]
+    },
+    {
+      "name": "月之暗面Kimi",
+      "base_url": "https://api.moonshot.cn/v1",
+      "doc": "https://platform.moonshot.cn/docs",
+      "remark": "月之暗面 · Kimi（国内站 api.moonshot.cn）",
+      "models": [
+        { "model_name": "moonshot-v1-8k", "model_type": "text" },
+        { "model_name": "moonshot-v1-32k", "model_type": "text" },
+        { "model_name": "moonshot-v1-128k", "model_type": "text" }
+      ]
+    },
+    {
+      "name": "MiniMax",
+      "base_url": "https://api.minimaxi.com/v1",
+      "doc": "https://platform.minimaxi.com/docs/guides/text-chat",
+      "remark": "MiniMax · 国内站（OpenAI 兼容；国际站为 api.minimax.io）",
+      "models": [
+        { "model_name": "MiniMax-Text-01", "model_type": "text" },
+        { "model_name": "abab6.5s-chat", "model_type": "text" }
+      ]
+    }
+  ]
+}

@@ -104,6 +104,24 @@ def register(
         db.rollback()
         logger.warning("register: seed prompt templates for user %s failed: %s", user.id, exc)
 
+    # 2026-10-13 用户口径：**国内常见 6 个服务商**作为种子数据（用户登录后只需配 KEY
+    # 并点「测试连接」即可用）。同样**按用户各持一份** ⇒ 注册即播种；种子**不含 KEY**，
+    # 存量用户不主动补种（避免替用户建一堆没配 KEY 的服务商，同 §4.5.1 纪律）。
+    try:
+        from backend.app.services.llm_gateway_seed_service import (
+            seed_default_business_map_for_user,
+            seed_gateway_providers_for_user,
+        )
+
+        seed_gateway_providers_for_user(db, user.id)
+        # 小红书平台的默认业务点映射（文本→DeepSeek、图片→通义千问）；
+        # 幂等（已有映射不碰），且只在服务商种子存在时才写（缺一即跳过）。
+        seed_default_business_map_for_user(db, user.id, platform="xhs")
+        db.commit()
+    except Exception as exc:  # noqa: BLE001 - 注册不被子系统问题拖死
+        db.rollback()
+        logger.warning("register: seed gateway providers for user %s failed: %s", user.id, exc)
+
     return _token_response(user)
 
 

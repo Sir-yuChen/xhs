@@ -144,11 +144,15 @@ def test_registry_has_exactly_sixteen_entries():
 
     ⚠️ 2026-10-11：新增 `system.picture_space_cleanup`（图片空间清理未引用图片，
     用户口径「每周一执行一次」）⇒ 15 → 16。
+
+    ⚠️ 2026-10-13：**移除** `system.llm_gateway_monitor`（用户口径「移除 LLM 网关预警任务，
+    根据配置的规则**自动触发**」）⇒ 预警改由「台账写入即异步评估」
+    （`services/llm_gateway_alert_trigger.py`），不再需要常驻调度任务 ⇒ 16 → 15。
     """
     from backend.app.services.job_registry import job_registry
 
     registry = job_registry()
-    assert len(registry) == 16
+    assert len(registry) == 15
     assert set(registry) == {
         "system.due_publish",
         "system.monitoring_refresh",
@@ -160,7 +164,6 @@ def test_registry_has_exactly_sixteen_entries():
         "system.note_data_sync",
         "system.business_note_auto_publish",
         "system.queue_record_cleanup",
-        "system.llm_gateway_monitor",
         "system.note_metrics_collect",
         "system.shop_metrics_collect",
         "system.order_sync",
@@ -454,9 +457,12 @@ def test_schedule_status_counts_only_my_rows(tmp_path, monkeypatch):
 
         owner_stats = client.get("/api/schedule/status", headers=_auth(owner)).json()["stats"]
         intruder_stats = client.get("/api/schedule/status", headers=_auth(intruder)).json()["stats"]
-        assert owner_stats["total"] == 15
-        # 入侵者注册时也播种了 15 行 + 自己新建 1 行 = 16（只见自己的，不见主人的）
-        assert intruder_stats["total"] == 16, "入侵者只应看到自己的行"
+        from backend.app.core.initial_data import load_initial_scheduled_jobs
+
+        seed_n = len(load_initial_scheduled_jobs())
+        assert owner_stats["total"] == seed_n
+        # 入侵者注册时也播种了 seed_n 行 + 自己新建 1 行（只见自己的，不见主人的）
+        assert intruder_stats["total"] == seed_n + 1, "入侵者只应看到自己的行"
     finally:
         app.dependency_overrides.clear()
 
@@ -1645,7 +1651,8 @@ def test_ensure_builtin_jobs_seeds_from_application_initial_data(tmp_path, monke
         second_user = _make_user(SessionLocal, "seed-second")
         db = SessionLocal()
         first = ensure_builtin_jobs(db)
-        assert len(first) == 30, "两个用户 × 15 个内置目标"
+        expected_per_user = len(load_initial_scheduled_jobs())
+        assert len(first) == 2 * expected_per_user, f"两个用户 × {expected_per_user} 个内置目标"
         second = ensure_builtin_jobs(db)
         assert second == [], "幂等：已存在的 (user, job_key) 不插行"
         rows = list(db.scalars(select(ScheduledJob).where(ScheduledJob.is_builtin.is_(True))))
@@ -1693,7 +1700,7 @@ def test_register_seeds_builtin_jobs_for_the_new_user(tmp_path, monkeypatch):
             ).all()
             assert {row.job_key for row in rows} == {
                 row["job_key"] for row in load_initial_scheduled_jobs()
-            }, "注册完打开任务中心就应有这 12 条"
+            }, "注册完打开任务中心就应有初始化数据里的全部内置任务"
         finally:
             db.close()
 
@@ -1734,13 +1741,18 @@ def test_sync_jobs_from_db_registers_active_rows_only(tmp_path, monkeypatch):
         scheduler = build_scheduler()
         stats = sync_jobs_from_db(scheduler)
         ids = {job.id for job in scheduler.get_jobs()}
-        # 活跃行 = 测试行 1 + 应用初始化数据播种的 13 行（R24 起全 active）⇒ 注册 14。
-        # ⚠️ 2026-10-07：原先这里还要减一 —— `system.no_traffic_cleanup` 是 manual 档、
-        # **不参与调度装配**（播种 14 行、注册 13）。该任务已从注册表与种子**移除**
-        # （用户口径「无流量笔记清理任务不应在任务列表展示」）⇒ 播种 13 行、全 cron、
-        # 注册 14 行，两个数**从「差 1」变成「相等」**。
-        assert stats["registered"] == 15
-        assert len(ids) == 15
+        # 活跃行 = 测试行 1 + 应用初始化数据里 status=active 的内置行（paused 不装配）。
+        # ⚠️ 2026-10-07 / 2026-10-13：`system.no_traffic_cleanup` 与
+        # `system.llm_gateway_monitor` 先后移除 ⇒ 数字随种子变化。
+        # 断言**从初始化数据推导**（写死数字会随种子增减漂移，历史上已多次踩到）。
+        from backend.app.core.initial_data import load_initial_scheduled_jobs
+
+        active_seeds = sum(
+            1 for row in load_initial_scheduled_jobs() if row.get("status") == "active"
+        )
+        expected = active_seeds + 1  # +1 = 本用例插的活跃测试行
+        assert stats["registered"] == expected
+        assert len(ids) == expected
         assert all(job_id.startswith("job_") for job_id in ids)
     finally:
         app.dependency_overrides.clear()

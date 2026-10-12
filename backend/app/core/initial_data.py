@@ -44,6 +44,9 @@ GATEWAY_ALERTS_FILENAME = "llm_gateway_alerts.json"
 #: 内置提示词模板 / 模块初始化数据文件名（设计 17 §13.5.4，v2.24）
 PROMPT_TEMPLATES_FILENAME = "prompt_templates.json"
 
+#: LLM 网关服务商种子初始化数据文件名（2026-10-13 用户口径「国内常见 6 个服务商作为种子」）
+GATEWAY_PROVIDERS_FILENAME = "llm_gateway_providers.json"
+
 
 def _project_root() -> Path:
     """与 `core/config.py::_load_yaml_config()` 同一口径（frozen 下 = `_internal/`）。"""
@@ -448,3 +451,85 @@ def load_initial_prompt_templates() -> dict[str, list[dict[str, Any]]]:
         len(templates),
     )
     return {"modules": modules, "templates": templates}
+
+
+def _normalize_gateway_provider(raw: Any) -> dict[str, Any] | None:
+    """单条服务商种子 → 规范 dict；字段非法 ⇒ `None`（丢弃该条 + warning）。
+
+    ⚠️ **不含访问令牌**（KEY 由用户登录后自填）—— 种子里出现 token 字段也**不读**，
+    这是刻意的：种子随包分发，塞 KEY 等于泄露（设计纪律同 §10 安全设计）。
+    `model_type` 白名单从 `services.business_provider_keys.MODEL_TYPES` 取 ——
+    **不在这里重抄一份**（枚举漂移即缺陷，与 `_normalize_gateway_alert` 同纪律）。
+    未知类型的模型**丢弃该模型行**（不猜类型，同 §13.2.9.4）、服务商本身仍保留。
+    """
+    # 惰性 import：`core` 层不在模块级依赖 `services`（避免 core ↔ services 导入环）。
+    from backend.app.services.business_provider_keys import MODEL_TYPES
+
+    if not isinstance(raw, dict):
+        logger.warning("initial_data: 服务商种子条目不是对象（%r），已跳过", type(raw).__name__)
+        return None
+
+    name = str(raw.get("name") or "").strip()
+    base_url = str(raw.get("base_url") or "").strip()
+    if not name or not base_url:
+        logger.warning("initial_data: 服务商种子缺 name/base_url，已跳过：%r", name)
+        return None
+
+    models: list[dict[str, str]] = []
+    for item in raw.get("models") or []:
+        if not isinstance(item, dict):
+            logger.warning("initial_data: 服务商 %s 的模型条目不是对象，已跳过", name)
+            continue
+        model_name = str(item.get("model_name") or "").strip()
+        model_type = str(item.get("model_type") or "").strip()
+        if not model_name:
+            logger.warning("initial_data: 服务商 %s 有模型条目缺 model_name，已跳过", name)
+            continue
+        if model_type not in MODEL_TYPES:
+            logger.warning(
+                "initial_data: 服务商 %s 的模型 %s model_type=%r 不在白名单 %s，已跳过该模型",
+                name,
+                model_name,
+                model_type,
+                sorted(MODEL_TYPES),
+            )
+            continue
+        models.append({"model_name": model_name, "model_type": model_type})
+
+    return {
+        "name": name[:128],
+        "base_url": base_url[:512],
+        "remark": str(raw.get("remark") or "").strip(),
+        "models": models,
+    }
+
+
+def load_initial_gateway_providers() -> list[dict[str, Any]]:
+    """LLM 网关服务商种子初始化数据（规范化后的列表；任何问题 ⇒ warning + 可用部分）。
+
+    与 `load_initial_gateway_alerts` 同构（双路解析、坏数据不致命）。
+    ⚠️ **播种时机**：服务商**不依附任何行**（不像预警规则依附 `gateway_id`），
+    但也**不在 lifespan 全局播** —— 它属于「某用户的凭据容器」，在**用户注册时**
+    播种（`api/auth.py::register` 与既有三个种子并列），存量用户不主动补种
+    （避免替用户建一堆没配 KEY 的服务商，同 §4.5.1 纪律）。
+    """
+    payload = _load_payload(GATEWAY_PROVIDERS_FILENAME)
+    if payload is None:
+        return []
+    if not isinstance(payload, dict):
+        logger.warning("initial_data: %s 顶层不是对象，已忽略", GATEWAY_PROVIDERS_FILENAME)
+        return []
+    rows = payload.get("providers")
+    if not isinstance(rows, list):
+        logger.warning(
+            "initial_data: %s 缺少 providers 数组，已忽略", GATEWAY_PROVIDERS_FILENAME
+        )
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    for raw in rows:
+        item = _normalize_gateway_provider(raw)
+        if item is not None:
+            normalized.append(item)
+    logger.info("initial_data: 载入 %s 个服务商种子初始化数据", len(normalized))
+    return normalized

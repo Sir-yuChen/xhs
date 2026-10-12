@@ -548,7 +548,11 @@ def test_build_has_a_positive_assertion_for_every_initial_data_file():
     """
     build_text = BUILD_PS1.read_text(encoding="utf-8-sig")
     assert "MISSING" in build_text
-    for name in ("scheduled_jobs.json", "system_settings.json"):
+    for name in (
+        "scheduled_jobs.json",
+        "system_settings.json",
+        "llm_gateway_providers.json",
+    ):
         assert name in build_text, f"build.ps1 自检没有正向断言 {name}"
 
 
@@ -559,7 +563,11 @@ def test_smoke_test_checks_every_initial_data_file_and_its_rows():
     文件在而没播种 = 用户打开任务中心 / 设置页还是空的。
     """
     smoke_text = SMOKE_TEST_PS1.read_text(encoding="utf-8-sig")
-    for name in ("scheduled_jobs.json", "system_settings.json"):
+    for name in (
+        "scheduled_jobs.json",
+        "system_settings.json",
+        "llm_gateway_providers.json",
+    ):
         assert name in smoke_text, f"smoke-test.ps1 没有校验 {name}"
     assert "select id from system_settings" in smoke_text, "冒烟没有查配置行的落库判据"
     assert "运行时配置播种失效" in smoke_text, "冒烟查到行数却没有失败判据（只打印不断言）"

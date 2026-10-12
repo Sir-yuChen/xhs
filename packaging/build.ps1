@@ -223,6 +223,13 @@ Copy-Item (Join-Path $Root "config\default.yaml") (Join-Path $Bundle "config\def
 #    与上面 frontend\dist 那条同源坑（目标不存在时源目录会被当成目标名）。
 Copy-Item (Join-Path $Root "config\initial_data") (Join-Path $Bundle "config") -Recurse -Force
 
+# 应用版本（设计 36 §5.1，2026-10-13）：运行时**唯一**版本真相源，随包分发。
+# ⚠️ 后端 `core/version.py` 与前端经 `GET /api/system/version` 都读它 ——
+#    不许在别处再写一份版本常量（DEF-044）。缺了 = 版本恒 0.0.0 ⇒ 更新检查失效。
+$versionJson = Join-Path $Bundle "config\version.json"
+(@{ version = $Version } | ConvertTo-Json -Compress) | Set-Content -Path $versionJson -Encoding utf8
+Write-Host "  应用版本: $Version → config\version.json"
+
 # 7a. 裁掉明确不用的内容（用户口径：不必要内容不打包）：
 #   cv2/data/*.xml = haarcascade 等模型文件（约 10MB）。本仓库 cv2 只用了
 #   imdecode / imencode / VideoCapture（媒体校验），无任何级联分类器用法
@@ -336,7 +343,9 @@ if (-not (Test-Path $nm)) {
 #    另一个悄悄漏掉时自检照样「全部通过」。
 foreach ($rel in @(
     "config\initial_data\scheduled_jobs.json",
-    "config\initial_data\system_settings.json"
+    "config\initial_data\system_settings.json",
+    "config\initial_data\llm_gateway_providers.json",
+    "config\version.json"
 )) {
     $initialData = Join-Path $Bundle $rel
     if (Test-Path $initialData) {

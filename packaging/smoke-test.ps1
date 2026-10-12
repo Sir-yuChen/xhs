@@ -50,7 +50,8 @@ foreach ($rel in @(
     "frontend\dist\index.html", "config\default.yaml",
     # 应用初始化数据（设计 15 §4.5 / 设计 10 §7.3）：缺了 = 装完任务中心 / 设置页是空的
     "config\initial_data\scheduled_jobs.json",
-    "config\initial_data\system_settings.json"
+    "config\initial_data\system_settings.json",
+    "config\initial_data\llm_gateway_providers.json"
 )) {
     $p = Join-Path $InstallDir $rel
     if (-not (Test-Path $p)) { Fail "缺少 $rel" }
@@ -79,6 +80,14 @@ if (-not $settingsJson.system_settings -or $settingsJson.system_settings.Count -
 }
 $settingsCount = $settingsJson.system_settings.Count
 Write-Host "  应用初始化数据: $settingsCount 条运行时配置"
+
+# 服务商种子初始化数据同样必须可解析（2026-10-13）：缺了 = 装完服务商列表是空的
+$providersJson = Get-Content (Join-Path $InstallDir "config\initial_data\llm_gateway_providers.json") -Raw -Encoding UTF8 | ConvertFrom-Json
+if (-not $providersJson.providers -or $providersJson.providers.Count -lt 1) {
+    Fail "应用初始化数据里没有服务商种子条目"
+}
+$providersCount = $providersJson.providers.Count
+Write-Host "  应用初始化数据: $providersCount 个服务商种子"
 
 # --- 3. 启动 + 健康检查 -------------------------------------------------------
 Write-Step "启动服务（端口 $Port，--no-browser）"

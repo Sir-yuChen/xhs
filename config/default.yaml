@@ -97,3 +97,15 @@ frontend:
   serve_static: false
   # Path to the built frontend assets
   build_dir: "./frontend/dist"
+
+# 系统更新（设计 36，2026-10-13 用户口径「更新地址为当前项目的远程仓库」）。
+# ⚠️ **两项都留空时更新检查静默跳过**（不打扰用户）：仓库私有时不放令牌进包（= 泄露）。
+#   维护者/安装者可按需填 `manifest_url`（推荐的零鉴权静态清单）或 `gitee_token`。
+#   也可用环境变量覆盖：UPDATE_MANIFEST_URL / UPDATE_GITEE_TOKEN / UPDATE_GITEE_OWNER / UPDATE_GITEE_REPO。
+update:
+  # 静态清单 URL（如 https://example.com/xhs/update.json），非空则**优先**走它。
+  manifest_url: ""
+  # Gitee 回退路径（私有仓库需私人令牌；空则不启用）。
+  gitee_owner: "Sir-yuChen"
+  gitee_repo: "xhs"
+  gitee_token: ""

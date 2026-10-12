@@ -189,13 +189,21 @@ def record_usage(
             _insert_once,
             what=f"LLM 台账写入（user_id={user_id}, gateway_id={gateway_id}）",
         )
-        return True
     except Exception as exc:  # noqa: BLE001 —— 见 docstring：安全网不得抛穿
         logger.warning(
             "LLM 台账写入失败（user_id=%s, gateway_id=%s, %s/%s）：%s",
             user_id, gateway_id, platform, function, exc, exc_info=True,
         )
         return False
+
+    # 2026-10-13 用户口径「移除 LLM 网关预警任务，根据配置的规则**自动触发**」：
+    # 台账刚写入成功 ⇒ 投递一次预警评估（**异步、非阻塞、去抖**）。
+    # ⚠️ 必须放在写入**成功之后**（失败没落行，评估无意义）；且投递本身 O(1)、
+    # 绝不抛异常（`notify_usage_recorded` 内已兜底）⇒ 不拖慢业务调用（DEF-048）。
+    from backend.app.services.llm_gateway_alert_trigger import notify_usage_recorded
+
+    notify_usage_recorded(user_id, gateway_id)
+    return True
 
 
 def record_usage_for_model(

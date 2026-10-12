@@ -134,7 +134,6 @@ def _build_registry() -> dict[str, JobSpec]:
         run_business_note_auto_publish,
         validate_business_publish_params,
     )
-    from backend.app.services.llm_gateway_monitor_service import run_llm_gateway_monitor_once
     from backend.app.services.metric_scheduler_service import (
         run_note_metrics_collect_once,
         run_shop_metrics_collect_once,
@@ -365,17 +364,6 @@ def _build_registry() -> dict[str, JobSpec]:
             default_cron="0 0 9 * * *",
             params_required=("auto_task_id",),
             params_validator=_validate_auto_ops_params,
-        ),
-        JobSpec(
-            # 2026-09-29 v1.6 架构 A（设计 17 §4.5）：LLM 网关用量/健康预警。
-            # 轮询本地台账，对照预警规则，超阈值写站内通知。user_scoped。
-            key="system.llm_gateway_monitor",
-            name="LLM 网关预警",
-            func=run_llm_gateway_monitor_once,
-            builtin=True,
-            user_scoped=True,
-            default_trigger_type="cron",
-            default_cron="0 */10 * * * *",  # 每 10 分钟轮询一次
         ),
     ]
     return {spec.key: spec for spec in specs}
