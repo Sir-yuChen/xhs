@@ -316,7 +316,17 @@ class TestLayer3TellsValidFromExpiredFromUnknown:
         finally:
             app.dependency_overrides.clear()
 
-    def test_platform_answered_with_identity_is_valid(self, tmp_path: Path):
+    def test_platform_answered_with_identity_is_valid(self, tmp_path: Path, monkeypatch: Any):
+        """API 域有效 **且网页域可用** ⇒ `valid`（两跳都过，2026-10-12 起）。
+
+        ⚠️ 网页域那一跳必须打桩：不打的话本用例会**真打** `www.xiaohongshu.com`
+        （测试不得触网）。第二个用例专门验证「网页域不可用」的分支。
+        """
+        monkeypatch.setattr(
+            login_state_service,
+            "_probe_www_domain",
+            lambda cookies: (login_state_service.STATE_VALID, ""),
+        )
         payload = self._probe(
             tmp_path,
             (True, "ok", {"success": True, "data": {"nickname": "观隅好物", "user_id": "5bdc"}}),
@@ -324,6 +334,46 @@ class TestLayer3TellsValidFromExpiredFromUnknown:
         )
         assert _state(payload, CHANNEL_WWW) == "valid"
         assert _channels(payload)[CHANNEL_WWW]["probed"] is True
+
+    def test_api_valid_but_web_domain_needs_captcha_is_expired(self, tmp_path: Path, monkeypatch: Any):
+        """⚠️ **2026-10-12 主契约**：API 域有效、**网页域被要求验证码** ⇒ `expired`。
+
+        真机实测：同一个 jar，`/v2/user/me` 回 `nickname='观隅好物'`（API 有效），
+        而 `/explore/<id>` 跳 `/website-login/captcha`（网页域要验证码）。
+        **笔记详情只走网页域** ⇒ 只探 API 的绿标会说假话（用户报障：卡片全绿、
+        同步报「正文取不到」）。
+
+        这里直接驱动判定函数（不经 HTTP 端点）：API 桩返回有效身份，
+        网页域桩返回 `expired` ⇒ 最终必须是 `expired`，且 reason 说清原因。
+        """
+        monkeypatch.setattr(
+            login_state_service,
+            "_probe_www_domain",
+            lambda cookies: (login_state_service.STATE_EXPIRED, "网页域要验证码，请重新登录"),
+        )
+        fake = _FakeSelfProfile(
+            (True, "ok", {"success": True, "data": {"nickname": "观隅好物", "user_id": "5bdc"}})
+        )
+        state, reason = login_state_service._probe_www("a=x; web_session=y; id_token=z", fake)
+        assert state == "expired", f"API 通但网页域要验证码 ⇒ 必须 expired，实际 {state}"
+        assert "重新登录" in reason, reason
+
+    def test_api_valid_but_web_domain_inconclusive_stays_valid(self, monkeypatch: Any):
+        """网页域**没探出结论** ⇒ 不冒充「不可用」，仍给 `valid` 但把未确认写进 reason。
+
+        （与本模块的方向性约定一致：API 已确认有效时，「没问到」不得降级成「已失效」。）
+        """
+        monkeypatch.setattr(
+            login_state_service,
+            "_probe_www_domain",
+            lambda cookies: (login_state_service.STATE_UNKNOWN, "网页域探活未得到结论（超时）"),
+        )
+        fake = _FakeSelfProfile(
+            (True, "ok", {"success": True, "data": {"nickname": "观隅好物", "user_id": "5bdc"}})
+        )
+        state, reason = login_state_service._probe_www("a=x; web_session=y; id_token=z", fake)
+        assert state == "valid", state
+        assert "未得到结论" in reason, reason
 
     def test_platform_answered_without_identity_is_guest(self, tmp_path: Path):
         """真机口径：游客会话 `ok=True` 但 `nickname=None`（设计 12 §17.6.2 三组对照）。"""

@@ -1032,6 +1032,181 @@ class TestExploreSsrDetailRoute:
         finally:
             db.close()
 
+    def test_stale_token_is_refreshed_and_retried_once(self, tmp_path: Path, monkeypatch: Any):
+        """⚠️ **2026-10-12 主契约**：令牌过期（`DETAIL_EMPTY`）⇒ **刷新令牌 + 重试一次**。
+
+        真机定论：平台对**过期** `xsec_token` 的答复是 `200 + noteDetailMap={}` +
+        `errorCode=-510000`（**不是 4xx**，所以从响应分不出「没正文」与「令牌失效」）。
+        而千帆 `goods-note/list` **每次都发新鲜 token** ⇒ 刷新就一条请求的事。
+
+        旧实现只在「完全没令牌」时回查（`if not _note_detail_url(note)`），
+        **有旧令牌就永不刷新** ⇒ 拿着过期令牌反复失败（用户报障：点多少次同步都
+        拿不到正文）。
+
+        本用例钉三件事：① 第一次取数失败后**真的去刷了令牌**；
+        ② **重试了一次**；③ 重试成功 ⇒ 正文落库。
+        """
+        import backend.app.services.note_sync_service as nss
+
+        _db_dependency, db, creator = _build_db(tmp_path)
+        try:
+            note = _add_note(
+                db,
+                creator,
+                HEX_NOTE_ID,
+                raw={
+                    "note_url": f"https://www.xiaohongshu.com/explore/{HEX_NOTE_ID}?xsec_token=STALE",
+                    "xsec_token": "STALE",
+                },
+            )
+            calls: list[str] = []
+            refreshed: list[int] = []
+
+            class FlakyAdapter:
+                """第一次回空（模拟过期），第二次回正文（刷新后）。"""
+
+                def __init__(self, cookies: str) -> None:
+                    pass
+
+                def get_note_info_html(self, url: str):
+                    calls.append(url)
+                    if "STALE" in url:
+                        # 过期令牌的表现：HTTP 200，但 items 为空
+                        return True, "成功", {"data": {"items": []}}
+                    return True, "成功", _detail_payload(HEX_NOTE_ID, desc="刷新后正文")
+
+                def get_note_info(self, url: str):
+                    calls.append(url)
+                    return True, "ok", {"data": {"items": []}}
+
+            def fake_refresh(db_, account_, note_):
+                refreshed.append(1)
+                merged = dict(note_.raw_json or {})
+                # 换成新鲜令牌（模拟千帆列表返回新 token）
+                merged["xsec_token"] = "FRESH"
+                merged["note_url"] = (
+                    f"https://www.xiaohongshu.com/explore/{HEX_NOTE_ID}?xsec_token=FRESH"
+                )
+                note_.raw_json = merged
+                db_.commit()
+                return True
+
+            monkeypatch.setattr(nss, "_refresh_note_detail_token", fake_refresh)
+
+            out = nss.sync_note_from_platform(
+                db, note, account=creator, adapter_factory=lambda c: FlakyAdapter(c)
+            )
+
+            assert refreshed, "DETAIL_EMPTY 必须触发令牌刷新（旧实现永不走这里）"
+            assert out["status"] == "ok", out
+            assert len(calls) >= 2, f"必须重试一次，实际取数 {len(calls)} 次"
+            assert note.content == "刷新后正文", note.content
+        finally:
+            db.close()
+
+    def test_detail_empty_without_refresh_available_reports_it(self, tmp_path: Path, monkeypatch: Any):
+        """刷不到新令牌（千帆列表里没有这条 / 无 ark 令牌）⇒ 如实报 `DETAIL_EMPTY`。
+
+        「刷不动」不是「没救」：`DETAIL_EMPTY` 的文案已说明「令牌可能已失效或该笔记
+        不可见」，且**不写** `hydrated_at`（可恢复，下次同步重试）。
+        """
+        import backend.app.services.note_sync_service as nss
+
+        _db_dependency, db, creator = _build_db(tmp_path)
+        try:
+            note = _add_note(
+                db,
+                creator,
+                HEX_NOTE_ID,
+                raw={
+                    "note_url": f"https://www.xiaohongshu.com/explore/{HEX_NOTE_ID}?xsec_token=STALE",
+                    "xsec_token": "STALE",
+                },
+            )
+
+            class EmptyAdapter:
+                def __init__(self, cookies: str) -> None:
+                    pass
+
+                def get_note_info_html(self, url: str):
+                    return True, "成功", {"data": {"items": []}}
+
+                def get_note_info(self, url: str):
+                    return True, "ok", {"data": {"items": []}}
+
+            monkeypatch.setattr(nss, "_refresh_note_detail_token", lambda *a, **k: False)
+
+            out = nss.sync_note_from_platform(
+                db, note, account=creator, adapter_factory=lambda c: EmptyAdapter(c)
+            )
+
+            assert out["status"] == "failed", out
+            assert out["code"] == "DETAIL_EMPTY", out
+            assert "令牌" in out["reason"] or "不可见" in out["reason"], out["reason"]
+        finally:
+            db.close()
+
+    def test_force_refresh_rewrites_even_when_note_url_exists(self, tmp_path: Path, monkeypatch: Any):
+        """令牌刷新必须**连已有 `note_url` 的行也重取**（2026-10-12）。
+
+        为什么单独立契约：`backfill_note_detail_refs` 的默认语义是「**只补缺地址**」
+        （`if not force and note_url: continue`）—— 令牌过期刷新要的恰恰相反：
+        地址**在**、令牌**失效**。用默认语义调它 ⇒ 整批被跳过 ⇒ 刷新永远拿不到新令牌。
+
+        ⚠️ 必须走**真实调用链**（`_refresh_note_detail_token` → `_backfill_detail_ref_for_account`
+        → `_backfill_detail_ref_for_accounts` → `backfill_note_detail_refs`）：
+        直接调最内层那个函数测不出「force 有没有被传下去」—— 变异验证实测，
+        把中间的 `force=True` 去掉，只测最内层的用例全绿（缺陷漏网）。
+
+        所以这里桩掉千帆适配器工厂（拦住网络），驱动 `_refresh_note_detail_token`，
+        钉「已有 note_url 的行被真的改写」。
+        """
+        import backend.app.services.note_sync_service as nss
+        import backend.app.api.platforms.xhs.qianfan as qianfan_pkg
+
+        _db_dependency, db, creator = _build_db(tmp_path)
+        try:
+            note = _add_note(
+                db,
+                creator,
+                HEX_NOTE_ID,
+                raw={
+                    "note_url": f"https://www.xiaohongshu.com/explore/{HEX_NOTE_ID}?xsec_token=STALE",
+                    "xsec_token": "STALE",
+                },
+            )
+
+            class FakeQianfanAdapter:
+                """一次 `note_ids` 精确查询返回**新鲜**令牌（与真实响应同形）。"""
+
+                def __init__(self, cookies: str) -> None:
+                    pass
+
+                def get_goods_note_page(self, **kwargs):
+                    return True, "成功", {
+                        "data": {"note_infos": [{"note_id": HEX_NOTE_ID, "xsec_token": "FRESH"}]}
+                    }
+
+            monkeypatch.setattr(
+                qianfan_pkg, "get_qianfan_api_adapter_factory", lambda: FakeQianfanAdapter
+            )
+            #: ark 令牌：`qianfan_cookies_for_account` 取不到就整条链路早退。
+            monkeypatch.setattr(
+                nss, "_refresh_note_detail_token", nss._refresh_note_detail_token
+            )
+            monkeypatch.setattr(
+                "backend.app.services.shop_binding_service.qianfan_cookies_for_account",
+                lambda db_, account_id: "a1=x; customer-sso-sid=y",
+            )
+
+            changed = nss._refresh_note_detail_token(db, creator, note)
+
+            assert changed is True, "已有 note_url 的行也必须被重取（force 要传到底）"
+            assert str((note.raw_json or {}).get("xsec_token")) == "FRESH", note.raw_json
+            assert "xsec_token=FRESH" in str((note.raw_json or {}).get("note_url")), note.raw_json
+        finally:
+            db.close()
+
     def test_ssr_failure_falls_back_to_json_feed(self, tmp_path: Path):
         """SSR 取不到（结构变更 / 风控页）⇒ 回退 `/v1/feed`，不判死。"""
         import backend.app.services.note_sync_service as nss

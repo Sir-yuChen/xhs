@@ -144,6 +144,11 @@ PROBE_ATTEMPT_TIMEOUT = 10
 #: 三连失败退化成一次失败。0.6s 足够错过一次拥塞窗口，又不拖长最坏墙钟。
 PROBE_RETRY_BACKOFF = 0.6
 
+#: 网页域探活（L3 第二跳，2026-10-12）的**单次超时**（秒）。
+#: 比 API 探针短：它只请求首页、判据是最终 URL，拿到就是拿到；
+#: 拖长只会让「登录态」这个页面级卡片的整体探活变慢（多账号并行）。
+_WWW_DOMAIN_PROBE_TIMEOUT = 8.0
+
 
 def _probe_parallelism() -> int:
     """账号间探针并行度 —— **复用同步的那把尺子**（§18.18.3）。
@@ -249,6 +254,22 @@ def _probe_www(cookies: str, profile_adapter: Any) -> tuple[str, str]:
         ⇒ **`unknown`**。**这是本函数最容易写错的地方**：把它判成 `expired`
         就是又一次「用『没问到』冒充『不可用』」；
       - 拿到了 JSON ⇒ 平台**答复并拒绝**（真机口径：`msg = 登录已过期`）⇒ `expired`。
+
+    ⚠️ **2026-10-12 补第二跳：API 域通 ≠ 网页域通**（真机实测，`www` 通道）：
+
+    | 域 | 端点 | 结果 |
+    |---|---|---|
+    | `edith`（API） | `/v2/user/me` | ✅ `success=True`，`nickname` 正常 |
+    | `www`（网页） | `/explore/<id>?xsec_token=…` | ❌ 10 KB → `/website-login/captcha` |
+
+    同一个会话：**API 令牌有效，网页端已被要求验证码**。而**笔记详情走的是网页域**
+    （explore SSR）—— 只探 API 就报 `valid`，卡片全绿、用户点同步却报「正文取不到」，
+    绿标在这里**说了假话**（用户报障场景）。
+
+    所以 `valid` 的判据加一跳：API 通过后再确认**网页域**是否仍可用
+    （`www_domain_probe` 注入点，缺省用 `_probe_www_domain`）。两跳都过才是
+    「网页版可用」；网页域要验证码 ⇒ 判 **`expired`**（用户动作明确：重新登录），
+    并把它作为 reason 说出来 —— 这是**用户可自救**的状态，不是 `unknown`。
     """
     try:
         success, message, payload = profile_adapter.probe_self_profile(cookies)
@@ -259,12 +280,84 @@ def _probe_www(cookies: str, profile_adapter: Any) -> tuple[str, str]:
     if success:
         data = payload.get("data") if isinstance(payload, dict) else None
         nickname = str((data or {}).get("nickname") or "").strip() if isinstance(data, dict) else ""
-        if nickname:
-            return STATE_VALID, _REASONS[(CHANNEL_WWW, STATE_VALID)]
-        return STATE_GUEST, _REASONS[(CHANNEL_WWW, STATE_GUEST)]
+        if not nickname:
+            return STATE_GUEST, _REASONS[(CHANNEL_WWW, STATE_GUEST)]
+        #: 第二跳：API 有效还不够，网页域也要能读（详情走的正是它）。
+        www_state, www_reason = _probe_www_domain(cookies)
+        if www_state == STATE_EXPIRED:
+            return STATE_EXPIRED, www_reason
+        if www_state == STATE_UNKNOWN:
+            # 「没问到」不冒充「不可用」（本模块的方向性约定）：API 已确认有效，
+            # 网页域没探出结论 ⇒ 保守给 `valid`，但把未确认说进 reason。
+            return STATE_VALID, f"{_REASONS[(CHANNEL_WWW, STATE_VALID)]}；{www_reason}"
+        return STATE_VALID, _REASONS[(CHANNEL_WWW, STATE_VALID)]
     if payload is None:
         return STATE_UNKNOWN, f"检测网页版令牌未得到结论（请求未完成）：{message}"
     return STATE_EXPIRED, f"{_REASONS[(CHANNEL_WWW, STATE_EXPIRED)]}（平台原话：{message}）"
+
+
+#: 网页域探活的**探针端点**：`/explore` 频道页。
+#:
+#: ⚠️ 实测记录（2026-10-12）：
+#: * **首页 `/` 无区分度** —— 恒 200 且不被风控拦（连探 5 次全绿），拿它探活等于没探。
+#: * `/explore` 与详情同属**内容页**风控线，实测能区分（会话被要求验证码时它同样被拦）。
+#: * ⚠️ **但这条探针证不了「详情能读」**：真机实测同一会话下 `/explore` 恒 green，
+#:   而带**过期** `xsec_token` 的详情 URL 会回 `noteDetailMap={}` + `errorCode=-510000`。
+#:   那是**令牌级**授权问题，不是会话问题 ⇒ 探针只回答「网页域会话是否还有效」，
+#:   **不回答**「某条笔记的 token 是否还有效」。后者由取数本身如实报（见
+#:   `note_sync_service` 的 `DETAIL_EMPTY` / token 刷新链路）。
+_WWW_PROBE_URL = "https://www.xiaohongshu.com/explore"
+
+
+def _probe_www_domain(cookies: str) -> tuple[str, str]:
+    """L3 第二跳：**网页域内容页**（`www.xiaohongshu.com/explore`）还能不能作为登录用户访问。
+
+    为什么必须单列一跳：真机实测（2026-10-12）同一个 jar 在 API 域有效、网页域却被
+    踢进 `/website-login/captcha`。笔记详情取数（explore SSR）**只走网页域** ⇒ 只探 API
+    的绿标会说假话（用户报障：卡片全绿、同步报「正文取不到」）。
+
+    为什么探 `/explore` 而不是首页：首页**恒 200、恒不被拦**（实测连探 5 次全绿），
+    对「详情能不能读」零区分度；`/explore` 是同一条内容页风控线，才会跟着详情一起被拦。
+
+    判据刻意用**最终 URL**，不是响应体内容：
+
+    * 落在 `/website-login/` / `/login` ⇒ 平台要求登录 / 验证码 ⇒ `expired`；
+    * 其余（含 `/explore`、`/404?source=…`）⇒ 网页域**内容页可访问** ⇒ `valid`。
+      ⚠️ **`/404` 不算「不可用」**：实测那是平台对「该参数下无内容」的提示页，
+      页面里**照样带完整 `noteDetailMap`**（112 KB）—— 把它判成 expired 会让
+      用户在一切正常时被要求重登（DEF-057 同型：用「没内容」冒充「没登录」）。
+    * 请求本身失败（网络 / 超时）⇒ `unknown`（**不冒充** expired）。
+
+    零额外凭证：复用同一个 jar。请求头与 `note_detail_ssr` 同款（UA 必须带，
+    否则被踢到登录页 —— 那里已有实测记录）。
+    """
+    try:
+        import urllib.request
+
+        from backend.app.adapters.xhs.note_detail_ssr import _default_user_agent
+
+        req = urllib.request.Request(
+            _WWW_PROBE_URL,
+            headers={
+                "User-Agent": _default_user_agent(),
+                "Cookie": cookies,
+                "Referer": "https://www.xiaohongshu.com/",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "zh-CN,zh;q=0.9",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=_WWW_DOMAIN_PROBE_TIMEOUT) as resp:
+            final = str(getattr(resp, "url", "") or "")
+        if "/website-login/" in final or "/login" in final:
+            return (
+                STATE_EXPIRED,
+                "网页版登录态已被平台要求重新验证（内容页跳转到验证码/登录页），"
+                "请重新登录网页版后再同步",
+            )
+        return STATE_VALID, ""
+    except Exception as exc:  # noqa: BLE001 - 探活失败是业务结果，不是程序错误
+        logger.info("[login-state] www domain probe inconclusive: %s", exc)
+        return STATE_UNKNOWN, f"网页域探活未得到结论（{type(exc).__name__}），按 API 结果从宽判定"
 
 
 def _probe_creator(cookies: str, adapter_factory: Any) -> tuple[str, str]:

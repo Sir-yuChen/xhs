@@ -419,7 +419,9 @@ def backfill_note_detail_ref(db: Session, note: Any, fetch: Any) -> bool:
     return backfill_note_detail_refs(db, [note], fetch) > 0
 
 
-def backfill_note_detail_refs(db: Session, notes: list[Any], fetch: Any) -> int:
+def backfill_note_detail_refs(
+    db: Session, notes: list[Any], fetch: Any, *, force: bool = False
+) -> int:
     """**批量**补详情地址：一次 `note_ids` 精确查询补全整批（§25.4，2026-09-25 提速）。
 
     为什么需要批量版：批量同步 N 篇本地生成笔记时，旧实现每篇各回查一次千帆
@@ -431,11 +433,16 @@ def backfill_note_detail_refs(db: Session, notes: list[Any], fetch: Any) -> int:
     只补**缺地址**的行（已有 `note_url` 的不碰）；返回补齐篇数（调用方据此
     决定要不要 commit）。hex 判据是 `_note_detail_url` 拼 explore 的关切；
     这里只要求有平台 id（真实平台恒为 hex，替身 / 历史行不保证）。
+
+    ``force``（2026-10-12）：**连已有 `note_url` 的行也重取**。给「令牌过期刷新」
+    用 —— 那种行的地址**在、但令牌已失效**，按「缺地址」过滤会整批跳过
+    （`_refresh_note_detail_token` 的调用因此永远拿不到新令牌）。
+    缺省 `False` 保持既有调用方的「只补缺」语义不变。
     """
     pending = []
     for note in notes:
         raw = note.raw_json if isinstance(note.raw_json, dict) else {}
-        if str(raw.get("note_url") or "").strip():
+        if not force and str(raw.get("note_url") or "").strip():
             continue
         note_id = str(note.note_id or "").strip()
         if note_id:
@@ -474,17 +481,50 @@ def backfill_note_detail_refs(db: Session, notes: list[Any], fetch: Any) -> int:
     return filled
 
 
-def _backfill_detail_ref_for_account(db: Session, account: PlatformAccount, note: Any) -> bool:
+def _backfill_detail_ref_for_account(
+    db: Session, account: PlatformAccount, note: Any, *, force: bool = False
+) -> bool:
     """用**账号自己的 `ark` 令牌**回查商品笔记列表，补详情地址（§25.4 / §18.14）。
 
     千帆凭据只认本账号 `ark`（`qianfan_cookies_for_account`，无令牌返空串）——
     拿不到就静默跳过（调用方有 explore 兜底），**不借任何别的凭据**、不发探活。
+
+    ``force``（2026-10-12）：连已有地址的行也重取（令牌过期刷新用，见
+    ``_refresh_note_detail_token``）。
     """
-    return _backfill_detail_ref_for_accounts(db, account, [note]) > 0
+    return _backfill_detail_ref_for_accounts(db, account, [note], force=force) > 0
+
+
+def _refresh_note_detail_token(db: Session, account: PlatformAccount, note: Any) -> bool:
+    """把这条笔记的 `xsec_token` **强制换成平台最新的一枚**（2026-10-12）。
+
+    与 `_backfill_detail_ref_for_account` 是**同一件事**，差别只在**调用时机**：
+
+    * 那个只在「本地完全没有令牌」时被调（`if not _note_detail_url(note)`）；
+    * 本函数在「本地**有**令牌、但取数回 `DETAIL_EMPTY`」时被调 —— 那说明
+      令牌**过期了**（平台对过期令牌回 `200 + noteDetailMap={} + errorCode=-510000`，
+      不是 4xx，所以从响应本身分不出「没有正文」与「令牌失效」）。
+
+    ⚠️ **令牌有时效**是这轮真机定论：抓包当天同一枚 token 能读到完整
+    `noteDetailMap`，几小时后同一枚回空对象；而千帆列表**每次都发新鲜 token**。
+    旧实现「有令牌就永不刷新」正是用户反复点同步都拿不到正文的直接原因。
+
+    返回 True 表示 `raw_json` 被改写（**调用方负责提交**，本函数不 commit ——
+    与 `_backfill_detail_ref_*` 同一纪律）。
+    """
+    raw = note.raw_json if isinstance(note.raw_json, dict) else {}
+    before = str(raw.get("xsec_token") or "").strip()
+    changed = _backfill_detail_ref_for_account(db, account, note, force=True)
+    after_raw = note.raw_json if isinstance(note.raw_json, dict) else {}
+    after = str(after_raw.get("xsec_token") or "").strip()
+    if changed and after and after != before:
+        db.commit()
+        return True
+    return False
 
 
 def _backfill_detail_ref_for_accounts(
-    db: Session, account: PlatformAccount, notes: list[Any]
+    db: Session, account: PlatformAccount, notes: list[Any], *, force: bool = False
 ) -> int:
     """批量版：一次 `note_ids` 精确查询补全整批（DEF-069 提速，2026-09-25）。
 
@@ -514,7 +554,7 @@ def _backfill_detail_ref_for_accounts(
         # 与 `shop_goods_service.sync_note_ids` 同一组参数（note_ids 精确查询）。
         return goods_page(page_num=1, page_size=len(note_ids), note_ids=note_ids)
 
-    filled = backfill_note_detail_refs(db, notes, _fetch)
+    filled = backfill_note_detail_refs(db, notes, _fetch, force=force)
     if filled <= 0:
         return 0
     db.commit()
@@ -887,6 +927,21 @@ def sync_note_from_platform(
     outcome = hydrate_note_detail(
         db, account, note, refresh=True, adapter_factory=adapter_factory,
     )
+    # ⚠️ **`DETAIL_EMPTY` ⇒ 令牌过期，刷一次新令牌重试一次**（2026-10-12 真机定论）。
+    #
+    # 为什么必须重试：`xsec_token` **有时效**（抓包当天的 token 当天可用）。平台对
+    # **过期令牌**的答复不是 4xx，而是 **HTTP 200 + `noteDetailMap={}` +
+    # `errorCode=-510000`** —— 看起来像「这条笔记没有正文」，实际是「令牌失效」。
+    # 而千帆 `goods-note/list` **每次都返回新鲜 token** ⇒ 刷新就一条请求的事。
+    #
+    # 旧实现只在**完全没令牌**时回查（`if not _note_detail_url(note)`），
+    # **有旧令牌就永不刷新** ⇒ 拿着过期令牌反复失败，用户在内容库点多少次同步都拿不到
+    # 正文（本轮报障的直接来源）。判据从「有没有令牌」改成「令牌还能不能用」——
+    # 由取数结果回答，不是由 `raw_json` 里有没有那个字符串回答。
+    if outcome.get("code") == "DETAIL_EMPTY" and _refresh_note_detail_token(db, account, note):
+        outcome = hydrate_note_detail(
+            db, account, note, refresh=True, adapter_factory=adapter_factory,
+        )
     result.update(
         status=outcome["status"],
         content_updated=bool(outcome.get("content_updated")),
@@ -894,6 +949,10 @@ def sync_note_from_platform(
         images_added=int(outcome.get("images_added") or 0),
         video_added=bool(outcome.get("video_added")),
         reason=str(outcome.get("reason") or ""),
+        #: 机器码**必须带出来**（2026-10-12）：① 前端按 code 走安静降级；② 上面那步
+        #: 「令牌过期 ⇒ 刷新重试」也靠它判 —— 不带出来时 `outcome["code"]` 读不到，
+        #: 重试分支永不触发（本函数的返回值是调用方唯一的判据来源）。
+        code=str(outcome.get("code") or ""),
     )
     if outcome["status"] == "no_session":
         # 前端安静降级白名单里的既有 code（不新造）。
@@ -3259,9 +3318,6 @@ def _sync_with_task(
         warnings.append("本次为商品笔记同步：不做账号级正文补齐与对账（由「同步笔记」承担）")
     elif www_adapter is None:
         if stored:
-            # 2026-10-12：ark 条目自带令牌 ⇒ 详情补齐走它自己的凭证（见 `_sync_source`
-            # 的 `detail_with_own_token`）。所以这里只有在**这批笔记都没带令牌**时
-            # 才如实说一句 —— 不再按「账号有没有 www 会话」一刀切。
             warnings.append("该账号没有网页版（www）会话，本轮同步的笔记未补正文与图集")
     else:
         # ⚠️ **不再刷新详情令牌**（2026-09-28 用户口径：「移除兜底，不允许出现翻页
