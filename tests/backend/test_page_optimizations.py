@@ -2335,6 +2335,7 @@ def test_t9_panels_are_wired_into_workshop():
 # 2026-10-03 v2.16：「生成AI商品图」弹窗左右两栏布局
 # --------------------------------------------------------------------------- #
 SHOP_ITEMS_PAGE = ROOT / "frontend/src/pages/platforms/xhs/shop-items-page.tsx"
+MY_NOTES_PAGE = ROOT / "frontend/src/pages/platforms/xhs/my-notes-page.tsx"
 
 
 def test_detail_image_modal_uses_tabs_for_groups():
@@ -4630,6 +4631,40 @@ def test_no_markdown_bold_inside_user_facing_strings():
     #: 守卫自检：两种真形态都要认得出（属性式 + JSX 文本节点），否则是空转的
     assert renderable.search('const x = <Alert description="**立即关闭**" />;'), "属性式漏判"
     assert "**" in "<Text>商品的价格**不能改**</Text>", "JSX 文本节点式漏判"
+
+
+def test_sync_note_enqueues_goods_missing_local_info():
+    """点「同步笔记」时，本地查不到信息的挂载商品**必须入商品同步队列**（2026-10-12 用户口径）。
+
+    用户原话：「点击同步笔记按钮是如果商品id本地查询不到商品信息应将商品ID放入队列中触发同步商品信息」。
+
+    判据（全部落在 `my-notes-page.tsx` 的**代码**上，剥注释后判）：
+    ① `handleSyncNoteData` 里调了 `enqueueGoodsMissingInfo(category)`（挂在同步提交之后）；
+    ② `enqueueGoodsMissingInfo` 存在，且**只对 goods 分类**生效；
+    ③ 判据与详情弹窗同源 —— 「有 goodsId、但 title 与 price 都空」
+       （后端 `_goods_entry` 缺值口径：关系行在、`shop_products` 无行）；
+    ④ 入队走既有 `syncSpecifiedShopItems`（**不另造同步路径**，DEF-044）；
+    ⑤ 卡片如实说明「本地查询不到该商品信息」+ 指引「点同步笔记会自动加入队列」。
+    """
+    page = _code_only(_read(MY_NOTES_PAGE))
+    # ① 挂在同步笔记流程里
+    sync_fn = _slice_between(page, "async function handleSyncNoteData(", "async function ")
+    assert "enqueueGoodsMissingInfo(category)" in sync_fn, (
+        "「同步笔记」提交后必须调 `enqueueGoodsMissingInfo(category)` —— 否则商品 ID 不入队"
+    )
+    # ② 函数在，且只对 goods 生效
+    assert "function enqueueGoodsMissingInfo(" in page, "补商品的函数不见了"
+    helper = _slice_between(page, "function enqueueGoodsMissingInfo(", "async function handleSyncNoteData(")
+    assert 'category !== "goods"' in helper, "只应对商业笔记（goods）生效 —— 普通笔记不挂商品"
+    # ③ 判据 = 有 ID 无标题无价
+    assert "g.goodsId && !g.title && !g.price" in helper, (
+        "判据必须是「有 goodsId、但标题与价格都空」（与后端缺值口径同源）"
+    )
+    # ④ 复用既有同步路径，不另造
+    assert "syncSpecifiedShopItems(" in helper, "必须走既有 `/items/sync`（不另造同步路径）"
+    # ⑤ 卡片如实说明（不干放「价格待同步」）
+    assert "本地查询不到该商品信息" in page, "卡片应如实说明本地查不到该商品信息"
+    assert "点「同步笔记」会自动加入商品信息同步队列" in page, "应指引用户「同步笔记」会自动入队"
 
 
 def test_shop_items_page_has_no_top_qianfan_card_and_no_refresh_icon():

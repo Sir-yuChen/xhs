@@ -216,6 +216,10 @@ export type XhsNoteShopDetail = XhsNoteShopMetrics & {
 
 export type XhsSearchNote = {
   note_id: string;
+  /** 本地主键（离线笔记详情用；在线搜索列表可不带）。 */
+  id?: number;
+  /** 来源账号（详情弹窗按它触发「同步商品信息」；离线笔记行携带）。 */
+  platform_account_id?: number;
   /** 千帆（店铺侧）数据；列表页只有指标，详情弹窗里还带商品数组（v1.18）。 */
   shop?: XhsNoteShopDetail | null;
   note_url?: string;
