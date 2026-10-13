@@ -170,6 +170,34 @@ def test_initial_data_fields_are_within_whitelists():
             assert row["cron_expression"], f"{key} 是 cron 档却没有表达式"
 
 
+def test_initial_data_names_match_registry_spec_names():
+    """种子里的**中文名**必须 == 注册表 `JobSpec.name`。
+
+    ⚠️ 为什么单独立一条（2026-10-13 实测漏网）：已有的两条守卫只钉
+    ①「条数 == 注册表 builtin 全集」②「`job_key` 集合 == 注册表 builtin 全集」——
+    都**不看 `name`**。而 `ensure_builtin_jobs` 写新行时用的是 `row["name"]`
+    （种子优先、`JobSpec.name` 只在种子缺行时兜底）⇒ **改名只改代码不改种子**时，
+    已有用户的旧行被迁移 UPDATE 成新名、而**新装用户的种子行仍是旧名**：
+    两种安装形态显示不同名字，且所有测试照绿（本轮实际发生：`system.note_data_sync`
+    的 JobSpec 改了名、种子文件漏改，靠人工比对才发现）。
+
+    ⚠️ 变异守护：只改 `JobSpec.name` 不改种子（或反之）⇒ 本用例必红。
+    """
+    from backend.app.services.job_registry import job_registry
+
+    registry = job_registry()
+    for row in initial_data.load_initial_scheduled_jobs():
+        key = row["job_key"]
+        spec = registry.get(key)
+        if spec is None:  # 键集合由上面那条守卫负责，这里只比名字
+            continue
+        assert row["name"] == spec.name, (
+            f"{key} 的中文名两处不一致：种子={row['name']!r} / 注册表={spec.name!r}"
+            f"（改名必须两处同改 —— 种子是写入真相源，注册表是文档/兜底真相源）"
+        )
+
+
+
 # --------------------------------------------------------------------------- #
 # 1b. 数据文件本身：运行时配置（设计 10 §7.3，2026-09-27 起随包）
 # --------------------------------------------------------------------------- #

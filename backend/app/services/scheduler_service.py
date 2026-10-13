@@ -738,6 +738,8 @@ def _builtin_seed_defaults() -> dict[str, dict[str, Any]]:
         # ⚠️ 2026-10-13 用户口径由「离线笔记数据同步」**改名**（落 `note_datacenter_stats`，
         # 供数据中心页展示 + 无流量清理判定）。同轮**移除**指标快照采集两任务
         # （`system.note_metrics_collect` / `system.shop_metrics_collect`）。
+        # ⚠️ 兜底键**只有 cron/status**（名称走 `JobSpec.name`）—— 种子文件
+        # `config/initial_data/scheduled_jobs.json` 才是显示名的真相源，改名时两处都要动。
         "system.note_data_sync": {"cron": "0 0 */6 * * *", "status": "active"},
         # 2026-10-07 用户需求「每日发布商业笔记」（设计 15 §19）：每天 9:00 跑一轮。
         # ⚠️ 默认 active —— 与两个同步任务不同（它们默认关，因为会大量打平台只读

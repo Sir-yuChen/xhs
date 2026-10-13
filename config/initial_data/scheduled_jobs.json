@@ -113,7 +113,7 @@
     },
     {
       "job_key": "system.note_data_sync",
-      "name": "离线笔记数据同步",
+      "name": "数据中心笔记指标同步",
       "trigger_type": "cron",
       "cron_expression": "0 0 */6 * * *",
       "misfire_policy": "once",
