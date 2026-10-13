@@ -810,6 +810,90 @@ def run_alembic(db_path: Path, *args: str) -> None:
 # --------------------------------------------------------------------------- #
 # 千帆源码读取（2026-10-11 拆包后）
 # --------------------------------------------------------------------------- #
+def upsert_business_mapping(
+    db: Any,
+    *,
+    user_id: int,
+    business_key: str,
+    provider_key: str,
+    model_name: str,
+    platform: str = "xhs",
+    enabled: bool = True,
+) -> None:
+    """把「用户 × 平台 × 业务点」的映射**配成**给定服务商（幂等 upsert）。
+
+    ⚠️ **为什么必须有它**（2026-10-13）：R4 服务商种子（设计 37）在**注册时**就为新用户
+    播种了默认业务点映射（`seed_default_business_map_for_user`）⇒ `llm_business_providers`
+    上 `(user_id, platform, business_key)` 的唯一约束让**盲 `db.add` 必撞**
+    `UNIQUE constraint failed`。用例里「把某业务点指到某服务商」的意图都该走本函数：
+    已有行**改指**，没有才新增。各文件别再各写一份（DEF-044）。
+    """
+    from backend.app.models import LlmBusinessProvider
+    from sqlalchemy import select as _select
+
+    row = db.scalar(
+        _select(LlmBusinessProvider).where(
+            LlmBusinessProvider.user_id == user_id,
+            LlmBusinessProvider.platform == platform,
+            LlmBusinessProvider.business_key == business_key,
+        )
+    )
+    if row is None:
+        db.add(
+            LlmBusinessProvider(
+                user_id=user_id,
+                platform=platform,
+                business_key=business_key,
+                provider_key=provider_key,
+                model_name=model_name,
+                enabled=enabled,
+            )
+        )
+    else:
+        row.provider_key = provider_key
+        row.model_name = model_name
+        row.enabled = enabled
+
+
+def clear_business_mapping(db: Any, *, user_id: int, business_key: str, platform: str = "xhs") -> None:
+    """删掉「用户 × 平台 × 业务点」的映射行（幂等）。
+
+    ⚠️ **为什么需要它**（2026-10-13）：R4 服务商种子（设计 37）在**注册时**就为新用户
+    播种了默认业务点映射 ⇒ 「这个新用户没有映射」这个前提**不再天然成立**。
+    凡是要测「未配映射」分支的用例，必须先 `clear_business_mapping(...)` 把种子行删掉，
+    否则测到的是种子服务商的另一条分支（如 `LLM_PROVIDER_KEY_MISSING`）。
+    """
+    from backend.app.models import LlmBusinessProvider
+    from sqlalchemy import delete as _delete
+
+    db.execute(
+        _delete(LlmBusinessProvider).where(
+            LlmBusinessProvider.user_id == user_id,
+            LlmBusinessProvider.platform == platform,
+            LlmBusinessProvider.business_key == business_key,
+        )
+    )
+    db.commit()
+
+
+def clear_all_business_mappings(db: Any, *, user_id: int, platform: str = "xhs") -> None:
+    """删掉该用户在某平台上的**全部**业务点映射（幂等）。
+
+    ⚠️ 同 `clear_business_mapping` 的由来（2026-10-13 R4 种子）：测「什么都没配」
+    或「全部未配置」的用例需要先回到空态。
+    """
+    from backend.app.models import LlmBusinessProvider
+    from sqlalchemy import delete as _delete
+
+    db.execute(
+        _delete(LlmBusinessProvider).where(
+            LlmBusinessProvider.user_id == user_id,
+            LlmBusinessProvider.platform == platform,
+        )
+    )
+    db.commit()
+
+
 def read_qianfan_source(root: Path | None = None) -> str:
     """**整包**千帆后端源码拼接（`qianfan/` 包下全部 `.py`）。
 

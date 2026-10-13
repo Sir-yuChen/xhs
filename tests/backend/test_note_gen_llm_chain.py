@@ -72,6 +72,7 @@ from backend.app.models.note import NoteTopic
 from backend.app.services import note_gen_llm_worker as gw
 from backend.app.services import note_queue_service as nqs
 from backend.app.services.business_provider_keys import BUSINESS_KEY_GENERATE_NOTE
+from tests.backend.conftest import upsert_business_mapping
 
 BATCH = "/api/xhs/product-notes/batch-generate-llm"
 SINGLE = "/api/xhs/product-notes/generate-llm"
@@ -250,15 +251,12 @@ def _seed_gateway(db, user: User, account: PlatformAccount) -> LlmGatewayConfig:
             enabled=True,
         )
     )
-    db.add(
-        LlmBusinessProvider(
-            user_id=user.id,
-            platform="xhs",
-            business_key=BUSINESS_KEY_GENERATE_NOTE.key,
-            provider_key=PROVIDER_KEY,
-            model_name=MODEL_NAME,
-            enabled=True,
-        )
+    upsert_business_mapping(
+        db,
+        user_id=user.id,
+        business_key=BUSINESS_KEY_GENERATE_NOTE.key,
+        provider_key=PROVIDER_KEY,
+        model_name=MODEL_NAME,
     )
     db.flush()
     return config

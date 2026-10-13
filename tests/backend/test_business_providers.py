@@ -20,6 +20,12 @@ import pytest
 from sqlalchemy import inspect, select
 
 from backend.app.models import LlmBusinessProvider, LlmGatewayConfig, User
+from backend.app.main import app
+from tests.backend.conftest import (
+    clear_all_business_mappings,
+    clear_business_mapping,
+    upsert_business_mapping,
+)
 from backend.app.api.llm_gateway import (
     _dump_platforms,
     _parse_platforms,
@@ -106,6 +112,34 @@ def _user_by_name(api_client, db_factory, username: str) -> User:
         return db.scalar(select(User).where(User.username == username))
 
 
+def _clear_all_mappings_for(username: str) -> None:
+    """清掉 `username` 的**全部** xhs 业务点映射（回到「什么都没配」）。
+
+    ⚠️ 2026-10-13（R4 服务商种子落地）：注册即播种默认映射，故「新用户没有映射」
+    不再天然成立。测「无映射 / 全部未配置」的用例先调它。
+    """
+    from backend.app.core.database import get_db
+
+    db = next(app.dependency_overrides[get_db]())
+    try:
+        user = db.scalar(select(User).where(User.username == username))
+        clear_all_business_mappings(db, user_id=user.id)
+    finally:
+        db.close()
+
+
+def _clear_mapping_for(username: str, business_key: str) -> None:
+    """清掉 `username` 在 `business_key` 上的映射（其余不动）。"""
+    from backend.app.core.database import get_db
+
+    db = next(app.dependency_overrides[get_db]())
+    try:
+        user = db.scalar(select(User).where(User.username == username))
+        clear_business_mapping(db, user_id=user.id, business_key=business_key)
+    finally:
+        db.close()
+
+
 def _upsert(
     api_client,
     headers,
@@ -173,6 +207,8 @@ def test_resolve_missing_mapping_raises_and_never_falls_back(api_client, db_fact
     _create_provider(api_client, headers, "a-provider", MODEL_TYPE_TEXT)
     _create_provider(api_client, headers, "b-provider", MODEL_TYPE_TEXT)
     # 刻意不建任何映射
+    # ⚠️ 2026-10-13（R4 种子）：注册已播种映射 ⇒ 清掉才是真正的「无映射」。
+    _clear_all_mappings_for("bp_miss")
 
     user = _user_by_name(api_client, db_factory, "bp_miss")
     with db_factory() as db:
@@ -196,14 +232,12 @@ def test_resolve_type_mismatch_raises(api_client, db_factory):
     # 端点层会先拦（§13.2.6 类型校验）⇒ 直接用 ORM 造一条脏映射验证解析层也拦
     user = _user_by_name(api_client, db_factory, "bp_type")
     with db_factory() as db:
-        db.add(
-            LlmBusinessProvider(
-                user_id=user.id,
-                platform="xhs",
-                business_key=BUSINESS_KEY_GENERATE_NOTE.key,
-                provider_key=image_provider["provider_key"],
-                model_name="some-image-model",
-            )
+        upsert_business_mapping(
+            db,
+            user_id=user.id,
+            business_key=BUSINESS_KEY_GENERATE_NOTE.key,
+            provider_key=image_provider["provider_key"],
+            model_name="some-image-model",
         )
         db.commit()
         with pytest.raises(BusinessProviderTypeMismatchError):
@@ -233,14 +267,12 @@ def test_resolve_provider_not_found_raises(api_client, db_factory):
     headers = _register(api_client, "bp_notfound")
     user = _user_by_name(api_client, db_factory, "bp_notfound")
     with db_factory() as db:
-        db.add(
-            LlmBusinessProvider(
-                user_id=user.id,
-                platform="xhs",
-                business_key=BUSINESS_KEY_GENERATE_NOTE.key,
-                provider_key="NOPE-0000",
-                model_name="whatever-model",
-            )
+        upsert_business_mapping(
+            db,
+            user_id=user.id,
+            business_key=BUSINESS_KEY_GENERATE_NOTE.key,
+            provider_key="NOPE-0000",
+            model_name="whatever-model",
         )
         db.commit()
         with pytest.raises(ProviderNotFoundError):
@@ -255,6 +287,8 @@ def test_mapping_is_isolated_across_users(api_client, db_factory):
     """A 配了映射，B 同 key 同平台仍然「未配置」（DEF-066）。"""
     head_a = _register(api_client, "bp_user_a")
     head_b = _register(api_client, "bp_user_b")
+    # ⚠️ 2026-10-13（R4 种子）：B 也有默认映射 ⇒ 先清掉才验「B 未配不受 A 影响」。
+    _clear_all_mappings_for("bp_user_b")
 
     prov_a = _create_provider(api_client, head_a, "provider-a", MODEL_TYPE_TEXT)
     assert _upsert(api_client, head_a, BUSINESS_KEY_GENERATE_NOTE.key, prov_a["provider_key"]).status_code == 200
@@ -419,6 +453,8 @@ def test_clear_mapping_returns_to_unconfigured(api_client, db_factory):
 def test_list_includes_unconfigured_rows(api_client):
     """列表**含未配置业务点**（否则用户无从发现哪些还没配）。"""
     headers = _register(api_client, "bp_list")
+    # ⚠️ 2026-10-13（R4 种子）：注册即播种映射 ⇒ 先清空才回到「全部未配置」。
+    _clear_all_mappings_for("bp_list")
     resp = api_client.get("/api/llm/business-providers?platform=xhs", headers=headers)
     assert resp.status_code == 200
     items = resp.json()["items"]
@@ -588,6 +624,10 @@ def test_list_exposes_model_name_and_provider_models(api_client):
     assert row["configured"] is True
 
     # 未配置的行：模型为空、目录为空、configured=False
+    # ⚠️ 2026-10-13（R4 种子）：`generate_cover` 属图片类，种子也给它播种 ⇒ 先清掉。
+    _clear_mapping_for("bp_listmodel", BUSINESS_KEY_GENERATE_COVER.key)
+    resp2 = api_client.get("/api/llm/business-providers?platform=xhs", headers=headers)
+    rows = {r["business_key"]: r for r in resp2.json()["items"]}
     other = rows[BUSINESS_KEY_GENERATE_COVER.key]
     assert other["model_name"] == ""
     assert other["provider_models"] == []

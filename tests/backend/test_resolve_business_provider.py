@@ -26,7 +26,8 @@ import pytest
 from sqlalchemy.orm import Session
 
 from backend.app.core.security import encrypt_text
-from backend.app.models import LlmBusinessProvider, LlmGatewayConfig, User
+from backend.app.models import LlmGatewayConfig, User
+from tests.backend.conftest import upsert_business_mapping
 from backend.app.models.llm_gateway import LlmGatewayModel
 from backend.app.services import llm_gateway_client
 from backend.app.services.business_provider_keys import (
@@ -110,15 +111,12 @@ def _seed_mapping(
     否则 `resolve_business_provider` 会抛 `LLM_BUSINESS_MODEL_REQUIRED` —— 默认给一个
     合法值，让「四态」用例聚焦各自想测的失败分支（要测缺模型请显式传 `model_name=""`）。
     """
-    db.add(
-        LlmBusinessProvider(
-            user_id=user.id,
-            platform="xhs",
-            business_key=business_key,
-            provider_key=provider_key,
-            model_name=model_name,
-            enabled=True,
-        )
+    upsert_business_mapping(
+        db,
+        user_id=user.id,
+        business_key=business_key,
+        provider_key=provider_key,
+        model_name=model_name,
     )
     db.commit()
 

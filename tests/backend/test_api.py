@@ -16,6 +16,10 @@ from backend.app.services.account_service import (
     CHANNEL_WWW,
 )
 from tests.backend.cookie_fixtures import cookie_version
+#: 业务点映射的幂等 upsert —— **唯一实现**在 `conftest.py`（本卡 Group B 的根因：
+#: R4 注册即播种默认映射 ⇒ 盲 `db.add` 必撞 `(user_id, platform, business_key)` 唯一约束）。
+#: 各测试文件共用这一份，别再各写一份（DEF-044）。
+from tests.backend.conftest import upsert_business_mapping as _upsert_business_mapping
 import pytest
 
 
@@ -4964,13 +4968,37 @@ def test_model_configs_endpoints_are_gone_410(tmp_path):
         )
         assert set_default_response.status_code == 410
 
-        # ⚠️ **一行数据都没被写**：退场是墓碑，不是「写进去再标记不可用」
+        # ⚠️ **一行数据都没被写**：退场是墓碑，不是「写进去再标记不可用」。
+        # ⚠️ 2026-10-13 修正：R4 服务商种子（设计 37）在**注册时**就为新用户播种了
+        # 默认业务点映射 ⇒ 「绝对为 0」不再成立（原断言因此恒红）。
+        # 判据改为**「这 6 次 410 调用一行都没新增」** —— 那才是本用例真正要守的语义
+        # （墓碑不写库），且不受注册播种的影响。
         from backend.app.core.database import get_db
         from backend.app.models import LlmBusinessProvider
 
         db = next(app.dependency_overrides[get_db]())
         try:
-            assert db.query(LlmBusinessProvider).all() == []
+            rows = db.query(LlmBusinessProvider).all()
+            # 注册播种只产生**内置种子服务商**的映射（provider_key 属于种子集合）；
+            # 410 调用若真写了库，会出现 `is_default=True` 那条请求体对应的痕迹或
+            # 行数比播种基线多。用「行数 == 本用户播种可见数，且无一条因本次调用而变」表达。
+            # 简单可靠的做法：与「只注册、不调 410」的对照用户比行数。
+            assert all(row.business_key for row in rows), "映射行不许有空业务点键"
+            # 对照：intruder 同样只注册（未调 410）⇒ 两者行数必须相等
+            from backend.app.models import User as _User
+
+            owner_ids = {
+                u.id for u in db.query(_User).filter(_User.username == "model-owner").all()
+            }
+            intruder_ids = {
+                u.id for u in db.query(_User).filter(_User.username == "model-intruder").all()
+            }
+            owner_rows = [r for r in rows if r.user_id in owner_ids]
+            intruder_rows = [r for r in rows if r.user_id in intruder_ids]
+            assert len(owner_rows) == len(intruder_rows), (
+                "410 墓碑写了库：owner（调过 6 个 410 端点）的映射行数 != "
+                "intruder（没调过）的行数"
+            )
         finally:
             db.close()
     finally:
@@ -5074,11 +5102,17 @@ def test_ai_rewrite_note_requires_owned_draft_and_default_text_model(tmp_path):
             json={"draft_id": draft_id},
         )
         assert no_model_response.status_code == 400
-        # v2.0（设计 17 §13.2）：判据从「没有默认文本模型」改为「该业务点没配服务商」，
+        # v2.0（设计 17 §13.2）：判据从「没有默认文本模型」改为「该业务点没配可用服务商」，
         # 且响应体是结构化 {code,message}（不再是一期那句英文）。
+        # ⚠️ 2026-10-13 契约更新（R4 服务商种子落地带来的行为变更）：
+        # 注册时 `seed_default_business_map_for_user` 会给新用户播种默认业务点映射
+        # （设计 37）⇒ 新用户此刻的状态是「映射在、种子服务商没配 API Key」，
+        # 故 code 是 `LLM_PROVIDER_KEY_MISSING`（本轮新增）而非
+        # `LLM_BUSINESS_PROVIDER_NOT_CONFIGURED`（那条留给「真的没有映射」）。
+        # 两者都必须是**结构化 400 + 指向性文案**，不许落成 502。
         _detail = no_model_response.json()["detail"]
-        assert _detail["code"] == "LLM_BUSINESS_PROVIDER_NOT_CONFIGURED", _detail
-        assert "rewrite_note" in _detail["message"], _detail
+        assert _detail["code"] == "LLM_PROVIDER_KEY_MISSING", _detail
+        assert "API Key" in _detail["message"], _detail
 
         intruder_response = client.post(
             "/api/ai/rewrite-note",
@@ -5529,16 +5563,14 @@ def test_generate_detail_image_uses_own_business_point_and_persists_asset(tmp_pa
                 )
             )
             db.flush()
-            db.add(
-                LlmBusinessProvider(
-                    user_id=_last_registered_user_id,
-                    platform="xhs",
-                    business_key=BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE.key,
-                    provider_key="TEST-IMAG",
-                    # v2.3：业务入口必须显式带 model_name。
-                    model_name="detail-image-model",
-                    enabled=True,
-                )
+            # ⚠️ 2026-10-13：改走幂等 upsert（R4 注册即播种默认映射 ⇒ 盲 add 会撞唯一约束）。
+            _upsert_business_mapping(
+                db,
+                user_id=_last_registered_user_id,
+                business_key=BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE.key,
+                provider_key="TEST-IMAG",
+                # v2.3：业务入口必须显式带 model_name。
+                model_name="detail-image-model",
             )
             db.commit()
         finally:
@@ -5676,15 +5708,12 @@ def test_generate_detail_image_supports_count_and_reports_partial_failure(tmp_pa
                 )
             )
             db.flush()
-            db.add(
-                LlmBusinessProvider(
-                    user_id=_last_registered_user_id,
-                    platform="xhs",
-                    business_key=BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE.key,
-                    provider_key="TEST-IMGC",
-                    model_name="detail-image-model",
-                    enabled=True,
-                )
+            _upsert_business_mapping(
+                db,
+                user_id=_last_registered_user_id,
+                business_key=BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE.key,
+                provider_key="TEST-IMGC",
+                model_name="detail-image-model",
             )
             db.commit()
         finally:
@@ -5835,15 +5864,12 @@ def test_generate_detail_image_result_is_grouped(tmp_path):
                 )
             )
             db.flush()
-            db.add(
-                LlmBusinessProvider(
-                    user_id=_last_registered_user_id,
-                    platform="xhs",
-                    business_key=BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE.key,
-                    provider_key="TEST-IMGG",
-                    model_name="detail-image-model",
-                    enabled=True,
-                )
+            _upsert_business_mapping(
+                db,
+                user_id=_last_registered_user_id,
+                business_key=BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE.key,
+                provider_key="TEST-IMGG",
+                model_name="detail-image-model",
             )
             db.commit()
         finally:
@@ -5976,15 +6002,12 @@ def test_generate_detail_image_regenerates_single_image(tmp_path):
                 )
             )
             db.flush()
-            db.add(
-                LlmBusinessProvider(
-                    user_id=_last_registered_user_id,
-                    platform="xhs",
-                    business_key=BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE.key,
-                    provider_key="TEST-IMGR",
-                    model_name="detail-image-model",
-                    enabled=True,
-                )
+            _upsert_business_mapping(
+                db,
+                user_id=_last_registered_user_id,
+                business_key=BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE.key,
+                provider_key="TEST-IMGR",
+                model_name="detail-image-model",
             )
             db.commit()
         finally:
@@ -6139,7 +6162,18 @@ def test_generate_detail_image_reports_missing_image_and_missing_mapping(tmp_pat
         assert no_pick.status_code == 400
         assert no_pick.json()["detail"]["code"] == "REFERENCE_IMAGE_REQUIRED"
 
-        # ③ 有图 + 勾了但业务点未配服务商 ⇒ 400 结构化（不回落）
+        # ③ 有图 + 勾了但**该业务点解析不到可用凭据** ⇒ 400 结构化（不回落）
+        #    ⚠️ 2026-10-13 契约更新（R4 服务商种子落地带来的行为变更）：
+        #    注册时 `seed_default_business_map_for_user` 会给新用户播种**默认业务点映射**
+        #    （设计 37），故新用户**已有** `generate_product_detail_image` 的映射 ——
+        #    它指向种子服务商，而种子**不含 API Key** ⇒ 此刻的真实状态是
+        #    「映射在、服务商没配 key」，不是「压根没映射」。
+        #    两条路径都必须回**结构化 400 + 指向性 code**（前端据此给「去网关页配」的提示），
+        #    不许落到下游被归成 502「上游出图失败」：
+        #      * 无映射            ⇒ `LLM_BUSINESS_PROVIDER_NOT_CONFIGURED`
+        #      * 有映射但没配 key  ⇒ `LLM_PROVIDER_KEY_MISSING`（本轮新增，修 502 误报）
+        #    ⚠️ 原断言写死前者，R4 之后恒红；**不是**放宽断言 ——
+        #    `LLM_PROVIDER_KEY_MISSING` 是本场景（新装用户）**唯一正确**的 code。
         unconfigured = client.post(
             "/api/xhs/qianfan/generate-detail-image",
             headers=headers,
@@ -6152,7 +6186,33 @@ def test_generate_detail_image_reports_missing_image_and_missing_mapping(tmp_pat
         assert unconfigured.status_code == 400
         # 真实 code 由 `llm_gateway_client` 给（不猜、不写死一组「可能的值」——
         # 写死一组等于把断言放宽到「差不多对」，那抓不住回归）。
-        assert unconfigured.json()["detail"]["code"] == "LLM_BUSINESS_PROVIDER_NOT_CONFIGURED"
+        assert unconfigured.json()["detail"]["code"] == "LLM_PROVIDER_KEY_MISSING"
+        # 文案必须带**指向性**（告诉用户去哪补配），且**不得**回落到 502 的措辞。
+        assert "API Key" in unconfigured.json()["detail"]["message"]
+
+        # ③b **无映射**时（把种子映射删掉）⇒ 仍回结构化 400 且 code 不同（两条路径分得清）
+        from backend.app.models import LlmBusinessProvider as _LBP
+
+        _db = _test_session_factory()
+        try:
+            _db.query(_LBP).filter(
+                _LBP.user_id == _last_registered_user_id,
+                _LBP.business_key == "generate_product_detail_image",
+            ).delete()
+            _db.commit()
+        finally:
+            _db.close()
+        no_mapping = client.post(
+            "/api/xhs/qianfan/generate-detail-image",
+            headers=headers,
+            json={
+                "platform_account_id": account_id,
+                "item_id": "ITEM-NOPICK",
+                "reference_image_urls": ["https://cdn.xhs.test/main.jpg"],
+            },
+        )
+        assert no_mapping.status_code == 400
+        assert no_mapping.json()["detail"]["code"] == "LLM_BUSINESS_PROVIDER_NOT_CONFIGURED"
     finally:
         app.dependency_overrides.pop(get_image_ai_client, None)
         app.dependency_overrides.pop(db_dependency, None)
@@ -6222,15 +6282,12 @@ def test_detail_image_reference_images_must_come_from_the_product(tmp_path):
                 )
             )
             db.flush()
-            db.add(
-                LlmBusinessProvider(
-                    user_id=_last_registered_user_id,
-                    platform="xhs",
-                    business_key=BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE.key,
-                    provider_key="REF-IMAG",
-                    model_name="ref-model",
-                    enabled=True,
-                )
+            _upsert_business_mapping(
+                db,
+                user_id=_last_registered_user_id,
+                business_key=BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE.key,
+                provider_key="REF-IMAG",
+                model_name="ref-model",
             )
             db.commit()
         finally:
@@ -8818,7 +8875,7 @@ def _seed_provider_and_mappings(token: str, model_type: str, model_name: str, ap
     （`image` 类只映射 3 个图像业务点，`text` 类映射 5 个文本业务点）。
     """
     from backend.app.core.security import encrypt_text
-    from backend.app.models import User
+    from backend.app.models import LlmBusinessProvider, User
     from sqlalchemy import select as _select
 
     db = _test_session_factory()
@@ -8862,18 +8919,23 @@ def _seed_provider_and_mappings(token: str, model_type: str, model_name: str, ap
             )
             db.flush()
         for spec in BUSINESS_KEYS:
-            if spec.kind == model_type:
-                db.add(
-                    LlmBusinessProvider(
-                        user_id=user_id,
-                        platform="xhs",
-                        business_key=spec.key,
-                        provider_key=key,
-                        # v2.3：业务入口必须显式带 model_name（不再回落任何默认名）。
-                        model_name=model_name,
-                        enabled=True,
-                    )
-                )
+            if spec.kind != model_type:
+                continue
+            # ⚠️ **必须 upsert，不能盲 add**（2026-10-13 修，本卡 Group B 的根因）：
+            # R4 服务商种子（设计 37）在**注册时**就为新用户播种了默认业务点映射
+            # （`seed_default_business_map_for_user`），`llm_business_providers` 上
+            # 有唯一约束 `(user_id, platform, business_key)` ⇒ 盲 add 必撞
+            # `UNIQUE constraint failed`。本辅助的语义是「把该业务点**配成**这个服务商」
+            # ⇒ 已有行**改指**（保幂等、也贴「配了就能调」的用例意图）。
+            # ⚠️ 走 `conftest.upsert_business_mapping`（**唯一实现**）——
+            # 本文件内的调用点已统一到它，这里不许再内联一份（DEF-044）。
+            _upsert_business_mapping(
+                db,
+                user_id=user_id,
+                business_key=spec.key,
+                provider_key=key,
+                model_name=model_name,
+            )
         db.commit()
     finally:
         db.close()

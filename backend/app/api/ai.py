@@ -125,11 +125,41 @@ def _business_model_context(
             db, current_user, business_key, platform
         )
     except LLMGatewayError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"code": exc.code, "message": exc.message},
-        ) from exc
+        raise _business_model_error(exc) from exc
     return ctx, ctx.api_key
+
+
+#: 「业务点未配服务商」的结构化 400 错误码（`llm_gateway_client` 给的值）。
+#: ⚠️ 独立常量而不是散写字面量：`_business_model_error()` 与 `goods.py` 的
+#: 「本次**不生成**该组」判据都按它分支，两处必须同源（DEF-044）。
+BUSINESS_KEY_NOT_CONFIGURED_CODE = "LLM_BUSINESS_PROVIDER_NOT_CONFIGURED"
+
+
+def _business_model_error(exc: "LLMGatewayError") -> HTTPException:
+    """业务点解析失败 ⇒ **结构化 400**（`_business_model_context` 的唯一映射实现）。
+
+    ⚠️ **`resolve_business_provider` 可能在两个时机抛**，`_business_model_context`
+    只兜住了**第一个**：
+    ① 调用点**立即**执行（`rewrite-note` 的 246 行等）⇒ 被上面的 `try` 接住；
+    ② 被 `lambda` **延迟**到 `_recorded_image_task` 的 `action()` 里执行
+       （`image_ai_client.generate_images(...)` 的实参里读 `model_config.model_name`
+       ⇒ 属性访问时**重新求值**）⇒ 此时已在 `except Exception` 的地界上。
+
+    ② 的后果不是「报错」，是**报错报成 502**：真正的原因是「未配服务商」（400 +
+    `LLM_BUSINESS_PROVIDER_NOT_CONFIGURED`，前端据此给「去模型配置页」的指向性提示），
+    却按「上游出图失败」出队 —— 用户看到 502 只会去查服务商额度，
+    **真实原因被归错类**（同 `detailMessage` 注释里那段「真实原因被丢掉、用户无从自救」）。
+    `qianfan/goods.py::generate_detail_image` 是**已知会走 ②** 的那条链路
+    （它的 `generate_images(...)` 实参里同时读了 `model_config` 与 `api_key`）。
+
+    故本函数是 **唯一** 的「业务异常 → 400」映射点，`_business_model_context` 与
+    `_recorded_text_task` / `_recorded_image_task` 的异常分支都调它 ——
+    三种字段组合（缺模型 / 服务商停用 / 未配映射）在两处得到**逐字相同**的状态码与响应体。
+    """
+    return HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail={"code": exc.code, "message": exc.message},
+    )
 
 
 def _serialize_generated_asset(asset: AiGeneratedAsset) -> dict[str, Any]:
@@ -173,6 +203,16 @@ def _recorded_text_task(
     db.commit()
     try:
         result = action()
+    except LLMGatewayError as exc:
+        # ⚠️ **先于 `except ValueError` / `except Exception`**：`LLMGatewayError`
+        # 继承 `RuntimeError`，两条都不接它，故顺序不影响匹配 —— 但必须**显式**接住，
+        # 否则业务点解析失败会被下面那条 `except Exception` 归成 502（真实原因被归错类，
+        # 见 `_business_model_error` 的注释）。
+        task.status = "failed"
+        task.progress = 100
+        task.payload = {**(task.payload or {}), "error": exc.message}
+        db.commit()
+        raise _business_model_error(exc) from exc
     except ValueError as exc:
         task.status = "failed"
         task.progress = 100
@@ -214,6 +254,14 @@ def _recorded_image_task(
     db.commit()
     try:
         result = action()
+    except LLMGatewayError as exc:
+        # ⚠️ 同 `_recorded_text_task`：业务点解析失败必须如实回 **400 结构化**，
+        # 不能被下面那条 `except Exception` 归成 502「上游出图失败」。
+        task.status = "failed"
+        task.progress = 100
+        task.payload = {**(task.payload or {}), "error": exc.message}
+        db.commit()
+        raise _business_model_error(exc) from exc
     except ValueError as exc:
         task.status = "failed"
         task.progress = 100

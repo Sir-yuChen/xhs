@@ -32,6 +32,7 @@ from backend.app.main import app
 # 那个名字在 `_override_database()` 里才被赋值，`from X import name` 是**值拷贝**，
 # 导入时拿到的是 None ⇒ 每次播种都 `TypeError: 'NoneType' object is not callable`。
 from tests.backend import test_api as api_mod
+from tests.backend.conftest import upsert_business_mapping
 from tests.backend.test_api import (
     _override_database,
     _register_and_get_access_token,
@@ -233,15 +234,12 @@ def _seed_image_provider() -> None:
                 enabled=True,
             )
         )
-        db.add(
-            LlmBusinessProvider(
-                user_id=_uid(),
-                platform="xhs",
-                business_key=spec.key,
-                provider_key="TEST-IMGT",
-                model_name="detail-image-model",
-                enabled=True,
-            )
+        upsert_business_mapping(
+            db,
+            user_id=_uid(),
+            business_key=spec.key,
+            provider_key="TEST-IMGT",
+            model_name="detail-image-model",
         )
         db.commit()
     finally:

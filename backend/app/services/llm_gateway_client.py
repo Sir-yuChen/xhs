@@ -214,6 +214,33 @@ class ProviderNotFoundError(LLMGatewayError):
         )
 
 
+class ProviderKeyMissingError(LLMGatewayError):
+    """服务商存在且在用，但**没配 API Key**（`access_token` 为空）—— 2026-10-13 新增。
+
+    为什么单独立一条（而不是让调用方各自判 `api_key == ""`）：
+
+    ① **同一语义只留一份**（DEF-044）：`ai.py` 的 8 个业务端点 + 商品详情图链路
+       都会拿到「解析成功但 key 空」的上下文；若各写一遍 `if not api_key: raise 400`，
+       就是同一判据散在多处，新增调用点必漏一处。
+    ② **归属正确**：没配 key 与「未配服务商」同属**配置缺失**（用户去模型配置页补即可），
+       必须以**结构化 400 + 指向性 code** 报出；若放它落到下游服务商的
+       `except Exception → 502`，用户看到「上游出图失败」只会去查额度，
+       **真实原因（没配 key）被归错类**（同 `ai_service` 里那句「真实原因被丢掉」）。
+       实测（本卡开工前）：未配 key 的详情图链路回
+       `502 {"detail":"生成商品详情图失败：… Image model api_key is required"}`。
+    ③ **`[REDACTED]` 铁律**：本异常只在文案里说「未配置」，**绝不带入 key 的值**
+       （哪怕是空串也不外泄形态），符合 §10 安全设计。
+    """
+
+    def __init__(self, name: str = "") -> None:
+        super().__init__(
+            f"服务商「{name}」尚未配置 API Key，请到「大模型网关」页补配后再试"
+            if name
+            else "该服务商尚未配置 API Key，请到「大模型网关」页补配后再试",
+            code="LLM_PROVIDER_KEY_MISSING",
+        )
+
+
 @dataclass(frozen=True)
 class ProviderContext:
     """业务调用所需的**服务商上下文**（v1.9，设计 17 §4.3.1）。
@@ -268,11 +295,19 @@ def resolve_provider_context(db: Session, user_id: int, provider_key: str | None
     if not config.enabled:
         raise ProviderDisabledError(config.name)
 
+    #: ⚠️ **没配 key 也算「配置缺失」，在解析层就拦下**（2026-10-13 新增）——
+    #: 否则空 key 会一路带到调用层，被服务商的 `except Exception` 归成 **502**
+    #: 「上游出图失败/生成失败」，用户被指去查额度而不是去补 key（真实原因归错类）。
+    #: 放在 `enabled` 之后：停用是更强的信号（先告诉用户服务商被停用了）。
+    api_key = decrypt_text(config.access_token) if config.access_token else ""
+    if not api_key.strip():
+        raise ProviderKeyMissingError(config.name)
+
     return ProviderContext(
         provider_id=config.id,
         provider_key=config.provider_key,
         base_url=config.base_url,
-        api_key=decrypt_text(config.access_token) if config.access_token else "",
+        api_key=api_key,
     )
 
 

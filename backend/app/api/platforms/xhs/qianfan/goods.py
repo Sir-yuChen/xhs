@@ -997,6 +997,27 @@ def generate_detail_image(
     # ⚠️ 复用 `ai.py::_business_model_context`（**同一份**错误映射实现）：
     # 自己再写一遍 `resolve + except LLMGatewayError → 400` = 同一语义两份实现（DEF-044），
     # 两份会在「新增错误码」时分叉。
+    #
+    # ⚠️ **必须最早显式求值**（2026-10-13 修，实测 502 的根因）：
+    # 本函数与 `ai.py` 的 8 个业务端点不同 —— 它的出图循环**不走**
+    # `_recorded_image_task`，而是直接调 `image_ai_client.generate_images(...)`
+    # 并自己 catch `except Exception` → 502（见下方「一张都没成」）。而
+    # `model_config` / `api_key` 在**上一个版本里**只出现在那个实参列表里（属性访问
+    # 时才求值）⇒ 解析失败发生在 `except Exception` 的地界上 ⇒ **被告成 502
+    # 「生成商品详情图失败」**，真实原因（未配服务商）连同结构化 code 一起丢掉。
+    # 实测原文（临时探针，商品在、图集有、勾了一张、业务点未配服务商）：
+    #   502 {"detail":"生成商品详情图失败：原始主图 第 1~3 张：Image model api_key is required;
+    #              原始详情图 第 1~3 张：Image model api_key is required"}
+    # 显式求值把它挪回**请求处理**地界 ⇒ `_business_model_context` 自己抛结构化 400
+    # （与设计 17 §13.3.3 错误口径表「业务点未配服务商 ⇒ 400」逐字一致）。
+    #
+    # ⚠️ **放在参考图/模板/提示词组装之前**：那些分支**全是纯本地校验与拼装**
+    # （不触上游、不落库），排在它们后面会让「未配服务商」这个**必然失败**的结论
+    # 被一个无关的本地报错抢答（一个 400 换另一个 400，但 `code` 不同 ⇒ 前端拿到的
+    # 指向性提示也换了一个）。越权 / 商品缺失（404）已在更上面先判，不受影响。
+    # ⚠️ 也**不依赖 `payload.refine_prompt`**：那条 `_text_model_context` 分支用
+    # `is not None` 把失败吞成「回落本地拼接」，是**有意**的（不因润色模型没配把
+    # 整个功能判死）；出图服务商没配则必须响 —— 两者判据不同，不许合并。
     model_config, api_key = _business_model_context(
         db, current_user, BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE
     )

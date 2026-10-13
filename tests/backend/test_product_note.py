@@ -23,6 +23,7 @@ from backend.app.adapters.xhs.qianfan_api_adapter import get_qianfan_api_adapter
 from backend.app.api.ai import get_text_ai_client
 from backend.app.api.platforms.xhs.qianfan import get_qianfan_api_adapter_factory as _qf_dep
 from backend.app.core.database import Base, get_db
+from backend.app.core.security import encrypt_text
 from backend.app.main import app
 from backend.app.models import AiDraft, PlatformAccount, PublishJob, Task, User
 from backend.app.models.llm_gateway import LlmBusinessProvider, LlmGatewayConfig, LlmGatewayModel
@@ -58,6 +59,7 @@ from backend.app.services.product_note_service import (
     validate_note_format,
 )
 from tests.backend.cookie_fixtures import bind_shop_account
+from tests.backend.conftest import upsert_business_mapping
 
 client = TestClient(app)
 ROOT = Path(__file__).resolve().parents[2]
@@ -200,7 +202,12 @@ def _setup(tmp_path):
                 name="fake-provider",
                 provider_key="FAKE-KEY1",
                 base_url="http://127.0.0.1:9",
-                access_token="",
+                # ⚠️ 2026-10-13：**必须给一个非空 key**。此前是 `""`，因为解析层不校验；
+                # 现在「服务商没配 key」会在 `resolve_provider_context` 抛
+                # `ProviderKeyMissingError`（结构化 400，修「没配 key 被报成 502」）
+                # ⇒ 空 key 会让本文件的用例在**解析阶段**就 400，与它们要测的分支无关。
+                # 本文件用的是假客户端（不打真实上游），key 给个占位值即可。
+                access_token=encrypt_text("«redacted:sk-…»"),
                 models_json='["fake-model"]',
                 enabled=True,
                 healthy=True,
@@ -218,16 +225,13 @@ def _setup(tmp_path):
                 enabled=True,
             )
         )
-        db.add(
-            LlmBusinessProvider(
-                user_id=user_id,
-                platform="xhs",
-                business_key=BUSINESS_KEY_GENERATE_NOTE.key,
-                provider_key="FAKE-KEY1",
-                # v2.3：业务入口必须显式带 model_name，且须在服务商目录内。
-                model_name="fake-model",
-                enabled=True,
-            )
+        upsert_business_mapping(
+            db,
+            user_id=user_id,
+            business_key=BUSINESS_KEY_GENERATE_NOTE.key,
+            provider_key="FAKE-KEY1",
+            # v2.3：业务入口必须显式带 model_name，且须在服务商目录内。
+            model_name="fake-model",
         )
         db.commit()
         account_id = account.id
