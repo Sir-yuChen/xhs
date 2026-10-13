@@ -536,6 +536,12 @@ LATER_MIGRATION_TABLES: dict[str, str] = {
         " name VARCHAR(128) NOT NULL,"
         " base_url VARCHAR(512) NOT NULL DEFAULT 'http://127.0.0.1:3000',"
         " access_token TEXT NOT NULL DEFAULT '',"
+        # ⚠️ `local_db_path` 必须声明（2026-10-13 补）：它在 `m4n5o6p7q8r9` 建表时就有
+        #    （早于本夹具的 stamp 点 `h9i0j1k2l3m4`）⇒ 属于「stamp 点当时的形状」的一部分。
+        #    缺列时，head 迁移 `c2d3e4f5a6b8`（网关服务商补种，走 ORM）会
+        #    `table llm_gateway_configs has no column named local_db_path` ——
+        #    夹具的债在夹具侧还（同 `job_name` / `notes` 的先例）。
+        " local_db_path VARCHAR(512) NOT NULL DEFAULT '',"
         " default_model VARCHAR(128) NOT NULL DEFAULT '',"
         " models_json TEXT NOT NULL DEFAULT '[]',"
         " enabled BOOLEAN NOT NULL DEFAULT 1,"

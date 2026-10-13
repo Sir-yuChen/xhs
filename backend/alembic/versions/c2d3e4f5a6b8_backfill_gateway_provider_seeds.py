@@ -60,10 +60,28 @@ def _table_names() -> set[str]:
 
 
 def upgrade() -> None:
+    bind = op.get_bind()
     tables = _table_names()
     # 表还没建（极小夹具/早期 revision）⇒ 无事可做（种子播种依赖这两张表）。
     if "llm_gateway_configs" not in tables or "users" not in tables:
         logger.info("gateway provider seed backfill: 目标表不存在，跳过")
+        return
+
+    # ⚠️ **最小夹具的表是「省略版」**（只建迁移读写的列）：本补种走 ORM 服务层，
+    # 会读 `llm_gateway_configs` 的多个业务列（如 `local_db_path` / `provider_key`）——
+    # 夹具没建那些列时 ORM 查询会 `no such column`。此时**如实跳过并在日志说明**。
+    # 这不是「让迁移在真库静默不干活」：真库的表是完整的，必然满足下面的列检查；
+    # 只有「stamp 到某 revision 再 upgrade」的最小夹具才会缺列（它的语义就是
+    # 「只建被测迁移要碰的列」，不该为数据补种再补一批列）。
+    needed = {"provider_key", "name", "base_url", "access_token"}
+    existing_cols = {
+        col["name"] for col in inspect(bind).get_columns("llm_gateway_configs")
+    }
+    if not needed.issubset(existing_cols):
+        logger.info(
+            "gateway provider seed backfill: 表结构不含补种所需列（%s 缺席），跳过（最小夹具）",
+            sorted(needed - existing_cols),
+        )
         return
 
     # 用**应用自己的 Session**（与服务层同库、同 ORM 映射）——迁移自带 bind 是
