@@ -1,18 +1,24 @@
 /**
  * 系统更新弹窗（设计 36，2026-10-13 用户口径）。
  *
- * 用户口径原文：
- * > 「每次打开软件后需要检查版本是否需要更新，存在新版本则弹窗提示更新，展示更新内容，
- * > 提供下载按钮，下载成功点击安装按钮触发软件的按钮（安装），实现静默安装保证历史数据；
- * > **存在新版本则强制安装最新版本软件**。」
+ * ## 两种入口（2026-10-13 用户追加口径）
  *
- * 「强制」的落地（设计 36 §4）：弹出即**不可关闭**（无 X、`maskClosable=false`、
- * 无「稍后」）；下载 → 安装是唯一路径。**唯一让步**：下载/安装失败时转为可关闭的错误态
- * 并给「重试 / 关闭」出口 —— 强制的对象是**版本**，不是把用户锁死在装不上的界面上。
+ * > 「再切换白天和夜间模式图标旁边新增检查版本更新入口图标，点击检查当前版本，
+ * > 存在新版本则弹窗提示更新或不更新，**只有在每次软件打开时的入口才要求强制更新**」
  *
- * 挂载点：`WorkspaceShell`（登录后即检查；打开软件即触发）。
+ * * **启动检查**（`<UpdateDialog />`，挂 `WorkspaceShell` 打开软件即查）= **强制**：
+ *   弹出即不可关闭（无 X、`maskClosable=false`、无「稍后」/「暂不更新」）。
+ *   原口径：「存在新版本则强制安装最新版本软件」。
+ * * **手动检查**（顶栏「检查版本更新」图标）= **可选**：弹窗可关，
+ *   footer 给「暂不更新」+「下载」两条路 —— 用户主动点的检查，理应能选择不更新。
+ *
+ * 两者共用同一套「检查 / 下载 / 安装」状态机（`useUpdateFlow`）与弹窗主体
+ * （`UpdateModalBody`）——**一份实现，两种强制语义**（DEF-044：不留两份）。
+ *
+ * **唯一让步（两种入口一致）**：下载/安装失败时转可关闭的错误态并给「重试 / 关闭」——
+ * 强制的对象是**版本**，不是把用户锁死在装不上的界面上。
  */
-import { CloudDownloadOutlined, ReloadOutlined } from "@ant-design/icons";
+import { CheckCircleOutlined, CloudDownloadOutlined, ReloadOutlined } from "@ant-design/icons";
 import { Alert, Button, Modal, Progress, Space, Tag, Typography } from "antd";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -21,35 +27,76 @@ import type { SystemUpdateInfo } from "../../types";
 
 const { Text, Paragraph } = Typography;
 
-type Phase = "idle" | "checking" | "available" | "downloading" | "downloaded" | "installing" | "error";
+export type UpdatePhase =
+  | "idle"
+  | "checking"
+  | "available"
+  | "downloading"
+  | "downloaded"
+  | "installing"
+  | "error";
 
-export function UpdateDialog() {
+export type UpdateFlow = {
+  info: SystemUpdateInfo | null;
+  phase: UpdatePhase;
+  error: string;
+  progress: number;
+  runCheck: () => Promise<void>;
+  handleDownload: () => Promise<void>;
+  handleInstall: () => Promise<void>;
+  reset: () => void;
+  /** 检查完成且无新版本（手动入口据此弹「已是最新」提示）。 */
+  upToDate: boolean;
+};
+
+/**
+ * 「检查 / 下载 / 安装」状态机（两种入口共用）。
+ *
+ * @param autoCheckOnMount 挂载即自动检查一次（**启动入口**用；手动入口由点击触发）。
+ */
+export function useUpdateFlow(autoCheckOnMount = false): UpdateFlow {
   const [info, setInfo] = useState<SystemUpdateInfo | null>(null);
-  const [phase, setPhase] = useState<Phase>("idle");
+  const [phase, setPhase] = useState<UpdatePhase>("idle");
   const [error, setError] = useState<string>("");
   const [installerPath, setInstallerPath] = useState<string>("");
   const [progress, setProgress] = useState(0);
+  const [upToDate, setUpToDate] = useState(false);
   const checkedRef = useRef(false);
 
   const runCheck = useCallback(async () => {
     setPhase("checking");
     setError("");
+    setUpToDate(false);
     try {
       const result = await checkSystemUpdate();
       setInfo(result);
-      setPhase(result.has_update ? "available" : "idle");
-    } catch {
-      // 检查失败**静默**（网络抖动不该打扰用户；也不该挡登录后的正常使用）
-      setPhase("idle");
+      if (result.has_update) {
+        setPhase("available");
+      } else {
+        // 无新版本：手动入口要能告诉用户「已是最新」；启动入口静默即可。
+        setPhase("idle");
+        setUpToDate(true);
+      }
+    } catch (exc) {
+      // 检查失败**不静默**给手动入口用（用户主动点的，得知道为什么没结果）；
+      // 是否提示由调用方决定 —— 这里只如实置错误态。
+      setError("检查更新失败，请检查网络后重试。");
+      setPhase("error");
+      throw exc;
     }
   }, []);
 
   useEffect(() => {
+    if (!autoCheckOnMount) return;
     // 每次打开软件（挂载）检查一次；用 ref 防 React 严格模式的重复调用。
     if (checkedRef.current) return;
     checkedRef.current = true;
-    void runCheck();
-  }, [runCheck]);
+    void runCheck().catch(() => {
+      // 启动检查失败**静默**（网络抖动不该打扰用户；也不该挡登录后的正常使用）。
+      setPhase("idle");
+      setError("");
+    });
+  }, [autoCheckOnMount, runCheck]);
 
   const handleDownload = useCallback(async () => {
     if (!info?.download_url) {
@@ -98,7 +145,69 @@ export function UpdateDialog() {
     }
   }, [installerPath]);
 
-  const open = phase === "available" || phase === "downloading" || phase === "downloaded" || phase === "installing" || phase === "error";
+  const reset = useCallback(() => {
+    setPhase("idle");
+    setError("");
+  }, []);
+
+  return {
+    info,
+    phase,
+    error,
+    progress,
+    runCheck,
+    handleDownload,
+    handleInstall,
+    reset,
+    upToDate,
+  };
+}
+
+/** 弹窗主体（版本号 + 更新内容 + 进度 + 错误）——两种入口共用一份。 */
+function UpdateModalBody({ flow }: { flow: UpdateFlow }) {
+  const { info, phase, error, progress } = flow;
+  return (
+    <Space direction="vertical" size={12} style={{ width: "100%" }}>
+      <Space>
+        <Text>当前版本</Text>
+        <Tag>{info?.current || "-"}</Tag>
+        <Text>最新版本</Text>
+        <Tag color="blue">{info?.latest || "-"}</Tag>
+      </Space>
+
+      {info?.notes ? (
+        <div style={{ maxHeight: "32vh", overflowY: "auto" }}>
+          <Text type="secondary">更新内容：</Text>
+          <Paragraph style={{ whiteSpace: "pre-wrap", marginTop: 4 }}>{info.notes}</Paragraph>
+        </div>
+      ) : null}
+
+      {phase === "downloading" && <Progress percent={progress} status="active" />}
+      {phase === "downloaded" && <Text type="success">下载完成，点击「立即安装并重启」更新。</Text>}
+      {phase === "installing" && <Text type="secondary">正在启动安装程序，应用将自动重启……</Text>}
+      {phase === "error" && <Alert type="error" showIcon message={error || "更新失败"} />}
+
+      <Text type="secondary" style={{ fontSize: 12 }}>
+        更新仅替换程序文件，账号、笔记与历史数据全部保留。
+      </Text>
+    </Space>
+  );
+}
+
+/**
+ * 启动检查入口（**强制**）：打开软件即查；有新版本弹窗**不可关闭**。
+ *
+ * 用户口径「存在新版本则强制安装最新版本软件」。
+ */
+export function UpdateDialog() {
+  const flow = useUpdateFlow(true);
+  const { phase } = flow;
+  const open =
+    phase === "available" ||
+    phase === "downloading" ||
+    phase === "downloaded" ||
+    phase === "installing" ||
+    phase === "error";
   if (!open) return null;
 
   // ⚠️ 强制更新：正常路径不可关闭；**错误态**才给关闭出口（否则用户既装不上也退不出）。
@@ -106,7 +215,7 @@ export function UpdateDialog() {
 
   return (
     <Modal
-      open={open}
+      open
       centered
       title={
         <Space>
@@ -117,25 +226,25 @@ export function UpdateDialog() {
       closable={closable}
       maskClosable={false}
       keyboard={closable}
-      onCancel={closable ? () => setPhase("idle") : undefined}
+      onCancel={closable ? flow.reset : undefined}
       footer={
         phase === "error"
           ? [
-              <Button key="retry" icon={<ReloadOutlined />} onClick={() => void runCheck()}>
+              <Button key="retry" icon={<ReloadOutlined />} onClick={() => void flow.runCheck()}>
                 重试
               </Button>,
-              <Button key="close" onClick={() => setPhase("idle")}>
+              <Button key="close" onClick={flow.reset}>
                 关闭
               </Button>,
             ]
           : [
               phase === "available" && (
-                <Button key="dl" type="primary" onClick={() => void handleDownload()}>
+                <Button key="dl" type="primary" onClick={() => void flow.handleDownload()}>
                   下载
                 </Button>
               ),
               phase === "downloaded" && (
-                <Button key="install" type="primary" onClick={() => void handleInstall()}>
+                <Button key="install" type="primary" onClick={() => void flow.handleInstall()}>
                   立即安装并重启
                 </Button>
               ),
@@ -143,30 +252,101 @@ export function UpdateDialog() {
       }
       width="56vw"
     >
-      <Space direction="vertical" size={12} style={{ width: "100%" }}>
+      <UpdateModalBody flow={flow} />
+    </Modal>
+  );
+}
+
+/**
+ * 手动检查入口（**不强制**）：顶栏「检查版本更新」图标点出来的弹窗。
+ *
+ * 用户口径「点击检查当前版本，存在新版本则弹窗提示更新或不更新」——
+ * 故本入口的弹窗**可关闭**，且 footer 明给「暂不更新」。
+ */
+export function ManualUpdateDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const flow = useUpdateFlow(false);
+  const { phase } = flow;
+
+  // 打开时自动查一次（用户点图标 = 想看结果，不该再让他点第二下）。
+  const openedRef = useRef(false);
+  useEffect(() => {
+    if (!open) {
+      openedRef.current = false;
+      return;
+    }
+    if (openedRef.current) return;
+    openedRef.current = true;
+    void flow.runCheck().catch(() => {
+      /* 错误态已由 flow 置好，弹窗自己会显示 */
+    });
+  }, [open, flow]);
+
+  useEffect(() => {
+    if (!open) flow.reset();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  if (!open) return null;
+
+  const hasUpdate = phase === "available" || phase === "downloading" || phase === "downloaded" || phase === "installing";
+
+  return (
+    <Modal
+      open
+      centered
+      title={
         <Space>
-          <Text>当前版本</Text>
-          <Tag>{info?.current || "-"}</Tag>
-          <Text>最新版本</Text>
-          <Tag color="blue">{info?.latest || "-"}</Tag>
+          <CloudDownloadOutlined />
+          <span>{hasUpdate ? "发现新版本" : "检查版本更新"}</span>
         </Space>
-
-        {info?.notes ? (
-          <div style={{ maxHeight: "32vh", overflowY: "auto" }}>
-            <Text type="secondary">更新内容：</Text>
-            <Paragraph style={{ whiteSpace: "pre-wrap", marginTop: 4 }}>{info.notes}</Paragraph>
-          </div>
-        ) : null}
-
-        {phase === "downloading" && <Progress percent={progress} status="active" />}
-        {phase === "downloaded" && <Text type="success">下载完成，点击「立即安装并重启」更新。</Text>}
-        {phase === "installing" && <Text type="secondary">正在启动安装程序，应用将自动重启……</Text>}
-        {phase === "error" && <Alert type="error" showIcon message={error || "更新失败"} />}
-
-        <Text type="secondary" style={{ fontSize: 12 }}>
-          更新仅替换程序文件，账号、笔记与历史数据全部保留。
-        </Text>
-      </Space>
+      }
+      closable
+      maskClosable
+      onCancel={onClose}
+      footer={
+        phase === "error"
+          ? [
+              <Button key="retry" icon={<ReloadOutlined />} onClick={() => void flow.runCheck()}>
+                重试
+              </Button>,
+              <Button key="close" onClick={onClose}>
+                关闭
+              </Button>,
+            ]
+          : [
+              // 「暂不更新」= 手动入口特有的出口（启动入口没有它）。
+              <Button key="skip" onClick={onClose}>
+                暂不更新
+              </Button>,
+              phase === "available" && (
+                <Button key="dl" type="primary" onClick={() => void flow.handleDownload()}>
+                  下载
+                </Button>
+              ),
+              phase === "downloaded" && (
+                <Button key="install" type="primary" onClick={() => void flow.handleInstall()}>
+                  立即安装并重启
+                </Button>
+              ),
+            ].filter(Boolean)
+      }
+      width="56vw"
+    >
+      {phase === "checking" ? (
+        <Space>
+          <Text type="secondary">正在检查最新版本……</Text>
+        </Space>
+      ) : flow.upToDate ? (
+        <Space>
+          <CheckCircleOutlined style={{ color: "#52c41a" }} />
+          <Text>
+            当前已是最新版本
+            {flow.info?.current ? `（${flow.info.current}）` : ""}。
+          </Text>
+        </Space>
+      ) : (
+        <UpdateModalBody flow={flow} />
+      )}
     </Modal>
   );
 }

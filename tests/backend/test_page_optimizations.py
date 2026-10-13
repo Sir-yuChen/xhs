@@ -8765,3 +8765,79 @@ def test_scrollbars_are_globally_hidden_but_scrolling_still_works():
         f"这些地方还写着滚动条样式 —— 「全部统一隐藏」会被更具体的局部规则盖过：{offenders}"
     )
 
+
+# --------------------------------------------------------------------------- #
+# 2026-10-13 用户口径：顶栏「检查版本更新」入口（手动，不强制）
+# --------------------------------------------------------------------------- #
+# 用户口径原文：
+# 「再切换白天和夜间模式图标旁边新增检查版本更新入口图标，点击检查当前版本，存在新
+#   版本则弹窗提示更新或不更新，**只有在每次软件打开时的入口才要求强制更新**」。
+#
+# 判据分两半（**手动入口不强制 / 启动入口强制**，两条一起才完整）：
+SHELL_TSX = "frontend/src/components/layout/workspace-shell.tsx"
+UPDATE_DIALOG = "frontend/src/components/system/update-dialog.tsx"
+
+
+def test_manual_update_entry_sits_next_to_theme_toggle():
+    """顶栏「检查版本更新」图标与主题切换**并排**，且点击打开手动弹窗。
+
+    ⚠️ 变异守护：把该 Button 删掉、或把 onClick 改成不设 state ⇒ 本用例必红。
+    位置判据用**顺序**（主题按钮在前、更新按钮紧随其后），不靠坐标 ——
+    源码守卫能判定的是「同一 Space 容器、相邻出现」，真实观感由真机验收。
+    """
+    src = _code_only(_read(ROOT / SHELL_TSX))
+    # 锚点取**按钮上的调用**（不是别处的声明）：`onClick={toggleTheme}` 唯一
+    theme_i = src.index("onClick={toggleTheme}")
+    update_i = src.index("CloudDownloadOutlined", theme_i)
+    assert theme_i < update_i, "更新图标应排在主题切换**之后**（并排同一行）"
+    assert "检查版本更新" in src, "缺「检查版本更新」入口文案/title"
+    assert "setManualUpdateOpen(true)" in src, "图标没接上打开手动弹窗的动作"
+    # 两个按钮必须在**同一个** Space 容器内（否则掉到别的区域去了）
+    assert "<Space" in src[max(0, theme_i - 600):theme_i], "主题/更新按钮应同处顶栏 Space"
+
+
+def test_manual_dialog_is_closable_and_offers_skip():
+    """**手动**入口弹窗必须可关闭且给「暂不更新」（用户口径「提示更新或不更新」）。
+
+    ⚠️ 变异守护：把 ManualUpdateDialog 的 `closable` / 「暂不更新」按钮删掉
+    ⇒ 本用例必红 —— 那就变成「手动点一下也被强制」，与口径相反。
+    """
+    src = _code_only(_read(ROOT / UPDATE_DIALOG))
+    start = src.index("export function ManualUpdateDialog")
+    body = src[start:]
+    assert "closable" in body, "手动弹窗必须可关闭"
+    assert "暂不更新" in body, "手动弹窗必须给「暂不更新」出口"
+    # 手动弹窗**不得**出现强制入口才有的写法
+    assert "maskClosable={false}" not in body, "手动弹窗不该锁蒙版（那是启动强制入口的语义）"
+
+
+def test_startup_dialog_stays_forced():
+    """**启动**入口弹窗保持强制：正常路径不可关闭、maskClosable=false、无「暂不更新」。
+
+    ⚠️ 变异守护：把 UpdateDialog 的 `maskClosable={false}` 放松、或给它加「暂不更新」
+    ⇒ 本用例必红（那是把「打开软件强制更新」降级，用户口径明确要求保留）。
+    """
+    src = _code_only(_read(ROOT / UPDATE_DIALOG))
+    start = src.index("export function UpdateDialog")
+    # 取到下一个 export function 之前（避免把 ManualUpdateDialog 的体算进来）
+    rest = src[start:]
+    nxt = rest.find("export function", 1)
+    body = rest[: nxt if nxt > 0 else len(rest)]
+    assert "maskClosable={false}" in body, "启动弹窗必须锁蒙版（强制语义）"
+    assert "暂不更新" not in body, "启动弹窗不得给「暂不更新」（那是手动入口才有的）"
+    assert "const closable = phase === \"error\"" in body, (
+        "启动弹窗的 closable 应只在错误态为真（其余强制不可关）"
+    )
+
+
+def test_both_dialogs_share_one_state_machine():
+    """两种入口**共用同一状态机**（`useUpdateFlow`）——不留两份检查/下载/安装实现。
+
+    ⚠️ 变异守护：把 ManualUpdateDialog 自写一套 fetch ⇒ 本用例必红（DEF-044 同型）。
+    """
+    src = _code_only(_read(ROOT / UPDATE_DIALOG))
+    assert src.count("useUpdateFlow(") >= 2, "两个入口都应调 useUpdateFlow（共用一份）"
+    # 检查/下载/安装三者只在 useUpdateFlow 里各调一次（调用点唯一）
+    assert src.count("checkSystemUpdate(") == 1, "检查更新调用点应唯一（不得各写一份）"
+    assert src.count("downloadSystemUpdate(") == 1, "下载调用点应唯一"
+    assert src.count("installSystemUpdate(") == 1, "安装调用点应唯一"

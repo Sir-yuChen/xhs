@@ -1,5 +1,6 @@
 import {
   BellOutlined,
+  CloudDownloadOutlined,
   LogoutOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
@@ -36,7 +37,7 @@ import {
 } from "../../lib/api";
 import type { AppNotification } from "../../types";
 import { notificationTargetPath } from "../../lib/notification-routes";
-import { UpdateDialog } from "../system/update-dialog";
+import { UpdateDialog, ManualUpdateDialog } from "../system/update-dialog";
 
 const { Sider, Header, Content } = Layout;
 const { Text } = Typography;
@@ -198,6 +199,8 @@ export function WorkspaceShell({
   //: 通知下拉的过滤档（R2-C 2026-10-13）：全部 / 未读。（按来源/等级的细分过滤走
   //: 后端 `source_type` / `level` 参数，下拉里给「未读」这一个最常用的粗筛。）
   const [notifyFilter, setNotifyFilter] = useState<"all" | "unread">("all");
+  // 手动「检查版本更新」弹窗（2026-10-13 用户口径）：顶栏图标点开，**不强制**。
+  const [manualUpdateOpen, setManualUpdateOpen] = useState(false);
 
   const c = useShellPalette();
   const isDark = c.isDark;
@@ -381,6 +384,16 @@ export function WorkspaceShell({
               title={themeMode === "dark" ? "切换为浅色模式" : "切换为暗色模式"}
               style={{ display: "flex", alignItems: "center", justifyContent: "center" }}
             />
+            {/* 检查版本更新（2026-10-13 用户口径）：与主题切换并排的**手动**入口。
+                ⚠️ 与启动检查的区别：本入口**不强制** —— 弹窗可关、可「暂不更新」；
+                只有「每次软件打开时」的启动检查才强制（见 update-dialog.tsx）。 */}
+            <Button
+              type="text"
+              icon={<CloudDownloadOutlined style={{ fontSize: 16 }} />}
+              onClick={() => setManualUpdateOpen(true)}
+              title="检查版本更新"
+              style={{ display: "flex", alignItems: "center", justifyContent: "center" }}
+            />
             <Dropdown dropdownRender={() => notificationDropdownContent} trigger={["click"]} placement="bottomRight">
               <Badge count={unreadCount} size="small" offset={[-2, 2]}>
                 <Button type="text" icon={<BellOutlined style={{ fontSize: 16 }} />} style={{ display: "flex", alignItems: "center", justifyContent: "center" }} />
@@ -400,8 +413,10 @@ export function WorkspaceShell({
           {children}
         </Content>
       </Layout>
-      {/* 系统更新弹窗（设计 36，2026-10-13）：打开软件即检查；有新版本强制弹窗 */}
+      {/* 系统更新弹窗（设计 36，2026-10-13）：打开软件即检查；有新版本**强制**弹窗 */}
       <UpdateDialog />
+      {/* 手动检查更新弹窗（2026-10-13 用户口径）：顶栏图标点开，**可关闭 / 可暂不更新** */}
+      <ManualUpdateDialog open={manualUpdateOpen} onClose={() => setManualUpdateOpen(false)} />
     </Layout>
   );
 }
