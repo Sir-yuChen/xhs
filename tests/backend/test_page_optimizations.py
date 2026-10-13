@@ -8830,16 +8830,23 @@ def test_startup_dialog_stays_forced():
     )
 
 
-def test_update_dialogs_are_fifty_percent_of_the_viewport():
-    """两个更新弹窗宽度 = **视口 50%**（用户口径 2026-10-13「更新弹窗50%」）。
+def test_update_dialogs_are_forty_percent_of_the_viewport():
+    """两个更新弹窗 = **视口 40%**（宽 40vw + 高 40vh；用户口径 2026-10-13「检查版本
+
+    更新 固定全屏的 40%」，随后确认「两个都改成 40%」「宽 40% + 高 40%」）。
 
     ⚠️ 是**视口百分比**不是固定像素 —— 换屏幕尺寸比例才一致（同违规词 60vw 的纪律）。
-    ⚠️ 变异守护：把任一入口的 `50vw` 改回 `56vw`/像素值 ⇒ 本用例必红。
+    ⚠️ 变异守护：把任一入口的 `40vw`/`40vh` 改回旧口径（50vw / 56vw）或像素值 ⇒ 必红。
     """
     src = _code_only(_read(ROOT / UPDATE_DIALOG))
-    assert src.count('width="50vw"') == 2, (
-        "启动 / 手动两个更新弹窗都应是 50vw（各一处）"
+    assert src.count('width="40vw"') == 2, (
+        "启动 / 手动两个更新弹窗都应是 40vw（各一处）"
     )
+    assert src.count('height: "40vh"') == 2 and src.count('maxHeight: "40vh"') == 2, (
+        "两个弹窗都应固定高 40vh（maxHeight 同值，防内容把弹窗撑开）"
+    )
+    #: 不得残留旧口径（50vw 是上一轮、56vw 是更早一轮）
+    assert 'width="50vw"' not in src, "还留着旧口径 50vw"
     assert 'width="56vw"' not in src, "还留着旧口径 56vw"
     #: 不得退回固定像素（换屏幕比例就不一致了）
     assert not re.search(r'width=\{?["\']?\d{3,}', src), "更新弹窗宽度不该是固定像素"

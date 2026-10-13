@@ -250,7 +250,10 @@ export function UpdateDialog() {
               ),
             ].filter(Boolean)
       }
-      width="50vw"
+      //: 宽高都是**视口百分比**（不是固定像素），各种屏幕比例一致。
+      //: 用户口径 2026-10-13「检查版本更新 固定全屏的 40%」⇒ 宽 40vw + 高 40vh。
+      width="40vw"
+      styles={{ body: { height: "40vh", maxHeight: "40vh", overflowY: "auto" } }}
     >
       <UpdateModalBody flow={flow} />
     </Modal>
@@ -330,7 +333,10 @@ export function ManualUpdateDialog({ open, onClose }: { open: boolean; onClose: 
               ),
             ].filter(Boolean)
       }
-      width="50vw"
+      //: 宽高都是**视口百分比**（不是固定像素），各种屏幕比例一致。
+      //: 用户口径 2026-10-13「检查版本更新 固定全屏的 40%」⇒ 宽 40vw + 高 40vh。
+      width="40vw"
+      styles={{ body: { height: "40vh", maxHeight: "40vh", overflowY: "auto" } }}
     >
       {phase === "checking" ? (
         <Space>
