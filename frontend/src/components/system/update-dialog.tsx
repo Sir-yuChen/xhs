@@ -192,7 +192,7 @@ function UpdateModalBody({ flow }: { flow: UpdateFlow }) {
         key: item.version,
         version: item.version,
         built_at: item.built_at,
-        title: item.version,
+        summary: item.summary,
         notes: item.notes,
       }));
     }
@@ -202,7 +202,7 @@ function UpdateModalBody({ flow }: { flow: UpdateFlow }) {
           key: info.latest || "latest",
           version: info.latest || "最新版本",
           built_at: "",
-          title: info.latest || "更新内容",
+          summary: "",
           notes: info.notes,
         },
       ];
@@ -239,11 +239,16 @@ function UpdateModalBody({ flow }: { flow: UpdateFlow }) {
             items={panels.map((panel) => ({
               key: panel.key,
               label: (
-                <Space size={8}>
-                  <Text strong>{panel.title}</Text>
+                <Space size={8} wrap>
+                  <Text strong>{`v${panel.version}`}</Text>
                   {panel.built_at ? (
                     <Text type="secondary" style={{ fontSize: 12 }}>
-                      {panel.built_at.slice(0, 10)}
+                      {panel.built_at}
+                    </Text>
+                  ) : null}
+                  {panel.summary ? (
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      {panel.summary}
                     </Text>
                   ) : null}
                 </Space>

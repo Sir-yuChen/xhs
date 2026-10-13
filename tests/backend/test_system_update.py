@@ -17,12 +17,16 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
 
 from backend.app.core import version as version_mod
 from backend.app.services import system_update_service as update_svc
+
+#: 仓库根（`tests/backend/test_system_update.py` → 上溯两级）。
+ROOT = Path(__file__).resolve().parents[2]
 
 
 # --------------------------------------------------------------------------- #
@@ -122,6 +126,74 @@ def test_old_flat_version_json_still_works(tmp_path, monkeypatch):
     info = version_mod.version_info()
     assert info["version"] == "9.9.9"
     assert info["history"] == [], "旧形状没有 versions 数组 ⇒ 空（前端退化成远端 notes）"
+
+# ---------------------------------------------------------------- 版本历史四要素
+#  用户口径 2026-10-13：「version.json 应记录的是版本升级历史，不是只记录最新的版本，
+#  弹窗中使用版本号折叠展示，记录版本更新相关信息，**版本号，更新时间，更新简介**，
+#  你补全一个 1.0.0-1.0.2」+「简介要简短保持在 100 字以内即可」。
+
+
+def test_shipped_version_json_has_the_three_releases():
+    """仓库内 `config/version.json` **真的**记录了 1.0.0 / 1.0.1 / 1.0.2 三条（最新在前）。"""
+    payload = json.loads((ROOT / "config" / "version.json").read_text(encoding="utf-8"))
+    assert payload["current"] == "1.0.2", "current 应为 1.0.2"
+    versions = [item["version"] for item in payload["versions"]]
+    assert versions == ["1.0.2", "1.0.1", "1.0.0"], (
+        f"版本历史应含 1.0.0-1.0.2 三条且最新在前，实得 {versions}"
+    )
+
+
+def test_every_release_has_version_time_and_summary():
+    """每条历史四要素齐全：**版本号 + 更新时间 + 更新简介 + 更新详情**。"""
+    payload = json.loads((ROOT / "config" / "version.json").read_text(encoding="utf-8"))
+    for item in payload["versions"]:
+        ver = item["version"]
+        assert ver, "缺版本号"
+        assert item.get("built_at"), f"{ver} 缺更新时间"
+        assert item.get("summary"), f"{ver} 缺更新简介"
+        assert item.get("notes"), f"{ver} 缺更新详情"
+        #: 时间形如 `2026-10-12 00:52`（可读，比 ISO 带 T 更适合弹窗）。
+        assert re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$", item["built_at"]), (
+            f"{ver} 更新时间格式应为 YYYY-MM-DD HH:mm，实得 {item['built_at']!r}"
+        )
+
+
+def test_release_summaries_stay_within_a_hundred_chars():
+    """用户口径 2026-10-13：「简介要简短保持在 100 字以内即可」。"""
+    payload = json.loads((ROOT / "config" / "version.json").read_text(encoding="utf-8"))
+    for item in payload["versions"]:
+        summary = item["summary"]
+        assert len(summary) <= 100, (
+            f"{item['version']} 简介 {len(summary)} 字，超过 100 字上限：{summary!r}"
+        )
+
+
+def test_history_exposes_summary_to_the_api(tmp_path, monkeypatch):
+    """`version_info()` 把 `summary` 一并透出（前端折叠标题要用）。"""
+    monkeypatch.delenv("SPIDER_XHS_VERSION", raising=False)
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    (cfg / "version.json").write_text(
+        json.dumps(
+            {
+                "current": "2.0.0",
+                "versions": [
+                    {
+                        "version": "2.0.0",
+                        "built_at": "2026-11-01 09:00",
+                        "commit": "abc",
+                        "summary": "一句话简介",
+                        "notes": "详情",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONFIG_FILE", str(cfg / "default.yaml"))
+    info = version_mod.version_info()
+    assert info["history"][0]["summary"] == "一句话简介"
+    assert info["history"][0]["built_at"] == "2026-11-01 09:00"
 
 def test_version_info_carries_build_time_and_commit(tmp_path, monkeypatch):
     """`version_info()` 带出**打包时间 / 提交**（用户口径 2026-10-13：

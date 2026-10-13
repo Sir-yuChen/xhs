@@ -77,6 +77,8 @@ def _read_version_payload(payload: dict) -> tuple[str, str, str, list[dict]]:
                     "version": ver.lstrip("vV"),
                     "built_at": str(item.get("built_at") or "").strip(),
                     "commit": str(item.get("commit") or "").strip(),
+                    #: 更新简介（一句话摘要，弹窗折叠标题用）。
+                    "summary": str(item.get("summary") or "").strip(),
                     "notes": str(item.get("notes") or "").strip(),
                 }
             )
@@ -128,8 +130,10 @@ def version_info() -> dict:
     以及「version.json 应记录的是版本升级历史，不是只记录最新的」）。
 
     返回：`{"version", "built_at", "commit", "source", "history"}` ——
-    * `history` = **版本升级历史**（`[{version, built_at, commit, notes}, ...]`，
-      约定**最新在前**，前端按版本折叠展示）；旧形状（单条）⇒ 长度 1；
+    * `history` = **版本升级历史**（`[{version, built_at, commit, summary, notes}, ...]`，
+      约定**最新在前**，前端按版本折叠展示）；
+      每项四要素：**版本号** `version` + **更新时间** `built_at` + **更新简介** `summary`
+      （一句话摘要，折叠标题用）+ **更新详情** `notes`（Markdown，展开后用）；
     * 除 `version` 外都**允许缺**（dev 态 ⇒ 空串 / 空列表）；
     * `source`：本次版本值**从哪读到**（`env` / 文件路径 / `"unknown"`）—— dev 态排查用。
 

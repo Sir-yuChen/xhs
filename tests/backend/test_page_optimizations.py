@@ -8830,6 +8830,26 @@ def test_startup_dialog_stays_forced():
     )
 
 
+def test_update_dialog_folds_releases_by_version_with_time_and_summary():
+    """弹窗按**版本号折叠**展示，标题含 **版本号 + 更新时间 + 更新简介**。
+
+    用户口径 2026-10-13：「弹窗中使用版本号折叠展示，记录版本更新相关信息，
+    版本号，更新时间，更新简介」。
+    历史数据来自 `GET /api/system/version` 的 `history`（本地 `version.json`）。
+    """
+    src = _code_only(_read(ROOT / UPDATE_DIALOG))
+    assert "Collapse" in src, "弹窗应使用折叠面板按版本展示"
+    body = src[src.index("function UpdateModalBody") :]
+    #: 标题三要素：版本号（带 v 前缀）、更新时间、更新简介
+    assert '`v${panel.version}`' in body, "折叠标题应显示版本号（v 前缀）"
+    assert "panel.built_at" in body, "折叠标题应显示更新时间"
+    assert "panel.summary" in body, "折叠标题应显示更新简介"
+    #: 数据源＝本地版本历史（不是只有一个远端 notes）
+    assert "history" in body, "折叠数据应来自版本历史 history"
+    #: 仍保留详情展开区
+    assert "panel.notes" in body, "展开区应显示更新详情"
+
+
 def test_update_dialogs_are_forty_percent_of_the_viewport():
     """两个更新弹窗 = **视口 40%**（宽 40vw + 高 40vh；用户口径 2026-10-13「检查版本
 

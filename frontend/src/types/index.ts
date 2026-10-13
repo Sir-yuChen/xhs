@@ -2472,9 +2472,14 @@ export type RecommendItemTitleResult = {
 
 /** 一个版本的升级记录（`config/version.json` 的 `versions[]` 项）。 */
 export type SystemVersionRelease = {
+  /** 版本号（如 `1.0.2`）。 */
   version: string;
+  /** 更新时间（如 `2026-10-12 00:52`）。 */
   built_at: string;
   commit: string;
+  /** 更新简介（一句话摘要，折叠标题用）。 */
+  summary: string;
+  /** 更新详情（Markdown，展开后用）。 */
   notes: string;
 };
 
