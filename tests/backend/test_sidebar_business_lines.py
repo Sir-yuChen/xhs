@@ -535,7 +535,6 @@ class TestAccountScope:
 
 INSIGHTS_CONTENT = ROOT / "frontend/src/pages/platforms/xhs/insights-content-page.tsx"
 INSIGHTS_SHOP = ROOT / "frontend/src/pages/platforms/xhs/insights-shop-page.tsx"
-METRICS_PANEL = ROOT / "frontend/src/pages/platforms/xhs/metrics-dashboard-panel.tsx"
 
 
 class TestInsightsSplit:
@@ -555,50 +554,11 @@ class TestInsightsSplit:
         assert "InsightsContentPage" in router
         assert "InsightsShopPage" in router
 
-    def test_pages_pass_their_scope_to_one_shared_panel(self):
-        """两页各自把 `scope` 传给**同一个**面板 —— **不许各写一份图表**。
-
-        ⚠️ 这是本组最承重的一条：断言「两处都调 `<MetricsDashboardPanel`」+
-        「面板**只有一份文件**」。若哪天有人把图表复制进某一页，
-        第二条断言（面板文件里没有任何一页的私有拷贝）会钉住它。
-        """
-        content = _code_only(INSIGHTS_CONTENT)
-        shop = _code_only(INSIGHTS_SHOP)
-        assert '<MetricsDashboardPanel scope="note"' in content, "内容洞察页必须传 scope=\"note\""
-        assert '<MetricsDashboardPanel scope="shop"' in shop, "商品洞察页必须传 scope=\"shop\""
-        # 面板只允许一个实现文件（复制一份 = 两份真相源）。
-        panel_copies = sorted(
-            p.relative_to(ROOT).as_posix()
-            for p in (ROOT / "frontend/src").rglob("*metric*dashboard*.tsx")
-        )
-        assert panel_copies == ["frontend/src/pages/platforms/xhs/metrics-dashboard-panel.tsx"], (
-            f"指标面板只允许一份实现，实测：{panel_copies}"
-        )
-
-    def test_panel_actually_branches_on_scope(self):
-        """面板真的按 `scope` 分流 —— 不是「收下参数然后照旧全渲染」。
-
-        ⚠️ 只断言「参数在」会被「收下但不用」的写法骗过（那是**假拆分**：
-        两个页面看着分开，实际都在拉两条线的数据）。
-        """
-        panel = _code_only(METRICS_PANEL)
-        assert "scope" in panel
-        assert "showNote" in panel and "showShop" in panel, "面板必须把 scope 落成两个分流标志"
-        # ⚠️ **分流标志必须真的从 scope 派生**（不能是常量）：
-        #    写成 `const showNote = true` 时，下面的「调用形态」断言**照样绿**
-        #    （`showNote ? fetch…` 这个字符串还在），但两个页面实际都在拉两条线的数据
-        #    = 假拆分。实测：只查调用形态时，这个变异 ESCAPED —— 所以这一条是承重的。
-        assert 'const showNote = scope === "note" || scope === "both";' in panel, (
-            "showNote 必须由 scope 派生（写成常量 = 面板忽略 scope）"
-        )
-        assert 'const showShop = scope === "shop" || scope === "both";' in panel, (
-            "showShop 必须由 scope 派生（写成常量 = 面板忽略 scope）"
-        )
-        # 两个方向的请求都要能被跳过（否则拆了页还是每次拉两条线的数据）。
-        assert "showNote ? fetchNoteMetricsTrend" in panel, "笔记趋势必须受 scope 控制"
-        assert "showShop ? fetchShopMetricsTrend" in panel, "商品趋势必须受 scope 控制"
-        assert "showNote ? collectNoteMetrics" in panel, "笔记采集必须受 scope 控制"
-        assert "showShop ? collectShopMetrics" in panel, "商品采集必须受 scope 控制"
+    # ⚠️ 2026-10-13 用户口径：指标快照/趋势子系统整块移除（设计 39）⇒
+    # 原 `test_pages_pass_their_scope_to_one_shared_panel` 与
+    # `test_panel_actually_branches_on_scope` 的守卫对象（`metrics-dashboard-panel.tsx`
+    # 及其在两页的 `<MetricsDashboardPanel scope=…>` 接线）与实现一并退场，两条随之删除。
+    # 保留路由与旧路由重定向两条 —— 它们钉的是**信息架构**，与指标面板无关。
 
     def test_legacy_analytics_route_still_redirects(self):
         """旧 `/platforms/xhs/analytics` **保留为重定向**（深链与书签不死）。"""

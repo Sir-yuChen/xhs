@@ -129,11 +129,14 @@ def test_initial_data_file_exists_and_is_parseable():
     payload = json.loads(INITIAL_DATA_FILE.read_text(encoding="utf-8"))
     rows = payload["scheduled_jobs"]
     assert isinstance(rows, list)
-    #: ⚠️ 14（原 15）—— 2026-10-13 R2：`system.llm_gateway_monitor` 退场（用户口径
-    #: 「移除 LLM 网关预警任务」）⇒ 注册表 builtin 全集 15→14，种子同步删条目。
-    #: 前值 15 的原注：`system.picture_space_cleanup`（图片空间清理，设计 22）落地时
-    #: 漏改硬编码数字导致本条长期红，2026-10-11 按注册表 builtin 全集审阅后订正为 15。
-    assert len(rows) == 14, "定时任务初始化数据条数变化必须同步审阅（注册表 builtin 全集）"
+    #: ⚠️ 12（原 14）—— 2026-10-13 第二轮用户口径：指标快照子系统整块移除 ⇒
+    #: `system.note_metrics_collect` / `system.shop_metrics_collect` 两条种子退场
+    #: （注册表 builtin 全集 14→12，种子同步删条目）。
+    #: 前值 14 的原注：2026-10-13 R2 `system.llm_gateway_monitor` 退场（用户口径
+    #: 「移除 LLM 网关预警任务」）⇒ 15→14；再前值 15：`system.picture_space_cleanup`
+    #: （图片空间清理，设计 22）落地时漏改硬编码数字导致本条长期红，2026-10-11 按
+    #: 注册表 builtin 全集审阅后订正为 15。
+    assert len(rows) == 12, "定时任务初始化数据条数变化必须同步审阅（注册表 builtin 全集）"
 
 
 def test_initial_data_keys_match_registry_builtin_set():
@@ -358,7 +361,7 @@ def test_startup_seeding_is_decoupled_from_scheduler_switch(tmp_path, monkeypatc
         _make_user(TestingSessionLocal)
         # 直接调启动播种（它就是 lifespan 里那一步），不启调度器
         created = scheduler_service.seed_builtin_jobs_from_initial_data()
-        assert created == 14  # 同上：注册表 builtin 全集的条数（2026-10-13 R2 退场 monitor ⇒ 15→14）
+        assert created == 12  # 同上：注册表 builtin 全集的条数（2026-10-13 指标快照两任务退场 ⇒ 14→12）
 
         db = TestingSessionLocal()
         keys = set(db.scalars(select(ScheduledJob.job_key)).all())
@@ -458,8 +461,8 @@ def test_missing_data_file_falls_back_to_code_defaults_with_warning(tmp_path, mo
             _make_user(TestingSessionLocal)
             created = ensure_builtin_jobs(db)
             db.close()
-        assert len(created) == 14, "文件缺失也要有兜底种子（不能少任务）"
-        # ⚠️ 14 = 注册表 builtin 全集的条数（2026-10-13 R2 退场 monitor ⇒ 15→14）。
+        assert len(created) == 12, "文件缺失也要有兜底种子（不能少任务）"
+        # ⚠️ 12 = 注册表 builtin 全集的条数（2026-10-13 指标快照两任务退场 ⇒ 14→12）。
         assert any("不存在" in record.message for record in caplog.records)
     finally:
         app.dependency_overrides.clear()

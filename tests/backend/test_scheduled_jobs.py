@@ -139,8 +139,8 @@ def test_registry_has_exactly_sixteen_entries():
     ⚠️ 2026-10-07：**工作流整条特性退场**（用户口径「把工作流相关逻辑表等完整移除，
     直接使用定时任务完成即可」）⇒ `workflow.` 这一项从注册表删除 ⇒ 16 → 15。
 
-    ⚠️ 2026-10-06：新增 `system.note_data_sync`（离线笔记数据同步，商业+普通两类，
-    千帆数据中心 butterfly/data 接口）⇒ 15 → 16。
+    ⚠️ 2026-10-06：新增 `system.note_data_sync`（**2026-10-13 用户口径改名为「数据中心
+    笔记指标同步」**，商业+普通两类，千帆数据中心 butterfly/data 接口）⇒ 15 → 16。
 
     ⚠️ 2026-10-11：新增 `system.picture_space_cleanup`（图片空间清理未引用图片，
     用户口径「每周一执行一次」）⇒ 15 → 16。
@@ -148,11 +148,14 @@ def test_registry_has_exactly_sixteen_entries():
     ⚠️ 2026-10-13：**移除** `system.llm_gateway_monitor`（用户口径「移除 LLM 网关预警任务，
     根据配置的规则**自动触发**」）⇒ 预警改由「台账写入即异步评估」
     （`services/llm_gateway_alert_trigger.py`），不再需要常驻调度任务 ⇒ 16 → 15。
+
+    ⚠️ 2026-10-13（第二轮用户口径）：**移除** `system.note_metrics_collect` /
+    `system.shop_metrics_collect`（指标快照子系统整块移除，后续专项）⇒ 15 → 13。
     """
     from backend.app.services.job_registry import job_registry
 
     registry = job_registry()
-    assert len(registry) == 15
+    assert len(registry) == 13
     assert set(registry) == {
         "system.due_publish",
         "system.monitoring_refresh",
@@ -164,8 +167,6 @@ def test_registry_has_exactly_sixteen_entries():
         "system.note_data_sync",
         "system.business_note_auto_publish",
         "system.queue_record_cleanup",
-        "system.note_metrics_collect",
-        "system.shop_metrics_collect",
         "system.order_sync",
         "system.picture_space_cleanup",
         "auto_ops.keyword_pipeline",
@@ -2773,9 +2774,15 @@ def test_dedupe_seeded_scheduled_jobs_migration(tmp_path):
         # 而 head 迁移 `j1k2l3m4n5o6` 会给这张表加 `account_id` 列 —— 表不存在则迁移
         # 报错，用例红得与它要验的 DEF-077 毫无关系（夹具缺失，不是被测行为坏了）。
         # 刻意**不含** `account_id`：那正是迁移要加的列，预置会让迁移重复加列而失败。
+        # ⚠️ 2026-10-13 补 `job_key` / `job_name`：head 迁移 `b1c2d3e4f5a7`（指标快照
+        #    两任务退场 + `note_data_sync` 改名）要 UPDATE 这两列 —— 夹具是「stamp 点
+        #    当时的表形状省略版」，而 `job_name` 是更早的 `y8z9a0b1c2d3` 加的、不在本
+        #    区间内重跑 ⇒ 缺列即 `no such column: job_name`。
         conn.execute(
             "CREATE TABLE scheduled_job_logs ("
             " id INTEGER NOT NULL, status VARCHAR(16) DEFAULT 'running' NOT NULL,"
+            " job_key VARCHAR(128) DEFAULT '' NOT NULL,"
+            " job_name VARCHAR(128) DEFAULT '' NOT NULL,"
             " PRIMARY KEY (id))"
         )
         for job_id, user_id, name, job_key, remark in rows:

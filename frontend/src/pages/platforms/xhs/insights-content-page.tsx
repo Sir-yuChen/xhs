@@ -10,12 +10,18 @@
  *  * **本页 = 内容线**：内容库笔记指标 + 热点话题 + 评论洞察；
  *  * **商品洞察**（`insights-shop-page.tsx`）= 店铺线：商品指标趋势 + 商品监控 + 订单入口。
  *
- * ## 2026-10-13 重排（R3）
+ * ## 2026-10-13 重排（R3）+ 指标内容整块移除
  *
  * 用户口径「重新布局的商品洞察页面和内容洞察页面，要求 UI 更合理美观」。本页重排三件事：
- * ① **信息层级**：KPI 概览 → 趋势（主图，全宽）→ 明细（高潜内容 / 热点 / 评论三等分）；
+ * ① **信息层级**：KPI 概览 → 明细（高潜内容 / 热点 / 评论三等分）→ 高赞评论；
  * ② **色板统一**：全部走 `useThemePalette()`（原先多处硬编码 `#1668dc` 等，深浅主题下割裂）；
  * ③ **间距/栅格统一**：区块间距 16、卡片内边距一致、窄屏塌陷到单列。
+ *
+ * ⚠️ **2026-10-13 用户口径「指标相关内容逻辑移除」**：原先的「笔记指标趋势」面板
+ * （`MetricsDashboardPanel scope="note"`，底层是 `note-metrics/collect|trend` 端点 +
+ * 定时任务）**整块移除**，后续作专项单独排期。本页保留的 KPI 概览（内容库笔记 /
+ * 总互动 / 已存评论 / 热点话题）来自 `fetchXhsOverview` 的**实时聚合**，
+ * 与「快照趋势」无关，故保留。
  *
  * ⚠️ 旧路由 `/platforms/xhs/analytics`（含 `?tab=`）**重定向保深链不死**（见 `router.tsx`）。
  */
@@ -60,9 +66,6 @@ import type {
   AnalyticsTopContent,
   DashboardOverview,
 } from "../../../types";
-// 「指标监控」面板（设计 17 §13.10）：本页只要**笔记侧**（`scope="note"`）。
-// ⚠️ 拆页**不是**复制面板 —— 面板收 `scope` 参数、两侧共用一份图表实现。
-import { MetricsDashboardPanel } from "./metrics-dashboard-panel";
 
 const { Text } = Typography;
 
@@ -208,10 +211,7 @@ export function InsightsContentPage() {
       {error ? <Alert type="error" showIcon message={error} closable /> : null}
 
       <Spin spinning={isLoading}>
-        {/* ---- ② 笔记指标趋势（主图，全宽） ---- */}
-        <MetricsDashboardPanel scope="note" />
-
-        {/* ---- ③ 明细：高潜内容（主）+ 热点 / 评论（侧） ---- */}
+        {/* ---- ② 明细：高潜内容（主）+ 热点 / 评论（侧） ---- */}
         <Row gutter={[16, 16]}>
           <Col xs={24} lg={16}>
             <Card
@@ -321,7 +321,7 @@ export function InsightsContentPage() {
           </Col>
         </Row>
 
-        {/* ---- ④ 高赞评论（全宽） ---- */}
+        {/* ---- ③ 高赞评论（全宽） ---- */}
         <Card
           title={
             <Space>

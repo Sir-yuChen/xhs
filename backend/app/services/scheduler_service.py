@@ -734,13 +734,10 @@ def _builtin_seed_defaults() -> dict[str, dict[str, Any]]:
             "cron": _cron_every_n_hours(hours("xhs_shop_goods_sync_interval_hours", 6)),
             "status": "active" if bool(getattr(settings, "xhs_shop_goods_sync_enabled", False)) else "paused",
         },
-        # 2026-10-03 M2 切片 2（设计 17 §13.9）：两个指标快照采集。
-        # ⚠️ **无开关**（兜底恒 `active`）：采集是纯本地零平台请求，没有「该不该跑」
-        # 的成本问题；关掉它只会让趋势断档。真要停，用户在任务中心暂停即可。
-        # ⚠️ 分钟错开（5 / 35）见 `job_registry` 的同一注释（减少写锁竞争，DEF-085）。
-        "system.note_metrics_collect": {"cron": "0 5 * * * *", "status": "active"},
-        "system.shop_metrics_collect": {"cron": "0 35 * * * *", "status": "active"},
-        # 2026-10-06 需求：离线笔记数据同步（商业+普通，默认每 6 小时一次，恒 active）。
+        # 2026-10-06 需求：数据中心笔记指标同步（商业+普通，默认每 6 小时一次，恒 active）。
+        # ⚠️ 2026-10-13 用户口径由「离线笔记数据同步」**改名**（落 `note_datacenter_stats`，
+        # 供数据中心页展示 + 无流量清理判定）。同轮**移除**指标快照采集两任务
+        # （`system.note_metrics_collect` / `system.shop_metrics_collect`）。
         "system.note_data_sync": {"cron": "0 0 */6 * * *", "status": "active"},
         # 2026-10-07 用户需求「每日发布商业笔记」（设计 15 §19）：每天 9:00 跑一轮。
         # ⚠️ 默认 active —— 与两个同步任务不同（它们默认关，因为会大量打平台只读

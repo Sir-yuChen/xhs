@@ -6466,8 +6466,13 @@ def test_schedule_status_reports_scheduler_state_and_counts(tmp_path):
         # 2026-10-11 §1.9：新增 `system.picture_space_cleanup`（**默认 paused** ——
         # 平台写操作，用户确认参数后再启用）⇒ total 16 → 17、paused 1 → 2
         #（active 不变：新任务不进 active）。
-        assert payload["stats"]["total"] == 17
-        assert payload["stats"]["active"] == 15
+        # ⚠️ 2026-10-13 指标快照子系统整块移除：`system.note_metrics_collect` /
+        # `system.shop_metrics_collect` 两条种子退场（均 active）⇒ total 17 → 15、
+        # active 15 → 13；同轮再算：本测试自播 2 行（1 active + 1 paused）+
+        # 内置 12 行（11 active + 1 paused `picture_space_cleanup`）
+        # ⇒ total 14 / active 12 / paused 2。
+        assert payload["stats"]["total"] == 14
+        assert payload["stats"]["active"] == 12
         assert payload["stats"]["paused"] == 2
         assert payload["stats"]["completed"] == 0
     finally:

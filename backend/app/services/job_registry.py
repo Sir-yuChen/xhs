@@ -134,10 +134,6 @@ def _build_registry() -> dict[str, JobSpec]:
         run_business_note_auto_publish,
         validate_business_publish_params,
     )
-    from backend.app.services.metric_scheduler_service import (
-        run_note_metrics_collect_once,
-        run_shop_metrics_collect_once,
-    )
     from backend.app.services.picture_space_cleanup_service import (
         run_picture_space_cleanup,
         validate_cleanup_params,
@@ -228,12 +224,13 @@ def _build_registry() -> dict[str, JobSpec]:
             default_cron="0 0 */6 * * *",
         ),
         JobSpec(
-            # 「我的笔记」离线数据同步（2026-10-06 需求）：千帆数据中心商业 + 普通
-            # 两类笔记，走 butterfly/data 列表接口（无签名直连）落库。与上面的
-            # 笔记同步（creator/ark 三方同步）是**两件事**：那个同步到 `note_type=synced`
-            # 的线上笔记，这个落 `note_datacenter_stats` 统计表的离线数据中心笔记。
+            # 「数据中心笔记指标同步」（2026-10-13 用户口径由「离线笔记数据同步」改名）：
+            # 千帆数据中心商业 + 普通两类笔记，走 butterfly/data 列表接口（无签名直连）
+            # 落库。与上面的笔记同步（creator/ark 三方同步）是**两件事**：那个同步到
+            # `note_type=synced` 的线上笔记，这个落 `note_datacenter_stats` 统计表的
+            # 离线数据中心笔记（供数据中心页的指标展示与无流量清理判定）。
             key=JOB_KEY_NOTE_DATA_SYNC,
-            name="离线笔记数据同步",
+            name="数据中心笔记指标同步",
             func=scheduler_service.run_scheduled_note_data_syncs,
             builtin=True,
             user_scoped=True,
@@ -273,34 +270,6 @@ def _build_registry() -> dict[str, JobSpec]:
             params_validator=validate_retention_days,
             default_trigger_type="cron",
             default_cron="0 0 7 * * *",
-        ),
-        JobSpec(
-            # 2026-10-03 M2 数据仪表盘切片 2（设计 17 §13.9）：笔记指标快照采集。
-            # ⚠️ **纯本地零平台请求**（数据源 = 已落库的 `notes.raw_json`），
-            # 故频率不受平台限流约束；但仍**不调高到每分钟** —— 写锁是共享资源，
-            # 采集频率只要不低于源数据的更新频率即可（笔记同步默认 6 小时一次）。
-            key="system.note_metrics_collect",
-            name="笔记指标快照采集",
-            func=run_note_metrics_collect_once,
-            builtin=True,
-            user_scoped=True,
-            params_editable=(),
-            default_trigger_type="cron",
-            # 每小时第 5 分。**避开整点**：整点是同步/发布/巡检的集中时段，
-            # 错峰减少 SQLite 写锁竞争（DEF-085 的直接教训）。
-            default_cron="0 5 * * * *",
-        ),
-        JobSpec(
-            # 2026-10-03 M2 数据仪表盘切片 2（设计 17 §13.9）：商品指标快照采集。
-            # ⚠️ 与笔记采集**错开 30 分钟**（第 35 分），避免两个采集同时抢写锁。
-            key="system.shop_metrics_collect",
-            name="店铺商品指标快照采集",
-            func=run_shop_metrics_collect_once,
-            builtin=True,
-            user_scoped=True,
-            params_editable=(),
-            default_trigger_type="cron",
-            default_cron="0 35 * * * *",
         ),
         JobSpec(
             # 设计 15 §19（2026-10-07 用户需求「新增定时任务 每日发布商业笔记」）：

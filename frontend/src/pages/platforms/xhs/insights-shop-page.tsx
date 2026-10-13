@@ -2,21 +2,22 @@
  * 商品洞察（设计 32 §6 / A6，2026-10-11 用户拍板 D2「拆」；2026-10-13 R3 重排）。
  *
  * 与前身「数据洞察」的关系：那一页把**两条业务线**的指标塞在一个页面的两个 Tab 里；
- * 本页只承载**店铺线**（商品指标趋势 + 商品监控 + 订单指标入口）。
+ * 本页只承载**店铺线**（商品库存/销量 + 店铺快捷入口 + 订单口径入口）。
  *
  * 用户口径（市场共识）：**两条线的成绩先分开看**，组合视图只做汇总，
  * 不可把不可比的成绩揉成一个数 —— 笔记的「阅读/互动」与商品的「库存/销量/价格」
  * 本来就不是同一把尺子。
  *
- * ## 2026-10-13 重排（R3）
+ * ## 2026-10-13 用户口径：指标（快照/趋势）相关内容整块移除
  *
- * 用户口径「重新布局的商品洞察页面和内容洞察页面，要求 UI 更合理美观」。原页只有
- * 一个面板 + 一张入口卡（56 行，观感偏空）。本页补齐**经营三块**：
- * ① **商品指标趋势**（复用面板，`scope="shop"` —— 图表实现一份，两侧共用）；
- * ② **店铺快捷入口**（商品列表 / 订单管理 —— 把「看数」直接接到「干活」）；
- * ③ **订单口径说明**（不复制订单指标卡：订单页顶部已有完整指标，复制即两份真相源）。
+ * 用户口径「把商品洞察和内容洞察中的指标相关内容逻辑移除，包括店铺商品指标快照
+ * 采集、笔记指标快照采集定时任务移除，后续作为专项单独排期」。
  *
- * ⚠️ 面板只传 `scope="shop"` —— 图表实现**一份**，两侧共用（不复制）。
+ * ⇒ 原先的「商品指标趋势面板」（`MetricsDashboardPanel scope="shop"`）与其底层
+ * 快照采集（`shop-metrics/collect|trend` 端点 + 定时任务）**整块移除**。
+ * 本页现在承载：① **店铺快捷入口**（把「看数」接到「干活」）；
+ * ② **订单口径说明**（不复制订单指标卡：订单页顶部已有完整指标，复制即两份真相源）。
+ * 商品维度的库存/销量/价格在「商品管理」列表页有实时值（那是台账，不是快照趋势）。
  */
 import {
   BarChartOutlined,
@@ -28,7 +29,6 @@ import { Card, Col, Row, Space, Statistic, Typography } from "antd";
 import { Link } from "react-router-dom";
 
 import { useThemePalette } from "../../../app/providers";
-import { MetricsDashboardPanel } from "./metrics-dashboard-panel";
 
 const { Text } = Typography;
 
@@ -39,7 +39,7 @@ const SHOP_ENTRIES = [
     to: "/platforms/xhs/shop-items",
     icon: <ShoppingOutlined />,
     title: "商品管理",
-    desc: "查看 / 编辑商品，批量上架下架",
+    desc: "库存 / 销量 / 价格实时台账，批量上架下架",
   },
   {
     key: "orders",
@@ -55,10 +55,7 @@ export function InsightsShopPage() {
 
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
-      {/* ---- ① 商品指标趋势 + 商品监控（面板的店铺侧） ---- */}
-      <MetricsDashboardPanel scope="shop" />
-
-      {/* ---- ② 店铺快捷入口 ---- */}
+      {/* ---- ① 店铺快捷入口 ---- */}
       <Row gutter={[16, 16]}>
         {SHOP_ENTRIES.map((entry) => (
           <Col xs={24} md={12} key={entry.key}>
@@ -88,7 +85,7 @@ export function InsightsShopPage() {
         ))}
       </Row>
 
-      {/* ---- ③ 订单口径说明 ---- */}
+      {/* ---- ② 订单口径说明 ---- */}
       <Card
         size="small"
         title={

@@ -1,15 +1,16 @@
 """共用撞锁重试的测试（DEF-085，2026-10-03）。
 
-`retry_on_lock` 是**三处同型链路的唯一实现**（台账记账 + 两个快照采集），
-它的判据错一次，三处一起错 —— 所以判据本身要有独立的、变异可验证的守卫。
+`retry_on_lock` 是**多处同型链路的唯一实现**（台账记账等），
+它的判据错一次，多处一起错 —— 所以判据本身要有独立的、变异可验证的守卫。
 
 覆盖：
 1. **判据**（`is_lock_error`）—— 只认锁竞争；`no such table` / 唯一约束 / 非
    SQLAlchemy 异常一律**不**算（否则确定性错误被无谓重试，白占业务线程）。
 2. **重试行为** —— 撞锁重试到成功；非锁类**一次即止**；次数用尽后**原样抛**
    （本函数**不是**安全网，「不抛穿」由调用点自己包）。
-3. **批量采集不再撞锁** —— `_SNAPSHOT_BATCH` 存在且 SQL 逐字仍是 `ON CONFLICT DO UPDATE`
-   （防「为重试而改成先删后插」这类语义漂移）。
+
+⚠️ 2026-10-13 用户口径移除指标快照子系统后，原 ③ 段（批量采集 + `ON CONFLICT DO
+UPDATE` 语义）**随快照采集一并移除** —— 判据对象已不存在，留着就是守卫一个已删实现。
 """
 
 from __future__ import annotations
@@ -128,63 +129,3 @@ def test_retry_raises_after_exhausting_attempts():
         sqlite_retry.retry_on_lock(op, what="t", attempts=3, sleep=slept.append)
     assert calls["n"] == 3
     assert len(slept) == 2, "3 次尝试 ⇒ 2 次退避（最后一次不再等）"
-
-
-# --------------------------------------------------------------------------- #
-# ③ 采集链路：批量 + 语义不变
-# --------------------------------------------------------------------------- #
-def test_snapshot_batch_size_is_defined_and_sane():
-    """两侧都定义了批大小，且足够大到真有「批」的效果。
-
-    ⚠️ 变异守护：把 `_SNAPSHOT_BATCH` 改成 1（等于没批，退回逐行 execute）
-    ⇒ 本用例必红。逐行 execute 正是 DEF-085 里持锁 6 秒的原因。
-    """
-    from backend.app.services import note_metrics_service, shop_metrics_service
-
-    for module in (note_metrics_service, shop_metrics_service):
-        size = module._SNAPSHOT_BATCH
-        assert 100 <= size <= 1000, f"{module.__name__} 的批大小 {size} 不在合理区间"
-
-
-def test_lock_exhaustion_is_retryable_not_internal_error():
-    """用尽重试必须抛 `LockRetryExhausted`（可重试语义），**不是**裸 OperationalError。
-
-    ⚠️ 变异守护：改成 `raise`（把原 OperationalError 抛出去）⇒ 本用例必红。
-    裸 OperationalError 冒到 FastAPI = **500 服务器内部错误**，
-    而写锁竞争是**可预期**的瞬时失败 ⇒ 会让用户以为功能坏了，也污染错误率口径。
-    """
-    def op():
-        raise _op_error("database is locked")
-
-    with pytest.raises(sqlite_retry.LockRetryExhausted) as info:
-        sqlite_retry.retry_on_lock(op, what="采集", attempts=2, sleep=lambda _s: None)
-    assert info.value.attempts == 2
-    assert isinstance(info.value.cause, OperationalError)
-
-
-def test_non_lock_error_is_not_wrapped():
-    """确定性错误**不得**被包成可重试语义（否则调用点会去重试一个必错的请求）。"""
-    def op():
-        raise _op_error("no such table: t")
-
-    with pytest.raises(OperationalError) as info:
-        sqlite_retry.retry_on_lock(op, what="采集", sleep=lambda _s: None)
-    assert not isinstance(info.value, sqlite_retry.LockRetryExhausted)
-
-
-def test_snapshots_use_on_conflict_do_update_not_delete_insert():
-    """采集必须仍是 `ON CONFLICT DO UPDATE`（同日覆盖），**不许**为先删后插。
-
-    ⚠️ 变异守护：把 `on_conflict_do_update` 换成「先 delete 再 insert」⇒ 本用例必红。
-
-    为什么钉死：先删后插是**两次写**，中间有窗口（另一个读者会看到空窗），
-    且删+插的锁持有时间**更长** —— 正好与 DEF-085 的修法方向相反。
-    """
-    import inspect
-
-    from backend.app.services import note_metrics_service, shop_metrics_service
-
-    for module in (note_metrics_service, shop_metrics_service):
-        source = inspect.getsource(module.collect_snapshots)
-        assert "on_conflict_do_update" in source, f"{module.__name__} 丢了覆盖语义"
-        assert "delete(" not in source, f"{module.__name__} 不得先删后插"

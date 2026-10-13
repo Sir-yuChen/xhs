@@ -112,28 +112,6 @@
       "remark": "系统内置任务"
     },
     {
-      "job_key": "system.note_metrics_collect",
-      "name": "笔记指标快照采集",
-      "trigger_type": "cron",
-      "cron_expression": "0 5 * * * *",
-      "misfire_policy": "once",
-      "concurrent": "forbid",
-      "params": {},
-      "status": "active",
-      "remark": "系统内置任务"
-    },
-    {
-      "job_key": "system.shop_metrics_collect",
-      "name": "店铺商品指标快照采集",
-      "trigger_type": "cron",
-      "cron_expression": "0 35 * * * *",
-      "misfire_policy": "once",
-      "concurrent": "forbid",
-      "params": {},
-      "status": "active",
-      "remark": "系统内置任务"
-    },
-    {
       "job_key": "system.note_data_sync",
       "name": "离线笔记数据同步",
       "trigger_type": "cron",

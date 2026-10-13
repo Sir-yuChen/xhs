@@ -1,57 +1,17 @@
-"""笔记指标快照与趋势的测试（设计 17 §13.5，M2 方向 3，2026-10-03）。
+"""笔记指标**口径**的测试（设计 17 §13.5，M2 方向 3，2026-10-03）。
 
-覆盖三块：
-1. **口径**（`note_metrics`）—— 含 v2.24 补的 `views`，以及**三种真实数据形态**
-   （平铺 / `data` 下 / `note` 下）；缺值一律 0（不造假）。
-2. **采集**（`collect_snapshots`）—— 覆盖语义（同日重采取最新，不是追加）、
-   只采有 raw_json 的笔记（未同步 ≠ 零互动）。
-3. **趋势**（`trend_series`）—— 按日聚合、不补零、租户隔离、可按单篇过滤。
+覆盖：**口径**（`note_metrics`）—— 含 `views`，以及**三种真实数据形态**
+（平铺 / `data` 下 / `note` 下）；缺值一律 0（不造假）。
+
+⚠️ 2026-10-13 用户口径移除指标快照子系统：原「② 采集（`collect_snapshots`）」
+与「③ 趋势（`trend_series`）」两段**随实现一并移除**（快照/趋势端点、定时任务、
+服务函数已删）。口径读取仍被榜单/排名使用，故本段保留。
 """
 
 from __future__ import annotations
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-
-from backend.app.core.database import Base
-from tests.backend.conftest import seed_owner_rows
-from backend.app.models.monitoring import NoteMetricSnapshot
 from backend.app.models.note import Note
 from backend.app.services import note_metrics_service as svc
-
-
-def _session(tmp_path, name="metrics.db"):
-    engine = create_engine(f"sqlite:///{tmp_path / name}")
-    Base.metadata.create_all(engine)
-    # ⚠️ FK=ON 后必须播种父行：本文件插 notes(user_id=1)，而 users 行没人建
-    # （2026-10-04 实测：不播则 10 条用例 FOREIGN KEY constraint failed）。
-    seed_owner_rows(engine, user_id=1, account_id=1)
-    return sessionmaker(bind=engine)()
-
-
-def _ensure_user(db, user_id):
-    """保证 `users` 行存在（FK=ON 后 `notes.user_id` 有外键；跨租户用例用 id=2）。"""
-    from backend.app.models.user import User
-
-    if db.get(User, user_id) is None:
-        db.add(User(id=user_id, username=f"u{user_id}", password_hash="x"))
-        db.flush()
-
-
-def _note(db, *, user_id=1, note_id="n1", raw=None, title="笔记"):
-    _ensure_user(db, user_id)
-    note = Note(
-        user_id=user_id,
-        platform_account_id=1,
-        platform="xhs",
-        note_id=note_id,
-        title=title,
-        raw_json=raw,
-    )
-    db.add(note)
-    db.commit()
-    db.refresh(note)
-    return note
 
 
 # --------------------------------------------------------------------------- #
@@ -105,144 +65,3 @@ def test_engagement_is_sum_of_four_only():
     note = Note(raw_json={"likes": 1, "collects": 2, "comments": 3, "shares": 4, "view_count": 999})
     metrics = svc.note_metrics(note)
     assert metrics["engagement"] == 1 + 2 + 3 + 4
-
-
-# --------------------------------------------------------------------------- #
-# ② 采集
-# --------------------------------------------------------------------------- #
-def test_collect_writes_snapshot_per_note(tmp_path):
-    db = _session(tmp_path)
-    _note(db, note_id="a", raw={"likes": 1, "view_count": 10})
-    _note(db, note_id="b", raw={"likes": 2, "view_count": 20})
-
-    written = svc.collect_snapshots(db, user_id=1, stat_date="2026-10-03")
-    assert written == 2
-    rows = db.query(NoteMetricSnapshot).all()
-    assert len(rows) == 2
-    assert all(row.stat_date == "2026-10-03" for row in rows)
-    assert sorted(row.likes for row in rows) == [1, 2]
-    assert sorted(row.views for row in rows) == [10, 20]
-
-
-def test_collect_overwrites_same_day_not_appends(tmp_path):
-    """同日重采 ⇒ **覆盖**（取最新值），不是追加（否则趋势线成锯齿）。"""
-    db = _session(tmp_path)
-    note = _note(db, note_id="a", raw={"likes": 1})
-
-    svc.collect_snapshots(db, user_id=1, stat_date="2026-10-03")
-    # 再采一次（模拟当天晚些时候又同步了一次，值涨了）
-    note.raw_json = {"likes": 9}
-    db.commit()
-    svc.collect_snapshots(db, user_id=1, stat_date="2026-10-03")
-
-    rows = db.query(NoteMetricSnapshot).all()
-    assert len(rows) == 1, "同日重复采集不应产生第二行（唯一键 + upsert）"
-    assert rows[0].likes == 9, "应取最新值，而不是保留第一次的旧值"
-
-
-def test_collect_different_days_accumulate(tmp_path):
-    """不同日 ⇒ 各自一行（趋势的基础）。"""
-    db = _session(tmp_path)
-    _note(db, note_id="a", raw={"likes": 1})
-    svc.collect_snapshots(db, user_id=1, stat_date="2026-10-01")
-    svc.collect_snapshots(db, user_id=1, stat_date="2026-10-02")
-    assert db.query(NoteMetricSnapshot).count() == 2
-
-
-def test_collect_skips_notes_without_raw_json(tmp_path):
-    """**没同步过的笔记不采**（缺值口径：未同步 ≠ 零互动）。
-
-    ⚠️ 变异守护：去掉 `raw_json.is_not(None)` 条件 ⇒ 本用例必红 ——
-    那会把「还没同步」写成「互动为 0」，在仪表盘上表现为真实的零互动。
-    """
-    db = _session(tmp_path)
-    _note(db, note_id="synced", raw={"likes": 1})
-    _note(db, note_id="never_synced", raw=None)
-    # ⚠️ 空对象也是「无指标可采」——SQLAlchemy 把它存成字符串 `'{}'`（不是 NULL），
-    # 所以判据要按**实际存储形态**写（本用例守住这一点）。
-    _note(db, note_id="empty_obj", raw={})
-
-    written = svc.collect_snapshots(db, user_id=1, stat_date="2026-10-03")
-    assert written == 1, "只应采有真实 raw_json 的那篇"
-    assert [row.note_pk for row in db.query(NoteMetricSnapshot).all()] == [
-        db.query(Note).filter_by(note_id="synced").one().id
-    ]
-
-
-def test_collect_is_scoped_to_user(tmp_path):
-    """只采**本用户**的笔记（租户隔离）。"""
-    db = _session(tmp_path)
-    _note(db, user_id=1, note_id="mine", raw={"likes": 1})
-    _note(db, user_id=2, note_id="others", raw={"likes": 2})
-
-    written = svc.collect_snapshots(db, user_id=1, stat_date="2026-10-03")
-    assert written == 1
-    assert db.query(NoteMetricSnapshot).one().user_id == 1
-
-
-# --------------------------------------------------------------------------- #
-# ③ 趋势
-# --------------------------------------------------------------------------- #
-def test_trend_aggregates_by_day(tmp_path):
-    db = _session(tmp_path)
-    _note(db, note_id="a", raw={"likes": 1})
-    _note(db, note_id="b", raw={"likes": 2})
-    svc.collect_snapshots(db, user_id=1, stat_date="2026-10-01")
-    _note(db, note_id="c", raw={"likes": 10})
-    svc.collect_snapshots(db, user_id=1, stat_date="2026-10-02")
-
-    series = svc.trend_series(db, user_id=1, days=0)
-    assert [point["stat_date"] for point in series] == ["2026-10-01", "2026-10-02"]
-    assert series[0]["likes"] == 3   # 1 + 2
-    assert series[1]["likes"] == 13  # 1 + 2 + 10
-
-
-def test_trend_does_not_fill_missing_days(tmp_path):
-    """**不补零** —— 缺失的天直接不出现（补零会把「没采」画成「掉到 0」）。
-
-    ⚠️ 变异守护：给它补零（如中间插一条 0 值）⇒ 本用例必红。
-    """
-    db = _session(tmp_path)
-    _note(db, note_id="a", raw={"likes": 1})
-    svc.collect_snapshots(db, user_id=1, stat_date="2026-09-01")
-    svc.collect_snapshots(db, user_id=1, stat_date="2026-09-30")
-
-    series = svc.trend_series(db, user_id=1, days=0)
-    assert len(series) == 2, "只返回有快照的两天，中间不补零"
-    assert {p["stat_date"] for p in series} == {"2026-09-01", "2026-09-30"}
-
-
-def test_trend_can_filter_single_note(tmp_path):
-    db = _session(tmp_path)
-    note_a = _note(db, note_id="a", raw={"likes": 1})
-    _note(db, note_id="b", raw={"likes": 100})
-    svc.collect_snapshots(db, user_id=1, stat_date="2026-10-03")
-
-    series = svc.trend_series(db, user_id=1, days=0, note_pk=note_a.id)
-    assert len(series) == 1 and series[0]["likes"] == 1
-
-
-def test_trend_is_scoped_to_user(tmp_path):
-    """趋势只含本用户（租户隔离 —— 与全站同一把尺子）。"""
-    db = _session(tmp_path)
-    _note(db, user_id=1, note_id="mine", raw={"likes": 1})
-    _note(db, user_id=2, note_id="others", raw={"likes": 999})
-    svc.collect_snapshots(db, user_id=1, stat_date="2026-10-03")
-    svc.collect_snapshots(db, user_id=2, stat_date="2026-10-03")
-
-    series = svc.trend_series(db, user_id=1, days=0)
-    assert series[0]["likes"] == 1, "不能把别人的数据算进来"
-
-
-def test_trend_empty_when_no_snapshots(tmp_path):
-    """没有任何快照 ⇒ 空序列（不是编一串 0）。"""
-    db = _session(tmp_path)
-    _note(db, note_id="a", raw={"likes": 1})
-    assert svc.trend_series(db, user_id=1, days=30) == []
-
-
-def test_stat_date_is_shanghai_day():
-    """统计日按**上海时区**（用 UTC 会让凌晨采集的笔记落到前一天）。"""
-    from datetime import datetime
-
-    assert svc.stat_date_of(datetime(2026, 10, 3, 23, 30)) == "2026-10-03"

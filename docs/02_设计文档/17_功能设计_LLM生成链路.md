@@ -3006,6 +3006,23 @@ T7 连带跑全量回归时暴露 **3 条未提交迁移的幂等缺陷**（`e5f
 
 ## 13.5 M2 数据仪表盘 · 切片 1：笔记指标快照与趋势（2026-10-03）
 
+> ⚠️ **2026-10-13 用户口径：整块废止**（设计 39 §1 为准）。
+>
+> 口径原文：「把商品洞察和内容洞察中的指标相关内容逻辑移除，包括店铺商品指标快照采集、
+> 笔记指标快照采集定时任务移除，后续作为专项单独排期。」
+>
+> **退场**：4 端点（`POST|GET /api/xhs/analytics/metrics/collect|trend`、`POST|GET /api/xhs/analytics/shop-metrics/collect|trend`）、
+> `services/metric_scheduler_service.py` 整模块、`services/shop_metrics_service.py` 整模块、
+> `note_metrics_service` 的快照/趋势四函数（`stat_date_of` / `snapshot_note` / `collect_snapshots` / `trend_series`）、
+> 两个内置任务（`system.note_metrics_collect` / `system.shop_metrics_collect`，注册表 15→13 + 种子删 2 条 + 迁移 `b1c2d3e4f5a7` 清存量行与调度注册项）、
+> 前端 `metrics-dashboard-panel.tsx` / `lib/metrics-format.ts(+test)` / `lib/api.ts` 4 请求函数 + 3 类型 / 双洞察页的两处面板接线。
+>
+> **保留**：`note_metrics()` 口径读取（榜单/互动排名仍在用）、`shop_metrics()`、
+> 字典表 `note_metric_snapshots` / `shop_metric_snapshots` 与全部历史行（不 drop，供后续专项复用）。
+>
+> **下文原样保留**作历史记录，不再作为实施依据。
+
+
 > **背景**：二期里程碑 M1（LLM 生成链路）已收口，进入 **M2 数据仪表盘（方向 3）**。
 > 用户口径「你一个一个需求做」⇒ 按里程碑顺序推进，且**每个切片独立可交付**。
 
@@ -3467,6 +3484,23 @@ shop_products ──❌── aigc_media_assets
 
 ## 13.9 M2 数据仪表盘 · 切片 2：快照自动沉淀 + 商品监控数据源（2026-10-03）
 
+> ⚠️ **2026-10-13 用户口径：整块废止**（设计 39 §1 为准）。
+>
+> 口径原文：「把商品洞察和内容洞察中的指标相关内容逻辑移除，包括店铺商品指标快照采集、
+> 笔记指标快照采集定时任务移除，后续作为专项单独排期。」
+>
+> **退场**：4 端点（`POST|GET /api/xhs/analytics/metrics/collect|trend`、`POST|GET /api/xhs/analytics/shop-metrics/collect|trend`）、
+> `services/metric_scheduler_service.py` 整模块、`services/shop_metrics_service.py` 整模块、
+> `note_metrics_service` 的快照/趋势四函数（`stat_date_of` / `snapshot_note` / `collect_snapshots` / `trend_series`）、
+> 两个内置任务（`system.note_metrics_collect` / `system.shop_metrics_collect`，注册表 15→13 + 种子删 2 条 + 迁移 `b1c2d3e4f5a7` 清存量行与调度注册项）、
+> 前端 `metrics-dashboard-panel.tsx` / `lib/metrics-format.ts(+test)` / `lib/api.ts` 4 请求函数 + 3 类型 / 双洞察页的两处面板接线。
+>
+> **保留**：`note_metrics()` 口径读取（榜单/互动排名仍在用）、`shop_metrics()`、
+> 字典表 `note_metric_snapshots` / `shop_metric_snapshots` 与全部历史行（不 drop，供后续专项复用）。
+>
+> **下文原样保留**作历史记录，不再作为实施依据。
+
+
 > **背景**：切片 1（§13.5）交付了「表 + 服务 + 2 端点」，但真机实测发现**闭环是断的**。
 
 ### 13.9.1 缺口（真机实证，不是推测）
@@ -3611,6 +3645,23 @@ shop_products ──❌── aigc_media_assets
 ---
 
 ## 13.10 M2 数据仪表盘 · 切片 3：仪表盘页面（2026-10-04）
+
+> ⚠️ **2026-10-13 用户口径：整块废止**（设计 39 §1 为准）。
+>
+> 口径原文：「把商品洞察和内容洞察中的指标相关内容逻辑移除，包括店铺商品指标快照采集、
+> 笔记指标快照采集定时任务移除，后续作为专项单独排期。」
+>
+> **退场**：4 端点（`POST|GET /api/xhs/analytics/metrics/collect|trend`、`POST|GET /api/xhs/analytics/shop-metrics/collect|trend`）、
+> `services/metric_scheduler_service.py` 整模块、`services/shop_metrics_service.py` 整模块、
+> `note_metrics_service` 的快照/趋势四函数（`stat_date_of` / `snapshot_note` / `collect_snapshots` / `trend_series`）、
+> 两个内置任务（`system.note_metrics_collect` / `system.shop_metrics_collect`，注册表 15→13 + 种子删 2 条 + 迁移 `b1c2d3e4f5a7` 清存量行与调度注册项）、
+> 前端 `metrics-dashboard-panel.tsx` / `lib/metrics-format.ts(+test)` / `lib/api.ts` 4 请求函数 + 3 类型 / 双洞察页的两处面板接线。
+>
+> **保留**：`note_metrics()` 口径读取（榜单/互动排名仍在用）、`shop_metrics()`、
+> 字典表 `note_metric_snapshots` / `shop_metric_snapshots` 与全部历史行（不 drop，供后续专项复用）。
+>
+> **下文原样保留**作历史记录，不再作为实施依据。
+
 
 > **背景**：切片 1/2 把「表 + 服务 + 端点 + 定时任务」四件都做完了（数据每时自动沉淀），
 > 但**用户看不到任何东西**。本切片补上页面。
