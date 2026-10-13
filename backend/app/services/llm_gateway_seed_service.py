@@ -8,9 +8,11 @@
 
 ## 语义
 
-- **播种时机 = 用户注册时**（`api/auth.py::register`，与 `seed_builtin_jobs_for_user` /
-  `seed_settings_for_user` / `seed_builtin_prompt_templates` 并列）。
-  存量用户**不主动补种**（避免替用户建一堆没配 KEY 的服务商，同 §4.5.1 纪律）。
+- **播种时机 = ① 用户注册时**（`api/auth.py::register`，与 `seed_builtin_jobs_for_user` /
+  `seed_settings_for_user` / `seed_builtin_prompt_templates` 并列）**+ ② 应用启动时补存量**
+  （`main.py::lifespan` → `seed_gateway_providers_for_all_users`，2026-10-13 补：原实现只播
+  新注册，存量老账号永远拿不到这 6 个 ⇒ 用户报障「模型服务商依旧未配置」）。
+  两处都走同一对幂等函数，**绝无覆盖**。
 - **幂等**：按 `(user_id, name)` 判重 —— 已存在的服务商**一律不覆盖**
   （用户改过 base_url、配过 KEY、删过模型的行，绝不还魂）。
 - **不含 KEY**：`access_token=""`（用户登录后自填 + 点「测试连接」）。
@@ -31,6 +33,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from backend.app.core.database import SessionLocal
 from backend.app.models import LlmGatewayConfig, LlmGatewayModel
 
 logger = logging.getLogger(__name__)
@@ -197,3 +200,52 @@ def seed_default_business_map_for_user(db: Session, user_id: int, *, platform: s
             user_id, created, platform,
         )
     return created
+
+
+def seed_gateway_providers_for_all_users() -> int:
+    """**应用启动时**给每个已有用户补种服务商 + 默认业务点映射（幂等）。返回新建服务商条数。
+
+    为什么要「启动时补存量」而不只在注册时播（2026-10-13 用户报障「模型服务商依旧未配置」）：
+
+    用户口径原文「**用户安装登录后**只需要配置 key 并检测后即可使用」—— 这里的
+    「安装登录后」既包括**新注册**，也包括**已在用的老账号**。而原实现只在
+    `register()` 里播种 ⇒ **存量用户永远拿不到这 6 个种子服务商**（用户实测：
+    uid=2 名下只有他早期自建的 `discovery` / `qianwenaiapi`，6 个种子全在
+    我的 E2E 测试账号 uid=25 名下）—— 需求没落地。本函数补上这一半。
+
+    ⚠️ **绝不覆盖**（用户口径「已经配置好的参数不带改动」）：两个子函数本身已是
+    非破坏性的 —— `seed_gateway_providers_for_user` 按**服务商名**判重（同名skip）、
+    `seed_default_business_map_for_user` 按 `(user_id, platform, business_key)` 判重
+    （已有映射不碰）。故对存量用户只会**新增**缺失的种子服务商、**补齐**未映射的
+    业务点，用户改过的配置一律原样保留。
+
+    ⚠️ 与 `seed_builtin_prompt_templates_for_all_users` 同型：**独立 Session**、
+    **失败只记 warning 不抛**（起服务不能被子系统问题拖死）。
+
+    ⚠️ `SessionLocal` 必须在**模块层**持有：`conftest.patch_service_sessions` 按模块
+    属性打桩，函数内 import 打不到 ⇒ 测试会默默写生产库。
+    """
+    from backend.app.models.user import User
+
+    db = SessionLocal()
+    try:
+        user_ids = list(db.scalars(select(User.id)))
+        providers_total = 0
+        for uid in user_ids:
+            providers_total += seed_gateway_providers_for_user(db, uid)
+            seed_default_business_map_for_user(db, uid, platform=DEFAULT_SEED_PLATFORM)
+        if providers_total:
+            db.commit()
+            logger.info(
+                "应用初始化数据：为 %s 个用户补种 %s 个网关服务商种子",
+                len(user_ids), providers_total,
+            )
+        else:
+            db.rollback()
+        return providers_total
+    except Exception as exc:  # noqa: BLE001 - 起服务不能被子系统问题拖死
+        db.rollback()
+        logger.warning("网关服务商种子补种失败（已跳过，可在网关页手动新建）：%s", exc)
+        return 0
+    finally:
+        db.close()

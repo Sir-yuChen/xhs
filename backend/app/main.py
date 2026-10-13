@@ -95,6 +95,14 @@ async def lifespan(app: FastAPI):
     # 提示模板相关逻辑」⇒ 没有种子时出图弹窗的下拉是**空的**，选了也无内容，
     # 「公共模板保证一致性」就落不了地。与上面两项同一语义：随安装附有 + 只补缺失不覆盖。
     seed_builtin_prompt_templates_for_all_users()
+    # LLM 网关服务商种子**补存量**（2026-10-13 用户报障「模型服务商依旧未配置」）：
+    # 种子原只在 `register()` 播 ⇒ 存量老账号永远拿不到这 6 个国内常见服务商。
+    # 与上面同语义：随安装附有 + **只补缺失不覆盖**（同名服务商 / 已有业务点映射一律不碰）。
+    from backend.app.services.llm_gateway_seed_service import (
+        seed_gateway_providers_for_all_users,
+    )
+
+    seed_gateway_providers_for_all_users()
     settings = get_settings()
     # 多实例闸（T-108 / DEF-003）：`BackgroundScheduler` 与 FastAPI 同进程，
     # `max_instances=1` 只约束单进程内 ⇒ 误开第二个后端会让**同一批定时任务跑两遍**

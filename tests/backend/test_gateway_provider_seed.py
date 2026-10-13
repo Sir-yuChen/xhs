@@ -267,3 +267,131 @@ def test_business_map_skips_when_provider_missing(db_factory):
         assert created == 0
     finally:
         db.close()
+
+
+# --------------------------------------------------------------------------- #
+# 5. 存量用户补种（2026-10-13 用户报障「模型服务商依旧未配置」）
+# --------------------------------------------------------------------------- #
+
+def test_backfill_seeds_existing_users_who_registered_before(db_factory, monkeypatch):
+    """**补存量**：先于种子存在的用户（模拟老账号）启动补种后也拿到 6 个服务商。
+
+    根因：原实现只在 `register()` 播种 ⇒ 存量用户永远拿不到种子。
+    用户口径「用户安装登录后只需要配置 key」里的「登录后」包含**已在用的老账号**。
+    """
+    from backend.app.services import llm_gateway_seed_service as seed_svc
+
+    db = _db(db_factory)
+    try:
+        # 直接建用户（**不走注册端点** ⇒ 模拟「种子机制之前就存在的老账号」）
+        uid = _make_user(db_factory, "legacy-before-seed")
+        assert db.scalars(
+            select(LlmGatewayConfig).where(LlmGatewayConfig.user_id == uid)
+        ).all() == [], "前提：老账号名下没有任何种子服务商"
+    finally:
+        db.close()
+
+    # 启动补种（用本夹具库，替掉模块级 SessionLocal）
+    monkeypatch.setattr(seed_svc, "SessionLocal", db_factory)
+    created = seed_svc.seed_gateway_providers_for_all_users()
+    assert created > 0, "存量用户应被补种"
+
+    db = _db(db_factory)
+    try:
+        names = {
+            c.name
+            for c in db.scalars(
+                select(LlmGatewayConfig).where(LlmGatewayConfig.user_id == uid)
+            ).all()
+        }
+        assert "DeepSeek" in names, "存量用户被补种后应能看到 DeepSeek 等种子服务商"
+        assert len(names) >= 6
+    finally:
+        db.close()
+
+
+def test_backfill_never_overwrites_existing_config(db_factory, monkeypatch):
+    """补种**绝不覆盖**用户已配好的参数（用户口径「已经配置好的参数不带改动」）。
+
+    判据：老账号自建的同名服务商（含已配 KEY、改过的 base_url）与已有业务点映射
+    在补种后**逐字不变**。
+    """
+    from backend.app.core.security import encrypt_text
+    from backend.app.services import llm_gateway_seed_service as seed_svc
+
+    db = _db(db_factory)
+    try:
+        uid = _make_user(db_factory, "legacy-with-own-provider")
+        # 老账号自建一个**与种子同名**的服务商（DeepSeek），且已配 KEY、改过 base_url
+        db.add(
+            LlmGatewayConfig(
+                user_id=uid,
+                name="DeepSeek",
+                provider_key="LEGACY-OWN-DS",
+                base_url="https://my-own-proxy.example/v1",
+                access_token=encrypt_text("«redacted:sk-…»"),
+                enabled=True,
+                healthy=True,
+            )
+        )
+        # 老账号已选过业务点映射（指向它自己的服务商）
+        db.add(
+            LlmBusinessProvider(
+                user_id=uid,
+                platform="xhs",
+                business_key="generate_note",
+                provider_key="LEGACY-OWN-DS",
+                model_name="my-own-model",
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    monkeypatch.setattr(seed_svc, "SessionLocal", db_factory)
+    seed_svc.seed_gateway_providers_for_all_users()
+
+    db = _db(db_factory)
+    try:
+        mine = db.scalars(
+            select(LlmGatewayConfig).where(
+                LlmGatewayConfig.user_id == uid,
+                LlmGatewayConfig.name == "DeepSeek",
+            )
+        ).all()
+        assert len(mine) == 1, "同名服务商不该被种子又建一个"
+        assert mine[0].provider_key == "LEGACY-OWN-DS", "provider_key 被覆盖"
+        assert mine[0].base_url == "https://my-own-proxy.example/v1", "base_url 被覆盖"
+        assert mine[0].access_token, "已配的 KEY 被清空"
+
+        mapping = db.scalars(
+            select(LlmBusinessProvider).where(
+                LlmBusinessProvider.user_id == uid,
+                LlmBusinessProvider.platform == "xhs",
+                LlmBusinessProvider.business_key == "generate_note",
+            )
+        ).one()
+        assert mapping.provider_key == "LEGACY-OWN-DS", "已有业务点映射被覆盖"
+        assert mapping.model_name == "my-own-model", "已有映射的模型被覆盖"
+    finally:
+        db.close()
+
+
+def test_backfill_is_idempotent(db_factory, monkeypatch):
+    """重复启动补种不新增（幂等）——否则每次开机都堆一批重复行。"""
+    from backend.app.services import llm_gateway_seed_service as seed_svc
+
+    _make_user(db_factory, "backfill-idem")
+    monkeypatch.setattr(seed_svc, "SessionLocal", db_factory)
+    first = seed_svc.seed_gateway_providers_for_all_users()
+    second = seed_svc.seed_gateway_providers_for_all_users()
+    assert first > 0
+    assert second == 0, "重复启动补种不应新增"
+
+
+def test_lifespan_calls_backfill():
+    """启动接线守卫：`lifespan` 必须真的调用补种（否则「防以后再漂」落空）。"""
+    src = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
+    assert "seed_gateway_providers_for_all_users" in src, (
+        "lifespan 没接线服务商补种 —— 存量用户/新加种子又会拿不到"
+    )
