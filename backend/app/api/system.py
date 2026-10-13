@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.core.deps import get_current_user
-from backend.app.core.version import current_version
+from backend.app.core.version import current_version, version_info
 from backend.app.models import User
 from backend.app.services import system_update_service
 
@@ -39,10 +39,19 @@ class UpdateInstallRequest(BaseModel):
 
 @router.get("/version")
 def get_version() -> dict:
-    """当前应用版本 + 更新源配置状态（免鉴权：登录页 / 启动早期可读）。"""
+    """当前应用版本 + 打包时间 + **版本升级历史** + 更新源配置状态（免鉴权）。"""
     source = system_update_service.load_update_source()
+    info = version_info()
     return {
         "version": current_version(),
+        #: 打包时间 / 提交（用户口径 2026-10-13「本地记录当前版本和打包等时间相关信息」）。
+        #: dev 态未打包 ⇒ 空串（**不臆造**）。
+        "built_at": info["built_at"],
+        "commit": info["commit"],
+        "version_source": info["source"],
+        #: 版本升级历史（用户口径 2026-10-13「version.json 应记录的是版本升级历史」）——
+        #: 前端弹窗按版本折叠展示。最新在前。
+        "history": info["history"],
         "source_configured": source.configured,
         "platform": "xhs",
     }

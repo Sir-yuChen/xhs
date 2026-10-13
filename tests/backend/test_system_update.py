@@ -76,6 +76,112 @@ def test_current_version_reads_version_json(tmp_path, monkeypatch):
     assert version_mod.current_version() == "3.1.4"
 
 
+def test_version_json_records_history_not_only_latest(tmp_path, monkeypatch):
+    """`version.json` 记录的是**版本升级历史**（用户口径 2026-10-13：
+    「应记录的是版本升级历史，不是只记录最新的」）⇒ `version_info()["history"]`
+    透出多条、**最新在前**，`current` 与首条一致。"""
+    monkeypatch.delenv("SPIDER_XHS_VERSION", raising=False)
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    (cfg / "version.json").write_text(
+        json.dumps(
+            {
+                "current": "1.2.0",
+                "versions": [
+                    {"version": "1.2.0", "built_at": "2026-10-12T00:00:00+08:00", "commit": "bbb", "notes": "新功能"},
+                    {"version": "1.1.0", "built_at": "2026-09-01T00:00:00+08:00", "commit": "aaa", "notes": "修 bug"},
+                    {"version": "1.0.0", "built_at": "2026-08-01T00:00:00+08:00", "commit": "zzz", "notes": "首发"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONFIG_FILE", str(cfg / "default.yaml"))
+    info = version_mod.version_info()
+    assert info["version"] == "1.2.0"
+    assert len(info["history"]) == 3, "历史应透出多条（不是只留最新）"
+    assert [h["version"] for h in info["history"]] == ["1.2.0", "1.1.0", "1.0.0"], (
+        "版本历史应保持文件顺序（最新在前）"
+    )
+    assert info["history"][0]["notes"] == "新功能"
+    assert info["history"][2]["notes"] == "首发"
+    assert info["built_at"] == "2026-10-12T00:00:00+08:00", "顶层时间取当前版本那条"
+    assert info["commit"] == "bbb"
+
+
+def test_old_flat_version_json_still_works(tmp_path, monkeypatch):
+    """旧形状（只有顶层 version/built_at/commit）**向后兼容**：history 退化成 1 条。"""
+    monkeypatch.delenv("SPIDER_XHS_VERSION", raising=False)
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    (cfg / "version.json").write_text(
+        json.dumps({"version": "9.9.9", "built_at": "x", "commit": "y"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONFIG_FILE", str(cfg / "default.yaml"))
+    info = version_mod.version_info()
+    assert info["version"] == "9.9.9"
+    assert info["history"] == [], "旧形状没有 versions 数组 ⇒ 空（前端退化成远端 notes）"
+
+def test_version_info_carries_build_time_and_commit(tmp_path, monkeypatch):
+    """`version_info()` 带出**打包时间 / 提交**（用户口径 2026-10-13：
+    「本地记录当前版本和打包等时间相关信息」）。"""
+    monkeypatch.delenv("SPIDER_XHS_VERSION", raising=False)
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    (cfg / "version.json").write_text(
+        json.dumps({
+            "version": "3.1.4",
+            "built_at": "2026-10-12T20:30:00+08:00",
+            "commit": "abc1234",
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONFIG_FILE", str(cfg / "default.yaml"))
+    info = version_mod.version_info()
+    assert info["version"] == "3.1.4"
+    assert info["built_at"] == "2026-10-12T20:30:00+08:00"
+    assert info["commit"] == "abc1234"
+    assert info["source"].endswith("version.json"), "source 应指出读到哪份文件"
+
+
+def test_version_info_degrades_gracefully_without_extra_fields(tmp_path, monkeypatch):
+    """旧版 version.json（只有 version）⇒ 时间/提交为空串，**不报错、不臆造**。"""
+    monkeypatch.delenv("SPIDER_XHS_VERSION", raising=False)
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    (cfg / "version.json").write_text(json.dumps({"version": "3.1.4"}), encoding="utf-8")
+    monkeypatch.setenv("CONFIG_FILE", str(cfg / "default.yaml"))
+    info = version_mod.version_info()
+    assert info["version"] == "3.1.4"
+    assert info["built_at"] == ""
+    assert info["commit"] == ""
+
+
+def test_version_info_unknown_reports_unknown_source(tmp_path, monkeypatch):
+    """候选文件**全都读不到** ⇒ 0.0.0 + source=unknown（dev 态排查用）。
+
+    ⚠️ 不能只靠 `CONFIG_FILE` 指到空目录：候选清单里还有**仓库自身的**
+    `config/version.json`（随仓库提交的，值 1.0.2）⇒ 会回落读到它。这里直接
+    把候选清单清空，才能测到「一个都读不到」这条分支。
+    """
+    monkeypatch.delenv("SPIDER_XHS_VERSION", raising=False)
+    monkeypatch.setattr(version_mod, "_candidate_files", lambda: [])
+    info = version_mod.version_info()
+    assert info["version"] == "0.0.0"
+    assert info["source"] == "unknown"
+
+
+def test_version_endpoint_exposes_build_metadata(api_client):
+    """`GET /api/system/version` 下发 built_at / commit / version_source（免鉴权）。"""
+    resp = api_client.get("/api/system/version")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "version" in body
+    assert "built_at" in body, "缺少打包时间"
+    assert "commit" in body, "缺少提交号"
+    assert "version_source" in body, "缺少版本来源（排查 0.0.0 用）"
+
 def test_current_version_unknown_when_missing(tmp_path, monkeypatch):
     monkeypatch.delenv("SPIDER_XHS_VERSION", raising=False)
     cfg = tmp_path / "config"
@@ -310,3 +416,108 @@ def test_update_download_rejects_bad_url(api_client):
     )
     assert resp.status_code == 400
     assert resp.json()["detail"]["code"] == "UPDATE_DOWNLOAD_FAILED"
+
+
+
+# ---------------------------------------------------------------- 公开仓库免令牌
+#  用户口径 2026-10-13：「仓库公开了，你再试试」+「我把远程仓库公开，是否就可以
+#  不需要接入私人令牌了？」—— 实测：公开仓库 Gitee API 匿名可访问（repo info /
+#  releases/latest / tags 均 200）⇒ **公开即免令牌**。旧实现 `if not gitee_token:
+#  return None` 是硬门槛：公开仓库没令牌就永远「已是最新」（假结论）。
+
+
+def test_public_repo_enables_gitee_without_token(monkeypatch, tmp_path):
+    """仓库公开 ⇒ **没有令牌也算已配置**（旧实现会漏查）。"""
+    monkeypatch.delenv("UPDATE_MANIFEST_URL", raising=False)
+    monkeypatch.delenv("UPDATE_GITEE_TOKEN", raising=False)
+    monkeypatch.delenv("UPDATE_GITEE_PUBLIC", raising=False)
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    (cfg / "default.yaml").write_text(
+        "update:\n  manifest_url: ''\n  gitee_token: ''\n  gitee_public: true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONFIG_FILE", str(cfg / "default.yaml"))
+    src = update_svc.load_update_source()
+    assert src.gitee_public is True
+    assert src.gitee_token == ""
+    assert src.gitee_enabled is True, "公开仓库应免令牌启用 Gitee 路径"
+    assert src.configured is True, "公开仓库没令牌也应算已配置（否则恒『已是最新』）"
+
+
+def test_private_repo_still_requires_token(monkeypatch, tmp_path):
+    """私有仓库（gitee_public=false）+ 无令牌 ⇒ 仍不启用（免得每次白打一次网络）。"""
+    monkeypatch.delenv("UPDATE_GITEE_PUBLIC", raising=False)
+    monkeypatch.delenv("UPDATE_GITEE_TOKEN", raising=False)
+    monkeypatch.delenv("UPDATE_MANIFEST_URL", raising=False)
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    (cfg / "default.yaml").write_text(
+        "update:\n  manifest_url: ''\n  gitee_token: ''\n  gitee_public: false\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONFIG_FILE", str(cfg / "default.yaml"))
+    src = update_svc.load_update_source()
+    assert src.gitee_enabled is False
+    assert src.configured is False
+
+
+def test_public_repo_call_carries_no_authorization_header(monkeypatch, tmp_path):
+    """公开仓库的请求**不带令牌**（匿名调用）。"""
+    monkeypatch.delenv("UPDATE_MANIFEST_URL", raising=False)
+    monkeypatch.delenv("UPDATE_GITEE_TOKEN", raising=False)
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    (cfg / "default.yaml").write_text(
+        "update:\n  manifest_url: ''\n  gitee_owner: 'Sir-yuChen'\n  gitee_repo: 'xhs'\n  gitee_public: true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONFIG_FILE", str(cfg / "default.yaml"))
+    src = update_svc.load_update_source()
+
+    seen: dict = {}
+
+    def _fake_get(url, token="", timeout=None):
+        seen["url"] = url
+        seen["token"] = token
+        return {
+            "tag_name": "v9.9.9",
+            "body": "notes",
+            "assets": [{"name": "setup-9.9.9.exe", "browser_download_url": "https://x/y.exe"}],
+        }
+
+    monkeypatch.setattr(update_svc, "_http_get_json", _fake_get)
+    rel = update_svc._latest_from_gitee(src)
+    assert rel is not None and rel.version == "v9.9.9"
+    assert seen["token"] == "", "公开仓库必须匿名调用（不带令牌）"
+    assert "releases/latest" in seen["url"]
+
+
+def test_public_repo_check_reports_newer_release(monkeypatch, tmp_path):
+    """公开仓库端到端：当前 1.0.2、远端 v1.0.3 ⇒ has_update=True。"""
+    monkeypatch.delenv("UPDATE_MANIFEST_URL", raising=False)
+    monkeypatch.delenv("UPDATE_GITEE_TOKEN", raising=False)
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    (cfg / "default.yaml").write_text(
+        "update:\n  manifest_url: ''\n  gitee_public: true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONFIG_FILE", str(cfg / "default.yaml"))
+    monkeypatch.setattr(update_svc, "current_version", lambda: "1.0.2")
+    monkeypatch.setattr(
+        update_svc,
+        "_http_get_json",
+        lambda url, token="", timeout=None: {
+            "tag_name": "v1.0.3",
+            "body": "修了 X",
+            "assets": [{"name": "spider-xhs-setup-1.0.3.exe", "browser_download_url": "https://g/d.exe"}],
+        },
+    )
+    result = update_svc.check_for_update()
+    assert result["current"] == "1.0.2"
+    assert result["latest"] == "v1.0.3"
+    assert result["has_update"] is True
+    assert result["download_url"] == "https://g/d.exe"
+    assert result["notes"] == "修了 X"
+    assert result["source_configured"] is True

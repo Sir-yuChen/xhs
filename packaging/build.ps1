@@ -226,9 +226,42 @@ Copy-Item (Join-Path $Root "config\initial_data") (Join-Path $Bundle "config") -
 # 应用版本（设计 36 §5.1，2026-10-13）：运行时**唯一**版本真相源，随包分发。
 # ⚠️ 后端 `core/version.py` 与前端经 `GET /api/system/version` 都读它 ——
 #    不许在别处再写一份版本常量（DEF-044）。缺了 = 版本恒 0.0.0 ⇒ 更新检查失效。
+# 用户口径 2026-10-13：「本地记录当前版本和打包等时间相关信息」+
+#    「version.json 应记录的是版本升级历史，不是只记录最新的」⇒ 形状为
+#    { current, versions: [{version, built_at, commit, notes}, ...] }（**最新在前**）。
+# ⚠️ 打包**不改写历史内容**（那是版本库的内容）：源码里的 `config/version.json`
+#    就是真相源，这里只在包内**刷新 current / 最新那条的时间与提交**（版本号取自 -Version）。
 $versionJson = Join-Path $Bundle "config\version.json"
-(@{ version = $Version } | ConvertTo-Json -Compress) | Set-Content -Path $versionJson -Encoding utf8
-Write-Host "  应用版本: $Version → config\version.json"
+$builtAt = (Get-Date).ToString("yyyy-MM-ddTHH:mm:sszzz")
+$commitSha = ""
+try {
+    $commitSha = (git -C $Root rev-parse --short HEAD 2>$null)
+    if ($commitSha) { $commitSha = $commitSha.Trim() }
+} catch { $commitSha = "" }
+
+$history = @()
+$srcVersionJson = Join-Path $Root "config\version.json"
+if (Test-Path $srcVersionJson) {
+    try {
+        $parsed = Get-Content $srcVersionJson -Raw | ConvertFrom-Json
+        if ($parsed.versions) { $history = @($parsed.versions) }
+    } catch { $history = @() }
+}
+# 让「当前版本」那条带上本次打包的时间 / 提交；不在历史里就先插一条（保住版本记录）。
+$hit = $false
+foreach ($item in $history) {
+    if ($item.version -eq $Version) {
+        $item.built_at = $builtAt
+        $item.commit = $commitSha
+        $hit = $true
+    }
+}
+if (-not $hit) {
+    $history = @([pscustomobject]@{ version = $Version; built_at = $builtAt; commit = $commitSha; notes = "" }) + $history
+}
+(@{ current = $Version; versions = $history } | ConvertTo-Json -Depth 6 -Compress) |
+    Set-Content -Path $versionJson -Encoding utf8
+Write-Host "  应用版本: $Version → config\version.json（built_at=$builtAt commit=$commitSha 历史 $($history.Count) 条）"
 
 # 7a. 裁掉明确不用的内容（用户口径：不必要内容不打包）：
 #   cv2/data/*.xml = haarcascade 等模型文件（约 10MB）。本仓库 cv2 只用了

@@ -53,13 +53,20 @@ class UpdateSource:
     #: Gitee 仓库 owner/repo（回退路径用）。
     gitee_owner: str = "Sir-yuChen"
     gitee_repo: str = "xhs"
-    #: Gitee 私人令牌（私有仓库必需；空则不启用 Gitee 路径）。
+    #: Gitee 私人令牌（**私有仓库**必需；仓库公开后留空即可）。
     gitee_token: str = ""
+    #: 仓库是否公开（**公开 ⇒ 匿名即可查，不需要令牌**；2026-10-13 用户口径）。
+    gitee_public: bool = False
     raw: dict = field(default_factory=dict)
 
     @property
+    def gitee_enabled(self) -> bool:
+        """Gitee 路径是否可用：**公开仓库免令牌**，私有仓库必须有令牌。"""
+        return bool(self.gitee_token) or bool(self.gitee_public)
+
+    @property
     def configured(self) -> bool:
-        return bool(self.manifest_url) or bool(self.gitee_token)
+        return bool(self.manifest_url) or self.gitee_enabled
 
 
 def load_update_source() -> UpdateSource:
@@ -93,8 +100,22 @@ def load_update_source() -> UpdateSource:
         gitee_owner=str(os.environ.get("UPDATE_GITEE_OWNER") or data.get("gitee_owner") or "Sir-yuChen").strip(),
         gitee_repo=str(os.environ.get("UPDATE_GITEE_REPO") or data.get("gitee_repo") or "xhs").strip(),
         gitee_token=str(os.environ.get("UPDATE_GITEE_TOKEN") or data.get("gitee_token") or "").strip(),
+        gitee_public=_as_bool(
+            os.environ.get("UPDATE_GITEE_PUBLIC")
+            if os.environ.get("UPDATE_GITEE_PUBLIC") is not None
+            else data.get("gitee_public")
+        ),
         raw=data if isinstance(data, dict) else {},
     )
+
+
+def _as_bool(value: object) -> bool:
+    """宽松布尔解析（YAML `true` / 环境变量 `"1"`/`"true"` 都认）。"""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _http_get_json(url: str, token: str = "", timeout: int = CHECK_TIMEOUT_SECONDS) -> dict:
@@ -136,7 +157,8 @@ def _latest_from_manifest(source: UpdateSource) -> ReleaseInfo | None:
 
 
 def _latest_from_gitee(source: UpdateSource) -> ReleaseInfo | None:
-    if not source.gitee_token:
+    #: 私有仓库必须有令牌；**公开仓库匿名即可**（2026-10-13 用户口径）。
+    if not source.gitee_enabled:
         return None
     owner = urllib.parse.quote(source.gitee_owner, safe="")
     repo = urllib.parse.quote(source.gitee_repo, safe="")

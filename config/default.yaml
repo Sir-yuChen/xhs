@@ -105,7 +105,10 @@ frontend:
 update:
   # 静态清单 URL（如 https://example.com/xhs/update.json），非空则**优先**走它。
   manifest_url: ""
-  # Gitee 回退路径（私有仓库需私人令牌；空则不启用）。
+  # Gitee 回退路径（**仓库公开 ⇒ 免令牌**，见 gitee_public）。
   gitee_owner: "Sir-yuChen"
   gitee_repo: "xhs"
+  # 私有仓库需私人令牌；仓库公开后留空即可。
   gitee_token: ""
+  # 仓库是否公开（2026-10-13 起本地仓库已公开 ⇒ 匿名即可查 Release，不需令牌）。
+  gitee_public: true

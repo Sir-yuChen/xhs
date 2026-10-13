@@ -2470,9 +2470,22 @@ export type RecommendItemTitleResult = {
 
 // ─────────────────────────── 系统更新（设计 36，2026-10-13） ───────────────────────────
 
-/** `GET /api/system/version`：当前版本 + 更新源配置状态（免鉴权）。 */
+/** 一个版本的升级记录（`config/version.json` 的 `versions[]` 项）。 */
+export type SystemVersionRelease = {
+  version: string;
+  built_at: string;
+  commit: string;
+  notes: string;
+};
+
+/** `GET /api/system/version`：当前版本 + 打包信息 + 版本升级历史（免鉴权）。 */
 export type SystemVersionInfo = {
   version: string;
+  built_at: string;
+  commit: string;
+  version_source: string;
+  /** 版本升级历史（**最新在前**）—— 弹窗按版本折叠展示。 */
+  history: SystemVersionRelease[];
   source_configured: boolean;
   platform: string;
 };

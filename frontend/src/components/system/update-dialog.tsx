@@ -19,11 +19,16 @@
  * 强制的对象是**版本**，不是把用户锁死在装不上的界面上。
  */
 import { CheckCircleOutlined, CloudDownloadOutlined, ReloadOutlined } from "@ant-design/icons";
-import { Alert, Button, Modal, Progress, Space, Tag, Typography } from "antd";
+import { Alert, Button, Collapse, Modal, Progress, Space, Tag, Typography } from "antd";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { checkSystemUpdate, downloadSystemUpdate, installSystemUpdate } from "../../lib/api";
-import type { SystemUpdateInfo } from "../../types";
+import {
+  checkSystemUpdate,
+  downloadSystemUpdate,
+  fetchAppVersion,
+  installSystemUpdate,
+} from "../../lib/api";
+import type { SystemUpdateInfo, SystemVersionRelease } from "../../types";
 
 const { Text, Paragraph } = Typography;
 
@@ -38,6 +43,8 @@ export type UpdatePhase =
 
 export type UpdateFlow = {
   info: SystemUpdateInfo | null;
+  /** 版本升级历史（来自 `GET /api/system/version`，**最新在前**）。 */
+  history: SystemVersionRelease[];
   phase: UpdatePhase;
   error: string;
   progress: number;
@@ -56,6 +63,7 @@ export type UpdateFlow = {
  */
 export function useUpdateFlow(autoCheckOnMount = false): UpdateFlow {
   const [info, setInfo] = useState<SystemUpdateInfo | null>(null);
+  const [history, setHistory] = useState<SystemVersionRelease[]>([]);
   const [phase, setPhase] = useState<UpdatePhase>("idle");
   const [error, setError] = useState<string>("");
   const [installerPath, setInstallerPath] = useState<string>("");
@@ -97,6 +105,14 @@ export function useUpdateFlow(autoCheckOnMount = false): UpdateFlow {
       setError("");
     });
   }, [autoCheckOnMount, runCheck]);
+
+  // 版本升级历史（弹窗按版本折叠展示，用户口径 2026-10-13）—— 挂载时读一次。
+  // 读不到就退化成「只有远端 notes 一条」，不影响「检查 / 下载 / 安装」主流程。
+  useEffect(() => {
+    void fetchAppVersion()
+      .then((snapshot) => setHistory(snapshot.history ?? []))
+      .catch(() => setHistory([]));
+  }, []);
 
   const handleDownload = useCallback(async () => {
     if (!info?.download_url) {
@@ -152,6 +168,7 @@ export function useUpdateFlow(autoCheckOnMount = false): UpdateFlow {
 
   return {
     info,
+    history,
     phase,
     error,
     progress,
@@ -163,9 +180,42 @@ export function useUpdateFlow(autoCheckOnMount = false): UpdateFlow {
   };
 }
 
-/** 弹窗主体（版本号 + 更新内容 + 进度 + 错误）——两种入口共用一份。 */
+/** 弹窗主体（版本号 + **版本升级历史折叠** + 进度 + 错误）——两种入口共用一份。 */
 function UpdateModalBody({ flow }: { flow: UpdateFlow }) {
-  const { info, phase, error, progress } = flow;
+  const { info, history, phase, error, progress } = flow;
+
+  //: 折叠面板数据：优先用**本地版本历史**（`config/version.json` 的 versions[]，
+  //: 用户口径「记录的是版本升级历史」）；本地为空时退化成「远端 notes 一条」。
+  const panels = (() => {
+    if (history.length > 0) {
+      return history.map((item) => ({
+        key: item.version,
+        version: item.version,
+        built_at: item.built_at,
+        title: item.version,
+        notes: item.notes,
+      }));
+    }
+    if (info?.notes) {
+      return [
+        {
+          key: info.latest || "latest",
+          version: info.latest || "最新版本",
+          built_at: "",
+          title: info.latest || "更新内容",
+          notes: info.notes,
+        },
+      ];
+    }
+    return [];
+  })();
+
+  //: 有新版本时，默认展开**最新那条**（用户一眼看到这次更新了什么）。
+  const [activeKeys, setActiveKeys] = useState<string[]>([]);
+  useEffect(() => {
+    setActiveKeys(panels.length > 0 ? [panels[0].key] : []);
+  }, [panels.length]);
+
   return (
     <Space direction="vertical" size={12} style={{ width: "100%" }}>
       <Space>
@@ -175,10 +225,36 @@ function UpdateModalBody({ flow }: { flow: UpdateFlow }) {
         <Tag color="blue">{info?.latest || "-"}</Tag>
       </Space>
 
-      {info?.notes ? (
+      {panels.length > 0 ? (
         <div style={{ maxHeight: "32vh", overflowY: "auto" }}>
-          <Text type="secondary">更新内容：</Text>
-          <Paragraph style={{ whiteSpace: "pre-wrap", marginTop: 4 }}>{info.notes}</Paragraph>
+          <Text type="secondary">版本更新记录：</Text>
+          <Collapse
+            ghost
+            size="small"
+            style={{ marginTop: 4 }}
+            activeKey={activeKeys}
+            onChange={(keys) =>
+              setActiveKeys(Array.isArray(keys) ? keys.map(String) : [String(keys)])
+            }
+            items={panels.map((panel) => ({
+              key: panel.key,
+              label: (
+                <Space size={8}>
+                  <Text strong>{panel.title}</Text>
+                  {panel.built_at ? (
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      {panel.built_at.slice(0, 10)}
+                    </Text>
+                  ) : null}
+                </Space>
+              ),
+              children: (
+                <Paragraph style={{ whiteSpace: "pre-wrap", marginBottom: 0 }}>
+                  {panel.notes || "（无更新说明）"}
+                </Paragraph>
+              ),
+            }))}
+          />
         </div>
       ) : null}
 

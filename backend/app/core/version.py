@@ -53,6 +53,50 @@ def _candidate_files() -> list[Path]:
     return candidates
 
 
+def _read_version_payload(payload: dict) -> tuple[str, str, str, list[dict]]:
+    """从 `version.json` 负载取出 (version, built_at, commit, history)。
+
+    **两种形状都认**（向后兼容，2026-10-13 用户口径「version.json 应记录的是版本升级历史」）：
+    * 新：`{"current": "1.0.2", "versions": [{version, built_at, commit, notes}, ...]}`
+      —— 取 `current`（缺则取 `versions[0].version`）+ 首项的时间/提交；
+    * 旧：`{"version": "1.0.2", "built_at": ..., "commit": ...}` —— 整份当「历史只有一条」。
+
+    `history` **原样透出**（前端按版本折叠展示），顺序 = 文件里的顺序（**约定最新在前**）。
+    """
+    versions = payload.get("versions")
+    history: list[dict] = []
+    if isinstance(versions, list):
+        for item in versions:
+            if not isinstance(item, dict):
+                continue
+            ver = str(item.get("version") or "").strip()
+            if not ver:
+                continue
+            history.append(
+                {
+                    "version": ver.lstrip("vV"),
+                    "built_at": str(item.get("built_at") or "").strip(),
+                    "commit": str(item.get("commit") or "").strip(),
+                    "notes": str(item.get("notes") or "").strip(),
+                }
+            )
+
+    current = str(payload.get("current") or "").strip()
+    if not current and history:
+        current = history[0]["version"]
+    if not current:
+        current = str(payload.get("version") or "").strip()
+
+    built_at = str(payload.get("built_at") or "").strip()
+    commit = str(payload.get("commit") or "").strip()
+    if history and not (built_at and commit):
+        #: 新形状下，顶层不重复存时间/提交 —— 取**当前版本**那一条。
+        head = next((h for h in history if h["version"] == current.lstrip("vV")), history[0])
+        built_at = built_at or head["built_at"]
+        commit = commit or head["commit"]
+    return current.lstrip("vV"), built_at, commit, history
+
+
 def current_version() -> str:
     """当前应用版本（见模块 docstring 的优先级；都取不到 ⇒ `0.0.0`）。"""
     env = (os.environ.get("SPIDER_XHS_VERSION") or "").strip()
@@ -66,7 +110,9 @@ def current_version() -> str:
             if path.suffix == ".json":
                 with open(path, "r", encoding="utf-8-sig") as handle:
                     payload = json.load(handle)
-                value = str(payload.get("version") or "").strip()
+                if not isinstance(payload, dict):
+                    continue
+                value, _built_at, _commit, _history = _read_version_payload(payload)
             else:
                 value = path.read_text(encoding="utf-8-sig").strip()
         except (OSError, json.JSONDecodeError) as exc:
@@ -75,6 +121,62 @@ def current_version() -> str:
         if value:
             return value.lstrip("vV")
     return UNKNOWN_VERSION
+
+
+def version_info() -> dict:
+    """版本**完整信息**（用户口径 2026-10-13：「本地记录当前版本和打包等时间相关信息」，
+    以及「version.json 应记录的是版本升级历史，不是只记录最新的」）。
+
+    返回：`{"version", "built_at", "commit", "source", "history"}` ——
+    * `history` = **版本升级历史**（`[{version, built_at, commit, notes}, ...]`，
+      约定**最新在前**，前端按版本折叠展示）；旧形状（单条）⇒ 长度 1；
+    * 除 `version` 外都**允许缺**（dev 态 ⇒ 空串 / 空列表）；
+    * `source`：本次版本值**从哪读到**（`env` / 文件路径 / `"unknown"`）—— dev 态排查用。
+
+    ⚠️ 与 `current_version()` **同源**（同一份候选文件），不另建真相源。
+    """
+    env = (os.environ.get("SPIDER_XHS_VERSION") or "").strip()
+    if env:
+        return {
+            "version": env.lstrip("vV"),
+            "built_at": "",
+            "commit": "",
+            "source": "env",
+            "history": [],
+        }
+
+    for path in _candidate_files():
+        if not path.is_file():
+            continue
+        try:
+            if path.suffix == ".json":
+                with open(path, "r", encoding="utf-8-sig") as handle:
+                    payload = json.load(handle)
+                if not isinstance(payload, dict):
+                    continue
+                value, built_at, commit, history = _read_version_payload(payload)
+            else:
+                value = path.read_text(encoding="utf-8-sig").strip()
+                built_at = commit = ""
+                history = []
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("version: 读取 %s 失败（%s），跳过", path, exc)
+            continue
+        if value:
+            return {
+                "version": value.lstrip("vV"),
+                "built_at": built_at,
+                "commit": commit,
+                "source": str(path),
+                "history": history,
+            }
+    return {
+        "version": UNKNOWN_VERSION,
+        "built_at": "",
+        "commit": "",
+        "source": "unknown",
+        "history": [],
+    }
 
 
 def compare_versions(a: str, b: str) -> int:
