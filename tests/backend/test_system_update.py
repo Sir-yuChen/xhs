@@ -168,6 +168,26 @@ def test_release_summaries_stay_within_a_hundred_chars():
         )
 
 
+def test_release_notes_are_short_plain_bullets():
+    """更新详情 = **≤5 条要点、每条一行、无 Markdown 符号、合计 ≤100 字**。
+
+    用户口径 2026-10-13：「简介合并简单 100 字内 5 条以内」+
+    「去掉 Markdown 符号，纯文本分条（最简单、不会丑）」。
+
+    ⚠️ 背景：原 `notes` 是一篇带 `##` / `**` 的 Markdown 长文（1.0.1 有 8 条），
+    弹窗里符号原样显示、又长又乱（用户截图指出）。
+    """
+    payload = json.loads((ROOT / "config" / "version.json").read_text(encoding="utf-8"))
+    for item in payload["versions"]:
+        ver = item["version"]
+        notes = item["notes"]
+        lines = [ln for ln in notes.split("\n") if ln.strip()]
+        assert len(lines) <= 5, f"{ver} 更新详情 {len(lines)} 条，超过 5 条上限"
+        assert len(notes) <= 100, f"{ver} 更新详情合计 {len(notes)} 字，超过 100 字上限"
+        for bad in ("##", "**", "> ", "* "):
+            assert bad not in notes, f"{ver} 更新详情残留 Markdown 符号 {bad!r}"
+
+
 def test_history_exposes_summary_to_the_api(tmp_path, monkeypatch):
     """`version_info()` 把 `summary` 一并透出（前端折叠标题要用）。"""
     monkeypatch.delenv("SPIDER_XHS_VERSION", raising=False)

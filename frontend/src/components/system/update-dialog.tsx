@@ -30,7 +30,7 @@ import {
 } from "../../lib/api";
 import type { SystemUpdateInfo, SystemVersionRelease } from "../../types";
 
-const { Text, Paragraph } = Typography;
+const { Text } = Typography;
 
 export type UpdatePhase =
   | "idle"
@@ -271,9 +271,19 @@ function ReleaseHistory({ flow }: { flow: UpdateFlow }) {
             </Space>
           ),
           children: (
-            <Paragraph style={{ whiteSpace: "pre-wrap", marginBottom: 0 }}>
-              {panel.notes || "（无更新说明）"}
-            </Paragraph>
+            //: 要点分行渲染（用户口径 2026-10-13「去掉 Markdown 符号，纯文本分条」）——
+            //: 每行一条，前面点一个小圆点；不再整段 `pre-wrap` 铺开。
+            <ul style={{ margin: 0, paddingLeft: 18 }}>
+              {(panel.notes || "（无更新说明）")
+                .split("\n")
+                .map((line) => line.trim())
+                .filter(Boolean)
+                .map((line, index) => (
+                  <li key={index} style={{ marginBottom: 2 }}>
+                    {line}
+                  </li>
+                ))}
+            </ul>
           ),
         }))}
       />
