@@ -8830,6 +8830,21 @@ def test_startup_dialog_stays_forced():
     )
 
 
+def test_update_dialogs_are_fifty_percent_of_the_viewport():
+    """两个更新弹窗宽度 = **视口 50%**（用户口径 2026-10-13「更新弹窗50%」）。
+
+    ⚠️ 是**视口百分比**不是固定像素 —— 换屏幕尺寸比例才一致（同违规词 60vw 的纪律）。
+    ⚠️ 变异守护：把任一入口的 `50vw` 改回 `56vw`/像素值 ⇒ 本用例必红。
+    """
+    src = _code_only(_read(ROOT / UPDATE_DIALOG))
+    assert src.count('width="50vw"') == 2, (
+        "启动 / 手动两个更新弹窗都应是 50vw（各一处）"
+    )
+    assert 'width="56vw"' not in src, "还留着旧口径 56vw"
+    #: 不得退回固定像素（换屏幕比例就不一致了）
+    assert not re.search(r'width=\{?["\']?\d{3,}', src), "更新弹窗宽度不该是固定像素"
+
+
 def test_both_dialogs_share_one_state_machine():
     """两种入口**共用同一状态机**（`useUpdateFlow`）——不留两份检查/下载/安装实现。
 

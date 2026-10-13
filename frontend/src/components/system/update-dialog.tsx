@@ -250,7 +250,7 @@ export function UpdateDialog() {
               ),
             ].filter(Boolean)
       }
-      width="56vw"
+      width="50vw"
     >
       <UpdateModalBody flow={flow} />
     </Modal>
@@ -330,7 +330,7 @@ export function ManualUpdateDialog({ open, onClose }: { open: boolean; onClose: 
               ),
             ].filter(Boolean)
       }
-      width="56vw"
+      width="50vw"
     >
       {phase === "checking" ? (
         <Space>
