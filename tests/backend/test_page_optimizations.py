@@ -8850,6 +8850,24 @@ def test_update_dialog_folds_releases_by_version_with_time_and_summary():
     assert "panel.notes" in body, "展开区应显示更新详情"
 
 
+def test_up_to_date_dialog_also_shows_release_history():
+    """「当前已是最新版本」时**也要**展示版本更新记录。
+
+    ⚠️ 2026-10-13 用户截图实测：手动入口点「检查版本更新」、已是最新时，
+    弹窗只渲染一行绿字提示 + 大片空白 —— 因为「已是最新」走了一个**独立分支**，
+    绕过了 `UpdateModalBody`（版本历史折叠在那里面）。修法 = 抽出 `ReleaseHistory`
+    两处共用；本守卫钉死「已是最新」分支必须渲染它。
+    """
+    src = _code_only(_read(ROOT / UPDATE_DIALOG))
+    up_to_date = src.index("flow.upToDate ?")
+    else_branch = src.index(") : (", up_to_date)
+    branch = src[up_to_date:else_branch]
+    assert "ReleaseHistory" in branch, "「已是最新」分支必须渲染版本更新记录（否则弹窗大片空白）"
+    #: 抽出的那份要独立成组件，两处共用（DEF-044：不留两份实现）
+    assert src.count("function ReleaseHistory(") == 1, "版本历史应只有一份实现"
+    assert src.count("<ReleaseHistory ") == 2, "两个位置（主体 + 已是最新）应共用同一份"
+
+
 def test_update_dialogs_are_forty_percent_of_the_viewport():
     """两个更新弹窗 = **视口 40%**（宽 40vw + 高 40vh；用户口径 2026-10-13「检查版本
 

@@ -182,7 +182,33 @@ export function useUpdateFlow(autoCheckOnMount = false): UpdateFlow {
 
 /** 弹窗主体（版本号 + **版本升级历史折叠** + 进度 + 错误）——两种入口共用一份。 */
 function UpdateModalBody({ flow }: { flow: UpdateFlow }) {
-  const { info, history, phase, error, progress } = flow;
+  const { info, phase, error, progress } = flow;
+  return (
+    <Space direction="vertical" size={12} style={{ width: "100%" }}>
+      <Space>
+        <Text>当前版本</Text>
+        <Tag>{info?.current || "-"}</Tag>
+        <Text>最新版本</Text>
+        <Tag color="blue">{info?.latest || "-"}</Tag>
+      </Space>
+
+      <ReleaseHistory flow={flow} />
+
+      {phase === "downloading" && <Progress percent={progress} status="active" />}
+      {phase === "downloaded" && <Text type="success">下载完成，点击「立即安装并重启」更新。</Text>}
+      {phase === "installing" && <Text type="secondary">正在启动安装程序，应用将自动重启……</Text>}
+      {phase === "error" && <Alert type="error" showIcon message={error || "更新失败"} />}
+
+      <Text type="secondary" style={{ fontSize: 12 }}>
+        更新仅替换程序文件，账号、笔记与历史数据全部保留。
+      </Text>
+    </Space>
+  );
+}
+
+/** 版本升级历史（折叠面板）——**两个入口、「已是最新」提示态都共用这一份**。 */
+function ReleaseHistory({ flow }: { flow: UpdateFlow }) {
+  const { info, history } = flow;
 
   //: 折叠面板数据：优先用**本地版本历史**（`config/version.json` 的 versions[]，
   //: 用户口径「记录的是版本升级历史」）；本地为空时退化成「远端 notes 一条」。
@@ -210,68 +236,48 @@ function UpdateModalBody({ flow }: { flow: UpdateFlow }) {
     return [];
   })();
 
-  //: 有新版本时，默认展开**最新那条**（用户一眼看到这次更新了什么）。
+  //: 默认展开**最新那条**（用户一眼看到这个版本改了什么）。
   const [activeKeys, setActiveKeys] = useState<string[]>([]);
   useEffect(() => {
     setActiveKeys(panels.length > 0 ? [panels[0].key] : []);
   }, [panels.length]);
 
+  if (panels.length === 0) return null;
+
   return (
-    <Space direction="vertical" size={12} style={{ width: "100%" }}>
-      <Space>
-        <Text>当前版本</Text>
-        <Tag>{info?.current || "-"}</Tag>
-        <Text>最新版本</Text>
-        <Tag color="blue">{info?.latest || "-"}</Tag>
-      </Space>
-
-      {panels.length > 0 ? (
-        <div style={{ maxHeight: "32vh", overflowY: "auto" }}>
-          <Text type="secondary">版本更新记录：</Text>
-          <Collapse
-            ghost
-            size="small"
-            style={{ marginTop: 4 }}
-            activeKey={activeKeys}
-            onChange={(keys) =>
-              setActiveKeys(Array.isArray(keys) ? keys.map(String) : [String(keys)])
-            }
-            items={panels.map((panel) => ({
-              key: panel.key,
-              label: (
-                <Space size={8} wrap>
-                  <Text strong>{`v${panel.version}`}</Text>
-                  {panel.built_at ? (
-                    <Text type="secondary" style={{ fontSize: 12 }}>
-                      {panel.built_at}
-                    </Text>
-                  ) : null}
-                  {panel.summary ? (
-                    <Text type="secondary" style={{ fontSize: 12 }}>
-                      {panel.summary}
-                    </Text>
-                  ) : null}
-                </Space>
-              ),
-              children: (
-                <Paragraph style={{ whiteSpace: "pre-wrap", marginBottom: 0 }}>
-                  {panel.notes || "（无更新说明）"}
-                </Paragraph>
-              ),
-            }))}
-          />
-        </div>
-      ) : null}
-
-      {phase === "downloading" && <Progress percent={progress} status="active" />}
-      {phase === "downloaded" && <Text type="success">下载完成，点击「立即安装并重启」更新。</Text>}
-      {phase === "installing" && <Text type="secondary">正在启动安装程序，应用将自动重启……</Text>}
-      {phase === "error" && <Alert type="error" showIcon message={error || "更新失败"} />}
-
-      <Text type="secondary" style={{ fontSize: 12 }}>
-        更新仅替换程序文件，账号、笔记与历史数据全部保留。
-      </Text>
-    </Space>
+    <div style={{ maxHeight: "32vh", overflowY: "auto" }}>
+      <Text type="secondary">版本更新记录：</Text>
+      <Collapse
+        ghost
+        size="small"
+        style={{ marginTop: 4 }}
+        activeKey={activeKeys}
+        onChange={(keys) => setActiveKeys(Array.isArray(keys) ? keys.map(String) : [String(keys)])}
+        items={panels.map((panel) => ({
+          key: panel.key,
+          label: (
+            <Space size={8} wrap>
+              <Text strong>{`v${panel.version}`}</Text>
+              {panel.built_at ? (
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  {panel.built_at}
+                </Text>
+              ) : null}
+              {panel.summary ? (
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  {panel.summary}
+                </Text>
+              ) : null}
+            </Space>
+          ),
+          children: (
+            <Paragraph style={{ whiteSpace: "pre-wrap", marginBottom: 0 }}>
+              {panel.notes || "（无更新说明）"}
+            </Paragraph>
+          ),
+        }))}
+      />
+    </div>
   );
 }
 
@@ -424,12 +430,17 @@ export function ManualUpdateDialog({ open, onClose }: { open: boolean; onClose: 
           <Text type="secondary">正在检查最新版本……</Text>
         </Space>
       ) : flow.upToDate ? (
-        <Space>
-          <CheckCircleOutlined style={{ color: "#52c41a" }} />
-          <Text>
-            当前已是最新版本
-            {flow.info?.current ? `（${flow.info.current}）` : ""}。
-          </Text>
+        //: 「已是最新」**也要展示版本更新记录**（用户口径：弹窗按版本号折叠展示更新历史）——
+        //: 原先这里只渲染一行提示，导致弹窗大片空白（2026-10-13 用户截图反馈）。
+        <Space direction="vertical" size={12} style={{ width: "100%" }}>
+          <Space>
+            <CheckCircleOutlined style={{ color: "#52c41a" }} />
+            <Text>
+              当前已是最新版本
+              {flow.info?.current ? `（${flow.info.current}）` : ""}。
+            </Text>
+          </Space>
+          <ReleaseHistory flow={flow} />
         </Space>
       ) : (
         <UpdateModalBody flow={flow} />
