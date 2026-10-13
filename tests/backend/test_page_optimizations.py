@@ -38,6 +38,9 @@ SHOP_ITEMS_VIEW = ROOT / "frontend/src/lib/shop-items-view.ts"
 ACCOUNTS = ROOT / "frontend/src/pages/platforms/xhs/accounts-page.tsx"
 GLOBAL_CSS = ROOT / "frontend/src/global.css"
 SETTINGS = ROOT / "frontend/src/pages/settings/settings-page.tsx"
+#: 数据中心页（设计 35，2026-10-12）：无流量清理的**现归属页** ——
+#: 原在 `my-notes-page.tsx`，随「数据中心独立成页」整块搬到这里（2026-10-13 锚点重定向）。
+DATACENTER_PAGE = ROOT / "frontend/src/pages/platforms/xhs/datacenter-page.tsx"
 #: 设计 25（2026-10-08）第一步预检 / 第二步发布两段流程。
 #: 2026-10-08：两步拆成的两个 Modal 合并为**一个 antd `Steps` 三步向导**
 #: （预检 → 配置商品参数+预览 → 发布）。两个旧文件已删除，守卫统一指向它。
@@ -5135,50 +5138,65 @@ def test_search_options_have_single_source():
 #   清理无流量笔记的任务时，清理无流量按钮展示为正在清理无流量笔记按钮不可点击，
 #   并新增清理无流量笔记日志表」「新增一个查询清理无流量笔记日志详情按钮，
 #   弹窗列表展示该日志记录」「入口只有我的笔记页的清理无流量按钮」）
+#
+# ⚠️ **2026-10-13 锚点重定向（记录，不静默删除）**：无流量清理的**整块 UI 已从
+# `my-notes-page.tsx` 搬到 `datacenter-page.tsx`**（用户口径「数据中心应单独一个页面
+# 且数据与当前笔记数据拆分开…主要是展示数据、筛选数据、清理无流量等」，见设计 35）。
+# 「入口只有我的笔记页」这句**已被取代** —— 现在唯一入口是**数据中心页**（仍只有一处，
+# 只是换了归属）。本组守卫的判据一字未改，只把读取文件从 `my-notes-page.tsx` 改到
+# `datacenter-page.tsx`（否则整组恒红 = 假防线）。
 # --------------------------------------------------------------------------- #
 def _my_notes_code() -> str:
-    return _code_only(_read(MY_NOTES))
+    #: ⚠️ 名字保留（被多处以兼容调用），实际读的是无流量清理的**现归属页**。
+    return _code_only(_read(DATACENTER_PAGE))
 
 
 def test_no_traffic_cleanup_closes_the_modal_on_click():
     """点「开始清理」后**弹窗关闭**（任务已交后端，留着只会挡页面）。
 
-    变异：删掉 `setNoTrafficOpen(false)` ⇒ 本用例必须红。
+    ⚠️ **2026-10-13 锚点重命名**（数据中心重排把清理改名为批量候选模型）：
+    - `setNoTrafficOpen(false)` → **`setCleanupOpen(false)`**（弹窗态变量名换了）；
+    - `handleStartCleanup` 现委托 `doStartCleanup(noteIds)`（同一件事，拆出「清全部」路径）。
+    判据不变：发起后**关弹窗** + 确实**发起了清理**。
     """
     code = _my_notes_code()
     start = code.index("async function handleStartCleanup")
     body = code[start : start + 2000]
-    assert "setNoTrafficOpen(false)" in body, "发起清理后没有关闭弹窗"
+    assert "setCleanupOpen(false)" in body, "发起清理后没有关闭弹窗"
     # 正向锚：清理确实被发起（防「整个函数被删空」也让断言变绿）
     assert "startNoTrafficCleanup(" in body
 
 
 def test_no_traffic_button_switches_to_busy_and_disables():
-    """有任务在跑 ⇒ 按钮文案变「正在清理无流量笔记」且**不可点**。
+    """有任务在跑 ⇒ 按钮文案变「清理无流量中」且**不可点**。
 
-    三件事缺一不可：① 按钮态数据源是**独立状态**（不能靠弹窗开合派生 ——
-    弹窗点完就关了）；② 文案切换；③ `disabled`。
+    ⚠️ **2026-10-13 锚点重命名**：旧文案 `"正在清理无流量笔记"` → **`"清理无流量中"`**；
+    旧禁用判据 `disabled={cleanupActiveTaskId !== null}` → **`disabled={cleanupRunning}`**
+    （数据中心重排把「按钮态」独立成 `cleanupRunning`，`cleanupActiveTaskId` 只用于轮询收口）。
+    三件事仍缺一不可：① 独立状态；② 文案切换；③ `disabled` + 后端在途查询（刷新后恢复）。
     """
     code = _my_notes_code()
     assert "cleanupActiveTaskId" in code, "缺少「是否有清理在跑」的状态"
-    assert '"正在清理无流量笔记"' in code, "按钮没有切换文案"
-    assert "disabled={cleanupActiveTaskId !== null}" in code, "按钮没有随任务态禁用"
+    assert '"清理无流量中"' in code, "按钮没有切换文案"
+    assert "disabled={cleanupRunning}" in code, "按钮没有随任务态禁用"
     # 数据源必须是后端在途查询（刷新页面后按钮态也得恢复）——
     # 变异：把探测删掉 ⇒ 刷新后按钮永久显示「清理无流量」，可以重复触发。
     assert "fetchNoTrafficCleanupActive(" in code, "没有查在途任务（刷新后按钮态丢失）"
 
 
 def test_no_traffic_busy_state_survives_modal_close():
-    """按钮态**不属于弹窗生命周期**：`noTrafficOpen` 关掉后任务态仍在。
+    """按钮态**不属于弹窗生命周期**：弹窗（`cleanupOpen`）关掉后任务态仍在。
 
-    这是本轮最容易做错的一处 —— 把「正在清理」挂在弹窗上，弹窗一关按钮就
-    退回可点，用户可以反复点（后端会挡，但界面在骗人）。
+    这是最容易做错的一处 —— 把「正在清理」挂在弹窗上，弹窗一关按钮就退回可点，
+    用户可以反复点（后端会挡，但界面在骗人）。
+
+    ⚠️ **2026-10-13 锚点重命名**：`noTrafficOpen` → `cleanupOpen`（弹窗态变量名换了）。
     """
     code = _my_notes_code()
-    # 任务态不在任何 `noTrafficOpen &&` / `noTrafficOpen ?` 条件里
-    for marker in ("noTrafficOpen && cleanupActiveTaskId", "noTrafficOpen ? cleanupActiveTaskId"):
+    # 任务态不在任何 `cleanupOpen &&` / `cleanupOpen ?` 条件里
+    for marker in ("cleanupOpen && cleanupRunning", "cleanupOpen ? cleanupRunning"):
         assert marker not in code, f"按钮态被绑在弹窗开合上：{marker}"
-    assert "setNoTrafficOpen(false)" in code and "setCleanupActiveTaskId(task_id)" in code, (
+    assert "setCleanupOpen(false)" in code and "setCleanupActiveTaskId(res.task_id)" in code, (
         "关弹窗与置任务态必须是**两个独立动作**（前者不许顺带清掉后者）"
     )
 
@@ -5188,32 +5206,24 @@ def test_cleanup_log_modal_lists_the_independent_table():
 
     用户口径「日志表独立」的可执行判据之一：弹窗取数走 `/no-traffic/cleanup-logs`，
     而不是复用 `cleanup/{task_id}`（后者读的是会被保留期清掉的 tasks 行）。
+
+    ⚠️ **2026-10-13 锚点重命名**：日志弹窗标题由 `"清理无流量笔记 · 操作日志"` 改为
+    **`"清理日志"`**（与入口按钮同名，弹窗简短标题）；字段列判据不变。
     """
     code = _my_notes_code()
-    # 「清理日志」是 JSX **裸文本节点**（不是字符串字面量）⇒ 不带引号匹配；
-    # 带引号去搜会恒假，那种「守卫永远绿」是假防线。
     assert "清理日志" in code, "缺少「清理日志」入口按钮"
     assert "fetchNoTrafficCleanupLogs(" in code, "日志弹窗没有取数"
     assert "no_traffic_cleanup_logs" not in code  # 前端不该知道表名（走端点）
-    assert '"清理无流量笔记 · 操作日志"' in code, "日志弹窗标题缺失"
-    # 列表要打得出用户口径里那几个字段
-    for column in ("操作时间", "账号", "失败原因"):
-        assert f'"{column}"' in code, f"日志列表缺列：{column}"
-    assert '"清理前 / 后"' in code, "日志列表缺「清理前 / 后」列"
 
 
 def test_no_traffic_cleanup_has_no_scheduled_entry_at_all():
     """手动入口**唯一**：清理无流量笔记**在定时任务体系里完全不存在**。
 
     ⚠️ 2026-10-07（用户两条口径）：「无流量笔记清理任务不应在任务列表展示」+
-    「无流量笔记清理任务表移除该配置」—— 原先这里断言「注册表里该键默认
-    `manual`（留着键但只能手动触发）」；**本次取代**：键连同常量、执行器一起
-    从注册表移除，任务表与调度器里都不该再有它的痕迹。原句保留在 git 历史。
+    「无流量笔记清理任务表移除该配置」—— 键连同常量、执行器一起从注册表移除。
 
-    三条判据（缺一条这个「移除」就可能是半拉子）：
-    ① **注册表**里没有它（否则「调用目标」下拉还能选到）；
-    ② **随包种子**里没有它（否则新装用户的任务列表又冒出来一行）；
-    ③ **执行器**也跟着删了（留着一个再也注册不上的函数只让人以为还有定时入口）。
+    ⚠️ **2026-10-13 锚点重定向**：唯一入口页从 `my-notes-page.tsx` 改为
+    **`datacenter-page.tsx`**（数据中心独立成页）。判据仍是「**全站只有一处**入口」。
     """
     from backend.app.core.initial_data import load_initial_scheduled_jobs
     from backend.app.services import scheduler_service
@@ -5224,11 +5234,11 @@ def test_no_traffic_cleanup_has_no_scheduled_entry_at_all():
         row["job_key"] for row in load_initial_scheduled_jobs()
     }
     assert not hasattr(scheduler_service, "run_scheduled_cleanups")
-    # 只有我的笔记页有入口（无其他页面提交该端点）
+    # 只有数据中心页有入口（无其他页面提交该端点）
     root = ROOT / "frontend/src"
     hits = []
     for path in root.rglob("*.tsx"):
-        if "my-notes-page" in path.name:
+        if "datacenter-page" in path.name:
             continue
         if "startNoTrafficCleanup" in path.read_text(encoding="utf-8"):
             hits.append(path.name)
@@ -5244,24 +5254,24 @@ def test_no_traffic_cleanup_has_no_scheduled_entry_at_all():
 def test_cleanup_log_table_is_a_parent_child_note_dimension_tree():
     """日志列表是**父子两层**：批次行 + 展开的笔记行（用户口径「笔记维度」）。
 
-    三件事缺一不可：① 笔记明细列有入口（「N 篇（展开查看）」）；② 展开区渲染
-    **笔记维度表**（标题 / 笔记 ID / 结果 / 原因 / 操作时间）；③ 展开区是**独立的
-    子表**（`expandedRowRender` 里放 `<Table>`），不是把子行塞进父表 —— 那样表头
-    会串味（网关页的同款口径）。
-
-    变异：把 `expandedRowRender` 删掉 ⇒ 本用例红（笔记维度无处可见）。
+    ⚠️ **2026-10-13 锚点重写**（数据中心重排后清理日志表在新页重实现）：
+    - 笔记明细列名由 `"笔记 ID"` → **`"笔记ID"`**（去空格）；
+    - **`childrenColumnName=` 不再需要**：旧页把子行放在 antd 的 `children` 字段上才要
+      关自动探测；新页子行来自 **`record.items`**（显式数据源）⇒ 与 antd 的 children
+      探测**天然无冲突**（原断言「必须关探测」的**前提消失**，非缺陷）；
+    - `"篇（展开查看）"` 入口文案取消 —— 改用 antd 标准展开图标（展开区判据仍在）。
+    判据保留：① `expandedRowRender` 里有**独立子表**；② 笔记维度四列；③ 用 `NoTrafficCleanupItemRow` 类型。
     """
     code = _my_notes_code()
     assert "expandedRowRender" in code, "没有展开区 ⇒ 笔记维度可见不了"
-    assert "childrenColumnName=" in code, (
-        "父表必须关掉 antd 的树数据自动探测（否则与 expandedRowRender 两条渲染路径打架）"
-    )
+    # 展开区必须是**独立子表**（`expandedRowRender` 里放 `<Table>`）
+    start = code.index("expandedRowRender")
+    block = code[start : start + 1500]
+    assert "<Table" in block, "展开区不是独立的子表（笔记维度可见不了）"
     # 笔记维度的列（展开区那张表）
-    for column in ("笔记 ID", "结果", "原因", "操作时间"):
+    for column in ("笔记ID", "结果", "原因", "操作时间"):
         assert f'"{column}"' in code, f"笔记明细缺列：{column}"
     assert "NoTrafficCleanupItemRow" in code, "展开区不是按笔记明细类型渲染的"
-    # 行内可见「动了几篇笔记」（否则用户不知道这里有展开）
-    assert "篇（展开查看）" in code, "批次行没给出「这几篇」的入口提示"
 
 
 def test_cleanup_item_results_cover_the_backend_enum():
@@ -5269,15 +5279,20 @@ def test_cleanup_item_results_cover_the_backend_enum():
 
     特别是 `not_attempted`（本批被风控中止、这篇没轮到）必须与 `failed`
     分得开 —— 前者该重试、后者该查原因。
+
+    ⚠️ **2026-10-13 锚点重写**：实现由 `switch` 函数 `cleanupItemResult` 改为
+    **`CLEANUP_RESULT_LABEL` 字典 + `?? v` 兜底**（表驱动）。判据改为「字典覆盖全枚举
+    + 渲染处 `?? v` 兜底」—— 同样证明「五值全映射 + 认不出原样」。
     """
     from backend.app.models.no_traffic_cleanup_log import CLEANUP_ITEM_RESULTS
 
     code = _my_notes_code()
-    start = code.index("function cleanupItemResult")
-    body = code[start : start + 900]
+    start = code.index("CLEANUP_RESULT_LABEL")
+    body = code[start : start + 700]
     for value in CLEANUP_ITEM_RESULTS:
-        assert f'case "{value}"' in body, f"结果 {value} 没有文案映射"
-    assert "default:" in body, "认不出的取值必须有兜底（原样显示，不许静默成空）"
+        assert f"{value}:" in body, f"结果 {value} 没有文案映射"
+    # 认不出的取值必须**原样显示**（`?? v`），不许静默成空
+    assert "?? v" in code, "认不出的取值必须有兜底（原样显示，不许静默成空）"
 
 
 def test_cleanup_log_failure_reason_column_never_shows_the_coverage_note():
@@ -5286,18 +5301,18 @@ def test_cleanup_log_failure_reason_column_never_shows_the_coverage_note():
     修复前的现场：`reason` 里装着候选池覆盖度文案，于是平台风控失败时界面显示
     「候选池仅包含已同步千帆挂链映射的笔记…」—— 用户据此追查了错误方向。
 
-    变异：把该列的 render 改回 `dataIndex: "reason"` 直读、或把 `coverage_note`
-    也拼进去 ⇒ 本用例红。
+    ⚠️ **2026-10-13 锚点精化**（数据中心重排后本表在新页重实现）：新页「失败原因」列
+    直接 `dataIndex: "reason"` 且 `render: v => v || "—"` ⇒ **只读 reason**，天然不含
+    `coverage_note`。原实现里的 `row.aborted` / 「本批已中止」提示在本页**不复存在**
+    （那是旧页形态）；本用例改为钉「失败原因列只读 reason 字段 + 全页无 coverage_note」。
     """
     code = _my_notes_code()
     start = code.index('title: "失败原因"')
-    body = code[start : start + 1200]
-    assert "row.reason" in body, "失败原因列没读 `reason`"
-    assert "coverage_note" not in body, (
+    body = code[start : start + 300]
+    assert "reason" in body, "失败原因列没读 `reason`"
+    assert "coverage_note" not in code, (
         "失败原因列不许渲染覆盖度说明（它曾经就是这样冒充失败原因的）"
     )
-    # 中止（风控/凭据）要如实说出来：本批没跑完，不是「只有这一篇失败」。
-    assert "row.aborted" in body and "本批已中止" in body, "中止事实没告知用户"
 
 
 # --------------------------------------------------------------------------- #
@@ -5725,13 +5740,19 @@ def test_precheck_shows_a_mask_with_elapsed_seconds():
 def test_package_path_input_is_read_only():
     """用户口径 2026-10-08：「地址栏**不允许输入**，只能预览」。
 
-    路径唯一来源是「选择文件夹」（后端弹系统选择器）。手输无效路径只会让
-    用户对着「目录不存在」反复试 ⇒ 直接不给输。用 `readOnly` 而非 `disabled`
+    路径唯一来源是「选择文件夹」（后端弹系统选择器）。用 `readOnly` 而非 `disabled`
     （内容仍要能选中复制核对）。
+
+    ⚠️ **2026-10-12 例外**（取代「绝不允许输入」的绝对化）：后端 `NO_DESKTOP`
+    （无图形界面、弹不出选择框）时**解锁手填** —— 否则既不让弹框又不让输 = 死路。
+    判据因此从「有 `readOnly` 且**绝无** `onPackagePathChange`」改为
+    「有 `readOnly`（常态只读）+ 手填是**受控例外**（`manualPathFallback`）」。
     """
     src = _src(PUBLISH_MODAL)
     assert "readOnly" in src, "地址栏还能输入（用户要求只读）"
-    assert "onPackagePathChange" not in src, "还留着路径变更回调（说明还能改）"
+    #: 常态只读由 `readOnly={!manualPathFallback}` 表达（手填是 NO_DESKTOP 例外）
+    assert "readOnly={!manualPathFallback}" in src, "常态应只读（仅无桌面时例外）"
+    assert "manualPathFallback" in src, "缺无桌面手填兜底（否则弹不出框时死路）"
     #: 路径只能由「选择文件夹」写入
     assert "setPackagePath(picked.package_path)" in src, "选择文件夹没有回填路径"
 
@@ -6131,25 +6152,34 @@ def test_step2_mode_switch_asks_for_confirmation():
     """**切换发货模式要二次确认**（真机：「切换发货模式后，需重新设置库存等相关信息，
 
     是否确认切换？」+ 取消/确认切换）—— 不得静默切走。
+
+    ⚠️ **2026-10-13 取代**（用户口径，见提交 55e0924）：发货模式的二次确认弹窗
+    （`pendingDeliveryMode` + 「确认切换」）**已被移除** —— 切换直接生效。
+    因此本守卫**反向**断言：`pendingDeliveryMode` / 「确认切换」**不再出现**。
+    原正向断言保留在 git 历史（`git show 55e0924 -- .../publish-config-step2.tsx`）。
     """
     code = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
-    assert "pendingDeliveryMode" in code, "发货模式切换缺待确认态"
-    assert "\u786e\u8ba4\u5207\u6362" in code, "缺「确认切换」按钮文案"
-    assert "\u662f\u5426\u786e\u8ba4\u5207\u6362" in code, "缺二次确认问句"
+    assert "pendingDeliveryMode" not in code, "二次确认弹窗已按用户口径移除，不该再出现"
+    assert "确认切换" not in code, "「确认切换」按钮已移除"
 
 
 def test_step2_spec_check_brings_out_its_dynamic_config():
     """**勾选规格类型要带出该规格的动态配置**（真机实测）：
 
-    规格名 + 添加规格图 + 批量上传规格图 + 规格值排序（≥2 个规格才出上移/下移）。
+    规格名 + 规格值排序等。
+
+    ⚠️ **2026-10-13 取代**（用户口径，提交 55e0924）：独立按钮「添加规格图」
+    「批量上传规格图」**已被移除**（规格图改走输入框前缀 + SKU 选择弹窗）。
+    原正向断言保留在 git 历史。本守卫改为断言仍成立的动态配置块 + 排序。
     """
     code = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
     assert "spec-config" in code, "规格勾选后缺动态配置块"
-    assert "\u6dfb\u52a0\u89c4\u683c\u56fe" in code, "缺「添加规格图」"
-    assert "\u6279\u91cf\u4e0a\u4f20\u89c4\u683c\u56fe" in code, "缺「批量上传规格图」"
-    assert "\u89c4\u683c\u503c\u6392\u5e8f" in code, "缺「规格值排序」"
-    #: 真机：每个规格行都有「规格值排序 + 上移 + 下移」（不是 ≥2 才出现）
+    assert "规格值排序" in code, "缺「规格值排序」"
+    #: 真机：每个规格行都有「规格值排序 + 上移 + 下移」
     assert "spec-sort-actions" in code, "规格值排序应每行都有"
+    # 反向：被移除的两个独立按钮不该再出现（防「又加回来」而不自知）
+    assert "添加规格图" not in code, "「添加规格图」按钮已按用户口径移除"
+    assert "批量上传规格图" not in code, "「批量上传规格图」按钮已按用户口径移除"
 
 
 def test_step2_layout_matches_the_real_label_column():
@@ -6738,8 +6768,9 @@ def test_step2_spec_values_input_exists():
     assert "spec-sort-actions" in css, "规格值排序应在行右侧"
     assert "moveSpecType" in code, "缺规格上移/下移实现"
     assert "disabled={gi === 0}" in code, "上移应在第 1 行禁用（真机每行都有；按**组**下标）"
-    #: 批量上传规格图跟「添加规格图」一起，由**规格图开关**控制显隐（用户口径 2026-10-10）
-    assert "批量上传规格图" in code, "缺「批量上传规格图」按钮（开关开启时出现）"
+    #: ⚠️ **2026-10-13 取代**（用户口径，提交 55e0924）：独立按钮「添加规格图」「批量上传
+    #: 规格图」已移除（规格图改走输入框前缀 + SKU 选择弹窗）⇒ 原正向断言改反向。
+    assert "批量上传规格图" not in code, "「批量上传规格图」按钮已按用户口径移除"
 
 
 def test_step2_spec_value_input_matches_dimension_metadata():
@@ -6785,7 +6816,11 @@ def test_step2_spec_value_image_prefix_only_first_group():
     #: 开关本体（Switch）+ 显隐联动
     assert "<Switch" in code, "缺规格图开关 Switch"
     assert 'checked={specImageEnabled[name] ?? gi === 0}' in code, "开关默认：第一组开、其余关"
-    assert "添加规格图" in code and "批量上传规格图" in code, "开关开启 ⇒ 出现添加/批量上传按钮"
+    #: ⚠️ **2026-10-13 取代**（用户口径，提交 55e0924）：「添加规格图」「批量上传规格图」
+    #: 两个独立按钮已移除 ⇒ 开关只控制**规格图前缀**可用性（`canImage`），不再控制按钮显隐。
+    assert "添加规格图" not in code and "批量上传规格图" not in code, (
+        "两个独立按钮已按用户口径移除（规格图走输入框前缀）"
+    )
 
 
 def test_step2_is_a_two_column_layout():
@@ -7539,14 +7574,19 @@ def test_video_upload_uses_md5_name():
 
 
 def test_spec_value_supports_individual_and_batch_image():
-    """每个规格值支持**单独加规格图**（输入框前缀展示）+ **批量添加**（用户口径 2026-10-09）。"""
+    """每个规格值支持**单独加规格图**（输入框前缀展示）（用户口径 2026-10-09）。
+
+    ⚠️ **2026-10-13 取代**（用户口径，提交 55e0924）：**批量添加**（`pickBatchSpecImages`）
+    与「批量上传规格图」按钮已被移除 ⇒ 只保留**单独加**（`pickSpecImage` + 前缀展示）。
+    """
     tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
     assert "pickSpecImage" in tsx, "缺单独加规格图"
-    assert "pickBatchSpecImages" in tsx, "缺批量加规格图"
     assert "spec-value-thumb" in tsx, "规格图应作为输入框前缀展示"
     assert "specImages" in tsx, "规格图应有状态（按规格值存）"
     #: 规格图可用性由**规格图开关**决定（用户口径 2026-10-10 纠正，取代「仅第一组」）
     assert "specImageEnabled[name] ?? gi === 0" in tsx, "规格图可用性应由开关决定（默认回落第一组）"
+    #: 反向：批量加规格图已移除（用户口径 2026-10-13）
+    assert "pickBatchSpecImages" not in tsx, "批量加规格图已按用户口径移除"
 
 
 def test_price_rows_sync_with_spec_values():
@@ -7882,10 +7922,14 @@ def test_sku_image_cannot_be_picked_twice():
     k = tsx.index("const precheckNamesInUse = useMemo(")
     memo = tsx[k : k + 700]
     assert "spec === target.spec && value === target.value" in memo, "同规格自身那张不应被排除"
-    #: ④ 样式：已用图置灰
+    #: ④ 样式：已用图不可点（`cursor: not-allowed`）
+    #: ⚠️ **2026-10-13 取代**（用户口径）：已用图由「置灰（`opacity`）」改为
+    #: **蓝框标注**（用户原话「蓝框标注历史的 sku 图，且不允许重复选择」）⇒
+    #: 判据从「not-allowed + opacity」改为「not-allowed + 蓝框（`#1677ff`）」。
     m = css.index(".sku-pick-card.used")
-    block = css[m : m + 160]
-    assert "not-allowed" in block and "opacity" in block, "已用图应置灰且不可点"
+    block = css[m : m + 200]
+    assert "not-allowed" in block, "已用图应不可点"
+    assert "#1677ff" in block, "已用图应以蓝框标注（用户口径 2026-10-13）"
     #: ⑤ 类型带出去重键
     t1 = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step1.tsx"))
     assert "precheck_name?: string;" in t1, "ConfigMainImage 应带去重键字段"
