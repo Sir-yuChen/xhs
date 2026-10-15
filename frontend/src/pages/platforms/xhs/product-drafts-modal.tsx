@@ -205,7 +205,7 @@ export function ProductDraftsModal({
           type="info"
           showIcon
           message="草稿箱数据实时来自千帆，本地不落库"
-          description="账号跟随商品页选定的店铺。草稿保存的是商品骨架（类目 / 标题 / 主图 / SKU），详细字段需在千帆「商品管理 → 草稿箱」点编辑继续填。"
+          description="账号跟随商品页选定的店铺。草稿只存商品骨架，其余字段需在千帆草稿箱补齐。"
         />
 
         <Table<ItemDraftRow>

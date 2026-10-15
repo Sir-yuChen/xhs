@@ -54,8 +54,11 @@ export const FILTER_CACHE_KEYS = {
     accountId: "xhs.filters.my-notes.account-id",
     tab: "xhs.filters.my-notes.tab",
     interactionKind: "xhs.filters.my-notes.interaction-kind",
-    noTrafficThresholds: "xhs.filters.my-notes.no-traffic-thresholds",
-    noTrafficQuery: "xhs.filters.my-notes.no-traffic-query",
+    //: ⚠️ 2026-10-14 删掉两个**死键**（`noTrafficThresholds` / `noTrafficQuery`）：
+    //: 「无流量」筛选随 `55e0924`（数据中心独立成页）整块迁到了 `datacenter-page.tsx`，
+    //: 但那一次**只删了页面代码、没删这里的键**（my-notes-page 那次被砍掉 1476 行）。
+    //: 结果：这两个键没有任何生产代码引用，只有守卫还在按「my-notes-page 应该接它们」
+    //: 断言 ⇒ 3 条用例长期红。删键即「无流量不是我的笔记页的筛选」这一事实的落地。
   },
   /** 商品列表 `/platforms/xhs/shop-items`。 */
   shopItems: {

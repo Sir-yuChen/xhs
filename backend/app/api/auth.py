@@ -104,6 +104,18 @@ def register(
         db.rollback()
         logger.warning("register: seed prompt templates for user %s failed: %s", user.id, exc)
 
+    # 设计 40（2026-10-14）：数据包列规则的**示例规则包**同样按用户各持一份。
+    # ⚠️ 少了这一步，新用户第一次打开列头齿轮时「提取数据规则」里是空的
+    # （启动播种只覆盖「启动时已存在的用户」）。
+    try:
+        from backend.app.services.data_package_rule_service import seed_builtin_rules
+
+        seed_builtin_rules(db, user_id=user.id)
+        db.commit()
+    except Exception as exc:  # noqa: BLE001 - 注册不被子系统问题拖死
+        db.rollback()
+        logger.warning("register: seed data package rules for user %s failed: %s", user.id, exc)
+
     # 2026-10-13 用户口径：**国内常见 6 个服务商**作为种子数据（用户登录后只需配 KEY
     # 并点「测试连接」即可用）。同样**按用户各持一份** ⇒ 注册即播种；种子**不含 KEY**，
     # 存量用户不主动补种（避免替用户建一堆没配 KEY 的服务商，同 §4.5.1 纪律）。

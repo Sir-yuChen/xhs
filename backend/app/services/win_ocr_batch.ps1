@@ -64,9 +64,21 @@ foreach ($row in $rows) {
         $scale = 1.0
         if ($maxDim -gt 0 -and ($origW -gt $maxDim -or $origH -gt $maxDim)) {
             $scale = [Math]::Min($maxDim / $origW, $maxDim / $origH)
-            $nw = [uint32][Math]::Max(1, [Math]::Round($origW * $scale))
-            $nh = [uint32][Math]::Max(1, [Math]::Round($origH * $scale))
-            $resized = Await ($bitmap.ResizeAsync($nw, $nh)) ([Windows.Graphics.Imaging.SoftwareBitmap])
+            # NOTE 5: SoftwareBitmap has NO ResizeAsync -- the WinRT way is
+            #   BitmapTransform.ScaleRatio + decoder.GetSoftwareBitmapAsync(transform).
+            #   Re-decoding with a transform is also the only path that keeps the
+            #   decoder's own pixel format (mixing formats breaks OcrEngine).
+            $transform = New-Object Windows.Graphics.Imaging.BitmapTransform
+            $transform.ScaledWidth = [uint32][Math]::Max(1, [Math]::Round($origW * $scale))
+            $transform.ScaledHeight = [uint32][Math]::Max(1, [Math]::Round($origH * $scale))
+            $transform.InterpolationMode = [Windows.Graphics.Imaging.BitmapInterpolationMode]::Fant
+            $resized = Await ($decoder.GetSoftwareBitmapAsync(
+                [Windows.Graphics.Imaging.BitmapPixelFormat]::Bgra8,
+                [Windows.Graphics.Imaging.BitmapAlphaMode]::Premultiplied,
+                $transform,
+                [Windows.Graphics.Imaging.ExifOrientationMode]::RespectExifOrientation,
+                [Windows.Graphics.Imaging.ColorManagementMode]::DoNotColorManage
+            )) ([Windows.Graphics.Imaging.SoftwareBitmap])
             $bitmap.Dispose()
             $bitmap = $resized
         }

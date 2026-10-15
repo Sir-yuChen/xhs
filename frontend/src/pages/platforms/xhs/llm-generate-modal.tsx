@@ -220,7 +220,7 @@ export function LlmGenerateModal({
             type="info"
             showIcon
             message="还没有提示词模板"
-            description="去「笔记工坊 → 提示词模板」建一个（可留空不选，后端会用默认骨架）。"
+            description="可在「笔记工坊 → 提示词模板」新建（留空则用默认骨架）"
           />
         )}
 
@@ -303,7 +303,7 @@ export function LlmGenerateModal({
               type="info"
               showIcon
               message="参考图自动取商品的台账首图"
-              description="无需填 URL（后端按商品 ID 取本地台账的图）；没有图会报缺，不会凭空生成。"
+              description="无需填 URL，后端按商品 ID 取本地台账的图"
             />
           )}
 

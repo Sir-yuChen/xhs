@@ -482,7 +482,7 @@ export function TaskCenterPage() {
           </Button>
           <Popconfirm
             title={`删除任务「${record.name}」？`}
-            description="任务日志会保留（任务名快照仍在），可随后在日志页签清理。"
+            description="任务日志会保留，可在日志页签清理"
             onConfirm={() => removeJob(record)}
             okButtonProps={{ danger: true }}
             // 内置任务不给弹确认（点都点不动，弹了也没用）
@@ -740,7 +740,7 @@ export function TaskCenterPage() {
                       <Spin tip="正在加载任务..." />
                     </div>
                   ) : jobs.length === 0 ? (
-                    <Empty description="还没有任务。点「新建任务」创建一个：定时一次、Cron 周期或间隔周期。" />
+                    <Empty description="还没有任务" />
                   ) : (
                     <Table<ScheduledJob>
                       columns={jobColumns}
@@ -830,7 +830,7 @@ export function TaskCenterPage() {
                       <Spin tip="正在加载日志..." />
                     </div>
                   ) : logs.length === 0 ? (
-                    <Empty description="还没有执行记录。任务首次触发后，这里会有每次执行的成败与耗时。" />
+                    <Empty description="还没有执行记录，任务首次触发后这里会有" />
                   ) : (
                     <Table<ScheduledJobLog>
                       columns={logColumns}

@@ -638,7 +638,7 @@ export function XhsDatacenterPage() {
     if (!selectedAccountId) return;
     const noteIds = Array.from(cleanupSelected);
     if (!noteIds.length) {
-      message.warning("请先勾选要清理的笔记，或点「清理全部候选笔记」");
+      message.warning("请先勾选要清理的笔记");
       return;
     }
     await doStartCleanup(noteIds);
@@ -1002,7 +1002,7 @@ export function XhsDatacenterPage() {
             type="warning"
             showIcon
             message="没有小红书账号可选"
-            description="数据中心按账号隔离；请先到「账号矩阵」添加账号，并导入其千帆登录态后才能同步笔记数据。"
+            description="数据中心按账号隔离；请先添加账号并导入千帆登录态，才能同步笔记数据。"
           />
         )}
 

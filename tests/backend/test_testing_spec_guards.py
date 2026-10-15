@@ -286,6 +286,46 @@ def test_wiring_guard_is_not_vacuous():
     assert _wired_by("definitely_not_a_behaviour_script.cjs") == []
 
 
+#: 支持 `--self-check --full`（契约 + 全部变异）的行为脚本。
+#: ⚠️ 2026-10-14 拆分（用户口径「拆」）：这两个脚本的变异逐个都要 jsdom/esbuild，
+#: 且 pytest 用模块级 fixture **串行**跑 ⇒ 每轮全量回归固定多花 ~3 分钟
+#: （实测 `add_account_modal --full` = **2m51s**、`login_state --full` = 0.35s）。
+#: 现在默认只跑契约，变异收在 `--full` 后面。
+#:
+#: 拆分最大的风险 = **变异被悄悄丢光**（`--full` 分支写错 / 清单被清空），
+#: 那样「守卫承重」的证据链就断了，而且**契约照样全绿** ⇒ 静默退化。
+#: 所以这里钉两件事：① 两个模式都真的实现；② **变异清单非空**。
+FULL_MODE_SCRIPTS = ("add_account_modal.cjs", "login_state.cjs")
+
+
+@pytest.mark.parametrize("script", FULL_MODE_SCRIPTS)
+def test_frontend_scripts_expose_a_full_mutation_mode(script: str):
+    """`--full` 必须存在，且**变异清单非空**（拆分不能把变异丢光）。
+
+    判据读**源码**（脚本是 node 的，pytest 这边只能静态看）：
+    1. 有 `process.argv.includes("--full")` —— 否则 `--full` 不生效，
+       变异**永远不会被跑**，而契约仍然全绿（最坏的静默退化）；
+    2. 有非空的变异清单（`VARIANTS = [...]` 或 `MODAL_VARIANTS.slice(1)`）
+       —— 否则「全部变异」是个空集，`--full` 也证明不了任何事。
+
+    ⚠️ 为什么值得一条守卫：这两个脚本的契约与变异**共用同一个入口**，
+    拆分时把变异分支写错（或漏掉 `--full` 判断）不会有任何红 ——
+    日常回归只会看到「契约 PASS」，丢失的是「守卫真的承重」这条结论。
+    """
+    src = (ROOT / "tests" / "frontend" / script).read_text(encoding="utf-8")
+
+    assert 'process.argv.includes("--full")' in src, (
+        f"{script} 没有实现 `--full` ⇒ 变异永远不会被跑（契约仍会全绿，静默退化）"
+    )
+    #: 变异清单：add_account_modal 用 `MODAL_VARIANTS.slice(1)`；
+    #: login_state 用 `VARIANTS`（首项是契约）。
+    has_list = (
+        "MODAL_VARIANTS.slice(1)" in src
+        or re.search(r"^const VARIANTS = \[[^\]]+\]", src, flags=re.M) is not None
+    )
+    assert has_list, f"{script} 找不到非空的变异清单 ⇒ `--full` 会跑一个空集"
+
+
 
 # ---------------------------------------------------------------------------
 # 记忆预算守卫（2026-09-25）

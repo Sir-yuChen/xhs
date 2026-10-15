@@ -238,7 +238,7 @@ export function CronBuilderModal({ open, initialCron, onOk, onCancel }: CronBuil
           <Alert
             type="info"
             showIcon
-            message="当前表达式包含混合形态，已切换为原文编辑（点选模式只覆盖标准形态）"
+            message="表达式含混合形态，已切换为原文编辑"
           />
         )}
 

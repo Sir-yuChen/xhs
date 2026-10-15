@@ -26,7 +26,8 @@
  *
  * Run:
  *   <node> tests/frontend/add_account_modal.cjs                        # expect all PASS
- *   <node> tests/frontend/add_account_modal.cjs --self-check           # one process: contract + all mutations (pytest uses this)
+ *   <node> tests/frontend/add_account_modal.cjs --self-check           # 契约 only（pytest 默认用这个）
+ *   <node> tests/frontend/add_account_modal.cjs --self-check --full    # 契约 + 全部变异
  *   MODAL_MUTATE=drawer <node> tests/frontend/add_account_modal.cjs    # expect A1 FAIL
  *   RENEW_MUTATE=default  <node> tests/frontend/add_account_modal.cjs  # expect A6/A7/A8 FAIL
  *   RENEW_MUTATE=matrix   <node> tests/frontend/add_account_modal.cjs  # expect A7/A8 FAIL
@@ -40,6 +41,14 @@
  * `SELF <variant> OK|BROKEN <p>/<f>` summary lines for pytest to parse. Before this,
  * each mutation spawned its own process (5x jsdom boot + esbuild); the related cases
  * cost ~100s of the full regression, now ~1 run.
+ *
+ * ⚠️ **2026-10-14 拆分（用户口径「拆」）**：实测契约 **38s**、每个变异 **11s** ⇒
+ * 旧的全跑模式固定花 ~126s，且它在 pytest 的模块级 fixture 里**串行**执行
+ * （xdist 帮不上忙），是全量回归长期 10+ 分钟的主因之一。
+ * 现在默认**只跑契约**（38s），变异走 `--full`（改本脚本 / 改弹窗时跑）。
+ * ⚠️ 拆的是「跑哪些」不是「判什么」：`login_state.cjs` 同理已拆分。
+ * 守卫 `test_frontend_scripts_expose_a_full_mutation_mode` 钉住两件事：
+ * 两个脚本都支持 `--full`，且**变异清单非空**（否则拆分可能把变异悄悄丢光）。
  *
  * jsdom is intentionally NOT a project dependency; point NODE_PATH at its
  * node_modules when installed outside the project.
@@ -1117,9 +1126,28 @@ const MODAL_VARIANTS = [
   { name: "shortwait", modal: "", renew: "", mask: "", login: "shortwait" },
 ];
 
-async function selfCheck() {
+//: ⚠️ **契约与变异分批**（2026-10-14 用户口径「拆」）：
+//:
+//: 实测耗时：契约（none）**38s**、每个变异约 **11s** ⇒ `--self-check` 跑满 9 个
+//: variant 要 **~126s**，而 pytest 是模块级 fixture 串行跑两个行为脚本
+//: （另一个是 `login_state.cjs`）⇒ **每轮全量回归固定多花 2 分钟以上**，
+//: 且它跑在单线程里，xdist 的 6 个 worker 谁也帮不上忙（这是全量回归
+//: 长期 10+ 分钟的主要来源之一）。
+//:
+//: 拆分口径：
+//: * **默认（`--self-check`）只跑契约** —— 守卫「契约必须全 PASS」这条日常判据；
+//: * **`--self-check --full` 才跑全部变异** —— 变异是「证明守卫承重」的判据，
+//:   属于**改动本脚本或改弹窗代码时**才需要跑的重活。
+//:
+//: ⚠️ 拆的是「跑哪些」，不是「判什么」：两种模式下**契约都必须全 PASS**，
+//: 且 `--full` 下每个变异仍必须至少让一条断言变红。判据一条不减。
+const CONTRACT_VARIANT = MODAL_VARIANTS[0];
+const MUTATION_VARIANTS = MODAL_VARIANTS.slice(1);
+
+async function selfCheck({ full = false } = {}) {
+  const variants = full ? MODAL_VARIANTS : [CONTRACT_VARIANT];
   let broken = 0;
-  for (const v of MODAL_VARIANTS) {
+  for (const v of variants) {
     let r;
     try {
       r = await runOnce(v.modal, v.renew, v.mask, v.login);
@@ -1138,7 +1166,8 @@ async function selfCheck() {
 }
 
 if (process.argv.includes("--self-check")) {
-  selfCheck()
+  //: `--full` 才跑全部变异；默认只跑契约（见上面 CONTRACT_VARIANT 的耗时说明）。
+  selfCheck({ full: process.argv.includes("--full") })
     .then((code) => process.exit(code))
     .catch((err) => {
       origLog("HARNESS ERROR:", err && err.stack ? err.stack : err);

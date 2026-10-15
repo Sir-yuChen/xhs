@@ -18,7 +18,8 @@
  * 运行（纯模块，不需要 antd 桩、不需要 jsdom）：
  *
  *   <node> tests/frontend/login_state.cjs                    # 期望 20 PASS
- *   <node> tests/frontend/login_state.cjs --self-check       # 一次进程跑完契约+全部变异（pytest 用这个）
+ *   <node> tests/frontend/login_state.cjs --self-check       # 契约 only（pytest 默认用这个）
+ *   <node> tests/frontend/login_state.cjs --self-check --full # 契约 + 全部变异
  *   LOGIN_STATE_MUTATE=expired <node> tests/frontend/login_state.cjs   # 期望 FAIL
  *   LOGIN_STATE_MUTATE=label   <node> tests/frontend/login_state.cjs   # 期望 FAIL
  *   LOGIN_STATE_MUTATE=order   <node> tests/frontend/login_state.cjs   # 期望 FAIL
@@ -39,6 +40,12 @@
  * `--self-check`（2026-09-25 提速，见调研报告 P0-4）：契约 + 全部变异在**一个 node 进程**里
  * 依次跑完，输出 `SELF <variant> OK|BROKEN <passed>/<failed>` 摘要行。原来是每个变异起一个
  * 进程（6 次 node 冷启动 + 6 次 esbuild），单文件相关用例占全量回归约 100s；合并后约 30s。
+ *
+ * ⚠️ **2026-10-14 再拆（用户口径「拆」）**：变异逐个仍然要 jsdom/esbuild，且 pytest
+ * 用模块级 fixture **串行**跑 ⇒ 每轮全量回归固定多花几十秒。现在
+ * `--self-check` **默认只跑契约**，变异走 `--self-check --full`
+ * （改本脚本 / 改登录态代码时才跑）。
+ * ⚠️ 拆的是「跑哪些」不是「判什么」：契约在两种模式下都必须全 PASS。
  */
 const fs = require("fs");
 const os = require("os");
@@ -252,12 +259,23 @@ async function main(mutate) {
   return { passed, failed };
 }
 
-// --self-check：一个进程跑完契约 + 全部变异。
+// --self-check：默认**只跑契约**；`--self-check --full` 才跑契约 + 全部变异。
 // 每个 variant 的期望：契约全 PASS；变异至少一个 FAIL（守卫承重）。
 // 摘要行 `SELF <variant> OK|BROKEN <p>/<f>` 供 pytest 解析。
-async function selfCheck() {
+//
+//: ⚠️ **2026-10-14 拆分**（与 `add_account_modal.cjs` 同一轮，用户口径「拆」）：
+//: 变异逐个跑（每个都要 jsdom boot + esbuild 打包）是**串行**的，而 pytest
+//: 用的是模块级 fixture ⇒ 每轮全量回归固定多花几十秒到两分钟。
+//: 变异是「证明守卫承重」的判据 —— 改本脚本 / 改登录态代码时才需要，
+//: 日常回归只需要「契约全 PASS」。
+//:
+//: ⚠️ 拆的是「跑哪些」不是「判什么」：契约在两种模式下都必须全 PASS。
+//: 守卫 `test_frontend_scripts_expose_a_full_mutation_mode` 钉住两个脚本都支持
+//: `--full` 且变异清单非空。
+async function selfCheck({ full = false } = {}) {
+  const variants = full ? VARIANTS : [VARIANTS[0]];
   let broken = 0;
-  for (const variant of VARIANTS) {
+  for (const variant of variants) {
     let r;
     try {
       r = await main(variant);
@@ -276,7 +294,8 @@ async function selfCheck() {
 }
 
 if (process.argv.includes("--self-check")) {
-  selfCheck()
+  //: `--full` 才跑全部变异；默认只跑契约（见上面拆分说明）。
+  selfCheck({ full: process.argv.includes("--full") })
     .then((code) => process.exit(code))
     .catch((error) => {
       console.error(`FATAL ${error && error.message ? error.message : error}`);

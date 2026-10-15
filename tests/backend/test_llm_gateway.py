@@ -21,7 +21,7 @@ from sqlalchemy import select
 
 from backend.app.core.security import decrypt_text
 from backend.app.core.time import shanghai_now
-from backend.app.models import LlmGatewayAlert, LlmGatewayConfig
+from backend.app.models import LlmGatewayAlert, LlmGatewayConfig, User
 
 
 def _auth_header(api_client) -> dict:
@@ -333,10 +333,15 @@ def test_list_only_own(api_client):
         json={"name": "theirs", "base_url": "http://127.0.0.1:3000", "access_token": "sk-t", "models": [{"model_name": "m", "model_type": "text", "platform": ["xhs"]}]},
         headers=other,
     )
-    resp = api_client.get("/api/llm/gateway-configs?page=1&page_size=20", headers=headers)
+    resp = api_client.get("/api/llm/gateway-configs?page=1&page_size=50", headers=headers)
     assert resp.status_code == 200
     items = resp.json()["items"]
-    assert [i["name"] for i in items] == ["mine"]
+    names = [i["name"] for i in items]
+    #: ⚠️ 2026-10-14：注册即**播种 6 家国内服务商**（需求 R4）⇒ 新用户自带种子，
+    #: 「列表里只有我建的那条」不再成立。**隔离的判据不是「只有一条」**，
+    #: 而是「**我的**在、**别人的**不在」—— 改成这个，判据反而更贴规则本身。
+    assert "mine" in names, f"自己的服务商应可见：{names}"
+    assert "theirs" not in names, f"别的用户的服务商绝不能出现：{names}"
 
 
 def test_cross_user_404(api_client):
@@ -1315,9 +1320,12 @@ def test_models_tree_returns_provider_with_its_models(api_client):
     assert resp.status_code == 200, resp.text
     body = resp.json()
     items = body["items"]
-    assert len(items) == 1
+    #: ⚠️ 2026-10-14：注册即播种 6 家服务商（需求 R4）⇒ 不能断言「只有 1 条」。
+    #: 本用例要证的是「**建的那条**在树里且带着它的模型行」，按 id 定位即可。
+    rows = [i for i in items if i["id"] == created["id"]]
+    assert len(rows) == 1, f"刚建的服务商应在树里：{[i['name'] for i in items]}"
 
-    row = items[0]
+    row = rows[0]
     assert row["id"] == created["id"]
     # 父层字段（服务商维度）齐全
     assert row["name"] == "父子列表"
@@ -1355,13 +1363,43 @@ def test_models_tree_only_own(api_client):
 
     mine = api_client.get("/api/llm/gateway-configs/models-tree", headers=headers).json()["items"]
     theirs = api_client.get("/api/llm/gateway-configs/models-tree", headers=other_headers).json()["items"]
-    assert [r["name"] for r in mine] == ["我的"]
-    assert theirs == []
+    #: ⚠️ 2026-10-14：注册即播种 ⇒ 两边都可能有种子服务商。
+    #: 隔离的真正判据 = 「我的那条在我的里面 / **不在**对方的里面」——
+    #: 比「对方是空列表」更直接也更稳（后者依赖「新用户什么都没有」这个已被 R4 改掉的前提）。
+    assert "我的" in [r["name"] for r in mine]
+    assert "我的" not in [r["name"] for r in theirs], "别的用户不该看到我的服务商"
 
 
-def test_models_tree_empty_is_empty_list_not_error(api_client):
-    """没配过服务商 ⇒ 空列表（空态由前端 `locale.emptyText` 呈现，不是错误）。"""
+def test_models_tree_empty_is_empty_list_not_error(api_client, db_factory):
+    """**一个服务商都没有**时 ⇒ 空列表（空态由前端 `locale.emptyText` 呈现，不是错误）。
+
+    ⚠️ 2026-10-14 改写：需求 R4 之后「注册即播种 6 家服务商」是**正确行为**，
+    所以「新注册用户的 models-tree 为空」这个前提**已不成立**。
+    本用例要证的仍是「空的时候不报错」—— 于是把该用户的服务商**先清掉**
+    （走 DB 直删，不经过会触发校验的 API），再断言空态。
+    这样测的是端点行为本身，而不是「新用户恰好没数据」这个会被产品决策推翻的巧合。
+    """
+    from sqlalchemy import delete
+
+    from backend.app.models import LlmGatewayModel
+
     headers = _auth_header(api_client)
+    db = db_factory()
+    try:
+        user = db.scalars(
+            select(User).where(User.username == "llm_tester")
+        ).one_or_none()
+        assert user is not None, "前提：刚才注册的用户应在库里"
+        db.execute(delete(LlmGatewayModel).where(LlmGatewayModel.user_id == user.id))
+        db.commit()
+        #: 服务商父行也一并清掉（models-tree 是服务商带模型，父行在就会非空）
+        from backend.app.models import LlmGatewayConfig
+
+        db.execute(delete(LlmGatewayConfig).where(LlmGatewayConfig.user_id == user.id))
+        db.commit()
+    finally:
+        db.close()
+
     resp = api_client.get("/api/llm/gateway-configs/models-tree", headers=headers)
     assert resp.status_code == 200, resp.text
     assert resp.json()["items"] == []

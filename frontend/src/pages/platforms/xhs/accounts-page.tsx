@@ -1018,7 +1018,7 @@ export function XhsAccountsPage() {
                           icon={isGoodsNoteSyncing ? <SyncOutlined spin /> : <ShopOutlined />}
                           onClick={() => handleGoodsNoteSyncClick(account)}
                           disabled={isGoodsNoteSyncing}
-                          title="把该账号的商品笔记（挂链笔记）同步到本地库（需千帆商家后台会话）"
+                          title="把该账号的商品笔记同步到本地库（需千帆会话）"
                         >
                           {isGoodsNoteSyncing ? "同步中" : "同步商品笔记"}
                         </Button>

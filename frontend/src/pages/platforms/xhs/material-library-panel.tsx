@@ -377,7 +377,7 @@ export function MaterialLibraryPanel({
               void loadFiles(activeFolderId, page);
             } else {
               // 超时如实说，不假装还在扫（用户知道要手动刷新）
-              message.warning("扫描还在进行，可稍后点「刷新」查看结果");
+              message.warning("扫描还在进行");
             }
           }
         } catch {
@@ -660,7 +660,7 @@ export function MaterialLibraryPanel({
         {foldersLoading ? (
           <Spin />
         ) : folders.length === 0 ? (
-          <Empty description="还没有素材文件夹。点「新建文件夹」选一个本机放图片 / 视频的目录（只索引，不搬移、不删除原文件）" />
+          <Empty description="还没有素材文件夹（只索引，不搬移原文件）" />
         ) : (
           <Space size={8} wrap>
             {folders.map((folder) => {

@@ -158,6 +158,77 @@
 
 ---
 
+## 4.3 「使用平台」列的口径修正（2026-10-14）
+
+### 4.3.1 缺陷（用户报的原话）
+
+> 「大模型服务商的种子数据有问题，**模型没有在平台被配置使用，但是使用平台列依旧被设置成了小红书**」
+> 「**除非默认被配置到了业务点使用才应配置正确的使用列**」
+
+### 4.3.2 根因
+
+`llm_gateway_seed_service.seed_gateway_provider_for_user` 在写模型行时**无条件**填
+`platform = {"xhs": 1}`。而这一列的权威语义（设计 17 §3.x / v2.28 §13.2.9.7c）是：
+
+> **`platform` = 本模型真的被哪些平台的业务点使用了**，值是「该平台下指向该模型的
+> **业务点个数**」—— 它是**状态**，不是「预设」。
+
+⇒ 后果：用户**刚注册、一个业务点都没配**，模型列表就显示「使用平台 = 小红书」；
+而且因为它成了已有事实，后续 `merge_platforms` 会把它当基数继续累积。
+
+同一份代码里另外两条路径本来就是对的（**只有这条错了**）：
+
+| 路径 | 取值 |
+|---|---|
+| 用户手建模型（`api/llm_gateway.py` 创建服务商） | `item.platform` —— 用户显式选的平台（可空） |
+| 同步模型目录（`sync-models`） | 只在 `platform` 有值时才写 / 并入 |
+| **种子播种（本条）** | ~~无条件 `{"xhs": 1}`~~ ⇒ **改为空** |
+
+### 4.3.3 修法（两半，缺一不可）
+
+1. **播种模型时 `platform` 留空** —— 种子只**登记条目**，不断言任何平台。
+2. **业务点映射播种时回写 `platform`** —— 这是「真的被用了」的**唯一事实来源**：
+   每写一条默认映射，就把该模型的 `platform` 里 `xhs` 计数 **+1**
+   （走公共层的 `bump_platform` / `parse_platforms` / `dump_platforms`）。
+
+⇒ 播种完成后的正确状态：**只有 `DeepSeek/deepseek-chat` 与
+`阿里通义千问/wanx2.1-t2i-turbo` 的「使用平台」是小红书**（前者被 7 个文本业务点用、
+后者被 4 个图片业务点用 —— 计数即业务点数），其余 16 个模型**空白**。
+
+⚠️ 只做第 1 半会让「被默认映射引用的模型」也显示空白（该写的没写）；
+只做第 2 半则治不了根（播种那一步仍然在说假话）。
+
+### 4.3.4 顺带修掉的依赖方向问题
+
+`parse_platforms` / `dump_platforms` / `bump_platform` / `merge_platforms`
+原先住在 `api/llm_gateway.py`，于是 `services/llm_gateway_seed_service.py`
+为了写一个模型行**反向 import API 层**。本次下沉到
+**`services/llm_platforms.py`**（单一实现），API 层保留同名 re-export
+（含旧的 `_` 前缀名）⇒ 既有调用点、迁移脚本、测试都不用改。
+
+### 4.3.5 守卫
+
+* `test_seeded_models_do_not_claim_a_platform` —— 播种后模型 `platform` 必须**全空**；
+* `test_business_map_seed_writes_the_platform_of_the_models_it_uses` ——
+  **反向**：被映射引用的模型计数 == 业务点数、未被引用的仍空、且**重复播种不累加**
+  （计数是状态不是事件）。
+* 另有 `test_scheduler_sync` 的 lifespan 桩清单守卫（见 §4.3.6）。
+
+### 4.3.6 同轮修掉的三个「守卫与实现脱节」
+
+这三条都是**全量回归报出来的既有红**（非本轮功能引入），根因同属一类 ——
+**守卫还在按旧口径判，而实现已经变了**：
+
+| 现象 | 根因 | 修法 |
+|---|---|---|
+| `test_scheduler_sync` 的桩清单守卫报「`seed_gateway_providers_for_all_users` 没被桩掉」 | 10-13 加播种时把它写成 **`lifespan` 内的函数级 import** ⇒ `main` 模块**没有这个属性**，`monkeypatch.setattr(main_module, …)` 打不上（AttributeError）；而读 AST 的守卫**照样绿**（桩清单的真相源是源码文本，能力却是运行时属性） | 提到**模块级导入**（与另两条种子同形），并补桩 |
+| `test_filter_cache` 3 条 | 「无流量」筛选随 `55e0924`（数据中心独立成页）迁走了，但 `filter-cache.ts` 的 `myNotes.noTrafficThresholds` / `noTrafficQuery` **两个死键没删**，`persisted_filters.cjs` 的页签期望也还留着已删的 `goods` / `normal` | 删死键 + 同步守卫期望（**删掉不存在的期望，不是放宽判据**） |
+| `test_note_sync::test_ark_note_category_refreshes_on_existing_row` | 统计行 upsert 键含 `stat_date`，生产取 `shanghai_now()`，而**夹具写死 `2026-10-12`** ⇒ 隔天不再命中、服务插了第二行 ⇒ `.one()` 抛 `MultipleResultsFound` | 夹具改用 `shanghai_now()` **同源**取当天；断言改 `.all()` + 显式「只有一行」，把「多出一行」暴露成业务断言而非 SQLAlchemy 异常 |
+
+⚠️ 教训：**「夹具/守卫写死了一个会过期的值」是静默变红的常见形态** ——
+写死日期、写死计数、写死「新用户什么都没有」这类前提，都会在某天或某次产品决策后
+变成假红，而报错信息往往指向别处（SQLAlchemy 异常、AttributeError）。
+
 ## 5. 数字变化登记
 
 | 项 | 变化 |

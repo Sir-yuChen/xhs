@@ -409,7 +409,14 @@ def test_live_keys_are_real_read_points():
             "backend.app.api.platforms.xhs.qianfan.picture_space",
             "picture_space_upload_batch",
         ),
-    }
+        #: 违规词检测 OCR 的起始并发数（2026-10-13 换 RapidOCR 时新增）。
+        #: 读点在 `image_ocr_service.resolve_parallelism()` —— 函数体里
+        #: 字面量调 `settings_service.live_int(None, None, "xhs_ocr_parallelism", ...)`。
+        "xhs_ocr_parallelism": (
+            "backend.app.services.image_ocr_service",
+            "resolve_parallelism",
+        ),
+        }
     assert set(read_points) == set(settings_service.LIVE_KEYS), (
         "LIVE_KEYS 与测试里的读点映射必须一一对应：新增读点要两边一起加"
     )

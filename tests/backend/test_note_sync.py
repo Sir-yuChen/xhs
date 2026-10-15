@@ -754,6 +754,14 @@ def test_ark_note_category_refreshes_on_existing_row(creator_env):
     同一口径。2026-10-12 设计 35 起落统计表 `note_flag`。
     """
     _, account_id, user_id, SessionLocal = creator_env
+    #: ⚠️ 统计行的 upsert 键含 `stat_date`，而**生产侧取的是 `shanghai_now()`**
+    #: （见 `note_data_service._upsert_datacenter_stat`）⇒ 夹具若写死一个日期，
+    #: 隔天就不再命中，服务会**插入第二行**，本用例的 `.one()` 便抛
+    #: `MultipleResultsFound`（2026-10-14 实测：夹具停在 10-12，跑的那天是 10-14）。
+    #: 夹具必须与生产**同源**取当天，否则它是一条「只在某些日子成立」的用例。
+    from backend.app.core.time import shanghai_now
+
+    today = shanghai_now().strftime("%Y-%m-%d")
     # 先造一条「本地已落库、分类为空」的行（notes + 空统计行）。
     db = SessionLocal()
     try:
@@ -771,7 +779,7 @@ def test_ark_note_category_refreshes_on_existing_row(creator_env):
                 user_id=user_id,
                 platform_account_id=account_id,
                 note_id="C-R1",
-                stat_date="2026-10-12",
+                stat_date=today,
                 window="recent_1",
                 note_flag="",
                 title="已有标题",
@@ -787,10 +795,14 @@ def test_ark_note_category_refreshes_on_existing_row(creator_env):
 
     db = SessionLocal()
     try:
-        stat = db.scalars(
+        #: 判据是「C-R1 只有一行、且它被刷成了 goods_note」——
+        #: `scalars(...).all()` 才能把「多出一行」暴露成断言失败，
+        #: 而不是让 `.one()` 抛个与业务无关的 SQLAlchemy 异常。
+        stats = db.scalars(
             select(NoteDatacenterStat).where(NoteDatacenterStat.note_id == "C-R1")
-        ).one()
-        assert stat.note_flag == "goods_note", stat.note_flag
+        ).all()
+        assert len(stats) == 1, f"同一篇笔记应只有一行统计，实际 {len(stats)} 行"
+        assert stats[0].note_flag == "goods_note", stats[0].note_flag
     finally:
         db.close()
 

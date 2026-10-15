@@ -337,21 +337,47 @@ class TestRelativePathSafety:
             staging._safe_rel_path("主图/x.db")
 
 
-class TestGroupLookup:
-    def test_group_lookup_is_case_insensitive_for_uppercase_dirnames(self):
-        """回归 guard-2：真实包目录是 `SKU`，常量是小写 `sku`。
+class TestZoneLookup:
+    def test_group_is_the_real_directory_name(self):
+        """区域名 = 数据包里**一级目录名的原值**（用户口径 2026-10-13）。
 
-        查表必须先小写，否则整个 SKU 区（实测 26 张）静默变 0。
+        > 「数据包中读取到什么就**按照读取到的文件夹分区域**，不做任何操作直接展示」
+
+        ⚠️ 旧实现是「查表 → `main`/`sku`/…」白名单，**认不出就丢**。
+        实测代价：包 A（淘宝店透导出）的 5 个目录有 4 个不在白名单里 ⇒
+        **丢 63 个文件**（5 主图 + 5 页面展示主图 + 52 SKU 图 + 1 视频）。
+        ⇒ 现在一律原样透出（含原大小写）。
         """
-        assert pre.group_of_rel_path("SKU/SKU01.jpg") == "sku"
+        assert pre.group_of_rel_path("SKU/SKU01.jpg") == "SKU"
         assert pre.group_of_rel_path("sku/SKU01.jpg") == "sku"
-        assert pre.group_of_rel_path("主图/主图01.jpg") == "main"
-        assert pre.group_of_rel_path("详情图/详情图01.jpg") == "detail"
-        assert pre.group_of_rel_path("视频/1.mp4") == "video"
+        assert pre.group_of_rel_path("主图/主图01.jpg") == "主图"
+        assert pre.group_of_rel_path("详情图/详情图01.jpg") == "详情图"
+        assert pre.group_of_rel_path("视频/1.mp4") == "视频"
+        #: 包 A 的真实目录名（旧实现全部认不出 ⇒ 全部被丢）。
+        assert pre.group_of_rel_path("1比1主图/a.jpg") == "1比1主图"
+        assert pre.group_of_rel_path("页面展示主图/a.jpg") == "页面展示主图"
+        assert pre.group_of_rel_path("SKU图/SKU图_01_x.jpg") == "SKU图"
+        assert pre.group_of_rel_path("主图视频/1.mp4") == "主图视频"
+        #: 未识别目录**照样有区域名**（不再返回 None 被丢）。
+        assert pre.group_of_rel_path("其他/x.jpg") == "其他"
+        assert pre.group_of_rel_path("属性/商品属性图.png") == "属性"
 
-    def test_unknown_or_flat_path_is_none(self):
-        assert pre.group_of_rel_path("其他/x.jpg") is None
+    def test_flat_path_has_no_zone_and_caller_uses_root(self):
+        """顶层散落文件没有一级目录 ⇒ `None`，调用方归 `ROOT_ZONE`（**不丢弃**）。"""
         assert pre.group_of_rel_path("loose.jpg") is None
+        assert pre.ROOT_ZONE == "根目录"
+
+    def test_kind_is_only_a_hint_and_never_filters(self):
+        """`kind_of_zone` 只是**参考分类**，认不出落 `other`，**不参与任何过滤**。"""
+        assert pre.kind_of_zone("主图") == "main"
+        assert pre.kind_of_zone("1比1主图") == "main"
+        assert pre.kind_of_zone("页面展示主图") == "main"
+        assert pre.kind_of_zone("SKU图") == "sku"
+        assert pre.kind_of_zone("主图视频") == "video"
+        assert pre.kind_of_zone("详情图") == "detail"
+        #: 认不出 ⇒ other（**不是丢**）。
+        assert pre.kind_of_zone("属性") == "other"
+        assert pre.kind_of_zone("随便一个目录") == "other"
 
 
 def test_sheet_title_uses_the_sheet_name(tmp_path: Path):
@@ -368,6 +394,65 @@ def test_sheet_title_uses_the_sheet_name(tmp_path: Path):
     assert table.title == "全部"
     assert table.columns == ["sku名称", "库存"]
     assert table.rows == [["A", "1"]]
+
+
+class TestColumnKindsAndSkuTable:
+    """**列类型判定 + SKU 表识别**（用户口径 2026-10-13）。"""
+
+    def test_numeric_column_is_detected(self):
+        assert pre.column_kind(["1280", "1980", "2280"]) == "numeric"
+        assert pre.column_kind(["1280.50", "¥1980"]) == "numeric"
+
+    def test_text_column_wins_over_looks_numeric(self):
+        """`1000+`（真包 `商品销量` 的形态）必须判 **text**，不能因为开头是数字就当数值。
+
+        ⚠️ 判错会让前端给数值列开正则入口（用户口径明确「数值列不支持」）。
+        """
+        assert pre.column_kind(["1000+", "2000+"]) == "text"
+        assert pre.column_kind(["https://item.taobao.com/1"]) == "text"
+        assert pre.column_kind(["木;中古色-实木三斗柜;上门安装"]) == "text"
+
+    def test_mixed_column_is_text(self):
+        """有数字也有文字 ⇒ text（不能只看第一行就判 numeric）。"""
+        assert pre.column_kind(["1280", "待补"]) == "text"
+
+    def test_empty_column(self):
+        assert pre.column_kind([None, None, ""]) == "empty"
+        #: 真包 `计算价格` 全空 ⇒ empty（不给正则入口，符合「数值列不支持」）。
+        assert pre.column_kind([]) == "empty"
+
+    def test_sampling_catches_digits_then_text(self):
+        """⚠️ **必须抽样多行**：只看第一行会把「首行是数、后面是字」的列判成 numeric。"""
+        assert pre.column_kind(["1280", "1280", "1280", "待补"]) == "text"
+
+    def test_sku_table_identified_by_column_names_not_sheet_name(self):
+        """SKU 表按**列名特征**判（≥2 命中），**不看 sheet 名**。
+
+        实测：包 B 的 sheet 叫 `全部`、包 A 的被截断 —— 两个 sheet 名都不可用。
+        """
+        #: 包 B 真形态。
+        assert pre.looks_like_sku_table(["sku名称", "图片", "原价", "计算价格", "库存", "ID"])
+        #: 包 A 真形态（没有 `sku名称`，但有 `价格` + `库存`）。
+        assert pre.looks_like_sku_table(
+            ["商品信息", "商品ID", "商品链接", "店铺名称", "商品销量", "SKU信息",
+             "SKUID", "价格", "券后价格", "饰面材质", "颜色分类", "安装方式", "库存"]
+        )
+        #: 单个命中不算（避免把普通表误判成 SKU 表）。
+        assert not pre.looks_like_sku_table(["名称", "备注"])
+        assert not pre.looks_like_sku_table(["a", "b"])
+
+    def test_tables_carry_column_kinds_and_sku_flag(self, tmp_path: Path):
+        """两端契约：`column_kinds` 与 `is_sku_table` 必须**随表下发**（前端要读）。"""
+        _make_xlsx(
+            tmp_path / "t.xlsx",
+            {"全部": [["sku名称", "库存", "空列"], ["甲", "200", None], ["乙", "300", None]]},
+        )
+        (table,) = pre.precheck_package(tmp_path).tables
+        assert table.column_kinds == ["text", "numeric", "empty"]
+        assert table.is_sku_table is True
+        payload = table.to_dict()
+        assert payload["column_kinds"] == ["text", "numeric", "empty"]
+        assert payload["is_sku_table"] is True
 
 
 def test_no_media_is_excluded_from_the_package(tmp_path: Path):
@@ -428,19 +513,72 @@ def test_attribute_image_no_longer_produces_a_kv_table(tmp_path: Path):
         assert "kv" not in t.to_dict()
 
 
-def test_missing_area_directories_become_warnings_not_errors(tmp_path: Path):
-    """只有主图、缺 SKU/详情/视频 ⇒ **告警**，不抛错（尽力而为）。"""
-    (tmp_path / "主图").mkdir()
-    (tmp_path / "主图" / "主图01.jpg").write_bytes(_one_pixel_png())
+def test_missing_area_directories_no_longer_warn(tmp_path: Path):
+    """**「数据包里没有「主图」目录」这条告警已被删除**（用户口径 2026-10-13）。
+
+    ⚠️ 在「目录名直出」口径下它是**错的**：包 A 没有名为 `主图` 的目录，
+    但它的 `1比1主图` / `页面展示主图` 就是主图资源 —— 这条告警会让用户
+    以为包里缺东西，而实际只是目录名不同（正是本轮要修的那类误判）。
+
+    ⇒ 判据变成：**有主图资源就正常收，不因为目录名不叫「主图」而报警**。
+    """
+    (tmp_path / "1比1主图").mkdir()
+    (tmp_path / "1比1主图" / "a.jpg").write_bytes(_one_pixel_png())
     _make_xlsx(tmp_path / "t.xlsx", {"全部": [["a"], ["1"]]})
 
     result = pre.precheck_package(tmp_path, package_name="t")
     joined = " ".join(result.warnings)
-    assert "sku" in joined.lower()
-    assert "详情图" in joined
-    # ⚠️ 分组计数字段是 `to_dict()["media_groups"]`（PrecheckResult 上没有
-    # `groups` 属性/方法）—— 第一版以为有 `groups()`，AttributeError。
-    assert [g for g, n in result.to_dict()["media_groups"].items() if n] == ["main"]
+    #: 不再因为「没有名为 主图/详情图/sku/视频 的目录」而告警。
+    for gone in ("没有「主图」目录", "没有「详情图」目录", "没有「sku」目录", "没有「视频」目录"):
+        assert gone not in joined, f"旧告警不该回归：{gone}"
+    #: 资源照常收进清单，区域名是真实目录名。
+    assert [m.file_name for m in result.media] == ["a.jpg"]
+    assert result.to_dict()["zones"] == [{"name": "1比1主图", "kind": "main", "count": 1}]
+
+
+def test_non_compliant_format_is_listed_not_dropped(tmp_path: Path):
+    """**方案 C**（用户口径 2026-10-13）：「展示与上传都按平台，但把不合规的
+    **列出来而不是丢掉**，红框提示」。
+
+    ⚠️ 这是本轮最容易做错的一条 —— 「按平台格式筛」有两种实现：
+      · ❌ 直接 `continue` 丢掉（旧实现，用户无从发现）；
+      · ✅ **照常进清单**，带 `unsupported=True` + 人话原因，前端红框 + 默认不勾选。
+    本用例钉的是后者。
+
+    实测来源：包 A `详情图/详情图_22.gif`（平台只收 jpg/jpeg/png）。
+    """
+    (tmp_path / "详情图").mkdir()
+    (tmp_path / "详情图" / "a.jpg").write_bytes(_one_pixel_png())
+    (tmp_path / "详情图" / "b.gif").write_bytes(b"GIF89a\x01\x00\x01\x00")
+    (tmp_path / "详情图" / "c.webp").write_bytes(b"RIFF....WEBP")
+    _make_xlsx(tmp_path / "t.xlsx", {"全部": [["a"], ["1"]]})
+
+    result = pre.precheck_package(tmp_path, package_name="t")
+    names = [m.file_name for m in result.media]
+    #: ① 不合规的**必须还在清单里**（三个文件一个不少）。
+    assert names == ["a.jpg", "b.gif", "c.webp"], f"不合规文件被丢了：{names}"
+    by_name = {m.file_name: m for m in result.media}
+    #: ② 合规的不带标记。
+    assert by_name["a.jpg"].unsupported is False
+    assert by_name["a.jpg"].unsupported_reason == ""
+    #: ③ 不合规的带标记 + **人话原因**（前端红框文案）。
+    for bad in ("b.gif", "c.webp"):
+        assert by_name[bad].unsupported is True
+        assert "jpg" in by_name[bad].unsupported_reason
+    #: ④ 序列化契约里两个键都在（前端要读）。
+    payload = {m["file_name"]: m for m in result.to_dict()["media"]}
+    assert payload["b.gif"]["unsupported"] is True
+    assert payload["b.gif"]["unsupported_reason"]
+    #: ⑤ 详情图区计数含不合规的（**它是「展示」口径**，不是可上传口径）。
+    assert result.to_dict()["zones"] == [{"name": "详情图", "kind": "detail", "count": 3}]
+    #: ⑥ 告警**聚合上报**（用户口径「提示简洁明了」）：说清「几张、什么格式、只收什么」，
+    #: 而不是逐个文件报一遍（那会让 warnings 变成一堵墙，且文件名在网格上已有）。
+    joined = " ".join(result.warnings)
+    assert "2 个文件平台不支持" in joined, f"应聚合计数，实得：{joined}"
+    assert ".gif" in joined and ".webp" in joined, "应列出不合规的格式"
+    assert "jpg" in joined, "应说清平台收什么"
+    #: ⚠️ 不重复文件名（网格上有红框 + 角标，那是它该待的地方）。
+    assert "b.gif」" not in joined, "不该逐个文件重复路径（噪音）"
 
 
 def test_package_without_xlsx_is_rejected_with_a_clear_message(tmp_path: Path):
@@ -451,16 +589,20 @@ def test_package_without_xlsx_is_rejected_with_a_clear_message(tmp_path: Path):
     assert "表格" in str(excinfo.value)
 
 
-def test_video_is_listed_but_not_sent_to_ocr(tmp_path: Path):
+def test_video_is_listed_and_zone_is_the_real_dirname(tmp_path: Path):
+    """视频照常进清单；**区域名 = 真实目录名**（不再被归一成 `video`）。"""
     (tmp_path / "视频").mkdir()
     (tmp_path / "视频" / "1.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42")
     _make_xlsx(tmp_path / "t.xlsx", {"全部": [["a"], ["1"]]})
 
     result = pre.precheck_package(tmp_path, package_name="t")
-    video = [m for m in result.media if m.group == "video"]
+    video = [m for m in result.media if m.file_name == "1.mp4"]
     assert len(video) == 1
-    # ⚠️ 没有 `is_video` 字段 —— 区域本身就是 `group == "video"`。
-    assert video[0].group == "video"
+    #: ⚠️ 区域名是目录名原值 `视频`（不是 `video`）；类别才是 `video`。
+    assert video[0].group == "视频"
+    assert video[0].kind == "video"
+    #: 包 A 的目录叫 `主图视频` —— 旧实现认不出，整个视频区被丢。
+    assert pre.group_of_rel_path("主图视频/1.mp4") == "主图视频"
 
 
 # --------------------------------------------------------------------------- #
@@ -533,14 +675,14 @@ class TestPrecheckEndpoints:
         pre_result = body["precheck"]
 
         assert pre_result["package_name"] == "商品包"
-        # 四个区域都有（视频 1 张不进 OCR）
-        # ⚠️ 分组计数字段是 **`media_groups`**（不是 `groups`）。
-        groups = pre_result["media_groups"]
-        #: 2026-10-11 最终口径：**不排除任何媒体** ⇒ main = 2（主图01 + 商品属性图）。
-        assert groups["main"] == 2
-        assert groups["detail"] == 1
-        assert groups["sku"] == 1
-        assert groups["video"] == 1
+        # ⚠️ 用户口径 2026-10-13：分区按**真实目录名**透出（`zones`），
+        # 不再是固定四值 `media_groups`（那个已退化为 `kind` 参考计数）。
+        zones = {z["name"]: z for z in pre_result["zones"]}
+        assert set(zones) == {"主图", "详情图", "SKU", "视频"}, zones
+        #: 「不排除任何媒体」⇒ 主图区 2 张（主图01 + 商品属性图）。
+        assert zones["主图"]["count"] == 2
+        assert zones["主图"]["kind"] == "main"
+        assert zones["SKU"]["kind"] == "sku"
         #: OCR 输入排除视频（未抽帧）；**图片全部进 OCR**（不排除任何媒体）。
         sent = [Path(p).name for p in stub_ocr[0]["paths"]]
         assert "1.mp4" not in sent
@@ -638,7 +780,8 @@ class TestPrecheckEndpoints:
         assert any("未能完成 OCR" in w for w in pre_result["warnings"])
         # 失败图仍要出现在结果里（前端按「未检出但保留勾选」处理）。
         #: ⚠️ 不再按属性图筛选（字段已移除）—— 非视频的都该是 OCR 失败态。
-        scanned = [m for m in pre_result["media"] if m["group"] != "video"]
+        #: 区域名现在是**真实目录名**（`视频` 不是 `video`）。
+        scanned = [m for m in pre_result["media"] if m["group"] != "视频"]
         assert scanned and all(m["ocr_ok"] is False for m in scanned)
         assert all(m["error"] for m in scanned)
 
@@ -717,23 +860,58 @@ class TestPrecheckEndpoints:
 # --------------------------------------------------------------------------- #
 
 
-def test_ocr_runs_five_way_concurrent_and_videos_too(monkeypatch):
-    """用户口径 2026-10-09：「预检太慢了，后端使用 5 个并发的方式执行，
-    最后汇总结果」「5 个并发处理 ocr」。
+def test_ocr_parallelism_is_configurable_and_adaptive():
+    """用户口径 2026-10-13：并发初始值配到系统参数（默认 5），
+    时间控制 30 秒内或**按电脑使用情况自动调节**。
 
-    判据：① `MAX_WORKERS == 5`；② `scan_images` 用它建线程池（图片并发）；
-    ③ 视频抽帧也**并发**（走同一并发数），不再串行 for。
+    判据：① 系统参数键 `xhs_ocr_parallelism` 存在且默认 5（LIVE_KEYS +
+    BUILTIN_DEFAULTS + 随包种子三处同值）；② `resolve_parallelism` 是**函数**
+    （不是固定常量）且被 `scan_images` 使用；③ 图多时自动上调、有硬上界。
     """
-    assert ocr.MAX_WORKERS == 5, f"OCR 并发数应为 5，实际 {ocr.MAX_WORKERS}"
+    from backend.app.services import settings_service as st
+    from backend.app.services import image_ocr_service as m
 
-    repo = Path(ocr.__file__).resolve().parents[3]
+    assert "xhs_ocr_parallelism" in st.LIVE_KEYS, "并发数没进 LIVE_KEYS（改了不生效）"
+    assert st.BUILTIN_DEFAULTS["xhs_ocr_parallelism"] == 5, "内置默认应为 5"
+    assert st._KEY_BOUNDS["xhs_ocr_parallelism"] == (1, 32), "并发应有上界 32"
+
+    seed = json.loads(
+        (Path(m.__file__).resolve().parents[3] / "config/initial_data/system_settings.json")
+        .read_text(encoding="utf-8")
+    )
+    seeded = {s["key"]: s["value"] for s in seed["system_settings"]}
+    assert seeded.get("xhs_ocr_parallelism") == 5, "随包种子应与内置默认同值"
+
+    assert m.DEFAULT_PARALLELISM == 5
+    #: 自适应：1 张不浪费、图多时上调、有上界。
+    assert m.resolve_parallelism(0) == 1
+    assert m.resolve_parallelism(1) == 1
+    assert m.resolve_parallelism(5) == 5
+    big = m.resolve_parallelism(m.MAX_IMAGES)
+    assert big > m.DEFAULT_PARALLELISM, f"图多时应上调，实际 {big}"
+    assert big <= m.MAX_PARALLELISM, f"并发超上界：{big}"
+
+    repo = Path(m.__file__).resolve().parents[3]
     src = (repo / "backend/app/services/image_ocr_service.py").read_text("utf-8")
-    assert "ThreadPoolExecutor(max_workers=MAX_WORKERS)" in src, \
-        "scan_images 没用 MAX_WORKERS 建线程池"
+    assert "max_workers=workers" in src, "scan_images 没用自适应并发建线程池"
+    assert "resolve_parallelism" in src and "def resolve_parallelism" in src
 
     api = (repo / "backend/app/api/platforms/xhs/package_precheck.py").read_text("utf-8")
-    assert "ThreadPoolExecutor(max_workers=ocr.MAX_WORKERS)" in api, \
-        "视频抽帧没有并发（仍串行）"
+    assert "ocr.resolve_parallelism" in api, "视频抽帧没用同一套自适应并发"
+
+
+def test_summary_reports_actual_parallelism_and_elapsed():
+    """「30 秒以内」必须**如实上报**，不是假装达标。
+
+    判据：`scan_images` 的 summary 带 `parallelism` / `elapsed_seconds` /
+    `target_seconds` 三个键（前端据此显示实际并发与实际耗时）。
+    """
+    from backend.app.services import image_ocr_service as m
+
+    out = m.scan_images([], [])
+    assert out["summary"]["parallelism"] == 0
+    assert "elapsed_seconds" in out["summary"]
+    assert out["summary"]["target_seconds"] == m.TARGET_TOTAL_SECONDS == 30.0
 
 
 def test_precheck_progress_endpoint_and_callback():
@@ -755,91 +933,51 @@ def test_precheck_progress_endpoint_and_callback():
     assert "as_completed" in src, "scan_images 没用 as_completed（进度会卡）"
 
 
-def test_each_ocr_call_uses_a_unique_output_file(monkeypatch):
-    """回归 guard-3：并发时不能共用一个临时 JSON 文件。
-
-    ⚠️ 第一版固定写 `%TEMP%/ocr_out.json`，4 路并发互相覆盖 ⇒ 68 张里
-    18 张误报 `OCR_NO_OUTPUT`。这里断言**每次调用都传入不同的 out 路径**。
-    """
-    seen: list[str] = []
-    import subprocess as sp
-
-    def fake_run(cmd, **kwargs):
-        # ⚠️ 输出路径是 **argv 的最后一项**（脚本第 3 个位置参数），
-        # 且 `_run_script` 在 finally 里会 unlink 它 —— 所以这里必须
-        # **先记账再写文件**，不能等调用返回后去看磁盘。
-        out = cmd[-1]
-        seen.append(out)
-        Path(out).write_text(
-            json.dumps({"ok": True, "text": "", "lines": [], "line_count": 0}),
-            encoding="utf-8",
-        )
-        return sp.CompletedProcess(cmd, 0, "", "")
-
-    monkeypatch.setattr(ocr.subprocess, "run", fake_run)
-    for name in ("a.jpg", "b.jpg", "c.jpg"):
-        ocr._run_script(Path(name))
-    assert len(seen) == 3
-    assert len(set(seen)) == 3, f"输出路径重复：{seen}"
-
-
-def test_ocr_subprocess_decodes_powershell_output_as_gbk(monkeypatch):
-    """PowerShell 5.1 按 **GBK** 输出中文错误；`text=True` 默认按 locale 解码。
-
-    ⚠️ 第一版没给 `encoding`，本机 locale 是 UTF-8 ⇒ 一解码 stderr 就抛
-    `UnicodeDecodeError`（在 subprocess 的 reader 线程里，看起来像随机崩溃）。
-    """
-    import subprocess as sp
-
-    captured: dict = {}
-
-    def fake_run(cmd, **kwargs):
-        captured.update(kwargs)
-        return sp.CompletedProcess(cmd, 0, "", "")
-
-    monkeypatch.setattr(ocr.subprocess, "run", fake_run)
-    with pytest.raises(ocr.OcrError):
-        ocr._run_script(Path("x.jpg"))  # 没产出文件 ⇒ 抛 OCR_NO_OUTPUT
-    assert captured.get("encoding") == "gbk"
-    assert captured.get("errors") == "replace"
-
-
-@pytest.mark.parametrize("transient_code", ["OCR_NO_OUTPUT", "OCR_FAILED"])
-def test_retry_fires_for_transient_winrt_contention(monkeypatch, transient_code):
-    """瞬时争用（两种码）都要重试到成功。
-
-    ⚠️ `OCR_FAILED` 这条是**实测补的**：脚本把 WinRT `Wait` 异常 catch 成
-    了它，而第一版只重试 `OCR_NO_OUTPUT` ⇒ 端点预检里 OCR_FAILED 一片
-    （失败率一度 97%）却一次都不重试。
-    """
+def test_retry_fires_for_transient_engine_errors(monkeypatch):
+    """瞬时引擎异常要重试到成功（并发争用会偶发失败）。"""
     calls = {"n": 0}
 
-    def flaky(image):
+    def flaky(path):
         calls["n"] += 1
         if calls["n"] < 3:
-            raise ocr.OcrError(transient_code, "WinRT 争用")
-        return {"ok": True, "text": "", "lines": []}
+            raise RuntimeError("onnxruntime 瞬时争用")
+        return {"ok": True, "text": "", "lines": [], "pixel_width": 0, "pixel_height": 0}
 
-    monkeypatch.setattr(ocr, "_run_script", flaky)
+    monkeypatch.setattr(ocr.rapid, "recognize", flaky)
     monkeypatch.setattr(ocr.time, "sleep", lambda *_: None)
-    assert ocr._run_script_with_retry(Path("x.jpg"))["ok"] is True
+    out = ocr._scan_one("x.jpg", [])
+    assert out["ocr_ok"] is True
     assert calls["n"] == 3
 
 
-def test_retry_does_not_fire_on_deterministic_errors(monkeypatch):
-    """确定性错误（文件不是图片）重试多少次都一样 ⇒ 直接放行。"""
+def test_scan_one_reports_failure_without_raising(monkeypatch):
+    """引擎不可用 / 一直失败 ⇒ `ocr_ok=False` + 结构化 error，**不抛异常**。
+
+    ⚠️ 单图失败不该中断整批（一张坏图让 69 张全废是最坏的行为）。
+    """
+    def boom(path):
+        raise RuntimeError("引擎炸了")
+
+    monkeypatch.setattr(ocr.rapid, "recognize", boom)
+    monkeypatch.setattr(ocr.time, "sleep", lambda *_: None)
+    out = ocr._scan_one("x.jpg", [])
+    assert out["ocr_ok"] is False
+    assert out["error"] == "OCR_FAILED"
+    assert out["hits"] == []
+
+
+def test_engine_unavailable_is_not_retried(monkeypatch):
+    """引擎级不可用（没装/模型坏）重试无意义 ⇒ 一次即止。"""
     calls = {"n": 0}
 
-    def deterministic(image):
+    def missing(path):
         calls["n"] += 1
-        raise ocr.OcrError("OCR_BAD_IMAGE", "不是图片")
+        raise ocr.rapid.RapidOcrUnavailable("未安装")
 
-    monkeypatch.setattr(ocr, "_run_script", deterministic)
-    monkeypatch.setattr(ocr.time, "sleep", lambda *_: None)
-    with pytest.raises(ocr.OcrError) as excinfo:
-        ocr._run_script_with_retry(Path("x.jpg"))
-    assert excinfo.value.code == "OCR_BAD_IMAGE"
-    assert calls["n"] == 1
+    monkeypatch.setattr(ocr.rapid, "recognize", missing)
+    out = ocr._scan_one("x.jpg", [])
+    assert out["ocr_ok"] is False
+    assert calls["n"] == 1, "引擎级错误不该重试"
 
 
 def test_staging_root_is_absolute(tmp_path, monkeypatch):
@@ -855,36 +993,8 @@ def test_staging_root_is_absolute(tmp_path, monkeypatch):
     assert root.is_absolute(), f"暂存根必须是绝对路径，实测 {root}"
 
 
-def test_ocr_script_receives_an_absolute_image_path(tmp_path, monkeypatch):
-    """交给 PowerShell 的图片路径必须绝对化（兜底层）。
-
-    钉的是同一个 bug 的第二道防线：即便调用方传了相对路径，
-    `_run_script` 也必须自己 resolve 掉。
-    """
-    real = tmp_path / "img.jpg"
-    real.write_bytes(b"not-really-a-jpeg")
-    seen: list[str] = []
-
-    import subprocess as sp
-
-    def fake_run(cmd, **kwargs):
-        # 按结构定位，不写死下标（我连着两次猜错：2 / 6）。
-        # 命令行固定形如 [powershell, -NoProfile, -ExecutionPolicy, Bypass,
-        # -File, <script>, <image>, <max_dim>, <out_json>]
-        assert "-File" in cmd
-        seen.append(cmd[cmd.index("-File") + 2])
-        raise sp.TimeoutExpired(cmd, 1)
-
-    monkeypatch.setattr(ocr.subprocess, "run", fake_run)
-    with pytest.raises(Exception):
-        ocr._run_script(Path("relative/path/img.jpg"))
-
-    assert seen, "子进程根本没被调起"
-    assert Path(seen[0]).is_absolute(), f"传给子进程的路径必须绝对：{seen[0]}"
-
-
-def test_retryable_codes_cover_both_winrt_failures():
-    """可重试集合**必须同时含**两个码（防止只修一半又漏回去）。"""
+def test_retryable_codes_are_engine_level_only():
+    """可重试集合只含**引擎级瞬时**错误，不含确定性错误。"""
     assert "OCR_NO_OUTPUT" in ocr.RETRYABLE_CODES
     assert "OCR_FAILED" in ocr.RETRYABLE_CODES
     assert "OCR_BAD_IMAGE" not in ocr.RETRYABLE_CODES
@@ -893,12 +1003,6 @@ def test_retryable_codes_cover_both_winrt_failures():
 def test_engine_probe_is_offline_and_forgiving():
     """`engine_available()` 只探引擎、**不识别任何用户数据**，且不抛异常。"""
     assert ocr.engine_available() in (True, False)
-
-
-def test_ocr_script_ships_next_to_the_module():
-    """脚本必须**随包分发**（打包后与本模块同目录），否则 exe 里会缺。"""
-    assert ocr.script_path().exists()
-    assert ocr.script_path().name == ocr._SCRIPT_NAME
 
 
 # --------------------------------------------------------------------------- #
@@ -1639,6 +1743,8 @@ def test_attribute_image_is_no_longer_ocr_ed_into_a_table(tmp_path: Path, monkey
     assert not any("未能识别出属性表格" in w for w in result.warnings)
     #: `BuildKvFromBoxes` 的几何还原函数也随链路移除（没有调用方了）。
     assert not hasattr(ocr, "build_kv_from_boxes")
+
+
 
 
 

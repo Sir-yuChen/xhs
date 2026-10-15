@@ -552,7 +552,7 @@ export function DraftsWorkshopPanel() {
         publish_mode: "immediate",
       });
       upsertDraft(saved);
-      message.success(`已送入发布中心，发布任务 #${job.id}。请前往发布中心选择账号并发布。`);
+      message.success(`已送入发布中心，发布任务 #${job.id}`);
     } catch (err: unknown) {
       const d = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
       message.error(d || "送发布中心失败。");

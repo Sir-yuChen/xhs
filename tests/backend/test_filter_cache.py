@@ -46,8 +46,11 @@ PAGE_CACHE_KEYS: dict[str, tuple[str, ...]] = {
     "frontend/src/pages/platforms/xhs/my-notes-page.tsx": (
         "FILTER_CACHE_KEYS.myNotes.tab",
         "FILTER_CACHE_KEYS.myNotes.interactionKind",
-        "FILTER_CACHE_KEYS.myNotes.noTrafficThresholds",
-        "FILTER_CACHE_KEYS.myNotes.noTrafficQuery",
+        #: ⚠️ 2026-10-14：这里原有 `noTrafficThresholds` / `noTrafficQuery` 两项，
+        #: 但「无流量」筛选随 `55e0924` 整块迁去了 `datacenter-page.tsx`
+        #: （而 `datacenter-page` 目前**没有**接任何筛选缓存）。
+        #: 那一次只删页面代码、没删 `filter-cache.ts` 里的键 ⇒ 本守卫一直要求
+        #: 一个不存在的接线 ⇒ 3 条用例长期红。**删掉不存在的期望，不是放宽判据。**
     ),
     "frontend/src/pages/platforms/xhs/shop-items-page.tsx": (
         "FILTER_CACHE_KEYS.shopItems.form",

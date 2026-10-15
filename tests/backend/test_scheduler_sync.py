@@ -236,6 +236,14 @@ def test_scheduler_is_not_started_when_master_switch_is_off(monkeypatch):
     monkeypatch.setattr(
         main_module, "seed_builtin_prompt_templates_for_all_users", lambda *a, **k: 0
     )
+    # 设计 37 服务商种子播种：**按用户各写 6 家服务商 + N 个模型 + 11 个业务点映射**
+    # （自开 Session）⇒ 与上面两条同一条理由，不桩就会拿真实运行库写
+    # `llm_gateway_configs` / `llm_gateway_models` / `llm_business_providers`。
+    # ⚠️ 守卫 `test_lifespan_steps_are_all_stubbed_by_this_module` 就是为这条存在的 ——
+    #    它是本用例唯一被**自动发现**的漏桩（2026-10-14 实测：全量 1 failed）。
+    monkeypatch.setattr(
+        main_module, "seed_gateway_providers_for_all_users", lambda *a, **k: 0
+    )
     monkeypatch.setattr(main_module, "recover_account_tasks", lambda *a, **k: 0)
     monkeypatch.setattr(main_module, "ensure_account_task_worker", lambda: None)
     monkeypatch.setattr(main_module, "start_account_task_watchdog", lambda *a, **k: None)

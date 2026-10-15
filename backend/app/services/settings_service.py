@@ -68,6 +68,7 @@ LIVE_KEYS: dict[str, str] = {
     "xhs_sync_account_gap_seconds": "调度轮内账号间停顿",
     "xhs_allow_duplicate_goods_publish": "note_publish_service 商品重复发布门禁（设计 13 §31.5.2）",
     "xhs_image_upload_parallelism": "媒体上传并发数（商品主图/详情图/规格图共用；设计 24 §22）",
+    "xhs_ocr_parallelism": "image_ocr_service 违规词检测（OCR）的**起始**并发数；实际并发按 CPU 核数与目标耗时自动上调（设计 24 §22.9）",
 }
 
 #: 内置兜底默认值（第 3 层）。**只放 `LIVE_KEYS` 里的键** —— 给没有读点的键编一个默认值
@@ -89,6 +90,11 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     #:   小红书域名**）⇒ 并发第二节**不产生平台请求**，与风控无关。单张 ~2.5s 的耗时
     #:   基本全在 ②，故 N 并发把 38 张从 ~94s 压到 ~19s。
     "xhs_image_upload_parallelism": 5,
+    #: 违规词检测（OCR）起始并发数（用户口径 2026-10-13：默认 5）。
+    #: ⚠️ 这是**起步值**：`image_ocr_service.resolve_parallelism()` 会按
+    #:   待处理图数 / CPU 核数 / 目标总耗时（30s）**自动上调**，配置值是下限。
+    #:   引擎 2026-10-13 由 Windows OCR 换为 RapidOCR（单图 0.95s → 3.3s）。
+    "xhs_ocr_parallelism": 5,
 }
 
 #: 宽松布尔文本（`coerce_value` 与 `live_bool` **共用同一份**）——
@@ -112,6 +118,7 @@ _KEY_BOUNDS: dict[str, tuple[int, int]] = {
     "crawl_rate_limit_per_minute": (1, 600),
     "xhs_sync_account_parallelism": (1, 8),
     "xhs_sync_account_gap_seconds": (0, 600),
+    "xhs_ocr_parallelism": (1, 32),
 }
 
 #: 进程内缓存：`(user_id, key) -> (值, 过期时刻)`。

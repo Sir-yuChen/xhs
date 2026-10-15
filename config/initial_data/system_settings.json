@@ -51,6 +51,16 @@
       "description": "图片上传的并发度，默认 5。上传是两段式：申请凭证打小红书（整批只 1 次），PUT 字节打对象存储（不是小红书域名）⇒ 并发不产生平台请求，风控风险与串行相同。真机实测单张约 2.5s：38 张详情图串行 94s，并发 5 后约 19s。调大 = 更快，但同批文件会同时占内存与后台上传线程。改完立即生效，无需重启。",
       "requires_restart": false,
       "is_dangerous": false
+    },
+    {
+      "key": "xhs_ocr_parallelism",
+      "value": 5,
+      "value_type": "int",
+      "category": "publish",
+      "label": "违规词检测（OCR）起始并发数",
+      "description": "违规词检测识图的起始并发数，默认 5。这是起步值，不是固定值：实际并发会按待处理图片数量、CPU 核数与「目标总耗时 30 秒」自动上调（配置值是下限，不会被机器缩小，上限 32）。引擎为 RapidOCR（纯 CPU，实测单图约 3.3 秒）。调大 = 大批量更快，但会同时占用更多 CPU 与内存；核数不足时反而更慢。改完立即生效，无需重启。",
+      "requires_restart": false,
+      "is_dangerous": false
     }
   ]
 }

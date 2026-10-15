@@ -257,6 +257,107 @@ def test_business_map_seed_is_idempotent_and_skips_missing(db_factory):
         db.close()
 
 
+def test_seeded_models_do_not_claim_a_platform(db_factory):
+    """⚠️ 刚播种、**一个业务点都没配**时，模型行的「使用平台」必须是**空的**。
+
+    用户口径（2026-10-14 原话）：
+    > 「模型没有在平台被配置使用，但是使用平台列依旧被设置成了小红书」
+    > 「**除非默认被配置到了业务点使用才应配置正确的使用列**」
+
+    `platform` 的语义 = 「本模型真的被哪些平台的业务点使用了」（值是**业务点个数**，
+    是状态不是事件）。种子只负责**登记条目**，并不断言任何平台 —— 断言「被 xhs 用了」
+    却没人在用，界面就是在说假话（用户看到刚注册的账号显示「使用平台 = 小红书」）。
+
+    ⚠️ 曾经这里写死 `_dump_platforms({DEFAULT_SEED_PLATFORM: 1})` ⇒ 本用例会红。
+    """
+    from backend.app.services.llm_platforms import parse_platforms
+
+    db = _db(db_factory)
+    try:
+        uid = _make_user(db_factory, "seed-platform-empty")
+        seed_gateway_providers_for_user(db, uid)
+        db.commit()
+        rows = db.scalars(select(LlmGatewayModel).where(LlmGatewayModel.user_id == uid)).all()
+        assert rows, "前提：播种应产生模型行"
+        polluted = {r.model_name: r.platform for r in rows if parse_platforms(r.platform)}
+        assert not polluted, (
+            f"播种阶段没有业务点在使用这些模型，使用平台必须为空；实际：{polluted}"
+        )
+    finally:
+        db.close()
+
+
+def test_business_map_seed_writes_the_platform_of_the_models_it_uses(db_factory):
+    """⚠️ 反向：**业务点真的用了**的模型，使用平台要被写上（否则列表永远空白）。
+
+    与上一条是**一对**：只测「不为空」会退化成「什么都写」，
+    只测「空」会漏掉「该写的没写」。两条一起才钉住用户口径
+    「**除非默认被配置到了业务点使用才应配置正确的使用列**」—— 即
+    「配了才写，写的一定是配了的那几个」。
+
+    判据分三段：
+    1. 被默认映射引用的模型（DeepSeek/deepseek-chat、通义千问/wanx2.1-t2i-turbo）
+       的 `platform` **含 xhs**，且**计数 == 指向它的业务点个数**；
+    2. **没被任何业务点引用**的模型仍为空（拿种子里肯定没被映射的模型当反例）；
+    3. 幂等：再播一次，计数**不再累加**（状态不是事件）。
+    """
+    from backend.app.services.llm_platforms import parse_platforms
+
+    db = _db(db_factory)
+    try:
+        uid = _make_user(db_factory, "seed-platform-written")
+        seed_gateway_providers_for_user(db, uid)
+        db.commit()
+        seed_default_business_map_for_user(db, uid, platform="xhs")
+        db.commit()
+
+        used: dict[tuple[str, str], int] = {}
+        for _bk, _t, provider_name, model_name in DEFAULT_BUSINESS_MAP:
+            used[(provider_name, model_name)] = used.get((provider_name, model_name), 0) + 1
+
+        by_key = {
+            (c.provider_key, c.name): c
+            for c in db.scalars(
+                select(LlmGatewayConfig).where(LlmGatewayConfig.user_id == uid)
+            ).all()
+        }
+        name_to_provider_key = {name: pk for (pk, name) in by_key}
+        models = db.scalars(select(LlmGatewayModel).where(LlmGatewayModel.user_id == uid)).all()
+
+        for m in models:
+            provider_name = next(
+                (
+                    n
+                    for n, pk in name_to_provider_key.items()
+                    if pk == m.provider_key
+                ),
+                None,
+            )
+            want = used.get((provider_name, m.model_name), 0)
+            got = parse_platforms(m.platform).get("xhs", 0)
+            assert got == want, (
+                f"{provider_name}/{m.model_name} 的 xhs 计数应为 {want}"
+                f"（指向它的业务点数），实际 {got}（platform={m.platform!r}）"
+            )
+
+        # 幂等：再播一次不该累加（`platform` 是状态，不是事件）
+        seed_default_business_map_for_user(db, uid, platform="xhs")
+        db.commit()
+        again = db.scalars(
+            select(LlmGatewayModel).where(LlmGatewayModel.user_id == uid)
+        ).all()
+        for m in again:
+            provider_name = next(
+                (n for n, pk in name_to_provider_key.items() if pk == m.provider_key), None
+            )
+            want = used.get((provider_name, m.model_name), 0)
+            assert parse_platforms(m.platform).get("xhs", 0) == want, (
+                f"重复播种后 {m.model_name} 的计数被累加了（platform={m.platform!r}）"
+            )
+    finally:
+        db.close()
+
+
 def test_business_map_skips_when_provider_missing(db_factory):
     """服务商都不在（用户没种子）⇒ 映射 0 条，不臆造。"""
     db = _db(db_factory)

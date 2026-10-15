@@ -111,6 +111,7 @@ BUSINESS_KEY_GENERATE_TITLE = BusinessKey(
 BUSINESS_KEY_GENERATE_TAGS = BusinessKey("generate_tags", MODEL_TYPE_TEXT, "生成标签")
 BUSINESS_KEY_POLISH_TEXT = BusinessKey("polish_text", MODEL_TYPE_TEXT, "文本润色")
 
+
 # --------------------------------------------------------------------------- #
 # 文本类 · 商品侧（kind = `text`）：2 个（设计 20 §3.2，M4 方向 4）
 # --------------------------------------------------------------------------- #

@@ -369,7 +369,7 @@ function PublishStatusTag({
     return <Tooltip title={note.publish_error || "发布失败（无原因记录）"}>{tag}</Tooltip>;
   }
   return clickable ? (
-    <Tooltip title="点击切换发布状态（待发布 ⇄ 已发布）">{tag}</Tooltip>
+    <Tooltip title="切换发布状态（待发布 ⇄ 已发布）">{tag}</Tooltip>
   ) : (
     tag
   );
@@ -1072,7 +1072,7 @@ export function XhsLibraryPage() {
   function batchPublishSelected() {
     const { targets, skipped } = splitPublishTargets(notes, selectedNoteIds);
     if (!targets.length) {
-      message.warning("选中的笔记里没有可发布的（待发布/发布失败的本地生成笔记才可发布）。");
+      message.warning("选中的笔记里没有可发布的");
       return;
     }
     // ⚠️ `centered: true` 必须**逐点显式传**：`Modal.confirm` 走的是静态方法分支
@@ -1152,7 +1152,7 @@ export function XhsLibraryPage() {
   function batchSyncSelected() {
     const { targets, skipped } = splitSyncTargets(notes, selectedNoteIds);
     if (!targets.length) {
-      message.warning("选中的笔记里没有已发布的（只有已发布过的笔记支持批量同步）。");
+      message.warning("选中的笔记里没有已发布的");
       return;
     }
     // ⚠️ `centered: true` 必须**逐点显式传**：`Modal.confirm` 走的是静态方法分支
@@ -1705,7 +1705,7 @@ export function XhsLibraryPage() {
               <Button icon={<CheckSquareOutlined />} disabled={isBatchWorking || !selectedNoteIds.length} onClick={createBatchRewriteDrafts} size="small">批量加入草稿工坊</Button>
               {/* 批量发布（设计 13 §31.5 步 8）：只发选中里可发布的（本地生成待发布/发布失败），
                   跳过的在确认框里明示；单项失败不阻断。 */}
-              <Tooltip title="把选中里待发布 / 发布失败的本地生成笔记发布到小红书（逐篇处理，单项失败不阻断）">
+              <Tooltip title="把选中里待发布 / 发布失败的本地生成笔记发布到小红书">
                 <Button
                   type="primary"
                   icon={<SendOutlined />}
@@ -1719,7 +1719,7 @@ export function XhsLibraryPage() {
               </Tooltip>
               {/* 批量同步（设计 13 §35）：只同步选中里**已发布**的（用户口径「只有已发布的
                   支持被选中」），跳过的在确认框里明示；入队后按顺序执行，进度见上方进度卡。 */}
-              <Tooltip title="把选中里已发布的笔记加入同步队列，按顺序拉取平台最新内容（逐篇处理，单项失败不阻断）">
+              <Tooltip title="把选中里已发布的笔记加入同步队列，拉取平台最新内容">
                 <Button
                   icon={<CloudSyncOutlined />}
                   disabled={isBatchWorking || isBatchSyncing || !selectedNoteIds.length}
@@ -2306,7 +2306,7 @@ export function XhsLibraryPage() {
               {/* 「同步」（§25）：判定走 `canSyncNote`（唯一实现，与卡片同一函数）——
                   用笔记 id 拉平台最新内容更新落库，逻辑与同步任务一致。 */}
               {canSyncNote(selectedNote) && (
-                <Tooltip title="用这条笔记的 ID 拉取平台最新内容并更新本地（与同步任务同一套逻辑）">
+                <Tooltip title="用这条笔记的 ID 拉取平台最新内容并更新本地">
                   <Button
                     icon={<SyncOutlined spin={syncingNoteId === selectedNote.id || syncQueueNoteIds.has(selectedNote.id)} />}
                     onClick={() => void syncNote(selectedNote)}

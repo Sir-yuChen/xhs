@@ -344,7 +344,7 @@ export function PromptTemplatePanel() {
                 }
               >
                 {templates.length === 0 ? (
-                  <Empty description="还没有提示词模板。模板 = 骨架 {插槽} + 引用的模块；生成笔记时选它。" />
+                  <Empty description="还没有提示词模板（模板 = 骨架 + 引用的模块）" />
                 ) : (
                   <Table<PromptTemplate>
                     rowKey="id"
@@ -380,7 +380,7 @@ export function PromptTemplatePanel() {
                 }
               >
                 {modules.length === 0 ? (
-                  <Empty description="还没有模块。模块是可复用的提示词片段（风格 / 语气 / 受众 / 结构 / 禁忌），多个模板都能引用。" />
+                  <Empty description="还没有模块。模块是可复用的提示词片段，多个模板都能引用。" />
                 ) : (
                   <Table<PromptModule>
                     rowKey="id"

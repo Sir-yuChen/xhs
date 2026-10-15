@@ -53,15 +53,14 @@ const RESERVED = {
   // 两个页面用同一个 key ⇒ 互相覆盖对方的筛选
   dupkey: '    keyword: "xhs.filters.library.keyword",',
   // 页签集合少一个 ⇒ 缓存里那个页签被静默退回默认。
-  // ⚠️ 2026-10-07：真值已是**多行数组**（含 "goods" / "normal"，设计 17 §13.x）⇒
+  // ⚠️ 2026-10-14：真值是**多行数组**（`notes`/`liked`/`collected`/`interactions`；
+  //   `goods`/`normal` 已于 `55e0924` 移除，锚点同步删去，否则变异变成哑弹）⇒
   //   锚点必须与 `filter-cache.ts` **逐字同形**（含每行缩进与 `] as const;` 在行首），
   //   单行锚点会静默失配 ⇒ 替换没发生 ⇒ 变异变成哑弹（实测踩过）。
   //   变异体 = 真值少一行 `  "collected",`（页签被静默退回默认）。
   tabs: [
     'export const MY_NOTES_TAB_VALUES = [',
     '  "notes",',
-    '  "goods",',
-    '  "normal",',
     '  "liked",',
     '  "collected",',
     '  "interactions",',
@@ -79,8 +78,6 @@ const MUTATE_TO = {
   tabs: [
     'export const MY_NOTES_TAB_VALUES = [',
     '  "notes",',
-    '  "goods",',
-    '  "normal",',
     '  "liked",',
     '  "interactions",',
     '] as const;',
@@ -276,17 +273,17 @@ async function main() {
   // ------------------------------------------------------------- D. 键清单
   const namespaces = Object.values(FILTER_CACHE_KEYS);
   const allKeys = namespaces.flatMap((group) => Object.values(group));
-  check("D1 三个页面各一份命名空间", [namespaces.length, allKeys.length], [3, 17]);
+  check("D1 三个页面各一份命名空间", [namespaces.length, allKeys.length], [3, 15]);
   check("D1b 键名全部带页面前缀", allKeys.every((key) => key.startsWith("xhs.filters.")), true);
   check("D2 全局无重复键（重复 = 两页互相覆盖）", new Set(allKeys).size, allKeys.length);
 
   // ---------------------------------------------------------------- E. 页签
-  // ⚠️ 2026-10-07 校正：真值已含 "goods" / "normal"（「我的笔记」商业 / 普通两类，
-  //   设计 17 §13.x 落库），本期望未同步 ⇒ E1 长期假红。按 `filter-cache.ts` 实际取值校正。
+  // ⚠️ 2026-10-14 校正：`55e0924`（数据中心独立成页）已把 `goods` / `normal` 两个页签
+  //   从 `MY_NOTES_TAB_VALUES` 移除（拆出去成了独立的 `datacenter-page`）——
+  //   当轮只改了真值、**没同步本脚本**，E1 自此长期假红。
+  //   本期望按 `filter-cache.ts` **当前**实际取值校正（不是放宽判据）。
   check("E1 我的笔记页签顺序（渲染顺序与合法取值同一份）", MY_NOTES_TAB_VALUES, [
     "notes",
-    "goods",
-    "normal",
     "liked",
     "collected",
     "interactions",

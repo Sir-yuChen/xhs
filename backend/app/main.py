@@ -14,6 +14,7 @@ from backend.app.api.platforms.xhs import (
     analytics,
     crawl,
     creator,
+    data_package_rules,
     forbidden_words,
     material_files,
     materials,
@@ -66,7 +67,14 @@ from backend.app.services.scheduler_service import (
     stop_scheduler_watchdog,
 )
 from backend.app.services.settings_service import seed_builtin_settings_from_initial_data
+#: ⚠️ **必须模块级导入**（2026-10-14 修）：此前这一句写在 `lifespan` 函数体内，
+#: 于是 `main` 模块**没有**这个属性 ⇒ `test_scheduler_sync` 里那套
+#: `monkeypatch.setattr(main_module, "…")` 的桩清单**打不上**（AttributeError），
+#: 而「必须给每一步打桩」的守卫（读 AST）却**照样绿** —— 桩清单的真相源是
+#: 源码文本，能力却是运行时的属性。与上面两条种子同形（它们本来就是模块级）。
+from backend.app.services.llm_gateway_seed_service import seed_gateway_providers_for_all_users
 from backend.app.api.llm_prompts import seed_builtin_prompt_templates_for_all_users
+from backend.app.services.data_package_rule_service import seed_builtin_rules_for_all_users
 
 logger = logging.getLogger(__name__)
 
@@ -95,13 +103,11 @@ async def lifespan(app: FastAPI):
     # 提示模板相关逻辑」⇒ 没有种子时出图弹窗的下拉是**空的**，选了也无内容，
     # 「公共模板保证一致性」就落不了地。与上面两项同一语义：随安装附有 + 只补缺失不覆盖。
     seed_builtin_prompt_templates_for_all_users()
+    # 设计 40：为存量用户补种数据包列规则的示例包（只补「一个都没有」的用户）。
+    seed_builtin_rules_for_all_users()
     # LLM 网关服务商种子**补存量**（2026-10-13 用户报障「模型服务商依旧未配置」）：
     # 种子原只在 `register()` 播 ⇒ 存量老账号永远拿不到这 6 个国内常见服务商。
     # 与上面同语义：随安装附有 + **只补缺失不覆盖**（同名服务商 / 已有业务点映射一律不碰）。
-    from backend.app.services.llm_gateway_seed_service import (
-        seed_gateway_providers_for_all_users,
-    )
-
     seed_gateway_providers_for_all_users()
     settings = get_settings()
     # 多实例闸（T-108 / DEF-003）：`BackgroundScheduler` 与 FastAPI 同进程，
@@ -239,6 +245,8 @@ def create_app() -> FastAPI:
     app.include_router(materials.router, prefix="/api")
     # v2.50：违规词库（本地自维护词表，供数据包图片 OCR 精确过滤；设计 25 §2）
     app.include_router(forbidden_words.router, prefix="/api")
+    # 设计 40（2026-10-14）：数据包列规则（提取/运算规则可配置；父子表 CRUD + 执行）
+    app.include_router(data_package_rules.router, prefix="/api")
     # v2.50：数据包预检（上传 → 解析 → OCR 红框；设计 25 §4）
     app.include_router(package_precheck.router, prefix="/api")
     # v2.31：素材**文件**的增删（会动用户磁盘 ⇒ 另一套语义，单独成模块）

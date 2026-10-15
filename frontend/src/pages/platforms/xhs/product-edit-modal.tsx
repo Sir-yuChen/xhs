@@ -209,7 +209,7 @@ export function ProductEditModal({
                   ) : (
                     <Empty
                       image={Empty.PRESENTED_IMAGE_SIMPLE}
-                      description="点「AI 润色」生成备选（每个标题不超过 60 字）"
+                      description="生成标题备选（每个不超过 60 字）"
                     />
                   )}
                 </>

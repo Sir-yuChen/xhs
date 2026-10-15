@@ -2652,7 +2652,7 @@ export function XhsShopItemsPage() {
             type="warning"
             showIcon
             message="没有小红书账号可选"
-            description="商品台账按账号隔离；请先到「账号矩阵」添加账号，并导入其千帆登录态后才能同步商品。"
+            description="商品台账按账号隔离；请先添加账号并导入千帆登录态，才能同步商品。"
           />
         )}
 
@@ -3245,7 +3245,7 @@ export function XhsShopItemsPage() {
                 <Empty
                   style={{ marginTop: 6 }}
                   image={Empty.PRESENTED_IMAGE_SIMPLE}
-                  description="规格详情还没补齐（同步商品任务会自动多轮补足，届时这里展示各规格的价格 / 库存 / 条形码）"
+                  description="规格详情还没补齐（同步商品任务会自动补足）"
                 />
               )}
             </div>
@@ -3825,7 +3825,7 @@ export function XhsShopItemsPage() {
               />
             )
           ) : (
-            <Empty description="关系表里这个商品还没有挂链笔记（可能是未同步，也可能确实没挂；「生成笔记」会建立新的映射）" />
+            <Empty description="这个商品还没有挂链笔记（可能未同步，也可能确实没挂）" />
           )}
         </div>
       </Modal>

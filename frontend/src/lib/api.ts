@@ -2471,6 +2471,180 @@ export async function setForbiddenWordGroupEnabled(
   return response.data;
 }
 
+/* ------------------------------------------------------------------ *
+ * 数据包列规则（设计 40，用户口径 2026-10-14）
+ *
+ * 为什么要有它：每个数据包的**列取值规则不同**（真机实测：包1 `SKU信息` 按 `;`
+ * 取第 2 段、包2 `sku名称` 按 `:` 取第 1 段），拿一包规则套另一包 ⇒ **0% 命中**；
+ * 而包内给 1~2 行例子即可覆盖整列。⇒ 规则**按包的类型**落库复用，而不是每包现猜。
+ * ------------------------------------------------------------------ */
+
+/** 规则的操作类型（**六个全部已实现**，与后端 `_IMPLEMENTED_OPS` 同集合）。 */
+export type DataPackageRuleOp =
+  | "extract_segment" //: 按分隔符切段取第 N 段
+  | "extract_between" //: 取包裹符之间
+  | "extract_strip" //: 去前缀 / 去后缀
+  | "fixed_text" //: 整列设为固定文本（含原本为空的行）
+  | "math_scale" //: 批量运算（步骤列表：加减乘随意搭配，空值按 0）
+  | "copy_column" //: 复制列值（把来源列整格照搬到当前列）
+  | "copy_extract"; //: 复制 + 提取（多步：先复制来源列，再按 `params.extract` 提取）
+
+/** 列名匹配方式。 */
+/** 一条规则（子）。 */
+export interface DataPackageRule {
+  id: number;
+  set_id: number;
+  rule_name: string;
+  op: DataPackageRuleOp;
+  /** 原始参数（编辑时要用）。 */
+  params: Record<string, unknown>;
+  /** **人话摘要**（`按「;」取第 2 段`）—— 直接显示这个，别显示 params。 */
+  summary: string;
+  enabled: boolean;
+  sort_order: number;
+  updated_at: string | null;
+}
+
+/** 一个规则包（父）。`rules` 只在 `with_rules=1` 时下发。 */
+export interface DataPackageRuleSet {
+  id: number;
+  name: string;
+  remark: string;
+  enabled: boolean;
+  sort_order: number;
+  updated_at: string | null;
+  rules?: DataPackageRule[];
+  rule_count?: number;
+}
+
+/** 执行一条规则的结果。 */
+export interface DataPackageRuleResult {
+  /** 逐行结果；`null` = 该行提不出（前端**留空**，不是填原值）。 */
+  values: (string | null)[];
+  missed: number;
+  total: number;
+  summary: string;
+  /** 有缺值时的原因行（25–30 字）。 */
+  reason: string;
+  rule_id: number;
+  set_id: number;
+  /** 规则最后修改时间 —— 变了说明该重算（用户口径「调整后实时生效」）。 */
+  updated_at: string | null;
+  /** **计算基础列**下标原样回传（用户口径 2026-10-15）—— 供前端回显与落值判据。 */
+  source_column?: number | null;
+}
+
+/** 规则包清单（`withRules` 时带上各包**启用中的**规则）。 */
+export async function fetchDataPackageRuleSets(
+  enabledOnly = false,
+  withRules = false,
+): Promise<DataPackageRuleSet[]> {
+  const response = await http.get<DataPackageRuleSet[]>("/xhs/data-package-rules/sets", {
+    params: { enabled_only: enabledOnly, with_rules: withRules },
+  });
+  return response.data;
+}
+
+/** 新建规则包（重名 ⇒ 409）。 */
+export async function createDataPackageRuleSet(payload: {
+  name: string;
+  remark?: string;
+  enabled?: boolean;
+}): Promise<DataPackageRuleSet> {
+  const response = await http.post<DataPackageRuleSet>("/xhs/data-package-rules/sets", payload);
+  return response.data;
+}
+
+/** 改规则包（名 / 备注 / **启用停用** / 排序）。 */
+export async function updateDataPackageRuleSet(
+  setId: number,
+  payload: {
+    name?: string;
+    remark?: string;
+    enabled?: boolean;
+    sort_order?: number;
+  },
+): Promise<DataPackageRuleSet> {
+  const response = await http.patch<DataPackageRuleSet>(
+    `/xhs/data-package-rules/sets/${setId}`,
+    payload,
+  );
+  return response.data;
+}
+
+/** 删规则包（**级联删规则**）。回 `deletedRules` 供二次确认明示条数。 */
+export async function deleteDataPackageRuleSet(
+  setId: number,
+): Promise<{ ok: boolean; deleted_rules: number }> {
+  const response = await http.delete<{ ok: boolean; deleted_rules: number }>(
+    `/xhs/data-package-rules/sets/${setId}`,
+  );
+  return response.data;
+}
+
+/** 某包下的规则清单。 */
+export async function fetchDataPackageRules(
+  setId: number,
+  enabledOnly = false,
+): Promise<DataPackageRule[]> {
+  const response = await http.get<DataPackageRule[]>("/xhs/data-package-rules/rules", {
+    params: { set_id: setId, enabled_only: enabledOnly },
+  });
+  return response.data;
+}
+
+/** 新建规则（同包同列重复 ⇒ 409）。 */
+export async function createDataPackageRule(payload: {
+  set_id: number;
+  rule_name: string;
+  op: DataPackageRuleOp;
+  params?: Record<string, unknown>;
+  enabled?: boolean;
+}): Promise<DataPackageRule> {
+  const response = await http.post<DataPackageRule>("/xhs/data-package-rules/rules", payload);
+  return response.data;
+}
+
+/** 改规则（含启用停用）。 */
+export async function updateDataPackageRule(
+  ruleId: number,
+  payload: {
+    rule_name?: string;
+    op?: DataPackageRuleOp;
+    params?: Record<string, unknown>;
+    enabled?: boolean;
+    sort_order?: number;
+  },
+): Promise<DataPackageRule> {
+  const response = await http.patch<DataPackageRule>(
+    `/xhs/data-package-rules/rules/${ruleId}`,
+    payload,
+  );
+  return response.data;
+}
+
+/** 删规则。 */
+export async function deleteDataPackageRule(ruleId: number): Promise<{ ok: boolean }> {
+  const response = await http.delete<{ ok: boolean }>(`/xhs/data-package-rules/rules/${ruleId}`);
+  return response.data;
+}
+
+/** **执行一条规则**（**后端算** —— 前端不重复实现提取语义，DEF-044）。 */
+export async function executeDataPackageRule(payload: {
+  set_id: number;
+  rule_id: number;
+  /** 参与计算的值。⚠️ **运算类规则**要传**基础列**的值（可能不是落值那一列）。 */
+  values: (string | null)[];
+  /** 计算基础列下标（用户口径 2026-10-15）。缺省 = 落值那一列。 */
+  source_column?: number;
+}): Promise<DataPackageRuleResult> {
+  const response = await http.post<DataPackageRuleResult>(
+    "/xhs/data-package-rules/execute",
+    payload,
+  );
+  return response.data;
+}
+
 /** 已有分组 + 各自词条数（预检的「指定分组」下拉用）。 */
 export async function fetchForbiddenWordGroups(): Promise<ForbiddenWordGroup[]> {
   const response = await http.get<ForbiddenWordGroup[]>("/xhs/forbidden-words/groups");
@@ -2657,7 +2831,25 @@ export async function deleteItemDrafts(
  * 数据包预检（设计 25 §4）
  * ------------------------------------------------------------------ */
 
-export type PrecheckGroup = "main" | "video" | "sku" | "detail";
+/**
+ * 媒体**区域**（用户口径 2026-10-13）。
+ *
+ * ⚠️ **不再是固定四值** —— `group` 是**数据包里一级目录名的原值**
+ * （`1比1主图` / `页面展示主图` / `SKU图` / `主图视频` / `详情图` / `属性` …）。
+ *
+ * 用户原话：「数据包中读取到什么就**按照读取到的文件夹分区域**，
+ * 不做任何操作直接展示」「读到什么媒体资源就展示什么」。
+ *
+ * 历史：旧实现是 `"main" | "video" | "sku" | "detail"` 四值查表，**认不出就丢**。
+ * 实测代价：包 A（淘宝店透导出）5 个目录有 4 个不在表里 ⇒ **丢 63 个文件**。
+ */
+export type PrecheckZoneName = string;
+
+/** 区域**参考类别**（发布语义提示）—— **只作展示，不参与过滤**。 */
+export type PrecheckKind = "main" | "video" | "sku" | "detail" | "other";
+
+/** 兼容别名：旧代码里 `PrecheckGroup` 的语义现在是「区域名」。 */
+export type PrecheckGroup = PrecheckZoneName;
 
 export interface PrecheckHit {
   word_id: number;
@@ -2668,13 +2860,19 @@ export interface PrecheckHit {
 }
 
 export interface PrecheckMediaItem {
-  group: PrecheckGroup;
+  /** ⚠️ **区域名 = 数据包一级目录名原值**（不再是 `main`/`sku` 四值之一）。 */
+  group: PrecheckZoneName;
+  /** 区域**参考类别** —— 只作展示提示，**不参与过滤**。 */
+  kind?: PrecheckKind;
   index: number;
   rel_path: string;
   file_name: string;
   size_bytes: number;
   oversized: boolean;
+  /** **平台不收这个格式**（展示照常 + 红框，默认不勾选、发布跳过）。 */
   unsupported: boolean;
+  /** `unsupported` 的人话原因（红框提示文案）。空 = 合规。 */
+  unsupported_reason?: string;
   ocr_ok?: boolean | null;
   /** `ocr_ok === null` = 没检过（抽帧失败 / 引擎缺失），前端默认不勾选 */
   unverified_reason?: string | null;
@@ -2699,13 +2897,40 @@ export interface PrecheckTable {
   rows: (string | null)[][];
   /** 来源 xlsx 的文件名（表格顶部展示）。 */
   source_file?: string;
+  /** **逐列类型**（`numeric` / `text` / `empty`，与 `columns` 等长）。
+   *
+   *  ⚠️ 用户口径 2026-10-13：「数值列不支持（正则）只能读取原始值」
+   *  ⇒ 前端据此决定哪些列给正则入口。**后端判、前端不猜**。 */
+  column_kinds?: ColumnKind[];
+  /** **逐列身份键**（与 `columns` 等长；**前端产物**，后端不下发）。
+   *
+   *  ⚠️ 表头是**中文名**（用户可改、可重复）⇒ 不能当身份。
+   *  「这列是不是手动新增的」必须判准（决定删除按钮给不给），
+   *  故用 `__manual_` 前缀的 key 承载身份（见 `MANUAL_COLUMN_PREFIX`）。
+   */
+  column_keys?: string[];
+  /** 这张表**是不是 SKU / 规格表**（后端按列名特征判定，不靠 sheet 名）。 */
+  is_sku_table?: boolean;
+}
+
+/** 表格列的类型（后端判定后随表下发）。 */
+export type ColumnKind = "numeric" | "text" | "empty";
+
+/** 数据包里的一个**媒体区域**（区域名 = 目录名原值）。 */
+export interface PrecheckZone {
+  name: PrecheckZoneName;
+  kind: PrecheckKind;
+  count: number;
 }
 
 export interface PrecheckResult {
   /** 是否已跑过违规词检测（`false` = 只读取展示）。 */
   inspected?: boolean;
   package_name: string;
-  media_groups: Record<PrecheckGroup, number>;
+  /** ⚠️ **旧契约**（固定四值计数），已由 `zones` 取代；新代码一律读 `zones`。 */
+  media_groups: Record<string, number>;
+  /** **区域清单**（保序 = 数据包里目录出现顺序）。 */
+  zones?: PrecheckZone[];
   media: PrecheckMediaItem[];
   tables: PrecheckTable[];
   warnings: string[];
@@ -2816,6 +3041,16 @@ export async function fetchPrecheckProgress(token: string): Promise<PrecheckProg
   const response = await http.get<PrecheckProgress>(`/xhs/package-precheck/${token}/progress`);
   return response.data;
 }
+
+/** **由样例反推取值正则**（用户口径 2026-10-13）。
+ *
+ * ⚠️ **纯算法，不用大模型**（用户口径：「完全放弃大模型，移除相关逻辑」）：
+ * 后端走 `grex`（本地、确定性、毫秒级），**不需要配服务商、不花钱**。
+ *
+ * 传**多组样例**能显著提高正则的泛化能力 —— 引擎要看到「哪些部分在变」
+ * 才能把变化部分泛化成字符类/枚举；只有一组时它只能原样硬编码。
+ * 产出的正则对**每组**样例都回验通过才返回（否则报结构化错误）。
+ */
 
 /** 取暂存包里的一张图（红框 overlay 的底图；需带鉴权 ⇒ 走 blob URL）。 */
 export async function fetchPrecheckImage(token: string, relPath: string): Promise<string> {

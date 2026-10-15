@@ -25,6 +25,16 @@ from pathlib import Path
 
 import pytest
 
+def _strip_comments(text: str) -> str:
+    """剥掉 `//` 行注释与 `/* */` 块注释（源码级守卫的公共前置）。
+
+    ⚠️ 本项目多处守卫踩过同一个坑：页面 docstring / 注释里**会提到被守护的符号名**
+    （尤其「旧实现是 X、已取代」这类考古说明），不剥注释就会被自己的注释命中。
+    """
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    return re.sub(r"//[^\n]*", "", text)
+
+
 ROOT = Path(__file__).resolve().parents[2]
 MY_NOTES = ROOT / "frontend/src/pages/platforms/xhs/my-notes-page.tsx"
 LIBRARY = ROOT / "frontend/src/pages/platforms/xhs/library-page.tsx"
@@ -5416,15 +5426,263 @@ def test_publish_wizard_shows_media_before_running_the_precheck():
 
 
 def test_publish_wizard_gates_step_two_on_a_passed_precheck():
-    """⚠️ 核心诉求：**预检通过才可进第二步**。"""
+    """⚠️ 核心诉求：**预检通过才可进第二步**（判据形态 2026-10-14 修订）。
+
+    ⚠️ 用户口径 2026-10-14：
+    > 「点击下一步时**未进行拦截提示**匹配 sku 图」
+
+    根因：这条判据原先靠按钮 `disabled` 实现，而 **disabled 的按钮吞掉点击**
+    ⇒ 用户既进不去、也看不到任何提示。改成**点击时逐条报原因**后，
+    「预检通过」必须回到 `goStep2` 里当一条**显式判据** ——
+    否则去掉 `disabled` 就等于把这道关卡整个拆了。
+    """
     src = _src(PUBLISH_MODAL)
-    assert "precheckPassed" in src, "缺少「预检通过」判据"
-    gate = src.index("disabled={!precheckPassed")
-    label = src.index("下一步：配置商品参数")
-    #: 二者同处一个 `<Button>`（相隔不到 300 字符），别只看标签附近的字面量。
-    assert abs(gate - label) < 300, (
-        "「下一步」按钮没有挂在 precheckPassed 上（预检没过也能进第二步）"
-    )
+    code = _code_only(src)
+    assert "precheckPassed" in code, "缺少「预检通过」判据"
+    #: ① 不在按钮上禁用（禁用 = 吞点击 = 用户看不到原因）。
+    assert "disabled={!precheckPassed" not in code, \
+        "「下一步」又回到 disabled 门禁（用户看不到提示，只能猜）"
+    #: ② 判据必须在 `goStep2` 里显式存在。
+    go = code[code.index("const goStep2 = useCallback("):]
+    go = go[:go.index("}, [")]
+    assert "precheckPassed" in go, \
+        "goStep2 没校验 precheckPassed（去掉 disabled 后预检没过也能进第二步）"
+
+
+def test_next_step_blocks_on_sku_match_and_item_no():
+    """「下一步」的**逐条关卡**（用户口径 2026-10-14）。
+
+    > 「商品发布 sku图自动匹配点击前校验…点击下一步配置商品参数按钮校验
+    >   SKU 图需自动匹配触发成功后才可以点击下一步，否则提示请先匹配sku图」
+    > 「商品sku表格tab下新增一个商品货号参数，默认是为空**必填**，
+    >   点击下一步时需校验非空」
+
+    判据：`goStep2` 里按顺序逐条拦并给**可执行**的提示。
+    """
+    code = _code_only(_src(PUBLISH_MODAL))
+    go = code[code.index("const goStep2 = useCallback("):]
+    go = go[:go.index("}, [")]
+    assert '"请先匹配 SKU 图"' in go, "没拦「SKU 图未匹配」"
+    assert "skuMatchRan" in go, "SKU 图关卡没用 skuMatchRan（用长度会指错方向）"
+    assert '"请先填写商品货号"' in go, "没拦「商品货号为空」"
+    assert "itemNo" in go, "商品货号关卡没读 itemNo"
+
+
+def test_apply_match_result_also_marks_sku_match_as_run():
+    """**「应用匹配结果」必须置 `skuMatchRan`**（真 bug，2026-10-14）。
+
+    用户原话：
+    > 「sku 图已经自动匹配成功并应用了，点击下一步依旧提示请先匹配 SKU 图」
+
+    根因：`onSkuMatchRun`（置 `skuMatchRan` 的**唯一入口**）只挂在
+    「执行匹配」按钮上；而用户的真实路径是**「应用匹配结果」**（`onOk`）
+    ⇒ 关卡判据恒 false ⇒ 明明配好了却被拦。
+
+    判据：`onOk` 里除写回匹配结果外，**也要**调 `onSkuMatchRun()`。
+    """
+    code = _code_only(_src(PUBLISH_MODAL))
+    #: ⚠️ 判据必须**定位到 SkuMatchModal 的那次调用** —— 页面里另有多处 `onOk`
+    #: （如「自动加载参数」的二次确认），`code.index("onOk")` 会抓错一个（实测踩过）。
+    at = code.index("<SkuMatchModal")
+    call = code[at:code.index("/>", at)]
+    assert "applySkuMatch(matchRows)" in call, "onOk 没写回匹配结果"
+    assert "onSkuMatchRun()" in call, \
+        "「应用匹配结果」没置 skuMatchRan ⇒ 点下一步仍提示「请先匹配 SKU 图」（真 bug 回归）"
+
+
+def test_reopening_the_wizard_remounts_the_first_step():
+    """**重开弹窗要清干净第一步面板的内部 state**（用户口径 2026-10-14）。
+
+    用户原话：
+    > 「每次关闭发布商品弹窗，相关的属性弹窗中的参数需要清除干净，
+    >   本次打开发现 sku 名称默认读取的不是原始表格中的值，
+    >   是上一次正则处理过的列值」
+
+    根因：第一步面板改成 `display:none` **保持挂载**（为了「切步骤不丢匹配结果」）后，
+    它的内部 state（表格副本 / 取值正则 / 勾选 / 已应用匹配图）**活得过 `reset()`**
+    ⇒ 下次打开看到上一轮的残留。
+
+    判据：`<PrecheckStep>` 外层节点带一个**每次打开都变的 key**（`openSeq`）——
+    打开即重挂（内部 state 归零），步骤间切换 key 不变（仍保留）。
+    """
+    code = _code_only(_src(PUBLISH_MODAL))
+    assert "const [openSeq, setOpenSeq] = useState(" in code, "没有 openSeq 状态"
+    assert "setOpenSeq((n) => n + 1)" in code, "打开时没自增 openSeq（重开不会重挂）"
+    assert "key={openSeq}" in code, \
+        "第一步没有被 `key={openSeq}` 强制重挂 ⇒ 重开仍是上一轮的正则处理过的列值"
+
+
+def test_sku_match_modal_is_destroyed_on_close():
+    """SKU 匹配弹窗关掉即销毁（用户口径 2026-10-14：「属性弹窗中的参数清除干净」）。"""
+    code = _code_only(_src(PUBLISH_MODAL))
+    modal = code[code.index("function SkuMatchModal"):]
+    modal = modal[:modal.index("function BatchColumnControl")]
+    assert "destroyOnHidden" in modal, "SKU 匹配弹窗关掉没销毁（内部 state 会留到下次）"
+
+
+def test_item_no_overrides_the_haohao_attribute_on_auto_load():
+    """「货号」属性由**属性装配层固定合成**，不再靠「按名匹配平台属性」覆盖。
+
+    ⚠️ 本条 **2026-10-15 被取代**（用户新口径，task t_c986f8d8）：
+    > 「第三步，类目生成后，商品的其他属性中没有展示货号属性，
+    >   它**应该是固定的其它属性第一个**」
+
+    旧口径（2026-10-14）是「第一步填的货号 ⇒ 在『智能生成商品属性』那一步
+    **按名覆盖**平台下发的『货号』属性」。它**恒不命中**：平台
+    `desc_properties`（离线真机 22 项逐名核对）与 `predictProductProperty`
+    都**不下发**货号 ⇒ `loadedFields` 里根本没有那一项 ⇒ 属性区永远看不到货号。
+    这正是用户报的现象的**真因**。
+
+    现口径 = 单实现（DEF-044）：`lib/publish-property-fields.ts` 的
+    `withItemNoFirst()` 合成 `{id:"articleNo", name:"货号", kind:"text"}`
+    并排在「其他属性」**第 0 位**；**两条属性加载路径**（进第二步的
+    `autoLoadAll`、改类目的重载 effect）都必须过它，且都要把第一步填的货号
+    落进该输入框。
+
+    形态依据（非新猜测，均为既有实证）：
+      · 千帆 bundle `ARTICLE_NO_PROPERTY_ID = "articleNo"`、
+        `allProperties = [货号项].concat(平台属性)`；
+      · `getFormData()` 里货号**单独走**，值取顶层 `articleNo`；
+        `selectedPropertyVals` 把它 **`unshift`** 进属性列表 ⇒ 提交体
+        `attributes[]` 第一条即 `{attributeId:"articleNo", attributeValue:<货号>}`；
+      · 「货号」**不是**顶层 `articleNo` 那个字段（后者是 2026-10-14 的真机抓包结论）。
+    """
+    code = _code_only(_src(PUBLISH_MODAL))
+    #: ① 合成 + 置首由唯一一份实现负责（不许在页面里再写一遍）。
+    helper = _code_only(_read(ROOT / "frontend/src/lib/publish-property-fields.ts"))
+    assert 'id: ITEM_NO_PROPERTY_ID' in helper, "货号项的 id 没走常量"
+    assert 'const ITEM_NO_PROPERTY_ID = "articleNo"' in helper, \
+        "货号属性 id 必须是 articleNo（千帆 bundle ARTICLE_NO_PROPERTY_ID 逐字一致）"
+    #: ⚠️ 断言写成 **特征**（「货号在前 + 其余去重在后」）而不是逐字整行：
+    #: 该函数 2026-10-15 一度写成泛型 `T`（`as unknown as T`）—— 调用点会把
+    #: 「合成的货号项」硬塞成平台字段的具体类型 ⇒ `TS2322`（`PropertyLike`
+    #: 不是 `T` 的子类型，`tsc` 实测报错）。定稿为**非泛型**
+    #: `withItemNoFirst(fields: PropertyLike[]): PropertyLike[]`
+    #: （并集形状），故这里只钉「首项是 `buildItemNoProperty()`、其余过
+    #: `withoutItemNo`」这一判据 —— 改成追加到末尾 / 不去重都必红。
+    assert re.search(
+        r"return\s*\[\s*buildItemNoProperty\(\),\s*\.\.\.withoutItemNo\(fields\)\s*\]",
+        helper,
+    ), "置首必须是「货号在前 + 其余去重在后」（改成追加到末尾即推翻用户口径）"
+    assert "as unknown as T" not in helper, \
+        "又退回泛型实现了（调用点必 TS2322；定稿是非泛型 PropertyLike[]）"
+    #: ② 去重判据 = id **或** 名（只判一个 ⇒ 平台换个写法就插出两条货号）。
+    assert "f.id !== ITEM_NO_PROPERTY_ID" in helper and 'f.name.trim() !== ITEM_NO_PROPERTY_NAME' in helper, \
+        "去重必须同时认 id 与名（否则平台下发货号时会出两条）"
+    #: ③ `kind` 必须是文本（真机 propertyInputType = TEXT）。
+    assert 'kind: "text"' in helper, "货号是文本属性"
+    #: ④ 导入 + 调用：两条加载路径都必须过 `withItemNoFirst`。
+    assert "withItemNoFirst," in code, "页面没有导入 withItemNoFirst"
+    assert code.count("withItemNoFirst(") == 2, \
+        f"两条属性加载路径都该插入货号（实测 {code.count('withItemNoFirst(')} 处调用）"
+    assert "setOtherProperties(ordered)" in code, "autoLoadAll 没把置首结果写进 otherProperties"
+    #: ⑤ 第一步填的货号必须落进货号项的输入框（两条路径各一次）。
+    assert code.count("next[ITEM_NO_PROPERTY_ID]") + code.count("[ITEM_NO_PROPERTY_ID]: no") >= 2, \
+        "两条路径都要把第一步的货号落进货号输入框"
+    assert code.count("{ ...prev, [ITEM_NO_PROPERTY_ID]: no }") >= 1, \
+        "改类目重载那条路径没回填货号"
+    #: ⑥ 依赖数组必须带 `itemNo`（否则改完货号再点自动加载仍用旧闭包值）。
+    assert "    itemNo,\n" in code, "autoLoadAll 的依赖数组漏了 itemNo"
+    assert "}, [platformAccountId, configCategoryId, itemNo]);" in code, \
+        "改类目重载的 effect 依赖数组漏了 itemNo（回填会用到旧值）"
+    #: ⑦ 旧的「按名覆盖」必须**删干净**（两套逻辑打架 = 死代码，DEF-044）。
+    assert "itemNoFilled" not in code, "旧的「货号覆盖」遗留（那份恒不命中，只会误导）"
+    assert 'f.name.includes("货号")' not in code, "旧的按名兜底匹配还在"
+
+
+def _run_publish_property_fields(env: dict | None = None):
+    script = ROOT / "tests/frontend/publish_property_fields.cjs"
+    assert script.exists(), "行为验证脚本缺失（tests/frontend/publish_property_fields.cjs）"
+    try:
+        return subprocess.run(
+            ["node", str(script)],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=180,
+            env={**os.environ, **(env or {})},
+        )
+    except FileNotFoundError:  # pragma: no cover - 环境问题，不是逻辑分支
+        pytest.fail("未找到 node：本机无法运行前端行为验证（AGENTS.md §2 已依赖 node 跑 tsc）")
+
+
+def test_item_no_is_the_first_other_property_driven_for_real():
+    """「货号」是「其他属性」的**固定第一条** —— 由**真机离线属性表**验证（用户口径 2026-10-15）。
+
+    > 「第三步，类目生成后，商品的其他属性中没有展示货号属性，
+    >   它**应该是固定的其它属性第一个**」
+
+    为什么值得单独跑：`withItemNoFirst()` 是纯装配函数，源码断言只能证明
+    「那行还在」；本脚本拿 `.hermes/tmp/evidence_publish/step2_default_net.json`
+    里真机 22 项 `descProperties`（**逐名核对无「货号」**）当输入，
+    检查**真实输出**：23 项、首条是 `{name:"货号", id:"articleNo", kind:"text"}`、
+    平台其余项相对顺序不变、平台若也下发则去重不出两条。
+    """
+    result = _run_publish_property_fields()
+    assert result.returncode == 0, (result.stdout + result.stderr)[-900:]
+    assert "13 PASS / 0 FAIL" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "mutate,expected",
+    [
+        ("append", "A3"),          # 置首改成追加到末尾 ⇒ 推翻用户口径
+        ("no-dedupe", "B2"),       # 完全不去重 ⇒ 平台下发货号时出现两条
+        ("wrong-id", "A4"),        # id 写错 ⇒ 提交体 attributeId 不是 articleNo
+        ("no-name-dedupe", "B1"),  # 只按 id 去重 ⇒ 平台按名下发就出两条
+    ],
+)
+def test_publish_property_fields_guards_are_load_bearing(mutate, expected):
+    """变异验证：把置首/去重/id 改坏时脚本必须变红（否则它没在守任何东西）。"""
+    result = _run_publish_property_fields({"PUBLISH_PROP_FIELDS_MUTATE": mutate})
+    assert result.returncode != 0, f"{mutate} 变异必须让脚本失败"
+    assert f"FAIL  {expected}" in result.stdout, f"stdout={result.stdout}"
+
+
+def test_item_no_input_lives_in_the_sku_table_tab():
+    """商品货号输入框在**商品sku表格 tab**，且状态住在向导（用户口径 2026-10-14）。
+
+    > 「商品sku表格tab下新增一个商品货号参数」
+
+    ⚠️ 状态必须住在向导：它是 `goStep2` 的判据之一，
+    而 `TablesPanel` 会随页签/步骤切换卸载重挂（放里面会丢 —— 与 `skuMatchRan` 同因）。
+    """
+    code = _code_only(_src(PUBLISH_MODAL))
+    assert 'label: `商品sku表格（${tables.length}）`' in code, "商品sku表格页签找不到"
+    tab = code[code.index('label: `商品sku表格（${tables.length}）`'):]
+    tab = tab[:tab.index("<TablesPanel")]
+    assert "商品货号" in tab, "商品sku表格 tab 下没有「商品货号」输入框"
+    assert "itemNo" in tab, "货号输入框没接 itemNo"
+    assert "onItemNoChange" in tab, "货号输入框没接回传"
+    #: 状态在向导（不在面板内部）。
+    assert "const [itemNo, setItemNo] = useState(" in code, "货号状态不在向导层"
+    assert "itemNo={itemNo}" in code, "货号没透传给面板"
+
+
+def test_step_switching_keeps_the_panel_mounted():
+    """⚠️ **切换步骤不得丢状态**（用户口径 2026-10-14，真 bug）。
+
+    用户原话：
+    > 「切换步骤后，匹配好的 sku 图丢了……在来回切换步骤时保持不变」
+
+    根因：`PrecheckStep` 是**条件渲染**（`{step === 0 && <PrecheckStep/>}`）
+    ⇒ 切到第二步时组件被**卸载**，内部 state（`appliedSkuImages` 匹配结果、
+    `manualPicks` 手选图、勾选、表格编辑）全丢，切回来一片空白。
+
+    修法：**保持挂载、只隐藏**（`display: none`）—— 与第二步
+    （`PublishConfigStep2`）此前踩的同一个坑、同一个修法。
+
+    判据（两条，缺一不可）：
+      ① 没有 `{step === 0 && <PrecheckStep` 这种条件渲染；
+      ② 有一层 `display: step === 0 ? undefined : "none"` 包住它。
+    """
+    code = _code_only(_src(PUBLISH_MODAL))
+    assert "{step === 0 && <PrecheckStep" not in code, \
+        "第一步仍是条件渲染 ⇒ 切步会卸载组件、state 全丢（匹配好的 sku 图会丢）"
+    assert 'display: step === 0 ? undefined : "none"' in code, \
+        "第一步没有「保持挂载只隐藏」的包裹"
 
 
 def test_precheck_page_does_not_surface_ocr_internals():
@@ -5559,7 +5817,8 @@ def test_forbidden_words_modal_is_sixty_percent_of_the_viewport():
     src = _src(ROOT / "frontend/src/pages/platforms/xhs/forbidden-words-modal.tsx")
     assert 'width="60vw"' in src, "违规词弹窗宽度不是 60vw"
     assert '"60vh"' in src, "违规词弹窗高度不是视口 60%"
-    assert 'width="50vw"' not in src, "还留着旧口径 50vw"
+    assert 'width="50vw"' not in src, "还留着旧口径 50vw（已纠正为 60vw）"
+    assert 'width="60vw"' in src, "弹窗宽度不是 60vw"
     #: 发布弹窗应保持 75vw（两个弹窗的尺寸口径各自独立）
     wizard = _src(PUBLISH_MODAL)
     #: ⚠️ 2026-10-08 口径改为 **宽 80% / 高 90%**（原来 75vw），
@@ -5596,9 +5855,15 @@ def test_media_hitting_forbidden_words_is_disabled_and_greyed():
 
 
 def test_precheck_can_be_rerun():
-    """用户口径 2026-10-08：「支持重复预检」—— 检过之后按钮仍可点。"""
+    """用户口径 2026-10-08：「支持重复预检」—— 检过之后按钮仍可点。
+
+    ⚠️ 文案已按用户口径 2026-10-13 改口径：「预检按钮只预检图片是否存在违规词，
+    **按钮的文案使用重新明确**」⇒ 检过后的入口文案由「重新预检」改为
+    **「重新检测违规词」**（同族词「检测违规词」= 未检过的态）。本用例的**判据**
+    （检过仍可点）不变，只换文案锚点。
+    """
     src = _src(PUBLISH_MODAL)
-    assert "重新预检" in src, "没有「重新预检」入口（检过就disabled了）"
+    assert "重新检测违规词" in src, "没有「重新检测违规词」入口（检过就disabled了）"
     #: ⚠️ 判据落在**预检按钮自己那一小段**里（不能从「重新预检」往后大段切 ——
     #: 那会切到下方的提示文案，把无关的 `!inspected` 当成按钮禁用条件，实测误红）。
     #: 窗口要落在按钮**自己那一段**（从 onClick 起，到 `>` 收口为止）。
@@ -7316,7 +7581,11 @@ def test_precheck_batch_apply_has_no_confirm_dialog():
     assert "message.success(text)" in block, "applyDirectly 里应给一条轻提示"
     #: 不得再有确认弹窗
     assert "confirmThen" not in wiz, "confirmThen 二次确认应已移除"
-    assert "modal.confirm" not in wiz, "批量修改不应再弹确认框"
+    #: ⚠️ 判据**收敛到「批量修改这一段」** —— 全文件断言 `modal.confirm` 已不成立：
+    #: 用户口径 2026-10-14 明确要求「**还原列值需二次确认**」，那一处就该有 `modal.confirm`
+    #: （它属于「整表还原」而不是「批量修改」，两者不是同一条链路）。
+    apply_block = wiz[i : i + 600]
+    assert "modal.confirm" not in apply_block, "批量修改不应再弹确认框"
 
 
 def test_precheck_batch_delta_has_sign_selector():
@@ -8427,30 +8696,41 @@ def test_multi_select_property_keeps_at_most_three_values():
 # ---------------------------------------------------------------------------
 
 
-def test_wizard_hides_the_raw_image_column():
-    """原始「图片」列**不再展示**（用户口径 2026-10-11）。
+def test_wizard_shows_the_file_columns_verbatim():
+    """SKU 表格**按文件自己的列渲染**，不再过滤、不再自造列（用户口径 2026-10-14）。
 
-    那列装的是数据包 xlsx 里的一长串外部 URL，对用户没有阅读价值 —— 图已经由
-    「线上图片」列预览出来了。守卫钉住 `.filter(... !== imageCol)` 这个**过滤动作**。
+    > 「新增排队商品 sku 表格 tab **应读到什么就展示什么**，
+    >   如果为图片则展示小图预览方式，**不应该还有线上图和本地图非表格中原始的列**」
+
+    ⚠️ **取代**原 `test_wizard_hides_the_raw_image_column`（那条要求**过滤掉**
+    原始「图片」列，靠自造的「线上图片」列来预览）—— 自造列整块退场后，
+    过滤动作也不该存在：文件里有什么列就渲染什么列。
     """
     code = _code_only(_read(PRECHECK_MODAL))
-    assert "colIndex !== imageCol" in code, "原始「图片」列应被过滤掉（不再展示）"
-
-
-def test_wizard_puts_the_spec_category_column_fourth():
-    """「规格分类」放**第 4 列**（用户口径 2026-10-11）。
-
-    列序：勾选 · 线上图片 · 本地图片 · **规格分类** · 其余数据列。
-    判据 = 规格分类列的定义**出现在数据列 map 之前**（源码顺序即列序）。
-    """
-    code = _code_only(_read(PRECHECK_MODAL))
-    spec_at = code.index('key: "__spec_category"')
-    online_at = code.index('key: "__online_image"')
-    local_at = code.index('key: "__local_image"')
-    data_at = code.index("colIndex !== imageCol")
-    assert online_at < local_at < spec_at < data_at, (
-        "列序应为 线上图片 · 本地图片 · 规格分类 · 数据列（规格分类必须是第 4 列）"
+    assert "colIndex !== imageCol" not in code, (
+        "不应再过滤「图片」列 —— 文件里的列要原样渲染（图片值由 isImageValue 判、渲染缩略图）"
     )
+
+
+def test_wizard_has_no_self_invented_columns():
+    """**不再自造列**（用户口径 2026-10-14）。
+
+    > 「不应该还有线上图和本地图非表格中原始的列」
+
+    ⚠️ **取代**原 `test_wizard_puts_the_spec_category_column_fourth`
+    （那条要求自造「线上图片 / 本地图片 / 规格分类」三列并规定列序）。
+    """
+    code = _code_only(_read(PRECHECK_MODAL))
+    for key in ("__online_image", "__local_image"):
+        assert f'key: "{key}"' not in code, f"自造列 {key} 应已退场"
+    #: ⚠️ **`__spec_category` 是例外**（用户口径 2026-10-14 **再修订**）：
+    #: 「还是需要一列规格分类，否则第二步的参数规格分类映射无法映射，
+    #:   固定在原始表读取成功后**在第二列**新增固定列规格分类默认为空」。
+    #: ⇒ 它**要**存在（独立于 xlsx 列、默认空、值由正则取值填）。
+    #: ⚠️ **被 2026-10-14 口径取代**：「固定的规格分类**移除**，相关逻辑也移除」
+    #: ⇒ 不再有自造列，第二步的参数映射改由「用户在弹窗里**手动勾选**商品规格」
+    #: （设计 40 §1.3）。
+    assert 'key: "__spec_category"' not in code, "「规格分类」列已按口径移除，不该还在"
 
 
 def test_wizard_sku_thumbnails_share_one_size_constant():
@@ -8505,7 +8785,13 @@ def test_wizard_switch_icon_sits_on_the_local_thumb():
     assert 'className="sku-local-thumb"' in code, "本地图需要有定位容器"
     assert 'className="sku-local-thumb-switch"' in code, "切换图标要挂在缩略图上"
     #: 分支必须存在：无图 ⇒ 独立按钮；有图 ⇒ 缩略图 + 右上角图标。
-    assert "if (!info?.localRel) {" in code, "「无图才给独立按钮」的分支应保留"
+    #: ⚠️ 判据演化（2026-10-14）：单元格渲染改用局部变量 `rel`，
+    #: 分支形式由 `if (!info?.localRel)` 变为 `if (!rel)`（同一语义）。
+    #: ⚠️ 锚点已重定向（2026-10-15）：第一列的值改为**读 `rows`**
+    #: （用户口径：「把第一列**放入 rows**，它是固定列」）⇒ 变量名从 `rel`
+    #: 改为 `relShown`（`rows` 里的值，缺时回落内存态避免闪空）。
+    #: **守卫的意图没变**：有图给「缩略图 + 切换图标」，无图才给独立「选择」按钮。
+    assert "if (!relShown) {" in code, "「无图才给独立按钮」的分支应保留"
     css = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.css"))
     assert ".sku-local-thumb-switch" in css, "右上角定位样式应在 CSS 里"
     assert "position: absolute" in css
@@ -8538,38 +8824,173 @@ def test_backend_has_no_attribute_image_specific_logic_left():
         assert symbol not in ocr_src, f"{symbol} 应已整段移除（图片 OCR 建表）"
 
 
-def test_sku_name_column_shows_only_the_name_not_the_spec_category():
-    """「sku名称」列**只展示拆分后的 SKU 名称**（用户口径 2026-10-11 最终版）。
+def test_all_columns_have_the_settings_gear():
+    """**所有列的表头都有设置图标**（用户口径 2026-10-14）。
 
-    > 用户原话：「商品 sku 表格的 sku 名称列，应不再展示规格类型，取分割后只展示 sku 名称」
+    用户原话：
+    > 「**所有列均表头有设置图标**，**不再只局限于文本列**」
 
-    原值 `颜色分类:【中古风】实木三斗柜` ⇒ 这一列只展示 `【中古风】实木三斗柜`；
-    规格分类已由**第 4 列**单独展示，同一份信息不该在一行里出现两次。
+    ⚠️ 与 `canApplyPattern` 的区别（2026-10-14 起**两者不再是同一个判据**）：
+      · 表头**要不要出齿轮** ⇒ `hasColumnGear`（**所有列都要**，因为数据包规则里
+        还有 fixed_text / math_scale 这类本来就是给数值列的操作）；
+      · **正则区块内部**只给文本列 ⇒ `canApplyPattern`（数值列做正则没意义）。
 
-    ⚠️ 两个容易做错、必须同时钉住的点：
-      ① **展示用拆分值**（`parseSkuName(...).value`），不是原值；
-      ② **写回时把分类拼回去** —— 否则用户一编辑就把规格分类**静默丢掉**
-         （数据损坏，且界面上看不出来，因为那一列本来就不显示分类）。
+    ⚠️ 本条**取代**两条旧守卫（它们的对象已随口径退场）：
+      · `test_spec_category_header_gear_actually_opens_the_popover`
+        —— 「规格分类」列已整条移除（用户口径「将固定的规格分类移除，相关逻辑也移除」）；
+      · `test_column_gears_are_icon_only_and_uniform`
+        —— 其判据（表头实例传 `withTrigger={false}` ⇒ 只画小齿轮）仍重要，并入下方。
     """
-    code = _code_only(_read(PRECHECK_MODAL))
-    i = code.index("colIndex === nameCol")
-    #: 切到 `) : (` 为止 —— 只取**名称列这一个分支**（再往后就进 else 的通用列了）。
-    j = code.index(") : (", i)
-    seg = code[i:j]
-    assert "parseSkuName" in seg, "名称列应按 parseSkuName 拆分后展示"
-    assert _re.search(r"parseSkuName\(.*?\)\.value", seg), (
-        "展示的应是拆分出的 SKU 名称部分（`parseSkuName(...).value`）"
+    code = _code_only(_src(PUBLISH_MODAL))
+
+    #: ① 表头判据是「所有列」而不是「文本列」。
+    assert "hasColumnGear((table.column_kinds ?? [])[colIndex])" in code, \
+        "表头没按「所有列都给齿轮」处理"
+    assert "canApplyPattern((table.column_kinds ?? [])[colIndex])" not in code, \
+        "表头仍在用 canApplyPattern（数值列会没有齿轮）"
+
+    #: ② 表头实例**只画图标**（用户口径：图标很大且带文字 ⇒ 统一只要图标）。
+    i = code.index("initialColumn={colIndex}")
+    seg = code[i : i + 300]
+    assert "withTrigger={false}" in seg, "表头实例没传 withTrigger={false}（会画出大按钮）"
+    assert "withTrigger={true}" not in seg, "表头实例被显式传了 withTrigger={true}"
+
+
+def test_restore_requires_second_confirmation():
+    """**还原原始值需二次确认**（用户口径 2026-10-14），且**只还原当前列**（2026-10-15）。
+
+    用户原话：「**还原列值需二次确认**」；
+             「**恢复数据应只恢复当前列而不是全表**」。
+
+    ⚠️ 还原撤掉的原值**不可逆**（快照只留一份）⇒ 必须挡一道。
+    ⚠️ 作用域是**当前列**（快照按「表 + 列」存）—— 确认框的「确定」必须把
+    **这一列**传回去（`onRestore(column)`）；写成 `onOk: onRestore`（不传列）
+    在 TS 上仍能过（React 会把事件对象当实参递过去），但运行时撤的是别的列。
+    ⚠️ 确认框走 `App.useApp()` 的 `modal`（项目口径：静态 `Modal.confirm`
+    不吃 ConfigProvider 主题）。
+    """
+    code = _code_only(_src(PUBLISH_MODAL))
+    cpc = code[code.index("function ColumnPatternControl"):]
+    cpc = cpc[:cpc.index("function SkuMatchModal")]
+
+    assert "modal" in cpc.split("} = props;")[1][:200], "没从 App.useApp() 取 modal"
+    assert "modal.confirm" in cpc, "还原没有二次确认"
+    i = cpc.index("modal.confirm")
+    block = cpc[i : i + 500]
+    for need in ("title", "content", "onOk", "cancelText", "okText"):
+        assert need in block, f"确认框缺 `{need}`"
+    assert "onRestore" in block, "确认框的 onOk 没接上还原动作"
+    #: ⚠️ 必须**带上这一列**（用户口径 2026-10-15）—— `onOk: onRestore` 这种
+    #: 裸引用会把 React 的事件对象当 `column` 传进去，撤的还是错的列。
+    assert "onRestore(column)" in block, \
+        "确认框没有把当前列传给还原动作（会撤错列）"
+    #: ⚠️ 文案必须说清**只还原当前列**（旧文案「丢弃本表所有列」已随口径作废）。
+    assert "本表所有列" not in block, "确认框文案还写着「本表所有列」（旧口径）"
+    assert "当前列" in block, "确认框文案没说清只还原当前列"
+
+
+def test_wait_mask_shows_elapsed_time_once():
+    """等待弹窗**进度 + 实时耗时**，且**只展示一处**（用户口径 2026-10-14）。
+
+    用户原话：
+    > 「检测违规词提示弹窗，添加**耗时统计**」
+    > 「只要**序号统计实时耗时**，**不需要预估耗时**」
+    > 「**底部的耗时移除，只展示一个即可**」
+
+    判据：
+      ① 进度文案里含**序号** `（done/total）` 与**实时耗时**（取 `waitElapsedSec`）；
+      ② 耗时**只出现一处**（底部那行已被用户点名移除）；
+      ③ **不得**出现预估（「预计 / 剩余 / ETA / 预估」）。
+    """
+    code = _code_only(_src(PUBLISH_MODAL))
+    #: ⚠️ **只取「等待卡片」那一段**，切片方向与锚点都很关键：
+    #: `publish-wait-card` 这个标记在代码里出现 **3 次**（`className` 一处 + 掩层一处
+    #: + 卡片一处），取 `index`（第一个）会落在**掩层之前**，压根看不到文案；
+    #: 而取错方向又会把发布/草稿两张进度卡的「已耗时」一起数进来（实测数出 5 次）。
+    #: ⇒ 用**最后一次**出现为锚点，向后取一段（卡片很短）。
+    seg = code[code.rindex("publish-wait-card"):]
+    seg = seg[:700]
+
+    #: ① 序号 + 实时耗时（**两段分开断言**）。
+    #: ⚠️ 别写成一条含 `${...}` 的长串 —— `_code_only` 处理后的文本里
+    #: 花括号/插值形态极易与源码有细微差别，整串比对会假红（实测踩过）。
+    assert "progress.done" in seg and "progress.total" in seg, "进度文案没有序号统计"
+    #: 耗时必须**与序号同处一条三元表达式**（不是只在整个卡片里出现过）。
+    line = next((ln for ln in seg.splitlines() if "progress.done" in ln), "")
+    assert "waitElapsedSec" in line, \
+        "带序号的那条文案里没有实时耗时（会被「有进度就不显耗时」的变异逃逸）"
+
+    #: ② **只展示一处**：`已耗时` 是**同一条文案的三元分支**（有进度 / 无进度），
+    #: 所以卡片里恰好出现 **2 次**（超了就是在别处又加了一行 —— 用户点名要移除的
+    #: 「底部那行耗时」正是这种重复）。
+    n = seg.count("已耗时")
+    assert n == 2, (
+        f"「已耗时」在等待卡片里出现 {n} 次（口径：进度文案的三元两分支 = 2；"
+        "多出来就是又加了一行，用户要求只展示一个）"
     )
-    #: ② 写回必须拼回分类（`cat` + `:` + 用户输入）。
-    assert "category" in seg and "`${cat}:" in seg, (
-        "编辑名称列时必须把规格分类拼回去，否则一次编辑就丢掉分类"
-    )
-    #: ⚠️ 反面：`value=` 必须包在 `parseSkuName(...)` 里 —— 不许把原值直接交给 value。
-    #: （不用字面串判 `value={record.row[colIndex]...}`：`_code_only` 剥注释后会把
-    #:   相邻字符串粘起来，产生假阳性 ⇒ 改判「value 表达式里有 parseSkuName」。）
-    assert _re.search(r"value=\{parseSkuName\(", seg), (
-        "名称列的 value 必须经 parseSkuName 拆分（否则会带出规格分类前缀）"
-    )
+
+    #: ③ 不许有预估。
+    for word in ("预计", "剩余", "ETA", "预估"):
+        assert word not in seg, f"等待弹窗出现了预估成分「{word}」（用户明确不要）"
+
+
+def test_pattern_entry_moved_to_column_headers():
+    """正则取值入口：**每列表头一枚图标、弹窗贴着图标、每列独立**（用户口径 2026-10-14 再修订）。
+
+    用户原话：
+    > 「将正则取值不要放在顶部，放在**每一列的表头**使用设置图标，
+    >   列默认为**当前列**，依旧支持选择」
+    > 「只展示在**文本列**，数值列表头不展示设置图标」
+    > 「正则取值弹窗的位置应是**点击的对应设置图标**」「**每一列的弹窗均是独立的**，
+    >   每次打开**只展示当前列**的正则，**默认空**」
+    > 「**还原原始值与设置图标放一起**」
+
+    ⚠️ 「仍支持选择」**已被取代** —— 那是顶部单入口时代的诉求；入口下沉到每列表头、
+    每列一个实例后，弹窗里再换列会与「点的是这一枚图标」矛盾 ⇒ `lockColumn`。
+
+    判据：
+      ① 表头图标**按文本列过滤**（数值列不出图标）；
+      ② 每个图标是**独立实例**（传 `initialColumn={colIndex}` + `lockColumn`）；
+      ③ 锁列时**不渲染列选择器**；
+      ④ 打开时**正则置空**（默认空）；
+      ⑤ **还原原始值**与设置图标同处（`UndoOutlined` 在 `ColumnPatternControl` 里）；
+      ⑥ 顶部**不再有**「还原原始值」按钮。
+    """
+    code = _code_only(_src(PUBLISH_MODAL))
+
+    #: ① 文本列才给图标。
+    #: ⚠️ **被 2026-10-14 口径取代**：原判据是「表头图标按是否文本列过滤」；
+    #: 用户当天明确「**所有列均表头有设置图标**，不再只局限于文本列」
+    #: （因为规则里还有 fixed_text / math_scale 这类本来就是给数值列的操作）。
+    #: ⇒ 现在表头用 `hasColumnGear`（所有列都出齿轮），
+    #: 而 `canApplyPattern` **降级为「正则区块内部」的判据**（那边仍只给文本列）。
+    assert "hasColumnGear((table.column_kinds ?? [])[colIndex])" in code, \
+        "数据列表头图标没按「所有列都给」处理"
+    #: ② 每列独立实例。
+    assert "initialColumn={colIndex}" in code, "表头没把所在列传给弹窗"
+    #: ⚠️ **弹窗里的列选择器整块退场**（用户口径 2026-10-14：「反推正则相关的内容
+    #: 全部移除」；规则也不再绑列）—— 现在是「哪个表头点开就是哪一列」，
+    #: 弹窗内**不再有**换列入口（`lockColumn` 那套连同 `pattern` 一起删）。
+    #: ⇒ 反着钉，防回潮。
+    for gone in ("lockColumn", "!lockColumn && (", 'setPattern("")'):
+        assert gone not in code, f"弹窗内换列 / 正则入口已退场，不该再出现 `{gone}`"
+    #: ⑤ 还原与图标同处。
+    cpc = code[code.index("function ColumnPatternControl"):]
+    cpc = cpc[:cpc.index("function SkuMatchModal")]
+    assert "UndoOutlined" in cpc, "「还原原始值」没和设置图标放一起"
+    assert "onRestore" in cpc, "还原按钮没接上 onRestore"
+    #: ⑥ 顶部工具条不再有还原按钮。
+    #: ⚠️ 不能用「全文不含『还原原始值』」—— 二次确认弹窗的 `title` 正是这四个字
+    #: （用户口径 2026-10-14：「还原列值需**二次确认**」）。判据落在
+    #: 「**还原动作必须走确认框**」+「**设置图标旁才有还原按钮**」。
+    assert "modal.confirm" in cpc, "还原没有二次确认（用户口径：还原列值需二次确认）"
+    assert "onRestore" in cpc and "UndoOutlined" in cpc, "还原按钮没和设置图标放一起"
+    #: ⑦ **作用域 = 当前列**（用户口径 2026-10-15：「恢复数据应只恢复**当前列**
+    #: 而不是全表」）—— 快照键是「表 + 列」复合键，撤销必须指名这一列。
+    assert "snapshotKey(" in code, "快照没有按「表 + 列」记（还是一次性整表撤）"
+    assert "restoreColumn" in code, "没有按列还原的实现"
+    #: ⚠️ 反着钉：整表还原那套（`restoreTable`）已退场，防回潮。
+    assert "restoreTable" not in code, "整表还原（restoreTable）已退场，不该再出现"
 
 
 def test_spec_value_container_prevents_horizontal_overflow():
@@ -8656,7 +9077,11 @@ def test_import_can_be_cancelled_midway():
     #: ③ 取消检查在清表之前。
     cancel_at = code.index("if (importCancelRef.current) {")
     #: 清表那句（规格值/specTypes/价格表置空）必须**晚于**取消检查。
-    clear_at = code.index("setSpecValues({})")
+    #: ⚠️ 锚点已重定向（2026-10-15）：清表收敛成**单一入口** `clearImportTargets()`
+    #: （点「选择」重开与导入共用），原先那一串 `setSpecValues({})` 等散写已移进它。
+    #: **守卫的意图没变**：取消检查必须**先于任何写入**（否则用户在开跑瞬间点取消，
+    #: 会得到「历史被清空、新数据没写」的最坏结果）。
+    clear_at = code.index("clearImportTargets({ keepPending: true })")
     assert cancel_at < clear_at, (
         "取消检查必须在清空历史数据**之前**，否则点取消会把历史数据清掉（数据丢失）"
     )
@@ -8668,7 +9093,9 @@ def test_import_can_be_cancelled_midway():
     #: antd 在 `confirmLoading=true` 时会把 OK 变 loading，并**连带禁用同排的
     #: 取消按钮** ⇒ 用户点取消毫无反应（实测：「点击取消未中断也未关闭弹窗」）。
     #: 这是本用例存在的**唯一理由** —— 取消能不能点，取决于这个 prop 用没用错。
-    modal_at = code.index('title="从预检 SKU 导入规格 / 价格 / 库存"')
+    #: ⚠️ 标题已改（用户口径 2026-10-15：「『从预检 SKU 导入规格 / 价格 / 库存』
+    #: 文本调整为『导入sku数据』」）。
+    modal_at = code.index('title="导入sku数据"')
     modal_body = code[modal_at:modal_at + 2000]
     assert "confirmLoading" not in modal_body, (
         "导入弹窗不许用 confirmLoading（会连带禁用取消按钮）—— 用 okButtonProps.loading"
@@ -8884,7 +9311,7 @@ def test_update_dialogs_are_forty_percent_of_the_viewport():
         "两个弹窗都应固定高 40vh（maxHeight 同值，防内容把弹窗撑开）"
     )
     #: 不得残留旧口径（50vw 是上一轮、56vw 是更早一轮）
-    assert 'width="50vw"' not in src, "还留着旧口径 50vw"
+    assert 'width="50vw"' not in src, "还留着旧口径 50vw（已纠正为 60vw）"
     assert 'width="56vw"' not in src, "还留着旧口径 56vw"
     #: 不得退回固定像素（换屏幕比例就不一致了）
     assert not re.search(r'width=\{?["\']?\d{3,}', src), "更新弹窗宽度不该是固定像素"
@@ -8901,3 +9328,1179 @@ def test_both_dialogs_share_one_state_machine():
     assert src.count("checkSystemUpdate(") == 1, "检查更新调用点应唯一（不得各写一份）"
     assert src.count("downloadSystemUpdate(") == 1, "下载调用点应唯一"
     assert src.count("installSystemUpdate(") == 1, "安装调用点应唯一"
+
+
+# --------------------------------------------------------------------------- #
+# 用户口径 2026-10-13：数据包**区域**改为目录名直出 + 发布位映射 + 表格正则
+# --------------------------------------------------------------------------- #
+
+
+def test_media_zones_come_from_real_directory_names():
+    """区域**动态**来自数据包（不再固定四值常量）。
+
+    用户口径：「数据包中读取到什么就**按照读取到的文件夹分区域**，不做任何操作直接展示」。
+
+    ⚠️ 实测代价：包 A（淘宝店透）的 5 个目录有 4 个不在旧白名单里 ⇒ **丢 63 个文件**。
+    """
+    src = _src(PUBLISH_MODAL)
+    #: 旧的固定四值常量必须**已删除** —— 留着就会有人拿它 filter（且恒空）。
+    assert "const ZONES" not in src, "固定四区常量应已删除（pack A 上恒空）"
+    assert "zoneNamesOf(" in src, "媒体区没有按真实目录名动态渲染"
+    assert "mediaOfZone(" in src, "没有按区域名取媒体（单一实现）"
+    #: 后端：group 是目录名原值（不再查白名单表）。
+    pre = _code_only(_read(ROOT / "backend/app/services/shop_package_precheck.py"))
+    assert "_GROUP_BY_DIRNAME" not in pre, "目录名查表白名单应已删除（认不出就丢）"
+    assert "return parts[0].strip() or None" in pre, "group 应返回真实目录名"
+
+
+def test_sku_match_requires_an_explicit_zone_and_column():
+    """**SKU 图自动匹配的两道硬前置**（用户口径 2026-10-13，抓的是真 bug）。
+
+    > 「SKU 图自动匹配 弹窗图片区域未指定，已经匹配到了数据包，不正常，
+    >   必须用户指定 sku 规格图的媒体资源区，后指定使用哪一些与图片名称去匹配」
+
+    根因：`matchZones` 为空时**回落到「全部 SKU 区域」**，用户什么都没选就看到
+    「已经匹配到了数据」—— 他没法判断这些图来自哪。这不是兜底，是替用户做了
+    一个他没做的决定。
+
+    判据（都落在**剥掉注释的代码**上 —— 注释里正解释着被删的旧行为）：
+    ① `matchRows` 在区域为空 / 列未选时**返回空**（不再回落）；
+    ② 弹窗的确认键与执行键在有前置未满足时 `disabled`；
+    ③ 传给弹窗的 `column` 是**原值**（`-1` 表示未选），不再「猜一个名称列」。
+    """
+    src = _src(PUBLISH_MODAL)
+    code = _code_only(src)
+
+    #: ① 两道硬前置：空区域 / 未选列 ⇒ 直接返回空结果。
+    assert "if (matchZones.length === 0) return [];" in code, \
+        "区域为空仍在回落匹配（用户口径：必须先指定区域）"
+    assert "if (matchCol < 0) return [];" in code, \
+        "名称列未选仍在匹配（用户口径：必须先指定使用哪一列去匹配）"
+
+    #: ② 按钮门禁。
+    assert "okButtonProps={{ disabled: !zonePicked || !colPicked }}" in code, \
+        "确认键没有按「区域/列已选」禁用"
+    assert "disabled={!zonePicked || !colPicked}" in code, \
+        "「执行匹配」没有按前置禁用"
+
+    #: ③ 不再替用户猜名称列 —— **判据落在 SkuMatchModal 的调用点上**。
+    #: ⚠️ 第一版写成「全文不得出现 `skuNameColumnIndex(tables[0]...`」⇒ 变异
+    #: 逃逸：另有一处合法用法（line 4511，别处的默认名称列），全文判据看不见
+    #: 「调用点又加回了猜列」。收紧为：调用点里 `column` 必须**直接传 `matchCol`**。
+    at = code.index("<SkuMatchModal")
+    call = code[at:code.index("/>", at)]
+    assert "column={matchCol}" in call, \
+        "SkuMatchModal 的 column 没有直接传 matchCol（仍在回落猜一个名称列）"
+    assert "skuNameColumnIndex" not in call, \
+        "SkuMatchModal 调用点又加回了「猜名称列」"
+
+    #: ④ 取值正则独立于匹配方式，且提取失败回落原值。
+    assert "matchExtract" in code, "没有 SKU 列取值正则的状态"
+    assert "applyExtract(" in code, "没有把取值正则接进匹配链路"
+
+    #: ⑤ 弹窗顶部的大提示条已移除（用户口径：「移除占用空间」）。
+    modal = code[code.index("function SkuMatchModal"):]
+    modal = modal[:modal.index("function BatchColumnControl")]
+    assert "Alert" not in modal, "SKU 匹配弹窗仍在用占位大的 Alert 提示条"
+
+    #: ⑥ 「图片名称」列仍在（它是判据 —— 用户要拿它核对为什么命中/没命中）。
+    assert 'title: "图片名称"' in modal, "没有图片名称列"
+    #: ⑦ ⚠️ **用户口径 2026-10-14 取代原先的列序**：
+    #:    「匹配到的 sku 图展示在**第一列**，方式列移除」
+    #:    ⇒ 「匹配到的图」必须排在**最前**（原先要求它在「图片名称」之后）。
+    assert modal.index('title: "匹配到的图"') < modal.index('title: "图片名称"'), \
+        "「匹配到的图」应排在列表第一列"
+    #: ⑧ 小图展示（外层固定尺寸容器包裹，因为 PrecheckThumb 是 100% 填充没有 size prop）。
+    assert "width: 36, height: 36" in modal, "匹配到的图没有用小图展示"
+
+
+def test_sku_match_modal_layout_and_modes():
+    """**SKU 匹配弹窗**的布局与门禁（用户口径 2026-10-13 → 2026-10-14 演化）。
+
+    判据逐条对应原话：
+      * 「弹窗全屏的宽高 50%」→ 纠正为 60%  ⇒ `width="60vw"` + `height: "60vh"`
+      * 「图片区域（必选）与 SKU 名称列一行（必选）」⇒ 第 1 行两栏**各占 50%**
+      * 「预检通过的所有图片区域均支持被选中」⇒ 区域候选取**全部预检媒体**
+
+    ⚠️ **两条已被取代**（用户口径 2026-10-14，本轮）：
+      * 「匹配规则精确/模糊」→ **取消匹配方式**（匹配 = 图片名包含 SKU 名）；
+      * 「图片名称取值正则」→ **图片名侧不再需要正则**（改判包含）
+        ⇒ 第 2 行由「两条正则并排」降为**单条 SKU 列正则**，`matchModeLabel` 退场。
+    """
+    src = _src(PUBLISH_MODAL)
+    code = _code_only(src)
+    modal = code[code.index("function SkuMatchModal"):]
+    modal = modal[:modal.index("function BatchColumnControl")]
+
+    #: ① 60% 固定宽**高**（用户口径：「弹窗全屏的宽高 50%」→ 纠正为 60%）。
+    assert 'width="60vw"' in modal, "弹窗宽度不是 60vw"
+    assert 'height: "60vh"' in modal, "弹窗高度不是 60% 视口"
+
+    #: ② 第 1 行两栏（图片区域 + SKU 名称列），**各占 50%**。
+    #: ⚠️ 用户口径 2026-10-14：「图片区域和 sku 列名称也同上布局（各占 50%）」——
+    #: 右栏由固定 `width: 200` 改为 `flex: 1` ⇒ 不再有 `flexShrink: 0`。
+    assert modal.count('display: "flex"') >= 1, "没有 flex 分栏布局"
+    assert modal.count("flex: 1, minWidth: 0") >= 2, \
+        "两栏没有各占 50%（应都是 flex:1 + minWidth:0）"
+
+    #: ③ **取消匹配方式**（用户口径 2026-10-14：「取消页面弹窗中的匹配方式」）。
+    assert 'value="exact"' not in modal, "匹配方式（精确）应已取消"
+    assert 'value="fuzzy"' not in modal, "匹配方式（模糊）应已取消"
+    assert 'value="regex"' not in modal, "匹配方式（正则）应已取消"
+
+    #: ⚠️ 原「必选 / 非必须」标注是给 **SKU 列取值正则**输入框的。
+    #: 正则入口整块退场（用户口径 2026-10-14：「反推正则相关的内容全部移除」）
+    #: ⇒ 标注随之消失，反着钉。
+    assert "SKU 列取值正则" not in modal, "取值正则输入框已退场，不该再出现"
+
+    #: ⑤ **图片名称侧不再需要正则**（用户口径 2026-10-14：
+    #:    「图片名称不是固定样式的，但一定包含 sku 名」⇒ 改判包含）。
+    assert "图片名称取值正则" not in modal, "仍在让用户给图片名称写正则"
+    assert "图片名称正则" not in modal, "仍在让用户给图片名称写正则"
+
+    #: ⑥ 区域候选 = 全部预检媒体（不是 `kind === "sku"` 的 skuMedia）。
+    assert "zonesSource" in code, "区域候选仍只取 skuMedia（应取全部预检媒体）"
+    assert "allMedia: PrecheckMediaItem[]" in code, "TablesPanel 没有接全量媒体"
+    assert "allMedia={precheck.media ?? []}" in code, "调用点没把全量媒体传下去"
+
+
+def test_sku_match_gates_and_chinese_labels():
+    """SKU 匹配的**两道门禁**（用户口径 2026-10-13）。
+
+    > 「商品发布 sku图自动匹配点击前校验是否违规词已经检测通过，不通过则提示
+    >   请先进行违规词检测；点击下一步配置商品参数按钮校验 SKU 图需自动匹配触发
+    >   成功后才可以点击下一步，否则提示请先匹配sku图；匹配方式应展示中文」
+
+    判据：
+      ① 「SKU 图自动匹配」按钮点击时校验 `precheckPassed`，不通过 `message.warning`；
+      ② 「下一步」`goStep2` 校验 `skuMatchRan`，不通过提示「请先匹配 SKU 图」；
+      ③ `skuMatchRan` 由「执行匹配」置真（**不是** `matchRows.length > 0`）。
+
+    ⚠️ 原 ④「方式列走中文映射」**已被取代**（用户口径 2026-10-14：
+    「匹配到的 sku 图展示在第一列，**方式列移除**」）⇒ `matchModeLabel`
+    与「方式」列同批退场，判据相应删除（不留「函数还在但没人用」的假覆盖）。
+    """
+    src = _src(PUBLISH_MODAL)
+    code = _code_only(src)
+
+    #: ① 匹配按钮的违规词门禁。
+    assert '"请先进行违规词检测"' in code, "匹配按钮没有违规词门禁提示"
+    at = code.index("SKU 图自动匹配\n")
+    seg = code[max(0, at - 700):at]
+    assert "precheckPassed" in seg, "匹配按钮的门禁没用 precheckPassed"
+
+    #: ② 下一步的匹配门禁。
+    assert '"请先匹配 SKU 图"' in code, "「下一步」没有 SKU 匹配门禁提示"
+    go = code[code.index("const goStep2 = useCallback("):]
+    go = go[:go.index("}, [")]
+    assert "skuMatchRan" in go, "goStep2 没有校验 skuMatchRan"
+
+    #: ③ 置真点是「执行匹配」，且**不是**用 matchRows 长度当判据。
+    assert "onRun={onSkuMatchRun}" in code, "执行匹配没接上置真回调"
+    assert "setSkuMatchRan(true)" in code, "没有置真 skuMatchRan 的地方"
+    assert "skuMatchRan" in code and "matchRows.length > 0 ?" not in go, \
+        "门禁错用了 matchRows 长度（无法区分「没匹配」与「没配上」）"
+
+    #: ④（取代原「方式列中文」）用户口径 2026-10-14：
+    #:    「匹配到的 sku 图展示在**第一列**，**方式列移除**」。
+    assert "matchModeLabel" not in code, "「方式」列应已移除，不该再有 matchModeLabel"
+    assert 'title: "方式"' not in code, "「方式」列仍在"
+    #: 图片列必须排在规格列**之前**。
+    assert code.index('title: "匹配到的图"') < code.index('title: "规格（SKU 名称）"'), \
+        "「匹配到的图」没有排在列表第一列"
+
+
+def test_sku_match_apply_writes_into_the_table_that_renders_it():
+    """**「应用匹配结果」必须同时更新商品 SKU 表格**（真 bug，2026-10-14）。
+
+    用户原话：
+    > 「点击应用匹配结果后，商品sku表格依旧显示未匹配到本地数据，
+    >   第一列已经展示了匹配到的sku列图」
+
+    根因：两张表各读各的 —— 弹窗的表格读 `appliedSkuImages`，
+    而**商品 SKU 表格**的「本地图」判据走 `lookupLocalSkuImage(...)` /
+    `manualPicks`，完全不看 `appliedSkuImages` ⇒ 匹配成功也看不见。
+
+    判据：`applySkuMatch` 里既要写 `appliedSkuImages`，
+    也要写 `manualPicks`（后者才是 SKU 表格的权威覆盖）。
+    """
+    code = _code_only(_src(PUBLISH_MODAL))
+    body = code[code.index("const applySkuMatch ="):]
+    body = body[:body.index("\n  };")]
+    assert "setAppliedSkuImages(" in body, "没写弹窗自己的第一列预览"
+    assert "setManualPicks(" in body, \
+        "没写商品 SKU 表格读的 manualPicks ⇒ 点了「应用」表格仍显示未匹配（真 bug 回归）"
+
+
+def test_sku_match_labels_are_block_wrapped_before_controls():
+    """**「下拉图标掉到第二行」的真根因**：标签与控件没分成两块（用户口径 2026-10-13）。
+
+    > 「SKU 名称列的下拉框的下拉图标还是在第二行，正常默认应在第一行末位的，
+    >   分析原因是否存在 css，移除对应样式」
+
+    定位结论：**不是 Select 的 CSS**（`global.css` 里没有任何 `.ant-select` 规则，
+    本用例同时钉这一点），而是标签写成**行内** `<Text>` 后紧跟块级 `Select` ⇒
+    混排把 `Select` 的可用宽度算错，窄容器（50vw 下右栏固定 200）里下拉箭头被挤到第二行。
+
+    ⇒ 修法：**每个控件的标签单独包一层 `<div>`**，控件另起一行，宽度来源单一。
+    """
+    src = _src(PUBLISH_MODAL)
+    code = _code_only(src)
+    modal = code[code.index("function SkuMatchModal"):]
+    modal = modal[:modal.index("function BatchColumnControl")]
+
+    #: ① 每个标签都有独立的一层 `<div>` 包裹（`lineHeight: "20px"` 是本轮统一写法）。
+    
+    #: ② 每个控件的标签都在**自己的 div** 里（= 不与控件混排）。
+    #:
+    #: ⚠️ **不要用「窗口内找 `</div>` / 找控件」这类结构匹配** —— 实测三次假红：
+    #:   JSX 注释里也有 `</div>`、窗口会跨列捞到隔壁的 `<Select>`、
+    #:   `_code_only` 删注释后偏移错位。这种判据看着严格，实际是**脆的**。
+    #: ⇒ 改判**不变量**：标签文字与控件之间必须隔着一次标签块闭合
+    #:   （`标签 … </div> … 控件`，而不是 `标签 … 控件`）。
+    #:   用**去掉 JSX 注释**的文本判（注释里的 `</div>` 是噪音）。
+    no_comment = re.sub(r"\{/\*.*?\*/\}", "", modal, flags=re.S)
+    for label in ("图片区域", "SKU 名称列"):
+        at = no_comment.index(f"<Text strong>{label}</Text>")
+        seg = no_comment[at:]
+        close = seg.find("</div>")
+        assert close > 0, f"「{label}」标签块没有闭合"
+        head = seg[:close]
+        assert "<Select" not in head and "<Input" not in head, (
+            f"「{label}」的标签与控件混排（控件出现在标签块闭合之前）"
+        )
+
+    #: ③ ⚠️ 全站 `global.css` **不得**出现 `.ant-select` 覆盖规则
+    #:    （用户要求「分析原因是否存在 css，移除对应样式」—— 定位结论是没有）。
+    css = _src(ROOT / "frontend/src/global.css")
+    assert ".ant-select" not in css, \
+        "global.css 里有 .ant-select 覆盖规则（会干扰 Select 宽度/箭头布局）"
+
+
+def test_sku_match_uses_the_complete_sku_text():
+    """匹配判据 = **图片名包含 SKU 名**（用户口径 2026-10-14 定案）。
+
+    用户原话：
+    > 「图片名称**不是固定样式**的，但**一定包含** sku 名」
+
+    ⚠️ 这条**取代**了此前三版口径（都已被推翻，逐版留证）：
+      * v1「整串双向包含」⇒ 短串串长串，52/52 全中；
+      * v2「取末段」⇒ 末段 `上门安装` 图上根本没有，全落空；
+      * v3「拆段逐段比」⇒ 分类段 `木` 命中所有含「木」的图；
+      * v4「两侧各跑正则 + 精确相等」⇒ 图片名样式不固定，正则必须靠反推，
+        而反推会把该条样例特有的字面量写死（`SKU01`）⇒ 用户报的
+        「反推后只匹配成功了第一条」。
+    """
+    lib = _src(ROOT / "frontend/src/lib/precheck-zones.ts")
+    code = _code_only(lib)
+
+    #: ① 旧口径的痕迹必须清干净（拆段 / 末段 / 长度阈值 / 模糊两档）。
+    assert "skuNameSegments" not in code, "仍在拆段（已被包含判据取代）"
+    assert "lastSkuSegment" not in code, "仍在取末段（已被包含判据取代）"
+    assert "MIN_FUZZY_SEGMENT_LEN" not in code, "短段阈值仍在（拆段口径的残留）"
+    assert "skuNameText" not in code, "skuNameText 仍在（两侧正则口径的残留）"
+    assert "looseMatchKey" not in code, "looseMatchKey 仍在（精确/模糊两档的残留）"
+    assert "matchModeLabel" not in code, "matchModeLabel 仍在（方式列已移除）"
+
+    #: ② 判据落点：左 = SKU 列值经**用户正则**取值；右 = 图片名去目录去扩展名。
+    fn = code[code.index("export function matchesSkuName"):]
+    fn = fn[:fn.index("export function matchSkuRows")]
+    assert "applyExtract(" in fn, "左侧没走 SKU 列取值正则"
+    assert "imageBaseName(" in fn, "右侧没走「去目录去扩展名」的文件名载体"
+    #: ③ **包含**判据（不是相等）—— 这是「样式不固定但一定包含」的落点。
+    assert ".includes(" in fn, "没有用包含判据（图片名样式不固定，相等会全废）"
+
+    #: ④ 消歧两道必须都在（包含判据的副作用：短值 ⊂ 长值）。
+    rows_fn = code[code.index("export function matchSkuRows"):]
+    assert "b.len - a.len" in rows_fn, "没有「最长优先」排序"
+    assert "usedCand" in rows_fn, "没有「一图一用」"
+
+
+def test_sku_match_has_no_mode_type():
+    """`SkuMatchMode`（精确/模糊两档）**整类退场**（用户口径 2026-10-14）。
+
+    > 「取消页面弹窗中的匹配方式」
+
+    ⚠️ **取代**原 `test_sku_match_mode_type_has_no_regex`（那条只要求
+    类型里不含 `"regex"`，仍保留 exact/fuzzy 两档）—— 两档本身已被取消。
+    """
+    lib = _src(ROOT / "frontend/src/lib/precheck-zones.ts")
+    assert "SkuMatchMode" not in lib, "SkuMatchMode 类型应已整类退场"
+    #: 图名侧的抽键函数 `imageMatchKey` 也已退场（改判包含 + 去扩展名）。
+    assert "export function imageMatchKey" not in lib, \
+        "imageMatchKey 应已退场（图片名侧不再需要正则）"
+
+
+def test_zone_mapping_gate_before_step_two():
+    """**进入第二步的第二个关卡**：区域映射弹窗（用户口径 2026-10-13）。
+
+    > 「点击进入第二步时弹窗提示指定主图区域、详情图区域、商品视频……
+    >   选择后才可以进入第二步」「均支持合并多个第一步中的图片区域」
+    """
+    src = _src(PUBLISH_MODAL)
+    assert "ZoneMapModal" in src, "没有区域映射弹窗"
+    assert "setZoneMapOpen(true)" in src, "点「下一步」没有弹区域映射"
+    #: 确认后才真正进第二步（选择后才可进）。
+    assert "confirmZoneMap" in src, "没有映射确认入口"
+    assert "setStep(1)" in src, "确认后没有进第二步"
+    #: 多选 + 不展示图（用户口径：「不展示图，使用多选下拉展示媒体区域名称即可」）。
+    assert 'mode="multiple"' in src, "区域映射不是多选（不能合并多个区域）"
+    #: 必填位空 ⇒ 进不去。
+    assert "isZoneMapReady" in src, "没有「必填位非空才可进」的判据"
+    assert "unusedZones" in src, "没有列出未使用的区域（漏配要能看出来）"
+    #: ⚠️ 用户口径 2026-10-13（**后续追加**）：「区域映射弹窗我做了默认值 **不做默认值**」
+    #: ⇒ 弹窗必须从**空映射**开始（`emptyZoneMap()`），**不得**按 `kind` 预填。
+    #: 预填会让用户直接点确认 = 系统替他决定发布位（`kind` 只是参考分类，
+    #: 包 A 的 `1比1主图` 与 `页面展示主图` 都会被猜成主图）。
+    code2 = _code_only(src)
+    assert "emptyZoneMap()" in code2, "区域映射没有从空映射开始"
+    assert "defaultZoneMap(" not in code2, "区域映射仍在按 kind 预填默认值（已被用户否掉）"
+    #: 加载数据包时必须是**重置为空**，不是「只在首次为空」。
+    at = code2.index("setZoneMap(emptyZoneMap())")
+    assert at > 0, "加载数据包没有把映射重置为空"
+    #: ⚠️ 发布位**不再**由目录名猜测（4 处硬编码必须清掉）。
+    #: 判据落在**剥掉注释的代码**上 —— 注释里到处都是「旧写法 group==="main"」
+    #: 这类说明（那正是要保留的历史），不剥就会把注释当成实现。
+    code = _code_only(src)
+    assert 'm.group === "main"' not in code, "仍有 group===main 硬编码（目录名恒不等）"
+    assert 'm.group === "detail"' not in code, "仍有 group===detail 硬编码"
+    assert 'm.group === "video"' not in code, "仍有 group===video 硬编码"
+    assert 'm.group === "sku"' not in code, "仍有 group===sku 硬编码"
+
+
+def test_sku_import_uses_matched_images_not_the_whole_zone():
+    """第二步「导入 SKU 图」的数据源 = **第一步匹配成功的图**（用户口径 2026-10-13）。
+
+    > 「第二步中的导入 sku 图上传的是第一步 sku 表中**已经匹配成功的**图」
+    """
+    src = _src(PUBLISH_MODAL)
+    #: 匹配结果必须**上抛到向导**（面板 state 会随页签卸载而丢）。
+    assert "onSkuMatchChange" in src, "匹配结果没有上抛"
+    assert "matchedSkuImages" in src, "向导没有持有匹配结果"
+    #: SKU 图候选**取匹配结果**，不是「SKU 区域里的全部图」。
+    assert "matchedSkuImages.map(" in src, "skuImagePaths 没有取自匹配结果"
+
+
+def test_column_pattern_overwrites_in_place_and_can_be_undone():
+    """表格正则**覆盖原列**（不做派生列）+ 可撤销（用户口径 2026-10-13）。
+
+    > 「表格列通过正则对原数据中的列取值操作后**覆盖原始列**」
+    > 「默认**覆盖全部**，如果存勾选行则**只覆盖勾选行**」
+
+    ⚠️ 撤销的**作用域 = 当前列**（用户口径 2026-10-15：「恢复数据应只恢复当前列
+    而不是全表」）—— 快照按「表 + 列」复合键存；这条只管「有没有撤销入口」，
+    按列语义由 `test_restore_requires_second_confirmation` 与
+    `frontend/src/lib/table-pattern.test.ts` 钉。
+    """
+    src = _src(PUBLISH_MODAL)
+    assert "ColumnPatternControl" in src, "没有表格正则入口"
+    assert "applyPatternToColumn" in src, "没有覆盖原列的实现"
+    #: **撤销**：破坏性动作必须能还原（原值没了就真没了）。
+    assert "snapshotTable" in src, "覆盖前没有存快照（不可撤销）"
+    #: ⚠️ 入参从「表」变成「表 + 列」（用户口径 2026-10-15）—— 只传表下标时
+    #: 同一张表只能有一份快照，「撤 B 列连带撤掉 A 列」。
+    assert "snapshotTable(tables[tIndex], tIndex, column)" in src, \
+        "存快照没带上列下标（还原作用域退化成整表）"
+    assert "restoreRows" in src, "没有还原入口"
+    assert "还原原始值" in src, "界面上没有还原按钮"
+    #: ⚠️ **反推正则整条链路已退场**（用户口径 2026-10-14：「**反推正则相关的内容
+    #: 全部移除**」）—— 取值改由「数据包规则」承担（规则是**配置好的**、
+    #: 按包归属、可复用；反推是临场猜，跨包 0% 命中，见设计 40 §1）。
+    #: ⇒ 这里反着钉：**界面与实现里都不许再有反推入口**（防回潮）。
+    code = _code_only(src)
+    for gone in (
+        "DerivePatternModal",
+        "setDeriveOpen",
+        "deriveExtractPattern",
+    ):
+        assert gone not in code, f"反推正则链路已退场，不应再出现 `{gone}`"
+
+
+def test_precheck_button_only_checks_forbidden_words():
+    """用户口径 2026-10-13：「预检按钮**只预检图片是否存在违规词**，按钮的文案使用重新明确」，
+    且「将预检中的 sku 图与 sku 匹配**拆分出来**」。
+    """
+    src = _src(PUBLISH_MODAL)
+    #: 文案说清检的是什么（不再是一个泛泛的「预检」）。
+    assert "检测违规词" in src, "预检按钮文案没有明确"
+    #: SKU 图匹配是**独立入口**（在 sku 表 tab 下）。
+    assert "SKU 图自动匹配" in src, "SKU 图匹配没有独立按钮"
+    assert "SkuMatchModal" in src, "没有 SKU 图匹配弹窗"
+    #: 匹配方式（用户口径 2026-10-13 **修订**：「匹配规则调整为**精确和模糊**，
+    #: 图片名称不支持再使用正则处理后再匹配，只能使用原始图片名称」）。
+    #: ⚠️ 原判据断言三值含「正则表达式」—— **已被本轮口径取代**，
+    #: 原句保留在此以免下一个人以为它从没存在过。
+    #: ⚠️ 判据落在**剥掉注释**的代码上 —— 文件头 docstring 里刻意引用了
+    #: 用户**旧**口径原话（「…或使用正则表达式」），不剥注释就会把那段引文
+    #: 当成实现（实测踩过两次）。
+    #: ⚠️ 判据只落在 **SkuMatchModal 内部** —— 页面别处（列批量「正则取值」）
+    #: **合法地**含「正则」二字，全文判据会把那个功能误伤（实测踩到）。
+    code = _code_only(src)
+    modal = code[code.index("function SkuMatchModal"):]
+    modal = modal[:modal.index("function BatchColumnControl")]
+    #: ⚠️ **匹配方式整组已取消**（用户口径 2026-10-14：「取消页面弹窗中的匹配方式」）
+    #: ⇒ 原先「精确/模糊两个 Radio.Button」的判据**被取代**，改为反向钉死。
+    #: 同一轮图片名侧也不再需要正则（改判「包含 SKU 名」）。
+    assert "<Radio.Group" not in modal, "匹配方式（Radio.Group）应已整组取消"
+    assert 'value="exact"' not in modal and 'value="fuzzy"' not in modal, \
+        "匹配方式（精确/模糊）应已取消"
+    #: 匹配结果的**命中率**要显示（漏配要能看出来）。
+    assert "命中 " in src, "没有显示命中行数"
+
+
+def test_sku_table_identified_by_columns_not_sheet_name():
+    """SKU 表按**列名特征**判（用户口径 2026-10-13），不靠 sheet 名。
+
+    实测：包 B 的 sheet 叫 `全部`、包 A 的被导出工具截断 ⇒ 两个 sheet 名都不可用。
+    """
+    pre = _code_only(_read(ROOT / "backend/app/services/shop_package_precheck.py"))
+    assert "looks_like_sku_table" in pre, "没有按列名特征识别 SKU 表"
+    assert "column_kind" in pre, "没有列类型判定"
+    assert "_SKU_COLUMN_HINTS" in pre, "没有列名特征表"
+    #: 列类型必须随表下发（前端据此决定给不给正则入口）。
+    assert "column_kinds" in pre and "is_sku_table" in pre, "表格契约缺列类型 / SKU 表标记"
+
+
+def test_non_compliant_media_is_listed_with_a_red_flag():
+    """方案 C（用户口径 2026-10-13）：「展示与上传都按平台，但把不合规的**列出来而不是丢掉**，红框提示」。"""
+    pre = _code_only(_read(ROOT / "backend/app/services/shop_package_precheck.py"))
+    #: 不合规的**照旧进清单**（不是 continue 掉）+ 带人话原因。
+    assert "unsupported_reason" in pre, "没有带上不可上传的原因"
+    src = _src(PUBLISH_MODAL)
+    assert "unsupportedText" in src, "前端没有展示不可上传原因"
+    assert "不可发布" in src, "不合规的图没有红框/角标提示"
+
+# =========================================================================== #
+# 2026-10-15 四张卡（还原按列 / 预检导入 / 货号 / 固定文本+运算）的守卫
+# =========================================================================== #
+
+
+def test_restore_only_touches_the_current_column():
+    """「还原原始值」**只还原当前列**，不是整表（用户口径 2026-10-15）。
+
+    用户原话：
+    > 「恢复数据应只恢复当前列而不是全表」
+
+    判据（这条是 ① 的承重面）：
+      · 快照是**按列**存的（`TableSnapshot.columns[列] = 该列原值`）；
+      · 还原**只覆盖快照里那几列**，其余列原样；
+      · 向导层是 `restoreColumn(tIndex, column)`（不是整表的 `restoreTable`）。
+    """
+    lib = _code_only(_src(ROOT / "frontend/src/lib/table-pattern.ts"))
+    #: ① 快照按列。
+    assert "columns: Record<number, (string | null)[]>" in lib, \
+        "快照不是按列存的（整表快照 ⇒ 还原会波及全表）"
+    #: ② 还原只覆盖快照里的列（遍历 snapshot.columns，不是整行替换）。
+    assert "snapshot.columns" in lib, "还原没有按列遍历快照"
+    assert "colValues" in lib, "还原没有逐列取原值"
+    #: ③ 不能再有「整表 rows 直接覆盖」的写法（那是本轮要消掉的行为）。
+    assert "rows: snapshot.rows.map" not in lib, \
+        "还原仍是整表覆盖（`snapshot.rows` 直接铺回）—— 本轮要改成按列"
+    #: ④ 向导层调用的是按列的入口。
+    wiz = _code_only(_src(PUBLISH_MODAL))
+    assert "restoreColumn" in wiz, "向导层没有按列还原的入口"
+    assert "restoreTable" not in wiz, "向导层仍在调整表还原"
+
+
+def test_spec_import_button_is_not_greyed_when_names_have_no_colon():
+    """「预检通过SKU导入」**不该因名称没冒号而恒灰**（用户报的真 bug，2026-10-15）。
+
+    用户原话：
+    > 「预检通过SKU import 按钮提示没有可导入的 SKU…实际第一步的 sku 已经预检
+    >   通过且有勾选部分数据」
+
+    根因（实测 12 个真实数据包全部同形）：`sku名称` 列值是 `A款` 这类**纯值**，
+    `parseSkuName().category` 是空串 ⇒ `specName` 空 ⇒ `sourceSpecNames()` 丢弃
+    ⇒ `specImportSources=[]` ⇒ `disabled={length===0}` 恒真。
+
+    判据：无冒号时**退化为单一维度**（`SINGLE_SPEC_NAME`），**不是空串**。
+    """
+    lib = _src(ROOT / "frontend/src/lib/precheck-publish.ts")
+    #: ① 退化常量存在。
+    assert 'SINGLE_SPEC_NAME = "规格"' in lib, "没有「无分类时的单一维度」常量"
+    #: ② 源头 `passedSkuRows` 就退化了（`|| SINGLE_SPEC_NAME`）。
+    #: ⚠️ **锚点已按新口径重定向**（2026-10-15）：判据从 `parsed.category`（拆冒号）
+    #: 换成**「规格分类」列**（用户口径：「是从 sku名称 拆冒号得 ⇒ 移除逻辑，
+    #: 应读 sku 预检通过的规格分类固定列」）。
+    #: **守卫的意图没变** ——「名称形态认不出分类时不许丢行、要退化成单一维度」
+    #: （丢了 ⇒ 按钮恒灰，就是这条守卫当初抓的那个 bug）。
+    assert "category || SINGLE_SPEC_NAME" in lib, \
+        "`passedSkuRows` 没把「分类取不到」退化成单一维度 ⇒ 按钮恒灰（原真 bug）"
+    #: ③ 取值**读「规格分类」列**（不再从名称拆）。
+    assert "specCategoryColumnIndex(table.columns)" in lib, \
+        "`passedSkuRows` 没读「规格分类」固定列（又退回去猜 sku 名称形态了）"
+    #: ④ 值 = **整个 sku 名称**（分类已独立成列，名称里的前缀不再切掉）。
+    assert "const specValue = rawName;" in lib, \
+        "无分类时 `specValue` 取错（应是整个名称原样，不是空串）"
+    code = _code_only(lib)
+    i = code.index("export function sourceSpecNames")
+    seg = code[i:code.index("export function", i + 10)]
+    #: ④ 兜底：**绝不返回空数组**（有行有名称 ⇒ 至少一个维度）。
+    assert "SINGLE_SPEC_NAME" in seg, "`sourceSpecNames` 没有兜底 ⇒ 跨层调用仍会恒灰"
+
+
+def test_item_no_is_the_first_other_property():
+    """「货号」**固定是「其他属性」第一条**（用户口径 2026-10-15）。
+
+    用户原话：
+    > 「第三步，类目生成后，商品的其他属性中没有展示货号属性，
+    >   它应该是固定的其它属性第一个」
+
+    根因：平台 `desc_properties` **不下发**货号，而旧代码假定它在 `loadedFields` 里
+    做「覆盖填充」⇒ 永远匹配不到 ⇒ 用户从来看不见它。
+    """
+    lib = _src(ROOT / "frontend/src/lib/publish-property-fields.ts")
+    assert 'ITEM_NO_PROPERTY_ID = "articleNo"' in lib, "货号 id 不是千帆 bundle 的 articleNo"
+    assert "export function withItemNoFirst" in lib, "没有「货号置首」的实现"
+    code = _code_only(lib)
+    i = code.index("export function withItemNoFirst")
+    seg = code[i:i + 200]
+    #: **承重面**：必须是 `[货号, ...其余]` 的顺序（插到首位，不是追加）。
+    assert "[buildItemNoProperty(), ...withoutItemNo(fields)]" in seg.replace(" ", "").replace(
+        "[buildItemNoProperty(),...withoutItemNo(fields)]",
+        "[buildItemNoProperty(), ...withoutItemNo(fields)]",
+    ).replace(",", ", ").replace("  ", " "), \
+        "货号没被插到首位（或没去重）"
+    #: 去重判据必须「id 或名」（只判 id / 只判名都会插出两条）。
+    assert "f.id !== ITEM_NO_PROPERTY_ID" in lib and "f.name.trim() !== ITEM_NO_PROPERTY_NAME" in lib, \
+        "去重判据不完整（须 id 或名，否则平台下发货号时会出两条）"
+    #: 向导两条加载路径都要用同一份实现（DEF-044）。
+    wiz = _code_only(_src(PUBLISH_MODAL))
+    assert wiz.count("withItemNoFirst(") >= 2, \
+        "向导里没有两条加载路径共用 `withItemNoFirst`（只改一处 ⇒ 另一条路径货号又消失）"
+
+
+def test_math_rule_has_a_source_column_picker_limited_to_numeric():
+    """运算类规则要选「计算基础列」：默认当前列、只列数值列（用户口径 2026-10-15）。
+
+    用户原话：
+    > 「涉及到计算时是需要一个前提条件为基于指定列，如果选择的规则是运算类的规则
+    >   则需要指定计算的基础列，该列在表头列的设置图标 tip 弹窗中指定，默认为
+    >   当前列，可选择指定为其它列，下拉只展示数值列，计算时为空的行默认为 0」
+    """
+    wiz = _code_only(_src(PUBLISH_MODAL))
+    #: ① 只在**需要来源列的 op**出现（运算 = 计算基础列；复制 = 来源列）。
+    assert '"math_scale"' in wiz and '"copy_column"' in wiz, "没有「哪些 op 要选来源列」的判据"
+    assert "{needsSourceColumn && (" in wiz, \
+        "来源列下拉没有按 `needsSourceColumn` 包起来（提取类也会看到）"
+    #: ② 默认当前列。
+    assert "sourceColumn ?? column" in wiz, "基础列没有默认到当前列"
+    #: ③ **运算类只列数值列**（判据是后端 `"numeric"`，写 `number` 会恒空且不报错）；
+    #:    复制类列全部列；且**当前列必在选项里**（它是默认值）。
+    assert 'it.kind === "numeric"' in wiz, "数值列筛选用错枚举（后端是 numeric，不是 number）"
+    assert "it.i === column" in wiz, "当前列没被钉进选项（默认值不在选项里 ⇒ 下拉显示裸下标）"
+    assert "isCopyRule ? true :" in wiz, "复制类没有放开成「全部列」"
+    #: ④ 读基础列、写当前列（「A 列 ×1.7 写到 B 列」靠这两处不同）。
+    assert "needsSourceColumn ? (sourceColumn ?? column) : column" in wiz, \
+        "执行时没有「读来源列」的分支 ⇒ 换列无效"
+    assert "source_column: readCol" in wiz, "没有把基础列回传后端"
+
+
+def test_run_picked_rule_deps_cover_everything_it_reads():
+    """⚠️ `runPickedRule` 的 `useCallback` 依赖数组**必须覆盖它读到的每个 state**。
+
+    用户实测的真 bug（2026-10-15）：
+    > 「计算基础列指定的是原价列…最后得到的全是0」
+
+    **根因**：`readCol = needsSourceColumn ? (sourceColumn ?? column) : column`
+    读了两个 state，但依赖数组里**两个都没有** ⇒ 回调永远用**首次渲染时**的闭包值
+    （`sourceColumn = null`）⇒ 用户选了「原价」，实际读的仍是**当前列**。
+    若当前列恰好是空的（如「计算价格」）⇒ 整列按 0 参与运算 ⇒ **结果全是 0**，
+    而界面上的提示行显示的是「按原价列计算」（提示读的是**新** state，与执行读的**旧** state 不一致）。
+
+    ⚠️ 这类 bug 的特征是**静默**：不报错、不崩、提示还显示得对，只有结果错。
+    ⇒ 必须用守卫钉住依赖项，而不是靠人眼复查（本轮就是人眼漏了）。
+    """
+    wiz = _code_only(_src(PUBLISH_MODAL))
+    i = wiz.index("const runPickedRule = useCallback(")
+    j = wiz.index("]);", i)
+    body_and_deps = wiz[i:j]
+
+    #: ① 回调体里**真的读了**这几个 state（否则本守卫是空转）。
+    for read in ("needsSourceColumn", "sourceColumn", "table.rows", "pickedRows", "column"):
+        assert read in body_and_deps, f"`runPickedRule` 没有读 `{read}`（守卫前提变了，需重审）"
+
+    #: ② 依赖数组里**必须都列上**。
+    deps = body_and_deps[body_and_deps.index("}, ["):]
+    for name in ("sourceColumn", "needsSourceColumn", "pickedRows", "table.rows", "column"):
+        assert name in deps, (
+            f"`runPickedRule` 的依赖数组漏了 `{name}` ⇒ 回调会用陈旧闭包值"
+            f"（实测后果：选了来源列也照读当前列 ⇒ 结果全 0）"
+        )
+
+
+def test_sku_image_import_uses_the_match_result_not_the_dead_regex_path():
+    """⚠️ **SKU 图导入的候选必须来自「第 4 步匹配结果」**，不是被推翻的正则解析路线。
+
+    用户实测 bug（2026-10-15）：
+    > 「点击确认导入**没有上传**第一步预检通过的 sku 数据对应的图片」
+
+    根因：`passedSkuRows(...)` 的候选参数传的是
+    `localSkuImageList(媒体, DEFAULT_SKU_IMAGE_PATTERN)`（**按正则从文件名解析**），
+    而那条路线已随「正则方案推翻」整体移除 ⇒ 那份列表**恒为空** ⇒ `row.localRel`
+    恒空 ⇒ `plan.images` 为空 ⇒ **一张规格图都不上传**，而且**不报错**（静默）。
+
+    修法：候选改为 `matchedSkuImages`（第 4 步「SKU 图自动匹配」的产物）。
+    本守卫钉两件事：① 用的是 `matchedSkuImages`；② **不再出现** `DEFAULT_SKU_IMAGE_PATTERN`
+    参与 `passedSkuRows` 的形态（防退回老路）。
+    """
+    src = PUBLISH_MODAL.read_text(encoding="utf-8")
+    i = src.find("const wizardLocalImages = useMemo(")
+    assert i > 0, "找不到 wizardLocalImages"
+    block = src[i : i + 900]
+    assert "matchedSkuImages" in block, "SKU 图候选没接第 4 步匹配结果（会静默不上传图）"
+    assert "localSkuImageList" not in block, "SKU 图候选又走回了被推翻的正则解析路线"
+    #: 再钉一层：`passedSkuRows` 拿到的必须是这份候选（不是别的变量）。
+    j = src.find("passedSkuRows(")
+    assert j > 0
+    assert "wizardLocalImages" in src[j : j + 400], "passedSkuRows 没接上 SKU 图候选"
+
+
+def test_spec_category_column_is_added_to_the_sku_table():
+    """第一步 SKU 表要**新增「规格分类」列**（固定第 2 位/数据列第 0 位，默认空）。
+
+    用户口径 2026-10-15：
+    > 「再第一步商品sku表格的**第二列新增一个规格分类默认为空**」
+    """
+    lib = PRECHECK_MAP.read_text(encoding="utf-8")
+    assert 'export const SPEC_CATEGORY_COL = "规格分类"' in lib
+    assert "export function withSpecCategoryColumn" in lib
+    #: ⚠️ 插列必须**同步插 kind** —— `column_kinds` 与 `columns` 等长是既有契约，
+    #: 不同步插会让下标整体错位（「数值列」判据张冠李戴）。
+    i = lib.find("export function withSpecCategoryColumn")
+    body = lib[i : i + 900]
+    assert "column_kinds" in body, "插列没同步插 column_kinds（数值列判据会错位）"
+    #: 幂等：已有该列就不动。
+    assert "includes(SPEC_CATEGORY_COL)" in body, "插列不是幂等的（重复插会错位）"
+
+    src = PUBLISH_MODAL.read_text(encoding="utf-8")
+    #: ⚠️ 锚点已重定向（2026-10-15）：插列入口从 `withSpecCategoryColumn` 改为
+    #: **`withDerivedColumns`**（一次插「SKU 图 + 规格分类」两列后处理固定列）。
+    assert "withDerivedColumns(" in src, "向导层没真的调用插列"
+
+
+def test_next_step_blocks_on_empty_spec_category_for_picked_rows():
+    """点「下一步」要**校验「规格分类」列非空**（用户口径：只查勾选行）。"""
+    src = PUBLISH_MODAL.read_text(encoding="utf-8")
+    i = src.find("specCategoryColumnIndex(tables[0]")
+    assert i > 0, "下一步没有校验规格分类列"
+    block = src[i : i + 1200]
+    assert "skuTableSelection.picked" in block, "校验没按勾选行收口"
+    assert "skuTableSelection.blocked" in block, "校验没排除预检未通过的行"
+    assert "message.warning" in block, "校验不过要提示（不是静默 return）"
+
+
+def test_mapping_sources_come_from_the_spec_category_column():
+    """映射弹窗左候选 = **第一步「规格分类」列去重后的值**（不是从 sku 名称拆前缀）。"""
+    lib = PRECHECK_MAP.read_text(encoding="utf-8")
+    assert "export function specCategoriesFromColumn" in lib
+    i = lib.find("export function specCategoriesFromColumn")
+    body = lib[i : i + 1400]
+    assert "seen" in body, "候选没去重（用户口径：去重后下拉展示）"
+
+    src = PUBLISH_MODAL.read_text(encoding="utf-8")
+    assert "specCategoriesFromColumn(" in src, "向导层没接新候选"
+    #: ⚠️ 必须**剥掉注释再判** —— 旧函数名会被「旧实现是它、已取代」这类说明
+    #: **刻意留在注释里**（那是有用的考古信息，不该为了测试删掉）。
+    #: 扫带注释的全文 ⇒ 守卫打红的是自己的注释，与真实调用无关（哑弹的反面：
+    #: 它红得对不上被测行为，改代码的人会以为守卫坏了）。
+    code = _strip_comments(src)
+    assert "sourceSpecNames(filledSkuRows)" not in code, "还在用旧的「按冒号拆前缀」路线"
+
+
+def test_copy_extract_op_is_wired_end_to_end():
+    """`copy_extract`（复制 + 提取，两步）三处必须同集合。
+
+    ⚠️ 后端支持、前端下拉没有 = 用户**根本选不到**（上一轮 `math_scale` 就是这么漏的）；
+    前端有、后端不认 = 保存即 400。两处都要钉。
+    """
+    modal = (PUBLISH_MODAL.parent / "data-package-rules-modal.tsx").read_text(encoding="utf-8")
+    assert '"copy_extract"' in modal, "规则弹窗下拉没有 copy_extract"
+    assert "cx_step" in modal, "没有第二步（怎么提取）的表单"
+    api = (ROOT / "frontend/src/lib/api.ts").read_text(encoding="utf-8")
+    assert '"copy_extract"' in api, "api.ts 的 op 类型没有 copy_extract"
+
+    import pathlib
+
+    svc = pathlib.Path(
+        "D:/work/XHS/backend/app/services/data_package_rule_service.py"
+    ).read_text(encoding="utf-8")
+    assert "OP_COPY_EXTRACT" in svc
+    assert "def apply_copy_extract" in svc
+    #: ⚠️ 提取步骤必须**复用**既有三个实现（DEF-044：不留两份算法）。
+    i = svc.find("def apply_copy_extract")
+    body = svc[i : i + 2000]
+    for fn in ("apply_extract_segment", "apply_extract_between", "apply_extract_strip"):
+        assert fn in body, f"复制+提取没复用 {fn}（另写了一份算法）"
+
+
+def test_source_column_ops_match_backend():
+    """⚠️ 前端「需要来源列」的 op 集合必须与后端 `OPS_NEED_SOURCE_COLUMN` 同集合。
+
+    漏一个的后果：表头弹窗**不出现来源列下拉** ⇒ 规则静默按当前列执行
+    （用户看到的是「规则没生效」，而不是任何报错）。
+    """
+    import pathlib
+
+    model = pathlib.Path("D:/work/XHS/backend/app/models/data_package_rule.py").read_text(encoding="utf-8")
+    i = model.find("OPS_NEED_SOURCE_COLUMN")
+    backend_ops = {
+        op
+        for op in ("math_scale", "copy_column", "copy_extract")
+        if op in model[i : i + 400]
+    }
+    wizard = PUBLISH_MODAL.read_text(encoding="utf-8")
+    j = wizard.find("const needsSourceColumn =")
+    front = {op for op in backend_ops if f'"{op}"' in wizard[j : j + 400]}
+    assert front == backend_ops, f"前端 {front} != 后端 {backend_ops}"
+
+
+def test_spec_mapping_is_a_table_with_two_rows_max_and_no_duplicates():
+    """商品 SKU 映射关系 = **映射表**（不是「勾选 + 下拉」）。
+
+    用户口径 2026-10-15：
+    > 「应拿第一步预检通过的**规格分类列去重**与平台类目生成的商品规格下拉选择映射，
+    >   且**不允许重复选择**，**最多两个映射关系**，**布局参考同一个弹窗中的其它部分**」
+    """
+    src = STEP2.read_text(encoding="utf-8")
+    #: ⚠️ 区块边界用**两个 import-section** 卡，不用「价格库存映射关系表」这个**词**
+    #: —— 我新写的注释里恰好提到它，用词定位会把区块截短（守卫红得对不上被测行为）。
+    i = src.find('<div className="import-section-title">商品 SKU 映射关系</div>')
+    assert i > 0, "找不到「商品 SKU 映射关系」区块"
+    j = src.find('<div className="import-section-title">价格库存映射关系表</div>', i)
+    assert j > i, "找不到下一个区块边界"
+    block = src[i:j]
+
+    #: ① 布局 = Table（与同弹窗的价格库存映射表同款）。
+    assert "<Table" in block, "商品 SKU 映射关系不是表格布局（用户口径：参考同弹窗其它部分）"
+    #: ② 两列 + 操作列。
+    assert '"规格分类"' in block, "缺少「规格分类」列"
+    assert '"平台规格类型"' in block, "缺少「平台规格类型」列"
+    #: ③ **最多两个映射关系**（用常量，不硬编码 2）。
+    assert "MAX_SPEC_MAPPING_ROWS" in block, "没有条数上限（用户口径：最多两个）"
+    #: ④ **不允许重复选择**：两个下拉各自 disabled 已选项。
+    assert block.count("disabled: others.includes(") >= 2, "两列都要禁止重复选择"
+    #: ⑤ 新增行两列都空（与价格库存一致，不设默认值）。
+    assert '{ source: "", target: "" }' in block, "新增映射行应两列都空"
+    #: ⑥ ⚠️ **空表也必须能加**（真 bug，用户实测 2026-10-15 截图：「没有点击添加映射
+    #: 关系的按钮」）。根因：`+` 只挂在**行的操作列**上 ⇒ 零行时没有操作列，
+    #: 用户看到「还没有映射，请点操作列的 + 添加」却找不到那个 +，功能等于不存在。
+    assert "添加映射关系" in block, "空表时没有可点的添加入口（+ 只在行的操作列上）"
+    assert "setImportMapping([{ source: \"\", target: \"\" }])" in block, (
+        "空态的添加按钮没有真的加一行"
+    )
+
+
+def test_price_mapping_presets_four_required_rows_with_empty_sources():
+    """价格库存映射：**预置 4 行**（SKU图/售价/市场价/库存），但**来源列全空**。
+
+    用户口径 2026-10-15：
+    > 「右侧的价格库存中，**SKU图、售价、市场价、库存**所有**必须配置**，
+    >   弹窗打开时就**默认展示**，它们对应的**左侧下拉默认为空**展示『请选择』文本」
+
+    ⚠️ 这条**取代**了此前那条 `test_price_mapping_has_no_default_rows`
+    （它断言「初始必须是空数组」，那是「不预填**来源列**」的时期口径）。
+    现在的口径把两件事**分开**：
+      · **行**要预置（让用户知道这四项必须配）—— 本守卫钉这个；
+      · **来源列**一律留空（不替他猜是哪一列）—— `DEFAULT_PRICE_MAPPING` 仍是空。
+    """
+    lib = PRECHECK_MAP.read_text(encoding="utf-8")
+    #: ① 四项必修清单齐全（顺序按用户列举）。
+    i = lib.find("REQUIRED_PRICE_TARGETS")
+    block = lib[i : i + 400]
+    #: ⚠️ **五项**（用户口径 2026-10-15：「把『SKU 名称』也加入预置的必修行（变成 5 行）
+    #: —— 它确实是导入必须的」）。缺 `sku_name` ⇒ 一行都读不出来 ⇒
+    #: 报「没有『预检通过且已勾选』的 SKU 行」（用户实测：映射全配对却报这个）。
+    for t in ("sku_name", "spec_image", "price", "market_price", "stock"):
+        assert f'"{t}"' in block, f"必修清单缺 {t}"
+    #: ② 预置行**只带目标、来源全空**。
+    j = lib.find("export function defaultPriceMappingRows")
+    body = lib[j : j + 300]
+    assert "REQUIRED_PRICE_TARGETS.map" in body, "预置行不是按必修清单生成的"
+    assert 'source: ""' in body, "预置行的来源列应为**空**（用户口径：默认展示「请选择」）"
+    #: ③ 不预填来源的常量仍是空（两件事别混）。
+    assert "DEFAULT_PRICE_MAPPING: readonly PriceMappingRow[] = [];" in lib, (
+        "DEFAULT_PRICE_MAPPING 不该有内容（那是「预填来源列」，用户口径：不猜）"
+    )
+
+    #: ④ 弹窗真的用了预置行，且**每次打开都重置**（否则用户看到上次的半截配置）。
+    src = STEP2.read_text(encoding="utf-8")
+    i2 = src.find("const [priceMapping, setPriceMapping]")
+    assert i2 > 0
+    line = src[i2 : src.find(";", i2) + 1]
+    assert "defaultPriceMappingRows()" in line, f"初始 state 没用预置行：{line[:200]}"
+    assert "resetPriceMappingOnOpen" in src, "打开弹窗时没重置映射"
+
+
+def test_confirm_import_checks_the_spec_image_mapping():
+    """⚠️ 点「确认导入」要**校验 SKU 图的映射**（用户口径 2026-10-15）。
+
+    > 「再点击确认导入映射关系时**校验 SKU图的映射关系**，不再走现在默认的逻辑，
+    >   应走映射逻辑」
+
+    ⚠️ 这条咬的是**规格图不再走「按名称猜」的默认路**：
+      · 校验：四项必修（含 SKU图）没配来源列 ⇒ 按钮不给点 + 说清是哪几项；
+      · 取值：`plan.images` 取 `specImageRel`（映射来的），**不取 `localRel`**（猜的）。
+    """
+    lib = PRECHECK_MAP.read_text(encoding="utf-8")
+
+    #: ① 校验函数存在，且**列出是哪几项**没配（不是一句「有必填项」）。
+    assert "export function missingRequiredPriceTargets" in lib
+    i = lib.find("export function missingRequiredPriceTargets")
+    body = lib[i : i + 700]
+    assert "PRICE_TARGET_LABELS[target]" in body, "没报出**中文名**（用户不知道该配哪项）"
+
+    #: ② 弹窗把校验接进 blockers（按钮 disabled 与提示同源）。
+    src = STEP2.read_text(encoding="utf-8")
+    assert "missingRequiredPriceTargets(priceMapping)" in src, "确认导入没校验必修项"
+    assert "还没有选来源列" in src, "校验失败没给出可操作的提示"
+
+    #: ③ ⚠️ **取值改走映射**：`plan.images` 取 `specImageRel`。
+    j = lib.find("if (row.specImageRel)")
+    assert j > 0, "plan.images 没按映射取（还在用猜出来的 localRel）"
+    seg = lib[j : j + 400]
+    assert "row.specImageRel" in seg
+    #: 反证：那一段里**不得**再出现 `row.localRel`（走了老路）。
+    assert "row.localRel" not in seg, "规格图取值仍走 `localRel`（默认逻辑，用户要求移除）"
+
+
+def test_other_rules_block_is_removed():
+    """「其它规则」整块移除（用户口径 2026-10-15：「其它规则的逻辑移除」）。"""
+    src = STEP2.read_text(encoding="utf-8")
+    code = _strip_comments(src)
+    assert "其它规则" not in code, "「其它规则」区块还在"
+    #: ⚠️ **不是删功能**：倍率仍有默认值，导入时照常算市场价。
+    lib = PRECHECK_MAP.read_text(encoding="utf-8")
+    assert "DEFAULT_PRICE_MULTIPLIER" in lib, "倍率默认值被误删（导入时会算不出市场价）"
+
+
+def test_manual_column_add_and_drop_are_wired():
+    """手动添加列 + 整列删除（用户口径 2026-10-15）。"""
+    src = PUBLISH_MODAL.read_text(encoding="utf-8")
+    lib = PRECHECK_MAP.read_text(encoding="utf-8")
+
+    #: lib 侧：四个纯函数都在。
+    for fn in ("addTableColumn", "dropTableColumn", "canDropColumn", "nextManualColumnKey"):
+        assert f"export function {fn}" in lib, f"缺 {fn}"
+
+    #: ① 表头删除按钮：**只有手动列给**（非手动/固定列不支持删除）。
+    assert "canDropColumn((table.column_keys ?? [])[colIndex])" in src, (
+        "删除按钮没按「是否手动列」判可见性（原始列也会被给到删除按钮）"
+    )
+    #: ② 添加列入口 + 弹窗（中文名 + 英文名，英文名非必填）。
+    assert "添加列" in src, "没有「添加列」入口"
+    assert "nextManualColumnKey(" in src, "英文名没有「留空自动生成」的兜底"
+    assert "请填写表头中文名" in src, "中文名没有必填校验"
+    #: ③ 二次确认要**点名**会连带删掉的配置（用户原话：会同步删除已经映射使用的 XXX）。
+    assert "会同步删除已经映射使用的" in src, "删除列没有连带提示（用户口径的点名要求）"
+
+
+def test_column_drop_warning_is_fed_by_real_mapping_drafts():
+    """⚠️ 删列的连带提示必须由**第二步的真实映射草稿**喂 —— 不能是写死的文案。
+
+    用户口径 2026-10-15：「如果该列**在第二步已经被映射使用**，删除该列后二次确认
+    提示会**同步删除已经映射使用的 XXX 配置参数**」。
+
+    ⚠️ 这条守卫咬的是**接线**：`TablesPanel` 收到的 `specImportSources` / `priceSources`
+    必须来自向导层的 `mappingDraft`（而它由第二步 `onMappingDraftChange` 上报）。
+    只断言「页面上有那句话」是哑弹 —— 文案在、但永远走不到「点名」分支。
+    """
+    src = PUBLISH_MODAL.read_text(encoding="utf-8")
+    step2 = STEP2.read_text(encoding="utf-8")
+
+    #: ① 第二步要上报草稿。
+    assert "onMappingDraftChange" in step2, "第二步没有上报映射草稿"
+    #: ② 上报的依赖数组必须含 `onMappingDraftChange`（漏了 ⇒ 永远报首次渲染那份）。
+    i = step2.find("props.onMappingDraftChange?.({")
+    assert i > 0
+    #: ⚠️ **依赖数组要精确取**：从 `}, [` 起**截到该行行尾** ——
+    #: 用固定窗口长度会随新增字段变长而截断（取 400/900 都不够，
+    #: 守卫会红得「对不上被测行为」）。依赖数组本身一定在一行里。
+    tail = step2[i:]
+    dep_start = tail.find("}, [")
+    assert dep_start > 0, "找不到上报 effect 的依赖数组"
+    dep = tail[dep_start : tail.find("\n", dep_start)]
+    assert "props.onMappingDraftChange]" in dep, f"上报 effect 依赖数组漏了回调：{dep}"
+    #: ③ 回落列也要在依赖里（漏了 ⇒ 提交体拿到空的回落列，取值错）。
+    assert "priceFallbackSource" in dep, f"依赖数组漏了回落列：{dep}"
+    #: ③ 向导层接住并透传给第一步表格。
+    assert "onMappingDraftChange={setMappingDraft}" in src, "向导层没接住草稿"
+    assert "specImportSources={mappingDraft.specSources}" in src, "草稿没接到表格"
+    assert "priceSources={mappingDraft.priceSources}" in src, "价格来源草稿没接到表格"
+
+
+def test_both_mapping_tables_can_add_from_an_empty_state():
+    """⚠️ 两张映射表在**空表**时都必须有可点的添加入口。
+
+    真 bug（用户实测 2026-10-15，截图现象：「没有点击添加映射关系的按钮」）：
+    我把「商品 SKU 映射关系」从「勾选 + 下拉」换成表格时，`+` 挂在**行的操作列**上
+    —— 零行时**没有操作列**，那句「还没有映射，请点操作列的 + 添加」指向一个
+    不存在的东西，用户**被卡死**（功能等于不存在）。
+    价格库存表本来靠默认值遮住了这个洞；本轮去掉默认值后**两张表同时暴露**。
+
+    ⚠️ 判据分两层：① 空态文案里**有按钮**（不是纯文本引导）；② 按钮**真的加一行**。
+    只断言文案（「添加映射关系」这个词在）是哑弹 —— 一个 `disabled` 的按钮也满足它。
+    """
+    src = STEP2.read_text(encoding="utf-8")
+
+    for label, state, seed in (
+        ("商品 SKU 映射关系", "setImportMapping", '{ source: "", target: "" }'),
+        ("价格库存映射关系表", "setPriceMapping", '{ target: "", source: "" }'),
+    ):
+        #: 每个 `emptyText` 后面紧跟的内容里必须有一个 onClick 真加行。
+        hits = [
+            m.start()
+            for m in __import__("re").finditer(r"emptyText:", src)
+        ]
+        assert hits, "两张表都没有 emptyText（守卫锚点失效）"
+        found = False
+        for i in hits:
+            window = src[i : i + 700]
+            if f"{state}([ {seed} ])" in window or f"{state}([{seed}])" in window:
+                found = True
+                break
+        assert found, f"「{label}」空表时没有可点的添加按钮（用户会被卡死）"
+
+
+def test_derived_fixed_columns_are_not_rendered_twice():
+    """⚠️ 「SKU 图」「规格分类」是**固定列**，只能**渲染一次**。
+
+    用户实测截图（2026-10-15）：表头出现**两列「SKU 图」** —— 表格第一列
+    （`__matched_image`，固定列）与新插进 `table.columns` 的同名列**各渲染一次**。
+
+    根因：把这两列插进 `columns`/`rows`（**为了能被映射/规则取值**）之后，
+    `...table.columns` 展开时会**再渲染一遍**。
+
+    修法：展开时**只过滤「SKU 图」**（用户口径 2026-10-15 两次纠正）：
+      · **SKU 图** —— 由**固定列**渲染（要缩略图 + 切换图标，统一渲染做不到）⇒ 跳过；
+      · **规格分类** —— **不跳过**，走**统一的数据列渲染**（用户口径：
+        「规则分类列恢复到原来历史 **默认为空支持表头的设置图标**」）——
+        统一渲染自带表头设置图标，与截图里的历史形态一致。
+    ⚠️ **过滤的是渲染，不是数据** —— 两列仍在 `columns`/`rows` 里。
+    """
+    src = PUBLISH_MODAL.read_text(encoding="utf-8")
+    #: ① 展开列时**只**过滤 SKU 图（不能连规格分类一起滤掉 —— 那样它就不显示了）。
+    i = src.find("...table.columns")
+    assert i > 0, "找不到列展开处"
+    seg = src[i : i + 400]
+    assert "SKU_IMAGE_COL" in seg, "展开列时没过滤「SKU 图」⇒ 屏幕上会出现两列同名"
+    assert "SPEC_CATEGORY_COL" not in seg, (
+        "把「规格分类」也过滤掉了 ⇒ 它彻底不显示（用户口径：恢复到历史，带表头设置图标）"
+    )
+    #: ② 第一列必须**读 rows**（不是只读渲染层状态 —— 那样它就不在表格数据里）。
+    j = src.find('key: "__matched_image"')
+    assert j > 0
+    blk = src[j : j + 1400]
+    assert "skuImageColOf(table)" in blk, "第一列没从 rows 取「SKU 图」列"
+    assert "table.rows[record.__index]" in blk, "第一列没读 rows（还是两处真相源）"
+    #: ③ 预检列里的「选择本地图」**按钮**已移除（第一列那枚图标是唯一入口）。
+    #: ⚠️ 判据用**按钮的调用形态**而不是裸词 —— 说明注释里会提到这个按钮名
+    #: （「已移除，因为…」那是有用的考古信息，不该为了测试删掉）。
+    assert "选择本地图\n                      </Button>" not in src, (
+        "「选择本地图」按钮还在（与第一列图标重复）"
+    )
+    #: 反证：说明里的**状态提示**要留着（用户据此知道去第一列点图标）。
+    assert "未匹配到本地图" in src, "状态提示被误删（用户没信号了）"
+
+
+def test_spec_type_toggle_clears_that_specs_sku_data():
+    """⚠️ 取消勾选规格类型时，要**连带清除该规格的全部 SKU 数据**。
+
+    用户口径 2026-10-15：
+    > 「价格库存表格是根据商品规格**联动**的，规格**新增**时价格库存表格实时联动，
+    >    **删除**规格时依旧实时联动，当商品规格**切换**时被切换到的规格类型
+    >    对应的数据**也应同步被清除**」
+    > 「该规格下**全部 sku 数据**，包括商品规格与商品规格关联的
+    >    **价格库存表中的关联数据**」
+
+    ⚠️ 旧实现只 `setSpecTypes(filter)` —— **只摘掉类型名**，规格值 / 规格图 /
+    价格库存行全留着 ⇒ 用户看到「取消勾选了，规格值还在、价格表还占着行」。
+
+    ⚠️ 本守卫钉**三块都要清**（少清一块就是孤儿数据）：
+      · `specValues[name]` —— 该规格的值；
+      · `specImages[name]` —— 按「维度+值」存的图（不清 ⇒ 下次同名维度**复用到旧图**）；
+      · `specImageEnabled[name]` —— 规格图开关（不清 ⇒ 下次勾回继承旧状态）。
+      · 价格库存行**不手工删**：重建 effect 按新 `specTypes` 重算笛卡尔积，
+        被切走的维度不再参与组合 ⇒ 那批行自然消失。
+    """
+    src = STEP2.read_text(encoding="utf-8")
+    i = src.find("const toggleSpecType = useCallback(")
+    assert i > 0, "找不到 toggleSpecType"
+    body = src[i : i + 2200]
+    for key in ("setSpecValues", "setSpecImages", "setSpecImageEnabled"):
+        assert key in body, f"取消勾选时没清 `{key}`（留孤儿数据）"
+    #: ⚠️ 反向：**不许**手工删价格库存行（会与重建 effect 打架）。
+    assert "onPriceRowsChange" not in body, (
+        "toggleSpecType 里手工改了价格库存行 —— 应交给重建 effect 按新 specTypes 重算"
+    )
+
+    #: ⚠️ 联动靠重建 effect 的依赖数组 —— 漏 `specTypes`/`specValues` 就不联动了。
+    j = src.find("}, [specTypes, specValues, props.priceRows")
+    assert j > 0, "重建 effect 的依赖数组漏了 specTypes / specValues（规格变化不联动）"
+
+
+def test_item_no_goes_to_the_top_level_field_not_into_attributes():
+    """⚠️ **货号必须走顶层 `article_no`，不许塞进 `attributes[]`**。
+
+    用户报障 2026-10-15：
+    > 「相同的商品信息和类目，在平台后台商品属性中的其他属性下**存在货号**，
+    >    但是本地项目上传**提示无货号属性**」
+
+    ⚠️ 两条独立的错，**必须同时成立**才算修好：
+
+    ① **不许进 `attributes[]`** —— 「货号」是前端**自己合成**的 UI 项
+       （平台 `desc_properties` 不下发它，见 `buildItemNoProperty`）。
+       塞进 `attributes[]` ⇒ 平台把它当成一个 `attributeId` = `articleNo`
+       的**类目属性**，而类目里不存在这个属性 ⇒ 报
+       「当前类目不存在[货号]属性，请刷新页面后再试」，**整个发布被拒**。
+       ⇒ 判据：第二步组 `attributes` 时用了 `withoutItemNo`。
+
+    ② **必须填顶层 `article_no`** —— 真机 `itemData[0].articleNo`。
+       后端 `ItemPublishRequest.article_no` 一直收着它，但**前端从没传过** ⇒
+       提交体里永远没有货号（`skus[].erpCode` 是**商家编码**，两回事）。
+       ⇒ 判据：提交调用里带上了 `article_no`，且空值时不传。
+    """
+    #: ── ① 不许进 attributes[] ──
+    step2 = STEP2.read_text(encoding="utf-8")
+    assert "withoutItemNo(props.otherProperties" in _code_only(step2), (
+        "第二步组 attributes 时没排除货号 —— 平台会报「当前类目不存在[货号]属性」"
+    )
+
+    #: ── ② 必须填顶层 article_no ──
+    wizard = PUBLISH_MODAL.read_text(encoding="utf-8")
+    i = wizard.find("await publishShopItem({")
+    assert i > 0, "找不到发布提交调用"
+    call = wizard[i : i + 2600]
+    assert "article_no" in call, (
+        "提交体没带货号 —— 后端 ItemPublishRequest.article_no 收不到值（货号丢失）"
+    )
+    #: ⚠️ 空值**不传**（与「缺值留空不造假」同口径；后端 `article_no or None`）。
+    assert "itemNo.trim()" in call, (
+        "货号没有做空值判断 —— 空串应**不传**该键，而不是传空串"
+    )
+    #: ⚠️ 反向：**不许**在 attributes 里再塞一条货号（两条路 = 平台必拒）。
+    assert "attributeId: ITEM_NO_PROPERTY_ID" not in _code_only(step2), (
+        "又把货号塞进 attributes[] 了 —— 这是平台报错的直接成因"
+    )
+
+
+def test_reload_and_full_unspec_and_target_list_consistency():
+    """三条用户报障（2026-10-15）的守卫 —— 一次咬三处，各自独立断言。
+
+    ── 一、「重新读取资源后，SKU 导入的数据**未清空**」──
+    根因：第二步的 div **没有 `key={openSeq}`**（只有第一步挂了）⇒ `loadWithPath`
+    换数据包时第二步**不重挂** ⇒ 内部 SKU 导入产物（`specTypes` / `specValues` /
+    `specImages` / `specImageEnabled` / `pendingSpecFills`）整批残留。
+
+    ── 二、「所有商品规格全部取消后，价格及库存列表关联的数据**未清空**」──
+    根因：重建 effect 里 `if (next.length === 0) return;` —— 这句是为「平台还没生成
+    规格、外层给了一行裸价占位」设的，却把「用户把规格全取消」也一起放过 ⇒
+    外层 `priceRows` 保留上一轮的行。
+
+    ── 三、「价格库存列下拉框与价格及库存存在**不一致的列**」──
+    根因：下拉用了 `PRICE_TARGET_OPTIONS` **全量**（那是「导入所需 target 总集」），
+    多出 `price_fallback`（售价回落列）与 `spec_category`（规格分类）—— 两者都是
+    **规则参数**，不是价格库存表的列。
+    """
+    wizard = PUBLISH_MODAL.read_text(encoding="utf-8")
+    step2_src = STEP2.read_text(encoding="utf-8")
+    lib = (ROOT / "frontend/src/lib/precheck-publish.ts").read_text(encoding="utf-8")
+
+    #: ── 一：换数据包要强制重挂第二步 + 复位向导层的 priceRows ──
+    i = wizard.find("const loadWithPath = useCallback(")
+    assert i > 0, "找不到 loadWithPath"
+    body = wizard[i : i + 4000]
+    #: ⚠️ **判据已改**（2026-10-15）：换数据包**不再靠 `setOpenSeq` 重挂第二步**
+    #: —— 那会把第一步 `PrecheckStep`（同一个 key）一起重挂，实测自伤
+    #: （两行资源选择框 + 「正在读取」永不消失）。现改用递增 `resetToken` 信号。
+    assert "setStep2ResetToken" in body, (
+        "换数据包没递增 resetToken ⇒ 第二步收不到清空信号（SKU 导入数据残留）"
+    )
+    assert "setPriceRows" in body, "换数据包没复位 priceRows（价表残留上一轮的行）"
+    #: ⚠️ **「第二步挂 key 重挂」已被推翻**（2026-10-15 实测自伤：会把第一步
+    #: `PrecheckStep` 一起重挂 ⇒ 两行资源选择框 + 「正在读取」永不消失）。
+    #: 现判据在上面（递增 `resetToken`）与 `test_reload_clears_step2_without_remounting_step1`。
+    assert not re.search(r'key=\{openSeq\}\s+style=\{\{ display: step === 1', wizard), (
+        "第二步又挂回 key={openSeq} 了（换数据包会把第一步一起重挂，自伤复现）"
+    )
+
+    #: ── 二：规格全取消 ⇒ 清空（且只在 specTypes 为空时清，别误伤「值还没填」）──
+    assert "specTypes.length === 0 && props.priceRows.length > 0" in _code_only(step2_src), (
+        "规格全取消时没清价格库存行 —— 仍会残留上一轮的行"
+    )
+
+    #: ── 三：下拉用「价格库存表列」清单，不是全量 ──
+    #: ⚠️ **必须查「下拉真的用了它」**，不能只查「名字出现过」—— 只查名字时，
+    #: 变异「`options={PRICE_TABLE_TARGETS.map` 改回 `PRICE_TARGET_OPTIONS.map`」
+    #: 会被 import 那一行满足 ⇒ **ESCAPED**（实测咬到过一次）。
+    assert re.search(r"options=\{PRICE_TABLE_TARGETS\.map", _code_only(step2_src)), (
+        "价格库存列下拉没改用 PRICE_TABLE_TARGETS（仍会列出不是表列的项）"
+    )
+    #: ⚠️ 反向：这张表的下拉**不许**再用全量清单。
+    assert not re.search(r"options=\{PRICE_TARGET_OPTIONS\.map", _code_only(step2_src)), (
+        "价格库存列下拉用回了 PRICE_TARGET_OPTIONS 全量"
+    )
+    #: ⚠️ 从 `= [` 起截到配对的 `];` —— 不能写 `[^\]]*]`：类型注解
+    #: `PriceTargetKey[]` 里就有 `]`，正则会**在类型处就停**（实测咬过一次）。
+    m = re.search(r"PRICE_TABLE_TARGETS[^=]*=\s*\[(.*?)\];", lib, re.S)
+    assert m, "precheck-publish.ts 里没有 PRICE_TABLE_TARGETS 定义"
+    block = m.group(1)
+    #: ⚠️ 两条负向：规则参数类 target **不许**混进这张表的下拉。
+    assert '"price_fallback"' not in block, "售价回落列不该出现在价格库存列下拉里"
+    assert '"spec_category"' not in block, "规格分类不该出现在价格库存列下拉里"
+    #: ⚠️ 两条正向：表列 + 导入必需来源**必须**在。
+    for t in ("price", "stock", "market_price", "barcode", "seller_code", "sku_name", "spec_image"):
+        assert f'"{t}"' in block, f"价格库存列下拉漏了 {t}"
+
+
+def test_reload_clears_step2_without_remounting_step1():
+    """⚠️ 换数据包清第二步 **不许重挂第一步**（2026-10-15 自伤修复的守卫）。
+
+    用户报障（2026-10-15）：
+    > 「加载完数据后展示**两行资源选择框**，「正在读取本地数据包…」文本也一直展示」
+
+    ⚠️ **根因是我自己引入的**：上一版给第二步的 div 挂 `key={openSeq}` 来强制重挂、
+    清掉 SKU 导入产物。但 **`openSeq` 同时挂在第一步 `PrecheckStep` 上** ⇒ 自增时
+    **第一步也被重挂** ⇒ 它被打回「还没有加载数据包」的初始态（多的那行资源选择框），
+    而向导层的 `loading` 还在转 ⇒ 「正在读取」永不消失。
+
+    ⇒ 判据两条：
+      ① **第一步的 key 仍绑 `openSeq`**（关弹窗才清，这是既有正确行为）；
+      ② **第二步不绑 key**，改用递增的 `resetToken` 信号，由第二步自己清。
+    """
+    wiz = PUBLISH_MODAL.read_text(encoding="utf-8")
+    code = _code_only(wiz)
+
+    #: ① 第一步：`key={openSeq}` 仍在（关弹窗清空这一步不能丢）。
+    assert "key={openSeq}" in code, "第一步的 key={openSeq} 丢了（关弹窗不再清空内部 state）"
+
+    #: ② 第二步：**不许**挂 key（挂了就是重挂，会把第一步一起带走）。
+    assert not re.search(r'key=\{openSeq\}\s+style=\{\{ display: step === 1', wiz), (
+        "第二步又挂回 key={openSeq} 了 —— 换数据包时会把第一步一起重挂（自伤复现）"
+    )
+    #: ⚠️ **查「真的递增了」而不是「名字出现过」** —— 只查名字时，
+    #: 变异「把 `setStep2ResetToken(...)` 整行删掉」照样绿（实测 ESCAPED）。
+    assert re.search(r"setStep2ResetToken\(\(n\) => n \+ 1\)", code), (
+        "换数据包没**真的**递增 resetToken（第二步收不到信号）"
+    )
+    #: 且它必须挂在 **loadWithPath 读取成功之后**（读失败不该清用户已配的东西）。
+    #: ⚠️ 窗口**从函数起点截到它的依赖数组**（不能写死长度 —— 函数会随注释变长，
+    #: 写死 2600 时实测越过了函数体，断言恒假）。
+    i0 = wiz.find("const loadWithPath = useCallback(")
+    end0 = wiz.find("\n  );", i0)
+    body0 = wiz[i0:end0] if end0 > i0 else wiz[i0 : i0 + 4000]
+    assert "setStep2ResetToken" in body0, "resetToken 没在 loadWithPath 里递增"
+
+    #: ③ 第二步自己响应信号，且**首次挂载不清**（否则弹窗一打开就清空用户配的东西）。
+    step2 = STEP2.read_text(encoding="utf-8")
+    #: ⚠️ 同理：必须查 **依赖数组里真的有 `props.resetToken`** ——
+    #: 变异「把 `[props.resetToken]` 改回 `[]`」时，只要别处提过这个名字就查不出来（ESCAPED）。
+    assert "}, [props.resetToken]);" in _code_only(step2), (
+        "第二步的 effect 没把 props.resetToken 放进依赖数组 ⇒ 收到信号也不会清"
+    )
+    i = step2.find("props.resetToken")
+    body = step2[max(0, i - 900) : i + 900]
+    assert "lastResetTokenRef" in body, (
+        "第二步没做「首次不清」保护 —— 弹窗一打开就会把已配的规格/价格清掉"
+    )
+    assert "clearImportTargets()" in body, "第二步收到信号后没清 SKU 导入产物"

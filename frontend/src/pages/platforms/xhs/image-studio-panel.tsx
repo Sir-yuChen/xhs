@@ -139,7 +139,7 @@ export function ImageStudioPanel() {
       setDescription(result.text);
       message.success("图片描述已生成。");
     } catch {
-      message.error("图片描述失败，请确认已配置支持视觉理解的图片模型。");
+      message.error("图片描述失败：请确认已配置视觉理解模型");
     } finally {
       setIsDescribing(false);
     }

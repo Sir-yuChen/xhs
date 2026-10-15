@@ -344,7 +344,7 @@ export function ProductDraftModal({
         type="warning"
         showIcon
         message="保存后只进草稿箱，不会上架"
-        description="商品不会出现在商品列表中，也不会对买家可见。需要上架时请到千帆「商品管理 → 草稿箱」补齐必填项后自行提交。"
+        description="商品不会对买家可见；上架需在千帆草稿箱补齐必填项后提交。"
       />
 
       <Descriptions size="small" bordered column={2}>

@@ -414,7 +414,7 @@ const onSync = async () => {
         return (
           <Space size={4} wrap>
             {canShipOrder(row.status) ? (
-              <Tooltip title="对这笔真实订单执行发货（不可撤回，需二次确认）">
+              <Tooltip title="对这笔真实订单发货（不可撤回）">
                 <Button
                   type="link"
                   size="small"

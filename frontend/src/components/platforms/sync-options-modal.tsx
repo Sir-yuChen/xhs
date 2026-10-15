@@ -142,7 +142,7 @@ export function SyncOptionsModal(props: {
           <Alert
             type="warning"
             showIcon
-            message="全量同步会翻完整个列表，耗时较长（数据多时可能几十分钟），且更耗平台请求额度。"
+            message="全量同步会翻完整个列表，耗时较长且更耗平台额度。"
           />
         )}
       </Space>

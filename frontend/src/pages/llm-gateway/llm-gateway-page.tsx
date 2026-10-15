@@ -344,7 +344,7 @@ function GatewaysPage() {
         if (sync?.ok) {
           message.success(`已新增服务商；${sync.reason}`);
         } else if (sync) {
-          message.warning(`已新增服务商，但模型同步未完成：${sync.reason}（可在操作列点「同步服务商模型」重试）`);
+          message.warning(`已新增服务商，模型同步未完成：${sync.reason}`);
         } else {
           message.success("已新增服务商");
         }
@@ -663,7 +663,7 @@ function GatewaysPage() {
           // 未探测 ⇒ **给一个「检查」按钮**（而不是只显示一个「未探测」死标签）——
           // 用户看到空状态时最自然的动作就是「点一下试试」，让入口就在那里。
           return (
-            <Tooltip title="该模型尚未探测过连通性，点击立即检查">
+            <Tooltip title="尚未探测连通性">
               <Button
                 type="link"
                 size="small"

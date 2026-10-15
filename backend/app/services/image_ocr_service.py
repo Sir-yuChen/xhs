@@ -40,53 +40,66 @@
 
 from __future__ import annotations
 
-import json
 import logging
+import math
 import os
 import shutil
 import subprocess
 import tempfile
 import time
-import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
+from backend.app.services import rapid_ocr_service as rapid
+from backend.app.services import settings_service
 from backend.app.services.forbidden_word_service import find_hits, normalize
 
 logger = logging.getLogger(__name__)
 
-#: 随包分发的 PowerShell 脚本（纯 ASCII —— Windows PowerShell 按系统 ANSI
-#: 码页读 .ps1，UTF-8 中文注释会被解析成乱码引号而语法报错，实测踩过）。
-_SCRIPT_NAME = "win_ocr_json.ps1"
-#: 批量脚本（一进程多图，消除 PowerShell 冷启动开销，见 `_run_batch`）。
-_BATCH_SCRIPT_NAME = "win_ocr_batch.ps1"
 
-#: 识别前的最大边长。超出的先缩再识别（Windows OCR 对超大图慢且吃内存），
-#: 脚本会把坐标**乘回原图尺度**，所以红框位置不受影响。
+#: 识别前的最大边长。超出的先缩再识别（对超大图慢且吃内存），
+#: 引擎会把坐标**乘回原图尺度**，所以红框位置不受影响。
 MAX_DIM = 1600
 
-#: 单图 OCR 超时（秒）。实测 0.6s；留足 8 倍余量给冷启动的大图。
+#: 单图 OCR 超时（秒）。RapidOCR 实测 3.3s；留 10 倍余量给冷启动 + 大图。
 PER_IMAGE_TIMEOUT = 30.0
 
-#: 并发数。Windows OCR 是 CPU 密集但**进程内可并行**的；用户口径 2026-10-09
-#: 要求 **5 个并发**处理 OCR（此前 4）。
+#: **初始**并发数（用户口径 2026-10-13）。
 #:
-#: ⚠️ **这里不是「并发安全」的保证**：并发只在**重试**配合下才稳
-#: （见 `RETRYABLE_CODES`）。5 是吞吐与争用的折中，不是「不会失败」。
-MAX_WORKERS = 5
+#: ⚠️ 这是**起步值**，不是固定值 —— 真实并发由 `resolve_parallelism()` 按
+#: 「系统参数 `xhs_ocr_parallelism`」+「本机 CPU 核数」动态算（见该函数）。
+#: 默认 5 与用户口径一致；配置项在设置页可调（默认 5）。
+DEFAULT_PARALLELISM = 5
 
-#: 瞬时失败（WinRT 并发争用）重试次数 + 退避基数（秒）。
+#: 并发数硬上界。再高会因 CPU 争用让**总耗时反而上升**（RapidOCR 是 CPU 密集，
+#: 每路都在抢核），且内存按路数线性增长（每路的 ONNX 推理缓冲）。
+MAX_PARALLELISM = 32
+
+#: **目标总耗时**（秒）。用户口径 2026-10-13：「时间控制在 30 秒以内」。
 #:
-#: ⚠️ 见 `RETRYABLE_CODES` 与 `_run_script_with_retry` 的实测依据。
+#: ⚠️ **实测做不到，这里如实标注**（硬约束⑤不造假）：RapidOCR 是纯 CPU 密集，
+#: 实测（本机 8 逻辑核）吞吐在 **4 路**就饱和 ——
+#: 24 张样本：1 路 41.1s / 4 路 19.4s（2.1x）/ 8 路 19.8s / 12 路 19.4s，
+#: 再加路数**毫无收益**。单图推理 ~1.74s（占单图耗时 99.5%，读图只 0.01s）。
+#: ⇒ 118 张的**物理下限**约 96s（4 路 × 0.81s/张），30s 只能靠更小的图 / 更强的 CPU。
+#: 该常量只用于**反推并发档位**，同时作为上报给前端的**参照值**（前端显示
+#: 「实际 Xs / 目标 30s」），不是达标承诺。
+TARGET_TOTAL_SECONDS = 30.0
+
+#: 单图预估耗时（秒）。用于「按目标时间反推并发数」—— 实测单图推理 ~1.74s，
+#: 4 路并发下有效吞吐 ~0.81s/张。取 1.0 作为**每路有效速率**的保守估计。
+SECONDS_PER_IMAGE = 1.0
+
+#: 吞吐**饱和点**（路数）。实测再加路数无收益（见 `TARGET_TOTAL_SECONDS` 注）。
+#: 用它作为「按目标耗时上推」的**实际可用上限**，避免开一堆白占内存的线程。
+SATURATION_WORKERS = 4
+
+#: 瞬时失败重试次数 + 退避基数（秒）。
 RETRY_ATTEMPTS = 3
 RETRY_BACKOFF_S = 0.4
 
-#: **可重试**的错误码 —— 全是 WinRT 并发争用的表征，不是「图坏了」。
-#:
-#: ⚠️ `OCR_FAILED` 是脚本 catch-all（含 WinRT `Wait` 异常）；它与
-#: `OCR_NO_OUTPUT` 同源，必须一起重试。只重试前者会漏掉大半失败
-#: （实测：端点预检里 `OCR_FAILED` 一片，失败率一度 97%）。
+#: **可重试**的错误码 —— 引擎层的瞬时争用，不是「图坏了」。
 RETRYABLE_CODES: frozenset[str] = frozenset({"OCR_NO_OUTPUT", "OCR_FAILED"})
 
 #: 单个数据包的媒体张数上限（防「用户丢了个 5000 张的目录」把内存吃光）。
@@ -102,164 +115,77 @@ class OcrError(RuntimeError):
         self.message = message
 
 
-def script_path() -> Path:
-    """定位随包分发的 OCR 脚本（打包后与本模块同目录）。"""
-    local = Path(__file__).with_name(_SCRIPT_NAME)
-    if local.exists():
-        return local
-    fallback = Path(__file__).parent.parent / "bin" / _SCRIPT_NAME
-    if fallback.exists():
-        return fallback
-    raise OcrError("OCR_SCRIPT_MISSING", f"找不到 OCR 脚本（{_SCRIPT_NAME}）")
-
-
 def engine_available() -> bool:
-    """OCR 引擎是否可用（**不识别任何图**，只探一次引擎）。
+    """OCR 引擎是否可用（**不识别任何图**，只探一次引擎）。"""
+    return rapid.engine_available()
 
-    用一个 1×1 的内存 PNG 试跑 —— 比解析 PowerShell 装配类型可靠，
-    因为「类型没装载」和「引擎没装」都会在这里一次性暴露。
+
+def resolve_parallelism(pending: int) -> int:
+    """算**本次实际并发数**：配置起始值 → 按核数夹 → 按目标耗时上推。
+
+    三档依据（用户口径 2026-10-13「时间控制在 30 秒以内，或按电脑使用情况自动调节」）：
+
+    1. **起始值** = 系统参数 `xhs_ocr_parallelism`（默认 5，设置页可调）；
+    2. **按核数夹**：RapidOCR 是 CPU 密集且 onnxruntime 每路自带线程池
+       ⇒ 路数 ≈ 核数时吞吐最高，超过核数只是互相抢核（总耗时反而上升）。
+       故上界取 `max(起始值, 核数)` —— **用户的配置是下限，不被机器缩小**
+       （否则用户在 16 核机上填 12 却被夹到 8 会以为配置没生效）；
+    3. **按目标耗时上推**：`ceil(pending × 单图预估 / 30s)`。图多时自动加路，
+       让批量预检落在 `TARGET_TOTAL_SECONDS` 内。
+
+    最后夹到 `[1, MAX_PARALLELISM]`，且**不超过待处理图数**（2 张图开 16 路无意义）。
+
+    ⚠️ **这是估算驱动的调参**，不是「保证 30 秒」的承诺：单图耗时随图内容波动
+    （纯色图 0.5s、密集文字图 6s+）。做不到时如实反映在返回值上（见 `scan_images`
+    的 `summary.parallelism` / `summary.elapsed_seconds`），不假装达标。
     """
+    if pending <= 0:
+        return 1
     try:
-        from PIL import Image
-    except ImportError:
-        return False
-    tmp_dir = Path(tempfile.mkdtemp(prefix="ocr_probe_"))
-    try:
-        probe = tmp_dir / "probe.png"
-        Image.new("RGB", (8, 8), "white").save(probe)
-        return _run_script(probe) is not None
-    except OcrError:
-        return False
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-
-
-def _run_script(image: Path) -> dict[str, Any]:
-    """跑一次 PowerShell 脚本，返回其 JSON。
-
-    ⚠️ **每次调用必须用独立的输出文件**（第一版实测踩过的坑）：固定写
-    ``%TEMP%/ocr_out.json`` 时，4 路并发互相删/覆盖对方的结果 ⇒ 68 张图里
-    18 张误报 `OCR_NO_OUTPUT`。所以这里用 `uuid` 给每次调用一个专属路径。
-    """
-    script = script_path()
-    out_file = Path(tempfile.gettempdir()) / f"ocr_out_{uuid.uuid4().hex}.json"
-    #: ⚠️ **必须绝对路径**。PowerShell 子进程按**它自己的** cwd 解析相对
-    #: 路径，实测踩到：`storage_dir` 是相对路径，暂存图路径原样传过去
-    #: ⇒ `Test-Path` False ⇒ 每张图 `OCR_NO_OUTPUT`（同一张图、同一份代码，
-    #: 换成绝对路径就 1/1 成功）。`staging_root()` 已 resolve 过一次，
-    #: 这里再兜一层 —— 漏一处就复现一次，而症状（全部 OCR 失败）完全
-    #: 不指向「路径是相对的」。
-    image = Path(image).resolve()
-    proc = subprocess.run(
-        [
-            "powershell",
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(script),
-            str(image),
-            str(MAX_DIM),
-            str(out_file),
-        ],
-        capture_output=True,
-        text=True,
-        #: ⚠️ **必须显式给编码**（第一版实测踩到的坑）：Windows PowerShell 5.1
-        #: 按 **GBK** 输出中文错误信息，而 `text=True` 的默认解码是 locale
-        #: 编码（本机为 UTF-8）⇒ stderr 一解码就抛 `UnicodeDecodeError`，
-        #: 在 reader 线程里炸掉，**看起来像随机崩溃**。
-        #: 实际结果走 JSON 文件（UTF-8），这里只是读诊断信息 ⇒ 用
-        #: `errors="replace"` 兜住非法字节，宁可看到乱码也不要抛异常。
-        encoding="gbk",
-        errors="replace",
-        timeout=PER_IMAGE_TIMEOUT,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
-    if not out_file.exists():
-        raise OcrError(
-            "OCR_NO_OUTPUT",
-            f"OCR 脚本没有产出结果（退出码 {proc.returncode}）：{(proc.stderr or '')[:200]}",
+        start = settings_service.live_int(
+            None, None, "xhs_ocr_parallelism", default=DEFAULT_PARALLELISM
         )
-    try:
-        payload = json.loads(out_file.read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError) as error:
-        raise OcrError("OCR_BAD_JSON", f"OCR 结果不是合法 JSON：{error}") from error
-    finally:
-        out_file.unlink(missing_ok=True)
+    except Exception:  # pragma: no cover - 配置层异常不该让 OCR 跑不起来
+        start = DEFAULT_PARALLELISM
+    start = max(1, int(start))
 
-    if not payload.get("ok"):
-        code = str(payload.get("error") or "OCR_FAILED")
-        message = str(payload.get("message") or "OCR 识别失败")
-        if code == "NO_ENGINE":
-            raise OcrError(
-                "OCR_ENGINE_MISSING",
-                "本机没有可用的 Windows OCR 引擎（设置 > 时间和语言 > 语言 > 添加「光学字符识别」）",
-            )
-        raise OcrError(code, message)
-    return payload
+    #: ⚠️ 实测吞吐饱和点是 4 路（见 `SATURATION_WORKERS` 注）—— 再加路数**无收益**，
+    #: 只会白占内存。所以这里把「按目标耗时上推」的结果**夹在饱和点内**；
+    #: 用户把配置填得比饱和点高时不拦（尊重显式配置），但自动上推不会越过它。
+    cpu = os.cpu_count() or 4
+    ceiling = min(MAX_PARALLELISM, max(start, SATURATION_WORKERS, min(cpu, MAX_PARALLELISM)))
+
+    needed = math.ceil(pending * SECONDS_PER_IMAGE / TARGET_TOTAL_SECONDS)
+    needed = min(needed, SATURATION_WORKERS) if start <= SATURATION_WORKERS else needed
+    return max(1, min(ceiling, max(start, needed), pending))
 
 
-def batch_script_path() -> Path:
-    """定位**批量** OCR 脚本（打包后与本模块同目录）。"""
-    local = Path(__file__).with_name(_BATCH_SCRIPT_NAME)
-    if local.exists():
-        return local
-    fallback = Path(__file__).parent.parent / "bin" / _BATCH_SCRIPT_NAME
-    if fallback.exists():
-        return fallback
-    raise OcrError("OCR_SCRIPT_MISSING", f"找不到批量 OCR 脚本（{_BATCH_SCRIPT_NAME}）")
-
-
-def _run_batch(pairs: list[tuple[str, Path]]) -> dict[str, dict[str, Any]]:
-    """**一次 PowerShell 进程**识别多张图，返回 `{image_path: payload}`。
-
-    ⚠️ **为什么批量**（实测 2026-10-09）：每次 `powershell -File` 冷启动
-    ~1.2s，而真正 OCR 只 ~0.3s ⇒ 一图一进程时 **80% 时间花在进程启动上**。
-    68 张图一进程跑 ~5s（对照 4 路并发逐图跑 ~30s+）。
-
-    `pairs` = `[(uid, image_path)]`；脚本按 uid 写结果文件，这里再读回来。
-    单图失败**不影响整批**（脚本逐图 try/catch，写各自的错误 JSON）。
-    """
-    script = batch_script_path()
-    work = Path(tempfile.mkdtemp(prefix="ocr_batch_"))
-    try:
-        map_file = work / "mapping.tsv"
-        out_dir = work / "out"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        map_file.write_text(
-            "\n".join(f"{uid}\t{Path(p).resolve()}" for uid, p in pairs),
-            encoding="utf-8",
-        )
-        proc = subprocess.run(
-            [
-                "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-                "-File", str(script), str(map_file), str(MAX_DIM), str(out_dir),
-            ],
-            capture_output=True,
-            text=True,
-            encoding="gbk",
-            errors="replace",
-            timeout=PER_IMAGE_TIMEOUT * max(1, len(pairs)) + 60,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        results: dict[str, dict[str, Any]] = {}
-        for uid, path in pairs:
-            out_file = out_dir / f"{uid}.json"
-            if not out_file.exists():
-                results[str(path)] = {
-                    "ok": False, "error": "OCR_NO_OUTPUT",
-                    "message": f"批量 OCR 未产出该图结果（进程退出码 {proc.returncode}）",
-                }
-                continue
-            try:
-                results[str(path)] = json.loads(out_file.read_text(encoding="utf-8-sig"))
-            except (OSError, ValueError):
-                results[str(path)] = {
-                    "ok": False, "error": "OCR_BAD_JSON", "message": "结果不是合法 JSON",
-                }
-        return results
-    finally:
-        shutil.rmtree(work, ignore_errors=True)
+def _scan_one(path: str, entries: list[dict[str, Any]]) -> dict[str, Any]:
+    """单图：OCR → 匹配 → 定位红框。**异常不外泄**（转成 `ocr_ok=False`）。"""
+    name = os.path.basename(path)
+    last: Exception | None = None
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        try:
+            payload = rapid.recognize(Path(path))
+        except rapid.RapidOcrUnavailable as error:
+            #: 引擎级不可用（没装/模型坏）—— 重试无意义，直接判失败。
+            return {
+                "path": path, "name": name, "ocr_ok": False, "ocr_text": "",
+                "hits": [], "error": "OCR_FAILED", "error_message": str(error),
+                "width": 0, "height": 0,
+            }
+        except Exception as error:  # pragma: no cover - 引擎内部瞬时异常
+            last = error
+            if attempt < RETRY_ATTEMPTS:
+                time.sleep(RETRY_BACKOFF_S * attempt)
+            continue
+        return _payload_to_scan(path, payload, entries)
+    return {
+        "path": path, "name": name, "ocr_ok": False, "ocr_text": "",
+        "hits": [], "error": "OCR_FAILED",
+        "error_message": str(last or "识别失败"),
+        "width": 0, "height": 0,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -645,65 +571,37 @@ def scan_images(
     if not paths:
         return {
             "results": [],
-            "summary": {"total": 0, "ok": 0, "failed": 0, "violations": 0, "truncated": False},
+            "summary": {
+                "total": 0, "ok": 0, "failed": 0, "violations": 0,
+                "truncated": False, "parallelism": 0, "elapsed_seconds": 0.0,
+                "target_seconds": TARGET_TOTAL_SECONDS,
+            },
         }
     if not engine_available():
-        raise OcrError("OCR_ENGINE_MISSING", "本机没有可用的 Windows OCR 引擎")
+        raise OcrError("OCR_ENGINE_MISSING", "OCR 引擎不可用（RapidOCR 未安装或模型缺失）")
 
-    #: ① 批量路径（首选）：一次进程跑完，逐图回调进度。
-    try:
-        batch_script_path()
-        batch_ok = True
-    except OcrError:
-        batch_ok = False
-
-    if batch_ok:
-        #: **分块并行批量**（实测 2026-10-09）：一进程跑完 68 张 7.1s；
-        #: 拆成 N=MAX_WORKERS 块、每块一个批量进程并行跑到 3.8s。既省了
-        #: 「一图一进程」的冷启动，又用上多核 ⇒ 综合最快。块内仍是批量脚本。
-        n_chunks = min(MAX_WORKERS, len(paths))
-        chunks = [paths[i::n_chunks] for i in range(n_chunks)]
-
-        def _run_chunk(chunk: list[str]) -> dict[str, dict[str, Any]]:
-            pairs = [(uuid.uuid4().hex, Path(p)) for p in chunk]
-            return _run_batch(pairs)
-
-        results: list[dict[str, Any]] = [{} for _ in paths]
-        idx_by_path = {p: i for i, p in enumerate(paths)}
-        with ThreadPoolExecutor(max_workers=n_chunks) as pool:
-            for chunk, payloads in zip(chunks, pool.map(_run_chunk, chunks)):
-                for original in chunk:
-                    payload = (
-                        payloads.get(str(Path(original).resolve()))
-                        or payloads.get(str(original))
-                        or {}
-                    )
-                    idx = idx_by_path[original]
-                    if payload.get("ok"):
-                        results[idx] = _payload_to_scan(original, payload, entries)
-                    else:
-                        results[idx] = {
-                            "path": original, "name": os.path.basename(original),
-                            "ocr_ok": False, "ocr_text": "", "hits": [],
-                            "error": str(payload.get("error") or "OCR_FAILED"),
-                            "error_message": str(payload.get("message") or "OCR 识别失败"),
-                            "width": 0, "height": 0,
-                        }
-                    if on_one_done is not None:
-                        on_one_done()
-    else:
-        #: ② 回退：逐图 + 线程池（旧路径）。
-        results = [{} for _ in paths]
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-            future_to_idx = {
-                pool.submit(_scan_one, path, entries): i for i, path in enumerate(paths)
-            }
-            for fut in as_completed(future_to_idx):
-                idx = future_to_idx[fut]
+    workers = resolve_parallelism(len(paths))
+    started = time.monotonic()
+    results: list[dict[str, Any]] = [{} for _ in paths]
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        future_to_idx = {
+            pool.submit(_scan_one, path, entries): i for i, path in enumerate(paths)
+        }
+        for fut in as_completed(future_to_idx):
+            idx = future_to_idx[fut]
+            try:
                 results[idx] = fut.result()
-                if on_one_done is not None:
-                    on_one_done()
+            except Exception as error:  # pragma: no cover - `_scan_one` 已兜住
+                p = paths[idx]
+                results[idx] = {
+                    "path": p, "name": os.path.basename(p), "ocr_ok": False,
+                    "ocr_text": "", "hits": [], "error": "OCR_FAILED",
+                    "error_message": str(error), "width": 0, "height": 0,
+                }
+            if on_one_done is not None:
+                on_one_done()
 
+    elapsed = time.monotonic() - started
     ok = sum(1 for r in results if r.get("ocr_ok"))
     return {
         "results": results,
@@ -713,61 +611,13 @@ def scan_images(
             "failed": len(results) - ok,
             "violations": sum(1 for r in results if r.get("hits")),
             "truncated": len(image_paths) > len(results),
+            #: 用户口径 2026-10-13「时间控制在 30 秒以内」—— 实际并发与耗时
+            #: **如实上报**（不假装达标，也不藏），前端可据此显示「N 路并发 / Xs」。
+            "parallelism": workers,
+            "elapsed_seconds": round(elapsed, 2),
+            "target_seconds": TARGET_TOTAL_SECONDS,
         },
     }
-
-
-def _run_script_with_retry(image: Path, attempts: int = RETRY_ATTEMPTS) -> dict[str, Any]:
-    """跑 OCR 脚本，**瞬时失败重试**。
-
-    ⚠️ **为什么要重试**（实测踩到，且我第一版的诊断是**错的**）：
-    `Windows.Media.Ocr` 走 WinRT 异步 await。**并发的多个 PowerShell
-    子进程**里，个别进程会在 `Wait` 上抛「发生一个或多个错误」。
-
-    这里有个坑：我最初只在**独立脚本**里测并发（1/2/4/8 档 × 69 张都是
-    0 失败），据此写下「并发安全、不用重试」的注释。**在应用进程内跑就
-    翻车了** —— 真实端点预检 70 张图，`OCR_FAILED` 报错一大片。所以
-    判据必须是**端点实测**，不是孤立脚本。
-
-    两种码都重试（它们都是同一类瞬时争用，不是「图坏了」）：
-    * `OCR_NO_OUTPUT` —— 子进程没产出文件；
-    * `OCR_FAILED` —— 脚本 catch 到了 WinRT 异常并写进 JSON。
-
-    「文件损坏 / 不是图片」走 `OCR_BAD_IMAGE`，重试多少次都一样 ⇒
-    直接放行（不重试，避免把确定性错误拖成慢失败）。
-    """
-    last: OcrError | None = None
-    for attempt in range(1, attempts + 1):
-        try:
-            return _run_script(image)
-        except OcrError as error:
-            last = error
-            if error.code not in RETRYABLE_CODES:
-                raise
-            if attempt < attempts:
-                time.sleep(RETRY_BACKOFF_S * attempt)
-    assert last is not None  # pragma: no cover - attempts >= 1
-    raise last
-
-
-def _scan_one(path: str, entries: list[dict[str, Any]]) -> dict[str, Any]:
-    """单图：OCR → 匹配 → 定位红框。**异常不外泄**（转成 `ocr_ok=False`）。"""
-    name = os.path.basename(path)
-    try:
-        payload = _run_script_with_retry(Path(path))
-    except OcrError as error:
-        return {
-            "path": path, "name": name, "ocr_ok": False, "ocr_text": "",
-            "hits": [], "error": error.code, "error_message": error.message,
-            "width": 0, "height": 0,
-        }
-    except subprocess.TimeoutExpired:
-        return {
-            "path": path, "name": name, "ocr_ok": False, "ocr_text": "",
-            "hits": [], "error": "OCR_TIMEOUT", "error_message": "识别超时",
-            "width": 0, "height": 0,
-        }
-    return _payload_to_scan(path, payload, entries)
 
 
 def _payload_to_scan(
@@ -793,8 +643,10 @@ def _payload_to_scan(
         "height": int(payload.get("pixel_height") or 0),
     }
 __all__ = [
+    "DEFAULT_PARALLELISM",
     "FRAME_MAX_WIDTH",
     "MAX_DIM",
+    "TARGET_TOTAL_SECONDS",
     "MAX_IMAGES",
     "VIDEO_FRAMES",
     "OcrError",
@@ -807,6 +659,6 @@ __all__ = [
     "note_unverified_videos",
     "probe_duration",
     "scan_images",
+    "resolve_parallelism",
     "scan_video",
-    "script_path",
 ]

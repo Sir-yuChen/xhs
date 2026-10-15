@@ -376,7 +376,7 @@ export function NoteDetailBody({
               showIcon
               style={{ marginBottom: 12 }}
               message="这条视频笔记还没有可播放的地址"
-              description="平台的列表接口不带视频流地址，只有详情接口有。触发一次「同步笔记」让后台补齐后，这里就能直接播放。"
+              description="同步笔记补齐后即可播放。"
             />
           )}
           {videoUrl ? (
