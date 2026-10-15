@@ -239,28 +239,49 @@ try {
     if ($commitSha) { $commitSha = $commitSha.Trim() }
 } catch { $commitSha = "" }
 
-$history = @()
+#: ⚠️⚠️ **用 Python 读源码历史**，不用 PS 的 `ConvertFrom-Json`。
+#: 2026-10-15 实测踩到：PS 5.1 的 `ConvertFrom-Json` 对这份 JSON **解析失败**
+#:   （报「无效的对象...位置 685」），而它被 `catch { $history = @() }`
+#:   **静默吞掉** ⇒ 包内 `version.json` 只剩一条新插的、`notes` 为空
+#:   ⇒ 用户装上后「检查版本更新」弹窗里**看不到历史版本也看不到简介**。
+#: ⇒ 改走 Python（本项目打包链路已有 Python 依赖，零新增成本）。
+#: ⚠️⚠️ **不允许再用 `catch { }` 静默回退** —— 读不到就报错停构建，
+#:   不要拿一个看似合理的空历史蒙混过去（这正是本次的教训）。
+#: ⚠️⚠️ **整段走 Python**（读源码历史 → 刷当前条的时间/提交 → 写包内 version.json）。
+#: 2026-10-15 实测踩到：**PS 5.1 的 `ConvertFrom-Json` 对这份数据不可用** ——
+#:   无论是 `Get-Content -Raw` 还是管道喂进来的单行长 JSON，它都**解析失败或解成空**
+#:   （报「无效的对象...位置 N」）；而旧代码用 `catch { $history = @() }` **静默吞掉**
+#:   ⇒ 包内 `version.json` 只剩一条新插的、`notes` 为空 ⇒ 用户装上后
+#:   「检查版本更新」弹窗里**看不到历史版本、也看不到更新简介**。
+#: ⇒ 涉及 JSON 读写的部分**一律交 Python**（打包链路已有 Python 依赖，零新增成本），
+#:   不在 PowerShell 里碰 JSON。
+#: ⚠️⚠️ **不允许再出现静默回退**（`catch { }` 里赌一个默认值）—— 读不到就 `Fail` 停构建。
 $srcVersionJson = Join-Path $Root "config\version.json"
-if (Test-Path $srcVersionJson) {
-    try {
-        $parsed = Get-Content $srcVersionJson -Raw | ConvertFrom-Json
-        if ($parsed.versions) { $history = @($parsed.versions) }
-    } catch { $history = @() }
+$pyMerge = @'
+import json, sys
+src, dst, version, built_at, commit = sys.argv[1:6]
+d = json.load(open(src, encoding="utf-8-sig"))
+history = list(d.get("versions") or [])
+if not history:
+    print("源码 config/version.json 里没有 versions（不允许静默回退为空历史）", file=sys.stderr)
+    sys.exit(1)
+hit = False
+for item in history:
+    if item.get("version") == version:
+        item["built_at"] = built_at
+        item["commit"] = commit
+        hit = True
+if not hit:
+    history = [{"version": version, "built_at": built_at, "commit": commit, "notes": ""}] + history
+out = {"current": version, "versions": history}
+open(dst, "w", encoding="utf-8").write(json.dumps(out, ensure_ascii=False, indent=2))
+print(len(history))
+'@
+$historyCount = & $Python -c $pyMerge $srcVersionJson $versionJson $Version $builtAt $commitSha
+if ($LASTEXITCODE -ne 0) {
+    Fail "写包内 config/version.json 失败（源码历史读不到，或写入出错）"
 }
-# 让「当前版本」那条带上本次打包的时间 / 提交；不在历史里就先插一条（保住版本记录）。
-$hit = $false
-foreach ($item in $history) {
-    if ($item.version -eq $Version) {
-        $item.built_at = $builtAt
-        $item.commit = $commitSha
-        $hit = $true
-    }
-}
-if (-not $hit) {
-    $history = @([pscustomobject]@{ version = $Version; built_at = $builtAt; commit = $commitSha; notes = "" }) + $history
-}
-(@{ current = $Version; versions = $history } | ConvertTo-Json -Depth 6 -Compress) |
-    Set-Content -Path $versionJson -Encoding utf8
+
 Write-Host "  应用版本: $Version → config\version.json（built_at=$builtAt commit=$commitSha 历史 $($history.Count) 条）"
 
 # 7a. 裁掉明确不用的内容（用户口径：不必要内容不打包）：
