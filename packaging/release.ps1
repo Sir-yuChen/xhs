@@ -273,7 +273,7 @@ if ($SkipRelease) {
     $relScript = Join-Path $PSScriptRoot "gitee_release.py"
     $relLog = Join-Path $TmpDir "release-publish-$TagName.log"
     Info "日志：$relLog"
-    & $Py $relScript publish --owner $Owner --repo $Repo --tag $TagName --exe $ExePath --name $ReleaseName --body-file $NotesFile --replace --repo-dir $Root | Out-File -FilePath $relLog -Encoding utf8
+    & $Py $relScript publish --owner $Owner --repo $Repo --tag $TagName --exe $ExePath --name $ReleaseName --body-file $NotesFile --replace --repo-dir $Root --target $head | Out-File -FilePath $relLog -Encoding utf8
     if ($LASTEXITCODE -ne 0) {
         Get-Content $relLog -Tail 20
         Fail "发布失败，日志：$relLog"
