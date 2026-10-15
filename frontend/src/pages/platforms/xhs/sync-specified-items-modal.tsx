@@ -514,7 +514,7 @@ export function SyncSpecifiedItemsModal({
                   type="info"
                   showIcon
                   message="按条件同步整个店铺（后台执行）"
-                  description="点「同步」后弹窗立即关闭，任务在后台跑；进度去「账号矩阵 → 任务日志」看。"
+                  description="任务在后台执行，进度见「账号矩阵 → 任务日志」。"
                 />
                 <Radio.Group
                   value={scope}
@@ -559,7 +559,7 @@ export function SyncSpecifiedItemsModal({
                   type="info"
                   showIcon
                   message="按 ID 同步（加入队列）"
-                  description="点「同步」后这批商品会加入同步队列，弹窗立即关闭；逐件执行进度去「队列记录」按批次号查看。"
+                  description="加入同步队列后弹窗关闭，进度见「队列记录」。"
                 />
                 <Text type="secondary" style={{ fontSize: 12 }}>
                   下面是要同步的商品（主表勾选的 + 你补充的）。

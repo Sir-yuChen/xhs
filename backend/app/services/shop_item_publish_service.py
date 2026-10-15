@@ -236,6 +236,22 @@ def build_item_from_request(
             logistics_plan_id=logistics_plan_id,
             variants=variants,
             spec_image=spec_img,
+            #: ⚠️ **发货时间按用户选的模式算**（用户报障 2026-10-15：
+            #: 「发货模式配置的是全款预售模式15天内发货，但是发布后变成了现货模式48小时发货」）。
+            #: 此前 `delivery_time` **从未被传** ⇒ `build_publish_sku` 里
+            #: `or {"type": 4, "time": "48"}` 的**默认值生效** ⇒ 一律现货48小时。
+            #: 真机抓包（用户亲手切四种模式，6 次草稿）证明载体是 **SKU 级
+            #: `skuData[].deliveryTime`**，`deliveryMode` 恒为 1（不是它）。
+            #: ⚠️ 「按规格设置发货时间」时每行各自有文案（`row.delivery_label`）。
+            delivery_time=pub.build_delivery_time(
+                delivery_mode=str(cfg.get("deliveryMode") or ""),
+                ship_time=str(cfg.get("shipTime") or ""),
+                presale_kind=str(cfg.get("presaleKind") or ""),
+                presale_days=cfg.get("presaleDays") if isinstance(cfg.get("presaleDays"), int) else None,
+                ship_aging=str(cfg.get("shipAging") or ""),
+                sale_time=str(cfg.get("saleTime") or ""),
+                row_ship_aging=str(row.get("delivery_label") or ""),
+            ),
         ))
 
     #: ⚠️ 2026-10-10：发货模式「中文 → 数字」映射。真机只抓到「现货模式=1」，

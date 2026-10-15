@@ -50,9 +50,10 @@ from backend.app.models.user import User
 from backend.app.services import forbidden_word_service as fw
 from backend.app.services import image_ocr_service as ocr
 from backend.app.services import package_staging_service as staging
+from backend.app.services.shop_draft_package import VIDEO_EXTS
 from backend.app.services.shop_package_precheck import (
     PrecheckError,
-    MEDIA_GROUPS,
+    MEDIA_KINDS,
     precheck_package,
 )
 
@@ -276,8 +277,16 @@ def _run_precheck(
     #: ⚠️ 「全部媒体 OCR」的口径（用户 2026-10-08）：**连视频和属性图也要**。
     #: 视频走**抽帧 OCR**（`scan_video`：等间隔抽帧 → 逐帧识别 → 合并命中）；
     #: 抽帧失败才退回「显式未验证」（`ocr_ok=None` + `unverified_reason`，默认不勾选）。
-    image_items = [m for m in result.media if not m.unsupported and m.group != "video"]
-    video_items = [m for m in result.media if m.group == "video"]
+    #: ⚠️ 判据必须用 **`kind`**（参考类别）而不是 `group` ——
+    #: `group` 现在是**真实目录名**（`视频` / `主图视频` / `SKU图`），
+    #: 拿它跟字面量 `"video"` 比会**恒不成立** ⇒ 视频被当成图片送进图片 OCR
+    #: （实测：`1.mp4` 出现在 `scan_images` 的输入里，且被假称 `ocr_ok=True`）。
+    #: 这正是「目录名直出」改动最容易漏掉的那类静默破口：把旧枚举值与新目录名比。
+    def _is_video(m) -> bool:
+        return m.kind == "video" or Path(m.rel_path).suffix.lower() in VIDEO_EXTS
+
+    image_items = [m for m in result.media if not _is_video(m) and not m.unsupported]
+    video_items = [m for m in result.media if _is_video(m)]
     image_paths = [str(root / m.rel_path) for m in image_items]
     total_media = len(image_paths) + len(video_items)
     #: **执行进度**（用户口径 2026-10-09）：图片逐张 +，视频按每个完成 +1。
@@ -292,9 +301,9 @@ def _run_precheck(
         _set_progress(progress_token, "检测违规词", 0, total_media)
     scan = ocr.scan_images(image_paths, entries, on_one_done=_bump)
     by_path = {r["path"]: r for r in scan["results"]}
-    #: ⚠️ 视频抽帧**并发**（用户口径 2026-10-09：并发处理 OCR）——
-    #: 此前是串行 for，每个视频抽帧 + 逐帧识别在各 ~10s 量级，
-    #: 多视频时会叠加。用同一并发数（`MAX_WORKERS`）跑，单个失败不中断整批。
+    #: ⚠️ 视频抽帧**并发**（用户口径 2026-10-09：并发处理 OCR）。
+    #: 并发数走 `ocr.resolve_parallelism()` —— 与图片同一套自适应（配置起始值 +
+    #: 核数 + 目标耗时），不另立一个固定值（两个固定值迟早会不一致）。
     if video_items:
         video_paths = [str(root / v.rel_path) for v in video_items]
 
@@ -305,7 +314,9 @@ def _run_precheck(
                 logger.warning("视频抽帧失败 %s: %s", os.path.basename(vp), error)
                 return next(iter(ocr.note_unverified_videos([vp]).values()))
 
-        with ThreadPoolExecutor(max_workers=ocr.MAX_WORKERS) as pool:
+        with ThreadPoolExecutor(
+            max_workers=ocr.resolve_parallelism(len(video_paths))
+        ) as pool:
             for res in pool.map(_scan_video_one, video_paths):
                 by_path[res["path"]] = res
                 _bump()
@@ -632,4 +643,4 @@ def discard(token: str, current_user: User = Depends(get_current_user)) -> dict:
     return {"token": token, "dropped": True}
 
 
-__all__ = ["router", "MEDIA_GROUPS"]
+__all__ = ["router", "MEDIA_KINDS"]

@@ -259,6 +259,109 @@ def build_publish_sku(
     return entry
 
 
+#: 发货模式的中文名（与前端 `DELIVERY_MODES` 逐字一致，2026-10-15 真机抓包）。
+MODE_SPOT = "现货模式"
+MODE_PRESALE = "全款预售模式"
+MODE_SPOT_PLUS = "现货+预售模式"
+MODE_BY_SPEC = "按规格设置发货时间"
+
+#: 现货发货时间的中文名 → `{type, time}` 的 `time`（小时）。真机 2026-10-15 抓包：
+#:   · 「当日发货」⇒ `{"type": 3}`（**不带 time**）
+#:   · 「24小时」  ⇒ `{"type": 4, "time": "24"}`
+#:   · 「48小时（推荐）」⇒ `{"type": 4, "time": "48"}`
+SPOT_SHIP_TIME_HOURS = {
+    "当日发货": 0,       # 0 = 当日（用 type 3 表达）
+    "24小时": 24,
+    "48小时": 48,
+    "48小时（推荐）": 48,
+}
+
+
+def build_delivery_time(
+    *,
+    delivery_mode: str,
+    ship_time: str = "",
+    presale_kind: str = "",
+    presale_days: int | None = None,
+    ship_aging: str = "",
+    sale_time: str = "",
+    row_ship_aging: str = "",
+) -> dict[str, Any]:
+    """算一条 SKU 的 `deliveryTime`（**发货模式的真身**）。
+
+    ## ⚠️ 为什么是 SKU 级而不是顶层 `deliveryMode`
+
+    真机抓包（2026-10-15，用户亲手把四种模式各切一遍，6 次 `save_product_drafts`）：
+    **`deliveryMode` 6 次恒为 `1`** —— 它**不是**模式的载体；真正的字段是
+    `skuData[].deliveryTime`：
+
+    | 界面选择 | 真机提交体 |
+    |---|---|
+    | 现货 · 当日发货 | `{"type": 3}` |
+    | 现货 · 24小时 | `{"type": 4, "time": "24"}` |
+    | 现货 · 48小时 | `{"type": 4, "time": "48"}` |
+    | **全款预售 · 时段预售 · 15天** | **`{"type": 4, "time": "360"}`**（15×24）|
+    | **全款预售 · 定时预售 · 某日** | **`{"type": 5, "time": "2026/10/31"}`** |
+    | 现货+预售 | 每 SKU 各一条（现货那条 + 预售那条）|
+
+    ## 现象（用户报障 2026-10-15）
+
+    > 「发货模式配置的是**全款预售模式15天内发货**，但是发布后变成了**现货模式48小时发货**」
+
+    根因：`build_publish_sku` 里 `delivery_time or {"type": 4, "time": "48"}`
+    —— **默认写死现货 48 小时**，而 `delivery_time` **从未被调用方传过** ⇒
+    用户配什么都被覆盖成「现货48小时」。
+
+    ⚠️ **缺值不造假**：算不出来就返回 `None`，由调用方回落默认（与既有同口径）。
+    """
+    mode = str(delivery_mode or "").strip()
+    kind = str(presale_kind or "").strip()
+
+    if mode in (MODE_SPOT, MODE_SPOT_PLUS):
+        #: 现货那一段：当日 ⇒ `type 3`（真机不带 time）；24/48 ⇒ `type 4` + 小时。
+        raw = str(ship_time or "")
+        #: ⚠️ 前端文案是「48小时（推荐）」，真机提交体是纯 `48小时` ⇒ 归一化。
+        norm = raw.split("（")[0].strip() if "（" in raw else raw.strip()
+        hours = SPOT_SHIP_TIME_HOURS.get(raw)
+        if hours is None:
+            hours = SPOT_SHIP_TIME_HOURS.get(norm)
+        if hours == 0:
+            return {"type": 3}
+        if hours:
+            return {"type": 4, "time": str(hours)}
+
+    if mode in (MODE_PRESALE, MODE_SPOT_PLUS, MODE_BY_SPEC):
+        #: 「按规格设置发货时间」时**每行各自有** `rowShipAging`（前端那列「发货时间」），
+        #: 形如「现货 / 48小时」「预售 / 时段预售」… —— 由前端直接给出该行的时效文案。
+        aging = str(row_ship_aging or ship_aging or "").strip()
+        if kind == "定时预售" or aging.startswith("定时预售"):
+            date = str(sale_time or "").strip()
+            if date:
+                return {"type": 5, "time": date}
+        #: 时段预售：付款后 N 天 ⇒ **小时数**（真机 15天 ⇒ 360）。
+        if presale_days:
+            return {"type": 4, "time": str(int(presale_days) * 24)}
+        #: ⚠️ **「现货 / 48小时」必须先判**（2026-10-15 实测咬到）：
+        #: 「按规格」模式下该行文案形如 `「现货 / 48小时」` —— 若先走下面的
+        #: 「取数字 × 24」分支，会把 **48 小时当成 48 天** ⇒ `1152`（差 24 倍）。
+        #: ⇒ 判据看**斜杠后的那一段**（它才是真正的时效值）。
+        tail = aging.split("/")[-1].strip() if "/" in aging else aging
+        tail_hours = SPOT_SHIP_TIME_HOURS.get(tail)
+        if tail_hours is not None:
+            return {"type": 3} if tail_hours == 0 else {"type": 4, "time": str(tail_hours)}
+        #: 现货+预售 / 按规格：把「15天」这类文案转成小时。
+        if "天" in tail:
+            digits = "".join(ch for ch in tail if ch.isdigit())
+            if digits:
+                return {"type": 4, "time": str(int(digits) * 24)}
+        #: 「24小时」「48小时」这类（不带「/」的形态）。
+        if "小时" in tail:
+            digits = "".join(ch for ch in tail if ch.isdigit())
+            if digits:
+                return {"type": 4, "time": digits}
+    return None
+
+
 def build_publish_variant(
     *, variant_id: str, variant_name: str, variant_value: str, variant_type: int = 1
 ) -> dict[str, Any]:
@@ -347,11 +450,29 @@ def build_item_body(
     #: 货号 `articleNo`（真机字段，2026-10-10 补）。
     if article_no:
         body["articleNo"] = str(article_no)
-    body["variantIds"] = [str(v) for v in variant_ids]
+    #: ⚠️⚠️ **`variantIds` 为空时从 `variantSequence` 派生**（用户报障 2026-10-15）。
+    #:
+    #: 现象：「发布时配置的每个规格的**规格图**，发布成功后**添加规格图的开关是关闭的
+    #:   且每个规格均没有配置规格图**」。
+    #:
+    #: 真机回读已发布商品 + 平台自己的草稿体对照（2026-10-15 抓包实证）：
+    #:   · 平台草稿体：`variantIds: ["60404e0d…"]` / `mainSpecEnable: 1`
+    #:   · 我们发出去的：`variantIds: []` / `mainSpecEnable: 0`
+    #:   ⇒ 平台认为「**没有主规格**」⇒ 规格图开关关闭、`skuData[].specImage` 不生效。
+    #:
+    #: 根因：API 层**写死** `variant_ids=[]`（`publish.py:788`），而
+    #: `variant_sequence` 已经由「SKU 名逐维度解析」算出来了（`spec_attributes`
+    #: 里的平台 `saleProperties` id）—— **同一份数据、一处有值一处为空**。
+    #: ⇒ 这里以 `variantSequence` 为准回填，不依赖调用方传（**单一真相源**）。
+    _vids = [str(v) for v in variant_ids]
+    if not _vids and variant_sequence:
+        _vids = [str(one.get("variantId") or "") for one in variant_sequence]
+        _vids = [v for v in _vids if v]
+    body["variantIds"] = _vids
     #: mainSpecEnable=1 ⇒ 必须有主规格 id（真机取第一个 variantId）。
-    body["mainSpecEnable"] = 1 if variant_ids else 0
-    if variant_ids:
-        body["mainSpecId"] = str(variant_ids[0])
+    body["mainSpecEnable"] = 1 if _vids else 0
+    if _vids:
+        body["mainSpecId"] = str(_vids[0])
     body["skuData"] = list(skus)
     if variant_sequence is not None:
         body["variantSequence"] = list(variant_sequence)

@@ -33,10 +33,6 @@ from pathlib import Path
 from typing import Any
 
 from backend.app.services.shop_draft_package import (
-    DIR_DETAIL,
-    DIR_MAIN,
-    DIR_SKU,
-    DIR_VIDEO,
     IMAGE_EXTS,
     MAX_IMAGE_BYTES,
     VIDEO_EXTS,
@@ -44,20 +40,87 @@ from backend.app.services.shop_draft_package import (
 
 logger = logging.getLogger(__name__)
 
-#: 预检的四个媒体区域（用户口径：分主图区域、视频区域、sku图区域、详情图区域）。
-MEDIA_GROUPS: tuple[str, ...] = ("main", "video", "sku", "detail")
-
-#: 区域 → 数据包目录名（用于把上传的相对路径归到某个区域）。
+#: 媒体**区域类别**（发布语义）—— 只用于「这个区域像是什么用途」的参考。
 #:
-#: ⚠️ **键必须小写**：`group_of_rel_path` 按小写查表。
-#: 真实包目录是 `SKU`（大写，实测 2026-10-08），而 `DIR_SKU` 常量是小写
-#: `sku` —— 直接拿常量当键会漏掉整个 SKU 区域（第一版实测：`sku: 0`）。
-_GROUP_BY_DIRNAME: dict[str, str] = {
-    DIR_MAIN.lower(): "main",
-    DIR_SKU.lower(): "sku",
-    DIR_DETAIL.lower(): "detail",
-    DIR_VIDEO.lower(): "video",
-}
+#: ⚠️ 用户口径 2026-10-13（**本次改动的核心**）：
+#: 「数据包中读取到什么就按照读取到的文件夹分区域，**不做任何操作直接展示**」
+#: 「读到什么媒体资源就展示什么」
+#:
+#: ⇒ `group` **不再是这四个值之一**，而是**数据包里真实的一级目录名原值**
+#: （`1比1主图` / `页面展示主图` / `SKU图` / `主图视频` / `详情图` / `属性` …）。
+#: `kind` 是对该区域名的**语义猜测**，仅供展示参考与「哪个区像主图」的提示，
+#: **不参与任何过滤或丢弃** —— 第二步走哪张图完全由用户在区域映射弹窗里指定。
+#:
+#: ⚠️ 为什么必须这么改（实测两个真包）：
+#:   包 A（淘宝店透导出）目录：`1比1主图`/`页面展示主图`/`SKU图`/`主图视频`/`详情图`
+#:   包 B（1688 导出）目录：   `主图`/`详情图`/`SKU`/`视频`/`属性`
+#:   硬编码四目录名只认 `主图`/`sku`/`详情图`/`视频` ⇒ **包 A 丢 63 个文件**
+#:   （5 主图 + 5 页面展示主图 + 52 SKU 图 + 1 视频），且是**静默丢弃**
+#:   （原实现 `continue` 掉，只在 warnings 留一行，用户根本不知道丢了什么）。
+MEDIA_KINDS: tuple[str, ...] = ("main", "video", "sku", "detail", "other")
+
+#: 区域名 → 类别 的**关键词**（按声明顺序优先匹配，先命中先得）。
+#:
+#: ⚠️ 顺序有语义，不能随便调：
+#:   · `sku` 必须在 `main` 前 —— `SKU图` 同时含「图」，但更重要的是
+#:     `主图视频` 会同时命中 `main`(主图) 与 `video`(视频)，靠 `video` 排前解决；
+#:   · `detail` 在 `main` 前 —— 避免「详情主图」这类混合名被误判成主图。
+#: ⚠️ 这只是**参考分类**，判错不影响媒体是否展示（不丢任何东西）。
+_KIND_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("video", ("视频", "video", "mp4")),
+    ("sku", ("sku", "规格")),
+    ("detail", ("详情", "detail", "描述")),
+    ("main", ("主图", "1比1", "1:1", "1/1", "页面展示", "首图", "白底")),
+    ("other", ("属性", "参数", "attr")),
+)
+
+
+def kind_of_zone(zone: str) -> str:
+    """区域名 → 类别（**只作参考，不影响媒体是否被展示**）。
+
+    认不出 ⇒ `"other"`（**不丢弃**，也不再进 warnings 说「缺少某目录」——
+    那条告警在「目录名直出」的口径下是错的：包 A 没有名为 `主图` 的目录，
+    但它的 `1比1主图` 就是主图资源）。
+    """
+    text = str(zone or "").strip().lower()
+    if not text:
+        return "other"
+    for kind, keywords in _KIND_KEYWORDS:
+        if any(k in text for k in keywords):
+            return kind
+    return "other"
+
+
+#: 顶层散落文件（不在任何子目录里，如数据包根下的 xlsx）归到这个区域名。
+#:
+#: ⚠️ 用户口径「读到什么媒体资源就展示什么」⇒ 根目录下的媒体（若有）也要能看见，
+#: 不能因为没有一级目录就丢掉。
+ROOT_ZONE = "根目录"
+
+#: **明确不是媒体**的后缀 —— 这些**不进媒体清单**（它们在别处自有去处）。
+#:
+#: ⚠️ 与「平台不收的图片格式」（如 `.gif`）**不是一回事**：
+#:   · 本清单里的（xlsx / zip / exe…）= **压根不是媒体**，进了清单只是噪音；
+#:   · 平台不收的图片格式 = **是媒体，只是发不出去** ⇒ 用户口径 2026-10-13
+#:     方案 C 要求**照常展示 + 红框**（`PrecheckMedia.unsupported`），**不在这张表里**。
+#:
+#: ⇒ 判据是「这是什么文件」，不是「平台收不收」——后者绝不能用来丢东西。
+_NON_MEDIA_SUFFIXES: frozenset[str] = frozenset(
+    {
+        # 表格（走 _read_tables，不是媒体）
+        ".xlsx", ".xls", ".xlsm", ".xlsb", ".csv", ".ods",
+        # 文本 / 文档
+        ".txt", ".md", ".json", ".xml", ".html", ".htm", ".pdf",
+        ".doc", ".docx", ".ppt", ".pptx",
+        # 压缩包
+        ".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz",
+        # 可执行 / 库 / 工程文件
+        ".exe", ".dll", ".msi", ".bat", ".cmd", ".ps1", ".sh",
+        ".py", ".js", ".ts", ".css", ".psd", ".ai", ".sketch",
+        # 其它明显非媒体
+        ".db", ".sqlite", ".log", ".ini", ".cfg", ".toml", ".yaml", ".yml",
+    }
+)
 
 #: 表头名要剥掉的后缀（用户口径「不带后缀」）。
 _SHEET_SUFFIXES: tuple[str, ...] = ("_sku数据", "_sku", "_data", "_sheet", "_表格")
@@ -93,6 +156,9 @@ def sheet_display_name(sheet_name: str, fallback: str = "") -> str:
 class PrecheckMedia:
     """一个媒体文件在预检里的完整身份。"""
 
+    #: ⚠️ **区域名 = 数据包里第一级目录名的原值**（用户口径 2026-10-13
+    #: 「按照读取到的文件夹分区域，不做任何操作直接展示」）。
+    #: 不再是 `main`/`video`/`sku`/`detail` 四选一 —— 包 A 的 `1比1主图` 原样透出。
     group: str
     #: 区域内稳定序号（0 起）—— 前端做「反选 / 全选」与排序都靠它。
     index: int
@@ -102,18 +168,28 @@ class PrecheckMedia:
     size_bytes: int
     #: 超过平台 5M 上限（**不静默丢弃**，前端要显示并默认不勾选）。
     oversized: bool = False
-    #: 扩展名不在白名单（非图片被放进媒体目录时）。
+    #: **平台不收这个格式**（展示照常 + 红框，但默认不勾选、发布时跳过）。
+    #:
+    #: ⚠️ 用户口径 2026-10-13 方案 C：「展示与上传都按平台，但把不合规的
+    #: **列出来而不是丢掉**，红框提示」。与旧版「扩展名不认识 ⇒ 直接丢」不同。
     unsupported: bool = False
+    #: `unsupported` 的人话原因（前端红框上的提示文案）。空 = 合规。
+    unsupported_reason: str = ""
+    #: 区域**参考类别**（`main`/`video`/`sku`/`detail`/`other`）—— 只作展示提示，
+    #: **不参与过滤**。走哪张图由用户在第二步的区域映射弹窗里指定。
+    kind: str = "other"
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "group": self.group,
+            "kind": self.kind,
             "index": self.index,
             "rel_path": self.rel_path,
             "file_name": self.file_name,
             "size_bytes": self.size_bytes,
             "oversized": self.oversized,
             "unsupported": self.unsupported,
+            "unsupported_reason": self.unsupported_reason,
         }
 
 
@@ -132,6 +208,15 @@ class PrecheckTable:
     #: ⚠️ **来源 xlsx 的文件名**（用户口径 2026-10-08：「表格顶部新增文件名称」）。
     #: 表名只说清是哪个 sheet，一个包里可能有多个 xlsx ⇒ 必须能看出出自哪份文件。
     source_file: str = ""
+    #: **逐列类型**（`numeric` / `text` / `empty`，与 `columns` 等长）。
+    #:
+    #: ⚠️ 用户口径 2026-10-13：「**数值列不支持**（正则）只能读取原始值」
+    #: ⇒ 前端据此决定哪些列给正则入口。**后端判、前端不猜**。
+    column_kinds: list[str] = field(default_factory=list)
+    #: 这张表**是不是 SKU / 规格表**（列名特征命中 ≥2）。
+    #:
+    #: ⚠️ 不能靠 sheet 名（实测包 B 叫 `全部`、包 A 被截断）。
+    is_sku_table: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -140,6 +225,8 @@ class PrecheckTable:
             "columns": list(self.columns),
             "rows": [list(r) for r in self.rows],
             "source_file": self.source_file,
+            "column_kinds": list(self.column_kinds),
+            "is_sku_table": self.is_sku_table,
         }
 
 
@@ -151,16 +238,81 @@ class PrecheckResult:
     warnings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        groups: dict[str, int] = {g: 0 for g in MEDIA_GROUPS}
-        for item in self.media:
-            groups[item.group] = groups.get(item.group, 0) + 1
         return {
             "package_name": self.package_name,
-            "media_groups": groups,
+            #: ⚠️ `media_groups` 是**旧契约**（固定四值计数），已由 `zones` 取代。
+            #: 保留它以免老前端/老测试整块炸掉 —— 但它现在只统计 `kind` 参考类别，
+            #: **不再能反映真实分区**（包 A 的 `1比1主图` 会算进 `main` 计数，
+            #: 而真实区域名是 `1比1主图`）。新代码一律读 `zones`。
+            "media_groups": _legacy_kind_counts(self.media),
+            #: **区域清单**（保序）—— 前端按它渲染分区页签与区域映射下拉。
+            "zones": zone_summary(self.media),
             "media": [m.to_dict() for m in self.media],
             "tables": [t.to_dict() for t in self.tables],
             "warnings": list(self.warnings),
         }
+
+
+#: 列类型（后端判定后随表下发；前端据此决定要不要给正则入口）。
+#:
+#: ⚠️ 用户口径 2026-10-13：「**数值列不支持**（正则）只能读取原始值」。
+#: 判定用「抽样多行」而不是只看第一行 —— 只看第一行会把「第 2 行起全空」
+#: 的列（真包 `券后价格` 就是这样）误判成空列 / 数值列。
+COLUMN_KINDS: tuple[str, ...] = ("numeric", "text", "empty")
+
+#: 识别为「SKU 表」的列名特征（命中 **≥2 个**即判为 SKU 表）。
+#:
+#: ⚠️ 用户口径 2026-10-13：「sku表识别」不能靠 sheet 名 ——
+#: 实测包 B 的 sheet 叫 `全部`、包 A 的 sheet 名被导出工具截断成
+#: `店透-SKU预览-表格-827654555981-2026-1`，**两个包的 sheet 名都不可用**。
+#: 改成看**列名特征命中数**：SKU 表一定有「规格 / 价格 / 库存 / 名称」里的若干个。
+_SKU_COLUMN_HINTS: tuple[str, ...] = (
+    "sku名称", "sku名", "规格", "颜色分类", "尺码", "原价", "价格", "售价",
+    "库存", "数量", "编码", "货号",
+)
+
+#: 判定数值列的抽样行数（前 N 行有值的数据行）。
+_TYPE_SAMPLE_ROWS = 24
+
+
+def column_kind(values: list[str | None]) -> str:
+    """一列的值 → `numeric` / `text` / `empty`。
+
+    **抽样多行**判（不是只看第一行）：
+
+    · 全部有值项都能解析成数 ⇒ `numeric`；
+    · 一个值都没有 ⇒ `empty`；
+    · 其余 ⇒ `text`（含「有数字也有文字」的混合列）。
+
+    ⚠️ 为什么必须抽样：真包 `券后价格` 第 1 行有值、第 2 行起全空，
+    只看第一行会判成 `numeric` ⇒ 前端给正则入口，但正则对空列毫无意义。
+    反过来 `商品销量` 是 `1000+`（带加号的文本），只看一眼容易误判成数。
+    """
+    filled = [v for v in values if v not in (None, "")]
+    if not filled:
+        return "empty"
+    for raw in filled[:_TYPE_SAMPLE_ROWS]:
+        text = str(raw).strip().replace(",", "").replace("￥", "").replace("¥", "")
+        if not text:
+            continue
+        try:
+            float(text)
+        except ValueError:
+            return "text"
+    return "numeric"
+
+
+def looks_like_sku_table(columns: list[str]) -> bool:
+    """列名特征命中 **≥2** ⇒ 判为 SKU / 规格表（用户口径 2026-10-13）。
+
+    ⚠️ 不靠 sheet 名（实测两个真包的 sheet 名一个是 `全部`、一个被截断）。
+    """
+    lowered = [str(c or "").replace(" ", "").lower() for c in columns]
+    hits = 0
+    for hint in _SKU_COLUMN_HINTS:
+        if any(hint in name for name in lowered):
+            hits += 1
+    return hits >= 2
 
 
 def _cell_text(value: Any) -> str | None:
@@ -180,11 +332,21 @@ def _cell_text(value: Any) -> str | None:
 
 
 def group_of_rel_path(rel_path: str) -> str | None:
-    """上传的相对路径 → 媒体区域（`主图/x.jpg` ⇒ `"main"`）。
+    """上传的相对路径 → **媒体区域名**（= 数据包里第一级目录名的**原值**）。
 
-    **只认第一级目录名**，且大小写不敏感（`主图` / `sku` / `SKU` / `视频`）。
-    拿不准就返回 `None` —— 调用方进 `warnings`，不硬塞进某个区域
-    （把 `详情图` 当 `主图` 会打乱封面顺序，而顺序就是主图顺序）。
+    ⚠️ 用户口径 2026-10-13：「按照读取到的文件夹分区域，**不做任何操作直接展示**」。
+
+    | 输入 | 返回 |
+    |---|---|
+    | `主图/主图01.jpg` | `"主图"` |
+    | `SKU/SKU01.jpg` | `"SKU"`（**保留原大小写**，不做小写归一） |
+    | `SKU图/SKU图_01_x.jpg` | `"SKU图"` |
+    | `1比1主图/a.jpg` | `"1比1主图"` |
+    | `loose.jpg`（顶层散落文件） | `None` —— 调用方归 `ROOT_ZONE` |
+
+    ⚠️ **不再做白名单查表**：查表就是「认不出就丢」，而包 A 的 5 个目录名
+    有 4 个不在旧白名单里 ⇒ 实测丢 63 个文件。现在凡是有一级目录的一律归区，
+    区域名原样透出，前端按区域名分区展示（顺序 = 数据包里的目录顺序）。
     """
     parts = [
         p
@@ -192,55 +354,86 @@ def group_of_rel_path(rel_path: str) -> str | None:
         if p not in (".", "", "/")
     ]
     if len(parts) < 2:
+        #: 顶层散落文件：没有一级目录 ⇒ 交给调用方归 `ROOT_ZONE`（不丢弃）。
         return None
-    return _GROUP_BY_DIRNAME.get(parts[0].strip().lower())
+    return parts[0].strip() or None
 
 
 def _scan_media(stage_root: Path) -> tuple[list[PrecheckMedia], list[str]]:
-    """扫暂存目录里的媒体文件 → (按区域排序的媒体列表, warnings)。"""
+    """扫目录里的媒体文件 → (按区域分组的媒体列表, warnings)。
+
+    ⚠️ 用户口径 2026-10-13（本次改动的核心）：
+
+    > 「数据包中读取到什么就**按照读取到的文件夹分区域**，**不做任何操作直接展示**」
+    > 「属性目录……**不应被丢弃**，读到什么媒体资源就展示什么」
+
+    ⇒ 两条铁律：
+      ① **一个媒体都不丢** —— 凡是有扩展名在白名单里的文件，全部进媒体清单
+         （含 `属性/商品属性图.png` 这种）；
+      ② **区域 = 真实目录名** —— 不再做「认不出就 `continue`」。
+
+    区域顺序 = 数据包里目录**首次出现**的顺序（按路径排序扫一遍自然得到），
+    与原实现「按 `MEDIA_GROUPS` 常量顺序」不同 —— 后者会把用户自己的目录次序
+    重排成固定四区，而目录次序本身就是用户组织素材的意图。
+    """
     warnings: list[str] = []
-    by_group: dict[str, list[PrecheckMedia]] = {g: [] for g in MEDIA_GROUPS}
-    seen_dirs: set[str] = set()
+    #: 区域名 → 该区媒体（用 dict 保序 = 目录首次出现顺序）。
+    by_zone: dict[str, list[PrecheckMedia]] = {}
+    seen_other: set[str] = set()
 
     for path in sorted(stage_root.rglob("*"), key=lambda p: p.as_posix().lower()):
         if not path.is_file():
             continue
         rel = path.relative_to(stage_root).as_posix()
-        top = rel.split("/")[0]
-        seen_dirs.add(top)
-        group = group_of_rel_path(rel)
-        if group is None:
-            continue  # 区域外的文件（如根目录的 xlsx）不当作媒体
-        #: ⚠️ 用户口径 2026-10-11（**最终版，撤销本批次中间那版「排除属性图」**）：
-        #: 「**数据包中有什么媒体资源就展示什么，不要排除任何媒体资源**」。
-        #: ⇒ 媒体清单 = 数据包里的**全部**媒体文件，一个不减（含属性图 / 参数图）。
-        #:
-        #: ⚠️ 与「删除图片 OCR 建表」不冲突 —— 那是**表格产出**的事（见
-        #: `TestImageToTableOcrIsGone`：`build_table_from_boxes` 已整段移除）。
-        #: 本次撤销的只是「按文件名把图排除出媒体清单」这一步。
         suffix = path.suffix.lower()
-        exts = VIDEO_EXTS if group == "video" else IMAGE_EXTS
-        by_group[group].append(
+        #: ⚠️ 用户口径 2026-10-13（**方案 C**）：「展示与上传都按平台，
+        #: 但把不合规的**列出来而不是丢掉**，红框提示」。
+        #:
+        #: ⇒ 不合规的文件**照样进清单**（带 `unsupported=True` + `unsupported_reason`），
+        #: 由前端**红框**显示并默认不勾选 —— **不静默丢弃**。
+        #: 旧实现是 `continue` 掉，用户根本不知道包里有什么没被收（包 A 丢 63 个）。
+        #:
+        #: 唯一不进清单的是**一眼可知的非媒体文件**（表格/文本/压缩包/可执行）——
+        #: 它们不是「不合规的图片」，是压根不是媒体；进了清单只会让用户看到
+        #: 一堆跟商品图无关的东西（xlsx 走 `_read_tables`，自有去处）。
+        if suffix in _NON_MEDIA_SUFFIXES:
+            seen_other.add(rel.split("/")[0])
+            continue
+        is_video = suffix in VIDEO_EXTS
+        zone = group_of_rel_path(rel) or ROOT_ZONE
+        bucket = by_zone.setdefault(zone, [])
+        #: 平台判据：视频按 `VIDEO_EXTS`，图片按 `IMAGE_EXTS`（真机：jpg/jpeg/png）。
+        uploadable = is_video or suffix in IMAGE_EXTS
+        reason = ""
+        if not uploadable:
+            reason = f"平台不支持 {suffix or '（无扩展名）'} 格式的图片（只收 jpg / jpeg / png）"
+        bucket.append(
             PrecheckMedia(
-                group=group,
-                index=len(by_group[group]),
+                group=zone,
+                index=len(bucket),
                 rel_path=rel,
                 file_name=path.name,
                 size_bytes=path.stat().st_size,
-                oversized=path.stat().st_size > MAX_IMAGE_BYTES,
-                unsupported=suffix not in exts,
+                oversized=(not is_video) and path.stat().st_size > MAX_IMAGE_BYTES,
+                unsupported=not uploadable,
+                unsupported_reason=reason,
+                kind=kind_of_zone(zone),
             )
         )
 
-    #: 目录名按**小写**比对（真实包是 `SKU`，常量是 `sku`）
-    seen_lower = {d.lower() for d in seen_dirs}
-    for dirname in (DIR_MAIN, DIR_SKU, DIR_DETAIL, DIR_VIDEO):
-        if dirname.lower() not in seen_lower:
-            warnings.append(f"数据包里没有「{dirname}」目录")
+    #: ⚠️ **删掉「数据包里没有「主图」目录」这条告警**（原实现在此处）：
+    #: 在「目录名直出」口径下它是**错的** —— 包 A 没有名为 `主图` 的目录，
+    #: 但它的 `1比1主图` 就是主图资源。留着会误导用户以为包缺东西。
 
     media: list[PrecheckMedia] = []
-    for group in MEDIA_GROUPS:
-        media.extend(by_group[group])
+    for zone, items in by_zone.items():
+        media.extend(items)
+    #: 不合规格式**聚合上报**（用户口径：提示简洁明了）。
+    #: ⚠️ 逐个文件报会让 warnings 变成一堵墙（包 A 那样 60+ 条），
+    #: 而「哪张图不合规」在媒体网格上已经标出来了（红框 + 角标 + hover 原因）
+    #: ⇒ 这里只需一句话说清「有几张、什么格式、只收什么」。
+    bad_formats: set[str] = set()
+    bad_count = 0
     for item in media:
         if item.oversized:
             warnings.append(
@@ -248,8 +441,50 @@ def _scan_media(stage_root: Path) -> tuple[list[PrecheckMedia], list[str]]:
                 "超过平台单文件 5M 上限"
             )
         if item.unsupported:
-            warnings.append(f"「{item.rel_path}」不是 {item.group} 区域支持的格式")
+            #: ⚠️ **方案 C**：不合规的**列出来**（不是丢掉）—— 但提示要**简洁**。
+            #: 文件名已在媒体网格上（带「不可发布」角标 + hover 原因），
+            #: 这里不必再重复一遍路径（那是噪音），只留核心结论 + 计数。
+            bad_formats.add(Path(item.rel_path).suffix.lower() or "（无扩展名）")
+            bad_count += 1
+    if bad_count > 0:
+        formats = "、".join(sorted(bad_formats))
+        warnings.append(f"{bad_count} 个文件平台不支持（{formats}），仅 jpg / jpeg / png 可发布")
     return media, warnings
+
+
+def _legacy_kind_counts(media: list[PrecheckMedia]) -> dict[str, int]:
+    """旧契约 `media_groups` 的兼容计数（按 `kind` **参考类别**统计）。
+
+    ⚠️ 仅用于兼容 —— 它**无法反映真实分区**（`1比1主图` 与 `页面展示主图`
+    都会算进 `main`）。新代码读 `zones`。
+    """
+    counts: dict[str, int] = {k: 0 for k in MEDIA_KINDS}
+    for item in media:
+        counts[item.kind] = counts.get(item.kind, 0) + 1
+    return counts
+
+
+def zone_summary(media: list[PrecheckMedia]) -> list[dict[str, object]]:
+    """媒体清单 → **区域清单**（保序）；前端按它渲染分区与区域映射下拉。
+
+    每项 `{name, kind, count}`：
+      · `name` = 区域名原值（数据包里的目录名，或 `根目录`）；
+      · `kind` = 参考类别（见 `kind_of_zone`），**只作提示**；
+      · `count` = 该区媒体数。
+
+    ⚠️ 顺序 = 媒体清单里区域的**首次出现顺序**（`_scan_media` 已按目录序排好）。
+    """
+    out: list[dict[str, object]] = []
+    for item in media:
+        if out and out[-1]["name"] == item.group:
+            out[-1]["count"] = int(out[-1]["count"]) + 1
+            continue
+        hit = next((z for z in out if z["name"] == item.group), None)
+        if hit is not None:
+            hit["count"] = int(hit["count"]) + 1
+            continue
+        out.append({"name": item.group, "kind": item.kind, "count": 1})
+    return out
 
 
 def _read_tables(stage_root: Path) -> tuple[list[PrecheckTable], list[str]]:
@@ -296,6 +531,13 @@ def _read_tables(stage_root: Path) -> tuple[list[PrecheckTable], list[str]]:
                         columns=columns,
                         rows=rows,
                         source_file=xlsx.name,
+                        #: 逐列类型（用户口径 2026-10-13）：数值列不给正则入口。
+                        column_kinds=[
+                            column_kind([r[i] for r in rows])
+                            for i in range(len(columns))
+                        ],
+                        #: 「是不是 SKU 表」按**列名特征**判，不看 sheet 名。
+                        is_sku_table=looks_like_sku_table(columns),
                     )
                 )
         finally:

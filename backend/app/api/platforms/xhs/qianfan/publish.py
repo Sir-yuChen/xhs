@@ -80,6 +80,15 @@ class ItemDraftSku(BaseModel):
     #: **规格图已上传对象**（2026-10-10 补，用户口径「上传成功后提交用远程 url」）。
     #: 非空时后端 `build_publish_image` 直接用它填 `skuData[].specImage`，跳过重新上传。
     spec_image_material: dict[str, Any] | None = Field(default=None, description="规格图已上传对象")
+    #: ⚠️ **该行的发货时间文案**（2026-10-15 补，只「按规格设置发货时间」模式用）。
+    #: 真机抓包：该模式下价格库存表多一列「发货时间」，**每行各自一条
+    #: `skuData[].deliveryTime`**。值形如 `「现货 / 48小时」`、`「预售 / 15天」`，
+    #: 由后端 `build_delivery_time` 解析成 `{type, time}`。
+    #: ⚠️ 没有它，用户配的「全款预售15天」会被平台默认值覆盖成「现货48小时」
+    #: （用户报障 2026-10-15）。
+    delivery_label: str | None = Field(default=None, max_length=64, description="该行发货时间文案")
+    #: 现货+预售模式那列「发货时效」（`15天` / `20天` …）。
+    ship_aging: str | None = Field(default=None, max_length=32, description="该行发货时效")
 
 class ItemDraftCreateRequest(BaseModel):
     """**新增商品 → 存草稿箱**（设计 23 §3.1）。

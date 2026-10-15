@@ -1,7 +1,24 @@
 /** 真包端到端：规则解析 + 精确对齐是否 26/26 命中（含「不误配前缀重叠」检查）。 */
 import { describe, expect, it } from "vitest";
-import { localSkuImageList, lookupLocalSkuImage, skuImageNameFromFile } from "./precheck-publish";
+import {
+  localSkuImageList,
+  lookupLocalSkuImage,
+  skuImageNameFromFile,
+  type PriceMappingRow,
+} from "./precheck-publish";
 import type { PrecheckMedia } from "./precheck-publish";
+
+/* ------------------------------------------------------------------ *
+ * ⚠️ **公共映射夹具**（2026-10-15 口径变更：所有点一律走映射，移除写死逻辑）
+ *
+ * 测试再也不能靠「列名叫 sku名称 就被认出来」了 —— 那正是本轮移除的行为。
+ * 这份映射对应下面夹具表的列名。
+ * ------------------------------------------------------------------ */
+const M: PriceMappingRow[] = [
+  { target: "sku_name", source: "sku名称" },
+  { target: "stock", source: "库存" },
+];
+
 
 const FILES = [
   "SKU01_颜色分类(【中古风】实木三斗柜).jpg",

@@ -60,17 +60,21 @@ import type { Dayjs } from "dayjs";
 import { generateShortTitle, predictProperties } from "../../../lib/api";
 import type { AfterSaleRule } from "../../../lib/api";
 import { buildImageUrls, spec_combinations } from "../../../lib/publish-config";
+import { withoutItemNo } from "../../../lib/publish-property-fields";
 import {
   applyBatchRule,
   buildSkuFillPlan,
   clampPriceMultiplier,
   DEFAULT_PRICE_MULTIPLIER,
   applyPriceMultiplier,
+  defaultPriceMappingRows,
   DEFAULT_PRICE_MAPPING,
   DEFAULT_PRICE_FALLBACK_SOURCE,
+  missingRequiredPriceTargets,
   isPriceMappingReady,
   PRICE_TARGET_LABELS,
   PRICE_TARGET_OPTIONS,
+  PRICE_TABLE_TARGETS,
   priceSourceOptions,
   type SkuFillPlan,
   validatePriceMapping,
@@ -1051,6 +1055,16 @@ export type PriceRow = {
   /** **行级启用状态**（用户口径 2026-10-10，真机 `skuData[].available`）：
    *  默认启用；停用后该 SKU 不会被消费者看到。`undefined` = 启用。 */
   available?: boolean;
+  /** ⚠️ **该行的发货时间文案**（只「按规格设置发货时间」模式用）。
+   *
+   *  真机（2026-10-15 抓包）：「按规格」时价格库存表多一列「发货时间」，
+   *  每行各自选（下拉：现货〔当日发货/24小时/48小时〕| 预售〔时段预售/定时预售〕）
+   *  ⇒ **每行一条 `skuData[].deliveryTime`**（这才是我方该提交的东西）。
+   *  值形如 `「现货 / 48小时」`、`「预售 / 15天」`；后端 `build_delivery_time`
+   *  把它解析成 `{type, time}`。 */
+  delivery_label?: string;
+  /** 现货+预售模式的那列「发货时效」（15天 / 20天 …）。 */
+  ship_aging?: string;
 };
 
 /** **第二步配置快照**（用户口径 2026-10-10：「确认发布提交的参数应是第二步配置的完整参数」
@@ -1110,6 +1124,11 @@ export type ConfigSnapshot = {
 };
 
 export type PublishConfigStep2Props = {
+  /** ⚠️ **清空信号**（2026-10-15）：换数据包时向导递增它 ⇒ 本组件清掉自己的
+   *  SKU 导入产物（规格/规格值/规格图/开关/挂起值）。
+   *  ⚠️ 用信号而**不是** `key` 重挂 —— 重挂会连带第一步一起重挂（实测自伤：
+   *  第一步被打回「还没有加载数据包」空态，且「正在读取」文案永不消失）。 */
+  resetToken?: number;
   /** 已选类目链路（展示用）。 */
   categoryPath: string[];
   /** 已选类目 id（拉属性 / 调平台接口用）。 */
@@ -1173,6 +1192,22 @@ export type PublishConfigStep2Props = {
   specImportSources?: string[];
   /** **预检表格的全部列名**（价格库存映射的来源列候选 —— 用户口径「动态可调整」）。 */
   priceSourceColumns?: string[];
+  /** **上报两份映射草稿给向导**（用户口径 2026-10-15）。
+   *
+   *  ⚠️ 为什么必须上报：第一步的 SKU 表**支持手动删列**，而删列前的二次确认要
+   *  「点名该列已被 XX 映射使用」（用户原话：「会同步删除已经映射使用的 XXX 配置参数」）。
+   *  那两份映射的**真相源在第二步**（本组件），第一步拿不到 ⇒ 必须上抛。
+   *  ⚠️ 只上抛**最小形状**（`source` / `target` 字符串数组），不上抛整个 state ——
+   *  第一步只需要「这列有没有被用到」，多传会让两边耦合。
+   */
+  onMappingDraftChange?: (draft: {
+    specSources: string[];
+    priceSources: string[];
+    /** ⚠️ **完整映射行**（提交体要按它取列值，不能只给来源名单）。 */
+    priceMapping: PriceMappingRow[];
+    /** 售价回落列（`原价` 取不到时用它）。 */
+    priceFallbackSource: string;
+  }) => void;
   /** 按**用户配置的**列映射重新导出通过行（向导持有表格与勾选态，只有它能重算）。 */
   onRebuildRows?: (
     priceMapping: readonly PriceMappingRow[],
@@ -1509,6 +1544,58 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
    * （默认**文本精确匹配**，可手改），确认后自动解析并加载规格值 / 价格 / 库存 / 规格图。
    */
   const [specImportOpen, setSpecImportOpen] = useState(false);
+  /** **清掉本弹窗管辖的历史数据**（用户口径 2026-10-15）。
+   *
+   *  > 「点击选择重新加载资源后，**当前窗口内的所有历史数据均应被清除**，
+   *  >   目前第二步的**商品规格和价格库存列均未清除**」
+   *
+   *  ⚠️ **单一实现**：点「选择」重开时清一次，导入时再清一次 —— 两处共用本函数，
+   *  否则迟早漂移成「一处清、一处不清」（用户看到的正是这个现象）。
+   *  ⚠️ 清的是**本弹窗管辖的两块**：商品规格（类型 + 值）与价格库存行。
+   *  主图 / 详情图 / 属性**不属于本弹窗**，一律不动。
+   *  ⚠️ **规格图也一起清**（它按「维度+值」存，维度清了图留着会变成孤儿条目，
+   *  下次同名的维度会**复用到旧图**，用户看到「没传过却已有图」）。
+   */
+  const clearImportTargets = (opts?: { keepPending?: boolean }) => {
+    setSpecTypes([]);
+    setSpecValues({});
+    setSpecImages({});
+    props.onPriceRowsChange([]);
+    //: 👆 挂起值：清（默认）—— 否则清完价格表后，旧挂起值会在下一轮重建里又落回去。
+    //: ⚠️ **导入那一刻例外**（`keepPending: true`）：调用方刚设好**新的**挂起值，
+    //: 清了就白设（那是「导入成功但一行没值」的老 bug 形态）。
+    if (!opts?.keepPending) setPendingSpecFills([]);
+  }
+
+  /** ⚠️ **换数据包 ⇒ 清掉本组件的 SKU 导入产物**（用户报障 2026-10-15：
+   *  「重新读取资源后，SKU 导入的数据未清空」）。
+   *
+   *  向导在换数据包成功后递增 `resetToken` ⇒ 这里响应式地调 `clearImportTargets()`。
+   *  ⚠️ **不用 `key` 重挂**：实测重挂会把第一步 `PrecheckStep` 一起打回初始态
+   *  （两行资源选择框 + 「正在读取本地数据包…」永不消失）。
+   *  ⚠️ 首次挂载（`resetToken` 为 0 / undefined）**不执行** —— 否则弹窗一打开
+   *  就把用户已配的东西清掉。
+   */
+  const lastResetTokenRef = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    const token = props.resetToken;
+    if (token === undefined) return;
+    if (lastResetTokenRef.current === undefined) {
+      //: 首次见到 ⇒ 只记住，不清（打开弹窗不该清空）。
+      lastResetTokenRef.current = token;
+      return;
+    }
+    if (token === lastResetTokenRef.current) return;
+    lastResetTokenRef.current = token;
+    clearImportTargets();
+    //: eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.resetToken]);;
+  /** ⚠️ **打开弹窗时重置映射**为「预置 4 行 + 来源全空」（用户口径 2026-10-15）。
+   *
+   *  ⚠️ 不重置的后果：用户上次配了一半取消，这次打开看到的是半截配置，
+   *  而他以为那是「默认状态」—— 会直接点确认导入。
+   */
+  const resetPriceMappingOnOpen = () => setPriceMapping(defaultPriceMappingRows());
   /** 映射草稿（**成对关系行**，最多 2 行；两列均必填且不许重复）。 */
   const [importMapping, setImportMapping] = useState<SpecMappingRow[]>([]);
   /** 导入执行态（跑的时候禁用「确认导入」并显示进度文案）。 */
@@ -1539,9 +1626,51 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
   const [priceMultiplier, setPriceMultiplier] = useState<number>(DEFAULT_PRICE_MULTIPLIER);
   /** **价格库存列映射**（用户口径：动态可调整；**默认 = 现行那套逻辑**）。
    *  `售价 ← 原价`、`库存 ← 库存`、`商家编码 ← ID`。 */
+  /** ⚠️ **价格库存映射关系表不设默认值**（用户口径 2026-10-15：
+   *  「价格库存映射关系表不再设置默认值」）。
+   *
+   *  旧实现是 `DEFAULT_PRICE_MAPPING.map(...)` —— 打开弹窗就预填好两三行
+   *  「售价 ← 原价」「库存 ← 库存」… 那会让用户**以为映射已经配好了**，
+   *  而实际来源列是否选对、他有没有别的意图，只有他自己知道。
+   *  ⇒ 初始为空数组，用户从「+」自己加（新增行两列都空，与口径一致）。
+   *  ⚠️ `DEFAULT_PRICE_MAPPING` 常量**保留**（下方「按现行逻辑一键填充」按钮仍用它）——
+   *  删常量等于把「快速回到默认配置」的路也一起删了。 */
   const [priceMapping, setPriceMapping] = useState<PriceMappingRow[]>(
-    DEFAULT_PRICE_MAPPING.map((r) => ({ ...r })),
+    //: ⚠️ **预置 4 行**（SKU图/售价/市场价/库存，来源全空）—— 用户口径 2026-10-15：
+    //: 「右侧的价格库存中，SKU图、售价、市场价、库存**所有必须配置**，
+    //:  弹窗打开时就**默认展示**，它们对应的左侧下拉**默认为空**展示『请选择』文本」。
+    //: ⚠️ 与「不设默认值」不矛盾：**不预填来源列**（那是猜），但**行要摆出来**
+    //: （让用户知道这四项必须配）。
+    defaultPriceMappingRows(),
   );
+
+  /** ⚠️ **「还不能导入」的原因清单**（用户口径 2026-10-15：未配映射要**提示他去配**，
+   *  不能只把按钮变灰让他猜）。
+   *
+   *  ⚠️ **单一实现**：按钮的 `disabled` 与弹窗里的提示都读它 ——
+   *  两处各写一份判据迟早漂移成「按钮不能点、提示说没问题」。
+   *  ⚠️ 只列**用户能自己解决**的项，并按他配的顺序（先规格映射、再价格库存映射）。
+   */
+  const importBlockers = useMemo(() => {
+    const out: string[] = [];
+    if ((props.specImportSources ?? []).length === 0) {
+      out.push("第一步还没有预检通过且勾选的 SKU 行");
+    } else if (!isSpecMappingReady(importMapping)) {
+      out.push("请先配置「商品 SKU 映射关系」（左侧选规格分类、右侧选平台规格类型）");
+    }
+    if (!isPriceMappingReady(priceMapping)) {
+      out.push("请先配置「价格库存映射关系表」（左侧选预检通过列、右侧选价格库存列）");
+    } else {
+      //: ⚠️ **四项必配**（用户口径 2026-10-15：「右侧的价格库存中，SKU图、售价、
+      //: 市场价、库存所有**必须配置**」）。说清**是哪几项**没配 —— 「有必填项未填」
+      //: 等于没说，用户还得自己一行行找。
+      const missing = missingRequiredPriceTargets(priceMapping);
+      if (missing.length > 0) {
+        out.push(`「${missing.join("、")}」还没有选来源列`);
+      }
+    }
+    return out;
+  }, [props.specImportSources, importMapping, priceMapping]);
   /** 售价的滞留来源列（原价取不到时用它，**不乘倍率**）。默认「计算价格」。 */
   const [priceFallbackSource, setPriceFallbackSource] = useState<string>(
     DEFAULT_PRICE_FALLBACK_SOURCE,
@@ -1863,10 +1992,13 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
       //: 三者都在同一次 React 批处理里 ⇒ 重建 effect 那一轮同时看到
       //: 「新规格（决定有哪些行）+ 挂起值（决定填什么）」⇒ 一次算对。
       //: 反序（先清后挂）会让重建先跑一轮、把挂起当空 ⇒ 行建好了但没值。
+      //: ⚠️ **顺序至关重要**：先挂起 fills，**再**清表 + 写规格。
+      //: 三者都在同一次 React 批处理里 ⇒ 重建 effect 那一轮同时看到
+      //: 「新规格（决定有哪些行）+ 挂起值（决定填什么）」⇒ 一次算对。
+      //: ⚠️ 清表走 `clearImportTargets`（**单一实现**，与「点选择重开」共用），
+      //: 但传 `keepPending` —— 刚挂的新值不能被它清掉（那是「导入成功却一行没值」的成因）。
       setPendingSpecFills(plan.rows);
-      setSpecValues({});
-      setSpecTypes([]);
-      props.onPriceRowsChange([]);
+      clearImportTargets({ keepPending: true });
       const dimPlan = plan.dims[0];
       //: ① 规格类型 + 规格值（合并去重，不覆盖用户已填的）。
       //: 逐维度落规格类型与值（上面已清空 ⇒ 这里是**纯写入**，不会再叠历史值）。
@@ -1949,6 +2081,22 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
     }
   }, [props, importMapping, priceMapping, priceFallbackSource, priceMultiplier, setSpecImage]);
 
+  /** ⚠️ **上报两份映射草稿**给向导（第一步删列时的二次确认要「点名」用）。
+   *
+   *  ⚠️ 依赖数组**必须带上 `props.onMappingDraftChange`** ——
+   *  漏了的话回调里永远是首次渲染时那份（第一步拿到的是过期草稿，提示会说错人）。
+   */
+  useEffect(() => {
+    props.onMappingDraftChange?.({
+      specSources: importMapping.map((r) => r.source).filter((x) => !!x.trim()),
+      priceSources: priceMapping.map((r) => r.source).filter((x) => !!x.trim()),
+      //: ⚠️ 带上**完整映射行**（不是只有来源名单）—— 提交体要按 `target → source`
+      //: 取列值。只给名单的话，取值那边仍只能猜列名（用户口径：全部使用映射关系）。
+      priceMapping: priceMapping.map((r) => ({ ...r })),
+      priceFallbackSource,
+    });
+  }, [importMapping, priceMapping, priceFallbackSource, props.onMappingDraftChange]);
+
   /** 规格值 → **价格及库存表**同步（用户口径 2026-10-09：「添加规格时价格及库存列表
    *  应同步添加」）。
    *
@@ -1994,6 +2142,8 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
         market_price: fill.marketPrice,
         stock: fill.stock,
         seller_code: fill.sellerCode,
+        //: ⚠️ 条形码也**按映射**写（用户口径 2026-10-15：下拉漏了它 ⇒ 配不出来）。
+        barcode: fill.barcode,
       };
     });
     //: 落过值就把挂起清掉（否则每次外层回传都重写一遍，用户手改价会被反复覆盖）。
@@ -2001,8 +2151,23 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
       const appliedAll = visible.every((c) => !pending.has(c.spec) || true);
       if (appliedAll) setPendingSpecFills([]);
     }
-    //: ⚠️ 没有规格值时**不覆盖**外层给的那一行裸价（`default`），否则页面上价表会空掉。
-    if (next.length === 0) return;
+    //: ⚠️ `next` 为空要**分两种状态**（用户报障 2026-10-15：「所有商品规格全部取消后
+    //:   价格及库存列表关联的数据**未清空**」）：
+    //:
+    //:   · **`specTypes.length === 0`（用户把规格全取消了）⇒ 必须清空**：
+    //:     没有规格 = 没有 SKU 组合 = 价格库存表**不该留任何行**。旧实现一律
+    //:     `return` ⇒ 外层 `props.priceRows` 保留上一轮的 4 行 ⇒ 用户看到
+    //:     「规格全没勾，价表还占着 4 行带值的行」（本次报障）。
+    //:   · **`specTypes.length > 0` 但 `visible` 为空（规格勾了、值还没填，
+    //:     或被 `passedSpecs` 过滤光）⇒ 不清**：此时是「过程态」，外层可能给了
+    //:     一行裸价占位（`default`），清掉会让页面价表**闪空**。
+    if (next.length === 0) {
+      if (specTypes.length === 0 && props.priceRows.length > 0) {
+        //: 清空（只在真有余行时上抛 —— 否则每次渲染都上抛空数组，自触发死循环）。
+        props.onPriceRowsChange([]);
+      }
+      return;
+    }
     //: 内容相同就不上抛（否则 effect 自触发死循环）。
     const same =
       next.length === props.priceRows.length &&
@@ -2045,15 +2210,53 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
     [specTypes],
   );
 
-  /** 切换规格类型 —— 上限 2，超限不生效。 */
+  /** 切换规格类型 —— 上限 2，超限不生效。
+   *
+   *  ⚠️ **取消勾选要连带清除该规格的「全部 SKU 数据」**（用户口径 2026-10-15）：
+   *  > 「当商品规格**切换**时，被切换到的规格类型对应的数据**也应同步被清除**」
+   *  > 「该规格下**全部 sku 数据**，包括商品规格与商品规格关联的**价格库存表中的关联数据**」
+   *
+   *  ⚠️ 旧实现只 `setSpecTypes(filter)` —— **只摘掉类型名**，而该规格的
+   *  规格值 / 规格图 / 价格库存行**全留着** ⇒ 用户看到「已经取消勾选了，
+   *  规格值还在、价格表还占着行」（数据残留 + 表里出现对不上的行）。
+   *  ⚠️ 三块一起清，否则会留下**孤儿数据**：
+   *    · `specValues[name]` —— 该规格的值；
+   *    · `specImages[name]` —— 按「维度+值」存的图（不清 ⇒ 下次同名维度**复用到旧图**）；
+   *    · 价格库存行 —— 由重建 effect 按新 `specTypes` 重算笛卡尔积，
+   *      被切走的维度自然**不再参与组合** ⇒ 那批行消失（**不需要手工删行**，
+   *      手工删反而会与重建 effect 打架）。
+   */
   const toggleSpecType = useCallback(
     (name: string, checked: boolean) => {
       if (checked) {
         if (specTypes.length >= 2) return;
         setSpecTypes([...specTypes, name]);
-      } else {
-        setSpecTypes(specTypes.filter((x) => x !== name));
+        return;
       }
+      setSpecTypes(specTypes.filter((x) => x !== name));
+      //: ⚠️ **连带清该规格的 sku 数据**（规格值 + 规格图）。
+      //: 价格库存表**不用手工清** —— 重建 effect 按新 `specTypes` 重算笛卡尔积，
+      //: 被切走的维度不再参与组合 ⇒ 那批行自然消失（手工删会与 effect 打架）。
+      setSpecValues((prev) => {
+        if (!(name in prev)) return prev;
+        const next = { ...prev };
+        delete next[name];
+        return next;
+      });
+      setSpecImages((prev) => {
+        if (!(name in prev)) return prev;
+        const next = { ...prev };
+        delete next[name];
+        return next;
+      });
+      //: ⚠️ **规格图开关**也要清（`specImageEnabled`）—— 不清的话下次勾回同名维度，
+      //: 开关会**继承上次的状态**，用户看到「新勾的规格图开关是开的」（他以为默认关）。
+      setSpecImageEnabled((prev) => {
+        if (!(name in prev)) return prev;
+        const next = { ...prev };
+        delete next[name];
+        return next;
+      });
     },
     [specTypes],
   );
@@ -2170,14 +2373,26 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
       freightTemplateName:
         props.shippingTemplates.find((t) => t.template_id === effectiveFreightTemplateId)?.name ?? "",
       //: 商品属性：从**字段定义 + 已填值**构造（只带已填的；值名 → value_id 若平台给了）。
+      //:
+      //: ⚠️⚠️ **「货号」必须排除在外**（用户报障 2026-10-15：「相同商品信息和类目，
+      //:   平台后台其他属性下存在货号，本地项目上传提示**无货号属性**」）。
+      //:   · 「货号」是前端**自己合成**的 UI 项（平台 `desc_properties` **不下发**它，
+      //:     见 `lib/publish-property-fields.ts` 的 `buildItemNoProperty`）；
+      //:   · 它走**顶层字段** `body["articleNo"]`（真机 `itemData[0].articleNo`）；
+      //:   · 塞进 `attributes[]` ⇒ 平台把它当成一个 **`attributeId` = `articleNo`
+      //:     的类目属性**，而类目里**不存在**这个属性 ⇒ 报
+      //:     「当前类目不存在[货号]属性，请刷新页面后再试」。
+      //:   ⚠️ 判据用 `withoutItemNo`（id **或** 名）而不是只比 id：平台某些类目会把
+      //:     属性归一化成非 `articleNo` 的 id、名字仍叫「货号」⇒ 只比 id 会漏。
       //: ⚠️ 真机形状（千帆 bundle `8091.31a2a571.js` 逐字逆出，2026-10-10）：
       //:   · **多选属性**（`attributeValueType === 2`）⇒ **一条记录**，值放
       //:     `attributeValueList: [{attributeValue, attributeValueId}]`（数组，**最多 3 个**）
       //:   · **单选属性** ⇒ 标量 `attributeValue` + `attributeValueId`
       //: 早期实现「**每个选中值各推一条**」⇒ 多选值被当成多条属性 ⇒ 真机报
       //: 「attributes - **多选属性最多设置3个属性值**」（用户截图 2026-10-10）。
-      attributes: [...(props.keyProperties ?? []), ...(props.otherProperties ?? [])].flatMap(
+      attributes: [...(props.keyProperties ?? []), ...withoutItemNo(props.otherProperties ?? [])].flatMap(
         (f): PublishAttributeSnapshot[] => {
+          //: eslint-disable-next-line @typescript-eslint/no-unused-vars
         const raw = propValues[f.id];
         const list = (Array.isArray(raw)
           ? raw
@@ -2498,7 +2713,7 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
         type="info"
         showIcon
         icon={<InfoCircleOutlined />}
-        message="预填信息供参考，请仔细检查每项信息，如信息有误，应修改后发布"
+        message="预填信息仅供参考，请检查后发布"
         style={{ marginBottom: 12 }}
       />
 
@@ -2568,7 +2783,7 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
             >
               智能生成
             </Button>
-            <Tooltip title="关键属性可显著影响消费者的购买意向，提升商品转化；完整的商品属性利于提升搜索流量。">
+            <Tooltip title="关键属性影响转化与搜索流量，建议填全。">
               <InfoCircleOutlined className="section-help-icon" />
             </Tooltip>
           </Space>
@@ -2579,7 +2794,7 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
           <span className="prop-group-title">
             关键属性 {filledCount(props.keyProperties, propValues)}/{props.keyProperties.length}
           </span>
-          <Tooltip title="关键属性可显著影响消费者的购买意向，提升商品转化">
+          <Tooltip title="关键属性影响转化，建议填全">
             <InfoCircleOutlined className="section-help-icon" />
           </Tooltip>
         </div>
@@ -2901,10 +3116,18 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
               icon={<ImportOutlined />}
               disabled={(props.specImportSources ?? []).length === 0}
               onClick={() => {
-                //: 打开时用**默认映射行**（右侧取同名平台维度，最多 2 行）初始化。
-                setImportMapping(
-                  defaultSpecMappingRows(props.specImportSources ?? [], props.specAttributes ?? []),
-                );
+                //: ⚠️ **不再自动带入默认映射**（用户口径 2026-10-14：
+                //: 「用户第一步需**手动勾选**商品规格」）—— 打开时清空，
+                //: 用户勾了哪个才建哪一行（不勾 = 不导入）。
+                setImportMapping([]);
+                //: ⚠️ **价格库存映射重置为「预置 5 行 + 来源全空」**（用户口径 2026-10-15）。
+                resetPriceMappingOnOpen();
+                //: ⚠️ **「点击选择重新加载资源后，当前窗口内的所有历史数据均应被清除」**
+                //: （用户口径 2026-10-15）——清的是**本弹窗管辖的两块**：
+                //: 商品规格（规格类型 + 规格值）与价格库存行。主图/详情图/属性不归它管。
+                //: ⚠️ 与「导入时清历史」**同一份实现**（`clearImportTargets`）——
+                //: 两处各写一份迟早漂移成「一处清一处不清」。
+                clearImportTargets();
                 setImportDetail("");
                 setSpecImportOpen(true);
               }}
@@ -2924,7 +3147,7 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
             （宁可漏填，也不把值填错维度）。 */}
         <Modal
           open={specImportOpen}
-          title="从预检 SKU 导入规格 / 价格 / 库存"
+          title="导入sku数据"
           centered
           width={680}
           okText="确认导入"
@@ -2936,10 +3159,9 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
           okButtonProps={{
             loading: importRunning,
             //: 两列必填、不重复、最多两行（用户口径）—— 不满足则**不能**确认导入。
-            disabled:
-              (props.specImportSources ?? []).length === 0 ||
-              !isSpecMappingReady(importMapping) ||
-              !isPriceMappingReady(priceMapping),
+            //: ⚠️ 判据抽到 `importBlockers`（**单一实现**）—— 按钮的 disabled 与
+            //: 上面那条「还差什么」提示必须同源，否则会出现「按钮说不能导、提示说能导」。
+            disabled: importBlockers.length > 0,
           }}
           //: 用户口径 2026-10-11：「点击确认导入后**不允许关闭弹窗**，除非点击
           //: 取消按钮才可以关闭」。⇒ 跑的时候：蒙版不可点关、右上角 X 不可点；
@@ -2972,40 +3194,74 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
             style={{ width: "100%" }}
             wrapperClassName="import-spin-wrapper"
           >
-          {/* ══════════ 区域一：商品 SKU 映射关系 ══════════
-              （用户口径 2026-10-11：两列名 =「预选通过规格类型」「平台规格类型」；
-               最多 2 行、两列各自不许重复、都不能为空） */}
+          {/* ══════════ 区域一：手选商品规格 → 平台规格 ══════════
+              **用户口径 2026-10-14**：
+              「将**固定的规格分类移除**，相关逻辑也移除，第二步参数配置中，
+               再 SKU 自动导入数据弹窗中**用户第一步需手动勾选商品规格**」
+
+              ⚠️ 此前左侧是「预选通过规格类型」下拉（候选来自第一步那张**自造的
+              『规格分类』列**）。那列已整条退场 ⇒ **来源不复存在**，改为
+              **用户自己勾选**：勾哪些商品规格，就导入哪些（勾了才要映射）。
+              ⚠️ 候选仍来自预检通过的行（`row.specName` = `sku名称` 冒号前的部分）。
+              ⚠️ **名称里没有冒号时**（真实包 2026-10-15：`A款`）→ `specName` 退化为
+              `SINGLE_SPEC_NAME`（`规格`）**一个维度**，值 = 整个名称 ——
+              不再是空（空会让左侧候选整块消失、按钮恒灰）。 */}
           <div className="import-section">
             <div className="import-section-title">商品 SKU 映射关系</div>
+            {/* ⚠️ **用户口径 2026-10-15**：
+                「应拿第一步预检通过的**规格分类列去重**与平台类目生成的商品规格
+                  下拉选择映射，且**不允许重复选择**，**最多两个映射关系**，
+                  **布局参考同一个弹窗中的其它部分**」
+
+                ⚠️ 与旧实现的差别（旧的是「勾选 + 下拉」紧跟在候选名后面）：
+                  · 来源 = 第一步那张**「规格分类」列去重**（不再从 `sku名称` 拆冒号）；
+                  · 布局 = **表格**（与下面「价格库存映射关系表」同款：两列 + 操作列）；
+                  · 条数上限 = **2**（到 2 条不再给「+」）。
+            */}
             <Table
               size="small"
-              rowKey={(_, i) => String(i)}
+              rowKey={(_, i2) => String(i2)}
               pagination={false}
               dataSource={importMapping}
-              locale={{ emptyText: "还没有规格关系，请点下方「添加规格关系」" }}
+              //: ⚠️ **空表时也要能加**（真 bug，用户实测 2026-10-15）：
+              //: 旧写法把「+」只挂在**行的操作列**上 ⇒ 零行时**没有操作列**，
+              //: 用户看到「还没有映射，请点操作列的 + 添加」却**根本找不到那个 +**
+              //: ⇒ 功能等于不存在。⇒ 空态直接渲染一个**可点的添加按钮**。
+              locale={{
+                emptyText: (
+                  <Button
+                    size="small"
+                    type="link"
+                    icon={<PlusOutlined />}
+                    onClick={() => setImportMapping([{ source: "", target: "" }])}
+                  >
+                    添加映射关系
+                  </Button>
+                ),
+              }}
               columns={[
                 {
-                  title: "预选通过规格类型",
+                  title: "规格分类",
                   key: "source",
-                  render: (_: unknown, row: SpecMappingRow, i: number) => {
+                  render: (_: unknown, row: SpecMappingRow, i2: number) => {
                     const others = importMapping
-                      .filter((r, j) => j !== i && r.source)
-                      .map((r) => r.source);
+                      .filter((r, j2) => j2 !== i2 && r.source.trim())
+                      .map((r) => r.source.trim());
                     return (
                       <Select
                         style={{ width: "100%" }}
                         value={row.source || undefined}
-                        placeholder="请选择（预检通过）"
+                        placeholder="请选择"
                         status={!row.source.trim() ? "error" : undefined}
                         onChange={(v) =>
                           setImportMapping((prev) =>
-                            prev.map((r, j) => (j === i ? { ...r, source: v ?? "" } : r)),
+                            prev.map((r, j2) => (j2 === i2 ? { ...r, source: v ?? "" } : r)),
                           )
                         }
                         options={(props.specImportSources ?? []).map((name) => ({
                           label: name,
                           value: name,
-                          //: 用户口径：**两列均不支持重复选择** ⇒ 已被别的行用掉的不给选。
+                          //: ⚠️ **不允许重复选择**（用户原话）。
                           disabled: others.includes(name),
                         }))}
                       />
@@ -3015,25 +3271,24 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
                 {
                   title: "平台规格类型",
                   key: "target",
-                  render: (_: unknown, row: SpecMappingRow, i: number) => {
-                    const others = importMapping
-                      .filter((r, j) => j !== i && r.target)
-                      .map((r) => r.target);
+                  render: (_: unknown, row: SpecMappingRow, i2: number) => {
+                    const others = importMapping.filter((r, j2) => j2 !== i2).map((r) => r.target);
                     return (
                       <Select
                         style={{ width: "100%" }}
                         value={row.target || undefined}
-                        placeholder="请选择（平台类目）"
+                        placeholder="请选择"
                         status={!row.target.trim() ? "error" : undefined}
                         onChange={(v) =>
                           setImportMapping((prev) =>
-                            prev.map((r, j) => (j === i ? { ...r, target: v ?? "" } : r)),
+                            prev.map((r, j2) => (j2 === i2 ? { ...r, target: v ?? "" } : r)),
                           )
                         }
-                        options={(props.specAttributes ?? []).map((a) => ({
-                          label: a.name,
-                          value: a.name,
-                          disabled: others.includes(a.name),
+                        options={(props.specAttributes ?? []).map((d) => ({
+                          label: d.name,
+                          value: d.name,
+                          //: 平台规格类型同样**不许重复**。
+                          disabled: others.includes(d.name),
                         }))}
                       />
                     );
@@ -3043,49 +3298,42 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
                   title: "操作",
                   key: "op",
                   width: 110,
-                  render: (_: unknown, __: SpecMappingRow, i: number) => {
-                    //: 用户口径 2026-10-11：**添加入口放操作列**，点击加一行。
-                    //: 只给**最后一行**渲染「添加」，逐行都渲染会出现多个加号
-                    //: （点哪个都一样，反而让人以为有区别）；上限 2 行时置灰。
-                    const isLast = i === importMapping.length - 1;
-                    const full = importMapping.length >= MAX_SPEC_MAPPING_ROWS;
-                    return (
-                      <Space size={0}>
-                        <Button
-                          size="small"
-                          type="link"
-                          danger
-                          icon={<DeleteOutlined />}
-                          //: 只剩一行时不给删（映射至少要有一行，否则区域空着没意义）。
-                          disabled={importMapping.length <= 1}
-                          onClick={() => setImportMapping((prev) => prev.filter((_, j) => j !== i))}
-                        />
-                        {isLast && (
-                          <Tooltip
-                            title={
-                              full
-                                ? `最多 ${MAX_SPEC_MAPPING_ROWS} 行`
-                                : "添加一行规格关系"
+                  render: (_: unknown, __: SpecMappingRow, i2: number) => (
+                    <Space size={0}>
+                      <Button
+                        size="small"
+                        type="link"
+                        danger
+                        icon={<DeleteOutlined />}
+                        onClick={() =>
+                          setImportMapping((prev) => prev.filter((_, j2) => j2 !== i2))
+                        }
+                      />
+                      {i2 === importMapping.length - 1 && importMapping.length < MAX_SPEC_MAPPING_ROWS && (
+                        <Tooltip title="添加一行映射">
+                          <Button
+                            size="small"
+                            type="link"
+                            icon={<PlusOutlined />}
+                            //: 与价格库存一致：**新增行两列都空，不设默认值**。
+                            onClick={() =>
+                              setImportMapping((prev) => [...prev, { source: "", target: "" }])
                             }
-                          >
-                            <Button
-                              size="small"
-                              type="link"
-                              icon={<PlusOutlined />}
-                              disabled={full}
-                              onClick={() =>
-                                setImportMapping((prev) => [...prev, { source: "", target: "" }])
-                              }
-                            />
-                          </Tooltip>
-                        )}
-                      </Space>
-                    );
-                  },
+                          />
+                        </Tooltip>
+                      )}
+                    </Space>
+                  ),
                 },
               ]}
             />
-            {/* 逐行错误**即时**显示（必填 / 重复），不让用户点到「确认导入」才知道。 */}
+            {importMapping.length >= MAX_SPEC_MAPPING_ROWS && (
+              <div style={{ marginTop: 4 }}>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  {`最多 ${MAX_SPEC_MAPPING_ROWS} 个映射关系。`}
+                </Text>
+              </div>
+            )}
             {validateSpecMapping(importMapping).map((msg) => (
               <div key={msg} style={{ marginTop: 4 }}>
                 <Text type="danger" style={{ fontSize: 12 }}>
@@ -3106,39 +3354,23 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
               rowKey={(_, i) => String(i)}
               pagination={false}
               dataSource={priceMapping}
-              locale={{ emptyText: "还没有映射，请点操作列的 + 添加" }}
+              //: ⚠️ 同「商品 SKU 映射关系」：空表时也要有可点的「+」——
+              //: 去默认值后初始就是空表，只留一句话会让用户卡住（用户实测 2026-10-15）。
+              locale={{
+                emptyText: (
+                  <Button
+                    size="small"
+                    type="link"
+                    icon={<PlusOutlined />}
+                    onClick={() => setPriceMapping([{ target: "", source: "" }])}
+                  >
+                    添加映射关系
+                  </Button>
+                ),
+              }}
               columns={[
                 {
                   //: ⚠️ 用户口径 2026-10-11：**两边均应与商品 SKU 映射关系一样自由选择**。
-                  title: "价格库存列",
-                  key: "target",
-                  render: (_: unknown, row: PriceMappingRow, i: number) => {
-                    const others = priceMapping
-                      .filter((r, j) => j !== i)
-                      .map((r) => r.target);
-                    return (
-                      <Select
-                        style={{ width: "100%" }}
-                        value={row.target || undefined}
-                        placeholder="请选择"
-                        //: 必填（用户口径「不能为空」）⇒ 未选即红框。
-                        status={!row.target ? "error" : undefined}
-                        onChange={(v) =>
-                          setPriceMapping((prev) =>
-                            prev.map((r, j) => (j === i ? { ...r, target: v as PriceTargetKey } : r)),
-                          )
-                        }
-                        options={PRICE_TARGET_OPTIONS.map((t) => ({
-                          label: PRICE_TARGET_LABELS[t],
-                          value: t,
-                          //: 目标列不许重复。
-                          disabled: others.includes(t),
-                        }))}
-                      />
-                    );
-                  },
-                },
-                {
                   title: "预检通过列",
                   key: "source",
                   render: (_: unknown, row: PriceMappingRow, i: number) => {
@@ -3161,6 +3393,38 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
                           value: name,
                           //: 来源列也不许重复映射。
                           disabled: others.includes(name),
+                        }))}
+                      />
+                    );
+                  },
+                },
+                {
+                  title: "价格库存列",
+                  key: "target",
+                  render: (_: unknown, row: PriceMappingRow, i: number) => {
+                    const others = priceMapping
+                      .filter((r, j) => j !== i)
+                      .map((r) => r.target);
+                    return (
+                      <Select
+                        style={{ width: "100%" }}
+                        value={row.target || undefined}
+                        placeholder="请选择"
+                        //: 必填（用户口径「不能为空」）⇒ 未选即红框。
+                        status={!row.target ? "error" : undefined}
+                        onChange={(v) =>
+                          setPriceMapping((prev) =>
+                            prev.map((r, j) => (j === i ? { ...r, target: v as PriceTargetKey } : r)),
+                          )
+                        }
+                        //: ⚠️ 用**价格库存表列**清单（不是 `PRICE_TARGET_OPTIONS` 全量）——
+                        //: 全量会把「售价回落列」「规格分类」也列进来，而它们不是这张表的列
+                        //: （用户报障 2026-10-15：「下拉框与价格及库存存在不一致的列，应保持一致」）。
+                        options={PRICE_TABLE_TARGETS.map((t) => ({
+                          label: PRICE_TARGET_LABELS[t],
+                          value: t,
+                          //: 目标列不许重复。
+                          disabled: others.includes(t),
                         }))}
                       />
                     );
@@ -3208,53 +3472,25 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
             ))}
           </div>
 
-          {/* ══════════ 区域三：其它规则 ══════════ */}
-          <div className="import-section">
-            <div className="import-section-title">其它规则</div>
-            <Space align="center" size={8} wrap>
-              {/* ⚠️ 用户口径 2026-10-11 最终版：「其它规则中应是**市场价**为原价的
-                  1.7 倍支持调整，**不是售价**」⇒ 倍率作用在**市场价**上。 */}
-              <Text>市场价计算规则：</Text>
-              <Text type="secondary">
-                「{priceMapping.find((r) => r.target === "market_price")?.source || "原价"}」×
-              </Text>
-              <InputNumber
-                min={PRICE_MULTIPLIER_MIN}
-                max={PRICE_MULTIPLIER_MAX}
-                step={0.1}
-                precision={2}
-                value={priceMultiplier}
-                onChange={(value) => setPriceMultiplier(clampPriceMultiplier(value))}
-                style={{ width: 90 }}
-              />
-              <Button size="small" type="link" onClick={() => setPriceMultiplier(DEFAULT_PRICE_MULTIPLIER)}>
-                恢复默认 {DEFAULT_PRICE_MULTIPLIER}
-              </Button>
-            </Space>
-            <div style={{ marginTop: 4 }}>
-              <Space align="center" size={8} wrap>
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  取不到时回落列：
-                </Text>
-                <Select
-                  size="small"
-                  style={{ width: 160 }}
-                  value={priceFallbackSource || undefined}
-                  placeholder="不回落"
-                  allowClear
-                  onChange={(v) => setPriceFallbackSource(v ?? "")}
-                  options={priceSourceOptions(props.priceSourceColumns ?? []).map((name) => ({
-                    label: name,
-                    value: name,
-                  }))}
-                />
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  回落值不乘倍率
-                </Text>
-              </Space>
-            </div>
-          </div>
+          {/* ⚠️ **「其它规则」整块已移除**（用户口径 2026-10-15：「其它规则的逻辑移除」）。
+              原内容 = 「市场价计算规则：原价 × [倍率] + 恢复默认 + 取不到时回落列」。
+              ⚠️ **不是删功能，是删入口**：倍率仍有默认值（`DEFAULT_PRICE_MULTIPLIER`
+              = 1.7，见 `precheck-publish.ts`），导入时照常按它算市场价 ——
+              只是用户不再在弹窗里配。要改倍率就改常量（或将来另开关口）。 */}
 
+          {/* ⚠️ **未配映射时要说清「还差什么」**（用户口径 2026-10-15：
+              「不预填，用户自己从头配（但没配之前导入按钮会恒灰，**需要提示他去配**）」）。
+              ⚠️ 只把按钮变灰 = 用户对着一个点不动的按钮猜原因，这是本项目反复踩的坑
+              （既有口径：门禁用「点击时提示」而不是 `disabled`；这里两种都给，
+              因为导入是跑批操作，灰掉能防误点，提示负责说清原因）。 */}
+          {importBlockers.length > 0 && (
+            <Alert
+              style={{ marginTop: 12 }}
+              type="info"
+              showIcon
+              message={`还不能导入：${importBlockers.join("；")}`}
+            />
+          )}
           {importDetail && (
             <Alert
               style={{ marginTop: 12 }}

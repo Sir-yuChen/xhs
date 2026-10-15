@@ -449,7 +449,7 @@ export default function PublishConfigStep1({
               status={title.trim() ? undefined : "error"}
               value={title}
               onChange={(e) => onTitleChange(e.target.value)}
-              placeholder="系统已自动在商品标题前拼接品牌名称，请勿重复填写品牌名称。"
+              placeholder="系统会自动拼接品牌名称，请勿重复填写"
             />
             <Button className="smart-gen-btn" loading={titlesLoading} onClick={() => void genTitle()}>
               智能生成

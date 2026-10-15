@@ -3,6 +3,7 @@
  * `C:\Users\admin\Desktop\商品ID_935947169189`（含真实列名与真实 SKU 名）。
  */
 import { describe, expect, it } from "vitest";
+import { spec_combinations } from "./publish-config";
 
 import {
   applyBatchRule,
@@ -14,7 +15,6 @@ import {
   matchSkuImageName,
   lookupLocalSkuImage,
   mergePanelTable,
-  onlineImageColumnIndex,
   passedSkuSpecs,
   parseSkuName,
   countUncheckedSkuMedia,
@@ -33,6 +33,7 @@ import {
   sourceColumnIndex,
   PRICE_TARGET_OPTIONS,
   type PriceMappingRow,
+  dropTableColumn,
   passedSkuRows,
   sourceSpecNames,
   applyPriceMultiplier,
@@ -52,7 +53,36 @@ import {
   tableToSkus,
   type PrecheckMedia,
   type PrecheckTable,
+
+  withSpecCategoryColumn,
+  canDropColumn,
+  nextManualColumnKey,
+  addTableColumn,
+
+  priceSourceOptions,
+  SKU_IMAGE_COL,
+  withDerivedColumns,
 } from "./precheck-publish";
+
+/* ------------------------------------------------------------------ *
+ * ⚠️ **公共映射夹具**（2026-10-15 口径变更后必须显式给）
+ *
+ * 「所有点均走映射，移除写死的逻辑」+「默认映射不预填」⇒
+ * `tableToSkus` / `passedSkuRows` / `buildSkuFillPlan` 的取值**全部来自这份映射**。
+ * 测试再也不能靠「列名叫原价就被认出来」了 —— 那正是本轮移除的行为。
+ * ------------------------------------------------------------------ */
+const MAP_PRICE: PriceMappingRow[] = [
+  { target: "sku_name", source: "sku名称" },
+  { target: "price", source: "原价" },
+  { target: "price_fallback", source: "计算价格" },
+  { target: "stock", source: "库存" },
+  { target: "seller_code", source: "ID" },
+];
+const MAP_PRICE_SPEC: PriceMappingRow[] = [
+  ...MAP_PRICE,
+  { target: "spec_category", source: "规格分类" },
+];
+
 
 /* ------------------------------------------------------------------ *
  * 真实包基线（实测，非构造）
@@ -87,15 +117,33 @@ const REAL_SKU_IMAGES = [
   "SKU/SKU02_颜色分类(【中古风】伸缩桌+三斗柜梳妆台).jpg",
 ];
 
-function media(group: string, n: number): PrecheckMedia[] {
+/** 造一批媒体。
+
+ *  ⚠️ 用户口径 2026-10-13 后**两个字段各有含义**，夹具必须都给：
+ *    · `group` = 数据包里一级目录名的**原值**（真实形态是中文，如 `1比1主图`）；
+ *    · `kind`  = 后端判的**参考类别**（`main`/`sku`/`detail`/`video`/`other`）。
+ *  本文件测的是 `kind` 参与的分流（`splitByGroup`），所以 `kind` 取传入值；
+ *  `group` 刻意用**不同于 kind 的目录名**（模拟包 A），钉住
+ *  「拿 `group` 当枚举用会失效」这件事。
+ */
+const REAL_DIR_BY_KIND: Record<string, string> = {
+  main: "1比1主图",
+  sku: "SKU图",
+  detail: "详情图",
+  video: "主图视频",
+};
+
+function media(kind: string, n: number): PrecheckMedia[] {
+  const dir = REAL_DIR_BY_KIND[kind] ?? kind;
   return Array.from({ length: n }, (_, i) => ({
-    group,
+    group: dir,
+    kind,
     index: i,
-    rel_path: `${group}/f${i + 1}.jpg`,
+    rel_path: `${dir}/f${i + 1}.jpg`,
     file_name: `f${i + 1}.jpg`,
     ocr_ok: true,
     has_forbidden: false,
-  }));
+  })) as PrecheckMedia[];
 }
 
 /* ------------------------------------------------------------------ */
@@ -112,16 +160,24 @@ describe("splitByGroup", () => {
     expect(r.detailImages).toHaveLength(38);
   });
 
+  it("⚠️ 分流按 `kind` 而不是 `group`（目录名可能是 `1比1主图` / `SKU图`）", () => {
+    //: 这是本轮最容易写错的一处：`group` 现在是目录名原值，
+    //: `group === "main"` 恒不成立 ⇒ 主图恒空（静默失效）。
+    const r = splitByGroup(media("main", 3));
+    expect(r.mainImages).toHaveLength(3);
+    expect(r.mainImages[0]).toBe("1比1主图/f1.jpg");
+  });
+
   it("视频**不进** images（真机抓包：images/imageDescriptions 都是图片对象）", () => {
     const r = splitByGroup([...media("main", 2), ...media("video", 1)]);
     const all = [...r.mainImages, ...r.detailImages, ...r.skuImages];
-    expect(all.some((p) => p.includes("video"))).toBe(false);
+    expect(all.some((p) => p.includes("主图视频"))).toBe(false);
     expect(r.mainImages).toHaveLength(2);
   });
 
   it("传的是暂存内相对路径，不是服务器绝对路径", () => {
     const r = splitByGroup(media("main", 1));
-    expect(r.mainImages[0]).toBe("main/f1.jpg");
+    expect(r.mainImages[0]).toBe("1比1主图/f1.jpg");
     expect(r.mainImages[0].startsWith("/")).toBe(false);
   });
 });
@@ -158,7 +214,7 @@ describe("tableToSkus", () => {
   };
 
   it("真实表 ⇒ 2 行 SKU，价格取「原价」", () => {
-    const skus = tableToSkus(table);
+    const skus = tableToSkus(table, MAP_PRICE);
     expect(skus).toHaveLength(2);
     expect(skus[0].name).toBe("颜色分类:【中古风】实木三斗柜");
     expect(skus[0].price_yuan).toBe(1280);
@@ -170,7 +226,7 @@ describe("tableToSkus", () => {
     // ⚠️ 真包 `计算价格` 列是**空的**（公式列没算出来）。若优先取它，
     // 全部 SKU 价格会变「待补」。
     expect(table.rows.every((r) => r[3] === null)).toBe(true);
-    expect(tableToSkus(table).every((s) => s.price_yuan !== null)).toBe(true);
+    expect(tableToSkus(table, MAP_PRICE).every((s) => s.price_yuan !== null)).toBe(true);
   });
 
   it("原价与计算价格都缺 ⇒ null（不填 0 冒充）", () => {
@@ -180,19 +236,28 @@ describe("tableToSkus", () => {
       columns: REAL_COLUMNS,
       rows: [["颜色分类:A", null, null, null, "1", "9"]],
     };
-    expect(tableToSkus(bare)[0].price_yuan).toBeNull();
+    expect(tableToSkus(bare, MAP_PRICE)[0].price_yuan).toBeNull();
   });
 
-  it("列名变体也能认（规格名/价格/stock）", () => {
+  it("⚠️ 列名变体**不再**被认（口径已改为「一律走映射，移除写死」）", () => {
     const alt: PrecheckTable = {
       title: "全部",
       sheet_name: "全部",
       columns: ["规格名", "价格", "stock"],
       rows: [["颜色分类:A", "88.5", "3"]],
     };
-    expect(tableToSkus(alt)).toEqual([
-      { name: "颜色分类:A", price_yuan: 88.5, stock: 3, image_path: null },
-    ]);
+    //: ⚠️ **夹具的列名与映射对不上**（映射指的是 `sku名称`/`原价`/`库存`）
+    //: ⇒ 新口径下**认不出**（`sku_name` 那一列不存在）⇒ 返回空。
+    //: 这正是「移除写死逻辑」的**预期后果**：列名不匹配就不猜。
+    expect(tableToSkus(alt, MAP_PRICE)).toEqual([]);
+    //: 把映射改成这个表的列名 ⇒ 立刻能认出（证明是**映射**在起作用）。
+    expect(
+      tableToSkus(alt, [
+        { target: "sku_name", source: "规格名" },
+        { target: "price", source: "价格" },
+        { target: "stock", source: "stock" },
+      ]),
+    ).toEqual([{ name: "颜色分类:A", price_yuan: 88.5, stock: 3, image_path: null }]);
   });
 
   it("没有名称列 ⇒ 不产出 SKU（不硬造）", () => {
@@ -200,7 +265,7 @@ describe("tableToSkus", () => {
   });
 
   it("空表 / 空列头 ⇒ 空数组", () => {
-    expect(tableToSkus(null)).toEqual([]);
+    expect(tableToSkus(null, MAP_PRICE)).toEqual([]);
     expect(tableToSkus({ title: "t", sheet_name: "t", columns: [], rows: [] })).toEqual([]);
   });
 
@@ -208,14 +273,14 @@ describe("tableToSkus", () => {
   //: 名称可能对应不上，没有固定规则」。这条**刻意**钉住 —— 将来谁想
   //: 「顺手加个名称匹配」，这条会先红。
   it("**不把 SKU 图按名称配给规格**（无固定规则 ⇒ 宁缺勿猜）", () => {
-    const skus = tableToSkus(table);
+    const skus = tableToSkus(table, MAP_PRICE);
     expect(skus.every((s) => s.image_path === null)).toBe(true);
   });
 
   it("即使文件名恰好能对上也不配（避免「这一份包能配」被当成规则）", () => {
     //: 故意用**可对上**的文件名：归一后 `SKU01_颜色分类(…)` == 表格首列。
     //: 行为必须仍是 null —— 否则就变成隐式依赖命名巧合了。
-    const skus = tableToSkus(table);
+    const skus = tableToSkus(table, MAP_PRICE);
     expect(REAL_SKU_IMAGES.length).toBe(2); // 素材存在，但没用上
     expect(skus.map((s) => s.image_path)).toEqual([null, null]);
   });
@@ -223,11 +288,15 @@ describe("tableToSkus", () => {
 
 describe("buildPublishPayloadFromPrecheck", () => {
   it("有 token ⇒ 出完整载荷（token + 两个图片列 + SKU）", () => {
-    const p = buildPublishPayloadFromPrecheck({
-      token: "TK1",
-      media: [...media("main", 5), ...media("detail", 38), ...media("sku", 26)],
-      tables: [{ title: "全部", sheet_name: "全部", columns: REAL_COLUMNS, rows: REAL_ROWS }],
-    });
+    const p = buildPublishPayloadFromPrecheck(
+      {
+        token: "TK1",
+        media: [...media("main", 5), ...media("detail", 38), ...media("sku", 26)],
+        tables: [{ title: "全部", sheet_name: "全部", columns: REAL_COLUMNS, rows: REAL_ROWS }],
+      },
+      //: ⚠️ **必须传映射**（用户口径 2026-10-15：全部使用映射关系得到列值）。
+      MAP_PRICE,
+    );
     expect(p).not.toBeNull();
     expect(p!.precheck_token).toBe("TK1");
     expect(p!.main_images).toHaveLength(5);
@@ -265,10 +334,11 @@ describe("表格·价格/库存批量修改（用户口径 2026-10-09）", () =>
   };
 
   it("列识别与 tableToSkus 同源（价格/库存别名一致）", () => {
-    expect(priceColumnIndex(table.columns)).toBe(1);
-    expect(stockColumnIndex(table.columns)).toBe(2);
-    expect(priceColumnIndex(["sku名称", "ID"])).toBe(-1);
-    expect(stockColumnIndex(["sku名称", "ID"])).toBe(-1);
+    //: ⚠️ **一律走映射**（用户口径 2026-10-15）—— 没配映射就恒 -1，不猜列名。
+    expect(priceColumnIndex(table.columns, MAP_PRICE)).toBe(1);
+    expect(stockColumnIndex(table.columns, MAP_PRICE)).toBe(2);
+    expect(priceColumnIndex(table.columns)).toBe(-1);
+    expect(stockColumnIndex(table.columns)).toBe(-1);
   });
 
   it("加减固定值：每条 = 原值 + N（N 可负）", () => {
@@ -709,21 +779,23 @@ describe("需求 5 · 按命名规则精确对齐本地 SKU 图（用户口径 2
         ["颜色分类:完全不存在的东西", "https://x/9.jpg", "1", "1"],
       ],
     };
-    const got = passedSkuSpecs(table, [1], [0]);
+    const got = passedSkuSpecs(table, [1], [0], MAP_PRICE);
     expect([...got]).toEqual(["颜色分类:【中古风】实木三斗柜"]);
   });
 });
 
-describe("需求 3 · 列定位别名", () => {
-  it("线上图列 = 真包 `图片` 列（下标 1）", () => {
-    expect(onlineImageColumnIndex(["sku名称", "图片", "原价", "计算价格", "库存", "ID"])).toBe(1);
-  });
-  it("sku 名称列 = 下标 0", () => {
-    expect(skuNameColumnIndex(["sku名称", "图片", "原价"])).toBe(0);
-  });
-  it("找不到 ⇒ -1（不猜列）", () => {
-    expect(onlineImageColumnIndex(["A", "B"])).toBe(-1);
-    expect(skuNameColumnIndex(["A", "B"])).toBe(-1);
+describe("列定位一律走映射（用户口径 2026-10-15：移除写死的逻辑）", () => {
+  //: ⚠️ **口径已变**（原断言 = 按别名猜列名，已随「所有点均走映射」移除）：
+  //:   - 线上图列：**该列已从第一步整列移除**，映射里没有它 ⇒ 函数一并删除。
+  //:   - 其余列：不再按别名猜，只认用户配的映射。
+  it("SKU 名称列只认映射（没配 ⇒ -1，不猜列名）", () => {
+    const cols = ["sku名称", "原价", "库存"];
+    //: 没配映射 ⇒ -1（**不因为列名叫「sku名称」就认它**）。
+    expect(skuNameColumnIndex(cols, [])).toBe(-1);
+    //: 配了映射 ⇒ 认映射指定的那一列（哪怕列名不叫 sku名称）。
+    expect(
+      skuNameColumnIndex(cols, [{ target: "sku_name", source: "原价" }]),
+    ).toBe(1);
   });
 });
 
@@ -741,24 +813,24 @@ describe("需求 4 · passedSkuSpecs（未选中的不允许进第二步）", ()
   };
 
   it("默认全选 + 无拦截 ⇒ 三行全通过", () => {
-    const got = passedSkuSpecs(table, [], [0, 1, 2]);
+    const got = passedSkuSpecs(table, [], [0, 1, 2], MAP_PRICE);
     expect([...got].sort()).toEqual(["颜色分类:甲", "颜色分类:丙", "颜色分类:乙"].sort());
   });
 
   it("**未勾选的行被排除**（用户口径：未选中的不允许进第二步）", () => {
-    const got = passedSkuSpecs(table, [], [0, 2]);
+    const got = passedSkuSpecs(table, [], [0, 2], MAP_PRICE);
     expect(got.has("颜色分类:乙")).toBe(false);
     expect(got.size).toBe(2);
   });
 
   it("**两图判定未通过的行被排除**（即使被勾选 —— 手滑勾上也不许漏进）", () => {
-    const got = passedSkuSpecs(table, [1], [0, 1, 2]);
+    const got = passedSkuSpecs(table, [1], [0, 1, 2], MAP_PRICE);
     expect(got.has("颜色分类:乙")).toBe(false);
     expect(got.size).toBe(2);
   });
 
   it("两个条件都要：未勾选 **或** 被拦 ⇒ 都不通过", () => {
-    const got = passedSkuSpecs(table, [0], [1, 2]);
+    const got = passedSkuSpecs(table, [0], [1, 2], MAP_PRICE);
     expect([...got].sort()).toEqual(["颜色分类:丙", "颜色分类:乙"].sort());
   });
 
@@ -770,19 +842,19 @@ describe("需求 4 · passedSkuSpecs（未选中的不允许进第二步）", ()
     //: 「先点一下媒体资源就能用了」= 典型时序症状）。
     //: 表格自身默认就是**全选**（`picked[tIndex] ?? rows.map(() => true)`），
     //: 所以空集 = 全选才是同一口径；**预检未通过的行仍被 blocked 挡掉**。
-    expect(passedSkuSpecs(table, [], []).size).toBe(3);
+    expect(passedSkuSpecs(table, [], [], MAP_PRICE).size).toBe(3);
   });
 
   it("空 `picked` 也不会放过预检未通过的行（blocked 仍然生效）", () => {
-    const got = passedSkuSpecs(table, [1], []);
+    const got = passedSkuSpecs(table, [1], [], MAP_PRICE);
     expect(got.has("颜色分类:乙")).toBe(false);
     expect(got.size).toBe(2);
   });
 
   it("没有 sku 名称列 / 空表 ⇒ 空集（不猜不编）", () => {
-    expect(passedSkuSpecs(null, [], [0]).size).toBe(0);
+    expect(passedSkuSpecs(null, [], [0], MAP_PRICE).size).toBe(0);
     expect(
-      passedSkuSpecs({ title: "x", sheet_name: "x", columns: ["A", "B"], rows: [["1", "2"]] }, [], [0]).size,
+      passedSkuSpecs({ title: "x", sheet_name: "x", columns: ["A", "B"], rows: [["1", "2"]] }, [], [0], MAP_PRICE).size,
     ).toBe(0);
   });
 
@@ -790,7 +862,7 @@ describe("需求 4 · passedSkuSpecs（未选中的不允许进第二步）", ()
     const t: PrecheckTable = {
       title: "t", sheet_name: "t", columns: ["sku名称"], rows: [["  "], ["颜色分类:甲"]],
     };
-    const got = passedSkuSpecs(t, [], [0, 1]);
+    const got = passedSkuSpecs(t, [], [0, 1], MAP_PRICE);
     expect([...got]).toEqual(["颜色分类:甲"]);
   });
 });
@@ -1041,10 +1113,18 @@ describe("构建导入计划（buildSkuFillPlan）", () => {
       .toContain("未返回该类目的规格类型");
   });
 
-  it("规格图只收**有本地图**的行（用户口径：上传本地图列）", () => {
+  it("规格图只收**有图的行**（⚠️ 已改为**走映射**：看 `specImageRel`，不看 `localRel`）", () => {
+    //: ⚠️ **口径已变**（用户口径 2026-10-15：「不再走现在默认的逻辑，应走映射逻辑」）：
+    //: 旧实现取 `row.localRel`（代码按 SKU 名称**猜**的那张图）；
+    //: 现在取 `row.specImageRel`（由 `spec_image` 映射指定的列取到的值）。
     const plan = buildSkuFillPlan(
       [
-        row({ rawName: "颜色:甲", specName: "颜色", specValue: "甲", localRel: "SKU/a.jpg", localFileName: "a.jpg" }),
+        //: `localRel` **故意给了值但不该被用**（若被用，这条断言会失败）。
+        row({
+          rawName: "颜色:甲", specName: "颜色", specValue: "甲",
+          localRel: "SKU/猜的.jpg", localFileName: "猜的.jpg",
+          specImageRel: "SKU/a.jpg",
+        }),
         row({ rawName: "颜色:乙", specName: "颜色", specValue: "乙" }),
       ],
       [dim("颜色")],
@@ -1052,6 +1132,17 @@ describe("构建导入计划（buildSkuFillPlan）", () => {
     );
     expect(plan.images).toHaveLength(1);
     expect(plan.images[0]).toMatchObject({ dimName: "颜色", value: "甲", localRel: "SKU/a.jpg" });
+    //: ⚠️ 文件名从路径末段取（上传按内容 MD5 重命名，这只作 `origin_name`）。
+    expect(plan.images[0].localFileName).toBe("a.jpg");
+  });
+
+  it("⚠️ 没配 `spec_image` 映射（`specImageRel` 缺）⇒ 一张图都不收（不退回猜）", () => {
+    const plan = buildSkuFillPlan(
+      [row({ rawName: "颜色:甲", specName: "颜色", specValue: "甲", localRel: "SKU/猜的.jpg", localFileName: "猜的.jpg" })],
+      [dim("颜色")],
+      { 颜色: "颜色" },
+    );
+    expect(plan.images).toHaveLength(0);
   });
 });
 
@@ -1118,18 +1209,22 @@ describe("规格关系行（最多两行 / 必填 / 不重复）", () => {
 });
 
 describe("导出预检通过行（passedSkuRows）", () => {
+  //: ⚠️ **夹具已按新口径更新**（2026-10-15）：`规格分类` 是**独立的一列**
+  //: （不再靠 `sku名称` 拆冒号拿分类）。夹具必须反映真实形状，
+  //: 否则测的是「旧实现下的旧行为」，新口径改了也测不出来。
   const table = {
     title: "全部", sheet_name: "全部",
-    columns: ["sku名称", "图片", "原价", "计算价格", "库存", "ID"],
+    columns: ["规格分类", "sku名称", "图片", "原价", "计算价格", "库存", "ID"],
     rows: [
-      ["颜色分类:甲", "u1", "1280", null, "200", "935947169189"],
-      ["颜色分类:乙", "u2", "", "990", "10", "ID2"],
-      ["颜色分类:丙", "u3", "500", "", "5", "ID3"],
+      ["颜色分类", "甲", "u1", "1280", null, "200", "935947169189"],
+      ["颜色分类", "乙", "u2", "", "990", "10", "ID2"],
+      ["颜色分类", "丙", "u3", "500", "", "5", "ID3"],
     ],
   };
 
   it("**原价优先**，空则回落计算价格（用户口径 ②）", () => {
-    const rows = passedSkuRows(table, [], [0, 1, 2]);
+    //: ⚠️ 夹具表没有「规格分类」列 ⇒ 用不带该条的映射（否则缺 sku_name 也会空）。
+    const rows = passedSkuRows(table, [], [0, 1, 2], [], MAP_PRICE);
     expect(rows[0].price).toBe(1280);   //: 原价有 ⇒ 用原价
     expect(rows[1].price).toBe(990);    //: 原价空 ⇒ 用计算价格
     expect(rows[2].price).toBe(500);
@@ -1138,19 +1233,20 @@ describe("导出预检通过行（passedSkuRows）", () => {
   });
 
   it("未勾选 / 预检未通过的行**不进**结果", () => {
-    expect(passedSkuRows(table, [], [0]).map((r) => r.specValue)).toEqual(["甲"]);
-    expect(passedSkuRows(table, [1], [0, 1]).map((r) => r.specValue)).toEqual(["甲"]);
+    expect(passedSkuRows(table, [], [0], [], MAP_PRICE).map((r) => r.specValue)).toEqual(["甲"]);
+    expect(passedSkuRows(table, [1], [0, 1], [], MAP_PRICE).map((r) => r.specValue)).toEqual(["甲"]);
   });
 
   it("本地图按 SKU 名称对齐（本地图列那张）", () => {
-    const imgs = [{ key: "颜色分类:甲", relPath: "SKU/SKU01_颜色分类(甲).jpg" }];
-    const rows = passedSkuRows(table, [], [0], imgs);
-    expect(rows[0].localRel).toBe("SKU/SKU01_颜色分类(甲).jpg");
-    expect(rows[0].localFileName).toBe("SKU01_颜色分类(甲).jpg");
+    //: ⚠️ 对齐用的仍是**完整 sku 名称**（`rawName`）—— 图片一直按它匹配。
+    const imgs = [{ key: "甲", relPath: "SKU/SKU01_甲.jpg" }];
+    const rows = passedSkuRows(table, [], [0], imgs, MAP_PRICE);
+    expect(rows[0].localRel).toBe("SKU/SKU01_甲.jpg");
+    expect(rows[0].localFileName).toBe("SKU01_甲.jpg");
   });
 
   it("sourceSpecNames：保序去重", () => {
-    expect(sourceSpecNames(passedSkuRows(table, [], [0, 1, 2]))).toEqual(["颜色分类"]);
+    expect(sourceSpecNames(passedSkuRows(table, [], [0, 1, 2], [], MAP_PRICE))).toEqual(["颜色分类"]);
   });
 });
 
@@ -1229,21 +1325,26 @@ describe("售价倍率（原价 × 1.7 默认，可调）", () => {
 describe("价格库存列映射（动态可调；默认 = 现行逻辑）", () => {
   const cols = ["sku名称", "图片", "原价", "计算价格", "库存", "ID"];
 
-  it("**默认映射就是现行那套**（原价→售价/市场价、库存→库存、ID→商家编码）", () => {
-    expect(DEFAULT_PRICE_MAPPING).toEqual([
-      { target: "price", source: "原价" },
-      { target: "stock", source: "库存" },
-      { target: "seller_code", source: "ID" },
-    ]);
-    //: 用户口径：**市场价不做默认映射**（不在默认行里）。
-    expect(DEFAULT_PRICE_MAPPING.some((r) => r.target === "market_price")).toBe(false);
-    expect(DEFAULT_PRICE_FALLBACK_SOURCE).toBe("计算价格");
+  it("⚠️ **默认映射是空**（用户口径 2026-10-15：不预填，用户自己从头配）", () => {
+    //: ⚠️ **一行都没有**（用户口径 2026-10-15：「不预填，用户自己从头配」+
+    //: 「『原价』『计算价格』也当作普通列，用户自己选（**不再猜**）」）。
+    //: 旧断言（已取代，保留作考古）：
+    //:   `expect(DEFAULT_PRICE_MAPPING).toEqual([售价←原价, 库存←库存, 商家编码←ID])`
+    //:   —— 那是**猜列名**：数据包列名一换（真包就有 `SKU信息`）就猜空。
+    expect(DEFAULT_PRICE_MAPPING).toEqual([]);
+    expect(DEFAULT_PRICE_FALLBACK_SOURCE).toBe("");
   });
 
   it("sourceColumnIndex 按列名定位（可任意列 ⇒ 动态可调整）", () => {
-    expect(sourceColumnIndex(cols, DEFAULT_PRICE_MAPPING, "price")).toBe(2);
-    expect(sourceColumnIndex(cols, DEFAULT_PRICE_MAPPING, "stock")).toBe(4);
-    expect(sourceColumnIndex(cols, DEFAULT_PRICE_MAPPING, "seller_code")).toBe(5);
+    //: ⚠️ 用**显式映射**（`DEFAULT_PRICE_MAPPING` 现在是空 —— 口径已改为不预填）。
+    const m: PriceMappingRow[] = [
+      { target: "price", source: "原价" },
+      { target: "stock", source: "库存" },
+      { target: "seller_code", source: "ID" },
+    ];
+    expect(sourceColumnIndex(cols, m, "price")).toBe(2);
+    expect(sourceColumnIndex(cols, m, "stock")).toBe(4);
+    expect(sourceColumnIndex(cols, m, "seller_code")).toBe(5);
     //: 换成别的列也认（用户口径：动态可调）。
     expect(sourceColumnIndex(cols, [{ target: "price", source: "计算价格" }], "price")).toBe(3);
     //: 不填 / 列不存在 ⇒ -1（调用方按「不自动填」处理）。
@@ -1301,7 +1402,7 @@ describe("passedSkuRows 按映射取列", () => {
   };
 
   it("默认映射 ⇒ 原价优先，空才回落计算价格", () => {
-    const [r] = passedSkuRows(table, [], [0]);
+    const [r] = passedSkuRows(table, [], [0], [], MAP_PRICE);
     expect(r.originalPrice).toBe(1280);
     expect(r.price).toBe(1280);       //: 原价有值 ⇒ 不回落
     expect(r.stock).toBe(200);
@@ -1310,6 +1411,8 @@ describe("passedSkuRows 按映射取列", () => {
 
   it("把售价映射到「计算价格」⇒ 就用那一列，原价字段随之变化", () => {
     const [r] = passedSkuRows(table, [], [0], [], [
+      //: ⚠️ `sku_name` 必须配（新口径下没它 ⇒ 读不出行）。
+      { target: "sku_name", source: "sku名称" },
       { target: "price", source: "计算价格" },
       { target: "stock", source: "库存" },
       { target: "seller_code", source: "ID" },
@@ -1320,6 +1423,7 @@ describe("passedSkuRows 按映射取列", () => {
 
   it("来源列留空 ⇒ 该字段为 null / 空串（不自动填）", () => {
     const [r] = passedSkuRows(table, [], [0], [], [
+      { target: "sku_name", source: "sku名称" },
       { target: "price", source: "原价" },
       { target: "stock", source: "" },
       { target: "seller_code", source: "" },
@@ -1330,7 +1434,14 @@ describe("passedSkuRows 按映射取列", () => {
 
   it("回落列可改：原价空 + 回落指向别的列", () => {
     const t2 = { ...table, rows: [["颜色分类:甲", "u1", "", "990", "", "ID1"]] };
-    const [r] = passedSkuRows(t2, [], [0], [], DEFAULT_PRICE_MAPPING, "计算价格");
+    //: ⚠️ 回落列现在是**映射里的一条**（`price_fallback`），不再是裸列名参数。
+    const [r] = passedSkuRows(t2, [], [0], [], [
+      { target: "sku_name", source: "sku名称" },
+      { target: "price", source: "原价" },
+      { target: "price_fallback", source: "计算价格" },
+      { target: "stock", source: "库存" },
+      { target: "seller_code", source: "ID" },
+    ]);
     expect(r.originalPrice).toBeNull();
     expect(r.price).toBe(990);        //: 回落生效
   });
@@ -1426,5 +1537,203 @@ describe("applyBatchRule 的两位小数四舍五入（用户口径 2026-10-11�
 
   it("空值仍按缺值口径跳过（不因四舍五入把 null 变成 0）", () => {
     expect(applyBatchRule(null, { mode: "delta", operand: 5 })).toBeNull();
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * 手动新增列（用户口径 2026-10-15）
+ * ------------------------------------------------------------------ */
+
+describe("手动新增列", () => {
+  const table = {
+    columns: ["规格分类", "sku名称", "原价"],
+    rows: [
+      ["颜色分类", "A款", "100"],
+      ["尺寸", "B款", "200"],
+    ] as (string | null)[][],
+    column_kinds: ["text", "text", "numeric"],
+    column_keys: ["规格分类", "sku名称", "原价"],
+  };
+
+  it("只有手动列可删（非手动新增与固定列不支持删除）", () => {
+    //: ⚠️ 用户原话：「手动新增的列支持整列删除，**非手动新增和固定列不支持删除**」。
+    expect(canDropColumn("__manual_col_1")).toBe(true);
+    expect(canDropColumn("规格分类")).toBe(false); // 固定列
+    expect(canDropColumn("sku名称")).toBe(false); // 原始列
+    //: ⚠️ key 缺失（后端还没下发）⇒ **一律不可删** ——
+    //: 宁可少给一个按钮，也不能让用户误删原始列（删了没法还原）。
+    expect(canDropColumn(undefined)).toBe(false);
+    expect(canDropColumn(null)).toBe(false);
+  });
+
+  it("英文名空则按顺序规则自动生成（col_1 / col_2 …）", () => {
+    expect(nextManualColumnKey([])).toBe("col_1");
+    expect(nextManualColumnKey(["col_1"])).toBe("col_2");
+    //: ⚠️ 按**已有手动列的最大序号 +1**，不是按总列数 ——
+    //: 否则删掉 col_1 再加一列会撞名。
+    expect(nextManualColumnKey(["col_1", "col_3"])).toBe("col_4");
+    //: 序号被别的名字占着 ⇒ 继续往后找，不返回重复值。
+    expect(nextManualColumnKey(["col_1", "col_2"])).toBe("col_3");
+  });
+
+  it("添加列：追加在最右，各数组等长", () => {
+    const next = addTableColumn(table, "成本价", "__manual_col_1");
+    expect(next.columns).toEqual(["规格分类", "sku名称", "原价", "成本价"]);
+    expect(next.columns).toHaveLength(4);
+    //: ⚠️ `column_kinds` / `column_keys` 与 `columns` **等长**是契约：
+    //: 不同步加会让下标整体错位（「数值列」判据张冠李戴、删除按钮认错列）。
+    expect(next.column_kinds).toHaveLength(4);
+    expect(next.column_keys).toHaveLength(4);
+    expect(next.column_keys?.[3]).toBe("__manual_col_1");
+    //: 新列的值**全为空**（不造假）。
+    expect(next.rows.map((r) => r[3])).toEqual([null, null]);
+  });
+
+  it("整列删除：列、每行、kinds、keys 一起删", () => {
+    const withNew = addTableColumn(table, "成本价", "__manual_col_1");
+    const after = dropTableColumn(withNew, 3);
+    expect(after.columns).toEqual(["规格分类", "sku名称", "原价"]);
+    expect(after.column_kinds).toHaveLength(3);
+    expect(after.column_keys).toHaveLength(3);
+    expect(after.rows[0]).toHaveLength(3);
+  });
+
+  it("删除是纯函数（不改原表）", () => {
+    const before = JSON.stringify(table);
+    dropTableColumn(table, 0);
+    expect(JSON.stringify(table)).toBe(before);
+  });
+
+  it("下标越界 ⇒ 原表不动（不抛、不静默改坏）", () => {
+    expect(dropTableColumn(table, -1)).toBe(table);
+    expect(dropTableColumn(table, 99)).toBe(table);
+  });
+
+  it("插入「规格分类」列时同步插 keys（长度始终一致）", () => {
+    const raw = {
+      columns: ["sku名称", "原价"],
+      rows: [["A款", "100"]] as (string | null)[][],
+      column_kinds: ["text", "numeric"],
+      column_keys: ["sku名称", "原价"],
+    };
+    const withSpec = withSpecCategoryColumn(raw);
+    expect(withSpec.columns).toEqual(["规格分类", "sku名称", "原价"]);
+    expect(withSpec.column_keys).toHaveLength(3);
+    //: ⚠️ 「规格分类」是**固定列** ⇒ key 不带手动前缀（不可删）。
+    expect(canDropColumn(withSpec.column_keys?.[0])).toBe(false);
+    //: 幂等。
+    expect(withSpecCategoryColumn(withSpec)).toBe(withSpec);
+  });
+});
+
+describe("「预检通过列」下拉必须是**表格所有列**（用户口径 2026-10-15）", () => {
+  it("候选 = **表格的所有列**（含「SKU 图」与「规格分类」两列后处理固定列）", () => {
+    //: 用户实测（截图）：「下拉不完整，**没有 SKU 图片列**，应展示商品 sku
+    //: 表格的**所有列**」。
+    //: ⚠️ **口径已变**（用户口径 2026-10-15：「SKU 图应该给放回 rows 中」
+    //: +「SKU 图与规格分类属于**后处理的固定表格列**」）：
+    //: 它们现在是**真列**（`withDerivedColumns` 插进 `columns`/`rows`）⇒
+    //: 候选**直接就是全部列**，不再需要 `priceSourceOptions` 手工补虚拟列。
+    const raw = {
+      columns: ["sku名称", "原价"],
+      rows: [["A款", "100"]] as (string | null)[][],
+    };
+    const table = withDerivedColumns(raw, { 0: "SKU图/a.jpg" });
+    const opts = priceSourceOptions(table.columns);
+    //: 两列后处理固定列都在（且顺序 = 屏幕序）。
+    expect(opts).toEqual(["SKU 图", "规格分类", "sku名称", "原价"]);
+    //: 纯函数不再做任何补列（避免与 `withDerivedColumns` 两份实现）。
+    expect(priceSourceOptions(["sku名称"])).toEqual(["sku名称"]);
+  });
+
+  it("映射指向 SKU 图 ⇒ 与普通列一样按下标返回（**不再有虚拟列哨兵**）", () => {
+    //: ⚠️ 口径已变（用户口径 2026-10-15：「SKU 图应该给放回 rows 中」）：
+    //: 它现在是**真列**（`withDerivedColumns` 插进 `columns`/`rows`）⇒
+    //: 取值就是普通的 `row[colIndex]`，不需要哨兵特判。
+    const cols = ["SKU 图", "规格分类", "sku名称"];
+    expect(sourceColumnIndex(cols, [{ target: "price", source: "SKU 图" }], "price")).toBe(0);
+    //: 没配 ⇒ 仍是 -1。
+    expect(sourceColumnIndex(cols, [], "price")).toBe(-1);
+  });
+
+  it("⚠️ `withDerivedColumns` 把「SKU 图 + 规格分类」一次插成真列（屏幕序 SKU图 → 规格分类）", () => {
+    const raw = {
+      columns: ["sku名称", "原价"],
+      rows: [["A款", "100"], ["B款", "200"]] as (string | null)[][],
+      column_kinds: ["text", "numeric"],
+      column_keys: ["sku名称", "原价"],
+    };
+    const out = withDerivedColumns(raw, { 0: "SKU图/a.jpg", 1: "SKU图/b.jpg" });
+    //: ⚠️ 屏幕序：SKU 图 在 规格分类 **左边**（与表格显示一致）。
+    expect(out.columns).toEqual(["SKU 图", "规格分类", "sku名称", "原价"]);
+    //: ⚠️ **值真的进了 rows**（不是渲染层虚拟出来的）。
+    expect(out.rows.map((r) => r[0])).toEqual(["SKU图/a.jpg", "SKU图/b.jpg"]);
+    //: 规格分类默认空（用户自己填 / 由规则跑）。
+    expect(out.rows.map((r) => r[1])).toEqual([null, null]);
+    //: 三个数组等长（契约）。
+    expect(out.column_kinds).toHaveLength(4);
+    expect(out.column_keys).toHaveLength(4);
+    //: 幂等。
+    expect(withDerivedColumns(out, {})).toBe(out);
+    //: ⚠️ 它们都是**固定列** ⇒ 不可删（只有手动列可删）。
+    expect(canDropColumn(out.column_keys?.[0])).toBe(false);
+    expect(canDropColumn(out.column_keys?.[1])).toBe(false);
+  });
+});
+
+describe("⚠️ 真 bug 守卫：确认导入后价格库存**没对接** sku 数据（2026-10-15）", () => {
+  const table = {
+    sheet_name: "全部",
+    columns: ["规格分类", "sku名称", "原价", "库存"],
+    rows: [
+      ["颜色分类", "【中古风】实木三斗柜", "1280", "200"],
+      ["颜色分类", "【中古风】伸缩桌+三斗柜", "1980", "200"],
+    ],
+    column_kinds: ["text", "text", "numeric", "numeric"],
+  } as unknown as PrecheckTable;
+  const M2: PriceMappingRow[] = [
+    { target: "sku_name", source: "sku名称" },
+    { target: "price", source: "原价" },
+    { target: "stock", source: "库存" },
+  ];
+
+  it("`passedSkuSpecs` 产出**带规格分类前缀**的完整形态（与 `spec_combinations` 同形）", () => {
+    //: ⚠️ **这是本次真 bug 的判据**：`passedSkuSpecs` 原先收**裸名称**
+    //: （`【中古风】实木三斗柜`），而第二步过滤时比的是 `c.spec`
+    //: （`颜色分类:【中古风】实木三斗柜`）⇒ **一个都对不上** ⇒ `visible` 为空
+    //: ⇒ 价格库存表**一行都不落**（且不报错，用户只看到「没数据」）。
+    const allowed = passedSkuSpecs(table, [], [], M2);
+    expect([...allowed]).toEqual([
+      "颜色分类:【中古风】实木三斗柜",
+      "颜色分类:【中古风】伸缩桌+三斗柜",
+    ]);
+  });
+
+  it("两边形态逐字一致 ⇒ 过滤后不会清空（端到端）", () => {
+    const rows = passedSkuRows(table, [], [], [], M2);
+    const dims = [{ name: "颜色分类", id: "d1", customizable: true, options: [], values: [] }];
+    const plan = buildSkuFillPlan(rows, dims, { 颜色分类: "颜色分类" }, 1.7);
+    const combos = spec_combinations([
+      { name: "颜色分类", values: plan.rows.map((r) => r.spec.split(":")[1]) },
+    ]);
+    const allowed = passedSkuSpecs(table, [], [], M2);
+    const visible = allowed.size > 0
+      ? combos.filter((c) => allowed.has(String(c.spec ?? "").trim()))
+      : combos;
+    //: ⚠️ 过滤**不许**把行清空（清了 = 用户看到的「没对接」）。
+    expect(combos.length).toBeGreaterThan(0);
+    expect(visible).toHaveLength(combos.length);
+    //: 且价格/库存真的带上了。
+    expect(plan.rows.map((r) => [r.price, r.stock])).toEqual([[1280, 200], [1980, 200]]);
+  });
+
+  it("分类列为空（旧数据包）⇒ 退化成裸名称，不丢行", () => {
+    const legacy = {
+      sheet_name: "全部",
+      columns: ["sku名称", "原价", "库存"],
+      rows: [["A款", "100", "5"]],
+    } as unknown as PrecheckTable;
+    const allowed = passedSkuSpecs(legacy, [], [], M2);
+    expect([...allowed]).toEqual(["A款"]);
   });
 });
