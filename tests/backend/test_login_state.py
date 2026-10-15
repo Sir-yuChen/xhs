@@ -1258,7 +1258,11 @@ class TestFrontendBehaviourScripts:
         out: dict[str, str] = {}
         for script in (self.LOGIN_SCRIPT, self.MODAL_SCRIPT):
             result = subprocess.run(
-                ["node", str(ROOT / script), "--self-check"],
+                #: ⚠️ **必须带 `--full`**：脚本已拆成「默认只跑契约 / `--full` 连变异一起跑」
+                #: （见 `login_state.cjs` 的 `selfCheck({full})`）。
+                #: 下面那几条用例要断言 `SELF <变异名> OK`（证明变异**真的被咬住**），
+                #: 不带 `--full` 时输出里只有 `SELF none OK` ⇒ 断言恒假。
+                ["node", str(ROOT / script), "--self-check", "--full"],
                 cwd=str(ROOT),
                 capture_output=True,
                 text=True,

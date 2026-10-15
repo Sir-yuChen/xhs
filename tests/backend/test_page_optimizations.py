@@ -10504,3 +10504,59 @@ def test_reload_clears_step2_without_remounting_step1():
         "第二步没做「首次不清」保护 —— 弹窗一打开就会把已配的规格/价格清掉"
     )
     assert "clearImportTargets()" in body, "第二步收到信号后没清 SKU 导入产物"
+
+
+def test_workflow_feature_stays_removed():
+    """⚠️ **自动化工作流整条特性已退场，不许回来**（2026-10-15 立的守卫）。
+
+    背景：`1e09bf7`（2026-10-07）已按用户口径「把工作流相关逻辑表等完整移除，
+    直接使用定时任务完成即可」**整条删除**（5 张表 + 5 个后端模块 + 前端页 +
+    测试 + job_registry 项），退场理由实测三条硬缺口（详见该提交信息）。
+
+    ⚠️ **2026-10-15 实测复发过**：提交未跟踪文件时**没逐个甄别**，
+    把这 7 个已删文件又加回了库（还顺带把它的建表迁移挂回主链 ⇒ 迁移图里
+    出现已退场特性的建表迁移，与 drop 迁移语义矛盾）。
+    ⇒ 本守卫钉住：**文件不存在 + 迁移不在链上**。
+    """
+    #: ① 文件不许存在。
+    gone_files = [
+        "backend/alembic/versions/q8r9s0t1u2v3_workflows.py",
+        "backend/app/api/platforms/xhs/workflows.py",
+        "backend/app/models/workflow.py",
+        "backend/app/services/workflow_engine.py",
+        "backend/app/services/workflow_nodes.py",
+        "backend/app/services/workflow_service.py",
+        "tests/backend/test_workflows.py",
+    ]
+    for rel in gone_files:
+        assert not (ROOT / rel).exists(), (
+            f"已退场的自动化工作流文件又回来了：{rel} —— "
+            "该特性已按用户口径整条移除，不要重新引入"
+        )
+
+    #: ② ORM 里不许有 workflow 表（否则 `create_all` 会把 drop 掉的表建回来，
+    #:    这是本项目记过的坑：迁移 drop 了但 ORM 类还在 ⇒ 一启动表又有了）。
+    import sys
+
+    sys.path.insert(0, str(ROOT))
+    from backend.app.core.database import Base
+    import backend.app.models  # noqa: F401  —— 触发模型注册
+
+    wf = [t for t in Base.metadata.tables if "workflow" in t]
+    assert not wf, f"ORM 里还有工作流表（create_all 会把它们建回来）：{wf}"
+
+    #: ③ 迁移图必须是**单 head**（工作流建表/删表迁移不应挂回主链）。
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    cfg = Config(str(ROOT / "backend/alembic.ini"))
+    cfg.set_main_option("script_location", str(ROOT / "backend/alembic"))
+    heads = ScriptDirectory.from_config(cfg).get_heads()
+    assert len(heads) == 1, f"迁移图不是单 head：{heads}"
+
+    #: ④ 源码里不许再有对已删模块的 import（防止半删状态）。
+    for mod in ("models.workflow", "services.workflow_engine", "services.workflow_nodes",
+                "services.workflow_service", "xhs.workflows"):
+        assert mod not in _code_only(_read(ROOT / "backend/app/main.py")), (
+            f"main.py 还在 import 已删的工作流模块：{mod}"
+        )

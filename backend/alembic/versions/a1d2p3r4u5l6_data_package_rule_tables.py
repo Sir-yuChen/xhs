@@ -38,7 +38,13 @@ revision = "a1d2p3r4u5l6"
 #: 只接 `c2d3e4f5a6b8` ⇒ alembic 报 **"Multiple head revisions"**（实测红过
 #: `test_migration_no_longer_seeds_scheduled_jobs`）；只接 `q8r9s0t1u2v3`
 #: ⇒ `c2d3e4f5a6b8` 又成了悬空 head。⇒ **两个都接**（alembic 的多父合并语义）。
-down_revision = ("c2d3e4f5a6b8", "q8r9s0t1u2v3")
+#: ⚠️ **单父**（2026-10-15 修正）：原先写成双父 `("c2d3e4f5a6b8", "q8r9s0t1u2v3")`
+#: —— 第二个父 `q8r9s0t1u2v3` 是**自动化工作流的建表迁移**，而那条特性已在
+#: `1e09bf7`（2026-10-07）**整条移除**（含 `e6f7a8b9c0d1_drop_workflow_tables`）。
+#: 把已删除的迁移重新挂进主链 ⇒ 迁移图里出现**已退场特性的建表迁移**，
+#: 且与 drop 迁移语义相矛盾。
+#: 现已恢复 `1e09bf7` 的意图：**工作流不在这条链上**。
+down_revision = "c2d3e4f5a6b8"
 branch_labels = None
 depends_on = None
 

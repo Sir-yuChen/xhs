@@ -133,13 +133,23 @@ def test_old_flat_version_json_still_works(tmp_path, monkeypatch):
 #  你补全一个 1.0.0-1.0.2」+「简介要简短保持在 100 字以内即可」。
 
 
-def test_shipped_version_json_has_the_three_releases():
-    """仓库内 `config/version.json` **真的**记录了 1.0.0 / 1.0.1 / 1.0.2 三条（最新在前）。"""
+def test_shipped_version_json_has_the_baseline_releases():
+    """仓库内 `config/version.json` **真的**记录着版本历史（最新在前）。
+
+    ⚠️ **判据不许写死「恰好三条」**（2026-10-15 修正）：原写法断言
+    `versions == ["1.0.2", "1.0.1", "1.0.0"]` —— 一发新版本就红，
+    而那**不是缺陷**（历史本来就该边长）。
+    ⇒ 现判据：**包含基线三条**（1.0.0/1.0.1/1.0.2 是当时的用户口径要求，
+    不许被删掉）+ **最新在前**（`versions[0]` 就是 `current` 那条）。
+    """
     payload = json.loads((ROOT / "config" / "version.json").read_text(encoding="utf-8"))
-    assert payload["current"] == "1.0.2", "current 应为 1.0.2"
     versions = [item["version"] for item in payload["versions"]]
-    assert versions == ["1.0.2", "1.0.1", "1.0.0"], (
-        f"版本历史应含 1.0.0-1.0.2 三条且最新在前，实得 {versions}"
+    #: 基线三条必须还在（用户口径 2026-10-13：「你补全一个 1.0.0-1.0.2」）。
+    for base in ("1.0.0", "1.0.1", "1.0.2"):
+        assert base in versions, f"版本历史丢了基线版本 {base}：{versions}"
+    #: 最新在前，且 `current` 就是最新那条（发版脚本会改写 `current`）。
+    assert versions[0] == payload["current"], (
+        f"版本历史最新一条应是 current（{payload['current']}），实得首位 {versions[0]}"
     )
 
 

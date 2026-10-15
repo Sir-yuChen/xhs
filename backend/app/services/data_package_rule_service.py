@@ -48,7 +48,12 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from backend.app.core.time import shanghai_now
+#: ⚠️ **`SessionLocal` 在模块层持有**（不是函数内 import）—— 与
+#: `api/llm_prompts.py` 的播种同约定。
+#: 原因（测试规范，2026-09-27 立规）：测试的 Session 打桩是**按模块扫描注册**的，
+#: 函数内 import 扫不到 ⇒ 该模块一旦被端点链路走到就会**写生产库**。
+#: （守卫 `test_service_session_registry_covers_every_session_owner` 钉这条。）
+from backend.app.core.database import SessionLocal
 from backend.app.models.data_package_rule import (
     OP_EXTRACT_BETWEEN,
     OP_EXTRACT_SEGMENT,
@@ -1093,7 +1098,6 @@ def seed_builtin_rules_for_all_users() -> int:
 
     ⚠️ 与 `seed_builtin_prompt_templates_for_all_users` 同型：单用户失败不影响其它人。
     """
-    from backend.app.core.database import SessionLocal
     from backend.app.models import User
 
     total = 0

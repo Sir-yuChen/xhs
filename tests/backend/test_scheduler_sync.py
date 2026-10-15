@@ -236,6 +236,12 @@ def test_scheduler_is_not_started_when_master_switch_is_off(monkeypatch):
     monkeypatch.setattr(
         main_module, "seed_builtin_prompt_templates_for_all_users", lambda *a, **k: 0
     )
+    #: ⚠️ 设计 40 数据包列规则的同型播种（2026-10-15 加）：**独立 Session + 逐用户 commit**
+    #: ⇒ 不桩的话全量回归会拿**真实运行库**播种（写库）。
+    #: 与上面几项同一语义：随安装附有 + 只补缺失不覆盖。
+    monkeypatch.setattr(
+        main_module, "seed_builtin_rules_for_all_users", lambda *a, **k: 0
+    )
     # 设计 37 服务商种子播种：**按用户各写 6 家服务商 + N 个模型 + 11 个业务点映射**
     # （自开 Session）⇒ 与上面两条同一条理由，不桩就会拿真实运行库写
     # `llm_gateway_configs` / `llm_gateway_models` / `llm_business_providers`。
