@@ -132,3 +132,48 @@ class TestTemplateIsUsable:
         text = TEMPLATE.read_text(encoding="utf-8", errors="replace")
         assert "颜色分类" in text, "缺 spec 形态不一致的真实例子"
         assert "useCallback" in text or "Popconfirm" in text, "缺时序/竞态的真实例子"
+
+class TestImpactCheckScriptIsAlive:
+    """`impact_check.py`（改动影响反查）也必须真的能跑 —— 同「规矩不接线就是纸面规矩」。"""
+
+    def test_script_runs_and_finds_callers(self):
+        import subprocess
+        r = subprocess.run(
+            [sys.executable, str(ROOT / ".hermes/scripts/impact_check.py"), "QUEUE_REGISTRY"],
+            cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        assert r.returncode == 0, r.stderr
+        out = r.stdout
+        assert "反查符号：QUEUE_REGISTRY" in out
+        assert "note_queue_service.py" in out, "连注册表本体都没查到 —— 脚本退化了"
+        assert "alembic" in out, (
+            "没查出迁移里也引用了 QUEUE_REGISTRY —— 这正是「人极易漏」的那类连带，"
+            "脚本必须能找出来"
+        )
+
+    def test_changed_mode_works(self):
+        import subprocess
+        r = subprocess.run(
+            [sys.executable, str(ROOT / ".hermes/scripts/impact_check.py"), "--changed"],
+            cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        assert r.returncode == 0, r.stderr
+        assert "工作区干净" in r.stdout or "未提交改动" in r.stdout
+
+    def test_workflow_names_the_tool(self):
+        """工作流阶段三必须点名它（否则没人知道有这个工具）。"""
+        text = WORKFLOW.read_text(encoding="utf-8", errors="replace")
+        assert "impact_check.py" in text
+
+    def test_workflow_has_the_change_impact_step(self):
+        """阶段三必须保留「改动前置评估」（用户 2026-10-15 口径）。
+
+        ⚠️ 变异验证实测：删掉这一整块时守卫**照样绿**（ESCAPED）——
+        因为当时没有任何断言钉住它。⇒ 补上。
+        """
+        text = WORKFLOW.read_text(encoding="utf-8", errors="replace")
+        assert "改动前置评估" in text, "阶段三的「改动前置评估」被删了"
+        for marker in ("要改什么？", "改完连带什么？", "怎么验？"):
+            assert marker in text, f"三问里缺「{marker}」"
+        assert "连带排查四把尺子" in text, "缺「四把尺子」表"
+        assert "常见漏项清单" in text or "五类常漏项" in text, "缺「常漏项清单」"
