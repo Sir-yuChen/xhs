@@ -23,6 +23,7 @@ SCRIPT = ROOT / ".hermes" / "scripts" / "check_gate2.py"
 WORKFLOW = ROOT / "docs" / "00_管理规范" / "01_文档先行工作流.md"
 TEMPLATE = ROOT / "docs" / "00_管理规范" / "02_功能设计文档模板.md"
 REDLINE = ROOT / "docs" / "00_管理规范" / "03_改动红线.md"
+IMPACT = ROOT / ".hermes" / "scripts" / "impact_check.py"
 
 
 def _run(*args: str) -> subprocess.CompletedProcess:
@@ -336,9 +337,14 @@ class TestRedline:
             names = [t.split("]")[0][1:] for t in todos]
             assert expect in names, f"{files} 没触发「{expect}」：{names}"
 
-        #: 反面：真·琐碎改动不该触发
-        assert ic.redline(["frontend/src/pages/platforms/xhs/my-notes-page.tsx"], 0) == [], \
-            "改一个无关页面文件不该触发红线"
+        #: ⚠️ **口径已变（2026-10-16）**：原先断言「改页面文件不该触发红线」——
+        #: 加入「接缝类」规则后，**改前端页面就该触发**（实测 `fd78357` 三个 bug 单测全绿）。
+        #: 反面判据改为「**后端纯逻辑**改动（不涉及公共层/迁移/守卫）不该触发」。
+        assert ic.redline(["backend/app/services/some_service.py"], 0) == [], \
+            "改后端普通服务文件不该触发红线"
+        #: 但前端页面**必须**触发「接缝类」
+        seam = ic.redline(["frontend/src/pages/platforms/xhs/my-notes-page.tsx"], 0)
+        assert any("接缝类" in t for t in seam), "改前端页面必须触发「接缝类」"
 
         #: 删除行数 >= 100 触发「删除/退场」
         assert any("删除/退场" in t for t in ic.redline(["a.py"], 100))
@@ -391,3 +397,66 @@ class TestWorkflowTwoChannelsAreWired:
         text = self.CHEAT.read_text(encoding="utf-8", errors="replace")
         for i, line in enumerate(text.splitlines(), 1):
             assert "\\n" not in line, f"第 {i} 行有字面 \\n：{line[:80]}"
+
+class TestDivisionIsByFailureMode:
+    """⚠️ 2026-10-16 决定：**保持一条工作流，分流判据从「场景名」改成「失败模式」**。
+
+    实证：commit 前缀会**反向指错** —— `fd78357`（前缀 `feat`）实为交互修正；
+    `afd944f`（前缀 `fix`）实为删 5 个模块的地基变更。⇒ 按「这次改动的失败模式」分。
+    """
+
+    CHEAT = ROOT / "docs" / "00_管理规范" / "00_需求工作流速查.md"
+
+    def test_cheatsheet_uses_failure_modes_not_scenario_names(self):
+        """速查表分流判据必须是「失败模式」，且点名两个反向指错的实证。"""
+        t = self.CHEAT.read_text(encoding="utf-8", errors="replace")
+        for m in ("地基塌", "接缝错", "数据/环境", "口径变"):
+            assert m in t, f"速查表缺失败模式「{m}」"
+        #: 必须写明「前缀会反向指错」并给出两个实证 hash
+        assert "反向指错" in t, "速查表没写「前缀会反向指错」"
+        for h in ("fd78357", "afd944f"):
+            assert h in t, f"速查表缺实证 {h}"
+
+    def test_redline_is_scoped_by_failure_mode(self):
+        """改动红线首部必须按失败模式划适用范围，且含「接缝类必须跑真链路」。"""
+        t = REDLINE.read_text(encoding="utf-8", errors="replace")
+        assert "地基塌" in t and "接缝错" in t
+        assert "必须跑一条真链路" in t, "红线缺「接缝类必须跑真链路」"
+        #: 要给出「单测全绿」的实证
+        assert "单测全绿" in t
+        assert "fd78357" in t
+
+    def test_impact_check_flags_seam_class(self):
+        """`impact_check.py` 必须对前端交互改动报「接缝类」并给真链路要求。"""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("ic_t", IMPACT)
+        ic = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ic)
+        out = ic.redline(["frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"], 0)
+        joined = " ".join(out)
+        assert "接缝类" in joined, "前端交互改动没报「接缝类」"
+        assert "真链路" in joined, "接缝类没要求跑真链路"
+
+    def test_impact_check_escalates_big_deletions(self):
+        """大删除（`afd944f`）必须提示**升级走五阶段**。"""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("ic_d", IMPACT)
+        ic = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ic)
+        out = ic.redline(["backend/app/models/workflow.py"], 3206)
+        #: ⚠️ **锚「删除/退场」那一条**，不能查整个 joined ——
+        #: 变异实测 ESCAPED：删掉删除规则里的「走五阶段」后，**「公共层」规则里也有**
+        #: 「建议走五阶段」⇒ 全文查「五阶段」被别处满足（假绿）。
+        rule = [o for o in out if o.startswith("[删除/退场]")]
+        assert rule, "大删除没报「删除/退场」"
+        assert "五阶段" in rule[0], "删除/退场那条没提示升级走五阶段"
+
+    def test_impact_check_stays_silent_for_pure_frontend_doc(self):
+        """反向：纯前端交互改动**不该**命中「公共层/迁移」（避免红线通胀）。"""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("ic_s", IMPACT)
+        ic = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ic)
+        out = " ".join(ic.redline(["frontend/src/pages/platforms/xhs/xxx-page.tsx"], 0))
+        assert "公共层" not in out
+        assert "数据库/迁移" not in out
