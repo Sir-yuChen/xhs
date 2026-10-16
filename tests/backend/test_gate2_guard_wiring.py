@@ -207,3 +207,24 @@ class TestWorkflowCheatSheet:
     def test_mentions_the_three_heaviest_lessons(self):
         t = self.CHEAT.read_text(encoding="utf-8", errors="replace")
         assert "抓包" in t and "判据式" in t and "纸面规矩" in t
+
+    def test_gate3_and_gate4_do_not_duplicate_link_acceptance(self):
+        """Gate 3 / Gate 4 **不能对「业务链路验收」提同一件事**（用户 2026-10-15 指出重复）。
+
+        ⚠️ 实测的原状：Gate 3 要「已在验收文档**登记**」，Gate 4 要「验收文档**已更新**（四段完整）」
+        —— 措辞几乎一样 ⇒ 读者以为要跑两趟。正确分工：
+        **Gate 3 只「挂上号」（登记存在），Gate 4 才写「四段完整」（真走过一遍）**。
+        """
+        text = WORKFLOW.read_text(encoding="utf-8", errors="replace")
+        assert "挂上号" in text, "Gate 3 的「只登记存在」措辞丢了 —— 又会与 Gate 4 撞车"
+        assert "四段完整**只在 Gate 4 判" in text or "只在 Gate 4 判" in text, \
+            "缺「四段完整只在 Gate 4 判」这句消歧"
+        assert "Gate 3 = 代码级" in text or "Gate 3（开发）" in text, "缺 Gate3/Gate4 分工表"
+
+    def test_cheatsheet_also_disambiguates(self):
+        """速查表也要写清分工（只看速查表的人占多数）。"""
+        text = (ROOT / "docs" / "00_管理规范" / "00_需求工作流速查.md").read_text(
+            encoding="utf-8", errors="replace")
+        assert "与 Gate 3 的分工" in text
+        assert "代码级" in text and "业务级" in text
+
