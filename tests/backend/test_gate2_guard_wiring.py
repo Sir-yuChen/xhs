@@ -460,3 +460,45 @@ class TestDivisionIsByFailureMode:
         out = " ".join(ic.redline(["frontend/src/pages/platforms/xhs/xxx-page.tsx"], 0))
         assert "公共层" not in out
         assert "数据库/迁移" not in out
+
+class TestSeamClassHasAWayOut:
+    """⚠️ 2026-10-16 用「商品发布」真实返工模拟跑出的**第一个真缺口**。
+
+    模拟发现：新规则「接缝类必须跑真链路」在**用户不在场时无法执行**
+    （要登录千帆 / 会写真实数据）—— 规则**没给出路** ⇒ 会在没人时卡住，
+    或更糟：让人**假装跑过**（本项目已吃过「说验证过但其实没跑」的亏）。
+    修法：跑不了 **允许**，但必须 ① 登记攒批清单 ② 汇报里明说「未真跑」。
+    """
+
+    CHEAT = ROOT / "docs" / "00_管理规范" / "00_需求工作流速查.md"
+
+    def test_redline_has_the_way_out(self):
+        t = REDLINE.read_text(encoding="utf-8", errors="replace")
+        assert "跑不了怎么办" in t, "红线缺「跑不了怎么办」小节"
+        assert "08_真机验收攒批清单.md" in t, "没给登记去处"
+        assert "未真跑" in t, "没要求汇报时明说未真跑"
+
+    def test_cheatsheet_has_the_way_out(self):
+        t = self.CHEAT.read_text(encoding="utf-8", errors="replace")
+        assert "必须跑一条真链路" in t
+        assert "跑不了" in t, "速查表缺「跑不了怎么办」"
+        assert "08_真机验收攒批清单.md" in t
+
+    def test_the_registry_file_named_actually_exists(self):
+        """⚠️ 点名的路径必须**真存在** —— 否则「登记进某个不存在的清单」是空话。"""
+        f = ROOT / "docs" / "04_测试文档" / "08_真机验收攒批清单.md"
+        assert f.exists(), f"点名的登记去处不存在：{f}"
+
+    def test_both_docs_name_the_same_registry(self):
+        """⚠️ **同一条规则在两份文档里各写一遍 ⇒ 必须指同一个去处**（防双真相源）。"""
+        import re
+        a = REDLINE.read_text(encoding="utf-8", errors="replace")
+        b = self.CHEAT.read_text(encoding="utf-8", errors="replace")
+        assert "08_真机验收攒批清单.md" in a and "08_真机验收攒批清单.md" in b, \
+            "两份文档必须指向同一个攒批清单"
+
+    def test_forbids_claiming_verified_without_evidence(self):
+        """必须写明「说『已验证』就要能指出运行证据」这条禁令。"""
+        for t in (REDLINE.read_text(encoding="utf-8", errors="replace"),
+                  self.CHEAT.read_text(encoding="utf-8", errors="replace")):
+            assert "已验证" in t and "运行证据" in t
