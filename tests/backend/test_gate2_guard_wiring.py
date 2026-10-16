@@ -200,13 +200,28 @@ class TestWorkflowCheatSheet:
         """
         import re
         t = self.CHEAT.read_text(encoding="utf-8", errors="replace")
-        named = set(re.findall(r"([\w/.-]+\.(?:py|ps1|md))", t))
+        #: ⚠️ **只查「路径引用」（含 `/`），不查裸文件名** ——
+        #: 首版把裸文件名（`check_gate2.py` 这种**概念提及**）也算进来 ⇒ **误报**。
+        #: 判据太糙会自己红（本项目已重复踩过多次）：区分「提到一个名字」与「指向一个路径」。
+        named = set(re.findall(r"([\w.-]+/[\w/.-]+\.(?:py|ps1|md))", t))
         missing = [n for n in named if not (ROOT / n).exists()]
-        assert not missing, f"速查表点名了不存在的文件：{missing}"
+        assert not missing, f"速查表引用了不存在的路径：{missing}"
 
     def test_mentions_the_three_heaviest_lessons(self):
         t = self.CHEAT.read_text(encoding="utf-8", errors="replace")
         assert "抓包" in t and "判据式" in t and "纸面规矩" in t
+
+
+    def test_workflow_has_doc_change_side_effect_list(self):
+        """改「流程文档」的专属连带清单必须在（2026-10-15 助手实例：加 Gate 3 条目时
+        没回头核对 Gate 4 已覆盖 ⇒ 重复）。"""
+        cs = (ROOT / "docs" / "00_管理规范" / "00_需求工作流速查.md").read_text(
+            encoding="utf-8", errors="replace")
+        assert "改流程/规范文档时的专属连带清单" in cs, "速查表缺这张表"
+        for k in ("同层的其它 Gate", "自检脚本的判据", "守卫里写死的措辞", "索引"):
+            assert k in cs, f"连带清单缺「{k}」"
+        wf = WORKFLOW.read_text(encoding="utf-8", errors="replace")
+        assert "改「流程/规范文档」本身时，连带对象与改代码不同" in wf, "工作流缺指向"
 
     def test_gate3_and_gate4_do_not_duplicate_link_acceptance(self):
         """Gate 3 / Gate 4 **不能对「业务链路验收」提同一件事**（用户 2026-10-15 指出重复）。
