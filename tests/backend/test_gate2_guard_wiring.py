@@ -395,6 +395,36 @@ class TestRedline:
         assert "docs/02_设计文档/" in t
 
 
+    def test_cheatsheet_documents_capture_node_concretely(self):
+        """⚠️ 第 2 轮模拟：抓包节点只有 2 行注释 —— 现场下不了手。
+        必须点名 ① 现成脚本 `cdp_min.py` ② 已有 926 份可复用 ③ 启动参数出处。
+        """
+        t = self.CHEAT.read_text(encoding="utf-8", errors="replace")
+        assert "cdp_min.py" in t, "没点名现成抓包脚本"
+        assert "evidence_live" in t, "没提已有的抓包资产（不能复用）"
+        assert "remote-debugging-port" in t, "没写怎么起 CDP Chrome"
+        assert (ROOT / ".hermes" / "scripts" / "cdp_min.py").exists(), "点名的脚本不存在"
+
+    def test_mutation_scripts_follow_one_naming_and_convention(self):
+        """⚠️ 第 2 轮模拟：命名有 3 种写法 + 调用约定没写。
+        必须写明统一命名 + 裸跑无参数 + 基线红会拒跑。
+        """
+        t = self.CHEAT.read_text(encoding="utf-8", errors="replace")
+        assert "mutate_verify_<域>.py" in t, "没写统一命名"
+        assert "无参数" in t or "无 `--help`" in t, "没写调用约定"
+        #: ⚠️ **锚整句** —— 首版写 `"基线" in t and "拒跑" in t`，两个词**分别命中**
+        #: （「基线」在别处到处都是）⇒ 删掉这条仍绿（M5 ESCAPED，第 N 次「分开找词」假绿）。
+        assert "基线就是红的，变异验证无意义" in t, "没写「基线红会自己拒跑」这条好设计"
+
+    def test_the_renamed_mutation_script_matches_the_convention(self):
+        """⚠️ 我上轮自己写的 `verify_redline_mutation.py` **违反了自己的命名规范**（52:1）——
+        已改名 `mutate_verify_redline.py`。守卫钉住：不许再出现反例。
+        """
+        scripts = list((ROOT / ".hermes" / "scripts").glob("verify_*mutation*.py"))
+        assert not scripts, f"变异脚本命名应统一为 `mutate_verify_<域>.py`：{[s.name for s in scripts]}"
+        assert (ROOT / ".hermes" / "scripts" / "mutate_verify_redline.py").exists()
+
+
 class TestWorkflowTwoChannelsAreWired:
     """⚠️ 2026-10-16 判据式扫出的 4 个缺口 —— 必须钉住，否则下次又被冲掉。
 
