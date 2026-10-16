@@ -89,6 +89,77 @@ if (-not $providersJson.providers -or $providersJson.providers.Count -lt 1) {
 $providersCount = $providersJson.providers.Count
 Write-Host "  应用初始化数据: $providersCount 个服务商种子"
 
+# 版本历史必须**完整随包**（2026-10-15 用户报障补的判据 —— 任务卡 t_ad5b82f0）：
+# 装机后「检查版本更新」弹窗里只有 1 条、且简介为空。当时包内 `config/version.json`
+# 的 `versions` 只剩 1 条，而**构建全绿、本冒烟也全过** —— 因为这里只校验了
+# 「文件存在 / 可解析」。⇒ 判据必须咬住**语义**：条数 == 源码条数，
+# 且 current 那条的 `built_at` / `summary` 都非空（弹窗折叠标题就用这两个）。
+# ⚠️ 与源码对比而非写死条数：写死「恰好 N 条」一发版就假红（同
+#    `test_shipped_version_json_has_the_baseline_releases` 的教训）。
+#: ⚠️⚠️ **不用 PS 的 `ConvertFrom-Json`** —— 它在 PS 5.1 上对这份数据**解析失败/解成空**
+#: （2026-10-15 实测：`-Raw` 报「无效的对象...位置 685」；管道喂单行长 JSON 解成 1 条空对象）。
+#: 用它写守卫 ⇒ **守卫恒假**（永远是空对象、比较永远"相等"）——比没有守卫更危险。
+#: ⇒ 交 Python（打包/冒烟链路本就有 Python 依赖）。
+#: ⚠️ 必须用本脚本自己的解释器解析顺序（下方 4b 段同款 `$py`）：
+#:   2026-10-15 实测踩到：这里曾写成 `& $Py`（构建脚本的变量名），
+#:   而 smoke-test.ps1 里**没有 `$Py`** ⇒ 在 `$ErrorActionPreference = "Stop"` 下
+#:   直接抛 `RuntimeException`（"& 运算符后面的表达式不是有效对象"），
+#:   冒烟在**校验安装产物之前**就死掉 —— 守卫比没有更坏（把整条门禁带崩）。
+if (-not $py) { $py = (Get-Command python -ErrorAction SilentlyContinue).Source }
+if (-not $py) { $py = (Get-Command python3 -ErrorAction SilentlyContinue).Source }
+if (-not $py) {
+    Fail "找不到 python 可执行文件，无法校验包内版本历史（本机装了 python 才有这条判据，不许静默跳过）"
+}
+#: 找一个可用的 Python（与 release.ps1 的 Resolve-Python 同候选集）。
+#: ⚠️ 冒烟是**独立脚本**（release.ps1 阶段 4 调），没有继承 \$Py ⇒ 自己解析。
+$Py = $null
+if ($env:SPIDER_XHS_PYTHON -and (Test-Path $env:SPIDER_XHS_PYTHON)) { $Py = $env:SPIDER_XHS_PYTHON }
+if (-not $Py) {
+    foreach ($c in @(
+        (Join-Path $env:LOCALAPPDATA "Programs\Python\Python312\python.exe"),
+        (Join-Path $env:LOCALAPPDATA "Programs\Python\Python311\python.exe")
+    )) { if (Test-Path $c) { $Py = $c; break } }
+}
+if (-not $Py) {
+    $cmd = Get-Command python -ErrorAction SilentlyContinue
+    if ($cmd) { $Py = $cmd.Source }
+}
+if (-not $Py) { Fail "找不到 Python（版本历史审计需要；可用 SPIDER_XHS_PYTHON 指定）" }
+
+$pyVersionAudit = @'
+import json, sys
+shipped_path, source_path = sys.argv[1:3]
+
+def load(p):
+    return json.load(open(p, encoding="utf-8-sig"))
+
+shipped, source = load(shipped_path), load(source_path)
+sv = shipped.get("versions") or []
+pv = source.get("versions") or []
+problems = []
+if len(sv) != len(pv):
+    problems.append("包内版本历史只剩 %d 条（源码 %d 条）—— 更新弹窗会看不到历史版本" % (len(sv), len(pv)))
+if not sv:
+    problems.append("包内版本历史为空")
+head = next((h for h in sv if h.get("version") == shipped.get("current")), None)
+if head is None:
+    problems.append("包内版本历史里找不到 current=%s 那条" % shipped.get("current"))
+else:
+    for field in ("built_at", "summary"):
+        if not str(head.get(field) or "").strip():
+            problems.append("包内 %s 的 %s 为空 —— 更新弹窗里该条没有更新时间/简介" % (shipped.get("current"), field))
+for line in problems:
+    print("  [VERSION] " + line, file=sys.stderr)
+print(len(sv))
+sys.exit(1 if problems else 0)
+'@
+$shippedCount = & $py $pyVersionAudit (Join-Path $InstallDir "config\version.json") (Join-Path $Root "config\version.json")
+if ($LASTEXITCODE -ne 0) {
+    Fail "包内 config/version.json 历史不完整（见上方 [VERSION] 行）"
+}
+$shippedCount = "$shippedCount".Trim()
+Write-Host "  版本历史完整: $shippedCount 条（current 那条的 built_at/summary 齐）"
+
 # --- 3. 启动 + 健康检查 -------------------------------------------------------
 Write-Step "启动服务（端口 $Port，--no-browser）"
 $app = Start-Process -FilePath $AppExe -ArgumentList @("--port", "$Port", "--no-browser") -PassThru

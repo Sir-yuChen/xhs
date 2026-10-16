@@ -261,12 +261,15 @@ $pyMerge = @'
 import json, sys
 src, dst, version, built_at, commit = sys.argv[1:6]
 d = json.load(open(src, encoding="utf-8-sig"))
-history = list(d.get("versions") or [])
-if not history:
-    print("源码 config/version.json 里没有 versions（不允许静默回退为空历史）", file=sys.stderr)
+history = d["versions"]
+if not isinstance(history, list) or not history:
+    print("源码 config/version.json 的 versions 不是非空列表（不允许静默回退为空历史）", file=sys.stderr)
     sys.exit(1)
 hit = False
 for item in history:
+    if not isinstance(item, dict):
+        print("源码 config/version.json 的 versions 里有非对象项", file=sys.stderr)
+        sys.exit(1)
     if item.get("version") == version:
         item["built_at"] = built_at
         item["commit"] = commit
@@ -281,8 +284,52 @@ $historyCount = & $Python -c $pyMerge $srcVersionJson $versionJson $Version $bui
 if ($LASTEXITCODE -ne 0) {
     Fail "写包内 config/version.json 失败（源码历史读不到，或写入出错）"
 }
+if (-not $historyCount) {
+    Fail "写包内 config/version.json 后没拿到历史条数 —— Python 片段没按约定回传计数"
+}
+$historyCount = [int]$historyCount
 
-Write-Host "  应用版本: $Version → config\version.json（built_at=$builtAt commit=$commitSha 历史 $($history.Count) 条）"
+Write-Host "  应用版本: $Version → config\version.json（built_at=$builtAt commit=$commitSha 历史 $historyCount 条）"
+
+# ⚠️⚠️ **打包后守卫**（2026-10-15，本次缺陷咬不住才补的）：包内 `versions` 条数
+# 必须 == 源码条数，且当前版本那条的 `summary` 不为空。
+# 为什么单独加这道：旧代码用 `catch { $history = @() }` **静默**吞掉解析异常
+#   ⇒ 包内只剩 1 条、`notes`/`summary` 空，而构建**全绿**、体积/冗余自检**全过**、
+#   现有 `smoke-test.ps1` 也只校验「文件存在 / 可解析」——
+#   **只有装到用户机器上才看得出来**（本次就是这样漏出去的，见任务卡 t_ad5b82f0）。
+# ⇒ 判据必须咬住**语义**（条数 + 更新时间 + 更新简介），不是「文件在不在」。
+# ⚠️ 这条断言本身就是「静默失效比报错贵 10 倍」的落地：宁可构建当场红。
+$pyVerify = @'
+import json, sys
+src, dst = sys.argv[1:3]
+want = json.load(open(src, encoding="utf-8-sig")).get("versions") or []
+got = json.load(open(dst, encoding="utf-8-sig")).get("versions") or []
+problems = []
+if len(got) != len(want):
+    problems.append(f"历史条数不符：包内 {len(got)} 条，源码 {len(want)} 条")
+cur = json.load(open(dst, encoding="utf-8-sig")).get("current")
+head = next((h for h in got if h.get("version") == cur), None)
+if head is None:
+    problems.append(f"包内历史里找不到 current={cur} 那条")
+else:
+    for field in ("built_at", "summary"):
+        if not str(head.get(field) or "").strip():
+            problems.append(f"包内 {cur} 的 {field} 为空（正是本次缺陷：更新弹窗看不到时间/简介）")
+src_head = next((h for h in want if h.get("version") == cur), None)
+if head is not None and src_head is not None:
+    if not str(src_head.get("summary") or "").strip():
+        problems.append(f"源码 {cur} 本身缺 summary —— 请先补 config/version.json 再打包")
+    elif str(head.get("summary") or "").strip() != str(src_head.get("summary") or "").strip():
+        problems.append(f"包内 {cur} 的 summary 与源码不一致（内容被改写）")
+for line in problems:
+    print("  [VERSION] " + line, file=sys.stderr)
+sys.exit(1 if problems else 0)
+'@
+& $Python -c $pyVerify $srcVersionJson $versionJson
+if ($LASTEXITCODE -ne 0) {
+    Fail "包内 config/version.json 自检未通过（见上方 [VERSION] 行）"
+}
+Write-Host "  版本历史自检通过（条数 $historyCount == 源码，current 的 built_at/summary 齐）"
 
 # 7a. 裁掉明确不用的内容（用户口径：不必要内容不打包）：
 #   cv2/data/*.xml = haarcascade 等模型文件（约 10MB）。本仓库 cv2 只用了
