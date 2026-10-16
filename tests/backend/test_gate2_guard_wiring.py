@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / ".hermes" / "scripts" / "check_gate2.py"
 WORKFLOW = ROOT / "docs" / "00_管理规范" / "01_文档先行工作流.md"
 TEMPLATE = ROOT / "docs" / "00_管理规范" / "02_功能设计文档模板.md"
+REDLINE = ROOT / "docs" / "00_管理规范" / "03_改动红线.md"
 
 
 def _run(*args: str) -> subprocess.CompletedProcess:
@@ -342,3 +343,51 @@ class TestRedline:
         #: 删除行数 >= 100 触发「删除/退场」
         assert any("删除/退场" in t for t in ic.redline(["a.py"], 100))
         assert not any("删除/退场" in t for t in ic.redline(["a.py"], 0))
+
+class TestWorkflowTwoChannelsAreWired:
+    """⚠️ 2026-10-16 判据式扫出的 4 个缺口 —— 必须钉住，否则下次又被冲掉。
+
+    缺口：① 速查表完全没提「改动红线」（最常用的通道）② 工作流没引用红线文档
+         ③ 四文件之间互不引用、无「先读哪个」导航 ④ 速查表里留了个字面 `\n`
+    """
+
+    CHEAT = ROOT / "docs" / "00_管理规范" / "00_需求工作流速查.md"
+
+    def test_cheatsheet_shows_both_channels(self):
+        """速查表必须画两条通道，并给出红线四步 + 自动判定命令。"""
+        import re
+        text = self.CHEAT.read_text(encoding="utf-8", errors="replace")
+        #: ⚠️⚠️ **锚「节标题 + 四步清单」，不能全文找词** ——
+        #: 变异实测 ESCAPED：「通道 B」「改动红线」在文档里出现 **3 处**
+        #: （导航表 / 流程图 / 节标题）⇒ 只改节标题时全文找词照样命中（假绿）。
+        #: 判据锚到**节标题**（`^\*\*通道 B`）+ **紧跟着的四步清单**，这两处不可替代。
+        m = re.search(r"^\*\*通道 B · 改动红线\*\*[\s\S]{0,400}", text, re.M)
+        assert m, "速查表缺「**通道 B · 改动红线**」节标题（不是导航表/流程图里那两处提及）"
+        sect = m.group(0)
+        for step in ("列清单", "反查连带", "定判据", "改完验证"):
+            assert step in sect, f"红线节里缺第「{step}」步"
+        assert "03_改动红线.md" in sect, "红线节没指向细则文档"
+        #: 通道 A 同理锚标题
+        assert re.search(r"^\*\*通道 A · 五阶段\*\*", text, re.M), "缺「**通道 A · 五阶段**」节标题"
+        assert "impact_check.py --changed" in text, "速查表没给自动判定命令"
+        #: 例外情形（小改动触及公共层）必须写明
+        assert "回设计文档同步" in text
+
+    def test_cheatsheet_has_reading_navigation(self):
+        """速查表必须有「四个文件，先读哪个」导航。"""
+        text = self.CHEAT.read_text(encoding="utf-8", errors="replace")
+        assert "先读哪个" in text
+        for f in ("01_文档先行工作流.md", "02_功能设计文档模板.md", "03_改动红线.md"):
+            assert f in text, f"导航缺「{f}」"
+
+    def test_main_workflow_points_to_the_redline(self):
+        """工作流首部必须分流到「通道 B」，否则读者以为所有改动都走五阶段。"""
+        text = WORKFLOW.read_text(encoding="utf-8", errors="replace")
+        assert "通道 B" in text and "03_改动红线.md" in text
+        assert "本文是「通道 A · 新需求」的细则" in text
+
+    def test_cheatsheet_has_no_literal_backslash_n(self):
+        """⚠️ 字面 `\n` 漏改过一次（替换时转义多了一层）—— 表格里不许出现。"""
+        text = self.CHEAT.read_text(encoding="utf-8", errors="replace")
+        for i, line in enumerate(text.splitlines(), 1):
+            assert "\\n" not in line, f"第 {i} 行有字面 \\n：{line[:80]}"
