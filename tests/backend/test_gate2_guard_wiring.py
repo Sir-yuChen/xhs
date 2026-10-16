@@ -466,6 +466,53 @@ class TestRedline:
         assert set(ic.GOTCHA_PATTERNS) != {n for n, _, _ in ic.REDLINE_RULES}
 
 
+    def test_stage_one_requires_the_logic_map(self):
+        """⚠️ 2026-10-16 用户口径：**每个需求先整理一个逻辑导图**。
+
+        要求：需求文档里必须有导图，且**四段齐**（牵动模块 / 调用链 / **失败点** / 不碰的），
+        并且**明确不写字段**（字段是设计阶段「总②」的事，写这儿 = 提前重复）。
+        """
+        t = self.CHEAT.read_text(encoding="utf-8", errors="replace")
+        assert "逻辑导图" in t, "速查表 §① 缺逻辑导图"
+        #: 四段锚在**加粗标签**上（避免全文找词假绿）
+        for k in ("**牵动哪些模块**", "**谁调谁**", "**哪一步会失败、失败会怎样**", "**明确不碰的**"):
+            assert k in t, f"导图缺「{k}」"
+        assert "不写字段" in t, "没写「不写字段」（防与设计总② 重复）"
+
+    def test_main_workflow_stage_one_has_the_map_and_a_skeleton(self):
+        """工作流阶段一必须有导图步骤 + **可复制的骨架**。"""
+        t = WORKFLOW.read_text(encoding="utf-8", errors="replace")
+        assert "逻辑导图" in t
+        #: ⚠️ **锚「骨架代码块 3.1–3.4」** —— 首版全文找词 ⇒ M4 ESCAPED：
+        #: 把骨架里的 `### 3.3 哪一步会失败…` 删掉，**速查表里还有同一句** ⇒ 照样绿。
+        import re
+        skel = re.search(r"### 3\.1 牵动哪些模块[\s\S]{0,900}", t)
+        assert skel, "工作流阶段一没给可复制的需求文档骨架（3.1~3.4）"
+        body = skel.group(0)
+        for k in ("牵动哪些模块", "调用链", "哪一步会失败、失败会怎样", "明确不碰的"):
+            assert k in body, f"骨架缺「{k}」"
+        #: 骨架里必须有"这段最值钱"的提示（失败点是最有价值的产出）
+        assert "最值钱" in body, "骨架没标出「失败点这段最值钱」"
+
+    def test_stage_one_gate_requires_the_map(self):
+        """Gate 1 判据必须含逻辑导图（否则写了不查 = 纸面要求）。"""
+        t = self.CHEAT.read_text(encoding="utf-8", errors="replace")
+        assert "逻辑导图在" in t, "Gate 1 判据没查导图"
+
+    def test_logic_map_does_not_duplicate_design_fields(self):
+        """⚠️ 反向：导图**不许要求字段级细节**（那是设计「总②」的事）。
+
+        判据：速查表 §① 的导图段里**不该**出现「字段」这类设计期词汇的**要求**。
+        """
+        t = self.CHEAT.read_text(encoding="utf-8", errors="replace")
+        i = t.find("### 🧭 逻辑导图")
+        assert i > 0
+        j = t.find("**Gate 1 判据**", i)
+        sect = t[i:j]
+        assert "不写字段" in sect, "导图段必须显式排除字段级"
+        assert "单位" not in sect, "导图不该要求「单位」（那是设计契约的事）"
+
+
 class TestWorkflowTwoChannelsAreWired:
     """⚠️ 2026-10-16 判据式扫出的 4 个缺口 —— 必须钉住，否则下次又被冲掉。
 
