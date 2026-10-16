@@ -177,3 +177,33 @@ class TestImpactCheckScriptIsAlive:
             assert marker in text, f"三问里缺「{marker}」"
         assert "连带排查四把尺子" in text, "缺「四把尺子」表"
         assert "常见漏项清单" in text or "五类常漏项" in text, "缺「常漏项清单」"
+
+class TestWorkflowCheatSheet:
+    """一页速查（`00_需求工作流速查.md`）——开工第一眼看的，必须有且命令真实。"""
+
+    CHEAT = ROOT / "docs" / "00_管理规范" / "00_需求工作流速查.md"
+
+    def test_exists(self):
+        assert self.CHEAT.exists(), "速查表不在 —— 开工时只能去读 438 行的细则"
+
+    def test_mentions_all_five_stages_and_four_gates(self):
+        t = self.CHEAT.read_text(encoding="utf-8", errors="replace")
+        for k in ("① 需求", "② 设计", "③ 开发", "④ 测试", "⑤ 沉淀"):
+            assert k in t, f"速查表缺阶段 {k}"
+        for g in ("Gate 1", "Gate 2", "Gate 3", "Gate 4"):
+            assert g in t, f"速查表缺 {g}"
+
+    def test_every_named_script_actually_exists(self):
+        """速查表里点名的脚本**必须真实存在** —— 否则照着走会踩空。
+
+        ⚠️ 这是「判据式」：不问「写了没」，问「指的东西在不在」。
+        """
+        import re
+        t = self.CHEAT.read_text(encoding="utf-8", errors="replace")
+        named = set(re.findall(r"([\w/.-]+\.(?:py|ps1|md))", t))
+        missing = [n for n in named if not (ROOT / n).exists()]
+        assert not missing, f"速查表点名了不存在的文件：{missing}"
+
+    def test_mentions_the_three_heaviest_lessons(self):
+        t = self.CHEAT.read_text(encoding="utf-8", errors="replace")
+        assert "抓包" in t and "判据式" in t and "纸面规矩" in t
