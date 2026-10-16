@@ -230,6 +230,10 @@ class TestWorkflowCheatSheet:
         #: 首版把裸文件名（`check_gate2.py` 这种**概念提及**）也算进来 ⇒ **误报**。
         #: 判据太糙会自己红（本项目已重复踩过多次）：区分「提到一个名字」与「指向一个路径」。
         named = set(re.findall(r"([\w.-]+/[\w/.-]+\.(?:py|ps1|md))", t))
+        #: ⚠️ **占位符不算**（`test_xxx.py` / `<名>` / `NN_` 这类是**示例形态**，不是真路径）——
+        #: 首版把它们当路径 ⇒ 自己红（本项目第 N 次「判据太糙」）。
+        PLACEHOLDER = ("xxx", "_x.", "<", "NN", "…")
+        named = {n for n in named if not any(ph in n for ph in PLACEHOLDER)}
         missing = [n for n in named if not (ROOT / n).exists()]
         assert not missing, f"速查表引用了不存在的路径：{missing}"
 
@@ -274,6 +278,8 @@ class TestRedline:
 
     REDLINE = ROOT / "docs" / "00_管理规范" / "03_改动红线.md"
     SCRIPT = ROOT / ".hermes" / "scripts" / "impact_check.py"
+
+    CHEAT = ROOT / "docs" / "00_管理规范" / "00_需求工作流速查.md"
 
     def test_doc_exists_with_four_steps(self):
         t = self.REDLINE.read_text(encoding="utf-8", errors="replace")
@@ -349,6 +355,45 @@ class TestRedline:
         #: 删除行数 >= 100 触发「删除/退场」
         assert any("删除/退场" in t for t in ic.redline(["a.py"], 100))
         assert not any("删除/退场" in t for t in ic.redline(["a.py"], 0))
+
+    def test_no_bare_python_in_cheatsheet(self):
+        """⚠️ 2026-10-16 三轮模拟第 1 轮：速查表用**裸 `python`** —— 而本机裸 python 是
+        Hermes venv 的 **3.11.16**，**不是项目的 Py312**（AGENTS §2 一直用完整路径）。
+        照抄 ⇒ 跑错解释器。⇒ 命令必须用 `$PY`。
+        """
+        import re
+        t = self.CHEAT.read_text(encoding="utf-8", errors="replace")
+        #: ⚠️ 判据是「**行首词**是裸 `python`」（不是「任何位置出现 python」）——
+        #: 首版用了 `(?!-m)` 想放过 `python -m pytest`，结果**把 `python -m` 也放过了**
+        #: （而那正是最常见的写法）⇒ 变异塞回裸 python 竟 ESCAPED。
+        #: 正解：只看**命令起始词**是否 `python`。
+        def _starts_with_bare_python(line: str) -> bool:
+            cmd = line.strip()
+            #: 去掉常见行内注释/提示前缀后，看起始词
+            for pre in ("$ ", "# ", "> ", "| "):
+                if cmd.startswith(pre):
+                    cmd = cmd[len(pre):].lstrip()
+            return bool(re.match(r"python(\s|$)", cmd))
+
+        bad = [f"第 {i} 行：{l.strip()[:80]}"
+               for i, l in enumerate(t.splitlines(), 1)
+               if _starts_with_bare_python(l)]
+        assert not bad, "速查表有裸 `python`（应用 `$PY`）：\n" + "\n".join(bad)
+        #: 头部必须有 PY 定义
+        assert 'PY="C:/Users/admin/AppData/Local/Programs/Python/Python312/python.exe"' in t
+
+    def test_cheatsheet_documents_pick_tests_output_shape(self):
+        """⚠️ 第 1 轮模拟：文档里 `grep '\.py$'` 是**猜的** —— real 输出带注释行。"""
+        t = self.CHEAT.read_text(encoding="utf-8", errors="replace")
+        assert "没有检测到改动文件" in t, "没写明 pick_tests 的输出形态"
+        assert "别同时用" in t and "--lf" in t, "没写明 -x 与 --lf 打架"
+
+    def test_cheatsheet_documents_the_doc_numbering_rule(self):
+        """⚠️ 第 1 轮模拟：`NN_功能设计_<名>.md` 的 `NN` 怎么定没说。"""
+        t = self.CHEAT.read_text(encoding="utf-8", errors="replace")
+        assert "取现有最大号" in t, "没写 NN 编号规则"
+        assert "docs/02_设计文档/" in t
+
 
 class TestWorkflowTwoChannelsAreWired:
     """⚠️ 2026-10-16 判据式扫出的 4 个缺口 —— 必须钉住，否则下次又被冲掉。
