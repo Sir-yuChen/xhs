@@ -281,8 +281,17 @@ class SmokeTestGuardStatic(unittest.TestCase):
 
     def test_audits_history_against_source(self):
         self.assertIn("$pyVersionAudit", self.text)
-        self.assertIn('$shippedCount = & $py $pyVersionAudit', self.text)
+        self.assertIn('$shippedCount = & $py -c $pyVersionAudit', self.text)
         self.assertIn('"config\\version.json"', self.text)
+
+    def test_invocation_passes_dash_c(self):
+        """必须 `& $py -c <code>`：漏了 `-c`，PS 会把多行代码当成**文件名**传给 python
+        （`can't open file '...import json...'`）⇒ 守卫恒红/恒死。2026-10-15 实测踩到。"""
+        import re
+
+        calls = re.findall(r"&\s*\$py\s+(\S+)\s+\$pyVersionAudit", self.text)
+        self.assertTrue(calls, "找不到版本守卫的调用点")
+        self.assertEqual(calls, ["-c"], f"调用点必须传 -c，实得 {calls}")
 
     def test_asserts_summary_and_built_at_non_empty(self):
         self.assertIn('for field in ("built_at", "summary")', self.text)
@@ -290,7 +299,7 @@ class SmokeTestGuardStatic(unittest.TestCase):
     def test_does_not_use_a_phantom_interpreter_variable(self):
         """不许调 `& $Py` —— smoke-test.ps1 里没有这个变量，`Stop` 下直接抛错带崩冒烟。"""
         self.assertNotIn("& $Py ", self.text)
-        self.assertIn("& $py $pyVersionAudit", self.text)
+        self.assertIn("& $py -c $pyVersionAudit", self.text)
 
     def test_guard_runs_before_the_install_is_exercised(self):
         """守卫必须在起服务之前跑（坏包第一时间红，而不是等服务超时）。"""
@@ -348,8 +357,36 @@ class BuildScriptStatic(unittest.TestCase):
         self.assertIn("$historyCount", code)
 
     def test_calls_the_bundle_guard(self):
-        self.assertIn("& $Python -c $pyVerify", self.text)
+        self.assertIn("& $Python $pyVerifyFile $srcVersionJson $versionJson", self.text)
         self.assertIn("版本历史自检通过", self.text)
+
+    def test_python_blocks_go_through_temp_files_not_dash_c(self):
+        """两段 Python 必须写临时文件再执行：PS 5.1 用 `-c` 传含中文的代码会被
+        控制台代码页破坏（实测 `SyntaxError: '(' was never closed`）⇒ 构建必挂。
+        裸变量（漏 `-c`）更糟：多行代码被当**文件名**。两条都在这里钉死。"""
+        self.assertNotIn("& $Python -c $pyMerge", self.text)
+        self.assertNotIn("& $Python -c $pyVerify", self.text)
+        self.assertIn('$pyMergeFile = Write-Py', self.text)
+        self.assertIn('$pyVerifyFile = Write-Py', self.text)
+
+    def test_temp_python_written_without_bom(self):
+        """必须 .NET 写无 BOM：PS 5.1 的 `Set-Content -Encoding utf8` 带 BOM，
+        python 读源码时会 `SyntaxError: invalid non-printable character`。"""
+        self.assertIn("[System.IO.File]::WriteAllText", self.text)
+        self.assertIn("New-Object System.Text.UTF8Encoding $false", self.text)
+
+    def test_writer_does_not_read_outer_scope(self):
+        """`Write-Py` 的目录必须**当参数传**：`$script:` / 外层变量在
+        `[scriptblock]::Create` 或 dot-source 场景下为空（实测 Join-Path 报空值）。"""
+        self.assertIn("function Write-Py", self.text)
+        seg = self.text[self.text.index("function Write-Py") : self.text.index("$pyMerge = @'")]
+        self.assertIn("Join-Path $Dir $Name", seg)
+        self.assertNotIn("$script:", seg)
+        self.assertNotIn("$PSScriptRoot", seg)
+
+    def test_temp_dir_is_gitignored(self):
+        gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn("/packaging/.py-tmp/", gitignore)
 
     def test_no_dangling_history_variable(self):
         """修复漏网的 `$($history.Count)`（变量已删 ⇒ 输出恒空 ⇒ 假报账）。"""

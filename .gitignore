@@ -85,3 +85,7 @@ SCK/
 /probe_*.py
 dev/
 frontend/dev/
+#: ⚠️ 打包脚本的 Python 临时件（2026-10-15 加）：build.ps1 把两段 Python
+#: （读源码版本历史 / 包内自检）写成临时文件再跑 —— 因为 PS 5.1 用 `-c` 传
+#: 含中文的代码会被控制台代码页破坏。属于**构建中间产物**，不进库。
+/packaging/.py-tmp/

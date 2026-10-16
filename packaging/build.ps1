@@ -257,6 +257,35 @@ try {
 #:   不在 PowerShell 里碰 JSON。
 #: ⚠️⚠️ **不允许再出现静默回退**（`catch { }` 里赌一个默认值）—— 读不到就 `Fail` 停构建。
 $srcVersionJson = Join-Path $Root "config\version.json"
+#: ⚠️⚠️ **Python 代码必须落到临时文件再执行，不能用 `-c` 传**。
+#:   2026-10-15 实测（发版后复现）：PS 5.1 把**含非 ASCII 的 `-c` 参数**按控制台代码页
+#:   编码后交给 native python.exe ⇒ 代码里的中文字符串字面量被破坏，报
+#:   `SyntaxError: '(' was never closed`。
+#:   这两段里都有中文（错误提示串）⇒ 只要走 `-c` 就**必然跑不起来**，
+#:   而 `$LASTEXITCODE -ne 0` 会直接 `Fail` 停构建 —— 也就是说「修好的 build.ps1」
+#:   在真机上其实**打不了包**（比原来更早红，虽然方向是对的）。
+#:   另一条同源坑：裸 `& $Python $code`（漏 `-c`）会把多行代码当**文件名**。
+#: ⇒ 统一写临时文件（UTF-8 **无 BOM**，python 有 BOM 会报 invalid non-printable），
+#:   命令行上只出现 ASCII 路径。
+#: ⚠️ 目录**作为参数传进去**，不在函数体里读任何外层变量。
+#:   踩过的坑（2026-10-16 实测）：`$script:` / `$PSScriptRoot` / 裸外层变量
+#:   在「脚本段被 [scriptblock]::Create 执行 / dot-source」时都可能为空 ⇒
+#:   `Join-Path: 无法将参数绑定到参数"Path"，因为该参数是空值`。
+#:   参数传值对任何调用方式都成立，也不会把 `return` 的值混进管道。
+$pyTmpDir = Join-Path $ScriptDir ".py-tmp"
+New-Item -ItemType Directory -Force -Path $pyTmpDir | Out-Null
+function Write-Py {
+    param(
+        [Parameter(Mandatory)][string]$Dir,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Code
+    )
+    $path = Join-Path $Dir $Name
+    #: `Set-Content -Encoding utf8` 在 PS 5.1 上是**带 BOM** 的 ⇒ 必须用 .NET 写无 BOM。
+    [System.IO.File]::WriteAllText($path, $Code, (New-Object System.Text.UTF8Encoding $false))
+    return $path
+}
+
 $pyMerge = @'
 import json, sys
 src, dst, version, built_at, commit = sys.argv[1:6]
@@ -280,7 +309,9 @@ out = {"current": version, "versions": history}
 open(dst, "w", encoding="utf-8").write(json.dumps(out, ensure_ascii=False, indent=2))
 print(len(history))
 '@
-$historyCount = & $Python -c $pyMerge $srcVersionJson $versionJson $Version $builtAt $commitSha
+$pyMergeFile = Write-Py -Dir $pyTmpDir -Name "merge_version.py" -Code $pyMerge
+
+$historyCount = & $Python $pyMergeFile $srcVersionJson $versionJson $Version $builtAt $commitSha
 if ($LASTEXITCODE -ne 0) {
     Fail "写包内 config/version.json 失败（源码历史读不到，或写入出错）"
 }
@@ -325,7 +356,8 @@ for line in problems:
     print("  [VERSION] " + line, file=sys.stderr)
 sys.exit(1 if problems else 0)
 '@
-& $Python -c $pyVerify $srcVersionJson $versionJson
+$pyVerifyFile = Write-Py -Dir $pyTmpDir -Name "verify_version.py" -Code $pyVerify
+& $Python $pyVerifyFile $srcVersionJson $versionJson
 if ($LASTEXITCODE -ne 0) {
     Fail "包内 config/version.json 自检未通过（见上方 [VERSION] 行）"
 }

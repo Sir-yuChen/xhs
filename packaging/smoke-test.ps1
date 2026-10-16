@@ -100,18 +100,12 @@ Write-Host "  应用初始化数据: $providersCount 个服务商种子"
 #: （2026-10-15 实测：`-Raw` 报「无效的对象...位置 685」；管道喂单行长 JSON 解成 1 条空对象）。
 #: 用它写守卫 ⇒ **守卫恒假**（永远是空对象、比较永远"相等"）——比没有守卫更危险。
 #: ⇒ 交 Python（打包/冒烟链路本就有 Python 依赖）。
-#: ⚠️ 必须用本脚本自己的解释器解析顺序（下方 4b 段同款 `$py`）：
-#:   2026-10-15 实测踩到：这里曾写成 `& $Py`（构建脚本的变量名），
-#:   而 smoke-test.ps1 里**没有 `$Py`** ⇒ 在 `$ErrorActionPreference = "Stop"` 下
+#: ⚠️ 必须自己解析解释器：冒烟是**独立脚本**（release.ps1 阶段 4 调），不继承构建脚本的变量。
+#:   2026-10-15 实测踩到：这里曾写成 `& $Py`（构建脚本 `build.ps1` 的变量名），
+#:   而那时 smoke-test.ps1 里**没有 `$Py`** ⇒ 在 `$ErrorActionPreference = "Stop"` 下
 #:   直接抛 `RuntimeException`（"& 运算符后面的表达式不是有效对象"），
 #:   冒烟在**校验安装产物之前**就死掉 —— 守卫比没有更坏（把整条门禁带崩）。
-if (-not $py) { $py = (Get-Command python -ErrorAction SilentlyContinue).Source }
-if (-not $py) { $py = (Get-Command python3 -ErrorAction SilentlyContinue).Source }
-if (-not $py) {
-    Fail "找不到 python 可执行文件，无法校验包内版本历史（本机装了 python 才有这条判据，不许静默跳过）"
-}
 #: 找一个可用的 Python（与 release.ps1 的 Resolve-Python 同候选集）。
-#: ⚠️ 冒烟是**独立脚本**（release.ps1 阶段 4 调），没有继承 \$Py ⇒ 自己解析。
 $Py = $null
 if ($env:SPIDER_XHS_PYTHON -and (Test-Path $env:SPIDER_XHS_PYTHON)) { $Py = $env:SPIDER_XHS_PYTHON }
 if (-not $Py) {
@@ -126,6 +120,14 @@ if (-not $Py) {
 }
 if (-not $Py) { Fail "找不到 Python（版本历史审计需要；可用 SPIDER_XHS_PYTHON 指定）" }
 
+#: ⚠️⚠️ **审计脚本必须落到临时文件再执行，不能用 `-c` 传多行中文代码**。
+#:   2026-10-15 实测：PS 5.1 把**含非 ASCII 的 `-c` 参数**按控制台代码页编码后交给
+#:   native python.exe ⇒ 中文字符串字面量被破坏（`SyntaxError: '(' was never closed`），
+#:   守卫**恒红**。写文件走 UTF-8（无 BOM），命令行上只有 ASCII 路径，绕开整类坑。
+#:   （同理必须传 `-c`/文件而不是裸变量：裸 `& $Py $code` 会把多行代码当**文件名**。）
+$pyAuditDir = Join-Path $Root ".hermes\tmp"
+New-Item -ItemType Directory -Force -Path $pyAuditDir | Out-Null
+$pyAuditFile = Join-Path $pyAuditDir "smoke_version_audit.py"
 $pyVersionAudit = @'
 import json, sys
 shipped_path, source_path = sys.argv[1:3]
@@ -153,7 +155,10 @@ for line in problems:
 print(len(sv))
 sys.exit(1 if problems else 0)
 '@
-$shippedCount = & $py $pyVersionAudit (Join-Path $InstallDir "config\version.json") (Join-Path $Root "config\version.json")
+#: ⚠️ 必须【无 BOM】UTF-8：PS 5.1 的 Set-Content -Encoding utf8 带 BOM，
+#: python 读源码文件遇 BOM 会 `SyntaxError: invalid non-printable character`。
+[System.IO.File]::WriteAllText($pyAuditFile, $pyVersionAudit, (New-Object System.Text.UTF8Encoding $false))
+$shippedCount = & $Py $pyAuditFile (Join-Path $InstallDir "config\version.json") (Join-Path $Root "config\version.json")
 if ($LASTEXITCODE -ne 0) {
     Fail "包内 config/version.json 历史不完整（见上方 [VERSION] 行）"
 }
