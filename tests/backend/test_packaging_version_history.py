@@ -281,25 +281,28 @@ class SmokeTestGuardStatic(unittest.TestCase):
 
     def test_audits_history_against_source(self):
         self.assertIn("$pyVersionAudit", self.text)
-        self.assertIn('$shippedCount = & $py -c $pyVersionAudit', self.text)
+        self.assertIn("$shippedCount = & $Py $pyAuditFile", self.text)
         self.assertIn('"config\\version.json"', self.text)
 
-    def test_invocation_passes_dash_c(self):
-        """必须 `& $py -c <code>`：漏了 `-c`，PS 会把多行代码当成**文件名**传给 python
-        （`can't open file '...import json...'`）⇒ 守卫恒红/恒死。2026-10-15 实测踩到。"""
-        import re
+    def test_audit_code_never_travels_on_the_command_line(self):
+        """审计代码必须写临时文件再执行，**不许** `-c $pyVersionAudit` / 裸变量。
 
-        calls = re.findall(r"&\s*\$py\s+(\S+)\s+\$pyVersionAudit", self.text)
-        self.assertTrue(calls, "找不到版本守卫的调用点")
-        self.assertEqual(calls, ["-c"], f"调用点必须传 -c，实得 {calls}")
+        2026-10-16 实测两条同源坑：① `-c <含中文的代码>` 被 PS 5.1 按控制台代码页
+        编码 ⇒ `SyntaxError: '(' was never closed`；② 裸 `& $Py $code` 把多行代码
+        当**文件名** ⇒ `can't open file '...import json...'`。都会让守卫恒红/恒死。
+        """
+        self.assertNotIn("-c $pyVersionAudit", self.text)
+        self.assertIn("[System.IO.File]::WriteAllText($pyAuditFile, $pyVersionAudit", self.text)
+        self.assertIn("& $Py $pyAuditFile", self.text)
 
     def test_asserts_summary_and_built_at_non_empty(self):
         self.assertIn('for field in ("built_at", "summary")', self.text)
 
-    def test_does_not_use_a_phantom_interpreter_variable(self):
-        """不许调 `& $Py` —— smoke-test.ps1 里没有这个变量，`Stop` 下直接抛错带崩冒烟。"""
-        self.assertNotIn("& $Py ", self.text)
-        self.assertIn("& $py -c $pyVersionAudit", self.text)
+    def test_uses_the_scripts_own_interpreter_variable(self):
+        """必须用本脚本解析出的 `$Py`；`& $Py` 与调用点形状都要对得上。"""
+        self.assertIn("$Py = $null", self.text)
+        self.assertIn('$env:SPIDER_XHS_PYTHON', self.text)
+        self.assertIn("& $Py $pyAuditFile", self.text)
 
     def test_guard_runs_before_the_install_is_exercised(self):
         """守卫必须在起服务之前跑（坏包第一时间红，而不是等服务超时）。"""
@@ -307,13 +310,11 @@ class SmokeTestGuardStatic(unittest.TestCase):
 
     def test_python_missing_is_a_failure_not_a_skip(self):
         """python 缺失 ⇒ Fail（不许 Write-Host [跳过] 静默放过）。"""
-        guard = self.text.index("$pyVersionAudit")
-        segment = self.text[:guard]
-        self.assertIn(
-            "找不到 python 可执行文件，无法校验包内版本历史",
-            self.text,
-        )
-        self.assertNotIn("[跳过]", self.text[segment.rindex("版本历史必须") : guard])
+        guard_start = self.text.index("版本历史必须")
+        guard_end = self.text.index("# --- 3. 启动 + 健康检查")
+        guard = self.text[guard_start:guard_end]
+        self.assertIn("if (-not $Py) { Fail", guard)
+        self.assertNotIn("[跳过]", guard)
 
     def test_does_not_hardcode_a_version_count(self):
         """不许写死「恰好 N 条」—— 一发版就假红。"""
@@ -382,7 +383,6 @@ class BuildScriptStatic(unittest.TestCase):
         seg = self.text[self.text.index("function Write-Py") : self.text.index("$pyMerge = @'")]
         self.assertIn("Join-Path $Dir $Name", seg)
         self.assertNotIn("$script:", seg)
-        self.assertNotIn("$PSScriptRoot", seg)
 
     def test_temp_dir_is_gitignored(self):
         gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
@@ -393,8 +393,16 @@ class BuildScriptStatic(unittest.TestCase):
         self.assertNotIn("$history.Count", self.text)
 
     def test_python_is_configured_before_use(self):
-        self.assertIn("$Python", self.text)
-        self.assertLess(self.text.index("$Python = $env:SPIDER_XHS_PYTHON"), self.text.index("& $Python -c $pyMerge"))
+        self.assertLess(
+            self.text.index("$Python = $env:SPIDER_XHS_PYTHON"),
+            self.text.index("& $Python $pyMergeFile"),
+        )
+
+    def test_dangling_history_variable_check_is_specific(self):
+        """`$history` 这个旧变量必须彻底消失（新代码只许有 `$historyCount`）。"""
+        code = "\n".join(ln for ln in self.text.splitlines() if not ln.lstrip().startswith("#"))
+        for bad in ('$history =', '$history)', '$(history', '$history.'):
+            self.assertNotIn(bad, code)
 
 
 if __name__ == "__main__":
