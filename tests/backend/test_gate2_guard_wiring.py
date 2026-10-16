@@ -243,3 +243,78 @@ class TestWorkflowCheatSheet:
         assert "与 Gate 3 的分工" in text
         assert "代码级" in text and "业务级" in text
 
+class TestRedline:
+    """改动红线（`03_改动红线.md` + `impact_check.py --redline`）——场景 B 的最小强制清单。"""
+
+    REDLINE = ROOT / "docs" / "00_管理规范" / "03_改动红线.md"
+    SCRIPT = ROOT / ".hermes" / "scripts" / "impact_check.py"
+
+    def test_doc_exists_with_four_steps(self):
+        t = self.REDLINE.read_text(encoding="utf-8", errors="replace")
+        for k in ("① 列清单", "② 反查连带", "③ 定判据", "④ 改完验证"):
+            assert k in t, f"红线缺「{k}」"
+
+    def test_redline_rules_are_implemented_in_script(self):
+        """⚠️ **规矩要能被执行** —— 触发规则必须在脚本里（否则又是纸面规矩）。"""
+        src = self.SCRIPT.read_text(encoding="utf-8", errors="replace")
+        assert "REDLINE_RULES" in src, "红线规则没在脚本里实现"
+        assert "def redline(" in src
+
+    def test_script_handles_chinese_paths(self):
+        """⚠️⚠️ `git diff --name-only` 默认把中文路径转义成八进制 ⇒ 中文路径规则**静默失效**。
+
+        2026-10-15 实测：不加 `core.quotepath=false` 时，「流程文档」规则对着真实改动
+        返回「未命中」—— **红线形同虚设**。这是本守卫存在的唯一理由。
+        """
+        #: ⚠️ **不能只断言「字符串在源码里」** —— 变异实测 ESCAPED：
+        #: 把 `core.quotepath=false` 从 git 命令里去掉，源码里那串还在注释/docstring 里
+        #: ⇒ 静态断言照样绿，**而中文路径已经静默失效**。
+        #: ⇒ 改**行为验证**：真造一个中文路径的改动，看 `--changed` 能不能列出来。
+        import subprocess as sp
+        probe = ROOT / "docs" / "00_管理规范" / "_redline_probe_中文.md"
+        probe.write_text("probe\n", encoding="utf-8", newline="")
+        try:
+            r = sp.run([sys.executable, str(self.SCRIPT), "--changed"],
+                       cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace")
+            out = r.stdout or ""
+            assert "00_管理规范" in out, (
+                "`--changed` 列不出中文路径的改动（说明 core.quotepath 被去掉或失效）——\n"
+                f"{out[:400]}"
+            )
+        finally:
+            probe.unlink(missing_ok=True)
+
+    def test_redline_rules_actually_fire(self):
+        """真跑 `redline()` —— **纯函数调用，不碰任何文件**。
+
+        ⚠️⚠️ **首版错法（2026-10-15 事故）**：先 `write_text` 改**真文件**当探针、
+        再 `finally` 还原。一旦与变异脚本**并发**或**被超时打断** ⇒ `finally` 没跑完
+        ⇒ **真文件留脏**（实测 `backend/app/models/note.py` 尾部被留下 `<!-- redline probe -->`，
+        且 `03_改动红线.md` 停在变异态）。
+        ⇒ **判据式改法**：直接 import 被测函数、传构造的路径列表 —— **零副作用、可无限并发**。
+        """
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_ic", self.SCRIPT)
+        ic = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ic)
+
+        cases = [
+            (["backend/app/models/note.py"], "公共层"),
+            (["docs/00_管理规范/00_需求工作流速查.md"], "流程/规范文档"),
+            (["AGENTS.md"], "文档数字"),
+            (["frontend/src/lib/precheck-publish.ts"], "前端契约字段"),
+            (["backend/alembic/versions/x_y.py"], "数据库/迁移"),
+            (["tests/backend/test_a.py"], "守卫/测试/变异"),
+        ]
+        for files, expect in cases:
+            todos = ic.redline(files, deleted_lines=0)
+            names = [t.split("]")[0][1:] for t in todos]
+            assert expect in names, f"{files} 没触发「{expect}」：{names}"
+
+        #: 反面：真·琐碎改动不该触发
+        assert ic.redline(["frontend/src/pages/platforms/xhs/my-notes-page.tsx"], 0) == [], \
+            "改一个无关页面文件不该触发红线"
+
+        #: 删除行数 >= 100 触发「删除/退场」
+        assert any("删除/退场" in t for t in ic.redline(["a.py"], 100))
+        assert not any("删除/退场" in t for t in ic.redline(["a.py"], 0))
