@@ -44,7 +44,7 @@ class TestGate2ScriptIsAlive:
         out = _run().stdout
         assert "①" in out and "写动作" in out, "缺「平台写动作 + 抓包快照」那一段"
         assert "②" in out and "定论" in out, "缺「定论标题复查」那一段"
-        assert "③" in out and "三层" in out, "缺「三层声明」那一段"
+        assert "③" in out and "总-分-总" in out, "缺「总-分-总声明」那一段"
 
     def test_list_mode_works(self):
         """`--list` 只列不判（给「只想看看有哪些写接口」的人用）。"""
@@ -116,16 +116,40 @@ class TestGate2RulesAreWiredIntoTheWorkflow:
 
 
 class TestTemplateIsUsable:
-    def test_template_has_the_three_layers(self):
-        """模板必须有三层小节（作者复制它时不会漏）。"""
+    def test_template_has_the_zong_fen_zong_sections(self):
+        """模板必须是「总—分—总」四段（用户 2026-10-16 口径）。
+
+        ⚠️ 首版是「三层」（业务逻辑 / 接口设计 / 前后端交互）——
+        缺「总① 总体设计」、且**前后端没分开**（用户口径要求「分开设计前后端」）。
+        """
+        import re
         text = TEMPLATE.read_text(encoding="utf-8", errors="replace")
-        assert "业务逻辑与判据" in text
-        assert "接口设计" in text
-        assert "前后端数据交互" in text
+        #: ⚠️⚠️ **必须锚「标题行」，不能全文找词** ——
+        #: 变异实测两次 ESCAPED：
+        #:  · 把 `## 2.2 底层数据结构` 改名 ⇒ 全文找「底层数据结构」仍命中**开头的说明文字**
+        #:  · 把 `## 4.2 端到端链路` 删掉 ⇒ 全文找「端到端链路」仍命中**说明文字**
+        #: ⇒ 判据锚在标题行（`^#{1,3} …`），说明文字不算。
+        headings = re.findall(r"^#{1,3} .+$", text, re.M)
+        joined = "\n".join(headings)
+
+        for k in ("总① · 需求总体设计", "总② · 前后端关联"):
+            assert any(k in h for h in headings), f"缺标题「{k}」"
+        for k in ("分 · 前端设计", "分 · 后端设计"):
+            assert any(k in h for h in headings), f"缺标题「{k}」"
+
+        #: 前端段 / 后端段各自的**标题级**必备节
+        assert any("底层数据结构" in h and "表" not in h for h in headings), \
+            "缺前端「底层数据结构」标题"
+        assert any("底层数据结构（表" in h for h in headings), \
+            "缺后端「底层数据结构（表 / 模型）」标题"
+        assert any("端到端链路" in h for h in headings), "缺「端到端链路」标题"
+        assert any("端到端一张图" in h for h in headings), "缺总①「总体流程（端到端一张图）」标题"
 
     def test_template_carries_the_gate2_declaration(self):
         """模板带 `<!-- gate2: 三层 … -->` —— 声明的写法以模板为唯一来源。"""
-        assert "<!-- gate2:" in TEMPLATE.read_text(encoding="utf-8", errors="replace")
+        t = TEMPLATE.read_text(encoding="utf-8", errors="replace")
+        assert "<!-- gate2:" in t
+        assert "总-分-总" in t, "模板的 gate2 声明须写「总-分-总」"
 
     def test_template_has_real_examples_not_placeholders_only(self):
         """模板里的示例必须取自**真实踩过的坑**（否则新人抄了也不知道在防什么）。"""
