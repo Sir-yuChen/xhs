@@ -425,6 +425,47 @@ class TestRedline:
         assert (ROOT / ".hermes" / "scripts" / "mutate_verify_redline.py").exists()
 
 
+    def test_redline_covers_the_acceptance_checklists(self):
+        """⚠️ 2026-10-16 三轮模拟第 3 轮（零 bug 正常过程）：改**验收清单**时红线 **0 命中**。
+
+        真因：`REDLINE_RULES["文档数字"]` 的正则只框了 `AGENTS.md`/`README.md`/`docs/02_设计文档/`，
+        **漏了 `docs/04_测试文档/`** —— 而 `verify_acceptance_links.py` 的 `LINK_DOC`
+        **就是** `04_测试文档/09_…验收清单.md`。改它却不触发三校验 = **漏掉一道真防线**。
+        （真实样本 `eba3e24` 就是改清单。）
+        """
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("ic_acc", IMPACT)
+        ic = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ic)
+        for f in ("docs/04_测试文档/09_第二阶段功能点全链路验收清单.md",
+                  "docs/04_测试文档/10_前端页面整合验收清单.md"):
+            out = " ".join(ic.redline([f], 0))
+            assert "文档数字" in out, f"改 {f} 没触发三校验（验收清单是它的校验对象）"
+
+    def test_redline_does_not_over_trigger_on_unrelated_docs(self):
+        """反向：改**与校验无关**的文档（沉淀/复盘）**不该**触发三校验（防红线通胀）。"""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("ic_unrel", IMPACT)
+        ic = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ic)
+        out = " ".join(ic.redline(["docs/05_项目沉淀/05_复盘_商品发布功能开发为何慢.md"], 0))
+        assert "文档数字" not in out, "无关文档不该触发三校验"
+
+    def test_gotcha_patterns_and_redline_rules_are_different_things(self):
+        """⚠️ 第 3 轮模拟踩到的坑：`GOTCHA_PATTERNS`（反查符号时的「五类常漏项」提示）
+        与 `REDLINE_RULES`（`--redline` 用）是**两个不同用途的 dict** ——
+        我一开始改错了地方，改完还是 0 命中。守卫钉住：**两者都必须存在且用途不同**。
+        """
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("ic_two", IMPACT)
+        ic = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ic)
+        assert hasattr(ic, "GOTCHA_PATTERNS") and hasattr(ic, "REDLINE_RULES")
+        assert "① 守卫/测试写死的旧形态" in ic.GOTCHA_PATTERNS, "GOTCHA_PATTERNS 被误改"
+        #: 两者的 key 集合不同（不是同一份东西抄两遍）
+        assert set(ic.GOTCHA_PATTERNS) != {n for n, _, _ in ic.REDLINE_RULES}
+
+
 class TestWorkflowTwoChannelsAreWired:
     """⚠️ 2026-10-16 判据式扫出的 4 个缺口 —— 必须钉住，否则下次又被冲掉。
 
