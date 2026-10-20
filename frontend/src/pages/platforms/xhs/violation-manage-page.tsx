@@ -129,6 +129,7 @@ import {
 } from "../../../lib/violation-manage";
 import type { BatchActionKey, CheckupTabKey, QuickFilterKey, ReadMarkMap, ViolationTabKey } from "../../../lib/violation-manage";
 
+import { WaitMask } from "../../../components/ui/wait-mask";
 const { Text, Link } = Typography;
 
 /** 表格行宽（固定布局：表格内滚，分页与统计固定在卡底）。 */
@@ -1522,6 +1523,7 @@ export function ViolationManagePage() {
                   locale={{ emptyText: <Empty description="暂无数据" /> }}
                 />
               </Spin>
+<WaitMask open={loading} title="正在加载违规数据" />
             </div>
           </>
         )}

@@ -1,5 +1,5 @@
-import { Spin } from "antd";
 import type { ReactNode } from "react";
+import { WaitMask } from "./wait-mask";
 import { Navigate, useLocation } from "react-router-dom";
 
 import { useThemePalette } from "../../app/providers";
@@ -16,16 +16,9 @@ export function ProtectedRoute({ children }: RouteGuardProps) {
 
   if (auth.isChecking) {
     return (
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          minHeight: "100vh",
-          background: p.pageBg,
-        }}
-      >
-        <Spin size="large" tip="正在验证登录状态..." />
+      <div style={{ minHeight: "100vh", background: p.pageBg }}>
+        {/* 统一蒙版：白卡居中（用户口径 2026-10-20「全项目蒙版样式一样」）。 */}
+        <WaitMask open title="正在验证登录状态" />
       </div>
     );
   }
@@ -43,16 +36,9 @@ export function PublicOnlyRoute({ children }: RouteGuardProps) {
 
   if (auth.isChecking) {
     return (
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          minHeight: "100vh",
-          background: p.pageBg,
-        }}
-      >
-        <Spin size="large" tip="正在验证登录状态..." />
+      <div style={{ minHeight: "100vh", background: p.pageBg }}>
+        {/* 统一蒙版：白卡居中（用户口径 2026-10-20「全项目蒙版样式一样」）。 */}
+        <WaitMask open title="正在验证登录状态" />
       </div>
     );
   }

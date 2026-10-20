@@ -41,6 +41,7 @@ import {
 import { formatShanghaiTime } from "../../../lib/time";
 import { useThemePalette } from "../../../app/providers";
 import type { GeneratedImageAsset, UserImageFile } from "../../../types";
+import { WaitMask } from "../../../components/ui/wait-mask";
 
 const { Text, Paragraph } = Typography;
 const { TextArea } = Input;
@@ -461,9 +462,7 @@ export function ImageStudioPanel() {
             children: (
               <>
                 {isLoading ? (
-                  <div style={{ textAlign: "center", padding: 48 }}>
-                    <Spin tip="正在加载 AI 图片资产..." />
-                  </div>
+                  <WaitMask open title="正在加载 AI 图片资产" />
                 ) : assets.length === 0 ? (
                   <Empty
                     image={Empty.PRESENTED_IMAGE_SIMPLE}

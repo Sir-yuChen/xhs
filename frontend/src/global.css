@@ -316,33 +316,6 @@ body {
  * 层级要盖过 antd 弹窗（默认 1000）+ 其蒙版，故给 2000。
  * 遮罩本身也承担「防误触」：铺满视口 ⇒ 底下的按钮/勾选都点不到。
  * ---------------------------------------------------------------- */
-.publish-wait-mask {
-  position: fixed;
-  inset: 0;
-  z-index: 2000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(255, 255, 255, 0.55);
-  backdrop-filter: blur(1px);
-}
-
-.publish-wait-card {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 14px;
-  padding: 24px 32px;
-  border-radius: 12px;
-  background: var(--ant-color-bg-container, #fff);
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.14);
-}
-
-.publish-wait-text {
-  font-size: 14px;
-  color: var(--ant-color-text, rgba(0, 0, 0, 0.88));
-}
-
 /* 商品属性（属性图 OCR 出的 KV —— 用户口径 2026-10-09）
    一行一对「属性名：属性值」，两个输入框都可改（OCR 错字由用户自己纠）。 */
 .attr-kv-list {
@@ -371,15 +344,6 @@ body {
 .attr-kv-value {
   width: 320px;
   flex: 0 0 320px;
-}
-
-/* 提交蒙版的副说明（与 `.publish-wait-mask` 同款卡片内的次要一行）。 */
-.publish-wait-sub {
-  max-width: 360px;
-  font-size: 12px;
-  line-height: 18px;
-  text-align: center;
-  color: var(--ant-color-text-secondary, rgba(0, 0, 0, 0.45));
 }
 
 /* ===== 商品列表 · 台账三区布局（搜索固定 / 表体滚动 / 统计+分页固定） ===== */

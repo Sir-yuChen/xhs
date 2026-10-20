@@ -61,6 +61,7 @@ import { generateShortTitle, predictProperties } from "../../../lib/api";
 import type { AfterSaleRule } from "../../../lib/api";
 import { buildImageUrls, spec_combinations } from "../../../lib/publish-config";
 import { withoutItemNo } from "../../../lib/publish-property-fields";
+import { WaitMask } from "../../../components/ui/wait-mask";
 import {
   applyBatchRule,
   buildSkuFillPlan,
@@ -176,8 +177,11 @@ function SkuPickModal(props: {
         }}
       >
         {/* 等待蒙版（用户口径 2026-10-10：确认后要盖住，避免误触/重复提交）。 */}
-        <Spin spinning={!!props.busy} tip="正在上传规格图…" delay={0}>
-          <span className="sku-pick-spin-anchor" />
+        {/* 等待蒙版（用户口径 2026-10-10：确认后要盖住，避免误触/重复提交）。
+            ⚠️ 2026-10-20 换统一 WaitMask：老写法 Spin + tip 的 tip 会跟内容滚走，
+            且全站样式不一。外层 position: relative 供蒙版铺满本弹窗体。 */}
+        <div style={{ position: "relative" }}>
+          <WaitMask open={!!props.busy} scope="panel" title="正在上传规格图" />
         {/* 用户口径（2026-10-10）：规则文案放弹窗**顶部提示**。 */}
         <Alert type="info" showIcon style={{ marginBottom: 12 }} message={SPEC_IMAGE_RULE} />
         {items.length === 0 ? (
@@ -227,7 +231,7 @@ function SkuPickModal(props: {
             })}
           </div>
         )}
-        </Spin>
+        </div>
       </Modal>
 
       {/* 大图预览（可左右切换）。 */}
@@ -3184,13 +3188,10 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
           {/* **蒙版 + 耗时 + 进度**（用户口径 2026-10-11：「点击确认应加蒙版覆盖
               统计耗时和执行进度情况展示」）—— 跑的时候整块盖住，
               防止中途改配置产出半成品。 */}
+          {/* ⚠️ 2026-10-20：`tip` 已移除，改由统一 `<WaitMask>` 画在最上层
+              （`Spin` 的 tip 跟内容滚走；`Spin` 只保留挡交互的职责）。 */}
           <Spin
             spinning={importRunning}
-            tip={
-              importProgress
-                ? `${importProgress} · 已用 ${importElapsed}s`
-                : `正在导入…已用 ${importElapsed}s`
-            }
             style={{ width: "100%" }}
             wrapperClassName="import-spin-wrapper"
           >
@@ -3500,6 +3501,11 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
             />
           )}
           </Spin>
+          <WaitMask
+            open={importRunning}
+            title={importProgress || "正在导入"}
+            elapsed={importElapsed}
+          />
         </Modal>
 
         {specTypes.map((name, gi) => (

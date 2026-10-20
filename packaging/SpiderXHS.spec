@@ -76,8 +76,11 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     # pytest 只服务于测试链，进包纯粹占体积（约 10MB+）；
-    # tkinter / IPython / notebook 与桌面运行时无关（防钩子误收）。
-    excludes=["pytest", "tests", "tkinter", "IPython", "notebook"],
+    # IPython / notebook 与桌面运行时无关（防钩子误收）。
+    # ⚠️ **不能排除 tkinter**：`package_precheck._ask_directory` 用它弹
+    # 「选择文件夹」对话框，排除后装包用户点选择文件夹只会拿到「没有可用的图形界面」
+    # （2026-10-20 实测：先报错，因为 import 失败就直接抛 NO_DESKTOP）。
+    excludes=["pytest", "tests", "IPython", "notebook"],
     noarchive=False,
 )
 

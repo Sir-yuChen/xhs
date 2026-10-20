@@ -106,6 +106,7 @@ import {
 import { NoteDetailBody } from "../../../components/platforms/note-detail-modal";
 import { formValuesToQuery, type QueryForm } from "../../../lib/shop-items-query";
 import { LlmGenerateModal } from "./llm-generate-modal";
+import { WaitMask } from "../../../components/ui/wait-mask";
 import { SyncSpecifiedItemsModal } from "./sync-specified-items-modal";
 import { ProductDraftsModal } from "./product-drafts-modal";
 import { ForbiddenWordsModal } from "./forbidden-words-modal";
@@ -2624,9 +2625,12 @@ export function XhsShopItemsPage() {
     //: 按钮一律点不到 ⇒ 也就不会出现「等结果时结果窗口被关掉」。
     //: ⚠️ 用 `Spin` 包整页而不是给每个按钮加 `loading`：口径是「**所有功能**的等待都要
     //: 有蒙版」，按钮级 loading 只表达「这个按钮在转」，表达不了「整页在等」。
+    //: ⚠️ **`Spin` 只保留「挡住交互 + 维持高度链」两个职责，`tip` 已移除**（用户口径
+    //: 2026-10-20「统一蒙版样式」）：`Spin` 的 `tip` 跟着内容流滚，页面一滚「已耗时 Ns」就
+    //: 看不见了；文案改由 `<WaitMask>`（fixed + flex 居中）画在最上层，与滚动无关。
+    //: 不能把 `Spin` 整个换成 `WaitMask` —— 下面 `.ant-spin-container` 是台账三区高度链的一环。
     <Spin
       spinning={waitRunning}
-      tip={waitRunning ? `${waitLabel}… 耗时 ${waitElapsedSec}s` : ""}
       size="large"
     >
     <Flex
@@ -3082,7 +3086,17 @@ export function XhsShopItemsPage() {
                 centered
                 open={detailOpen}
         title="商品详情"
-        width="80%"
+        width="85%"
+        //: 宽高都取视口 **85%**（用户口径 2026-10-20「太占用全屏的宽高85%」）。
+        //: ⚠️ 只给 body 定高度不够 —— 标题栏 + footer 会再叠上去，整体超过 85vh。
+        //: `styles.container` 才是 `.ant-modal-content`（含 header/body/footer 的那层），
+        //: 在它上面做 flex 列；`style` 作用在更外层 `.ant-modal`，拿它定高会把
+        //: 标题栏/按钮区一起顶出视口。`minHeight: 0` 是承重的 —— 少了它 flex 子项
+        //: 不肯收缩，滚动会跑到弹窗外面。
+        styles={{
+          container: { height: "85vh", display: "flex", flexDirection: "column" },
+          body: { flex: 1, minHeight: 0, overflowY: "auto" },
+        }}
         footer={
           <Space>
             <Button onClick={() => setDetailOpen(false)}>关闭</Button>
@@ -3758,7 +3772,7 @@ export function XhsShopItemsPage() {
                 open={notesOpen}
         centered
         // 尺寸（v1.36 用户口径「挂链笔记弹窗全屏 75%」）：宽高都取视口的 75%。
-        // 原来的 80vw 是「尽量大」，与商品详情弹窗（80%）几乎同宽 —— 两个弹窗
+        // 原来的 80vw 是「尽量大」，与商品详情弹窗（85%）几乎同宽 —— 两个弹窗
         // 看起来一样大、层级感反而没了；收到 75% 后它是「一个更大的详情浮层」，
         // 与列表的对比更清楚。**不再设 maxWidth**：设了它就不是 75% 了
         // （宽屏上 75vw > 1600 会被截回，口径与实际不符）。
@@ -4029,6 +4043,8 @@ export function XhsShopItemsPage() {
         同步商品需要可用的千帆令牌，请到「账号矩阵」登录 / 重新登录千帆后再试。
       </Modal>
     </Flex>
+      {/* 页面级等待蒙版：与全站同一套视觉（fixed 铺满 + 白卡居中 + 已耗时）。 */}
+      <WaitMask open={waitRunning} title={waitLabel ?? ""} elapsed={waitElapsedSec} />
     </Spin>
   );
 }

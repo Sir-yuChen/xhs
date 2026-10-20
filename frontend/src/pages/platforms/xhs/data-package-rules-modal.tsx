@@ -55,6 +55,7 @@ import {
   type DataPackageRuleSet,
 } from "../../../lib/api";
 
+import { WaitMask } from "../../../components/ui/wait-mask";
 const { Text } = Typography;
 
 /** 运算的一步（`math_scale`）：运算符 + 数值。 */
@@ -554,6 +555,7 @@ export function DataPackageRulesModal({
             ]}
           />
         </Spin>
+<WaitMask open={loading} title="正在加载规则" />
       </Modal>
 
       {/* ---------------- 规则包编辑 ---------------- */}

@@ -32,6 +32,7 @@ import {
   updateKeywordGroup,
 } from "../../../lib/api";
 import type { KeywordGroup, KeywordGroupDetail } from "../../../types";
+import { WaitMask } from "../../../components/ui/wait-mask";
 
 const { Text } = Typography;
 
@@ -234,9 +235,7 @@ export function XhsKeywordsPage() {
       </Card>
 
       {isLoading ? (
-        <div style={{ textAlign: "center", padding: 48 }}>
-          <Spin tip="正在加载关键词组..." />
-        </div>
+        <WaitMask open title="正在加载关键词组" />
       ) : groups.length === 0 ? (
         <Card style={{ background: p.cardBg, borderColor: p.border }}>
           <Empty description="暂无关键词组。" />

@@ -139,6 +139,40 @@ def _ask_directory_windows() -> str:
         return None
 
 
+def _has_interactive_desktop() -> bool:
+    """当前进程是否身处**交互式桌面会话**（能弹窗口）。
+
+    为什么需要它：`tkinter` 缺失 / PowerShell 返回空，**既可能是「用户点了取消」，
+    也可能是「根本没有桌面」**。两者对前端的含义不同 —— 取消要静默，没桌面要提示
+    手填路径。判据取 Windows 的窗口站：交互式会话的窗口站名为 `WinSta0`
+    （服务进程跑在 `Service-0x…` 之类的非交互窗口站）。
+
+    非 Windows 一律视为**有**桌面（本项目的桌面端只在 Windows 出包）；
+    探测失败也返回 True（宁可当「取消」静默，也不要误报「没有图形界面」）。
+    """
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+
+        #: `GetProcessWindowStation` 返回当前进程的窗口站句柄；
+        #: `GetUserObjectInformationW` 的 `UOI_NAME`(=2) 取名字。
+        ctypes.windll.user32.GetProcessWindowStation.restype = ctypes.c_void_p
+        handle = ctypes.windll.user32.GetProcessWindowStation()
+        if not handle:
+            return False
+        buf = ctypes.create_unicode_buffer(256)
+        need = ctypes.c_ulong(0)
+        ok = ctypes.windll.user32.GetUserObjectInformationW(
+            ctypes.c_void_p(handle), 2, buf, ctypes.sizeof(buf), ctypes.byref(need)
+        )
+        if not ok:
+            return True
+        return buf.value.strip().lower() == "winsta0"
+    except Exception:  # noqa: BLE001 - 探测不可用时不阻断，按「有桌面」处理
+        return True
+
+
 def _ask_directory() -> str:
     """弹系统「选择文件夹」对话框，返回选中路径（取消 ⇒ 空串）。
 
@@ -392,20 +426,41 @@ def pick_folder(current_user: User = Depends(get_current_user)) -> dict:
 
     ⚠️ 无头环境（服务端部署）没有桌面 ⇒ 会报 `NO_DESKTOP`，前端应回落到手填路径。
     """
+    #: ⚠️ **`tkinter` 缺失不等于「没有图形界面」**（2026-10-20 实测）
+    #: 打包版 `SpiderXHS.spec` 明确 `excludes=["tkinter"]` ⇒ 装好的客户端里
+    #: **一定**没有这个模块。原实现 `import tkinter` 失败就直接抛 `NO_DESKTOP`，
+    #: 于是**每个装包用户**点「选择文件夹」都只看到「没有可用的图形界面」，
+    #: 从没走到过下面那条 PowerShell 原生对话框（它有桌面就一定能弹）。
+    #: ⇒ 这里改为**记下缺失、继续往下试**，只有所有弹窗方式都失败才报无桌面。
+    tk_missing = False
     try:
         import tkinter  # noqa: F401
-    except ImportError as error:  # pragma: no cover - 依赖缺失
-        raise _err(
-            "NO_DESKTOP",
-            "当前环境没有可用的图形界面，请直接填写数据包目录的绝对路径",
-            status.HTTP_400_BAD_REQUEST,
-        ) from error
+    except ImportError:
+        tk_missing = True
 
-    chosen = _ask_directory()
-    if not chosen:
-        #: 用户点了取消 —— 不是错误（前端静默处理，不弹红条）。
-        return {"package_path": "", "cancelled": True}
-    return {"package_path": str(Path(chosen).resolve()), "cancelled": False}
+    if not tk_missing:
+        chosen = _ask_directory()
+        if not chosen:
+            #: 用户点了取消 —— 不是错误（前端静默处理，不弹红条）。
+            return {"package_path": "", "cancelled": True}
+        return {"package_path": str(Path(chosen).resolve()), "cancelled": False}
+
+    #: 没有 tkinter ⇒ 直接走 PowerShell 的 Windows 原生选目录对话框。
+    #: ⚠️ 返回值有三态：`None` = **弹不出**（PowerShell 缺失/无桌面），
+    #: `""` = 用户取消，非空串 = 选中路径。三者不能混。
+    if os.name == "nt":
+        chosen = _ask_directory_windows()
+        if chosen:
+            return {"package_path": str(Path(chosen).resolve()), "cancelled": False}
+        if chosen == "" and _has_interactive_desktop():
+            #: 弹得出、用户点了取消 ⇒ 静默。
+            return {"package_path": "", "cancelled": True}
+
+    raise _err(
+        "NO_DESKTOP",
+        "当前环境没有可用的图形界面，请直接填写数据包目录的绝对路径",
+        status.HTTP_400_BAD_REQUEST,
+    )
 
 
 class LocalPackageRequest(BaseModel):

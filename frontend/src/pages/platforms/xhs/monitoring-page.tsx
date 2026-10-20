@@ -43,6 +43,7 @@ import type {
   MonitoringTarget,
   MonitoringTargetPayload,
 } from "../../../types";
+import { WaitMask } from "../../../components/ui/wait-mask";
 
 const { Text } = Typography;
 
@@ -298,9 +299,7 @@ export function XhsMonitoringPage() {
       </Card>
 
       {isLoading ? (
-        <div style={{ textAlign: "center", padding: 48 }}>
-          <Spin tip="正在加载监控目标..." />
-        </div>
+        <WaitMask open title="正在加载监控目标" />
       ) : targets.length === 0 ? (
         <Card style={{ background: p.cardBg, borderColor: p.border }}>
           <Empty description="暂无监控目标。" />

@@ -98,6 +98,7 @@ import type {
   ScheduledJob,
   ScheduledJobLog,
 } from "../../types";
+import { WaitMask } from "../../components/ui/wait-mask";
 
 const { Text } = Typography;
 const { RangePicker } = DatePicker;
@@ -736,9 +737,7 @@ export function TaskCenterPage() {
                     新建任务
                   </Button>
                   {jobsLoading ? (
-                    <div style={{ textAlign: "center", padding: 48 }}>
-                      <Spin tip="正在加载任务..." />
-                    </div>
+                    <WaitMask open title="正在加载任务" />
                   ) : jobs.length === 0 ? (
                     <Empty description="还没有任务" />
                   ) : (
@@ -826,9 +825,7 @@ export function TaskCenterPage() {
                     </Popconfirm>
                   </Space>
                   {logsLoading ? (
-                    <div style={{ textAlign: "center", padding: 48 }}>
-                      <Spin tip="正在加载日志..." />
-                    </div>
+                    <WaitMask open title="正在加载日志" />
                   ) : logs.length === 0 ? (
                     <Empty description="还没有执行记录，任务首次触发后这里会有" />
                   ) : (

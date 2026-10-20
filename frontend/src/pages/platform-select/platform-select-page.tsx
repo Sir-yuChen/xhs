@@ -8,6 +8,7 @@ import { useThemePalette } from "../../app/providers";
 import { useAuth } from "../../hooks/use-auth";
 import { fetchPlatforms } from "../../lib/api";
 import type { PlatformMeta } from "../../types";
+import { WaitMask } from "../../components/ui/wait-mask";
 
 const { Title, Text } = Typography;
 
@@ -80,9 +81,7 @@ export function PlatformSelectPage() {
 
         {/* T-17 / DEF-023：加载中 / 失败态必须显式（不再用前端副本兜底掩盖后端故障） */}
         {isLoading ? (
-          <div style={{ textAlign: "center", padding: "48px 0" }}>
-            <Spin tip="正在加载平台列表..." />
-          </div>
+          <WaitMask open title="正在加载平台列表" />
         ) : loadError ? (
           <Alert
             type="error"

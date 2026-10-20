@@ -44,6 +44,7 @@ import {
 } from "../../../lib/api";
 import type { PromptModule, PromptTemplate } from "../../../types";
 
+import { WaitMask } from "../../../components/ui/wait-mask";
 const { Text, Paragraph } = Typography;
 const { TextArea } = Input;
 
@@ -318,6 +319,7 @@ export function PromptTemplatePanel() {
   ];
 
   return (
+    <>
     <Spin spinning={loading}>
       <Tabs
         items={[
@@ -512,5 +514,7 @@ export function PromptTemplatePanel() {
         </Space>
       </Modal>
     </Spin>
+<WaitMask open={loading} title="正在加载提示词模板" />
+    </>
   );
 }

@@ -57,6 +57,7 @@ import type {
   LlmGatewayUsageOverview,
 } from "../../types";
 
+import { WaitMask } from "../../components/ui/wait-mask";
 const { Text } = Typography;
 
 // 2026-10-01 设计 17 §11.3（第二次修订）：用量看板是**大模型网关页的第一个页签**。
@@ -732,6 +733,7 @@ export function UsageDashboardPanel() {
           </div>
         ) : null}
       </Spin>
+<WaitMask open={loading} title="正在加载用量数据" />
     </>
   );
 }

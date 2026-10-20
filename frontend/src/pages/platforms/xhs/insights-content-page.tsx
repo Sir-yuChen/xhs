@@ -67,6 +67,7 @@ import type {
   DashboardOverview,
 } from "../../../types";
 
+import { WaitMask } from "../../../components/ui/wait-mask";
 const { Text } = Typography;
 
 const fallbackOverview: DashboardOverview = {
@@ -358,6 +359,7 @@ export function InsightsContentPage() {
           />
         </Card>
       </Spin>
+<WaitMask open={isLoading} title="正在加载内容洞察" />
     </Space>
   );
 }

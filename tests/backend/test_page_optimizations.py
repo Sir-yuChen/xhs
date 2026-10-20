@@ -4864,9 +4864,16 @@ def test_shop_items_waits_all_use_the_page_mask_and_elapsed():
     3. 秒表在结束时停（漏了就是「蒙版没了数字还在跳」）。
     """
     page = _code_only(_read(SHOP_ITEMS_PAGE))
-    #: ① 根级 Spin + 耗时提示
+    #: ① 根级 Spin 挡交互 + WaitMask 显示耗时文案
+    #: （2026-10-20 统一蒙版：耗时不再写在 `Spin tip` 里 —— tip 跟内容滚走，
+    #:  改由 `<WaitMask elapsed=…>` 画在最上层。断言**新的承重点**。）
     assert "spinning={waitRunning}" in page, "页面缺根级等待蒙版"
-    assert "耗时 ${waitElapsedSec}s" in page, "蒙版上要显示**耗时**（用户口径）"
+    assert "<WaitMask" in page and "elapsed={waitElapsedSec}" in page, (
+        "蒙版上要显示**耗时**（用户口径）：应由 WatchMask 的 elapsed 承担"
+    )
+    assert 'tip={' not in page.split("spinning={waitRunning}")[1][:400], (
+        "不许回退到 `Spin tip` —— tip 会跟内容滚出可视区"
+    )
     assert "const waitRunning = waitLabel !== null;" in page, "缺等待判据"
     #: ② 幂等 beginWait（不重起秒表）+ 停表
     begin = _slice_between(page, "function beginWait(", "\n  }")
@@ -5818,8 +5825,13 @@ def test_publish_wizard_has_save_draft_button_in_step3():
         "发布应是两个独立入口（发布商品 / 发布并下架商品）"
     )
     #: 保存草稿蒙版 + 耗时（用户口径 2026-10-10：保存应与发布一样加蒙版统计耗时）
+    #: ⚠️ 2026-10-20 统一蒙版：文案与耗时不再拼在字符串里，改由 `<WaitMask
+    #: title=… elapsed={draftElapsedSec}>` 承担（标题与秒数是两个 slot）。
     assert "draftSaving" in code and "draftElapsedSec" in code, "保存草稿应有耗时统计 state"
-    assert "正在保存草稿… 已耗时" in code, "保存草稿应加蒙版 + 实时耗时文案"
+    assert "<WaitMask" in code and "elapsed={draftElapsedSec}" in code, (
+        "保存草稿应加蒙版 + 实时耗时（WaitMask 的 elapsed）"
+    )
+    assert "正在保存草稿" in code, "保存草稿蒙版缺文案"
 
 
 def test_publish_wizard_shows_media_before_running_the_precheck():
@@ -6291,7 +6303,9 @@ def test_precheck_shows_a_mask_with_elapsed_seconds():
     src = _src(PUBLISH_MODAL)
     assert "beginWait" in src and "endWait" in src, "没有等待蒙版的开/关"
     assert "waitElapsedSec" in src, "没有耗时秒表"
-    assert "已耗时" in src, "蒙版上没有显示耗时"
+    #: ⚠️ 2026-10-20 统一蒙版：耗时由 `<WaitMask elapsed={waitElapsedSec}>` 渲染，
+    #: 不再是手拼的「已耗时 Ns」字符串（标题与秒数分离成两个 slot）。
+    assert "elapsed={waitElapsedSec}" in src, "蒙版上没有显示耗时"
     #: 必须是**幂等**起表（否则重复预检时耗时被反复清零，数字永远很小）
     assert "waitStartedAtRef.current === null" in src, "起表不幂等（耗时会反复清零）"
 
@@ -6314,6 +6328,42 @@ def test_package_path_input_is_read_only():
     assert "manualPathFallback" in src, "缺无桌面手填兜底（否则弹不出框时死路）"
     #: 路径只能由「选择文件夹」写入
     assert "setPackagePath(picked.package_path)" in src, "选择文件夹没有回填路径"
+
+
+def test_missing_tkinter_does_not_mean_no_desktop():
+    """**`tkinter` 缺失 ≠ 没有图形界面**（2026-10-20 实测的真缺陷）。
+
+    现场：装好的客户端点「选择文件夹」，只弹红条
+    「当前环境没有可用的图形界面，请直接填写数据包目录的绝对路径」。
+
+    根因两层，两层都要钉住：
+
+    ① `packaging/SpiderXHS.spec` 把 `tkinter` **排除**出包了（注释还写着
+      「与桌面运行时无关」—— 实际上这个选目录框就靠它），所以装包用户**必然**
+      没有这个模块；
+    ② `pick_local_package` 里 `import tkinter` 失败就**直接抛 `NO_DESKTOP`**，
+      从不尝试 PowerShell 的原生对话框 —— 于是在有桌面的机器上也报「没有图形界面」。
+
+    判据：ImportError 必须**降级到 PowerShell 回退**，而不是直接报错；
+    并且「取消」与「弹不出」必须分开（`""` vs `None`）。
+    """
+    src = _src(ROOT / "backend/app/api/platforms/xhs/package_precheck.py")
+    #: ① 打包必须带上 tkinter
+    spec = _src(ROOT / "packaging/SpiderXHS.spec")
+    assert '"tkinter"' not in spec.split("excludes=")[1].split("]")[0], (
+        "打包把 tkinter 排除了 —— 装包用户点「选择文件夹」必然失败"
+    )
+    #: ② ImportError 只做标记，不抛错
+    assert "tk_missing = True" in src, "tkinter 缺失应降级而不是直接报 NO_DESKTOP"
+    assert "if not tk_missing:" in src, "缺 tkinter 时应继续尝试其它弹窗方式"
+    #: ③ 缺 tkinter 时走 PowerShell（用两端简单锚点，避开换行差异）
+    seg = src[src.index("if not tk_missing:") : src.index("class LocalPackageRequest")]
+    assert "_ask_directory_windows()" in seg, "缺 tkinter 时没有回退到 PowerShell 对话框"
+    #: ④ 三态要分开：`None` = 弹不出，`""` = 取消
+    assert 'if chosen == "" and _has_interactive_desktop():' in src, (
+        "「取消」与「弹不出」没分开 —— 会把取消误报成没有图形界面"
+    )
+    assert "def _has_interactive_desktop()" in src, "缺交互式桌面判据"
 
 
 def test_forbidden_words_uses_a_tree_list_and_a_search_area():
@@ -8749,7 +8799,9 @@ def test_sku_pick_modal_has_waiting_mask_on_confirm():
     j = tsx.find("function ", i + 10)
     block = tsx[i : j if j > 0 else i + 6000]
     assert "busy?: boolean;" in block, "弹窗应接收上传中态"
-    assert "<Spin spinning={!!props.busy}" in block, "确认后应盖等待蒙版"
+    #: ⚠️ 2026-10-20 统一蒙版：由 `Spin` 换成 `<WaitMask scope="panel">`
+    #: （Spin 的 tip 跟内容滚走；panel 作用域只盖弹窗本体）。
+    assert '<WaitMask open={!!props.busy} scope="panel"' in block, "确认后应盖等待蒙版"
     assert "confirmLoading={props.busy}" in block, "确认按钮应显示 loading"
     assert "props.busy" in block.split("okButtonProps")[1][:80], "上传中应禁用二次确认"
 
@@ -8798,9 +8850,12 @@ def test_publish_submit_shows_mask_with_elapsed_time():
     #: 这里钉「有蒙版 + 有实时耗时」这条本质判据；三种模式的文案分叉由
     #: `test_publish_mask_copy_follows_the_clicked_button` 钉。
     assert "submitElapsedSec" in wiz, "提交中应显示实时耗时"
-    assert "publish-wait-mask" in wiz and "publish-wait-text" in wiz, (
-        "提交中应显示蒙版 + 文案"
+    #: ⚠️ 2026-10-20 统一蒙版：`.publish-wait-mask` / `-text` 两个类已退役，
+    #: 改由公共 `<WaitMask>` 渲染（样式全站一致、可自定义内容）。
+    assert "<WaitMask" in wiz and "elapsed={submitElapsedSec}" in wiz, (
+        "提交中应显示蒙版 + 耗时（WaitMask）"
     )
+    assert "publish-wait-mask" not in wiz, "旧蒙版类已退役，不许回退"
     assert "正在发布并下架商品" in wiz and "正在发布商品（保持在售）" in wiz, (
         "遮罩文案应按本次点击的按钮分叉"
     )
@@ -8812,7 +8867,7 @@ def test_publish_submit_shows_mask_with_elapsed_time():
     )
     #: ③ 用户可见文案禁 Markdown `**`（用新分叉后的文案做样本）。
     assert "发布成功后会立即下架；请勿关闭本窗口或重复点击。" in wiz
-    assert "**" not in wiz.split("publish-wait-text")[1][:600], (
+    assert "**" not in wiz.split("{submitting && (")[1][:600], (
         "遮罩文案里不得出现 Markdown `**`"
     )
 
@@ -9311,35 +9366,23 @@ def test_wait_mask_shows_elapsed_time_once():
       ③ **不得**出现预估（「预计 / 剩余 / ETA / 预估」）。
     """
     code = _code_only(_src(PUBLISH_MODAL))
-    #: ⚠️ **只取「等待卡片」那一段**，切片方向与锚点都很关键：
-    #: `publish-wait-card` 这个标记在代码里出现 **3 次**（`className` 一处 + 掩层一处
-    #: + 卡片一处），取 `index`（第一个）会落在**掩层之前**，压根看不到文案；
-    #: 而取错方向又会把发布/草稿两张进度卡的「已耗时」一起数进来（实测数出 5 次）。
-    #: ⇒ 用**最后一次**出现为锚点，向后取一段（卡片很短）。
-    seg = code[code.rindex("publish-wait-card"):]
-    seg = seg[:700]
-
-    #: ① 序号 + 实时耗时（**两段分开断言**）。
-    #: ⚠️ 别写成一条含 `${...}` 的长串 —— `_code_only` 处理后的文本里
-    #: 花括号/插值形态极易与源码有细微差别，整串比对会假红（实测踩过）。
-    assert "progress.done" in seg and "progress.total" in seg, "进度文案没有序号统计"
-    #: 耗时必须**与序号同处一条三元表达式**（不是只在整个卡片里出现过）。
-    line = next((ln for ln in seg.splitlines() if "progress.done" in ln), "")
-    assert "waitElapsedSec" in line, \
-        "带序号的那条文案里没有实时耗时（会被「有进度就不显耗时」的变异逃逸）"
-
-    #: ② **只展示一处**：`已耗时` 是**同一条文案的三元分支**（有进度 / 无进度），
-    #: 所以卡片里恰好出现 **2 次**（超了就是在别处又加了一行 —— 用户点名要移除的
-    #: 「底部那行耗时」正是这种重复）。
-    n = seg.count("已耗时")
-    assert n == 2, (
-        f"「已耗时」在等待卡片里出现 {n} 次（口径：进度文案的三元两分支 = 2；"
-        "多出来就是又加了一行，用户要求只展示一个）"
+    #: ⚠️ 2026-10-20 统一蒙版：等待卡片改由公共 `<WaitMask>` 渲染，
+    #: 序号在 `title`、耗时在 `elapsed`，**两者必然同处一个组件实例**，
+    #: 「底部再挂一行耗时」这种重复在结构上已不可能。判据随之改为钉住这两点：
+    #: ① 序号在 `title` 里；② 耗时走 `elapsed` prop（而不是手拼进 title 字符串）。
+    wait = code[code.index("{waitLabel !== null && ("):]
+    wait = wait[: wait.index("/>") + 2]
+    assert "progress.done" in wait and "progress.total" in wait, "进度文案没有序号统计"
+    assert "elapsed={waitElapsedSec}" in wait, (
+        "等待蒙版缺实时耗时 —— 必须走 WaitMask 的 elapsed prop"
     )
+    #: 耗时**不得**手拼进 title（那样它就不再受组件统一控制，且会跟序号耦合）
+    title_seg = wait[wait.index("title={") : wait.index("elapsed=")]
+    assert "已耗时" not in title_seg, "耗时被手拼进了 title —— 应交给 elapsed prop"
 
     #: ③ 不许有预估。
     for word in ("预计", "剩余", "ETA", "预估"):
-        assert word not in seg, f"等待弹窗出现了预估成分「{word}」（用户明确不要）"
+        assert word not in wait, f"等待弹窗出现了预估成分「{word}」（用户明确不要）"
 
 
 def test_pattern_entry_moved_to_column_headers():

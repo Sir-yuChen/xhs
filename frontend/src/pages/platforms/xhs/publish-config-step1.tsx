@@ -43,6 +43,7 @@ import {
 import type { RecommendCategoryItem } from "../../../types";
 import { category_path_text, md5_file_name, search_keyword } from "../../../lib/publish-config";
 import type { ItemDraftCategory } from "../../../types";
+import { WaitMask } from "../../../components/ui/wait-mask";
 
 /** 已上传的主图（链接 + 展示名）。 */
 export type ConfigMainImage = {
@@ -512,7 +513,9 @@ export default function PublishConfigStep1({
             </div>
           )}
 
-          <Spin spinning={catRecognizing} tip="正在识别类目…">
+          {/* ⚠️ 2026-10-20：`tip` 已移除，改由统一 `<WaitMask>` 画在最上层
+              （`Spin` 的 tip 跟内容滚走；`Spin` 只保留挡交互的职责）。 */}
+          <Spin spinning={catRecognizing}>
             <div className={`cat-panel${hasAnyCat ? " has-result" : ""}`}>
               {recommended.length > 0 ? (
                 <div className="cat-result">
@@ -585,6 +588,7 @@ export default function PublishConfigStep1({
               )}
             </div>
           </Spin>
+          <WaitMask open={catRecognizing} title="正在识别类目" />
 
         </div>
       </section>

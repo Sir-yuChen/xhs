@@ -86,6 +86,7 @@ import type {
   PlatformAccount,
 } from "../../../types";
 
+import { WaitMask } from "../../../components/ui/wait-mask";
 const { Text } = Typography;
 
 /** 排序字段（与后端 `MATERIAL_ORDER_FIELDS` 同值；后端表外值 400）。 */
@@ -1039,6 +1040,7 @@ export function PictureSpacePage() {
             )}
           </div>
         </Spin>
+        <WaitMask open={isLoading || busy} title="正在加载图片空间" />
 
         {/* ── 底部区：说明 + **公共分页**（两视图共用）**同一行**，整体**固定不滚动**。 ── */}
         <div
@@ -1183,6 +1185,7 @@ export function PictureSpacePage() {
             )}
           </Space>
         </Spin>
+<WaitMask open={resizeLoading} title="正在处理图片" />
       </Modal>
     </div>
   );

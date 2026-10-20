@@ -45,7 +45,6 @@ import {
   Radio,
   Select,
   Space,
-  Spin,
   Steps,
   Table,
   Tabs,
@@ -206,6 +205,7 @@ import PublishConfigStep2, {
   type SpecAttribute,
 } from "./publish-config-step2";
 import type { CategoryPropertyItem, ItemPublishResult } from "../../../types";
+import { WaitMask } from "../../../components/ui/wait-mask";
 //: 「货号」属性项的合成与置首（用户口径 2026-10-15：货号固定是「其他属性」第一条）。
 import {
   ITEM_NO_PROPERTY_ID,
@@ -3044,62 +3044,47 @@ export function ProductPublishWizard({
           文案带**实时耗时** ⇒ 用户看得见「在跑、跑了多久」，不会重复点「确认发布」
           （这也正是「一直转圈」的观感来源：真实上传+发布+下架两段轮询需 1.5 分钟上下）。 */}
       {submitting && (
-        <div className="publish-wait-mask" role="status" aria-live="polite">
-          <div className="publish-wait-card">
-            <Spin size="large" />
-            {/* ⚠️ 文案按**用户点的按钮**分叉（不能写死）：
-                旧版写死「正在发布并立即下架…（红线）」⇒ 点「发布商品」时
-                遮罩说的是**反的**（用户实测 2026-10-11）。且红线已取消，
-                那行字本身也不再准确。 */}
-            <div className="publish-wait-text">
-              {submitShelfMode
-                ? `正在发布并下架商品… 已耗时 ${Math.floor(submitElapsedSec)}s`
-                : `正在发布商品（保持在售）… 已耗时 ${Math.floor(submitElapsedSec)}s`}
-            </div>
-            <div className="publish-wait-sub">
-              {submitShelfMode
-                ? "发布成功后会立即下架；请勿关闭本窗口或重复点击。"
-                : "发布成功后商品将保持在售、不会自动下架；请勿关闭本窗口或重复点击。"}
-            </div>
-          </div>
-        </div>
+        <WaitMask
+          open
+          scope="page"
+          title={submitShelfMode ? "正在发布并下架商品" : "正在发布商品（保持在售）"}
+          elapsed={submitElapsedSec}
+          sub={
+            submitShelfMode
+              ? "发布成功后会立即下架；请勿关闭本窗口或重复点击。"
+              : "发布成功后商品将保持在售、不会自动下架；请勿关闭本窗口或重复点击。"
+          }
+        />
       )}
       {/* **保存草稿蒙版 + 耗时**（用户口径 2026-10-10：保存应与发布一样加蒙版统计耗时）。 */}
       {draftSaving && (
-        <div className="publish-wait-mask" role="status" aria-live="polite">
-          <div className="publish-wait-card">
-            <Spin size="large" />
-            <div className="publish-wait-text">
-              正在保存草稿… 已耗时 {Math.floor(draftElapsedSec)}s
-            </div>
-            <div className="publish-wait-sub">
-              保存到草稿箱（未上架）；请勿关闭本窗口或重复点击。
-            </div>
-          </div>
-        </div>
+        <WaitMask
+          open
+          scope="page"
+          title="正在保存草稿"
+          elapsed={draftElapsedSec}
+          sub="保存到草稿箱（未上架）；请勿关闭本窗口或重复点击。"
+        />
       )}
       {/* 等待遮罩：`position: fixed` 铺满视口 + flex 居中 ⇒
           文案**永远在窗口正中**，与弹窗内滚动位置无关
           （antd `Spin` 的 tip 跟着内容流滚，长内容时会滚出视野）。 */}
       {waitLabel !== null && (
-        <div className="publish-wait-mask" role="status" aria-live="polite">
-          <div className="publish-wait-card">
-            <Spin size="large" />
-            <div className="publish-wait-text">
-              {/* **执行进度 + 耗时**（用户口径 2026-10-14：「检测违规词提示弹窗，
-                  添加**耗时统计**」）。
-                  ⚠️ 此前**二选一**：有 done/total 就只显进度、**耗时被吃掉**；
-                  没有就只显耗时。检测违规词恰恰是「有进度但用户更想知道还要多久」
-                  的场景 ⇒ 两者**同时给**，不再互斥。 */}
-              {progress && progress.total > 0
-                ? `${progress.phase ?? waitLabel}…（${progress.done}/${progress.total}）· 已耗时 ${waitElapsedSec}s`
-                : `${waitLabel}… 已耗时 ${waitElapsedSec}s`}
-            </div>
-            {progress && progress.total > 0 && (
+        <WaitMask
+          open
+          scope="page"
+          title={
+            progress && progress.total > 0
+              ? `${progress.phase ?? waitLabel}（${progress.done}/${progress.total}）`
+              : waitLabel
+          }
+          elapsed={waitElapsedSec}
+          extra={
+            progress && progress.total > 0 ? (
               <Progress percent={progress.percent} style={{ width: 280 }} />
-            )}
-          </div>
-        </div>
+            ) : null
+          }
+        />
       )}
     </Modal>
   );

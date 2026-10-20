@@ -46,6 +46,7 @@ import {
 import { formatShanghaiTime } from "../../../lib/time";
 import type { PlatformAccount, PublishAsset, PublishJob } from "../../../types";
 
+import { WaitMask } from "../../../components/ui/wait-mask";
 const { Title, Text, Paragraph } = Typography;
 
 const STATUS_TAG_MAP: Record<string, { color: string; label: string }> = {
@@ -362,6 +363,7 @@ export function XhsPublishPage() {
                 <Empty description="请选择一个发布任务" />
               </Card>
             ) : (
+              <>
               <Spin spinning={isDetailLoading}>
                 <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
                   {/* Toolbar */}
@@ -547,6 +549,8 @@ export function XhsPublishPage() {
                   </Row>
                 </div>
               </Spin>
+<WaitMask open={isDetailLoading} title="正在加载详情" />
+              </>
             )}
           </Col>
         </Row>
