@@ -3,10 +3,10 @@
   "versions": [
     {
       "version": "1.0.4",
-      "built_at": "2026-10-20 17:30",
-      "commit": "4a48a47",
-      "summary": "商品笔记挂链修复 + 全站统一等待蒙版 + 选目录无桌面误报修复",
-      "notes": "发布挂商品：goods_id 改用 SKU ID\n全站统一等待蒙版，弹窗居中\n选目录缺 tkinter 时降级原生对话框\n装包补齐 OCR 等延迟导入依赖\n发布通道切换 GitHub Release"
+      "built_at": "2026-10-20 19:40",
+      "commit": "900f16f",
+      "summary": "全站等待统一 + 双层加载修复 + 数据规则种子对齐",
+      "notes": "全站等待统一 WaitMask，修复双层加载\n发布挂商品：goods_id 改用 SKU ID\n选目录降级原生对话框\n装包补齐 OCR 等依赖\n发布通道切换 GitHub"
     },
     {
       "version": "1.0.3",

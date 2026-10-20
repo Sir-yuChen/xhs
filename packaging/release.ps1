@@ -295,9 +295,11 @@ if ($SkipRelease) {
     Info "发布：GitHub Release（$ghExe）"
 
     $ghLog = Join-Path $TmpDir "release-publish-gh-$TagName.log"
-    #: `--clobber` = 同名附件覆盖（等价 Gitee 侧的 --replace）
+    #: ⚠️ `gh release create` **不接受 `--clobber`**（那是 `upload` 子命令的参数）——
+    #: 连同后面的 `upload` 一起写会直接报 usage 错误（2026-10-20 实测 exit=1）。
+    #: 这里 create 不带 clobber；只有走「已存在 ⇒ upload」分支时才带。
     & $ghExe release create $TagName $ExePath --repo "Sir-yuChen/xhs" `
-        --title $ReleaseName --notes-file $NotesFile --clobber 2>&1 |
+        --title $ReleaseName --notes-file $NotesFile 2>&1 |
         Tee-Object -FilePath $ghLog
     if ($LASTEXITCODE -ne 0) {
         #: 已存在则改走 upload + edit（gh create 对已存在的 tag 会报错）
