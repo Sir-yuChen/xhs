@@ -36,8 +36,8 @@ from sqlalchemy.orm import Session
 from backend.app.models.prompt import PromptTemplate
 from backend.app.models.user import User
 from backend.app.services.business_provider_keys import (
-    BUSINESS_KEY_GENERATE_SELLING_POINT,
-    BUSINESS_KEY_POLISH_PRODUCT_TITLE,
+    BUSINESS_KEY_PRODUCT_SELLING_POINT,
+    BUSINESS_KEY_PRODUCT_TITLE_POLISH,
 )
 
 #: 一次给的备选数（设计 20 §3.1：只给一个等于没给，用户没有可比较的对象）。
@@ -229,7 +229,7 @@ def polish_product(
     template_prompt = _render_template(db, current_user, template_id, item)
     extra = (instruction or "").strip()
 
-    title_model, title_key = resolve_context(BUSINESS_KEY_POLISH_PRODUCT_TITLE.key)
+    title_model, title_key = resolve_context(BUSINESS_KEY_PRODUCT_TITLE_POLISH.key)
     title_prompt = template_prompt or brief
     if extra:
         title_prompt = f"{title_prompt}\n\n补充要求：{extra}"
@@ -249,7 +249,7 @@ def polish_product(
             code="PRODUCT_POLISH_EMPTY",
         )
 
-    point_model, point_key = resolve_context(BUSINESS_KEY_GENERATE_SELLING_POINT.key)
+    point_model, point_key = resolve_context(BUSINESS_KEY_PRODUCT_SELLING_POINT.key)
     point_prompt = brief
     if extra:
         point_prompt = f"{point_prompt}\n\n补充要求：{extra}"

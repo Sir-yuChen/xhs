@@ -248,7 +248,13 @@ class OpenAICompatibleTextClient:
                     ],
                     "temperature": temperature,
                 },
-                timeout=60,
+                #: ⚠️ **文本生成 60s 不够**（2026-10-17 真机实证：discovery 服务商
+                #: 写一篇完整笔记 —— 标题 + 300 字正文 + 话题 —— 推理常超 60s，
+                #: 报 `ReadTimeout ... read timeout=60`；而同一服务 `/v1/models`
+                #: 2.3s 就应答 ⇒ **不是服务挂了，是 60s 这个闸太紧**）。
+                #: 放宽到 300s：与图片链路 `timeout=180` 同一量级思路（生成类给足）。
+                #: ⚠️ 不能无上限：worker 是单线程串行，挂死一次会堵住整个队列。
+                timeout=TEXT_COMPLETION_TIMEOUT,
             )
             response.raise_for_status()
             payload = _load_json_response(response)
@@ -268,6 +274,16 @@ class OpenAICompatibleTextClient:
                 status=STATUS_FAILED,
                 error_message=_brief_error(exc),
             )
+            #: 超时单独翻译成**可读原因**（2026-10-17 真机：用户看到的是
+            #: `ReadTimeout: HTTPSConnectionPool(host='...', port=443): Read timed out.
+            #: (read timeout=60)` —— 原始异常栈对用户毫无信息量，不知道该改什么）。
+            #: ⚠️ 只翻译**超时**这一种，其它异常原样抛出（不吞、不猜测）。
+            if isinstance(exc, _REQUESTS_TIMEOUT_ERRORS):
+                raise TimeoutError(
+                    f"模型响应超时（{TEXT_COMPLETION_TIMEOUT} 秒内没返回）。"
+                    "上游服务可能正忙或网络不稳，稍后重试即可；"
+                    "若频繁出现，可在「模型配置」换一个响应更快的服务商。"
+                ) from exc
             raise
 
         # HTTP 通了、内容也解析出来了 ⇒ success；token 用量以响应 usage 为准（缺则 0）
@@ -468,6 +484,17 @@ class OpenAICompatibleTextClient:
         )
 
 
+#: 文本补全超时（秒）。600 秒级不设，是因为 worker 串行 —— 挂死会堵住整个队列；
+#: 300 秒足够「标题 + 300 字正文 + 话题」这类长输出的推理（实测慢模型 60s 不够）。
+TEXT_COMPLETION_TIMEOUT = 300
+
+#: `requests` 的超时类（ReadTimeout / ConnectTimeout / 连接池超时都继承 `Timeout`）。
+#: ⚠️ 惰性构造：`requests` 是硬依赖，但这里只为了让 `isinstance` 判定可读。
+import requests as _requests  # noqa: E402
+
+_REQUESTS_TIMEOUT_ERRORS = (_requests.exceptions.Timeout,)
+
+
 class OpenAICompatibleImageClient:
     def _validate(self, *, model_config: Any, api_key: str) -> None:
         if not model_config.base_url:
@@ -659,6 +686,15 @@ class OpenAICompatibleImageClient:
 
     @staticmethod
     def _resolve_image_ref(url: str) -> str:
+        """参考图 → 上游能取的形态。
+
+        ⚠️ **非 http(s) 的引用可能是本地文件路径**（用户口径 2026-10-16：
+        *「参考图支持选本地或商品原图，本地素材均需要支持预览」*）——
+        第三方模型拉不到我们带鉴权的端点，也拉不到磁盘路径 ⇒ 这类引用**读盘转
+        base64 data URL**（就地内联，模型直接吃）。
+        判据：**能读到的本地文件就内联**；读不到就原样返回（让上游自己报错，
+        不在这一层假装成功）。
+        """
         if url.startswith("http://") or url.startswith("https://"):
             return url
         if url.startswith("/api/files/media/"):
@@ -672,6 +708,42 @@ class OpenAICompatibleImageClient:
                 ext = local.suffix.lower().lstrip(".")
                 mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "gif": "image/gif", "webp": "image/webp"}.get(ext, "image/png")
                 return f"data:{mime};base64,{base64.b64encode(raw).decode()}"
+        if url.startswith("/api/xhs/materials/files/"):
+            #: 素材库引用（`/api/xhs/materials/files/{id}/file`）—— 同上，读盘内联。
+            #: ⚠️ 走 `material_files.rel_path` 定位（**不拼 storage_dir/media**：
+            #: 素材有自己的根目录，两者不同；拼错会静默取不到图）。
+            import base64
+            from pathlib import Path
+            from backend.app.core.config import get_settings
+            from backend.app.models.material import MaterialFile
+            from backend.app.core.database import SessionLocal
+
+            parts = url.split("/")
+            try:
+                file_id = int(parts[parts.index("files") + 1])
+            except (ValueError, IndexError):
+                return url
+            from backend.app.models.material import MaterialFolder
+
+            with SessionLocal() as db:
+                item = db.get(MaterialFile, file_id)
+                rel = str(getattr(item, "rel_path", "") or "") if item else ""
+                #: ⚠️ **基准目录是 `material_folders.path`**（用户登记的那个文件夹），
+                #: 不是 `storage_dir` —— 素材库支持任意本地目录（`/d/素材/xxx`）。
+                #: 拼成 `storage_dir/{rel}` 会找不到文件、静默回落成「原样返回 URL」，
+                #: 上游再拉那个带鉴权的端点必然失败（=「选了素材但生成不出来」）。
+                #: 判据与 `api/platforms/xhs/materials.py` 一致：`Path(folder.path) / rel_path`。
+                folder_path = ""
+                if item is not None:
+                    folder = db.get(MaterialFolder, getattr(item, "folder_id", None))
+                    folder_path = str(getattr(folder, "path", "") or "") if folder else ""
+            if rel and folder_path:
+                local = Path(folder_path) / rel
+                if local.is_file():
+                    raw = local.read_bytes()
+                    ext = local.suffix.lower().lstrip(".")
+                    mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "gif": "image/gif", "webp": "image/webp", "mp4": "video/mp4"}.get(ext, "image/png")
+                    return f"data:{mime};base64,{base64.b64encode(raw).decode()}"
         return url
 
     def describe_image(

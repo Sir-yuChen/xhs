@@ -230,6 +230,7 @@ def test_settings_initial_data_fields_are_within_whitelists():
     from backend.app.models.system_setting import (
         CATEGORY_AI,
         CATEGORY_FEATURE,
+        CATEGORY_NOTE,
         CATEGORY_PUBLISH,
         CATEGORY_SCHEDULER,
         CATEGORY_SYNC,
@@ -242,6 +243,7 @@ def test_settings_initial_data_fields_are_within_whitelists():
         CATEGORY_PUBLISH,
         CATEGORY_AI,
         CATEGORY_FEATURE,
+        CATEGORY_NOTE,
     }
     payload = json.loads(SETTINGS_DATA_FILE.read_text(encoding="utf-8"))
     for row in payload["system_settings"]:

@@ -5500,7 +5500,7 @@ def test_generate_detail_image_uses_own_business_point_and_persists_asset(tmp_pa
     from backend.app.api.ai import get_image_ai_client
     from backend.app.models.generation import AigcMediaAsset
     from backend.app.services.business_provider_keys import (
-        BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE,
+        BUSINESS_KEY_PRODUCT_DETAIL_IMAGE,
     )
     from backend.app.models.generation import AigcMediaAsset as _Asset  # noqa: F401
 
@@ -5567,7 +5567,7 @@ def test_generate_detail_image_uses_own_business_point_and_persists_asset(tmp_pa
             _upsert_business_mapping(
                 db,
                 user_id=_last_registered_user_id,
-                business_key=BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE.key,
+                business_key=BUSINESS_KEY_PRODUCT_DETAIL_IMAGE.key,
                 provider_key="TEST-IMAG",
                 # v2.3：业务入口必须显式带 model_name。
                 model_name="detail-image-model",
@@ -5639,7 +5639,7 @@ def test_generate_detail_image_supports_count_and_reports_partial_failure(tmp_pa
     from backend.app.api.ai import get_image_ai_client
     from backend.app.models.generation import AigcMediaAsset
     from backend.app.services.business_provider_keys import (
-        BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE,
+        BUSINESS_KEY_PRODUCT_DETAIL_IMAGE,
     )
 
     class FlakyImageClient:
@@ -5711,7 +5711,7 @@ def test_generate_detail_image_supports_count_and_reports_partial_failure(tmp_pa
             _upsert_business_mapping(
                 db,
                 user_id=_last_registered_user_id,
-                business_key=BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE.key,
+                business_key=BUSINESS_KEY_PRODUCT_DETAIL_IMAGE.key,
                 provider_key="TEST-IMGC",
                 model_name="detail-image-model",
             )
@@ -5796,7 +5796,7 @@ def test_generate_detail_image_result_is_grouped(tmp_path):
     """
     from backend.app.api.ai import get_image_ai_client
     from backend.app.services.business_provider_keys import (
-        BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE,
+        BUSINESS_KEY_PRODUCT_DETAIL_IMAGE,
     )
 
     class HalfFailClient:
@@ -5867,7 +5867,7 @@ def test_generate_detail_image_result_is_grouped(tmp_path):
             _upsert_business_mapping(
                 db,
                 user_id=_last_registered_user_id,
-                business_key=BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE.key,
+                business_key=BUSINESS_KEY_PRODUCT_DETAIL_IMAGE.key,
                 provider_key="TEST-IMGG",
                 model_name="detail-image-model",
             )
@@ -5945,7 +5945,7 @@ def test_generate_detail_image_regenerates_single_image(tmp_path):
     """
     from backend.app.api.ai import get_image_ai_client
     from backend.app.services.business_provider_keys import (
-        BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE,
+        BUSINESS_KEY_PRODUCT_DETAIL_IMAGE,
     )
 
     class CountingClient:
@@ -6005,7 +6005,7 @@ def test_generate_detail_image_regenerates_single_image(tmp_path):
             _upsert_business_mapping(
                 db,
                 user_id=_last_registered_user_id,
-                business_key=BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE.key,
+                business_key=BUSINESS_KEY_PRODUCT_DETAIL_IMAGE.key,
                 provider_key="TEST-IMGR",
                 model_name="detail-image-model",
             )
@@ -6228,7 +6228,7 @@ def test_detail_image_reference_images_must_come_from_the_product(tmp_path):
     from backend.app.core.security import encrypt_text
     from backend.app.models import LlmBusinessProvider, LlmGatewayConfig, LlmGatewayModel
     from backend.app.services.business_provider_keys import (
-        BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE,
+        BUSINESS_KEY_PRODUCT_DETAIL_IMAGE,
     )
 
     class FakeImageClient:
@@ -6285,7 +6285,7 @@ def test_detail_image_reference_images_must_come_from_the_product(tmp_path):
             _upsert_business_mapping(
                 db,
                 user_id=_last_registered_user_id,
-                business_key=BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE.key,
+                business_key=BUSINESS_KEY_PRODUCT_DETAIL_IMAGE.key,
                 provider_key="REF-IMAG",
                 model_name="ref-model",
             )

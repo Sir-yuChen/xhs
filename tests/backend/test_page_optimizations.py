@@ -2330,18 +2330,431 @@ def test_t9_panels_are_wired_into_workshop():
     assert "finally" not in card, "进度卡轮询摘除写了 finally（H9 铁律：会让队列停在那一刻）"
     assert "generated" in card, "进度卡未消费 `generated` 键（底座通用形状是 synced）"
 
-    # ④ 生成配置弹窗：媒体来源齐全（图片四选一 + 视频两选一，§13.4.4 v2.14）
+    # ④ 生成配置弹窗：媒体来源齐全 + **形态分流**（§13.4.4 v2.14；v2.27 / 设计 41 §16 重做）
+    #    ⚠️ 判据已换锚：重做后**不再有** `VIDEO_SOURCES` 常量（改由 `MEDIA_SOURCE_OPTIONS`
+    #    的 `form` 字段分流），原断言「`VIDEO_SOURCES` in modal」随之失锚。新判据落在
+    #    **每个来源的 form 标注**上 —— 它才是「视频有没有界面入口」的真载体。
     modal = _code_only(_read(LLM_GEN_MODAL))
+    #: ⚠️ `reference_image` **不再是来源**（用户口径 2026-10-16：*「这个下拉参考图正常
+    #: 是不需要的，智能生成时在其内支持选择参考图」*）—— 它本就是「智能生成 + 参考图」。
+    #: 来源名单只剩 5 项；参考图能力改由 `ai_generate` 内部的选择器承载（见 ⑪）。
     for source in (
         "product_image",
         "material",
-        "reference_image",
         "ai_generate",
         "video_ai_generate",
         "video_reference",
     ):
         assert source in modal, f"生成配置弹窗缺少媒体来源 {source}"
-    assert "VIDEO_SOURCES" in modal, "弹窗未按视频来源分流参数区（视频没界面入口）"
+    #: **反向判据**：`reference_image` 不许再作为来源出现在选项表里
+    #: （它只应作为「参考图 URL 下发」的历史键名存在于注释/类型里，不出现在下拉）。
+    assert 'label: "参考图生成"' not in modal, (
+        "「参考图生成」又回到来源下拉里了（用户口径：它应是智能生成内部的可选项）"
+    )
+    #: 两个视频来源必须标 `form: "video"`（否则选「视频笔记」时它们不出现 = 没入口）。
+    assert modal.count('video_ai_generate') >= 1 and 'form: "video"' in modal, (
+        "弹窗未按形态分流来源（视频来源没有 form 标注 ⇒ 视频没界面入口）"
+    )
+    #: 且**图文笔记不得出现视频来源** —— 平台两类互斥（设计 41 §15.2），
+    #: 分流就靠 `MEDIA_SOURCE_OPTIONS.filter((o) => o.form === noteForm)`。
+    assert "o.form === noteForm" in modal, "来源未按当前形态过滤（图文笔记会出现视频来源）"
+
+    #: ⑤ **弹窗尺寸 = 全屏的 80%**（用户口径 2026-10-16；原 70% 已被 80% 取代）。
+    #: 判据落在**视口百分比**上 —— 写固定像素（如 `width={680}`）即红：
+    #: 固定像素在大屏上偏小、小屏上溢出，用户既有偏好一律用视口百分比。
+    assert 'width="80vw"' in modal, "弹窗宽度必须是视口 80%（固定像素会在大屏偏小 / 小屏溢出）"
+    assert "72vh" in modal, "弹窗 body 高度未按视口约束（会随内容无限撑高）"
+    assert "centered" in modal, "弹窗未居中"
+    #: ⚠️ 反向判据：`centered` 与 `style.top` 同时给会「假居中」（本仓踩过）——
+    #: 这条守住「改尺寸时别顺手加 top」。
+    #: ⚠️ **判据必须只查 Modal 自身的 props**：早期写法是 `"top:" not in modal`
+    #: （全文扫），被弹窗内**子组件**的 CSS（如选中角标的 `top: 0`）误伤 ——
+    #: 子组件里的定位与 Modal 居中无关。锚点 = **`<Modal` 到 `styles={{` 之间**。
+    _mstart = modal.index("<Modal")
+    _mend = modal.index("styles={{", _mstart)
+    assert not _re.search(r"style=\{\{[^}]*\btop\s*:", modal[_mstart:_mend]), (
+        "`centered` 已用 top:50% 居中，显式 style.top 会顶掉它（假居中）"
+    )
+
+    #: ⑥ **图片必须能预览**（用户口径 2026-10-16：*「图片均需要预览，看不见图怎么选」*）。
+    #: 看不见图 = 盲选，正是本弹窗重做要解决的问题。四条判据：
+    #:   ① `product_image` 段渲染商品图；
+    #:   ② `material` 段渲染素材图，且**必须走 object URL**（授权端点直接
+    #:      `<img src="/api/...">` 带不了 Authorization ⇒ 必然 401 破图，本仓踩过）；
+    #:   ③ 生成类来源**显式说明「生成后才有」**（不装作有图）；
+    #:   ④ 宿主把商品图传进来了（没传 = 预览恒空，等于没做）。
+    #: ⚠️ 判据已换锚：`MediaPreviewStrip`（只读预览条）已被**选择器**取代 ——
+    #: 用户口径 2026-10-16「商品原图，无法被选中」⇒ 商品段也必须是**能点的选择器**。
+    assert "<ProductImagePicker" in modal, "商品原图段没接选择器（用户口径：商品原图要能选中）"
+    #: ⚠️ 素材段同样是**缩略图选择器** —— 用户口径「通过预览后进行选择」⇒ 预览与选择**合一**。
+    assert "<MaterialPicker" in modal, "素材段没接缩略图选择器"
+    #: ⑮ **素材二级联动 + 图片/视频都在**（用户口径 2026-10-16：
+    #: *「本地素材库会存在多个文件夹地址，需要用户二级联动指定文件夹，文件夹下的素材
+    #: 依旧一行展示左右滚动，点击勾选」* + *「文件夹中可能有图片也可能有视频素材」*）。
+    #: ① 一级：**文件夹下拉**（值 + 切换回调都是 props，切换要真的重拉）。
+    #: ⚠️ 锚点随细粒度调整更新：下拉已从 `MaterialPicker` **上提到卡片头**
+    #: 与「来源」下拉并排（用户口径：*「两个下拉放一起」*）⇒ 回调名 `onMaterialFolderChange`。
+    assert "onMaterialFolderChange" in modal and "fetchMaterialFolders" in modal, (
+        "素材没有文件夹下拉（用户口径：需要用户二级联动指定文件夹）"
+    )
+    #: ② 切文件夹 **必须重拉**（按 `materialFolderId` 触发）—— 不重拉 = 二级列表是旧的。
+    assert 'fetchMaterialFiles({ folderId: materialFolderId' in modal, (
+        "切文件夹没有按 folder_id 重新拉取（二级列表不会变）"
+    )
+    #: ③ **不许按 `file_type` 过滤掉视频**（口径：文件夹里也可能有视频素材）——
+    #: 原写法 `.filter((f) => f.file_type === \"image\")` 会把视频**静默藏掉**。
+    assert 'file_type === "image")' not in modal, (
+        "素材被按类型过滤（视频会被藏掉，用户看得见却选不到）"
+    )
+    #: ④ 二级素材也**一行横滑**，且**文件夹下拉与缩略图带同处一行**
+    #: （用户口径 2026-10-16：*「文件夹 放一行，不要放两行占用页面空间」*）——
+    #: 反例是外层 `flexDirection: "column"`（下拉一行、缩略图一行 = 白占两行）。
+    assert 'flexDirection: "column", gap: 6 }}>\n      <Select' not in modal, (
+        "素材选择器又变成上下两行了（用户口径：文件夹放一行）"
+    )
+    assert "fetchMaterialImageObjectUrl(materialFileUrl(f.id))" in modal or (
+        "fetchMaterialImageObjectUrl(materialFileUrl(id))" in modal
+    ), "素材预览必须走 object URL（<img src=\"/api/...\"> 带不了 Authorization ⇒ 401 破图）"
+    assert "revokeObjectURL" in modal, "object URL 未释放（泄漏，长会话下明显）"
+    assert "生成后才有" in modal, "生成类来源未说明「现在没有图可预览」（会让人以为坏了）"
+    #: ⚠️ 图片与**视频**各有各的说明 —— 只写一条时另一类来源仍是「空白无解释」。
+    #: 分成两条断言（一条判据只守一件事）：合成一条会被另一条掩盖成**哑弹**（M8 同型）。
+    #: ⚠️ 文案已按口径 C1（越少越好）**压缩**，锚点随之更新为压缩后的短句。
+    #: ⚠️ **反向断言**（用户口径 2026-10-19：*「这张图要生成后才有，现在无法预览文本移除」*）
+    #: —— 原来是「必须有这句」，现在**必须有且仅有**「不许出现这句」：
+    #: 生成前当然没有图，这句话是说废话，白占一行高度。
+    #: 旧断言（已被取代）：`assert "这张图要生成后才有" in modal`
+    assert "这张图要生成后才有" not in modal, "已按用户口径移除的说明文案又出现了"
+    assert "生成后才有；异步任务约几分钟" in modal, "视频来源未说明「现在无法预览 + 异步提醒」"
+    assert "productImages={llmGenerateItem?.images" in _code_only(_read(SHOP_ITEMS_PAGE)), (
+        "宿主没把商品图传给弹窗 ⇒ 商品原图预览恒空"
+    )
+
+    #: ⑦ **各区块用卡片分割 + ③ 区分形态布局**（用户口径 2026-10-16：
+    #: *「① 笔记类型 弹窗中使用卡片区域给这些区域进行分割」*、*「只留标题，不要序号」*、
+    #: *「③ 视频与封面 区域重新做布局」*）。
+    #: 判据：
+    #:   ① 区块都是 `Card`（不是裸 `<div>` + 标题 —— 卡片才有**区域感**）；
+    #:   ② **标题不带序号**（`①`/`②` 等一律不出现在标题里 —— 用户明确不要）；
+    #:   ③ ③ 区**按形态分两套布局**：视频笔记 `Row/Col` 两列并排（视频 | 封面）。
+    assert modal.count("<Card") >= 2, "区块未用卡片区域分割（用户口径：用卡片区域给这些区域进行分割）"
+    for serial in ("①", "②", "③", "④"):
+        assert serial not in modal, f"标题里还有序号 {serial}（用户口径：只留标题，不要序号）"
+    assert '"视频与封面" : "配图"' in modal, "③ 区标题未按形态分叉"
+    #: ⚠️ 判据已换锚两次，最终形态是**上下布局**：
+    #:   1. `Row/Col` 两列 ⇒ `Row gutter` 的负外边距把左列顶出容器、裁掉标签（实证）；
+    #:   2. CSS grid 两列 ⇒ grid 子项默认 `min-width:auto`，里面有横滑带 ⇒ 撑爆列宽（实证）；
+    #:   3. **用户口径 2026-10-16：*「视频与封面 上下布局不要左右布局」*** ⇒ 竖排。
+    #: 判据落在**视频分支用竖排容器**上（同时反向钉住「不许再用 Row/grid 两列」）。
+    assert 'noteForm === "video"' in modal, "视频分支的形态判断不见了"
+    video_branch = modal[modal.index('noteForm === "video"') :]
+    video_branch = video_branch[: video_branch.index(") : (")]
+    assert 'direction="vertical"' in video_branch, (
+        "视频笔记的 ③ 区不是上下布局（用户口径 2026-10-16：视频与封面 上下布局不要左右布局）"
+    )
+    assert "gridTemplateColumns" not in video_branch, (
+        "视频分支还在用 grid 两列（子项 min-width:auto + 内部横滑带 ⇒ 撑爆列宽）"
+    )
+    assert "<Row gutter" not in modal, (
+        "视频分支又用回 Row gutter（负外边距会裁掉左列的标签左边缘）"
+    )
+    #: ⑧ 单个来源块**抽成共用组件**（图文/视频两套布局共用一份实现）——
+    #: 两处各写一遍必然漂移（DEF-044）。
+    assert "function SegmentCard(" in modal, "媒体来源块未抽成共用组件（两套布局会各写一遍）"
+    assert modal.count("<SegmentCard") >= 2, "SegmentCard 未在两种形态下复用"
+
+    #: ⑨ **弹窗内用两个大类 Tab 拆分「图文 / 视频」**（用户口径 2026-10-16：
+    #: *「使用两个大类 tab 将图文和视频笔记进行拆分」* —— 只拆**参数界面**，
+    #: 后端链路**公用一条**）。
+    #: 判据：弹窗内必须有 `Tabs` 且两个 key 恰好是 `image` / `video`
+    #: （写在 `noteForm` 的 state 上 —— 切 Tab 换的是参数界面，不是链路）。
+    assert "<Tabs" in modal, "弹窗内没有两个大类 Tab"
+    assert '{ key: "image", label: "图文笔记" }' in modal, "缺「图文笔记」Tab"
+    assert '{ key: "video", label: "视频笔记" }' in modal, "缺「视频笔记」Tab"
+    assert "const [noteForm, setNoteForm] = useState" in modal, (
+        "Tab 未驱动形态 state（切 Tab 不会换参数界面）"
+    )
+    #: ⚠️ **光有 state 不够** —— 必须证明 **Tab 的 onChange 真的写它**
+    #: （第一版只查了 `useState` 存在，M19 变异把 `onChange` 改成 no-op 却没被抓住 ⇒ 哑弹）。
+    #: ⚠️ 判据换锚（2026-10-17 加「生成记录」页签后）：`onChange` 先写 `activeTab`，
+    #: 再**非 history 时**转发给 `setNoteForm` —— 判据必须落在**转发那一步**上，
+    #: 只查 `setNoteForm` 出现会漏掉「切 Tab 不再换形态」（等于没绑定）。
+    assert 'if (next === "image" || next === "video") switchForm(next);' in modal, (
+        "Tab 的 onChange 没有写回 `noteForm`（切 Tab 不换参数界面）"
+    )
+    #: ⚠️ **后端链路必须仍是公用的**：不许在这个前端弹窗里出现「两条链路」的痕迹
+    #: （如按形态分别调不同接口）—— 提交只发 `mediaPlan`，形态由后端派生。
+    assert modal.count("generateLlmNote(") == 1, (
+        "提交出现了多个生成入口（用户口径：只是 UI 拆分，链路公用）"
+    )
+    #: ⑨ **本地素材要「先预览、再选择」**（用户口径 2026-10-16：
+    #: *「本地素材库的素材也应该支持预览，通过预览后进行选择」*）。
+    #: 反向判据：**不许退回只显文件名的 `Select`**（那正是用户说的「看不见图怎么选」）。
+    assert "MaterialPicker" in modal, "本地素材未用缩略图选择器（用户要求先预览再选择）"
+    assert "materialFiles.map((f) => ({ value: f.id, label: f.filename }))" not in modal, (
+        "本地素材退回只显文件名的 Select（看不见图就得选）"
+    )
+    #: object URL 必须释放（授权端点取 blob，不 revoke 会泄漏）。
+    assert "revokeObjectURL" in modal, "素材 object URL 未释放（长会话下泄漏）"
+    #: ⑪ **参考图在「智能生成」内部选**（用户口径 2026-10-16：*「智能生成时需要参考AI商品图
+    #: 相关逻辑支持选择参考图」* + *「这个下拉参考图正常是不需要的」*
+    #: + *「参考图方放在提示词的上面，包括主图详情图，支持多选最多4个」*）。
+    #: 判据落在**调用形态**上（「有组件」≠「真的挂进 ai_generate 分支」，本仓 DEF-056 同型）：
+    #: 选择器必须出现在 `seg.source === "ai_generate"` 的块里。
+    assert "<ReferenceImagePicker" in modal, "智能生成未提供参考图选择（用户要求在其内选参考图）"
+    #: ⚠️ 截块锚点必须选**ai_generate 分支之后**的那些分支（`product_image` / `material`）。
+    #: 2026-10-17 起「参考图来源」下拉里也出现了 `seg.source === "material"` 字样
+    #: （父组件那行），拿它当结束锚点会**截在当前分支内部** ⇒ 假红。
+    #: 改用 `{seg.source === "product_image" && (` 这个稳定形态当边界。
+    #: ⚠️ 必须锚**分支形态** `{seg.source === "ai_generate" && (`，不能只锚字符串
+    #: —— 2026-10-17 起父组件里也有一句 `(seg.source === "ai_generate" || ...)`（参考图
+    #: 来源下拉那行，在分支之前）⇒ 锚到它就把块截在分支外部，恒假红。
+    _ai_start = modal.index('{seg.source === "ai_generate" && (')
+    _boundary = modal.find('{seg.source === "product_image" && (', _ai_start)
+    _ai_block = modal[_ai_start : _boundary if _boundary > 0 else len(modal)]
+    assert "<ReferenceImagePicker" in _ai_block, (
+        "参考图选择器没挂在「智能生成」分支里（挂外面 = 别的来源也受影响）"
+    )
+    #: **参考图要在提示词上面**（口径原话「放在提示词的上面」）—— 顺序即用法：
+    #: 先挑参考、再写提示词。判据 = 选择器在 `Input.TextArea` **之前**出现。
+    assert _ai_block.index("<ReferenceImagePicker") < _ai_block.index("Input.TextArea"), (
+        "参考图在提示词下面了（用户口径：参考图放在提示词上面）"
+    )
+    #: 参考图**上限 4 且可多选**（口径原话「支持多选最多4个」）。
+    assert "const MAX_REFERENCE_IMAGES = 4;" in modal, "参考图上限不是 4（用户口径：最多 4 个）"
+    assert "picked.length >= MAX_REFERENCE_IMAGES" in modal, (
+        "参考图没有数量上限判断（会无限选下去）"
+    )
+    #: **主图 / 详情图合并成一行、左右滚动**（用户口径 2026-10-16：
+    #: *「商品原图是包括商品主图和详情图」* + *「主图和详情图合并成一行展示」*
+    #: + *「商品原图展示一行，左右滚动即可」*）。
+    #: 判据 = **两个选择器都用合并列表 + 横向滚动**（不是「有个组标题」就算了）。
+    #: ⚠️ 判据换锚（2026-10-16）：`ReferenceImagePicker` 现在拼的是**三组**且每项是
+    #: `{url, preview}`（本地素材要 object URL 预览）⇒ 不再是 `[...productImages, null, ...detailImages]`
+    #: 这个字面量。判据改为落在**两处都用了「主图 + 分隔 + 详情图」的拼接形态**上：
+    #: 商品原图选择器仍是 `[..., null, ...]`；参考图选择器是三项 map + 分隔位。
+    #: ⚠️ 判据再换锚（2026-10-17 去重）：合并列表改由 `productImageList()` 统一产出
+    #: （主图 + 详情图 + **保序去重**），不再是 `[...productImages, null, ...detailImages]`
+    #: 字面量；参考图那边也不再三组混排（改「来源下拉 + 按来源展示」）。
+    #: 判据改为**落在统一入口与分隔线位置**上：
+    assert "productImageList(productImages, detailImages)" in modal, (
+        "商品原图没走统一合并入口（主图/详情图合并 + 去重）"
+    )
+    assert "...merged.slice(0, mainUnique), null, ...merged.slice(mainUnique)" in modal, (
+        "主图与详情图之间没有分隔线（或分隔线位置没按去重后的主图张数算）"
+    )
+    assert modal.count("overflowX: \"auto\"") >= 2, (
+        "合并行没有左右滚动（用户口径：展示一行，左右滚动即可）"
+    )
+    #: ⚠️ 分隔位**不能占 `pick` 的下标** —— 算错会让「选第 3 张实际出第 5 张」。
+    assert "position < detailOffset ? position : position - 1" in modal, (
+        "合并列表的下标没跳过分隔位（pick 下标会整体错位）"
+    )
+    #: ⚠️ 缩略图不许被 flex 压扁（`flexShrink: 0`）。
+    assert modal.count('flex: "0 0 auto"') >= 4, "缩略图未禁止收缩（会被压扁变形）"
+    #: 勾选的是 **URL**（两组混选，单一「下标」表达不了组内位置）。
+    assert "if (seg.reference_urls?.length) base.reference_image_urls = seg.reference_urls;" in modal, (
+        "参考图未随 media_plan 下发（选了也不生效 = 静默失效）"
+    )
+    #: ⚠️ 到上限后**剩余图禁用 + 点击给提示**（用户口径：*「图片总数达到限制后
+    #: 不再支持选择进行提示」*）—— 不能静默吞掉点击。
+    assert "最多选" in modal, "到上限后没有提示（用户点了没反应 = 以为坏了）"
+    #: ⑬ **商品原图可选中 + 封面只能选 1 张**（用户口径 2026-10-16：
+    #: *「商品原图，无法被选中，封面图应限制，只允许选择一个」*）。
+    #: ⚠️ 内页的上限**不写死**（= 配置的图片总数 `imageLimit`）—— 写死会让
+    #: 「配置调到 10」时内页仍只能选 6 张（配置形同虚设）。
+    assert 'seg.role === "cover"' in modal, (
+        "封面未被限制为 1 张 / 内页上限未跟随配置（用户口径：封面只允许选一个）"
+    )
+    #: 单选语义也必须对：`max=1` 时是**替换**不是追加 —— 追加会违反「只能选一个」。
+    #: ⚠️ 2026-10-18 起 `pick` 传的是**图片名称**（用户口径「必须是图片名称」），
+    #: 不再是下标，故断言里的变量是 `name`。
+    assert "onChange(picked.includes(name) ? [] : [name])" in modal, (
+        "封面单选逻辑不对（应先清空再放选中项，否则会累加出多张封面）"
+    )
+    #: 用户的选择**必须下发**（不传 = 后端取前 6 张，选择白做 = 静默失效）。
+    assert "if (seg.pick?.length) base.pick = seg.pick;" in modal, (
+        "商品图选择未随 media_plan 下发（后端只会取前 6 张）"
+    )
+    #: ⑭ **张数动态计算 + 总数后端下发**（用户口径 2026-10-16：*「生成张数根据笔记的
+    #: 需要的总图数动态计算…总数是固定的」* + *「可以低于上限，不能超过，最低一张图」*
+    #: + *「配置到 config 表中支持动态调整」*）。
+    #: ① 总数**不写死在前端**（写死 = 改了配置界面还说旧数，两份真相源）；
+    assert "fetchSystemSettings" in modal and "xhs_note_image_total_limit" in modal, (
+        "笔记图片总数没有从配置读（写死 = 配置改了界面不跟着变）"
+    )
+    #: ② 上限 = 总数 − **其他段**已占（排除本段，否则填完就锁死自己）；
+    assert 's.source !== "ai_generate"' in modal, (
+        "张数上限没有排除本段自身（填 3 之后上限剩 3，再想填 4 就填不进去）"
+    )
+    #: ③ **可填但夹在 1–6 内，默认 3**（不是只读展示）。
+    #: ⚠️ 旧断言（已被取代）要求按 `aiCountCap` 夹取 —— 用户口径 2026-10-19
+    #: *「生成张数不应该算该篇笔记的图片总数…默认3张最少1张最多6张」* ⇒
+    #: 生成张数与笔记图数**解耦**，固定 1–6，不再跟随总数变化。
+    assert "Math.min(seg.count ?? 3, 6)" in modal and "max={6}" in modal, (
+        "张数没有按 1–6 夹取（生成张数应与笔记图数解耦，固定最多 6 张）"
+    )
+    #: ④ 生成张数**不再随总数禁用**（用户口径 2026-10-19：生成张数与笔记图数解耦，
+    #: 固定 1–6）—— 旧断言（已被取代）要求 `disabled={aiCountCap < 1}`，
+    #: 那是「生成张数算进图片总数」时代的口径。现在备选池大小与笔记放几张无关。
+    assert "disabled={aiCountCap" not in modal, (
+        "生成张数仍被总数联动禁用（已改为 1–6 固定，与笔记图数解耦）"
+    )
+    #: ⑯ **「高级设置」整块移除 + 不许指定模型名**（用户口径 2026-10-16：
+    #: *「高级设计移除，不允许随意设置模型名」*）。
+    #: 模型由**业务点映射**决定；弹窗给输入框 = 给映射开后门（填个没配的名 ⇒ 运行期才 502）。
+    assert "<Collapse" not in modal, "「高级设置」折叠块又回来了（用户口径：高级设置移除）"
+    assert 'name="model_name"' not in modal, "弹窗又能填模型名了（用户口径：不允许随意设置模型名）"
+    assert "modelName:" not in modal, (
+        "提交体里还在下发 modelName（模型应由业务点映射决定，不走客户端）"
+    )
+    #: ⑰ **视频分支的封面下拉不许筛选空**（2026-10-16 截图实证的真 bug：
+    #: 封面那格显示成原始值 `product_image`）。
+    #: 根因：`options` 写成 `sourceOptions.filter(...)`，而 `sourceOptions` 已按
+    #: `noteForm`（=video）过滤过 ⇒ 再筛 `form === "image"` 恒得**空数组** ⇒
+    #: antd `Select` 匹配不到选项就把**原始 value** 直接渲染出来。
+    #: 判据 = **`filter` 的输入必须是「全集」`MEDIA_SOURCE_OPTIONS`**。
+    assert "sourceOptions.filter((o) => o.form ===" not in modal, (
+        "又从「已按形态筛过的子集」里再筛一次（视频分支的封面会拿到空数组、显示原始值）"
+    )
+    #: ⚠️ 锚点用**正则**（不写死缩进/换行）：`SegmentCard` 参数块改过缩进后，
+    #: 写死 `\n` + 20 空格的锚点会失配成哑弹（本仓变异锚点已三次栽在这上面）。
+    assert _re.search(
+        r"MEDIA_SOURCE_OPTIONS\.filter\(\s*\(o\)\s*=>\s*o\.form === \(isCover", modal
+    ), (
+        "视频分支的封面下拉没从全量来源里筛（会显示成 product_image）"
+    )
+    #: ⑫ **文案与信息密度硬约束**（用户口径 2026-10-16：
+    #: *「说明或提示文案不要占用过多的页面布局，越少越好」*，已写入
+    #: `00_管理规范/00_需求工作流速查.md` 硬约束区 + 设计模板 §2.5a）。
+    #: 判据（可执行，不是纸面规矩）：
+    #:   ① 弹窗内**没有独立 `Alert` 说明块**（原写法两条 Alert 白占 4 行高度）；
+    #:   ② 没有**超长**说明句（单条 hint 超过 40 字即视为该进 Tooltip / 注释）。
+    assert "<Alert" not in modal, (
+        "弹窗内出现独立 Alert 说明块（口径 C3/C5：提示不占独立区块、弹窗禁大段说明）"
+    )
+
+    #: ⑰ **视频来源只剩两项 / 本地素材不生成视频 / 参考图含本地素材**（用户口径 2026-10-16：
+    #: *「视频下拉应只有本地素材和智能生成视频，使用本地素材这无需再生成视频…
+    #:   智能生成视频需支持选择参考图，参考图可为本地素材也可以是商品原图」*）。
+    #:
+    #: ⚠️ 这条**必须验枚举内容**，不是「有没有 video_ai_generate」：
+    #:     只查存在 ⇒ 保留 `video_reference` 也能过（那正是要退场的东西）。
+    video_options = _re.findall(
+        r'value: "(video_[a-z_]+)"', modal
+    )
+    assert set(video_options) == {"video_material", "video_ai_generate"}, (
+        f"视频来源下拉应只有「本地素材 / 智能生成视频」两项，实得 {sorted(set(video_options))}"
+    )
+    #: 本地素材 = 直接用（不生成）⇒ 不能再有「时长」这类**生成参数**
+    #: （判据落在**条件渲染**上：时长只在 `video_ai_generate` 时出现）。
+    assert 'seg.source === "video_material"' in modal, (
+        "本地素材没有独立分支（会被当成生成来源，白烧一次视频模型调用）"
+    )
+    #: **生成记录挂在弹窗里 + 只显示该商品**（用户口径 2026-10-17：
+    #: *「页面记录在 LLM 生成笔记中实现只展示该商品对应生成的笔记」*）。
+    #: 判据：① 弹窗里挂了 `NoteVersionHistory`；② 传的是**商品标识**（不是不带参数）。
+    assert "<NoteVersionHistory" in modal, "弹窗里没有生成记录组件"
+    assert "platformAccountId={accountId}" in modal and "itemId={itemId}" in modal, (
+        "生成记录没有按商品定位（不传就会列出所有商品的记录）"
+    )
+    #: ⚠️ 记录组件必须**默认收起**（弹窗高度稀缺，口径 C5）
+    vh = (ROOT / "frontend/src/pages/platforms/xhs/note-version-history.tsx").read_text(
+        encoding="utf-8"
+    )
+    #: ⚠️ 判据已换口径（2026-10-17 用户：*「生成记录使用新 tab 展示」*）：
+    #: 记录现在是**弹窗的一个页签**，不再自带「展开/收起」折叠开关
+    #: ⇒ 反向断言不许再出现该开关（否则「Tab 里还藏一层折叠」，多一次点击）。
+    assert "收起生成记录" not in vh, "生成记录里还留着折叠开关（它现在是整页 Tab）"
+    #: **分页列表 + 抽屉详情**（用户口径 2026-10-17：
+    #: *「生成记录使用分页列表展示使用抽屉展示详情」*）。
+    #: 判据：① 用了 `Table`（不是横滑卡片堆）；② 配了 `pagination`；③ 详情走 `Drawer`。
+    assert "<Table" in vh or "<Table<" in vh, "生成记录不是列表（横滑卡片看不到总数、不能翻页）"
+    assert "pagination={{" in vh, "生成记录列表没有分页"
+    assert "<Drawer" in vh, "详情没有用抽屉"
+    assert "fetchNoteVersion(" in vh, "抽屉没取单版详情（列表只有摘要，正文取不到）"
+    assert 'key: "history"' in modal, "生成记录不是一个页签"
+    #: 生成参数不能出现在记录页（否则用户以为能在历史页直接点生成）
+    #: 生成参数区只在**图文 / 视频**两个页签出现（生成记录 / 本次结果都不该有）
+    assert '''(activeTab === "image" || activeTab === "video")''' in modal, "切到生成记录/结果时没有隐藏生成参数区"
+    #: 失败版本也要列（用户点过生成却没结果，看不到失败会以为没反应）
+    assert 'case "failed"' in vh, "生成记录不显示失败状态"
+
+    #: 参考图**来源下拉**（用户口径 2026-10-17：*「参考图要有一个下拉，是选择原图还是
+    #: 本地素材需指定具体文件夹」*）—— 两张截图实证：原先三组混排，用户分不清
+    #: 哪张是素材、也没地方选文件夹。
+    #: 判据：① 来源下拉两项齐全；② 选「本地素材」时**必须能指定文件夹**。
+    assert 'value: "product", label: "商品原图"' in modal, "参考图来源下拉缺「商品原图」"
+    assert 'value: "material", label: "本地素材"' in modal, "参考图来源下拉缺「本地素材」"
+    assert "onMaterialFolderChange" in modal and "materialFolders" in modal, (
+        "参考图选「本地素材」时没有文件夹选择（用户口径：需指定具体文件夹）"
+    )
+    #: 缩略图**必须走 CDN 缩略图**（用户口径 2026-10-17：*「小图预览都很模糊，正常应清晰」*）。
+    #: 实测：商品详情图原图 **2480×2824**，槽位只有 **56×56 CSS** ⇒ 浏览器 44 倍下采样
+    #: ⇒ 边缘糊 + 摩尔纹。小红书 CDN 支持 `?imageView2/2/w/{size}`（4KB vs 400KB）。
+    #: 判据：渲染 `<img>` 的 src 必须过 `thumbUrl()`，且**按 DPR 放大**取图。
+    assert "function thumbUrl(" in modal, "没有缩略图地址函数（会把 2480px 原图硬塞进 56px 槽）"
+    assert "imageView2" in modal, "缩略图没走 CDN 的 imageView2 参数"
+    assert "devicePixelRatio" in modal, (
+        "缩略图没按设备像素比取图（只按 CSS 尺寸取，在高分屏上又会糊）"
+    )
+    #: 两处渲染（商品原图选择器 / 参考图选择器）都必须用缩略图
+    assert modal.count("thumbUrl(") >= 3, (
+        "缩略图函数未被两处 `<img>` 使用（只定义不用 = 白写）"
+    )
+    #: ⚠️ 提交给后端的仍是**原图**（缩略图当参考图 = 模型拿到模糊输入）
+    assert "pick" in modal and "reference_urls" in modal, "提交字段不见了"
+
+    #: ⚠️ **`needsMaterial` 必须包含 `ai_generate`**（2026-10-17 截图实证的真 bug：
+    #: 参考图来源选「本地素材」时，文件夹下拉显示「暂无数据」、下方「文件夹下没有图片素材」）。
+    #: 根因：`ai_generate` 的**媒体来源**不是素材，但它的**参考图**可以来自本地素材
+    #: ⇒ 漏掉它就不拉清单，界面给个空下拉（静默空态，比报错更难查）。
+    #: 判据 = **凡界面上会出现素材的地方都算**，不是「媒体来源是素材」才算。
+    import re as _re2
+
+    _needs = _re2.search(
+        r"const needsMaterial = segments\.some\(([^;]+?)\);", modal, _re2.S
+    )
+    assert _needs, "找不到 needsMaterial 判定（拉素材清单的门禁）"
+    for _src in ("material", "ai_generate", "video_material", "video_ai_generate"):
+        assert f'"{_src}"' in _needs.group(1), (
+            f"needsMaterial 漏了 {_src} ⇒ 该来源下素材清单是空的（空下拉，静默失效）"
+        )
+    #: 参考图必须能拿到素材（object URL 预览 + 提交 /api 引用）
+    assert "materialImages" in modal and "materialFileUrl" in modal, (
+        "参考图未接入本地素材（用户口径：参考图可为本地素材也可以是商品原图）"
+    )
+    #: **商品原图去重**（用户口径 2026-10-17：*「商品原图实现图片去重」*）。
+    #: 真机实测 400/400 商品都有重复图（主图与详情图重叠）⇒ 不去重就是同一张图
+    #: 出现两三次。⚠️ 必须**保序**（`pick` 是下标，排序会静默错位）。
+    assert "function uniqueKeepOrder(" in modal, "前端没有保序去重实现"
+    assert "function productImageList(" in modal, "商品原图没有统一入口（两处选择器会各写一份）"
+    #: 两处选择器都必须走过去重入口（只改一处 = 一处去重一处不去重，下标必然错位）
+    assert modal.count("productImageList(productImages, detailImages)") >= 2, (
+        "商品原图选择器与参考图选择器没有都走 productImageList（会与后端下标错位）"
+    )
+    #: ⚠️ 素材预览必须走 **object URL**：`<img src="/api/...">` 带不了 Authorization
+    #: ⇒ 必然 401 破图（本仓踩过，用户口径「本地素材均需要支持预览」）。
+    assert "fetchMaterialImageObjectUrl" in modal, (
+        "素材预览没用 object URL（会 401 破图）"
+    )
+
+    #: 只查**面向用户的文案属性**（`title=` / `placeholder=` / `description=` /
+    #: `extra=` / `emptyHint=` / `message=`）—— CSS 值、类名、路径不算。
+    for text in _re.findall(
+        r'(?:title|placeholder|description|extra|emptyHint|message)=\{?"([^"\n]+)"\}?', modal
+    ):
+        assert len(text) <= 40, (
+            f"存在超长用户文案（{len(text)} 字，口径 C1：越少越好）：{text[:50]}…"
+        )
+    #: ⚠️ **JSX 文本子节点也要查**（`<Text strong>…</Text>` / `<Tag>…</Tag>`）——
+    #: 只在属性上判会漏掉**写在标签体里**的长句（M20 首版锚点正是从这里溜过去的）。
+    for text in _re.findall(r">\s*([^<>{}\n]{41,})\s*<", modal):
+        #: 缩进/换行会被算进长度 ⇒ 先 strip 再判（否则缩进多一层就误报）。
+        text = text.strip()
+        assert len(text) <= 40, (
+            f"存在超长用户文案（{len(text)} 字，口径 C1：越少越好）：{text[:50]}…"
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -3516,24 +3929,23 @@ def test_model_config_page_filters_candidates_by_kind():
     )
 
 
-def test_model_config_page_shows_explicit_empty_state():
-    """④ 没有该类型服务商时给**明确文案**，不是空下拉。
+def test_model_config_page_shows_empty_dropdown_without_explanation():
+    """下拉为空时**不再解释原因**（用户口径 2026-10-18）。
 
-    ⚠️ **v2.11 收紧**：页面上有 4 段提示都含「服务商配置」，全文断言会被**别的提示遮过**
-    —— 杀掉「该类型暂无服务商」这一段，`还没有` / `服务商配置` 仍能在其它三处命中 ⇒
-    守卫假绿（变异实测）。故切片到 `{empty && (` 这一段内部断言（DEF-057 同型：
-    断言必须落到**能区分对错**的粒度）。
+    > 「该类型的 8 个服务商都还没有可用模型… **移除**，没有对应模型下拉框展示为空即可」
+
+    ## 为什么推翻旧断言
+
+    旧口径（v2.11）要求 placeholder 写「暂无可用的该类型服务商」并配一段
+    「请先到『服务商配置』新增」——那是**诊断信息**，用户明确不要了：
+    下拉为空本身就是答案，多一段解释只是噪音（同「提示文案越少越好」）。
     """
     code = _code_only(_read(MODEL_CONFIG_PAGE))
-    # 无候选时 placeholder 必须明说（空下拉分不清「坏了」还是「没配」）
-    assert "暂无可用的该类型服务商" in code, (
-        "无候选时 placeholder 必须明说（空下拉分不清「坏了」还是「没配」）"
-    )
-    # 「该类型暂无服务商」这一段必须给出「去哪配」的指向 —— 只在这段里断言
-    seg = _slice_between(code, "{empty && (", "{allCatalogEmpty && (")
-    assert "还没有" in seg and "服务商配置" in seg, (
-        "空态必须给出「去哪配」的指向（请先到「服务商配置」新增）—— 段内断言，不许被别处提示遮过"
-    )
+    #: 这两句是本次明确要移除的诊断文案
+    assert "都还没有可用模型" not in code, "「N 个服务商都还没有可用模型」应已移除"
+    assert "暂无可用的该类型服务商" not in code, "「暂无可用的该类型服务商」placeholder 应已移除"
+    #: 下拉仍在、placeholder 保留一句中性的
+    assert "请选择服务商" in code, "下拉框本身不能删（删了就没法配了）"
 
 
 def test_model_config_page_reports_type_mismatch_and_disabled():
@@ -3638,29 +4050,20 @@ def test_model_config_page_pk_column_is_single_cascader():
 
 
 def test_model_config_page_drops_redundant_intro_paragraph():
-    """卡内**说明段落已移除**（v2.6 用户追加口径：「这里面这段说明也不要了」）。
+    """卡内**说明段落已移除**，且**不再用按行诊断文案替代**（用户口径 2026-10-18）。
 
-    ⚠️ **本条在 v2.11 被订正**（此前是**假红**）：原断言要求页面保留一句集中式
-    `Alert`（`服务商与具体模型都必选`）。但 v2.9 已把该 Alert **整段移除**，改为
-    **按行条件提示**（「该类型的 N 个服务商都还没有可用模型 …」「该服务商在该业务点下
-    没有可用模型 …」）—— 集中式 Alert 反而与「实时级联 + 逐行空态」的口径冲突
-    （用户要的是每行当场说清，不是顶部一句通用约束）。原断言从 v2.9 起就一直是红的
-    （未被察觉），本次一并订正为守**当前的正确形态**。
+    > 「该类型的 8 个服务商都还没有可用模型… **移除**，没有对应模型下拉框展示为空即可」
 
-    守什么：① 卡内那段长说明**不回来**；② 空态提示**必须保留**（换成了按行形态）——
-    删掉它才是回退（DEF-057：断言要能区分对错）。
+    ⚠️ **本条第三次订正**：
+    ① v2.6 要求删掉集中式 Alert（用户「这段说明也不要了」）；
+    ② v2.11 改成守「按行空态文案必须保留」（当时的口径是要逐行说清）；
+    ③ **本次（2026-10-18）用户明确要求把按行文案也删掉** —— 下拉为空即可。
+    断言随之改为「长说明不回来 + 诊断文案也不回来」。
     """
     code = _code_only(_read(MODEL_CONFIG_PAGE))
-    assert "服务商在「服务商配置」页单独维护" not in code, (
-        "卡内说明段落已按用户口径移除，不应回退"
-    )
-    # v2.11 订正：约束提示改由**按行**空态文案承载（不再是集中式 Alert）。
-    assert "暂无可用的该类型服务商" in code, (
-        "空态提示必须保留（v2.9 起改为按行形态）—— 删它才是回退"
-    )
-    assert "该业务点下没有可用模型" in code, (
-        "「服务商在该业务点下无可用模型」的按行提示必须保留（原集中式 Alert 的等价物）"
-    )
+    assert "服务商在「服务商配置」页单独维护" not in code, "卡内说明段落已按用户口径移除，不应回退"
+    assert "都还没有可用模型" not in code, "按行诊断文案已移除（用户：下拉为空即可）"
+    assert "该业务点下没有可用模型" not in code, "按行诊断文案已移除（用户：下拉为空即可）"
 
 
 def test_detail_image_uses_public_prompt_templates():
@@ -3759,23 +4162,28 @@ def test_video_prompt_uses_public_templates():
 
     守四件（少一件就退回「模板是摆设」）：
     ① 弹窗里有视频模板下拉；② 按 `task_type === "video"` 过滤（不与图片串用）；
-    ③ 提交时把 `template_id` 放进 `media_options`；④ 手输**不被裁剪**
+    ③ 提交时把 `template_id` 放进**媒体段**；④ 手输**不被裁剪**
        （后端要靠它做「补充要求」）。
+
+    ⚠️ **判据已换锚（v2.27 / 设计 41 §16 弹窗重做）**：旧版是 `Form.Item
+    name="video_template_id"` 的顶层字段，提交时读 `values.video_template_id`；
+    重做后视频参数**挂在媒体段上**（每行一个来源，参数就地展开）—— 锚点改为
+    `tag`/`seg.template_id` 形态。原句保留在 docstring。
     """
     modal = _code_only(_read(LLM_GEN_MODAL))
 
-    # ① 下拉存在（锚点是下拉自身，不是文案里的同名字 —— 见上面那条守卫的教训）
-    assert 'name="video_template_id"' in modal, "视频区没有模板下拉 —— 模板没用上"
+    # ① 下拉存在（挂在视频段上，值写进 `seg.template_id`）
+    assert "seg.template_id" in modal, "视频区没有模板下拉 —— 模板没用上"
     # ② 按 video 过滤
     assert 't.task_type === "video"' in modal, (
         "视频模板下拉没按 task_type=video 过滤（会选到图片模板）"
     )
-    # ③ 提交时发出去
-    assert "template_id: values.video_template_id" in modal, (
+    # ③ 提交时发出去（进媒体段）
+    assert "base.template_id = seg.template_id" in modal, (
         "视频模板没被发给后端（选了等于没选）"
     )
     # ④ 手输不被裁剪（与模板并存 —— 后端要用它当「补充要求」）
-    assert "prompt: values.video_prompt" in modal, (
+    assert "base.prompt = seg.prompt" in modal, (
         "选了模板就把手输裁掉了 —— 后端拿不到补充要求"
     )
 
@@ -10560,3 +10968,35 @@ def test_workflow_feature_stays_removed():
         assert mod not in _code_only(_read(ROOT / "backend/app/main.py")), (
             f"main.py 还在 import 已删的工作流模块：{mod}"
         )
+
+
+def test_llm_progress_card_is_not_mounted_on_shop_items():
+    """商品列表**不展示 LLM 生成进度表**（用户口径 2026-10-18：*「不展示进度表」*）。
+
+    ## 为什么删而不是修
+
+    进度卡把「待处理」算成 `(snapshot.running || 0) + (snapshot.queued || 0)`，
+    但底座 `note_queue_service.snapshot()` 的契约是 `running` = **对象或 None**、
+    `queued` = **数组**（列表）—— 两者用 `+` 相加得到 `[object Object]`，
+    界面上就出现「待处理 [Object Object]」+ 进度条恒 0%。
+    该卡片已被用户明确要求移除，**判据是「不许再加回来」**。
+
+    ⚠️ `llmQueueItemIds` 本身**不能删**：它还驱动操作列「LLM 生成」按钮的
+    旋转图标（待处理态的唯一表达）。
+    """
+    from pathlib import Path
+
+    page = (
+        Path(__file__).resolve().parents[2]
+        / "frontend/src/pages/platforms/xhs/shop-items-page.tsx"
+    ).read_text(encoding="utf-8")
+    #: 剥注释后再判（本文件顶部的「已移除（保留备查）」注释里写了组件名）
+    import re
+
+    code = re.sub(r"/\*.*?\*/", "", page, flags=re.S)
+    code = re.sub(r"^\s*//.*$", "", code, flags=re.M)
+
+    assert "<LlmGenerateProgressCard" not in code, "商品列表又挂回 LLM 生成进度表了"
+    assert 'from "./llm-generate-progress-card"' not in code, "进度表 import 还在"
+    #: 待处理态仍要能被感知（不许连旋转图标一起删掉）
+    assert "llmQueueItemIds.has(item.item_id)" in code, "操作列不再标记「生成中」"

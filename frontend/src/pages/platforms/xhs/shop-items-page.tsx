@@ -60,6 +60,7 @@ import {
   exportShopItems,
   fetchAccounts,
   fetchGenerateQueue,
+  fetchLlmGenerateQueue,
   fetchXhsItemNotes,
   fetchPromptTemplates,
   fetchXhsQianfanBinding,
@@ -112,7 +113,6 @@ import { ProductPublishWizard } from "./product-publish-wizard";
 //: ⚠️ 默认导出（`export default`），不是具名 —— 具名导出的 `PackagePrecheckHandle`
 //: 只是给第二步留的取值句柄类型，别误当成组件名 import。
 import { SyncOptionsModal, type SyncOptions } from "../../../components/platforms/sync-options-modal";
-import { LlmGenerateProgressCard } from "./llm-generate-progress-card";
 import {
   accountLabel,
   batchDeleteBlock,
@@ -1595,25 +1595,44 @@ export function XhsShopItemsPage() {
     if (waitTickRef.current !== null) window.clearInterval(waitTickRef.current);
   }, []);
 
-  /** LLM 生成入队成功 → 登记进轮询集合（操作列按钮转圈，进度卡开跑）。 */
+  /** LLM 生成入队成功 → 登记进轮询集合（操作列按钮转圈）。 */
   function handleLlmQueued(itemId: string) {
     setLlmQueueItemIds((current) => new Set(current).add(itemId));
     setLlmGenerating(null);
   }
 
-  /** LLM 生成某条终态 → 失败如实报原因（原因只在快照 finished 里给一次）。 */
-  function handleLlmFinished(entry: { item_id: string; status: string; reason?: string }) {
-    setLlmQueueItemIds((current) => {
-      if (!current.has(entry.item_id)) return current;
-      const next = new Set(current);
-      next.delete(entry.item_id);
-      return next;
-    });
-    if (entry.status === "failed" && entry.reason) {
-      message.error(`生成失败：${entry.reason}`);
-    }
-    // 成功不弹消息：卡片上的「生成成功」计数已经在说话（避免每篇一条弹窗）
-  }
+  //: **旋转图标的清除**（2026-10-18）：进度卡移除后，`llmQueueItemIds` 就没人删了
+  //: ⇒ 按钮会**永远转下去**（看着像卡死）。
+  //:
+  //: 判据用 `finished`（近期终态窗口的 `item_id`）：某个 item 出现在 `finished` 里
+  //: ⇒ 它已出结果 ⇒ 停转。**不弹任何消息** —— 失败原因仍在版本记录的详情抽屉里，
+  //: 不在列表页做「加载时把昨天的失败又弹一遍」那种事（那正是被删掉的进度卡的毛病）。
+  //:
+  //: ⚠️ 用 `finished` 而不是「不在 running/queued 里」：`running` / `queued` 是**计数**
+  //: 不是清单，拿不到 item_id。
+  useEffect(() => {
+    if (llmQueueItemIds.size === 0) return;
+    let alive = true;
+    const timer = window.setInterval(() => {
+      void (async () => {
+        try {
+          const snap = await fetchLlmGenerateQueue();
+          if (!alive) return;
+          const settled = new Set(snap.finished.map((entry) => entry.item_id));
+          setLlmQueueItemIds((current) => {
+            const next = new Set([...current].filter((id) => !settled.has(id)));
+            return next.size === current.size ? current : next;
+          });
+        } catch {
+          //: 取不到不停（瞬时网络问题），但也不清 —— 宁可多转几秒，别误判「已完成」
+        }
+      })();
+    }, 5000);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, [llmQueueItemIds]);
 
   /**
    * 同步该账号的**全部状态**商品到本地台账（v2.13，设计 13 §30.3.2）。
@@ -2453,7 +2472,8 @@ export function XhsShopItemsPage() {
             </Button>
           </Tooltip>
           {/* LLM 生成（T9，设计 17 §7.4）：走项目自己的 LLM 生成链路（与千帆后台智能生成
-              是两个队列、两条链路）。开的是**生成配置弹窗**（选模板 + 媒体来源四选一）。 */}
+              是两个队列、两条链路）。开的是**生成配置弹窗** —— 弹窗内用两大 Tab
+              拆分「图文笔记 / 视频笔记」（用户口径 2026-10-16）。 */}
           <Tooltip title="用本项目的 LLM 链路生成笔记">
             <Button
               type="link"
@@ -2927,23 +2947,17 @@ export function XhsShopItemsPage() {
                   : ""}
               </Text>
             )}
-            <Tooltip
-              title={
-                selectedItemIds.length > 0
-                  ? `对选中的 ${selectedItemIds.length} 个商品逐个入队生成笔记（≤20 个/次，单项失败不阻断；后台顺序执行）`
-                  : "先在表格里勾选商品（最多 20 个/次）"
-              }
-            >
-              <Button
-                type="primary"
-                icon={<FileAddOutlined spin={genQueueItemIds.size > 0} />}
-                disabled={selectedItemIds.length === 0}
-                loading={batchGenerating}
-                onClick={() => void batchGenerate()}
-              >
-                批量生成智能笔记{selectedItemIds.length > 0 ? `（${selectedItemIds.length}）` : ""}
-              </Button>
-            </Tooltip>
+            {/* ⚠️ 「批量生成智能笔记」**已移除**（2026-10-18 用户口径：
+                *「暂时不支持批量生成，改成同步等待」*）。
+                被移除的原按钮（保留备查，勿恢复）：
+                  <Button type="primary" icon={<FileAddOutlined />}
+                          disabled={selectedItemIds.length === 0}
+                          loading={batchGenerating}
+                          onClick={() => void batchGenerate()}>批量生成智能笔记（N）</Button>
+
+                理由：生成改成**同步等待**后，单篇要点完等几十秒才出结果；
+                20 篇串行必然超过任何 HTTP 超时。用户要的是「生成完就地改」，
+                不是「批量铺开」。端点侧留了 410 墓碑（`LLM_BATCH_GENERATE_GONE`）。 */}
             {/* ⚠️ 「批量同步商品」按钮**已移除**（2026-10-05）：它与 header 的
                 「同步商品」是同一件事（都触发整店全量同步），两个入口 = 两份说法。
                 被移除的原按钮（保留备查，勿恢复）：
@@ -3002,15 +3016,15 @@ export function XhsShopItemsPage() {
           </Space>
         }
       >
-        {/* LLM 生成进度卡（T9，设计 17 §7.4）：有待处理 / 跑过才渲染，空闲不占版面。 */}
-        {llmQueueItemIds.size > 0 && (
-          <div style={{ marginBottom: 12 }}>
-            <LlmGenerateProgressCard
-              activeItemIds={llmQueueItemIds}
-              onFinishedEntry={handleLlmFinished}
-            />
-          </div>
-        )}
+        {/* ⚠️ LLM 生成进度卡**已移除**（2026-10-18 用户口径：「不展示进度表」）。
+            原挂载点（保留备查，勿恢复）：
+              <LlmGenerateProgressCard activeItemIds={llmQueueItemIds}
+                                       onFinishedEntry={handleLlmFinished} />
+            移除理由：它是「当日三数（成功/失败/待处理）+ 进度条」，而三数里的
+            `running` / `queued` 契约是**对象 / 数组**（底座 `queued` 是列表），
+            进度卡却按数字相加 ⇒ 待处理显示成 `[Object Object]`、进度条恒 0%。
+            待处理态改由**操作列的旋转图标**表达（`llmQueueItemIds` 仍驱动它），
+            失败原因在各自的操作列行内提示，不再单独占用一张卡片。 */}
         {data ? (
           //: `className="shop-items-table"` + `scroll={{ y: "100%" }}`：只有**表格内**
           //: 这一块滚动（用户口径「只有列表内的数据支持表格列滚动」）。
@@ -3722,6 +3736,7 @@ export function XhsShopItemsPage() {
         accountId={selectedAccountId}
         itemId={llmGenerateItem?.item_id || ""}
         itemTitle={llmGenerateItem?.title || ""}
+        productImages={llmGenerateItem?.images || []}
         onClose={() => setLlmGenerateOpen(false)}
         onQueued={handleLlmQueued}
       />

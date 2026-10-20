@@ -30,6 +30,9 @@
 """
 from __future__ import annotations
 
+import json
+import time
+
 from typing import Any, Optional
 
 import requests
@@ -41,19 +44,27 @@ from sqlalchemy.orm import Session
 from backend.app.adapters.xhs.qianfan_api_adapter import get_qianfan_api_adapter_factory
 from backend.app.api.ai import _business_model_context, get_text_ai_client
 from backend.app.api.platforms.xhs.qianfan import _owned_account
-from backend.app.services.business_provider_keys import BUSINESS_KEY_GENERATE_NOTE
+from backend.app.services.business_provider_keys import BUSINESS_KEY_LLM_NOTE_TEXT
 from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user
+
+#: **同步发布最长等待**（秒）——发布链路上传 + 预审核 + 平台调用，实测单篇 20~90 秒；
+#: 给 180 秒余量。超时返回 504（**不假装成功**），用户可去内容库看终态。
+PUBLISH_WAIT_SECONDS = 180
+#: 等待期间的轮询间隔（秒）——1 秒足够，库是本地 SQLite。
+PUBLISH_WAIT_POLL_SECONDS = 1.0
 from backend.app.models.generation import MEDIA_SOURCES, MEDIA_SOURCE_PRODUCT_IMAGE
 from backend.app.models.platform_account import PlatformAccount
 from backend.app.models.shop_product import ShopProduct
 from backend.app.models.user import User
+from backend.app.services import copy_requirements, note_version_service
 from backend.app.services.note_gen_llm_service import NoteGenerationError
 from backend.app.services.note_gen_llm_worker import (
     GEN_LLM_BATCH_MAX_ITEMS,
     llm_generate_queue_snapshot,
     start_llm_batch_generate,
-    start_llm_generate_note,
+    regen_llm_note_sync,
+    generate_llm_note_sync,
     start_llm_retry,
 )
 from backend.app.services.product_note_gen_service import (
@@ -175,7 +186,7 @@ def generate_note_for_product(
 
     try:
         model_config, api_key = _business_model_context(
-            db, current_user, BUSINESS_KEY_GENERATE_NOTE
+            db, current_user, BUSINESS_KEY_LLM_NOTE_TEXT
         )
     except HTTPException as error:
         raise HTTPException(
@@ -376,15 +387,36 @@ class GenerateLlmNoteRequest(BaseModel):
     template_id: int | None = Field(default=None, ge=1)
     #: 网关配置 id（v1.7 只作审计快照；实际调用取用户的默认文本模型）。
     gateway_config_id: int | None = Field(default=None, ge=1)
-    #: 覆盖默认模型名；空 = 用该业务点映射到的服务商的默认模型（`resolve_business_provider`）。
+    #: ⚠️ **已停用**（用户口径 2026-10-16：*「不允许随意设置模型名」*）。
+    #:
+    #: 模型由**业务点映射**决定（`resolve_business_provider`：`generate_note` → 服务商
+    #: → 默认模型）。原先这里允许前端覆盖 ⇒ 等于给映射开了后门：
+    #: 填一个没配的模型名，**入队时看不出问题、运行期才 502**；而且同一业务点
+    #: 在「模型配置页」和「弹窗」两处各说各话（两份真相源）。
+    #: 现在**传非空即 400**（不静默忽略 —— 静默忽略会让调用方以为改了生效）。
+    #: 字段本身保留（去掉会让老客户端的请求体校验失败，是更差的行为）。
     model_name: str = Field(default="", max_length=128)
     #: 媒体来源四选一（设计 17 §13.4.1）：`product_image` / `material` /
     #: `reference_image` / `ai_generate`。
     media_source: str = Field(default=MEDIA_SOURCE_PRODUCT_IMAGE, max_length=32)
+    #: **媒体组合计划**（v2.26，M-C1，设计 41 §11.2）：有序段列表，每段
+    #: `{source, role, count?, …来源参数}`。**给了它就以它为准**（`media_source` 变兜底）。
+    #: 规则：封面唯一且排第一（R1）/ 总张数上限（R2）/ 同来源可重复（R3）/
+    #: 视频不占图片位（R4）。非法 ⇒ 400 结构化（不静默回落）。
+    media_plan: list[dict[str, Any]] = Field(default_factory=list)
     #: 媒体参数载体（§13.4.1）：`material` ⇒ `material_file_ids`；
     #: `reference_image` ⇒ `reference_image_urls?`；`ai_generate` ⇒
     #: `prompt?` / `reference_image_urls?` / `count?`。不落库，只进队列项行体。
     media_options: dict[str, Any] = Field(default_factory=dict)
+    #: **文案要求**（用户口径 2026-10-17）：标题 / 正文 / 话题**各自**的提示词、
+    #: 字数区间、是否带表情、话题数量区间。空 dict ⇒ 全走默认
+    #: （`services/copy_requirements.CopyRequirements` 的默认值）。
+    #: ⚠️ 校验在**同步段**做（`copy_requirements.normalize`）：区间倒挂等表意错误
+    #: 当场 400，不进队列 —— 入了队才失败，用户要等几分钟才知道自己填错了。
+    #: ⚠️ **不能叫 `copy`**：Pydantic v2 的 `BaseModel` 已有 `copy()` 方法，
+    #: 同名字段会遮蔽它（`UserWarning: shadows an attribute in parent`），
+    #: 任何 `model.copy()` 调用会变成「取字段」而不是「复制模型」。
+    copy_requirements: dict[str, Any] = Field(default_factory=dict)
 
 
 class BatchGenerateLlmNotesRequest(BaseModel):
@@ -394,6 +426,7 @@ class BatchGenerateLlmNotesRequest(BaseModel):
     item_ids: list[str] = Field(min_length=1)
     template_id: int | None = Field(default=None, ge=1)
     gateway_config_id: int | None = Field(default=None, ge=1)
+    #: ⚠️ **已停用**（同单篇：模型走业务点映射，不允许客户端指定）。传非空即 400。
     model_name: str = Field(default="", max_length=128)
     #: 媒体来源四选一（同单篇，设计 17 §13.4.1）。
     media_source: str = Field(default=MEDIA_SOURCE_PRODUCT_IMAGE, max_length=32)
@@ -458,26 +491,104 @@ def _check_media_source(value: str) -> str:
     return value
 
 
+def _checked_media_plan(media_plan: list[dict[str, Any]], media_source: str) -> list[dict]:
+    """入参 → 已校验的 `media_plan`（v2.26，M-C1）。
+
+    ⚠️ **在端点层校验**（不在 worker 里）：规则违反是**确定性的用户输入错误**，
+    必须**入队前**给结构化 400 —— 入队后才失败会让用户去队列记录页翻原因，
+    而真正要改的是他填的那个组合（DEF-058 同型的「错误要靠前报」）。
+    """
+    from backend.app.services.media_plan import MediaPlanError, build_plan
+
+    try:
+        return build_plan(media_plan=media_plan or None, media_source=media_source)
+    except MediaPlanError as error:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": error.code, "message": error.message},
+        ) from error
+
+
+def _checked_copy_requirements(raw: dict[str, Any]) -> copy_requirements.CopyRequirements:
+    """文案要求入参 → 规整对象（非法 ⇒ 结构化 400）。
+
+    ⚠️ **同步段必须校验**：区间倒挂（min > max）、表情取值非法都是**用户表意错误**，
+    当场告诉他比让他等几分钟看一条失败记录好得多。确定性答案 ⇒ 不入队。
+    """
+    try:
+        return copy_requirements.normalize(raw)
+    except copy_requirements.CopyRequirementError as error:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": error.code, "message": error.message},
+        ) from error
+
+
+def _reject_model_name_override(model_name: str) -> None:
+    """**模型名不允许客户端指定**（用户口径 2026-10-16：*「不允许随意设置模型名」*）。
+
+    模型由**业务点映射**决定（`resolve_business_provider`）；允许覆盖 = 给映射开后门：
+    填一个没配的模型名，**入队时看不出问题、运行期才 502**，而且同一业务点在
+    「模型配置页」和「弹窗」两处各说各话。
+
+    ⚠️ **传非空即 400，不静默忽略** —— 静默忽略会让调用方以为「我改了模型」，
+    实际没用上（本仓最厌恶的静默失效）。要换模型 ⇒ 去「模型配置」页改业务点映射。
+    """
+    if str(model_name or "").strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "LLM_MODEL_OVERRIDE_NOT_ALLOWED",
+                "message": "模型由业务点映射决定，不支持在请求里指定模型名；请到「模型配置」页调整映射。",
+            },
+        )
+
+
 @router.post("/generate-llm")
 def generate_llm_note(
     payload: GenerateLlmNoteRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """**入队一次 LLM 生成**（设计 17 §7.4 / T6；同步段毫秒级返回）。
+    """**同步生成一篇 LLM 笔记并直接返回结果**（用户口径 2026-10-18）。
 
-    与一期 `/generate-save` 的差别：本期**不需要千帆登录态**（生成阶段不碰平台），
-    但要**已有默认文本模型**（否则 400 `LLM_GATEWAY_NOT_CONFIGURED`）。
+    > 「调整一下生成笔记**不要放入队列中直接同步等待**，因为用户生成后应支持用户
+    >   对生成后的结果部分位置进行重复生成，也允许用户对生成图视频等选择性保留
+    >   或重新生成补充等」
 
-    终态不靠响应体：轮询 `GET /generate-llm-queue`（与同步 / 发布 / 一期生成
-    同一个出口、同一个底座）。返回 `{ok, status:"queued", item_id, record_id}`；
-    重复入队（同商品未终态）⇒ `already_queued: true`（幂等，不重复生成）。
+    ## 与「入队」的差别（为什么改）
+
+    入队是「毫秒级回执 + 轮询看终态」，它适合**批量**（20 篇排队跑几分钟）。
+    但单篇生成的真实诉求是**看到结果就地调整**：用户点完就要看到标题/正文/话题/图，
+    然后决定「这段重写」「这图换一张」。
+
+    排队路径把这件事拆成了两段（入队 → 轮询 → 再点开版本记录），
+    中间还有「到底跑没跑」的不确定感。同步路径一步到位。
+
+    ## 契约
+
+    * 成功 ⇒ `{ok: true, record_id, note_id, title, body, topics, media[], copy_requirements}`
+      —— 前端拿到就能渲染，不必再查版本列表；
+    * 失败 ⇒ 结构化 4xx/5xx（`LLM_GATEWAY_NOT_CONFIGURED` / `LLM_RESPONSE_NOT_JSON` /
+      `LLM_GUARDRAIL_BLOCKED` / 上游超时等），**原因可读**；
+    * 重复点：同商品**未终态**的排队项仍会被幂等复用（不重复生成），
+      但同步路径本身**不再产生排队项**。
+
+    ⚠️ 超时上限：文本调用 `TEXT_COMPLETION_TIMEOUT`（300s），媒体生成各自有上限。
+    前端必须显示「生成中 + 已用 N 秒」，不能让页面看起来卡死。
     """
     account = _owned_account(db, current_user, payload.platform_account_id)
     row = _ledger_product(db, current_user, account, payload.item_id)
+    #: 模型名不许客户端指定（用户口径 2026-10-16）—— **同步段**拒，不入队。
+    _reject_model_name_override(payload.model_name)
     media_source = _check_media_source(payload.media_source)
+    #: v2.26（M-C1）：组合计划（**组合优先，单值兜底**）；非法 ⇒ 结构化 400。
+    plan = _checked_media_plan(payload.media_plan, media_source)
+    #: **文案要求**（用户口径 2026-10-17）：同步段规整 —— 区间倒挂等表意错误当场 400
+    #: （跑几分钟才失败，用户要等半天才知道自己填反了）。
+    copy_req = _checked_copy_requirements(payload.copy_requirements)
     try:
-        receipt = start_llm_generate_note(
+        result = generate_llm_note_sync(
             db,
             current_user.id,
             shop_product_id=int(row.id),
@@ -486,6 +597,8 @@ def generate_llm_note(
             gateway_config_id=payload.gateway_config_id,
             model_name=payload.model_name,
             media_source=media_source,
+            media_plan=plan,
+            copy_requirements=copy_req,
         )
     except NoteGenerationError as error:
         raise _llm_generation_error(error)
@@ -493,80 +606,38 @@ def generate_llm_note(
         "ok": True,
         "platform_account_id": int(account.id),
         "item_id": payload.item_id,
-        **receipt,
+        **result,
     }
 
 
-@router.post("/batch-generate-llm")
+@router.post("/batch-generate-llm", include_in_schema=False)
 def batch_generate_llm_notes(
     payload: BatchGenerateLlmNotesRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """批量入队 LLM 生成（设计 17 §7.4）：逐项过门禁，**单项失败不阻断**。
+    """**已退场**：批量 LLM 生成（2026-10-18 用户口径）。
 
-    与一期批量同语义（`Promise.allSettled` 风格）：响应给逐项回执
-    `{item_id, ok, error?, code?}`，前端汇总「已入队 X / 失败 Y」。
+    > 「**暂时不支持批量生成**，改成同步等待，调整一下生成笔记不要放入队列中直接
+    >   同步等待，因为用户生成后应支持用户对生成后的结果部分位置进行重复生成…」
 
-    ⚠️ **网关门禁（`LLM_GATEWAY_NOT_CONFIGURED`）在批量入口直接抛 400**（不逐项）：
-    它是**账号级**属性 —— 逐项回执会给出 20 条一模一样的失败，用户以为「这些商品
-    都有问题」，而真正要修的是「去配一个默认文本模型」。
+    批量与「生成后就地调整」是两条相反的路：批量求快（排队跑），单篇求**可控**
+    （看到结果马上改文案 / 换图）。用户明确选了后者，且顺序执行 20 篇会远超
+    任何 HTTP 超时，所以批量**整条退场**，不是「改成同步批量」。
 
-    `item_ids` 里定位不到台账行的项 ⇒ 逐项回执 `LLM_PRODUCT_NOT_FOUND`（不抛）。
+    * 前端入口同步移除（商品列表的「批量生成智能笔记」按钮）；
+    * 端点保留 **410 墓碑**（`include_in_schema=False`，不进 OpenAPI）——
+      老客户端/书签拿到明确原因，而不是 404 让人以为路由写错。
+    * 服务层的 `start_llm_batch_generate` 暂留（单测仍覆盖它的参数归一），
+      但没有 HTTP 出口。
     """
-    account = _owned_account(db, current_user, payload.platform_account_id)
-    media_source = _check_media_source(payload.media_source)
-    # 先解析「平台 ID → 台账主键」，解析失败项进回执（保持入队集合是纯主键）。
-    resolved: list[tuple[str, int]] = []
-    pre_results: list[dict[str, Any]] = []
-    for item_id in payload.item_ids:
-        row = db.scalar(
-            select(ShopProduct).where(
-                ShopProduct.user_id == current_user.id,
-                ShopProduct.platform_account_id == account.id,
-                ShopProduct.item_id == item_id,
-            )
-        )
-        if row is None:
-            pre_results.append(
-                {
-                    "item_id": item_id,
-                    "ok": False,
-                    "code": "LLM_PRODUCT_NOT_FOUND",
-                    "error": "本账号的台账里找不到该商品，请先同步。",
-                }
-            )
-            continue
-        resolved.append((item_id, int(row.id)))
-    try:
-        summary = start_llm_batch_generate(
-            db,
-            current_user.id,
-            shop_product_ids=[pk for _, pk in resolved],
-            account_id=int(account.id),
-            template_id=payload.template_id,
-            gateway_config_id=payload.gateway_config_id,
-            model_name=payload.model_name,
-            media_source=media_source,
-            max_items=min(payload.max_items, GEN_LLM_BATCH_MAX_ITEMS),
-        )
-    except NoteGenerationError as error:
-        raise _llm_generation_error(error)
-    # 服务层回执按台账主键 ⇒ 换回平台 ID（前端只认平台 ID）。
-    pk_to_item = {pk: item_id for item_id, pk in resolved}
-    results = list(pre_results)
-    for entry in summary.get("results", []):
-        merged = dict(entry)
-        merged["item_id"] = pk_to_item.get(int(merged.get("shop_product_id") or 0), "")
-        merged.pop("shop_product_id", None)
-        merged.pop("status", None)  # 成功项由 `ok` 表达，`status` 是内部态
-        results.append(merged)
-    return {
-        "total": len(payload.item_ids),
-        "started": int(summary.get("started") or 0),
-        "failed": len(payload.item_ids) - int(summary.get("started") or 0),
-        "results": results,
-    }
+    raise HTTPException(
+        status_code=410,
+        detail={
+            "code": "LLM_BATCH_GENERATE_GONE",
+            "message": "批量生成已停用，请逐个商品生成（生成后可对结果局部重复生成）。",
+        },
+    )
 
 
 @router.get("/generate-llm-queue")
@@ -607,3 +678,588 @@ def retry_llm_generate(
     except NoteGenerationError as error:
         raise _llm_generation_error(error)
     return {"ok": True, **receipt}
+
+
+# --------------------------------------------------------------------------- #
+# 版本历史（用户口径 2026-10-17：
+#   *「LLM 生成笔记记录，且还有一个问题，比如基于指定生成的某一版本，
+#     用户只想重新生成正文或只重新配置生成图片」*）
+#
+# 三条判据（都在服务层实现，端点只做鉴权 + 参数传递）：
+#   1. **版本行永不覆盖** —— 每次生成 = 新版本，历史可回溯；
+#   2. **同商品最多一条 `is_adopted`** —— 「采用版」是用户的选择，不是时间序；
+#   3. **局部重生成覆盖当前版本** —— 版本号不变、不新增行，只替换目标块。
+# --------------------------------------------------------------------------- #
+class UpdateNoteVersionRequest(BaseModel):
+    """**就地编辑某一版文案**（不回模型、不改版本号）。
+
+    ⚠️ 三个字段都是**可选**且 `None` 表示「不改」—— 前端只传改过的那一块，
+    不会因为漏传把正文清空。
+    """
+
+    title: str | None = None
+    body: str | None = None
+    topics: list[str] | None = None
+    #: **配图**（用户口径 2026-10-19：*「更新记录按钮为保存最新的数据，勾选了新的图片未保存」*）
+    #: —— 用户在配置区勾选的图必须能存进这一版，否则「更新记录」只改文案、
+    #: 下次采用回来勾选还是旧的。`None` = 不动；给了就**整份替换** `media_json`。
+    #: 每项 `{url, local_path?, asset_type?, source?, role?, slot_index?}`。
+    media: list[dict] | None = None
+
+
+class RegenFromVersionRequest(BaseModel):
+    """基于某版本**局部重生成**（只重写文案 / 只重配图片）。"""
+
+    #: 要覆盖的那一版（必填；必须是**成功**且**同商品**的版本）。
+    target_record_id: int = Field(ge=1)
+    #: 重生成范围：`text`（只重写标题/正文/话题，媒体沿用当前版本已有的）
+    #: / `media`（只重配图片，文案沿用当前版本已有的）。⚠️ **不接受 `all`** ——
+    #: 整篇重新生成走 `/generate-llm`（那里能同时改模板/图片组合，语义更全）。
+    regen_scope: str = Field(default="text", max_length=16)
+    #: 只重写文案时可换模板（空 = 沿用当前版本那次用的模板）。
+    template_id: int | None = Field(default=None, ge=1)
+    #: 只重写文案时的文案要求（空 = 沿用当前版本的快照）。
+    copy_requirements: dict[str, Any] = Field(default_factory=dict)
+    #: 只重配图片时的媒体计划 / 参数（空 = 沿用当前版本已有的）。
+    media_plan: list[dict[str, Any]] = Field(default_factory=list)
+    media_options: dict[str, Any] = Field(default_factory=dict)
+
+
+@router.post("/versions/{record_id}/publish")
+def publish_note_version(
+    record_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    adapter_factory=Depends(get_qianfan_api_adapter_factory),
+):
+    """**把某一版生成结果直接发布**（用户口径 2026-10-19：*「LLM 生成笔记弹窗新增一个
+    发布笔记按钮，生成用户满意的笔记后可以直接发布」*）。
+
+    为什么按 `record_id` 而不是 `note_id`：弹窗手里只有「当前采用的那一版」，
+    而发布链路要的是 `notes.id`（本地主键）。两者由 `notes.raw_json.generation.record_id`
+    关联 —— 生成时写死的那一处，**唯一可靠的反查口**（不靠标题/时间猜）。
+
+    发布本身**完全复用**既有链路（`note_publish_service.start_publish`）：
+    不新造发布实现，也不跳过任何门禁（ark 令牌 / 媒体 / 已发布 / 发布中）。
+    异步语义与原端点一致：立即返回 `publishing`，终态由前端轮询笔记行。
+    """
+    from backend.app.models.note import Note
+    from backend.app.services.note_publish_service import NotePublishError, start_publish
+
+    #: **入口留痕**（诊断用）：确认前端确实打到了这个端点。
+    #: 没有这行 = 请求根本没到后端（前端提前失败 / 打错地址 / 产物旧）。
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "PUBLISH-ENDPOINT HIT record_id=%s user=%s", record_id, current_user.id
+    )
+
+    try:
+        record = note_version_service.find_record(
+            db, user_id=int(current_user.id), record_id=int(record_id)
+        )
+    except note_version_service.VersionError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": error.code, "message": error.message},
+        ) from error
+
+    #: 这一版对应的笔记行（生成时 `raw_json.generation.record_id` 写下的一对一关系）。
+    #: ⚠️ **找不到就是找不到**：不按标题/时间兜底猜 —— 发错篇比报错更糟。
+    #: 判据在 `raw_json.generation.record_id` —— 逐条比对（一个用户几十条，代价可忽略）。
+    candidates = db.scalars(
+        select(Note).where(
+            Note.user_id == int(current_user.id),
+            Note.note_type == "local_generated",
+        )
+    ).all()
+    #: ⚠️ **同一 `record_id` 可能对应多篇笔记**（局部重生成覆盖同一版时会另起一行，
+    #: 历史上也留下过重复）⇒ 不能「取第一条」：实测拿到的是**没有商品关系**的旧篇
+    #: （`note_goods` 空）⇒ 发布出去照样是裸笔记，用户看到「依旧没挂商品」。
+    #: 排序判据（按优先级）：
+    #:   ① **有商品关系**的优先（否则这次必挂不上）；
+    #:   ② **未发布**的优先（避免重复发同一篇，也避免撞平台重复内容限制）；
+    #:   ③ 最新的优先（`id` 倒序，最接近用户当前看到的那一版）。
+    matched: list[Note] = []
+    for row in candidates:
+        raw = row.raw_json if isinstance(row.raw_json, dict) else {}
+        try:
+            payload = json.loads(row.raw_json) if isinstance(row.raw_json, str) else raw
+        except ValueError:
+            payload = {}
+        generation = (payload or {}).get("generation") or {}
+        if int(generation.get("record_id") or 0) == int(record.id):
+            matched.append(row)
+    if not matched:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": "LLM_NOTE_VERSION_NOT_PUBLISHABLE",
+                "message": "这一版还没有对应的笔记内容，请先生成完整笔记再发布。",
+            },
+        )
+
+    from backend.app.models.shop import NoteGoods
+
+    def _rank(note_row: Note) -> tuple[int, int, int]:
+        has_goods = (
+            db.scalar(
+                select(NoteGoods.id).where(
+                    NoteGoods.user_id == int(note_row.user_id),
+                    NoteGoods.note_id == str(note_row.note_id or ""),
+                )
+            )
+            is not None
+        )
+        not_published = note_row.publish_status != "published"
+        return (1 if has_goods else 0, 1 if not_published else 0, int(note_row.id))
+
+    note = max(matched, key=_rank)
+    #: ⚠️ **发布前确保商品关系存在**（用户口径 2026-10-19：*「笔记发布均需要挂当前商品的
+    #: 链接」*）—— 发布链路 `_goods_item_ids_for()` 只认 `note_goods` / `raw_json.item_id`。
+    #: 本端点手里有 `record.shop_product_id`（本地台账主键）⇒ 直接补齐，
+    #: 不依赖生成侧是否写过（历史笔记就是这样缺的，实测 note 3886 两张表都空）。
+    from backend.app.models.shop import NoteGoods
+    from backend.app.models.shop_product import ShopProduct
+
+    product = db.get(ShopProduct, int(record.shop_product_id or 0))
+    if product is not None and str(product.item_id or "").strip():
+        item_id = str(product.item_id).strip()
+        exists = db.scalar(
+            select(NoteGoods).where(
+                NoteGoods.user_id == int(current_user.id),
+                NoteGoods.note_id == str(note.note_id or ""),
+                NoteGoods.item_id == item_id,
+            )
+        )
+        if exists is None:
+            db.add(
+                NoteGoods(
+                    user_id=int(current_user.id),
+                    note_id=str(note.note_id or ""),
+                    item_id=item_id,
+                )
+            )
+        raw = note.raw_json if isinstance(note.raw_json, dict) else {}
+        raw = dict(raw or {})
+        raw["item_id"] = item_id
+        note.raw_json = raw
+        db.commit()
+    else:
+        #: 取不到商品 ⇒ **不假装挂了**（缺值不造假，硬约束⑤）：明说出原因。
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "LLM_NOTE_GOODS_MISSING",
+                "message": "这一版没有关联商品，无法挂商品链接，请先重新生成。",
+            },
+        )
+
+    try:
+        start_publish(db, int(current_user.id), int(note.id), adapter_factory=adapter_factory)
+    except NotePublishError as error:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": error.code, "message": error.message},
+        ) from error
+
+    #: ⚠️ **同步等待终态**（用户口径 2026-10-19：*「发布笔记按钮改为同步按钮，
+    #: 发布成功关闭弹窗，失败则异常提示」*）—— 发布内部仍是异步 worker
+    #: （不改造那条链路：下载/上传/预审核/发布都在后台跑，是被验证过的路径），
+    #: 这里只**等它落终态**再返回：前端拿到 `published` 就关弹窗，
+    #: 拿到 `failed` 就弹平台原文。超时不算成功（不假装发布成功）。
+    from backend.app.models.note import PUBLISH_STATUS_FAILED, PUBLISH_STATUS_PUBLISHED
+
+    deadline = time.monotonic() + PUBLISH_WAIT_SECONDS
+    #: ⚠️ **轮询用独立 Session**：worker 在别的线程写库，本 Session 若持有旧快照
+    #: （identity map）会一直读到 `publishing`；`expire_all()` 虽能绕过，但它同时
+    #: 让**本 Session 未提交的改动失效**（这里的 `note.raw_json` 刚改过）。
+    #: 独立 Session 读到的就是库里真值，且不干扰本请求的事务。
+    from backend.app.core.database import SessionLocal
+
+    while time.monotonic() < deadline:
+        with SessionLocal() as probe:
+            current = probe.get(Note, int(note.id))
+        if current is not None and current.publish_status in (
+            PUBLISH_STATUS_PUBLISHED,
+            PUBLISH_STATUS_FAILED,
+        ):
+            if current.publish_status == PUBLISH_STATUS_FAILED:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": "NOTE_PUBLISH_FAILED",
+                        "message": str(current.publish_error or "发布失败（平台未返回原因）"),
+                    },
+                )
+            return {
+                "ok": True,
+                "note_pk": int(current.id),
+                "note_id": str(current.note_id or ""),
+                #: ⚠️ **没有 `platform_note_id` 这一列**（`Note` 只有 `note_id`，
+                #: 发布成功时它就被改写成平台 ID）—— 原写法在**返回时**抛
+                #: `AttributeError` ⇒ 前端看到 500，而平台上**已经发布成功**
+                #: （2026-10-19 实测：用户报「500 但实际发成功了」的真根因）。
+                "platform_note_id": str(current.note_id or ""),
+                "publish": {
+                    "ok": True,
+                    "status": PUBLISH_STATUS_PUBLISHED,
+                    "record_id": int(record.id),
+                },
+            }
+        time.sleep(PUBLISH_WAIT_POLL_SECONDS)
+    raise HTTPException(
+        status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+        detail={
+            "code": "NOTE_PUBLISH_TIMEOUT",
+            "message": f"发布已提交但 {PUBLISH_WAIT_SECONDS} 秒内未完成，请到内容库查看结果。",
+        },
+    )
+
+
+@router.get("/versions")
+def list_note_versions(
+    shop_product_id: int | None = None,
+    platform_account_id: int | None = None,
+    item_id: str | None = None,
+    limit: int = 50,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """某商品的**生成版本历史**（新→旧；含失败版本）。
+
+    ⚠️ 失败版本也在列表里：用户要看到「第 3 次生成了但失败了」，
+    否则会以为点了没反应。
+
+    ⚠️ **两种定位方式**（二选一）：
+      - `shop_product_id` —— 本地台账主键（已知时最直接）；
+      - `platform_account_id` + `item_id` —— **平台标识**。
+        弹窗手里只有平台 `item_id`（列表载荷里没有本地主键），
+        让前端自己查一次台账是多余的往返 ⇒ 后端按同一判据解析
+        （`uq_shop_products_account_item`：`item_id` 只在账号内唯一）。
+    """
+    resolved_id = shop_product_id
+    if resolved_id is None:
+        if not platform_account_id or not item_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "LLM_VERSION_QUERY_INVALID",
+                    "message": "需要 shop_product_id，或 platform_account_id + item_id",
+                },
+            )
+        account = db.get(PlatformAccount, int(platform_account_id))
+        if account is None or int(account.user_id) != int(current_user.id):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": "LLM_ACCOUNT_NOT_FOUND", "message": "账号不存在或不属于当前用户"},
+            )
+        row = _ledger_product(db, current_user, account, item_id)
+        resolved_id = int(row.id)
+
+    rows = note_version_service.list_versions(
+        db,
+        user_id=int(current_user.id),
+        shop_product_id=int(resolved_id),
+        limit=max(1, min(int(limit), 200)),
+    )
+    return {
+        "ok": True,
+        "shop_product_id": int(resolved_id),
+        "total": len(rows),
+        "items": [note_version_service.version_summary(row) for row in rows],
+    }
+
+
+@router.get("/versions/{record_id}")
+def get_note_version(
+    record_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """单版详情（**含正文全文** + 当时的文案要求快照）。"""
+    try:
+        record = note_version_service.find_record(
+            db, user_id=int(current_user.id), record_id=int(record_id)
+        )
+    except note_version_service.VersionError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": error.code, "message": error.message},
+        ) from error
+    summary = note_version_service.version_summary(record)
+    try:
+        copy_snapshot = json.loads(record.copy_requirements_json or "{}")
+    except ValueError:
+        copy_snapshot = {}
+    #: **完整媒体清单**（用户口径 2026-10-18：*「抽屉中没有图、视频」*）——
+    #: 摘要只给封面 + 计数（列表用，避免接口被撑大），详情必须给全清单，
+    #: 否则抽屉里看不到这一版到底用了哪些图/视频。
+    try:
+        media_list = json.loads(record.media_json or "[]")
+    except ValueError:
+        media_list = []
+    media = [m for m in media_list if isinstance(m, dict)] if isinstance(media_list, list) else []
+    return {
+        "ok": True,
+        "item": {
+            **summary,
+            "body": str(record.body or ""),
+            "copy_requirements": copy_snapshot,
+            "template_id": int(record.template_id) if record.template_id else None,
+            #: `[{url, local_path, sort_order, asset_type}]`（顺序即图序，第 1 张是封面）
+            "media": media,
+        },
+    }
+
+
+@router.post("/versions/regen")
+def regen_from_version(
+    payload: RegenFromVersionRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """**基于某版本局部重生成**（用户口径：*「只想重新生成正文或只重新配置生成图片」*）。
+
+    * `regen_scope=text`  ⇒ 只调文案模型，**媒体沿用当前版本**（不烧一次出图费用）；
+    * `regen_scope=media` ⇒ 只跑媒体链路，**文案沿用当前版本**（措辞一个字不变）。
+
+    两种都**覆盖当前这一版**（版本号不变、不新增行），只替换目标块。
+    """
+    scope = note_version_service.normalize_scope(payload.regen_scope)
+    if scope == "all":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "LLM_REGEN_SCOPE_INVALID",
+                "message": "整篇重新生成请用 /generate-llm（这里只做局部重生成）",
+            },
+        )
+    try:
+        target = note_version_service.validate_target_version(
+            db,
+            user=current_user,
+            target_id=payload.target_record_id,
+            scope=scope,
+        )
+    except note_version_service.VersionError as error:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": error.code, "message": error.message},
+        ) from error
+    assert target is not None  # scope != all ⇒ validate_target_version 保证非 None
+
+    shop_product_id = int(target.shop_product_id or 0)
+    if not shop_product_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "LLM_TARGET_INVALID",
+                "message": "这一版没有关联商品，无法重生成",
+            },
+        )
+    row = db.get(ShopProduct, shop_product_id)
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "LLM_ITEM_INVALID", "message": "这一版关联的商品已不在台账"},
+        )
+
+    #: 文案要求：给了就用新的，没给就**沿用当前版本的快照**（保持「只改图」时文案参数不变）。
+    if payload.copy_requirements:
+        copy_req = _checked_copy_requirements(payload.copy_requirements)
+    else:
+        try:
+            snapshot = json.loads(target.copy_requirements_json or "{}")
+        except ValueError:
+            snapshot = {}
+        copy_req = _checked_copy_requirements(snapshot if isinstance(snapshot, dict) else {})
+
+    #: **同步执行**（用户口径 2026-10-18：*「重新生成要同步接口等待」*）——
+    #: 原实现只建队列项就返回「已提交（后台执行）」，用户还得去版本列表里翻；
+    #: 现在本请求线程跑完才返回，前端拿到 `title/body/topics/media` 直接回填。
+    try:
+        result = regen_llm_note_sync(
+            db,
+            int(current_user.id),
+            shop_product_id=shop_product_id,
+            regen_scope=scope,
+            target_record_id=int(target.id),
+            template_id=payload.template_id or target.template_id,
+            media_source=str(target.media_source or MEDIA_SOURCE_PRODUCT_IMAGE),
+            media_plan=payload.media_plan or None,
+            copy_requirements=copy_req,
+        )
+    except NoteGenerationError as error:
+        raise _llm_generation_error(error)
+    return {
+        "ok": True,
+        "regen_scope": scope,
+        "target_record_id": int(target.id),
+        **result,
+    }
+
+
+@router.patch("/versions/{record_id}")
+def update_note_version(
+    record_id: int,
+    payload: "UpdateNoteVersionRequest",
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """**就地编辑某一版的文案**（用户口径 2026-10-19：*「文案也使用回显的方式」*）。
+
+    与「重新生成」的区别：**不调模型、不花钱、不动版本号** —— 用户自己改字，
+    改完就存。典型场景：模型写得不错但有个词想换掉、话题想删一个。
+
+    只接受三个可编辑字段（`title` / `body` / `topics`）：
+    媒体与生成参数不走这里（媒体有「重新生成 / 编辑回显」，参数在设置里）。
+    每个字段**只在传入时才更新**（`None` = 不动），避免前端漏传把内容清空。
+    """
+    try:
+        record = note_version_service.find_record(
+            db, user_id=int(current_user.id), record_id=int(record_id)
+        )
+    except note_version_service.VersionError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": error.code, "message": error.message},
+        ) from error
+
+    if payload.title is not None:
+        title = str(payload.title).strip()
+        if not title:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "LLM_TITLE_EMPTY", "message": "标题不能为空"},
+            )
+        if len(title) > copy_requirements.TITLE_MAX:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "LLM_TITLE_TOO_LONG",
+                    "message": f"标题最多 {copy_requirements.TITLE_MAX} 字（实得 {len(title)}）",
+                },
+            )
+        record.title = title
+    if payload.body is not None:
+        body = str(payload.body).strip()
+        if not body:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "LLM_BODY_EMPTY", "message": "正文不能为空"},
+            )
+        if len(body) > copy_requirements.BODY_MAX:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "LLM_BODY_TOO_LONG",
+                    "message": f"正文最多 {copy_requirements.BODY_MAX} 字（实得 {len(body)}）",
+                },
+            )
+        record.body = body
+    if payload.topics is not None:
+        topics = [str(t).strip() for t in payload.topics if str(t).strip()]
+        record.topics_json = json.dumps(topics[:20], ensure_ascii=False)
+    if payload.media is not None:
+        #: **整份替换**这一版的媒体清单（用户改的是「这一版用哪几张图」这件事本身）。
+        #: ⚠️ 保留每条自带的 `source` / `role` / `slot_index` —— 回显靠它们把图归回
+        #: 正确的段（封面 / 内页 N），丢了就又变成「全挤进封面」。
+        cleaned: list[dict] = []
+        for entry in payload.media:
+            if not isinstance(entry, dict):
+                continue
+            url = str(entry.get("url") or "").strip()
+            local = str(entry.get("local_path") or "").strip()
+            if not url and not local:
+                continue
+            cleaned.append(
+                {
+                    "url": url,
+                    "local_path": local,
+                    "sort_order": int(entry.get("sort_order") or len(cleaned)),
+                    "asset_type": str(entry.get("asset_type") or "image"),
+                    "ok": entry.get("ok") is not False,
+                    "source": str(entry.get("source") or ""),
+                    "role": str(entry.get("role") or ""),
+                    "slot_index": entry.get("slot_index"),
+                }
+            )
+        record.media_json = json.dumps(cleaned, ensure_ascii=False)
+
+        #: ⚠️ **必须同步写回 `note_assets`**（用户口径 2026-10-19：*「封面还是生成记录未更新
+        #: 前一次的封面」*）—— 发布链路 `_select_media()` 读的是 **`note_assets`**，
+        #: 不是 `media_json`；只改后者 ⇒ 界面上封面已经换了、发出去的还是旧封面。
+        #: 找到这一版产出的那篇笔记（`raw_json.generation.record_id` 反查），
+        #: **整份重建**资产并重编 `sort_order`（0..N-1，第 1 条即封面）。
+        from backend.app.models.note import Note, NoteAsset
+
+        for note in db.scalars(
+            select(Note).where(
+                Note.user_id == int(current_user.id),
+                Note.note_type == "local_generated",
+            )
+        ).all():
+            raw = note.raw_json if isinstance(note.raw_json, dict) else {}
+            generation = (raw or {}).get("generation") or {}
+            if int(generation.get("record_id") or 0) != int(record.id):
+                continue
+            for asset in db.scalars(
+                select(NoteAsset).where(NoteAsset.note_id == int(note.id))
+            ).all():
+                db.delete(asset)
+            db.flush()
+            for position, entry in enumerate(cleaned):
+                db.add(
+                    NoteAsset(
+                        note_id=int(note.id),
+                        asset_type=str(entry.get("asset_type") or "image"),
+                        url=str(entry.get("url") or ""),
+                        local_path=str(entry.get("local_path") or ""),
+                        sort_order=position,
+                    )
+                )
+            break
+
+    db.commit()
+    db.refresh(record)
+    return {
+        "ok": True,
+        "record_id": int(record.id),
+        "version_no": int(record.version_no or 1),
+        "title": record.title or "",
+        "body": record.body or "",
+        "topics": json.loads(record.topics_json or "[]"),
+    }
+
+
+@router.post("/versions/{record_id}/adopt")
+def adopt_note_version(
+    record_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """把某版标为**当前采用版**（同商品其余版本取消）。
+
+    ⚠️ 只是**标记**，不改 `notes` 表里已有的那篇 —— 「采用」是「我认这版」的意图记录。
+    真正把它写成正式笔记是发布链路的事（另一步，避免这里误改已发布内容）。
+    """
+    try:
+        record = note_version_service.find_record(
+            db, user_id=int(current_user.id), record_id=int(record_id)
+        )
+    except note_version_service.VersionError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": error.code, "message": error.message},
+        ) from error
+    if str(record.status) != "success":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "LLM_VERSION_NOT_SUCCESS",
+                "message": "只有成功产出的版本才能标为采用版",
+            },
+        )
+    note_version_service.mark_adopted(db, record=record)
+    db.commit()
+    return {"ok": True, "adopted_record_id": int(record.id), "version_no": int(record.version_no or 1)}

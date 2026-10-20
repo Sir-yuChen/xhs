@@ -32,7 +32,7 @@ from backend.app.models.llm_gateway import LlmGatewayModel
 from backend.app.services import llm_gateway_client
 from backend.app.services.business_provider_keys import (
     BUSINESS_KEY_GENERATE_COVER,
-    BUSINESS_KEY_GENERATE_NOTE,
+    BUSINESS_KEY_LLM_NOTE_TEXT,
 )
 from backend.app.services.llm_gateway_client import (
     BusinessProviderNotConfiguredError,
@@ -137,7 +137,7 @@ def test_missing_mapping_raises_not_configured(db_factory):
         _seed_gateway(db, user)  # 有服务商，但没映射
 
         with pytest.raises(BusinessProviderNotConfiguredError) as excinfo:
-            llm_gateway_client.resolve_business_provider(db, user, BUSINESS_KEY_GENERATE_NOTE)
+            llm_gateway_client.resolve_business_provider(db, user, BUSINESS_KEY_LLM_NOTE_TEXT)
 
     err = excinfo.value
     assert err.code == "LLM_BUSINESS_PROVIDER_NOT_CONFIGURED"
@@ -200,10 +200,10 @@ def test_dangling_provider_key_raises_not_found(db_factory):
     with db_factory() as db:
         user = _seed_user(db)
         _seed_gateway(db, user, provider_key="BP-REAL", model_type="text")
-        _seed_mapping(db, user, BUSINESS_KEY_GENERATE_NOTE.key, "BP-GONE")
+        _seed_mapping(db, user, BUSINESS_KEY_LLM_NOTE_TEXT.key, "BP-GONE")
 
         with pytest.raises(ProviderNotFoundError) as excinfo:
-            llm_gateway_client.resolve_business_provider(db, user, BUSINESS_KEY_GENERATE_NOTE)
+            llm_gateway_client.resolve_business_provider(db, user, BUSINESS_KEY_LLM_NOTE_TEXT)
 
     assert excinfo.value.code == "LLM_PROVIDER_NOT_FOUND"
     assert "BP-GONE" in excinfo.value.message
@@ -224,10 +224,10 @@ def test_disabled_provider_raises_and_does_not_fall_back(db_factory):
         user = _seed_user(db)
         _seed_gateway(db, user, provider_key="BP-OTHER", model_type="text")
         _seed_gateway(db, user, provider_key="BP-OFF", model_type="text", enabled=False)
-        _seed_mapping(db, user, BUSINESS_KEY_GENERATE_NOTE.key, "BP-OFF")
+        _seed_mapping(db, user, BUSINESS_KEY_LLM_NOTE_TEXT.key, "BP-OFF")
 
         with pytest.raises(ProviderDisabledError) as excinfo:
-            llm_gateway_client.resolve_business_provider(db, user, BUSINESS_KEY_GENERATE_NOTE)
+            llm_gateway_client.resolve_business_provider(db, user, BUSINESS_KEY_LLM_NOTE_TEXT)
 
     assert excinfo.value.code == "LLM_PROVIDER_DISABLED"
 
@@ -251,7 +251,7 @@ def test_text_business_key_resolves_to_selected_model_not_default(db_factory):
         # 干扰行：模型层里已有 `deepseek-v4-flash`（若实现回落到「第一条模型行」本用例必红）
         _seed_gateway(db, user, provider_key="BP-TEXT", model_type="text",
                       default_model="deepseek-v4-flash")
-        _seed_mapping(db, user, BUSINESS_KEY_GENERATE_NOTE.key, "BP-TEXT",
+        _seed_mapping(db, user, BUSINESS_KEY_LLM_NOTE_TEXT.key, "BP-TEXT",
                       model_name="deepseek-v4-pro")
         # 映射选的模型也必须在模型层建行（v2.7：判类型读模型行）
         db.add(
@@ -262,7 +262,7 @@ def test_text_business_key_resolves_to_selected_model_not_default(db_factory):
         )
         db.commit()
 
-        ctx = llm_gateway_client.resolve_business_provider(db, user, BUSINESS_KEY_GENERATE_NOTE)
+        ctx = llm_gateway_client.resolve_business_provider(db, user, BUSINESS_KEY_LLM_NOTE_TEXT)
 
     assert ctx.base_url == "https://api.example.test/v1"
     assert ctx.model_name == "deepseek-v4-pro"
@@ -284,10 +284,10 @@ def test_mapping_without_model_raises_model_required(db_factory):
         user = _seed_user(db)
         _seed_gateway(db, user, provider_key="BP-TEXT", model_type="text",
                       default_model="deepseek-v4-flash")
-        _seed_mapping(db, user, BUSINESS_KEY_GENERATE_NOTE.key, "BP-TEXT", model_name="")
+        _seed_mapping(db, user, BUSINESS_KEY_LLM_NOTE_TEXT.key, "BP-TEXT", model_name="")
 
         with pytest.raises(BusinessModelRequiredError) as excinfo:
-            llm_gateway_client.resolve_business_provider(db, user, BUSINESS_KEY_GENERATE_NOTE)
+            llm_gateway_client.resolve_business_provider(db, user, BUSINESS_KEY_LLM_NOTE_TEXT)
 
     err = excinfo.value
     assert err.code == "LLM_BUSINESS_MODEL_REQUIRED"
@@ -303,10 +303,10 @@ def test_whitespace_model_is_treated_as_missing(db_factory):
     with db_factory() as db:
         user = _seed_user(db)
         _seed_gateway(db, user, provider_key="BP-TEXT", model_type="text")
-        _seed_mapping(db, user, BUSINESS_KEY_GENERATE_NOTE.key, "BP-TEXT", model_name="   ")
+        _seed_mapping(db, user, BUSINESS_KEY_LLM_NOTE_TEXT.key, "BP-TEXT", model_name="   ")
 
         with pytest.raises(BusinessModelRequiredError):
-            llm_gateway_client.resolve_business_provider(db, user, BUSINESS_KEY_GENERATE_NOTE)
+            llm_gateway_client.resolve_business_provider(db, user, BUSINESS_KEY_LLM_NOTE_TEXT)
 
 
 def test_mapping_is_user_scoped(db_factory):
@@ -315,11 +315,11 @@ def test_mapping_is_user_scoped(db_factory):
         owner = _seed_user(db, "bp_owner")
         intruder = _seed_user(db, "bp_intruder")
         _seed_gateway(db, owner, provider_key="BP-OWNER", model_type="text")
-        _seed_mapping(db, owner, BUSINESS_KEY_GENERATE_NOTE.key, "BP-OWNER")
+        _seed_mapping(db, owner, BUSINESS_KEY_LLM_NOTE_TEXT.key, "BP-OWNER")
 
         # intruder 名下既无服务商也无映射
         with pytest.raises(LLMGatewayError) as excinfo:
-            llm_gateway_client.resolve_business_provider(db, intruder, BUSINESS_KEY_GENERATE_NOTE)
+            llm_gateway_client.resolve_business_provider(db, intruder, BUSINESS_KEY_LLM_NOTE_TEXT)
 
     assert excinfo.value.code == "LLM_BUSINESS_PROVIDER_NOT_CONFIGURED"
 
@@ -355,9 +355,9 @@ def test_multimodal_model_satisfies_text_business_key(db_factory):
     with db_factory() as db:
         user = _seed_user(db)
         _seed_gateway(db, user, provider_key="BP-MM", model_type="multimodal")
-        _seed_mapping(db, user, BUSINESS_KEY_GENERATE_NOTE.key, "BP-MM")
+        _seed_mapping(db, user, BUSINESS_KEY_LLM_NOTE_TEXT.key, "BP-MM")
 
-        ctx = llm_gateway_client.resolve_business_provider(db, user, BUSINESS_KEY_GENERATE_NOTE)
+        ctx = llm_gateway_client.resolve_business_provider(db, user, BUSINESS_KEY_LLM_NOTE_TEXT)
 
     assert ctx.model_name == "deepseek-v4-flash"
     assert ctx.provider_key == "BP-MM"
@@ -405,8 +405,8 @@ def test_video_model_does_not_satisfy_text_business_key(db_factory):
     with db_factory() as db:
         user = _seed_user(db)
         _seed_gateway(db, user, provider_key="BP-VID", model_type="video")
-        _seed_mapping(db, user, BUSINESS_KEY_GENERATE_NOTE.key, "BP-VID")
+        _seed_mapping(db, user, BUSINESS_KEY_LLM_NOTE_TEXT.key, "BP-VID")
 
         with pytest.raises(BusinessProviderTypeMismatchError):
-            llm_gateway_client.resolve_business_provider(db, user, BUSINESS_KEY_GENERATE_NOTE)
+            llm_gateway_client.resolve_business_provider(db, user, BUSINESS_KEY_LLM_NOTE_TEXT)
 

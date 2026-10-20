@@ -1,5 +1,5 @@
 import { ReloadOutlined } from "@ant-design/icons";
-import { App, Button, Card, Cascader, Space, Spin, Table, Tag, Typography } from "antd";
+import { App, Button, Card, Cascader, Space, Spin, Table, Tag, Tooltip, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -74,6 +74,15 @@ export function ModelConfigPage() {
   const { message } = App.useApp();
   const [rows, setRows] = useState<BusinessProviderRow[]>([]);
   const [keys, setKeys] = useState<BusinessKeyOption[]>([]);
+  //: **类型中文名**（`text`→文本 / `image`→图片 / `video`→视频 / `multimodal`→多态）。
+  //: ⚠️ 真相源是后端 `MODEL_TYPE_LABELS`，随 `business-provider-keys` 下发。
+  //: 原页面自己写 `kind === "image" ? "图像" : "文本"` ⇒ **视频类业务点被说成「文本」**
+  //: （`generate_video` 的空态文案在骗人）；扩枚举后还会静默漏掉多态。
+  const [typeLabels, setTypeLabels] = useState<Record<string, string>>({});
+  //: 入口 → 需求类型（后端 `entry_kinds`；父行「共需 N 类」读它，不许前端自己数）
+  const [entryKindsList, setEntryKindsList] = useState<
+    { entry: string; kinds: string[] }[]
+  >([]);
   const [providers, setProviders] = useState<LlmGatewayConfig[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [savingKey, setSavingKey] = useState<string | null>(null);
@@ -101,6 +110,10 @@ export function ModelConfigPage() {
       setRows(mapping.items);
       setKeys(keyList.items);
       setProviders(providerList.items);
+      setTypeLabels(
+        Object.fromEntries(keyList.model_types.map((entry) => [entry.value, entry.label]))
+      );
+      setEntryKindsList(mapping.entry_kinds ?? []);
     } catch {
       // 失败由全局拦截器报（401/400 都带结构化原因）
     } finally {
@@ -160,6 +173,9 @@ export function ModelConfigPage() {
         await upsertBusinessProvider({
           platform: row.platform,
           business_key: row.business_key,
+          //: **按类型保存**（用户口径 2026-10-18）：一个业务点可有多行，
+          //: 不带 kind 会全部写到业务点自身那一行（图像/视频的配置互相覆盖）。
+          kind: row.kind,
           provider_key: providerKey,
           model_name: modelName,
         });
@@ -185,53 +201,89 @@ export function ModelConfigPage() {
     [load, message],
   );
 
-  const rowsWithKey = useMemo(
-    () => rows.map((r) => ({ ...r, _key: `${r.platform}:${r.business_key}` })),
-    [rows],
-  );
+  //: **父子表，父对象 = 前端入口**（用户口径 2026-10-18：
+  //: *「模型配置以前端入口为父对象，比如当前的 LLM 生成笔记功能应配置三种类型的模型，
+  //:   触发源移除」+「所有业务功能不在共用配置，改为各个功能单独配置」*）。
+  //:
+  //: 例：父行「LLM 生成笔记」⇒ 子行「文本 / 图片 / 视频」三行，**各是独立 key**，
+  //: 改一个不影响另一个（也不再跨入口共用）。
+  //:
+  //: ⚠️ `rowKey` 用 business_key（它已成唯一）—— 同入口多行时 key 不会重复。
+  type TableRow = BusinessProviderRow & { _key: string; children?: TableRow[] };
+  const rowsWithKey = useMemo(() => {
+    const groups = new Map<string, BusinessProviderRow[]>();
+    for (const r of rows) {
+      //: 无入口的 key（仅 API 调用）各自单独成行 —— 不硬塞进某个入口
+      const gk = r.entry ? `entry:${r.entry}` : `key:${r.business_key}`;
+      const list = groups.get(gk);
+      if (list) list.push(r);
+      else groups.set(gk, [r]);
+    }
+    const out: TableRow[] = [];
+    for (const [gk, list] of groups) {
+      const kids = list.map((r) => ({ ...r, _key: `key:${r.business_key}` }));
+      //: **无入口的 key（仅 API 调用）不套父行**（用户口径 2026-10-18：
+      //: *「父行不能为空」*）—— 它本来就没有入口名，套一层只会得到一行空白标题
+      //: （截图实证：「需配 0 类模型」+ 空名字 + 可展开）。
+      if (!gk.startsWith("entry:")) {
+        out.push(kids[0]);
+        continue;
+      }
+      //: ⚠️ **只要属于某个入口就一定有子行**（哪怕只有 1 个）：
+      //: 早先写成 `kids.length > 1 ? kids : undefined` ⇒ 单模型入口（「自动运营」
+      //: 「商品详情 · 生成详情图」）被降级成**顶级行**，视觉上与父行平级，
+      //: 用户以为它们是独立功能而不是某个入口的一项（截图实证）。
+      out.push({
+        ...list[0],
+        _key: gk,
+        children: kids,
+      });
+    }
+    return out;
+  }, [rows]);
 
-  const columns: ColumnsType<BusinessProviderRow & { _key: string }> = [
+  const columns: ColumnsType<TableRow> = [
     {
-      title: "业务点",
-      dataIndex: "business_key",
-      width: 220,
-      render: (_v, record) => {
-        // 中文名由后端随行下发（常量 `BusinessKey.label`），页面不再拿 `keys` 反查。
-        return (
-          <Space direction="vertical" size={0}>
-            <Text>{record.label || record.business_key}</Text>
-            {/* 业务点 key 只读展示：它是代码里的调用契约，用户改不了 */}
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              {record.business_key}
-            </Text>
-          </Space>
-        );
-      },
-    },
-    {
-      title: "触发源",
-      dataIndex: "triggers",
+      //: **父对象 = 前端入口**（用户口径 2026-10-18）。
+      //: 子行这里显示「哪个能力」（业务点中文名），父行显示入口名。
+      title: "入口 / 能力",
+      dataIndex: "entry",
       width: 240,
       render: (_v, record) => {
-        // **只读**：触发源是常量元数据（`BusinessKey.triggers`），由后端随行下发，
-        // 页面只渲染、不提供编辑入口 —— 它镜像的是代码里的调用点，用户改不了。
-        // 空数组 = 只由 API 直接调用、界面无入口：**如实说明**，不编一个入口出来
-        // （同「缺值不造假」纪律）。
-        const triggers = record.triggers ?? [];
-        if (triggers.length === 0) {
+        const isParent = Boolean(record.children?.length);
+        if (isParent) {
+          //: ⚠️ **数字只认子行数**（`record.children.length`），不读 `entryKinds`：
+          //: `entryKinds` 是**按类型去重**的集合（`workshop_draft_text` 与
+          //: `workshop_title_text` 同为 text ⇒ 只算 1），而子行是**按项**列的（各 1 行）。
+          //: 两处混用会出现「需配 2 类模型」而下面列了 4 行 —— 截图实证的矛盾。
+          const kids = record.children ?? [];
+          const kindsLabel = Array.from(new Set(kids.map((k) => k.kind)))
+            .map((k) => typeLabels[k] ?? k)
+            .join(" / ");
           return (
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              无界面入口（仅 API 调用）
-            </Text>
+            <Space direction="vertical" size={0}>
+              <Text strong>{record.entry}</Text>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                需配 {kids.length} 个模型
+                {kindsLabel ? `（${kindsLabel}）` : ""}
+              </Text>
+            </Space>
           );
         }
+        //: **子行 = 该入口下的一项模型需求**：显示角色名（后端 `role`，如「文本/图片/视频」），
+        //: 父行已说明是哪个入口，这里不重复入口名。
+        //: 无入口的 key（仅 API 调用）也走这里 —— 如实标「仅 API 调用」，不编入口。
+        const isChild = Boolean(record.entry);
         return (
-          <Space direction="vertical" size={2}>
-            {triggers.map((t) => (
-              <Tag key={t} style={{ margin: 0 }}>
-                {t}
-              </Tag>
-            ))}
+          <Space direction="vertical" size={0}>
+            {/*: **子行标题 = 用途**（用户口径 2026-10-18：*「子行应展示为用处，
+                比如生成标题、正文、话题」*）—— 说清这个模型拿来干什么；
+                它是什么类型由右侧「类型」列的 Tag 表达，不在这里重复。 */}
+            <Text>{record.usage || record.label || record.business_key}</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              {record.business_key}
+              {isChild ? "" : " · 仅 API 调用"}
+            </Text>
           </Space>
         );
       },
@@ -240,17 +292,50 @@ export function ModelConfigPage() {
       title: "类型",
       dataIndex: "kind",
       width: 90,
-      render: (value: string) => (
-        <Tag color={value === "image" ? "purple" : "blue"}>
-          {value === "image" ? "图像" : "文本"}
-        </Tag>
-      ),
+      //: 父行（业务点本身）没有「一个类型」可言 —— 类型属于子行。
+      //: 中文名读后端唯一映射 `MODEL_TYPE_LABELS`（原写 `image ? "图像" : "文本"`
+      //: ⇒ **video 被说成「文本」**，扩枚举后还会漏 multimodal）。
+      render: (value: string, record) => {
+        if (record.children?.length) return null;
+        const color =
+          value === "image" ? "purple" : value === "video" ? "orange" : "blue";
+        return <Tag color={color}>{typeLabels[value] ?? value}</Tag>;
+      },
     },
     {
       title: "当前服务商 / 模型",
       dataIndex: "provider_key",
       width: 420,
       render: (_v, record) => {
+        //: **父行 = 汇总**（用户口径「表格展示使用总分格式」）：
+        //: 不在这行选模型（那是子行的事），而是说清「这个业务点一共要配几类、配了几类」。
+        if (record.children?.length) {
+          const kids = record.children;
+          const done = kids.filter((k) => k.configured).length;
+          const missing = kids.length - done;
+          return (
+            <Space size={6} wrap>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                共需 {kids.length} 个模型
+              </Text>
+              {done > 0 && (
+                <Tag color="green" style={{ marginInlineEnd: 0 }}>
+                  已配 {done}
+                </Tag>
+              )}
+              {missing > 0 && (
+                <Tag color="red" style={{ marginInlineEnd: 0 }}>
+                  缺 {missing}
+                </Tag>
+              )}
+              {missing > 0 && (
+                <Text type="secondary" style={{ fontSize: 11 }}>
+                  展开下方各行分别配置
+                </Text>
+              )}
+            </Space>
+          );
+        }
         const options = candidatesFor(record.kind);
         const empty = options.length === 0;
         const saving = savingKey === record.business_key;
@@ -297,13 +382,10 @@ export function ModelConfigPage() {
             <Cascader
               style={{ width: 380 }}
               value={cascaderValue.length ? cascaderValue : undefined}
-              placeholder={
-                empty
-                  ? "暂无可用的该类型服务商"
-                  : lockedByAllEmpty
-                    ? "该类型服务商都还没有可用模型"
-                    : "选择服务商 — 模型（选中即保存）"
-              }
+              //: 用户口径 2026-10-18：*「移除，没有对应模型下拉框展示为空即可」* ——
+              //: 不再解释「为什么没有模型」（那是诊断信息，不是用户要看的）；
+              //: 下拉为空 = 如实为空，placeholder 只说「请选择」。
+              placeholder="请选择服务商 — 模型（选中即保存）"
               disabled={empty || lockedByAllEmpty || saving}
               options={cascaderOptions}
               // 允许只选到一级（服务商）：此刻只落本地暂存，不落库（中间态见 commitDecision）
@@ -329,25 +411,6 @@ export function ModelConfigPage() {
                 setPendingProvider((prev) => ({ ...prev, [record.business_key]: nextProvider }));
               }}
             />
-            {empty && (
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                还没有{record.kind === "image" ? "图像" : "文本"}类型的服务商，请先到
-                「服务商配置」新增。
-              </Text>
-            )}
-            {allCatalogEmpty && (
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                该类型的 {options.length} 个服务商都还没有可用模型；模型是必选项，
-                请先到「服务商配置」对目标服务商执行「测试」以拉取模型目录。
-              </Text>
-            )}
-            {noModelCatalog && (
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                该服务商在该业务点下没有可用模型。请到「服务商配置」为它补
-                {record.kind === "image" ? "图像" : "文本"}类模型；或先把本行服务商
-                <b>清空</b>，再改选其它服务商。
-              </Text>
-            )}
             {boundDisabled && (
               <Text type="secondary" style={{ fontSize: 12 }}>
                 本行绑定的服务商<b>已停用</b>。请到「服务商配置」启用它，或先把本行服务商
@@ -370,6 +433,15 @@ export function ModelConfigPage() {
       dataIndex: "configured",
       width: 150,
       render: (_v, record) => {
+        //: **父行 = 整体状态**（总分格式）：全齐 / 缺几类。
+        if (record.children?.length) {
+          const kids = record.children;
+          const bad = kids.filter(
+            (k) => !k.provider_key || !k.model_name || k.type_satisfied === false
+          ).length;
+          if (bad === 0) return <Tag color="green">已配置完整</Tag>;
+          return <Tag color="orange">缺 {bad} 类</Tag>;
+        }
         // v2.3：服务商与模型**都**选了才算配好；只选服务商 ⇒ 未配置
         if (!record.provider_key) return <Tag>未配置</Tag>;
         if (record.provider_enabled === false) return <Tag color="orange">服务商已停用</Tag>;

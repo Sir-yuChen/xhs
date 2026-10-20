@@ -47,7 +47,7 @@ class _ModelConfigStub:
             setattr(self, k, v)
 
 
-from backend.app.services.business_provider_keys import BUSINESS_KEY_GENERATE_NOTE
+from backend.app.services.business_provider_keys import BUSINESS_KEY_LLM_NOTE_TEXT
 from backend.app.services.product_note_service import (
     ABSOLUTE_TERMS,
     BANNED_TERMS,
@@ -228,7 +228,7 @@ def _setup(tmp_path):
         upsert_business_mapping(
             db,
             user_id=user_id,
-            business_key=BUSINESS_KEY_GENERATE_NOTE.key,
+            business_key=BUSINESS_KEY_LLM_NOTE_TEXT.key,
             provider_key="FAKE-KEY1",
             # v2.3：业务入口必须显式带 model_name，且须在服务商目录内。
             model_name="fake-model",

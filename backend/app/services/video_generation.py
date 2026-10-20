@@ -137,8 +137,14 @@ class OpenAICompatibleVideoClient:
             "prompt": prompt,
         }
         # 图生视频：带参考图（上游字段名以 `image` 为准，与图片接口一致）。
+        #: ⚠️ **必须过 `_resolve_image_ref`**（2026-10-16 用户：*「参考图支持选本地或商品原图」*）
+        #: —— 用户选的素材图引用是**带鉴权的本地端点**（`/api/xhs/materials/files/{id}/file`），
+        #: 上游拉不到；该静态方法会**读盘转 base64 data URL** 就地内联。
+        #: ⚠️ 与图片链路**同一实现**（不重抄一份 —— 两处漂移时只有一处会修好，DEF-044）。
         if reference_image:
-            body["image"] = reference_image
+            from backend.app.services.ai_service import OpenAICompatibleImageClient
+
+            body["image"] = OpenAICompatibleImageClient._resolve_image_ref(reference_image)
         if duration:
             body["duration"] = int(duration)
         if size:

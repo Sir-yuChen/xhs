@@ -65,7 +65,7 @@ from backend.app.api.ai import get_image_ai_client, get_text_ai_client  # noqa: 
 from backend.app.services.ai_service import ImageAiClient, OpenAICompatibleTextClient  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
 from backend.app.services.business_provider_keys import (
-    BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE,
+    BUSINESS_KEY_PRODUCT_DETAIL_IMAGE,
     BusinessKey,
 )  # noqa: F401  # 转发面：本文件不直接用，子模块用
 

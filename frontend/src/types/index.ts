@@ -1320,6 +1320,8 @@ export type BusinessKeyOption = {
    * `商品列表-商品详情-生成商品详情图`）。空数组 = 只由 API 直接调用、界面无入口。
    */
   triggers: string[];
+  /** **所属前端入口**（空串 = 仅 API 调用）。 */
+  entry: string;
 };
 
 /** 业务点 → 服务商 映射行（`GET /llm/business-providers`） */
@@ -1367,10 +1369,18 @@ export type BusinessProviderRow = {
   /** v2.3：**服务商与模型都选了**才算配置好（只选服务商 ⇒ false） */
   configured: boolean;
   enabled: boolean;
+  /** **所属前端入口**（父行分组依据；空串 = 仅 API 调用、单独一行）。 */
+  entry: string;
+  /** 本行在该入口里扮演的角色（类型名，如「文本 / 图片 / 视频」）。 */
+  role: string;
+  /** 本行**用途**（子行标题，如「生成标题、正文、话题」）—— 用户看的重点是它在干什么。 */
+  usage: string;
 };
 
 export type BusinessProviderListResponse = {
   items: BusinessProviderRow[];
+  /** 入口 → 该入口需要的类型（父行「共需 N 类」的唯一真相源，前端不许自己数）。 */
+  entry_kinds: { entry: string; kinds: BusinessProviderKind[] }[];
   platforms: { value: string; label: string }[];
 };
 
@@ -1382,6 +1392,12 @@ export type BusinessKeysResponse = {
 export type BusinessProviderUpsertPayload = {
   platform: string;
   business_key: string;
+  /**
+   * 本行配的**能力类型**（用户口径 2026-10-18：一个业务点可按类型配多个模型，
+   * 每类型只能一个、同类型不许重复添加、可切换）。
+   * 缺省 = 业务点自身 kind（老调用方不带此字段，行为不变）。
+   */
+  kind?: string;
   /** 空串 = 清空映射（回到「未配置」） */
   provider_key: string;
   /**
@@ -2229,11 +2245,76 @@ export type PromptTemplate = {
 };
 
 /** 媒体来源（设计 17 §13.4.1 / §13.4.4 v2.14：图片四选一 + 视频两选一）。 */
+/**
+ * **文案要求**（用户口径 2026-10-17）：
+ * 标题 / 正文 / 话题**各自**的提示词（可空）、字数区间、表情开关、话题数量区间。
+ *
+ * ⚠️ 所有区间都是**闭区间**；上限在后端会被夹到平台硬顶
+ * （标题 20 / 正文 1000），前端这里只是「输入上限」，不是最终生效值。
+ */
+/**
+ * 一版生成记录（用户口径 2026-10-17：*「页面记录在 LLM 生成笔记中实现
+ * 只展示该商品对应生成的笔记」*）。
+ *
+ * ⚠️ **不含正文全文**（`body_excerpt` 只有前 60 字）：一个商品几十版 × 每版几百字，
+ * 全量下发给列表会让接口变成几百 KB。详情单独取（`fetchNoteVersion`）。
+ */
+export type NoteVersionItem = {
+  /** **笔记形态**（`image` 图文 / `video` 视频）—— 后端 `generation_records.note_form`。
+   *  用户口径 2026-10-19：生成记录要有明确类型字段，不靠媒体推断。 */
+  note_form?: "image" | "video";
+  id: number;
+  /** 同商品内的第几版（1,2,3…）。 */
+  version_no: number;
+  /** 基线版本（全量生成 ⇒ null；局部重生成 ⇒ 指向那一版）。 */
+  parent_record_id: number | null;
+  /** 这一版重做了什么：`all` 整篇 / `text` 只文案 / `media` 只图片。 */
+  regen_scope: "all" | "text" | "media";
+  /** 是否当前采用版（同商品最多一条）。 */
+  is_adopted: boolean;
+  /** `queued` / `running` / `success` / `failed`。 */
+  status: string;
+  title: string;
+  body_excerpt: string;
+  body_length: number;
+  topics: string[];
+  media_source: string;
+  model_name: string;
+  error_code: string | null;
+  error_message: string | null;
+  created_at: string | null;
+  /** 封面（第一条媒体的 url；空串 = 这一版没有媒体）。 */
+  cover_url: string;
+  /** 这一版的**图片张数**（不含视频）。 */
+  image_count: number;
+  /** 这一版的**视频个数**。 */
+  video_count: number;
+};
+
+export type LlmCopyRequirements = {
+  /** 标题提示词（空 = 不额外要求）。 */
+  title_prompt?: string;
+  body_prompt?: string;
+  topic_prompt?: string;
+  /** 标题字数区间（平台硬顶 20）。 */
+  title_min?: number;
+  title_max?: number;
+  /** 正文字数区间（平台硬顶 1000）。 */
+  body_min?: number;
+  body_max?: number;
+  /** 话题数量区间。 */
+  topic_min?: number;
+  topic_max?: number;
+  /** 表情：`auto` 按调性自行决定 / `on` 必须带 / `off` 不得出现。 */
+  emoji?: "auto" | "on" | "off";
+};
+
 export type LlmMediaSource =
   | "product_image"
   | "material"
   | "reference_image"
   | "ai_generate"
+  | "video_material"
   | "video_ai_generate"
   | "video_reference";
 
@@ -2243,15 +2324,60 @@ export type LlmMediaOptions = {
   material_file_ids?: number[];
   /** `reference_image` / `ai_generate` / 视频来源：参考图 URL（为空则后端按台账首图取）。 */
   reference_image_urls?: string[];
+  /**
+   * `ai_generate` 来源：**选中的参考图 URL**（用户口径 2026-10-16，最多 4 张，
+   * 主图与详情图都可选）。
+   *
+   * ⚠️ 这里存 **URL 而不是下标**：候选来自**两组**（主图 / 详情图），单一「下标」
+   * 表达不了「第几组的第几张」（第一版用 `reference_index` 正是这个错 —— 详情图一进来
+   * 下标就歧义了）。后端本来就按 `reference_image_urls` 收（不按组收）。
+   */
+  reference_urls?: string[];
   /** `ai_generate` / 视频来源：提示词（空则后端按商品拼默认）。 */
   prompt?: string;
   /** `ai_generate` 来源：生成张数（默认 1，上限 4）。 */
   count?: number;
+  /**
+   * `product_image` 来源：**勾选的商品图名称**（用户口径 2026-10-18：「必须是图片名称」）。
+   * 名称 = URL 末段（如 `1040g3no…upuas2o`），前后端同一判据。
+   *
+   * ## 为什么不用下标
+   *
+   * 下标依赖「前后端列表逐位一致」—— 而两边的列表来源不同：
+   * 前端拿的是**列表行载荷**（`item.images`），后端用的是
+   * `_main_image_urls + _detail_image_urls` 再去重。真机实测两边张数不同
+   * ⇒ **用户选第 3 张、实际出第 5 张**（静默错位，最难查的那种）。
+   *
+   * 名称是图片本身的身份，不依赖任何一侧的排序，也不受 CDN 域名/签名变化影响。
+   * 不传 = 后端取前 6 张（老行为）。封面只允许 1 个名称（UI 层限制）。
+   */
+  pick?: string[];
+  /** `material` 来源：勾选的素材文件 id（v2.27 起随组合段一起下发）。 */
+  file_ids?: number[];
+  /** 视频来源：提示词模板 id（模板 > 手输 > 兜底，后端定优先级）。 */
+  template_id?: number;
   /** 视频来源：时长秒数（默认 5，上限 10）。 */
   duration?: number;
   /** 视频来源：分辨率（默认 `720x1280` 竖版）。 */
   size?: string;
 };
+
+/** 媒体段角色（v2.26，设计 41 §11.2）：封面唯一且排第 1，其余都是内页。 */
+export type LlmMediaRole = "cover" | "content";
+
+/**
+ * **媒体组合计划段**（v2.26，设计 41 §11.2）。
+ *
+ * 有序 —— **列表顺序就是笔记里的图序**（封面必须在第 1 段）。
+ * 段参数（`count` / `folder_id` / `file_ids` / `template_id` / `prompt` …）
+ * 与 `LlmMediaOptions` 同语义，由后端按来源解读（前端不判参数合法性，除必填项）。
+ */
+export type LlmMediaPlanSegment = {
+  source: LlmMediaSource;
+  role: LlmMediaRole;
+  /** 本段要几张（缺省 1）。内页叠加时按段累加，总上限由后端判。 */
+  count?: number;
+} & LlmMediaOptions;
 
 /** LLM 生成队列快照（键名 `generated` —— 底座通用形状是 `synced`，此处显式改名）。 */
 export type LlmGenerateQueueSnapshot = {

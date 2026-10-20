@@ -1562,6 +1562,9 @@ class BusinessProviderUpsertRequest(BaseModel):
 
     platform: str = Field(min_length=1, max_length=32)
     business_key: str = Field(min_length=1, max_length=48)
+    #: **这一行服务的能力类型**（用户口径 2026-10-18：一个业务点可按类型配多个模型）。
+    #: 缺省 = 该业务点自身的 `kind`（兼容老调用方 —— 老客户端不带此字段，行为不变）。
+    kind: str = Field(default="", max_length=16)
     provider_key: str = Field(default="", max_length=64)
     #: v2.3：具体模型名；`provider_key` 非空时必填（见端点校验）。
     model_name: str = Field(default="", max_length=128)
@@ -1589,7 +1592,8 @@ def list_business_providers(
     rows = db.scalars(
         select(LlmBusinessProvider).where(LlmBusinessProvider.user_id == current_user.id)
     ).all()
-    by_key = {(r.platform, r.business_key): r for r in rows}
+    #: **按 (平台, 业务点, 类型)** 索引（用户口径 2026-10-18：一个业务点可有多行）。
+    by_key = {(r.platform, r.business_key, (r.kind or "")): r for r in rows}
 
     # 服务商名映射（一次查完，别在循环里 N+1）
     configs = db.scalars(
@@ -1604,55 +1608,69 @@ def list_business_providers(
     #: v2.3：服务商 → 模型**目录**（上游候选池，字符串数组；供前端提示「还没配的候选」）
     models_of = {c.provider_key: _parse_models_json(c.models_json) for c in configs}
 
+    from backend.app.services.llm_gateway_client import _type_satisfies
+
     items = []
     for item in BUSINESS_KEYS:
-        key = (platform or PLATFORM_ENUM[0][0], item.key)
-        row = by_key.get(key)
-        pk = (row.provider_key if row else "") or ""
-        model_name = (row.model_name if row else "") or ""
-        #: v2.7：该映射所选模型在模型层的类型（诊断「类型不匹配」用；配置正确时应恒等于 kind）
-        model_type = ""
-        for m in provider_models.get(pk, []):
-            if m["model_name"] == model_name:
-                model_type = m["model_type"]
-                break
-        #: v2.17：**兼容性判据由后端唯一裁定并下发**（`_type_satisfies`）——
-        #: 多态模型（multimodal）可服务 text / image 两类业务点。
-        #: ⚠️ 前端**不许**自己写 `model_type == kind` 比较：那是本判据的第二份实现，
-        #: 必然与 `_type_satisfies` 漂移（2026-10-03 用户实测：多模态服务商在模型配置页
-        #: 被误报「类型不匹配」，而后端写入校验**允许**该配置 —— 两处判据不一致，
-        #: 正是 DEF-044「同一语义不留两份实现」的违约）。
-        from backend.app.services.llm_gateway_client import _type_satisfies
+        plat = platform or PLATFORM_ENUM[0][0]
+        #: **一行 = 一个 key**（用户口径 2026-10-18「各个功能单独配置」）：
+        #: 一个入口下的文本/图片/视频是**三个独立 key**，各存一行，互不影响。
+        #: 不再有「一个 key 展开成多行」那种写法（那是共用配置的来源）。
+        for row_kind in (item.kind,):
+            row = by_key.get((plat, item.key, row_kind))
+            pk = (row.provider_key if row else "") or ""
+            model_name = (row.model_name if row else "") or ""
+            #: 该映射所选模型在模型层的类型（诊断「类型不匹配」用）
+            model_type = ""
+            for m in provider_models.get(pk, []):
+                if m["model_name"] == model_name:
+                    model_type = m["model_type"]
+                    break
+            #: v2.17：**兼容性判据由后端唯一裁定并下发**（`_type_satisfies`）——
+            #: 多态模型（multimodal）可服务 text / image 两类。
+            #: ⚠️ 前端**不许**自己写 `model_type == kind` 比较（DEF-044）。
+            type_satisfied = (
+                bool(model_type) and _type_satisfies(kind=row_kind, model_type=model_type)
+            )
+            items.append({
+                "platform": plat,
+                "business_key": item.key,
+                #: **本行**的类型（不是业务点自身的 kind —— 一个业务点可有多行）
+                "kind": row_kind,
+                "label": item.label or item.key,
+                #: **所属前端入口**（用户口径 2026-10-18：「以前端入口为父对象」）。
+                #: 页面按它分组成父行；空串 = 仅 API 调用、单独一行。
+                "entry": item.entry,
+                "triggers": list(item.triggers),
+                #: **所属前端入口**（父行）+ 本行**用途**（子行标题）。
+                #: 用户口径 2026-10-18：*「子行应展示为用处，比如生成标题、正文、话题」*
+                #: —— 子行说的是「这个模型拿来干什么」，不是「它是什么类型」。
+                #: 类型另在「类型」列用 Tag 展示。
+                "entry": item.entry,
+                "role": item.role_label,
+                "usage": item.label or item.role_label,
+                "provider_key": pk,
+                "provider_name": name_of.get(pk) if pk else None,
+                "provider_enabled": enabled_of.get(pk) if pk else None,
+                "provider_model_type": model_type or None,
+                "type_satisfied": type_satisfied,
+                "model_name": model_name,
+                "provider_models": models_of.get(pk, []) if pk else [],
+                "provider_model_rows": provider_models.get(pk, []) if pk else [],
+                "configured": bool(pk and model_name),
+                "enabled": bool(row.enabled) if row else True,
+            })
+    from backend.app.services.business_provider_keys import entry_kinds
 
-        type_satisfied = (
-            bool(model_type) and _type_satisfies(kind=item.kind, model_type=model_type)
-        )
-        items.append({
-            "platform": key[0],
-            "business_key": item.key,
-            "kind": item.kind,
-            #: 业务点中文名与**触发源**（常量元数据一并下发，页面的「业务点 / 触发源」
-            #: 两列直接渲染本行字段，不必再拿 `keys` 反查一遍；两者都只读）。
-            "label": item.label or item.key,
-            "triggers": list(item.triggers),
-            "provider_key": pk,
-            "provider_name": name_of.get(pk) if pk else None,
-            "provider_enabled": enabled_of.get(pk) if pk else None,
-            #: v2.7：映射所选**模型**的当前类型（诊断用；恒等于 kind 才是配好的）
-            "provider_model_type": model_type or None,
-            #: v2.17：**兼容性判据**（后端唯一裁定）—— 前端「类型不匹配」只看这个布尔，
-            #: 不再自己比较 `provider_model_type === kind`（多态模型会被误报）。
-            "type_satisfied": type_satisfied,
-            #: v2.3：已选具体模型 + 该服务商的模型目录（前端模型下拉候选）
-            "model_name": model_name,
-            "provider_models": models_of.get(pk, []) if pk else [],
-            #: v2.7：该服务商的**模型行**（带 type/platform，供「模型下拉按 kind 过滤」）
-            "provider_model_rows": provider_models.get(pk, []) if pk else [],
-            #: 已配置 = 服务商与模型**都**选了（只选服务商不算配好，调用会失败）
-            "configured": bool(pk and model_name),
-            "enabled": bool(row.enabled) if row else True,
-        })
-    return {"items": items, "platforms": [{"value": v, "label": l} for v, l in PLATFORM_ENUM]}
+    return {
+        "items": items,
+        #: **入口 → 该入口需要的类型**（父行「共需 N 类」的唯一真相源）。
+        #: 前端不许自己数 —— 见 `entry_kinds()` 的说明。
+        "entry_kinds": [
+            {"entry": name, "kinds": list(kinds)} for name, kinds in entry_kinds().items()
+        ],
+        "platforms": [{"value": v, "label": l} for v, l in PLATFORM_ENUM],
+    }
 
 
 @business_router.put("/business-providers")
@@ -1690,6 +1708,24 @@ def upsert_business_provider(
 
     provider_key = (payload.provider_key or "").strip()
     model_name = (payload.model_name or "").strip()
+    #: **本行要配的能力类型**（用户口径 2026-10-18）：缺省取业务点自身的 kind，
+    #: 传了就必须是**该业务点需要的类型之一**（`BusinessKey.needs`）——
+    #: 否则会出现「给 `generate_image` 配个 video 模型」这种永远调不通的行。
+    #: **类型 = 业务点自己的 kind**（用户口径 2026-10-18「各个功能单独配置」）：
+    #: 每个入口的每类模型都是独立 key，一个 key 只有一种能力类型。
+    #: 传了不一致的 kind ⇒ 400（否则会出现「文本 key 配了图像模型」这种永远调不通的行）。
+    row_kind = (payload.kind or "").strip() or item.kind
+    if row_kind != item.kind:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "LLM_BUSINESS_KIND_NOT_ALLOWED",
+                "message": (
+                    f"业务点「{item.label or item.key}」({item.key}) 是 {item.kind} 类型，"
+                    f"不能配 {row_kind} 类型的模型"
+                ),
+            },
+        )
     #: 命中的模型行（**显式初始化**）：下面「配置时同步」要用它写 `platform`，
     #: 而清空映射那条路不会赋值 ⇒ 不初始化会在 `model_row is not None` 处 NameError。
     #: 不靠「provider_key 非空才走到」的隐式依赖 —— 那种正确性一改条件就断。
@@ -1761,13 +1797,13 @@ def upsert_business_provider(
         # 若这里用严格相等而调用层用放宽，会出现「配得进但调不通」（最难查的形态）。
         from backend.app.services.llm_gateway_client import _type_satisfies
 
-        if not _type_satisfies(kind=item.kind, model_type=model_row.model_type):
+        if not _type_satisfies(kind=row_kind, model_type=model_row.model_type):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={
                     "code": "LLM_BUSINESS_PROVIDER_TYPE_MISMATCH",
                     "message": (
-                        f"业务点「{item.key}」需要 {item.kind} 类型模型，"
+                        f"业务点「{item.key}」的这一行需要 {row_kind} 类型模型，"
                         f"而「{config.name}」下的「{model_name}」是 {model_row.model_type} 类型"
                     ),
                 },
@@ -1776,11 +1812,16 @@ def upsert_business_provider(
         # 清空映射 ⇒ 模型一并清空（无服务商则无模型可言）
         model_name = ""
 
+    #: **按 (业务点, 类型) 定位行**（用户口径 2026-10-18）：
+    #: 一个业务点可以有多行（每类型一行），同类型**只能一行** —— 唯一键正是
+    #: `(user_id, platform, business_key, kind)`，DB 层兜住「同类型不许重复添加」。
+    #: 同一类型的「切换」= 改这一行的 provider/model（不新建行）。
     row = db.scalar(
         select(LlmBusinessProvider).where(
             LlmBusinessProvider.user_id == current_user.id,
             LlmBusinessProvider.platform == payload.platform,
             LlmBusinessProvider.business_key == item.key,
+            LlmBusinessProvider.kind == row_kind,
         )
     )
     # ⚠️ v2.28（§13.2.9.7c）：**使用平台改为引用计数** —— 增减必须知道「改之前指向谁」，
@@ -1794,6 +1835,7 @@ def upsert_business_provider(
             user_id=current_user.id,
             platform=payload.platform,
             business_key=item.key,
+            kind=row_kind,
             provider_key=provider_key,
             model_name=model_name,
         )
@@ -1822,7 +1864,8 @@ def upsert_business_provider(
     return {
         "platform": row.platform,
         "business_key": row.business_key,
-        "kind": item.kind,
+        #: 返回**本行**的类型（不是业务点自身的 kind）—— 一个业务点可有多行
+        "kind": row_kind,
         "provider_key": row.provider_key,
         "model_name": row.model_name,
         "configured": bool(row.provider_key and row.model_name),
@@ -1859,7 +1902,12 @@ def list_business_provider_keys(
                 "key": item.key,
                 "kind": item.kind,
                 "label": item.label or item.key,
+                #: **所属前端入口**（用户口径 2026-10-18：「以前端入口为父对象」）。
+                #: 页面按它分组成父行；空串 = 仅 API 调用、单独一行。
+                "entry": item.entry,
                 "triggers": list(item.triggers),
+                #: 本行在该入口里的角色（子行标题；缺省 = kind 的中文名）
+                "role": item.role_label,
             }
             for item in BUSINESS_KEYS
         ],

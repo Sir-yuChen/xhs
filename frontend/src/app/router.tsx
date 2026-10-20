@@ -26,6 +26,7 @@ import { XhsDatacenterPage } from "../pages/platforms/xhs/datacenter-page";
 import { PictureSpacePage } from "../pages/platforms/xhs/picture-space-page";
 import { XhsNoteWorkshopPage } from "../pages/platforms/xhs/note-workshop-page";
 import { XhsShopItemsPage } from "../pages/platforms/xhs/shop-items-page";
+import { ViolationManagePage } from "../pages/platforms/xhs/violation-manage-page";
 import { XhsPublishPage } from "../pages/platforms/xhs/publish-page";
 import { XhsSectionPage } from "../pages/platforms/xhs/xhs-section-page";
 
@@ -93,6 +94,16 @@ export function AppRouter() {
           <Route path="/platforms/xhs/my-notes" element={<XhsMyNotesPage />} />
           <Route path="/platforms/xhs/datacenter" element={<XhsDatacenterPage />} />
           <Route path="/platforms/xhs/shop-items" element={<XhsShopItemsPage />} />
+          {/* 店铺违规管理（设计 43，2026-10-18）：千帆 `店铺体检 → 违规管理` 一比一复刻。
+              **只读、零落库**；`?tab=` 选子 Tab，`?view=checkup` 切店铺体检。 */}
+          <Route path="/platforms/xhs/violation-manage" element={<ViolationManagePage />} />
+          {/* 店铺体检（设计 43 §3.1 的第二个路由）：同一个页面组件，`?view=checkup` 是内部分支。
+              ⚠️ 必须注册在 `/violation-manage` **之后**、且用独立 path（不是嵌套 Route）——
+              页面组件自带布局与抽屉，嵌套会把整页塞进 Outlet 里渲染两遍。 */}
+          <Route
+            path="/platforms/xhs/violation-manage/checkup"
+            element={<ViolationManagePage />}
+          />
           {/* 商品草稿箱 = 商品页内的弹窗（设计 24 §9.4，2026-10-08 用户口径
               「草稿箱弹窗的形式在商品页内展示，账号使用商品页选定的账号」）。
               旧独立路由重定向到商品列表，深链不死。 */}

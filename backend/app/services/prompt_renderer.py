@@ -39,7 +39,24 @@ PRODUCT_FIELD_SLOTS = tuple(PRODUCT_FIELDS) + ("price_text",)
 #: 全部合法槽位（§5.1 白名单）。
 TEXT_SLOTS = ("title", "body", "topics")
 MEDIA_SLOTS = ("images", "video")
-ALLOWED_SLOTS = frozenset(PRODUCT_FIELD_SLOTS + TEXT_SLOTS + MEDIA_SLOTS)
+
+#: **文案约束槽位**（2026-10-17 用户口径：
+#: *「字数、表情以及话题设置均有默认值，公共模板中应无需固定添加固定提示词，
+#:   调用大模型时需最终拼接」*）。
+#:
+#: 模板里**只引用槽位名**，具体数值由 `copy_requirements` 在**调用时**填进来 ——
+#: 于是模板不写死「30–300 字」，改一次前端设置就全局生效，不会两处打架。
+#: 槽位解析不到时渲染成空串（**不报错**：老模板不需要它们）。
+CONSTRAINT_SLOTS = (
+    "title_length",       # 「8–20 字」
+    "body_length",        # 「100–1000 字」
+    "topic_count",        # 「3–6 个」
+    "emoji_rule",         # 「带适量表情」/「不要表情」/「按调性自行决定」
+    "copy_supplement",    # 用户填的三块提示词（空 ⇒ 空串）
+)
+ALLOWED_SLOTS = frozenset(
+    PRODUCT_FIELD_SLOTS + TEXT_SLOTS + MEDIA_SLOTS + CONSTRAINT_SLOTS
+)
 
 #: 匹配 `{slot}`；只认 ASCII 标识符，避免误吞正文里的中文花括号内容。
 _SLOT_PATTERN = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -108,7 +125,7 @@ def render_skeleton(
     for field in PRODUCT_FIELD_SLOTS:
         raw = (product or {}).get(field)
         values[field] = "" if raw is None else str(raw)
-    for slot in TEXT_SLOTS + MEDIA_SLOTS:
+    for slot in TEXT_SLOTS + MEDIA_SLOTS + CONSTRAINT_SLOTS:
         raw = (extra or {}).get(slot)
         if raw is None:
             raw = (product or {}).get(slot)
@@ -145,5 +162,6 @@ def render_prompt(
     body = render_skeleton(skeleton, product=product, extra=extra)
     if body.strip():
         segments.append(body)
+
 
     return "\n\n".join(segment for segment in segments if segment.strip())

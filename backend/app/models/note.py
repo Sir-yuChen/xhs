@@ -19,6 +19,22 @@ NOTE_TYPE_LOCAL = "local"
 #: 同步链路命中也只升 `synced`，不回退。
 NOTE_TYPE_LOCAL_GENERATED = "local_generated"
 
+#: 笔记**形态**（设计 41 §15，2026-10-16）—— 与小红书平台的**唯二两大类**一一对应：
+#: 「**图文笔记**」（1–18 张图）与「**视频笔记**」（1 个视频 + 独立封面）。
+#:
+#: ⚠️ **平台侧两者互斥**（官方 `xhs.postNote` 契约：`image_resources` /
+#: `video_resources` 只能二选一，多传触发校验失败），所以这是**单值枚举**，
+#: 不是可叠加的标签。发布时它就是 `common.type` 的取值来源
+#: （`image` → `"normal"` / `video` → `"video"`）。
+#:
+#: ⚠️ **与 `note_type` 正交，别混**（设计 33 §4 的纪律）：`note_type` 说的是
+#: 「这条数据从哪来」（同步 / 采集 / 本地生成），`note_form` 说的是
+#: 「这条笔记长什么样」（图文 / 视频）。改一个不许顺手改另一个。
+NOTE_FORM_IMAGE = "image"
+NOTE_FORM_VIDEO = "video"
+#: 全部合法取值（写入入口的校验依据）。
+NOTE_FORMS = (NOTE_FORM_IMAGE, NOTE_FORM_VIDEO)
+
 #: 笔记**分类**（「我的笔记」离线数据，2026-10-06 需求）：与小红书平台一致，
 #: 分「商业笔记」（挂载商品）与「普通笔记」两类。
 #: ⛔ **已退役（2026-10-12，设计 35）**：分类权威改 `note_datacenter_stats.note_flag`
@@ -203,6 +219,13 @@ class Note(Base):
     #: 存量行由迁移按 §19.12 的已文档化不变量回填：`published=1 ⟺ 同步链路落库`。
     note_type: Mapped[str] = mapped_column(
         String(16), default=NOTE_TYPE_LOCAL, nullable=False, server_default=NOTE_TYPE_LOCAL
+    )
+    #: **笔记形态**（设计 41 §15）—— `image`（图文，1–18 图）/ `video`（视频 + 封面）。
+    #: 与 `note_type` **正交**：本列说的是「长什么样」，`note_type` 说的是「从哪来」。
+    #: 发布时本列决定 `common.type`（`image` → `"normal"` / `video` → `"video"`）。
+    #: 存量行由迁移回填 `image`（历史只成功发布过图文，见迁移 docstring）。
+    note_form: Mapped[str] = mapped_column(
+        String(16), default=NOTE_FORM_IMAGE, nullable=False, server_default=NOTE_FORM_IMAGE, index=True
     )
     #: ⛔ **`note_category` 已退役并 DROP（2026-10-12，设计 35）**。
     #: 原「笔记分类」（商业/普通）判据收敛为 `note_datacenter_stats.note_flag`（平台原生），

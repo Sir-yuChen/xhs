@@ -34,12 +34,14 @@ ROUTER = ROOT / "frontend/src/app/router.tsx"
 #:   ⚠️ 这 6 项**不是新页面**，是同一宿主页的页签（`note-workshop?tab=…`）——
 #:   路由表一条未改，见 `test_no_menu_entry_or_route_was_lost`。
 #: → 25（设计 35：新增「数据中心」页面，从「我的笔记」拆出离线商业/普通 Tab）。
-EXPECTED_MENU_ENTRIES = 25
+#: → 26（设计 43：店铺线新增「违规管理」页面 `/platforms/xhs/violation-manage`）。
+EXPECTED_MENU_ENTRIES = 26
 
 #: 路由条目数。**只在「新增页面」时增长**；把页签提升为菜单叶子**不**增路由。
 #: 32（A3 前）→ 34（A6 两个新页面；旧 `/analytics` 保留为重定向，条目不减）。
 #: → 35（设计 35：新增 `/platforms/xhs/datacenter`）。
-EXPECTED_ROUTE_PATHS = 35
+#: → 37（设计 43：店铺违规管理 `violation-manage` + 其店铺体检视图 `violation-manage/checkup`）。
+EXPECTED_ROUTE_PATHS = 37
 
 #: 二级菜单（SubMenu）父级 → 该父级下必须包含的**叶子** key（设计 32 §5）。
 EXPECTED_GROUPS: dict[str, tuple[str, ...]] = {

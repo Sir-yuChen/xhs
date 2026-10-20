@@ -140,11 +140,33 @@ import type {
   PromptTemplate,
   LlmMediaSource,
   LlmMediaOptions,
+  LlmCopyRequirements,
+  LlmMediaPlanSegment,
+  NoteVersionItem,
   LlmGenerateQueueSnapshot,
   XhsItemNotesResponse,
   XhsAccountLoginState,
   XhsQrLoginSession,
 } from "../types";
+import type {
+  CheckupAdviceResponse,
+  ViolationDeleteResponse,
+  ViolationDeleteTarget,
+  CheckupRisksQuery,
+  ExemptionItemsQuery,
+  NegativeFeedbackQuery,
+  PagedSellerQuery,
+  SpotCheckQuery,
+  ViolationCountsResponse,
+  ViolationDetail,
+  ViolationDetailQuery,
+  ViolationEvidenceQuery,
+  ViolationListQuery,
+  ViolationListResponse,
+  ViolationMeta,
+  ViolationMetaQuery,
+  ViolationPagedResponse,
+} from "../types/violation";
 
 const http = axios.create({
   baseURL: "/api",
@@ -4673,62 +4695,80 @@ export async function fetchMaterialImageObjectUrl(url: string): Promise<string> 
 }
 
 /** 单条 LLM 生成（入队即返回，设计 17 §7.4）。 */
+/** **同步生成的返回结果**（用户口径 2026-10-18：生成不再入队，跑完直接给结果）。 */
+export type LlmGenerateResult = {
+  ok: boolean;
+  platform_account_id: number;
+  item_id: string;
+  /** 版本记录主键（局部重生成以它为基线）。 */
+  record_id: number;
+  /** 生成的本地笔记 ID。 */
+  note_id: string;
+  /** **这一版的形态**（`image` 图文 / `video` 视频）—— 回显据此放进对应页签。 */
+  note_form?: "image" | "video";
+  title: string;
+  body: string;
+  topics: string[];
+  /** **这一版实际用了哪些图/视频** —— 详情与「选择性保留/重生」的依据。
+   *  ⚠️ `ok === false` 是**失败段**（`url` 为空、`error` 给原因）：前端要画占位图，
+   *  不能当作「没有这张图」直接跳过（用户口径 2026-10-18）。 */
+  media: {
+    url: string;
+    local_path?: string;
+    sort_order?: number;
+    asset_type?: string;
+    ok?: boolean;
+    error?: string;
+    role?: string;
+    /** **这张图来自哪个来源**（`product_image` / `material` / `ai_generate` …）。 */
+    source?: string;
+  }[];
+  copy_requirements: Record<string, unknown>;
+  model_name: string;
+  version_no: number;
+  is_adopted: boolean;
+};
+
 export async function generateLlmNote(payload: {
   platformAccountId: number;
   itemId: string;
-  templateId: number;
+  templateId?: number;
   gatewayConfigId?: number;
   modelName?: string;
   mediaSource?: LlmMediaSource;
+  /** **媒体组合计划**（v2.26，设计 41 §11.2）：有序段列表，**给了它就以它为准**。 */
+  mediaPlan?: LlmMediaPlanSegment[];
   mediaOptions?: LlmMediaOptions;
-}): Promise<{ ok: boolean; status: string; item_id: string; already_queued?: boolean }> {
-  const response = await http.post<{
-    ok: boolean;
-    status: string;
-    item_id: string;
-    already_queued?: boolean;
-  }>(
+  /** **文案要求**（用户口径 2026-10-17）：标题 / 正文 / 话题各自的提示词
+   *  + 字数区间 + 表情开关 + 话题数量区间。后端在同步段规整（区间倒挂等当场 400）。 */
+  copyRequirements?: LlmCopyRequirements;
+}): Promise<LlmGenerateResult> {
+  const response = await http.post<LlmGenerateResult>(
     "/xhs/product-notes/generate-llm",
     {
       platform_account_id: payload.platformAccountId,
       item_id: payload.itemId,
-      template_id: payload.templateId,
+      ...(payload.templateId ? { template_id: payload.templateId } : {}),
       ...(payload.gatewayConfigId ? { gateway_config_id: payload.gatewayConfigId } : {}),
       ...(payload.modelName ? { model_name: payload.modelName } : {}),
       ...(payload.mediaSource ? { media_source: payload.mediaSource } : {}),
+      ...(payload.mediaPlan?.length ? { media_plan: payload.mediaPlan } : {}),
       ...(payload.mediaOptions ? { media_options: payload.mediaOptions } : {}),
+      ...(payload.copyRequirements ? { copy_requirements: payload.copyRequirements } : {}),
     },
     { _silent: true } as never
   );
   return response.data;
 }
 
-/** 批量 LLM 生成（入队即返回；单项失败不阻断）。 */
-export async function batchGenerateLlmNotes(payload: {
-  platformAccountId: number;
-  itemIds: readonly string[];
-  templateId: number;
-  gatewayConfigId?: number;
-  modelName?: string;
-  mediaSource?: LlmMediaSource;
-  mediaOptions?: LlmMediaOptions;
-  maxItems?: number;
-}): Promise<{ ok: boolean; queued: number; skipped?: number }> {
-  const response = await http.post<{ ok: boolean; queued: number; skipped?: number }>(
-    "/xhs/product-notes/batch-generate-llm",
-    {
-      platform_account_id: payload.platformAccountId,
-      item_ids: [...payload.itemIds],
-      template_id: payload.templateId,
-      ...(payload.gatewayConfigId ? { gateway_config_id: payload.gatewayConfigId } : {}),
-      ...(payload.modelName ? { model_name: payload.modelName } : {}),
-      ...(payload.mediaSource ? { media_source: payload.mediaSource } : {}),
-      ...(payload.mediaOptions ? { media_options: payload.mediaOptions } : {}),
-      ...(payload.maxItems ? { max_items: payload.maxItems } : {}),
-    },
-    { _silent: true } as never
-  );
-  return response.data;
+/**
+ * 批量 LLM 生成 —— **已退场**（2026-10-18 用户口径「暂时不支持批量生成」）。
+ *
+ * 保留函数只为让 `tsc` 不炸与说明原因；**没有任何调用方**（页面按钮已删）。
+ * 真调会拿到 410 `LLM_BATCH_GENERATE_GONE`。
+ */
+export async function batchGenerateLlmNotes(): Promise<never> {
+  throw new Error("批量生成已停用，请逐个商品生成（生成后可对结果局部重复生成）。");
 }
 
 /** LLM 生成队列快照（5s 轮询；键名 `generated`）。 */
@@ -5147,5 +5187,395 @@ export async function exportOrders(
     date_to: params.dateTo ?? null,
     limit,
   });
+  return response.data;
+}
+
+/**
+ * 某商品的**生成版本历史**（用户口径 2026-10-17：*「页面记录在 LLM 生成笔记中实现
+ * 只展示该商品对应生成的笔记」*）。
+ *
+ * ⚠️ **必须按商品过滤**（`shop_product_id`）：版本表是全局的，
+ * 不过滤就会把别的商品的生成记录也列出来（用户看到的「记录」对不上他正在做的商品）。
+ */
+export async function fetchNoteVersions(
+  shopProductId: number,
+  limit = 50
+): Promise<{ ok: boolean; total: number; items: NoteVersionItem[] }> {
+  const response = await http.get<{ ok: boolean; total: number; items: NoteVersionItem[] }>(
+    "/xhs/product-notes/versions",
+    { params: { shop_product_id: shopProductId, limit } }
+  );
+  return response.data;
+}
+
+/**
+ * 同上，但按**平台标识**查（弹窗手里只有平台 `item_id`，没有本地台账主键）。
+ *
+ * ⚠️ 别让前端先查一次台账再拿主键 —— 那是多余的一次往返，
+ * 且两处判据（`item_id` 只在账号内唯一）容易漂移。后端按同一判据解析。
+ */
+export async function fetchNoteVersionsByItem(
+  platformAccountId: number,
+  itemId: string,
+  limit = 50
+): Promise<{ ok: boolean; total: number; shop_product_id: number; items: NoteVersionItem[] }> {
+  const response = await http.get<{
+    ok: boolean;
+    total: number;
+    shop_product_id: number;
+    items: NoteVersionItem[];
+  }>("/xhs/product-notes/versions", {
+    params: { platform_account_id: platformAccountId, item_id: itemId, limit },
+  });
+  return response.data;
+}
+
+/** 单版详情（含正文全文 + 当时的文案要求快照）。 */
+export async function fetchNoteVersion(recordId: number): Promise<{
+  ok: boolean;
+  item: NoteVersionItem & {
+    body: string;
+    copy_requirements: Record<string, unknown>;
+    template_id: number | null;
+    /** **这一版实际用了哪些图/视频**（顺序即图序，第 1 张是封面）。
+     *  素材图是 `/api/...`（要鉴权）⇒ 渲染必须走 object URL。 */
+    media: { url: string; local_path?: string; sort_order?: number; asset_type?: string }[];
+  };
+}> {
+  const response = await http.get(`/xhs/product-notes/versions/${recordId}`);
+  return response.data;
+}
+
+/** 把某版标为**当前采用版**（同商品其余版本取消）。 */
+export async function adoptNoteVersion(
+  recordId: number
+): Promise<{ ok: boolean; adopted_record_id: number; version_no: number }> {
+  const response = await http.post(`/xhs/product-notes/versions/${recordId}/adopt`, {});
+  return response.data;
+}
+
+/** 基于某版**局部重生成**（`text` = 只重写文案；`media` = 只重配图片）。 */
+/**
+ * **就地编辑某一版文案**（用户口径 2026-10-19：*「文案也使用回显的方式」*）。
+ *
+ * 与 `regenNoteVersion` 的区别：**不调模型、不花钱、版本号不变** ——
+ * 用户自己改字，改完就存。只传改过的字段（`undefined` = 不改）。
+ */
+export async function updateNoteVersion(payload: {
+  recordId: number;
+  title?: string;
+  body?: string;
+  topics?: string[];
+  /** **配图**（用户口径 2026-10-19：*「更新记录按钮为保存最新的数据，勾选了新的图片未保存」*）
+   *  —— 给了就**整份替换**这一版的媒体清单；`undefined` = 不动。 */
+  media?: {
+    url: string;
+    local_path?: string;
+    sort_order?: number;
+    asset_type?: string;
+    ok?: boolean;
+    source?: string;
+    role?: string;
+    slot_index?: number | null;
+  }[];
+}): Promise<{
+  ok: boolean;
+  record_id: number;
+  version_no: number;
+  title: string;
+  body: string;
+  topics: string[];
+}> {
+  const response = await http.patch<{
+    ok: boolean;
+    record_id: number;
+    version_no: number;
+    title: string;
+    body: string;
+    topics: string[];
+  }>(`/xhs/product-notes/versions/${payload.recordId}`, {
+    ...(payload.title !== undefined ? { title: payload.title } : {}),
+    ...(payload.body !== undefined ? { body: payload.body } : {}),
+    ...(payload.topics !== undefined ? { topics: payload.topics } : {}),
+    ...(payload.media !== undefined ? { media: payload.media } : {}),
+  });
+  return response.data;
+}
+
+/**
+ * **把某一版生成结果直接发布**（用户口径 2026-10-19：*「LLM 生成笔记弹窗新增一个
+ * 发布笔记按钮，生成用户满意的笔记后可以直接发布」*）。
+ *
+ * 按 `record_id` 走：发布链路要 `notes.id`，两者由 `notes.raw_json.generation.record_id`
+ * 关联，后端负责反查（不靠标题猜）。异步语义与内容库「发布」一致：立即返回
+ * `publishing`，终态看笔记行。
+ */
+export async function publishNoteVersion(recordId: number): Promise<{
+  ok: boolean;
+  note_pk: number;
+  note_id: string;
+  /** 平台侧笔记 ID（发布成功后由平台返回；空 = 平台没给）。 */
+  platform_note_id: string;
+  publish: { ok: boolean; status: string; record_id: number };
+}> {
+  const response = await http.post(
+    `/xhs/product-notes/versions/${recordId}/publish`
+  );
+  return response.data;
+}
+
+export async function regenNoteVersion(payload: {
+  baselineRecordId: number;
+  /** 重生成范围。`title`/`body`/`topics` 只换那一块（其余沿用基线），
+   *  `media` 只重配图，`all` 整篇重来。旧的 `text`（三块一起变）已不被前端使用。 */
+  regenScope: "all" | "text" | "title" | "body" | "topics" | "media";
+  templateId?: number;
+  copyRequirements?: LlmCopyRequirements;
+  mediaPlan?: LlmMediaPlanSegment[];
+}): Promise<{
+  ok: boolean;
+  regen_scope: string;
+  baseline_record_id: number;
+  /** **同步返回的这一版新内容**（后端已改为跑完才返回，直接回填面板）。 */
+  record_id: number;
+  note_id: string;
+  title: string;
+  body: string;
+  topics: string[];
+  media: {
+    url: string;
+    local_path?: string;
+    sort_order?: number;
+    asset_type?: string;
+    ok?: boolean;
+    error?: string;
+    role?: string;
+    /** **这张图来自哪个来源**（`product_image` / `material` / `ai_generate` …）。 */
+    source?: string;
+  }[];
+  copy_requirements: Record<string, unknown>;
+  model_name: string;
+  version_no: number;
+  is_adopted: boolean;
+}> {
+  const response = await http.post<{
+    ok: boolean;
+    regen_scope: string;
+    baseline_record_id: number;
+    record_id: number;
+    note_id: string;
+    title: string;
+    body: string;
+    topics: string[];
+    media: {
+      url: string;
+      local_path?: string;
+      sort_order?: number;
+      asset_type?: string;
+      ok?: boolean;
+      error?: string;
+      role?: string;
+    }[];
+    copy_requirements: Record<string, unknown>;
+    model_name: string;
+    version_no: number;
+    is_adopted: boolean;
+  }>("/xhs/product-notes/versions/regen", {
+    baseline_record_id: payload.baselineRecordId,
+    regen_scope: payload.regenScope,
+    ...(payload.templateId ? { template_id: payload.templateId } : {}),
+    ...(payload.copyRequirements ? { copy_requirements: payload.copyRequirements } : {}),
+    ...(payload.mediaPlan?.length ? { media_plan: payload.mediaPlan } : {}),
+  });
+  return response.data;
+}
+
+// --------------------------------------------------------------------------- #
+// 店铺违规管理（设计 43，2026-10-18）—— 全部只读；后端零落库
+//
+// ⚠️ 这里**没有**申诉提交 / 已读标记 / 批量删除的请求函数 —— 不是漏写，
+// 是只读边界（设计 43 §1.3）：接了就等于让页面顺手改平台状态。
+// --------------------------------------------------------------------------- #
+
+/** 违规 / 预警列表（`scene` 决定 `warnFlag`）。 */
+export async function fetchViolationList(
+  query: ViolationListQuery
+): Promise<ViolationListResponse> {
+  const response = await http.post<ViolationListResponse>(
+    "/xhs/qianfan/violation/list",
+    query
+  );
+  return response.data;
+}
+
+/**
+ * 删除违规**关联的本地内容**（商品台账行 / 本地笔记）。单条与批量同端点。
+ *
+ * ⚠️ 违规记录本身删不掉（千帆违规域没有删除接口）；这里删的是它指向的本地内容。
+ */
+export async function deleteViolationRelated(payload: {
+  platform_account_id: number;
+  targets: ViolationDeleteTarget[];
+}): Promise<ViolationDeleteResponse> {
+  const response = await http.post<ViolationDeleteResponse>(
+    "/xhs/qianfan/violation/related-delete",
+    payload
+  );
+  return response.data;
+}
+
+/** 角标计数（未读 N / 待处理 N）—— 千帆后台也是单独查一次 `counts`。 */
+export async function fetchViolationCounts(payload: {
+  platform_account_id: number;
+  scene?: "violation" | "warning";
+  quick: string;
+}): Promise<ViolationCountsResponse> {
+  const response = await http.post<ViolationCountsResponse>(
+    "/xhs/qianfan/violation/counts",
+    payload
+  );
+  return response.data;
+}
+
+/** 违规详情（含每条处罚的执行时间）。 */
+export async function fetchViolationDetail(
+  query: ViolationDetailQuery
+): Promise<ViolationDetail> {
+  const response = await http.post<ViolationDetail>(
+    "/xhs/qianfan/violation/detail",
+    query
+  );
+  return response.data;
+}
+
+/** 申诉记录（只读；平台没有就给空数组）。 */
+export async function fetchViolationAppealRecord(
+  query: ViolationDetailQuery
+): Promise<{ items: Record<string, unknown>[] }> {
+  const response = await http.post<{ items: Record<string, unknown>[] }>(
+    "/xhs/qianfan/violation/appeal-record",
+    query
+  );
+  return response.data;
+}
+
+/** 违规证据（平台可能给 `null` —— 页面显示「平台未提供证据」，不造内容）。 */
+export async function fetchViolationEvidence(
+  query: ViolationEvidenceQuery
+): Promise<{ evidence: unknown }> {
+  const response = await http.post<{ evidence: unknown }>(
+    "/xhs/qianfan/violation/evidence",
+    query
+  );
+  return response.data;
+}
+
+/** 三枚举（处罚状态 / 违规对象 / 违规原因 tag）—— 前端不硬编码。 */
+export async function fetchViolationMeta(
+  query: ViolationMetaQuery
+): Promise<ViolationMeta> {
+  const response = await http.post<ViolationMeta>(
+    "/xhs/qianfan/violation/meta",
+    query
+  );
+  return response.data;
+}
+
+/** 店铺体检 · 违规风险。 */
+export async function fetchViolationCheckupRisks(
+  query: CheckupRisksQuery
+): Promise<ViolationPagedResponse> {
+  const response = await http.post<ViolationPagedResponse>(
+    "/xhs/qianfan/checkup/risks",
+    query
+  );
+  return response.data;
+}
+
+/** 店铺体检 · 经营建议（附高价商品概览）。 */
+export async function fetchViolationCheckupAdvice(payload: {
+  platform_account_id: number;
+}): Promise<CheckupAdviceResponse> {
+  const response = await http.post<CheckupAdviceResponse>(
+    "/xhs/qianfan/checkup/advice",
+    payload
+  );
+  return response.data;
+}
+
+/** 店铺体检 · 负反馈风险（`quality` 商品品质 / `logistics` 物流）。 */
+export async function fetchViolationNegativeFeedback(
+  query: NegativeFeedbackQuery
+): Promise<ViolationPagedResponse> {
+  const response = await http.post<ViolationPagedResponse>(
+    "/xhs/qianfan/checkup/negative-feedback",
+    query
+  );
+  return response.data;
+}
+
+/** 赔付列表。 */
+export async function fetchViolationCompensations(
+  query: PagedSellerQuery
+): Promise<ViolationPagedResponse> {
+  const response = await http.post<ViolationPagedResponse>(
+    "/xhs/qianfan/compensations",
+    query
+  );
+  return response.data;
+}
+
+/** 仲裁列表。 */
+export async function fetchViolationArbitrations(
+  query: PagedSellerQuery
+): Promise<ViolationPagedResponse> {
+  const response = await http.post<ViolationPagedResponse>(
+    "/xhs/qianfan/arbitrations",
+    query
+  );
+  return response.data;
+}
+
+/** 仲裁原因下拉。 */
+export async function fetchViolationArbitrationTags(payload: {
+  platform_account_id: number;
+}): Promise<{ items: Record<string, unknown>[] }> {
+  const response = await http.post<{ items: Record<string, unknown>[] }>(
+    "/xhs/qianfan/arbitration-tags",
+    payload
+  );
+  return response.data;
+}
+
+/** 抽检违规列表。 */
+export async function fetchViolationSpotChecks(
+  query: SpotCheckQuery
+): Promise<ViolationListResponse> {
+  const response = await http.post<ViolationListResponse>(
+    "/xhs/qianfan/spot-checks",
+    query
+  );
+  return response.data;
+}
+
+/** 免罚机会 · 现货爆单豁免概览。 */
+export async function fetchViolationExemptionOverview(payload: {
+  platform_account_id: number;
+}): Promise<{ overview: Record<string, unknown> | null }> {
+  const response = await http.post<{ overview: Record<string, unknown> | null }>(
+    "/xhs/qianfan/exemptions/overview",
+    payload
+  );
+  return response.data;
+}
+
+/** 免罚机会 · 爆单明细（日期是 `YYYY-MM-DD`）。 */
+export async function fetchViolationExemptionItems(
+  query: ExemptionItemsQuery
+): Promise<ViolationPagedResponse> {
+  const response = await http.post<ViolationPagedResponse>(
+    "/xhs/qianfan/exemptions/items",
+    query
+  );
   return response.data;
 }

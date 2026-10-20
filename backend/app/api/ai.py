@@ -15,14 +15,12 @@ from backend.app.schemas.common import paginated
 from backend.app.services import llm_gateway_client
 from backend.app.services.ai_service import ImageAiClient, OpenAICompatibleImageClient, OpenAICompatibleTextClient, TextAiClient
 from backend.app.services.business_provider_keys import (
-    BUSINESS_KEY_DESCRIBE_IMAGE,
-    BUSINESS_KEY_GENERATE_COVER,
-    BUSINESS_KEY_GENERATE_IMAGE,
-    BUSINESS_KEY_GENERATE_NOTE,
     BUSINESS_KEY_GENERATE_TAGS,
-    BUSINESS_KEY_GENERATE_TITLE,
-    BUSINESS_KEY_POLISH_TEXT,
-    BUSINESS_KEY_REWRITE_NOTE,
+    BUSINESS_KEY_WORKSHOP_DRAFT_TEXT,
+    BUSINESS_KEY_WORKSHOP_IMAGE,
+    BUSINESS_KEY_WORKSHOP_IMAGE_UNDERSTAND,
+    BUSINESS_KEY_WORKSHOP_REWRITE_TEXT,
+    BUSINESS_KEY_WORKSHOP_TITLE_TEXT,
 )
 from backend.app.services.llm_gateway_client import LLMGatewayError, PLATFORM_XHS as BUSINESS_PLATFORM_XHS
 from backend.app.services.llm_gateway_usage_service import (
@@ -291,7 +289,7 @@ def rewrite_note(
     if draft is None or draft.user_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found")
 
-    model_config, api_key = _business_model_context(db, current_user, BUSINESS_KEY_REWRITE_NOTE)
+    model_config, api_key = _business_model_context(db, current_user, BUSINESS_KEY_WORKSHOP_REWRITE_TEXT)
     task, rewritten_body = _recorded_text_task(
         db=db,
         current_user=current_user,
@@ -322,7 +320,7 @@ def generate_note(
     db: Session = Depends(get_db),
     text_ai_client: TextAiClient = Depends(get_text_ai_client),
 ):
-    model_config, api_key = _business_model_context(db, current_user, BUSINESS_KEY_GENERATE_NOTE)
+    model_config, api_key = _business_model_context(db, current_user, BUSINESS_KEY_WORKSHOP_DRAFT_TEXT)
     task, result = _recorded_text_task(
         db=db,
         current_user=current_user,
@@ -360,7 +358,7 @@ def generate_title(
     db: Session = Depends(get_db),
     text_ai_client: TextAiClient = Depends(get_text_ai_client),
 ):
-    model_config, api_key = _business_model_context(db, current_user, BUSINESS_KEY_GENERATE_TITLE)
+    model_config, api_key = _business_model_context(db, current_user, BUSINESS_KEY_WORKSHOP_TITLE_TEXT)
     task, items = _recorded_text_task(
         db=db,
         current_user=current_user,
@@ -418,7 +416,16 @@ def polish_text(
     db: Session = Depends(get_db),
     text_ai_client: TextAiClient = Depends(get_text_ai_client),
 ):
-    model_config, api_key = _business_model_context(db, current_user, BUSINESS_KEY_POLISH_TEXT)
+    #: **业务点已退场**（2026-10-18：无任何前端调用 ⇒ 移出模型配置）。
+    #: 端点保留但不再解析模型映射 —— 若外部仍在调它，这里给出明确原因，
+    #: 而不是抛一个「业务点未配置」让人以为去页面配一下就好。
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail={
+            "code": "AI_POLISH_TEXT_GONE",
+            "message": "文本润色已停用（无调用方）。改用笔记工坊的「改写草稿」。",
+        },
+    )
     task, text = _recorded_text_task(
         db=db,
         current_user=current_user,
@@ -480,7 +487,14 @@ def generate_cover(
         if draft is None or draft.user_id != current_user.id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found")
 
-    model_config, api_key = _business_model_context(db, current_user, BUSINESS_KEY_GENERATE_COVER)
+    #: **业务点已退场**（同 `polish_text`：前端零调用）。
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail={
+            "code": "AI_GENERATE_COVER_GONE",
+            "message": "生成封面已停用（无调用方）。改用「LLM 生成笔记」的配图/封面来源。",
+        },
+    )
     task, result = _recorded_image_task(
         db=db,
         current_user=current_user,
@@ -517,7 +531,7 @@ def generate_image(
     db: Session = Depends(get_db),
     image_ai_client: ImageAiClient = Depends(get_image_ai_client),
 ):
-    model_config, api_key = _business_model_context(db, current_user, BUSINESS_KEY_GENERATE_IMAGE)
+    model_config, api_key = _business_model_context(db, current_user, BUSINESS_KEY_WORKSHOP_IMAGE)
     task, result = _recorded_image_task(
         db=db,
         current_user=current_user,
@@ -557,7 +571,7 @@ def describe_image(
     db: Session = Depends(get_db),
     image_ai_client: ImageAiClient = Depends(get_image_ai_client),
 ):
-    model_config, api_key = _business_model_context(db, current_user, BUSINESS_KEY_DESCRIBE_IMAGE)
+    model_config, api_key = _business_model_context(db, current_user, BUSINESS_KEY_WORKSHOP_IMAGE_UNDERSTAND)
     task, text = _recorded_image_task(
         db=db,
         current_user=current_user,

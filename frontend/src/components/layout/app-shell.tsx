@@ -24,6 +24,7 @@ import {
   ThunderboltOutlined,
   ToolOutlined,
   VideoCameraOutlined,
+  WarningOutlined,
 } from "@ant-design/icons";
 import type { MenuProps } from "antd";
 import KeepAliveRouteOutlet from "keepalive-for-react-router";
@@ -104,6 +105,10 @@ const contentLineChildren: MenuProps["items"] = [
 /** 店铺线：用**千帆（ark）令牌**的页面（商品 / 资产 / 订单）。 */
 const shopLineChildren: MenuProps["items"] = [
   { key: "/platforms/xhs/shop-items", icon: <ShoppingOutlined />, label: "商品列表" },
+  // 违规管理（设计 43，2026-10-18 用户口径「在店铺线菜单下新增店铺违规管理页面」）：
+  // 千帆 `店铺体检 → 违规管理` 的一比一复刻，只读、零落库。紧跟商品列表 ——
+  // 两者都是「店铺健康」相关的入口。
+  { key: "/platforms/xhs/violation-manage", icon: <WarningOutlined />, label: "违规管理" },
   // 图片空间（设计 22 §1）：千帆云图片资产浏览（与「笔记工坊 → 素材库」那个
   // **本地磁盘**目录不是一回事）。紧邻商品列表 —— 与千帆后台的资产类相邻。
   { key: "/platforms/xhs/picture-space", icon: <PictureOutlined />, label: "图片空间" },

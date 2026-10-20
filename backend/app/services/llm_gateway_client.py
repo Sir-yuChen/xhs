@@ -391,15 +391,33 @@ def resolve_business_provider(
         # 不认识业务点 ⇒ 也是「没配」，但我们不静默——按未配置表达（同一种出路：去页面配）
         raise BusinessProviderNotConfiguredError(key, platform)
 
+    #: **按类型取行**（用户口径 2026-10-18）：一个业务点可以有多行
+    #: （每类型一行，如 `generate_note` 同时有 text / image / video）。
+    #: 这里要的是**该业务点自身 kind 的那一行** —— 比如 `generate_note` 取 `text` 行，
+    #: `generate_image` 取 `image` 行。取错行的后果是把图像模型拿去写文案。
+    #: ⚠️ 兼容存量：早期行没有 `kind` 概念（列是迁移后补的，回填为业务点自身 kind），
+    #: 所以这里**不额外要求 kind 非空** —— 空值按「该业务点的 kind」兜底匹配。
     mapping = db.scalars(
         select(LlmBusinessProvider).where(
             LlmBusinessProvider.user_id == user.id,
             LlmBusinessProvider.platform == platform,
             LlmBusinessProvider.business_key == key,
+            LlmBusinessProvider.kind == spec.kind,
         )
     ).first()
     if mapping is None:
-        raise BusinessProviderNotConfiguredError(key, platform)
+        #: 兼容早期数据：该业务点只有一行且 `kind` 为空/旧值 ⇒ 仍认它
+        #: （否则升级后所有老配置会突然「未配置」，那是不可接受的回归）。
+        legacy = db.scalars(
+            select(LlmBusinessProvider).where(
+                LlmBusinessProvider.user_id == user.id,
+                LlmBusinessProvider.platform == platform,
+                LlmBusinessProvider.business_key == key,
+            )
+        ).first()
+        if legacy is None or (legacy.kind or "") not in ("", spec.kind):
+            raise BusinessProviderNotConfiguredError(key, platform)
+        mapping = legacy
 
     # v2.3：必须显式选模型（不回落 default_model）。
     model_name = (mapping.model_name or "").strip()

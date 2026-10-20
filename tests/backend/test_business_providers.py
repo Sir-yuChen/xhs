@@ -32,9 +32,9 @@ from backend.app.api.llm_gateway import (
 )
 from backend.app.services.business_provider_keys import (
     BUSINESS_KEYS,
-    BUSINESS_KEY_GENERATE_COVER,
-    BUSINESS_KEY_GENERATE_NOTE,
-    BUSINESS_KEY_GENERATE_TITLE,
+    BUSINESS_KEY_GENERATE_TAGS,
+    BUSINESS_KEY_LLM_NOTE_TEXT,
+    BUSINESS_KEY_WORKSHOP_TITLE_TEXT,
     MODEL_TYPE_IMAGE,
     MODEL_TYPE_TEXT,
     MODEL_TYPES,
@@ -183,7 +183,7 @@ def test_resolve_hit_returns_provider_context(api_client, db_factory):
         models=["deepseek-v4-flash", "deepseek-v4-pro"],
     )
     resp = _upsert(
-        api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"],
+        api_client, headers, BUSINESS_KEY_LLM_NOTE_TEXT.key, provider["provider_key"],
         model_name="deepseek-v4-pro",
     )
     assert resp.status_code == 200, resp.text
@@ -191,7 +191,7 @@ def test_resolve_hit_returns_provider_context(api_client, db_factory):
 
     user = _user_by_name(api_client, db_factory, "bp_hit")
     with db_factory() as db:
-        ctx = resolve_business_provider(db, user, BUSINESS_KEY_GENERATE_NOTE)
+        ctx = resolve_business_provider(db, user, BUSINESS_KEY_LLM_NOTE_TEXT)
     assert ctx.provider_key == provider["provider_key"]
     assert ctx.model_name == "deepseek-v4-pro"
     assert ctx.model_name != "deepseek-v4-flash", "不得回落到服务商默认模型"
@@ -213,7 +213,7 @@ def test_resolve_missing_mapping_raises_and_never_falls_back(api_client, db_fact
     user = _user_by_name(api_client, db_factory, "bp_miss")
     with db_factory() as db:
         with pytest.raises(BusinessProviderNotConfiguredError):
-            resolve_business_provider(db, user, BUSINESS_KEY_GENERATE_NOTE)
+            resolve_business_provider(db, user, BUSINESS_KEY_LLM_NOTE_TEXT)
 
 
 def test_resolve_type_mismatch_raises(api_client, db_factory):
@@ -235,20 +235,20 @@ def test_resolve_type_mismatch_raises(api_client, db_factory):
         upsert_business_mapping(
             db,
             user_id=user.id,
-            business_key=BUSINESS_KEY_GENERATE_NOTE.key,
+            business_key=BUSINESS_KEY_LLM_NOTE_TEXT.key,
             provider_key=image_provider["provider_key"],
             model_name="some-image-model",
         )
         db.commit()
         with pytest.raises(BusinessProviderTypeMismatchError):
-            resolve_business_provider(db, user, BUSINESS_KEY_GENERATE_NOTE)
+            resolve_business_provider(db, user, BUSINESS_KEY_LLM_NOTE_TEXT)
 
 
 def test_resolve_provider_disabled_raises(api_client, db_factory):
     """服务商停用 ⇒ `ProviderDisabledError`（**不静默回落**，D4）。"""
     headers = _register(api_client, "bp_disabled")
     provider = _create_provider(api_client, headers, "disabled-provider", MODEL_TYPE_TEXT)
-    assert _upsert(api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"]).status_code == 200
+    assert _upsert(api_client, headers, BUSINESS_KEY_LLM_NOTE_TEXT.key, provider["provider_key"]).status_code == 200
 
     # 停用
     resp = api_client.patch(
@@ -259,7 +259,7 @@ def test_resolve_provider_disabled_raises(api_client, db_factory):
     user = _user_by_name(api_client, db_factory, "bp_disabled")
     with db_factory() as db:
         with pytest.raises(ProviderDisabledError):
-            resolve_business_provider(db, user, BUSINESS_KEY_GENERATE_NOTE)
+            resolve_business_provider(db, user, BUSINESS_KEY_LLM_NOTE_TEXT)
 
 
 def test_resolve_provider_not_found_raises(api_client, db_factory):
@@ -270,13 +270,13 @@ def test_resolve_provider_not_found_raises(api_client, db_factory):
         upsert_business_mapping(
             db,
             user_id=user.id,
-            business_key=BUSINESS_KEY_GENERATE_NOTE.key,
+            business_key=BUSINESS_KEY_LLM_NOTE_TEXT.key,
             provider_key="NOPE-0000",
             model_name="whatever-model",
         )
         db.commit()
         with pytest.raises(ProviderNotFoundError):
-            resolve_business_provider(db, user, BUSINESS_KEY_GENERATE_NOTE)
+            resolve_business_provider(db, user, BUSINESS_KEY_LLM_NOTE_TEXT)
 
 
 # --------------------------------------------------------------------------- #
@@ -291,36 +291,36 @@ def test_mapping_is_isolated_across_users(api_client, db_factory):
     _clear_all_mappings_for("bp_user_b")
 
     prov_a = _create_provider(api_client, head_a, "provider-a", MODEL_TYPE_TEXT)
-    assert _upsert(api_client, head_a, BUSINESS_KEY_GENERATE_NOTE.key, prov_a["provider_key"]).status_code == 200
+    assert _upsert(api_client, head_a, BUSINESS_KEY_LLM_NOTE_TEXT.key, prov_a["provider_key"]).status_code == 200
 
     # B 自己的列表仍显示未配置
     resp = api_client.get("/api/llm/business-providers?platform=xhs", headers=head_b)
     assert resp.status_code == 200
-    rows = [r for r in resp.json()["items"] if r["business_key"] == BUSINESS_KEY_GENERATE_NOTE.key]
+    rows = [r for r in resp.json()["items"] if r["business_key"] == BUSINESS_KEY_LLM_NOTE_TEXT.key]
     assert rows and rows[0]["configured"] is False
 
     # B 的解析也必须抛错（不借用 A 的映射）
     user_b = _user_by_name(api_client, db_factory, "bp_user_b")
     with db_factory() as db:
         with pytest.raises(BusinessProviderNotConfiguredError):
-            resolve_business_provider(db, user_b, BUSINESS_KEY_GENERATE_NOTE)
+            resolve_business_provider(db, user_b, BUSINESS_KEY_LLM_NOTE_TEXT)
 
 
 def test_mapping_is_isolated_across_platforms(api_client, db_factory):
     """同 key 不同 platform 各自独立：xhs 配了，douyin 仍「未配置」。"""
     headers = _register(api_client, "bp_platform")
     provider = _create_provider(api_client, headers, "plat-provider", MODEL_TYPE_TEXT)
-    assert _upsert(api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"], "xhs").status_code == 200
+    assert _upsert(api_client, headers, BUSINESS_KEY_LLM_NOTE_TEXT.key, provider["provider_key"], "xhs").status_code == 200
 
     resp = api_client.get("/api/llm/business-providers?platform=douyin", headers=headers)
     assert resp.status_code == 200
-    rows = [r for r in resp.json()["items"] if r["business_key"] == BUSINESS_KEY_GENERATE_NOTE.key]
+    rows = [r for r in resp.json()["items"] if r["business_key"] == BUSINESS_KEY_LLM_NOTE_TEXT.key]
     assert rows and rows[0]["configured"] is False
 
     user = _user_by_name(api_client, db_factory, "bp_platform")
     with db_factory() as db:
         with pytest.raises(BusinessProviderNotConfiguredError):
-            resolve_business_provider(db, user, BUSINESS_KEY_GENERATE_NOTE, platform="douyin")
+            resolve_business_provider(db, user, BUSINESS_KEY_LLM_NOTE_TEXT, platform="douyin")
 
 
 # --------------------------------------------------------------------------- #
@@ -333,15 +333,15 @@ def test_upsert_is_idempotent_not_insert(api_client, db_factory):
     first = _create_provider(api_client, headers, "idem-1", MODEL_TYPE_TEXT)
     second = _create_provider(api_client, headers, "idem-2", MODEL_TYPE_TEXT)
 
-    assert _upsert(api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, first["provider_key"]).status_code == 200
-    assert _upsert(api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, second["provider_key"]).status_code == 200
+    assert _upsert(api_client, headers, BUSINESS_KEY_LLM_NOTE_TEXT.key, first["provider_key"]).status_code == 200
+    assert _upsert(api_client, headers, BUSINESS_KEY_LLM_NOTE_TEXT.key, second["provider_key"]).status_code == 200
 
     user = _user_by_name(api_client, db_factory, "bp_idem")
     with db_factory() as db:
         rows = db.scalars(
             select(LlmBusinessProvider).where(
                 LlmBusinessProvider.user_id == user.id,
-                LlmBusinessProvider.business_key == BUSINESS_KEY_GENERATE_NOTE.key,
+                LlmBusinessProvider.business_key == BUSINESS_KEY_LLM_NOTE_TEXT.key,
             )
         ).all()
         assert len(rows) == 1, "二次 upsert 不得新增行"
@@ -354,7 +354,7 @@ def test_upsert_rejects_other_users_provider_404(api_client):
     head_b = _register(api_client, "bp_owner_b")
     prov_a = _create_provider(api_client, head_a, "owner-a-provider", MODEL_TYPE_TEXT)
 
-    resp = _upsert(api_client, head_b, BUSINESS_KEY_GENERATE_NOTE.key, prov_a["provider_key"])
+    resp = _upsert(api_client, head_b, BUSINESS_KEY_LLM_NOTE_TEXT.key, prov_a["provider_key"])
     assert resp.status_code == 404, resp.text
     assert resp.json()["detail"]["code"] == "LLM_PROVIDER_NOT_FOUND"
 
@@ -383,7 +383,7 @@ def test_business_key_triggers_are_exposed_and_match_constants(api_client):
     判据三条：
     ① 清单端点 `business-provider-keys` 每个业务点都带 `triggers`，且与常量逐字一致；
     ② 映射行端点 `business-providers` 同样带 `label` / `triggers`（页面直接渲染，不必反查）；
-    ③ 新增的 `generate_product_detail_image` 业务点存在、kind=image、
+    ③ 商品详情图业务点 `product_detail_image` 存在、kind=image、
        触发源含「商品列表-商品详情-生成商品详情图」（用户点名的那个入口）。
     """
     headers = _register(api_client, "bp_triggers")
@@ -407,10 +407,10 @@ def test_business_key_triggers_are_exposed_and_match_constants(api_client):
         assert rows[item.key]["triggers"] == list(item.triggers), f"{item.key} triggers 不一致"
 
     # ③ 用户点名的那个业务点
-    detail = rows["generate_product_detail_image"]
+    detail = rows["product_detail_image"]
     assert detail["kind"] == MODEL_TYPE_IMAGE
     assert detail["triggers"] == ["商品列表-商品详情-生成商品详情图"]
-    assert detail["label"] == "生成商品详情图"
+    assert detail["label"] == "生成详情图"
 
 
 def test_upsert_rejects_type_mismatch_400(api_client):
@@ -418,7 +418,13 @@ def test_upsert_rejects_type_mismatch_400(api_client):
     headers = _register(api_client, "bp_mismatch")
     text_provider = _create_provider(api_client, headers, "text-only", MODEL_TYPE_TEXT)
 
-    resp = _upsert(api_client, headers, BUSINESS_KEY_GENERATE_COVER.key, text_provider["provider_key"])
+    #: 必须用**图片类型**的业务点做「指向 text 服务商」的反例
+    #: （`generate_tags` 是 text 类型，用它测不出不匹配）。
+    from backend.app.services.business_provider_keys import BUSINESS_KEY_LLM_NOTE_IMAGE
+
+    resp = _upsert(
+        api_client, headers, BUSINESS_KEY_LLM_NOTE_IMAGE.key, text_provider["provider_key"]
+    )
     assert resp.status_code == 400, resp.text
     assert resp.json()["detail"]["code"] == "LLM_BUSINESS_PROVIDER_TYPE_MISMATCH"
 
@@ -436,8 +442,8 @@ def test_clear_mapping_returns_to_unconfigured(api_client, db_factory):
     """`provider_key=""` ⇒ 回到「未配置」（清空映射，不是删行）。"""
     headers = _register(api_client, "bp_clear")
     provider = _create_provider(api_client, headers, "clear-provider", MODEL_TYPE_TEXT)
-    assert _upsert(api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"]).status_code == 200
-    resp = _upsert(api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, "")
+    assert _upsert(api_client, headers, BUSINESS_KEY_LLM_NOTE_TEXT.key, provider["provider_key"]).status_code == 200
+    resp = _upsert(api_client, headers, BUSINESS_KEY_LLM_NOTE_TEXT.key, "")
     assert resp.status_code == 200
     assert resp.json()["configured"] is False
 
@@ -447,7 +453,7 @@ def test_clear_mapping_returns_to_unconfigured(api_client, db_factory):
         # 「模型必选」这步先拦（比 provider_key 检查更靠前）⇒ `BusinessModelRequiredError`。
         # 这和「行不存在」（`BusinessProviderNotConfiguredError`）仍是两种错误，都要能定位。
         with pytest.raises(BusinessModelRequiredError):
-            resolve_business_provider(db, user, BUSINESS_KEY_GENERATE_NOTE)
+            resolve_business_provider(db, user, BUSINESS_KEY_LLM_NOTE_TEXT)
 
 
 def test_list_includes_unconfigured_rows(api_client):
@@ -523,7 +529,7 @@ def test_upsert_without_model_400(api_client):
     provider = _create_provider(api_client, headers, "nomodel-provider", MODEL_TYPE_TEXT)
 
     resp = _upsert(
-        api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"],
+        api_client, headers, BUSINESS_KEY_LLM_NOTE_TEXT.key, provider["provider_key"],
         model_name="",
     )
     assert resp.status_code == 400, resp.text
@@ -531,7 +537,7 @@ def test_upsert_without_model_400(api_client):
 
     # 纯空白同样视为缺模型（不靠 strip 之外的宽松）
     resp = _upsert(
-        api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"],
+        api_client, headers, BUSINESS_KEY_LLM_NOTE_TEXT.key, provider["provider_key"],
         model_name="   ",
     )
     assert resp.status_code == 400, resp.text
@@ -550,7 +556,7 @@ def test_upsert_model_not_in_catalog_400(api_client):
     )
 
     resp = _upsert(
-        api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"],
+        api_client, headers, BUSINESS_KEY_LLM_NOTE_TEXT.key, provider["provider_key"],
         model_name="gpt-nonexistent",
     )
     assert resp.status_code == 400, resp.text
@@ -565,7 +571,7 @@ def test_upsert_model_in_catalog_ok(api_client):
         models=["deepseek-v4-flash", "deepseek-v4-pro"],
     )
     resp = _upsert(
-        api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"],
+        api_client, headers, BUSINESS_KEY_LLM_NOTE_TEXT.key, provider["provider_key"],
         model_name="deepseek-v4-pro",
     )
     assert resp.status_code == 200, resp.text
@@ -581,11 +587,11 @@ def test_clear_mapping_also_clears_model(api_client, db_factory):
         api_client, headers, "clearmodel", MODEL_TYPE_TEXT, models=["deepseek-v4-pro"],
     )
     assert _upsert(
-        api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"],
+        api_client, headers, BUSINESS_KEY_LLM_NOTE_TEXT.key, provider["provider_key"],
         model_name="deepseek-v4-pro",
     ).status_code == 200
 
-    resp = _upsert(api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, "", model_name="")
+    resp = _upsert(api_client, headers, BUSINESS_KEY_LLM_NOTE_TEXT.key, "", model_name="")
     assert resp.status_code == 200
     body = resp.json()
     assert body["provider_key"] == ""
@@ -597,7 +603,7 @@ def test_clear_mapping_also_clears_model(api_client, db_factory):
         row = db.scalar(
             select(LlmBusinessProvider).where(
                 LlmBusinessProvider.user_id == user.id,
-                LlmBusinessProvider.business_key == BUSINESS_KEY_GENERATE_NOTE.key,
+                LlmBusinessProvider.business_key == BUSINESS_KEY_LLM_NOTE_TEXT.key,
             )
         )
         assert row is not None and row.model_name == "", "清空映射必须连模型一起清"
@@ -611,24 +617,24 @@ def test_list_exposes_model_name_and_provider_models(api_client):
         models=["deepseek-v4-flash", "deepseek-v4-pro"],
     )
     assert _upsert(
-        api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"],
+        api_client, headers, BUSINESS_KEY_LLM_NOTE_TEXT.key, provider["provider_key"],
         model_name="deepseek-v4-pro",
     ).status_code == 200
 
     resp = api_client.get("/api/llm/business-providers?platform=xhs", headers=headers)
     assert resp.status_code == 200
     rows = {r["business_key"]: r for r in resp.json()["items"]}
-    row = rows[BUSINESS_KEY_GENERATE_NOTE.key]
+    row = rows[BUSINESS_KEY_LLM_NOTE_TEXT.key]
     assert row["model_name"] == "deepseek-v4-pro"
     assert row["provider_models"] == ["deepseek-v4-flash", "deepseek-v4-pro"]
     assert row["configured"] is True
 
     # 未配置的行：模型为空、目录为空、configured=False
     # ⚠️ 2026-10-13（R4 种子）：`generate_cover` 属图片类，种子也给它播种 ⇒ 先清掉。
-    _clear_mapping_for("bp_listmodel", BUSINESS_KEY_GENERATE_COVER.key)
+    _clear_mapping_for("bp_listmodel", BUSINESS_KEY_GENERATE_TAGS.key)
     resp2 = api_client.get("/api/llm/business-providers?platform=xhs", headers=headers)
     rows = {r["business_key"]: r for r in resp2.json()["items"]}
-    other = rows[BUSINESS_KEY_GENERATE_COVER.key]
+    other = rows[BUSINESS_KEY_GENERATE_TAGS.key]
     assert other["model_name"] == ""
     assert other["provider_models"] == []
     assert other["configured"] is False
@@ -643,13 +649,13 @@ def test_resolve_uses_mapping_model_and_ignores_disabled_default(api_client, db_
         models=["deepseek-v4-flash", "deepseek-v4-pro"],
     )
     assert _upsert(
-        api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"],
+        api_client, headers, BUSINESS_KEY_LLM_NOTE_TEXT.key, provider["provider_key"],
         model_name="deepseek-v4-pro",
     ).status_code == 200
 
     user = _user_by_name(api_client, db_factory, "bp_resolvemodel")
     with db_factory() as db:
-        ctx = resolve_business_provider(db, user, BUSINESS_KEY_GENERATE_NOTE)
+        ctx = resolve_business_provider(db, user, BUSINESS_KEY_LLM_NOTE_TEXT)
     assert ctx.model_name == "deepseek-v4-pro"
 
 
@@ -713,7 +719,7 @@ def test_upsert_merges_platform_into_model_row(api_client, db_factory):
     _clear_model_platforms(db_factory, "platform-merge")
     assert _model_platforms(db_factory, "platform-merge", "deepseek-v4-flash") == {}
 
-    _upsert(api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"], platform="xhs")
+    _upsert(api_client, headers, BUSINESS_KEY_LLM_NOTE_TEXT.key, provider["provider_key"], platform="xhs")
 
     assert _model_platforms(db_factory, "platform-merge", "deepseek-v4-flash") == {"xhs": 1}, (
         "在 xhs 平台配置了模型，模型行的 platform 却没写 xhs（§13.2.9.7 漏实现）"
@@ -731,7 +737,7 @@ def test_upsert_platform_merge_is_idempotent(api_client, db_factory):
     _clear_model_platforms(db_factory, "platform-idem")
 
     for _ in range(3):
-        _upsert(api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"], platform="xhs")
+        _upsert(api_client, headers, BUSINESS_KEY_LLM_NOTE_TEXT.key, provider["provider_key"], platform="xhs")
 
     # ⚠️ v2.28：计数语义 = 「该平台下指向该模型的**业务点个数**」（状态），
     # 不是「被操作过几次」（事件）⇒ 同一业务点配 3 次仍是 1，**不是 3**。
@@ -763,7 +769,7 @@ def test_upsert_merge_accumulates_not_overwrites(api_client, db_factory):
         row.platform = _dump_platforms({"douyin": 1})
         db.commit()
 
-    _upsert(api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"], platform="xhs")
+    _upsert(api_client, headers, BUSINESS_KEY_LLM_NOTE_TEXT.key, provider["provider_key"], platform="xhs")
 
     merged = _model_platforms(db_factory, "platform-accum", "deepseek-v4-flash")
     assert "douyin" in merged, "原有的平台被覆盖掉了（并入≠覆盖）"
@@ -796,11 +802,11 @@ def test_clearing_mapping_decrements_platform_count(api_client, db_factory):
     # ⇒ 必须显式清空，否则起点是 `{"xhs": 1}`、加减验不出来（同 platform-merge 用例）。
     _clear_model_platforms(db_factory, "platform-clear")
 
-    _upsert(api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"], platform="xhs")
+    _upsert(api_client, headers, BUSINESS_KEY_LLM_NOTE_TEXT.key, provider["provider_key"], platform="xhs")
     assert _model_platforms(db_factory, "platform-clear", "deepseek-v4-flash") == {"xhs": 1}
 
     # 清空映射（provider_key=""）⇒ 该业务点不再用这个模型
-    resp = _upsert(api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, "", platform="xhs")
+    resp = _upsert(api_client, headers, BUSINESS_KEY_LLM_NOTE_TEXT.key, "", platform="xhs")
     assert resp.status_code == 200, resp.text
 
     after = _model_platforms(db_factory, "platform-clear", "deepseek-v4-flash")
@@ -827,20 +833,20 @@ def test_platform_count_survives_until_last_reference_goes(api_client, db_factor
     provider = _create_provider(api_client, headers, "计数", model_type=MODEL_TYPE_TEXT)
     _clear_model_platforms(db_factory, "platform-count")
 
-    _upsert(api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"], platform="xhs")
-    _upsert(api_client, headers, BUSINESS_KEY_GENERATE_TITLE.key, provider["provider_key"], platform="xhs")
+    _upsert(api_client, headers, BUSINESS_KEY_LLM_NOTE_TEXT.key, provider["provider_key"], platform="xhs")
+    _upsert(api_client, headers, BUSINESS_KEY_WORKSHOP_TITLE_TEXT.key, provider["provider_key"], platform="xhs")
     assert _model_platforms(db_factory, "platform-count", "deepseek-v4-flash") == {"xhs": 2}, (
         "两个业务点在用同一个模型，计数应为 2"
     )
 
     # 撤走第一个 ⇒ 还有人在用，平台**必须留着**
-    _upsert(api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, "", platform="xhs")
+    _upsert(api_client, headers, BUSINESS_KEY_LLM_NOTE_TEXT.key, "", platform="xhs")
     assert _model_platforms(db_factory, "platform-count", "deepseek-v4-flash") == {"xhs": 1}, (
         "还有业务点在用，平台被提前移除了（用户口径：全部不再使用才移除）"
     )
 
     # 撤走最后一个 ⇒ 这才移除
-    _upsert(api_client, headers, BUSINESS_KEY_GENERATE_TITLE.key, "", platform="xhs")
+    _upsert(api_client, headers, BUSINESS_KEY_WORKSHOP_TITLE_TEXT.key, "", platform="xhs")
     assert _model_platforms(db_factory, "platform-count", "deepseek-v4-flash") == {}, (
         "所有业务点都不再用这个模型了，平台应该被移除"
     )
@@ -872,7 +878,7 @@ def test_platform_dedupe_existing_platform_not_added_again(api_client, db_factor
     # 再在同一平台配 3 次
     for _ in range(3):
         resp = _upsert(
-            api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"],
+            api_client, headers, BUSINESS_KEY_LLM_NOTE_TEXT.key, provider["provider_key"],
             platform="xhs",
         )
         assert resp.status_code == 200, resp.text
@@ -907,9 +913,9 @@ def test_platform_count_zero_never_reaches_storage_or_reader(api_client, db_fact
     provider = _create_provider(api_client, headers, "零计数", model_type=MODEL_TYPE_TEXT)
     _clear_model_platforms(db_factory, "platform-zero")
 
-    _upsert(api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, provider["provider_key"], platform="xhs")
+    _upsert(api_client, headers, BUSINESS_KEY_LLM_NOTE_TEXT.key, provider["provider_key"], platform="xhs")
     # 撤走唯一的引用 ⇒ 计数 1 → 0
-    _upsert(api_client, headers, BUSINESS_KEY_GENERATE_NOTE.key, "", platform="xhs")
+    _upsert(api_client, headers, BUSINESS_KEY_LLM_NOTE_TEXT.key, "", platform="xhs")
 
     # ① 落库字符串（**原始列值**，不经解析）不含 0 计数
     from backend.app.models import LlmGatewayModel
@@ -933,3 +939,54 @@ def test_platform_count_zero_never_reaches_storage_or_reader(api_client, db_fact
     parsed = _model_platforms(db_factory, "platform-zero", "deepseek-v4-flash")
     assert parsed == {}, f"归零平台仍在读取结果里：{parsed}"
     assert all(n > 0 for n in parsed.values()), "读取结果里出现了 0 计数"
+
+
+class TestEntryGrouping:
+    """**父子列表：父 = 业务功能线，子 = 各类型模型**（用户口径 2026-10-18）。
+
+    > 「父子列表展示，一个业务功能线可能需要配置多类型模型」
+    > 「所有业务功能不在共用配置，改为各个功能单独配置」
+    """
+
+    def test_llm_note_entry_has_three_kinds(self):
+        """「LLM 生成笔记」这条功能线 = 文本 + 图片 + 视频 **三个独立 key**。"""
+        from backend.app.services.business_provider_keys import (
+            BUSINESS_KEY_LLM_NOTE_IMAGE,
+            BUSINESS_KEY_LLM_NOTE_TEXT,
+            BUSINESS_KEY_LLM_NOTE_VIDEO,
+            entry_kinds,
+        )
+
+        keys = [
+            BUSINESS_KEY_LLM_NOTE_TEXT,
+            BUSINESS_KEY_LLM_NOTE_IMAGE,
+            BUSINESS_KEY_LLM_NOTE_VIDEO,
+        ]
+        #: 三个 key **互不相同**（不是同一个 key 声明多种类型 —— 那是共用配置）
+        assert len({k.key for k in keys}) == 3
+        #: 都归同一个入口（父行）
+        assert {k.entry for k in keys} == {"LLM 生成笔记"}
+        #: 该入口需要三类模型
+        assert entry_kinds()["LLM 生成笔记"] == ("text", "image", "video")
+
+    def test_entries_do_not_share_keys(self):
+        """**各功能不共用**：同一个 key 不能出现在两个入口里。"""
+        from backend.app.services.business_provider_keys import BUSINESS_KEYS
+
+        owner: dict[str, str] = {}
+        for spec in BUSINESS_KEYS:
+            prev = owner.get(spec.key)
+            assert prev is None or prev == spec.entry, (
+                f"key {spec.key} 被两个入口共用：{prev} / {spec.entry}"
+            )
+            owner[spec.key] = spec.entry
+
+    def test_endpoint_ships_entry_and_role(self):
+        """两个端点都要下发 `entry` / `role`（父行分组 + 子行标题）。"""
+        from pathlib import Path
+
+        src = (Path(__file__).resolve().parents[2] / "backend/app/api/llm_gateway.py").read_text(
+            encoding="utf-8"
+        )
+        assert '"entry": item.entry' in src
+        assert '"role": item.role_label' in src

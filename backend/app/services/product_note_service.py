@@ -29,6 +29,10 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from backend.app.services.llm_gateway_usage_service import FUNCTION_GENERATE
+#: v2.25（M-B3）：商品事实抽取层。**只依赖本模块的纯函数**（无 DB / 无网络），
+#: 故不构成导入环；放在这里而不是调用方，是为了让「白名单入口只有一处」这条
+#: 纪律继续成立（`product_payload()` 是喂模型与护栏的唯一入口）。
+from backend.app.services.product_facts import extract_product_facts, facts_to_prompt_lines
 
 # --------------------------------------------------------------------------- #
 # ① 商品字段白名单（Prompt 与一致性校验都只看这些）
@@ -172,9 +176,38 @@ def _price_text(product: dict[str, Any]) -> str:
 
 
 def product_payload(product: dict[str, Any]) -> dict[str, Any]:
-    """白名单提取商品字段（喂给模型与一致性校验用的都是这一份）。"""
+    """白名单提取商品字段（喂给模型与一致性校验用的都是这一份）。
+
+    ⚠️ **v2.25（设计 41 §11.1.3 第三层 / M-B3）**：追加 `facts_text` —— 由
+    `product_facts.extract_product_facts()` 从 `raw` / `raw_json` 抽出的**结构化事实**
+    （类目路径 / 材质 / 规格 / 人群 / 场景 / 核心卖点 top3 / 在售规格 / 平台卖点词）。
+
+    为什么加在**这里**（而不是让各调用方自己抽）：
+    `product_payload()` 是「喂给模型与一致性校验」的**唯一入口**（docstring 原话）
+    ⇒ 事实也必须从这一个口子进，否则「干跑链路」与「真生成链路」看到的商品信息不同
+    （DEF-044 两份实现）。**缺值不出现**（`facts_to_prompt_lines` 整段消失，不留空标签）。
+    """
     payload = {key: product.get(key) for key in PRODUCT_FIELDS if product.get(key) not in (None, "")}
     payload["price_text"] = _price_text(product)
+
+    # ---- v2.25：结构化事实（缺 raw 时为空串，不阻断） ----
+    raw = product.get("raw") if isinstance(product.get("raw"), dict) else None
+    if raw is None:
+        maybe = product.get("raw_json")
+        if isinstance(maybe, dict):
+            raw = maybe
+    if raw is not None:
+        facts = extract_product_facts(raw)
+        #: 平台卖点词由调用方（worker / 端点）传入 `product["platform_seller_points"]`，
+        #: 因为它来自**另一次平台调用**的响应，不在商品台账 `raw_json` 里。
+        seller_points = product.get("platform_seller_points")
+        if isinstance(seller_points, list):
+            facts["platform_seller_points"] = [
+                str(x).strip() for x in seller_points if str(x).strip()
+            ]
+        text = facts_to_prompt_lines(facts)
+        if text:
+            payload["facts_text"] = text
     return payload
 
 
@@ -315,11 +348,16 @@ def validate_note_format(title: str, body: str, image_count: int) -> FormatResul
 # ⑤ 生成（含护栏与格式校验）
 # --------------------------------------------------------------------------- #
 def parse_generated_payload(content: str) -> dict[str, Any]:
-    """模型返回 → `{title, body, tags}`。
+    """模型返回 → `{title, body, tags, titles, cover_text}`。
 
     容错顺序：整段 JSON → 去掉 ``` 围栏后的 JSON → 从第一个 `{` 到最后一个 `}` 的子串。
     都不行就抛 `ValueError`（**不猜**）：把「模型没按格式回」当成错误暴露出来，
     比悄悄把一整段原始文本塞进正文要好（后者会带着 JSON 花括号发到平台上）。
+
+    ⚠️ **v2.25（设计 41 §11.1.3）**：新增 `titles`（标题 3 备选）与 `cover_text`
+    （封面大字）两个**可选**键。此前只取 `title`/`body`/`tags` ⇒ 模板里写明的这两项
+    会被**静默丢弃**（模型确实按模板给了，我们却没读 —— 同 DEF-044 的静默退化型）。
+    两者都**缺省为空**（模型没给不报错，属可选增强），不影响既有 `title`/`body` 契约。
     """
     text = (content or "").strip()
     if not text:
@@ -337,10 +375,17 @@ def parse_generated_payload(content: str) -> dict[str, Any]:
             continue
         if isinstance(payload, dict) and (payload.get("body") or payload.get("title")):
             tags = payload.get("tags")
+            titles = payload.get("titles")
             return {
                 "title": str(payload.get("title") or "").strip(),
                 "body": str(payload.get("body") or "").strip(),
                 "tags": [str(tag).strip() for tag in tags] if isinstance(tags, list) else [],
+                #: 标题备选（可选；模型按模板给 3 条）。空 ⇒ 调用方回落为 `[title]`。
+                "titles": [str(t).strip() for t in titles if str(t).strip()]
+                if isinstance(titles, list)
+                else [],
+                #: 封面大字（可选；≤15 字）。空 ⇒ 无封面文案，不阻断生成。
+                "cover_text": str(payload.get("cover_text") or "").strip(),
             }
     raise ValueError("AI 返回不是可解析的 JSON（需要 {\"title\", \"body\", \"tags\"}）")
 

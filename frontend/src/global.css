@@ -456,3 +456,88 @@ body {
   flex: 0 0 auto;
   margin-bottom: 0;
 }
+
+/* ===== 违规管理 · 表格三区布局（筛选固定 / 表体滚动 / 分页固定） ===== */
+/*
+ * 设计 43（2026-10-18）。与上面 `.shop-items-table` **同一套高度链**，只是类名不同
+ * ——照抄而非重写，避免两套布局实现漂移（先例：`.ps-scroll-host` / `.shop-items-table`
+ * 已经是同一规则的第二、三份拷贝，本页是第四份；若再出现第五处就该抽公共类）。
+ *
+ * 链条：`.violation-table`（页面里的 `flex:1` div）
+ *   → `.ant-spin` → `.ant-spin-container` → `.ant-table-wrapper`（`rootClassName` 落这层）
+ *   → `.ant-table` → `.ant-table-container` → (header + body)
+ */
+.violation-table {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.violation-table .ant-spin,
+.violation-table .ant-spin-container {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: 100%;
+}
+
+.violation-table .ant-spin-container {
+  display: flex;
+  flex-direction: column;
+}
+
+.violation-table .ant-table-wrapper {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.violation-table .ant-spin-container > .ant-table {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.violation-table .ant-table-container {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.violation-table .ant-table-header {
+  flex: 0 0 auto;
+}
+
+.violation-table .ant-table-body {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.violation-table .ant-pagination {
+  flex: 0 0 auto;
+  margin-bottom: 0;
+}
+
+/*
+ * 表头不换行（设计 43，2026-10-18）。
+ *
+ * 8 列要在 ~740px 内放下 ⇒ 「处罚处理状态」这种 6 字表头在窄列里会被拆成两行，
+ * 表头整行高度翻倍、下面所有行跟着错位。表头单行 + 单元格 `nowrap` 是千帆的做法。
+ */
+.violation-table .violation-th-nowrap {
+  white-space: nowrap;
+}
+
+.violation-table .ant-table-thead > tr > th {
+  white-space: nowrap;
+}
+
+/* 时间列两行会把整行撑高（2026-10-18 实测 → 单行） */
+.violation-table .violation-td-nowrap {
+  white-space: nowrap;
+}
+
+

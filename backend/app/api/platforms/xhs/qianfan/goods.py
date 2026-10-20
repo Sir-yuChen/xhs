@@ -11,7 +11,7 @@ from ._shared import (
     ABSOLUTE_PAGE_CAP,
     APIRouter,
     Any,
-    BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE,
+    BUSINESS_KEY_PRODUCT_DETAIL_IMAGE,
     BaseModel,
     CandidateQuery,
     ConfigDict,
@@ -1019,7 +1019,7 @@ def generate_detail_image(
     # `is not None` 把失败吞成「回落本地拼接」，是**有意**的（不因润色模型没配把
     # 整个功能判死）；出图服务商没配则必须响 —— 两者判据不同，不许合并。
     model_config, api_key = _business_model_context(
-        db, current_user, BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE
+        db, current_user, BUSINESS_KEY_PRODUCT_DETAIL_IMAGE
     )
 
     # v2.24（§13.5.4）：**公共提示词模板优先**（用户口径「生成图片时应选择公共提示词
@@ -1056,7 +1056,7 @@ def generate_detail_image(
     refine_note = ""
     if payload.refine_prompt:
         text_client, text_config, text_key = _text_model_context(
-            db, current_user, BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE
+            db, current_user, BUSINESS_KEY_PRODUCT_DETAIL_IMAGE
         )
         if text_client is not None:
             refined, refine_note = detail_image_prompt.refine_prompt(

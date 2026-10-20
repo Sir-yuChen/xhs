@@ -230,6 +230,12 @@ class Settings(BaseSettings):
     # ⚠️ 运行期可在设置页改（`system_settings` 行优先于本值）。
     xhs_image_upload_parallelism: int = 5
 
+    #: 笔记**图片总数**（一篇笔记最多几张图）—— 生成链路的组合总闸（设计 41 §17）。
+    #: ⚠️ **平台硬顶 18**（官方 `xhs.postNote` 原文「图片可以多张（1-18）」），
+    #:    本值是我们**自己收窄**的产品默认（改它不动平台契约）。
+    #: 用户口径 2026-10-16：「笔记图的总数是固定的…配置到 config 表中支持动态调整」。
+    xhs_note_image_total_limit: int = 6
+
     # Asset storage
     asset_storage_type: str = "local"
 

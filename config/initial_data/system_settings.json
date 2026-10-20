@@ -43,6 +43,16 @@
       "is_dangerous": false
     },
     {
+      "key": "xhs_note_image_total_limit",
+      "value": 6,
+      "value_type": "int",
+      "category": "note",
+      "label": "笔记图片总数上限",
+      "description": "一篇笔记最多几张图，默认 6。平台硬顶 18（官方发布契约：图片可以多张，1-18 张），填大于 18 会被夹到 18。生成笔记时「商品图 + 本地素材 + 智能生成」三类加起来不得超过这个数：界面按它限制勾选数量，后端按它做组合总闸（超了直接 400）。改完立即生效，无需重启。",
+      "requires_restart": false,
+      "is_dangerous": false
+    },
+    {
       "key": "xhs_image_upload_parallelism",
       "value": 5,
       "value_type": "int",

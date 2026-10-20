@@ -1033,6 +1033,9 @@ class BatchDeleteNotesRequest(BaseModel):
     note_ids: list[str] = Field(min_length=1)
     #: True = 删本地 + 平台；False = 只删本地（默认）。
     delete_platform: bool = False
+    #: 账号（可选）。**本地没有这些笔记时必须给** —— 否则无法确定打哪个平台的令牌。
+    #: 给了就一定按它走（即使本地笔记的归属账号与它不同，也不静默改）。
+    platform_account_id: int | None = None
 
 
 @router.post("/batch-delete")
@@ -1091,16 +1094,25 @@ def batch_delete_notes_endpoint(
         db.commit()
         return {"deleted": deleted, "failed": failed, "results": results}
 
-    # 删本地 + 平台：先删平台，成功后再删本地。
-    # 取账号 cookies（用第一笔笔记的 platform_account_id 归属账号）。
-    account_id = None
-    for n in notes:
-        if n.platform_account_id:
-            account_id = n.platform_account_id
-            break
+    # 删本地 + 平台：**先删平台，成功后再删本地**（设计 44 用户口径）。
+    # 账号：优先用请求里给的（本地没这些笔记时只能靠它），否则取第一笔本地笔记的归属账号。
+    account_id = payload.platform_account_id
+    if account_id is None:
+        for n in notes:
+            if n.platform_account_id:
+                account_id = n.platform_account_id
+                break
     if account_id is None:
         db.rollback()
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="笔记缺少归属账号")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="这批笔记本地都没有记录，需显式指定 platform_account_id 才能删除平台数据",
+        )
+
+    # 用自己的账号做归属校验（不给别人的账号当令牌用）
+    from backend.app.api.platforms.xhs.qianfan._shared import _owned_account
+
+    _owned_account(db, current_user, account_id)
 
     ark_cookies = latest_cookies_for_channel(db, account_id, CHANNEL_ARK) or ""
     creator_cookies = latest_cookies_for_channel(db, account_id, CHANNEL_CREATOR) or ""
@@ -1121,62 +1133,127 @@ def batch_delete_notes_endpoint(
     creator_ids: list[str] = []
     for nid in wanted:
         note = by_note_id.get(nid)
-        if note is None:
-            results.append({"note_id": nid, "ok": False, "reason": "本地无此笔记"})
-            failed.append({"note_id": nid, "reason": "本地无此笔记"})
-        elif flag_by_note_id.get(nid) == "goods_note":
+        # ⚠️ 2026-10-18 口径修正（设计 44）：本地没有**不再直接判失败** ——
+        #    旧写法在这里 `failed` 完就 continue，**根本不打平台**，于是「平台有、
+        #    本地没同步过」的笔记永远删不掉。新口径：先删平台，本地没有就跳过。
+        #    是否分区（商业/普通）仍看统计表；本地无统计行 ⇒ 按普通笔记处理。
+        if note is not None and flag_by_note_id.get(nid) == "goods_note":
             goods_ids.append(nid)
         else:
             creator_ids.append(nid)
 
     # 商业笔记：千帆批量删除（一次请求删整组）。成功后逐篇 purge 本地。
     if goods_ids:
-        if qianfan_adapter is None:
-            for nid in goods_ids:
-                results.append({"note_id": nid, "ok": False, "reason": "缺少千帆(ark)登录态"})
-                failed.append({"note_id": nid, "reason": "缺少千帆(ark)登录态"})
-        else:
+        # 商业笔记：**千帆先试 → 创作者兜底 → 任一成功即止**（用户 2026-10-18：
+        # 「均调用一次，先走普通再走千帆，其中一个成功就不再走其它的」）。
+        # ⚠️ 顺序不同不矛盾：商业笔记的**正路**本来就是千帆，普通笔记的正路是创作者；
+        #    两者都是「正路失败再兜底」，绝不是各删一次。
+        goods_ok_ids: list[str] = []
+        goods_fail: dict[str, str] = {}
+
+        if qianfan_adapter is not None:
             try:
                 ok, msg, _ = qianfan_adapter.batch_delete_notes(goods_ids)
             except Exception as exc:  # noqa: BLE001
                 ok, msg = False, f"千帆删除异常：{type(exc).__name__}: {exc}"
             if ok:
-                for nid in goods_ids:
-                    note = by_note_id.get(nid)
-                    if note is not None:
-                        purge_note(db, note)
-                    deleted += 1
-                    results.append({"note_id": nid, "ok": True})
+                goods_ok_ids = list(goods_ids)
             else:
                 for nid in goods_ids:
-                    results.append({"note_id": nid, "ok": False, "reason": str(msg)})
-                    failed.append({"note_id": nid, "reason": str(msg)})
+                    goods_fail[nid] = f"千帆通道：{msg}"
+        else:
+            for nid in goods_ids:
+                goods_fail[nid] = "千帆通道：缺少千帆(ark)登录态"
 
-    # 普通笔记：creator 逐篇（先权限校验再删）。成功后 purge 本地。
+        # 千帆没删掉的，创作者再试一次（有成就不再调）
+        for nid in goods_ids:
+            if nid in goods_ok_ids:
+                continue
+            if creator_adapter is None:
+                goods_fail[nid] = f"{goods_fail.get(nid, '')}；普通笔记通道：缺少创作者登录态"
+                continue
+            try:
+                ok, msg, _ = creator_adapter.validate_delete_permission(nid)
+                if ok:
+                    ok, msg, _ = creator_adapter.delete_note(nid)
+            except Exception as exc:  # noqa: BLE001
+                ok, msg = False, f"创作者异常：{type(exc).__name__}: {exc}"
+            if ok:
+                goods_ok_ids.append(nid)
+                goods_fail.pop(nid, None)
+            else:
+                goods_fail[nid] = f"{goods_fail.get(nid, '')}；普通笔记通道：{msg}"
+
+        for nid in goods_ids:
+            if nid in goods_ok_ids:
+                note = by_note_id.get(nid)
+                if note is not None:
+                    purge_note(db, note)
+                    deleted += 1
+                    results.append({"note_id": nid, "ok": True, "status": "deleted"})
+                else:
+                    # 平台删了、本地没有 ⇒ 跳过（不是失败）
+                    results.append({
+                        "note_id": nid, "ok": True, "status": "platform_only",
+                        "reason": "平台已删除；本地没有这条笔记，已跳过",
+                    })
+            else:
+                reason = goods_fail.get(nid) or "平台删除失败"
+                results.append({"note_id": nid, "ok": False, "reason": reason})
+                failed.append({"note_id": nid, "reason": reason})
+
+    # 普通笔记：**创作者通道先试 → 千帆兜底 → 任一成功即止**（用户 2026-10-18 口径：
+    # 「商业笔记和普通笔记均调用一次，先走普通再走千帆，如果其中一个成功则不再走其它的」）。
+    # 旧写法 creator 不可用就整条失败，而账号 8 实测创作者会话过期、千帆却可用 ⇒
+    # 能删的笔记被判失败。
     for nid in creator_ids:
         note = by_note_id.get(nid)
-        if note is None:
-            continue
-        if creator_adapter is None:
-            results.append({"note_id": nid, "ok": False, "reason": "缺少创作者登录态"})
-            failed.append({"note_id": nid, "reason": "缺少创作者登录态"})
-            continue
-        try:
-            ok, msg, _ = creator_adapter.validate_delete_permission(nid)
-            if not ok:
-                results.append({"note_id": nid, "ok": False, "reason": f"权限校验失败：{msg}"})
-                failed.append({"note_id": nid, "reason": f"权限校验失败：{msg}"})
-                continue
-            ok, msg, _ = creator_adapter.delete_note(nid)
-        except Exception as exc:  # noqa: BLE001
-            ok, msg = False, f"创作者删除异常：{type(exc).__name__}: {exc}"
-        if ok:
-            purge_note(db, note)
-            deleted += 1
-            results.append({"note_id": nid, "ok": True})
+        reason_parts: list[str] = []
+        platform_ok = False
+
+        if creator_adapter is not None:
+            try:
+                ok, msg, _ = creator_adapter.validate_delete_permission(nid)
+                if ok:
+                    ok, msg, _ = creator_adapter.delete_note(nid)
+            except Exception as exc:  # noqa: BLE001
+                ok, msg = False, f"创作者异常：{type(exc).__name__}: {exc}"
+            if ok:
+                platform_ok = True
+            else:
+                reason_parts.append(f"普通笔记通道：{msg}")
         else:
-            results.append({"note_id": nid, "ok": False, "reason": str(msg)})
-            failed.append({"note_id": nid, "reason": str(msg)})
+            reason_parts.append("普通笔记通道：缺少创作者登录态")
+
+        # ① 没成功 ⇒ 千帆再试一次；② 成功了就不再调另一条
+        if not platform_ok:
+            if qianfan_adapter is not None:
+                try:
+                    ok, msg, _ = qianfan_adapter.batch_delete_notes([nid])
+                except Exception as exc:  # noqa: BLE001
+                    ok, msg = False, f"千帆异常：{type(exc).__name__}: {exc}"
+                if ok:
+                    platform_ok = True
+                else:
+                    reason_parts.append(f"千帆通道：{msg}")
+            else:
+                reason_parts.append("千帆通道：缺少千帆(ark)登录态")
+
+        if platform_ok:
+            if note is not None:
+                purge_note(db, note)
+                deleted += 1
+                results.append({"note_id": nid, "ok": True, "status": "deleted"})
+            else:
+                # 平台删了、本地没有 ⇒ 跳过（不是失败）
+                results.append({
+                    "note_id": nid, "ok": True, "status": "platform_only",
+                    "reason": "平台已删除；本地没有这条笔记，已跳过",
+                })
+        else:
+            reason = "；".join(reason_parts) or "平台删除失败"
+            results.append({"note_id": nid, "ok": False, "reason": reason})
+            failed.append({"note_id": nid, "reason": reason})
 
     db.commit()
     return {"deleted": deleted, "failed": failed, "results": results}

@@ -69,6 +69,7 @@ LIVE_KEYS: dict[str, str] = {
     "xhs_allow_duplicate_goods_publish": "note_publish_service 商品重复发布门禁（设计 13 §31.5.2）",
     "xhs_image_upload_parallelism": "媒体上传并发数（商品主图/详情图/规格图共用；设计 24 §22）",
     "xhs_ocr_parallelism": "image_ocr_service 违规词检测（OCR）的**起始**并发数；实际并发按 CPU 核数与目标耗时自动上调（设计 24 §22.9）",
+    "xhs_note_image_total_limit": "笔记图片总数上限（生成链路组合总闸；平台硬顶 18，设计 41 §17）",
 }
 
 #: 内置兜底默认值（第 3 层）。**只放 `LIVE_KEYS` 里的键** —— 给没有读点的键编一个默认值
@@ -95,6 +96,11 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     #:   待处理图数 / CPU 核数 / 目标总耗时（30s）**自动上调**，配置值是下限。
     #:   引擎 2026-10-13 由 Windows OCR 换为 RapidOCR（单图 0.95s → 3.3s）。
     "xhs_ocr_parallelism": 5,
+    #: 笔记图片总数上限（用户口径 2026-10-16：默认 6，可在 config 表调整）。
+    #: ⚠️ **平台硬顶 18**（官方 `xhs.postNote`：「图片可以多张（1-18）」）——
+    #:    这里的 6 是我们刻意收窄的产品默认，**不是平台限制**；用户改大也不会违反契约，
+    #:    但超过 18 会被 `resolve_note_image_limit` 夹住（平台契约优先，见设计 41 §17.3）。
+    "xhs_note_image_total_limit": 6,
 }
 
 #: 宽松布尔文本（`coerce_value` 与 `live_bool` **共用同一份**）——
@@ -119,6 +125,10 @@ _KEY_BOUNDS: dict[str, tuple[int, int]] = {
     "xhs_sync_account_parallelism": (1, 8),
     "xhs_sync_account_gap_seconds": (0, 600),
     "xhs_ocr_parallelism": (1, 32),
+    #: 笔记图片总数（用户口径 2026-10-16）。**上界 = 平台硬顶 18** ——
+    #: 官方 `xhs.postNote`：「图片可以多张（1-18）」；夹在这里 = 配置怎么填都不会
+    #: 让生成出平台契约之外的图（下界 1：0 张图不成图文笔记）。
+    "xhs_note_image_total_limit": (1, 18),
 }
 
 #: 进程内缓存：`(user_id, key) -> (值, 过期时刻)`。

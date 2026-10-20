@@ -71,7 +71,7 @@ from backend.app.models.generation import (
 from backend.app.models.note import NoteTopic
 from backend.app.services import note_gen_llm_worker as gw
 from backend.app.services import note_queue_service as nqs
-from backend.app.services.business_provider_keys import BUSINESS_KEY_GENERATE_NOTE
+from backend.app.services.business_provider_keys import BUSINESS_KEY_LLM_NOTE_TEXT
 from tests.backend.conftest import upsert_business_mapping
 
 BATCH = "/api/xhs/product-notes/batch-generate-llm"
@@ -254,7 +254,7 @@ def _seed_gateway(db, user: User, account: PlatformAccount) -> LlmGatewayConfig:
     upsert_business_mapping(
         db,
         user_id=user.id,
-        business_key=BUSINESS_KEY_GENERATE_NOTE.key,
+        business_key=BUSINESS_KEY_LLM_NOTE_TEXT.key,
         provider_key=PROVIDER_KEY,
         model_name=MODEL_NAME,
     )
@@ -398,10 +398,14 @@ def test_gate_failures_never_call_upstream(llm_env, db_factory):
 # --------------------------------------------------------------------------- #
 # ② 正路径：入队即返回 + worker 落库六处
 # --------------------------------------------------------------------------- #
-def test_single_enqueue_returns_queued_and_worker_persists_note(
+def test_single_generate_is_synchronous_and_persists_note(
     clean_gen_llm_globals, llm_env, db_factory
 ):
-    """入队回执是毫秒级 `{ok, status:queued, record_id}`；worker 落库全套。"""
+    """**同步生成**：一次请求跑完并**直接返回结果**（用户口径 2026-10-18）。
+
+    原断言是「入队回执 `{ok, status:queued, record_id}` + 等 worker 落库」，
+    口径已改为*「不要放入队列中直接同步等待」* ⇒ 响应体里就该有标题/正文/话题/配图。
+    """
     client, headers, uid, account_id, product_pk = llm_env
 
     resp = client.post(
@@ -412,11 +416,12 @@ def test_single_enqueue_returns_queued_and_worker_persists_note(
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["ok"] is True
-    assert body["status"] == "queued"
-    assert body["record_id"] > 0, "入队必须回执可跳转的审计行 id"
-    assert "already_queued" not in body
-
-    assert gw.wait_llm_generate_done(timeout=20), "队列未跑空"
+    assert body["record_id"] > 0, "必须回执审计行 id（局部重生成以它为基线）"
+    #: 同步契约：结果**就在响应体里**（不再有 `status: queued` / `already_queued`）
+    assert body["title"], "同步生成必须直接返回标题"
+    assert body["body"], "同步生成必须直接返回正文"
+    assert "media" in body, "同步生成必须返回配图清单"
+    assert "status" not in body, "同步路径不该再回执队列状态"
 
     db = db_factory()
     try:
@@ -451,30 +456,32 @@ def test_single_enqueue_returns_queued_and_worker_persists_note(
     assert len(_records(db_factory)) == 1
 
 
-def test_retry_is_idempotent_while_not_terminal(clean_gen_llm_globals, llm_env, db_factory):
-    """同商品未终态时重复入队 ⇒ `already_queued`，队列仍只有一条。"""
+def test_each_call_generates_a_new_version(clean_gen_llm_globals, llm_env, db_factory):
+    """**同步口径下「重复点」= 生成新版本**（原断言是入队幂等 `already_queued`）。
+
+    用户口径 2026-10-18：*「不要放入队列中直接同步等待，因为用户生成后应支持用户
+    对生成后的结果部分位置进行重复生成」* —— 同步之后「再点一次」在语义上就是
+    **再生成一版**（这是用户要的能力），不再是「已在队列中」的幂等回执。
+
+    判据：两次调用各回一个 record_id、各落一条版本行，且版本号递增。
+    """
     client, headers, _uid, account_id, _pk = llm_env
-    # 把上游卡在「已认领未跑完」的确定态（假上游秒返回会让第二条请求到达前就终态）
-    FakeUpstream.hold = threading.Event()
 
     first = client.post(
         SINGLE, json={"platform_account_id": account_id, "item_id": ITEM_ID}, headers=headers
     )
-    assert first.status_code == 200 and "already_queued" not in first.json()
+    assert first.status_code == 200, first.text
+    assert "already_queued" not in first.json(), "同步路径不该再有入队幂等回执"
 
     second = client.post(
         SINGLE, json={"platform_account_id": account_id, "item_id": ITEM_ID}, headers=headers
     )
     assert second.status_code == 200, second.text
-    assert second.json().get("already_queued") is True
-    # 幂等回执必须回填首次的 record_id（否则前端「已在队列中」拿不到跳转目标）
-    assert second.json()["record_id"] == first.json()["record_id"]
-
-    assert len(_gen_items(db_factory)) == 1
-    assert len(_records(db_factory)) == 1
-
-    FakeUpstream.hold.set()  # 放行，让 worker 收尾
-    gw.wait_llm_generate_done(timeout=20)
+    assert second.json()["record_id"] != first.json()["record_id"], "第二次应产生新版本"
+    assert second.json()["version_no"] > first.json()["version_no"], "版本号应递增"
+    #: 两次都在响应体里直接给结果（同步）
+    assert second.json()["title"] and second.json()["body"]
+    assert len(_records(db_factory)) == 2
 
 
 # --------------------------------------------------------------------------- #
@@ -497,10 +504,10 @@ def test_guardrail_block_marks_failed_and_writes_no_note(
     resp = client.post(
         SINGLE, json={"platform_account_id": account_id, "item_id": ITEM_ID}, headers=headers
     )
-    assert resp.status_code == 200
-    record_id = resp.json()["record_id"]
-
-    assert gw.wait_llm_generate_done(timeout=20)
+    #: **同步口径**：护栏拦截在请求内就判完 ⇒ 直接结构化 4xx（原断言是 200 + 等 worker）
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["detail"]["code"] == "LLM_GUARDRAIL_BLOCKED"
+    record_id = _records(db_factory)[0].id
 
     db = db_factory()
     try:
@@ -514,20 +521,23 @@ def test_guardrail_block_marks_failed_and_writes_no_note(
 
 
 def test_non_json_response_marks_failed_with_code(clean_gen_llm_globals, llm_env, db_factory):
-    """模型没按 JSON 回 ⇒ `LLM_RESPONSE_NOT_JSON` + `failed`。"""
+    """模型没按 JSON 回 ⇒ `LLM_RESPONSE_NOT_JSON` + `failed`（**同步：直接 4xx**）。"""
     client, headers, _uid, account_id, _pk = llm_env
     FakeUpstream.reply = "抱歉，我不太明白你的需求，可以再说一遍吗？"
     resp = client.post(
         SINGLE, json={"platform_account_id": account_id, "item_id": ITEM_ID}, headers=headers
     )
-    record_id = resp.json()["record_id"]
-    assert gw.wait_llm_generate_done(timeout=20)
+    #: 同步口径：失败在请求内就归因，不必等 worker（原断言是 200 + 轮询队列）
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["detail"]["code"] == "LLM_RESPONSE_NOT_JSON"
 
     db = db_factory()
     try:
         assert db.scalar(select(Note)) is None
-        record = db.get(GenerationRecord, record_id)
-        assert record.status == GEN_STATUS_FAILED
+        record = db.scalars(
+            select(GenerationRecord).where(GenerationRecord.status == GEN_STATUS_FAILED)
+        ).first()
+        assert record is not None, "失败也要留下审计行（跨重启可查）"
         assert record.error_code == "LLM_RESPONSE_NOT_JSON"
     finally:
         db.close()
@@ -536,33 +546,22 @@ def test_non_json_response_marks_failed_with_code(clean_gen_llm_globals, llm_env
 # --------------------------------------------------------------------------- #
 # ④ 批量：坏项不阻断好项
 # --------------------------------------------------------------------------- #
-def test_batch_gate_failure_isolated_per_item(clean_gen_llm_globals, llm_env, db_factory):
-    """批量里「台账找不到」的项进逐项回执，不阻断其余项入队。"""
-    client, headers, _uid, account_id, _pk = llm_env
-    FakeUpstream.hold = threading.Event()
+def test_batch_endpoint_is_gone(clean_gen_llm_globals, llm_env, db_factory):
+    """**批量生成已退场**（用户口径 2026-10-18：*「暂时不支持批量生成」*）⇒ 410。
 
+    原用例是「批量里坏项不阻断好项」—— 批量入口不存在了，那条语义自然失效。
+    判据换成「老客户端拿到明确原因（410 + code），而不是 404」。
+    """
+    client, headers, _uid, account_id, _pk = llm_env
     resp = client.post(
         BATCH,
-        json={
-            "platform_account_id": account_id,
-            "item_ids": [ITEM_ID, "GHOST-ITEM"],
-        },
+        json={"platform_account_id": account_id, "item_ids": [ITEM_ID]},
         headers=headers,
     )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["total"] == 2
-    assert body["started"] == 1
-    assert body["failed"] == 1
-    by_item = {entry["item_id"]: entry for entry in body["results"]}
-    assert by_item[ITEM_ID]["ok"] is True
-    assert by_item["GHOST-ITEM"]["ok"] is False
-    assert by_item["GHOST-ITEM"]["code"] == "LLM_PRODUCT_NOT_FOUND"
-    # 好项确实入了队（且只有它一条）
-    assert len(_gen_items(db_factory)) == 1
-
-    FakeUpstream.hold.set()
-    gw.wait_llm_generate_done(timeout=20)
+    assert resp.status_code == 410, resp.text
+    assert resp.json()["detail"]["code"] == "LLM_BATCH_GENERATE_GONE"
+    #: 退场后不该留下任何队列项
+    assert len(_gen_items(db_factory)) == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -574,8 +573,8 @@ def test_retry_only_for_failed_records(clean_gen_llm_globals, llm_env, db_factor
     resp = client.post(
         SINGLE, json={"platform_account_id": account_id, "item_id": ITEM_ID}, headers=headers
     )
+    assert resp.status_code == 200, resp.text
     record_id = resp.json()["record_id"]
-    assert gw.wait_llm_generate_done(timeout=20)
 
     db = db_factory()
     try:
@@ -593,17 +592,20 @@ def test_retry_requeues_same_record_and_reuses_audit_row(
 ):
     """失败 → retry：新队列项 + **原审计行复位**（仍是一条记录）。"""
     client, headers, _uid, account_id, _pk = llm_env
-    # 第一跑必然失败（非 JSON）
+    # 第一跑必然失败（非 JSON）—— **同步口径：直接 4xx**，record_id 从审计行取
     FakeUpstream.reply = "不是 JSON"
     resp = client.post(
         SINGLE, json={"platform_account_id": account_id, "item_id": ITEM_ID}, headers=headers
     )
-    record_id = resp.json()["record_id"]
-    assert gw.wait_llm_generate_done(timeout=20)
+    assert resp.status_code == 400, resp.text
 
     db = db_factory()
     try:
-        assert db.get(GenerationRecord, record_id).status == GEN_STATUS_FAILED
+        record = db.scalars(
+            select(GenerationRecord).where(GenerationRecord.status == GEN_STATUS_FAILED)
+        ).first()
+        assert record is not None
+        record_id = int(record.id)
     finally:
         db.close()
     assert len(_records(db_factory)) == 1
@@ -641,8 +643,8 @@ def test_queue_snapshot_shape_uses_generated_key(clean_gen_llm_globals, llm_env,
     resp = client.post(
         SINGLE, json={"platform_account_id": account_id, "item_id": ITEM_ID}, headers=headers
     )
-    assert resp.status_code == 200
-    assert gw.wait_llm_generate_done(timeout=20)
+    #: **同步口径**：失败在请求内归因 ⇒ 400（原断言是 200 + 等 worker）
+    assert resp.status_code == 400, resp.text
 
     snap = client.get(SNAPSHOT, headers=headers)
     assert snap.status_code == 200, snap.text
@@ -651,10 +653,11 @@ def test_queue_snapshot_shape_uses_generated_key(clean_gen_llm_globals, llm_env,
     assert "synced" not in data, "底座键名 synced 不许漏出"
     for key in ("running", "queued", "total", "generated", "failed", "finished"):
         assert key in data, f"快照缺字段 {key}"
-    assert data["failed"] == 1
-    assert data["generated"] == 0
+    #: ⚠️ **同步口径**：失败在请求内就归因（4xx），队列项终态即 `failed`。
+    #: 原断言 `data["failed"] == 1` 是「入队后 worker 失败」的时期口径；
+    #: 现在失败项照样落进 `finished`（近期窗口），但计数口径由底座给。
     finished = [entry for entry in data["finished"] if entry.get("ok") is False]
-    assert finished, "失败项应出现在 finished"
+    assert finished, "失败项应出现在 finished（近期窗口）"
     # reason 优先取审计行的 error_message（跨重启留存 —— T5 三表存在的理由）
     assert "JSON" in (finished[0].get("reason") or "") or finished[0].get("code") == (
         "LLM_RESPONSE_NOT_JSON"
@@ -674,11 +677,16 @@ def test_worker_survives_system_exit_and_marks_failed(
     resp = client.post(
         SINGLE, json={"platform_account_id": account_id, "item_id": ITEM_ID}, headers=headers
     )
-    record_id = resp.json()["record_id"]
-    assert gw.wait_llm_generate_done(timeout=20), "SystemExit 把队列卡住了"
+    #: **同步口径**：SystemExit 由 worker 内层网兜住并写终态 ⇒ 请求内即归因（4xx）
+    assert resp.status_code == 400, resp.text
 
     db = db_factory()
     try:
+        record = db.scalars(
+            select(GenerationRecord).where(GenerationRecord.status == GEN_STATUS_FAILED)
+        ).first()
+        assert record is not None
+        record_id = int(record.id)
         item = db.scalar(select(Task).where(Task.task_type == nqs.TASK_TYPE_GEN_LLM_ITEM))
         assert item is not None and item.status != "running", "项仍挂在 running"
         record = db.get(GenerationRecord, record_id)
@@ -698,3 +706,99 @@ def test_generation_records_one_row_per_generation(clean_gen_llm_globals, llm_en
     assert resp.status_code == 200
     assert gw.wait_llm_generate_done(timeout=20)
     assert len(_records(db_factory)) == 1
+
+
+def test_model_name_override_is_rejected(api_client, db_factory, monkeypatch):
+    """⚠️ **请求里指定模型名必须 400**（用户口径 2026-10-16：*「不允许随意设置模型名」*）。
+
+    模型由**业务点映射**决定；允许覆盖 = 给映射开后门（填个没配的模型名，
+    入队时看不出问题、运行期才 502）。判据落在**端点同步段**（不是 worker）：
+    错误要在入队前报出来，而且**队列零行**。
+    """
+    _reset_fake()
+    monkeypatch.setattr(gw.llm_gateway_client, "complete_text", FakeUpstream.complete_text)
+    monkeypatch.setattr(gw, "_session_factory", db_factory)
+
+    r = api_client.post(
+        "/api/auth/register", json={"username": "model-override", "password": "secret123"}
+    )
+    headers = {"Authorization": f"Bearer {r.json()['access_token']}"}
+    db = db_factory()
+    try:
+        user = db.scalar(select(User).where(User.username == "model-override"))
+        account = PlatformAccount(
+            user_id=user.id, platform="xhs", sub_type="creator", nickname="改模型名", status="active"
+        )
+        db.add(account)
+        db.flush()
+        db.add(
+            ShopProduct(
+                user_id=user.id,
+                platform_account_id=account.id,
+                item_id=ITEM_ID,
+                item_title="防水桌布",
+                price="5440",
+                images_json="[]",
+                raw_json="{}",
+            )
+        )
+        db.commit()
+        account_id = account.id
+    finally:
+        db.close()
+
+    resp = api_client.post(
+        SINGLE,
+        json={
+            "platform_account_id": account_id,
+            "item_id": ITEM_ID,
+            "model_name": "我自己乱填的模型",
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 400, "指定模型名必须被拒（用户口径：不允许随意设置模型名）"
+    assert resp.json()["detail"]["code"] == "LLM_MODEL_OVERRIDE_NOT_ALLOWED"
+
+
+def test_empty_model_name_is_not_treated_as_an_override(api_client, db_factory, monkeypatch):
+    """空模型名 = **不指定**，不该被判成「指定了模型名」（别把合法请求也拦掉）。"""
+    _reset_fake()
+    monkeypatch.setattr(gw.llm_gateway_client, "complete_text", FakeUpstream.complete_text)
+    monkeypatch.setattr(gw, "_session_factory", db_factory)
+
+    r = api_client.post(
+        "/api/auth/register", json={"username": "model-empty", "password": "secret123"}
+    )
+    headers = {"Authorization": f"Bearer {r.json()['access_token']}"}
+    db = db_factory()
+    try:
+        user = db.scalar(select(User).where(User.username == "model-empty"))
+        account = PlatformAccount(
+            user_id=user.id, platform="xhs", sub_type="creator", nickname="空模型名", status="active"
+        )
+        db.add(account)
+        db.flush()
+        db.add(
+            ShopProduct(
+                user_id=user.id,
+                platform_account_id=account.id,
+                item_id=ITEM_ID,
+                item_title="防水桌布",
+                price="5440",
+                images_json="[]",
+                raw_json="{}",
+            )
+        )
+        db.commit()
+        account_id = account.id
+    finally:
+        db.close()
+
+    resp = api_client.post(
+        SINGLE,
+        json={"platform_account_id": account_id, "item_id": ITEM_ID, "model_name": ""},
+        headers=headers,
+    )
+    detail = resp.json().get("detail") if resp.status_code == 400 else {}
+    code = detail.get("code") if isinstance(detail, dict) else ""
+    assert code != "LLM_MODEL_OVERRIDE_NOT_ALLOWED", "空的模型名不该被判成「指定了模型名」"

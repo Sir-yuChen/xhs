@@ -328,8 +328,8 @@ class LlmBusinessProvider(Base):
     __tablename__ = "llm_business_providers"
     __table_args__ = (
         UniqueConstraint(
-            "user_id", "platform", "business_key",
-            name="uq_llm_business_providers_user_platform_business_key",
+            "user_id", "platform", "business_key", "kind",
+            name="uq_llm_business_providers_user_platform_business_key_kind",
         ),
     )
 
@@ -339,6 +339,22 @@ class LlmBusinessProvider(Base):
     platform: Mapped[str] = mapped_column(String(32), nullable=False, default="xhs")
     #: 业务点固定 key（`BUSINESS_KEY_*` 常量之一，用户不可改）
     business_key: Mapped[str] = mapped_column(String(48), nullable=False)
+    #: **这一行服务的能力类型**（`text` / `image` / `video` / `multimodal`）。
+    #:
+    #: 用户口径 2026-10-18：
+    #: > 「一个业务点支持用户配置**多个类型**模型，**每个类型只能配置一个**…
+    #: >   该业务点必须配置一个文本模型，一个图片模型，一个视频模型，
+    #: >   用户可以手动添加不同类型的模型，但是**相同类型的模型不允许重复添加**，
+    #: >   同一个类型的模型支持切换」
+    #:
+    #: ⇒ 一个业务点 = N 行（每类型一行），唯一键随之扩为
+    #: `(user_id, platform, business_key, kind)`。
+    #: ⚠️ 为什么允许「一行 kind=`text`」之后再插 `image`：`generate_note` 一次要
+    #: 写文案 + 配图 + 出视频，三类缺一不可（见 `BusinessKey.needs`）。
+    #:
+    #: 存量行由迁移回填为**该业务点自身的** `kind`（`BusinessKey.kind`），
+    #: 语义与改造前完全一致 —— 老配置照旧生效，不会因为多了这一列而失效。
+    kind: Mapped[str] = mapped_column(String(16), nullable=False, default="text")
     #: 指向 `llm_gateway_configs.provider_key`（裸列，应用层校验归属与类型匹配）
     provider_key: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     #: ⚠️ **v2.3 新增**：业务点显式选定的**具体模型名**（必须落在该服务商的模型目录里）。

@@ -60,7 +60,12 @@ from backend.app.models.generation import (
     GEN_STATUS_RUNNING,
     GEN_STATUS_SUCCESS,
     MEDIA_SOURCE_PRODUCT_IMAGE,
+    REGEN_SCOPE_BODY,
+    REGEN_SCOPE_TITLE,
+    REGEN_SCOPE_TOPICS,
+    REGEN_TEXT_FIELD_SCOPES,
 )
+from backend.app.models.shop import NoteGoods
 from backend.app.models.note import (
     NOTE_TYPE_LOCAL_GENERATED,
     PUBLISH_STATUS_PENDING,
@@ -70,12 +75,25 @@ from backend.app.models.note import (
 )
 from backend.app.models.shop_product import ShopProduct
 from backend.app.models.user import User
-from backend.app.services import llm_gateway_client, note_queue_service
-from backend.app.services.business_provider_keys import BUSINESS_KEY_GENERATE_NOTE
+from backend.app.services import (
+    copy_requirements,
+    llm_gateway_client,
+    note_queue_service,
+    note_version_service,
+)
+from backend.app.services.business_provider_keys import BUSINESS_KEY_LLM_NOTE_TEXT
 from backend.app.services.llm_gateway_client import LLMGatewayError
 from backend.app.services.media_generation import (
     MediaGenerationError,
+    build_media_plan_assets,
     build_note_media,
+)
+#: v2.26（M-C1）：组合计划的归一化 / 校验 / 摘要（**唯一实现**）。
+from backend.app.services.media_plan import (
+    has_cover,
+    normalize_plan,
+    plan_form,
+    plan_summary,
 )
 from backend.app.services.note_gen_llm_service import (
     GeneratedNote,
@@ -224,7 +242,7 @@ def gate_llm_gateway_ready(db: Session, user_id: int) -> User:
     try:
         # v2.0（设计 17 §13.2.4）：入队门禁也走**业务点映射**——
         # 与 worker 实际调用同一入口，门禁过了就不会在 worker 里才发现没配。
-        llm_gateway_client.resolve_business_provider(db, user, BUSINESS_KEY_GENERATE_NOTE)
+        llm_gateway_client.resolve_business_provider(db, user, BUSINESS_KEY_LLM_NOTE_TEXT)
     except LLMGatewayError as error:
         raise NoteGenerationError(error.message, code="LLM_GATEWAY_NOT_CONFIGURED") from error
     return user
@@ -245,8 +263,12 @@ def _llm_payload(
     model_name: str = "",
     media_source: str = MEDIA_SOURCE_PRODUCT_IMAGE,
     media_options: Optional[dict] = None,
+    media_plan: Optional[list] = None,
     record_id: Optional[int] = None,
     item_name: str = "",
+    copy_requirements: Optional[dict] = None,
+    regen_scope: str = "",
+    target_record_id: Optional[int] = None,
 ) -> dict:
     """队列项行体（**入队即完整落库**：展示与执行所需的全在这里，不回头补查）。
 
@@ -272,8 +294,23 @@ def _llm_payload(
     payload["media_source"] = str(media_source or MEDIA_SOURCE_PRODUCT_IMAGE)
     if media_options:
         payload["media_options"] = dict(media_options)
+    #: v2.26（M-C1）：**组合计划**随行体落库（有序段列表）。缺省不写键
+    #: —— 由消费端按「缺 ⇒ 退化为单来源」处理（归一化只有 `media_plan` 一处）。
+    if media_plan:
+        payload["media_plan"] = [dict(seg) for seg in media_plan]
     if record_id:
         payload["record_id"] = int(record_id)
+    #: **文案要求**（用户口径 2026-10-17）：随行体落库（worker 重试时同一份要求）。
+    #: 缺省不写键 —— 缺 ⇒ 走默认（不把所有老行体都补成一份默认配置）。
+    if copy_requirements:
+        payload["copy_requirements"] = dict(copy_requirements)
+    #: **局部重生成参数必须随行体落库**（2026-10-18 实测踩过）：worker 是从
+    #: `payload` 读 `regen_scope` 的，漏写 ⇒ 拿到 `None` ⇒ 按 `all` 走
+    #: ⇒ 逐块合并 / 媒体复用**全部不生效**（表现为「点只改正文，标题也变了」）。
+    if regen_scope and str(regen_scope) != "all":
+        payload["regen_scope"] = str(regen_scope)
+    if target_record_id:
+        payload["target_record_id"] = int(target_record_id)
     return payload
 
 
@@ -290,6 +327,10 @@ def _enqueue_llm_item(
     model_name: str = "",
     media_source: str = MEDIA_SOURCE_PRODUCT_IMAGE,
     media_options: Optional[dict] = None,
+    media_plan: Optional[list] = None,
+    copy_requirements: Optional[dict] = None,
+    regen_scope: str = "all",
+    target_record_id: Optional[int] = None,
 ) -> tuple[Task, bool]:
     """入队一条 LLM 生成项（内部用：`enqueue_item` 直插 + 行体全部字段）。
 
@@ -309,14 +350,29 @@ def _enqueue_llm_item(
         model_name=model_name,
         media_source=media_source,
         media_options=media_options,
+        media_plan=media_plan,
         item_name=str(getattr(row, "item_title", "") or ""),
+        copy_requirements=copy_requirements,
+        regen_scope=regen_scope,
+        target_record_id=target_record_id,
     )
     task_row, created = note_queue_service.enqueue_item(
         db,
         user_id=user_id,
         item_task_type=note_queue_service.TASK_TYPE_GEN_LLM_ITEM,
         account_id=account_id,
-        item_id=payload_extra["item_id"],
+        #: ⚠️ **局部重生成必须用独立幂等键**（2026-10-18 实测踩过）：
+        #: 幂等按 `item_id` 判重，而整篇生成与局部重生成都以「商品主键」为 `item_id`
+        #: ⇒ 点重生成会命中**上一次整篇生成残留的未终态项**，复用它 ⇒
+        #: `record_id` 是旧值、`regen_scope` 是 `all`，最终去改错了行
+        #: （实测报 `UNIQUE constraint ... generation_records`）。
+        #: 加 `regen@当前版本id` 前缀后：重生成只与**同一条当前版本的重生成**判重，
+        #: 既不撞整篇生成，也不撞别的版本。
+        item_id=(
+            f"regen@{int(target_record_id)}"
+            if target_record_id
+            else payload_extra["item_id"]
+        ),
         item_name=payload_extra.get("item_name", ""),
         source=source,
         batch=batch,
@@ -333,6 +389,163 @@ def _enqueue_llm_item(
     return task_row, created
 
 
+def generate_llm_note_sync(
+    db: Session,
+    user_id: int,
+    *,
+    shop_product_id: int,
+    account_id: Optional[int] = None,
+    template_id: Optional[int] = None,
+    gateway_config_id: Optional[int] = None,
+    model_name: str = "",
+    media_source: str = MEDIA_SOURCE_PRODUCT_IMAGE,
+    media_plan: Optional[list] = None,
+    copy_requirements: Optional[Any] = None,
+) -> dict[str, Any]:
+    """**同步**生成一篇 LLM 笔记：入队后**在本线程立刻跑完**，返回最终结果。
+
+    用户口径 2026-10-18：
+
+    > 「调整一下生成笔记**不要放入队列中直接同步等待**」
+
+    ## 为什么不重写生成逻辑
+
+    生成 + 落库 + 记账这一整段在 `_run_one_llm_generate(item_id)` 里，它**自建
+    Session**（worker 线程够不着 FastAPI 的注入层）。同步路径复用同一实现：
+
+    1. 用 `start_llm_generate_note()` 建队列项（**保留**幂等判重、门禁、行体归一）；
+    2. **本线程**直接调 `_run_one_llm_generate(item_id)` —— 跑完再返回；
+    3. 从队列项行体取回 `record_id / note_id`（worker 成功时已写进 payload）；
+    4. 读 `generation_records` 组装返回体（标题/正文/话题/**媒体清单**/文案要求快照）。
+
+    ⚠️ 第 1 步的队列项**不是**「入队等别人跑」—— 它只是承载参数与审计的载体，
+    建完就由当前请求线程消费掉。好处是两条路径共用同一份幂等与失败记账，
+    不会出现「同步一套、队列一套」的两份真相。
+
+    ⚠️ **不吞异常**：worker 内部把失败写进队列项的 `status/reason`（它不许往外抛，
+    否则队列会卡 running）。所以这里跑完必须**回读状态**：`failed` ⇒ 抛
+    `NoteGenerationError`，把原因原样交给 API 层翻译成 4xx/5xx。
+    """
+    receipt = start_llm_generate_note(
+        db,
+        user_id,
+        shop_product_id=shop_product_id,
+        account_id=account_id,
+        template_id=template_id,
+        gateway_config_id=gateway_config_id,
+        model_name=model_name,
+        media_source=media_source,
+        media_plan=media_plan,
+        copy_requirements=copy_requirements,
+        source=note_queue_service.SOURCE_PRODUCT_NOTE_GENERATE_LLM_SINGLE,
+    )
+    item_id = int(receipt.get("item_id") or 0)
+    if not item_id:
+        raise NoteGenerationError("生成任务未能建立（缺少队列项主键）", code="LLM_ITEM_INVALID")
+
+    #: 同步执行（worker 自建 Session，跑完即回）
+    _run_one_llm_generate(item_id)
+
+    return _collect_sync_result(item_id)
+
+
+def regen_llm_note_sync(
+    db: Session,
+    user_id: int,
+    *,
+    shop_product_id: int,
+    regen_scope: str,
+    target_record_id: int,
+    template_id: Optional[int] = None,
+    media_source: str = MEDIA_SOURCE_PRODUCT_IMAGE,
+    media_plan: Optional[list] = None,
+    copy_requirements: Optional[Any] = None,
+) -> dict[str, Any]:
+    """**同步**做一次局部重生成：跑完才返回，不用轮询。
+
+    用户口径 2026-10-18：*「重新生成要同步接口等待」* ——
+    与「整篇生成」同一形态：点完按钮就等结果回填，而不是收一个
+    「已提交（后台执行）」再让用户去版本列表里翻。
+
+    ## 复用同一条链路（不写第二套）
+
+    建队列项 → **本线程**直接跑 → 回读组装。与 `generate_llm_note_sync`
+    只差 `regen_scope` / `target_record_id` 两个参数 —— 幂等判重、失败记账、
+    逐块合并（`_merge_text_scope`）全走同一份实现。
+
+    ⚠️ 当前版本校验（归属 / 商品存在 / scope 合法性）由 API 层先做，这里不再判：
+    那几条都是**确定性答案**，应当在扣费前就 400 掉。
+    """
+    receipt = start_llm_generate_note(
+        db,
+        user_id,
+        shop_product_id=shop_product_id,
+        account_id=None,
+        template_id=template_id,
+        media_source=media_source,
+        media_plan=media_plan or None,
+        copy_requirements=copy_requirements,
+        regen_scope=regen_scope,
+        target_record_id=int(target_record_id),
+        source="llm_generate_regen_sync",
+    )
+    item_id = int(receipt.get("item_id") or 0)
+    if not item_id:
+        raise NoteGenerationError("重生成任务未能建立（缺少队列项主键）", code="LLM_ITEM_INVALID")
+
+    #: 同步执行（worker 自建 Session，跑完即回）
+    _run_one_llm_generate(item_id)
+    return _collect_sync_result(item_id)
+
+
+def _collect_sync_result(item_id: int) -> dict[str, Any]:
+    """跑完之后**回读队列项**组装返回值（同步生成与同步重生成共用）。
+
+    ⚠️ 回读要**新开 Session**：worker 用的是它自己那个，请求线程的 `db` 里看不到
+    它提交的改动（SQLite + 独立连接 ⇒ 旧快照）。
+    """
+    check = _session_factory()
+    try:
+        item = check.get(Task, item_id)
+        if item is None:
+            raise NoteGenerationError("生成任务已不存在（可能被清理）", code="LLM_ITEM_INVALID")
+        payload = item.payload if isinstance(item.payload, dict) else {}
+        if str(item.status or "") != "done":
+            reason = str(payload.get("reason") or "生成失败（未给出原因）")
+            code = str(payload.get("code") or "LLM_GENERATE_FAILED")
+            raise NoteGenerationError(reason, code=code)
+
+        record_id = int(payload.get("record_id") or 0)
+        record = check.get(GenerationRecord, record_id) if record_id else None
+        if record is None:
+            raise NoteGenerationError("生成成功但记录行缺失", code="LLM_RECORD_MISSING")
+
+        media: list[dict] = []
+        try:
+            raw_media = json.loads(record.media_json or "[]")
+            if isinstance(raw_media, list):
+                media = [entry for entry in raw_media if isinstance(entry, dict)]
+        except (TypeError, ValueError):
+            media = []
+
+        return {
+            "record_id": record_id,
+            "note_id": payload.get("note_id") or "",
+            "title": record.title or "",
+            "body": record.body or "",
+            "topics": json.loads(record.topics_json or "[]"),
+            "media": media,
+            "copy_requirements": json.loads(record.copy_requirements_json or "{}"),
+            "model_name": record.model_name or "",
+            "version_no": int(record.version_no or 1),
+            "is_adopted": bool(record.is_adopted),
+            #: **形态**（`image` / `video`）—— 前端据此把回显放进对应页签。
+            "note_form": str(record.note_form or "image"),
+        }
+    finally:
+        check.close()
+
+
 def start_llm_generate_note(
     db: Session,
     user_id: int,
@@ -345,7 +558,11 @@ def start_llm_generate_note(
     model_name: str = "",
     media_source: str = MEDIA_SOURCE_PRODUCT_IMAGE,
     media_options: Optional[dict] = None,
+    media_plan: Optional[list] = None,
     hot_topic: str = "",
+    copy_requirements: Optional[Any] = None,
+    regen_scope: str = "all",
+    target_record_id: Optional[int] = None,
     source: str = note_queue_service.SOURCE_PRODUCT_NOTE_GENERATE_LLM_SINGLE,
 ) -> dict:
     """单篇 LLM 生成**入队即返回**（设计 17 §7.4）。
@@ -384,6 +601,19 @@ def start_llm_generate_note(
         # 不新开一条 payload 键 = 不做第二次表单（DEF-044）。
         # 语义上它只是「本次生成的附加参数袋」，不是「媒体专属」。
         media_options=({**(media_options or {}), "hot_topic": hot_topic} if hot_topic else media_options),
+        #: v2.26（M-C1）组合计划：**原样透传**（校验已在端点层做完，此处不再判）。
+        media_plan=media_plan,
+        #: 文案要求（用户口径 2026-10-17）：端点已 `normalize` 过 ⇒ 这里只取落库形态。
+        #: `CopyRequirements` 实例或 dict 都接受（便于重试管线复用）。
+        copy_requirements=(
+            copy_requirements.as_dict()
+            if hasattr(copy_requirements, "as_dict")
+            else copy_requirements
+        ),
+        #: **局部重生成**：`all` / `text`（只重写文案）/ `media`（只重配图片）。
+        #: worker 按它决定跑文案链路还是媒体链路（或两者）。
+        regen_scope=str(regen_scope or "all"),
+        target_record_id=(int(target_record_id) if target_record_id else None),
     )
     record_id = 0
     if not created:
@@ -391,7 +621,41 @@ def start_llm_generate_note(
         # ⚠️ 必须把已有 `record_id` 回填给调用方 —— 返回 0 会让前端「已在队列中」
         # 的提示拿不到可跳转的审计行（且与首次入队的回执形状不一致）。
         record_id = int((task_row.payload or {}).get("record_id") or 0)
-    if created:
+    if created and target_record_id:
+        #: **局部重生成 = 覆盖当前这一版**（用户口径 2026-10-19：*「局部生成是只对当前版本
+        #: 数据进行覆盖」*；与 **每次点「生成」都新建版本** 是两件不同的事）。
+        #: 版本号不变、行不新增：用户只是在改这一版里的某一块，不是要再产一版。
+        #: ⚠️ 覆盖的是**当前这一版**（`target_record_id` 就是弹窗里正在看的那版），
+        #: 不是「另一条当前版本」—— 队列项 payload 里那个字段承担的就是「覆盖哪一行」。
+        record_id = int(target_record_id)
+        record = db.get(GenerationRecord, record_id)
+        if record is None:
+            raise NoteGenerationError(
+                "要覆盖的版本已不存在，无法重生成", code="LLM_TARGET_MISSING"
+            )
+        #: ⚠️ **先存原值再改行**：覆盖会立刻写 `task_id` / `status`，
+        #: 之后再读「改动前的内容」读到的是本次新值（「只改正文却把标题也换掉」的真因）。
+        merged_snapshot = _snapshot_record_text(record)
+        record.task_id = int(task_row.id)
+        record.status = GEN_STATUS_QUEUED
+        record.regen_scope = str(regen_scope or "all")
+        record.error_code = None
+        record.error_message = None
+        if copy_requirements is not None:
+            record.copy_requirements_json = note_version_service.serialize_copy_requirements(
+                copy_requirements.as_dict() if hasattr(copy_requirements, "as_dict")
+                else copy_requirements
+            )
+        db.flush()
+        merged = dict(task_row.payload or {})
+        merged["record_id"] = record_id
+        merged["text_snapshot"] = merged_snapshot
+        if template_name:
+            merged["template_name"] = str(template_name)
+        task_row.payload = merged
+        db.flush()
+    elif created:
+        #: **整篇生成** = 新版本行，**永不覆盖**（用户口径 2026-10-17）。
         record = GenerationRecord(
             user_id=user_id,
             task_id=int(task_row.id),
@@ -401,6 +665,16 @@ def start_llm_generate_note(
             model_name=str(model_name or ""),
             media_source=str(media_source or MEDIA_SOURCE_PRODUCT_IMAGE),
             status=GEN_STATUS_QUEUED,
+            version_no=note_version_service.next_version_no(
+                db, user_id=int(user_id), shop_product_id=int(row.id)
+            ),
+            parent_record_id=(int(target_record_id) if target_record_id else None),
+            regen_scope=str(regen_scope or "all"),
+            #: 文案要求**快照**（模板/区间后来被改过也能还原当时的实际要求）
+            copy_requirements_json=note_version_service.serialize_copy_requirements(
+                copy_requirements.as_dict() if hasattr(copy_requirements, "as_dict")
+                else copy_requirements
+            ),
         )
         db.add(record)
         db.flush()
@@ -426,6 +700,9 @@ def start_llm_generate_note(
         "status": "queued",
         "shop_product_id": int(shop_product_id),
         "record_id": record_id,
+        #: **队列项主键**（同步路径靠它去消费这一条并回读终态）。
+        #: ⚠️ 曾经没返回 ⇒ `generate_llm_note_sync` 拿到 0 就报「缺少队列项主键」。
+        "item_id": int(task_row.id),
         **({} if created else {"already_queued": True}),
     }
 
@@ -646,6 +923,266 @@ def _media_assets_for(row: ShopProduct, media_source: str) -> list[dict]:
     ]
 
 
+def _required_fields_for(scope: str) -> tuple[str, ...]:
+    """局部重生成只要求**目标块**存在；整篇 / 旧 `text` 仍要求标题 + 正文。"""
+    return {
+        REGEN_SCOPE_TITLE: ("title",),
+        REGEN_SCOPE_BODY: ("body",),
+        REGEN_SCOPE_TOPICS: (),  # 话题有独立兜底，不作为硬失败
+    }.get(scope, ("title", "body"))
+
+
+def _compose_regen_tail(scope: str, *, snapshot: Optional[dict[str, Any]] = None) -> str:
+    """只取「局部重生成说明」那一段（供校验脚本复现实际提示词）。"""
+    if scope not in REGEN_TEXT_FIELD_SCOPES:
+        return ""
+    return copy_requirements.build_regen_instruction(scope, snapshot=snapshot)
+
+
+def _compose_instruction(
+    copy_req: Any,
+    *,
+    scope: str,
+    snapshot: Optional[dict[str, Any]] = None,
+) -> str:
+    """拼「发给模型的补充说明」：**用户要求在前，局部重生成说明在后**。
+
+    ⚠️ 顺序有意义：后出现的指令对模型权重更高。局部重生成那段说的是
+    「只输出这一块」，必须排在「字数/话题数量」等常规要求**之后**，
+    否则模型会按整篇任务写三块（实测旧行为就是这样）。
+    """
+    base = copy_requirements.build_instruction(copy_req) if copy_req is not None else ""
+    extra = ""
+    if scope in REGEN_TEXT_FIELD_SCOPES:
+        extra = copy_requirements.build_regen_instruction(scope, snapshot=snapshot)
+    #: ⚠️ 这个整体会被 `generate_full_note` 追加在**整个提示词的最末尾**
+    #: （`[prompt] + 【额外风格要求】instruction`），所以局部重生成那段天然排在
+    #: 模板的【⑥ 输出格式】**之后** —— 这是它能压过「输出整块 JSON」的原因。
+    return chr(10).join(part for part in (base, extra) if part)
+
+
+def _snapshot_record_text(record: GenerationRecord) -> dict[str, Any]:
+    """取记录**当前**的文案三块（用于原地重生成时保住其余两块）。
+
+    ⚠️ 必须在模型调用**之前**取值：局部重生成是**原地更新同一行**，
+    只要 `_persist_generated_note` 一落库，行里的旧值就没了 ——
+    那时再读「当前版本」读到的是刚写进去的新值，等于三块全变。
+    """
+    try:
+        topics = json.loads(record.topics_json or "[]")
+    except ValueError:
+        topics = []
+    return {
+        "title": str(record.title or ""),
+        "body": str(record.body or ""),
+        "topics": [str(t) for t in topics] if isinstance(topics, list) else [],
+    }
+
+
+def _merge_text_scope(
+    db: Session,
+    *,
+    record: GenerationRecord,
+    generated: Any,
+    scope: str,
+    snapshot: Optional[dict[str, Any]] = None,
+) -> Any:
+    """**逐块合并**：只保留这次真正要换的那一块，其余两块回退到当前版本。
+
+    用户口径 2026-10-18：*「后端应支持每个文案区域单独重新生成」* ——
+    在结果面板里点「正文」的重新生成，**标题和话题必须一个字都不变**。
+
+    ⚠️ 为什么必须由后端做：模型一次调用总是把三块一起写出来（模板的输出契约就是
+    三块 JSON），前端无法「只要正文」；只有拿到当前版本再做合并才能保证其余两块不变。
+
+    三个 scope 各自只换一块：
+      * `title`  ⇒ 标题换、正文/话题用当前版本；
+      * `body`   ⇒ 正文换、标题/话题用当前版本；
+      * `topics` ⇒ 话题换、标题/正文用当前版本。
+
+    当前版本取不到（早期记录没存这几列）⇒ **报错不猜**：静默用新值等于又改了三块。
+    """
+    #: **原地更新**时以调用方传入的 `snapshot` 为准（那是本行被改写前的原值）；
+    #: 老路径（插新行）没有 snapshot ⇒ 退回按 `parent_record_id` 取当前版本。
+    if snapshot is not None:
+        base_title = str(snapshot.get("title") or "")
+        base_body = str(snapshot.get("body") or "")
+        base_topics = list(snapshot.get("topics") or [])
+        if not base_body or not base_title:
+            raise NoteGenerationError(
+                "当前版本没有可沿用的文案（标题或正文为空），请改用「整篇重新生成」。",
+                code="LLM_TARGET_TEXT_MISSING",
+            )
+        class _Base:  # 只为复用下方字段名
+            ok = True
+            title = base_title
+            body = base_body
+            topics = base_topics
+        target = _Base()
+    else:
+        target = _load_target_text(db, record)
+        if not getattr(target, "ok", True):
+            raise NoteGenerationError(
+                "当前版本缺失，无法只改这一块（请改用「整篇重新生成」）",
+                code="LLM_TARGET_MISSING",
+            )
+    #: ⚠️ **每个分支只保留目标块的新值**，其余两块一律回退当前版本的**原值**。
+    if scope == REGEN_SCOPE_TITLE:
+        # 标题换（新值保留）；正文 / 话题回当前版本
+        generated.body = target.body
+        generated.topics = list(target.topics)
+    elif scope == REGEN_SCOPE_BODY:
+        # 正文换；标题 / 话题回当前版本
+        generated.title = target.title
+        generated.topics = list(target.topics)
+    elif scope == REGEN_SCOPE_TOPICS:
+        # 话题换；标题 / 正文回当前版本
+        generated.title = target.title
+        generated.body = target.body
+    return generated
+
+
+def _load_target_text(db: Session, record: GenerationRecord) -> GeneratedNote:
+    """「只重配图片」时，从**当前版本**取回标题/正文/话题，包成 `GeneratedNote`。
+
+    ⚠️ 必须造一个**新的 `GeneratedNote` 对象**（不是直接返回当前版本的 record）：
+    下游 `_persist_generated_note` 会读取 `.guardrails` / `.model_name` /
+    `.latency_ms` 等字段并写进新笔记，而 `GenerationRecord` 没有这些属性。
+
+    ⚠️ 当前版本缺文案（`body` 为空）⇒ 抛错而不是产出空正文笔记：
+    空正文的笔记发不出去，静默产出等于把错误推到发布环节。
+    """
+    if not record.parent_record_id:
+        raise NoteGenerationError(
+            "「只重配图片」必须先指定当前版本。", code="LLM_TARGET_REQUIRED"
+        )
+    target = db.get(GenerationRecord, int(record.parent_record_id))
+    if target is None:
+        raise NoteGenerationError(
+            f"当前版本（id={record.parent_record_id}）不存在，无法沿用其文案。",
+            code="LLM_TARGET_REQUIRED",
+        )
+    body = str(target.body or "").strip()
+    title = str(target.title or "").strip()
+    if not body or not title:
+        raise NoteGenerationError(
+            "当前版本没有可沿用的文案（标题或正文为空），请改用「整篇重新生成」。",
+            code="LLM_TARGET_TEXT_MISSING",
+        )
+    try:
+        topics = json.loads(target.topics_json or "[]")
+    except ValueError:
+        topics = []
+    return GeneratedNote(
+        title=title,
+        body=body,
+        topics=topics if isinstance(topics, list) else [],
+        #: 沿用当前版本的模型名（这篇的文案确实是那个模型写的）
+        model_name=str(target.model_name or ""),
+        latency_ms=0,
+        guardrails={},
+        #: ⚠️ `ok` 是**只读属性**（`not block_reason`），不能当构造参数传 ——
+        #: 留空 `block_reason` 即表示「通过」，这也正是沿用的语义（当前版本已过护栏）。
+        block_reason="",
+    )
+
+
+def _own_media_entries(record: GenerationRecord) -> list[dict]:
+    """本行 `media_json` 里的**成功条目**（失败段不算可用媒体）。"""
+    try:
+        raw = json.loads(record.media_json or "[]")
+    except ValueError:
+        return []
+    if not isinstance(raw, list):
+        return []
+    out: list[dict] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        #: ⚠️ **失败占位也保留**（用户口径 2026-10-18）：只重写文案时，图的成败
+        #: 与这次动作无关 —— 把失败占位过滤掉会让「图 4」变「图 3」，
+        #: 用户会以为「重生成标题把一张图弄丢了」。
+        #: 保留原样 ⇒ 失败那张仍然显示为占位图 + 原因，可以单独重配图。
+        failed = entry.get("ok") is False
+        if failed:
+            out.append(
+                {
+                    "url": "",
+                    "local_path": "",
+                    "sort_order": int(entry.get("sort_order") or len(out)),
+                    "asset_type": str(entry.get("asset_type") or "image"),
+                    "ok": False,
+                    "error": str(entry.get("error") or "生成失败（未返回原因）"),
+                    "role": str(entry.get("role") or ""),
+                    #: 失败占位同样要带来源与段位（否则占位图归不到那一段）
+                    "source": str(entry.get("source") or ""),
+                    "slot_index": entry.get("slot_index"),
+                }
+            )
+            continue
+        url = str(entry.get("url") or "")
+        local = str(entry.get("local_path") or "")
+        if not url and not local:
+            continue
+        out.append(
+            {
+                "url": url,
+                "local_path": local,
+                "sort_order": int(entry.get("sort_order") or len(out)),
+                "asset_type": str(entry.get("asset_type") or "image"),
+                #: ⚠️ **来源与段位必须跟着搬**（2026-10-19 实测 bug）：局部重写文案时
+                #: 沿用当前版本媒体，这里漏了 `source` / `slot_index` ⇒ 落回 `media_json`
+                #: 后全是空 / 0 ⇒ 前端按段位还原时**所有图挤进封面**（用户看到
+                #: 「27 版回显全部又回显到了封面中」）。
+                "source": str(entry.get("source") or ""),
+                "role": str(entry.get("role") or ""),
+                "slot_index": entry.get("slot_index"),
+            }
+        )
+    return out
+
+
+def _target_media_entries(db: Session, *, record: GenerationRecord) -> list[dict]:
+    """取**当前版本**那篇笔记的媒体条目（供「只重写文案」沿用）。
+
+    ⚠️ 走 `note_generation_links` 找当前版本的 notes 行 —— 那是「笔记 ↔ 生成记录」的
+    唯一关系表。找不到 ⇒ 返回空（由调用方报 `LLM_TARGET_MEDIA_MISSING`）。
+    ⚠️ 复制的是 **note_assets 的字段**（url / local_path / sort_order），
+    不重新下载文件：文件已在本地，重复下载既慢又可能因源站限流失败。
+    """
+    #: ⚠️ **先看本行自己有没有媒体**（用户口径 2026-10-18 实测缺陷：
+    #: 第 20 版重生成标题报「当前版本没有可沿用的媒体」）——
+    #: 局部重生成是**原地更新同一行**，这一行本身就有 `media_json`（4 张图），
+    #: 完全不需要再沿 `parent_record_id` 去父版本找。
+    #: 原实现只认父版本 ⇒ 原地更新后的行（parent 为空）必然报错。
+    own = _own_media_entries(record)
+    if own:
+        return own
+    if not record.parent_record_id:
+        return []
+    link = db.scalar(
+        select(NoteGenerationLink).where(
+            NoteGenerationLink.generation_record_id == int(record.parent_record_id)
+        )
+    )
+    if link is None:
+        return []
+    assets = db.scalars(
+        select(NoteAsset)
+        .where(NoteAsset.note_id == int(link.note_pk))
+        .order_by(NoteAsset.sort_order)
+    ).all()
+    return [
+        {
+            "asset_type": str(a.asset_type),
+            "url": str(a.url or ""),
+            "local_path": str(a.local_path or ""),
+            "sort_order": int(a.sort_order or 0),
+        }
+        for a in assets
+    ]
+
+
 def _persist_generated_note(
     db: Session,
     *,
@@ -656,8 +1193,15 @@ def _persist_generated_note(
     record: GenerationRecord,
     media_source: str,
     media_options: Optional[dict] = None,
+    media_plan: Optional[list] = None,
+    regen_scope: str = "all",
 ) -> dict[str, Any]:
     """把生成产物落库（**调用方持事务**；本函数只 `flush`，不 `commit`）。
+
+    ⚠️ **`regen_scope` 决定复用哪一半**（用户口径 2026-10-17）：
+      - `text`  ⇒ 只重写了文案 ⇒ **媒体沿用当前版本原有的**（`_target_media_entries`）；
+      - `media` ⇒ 只重配了图片 ⇒ **文案沿用当前版本**（`generated` 已由调用方按当前版本填好）；
+      - `all`   ⇒ 全都新产出。
 
     落五处：`notes` + `note_topics`（经 `apply_sync_topics`，**唯一话题入口**）
     + `note_assets`（经 `build_note_media`，T7）+ `aigc_media_assets`（AIGC 溯源）
@@ -671,17 +1215,103 @@ def _persist_generated_note(
     已降级为空媒体；此处只接住**配置级** `MediaGenerationError`（业务点未配 /
     素材不存在）—— 那种情况**整条记失败**（用户该知道媒体没成），不落半条笔记。
     """
-    # ---- T7：媒体产出（可能调上游出图，故先于 note 落库执行；失败即整条失败） ----
-    media_entries, aigc_origins = build_note_media(
-        db,
-        user=user,
-        row=row,
-        media_source=media_source,
-        media_options=media_options,
-        record=record,
-    )
+    # ---- T7：媒体产出（可能调上游出图，故先于 note 落库执行） ----
+    #: ⚠️ **只重写文案时不再跑媒体**（`text`）：既省一次出图费用，也保住用户满意的图。
+    #: 媒体条目从**当前版本**复制（复制的是 note_assets 行，不是重新下载文件）。
+    #: 文案类细则（`title` / `body` / `topics`）与旧的 `text` **同一条路**：
+    #: 都只重写文案、**媒体一律沿用当前版本**（省一次出图费，也保住用户满意的图）。
+    #: ⚠️ 三者与 `text` 的唯一区别在「哪一块被替换」（见下方 `_apply_text_scope`）。
+    if regen_scope == "text" or regen_scope in REGEN_TEXT_FIELD_SCOPES:
+        media_entries = _target_media_entries(db, record=record)
+        if not media_entries:
+            raise MediaGenerationError(
+                "当前版本没有可沿用的媒体，无法只重写文案（请改用「整篇重新生成」）",
+                code="LLM_TARGET_MEDIA_MISSING",
+            )
+        media_segments: list[dict[str, Any]] = []
+        plan = normalize_plan(media_plan if media_plan else media_source)
+        aigc_origins: list[Any] = []
+        #: 跳过下面的媒体生成整段（直接进 note 落库）
+        _skip_media_generation = True
+    else:
+        _skip_media_generation = False
 
-    note = Note(
+    # ⚠️ **v2.26（M-C1）**：改走 `build_media_plan_assets()` —— 它按段循环调用
+    # `build_note_media()`（**不重造出图逻辑**），并做到「逐段隔离失败」：
+    # 内页段失败**半成功可交付**，封面段失败**由下方 cover_ok 判整篇失败**。
+    # ⚠️ 无 `media_plan` 时由 `normalize_plan` 把单来源**降级为一段** ——
+    # 归一化只有一处，调用方不各判一次（DEF-044）。
+    if not _skip_media_generation:
+        plan = normalize_plan(media_plan if media_plan else media_source)
+        #: **按入口取媒体模型**（用户口径 2026-10-18「各个功能单独配置」）：
+        #: 这里是「LLM 生成笔记」入口，配图/视频走它自己的 key —— 与笔记工坊的
+        #: 配图模型**互不影响**（改一处不会串到另一处）。
+        from backend.app.services.business_provider_keys import (
+            BUSINESS_KEY_LLM_NOTE_IMAGE,
+        )
+
+        media_entries, aigc_origins, media_segments = build_media_plan_assets(
+            db,
+            user=user,
+            row=row,
+            media_plan=plan,
+            media_options=media_options,
+            record=record,
+            #: ⚠️ 图片与视频在 `build_note_media` 内按 `media_source` 分流，
+            #: 视频分支会用 `BUSINESS_KEY_LLM_NOTE_VIDEO`；这里传图片 key 作基准。
+            business_key=BUSINESS_KEY_LLM_NOTE_IMAGE.key,
+        )
+        #: R1：**无封面 ⇒ 整篇失败**（不可半成功 —— 没封面的笔记不可发布）。
+        #: 判据用「计划里有没有 cover 段」而非「cover 段成不成功」：两者都要，
+        #: 顺序是先有段、再有产出（缺段是端点层就该拦的输入错误，缺产出是这里）。
+        if has_cover(plan) and not any(
+            seg["ok"] and seg["role"] == "cover" for seg in media_segments
+        ):
+            raise MediaGenerationError(
+                "封面媒体生成失败（封面缺失的笔记不可发布）", code="LLM_MEDIA_COVER_FAILED"
+            )
+
+    #: ⚠️ **一版生成记录只对应一篇笔记**（用户口径 2026-10-19：*「它应该发布当前用户指定的
+    #: 生成的笔记信息，不是选内容库中未发布的笔记，这两条逻辑线」*）——
+    #: 原实现每次走到这里都 `Note(...)` 新建 ⇒ 同一 `record_id` 下越攒越多
+    #: （实测 record 28 累积 4 篇、record 29 有 2 篇），发布时根本分不清该发哪篇，
+    #: 只能从一堆重复里挑，于是「挑到没有商品关系的那篇」这类错必然发生。
+    #: 现在：这一版**已经产出过笔记** ⇒ 就地覆盖它（标题/正文/话题/资产全部重写），
+    #: 不新增行；首次生成才创建。
+    existing_note = None
+    for candidate in db.scalars(
+        select(Note).where(
+            Note.user_id == row.user_id, Note.note_type == NOTE_TYPE_LOCAL_GENERATED
+        )
+    ).all():
+        candidate_raw = candidate.raw_json
+        if not isinstance(candidate_raw, dict):
+            try:
+                candidate_raw = json.loads(candidate_raw or "{}")
+            except (TypeError, ValueError):
+                candidate_raw = {}
+        if not isinstance(candidate_raw, dict):
+            candidate_raw = {}
+        if (
+            int(((candidate_raw.get("generation") or {}).get("record_id")) or 0)
+            == int(record.id)
+        ):
+            existing_note = candidate
+            break
+
+    if existing_note is not None:
+        note = existing_note
+        note.title = generated.title
+        note.content = generated.body
+        note.note_form = plan_form(plan)
+        #: 资产整份重建（图可能换了；不重建会留着上一次的图）
+        for asset in db.scalars(
+            select(NoteAsset).where(NoteAsset.note_id == int(note.id))
+        ).all():
+            db.delete(asset)
+        db.flush()
+    else:
+        note = Note(
         user_id=row.user_id,
         platform_account_id=account_id,        platform="xhs",
         note_id=_local_note_id(),
@@ -689,6 +1319,8 @@ def _persist_generated_note(
         content=generated.body,
         author_name="",
         note_type=NOTE_TYPE_LOCAL_GENERATED,
+        #: §15：形态由计划派生（有视频段 ⇒ 视频笔记，否则图文）—— 发布时决定 `common.type`。
+        note_form=plan_form(plan),
         raw_json={
             "guardrails": generated.guardrails,
             "generation": {
@@ -696,6 +1328,9 @@ def _persist_generated_note(
                 "model_name": generated.model_name,
                 "latency_ms": generated.latency_ms,
                 "media_source": media_source,
+                #: v2.26（M-C1）：组合摘要 + 逐段结果（用户要能看出「哪个来源失败+为什么」）。
+                "media_plan_summary": plan_summary(plan),
+                "media_segments": media_segments,
             },
             "shop_product_id": int(row.id),
         },
@@ -710,14 +1345,21 @@ def _persist_generated_note(
     # ⇒ 不传 `platform_ids`（缺值留空，不造假）。
     apply_sync_topics(db, note, generated.topics)
 
-    for entry in media_entries:
+    #: ⚠️ **`sort_order` 必须是全局递增序号**（2026-10-19 实测 bug：*「笔记封面页不是最新的」*）——
+    #: 原先直接写 `entry["sort_order"]`，而那个值来自**段内序号**（`_assets_from_product_image`
+    #: 每段都从 0 开始）⇒ 封面 1 张 + 内页 3 张时出现 3 个 `sort_order=0`，
+    #: 发布链路 `_select_media()` 按 `order_by(sort_order)` 取第 1 张当封面 ⇒
+    #: **封面变成哪张取决于数据库返回顺序**（不可复现的错图）。
+    #: 这里按**条目在 `media_entries` 里的既有顺序**（已是「封面段 → 内页 1 → 内页 2」）
+    #: 重编 0..N-1，图序因此与用户在界面上看到的一致。
+    for position, entry in enumerate(media_entries):
         db.add(
             NoteAsset(
                 note_id=note.id,
                 asset_type=entry["asset_type"],
                 url=entry["url"],
                 local_path=entry["local_path"],
-                sort_order=entry["sort_order"],
+                sort_order=position,
             )
         )
 
@@ -727,18 +1369,115 @@ def _persist_generated_note(
 
     # 本地主键级「生成笔记 ↔ 商品」关系（§3.7）。与一期 `note_goods`（平台 ID 级）
     # 并存：两者维度不同，不是两份实现（见 `NoteGenerationLink` docstring）。
+    #: ⚠️ **覆盖同一篇笔记时先清旧关联行**（`UNIQUE(note_pk, shop_product_id)`）——
+    #: 重新生成会重走这里，不清就撞唯一约束，整次生成本该成功却报 500。
+    for stale in db.scalars(
+        select(NoteGenerationLink).where(NoteGenerationLink.note_pk == int(note.id))
+    ).all():
+        db.delete(stale)
+    db.flush()
     db.add(
         NoteGenerationLink(
             user_id=note.user_id,
             note_pk=int(note.id),
             shop_product_id=int(row.id),
+            #: **哪次生成产出了这篇**（版本历史 ↔ 笔记的桥）。
+            #: ⚠️ 必须写：否则「基于这版只重写文案」时反查不到它产出的笔记
+            #: （实测 0 行 = 溯源断了，媒体沿用也就拿不到）。
+            generation_record_id=int(record.id),
         )
     )
 
+    #: ⚠️ **平台 ID 级的商品关系必须写**（用户口径 2026-10-19：*「注意笔记发布均需要
+    #: 挂当前商品的链接」*）：发布链路 `_goods_item_ids_for()` 读的是
+    #: `note_goods`（平台 `item_id` 级）+ `raw_json.item_id`，**不读**下面那张
+    #: `NoteGenerationLink`（本地主键级）。只写本地主键级 ⇒ 发布时找不到商品 ⇒
+    #: 笔记发出去是「裸笔记」，不挂任何商品链接（实测 note 3886 两张表都空）。
+    #: 两套关系维度不同、各司其职，缺一不可（§26.7 / §3.7）。
+    #: ⚠️ 覆盖同一篇笔记时先清旧行（`UNIQUE(user_id, note_id, item_id)`）
+    for stale_goods in db.scalars(
+        select(NoteGoods).where(
+            NoteGoods.user_id == note.user_id, NoteGoods.note_id == str(note.note_id or "")
+        )
+    ).all():
+        db.delete(stale_goods)
+    db.flush()
+    db.add(
+        NoteGoods(
+            user_id=note.user_id,
+            note_id=str(note.note_id or ""),
+            item_id=str(row.item_id or ""),
+        )
+    )
+    #: 同一事实写进 `raw_json.item_id`（发布链路的第一优先读点）—— 关系行还没
+    #: 落库/被清理时仍认得出「这篇挂的是什么商品」。
+    _raw = note.raw_json if isinstance(note.raw_json, dict) else {}
+    _raw = dict(_raw or {})
+    _raw["item_id"] = str(row.item_id or "")
+    note.raw_json = _raw
+
     record.status = GEN_STATUS_SUCCESS
+    #: **整篇生成**才把这一版标成「当前采用版」（新笔记就是用户现在要用的那篇）。
+    #: ⚠️ **局部重生成不动采用状态**（用户口径 2026-10-18：*「只是在历史版本进行更新
+    #: 生成记录」*）—— 他只是改了这一版的某一块，**没有**说「改用这一版」；
+    #: 强行标采用会撞部分唯一索引（实测 `UNIQUE constraint failed:
+    #: generation_records.user_id, generation_records.shop_product_id`）。
+    #: 采用与否由用户点「采用此版」显式决定（`adopt` 端点）。
+    if regen_scope in ("all", "text"):
+        #: 整篇 / 旧的「重写文案」= 产出一篇可用的新笔记 ⇒ 顺手标采用。
+        #: 细粒度（`title`/`body`/`topics`/`media`）原地改历史版 ⇒ **不动**采用状态。
+        note_version_service.mark_adopted(db, record=record)
+    #: **记录这一版的形态**（用户口径 2026-10-19：*「生成记录新增一个类型字段区分，
+    #: 视频笔记或图文笔记」*）—— 与 `notes.note_form` 同一判据（`plan_form`），
+    #: 这样「生成记录列表」不用再从 `media_json` 猜（媒体失败时根本猜不出来）。
+    record.note_form = plan_form(plan)
     record.title = generated.title
     record.body = generated.body
     record.topics_json = json.dumps(generated.topics, ensure_ascii=False)
+    #: **这一版实际用了哪些图/视频**（2026-10-18）：详情抽屉据此展示配图、
+    #: 用户据此勾选「保留哪些 / 重生哪些」。存的是**落库时的最终清单**，
+    #: 不是入参 plan —— 段级失败会让实际张数少于计划，记录必须反映实际。
+    #: ⚠️ **失败段也要落进来**（用户口径 2026-10-18：*「智能生成图如果为错误则需要
+    #: 展示一个站位图，并在图内展示异常原因，tip 展示完整异常原因，支持重新生成
+    #: 改部分的图」*）—— 只写成功项的话前端根本不知道「这里本该有一张图但失败了」，
+    #: 用户看到的是「少了一张」而不是「这张失败了、原因是什么、可以重试」。
+    #: 每条失败段记 `ok=False` + `error`（`role`/`slot_index` 让前端把它放回原位）。
+    _failed = [
+        {
+            "url": "",
+            "local_path": "",
+            "sort_order": int(seg.get("slot_index") or len(media_entries)),
+            "asset_type": str(seg.get("media_type") or "image"),
+            "ok": False,
+            "error": str(seg.get("error") or "生成失败（未返回原因）"),
+            "role": str(seg.get("role") or ""),
+            #: ⚠️ **失败段必须带 `source`**（2026-10-19 实测 bug）：前端按 `source`
+            #: 把失败归回它那一段再画占位图；这里漏了 ⇒ `source=None` ⇒ 找不到段
+            #: ⇒ 用户看到的是「生成后显示」（像是没跑），而不是「生成失败 + 原因」。
+            "source": str(seg.get("source") or ""),
+        }
+        for seg in (media_segments or [])
+        if not seg.get("ok")
+    ]
+    record.media_json = json.dumps(
+        [
+            {
+                "url": str(entry.get("url") or ""),
+                "local_path": str(entry.get("local_path") or ""),
+                "sort_order": int(entry.get("sort_order") or 0),
+                "asset_type": str(entry.get("asset_type") or "image"),
+                "ok": True,
+                "role": str(entry.get("role") or ""),
+                #: **来源与段位**（用户口径 2026-10-19「应记录图片内页来源」）——
+                #: 回显时据此把图放回它原来那一段，并在候选图上标勾选。
+                "source": str(entry.get("source") or ""),
+                "slot_index": int(entry.get("slot_index") or 0),
+            }
+            for entry in media_entries
+        ]
+        + _failed,
+        ensure_ascii=False,
+    )
     record.model_name = generated.model_name or record.model_name
     record.error_code = None
     record.error_message = None
@@ -819,6 +1558,8 @@ def _run_one_llm_generate(item_id: int) -> None:
         template_id = payload.get("template_id")
         media_source = str(payload.get("media_source") or MEDIA_SOURCE_PRODUCT_IMAGE)
         media_options = payload.get("media_options")
+        #: v2.26（M-C1）：组合计划（缺 ⇒ None，由归一化降级为单来源）。
+        media_plan = payload.get("media_plan")
         if not isinstance(media_options, dict):
             media_options = None
         #: 热词驱动（M3）：话题名随 `media_options` 一起落库，这里取出来交给
@@ -826,6 +1567,10 @@ def _run_one_llm_generate(item_id: int) -> None:
         hot_topic = ""
         if media_options:
             hot_topic = str(media_options.get("hot_topic") or "").strip()
+        #: **文案要求**（用户口径 2026-10-17）：随行体落库 ⇒ 这里读出并规整一次。
+        #: ⚠️ 再规整而不是直接用：行体是**历史数据**（可能由老版本写入、或缺键），
+        #: 直接信任会让「缺字段 ⇒ KeyError」变成整篇失败。
+        copy_req = copy_requirements.normalize(payload.get("copy_requirements") or {})
         account_id = note_queue_service.account_id_of(item)
         user_id = int(item.user_id)
         if not shop_product_id:
@@ -868,7 +1613,7 @@ def _run_one_llm_generate(item_id: int) -> None:
             #    打成 `LLM_GENERATE_FAILED`，实测踩过）。其余调用点
             #    （`api/ai.py` / `auto_ops_service.py`）一律按属性读，此处对齐。
             context = llm_gateway_client.resolve_business_provider(
-                db, user, BUSINESS_KEY_GENERATE_NOTE
+                db, user, BUSINESS_KEY_LLM_NOTE_TEXT
             )
         except LLMGatewayError as error:
             # 基类一并接住：映射未配 / 类型不匹配 / 服务商停用 都是
@@ -886,19 +1631,68 @@ def _run_one_llm_generate(item_id: int) -> None:
         # ---- ③ 生成（护栏在内部；记账在 _complete 内部） ----
         skeleton = template.prompt_skeleton if template is not None else ""
         record = _load_record(db, item, user_id)
-        try:
-            generated = generate_full_note(
-                db=db,
-                user_id=user_id,
-                product=load_product_dict_from_ledger(row),
-                model_config=context,
-                api_key=context.api_key,
-                skeleton=skeleton,
-                modules=modules,
-                #: 热词驱动：把话题交给 Prompt 渲染（模板可用 `{hot_topic}` 引用；
-                #: **模板没引用就当没有** —— 与 `extra` 的既有语义一致，不硬塞）。
-                extra=({"hot_topic": hot_topic} if hot_topic else None),
+        #: **原地重生成要先用原值**：本行马上会被改判/改写，必须在调模型之前
+        #: 把「改动前」的标题/正文/话题存下来，作为「其余两块保持不变」的来源。
+        #: **优先用入队时存的快照**（`start_llm_generate_note` 在改写行之前落的），
+        #: 那里的值才是「用户点重生成之前」的原文；`record` 上的值此时可能已被复位。
+        _text_snapshot = payload.get("text_snapshot")
+        if not isinstance(_text_snapshot, dict):
+            _text_snapshot = (
+                _snapshot_record_text(record) if record is not None else None
             )
+        #: **只重配图片**（`media`）：不调文案模型，直接用当前版本的标题/正文/话题。
+        #: ⚠️ 这样既省一次文本调用，也保证「用户满意的文案」一个字都不变
+        #: （重新生成必然措辞不同 —— 那正是用户在避免的事）。
+        _regen_scope = str(payload.get("regen_scope") or "all")
+        try:
+            if _regen_scope == "media":
+                generated = _load_target_text(db, record)
+            else:
+                generated = generate_full_note(
+                    db=db,
+                    user_id=user_id,
+                    product=load_product_dict_from_ledger(row),
+                    model_config=context,
+                    api_key=context.api_key,
+                    skeleton=skeleton,
+                    modules=modules,
+                    #: 热词驱动：把话题交给 Prompt 渲染（模板可用 `{hot_topic}` 引用；
+                    #: **模板没引用就当没有** —— 与 `extra` 的既有语义一致，不硬塞）。
+                    #:
+                    #: ⚠️ **字数 / 表情 / 话题数量 / 用户补充段也在这一步拼接**
+                    #: （用户口径 2026-10-17：*「字数，表情以及话题设置均有默认值，
+                    #: 公共模板中应无需固定添加固定提示词，调用大模型时需最终拼接」*）。
+                    #: 模板里只写槽位名（`{title_length}` 等），数值由这里填 ——
+                    #: 于是模板不含任何写死的数量，改前端设置即全局生效。
+                    extra={
+                        **({"hot_topic": hot_topic} if hot_topic else {}),
+                        **copy_requirements.build_slots(copy_req),
+                    },
+                    instruction=_compose_instruction(
+                        copy_req,
+                        scope=_regen_scope,
+                        snapshot=_text_snapshot,
+                    ),
+                    #: **只要求目标块**：局部重生成的提示词明说「只输出正文」，
+                    #: 按整篇判「缺标题」就自相矛盾（其余块由 `_merge_text_scope` 补回）。
+                    required_fields=_required_fields_for(_regen_scope),
+                    #: 把**页面上的配置参数**交给生成函数做兜底纠偏（标题超长裁掉、
+                    #: 话题超量截断）—— 参数已进提示词，但模型不一定遵守
+                    #: （实测要求正文 30–150 字、实际写了 769 字）。
+                    copy_requirements=copy_req,
+                )
+                #: **逐块合并**（用户口径 2026-10-18：*「后端应支持每个文案区域
+                #: 单独重新生成」*）—— 模型这次会给出三块全新文字（标题/正文/话题），
+                #: 但用户只要求换其中一块：另外两块**从当前版本原样搬回来**。
+                #: ⚠️ 不可省：只重写正文却把标题也换掉 =「点一块、改三块」。
+                if _regen_scope in REGEN_TEXT_FIELD_SCOPES:
+                    generated = _merge_text_scope(
+                        db,
+                        record=record,
+                        generated=generated,
+                        scope=_regen_scope,
+                        snapshot=_text_snapshot,
+                    )
         except NoteGenerationError as error:
             _mark_record_failed(
                 db, item=item, user_id=user_id, code=error.code, message=error.message
@@ -964,6 +1758,11 @@ def _run_one_llm_generate(item_id: int) -> None:
                 record=record,
                 media_source=media_source,
                 media_options=media_options,
+                media_plan=media_plan,
+                #: ⚠️ **必须传**（2026-10-18 实测踩过）：不传 ⇒ 函数内取默认 `all`
+                #: ⇒ `mark_adopted` 照跑 ⇒ 局部重生成把历史版标成采用版
+                #: ⇒ 撞部分唯一索引 `UNIQUE constraint failed: generation_records...`。
+                regen_scope=_regen_scope,
             )
         except MediaGenerationError as error:
             # ---- 媒体配置级失败（业务点未配 / 素材不存在）⇒ 整条失败（不落半条笔记） ----

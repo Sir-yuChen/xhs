@@ -16,13 +16,14 @@ import pytest
 
 from backend.app.services import video_generation as vg
 from backend.app.services.business_provider_keys import (
-    BUSINESS_KEY_GENERATE_VIDEO,
+    BUSINESS_KEY_LLM_NOTE_VIDEO,
     BUSINESS_KEYS,
     MODEL_TYPE_VIDEO,
     MODEL_TYPES,
 )
 from backend.app.services.media_generation import (
     MEDIA_SOURCE_VIDEO_AI,
+    MEDIA_SOURCE_VIDEO_MATERIAL,
     MEDIA_SOURCE_VIDEO_REFERENCE,
 )
 from backend.app.models.generation import (
@@ -38,8 +39,8 @@ from backend.app.models.generation import (
 
 def test_video_business_key_is_registered_with_video_kind():
     """`generate_video` 已登记且 kind=`video`（前端按 kind 过滤候选服务商）。"""
-    assert BUSINESS_KEY_GENERATE_VIDEO.kind == MODEL_TYPE_VIDEO
-    assert BUSINESS_KEY_GENERATE_VIDEO in BUSINESS_KEYS
+    assert BUSINESS_KEY_LLM_NOTE_VIDEO.kind == MODEL_TYPE_VIDEO
+    assert BUSINESS_KEY_LLM_NOTE_VIDEO in BUSINESS_KEYS
     assert MODEL_TYPE_VIDEO in MODEL_TYPES
 
 
@@ -292,3 +293,213 @@ def test_build_note_media_routes_video_sources_to_video_branch(monkeypatch):
     assert seen["source"] == MEDIA_SOURCE_VIDEO_AI
     assert assets[0]["asset_type"] == "video"
     assert origins == []
+
+
+# --------------------------------------------------------------------------- #
+# 「本地素材」= 直接用，不生成视频（2026-10-16 用户口径）
+#   *「使用本地素材这无需再生成视频，后端根据商品，以及提示词，本地素材参考生成相关的
+#     文案标题话题等」*
+# --------------------------------------------------------------------------- #
+def test_video_sources_are_exactly_material_and_ai_generate():
+    """视频来源**只有两种**（用户口径：*「视频下拉应只有本地素材和智能生成视频」*）。
+
+    ⚠️ 判据是**集合相等**而不是「包含」：`video_reference` 必须真的退场
+    （它和「智能生成 + 参考图」是同一件事，两个入口一实现 = 概念冗余）。
+    """
+    from backend.app.models.generation import VIDEO_MEDIA_SOURCES
+
+    assert set(VIDEO_MEDIA_SOURCES) == {MEDIA_SOURCE_VIDEO_MATERIAL, MEDIA_SOURCE_VIDEO_AI}
+
+
+def test_video_material_takes_the_local_video_without_calling_the_model(monkeypatch):
+    """本地素材 ⇒ **不调视频模型**（零成本、秒级），只取素材里的视频当媒体。
+
+    判据：① 返回的资产是那条视频；② 视频客户端**一次都没被调用**
+    （只断言「返回了视频」不够 —— 真调了模型也会返回视频，但那是白烧钱）。
+    """
+    from backend.app.services import media_generation as mg
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        mg, "_assets_from_material",
+        lambda db, **kw: [
+            {"asset_type": "video", "url": "/api/xhs/materials/files/9/file", "local_path": "a.mp4", "sort_order": 0},
+            {"asset_type": "image", "url": "/api/xhs/materials/files/8/file", "local_path": "b.jpg", "sort_order": 1},
+        ],
+    )
+    monkeypatch.setattr(
+        mg, "_assets_from_video",
+        lambda *a, **kw: calls.append("video-model-called") or ([], []),
+    )
+    assets = mg._assets_from_material_video(None, user_id=1, media_options={"file_ids": [9, 8]})
+    assert [a["asset_type"] for a in assets] == ["video"]
+    assert assets[0]["url"].endswith("/9/file")
+    assert calls == [], "本地素材不该调用视频模型（那是白烧一次生成）"
+
+
+def test_video_material_rejects_images_with_a_readable_reason(monkeypatch):
+    """本地素材只选了图片 ⇒ **结构化 400 说清原因**（不静默产出一张图冒充视频）。"""
+    from backend.app.services import media_generation as mg
+
+    monkeypatch.setattr(
+        mg, "_assets_from_material",
+        lambda db, **kw: [
+            {"asset_type": "image", "url": "/api/xhs/materials/files/8/file", "local_path": "b.jpg", "sort_order": 0}
+        ],
+    )
+    with pytest.raises(mg.MediaGenerationError) as excinfo:
+        mg._assets_from_material_video(None, user_id=1, media_options={"file_ids": [8]})
+    assert "MATERIAL_VIDEO_REQUIRED" == excinfo.value.code
+
+
+def test_video_material_keeps_only_one_video():
+    """平台视频笔记**只收 1 个视频** ⇒ 多选了也只取第一条（不静默全发）。
+
+    ⚠️ 这条是**平台契约**（`xhs.postNote`：视频只能一个）—— 多传会被平台校验拒，
+    用户以为选了几条就发几条。
+    """
+    from backend.app.services import media_generation as mg
+
+    entries = [
+        {"asset_type": "video", "url": "/api/xhs/materials/files/1/file"},
+        {"asset_type": "video", "url": "/api/xhs/materials/files/2/file"},
+    ]
+    orig = mg._assets_from_material
+    mg._assets_from_material = lambda db, **kw: entries
+    try:
+        got = mg._assets_from_material_video(None, user_id=1, media_options={"file_ids": [1, 2]})
+    finally:
+        mg._assets_from_material = orig
+    assert [a["url"] for a in got] == ["/api/xhs/materials/files/1/file"]
+
+
+# --------------------------------------------------------------------------- #
+# 参考图两类来源都可解析（2026-10-17 用户口径）
+#   *「图生成图，和图生视频均应该支持选择参考图，参考图支持选择商品图或本地素材」*
+# --------------------------------------------------------------------------- #
+def test_reference_resolves_http_urls_as_is():
+    """商品图是**公开 CDN 直链** ⇒ 原样返回（不读盘、不 base64，省内存省时间）。"""
+    from backend.app.services.ai_service import OpenAICompatibleImageClient
+
+    url = "https://cdn.example.com/a.jpg"
+    assert OpenAICompatibleImageClient._resolve_image_ref(url) == url
+
+
+def test_reference_inlines_local_material_as_data_url(tmp_path, monkeypatch):
+    """本地素材 ⇒ **读盘转 base64 data URL**（上游拉不到我们带鉴权的端点）。
+
+    ⚠️ 基准目录必须是 **`material_folders.path`**（用户登记的那个真实目录），
+    不是 `storage_dir` —— 拼错会静默回落成「原样返回 URL」，
+    于是「选了素材但生成不出来」（本次实测真 bug）。
+    """
+    from pathlib import Path
+
+    from backend.app.services.ai_service import OpenAICompatibleImageClient
+
+    # 造一张真图片文件在 tmp 目录里
+    folder = tmp_path / "素材根"
+    sub = folder / "ai-生成" / "batch"
+    sub.mkdir(parents=True)
+    img = sub / "主图-01.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 32)
+
+    # 打桩：拿到「文件夹 path + 相对路径」，实际定位逻辑与真实现一致
+    class _FakeFile:
+        id = 1
+        rel_path = "ai-生成/batch/主图-01.png"
+        folder_id = 7
+
+    class _FakeFolder:
+        id = 7
+        path = str(folder)
+
+    class _FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, model, ident):
+            return _FakeFile() if ident == 1 else _FakeFolder()
+
+    import backend.app.core.database as dbmod
+
+    monkeypatch.setattr(dbmod, "SessionLocal", lambda: _FakeSession())
+
+    out = OpenAICompatibleImageClient._resolve_image_ref("/api/xhs/materials/files/1/file")
+    assert out.startswith("data:image/png;base64,"), "本地素材没被内联成 data URL（上游会拉不到）"
+    assert len(out) > 40
+
+
+def test_reference_returns_url_when_material_file_is_missing(tmp_path, monkeypatch):
+    """文件不在磁盘上 ⇒ **原样返回**（让上游报错，不在这一层假装成功）。"""
+    from backend.app.services.ai_service import OpenAICompatibleImageClient
+
+    class _FakeFile:
+        id = 2
+        rel_path = "不存在/无.png"
+        folder_id = 8
+
+    class _FakeFolder:
+        path = str(tmp_path)
+
+    class _FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, model, ident):
+            return _FakeFile() if ident == 2 else _FakeFolder()
+
+    import backend.app.core.database as dbmod
+
+    monkeypatch.setattr(dbmod, "SessionLocal", lambda: _FakeSession())
+    url = "/api/xhs/materials/files/2/file"
+    assert OpenAICompatibleImageClient._resolve_image_ref(url) == url
+
+
+# --------------------------------------------------------------------------- #
+# 商品原图去重（用户口径 2026-10-17：*「商品原图实现图片去重」*）
+# --------------------------------------------------------------------------- #
+def test_product_images_are_deduped_and_keep_order():
+    """商品原图 = 主图 + 详情图，**保序去重**。
+
+    真机实测：抽查 400 个商品 **400 个**都有重复图（主图 10 张里有 5 张原样
+    重复出现在详情图组，典型 20 张 → 15 张唯一）⇒ 用户看到同一张图重复出现。
+
+    ⚠️ **必须保序**：`pick` 是下标，排序会让「用户选第 3 张、实际出第 5 张」。
+    """
+    from backend.app.services.media_generation import _product_image_urls
+
+    class _Row:
+        # 主图：a b c；详情图：b c d（b、c 重复）
+        images_json = '["https://x/a.jpg","https://x/b.jpg","https://x/c.jpg"]'
+        image = "https://x/a.jpg"
+        raw_json = (
+            '{"image_descriptions":[{"link":"https://x/b.jpg"},'
+            '{"link":"https://x/c.jpg"},{"link":"https://x/d.jpg"}]}'
+        )
+
+    got = _product_image_urls(_Row())
+    assert got == [
+        "https://x/a.jpg",
+        "https://x/b.jpg",
+        "https://x/c.jpg",
+        "https://x/d.jpg",
+    ], f"保序去重失败（拿到 {got}）"
+    assert len(got) == len(set(got)), "还有重复图"
+
+
+def test_product_images_dedup_is_stable_for_pure_main_images():
+    """没有重复时不改变顺序、不丢图（去重不能误删）。"""
+    from backend.app.services.media_generation import _product_image_urls
+
+    class _Row:
+        images_json = '["https://x/1.jpg","https://x/2.jpg"]'
+        image = "https://x/1.jpg"
+        raw_json = "{}"
+
+    assert _product_image_urls(_Row()) == ["https://x/1.jpg", "https://x/2.jpg"]

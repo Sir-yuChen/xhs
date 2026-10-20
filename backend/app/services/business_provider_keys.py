@@ -7,18 +7,37 @@
 `llm_business_providers`，页面只让用户**选服务商**、不许改 key（改了等于
 让代码里的调用点找不到映射）。同 §4.3.3 的 `FUNCTION_*` 纪律。
 
+## 核心口径（用户 2026-10-18，三条同时生效）
+
+> 「一个业务点支持用户配置**多个类型**模型，**每个类型只能配置一个**…该业务点必须
+>   配置一个文本模型，一个图片模型，一个视频模型，用户可以手动添加不同类型的模型，
+>   但是**相同类型的模型不允许重复添加**，同一个类型的模型支持切换」
+>
+> 「模型配置**以前端入口为父对象**，比如当前的 LLM 生成笔记功能应配置三种类型的模型」
+>
+> 「所有业务功能**不在共用配置**，改为**各个功能单独配置**」
+
+⇒ **一个入口 = 一组 key（每类型一个），入口之间不共用 key**：
+
+| 入口 | key |
+|---|---|
+| LLM 生成笔记 | `llm_note_text` / `llm_note_image` / `llm_note_video` |
+| 笔记工坊 · 草稿 | `workshop_draft_text` / `workshop_rewrite_text` / `workshop_title_text` / `workshop_image` |
+| 笔记工坊 · 图片 | `workshop_image_gen` / `workshop_image_understand` |
+| 自动运营 | `auto_ops_text` |
+| 商品详情 · AI 润色 | `product_title_polish` / `product_selling_point` |
+| 商品详情 · 生成详情图 | `product_detail_image` |
+
+⚠️ **旧的「一个 key + `needs` 声明多类型」写法已整条退场**：那正是「共用配置」的
+来源（`generate_image` 同时被两个入口用，改一处影响两处）。现在类型是 key 自己的
+属性（`kind`），一个入口要几类 = 该入口下有几个 key。
+
 ## kind 的语义与用途
 
-每个 key 带 `kind`（`text` / `image`），供 M2 的**类型匹配校验**使用：
-映射时 `business_key` 的 kind **必须等于**该映射所选**模型行**的
-`llm_gateway_models.model_type`，不等则 400 `LLM_BUSINESS_PROVIDER_TYPE_MISMATCH`。
-⚠️ **v2.7 起判据在模型层**（§13.2.9.6）—— 原文「必须等于服务商
-`llm_gateway_configs.model_type`」（§13.2.1a）**已被取代**：能力类型已下沉到模型，
-服务商层不再有 `model_type` 列。
-
-⚠️ kind 刻意只两值：`text` = 打 `POST {base_url}/chat/completions`，
-`image` = 打 `POST {base_url}/images/generations`。新能力 = 新增一个枚举值，
-**零表结构改动**（§13.2.1a 的可扩展性论证，v2.7 后依然成立）。
+映射时 `business_key` 的 kind **必须**与该映射所选**模型行**的
+`llm_gateway_models.model_type` 相容（`_type_satisfies`），不等则 400
+`LLM_BUSINESS_PROVIDER_TYPE_MISMATCH`。
+⚠️ **v2.7 起判据在模型层** —— 服务商层不再有 `model_type` 列。
 
 ⚠️ 本模块是 API 层与前端下发共用的**唯一真相源** —— 前端业务点清单由
 后端端点读这里的常量下发，不在前端再抄一份（DEF-044：同一语义不留两份实现）。
@@ -33,25 +52,23 @@ MODEL_TYPE_TEXT: Final[str] = "text"
 #: 图像类（打 `POST {base_url}/images/generations`）
 MODEL_TYPE_IMAGE: Final[str] = "image"
 #: 多态类（v2.9 新增）：既能对话又能出图/理解图片，如 gpt-4o、qwen-vl 系列。
-#: ⚠️ **调用层路由**：统一走 `POST {base_url}/chat/completions`（多态模型的上游入口就是 chat），
-#: 与 `text` 同路；`image` 才是唯一走 `/images/generations` 的类型（§13.2.11.4）。
+#: ⚠️ **调用层路由**：统一走 `POST {base_url}/chat/completions`，
+#: 与 `text` 同路；`image` 才是唯一走 `/images/generations` 的类型。
 MODEL_TYPE_MULTIMODAL: Final[str] = "multimodal"
 #: 视频类（v2.9 新增）：文生视频 / 图生视频，如 sora、kling、veo 系列。
-#: ⚠️ **当前无业务点消费**（`BUSINESS_KEYS` 里没有 kind=video 的条目）——
-#: 枚举先落地以便模型目录能如实标注；真正接线见 §13.4.4 视频链路。
 MODEL_TYPE_VIDEO: Final[str] = "video"
 
 #: 能力类型全集（§13.2.1a；新增能力只改这里）。
-#: ⚠️ v2.7：本集合是**模型行** `model_type` 的枚举源（服务商层已无该列，§13.2.9.5）。
-#: ⚠️ v2.9 由 `{text, image}` 扩为四值（用户 2026-10-02 口径「**图片，多态，视频，或文本等等**」）；
-#: 中文映射见 `MODEL_TYPE_LABELS`，**不要在别处再写一份**（DEF-044 同一语义不留两份实现）。
+#: ⚠️ 本集合是**模型行** `model_type` 的枚举源（服务商层已无该列）。
+#: 中文映射见 `MODEL_TYPE_LABELS`，**不要在别处再写一份**（DEF-044）。
 MODEL_TYPES: Final[frozenset[str]] = frozenset(
     {MODEL_TYPE_TEXT, MODEL_TYPE_IMAGE, MODEL_TYPE_MULTIMODAL, MODEL_TYPE_VIDEO}
 )
 
 #: 类型 → 中文展示名（**唯一映射点**）。
 #: ⚠️ 用户口径里的「图片」对应 `image`（能出图的模型）；「多态」对应 `multimodal`；
-#: 「视频」「文本」顾名思义。前端类型下拉、表格类型列、模型配置页筛选**全部读这一份**。
+#: 「视频」「文本」顾名思义。前端类型下拉、表格类型列、模型配置页筛选**全部读这一份**
+#: （随 `/business-provider-keys` 的 `model_types` 下发）。
 MODEL_TYPE_LABELS: Final[dict[str, str]] = {
     MODEL_TYPE_TEXT: "文本",
     MODEL_TYPE_IMAGE: "图片",
@@ -61,141 +78,250 @@ MODEL_TYPE_LABELS: Final[dict[str, str]] = {
 
 #: 走「对话」入口的类型（`POST {base_url}/chat/completions`）。
 #: ⚠️ 调用层路由**唯一判据** —— 凡是需要决定「打 chat 还是打 images」的地方读这个集合，
-#: 不要散写 `== MODEL_TYPE_TEXT`（v2.9 扩枚举后那样写会把 multimodal 漏掉）。
+#: 不要散写 `== MODEL_TYPE_TEXT`（扩枚举后那样写会把 multimodal 漏掉）。
 CHAT_ENTRY_MODEL_TYPES: Final[frozenset[str]] = frozenset(
     {MODEL_TYPE_TEXT, MODEL_TYPE_MULTIMODAL}
 )
 
 
 class BusinessKey(NamedTuple):
-    """一个业务点的固定 key 与其模型类型。
+    """一个业务点：固定 key + 它要的模型类型 + 所属前端入口。
 
-    ⚠️ `label` / `triggers` 是**展示用的元数据**（2026-10-01 用户口径「加触发源」）：
-    - `label` = 中文名（页面「业务点」列）
-    - `triggers` = **触发源**，即这个业务点在界面上由哪些业务动作触发
-      （页面路径链，如 `商品列表-商品详情-生成商品详情图`）。
+    ⚠️ `label` / `triggers` / `entry` / `role` 是**展示用的元数据**：
+    - `label` = 中文名（页面子行的能力名）
+    - `triggers` = 触发源（**只读诊断**，不再上屏 —— 用户 2026-10-18 要求移除该列）
+    - `entry` = **所属前端入口**（页面的父对象；空串 = 仅 API 调用）
+    - `role` = 该 key 在入口里扮演的角色（缺省 = `kind` 的中文名）
 
-    两者**只读**、不参与类型校验、不影响映射解析 —— 用户改不了 key，
-    也改不了触发源（它们都是代码里的调用契约的镜像）。空元组 = 该业务点
-    当前只由 API 直接调用、界面无入口（如实留空，**不编入口**）。
+    它们都**不参与类型校验、不影响映射解析** —— 用户改不了 key，也改不了入口。
     """
 
     key: str
     kind: str
     label: str = ""
     triggers: tuple[str, ...] = ()
+    #: **所属前端入口**（模型配置页的父行）。
+    #: 一个入口下可以有多个 key（每类型一个），它们一起满足该入口的模型需求。
+    #: 空串 = 该 key 没有对应前端入口（仅 API 调用），单独成行、不参与分组。
+    entry: str = ""
+    #: 该 key 在这个入口里扮演的角色（展示用；缺省 = `kind` 的中文名）。
+    #: 例：「LLM 生成笔记」入口下 `llm_note_image` 的角色是「图片」。
+    role: str = ""
+
+    @property
+    def role_label(self) -> str:
+        return self.role or MODEL_TYPE_LABELS.get(self.kind, self.kind)
 
 
 # --------------------------------------------------------------------------- #
-# 文本类（kind = `text`）：5 个
+# 入口 ①：LLM 生成笔记（商品列表操作列「LLM 生成」）
+#
+# 这个入口一次要三类模型：写文案（文本）+ 配图（图片）+ 出视频（视频）。
 # --------------------------------------------------------------------------- #
 
-BUSINESS_KEY_GENERATE_NOTE = BusinessKey(
-    "generate_note",
+#: 正文 / 标题 / 话题的文本生成（该入口的主模型）。
+BUSINESS_KEY_LLM_NOTE_TEXT = BusinessKey(
+    "llm_note_text",
     MODEL_TYPE_TEXT,
-    "生成笔记",
-    ("笔记工坊-草稿-生成草稿", "商品列表-商品详情-生成笔记"),
+    #: 子行展示的是**用途**（用户口径 2026-10-18：*「子行应展示为用处，
+    #: 比如生成标题、正文、话题」*）—— 写清它到底产出什么，不是「文本」这种类型名。
+    "生成标题、正文、话题",
+    ("商品列表-LLM生成-生成文案",),
+    entry="LLM 生成笔记",
 )
-BUSINESS_KEY_REWRITE_NOTE = BusinessKey(
-    "rewrite_note",
+#: 智能生成配图（媒体来源选「智能生成」时用）。
+BUSINESS_KEY_LLM_NOTE_IMAGE = BusinessKey(
+    "llm_note_image",
+    MODEL_TYPE_IMAGE,
+    "生成配图",
+    ("商品列表-LLM生成-智能生成配图",),
+    entry="LLM 生成笔记",
+)
+#: 智能生成视频（媒体来源选「智能生成视频」时用）。
+BUSINESS_KEY_LLM_NOTE_VIDEO = BusinessKey(
+    "llm_note_video",
+    MODEL_TYPE_VIDEO,
+    "生成视频",
+    ("商品列表-LLM生成-智能生成视频",),
+    entry="LLM 生成笔记",
+)
+
+# --------------------------------------------------------------------------- #
+# 入口 ②：笔记工坊 · 草稿
+# --------------------------------------------------------------------------- #
+
+BUSINESS_KEY_WORKSHOP_DRAFT_TEXT = BusinessKey(
+    "workshop_draft_text",
     MODEL_TYPE_TEXT,
-    "改写笔记",
-    ("笔记工坊-草稿-改写", "自动运营"),
+    "生成草稿",
+    ("笔记工坊-草稿-生成草稿",),
+    entry="笔记工坊 · 草稿",
 )
-BUSINESS_KEY_GENERATE_TITLE = BusinessKey(
-    "generate_title",
+BUSINESS_KEY_WORKSHOP_REWRITE_TEXT = BusinessKey(
+    "workshop_rewrite_text",
+    MODEL_TYPE_TEXT,
+    "改写草稿",
+    ("笔记工坊-草稿-改写",),
+    entry="笔记工坊 · 草稿",
+)
+BUSINESS_KEY_WORKSHOP_TITLE_TEXT = BusinessKey(
+    "workshop_title_text",
     MODEL_TYPE_TEXT,
     "生成标题",
     ("笔记工坊-草稿-生成标题",),
+    entry="笔记工坊 · 草稿",
 )
-BUSINESS_KEY_GENERATE_TAGS = BusinessKey("generate_tags", MODEL_TYPE_TEXT, "生成标签")
-BUSINESS_KEY_POLISH_TEXT = BusinessKey("polish_text", MODEL_TYPE_TEXT, "文本润色")
-
-
-# --------------------------------------------------------------------------- #
-# 文本类 · 商品侧（kind = `text`）：2 个（设计 20 §3.2，M4 方向 4）
-# --------------------------------------------------------------------------- #
-
-#: 商品标题润色。⚠️ 与 `polish_text`（笔记文本润色）/ `generate_title`（笔记标题）
-#: 是**四个不同的业务点**：那两个服务**笔记**，本组服务**商品** —— 提示词、长度约束、
-#: 平台口径全不同（商品标题有平台字数上限、不能含广告法违禁词；笔记标题没有）
-#: ⇒ 用户要能分别挂服务商（§13.2 的设计目标）。
-BUSINESS_KEY_POLISH_PRODUCT_TITLE = BusinessKey(
-    "polish_product_title",
-    MODEL_TYPE_TEXT,
-    "商品标题润色",
-    ("商品列表-商品详情-AI润色-标题",),
-)
-#: 商品卖点生成。语义同上（「场景 + 痛点 + 解决方案」，不得编造参数）。
-BUSINESS_KEY_GENERATE_SELLING_POINT = BusinessKey(
-    "generate_selling_point",
-    MODEL_TYPE_TEXT,
-    "商品卖点生成",
-    ("商品列表-商品详情-AI润色-卖点",),
-)
-
-# --------------------------------------------------------------------------- #
-# 图像类（kind = `image`）：4 个
-# --------------------------------------------------------------------------- #
-
-BUSINESS_KEY_GENERATE_COVER = BusinessKey("generate_cover", MODEL_TYPE_IMAGE, "生成封面")
-BUSINESS_KEY_GENERATE_IMAGE = BusinessKey(
-    "generate_image",
+BUSINESS_KEY_WORKSHOP_IMAGE = BusinessKey(
+    "workshop_image",
     MODEL_TYPE_IMAGE,
     "生成配图",
-    ("笔记工坊-图片-生成配图", "笔记工坊-草稿-生成配图"),
+    ("笔记工坊-草稿-生成配图",),
+    entry="笔记工坊 · 草稿",
 )
-BUSINESS_KEY_DESCRIBE_IMAGE = BusinessKey(
-    "describe_image",
+
+# --------------------------------------------------------------------------- #
+# 入口 ③：笔记工坊 · 图片
+# --------------------------------------------------------------------------- #
+
+BUSINESS_KEY_WORKSHOP_IMAGE_GEN = BusinessKey(
+    "workshop_image_gen",
+    MODEL_TYPE_IMAGE,
+    "生成配图",
+    ("笔记工坊-图片-生成配图",),
+    entry="笔记工坊 · 图片",
+)
+BUSINESS_KEY_WORKSHOP_IMAGE_UNDERSTAND = BusinessKey(
+    "workshop_image_understand",
     MODEL_TYPE_IMAGE,
     "图片理解",
     ("笔记工坊-图片-图片理解",),
+    entry="笔记工坊 · 图片",
 )
-#: 2026-10-01 用户新增（「商品列表-商品详情-生成商品详情图」）——
+
+# --------------------------------------------------------------------------- #
+# 入口 ④：自动运营
+# --------------------------------------------------------------------------- #
+
+BUSINESS_KEY_AUTO_OPS_TEXT = BusinessKey(
+    "auto_ops_text",
+    MODEL_TYPE_TEXT,
+    "自动改写",
+    ("自动运营",),
+    entry="自动运营",
+)
+
+# --------------------------------------------------------------------------- #
+# 入口 ⑤：商品详情 · AI 润色
+# --------------------------------------------------------------------------- #
+
+#: ⚠️ 与 `polish_text`（笔记文本润色）/ `workshop_title_text`（笔记标题）
+#: 是**不同的业务点**：那两个服务**笔记**，本组服务**商品** —— 提示词、长度约束、
+#: 平台口径全不同（商品标题有平台字数上限、不能含广告法违禁词；笔记标题没有）。
+BUSINESS_KEY_PRODUCT_TITLE_POLISH = BusinessKey(
+    "product_title_polish",
+    MODEL_TYPE_TEXT,
+    "标题润色",
+    ("商品列表-商品详情-AI润色-标题",),
+    entry="商品详情 · AI 润色",
+)
+BUSINESS_KEY_PRODUCT_SELLING_POINT = BusinessKey(
+    "product_selling_point",
+    MODEL_TYPE_TEXT,
+    "卖点生成",
+    ("商品列表-商品详情-AI润色-卖点",),
+    entry="商品详情 · AI 润色",
+)
+
+# --------------------------------------------------------------------------- #
+# 入口 ⑥：商品详情 · 生成详情图
+# --------------------------------------------------------------------------- #
+
 #: 商品详情图与「配图」不是一回事：配图服务笔记正文，详情图服务**商品**
-#: （电商详情页长图），提示词与尺寸口径都不同 ⇒ 独立业务点，可分别挂服务商。
-BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE = BusinessKey(
-    "generate_product_detail_image",
+#: （电商详情页长图），提示词与尺寸口径都不同 ⇒ 独立业务点。
+BUSINESS_KEY_PRODUCT_DETAIL_IMAGE = BusinessKey(
+    "product_detail_image",
     MODEL_TYPE_IMAGE,
-    "生成商品详情图",
+    "生成详情图",
     ("商品列表-商品详情-生成商品详情图",),
+    entry="商品详情 · 生成详情图",
 )
 
 # --------------------------------------------------------------------------- #
-# 视频类（kind = `video`）：1 个（§13.4.4 v2.14，2026-10-02）
+# 无前端入口（仅 API 调用）—— 如实留空 entry，单独成行，**不编入口**
 # --------------------------------------------------------------------------- #
 
-#: 文生视频 / 图生视频（notes 的「视频笔记」媒体来源）。
-#: ⚠️ 与 `generate_image` **分开挂服务商**：图像与视频模型通常不是同一供应商
-#: （且视频贵得多，用户要能单独指到便宜/可信的那家）。
-BUSINESS_KEY_GENERATE_VIDEO = BusinessKey(
-    "generate_video",
-    MODEL_TYPE_VIDEO,
-    "生成视频",
-    ("商品列表-LLM生成-媒体来源选视频",),
+#: 草稿工坊「生成标签」按钮（`generateTagOptions` → `POST /ai/generate-tags`）。
+#: ⚠️ 实测**有前端调用**（`drafts-workshop-panel.tsx`）⇒ 归「笔记工坊 · 草稿」入口，
+#: 不再是「仅 API 调用」。
+BUSINESS_KEY_GENERATE_TAGS = BusinessKey(
+    "generate_tags",
+    MODEL_TYPE_TEXT,
+    "生成标签",
+    ("笔记工坊-草稿-生成标签",),
+    entry="笔记工坊 · 草稿",
 )
+#: ⚠️ **已移除**（2026-10-18 用户口径「没有入口是否被真实使用，未使用直接移除」）：
+#: * `polish_text`（文本润色）/ `generate_cover`（生成封面）—— 端点还在
+#:   （`POST /ai/polish-text` / `POST /ai/images/generate-cover`），但**前端零调用**、
+#:   后端也没有任何业务链路调它（实测 grep 全仓无调用方）。
+#:   留着只会让用户在模型配置页配一个永远不生效的模型。
+#: * 端点本身暂不删（可能有外部调用方 / 后续功能要接），但**不再占业务点**：
+#:   它们若被调用会抛 `BusinessProviderNotConfiguredError`（业务点未登记）——
+#:   这是**如实报错**，不是静默回落到别的模型。
 
-#: 全部业务点（顺序即前端「模型配置页」的业务点清单顺序）。
+
+#: 全部业务点（顺序即模型配置页父行的顺序）。
 #:
 #: ⚠️ 加业务点**只改这里**：新增一个 `BusinessKey` 常量并加入本元组，
 #: 下发端点、类型校验、前端清单自动跟进。
 BUSINESS_KEYS: Final[tuple[BusinessKey, ...]] = (
-    BUSINESS_KEY_GENERATE_NOTE,
-    BUSINESS_KEY_REWRITE_NOTE,
-    BUSINESS_KEY_GENERATE_TITLE,
+    # ① LLM 生成笔记（三类）
+    BUSINESS_KEY_LLM_NOTE_TEXT,
+    BUSINESS_KEY_LLM_NOTE_IMAGE,
+    BUSINESS_KEY_LLM_NOTE_VIDEO,
+    # ② 笔记工坊 · 草稿
+    BUSINESS_KEY_WORKSHOP_DRAFT_TEXT,
+    BUSINESS_KEY_WORKSHOP_REWRITE_TEXT,
+    BUSINESS_KEY_WORKSHOP_TITLE_TEXT,
     BUSINESS_KEY_GENERATE_TAGS,
-    BUSINESS_KEY_POLISH_TEXT,
-    BUSINESS_KEY_POLISH_PRODUCT_TITLE,
-    BUSINESS_KEY_GENERATE_SELLING_POINT,
-    BUSINESS_KEY_GENERATE_COVER,
-    BUSINESS_KEY_GENERATE_IMAGE,
-    BUSINESS_KEY_DESCRIBE_IMAGE,
-    BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE,
-    BUSINESS_KEY_GENERATE_VIDEO,
+    BUSINESS_KEY_WORKSHOP_IMAGE,
+    # ③ 笔记工坊 · 图片
+    BUSINESS_KEY_WORKSHOP_IMAGE_GEN,
+    BUSINESS_KEY_WORKSHOP_IMAGE_UNDERSTAND,
+    # ④ 自动运营
+    BUSINESS_KEY_AUTO_OPS_TEXT,
+    # ⑤ 商品详情 · AI 润色
+    BUSINESS_KEY_PRODUCT_TITLE_POLISH,
+    BUSINESS_KEY_PRODUCT_SELLING_POINT,
+    # ⑥ 商品详情 · 生成详情图
+    BUSINESS_KEY_PRODUCT_DETAIL_IMAGE,
 )
 
 #: key → BusinessKey 反查表（映射解析与校验用；O(1)，不在调用点线性扫描）。
 _BUSINESS_KEY_BY_KEY: Final[dict[str, BusinessKey]] = {item.key: item for item in BUSINESS_KEYS}
+
+#: **旧 key → 新 key**（2026-10-18 按入口拆分）。
+#:
+#: 为什么需要：拆之前 `(platform, business_key)` 存着用户的配置，key 名如
+#: `generate_note`；拆之后变成 `llm_note_text` 等。**存量配置不能丢** ——
+#: 用户配好的模型在升级后必须继续生效（否则每个入口都变「未配置」）。
+#:
+#: ⚠️ 被多个入口共用的旧 key（`generate_note` / `generate_image` / `rewrite_note`）
+#: 会**复制成多行**（每个新 key 一行，初始值相同）。这是「拆分」的必然代价，
+#: 也正合用户口径 —— 拆开之后本来就可以各配各的，初始值相同不改变「可以不同」。
+LEGACY_KEY_ALIASES: Final[dict[str, tuple[str, ...]]] = {
+    "generate_note": ("llm_note_text", "workshop_draft_text"),
+    "generate_image": ("llm_note_image", "workshop_image", "workshop_image_gen"),
+    "generate_video": ("llm_note_video",),
+    "rewrite_note": ("workshop_rewrite_text", "auto_ops_text"),
+    "generate_title": ("workshop_title_text",),
+    "describe_image": ("workshop_image_understand",),
+    "polish_product_title": ("product_title_polish",),
+    "generate_selling_point": ("product_selling_point",),
+    "generate_product_detail_image": ("product_detail_image",),
+    #: `generate_tags` 同名沿用（只是从「无入口」归入「笔记工坊 · 草稿」）。
+    "generate_tags": ("generate_tags",),
+}
 
 
 def get_business_key(key: str) -> BusinessKey | None:
@@ -204,9 +330,30 @@ def get_business_key(key: str) -> BusinessKey | None:
     ⚠️ 调用层**必须用常量**而非字面量调映射解析；本函数只服务
     API 层（前端下发来的 key 要验是否合法）与迁移的存量兼容路径。
     """
-    return _BUSINESS_KEY_BY_KEY.get(key)
+    return _BUSINESS_KEY_BY_KEY.get((key or "").strip())
 
 
 def is_valid_business_key(key: str) -> bool:
     """key 是否已登记（API 层校验下发值用）。"""
-    return key in _BUSINESS_KEY_BY_KEY
+    return (key or "").strip() in _BUSINESS_KEY_BY_KEY
+
+
+# --------------------------------------------------------------------------- #
+# **前端入口聚合**（用户口径 2026-10-18：*「模型配置以前端入口为父对象」*）
+# --------------------------------------------------------------------------- #
+
+def entry_kinds() -> dict[str, tuple[str, ...]]:
+    """入口名 → 该入口需要的**能力类型**（按 `BUSINESS_KEYS` 顺序去重）。
+
+    父行的「共需 N 类模型」与「哪几类」都读它 —— 前端**不许自己数**：
+    将来加一个类型只改后端，页面若自己数就会静默少一行，缺的模型没人配、
+    调用时才 500。
+    """
+    out: dict[str, list[str]] = {}
+    for spec in BUSINESS_KEYS:
+        if not spec.entry:
+            continue
+        bucket = out.setdefault(spec.entry, [])
+        if spec.kind not in bucket:
+            bucket.append(spec.kind)
+    return {name: tuple(kinds) for name, kinds in out.items()}

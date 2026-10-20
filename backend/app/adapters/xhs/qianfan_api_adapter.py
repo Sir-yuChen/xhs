@@ -427,6 +427,98 @@ class XhsQianfanApiAdapter:
         with direct_xhs_request_env():
             return self._api().batch_delete_items(list(item_ids))
 
+    # ------------------------------------------------------------------ #
+    # 店铺违规管理（设计 42，2026-10-18）—— **只读域**，平台强制签名
+    #
+    # ⚠️ 本层刻意**不暴露** `read_mark`（标已读）与申诉提交（`appeal/*`）：
+    # 打开详情顺手改平台状态不是只读边界（设计 42 §1.3 / 编排卡 D3）。
+    # ------------------------------------------------------------------ #
+
+    def post_violation_list(self, body: dict) -> tuple[bool, str, Any]:
+        """违规 / 预警列表（`warnFlag` 0/1 共用）。"""
+        with direct_xhs_request_env():
+            return self._api().post_violation_list(body)
+
+    def post_violation_info(self, body: dict) -> tuple[bool, str, Any]:
+        """违规详情。"""
+        with direct_xhs_request_env():
+            return self._api().post_violation_info(body)
+
+    def get_violation_appeal_record(self, violation_id: str) -> tuple[bool, str, Any]:
+        """申诉记录（只读）。"""
+        with direct_xhs_request_env():
+            return self._api().get_violation_appeal_record(violation_id)
+
+    def post_violation_evidence(self, body: dict) -> tuple[bool, str, Any]:
+        """违规证据（可能为 null）。"""
+        with direct_xhs_request_env():
+            return self._api().post_violation_evidence(body)
+
+    def get_violation_status_enum(self) -> tuple[bool, str, Any]:
+        """处罚状态枚举（前端不硬编码，后端下发）。"""
+        with direct_xhs_request_env():
+            return self._api().get_violation_status_enum()
+
+    def get_violation_entity_enum(self) -> tuple[bool, str, Any]:
+        """违规对象枚举（后端下发）。"""
+        with direct_xhs_request_env():
+            return self._api().get_violation_entity_enum()
+
+    def post_violation_user_tag(self, body: dict) -> tuple[bool, str, Any]:
+        """违规原因 → tagId 分组（tagName 不 trim / 不去重）。"""
+        with direct_xhs_request_env():
+            return self._api().post_violation_user_tag(body)
+
+    def post_violation_risk_list(self, body: dict) -> tuple[bool, str, Any]:
+        """店铺体检 · 违规风险。"""
+        with direct_xhs_request_env():
+            return self._api().post_violation_risk_list(body)
+
+    def post_violation_risk_advice(self, body: dict) -> tuple[bool, str, Any]:
+        """店铺体检 · 经营建议。"""
+        with direct_xhs_request_env():
+            return self._api().post_violation_risk_advice(body)
+
+    def post_negative_feedback_badcase(self, kind: str, body: dict) -> tuple[bool, str, Any]:
+        """店铺体检 · 负反馈风险（`quality` / `logistics` 两个端点）。"""
+        with direct_xhs_request_env():
+            return self._api().post_negative_feedback_badcase(kind, body)
+
+    def post_seller_high_price_info(self, body: dict | None = None) -> tuple[bool, str, Any]:
+        """店铺体检 · 高价商品概览。"""
+        with direct_xhs_request_env():
+            return self._api().post_seller_high_price_info(body)
+
+    def post_compensate_list(self, body: dict) -> tuple[bool, str, Any]:
+        """赔付列表。"""
+        with direct_xhs_request_env():
+            return self._api().post_compensate_list(body)
+
+    def post_arbitration_list(self, body: dict) -> tuple[bool, str, Any]:
+        """仲裁列表。"""
+        with direct_xhs_request_env():
+            return self._api().post_arbitration_list(body)
+
+    def post_arbitration_taglist(self, body: dict | None = None) -> tuple[bool, str, Any]:
+        """仲裁原因下拉。"""
+        with direct_xhs_request_env():
+            return self._api().post_arbitration_taglist(body)
+
+    def post_spot_check_list(self, body: dict) -> tuple[bool, str, Any]:
+        """抽检违规列表。"""
+        with direct_xhs_request_env():
+            return self._api().post_spot_check_list(body)
+
+    def post_exemption_overview(self, body: dict | None = None) -> tuple[bool, str, Any]:
+        """免罚机会 · 爆单豁免概览。"""
+        with direct_xhs_request_env():
+            return self._api().post_exemption_overview(body)
+
+    def post_exemption_items(self, body: dict) -> tuple[bool, str, Any]:
+        """免罚机会 · 爆单明细。"""
+        with direct_xhs_request_env():
+            return self._api().post_exemption_items(body)
+
 
 def get_qianfan_api_adapter_factory():
     """千帆适配器工厂（FastAPI 依赖）。

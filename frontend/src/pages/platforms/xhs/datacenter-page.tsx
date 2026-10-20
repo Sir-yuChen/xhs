@@ -1493,14 +1493,18 @@ export function XhsDatacenterPage() {
         />
       </Modal>
 
-      {/* 商品详情弹窗（点「商品名称」列触发，参考我的笔记页挂载商品区块）。 */}
+      {/* 商品详情弹窗（点「商品名称」列触发，参考我的笔记页挂载商品区块）。
+          ⚠️ 宽度是**视口百分比**（用户口径 2026-10-18：*「商品详情弹窗最大 全屏的85%」*）——
+          原为固定 480px，图多/属性多时挤成一列滚不完。
+          `maxWidth` 兜住超宽屏：85vw 在 2560 屏上是 2176px，全摊开反而难读。 */}
       <Modal
         centered
         open={productDetailOpen}
         title="商品详情"
         onCancel={() => setProductDetailOpen(false)}
         footer={null}
-        width={480}
+        width="85vw"
+        style={{ maxWidth: 1600 }}
       >
         {productDetailLoading ? (
           <div style={{ padding: "24px 0", textAlign: "center" }}>

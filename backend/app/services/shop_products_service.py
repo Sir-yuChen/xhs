@@ -340,6 +340,29 @@ def delete_items(db: Session, *, platform_account_id: int, item_ids: list[str]) 
     if not ids:
         return 0
 
+    # ⚠️ 2026-10-18（设计 44）：**4 张表**外键指向 `shop_products.id`，只清 `note_goods`
+    #    会被 `FOREIGN KEY constraint failed` 挡住（本库实测：
+    #    `shop_metric_snapshots` 3972 行、`generation_records` 21 行）。
+    #    一律按「本地实体真删 ⇒ 从属数据跟着走」先清引用，再删本体。
+    doomed_pk = list(
+        db.scalars(
+            select(ShopProduct.id).where(
+                ShopProduct.platform_account_id == platform_account_id,
+                ShopProduct.item_id.in_(ids),
+            )
+        )
+    )
+    if doomed_pk:
+        from backend.app.models.generation import GenerationRecord
+        from backend.app.models.hot_topic import TopicGoodsMatch
+        from backend.app.models.monitoring import ShopMetricSnapshot
+        from backend.app.models.order import OrderItem
+
+        db.execute(delete(GenerationRecord).where(GenerationRecord.shop_product_id.in_(doomed_pk)))
+        db.execute(delete(TopicGoodsMatch).where(TopicGoodsMatch.product_pk.in_(doomed_pk)))
+        db.execute(delete(ShopMetricSnapshot).where(ShopMetricSnapshot.product_pk.in_(doomed_pk)))
+        db.execute(delete(OrderItem).where(OrderItem.shop_product_id.in_(doomed_pk)))
+
     # 1) 这个账号的台账里实际存在的选中行（传了别人的 / 不存在的 item_id ⇒ 少删几行）
     doomed = list(
         db.scalars(

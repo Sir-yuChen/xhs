@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import (
+    Boolean,
     DateTime,
     ForeignKey,
     Integer,
@@ -23,12 +24,62 @@ GEN_STATUS_SUCCESS = "success"
 GEN_STATUS_FAILED = "failed"
 GEN_TERMINAL_STATUSES = (GEN_STATUS_SUCCESS, GEN_STATUS_FAILED)
 
+#: 这一版**重做了什么**（用户口径 2026-10-17：*「基于指定生成的某一版本，用户只想重新
+#: 生成正文或只重新配置生成图片」*）。
+#:
+#: * `all`   —— 整篇重新生成（标题/正文/话题/图片全换）；`parent_record_id = NULL`；
+#: * `text`  —— **只重写文案**（标题/正文/话题），媒体沿用当前版本已有的；
+#: * `media` —— **只重配图片**，文案（标题/正文/话题）沿用当前版本已有的。
+#:
+#: ⚠️ 局部重生成**必须落成新版本行**（不覆盖当前版本）：用户可能想对比「改文案前后」，
+#: 覆盖掉了就没得比。当前版本行保持不动 = 历史可回溯。
+REGEN_SCOPE_ALL = "all"
+REGEN_SCOPE_TEXT = "text"
+REGEN_SCOPE_MEDIA = "media"
+#: **逐块重生成**（用户口径 2026-10-18：*「后端应支持每个文案区域单独重新生成，
+#: 或图片区域单独重新生成」*）—— 上面三个是**旧粒度**（`text` 把标题/正文/话题
+#: 一起重写，界面上写「只改一块」是假的），下面四个是**新粒度**：
+#:
+#: * `title`  —— 只重写标题（正文 / 话题 / 配图全部沿用当前版本，一个字不动）；
+#: * `body`   —— 只重写正文；
+#: * `topics` —— 只重写话题；
+#: * `media`  —— 只重配图片（复用上面的同名字面量，语义一致）。
+#:
+#: ⚠️ `text` / `all` **保留**：历史版本行的 `regen_scope` 列里有旧值，
+#: 删掉字面量会让老数据变成「未知 scope」。新请求只走四个细粒度值。
+REGEN_SCOPE_TITLE = "title"
+REGEN_SCOPE_BODY = "body"
+REGEN_SCOPE_TOPICS = "topics"
+#: 新的细粒度集合（**新请求只接受这一组 + `all`**）。
+REGEN_SCOPES = (
+    REGEN_SCOPE_ALL,
+    REGEN_SCOPE_TITLE,
+    REGEN_SCOPE_BODY,
+    REGEN_SCOPE_TOPICS,
+    REGEN_SCOPE_MEDIA,
+)
+#: 历史字面量（只读，用于展示老数据，**不再接受为新请求的入参**）。
+REGEN_LEGACY_SCOPES = (REGEN_SCOPE_TEXT,)
+#: 文案类细粒度（这三个都要走文本模型，且必须沿用当前版本里的其余两块）。
+REGEN_TEXT_FIELD_SCOPES = (
+    REGEN_SCOPE_TITLE,
+    REGEN_SCOPE_BODY,
+    REGEN_SCOPE_TOPICS,
+)
+
 #: `media_source` 四选一（设计 17 §3.5 / §7.4）。
 MEDIA_SOURCE_AI_GENERATE = "ai_generate"
 MEDIA_SOURCE_MATERIAL = "material"
 MEDIA_SOURCE_PRODUCT_IMAGE = "product_image"
 MEDIA_SOURCE_REFERENCE_IMAGE = "reference_image"
-#: 视频来源（§13.4.4 v2.14）：与图片**分开取值**（媒体来源决定调哪条客户端链路）。
+#: 视频来源（设计 17 §13.4.4）。
+#: ⚠️ **2026-10-16 收敛为两种**（用户口径：*「视频下拉应只有本地素材和智能生成视频」*）：
+#:   - `video_material` —— **本地素材直接用**（**不生成视频**，只借素材喂文案链路）；
+#:   - `video_ai_generate` —— 文/图生视频（可带参考图）。
+#: ⚠️ `video_reference`（独立「参考图生成视频」）**已退场**：它与 `video_ai_generate`
+#: 带参考图是同一件事（两入口一实现 ⇒ 概念冗余，与本仓「参考图移进智能生成」同一次收敛）。
+#: 旧值仍在白名单里**只为兼容存量队列行**（新请求不再产生它）。
+MEDIA_SOURCE_VIDEO_MATERIAL = "video_material"
 MEDIA_SOURCE_VIDEO_AI = "video_ai_generate"
 MEDIA_SOURCE_VIDEO_REFERENCE = "video_reference"
 #: 图片来源（可复用商品原图 / 素材库）。
@@ -38,10 +89,13 @@ IMAGE_MEDIA_SOURCES = (
     MEDIA_SOURCE_PRODUCT_IMAGE,
     MEDIA_SOURCE_REFERENCE_IMAGE,
 )
-#: 视频来源（只有 AI 生成 / 参考图两种 —— 商品原图与素材库对视频无意义）。
+#: 视频来源（本地素材直接用 / AI 生成）。
+#: ⚠️ `MEDIA_SOURCE_VIDEO_REFERENCE` **不在白名单**（已退场，见上方注释）——
+#: 但它仍在 `VIDEO_MEDIA_SOURCES` 之外 ⇒ 新请求传它会被 `LLM_MEDIA_SOURCE_INVALID` 拒。
+#: 存量队列行不受影响（那些行已经落库，不再过白名单）。
 VIDEO_MEDIA_SOURCES = (
+    MEDIA_SOURCE_VIDEO_MATERIAL,
     MEDIA_SOURCE_VIDEO_AI,
-    MEDIA_SOURCE_VIDEO_REFERENCE,
 )
 MEDIA_SOURCES = IMAGE_MEDIA_SOURCES + VIDEO_MEDIA_SOURCES
 
@@ -92,6 +146,12 @@ class GenerationRecord(Base):
     model_name: Mapped[str] = mapped_column(String(128), default="")
     #: `ai_generate`/`material`/`product_image`/`reference_image`。
     media_source: Mapped[str] = mapped_column(String(32), default=MEDIA_SOURCE_PRODUCT_IMAGE)
+    #: **笔记形态**：`image`（图文）/ `video`（视频）。
+    #: 用户口径 2026-10-19：*「生成记录新增一个类型字段区分，视频笔记或图文笔记」* ——
+    #: 原来只能靠 `media_json` 里有没有 `asset_type=video` 去猜，
+    #: 一旦媒体生成失败（一条都没落）就无从判断，回显还会错页签。
+    #: 落库时由 `plan_form(plan)` 派生（与 `notes.note_form` 同口径）。
+    note_form: Mapped[str] = mapped_column(String(16), default="image", index=True)
     #: `queued`/`running`/`success`/`failed`（状态机见模块常量）。
     status: Mapped[str] = mapped_column(String(32), index=True, default=GEN_STATUS_QUEUED)
     #: 生成的标题（护栏通过后落）。
@@ -105,6 +165,39 @@ class GenerationRecord(Base):
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     #: 供应商响应时间。
     ai_generated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    # ------------------------------------------------------------------ #
+    # 版本历史（用户口径 2026-10-17：*「基于指定生成的某一版本，用户只想重新生成
+    # 正文或只重新配置生成图片」*）
+    #
+    # 一张表同时是「审计」与「版本历史」：每次生成落一条，**永不覆盖旧记录**
+    # （原先只有「一次生成本身」，同商品生成 3 次后看不到前两版，用户无法对比/选回）。
+    # ------------------------------------------------------------------ #
+    #: 同商品内的版本序号（1,2,3…）。⚠️ **不是主键**，只是展示用的次序。
+    version_no: Mapped[int] = mapped_column(Integer, default=1)
+    #: 当前版本：全量生成 ⇒ `None`；「基于第 2 版只重生成正文/图片」⇒ 指向第 2 版那条。
+    #: 自引用外键（当前版本被删 ⇒ 置空，不连带删掉这条历史）。
+    parent_record_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("generation_records.id", ondelete="SET NULL"), nullable=True
+    )
+    #: 这一版重做了什么：`all`（整篇新生成）/ `text`（只重写文案，图沿用当前版本）/
+    #: `media`（只重配图片，文案沿用当前版本）。见 `REGEN_SCOPES`。
+    regen_scope: Mapped[str] = mapped_column(String(16), default=REGEN_SCOPE_ALL)
+    #: 是否是**当前采用版**（同商品最多一条为真，DB 层有部分唯一索引兜底）。
+    #: ⚠️ 不是「最新一条」—— 用户可能生成 3 版后选回第 1 版。
+    is_adopted: Mapped[bool] = mapped_column(Boolean, default=False)
+    #: 当时的**文案要求快照**（区间/表情/三块提示词），JSON 文本。
+    #: ⚠️ 必须存快照而不是只存模板 id：模板被改过之后，只存 id 还原不出当时的要求。
+    copy_requirements_json: Mapped[str] = mapped_column(Text, default="{}")
+    #: 这一版**实际用了哪些媒体**（JSON 数组，元素 `{url, local_path, sort_order}`）。
+    #:
+    #: ⚠️ 为什么必须存（2026-10-18 真机实证）：
+    #: `product_image` 来源是**直接引用台账图直链**，不走 `AigcMediaAsset`
+    #: （那是 AI 生成图的溯源表）—— 于是「图确实生成了、笔记也带图了」，
+    #: 但生成记录里**一个字都没提图** ⇒ 版本详情抽屉无从展示，
+    #: 用户以为「配图没生成」。这里把清单存进记录本身，与媒体来源无关。
+    media_json: Mapped[str] = mapped_column(Text, default="[]")
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=shanghai_now, onupdate=shanghai_now
@@ -184,5 +277,12 @@ class NoteGenerationLink(Base):
     #: 本地台账商品主键。
     shop_product_id: Mapped[int] = mapped_column(
         ForeignKey("shop_products.id"), index=True
+    )
+    #: **是哪次生成产出这篇笔记**（版本历史 ↔ 笔记的唯一桥）。
+    #: ⚠️ 2026-10-17 新增：此前本表只有「笔记 ↔ 商品」，**没有指向生成记录** ⇒
+    #: 「基于第 2 版只重写文案」时需要从当前版本记录反查它产出的笔记（沿用其媒体），
+    #: 而这条路径原本是断的（实测本表 0 行，无法溯源）。
+    generation_record_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("generation_records.id", ondelete="SET NULL"), index=True, nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now)

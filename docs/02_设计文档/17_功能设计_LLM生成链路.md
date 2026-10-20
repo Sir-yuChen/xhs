@@ -286,7 +286,7 @@
 | id | Integer | PK | ✅ | |
 | user_id | Integer | FK users.id, **index** | ✅ | 归属（DEF-066 纪律） |
 | name | String(128) | 非空 | ✅ | 模块名（唯一展示名，按 user 内唯一） |
-| category | String(64) | 非空, index | ✅ | 类别（如 `style`/`tone`/`audience`） |
+| category | String(64) | 非空, index | ✅ | 类别（见下方「类别口径」） |
 | content | Text | 非空 | ✅ | Prompt 片段正文 |
 | sort_order | Integer | 默认 0 | ✅ | 拼接顺序（同组合内先后） |
 | enabled | Boolean | 默认 True | ✅ | 停用即不参与渲染 |
@@ -294,6 +294,24 @@
 
 - **唯一约束**：`UniqueConstraint("user_id", "name")`（user 内模块名唯一，迁移 `ab1c2d3e4f5g` 由
   `(user_id, name)` 唯一索引锁定，不造第二份真相源）。
+
+**类别口径**（`category` 是自由字符串，无 DB 枚举；此处是**种子里实际使用的**取值）：
+
+| category | 面向 | 用途 | 种子条数 |
+|---|---|---|---|
+| `style` | **图** | 一致性锁（防漂移）：光位 / 材质 / 形状 | 1 |
+| `taboo` | **图** | 画面禁忌（水印 / logo / 价格标签） | 1 |
+| `tone` | **文案** | 语气（口语化程度、口语词上限） | 1 |
+| `structure` | **文案** | 正文结构（痛点开场三段式等） | 1 |
+| `audience` | **文案** | 人群与场景（从类目属性推，禁编造） | 1 |
+| `deai` | **文案** | 去 AI 味禁用词表 | 1 |
+| `taboo_text` | **文案** | 文本禁忌（绝对化 / 营销感 / 功效宣称） | 1 |
+| `selling_point` | **文案** | 卖点收窄（只讲 2–3 个） | 1 |
+
+⚠️ **2026-10-16 实测缺口（已修，设计 41 §11.1.3 / §12）**：此前种子里**只有**
+`style` + `taboo` 两类，**全是图用的** —— 文案链路上「公共模块可组合复用」是**空转**。
+文案向六类为本轮新增（`config/initial_data/prompt_templates.json`）。
+⚠️ 用户可自行新增任意 category（列是自由串）；上表是**种子基线**，不是白名单。
 
 ### 3.2 `prompt_templates`（提示词模板，新增 ✅）
 
@@ -3340,6 +3358,54 @@ media_generation._assets_from_video:
 
 ---
 
+## 13.12 文案向模板与模块（v2.25，2026-10-16 用户口径「提示词需要更细化」）
+
+> **上游**：设计 41 §11.1.3 / §12。**性质**：补种子 + 兜底对齐 + 解析器补键。
+
+### 13.12.1 缺口（**真库实测**，不是推测）
+
+| 项 | 实测 | 结论 |
+|---|---|---|
+| `prompt_modules` / `prompt_templates` 总行 | 52 / 78 | ⚠️ **是虚的**：属多个 user 的重复种子 |
+| **user 2（当前账号）名下** | **2 模块 / 3 模板** | 只有 `style` + `taboo`，**全是图用的** |
+| `task_type` 取值 | `cover` / `image` / `video` | ⚠️ **没有 `text`** ⇒ 文案 Prompt 走 `build_generation_skeleton_hint()` **代码兜底** |
+| 兜底骨架 | 极简四行 | 无爆款结构、无埋词位、无标题备选 |
+
+⇒ **「细化提示词」此前根本没有入口**（文案侧无可配模板）。这也解释了验收清单链 4
+那条真实样本（正文 **60 字**、话题丢 `[话题]#` 形态）：**文案 Prompt 是代码兜底的，没人能调**。
+
+### 13.12.2 交付物
+
+| # | 改动 | 落点 |
+|---|---|---|
+| 1 | 种子模块 2 → **8**（+`tone`/`structure`/`audience`/`deai`/`taboo_text`/`selling_point`） | `config/initial_data/prompt_templates.json` |
+| 2 | 种子模板 3 → **4**（+`task_type="text"`「商品笔记文案（默认）」） | 同上 |
+| 3 | 兜底骨架**对齐六段位**（与新模板同口径） | `note_gen_llm_service.build_generation_skeleton_hint()` |
+| 4 | `GeneratedNote` +`titles` / `+cover_text`；选定 title 补进 titles 首位 | `note_gen_llm_service` |
+| 5 | `parse_generated_payload` 补读 `titles` / `cover_text`（可选，缺省为空） | `product_note_service` |
+
+### 13.12.3 两条钉死的判据
+
+1. **兜底 ⊇ 模板**（六段位逐段都在）—— `template_id` 是 nullable，
+   **新用户首次生成的默认状态就是没模板**；兜底若比模板弱，「细化」只覆盖选模板的用户。
+2. **选定 title 必须在 `titles` 里** —— 前端拿 `titles` 做备选下拉，
+   下拉里没有当前生效的那条 = 用户以为「选的和写的不一致」。
+
+### 13.12.4 落地实测（2026-10-16）
+
+| 项 | 结果 |
+|---|---|
+| 守卫 | `tests/backend/test_prompt_text_template.py` **15 passed** |
+| 回归 | `test_detail_image_template.py` + `test_initial_data.py` **39 passed / 0 failed** |
+| 变异 | `.hermes/scripts/mutate_verify_prompt_text_template.py` **9/9 CAUGHT**（M7 首轮 ESCAPED，已修） |
+| 存量升级 | `.hermes/scripts/upgrade_prompt_skeletons.py`（**只覆盖「与旧种子逐字相同」的行** ⇒ 用户改过的绝不冲掉） |
+| 端点 / 表 / 迁移 | **零变化** —— 只动种子与解析器 |
+
+⚠️ **前端零改动**：`prompt-template-panel.tsx` **早已注册** `text: "文案生成"`，
+`PROMPT_TASK_TYPES` 也早已含 `text`（`models/prompt.py:24`）—— 缺的只是**种子数据**。
+
+---
+
 ## 14. 里程碑验收（对齐 16 文档 §2.6）
 
 - 选商品 → 选模板 → 点「生成并保存」，**≤60s** 产出：标题（多备选）+ 正文（600–900 字）+
@@ -3813,3 +3879,50 @@ relevance = 词面命中权重（标题 100 / 类目 40 / 卖点 20） + 平台�
 `{"data": {"topic_list": …}}`），而调用点传的是**已解包的 `data`** ⇒
 静默返回空列表（**HTTP 200 + 0 条**，看起来像「平台没给词」，实际是取错层）。
 已改为**两种载体都吃**，并由用例钉住。
+---
+
+## 12. 「生成笔记」要配**多类型模型**（2026-10-18 用户口径）
+
+> 「生成笔记，既有文本也有图片也有视频，应支持配置多个模型」
+
+### 12.1 结论：数据层本来就支持，缺的是「说得清」
+
+一次「生成笔记」在用户眼里是一件事，技术上是**三次调用、三个业务点**：
+
+| 环节 | 业务点 | 类型 | 实测（user 2） |
+|---|---|---|---|
+| 写文案 | `generate_note` | `text` | `DISCOVERY-EUSK / deepseek-v4-flash-0731` |
+| 配图 | `generate_image` | `image` | `QIANWENAIAPI-EZKJ / qwen-image-2.1-pro` |
+| 出视频 | `generate_video` | `video` | **未配**（`LLM_BUSINESS_PROVIDER_NOT_CONFIGURED`） |
+
+**分开挂服务商是对的**：文本 / 图片 / 视频通常不是同一家，且视频贵得多，
+用户要能单独指到便宜或可信的那家。`resolve_business_provider()` 各走各的 key，
+**不做任何合并**。
+
+缺的是**界面说得清**：用户在「生成笔记」那行只看到一个文本模型，
+会以为图 / 视频没地方配。
+
+### 12.2 改了什么
+
+`BusinessKey` 新增 `needs: tuple[str, ...]`（**只供界面聚合展示**）：
+
+| 业务点 | needs |
+|---|---|
+| `generate_note` | `text` + `image` + `video` |
+| `generate_image` | `text` + `image` |
+| `generate_video` | `text` + `video` |
+
+两个端点（`/business-provider-keys` 与 `/business-providers`）都下发 `needs`；
+页面在「业务点」列多一行「需配套：文本 图片 视频」，并提示
+「分别在本页各自的行里配置（不是同一行选多个）」。
+
+⚠️ `kind` 仍是**单值**，映射仍按 `(platform, business_key)` 存 ——
+`needs` 不是合并信号，守卫 `test_needs_does_not_merge_resolution` 钉住这一点。
+
+### 12.3 顺带修：类型中文名说假话
+
+页面原写 `kind === "image" ? "图像" : "文本"` ⇒ **`video` 类型被说成「文本」**
+（`generate_video` 的空态文案在骗人），扩枚举后还会静默漏掉 `multimodal`。
+
+修法：读后端唯一映射点 `MODEL_TYPE_LABELS`（`/business-provider-keys` 早就下发了
+`model_types`，**页面此前根本没接收**），页面不再自己写三目。

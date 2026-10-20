@@ -79,6 +79,8 @@ export const ROUTE_BUSINESS_LINES: Record<string, BusinessLine> = {
   "/platforms/xhs/insights/content": "content",
   // 店铺线（用千帆 ark 令牌）
   "/platforms/xhs/shop-items": "shop",
+  // 设计 43（2026-10-18）：店铺违规管理，千帆违规域一比一复刻（只读、零落库）。
+  "/platforms/xhs/violation-manage": "shop",
   "/platforms/xhs/picture-space": "shop",
   "/platforms/xhs/orders": "shop",
   "/platforms/xhs/insights/shop": "shop",

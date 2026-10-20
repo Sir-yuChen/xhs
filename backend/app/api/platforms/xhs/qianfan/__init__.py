@@ -16,14 +16,14 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from . import goods, orders, picture_space, publish
+from . import goods, orders, picture_space, publish, violation
 
 #: ⚠️ **前缀与 tags 与拆分前逐字一致**（`qianfan.py` 原第 99 行）。
 #:    改这里 = 改对外 URL，必须同步 `test_qianfan_package.py` 的基线。
 router = APIRouter(prefix="/xhs/qianfan", tags=["xhs-qianfan"])
 
 #: 子 router **不再各自带 prefix**（它们挂在父 router 下，路径里已含 `/picture-space` 等段）。
-for _sub in (goods.router, orders.router, picture_space.router, publish.router):
+for _sub in (goods.router, orders.router, picture_space.router, publish.router, violation.router):
     router.include_router(_sub)
 
 #: ⚠️ **兼容旧 import 路径是有意的转发面**，不是懒加载 —— 删掉它会静默打断
@@ -47,7 +47,7 @@ from ._shared import (  # noqa: F401
     APIRouter,
     AfterSale,
     Any,
-    BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE,
+    BUSINESS_KEY_PRODUCT_DETAIL_IMAGE,
     BaseModel,
     Body,
     BusinessKey,

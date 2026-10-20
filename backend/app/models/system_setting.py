@@ -37,6 +37,10 @@ CATEGORY_SCHEDULER = "scheduler"
 CATEGORY_PUBLISH = "publish"
 CATEGORY_AI = "ai"
 CATEGORY_FEATURE = "feature"
+#: 笔记生成/配图相关（如 `xhs_note_image_total_limit`）。
+#: ⚠️ 该分组 2026-10 追加图片上限时**只改了种子、忘了补白名单**，
+#: 导致 `test_settings_initial_data_fields_are_within_whitelists` 长期红。
+CATEGORY_NOTE = "note"
 
 
 class SystemSetting(Base):

@@ -73,9 +73,11 @@ def test_initial_data_ships_consistency_module_and_two_templates():
     for fragment in ("统一光位", "保留商品真实材质", "禁止改变产品形状"):
         assert fragment in consistency["content"], f"一致性约束缺「{fragment}」"
 
-    # v2.26：三张模板 —— 详情图(image) / 主图(cover) / 视频(video)
+    # v2.26：四张模板 —— 详情图(image) / 主图(cover) / 视频(video) / 文案(text)
+    # ⚠️ v2.25 追加 text（设计 41 §11.1.3）：文案提示词此前**没有模板可配**，
+    #    走 `build_generation_skeleton_hint()` 代码兜底 ⇒ 用户在界面上改不到。
     task_types = {t["task_type"] for t in templates}
-    assert task_types == {"image", "cover", "video"}, f"种子模板任务类型不对：{task_types}"
+    assert task_types == {"image", "cover", "video", "text"}, f"种子模板任务类型不对：{task_types}"
     for template in templates:
         assert template["is_default"] is True, "种子模板必须是默认（否则弹窗不会自动选中）"
         assert template["module_names"], "种子模板必须引用一致性模块（否则一致性不生效）"
@@ -137,8 +139,8 @@ def test_register_seeds_prompt_templates_for_new_user(tmp_path):
             templates = db.query(PromptTemplate).filter_by(user_id=uid).all()
             modules = db.query(PromptModule).filter_by(user_id=uid).all()
             # v2.26：3 张模板（image / cover / video）
-            assert len(templates) == 3, f"注册后应有 3 张内置模板，实得 {len(templates)}"
-            assert len(modules) == 2, f"注册后应有 2 个内置模块，实得 {len(modules)}"
+            assert len(templates) == 4, f"注册后应有 4 张内置模板，实得 {len(templates)}"
+            assert len(modules) == 8, f"注册后应有 8 个内置模块，实得 {len(modules)}"
 
             # ① 模块先于模板：模板引用的 module_ids 必须**都解析得到**
             #    （顺序写反 ⇒ module_ids 为空 ⇒ 一致性约束静默不生效）
@@ -149,8 +151,8 @@ def test_register_seeds_prompt_templates_for_new_user(tmp_path):
 
             # ② 每个 task_type 恰好一张默认（弹窗按 task_type 找默认）
             defaults = [t for t in templates if t.is_default]
-            assert len(defaults) == 3
-            assert {t.task_type for t in defaults} == {"image", "cover", "video"}
+            assert len(defaults) == 4
+            assert {t.task_type for t in defaults} == {"image", "cover", "video", "text"}
         finally:
             db.close()
     finally:
@@ -205,10 +207,10 @@ def _seed_image_provider() -> None:
     from backend.app.core.security import encrypt_text
     from backend.app.models import LlmBusinessProvider, LlmGatewayConfig, LlmGatewayModel
     from backend.app.services.business_provider_keys import (
-        BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE,
+        BUSINESS_KEY_PRODUCT_DETAIL_IMAGE,
     )
 
-    spec = BUSINESS_KEY_GENERATE_PRODUCT_DETAIL_IMAGE
+    spec = BUSINESS_KEY_PRODUCT_DETAIL_IMAGE
     db = _db()
     try:
         config = LlmGatewayConfig(

@@ -133,14 +133,14 @@ def _run_pipeline(db: Session, *, auto_task_id: int, publish_mode: str) -> dict[
     # v2.0（设计 17 §13.2.4）：一期「默认文本模型」随 `model_configs` 退场，
     # 改由「平台 × 业务点」映射解析服务商。映射缺失 ⇒ 抛结构化错误
     # （**不回落**：回落 = 用错服务商而不报错，同 §13.2.3 D4）。
-    from backend.app.services.business_provider_keys import BUSINESS_KEY_REWRITE_NOTE
+    from backend.app.services.business_provider_keys import BUSINESS_KEY_AUTO_OPS_TEXT
     from backend.app.services.llm_gateway_client import (
         LLMGatewayError,
         resolve_business_provider,
     )
 
     try:
-        context = resolve_business_provider(db, user, BUSINESS_KEY_REWRITE_NOTE, platform="xhs")
+        context = resolve_business_provider(db, user, BUSINESS_KEY_AUTO_OPS_TEXT, platform="xhs")
     except LLMGatewayError as exc:
         raise AutoTaskRunError(f"AI 服务商未配置：{exc}") from exc
     model_config, api_key = context, context.api_key

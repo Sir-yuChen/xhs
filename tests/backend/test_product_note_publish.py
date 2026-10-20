@@ -1649,11 +1649,15 @@ def test_generate_prefers_video_over_images(tmp_path, monkeypatch):
 
 
 def test_publish_video_only_note_is_rejected_with_reason(tmp_path, monkeypatch):
-    """「只有视频」的笔记发布 ⇒ 明确失败 + 可读原因（§32.7：视频发布链路未接通）。
+    """「形态=图文但只有视频素材」⇒ 明确失败 + 可读原因（设计 41 §15）。
 
-    守的是**不静默失败**：用户看到的是 `NOTE_VIDEO_UNSUPPORTED` 与一句说清的话，
-    不是「发布失败（未给原因）」。异步后这是**同步门禁**（§31.5 步 0）——
-    点击即知发不了，不进队列。
+    ⚠️ **原判据已被取代**：本用例原名 `…video_unsupported…`，断言
+    `NOTE_VIDEO_UNSUPPORTED`（「视频笔记发布链路尚未接通」，设计 13 §32.7）。
+    §15 接通视频链路后，**视频笔记可发布**；真正该拦的是「形态与素材不一致」——
+    界面说图文、素材却只有视频（生成侧与形态脱钩）。原句保留在 docstring。
+
+    守的是**不静默失败**：用户看到的是 `NOTE_FORM_MEDIA_MISMATCH` 与一句说清的话。
+    异步后这是**同步门禁**（§31.5 步 0）—— 点击即知发不了，不进队列。
     """
     headers, account_id, db_factory = _setup(tmp_path)
     try:
@@ -1663,12 +1667,15 @@ def test_publish_video_only_note_is_rejected_with_reason(tmp_path, monkeypatch):
         db = db_factory()
         try:
             note = db.scalar(select(Note).where(Note.note_id == note_id))
+            #: 造出「形态=图文 但只有视频」的不一致态（正常情况下生成侧会置 video）。
+            note.note_form = "image"
+            db.commit()
             with pytest.raises(note_publish_service.NotePublishError) as exc:
                 note_publish_service.start_publish(
                     db, 1, note.id, adapter_factory=lambda cookies: FakePublishAdapter(cookies)
                 )
-            assert exc.value.code == "NOTE_VIDEO_UNSUPPORTED"
-            assert "视频笔记发布链路尚未接通" in exc.value.message
+            assert exc.value.code == "NOTE_FORM_MEDIA_MISMATCH"
+            assert "标记为「图文笔记」" in exc.value.message
         finally:
             db.close()
     finally:
