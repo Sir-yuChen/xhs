@@ -135,9 +135,7 @@ import {
   buildSkuFillPlan,
   defaultSpecMapping,
   passedSkuRows,
-  SPEC_CATEGORY_COL,
-  specCategoriesFromColumn,
-  specCategoryColumnIndex,
+  priceSourceOptions,
   withDerivedColumns,
   SKU_IMAGE_COL,
   type PriceMappingRow,
@@ -795,10 +793,9 @@ export function ProductPublishWizard({
       next[`${item.group}/${item.rel_path}`] = !item.has_forbidden && item.ocr_ok === true;
     }
     setChecked(next);
-    //: ⚠️ **给 SKU 表插入「规格分类」列**（用户口径 2026-10-15：「再第一步商品
-    //: sku 表格的**第二列新增一个规格分类默认为空**」）。
-    //: 插在**数据列的第 0 位** ⇒ 渲染时排在「SKU 图」预览列之后 = 屏幕第 2 列。
-    //: 只给 **SKU 表**插（属性表不需要；`is_sku_table` 由后端按列名特征判定）。
+    //: ⚠️ **「规格分类」固定列已整体移除**（用户口径 2026-10-20：
+    //: 「商品发布移除商品sku表格中的规格分类固定列，『规格分类』固定列 相关所有逻辑移除」）。
+    //: 现在只给 SKU 表插「SKU 图」一列（`withDerivedColumns` 内部只剩它）。
     setTables(
       data.tables.map((t) => {
         //: ⚠️ **初始化 `column_keys`**（后端不下发；它是前端产物）——
@@ -1187,30 +1184,23 @@ export function ProductPublishWizard({
     [tables, skuTableSelection, wizardLocalImages],
   );
 
-  /** 弹窗「商品 SKU 映射关系」的**左侧候选** = 预检通过的 SKU 行的规格名。
+  /** 弹窗「商品 SKU 映射关系」的**左侧候选** = **预检通过表的全部列**
+   *  （用户口径 2026-10-20，逐字）：
+   *  「第二步的导入sku数据弹窗中的商品sku的映射关系应左侧不再是规格分类而应该是
+   *    **与价格库存映射关系表一致，预检通过列的所有列**」。
    *
-   *  ⚠️ **用户口径 2026-10-14**：「将固定的规格分类移除，相关逻辑也移除，
-   *  第二步参数配置中，再 SKU 自动导入数据弹窗中**用户第一步需手动勾选商品规格**」
-   *  ⇒ 左侧不再是「从自造列派生」，而是**用户自己勾**（勾选列），
-   *  候选仍来自预检通过的行（`row.specName` 是从 `sku名称` 按 `:` 切出来的）。
-   */
-  /** 弹窗「商品 SKU 映射关系」的**左侧候选** = **第一步「规格分类」列去重后的值**
-   *  （用户口径 2026-10-15）：
-   *  「将第一步预检同步的 sku 数据的**规格分类列数据去重后**下拉展示」。
+   *  ⚠️ 三个已退场的旧实现（**不要再回到其中任何一个**）：
+   *    ① `sourceSpecNames(filledSkuRows)` —— 从 `sku名称` 拆冒号猜前缀；
+   *    ② 读自造的「规格分类」固定列（该列 2026-10-20 已整体移除）；
+   *    ③ 任何「代码替用户分规格」的推断 —— 用户明确：
+   *       「从 sku 名称按冒号取前缀这个是错的，不要改成这个逻辑，**用户使用规则自己控制**」。
    *
-   *  ⚠️ 旧实现是 `sourceSpecNames(filledSkuRows)`（从 `sku名称` 按冒号拆前缀）——
-   *  那条路随「规格分类改为第一步手填的独立列」**已被取代**（用户口径：
-   *  「规格分类列为空则校验不过」⇒ 有这张表就不该再去猜 sku 名称的形态）。
-   *  ⚠️ 只取**预检通过且已勾选**的行（与导入同一套判据）。
+   *  ⇒ 候选清单 = 列名清单，与下面「价格库存映射关系表」**同一份来源**
+   *  （wizard 传给第二步的 `priceSourceColumns` 就是 `tables[0].columns`），两边不再各算各的。
    */
   const mappingSources = useMemo(
-    () =>
-      specCategoriesFromColumn(
-        tables[0] ?? null,
-        skuTableSelection.blocked,
-        skuTableSelection.picked,
-      ),
-    [tables, skuTableSelection],
+    () => priceSourceOptions(tables[0]?.columns ?? []),
+    [tables],
   );
 
 
@@ -2248,31 +2238,9 @@ export function ProductPublishWizard({
       void message.warning("请先填写商品货号");
       return;
     }
-    //: ⚠️ **关卡：规格分类列必填**（用户口径 2026-10-15）：
-    //: 「再第一步商品sku表格的第二列新增一个规格分类默认为空，但是**进入点击下一步时
-    //:   校验该列均不能为空**」。
-    //: ⚠️ 只查**勾选行**（用户口径：「只查勾选」）—— 未勾选的行本次不导入，
-    //: 拦下来只会逼用户填一堆用不到的行。
-    const _specCatCol = specCategoryColumnIndex(tables[0]?.columns ?? []);
-    if (_specCatCol >= 0) {
-      const _blocked = new Set(skuTableSelection.blocked);
-      const _picked = new Set(skuTableSelection.picked);
-      const _checkAll = skuTableSelection.picked.length === 0;
-      const _emptyRows: number[] = [];
-      (tables[0]?.rows ?? []).forEach((row, index) => {
-        if (_blocked.has(index)) return;
-        if (!_checkAll && !_picked.has(index)) return;
-        if (!String(row[_specCatCol] ?? "").trim()) _emptyRows.push(index + 1);
-      });
-      if (_emptyRows.length > 0) {
-        const head = _emptyRows.slice(0, 5).join("、");
-        const more = _emptyRows.length > 5 ? ` 等 ${_emptyRows.length} 行` : "";
-        void message.warning(
-          `「${SPEC_CATEGORY_COL}」列有 ${_emptyRows.length} 行为空（第 ${head}${more} 行），请先填写`,
-        );
-        return;
-      }
-    }
+    //: ⚠️ **「规格分类」必填校验已整体移除**（用户口径 2026-10-20：
+    //: 「商品发布移除商品sku表格中的规格分类固定列，相关所有逻辑移除」）。
+    //: 原逻辑是「第一列表头『规格分类』且勾选行不能为空」—— 列没了，校验随之退场。
     //: ⚠️ **进入第二步前的第二个关卡**（用户口径 2026-10-13）：
     //: 「第一步的图片和 sku 表预检全部通过后，点击进入第二步时**弹窗提示指定**
     //:   主图区域、详情图区域、商品视频、映射到预检通过的媒体资源区域，
@@ -4007,13 +3975,16 @@ function ColumnPatternControl(props: {
    *  ⚠️ 默认 = **当前列**（`null` 即「就是本列」），其显示名同样走表头名。
    *  ⚠️ **换规则要清掉已选**（否则带着上一条规则的列去算，静默错值）。 */
   const [sourceColumn, setSourceColumn] = useState<number | null>(null);
-  /** 需要选来源列的 op（与后端 `OPS_NEED_SOURCE_COLUMN` 同集合）。 */
-  const needsSourceColumn =
-    pickedRule?.op === "math_scale" ||
-    pickedRule?.op === "copy_column" ||
-    //: ⚠️ 「复制 + 提取」**第一步就是复制** ⇒ 同样要选来源列。
-    //: 与后端 `OPS_NEED_SOURCE_COLUMN` 同集合（漏一个 = 静默按当前列执行）。
-    pickedRule?.op === "copy_extract";
+  /**
+   * **所有规则都支持选择「数据源列」**（用户口径 2026-10-20：「所有规则均支持选择
+   * 数据源列，默认为当前列，比如图片中的计算基础列，全部统一为数据源列，
+   * 优化为所有规则均支持选择数据源列」）。
+   *
+   * ⚠️ 早先只有 `math_scale` / `copy_column` / `copy_extract` 才显示该下拉，
+   * 提取类 / 固定文本「读的就是当前列自分」所以没给。用户要求统一：
+   * 任何规则都能指定「从哪一列取值」，不指定 = 当前列（向后兼容，行为不变）。
+   */
+  const needsSourceColumn = true;
   //: 「照搬整格」语义（提示文案用「复制到」而不是「按…计算」）。
   const isCopyRule =
     pickedRule?.op === "copy_column" || pickedRule?.op === "copy_extract";
@@ -4028,10 +3999,13 @@ function ColumnPatternControl(props: {
    *  ⚠️ **当前列本身要始终在选项里**：它是默认值，若它被判成非数值列，
    *  下拉会「显示当前列却不在选项里」（antd 会把 value 原样渲染成裸 `3`）——
    *  那正是用户看到的「下拉显示 3」的成因之一。⇒ 钉住当前列一定入选项。 */
-  const columnOptions = table.columns
-    .map((name, i) => ({ name: name || `第 ${i + 1} 列`, i, kind: (table.column_kinds ?? [])[i] }))
-    .filter((it) => (isCopyRule ? true : it.kind === "numeric" || it.i === column))
-    .map((it) => ({ value: it.i, label: it.name }));
+  //: ⚠️ **全部列都可当数据源**（不再按 op 过滤成「只数值列」）：
+  //: 用户口径「所有规则均支持选择数据源列」⇒ 提取类也可能想从别的列取值，
+  //: 复制类本身就不限类型。真选错列由用户自己负责（下拉已显示中文表头名）。
+  const columnOptions = table.columns.map((name, i) => ({
+    value: i,
+    label: name || `第 ${i + 1} 列`,
+  }));
   //: ⚠️ 换规则 / 换列 ⇒ 基础列回默认（否则带着上一条规则的列去算，静默错值）。
   useEffect(() => {
     setSourceColumn(null);
@@ -4168,14 +4142,12 @@ function ColumnPatternControl(props: {
                   }))}
                 />
               </Space>
-              {/* ⚠️ **运算类规则**才有的「计算基础列」（用户口径 2026-10-15）：
-                  默认当前列、可换其它列、**下拉只列数值列**。
-                  提取类/固定文本不显示 —— 它们读的就是当前列自己，给个下拉会误导。 */}
+              {/* **数据源列**（用户口径 2026-10-20：「所有规则均支持选择数据源列，
+                  默认为当前列…全部统一为数据源列」）——
+                  不再区分「计算基础列 / 来源列」，统一叫**数据源列**，所有规则都有。 */}
               {needsSourceColumn && (
                 <Space size={6} align="center" style={{ marginTop: 6 }}>
-                  <Text style={{ fontSize: 12 }}>
-                    {isCopyRule ? "来源列" : "计算基础列"}
-                  </Text>
+                  <Text style={{ fontSize: 12 }}>数据源列</Text>
                   <Select
                     size="small"
                     style={{ width: 180 }}
@@ -4187,7 +4159,7 @@ function ColumnPatternControl(props: {
                     placeholder="选择列"
                   />
                   <Text type="secondary" style={{ fontSize: 11 }}>
-                    {isCopyRule ? "把这一列复制到当前列" : "按这一列做计算"}
+                    {isCopyRule ? "把这一列复制到当前列" : "按这一列取值"}
                   </Text>
                 </Space>
               )}
@@ -4195,7 +4167,7 @@ function ColumnPatternControl(props: {
                   把「读的是哪一列 + 该列前几行的原始值」显示出来。
                   用户一眼就能看出是「读错列」还是「那列本来就空」，
                   不必再来回猜（前几轮就是靠猜浪费了好几轮）。
-                  ⚠️ 只在**需要来源列的规则**上显示（提取/固定文本读的就是当前列，没有歧义）。 */}
+                  ⚠️ 2026-10-20 起所有规则都显示（都支持选数据源列，读错列同样要能现场核）。 */}
               {needsSourceColumn && (
                 <Text type="secondary" style={{ fontSize: 11, display: "block" }}>
                   {`读取：第 ${(sourceColumn ?? column) + 1} 列「${
@@ -5735,8 +5707,17 @@ function TablesPanel(props: {
                 </Text>
               )}
             </Space>
-            {/* 右：表格名 + 行列数（来源文件名已移除） */}
+            {/* 右：**来源文件名** + 表格名 + 行列数
+                ⚠️ 用户口径 2026-10-20：「红框位置缺少读取的原始表格名称的展示」
+                ⇒ 把后端下发的 `source_file`（xlsx 原文件名）显示在最左，
+                它是「这批数据到底从哪个文件读来的」的唯一答案 ——
+                没有它，用户换包后无法确认自己看的是不是新文件。 */}
             <Space size={8} wrap={false}>
+              {table.source_file ? (
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  {table.source_file}
+                </Text>
+              ) : null}
               <Text strong>{table.sheet_name}</Text>
               <Tag>
                 {table.columns.length} 列 × {table.rows.length} 行

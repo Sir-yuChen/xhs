@@ -70,6 +70,7 @@ LIVE_KEYS: dict[str, str] = {
     "xhs_image_upload_parallelism": "媒体上传并发数（商品主图/详情图/规格图共用；设计 24 §22）",
     "xhs_ocr_parallelism": "image_ocr_service 违规词检测（OCR）的**起始**并发数；实际并发按 CPU 核数与目标耗时自动上调（设计 24 §22.9）",
     "xhs_note_image_total_limit": "笔记图片总数上限（生成链路组合总闸；平台硬顶 18，设计 41 §17）",
+    "xhs_sku_name_max_chars": "SKU 规格名称最大显示长度（用户口径：30 字 = 60 字符，汉字计 2、ASCII 计 1）",
 }
 
 #: 内置兜底默认值（第 3 层）。**只放 `LIVE_KEYS` 里的键** —— 给没有读点的键编一个默认值
@@ -101,6 +102,10 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     #:    这里的 6 是我们刻意收窄的产品默认，**不是平台限制**；用户改大也不会违反契约，
     #:    但超过 18 会被 `resolve_note_image_limit` 夹住（平台契约优先，见设计 41 §17.3）。
     "xhs_note_image_total_limit": 6,
+    #: SKU 规格名称最大**显示长度**（用户口径 2026-10-20：「30 字，60 个字符」）。
+    #: 计量口径：**汉字计 2、ASCII 计 1** ⇒ 60 字符 == 30 个汉字。
+    #: ⚠️ 口径是「**达到**即优化」：`display_len(name) >= 该值` 就交给大模型压到该值以内。
+    "xhs_sku_name_max_chars": 60,
 }
 
 #: 宽松布尔文本（`coerce_value` 与 `live_bool` **共用同一份**）——

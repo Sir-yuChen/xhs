@@ -169,7 +169,7 @@ export const SKU_NAME_COLUMN_ALIASES = ["sku名称", "skuname", "规格名", "�
  *  背景（真实数据包 2026-10-15 实测）：`sku名称` 列的值可能是**纯规格值**、不带
  *  `分类:` 前缀 —— 如 `A款`。`parseSkuName("A款").category` 按设计口径返回**空串**
  *  （「不猜」）。若把它当「没有规格分类」丢掉，整条「预检通过 SKU 导入」链路会塌：
- *  `sourceSpecNames()` 返回 `[]` ⇒ 第二步按钮**恒灰** + 恒提示「没有可导入的 SKU」，
+ *  候选清单为空 ⇒ 第二步按钮**恒灰** + 恒提示「没有可导入的 SKU」，
  *  而用户在第一步明明看到有预检通过、且勾选了行。
  *
  *  ⇒ 需要区分「**没有分类**」与「**解析不出来**」：数据包只有值、没有分类时，
@@ -180,20 +180,6 @@ export const SKU_NAME_COLUMN_ALIASES = ["sku名称", "skuname", "规格名", "�
  *  通用规则，任何包（有分类 / 无分类）都走同一个 `parseSkuName`。
  */
 export const SINGLE_SPEC_NAME = "规格";
-
-/** 数据包里**实际有规格分类**的名称（保序去重）。
- *  ⚠️ 与 `sourceSpecNames` 的区别：本函数**不含** `SINGLE_SPEC_NAME` 这条合成维度
- *  —— 用于「名称里到底有没有真分类」的判定（如 UI 提示措辞）。 */
-export function realSpecNames(rows: readonly PassedSkuRow[]): string[] {
-  const out: string[] = [];
-  for (const row of rows) {
-    const name = row.specName.trim();
-    if (name && name !== SINGLE_SPEC_NAME && !out.includes(name)) out.push(name);
-  }
-  return out;
-}
-
-
 
 /** **按映射取列，没配才退回别名猜**（用户口径 2026-10-15：「正常应**全部使用映射关系**
  *  得到列值」「预检阶段的派生判定（哪列是 SKU 名、哪列是线上图）**应走映射**」）。
@@ -221,18 +207,6 @@ export function skuNameColumnIndex(
 }
 
 
-/** **「规格分类」列**的列名（用户口径 2026-10-15）。
- *
- *  > 「再第一步商品sku表格的**第二列新增一个规格分类默认为空**，但是进入点击下一步时
- *  >   校验该列均不能为空」「将第一步预检同步的sku数据的规格分类列数据**去重后**下拉展示」
- *
- *  ⚠️ 它是**产品级列**（不是 xlsx 里读到的），插在**数据列的第 0 位**
- *  （渲染时显示在「SKU 图」预览列之后 = 屏幕第 2 列）。
- *  ⚠️ 存进 `table.columns` / `table.rows`（**真列**）而不是另起一份 state ——
- *  编辑、取值、校验、映射候选**全都复用既有链路**（本项目「两份 state」的教训太多）。
- */
-export const SPEC_CATEGORY_COL = "规格分类";
-
 /** **「SKU 图」预览列的列名**（屏幕上第 2 列）。
  *
  *  ⚠️ 它不是 xlsx 里读到的列，而是**渲染层自造**的（表格列 key = `__matched_image`）——
@@ -245,34 +219,6 @@ export const SPEC_CATEGORY_COL = "规格分类";
  *  （`sourceColumnIndex` 返回 `VIRTUAL_COL_INDEX`）。
  */
 export const SKU_IMAGE_COL = "SKU 图";
-
-/** 把「规格分类」列插到数据列第 0 位（**幂等**；新列值全为空）。
- *
- *  ⚠️ `column_kinds` 与 `columns` **等长**是既有契约（后端逐列下发）⇒
- *  插列必须同步插一个 kind，否则下标整体错位（数值列判据会张冠李戴）。
- */
-export function withSpecCategoryColumn<
-  T extends {
-    columns: string[];
-    rows: (string | null)[][];
-    column_kinds?: string[];
-    column_keys?: string[];
-  },
->(table: T): T {
-  if (table.columns.includes(SPEC_CATEGORY_COL)) return table;
-  return {
-    ...table,
-    columns: [SPEC_CATEGORY_COL, ...table.columns],
-    rows: table.rows.map((r) => [null, ...r]),
-    //: ⚠️ `column_kinds` / `column_keys` 与 `columns` **等长**是契约 ⇒ 必须同步插。
-    column_kinds: table.column_kinds
-      ? ["text", ...table.column_kinds]
-      : table.column_kinds,
-    //: 「规格分类」是**固定列**（不可删）⇒ key 用固定名（不是 `__manual_` 前缀）。
-    column_keys: table.column_keys ? [SPEC_CATEGORY_COL, ...table.column_keys] : table.column_keys,
-  };
-}
-
 
 /** **把「SKU 图」作为真列插进表格**（用户口径 2026-10-15：「把第一列**放入 rows**，
  *  它是**固定列**」）。
@@ -303,13 +249,12 @@ export function withSkuImageColumn<
   };
 }
 
-/** **「后处理的固定表格列」一次插完**（用户口径 2026-10-15）。
+/** **「后处理的固定表格列」插入**（用户口径 2026-10-15，2026-10-20 收敛为一列）。
  *
- *  ⚠️ 两列都是**固定列**（不可删）：
- *    · `SKU 图`  —— 商品 sku 表格的**第一列**（值 = 匹配结果，存在 `rows` 里）；
- *    · `规格分类` —— 插在它右边（默认空，用户填 / 由规则跑）。
- *  ⚠️ **屏幕序 = SKU 图 → 规格分类 → …xlsx 原列**。两列都往第 0 位插，
- *  所以先插「规格分类」（它先占第 0 位），再插「SKU 图」（顶到第 0 位）。
+ *  ⚠️ 现在只剩 `SKU 图` 一列（商品 sku 表格的**第一列**，值 = 匹配结果，存在 `rows` 里）。
+ *  ⚠️ **「规格分类」固定列已按用户口径整体移除**：
+ *    「商品发布移除商品sku表格中的规格分类固定列」「『规格分类』固定列 相关所有逻辑移除」
+ *    —— 不要再加回来。
  *  ⚠️ 幂等：已在的列跳过。
  */
 export function withDerivedColumns<
@@ -320,10 +265,7 @@ export function withDerivedColumns<
     column_keys?: string[];
   },
 >(table: T, skuImageByRowIndex: Readonly<Record<number, string>> = {}): T {
-  let out = table;
-  out = withSpecCategoryColumn(out);
-  out = withSkuImageColumn(out, skuImageByRowIndex);
-  return out;
+  return withSkuImageColumn(table, skuImageByRowIndex);
 }
 
 /** 某列**能不能删**（用户口径 2026-10-15）：
@@ -335,20 +277,6 @@ export function withDerivedColumns<
  */
 export function canDropColumn(key: string | undefined | null): boolean {
   return isManualColumn(key);
-}
-
-/** 「规格分类」列的下标（找不到 ⇒ -1）。 */
-export function specCategoryColumnIndex(
-  columns: readonly string[],
-  priceMapping: readonly PriceMappingRow[] = [],
-): number {
-  //: ⚠️ **规格分类列也走映射**（用户口径 2026-10-15）。
-  const mapped = sourceColumnIndex(columns, priceMapping, "spec_category");
-  if (mapped >= 0) return mapped;
-  //: ⚠️ **兜底修「列不存在 ⇒ 退回按列名找」**：那一列是我们**自己插进去的固定列**，
-  //: 列名唯一且不由用户改（`withSpecCategoryColumn` 的产物）——
-  //: 它不是「数据形态猜测」，而是**产品级常量**。用户没配映射时按它找是确定的。
-  return columns.findIndex((c) => String(c).trim() === SPEC_CATEGORY_COL);
 }
 
 /* ------------------------------------------------------------------ *
@@ -683,19 +611,15 @@ export function passedSkuSpecs(
     if (blocked.has(index) || (pickedRows.length > 0 && !picked.has(index))) return;
     const name = String(row[nameCol] ?? "").trim();
     if (!name) return;
-    //: ⚠️ **产出「规格分类:名称」完整形态**（与 `spec_combinations` 的 `c.spec` 同形）——
+    //: ⚠️ **产出与 `spec_combinations` 的 `c.spec` 同形**（`分类:名称` 或裸名称）——
     //: 这是【真 bug 修复 2026-10-15】的判据：「确认导入后价格和库存列表**没有导入
-    //: 对接 sku 数据**」。
+    //: 对接 sku 数据」。根因是两边形态不一致（一个裸名、一个带前缀）⇒ 一个都对不上
+    //: ⇒ `visible` 为空 ⇒ 价格库存表一行都不落（且不报错）。
     //:
-    //: 根因：本函数原先只收**裸名称**（`【中古风】实木三斗柜`），而第二步过滤时
-    //: 比的是 `c.spec`（`颜色分类:【中古风】实木三斗柜`）⇒ **一个都对不上**
-    //: ⇒ `visible` 为空 ⇒ 价格库存表一行都不落（且不报错，用户只看到「没数据」）。
-    //:
-    //: ⚠️ 分类列有值就用它拼；没有（旧数据包）就退化成裸名称 —— 与
-    //: `passedSkuRows` 的 `specName || SINGLE_SPEC_NAME` 同一口径。
-    const catCol = specCategoryColumnIndex(table.columns, priceMapping);
-    const cat = catCol >= 0 ? String(row[catCol] ?? "").trim() : "";
-    out.add(cat ? `${cat}:${name}` : name);
+    //: ⚠️ **不做名称形态推断**（用户口径 2026-10-20：
+    //: 「从 sku 名称按冒号取前缀这个是错的，不要改成这个逻辑，用户使用规则自己控制」）。
+    //: ⇒ 裸名称原样入集合（与 `spec_combinations` 的 `c.spec` 对齐由用户配的规则保证）。
+    out.add(name);
   });
   return out;
 }
@@ -962,7 +886,8 @@ export type PassedSkuRow = {
    *  再猜名称形态会产生两份矛盾的事实（用户实测：填了「颜色分类」却被报
    *  「没有与数据包『规格』对应的维度」）。
    *  ⚠️ 列不存在 / 该行没填 ⇒ `SINGLE_SPEC_NAME`（不是空串）—— 空串会被
-   *  `sourceSpecNames()` 当成「没有规格分类」丢掉，整条导入链路一起塌。 */
+   *  当成「没有规格分类」丢掉，整条导入链路一起塌。
+   *  ⚠️ 2026-10-20 起**恒为该值**（分类不由代码决定，见 `passedSkuRows`）。 */
   specName: string;
   /** 规格值 —— **整个 sku 名称**（分类已独立成列，名称里的前缀不再切掉）。 */
   specValue: string;
@@ -1000,6 +925,17 @@ export type PassedSkuRow = {
   specImageRel?: string | null;
   /** 本地图文件名（上传时按内容 MD5 重命名，这里只作 `origin_name`）。 */
   localFileName: string;
+  /** **整行原始值**（按表头列名索引）—— 用户口径 2026-10-20：
+   *  「导入sku数据弹窗中的商品sku的映射关系应左侧…**预检通过列的所有列**，
+   *   实际导入规格时需**对选择的列数据进行去重处理**」。
+   *
+   *  ⚠️ 映射左侧现在选的是**列名**（不是规格分类名）⇒ 导入时必须能按列名
+   *  从每一行取值，所以这里要留一份原始行。缺这份数据就只能拿
+   *  `specName`/`specValue` 那对旧字段，用户选别的列会**静默取不到值**。
+   *  ⚠️ **必填**：只有 `passedSkuRows` 能产出它，凡是构造 `PassedSkuRow` 的地方
+   *  都必须给（不给 = 编译不过，而不是运行时静默取空）。
+   */
+  cells: Record<string, string>;
 };
 
 /** 填充计划的**逐规格值结果**（含跳过原因 —— 静默跳过比不填更糟）。 */
@@ -1121,38 +1057,34 @@ export function buildSkuFillPlan(
     return plan;
   }
 
-  //: 数据包侧有哪些规格分类（保序去重）—— 与 `sourceSpecNames` **同一口径**
-  //: （数据包只有值没有分类时退化为单一维度 `SINGLE_SPEC_NAME`，DEF-044 不留两份实现）。
-  const sourceNames: string[] = [];
-  for (const row of rows) {
-    const name = row.specName.trim();
-    if (name && !sourceNames.includes(name)) sourceNames.push(name);
-  }
-  if (sourceNames.length === 0 && rows.some((r) => r.specValue.trim() !== "")) {
-    sourceNames.push(SINGLE_SPEC_NAME);
-  }
+  //: ⚠️ 用户口径 2026-10-20：映射左侧 = **预检通过列名** ⇒ 候选直接取
+  //: `mapping` 的键（用户选过的列），不再从 `specName` 派生。
+  //: 「有映射」就是用户明确说过「这一列要导入」，比任何名称推断都可靠。
+  const sourceNames: string[] = Object.keys(mapping).filter((k) => k.trim() !== "");
   if (sourceNames.length === 0) {
-    plan.skipped.push("SKU 名称列是空的，没有可导入的规格值");
+    plan.skipped.push("还没有配置「商品 SKU 映射关系」，规格与价格库存保持现状");
     return plan;
   }
 
-  //: ⚠️ 用户口径 2026-10-11（最终）：用**用户配的成对映射**决定「哪个分类进哪个维度」。
-  //: 没配映射的行**不导入**（宁可漏填，也不把值填错维度）。
+  //: ⚠️ 用户口径 2026-10-20：映射左侧已是**预检通过列名**（不再是规格分类名）。
+  //: ⇒ `mapping` 的键是**列名**，值是平台维度名。没配映射的列 ⇒ 不导入
+  //: （宁可漏填，也不把值填错维度）。
   const usable = sourceNames.filter((name) => {
     const target = mapping[name];
     return Boolean(target) && dims.some((d) => d.name === target);
   });
   if (usable.length === 0) {
     plan.skipped.push(
-      `平台规格类型里没有与数据包 ${sourceNames.map((n) => `「${n}」`).join("、")} 对应的维度` +
+      `平台规格类型里没有与所选列 ${sourceNames.map((n) => `「${n}」`).join("、")} 对应的维度` +
         `（平台有：${dims.map((d) => d.name).join("、") || "无"}）——` +
         "请在导入弹窗里配置规格关系后重试",
     );
     return plan;
   }
 
-  //: 每个被映射的分类 → 它的平台维度 + 该维度下要填的值（逐维度独立）。
-  const perDim = new Map<string, { dim: PlatformSpecDim; sourceName: string; values: SkuValuePlan[] }>();
+  //: 每个被映射的列 → 它的平台维度 + 该维度下要填的值（逐维度独立）。
+  type DimPlan = { dim: PlatformSpecDim; sourceName: string; values: SkuValuePlan[] };
+  const perDim = new Map<string, DimPlan>();
   for (const name of usable) {
     const dim = dims.find((d) => d.name === mapping[name]);
     if (dim && !perDim.has(dim.name)) {
@@ -1175,34 +1107,50 @@ export function buildSkuFillPlan(
   }>();
 
   rows.forEach((row, index) => {
-    const name = row.specName.trim();
-    const entry = perDim.get(mapping[name] ?? "");
-    if (!entry) return;                       //: 该分类没配映射 ⇒ 不导入
-    const raw = row.specValue.trim();
-    if (!raw) {
-      plan.skipped.push(`「${row.rawName || "(空名称)"}」没有规格值，已跳过该行`);
-      return;
+    //: ⚠️ 用户口径 2026-10-20：映射左侧是**列名**（不再是规格分类名）⇒
+    //: 一行里可能有**多个**被映射的列（如「颜色」列 +「尺寸」列），要**全取**。
+    //: 旧写法只取 `row.specValue` 一个值 ⇒ 用户选第二列时**静默取不到**。
+    const hitEntries: { entry: DimPlan; raw: string }[] = [];
+    for (const colName of usable) {
+      const entry = perDim.get(mapping[colName] ?? "");
+      if (!entry) continue;
+      //: 按**列名**取本行值（`cells` 是 `passedSkuRows` 摊平好的整行）。
+      //: ⚠️ **不做任何兜底**：映射左侧是列名，就只按列名取 ——
+      //: 回退到 `specValue` 会把「用户没选的那一列」的值填进规格，是静默填错。
+      const raw = String(row.cells?.[colName] ?? "").trim();
+      if (!raw) continue;
+      hitEntries.push({ entry, raw });
     }
-    const hit = matchSpecValue(raw, entry.dim);
-    if (hit.match === "unusable") {
-      plan.skipped.push(hit.reason);
+    if (hitEntries.length === 0) {
+      //: 所选列在本行全空 ⇒ 跳过并**说明原因**（静默跳过比不填更糟）。
+      plan.skipped.push(`「${row.rawName || "(空名称)"}」所选列没有值，已跳过该行`);
       return;
-    }
-    //: 值去重（同一维度下同名值只出现一次）。
-    const seen = seenValues.get(entry.dim.name)!;
-    const key = normalizeSkuKey(hit.value);
-    if (!seen.has(key)) {
-      seen.add(key);
-      entry.values.push({
-        value: hit.value, rawValue: raw, valueId: hit.valueId,
-        match: hit.match, reason: "",
-      });
     }
     //: 按数据包**行**归组（同一行的多个维度合成一个 spec 组合）。
     const slot = rawRows.get(index) ?? {
       price: null, marketPrice: null, stock: null, sellerCode: "", barcode: "", parts: [],
     };
-    slot.parts.push({ dimName: entry.dim.name, value: hit.value });
+    for (const { entry, raw } of hitEntries) {
+      const hit = matchSpecValue(raw, entry.dim);
+      if (hit.match === "unusable") {
+        plan.skipped.push(hit.reason);
+        continue;
+      }
+      //: ⚠️ **值去重**（用户口径 2026-10-20：「实际导入规格时需**对选择的列数据进行
+      //: 去重处理**」）—— 同一维度下同名值只出现一次。这是**导入时**去重，
+      //: 不是选列时去重：左侧清单保持原样，用户能看到全部列。
+      const seen = seenValues.get(entry.dim.name)!;
+      const key = normalizeSkuKey(hit.value);
+      if (!seen.has(key)) {
+        seen.add(key);
+        entry.values.push({
+          value: hit.value, rawValue: raw, valueId: hit.valueId,
+          match: hit.match, reason: "",
+        });
+      }
+      slot.parts.push({ dimName: entry.dim.name, value: hit.value });
+    }
+    if (slot.parts.length === 0) return;   //: 一个维度都没匹配上 ⇒ 这行不建组合。
     //: ⚠️ 用户口径 2026-10-11（最终）：「其它规则中应是**市场价**为原价的 1.7 倍
     //: 支持调整，**不是售价**」⇒ 售价 = 原价**原值**；市场价 = 原价 × 倍率。
     slot.price = row.price;
@@ -1221,9 +1169,12 @@ export function buildSkuFillPlan(
     //: 那条路已随「规格图也走映射」退场。
     //: ⚠️ 文件名从路径末段取（上传时按内容 MD5 重命名，这里只作 `origin_name`）。
     if (row.specImageRel) {
+      //: ⚠️ 规格图**挂第一个命中维度**：图片是按 SKU 行对齐的，一行一张，
+      //: 不是每个维度各一张（多维度时重复推会让同一张图挂多次）。
+      const first = hitEntries[0];
       plan.images.push({
-        dimName: entry.dim.name,
-        value: hit.value,
+        dimName: first.entry.dim.name,
+        value: slot.parts[0]?.value ?? "",
         localRel: row.specImageRel,
         localFileName: row.specImageRel.split("/").pop() ?? "",
       });
@@ -1327,26 +1278,19 @@ export function passedSkuRows(
     if (!pickedAll && !picked.has(index)) return;  //: 用户显式取消勾选的行
     const rawName = String(row[nameCol] ?? "").trim();
     if (!rawName) return;
-    //: ⚠️ **规格分类读「规格分类」固定列**（用户口径 2026-10-15）：
-    //: 「`specName = parsed.category || SINGLE_SPEC_NAME`，是从 sku名称 拆冒号得
-    //:  ⇒ **移除逻辑**，应读 sku 预检通过的**规格分类固定列**」
+    //: ⚠️ **规格分类不由代码猜**（用户口径 2026-10-20，逐字）：
+    //: 「统一改为从 sku 名称按冒号取前缀（没有就使用单维度名）**这个是错的，
+    //:   不要改成这个逻辑，用户使用规则自己控制**」。
     //:
-    //: ⚠️ 为什么必须移除「拆冒号」：那是「规格分类由代码从名称派生」时期的产物。
-    //: 现在规格分类是第一步**真实的一列**（用户自己填、或由规则跑出来）——
-    //: 再去猜名称形态，会出现**两份互相矛盾的事实**：
-    //:   用户填了「颜色分类」，而名称是 `A款`（无冒号）⇒ 代码拆出 `规格` ⇒
-    //:   用户在弹窗里配 `颜色分类 → 颜色分类` 却报
-    //:   「平台规格类型里没有与数据包『规格』对应的维度」（用户实测 2026-10-15）。
-    //: ⇒ **唯一真相源 = 那一列**。
+    //: ⇒ 代码**不做任何名称形态推断**。分类从哪来？由用户在自己配置的
+    //: 「数据包规则」里决定（如 `copy_extract` 从 sku 名称按分隔符取段），
+    //: 规则跑完写成表格里的一列，用户再把那一列选进映射。规则是唯一真相源。
     //:
-    //: ⚠️ 列不存在（旧数据包 / 非 SKU 表）⇒ 退回 `SINGLE_SPEC_NAME` 单一维度，
-    //: 值 = 整个名称 —— 宁可让用户看到「规格」这个占位名自己改映射，
-    //: 也不静默丢掉整行（那会让按钮恒灰，用户完全无从下手）。
-    const specCol = specCategoryColumnIndex(table.columns);
-    const category = specCol >= 0 ? String(row[specCol] ?? "").trim() : "";
-    const specName = category || SINGLE_SPEC_NAME;
-    //: ⚠️ 值用**完整 sku 名称**（不再 `parsed.value`）—— 分类已经是独立的一列，
-    //: 名称里的分类前缀（若有）不该再被切掉：用户看到什么就该导入什么。
+    //: ⚠️ 因此这里**退回单一维度** `SINGLE_SPEC_NAME`：它是「没有分类」时的
+    //: 中性占位，用户在映射弹窗里自己指定平台规格类型即可 ——
+    //: 宁可让用户显式配一次，也不要代码替他猜错一个分类名。
+    const specName = SINGLE_SPEC_NAME;
+    //: 值 = 完整 sku 名称（不做任何切分：前缀是用户的事，不是代码的事）。
     const specValue = rawName;
     //: 本地图列那张（按 SKU 名称对齐）—— 用户口径「上传本地图」。
     const relPath = lookupLocalSkuImage(localImages, rawName);
@@ -1374,7 +1318,25 @@ export function passedSkuRows(
       specImageRel: specImageSourceCol >= 0
         ? String(row[specImageSourceCol] ?? "").trim()
         : null,
+      //: 整行原始值（按列名索引）—— 供「按用户选的列取值 + 去重」用。
+      cells: cellsOfRow(table.columns, row),
     });
+  });
+  return out;
+}
+
+/** 把一行按**列名**摊平成 `{列名: 值}`（值统一 trim 成字符串）。
+ *
+ *  ⚠️ 用列名而不是下标：映射里存的是列名，用户换数据包后列顺序会变，
+ *  下标会**静默错位**（把「价格」当「库存」导入）。
+ */
+function cellsOfRow(
+  columns: readonly string[],
+  row: readonly (string | null)[],
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  columns.forEach((name, i) => {
+    out[String(name)] = String(row[i] ?? "").trim();
   });
   return out;
 }
@@ -1400,61 +1362,6 @@ export function firstPrice(original: unknown, computed: unknown): number | null 
 export function findColumnIndex(columns: readonly string[], aliases: readonly string[]): number {
   const wanted = aliases.map((a) => a.toLowerCase());
   return columns.findIndex((c) => wanted.includes(String(c).trim().toLowerCase()));
-}
-
-/** **从「规格分类」列取候选**（用户口径 2026-10-15）：
- *  「将第一步预检同步的 sku 数据的**规格分类列数据去重后**下拉展示，
- *   **不允许重复选择**，最多两个规格映射关系」。
- *
- *  ⚠️ 只取**预检通过且已勾选**的行（`blocked` / `picked` 与导入同一套判据）——
- *  否则用户会看到一堆来自「根本不会导入的行」的分类，选了也没有数据。
- *  ⚠️ 去重按 `normalizeSkuKey`（大小写/空白归一），与其它值去重口径一致。
- *  ⚠️ **保序**（第一行出现的最前）—— 用户按表格顺序填的，顺序变了会以为串行。
- */
-export function specCategoriesFromColumn(
-  table: PrecheckTable | null | undefined,
-  blockedRows: readonly number[],
-  pickedRows: readonly number[],
-): string[] {
-  if (!table || !table.columns?.length) return [];
-  const col = specCategoryColumnIndex(table.columns);
-  if (col < 0) return [];
-  const blocked = new Set(blockedRows);
-  const picked = new Set(pickedRows);
-  //: ⚠️ 空 `picked` = 全选（与 `passedSkuRows` 同一口径）。
-  const pickedAll = pickedRows.length === 0;
-
-  const out: string[] = [];
-  const seen = new Set<string>();
-  (table.rows ?? []).forEach((row, index) => {
-    if (blocked.has(index)) return;
-    if (!pickedAll && !picked.has(index)) return;
-    const raw = String(row[col] ?? "").trim();
-    if (!raw) return;
-    const key = normalizeSkuKey(raw);
-    if (seen.has(key)) return;
-    seen.add(key);
-    out.push(raw);
-  });
-  return out;
-}
-
-/** 数据包侧的规格分类名清单（保序去重）—— 供弹窗列出「要映射什么」。 */
-export function sourceSpecNames(rows: readonly PassedSkuRow[]): string[] {
-  const out: string[] = [];
-  for (const row of rows) {
-    const name = row.specName.trim();
-    if (name && !out.includes(name)) out.push(name);
-  }
-  //: ⚠️ **数据包没有分类、只有值时退化为单一维度**（见 `SINGLE_SPEC_NAME` 的长注释）。
-  //: 关键：**不能返回空数组** —— 那会让第二步「预检通过SKU导入」按钮**恒灰**
-  //: （`publish-config-step2.tsx` 的 `disabled={specImportSources.length === 0}`），
-  //: 而用户在第一步明明看到有预检通过且勾选了行（2026-10-15 用户报的真 bug）。
-  //: 判据是通用的一条：**只要有行、且行里有名称，就至少有一个维度可映射**。
-  if (out.length === 0 && rows.some((r) => r.specValue.trim() !== "")) {
-    return [SINGLE_SPEC_NAME];
-  }
-  return out;
 }
 
 /** 规格映射的**默认值**：**文本精确匹配**（用户口径 2026-10-11）。

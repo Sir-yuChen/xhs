@@ -57,7 +57,10 @@ import {
 } from "@ant-design/icons";
 import type { Dayjs } from "dayjs";
 
-import { generateShortTitle, predictProperties } from "../../../lib/api";
+import { generateShortTitle, optimizeSkuNames, predictProperties } from "../../../lib/api";
+import type { SkuNameOptimizeItem } from "../../../lib/api";
+import { displayWidth, isTooLong } from "../../../lib/sku-name-width";
+import { SkuNameOptimizeModal } from "./sku-name-optimize-modal";
 import type { AfterSaleRule } from "../../../lib/api";
 import { buildImageUrls, spec_combinations } from "../../../lib/publish-config";
 import { withoutItemNo } from "../../../lib/publish-property-fields";
@@ -1548,6 +1551,19 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
    * （默认**文本精确匹配**，可手改），确认后自动解析并加载规格值 / 价格 / 库存 / 规格图。
    */
   const [specImportOpen, setSpecImportOpen] = useState(false);
+  /** **SKU 名称优化预览**（用户口径 2026-10-20）：点「预检通过SKU导入」时，
+   *  若有规格名超长（默认 60 字符，汉字计 2）先弹这个，确认后再进导入弹窗。 */
+  const [skuOptimizeOpen, setSkuOptimizeOpen] = useState(false);
+  const [skuOptimizeItems, setSkuOptimizeItems] = useState<SkuNameOptimizeItem[]>([]);
+  const [skuOptimizeMax, setSkuOptimizeMax] = useState(60);
+  const [skuOptimizeBusy, setSkuOptimizeBusy] = useState(false);
+  /** **生效的规格来源名**（用户确认优化后的名称用在这里）。
+   *
+   *  ⚠️ 用户口径 2026-10-20：「只影响本次导入结果」——
+   *  不写回 SKU 表、不改 `props.specImportSources`，只在本组件内替换。
+   *  `null` = 用原始来源（没做优化时）。 */
+  const [appliedSkuNames, setAppliedSkuNames] = useState<string[] | null>(null);
+  const effectiveImportSources = appliedSkuNames ?? props.specImportSources ?? [];
   /** **清掉本弹窗管辖的历史数据**（用户口径 2026-10-15）。
    *
    *  > 「点击选择重新加载资源后，**当前窗口内的所有历史数据均应被清除**，
@@ -1600,6 +1616,64 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
    *  而他以为那是「默认状态」—— 会直接点确认导入。
    */
   const resetPriceMappingOnOpen = () => setPriceMapping(defaultPriceMappingRows());
+
+
+  /** 真正打开「导入 sku 数据」弹窗（清历史 + 重置映射）。 */
+  const openSpecImportModal = useCallback(() => {
+    //: ⚠️ **不再自动带入默认映射**（用户口径 2026-10-14：
+    //: 「用户第一步需**手动勾选**商品规格」）—— 打开时清空，
+    //: 用户勾了哪个才建哪一行（不勾 = 不导入）。
+    setImportMapping([]);
+    //: ⚠️ **价格库存映射重置为「预置 5 行 + 来源全空」**（用户口径 2026-10-15）。
+    resetPriceMappingOnOpen();
+    //: ⚠️ **「点击选择重新加载资源后，当前窗口内的所有历史数据均应被清除」**
+    //: （用户口径 2026-10-15）——清的是**本弹窗管辖的两块**：
+    //: 商品规格（规格类型 + 规格值）与价格库存行。主图/详情图/属性不归它管。
+    //: ⚠️ 与「导入时清历史」**同一份实现**（`clearImportTargets`）——
+    //: 两处各写一份迟早漂移成「一处清一处不清」。
+    clearImportTargets();
+    setImportDetail("");
+    setSpecImportOpen(true);
+  }, [clearImportTargets, resetPriceMappingOnOpen]);
+
+  /** 点「预检通过SKU导入」：**先查规格名是否超长**（用户口径 2026-10-20）。
+   *
+   * 有超长的 ⇒ 调大模型压缩 + 弹预览（用户比较后再决定）；
+   * 没有超长的 ⇒ 直接进导入弹窗，**不白调一次模型**。
+   * 调用失败也直接进导入（不能因为优化不了就堵住用户）。
+   */
+  const openSpecImportWithNameCheck = useCallback(async () => {
+    const names = effectiveImportSources;
+    if (names.length === 0) {
+      openSpecImportModal();
+      return;
+    }
+    //: 前端先粗筛（同口径 60 字符）：全都够短就不打网络。
+    const maybeLong = names.filter((n) => isTooLong(n, 60));
+    if (maybeLong.length === 0) {
+      openSpecImportModal();
+      return;
+    }
+    setSkuOptimizeBusy(true);
+    try {
+      const result = await optimizeSkuNames({
+        items: names.map((name) => ({ key: name, name })),
+      });
+      const needing = result.items.filter((r) => r.changed || !!r.reason);
+      if (needing.length === 0) {
+        openSpecImportModal();
+        return;
+      }
+      setSkuOptimizeItems(result.items);
+      setSkuOptimizeMax(result.max_chars);
+      setSkuOptimizeOpen(true);
+    } catch {
+      //: 优化失败不阻断导入（用户仍可手工改规格名）。
+      openSpecImportModal();
+    } finally {
+      setSkuOptimizeBusy(false);
+    }
+  }, [effectiveImportSources, openSpecImportModal]);
   /** 映射草稿（**成对关系行**，最多 2 行；两列均必填且不许重复）。 */
   const [importMapping, setImportMapping] = useState<SpecMappingRow[]>([]);
   /** 导入执行态（跑的时候禁用「确认导入」并显示进度文案）。 */
@@ -1657,7 +1731,7 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
    */
   const importBlockers = useMemo(() => {
     const out: string[] = [];
-    if ((props.specImportSources ?? []).length === 0) {
+    if (effectiveImportSources.length === 0) {
       out.push("第一步还没有预检通过且勾选的 SKU 行");
     } else if (!isSpecMappingReady(importMapping)) {
       out.push("请先配置「商品 SKU 映射关系」（左侧选规格分类、右侧选平台规格类型）");
@@ -1674,7 +1748,7 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
       }
     }
     return out;
-  }, [props.specImportSources, importMapping, priceMapping]);
+  }, [effectiveImportSources, importMapping, priceMapping]);
   /** 售价的滞留来源列（原价取不到时用它，**不乘倍率**）。默认「计算价格」。 */
   const [priceFallbackSource, setPriceFallbackSource] = useState<string>(
     DEFAULT_PRICE_FALLBACK_SOURCE,
@@ -3109,7 +3183,7 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
                 注意必须是 JSX 注释写法：行注释写在 JSX 子节点位置会被当文本渲染出来。 */}
             <Tooltip
               title={
-                (props.specImportSources ?? []).length === 0
+                effectiveImportSources.length === 0
                   ? "没有可导入的 SKU：请先在第一步预检里读取数据包，并保证有「预检通过」的 SKU 行"
                   : "从预检通过的 SKU 导入规格 / 价格 / 库存"
               }
@@ -3118,23 +3192,8 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
               size="small"
               type="primary"
               icon={<ImportOutlined />}
-              disabled={(props.specImportSources ?? []).length === 0}
-              onClick={() => {
-                //: ⚠️ **不再自动带入默认映射**（用户口径 2026-10-14：
-                //: 「用户第一步需**手动勾选**商品规格」）—— 打开时清空，
-                //: 用户勾了哪个才建哪一行（不勾 = 不导入）。
-                setImportMapping([]);
-                //: ⚠️ **价格库存映射重置为「预置 5 行 + 来源全空」**（用户口径 2026-10-15）。
-                resetPriceMappingOnOpen();
-                //: ⚠️ **「点击选择重新加载资源后，当前窗口内的所有历史数据均应被清除」**
-                //: （用户口径 2026-10-15）——清的是**本弹窗管辖的两块**：
-                //: 商品规格（规格类型 + 规格值）与价格库存行。主图/详情图/属性不归它管。
-                //: ⚠️ 与「导入时清历史」**同一份实现**（`clearImportTargets`）——
-                //: 两处各写一份迟早漂移成「一处清一处不清」。
-                clearImportTargets();
-                setImportDetail("");
-                setSpecImportOpen(true);
-              }}
+              disabled={effectiveImportSources.length === 0}
+              onClick={() => void openSpecImportWithNameCheck()}
             >
               预检通过SKU导入
             </Button>
@@ -3149,6 +3208,23 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
             先让用户确认「第一步规格分类 → 第二步平台规格」的映射，再自动解析加载。
             ⚠️ 映射**默认文本精确匹配**，不一致时由用户手选 —— 不选则该项不导入
             （宁可漏填，也不把值填错维度）。 */}
+        {/* **SKU 名称优化预览**（用户口径 2026-10-20）：
+            超长的规格名压到上限内，用户比较后确认；
+            每行可「重新生成」覆盖该行。确认结果**只用于本次导入**。 */}
+        <SkuNameOptimizeModal
+          open={skuOptimizeOpen}
+          maxChars={skuOptimizeMax}
+          items={skuOptimizeItems}
+          onClose={() => setSkuOptimizeOpen(false)}
+          onConfirm={(applied) => {
+            //: 把优化后的名称按**原顺序**放回去（key 是原始名，逐一替换）。
+            const next = (props.specImportSources ?? []).map((name) => applied[name] ?? name);
+            setAppliedSkuNames(next);
+            setSkuOptimizeOpen(false);
+            openSpecImportModal();
+          }}
+        />
+
         <Modal
           open={specImportOpen}
           title="导入sku数据"
@@ -3245,7 +3321,10 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
               }}
               columns={[
                 {
-                  title: "规格分类",
+                  //: ⚠️ 用户口径 2026-10-20：「左侧不再是规格分类而应该是
+                  //: **与价格库存映射关系表一致，预检通过列的所有列**」
+                  //: ⇒ 表头与下面「价格库存映射关系表」左列**同名**，不再叫「规格分类」。
+                  title: "预检通过列",
                   key: "source",
                   render: (_: unknown, row: SpecMappingRow, i2: number) => {
                     const others = importMapping
@@ -3262,7 +3341,7 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
                             prev.map((r, j2) => (j2 === i2 ? { ...r, source: v ?? "" } : r)),
                           )
                         }
-                        options={(props.specImportSources ?? []).map((name) => ({
+                        options={effectiveImportSources.map((name) => ({
                           label: name,
                           value: name,
                           //: ⚠️ **不允许重复选择**（用户原话）。
@@ -3506,6 +3585,12 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
           </Spin>
           {/* 导入中需要挡交互（防止中途改配置）⇒ 这里显式 `mask`；
               上面的 `Spin` 已 `spinning={false}`，不会再叠第二层底。 */}
+          <WaitMask
+            open={skuOptimizeBusy}
+            mask
+            scope="panel"
+            title="正在优化 SKU 规格名称"
+          />
           <WaitMask
             open={importRunning}
             mask

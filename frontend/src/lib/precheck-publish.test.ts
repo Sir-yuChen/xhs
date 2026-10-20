@@ -35,7 +35,6 @@ import {
   type PriceMappingRow,
   dropTableColumn,
   passedSkuRows,
-  sourceSpecNames,
   applyPriceMultiplier,
   clampPriceMultiplier,
   DEFAULT_PRICE_MULTIPLIER,
@@ -54,7 +53,6 @@ import {
   type PrecheckMedia,
   type PrecheckTable,
 
-  withSpecCategoryColumn,
   canDropColumn,
   nextManualColumnKey,
   addTableColumn,
@@ -1004,62 +1002,67 @@ describe("构建导入计划（buildSkuFillPlan）", () => {
   });
   const row = (over: Partial<PassedSkuRow>): PassedSkuRow => ({
     rawName: "", specName: "", specValue: "", originalPrice: null, price: null, stock: null,
-    sellerCode: "", localRel: null, localFileName: "", ...over,
+    sellerCode: "", localRel: null, localFileName: "",
+    //: ⚠️ 2026-10-20 起 `cells` 必填（映射左侧 = 列名，导入按列名取值）。
+    //: 用例只关心 `specValue` 时，把它放进「sku名称」列即可。
+    cells: { ...(over.specValue ? { sku名称: over.specValue } : {}), ...(over.cells ?? {}) },
+    ...over,
   });
 
-  it("按**用户配的映射**导入（同名时右侧默认选中它）", () => {
+  //: ⚠️ 2026-10-20 口径：映射左侧 = **预检通过列名**（不再是规格分类名）
+  //: ⇒ `mapping` 的键是列名；值 = 平台维度名。导入按**列名**从 `cells` 取值。
+  it("按**用户配的映射**导入（列名 → 平台维度）", () => {
     const plan = buildSkuFillPlan(
-      [row({ rawName: "颜色分类:甲", specName: "颜色分类", specValue: "甲", originalPrice: 1280, price: 1280, stock: 200 })],
+      [row({ rawName: "甲", cells: { sku名称: "甲" }, originalPrice: 1280, price: 1280, stock: 200 })],
       [dim("颜色分类")],
-      { 颜色分类: "颜色分类" },
+      { sku名称: "颜色分类" },
     );
     expect(plan.dims).toHaveLength(1);
     expect(plan.dims[0].dimName).toBe("颜色分类");
     expect(plan.rows).toHaveLength(1);
     expect(plan.rows[0]).toMatchObject({ spec: "颜色分类:甲", stock: 200, sellerCode: "" });
-    expect(plan.notes.join("")).toContain("文本精确匹配");
   });
 
   it("**没配映射 ⇒ 不导入**（宁可漏填，也不把值填错维度）", () => {
     const plan = buildSkuFillPlan(
-      [row({ specName: "颜色分类", specValue: "甲" })],
+      [row({ cells: { sku名称: "甲" } })],
       [dim("颜色分类")],
       {},                       //: 用户没配置任何规格关系
     );
     expect(plan.dims).toHaveLength(0);
-    expect(plan.skipped.join("")).toContain("配置规格关系");
+    expect(plan.skipped.join("")).toContain("商品 SKU 映射关系");
   });
 
-  it("**名字不一致且没给映射 ⇒ 不填并写明**（不按顺序猜）", () => {
+  it("**映射到平台没有的维度 ⇒ 不填并写明**（不按顺序猜）", () => {
     const plan = buildSkuFillPlan(
-      [row({ specName: "颜色分类", specValue: "甲" })],
+      [row({ cells: { sku名称: "甲" } })],
       [dim("颜色")],
+      { sku名称: "不存在的维度" },
     );
     expect(plan.dims).toHaveLength(0);
-    expect(plan.skipped.join("")).toContain("颜色分类");
+    expect(plan.skipped.join("")).toContain("sku名称");
     expect(plan.rows).toHaveLength(0);
   });
 
-  it("给了用户映射 ⇒ 按映射填，并写明是「你指定的」", () => {
+  it("给了用户映射 ⇒ 按映射填", () => {
     const plan = buildSkuFillPlan(
-      [row({ rawName: "颜色分类:甲", specName: "颜色分类", specValue: "甲", price: 1 })],
+      [row({ rawName: "甲", cells: { sku名称: "甲" }, price: 1 })],
       [dim("颜色")],
-      { 颜色分类: "颜色" },
+      { sku名称: "颜色" },
     );
     expect(plan.dims[0].dimName).toBe("颜色");
     expect(plan.rows[0].spec).toBe("颜色:甲");
-    expect(plan.notes.join("")).toContain("你指定的映射");
   });
 
   it("命中平台候选项 ⇒ standard 且带 valueId；不命中但可自定义 ⇒ custom", () => {
     const withValues = dim("颜色", { values: [{ name: "甲", value_id: "vid-1" }] });
     const plan = buildSkuFillPlan(
       [
-        row({ rawName: "颜色:甲", specName: "颜色", specValue: "甲" }),
-        row({ rawName: "颜色:乙", specName: "颜色", specValue: "乙" }),
+        row({ rawName: "甲", cells: { sku名称: "甲" } }),
+        row({ rawName: "乙", cells: { sku名称: "乙" } }),
       ],
       [withValues],
-      { 颜色: "颜色" },
+      { sku名称: "颜色" },
     );
     const [a, b] = plan.dims[0].values;
     expect(a).toMatchObject({ value: "甲", valueId: "vid-1", match: "standard" });
@@ -1069,22 +1072,34 @@ describe("构建导入计划（buildSkuFillPlan）", () => {
   it("平台不允许自定义且值不在候选里 ⇒ 该值被跳过并写明原因", () => {
     const locked = dim("颜色", { customizable: false, values: [{ name: "甲", value_id: "v1" }] });
     const plan = buildSkuFillPlan(
-      [row({ rawName: "颜色:乙", specName: "颜色", specValue: "乙" })],
+      [row({ rawName: "乙", cells: { sku名称: "乙" } })],
       [locked],
-      { 颜色: "颜色" },
+      { sku名称: "颜色" },
     );
     expect(plan.dims).toHaveLength(0);
     expect(plan.skipped.join("")).toContain("不接受自定义值");
   });
 
-  it("**两个规格分类**（两行映射）⇒ 各自进各自的维度，组合文本按平台顺序拼", () => {
+  it("★ **按用户选的列取值**（不是永远取 sku 名称）—— 换列必须换值", () => {
+    //: ⚠️ 这条是「按列名取值」的**唯一承重断言**：
+    //: 若代码退回 `row.specValue`（永远取 sku 名称），下面选「颜色」列后
+    //: 拿到的仍是 sku 名称 ⇒ 断言必红。
+    const plan = buildSkuFillPlan(
+      [row({ rawName: "A款", cells: { sku名称: "A款", 颜色: "红" }, price: 1, stock: 1 })],
+      [dim("颜色")],
+      { 颜色: "颜色" },          //: 用户明确选的是「颜色」列
+    );
+    expect(plan.dims[0].values.map((v) => v.value)).toEqual(["红"]);
+  });
+
+  it("**两个不同列**（两行映射）⇒ 各自进各自的维度，组合文本按平台顺序拼", () => {
     const plan = buildSkuFillPlan(
       [
-        row({ rawName: "颜色分类:甲", specName: "颜色分类", specValue: "甲", originalPrice: 100, price: 100, stock: 1 }),
-        row({ rawName: "尺寸:1m", specName: "尺寸", specValue: "1m", originalPrice: 100, price: 100, stock: 2 }),
+        row({ rawName: "甲", cells: { 颜色: "甲" }, originalPrice: 100, price: 100, stock: 1 }),
+        row({ rawName: "1m", cells: { 尺寸: "1m" }, originalPrice: 100, price: 100, stock: 2 }),
       ],
       [dim("颜色"), dim("尺寸")],
-      { 颜色分类: "颜色", 尺寸: "尺寸" },
+      { 颜色: "颜色", 尺寸: "尺寸" },
     );
     //: 两个维度都建出来了（保序 = 平台维度顺序）。
     expect(plan.dims.map((d) => d.dimName)).toEqual(["颜色", "尺寸"]);
@@ -1095,14 +1110,40 @@ describe("构建导入计划（buildSkuFillPlan）", () => {
     expect(plan.rows).toHaveLength(0);
   });
 
+  it("**同一行多个列都被映射** ⇒ 一次取全，组合成一条规格", () => {
+    //: 用户口径 2026-10-20：左侧 = 列名 ⇒ 一行里可能同时有「颜色」和「尺寸」两列。
+    const plan = buildSkuFillPlan(
+      [row({ rawName: "甲1m", cells: { 颜色: "甲", 尺寸: "1m" }, originalPrice: 100, price: 100, stock: 5 })],
+      [dim("颜色"), dim("尺寸")],
+      { 颜色: "颜色", 尺寸: "尺寸" },
+    );
+    expect(plan.rows).toHaveLength(1);
+    expect(plan.rows[0].spec).toBe("颜色:甲 / 尺寸:1m");
+  });
+
+  it("**所选列的值去重**（用户口径 2026-10-20：导入时对选择的列数据去重）", () => {
+    const plan = buildSkuFillPlan(
+      [
+        row({ rawName: "甲", cells: { 颜色: "甲" }, originalPrice: 1, price: 1, stock: 1 }),
+        row({ rawName: "甲 ", cells: { 颜色: "甲 " }, originalPrice: 1, price: 1, stock: 2 }),
+        row({ rawName: "乙", cells: { 颜色: "乙" }, originalPrice: 1, price: 1, stock: 3 }),
+      ],
+      [dim("颜色")],
+      { 颜色: "颜色" },
+    );
+    //: ⚠️ 去重按 `normalizeSkuKey`（大小写/空白归一）⇒ 「甲」和「甲 」
+    //: 只算一个规格值，界面上不该出现两个一模一样的选项。
+    expect(plan.dims[0].values.map((v) => v.value)).toEqual(["甲", "乙"]);
+  });
+
   it("**每个维度都有值的行**才成组合（与 spec_combinations 同判据）", () => {
     const plan = buildSkuFillPlan(
       [
-        row({ rawName: "颜色分类:甲", specName: "颜色分类", specValue: "甲", originalPrice: 100, price: 100, stock: 1 }),
-        row({ rawName: "颜色分类:乙", specName: "颜色分类", specValue: "乙", originalPrice: 100, price: 100, stock: 2 }),
+        row({ rawName: "甲", cells: { sku名称: "甲" }, originalPrice: 100, price: 100, stock: 1 }),
+        row({ rawName: "乙", cells: { sku名称: "乙" }, originalPrice: 100, price: 100, stock: 2 }),
       ],
       [dim("颜色")],
-      { 颜色分类: "颜色" },
+      { sku名称: "颜色" },
     );
     expect(plan.rows.map((r) => r.spec)).toEqual(["颜色:甲", "颜色:乙"]);
   });
@@ -1121,14 +1162,14 @@ describe("构建导入计划（buildSkuFillPlan）", () => {
       [
         //: `localRel` **故意给了值但不该被用**（若被用，这条断言会失败）。
         row({
-          rawName: "颜色:甲", specName: "颜色", specValue: "甲",
+          rawName: "甲", cells: { sku名称: "甲" },
           localRel: "SKU/猜的.jpg", localFileName: "猜的.jpg",
           specImageRel: "SKU/a.jpg",
         }),
-        row({ rawName: "颜色:乙", specName: "颜色", specValue: "乙" }),
+        row({ rawName: "乙", cells: { sku名称: "乙" } }),
       ],
       [dim("颜色")],
-      { 颜色: "颜色" },
+      { sku名称: "颜色" },
     );
     expect(plan.images).toHaveLength(1);
     expect(plan.images[0]).toMatchObject({ dimName: "颜色", value: "甲", localRel: "SKU/a.jpg" });
@@ -1245,9 +1286,6 @@ describe("导出预检通过行（passedSkuRows）", () => {
     expect(rows[0].localFileName).toBe("SKU01_甲.jpg");
   });
 
-  it("sourceSpecNames：保序去重", () => {
-    expect(sourceSpecNames(passedSkuRows(table, [], [0, 1, 2], [], MAP_PRICE))).toEqual(["颜色分类"]);
-  });
 });
 
 describe("售价倍率（原价 × 1.7 默认，可调）", () => {
@@ -1283,9 +1321,10 @@ describe("售价倍率（原价 × 1.7 默认，可调）", () => {
         rawName: "颜色分类:甲", specName: "颜色分类", specValue: "甲",
         originalPrice: 1280, price: 1280, stock: 200,
         sellerCode: "", localRel: null, localFileName: "",
+        cells: { sku名称: "甲" },
       }],
       [{ name: "颜色分类", id: "d1", customizable: true, values: [], options: [] }],
-      { 颜色分类: "颜色分类" },
+      { sku名称: "颜色分类" },
     );
     //: ⚠️ 用户口径最终版：**市场价** = 原价 × 1.7；**售价** = 原价原值。
     expect(plan.rows[0].price).toBe(1280);
@@ -1298,9 +1337,10 @@ describe("售价倍率（原价 × 1.7 默认，可调）", () => {
         rawName: "颜色分类:甲", specName: "颜色分类", specValue: "甲",
         originalPrice: null, price: 990, stock: 1,
         sellerCode: "", localRel: null, localFileName: "",
+        cells: { sku名称: "甲" },
       }],
       [{ name: "颜色分类", id: "d1", customizable: true, values: [], options: [] }],
-      { 颜色分类: "颜色分类" },
+      { sku名称: "颜色分类" },
     );
     expect(plan.rows[0].price).toBe(990);     //: 售价回落计算价格原值
     expect(plan.rows[0].marketPrice).toBeNull(); //: 原价空 ⇒ 市场价没基数，不造假
@@ -1312,9 +1352,10 @@ describe("售价倍率（原价 × 1.7 默认，可调）", () => {
         rawName: "颜色分类:甲", specName: "颜色分类", specValue: "甲",
         originalPrice: 1000, price: 1000, stock: 1,
         sellerCode: "", localRel: null, localFileName: "",
+        cells: { sku名称: "甲" },
       }],
       [{ name: "颜色分类", id: "d1", customizable: true, values: [], options: [] }],
-      { 颜色分类: "颜色分类" },
+      { sku名称: "颜色分类" },
       2.0,
     );
     expect(plan.rows[0].price).toBe(1000);
@@ -1483,15 +1524,15 @@ describe("导入后价格表不漏行（用户反馈：导入完助手仍提示�
   it("**计划里每一行都带价格与库存**（否则助手会一直报缺值）", () => {
     const plan = buildSkuFillPlan(
       [
-        { rawName: "颜色分类:甲", specName: "颜色分类", specValue: "甲",
+        { rawName: "甲", specName: "", specValue: "甲", cells: { sku名称: "甲" },
           originalPrice: 1280, price: 1280, stock: 200,
           sellerCode: "ID1", localRel: null, localFileName: "" },
-        { rawName: "颜色分类:乙", specName: "颜色分类", specValue: "乙",
+        { rawName: "乙", specName: "", specValue: "乙", cells: { sku名称: "乙" },
           originalPrice: 2000, price: 2000, stock: 10,
           sellerCode: "ID2", localRel: null, localFileName: "" },
       ],
       dims,
-      { 颜色分类: "颜色" },
+      { sku名称: "颜色" },
     );
     expect(plan.rows).toHaveLength(2);
     //: ⚠️ **关键**：不许出现 price/stock 为 null 的行 —— 助手判据是
@@ -1609,20 +1650,23 @@ describe("手动新增列", () => {
     expect(dropTableColumn(table, 99)).toBe(table);
   });
 
-  it("插入「规格分类」列时同步插 keys（长度始终一致）", () => {
+  it("**不再插入「规格分类」列**（该固定列已整体移除）", () => {
+    //: 用户口径 2026-10-20：「商品发布移除商品sku表格中的规格分类固定列，
+    //: 『规格分类』固定列 相关所有逻辑移除」⇒ `withDerivedColumns` 只插「SKU 图」一列。
     const raw = {
       columns: ["sku名称", "原价"],
       rows: [["A款", "100"]] as (string | null)[][],
       column_kinds: ["text", "numeric"],
       column_keys: ["sku名称", "原价"],
     };
-    const withSpec = withSpecCategoryColumn(raw);
-    expect(withSpec.columns).toEqual(["规格分类", "sku名称", "原价"]);
-    expect(withSpec.column_keys).toHaveLength(3);
-    //: ⚠️ 「规格分类」是**固定列** ⇒ key 不带手动前缀（不可删）。
-    expect(canDropColumn(withSpec.column_keys?.[0])).toBe(false);
+    const out = withDerivedColumns(raw);
+    expect(out.columns).toEqual(["SKU 图", "sku名称", "原价"]);
+    expect(out.columns).not.toContain("规格分类");
+    //: 长度始终与 `columns` 一致（既有契约）。
+    expect(out.column_keys).toHaveLength(3);
+    expect(out.column_kinds).toHaveLength(3);
     //: 幂等。
-    expect(withSpecCategoryColumn(withSpec)).toBe(withSpec);
+    expect(withDerivedColumns(out)).toBe(out);
   });
 });
 
@@ -1641,7 +1685,8 @@ describe("「预检通过列」下拉必须是**表格所有列**（用户口径
     const table = withDerivedColumns(raw, { 0: "SKU图/a.jpg" });
     const opts = priceSourceOptions(table.columns);
     //: 两列后处理固定列都在（且顺序 = 屏幕序）。
-    expect(opts).toEqual(["SKU 图", "规格分类", "sku名称", "原价"]);
+    //: ⚠️ 「规格分类」固定列已移除（2026-10-20）⇒ 只剩「SKU 图」。
+    expect(opts).toEqual(["SKU 图", "sku名称", "原价"]);
     //: 纯函数不再做任何补列（避免与 `withDerivedColumns` 两份实现）。
     expect(priceSourceOptions(["sku名称"])).toEqual(["sku名称"]);
   });
@@ -1665,14 +1710,15 @@ describe("「预检通过列」下拉必须是**表格所有列**（用户口径
     };
     const out = withDerivedColumns(raw, { 0: "SKU图/a.jpg", 1: "SKU图/b.jpg" });
     //: ⚠️ 屏幕序：SKU 图 在 规格分类 **左边**（与表格显示一致）。
-    expect(out.columns).toEqual(["SKU 图", "规格分类", "sku名称", "原价"]);
+    //: ⚠️ 只剩「SKU 图」一列（「规格分类」已移除）。
+    expect(out.columns).toEqual(["SKU 图", "sku名称", "原价"]);
     //: ⚠️ **值真的进了 rows**（不是渲染层虚拟出来的）。
     expect(out.rows.map((r) => r[0])).toEqual(["SKU图/a.jpg", "SKU图/b.jpg"]);
-    //: 规格分类默认空（用户自己填 / 由规则跑）。
-    expect(out.rows.map((r) => r[1])).toEqual([null, null]);
-    //: 三个数组等长（契约）。
-    expect(out.column_kinds).toHaveLength(4);
-    expect(out.column_keys).toHaveLength(4);
+    //: ⚠️ 「规格分类」列已移除 ⇒ 第 2 位就是原来的 `sku名称` 列（值原样没动过）。
+    expect(out.rows.map((r) => r[1])).toEqual(["A款", "B款"]);
+    //: 三个数组等长（契约）—— 3 列。
+    expect(out.column_kinds).toHaveLength(3);
+    expect(out.column_keys).toHaveLength(3);
     //: 幂等。
     expect(withDerivedColumns(out, {})).toBe(out);
     //: ⚠️ 它们都是**固定列** ⇒ 不可删（只有手动列可删）。
@@ -1702,23 +1748,31 @@ describe("⚠️ 真 bug 守卫：确认导入后价格库存**没对接** sku �
     //: （`【中古风】实木三斗柜`），而第二步过滤时比的是 `c.spec`
     //: （`颜色分类:【中古风】实木三斗柜`）⇒ **一个都对不上** ⇒ `visible` 为空
     //: ⇒ 价格库存表**一行都不落**（且不报错，用户只看到「没数据」）。
+    //: ⚠️ 2026-10-20：代码不再拼「分类:名称」前缀（分类由用户规则决定）
+    //: ⇒ 产出的是**裸名称**。
     const allowed = passedSkuSpecs(table, [], [], M2);
     expect([...allowed]).toEqual([
-      "颜色分类:【中古风】实木三斗柜",
-      "颜色分类:【中古风】伸缩桌+三斗柜",
+      "【中古风】实木三斗柜",
+      "【中古风】伸缩桌+三斗柜",
     ]);
   });
 
   it("两边形态逐字一致 ⇒ 过滤后不会清空（端到端）", () => {
     const rows = passedSkuRows(table, [], [], [], M2);
     const dims = [{ name: "颜色分类", id: "d1", customizable: true, options: [], values: [] }];
-    const plan = buildSkuFillPlan(rows, dims, { 颜色分类: "颜色分类" }, 1.7);
+    const plan = buildSkuFillPlan(rows, dims, { sku名称: "颜色分类" }, 1.7);
+    //: ⚠️ 2026-10-20：两边都基于**同一列**（用户选的 `sku名称`）⇒ 形态天然一致。
+    //: `spec_combinations` 收的是**裸值**（不带维度前缀），与 `passedSkuSpecs`
+    //: 现在产出的裸名称逐字相同 —— 这正是「不会一边带前缀一边裸名」的判据。
     const combos = spec_combinations([
       { name: "颜色分类", values: plan.rows.map((r) => r.spec.split(":")[1]) },
     ]);
     const allowed = passedSkuSpecs(table, [], [], M2);
     const visible = allowed.size > 0
-      ? combos.filter((c) => allowed.has(String(c.spec ?? "").trim()))
+      ? combos.filter((c) =>
+          //: 组合文本形如 `颜色分类:【中古风】实木三斗柜`，取末段与会话值比对。
+          allowed.has(String(c.spec ?? "").split(":").slice(1).join(":").trim()),
+        )
       : combos;
     //: ⚠️ 过滤**不许**把行清空（清了 = 用户看到的「没对接」）。
     expect(combos.length).toBeGreaterThan(0);

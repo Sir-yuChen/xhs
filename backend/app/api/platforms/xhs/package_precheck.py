@@ -698,4 +698,117 @@ def discard(token: str, current_user: User = Depends(get_current_user)) -> dict:
     return {"token": token, "dropped": True}
 
 
+# --------------------------------------------------------------------------- #
+# SKU 规格名称超长压缩（用户口径 2026-10-20）
+# --------------------------------------------------------------------------- #
+
+class SkuNameItem(BaseModel):
+    """一条待检查的 SKU 名称（`key` 由前端定义，原样回传便于对位）。"""
+
+    key: str = Field(description="前端自定义的稳定标识（行下标 / SKU 名），原样回传")
+    name: str = Field(description="SKU 规格名称原文")
+
+
+class SkuNameOptimizeRequest(BaseModel):
+    """批量压缩请求。
+
+    ⚠️ 上限**不传就用设置页的值**（`xhs_sku_name_max_chars`，默认 60 字符，
+    汉字计 2）—— 用户要求「设置中动态调整实时生效」，所以每次调用都现读配置，
+    不在前端缓存也不在后端常量里写死。
+    """
+
+    items: list[SkuNameItem] = Field(description="待检查的 SKU 名称（全量传，未超长的原样返回）")
+    max_chars: int | None = Field(default=None, description="可选覆盖；不传读设置页配置")
+
+
+class SkuNameOptimizeResponse(BaseModel):
+    max_chars: int
+    items: list[dict]
+
+
+@router.post("/sku-name-optimize", status_code=status.HTTP_200_OK)
+def optimize_sku_names(
+    payload: SkuNameOptimizeRequest,
+    current_user: User = Depends(get_current_user),
+    db=Depends(get_db),
+) -> dict:
+    """把**超长**的 SKU 规格名称压到上限内（语义不得改变）。
+
+    - 未超长的项原样返回、`changed=False`（前端据此只展示需要比较的行）；
+    - 超长的项调大模型压缩，本地再校验宽度，压不够就截断并标 `truncated`；
+    - 失败项 `optimized` 退回原文并带 `reason`（**不造假**）。
+
+    ⚠️ **只影响本次导入**：本端点不写库、不改 SKU 表（用户口径）。
+    """
+    from backend.app.services import settings_service, sku_name_optimize_service
+
+    if payload.max_chars is not None and payload.max_chars > 0:
+        max_chars = int(payload.max_chars)
+    else:
+        max_chars = settings_service.live_int(
+            db, current_user.id, "xhs_sku_name_max_chars",
+            default=sku_name_optimize_service.DEFAULT_MAX_CHARS,
+        )
+
+    results = sku_name_optimize_service.optimize_names(
+        db=db,
+        user_id=current_user.id,
+        items=[(it.key, it.name) for it in payload.items],
+        max_chars=max_chars,
+    )
+    return {
+        "max_chars": max_chars,
+        "items": [
+            {
+                "key": r.key,
+                "original": r.original,
+                "optimized": r.optimized,
+                "changed": r.changed,
+                "truncated": r.truncated,
+                "reason": r.reason,
+            }
+            for r in results
+        ],
+    }
+
+
+@router.post("/sku-name-regenerate", status_code=status.HTTP_200_OK)
+def regenerate_sku_name(
+    payload: SkuNameItem,
+    current_user: User = Depends(get_current_user),
+    db=Depends(get_db),
+) -> dict:
+    """**单条重新生成**（用户口径：「不满意可单独对一个 sku 规格名称重新生成并覆盖历史值」）。
+
+    ⚠️ 与批量端点的差别只有两点：① 只处理一条；② 温度略高（0.5），
+    让同样的输入能产出**不同的**候选 —— 否则「重新生成」永远得到同一个结果，
+    用户点十次也没有新选择。
+    """
+    from backend.app.services import settings_service, sku_name_optimize_service
+
+    max_chars = settings_service.live_int(
+        db, current_user.id, "xhs_sku_name_max_chars",
+        default=sku_name_optimize_service.DEFAULT_MAX_CHARS,
+    )
+    results = sku_name_optimize_service.optimize_names(
+        db=db,
+        user_id=current_user.id,
+        items=[(payload.key, payload.name)],
+        max_chars=max_chars,
+        #: 重新生成时换一批候选（批量路径用低温求稳，这里略高求变化）。
+        temperature=0.5,
+    )
+    r = results[0]
+    return {
+        "max_chars": max_chars,
+        "key": r.key,
+        "original": r.original,
+        "optimized": r.optimized,
+        "changed": r.changed,
+        "truncated": r.truncated,
+        "reason": r.reason,
+    }
+
+
+
 __all__ = ["router", "MEDIA_KINDS"]

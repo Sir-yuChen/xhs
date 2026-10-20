@@ -232,6 +232,18 @@ BUSINESS_KEY_PRODUCT_SELLING_POINT = BusinessKey(
     entry="商品详情 · AI 润色",
 )
 
+#: SKU 规格名称压缩（用户口径 2026-10-20：导入预检通过的 SKU 时，名称超长
+#: （默认 60 字符，汉字计 2）交给大模型压到上限内，语义不得改变）。
+#: ⚠️ 与「标题润色」分开：那个是给**笔记标题**换写法（营销向），
+#: 这个只做**无损压缩**（保留全部差异点），提示词与温度都不一样。
+BUSINESS_KEY_PRODUCT_SKU_NAME_OPTIMIZE = BusinessKey(
+    "product_sku_name_optimize",
+    MODEL_TYPE_TEXT,
+    "SKU 名称压缩",
+    ("商品发布-第二步-从预检通过的 SKU 导入规格",),
+    entry="商品发布 · 导入 SKU 规格",
+)
+
 # --------------------------------------------------------------------------- #
 # 入口 ⑥：商品详情 · 生成详情图
 # --------------------------------------------------------------------------- #
@@ -293,6 +305,8 @@ BUSINESS_KEYS: Final[tuple[BusinessKey, ...]] = (
     # ⑤ 商品详情 · AI 润色
     BUSINESS_KEY_PRODUCT_TITLE_POLISH,
     BUSINESS_KEY_PRODUCT_SELLING_POINT,
+    # ⑤b SKU 规格名称压缩（导入预检通过的 SKU 时）
+    BUSINESS_KEY_PRODUCT_SKU_NAME_OPTIMIZE,
     # ⑥ 商品详情 · 生成详情图
     BUSINESS_KEY_PRODUCT_DETAIL_IMAGE,
 )

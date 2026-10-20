@@ -13,10 +13,10 @@
 import { describe, expect, it } from "vitest";
 import {
   passedSkuRows,
-  sourceSpecNames,
   skuNameColumnIndex,
   SINGLE_SPEC_NAME,
   buildSkuFillPlan,
+  priceSourceOptions,
   type PriceMappingRow,
 } from "./precheck-publish";
 import type { PrecheckTable } from "./precheck-publish";
@@ -52,7 +52,8 @@ describe("真机端到端：真实包的按钮 disabled 判据", () => {
     //: 或显式 [0]（用户勾过）。两种都试，判据必须都不为 disabled。
     for (const picked of [[], [0]]) {
       const rows = passedSkuRows(table, [], picked, [], M);
-      const specImportSources = sourceSpecNames(rows);
+      //: ⚠️ 2026-10-20：映射左侧 = **预检通过列名** ⇒ 候选不再从规格名派生。
+      const specImportSources = priceSourceOptions(table.columns);
       // eslint-disable-next-line no-console
       console.log(
         `[真机] picked=${JSON.stringify(picked)} ⇒ 行数=${rows.length} ` +
@@ -60,7 +61,8 @@ describe("真机端到端：真实包的按钮 disabled 判据", () => {
           `disabled=${specImportSources.length === 0}`,
       );
       expect(specImportSources.length).toBeGreaterThan(0);
-      expect(specImportSources).toEqual([SINGLE_SPEC_NAME]);
+      //: 候选 = 表格的所有列（「sku名称」「库存」）。
+      expect(specImportSources).toEqual(["sku名称", "库存"]);
       //: 这一条就是 `publish-config-step2.tsx:2902` 的表达式，逐字照抄。
       expect(specImportSources.length === 0).toBe(false);
     }
@@ -72,7 +74,8 @@ describe("真机端到端：真实包的按钮 disabled 判据", () => {
     const dims = [
       { name: "颜色分类", id: "d1", customizable: true, options: ["A款"] },
     ];
-    const plan = buildSkuFillPlan(rows, dims, { [SINGLE_SPEC_NAME]: "颜色分类" });
+    //: ⚠️ 2026-10-20：映射键 = **列名**（用户选的那一列）。
+    const plan = buildSkuFillPlan(rows, dims, { sku名称: "颜色分类" });
     // eslint-disable-next-line no-console
     console.log("[真机] plan.dims =", JSON.stringify(plan.dims.map((d) => d.dimName)),
       " plan.rows =", plan.rows.length, " skipped =", JSON.stringify(plan.skipped));

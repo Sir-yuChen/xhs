@@ -22,11 +22,10 @@ import { describe, expect, it } from "vitest";
 import {
   parseSkuName,
   passedSkuRows,
-  sourceSpecNames,
-  realSpecNames,
   SINGLE_SPEC_NAME,
   localSkuImageList,
   buildSkuFillPlan,
+  priceSourceOptions,
   type PriceMappingRow,
 } from "./precheck-publish";
 import type { PrecheckMedia, PrecheckTable } from "./precheck-publish";
@@ -62,15 +61,14 @@ describe("真 bug 守卫：SKU 名不含冒号（真实包 `A款`）时按钮不
     expect(p.value).toBe("A款");
   });
 
-  it("★ 核心判据：`sourceSpecNames(passedSkuRows(真实表), M)` **非空** ⇒ 按钮不 disabled", () => {
+  it("★ 核心判据：候选列清单**非空** ⇒ 按钮不 disabled", () => {
     const rows = passedSkuRows(REAL_TABLE, [], [], [], M);
-    const names = sourceSpecNames(rows);
-    //: 修复前：rows.length = 1 但 names = [] ⇒ `length === 0` 恒真 ⇒ 按钮恒灰。
-    //: 修复后：names = ["规格"]。
+    //: ⚠️ 2026-10-20：按钮的 `disabled` 判据改为「**预检通过列**清单是否为空」
+    //: （用户口径「左侧…预检通过列的所有列」），不再看规格名。
+    const cols = priceSourceOptions(REAL_TABLE.columns);
     expect(rows.length).toBe(1);
-    expect(names).toEqual([SINGLE_SPEC_NAME]);
-    //: 直接断言「按钮 disabled 判据」（`publish-config-step2.tsx:2902`）为 false。
-    expect(names.length === 0).toBe(false);
+    expect(cols.length).toBeGreaterThan(0);
+    expect(cols.length === 0).toBe(false);
   });
 
   it("该行的 specValue = 整个名称（不是空串 —— 值不能被吞掉）", () => {
@@ -80,10 +78,9 @@ describe("真 bug 守卫：SKU 名不含冒号（真实包 `A款`）时按钮不
     expect(row.stock).toBe(3);
   });
 
-  it("`realSpecNames` 仍是空（数据包里确实**没有**真分类）—— UI 措辞据此区分", () => {
-    const rows = passedSkuRows(REAL_TABLE, [], [], [], M);
-    expect(realSpecNames(rows)).toEqual([]);
-    expect(sourceSpecNames(rows)).toEqual([SINGLE_SPEC_NAME]);
+  it("`specName` 恒为中性占位（数据包里**没有**分类概念了）", () => {
+    const [row] = passedSkuRows(REAL_TABLE, [], [], [], M);
+    expect(row.specName).toBe(SINGLE_SPEC_NAME);
   });
 
   it("多行无分类 ⇒ 维度仍只有**一个**（不是每行各一个维度）", () => {
@@ -97,8 +94,8 @@ describe("真 bug 守卫：SKU 名不含冒号（真实包 `A款`）时按钮不
       ],
     } as unknown as PrecheckTable;
     const rows = passedSkuRows(table, [], [], [], M);
-    expect(sourceSpecNames(rows)).toEqual([SINGLE_SPEC_NAME]);
-    expect(rows.map((r) => r.specValue)).toEqual(["A款", "B款", "C款"]);
+    expect(new Set(rows.map((r) => r.specName))).toEqual(new Set([SINGLE_SPEC_NAME]));
+    expect(rows.map((r) => r.cells.sku名称)).toEqual(["A款", "B款", "C款"]);
   });
 });
 
@@ -116,7 +113,8 @@ describe("端到端：无分类包能被 `buildSkuFillPlan` 接受（映射对�
     const dims = [
       { name: "颜色分类", id: "d1", customizable: true, options: ["A款", "B款"] },
     ];
-    const plan = buildSkuFillPlan(rows, dims, { [SINGLE_SPEC_NAME]: "颜色分类" });
+    //: ⚠️ 2026-10-20：映射键 = **列名**（用户选的那一列）。
+    const plan = buildSkuFillPlan(rows, dims, { sku名称: "颜色分类" });
     //: 修复前这里会 `skipped.push("SKU 名称里没有可识别的规格分类…")` 且 dims = []。
     expect(plan.dims.map((d) => d.dimName)).toEqual(["颜色分类"]);
     expect(plan.rows.length).toBe(2);
@@ -124,71 +122,68 @@ describe("端到端：无分类包能被 `buildSkuFillPlan` 接受（映射对�
   });
 });
 
-describe("规格分类读「规格分类」固定列（用户口径 2026-10-15：拆冒号逻辑移除）", () => {
-  //: ⚠️ **口径已变**（原断言见下方 docstring，保留作为考古）：
-  //: 旧口径 = `specName` 从 `sku名称` **按冒号拆**（`颜色分类:xxx` ⇒ `颜色分类`）。
-  //: 用户口径 2026-10-15：
-  //:   「`specName = parsed.category || SINGLE_SPEC_NAME`，是从 sku名称 拆冒号得
-  //:     ⇒ **移除逻辑**，应读 sku 预检通过的**规格分类固定列**」
-  //: 原因：拆冒号是「分类由代码派生」时期的产物；现在分类是用户填的**真列**，
-  //: 再猜名称形态会出现两份矛盾的事实（用户实测：填了「颜色分类」却被报
-  //: 「平台规格类型里没有与数据包『规格』对应的维度」）。
+describe("规格分类**不再由代码决定**（用户口径 2026-10-20）", () => {
+  //: ⚠️ 口径沿革（原断言保留作考古，**不要再按旧语义写测试**）：
+  //:   ① 最早：`specName` 从 `sku名称` 按冒号拆（`颜色分类:xxx` ⇒ `颜色分类`）；
+  //:   ② 2026-10-15：改成读自造的「规格分类」固定列；
+  //:   ③ 2026-10-20（用户逐字）：
+  //:      「商品发布移除商品sku表格中的规格分类固定列，『规格分类』固定列 相关所有逻辑移除」
+  //:      「从 sku 名称按冒号取前缀这个是错的，不要改成这个逻辑，**用户使用规则自己控制**」
+  //:
+  //: ⇒ 现在的契约：代码**一律给中性占位** `SINGLE_SPEC_NAME`，
+  //: 分类从哪来由用户的「数据包规则」+ 导入弹窗里的列映射决定。
+  //: 所以这几条测的是「**不猜**」：无论名称什么形态、有没有分类列，结果都一样。
 
-  it("读「规格分类」列 ⇒ specName = 该列的值（与 sku名称 形态无关）", () => {
-    const table = {
-      sheet_name: "全部",
-      columns: ["规格分类", "sku名称", "库存"],
-      rows: [
-        ["颜色分类", "颜色分类:【中古风】实木三斗柜", "3"],
-        ["颜色分类", "【中古风】实木六斗柜", "3"],
-      ],
-    } as unknown as PrecheckTable;
-    const rows = passedSkuRows(table, [], [], [], M);
-    expect(sourceSpecNames(rows)).toEqual(["颜色分类"]);
-    expect(realSpecNames(rows)).toEqual(["颜色分类"]);
-    //: ⚠️ 值 = **整个 sku 名称**（分类已独立成列，名称里的前缀不再切掉）。
-    expect(rows.map((r) => r.specValue)).toEqual([
-      "颜色分类:【中古风】实木三斗柜",
-      "【中古风】实木六斗柜",
-    ]);
-  });
-
-  it("**没有冒号也不再退化成「规格」**（名称形态不再参与分类判定）", () => {
-    //: 这正是真机场景：`sku名称` 是 `A款` 这种纯值，而分类在独立那一列里。
-    const table = {
-      sheet_name: "全部",
-      columns: ["规格分类", "sku名称", "库存"],
-      rows: [
-        ["颜色分类", "A款", "3"],
-        ["尺寸", "1m", "3"],
-      ],
-    } as unknown as PrecheckTable;
-    const rows = passedSkuRows(table, [], [], [], M);
-    expect(sourceSpecNames(rows)).toEqual(["颜色分类", "尺寸"]);
-    expect(sourceSpecNames(rows)).not.toContain(SINGLE_SPEC_NAME);
-  });
-
-  it("分类列缺失（旧数据包）⇒ 退化为单维度 `规格`，不丢行", () => {
-    //: ⚠️ 宁可让用户看到占位名自己去改映射，也不静默丢整行
-    //: （丢了会让「预检通过SKU导入」按钮恒灰，用户完全无从下手）。
+  it("名称里带分类前缀 ⇒ 也不拆（代码不猜）", () => {
     const table = {
       sheet_name: "全部",
       columns: ["sku名称", "库存"],
-      rows: [["A款", "3"]],
+      rows: [
+        ["颜色分类:【中古风】实木三斗柜", "3"],
+        ["颜色分类:【中古风】实木六斗柜", "3"],
+      ],
     } as unknown as PrecheckTable;
     const rows = passedSkuRows(table, [], [], [], M);
-    expect(sourceSpecNames(rows)).toEqual([SINGLE_SPEC_NAME]);
-    expect(rows).toHaveLength(1);
+    //: ⚠️ 名称形态**完全不参与分类判定** ⇒ 恒为中性占位。
+    expect(new Set(rows.map((r) => r.specName))).toEqual(new Set([SINGLE_SPEC_NAME]));
+    //: 值 = **整个 sku 名称**（不做任何切分）。
+    expect(rows.map((r) => r.specValue)).toEqual([
+      "颜色分类:【中古风】实木三斗柜",
+      "颜色分类:【中古风】实木六斗柜",
+    ]);
   });
 
-  it("分类列为空（有列但该行没填）⇒ 同样退化，不丢行", () => {
+  it("名称是纯值（无冒号）⇒ 同样是中性占位，且不丢行", () => {
+    const table = {
+      sheet_name: "全部",
+      columns: ["sku名称", "库存"],
+      rows: [["A款", "3"], ["1m", "3"]],
+    } as unknown as PrecheckTable;
+    const rows = passedSkuRows(table, [], [], [], M);
+    expect(new Set(rows.map((r) => r.specName))).toEqual(new Set([SINGLE_SPEC_NAME]));
+    expect(rows).toHaveLength(2);
+  });
+
+  it("表里残留「规格分类」列 ⇒ **完全忽略**（该列已退场）", () => {
+    //: 老数据包/老缓存里可能还带这列；代码必须当它不存在。
     const table = {
       sheet_name: "全部",
       columns: ["规格分类", "sku名称", "库存"],
-      rows: [["", "A款", "3"]],
+      rows: [["颜色分类", "A款", "3"]],
     } as unknown as PrecheckTable;
     const rows = passedSkuRows(table, [], [], [], M);
-    expect(sourceSpecNames(rows)).toEqual([SINGLE_SPEC_NAME]);
+    expect(new Set(rows.map((r) => r.specName))).toEqual(new Set([SINGLE_SPEC_NAME]));
+  });
+
+  it("每行都带 `cells`（整行按列名摊平）——供「按所选列取值」用", () => {
+    const table = {
+      sheet_name: "全部",
+      columns: ["sku名称", "原价", "库存"],
+      rows: [["A款", "100", "3"]],
+    } as unknown as PrecheckTable;
+    const [row] = passedSkuRows(table, [], [], [], M);
+    //: ⚠️ 映射左侧是**列名** ⇒ 导入时必须能按列名回取原值。
+    expect(row.cells).toEqual({ sku名称: "A款", 原价: "100", 库存: "3" });
   });
 });
 

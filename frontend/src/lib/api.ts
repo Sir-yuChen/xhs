@@ -3064,6 +3064,58 @@ export async function fetchPrecheckProgress(token: string): Promise<PrecheckProg
   return response.data;
 }
 
+/** **SKU 规格名称超长压缩**的结果项（用户口径 2026-10-20）。
+ *
+ * - `changed=false` ⇒ 没超长（或没改动），`optimized === original`，界面不必展示；
+ * - `truncated=true` ⇒ 大模型压不够、被本地截断，语义可能略损，界面要标出来；
+ * - `reason` 非空 ⇒ 该条失败，`optimized` 已退回原文（**不造假**）。
+ */
+export type SkuNameOptimizeItem = {
+  key: string;
+  original: string;
+  optimized: string;
+  changed: boolean;
+  truncated: boolean;
+  reason: string;
+};
+
+export type SkuNameOptimizeResult = {
+  max_chars: number;
+  items: SkuNameOptimizeItem[];
+};
+
+/** 批量压缩超长的 SKU 规格名称（未超长的原样返回）。
+ *
+ * ⚠️ 上限**不传就读设置页配置**（`xhs_sku_name_max_chars`，默认 60 字符，
+ * 汉字计 2）—— 用户要求「设置中动态调整实时生效」，故每次现读、前端不缓存。
+ * ⚠️ 只影响本次导入：不写库、不改 SKU 表。
+ */
+export async function optimizeSkuNames(payload: {
+  items: { key: string; name: string }[];
+  max_chars?: number;
+}): Promise<SkuNameOptimizeResult> {
+  const response = await http.post<SkuNameOptimizeResult>(
+    '/xhs/package-precheck/sku-name-optimize',
+    payload,
+  );
+  return response.data;
+}
+
+/** **单条重新生成**（用户不满意某一条时点「重新生成」覆盖历史值）。
+ *
+ * 与批量端的差别：温度略高，让同样的输入能产出**不同**的候选。
+ */
+export async function regenerateSkuName(payload: {
+  key: string;
+  name: string;
+}): Promise<SkuNameOptimizeItem & { max_chars: number }> {
+  const response = await http.post<SkuNameOptimizeItem & { max_chars: number }>(
+    '/xhs/package-precheck/sku-name-regenerate',
+    payload,
+  );
+  return response.data;
+}
+
 /** **由样例反推取值正则**（用户口径 2026-10-13）。
  *
  * ⚠️ **纯算法，不用大模型**（用户口径：「完全放弃大模型，移除相关逻辑」）：
