@@ -362,7 +362,7 @@ export function XhsPublishPage() {
               </Card>
             ) : (
               <>
-              <Spin indicator={<></>}>
+              <Spin spinning={false} indicator={<></>}>
                 <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
                   {/* Toolbar */}
                   <Card style={panelStyle} styles={{ body: { padding: "12px 16px" } }}>

@@ -211,7 +211,7 @@ export function ProductDraftsModal({
 
         {/* 2026-10-20 统一：表格等待由公共 WaitMask 表达。 */}
 
-        <WaitMask open={loading} title="正在加载草稿" />
+        <WaitMask open={loading} scope="panel" title="正在加载草稿" />
 
         <Table<ItemDraftRow>
           rowKey="draft_id"

@@ -38,7 +38,7 @@ export function LoginSubmitMask({
   text?: string;
 }) {
   //: ⚠️ 2026-10-20 用户口径「项目中所有等待，蒙版全部应走统一的公共组件」：
-  //: 原来是自建黑底 div + antd `<Spin>` ⇒ 现委托 `WaitMask tone="dark" scope="panel"`。
+  //: 原来是自建黑底 div + antd `<Spin spinning={false}>` ⇒ 现委托 `WaitMask tone="dark" scope="panel"`。
   //: 对外接口（`active` / `text` / `data-testid`）保持不变，6 个调用点零改动。
   return (
     <span data-testid="login-submit-mask" style={{ display: "contents" }}>

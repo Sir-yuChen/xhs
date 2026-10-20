@@ -2624,7 +2624,7 @@ export function XhsShopItemsPage() {
     //: **页面级等待 = `<WaitMask>` 的居中白卡片**（用户口径 2026-10-20
     //: 「可以不要蒙版只要居中的弹窗提示」），不再有半透明底、也不再挡交互。
     //:
-    //: ⚠️ **为什么这里不用 antd `<Spin>` 包整页**（实测根因，别再改回去）：
+    //: ⚠️ **为什么这里不用 antd `<Spin spinning={false}>` 包整页**（实测根因，别再改回去）：
     //: antd 6 的 `Spin` **无条件渲染 `Indicator`** —— 即使 `spinning={false}` 且
     //: `indicator` 传空，也会多渲染一个 section。表现就是页面上多出一个「只有圈、
     //: 没有字」的转圈，与 `WaitMask` 的卡片并排 = 用户看到的「两个居中提示」。

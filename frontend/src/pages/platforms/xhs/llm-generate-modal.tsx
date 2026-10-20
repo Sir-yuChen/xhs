@@ -3624,7 +3624,7 @@ export function LlmGenerateModal({
           这里自建 `position: absolute` 铺满**弹窗内容区**的蒙版 + `flex` 居中，
           提示位置与滚动无关，且只遮弹窗（不遮背后的商品列表）。 */}
       {/* ⚠️ 2026-10-20 用户口径「项目中所有等待，蒙版全部应走统一的公共组件」：
-          原来是**自建黑底遮罩 + antd `<Spin>`** ⇒ 改用 `<WaitMask tone="dark" scope="panel">`。 */}
+          原来是**自建黑底遮罩 + antd `<Spin spinning={false}>`** ⇒ 改用 `<WaitMask tone="dark" scope="panel">`。 */}
       <WaitMask
         open={busy}
         scope="panel"

@@ -5675,7 +5675,11 @@ function TablesPanel(props: {
             picked={pickedRows}
             onChange={onSelectionChange}
           />
-          {/* 用户口径 2026-10-08：表名 / 列×行 在左、**文件名在右上角**，同一行。 */}
+          {/* 用户口径 2026-10-20（本轮）：
+              ① **文件名整块移除**（红框里的「文件名称：店透-SKU预览-表格-xxx.xlsx」不再显示）；
+              ② **两个按钮（添加列 / SKU 图自动匹配）挪到最左侧**；
+              ③ 表格名 + 行列数 挪到**右侧**（原在左侧）。
+              理由：用户扫视表格时先要「能做什么」（按钮），文件名属于来源信息、占位却无操作价值。 */}
           <div
             style={{
               display: "flex",
@@ -5685,7 +5689,54 @@ function TablesPanel(props: {
               marginBottom: 6,
             }}
           >
-            <Space wrap={false}>
+            {/* 左：操作按钮 */}
+            <Space size={8} wrap={false}>
+              {/* ⚠️ **手动添加列**（用户口径 2026-10-15）：
+                  「商品sku表格**支持手动添加列**，弹窗用户设置表头**中文和英文名**
+                    （**英文名非必填为空则按照一定的顺序规则自动生成**）」 */}
+              {tIndex === 0 && (
+                <Button
+                  size="small"
+                  icon={<PlusOutlined />}
+                  onClick={() => {
+                    setAddColTarget(tIndex);
+                    setAddColName("");
+                    setAddColKey("");
+                  }}
+                >
+                  添加列
+                </Button>
+              )}
+              {/* ⚠️ **仅第一张 SKU 表**（`tIndex === 0`）显示匹配按钮 ——
+                  匹配结果是**全局一份**（上抛给向导），多张表各出一个按钮
+                  会让人以为能分别配（实际后点覆盖先点）。 */}
+              {tIndex === 0 && (
+                <Button
+                  size="small"
+                  type="primary"
+                  ghost
+                  onClick={() => {
+                    if (!precheckPassed) {
+                      message.warning("请先进行违规词检测");
+                      return;
+                    }
+                    setMatchOpen(true);
+                  }}
+                >
+                  SKU 图自动匹配
+                </Button>
+              )}
+              {tIndex === 0 && matchRows.length > 0 && (
+                <Text
+                  type={matchRows.some((r) => r.relPath) ? "success" : "warning"}
+                  style={{ fontSize: 12 }}
+                >
+                  已匹配 {matchRows.filter((r) => r.relPath).length}/{matchRows.length} 行
+                </Text>
+              )}
+            </Space>
+            {/* 右：表格名 + 行列数（来源文件名已移除） */}
+            <Space size={8} wrap={false}>
               <Text strong>{table.sheet_name}</Text>
               <Tag>
                 {table.columns.length} 列 × {table.rows.length} 行
@@ -5694,69 +5745,7 @@ function TablesPanel(props: {
                 <Tag color="blue">已选 {pickedRows.length} 行</Tag>
               )}
             </Space>
-            <Tooltip title={table.source_file ?? ""}>
-              <Text
-                type="secondary"
-                style={{
-                  fontSize: 12,
-                  maxWidth: 360,
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                文件名称：{table.source_file || "-"}
-              </Text>
-            </Tooltip>
-            {/* ⚠️ **手动添加列**（用户口径 2026-10-15）：
-                「商品sku表格**支持手动添加列**，弹窗用户设置表头**中文和英文名**
-                  （**英文名非必填为空则按照一定的顺序规则自动生成**）」
-                ⚠️ 与「规格分类」不同，手动列**追加在最右**且**可以整列删**。 */}
-            {tIndex === 0 && (
-              <Button
-                size="small"
-                icon={<PlusOutlined />}
-                onClick={() => {
-                  setAddColTarget(tIndex);
-                  setAddColName("");
-                  setAddColKey("");
-                }}
-              >
-                添加列
-              </Button>
-            )}
-            {/* ⚠️ **仅第一张 SKU 表**（`tIndex === 0`）显示匹配按钮 ——
-                匹配结果是**全局一份**（上抛给向导），多张表各出一个按钮
-                会让人以为能分别配（实际后点覆盖先点）。 */}
-            {tIndex === 0 && (
-              //: ⚠️ 用户口径 2026-10-13：「点击前校验是否违规词已经检测通过，
-              //: 不通过则提示「请先进行违规词检测」」。
-              //: ⚠️ 用**点击时提示**而不是 `disabled` —— 按钮灰着用户不知道
-              //: 为什么点不动；给一句话他立刻知道该先做什么。
-              <Button
-                size="small"
-                type="primary"
-                ghost
-                onClick={() => {
-                  if (!precheckPassed) {
-                    message.warning("请先进行违规词检测");
-                    return;
-                  }
-                  setMatchOpen(true);
-                }}
-              >
-                SKU 图自动匹配
-              </Button>
-            )}
-            {tIndex === 0 && matchRows.length > 0 && (
-              <Text type={matchRows.some((r) => r.relPath) ? "success" : "warning"} style={{ fontSize: 12 }}>
-                已匹配 {matchRows.filter((r) => r.relPath).length}/{matchRows.length} 行
-              </Text>
-            )}
-          
           </div>
-
-
 
           <Table
             size="small"

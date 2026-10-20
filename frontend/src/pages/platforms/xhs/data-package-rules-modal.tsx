@@ -465,8 +465,11 @@ export function DataPackageRulesModal({
           style={{ marginBottom: 12 }}
           message="一个「规则包」对应一类数据包；包下的每条规则管一列。配好后在每列表头的设置图标里选它执行。"
         />
-        <Spin indicator={<></>}>
-          <Table<DataPackageRuleSet>
+        {/* ⚠️ 2026-10-20：**不要用 `<Spin spinning={false}>` 包表格** —— antd 6 的 Spin 默认
+            `spinning=true`，会给内容套 `.ant-spin-container` 并蒙一层半透明白底
+            （用户实测：弹窗打开只有一片白色、表格内容几乎看不见）。
+            等待状态已由下方 `<WaitMask>` 承担，这里只留表格本身。 */}
+        <Table<DataPackageRuleSet>
             size="small"
             rowKey="id"
             dataSource={sets}
@@ -554,8 +557,7 @@ export function DataPackageRulesModal({
               },
             ]}
           />
-        </Spin>
-<WaitMask open={loading} title="正在加载规则" />
+        <WaitMask open={loading} scope="panel" title="正在加载规则" />
       </Modal>
 
       {/* ---------------- 规则包编辑 ---------------- */}

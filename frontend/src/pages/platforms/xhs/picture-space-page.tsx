@@ -948,7 +948,7 @@ export function PictureSpacePage() {
             ⇒ 不关会叠成两层圈，用户实测截图）。这里只留「挡住交互 + 维持滚动高度链」。 */}
         <Spin
           indicator={<></>}
-          spinning={isLoading || busy}
+          spinning={false}
           className="ps-scroll-host"
           wrapperClassName="ps-scroll-host"
         >
@@ -1167,7 +1167,7 @@ export function PictureSpacePage() {
           </div>
         }
       >
-        <Spin indicator={<></>}>
+        <Spin spinning={false} indicator={<></>}>
           <Space direction="vertical" size={8} style={{ width: "100%", minHeight: 60 }}>
             <Text strong>扩容条件</Text>
             {resizeCheck && resizeCheck.conditions.length > 0 ? (
@@ -1188,7 +1188,7 @@ export function PictureSpacePage() {
             )}
           </Space>
         </Spin>
-<WaitMask open={resizeLoading} title="正在处理图片" />
+<WaitMask open={resizeLoading} scope="panel" title="正在处理图片" />
       </Modal>
     </div>
   );

@@ -374,7 +374,7 @@ export function ForbiddenWordsModal({ open, onClose }: ForbiddenWordsModalProps)
 
             antd Spin 覆盖，与 WaitMask 叠成两层 ⇒ 已移除）。 */}
 
-        <WaitMask open={loading} title="正在加载违规词" />
+        <WaitMask open={loading} scope="panel" title="正在加载违规词" />
 
         <Table
           size="small"

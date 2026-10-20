@@ -1490,7 +1490,7 @@ export function ViolationManagePage() {
             <div className="violation-table" style={{ flex: 1, minHeight: 0 }}>
               {/* ⚠️ indicator={<></>}：转圈由下方 <WaitMask open={loading}> 统一画，
                   同一状态同时驱动两处会叠成两层圈。此处只保留挡交互 + 撑高度。 */}
-              <Spin indicator={<></>} spinning={loading} style={{ height: "100%" }}>
+              <Spin spinning={false} indicator={<></>} style={{ height: "100%" }}>
                 <Table
                   size="small"
                   rowKey={(record) =>
@@ -1878,7 +1878,7 @@ function CheckupPanel(props: {
           }))}
         />
         {/* ⚠️ indicator={<></>}：转圈由 <WaitMask open={loading}> 统一画（同一状态两处驱动 ⇒ 双层圈）。 */}
-        <Spin indicator={<></>} spinning={loading}>
+        <Spin spinning={false} indicator={<></>}>
           <Table
             size="small"
             rowKey={(record, index) => String(record.violation_id ?? `${activeKey}-${index}`)}

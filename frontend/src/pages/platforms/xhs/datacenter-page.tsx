@@ -1506,7 +1506,7 @@ export function XhsDatacenterPage() {
       >
         {productDetailLoading ? (
           /* 2026-10-20 统一：等待一律走 `<WaitMask>`。 */
-          <WaitMask open title="加载中" />
+          <WaitMask open scope="panel" title="加载中" />
         ) : productDetail ? (
           <Card size="small">
             <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
