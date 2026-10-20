@@ -59,6 +59,10 @@ WRITE_TIMEOUT = 60
 #: ⚠️ 定义在**类之前**（`get_order_page` 的默认参数在类体求值时引用它）。
 ORDER_PAGE_SIZE_LIMIT = 50
 
+#: 违规管理域的 Referer（设计 42，2026-10-18 真机抓包逐字）。
+#: 平台对**整个**违规域（含只读 GET 枚举）强制签名；签名材料里的 referer 取真机页。
+VIOLATION_REFERER = "/app-violation/violation-manage/list"
+
 #: 进程级共享会话（设计 13 §18.18.8）。`requests.Session` 是线程安全的（urllib3
 #: 连接池自带锁），复用它让同一 host 的连续请求省掉 DNS + TLS + HTTP/2 握手 ——
 #: 实测「新建连接 157–213 ms」vs「复用连接 40–48 ms」（令牌探针链路只读实测）。
@@ -1864,10 +1868,33 @@ class XHS_Qianfan_Apis:
 
         响应：`{"id": "<平台 note_id>"}` —— 三方真实笔记 ID（回写 notes.note_id 的依据）。
         """
+        #: ⚠️ **Referer 要带 AGI 场景参数**（2026-10-19 真机实测）：千帆「选择商品发笔记」
+        #: 的真实页面 URL 是 `/app-note/publish?step=notePublish&mainPublishType=agi
+        #: &itemId=…&skuId=…&agi=true` —— `mainPublishType=agi` 是「这条笔记挂在商品下」
+        #: 的场景标识。只发裸标 `/app-note/publish` 时，平台照样回 `success`、笔记也发出去，
+        #: 但**不挂商品、不进商品笔记列表**。
+        _referer = "/app-note/publish"
+        body = dict(body or {})
+        _meta = body.pop("_meta", None) or {}
+        try:
+            _common_ref = (body or {}).get("common") or {}
+            _biz_ref = _common_ref.get("biz_relations") or []
+            if _biz_ref:
+                _biz_id = str((_biz_ref[0] or {}).get("biz_id") or "")
+                _extra = _meta
+                _item_id = str(_extra.get("item_id") or "")
+                _sku_name = str(_extra.get("sku_name") or "")
+                _referer = (
+                    "/app-note/publish?step=notePublish&mainPublishType=agi"
+                    f"&itemId={_item_id}&skuId={_biz_id}"
+                    f"&skuName={quote(_sku_name)}&agi=true"
+                )
+        except Exception:  # noqa: BLE001 - Referer 拼装失败退回裸标
+            _referer = "/app-note/publish"
         return self._post(
             "/api/edith/note/publish",
             body if isinstance(body, dict) else {},
-            "/app-note/publish",
+            _referer,
             timeout=WRITE_TIMEOUT,
         )
 
@@ -2129,6 +2156,180 @@ class XHS_Qianfan_Apis:
             "/app-order/aftersale/list",
         )
 
+    # ------------------------------------------------------------------ #
+    # 店铺违规管理（设计 42，2026-10-18）—— **只读域**，但平台对整域强制签名
+    #
+    # 真机实测（账号 8，同一 Cookie 同一 body）：
+    #   无签名 `POST /api/edith/ark/violation/list` ⇒ HTTP 406 `{"code":-1}`
+    #   带 `X-s`/`X-t`（ark 档位 itemark/4.4.4/0101）⇒ 200 `{"counts":56,...}`
+    # ⇒ 本域**所有**方法都走 `_signed_post` / `_signed_get`，不允许退化成裸
+    #   `_post`（守卫 `test_violation_manage` 用 AST 钉住这条）。
+    #
+    # ⚠️ **写接口一个都不在这层**（设计 42 §1.3）：
+    #   `/ark/violation/read_mark`（标已读）与申诉提交（`appeal/*`）刻意缺席 ——
+    #   加进来就等于让「打开详情」顺手改平台状态，这不是只读边界。
+    # ------------------------------------------------------------------ #
+
+    def post_violation_list(
+        self, body: dict, *, referer: str = VIOLATION_REFERER
+    ) -> tuple[bool, str, dict | None]:
+        """违规列表 / 预警列表（`POST /api/edith/ark/violation/list`）—— 需签名。
+
+        **同一端点双场景**：`warnFlag=0` 违规、`=1` 预警，其余过滤字段语义一致。
+        请求体由 `violation_service.build_list_body()` 组装（唯一实现）。
+        返回 `data.{dtos, counts}`。
+        """
+        return self._signed_post("/api/edith/ark/violation/list", body, referer)
+
+    def post_violation_info(
+        self, body: dict, *, referer: str = VIOLATION_REFERER
+    ) -> tuple[bool, str, dict | None]:
+        """违规详情（`POST /api/edith/ark/violation/info`）—— 需签名。
+
+        body `{violationKey, tenant, tagId, source:"violation_detail_ark", dataFlag:true}`
+        （逐字来自真机抓包）。返回 `data.detail.info`。
+        """
+        return self._signed_post("/api/edith/ark/violation/info", body, referer)
+
+    def get_violation_appeal_record(
+        self, violation_id: str, *, referer: str = VIOLATION_REFERER
+    ) -> tuple[bool, str, dict | None]:
+        """申诉记录（`GET /api/edith/violation/appeal/record?violationId=`）—— 需签名。
+
+        返回 `data.appealInfos[]`（本店全部为空数组）。
+        """
+        from urllib.parse import quote
+
+        path = f"/api/edith/violation/appeal/record?violationId={quote(str(violation_id))}"
+        return self._signed_get(path, referer)
+
+    def post_violation_evidence(
+        self, body: dict, *, referer: str = VIOLATION_REFERER
+    ) -> tuple[bool, str, dict | None]:
+        """违规证据（`POST /api/edith/ark/violation/evidence`）—— 需签名。
+
+        body `{violationKey, violationEntityId, violationEntityType, tagId, tenant}`。
+        账号类违规实测 `data:null`（平台没有给证据）—— 缺值如实为 `null`。
+        """
+        return self._signed_post("/api/edith/ark/violation/evidence", body, referer)
+
+    def get_violation_status_enum(self) -> tuple[bool, str, dict | None]:
+        """处罚状态枚举（`GET /api/edith/violation/status_enum`）—— 需签名。
+
+        `0 待处罚 / 1 已处罚 / 2 处罚中 / -1 已取消`。
+        """
+        return self._signed_get("/api/edith/violation/status_enum", VIOLATION_REFERER)
+
+    def get_violation_entity_enum(self) -> tuple[bool, str, dict | None]:
+        """违规对象枚举（`GET /api/edith/violation/entity_enum`）—— 需签名。
+
+        `999 全部 / 0 店铺 / 1 商品 / 2 账号 / 3 笔记 / 4 直播间`。
+        """
+        return self._signed_get("/api/edith/violation/entity_enum", VIOLATION_REFERER)
+
+    def post_violation_user_tag(
+        self, body: dict, *, referer: str = VIOLATION_REFERER
+    ) -> tuple[bool, str, dict | None]:
+        """违规原因 → tagId 分组（`POST /api/edith/ark/violation/user_tag`）—— 需签名。
+
+        body `{violationEntityType: 999[, bizScene: "SPOT_CHECK"]}`。
+        返回 `data.tags[{tagName, tagIds[]}]`。
+
+        ⚠️ **tagName 可能带尾空格**（真机：`违反法律法规` 与 `违反法律法规 ` 是**两条**
+        不同 tag，tagIds 分别是 `80001101…` 与 `80005677`）⇒ 调用方**不得** trim
+        或按名字去重，否则两组合并、按名字过滤会漏数据。
+        """
+        return self._signed_post("/api/edith/ark/violation/user_tag", body, referer)
+
+    def post_violation_risk_list(
+        self, body: dict, *, referer: str = VIOLATION_REFERER
+    ) -> tuple[bool, str, dict | None]:
+        """店铺体检「违规风险」（`POST /api/edith/ark/violation/risk/list`）—— 需签名。
+
+        body `{dataFlag:true, warnFlag:0, pageNo:1, pageSize:100}`。
+        """
+        return self._signed_post("/api/edith/ark/violation/risk/list", body, referer)
+
+    def post_violation_risk_advice(
+        self, body: dict, *, referer: str = VIOLATION_REFERER
+    ) -> tuple[bool, str, dict | None]:
+        """店铺体检「经营建议」（`POST /api/edith/violation/risk/advice`）—— 需签名。"""
+        return self._signed_post("/api/edith/violation/risk/advice", body, referer)
+
+    def post_negative_feedback_badcase(
+        self, kind: str, body: dict, *, referer: str = VIOLATION_REFERER
+    ) -> tuple[bool, str, dict | None]:
+        """店铺体检「负反馈风险」（`shop/score/{item/quality|logistics}/negative/badcase/list`）。
+
+        `kind`：`"quality"` ⇒ 商品品质；`"logistics"` ⇒ 物流。两者**是两个不同端点**
+        （不是同一端点的参数差异）。
+        """
+        if kind == "quality":
+            path = "/api/edith/shop/score/item/quality/negative/badcase/list"
+        elif kind == "logistics":
+            path = "/api/edith/shop/score/logistics/negative/badcase/list"
+        else:
+            raise ValueError(f"unknown negative feedback kind: {kind!r}")
+        return self._signed_post(path, body, referer)
+
+    def post_seller_high_price_info(
+        self, body: dict | None = None, *, referer: str = VIOLATION_REFERER
+    ) -> tuple[bool, str, dict | None]:
+        """高价商品概览（`POST /api/edith/product/query_seller_high_price_info`）—— 需签名。"""
+        return self._signed_post(
+            "/api/edith/product/query_seller_high_price_info", body or {}, referer
+        )
+
+    def post_compensate_list(
+        self, body: dict, *, referer: str = VIOLATION_REFERER
+    ) -> tuple[bool, str, dict | None]:
+        """赔付列表（`POST /api/edith/governance/traction/query_compensate_list`）—— 需签名。
+
+        body `{sellerId, pageNo, pageSize}`；返回 `data.compensateList[] / total`。
+        """
+        return self._signed_post(
+            "/api/edith/governance/traction/query_compensate_list", body, referer
+        )
+
+    def post_arbitration_list(
+        self, body: dict, *, referer: str = VIOLATION_REFERER
+    ) -> tuple[bool, str, dict | None]:
+        """仲裁列表（`POST /api/edith/arbitration/list`）—— 需签名。
+
+        body `{sellerId, pageNo, pageSize}`；返回 `data.records[] / total`。
+        """
+        return self._signed_post("/api/edith/arbitration/list", body, referer)
+
+    def post_arbitration_taglist(
+        self, body: dict | None = None, *, referer: str = VIOLATION_REFERER
+    ) -> tuple[bool, str, dict | None]:
+        """仲裁原因下拉（`POST /api/edith/arbitration/taglist`）—— 需签名。"""
+        return self._signed_post("/api/edith/arbitration/taglist", body or {}, referer)
+
+    def post_spot_check_list(
+        self, body: dict, *, referer: str = VIOLATION_REFERER
+    ) -> tuple[bool, str, dict | None]:
+        """抽检违规列表（`POST /api/edith/common/violation/list`）—— 需签名。
+
+        body `{pageNo, pageSize, bizScene:"SPOT_CHECK"}`；返回 `data.vos[] / counts`。
+        """
+        return self._signed_post("/api/edith/common/violation/list", body, referer)
+
+    def post_exemption_overview(
+        self, body: dict | None = None, *, referer: str = VIOLATION_REFERER
+    ) -> tuple[bool, str, dict | None]:
+        """免罚机会——现货爆单豁免概览（`POST /api/edith/query/explosive/spot/total`）。"""
+        return self._signed_post("/api/edith/query/explosive/spot/total", body or {}, referer)
+
+    def post_exemption_items(
+        self, body: dict, *, referer: str = VIOLATION_REFERER
+    ) -> tuple[bool, str, dict | None]:
+        """免罚机会——爆单明细（`POST /api/edith/query/explosive/spot/details`）。
+
+        body `{pageNo, pageSize, startDtm, endDtm}`（`YYYY-MM-DD`）。
+        """
+        return self._signed_post("/api/edith/query/explosive/spot/details", body, referer)
+
 
 XHSQianfanApis = XHS_Qianfan_Apis
 
@@ -2205,6 +2406,7 @@ __all__ = [
     "QIANFAN_ORDER_STATUS_CODES",
     "QIANFAN_AFTERSALE_STATUS_CODES",
     "ORDER_PAGE_SIZE_LIMIT",
+    "VIOLATION_REFERER",
     "SKU_BATCH_SIZE",
     "AIGC_TASK_STATUS_RUNNING",
     "AIGC_TASK_STATUS_COMPLETED",

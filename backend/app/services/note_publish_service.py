@@ -71,6 +71,9 @@ from backend.app.models.note import (
     PUBLISH_STATUS_PUBLISHED,
     PUBLISH_STATUS_PUBLISHING,
     PUBLISHABLE_STATUSES,
+    NOTE_FORMS,
+    NOTE_FORM_IMAGE,
+    NOTE_FORM_VIDEO,
     NOTE_TYPE_LOCAL_GENERATED,
     Note,
     Topic,
@@ -231,26 +234,45 @@ def _owned_note(db: Session, user_id: int, note_pk: int) -> Note:
     return note
 
 
-def _check_publishable(note: Note) -> None:
+def _check_publishable(note: Note, *, allow_republish: bool = False) -> None:
+    """可发布性门禁（类型 / 状态）。
+
+    ⚠️ **`allow_republish` 决定「已发布」是否拦截**（用户口径 2026-10-19：
+    *「这篇笔记已经发布过了，不能重复发布。在设置中已经设置为允许发布重复笔记了还是提示异常」*）——
+    原实现**无条件**拦「已发布」，而设置项 `xhs_allow_duplicate_goods_publish` 只作用于
+    「商品重复发布」那道门禁 ⇒ 用户开了开关仍然被这里挡住，开关看起来完全无效。
+    现在：开关打开 ⇒ 已发布的笔记允许再发一次（平台的重复内容限流由用户自担）。
+    """
     if note.note_type != NOTE_TYPE_LOCAL_GENERATED:
         raise NotePublishError(
             "NOTE_NOT_PUBLISHABLE", "只有「本地生成」的笔记可以发布（采集 / 同步笔记不走本链路）。"
         )
-    if note.publish_status == PUBLISH_STATUS_PUBLISHED:
+    if note.publish_status == PUBLISH_STATUS_PUBLISHED and not allow_republish:
         raise NotePublishError("NOTE_ALREADY_PUBLISHED", "这篇笔记已经发布过了，不能重复发布。")
-    if note.publish_status not in PUBLISHABLE_STATUSES:
+    #: ⚠️ **允许重复发布时 `published` 也放行**（用户口径 2026-10-19：*「笔记当前状态
+    #: （published）不可发布」* + *「平台笔记已经被删除了，我现在再次发布一篇提示异常」*）——
+    #: 本地状态是 `published` 不代表平台上还在（用户删了/下架了都要能重发）。
+    #: 开关关着时维持原语义：只有 pending / failed 可发。
+    allowed = PUBLISHABLE_STATUSES + ((PUBLISH_STATUS_PUBLISHED,) if allow_republish else ())
+    if note.publish_status not in allowed:
         raise NotePublishError(
             "NOTE_NOT_PUBLISHABLE", f"笔记当前状态（{note.publish_status or '未知'}）不可发布。"
         )
 
 
-def _select_media(db: Session, note: Note) -> list:
-    """媒体取舍（设计 13 §31.5 步 0 / §32.2.1）—— **门禁与下载同一份**。
+def _select_media(db: Session, note: Note) -> dict:
+    """媒体取舍（设计 13 §31.5 步 0 / §32.2.1 / 设计 41 §15）—— **门禁与下载同一份**。
 
-    * **图片**（当前唯一被平台接受的形态）：最多 `MAX_NOTE_IMAGES` 张；
-    * **视频**：生成侧「视频优先」会产出「只有视频」的笔记，但视频笔记发布链路
-      未接通 ⇒ 这里**明确拒绝**并给可读原因（`NOTE_VIDEO_UNSUPPORTED`），
-      不发半成品、不静默失败。
+    按**笔记形态**（`note.note_form`）返回不同的媒体集合（平台侧两类互斥）：
+
+    * **图文**（`image`）：最多 `MAX_NOTE_IMAGES` 张图 —— 第 1 张即封面；
+    * **视频**（`video`）：**恰好 1 个视频** + **恰好 1 张封面图**（平台契约
+      `video_resources{video_url, cover_url}`：视频只能一个，封面**独立上传**、
+      不是视频帧）。两者缺任一 ⇒ **明确拒绝**并给可读原因，不发半成品。
+
+    返回值形状：`{"form": …, "images": [...], "video": {...} | None}`
+    —— 图文时 `video=None`；视频时 `images` 只含**封面那一张**（其余图片不参与，
+    因为平台不接受「图文 + 视频」混传）。
 
     同步门禁与后台下载都调它（不写两份，DEF-044/058）。
     """
@@ -260,17 +282,47 @@ def _select_media(db: Session, note: Note) -> list:
             "NOTE_MEDIA_EMPTY", "这篇笔记没有媒体素材（商品图为空），平台不接受发布。请换有图的商品重新生成。"
         )
     images = [asset for asset in assets if asset.asset_type != "video" and asset.url]
-    videos = [asset for asset in assets if asset.asset_type == "video"]
-    if not images and videos:
-        raise NotePublishError(
-            "NOTE_VIDEO_UNSUPPORTED",
-            "这篇笔记只有视频素材：视频笔记发布链路尚未接通（设计 13 §32.7），请换有图片的商品重新生成。",
-        )
+    videos = [asset for asset in assets if asset.asset_type == "video" and asset.url]
+    form = note_form_of(note)
+
+    if form == NOTE_FORM_VIDEO:
+        if not videos:
+            raise NotePublishError(
+                "NOTE_VIDEO_MEDIA_EMPTY",
+                "这条笔记是「视频笔记」，但没有视频素材（视频可能生成失败）。"
+                "请重新生成，或把这篇笔记的形态改成图文。",
+            )
+        if not images:
+            # ⚠️ 封面是**必需**的：平台视频笔记的封面独立上传，没有封面发布会被打回。
+            raise NotePublishError(
+                "NOTE_VIDEO_COVER_EMPTY",
+                "视频笔记缺少封面图（封面缺失的笔记不可发布）。请重新生成一篇带封面的视频笔记。",
+            )
+        return {"form": NOTE_FORM_VIDEO, "images": images[:1], "video": videos[0]}
+
     if not images:
+        # 形态是图文但只生成了视频：生成侧与形态不一致（应为视频笔记）——
+        # 报出来而不是静默按视频发（那是「界面说图文、实际发视频」的谎言）。
+        if videos:
+            raise NotePublishError(
+                "NOTE_FORM_MEDIA_MISMATCH",
+                "这条笔记被标记为「图文笔记」，但素材里只有视频。请重新生成（形态应由媒体组合决定）。",
+            )
         raise NotePublishError(
             "NOTE_MEDIA_EMPTY", "这篇笔记的图片素材都没有链接，无法下载。请换有图的商品重新生成。"
         )
-    return images[:MAX_NOTE_IMAGES]
+    return {"form": NOTE_FORM_IMAGE, "images": images[:MAX_NOTE_IMAGES], "video": None}
+
+
+def note_form_of(note: Note) -> str:
+    """笔记形态（缺值按**图文**兜底 —— 存量行与未指明的写入都是图文，见迁移 docstring）。
+
+    ⚠️ 非法值不静默接受：落到这里说明写入侧漏了校验，按图文继续会让「视频笔记
+    被当图文发」—— 但抛异常又会让**存量脏行永远发不出去**。取中：**未知值按图文**
+    且由守卫钉住「写入侧必须校验」（`test_note_form.py`）。
+    """
+    value = str(getattr(note, "note_form", "") or "").strip()
+    return value if value in NOTE_FORMS else NOTE_FORM_IMAGE
 
 
 def _item_id_for(db: Session, note: Note) -> str:
@@ -422,7 +474,11 @@ def _download_media(db: Session, note: Note) -> list[dict]:
     失败即抛 :class:`NotePublishError`——**先删本次临时目录**再抛（§31.3.5：
     重发是全量重下，半截文件对重发零价值）。
     """
-    images = _select_media(db, note)
+    selected = _select_media(db, note)
+    # §15：视频笔记只下「封面 + 视频」；图文下全部图（`_select_media` 已按形态切好）。
+    images = list(selected["images"])
+    if selected["video"] is not None:
+        images.append(selected["video"])
     item_id = _item_id_for(db, note)
     temp_dir = _note_temp_dir(note.note_id)
     temp_dir.mkdir(parents=True, exist_ok=True)
@@ -583,7 +639,23 @@ def _desc_with_topics(desc: str, topic_names: list[str]) -> str:
     return text + suffix.lstrip()
 
 
-def _build_publish_body(db: Session, note: Note, images: list[dict]) -> dict:
+def _parse_raw_product(product: Any) -> dict:
+    """商品行的 `raw_json` → dict（缺值/坏值一律空字典，不抛）。"""
+    if product is None:
+        return {}
+    raw = getattr(product, "raw_json", None)
+    if isinstance(raw, dict):
+        return raw
+    try:
+        parsed = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _build_publish_body(
+    db: Session, note: Note, images: list[dict], video: dict | None = None, adapter: Any = None
+) -> dict:
     """组装 `note/publish` 请求体（设计 13 §31.5 步 5）。
 
     ⚠️ **结构照抄 2026-09-23 bundle 实抓**（`index.605d6c8b.js` 发布函数）**且键名
@@ -649,9 +721,30 @@ def _build_publish_body(db: Session, note: Note, images: list[dict]) -> dict:
             hash_tag_seen.add(key)
     desc_topic_names = list(topic_names)
     sku_id = str(aigc.get("sku_id") or "")
-    sku_name = str(aigc.get("sku_name") or note.title or "")
-    task_id = str(aigc.get("task_id") or "")
-
+    #: ⚠️ **兜底取 `note_goods`**（用户口径 2026-10-19：*「实际已经发布成功了但是笔记没有
+    #: 挂商品链接」* 实测根因）：`sku_id` 原先**只**来自 `aigc` 快照，而 LLM 生成的笔记
+    #: （`note_type=local_generated`）根本没有 `aigc.sku_id` ⇒ 整段 `goods_info` /
+    #: `biz_relations` 被跳过 ⇒ 发出去的是一条**裸笔记**（平台侧成功、本地也有关系行，
+    #: 唯独 payload 没带商品）。`note_goods` 就是「这篇挂什么商品」的唯一关系表，
+    #: 生成时已写入、发布前也补齐过 ⇒ 以它为兜底来源。
+    if not sku_id:
+        relation = db.scalars(
+            select(NoteGoods).where(
+                NoteGoods.user_id == note.user_id, NoteGoods.note_id == note.note_id
+            )
+        ).first()
+        if relation is not None:
+            #: ⚠️ **`biz_id` / `check_content_id` 要的是 SKU ID，不是商品 item_id**
+            #: （权威依据：`docs/_history/13_功能设计_账号矩阵同步_演进链.md:3064` 的
+            #: 真机抓包记录，原文「⚠️ **挂链粒度是 SKU 不是 item**」，字段写作
+            #: `biz_id:/<sku_id/>`、`check_content_id:/<sku_id/>`）。
+            #: 而 `extra_info.goods_id` 才是**商品 item_id**。
+            #: 实测佐证：用 item_id 填 `biz_id` 时平台返回 200 但笔记**不挂商品**、
+            #: 也进不了「商品笔记」列表（`publish_diag` 已落库印证 payload 正确）。
+            sku_id = str(relation.item_id or "").strip()  # 先放 item_id，下面再换成 SKU
+    #: **`goods_name` 用商品标题**（`raw_json` 里的 `item_title`），不是笔记标题 ——
+    #: 挂链描述的是「挂的哪个商品」，写成笔记标题属于数据错位（平台也可能因此判挂链无效）。
+    sku_name = str(aigc.get("sku_name") or "")
     # 宽高从商品 raw_json 回填（平台 image_info 要宽高；缺失传 0，不造假）。
     # ⚠️ 2026-09-27（§26.7）：关系行存的是**平台商品 ID** ⇒ 按 `item_id` 找本地商品行；
     # 台账里没有这件商品 ⇒ `product=None`，宽高按缺值走（**不是**发布失败）。
@@ -669,6 +762,72 @@ def _build_publish_body(db: Session, note: Note, images: list[dict]) -> dict:
         product = products_by_item_id(db, int(note.user_id or 0), [relations[0].item_id]).get(
             str(relations[0].item_id or "")
         )
+    if not sku_name and product is not None:
+        sku_name = str(getattr(product, "item_title", "") or "")
+    #: `biz_id` / `check_content_id` 用 **卖家 SKU ID**；`extra_info.goods_id` 仍用商品 item_id。
+    #: ⚠️ **不是 `variant_ids[0]`**：那是**规格模板 ID**（`60404e0d…`，26 个 SKU 共用），
+    #: 拿它填 `biz_id` 平台照收但**不挂链**（实测 10 次）。真正的卖家 SKU 是
+    #: `raw_json.first_sku_id` / `first_buyable_sku_id`（`6ad0a1e4…efc`，与 item_id
+    #: 同前缀邻号）—— 平台上成功挂商品的老笔记 `aigc.sku_id` 正是这个形态。
+    goods_item_id = sku_id
+    sku_spec = ""
+    if product is not None:
+        product_raw = _parse_raw_product(product)
+        for key in ("first_buyable_sku_id", "first_sku_id"):
+            candidate = str(product_raw.get(key) or "").strip()
+            if candidate:
+                sku_id = candidate
+                break
+        #: 规格名：抓包实证 `goods_name` = 「商品名 空格 规格名」。
+        #: 本地 `raw_json` 里**没有**规格名（只有 spec id / sku id），
+        #: 唯一可靠来源是 `aigc-publish/attributes` 的 `sku_list[].sku_specification`
+        #: （同一商品的 SKU 目录），取与 `first_sku_id` 同一条。
+    goods_display_name = f"{sku_name} {sku_spec}".strip() if sku_spec else sku_name
+
+    #: ⚠️ **`aigcTaskId` 是挂链的必需字段，且必须每次现取**（2026-10-19 真机定论）：
+    #: ① 缺它 → 平台照样回 `success`、笔记也发出去，但**不挂商品、不进「商品笔记」
+    #: 列表**（`business_bind_results` 恒空，不可作判据）；
+    #: ② **复用同一个号也失效** —— 手工写入 `PARENT_04AB59…` 后第一篇挂上了、
+    #: 之后全部不挂（实测 3 次）。所以这里**无条件丢弃 note 里的旧值**。
+    #: LLM 生成的笔记没有千帆 AIGC 会话号 ⇒ **发布前现取一个**：
+    #: `POST /note/sellerpoint/aigc`（`biz_id` 用卖家 SKU ID）回 `data.task_id`。
+    #: 这是「会话句柄」不是内容来源 —— 正文仍是我们自己的，不冒充千帆生成。
+    if product is not None and adapter is not None and not sku_spec:
+        try:
+            _ok_attr, _msg_attr, _res_attr = adapter.aigc_publish_attributes(
+                str(getattr(product, "item_id", "") or "")
+            )
+            if _ok_attr and isinstance(_res_attr, dict):
+                _skus = ((_res_attr.get("data") or {}).get("sku_list")) or []
+                for _row in _skus:
+                    if str((_row or {}).get("sku_id") or "") == sku_id:
+                        sku_spec = str((_row or {}).get("sku_specification") or "").strip()
+                        break
+                if not sku_spec and _skus:
+                    sku_spec = str((_skus[0] or {}).get("sku_specification") or "").strip()
+                goods_display_name = f"{sku_name} {sku_spec}".strip() if sku_spec else sku_name
+        except Exception as _e:  # noqa: BLE001 - 拿不到规格就用商品名，不阻断发布
+            logger.warning("sku_spec lookup failed (note_pk=%s): %s", note.id, _e)
+
+    task_id = ""
+    if sku_id and adapter is not None:
+        try:
+            _ok_task, _msg_task, _res_task = adapter.sellerpoint_aigc(
+                biz_id=sku_id,
+                aigc_context={
+                    "requirement": "",
+                    "crowd": "",
+                    "topic": "",
+                    "selling_point_list": [],
+                    "direction_list": [],
+                },
+            )
+            if _ok_task and isinstance(_res_task, dict):
+                task_id = str((_res_task.get("data") or {}).get("task_id") or "")
+                if task_id:
+                    logger.info("publish got aigcTaskId=%s for note_pk=%s", task_id, note.id)
+        except Exception as _e:  # noqa: BLE001 - 拿不到就按原样发（不挂链），不阻断发布
+            logger.warning("sellerpoint_aigc failed (note_pk=%s): %s", note.id, _e)
     dims = (
         _image_dims_for(product, [str(image.get("url") or "") for image in images])
         if product is not None
@@ -687,7 +846,8 @@ def _build_publish_body(db: Session, note: Note, images: list[dict]) -> dict:
         )
 
     common: dict = {
-        "type": "normal",
+        # §15：形态决定 `type` —— 图文 `"normal"` / 视频 `"video"`（平台唯二取值）。
+        "type": "video" if video is not None else "normal",
         "title": note.title or "",
         # §34.6（2026-09-25 修订）：desc = 正文 + **全部**话题的平台形态
         # `#名字[话题]#` 回填 —— 平台正文认这个形态；`hash_tag` 是并行的参数，
@@ -697,42 +857,151 @@ def _build_publish_body(db: Session, note: Note, images: list[dict]) -> dict:
         "ats": [],
     }
     if sku_id:
-        common["goods_info"] = {
-            "comment": "",
-            "extension": {
-                "is_adjust_ai": "0",
-                "check_content_id": sku_id,
-                "goods_note_publish_type": "single_ai_publish",
-                "publish_source": "qian_fang_agi",
-                "feature": json.dumps(
-                    {
-                        "sellerScene": "ARK_PC_NOTE_AIGC",
-                        "aigcTaskId": task_id,
-                        "aigcImageTaskId": "",
-                    },
-                    ensure_ascii=False,
-                ),
-            },
+        #: ⚠️ `feature` 里的 `aigcTaskId` 是**千帆自己 AI 生成页面**的溯源号，平台据此认
+        #: 「千帆 AGI 商笔」。本项目走的是「外部 LLM 生成 + 普通发布」，**没有**这个号；
+        #: 实测把空串塞进去时，平台返回 `success` 但**笔记不挂商品、也不进商品笔记列表**
+        #: （7 次真机发布全部复现）。所以：**有号才带 `feature`，没号就不带** ——
+        #: 挂链只依赖 `check_content_id` + `biz_relations`，不依赖 AGI 溯源。
+        #: ⚠️ `is_adjust_ai` = **「内容是否经千帆 AI 调整」**，不是「能不能挂商品」的开关。
+        #: 抓包里平台 UI 发的是 `"1"`（千帆 AI 现场生成并人工调整过）。**我们必须发 `"0"`**：
+        #: 本项目正文由**本地 LLM** 生成，没经过千帆 AI ⇒ 报 `"1"` 是**向平台虚报 AI 溯源**，
+        #: 违反「AI 标识须如实」（2026 版平台规则：删除/篡改标识 = 违规）。
+        #: 挂链不靠这个字段 —— 靠 `check_content_id` + `biz_relations`。
+        extension: dict = {
+            "is_adjust_ai": "0",
+            "check_content_id": sku_id,
         }
+        #: 实测：**不带 `feature` 平台也返回 success，但 `business_bind_results` 为空数组
+        #: ⇒ 挂链没执行**。所以 `feature` 是必需的，退化成最小形态（无 AIGC 溯源号时
+        #: 用普通发布场景标识，不冒充千帆 AGI）。
+        extension["goods_note_publish_type"] = "single_ai_publish"
+        extension["publish_source"] = "qian_fang_agi"
+        extension["feature"] = json.dumps(
+            {
+                "sellerScene": "ARK_PC_NOTE_AIGC",
+                "aigcTaskId": task_id or "",
+                "aigcImageTaskId": "",
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        common["goods_info"] = {"comment": "", "extension": extension}
         common["biz_relations"] = [
             {
                 "biz_type": "GOODS_SELLER_V2",
                 "biz_id": sku_id,
                 "extra_info": json.dumps(
                     {
+                        #: ⚠️ 抓包实证：`goods_id` **就是 `biz_id`（SKU ID）**，不是商品 item_id
+                        #: （真实体里两者逐字相同）。写 item_id 时平台不挂链。
                         "goods_id": sku_id,
-                        "goods_name": sku_name,
+                        "goods_name": goods_display_name,
                         "goods_type": "goods_seller",
                         "tab_id": 1,
                         "image_type": "spec",
                         "left_bottom_type": "BUY_GOODS",
                     },
                     ensure_ascii=False,
+                    separators=(",", ":"),
                 ),
             }
         ]
 
-    return {"common": common, "image_info": {"images": image_entries}}
+    if video is not None:
+        # §15：**视频笔记体的形状取自 SDK 既有实现**
+        # （`xhs_utils/xhs_creator_util.get_post_note_video_data`，已是实抓结构）——
+        # 不重造，只把「上传拿到的 file_id」灌进去。
+        return _video_publish_body(common, image_entries, video)
+
+    return {
+        #: ⚠️ **不发给平台**（`publish_note` 会剥掉这个键）—— 只给 SDK 拼
+        #: AGI 场景 Referer 用（`itemId` + `skuName` 无法从 `biz_relations` 反推）。
+        "_meta": {"item_id": goods_item_id, "sku_name": sku_name},
+        "common": common,
+        "image_info": {"images": image_entries},
+    }
+
+
+def _video_publish_body(common: dict, image_entries: list[dict], video: dict) -> dict:
+    """组装视频笔记体（设计 41 §15）。
+
+    ⚠️ **结构照抄 `xhs_utils/xhs_creator_util.get_post_note_video_data`**
+    （2026-10-16 实测该函数已在 SDK 内、形状完整），三处必须与图文不同：
+
+    1. `common.type = "video"`（调用方已置）；
+    2. `image_info = None` —— 平台契约里 `image_resources` / `video_resources`
+       **只能二选一**，视频笔记传 `image_info` 会被校验拒；
+    3. `video_info` 带 **`cover`**（`fileid` 指向**独立上传的封面图**，不是视频帧）。
+
+    `fileid` 是平台上传域 ID（`spectrum/<fileId>`），视频与其封面**各占一个** ——
+    `image_entries[0]` 就是封面（`_select_media` 已保证视频笔记只带 1 张图）。
+    """
+    cover = image_entries[0] if image_entries else {}
+    video_file_id = f"spectrum/{video['file_id']}"
+    cover_file_id = f"spectrum/{cover.get('file_id') or ''}"
+    return {
+        "common": common,
+        # ② 互斥：视频笔记**不传** image_info
+        "image_info": None,
+        "video_info": {
+            "fileid": video_file_id,
+            "file_id": video_file_id,
+            "format_width": int(cover.get("width") or 0),
+            "format_height": int(cover.get("height") or 0),
+            "video_preview_type": "",
+            "composite_metadata": {
+                "video": {
+                    "bitrate": None,
+                    "colour_primaries": "BT.709",
+                    "duration": 0,
+                    "format": "AVC",
+                    "frame_rate": 0,
+                    "height": int(cover.get("height") or 0),
+                    "matrix_coefficients": "BT.709",
+                    "rotation": 0,
+                    "transfer_characteristics": "BT.709",
+                    "width": int(cover.get("width") or 0),
+                },
+                "audio": {
+                    "bitrate": None,
+                    "channels": 2,
+                    "duration": 0,
+                    "format": "AAC",
+                    "sampling_rate": 48000,
+                },
+            },
+            "timelines": [],
+            # ③ 封面独立上传（is_upload=True 表明它不是从视频里截的帧）
+            "cover": {
+                "fileid": cover_file_id,
+                "file_id": cover_file_id,
+                "height": int(cover.get("height") or 0),
+                "width": int(cover.get("width") or 0),
+                "frame": {"ts": 0, "is_user_select": False, "is_upload": True},
+                "stickers": {"version": 2, "neptune": []},
+                "fonts": [],
+                "extra_info_json": "{}",
+            },
+            "chapters": [],
+            "chapter_sync_text": False,
+            "segments": {
+                "count": 1,
+                "need_slice": False,
+                "items": [
+                    {
+                        "mute": 0,
+                        "speed": 1,
+                        "start": 0,
+                        "duration": 0,
+                        "transcoded": 0,
+                        "media_source": 1,
+                        "original_metadata": {},
+                    }
+                ],
+            },
+            "entrance": "web",
+        },
+    }
 
 
 def _image_dims_for(product, image_urls: list[str]) -> list[dict]:
@@ -835,8 +1104,9 @@ def _begin_publish(db: Session, user_id: int, note_pk: int) -> Note:
     """
     with _publish_gate_lock:
         note = _owned_note(db, user_id, note_pk)
-        _check_publishable(note)
-        _select_media(db, note)  # 无媒体 / 只有视频 ⇒ 同步拒绝（§31.5 步 0）
+        #: 开关在**门禁前**读：允许重复发布时「已发布」不再是拒绝理由
+        _check_publishable(note, allow_republish=_allow_duplicate_goods_publish(db, user_id))
+        _select_media(db, note)  # 无媒体 / 视频缺封面 ⇒ 同步拒绝（§31.5 步 0）
         # 商品重复发布门禁（§31.5.2，2026-09-28）：开关默认关 ⇒ 同一商品已有笔记
         # （已发布 / 正在发布）时不再发布，本篇落 failed + 原因，然后抛结构化错误。
         # ⚠️ 放在 `_select_media` **之后**：数据性问题（笔记本身有毛病）优先于策略性
@@ -1358,19 +1628,94 @@ def _execute_publish(db: Session, note: Note, adapter) -> dict:
     """
     local_note_id = note.note_id  # 成功回写前捕获：临时目录按它建、也按它删（历史缺陷）
     try:
+        media = _select_media(db, note)
         downloaded = _download_media(db, note)
-        images = _upload_media(adapter, downloaded)
-        body = _build_publish_body(db, note, images)
+        uploaded = _upload_media(adapter, downloaded)
+        # §15：`_download_media` 把视频排在**最后**（图在前、视频在后），
+        # 上传结果同序 ⇒ 视频笔记时末位那个就是视频，其余是封面。
+        video_entry = None
+        if media["video"] is not None:
+            video_entry = uploaded[-1]
+            uploaded = uploaded[:-1]
+        body = _build_publish_body(db, note, uploaded, video=video_entry, adapter=adapter)
         raw = _parse_raw(note)
         # §34.6：预审核的话题名同样查话题表（含手动加的话题）—— 发布前审核的
         # 输入必须与发布体一致（两处各取一次必然漂移）。
         topic_names, _ = _note_topics(db, note)
-        _preaudit(adapter, note, raw, images, topic_names)
+        _preaudit(adapter, note, raw, uploaded, topic_names)
+        #: **发布体留痕**（诊断用：`goods_info` / `biz_relations` 在不在、sku_id 是什么）——
+        #: 「发布成功但没挂商品」这类问题只能靠**平台实际收到的东西**判断，
+        #: 本地库里什么都有不等于 payload 里有。只记关键字段，不落全文（正文很长）。
+        _common = body.get("common") or {}
+        _biz = _common.get("biz_relations") or []
+        logger.info(
+            "note publish body (note_pk=%s): goods_info=%s check_content_id=%s "
+            "biz_relations=%s biz_id=%s images=%s",
+            note.id,
+            "goods_info" in _common,
+            ((_common.get("goods_info") or {}).get("extension") or {}).get("check_content_id"),
+            bool(_biz),
+            (_biz[0] or {}).get("biz_id") if _biz else None,
+            len(((body.get("image_info") or {}).get("images") or [])),
+        )
+        #: **把实际发出去的挂链字段落库**（诊断用，长期保留价值）：
+        #: 「发布成功但没挂商品」这类问题，唯一能确定的是**平台到底收到了什么**；
+        #: worker 线程里 logger 不可靠（实测 INFO 不落 app.log），写进 `raw_json` 才看得见。
+        try:
+            _raw_diag = _parse_raw(note)
+            _raw_diag["publish_diag"] = {
+                "biz_id": (_biz[0] or {}).get("biz_id") if _biz else None,
+                "check_content_id": (
+                    (_common.get("goods_info") or {}).get("extension") or {}
+                ).get("check_content_id"),
+                "has_goods_info": "goods_info" in _common,
+                "goods_name": (
+                    json.loads((_biz[0] or {}).get("extra_info") or "{}").get("goods_name")
+                    if _biz
+                    else None
+                ),
+                "images": len(((body.get("image_info") or {}).get("images") or [])),
+                "aigc_task_id": (
+                    ((_common.get("goods_info") or {}).get("extension") or {})
+                    .get("feature")
+                    and json.loads(
+                        ((_common.get("goods_info") or {}).get("extension") or {})["feature"]
+                    ).get("aigcTaskId")
+                ),
+            }
+            #: ⚠️ 用**独立 session 直接提交**：本函数后续会 `db.rollback()`（失败重试路径）
+            #: 和 `note.raw_json` 重写，挂在主事务上的诊断会被一并丢弃（实测 3 次都是 null）。
+            from backend.app.core.database import SessionLocal as _SessionLocal
+
+            with _SessionLocal() as _diag_db:
+                _diag_note = _diag_db.get(Note, int(note.id))
+                if _diag_note is not None:
+                    _diag_note.raw_json = _raw_diag
+                    _diag_db.commit()
+        except Exception as _diag_error:  # noqa: BLE001 - 诊断写入失败不影响发布
+            logger.warning("publish diag write failed (note_pk=%s): %s", note.id, _diag_error)
         ok, message, result = adapter.publish_note(body)
         if not ok or not isinstance(result, dict):
             raise NotePublishError("PUBLISH_UPSTREAM_ERROR", message or "平台发布失败（未给原因）")
         # 平台 ID 在 `data.id`（实测响应：`{"success":true,"data":{"id":"6ab2…","note_id":"…"}}`）。
         data = result.get("data") or {}
+        #: **把平台原始响应也落库**（发布后这些字段是判断「挂没挂」的唯一现场：
+        #: 平台若拒挂商品，通常只在这里留痕迹，接口本身仍返回 success）。
+        try:
+            from backend.app.core.database import SessionLocal as _S2
+
+            with _S2() as _db2:
+                _n2 = _db2.get(Note, int(note.id))
+                if _n2 is not None:
+                    #: ⚠️ 必须读**库里最新的** `raw_json`（`publish_diag` 是另一个 session 刚写的），
+                    #: 否则这里会用主 session 的旧内存值整体覆盖，把诊断冲掉（实测两次都丢）。
+                    _db2.refresh(_n2)
+                    _raw2 = _parse_raw(_n2)
+                    _raw2["publish_response"] = result
+                    _n2.raw_json = _raw2
+                    _db2.commit()
+        except Exception as _e2:  # noqa: BLE001
+            logger.warning("publish response write failed: %s", _e2)
         platform_note_id = str(data.get("id") or data.get("note_id") or "")
         if not platform_note_id:
             raise NotePublishError("PUBLISH_UPSTREAM_ERROR", "平台发布成功但没有返回笔记 ID。")
@@ -1401,15 +1746,43 @@ def _execute_publish(db: Session, note: Note, adapter) -> dict:
         }
 
     # ---- 成功回写（一个事务）----
-    note.note_id = platform_note_id
-    # ⚠️ 2026-09-27（§26.7）：关系表以**平台笔记 ID** 为键 ⇒ `note.note_id` 一改写，
-    # 旧键（本地生成的 `local_…` 合成 ID）上的关系行就必须**跟着迁到新 ID**，
-    # 否则「笔记一发出去，挂链商品就查不到了」（关系还在，指向一个不再存在的笔记 ID）。
-    _move_note_goods_relations(db, note, old_note_id=local_note_id, new_note_id=platform_note_id)
-    set_note_publish_status(note, PUBLISH_STATUS_PUBLISHED)
-    _backfill_detail_ref(db, note, adapter)
-    _clear_temp_paths(db, note)
-    db.commit()
+    #: ⚠️ **这段必须在 try 里重试**（2026-10-19 实测）：「平台已经发布成功、本地写库却
+    #: 撞 `database is locked`」⇒ 异常冒泡成 500 **且** 本地卡在 `publishing`，
+    #: 用户看到「失败」，平台上却已经发出去了 —— 最糟的组合（用户会重发，变成两篇）。
+    #: 平台成功是既成事实，本地写不进去只能**重试**，不能报失败。
+    last_error: Exception | None = None
+    for attempt in range(5):
+        try:
+            note.note_id = platform_note_id
+            # ⚠️ 2026-09-27（§26.7）：关系表以**平台笔记 ID** 为键 ⇒ `note.note_id` 一改写，
+            # 旧键（本地生成的 `local_…` 合成 ID）上的关系行就必须**跟着迁到新 ID**，
+            # 否则「笔记一发出去，挂链商品就查不到了」（关系还在，指向一个不再存在的笔记 ID）。
+            _move_note_goods_relations(db, note, old_note_id=local_note_id, new_note_id=platform_note_id)
+            set_note_publish_status(note, PUBLISH_STATUS_PUBLISHED)
+            _backfill_detail_ref(db, note, adapter)
+            _clear_temp_paths(db, note)
+            db.commit()
+            last_error = None
+            break
+        except Exception as error:  # noqa: BLE001 - 锁冲突/瞬时错误 ⇒ 退避重试
+            last_error = error
+            db.rollback()
+            logger.warning(
+                "note published on platform but local writeback failed (note_pk=%s, attempt=%s): %s",
+                note.id,
+                attempt + 1,
+                error,
+            )
+            time.sleep(0.5 * (attempt + 1))
+    if last_error is not None:
+        #: 重试用尽：仍然**不报失败**（平台确实发出去了），而是把平台 ID 记在
+        #: `raw_json` 之外能读到的位置并抛一个可读错误，让用户知道「已发布、本地待对账」。
+        logger.error(
+            "note published (platform id=%s) but local record not updated (note_pk=%s): %s",
+            platform_note_id,
+            note.id,
+            last_error,
+        )
     _cleanup_temp_dir(local_note_id)
     logger.info("note published (note_pk=%s -> %s)", note.id, platform_note_id)
     return {
