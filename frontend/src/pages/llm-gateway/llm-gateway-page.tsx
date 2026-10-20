@@ -746,7 +746,7 @@ function GatewaysPage() {
       >
         {/* 父表 = **服务商**（表头见 `providerColumns`）。展开行里是子表 = **模型**。 */}
         {/* 2026-10-20 统一：表格等待由公共 WaitMask 表达。 */}
-        <WaitMask open={loading} mask={false} title="正在加载" />
+        <WaitMask open={loading} title="正在加载" />
         <Table<GatewayProviderNode<LlmGatewayConfig>>
           rowKey="key"
           size="small"

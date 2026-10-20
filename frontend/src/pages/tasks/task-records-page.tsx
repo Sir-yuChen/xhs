@@ -909,7 +909,7 @@ export function TaskRecordsPage() {
 
                     antd Spin 覆盖，与 WaitMask 叠成两层 ⇒ 已移除）。 */}
 
-                <WaitMask open={loading} mask={false} title="正在加载队列记录" />
+                <WaitMask open={loading} title="正在加载队列记录" />
 
                 <Table<TaskRecord>
                   // ⚠️ `key` 随查询条件变 ⇒ 换一次查询 **重挂载** 一次，让

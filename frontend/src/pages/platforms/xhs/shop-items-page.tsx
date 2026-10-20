@@ -2621,7 +2621,7 @@ export function XhsShopItemsPage() {
 
   const waitRunning = waitLabel !== null;
   return (
-    //: **页面级等待 = `<WaitMask mask={false}>` 的居中白卡片**（用户口径 2026-10-20
+    //: **页面级等待 = `<WaitMask>` 的居中白卡片**（用户口径 2026-10-20
     //: 「可以不要蒙版只要居中的弹窗提示」），不再有半透明底、也不再挡交互。
     //:
     //: ⚠️ **为什么这里不用 antd `<Spin>` 包整页**（实测根因，别再改回去）：
@@ -4043,7 +4043,6 @@ export function XhsShopItemsPage() {
           ⇒ `mask={false}`：不画半透明底（页面不被"洗白"两层），只显示居中白卡片 + 耗时。 */}
       <WaitMask
         open={waitRunning}
-        mask={false}
         title={waitLabel ?? ""}
         elapsed={waitElapsedSec}
       />

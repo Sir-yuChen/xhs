@@ -473,7 +473,7 @@ export function ModelConfigPage() {
         }
       >
         {/* 2026-10-20 统一：表格等待由公共 WaitMask 表达。 */}
-        <WaitMask open={isLoading} mask={false} title="正在加载模型配置" />
+        <WaitMask open={isLoading} title="正在加载模型配置" />
         <Table
           rowKey="_key"
           //: ⚠️ 2026-10-20 统一：Table 自带的 loading 会渲染一层 antd Spin 覆盖，与公共 WaitMask 叠成两层 ⇒ 移除，等待交给 WaitMask。

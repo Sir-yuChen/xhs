@@ -408,7 +408,7 @@ export function NoteVersionHistory({
     <div>
       {/* 2026-10-20 统一：表格等待由公共 WaitMask 表达（Table 自带 loading 会渲染
           antd Spin 覆盖，与 WaitMask 叠成两层 ⇒ 已移除）。 */}
-      <WaitMask open={loading} mask={false} title="正在加载版本历史" />
+      <WaitMask open={loading} title="正在加载版本历史" />
       <Table<NoteVersionItem>
         size="small"
         rowKey="id"

@@ -275,7 +275,7 @@ export function XhsPublishPage() {
       {isLoading ? (
         //: 2026-10-20 统一：等待一律走 `<WaitMask>`。
         <Card style={panelStyle} styles={{ body: { ...cardBodyStyle, position: "relative" } }}>
-          <WaitMask open mask={false} scope="panel" title="正在加载发布任务" />
+          <WaitMask open scope="panel" title="正在加载发布任务" />
         </Card>
       ) : jobs.length === 0 ? (
         <Card style={panelStyle} styles={{ body: cardBodyStyle }}>

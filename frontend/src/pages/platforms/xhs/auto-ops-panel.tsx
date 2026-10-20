@@ -273,7 +273,7 @@ export function AutoOpsPanel() {
       {isLoading ? (
         //: 2026-10-20 统一：等待一律走 `<WaitMask>`。
         <Card style={panelStyle} styles={{ body: { ...cardBodyStyle, position: "relative" } }}>
-          <WaitMask open mask={false} scope="panel" title="正在加载自动运营任务" />
+          <WaitMask open scope="panel" title="正在加载自动运营任务" />
         </Card>
       ) : tasks.length === 0 && !showCreate ? (
         <Card style={panelStyle} styles={{ body: cardBodyStyle }}>

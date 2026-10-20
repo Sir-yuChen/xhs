@@ -713,7 +713,7 @@ export function XhsAccountsPage() {
 
         {isLoading ? (
           //: 2026-10-20 统一：等待一律走 `<WaitMask>`。
-          <WaitMask open mask={false} title="正在加载账号列表" />
+          <WaitMask open title="正在加载账号列表" />
         ) : accounts.length === 0 ? (
           <Empty
             image={<SafetyCertificateOutlined style={{ fontSize: 48, color: p.fillIcon }} />}

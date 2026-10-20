@@ -660,7 +660,7 @@ export function MaterialLibraryPanel({
       >
         {foldersLoading ? (
           /* 2026-10-20 统一：等待一律走 `<WaitMask>`。 */
-          <WaitMask open mask={false} title="正在加载素材文件夹" />
+          <WaitMask open title="正在加载素材文件夹" />
         ) : folders.length === 0 ? (
           <Empty description="还没有素材文件夹（只索引，不搬移原文件）" />
         ) : (
@@ -836,7 +836,7 @@ export function MaterialLibraryPanel({
       >
         {filesLoading && files.length === 0 ? (
           /* 2026-10-20 统一：等待一律走 `<WaitMask>`（仅首屏；追加下一页仍用内联小圈）。 */
-          <WaitMask open mask={false} title="正在加载素材文件" />
+          <WaitMask open title="正在加载素材文件" />
         ) : files.length === 0 ? (
           <Empty
             description={

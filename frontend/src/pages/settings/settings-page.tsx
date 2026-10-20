@@ -306,7 +306,7 @@ export function SettingsPage() {
 
                 antd Spin 覆盖，与 WaitMask 叠成两层 ⇒ 已移除）。 */}
 
-            <WaitMask open={loading} mask={false} title="正在加载系统参数" />
+            <WaitMask open={loading} title="正在加载系统参数" />
 
             <Table<SystemSetting>
               rowKey="id"

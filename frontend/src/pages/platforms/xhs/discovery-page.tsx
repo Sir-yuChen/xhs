@@ -296,7 +296,7 @@ function SearchPanel() {
         {selectedNote && (
           <div>
             {/* 2026-10-20 统一：等待一律走 `<WaitMask>`。 */}
-            <WaitMask open={isFetchingDetail} mask={false} title="正在加载笔记详情" />
+            <WaitMask open={isFetchingDetail} title="正在加载笔记详情" />
             {detailError && <Alert message={detailError} type="warning" showIcon style={{ marginBottom: 12 }} />}
             {selVideoUrl && getNoteKindLabel(selectedNote) === "视频" ? (
               <div style={{ marginBottom: 16 }}>

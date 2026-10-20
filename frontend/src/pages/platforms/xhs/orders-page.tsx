@@ -578,7 +578,7 @@ const onSync = async () => {
           </Descriptions.Item>
         </Descriptions>
         {/* 2026-10-20 统一：表格等待由公共 WaitMask 表达。 */}
-        <WaitMask open={loading} mask={false} title="正在加载订单" />
+        <WaitMask open={loading} title="正在加载订单" />
         <Table<OrderRow>
           rowKey="id"
           size="small"

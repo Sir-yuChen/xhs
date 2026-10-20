@@ -1792,7 +1792,7 @@ export function XhsLibraryPage() {
         卡片视图本身不变：`Row gutter` 网格 + `Col` 卡片 + 哨兵 + LoadMoreBar。
       */}
       {/* 2026-10-20 统一：等待一律走 `<WaitMask>`。 */}
-      {isLoading ? <WaitMask open mask={false} title="正在加载内容库" /> : notes.length === 0 ? (
+      {isLoading ? <WaitMask open title="正在加载内容库" /> : notes.length === 0 ? (
         <Empty description={itemIdFilter.trim() ? "这个商品在内容库里还没有挂链笔记（可能是未同步，也可能确实没挂）" : "内容库还是空的"}>
           {/* 「去发现笔记」只对**真的空库**有意义；筛选无结果时它是误导入口 */}
           {!itemIdFilter.trim() && <Link to="/platforms/xhs/discovery"><Button type="primary" icon={<BookOutlined />}>去发现笔记</Button></Link>}

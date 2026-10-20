@@ -792,7 +792,7 @@ export function XhsDatacenterPage() {
     const panel = panels[category];
     if (panel.loading && panel.items.length === 0) {
       //: 2026-10-20 统一：等待一律走 `<WaitMask>`。
-      return <WaitMask open mask={false} title="加载中" />;
+      return <WaitMask open title="加载中" />;
     }
     if (panel.error && panel.items.length === 0) {
       return renderFailure(panel.error);
@@ -1506,7 +1506,7 @@ export function XhsDatacenterPage() {
       >
         {productDetailLoading ? (
           /* 2026-10-20 统一：等待一律走 `<WaitMask>`。 */
-          <WaitMask open mask={false} title="加载中" />
+          <WaitMask open title="加载中" />
         ) : productDetail ? (
           <Card size="small">
             <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>

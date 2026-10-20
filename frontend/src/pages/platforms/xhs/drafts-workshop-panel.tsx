@@ -629,7 +629,7 @@ export function DraftsWorkshopPanel() {
           >
             {isLoading ? (
               /* 2026-10-20 统一：等待一律走 `<WaitMask>`。 */
-              <WaitMask open mask={false} title="正在加载草稿" />
+              <WaitMask open title="正在加载草稿" />
             ) : drafts.length === 0 ? (
               <Empty
                 image={<FileTextOutlined style={{ fontSize: 40, color: "#8c8c8c" }} />}
