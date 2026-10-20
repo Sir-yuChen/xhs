@@ -1,5 +1,5 @@
 <p align="center">
-  <a href="https://gitee.com/Sir-yuChen/xhs" target="_blank">
+  <a href="https://github.com/Sir-yuChen/xhs" target="_blank">
     <picture>
       <img width="220" src="./author/logo.jpg" alt="XHS logo">
     </picture>
@@ -12,14 +12,12 @@
 
 **小红书一站式智能运营平台 — 采集、分析、AI 创作、自动发布，全链路闭环**
 
-[![Gitee](https://gitee.com/Sir-yuChen/xhs/badge/star.svg?theme=dark)](https://gitee.com/Sir-yuChen/xhs)
-[![Version](https://img.shields.io/badge/version-v1.0.4-brightgreen)](https://gitee.com/Sir-yuChen/xhs/releases)
+[![Version](https://img.shields.io/badge/version-v1.0.4-brightgreen)](https://github.com/Sir-yuChen/xhs/releases)
 [![Desktop](https://img.shields.io/badge/Windows-桌面安装包%20v1.0.4-0078D6)](./packaging/README.md)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![Node.js](https://img.shields.io/badge/nodejs-20%2B-green)](https://nodejs.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100%2B-009688)](https://fastapi.tiangolo.com/)
 [![React](https://img.shields.io/badge/React-19-61DAFB)](https://react.dev/)
-[![Docker](https://img.shields.io/badge/Docker-ready-2496ED)](https://www.docker.com/)
 [![License](https://img.shields.io/badge/license-MIT-orange)](LICENSE)
 
 </div>
@@ -127,25 +125,6 @@
 > 与硬约束不冲突的是**探测 / 调研 / 取证**那条线 —— 那条始终只读。
 > 定时任务里唯一的写操作是「清理未引用图片」，**默认暂停**，需用户确认参数后再启用。
 
-### 平台扩展（规划中）
-
-| 平台 | 状态 |
-|------|------|
-| 小红书 (XHS) | ✅ 已实现 |
-| 抖音 (Douyin) | Coming Soon |
-| 快手 (Kuaishou) | Coming Soon |
-| 微博 (Weibo) | Coming Soon |
-| 闲鱼 (Xianyu) | Coming Soon |
-| 淘宝 (Taobao) | Coming Soon |
-
----
-
-## 🧩 Skills 支持
-
-当前项目已支持基于 skills 的能力接入，可直接作为底层能力仓库使用，也可通过标准化 skills 方式被上层 Agent 工具链引入。
-
-封装好的 skills 请查看 [XhsSkills](https://github.com/cv-cat/XhsSkills)，可被 `Clawbot`、`Claude Code`、`Codex` 等工具直接引入与集成。
-
 ---
 
 ## 🛠️ 快速开始
@@ -158,7 +137,7 @@
 ### 安装依赖
 
 ```bash
-git clone https://gitee.com/Sir-yuChen/xhs.git
+git clone https://github.com/Sir-yuChen/xhs.git
 cd xhs
 
 pip install -r requirements.txt
@@ -393,38 +372,6 @@ pytest $(python .hermes/scripts/pick_tests.py) -q
 - 所有敏感数据（Cookie、API Key）使用 Fernet 加密存储
 - AI 功能需在「模型配置」页面配置 OpenAI 兼容的 API 端点（支持火山引擎、阿里云百炼等）
 - `data/`（真实库与备份）、`backend/app/storage/`（媒体素材）、`node_modules/`、构建产物均**不入库**（见 `.gitignore`）
-
----
-
-## 🧸 额外说明
-
-1. 感谢 Star ⭐ 和 Follow，项目会持续更新
-2. 作者联系方式在主页，有问题随时联系
-3. 欢迎 PR 和 Issue，也欢迎关注作者其他项目
-
----
-
-## 📈 Star History
-
-<a href="https://star-history.com/#Sir-yuChen/xhs&Date">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://star-history.com/#Sir-yuChen/xhs&Date&theme=dark" />
-    <source media="(prefers-color-scheme: light)" srcset="https://star-history.com/#Sir-yuChen/xhs&Date&theme=light" />
-    <img alt="Star History Chart" src="https://star-history.com/#Sir-yuChen/xhs&Date" />
-  </picture>
-</a>
-
----
-
-## 🍔 交流群
-
-如果你对爬虫和 AI Agent 感兴趣，可以加入群聊一起讨论~
-
-ps: 请加群，人满或者过期 issue | wx 提醒 | qq提醒
-
-| group-1 | group-2 | group-3 | group-4 (2000人qq群) |
-|:--:|:--:|:--:|:--:|
-| <img width="280" alt="group1" src="https://cvcat.site/assets/group1.jpg" /> | <img width="280" alt="group2" src="https://cvcat.site/assets/group2.jpg" /> | <img width="280" alt="group3" src="https://cvcat.site/assets/group3.jpg" /> | <img width="280" alt="group3" src="https://cvcat.site/assets/group4.jpg" /> |
 
 ---
 

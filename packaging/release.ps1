@@ -250,8 +250,10 @@ sha256：$hash
 }
 
 # ---------------------------------------------------------------------------
-Write-Stage "发布：Gitee Release + 上传附件"
+Write-Stage "发布：GitHub Release"
 # ---------------------------------------------------------------------------
+#: 2026-10-20 用户口径「换成 GitHub Release，Gitee 不要了」。
+#: 起因：Gitee 单个附件硬上限 100 MB，安装包 1.0.4 已达 113.6 MB ⇒ 传不上去。
 if ($SkipRelease) {
     Warn "已按 -SkipRelease 跳过发布"
 } else {
@@ -270,15 +272,17 @@ if ($SkipRelease) {
 "@
         [System.IO.File]::WriteAllText($NotesFile, $notes, (New-Object System.Text.UTF8Encoding($false)))
     }
-    $relScript = Join-Path $PSScriptRoot "gitee_release.py"
-    $relLog = Join-Path $TmpDir "release-publish-$TagName.log"
-    Info "日志：$relLog"
-    & $Py $relScript publish --owner $Owner --repo $Repo --tag $TagName --exe $ExePath --name $ReleaseName --body-file $NotesFile --replace --repo-dir $Root --target $head | Out-File -FilePath $relLog -Encoding utf8
+
+    # ---- 主通道：GitHub ---------------------------------------------------
+    $ghScript = Join-Path $PSScriptRoot "github_release.py"
+    $ghLog = Join-Path $TmpDir "release-publish-gh-$TagName.log"
+    Info "主通道 GitHub，日志：$ghLog"
+    & $Py $ghScript publish --tag $TagName --exe $ExePath --name $ReleaseName --body-file $NotesFile --replace --repo-dir $Root --target $head | Out-File -FilePath $ghLog -Encoding utf8
     if ($LASTEXITCODE -ne 0) {
-        Get-Content $relLog -Tail 20
-        Fail "发布失败，日志：$relLog"
+        Get-Content $ghLog -Tail 20
+        Fail "GitHub 发布失败（主通道），日志：$ghLog"
     }
-    Get-Content $relLog | Where-Object { $_ -match "附件上传成功|已删除旧附件|已更新 release 说明|已创建 release|RELEASE_PAGE" } | ForEach-Object { Ok $_.Trim() }
+    Get-Content $ghLog | Where-Object { $_ -match "附件上传成功|已更新 release|已创建 release|RELEASE_PAGE" } | ForEach-Object { Ok $_.Trim() }
 }
 
 # ---------------------------------------------------------------------------
@@ -290,8 +294,8 @@ Write-Host ("  提交        : $head")
 Write-Host ("  安装包      : $ExePath")
 Write-Host ("  字节数      : $exeSize")
 Write-Host ("  sha256      : $hash")
-Write-Host ("  Release 页面: https://gitee.com/$Owner/$Repo/releases/tag/$TagName")
-Write-Host ("  下载直链    : https://gitee.com/$Owner/$Repo/releases/download/$TagName/$ExeName")
+Write-Host "  GitHub 发布: https://github.com/Sir-yuChen/xhs/releases/tag/$TagName"
+Write-Host "  GitHub 直链: https://github.com/Sir-yuChen/xhs/releases/download/$TagName/$ExeName"
 if ($SkipSmoke) { Write-Host "  ⚠️ 本次跳过了冒烟，无安装/运行验证结论" -ForegroundColor Yellow }
 Write-Host ""
-Write-Host "  提醒：仓库为私有，Release 页与下载直链需登录 Gitee 才能访问（未登录恒 403）。"
+Write-Host "  说明：安装包以 GitHub Release 分发（无单附件大小上限）。"

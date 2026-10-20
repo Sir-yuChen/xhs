@@ -10,7 +10,7 @@
 ## 更新源（设计 36 §2）
 
 - **首选**：静态清单 `update.manifest_url`（可匿名访问的 `update.json`）—— 零鉴权、最稳；
-- **回退**：Gitee Releases API（私有仓库需 `update.gitee_token`；无 token ⇒ 检查静默跳过）；
+- **回退**：GitHub Releases API（公开仓库免令牌，匿名可查）；
 - 两者都未配置 ⇒ `configured=False`，检查静默返回「无更新」（不打扰用户）。
 
 ## 安全网
@@ -50,23 +50,26 @@ class UpdateSource:
 
     #: 静态清单 URL（`update.json`）；非空则**优先**走它。
     manifest_url: str = ""
-    #: Gitee 仓库 owner/repo（回退路径用）。
-    gitee_owner: str = "Sir-yuChen"
-    gitee_repo: str = "xhs"
-    #: Gitee 私人令牌（**私有仓库**必需；仓库公开后留空即可）。
-    gitee_token: str = ""
-    #: 仓库是否公开（**公开 ⇒ 匿名即可查，不需要令牌**；2026-10-13 用户口径）。
-    gitee_public: bool = False
+    #: GitHub 仓库 owner/repo（2026-10-20 用户口径「换成 GitHub Release，Gitee 不要了」）。
+    #: 起因：Gitee Release 单个附件硬上限 100 MB，而安装包已达 113.6 MB。
+    github_owner: str = "Sir-yuChen"
+    github_repo: str = "xhs"
+    #: GitHub 私人令牌（**私有仓库**必需；仓库公开后留空即可）。
+    github_token: str = ""
+    #: GitHub 仓库是否公开（公开 ⇒ 匿名即可查）。
+    #: ⚠️ 默认 **False**：缺失该键时不得被当成「已配置」，否则
+    #: 「未配置 ⇒ 静默跳过」的契约失效（每次启动都白打一次网络）。
+    github_public: bool = False
     raw: dict = field(default_factory=dict)
 
     @property
-    def gitee_enabled(self) -> bool:
-        """Gitee 路径是否可用：**公开仓库免令牌**，私有仓库必须有令牌。"""
-        return bool(self.gitee_token) or bool(self.gitee_public)
+    def github_enabled(self) -> bool:
+        """GitHub 路径是否可用（**主通道**，与 Gitee 同判据）。"""
+        return bool(self.github_token) or bool(self.github_public)
 
     @property
     def configured(self) -> bool:
-        return bool(self.manifest_url) or self.gitee_enabled
+        return bool(self.manifest_url) or self.github_enabled
 
 
 def load_update_source() -> UpdateSource:
@@ -97,13 +100,13 @@ def load_update_source() -> UpdateSource:
 
     return UpdateSource(
         manifest_url=str(os.environ.get("UPDATE_MANIFEST_URL") or data.get("manifest_url") or "").strip(),
-        gitee_owner=str(os.environ.get("UPDATE_GITEE_OWNER") or data.get("gitee_owner") or "Sir-yuChen").strip(),
-        gitee_repo=str(os.environ.get("UPDATE_GITEE_REPO") or data.get("gitee_repo") or "xhs").strip(),
-        gitee_token=str(os.environ.get("UPDATE_GITEE_TOKEN") or data.get("gitee_token") or "").strip(),
-        gitee_public=_as_bool(
-            os.environ.get("UPDATE_GITEE_PUBLIC")
-            if os.environ.get("UPDATE_GITEE_PUBLIC") is not None
-            else data.get("gitee_public")
+        github_owner=str(os.environ.get("UPDATE_GITHUB_OWNER") or data.get("github_owner") or "Sir-yuChen").strip(),
+        github_repo=str(os.environ.get("UPDATE_GITHUB_REPO") or data.get("github_repo") or "xhs").strip(),
+        github_token=str(os.environ.get("UPDATE_GITHUB_TOKEN") or data.get("github_token") or "").strip(),
+        github_public=_as_bool(
+            os.environ.get("UPDATE_GITHUB_PUBLIC")
+            if os.environ.get("UPDATE_GITHUB_PUBLIC") is not None
+            else data.get("github_public") if data.get("github_public") is not None else False
         ),
         raw=data if isinstance(data, dict) else {},
     )
@@ -156,17 +159,21 @@ def _latest_from_manifest(source: UpdateSource) -> ReleaseInfo | None:
     )
 
 
-def _latest_from_gitee(source: UpdateSource) -> ReleaseInfo | None:
-    #: 私有仓库必须有令牌；**公开仓库匿名即可**（2026-10-13 用户口径）。
-    if not source.gitee_enabled:
+def _latest_from_github(source: UpdateSource) -> ReleaseInfo | None:
+    """从 GitHub Release 取最新版（**主通道**，2026-10-20）。
+
+    Gitee 对单个附件有 100 MB 硬上限，安装包超过后传不上去 ⇒ 以 GitHub 为主。
+    仓库公开时匿名即可查；私有仓库才需要令牌。
+    """
+    if not source.github_enabled:
         return None
-    owner = urllib.parse.quote(source.gitee_owner, safe="")
-    repo = urllib.parse.quote(source.gitee_repo, safe="")
-    url = f"https://gitee.com/api/v5/repos/{owner}/{repo}/releases/latest"
+    owner = urllib.parse.quote(source.github_owner, safe="")
+    repo = urllib.parse.quote(source.github_repo, safe="")
+    url = f"https://api.github.com/repos/{owner}/{repo}/releases/latest"
     try:
-        payload = _http_get_json(url, token=source.gitee_token)
+        payload = _http_get_json(url, token=source.github_token)
     except (urllib.error.URLError, urllib.error.HTTPError, ValueError, OSError) as exc:
-        logger.warning("update: 拉取 Gitee Release 失败（%s）", exc)
+        logger.warning("update: 拉取 GitHub Release 失败（%s）", exc)
         return None
 
     tag = str(payload.get("tag_name") or "").strip()
@@ -178,9 +185,7 @@ def _latest_from_gitee(source: UpdateSource) -> ReleaseInfo | None:
     for asset in payload.get("assets") or []:
         name = str(asset.get("name") or "")
         if name.lower().endswith(".exe"):
-            download_url = str(
-                asset.get("browser_download_url") or asset.get("download_url") or ""
-            ).strip()
+            download_url = str(asset.get("browser_download_url") or "").strip()
             size = int(asset.get("size") or 0)
             break
     return ReleaseInfo(version=tag, notes=notes, download_url=download_url, download_size=size)
@@ -204,7 +209,8 @@ def check_for_update() -> dict:
 
     release = _latest_from_manifest(source)
     if release is None:
-        release = _latest_from_gitee(source)
+        #: 只走 GitHub（2026-10-20 用户口径「Gitee 不要了」）。
+        release = _latest_from_github(source)
     if release is None:
         return result
 

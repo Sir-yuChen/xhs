@@ -8,7 +8,7 @@
 
 1. **版本比较**：语义化逐段数值比较（`1.10.0 > 1.9.0` 的经典坑）；
 2. **版本真相源**：`core/version.py` 单一读取点（env > version.json > txt > 0.0.0）；
-3. **更新源**：静态清单优先、Gitee 回退、未配置 ⇒ 静默跳过；
+3. **更新源**：静态清单优先、GitHub 回退、未配置 ⇒ 静默跳过；
 4. **下载**：原子落盘（`.part` → 改名）、非法 URL 拒绝、失败不留半截包；
 5. **端点契约**：version 免鉴权、check/download/install 需登录、install 在非打包态 400。
 """
@@ -302,10 +302,10 @@ def test_current_version_unknown_when_missing(tmp_path, monkeypatch):
 
 def test_source_not_configured_by_default(monkeypatch, tmp_path):
     monkeypatch.delenv("UPDATE_MANIFEST_URL", raising=False)
-    monkeypatch.delenv("UPDATE_GITEE_TOKEN", raising=False)
+    monkeypatch.delenv("UPDATE_GITHUB_TOKEN", raising=False)
     cfg = tmp_path / "config"
     cfg.mkdir()
-    (cfg / "default.yaml").write_text("update:\n  manifest_url: ''\n  gitee_token: ''\n", encoding="utf-8")
+    (cfg / "default.yaml").write_text("update:\n  manifest_url: ''\n  github_token: ''\n", encoding="utf-8")
     monkeypatch.setenv("CONFIG_FILE", str(cfg / "default.yaml"))
     src = update_svc.load_update_source()
     assert src.configured is False
@@ -314,10 +314,10 @@ def test_source_not_configured_by_default(monkeypatch, tmp_path):
 def test_check_skips_silently_when_unconfigured(monkeypatch, tmp_path):
     cfg = tmp_path / "config"
     cfg.mkdir()
-    (cfg / "default.yaml").write_text("update:\n  manifest_url: ''\n  gitee_token: ''\n", encoding="utf-8")
+    (cfg / "default.yaml").write_text("update:\n  manifest_url: ''\n  github_token: ''\n", encoding="utf-8")
     monkeypatch.setenv("CONFIG_FILE", str(cfg / "default.yaml"))
     monkeypatch.delenv("UPDATE_MANIFEST_URL", raising=False)
-    monkeypatch.delenv("UPDATE_GITEE_TOKEN", raising=False)
+    monkeypatch.delenv("UPDATE_GITHUB_TOKEN", raising=False)
     result = update_svc.check_for_update()
     assert result["has_update"] is False
     assert result["source_configured"] is False
@@ -523,55 +523,55 @@ def test_update_download_rejects_bad_url(api_client):
 
 # ---------------------------------------------------------------- 公开仓库免令牌
 #  用户口径 2026-10-13：「仓库公开了，你再试试」+「我把远程仓库公开，是否就可以
-#  不需要接入私人令牌了？」—— 实测：公开仓库 Gitee API 匿名可访问（repo info /
-#  releases/latest / tags 均 200）⇒ **公开即免令牌**。旧实现 `if not gitee_token:
+#  不需要接入私人令牌了？」—— 实测：公开仓库 GitHub API 匿名可访问（repo info /
+#  releases/latest / tags 均 200）⇒ **公开即免令牌**。旧实现 `if not github_token:
 #  return None` 是硬门槛：公开仓库没令牌就永远「已是最新」（假结论）。
 
 
-def test_public_repo_enables_gitee_without_token(monkeypatch, tmp_path):
+def test_public_repo_enables_github_without_token(monkeypatch, tmp_path):
     """仓库公开 ⇒ **没有令牌也算已配置**（旧实现会漏查）。"""
     monkeypatch.delenv("UPDATE_MANIFEST_URL", raising=False)
-    monkeypatch.delenv("UPDATE_GITEE_TOKEN", raising=False)
-    monkeypatch.delenv("UPDATE_GITEE_PUBLIC", raising=False)
+    monkeypatch.delenv("UPDATE_GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("UPDATE_GITHUB_PUBLIC", raising=False)
     cfg = tmp_path / "config"
     cfg.mkdir()
     (cfg / "default.yaml").write_text(
-        "update:\n  manifest_url: ''\n  gitee_token: ''\n  gitee_public: true\n",
+        "update:\n  manifest_url: ''\n  github_token: ''\n  github_public: true\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("CONFIG_FILE", str(cfg / "default.yaml"))
     src = update_svc.load_update_source()
-    assert src.gitee_public is True
-    assert src.gitee_token == ""
-    assert src.gitee_enabled is True, "公开仓库应免令牌启用 Gitee 路径"
+    assert src.github_public is True
+    assert src.github_token == ""
+    assert src.github_enabled is True, "公开仓库应免令牌启用 GitHub 路径"
     assert src.configured is True, "公开仓库没令牌也应算已配置（否则恒『已是最新』）"
 
 
 def test_private_repo_still_requires_token(monkeypatch, tmp_path):
-    """私有仓库（gitee_public=false）+ 无令牌 ⇒ 仍不启用（免得每次白打一次网络）。"""
-    monkeypatch.delenv("UPDATE_GITEE_PUBLIC", raising=False)
-    monkeypatch.delenv("UPDATE_GITEE_TOKEN", raising=False)
+    """私有仓库（github_public=false）+ 无令牌 ⇒ 仍不启用（免得每次白打一次网络）。"""
+    monkeypatch.delenv("UPDATE_GITHUB_PUBLIC", raising=False)
+    monkeypatch.delenv("UPDATE_GITHUB_TOKEN", raising=False)
     monkeypatch.delenv("UPDATE_MANIFEST_URL", raising=False)
     cfg = tmp_path / "config"
     cfg.mkdir()
     (cfg / "default.yaml").write_text(
-        "update:\n  manifest_url: ''\n  gitee_token: ''\n  gitee_public: false\n",
+        "update:\n  manifest_url: ''\n  github_token: ''\n  github_public: false\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("CONFIG_FILE", str(cfg / "default.yaml"))
     src = update_svc.load_update_source()
-    assert src.gitee_enabled is False
+    assert src.github_enabled is False
     assert src.configured is False
 
 
 def test_public_repo_call_carries_no_authorization_header(monkeypatch, tmp_path):
     """公开仓库的请求**不带令牌**（匿名调用）。"""
     monkeypatch.delenv("UPDATE_MANIFEST_URL", raising=False)
-    monkeypatch.delenv("UPDATE_GITEE_TOKEN", raising=False)
+    monkeypatch.delenv("UPDATE_GITHUB_TOKEN", raising=False)
     cfg = tmp_path / "config"
     cfg.mkdir()
     (cfg / "default.yaml").write_text(
-        "update:\n  manifest_url: ''\n  gitee_owner: 'Sir-yuChen'\n  gitee_repo: 'xhs'\n  gitee_public: true\n",
+        "update:\n  manifest_url: ''\n  github_owner: 'Sir-yuChen'\n  github_repo: 'xhs'\n  github_public: true\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("CONFIG_FILE", str(cfg / "default.yaml"))
@@ -589,7 +589,7 @@ def test_public_repo_call_carries_no_authorization_header(monkeypatch, tmp_path)
         }
 
     monkeypatch.setattr(update_svc, "_http_get_json", _fake_get)
-    rel = update_svc._latest_from_gitee(src)
+    rel = update_svc._latest_from_github(src)
     assert rel is not None and rel.version == "v9.9.9"
     assert seen["token"] == "", "公开仓库必须匿名调用（不带令牌）"
     assert "releases/latest" in seen["url"]
@@ -598,11 +598,11 @@ def test_public_repo_call_carries_no_authorization_header(monkeypatch, tmp_path)
 def test_public_repo_check_reports_newer_release(monkeypatch, tmp_path):
     """公开仓库端到端：当前 1.0.2、远端 v1.0.3 ⇒ has_update=True。"""
     monkeypatch.delenv("UPDATE_MANIFEST_URL", raising=False)
-    monkeypatch.delenv("UPDATE_GITEE_TOKEN", raising=False)
+    monkeypatch.delenv("UPDATE_GITHUB_TOKEN", raising=False)
     cfg = tmp_path / "config"
     cfg.mkdir()
     (cfg / "default.yaml").write_text(
-        "update:\n  manifest_url: ''\n  gitee_public: true\n",
+        "update:\n  manifest_url: ''\n  github_public: true\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("CONFIG_FILE", str(cfg / "default.yaml"))
@@ -623,3 +623,62 @@ def test_public_repo_check_reports_newer_release(monkeypatch, tmp_path):
     assert result["download_url"] == "https://g/d.exe"
     assert result["notes"] == "修了 X"
     assert result["source_configured"] is True
+
+
+# ---------------------------------------------------------------- 发布通道 = GitHub
+#  2026-10-20 用户口径「换成 GitHub Release，Gitee 不要了」——
+#  起因：Gitee 单个附件硬上限 100 MB，安装包 1.0.4 已达 113.6 MB，传不上去。
+#  本组守卫钉住三件事：① 不再有 Gitee 路径；② GitHub 是唯一回退；③ 发版脚本打 GitHub。
+
+
+def test_update_service_has_no_gitee_path_anymore():
+    """更新服务的**代码**里不得再出现 gitee（用户已明确不要该通道）。
+
+    ⚠️ 只看代码、不看注释与 docstring：源码里保留着「为什么改成 GitHub」
+    的说明（提到 Gitee 100 MB 上限），那是该留的上下文，不是残留。
+    判据与 `test_module_to_package_split` 同口径 —— 剥注释后再比。
+    """
+    import io
+    import inspect
+    import tokenize
+
+    source = inspect.getsource(update_svc)
+    code_only = []
+    for tok in tokenize.generate_tokens(io.StringIO(source).readline):
+        #: 注释 / 字符串（docstring 也是 STRING）一律跳过
+        if tok.type in (tokenize.COMMENT, tokenize.STRING):
+            continue
+        code_only.append(tok.string)
+    joined = " ".join(code_only).lower()
+    assert "gitee" not in joined, (
+        "system_update_service 的代码里仍有 gitee —— 发布通道已改为 GitHub"
+    )
+
+
+def test_github_release_is_the_only_fallback():
+    """`check_for_update` 的回退**必须**是 `_latest_from_github`。"""
+    import inspect
+
+    source = inspect.getsource(update_svc.check_for_update)
+    assert "_latest_from_github" in source, "回退路径丢了 GitHub"
+    assert "_latest_from_manifest" in source, "静态清单优先级丢失"
+
+
+def test_release_script_publishes_to_github():
+    """发版脚本第 7 阶段必须调 `github_release.py`，且不再调 gitee 脚本。"""
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[2] / "packaging" / "release.ps1"
+    text = script.read_text(encoding="utf-8-sig")
+    assert "github_release.py" in text, "release.ps1 未调用 github_release.py"
+    assert "gitee_release.py" not in text, "release.ps1 仍在调 gitee_release.py"
+
+
+def test_github_release_script_retries_on_flaky_network():
+    """GitHub 脚本必须带重试（本机直连 api.github.com 会间歇被掐断）。"""
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[2] / "packaging" / "github_release.py"
+    text = script.read_text(encoding="utf-8")
+    assert "tries=8" in text or "tries=" in text, "缺少重试参数"
+    assert "time.sleep" in text, "缺少退避等待"
