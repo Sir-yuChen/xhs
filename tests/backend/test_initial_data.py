@@ -580,6 +580,60 @@ def test_packaging_ships_the_initial_data():
     assert "config/initial_data" in spec_text, "SpiderXHS.spec 的 datas 没收 initial_data"
 
 
+def test_packaging_ships_every_lazily_imported_third_party_package():
+    """**函数内延迟 import 的第三方包必须在 hiddenimports 里**（2026-10-20）。
+
+    为什么这是「装包版专属」缺陷：PyInstaller 的静态分析只看模块顶层，
+    写在函数体 / try 块里的 `import x` **跟不到** ⇒ 包里没有它，
+    而开发环境一切正常（site-packages 里有）。现场三次都栽在这个形状上：
+
+    | 包 | 缺了会怎样（只有装包版才有） |
+    |---|---|
+    | `rapidocr_onnxruntime` | 违规词预检 500 |
+    | `openpyxl` | 数据包 xlsx 导入报「缺少 openpyxl 依赖」 |
+    | `alembic` | 启动静默退化成 `create_all`，老库不升级表结构 |
+    | `send2trash` | 素材删除抛错（代码刻意不回落 `unlink`） |
+
+    判据：每个都必须出现在 spec 的 `_safe_submodules(...)` 调用里。
+    """
+    spec_text = SPEC_FILE.read_text(encoding="utf-8")
+    for pkg in (
+        "rapidocr_onnxruntime",
+        "openpyxl",
+        "alembic",
+        "send2trash",
+    ):
+        assert f'_safe_submodules("{pkg}")' in spec_text, (
+            f"SpiderXHS.spec 没收集延迟导入的 `{pkg}` —— 装包版会缺这个模块"
+        )
+    #: 收集器本身必须容错（可选依赖如 psutil 未装时不能让构建整条挂掉）
+    assert "def _safe_submodules(" in spec_text, "缺 _safe_submodules：可选依赖未装会让构建失败"
+
+
+def test_packaging_ships_rapidocr_and_its_onnx_models():
+    """RapidOCR（违规词检测主引擎）**必须**进包，且 3 个 onnx 模型也在。
+
+    现场（2026-10-20，1.0.4 安装版）：点「预检 / 检查违规词」报
+    「检查违规词异常 预检失败：Request failed with status code 500」。
+    **开发环境不复现** —— 这是本类缺陷最贵的地方：只有装好的客户端才炸。
+
+    根因两层，两条都要钉：
+    ① `rapidocr_onnxruntime` 在 `rapid_ocr_service` 里是**函数内延迟导入**，
+       PyInstaller 静态分析跟不到 ⇒ 必须进 `hiddenimports`；
+    ② 它的 `models/*.onnx` 是包内数据文件（不是 import 进来的），
+       必须显式进 `datas`，否则引擎在、模型不在，照样起不来。
+    """
+    spec_text = SPEC_FILE.read_text(encoding="utf-8")
+    #: ① 模块本身
+    assert '_safe_submodules("rapidocr_onnxruntime")' in spec_text, (
+        "SpiderXHS.spec 的 hiddenimports 没收 rapidocr_onnxruntime "
+        "（延迟导入，静态分析跟不到）"
+    )
+    #: ② 模型文件（整包目录按 __file__ 相对路径收）
+    assert "def _rapidocr_data()" in spec_text, "缺 _rapidocr_data()：onnx 模型不会被收集"
+    assert "datas.extend(_rapidocr_data())" in spec_text, "_rapidocr_data() 算了却没并进 datas"
+
+
 def test_build_has_a_positive_assertion_for_every_initial_data_file():
     """构建自检必须**逐文件正向断言**（只查禁止项会漏掉「该有的没有」）。
 

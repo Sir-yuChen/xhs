@@ -11,7 +11,7 @@ frontend/dist、runtime/node、config/default.yaml）。
 
 import os
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 # PyInstaller 6.x 的 spec 命名空间只注入 SPECPATH（spec 所在目录）等变量，
 # 没有 __file__（用了会 NameError）。
@@ -21,6 +21,19 @@ REPO_ROOT = os.path.dirname(SPEC_DIR)
 
 def _data(src: str, dest: str) -> tuple[str, str]:
     return (os.path.join(REPO_ROOT, src), dest)
+
+
+def _safe_submodules(name: str) -> list[str]:
+    """收集子模块，**包没装就返回空**（不中断构建）。
+
+    为什么需要：有些依赖是**可选的**（如 `psutil` —— `singleton.py` 用
+    try/except 兜底，`requirements.txt` 里也没有它）。PyInstaller 的
+    `collect_submodules` 对不存在的包会抛异常，直接让整个构建失败。
+    """
+    try:
+        return collect_submodules(name)
+    except Exception:  # noqa: BLE001 - 可选依赖未安装
+        return []
 
 
 datas = [
@@ -74,6 +87,18 @@ def _rapidocr_data():
 
 datas.extend(_rapidocr_data())
 
+#: ⚠️ **第三方包的数据文件也要收**（模块在 ≠ 数据在）：
+#:   · openpyxl：模板/样式等随包数据（缺了读某些 xlsx 会莫名失败）
+#:   · alembic ：`script.py.mako` 模板 + 自身资源（它生成迁移脚本时要用）
+#:   · onnxruntime：ONNX Runtime 的许可/图谱优化库等运行时资源
+#: 注意：本项目的迁移脚本（backend/alembic）已由上面 `_data(...)` 显式收，
+#: 这里收的是 **alembic 包自身**的那份，两者互不覆盖。
+for _pkg in ("openpyxl", "alembic"):
+    try:
+        datas.extend(collect_data_files(_pkg))
+    except Exception:  # noqa: BLE001 - 构建期探测失败不阻断（模块已由 hiddenimports 保证）
+        pass
+
 # 托盘图标要进 _internal/assets/（launcher.asset_path 在 frozen 下从
 # sys._MEIPASS/assets 读）；只打 exe 图标不够 —— 少了它托盘起不来，
 # 用户就只剩任务管理器一条退路。build.ps1 会先生成它；手动跑 spec 时
@@ -99,11 +124,20 @@ a = Analysis(
         + collect_submodules("apis")
         + collect_submodules("xhs_utils")
         + collect_submodules("pystray")
-        #: ⚠️ `rapidocr_onnxruntime` 在 `rapid_ocr_service` 里是**函数内延迟导入**
-        #: （`from rapidocr_onnxruntime import RapidOCR` 写在 try 块中），
-        #: PyInstaller 的静态分析跟不到 ⇒ 必须显式声明，否则装包版
-        #: 「违规词检测」拿不到引擎（本地开发正常，因为 site-packages 里有）。
-        + collect_submodules("rapidocr_onnxruntime")
+        #: ⚠️ 以下全是**函数内延迟 import** 的第三方包 —— PyInstaller 的静态分析
+        #: 只看模块顶层，写进 try/函数体的导入**跟不到**，于是包里没有它们，
+        #: 而开发环境一切正常（site-packages 里有）。2026-10-20 体检逐个发现：
+        #:   · rapidocr_onnxruntime —— 违规词检测主引擎（装包版点预检 500）
+        #:   · openpyxl             —— 数据包 xlsx 导入（缺则「缺少 openpyxl 依赖」）
+        #:   · alembic              —— 启动时跑迁移（缺则静默退化成 create_all，
+        #:                             老库不升级表结构 / 迁移里的数据修正不执行）
+        #:   · psutil               —— 多实例租约的 PID 存活探测（缺则走兜底）
+        #:   · send2trash           —— 素材文件删除进回收站（缺则抛错不删）
+        + _safe_submodules("rapidocr_onnxruntime")
+        + _safe_submodules("openpyxl")
+        + _safe_submodules("alembic")
+        + _safe_submodules("send2trash")
+        + _safe_submodules("psutil")
     ),
     hookspath=[],
     hooksconfig={},
