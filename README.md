@@ -13,8 +13,8 @@
 **小红书一站式智能运营平台 — 采集、分析、AI 创作、自动发布，全链路闭环**
 
 [![Gitee](https://gitee.com/Sir-yuChen/xhs/badge/star.svg?theme=dark)](https://gitee.com/Sir-yuChen/xhs)
-[![Version](https://img.shields.io/badge/version-v1.0.2-brightgreen)](https://gitee.com/Sir-yuChen/xhs/releases)
-[![Desktop](https://img.shields.io/badge/Windows-桌面安装包%20v1.0.2-0078D6)](./packaging/README.md)
+[![Version](https://img.shields.io/badge/version-v1.0.4-brightgreen)](https://gitee.com/Sir-yuChen/xhs/releases)
+[![Desktop](https://img.shields.io/badge/Windows-桌面安装包%20v1.0.4-0078D6)](./packaging/README.md)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![Node.js](https://img.shields.io/badge/nodejs-20%2B-green)](https://nodejs.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100%2B-009688)](https://fastapi.tiangolo.com/)
@@ -325,6 +325,21 @@ pytest $(python .hermes/scripts/pick_tests.py) -q
 ---
 
 ## 📦 版本记录
+
+### v1.0.4 · 2026-10-20（桌面安装包）
+
+| 主题 | 内容 |
+|---|---|
+| **商品笔记挂链修复** | LLM 生成笔记发布后**平台不挂商品**（连续十余次复现）。真机抓包定案：`extra_info.goods_id` 必须是**卖家 SKU ID**（与 `biz_id` 逐字相同），`goods_name` 必须是「商品名 + 空格 + 规格名」；规格名本地没有、实时取 `aigc-publish/attributes`。详见设计 07 §13、复盘 06 |
+| **全站统一等待蒙版** | 新增 `components/ui/wait-mask.tsx`（`scope` page/panel + `title`/`elapsed`/`sub`/`extra` + `children` 自定义），**22 处等待**全部收敛；退役 `.publish-wait-*` 四个类。根因：`Spin` 的 `tip` 会跟内容滚出可视区 |
+| **商品详情弹窗** | 宽高都取视口 **85%**（`styles.container` 置 85vh + flex 列，body 内部滚动） |
+| **选目录无桌面误报（重要）** | 装包版点「选择文件夹」**必然**报「没有可用的图形界面」——`SpiderXHS.spec` 把 `tkinter` 排除出包，而 `import tkinter` 失败又直接抛 `NO_DESKTOP`，从不尝试 PowerShell 原生对话框。**本次修好并重新打包**，旧版客户端受影响 |
+| **店铺违规管理** | 违规列表/详情/申诉记录/证据/体检/预警/赔付/仲裁/抽检/免罚；只读边界（不接申诉提交与批量删除）；违规域整片强制签名 |
+| **平台优先删除** | 通用写操作口径：先动平台，平台成功后再核对本地，本地无则 `skipped`；回执四态 `deleted`/`platform_only`/`failed`/`skipped` |
+| **规模** | 344 operations / 297 paths、57 张表、296 个请求函数、46 个页面 |
+
+> ⚠️ 版本记录只列**主题级**变更；逐轮的精确数字口径以 `AGENTS.md` §5 为**唯一权威**
+> （本行不重复累加，避免两份数字漂移）。
 
 ### v2.0 · 2026-10（第二阶段二开）
 
