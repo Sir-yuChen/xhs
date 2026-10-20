@@ -46,6 +46,34 @@ datas = [
     _data("backend/app/services/win_ocr_batch.ps1", "backend/app/services"),
 ]
 
+#: ⚠️⚠️ **RapidOCR 必须显式收进包**（2026-10-20 实测漏了）
+#: 违规词检测的**主引擎**是 RapidOCR（PP-OCRv4 ONNX，纯 CPU）；
+#: PyInstaller **不会**自动收集它的 3 个 `.onnx` 模型（它们是包内数据文件，
+#: 不是被 import 进来的），也不一定跟到 `rapidocr_onnxruntime` 的隐式导入。
+#: 漏了的后果：本地开发环境一切正常（模型在 site-packages 里），
+#: 而**装好的客户端**一点「预检」就 500 —— 现场报「检查违规词异常 预检失败」。
+#: ⇒ 把整个包目录（含 `models/*.onnx`）按原相对路径拷进 `_internal`，
+#: 让 `rapidocr_onnxruntime` 在 frozen 下能按 `__file__` 找到模型。
+
+
+def _rapidocr_data():
+    """把已安装的 `rapidocr_onnxruntime` 整包收进 `_internal`（含 onnx 模型）。"""
+    try:
+        import rapidocr_onnxruntime as _rapid  # noqa: PLC0415 - 构建期探测
+    except ImportError:
+        return []
+    pkg_dir = os.path.dirname(_rapid.__file__)
+    out = []
+    for root, _dirs, files in os.walk(pkg_dir):
+        for name in files:
+            src = os.path.join(root, name)
+            rel = os.path.relpath(src, pkg_dir)
+            out.append((src, os.path.join("rapidocr_onnxruntime", os.path.dirname(rel)) if os.path.dirname(rel) else "rapidocr_onnxruntime"))
+    return out
+
+
+datas.extend(_rapidocr_data())
+
 # 托盘图标要进 _internal/assets/（launcher.asset_path 在 frozen 下从
 # sys._MEIPASS/assets 读）；只打 exe 图标不够 —— 少了它托盘起不来，
 # 用户就只剩任务管理器一条退路。build.ps1 会先生成它；手动跑 spec 时
@@ -71,6 +99,11 @@ a = Analysis(
         + collect_submodules("apis")
         + collect_submodules("xhs_utils")
         + collect_submodules("pystray")
+        #: ⚠️ `rapidocr_onnxruntime` 在 `rapid_ocr_service` 里是**函数内延迟导入**
+        #: （`from rapidocr_onnxruntime import RapidOCR` 写在 try 块中），
+        #: PyInstaller 的静态分析跟不到 ⇒ 必须显式声明，否则装包版
+        #: 「违规词检测」拿不到引擎（本地开发正常，因为 site-packages 里有）。
+        + collect_submodules("rapidocr_onnxruntime")
     ),
     hookspath=[],
     hooksconfig={},
