@@ -41,15 +41,30 @@ def _sanitize(text, token):
 
 
 def get_token(repo_dir):
-    """从 git credential manager 取 github.com 的令牌；不打印明文。"""
-    proc = subprocess.run(
-        ["git", "credential", "fill"],
-        input="protocol=https\nhost=github.com\n\n",
-        capture_output=True,
-        text=True,
-        cwd=repo_dir,
-        timeout=60,
-    )
+    """从 git credential manager 取 github.com 的令牌；不打印明文。
+
+    ⚠️ 必须设 `GIT_TERMINAL_PROMPT=0`：凭据管理器在拿不到时会**弹窗**等用户输入，
+    在非交互环境下会卡满 60 秒再抛 TimeoutExpired（实测）。
+    """
+    #: ⚠️ 两项都不能设：
+    #:  · `GIT_TERMINAL_PROMPT=0` ⇒ 放弃读取已存凭据（返回空）
+    #:  · `GCM_INTERACTIVE=never` ⇒ 同样返回空（实测）
+    #: 已存凭据时 GCM 不会弹窗，所以也不需要用环境变量禁弹窗；
+    #: 未存凭据时会弹窗，由下面的 timeout 兜住。
+    try:
+        proc = subprocess.run(
+            ["git", "credential", "fill"],
+            input="protocol=https\nhost=github.com\n\n",
+            capture_output=True,
+            text=True,
+            cwd=repo_dir,
+            timeout=45,
+        )
+    except subprocess.TimeoutExpired:
+        raise SystemExit(
+            "git credential fill 超时（凭据管理器可能在弹窗）——"
+            "请先在 Windows 凭据管理器里配置 github.com 的 PAT"
+        )
     token = None
     for line in proc.stdout.splitlines():
         if line.startswith("password="):
