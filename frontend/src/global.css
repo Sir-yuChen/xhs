@@ -505,3 +505,18 @@ body {
 }
 
 
+
+/**
+ * ⚠️ **不要用 `Spin` 自己画遮罩**（用户口径 2026-10-20「存在双层等待蒙版」）。
+ *
+ * 页面级等待现在统一由 `<WaitMask>` 画（fixed 铺满 + 白卡片 + 耗时），而外面那层
+ * `Spin spinning` 只负责两件事：**挡住交互** + **维持 `.ant-spin-container` 高度链**。
+ * 但 antd 的 `Spin` 在 `spinning` 时**自己也会画一层半透明底**（`.ant-spin-blur::after`）
+ * ⇒ 与 `WaitMask` 的半透明底叠成两层，视觉上就是「双层蒙版」。
+ *
+ * 这里把那层自绘遮罩关掉（遮罩统一由 `WaitMask` 出），同时保留 `Spin` 的结构职责。
+ */
+.ant-spin-blur::after {
+  background: transparent !important;
+  opacity: 0 !important;
+}

@@ -465,7 +465,7 @@ export function DataPackageRulesModal({
           style={{ marginBottom: 12 }}
           message="一个「规则包」对应一类数据包；包下的每条规则管一列。配好后在每列表头的设置图标里选它执行。"
         />
-        <Spin spinning={loading}>
+        <Spin indicator={<></>}>
           <Table<DataPackageRuleSet>
             size="small"
             rowKey="id"

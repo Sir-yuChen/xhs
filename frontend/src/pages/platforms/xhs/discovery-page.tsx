@@ -28,6 +28,7 @@ import {
   SORT_OPTIONS as sortOptions,
 } from "../../../lib/xhs-search-options";
 import type { NoteComment, PlatformAccount, XhsSearchNote, XhsSearchOptions } from "../../../types";
+import { WaitMask } from "../../../components/ui/wait-mask";
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -294,7 +295,8 @@ function SearchPanel() {
       <Drawer title={selectedNote?.title || "笔记详情"} open={!!selectedNote} onClose={closeDetail} width={640} styles={{ body: { background: p.cardBg } }}>
         {selectedNote && (
           <div>
-            {isFetchingDetail && <Spin style={{ display: "block", textAlign: "center", margin: "16px 0" }} />}
+            {/* 2026-10-20 统一：等待一律走 `<WaitMask>`。 */}
+            <WaitMask open={isFetchingDetail} mask={false} title="正在加载笔记详情" />
             {detailError && <Alert message={detailError} type="warning" showIcon style={{ marginBottom: 12 }} />}
             {selVideoUrl && getNoteKindLabel(selectedNote) === "视频" ? (
               <div style={{ marginBottom: 16 }}>

@@ -515,7 +515,7 @@ export default function PublishConfigStep1({
 
           {/* ⚠️ 2026-10-20：`tip` 已移除，改由统一 `<WaitMask>` 画在最上层
               （`Spin` 的 tip 跟内容滚走；`Spin` 只保留挡交互的职责）。 */}
-          <Spin spinning={catRecognizing}>
+          <Spin indicator={<></>}>
             <div className={`cat-panel${hasAnyCat ? " has-result" : ""}`}>
               {recommended.length > 0 ? (
                 <div className="cat-result">

@@ -1,3 +1,4 @@
+import { WaitMask } from "../../components/ui/wait-mask";
 import { ReloadOutlined } from "@ant-design/icons";
 import { App, Button, Card, Cascader, Space, Spin, Table, Tag, Tooltip, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
@@ -471,9 +472,12 @@ export function ModelConfigPage() {
           </Button>
         }
       >
+        {/* 2026-10-20 统一：表格等待由公共 WaitMask 表达。 */}
+        <WaitMask open={isLoading} mask={false} title="正在加载模型配置" />
         <Table
           rowKey="_key"
-          loading={isLoading}
+          //: ⚠️ 2026-10-20 统一：Table 自带的 loading 会渲染一层 antd Spin 覆盖，与公共 WaitMask 叠成两层 ⇒ 移除，等待交给 WaitMask。
+          //: 等待提示由同状态驱动的 WaitMask 承担（见函数返回处）。
           columns={columns}
           dataSource={rowsWithKey}
           pagination={false}

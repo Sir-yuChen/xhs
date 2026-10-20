@@ -18,7 +18,7 @@ export function ProtectedRoute({ children }: RouteGuardProps) {
     return (
       <div style={{ minHeight: "100vh", background: p.pageBg }}>
         {/* 统一蒙版：白卡居中（用户口径 2026-10-20「全项目蒙版样式一样」）。 */}
-        <WaitMask open title="正在验证登录状态" />
+        <WaitMask open mask title="正在验证登录状态" />
       </div>
     );
   }
@@ -38,7 +38,7 @@ export function PublicOnlyRoute({ children }: RouteGuardProps) {
     return (
       <div style={{ minHeight: "100vh", background: p.pageBg }}>
         {/* 统一蒙版：白卡居中（用户口径 2026-10-20「全项目蒙版样式一样」）。 */}
-        <WaitMask open title="正在验证登录状态" />
+        <WaitMask open mask title="正在验证登录状态" />
       </div>
     );
   }

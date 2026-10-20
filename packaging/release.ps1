@@ -273,16 +273,46 @@ if ($SkipRelease) {
         [System.IO.File]::WriteAllText($NotesFile, $notes, (New-Object System.Text.UTF8Encoding($false)))
     }
 
-    # ---- 主通道：GitHub ---------------------------------------------------
-    $ghScript = Join-Path $PSScriptRoot "github_release.py"
-    $ghLog = Join-Path $TmpDir "release-publish-gh-$TagName.log"
-    Info "主通道 GitHub，日志：$ghLog"
-    & $Py $ghScript publish --tag $TagName --exe $ExePath --name $ReleaseName --body-file $NotesFile --replace --repo-dir $Root --target $head | Out-File -FilePath $ghLog -Encoding utf8
-    if ($LASTEXITCODE -ne 0) {
-        Get-Content $ghLog -Tail 20
-        Fail "GitHub 发布失败（主通道），日志：$ghLog"
+    # ---- 发布：GitHub（官方 gh CLI）--------------------------------------
+    #: 2026-10-20 用户口径「我来安装用官方的」——改用 `gh release`，
+    #: 官方维护、无需自研 HTTP 重试、凭据由 gh 自己管。
+    #: ⚠️ gh 装在 D:\Program Files\GitHub CLI（不在 PATH，需显式定位）。
+    $ghExe = $null
+    foreach ($cand in @(
+        "D:\Program Files\GitHub CLI\gh.exe",
+        "C:\Program Files\GitHub CLI\gh.exe",
+        (Join-Path $env:LOCALAPPDATA "Programs\GitHub CLI\gh.exe")
+    )) {
+        if (Test-Path $cand) { $ghExe = $cand; break }
     }
-    Get-Content $ghLog | Where-Object { $_ -match "附件上传成功|已更新 release|已创建 release|RELEASE_PAGE" } | ForEach-Object { Ok $_.Trim() }
+    if (-not $ghExe) {
+        $found = Get-Command gh -ErrorAction SilentlyContinue
+        if ($found) { $ghExe = $found.Source }
+    }
+    if (-not $ghExe) {
+        Fail "未找到 gh CLI —— 请安装 GitHub CLI（https://cli.github.com/）"
+    }
+    Info "发布：GitHub Release（$ghExe）"
+
+    $ghLog = Join-Path $TmpDir "release-publish-gh-$TagName.log"
+    #: `--clobber` = 同名附件覆盖（等价 Gitee 侧的 --replace）
+    & $ghExe release create $TagName $ExePath --repo "Sir-yuChen/xhs" `
+        --title $ReleaseName --notes-file $NotesFile --clobber 2>&1 |
+        Tee-Object -FilePath $ghLog
+    if ($LASTEXITCODE -ne 0) {
+        #: 已存在则改走 upload + edit（gh create 对已存在的 tag 会报错）
+        Warn "release 可能已存在，改用 upload + edit"
+        & $ghExe release upload $TagName $ExePath --repo "Sir-yuChen/xhs" --clobber 2>&1 |
+            Tee-Object -FilePath $ghLog -Append
+        if ($LASTEXITCODE -ne 0) {
+            Get-Content $ghLog -Tail 20
+            Fail "GitHub 发布失败，日志：$ghLog"
+        }
+        & $ghExe release edit $TagName --repo "Sir-yuChen/xhs" `
+            --title $ReleaseName --notes-file $NotesFile 2>&1 |
+            Tee-Object -FilePath $ghLog -Append
+    }
+    Ok "GitHub Release 已发布：https://github.com/Sir-yuChen/xhs/releases/tag/$TagName"
 }
 
 # ---------------------------------------------------------------------------

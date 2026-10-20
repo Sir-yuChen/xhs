@@ -61,6 +61,7 @@ import {
   type NoteGoodsDetail,
 } from "../../../lib/api";
 import type { PlatformAccount } from "../../../types";
+import { WaitMask } from "../../../components/ui/wait-mask";
 import {
   NoteDetailModal,
   quietError,
@@ -790,11 +791,8 @@ export function XhsDatacenterPage() {
   function renderTable(category: "goods" | "normal") {
     const panel = panels[category];
     if (panel.loading && panel.items.length === 0) {
-      return (
-        <div style={{ padding: "48px 0", textAlign: "center" }}>
-          <Spin /> <Text type="secondary">加载中…</Text>
-        </div>
-      );
+      //: 2026-10-20 统一：等待一律走 `<WaitMask>`。
+      return <WaitMask open mask={false} title="加载中" />;
     }
     if (panel.error && panel.items.length === 0) {
       return renderFailure(panel.error);
@@ -927,7 +925,7 @@ export function XhsDatacenterPage() {
       <Table<DatacenterStatItem>
         rowKey={(r) => r.note_id}
         size="small"
-        loading={panel.loading}
+          //: ⚠️ 2026-10-20 统一：Table 自带的 loading 会渲染一层 antd Spin 覆盖，与公共 WaitMask 叠成两层 ⇒ 移除，等待交给 WaitMask。
         columns={columns}
         dataSource={panel.items}
         rowSelection={{
@@ -1507,9 +1505,8 @@ export function XhsDatacenterPage() {
         style={{ maxWidth: 1600 }}
       >
         {productDetailLoading ? (
-          <div style={{ padding: "24px 0", textAlign: "center" }}>
-            <Spin /> <Text type="secondary">加载中…</Text>
-          </div>
+          /* 2026-10-20 统一：等待一律走 `<WaitMask>`。 */
+          <WaitMask open mask={false} title="加载中" />
         ) : productDetail ? (
           <Card size="small">
             <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>

@@ -87,6 +87,7 @@ import {
   detailMessage,
   type LlmGenerateResult,
 } from "../../../lib/api";
+import { WaitMask } from "../../../components/ui/wait-mask";
 import { NoteVersionHistory } from "./note-version-history";
 import type {
   LlmCopyRequirements,
@@ -3622,30 +3623,16 @@ export function LlmGenerateModal({
           （这个弹窗 `body` 是 72vh 可滚动），提示会跟着滚出可视区，用户就看不到耗时了。
           这里自建 `position: absolute` 铺满**弹窗内容区**的蒙版 + `flex` 居中，
           提示位置与滚动无关，且只遮弹窗（不遮背后的商品列表）。 */}
-      {busy && (
-        <div
-          style={{
-            position: "absolute",
-            inset: 0,
-            background: "rgba(0, 0, 0, 0.45)",
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 12,
-            zIndex: 1000,
-            borderRadius: 8,
-          }}
-        >
-          <Spin size="large" />
-          <Text style={{ color: "#fff", fontSize: 14 }}>
-            {waitLabel}，已用 {elapsedSec} 秒
-          </Text>
-          <Text style={{ color: "rgba(255,255,255,0.75)", fontSize: 12 }}>
-            可能要几十秒，请勿关闭
-          </Text>
-        </div>
-      )}
+      {/* ⚠️ 2026-10-20 用户口径「项目中所有等待，蒙版全部应走统一的公共组件」：
+          原来是**自建黑底遮罩 + antd `<Spin>`** ⇒ 改用 `<WaitMask tone="dark" scope="panel">`。 */}
+      <WaitMask
+        open={busy}
+        scope="panel"
+        tone="dark"
+        title={waitLabel}
+        elapsed={elapsedSec}
+        sub="可能要几十秒，请勿关闭"
+      />
     </Modal>
   );
 }

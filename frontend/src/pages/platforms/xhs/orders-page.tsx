@@ -18,6 +18,7 @@
  *    **不等于一定有原值**。页面不许承诺「点开就有完整信息」。
  */
 
+import { WaitMask } from "../../../components/ui/wait-mask";
 import {
   DownloadOutlined,
   ExclamationCircleOutlined,
@@ -576,10 +577,13 @@ const onSync = async () => {
             本地台账（同步订单任务落库 · 数据归属该店铺）
           </Descriptions.Item>
         </Descriptions>
+        {/* 2026-10-20 统一：表格等待由公共 WaitMask 表达。 */}
+        <WaitMask open={loading} mask={false} title="正在加载订单" />
         <Table<OrderRow>
           rowKey="id"
           size="small"
-          loading={loading}
+          //: ⚠️ 2026-10-20 统一：Table 自带的 loading 会渲染一层 antd Spin 覆盖，与公共 WaitMask 叠成两层 ⇒ 移除，等待交给 WaitMask。
+          //: 等待提示由同状态驱动的 WaitMask 承担（见函数返回处）。
           columns={columns}
           dataSource={rows}
           scroll={{ x: 1100 }}

@@ -65,6 +65,7 @@ import {
 } from "../../../lib/sync-gates";
 import { formatShanghaiTime } from "../../../lib/time";
 import type { PlatformAccount, XhsLoginChannels } from "../../../types";
+import { WaitMask } from "../../../components/ui/wait-mask";
 
 const { Text } = Typography;
 
@@ -711,9 +712,8 @@ export function XhsAccountsPage() {
         {error ? <Alert type="error" message={error} showIcon style={{ marginBottom: 16 }} /> : null}
 
         {isLoading ? (
-          <div style={{ textAlign: "center", padding: "48px 0" }}>
-            <Spin size="large" />
-          </div>
+          //: 2026-10-20 统一：等待一律走 `<WaitMask>`。
+          <WaitMask open mask={false} title="正在加载账号列表" />
         ) : accounts.length === 0 ? (
           <Empty
             image={<SafetyCertificateOutlined style={{ fontSize: 48, color: p.fillIcon }} />}

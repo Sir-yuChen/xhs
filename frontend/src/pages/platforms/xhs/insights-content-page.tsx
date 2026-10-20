@@ -211,7 +211,7 @@ export function InsightsContentPage() {
 
       {error ? <Alert type="error" showIcon message={error} closable /> : null}
 
-      <Spin spinning={isLoading}>
+      <Spin indicator={<></>}>
         {/* ---- ② 明细：高潜内容（主）+ 热点 / 评论（侧） ---- */}
         <Row gutter={[16, 16]}>
           <Col xs={24} lg={16}>

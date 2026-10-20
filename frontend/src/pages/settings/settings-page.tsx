@@ -1,3 +1,4 @@
+import { WaitMask } from "../../components/ui/wait-mask";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   App,
@@ -301,10 +302,16 @@ export function SettingsPage() {
               </Text>
             ) : null}
 
+            {/* 2026-10-20 统一：表格等待由公共 WaitMask 表达（Table 自带 loading 会渲染
+
+                antd Spin 覆盖，与 WaitMask 叠成两层 ⇒ 已移除）。 */}
+
+            <WaitMask open={loading} mask={false} title="正在加载系统参数" />
+
             <Table<SystemSetting>
               rowKey="id"
               size="small"
-              loading={loading}
+          //: ⚠️ 2026-10-20 统一：移除 Table 自带 loading（它渲染 antd Spin，会与 WaitMask 叠两层）。
               columns={columns}
               dataSource={rows}
               pagination={false}

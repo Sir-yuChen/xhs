@@ -1,4 +1,4 @@
-import { Spin } from "antd";
+import { WaitMask } from "../ui/wait-mask";
 
 /**
  * 登录提交蒙版（2026-09-28 用户口径：「所有登录窗口提交后加蒙版，登录成功后
@@ -37,27 +37,12 @@ export function LoginSubmitMask({
   /** 蒙版上的说明文字（各面板可按自己的动作措辞，如「已扫码，正在确认登录…」）。 */
   text?: string;
 }) {
-  if (!active) {
-    return null;
-  }
+  //: ⚠️ 2026-10-20 用户口径「项目中所有等待，蒙版全部应走统一的公共组件」：
+  //: 原来是自建黑底 div + antd `<Spin>` ⇒ 现委托 `WaitMask tone="dark" scope="panel"`。
+  //: 对外接口（`active` / `text` / `data-testid`）保持不变，6 个调用点零改动。
   return (
-    <div
-      data-testid="login-submit-mask"
-      style={{
-        position: "absolute",
-        inset: 0,
-        zIndex: 10,
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        gap: 10,
-        background: "rgba(0, 0, 0, 0.55)",
-        borderRadius: 8,
-      }}
-    >
-      <Spin />
-      <span style={{ color: "rgba(255,255,255,0.85)", fontSize: 12 }}>{text}</span>
-    </div>
+    <span data-testid="login-submit-mask" style={{ display: "contents" }}>
+      <WaitMask open={active} mask scope="panel" tone="dark" title={text} />
+    </span>
   );
 }

@@ -14,6 +14,7 @@
  *    抽屉里给全文 + 话题 + 当时的文案要求 + 错误原因。
  * 4. **失败版本也列** —— 用户点过生成却没结果时，看不到失败记录会以为「点了没反应」。
  */
+import { WaitMask } from "../../../components/ui/wait-mask";
 import {
   App,
   Button,
@@ -405,10 +406,13 @@ export function NoteVersionHistory({
 
   return (
     <div>
+      {/* 2026-10-20 统一：表格等待由公共 WaitMask 表达（Table 自带 loading 会渲染
+          antd Spin 覆盖，与 WaitMask 叠成两层 ⇒ 已移除）。 */}
+      <WaitMask open={loading} mask={false} title="正在加载版本历史" />
       <Table<NoteVersionItem>
         size="small"
         rowKey="id"
-        loading={loading}
+          //: ⚠️ 2026-10-20 统一：移除 Table 自带 loading（它渲染 antd Spin，会与 WaitMask 叠两层）。
         columns={columns}
         dataSource={pageItems}
         locale={{

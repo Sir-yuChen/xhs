@@ -25,6 +25,7 @@
  * ⚠️ 说明文案**禁止 `**`**（守卫覆盖整个 `frontend/src`）。
  * ⚠️ 弹窗尺寸按**视口百分比**（用户偏好），不用固定像素宽。
  */
+import { WaitMask } from "../../../components/ui/wait-mask";
 import { useCallback, useEffect, useState } from "react";
 import {
   Alert,
@@ -208,10 +209,15 @@ export function ProductDraftsModal({
           description="账号跟随商品页选定的店铺。草稿只存商品骨架，其余字段需在千帆草稿箱补齐。"
         />
 
+        {/* 2026-10-20 统一：表格等待由公共 WaitMask 表达。 */}
+
+        <WaitMask open={loading} mask={false} title="正在加载草稿" />
+
         <Table<ItemDraftRow>
           rowKey="draft_id"
           size="small"
-          loading={loading}
+          //: ⚠️ 2026-10-20 统一：Table 自带的 loading 会渲染一层 antd Spin 覆盖，与公共 WaitMask 叠成两层 ⇒ 移除，等待交给 WaitMask。
+          //: 等待提示由同状态驱动的 WaitMask 承担（见函数返回处）。
           dataSource={rows}
           scroll={{ x: 900, y: "48vh" }}
           pagination={{

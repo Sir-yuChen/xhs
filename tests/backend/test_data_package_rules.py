@@ -1176,8 +1176,13 @@ UNIMPLEMENTED_OP = next(
 
 
 class TestSeed:
-    def test_creates_two_example_sets_with_rules(self, db_session):
-        """新用户拿到两个示例包（对应真机两个数据包），规则可执行。"""
+    def test_creates_the_three_real_sets_with_rules(self, db_session):
+        """新用户拿到三个规则包（= 用户真机库里的实际配置），规则可执行。
+
+        ⚠️ 2026-10-20 用户口径「应以当前本地配置的为准」：原种子是两个包
+        （店透SKU预览 / 商品SKU数据），用户库里实际是三个（店透视 / 公共 / 至尊宝）
+        ⇒ 种子整体对齐为后者。
+        """
         from backend.app.models.user import User
 
         user = User(username="seed-test", password_hash="x")
@@ -1187,22 +1192,24 @@ class TestSeed:
 
         created = service.seed_builtin_rules(db_session, user_id=user.id)
         db_session.commit()
-        assert created == 2
+        assert created == 3
 
         sets = service.list_sets(db_session, user.id)
-        assert [s.name for s in sets] == ["店透SKU预览", "商品SKU数据"]
+        assert [s.name for s in sets] == ["店透视", "公共", "至尊宝"]
 
         #: ⚠️ 种子的规则**真的能跑**（不是摆设）：包1 按 ; 取第 2 段。
         rules = {r.rule_name: r for r in service.list_rules(db_session, user.id, sets[0].id)}
-        info = rules["取颜色分类"]
+        info = rules["sku名称"]
         out = service.apply_rule("木;中古色-实木三斗柜;上门安装", info.op, service.parse_params(info.params_json))
         assert out == "中古色-实木三斗柜"
 
-        #: 包2 的「取 SKU 名称」按 : 取第 1 段。
+        #: 包2「公共」的「计算市场价」= 原值 × 2 + 50（可执行性同样要钉住）。
         rules2 = {r.rule_name: r for r in service.list_rules(db_session, user.id, sets[1].id)}
-        name_rule = rules2["取 SKU 名称"]
-        got = service.apply_rule("颜色分类:【中古风】实木三斗柜", name_rule.op, service.parse_params(name_rule.params_json))
-        assert got == "颜色分类"
+        price_rule = rules2["计算市场价"]
+        got = service.apply_rule(
+            "100", price_rule.op, service.parse_params(price_rule.params_json)
+        )
+        assert got == "250"
 
     def test_idempotent_and_does_not_clobber_user_edits(self, db_session):
         """⚠️ **幂等**，且用户改过的**不重建、不覆盖**（规则是用户资产）。"""
@@ -1411,10 +1418,10 @@ class TestSeedMatchesTheRealLibrary:
         path = _P(__file__).resolve().parents[2] / "config/initial_data/data_package_rules.json"
         return json.loads(path.read_text(encoding="utf-8"))
 
-    def test_seed_has_exactly_the_two_real_packages(self):
+    def test_seed_has_exactly_the_three_real_packages(self):
         seed = self._seed()
         names = [s["name"] for s in seed["data_package_rule_sets"]]
-        assert names == ["店透SKU预览", "商品SKU数据"], (
+        assert names == ["店透视", "公共", "至尊宝"], (
             f"种子规则包与真机库不一致：{names}"
         )
 
@@ -1425,9 +1432,24 @@ class TestSeedMatchesTheRealLibrary:
             s["name"]: [(r["rule_name"], r["op"], r["params"]) for r in s["rules"]]
             for s in seed["data_package_rule_sets"]
         }
-        assert got["店透SKU预览"] == [("取颜色分类", "extract_segment", {"sep": ";", "index": 2})]
-        assert got["商品SKU数据"] == [
-            ("取 SKU 名称", "extract_segment", {"sep": ":", "index": 1}),
+        assert got["店透视"] == [
+            ("sku名称", "extract_segment", {"sep": ";", "index": 2}),
+        ]
+        assert got["公共"] == [
+            (
+                "计算市场价",
+                "math_scale",
+                {"steps": [{"op": "mul", "value": 2}, {"op": "add", "value": 50}]},
+            ),
+            ("计算售价", "math_scale", {"steps": [{"op": "mul", "value": 1.8}]}),
+        ]
+        assert got["至尊宝"] == [
+            ("SKU 名称-sku信息列", "extract_segment", {"sep": ":", "index": 2}),
+            (
+                "规格分类",
+                "copy_extract",
+                {"extract": {"op": "segment", "sep": ":", "index": 1}},
+            ),
             ("取括号内名称", "extract_between", {"open": "(", "close": ")", "occurrence": 1}),
         ]
 

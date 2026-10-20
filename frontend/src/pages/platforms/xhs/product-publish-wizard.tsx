@@ -5708,20 +5708,6 @@ function TablesPanel(props: {
                 文件名称：{table.source_file || "-"}
               </Text>
             </Tooltip>
-          </div>
-
-          {/* 价格 / 库存批量修改（用户口径 2026-10-09）——
-              原参数基础上加减固定值 / 原参数 × 倍数 + 固定值 / 统一改成固定值。
-              勾选行后只改选中行；未勾选则整列改。 */}
-          <BatchColumnBar
-            table={table}
-            pickedRows={pickedRows}
-            onApply={(col, rule, rows) => batchColumn(tIndex, col, rule, rows)}
-          />
-
-          {/* ⚠️ 用户口径 2026-10-14：「**还原原始值与设置图标放一起**」
-              ⇒ 顶部这里**不再有**「还原原始值」按钮（已挪到表头的设置图标旁）。 */}
-          <Space size={8} style={{ marginTop: 6 }}>
             {/* ⚠️ **手动添加列**（用户口径 2026-10-15）：
                 「商品sku表格**支持手动添加列**，弹窗用户设置表头**中文和英文名**
                   （**英文名非必填为空则按照一定的顺序规则自动生成**）」
@@ -5767,7 +5753,10 @@ function TablesPanel(props: {
                 已匹配 {matchRows.filter((r) => r.relPath).length}/{matchRows.length} 行
               </Text>
             )}
-          </Space>
+          
+          </div>
+
+
 
           <Table
             size="small"

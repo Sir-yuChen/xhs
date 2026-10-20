@@ -944,7 +944,10 @@ export function PictureSpacePage() {
 
         {/* 数据区：**只有这里滚动**（工具栏卡与下方分页固定不动）。
             列表 / 卡片两视图共用同一份 `items` 与同一个分页（卡片只是展示样式变化）。 */}
+        {/* ⚠️ indicator={<></>}：转圈由 <WaitMask> 统一画（同一状态 isLoading||busy 同时驱动两处
+            ⇒ 不关会叠成两层圈，用户实测截图）。这里只留「挡住交互 + 维持滚动高度链」。 */}
         <Spin
+          indicator={<></>}
           spinning={isLoading || busy}
           className="ps-scroll-host"
           wrapperClassName="ps-scroll-host"
@@ -1025,7 +1028,7 @@ export function PictureSpacePage() {
                 scroll={{ x: 1006 }}
                 columns={columns}
                 dataSource={items}
-                loading={isLoading}
+          //: ⚠️ 2026-10-20 统一：Table 自带的 loading 会渲染一层 antd Spin 覆盖，与公共 WaitMask 叠成两层 ⇒ 移除，等待交给 WaitMask。
                 locale={{ emptyText: emptyState }}
                 // 固定表头：外层数据区滚动时表头不动（`sticky` 配 `scroll` 容器）。
                 sticky
@@ -1164,7 +1167,7 @@ export function PictureSpacePage() {
           </div>
         }
       >
-        <Spin spinning={resizeLoading}>
+        <Spin indicator={<></>}>
           <Space direction="vertical" size={8} style={{ width: "100%", minHeight: 60 }}>
             <Text strong>扩容条件</Text>
             {resizeCheck && resizeCheck.conditions.length > 0 ? (

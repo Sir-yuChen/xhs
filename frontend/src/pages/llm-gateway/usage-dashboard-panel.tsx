@@ -486,7 +486,7 @@ export function UsageDashboardPanel() {
         </Card>
       ) : null}
 
-      <Spin spinning={loading}>
+      <Spin indicator={<></>}>
         {/* ① 总览卡：三段时间 × 六指标 */}
         <Row gutter={[16, 16]}>
           {buckets.map(({ label, bucket }) => (

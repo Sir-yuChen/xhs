@@ -273,11 +273,9 @@ export function XhsPublishPage() {
           （与「N 个」计数同行）。 */}
 
       {isLoading ? (
-        <Card style={panelStyle} styles={{ body: cardBodyStyle }}>
-          <div style={{ textAlign: "center", padding: 48 }}>
-            <Spin size="large" />
-            <Paragraph style={{ color: "#8c8c8c", marginTop: 16 }}>正在加载发布任务...</Paragraph>
-          </div>
+        //: 2026-10-20 统一：等待一律走 `<WaitMask>`。
+        <Card style={panelStyle} styles={{ body: { ...cardBodyStyle, position: "relative" } }}>
+          <WaitMask open mask={false} scope="panel" title="正在加载发布任务" />
         </Card>
       ) : jobs.length === 0 ? (
         <Card style={panelStyle} styles={{ body: cardBodyStyle }}>
@@ -364,7 +362,7 @@ export function XhsPublishPage() {
               </Card>
             ) : (
               <>
-              <Spin spinning={isDetailLoading}>
+              <Spin indicator={<></>}>
                 <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
                   {/* Toolbar */}
                   <Card style={panelStyle} styles={{ body: { padding: "12px 16px" } }}>

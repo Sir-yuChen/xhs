@@ -33,6 +33,7 @@
  * ⚠️ 说明文案**禁止 `**`**（守卫覆盖整个 `frontend/src`）。
  * ⚠️ 弹窗尺寸按**视口百分比**（用户偏好），本弹窗 **60%**（发布弹窗是 75%）。
  */
+import { WaitMask } from "../../../components/ui/wait-mask";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   App,
@@ -369,10 +370,16 @@ export function ForbiddenWordsModal({ open, onClose }: ForbiddenWordsModalProps)
           </Button>
         </Space>
 
+        {/* 2026-10-20 统一：表格等待由公共 WaitMask 表达（Table 自带 loading 会渲染
+
+            antd Spin 覆盖，与 WaitMask 叠成两层 ⇒ 已移除）。 */}
+
+        <WaitMask open={loading} mask={false} title="正在加载违规词" />
+
         <Table
           size="small"
           rowKey="key"
-          loading={loading}
+          //: ⚠️ 2026-10-20 统一：移除 Table 自带 loading（它渲染 antd Spin，会与 WaitMask 叠两层）。
           dataSource={treeData}
           //: ⚠️ **按组分页**（用户口径 2026-10-08）：`total` = 分组数，
           //: 不是词数 —— 分页器上显示的「共 N 条」是 N 个分组。

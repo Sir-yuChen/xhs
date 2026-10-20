@@ -320,7 +320,7 @@ export function PromptTemplatePanel() {
 
   return (
     <>
-    <Spin spinning={loading}>
+    <Spin indicator={<></>}>
       <Tabs
         items={[
           {

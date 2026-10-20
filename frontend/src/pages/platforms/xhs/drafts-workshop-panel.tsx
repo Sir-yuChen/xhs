@@ -74,6 +74,7 @@ import { formatShanghaiTime } from "../../../lib/time";
 import { useThemePalette } from "../../../app/providers";
 import type { DraftAsset } from "../../../lib/api";
 import type { Draft, GeneratedImageAsset, SavedNote, UserImageFile } from "../../../types";
+import { WaitMask } from "../../../components/ui/wait-mask";
 
 const { Text, Paragraph } = Typography;
 const { TextArea } = Input;
@@ -627,10 +628,8 @@ export function DraftsWorkshopPanel() {
             styles={{ body: { padding: 0 } }}
           >
             {isLoading ? (
-              <div style={{ textAlign: "center", padding: 32 }}>
-                <Spin />
-                <Paragraph type="secondary" style={{ marginTop: 12 }}>正在加载草稿...</Paragraph>
-              </div>
+              /* 2026-10-20 统一：等待一律走 `<WaitMask>`。 */
+              <WaitMask open mask={false} title="正在加载草稿" />
             ) : drafts.length === 0 ? (
               <Empty
                 image={<FileTextOutlined style={{ fontSize: 40, color: "#8c8c8c" }} />}

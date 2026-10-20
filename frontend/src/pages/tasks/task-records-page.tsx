@@ -69,6 +69,7 @@
  *    在**详情抽屉**仍能看到；**「来源」列的 Tooltip 全部移除**（列表只留一个 Tag，
  *    说明性文字只留在详情抽屉那一处，不在列表每行挂浮层）。
  */
+import { WaitMask } from "../../components/ui/wait-mask";
 import { DeleteOutlined, QuestionCircleOutlined, ReloadOutlined } from "@ant-design/icons";
 import {
   App,
@@ -904,13 +905,19 @@ export function TaskRecordsPage() {
                   </Space>
                 </Card>
 
+                {/* 2026-10-20 统一：表格等待由公共 WaitMask 表达（Table 自带 loading 会渲染
+
+                    antd Spin 覆盖，与 WaitMask 叠成两层 ⇒ 已移除）。 */}
+
+                <WaitMask open={loading} mask={false} title="正在加载队列记录" />
+
                 <Table<TaskRecord>
                   // ⚠️ `key` 随查询条件变 ⇒ 换一次查询 **重挂载** 一次，让
                   // `defaultExpandAllRows` 生效（查批次号时用户就是要看这一批的明细，
                   // 否则得手点一次展开才知道结果对不对）。
                   key={batchNoQuery ? `batch-${batchNoQuery}` : "all"}
                   rowKey="id"
-                  loading={loading}
+          //: ⚠️ 2026-10-20 统一：移除 Table 自带 loading（它渲染 antd Spin，会与 WaitMask 叠两层）。
                   columns={columns}
                   dataSource={filtered}
                   // 父子树：`children` 由后端下发（前端不自己拼树 —— 分页截断会把

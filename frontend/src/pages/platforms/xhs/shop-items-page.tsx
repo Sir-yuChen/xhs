@@ -2621,18 +2621,18 @@ export function XhsShopItemsPage() {
 
   const waitRunning = waitLabel !== null;
   return (
-    //: 页面级等待蒙版（2026-10-06 用户口径）：**整页被盖住 + 显示耗时**，等待期间下面的
-    //: 按钮一律点不到 ⇒ 也就不会出现「等结果时结果窗口被关掉」。
-    //: ⚠️ 用 `Spin` 包整页而不是给每个按钮加 `loading`：口径是「**所有功能**的等待都要
-    //: 有蒙版」，按钮级 loading 只表达「这个按钮在转」，表达不了「整页在等」。
-    //: ⚠️ **`Spin` 只保留「挡住交互 + 维持高度链」两个职责，`tip` 已移除**（用户口径
-    //: 2026-10-20「统一蒙版样式」）：`Spin` 的 `tip` 跟着内容流滚，页面一滚「已耗时 Ns」就
-    //: 看不见了；文案改由 `<WaitMask>`（fixed + flex 居中）画在最上层，与滚动无关。
-    //: 不能把 `Spin` 整个换成 `WaitMask` —— 下面 `.ant-spin-container` 是台账三区高度链的一环。
-    <Spin
-      spinning={waitRunning}
-      size="large"
-    >
+    //: **页面级等待 = `<WaitMask mask={false}>` 的居中白卡片**（用户口径 2026-10-20
+    //: 「可以不要蒙版只要居中的弹窗提示」），不再有半透明底、也不再挡交互。
+    //:
+    //: ⚠️ **为什么这里不用 antd `<Spin>` 包整页**（实测根因，别再改回去）：
+    //: antd 6 的 `Spin` **无条件渲染 `Indicator`** —— 即使 `spinning={false}` 且
+    //: `indicator` 传空，也会多渲染一个 section。表现就是页面上多出一个「只有圈、
+    //: 没有字」的转圈，与 `WaitMask` 的卡片并排 = 用户看到的「两个居中提示」。
+    //: ⇒ 换成**同名类名的普通 div**（`.ant-spin` / `.ant-spin-container`）：
+    //: `global.css` 里的三层高度链规则逐字不变（台账卡三区固定布局靠它），
+    //: 而 antd 完全不参与渲染。
+    <div className="ant-spin">
+    <div className="ant-spin-container">
     <Flex
       vertical
       gap={10}
@@ -3038,7 +3038,10 @@ export function XhsShopItemsPage() {
           <Table<XhsShopItem>
             rowKey="item_id"
             size="small"
-            loading={loading}
+            //: ⚠️ **不要 `loading={loading}`**（2026-10-20 用户实测「两层等待图标」的根因）：
+            //: antd `Table` 的 loading 会自己渲染一层 `Spin` 覆盖（四点转圈），
+            //: 与页面级 `<WaitMask>` 的白卡片叠在一起 ⇒ 看起来是「两个等待」。
+            //: 等待表现统一交给 `<WaitMask>`，表格这里只负责把数据画出来。
             columns={columns}
             dataSource={data.items}
             //: ⚠️ 类名挂**外层 div**（蚂蚁表格的 `className` 落到最内层的 `.ant-table`，
@@ -3378,37 +3381,26 @@ export function XhsShopItemsPage() {
             各控件的 `disabled={detailImageGenerating}` 承担（两处都拦 = 一份判据
             两个实现，DEF-044）；且**不盖 Modal 的关闭按钮区**（那在 header，
             内容区之外）—— 关闭与否由 `closable` / `onCancel` 决定，与遮罩无关。 */}
-        {detailImageGenerating && (
-          <div
-            style={{
-              position: "absolute",
-              inset: 0,
-              zIndex: 10,
-              background: "rgba(255,255,255,0.72)",
-              backdropFilter: "blur(1px)",
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: 10,
-              pointerEvents: "none",
-            }}
-          >
-            <Spin size="large" />
-            <Text strong style={{ fontSize: 14 }}>
-              正在出图… 已耗时 {detailImageElapsed} 秒
-            </Text>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              逐张串行调用上游，单张约 30–100 秒
-            </Text>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              生成期间弹窗不可关闭（关闭会看不到结果）
-            </Text>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              逐张串行调用上游，单张约 30–100 秒；生成期间弹窗不可关闭（关闭会看不到结果）
-            </Text>
-          </div>
-        )}
+        {/* v2.30（2026-10-20 用户口径「第二个红框还有一个等待蒙版转圈」）：
+            原来这里是**自建 div + antd `<Spin size="large" />`** 的独立蒙版 ——
+            全站统一蒙版后它成了漏网的一个（页面里同时存在两套转圈：`WaitMask` 圆环
+            + 这里 antd 的圈）⇒ 改用 `<WaitMask scope="panel">`，与其它等待一致。
+            `sub` 承载原来那几条灰字说明（串行耗时 / 不可关闭），文案不丢。
+            ⚠️ `scope="panel"` 要求父元素 `position: relative`（Modal body 已满足）。 */}
+        <WaitMask
+          open={detailImageGenerating}
+          mask
+          scope="panel"
+          title="正在出图"
+          elapsed={detailImageElapsed}
+          sub="逐张串行调用上游，单张约 30–100 秒；生成期间弹窗不可关闭（关闭会看不到结果）"
+        />
+        {/* 详情图数据加载中的提示（原来由 Tab 内 `Spin spinning` 画，已统一改到这里）。 */}
+        <WaitMask
+          open={detailImageLoading}
+          scope="panel"
+          title="正在加载详情图数据"
+        />
         <Descriptions size="small" column={2} style={{ marginBottom: 12 }}>
           <Descriptions.Item label="商品">
             {detailImageItem?.title || detailImageItem?.item_id || "-"}
@@ -3471,7 +3463,9 @@ export function XhsShopItemsPage() {
               </span>
             ),
             children: (
-              <Spin spinning={detailImageLoading}>
+              //: ⚠️ 2026-10-20 统一口径：转圈不再由 antd Spin 画（会叠加/压字），
+              //: 交给 `<WaitMask>` 画居中提示（与全站一致）。Spin 只留结构。
+              <Spin spinning={false} indicator={<></>}>
                 <Space direction="vertical" size={12} style={{ width: "100%" }}>
                   {/* ① 可选参考图（v2.23 用户口径：「把原始主图、原始详情图**放一组内**，
                       该组为**可选参考图**，只有用户选了就一并扔给大模型，**最多选 6 张**」）——
@@ -4043,8 +4037,16 @@ export function XhsShopItemsPage() {
         同步商品需要可用的千帆令牌，请到「账号矩阵」登录 / 重新登录千帆后再试。
       </Modal>
     </Flex>
+    </div>
       {/* 页面级等待蒙版：与全站同一套视觉（fixed 铺满 + 白卡居中 + 已耗时）。 */}
-      <WaitMask open={waitRunning} title={waitLabel ?? ""} elapsed={waitElapsedSec} />
-    </Spin>
+      {/* 用户口径 2026-10-20：「可以不要蒙版只要居中的弹窗提示」
+          ⇒ `mask={false}`：不画半透明底（页面不被"洗白"两层），只显示居中白卡片 + 耗时。 */}
+      <WaitMask
+        open={waitRunning}
+        mask={false}
+        title={waitLabel ?? ""}
+        elapsed={waitElapsedSec}
+      />
+    </div>
   );
 }

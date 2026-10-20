@@ -45,6 +45,7 @@ import {
 import { triggerSummary } from "../../../lib/schedule";
 import { formatShanghaiTime } from "../../../lib/time";
 import type { AutoTask, AutoTaskRunResult, PlatformAccount, ScheduleIn } from "../../../types";
+import { WaitMask } from "../../../components/ui/wait-mask";
 
 const { Text, Paragraph } = Typography;
 const { TextArea } = Input;
@@ -270,11 +271,9 @@ export function AutoOpsPanel() {
         </Button>
       </div>
       {isLoading ? (
-        <Card style={panelStyle} styles={{ body: cardBodyStyle }}>
-          <div style={{ textAlign: "center", padding: 48 }}>
-            <Spin size="large" />
-            <Paragraph style={{ color: "#8c8c8c", marginTop: 16 }}>正在加载自动运营任务...</Paragraph>
-          </div>
+        //: 2026-10-20 统一：等待一律走 `<WaitMask>`。
+        <Card style={panelStyle} styles={{ body: { ...cardBodyStyle, position: "relative" } }}>
+          <WaitMask open mask={false} scope="panel" title="正在加载自动运营任务" />
         </Card>
       ) : tasks.length === 0 && !showCreate ? (
         <Card style={panelStyle} styles={{ body: cardBodyStyle }}>

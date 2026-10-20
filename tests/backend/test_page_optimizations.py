@@ -4340,16 +4340,18 @@ def test_detail_image_mask_covers_whole_modal_and_results_are_thumbnails():
     # 遮罩的定位父级仍是那个 `<div style={{ position: "relative" }}>`，只是中间隔了 Tabs 的
     # `children`（Tabs 自身不产生新层、不设 position，绝对定位照旧相对那个 relative div）。
     # ⇒ 判据从「紧邻」放宽成「在同一个弹窗块内存在 relative 父级」。
-    assert 'position: "absolute"' in page and 'inset: 0' in page, (
-        "生成中的蒙版不是整体覆盖（应为 absolute + inset:0）"
+    #: ⚠️ 2026-10-20：自建 `absolute` 遮罩已统一为 `<WaitMask scope="panel" mask>`。
+    #: 判据跟着换承重点：`scope="panel"` + `mask` + 由 `detailImageGenerating` 驱动。
+    assert 'open={detailImageGenerating}' in page, "生成中未挂等待蒙版"
+    gen_at = page.index('open={detailImageGenerating}')
+    gen_block = page[max(0, gen_at - 300) : gen_at + 400]
+    assert 'scope="panel"' in gen_block, (
+        "生成蒙版必须是 panel 作用域（只盖弹窗，不盖整页）"
     )
-    # ⚠️ 判据必须**紧邻**蒙版 —— 页面里有 3 处 `position: "relative"`，
-    # 用「蒙版之前出现过」会被**别处**的 relative 满足（实测变异 `norel`
-    # 拆掉蒙版自己的父级后判据照样通过 = 假绿）。取蒙版前 400 字符内。
-    mask_at = page.index('inset: 0')
-    nearby = page[max(0, mask_at - 400) : mask_at]
+    assert 'mask' in gen_block, "生成期间必须挡交互（mask）"
+    #: 仍需一个 `position: relative` 的定位父级（`scope="panel"` 是 absolute 定位）。
     assert 'position: "relative"' in page, (
-        "蒙版没有紧邻的 position:relative 父级 —— absolute 会以页面为基准铺满全屏"
+        "缺 position:relative 父级 —— panel 蒙版会以页面为基准铺满全屏"
     )
 
     # ③ 结果缩略图（固定尺寸），且不再有整幅 width="100%" 的结果图
@@ -4867,12 +4869,21 @@ def test_shop_items_waits_all_use_the_page_mask_and_elapsed():
     #: ① 根级 Spin 挡交互 + WaitMask 显示耗时文案
     #: （2026-10-20 统一蒙版：耗时不再写在 `Spin tip` 里 —— tip 跟内容滚走，
     #:  改由 `<WaitMask elapsed=…>` 画在最上层。断言**新的承重点**。）
-    assert "spinning={waitRunning}" in page, "页面缺根级等待蒙版"
-    assert "<WaitMask" in page and "elapsed={waitElapsedSec}" in page, (
-        "蒙版上要显示**耗时**（用户口径）：应由 WatchMask 的 elapsed 承担"
+    #: ⚠️ 2026-10-20 判据换承重点：**页面根级不再用 antd `<Spin spinning>`**。
+    #: 实测根因：antd 6 的 `Spin` 无条件渲染 `Indicator`，即使 `spinning={false}`
+    #: 也会多渲染一个「只有圈没有字」的空壳，与 `WaitMask` 的卡片并排出现
+    #: ⇒ 用户看到「两个居中提示」。改用**同名类名的普通 div**（`.ant-spin` /
+    #: `.ant-spin-container`），`global.css` 的高度链规则不变、antd 不参与渲染。
+    assert '<div className="ant-spin">' in page, "页面缺根级等待容器（.ant-spin）"
+    assert '<div className="ant-spin-container">' in page, "缺高度链内层（.ant-spin-container）"
+    assert "spinning={waitRunning}" not in page, (
+        "不许回退到 antd `Spin spinning` —— antd6 会无条件渲染空 Indicator，变成两层等待"
     )
-    assert 'tip={' not in page.split("spinning={waitRunning}")[1][:400], (
-        "不许回退到 `Spin tip` —— tip 会跟内容滚出可视区"
+    assert "<WaitMask" in page and "elapsed={waitElapsedSec}" in page, (
+        "等待提示与耗时由 `<WaitMask>` 承担"
+    )
+    assert "mask={false}" in page, (
+        "页面级等待不要遮罩底（用户口径 2026-10-20「可以不要蒙版只要居中的弹窗提示」）"
     )
     assert "const waitRunning = waitLabel !== null;" in page, "缺等待判据"
     #: ② 幂等 beginWait（不重起秒表）+ 停表
@@ -8801,7 +8812,7 @@ def test_sku_pick_modal_has_waiting_mask_on_confirm():
     assert "busy?: boolean;" in block, "弹窗应接收上传中态"
     #: ⚠️ 2026-10-20 统一蒙版：由 `Spin` 换成 `<WaitMask scope="panel">`
     #: （Spin 的 tip 跟内容滚走；panel 作用域只盖弹窗本体）。
-    assert '<WaitMask open={!!props.busy} scope="panel"' in block, "确认后应盖等待蒙版"
+    assert '<WaitMask open={!!props.busy} mask scope="panel"' in block, "确认后应盖等待蒙版"
     assert "confirmLoading={props.busy}" in block, "确认按钮应显示 loading"
     assert "props.busy" in block.split("okButtonProps")[1][:80], "上传中应禁用二次确认"
 

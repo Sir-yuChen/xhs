@@ -181,7 +181,7 @@ function SkuPickModal(props: {
             ⚠️ 2026-10-20 换统一 WaitMask：老写法 Spin + tip 的 tip 会跟内容滚走，
             且全站样式不一。外层 position: relative 供蒙版铺满本弹窗体。 */}
         <div style={{ position: "relative" }}>
-          <WaitMask open={!!props.busy} scope="panel" title="正在上传规格图" />
+          <WaitMask open={!!props.busy} mask scope="panel" title="正在上传规格图" />
         {/* 用户口径（2026-10-10）：规则文案放弹窗**顶部提示**。 */}
         <Alert type="info" showIcon style={{ marginBottom: 12 }} message={SPEC_IMAGE_RULE} />
         {items.length === 0 ? (
@@ -3190,8 +3190,11 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
               防止中途改配置产出半成品。 */}
           {/* ⚠️ 2026-10-20：`tip` 已移除，改由统一 `<WaitMask>` 画在最上层
               （`Spin` 的 tip 跟内容滚走；`Spin` 只保留挡交互的职责）。 */}
+          {/*: ⚠️ 2026-10-20 统一：`spinning` 恒 false —— 若为 true，`Spin` 会画自己的
+               半透明底，与下方 `<WaitMask>` 叠成两层（用户实测）。这里只留结构职责。 */}
           <Spin
-            spinning={importRunning}
+            spinning={false}
+            indicator={<></>}
             style={{ width: "100%" }}
             wrapperClassName="import-spin-wrapper"
           >
@@ -3501,8 +3504,12 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
             />
           )}
           </Spin>
+          {/* 导入中需要挡交互（防止中途改配置）⇒ 这里显式 `mask`；
+              上面的 `Spin` 已 `spinning={false}`，不会再叠第二层底。 */}
           <WaitMask
             open={importRunning}
+            mask
+            scope="panel"
             title={importProgress || "正在导入"}
             elapsed={importElapsed}
           />

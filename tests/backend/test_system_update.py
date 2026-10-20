@@ -665,13 +665,22 @@ def test_github_release_is_the_only_fallback():
 
 
 def test_release_script_publishes_to_github():
-    """发版脚本第 7 阶段必须调 `github_release.py`，且不再调 gitee 脚本。"""
+    """发版脚本第 7 阶段必须走**官方 gh CLI**，且不再调 gitee 脚本。
+
+    ⚠️ 2026-10-20 用户口径「我来安装用官方的」：原来是自研 `github_release.py`
+    （手写 urllib + 重试），现已改用 `gh release create/upload` ——
+    官方维护、凭据自管。判据随之换到 `gh release`。
+    """
     from pathlib import Path
 
     script = Path(__file__).resolve().parents[2] / "packaging" / "release.ps1"
     text = script.read_text(encoding="utf-8-sig")
-    assert "github_release.py" in text, "release.ps1 未调用 github_release.py"
+    #: 实际写法是 `& $ghExe release create …`（gh 不在 PATH）⇒ 判据要允许变量。
+    assert "release create" in text, "release.ps1 未调用 gh release create"
+    assert "release upload" in text, "release.ps1 缺 gh release upload 兜底路径"
     assert "gitee_release.py" not in text, "release.ps1 仍在调 gitee_release.py"
+    #: gh 不在 PATH（本机装在 D:\Program Files\GitHub CLI）⇒ 必须显式定位。
+    assert "GitHub CLI" in text, "release.ps1 未处理 gh 不在 PATH 的情况"
 
 
 def test_github_release_script_retries_on_flaky_network():
