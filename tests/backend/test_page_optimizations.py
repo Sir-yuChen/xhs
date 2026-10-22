@@ -8337,19 +8337,45 @@ def test_step2_after_sale_rule_comes_from_platform_by_category():
     assert '"action": "getSupportAfterSale"' in sdk, "SDK 缺 getSupportAfterSale"
 
 
-def test_video_upload_uses_its_own_scene_not_the_image_space():
-    """**商品视频走独立直传（`common_file`），不走图片空间**（2026-10-09 实测修复）。
+def test_video_upload_uses_goods_video_scene_and_registers():
+    """**商品视频走 `goods_video` 场景，且必须登记**（2026-10-22 真机抓包坐实）。
 
-    实测根因：mp4 走图片链路（`scene=goods_image`）PUT 成功，但登记一步答
-    「获取上传文件[v]信息失败」—— 图片空间是**图片库**（条目 `type:2` 要 width/height）。
-    真机 bundle 里「上传视频」是 `scene=common_file` 的独立直传，成功直接给 `{url,fileId}`。
+    ⚠️⚠️ **本条断言被推翻并重写**（原句保留在下面，不静默删除）：
+
+        原文：「商品视频走独立直传（`common_file`），不走图片空间」（2026-10-09）
+              assert 'scene="common_file"' in block
+              assert "register_material_files" not in block
+
+    **两个断言都是错的**，依据是 `9515.*.js` 里一句 `scene:"common_file"`（那属于
+    别的上传场景）。真机抓包（用户配合，商品发布页上传一次视频）显示平台自己：
+
+        GET  /api/edith/upload/web/permit?biz_name=ark&scene=goods_video&file_count=1
+        POST https://ros-upload.xiaohongshu.com/?uploads&prefix=arkgoods/<id>
+        POST /api/edith/product/material_space/batch_add_directory_manageable   ← 登记
+
+    ⇒ 视频与图片**同桶**（`arkgoods/`），所以**必须登记**拿 `materialId`；
+    用 `common_file` 会落 `ark-common/` 桶，登记恒答「获取上传文件[v]信息失败」
+    ⇒ `materialId` 空 ⇒ 提交体引用无效 ⇒ **商品发布后主图视频是空白框、播不了**。
+
+    教训：旧守卫把**错误结论固化成了红线**，改代码时被它拦下才知道要一起改。
+    详细试错账见 `docs/05_项目沉淀/07_复盘_商品主图视频发布后无法播放.md`。
     """
     q = _read_qianfan()
     assert '"/video/upload"' in q, "缺视频直传端点"
     i = q.index("def video_upload")
-    block = q[i : i + 3000]
-    assert 'scene="common_file"' in block, "视频应走 common_file 场景（图片空间 scene 会失败）"
-    assert "register_material_files" not in block, "视频不该登记图片空间（会被拒）"
+    #: ⚠️ 窗口要覆盖到**登记段**（`register_material_files` 在 ~7000 字符处，
+    #: 3500 只到「上传凭证没有预分配文件 ID」⇒ 首轮误判「没登记」）。
+    block = q[i : q.index("\n@router.", i)]
+
+    assert 'scene="goods_video"' in block, (
+        "视频上传申请凭证的 scene 必须是 goods_video（common_file 会落错桶）"
+    )
+    assert 'scene="common_file"' not in block, (
+        "视频仍在用 common_file —— 文件落 ark-common 桶，登记必然失败、发布后播不了"
+    )
+    assert "register_material_files" in block, (
+        "视频必须登记图片空间（拿 materialId），否则提交体 videos[] 引用无效"
+    )
     #: 前端：视频不再复用图片上传
     wiz = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
     assert "uploadVideoFromPackage" in wiz, "自动加载未用视频专用上传"
