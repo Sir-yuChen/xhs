@@ -89,3 +89,9 @@ frontend/dev/
 #: （读源码版本历史 / 包内自检）写成临时文件再跑 —— 因为 PS 5.1 用 `-c` 传
 #: 含中文的代码会被控制台代码页破坏。属于**构建中间产物**，不进库。
 /packaging/.py-tmp/
+
+#: ⚠️ 签名运行时的**临时输入快照**（2026-10-23 加）：`xhs_utils/xhs_core/js/`
+#: 下的签名脚本会把「待签名请求体」落成 `.sign_input_*.json` 再交给 node 处理。
+#: 内容含 sellerId / 素材 id 等平台数据，且每次调用都会生成新文件
+#: ⇒ 属于运行时中间件，不进库。
+xhs_utils/xhs_core/js/.sign_input_*.json

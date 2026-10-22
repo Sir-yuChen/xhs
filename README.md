@@ -12,8 +12,8 @@
 
 **小红书一站式智能运营平台 — 采集、分析、AI 创作、自动发布，全链路闭环**
 
-[![Version](https://img.shields.io/badge/version-v1.0.4-brightgreen)](https://github.com/Sir-yuChen/xhs/releases)
-[![Desktop](https://img.shields.io/badge/Windows-桌面安装包%20v1.0.4-0078D6)](./packaging/README.md)
+[![Version](https://img.shields.io/badge/version-v1.0.5-brightgreen)](https://github.com/Sir-yuChen/xhs/releases)
+[![Desktop](https://img.shields.io/badge/Windows-桌面安装包%20v1.0.5-0078D6)](./packaging/README.md)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![Node.js](https://img.shields.io/badge/nodejs-20%2B-green)](https://nodejs.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100%2B-009688)](https://fastapi.tiangolo.com/)
@@ -304,6 +304,18 @@ pytest $(python .hermes/scripts/pick_tests.py) -q
 ---
 
 ## 📦 版本记录
+
+### v1.0.5 · 2026-10-23（桌面安装包）
+
+- **商品主图视频发布后无法播放** —— 根因是上传场景用错（`common_file` → 文件落
+  `ark-common/` 桶，而登记只认 `arkgoods/`），登记失败后 `materialId` 为空、提交体
+  引用无效。改 `scene=goods_video` 一处修好；登记失败不再静默跳过。
+- **规格名称优化只改名、不再丢数据** —— 改名时按行号快照复原，规格图 / 售价 /
+  当前库存 / 改后库存 / 市场价 / 规格ID / 条形码 / 商家编码全部保留。
+- 规格名称：同维度重名整批拒绝（防 SKU 行错位）、逐字符判重、60 字符改严格大于、
+  导入后不再自动弹优化窗（改顶部按钮手动触发）。
+- 导入 SKU：取图按路径去重，同名图只取一次。
+- 常驻服务：launcher 单实例锁 + 指数退避 + 计划任务每 5 分钟兜底拉起。
 
 ### v1.0.4 · 2026-10-20（桌面安装包）
 
