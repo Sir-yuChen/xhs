@@ -232,7 +232,7 @@ class Settings(BaseSettings):
     #    平台自身证据：笔记发布链路 `note_publish_service._upload_media` 早已
     #    `upload_web_permit(len(downloaded))` 一次批量申请 N 个上传位。
     # ⚠️ 运行期可在设置页改（`system_settings` 行优先于本值）。
-    xhs_image_upload_parallelism: int = 5
+    xhs_image_upload_parallelism: int = 8
 
     #: 笔记**图片总数**（一篇笔记最多几张图）—— 生成链路的组合总闸（设计 41 §17）。
     #: ⚠️ **平台硬顶 18**（官方 `xhs.postNote` 原文「图片可以多张（1-18）」），

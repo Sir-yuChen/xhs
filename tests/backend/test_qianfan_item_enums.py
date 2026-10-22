@@ -114,3 +114,109 @@ class TestPublishBodyUsesEnums:
             variants=[{"attributeId": "v-1", "attributeName": "颜色", "attributeType": 1, "attributeValue": "红"}],
         )
         assert sku["deliveryTime"] == {"type": int(enums.DeliveryTimeType.HOURS), "time": "48"}
+
+
+class TestPreallocateUploadPermits:
+    """**批量先拿凭证再上传**（用户口径 2026-10-22）。
+
+    旧链路每张图各申请一次 `upload_web_permit(count=1)`：
+    45 张 = 45 次凭证 + 45 次 PUT ⇒ 用户实测「点击发布耗时 40 秒」。
+    本组钉住：① 一次拿多个；② 平台单次上限 14 时分批；
+    ③ 每个 fileId 带**自己那批**的 addr/token；④ 拿不齐如实返回已拿到部分。
+    """
+
+    @staticmethod
+    def _api(calls: list[int], per_batch_cap: int = 14):
+        class _Api:
+            @staticmethod
+            def upload_web_permit(count, **kwargs):
+                calls.append(int(count))
+                n = min(int(count), per_batch_cap)
+                return True, "ok", {
+                    "data": {
+                        "uploadTempPermits": [
+                            {
+                                "qos": 1,
+                                "fileIds": [f"fid-{len(calls)}-{i}" for i in range(n)],
+                                "uploadAddr": f"https://ros/{len(calls)}",
+                                "token": f"tok-{len(calls)}",
+                            }
+                        ]
+                    }
+                }
+
+        return _Api()
+
+    def test_single_call_when_within_platform_cap(self):
+        from backend.app.services import shop_draft_service as svc
+
+        calls: list[int] = []
+        permits, reason = svc.preallocate_upload_permits(self._api(calls), 10)
+        assert reason == ""
+        assert len(permits) == 10
+        assert calls == [10], "10 张 ≤ 平台单次上限 14 ⇒ 只申请一次"
+
+    def test_batches_beyond_platform_cap_of_14(self):
+        from backend.app.services import shop_draft_service as svc
+
+        calls: list[int] = []
+        permits, reason = svc.preallocate_upload_permits(self._api(calls), 24)
+        assert reason == ""
+        assert len(permits) == 24
+        #: 24 张 ⇒ 14 + 10 两批（平台单次最多 14 个 fileId）。
+        assert calls == [14, 10], calls
+
+    def test_each_file_id_carries_its_own_batch_credentials(self):
+        """分批拿到的凭证**互不通用** —— 每个 fileId 必须带自己那批的 addr/token。"""
+        from backend.app.services import shop_draft_service as svc
+
+        calls: list[int] = []
+        permits, _ = svc.preallocate_upload_permits(self._api(calls), 20)
+        #: 前 14 个来自第 1 批，后 6 个来自第 2 批。
+        assert permits[0]["upload_addr"] == "https://ros/1"
+        assert permits[13]["upload_addr"] == "https://ros/1"
+        assert permits[14]["upload_addr"] == "https://ros/2"
+        assert permits[19]["token"] == "tok-2"
+
+    def test_batches_until_quota_met_even_if_platform_gives_fewer_per_call(self):
+        """平台单批给得比要求少 ⇒ **继续要，直到拿齐或平台返回空批**。
+
+        ⚠️ 这条用例原本写的是「拿不齐就少给」——那是**错的期望**：
+        分批循环的意义就是「这批没给够，下一批接着要」。
+        真正的边界是**平台返回空批**（再要也是空）⇒ 此时停下并如实返回已有部分，
+        不能死循环、也不能谎报拿齐。
+        """
+        from backend.app.services import shop_draft_service as svc
+
+        calls: list[int] = []
+        permits, reason = svc.preallocate_upload_permits(self._api(calls, per_batch_cap=5), 12)
+        assert reason == ""
+        assert len(permits) == 12, "应从 5/批 一直要到拿满 12"
+        assert len(calls) >= 3, f"12 张、每批最多 5 ⇒ 至少 3 次申请，实际 {calls}"
+
+    def test_stops_on_empty_batch_without_looping_forever(self):
+        """平台返回**空 fileIds** ⇒ 立即停（再要也是空），如实返回已拿到的部分。"""
+        from backend.app.services import shop_draft_service as svc
+
+        calls: list[int] = []
+
+        class _Empty:
+            @staticmethod
+            def upload_web_permit(count, **kwargs):
+                calls.append(int(count))
+                return True, "ok", {
+                    "data": {"uploadTempPermits": [{"qos": 1, "fileIds": [], "uploadAddr": "u", "token": "t"}]}
+                }
+
+        permits, reason = svc.preallocate_upload_permits(_Empty(), 8)
+        assert permits == [], "空批 ⇒ 一个 fileId 都拿不到"
+        assert reason == ""
+        assert len(calls) == 1, f"空批后必须停，实际申请了 {len(calls)} 次"
+
+    def test_zero_needs_no_request(self):
+        from backend.app.services import shop_draft_service as svc
+
+        calls: list[int] = []
+        permits, reason = svc.preallocate_upload_permits(self._api(calls), 0)
+        assert permits == [] and reason == ""
+        assert calls == [], "0 张图不该发任何凭证申请"

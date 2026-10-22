@@ -54,7 +54,7 @@
     },
     {
       "key": "xhs_image_upload_parallelism",
-      "value": 5,
+      "value": 8,
       "value_type": "int",
       "category": "sync",
       "label": "媒体上传并发数（主图/详情图/规格图）",

@@ -739,20 +739,46 @@ def publish_item_to_online(
         if s.get("image_path"):
             _register_image_ref(s["image_path"])
 
-    #: ⚠️ **并行上传**（用户实测「顶级确认发布很慢」）：每张图要 1 次 permit + 1 次 PUT，
-    #: 26 张串行 ⇒ 几十秒起步且**线性叠加**。用有上限的线程池并发（8 路）压掉这段；
-    #: 单张仍是「失败逐条如实报」，**不静默丢图**（口径不变，只改并发度）。
+    #: ⚠️ **先批量拿齐凭证，再并发上传**（用户口径 2026-10-22：
+    #: 「改为批量先获取所有图片的凭证，再上传」）。
+    #:
+    #: 旧实现每张图各申请一次 `upload_web_permit(count=1)`：
+    #: 45 张 = 45 次凭证申请 + 45 次 PUT。用户实测**点击发布耗时 40 秒**，
+    #: 慢在凭证那一跳（平台侧最慢的一环），不是带宽或图片大小。
+    #: ⇒ 现在：一次（或按平台 14 个/批）拿到全部 fileId，再 8 路并发 PUT。
+    #:   凭证申请次数从 N 降到 ceil(N/14)。
     from concurrent.futures import ThreadPoolExecutor
 
-    def _upload_one(path_str: str) -> tuple[str, Any, Any]:
+    permits, permit_reason = draft_svc.preallocate_upload_permits(
+        adapter, len(_paths_to_upload)
+    )
+    if permit_reason:
+        #: 凭证申请整体失败 ⇒ 全部图片如实记失败（不静默丢图）。
+        for path_str in _paths_to_upload:
+            failed_images.append({"path": path_str, "reason": permit_reason})
+        _paths_to_upload = []
+    elif len(permits) < len(_paths_to_upload):
+        #: 拿不齐（平台封顶/异常）⇒ 多出来的那些如实报，前 N 张照传。
+        for path_str in _paths_to_upload[len(permits) :]:
+            failed_images.append(
+                {
+                    "path": path_str,
+                    "reason": f"上传凭证不足（需要 {len(_paths_to_upload)} 个，平台只给了 {len(permits)} 个）",
+                }
+            )
+        _paths_to_upload = _paths_to_upload[: len(permits)]
+
+    def _upload_one(pair: tuple[str, dict[str, Any]]) -> tuple[str, Any, Any]:
+        path_str, one_permit = pair
         ok_img, reason, entry = draft_svc.upload_one_image(
-            adapter, seller_id=seller_id, file_path=_abs(path_str)
+            adapter, seller_id=seller_id, file_path=_abs(path_str), permit=one_permit
         )
         return path_str, (ok_img, reason, entry), _abs(path_str)
 
     if _paths_to_upload:
-        with ThreadPoolExecutor(max_workers=min(8, len(_paths_to_upload))) as pool:
-            for path_str, (ok_img, reason, entry), abs_path in pool.map(_upload_one, _paths_to_upload):
+        pairs = list(zip(_paths_to_upload, permits))
+        with ThreadPoolExecutor(max_workers=min(8, len(pairs))) as pool:
+            for path_str, (ok_img, reason, entry), abs_path in pool.map(_upload_one, pairs):
                 if ok_img and entry:
                     uploaded[abs_path] = entry
                 else:

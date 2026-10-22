@@ -1394,7 +1394,10 @@ export function buildSkuFillPlan(
       const first = hitEntries[0];
       const dimName = first.entry.dim.name;
       const value = slot.parts[0]?.value ?? "";
-      const imgKey = `${dimName} ${value}`;
+      //: 规格名称由用户配置的映射列决定（`dimName` / `value` 来自映射关系），
+      //: 代码不写死任何规格名 —— 用户口径：「规格名称不是固定死的是用户配置的映射列」。
+      //: ⇒ 去重键 = 第一维度的「维度名 + 值」（即该映射列下的规格名称）。
+      const imgKey = `${dimName}\u0000${value}`;
       if (!pushedSpecImages.has(imgKey)) {
         pushedSpecImages.add(imgKey);
         plan.images.push({

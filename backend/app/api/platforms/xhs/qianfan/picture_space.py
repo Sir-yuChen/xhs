@@ -888,13 +888,14 @@ def picture_space_upload(
     from backend.app.services import shop_draft_service as draft_svc
 
     _material_id = draft_svc._registered_material_id(raw_resp) or file_id
-    _record = draft_svc._fetch_material_record(
-        adapter, name=str(item.get("name") or ""), material_id=_material_id
-    )
-    _path_value = str(_record.get("path") or (item.get("additionalData") or {}).get("path") or file_id)
+    #: ⚠️⚠️ **不回读**（用户口径 2026-10-22：「回读没必要移除，保持与详情图一样」）。
+    #: `additionalData.path` 就是登记时平台分配给该素材的 CDN id（`arkgoods/1040g…`），
+    #: 与回读得到的值**完全相同**；而回读是轮询（6 次 × ~1.4s，实测失败一次 8.18s），
+    #: 纯白等。与批量端点 / 详情图同一条路径。
+    _additional = item.get("additionalData") or {}
+    _path_value = str(_additional.get("path") or "").strip() or file_id
     _link_value = str(
-        _record.get("link")
-        or (item.get("additionalData") or {}).get("link")
+        _additional.get("link")
         or f"https://qimg.xiaohongshu.com/{_path_value}"
     )
     #: 回给前端的链接：优先带签名的预览地址（PUT 响应头给的），
@@ -1140,17 +1141,24 @@ def picture_space_upload_batch(
             from backend.app.services import shop_draft_service as draft_svc
 
             material_id = draft_svc._registered_material_id(raw_resp) or file_id
-            record = draft_svc._fetch_material_record(
-                adapter, name=str(reg_item.get("name") or ""), material_id=material_id
-            )
-            path_value = str(
-                record.get("path")
-                or (reg_item.get("additionalData") or {}).get("path")
-                or file_id
-            )
+            #: ⚠️⚠️ **不做回读**（用户口径 2026-10-22：「回读没必要移除，保持与详情图一样」）。
+            #:
+            #: 根因（实测）：`_fetch_material_record` 是**轮询**（6 次 × ~1.4s），
+            #: 因为它要等图片空间搜索的**最终一致**。实测一次失败的回读要 **8.18 秒**
+            #: ⇒ 24 张图 / 5 路并发光这一项就能吃掉 30~40 秒（用户实测 80 秒）。
+            #:
+            #: 而且它**不携带任何新信息**：`path` / `link` 在登记时就是**我们提交的**
+            #: （`additionalData.path = arkgoods/<id>`、`uploaderInfoModel.fileId` 同值），
+            #: 登记失败会直接走 `return`（下面的 `ok3` 判断），成功则不需要再问一次。
+            #: `build_publish_image` 也是从带签名 url 提取短格式 fileId，不依赖回读。
+            #:
+            #: ⇒ 与主图/详情图**完全同一条路径**：PUT → 登记 → 直接用登记体里的
+            #:   `additionalData.path` / `link` 返回。
+            _additional = reg_item.get("additionalData") or {}
+            _sent_path = str(_additional.get("path") or "").strip()
+            path_value = _sent_path or file_id
             link_value = str(
-                record.get("link")
-                or (reg_item.get("additionalData") or {}).get("link")
+                _additional.get("link")
                 or f"https://qimg.xiaohongshu.com/{path_value}"
             )
             fallback_url = ""

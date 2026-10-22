@@ -457,7 +457,7 @@ def test_create_reports_readback_diff(monkeypatch):
     一起退场。新接口的**响应结构**（`draftId` 还是 `productDraftId`）与回读校验
     契约**待真机抓包确认**（用户 2026-10-11 口径：抓包后统一改，不做保守处理）。
     """
-    def _ok_upload(api, *, seller_id, file_path):
+    def _ok_upload(api, *, seller_id, file_path, permit=None):
         return True, "成功", {"link": "https://x/a", "path": "material_space/a"}
 
     monkeypatch.setattr(svc, "upload_one_image", _ok_upload)
@@ -485,6 +485,22 @@ def test_create_reports_readback_diff(monkeypatch):
         @staticmethod
         def search_items(**kwargs):
             return True, "ok", {"data": {"items": []}}
+
+        @staticmethod
+        def upload_web_permit(count, **kwargs):
+            """**批量预分配凭证**（2026-10-22 起上传前一次性拿齐）。"""
+            return True, "ok", {
+                "data": {
+                    "uploadTempPermits": [
+                        {
+                            "qos": 1,
+                            "fileIds": [f"fid-{i}" for i in range(int(count))],
+                            "uploadAddr": "https://ros.example/put",
+                            "token": "tok",
+                        }
+                    ]
+                }
+            }
 
     result = svc.create_draft(
         api=_Api(), seller_id="s1", category_id="c1", name="n",
@@ -518,7 +534,7 @@ def test_upload_retries_on_transient_failure(monkeypatch):
     """
     attempts = {"n": 0}
 
-    def _flaky(api, *, seller_id, file_path):
+    def _flaky(api, *, seller_id, file_path, permit=None):
         attempts["n"] += 1
         if attempts["n"] < 2:
             return False, "ProxyError: 模拟瞬时失败", None
@@ -547,6 +563,22 @@ def test_upload_retries_on_transient_failure(monkeypatch):
         @staticmethod
         def search_items(**kwargs):
             return True, "ok", {"data": {"items": []}}
+
+        @staticmethod
+        def upload_web_permit(count, **kwargs):
+            """**批量预分配凭证**（2026-10-22 起上传前一次性拿齐）。"""
+            return True, "ok", {
+                "data": {
+                    "uploadTempPermits": [
+                        {
+                            "qos": 1,
+                            "fileIds": [f"fid-{i}" for i in range(int(count))],
+                            "uploadAddr": "https://ros.example/put",
+                            "token": "tok",
+                        }
+                    ]
+                }
+            }
 
     result = svc.create_draft(
         api=_Api(), seller_id="s1", category_id="c1", name="n",

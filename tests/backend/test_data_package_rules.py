@@ -1255,13 +1255,15 @@ class TestSeed:
         out = service.apply_rule("木;中古色-实木三斗柜;上门安装", info.op, service.parse_params(info.params_json))
         assert out == "中古色-实木三斗柜"
 
-        #: 包2「公共」的「计算市场价」= 原值 × 2 + 50（可执行性同样要钉住）。
+        #: 包2「公共」的「计算市场价」= 原值 × 2 + 5（可执行性同样要钉住）。
+        #: ⚠️ 2026-10-22 由 `+50` 改为 `+5`（用户弹窗里的当前配置）：
+        #:   100 × 2 + 5 = 205。
         rules2 = {r.rule_name: r for r in service.list_rules(db_session, user.id, sets[1].id)}
         price_rule = rules2["计算市场价"]
         got = service.apply_rule(
             "100", price_rule.op, service.parse_params(price_rule.params_json)
         )
-        assert got == "250"
+        assert got == "205"
 
     def test_idempotent_and_does_not_clobber_user_edits(self, db_session):
         """⚠️ **幂等**，且用户改过的**不重建、不覆盖**（规则是用户资产）。"""
@@ -1491,9 +1493,11 @@ class TestSeedMatchesTheRealLibrary:
             (
                 "计算市场价",
                 "math_scale",
-                {"steps": [{"op": "mul", "value": 2}, {"op": "add", "value": 50}]},
+                {"steps": [{"op": "mul", "value": 2}, {"op": "add", "value": 5}]},
             ),
             ("计算售价", "math_scale", {"steps": [{"op": "mul", "value": 1.8}]}),
+            #: ⚠️ 2026-10-22 新增：用户在弹窗里配的第 3 条（原种子只有两条）。
+            ("固定值规则", "fixed_text", {"text": "请输入固定文本"}),
         ]
         assert got["至尊宝"] == [
             ("SKU 名称-sku信息列", "extract_segment", {"sep": ":", "index": 2}),

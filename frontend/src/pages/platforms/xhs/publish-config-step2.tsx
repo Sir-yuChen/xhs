@@ -1890,6 +1890,35 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
   }, [specImages, skuPick]);
 
   /** 只改第一组规格值的图（真机：仅第一组支持添加规格图）。 */
+  /** **批量**写规格图 —— 一批只触发一次 setState。
+
+   *  ⚠️ 用户口径 2026-10-22：「24 张图上传正常 30 秒以内肯定可以完成」。
+   *  HAR 实测（127.0.0.1.har，92.5 秒全程）：每批 `upload-batch` 只有 **2.6 秒**，
+   *  但批与批之间各空 **12~13 秒零网络请求** —— 空转不在网络上，在**渲染**：
+   *  旧写法一批 8 张逐项调 `setSpecImage` ⇒ 8 次 `setSpecImages` ⇒
+   *  8 × 456 行表格全量重渲染（3 批共 24 次）。改成下面这样一批一次，
+   *  重渲染降到 3 次。**渲染次数才是批间空转的来源，不是上传。**
+   */
+  const setSpecImagesBatch = useCallback(
+    (entries: Array<{ spec: string; value: string; img: ConfigMainImage | null }>) => {
+      if (entries.length === 0) return;
+      setSpecImages((prev) => {
+        const next = { ...prev };
+        //: ⚠️ 同 `setSpecImage`：规格名与值都 trim（查表侧拆名后也 trim）。
+        for (const e of entries) {
+          const sk = String(e.spec ?? "").trim();
+          const group = { ...(next[sk] ?? {}) };
+          const k = String(e.value ?? "").trim();
+          if (e.img) group[k] = e.img;
+          else delete group[k];
+          next[sk] = group;
+        }
+        return next;
+      });
+    },
+    [],
+  );
+
   const setSpecImage = useCallback(
     (spec: string, value: string, img: ConfigMainImage | null) => {
       setSpecImages((prev) => {
@@ -2152,6 +2181,74 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
         //: 没接上传能力时整批计入失败（与旧串行版同判据，不静默）。
         failed = total;
         done = total;
+      } else if (total > 0 && props.onUploadSkuImagesBatch) {
+        //: ✅ **批量：先拿齐所有凭证，再并发上传**（用户口径 2026-10-22：
+        //: 「改为批量先获取所有图片的凭证，再上传」）。
+        //:
+        //: 根因：逐张走 `picture-space/upload` 时，**每张都要单独申请一次
+        //: `upload_web_permit(count=1)`** ⇒ 24 张 = 24 次凭证 + 24 次 PUT = 48 次
+        //: 串行网络往返 ⇒ 用户实测 **18/24 张耗时 307 秒**（约 17 秒/张）。
+        //: 正常排队上传绝不可能这么慢 —— 慢在凭证申请这一跳，不在带宽。
+        //:
+        //: 批量端点（`picture-space/upload-batch`）的做法：
+        //:   ① 先按 `_PERMIT_BATCH`（平台单次最多预分配 **14** 个 fileId）分批把凭证
+        //:      **一次拿齐**，每个 fileId 记住自己那批的 addr/token；
+        //:   ② 再按 `xhs_image_upload_parallelism`（默认 5）**服务端并发 PUT**。
+        //: ⇒ 24 张只需 2 次凭证申请 + 5 路并发 PUT，而不是 48 次串行。
+        //:
+        //: ⚠️ 结果**与入参逐位对齐**（后端保证），逐项回填、失败不静默。
+        //: ⚠️ 进度在整批返回后才更新（这是批量的固有代价）；为了不让用户以为
+        //:   「卡死」，文案写清「正在上传」并由 `WaitMask` 每秒刷新已耗时。
+        //: ⚠️ **分段批量**（用户口径 2026-10-22「改回批量上传」+ 2026-10-21
+        //: 「进度不更新」两件事一起满足）：
+        //:   · 一次 `await` 整批 ⇒ 期间零进度事件 ⇒ 用户看到「0/24 卡死」；
+        //:   · 每段提交后立即落进度、图立即上屏 ⇒ 进度会动；
+        //:   · 每段内部仍是**服务端并发 PUT**（`xhs_image_upload_parallelism` 默认 5）。
+        //:
+        //: 段大小取 8：实测单张 PUT 2.7~3.5 秒（真机 profile，见
+        //: `.hermes/tmp/profile_publish2.py`），8 张 / 5 路并发 ≈ 5~6 秒一段
+        //: ⇒ 24 张约 3 段、总耗时 ~20 秒（vs 顺序 64 秒）。
+        //: ⚠️ 不要再退回「整批一次提交」：那是用户实测 307 秒卡死的形态。
+        //: ⚠️⚠️ **与详情图完全一致**（用户口径 2026-10-22：「保持和详情图一致逻辑」）。
+        //:
+        //: 详情图那条路（`product-publish-wizard.tsx` 的 `uploadManyFromPackage`）
+        //: 是**一次性把 19 张全交进去**：内部滑窗 12 路并发取字节 ⇒ 一次
+        //: `upload-batch` 提交全部 ⇒ 服务端并发 PUT。HAR 实测详情图很快。
+        //:
+        //: 而 SKU 图这条被前端切成 3 批 × 8 张（`UPLOAD_CHUNK = 8`），每批
+        //: 都要重新走一遍取字节 + 一次往返。HAR 实测（127.0.0.1.har，93 秒全程）：
+        //:   · 每批 `upload-batch` 只有 **2.6 秒**；
+        //:   · 但批与批之间各空 **12~13 秒零网络请求**；
+        //:   · 开头还有 **50.7 秒**完全空档。
+        //: ⇒ 分批本身就是要削掉的东西，不是「上传慢」。
+        //: ⚠️ 不设上限：后端 `publish.py` 已放开 SKU 条数（用户口径「当前项目
+        //: 后端不设置限制」），`upload-batch` 也支持一次多张（服务端自行分批 PUT）。
+        const batchUpload = props.onUploadSkuImagesBatch;
+        setImportProgress(`上传规格图 0/${total} 张（上传中…）`);
+        const outcomes = await batchUpload(
+          plan.images.map((it) => ({ rel_path: it.localRel, file_name: it.localFileName })),
+        );
+        //: 结果**与入参逐位对齐**（后端保证），失败不静默。
+        //: ⚠️ **一次批量写**（不再逐项 `setSpecImage`）：逐项 setState 就是
+        //: N × 456 行表格全量重渲染。
+        const batchEntries: Array<{
+          spec: string;
+          value: string;
+          img: ConfigMainImage | null;
+        }> = [];
+        outcomes.forEach((o, i) => {
+          const item = plan.images[i];
+          if (!item) return;
+          if (o.ok && o.image) {
+            ok += 1;
+            batchEntries.push({ spec: item.dimName, value: item.value, img: o.image });
+          } else {
+            failed += 1;
+          }
+          done += 1;
+        });
+        setSpecImagesBatch(batchEntries);
+        setImportProgress(`上传规格图 ${done}/${total} 张完成`);
       } else if (total > 0) {
         //: ⚠️⚠️ **顺序逐张上传**（用户口径 2026-10-21：「不要并发上传规格图了，
         //: 顺序上传」）——已删掉 `upload-batch` 分段并发那条路。
@@ -2874,7 +2971,24 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
         },
       };
     });
-  }, [deliveryMode, props, specTypes, specValues, specImages, priceMapping]);
+    //: ⚠️⚠️ 依赖里**不许放 `props` 对象**（用户口径 2026-10-22：「sku 数据导入后
+    //: 运费模板的下拉切换时很慢」）。
+    //:
+    //: 根因：`props` 是父组件每次渲染新建的对象 ⇒ 依赖恒变 ⇒ 这个 useMemo
+    //: （要对 **456 行 × 每列**做 `dimOf` 逐格解析 + `centerHeader` 包一层）
+    //: **每次父组件重渲染都重算一遍**。导入 456 行后，点一下运费模板下拉
+    //: （父组件 setState）就触发一次全表列重建 ⇒ 卡顿与行数成正比。
+    //: ⇒ 只依赖**真正用到的两个字段**（`priceRows` / `onPriceRowsChange`），
+    //:   并依赖 `specAttributes` 变化而不是整个 props。
+  }, [
+    deliveryMode,
+    props.priceRows,
+    props.onPriceRowsChange,
+    specTypes,
+    specValues,
+    specImages,
+    priceMapping,
+  ]);
 
 
   /** 发布提示：按真机口径实时算**未通过的必填项**（分区 + 字段 + 原因）。 */
@@ -4114,7 +4228,25 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
             //: 用户口径 2026-10-11：「最高 400px，低于 400 自适应，高于 400 实现上下滚动」。
             //: ⚠️ 用 antd 原生 `scroll.y` 而不是外裹 div 的 max-height：
             //:   原生滚动会把**表头钉在顶部**（外裹 div 会把表头一起滚走，用户就看不到列名了）。
-            scroll={{ x: "max-content", y: 400 }}
+            //:
+            //: ⚠️⚠️ **`scroll.x` 必须是数字，不能是 `"max-content"`**（用户口径 2026-10-22：
+            //: 「UI 黑色主图需要调整优化」「运费模版下拉框切换页面反应很慢差不多需要 10 秒」）。
+            //: 读 rc-table 源码定位的真机制：
+            //:   `scrollX = scroll?.x` → `scrollWidth = typeof scrollX === "number" ? scrollX : null`
+            //:   → `useWidthColumns()` 在 `scrollWidth === null` 时**整段跳过**
+            //:   → `colWidths` 空 → `stickyOffsets.start` 全 0
+            //:   → 固定列（第一维度 `fixed: "left"`）**全部叠在 left:0**、
+            //:     且拿不到 `ant-table-cell-fix-left` 该有的实底 ⇒ 深色主题下露出
+            //:     底下的黑，表现为「颜色分类整列黑成一片」。
+            //:   ⇒ 同时它让每次渲染都要重新量宽，456 行 × 十余列在切换运费模板
+            //:     这类整页重渲染时就是那 10 秒的来源。
+            //: 取 2400：覆盖本表全部列宽之和（维度 135×N + 规格图 88 + 售价/库存
+            //: 150~200 × 6 + 规格ID 230 + 条形码 200 + 商家编码 164 + 操作 150）。
+            //:
+            //: `virtual`：456 行非虚拟表格会把每行每列都渲染成真实 DOM（上万节点），
+            //: 每次下拉切换都要重排一遍 —— 与第一步预检表同一口径（那里已启用）。
+            virtual
+            scroll={{ x: 2400, y: 400 }}
             columns={priceColumns}
           />
         </Field>

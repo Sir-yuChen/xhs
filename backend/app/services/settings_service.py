@@ -91,7 +91,7 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     #:   ② PUT 字节打 **ROS/COS 对象存储**（`https://<uploadAddr>/<fileId>`，**不是
     #:   小红书域名**）⇒ 并发第二节**不产生平台请求**，与风控无关。单张 ~2.5s 的耗时
     #:   基本全在 ②，故 N 并发把 38 张从 ~94s 压到 ~19s。
-    "xhs_image_upload_parallelism": 5,
+    "xhs_image_upload_parallelism": 8,
     #: 违规词检测（OCR）起始并发数（用户口径 2026-10-13：默认 5）。
     #: ⚠️ 这是**起步值**：`image_ocr_service.resolve_parallelism()` 会按
     #:   待处理图数 / CPU 核数 / 目标总耗时（30s）**自动上调**，配置值是下限。

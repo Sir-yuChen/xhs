@@ -3135,17 +3135,64 @@ export async function regenerateSkuName(payload: {
  * 产出的正则对**每组**样例都回验通过才返回（否则报结构化错误）。
  */
 
+//: ⚠️⚠️ **取图全局去重缓存**（用户口径 2026-10-22：「相同名称的图应只取一次」）。
+//:
+//: 真机抓包实测（用户提供，1036 请求 / 825 MB）：同一张 `SKU图_08_奇遇童话08.jpg`
+//: （1,392 KB）被**并发请求 21 次**，耗时 8.30s→7.92s→…→1.25s→441ms **递减**
+//: —— 这是排队特征。全量 1036 请求 vs 实际 24 张图 ≈ **28 倍重复**。
+//:
+//: 根因不在某一处调用点，而是 `fetchPrecheckImage` 有 **7 个调用点**
+//: （PrecheckThumb / PreviewBody / 上传取字节 / 缩略图…），它们互相不知道对方
+//: 已经取过；antd 虚拟表格滚动时行组件还会反复卸载重挂 ⇒ 同一张图反复取。
+//:
+//: ⇒ **修在源头**：同一个 `token + relPath` 全生命周期只发一次请求，
+//: 所有调用方 `await` 同一个 Promise。这是「同名图只取一次」唯一不会漏的做法
+//: （逐个堵调用点必然漏，因为新增调用点就会重新引入）。
+//:
+//: 用 `Map<promise>` 而不是 `Map<url>`：**并发**请求也能合并（先到者建 promise，
+//: 后到者直接复用），否则并发窗口期仍然会打出 N 个请求。
+//: ✅ objectURL **不在这里 revoke** —— 它是共享资源，谁 revoke 谁就坑了其他持有者；
+//: 统一在 `discardPackagePrecheck`（丢弃暂存包）时整批释放。
+const precheckImageCache = new Map<string, Promise<string>>();
+
 /** 取暂存包里的一张图（红框 overlay 的底图；需带鉴权 ⇒ 走 blob URL）。 */
 export async function fetchPrecheckImage(token: string, relPath: string): Promise<string> {
-  const response = await http.get(`/xhs/package-precheck/${token}/image`, {
-    params: { path: relPath },
-    responseType: "blob",
-  });
-  return URL.createObjectURL(response.data as Blob);
+  const key = `${token}\u0000${relPath}`;
+  const cached = precheckImageCache.get(key);
+  if (cached) return cached;
+
+  const pending = http
+    .get(`/xhs/package-precheck/${token}/image`, {
+      params: { path: relPath },
+      responseType: "blob",
+    })
+    .then((response) => URL.createObjectURL(response.data as Blob));
+
+  precheckImageCache.set(key, pending);
+  try {
+    return await pending;
+  } catch (error) {
+    //: 失败**必须**从缓存里摘掉，否则这一张永远拿不到图（重试也只会命中失败态）。
+    precheckImageCache.delete(key);
+    throw error;
+  }
+}
+
+/** 释放这个 token 下所有缓存过的 objectURL（丢弃暂存包时调用，防内存泄漏）。 */
+function releasePrecheckImages(token: string): void {
+  const prefix = `${token}\u0000`;
+  for (const [key, pending] of precheckImageCache) {
+    if (!key.startsWith(prefix)) continue;
+    precheckImageCache.delete(key);
+    pending
+      .then((url) => URL.revokeObjectURL(url))
+      .catch(() => undefined);
+  }
 }
 
 /** 丢弃暂存包（关弹窗 / 发布完成后调用）。 */
 export async function discardPackagePrecheck(token: string): Promise<void> {
+  releasePrecheckImages(token);
   await http.delete(`/xhs/package-precheck/${token}`);
 }
 

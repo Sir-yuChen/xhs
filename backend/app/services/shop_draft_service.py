@@ -84,8 +84,59 @@ def _api_factory(cookies: str) -> Any:
     return XHS_Qianfan_Apis(cookies)
 
 
+def preallocate_upload_permits(api: Any, count: int) -> tuple[list[dict[str, Any]], str]:
+    """**批量预分配上传凭证**（用户口径 2026-10-22：「改为批量先获取所有图片的凭证，再上传」）。
+
+    返回 `([{file_id, upload_addr, token}, ...], 失败原因)`；成功时原因为空串。
+
+    ## 为什么必须批量
+
+    单张链路是「申请 1 个凭证 → PUT 1 张」，一次发布要传 5 主图 + N 详情图 +
+    M 规格图（真机实测 45 张）⇒ **45 次凭证申请 + 45 次 PUT**。
+    用户实测「点击发布耗时 40 秒」，绝大部分耗在凭证那一跳，不是带宽。
+
+    ## 平台限制（真机实测 2026-10-11）
+
+    单次 `upload_web_permit` **最多预分配 14 个 fileId**
+    （`file_count=10→10 / 20→14 / 38→14 / 50→14`）⇒ 必须**分批申请直到拿齐**，
+    且**每个 fileId 只能用自己那批的 `upload_addr` / `token`**（批次间互不通用）。
+
+    ⚠️ 拿不齐**不算整批失败**：返回已拿到的部分，调用方按可用数量上传、
+    其余如实报「凭证不足」（不静默丢图）。
+    """
+    if count <= 0:
+        return [], ""
+    from backend.app.api.platforms.xhs.qianfan._shared import _PERMIT_BATCH
+
+    out: list[dict[str, Any]] = []
+    #: 上限保护：别因平台异常返回 0 个而无限循环。
+    rounds = (count // _PERMIT_BATCH) + 3
+    for _ in range(rounds):
+        if len(out) >= count:
+            break
+        want = min(_PERMIT_BATCH, count - len(out))
+        ok, msg, permit_raw = api.upload_web_permit(
+            want, biz_name="ark", scene="goods_image", referer="/app-system/pictureSpace"
+        )
+        if not ok or not isinstance(permit_raw, dict):
+            return out, msg or "申请上传凭证失败"
+        permits = (permit_raw.get("data") or {}).get("uploadTempPermits") or []
+        if not permits:
+            return out, "平台没有返回上传凭证"
+        #: 平台前端按 `qos` 降序取第一个（真机 bundle `sort((a,b)=>b.qos-a.qos)[0]`）。
+        chosen = sorted(permits, key=lambda x: x.get("qos") or 0, reverse=True)[0]
+        got = [str(x) for x in (chosen.get("fileIds") or [])]
+        if not got:
+            break  #: 平台给空批 ⇒ 再要也是空
+        upload_addr = str(chosen.get("uploadAddr") or "")
+        token = str(chosen.get("token") or "")
+        for fid in got:
+            out.append({"file_id": fid, "upload_addr": upload_addr, "token": token})
+    return out, ""
+
+
 def upload_one_image(
-    api: Any, *, seller_id: str, file_path: str
+    api: Any, *, seller_id: str, file_path: str, permit: dict[str, Any] | None = None
 ) -> tuple[bool, str, dict[str, Any] | None]:
     """上传**一张**图片到图片空间 → (成功, 原因, 归一化条目)。
 
@@ -94,6 +145,16 @@ def upload_one_image(
 
     ⚠️ `biz_name=ark&scene=goods_image`（设计 22 真机结论）：用发布链路的
     `spectrum/image` 会把文件 PUT 到别的桶 ⇒ 登记后取图 404（裂图）。
+
+    ## `permit` 参数（用户口径 2026-10-22：「改为批量先获取所有图片的凭证，再上传」）
+
+    不传 ⇒ 本函数自己申请 1 个凭证（**单张调用时的老行为，保留给零散调用**）。
+
+    传 ⇒ 用外面**预先批量申请好**的那份凭证（含 `file_id` / `upload_addr` / `token`），
+    跳过申请那一跳。⚠️ **这是发布链路提速的关键**：一次发布要传
+    5 主图 + N 详情图 + M 规格图（实测 45 张），逐张申请 = 45 次额外往返，
+    用户实测**点击发布耗时 40 秒**；批量申请后只剩 PUT 本身的耗时。
+    ⚠️ 一个 `file_id` 只能用**它那批的** `upload_addr` / `token`（分批申请的凭证互不通用）。
     """
     from backend.app.services import picture_space_service as ps
 
@@ -104,22 +165,29 @@ def upload_one_image(
     if size > package.MAX_IMAGE_BYTES:
         return False, f"图片超过平台 5M 上限（{size // 1024 // 1024}M）", None
 
-    ok, msg, permit_raw = api.upload_web_permit(
-        1, biz_name="ark", scene="goods_image", referer="/app-system/pictureSpace"
-    )
-    if not ok or not isinstance(permit_raw, dict):
-        return False, msg or "申请上传凭证失败", None
-    permits = (permit_raw.get("data") or {}).get("uploadTempPermits") or []
-    if not permits:
-        return False, "平台没有返回上传凭证", None
-    # 平台前端按 `qos` 降序取第一个（真机 bundle `sort((a,b)=>b.qos-a.qos)[0]`）。
-    permit = sorted(permits, key=lambda x: x.get("qos") or 0, reverse=True)[0]
-    file_ids = permit.get("fileIds") or []
-    if not file_ids:
-        return False, "上传凭证没有预分配文件 ID", None
-    file_id = str(file_ids[0])
-    upload_addr = str(permit.get("uploadAddr") or "")
-    token = str(permit.get("token") or "")
+    if permit and permit.get("file_id"):
+        file_id = str(permit["file_id"])
+        upload_addr = str(permit.get("upload_addr") or "")
+        token = str(permit.get("token") or "")
+        if not upload_addr or not token:
+            return False, "预分配的凭证缺少上传地址或 token", None
+    else:
+        ok, msg, permit_raw = api.upload_web_permit(
+            1, biz_name="ark", scene="goods_image", referer="/app-system/pictureSpace"
+        )
+        if not ok or not isinstance(permit_raw, dict):
+            return False, msg or "申请上传凭证失败", None
+        permits = (permit_raw.get("data") or {}).get("uploadTempPermits") or []
+        if not permits:
+            return False, "平台没有返回上传凭证", None
+        # 平台前端按 `qos` 降序取第一个（真机 bundle `sort((a,b)=>b.qos-a.qos)[0]`）。
+        chosen = sorted(permits, key=lambda x: x.get("qos") or 0, reverse=True)[0]
+        file_ids = chosen.get("fileIds") or []
+        if not file_ids:
+            return False, "上传凭证没有预分配文件 ID", None
+        file_id = str(file_ids[0])
+        upload_addr = str(chosen.get("uploadAddr") or "")
+        token = str(chosen.get("token") or "")
 
     ok, msg, put_meta = api.upload_file(
         upload_addr=upload_addr, file_id=file_id, token=token, file_path=str(path)
@@ -160,15 +228,13 @@ def upload_one_image(
     #: 发布被平台拒「获取图片信息失败，请检查图片是否正确后重试」。
     registered_id = _registered_material_id(raw_resp) or file_id
 
-    #: ⚠️⚠️ 登记的 `path` / `link` 是平台在**登记时新分配的 CDN id**
-    #: （`arkgoods/1040g…`），**不是**上传凭证的 `fileId`（`arkgoods/XOARE…`）。
-    #: 前端发布体里 `path`/`link`/`uploaderInfoModel.fileId` 三处并用同一个 CDN path；
-    #: 凭证 id 会让平台同样报「获取图片信息失败」。⇒ 登记后**回读该记录**取真值。
-    record = _fetch_material_record(api, name=str(item.get("name") or ""),
-                                    material_id=registered_id)
-    path_value = str(record.get("path") or additional.get("path") or file_id)
-    link_value = str(record.get("link") or additional.get("link")
-                     or f"https://qimg.xiaohongshu.com/{path_value}")
+    #: ⚠️⚠️ **不回读**（用户口径 2026-10-22：「回读没必要移除，保持与详情图一样」）。
+    #: 登记的 `path` / `link` **就是平台在登记时分配的 CDN id**
+    #: （`arkgoods/1040g…`），它已经在 `additional`（= 我们提交的 `additionalData`）里；
+    #: 回读只是把同一个值再问一次，且是轮询（6 次 × ~1.4s，实测失败一次 8.18s）。
+    #: 前端发布体 `path`/`link`/`uploaderInfoModel.fileId` 三处都用这个 CDN path。
+    path_value = str(additional.get("path") or "").strip() or file_id
+    link_value = str(additional.get("link") or f"https://qimg.xiaohongshu.com/{path_value}")
     return True, "成功", {
         "link": link_value,
         "path": path_value,
@@ -411,6 +477,17 @@ def create_draft(
         ordered = ordered[:MAX_DRAFT_IMAGES]
 
     by_path: dict[str, dict[str, Any]] = {}
+    #: ⚠️ **先批量拿齐凭证，再逐张上传**（用户口径 2026-10-22：
+    #: 「改为批量先获取所有图片的凭证，再上传」）。
+    #: 旧实现每张各申请一次 `upload_web_permit(count=1)` ⇒ N 张图 = N 次额外往返。
+    #: 这里一次（或按平台 14 个/批）拿齐，逐张上传时只做 PUT。
+    _need = [p for p in ordered if p not in pre_uploaded]
+    _permits, _permit_reason = (
+        preallocate_upload_permits(api, len(_need)) if _need else ([], "")
+    )
+    _permit_by_path: dict[str, dict[str, Any]] = {
+        path_str: one for path_str, one in zip(_need, _permits)
+    }
     for path_str in ordered:
         #: ⚠️ 2026-10-10：已上传对象（key 命中 `pre_uploaded`）跳过上传直接用。
         if path_str in pre_uploaded:
@@ -421,9 +498,16 @@ def create_draft(
         #: `ProxyError` / `SSLEOFError`）。这是环境抖动，一次失败就放弃的表现是
         #: 「同一份数据包这次少两张图、下次又好了」—— 用户无法归因。
         last_reason = ""
+        _permit = _permit_by_path.get(path_str)
+        if _permit is None:
+            #: 凭证没拿到（申请失败或平台封顶）⇒ 如实报，不装作传了。
+            _why = _permit_reason or "上传凭证不足（平台预分配的 fileId 比图片少）"
+            failed.append({"path": path_str, "reason": _why})
+            warnings.append(f"图片上传失败（{Path(path_str).name}）：{_why}")
+            continue
         for attempt in range(IMAGE_UPLOAD_RETRIES):
             ok, reason, entry = upload_one_image(
-                api, seller_id=seller_id, file_path=path_str
+                api, seller_id=seller_id, file_path=path_str, permit=_permit
             )
             if ok and entry:
                 by_path[path_str] = entry
@@ -567,5 +651,6 @@ __all__ = [
     "create_draft",
     "read_draft",
     "resolve_variant_id",
+    "preallocate_upload_permits",
     "upload_one_image",
 ]

@@ -11544,3 +11544,115 @@ def test_llm_progress_card_is_not_mounted_on_shop_items():
     assert 'from "./llm-generate-progress-card"' not in code, "进度表 import 还在"
     #: 待处理态仍要能被感知（不许连旋转图标一起删掉）
     assert "llmQueueItemIds.has(item.item_id)" in code, "操作列不再标记「生成中」"
+
+
+def test_precheck_image_fetch_is_deduplicated_at_the_source():
+    """同一张暂存包图**只取一次** —— 修在 `fetchPrecheckImage` 源头。
+
+    ⚠️ 真机抓包实测（2026-10-22，用户提供）：1036 个请求 / 825 MB 传输，
+    而数据包里只有 24 张 SKU 图（约 29 MB）⇒ **约 28 倍重复**。
+    典型样本：`SKU图_08_奇遇童话08.jpg`（1,392 KB）被并发请求 **21 次**，
+    耗时 8.30s→7.92s→…→1.25s→441ms **递减**（排队特征）。
+
+    根因不是某一处调用点写错，而是 `fetchPrecheckImage` 有多个调用点
+    （缩略图 / 预览 / 上传取字节 …），互相不知道对方取过；antd 虚拟表格
+    滚动时行组件还会反复卸载重挂。
+
+    ⇒ 判据必须落在**源头唯一性**上，逐个堵调用点会漏（新增调用点就复发）：
+      1. 缓存键 = `token + rel_path`；
+      2. 缓存的是 **Promise**（并发也能合并，Map<url> 挡不住并发窗口）；
+      3. 失败必须摘除缓存（否则这张图永远拿不到，重试也命中失败态）；
+      4. objectURL **不得**在下游 revoke（共享资源，revoke 会坑其他持有者 ——
+         表现为「滚走再滚回来图变白」）。
+    """
+    api_ts = (ROOT / "frontend/src/lib/api.ts").read_text(encoding="utf-8")
+
+    #: ① 缓存容器必须存在且以 Promise 为值
+    assert "precheckImageCache = new Map<string, Promise<string>>()" in api_ts, (
+        "取图缓存必须是 Map<promise>：Map<url> 只在**已完成**后才命中，"
+        "并发请求仍会全部打到后端（正是 21 次重复请求的形态）。"
+    )
+    #: ② 命中即返回，不得先发请求
+    assert "if (cached) return cached;" in api_ts, (
+        "`fetchPrecheckImage` 必须先查缓存再发请求，否则缓存形同虚设。"
+    )
+    #: ③ 失败摘除（⚠️ 必须锚在 `catch` 块里 —— `releasePrecheckImages` 里也有
+    #: 同名字的 delete，只搜字符串会被它顶替成假绿，变异实测 ESCAPED 过）
+    catch_block = api_ts.split("  } catch (error) {", 1)
+    assert len(catch_block) == 2, "`fetchPrecheckImage` 必须有 catch 块处理失败"
+    catch_body = catch_block[1].split("}", 1)[0]
+    assert "precheckImageCache.delete(key);" in catch_body, (
+        "取图失败必须从缓存摘除，否则该图永久卡在失败态、重试也拿不到。"
+    )
+    #: ④ 有集中释放入口
+    assert "function releasePrecheckImages(token: string)" in api_ts, (
+        "缓存必须有一个按 token 整批释放的出口，否则 objectURL 永久泄漏。"
+    )
+    assert "releasePrecheckImages(token);" in api_ts.split(
+        "export async function discardPackagePrecheck"
+    )[1], "丢弃暂存包时必须释放该 token 下的全部 objectURL。"
+
+    #: ⑤ 下游任何人都不许对共享 objectURL 调 revoke
+    wizard = (
+        ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"
+    ).read_text(encoding="utf-8")
+    wizard_code = _strip_comments(wizard)
+    offenders = [
+        f"{i}: {line.strip()}"
+        for i, line in enumerate(wizard_code.splitlines(), 1)
+        if "revokeObjectURL" in line
+    ]
+    assert not offenders, (
+        "product-publish-wizard.tsx 里不得再出现 `revokeObjectURL`："
+        "objectURL 由 `fetchPrecheckImage` 全局缓存共享，下游 revoke 会让"
+        "其他持有者（表格缩略图）拿到已失效 URL ⇒ 图变白 + 下次重新取图。\n"
+        + "\n".join(offenders)
+    )
+
+
+def test_price_stock_table_uses_numeric_scroll_x_and_virtual():
+    """第二步价格库存表：`scroll.x` **必须是数字** + 必须 `virtual`。
+
+    ⚠️ 用户口径 2026-10-22 两条：
+      · 「UI 黑色主图需要调整优化」——第一维度列（`fixed: "left"`）整列黑成一片；
+      · 「导入规格数据后，点击运费模版下拉框切换选项页面反应很慢差不多需要 10 秒」。
+
+    两者同一个根因，读 rc-table 源码定位：
+      `scrollX = scroll?.x`（Table.js:148）
+      → `scrollWidth = typeof scrollX === "number" ? scrollX : null`（:162）
+      → `useWidthColumns()` 在 `scrollWidth === null` 时**整段跳过**
+      → `colWidths` 空 → `stickyOffsets.start` 全 0
+      → 固定列全部叠在 `left:0`、拿不到实底背景（深色主题下露出黑）
+      → 且每次渲染都要重新量宽，456 行 × 十余列在整页重渲染时就是那 10 秒。
+
+    ⚠️ 第一步预检表早已按同一口径修过（`scroll={{ x: 2200, y: 420 }}` + `virtual`），
+    第二步价格库存表漏了 —— 这条守卫把两处的口径钉在一起，避免再次只修一边。
+    """
+    src = (ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx").read_text(
+        encoding="utf-8"
+    )
+    code = _strip_comments(src)
+
+    #: ① 不得再出现字符串型 scroll.x（`"max-content"` / `"100%"` 都走不到数值分支）
+    assert '"max-content"' not in code, (
+        '第二步价格库存表的 `scroll.x` 不得再用 `"max-content"`：'
+        "字符串在 rc-table 里被判定成 null，`stickyOffsets.start` 全 0 ⇒ "
+        "固定列叠在 left:0 且背景失效（用户看到的「颜色分类整列黑」）。"
+    )
+
+    #: ② 必须是数值型 scroll（x 与 y 同给）
+    import re
+
+    scrolls = re.findall(r"scroll=\{\{\s*x:\s*(\d+)\s*,\s*y:\s*(\d+)\s*\}\}", code)
+    assert scrolls, (
+        "第二步价格库存表的 `scroll` 必须写成 `{ x: <数字>, y: <数字> }` 形态 —— "
+        "`typeof scrollX === \"number\"` 是 antd 固定列算 sticky 偏移的唯一入口。"
+    )
+
+    #: ③ 必须启用 virtual（456 行非虚拟 = 上万 DOM 节点，下拉切换要重排全部）
+    price_table = code.split("scroll={", 1)[1] if "scroll={" in code else ""
+    window = code[max(0, code.find("scroll={") - 2000) : code.find("scroll={") + 800]
+    assert "virtual" in window, (
+        "第二步价格库存表必须启用 `virtual`：456 行非虚拟表格会把每行每列都渲染成"
+        "真实 DOM，切一次运费模板就重排一次（用户实测 10 秒）。"
+    )

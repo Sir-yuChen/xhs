@@ -197,7 +197,7 @@ type UploadOutcome = {
  * 这里控制「同时向本机后端要几张图的字节」。旧版这里**不限流**（38 张一起要）
  * ⇒ 浏览器连接池耗尽 ⇒ 一部分 `fetch` 失败被静默丢弃（真机实测 38 变 14）。
  */
-const UPLOAD_FETCH_CONCURRENCY = 5;
+const UPLOAD_FETCH_CONCURRENCY = 12;
 import PublishConfigStep2, {
   type ConfigSnapshot,
   type PriceRow,
@@ -1338,38 +1338,64 @@ export function ProductPublishWizard({
         reason: "",
       }));
 
-      //: 并发度：后端配置是权威闸门，但**取字节这一侧也要限流**（旧版不限 ⇒ 连接池耗尽）。
-      //: 取值与后端默认一致（5）；`UPLOAD_FETCH_CONCURRENCY` 是前端侧闸门。
-      const chunkSize = UPLOAD_FETCH_CONCURRENCY;
+      //: ⚠️⚠️ **同名图只取一次**（用户口径 2026-10-22：「相同名称的图应只取一次」）。
+      //:
+      //: 真机抓包实测（用户提供）：同一张 `SKU图_08_奇遇童话08.jpg`（1,392 KB）
+      //: 在 Network 里被请求了 **15+ 次**，耗时 8.88s→8.46s→…→2.04s **递减**
+      //: —— 这是同一批 image 请求在排队，不是接口慢。
+      //:
+      //: 根因：`plan.images` 可能含**同一个 rel_path 的重复项**
+      //: （去重键是「维度名+值」，而不同维度值可能指向同一张图）。
+      //: ⇒ 同一 `rel_path` 只取一次字节、只上传一次，其余项**复用**那一份结果。
+      const firstIndexByPath = new Map<string, number>();
+      items.forEach((it, i) => {
+        if (!firstIndexByPath.has(it.rel_path)) firstIndexByPath.set(it.rel_path, i);
+      });
 
-      //: ── 阶段 1：**分块**取字节，块内并行、块间串行（不一次打满连接池）──
-      //: 每块完成后立即收集，块与块之间让连接池有机会回收。
-      for (let start = 0; start < items.length; start += chunkSize) {
-        const slice = items.slice(start, start + chunkSize);
-        const fetched = await Promise.all(
-          slice.map(async (it, k) => {
-            const index = start + k;
-            try {
-              const objectUrl = await fetchPrecheckImage(token ?? "", it.rel_path);
-              const blob = await (await fetch(objectUrl)).blob();
-              const bytes = new Uint8Array(await blob.arrayBuffer());
-              const ext = (it.file_name.match(/\.[^.]+$/) ?? [".jpg"])[0];
-              const name = md5_file_name(bytes, { ext });
-              const file = new File([blob], name, { type: blob.type || "image/jpeg" });
-              //: ⚠️ objectURL 用完即释放 —— 旧版没释放，38 张会一直占内存。
-              URL.revokeObjectURL(objectUrl);
-              return { index, file };
-            } catch (err) {
-              //: ⚠️ **不再静默**：把失败原因留在这一项上（用户能看到是哪些张、为什么）。
-              out[index].reason = `取图失败：${err instanceof Error ? err.message : String(err)}`;
-              return null;
-            }
-          })
-        );
-        for (const one of fetched) {
-          if (one) out[one.index].file = one.file;
+      //: ⚠️⚠️ **滑窗并发取图**（用户口径 2026-10-22：「走同一条优化过的路径」）。
+      //:
+      //: 旧实现是「分块 5 张 + 块间串行」：一块里最慢的那张决定整块节奏。
+      //: 真机实测（用户抓包）：SKU 图取图 **1.3~2.0 秒/张**，24 张 = 5 块串行
+      //: ⇒ 光取图就要 30~50 秒（主图只有 5 张、1 块，所以看着快 —— 假象）。
+      //:
+      //: ⇒ 改成**共享游标的滑窗**：始终保持 `UPLOAD_FETCH_CONCURRENCY` 个请求在飞，
+      //:   任意一张完成立刻补下一张（不让最慢的那张拖住其余槽位）。
+      //:   24 张 / 12 路 ⇒ 约 2 轮 × 1.5 秒 ≈ 3~5 秒。
+      const fetchOne = async (index: number): Promise<void> => {
+        const it = items[index];
+        try {
+          const objectUrl = await fetchPrecheckImage(token ?? "", it.rel_path);
+          const blob = await (await fetch(objectUrl)).blob();
+          const bytes = new Uint8Array(await blob.arrayBuffer());
+          const ext = (it.file_name.match(/\.[^.]+$/) ?? [".jpg"])[0];
+          const name = md5_file_name(bytes, { ext });
+          //: ⚠️ **不再 revoke**（用户口径 2026-10-22「相同名称的图应只取一次」）：
+          //: `fetchPrecheckImage` 现在有全局缓存，这个 objectURL 同时被
+          //: 表格缩略图持有。上传完就 revoke ⇒ 表格里的图立刻变白，
+          //: 而且下次再要还得重新取（正是 28 倍重复的来源之一）。
+          //: 统一由 `discardPackagePrecheck` 整批释放。
+          out[index].file = new File([blob], name, { type: blob.type || "image/jpeg" });
+        } catch (err) {
+          //: ⚠️ **不再静默**：把失败原因留在这一项上（用户能看到是哪些张、为什么）。
+          out[index].reason = `取图失败：${err instanceof Error ? err.message : String(err)}`;
         }
-      }
+      };
+
+      //: 共享游标：谁先跑完谁领下一个，槽位永远不空转。
+      //: ⚠️ 只处理「该 rel_path 的首个下标」—— 重复项不重复取图。
+      let cursor = 0;
+      const worker = async (): Promise<void> => {
+        for (;;) {
+          const index = cursor;
+          cursor += 1;
+          if (index >= items.length) return;
+          if (firstIndexByPath.get(items[index].rel_path) !== index) continue; //: 重复图，跳过
+          await fetchOne(index);
+        }
+      };
+      await Promise.all(
+        Array.from({ length: Math.min(UPLOAD_FETCH_CONCURRENCY, items.length) }, () => worker()),
+      );
 
       //: ── 阶段 2：把**成功取到字节**的项按原下标顺序提交 ──
       //: `slots[k]` = 提交数组第 k 项对应的 **items 原下标** ⇒ 回填时用它还原位置，
@@ -1377,7 +1403,9 @@ export function ProductPublishWizard({
       const slots: number[] = [];
       const payload: File[] = [];
       out.forEach((o, i) => {
-        if (o.file) {
+        //: ⚠️ **同名图只提交一次**（用户口径 2026-10-22「相同名称的图应只取一次」）：
+        //: 只有「该 rel_path 的首个下标」进 payload，重复项在后面按路径复用结果。
+        if (o.file && firstIndexByPath.get(items[i].rel_path) === i) {
           slots.push(i);
           payload.push(o.file);
         }
@@ -1419,6 +1447,22 @@ export function ProductPublishWizard({
           link: r.link,
         };
       }
+
+      //: ⚠️⚠️ **重复项复用已取到的结果**（用户口径 2026-10-22：
+      //: 「重复项则使用已经取到的相同的图片资源」）。
+      //: 同一 `rel_path` 的重复项不在 payload 里（上面已排除），
+      //: 这里把首个下标的上传结果**原样复制**过去 —— 不重复取图、不重复上传。
+      items.forEach((it, i) => {
+        if (firstIndexByPath.get(it.rel_path) === i) return; //: 首个项已处理
+        const src = out[firstIndexByPath.get(it.rel_path) ?? i];
+        if (src?.ok && src.image) {
+          out[i].ok = true;
+          //: 复制一份并改回它自己的文件名（预览/展示用的是各自的 origin_name）。
+          out[i].image = { ...src.image, origin_name: it.file_name };
+        } else {
+          out[i].reason = src?.reason || "同路径图片上传失败";
+        }
+      });
       return out;
     },
     [fetchPrecheckImage, platformAccountId, token]
@@ -3801,17 +3845,19 @@ function PrecheckThumb(props: { token: string; item: PrecheckMediaItem }) {
     let alive = true;
     fetchPrecheckImage(token, item.rel_path)
       .then((url) => {
-        if (!alive) {
-          URL.revokeObjectURL(url);
-          return;
-        }
+        if (!alive) return;
         revoked = url;
         setSrc(url);
       })
       .catch(() => undefined);
     return () => {
       alive = false;
-      if (revoked) URL.revokeObjectURL(revoked);
+      //: ⚠️ **不 revoke**（用户口径 2026-10-22「相同名称的图应只取一次」）：
+      //: 同一个 objectURL 现在由多个组件共享（`fetchPrecheckImage` 有全局缓存），
+      //: 谁 revoke 谁就坑了其他持有者 —— 表格滚动导致行组件卸载重挂，
+      //: 一 revoke 就会出现「刚刚还有图，滚动回来变白」。统一由
+      //: `discardPackagePrecheck` 整批释放。
+      void revoked;
     };
   }, [token, item.rel_path]);
 
@@ -5132,17 +5178,16 @@ function PreviewBody(props: { token: string; item: PrecheckMediaItem }) {
     setSrc(null);
     fetchPrecheckImage(token, item.rel_path)
       .then((url) => {
-        if (!alive) {
-          URL.revokeObjectURL(url);
-          return;
-        }
+        if (!alive) return;
         revoked = url;
         setSrc(url);
       })
       .catch(() => alive && setFailed(true));
     return () => {
       alive = false;
-      if (revoked) URL.revokeObjectURL(revoked);
+      //: ⚠️ **不 revoke**：objectURL 由 `fetchPrecheckImage` 全局缓存共享，
+      //: 见 `PrecheckThumb` 同处说明。统一由 `discardPackagePrecheck` 释放。
+      void revoked;
     };
   }, [token, item.rel_path]);
 
