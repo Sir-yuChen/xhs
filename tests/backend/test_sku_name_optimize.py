@@ -55,9 +55,18 @@ class TestDisplayWidth:
 
 
 class TestIsTooLong:
-    def test_reaches_limit_triggers(self):
-        """「达到」即触发（用户口径「以 60 字符为准」）—— 60 宽就优化。"""
-        assert svc.is_too_long("中" * 30, 60) is True
+    def test_reaches_limit_does_not_trigger(self):
+        """**恰好 60 不触发**（用户口径 2026-10-22：
+        「小于 60 字符就不应该展示在 SKU 规格名称优化预览弹窗列表中」）。
+
+        ⚠️ 原断言是 `is_too_long("中"*30, 60) is True`（「达到即触发」）——
+        那条口径已被本轮取代：60 本身合法（平台原文「不能超过 30 个字（60 个字符）」）。
+        """
+        assert svc.is_too_long("中" * 30, 60) is False
+
+    def test_over_limit_triggers(self):
+        """**超过** 60 才触发 —— 这是弹窗列表的唯一入选判据。"""
+        assert svc.is_too_long("中" * 31, 60) is True
 
     def test_below_limit_does_not_trigger(self):
         assert svc.is_too_long("中" * 29, 60) is False
@@ -91,12 +100,19 @@ class TestOptimizeNamesNoLlm:
         assert out[0].reason == ""
 
     def test_llm_unavailable_reports_reason_not_silent(self):
-        """服务商不可用 ⇒ 每条**带原因**退回原文（不许静默当成成功）。"""
+        """服务商不可用 ⇒ 带原因 + **新规格名留空**（不许拿原文冒充结果）。
+
+        ⚠️ 用户口径 2026-10-22：「调用失败新规格名**应该还是空**不应该使用原规格名」。
+        ⇒ 原断言 `out[0].optimized == long_name`（退回原文）已被取代：
+        退回原文会让界面看起来「模型给了个和原来一样的名字」，
+        用户分不清是失败还是没压动；留空 + `reason` 才是可区分的失败态。
+        """
         long_name = "中" * 40  # 80 宽，触发
         out = svc.optimize_names(db=None, user_id=999999, items=[("k", long_name)], max_chars=60)
         assert len(out) == 1
         assert out[0].changed is False
-        assert out[0].optimized == long_name
+        assert out[0].optimized == "", "失败时新规格名必须留空，不能退回原文"
+        assert out[0].original == long_name, "原规格名要保留（用户要靠它手动改）"
         assert out[0].reason, "失败必须给出原因，不能空着"
 
 

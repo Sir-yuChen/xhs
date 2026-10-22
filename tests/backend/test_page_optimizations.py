@@ -6341,8 +6341,11 @@ def test_only_failed_toggle_materializes_full_selection_array():
     )
     assert "table.rows.map(() => true)" in seg, "关闭筛选时没有回到整表全选"
 
-    #: ② `pickedRows` 默认值 = 整表全选（未定义时），不许再按可见行补
-    assert "const pickedRows = (picked[tIndex] ?? table.rows.map(() => true))" in src, (
+    #: ② `pickedRows` 默认值 = **整表按预检结果**（未定义时），不许再按可见行补。
+    #: ⚠️ 2026-10-22 口径修订：默认值从「整表全 true」改为
+    #: 「整表 − 预检不通过」（用户口径「sku 图未匹配到的默认不勾选，
+    #: 规则执行失败无法执行的默认不勾选」）。判据不变的部分：**不按可见行补**。
+    assert "const pickedRows = (picked[tIndex] ?? table.rows.map((_, i) => !precheckFailed(i)))" in src, (
         "pickedRows 的默认值又被改成了「按可见行补」"
     )
     assert "table.rows.map((_, i) => scopeRows.includes(i))" not in src, (
@@ -6489,10 +6492,11 @@ def test_row_selection_defaults_to_visible_rows_and_fixed_text_needs_runtime_val
         encoding="utf-8"
     )
 
-    #: ① 勾选默认值 = **整表全选**（未定义时）—— 这是老行为，保持不变；
-    #:    「只看不通过」的落值是**显式**的（见下面 ②），不再靠默认值猜。
-    assert "const pickedRows = (picked[tIndex] ?? table.rows.map(() => true))" in src, (
-        "pickedRows 的默认值语义变了（未定义应为整表全选）"
+    #: ① 勾选默认值 = **整表按预检结果**（未定义时）—— 老行为「整表全选」已被
+    #:    2026-10-22 口径修订为「预检不通过的默认不勾」；
+    #:    「只看不通过」的落值仍是**显式**的（见下面 ②），不靠默认值猜。
+    assert "const pickedRows = (picked[tIndex] ?? table.rows.map((_, i) => !precheckFailed(i)))" in src, (
+        "pickedRows 的默认值语义变了（未定义应为「整表 − 预检不通过」）"
     )
     #: ② 「只看不通过」必须**显式落全量数组**（不能再靠默认值猜作用域）。
     #:    ⚠️ 默认值 `?? 整表全 true` 本身是**老行为**（进页面默认全选），保留；
@@ -6657,18 +6661,17 @@ def test_bad_row_marks_never_touch_values_and_clear_on_user_check():
     end = src.find('key: "__matched_image"', k3)
     assert end > k3, "找不到勾选列的结束边界（页面结构变了，更新本守卫）"
     chk = src[k3:end]
-    #: ⚠️ 2026-10-21 判据升级：禁选条件从「在 blockedRows 里」改为
-    #: `failureOf(...) === "image"`（只有**图片未匹配**档禁用；规则失败档可勾）。
-    #: 语义不变（都只挡结构性不可发布），但写法换了 ⇒ 这里钉**新写法**，
-    #: 并**反向排除**旧写法，防止有人改回去把规则失败档一起禁掉。
-    assert 'disabled={failureOf(record.__index) === "image"}' in chk, (
-        f"禁选判据没走 failureOf 的 image 档：{chk[:400]}"
+    #: ⚠️⚠️ 2026-10-22 **口径再次修订**（用户原话）：
+    #: 「不管是否预检通过，均应自动勾选，**是否勾选用户决定**」
+    #: ⇒ 勾选框**一律不禁用**，预检结论与勾选状态彻底解耦。
+    #: 历史沿革（不静默删除）：2026-10-21 那一版对「图片未匹配」档禁用
+    #: （`failureOf(...) === "image"`），现已推翻。
+    assert "disabled" not in chk, (
+        "勾选框被禁用了 —— 用户口径是「是否勾选用户决定」，任何档都必须可勾\n"
+        + chk[:400]
     )
     assert "disabled={blockedRows.has(record.__index)}" not in chk, (
-        "禁选仍按整块 blockedRows 判 —— 规则失败行也会被禁掉（用户无法接管）"
-    )
-    assert "badRuleRows.has(`${tIndex}:${record.__index}`)" not in chk.split("onChange")[0], (
-        "disabled 判断里仍含规则失败 —— 用户点不了，无法取消红框"
+        "禁选又按 blockedRows 判回来了"
     )
     assert "setBadRuleRows" in chk and "if (on)" in chk, (
         "勾上时没有清除红框标记（用户口径：主动勾选即取消红框）"
@@ -8753,7 +8756,13 @@ def test_price_table_is_editable_except_spec_and_has_batch_bar():
     #: **维度列组件的 render**（`dimCols`，只放最后一维，每行一个决定）。
     #: 判据不变：规格行必须有行级启用/停用切换。
     assert "di === dims.length - 1" in tsx, "规格列应有启用切换 render"
-    assert "sku-enabled-btn" in tsx, "缺启用切换链接（真机 sku-enabled-btn）"
+    #: ⚠️ 2026-10-22 口径修订：`sku-enabled-btn`（可点击链接）已改为**只读 Tag**
+    #: （用户口径「功能列重复，只保留一个操作入口，规格后的不启用/启用用预览 tag」）。
+    #: 唯一操作入口 = 操作列的 Switch ⇒ 这里钉 Tag + 反向禁止旧链接回来。
+    assert "sku-enabled-btn" not in tsx, (
+        "规格列又出现了 `sku-enabled-btn` 可点击链接 —— 与操作列 Switch 功能重复"
+    )
+    assert '"已启用" : "不启用"' in tsx, "规格列缺状态预览 Tag"
     assert "available !== false" in tsx, "行级启用状态默认应为启用（available !== false）"
     #: ① 新增「规格图」列
     assert '"规格图"' in tsx and "specImageForRow" in tsx, "缺规格图列"
@@ -9551,7 +9560,8 @@ def test_publish_hints_cover_all_required_fields_and_recompute():
     wiz = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
     #: ① 依赖含所有参与判定的值（否则改值不重算）
     i = s2.index("const publishHints = useMemo")
-    memo = s2[i : i + 2600]
+    #: ⚠️ 2026-10-22：函数体加了「规格值超长」一段，窗口 2600 → 4000。
+    memo = s2[i : i + 4000]
     #: ⚠️ 必须切**依赖数组那一段**再断言（首轮实测：只查 `dep in memo` 会被**函数体**
     #: 里的同名引用满足 —— 例如 `if (specTypes.length === 0)` 自己就含 `specTypes` ⇒ M1 逃逸）。
     assert "}, [" in memo, "应能定位依赖数组"
@@ -11761,4 +11771,549 @@ def test_price_stock_table_uses_numeric_scroll_x_and_virtual():
     assert "virtual" in window, (
         "第二步价格库存表必须启用 `virtual`：456 行非虚拟表格会把每行每列都渲染成"
         "真实 DOM，切一次运费模板就重排一次（用户实测 10 秒）。"
+    )
+
+
+def test_all_sku_rows_are_preselected_regardless_of_precheck_result():
+    """**默认值按预检结果分开，但勾选框永远不禁用**。
+
+    用户口径 2026-10-22（两轮修订后的**最终版**，原话）：
+    > 「读取到的表格的数据勾选复选框由用户决定是否勾选，
+    >    **sku 图未匹配到的默认不勾选**，**规则执行失败无法执行的默认不勾选**，
+    >    属于预检不通过」
+
+    演化（原句保留，不静默删除）：
+      · 第一轮：「不管是否预检通过，均应自动勾选，是否勾选用户决定」
+        ⇒ 当时连默认值都不过滤了；
+      · 本轮说清楚：**默认值按预检结果分开**，勾选框仍不禁用。
+    ⇒ 二者**不是矛盾，是两层**：
+        · 默认值 = 合理起点（预检不通过的先别勾，避免误提交）；
+        · 最终决定权 = 用户的（所有行都能手动勾 / 取消）。
+
+    三条判据（缺一条就不成立）：
+      ① 默认值必须**同时**读 `blockedRows`（SKU 图未匹配）与 `badRuleRows`
+         （规则执行失败）—— 只判前者会让规则失败行被默认勾上；
+      ② 勾选框**不得禁用**（否则用户改不了）；
+      ③ 全选/反选的**基准值**也要按预检结果（否则一点全选就把不通过的全勾上），
+         但**作用域**不得剔除它们（否则永远勾不上）。
+    """
+    src = _code_only(
+        _read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx")
+    )
+
+    #: ① 默认值必须同时读两类预检不通过
+    assert "const precheckFailed = (i: number) =>" in src, (
+        "没有「预检不通过」的合并判据（必须同时覆盖 SKU 图未匹配 + 规则执行失败）"
+    )
+    assert "blockedRows.has(i) || badRuleRows.has(`${tIndex}:${i}`)" in src, (
+        "预检不通过判据只覆盖了一类 —— 用户口径「sku 图未匹配到的默认不勾选，"
+        "规则执行失败无法执行的默认不勾选」，两类都算"
+    )
+    assert "table.rows.map((_, i) => !precheckFailed(i))" in src, (
+        "默认勾选没有按预检结果初始化（预检不通过的行应默认不勾）"
+    )
+
+    #: ② 勾选列不得出现 disabled
+    k3 = src.index("render: (_: unknown, record: { __index: number }) => (")
+    end = src.find('key: "__matched_image"', k3)
+    assert end > k3, "找不到勾选列的结束边界（页面结构变了，更新本守卫）"
+    chk = src[k3:end]
+    assert "disabled" not in chk, (
+        "勾选列里出现 `disabled` —— 用户口径是「是否勾选用户决定」，"
+        "任何预检档位都不许禁用勾选框"
+    )
+
+    #: ③ 全选：作用域不剔除（能勾），但首次基准按预检结果（默认不勾）
+    assert "const scopeSelectable = scopeRows.filter((i) => !blockedRows.has(i));" not in src, (
+        "表头全选的作用域排除了预检不通过的行 —— 那些行会永远勾不上"
+    )
+    assert "table.rows.map((_, i) => !viewingFailedOnly && !precheckFailed(i))" in src, (
+        "表头全选的首次基准值没按预检结果 —— 点一次全选就把不通过的行也勾上了"
+    )
+
+    #: ④ 反向：预检结论仍要表达（红框 + 统计 + 筛选），不能连带把信号也删了
+    assert 'const blockedRows = new Set(' in src, "预检不通过的判定被整段删了（信号没了）"
+    assert 'type FailReason = "image" | "rule" | null;' in src, (
+        "失败原因分档被删了（红框与统计都要按原因分）"
+    )
+
+
+def test_sku_name_length_is_enforced_with_display_width_and_blocks_next():
+    """规格名 60 字符校验：**按显示宽度**、**拦住下一步**、**不自动调模型**。
+
+    用户口径 2026-10-22（三条）：
+      > 「导入 sku 数据时**没有对规格名称添加 60 字符长度校验**，如果长度超出则
+      >    **弹窗**展示旧规格名 / 新规格名 / 操作列，新规格名默认为空输入框」
+      > 「调用大模型优化的逻辑**由用户触发**，不要再后端默认调用」
+      > 「商品规格组的输入框添加 60 字符长度校验，**超出则不允许进入下一步**」
+
+    平台真机报错原文：「规格名不能超过 **30 个字（60 个字符）**」
+    ⇒ 判据必须是**显示宽度（汉字计 2）**，不是码点数。
+
+    ⚠️ 三个真 bug 都被这条口径圈出来了，判据要同时钉住：
+      ① `Array.from(raw).length`（码点）⇒ 30 个汉字只算 30 ⇒ 前端放行、发布被拒；
+      ② 导入入口先 `await optimizeSkuNames(...)` ⇒ 用户没点按钮就烧 token，
+         且失败时 catch 静默吞掉直接开导入（用户看到「没校验就进来了」）；
+      ③ 校验只在 `commitSpecValue`（回车时）⇒ 不回车直接点「下一步」永远不校验。
+    """
+    step2 = _read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx")
+    code = _code_only(step2)
+
+    #: ① 长度判据必须是显示宽度
+    assert "Array.from(raw).length > SPEC_VALUE_LEN_MAX" not in code, (
+        "规格值长度仍在用**码点数**判断 —— 30 个汉字只算 30，前端放行后发布被平台拒"
+    )
+    assert "exceedsLimit(raw, SKU_NAME_MAX_CHARS)" in code, (
+        "规格值长度必须走 `exceedsLimit`（显示宽度，汉字计 2）"
+    )
+
+    #: ② 导入入口不得自动调模型
+    entry = code[code.index("const openSpecImportWithNameCheck = useCallback("):]
+    entry = entry[: entry.index("}, [")]
+    assert "optimizeSkuNames(" not in entry, (
+        "导入入口仍在**自动调用**大模型 —— 用户口径「由用户触发，不要默认调用」"
+    )
+    #: ⚠️ 2026-10-22 口径再修订（「所有 sku 数据导入完毕后，最后弹出优化规格名称的
+    #: 弹窗」）：入口**不再拦截弹窗**，校验与优化统一放到导入收尾。
+    assert "setSkuOptimizeOpen(true);" not in entry, (
+        "导入入口又会先弹优化窗 —— 用户口径是先导完再弹"
+    )
+    #: ⚠️⚠️ 2026-10-22 **最终口径**：「导入数据后**不要在自动弹窗**优化规格名称，
+    #: 只有用户手动触发优化规格名称按钮时才需要弹窗，**两部分逻辑拆分开**」。
+    #: ⇒ 收尾处**不许**再 `setSkuOptimizeOpen(true)`，但仍要**说清楚**超长了多少
+    #: （用 message.warning 点名条数并指向按钮 —— 不弹窗≠静默）。
+    #: ⚠️ 起点要**在 `message.success` 之前** —— 超长统计（`const landed = ...`）
+    #: 写在它上面（先算再报），从 success 起切会漏掉统计那几行（首轮误判「没做统计」）。
+    finish = code[code.index("const landed = Array.from("):]
+    finish = finish[: finish.index("} catch (err)")]
+    assert "setSkuOptimizeOpen(true);" not in finish, (
+        "导入完成后又在自动弹「优化规格名称」窗 —— 用户口径是「只有手动触发才弹」"
+    )
+    assert "setSkuOptimizeItems(" not in finish, (
+        "导入收尾仍在往弹窗灌数据（逻辑没拆分干净）"
+    )
+    assert "isTooLong(n, SKU_NAME_MAX_CHARS)" in finish, "收尾处没做超长统计"
+    assert "点「优化规格名称」可批量压缩" in finish, (
+        "超长时没有提示（不弹窗不等于静默 —— 要指向手动按钮）"
+    )
+    #: 顶部按钮（用户口径「商品规格列表顶部新增一个优化规格名称按钮」）
+    assert "openOptimizeForCurrentSpecs()" in code, "商品规格区顶部缺「优化规格名称」按钮"
+    assert "const allSpecValues = useMemo(" in code, "缺「当前全部规格值」的派生"
+    #: ⚠️ 2026-10-22 起**超长判定移到导入收尾**（先导完再弹），入口只剩「取规格值」，
+    #: 不再自己做筛选 —— 那条断言随口径一起退场，判据由下面的 `finish` 部分承担。
+    #: ⚠️⚠️ 校验对象必须是**规格值**，不是列名（用户口径 2026-10-22：
+    #: 「导入 SKU 数据 / 导入 sku 映射数据时没有弹出规格名称优化弹窗」）。
+    #: 真根因：入口读的 `effectiveImportSources` = `priceSourceOptions(columns)`
+    #: = **表头列名**（「商品信息」「SKUID」…），天生短词永远不超 60
+    #: ⇒ `longNames` 恒空 ⇒ 弹窗一次都没弹过。
+    assert "const names = effectiveImportSources;" not in entry, (
+        "导入入口仍在拿**列名**做超长判定 —— 列名永远不超 60，弹窗永远不会弹"
+    )
+    assert "r.specValue" in entry, (
+        "导入入口没有从 `passedRows` 取**规格值**（`specValue`）做判定"
+    )
+    assert "new Set(" in entry, "规格值没去重（同一值重复出现在弹窗里）"
+
+    #: ③ 超长要进发布助手（`onHintCountChange` 的门禁源头）
+    hints = code[code.index("const publishHints = useMemo"):]
+    hints = hints[: hints.index("}, [")]
+    #: ⚠️ 只查 `exceedsLimit(...)` 字符串会被「函数体在但分支被短路」骗过
+    #: （变异 M3 把 `if (longSpecValues.length > 0)` 改 `if (false)` 就逃逸了）。
+    #: ⇒ 必须同时判「有筛选」+「真的 push 了一条带 section 的提示」。
+    assert "exceedsLimit(v, SKU_NAME_MAX_CHARS)" in hints, (
+        "超长规格值没进 `publishHints` —— 不按回车直接点「下一步」就绕过了校验"
+    )
+    assert "if (longSpecValues.length > 0) {" in hints, (
+        "超长判定的 if 分支被短路了（`exceedsLimit` 在但从不执行）"
+    )
+    assert 'field: "规格值"' in hints and "个规格值超过" in hints, (
+        "超长规格值没有真的 push 成一条发布提示（只算不报 = 拦不住下一步）"
+    )
+
+    #: ④ 输入框要有实时红框
+    #: ⚠️ 规格值输入框有**两处**（AutoComplete 内嵌的 Input + 普通 Input）。
+    #: 只判 `in code` 时删掉一处还有另一处 ⇒ 变异 M4 逃逸。
+    #: ⇒ 用**出现次数**钉（两处都必须有红框判据）。
+    assert code.count('status={exceedsLimit(v, SKU_NAME_MAX_CHARS) ? "error" : undefined}') >= 2, (
+        "规格值输入框的红框判据少于 2 处（AutoComplete 内嵌那个 / 普通那个都要有）"
+    )
+
+    #: ⑤ 弹窗侧：默认空 + 批量优化按钮存在，且**打开时不自动调模型**
+    modal = _code_only(
+        _read(ROOT / "frontend/src/pages/platforms/xhs/sku-name-optimize-modal.tsx")
+    )
+    #: ⚠️「默认空」是在**调用方**给的初值（弹窗只渲染传进来的 items）⇒ 判据落在 step2。
+    assert 'optimized: "",' in code, (
+        "新规格名不是默认空输入框（调用方给弹窗的初值必须是空串，不是模型结果）"
+    )
+    #: ⚠️ 文案在注释 / description / 按钮标签里共出现 4 次，只判 `in modal`
+    #: 时删掉按钮本体仍能过（变异 M5 逃逸）。⇒ 判**按钮 JSX 形态**：
+    #: `<Button ...>统一优化规格名称</Button>` 这种「标签紧邻」的结构。
+    import re as _re
+
+    assert _re.search(r"onClick=\{\(\) => void optimizeAll\(\)\}", modal), (
+        "缺「统一优化规格名称」按钮的 onClick 接线（按钮本体被删或没接处理函数）"
+    )
+    assert _re.search(r"\n\s*统一优化规格名称\s*\n\s*</Button>", modal), (
+        "缺「统一优化规格名称」按钮本体（要有真正的 <Button>，不能只在文案里提到）"
+    )
+    assert "const optimizeAll = async () =>" in modal, "批量优化函数缺失"
+    #: 反向：弹窗打开时的 useEffect 不得调模型
+    eff = modal[modal.index("useEffect(() => {"):]
+    eff = eff[: eff.index("}, [")]
+    assert "optimizeSkuNames(" not in eff and "regenerateSkuName(" not in eff, (
+        "弹窗打开就自动调大模型 —— 用户口径是「由用户触发」"
+    )
+
+
+def test_overlong_manual_spec_value_opens_the_optimize_modal():
+    """**手动输入**的规格值超长时也要弹优化窗（不是干报一句错）。
+
+    用户口径 2026-10-22：
+    > 「规格名称校验成功了，但是**没有优化规格名的弹窗**」
+
+    根因：优化弹窗只接在了「导入 SKU 数据」那条路上（`openSpecImportWithNameCheck`），
+    而截图里红框标的是**手动输入/粘贴**的规格值 —— 它走 `commitSpecValue`，
+    那里只 `fail(...)` 报一句就 return，从来没弹窗。
+
+    ⚠️ 两个入口必须**各回各处**（这是最容易漏的一半）：
+      · 导入入口 → 确认后把优化结果写回 `specImportSources` 再开导入弹窗；
+      · 手动输入 → 确认后把优化结果**写回那个输入框**（靠 `pendingSpecValue` 记住落点）。
+    只做「打开弹窗」不做「写回落点」，用户优化完发现值没变。
+    """
+    code = _code_only(
+        _read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx")
+    )
+
+    #: ① 超长分支必须弹窗（不只是 fail）
+    seg = code[code.index("if (exceedsLimit(raw, SKU_NAME_MAX_CHARS)) {"):]
+    seg = seg[: seg.index("return;") + 400]
+    assert "setSkuOptimizeOpen(true);" in seg, (
+        "手动输入的规格值超长时没有打开优化弹窗（只报错就 return 了）"
+    )
+    assert "setPendingSpecValue({ spec, index })" in seg, (
+        "没记住「优化完写回哪个规格的第几格」—— 优化结果会无处可写"
+    )
+    assert "original: raw," in seg and 'optimized: "",' in seg, (
+        "弹窗项没带上原始值 / 新规格名不是默认空"
+    )
+
+    #: ② 确认后要按入口分流（两条路各回各处）
+    confirm = code[code.index("onConfirm={(applied) => {"):]
+    confirm = confirm[: confirm.index("}}")]
+    assert "if (pendingSpecValue) {" in confirm, (
+        "onConfirm 没区分「手动输入」与「导入」两个入口 —— 手动改完会被弹进导入弹窗"
+    )
+    assert "setSpecValueAt(spec, index, picked);" in confirm, (
+        "手动输入入口确认后没有把优化结果写回输入框"
+    )
+    assert "setAppliedSkuNames(next);" in confirm, (
+        "导入入口确认后没有更新数据源（原有行为被破坏）"
+    )
+    #: ⚠️ 入口 C：导入完成后统一优化 ⇒ **覆盖商品规格里的旧值**
+    #: （用户口径「统一优化点击应用重新覆盖到商品 sku 旧规格名称值」）。
+    #: 三类数据都要跟着改名，否则留下指向旧名的孤儿（值改了图/开关就挂不上）。
+    assert "if (!specImportOpen) {" in confirm, "onConfirm 没区分「导入后统一优化」这个入口"
+    #: ⚠️ 2026-10-22 改：入口 C 不再**手写三份 setState**，统一委托
+    #: `renameSpecValue(dim, v, nextName)` —— 那个实现会一起重排
+    #: `specValues` / `specImages` / `specImageEnabled` / `priceRows.key`。
+    #: 手写版漏了 `priceRows`（正是用户报的「其它值也丢失了」），故此处改为
+    #: **反向断言**：不许再出现手写改名。
+    assert "renameMap.set(rk(dim, v)" in confirm, "入口 C 没构建批量改名表"
+    assert "next[dim] = list.map((v) => renameMap.get(rk(dim, v)) ?? v);" in confirm, (
+        "入口 C 没按批量表改 `specValues`"
+    )
+
+
+def test_sku_name_optimize_modal_threshold_blank_and_compact():
+    """优化弹窗三条口径（用户口径 2026-10-22，同一轮报的三件事）。
+
+    ① 「**小于 60 字符就不应该展示**在 SKU 规格名称优化预览弹窗列表中」
+       ⇒ 阈值是**严格大于**（60 本身合法；平台原文「不能超过 30 个字（60 个字符）」）。
+       前口径是「达到即触发」（`>=`）⇒ 列表里混进一堆 60 的合规项（用户截图为证）。
+    ② 「调用失败新规格名**应该还是空**不应该使用原规格名」
+       ⇒ 后端超长项初值 `optimized=""`；前端 `isNameOk("")` 必须判**不合规**，
+          否则空值宽度 0 会被当成合格 ⇒ 既不红框、也不计入「待处理」。
+    ③ 「提示音**不要占用页面太多空间**」
+       ⇒ 两条 `<Alert>` + 一行按钮合并成一条紧凑操作行。
+    """
+    from backend.app.services import sku_name_optimize_service as svc
+
+    #: ① 阈值：严格大于（前后端必须同一判据）
+    assert svc.is_too_long("中" * 30, 60) is False, (
+        "后端 60 字符仍判超长 —— 用户口径是「小于 60 不展示」，恰好 60 合法"
+    )
+    assert svc.is_too_long("中" * 31, 60) is True, "后端 61 字符没判超长"
+    width_lib = _read(ROOT / "frontend/src/lib/sku-name-width.ts")
+    #: ⚠️ 必须**按函数体**判，不能全文搜 `> maxChars;` ——
+    #: `exceedsLimit` 里有一模一样的一行，把 `isTooLong` 改回 `>=` 时
+    #: 全文断言照样绿（变异 Q2 实测逃逸）。
+    fn_i = width_lib.index("export function isTooLong(")
+    fn_body = width_lib[fn_i : width_lib.index("\n}", fn_i)]
+    assert "return displayWidth(name) > maxChars;" in fn_body, (
+        "前端 `isTooLong` 不是严格大于（会与后端口径不一致）"
+    )
+    assert ">=" not in fn_body, "前端 `isTooLong` 里仍有 `>=`（达到即触发的旧口径）"
+
+    #: ② 失败留空 + 空值判不合规
+    svc_src = _read(ROOT / "backend/app/services/sku_name_optimize_service.py")
+    assert 'optimized="" if is_too_long(n, max_chars) else n,' in svc_src, (
+        "后端超长项初值没有留空 —— 失败时会拿原文冒充结果"
+    )
+    modal = _code_only(
+        _read(ROOT / "frontend/src/pages/platforms/xhs/sku-name-optimize-modal.tsx")
+    )
+    name_ok = modal[modal.index("function isNameOk("):]
+    name_ok = name_ok[: name_ok.index("\n}")]
+    assert 'if (!text) return false;' in name_ok, (
+        "`isNameOk` 没把空值判为不合规 —— 失败行不红框、也不计入待处理"
+    )
+    #: 红框判据要同时看 reason（重试失败也要红）
+    assert "const bad = !!row.reason || !isNameOk(value, maxChars);" in modal, (
+        "新规格名红框判据只看长度 —— 调用失败的行不标红"
+    )
+
+    #: ③ 紧凑提示：不再用 <Alert>，失败提示走 <Text type="warning">
+    assert "<Alert" not in modal, (
+        "弹窗里仍有 `<Alert>` 大块提示 —— 用户口径「提示不要占太多空间」"
+    )
+    assert '<Text type="warning"' in modal, "失败提示没有改成紧凑 Text"
+    assert "<Space wrap size={8}" in modal, "操作行没合并成一行"
+
+
+def test_renaming_spec_value_only_renames_never_resets_rows():
+    """规格改名**只换名字**，价格库存行的其它字段一律不动（用户口径 2026-10-22）。
+
+    用户连报三次，其实是**同一个根因**：
+      ① 「编辑商品规格输入框后，**规格图丢失**，对应的价格及库存中的**所有列数据
+         全部丢失**」；
+      ② 「优化预览弹窗点击使用这些名称导入时应**只覆盖原来的规格名称**，目前覆盖后
+         价格及库存列表中的**其它值也丢失了**」；
+      ③ 「修改时只是名修改规格图，**库存表数据不应该变化清空**」
+      + 「**只有删除该规格时**，对应的库存表的整行数据应删除」。
+
+    根因：`PriceRow.key` 就是完整 `spec`（`lib/publish-config.ts::spec_combinations`
+    末尾 `{ key: spec, spec }`，含「维度名:值」）。只改 `specValues` 里的字符串时，
+    同步 effect 按**新 key** 重建行、`byKey` 里只有**旧 key** ⇒ 匹配不上 ⇒ 走 `base`
+    分支把 price/stock/market_price/current_stock/barcode/seller_code 全置 `null`；
+    规格图侧 `specImages`/`specImageEnabled` 按值做 key，旧键成了孤儿 ⇒ 图挂不上。
+    未改名的行 key 不变所以完好 —— 与截图完全吻合。
+
+    ⇒ 判据（三条，缺一即回归）：
+      A. 改名走**单一实现** `renameSpecValue`，且它四类键一起重排；
+      B. 价格行**只换 `key` 与 `spec`**，其余字段靠 `...r` 原样带过去（不许 delete/重置）；
+      C. 删行只发生在「删除该规格」的路径上 —— 改名路径**不得**减少行数。
+    """
+    src = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+
+    #: A. 单一实现存在，且四类键都重排
+    assert "const renameSpecValue = useCallback(" in src, "改名没有统一实现 `renameSpecValue`"
+    body_i = src.index("const renameSpecValue = useCallback(")
+    #: 右边界用下一个函数声明；src 过了 _code_only（注释已剥），不能拿注释当锚点。
+    body = src[body_i : src.index("const setSpecValueAt = useCallback(", body_i)]
+    #: ⚠️ 不能只查「setter 名出现过」—— 变异「`return prev;` 让 setSpecImages 空转」时
+    #:   `setSpecImages(` 那串仍在（调用还在，只是不做事）⇒ 首轮 S3 ESCAPED。
+    #:   判据要落到**真正改键的那几行**上。
+    assert "return { ...prev, [dim]: list.map((v) => (v === from ? to : v)) };" in body, (
+        "`renameSpecValue` 没重排 `specValues`"
+    )
+    assert "return { ...prev, [dim]: renamed };" in body, (
+        "`renameSpecValue` 没重排 `specImages`（改名后规格图丢失）"
+    )
+    assert "next[`${dim}\\u0000${to}`] = next[oldKey];" in body, (
+        "`renameSpecValue` 没重排 `specImageEnabled` 的扁平键"
+    )
+    assert "props.onPriceRowsChange?.(" in body, "`renameSpecValue` 没重排价格库存行"
+
+    #: B. 价格行只换两段名字，其余字段原样带过去
+    assert "return { ...r, key: spec, spec };" in body, (
+        "价格行不是「只换 key 与 spec」—— 其它字段会被重置（用户报的「其它值全丢」）"
+    )
+    #: 任何在改名实现里删字段/重建行的写法都是回归
+    for forbidden in ("price: null", "stock: null", "market_price: null", "delete r."):
+        assert forbidden not in body, f"`renameSpecValue` 里出现 `{forbidden}` —— 会把已填数据清掉"
+
+    #: C. 改名路径不许过滤/截断行（行数只能由「删除规格」改变）
+    assert ".filter(" not in body, "`renameSpecValue` 里在过滤行 —— 改名不该增删行"
+
+    #: 入口 C（优化弹窗确认）必须走同一实现，不许自己再写一份
+    #: ⚠️ `src` 过了 `_code_only`（注释已剥）⇒ 用**代码**锚点，不能用注释文案。
+    #: ⚠️⚠️ 入口 C **不能循环里逐条调 `renameSpecValue`**（用户报 2026-10-22 第二次：
+    #: 循环里每次都用同一份 `props.priceRows` 闭包快照 + 异步 `onPriceRowsChange`
+    #: ⇒ 后一次覆盖前一次 ⇒ 只有最后一条改名落到价格行 ⇒ 其余行被重建清空）。
+    #: 正确形态 = **一次算完 `renameMap` → 一次 `onPriceRowsChange`**。
+    #: ⚠️ 起点前移到 `const norm` —— 快照（`snapshotByRow`）建在 `renameMap` 之前。
+    confirm_i = src.index("const norm = (s: string) =>")
+    confirm = src[confirm_i : src.index("void message.success(`已把", confirm_i)]
+    assert "renameMap.set(rk(dim, v)" in confirm, "入口 C 没构建批量改名表"
+    assert confirm.count("props.onPriceRowsChange?.(") == 1, (
+        "入口 C 里 `onPriceRowsChange` 出现了多次 —— 会被闭包旧快照互相覆盖"
+    )
+    #: ⚠️ 2026-10-22 定稿：改为**按行号快照复原** ⇒ 字段来源是 `snapshot` 而不是 `r`。
+    assert "const snapshot = snapshotByRow[i];" in confirm and (
+        "return { ...snapshot, key: spec, spec };" in confirm
+    ), "入口 C 的价格行不是「只换 key 与 spec、其余字段按快照复原」"
+    #: ⚠️ 禁止「循环里逐条调改名」—— 但入口 C 本身要遍历维度构建表，
+    #:   所以判据落在**循环体里有没有调 `renameSpecValue`**，而不是循环本身。
+    assert "if (nextName && nextName !== v) renameSpecValue(" not in src, (
+        "入口 C 又变成循环逐条改名（多次异步回传会互相覆盖，其它值会被清空）"
+    )
+
+
+def test_rename_paths_share_one_implementation_and_never_touch_inputs():
+    """改名两条路（手改输入框 / 优化弹窗覆盖）**必须同一套键同步**，且都不重构输入框。
+
+    用户口径 2026-10-22：
+      > 「手动修改规格时**数据列没有丢失**」
+      > 「分析是否由于你覆盖时**清空了规格输入框**导致数据丢失」
+      > 「优化规格名称后，红框中的 sku 导入的数据丢失了，应该**只改规格名称**，
+      >   其它规格图以及对应的库存，价格等等列均不变」
+
+    实测差异（这是本条守卫的由来）：
+      · 手改：一次只改**一个值**，`priceRows` 的 key 与新值天然同一步到位 ⇒ 从不丢；
+      · 覆盖：一条事件里改**多个值**。若循环里逐条调 `renameSpecValue`，
+        每次都用**同一份 `props.priceRows` 闭包快照** + 异步 `onPriceRowsChange`
+        ⇒ 后一次覆盖前一次 ⇒ 只有最后一条改名落到价格行 ⇒ 其余行 key 停在旧值
+        ⇒ 重建 effect 按新 key 找不到 ⇒ 价格/库存/编码被清空（用户截图那几行）。
+    """
+    src = _code_only(
+        _read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx")
+    )
+
+    #: ① 覆盖路径必须「先算完整张改名表 → 一次回传」，不许循环里逐条回传
+    #: ⚠️ 起点必须在 `const norm` —— 快照（`snapshotByRow`）建在 `renameMap` 之前，
+    #:   从 `renameMap` 起切会看不到快照那两行（首轮误判「没记录快照」）。
+    i = src.index("const norm = (s: string) =>")
+    seg = src[i : src.index("void message.success(`已把", i)]
+    assert seg.count("props.onPriceRowsChange?.(") == 1, (
+        "覆盖路径里 `onPriceRowsChange` 不止一次 —— 闭包旧快照互相覆盖会清空其它行"
+    )
+    assert "if (nextName && nextName !== v) renameSpecValue(" not in seg, (
+        "覆盖路径又变成循环逐条改名（多次异步回传互相覆盖）"
+    )
+
+    #: ② 归一化：`applied` 的键与表里的值必须都 trim 后再比对，
+    #:    否则「有一项没改到」⇒ 该项三处键不同步 ⇒ 那几行被清空。
+    #: ⚠️ `rk` 定义在 `renameMap` **之前** ⇒ 判据落在整个入口 C 片段上（`seg` 从
+    #: `renameMap` 起切会看不到定义）。用更宽的 `block` 覆盖「定义 + 使用」。
+    block = src[src.index("const norm = (s: string)"):][:3000]
+    #: ⚠️ 不能只查「`rk` 这个函数存在」—— 变异「rk 内部去掉 norm」时函数名还在
+    #:   （首轮 T2 ESCAPED）。判据要落到**函数体真的用了 norm**。
+    assert "${norm(dim)}\u0000${norm(value)}" in block, (
+        "改名表的 key 没做两头归一化 —— 带首尾空格的值会漏改"
+    )
+    assert "renameMap.get(rk(" in seg, "查改名表没用归一化 key"
+
+    #: ③ 覆盖路径**不许**碰规格类型 / 输入框 / 挂起值（那会让「只改名字」变成重建）
+    for forbidden in ("setSpecTypes(", "clearImportTargets(", "setPendingSpecFills("):
+        assert forbidden not in seg, (
+            f"覆盖路径调了 `{forbidden}` —— 用户口径是「只改规格名称」，不是重建整块"
+        )
+
+    #: ④ **快照式复原**（用户口径 2026-10-22 最终做法）：
+    #: 「先批量覆盖前先记录历史数据，覆盖后**只规格名称变化，其它数据不变复原**」。
+    #: ⇒ 覆盖路径必须**先存快照**，且复原时字段取自快照（不是取自可能已被清空的 `r`）。
+    #: ⚠️ **按行号复原**（用户口径 2026-10-22：「可以**按照行号复原**」）。
+    #: 行号是唯一不依赖名字的索引 —— `priceRows` 的行序是规格值笛卡尔积的固定顺序，
+    #: 改名只换标签不改顺序，所以第 i 行改名前后是同一个 SKU。
+    assert "const snapshotByRow = props.priceRows.map((r) => ({ ...r }));" in seg, (
+        "覆盖前没有按行号记录快照 —— 改名后其它列只能靠猜 key 找回来"
+    )
+    assert "props.priceRows.map((r, i) => {" in seg, (
+        "复原时没有拿到行号 `i`"
+    )
+    assert "const snapshot = snapshotByRow[i];" in seg, (
+        "复原时没有按行号取快照行"
+    )
+    assert "return { ...snapshot, key: spec, spec };" in seg, (
+        "复原时字段来源不是快照 —— 只换名称的承诺没兑现（其它列可能为空）"
+    )
+
+
+def test_rename_restore_by_row_index_handles_multi_spec():
+    """改名复原**按行号**，并挡住「多规格改名后重名 ⇒ 行错位」（用户口径 2026-10-22）。
+
+    用户口径演进（三版猜 key 全失败后定稿）：
+      · 「先批量覆盖前先**记录历史数据**，覆盖后**只规格名称变化，其它数据不变复原**」
+      · 「可以**按照行号复原**」
+      · 「此处需注意考虑**多规格**时如何覆盖处理」
+
+    **为什么行号成立**：`priceRows` 由 `spec_combinations` 对每个维度的值做笛卡尔积
+    生成，行序是确定的；改名只换标签不改顺序 ⇒ 第 i 行改名前后是同一个 SKU。
+
+    **多规格的真实风险**：改名后同维度出现**重名**（「白色A」与「白色」都改成
+    「白色」）⇒ `specValues` 里两个相同值 ⇒ 组合数变少 ⇒ 行号整体错位 ⇒
+    按行号复原会把别行的价格/库存搬到错行（比清空更糟：有值但张冠李戴）。
+    ⇒ 覆盖前必须拦住这种改名，不许带着错位往下走。
+    """
+    src = _code_only(
+        _read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx")
+    )
+    i = src.index("const norm = (s: string) =>")
+    seg = src[i : src.index("void message.success(`已把", i)]
+
+    #: ① 快照按行号 + 复原按行号（不许退回「按 key / 按值序列」猜）
+    assert "const snapshotByRow = props.priceRows.map((r) => ({ ...r }));" in seg
+    assert "const snapshot = snapshotByRow[i];" in seg
+    assert "return { ...snapshot, key: spec, spec };" in seg, (
+        "复原字段来源不是行号快照 —— 其它列可能为空或被搬到错行"
+    )
+
+    #: ② 多规格重名必须在**写任何状态之前**拦住（`return` 在 setSpecValues 之前）
+    clash_at = seg.index("const clashes: string[] = [];")
+    first_set = seg.index("setSpecValues((prev) => {")
+    assert clash_at < first_set, (
+        "重名检查放在改名之后 —— 已经写脏状态再 return，页面会半更新"
+    )
+    assert "if (clashes.length > 0) {" in seg and "return;" in seg, "重名时没有中断覆盖"
+    assert "会导致 SKU 行错位" in seg, "重名提示没说清后果（用户不知道为什么要拦）"
+
+    #: ③ 重名检查必须**按维度分组**（跨维度同名是合法的：颜色「白」+ 款式「白」）
+    assert "for (const [dim, list] of Object.entries(specValues)) {" in seg
+    assert "const seen = new Set<string>();" in seg
+
+
+def test_spec_value_duplicates_are_rejected_at_every_entry():
+    """**规格名不能重复**（用户口径 2026-10-22：「规格名不能重复添加校验」）。
+
+    为什么要三个入口都拦：规格值有**三条写入路径**，只堵一条就漏
+      A. 输入框 `onChange`（逐字符）→ `setSpecValueAt`；
+      B. 回车提交 → `commitSpecValue`；
+      C. 优化弹窗「使用这些名称导入」批量覆盖 → 入口 C。
+
+    漏 A 的后果最隐蔽：用户还没回车，重复值已经进了 `specValues`
+    ⇒ 同维度两个同名值 ⇒ 笛卡尔积**少一行** ⇒ 价格库存表**行错位**
+    （比多一行更糟：数据张冠李戴）。
+    漏 C 的后果：优化把两个不同名压成同一个短名 ⇒ 同样错位，
+    而且发生在**批量**操作上，一次影响整张表。
+    """
+    src = _code_only(
+        _read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx")
+    )
+
+    #: A. 逐字符写入路径必须在**写状态之前**拦
+    a_i = src.index("const setSpecValueAt = useCallback(")
+    #: ⚠️ `src` 过了 `_code_only`（注释已剥）⇒ 用**代码**锚点。
+    a_seg = src[a_i : src.index("const commitSpecValue = useCallback(", a_i)]
+    assert "规格值名称不可重复" in a_seg, (
+        "输入框逐字符写入没有重复校验（用户没回车就已经写进 specValues 了）"
+    )
+    #: ⚠️ 判据要落在**条件本身**上：只查「提示文案出现过」的话，把 `if (false)` 塞进去
+    #: 文案仍在 ⇒ 首轮 V1 ESCAPED。必须钉住「同维度其它值 == 输入值」这个比法。
+    cond = "list.some((v, i) => i !== index && v.trim() === typed)"
+    assert cond in a_seg, "输入框没按「同维度其它值」判重（或判重条件被架空）"
+    dup_at = a_seg.index(cond)
+    rename_at = a_seg.index("renameSpecValue(spec, before, next);")
+    assert dup_at < rename_at, "重复校验放在改名之后 —— 已经写脏状态才报错"
+
+    #: B. 回车提交路径
+    b_i = src.index("const commitSpecValue = useCallback(")
+    b_seg = src[b_i : b_i + 3000]
+    assert "规格值名称不可重复" in b_seg, "回车提交没有重复校验"
+
+    #: C. 优化覆盖路径（批量）—— 重名必须整批拒绝，不许带着错位往下走
+    c_i = src.index("const clashes: string[] = [];")
+    c_seg = src[c_i : c_i + 1200]
+    assert "if (clashes.length > 0) {" in c_seg and "return;" in c_seg, (
+        "优化覆盖没有拦截重名 —— 会把两个值压成同名，价格库存行整体错位"
     )

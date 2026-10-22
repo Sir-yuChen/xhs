@@ -6164,7 +6164,10 @@ function TablesPanel(props: {
           ? badRowIndexes
           : table.rows.map((_, i) => i);
         /** 可见行里**能勾的**（排除结构性不可发布 = `blockedRows`）。 */
-        const scopeSelectable = scopeRows.filter((i) => !blockedRows.has(i));
+        //: ⚠️ 2026-10-22：勾选与预检结论解耦后，**可见行全部可选**
+        //: （不再剔除 `blockedRows`）—— 用户口径「不管是否预检通过，均应自动勾选，
+        //: 是否勾选用户决定」。保留常量名是为了不改下方全选/反选的判据形状。
+        const scopeSelectable = scopeRows;
         /** **当前勾选的行**（规则执行 / 导出 / 第二步导入的唯一作用域）。
          *
          *  ⚠️⚠️ 真根因（2026-10-21 第 3 次报同一现象）：「选了 24 行，固定文本规则
@@ -6191,8 +6194,28 @@ function TablesPanel(props: {
         //: ⇒ **判据改成：只要「只看不通过」开着，作用域就只取可见行**。
         //:   屏幕显示什么，规则就作用于什么 —— 不需要用户额外点任何东西。
         //:   关掉筛选 ⇒ 可见行 = 整表 ⇒ 行为与老版本完全一致。
-        const pickedRows = (picked[tIndex] ?? table.rows.map(() => true))
-          .map((on, i) => (on && !blockedRows.has(i) ? i : -1))
+        //: ⚠️⚠️ **默认勾选规则**（用户口径 2026-10-22，两轮修订后的最终版）：
+        //:
+        //:   · **其余行一律默认勾选**（正常行）；
+        //:   · **预检不通过的行默认不勾** —— 判据 = `blockedRows`（SKU 图未匹配）
+        //:     ∪ `badRuleRows`（规则执行失败/无法执行）**两类都算**预检不通过；
+        //:   · 但勾选框**不禁用** —— 「是否勾选由用户决定」，他可以手动勾上接管。
+        //:
+        //: ⚠️ 演化（原句保留，不静默删除）：
+        //:   · 2026-10-22 第一轮：「不管是否预检通过，均应自动勾选，是否勾选用户决定」
+        //:     ⇒ 当时把默认值里的 `blockedRows` 过滤也去掉了；
+        //:   · 2026-10-22 第二轮（本条）：**默认值要按预检结果分开**，
+        //:     只有「用户显式勾选」这一层才是自由的。
+        //: ⇒ 所以「默认值看预检」与「勾选框不禁用」**不是矛盾**，是两层：
+        //:   默认值给一个合理起点（不通过的先别勾，避免误提交），
+        //:   最终决定权仍在用户手里。
+        //:
+        //: ⚠️ 判据必须**同时**读 `blockedRows` 与 `badRuleRows`：
+        //:   只判前者 ⇒ 规则失败行仍被默认勾上（用户明确说「属于预检不通过」）。
+        const precheckFailed = (i: number) =>
+          blockedRows.has(i) || badRuleRows.has(`${tIndex}:${i}`);
+        const pickedRows = (picked[tIndex] ?? table.rows.map((_, i) => !precheckFailed(i)))
+          .map((on, i) => (on ? i : -1))
           .filter((i) => i >= 0)
           //: 筛选开着 ⇒ 只保留可见行（屏幕上勾着的那 24 行）。
           .filter((i) => !viewingFailedOnly || scopeRows.includes(i));
@@ -6527,11 +6550,11 @@ function TablesPanel(props: {
                         //:  · 筛选关着 ⇒ 整表全 true（可见行就是整表，行为与老版本一致）。
                         const cur =
                           seen ??
-                          table.rows.map(() => !viewingFailedOnly);
+                          table.rows.map((_, i) => !viewingFailedOnly && !precheckFailed(i));
                         const next = cur.slice();
                         for (const i of scopeSelectable) next[i] = on;
-                        //: 取消全选时把**不可勾的可见行**也置 false，
-                        //: 避免「取消后还剩几个勾」的观感问题（它们本就 disabled）。
+                        //: 取消全选时把**可见行**全部置 false（含预检不通过的 —— 2026-10-22
+                        //: 起它们也可勾选，不置 false 会留下「取消了还勾着几个」的观感问题）。
                         if (!on) for (const i of scopeRows) next[i] = false;
                         return { ...prev, [tIndex]: next };
                       });
@@ -6555,16 +6578,19 @@ function TablesPanel(props: {
                 render: (_: unknown, record: { __index: number }) => (
                   <Checkbox
                     checked={pickedRows.includes(record.__index)}
-                    //: ⚠️ 用户口径 2026-10-21：
-                    //:   · 「红框标记，**原值不要改变**」—— 红框只是提示，不改数据；
-                    //:   · 「**用户主动勾选该行时取消红框提示**」——
-                    //:     所以**规则失败的行不再禁用勾选框**（禁用了用户根本点不了，
-                    //:     与这条口径直接矛盾）；只有「预检未通过」仍禁用
-                    //:     （那是结构性不可发布：本地没有对应图，勾了也发不出去）。
-                    //: ⚠️ 判据走 `failureOf`：**只有「图片未匹配」档禁用**
-                    //: （结构性不可发布，勾了平台也拒），「规则执行失败」档**可勾** ——
-                    //: 用户口径「用户主动勾选该行时取消红框」，禁用了他就点不了。
-                    disabled={failureOf(record.__index) === "image"}
+                    //: ⚠️⚠️ **不禁用**（用户口径 2026-10-22：「不管是否预检通过，均应
+                    //: 自动勾选，**是否勾选用户决定**」）。
+                    //:
+                    //: 历史沿革（原句保留，不静默删除）：
+                    //:   · 2026-10-21 口径是「红框只是提示，不改数据；用户主动勾选该行时
+                    //:     取消红框」⇒ 规则失败档可勾、图片未匹配档**禁用**；
+                    //:   · 2026-10-22 用户推翻「图片未匹配档禁用」——理由是不能代替用户
+                    //:     决定要不要这一行（他可能先勾着、等补齐图再发布）。
+                    //:
+                    //: 现在勾选与预检结论完全解耦：**所有行都能勾/取消**。
+                    //: 预检不通过的信号只靠红框 + 顶部统计 + 「只看不通过」筛选表达；
+                    //: 真正阻止发布的是提交前的门禁（`passedSkuSpecs` 收口），
+                    //: 那里仍按真实通过与否判断 —— 不禁用勾选框并不等于放行。
                     onChange={(e) => {
                       const on = e.target.checked;
                       setPicked((prev) => {

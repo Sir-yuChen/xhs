@@ -57,12 +57,13 @@ import {
   MinusOutlined,
   PlusOutlined,
   RightOutlined,
+  ThunderboltOutlined,
 } from "@ant-design/icons";
 import type { Dayjs } from "dayjs";
 
 import { generateShortTitle, optimizeSkuNames, predictProperties } from "../../../lib/api";
 import type { SkuNameOptimizeItem } from "../../../lib/api";
-import { displayWidth, isTooLong } from "../../../lib/sku-name-width";
+import { SKU_NAME_MAX_CHARS, displayWidth, exceedsLimit, isTooLong } from "../../../lib/sku-name-width";
 import { SkuNameOptimizeModal } from "./sku-name-optimize-modal";
 import type { AfterSaleRule } from "../../../lib/api";
 import { buildImageUrls, lookupSpecFill, spec_combinations } from "../../../lib/publish-config";
@@ -1591,6 +1592,14 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
    *  若有规格名超长（默认 60 字符，汉字计 2）先弹这个，确认后再进导入弹窗。 */
   const [skuOptimizeOpen, setSkuOptimizeOpen] = useState(false);
   const [skuOptimizeItems, setSkuOptimizeItems] = useState<SkuNameOptimizeItem[]>([]);
+  /** **手动输入**的规格值触发优化弹窗时，记住「优化完写回哪个规格的第几格」。
+   *
+   *  ⚠️ 与导入链路（`appliedSkuNames`）是**两条路**：导入是批量替换数据源，
+   *  手动输入只是改一个输入框的值 ⇒ 必须单独记住落点，否则优化完写不回去。
+   *  `null` = 本次弹窗不是从手动输入触发的（走导入链路）。 */
+  const [pendingSpecValue, setPendingSpecValue] = useState<
+    { spec: string; index: number } | null
+  >(null);
   const [skuOptimizeMax, setSkuOptimizeMax] = useState(60);
   const [skuOptimizeBusy, setSkuOptimizeBusy] = useState(false);
   /** **生效的规格来源名**（用户确认优化后的名称用在这里）。
@@ -1678,38 +1687,49 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
    * 没有超长的 ⇒ 直接进导入弹窗，**不白调一次模型**。
    * 调用失败也直接进导入（不能因为优化不了就堵住用户）。
    */
-  const openSpecImportWithNameCheck = useCallback(async () => {
-    const names = effectiveImportSources;
-    if (names.length === 0) {
+  /**
+   * 点「导入 SKU 数据」入口。
+   *
+   * ⚠️⚠️ **用户口径 2026-10-22**：「调用大模型优化的逻辑**由用户触发**，
+   * 不在后端默认调用」+「导入 sku 数据时**没有对规格名称添加 60 字符长度校验**，
+   * 如果长度超出则**弹窗**展示旧规格名 / 新规格名 / 操作列」。
+   *
+   * ⇒ 这里是**纯本地判定**，一次网络都不打：
+   *   · 没有超长的 ⇒ 直接开导入弹窗（零延迟，绝大多数包走这条）；
+   *   · 有超长的   ⇒ 开「规格名称超长」弹窗，把超长的行逐条列出；
+   *     用户自己决定哪一条点「优化」（那才调大模型）。
+   * ⚠️ 旧实现进这里就先 `await optimizeSkuNames(...)` 批量调模型 —— 已删除：
+   *   用户没点任何按钮就消耗 token，且失败时 `catch` 静默吞掉直接开导入
+   *   （用户看到的正是「没有校验就进来了」）。
+   */
+  const openSpecImportWithNameCheck = useCallback(() => {
+    //: ⚠️⚠️ **校验对象是「规格值」，不是「列名」**（用户口径 2026-10-22：
+    //: 「导入 SKU 数据 / 导入 sku 映射数据时**没有弹出规格名称优化弹窗**」）。
+    //:
+    //: 真根因：`effectiveImportSources` 装的是 `mappingSources`，而它是
+    //: `priceSourceOptions(columns)` = **表头列名列表**（「商品信息」「SKUID」
+    //: 「颜色分类」…）。列名天生是短词，永远不可能超 60 ⇒ `longNames` 恒空
+    //: ⇒ **每次都直接开导入弹窗，弹窗一次都没弹过**（用户看到的就是这个）。
+    //: 真正会长的是**表格数据里的规格值**（如「奶油白色-【伸缩桌+六斗柜】…」）。
+    //: ⇒ 从 `passedRows` 取 `specValue` 去重后判定。
+    const specValuesForCheck = Array.from(
+      new Set(
+        (props.passedRows ?? [])
+          .map((r) => String(r.specValue ?? "").trim())
+          .filter(Boolean),
+      ),
+    );
+    if (specValuesForCheck.length === 0) {
       openSpecImportModal();
       return;
     }
-    //: 前端先粗筛（同口径 60 字符）：全都够短就不打网络。
-    const maybeLong = names.filter((n) => isTooLong(n, 60));
-    if (maybeLong.length === 0) {
-      openSpecImportModal();
-      return;
-    }
-    setSkuOptimizeBusy(true);
-    try {
-      const result = await optimizeSkuNames({
-        items: names.map((name) => ({ key: name, name })),
-      });
-      const needing = result.items.filter((r) => r.changed || !!r.reason);
-      if (needing.length === 0) {
-        openSpecImportModal();
-        return;
-      }
-      setSkuOptimizeItems(result.items);
-      setSkuOptimizeMax(result.max_chars);
-      setSkuOptimizeOpen(true);
-    } catch {
-      //: 优化失败不阻断导入（用户仍可手工改规格名）。
-      openSpecImportModal();
-    } finally {
-      setSkuOptimizeBusy(false);
-    }
-  }, [effectiveImportSources, openSpecImportModal]);
+    //: ⚠️⚠️ **入口这里不再弹窗**（用户口径 2026-10-22：「所有 sku 数据导入完毕后，
+    //: 最后弹出优化规格名称的弹窗」）——先让导入完整跑完、用户看到结果，
+    //: 再在导入收尾处（`importFinished` 分支）弹「统一优化」。
+    //: ⇒ 入口只负责打开导入弹窗，校验与优化统一放在收尾，避免「还没导入就先被打断」。
+    void specValuesForCheck;
+    openSpecImportModal();
+  }, [props.passedRows, openSpecImportModal]);
   /** 映射草稿（**成对关系行**，最多 2 行；两列均必填且不许重复）。 */
   const [importMapping, setImportMapping] = useState<SpecMappingRow[]>([]);
   /** 导入执行态（跑的时候禁用「确认导入」并显示进度文案）。 */
@@ -1830,20 +1850,152 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
     [props.specAttributes],
   );
 
-  /** 改第 i 个规格值输入框。 */
+  /** **把某个规格值改名 —— 唯一实现**（`setSpecValueAt` / `commitSpecValue` /
+   *  「优化规格名称」弹窗确认 三处都走这里）。
+   *
+   *  ⚠️⚠️⚠️ 用户报 2026-10-22 两次，其实是**同一个根因**：
+   *    ① 「编辑商品规格输入框后，**规格图丢失**，对应的价格及库存中的**所有列数据
+   *       全部丢失**」；
+   *    ② 「SKU 规格名称优化预览弹窗点击使用这些名称导入时**应只覆盖原来的规格名称**，
+   *       目前覆盖后价格及库存列表中的**其它值也丢失了**」。
+   *
+   *  **根因（实测）：`PriceRow.key` 就是完整 `spec`**（`lib/publish-config.ts`
+   *  `spec_combinations` 末尾 `const spec = combo.map(...).join(" / ")` ⇒
+   *  `return { key: spec, spec }`，含「维度名:值」）。所以**值一改，key 就变**：
+   *    · 价格库存那边：同步 effect 按新 key 重建，`byKey` 里只有旧 key ⇒
+   *      `byKey.get(c.key)` 落空 ⇒ 走 `base` 分支把
+   *      price/stock/market_price/current_stock/barcode/seller_code 全置 `null`；
+   *    · 规格图那边：`specImages` / `specImageEnabled` 都是**按值做 key**，
+   *      值改了旧键成了孤儿 ⇒ 图挂不上、开关读不到。
+   *  未改名的行/值 key 不变，所以它们完好 —— 与用户截图完全吻合。
+   *
+   *  ⇒ 判据：**改名 = 三类键一起重排**，行的其它字段逐字段原样带过去。
+   *  只在 `specValues` 里换字符串是不够的（那正是缺陷本身）。
+   */
+  const renameSpecValue = useCallback(
+    (dim: string, before: string, after: string) => {
+      const from = before.trim();
+      const to = after.trim();
+      if (!from || !to || from === to) return;
+      //: ① 规格值列表：**按位置换**（同维度可能有重名，值本身不会重复，但位置最稳）。
+      setSpecValues((prev) => {
+        const list = prev[dim] ?? [];
+        if (!list.includes(from)) return prev;
+        return { ...prev, [dim]: list.map((v) => (v === from ? to : v)) };
+      });
+      //: ② 规格图：`规格名 → 值 → 图`，把值这一层的键换掉。
+      setSpecImages((prev) => {
+        const byValue = prev[dim];
+        if (!byValue || !(from in byValue)) return prev;
+        const renamed: Record<string, ConfigMainImage> = {};
+        for (const [v, img] of Object.entries(byValue)) {
+          renamed[v === from ? to : v] = img;
+        }
+        return { ...prev, [dim]: renamed };
+      });
+      //: ③ 规格图开关：**扁平** `{ "维度\\x00值": boolean }`（与 `specImages` 结构不同）。
+      setSpecImageEnabled((prev) => {
+        const oldKey = `${dim}\u0000${from}`;
+        if (!(oldKey in prev)) return prev;
+        const next = { ...prev };
+        next[`${dim}\u0000${to}`] = next[oldKey];
+        delete next[oldKey];
+        return next;
+      });
+      //: ④ **价格库存表**：key 与 spec 里的这一段一起换，其它字段原样保留。
+      //:    ⚠️ 必须在这里改 —— 只改 `specValues` 的话，下面那个同步 effect 会用
+      //:    **新 key 重建行**，旧行匹配不上 ⇒ 价格/库存/编码全被 `null` 覆盖。
+      props.onPriceRowsChange?.(
+        props.priceRows.map((r) => {
+          const parts = String(r.spec ?? "").split(" / ");
+          let touched = false;
+          const renamedParts = parts.map((part) => {
+            const sep = part.indexOf(":");
+            if (sep < 0) return part;
+            if (part.slice(0, sep).trim() !== dim) return part;
+            if (part.slice(sep + 1).trim() !== from) return part;
+            touched = true;
+            return `${part.slice(0, sep)}:${to}`;
+          });
+          if (!touched) return r;
+          //: ⚠️ 用户口径 2026-10-22：「修改时只是名修改规格图，**库存表数据不应该变化清空**」
+          //: ⇒ 这里**只换 `key` 与 `spec` 两段名字**，其余字段（price / stock /
+          //:   current_stock / market_price / barcode / seller_code / spec_id /
+          //:   available / 发货时间 …）全部靠 `...r` 原样带过去，一个都不碰。
+          //:   任何 `delete`/重建行的写法都会把用户填过的数据弄丢。
+          const spec = renamedParts.join(" / ");
+          return { ...r, key: spec, spec };
+        }),
+      );
+    },
+    [props.priceRows, props.onPriceRowsChange],
+  );
+
+  /** 把某一格规格值换成 `next`（**走 `renameSpecValue`** 同步重排所有键）。 */
   const setSpecValueAt = useCallback(
     (spec: string, index: number, next: string) => {
-      setSpecValues((prev) => {
-        const list = [...(prev[spec] ?? []).filter((v) => v.trim() !== "")];
-        list[index] = next;
-        return { ...prev, [spec]: list };
-      });
+      const list = (specValues[spec] ?? []).filter((v) => v.trim() !== "");
+      const before = list[index] ?? "";
+      //: ⚠️⚠️ **规格名不能重复**（用户口径 2026-10-22：「规格名不能重复添加校验」）。
+      //:
+      //: 原来只在 `commitSpecValue`（回车提交）拦 —— 但输入框是
+      //: `onChange → setSpecValueAt` **逐字符写状态**，用户还没回车，重复值就已经
+      //: 进了 `specValues` ⇒ 撞出两个同名值 ⇒ 笛卡尔积少一行 ⇒ 价格库存表行错位。
+      //:
+      //: ⇒ 在**写状态之前**拦：与同维度其它值重名就直接拒绝 + 红框提示。
+      const typed = String(next ?? "").trim();
+      if (typed && list.some((v, i) => i !== index && v.trim() === typed)) {
+        setSpecValueHints((prev) => ({ ...prev, [spec]: "规格值名称不可重复" }));
+        return;
+      }
+      renameSpecValue(spec, before, next);
       setSpecValueHints((prev) => ({ ...prev, [spec]: "" }));
     },
-    [],
+    [specValues, renameSpecValue],
   );
 
   /** 回车提交该规格值（校验：非空 / 不重复 / ≤60 字符 / ≤500 个）——真机口径。 */
+  /** 当前「商品规格」里**已填的全部规格值**（去重；供顶部「优化规格名称」按钮判定）。 */
+  const allSpecValues = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          specTypes
+            .flatMap((dim) => specValues[dim] ?? [])
+            .map((v) => String(v ?? "").trim())
+            .filter(Boolean),
+        ),
+      ),
+    [specTypes, specValues],
+  );
+
+  /** 顶部「优化规格名称」按钮（用户口径 2026-10-22）：
+   *  「点击也可以打开弹窗对商品 sku 规格名称进行优化」。
+   *
+   *  ⚠️ 与「导入后自动弹」的区别：这里**用户主动点**，所以不筛只超长的 ——
+   *  用户可能就是想给某个名字换个更短的写法 ⇒ 有超长就优先列超长的，
+   *  没有超长的也允许手动挑（这里为保证不误伤，空列表时按钮禁用）。 */
+  const openOptimizeForCurrentSpecs = useCallback(() => {
+    if (allSpecValues.length === 0) return;
+    const tooLong = allSpecValues.filter((n) => isTooLong(n, SKU_NAME_MAX_CHARS));
+    //: 有超长的 ⇒ 只列超长的（用户点这个按钮通常就是为了处理它们）；
+    //: 一个都没超 ⇒ 列表全给（让用户自己挑要压哪个）。
+    const picked = tooLong.length > 0 ? tooLong : allSpecValues;
+    setSkuOptimizeItems(
+      picked.map((n) => ({
+        key: n,
+        original: n,
+        optimized: "",
+        changed: false,
+        truncated: false,
+        reason: "",
+      })),
+    );
+    setPendingSpecValue(null);
+    setSkuOptimizeMax(SKU_NAME_MAX_CHARS);
+    setSkuOptimizeOpen(true);
+  }, [allSpecValues]);
+
   const commitSpecValue = useCallback(
     (spec: string, index: number) => {
       const cur = specValues[spec] ?? [];
@@ -1852,8 +2004,36 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
       const list = cur.filter((v) => v.trim() !== "");
 
       const fail = (msg: string) => setSpecValueHints((prev) => ({ ...prev, [spec]: msg }));
-      if (Array.from(raw).length > SPEC_VALUE_LEN_MAX) {
-        fail(`规格值长度上限为 ${SPEC_VALUE_LEN_MAX} 个字符`);
+      //: ⚠️⚠️ **口径必须与平台一致：按显示宽度（汉字计 2），不是码点数**
+      //: （用户口径 2026-10-22：「商品规格组的输入框添加 **60 字符**长度校验，
+      //:  超出则不允许进入下一步」；平台真机报错原文「规格名不能超过 30 个字
+      //:  （60 个字符）」）。
+      //: 旧写法 `Array.from(raw).length` 是**码点数** ⇒ 30 个汉字只算 30，
+      //: 前端放行、发布时被平台拒（正是用户截图里那 4 条「variants」失败）。
+      if (exceedsLimit(raw, SKU_NAME_MAX_CHARS)) {
+        //: ⚠️⚠️ 用户口径 2026-10-22：「规格名称校验成功了，但是**没有优化规格名的弹窗**」
+        //: + 「长度超出则**弹窗**展示旧规格名 / 新规格名 / 操作列」。
+        //:
+        //: ⇒ 超长时不是干报一句错了事，而是**把这一条直接抛进优化弹窗**：
+        //:   用户在弹窗里点「优化」（调大模型）或手动改短，确认后用返回值替换该输入框。
+        //: `pendingSpecValue` 记住「优化完要写回哪个规格的第几格」——
+        //: 手动输入的规格值不经过导入链路，没有它写不回去。
+        fail(
+          `规格值长度上限为 ${SKU_NAME_MAX_CHARS} 个字符（汉字计 2），当前 ${displayWidth(raw)}`,
+        );
+        setPendingSpecValue({ spec, index });
+        setSkuOptimizeItems([
+          {
+            key: raw,
+            original: raw,
+            optimized: "",
+            changed: false,
+            truncated: false,
+            reason: "",
+          },
+        ]);
+        setSkuOptimizeMax(SKU_NAME_MAX_CHARS);
+        setSkuOptimizeOpen(true);
         return;
       }
       if (list.filter((v) => v !== raw).includes(raw)) {
@@ -2304,7 +2484,32 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
       if (cancelled) {
         void message.warning("导入已被取消（已完成的规格与价格库存保留）");
       } else {
+        //: ⚠️⚠️ **导入完成后不再自动弹优化窗**（用户口径 2026-10-22 最终版：
+        //: 「导入数据后**不要在自动弹窗**优化规格名称，**只有用户手动触发**优化规格
+        //: 名称按钮时才需要弹窗，**两部分逻辑拆分开**」）。
+        //:
+        //: 演化（原句保留，不静默删除）：
+        //:   · 更早的版本在**入口**拦截弹窗 → 用户还没看到导入结果就被打断；
+        //:   · 中间版本改成**导入收尾**自动弹 → 用户说「不要自动弹」；
+        //:   · 现在：导入只负责导入，**超长提示走 message + 顶部按钮**，弹窗只由
+        //:     用户主动点「优化规格名称」触发。
+        //: ⚠️ 「超长」这件事仍要**说清楚**（不能因为不弹窗就静默）——
+        //: 用一条 warning 文案点名条数，并指向那个按钮。
+        const landed = Array.from(
+          new Set(
+            plan.dims
+              .flatMap((d) => d.values.map((v) => String(v.value ?? "").trim()))
+              .filter(Boolean),
+          ),
+        );
+        const tooLong = landed.filter((n) => isTooLong(n, SKU_NAME_MAX_CHARS));
         void message.success(`已导入 ${plan.rows.length} 行规格数据`);
+        if (tooLong.length > 0) {
+          //: 只提示，不弹窗 —— 是否处理由用户点顶部「优化规格名称」决定。
+          void message.warning(
+            `有 ${tooLong.length} 个规格名超出 ${SKU_NAME_MAX_CHARS} 字符，点「优化规格名称」可批量压缩`,
+          );
+        }
       }
     } catch (err) {
       setImportDetail(`导入失败：${err instanceof Error ? err.message : String(err)}`);
@@ -2750,18 +2955,12 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
             <span>{v}</span>
             {/* 启用/停用入口只放在**最后一维**（每行一个决定），否则同组多个链接重复 */}
             {di === dims.length - 1 && (
-              <a
-                className="sku-enabled-btn"
-                onClick={() =>
-                  props.onPriceRowsChange(
-                    props.priceRows.map((r) =>
-                      r.key === row.key ? { ...r, available: !enabled } : r,
-                    ),
-                  )
-                }
+              <Tag
+                color={enabled ? "success" : "default"}
+                style={{ marginInlineEnd: 0, fontSize: 12, lineHeight: "18px" }}
               >
-                {enabled ? "不启用" : "启用"}
-              </a>
+                {enabled ? "已启用" : "不启用"}
+              </Tag>
             )}
           </Space>
         );
@@ -3049,6 +3248,28 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
         section: "价格库存",
         field: "价格及库存",
         reason: `${badRows.length} 行缺价格或库存`,
+      });
+    }
+    //: ⚠️⚠️ 用户口径 2026-10-22：「**商品规格组的输入框添加 60 字符长度校验，
+    //: 超出则不允许进入下一步**」。
+    //:
+    //: 判据与平台同口径 = **显示宽度**（汉字计 2）。旧代码只在 `commitSpecValue`
+    //: （回车提交时）用码点数校验 ⇒ 两处漏洞：
+    //:   ① 不按回车直接点「下一步」永远不校验；
+    //:   ② 30 个汉字码点只算 30 ⇒ 前端放行、发布被平台拒（截图里那 4 条 variants）。
+    //: ⇒ 放进 `publishHints`：它会经 `onHintCountChange` 上报给向导，
+    //:   而向导的门禁判据就是「异常数 > 0 不许进下一步」—— 一处收口。
+    const longSpecValues: string[] = [];
+    for (const specName of specTypes) {
+      for (const v of specValues[specName] ?? []) {
+        if (v && exceedsLimit(v, SKU_NAME_MAX_CHARS)) longSpecValues.push(v);
+      }
+    }
+    if (longSpecValues.length > 0) {
+      out.push({
+        section: "商品规格",
+        field: "规格值",
+        reason: `${longSpecValues.length} 个规格值超过 ${SKU_NAME_MAX_CHARS} 字符（汉字计 2）`,
       });
     }
     //: ⚠️ 用户口径（2026-10-10）：「第二步中**所有必须配置的参数均在助手中展示**」
@@ -3584,11 +3805,22 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
               type="primary"
               icon={<ImportOutlined />}
               disabled={effectiveImportSources.length === 0}
-              onClick={() => void openSpecImportWithNameCheck()}
+              onClick={() => openSpecImportWithNameCheck()}
             >
               预检通过SKU导入
             </Button>
             </Tooltip>
+            {/* ⚠️ 用户口径 2026-10-22：「商品规格列表顶部新增一个**优化规格名称**按钮，
+                点击也可以打开弹窗对商品 sku 规格名称进行优化」——
+                手动改过 / 导入后留下的超长规格名，不必重跑导入，在这里直接优化。 */}
+            <Button
+              size="small"
+              icon={<ThunderboltOutlined />}
+              disabled={allSpecValues.length === 0}
+              onClick={() => openOptimizeForCurrentSpecs()}
+            >
+              优化规格名称
+            </Button>
           </Space>
         </Field>
 
@@ -3622,10 +3854,179 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
           )}
           onClose={() => setSkuOptimizeOpen(false)}
           onConfirm={(applied) => {
-            //: 把优化后的名称按**原顺序**放回去（key 是原始名，逐一替换）。
+            setSkuOptimizeOpen(false);
+            //: ⚠️ 弹窗有**三个入口**，确认后必须回到各自的原处：
+            //:   A. 手动输入框超长      → 写回那个输入框（`pendingSpecValue`）
+            //:   B. 手动点击「导入 SKU 数据」 → 把结果写回 `specImportSources` 再开导入
+            //:   C. **导入完成后的统一优化** → 用新名**覆盖商品规格里已有的旧值**
+            //:      （用户口径 2026-10-22：「统一优化点击应用重新覆盖到商品
+            //:      sku 旧规格名称值」）。判据 = `pendingSpecValue` 为空且
+            //:      导入弹窗没开（说明是从导入收尾弹出来的）。
+            if (pendingSpecValue) {
+              const { spec, index } = pendingSpecValue;
+              const picked = Object.values(applied)[0] ?? "";
+              setSpecValueAt(spec, index, picked);
+              setPendingSpecValue(null);
+              return;
+            }
+            if (!specImportOpen) {
+              //: 入口 C：覆盖已落库到「商品规格」里的旧值。
+              //: ⚠️⚠️⚠️ 用户报 2026-10-22：「点击**使用这些名称导入**时应**只覆盖原来的
+              //: 规格名称**，目前覆盖后价格及库存列表中的**其它值也丢失了**」。
+              //:
+              //: 真根因见 `renameSpecValue` 的注释：`PriceRow.key` 就是完整 `spec`
+              //: ⇒ 只换 `specValues` 里的字符串，价格库存那边按新 key 重建时
+              //: 匹配不上旧行，`base` 分支把价格/库存/编码全置 `null`。
+              //:
+              //: ⚠️⚠️ **必须一次性传整张改名表**，不能循环里逐条调。
+              //:
+              //: `renameSpecValue` 里改价格行用的是 `props.priceRows`（**闭包快照**）
+              //: + `props.onPriceRowsChange(...)`（**异步回传外层**）。在同一个事件里
+              //: 连续调用 N 次 ⇒ N 次都基于**同一份旧快照** map，后一次把前一次覆盖掉
+              //: ⇒ 只有**最后一条**改名落到价格行上，其余行 key 还是旧值，
+              //: 随后重建 effect 按新 key 找不到 ⇒ 整行价格/库存被清空
+              //: （正是用户截图：改名那几行全空、未改名的行完好）。
+              //:
+              //: ⚠️⚠️⚠️ 用户口径 2026-10-22（第三条路，最终做法）：
+              //: 「**先批量覆盖前先记录历史数据，覆盖后只规格名称变化，其它数据不变复原**」。
+              //:
+              //: 前两版都在「猜 key」：先按 `维度:值` 拼 key 重排，再猜归一化要不要 trim。
+              //: 但 key 的构造散落在三处（`spec_combinations` / `specImages` / 扁平
+              //: `specImageEnabled`），任何一处没跟上就丢数据 —— 用户已经连报三次。
+              //:
+              //: ⇒ 改成**快照式**，彻底不依赖「怎么拼 key」：
+              //:   ① 覆盖前：把每行（按**值序列**索引，与 key 无关）的**全部字段**存一份；
+              //:   ② 只改规格名（`specValues` / `specImages` / `specImageEnabled` 的键）；
+              //:   ③ 覆盖后：价格库存行**用旧行做底**，只换 `key`/`spec` 两段名字，
+              //:      其余字段**从快照逐字段复原** —— 名字变了也不影响价格/库存/编码。
+              //:
+              //: 与「按 key 找旧行」的区别：快照的索引是**规格值的序列**
+              //: （`颜色值 / 款式值`，剥掉维度名），改名后这个序列**仍然可算**，
+              //: 因为新名字就是旧名字的映射结果。所以永远找得回来。
+              //: ⚠️⚠️⚠️ 用户口径 2026-10-22（最终做法，第三次修正）：
+              //: 「先批量**覆盖前先记录历史数据**，覆盖后**只规格名称变化，其它数据不变复原**」
+              //: + 「可以**按照行号复原**」。
+              //:
+              //: 前两版都在「按名字猜 key」：`PriceRow.key` 就是完整 `spec`（含维度名 +
+              //: 值），还得考虑 trim、维度重名、`specImages` 的嵌套 vs 扁平……任何一处
+              //: 没跟上就丢数据，用户连报三次。
+              //:
+              //: ⇒ **按行号**，这是唯一不依赖名字的索引：`priceRows` 的行序是规格值做
+              //:   笛卡尔积的固定顺序，**改名只换标签、不改顺序** ⇒ 第 i 行改名前后是同
+              //:   一个 SKU。所以：
+              //:     ① 覆盖前：`snapshot[i] = { ...priceRows[i] }`（行号 → 整行）；
+              //:     ② 只改名字：`specValues` / `specImages` / `specImageEnabled` 的键；
+              //:     ③ 覆盖后：第 i 行 = `{ ...snapshot[i], key: 新spec, spec: 新spec }`
+              //:        —— 其它字段**逐个来自快照**，价格/库存/编码一个都不会丢。
+              const norm = (s: string) => String(s ?? "").trim();
+
+              //: ① **快照（按行号）**：覆盖前的每一行原样留底。
+              //:   ⚠️ 存 `{ ...r }` 而不是引用 —— 后续 effect 可能原地改 `r`。
+              const snapshotByRow = props.priceRows.map((r) => ({ ...r }));
+
+              //: ② 改名表（维度 + 旧值 → 新值），键两头归一化。
+              const rk = (dim: string, value: string) => `${norm(dim)} ${norm(value)}`;
+              const renameMap = new Map<string, string>();
+              for (const [dim, list] of Object.entries(specValues)) {
+                for (const v of list) {
+                  const nextName = applied[norm(v)];
+                  if (nextName && norm(nextName) !== norm(v)) renameMap.set(rk(dim, v), norm(nextName));
+                }
+              }
+              //: ⚠️⚠️ **多规格的关键前提**：按行号复原要求「**改名前后行数不变、顺序不变**」。
+              //:
+              //:   `priceRows` 由 `spec_combinations` 对「每个维度的值」做笛卡尔积生成。
+              //:   改名只是换标签 ⇒ 组合数不变 ⇒ 第 i 行还是同一个 SKU ⇒ 行号复原成立。
+              //:
+              //:   但有一个真实风险：**改名后同一维度里出现重名**
+              //:   （如把「白色A」和「白色」都改成「白色」）。这时 `specValues` 里该维度
+              //:   有两个相同值 ⇒ 组合数**变少** ⇒ 行号整体错位 ⇒ 按行号复原会把
+              //:   别行的价格/库存搬到错的行上（比清空更糟：数据看起来有、但张冠李戴）。
+              //:   ⇒ 覆盖前先拦：新名若与同维度**其它**值重名，直接拒绝整批并说明。
+              const clashes: string[] = [];
+              for (const [dim, list] of Object.entries(specValues)) {
+                const after = list.map((v) => renameMap.get(rk(dim, v)) ?? v);
+                const seen = new Set<string>();
+                for (const v of after) {
+                  const k = norm(v);
+                  if (!k) continue;
+                  if (seen.has(k)) clashes.push(`${dim}：${k}`);
+                  seen.add(k);
+                }
+              }
+              if (clashes.length > 0) {
+                void message.error(
+                  `优化后的名称在同规格下重复（${clashes.join("、")}），会导致 SKU 行错位，已取消本次覆盖。`,
+                );
+                return;
+              }
+              if (renameMap.size > 0) {
+                //: ③ 规格值列表
+                setSpecValues((prev) => {
+                  const next: Record<string, string[]> = {};
+                  for (const [dim, list] of Object.entries(prev)) {
+                    next[dim] = list.map((v) => renameMap.get(rk(dim, v)) ?? v);
+                  }
+                  return next;
+                });
+                //: ④ 规格图（值这一层的键）
+                setSpecImages((prev) => {
+                  const next: Record<string, Record<string, ConfigMainImage>> = {};
+                  for (const [dim, byValue] of Object.entries(prev)) {
+                    const renamed: Record<string, ConfigMainImage> = {};
+                    for (const [v, img] of Object.entries(byValue)) {
+                      renamed[renameMap.get(rk(dim, v)) ?? v] = img;
+                    }
+                    next[dim] = renamed;
+                  }
+                  return next;
+                });
+                //: ⑤ 规格图开关（扁平 `维度 值`）
+                setSpecImageEnabled((prev) => {
+                  const next: Record<string, boolean> = {};
+                  for (const [key, on] of Object.entries(prev)) {
+                    const sep = key.indexOf(" ");
+                    if (sep < 0) {
+                      next[key] = on;
+                      continue;
+                    }
+                    const dim = key.slice(0, sep);
+                    const value = key.slice(sep + 1);
+                    next[`${dim} ${renameMap.get(rk(dim, value)) ?? value}`] = on;
+                  }
+                  return next;
+                });
+                //: ⑥ 价格库存行：**按行号复原** —— 第 i 行只换 `key`/`spec`，
+                //:   其余字段全部取自 `snapshotByRow[i]`。
+                props.onPriceRowsChange?.(
+                  props.priceRows.map((r, i) => {
+                    const parts = String(r.spec ?? "").split(" / ");
+                    let touched = false;
+                    const renamedParts = parts.map((part) => {
+                      const sep = part.indexOf(":");
+                      if (sep < 0) return part;
+                      const d = part.slice(0, sep).trim();
+                      const v = part.slice(sep + 1).trim();
+                      const hit = renameMap.get(rk(d, v));
+                      if (!hit) return part;
+                      touched = true;
+                      return `${part.slice(0, sep)}:${hit}`;
+                    });
+                    if (!touched) return r;
+                    const spec = renamedParts.join(" / ");
+                    //: 用户口径：「**只改规格名称**，其它规格图以及对应的库存、价格等等列均不变」。
+                    const snapshot = snapshotByRow[i];
+                    if (!snapshot) return { ...r, key: spec, spec };
+                    return { ...snapshot, key: spec, spec };
+                  }),
+                );
+              }
+              void message.success(`已把 ${Object.keys(applied).length} 个规格名更新为新名称`);
+              return;
+            }
+            //: 入口 B：把优化后的名称按**原顺序**放回去（key 是原始名）。
             const next = (props.specImportSources ?? []).map((name) => applied[name] ?? name);
             setAppliedSkuNames(next);
-            setSkuOptimizeOpen(false);
             openSpecImportModal();
           }}
         />
@@ -4115,6 +4516,8 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
                             <Input
                               value={v}
                               maxLength={SPEC_VALUE_LEN_MAX}
+                              //: ⚠️ 用户口径 2026-10-22：超出 60 字符**红框展示**（显示宽度，汉字计 2）。
+                              status={exceedsLimit(v, SKU_NAME_MAX_CHARS) ? "error" : undefined}
                               title={v || undefined}
                               onPressEnter={() => commitSpecValue(name, vi)}
                             />
@@ -4140,6 +4543,8 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
                         className="spec-value-input"
                         value={v}
                         maxLength={SPEC_VALUE_LEN_MAX}
+                              //: ⚠️ 用户口径 2026-10-22：超出 60 字符**红框展示**（显示宽度，汉字计 2）。
+                              status={exceedsLimit(v, SKU_NAME_MAX_CHARS) ? "error" : undefined}
                         placeholder="请选择或输入规格值"
                         //: ⚠️ 宽度固定 200px（用户口径）⇒ 长规格值显示不下。
                         //: 给 `title` 让用户**悬停看全文**（不靠加宽输入框解决）。

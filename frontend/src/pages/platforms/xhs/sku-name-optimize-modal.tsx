@@ -25,12 +25,12 @@
  *    （否则用户以为「取消 = 先放着」，实际已经放弃本次导入）。
  */
 import { useEffect, useMemo, useState } from "react";
-import { App, Alert, Button, Input, Modal, Space, Table, Tag, Tooltip, Typography } from "antd";
-import { ReloadOutlined } from "@ant-design/icons";
+import { App, Button, Input, Modal, Space, Table, Tag, Tooltip, Typography } from "antd";
+import { ReloadOutlined, ThunderboltOutlined, WarningOutlined } from "@ant-design/icons";
 
-import { displayWidth } from "../../../lib/sku-name-width";
+import { displayWidth, isTooLong } from "../../../lib/sku-name-width";
 import type { SkuNameOptimizeItem } from "../../../lib/api";
-import { regenerateSkuName } from "../../../lib/api";
+import { optimizeSkuNames, regenerateSkuName } from "../../../lib/api";
 
 const { Text } = Typography;
 
@@ -52,9 +52,19 @@ export interface SkuNameOptimizeModalProps {
   onClose: () => void;
 }
 
-/** 一条名字是否**合规**（未超上限）。判据与后端 `display_width` 同口径。 */
+/** 一条名字是否**合规**（非空且未超上限）。判据与后端 `display_width` 同口径。
+ *
+ *  ⚠️⚠️ **空值必须判为不合规**（用户口径 2026-10-22：「调用失败新规格名
+ *  应该还是空不应该使用原规格名」+「点击重试生成没有红色标注」）。
+ *
+ *  旧实现只判 `displayWidth(name) <= maxChars` ⇒ 空串宽度 0 ⇒ **恒合格**
+ *  ⇒ 失败行（新名为空）既不红框、也不计入 `blocking`（「0 条待处理」）
+ *  ⇒ 用户看到「有 1 条失败」但界面上没有任何红框，也点不动「使用这些名称导入」的禁用理由。
+ *  ⇒ 空 = 还没结果 = 不合规。 */
 function isNameOk(name: string, maxChars: number): boolean {
-  return displayWidth(name) <= maxChars;
+  const text = String(name ?? "").trim();
+  if (!text) return false;
+  return displayWidth(text) <= maxChars;
 }
 
 export function SkuNameOptimizeModal(props: SkuNameOptimizeModalProps) {
@@ -65,6 +75,8 @@ export function SkuNameOptimizeModal(props: SkuNameOptimizeModalProps) {
   const { open, maxChars, items, imageByValue, onConfirm, onClose } = props;
   const [rows, setRows] = useState<Row[]>([]);
   const [regenKey, setRegenKey] = useState<string | null>(null);
+  /** 批量优化进行中（「统一优化规格名称」按钮的 loading）。 */
+  const [bulkOptimizing, setBulkOptimizing] = useState(false);
 
   //: 每次打开都用最新结果覆盖（重开不能带着上次的改动）。
   useEffect(() => {
@@ -78,8 +90,17 @@ export function SkuNameOptimizeModal(props: SkuNameOptimizeModalProps) {
     setRegenKey(null);
   }, [open, items, imageByValue]);
 
-  /** 只展示**真的需要比较**的行：超长且改动过，或失败（失败也要让用户看见）。 */
-  const visible = useMemo(() => rows.filter((r) => r.changed || !!r.reason), [rows]);
+  /** 展示**所有超长的行**（不只是改过的）。
+   *
+   *  ⚠️ 用户口径 2026-10-22：「长度超出则弹窗展示**旧规格名 / 新规格名 / 操作列**，
+   *  新规格名**默认为空输入框**」——
+   *  ⇒ 判据不能是 `changed`（那要求模型已经跑过），而是「这一行原值本身就超长」。
+   *  旧写法 `r.changed || !!r.reason` 只在**自动批量调模型之后**才成立，
+   *  改成用户触发后表里一行都不会显示（用户看到的就是「没弹窗」）。 */
+  const visible = useMemo(
+    () => rows.filter((r) => isTooLong(r.original, maxChars) || r.changed || !!r.reason),
+    [rows, maxChars],
+  );
 
   const failedCount = visible.filter((r) => !!r.reason).length;
 
@@ -88,6 +109,49 @@ export function SkuNameOptimizeModal(props: SkuNameOptimizeModalProps) {
     () => visible.filter((r) => !isNameOk(r.optimized, maxChars)),
     [visible, maxChars],
   );
+
+  /** 批量优化（**只能由用户点按钮触发**，用户口径 2026-10-22）。 */
+  const optimizeAll = async () => {
+    const targets = visible.filter((r) => !!r.original);
+    if (targets.length === 0) return;
+    setBulkOptimizing(true);
+    try {
+      const result = await optimizeSkuNames({
+        items: targets.map((r) => ({ key: r.key, name: r.original })),
+      });
+      //: 按 key 回填（后端保证逐条返回；失败项带 reason，新名退回原文）。
+      const byKey = new Map(result.items.map((it) => [it.key, it]));
+      setRows((prev) =>
+        prev.map((it) => {
+          const hit = byKey.get(it.key);
+          if (!hit) return it;
+          return {
+            ...it,
+            optimized: hit.optimized,
+            changed: hit.changed,
+            truncated: hit.truncated,
+            reason: hit.reason,
+          };
+        }),
+      );
+      const failed = result.items.filter((it) => !!it.reason).length;
+      if (failed > 0) {
+        message.warning(`${failed} 条调用大模型失败（已标红），请手动修改这几行`);
+      } else {
+        message.success(`已统一优化 ${result.items.length} 条规格名称`);
+      }
+    } catch (error) {
+      //: ⚠️ 整体失败（网络 / 无模型配置）也要说清楚，**不静默** ——
+      //: 用户口径「调用大模型优化失败红框展示」。
+      message.error(
+        `优化失败：${error instanceof Error ? error.message : String(error)}`,
+      );
+      //: 全部标红（把失败原因带进每一行，红框由 `!isNameOk` 兜住）。
+      setRows((prev) => prev.map((it) => ({ ...it, reason: "调用大模型失败" })));
+    } finally {
+      setBulkOptimizing(false);
+    }
+  };
 
   const regenerate = async (row: Row) => {
     setRegenKey(row.key);
@@ -163,20 +227,34 @@ export function SkuNameOptimizeModal(props: SkuNameOptimizeModalProps) {
       className="hermes-hide-scrollbar"
       styles={{ body: { maxHeight: "62vh", overflowY: "auto" } }}
     >
-      <Alert
-        type="info"
-        showIcon
-        style={{ marginBottom: 12 }}
-        message="只压缩长度，不改变语义。确认后仅本次导入使用，不会改动 SKU 表里的原始名称。"
-      />
-      {failedCount > 0 && (
-        <Alert
-          type="warning"
-          showIcon
-          style={{ marginBottom: 12 }}
-          message={`有 ${failedCount} 条调用大模型失败（新规格名已标红），请手动修改后再导入。`}
-        />
-      )}
+      {/* ⚠️ 用户口径 2026-10-22：「提示音**不要占用页面太多空间**」——
+          原来两条 Alert（信息条 + 失败条）+ 一行按钮各占一整行，把表格挤掉半屏。
+          ⇒ 合并成**一条紧凑操作行**：按钮 + 计数 + 失败提示全在一行，
+            失败提示用 `<Text type="warning">` + Tooltip 承载全文，
+            不再用带图标垫高 40px+ 的 `<Alert>`；表格随之能多显示 2~3 行。 */}
+      <Space wrap size={8} style={{ marginBottom: 8 }}>
+        <Button
+          size="small"
+          type="primary"
+          icon={<ThunderboltOutlined />}
+          loading={bulkOptimizing}
+          disabled={visible.length === 0}
+          onClick={() => void optimizeAll()}
+        >
+          统一优化规格名称
+        </Button>
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          共 {visible.length} 条，{blocking.length} 条待处理
+        </Text>
+        {failedCount > 0 && (
+          <Tooltip title="调用大模型失败的行，新规格名已标红；请手动填写或重新生成。">
+            <Text type="warning" style={{ fontSize: 12 }}>
+              <WarningOutlined style={{ marginRight: 4 }} />
+              {failedCount} 条调用失败，请手动修改
+            </Text>
+          </Tooltip>
+        )}
+      </Space>
       <Table<Row>
         size="small"
         rowKey="key"
@@ -220,9 +298,11 @@ export function SkuNameOptimizeModal(props: SkuNameOptimizeModalProps) {
             dataIndex: "optimized",
             render: (value: string, row) => {
               //: ⚠️ 用户口径 2026-10-21：「调用失败的**新规格名红框展示且必须手动修改**」。
-              //: 判据用**长度**（而不是只看 `reason`）—— 用户手改后可能又超长，
-              //: 那种情况同样要红框（红框 = 「这一格还不合规」）。
-              const bad = !isNameOk(value, maxChars);
+              //: ⚠️ 2026-10-22 补：「点击重试生成**没有红色标注**」——
+              //: 判据必须**同时**看「失败原因」与「长度」：
+              //:   · `row.reason` 非空 = 这一行模型失败 ⇒ 必红框（哪怕值碰巧不超长）；
+              //:   · 否则再看长度（用户手改后又超长同样要红）。
+              const bad = !!row.reason || !isNameOk(value, maxChars);
               return (
                 <Tooltip title={row.reason || undefined}>
                   <Input
@@ -254,8 +334,12 @@ export function SkuNameOptimizeModal(props: SkuNameOptimizeModalProps) {
             width: 100,
             render: (_: unknown, row) => {
               //: 显示宽度与后端**同一口径**（汉字计 2），避免「页面说 40、后端说 72」。
-              const width = displayWidth(row.optimized);
-              const ok = width <= maxChars;
+              //: ⚠️ 新规格名**默认为空**（用户口径 2026-10-22）⇒ 空串宽度是 0，
+              //: 直接显示会变成「0 绿标」，看起来像已经合规了。
+              //: ⇒ 没填新名时**显示原值宽度**（那才是这条被拦下的原因）。
+              const text = row.optimized || row.original;
+              const width = displayWidth(text);
+              const ok = !!row.optimized && width <= maxChars;
               return (
                 <Space size={4}>
                   <Tag color={ok ? "green" : "red"}>{width}</Tag>

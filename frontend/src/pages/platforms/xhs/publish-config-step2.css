@@ -595,12 +595,9 @@
   margin-left: auto;
 }
 
-/* SKU 行级「启用/不启用」切换（用户口径 2026-10-10，真机 `sku-enabled-btn`）。
-   文案 = 点后变成的状态（启用中显示「不启用」）。 */
-.publish-config-step2 .sku-enabled-btn {
-  font-size: 12px;
-  white-space: nowrap;
-}
+/* SKU 行级「启用/不启用」的**只读预览 Tag**（用户口径 2026-10-22：
+   「功能列重复，只保留一个操作入口，将规格后的不启用/启用使用预览 tag 方式」）。
+   ⚠️ 唯一操作入口是**操作列的 Switch**；这里是纯展示，不含 `.sku-enabled-btn`。 */
 .publish-config-step2 .price-row-disabled .spec-cell-text {
   color: var(--ant-color-text-quaternary, rgba(0, 0, 0, 0.25));
 }
@@ -612,8 +609,8 @@
 .publish-config-step2 .price-row-disabled td .ant-input {
   color: var(--ant-color-text-quaternary, rgba(0, 0, 0, 0.25));
 }
-/* 但「启用」切换链接仍要可点（否则停用的行永远无法重新启用）。 */
-.publish-config-step2 .price-row-disabled td .sku-enabled-btn {
+/* 但状态 Tag 要**保持清晰**（整行 0.45 透明度下会看不清「不启用」这个结论）。 */
+.publish-config-step2 .price-row-disabled td .ant-tag {
   opacity: 1;
 }
 

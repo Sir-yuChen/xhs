@@ -83,8 +83,15 @@ def display_width(text: str) -> int:
 
 
 def is_too_long(name: str, max_chars: int = DEFAULT_MAX_CHARS) -> bool:
-    """是否触发优化（**达到**即触发，用户口径「以 60 字符为准」）。"""
-    return display_width(name) >= max_chars
+    """是否**超长**（严格大于）—— 与前端 `isTooLong` 同一函数口径。
+
+    ⚠️⚠️ 用户口径 2026-10-22：「**小于 60 字符就不应该展示**在 SKU 规格名称
+    优化预览弹窗列表中」。
+    演化：2026-10-20 是「**达到**即触发」（`>=`）—— 那时弹窗只是「可优化的提醒」；
+    现在弹窗语义是「这些必须处理」，而平台原文「不能超过 30 个字（60 个字符）」
+    ⇒ **60 本身合法** ⇒ 必须严格大于，否则 60 的合规项也会进列表（用户截图为证）。
+    """
+    return display_width(name) > max_chars
 
 
 def truncate_to_width(text: str, max_chars: int) -> str:
@@ -163,8 +170,23 @@ def optimize_names(
     `items` 是 `[(key, name), ...]`；返回顺序与入参一致。
     没超长的项原样返回、`changed=False`（前端据此只展示需要确认的行）。
     """
+    #: ⚠️ **超长项初值 `optimized` 必须留空**（用户口径 2026-10-22：
+    #: 「调用失败新规格名**应该还是空**不应该使用原规格名」）。
+    #:
+    #: 旧写法统一 `optimized=n`（= 原文）⇒ 失败时用户看到「新规格名 = 原规格名」，
+    #: 既没红框（长度判据看的是原文，本身就是超长的 —— 但值不为空时前端
+    #: `!!row.optimized && width <= max` 的判据会被绕成「有值但超长」，
+    #: 视觉上分不清「模型给出了结果」还是「失败退回原文」）。
+    #: ⇒ 没超长的项**保持原样**（`optimized = n`，`changed=False`，前端不展示）；
+    #:   超长的项**先清空**，只有模型真的给出结果才填上。
     results: list[SkuNameOptimizeItem] = [
-        SkuNameOptimizeItem(key=k, original=n, optimized=n, changed=False)
+        SkuNameOptimizeItem(
+            key=k,
+            original=n,
+            #: 超长的先留空（等模型结果）；没超长的原样返回（前端不展示它）。
+            optimized="" if is_too_long(n, max_chars) else n,
+            changed=False,
+        )
         for k, n in items
     ]
     #: 只把**超长**的送去压缩（没超长的调模型纯属浪费额度）。
