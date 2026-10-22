@@ -1,0 +1,67 @@
+# 行尾统一为 LF（仓库内所有文本文件）
+#
+# 为什么需要这个文件（实测教训）：
+#   本机 `core.autocrlf=true`，而仓库里的文件是**纯 LF**（HEAD 实测
+#   `publish-config-step2.tsx` = 4459 行全 LF）。当工具（Python 写入脚本 /
+#   sed / 某些编辑器）按工作区默认写 CRLF 时，git diff 会把**整份文件**算成
+#   改动 —— 一次 511 行的真实改动在 diff 里显示成 9307 行，评审和 blame 全废。
+#
+#   ⇒ 显式声明 `eol=lf`：无论 autocrlf 怎么配、无论谁用什么工具写，
+#     git 都把内容按 LF 存进仓库，diff 只反映真实改动。
+#
+# ⚠️ 本文件生效后，已跟踪文件的行尾在**下一次被 git 触碰时**才归一
+#   （`git add --renormalize .` 可一次性完成，但会产生一个大提交，
+#    所以这里不自动做 —— 按需执行）。
+
+* text=auto eol=lf
+
+# Windows 专有的二进制/脚本保持原样，不做行尾转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.pdf binary
+*.zip binary
+*.7z binary
+*.exe binary
+*.dll binary
+*.pyd binary
+*.so binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.db binary
+*.sqlite binary
+*.sqlite3 binary
+*.xlsx binary
+*.xls binary
+*.docx binary
+*.pptx binary
+*.mp4 binary
+*.mp3 binary
+
+# PowerShell 脚本：Windows PowerShell 5.1 对 UTF-8 BOM 敏感
+# （`packaging/build.ps1` 带 BOM 且必须 CRLF，见 AGENTS.md §2 环境坑）
+*.ps1 text eol=crlf
+*.psm1 text eol=crlf
+
+# Git 自身与批处理
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 明确按 LF 的文本类
+*.py text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.js text eol=lf
+*.jsx text eol=lf
+*.json text eol=lf
+*.css text eol=lf
+*.md text eol=lf
+*.sql text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.sh text eol=lf
