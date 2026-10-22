@@ -72,14 +72,22 @@ const darkComponents = {
   Layout: { siderBg: "#141414", headerBg: "#141414", bodyBg: "#0a0a0a" },
   Menu: { darkItemBg: "#141414", darkSubMenuItemBg: "#141414", darkItemSelectedBg: "#1668dc20", darkItemSelectedColor: "#1668dc" },
   Card: { colorBgContainer: "#1a1a1a" },
-  Table: { colorBgContainer: "#1a1a1a", headerBg: "#1f1f1f", rowHoverBg: "rgba(255,255,255,0.06)" },
+  //: ⚠️ **不要覆盖行背景 token**（2026-10-21 实测教训）：
+  //: antd 默认 `rowHoverBg: colorFillAlterSolid` 本身就是**实色**，且
+  //: `genFixedStyle` 在 `genSelectionStyle` **之后**注入（table/style/index.js:319）
+  //: ⇒ 固定列背景天然覆盖悬停/选中色，本就不会透明。
+  //: 之前在这里写 `rowHoverBg: "rgba(255,255,255,0.06)"` 恰恰把实色改成了半透明，
+  //: 才造出「选中行左侧固定列变透明」——**问题是我改坏的，不是 antd 的**。
+  //: ⇒ 恢复默认，不再传任何 row*Bg。
+  Table: { colorBgContainer: "#1a1a1a", headerBg: "#1f1f1f" },
 };
 
 const lightComponents = {
   Layout: { siderBg: "#ffffff", headerBg: "#ffffff", bodyBg: "#f5f5f5" },
   Menu: { itemBg: "#ffffff", subMenuItemBg: "#ffffff", itemSelectedBg: "#1668dc14", itemSelectedColor: "#1668dc", itemColor: "rgba(0,0,0,.85)" },
   Card: {},
-  Table: { rowHoverBg: "rgba(0,0,0,0.04)" },
+  //: 同上：不覆盖行背景 token（antd 默认实色，固定列不会透）。
+  Table: {},
 };
 
 type AppProvidersProps = { children: ReactNode };

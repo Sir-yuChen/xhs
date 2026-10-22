@@ -198,12 +198,129 @@ export function columnByMappingOrAlias(
   return sourceColumnIndex(columns, rows, target);
 }
 
+/** **规格文本**（用户口径 2026-10-21 的核心修正）。
+ *
+ *  > 「SKU 名称也应无需再让用户配置映射关系，当用户配置完**商品 SKU 映射关系**
+ *  >   指定的列**去重后就是对该组的 sku 规格**」
+ *
+ *  数据包实证（`店透-SKU预览-表格-1073821618329-2026-10-21.csv`，456 行 × 13 列）：
+ *    · `颜色分类` 去重 24 个（`奇遇童话01…24`，与 `SKU图/` 的 24 张图**一一对应**）；
+ *    · `尺寸` 去重 19 个；两者**组合**去重 **456** = 行数（无重复组合）。
+ *    · `SKU信息` 列是「颜色;尺寸」的拼串（与 `颜色分类 + ";" + 尺寸` 逐字一致）。
+ *  ⇒ 规格 = 用户选中的那几列**按行拼接 + 去重**，而不是让用户再映射一个「SKU 名称」列。
+ *
+ *  ⚠️ 分隔符用 `" / "`：与第二步 `spec_combinations` 的 `c.spec` **同形**
+ *  （维度按 `dims` 顺序、` / ` 分隔）—— 不同形的话价格表按 key 对齐时行会凭空多出来。
+ *  ⚠️ 值本身**不再拆冒号**（用户口径 2026-10-20：「从 sku 名称按冒号取前缀这个是错的」）。
+ */
+export function skuSpecTextOf(
+  rowCells: Record<string, string>,
+  specColumns: readonly string[],
+): string {
+  return specColumns
+    .map((col) => String(rowCells[col] ?? "").trim())
+    .filter((v) => !!v)
+    .join(" / ");
+}
+
+/** **SKU 图（固定列）的本行值**（用户口径 2026-10-21）。
+ *
+ *  > 「规格图不应在价格库存映射关系表中再次进行配置，应为在预检步骤中
+ *  >   SKU 图是固定列，应直接取规格对应行的固定列 SKU图」
+ *
+ *  ⚠️ 唯一来源 = 表格里名为 `SKU 图` 的那列（`SKU_IMAGE_COL`）本行值 ——
+ *  那是「SKU 图自动匹配 + 手工切换」写进 `rows` 的结果。
+ *  ⚠️ 不再接受「用户再映射一个列当规格图」：两份来源必然漂移
+ *  （表格显示 A、发布用的是 B，且看不出来哪个对）。
+ */
+export function skuImageRelOf(
+  table: PrecheckTable | null | undefined,
+  rowIndex: number,
+): string | null {
+  if (!table || !table.columns?.length) return null;
+  const col = table.columns.findIndex((c) => String(c).trim() === SKU_IMAGE_COL);
+  if (col < 0) return null;
+  const raw = table.rows?.[rowIndex]?.[col];
+  const text = String(raw ?? "").trim();
+  return text || null;
+}
+
 /** ⚠️ **SKU 名称列**：优先走映射（`sku_name`），没配才按别名猜。 */
+/** **第一步的 SKU 名称定位列**（用户口径 2026-10-21，修「全表被判图片未匹配」）。
+ *
+ *  背景：`sku_name` 已从价格库存下拉里删除（用户口径「移除下拉中的 SKU 图和
+ *  SKU 名称」），但第一步判「本地图有没有对上」仍然要**一行一个文本**。
+ *
+ *  ⇒ 判据退化为「表格里**内容最像一列标识**的那一列」：
+ *    取**首个**满足「非空率 ≥ 50% 且平均长度 ≤ 40 字」的列 —
+ *    店铺名/商品名这类长文本、图片链接这类超长串会被跳过，
+ *    `SKU信息` / `颜色分类` / `尺寸` 这类会命中。
+ *
+ *  ⚠️ 这**只是配图用的文本**，不参与规格拆分、不改任何数据、不上屏。
+ *  ⚠️ 不许改成「按列名猜」（`SKU名称`/`规格名` 别名那套已退场，用户明确反对）。
+ *  ⚠️ 一条都找不到 ⇒ 返回 0（用第一列），**绝不返回 -1** ——
+ *     返回 -1 会让整表判成「图片未匹配」，那正是本轮要修的 bug。
+ */
+export function firstUsableColumnIndex(
+  table: { columns: string[]; rows: (string | null | undefined)[][] } | null | undefined,
+): number {
+  const columns = table?.columns ?? [];
+  const rows = table?.rows ?? [];
+  if (columns.length === 0) return 0;
+  if (rows.length === 0) return 0;
+  for (let c = 0; c < columns.length; c += 1) {
+    let filled = 0;
+    let charTotal = 0;
+    for (const row of rows) {
+      const text = String(row?.[c] ?? "").trim();
+      if (!text) continue;
+      filled += 1;
+      charTotal += text.length;
+    }
+    if (filled === 0) continue;
+    const fillRate = filled / rows.length;
+    const avgLen = charTotal / filled;
+    if (fillRate >= 0.5 && avgLen <= 40) return c;
+  }
+  //: 全都不合格 ⇒ 仍给 0（宁可错配几行，也不要把整表判成不通过）。
+  return 0;
+}
+
 export function skuNameColumnIndex(
   columns: string[],
   priceMapping: readonly PriceMappingRow[] = [],
+  /** **商品 SKU 映射的列名**（用户口径 2026-10-21：这几列就是规格本身）。
+   *
+   *  ⚠️ 它是**兜底**，不是替代：`priceMapping` 里配了 `sku_name` 仍然优先。
+   *  为什么需要兜底：用户口径已定「SKU 名称无需再配置映射」——
+   *  价格库存表里已经没有这一行了 ⇒ 只认 `priceMapping` 会恒返回 -1
+   *  ⇒ `passedSkuRows` 恒空 ⇒「预检通过 SKU 导入」拿不到任何行。
+   *  这不违反「移除写死的逻辑」：兜底用的是**用户亲手选的列**，不是代码猜列名。
+   */
+  specColumns: readonly string[] = [],
 ): number {
-  return columnByMappingOrAlias(columns, priceMapping, "sku_name");
+  //: ① 价格库存表里显式配了 `sku_name` ⇒ 用它（老配置仍然有效）。
+  const mapped = sourceColumnIndex(columns, priceMapping, "sku_name");
+  if (mapped >= 0) return mapped;
+  //: ② ⚠️ **不再按列名别名猜**（用户口径 2026-10-15：
+  //:    「移除写死的逻辑」，`sku名称 / 规格名 / 颜色分类` 那套别名已退场）——
+  //:    代码不替用户判断哪一列是 SKU 名称。
+  //: ③ 兜底 = 商品 SKU 映射的**第一列**（用户亲手选过的，最可靠）。
+  const first = specColumns.map((c) => String(c).trim()).find((c) => !!c);
+  if (!first) return -1;
+  return columns.findIndex((c) => String(c).trim() === first);
+}
+
+/** **商品 SKU 映射的列名清单**（按用户配置的顺序）—— SKU 名称 / 价格的取值基准。
+ *
+ *  ⚠️ 用户口径 2026-10-21：「当用户配置完**商品 SKU 映射关系**指定的列
+ *  **去重后就是对该组的 sku 规格**」⇒ 这几列是第一真相源。
+ *
+ *  ⚠️ 它**不是** `priceMapping`（那是价格库存表）。早期两者混用，导致
+ *  「价格库存没配 SKU 名称 ⇒ 一行都读不出」。分开之后语义才清楚。
+ */
+export function rowsFirstMappedSource(specColumns: readonly string[]): string {
+  return specColumns.map((c) => String(c).trim()).find((c) => !!c) ?? "";
 }
 
 
@@ -452,22 +569,50 @@ export function localSkuImageList(
 }
 
 /**
- * **可参与本地图匹配的 SKU 媒体**（用户口径 2026-10-11 红线）。
+ * **可参与本地图匹配的 SKU 媒体**。
  *
- * > 「预检的步骤是**先检查媒体资源是否存在违规词，然后再匹配 sku 图**，
- * >   违规的媒体资源**不允许被选中，也不允许被匹配到**」
+ * ⚠️ 用户口径 2026-10-21 修订（**取代** 2026-10-11 的「违规图不允许被匹配到」原句）：
  *
- * 两步顺序 = 两个条件**同时**成立，缺一不可：
- *   ① **先**跑过违规词检测：`ocr_ok === true` —— 未检测（`null`）不许算通过
- *      （把 `null` 当合规就是开免检通道，与第一步的「未验证默认不勾选」同源）；
- *   ② **再**排除命中违规词的：`has_forbidden !== true`。
+ * > 「检测到违规词的媒体资源放开也可选择，检查完默认是不选择的，不再固定为不可选，
+ * >   决策权交给用户」
+ *
+ * 决策权既然交给用户，本函数就不能再按 `has_forbidden` 静默剔除 —— 否则会出现
+ * 「用户勾了那张图，但规格表里永远匹配不到」这种**最难查的错位**（勾选态与匹配结果
+ * 不一致，且没有任何提示）。违规图的风险提示由界面承担（红框 + 角标 + 默认不勾）。
+ *
+ * 唯一保留的硬判据是 **是否真跑过检测**：
+ *   - `ocr_ok === true` ⇒ 放行（用户勾了就参与匹配）；
+ *   - `ocr_ok === null/undefined` ⇒ 排除（未检测不许当合规，防免检通道）。
  *
  * ⚠️ 这是**唯一**的过滤实现：名称模糊查询与手选弹窗都必须从这里取候选。
- * 分成两份（一份只给弹窗过滤、查询用全量）就会漏 —— 命中违规词的图会经
- * 名称匹配混进「预检通过」，正是这条红线的反面。
  */
 export function selectableSkuMedia<T extends PrecheckMedia>(media: readonly T[]): T[] {
-  return media.filter((m) => m.ocr_ok === true && !m.has_forbidden);
+  return media.filter((m) => m.ocr_ok === true);
+}
+
+/** **一个格子的数值是否可用于计算**（用户口径 2026-10-21）。
+ *
+ *  > 「红框中**非数值且小于等于 0**，则**无法计算应红框提示**」
+ *
+ *  判据（三条，缺一不可）：
+ *    ① 空 / 全空白 ⇒ 不可用（没有值可算）；
+ *    ② 解析不出数值（`"-"` / `"abc"` / `"20元"`）⇒ 不可用；
+ *    ③ 数值 **≤ 0** ⇒ 不可用（价格 / 库存为 0 或负数在电商里没有意义，
+ *       继续 ×1.8 只会把错误放大 —— 用户明确要求这种格子不许参与计算）。
+ *
+ *  ⚠️ **单一实现**：单元格标红、规则执行前的可算性检查、批量修改都调它 ——
+ *  三处各写一份会出现「标红了但还算」这种自相矛盾的界面。
+ */
+export function numericCellIssue(raw: string | null | undefined): string {
+  const text = String(raw ?? "").trim();
+  if (!text) return "为空";
+  //: 允许 `￥`/`¥` 与千分位逗号（与后端 `_as_number_or_none` 同口径），但**不认**中文单位。
+  const cleaned = text.replace(/[\s￥¥,]/g, "");
+  if (!/^-?\d+(\.\d+)?$/.test(cleaned)) return "不是数字";
+  const value = Number(cleaned);
+  if (!Number.isFinite(value)) return "不是数字";
+  if (value <= 0) return "小于等于 0，无法计算";
+  return "";
 }
 
 /**
@@ -492,8 +637,11 @@ export function filterCheckedSkuMedia<T extends PrecheckMedia>(
 /**
  * **因取消勾选而被移除的 SKU 图**（用户口径 2026-10-11 要给提示）。
  *
- * 口径：**本来可选**（红线通过：已检测 + 非违规）但**未勾选**的那些。
- * 违规/未检测的图另有红框/角标提示 ⇒ 不重复计入（否则提示数虚高，用户会以为算错了）。
+ * 口径：**本来可选**（`selectableSkuMedia` 的口径：已检测）但**未勾选**的那些。
+ * 未检测的图另有红框/角标提示 ⇒ 不重复计入（否则提示数虚高，用户会以为算错了）。
+ *
+ * ⚠️ 2026-10-21 起违规图也**算「本来可选」**（用户把决策权拿走了），
+ * 所以用户不勾它们时会出现在这条提示里 —— 这是对的：那正是「你少用了这几张图」。
  */
 export function countUncheckedSkuMedia(
   media: readonly PrecheckMedia[],
@@ -638,6 +786,8 @@ export function applyBatchRuleToTable(
 ): PrecheckTable {
   if (column < 0) return table;
   const scope = onlyRows && onlyRows.length > 0 ? new Set(onlyRows) : null;
+  /** 计算结果为空 / 非数值的行（红框 + 取消勾选，用户口径 2026-10-21）。 */
+  const badRows = new Set<number>();
   return {
     ...table,
     rows: (table.rows ?? []).map((row, rowIndex) => {
@@ -648,12 +798,20 @@ export function applyBatchRuleToTable(
         const raw = parseYuan(cell);
         const next = applyBatchRule(raw, rule);
         //: 空值跳过 ⇒ 保持原样（不写 `"0"`，不造假）。
-        if (next === null) return cell;
+        if (next === null) {
+          badRows.add(rowIndex);
+          return cell;
+        }
         //: 价格保留两位小数、整数不补 `.00`（与平台展示口径一致）。
         return Number.isInteger(next) ? String(next) : next.toFixed(2);
       });
     }),
-  };
+    //: ⚠️ 用户口径 2026-10-21：「当前计算规则**当前行数为空或非数值**时，
+    //: **红框展示且该数据取消勾选**」——
+    //: 算不出来的行必须**标记出来**（`batchRuleBadRows`），界面据此画红框 + 取消勾选。
+    //: 只靠「值没变」看不出来：用户以为规则生效了，其实这一行被跳过了。
+    batchRuleBadRows: [...badRows].sort((a, b) => a - b),
+  } as PrecheckTable & { batchRuleBadRows: number[] };
 }
 
 /** 统计某列**有值**的行数（确认文案用；可选只在给定行里数）。 */
@@ -909,6 +1067,12 @@ export type PassedSkuRow = {
    *  空串会让提交体带上一个 `barcode: ""`，平台可能当「填了但非法」）。
    */
   barcode?: string;
+  /** **当前库存**（映射到「当前库存」的列；平台侧是线上现值，只读回显）。
+   *  ⚠️ 可选：没配映射就不给（不造假）。 */
+  currentStock?: number | null;
+  /** **规格ID**（映射到「规格ID」的列）。
+   *  ⚠️ 可选：平台侧是生成物，我方只透传用户提供的值。 */
+  specId?: string;
   /** **本地图**在数据包里的相对路径（用户口径：「上传本地图」）；未对齐 ⇒ null。
    *
    *  ⚠️ 这是**按 SKU 名称对齐**那条老路的产物（`lookupLocalSkuImage`）。
@@ -980,6 +1144,9 @@ export type SkuFillPlan = {
     /** ⚠️ **条形码**（映射到「条形码」的那一列）。缺映射 / 缺值 ⇒ 空串
      *  （用户口径 2026-10-15：下拉漏了它 ⇒ 永远配不出来）。 */
     barcode: string;
+    /** **当前库存 / 规格ID**（用户口径 2026-10-21：固定列都要能映射）。 */
+    currentStock?: number | null;
+    specId?: string;
   }[];
   /** 规格值 → 本地图（上传用）；key = `${dimName}\u0000${value}`。 */
   images: { dimName: string; value: string; localRel: string; localFileName: string }[];
@@ -1046,6 +1213,14 @@ export function buildSkuFillPlan(
   /** **售价倍率**（用户口径 2026-10-11：原价 × 1.7，可调）。
    *  作用于**原价**：`originalPrice` 有值 ⇒ `原价 × k`；没有 ⇒ 回落计算价格（不乘）。 */
   priceMultiplier: number = DEFAULT_PRICE_MULTIPLIER,
+  /** **商品 SKU 映射指定的列**（映射左侧 = 预检通过列名，按用户配置的顺序）。
+   *
+   *  ⚠️ 用户口径 2026-10-21：「当用户配置完**商品 SKU 映射关系**指定的列
+   *  **去重后就是对该组的 sku 规格**」——
+   *  ⇒ 价格库存的键用**这几列按行拼接**出来的完整规格文本（`skuSpecTextOf`），
+   *  不再依赖「SKU 名称」映射行。
+   *  缺省（空数组）= 退回原来的「按维度值去重」行为（向后兼容测试与老调用）。 */
+  specColumns: readonly string[] = [],
 ): SkuFillPlan {
   const plan: SkuFillPlan = { dims: [], rows: [], images: [], notes: [], skipped: [] };
   if (rows.length === 0) {
@@ -1093,18 +1268,37 @@ export function buildSkuFillPlan(
   }
 
   //: 逐行建「组合文本」：把每个维度各自的值拼成 `维度名:值 / 维度名:值`。
-  //: ⚠️ 必须与第二步 `spec_combinations` 的**同形**（维度按 `dims` 顺序、` / ` 分隔），
+  //: ⚠️ 必须与第二步 `spec_combinations` 的**同形**（同一组顺序、` / ` 分隔），
   //: 否则价格表按 key 对齐时对不上（行会凭空多出来 / 已填值丢失）。
-  const dimOrder = dims.map((d) => d.name).filter((n) => perDim.has(n));
+  //:
+  //: ⚠️⚠️ 用户报 2026-10-21：「商品规格映射分组应与**商品 SKU 映射关系配置顺序**一致，
+  //: 现在是顺序是倒的」——
+  //: 原实现 `dims.map(...)` 按**平台规格类型**的顺序排维度，与用户在弹窗里
+  //: 配映射的顺序无关 ⇒ 用户配「颜色分类 → 尺寸」，导出却按平台序（常是倒的）。
+  //: ⇒ 顺序改为**用户映射的配置顺序**（`usable` = 已配来源的列，按行序）。
+  //: ⚠️ 第二步的 `specTypes` 也必须用同一顺序（页面按 `plan.dims` 落 `specTypes`），
+  //: 否则两处 `spec` 字符串不同形、价格库存行对不上。
+  const dimOrder = usable
+    .map((name) => mapping[name])
+    .filter((n): n is string => !!n && perDim.has(n));
   const seenValues = new Map<string, Set<string>>(dimOrder.map((n) => [n, new Set<string>()]));
+  /** 已经推过规格图的「维度+值」（用户口径 2026-10-21：**按规格值去重**，不按行）。 */
+  const pushedSpecImages = new Set<string>();
   const rawRows = new Map<number, {
     price: number | null;
     marketPrice: number | null;
     stock: number | null;
     sellerCode: string;
     barcode: string;
+    //: 固定列（用户口径 2026-10-21：当前库存 / 规格ID 也走映射）。
+    currentStock: number | null;
+    specId: string;
     parts: { dimName: string; value: string }[];
+    /** 行级规格文本（商品 SKU 映射那几列拼接；用户口径 2026-10-21）。 */
+    specText?: string;
   }>();
+  //: 行级规格文本去重（同一规格重复出现只取第一条，并说明）。
+  const perfSeen = new Set<string>();
 
   rows.forEach((row, index) => {
     //: ⚠️ 用户口径 2026-10-20：映射左侧是**列名**（不再是规格分类名）⇒
@@ -1128,8 +1322,19 @@ export function buildSkuFillPlan(
     }
     //: 按数据包**行**归组（同一行的多个维度合成一个 spec 组合）。
     const slot = rawRows.get(index) ?? {
-      price: null, marketPrice: null, stock: null, sellerCode: "", barcode: "", parts: [],
+      price: null, marketPrice: null, stock: null, sellerCode: "", barcode: "",
+      //: ⚠️ 这两个字段必须与 `rawRows` 的 Map 值类型**完全一致**，
+      //: 否则 TS 会把字面量类型推到「缺字段」那一支，后面 `slot.specText` 全报错。
+      currentStock: null, specId: "", parts: [],
     };
+    //: ⚠️ **2026-10-21 修的真问题**：同一列里同一个值会出现在**多行**上
+    //: （本数据包 `颜色分类=奇遇童话01` 有 ~19 行），早先按值去重写进
+    //: `entry.values` 只会留下 24 个值、而售价/库存是**逐行**不同的 ⇒
+    //: 「颜色 24 × 尺寸 19 = 456 个组合，价格只来自其中 24 行」这种对不上的形态。
+    //: ⇒ 售价 / 库存 / 商家编码 / 条形码 **按行取**，键 = 该行拼接出的完整规格文本
+    //:   （见 `skuSpecTextOf`，与 `spec_combinations` 同形），不再按维度值去重合并。
+    const specText = skuSpecTextOf(row.cells ?? {}, specColumns);
+    slot.specText = specText;
     for (const { entry, raw } of hitEntries) {
       const hit = matchSpecValue(raw, entry.dim);
       if (hit.match === "unusable") {
@@ -1161,6 +1366,16 @@ export function buildSkuFillPlan(
     slot.sellerCode = row.sellerCode;
     //: ⚠️ 条形码同样**走映射**（`passedSkuRows` 已按映射取好）。
     slot.barcode = row.barcode ?? "";
+    //: ⚠️⚠️ **当前库存 / 规格ID 也必须在这里落**（用户口径 2026-10-21：
+    //: 「当前库存、规格ID 列配置的映射没有映射成功」）。
+    //:
+    //:  根因：`passedSkuRows` 早就按映射取好了这两个值，但本函数**只给槽位
+    //:  初始化为 null/""、从未赋值** ⇒ `plan.rows[].currentStock` 恒 null、
+    //:  `specId` 恒 ""，页面落值那步自然拿不到（售价/库存/条形码都不受影响，
+    //:  所以看起来"只有这两列没映射成功"，极易误判成映射配置问题）。
+    //:  ⇒ 与 `barcode` 同一条规则：**有就带上、没有保持 null/""**（不造假）。
+    slot.currentStock = row.currentStock ?? null;
+    slot.specId = row.specId ?? "";
     rawRows.set(index, slot);
 
     //: ⚠️ **规格图走映射**（用户口径 2026-10-15：「不再走现在默认的逻辑，
@@ -1168,16 +1383,27 @@ export function buildSkuFillPlan(
     //: ⚠️ 旧实现取 `row.localRel`（代码按 SKU 名称**猜**出来的那张图）——
     //: 那条路已随「规格图也走映射」退场。
     //: ⚠️ 文件名从路径末段取（上传时按内容 MD5 重命名，这里只作 `origin_name`）。
+    //: ⚠️⚠️ 用户口径 2026-10-21（真机 456 行报「上传规格图 25/455」后定论）：
+    //: 「**导入规格图应只在第一个组需要上传，且是去重后的数据行对应规格图**」——
+    //: 规格图挂的是**规格值**（颜色分类 24 个），不是 SKU **行**（456 行）。
+    //: 旧实现按行 push ⇒ 456 行就要传 456 张，同一张图重复传 19 次
+    //: （19 = 该颜色下的尺寸数），进度显示 `25/455` 且白等几十秒。
+    //: ⇒ 只收**第一个维度**的**首次出现**（同一个规格值只留第一张），
+    //: 后面的行若该值已有图就不再加。
     if (row.specImageRel) {
-      //: ⚠️ 规格图**挂第一个命中维度**：图片是按 SKU 行对齐的，一行一张，
-      //: 不是每个维度各一张（多维度时重复推会让同一张图挂多次）。
       const first = hitEntries[0];
-      plan.images.push({
-        dimName: first.entry.dim.name,
-        value: slot.parts[0]?.value ?? "",
-        localRel: row.specImageRel,
-        localFileName: row.specImageRel.split("/").pop() ?? "",
-      });
+      const dimName = first.entry.dim.name;
+      const value = slot.parts[0]?.value ?? "";
+      const imgKey = `${dimName} ${value}`;
+      if (!pushedSpecImages.has(imgKey)) {
+        pushedSpecImages.add(imgKey);
+        plan.images.push({
+          dimName,
+          value,
+          localRel: row.specImageRel,
+          localFileName: row.specImageRel.split("/").pop() ?? "",
+        });
+      }
     }
   });
 
@@ -1208,7 +1434,22 @@ export function buildSkuFillPlan(
       .filter((p): p is { dimName: string; value: string } => Boolean(p));
     //: 多维度必须**每个维度都有值**才是合法组合（与 `spec_combinations` 同判据）。
     if (ordered.length !== dimOrder.length) continue;
-    const spec = ordered.map((p) => `${p.dimName}:${p.value}`).join(" / ");
+    //: ⚠️ **键 = 该行拼接出的完整规格文本**（用户口径 2026-10-21）。
+    //: 原实现拼 `${dimName}:${value}` —— 它按**维度值**标识，同一组 (颜色,尺寸)
+    //: 只会产生**一行**价格；而这个数据包里 456 行的售价/库存**逐行不同**，
+    //: 按维度值合并 = 444 行价格丢失（只留 24 行）。
+    //: ⇒ 有 `specColumns` 时用行级规格文本作键；否则退回旧行为。
+    const spec =
+      slot.specText && specColumns.length > 0
+        ? slot.specText
+        : ordered.map((p) => `${p.dimName}:${p.value}`).join(" / ");
+    //: ⚠️ 同一行级规格重复出现（真包 456 行组合无重复，但别的包可能有）
+    //: ⇒ **保留第一条**并记一条 note，不静默覆盖（覆盖会让后一行的价格吃掉前一行）。
+    if (perfSeen.has(spec)) {
+      plan.skipped.push(`规格「${spec}」出现多次，只取第一行的价格库存`);
+      continue;
+    }
+    perfSeen.add(spec);
     plan.rows.push({
       spec,
       price: slot.price,
@@ -1216,6 +1457,8 @@ export function buildSkuFillPlan(
       stock: slot.stock,
       sellerCode: slot.sellerCode,
       barcode: slot.barcode,
+      currentStock: slot.currentStock,
+      specId: slot.specId,
     });
   }
 
@@ -1245,10 +1488,20 @@ export function passedSkuRows(
   /** **价格库存列映射**（用户口径 2026-10-11：动态可调整；默认 = 现行逻辑）。
    *  缺省用 `DEFAULT_PRICE_MAPPING`（原价 / 库存 / ID）。 */
   priceMapping: readonly PriceMappingRow[] = DEFAULT_PRICE_MAPPING,
+  /** **商品 SKU 映射指定的列**（用户口径 2026-10-21：这几列就是规格）。
+   *
+   *  ⚠️ 价格库存表里已**没有**「SKU 名称」这一行 ⇒ 这一列从哪来？
+   *  答案在这里：用商品 SKU 映射的**第一列**作为「一行一个 SKU」的定位列
+   *  （`skuNameColumnIndex` 的第 3 参兜底）。
+   *  ⚠️ 它只用于「**这一行算不算一条 SKU**」与「空行跳过」，
+   *  不再当作「规格分类:规格值」去拆（拆分已整条退场）。
+   */
+  specColumns: readonly string[] = [],
 ): PassedSkuRow[] {
   if (!table || !table.columns?.length) return [];
-  //: ⚠️ SKU 名称列**优先走映射**（用户把「SKU 名称」映射到哪列，就用哪列）。
-  const nameCol = skuNameColumnIndex(table.columns, priceMapping);
+  //: ⚠️ SKU 名称列**优先走映射**（用户把「SKU 名称」映射到哪列，就用哪列）；
+  //: 没配才退到商品 SKU 映射的第一列（用户口径 2026-10-21）。
+  const nameCol = skuNameColumnIndex(table.columns, priceMapping, specColumns);
   if (nameCol < 0) return [];
 
   const columns = table.columns;
@@ -1257,9 +1510,15 @@ export function passedSkuRows(
   const codeCol = sourceColumnIndex(columns, priceMapping, "seller_code");
   //: ⚠️ **条形码**（用户口径 2026-10-15：下拉漏了它；后端一直认 `barcode`）。
   const barcodeCol = sourceColumnIndex(columns, priceMapping, "barcode");
-  //: ⚠️ **规格图的来源列**（用户口径 2026-10-15：规格图也走映射）。
-  //: 可能是虚拟列「SKU 图」（`VIRTUAL_COL_INDEX`）或某个真实列。
-  const specImageSourceCol = sourceColumnIndex(columns, priceMapping, "spec_image");
+  //: ⚠️ **当前库存 / 规格ID**（用户口径 2026-10-21：「价格及库存**非动态列**
+  //: 均需要用户配置映射」「售价、**当前库存**、改后库存、市场价均必须配置」，
+  //: 且「缺少规格ID…固定列必须保持一致」）。
+  //: 两者都按**普通映射列**取值（与 barcode 同一条路），取不到 ⇒ 空（不造假）。
+  const currentStockCol = sourceColumnIndex(columns, priceMapping, "current_stock");
+  const specIdCol = sourceColumnIndex(columns, priceMapping, "spec_id");
+  //: ⚠️ **SKU 图 = 固定列的「SKU 图」**（用户口径 2026-10-21，取代 2026-10-15 的
+  //: 「规格图也走映射」）—— 不再从 `priceMapping` 里找来源列。
+  const specImageSourceCol = columns.findIndex((c) => String(c).trim() === SKU_IMAGE_COL);
   //: ⚠️ **回落列也走映射**（`price_fallback`）—— 此前按裸列名查「计算价格」，
   //: 是写死逻辑（用户口径 2026-10-15：所有点均走映射）。
   const fallbackCol = sourceColumnIndex(columns, priceMapping, "price_fallback");
@@ -1308,6 +1567,11 @@ export function passedSkuRows(
       //: ⚠️ **没配映射 / 缺列 ⇒ 整个键不给**（不是空串）——
       //: 空串会被当成「填了但非法」，平台可能直接拒；不给键才是「没填」。
       ...(barcodeCol >= 0 ? { barcode: String(row[barcodeCol] ?? "").trim() } : {}),
+      //: **当前库存 / 规格ID**：与 barcode 同一条路（配了映射才给键，不造假）。
+      ...(currentStockCol >= 0
+        ? { currentStock: firstNumber(row[currentStockCol]) }
+        : {}),
+      ...(specIdCol >= 0 ? { specId: String(row[specIdCol] ?? "").trim() } : {}),
       localRel: relPath,
       localFileName: relPath ? relPath.split("/").pop() ?? "" : "",
       //: ⚠️ **规格图走映射**（用户口径 2026-10-15：「不再走现在默认的逻辑，
@@ -1540,11 +1804,18 @@ export function defaultSpecMappingRows(
 /** 价格库存表里**可被映射**的目标列。 */
 export type PriceTargetKey =
   | "price"
+  //: ⚠️ **当前库存**（千帆固定列，只读回显；用户口径：也要能配映射）
+  | "current_stock"
   | "stock"
   | "seller_code"
   | "market_price"
   //: ⚠️ 平台提交体认 `skuData[].barcode`（后端一直支持，此前下拉漏了它）。
   | "barcode"
+  //: ⚠️ **规格ID**（千帆固定列 `规格ID`，用户口径 2026-10-21：
+  //: 「缺少规格ID…价格及库存固定列必须保持一致」）——
+  //: 它是**平台生成的 SKU 标识**，我方不生成，但用户可能想从数据包某列映射进来
+  //: （例如数据包里已有卖家侧规格 ID，要一并带过去对账）。
+  | "spec_id"
   //: ⚠️ **SKU 名称列**（用户口径 2026-10-15：「预检阶段的派生判定（哪列是 SKU 名、
   //: 哪列是线上图）**应走映射**」）。
   //: 此前它是靠**别名猜**（`sku名称` / `规格名` / `颜色分类`…）—— 数据包列名一换就猜空，
@@ -1564,8 +1835,14 @@ export type PriceTargetKey =
 /** 目标列的中文名（弹窗里显示）。 */
 export const PRICE_TARGET_LABELS: Record<PriceTargetKey, string> = {
   price: "售价",
+  //: 当前库存（线上现值）
+  current_stock: "当前库存",
   market_price: "市场价",
-  stock: "库存",
+  //: ⚠️ 用户口径 2026-10-21（真机 CDP 抓包，设计 24 §23）：平台把库存拆成
+  //: **当前库存**（线上现值，只读回显）+ **改后库存**（本次提交的新值）。
+  //: 能映射的只有**改后库存** —— `当前库存` 是平台给的，不是我们写的。
+  //: 标签写「改后库存」与平台表头逐字一致，用户对着两边看得懂。
+  stock: "改后库存",
   seller_code: "商家编码",
   sku_name: "SKU 名称",
   price_fallback: "售价回落列",
@@ -1575,22 +1852,14 @@ export const PRICE_TARGET_LABELS: Record<PriceTargetKey, string> = {
   //: 平台提交体认的是 `skuData[].barcode`（`shop_item_publish_service.py:234`）——
   //: 后端一直支持，**只是下拉里没给** ⇒ 用户永远配不出条形码映射。
   barcode: "条形码",
+  spec_id: "规格ID",
 };
 
 /** 目标列下拉的候选（**两列都自由选择** —— 用户口径 2026-10-11）。 */
-export const PRICE_TARGET_OPTIONS: PriceTargetKey[] = [
-  "price",
-  "market_price",
-  "stock",
-  "seller_code",
-  "barcode",
-  //: ⚠️ 此前**不在映射表里**，只能靠别名猜列（用户口径 2026-10-15：应走映射）。
-  "sku_name",
-  //: ⚠️ **回落列**（`原价` 取不到时用它）——此前按列名现查「计算价格」，是写死逻辑。
-  "price_fallback",
-  "spec_category",
-  "spec_image",
-];
+/*: ⚠️ `PRICE_TARGET_OPTIONS` **已删除**（2026-10-21）——
+ *  它与 `PRICE_TABLE_TARGETS` 是同一件事的两份清单，上一轮只改了其中一份
+ *  ⇒ 下拉读的是另一份 ⇒ 用户看到的还是旧选项（`current_stock` 甚至以英文键名显示）。
+ *  ⇒ 唯一清单 = `PRICE_TABLE_TARGETS`，所有引用直接用它。 */
 
 /** ⚠️ **价格及库存表真正有的列**（= 表头列的 target 子集）。
  *
@@ -1610,15 +1879,25 @@ export const PRICE_TARGET_OPTIONS: PriceTargetKey[] = [
  *  表头列 ∪ 导入必需来源，**不含**规则参数类 target。
  */
 export const PRICE_TABLE_TARGETS: PriceTargetKey[] = [
-  //: ── 价格及库存表的列（与 `publish-config-step2.tsx` 表头一一对应）──
-  "price", // 售价
-  "stock", // 库存
-  "market_price", // 市场价
-  "barcode", // 条形码
-  "seller_code", // 商家编码
-  //: ── 导入必需来源（不在表头，但取值要用）──
-  "sku_name", // SKU 名称
-  "spec_image", // SKU 图
+  //: ⚠️⚠️ 这是**导入弹窗下拉真正用的清单**（`publish-config-step2.tsx` 读它）。
+  //: 用户口径 2026-10-21（截图为证）：
+  //:   「**移除下拉中的 SKU 图和 SKU 名称**」「价格库存列的下拉框中应包含
+  //:    **当前价格及库存全部固定列**」——
+  //:
+  //: ⇒ 必须与千帆价格及库存表的**非动态列**逐个对应（真机 CDP 实读，设计 24 §23）：
+  //:   售价 / 当前库存 / 改后库存 / 市场价 / 规格ID / 条形码 / 商家编码
+  //:
+  //: ⚠️ **教训**：上一轮改的是 `PRICE_TARGET_OPTIONS`，而下拉读的是**这份**清单
+  //: （两份清单并存 = 改了没生效，且 `current_stock` 没进这份清单时
+  //:  会把**英文键名**直接显示给用户）。现在两份内容一致，且这份是唯一数据源
+  //: （`PRICE_TARGET_OPTIONS` 已改为引用它，见下方）。
+  "price",         // 售价
+  "current_stock", // 当前库存
+  "stock",         // 改后库存
+  "market_price",  // 市场价
+  "spec_id",       // 规格ID
+  "barcode",       // 条形码
+  "seller_code",   // 商家编码
 ];
 
 /** 一行价格库存映射：目标列 ← 来源列（预检表格里的列名，`""` = 不填）。 */
@@ -1658,15 +1937,21 @@ export const DEFAULT_PRICE_MAPPING: readonly PriceMappingRow[] = [];
  *  用户要就自己点「+」加）。
  */
 export const REQUIRED_PRICE_TARGETS: readonly PriceTargetKey[] = [
-  //: ⚠️ **SKU 名称列也是必修**（用户口径 2026-10-15：把它加进预置的必修行）。
-  //: 为什么必须：`passedSkuRows` 要按它**读每一行的 SKU 名称** ——
-  //: 没配 ⇒ 一行都读不出来 ⇒ 报「没有『预检通过且已勾选』的 SKU 行」
-  //: （用户实测：映射全配对了，却报这个 —— 根因就是缺这一条）。
-  "sku_name",
-  "spec_image",
+  //: ⚠️ **用户口径 2026-10-21（推翻 2026-10-14/15 的「SKU 名称 + SKU图 必配」）**：
+  //
+  //: > 「规格图不应在价格库存映射关系表中再次进行配置，应为在预检步骤中 SKU 图是
+  //: >   固定列，应直接取规格对应行的固定列 SKU图；另外 SKU 名称也应无需再让用户
+  //: >   配置映射关系，当用户配置完商品 SKU 映射关系指定的列去重后就是对该组的 sku 规格」
+  //
+  //: ⇒ `sku_name` / `spec_image` **不再是必配行**：
+  //:   · SKU 名称 = 商品 SKU 映射关系里那几列**去重组合**出来的规格（见 `skuSpecTextOf`）；
+  //:   · SKU 图   = 表格固定的「SKU 图」列（`SKU_IMAGE_COL`）本行值。
+  //: 两个都由代码按**固定判据**取，不让用户再配一遍（配两遍 = 两份真相源，必然漂移）。
+  //: ⚠️ 用户口径 2026-10-21：「**售价、当前库存、改后库存、市场价均必须配置**」。
   "price",
-  "market_price",
+  "current_stock",
   "stock",
+  "market_price",
 ];
 
 /** 预置的映射行（目标固定、来源**全空**）。 */
@@ -1704,7 +1989,7 @@ export function validatePriceMapping(rows: readonly PriceMappingRow[]): string[]
   //: 用户看到的是同一件事被说三遍 ⇒ 现在**每类问题只报一条**，且不带行号。
   const emptySources: string[] = [];
   const dupTargets: string[] = [];
-  const dupSources: string[] = [];
+  //: （`dupSources` / `seenSource` 已随「来源列允许重复」一并退场。）
 
   for (const row of rows) {
     const label = row.target ? PRICE_TARGET_LABELS[row.target] : "未选";
@@ -1718,11 +2003,13 @@ export function validatePriceMapping(rows: readonly PriceMappingRow[]): string[]
       if (!emptySources.includes(label)) emptySources.push(label);
       continue;
     }
-    if (seenSource.has(source)) {
-      if (!dupSources.includes(source)) dupSources.push(source);
-    } else {
-      seenSource.add(source);
-    }
+    //: ⚠️ **来源列允许重复**（用户口径 2026-10-21：「价格库存映射关系表应
+    //: **支持重复选择映射列**」）。同一列本来就可能喂给多个目标：
+    //:   · 「库存」→ 当前库存，同时 → 改后库存（把现库存原样带上）；
+    //:   · 「价格」→ 售价，同时 → 市场价；
+    //:   · 「SKUID」→ 商家编码，同时 → 规格ID。
+    //: ⇒ 不再收集/上报「来源列重复」，`seenSource` 一并退场
+    //:   （留着它只会让下一个人又把它接回错误提示里）。
   }
 
   //: ⚠️ 用户口径 2026-10-11：多条问题要「**放一行提示**」——
@@ -1731,7 +2018,6 @@ export function validatePriceMapping(rows: readonly PriceMappingRow[]): string[]
   if (rows.some((r) => !r.target)) parts.push("价格库存列不能为空");
   if (emptySources.length > 0) parts.push("来源列不能为空");
   if (dupTargets.length > 0) parts.push(`价格库存列重复：${dupTargets.join("、")}`);
-  if (dupSources.length > 0) parts.push(`来源列重复：${dupSources.join("、")}`);
   if (parts.length > 0) errors.push(parts.join("；"));
   return errors;
 }

@@ -589,16 +589,26 @@ def test_packaging_ships_every_lazily_imported_third_party_package():
 
     | 包 | 缺了会怎样（只有装包版才有） |
     |---|---|
-    | `rapidocr_onnxruntime` | 违规词预检 500 |
+    | `rapidocr` | 违规词预检 500 |
     | `openpyxl` | 数据包 xlsx 导入报「缺少 openpyxl 依赖」 |
     | `alembic` | 启动静默退化成 `create_all`，老库不升级表结构 |
     | `send2trash` | 素材删除抛错（代码刻意不回落 `unlink`） |
 
     判据：每个都必须出现在 spec 的 `_safe_submodules(...)` 调用里。
+
+    ⚠️ 2026-10-20：OCR 引擎由 `rapidocr_onnxruntime`(1.x) 换成 `rapidocr`(3.x)，
+    spec 里改用 `_OCR_PKG_NAME` 常量（一处改、两处用），所以这里按**常量 +
+    `_safe_submodules(_OCR_PKG_NAME)`** 断言，而不是字面包名 —— 换包名时守卫
+    仍要盯着「这个延迟导入的包真的进了 hiddenimports」。
     """
     spec_text = SPEC_FILE.read_text(encoding="utf-8")
+    assert '_OCR_PKG_NAME = "rapidocr"' in spec_text, (
+        "spec 里的 OCR 包名常量丢了（换引擎时会漏收）"
+    )
+    assert "_safe_submodules(_OCR_PKG_NAME)" in spec_text, (
+        "SpiderXHS.spec 的 hiddenimports 没收 OCR 引擎（延迟导入，静态分析跟不到）"
+    )
     for pkg in (
-        "rapidocr_onnxruntime",
         "openpyxl",
         "alembic",
         "send2trash",
@@ -618,20 +628,26 @@ def test_packaging_ships_rapidocr_and_its_onnx_models():
     **开发环境不复现** —— 这是本类缺陷最贵的地方：只有装好的客户端才炸。
 
     根因两层，两条都要钉：
-    ① `rapidocr_onnxruntime` 在 `rapid_ocr_service` 里是**函数内延迟导入**，
+    ① `rapidocr` 在 `rapid_ocr_service` 里是**函数内延迟导入**，
        PyInstaller 静态分析跟不到 ⇒ 必须进 `hiddenimports`；
     ② 它的 `models/*.onnx` 是包内数据文件（不是 import 进来的），
        必须显式进 `datas`，否则引擎在、模型不在，照样起不来。
+
+    ⚠️ 2026-10-20：引擎换成 `rapidocr` 3.x（PP-OCRv5）后，模型**不再随包内置**，
+    而是首次使用时下载到 `rapidocr/models/`。所以额外要求：`_rapidocr_data()`
+    必须整包收集（含 `models/` 与 `config.yaml`），否则装包版第一次预检要联网。
     """
     spec_text = SPEC_FILE.read_text(encoding="utf-8")
     #: ① 模块本身
-    assert '_safe_submodules("rapidocr_onnxruntime")' in spec_text, (
-        "SpiderXHS.spec 的 hiddenimports 没收 rapidocr_onnxruntime "
-        "（延迟导入，静态分析跟不到）"
+    assert "_safe_submodules(_OCR_PKG_NAME)" in spec_text, (
+        "SpiderXHS.spec 的 hiddenimports 没收 OCR 引擎（延迟导入，静态分析跟不到）"
     )
     #: ② 模型文件（整包目录按 __file__ 相对路径收）
     assert "def _rapidocr_data()" in spec_text, "缺 _rapidocr_data()：onnx 模型不会被收集"
     assert "datas.extend(_rapidocr_data())" in spec_text, "_rapidocr_data() 算了却没并进 datas"
+    assert "importlib.import_module(_OCR_PKG_NAME)" in spec_text, (
+        "_rapidocr_data 应按常量动态导入，否则换引擎又要改两处"
+    )
 
 
 def test_build_has_a_positive_assertion_for_every_initial_data_file():

@@ -91,6 +91,9 @@ xhs:
   #    （设置页可改、改完**立即生效**，无需重启）。
   publish:
     allow_duplicate_goods: false
+    # SKU 规格名称字数上限（用户口径：30 字 = 60 字符，汉字计 2、ASCII 计 1）。
+    # ⚠️ 第 3 层兜底：正常安装路径读随包种子铺设的 `system_settings` 行。
+    sku_name_max_chars: 60
 
 frontend:
   # Set to true to serve pre-built frontend from backend (Docker/production)

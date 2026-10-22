@@ -34,7 +34,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable, Sequence
 
 
 logger = logging.getLogger(__name__)
@@ -119,88 +119,95 @@ def _list_media(directory: Path, exts: frozenset[str]) -> list[str]:
     return files
 
 
-def _read_xlsx_rows(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
-    """读 SKU 表 → (行列表, warnings)。
+def _read_table_rows(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
+    """读 SKU 表（`.xlsx` / `.xls` / `.ods` / `.csv` …）→ (行列表, warnings)。
 
-    用 `openpyxl`（仓库已有依赖）。表头按 `_XLSX_COLUMNS` 匹配；
-    **未识别的列进 warnings**（如实告知「这一列没用上」比静默忽略好）。
+    用户口径 2026-10-21：「商品发布应支持 xlsx 和 csv 表的读取」→「应支持常用的大多数表格格式」。
+
+    ⚠️ **格式分流只在 `tabular_reader` 一处**（与预检侧同一个内核）——
+    两侧各写一套格式判断，迟早出现「预检能读、发布读不出」这种最难查的错位。
+    这里只做「表头 → 列映射」，编码探测 / 引擎选择全在 `tabular_reader`。
     """
-    warnings: list[str] = []
-    try:
-        import openpyxl
-    except ImportError:  # pragma: no cover - 依赖缺失是环境问题，如实报
-        return [], ["缺少 openpyxl 依赖，无法读取 xlsx"]
+    from backend.app.services import tabular_reader
 
     try:
-        book = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
-    except Exception as error:  # noqa: BLE001 - 各种坏文件都要变成可读原因
-        return [], [f"读取 xlsx 失败：{type(error).__name__}: {error}"]
+        sheets = tabular_reader.read_tables(path)
+    except tabular_reader.TableReadError as error:
+        return [], [str(error)]
+
+    warnings: list[str] = []
+    #: 多 sheet 以第一个有表头的为准（SKU 表通常就一个 sheet；
+    #: 全量多表合并属于另一件事，不在这里悄悄做）。
+    for sheet in sheets:
+        warnings.extend(sheet.extra_warnings)
+        if sheet.encoding and sheet.encoding != "utf-8-sig":
+            warnings.append(f"「{path.name}」按 {sheet.encoding} 编码读取（非 UTF-8）")
+        if not sheet.header:
+            continue
+        rows, row_warnings = _rows_from_header(sheet.header, sheet.rows)
+        return rows, warnings + row_warnings
+    return [], warnings + [f"「{path.name}」里没有任何带表头的表"]
+
+
+def _rows_from_header(
+    header: Sequence[Any], raw_rows: Iterable[Sequence[Any]]
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """表头 + 数据行 → SKU 行字典（**所有格式共用**，唯一实现）。"""
+    warnings: list[str] = []
+    # 表头 → 列下标
+    index_of: dict[str, int] = {}
+    for position, raw in enumerate(header):
+        text = str(raw or "").strip().lower()
+        key = _XLSX_COLUMNS.get(text)
+        if key and key not in index_of:
+            index_of[key] = position
+    if "name" not in index_of:
+        return [], ["表格里找不到「sku名称」列，无法识别 SKU（请检查表头）"]
+
+    unknown = [
+        str(c).strip()
+        for c in header
+        if str(c or "").strip() and str(c).strip().lower() not in _XLSX_COLUMNS
+    ]
+    if unknown:
+        warnings.append("以下列未被使用：" + "、".join(unknown))
 
     rows: list[dict[str, Any]] = []
-    try:
-        sheet = book.worksheets[0]
-        iterator = sheet.iter_rows(values_only=True)
-        header = next(iterator, None)
-        if header is None:
-            return [], ["xlsx 是空表（没有表头行）"]
-        # 表头 → 列下标
-        index_of: dict[str, int] = {}
-        for position, raw in enumerate(header):
-            text = str(raw or "").strip().lower()
-            key = _XLSX_COLUMNS.get(text)
-            if key and key not in index_of:
-                index_of[key] = position
-        if "name" not in index_of:
-            return [], ["xlsx 里找不到「sku名称」列，无法识别 SKU（请检查表头）"]
+    for raw_row in raw_rows:
+        if raw_row is None:
+            continue
+        values = list(raw_row)
 
-        unknown = [
-            str(c).strip()
-            for c in header
-            if str(c or "").strip() and str(c).strip().lower() not in _XLSX_COLUMNS
-        ]
-        if unknown:
-            warnings.append("以下列未被使用：" + "、".join(unknown))
+        def cell(key: str) -> Any:
+            pos = index_of.get(key)
+            if pos is None or pos >= len(values):
+                return None
+            return values[pos]
 
-        for raw_row in iterator:
-            if raw_row is None:
-                continue
-            values = list(raw_row)
-
-            def cell(key: str) -> Any:
-                pos = index_of.get(key)
-                if pos is None or pos >= len(values):
-                    return None
-                return values[pos]
-
-            name = str(cell("name") or "").strip()
-            if not name:
-                continue  # 空行（表尾常见）—— 跳过不算错
-            #: ⚠️ 价格**两列取一个**：数据包的 `计算价格` 常为空（真机实测
-            #: 26 行全空），真正有值的是 `原价`。只认 `计算价格` 会让整批商品
-            #: 的价格全空 —— 而草稿建完看不出来（价格留空是合法状态）。
-            #: 优先 `计算价格`（它是「算过的最终价」），空则回退 `原价`。
-            price = _to_float(cell("price"))
-            if price is None:
-                price = _to_float(cell("original_price"))
-            rows.append(
-                {
-                    "name": name,
-                    "image": str(cell("image") or "").strip(),
-                    "original_price": _to_float(cell("original_price")),
-                    "price": price,
-                    "stock": _to_int(cell("stock")),
-                    "item_id": str(cell("item_id") or "").strip(),
-                }
-            )
-    finally:
-        try:
-            book.close()
-        except Exception:  # noqa: BLE001
-            pass
-
+        name = str(cell("name") or "").strip()
+        if not name:
+            continue  # 空行（表尾常见）—— 跳过不算错
+        #: ⚠️ 价格**两列取一个**：数据包的 `计算价格` 常为空（真机实测
+        #: 26 行全空），真正有值的是 `原价`。只认 `计算价格` 会让整批商品
+        #: 的价格全空 —— 而草稿建完看不出来（价格留空是合法状态）。
+        #: 优先 `计算价格`（它是「算过的最终价」），空则回退 `原价`。
+        price = _to_float(cell("price"))
+        if price is None:
+            price = _to_float(cell("original_price"))
+        rows.append(
+            {
+                "name": name,
+                "image": str(cell("image") or "").strip(),
+                "original_price": _to_float(cell("original_price")),
+                "price": price,
+                "stock": _to_int(cell("stock")),
+                "item_id": str(cell("item_id") or "").strip(),
+            }
+        )
     if not rows:
-        warnings.append("xlsx 里没有解析到任何 SKU 行（除表头外为空）")
+        warnings.append("SKU 表里没有任何有效行，无法新增商品")
     return rows, warnings
+
 
 
 def _to_float(value: Any) -> float | None:
@@ -253,15 +260,27 @@ def parse_package(package_path: str) -> dict[str, Any]:
     if not root.is_dir():
         raise PackageError(f"数据包目录不存在：{package_path}")
 
-    # 1) xlsx（取第一个；多个时提示）
-    xlsx_files = sorted(root.glob("*.xlsx"))
-    if not xlsx_files:
-        raise PackageError(f"数据包目录里没有 .xlsx（SKU 表）：{package_path}")
-    if len(xlsx_files) > 1:
-        warnings.append(
-            f"目录里有 {len(xlsx_files)} 个 xlsx，只读了第一个：{xlsx_files[0].name}"
+    # 1) SKU 表（取第一个；多个时提示）
+    #: ⚠️ 2026-10-21 用户口径「商品发布应支持 xlsx 和 csv 表的读取」：
+    #: 这里原先只 `glob("*.xlsx")` ⇒ 只放 csv 的包直接报「没有 .xlsx」。
+    #: 现在 xlsx/xlsm/csv 一起找；**表头映射与取值逻辑完全共用**（唯一实现），
+    #: 只有「怎么把文件变成 header+rows」这一步不同。
+    #: SKU 表：**所有支持的表格格式**一起找（xlsx / xls / ods / csv / tsv / txt）。
+    #: 口径来源：用户 2026-10-21「应支持常用的大多数表格格式」。
+    from backend.app.services import tabular_reader
+
+    table_files = sorted(
+        p for p in root.iterdir() if p.is_file() and tabular_reader.is_table_file(p)
+    )
+    if not table_files:
+        raise PackageError(
+            f"数据包目录里没有 SKU 表（支持 {tabular_reader.SUPPORTED_HINT}）：{package_path}"
         )
-    sku_rows, xlsx_warnings = _read_xlsx_rows(xlsx_files[0])
+    if len(table_files) > 1:
+        warnings.append(
+            f"目录里有 {len(table_files)} 个表格文件，只读了第一个：{table_files[0].name}"
+        )
+    sku_rows, xlsx_warnings = _read_table_rows(table_files[0])
     warnings.extend(xlsx_warnings)
     if not sku_rows:
         raise PackageError("SKU 表里没有任何有效行，无法新增商品")

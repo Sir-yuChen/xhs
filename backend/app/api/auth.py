@@ -116,6 +116,18 @@ def register(
         db.rollback()
         logger.warning("register: seed data package rules for user %s failed: %s", user.id, exc)
 
+    # 2026-10-21 用户口径「把当前违规词作为新的种子数据」：内置违规词（小红书组 7 条）
+    # 同样**按用户各持一份** ⇒ 注册即播种。播种只往**空分组**里追加，
+    # 用户改过 / 删过的不重建、不覆盖（违规词是用户资产）。
+    try:
+        from backend.app.services.forbidden_word_service import seed_builtin_words
+
+        seed_builtin_words(db, user_id=user.id)
+        db.commit()
+    except Exception as exc:  # noqa: BLE001 - 注册不被子系统问题拖死
+        db.rollback()
+        logger.warning("register: seed forbidden words for user %s failed: %s", user.id, exc)
+
     # 2026-10-13 用户口径：**国内常见 6 个服务商**作为种子数据（用户登录后只需配 KEY
     # 并点「测试连接」即可用）。同样**按用户各持一份** ⇒ 注册即播种；种子**不含 KEY**，
     # 存量用户不主动补种（避免替用户建一堆没配 KEY 的服务商，同 §4.5.1 纪律）。

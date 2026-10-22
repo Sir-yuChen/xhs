@@ -114,7 +114,9 @@ def test_item_body_forces_platform_defaults_and_spec():
     assert body["categoryId"] == "cat-1"
     assert body["name"] == "标题"
     assert body["mainSpecEnable"] == 1 and body["mainSpecId"] == "v-1"
-    assert body["stockType"] == 1 and body["deliveryMode"] == 1 and body["source"] == 2
+    #: ⚠️ `deliveryMode` 是**物流类型**不是发货模式：物流配送 = 0（真机 radio value="0"）。
+    #: 旧断言写 1（当时的错误理解），会被平台判成「无物流发货」而报错。
+    assert body["stockType"] == 1 and body["deliveryMode"] == 0 and body["source"] == 2
     #: ⚠️ brandId 必带（真机体 "-999"=无品牌）；被 _DROP_FROM_SKELETON 剥掉后必须补回。
     assert body["brandId"] == "-999", "brandId 缺失会让平台判无品牌属性"
     assert body["images"] == [{"key": "a"}]
@@ -804,8 +806,11 @@ def test_build_item_from_request_applies_config_fields():
         skus=[{"name": "颜色分类:斗柜", "price_yuan": 1, "stock": 1}],
         variant_ids=[], config=cfg,
     )
-    #: ① 发货模式：现货→1（唯一已真机确认的映射）
-    assert body["deliveryMode"] == 1, "现货模式应映射为 1"
+    #: ① **物流类型**决定 `deliveryMode`，与「发货模式」无关：
+    #:    没给 `logisticsType` ⇒ 默认物流配送 = **0**（真机 radio value="0"）。
+    #:    ⚠️ 旧断言这里是「现货模式→1」，那是把物流类型与发货模式混成一个字段，
+    #:    正是用户实测「deliveryMode — 商品不支持设置无物流发货」的根因。
+    assert body["deliveryMode"] == 0, "默认应为物流配送（0），不是无物流发货（1）"
     #: ② 价格保密 / 详情 / 回看 / 英文名 覆盖骨架
     assert body["priceConfidential"] is True
     assert body["description"] == "这是详情描述"
@@ -831,9 +836,9 @@ def test_build_item_from_request_config_absent_falls_back_to_skeleton():
     )
     assert body["logisticsPlanId"] == "lp-skel"
     assert body["shippingTemplateId"] == "st-skel"
-    #: 未传 config ⇒ deliveryMode 回落平台默认 1（现货，`_PLATFORM_DEFAULTS` 写死），
-    #: 不是骨架的过期值 2。
-    assert body["deliveryMode"] == 1
+    #: 未传 config ⇒ deliveryMode 回落平台默认 **0**（物流配送，`_PLATFORM_DEFAULTS`），
+    #: 不是骨架的过期值 2 —— 也绝不能是 1（= 无物流发货，平台会拒绝）。
+    assert body["deliveryMode"] == 0
 
 
 def test_publish_endpoint_syncs_published_item_via_sync_specified():

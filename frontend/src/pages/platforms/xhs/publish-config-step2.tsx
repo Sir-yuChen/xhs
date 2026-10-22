@@ -43,6 +43,9 @@ import {
   Tooltip,
   Typography,
 } from "antd";
+//: ⚠️ 列类型单独 import（`ColumnsType<PriceRow>[number]` = antd 自己的列结构，
+//: 手写等价类型会与 `onCell` 的 `GetComponentProps` 签名不兼容）。
+import type { ColumnsType } from "antd/es/table";
 
 import {
   DeleteOutlined,
@@ -62,7 +65,7 @@ import type { SkuNameOptimizeItem } from "../../../lib/api";
 import { displayWidth, isTooLong } from "../../../lib/sku-name-width";
 import { SkuNameOptimizeModal } from "./sku-name-optimize-modal";
 import type { AfterSaleRule } from "../../../lib/api";
-import { buildImageUrls, spec_combinations } from "../../../lib/publish-config";
+import { buildImageUrls, lookupSpecFill, spec_combinations } from "../../../lib/publish-config";
 import { withoutItemNo } from "../../../lib/publish-property-fields";
 import { WaitMask } from "../../../components/ui/wait-mask";
 import {
@@ -77,8 +80,8 @@ import {
   missingRequiredPriceTargets,
   isPriceMappingReady,
   PRICE_TARGET_LABELS,
-  PRICE_TARGET_OPTIONS,
   PRICE_TABLE_TARGETS,
+  REQUIRED_PRICE_TARGETS,
   priceSourceOptions,
   type SkuFillPlan,
   validatePriceMapping,
@@ -936,17 +939,18 @@ export const SPEC_IMAGE_RULE = "图片大小应小于3MB；比例应为1:1或3:4
 
 /** 物流类型候选（用户口径 2026-10-09：「物流类型应和类目有直接关系」）。
  *
+ * ⚠️ **文案与数字值统一在 `lib/qianfan-enums.ts`**（与后端枚举一一对应）——
+ * 本文件只做 re-export，避免同一份字面量在两处各写一遍后漂移
+ * （`deliveryMode` 曾被前端当发货模式、后端当物流类型 ⇒ 平台报
+ * 「商品不支持设置无物流发货」）。
+ *
  * 真机 bundle（`8091.*.js`）`logisticsTypeOptions`：默认只给 **「物流配送」**；
  * 仅当该类目支持「无物流发货」时才追加 **「无物流发货或物流配送」**
  * （tip 文本见 `NOT_LOGISTICS_HINT`）。 */
-export const LOGISTICS_TYPE_LABELS = {
-  logistics: "物流配送",
-  notLogistics: "无物流发货或物流配送",
-} as const;
+import { LOGISTICS_TYPE_LABELS, NOT_LOGISTICS_HINT } from "../../../lib/qianfan-enums";
 
-/** 「无物流发货或物流配送」的说明（真机 bundle 原文）。 */
-export const NOT_LOGISTICS_HINT =
-  "在订单发货页面支持选择无物流发货，无需上传快递单号即可发货成功；支持选择物流配送，需上传快递单号发货。请根据实际情况选择物流配送模式";
+//: 转发给本文件的既有调用方（`import ... from` + `export` 才能在文件作用域里同时可用）。
+export { LOGISTICS_TYPE_LABELS, NOT_LOGISTICS_HINT };
 
 /** 真机 bundle 原文：价格表内置校验（逐列，逐字对过）。 */
 export const PRICE_ROW_RULES = {
@@ -1055,10 +1059,22 @@ export type PriceRow = {
   /** 规格组合文本（如「颜色分类:白 / 尺寸:1.2m」）。 */
   spec: string;
   price: number | null;
+  /** **改后库存**（本次提交要写的新值）—— 平台真实列名。 */
   stock: number | null;
+  /** **当前库存**（线上现值，**只读回显**）。
+   *
+   *  ⚠️ 用户口径 2026-10-21（真机 CDP 抓包，见设计 24 §23）：
+   *  平台价格库存表把库存拆成**两列** —— `当前库存` + `改后库存`；
+   *  提交用的是 `改后库存`，`当前库存` 只是给人看的对账值。
+   *  旧实现只有一列「库存」⇒ 用户看不出「改了之后比线上多了多少」。
+   *  `null` = 新导入、线上还没有这个 SKU（不是 0，不造假）。 */
+  current_stock?: number | null;
   market_price: number | null;
   barcode: string;
   seller_code: string;
+  /** **规格ID**（用户口径 2026-10-21：千帆固定列必须有）。平台侧是生成物，
+   *  我方只透传用户映射来的值；没配映射就是空串（不造假 ID）。 */
+  spec_id?: string;
   /** **行级启用状态**（用户口径 2026-10-10，真机 `skuData[].available`）：
    *  默认启用；停用后该 SKU 不会被消费者看到。`undefined` = 启用。 */
   available?: boolean;
@@ -1083,6 +1099,11 @@ export type PriceRow = {
  *  ⇒ 把「可提交 / 可预览的那部分」在变化时上报给向导（由向导持有到关闭为止）。 */
 export type ConfigSnapshot = {
   deliveryMode: string;
+  /** **物流类型**（`物流配送` / `无物流发货或物流配送`）。
+   *  ⚠️ 与 `deliveryMode`（发货模式：现货/预售）**是两件事**：
+   *  后端据此算提交体的 `deliveryMode` 数字值（物流配送=0）。
+   *  缺它 ⇒ 平台报「商品不支持设置无物流发货」（用户实测 2026-10-21）。 */
+  logisticsType?: string;
   shipTime: string;
   presaleKind: string;
   presaleDays: number | null;
@@ -1219,6 +1240,10 @@ export type PublishConfigStep2Props = {
   onRebuildRows?: (
     priceMapping: readonly PriceMappingRow[],
     priceFallbackSource: string,
+    /** **商品 SKU 映射的列名**（用户口径 2026-10-21：SKU 名称不再单独配映射，
+     *  由这几列决定 ⇒ 向导重算时必须把它一起传下去，否则 `passedSkuRows`
+     *  找不到「一行一条 SKU」的定位列 ⇒ 恒空 ⇒ 报「没有『预检通过且已勾选』的 SKU 行」。 */
+    specColumns: readonly string[],
   ) => PassedSkuRow[] | undefined;
   /** 上传失败重试（读向导的重试开关/次数）—— 规格图上传也认这份配置。 */
   withUploadRetry?: <T,>(run: () => Promise<T | null>, isOk?: (v: T) => boolean) => Promise<T | null>;
@@ -1254,6 +1279,17 @@ export type PublishConfigStep2Props = {
   skuImages?: { rel_path: string; file_name: string }[];
   /** 把预检暂存的**一张 SKU 图**上传到图片空间（回到 `ConfigMainImage`）。 */
   onUploadSkuImage?: (rel_path: string, file_name: string) => Promise<ConfigMainImage | null>;
+  /** **批量上传规格图**（用户报 2026-10-21「上传规格图耗时高」，实测 24 张 93 秒）。
+   *
+   *  逐张上传时每张都要单独取 permit + 单独 base64 ⇒ 前端并发再高也白搭
+   *  （后端每次只收到一张）。这里接向导已有的 `uploadManyFromPackage`
+   *  （一次 permit + 服务端并发 PUT，与主图/详情图同一条链路）。
+   *
+   *  ⚠️ 返回**与入参逐位对齐**（失败项也在，`image=null` + `reason`）；
+   *  缺省时回落到逐张 `onUploadSkuImage`（保持向后兼容，老调用方不受影响）。 */
+  onUploadSkuImagesBatch?: (
+    items: { rel_path: string; file_name: string }[],
+  ) => Promise<{ rel_path: string; ok: boolean; image: ConfigMainImage | null; reason: string }[]>;
   /** 取预检媒体图的 URL（鉴权流）；规格图选择弹窗的缩略图用。 */
   onFetchPrecheckImage?: (rel_path: string) => Promise<string>;
   /** 导购短标题（自动加载第 6 步产物 + 基础信息区共用；受控）。 */
@@ -2040,12 +2076,21 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
     //: 成对行 ⇒ 查表结构（`buildSkuFillPlan` 消费的是这个）。
     //: 价格库存的列映射由**用户配置**决定；行数据要按同一份映射重新导出
     //: （`props.passedRows` 是按默认映射算的，用户改了映射就必须重算）。
-    const remapped = props.onRebuildRows?.(priceMapping, priceFallbackSource) ?? rows;
+    //: ⚠️ **商品 SKU 映射的列** 必须一起传（2026-10-21）：SKU 名称不再单独配映射后，
+    //: `passedSkuRows` 要靠它定位「一行一条 SKU」的列；不传 ⇒ 行集恒空
+    //: ⇒ 用户实测的「没有『预检通过且已勾选』的 SKU 行，实际是存在的」。
+    const specColumns = importMapping.map((r) => r.source).filter((x) => !!x.trim());
+    const remapped =
+      props.onRebuildRows?.(priceMapping, priceFallbackSource, specColumns) ?? rows;
     const plan = buildSkuFillPlan(
       remapped,
       dims,
       mappingFromRows(importMapping),
       priceMultiplier,
+      //: ⚠️ 用户口径 2026-10-21：价格行的键 = **商品 SKU 映射那几列按行拼接**
+      //: 出来的完整规格（「指定的列去重后就是对该组的 sku 规格」）。
+      //: 不传它 ⇒ 退回「按维度值合并」⇒ 456 行只落 24 行价格（444 行丢失且不报错）。
+      specColumns,
     );
     if (plan.dims.length === 0) {
       setImportDetail(
@@ -2077,7 +2122,6 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
       //: 但传 `keepPending` —— 刚挂的新值不能被它清掉（那是「导入成功却一行没值」的成因）。
       setPendingSpecFills(plan.rows);
       clearImportTargets({ keepPending: true });
-      const dimPlan = plan.dims[0];
       //: ① 规格类型 + 规格值（合并去重，不覆盖用户已填的）。
       //: 逐维度落规格类型与值（上面已清空 ⇒ 这里是**纯写入**，不会再叠历史值）。
       const mergedTypes: string[] = [];
@@ -2109,37 +2153,50 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
         failed = total;
         done = total;
       } else if (total > 0) {
-        //: worker pool：单个 worker 反复「领一项 → 上传 → 记结果 → 报进度」。
-        //: 项的下标由**共享游标**发放，天然无重复、无遗漏（不用先切片）。
-        let cursor = 0;
-        const worker = async () => {
-          for (;;) {
-            if (importCancelRef.current) return; // ⚠️ 取消：不再领新项
-            const i = cursor;
-            cursor += 1;
-            if (i >= total) return;
-            const item = plan.images[i];
-            const one = await run!(() => upload!(item.localRel, item.localFileName));
-            if (one) {
+        //: ⚠️⚠️ **顺序逐张上传**（用户口径 2026-10-21：「不要并发上传规格图了，
+        //: 顺序上传」）——已删掉 `upload-batch` 分段并发那条路。
+        //:
+        //:  为什么顺序是对的：
+        //:   · 批量端点一次 `await` 整批 ⇒ 期间**零进度事件**，用户看到
+        //:     「0/24 卡死 80 秒」（用户截图为证）；
+        //:   · 分段并发仍要按批等待，每批内部哪些成功、哪些失败用户看不见，
+        //:     且失败时无法精确知道"卡在哪一张"；
+        //:   · 逐张顺序 = 每张都有确定的前后顺序 ⇒ 进度**每张都动**、
+        //:     失败立刻定位到具体规格值、取消后**下一张就不传**。
+        //:
+        //:  ⚠️ 用 `withUploadRetry`（带重试）+ `onUploadSkuImage`（单张）。
+        //:  ⚠️ `importCancelRef` 每张前都查 ⇒ 取消后未传的项一张都不传
+        //:    （用户口径「导入中点击取消，则中断未导入和未上传的数据」）。
+        for (let i = 0; i < total; i += 1) {
+          if (importCancelRef.current) break;
+          const item = plan.images[i];
+          setImportProgress(`上传规格图 ${done}/${total}（${item.value}）`);
+          try {
+            //: ⚠️ `withUploadRetry` 的签名是 `<T>(run: () => Promise<T|null>, isOk?)`
+            //: —— 传的是**函数**，不是 (fn, args)。早先按 (fn, args) 写会直接
+            //: tsc 报 `run is possibly undefined` 且运行期一次都传不出去。
+            const image = await run!(() => upload!(item.localRel, item.localFileName));
+            if (image) {
               ok += 1;
-              //: ⚠️ 回填规格图（`setSpecImage` 支持乱序调用，key 是「维度+值」）。
-              setSpecImage(item.dimName, item.value, one);
+              setSpecImage(item.dimName, item.value, image);
             } else {
               failed += 1;
             }
-            done += 1;
-            //: 逐张报进度 —— 并发下 `done` 是**完成数**（可能非线性），文案仍准确。
-            setImportProgress(`上传规格图 ${done}/${total}（${item.value}）`);
+          } catch {
+            //: 单张失败不中断整批（其余规格图照传；失败数如实计入）。
+            failed += 1;
           }
-        };
-        const CONCURRENCY = SPEC_IMAGE_UPLOAD_CONCURRENCY;
-        await Promise.all(
-          Array.from({ length: Math.min(CONCURRENCY, total) }, () => worker())
-        );
+          done += 1;
+          setImportProgress(`上传规格图 ${done}/${total}`);
+        }
       }
       const cancelled = importCancelRef.current;
       const bits = [
-        `规格「${dimPlan.dimName}」${dimPlan.values.length} 个值`,
+        //: ⚠️ 用户报 2026-10-21：「展示的信息不准确」——
+        //: 原文案只报 `dims[0]` 一个维度的值数（如「规格「规格/尺寸」19 个值」），
+        //: 用户看不到**另一个维度**有多少值，也看不出分组顺序。
+        //: ⇒ 所有维度逐个列出（顺序 = 用户映射顺序 = 价格表分组顺序）。
+        `规格 ${plan.dims.map((d) => `${d.dimName} ${d.values.length} 个值`).join(" × ")}`,
         `${plan.rows.length} 行价格库存`,
         `规格图 ${ok} 张${failed > 0 ? `（失败 ${failed} 张，已跳过）` : ""}`,
         //: 用户口径：取消要**说清楚停在哪**（已传 N/M 张），否则用户不知道算不算完整。
@@ -2197,9 +2254,26 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
     //: 旧实现把落值交给**另一个 effect**，而那两个 effect 的触发顺序/时机不由我们
     //: 控制（价格表要先回传外层再回传进来），实测会「导入成功但一行都没填上」。
     //: 现在重建与落值**在同一次计算里**完成 ⇒ 不存在时序窗口。
-    const pending = new Map(pendingSpecFills.map((f) => [f.spec, f]));
+    //: ⚠️⚠️⚠️ 用户报 2026-10-21：「导入 sku 数据的价格及库存，映射关系配置了，
+    //: 但**数据未填充**」（截图：价格/库存/市场价/商家编码 全空）。
+    //:
+    //: **真根因：两侧的 `spec` 格式不同，一条都匹配不上。**
+    //:  · `pendingSpecFills`（来自 `buildSkuFillPlan`）的 spec 是
+    //:    **行级拼接原文**（`skuSpecTextOf`）⇒ `奇遇童话01 / 尺寸/图案任意定制`
+    //:  · `combos`（来自 `spec_combinations`）的 spec 是
+    //:    **带维度名前缀** ⇒ `颜色分类:奇遇童话01 / 款式:尺寸/图案任意定制`
+    //: ⇒ `pending.get(c.spec)` 恒 `undefined` ⇒ 每行都走 `return base`（全空），
+    //:   而界面看起来「导入成功、规格都建好了」，只是值全是空的。
+    //:
+    //: ⇒ 判据改为**按值序列比对**（把维度前缀剥掉再比），两侧都能对上：
+    //:   `颜色分类:X / 款式:Y` → `X / Y` === `X / Y`。
+    //: ⚠️ 同时保留**原始 spec 精确命中**优先（万一将来两侧统一了格式，仍走快路径）。
+    //: ⚠️ 匹配走 lib 的**单一实现** `lookupSpecFill`（可单测、可变异）。
+    //: 页面内再写一份「剥前缀 + 两次 find」等于两份判据，迟早漂移。
+    const pendingExact = new Map(pendingSpecFills.map((f) => [f.spec, f]));
     const next: PriceRow[] = visible.map((c) => {
-      const fill = pending.get(c.spec);
+      //: 先用原串精确命中；不行再按「剥掉维度前缀的值序列」命中。
+      const fill = lookupSpecFill(pendingSpecFills, c.spec);
       const existing = byKey.get(c.key);
       const base: PriceRow = existing
         ? { ...existing, spec: c.spec }
@@ -2218,15 +2292,19 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
         ...base,
         price: fill.price,
         market_price: fill.marketPrice,
+        //: **当前库存 / 改后库存**分开落（用户口径 2026-10-21：两列都要能映射）。
+        current_stock: fill.currentStock ?? null,
         stock: fill.stock,
         seller_code: fill.sellerCode,
+        //: **规格ID**（平台生成物，只透传用户映射来的值；没配就空串）。
+        spec_id: fill.specId ?? "",
         //: ⚠️ 条形码也**按映射**写（用户口径 2026-10-15：下拉漏了它 ⇒ 配不出来）。
         barcode: fill.barcode,
       };
     });
     //: 落过值就把挂起清掉（否则每次外层回传都重写一遍，用户手改价会被反复覆盖）。
-    if (pending.size > 0) {
-      const appliedAll = visible.every((c) => !pending.has(c.spec) || true);
+    if (pendingSpecFills.length > 0) {
+      const appliedAll = visible.every((c) => !!lookupSpecFill(pendingSpecFills, c.spec) || true);
       if (appliedAll) setPendingSpecFills([]);
     }
     //: ⚠️ `next` 为空要**分两种状态**（用户报障 2026-10-15：「所有商品规格全部取消后
@@ -2389,6 +2467,11 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
   useEffect(() => {
     props.onConfigChange?.({
       deliveryMode,
+      //: ⚠️⚠️ **物流类型**（用户口径 2026-10-09「物流类型应和类目有直接关系」）——
+      //: 此前只在组件内 `useState`，**从未上报** ⇒ 后端读不到 ⇒ 提交体沿用骨架
+      //: 默认值 ⇒ 平台报「deliveryMode — 商品不支持设置无物流发货」。
+      //: 后端按它算 `deliveryMode`（物流配送=0 / 无物流发货=1），与发货模式无关。
+      logisticsType,
       shipTime,
       presaleKind,
       presaleDays,
@@ -2524,71 +2607,265 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
    * ⚠️ 用户口径 2026-10-09：「价格及库存表格应支持编辑，**规格列不支持**，
    * 在此基础上添加**批量编辑**操作，参考预选 sku 表 tab 下的批量操作功能」。
    * ⇒ 除「规格」列外每格可编辑（写回 `props.priceRows`）；批量条按列套规则。 */
+  /** **价格及库存表的列**（真机 CDP 抓包，设计 24 §23）。
+   *
+   *  ⚠️⚠️ 用户口径 2026-10-21：「价格及库存的表格列**不是固定的**，可能根据类目或
+   *  商品规格变化」+「第一个商品规格为**主-总-分**的结构表格」。
+   *
+   *  真机表头（`6a55be4d…` 商品实读）：
+   *    颜色分类 | 适用床尺寸 | 行号 | 规格图 | 售价* | 当前库存 | 改后库存 | 市场价 | 规格ID | 条形码 | 商家编码 | 操作
+   *  ⇒ 前三段：**规格维度（1~10 个，名字由类目定）** → 行号 → 规格图 → 固定价格块。
+   *
+   *  旧实现只有一列「规格」（整串文本），用户看不出「哪几行属于同一个颜色」，
+   *  也无法按维度核对。现在按维度拆列 + 第一维度 `rowSpan` 合并（= 主-总-分）。
+   *
+   *  ⚠️ 平台生成的列（行号 / 规格ID / 规格图 / 操作）**不可编辑**，只回显。
+   */
   const priceColumns = useMemo(() => {
-    const base: { title: string; dataIndex: string; key: string; width?: number }[] = [
-      { title: "规格", dataIndex: "spec", key: "spec", width: 160 },
-      { title: "售价", dataIndex: "price", key: "price", width: 120 },
-      { title: "库存", dataIndex: "stock", key: "stock", width: 100 },
-      { title: "市场价", dataIndex: "market_price", key: "market_price", width: 120 },
-      { title: "条形码", dataIndex: "barcode", key: "barcode", width: 160 },
-      { title: "商家编码", dataIndex: "seller_code", key: "seller_code", width: 140 },
+    const dims = specTypes.filter((d) => (specValues[d] ?? []).length > 0);
+    //: ⚠️ 用 antd 自己的列类型（`ColumnsType<PriceRow>[number]`）而不是手写 `Col`：
+    //: 手写类型会让 `onCell` 的签名与 antd 的 `GetComponentProps`（第二参 `index?`）
+    //: 不兼容，tsc 报一长串不匹配。交给推断最稳。
+    type Col = ColumnsType<PriceRow>[number];
+    //: ① **规格维度列**（动态个数）。用 `spec` 里 `维度名:值 / 维度名:值` 反解取值 ——
+    //:    `spec` 是本项目全链路唯一的组合标识（预检 / 导入 / 提交都靠它）。
+    const dimOf = (row: PriceRow, dim: string): string => {
+      for (const part of String(row.spec ?? "").split(" / ")) {
+        const at = part.indexOf(":");
+        if (at >= 0 && part.slice(0, at).trim() === dim) return part.slice(at + 1).trim();
+      }
+      return "";
+    };
+    const dimCols: Col[] = dims.map((dim, di) => ({
+      title: dim,
+      key: `dim-${dim}`,
+      //: 真机列宽 135px（设计 24 §23 实测 colgroup）。
+      width: 135,
+      //: antd 原生对齐（不再写 CSS 覆盖 th/td 的 text-align）。
+      align: "left" as const,
+      //: 第一维度固定在最左（内容一致即可：横向滚动时仍能看出属于哪一组）。
+      fixed: di === 0 ? ("left" as const) : undefined,
+      render: (_: unknown, row: PriceRow) => {
+        const v = dimOf(row, dim);
+        const enabled = row.available !== false;
+        return (
+          <Space size={6}>
+            <span>{v}</span>
+            {/* 启用/停用入口只放在**最后一维**（每行一个决定），否则同组多个链接重复 */}
+            {di === dims.length - 1 && (
+              <a
+                className="sku-enabled-btn"
+                onClick={() =>
+                  props.onPriceRowsChange(
+                    props.priceRows.map((r) =>
+                      r.key === row.key ? { ...r, available: !enabled } : r,
+                    ),
+                  )
+                }
+              >
+                {enabled ? "不启用" : "启用"}
+              </a>
+            )}
+          </Space>
+        );
+      },
+      //: **主-总-分**：第一维度按值分组，组首 `rowSpan = 组内行数`。
+      //: ⚠️ 只看第一维（`di === 0`）：平台就是这么合并的（实测 rowspan=8）。
+      onCell:
+        di === 0
+          ? (row: PriceRow, index?: number) => {
+              const at = index ?? 0;
+              //: 第 i 行是否是**同组的第一行**（值变了就是新组）。
+              const isGroupStart =
+                at === 0 ||
+                dimOf(props.priceRows[at - 1], dim) !== dimOf(row, dim);
+              if (!isGroupStart) return { rowSpan: 0 }; //: 0 = 被上面那格吃掉
+              let span = 1;
+              while (
+                at + span < props.priceRows.length &&
+                dimOf(props.priceRows[at + span], dim) === dimOf(row, dim)
+              ) {
+                span += 1;
+              }
+              return { rowSpan: span };
+            }
+          : undefined,
+    }));
+
+    /*: ⚠️ 用户口径 2026-10-21：「**价格及库存应表头全部居中**」。
+     *
+     *  `align` 会**同时**作用于表头 th 与单元格 td —— 用户只要求表头居中，
+     *  单元格（价格/库存是右对齐的数值）保持原样。
+     *  ⇒ 用 `onHeaderCell` 单独给 th 打 `style.textAlign`（antd 原生能力，
+     *    不写 CSS 覆写），并统一补到**所有列**（含规格维度 / 行号 / 规格图 / 操作）。
+     */
+    const centerHeader = <T,>(col: T): T => ({
+      ...col,
+      onHeaderCell: () => ({ style: { textAlign: "center" as const } }),
+    });
+
+    const base: Col[] = [
+      ...dimCols,
+      //: ② 行号（平台生成，1..N 连续）。
+      {
+        title: "行号",
+        key: "rowNo",
+        width: 55,
+        render: (_: unknown, __row: PriceRow, index: number) => (
+          <span style={{ color: "rgba(0,0,0,.45)" }}>{index + 1}</span>
+        ),
+      },
+      //: ③ 规格图：**只在第一维度组首行显示一张**（真机：一组一张，不是每行一张）。
+      {
+        title: "规格图",
+        key: "specImage",
+        width: 88,
+        //: ⚠️⚠️ **规格图必须按第一维度合并多行**（用户口径 2026-10-21，截图为证：
+        //: 千帆的规格图一格跨 6 行，我方每行各画一格 ⇒ 视觉上完全不是一张表）。
+        //: 旧实现只在 `render` 里 `return null`（只清空内容）⇒ **单元格仍在**，
+        //: 边框、斑马纹、行高都照旧 ⇒ 看起来就是「每行一个空格子」。
+        //: ⇒ 合并必须由 `onCell` 返回 `rowSpan` 完成（组首行 = 组内行数，其余 = 0）。
+        onCell: (_row: PriceRow, index?: number) => {
+          const firstDim = dims[0];
+          const at = index ?? 0;
+          if (!firstDim || at < 0 || at >= props.priceRows.length) return { rowSpan: 1 };
+          const cur = dimOf(props.priceRows[at], firstDim);
+          const prevSame =
+            at > 0 && dimOf(props.priceRows[at - 1], firstDim) === cur;
+          if (prevSame) return { rowSpan: 0 };
+          let span = 1;
+          for (let i = at + 1; i < props.priceRows.length; i += 1) {
+            if (dimOf(props.priceRows[i], firstDim) !== cur) break;
+            span += 1;
+          }
+          return { rowSpan: span };
+        },
+        render: (_: unknown, row: PriceRow, index: number) => {
+          //: 取该行第一维度的值去找规格图（`specImages[维度][值]`）。
+          const firstDim = dims[0];
+          const firstVal = firstDim ? dimOf(row, firstDim) : "";
+          const img = firstDim && firstVal ? specImages[firstDim]?.[firstVal] : undefined;
+          //: `rowSpan: 0` 的行 antd 不会渲染本单元格 ⇒ 这里返回什么都不会上屏；
+          //: 保留判据是为了「万一 rowSpan 失效」时不出现重复图（防御，不是主逻辑）。
+          const prevSame =
+            index > 0 &&
+            firstDim &&
+            dimOf(props.priceRows[index - 1], firstDim) === firstVal;
+          if (prevSame) return null;
+          return img?.url ? (
+            <img src={img.url} alt="" style={{ width: 40, height: 40, objectFit: "cover", borderRadius: 4 }} />
+          ) : (
+            <span style={{ color: "rgba(0,0,0,.3)", fontSize: 11 }}>无图</span>
+          );
+        },
+      },
+      //: ④ 固定价格块（与平台同序）。
+      { title: "售价", dataIndex: "price", key: "price", align: "right" as const, width: 150 },
+      //: `当前库存` = 线上现值，**只读**（null ⇒ 显示 `-`，不造 0）。
+      //: **当前库存**（千帆固定列，宽 200）——用户口径 2026-10-21：
+      //: 「当前库存…均必须配置」⇒ 它也能被映射；未映射时显示 `-`（不造假）。
+      { title: "当前库存", dataIndex: "current_stock", key: "current_stock", align: "right" as const, width: 200 },
+      { title: "改后库存", dataIndex: "stock", key: "stock", align: "right" as const, width: 130 },
+      { title: "市场价", dataIndex: "market_price", key: "market_price", align: "right" as const, width: 150 },
+      //: **规格ID**（千帆固定列 `规格ID`，宽 230）——用户口径 2026-10-21：
+      //: 「缺少规格ID、条形码、商家编码…价格及库存固定列必须保持一致」。
+      //: ⚠️ 平台侧它是**生成物**；我方只在用户把某列映射到它时才显示值，
+      //: 否则显示 `-`（不造假、不生成假 ID）。
+      { title: "规格ID", dataIndex: "spec_id", key: "spec_id", width: 230 },
+      { title: "条形码", dataIndex: "barcode", key: "barcode", width: 200 },
+      { title: "商家编码", dataIndex: "seller_code", key: "seller_code", width: 164 },
+      //: **操作列**（真机是 `Switch` 开关 + 操作区，宽度 150）——用户口径
+      //: 「价格及库存表应完全与千帆后台除动态列以外保持一致」。
+      //: 开关语义 = `skuData[].available`（停用后消费者看不到该 SKU）。
+      {
+        title: "操作",
+        key: "operate",
+        width: 150,
+        render: (_: unknown, row: PriceRow) => {
+          const enabled = row.available !== false;
+          return (
+            <Space size={4}>
+              <Switch
+                size="small"
+                checked={enabled}
+                onChange={(next) =>
+                  props.onPriceRowsChange(
+                    props.priceRows.map((r) =>
+                      r.key === row.key ? { ...r, available: next } : r,
+                    ),
+                  )
+                }
+              />
+              <span style={{ fontSize: 12, color: "rgba(0,0,0,.65)" }}>
+                {enabled ? "上架" : "下架"}
+              </span>
+            </Space>
+          );
+        },
+      },
     ];
     //: 真机：现货+预售模式多一列「发货时效」；按规格模式多一列「发货时间」。
     if (deliveryMode === DELIVERY_MODES[2]) {
-      base.splice(2, 0, { title: "发货时效 *", dataIndex: "shipAging", key: "shipAging", width: 120 });
+      base.push({ title: "发货时效 *", dataIndex: "shipAging", key: "shipAging", width: 120 });
     }
     if (deliveryMode === DELIVERY_MODES[3]) {
-      base.splice(2, 0, { title: "发货时间 *", dataIndex: "delivery", key: "delivery", width: 160 });
+      base.push({ title: "发货时间 *", dataIndex: "delivery", key: "delivery", width: 160 });
     }
-    const numeric = new Set(["price", "stock", "market_price"]);
-    return base.map((col) => {
-      if (col.dataIndex === "spec") {
-        //: ⚠️ 用户口径（2026-10-10）：每个 SKU 行**默认启用**，规格值名旁有
-        //: 「不启用/启用」切换链接（真机 `sku-enabled-btn`；文案=点后变成的状态）。
-        return {
-          ...col,
-          render: (_: unknown, row: PriceRow) => {
-            const enabled = row.available !== false;
-            return (
-              <Space size={6}>
-                <span>{row.spec}</span>
-                <a
-                  className="sku-enabled-btn"
-                  onClick={() =>
-                    props.onPriceRowsChange(
-                      props.priceRows.map((r) =>
-                        r.key === row.key ? { ...r, available: !enabled } : r,
-                      ),
-                    )
-                  }
-                >
-                  {enabled ? "不启用" : "启用"}
-                </a>
-              </Space>
-            );
-          },
-        };
-      }
+    const numeric = new Set(["price", "current_stock", "stock", "market_price"]);
+    //: 只读列（平台生成 / 线上现值）—— 不渲染输入框。
+    const readOnly = new Set(["rowNo", "specImage"]);
+    //: ⚠️⚠️ 用户口径 2026-10-21：「**固定列预设需要用户配置映射关系**」——
+    //: 即价格块的列**不是写死全显示**，而是「用户在导入弹窗里配了哪几个映射，
+    //: 这里就出现哪几列」。没配的列不出现（配了才有意义，不配全是空列噪声）。
+    //:
+    //: 判据：`priceMapping` 里出现过的 `target` 才保留。
+    //: ⚠️ `current_stock` / 行号 / 规格图 / 操作 是平台自身字段，不参与映射 ⇒ 恒显示。
+    const mappedTargets = new Set(
+      priceMapping.map((r) => String(r.target ?? "").trim()).filter(Boolean),
+    );
+    //: 映射里的 target 与列 `key` 同名（price / market_price / stock / barcode / seller_code）。
+    //: ⚠️⚠️ 用户口径 2026-10-21（截图为证）：「**缺少列** … **与千帆后台保持一致**」——
+    //: 千帆价格及库存表的**固定列恒在**，不因「用户还没配映射」就消失：
+    //:   行号 / 规格图 / 售价 / 当前库存 / 改后库存 / 市场价 / 规格ID / 条形码 / 商家编码
+    //: ⇒ 只有**售价 / 当前库存 / 改后库存 / 市场价**受映射控制（它们本来就是必配，恒有值）；
+    //:   **规格ID / 条形码 / 商家编码 是可选映射，但列必须恒显示**，未配时该格显示 `-`
+    //:   （缺值口径：不造假、也不让列凭空消失）。
+    const mappedCols = ["price", "current_stock", "market_price", "stock"];
+    //: ⚠️ **一个映射都没配时显示全部**：否则初次进来表格只剩行号/规格图，
+    //: 用户会以为功能坏了（而且他还没机会配映射 —— 映射在弹窗里配，
+    //: 弹窗的打开又依赖这张表先渲染出来）。
+    const visible =
+      mappedTargets.size === 0
+        ? base
+        : base.filter(
+            (col) =>
+              !mappedCols.includes(String(col.key)) || mappedTargets.has(String(col.key)),
+          );
+    return visible.map(centerHeader).map((col) => {
+      //: ⚠️ `ColumnsType` 是「分组列 | 普通列」的联合 ⇒ `dataIndex` 不总存在。
+      //: 我们这里全是普通列，用 `dataIndex` 作字段名（与 `key` 同名）。
+      const field = "dataIndex" in col ? (col.dataIndex as string | undefined) : undefined;
+      if (col.render || readOnly.has(col.key as string) || !field) return col;
       return {
         ...col,
         render: (_: unknown, row: PriceRow) => {
-          //: ⚠️ 用户口径（2026-10-10）：不启用的行**整行置灰不可编辑**。
+          //: 用户口径 2026-10-10：不启用的行**整行置灰不可编辑**。
           const disabled = row.available === false;
           return (
             <Input
               size="small"
               disabled={disabled}
-              value={String((row as unknown as Record<string, unknown>)[col.dataIndex] ?? "")}
+              value={String((row as unknown as Record<string, unknown>)[field] ?? "")}
               onChange={(e) => {
                 const raw = e.target.value;
                 props.onPriceRowsChange(
                   props.priceRows.map((r) => {
                     if (r.key !== row.key) return r;
-                    if (numeric.has(col.dataIndex)) {
-                      const n = raw.trim() === "" ? null : Number(raw.replace(/[^\d.-]/g, ""));
-                      return { ...r, [col.dataIndex]: Number.isFinite(n as number) ? n : null };
+                    if (numeric.has(field)) {
+                      const n = raw.trim() === "" ? null : Number(raw.replace(/[^0-9.-]/g, ""));
+                      return { ...r, [field]: Number.isFinite(n as number) ? n : null };
                     }
-                    return { ...r, [col.dataIndex]: raw };
+                    return { ...r, [field]: raw };
                   }),
                 );
               }}
@@ -2597,7 +2874,7 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
         },
       };
     });
-  }, [deliveryMode, props]);
+  }, [deliveryMode, props, specTypes, specValues, specImages, priceMapping]);
 
 
   /** 发布提示：按真机口径实时算**未通过的必填项**（分区 + 字段 + 原因）。 */
@@ -3215,6 +3492,20 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
           open={skuOptimizeOpen}
           maxChars={skuOptimizeMax}
           items={skuOptimizeItems}
+          //: 用户口径 2026-10-21：「预览弹窗中展示**规格图**、原规格名、新规格名」。
+          //: 规格图来自 `specImages`（维度 → 值 → 图），这里摊平成「值 → URL」：
+          //: 规格名在第一个维度下才有图（与 `plan.images` 同口径），
+          //: 跨维度重名时以先出现的为准（第一个维度优先）。
+          imageByValue={Object.values(specImages).reduce<Record<string, string>>(
+            (acc, byValue) => {
+              for (const [value, img] of Object.entries(byValue ?? {})) {
+                const url = (img as { url?: string } | undefined)?.url;
+                if (url && !acc[value]) acc[value] = url;
+              }
+              return acc;
+            },
+            {},
+          )}
           onClose={() => setSkuOptimizeOpen(false)}
           onConfirm={(applied) => {
             //: 把优化后的名称按**原顺序**放回去（key 是原始名，逐一替换）。
@@ -3457,9 +3748,6 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
                   title: "预检通过列",
                   key: "source",
                   render: (_: unknown, row: PriceMappingRow, i: number) => {
-                    const others = priceMapping
-                      .filter((r, j) => j !== i && r.source.trim())
-                      .map((r) => r.source.trim());
                     return (
                       <Select
                         style={{ width: "100%" }}
@@ -3471,11 +3759,18 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
                             prev.map((r, j) => (j === i ? { ...r, source: v ?? "" } : r)),
                           )
                         }
+                        //: ⚠️⚠️ 用户口径 2026-10-21：「**预检通过列取消一对一配，
+                        //: 支持列被多次选择**」——
+                        //: 原实现对来源列做了「已用即 disabled」的互斥限制，
+                        //: 但同一列完全可能喂给多个目标：
+                        //:   · 数据包「价格」列 → 售价，同时 → 市场价（划线价同源）；
+                        //:   · 「库存」列 → 当前库存，同时 → 改后库存（把现库存原样带上）；
+                        //:   · 「SKUID」列 → 商家编码，同时 → 规格ID。
+                        //: ⇒ **取消互斥**，任何列都可被多次选（目标列仍不许重复，
+                        //:   那是"一列落一个值"的硬约束，见右侧下拉的 `disabled`）。
                         options={priceSourceOptions(props.priceSourceColumns ?? []).map((name) => ({
                           label: name,
                           value: name,
-                          //: 来源列也不许重复映射。
-                          disabled: others.includes(name),
                         }))}
                       />
                     );
@@ -3495,12 +3790,18 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
                         placeholder="请选择"
                         //: 必填（用户口径「不能为空」）⇒ 未选即红框。
                         status={!row.target ? "error" : undefined}
+                        //: ⚠️⚠️ 用户口径 2026-10-21（截图为证）：「**红框中的值不允许修改切换**」
+                        //: —— 即**四项必配**（售价 / 当前库存 / 改后库存 / 市场价）的
+                        //: 目标列是**锁定**的：它们与千帆表头一一对应，改了就没有对应列可落值。
+                        //: ⇒ `disabled` + 一个说清原因的 Tooltip（不让用户以为控件坏了）。
+                        //: ⚠️ 其余行（条形码 / 商家编码 / 规格ID）仍可自由切换。
+                        disabled={REQUIRED_PRICE_TARGETS.includes(row.target as PriceTargetKey)}
                         onChange={(v) =>
                           setPriceMapping((prev) =>
                             prev.map((r, j) => (j === i ? { ...r, target: v as PriceTargetKey } : r)),
                           )
                         }
-                        //: ⚠️ 用**价格库存表列**清单（不是 `PRICE_TARGET_OPTIONS` 全量）——
+                        //: ⚠️ 用**价格库存表固定列**清单（唯一数据源 `PRICE_TABLE_TARGETS`）——
                         //: 全量会把「售价回落列」「规格分类」也列进来，而它们不是这张表的列
                         //: （用户报障 2026-10-15：「下拉框与价格及库存存在不一致的列，应保持一致」）。
                         options={PRICE_TABLE_TARGETS.map((t) => ({
@@ -3794,32 +4095,27 @@ export default function PublishConfigStep2(props: PublishConfigStep2Props) {
               onChange={(e) => setSpecKeyword(e.target.value)}
             />
           </div>
-          <Table
-            size="small"
+          <Table<PriceRow>
+            //: ⚠️ 用户口径 2026-10-21：「样式无需完全一样，**使用 antd 相关成熟的组件**，
+            //: 内容一致即可」+「**减少使用 css**」——
+            //: ⇒ 不再为对齐千帆写自定义 CSS，全部用 antd 原生能力：
+            //:   · `bordered` 给网格线（平台是每格 1px 浅灰边）
+            //:   · `size="middle"` 给接近平台的松弛行高（default 更接近 60px）
+            //:   · 列上的 `align` / `fixed` 处理对齐与固定
+            //:   · `rowSelection` 不启用（平台用操作列 Switch 控制上架，见列定义）
+            bordered
+            size="middle"
             rowKey="key"
             pagination={false}
             dataSource={filteredPriceRows}
+            //: 停用行整体降透明度 —— 用 antd 的 `rowClassName` + 一行工具类，
+            //: 不为此单独写样式块（见 css 里的 `.price-row-disabled`，只有 3 行）。
             rowClassName={(row: PriceRow) => (row.available === false ? "price-row-disabled" : "")}
             //: 用户口径 2026-10-11：「最高 400px，低于 400 自适应，高于 400 实现上下滚动」。
             //: ⚠️ 用 antd 原生 `scroll.y` 而不是外裹 div 的 max-height：
             //:   原生滚动会把**表头钉在顶部**（外裹 div 会把表头一起滚走，用户就看不到列名了）。
             scroll={{ x: "max-content", y: 400 }}
-            columns={[
-              {
-                title: "规格图",
-                key: "spec_image",
-                width: 72,
-                render: (_: unknown, row: PriceRow) => {
-                  const img = specImageForRow(row);
-                  return img ? (
-                    <img className="media-thumb" src={img.url || img.local_url} alt="规格图" />
-                  ) : (
-                    <Text type="secondary">-</Text>
-                  );
-                },
-              },
-              ...priceColumns,
-            ]}
+            columns={priceColumns}
           />
         </Field>
       </Section>

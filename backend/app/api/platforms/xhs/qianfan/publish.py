@@ -109,7 +109,12 @@ class ItemDraftCreateRequest(BaseModel):
     #: `str` = 相对路径（旧链路，后端上传）；`dict` = 已上传对象（跳过上传直接用）。
     main_images: list[str | dict[str, Any]] = Field(default_factory=list, max_length=_DRAFT_MAX_IMAGES)
     detail_images: list[str | dict[str, Any]] = Field(default_factory=list, max_length=_DRAFT_MAX_IMAGES)
-    skus: list[ItemDraftSku] = Field(min_length=1, max_length=_DRAFT_MAX_SKUS)
+    #: ⚠️ **不设 SKU 条数上限**（用户口径 2026-10-21：「当前项目后端不设置限制」）。
+    #: 原为 `max_length=_DRAFT_MAX_SKUS`（200）⇒ 456 行的真实数据包直接 422
+    #: （用户实测「点击发布商品异常：Request failed with status code 422」）。
+    #: 平台自身对 SKU 组合数的约束由**平台**在提交时判定并回错误，
+    #: 我方不应在入口处先行拒绝（截断/拒绝都会让用户看到的行数与实际发布不一致）。
+    skus: list[ItemDraftSku] = Field(min_length=1)
     #: 第一步「数据包预检」的暂存 token（设计 25 §6）。非空时
     #: `main_images` / `detail_images` / `skus[].image_path` 按**暂存内相对路径**解析
     #: （`<区域>/<文件名>`）。⚠️ 2026-10-10 补：此前保存草稿缺此字段，前端传
@@ -526,7 +531,12 @@ class ItemPublishRequest(BaseModel):
     #:    后端 `build_publish_image` 直接组装，**不再重新上传**。
     main_images: list[str | dict[str, Any]] = Field(default_factory=list, max_length=_DRAFT_MAX_IMAGES)
     detail_images: list[str | dict[str, Any]] = Field(default_factory=list, max_length=_DRAFT_MAX_IMAGES)
-    skus: list[ItemDraftSku] = Field(min_length=1, max_length=_DRAFT_MAX_SKUS)
+    #: ⚠️ **不设 SKU 条数上限**（用户口径 2026-10-21：「当前项目后端不设置限制」）。
+    #: 原为 `max_length=_DRAFT_MAX_SKUS`（200）⇒ 456 行的真实数据包直接 422
+    #: （用户实测「点击发布商品异常：Request failed with status code 422」）。
+    #: 平台自身对 SKU 组合数的约束由**平台**在提交时判定并回错误，
+    #: 我方不应在入口处先行拒绝（截断/拒绝都会让用户看到的行数与实际发布不一致）。
+    skus: list[ItemDraftSku] = Field(min_length=1)
     #: 本店任一既有商品的 id（取发布体骨架）；空 ⇒ 自动取最近创建的在售商品。
     skeleton_item_id: str = Field(default="", max_length=64)
     #: ⚠️ **红线开关**：默认 True（发布成功立刻下架）。生产路径不得传 False。

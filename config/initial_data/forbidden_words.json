@@ -1,0 +1,47 @@
+{
+  "_comment": "违规词内置种子（2026-10-21 由用户真机核对后定稿）。新用户注册 / 存量用户启动时补种：只在该用户**该分组一条词都没有**时播种，用户改过/删过的不重建、不覆盖（违规词是用户资产）。分组名与匹配模式在 forbidden_word_service 里有常量与校验，这里是唯一数据源。",
+  "forbidden_words": [
+    {
+      "group_name": "小红书",
+      "word": "淘宝",
+      "match_mode": 2,
+      "remark": "严禁导流到竞品电商平台"
+    },
+    {
+      "group_name": "小红书",
+      "word": "天猫",
+      "match_mode": 2,
+      "remark": "严禁导流到竞品电商平台"
+    },
+    {
+      "group_name": "小红书",
+      "word": "超级88",
+      "match_mode": 2,
+      "remark": "平台促销活动名，属未授权使用"
+    },
+    {
+      "group_name": "小红书",
+      "word": "88VIP",
+      "match_mode": 2,
+      "remark": "平台促销活动名，属未授权使用"
+    },
+    {
+      "group_name": "小红书",
+      "word": "政府补贴",
+      "match_mode": 2,
+      "remark": "国家/政府背书类绝对化用语"
+    },
+    {
+      "group_name": "小红书",
+      "word": "好评",
+      "match_mode": 2,
+      "remark": "诱导评价 / 刷单类表述"
+    },
+    {
+      "group_name": "小红书",
+      "word": "补贴",
+      "match_mode": 2,
+      "remark": "与「政府补贴」同类的价格补贴宣传"
+    }
+  ]
+}

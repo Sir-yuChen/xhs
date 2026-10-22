@@ -416,6 +416,21 @@ def test_live_keys_are_real_read_points():
             "backend.app.services.image_ocr_service",
             "resolve_parallelism",
         ),
+        #: ⚠️ 下面两个是**他人未提交改动带来的既有红**（2026-10-20 复核：`HEAD` 的
+        #: `settings_service.py` 已含这两个键，但 `test_app_settings` 的映射表与
+        #: `config/initial_data/system_settings.json` 都没跟上）。本模块的 OCR 轮次
+        #: 不认领它们，登记在此只为让本文件的映射表与 `LIVE_KEYS` 保持一致 ——
+        #: **它们的读点待实现方补齐**（`xhs_sku_name_max_chars` 有真实读点，
+        #: 缺的是种子行；`xhs_note_image_total_limit` 读点在 `media_plan.py`）。
+        #: 删掉这两行 = 让守卫重新变红，不要静默移除。
+        "xhs_sku_name_max_chars": (
+            "backend.app.api.platforms.xhs.package_precheck",
+            "optimize_sku_names",
+        ),
+        "xhs_note_image_total_limit": (
+            "backend.app.services.media_plan",
+            "resolve_note_image_limit",
+        ),
         }
     assert set(read_points) == set(settings_service.LIVE_KEYS), (
         "LIVE_KEYS 与测试里的读点映射必须一一对应：新增读点要两边一起加"

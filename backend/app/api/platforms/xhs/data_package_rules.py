@@ -94,6 +94,11 @@ class ExecuteRequest(BaseModel):
     source_column: Optional[int] = Field(
         None, description="计算基础列下标（默认当前列）"
     )
+    #: ⚠️ 用户口径 2026-10-21：「固定数值或文本时应支持用户在 tip 窗口输入自定义文本，
+    #: 新建规则输入的文本作为兜底」—— 现场敲的值**优先于**规则本身存的参数。
+    params_override: Optional[dict] = Field(
+        None, description="现场覆盖的规则参数（如 fixed_text 的 text），缺省用规则自身参数"
+    )
 
 
 def _fail(error: service.DataPackageRuleError) -> HTTPException:
@@ -273,8 +278,9 @@ def execute_rule(
     返回 `{values, missed, total, summary, reason, source_column, rule_id, set_id, updated_at}`。
 
     ⚠️ `values` 里 `null` = 该行提不出 ⇒ 前端**留空**（不是填原值，见服务层 docstring）。
-    ⚠️ **运算类例外**：`fixed_text` / `math_scale` 的 `values` 不会有 `null`
-    （空值按 0 参与计算，用户口径 2026-10-15），缺值信息走 `reason`。
+    ⚠️ **运算类也会 `null`**：`math_scale` 遇到空 / 非数值行 ⇒ 留空
+    （用户口径 2026-10-21「不应该再默认为 0 进行计算，应红框提示，并取消勾选」），
+    行下标在 `missed_indexes` 里，供前端标红 + 取消勾选。
     ⚠️ `source_column` 原样回传（计算基础列），供前端回显与落值判据。
     ⚠️ 同时回 `updated_at`：前端据此判断「规则被改过了，要重算」
     （用户口径「数据包规则调整后实时生效」）。
@@ -287,6 +293,7 @@ def execute_rule(
             rule_id=payload.rule_id,
             values=list(payload.values or []),
             source_column=payload.source_column,
+            params_override=payload.params_override,
         )
     except service.DataPackageRuleError as error:
         raise _fail(error) from error

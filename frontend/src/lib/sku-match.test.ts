@@ -95,11 +95,29 @@ describe("matchSkuRows：最长优先 + 一图一用", () => {
     expect(out[0].relPath).toBe("SKU/SKU02.jpg"); //: 短值拿剩下的
   });
 
-  it("一图一用：多行不得共用同一张图", () => {
+  it("⚠️ 用户口径 2026-10-21：**同一张图可被多行重复匹配**", () => {
+    //: 这一条**取代**原先的「一图一用」：真实包 24 张图对 456 行，
+    //: 同名规格（`奇遇童话 01` 反复出现）只有第一行拿到图，其余全「未匹配」。
     const rows = [{ skuName: "颜色分类:实木三斗柜" }, { skuName: "颜色分类:实木三斗柜" }];
     const out = matchSkuRows(rows, cands, SKU_PATTERN);
     expect(out[0].relPath).toBe("SKU/SKU01.jpg");
-    expect(out[1].relPath).toBe(null); //: 图只有一张 ⇒ 第二行让位
+    expect(out[1].relPath).toBe("SKU/SKU01.jpg"); //: 复用同一张图
+  });
+
+  it("重复匹配下**每行仍挑最贴切的那张**（不因可复用就都指向同一张长图）", () => {
+    //: 两行共用一张图是允许的（2026-10-21），但每行要挑**文件名最短**够用的：
+    //: 短值行 ⊂ 两张图名 ⇒ 选短的那张；长值行只 ⊂ 长图名 ⇒ 选长那张。
+    const rows = [
+      { skuName: "颜色分类:伸缩桌+三斗柜梳妆台" },
+      { skuName: "颜色分类:伸缩桌+三斗柜梳妆台+云朵妆镜" },
+    ];
+    const candsLongFirst = [
+      { fileName: "SKU03_颜色分类(伸缩桌+三斗柜梳妆台+云朵妆镜).jpg", relPath: "SKU/SKU03.jpg" },
+      { fileName: "SKU02_颜色分类(伸缩桌+三斗柜梳妆台).jpg", relPath: "SKU/SKU02.jpg" },
+    ];
+    const out = matchSkuRows(rows, candsLongFirst, SKU_PATTERN);
+    expect(out[0].relPath).toBe("SKU/SKU02.jpg"); //: 短值行挑短图
+    expect(out[1].relPath).toBe("SKU/SKU03.jpg"); //: 长值行挑长图
   });
 
   it("usedCandidates 里的图不参与（让位给手选）", () => {

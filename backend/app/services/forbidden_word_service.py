@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+import logging
 from typing import Any, Iterable
 
 from sqlalchemy import delete, func, select
@@ -41,6 +42,8 @@ from backend.app.models.forbidden_word import (
     MAX_GROUP_LEN,
     MAX_WORDS_PER_GROUP,
 )
+
+logger = logging.getLogger(__name__)
 
 #: 词的输入长度上限（与列宽一致；超长在路由层报 400）。
 MAX_WORD_LEN = 120
@@ -524,6 +527,93 @@ def serialize(row: ForbiddenWord) -> dict[str, Any]:
     }
 
 
+# --------------------------------------------------------------------------- #
+# 内置种子（2026-10-21 用户口径「把当前违规词作为新的种子数据」）
+# --------------------------------------------------------------------------- #
+
+
+def seed_builtin_words(db: Session, *, user_id: int) -> int:
+    """为某用户播种内置违规词（返回**新建条数**）。
+
+    ## 为什么是「按分组」判重，而不是「按用户」
+
+    违规词是**用户资产**：他可能只用「小红书」组，也自己建了别的组。
+    判定粒度取**每个种子分组**：该组一条都没有才播，有任何一条就整组跳过。
+    这样「用户删光了某组」会被重新补上（他承认这组该有），
+    而「用户删掉了其中几个词」不会复活（`已有词 ⇒ 整组不动`）。
+
+    ⚠️ **绝不覆盖 / 绝不复活被删的词**：只在空组里追加，不 update、不 delete。
+
+    调用时机：注册新用户后（`api/auth.py`）+ 应用启动补存量（`main.py`）。
+    """
+    from backend.app.core.initial_data import load_initial_forbidden_words
+
+    specs = load_initial_forbidden_words()
+    if not specs:
+        return 0
+
+    #: 该用户每个分组已有多少条（一次查完，避免逐条 COUNT）。
+    existing = {
+        (row[0] or DEFAULT_GROUP): int(row[1])
+        for row in db.execute(
+            select(ForbiddenWord.group_name, func.count())
+            .where(ForbiddenWord.user_id == int(user_id))
+            .group_by(ForbiddenWord.group_name)
+        ).all()
+    }
+
+    created = 0
+    touched: set[str] = set()
+    for spec in specs:
+        group = spec["group_name"]
+        if existing.get(group) or group in touched:
+            #: 该组已有词（用户资产）⇒ 整组跳过；同组多条只判一次。
+            touched.add(group)
+            continue
+        db.add(
+            ForbiddenWord(
+                user_id=int(user_id),
+                word=spec["word"],
+                match_mode=spec["match_mode"],
+                enabled=spec["enabled"],
+                remark=spec["remark"],
+                group_name=group,
+            )
+        )
+        created += 1
+    if created:
+        db.flush()
+    return created
+
+
+def seed_builtin_words_for_all_users() -> int:
+    """应用启动时为**已有用户**补种（独立 Session、逐用户提交）。
+
+    ⚠️ 与 `seed_builtin_rules_for_all_users` 同型：单用户失败不影响其它人。
+    """
+    from backend.app.core.database import SessionLocal
+    from backend.app.models import User
+
+    total = 0
+    db = SessionLocal()
+    try:
+        user_ids = list(db.execute(select(User.id)).scalars().all())
+    finally:
+        db.close()
+
+    for uid in user_ids:
+        db = SessionLocal()
+        try:
+            total += seed_builtin_words(db, user_id=uid)
+            db.commit()
+        except Exception:  # noqa: BLE001 - 单个用户失败不拖垮其它人
+            db.rollback()
+            logger.exception("为用户 %s 播种违规词种子失败", uid)
+        finally:
+            db.close()
+    return total
+
+
 __all__ = [
     "ForbiddenWordError",
     "MAX_REMARK_LEN",
@@ -538,6 +628,8 @@ __all__ = [
     "list_words",
     "set_group_enabled",
     "normalize",
+    "seed_builtin_words",
+    "seed_builtin_words_for_all_users",
     "serialize",
     "set_enabled",
     "update_word",

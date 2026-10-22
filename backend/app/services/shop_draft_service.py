@@ -473,7 +473,10 @@ def create_draft(
 
     #: SKU 行归一成 `build_item_from_request` 要的形态（保留 ledger 的 variant_id 回落）。
     sku_rows: list[dict[str, Any]] = []
-    for row in skus[:MAX_DRAFT_SKUS]:
+    #: ⚠️ **不截断 SKU 行**（用户口径 2026-10-21：「当前项目后端不设置限制」）。
+    #: 原为 `skus[:MAX_DRAFT_SKUS]`（200）⇒ 超过 200 行的部分被**静默丢弃**
+    #: （比 422 更坏：用户以为 456 行都发布了，平台只有 200 行）。
+    for row in skus:
         name_text = str(row.get("name") or "")
         variant_name, _value = package.split_sku_name(name_text)
         variant_id = resolve_variant_id(variant_name=variant_name, ledger_variant_ids=ledger_variant_ids)

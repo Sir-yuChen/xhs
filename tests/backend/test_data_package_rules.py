@@ -487,41 +487,41 @@ class TestApplyMathScale:
         assert out == ["15"]
 
     def test_empty_value_counts_as_zero(self):
-        """⚠️ **核心口径**：「计算时为空的行**默认为 0**」（用户原话）。
+        """⚠️ 用户口径 **2026-10-21（推翻 2026-10-15 的「空行默认为 0」）**：
 
-        与 `extract_*` 的「提不出 ⇒ 留空」**方向相反**，是刻意的：
-        运算里整列都要有一个数，留空会让半列结果空洞。
+        > 「不应该再默认为 0 进行计算，应**红框提示，并取消勾选**」
+
+        空 / 全空白 ⇒ **留空**（`None`），不参与运算。
+        按 0 算会凭空造出 `0.00` 价格，用户无法与「真的 0 元」区分（硬约束 5）。
         """
         out = service.apply_rule_to_column(
             [None, "", "  ", "100"], OP_MATH_SCALE, {"steps": [{"op": "mul", "value": 2}]}
         )
-        assert out == ["0", "0", "0", "200"]
+        assert out == [None, None, None, "200"]
 
-    def test_unrecognized_content_also_counts_as_zero(self):
-        """⚠️ 认不出的内容（`"abc"`）也按 0 —— 与「为空的行默认为 0」同向。
+    def test_unrecognized_content_is_left_blank(self):
+        """⚠️ 认不出的内容（`"abc"`）同样**留空**（2026-10-21 口径）。
 
-        用户在表里看到的就是「这格没数」；但要**记原因行**（`count_unrecognized`）。
-
-        ⚠️ 判据只认**纯数字形态**（允许 `￥¥` 与千分位逗号，见 `_as_number_or_none`）——
+        判据只认**纯数字形态**（允许 `￥¥` 与千分位逗号，见 `_as_number_or_none`）——
         表格里那一格本来就是数字，不是「100元」这种带中文单位的写法。
-        ⇒ 认不出的走 0、认得出的照算，**两者在同一列里并存**。
+        ⇒ 认不出的留空、认得出的照算，**两者在同一列里并存**。
         """
         out = service.apply_rule_to_column(
             ["abc", "100", "￥1,200"], OP_MATH_SCALE, {"steps": [{"op": "mul", "value": 2}]}
         )
-        assert out == ["0", "200", "2400"]
+        assert out == [None, "200", "2400"]
 
-    def test_count_unrecognized_reports_those_rows(self):
-        """认不出的行数要数出来（执行结果的 `reason` 用它，硬约束 5 同型静默错）。"""
-        values = ["abc", None, "", "100"]
-        assert service.count_unrecognized(values, OP_MATH_SCALE, {"steps": [{"op": "mul", "value": 2}]}) == 3
-        #: 非运算类一律 0（那些 op 的缺值语义是「留空」，由 `missed` 表达）。
-        assert service.count_unrecognized(values, OP_EXTRACT_SEGMENT, {"sep": ";", "index": 1}) == 0
+    def test_missed_indexes_point_at_the_blank_rows(self):
+        """执行结果要回**算不出来的行下标**（前端据此红框 + 取消勾选）。"""
+        out = service.apply_rule_to_column(
+            ["-", "100", "", "200"], OP_MATH_SCALE, {"steps": [{"op": "mul", "value": 1.8}]}
+        )
+        assert [i for i, v in enumerate(out) if v is None] == [0, 2]
 
-    def test_no_none_in_result(self):
-        """⚠️ 运算结果**不会有 `None`**（这是与 extract 家族最容易被搞混的一点）。"""
+    def test_math_scale_now_leaves_blank_rows_empty(self):
+        """⚠️ 2026-10-21 起运算结果**会**有 `None`（空 / 非数值留空）。"""
         out = service.apply_rule_to_column([None, "abc"], OP_MATH_SCALE, {"steps": [{"op": "mul", "value": 1.7}]})
-        assert all(v is not None for v in out)
+        assert out == [None, None]
 
     def test_strips_currency_and_thousand_separators(self):
         """`￥1,200` 这种从表里读出来的写法要认（本项目 OCR/表格的常见形态）。"""
@@ -905,6 +905,58 @@ class TestRuleApi:
             },
         )
         assert r.status_code == 400
+        assert r.json()["detail"]["code"] == "DP_RULE_BAD_PARAM"
+
+    def test_runtime_text_overrides_rule_default_as_fallback(self, auth_client):
+        """用户口径 2026-10-21：tip 窗口里敲的文本**优先**，规则存的文本是**兜底**。
+
+        > 「固定数值或文本时应支持用户在 tip 窗口输入自定义文本，
+        >   **新建规则输入的文本作为兜底**」
+
+        判据三条：
+        ① 传 `params_override` ⇒ 用现场值（不是规则里那个）；
+        ② 不传 ⇒ 用规则自身存的兜底值（`None` 与 `{}` 都不能把兜底冲掉）；
+        ③ 覆盖值同样要**过校验**（空串 / 超长照样 400，不能靠覆盖绕过校验）。
+        """
+        set_id = self._make_set(auth_client, "运行时文本")
+        created = auth_client.post(
+            "/api/xhs/data-package-rules/rules",
+            json={
+                "set_id": set_id,
+                "rule_name": "固定产地",
+                "op": OP_FIXED_TEXT,
+                #: 这是**兜底值**（新建规则时填的）。
+                "params": {"text": "兜底值"},
+            },
+        )
+        assert created.status_code == 201, created.text
+        rule_id = created.json()["id"]
+
+        def run(override_marker: bool, override=None, values=("a", "", "c")):
+            body = {
+                "set_id": set_id,
+                "rule_id": rule_id,
+                "values": list(values),
+                "source_column": 0,
+            }
+            if override_marker:
+                body["params_override"] = override
+            return auth_client.post("/api/xhs/data-package-rules/execute", json=body)
+
+        #: ① 现场值优先，且**空原本值也写**（fixed_text 是无条件的）。
+        r = run(True, {"text": "现场值"})
+        assert r.status_code == 200, r.text
+        assert r.json()["values"] == ["现场值", "现场值", "现场值"]
+
+        #: ② 不传 / 传 None / 传空对象 ⇒ 退回兜底值。
+        for marker, override in ((False, None), (True, None), (True, {})):
+            r = run(marker, override)
+            assert r.status_code == 200, r.text
+            assert r.json()["values"] == ["兜底值"] * 3, (marker, override, r.json())
+
+        #: ③ 覆盖值也要过校验 —— 空串不许把整列写成空。
+        r = run(True, {"text": "   "})
+        assert r.status_code == 400, r.text
         assert r.json()["detail"]["code"] == "DP_RULE_BAD_PARAM"
 
     def test_fixed_text_and_math_scale_are_creatable_now(self, auth_client):

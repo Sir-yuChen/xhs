@@ -192,17 +192,30 @@ export function applyPatternToColumn<T extends { rows: (string | null)[][] }>(
   const { re } = compilePattern(pattern);
   if (!re || column < 0) return table;
   const scope = onlyRows && onlyRows.length > 0 ? new Set(onlyRows) : null;
+  /** **规则处理异常的行**（用户口径 2026-10-21：「规则处理异常，无法处理的
+   *  行数据红色标记并取消勾选」）。
+   *
+   *  ⚠️ 「没命中就原样保留」本身是对的（不该写空），但**必须回报**：
+   *  否则用户看到「执行成功」，却不知道有几十行根本没被处理 ——
+   *  与「静默失败」同类（硬约束 5）。
+   */
+  const failed: number[] = [];
 
-  return {
+  const next = {
     ...table,
     rows: table.rows.map((row, rowIndex) => {
       if (scope && !scope.has(rowIndex)) return row;
-      const next = applyPatternToCell(row[column], re);
-      //: 没命中 ⇒ 原样保留（不是写空）。
-      if (next === null) return row;
-      return row.map((cell, ci) => (ci === column ? next : cell));
+      const value = applyPatternToCell(row[column], re);
+      //: 没命中 ⇒ 原样保留（不是写空），但**记入失败行**。
+      if (value === null) {
+        failed.push(rowIndex);
+        return row;
+      }
+      return row.map((cell, ci) => (ci === column ? value : cell));
     }),
-  };
+  } as T & { ruleFailedRows?: number[] };
+  next.ruleFailedRows = failed;
+  return next;
 }
 
 /** 表的**原始值快照**（撤销用；调用方在第一次覆盖前存一次）。

@@ -75,6 +75,9 @@ from backend.app.services.settings_service import seed_builtin_settings_from_ini
 from backend.app.services.llm_gateway_seed_service import seed_gateway_providers_for_all_users
 from backend.app.api.llm_prompts import seed_builtin_prompt_templates_for_all_users
 from backend.app.services.data_package_rule_service import seed_builtin_rules_for_all_users
+#: 违规词内置种子（2026-10-21）。同样**模块级导入** —— `lifespan` 里那套打桩
+#: 与「每一步都打桩」的守卫都读模块属性，函数体内导入会让桩打不上（见上注）。
+from backend.app.services.forbidden_word_service import seed_builtin_words_for_all_users
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +112,9 @@ async def lifespan(app: FastAPI):
     # 种子原只在 `register()` 播 ⇒ 存量老账号永远拿不到这 6 个国内常见服务商。
     # 与上面同语义：随安装附有 + **只补缺失不覆盖**（同名服务商 / 已有业务点映射一律不碰）。
     seed_gateway_providers_for_all_users()
+    # 2026-10-21：违规词内置种子**补存量**（用户口径「把当前违规词作为新的种子数据」）。
+    # 与上面同语义：只往**空分组**里追加，用户改过 / 删过的不重建、不覆盖。
+    seed_builtin_words_for_all_users()
     settings = get_settings()
     # 多实例闸（T-108 / DEF-003）：`BackgroundScheduler` 与 FastAPI 同进程，
     # `max_instances=1` 只约束单进程内 ⇒ 误开第二个后端会让**同一批定时任务跑两遍**

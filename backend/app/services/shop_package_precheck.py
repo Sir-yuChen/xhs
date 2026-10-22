@@ -123,6 +123,13 @@ _NON_MEDIA_SUFFIXES: frozenset[str] = frozenset(
 )
 
 #: 表头名要剥掉的后缀（用户口径「不带后缀」）。
+#: ⚠️ **已废弃，不再参与展示名计算**（2026-10-21）。
+#:
+#: 历史：2026-10-08 用这套后缀把 `商品ID_935947169189_1_sku数据` 剥成更短的表头。
+#: 2026-10-21 实测反例：`店透-SKU预览-表格-827654559981-2026-10-13.xlsx` 里的
+#: `-表格` 是**文件名的一部分**，剥掉后表头变成 `…-SKU预览-`，用户认不出是哪个文件
+#: （他当时的原话是「应只展示后面一个文件名称」——要的是**完整可辨**，不是更短）。
+#: 保留常量只为让历史引用可见，**不要再用它裁展示名**。
 _SHEET_SUFFIXES: tuple[str, ...] = ("_sku数据", "_sku", "_data", "_sheet", "_表格")
 
 
@@ -131,24 +138,22 @@ class PrecheckError(ValueError):
 
 
 def sheet_display_name(sheet_name: str, fallback: str = "") -> str:
-    """sheet 名 → 表头展示名（**去掉后缀**）。
+    """sheet 名 → 表头展示名（**剥扩展名与目录前缀**）。
 
     真实包实测（2026-10-08）：文件名与 sheet 名都是
     `商品ID_935947169189_1_sku数据`，扩展名可能被并进 sheet 名，
     所以先剥扩展名再剥业务后缀。
+    ⚠️ 2026-10-21 实测（`店透-SKU预览-表格-827654559981-2026-10-13.xlsx`）：
+    `openpyxl` 的 sheet 名**本身就可能带 `.xlsx` 后缀** ⇒ 只剥扩展名、**不再剥业务后缀**
+    （`_表格` 这类是名字的一部分，剥掉会显示成 `…-SKU预览-` ，用户认不出这是哪个文件）。
     """
     text = str(sheet_name or fallback or "").strip()
     if not text:
         return "表格"
-    #: 先剥扩展名（`.xlsx` 之类可能被并进 sheet 名）
+    #: 有的包 sheet 名带目录前缀 ⇒ 只保留文件名部分。
+    text = text.replace("\\", "/").rsplit("/", 1)[-1].strip()
+    #: 剥扩展名（`.xlsx` 之类可能被并进 sheet 名）—— **只剥这一层**。
     text = re.sub(r"\.(xlsx|xlsm|xls|csv)$", "", text, flags=re.IGNORECASE)
-    changed = True
-    while changed:  # 可能叠加多层后缀（`_1_sku数据` 之类）
-        changed = False
-        for suffix in _SHEET_SUFFIXES:
-            if len(text) > len(suffix) and text.lower().endswith(suffix.lower()):
-                text = text[: -len(suffix)]
-                changed = True
     return text.strip() or str(sheet_name or fallback or "表格").strip()
 
 
@@ -488,67 +493,93 @@ def zone_summary(media: list[PrecheckMedia]) -> list[dict[str, object]]:
 
 
 def _read_tables(stage_root: Path) -> tuple[list[PrecheckTable], list[str]]:
-    """读数据包里的**每个** xlsx 的**每个** sheet → 一比一还原的表格。"""
-    warnings: list[str] = []
-    try:
-        import openpyxl
-    except ImportError:  # pragma: no cover - 依赖缺失
-        return [], ["缺少 openpyxl 依赖，无法读取 xlsx"]
+    """读数据包里的**每个**表格文件 → 一比一还原的表格。
 
+    ## 支持的文件类型（用户口径 2026-10-21：「应支持常用的大多数表格格式」）
+
+    | 后缀 | 读取器 |
+    |---|---|
+    | `.xlsx` / `.xlsm` | openpyxl（每个 sheet 一张表） |
+    | `.xls`（Excel 97-2003） | xlrd（每个 sheet 一张表） |
+    | `.ods`（LibreOffice） | 标准库 zip + XML（每个 sheet 一张表） |
+    | `.csv` / `.tsv` / `.txt` | 标准库 csv + 编码探测（一个文件一张表） |
+    | `.xlsb` | pyxlsb（可选依赖） |
+
+    ⚠️ **格式分流只在 `tabular_reader` 一处**，本函数只负责「把 SheetRows 组装成
+    PrecheckTable」。两侧（预检 / 建草稿）各写一套格式判断 ⇒ 迟早出现
+    「预检能读、发布读不出」这种最难查的错位。
+
+    ⚠️ 读不出的文件（坏文件 / 编码不认识 / 库缺失）**只影响它自己**，转成 warning
+    继续读下一个；一个都读不出才报错 —— 而错误文案要给出**支持范围**，不能只说
+    「包里没有表格」（用户会以为放错了目录）。
+    """
+    from backend.app.services import tabular_reader
+
+    warnings: list[str] = []
     tables: list[PrecheckTable] = []
-    for xlsx in sorted(stage_root.rglob("*.xlsx"), key=lambda p: p.name.lower()):
+    files = sorted(
+        (p for p in stage_root.rglob("*") if p.is_file() and tabular_reader.is_table_file(p)),
+        key=lambda p: p.name.lower(),
+    )
+
+    for path in files:
         try:
-            book = openpyxl.load_workbook(str(xlsx), read_only=True, data_only=True)
-        except Exception as error:  # noqa: BLE001
-            warnings.append(f"读取「{xlsx.name}」失败：{type(error).__name__}")
+            sheets = tabular_reader.read_tables(path)
+        except tabular_reader.TableReadError as error:
+            warnings.append(str(error))
             continue
-        try:
-            for sheet in book.worksheets:
-                iterator = sheet.iter_rows(values_only=True)
-                header = next(iterator, None)
-                if header is None:
-                    warnings.append(f"「{sheet.title}」是空表（没有表头行）")
-                    continue
-                columns = [str(c).strip() if c is not None else "" for c in header]
-                while columns and not columns[-1]:
-                    columns.pop()  # openpyxl 常在末尾补空列
-                if not any(columns):
-                    warnings.append(f"「{sheet.title}」没有有效表头")
-                    continue
-                rows: list[list[str | None]] = []
-                for raw in iterator:
-                    if raw is None:
-                        continue
-                    values = [_cell_text(c) for c in list(raw)[: len(columns)]]
-                    if not any(v not in (None, "") for v in values):
-                        continue  # 空行（表尾常见）
-                    values += [None] * (len(columns) - len(values))
-                    rows.append(values)
-                tables.append(
-                    PrecheckTable(
-                        title=sheet_display_name(sheet.title, fallback=xlsx.stem),
-                        sheet_name=str(sheet.title),
-                        columns=columns,
-                        rows=rows,
-                        source_file=xlsx.name,
-                        #: 逐列类型（用户口径 2026-10-13）：数值列不给正则入口。
-                        column_kinds=[
-                            column_kind([r[i] for r in rows])
-                            for i in range(len(columns))
-                        ],
-                        #: 「是不是 SKU 表」按**列名特征**判，不看 sheet 名。
-                        is_sku_table=looks_like_sku_table(columns),
-                    )
-                )
-        finally:
-            try:
-                book.close()
-            except Exception:  # noqa: BLE001
-                pass
+        for sheet in sheets:
+            warnings.extend(sheet.extra_warnings)
+            table = _build_table(sheet, fallback_stem=path.stem)
+            if table is None:
+                warnings.append(f"「{sheet.name}」没有有效表头")
+                continue
+            if sheet.encoding and sheet.encoding != "utf-8-sig":
+                #: 编码只在「不是最常规的 UTF-8」时说一句，方便排查乱码来源（不打扰正常包）。
+                warnings.append(f"「{path.name}」按 {sheet.encoding} 编码读取（非 UTF-8）")
+            tables.append(table)
 
     if not tables:
-        raise PrecheckError("数据包里没有可读取的 xlsx 表格（无法还原商品表格）")
+        raise PrecheckError(
+            f"数据包里没有可读取的表格（支持 {tabular_reader.SUPPORTED_HINT}）"
+        )
     return tables, warnings
+
+
+def _build_table(sheet: Any, *, fallback_stem: str) -> PrecheckTable | None:
+    """`SheetRows` → `PrecheckTable`（**预检侧唯一组装点**）。
+
+    列名 / 行 / 逐列类型 / 是否 SKU 表的判据都只在这里写一次。
+    """
+    from backend.app.services.tabular_reader import cell_text, sheet_display_name
+
+    columns = [str(c).strip() if c is not None else "" for c in sheet.header]
+    while columns and not columns[-1]:
+        columns.pop()
+    if not any(columns):
+        return None
+    width = len(columns)
+    rows: list[list[str | None]] = []
+    for raw in sheet.rows:
+        values = [cell_text(v) for v in list(raw)[:width]]
+        values += [None] * (width - len(values))
+        if not any(v not in (None, "") for v in values):
+            continue
+        rows.append(values)
+    return PrecheckTable(
+        title=sheet_display_name(sheet.name, fallback=fallback_stem),
+        sheet_name=str(sheet.name),
+        columns=columns,
+        rows=rows,
+        source_file=sheet.source_file,
+        #: 逐列类型（用户口径 2026-10-13）：数值列不给正则入口。
+        column_kinds=[
+            column_kind([r[i] for r in rows if i < len(r)]) for i in range(len(columns))
+        ],
+        #: 「是不是 SKU 表」按**列名特征**判，不看 sheet 名。
+        is_sku_table=looks_like_sku_table(columns),
+    )
+
 
 
 def precheck_package(stage_root: str | Path, package_name: str = "") -> PrecheckResult:

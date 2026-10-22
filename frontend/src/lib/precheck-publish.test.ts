@@ -31,7 +31,7 @@ import {
   validatePriceMapping,
   isPriceMappingReady,
   sourceColumnIndex,
-  PRICE_TARGET_OPTIONS,
+  PRICE_TABLE_TARGETS,
   type PriceMappingRow,
   dropTableColumn,
   passedSkuRows,
@@ -644,12 +644,19 @@ describe("预检顺序红线 · 违规媒体不允许被匹配到（用户口径
     has_forbidden,
   });
 
-  it("**命中违规词的图被排除**（既不许选中、也不许被匹配到）", () => {
+  it("⚠️ 用户口径 2026-10-21：**命中违规词的图不再被静默排除**（决策权交给用户）", () => {
+    //: 这一条**取代**了 2026-10-11 的「违规图不许被匹配到」——
+    //: 用户明确要求「检测到违规词的媒体资源放开也可选择……决策权交给用户」，
+    //: 若这里仍剔除，用户勾了那张图却永远匹配不到（勾选态与结果不一致，且无提示）。
+    //: 风险提示改由界面承担（红框 + 角标 + 默认不勾）。
     const out = selectableSkuMedia([
-      m("SKU01_颜色分类(甲).jpg", true, true), // 违规
+      m("SKU01_颜色分类(甲).jpg", true, true), // 违规，但已检测
       m("SKU02_颜色分类(乙).jpg", true, false),
     ]);
-    expect(out.map((x) => x.file_name)).toEqual(["SKU02_颜色分类(乙).jpg"]);
+    expect(out.map((x) => x.file_name)).toEqual([
+      "SKU01_颜色分类(甲).jpg",
+      "SKU02_颜色分类(乙).jpg",
+    ]);
   });
 
   it("**未检测（`ocr_ok=null`）也被排除** —— 未检不许算通过（免检通道）", () => {
@@ -660,13 +667,13 @@ describe("预检顺序红线 · 违规媒体不允许被匹配到（用户口径
     expect(out.map((x) => x.file_name)).toEqual(["SKU02_颜色分类(乙).jpg"]);
   });
 
-  it("**违规图不参与名称匹配**（红线：不允许被匹配到）", () => {
+  it("⚠️ 用户口径 2026-10-21：**违规图可以参与名称匹配**（用户勾了就认）", () => {
     const media = [
-      m("SKU01_颜色分类(甲).jpg", true, true), // 违规 —— 名字能对上但必须匹配不到
+      m("SKU01_颜色分类(甲).jpg", true, true), // 违规，但已检测 ⇒ 参与匹配
       m("SKU02_颜色分类(乙).jpg", true, false),
     ];
     const list = localSkuImageList(selectableSkuMedia(media));
-    expect(lookupLocalSkuImage(list, "颜色分类:甲")).toBeNull();
+    expect(lookupLocalSkuImage(list, "颜色分类:甲")).toBe("SKU/SKU01_颜色分类(甲).jpg");
     expect(lookupLocalSkuImage(list, "颜色分类:乙")).toBe("SKU/SKU02_颜色分类(乙).jpg");
   });
 
@@ -959,33 +966,39 @@ describe("媒体勾选 ↔ 规格表联动（用户口径 2026-10-11）", () => 
     expect(clean).toHaveLength(0);
   });
 
-  it("红线仍在：违规/未检测的图**即使勾上也**不参与匹配", () => {
+  it("红线仍在：**未检测（`ocr_ok=null`）的图即使勾上也**不参与匹配", () => {
+    //: ⚠️ 2026-10-21 起「违规」不再是过滤条件（决策权交用户），但「未检测」仍是 ——
+    //: 把 `null` 当合规就是给没跑过 OCR 的图开免检通道，这条红线不动。
     const dirty = [
       { group: "sku", index: 0, rel_path: "SKU/a.jpg", file_name: "SKU01_颜色分类(丙).jpg", ocr_ok: true, has_forbidden: true },
       { group: "sku", index: 1, rel_path: "SKU/b.jpg", file_name: "SKU02_颜色分类(丁).jpg", ocr_ok: null, has_forbidden: false },
     ] as PrecheckMedia[];
     const allChecked: Record<string, boolean> = { "sku/SKU/a.jpg": true, "sku/SKU/b.jpg": true };
     const clean = filterCheckedSkuMedia(selectableSkuMedia(dirty), allChecked);
-    expect(clean).toHaveLength(0);
+    expect(clean.map((x) => x.file_name)).toEqual(["SKU01_颜色分类(丙).jpg"]);
   });
 
-  it("`countUncheckedSkuMedia`：只数「本来可选却没勾」的（违规/未检测不重复计）", () => {
+  it("`countUncheckedSkuMedia`：数「本来可选却没勾」的（未检测的不计）", () => {
     const withDirty = [
       ...media,
       { group: "sku", index: 2, rel_path: "SKU/c.jpg", file_name: "SKU03_颜色分类(丙).jpg", ocr_ok: true, has_forbidden: true },
       { group: "sku", index: 3, rel_path: "SKU/d.jpg", file_name: "SKU04_颜色分类(丁).jpg", ocr_ok: null, has_forbidden: false },
     ] as PrecheckMedia[];
-    //: 两张可选、一张未勾 ⇒ 计数 1（违规/未检测那两张不进分母也不算进分子）
+    //: ⚠️ 用户口径 2026-10-21：违规图现在**算「本来可选」**（决策权交用户），
+    //: 所以「没勾」的那张违规图**要计入** —— 正是「你少用了这几张图」。
+    //: 未检测（`ocr_ok=null`）仍不计（另有红框提示，避免数虚高）。
+    //: ⇒ 甲已勾；乙未勾 + 丙（违规）未勾 = 2。
     const checked: Record<string, boolean> = {
       "sku/SKU/SKU01_颜色分类(甲).jpg": true,
       "sku/SKU/SKU02_颜色分类(乙).jpg": false,
     };
-    expect(countUncheckedSkuMedia(withDirty, checked)).toBe(1);
-    //: 全勾 ⇒ 0（不误报）
+    expect(countUncheckedSkuMedia(withDirty, checked)).toBe(2);
+    //: 全勾（含违规那张）⇒ 0（不误报）
     expect(
       countUncheckedSkuMedia(withDirty, {
         "sku/SKU/SKU01_颜色分类(甲).jpg": true,
         "sku/SKU/SKU02_颜色分类(乙).jpg": true,
+        "sku/SKU/c.jpg": true,
       }),
     ).toBe(0);
   });
@@ -1393,14 +1406,19 @@ describe("价格库存列映射（动态可调；默认 = 现行逻辑）", () =
     expect(sourceColumnIndex(cols, [{ target: "stock", source: "不存在" }], "stock")).toBe(-1);
   });
 
-  it("**来源列不支持重复映射**（一列不能喂两个目标）", () => {
-    const bad: PriceMappingRow[] = [
-      { target: "price", source: "原价" },
-      { target: "stock", source: "原价" },   //: 同一列又被当库存
+  it("**来源列允许重复映射**（用户口径 2026-10-21：一列可以喂多个目标）", () => {
+    //: 原用例（2026-10-11）断言「来源列重复 ⇒ 报错」，
+    //: **已被用户 2026-10-21 推翻**：「价格库存映射关系表应支持重复选择映射列」。
+    //: 真实的合理性：库存列既做「当前库存」又做「改后库存」；
+    //: 价格列既做「售价」又做「市场价」；SKUID 既做「商家编码」又做「规格ID」。
+    const ok: PriceMappingRow[] = [
+      { target: "current_stock", source: "库存" },
+      { target: "stock", source: "库存" },   //: 同一列又被当改后库存 —— 合法
+      { target: "price", source: "价格" },
+      { target: "market_price", source: "价格" },
     ];
-    //: 提炼后：每类只报一条、不带行号（用户口径「只保留核心」）。
-    expect(validatePriceMapping(bad)).toEqual(["来源列重复：原价"]);
-    expect(isPriceMappingReady(bad)).toBe(false);
+    expect(validatePriceMapping(ok)).toEqual([]);
+    expect(isPriceMappingReady(ok)).toBe(true);
   });
 
   it("目标列重复 ⇒ 报错", () => {
@@ -1430,7 +1448,7 @@ describe("价格库存列映射（动态可调；默认 = 现行逻辑）", () =
   });
 
   it("**市场价可作目标列**（两边自由选择）", () => {
-    expect(PRICE_TARGET_OPTIONS).toContain("market_price");
+    expect(PRICE_TABLE_TARGETS).toContain("market_price");
     expect(validatePriceMapping([{ target: "market_price", source: "原价" }])).toEqual([]);
   });
 });
@@ -1489,16 +1507,18 @@ describe("passedSkuRows 按映射取列", () => {
 });
 
 describe("映射校验的报错提炼（用户口径：只保留核心）", () => {
-  it("价格映射：三类问题各报**一条**、不带行号", () => {
+  it("价格映射：多类问题各报**一条**、不带行号", () => {
     const rows: PriceMappingRow[] = [
       { target: "price", source: "原价" },
-      { target: "price", source: "原价" },   //: 目标重复 + 来源重复
+      { target: "price", source: "原价" },   //: 目标重复（来源重复**合法**，2026-10-21 起）
       { target: "stock", source: "" },       //: 来源空
     ];
     const errors = validatePriceMapping(rows);
     //: 用户口径「**放一行提示**」⇒ 只有一条，多类问题用 `；` 接在一行里。
     expect(errors).toHaveLength(1);
-    expect(errors[0]).toBe("来源列不能为空；价格库存列重复：售价；来源列重复：原价");
+    //: ⚠️ 期望值里**不再有「来源列重复」**：用户 2026-10-21 口径
+    //: 「价格库存映射关系表应支持重复选择映射列」⇒ 该档校验已整条退场。
+    expect(errors[0]).toBe("来源列不能为空；价格库存列重复：售价");
     //: 逐行式报错已废弃（同一件事被说三遍）。
     expect(errors[0]).not.toContain("第 2 行");
   });

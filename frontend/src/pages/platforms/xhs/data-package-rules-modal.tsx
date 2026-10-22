@@ -438,7 +438,7 @@ export function DataPackageRulesModal({
     <>
       <Modal
         open={open}
-        title="提取数据规则"
+        title="数据操作规则"
         centered
         //: 用户口径：**全屏的 60%**（vw/vh，不用固定像素）。
         width="60vw"

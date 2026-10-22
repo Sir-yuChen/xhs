@@ -131,8 +131,10 @@ import {
   parseSkuName,
   passedSkuSpecs,
   skuNameColumnIndex,
+  firstUsableColumnIndex,
   //: 2026-10-11 第五批（自动加载第 9 步：填 SKU 规格 / 价格库存 / 规格图）：
   buildSkuFillPlan,
+  numericCellIssue,
   defaultSpecMapping,
   passedSkuRows,
   priceSourceOptions,
@@ -281,7 +283,16 @@ const UNGROUPED_LABEL = "未分组";
  * 单一常量：两个列都用它 ⇒ 改一处两边同步，不会一边 72 一边 100。 */
 const SKU_THUMB_SIZE = 72;
 /** SKU 图列的列宽（容纳预览 + 边距）。 */
-const SKU_THUMB_COL_WIDTH = 110;
+//: ⚠️ 用户报 2026-10-21「**复选框被覆盖了**」：72px 缩略图 + 内边距塞在 110px
+//: 的列里，溢出到勾选列上。改成 96 = 图 72 + 左 12 + 右 8 + 边框余量。
+const SKU_THUMB_COL_WIDTH = 96;
+
+/** **行勾选列的列 key**（用户口径 2026-10-21：与 SKU 图**拆成两列**）。
+ *
+ *  ⚠️ 它**不是**数据列：不进 `table.columns` / `column_kinds` / `column_keys`，
+ *  也不参与映射与规则（那些只认原始表列）。只在渲染时插在最左侧。
+ */
+const COL_CHECK = "__row_check";
 
 
 /**
@@ -787,7 +798,9 @@ export function ProductPublishWizard({
   const applyDefaults = useCallback((data: PrecheckResult) => {
     const next: Record<string, boolean> = {};
     for (const item of data.media) {
-      //: ⚠️ `has_forbidden` ⇒ 不勾**且禁选**（见 `MediaGrid` 的 `disabled`）。
+      //: ⚠️ `has_forbidden` ⇒ **默认不勾，但可勾**（用户口径 2026-10-21：
+      //: 「检测到违规词的媒体资源放开也可选择，检查完默认是不选择的，不再固定为不可选，
+      //: 决策权交给用户」）—— 这里只决定**初始值**，`MediaGrid` 不再禁选。
       //: `ocr_ok !== true`（含 `null` = 未验证）⇒ 不勾。
       //: 把 `null` 当合规就是给视频开免检通道（红线）。
       next[`${item.group}/${item.rel_path}`] = !item.has_forbidden && item.ocr_ok === true;
@@ -962,7 +975,7 @@ export function ProductPublishWizard({
       } else {
         void message.success(
           hits > 0
-            ? `预检完成：${hits} 个文件命中违规词（已置灰不可选）`
+            ? `预检完成：${hits} 个文件命中违规词（已默认不勾选，可手动勾上）`
             : "预检完成：未发现违规词",
         );
       }
@@ -1012,16 +1025,25 @@ export function ProductPublishWizard({
     }
   }, [loadWithPath, message]);
 
-  //: 「预检通过 且 被选中」的媒体（用户口径 2026-10-08）。
+  //: 「可发布 且 被选中」的媒体。
   //:
-  //: ⚠️ 是 **与**关系，两个条件都要：
-  //:   - 预检通过：`ocr_ok === true` 且**未命中违规词**（`!has_forbidden`）；
-  //:     `ocr_ok === null/undefined` = 没检过（抽帧失败等）⇒ **不算通过**
-  //:     （红线：不得把未扫描/未知当合规）；
-  //:   - 被选中：第一步勾选了它。
-  //: 只看勾选会让「预检没过但手滑勾上」的图漏进发布链路。
+  //: ⚠️ 用户口径 2026-10-21：「检测到违规词的媒体资源放开也可选择，检查完默认是不选择的，
+  //: 不再固定为不可选，**决策权交给用户**」——
+  //: 所以违规词命中**不再**在这里被排除：用户明确勾了就说明他认了这条风险，
+  //: 若这里还按 `!has_forbidden` 过滤，会出现「勾了但发布时静默丢弃」这种最难查的错位。
+  //:
+  //: 仍然保留的硬判据只剩 **OCR 是否跑过**（`ocr_ok`）：
+  //:   - `ocr_ok === true` = 自信没问题 ⇒ 放行；
+  //:   - `ocr_ok === null/undefined` = 没检过（抽帧失败等）⇒ **不勾且不发布**
+  //:     （红线：不得把「未扫描 / 未知」当合规）；
+  //:   - `ocr_ok === false` = 检测失败 ⇒ 不发布。
+  //: 另外 `unsupported` / `oversized` 是**结构性**不可发布（平台不收 / 超 5M），
+  //: 选了也发不出去，所以同样排除。
   const passedMedia = useMemo(
-    () => (precheck?.media ?? []).filter((m) => m.ocr_ok === true && !m.has_forbidden),
+    () =>
+      (precheck?.media ?? []).filter(
+        (m) => m.ocr_ok === true && !m.unsupported && !m.oversized,
+      ),
     [precheck],
   );
 
@@ -2642,13 +2664,17 @@ export function ProductPublishWizard({
           specImportSources={mappingSources}
           priceSourceColumns={tables[0]?.columns ?? []}
           //: 用户改了价格库存列映射 ⇒ 按新映射**重新导出**通过行（本层持有表格与勾选态）。
-          onRebuildRows={(priceMapping) =>
+          //: ⚠️ 第 6 参 `specColumns` = **商品 SKU 映射的列**（2026-10-21）。
+          //: 缺它 ⇒ 找不到「一行一条 SKU」的定位列 ⇒ 行集恒空 ⇒
+          //: 用户实测「没有『预检通过且已勾选』的 SKU 行，实际是存在的」。
+          onRebuildRows={(priceMapping, _fallback, specColumns) =>
             passedSkuRows(
               tables[0] ?? null,
               skuTableSelection.blocked,
               skuTableSelection.picked,
               wizardLocalImages,
               priceMapping,
+              specColumns,
             )
           }
           withUploadRetry={withUploadRetry}
@@ -2664,6 +2690,13 @@ export function ProductPublishWizard({
           onMappingDraftChange={setMappingDraft}
           skuImages={skuImagePaths}
           onUploadSkuImage={uploadOneFromPackage}
+          //: ⚠️ 用户报 2026-10-21：「上传规格图耗时高」——实测 24 张 **93 秒**（≈3.9s/张）。
+          //: 根因：前端并发 5 路，但每张都单独 POST `/picture-space/upload`
+          //: （每次都要重新取 permit + 单独做一次 base64 编码）⇒ 后端每次只拿到 1 张，
+          //: 并发根本没落到平台 PUT 上，等于串行。
+          //: ⇒ 改走**已有的** `upload-batch`（一次 permit + 服务端并发 PUT，设计 24 §22），
+          //: 与主图/详情图同一条链路（`uploadManyFromPackage`，已有 MD5 命名 + 逐位回填）。
+          onUploadSkuImagesBatch={uploadManyFromPackage}
           onFetchPrecheckImage={(rel_path) => fetchPrecheckImage(token ?? "", rel_path)}
           shortTitle={configShortTitle}
           onShortTitleChange={setConfigShortTitle}
@@ -3126,12 +3159,18 @@ function PrecheckStep(props: {
     itemNo, onItemNoChange, onOpenRules,
   } = props;
 
+  /** ⚠️ 用户口径 2026-10-21：「商品 sku 表格 表数据量过多时，**点击 tab** 应使用
+   *  **公共的等待弹窗**」—— 456 行 × 十几列的重渲染要几百毫秒，期间界面无反馈像卡死。 */
+  const [tabSwitching, setTabSwitching] = useState(false);
+
   /**
    * 区域批量勾选。
    *
-   * ⚠️ **命中违规词的项永远不许被打开** —— 用户口径 2026-10-08：
-   * 「命中违规词的不允许勾选至灰」。所以「全选 / 反选」也必须遵守这条，
-   * 否则用户点一下「全选」就把禁选的违规项绕过去了（禁选形同虚设）。
+   * ⚠️ 用户口径 2026-10-21（**取代** 2026-10-08 的「命中违规词的不允许勾选至灰」）：
+   * 「检测到违规词的媒体资源放开也可选择……决策权交给用户」——
+   * 违规项**已从 `locked` 名单移出**，所以「全选 / 反选」可以勾上它们（用户就是要这个）。
+   * `locked` 现在只剩**结构性**原因（平台不收的格式 / 超 5M 上限）：那些选了也发不出去，
+   * 批量按钮仍然必须遵守（否则「全选」会把一批发不出去的图塞进来）。
    */
   const setZone = (keys: string[], value: boolean, locked: Set<string>) => {
     const next = { ...checked };
@@ -3153,7 +3192,10 @@ function PrecheckStep(props: {
   );
 
   return (
-    <div>
+    //: ⚠️ `position: relative` 是 `WaitMask scope="panel"` 的**前置条件** ——
+    //: 缺了它会往上找到 body，变成整页蒙版（用户口径 2026-10-21 的切 Tab 等待窗
+    //: 只应盖住面板，不该盖住整个弹窗）。
+    <div style={{ position: "relative" }}>
       <Space.Compact style={{ width: "100%", marginBottom: 12 }}>
         {/* ⚠️ 用户口径 2026-10-08：「地址栏**不允许输入**，只能预览」——
             路径唯一来源是「选择文件夹」（后端弹系统选择器）。
@@ -3278,6 +3320,23 @@ function PrecheckStep(props: {
         <Empty description="还没有加载数据包" />
       ) : (
         <Tabs
+          //: ⚠️ 用户口径 2026-10-21：「商品 sku 表格 表数据量过多时，**点击 tab** 应使用
+          //: **公共的等待弹窗**」—— 456 行 × 十几列的重渲染要几百毫秒，
+          //: 期间界面无反馈像卡死。
+          //: 判据 = **表格行数 ≥ 200** 才起蒙版：小表切换是瞬间的，起蒙版反而闪一下更难受。
+          //: 蒙版用 `requestAnimationFrame` 推迟到下一帧再起、再等一帧后收起 ——
+          //: 让「切换」本身先落屏，蒙版覆盖的是**渲染**那段，不会自己成为卡顿源。
+          onChange={(key) => {
+            const heavy = (tables[0]?.rows?.length ?? 0) >= 200;
+            if (!heavy) return;
+            setTabSwitching(true);
+            requestAnimationFrame(() => {
+              requestAnimationFrame(() => setTabSwitching(false));
+            });
+            //: ⚠️ 不在这里做任何「延迟切换」—— 切换交给 antd 自己，
+            //: 我们只负责把这段渲染时间遮住（延迟切换会让用户觉得点了没反应）。
+            void key;
+          }}
           items={[
             {
               key: "media",
@@ -3293,13 +3352,14 @@ function PrecheckStep(props: {
                     //: 区域名原值（中文目录名）—— 直接用，不再查 label 表。
                     const kind = items[0]?.kind;
                     const keys = items.map((m) => mediaKey(m));
-                    //: ⚠️ 命中违规词的项**禁选**（用户口径 2026-10-08：「命中的不允许
-                    //: 勾选至灰」）—— 三个批量按钮也必须认这份名单，否则「全选」就能绕过。
-                    //: ⚠️ 用户口径 2026-10-13 方案 C：**平台不收的格式也不可选**
-                    //: （它照常展示 + 红框，但默认不勾、发布跳过）。
+                    //: ⚠️ 用户口径 2026-10-21：「检测到违规词的媒体资源放开也可选择，
+                    //: 检查完默认是不选择的，不再固定为不可选，决策权交给用户」
+                    //: ⇒ 违规词项**不进 locked**（批量按钮 / 全选都能勾上它）。
+                    //: ⚠️ 保留唯一的结构性禁止：平台不收的格式 / 超 5M 上限
+                    //: （用户口径 2026-10-13 方案 C —— 它们照常展示 + 红框，但选了也发不出去）。
                     const locked = new Set(
                       items
-                        .filter((m) => m.has_forbidden || m.unsupported || m.oversized)
+                        .filter((m) => m.unsupported || m.oversized)
                         .map((m) => mediaKey(m)),
                     );
                     return (
@@ -3316,7 +3376,7 @@ function PrecheckStep(props: {
                             （{items.filter((m) => checked[mediaKey(m)]).length}/{items.length}）
                           </Text>
                           {locked.size > 0 && (
-                            <Tag color="error">{locked.size} 个不可选（违规词 / 格式 / 超限）</Tag>
+                            <Tag color="error">{locked.size} 个不可选（格式 / 超限）</Tag>
                           )}
                           <Button
                             size="small"
@@ -3403,13 +3463,30 @@ function PrecheckStep(props: {
                       「在商品 sku 表格 tab 下新增**提取数据规则**按钮，
                        使用弹窗**全屏的 60%** 实现 CRUD」。
                       ⇒ 与「商品货号」同一条工具行（都是这次发布的**配置**，不是表格的列）。 */}
+                  {/* 用户口径 2026-10-21：「**文件名称和数据操作规则按钮调换一下位置**」——
+                      即文件名在左、按钮在右（按钮仍靠右对齐，用 `marginLeft:auto`
+                      挂在文件名之后，保证整行右端不飘）。
+                      文件名是**数据包身份**（这份数据是从哪读来的），先看到它、
+                      再看到能对它做什么，顺序更自然。 */}
+                  {(precheck.tables ?? [])[0]?.sheet_name && (
+                    <Text
+                      type="secondary"
+                      style={{ fontSize: 12, marginLeft: "auto" }}
+                    >
+                      {(precheck.tables ?? [])[0].sheet_name}
+                    </Text>
+                  )}
                   <Button
                     size="small"
                     icon={<SettingOutlined />}
-                    style={{ marginLeft: "auto" }}
+                    //: ⚠️ 有文件名时 `marginLeft:auto` 已经落在文件名上，
+                    //: 这里不能再给一次（两个 auto 会把中间撑开、按钮跑到最右）。
+                    style={{
+                      marginLeft: (precheck.tables ?? [])[0]?.sheet_name ? 0 : "auto",
+                    }}
                     onClick={() => onOpenRules?.()}
                   >
-                    提取数据规则
+                    数据操作规则
                   </Button>
                 </div>
                 <TablesPanel
@@ -3449,6 +3526,11 @@ function PrecheckStep(props: {
           ]}
         />
       )}
+      {/* ⚠️ 用户口径 2026-10-21：大表切 Tab 的**公共等待弹窗**。
+          与「发布 / 保存草稿」同一个 `WaitMask` 组件（公共件，不另造一个）。 */}
+      {tabSwitching && (
+        <WaitMask open scope="panel" title="正在切换页签" sub="表格数据较多，请稍候…" />
+      )}
     </div>
   );
 }
@@ -3475,16 +3557,20 @@ function MediaGrid(props: {
       {items.map((item, index) => {
         const key = mediaKey(item);
         const isVideo = isVideoFile(item.file_name || item.rel_path);
-        const isLocked = locked.has(key) || !!item.has_forbidden;
+        //: ⚠️ 用户口径 2026-10-21：「检测到违规词的媒体资源放开也可选择，检查完默认是不选择的，
+        //: 不再固定为不可选，决策权交给用户」—— 命中违规词的项**可以勾选**，
+        //: 只是**默认不勾**（见 `applyPrecheckSelection`）并**红框 + 角标**提示。
+        //: 保留 `disabled` 的只剩真正的**结构性**原因：平台不收的格式 / 超 5M 上限
+        //: （那些选了也发不出去，让用户勾 = 假选项）。
+        const isLocked = locked.has(key) || !!item.unsupported || !!item.oversized;
         //: ⚠️ **方案 C**（用户口径 2026-10-13）：平台不收的格式 / 超限的图
         //: **照常展示**，但要**红框 + 原因**（不是静默丢弃）。
-        const badReason = item.has_forbidden
-          ? "命中违规词，不可选"
-          : item.unsupported
-            ? unsupportedText(item)
-            : item.oversized
-              ? "超过平台单文件 5M 上限"
-              : "";
+        //: ⚠️ 违规词不再算「不可选」，这里只保留「不可发布」那一档的原因。
+        const badReason = item.unsupported
+          ? unsupportedText(item)
+          : item.oversized
+            ? "超过平台单文件 5M 上限"
+            : "";
         return (
           <div
             key={key}
@@ -3497,10 +3583,10 @@ function MediaGrid(props: {
                   : "1px solid #f0f0f0",
               borderRadius: 6,
               padding: 6,
-              //: ⚠️ 命中违规词 ⇒ 整块**置灰**（用户口径 2026-10-08：「不允许勾选**至灰**」）——
-              //: 不只是默认不勾，而是要一眼看出「这个不能选」。
-              background: isLocked ? "#f0f0f0" : "#fafafa",
-              opacity: isLocked ? 0.72 : 1,
+              //: ⚠️ 用户口径 2026-10-21：违规词项**可勾选**（决策权交用户）⇒
+              //: 这里只给「命中」的视觉提示，不再把整块置灰（置灰 = 暗示不可选）。
+              background: badReason ? "#f0f0f0" : "#fafafa",
+              opacity: badReason ? 0.72 : 1,
             }}
           >
             <div
@@ -3563,9 +3649,9 @@ function MediaGrid(props: {
                 </span>
               </Tooltip>
             </Checkbox>
-            {item.has_forbidden && (
-              <div style={{ fontSize: 11, color: "#ff4d4f" }}>命中违规词，不可选</div>
-            )}
+            {/* ⚠️ 用户口径 2026-10-21：卡片底部那行命中说明文案要求**移除** ——
+                命中提示已由卡片左上角的违规词角标承担，再写一行属于冗余。
+                卡片仍保留红框（一眼可辨），勾选默认不勾的逻辑不变。 */}
             {item.error_message && (
               <div style={{ fontSize: 11, color: "#faad14" }}>{item.error_message}</div>
             )}
@@ -3789,63 +3875,10 @@ function SkuImageThumb(props: { token: string; onlineUrl: string }) {
   );
 }
 
-/** 表格里**一列的批量修改条**（价格 / 库存各一条，用户口径 2026-10-09）。
- *
- * 三种模式：
- *   - 加减固定值：原值 + N（N 可负）
- *   - 倍数 + 固定值：原值 × K + N
- *   - 统一改固定值：一律 = N
- *
- * ⚠️ 列可任选（表里除了「原价」「库存」还有「计算价格」等列，不写死两列）；
- *    列识别仅用于给默认列，与 `tableToSkus` 共用同一套别名。
- * ⚠️ 直接应用，**无二次确认弹窗**（用户口径 2026-10-09：移除批量修改的二次弹窗提醒）；
- *    改完给一条轻提示告知改了什么。
- */
-function BatchColumnBar(props: {
-  table: PrecheckTable;
-  /** 当前勾选的行下标（空 = 未勾选 ⇒ 整列改）。 */
-  pickedRows?: readonly number[];
-  /** ⚠️ 价格库存映射（默认选中列要按用户配的映射，**不猜列名**）。 */
-  priceMapping?: readonly PriceMappingRow[];
-  onApply: (column: number, rule: BatchEditRule, onlyRows?: readonly number[]) => void;
-}) {
-  const { table, pickedRows, onApply } = props;
-  const { message } = App.useApp();
-  //: 列**可任选**（用户口径 2026-10-09：表里除了「原价」「库存」还有「计算价格」
-  //:  等更多列，不该写死两列）；默认落在能认出的价格 / 库存列上，认不出就用第一列。
-  //: ⚠️ **走映射**（用户口径 2026-10-15：所有点均走映射，移除写死逻辑）——
-  //: 默认落在用户映射的「售价 / 库存」源列上；没配就退到第 1 列（**不猜列名**）。
-  const priceCol = priceColumnIndex(table.columns, props.priceMapping ?? []);
-  const stockCol = stockColumnIndex(table.columns, props.priceMapping ?? []);
-  const defaultCol = priceCol >= 0 ? priceCol : stockCol >= 0 ? stockCol : 0;
-  const [column, setColumn] = useState<number>(defaultCol);
-
-  if (table.columns.length === 0) return null;
-
-  //: 勾了行 ⇒ 作用域是这些行；没勾 ⇒ 整列（undefined）。
-  const scope = pickedRows && pickedRows.length > 0 ? pickedRows : undefined;
-  //: 价格列下限 0（不为负）；其它列不裁剪。
-  const min = column === priceCol ? 0 : undefined;
-
-  /** 落改（**无确认弹窗**，直接应用 + 一条轻提示）。 */
-  const applyDirectly = (text: string, run: () => void) => {
-    run();
-    message.success(text);
-  };
-
-  return (
-    <BatchColumnControl
-      table={table}
-      column={column}
-      columns={table.columns}
-      onColumnChange={setColumn}
-      scope={scope}
-      min={min}
-      onApply={onApply}
-      applyDirectly={applyDirectly}
-    />
-  );
-}
+/*: ⚠️ `BatchColumnBar` 已删除（2026-10-21）—— 它是「每列一条批量修改条」的旧入口，
+ *  早已被 `ColumnPatternControl`（表头齿轮 → 数据操作规则）取代，**全仓无调用点**。
+ *  保留它只会留下一个「作用域语义可能被改错」的影子实现（本轮排查「整列被改」时
+ *  就差点去改它）。同类清理原则见 AGENTS.md：死代码可整段删，不留兼容层。 */
 
 /* ------------------------------------------------------------------ *
  * 表格列的**正则取值**（用户口径 2026-10-13）
@@ -3865,10 +3898,22 @@ function ColumnPatternControl(props: {
   table: PrecheckTable;
   /** 该表在完整数组里的真实下标（撤销快照的键要用它）。 */
   tableIndex: number;
-  /** 当前勾选的行（空 = 整列）。 */
+  /** 当前勾选的行。
+   *
+   *  ⚠️ 用户口径 2026-10-21：「只改勾选的数据」——**空数组不再等于整列**，
+   *  是否「从没做过选择」由 `hasRowSelection` 表达（见下）。 */
   pickedRows?: readonly number[];
+  /** **用户是否做过行选择**（`picked[tIndex]` 已定义）。
+   *
+   *  ⚠️ 为什么不能只靠 `pickedRows.length`：用户把勾选**全部取消**时它是空数组，
+   *  老实现把它当「全表」⇒ 恰好改掉他刚取消的行（与意图相反）。
+   *  ⇒ 判据是「有没有做过选择」：没做过 = 默认全选作用于全表；
+   *    做过了 = **严格按勾选行**，空就一行都不改。 */
+  hasRowSelection?: boolean;
   /** 应用正则（覆盖原列）。 */
   onApply: (column: number, pattern: string, onlyRows?: readonly number[]) => void;
+  /** **规则算不出来的行**（留空）：红框 + 取消勾选（用户口径 2026-10-21）。 */
+  onMarkBadRows?: (rowIndexes: readonly number[]) => void;
   /** **直接落值**（数据包规则执行：后端已算好逐行结果，前端不再过正则）。
    *  ⚠️ 与 `onApply` 分开：那条走「正则 → 匹配 → 覆盖」，这条是「结果已知，照写」。
    *  共用同一份**快照**（都进快照 ⇒ 一次「还原原始值」全撤）。 */
@@ -3899,7 +3944,7 @@ function ColumnPatternControl(props: {
    *  入参是该列的预览结果（`rowIndex` + `after`），由调用方决定存哪。 */
 }) {
   const {
-    table, pickedRows, onApply, onApplyValues, onRestore, canRestore,
+    table, pickedRows, hasRowSelection, onApply, onApplyValues, onRestore, canRestore, onMarkBadRows,
     initialColumn, withTrigger = true, open: openProp, onOpenChange,
   } = props;
   //: ⚠️ `modal` 用于**二次确认**（还原这一列）—— 项目口径：确认类弹窗走
@@ -3981,13 +4026,44 @@ function ColumnPatternControl(props: {
    * 优化为所有规则均支持选择数据源列」）。
    *
    * ⚠️ 早先只有 `math_scale` / `copy_column` / `copy_extract` 才显示该下拉，
-   * 提取类 / 固定文本「读的就是当前列自分」所以没给。用户要求统一：
-   * 任何规则都能指定「从哪一列取值」，不指定 = 当前列（向后兼容，行为不变）。
-   */
-  const needsSourceColumn = true;
+   * 提取类「读的就是当前列自分」所以没给。用户 2026-10-20 要求统一：
+   * 任何**会读源列**的规则都能指定「从哪一列取值」，不指定 = 当前列。
+   *
+   * ⚠️ 用户口径 2026-10-21：「**设置固定文本时不需要数据源下拉**」——
+   * 固定文本是「整列无条件写成同一个值」，**根本不读任何列**
+   * （后端 `apply_fixed_text` 直接返回 `params["text"]`，连 `values` 都不看）。
+   * 给它一个数据源下拉只会让用户以为「它按某列算」，选了也没作用 —— 纯误导。
+   * ⇒ 判据从写死 `true` 改为**按 op 排除不读源列的那一个**。 */
+  const needsSourceColumn = pickedRule?.op !== "fixed_text";
   //: 「照搬整格」语义（提示文案用「复制到」而不是「按…计算」）。
   const isCopyRule =
     pickedRule?.op === "copy_column" || pickedRule?.op === "copy_extract";
+  /** 这条规则是不是「固定数值 / 固定文本」（用户口径 2026-10-21：
+   *  「固定数值或文本时应支持用户在 tip 窗口输入自定义文本，
+   *   **新建规则输入的文本作为兜底**」）。
+   *
+   *  语义：规则本身存了一个默认文本（新建规则时填的）—— 那是**兜底**；
+   *  用户在这里敲的值**优先**，且只作用于本次执行，不改规则定义。 */
+  //: ⚠️ 只有 `fixed_text` 一个 op（「固定数值 / 固定文本」在**同一个** op 里，
+  //: 区别只是填的内容像不像数字 —— 后端都按文本写）。曾经按 `fixed_number`
+  //: 另判一次 ⇒ tsc 直接报「这两个类型没有重叠」（该 op 根本不存在）。
+  const isFixedValueRule = pickedRule?.op === "fixed_text";
+  /** 现场输入的自定义文本（仅 `fixed_text` / `fixed_number` 用）。 */
+  const [runtimeText, setRuntimeText] = useState<string>("");
+  //: ⚠️⚠️ **执行作用域用 ref 读，不用 props 闭包**（2026-10-21 真机取证定论）：
+  //: 诊断显示 `picked 456` 而界面写着「已选 24 行」——
+  //: `ColumnPatternControl` 是在 `columns` 的 `title` 里渲染的，
+  //: antd 会缓存/复用列定义，**`runPickedRule` 闭包捕获的 `pickedRows`
+  //: 可能不是最新一次渲染的那份**（切筛选后 `picked` 变了，回调还拿着旧的）。
+  //: ⇒ 每次渲染把最新值写进 ref，执行时**读 ref**：
+  //:   ref 是同一个可变对象，回调无论多久以后执行都拿到当下的真值。
+  //:   （同类坑本项目踩过：取消标志 `importCancelRef` 就是用 ref 解决"闭包快照"。）
+  const pickedRowsRef = useRef<readonly number[]>(pickedRows ?? []);
+  pickedRowsRef.current = pickedRows ?? [];
+  //: 换规则 ⇒ 清空现场输入（否则上一条顶的文本会带过来，静默写错整列）。
+  useEffect(() => {
+    setRuntimeText("");
+  }, [pickedRuleId]);
   /** 来源列清单（**两个 op 的筛选口径不同**，用户口径 2026-10-15）：
    *
    *  · `math_scale`（计算基础列）⇒ **只展示数值列**（用户原话）。列也**显示中文表头名**。
@@ -4019,25 +4095,65 @@ function ColumnPatternControl(props: {
       //: ⚠️ 运算类：读**基础列**的值（默认当前列）；提取类：读当前列自己。
       //: 「把 A 列 ×1.7 写到 B 列」就靠这两处不同 —— 读 `readCol`、写 `column`。
       const readCol = needsSourceColumn ? (sourceColumn ?? column) : column;
-      //: ⚠️ **默认作用于全表；有勾选时只对勾选行生效**（用户口径 2026-10-15：
-      //: 「所有规则的执行均是默认当前列的所有数据行，如果存在勾选行则只对勾选行
-      //:   执行有效，不存在勾选行默认全部行」）。
-      //: ⚠️ 判据与 `applyColumnPattern` 的 `scope` **同一套**（空数组 = 全表）。
-      const scope =
-        pickedRows && pickedRows.length > 0 ? new Set(pickedRows) : null;
-      const allValues = table.rows.map((r) => r[readCol] ?? null);
-      const values = scope
-        ? allValues.filter((_, i) => scope.has(i))
-        : allValues;
-      //: ⚠️ `values` 是**筛过的** ⇒ 后端回来的 `res.values[i]` 对应的是
-      //: **第 i 个被选中的行**，不是第 i 行！必须用它把下标映射回去，
-      //: 否则「勾了第 3 行」会写到第 1 行（静默改错行，比不生效更糟）。
-      const targetRows = scope ? [...scope] : table.rows.map((_, i) => i);
+      //: ⚠️⚠️ 用户口径 2026-10-21（真机报「我本是只想改勾选的数据，结果整列都被改成
+      //: 兜底文案」后定论）—— 原实现是：
+      //:   老判据是「勾选行非空才限定作用域，否则当整表」
+      //: 「空数组 ⇒ 全表」。这在**老口径**（默认全选、勾选=全部）下等价，
+      //: 但一旦用户**主动取消勾选到 0 行**，`pickedRows` 就是空数组 ⇒ 回落成全表
+      //: ⇒ **恰好把他取消掉的那些行全改了**（与意图完全相反，最坏的一类静默错）。
+      //: ⇒ 判据改为「**有没有做过选择**」，而不是「选了几行」：
+      //:   · `picked[tIndex]` 未定义 = 从没动过 = 默认全选 ⇒ 全表；
+      //:   · 已定义（哪怕全是 false）⇒ **严格按勾选行**，空就是一行都不改。
+      //: ⚠️ **作用域永远是「当前勾选行」**（用户口径 2026-10-21：
+      //: 「固定值规则处理时只勾选了 24 行但是执行了全部行」）——
+      //: 不再有「没勾选 ⇒ 整张表」这条回落：表格默认全选，所以
+      //: 「整表」本来就已经等同于「勾选全部行」，回落分支纯属多余，
+      //: 而它一旦判错（把 24 行的筛选态当成「没选」）就会改掉 456 行。
+      //: ⚠️ 读 **ref**（当下真值），不读闭包里的 props（可能是旧渲染的快照）。
+      const scope: Set<number> = new Set(pickedRowsRef.current);
+      if (scope.size === 0) {
+        void message.warning("当前没有勾选任何行，请先勾选要处理的行");
+        return;
+      }
+      //: ⚠️⚠️⚠️ 用户报 2026-10-21（第 5 次，**这次才是真根因**）：
+      //: 「只勾选了 24 行，但是覆盖执行了全部」。
+      //:
+      //: 原实现是：
+      //:   `const values = table.rows.map(...).filter((_, i) => scope.has(i))`
+      //: ⚠️ **`filter` 回调的第二个参数 `i` 是「原数组下标」**，这一层是对的；
+      //: 但 `res.values[i]` 回来的是「**第 i 个被选中的行**」，映射本该用
+      //: `targetRows = [...scope].sort()` 的下标。毛病在于：
+      //: `scope` 是 `Set`，`[...scope]` 的**遍历顺序 = 插入顺序**（用户点勾选的先后），
+      //: 与 `values` 的**表内顺序**（0,1,2,…）**不是同一个顺序**。
+      //: ⇒ 一旦用户点勾选的顺序与表格顺序不一致，`ie[Q]` 就把结果写到**错的行**上，
+      //:   看起来就是「别的行也被改了」。
+      //:
+      //: ⇒ 修法：**values 与 targetRows 用同一份有序数组**，逐个取值，
+      //:   彻底去掉「先 map 再 filter」这种依赖隐式顺序的写法。
+      const targetRows = [...scope].sort((a, b) => a - b);
+      //: 与 `targetRows` **逐位对应**：第 i 个结果属于 `targetRows[i]`。
+      const values = targetRows.map((i) => table.rows[i]?.[readCol] ?? null);
+      //: ⚠️ 断言式守卫：两者长度必须相等，否则下标映射必然错位
+      //: （这种错位是「静默改错行」，比报错更糟 —— 所以宁可当场抛）。
+      if (values.length !== targetRows.length) {
+        throw new Error(
+          `规则作用域错位：values=${values.length} / rows=${targetRows.length}`,
+        );
+      }
+      //: ⚠️ 用户口径 2026-10-21：现场输入的文本**优先**（兜底是规则自身存的）。
+      //: 只在用户真的敲了东西时才覆盖 —— 空串代表「没输入」，不是「清空成空」，
+      //: 否则用户忘了填就会把整列写成空（比不做更糟）。
+      //: ⚠️ 2026-10-21 用户澄清：「请输入固定文本」是**他自己输入的值**，
+      //: 不是规则里的兜底文案 ⇒ 规则里存的 text 是**合法真值**，照常可用。
+      //: 现场输入（tip 里的「固定值」）**优先**，留空则用规则里的值。
+      const override =
+        isFixedValueRule && runtimeText.trim() ? { text: runtimeText.trim() } : undefined;
       const res = await executeDataPackageRule({
         set_id: pickedSet.id,
         rule_id: pickedRule.id,
         values,
         source_column: readCol,
+        ...(override ? { params_override: override } : {}),
       });
       //: 覆盖成后端算出的结果（`null` = 该行提不出 ⇒ **留空**，不是保留原值）。
       const changes = res.values
@@ -4046,7 +4162,32 @@ function ColumnPatternControl(props: {
         //: ⚠️ 跳过没变化的行 —— 否则「点了执行但结果一样」也会写满快照。
         .filter((c) => (table.rows[c.rowIndex]?.[column] ?? null) !== c.after);
       onApplyValues?.(column, changes);
-      const where = scope ? `（勾选的 ${targetRows.length} 行）` : `（全部 ${res.total} 行）`;
+      //: ⚠️ 用户口径 2026-10-21：「**不应该再默认为 0 进行计算，应红框提示，并取消勾选**」。
+      //: 后端对空 / 非数值行返回 `null`（留空），行下标在 `missed_indexes`。
+      //: 这里把下标映射回**原表行号**（`values` 是筛过的 ⇒ 必须经 `targetRows`），
+      //: 上抛给持有勾选态与红框集合的父级 `TablesPanel`。
+      const missedTableRows = (res.missed_indexes ?? [])
+        .map((i) => targetRows[i])
+        .filter((i): i is number => typeof i === "number");
+      if (missedTableRows.length > 0) {
+        onMarkBadRows?.(missedTableRows);
+      }
+      //: ⚠️ **执行后自检**（2026-10-21 第 5 次报障后加）：
+      //: 用户反复看到「只勾 24 行却改了 456 行」，而界面上的「已选」是对的。
+      //: 这中间任何一处口径漂移（picked 默认值、筛选、events 顺序）都会让作用域
+      //: 悄悄变大，且**事后无法从界面看出来**。
+      //: ⇒ 执行完立刻核对：真正被改的行数必须 == 作用域行数。
+      //:   不等 ⇒ 说明映射错位，直接报错（宁可报错，也不能静默多改 432 行）。
+      if (changes.length > targetRows.length) {
+        void message.error(
+          `内部错误：作用域 ${targetRows.length} 行却写了 ${changes.length} 行，已中止（请反馈）`,
+        );
+        return;
+      }
+      //: 🔍 临时诊断（取证用，定位后删）：把真实作用域显示出来。
+      const where =
+        `（勾选 ${targetRows.length} 行 / 表 ${table.rows.length} 行 / ` +
+        `picked ${pickedRows?.length ?? -1} / 改 ${changes.length} 行）`;
       message.success(
         `已按「${res.summary}」处理 ${res.total - res.missed} 行${where}` +
           (res.missed ? `，${res.missed} 行未匹配` : ""),
@@ -4078,6 +4219,15 @@ function ColumnPatternControl(props: {
   sourceColumn,
   needsSourceColumn,
   pickedRows,
+  //: ⚠️⚠️ **必须包含 `runtimeText` / `isFixedValueRule` / `readCol` 相关**（2026-10-21 实测真 bug）：
+  //: 「tip 里输入 20，执行时覆盖的却是规则里的兜底文案」——
+  //: 因为漏了 `runtimeText`，`runPickedRule` 一直是**首次渲染的闭包**，
+  //: 里面 `runtimeText` 恒为 `""` ⇒ `override` 恒 `undefined` ⇒ 后端只能走兜底。
+  //: 这和下面注释里 `sourceColumn` 那次是**同一类错**，此处是第二次发生。
+  //: 教训：`useCallback` 依赖数组 = **回调体里读到的每一个 props/state**，
+  //: 包括条件表达式里的（`isFixedValueRule`）与只在分支里用的（`runtimeText`）。
+  runtimeText,
+  isFixedValueRule,
   onApplyValues,
   message,
 ]);
@@ -4160,6 +4310,30 @@ function ColumnPatternControl(props: {
                   />
                   <Text type="secondary" style={{ fontSize: 11 }}>
                     {isCopyRule ? "把这一列复制到当前列" : "按这一列取值"}
+                  </Text>
+                </Space>
+              )}
+              {/* ⚠️ 用户口径 2026-10-21：「**固定数值或文本时应支持用户在 tip 窗口输入
+                  自定义文本**，新建规则输入的文本**作为兜底**」——
+                  即：规则里存的是兜底值，这里敲的**优先**（只作用本次执行，不改规则定义）。
+                  空着 = 用兜底（不是「写成空」，所以执行时只在非空才覆盖）。 */}
+              {isFixedValueRule && (
+                <Space size={6} align="center" style={{ marginTop: 6 }}>
+                  <Text style={{ fontSize: 12 }}>固定值</Text>
+                  <Input
+                    size="small"
+                    style={{ width: 240 }}
+                    value={runtimeText}
+                    placeholder="留空则用规则里的值"
+                    onChange={(e) => setRuntimeText(e.target.value)}
+                  />
+                  {/* ⚠️ 用户口径 2026-10-21：「『本次用规则兜底值（固定为「请输入固定文本」）』
+                      tip 中文本**移除**」——
+                      规则里的兜底文本本身是句提示语（不是真值），搬到这儿只会让人
+                      以为「这列会被写成这句话」。⇒ **只在用户真的敲了值时才显示**，
+                      没敲就什么都不说（输入框 placeholder 已说明会走兜底）。 */}
+                  <Text type="secondary" style={{ fontSize: 11 }}>
+                    {runtimeText.trim() ? `本次写入「${runtimeText.trim()}」` : ""}
                   </Text>
                 </Space>
               )}
@@ -4264,6 +4438,19 @@ function ColumnPatternControl(props: {
           </Tooltip>
         )}
       </Space>
+      {/* ⚠️ 用户口径 2026-10-21：「点击**规则执行**按钮时也应有公共等待弹窗」——
+          规则作用在 456 行上时前后端往返 + 全表重写要几秒，只靠按钮 `loading`
+          用户会以为没点上（按钮在 Popover 里，容易被忽略）。
+          与其它等待同一件 `WaitMask` + 同一份 `ruleBusy` 状态，
+          **不另造 loading 变量**（两份真相源会不同步）。 */}
+      {ruleBusy && (
+        <WaitMask
+          open
+          scope="page"
+          title="正在执行规则"
+          sub="正在按规则改写当前列数据，请稍候…"
+        />
+      )}
     </Popover>
   );
 }
@@ -4332,6 +4519,10 @@ function SkuMatchModal(props: {
   sampleSourceName: string;
   /** 进行匹配（父级用当前规则重算）。 */
   onRun: () => void;
+  /** **真正计算**（父级做：它持有表格与候选图）。弹窗负责蒙版前后两帧。 */
+  onMatch: () => SkuMatchRow[];
+  /** 计算完成 ⇒ 把结果交回父级（父级是 `rows` 的唯一持有者）。 */
+  onMatched: (rows: SkuMatchRow[]) => void;
   /** 逐行结果（命中 / 未命中都要显示 —— 漏配要能看出来）。 */
   rows: SkuMatchRow[];
   onOk: () => void;
@@ -4340,10 +4531,36 @@ function SkuMatchModal(props: {
   const {
     open, token, zoneOptions, zones, onZonesChange, columnOptions, column, onColumnChange,
     extractPattern, onExtractPatternChange, sampleSourceName,
-    onRun, rows, onOk, onCancel,
+    onRun, onMatch, onMatched, rows, onOk, onCancel,
   } = props;
+
+  /** ⚠️ 用户口径 2026-10-21：「点击**规则执行**按钮时也应有公共等待弹窗」——
+   *  匹配算法作用在 456 行 × 候选图上时是同步 CPU 计算，期间界面完全无响应。
+   *  用两帧把「计算」夹起来：先让蒙版落屏，再跑 `onRun`，再收起。 */
+  const [matchBusy, setMatchBusy] = useState(false);
   //: 反推正则弹窗开关（用户口径 2026-10-13）—— SKU 列与图片名**各一个**
   //: （方案 B：两侧都由正则取值，所以两侧都需要反推入口）。
+
+  /** **执行匹配**：先让公共等待组件落屏，再跑计算（用户口径 2026-10-21）。
+   *
+   *  ⚠️ 必须 `await` 两帧再做计算：同帧内 `setState` + 同步计算 ⇒ 浏览器
+   *  没有机会绘制蒙版，观感还是「点了没反应」。
+   */
+  const runMatch = async () => {
+    if (matchBusy) return; //: 防连点重复排队
+    setMatchBusy(true);
+    try {
+      await nextFrame();
+      await nextFrame();
+      const next = onMatch();
+      onMatched(next);
+      //: 「跑过一次」的关卡标记放在**算完之后**：中途抛错不该算跑过。
+      onRun();
+    } finally {
+      await nextFrame();
+      setMatchBusy(false);
+    }
+  };
 
   const hit = rows.filter((r) => r.relPath).length;
   //: ⚠️ **未指定图片区域 ⇒ 不匹配**（用户口径 2026-10-13）：
@@ -4463,7 +4680,25 @@ function SkuMatchModal(props: {
         </div>
 
         <Space>
-          <Button type="primary" onClick={onRun} disabled={!zonePicked || !colPicked}>
+          <Button
+            type="primary"
+            //: ⚠️ 用户口径 2026-10-21：「SKU 图自动匹配匹配图片时**加公共的等待组件**」。
+            //:
+            //: 关键点：**不能**在同一个事件里 `setState(true)` 再同步跑计算 ——
+            //: 浏览器没有机会绘制蒙版，用户看到的还是那个「点了没反应」。
+            //: 正确顺序：
+            //:   ① `setMatchBusy(true)`；
+            //:   ② `await` **两帧**（真的把控制权交还浏览器 → 蒙版画出来）；
+            //:   ③ 再跑 `onRun`；
+            //:   ④ 再 `await` 一帧后收起（否则收起与绘制同帧，观感是「闪一下」）。
+            onClick={async () => {
+              if (matchBusy) return; //: 防止连点重复排队
+              await runMatch();
+            }}
+            //: 计算中直接禁用（蒙版之下也要点不到，避免双击排两次队）。
+            disabled={!zonePicked || !colPicked || matchBusy}
+            loading={matchBusy}
+          >
             执行匹配
           </Button>
           <Text type={hit > 0 ? "success" : "secondary"}>
@@ -4481,6 +4716,13 @@ function SkuMatchModal(props: {
             size="small"
             rowKey={(r: SkuMatchRow) => r.rowIndex}
             pagination={false}
+            //: ⚠️ 用户报 2026-10-21「SKU 图匹配**数据量大时很慢**」——
+            //: 真身是**结果表一次性渲染 N 行**（456 行 × 4 列 + 每行一张缩略图
+            //: `PrecheckThumb`）。那些缩略图会各自发请求、各自解码 ⇒ 主线程被占满，
+            //: 所以「点了执行匹配 → 蒙版画不出来 → 界面卡住」。
+            //: ⇒ `virtual` 只渲染可视区（约 7 行），其余滚动时才挂载。
+            //: 必须给**固定** `scroll.y`，否则 antd 无法算高度（给了 260 就是可视区高）。
+            virtual
             scroll={{ y: 260, x: "max-content" }}
             className="hermes-hide-scrollbar"
             dataSource={rows}
@@ -4566,8 +4808,30 @@ function SkuMatchModal(props: {
           />
         )}
       </Space>
+      {/* ⚠️ 用户口径 2026-10-21：「**开始匹配时弹公共等待组件**」。
+          与其它等待共用 `WaitMask`（公共件）。
+          ⚠️ 用 `scope="page"`（铺满视口）而不是 `panel`：`panel` 要求最近的定位祖先
+          `position: relative`，这里外层是 antd `Space`（没有定位）⇒ 会一路找到 body，
+          表现与 page 相同却更难预测。直接写明 `page`，语义与行为一致。 */}
+      {matchBusy && (
+        <WaitMask
+          open
+          scope="page"
+          title="正在执行匹配"
+          sub="正在按 SKU 名称匹配图片，请稍候…"
+        />
+      )}
     </Modal>
   );
+}
+
+/** 等**一帧**（真的让浏览器有机会绘制）。
+ *
+ *  ⚠️ 为什么不用 `setTimeout(0)`：宏任务也可能在下一帧绘制前跑完，
+ *  蒙版照样画不出来。`requestAnimationFrame` 保证「这一帧已经画完了」。
+ */
+function nextFrame(): Promise<void> {
+  return new Promise((resolve) => requestAnimationFrame(() => resolve()));
 }
 
 /** 单列的批量修改控件：**选列** + 模式 + 参数 + 应用（直接落，无二次确认）。 */
@@ -4697,12 +4961,12 @@ function BatchColumnControl(props: {
  *
  * 与第二步的 `SkuPickModal` **同款形态**（60vw 居中 / 卡片网格 / 单选 /
  * 缩略图 + 「预览」按钮 + 大图左右切换 / 确认回填），差别只在两处：
- *   - 候选来源 = **预检已加载且无违规词**的 SKU 图（`has_forbidden !== true`
- *     且 `ocr_ok === true`）—— 用户口径明确要求「无违规词」；
+ *   - 候选来源 = `selectableSkuMedia`（**已跑过 OCR** 的 SKU 图）；
  *   - 选中后回填的是**「这张 SKU 规格用哪张本地图」的映射**，供预检通过判定用。
  *
- * ⚠️ 候选**不含**违规图：`has_forbidden` 的图进了这里就等于把违规素材放行
- * （与第一步「命中违规词不允许勾选至灰」同一条红线）。
+ * ⚠️ 用户口径 2026-10-21 修订：命中违规词的图**不再被排除**（决策权交给用户），
+ * 界面照常红框 + 角标提示，但用户可以主动选它。
+ * ⚠️ 仍然排除的是**未检测**（`ocr_ok !== true`）—— 没跑过 OCR 就给选，等于开免检通道。
  */
 function LocalSkuImagePickModal(props: {
   open: boolean;
@@ -5052,9 +5316,10 @@ function TablesPanel(props: {
    * 并算作「预检通过」，等于让违规素材走免检通道（与第一步「命中违规词不允许勾选」
    * 同一条红线，却在这里破了个洞）。
    *
-   * 两步顺序体现为两个条件同时成立：
-   *   ① **先**跑过违规词检测（`ocr_ok === true`）—— 未检测（`null`）不算通过；
-   *   ② **再**排除命中违规词的（`has_forbidden !== true`）。
+   * ⚠️ 用户口径 2026-10-21 修订（**取代**上面 2026-10-11 的那句「不允许被匹配到」）：
+   * 「检测到违规词的媒体资源放开也可选择，检查完默认是不选择的，不再固定为不可选，
+   * 决策权交给用户」⇒ 判据只剩一条：**先**跑过违规词检测（`ocr_ok === true`）。
+   * 违规命中不再剔除 —— 剔了会出现「用户勾了却永远匹配不到」的静默错位。
    */
   const cleanSkuMedia = useMemo(
     //: 两步都要（用户口径 2026-10-11）：**红线**（已检测 + 非违规）→ **再**按勾选收窄。
@@ -5143,6 +5408,19 @@ function TablesPanel(props: {
   }, [allMedia, checked]);
 
   //: 「SKU 名称列」候选 = 所有列（用户自己选哪一个当名称列；不猜）。
+  /** **「SKU 名称」下拉的候选**。
+   *
+   *  ⚠️ 用户口径 2026-10-21（**推翻我上一版「按列类型收窄」**）：
+   *
+   *  > 「**不应该去掉**，原始表数据读后**直接展示**，读原始表**不对任何原数据做特殊处理**」
+   *
+   *  上一版按 `column_kinds` 滤掉数值列 + 列名含「图片/链接」的列 —— 那是
+   *  代码替用户判断「哪一列能当名称」，违反「读到什么就展示什么」。
+   *  而且实测这个数据包里 `商品销量`（值 `200+`）和 `券后价格`（有 `-` 空值）
+   *  被判成 text，**根本没被滤掉**；真正被误滤的是用户可能真要用的列。
+   *
+   *  ⇒ 候选 = **表格全部列**，一个不删、不改名、不排序。
+   */
   const matchColumnOptions = useMemo(
     () => (tables[0]?.columns ?? []).map((c, i) => ({ value: i, label: `${c}` })),
     [tables],
@@ -5178,7 +5456,24 @@ function TablesPanel(props: {
   }, [tables, matchCol]);
 
 
-  const matchRows = useMemo<SkuMatchRow[]>(() => {
+  /** **匹配结果**（用户口径 2026-10-21 改：**不再随输入实时重算**）。
+   *
+   *  ⚠️ 原实现是 `useMemo`：用户每改一次区域 / 名称列，React 就在**渲染期**
+   *  同步重算整张表（456 行 × 候选图）。456 行的同步计算把主线程占满 ⇒
+   *  「点执行匹配时蒙版画不出来、整个弹窗卡住」。
+   *
+   *  ⇒ 现在改成：**只有点「执行匹配」才跑**（`runMatch`），结果落到 state。
+   *  计算过程中 `matchBusy` 为真 ⇒ 公共等待组件可见。
+   */
+  /** 匹配结果（**只在点「执行匹配」时更新** —— 用户口径 2026-10-21）。
+   *
+   *  ⚠️ 原实现是 `useMemo`：每改一次区域 / 名称列就在**渲染期**同步重算 456 行
+   *  ⇒ 主线程被占满，「点执行匹配时蒙版画不出来、整个弹窗卡住」。
+   *  ⇒ 现在只在点按钮时算（弹窗负责蒙版：起 → 两帧 → 算 → 收）。
+   */
+  const [matchRows, setMatchRows] = useState<SkuMatchRow[]>([]);
+
+  const computeMatchRows = useCallback((): SkuMatchRow[] => {
     const table = tables[0];
     if (!table) return [];
     //: ⚠️ 两道硬前置，都不给默认值（见上）。
@@ -5223,11 +5518,14 @@ function TablesPanel(props: {
     const autoRows = rowsIn
       .map((_, rowIndex) => rowIndex)
       .filter((i) => !picked[i]);
+    //: ⚠️ 用户口径 2026-10-21：「SKU 图自动匹配中 SKU 图**支持重复匹配**」——
+    //: 同一张图可以被多行匹配（24 图对 456 行、同名规格重复出现时，
+    //: 「一图一用」会让除第一行外全部「未匹配」）。
+    //: ⇒ 手选占用的图**不再剔除出自动池**（那是旧的「一图一用」语义）。
     const auto = matchSkuRows(
       autoRows.map((i) => ({ skuName: keys[i] })),
       pool.map((m) => ({ fileName: m.file_name || m.rel_path, relPath: m.rel_path })),
       matchExtract,
-      new Set(picked.filter(Boolean).map((p) => (p as { relPath: string }).relPath)),
     );
     //: 行号 → 分配结果（`auto` 的下标是 `autoRows` 的下标）。
     const autoByRow = new Map<number, { relPath: string | null; fileName: string }>();
@@ -5298,9 +5596,17 @@ function TablesPanel(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [matchedKey]);
 
+
   if (tables.length === 0) return <Empty description="数据包里没有可读取的表格" />;
 
   /** 把「本面板第 i 张表」映射到**父级完整数组**里对应的下标。 */
+  /** **计算规则算不出来的行**（键 = `表下标:行下标`）—— 红框 + 取消勾选（用户口径 2026-10-21）。 */
+  const [badRuleRows, setBadRuleRows] = useState<Set<string>>(new Set());
+  /** 每张表「只展示预检不通过行」开关（用户口径 2026-10-21，key = 表下标）。
+   *  ⚠️ 必须放在 **TablesPanel**（真正渲染表格的组件）里，不能放 `PrecheckStep`：
+   *  两者不是同一层，渲染块里读不到它的 state（tsc 会报 Cannot find name）。 */
+  const [onlyFailed, setOnlyFailed] = useState<Record<number, boolean>>({});
+
   const emit = (tIndex: number, next: PrecheckTable) => onTableChange(tIndex, next);
 
   /** **「SKU 图」这一列在表里的下标**（`{index, name}`；没这列 ⇒ `-1`）。
@@ -5398,6 +5704,23 @@ function TablesPanel(props: {
         ri !== rowIndex ? r : r.map((c, ci) => (ci === colIndex ? value : c)),
       ),
     });
+    //: ⚠️ 用户口径 2026-10-21：「**需用户手动处理**」——
+    //: 手动改值同样走**同一个收口**：数值列改成空 / 非数字 / ≤0 ⇒ 标红 + 取消勾选；
+    //: **改回合法值则清掉标记**（否则用户修好了红框还挂着，以为没修对）。
+    if ((table.column_kinds ?? [])[colIndex] !== "numeric") return;
+    const issue = numericCellIssue(value);
+    if (issue) {
+      markRuleFailures(tIndex, colIndex, [rowIndex]);
+      return;
+    }
+    //: 改好了 ⇒ 撤掉红框（但**不自动重新勾选** —— 勾选是用户的决定，不替他改回去）。
+    const key = `${tIndex}:${rowIndex}`;
+    setBadRuleRows((prev) => {
+      if (!prev.has(key)) return prev; //: 没标记过 ⇒ 不触发重渲染
+      const next = new Set(prev);
+      next.delete(key);
+      return next;
+    });
   };
 
   /** 对某表某一列套规则（**只改选中的行**；没勾选 = 整列）。
@@ -5406,13 +5729,92 @@ function TablesPanel(props: {
    * 完整数组 —— 直接上抛子集会把属性表丢掉，页签随之重建、面板状态被重置
    * （用户实测：第二次改库存点「应用」无响应）。
    */
+  /** **规则无法处理的数据 ⇒ 该行红框 + 取消勾选**（用户口径 2026-10-21）。
+   *
+   *  > 「无法计算的列应红框展示，**适用于所有规则**，规则无法处理的数据，
+   *  >   该行红框展示取消勾选，**需用户手动处理**」
+   *
+   *  ⚠️ **单一入口**：批量修改 / 正则取值 / 数据包规则三条路都收口到这里 ——
+   *  三处各写一份必然出现「这条规则标红了、那条没标」。
+   *
+   *  判据 = 规则跑完后、**该列**这一格：
+   *    · 是**数值列**且 `numericCellIssue()` 有话说（空 / 非数字 / ≤0）⇒ 无法计算；
+   *    · 或者是**文本列**但规则明确留空（`after === null` 且原来是空）⇒ 也算没处理成功。
+   *  ⇒ 标红 + 取消勾选，由用户手动改。
+   *
+   *  ⚠️ 只在**确实值变了**的行上判：没变 = 规则没碰它，不该把原本就空的行全标红。
+   */
+  const markRuleFailures = (
+    tIndex: number,
+    column: number,
+    failedRows: readonly number[],
+  ) => {
+    if (failedRows.length === 0) return;
+    setBadRuleRows((prev) =>
+      new Set([...prev, ...failedRows.map((i) => `${tIndex}:${i}`)]),
+    );
+    //: 取消勾选 ⇒ 不带进第二步（留空的价/库存导进去就是错的）。
+    setPicked((prev) => {
+      const cur = prev[tIndex] ?? tables[tIndex].rows.map(() => true);
+      const patched = cur.slice();
+      for (const i of failedRows) if (i < patched.length) patched[i] = false;
+      return { ...prev, [tIndex]: patched };
+    });
+    void message.warning(
+      `${failedRows.length} 行规则无法处理，已标红并取消勾选，请手动处理`,
+    );
+  };
+
+  /** **规则处理异常的行**（用户口径 2026-10-21）。
+   *
+   *  两个来源，**都要**（任一命中即算失败）：
+   *    ① 规则**自己回报**的行（`ruleFailedRows` / `missed_indexes`）——
+   *       这是最准的：只有规则知道「这一行我没能处理」；
+   *    ② 值判据兜底：数值列按 `numericCellIssue()` 判空 / 非数字 / ≤0。
+   *
+   *  ⚠️ 旧实现只看 ②，且**文本列直接 return []** —— 正则取值对文本列不命中时
+   *  完全不会标红（用户报的「规则处理异常没标」就是这里漏的）。
+   */
+  const failedRowsOfColumn = (
+    next: PrecheckTable,
+    column: number,
+    scope?: readonly number[],
+  ): number[] => {
+    const only = scope && scope.length > 0 ? new Set(scope) : null;
+    const out = new Set<number>();
+
+    //: ① 规则自报的失败行（三个 op 各自的回执字段名不同，取到哪个算哪个）。
+    const reported = (next as unknown as {
+      ruleFailedRows?: number[];
+      batchRuleBadRows?: number[];
+    });
+    for (const i of reported.ruleFailedRows ?? []) {
+      if (!only || only.has(i)) out.add(i);
+    }
+    for (const i of reported.batchRuleBadRows ?? []) {
+      if (!only || only.has(i)) out.add(i);
+    }
+
+    //: ② 值判据：只对**数值列**有意义（文本列空值是合法的）。
+    if ((next.column_kinds ?? [])[column] === "numeric") {
+      (next.rows ?? []).forEach((row, i) => {
+        if (only && !only.has(i)) return;
+        if (numericCellIssue(row[column])) out.add(i);
+      });
+    }
+    return [...out].sort((a, b) => a - b);
+  };
+
   const batchColumn = (
     tIndex: number,
     column: number,
     rule: BatchEditRule,
     onlyRows?: readonly number[],
   ) => {
-    emit(tIndex, applyBatchRuleToTable(tables[tIndex], column, rule, onlyRows));
+    const next = applyBatchRuleToTable(tables[tIndex], column, rule, onlyRows);
+    emit(tIndex, next);
+    //: 所有规则统一：算不出来的行标红 + 取消勾选（用户口径 2026-10-21）。
+    markRuleFailures(tIndex, column, failedRowsOfColumn(next, column, onlyRows));
   };
 
   /** **正则覆盖原列**（用户口径 2026-10-13）。
@@ -5432,7 +5834,9 @@ function TablesPanel(props: {
     setSnapshots((prev) =>
       prev[sk] ? prev : { ...prev, [sk]: snapshotTable(tables[tIndex], tIndex, column) },
     );
-    emit(tIndex, applyPatternToColumn(tables[tIndex], column, pattern, onlyRows));
+    const next = applyPatternToColumn(tables[tIndex], column, pattern, onlyRows);
+    emit(tIndex, next);
+    markRuleFailures(tIndex, column, failedRowsOfColumn(next, column, onlyRows));
   };
 
   /** **直接落值**（数据包规则执行用）—— 后端已算好逐行结果，这里只写。
@@ -5450,7 +5854,14 @@ function TablesPanel(props: {
     setSnapshots((prev) =>
       prev[sk] ? prev : { ...prev, [sk]: snapshotTable(tables[tIndex], tIndex, column) },
     );
-    emit(tIndex, applyValuesToColumn(tables[tIndex], column, changed));
+    const next = applyValuesToColumn(tables[tIndex], column, changed);
+    emit(tIndex, next);
+    //: 数据包规则同理（后端已回 `missed_indexes`，这里再按同一判据兜一层）。
+    markRuleFailures(
+      tIndex,
+      column,
+      failedRowsOfColumn(next, column, changed.map((c) => c.rowIndex)),
+    );
   };
 
   /** **把 SKU 图自动匹配的结果写回 SKU 表格**（用户口径 2026-10-14）。
@@ -5592,7 +6003,22 @@ function TablesPanel(props: {
         //: ⚠️ **SKU 名称列走映射**（用户口径 2026-10-15：「预检阶段的派生判定
         //: （哪列是 SKU 名）**应走映射**」）—— 用户把「SKU 名称」映射到哪列就用哪列，
         //: 不再靠别名猜（数据包列名一换就猜空 ⇒ 整表读不出 SKU 名）。
-        const nameCol = skuNameColumnIndex(table.columns, props.priceMapping ?? []);
+        //: ⚠️⚠️ **第一步不依赖「SKU 名称」映射**（2026-10-21 修的真 bug）。
+        //:
+        //:  用户口径「移除下拉中的 SKU 图和 SKU 名称」⇒ `sku_name` 从
+        //:  `PRICE_TABLE_TARGETS` 里删掉了。但这行代码**只认** `priceMapping`
+        //:  里的 `sku_name` ⇒ 恒返回 -1 ⇒ `skuName` 恒空 ⇒ 本地图查找恒 null
+        //:  ⇒ `blockedRows` = **整表** ⇒ 每一行都被判「图片未匹配」，
+        //:  红框满屏、复选框全部禁选（用户截图：「规格无法处理的没有红色提示」
+        //:  的**反面** —— 其实是全都红了，且规则失败的红框被"图片"这档盖住）。
+        //:
+        //:  ⇒ 第一步的判据必须是**它能拿到的信息**：商品 SKU 映射在第二步才配，
+        //:  第一步拿不到。所以退化为「映射配了就用，没配就取表格里第一个
+        //:  非空单元格较多的列」—— 只用于「这一行拿什么文本去配图」，
+        //:  **不参与规格拆分、不改任何数据**。
+        const mappedNameCol = skuNameColumnIndex(table.columns, props.priceMapping ?? []);
+        const nameCol =
+          mappedNameCol >= 0 ? mappedNameCol : firstUsableColumnIndex(table);
         //: ⚠️ **线上图列已从第一步移除**（用户口径 2026-10-15）⇒ **不再有这一列**，
         //: 两图一致性判定随之失效（-1 ⇒ `onlineUrl` 恒空 ⇒ 不参与判定）。
         //: 这不是缺陷：线上图没了，就没有「线上 vs 本地」可判。
@@ -5634,9 +6060,105 @@ function TablesPanel(props: {
         //: 需求 4/5：**默认全选**（用户口径「商品sku表格中的所有列默认全选」）；
         //: 预检未通过（本地无对齐图）的行**结构上**不许被勾选。
         //: 用户取消勾选的行同样不进第二步 —— 两者都由 `passedSkuSpecs` 收口。
+        //: （`pickedRows` 的默认值依赖「可见行」，见下方 `scopeRows` 之后。）
+        //: ⚠️ **整表**可选行数已删除（2026-10-21）：表头全选改按**可见行**算
+        //: （`scopeSelectable`）。留一个没人用的「整表可选数」只会让下次改的人
+        //: 又拿它去算判据 —— 那正是「只看不通过里点全选，整表 456 行全被勾上」的成因。
+        /** **这一行为什么预检不通过**（用户口径 2026-10-21 最终版）：
+         *  「预检不通过的数据包括：**规则执行失败**、**图片未匹配成功**」。
+         *
+         *  ⇒ 这是**唯一判据**（本仓反复踩过「同一判据两份实现」的坑，DEF-044）：
+         *    标红 / 置灰 / 提示文案 / 顶部统计 / 「只看不通过」筛选 / 全选反选
+         *    **全部**从这里读，不许任何一处另算。
+         *
+         *  两档**性质不同**，必须分开表达（合并成一句「不通过」用户没法处理）：
+         *  · `image`（图片未匹配）：**结构性**不可发布 —— 平台要规格图，
+         *    本地没有对应图就是发不出去 ⇒ **禁勾选**（勾了也会在提交时被平台拒）。
+         *  · `rule`（规则执行失败）：**数据问题** —— 该行某列算不出来/提取不到，
+         *    用户**可以**勾选接管（口径「用户主动勾选该行时取消红框」）。
+         *  · 两者都命中 ⇒ 返回 `image`（更硬的那档优先，因为勾选也没用）。
+         *
+         *  ⚠️ 返回值做**字符串**而不是布尔：提示与筛选都要按原因分，
+         *  布尔会把这层信息丢掉（上一版就丢了，界面只说「不通过」）。 */
+        type FailReason = "image" | "rule" | null;
+        const failureOf = (rowIndex: number): FailReason => {
+          if (blockedRows.has(rowIndex)) return "image";
+          if (badRuleRows.has(`${tIndex}:${rowIndex}`)) return "rule";
+          return null;
+        };
+        /** 这一行是否**预检不通过**（= 有失败原因）。红框与统计都读它。 */
+        const isBadRow = (rowIndex: number) => failureOf(rowIndex) !== null;
+        /** 失败原因 → 给用户看的一句话（25–30 字，AGENTS.md 硬约束 5 的口径）。 */
+        const failReasonText = (reason: FailReason): string => {
+          if (reason === "image") return "本地没有与 SKU 名称对上的规格图，需先补齐";
+          if (reason === "rule") return "规则执行失败（该列算不出或提取不到），需手动处理";
+          return "";
+        };
+        /** 不通过的行（**统计与筛选共用**，判据 = `isBadRow`，不许另算一遍）。 */
+        const badRowIndexes: number[] = [];
+        for (let i = 0; i < table.rows.length; i += 1) {
+          if (isBadRow(i)) badRowIndexes.push(i);
+        }
+        const failedRowCount = badRowIndexes.length;
+        const passedRowCount = table.rows.length - failedRowCount;
+        //: 两档计数（同一判据派生，不另算）—— 顶部统计与提示文案都用它。
+        const imageFailCount = blockedRows.size;
+        const ruleFailCount = badRowIndexes.filter((i) => !blockedRows.has(i)).length;
+        /** **当前可见的行**（「只看不通过」开启时 = 不通过行；否则 = 整表）。
+         *
+         * ⚠️ 用户口径 2026-10-21：「**只看不通过数据时，那么复选框勾选的应该是
+         * 检测不通过的，原理是全选反选**」——
+         * 筛选**不能只收窄渲染集**：表头全选 / 「已选 N 行」/ 行勾选框必须都按
+         * **可见集合**算，否则用户在「只看不通过」里点表头全选，
+         * 实际勾上的是**整张表 456 行**（含他根本看不见的通过行），
+         * 而界面上只有十几行打了勾 —— 勾选结果与所见完全不符。
+         * ⇒ 一份判据 `scopeRows`，渲染 / 全选 / 反选 / 计数**全部**用它。
+         * 空筛选（`failedRowCount === 0`）时自动回全量（上一条口径）。 */
+        const viewingFailedOnly = !!onlyFailed[tIndex] && failedRowCount > 0;
+        const scopeRows: number[] = viewingFailedOnly
+          ? badRowIndexes
+          : table.rows.map((_, i) => i);
+        /** 可见行里**能勾的**（排除结构性不可发布 = `blockedRows`）。 */
+        const scopeSelectable = scopeRows.filter((i) => !blockedRows.has(i));
+        /** **当前勾选的行**（规则执行 / 导出 / 第二步导入的唯一作用域）。
+         *
+         *  ⚠️⚠️ 真根因（2026-10-21 第 3 次报同一现象）：「选了 24 行，固定文本规则
+         *  依旧执行了全部 456 行」。`picked[tIndex]` 只在用户**逐行点**过之后才有值，
+         *  未定义时 `?? 整表全选` ⇒ 开「只看不通过」后屏幕上 24 个勾、
+         *  状态里却是 **456 行全勾**，规则照着 456 行跑。
+         *  ⇒ 默认值改为**当前可见行**（屏幕上勾着的那批），与所见一致。
+         *  关掉筛选后可见行 = 整表，行为与以前完全一致。 */
+        //: ⚠️ `picked[tIndex]` 的语义（2026-10-21 第 4 次修，这次是**最后一版**）：
+        //:  · 未定义 ⇒ **整表全选**（老行为：进页面什么都没点，默认全勾）；
+        //:  · 已定义 ⇒ 它是**完整的 456 行布尔数组**（不是"补丁"）——
+        //:    「只看不通过」的开关会把它落成「可见 24 行为 true、其余 false」。
+        //: 只要默认值是 true，任何"补丁式"存储都会把未写过的行算成已勾，
+        //: 那正是「勾了 24 行却处理 456 行」反复出现的原因。
+        //: ⚠️⚠️⚠️ 真根因（2026-10-21 第 5 次报障，诊断 toast 实测 `picked 456`）：
+        //: 用户说「我只勾选了 24 条未通过的数据」—— 但**他一个勾选框都没点过**：
+        //: 「只看不通过」筛选下那 24 行**本来默认就是勾着的**（表格初始默认全选），
+        //: 屏幕上看就是"我勾了 24 行"。而状态里 `picked` 是 `undefined`
+        //: ⇒ 默认值补成**整表 456 行全 true** ⇒ 规则照着 456 行执行。
+        //:
+        //: 前几版都在「默认值 / 切换时机」上打补丁 —— 但用户压根没触发过切换
+        //: （筛选开着进页面、或早就开着），补丁永远不生效。
+        //:
+        //: ⇒ **判据改成：只要「只看不通过」开着，作用域就只取可见行**。
+        //:   屏幕显示什么，规则就作用于什么 —— 不需要用户额外点任何东西。
+        //:   关掉筛选 ⇒ 可见行 = 整表 ⇒ 行为与老版本完全一致。
         const pickedRows = (picked[tIndex] ?? table.rows.map(() => true))
           .map((on, i) => (on && !blockedRows.has(i) ? i : -1))
-          .filter((i) => i >= 0);
+          .filter((i) => i >= 0)
+          //: 筛选开着 ⇒ 只保留可见行（屏幕上勾着的那 24 行）。
+          .filter((i) => !viewingFailedOnly || scopeRows.includes(i));
+
+        /** 可见行里**已勾的**（用于表头全选判据与「已选 N 行」）。 */
+        //: ⚠️ 从 `pickedRows` **派生**，不再重算一遍勾选状态
+        //: （本仓反复踩「同一判据两份实现」的坑）：`pickedRows` 已经应用了
+        //: 「默认值 = 可见行」与「排除不可勾行」，再按 `picked[tIndex]` 算一次
+        //: 会得到不同答案（上一版就是这样：屏幕 24 勾、状态 456 全勾）。
+        const pickedSet = new Set(pickedRows);
+        const scopePicked = scopeRows.filter((i) => pickedSet.has(i));
         return (
         <div key={`${table.sheet_name}-${tIndex}`} style={{ marginBottom: 20 }}>
           {/* ⚠️ 需求 4：把本表的选择快照上抛给向导（第二步要用同一份判据）。
@@ -5698,32 +6220,144 @@ function TablesPanel(props: {
                   SKU 图自动匹配
                 </Button>
               )}
-              {tIndex === 0 && matchRows.length > 0 && (
-                <Text
-                  type={matchRows.some((r) => r.relPath) ? "success" : "warning"}
-                  style={{ fontSize: 12 }}
+              {/* ⚠️ 用户口径 2026-10-21：「**布局拥挤，部分功能按钮可合并**」——
+                  原先这里是「☐ 只看不通过(24)」+「[视为已处理(24)]」两个控件并排，
+                  再加上「已匹配 456/456 行」的整句文字，一行挤到换行。
+                  ⇒ 合并成**一个**开关 + 一个动作（语义相关：
+                    「筛出不通过的 → 处理完 → 视为已处理」是一条连续动作链），
+                    并把「已匹配」压成紧凑 Tag（不再占一整句）。 */}
+              <Space.Compact size="small">
+                <Button
+                  size="small"
+                  type={onlyFailed[tIndex] ? "primary" : "default"}
+                  ghost={!!onlyFailed[tIndex]}
+                  disabled={failedRowCount === 0}
+                  onClick={() => {
+                    //: ⚠️ 用**函数式更新内部**的 `prev` 判方向，不读渲染闭包里的
+                    //: `onlyFailed[tIndex]` —— 闭包值可能滞后一帧（用户在同一个
+                    //: 事件里连点、或 React 批处理时），导致「以为在开、其实是关」，
+                    //: 那样落下去的勾选就是**整表全选**（= 执行 456 行的直接成因）。
+                    let turningOn = false;
+                    setOnlyFailed((prev) => {
+                      turningOn = !prev[tIndex];
+                      return { ...prev, [tIndex]: turningOn };
+                    });
+                    //: ⚠️⚠️ 用户报 2026-10-21（第 4 次）：「还是会处理所有行，全部被覆盖成了 20，
+                    //: 我只勾选了 24 行」。
+                    //:
+                    //: **真根因是「补丁式」勾选状态表达不出「只看这 24 行」**：
+                    //: `picked[tIndex]` 只是**用户改过的那些位的补丁**，未定义/未覆盖的位
+                    //: 一律**回落到 `true`（全选）**。所以用户开着「只看不通过」看到的
+                    //: 24 个勾，在状态里等价于「456 行全勾」—— 屏幕上从没勾过任何东西。
+                    //: 前几版一直想在「补丁 + 默认值」上打补丁（改默认值、改判据），
+                    //: 但只要默认值是 `true`，**任何**未显式写过的行都会被算成已勾。
+                    //:
+                    //: ⇒ 切筛选这一动作**显式落成全量数组**：
+                    //:   · 打开筛选 ⇒ 把**可见行（不通过）+ 原本已勾的行**落成 true，
+                    //:     其余 false —— 于是「已勾」= 屏幕上看得到的那批，一目了然；
+                    //:   · 关闭筛选 ⇒ 落成整表 true（回到默认全选，与以前一致）。
+                    //: 这样状态与所见**永远一致**，规则执行范围也就不会再多出 432 行。
+                    if (turningOn) {
+                      setPicked((prev) => {
+                        const cur = prev[tIndex] ?? table.rows.map(() => true);
+                        const next = table.rows.map(() => false);
+                        for (const i of scopeRows) next[i] = cur[i];
+                        return { ...prev, [tIndex]: next };
+                      });
+                    } else {
+                      setPicked((prev) => ({ ...prev, [tIndex]: table.rows.map(() => true) }));
+                    }
+                  }}
+                  title={
+                    failedRowCount === 0
+                      ? "当前没有不通过的行"
+                      : "只展示预检不通过的行（规则失败 / 图片未匹配）"
+                  }
                 >
-                  已匹配 {matchRows.filter((r) => r.relPath).length}/{matchRows.length} 行
-                </Text>
+                  只看不通过 {failedRowCount}
+                </Button>
+                {ruleFailCount > 0 && (
+                  <Button
+                    size="small"
+                    onClick={() => {
+                      //: 清本表的规则失败标记（其它表不受影响）。
+                      setBadRuleRows((prev) => {
+                        const next = new Set<string>();
+                        for (const key of prev) {
+                          if (!key.startsWith(`${tIndex}:`)) next.add(key);
+                        }
+                        return next;
+                      });
+                      //: 把这些行重新勾上（用户确认已手动处理）。
+                      setPicked((prev) => {
+                        const cur = prev[tIndex] ?? table.rows.map(() => true);
+                        const patched = cur.slice();
+                        for (let i = 0; i < table.rows.length; i += 1) {
+                          if (blockedRows.has(i)) continue; //: 图片档仍不可勾
+                          if (badRuleRows.has(`${tIndex}:${i}`)) patched[i] = true;
+                        }
+                        return { ...prev, [tIndex]: patched };
+                      });
+                      void message.success(
+                        `已将本表 ${ruleFailCount} 行规则失败视为已处理并重新勾选`,
+                      );
+                    }}
+                  >
+                    视为已处理 {ruleFailCount}
+                  </Button>
+                )}
+              </Space.Compact>
+              {tIndex === 0 && matchRows.length > 0 && (
+                <Tag
+                  color={matchRows.some((r) => r.relPath) ? "success" : "warning"}
+                  style={{ marginInlineEnd: 0 }}
+                >
+                  已匹配 {matchRows.filter((r) => r.relPath).length}/{matchRows.length}
+                </Tag>
               )}
             </Space>
-            {/* 右：**来源文件名** + 表格名 + 行列数
+            {/* 右：**表格名（只显示一个）** + 行列数
                 ⚠️ 用户口径 2026-10-20：「红框位置缺少读取的原始表格名称的展示」
-                ⇒ 把后端下发的 `source_file`（xlsx 原文件名）显示在最左，
-                它是「这批数据到底从哪个文件读来的」的唯一答案 ——
-                没有它，用户换包后无法确认自己看的是不是新文件。 */}
+                ⇒ 起初把后端 `source_file`（xlsx 原文件名）和 `sheet_name` **两个都显示**。
+                ⚠️ 用户口径 2026-10-21（截图为证）：「又展示了两个，应只展示**后面一个**文件名称」
+                ⇒ **只显示 `sheet_name`**（后端 `sheet_display_name` 已把扩展名与目录前缀剥掉），
+                `source_file` 不再上屏 —— 两者在这个包里本就同名，
+                并列显示只让用户以为读了两份文件。
+                ⚠️ 两个都不显示 `title`：那是**用户可自拟的别名**，不是文件身份。 */}
             <Space size={8} wrap={false}>
-              {table.source_file ? (
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  {table.source_file}
-                </Text>
-              ) : null}
-              <Text strong>{table.sheet_name}</Text>
-              <Tag>
-                {table.columns.length} 列 × {table.rows.length} 行
+              {/* ⚠️ 用户口径 2026-10-21：「文件名展示调整到与数据操作规则按钮一起」——
+                  文件名是**数据包身份**，不是这张表的统计，留在统计行里
+                  会把「总/通过/不通过」几个数字挤成一团（真机反馈「布局拥挤」）。
+                  ⇒ 已移到顶部的「商品货号 / 数据操作规则」同一行。 */}
+              {/* 用户口径 2026-10-21：「表格顶部新增**总行数、预检通过行数、
+                  预检不通过行数**」。
+                  ⚠️ 三个数都从 `isBadRow` 派生（与标红 / 筛选同一判据），
+                  不另算一遍 —— 否则统计说 455 通过、而屏幕上还有红行。 */}
+              <Tag>总 {table.rows.length} 行</Tag>
+              <Tag color="success">通过 {passedRowCount} 行</Tag>
+              {/* 用户口径 2026-10-21：「预检不通过的数据包括**规则执行失败**、
+                  **图片未匹配成功**」—— 两档分开计数，否则用户看到「不通过 40」
+                  却不知道那 40 行该补图还是该改数据。 */}
+              <Tooltip title="本地没有与 SKU 名称对上的规格图，必须补齐才能勾选发布">
+                <Tag color={imageFailCount > 0 ? "error" : "default"}>
+                  图片未匹配 {imageFailCount} 行
+                </Tag>
+              </Tooltip>
+              <Tooltip title="规则执行失败（该列算不出或提取不到），可手动改完再勾选">
+                <Tag color={ruleFailCount > 0 ? "warning" : "default"}>
+                  规则失败 {ruleFailCount} 行
+                </Tag>
+              </Tooltip>
+              <Tag color={failedRowCount > 0 ? "error" : "default"}>
+                不通过合计 {failedRowCount} 行
               </Tag>
-              {pickedRows.length > 0 && (
-                <Tag color="blue">已选 {pickedRows.length} 行</Tag>
+              {/* ⚠️ 「已选」必须与**屏幕上的东西**一致：只看不通过时
+                  显示「可见的已选行数」，不是整表的（用户口径 2026-10-21）。 */}
+              {scopePicked.length > 0 && (
+                <Tag color="blue">
+                  已选 {scopePicked.length} 行
+                  {viewingFailedOnly ? "（当前筛选内）" : ""}
+                </Tag>
               )}
             </Space>
           </div>
@@ -5737,29 +6371,180 @@ function TablesPanel(props: {
             rowKey={(record: { __index: number }) => record.__index}
             pagination={false}
             //: 列数不固定 ⇒ 横向要能滚；滚动条外观藏掉（用户口径 2026-10-08）。
+            //: ⚠️ `publish-sku-table` 供 CSS 把**固定列**刷成实色底
+            //: （用户口径 2026-10-21：「复选框和 sku 图列固定但是**不要透明**」）——
+            //: antd 固定列默认半透明白，标红行会被冲淡得像没生效。
             className="hermes-hide-scrollbar"
-            scroll={{ x: "max-content" }}
-            dataSource={table.rows.map((row, index) => ({ __index: index, row }))}
-            rowSelection={{
-              //: 用户口径（2026-10-09）：规格列表加复选框，支持只对选中行批量改。
-              //: ⚠️ 不提供「全选」按钮（用户口径：有上限的多选不要全选；这里行数大，
-              //:  误点即成批改，故只留逐行勾选 + 表头全选）。
-              selectedRowKeys: pickedRows,
-              //: ⚠️ 需求 4/5：预选未通过的行**结构上不可勾选**（置灰）。
-              getCheckboxProps: (record: { __index: number }) => ({
-                disabled: blockedRows.has(record.__index),
-              }),
-              onChange: (keys) => {
-                const next = table.rows.map((_, i) => keys.includes(i));
-                setPicked((prev) => ({ ...prev, [tIndex]: next }));
-              },
-            }}
+            //: ⚠️ 用户口径 2026-10-21：「数据 456 行，页面操作**很卡**」——
+            //: 非虚拟表格会把 456 × 列数 个单元格**全部**渲染成 DOM（十几列时上万节点），
+            //: 每次切 Tab / 跑规则的全量重渲染都要重排一次 ⇒ 明显卡顿。
+            //: `virtual` + 固定 `scroll.y` 只渲染可视区那几十行（用户口径前不变，
+            //: 列宽 / 勾选 / 表头批量入口全部照旧）。
+            virtual
+            //: ⚠️ 用户口径 2026-10-21：「固定列**使用 antd 的表格原始功能**，
+            //: **不要自定义使用 css 样式固定**」——
+            //: 之前的做法是 CSS 覆写 `.ant-table-cell-fix-left` 的 `background`，
+            //: 与 antd 自己的 sticky 定位打架（用户看到的是「勾选框压在商品图上」）。
+            //: antd 的固定列**要求 `scroll.x` 是一个具体数值或 `true`**：
+            //: 它据此算出每列的 sticky `left` 偏移；给 `"max-content"` 时 antd
+            //: 无法确定容器宽度 ⇒ 固定列的定位与遮罩全乱。
+            //: ⇒ 用 `x: "100%"`（容器宽，antd 官方推荐的「内容自适应 + 固定列」写法），
+            //: 列宽由各列 `width` 决定，超出即横向滚动。
+            //: ⚠️ **`scroll.x` 必须是数字**（读 rc-table 源码定位的真根因）：
+            //: antd 6 的固定列靠 `stickyOffsets.start[i]`（前面各列宽度累加），
+            //: 而这条链是：
+            //:   `scrollX = scroll?.x`（Table.js:148）
+            //:   → `scrollWidth = typeof scrollX === "number" ? scrollX : null`（:162）
+            //:   → `useWidthColumns()` 在 scrollWidth 为 null 时**整段跳过**
+            //:   → `colWidths` 空 → `stickyOffsets.start` 全 0
+            //:   → 两列固定列**都定位在 left:0**、叠在一起（勾选框被缩略图压住）
+            //:
+            //: ⇒ 之前写 `"100%"` / `"max-content"`（字符串）根本走不到这条链，
+            //: 固定列等于没生效 —— 用户连报两轮的「还是透明 / 勾选框被盖」都是它。
+            //: ⇒ 给**远大于视口的数值**：表格按它布局、列宽由各列 width 决定，
+            //: 超出视口即横滚（antd 官方对固定列的要求）。2200 覆盖本包 13 列。
+            scroll={{ x: 2200, y: 420 }}
+            //: 用户口径 2026-10-21：「**只展示预检不通过行**」——
+            //: 收窄的是**渲染集**，行下标 `__index` 仍是原表行号
+            //: （勾选 / 规则 / 导入全部按原表行号工作，不会因为筛选错位）。
+            //:
+            //: ⚠️ 用户口径 2026-10-21 追加：「**只看不通过为 0 时应自动展示所有数据**」
+            //: —— 用户把最后一行修好后，筛选状态仍开着但已无可展示的行 ⇒
+            //: 表格会变成空表（他以为自己把数据弄丢了）。
+            //: ⇒ 判据里加上 `failedRowCount > 0`：没不通过行了就**自动回到全量**，
+            //: 但**不改写开关状态**（`onlyFailed` 仍是 true）—— 开关位置保持用户选的样子，
+            //: 一旦再出现不通过行，筛选立刻重新生效，不用他再勾一次。
+            dataSource={table.rows
+              .map((row, index) => ({ __index: index, row }))
+              .filter(
+                (r) =>
+                  !onlyFailed[tIndex] || failedRowCount === 0 || isBadRow(r.__index),
+              )}
+            //: ⚠️ 用户口径 2026-10-21：「**把复选框与 sku 图列，拆分为两列**」——
+            //: 原先是 antd `rowSelection` 内置的勾选列（宽度由 antd 定、且紧贴
+            //: SKU 图列），缩略图一溢就把勾选框盖住（用户连续两轮反馈）。
+            //: ⇒ 勾选改用**普通数据列**（`COL_CHECK`），宽度显式 48px 且 sticky 左固定，
+            //: 与 SKU 图列各自独立、互不重叠。
             //: ⚠️ 需求 5：预选未通过的行整行标红（红框 + 淡红底），一眼能找出来。
+            //: ⚠️ 用户报 2026-10-21：「规则无法处理时**依旧未红框提示**，只取消了勾选」。
+            //: 根因：`rowClassName` 只给了 `<tr>` 一个类名，而 CSS 用的是
+            //: `.publish-sku-row-blocked > td` —— antd 6 虚拟表格的单元格不在
+            //: `<tr>` 的直接子级（行被包在虚拟容器里）⇒ 选择器匹配不到，
+            //: 红框**一格都没画出来**（预检未通过的行其实也一直没红，只是没人报）。
+            //: ⇒ 改用**单元格级**样式（见下面各列的 `onCell`），不依赖 DOM 结构。
             rowClassName={(record: { __index: number }) =>
-              blockedRows.has(record.__index) ? "publish-sku-row-blocked" : ""
+              isBadRow(record.__index) ? "publish-sku-row-blocked" : ""
             }
             columns={[
-              //: **第一列：匹配到的 SKU 图预览**（用户口径 2026-10-14）。
+              //: **第一列：行勾选**（用户口径 2026-10-21：与 SKU 图**拆成两列**）。
+              //: ⚠️ 固定宽度 48 + `fixed: "left"`：横滚时它留在最左，且不会与
+              //: SKU 图列挤压/覆盖（原先用 `rowSelection` 的隐式列，宽度不受控）。
+              {
+                title: (
+                  //: 表头全选（保留原有口径）。
+                  //: ⚠️ 判据必须按**可选行**（排除被拦下的行），不然「有一行被禁选」
+                  //: 时表头永远显示未全选 —— 用户会以为点全选没生效。
+                  //: ⚠️ 用户口径 2026-10-21：「只看不通过数据时，复选框勾选的应该是
+                  //: 检测不通过的，**原理是全选反选**」——
+                  //: 表头这枚勾选框 = 「对**当前可见的行**全选 / 反选」。
+                  //: 判据与计数都按 `scopeSelectable`（可见 ∩ 可勾），
+                  //: 不再用整表的 `selectableCount`（那会让「只看不通过」里点全选
+                  //: 把 456 行全勾上，而屏幕上只有十几行）。
+                  <Checkbox
+                    checked={
+                      scopeSelectable.length > 0 &&
+                      scopePicked.length >= scopeSelectable.length
+                    }
+                    indeterminate={
+                      scopePicked.length > 0 &&
+                      scopePicked.length < scopeSelectable.length
+                    }
+                    onChange={(e) => {
+                      const on = e.target.checked;
+                      //: ⚠️⚠️⚠️ 用户报 2026-10-21（第 6 次，终于对上操作）：
+                      //: 「**我点的是全选按钮**」「全选复选框点了一次」。
+                      //:
+                      //: 老实现：
+                      //:   `cur = prev[tIndex] ?? table.rows.map(() => true)`  ⇒ 首次点全选时
+                      //:   基准值是**整表全 true**，再只把这 24 行设为 `on`
+                      //:   ⇒ 点「勾上」= 456 行全勾（多出的 432 行就是这么来的）；
+                      //:      点「取消」= 432 行勾着 + 24 行取消（正好反过来）。
+                      //:
+                      //: ⇒ 语义修正：**全选键作用于当前可见行**（用户口径
+                      //:   「只看不通过数据时，复选框勾选的应该是检测不通过的，原理是全选反选」）：
+                      //:   · 首次点（`prev` 无记录）⇒ 基准是**全 false**，只勾可见行；
+                      //:   · 之后切换 ⇒ 只在**可见行**上做全选/反选，
+                      //:     其余行**保持原状**（关掉筛选不会发现通过行被清）。
+                      setPicked((prev) => {
+                        const seen = prev[tIndex];
+                        //: 基准：首次点全选时——
+                        //:  · 筛选开着 ⇒ 全 false（点「勾上」只勾这 24 行，其余不勾）；
+                        //:  · 筛选关着 ⇒ 整表全 true（可见行就是整表，行为与老版本一致）。
+                        const cur =
+                          seen ??
+                          table.rows.map(() => !viewingFailedOnly);
+                        const next = cur.slice();
+                        for (const i of scopeSelectable) next[i] = on;
+                        //: 取消全选时把**不可勾的可见行**也置 false，
+                        //: 避免「取消后还剩几个勾」的观感问题（它们本就 disabled）。
+                        if (!on) for (const i of scopeRows) next[i] = false;
+                        return { ...prev, [tIndex]: next };
+                      });
+                    }}
+                  />
+                ),
+                key: COL_CHECK,
+                width: 48,
+                //: ⚠️ antd 该版本**没有 `left` prop**（TS 报 unknown property）——
+                //: sticky 偏移按**列顺序**自动累加，所以两列的 `fixed: "left"`
+                //: 必须在 columns 里**相邻且顺序正确**（勾选在前、SKU 图在后）。
+                fixed: "left",
+                align: "center" as const,
+                onCell: (record: { __index: number }) =>
+                  isBadRow(record.__index)
+                    ? {
+                        className: "publish-sku-cell-blocked",
+                        style: { paddingLeft: 8, paddingRight: 0 },
+                      }
+                    : { style: { paddingLeft: 8, paddingRight: 0 } },
+                render: (_: unknown, record: { __index: number }) => (
+                  <Checkbox
+                    checked={pickedRows.includes(record.__index)}
+                    //: ⚠️ 用户口径 2026-10-21：
+                    //:   · 「红框标记，**原值不要改变**」—— 红框只是提示，不改数据；
+                    //:   · 「**用户主动勾选该行时取消红框提示**」——
+                    //:     所以**规则失败的行不再禁用勾选框**（禁用了用户根本点不了，
+                    //:     与这条口径直接矛盾）；只有「预检未通过」仍禁用
+                    //:     （那是结构性不可发布：本地没有对应图，勾了也发不出去）。
+                    //: ⚠️ 判据走 `failureOf`：**只有「图片未匹配」档禁用**
+                    //: （结构性不可发布，勾了平台也拒），「规则执行失败」档**可勾** ——
+                    //: 用户口径「用户主动勾选该行时取消红框」，禁用了他就点不了。
+                    disabled={failureOf(record.__index) === "image"}
+                    onChange={(e) => {
+                      const on = e.target.checked;
+                      setPicked((prev) => {
+                        const cur =
+                          prev[tIndex] ?? tables[tIndex].rows.map(() => true);
+                        const patched = cur.slice();
+                        patched[record.__index] = on;
+                        return { ...prev, [tIndex]: patched };
+                      });
+                      //: 用户主动勾上 ⇒ **取消红框**（他把这一行接管了）。
+                      //: 只在「勾上」时清：取消勾选不代表认可这一行。
+                      if (on) {
+                        const key = `${tIndex}:${record.__index}`;
+                        setBadRuleRows((prev) => {
+                          if (!prev.has(key)) return prev;
+                          const next = new Set(prev);
+                          next.delete(key);
+                          return next;
+                        });
+                      }
+                    }}
+                  />
+                ),
+              },
+              //: **第二列：匹配到的 SKU 图预览**（用户口径 2026-10-14）。
               //:
               //: > 「点击应用在商品 sku 表格 tab 下的列表中更新相关数据，
               //: >   第一列展示匹配到的图片预览图」
@@ -5772,6 +6557,24 @@ function TablesPanel(props: {
                 title: "SKU 图",
                 key: "__matched_image",
                 width: SKU_THUMB_COL_WIDTH,
+                //: ⚠️ 与勾选列**各自 sticky 左固定**：横滚时两列都留在左边、
+                //: 顺序稳定（勾选 → SKU 图），不会因为挤压而互相覆盖。
+                fixed: "left",
+                //: ⚠️ 用户报（2026-10-21 截图）「**复选框被覆盖了**」——
+                //: 缩略图外框 72px + 单元格内边距，在 `width: 110` 的列里会横向
+                //: 溢出到前一列（行勾选列）上，把勾选框压住。
+                //: 修法：
+                //:   ① 单元格**不许溢出**（`overflow: hidden`）；
+                //:   ② 缩略图居中并留出与勾选列的间隙（`paddingLeft`）；
+                //:   ③ 列宽放宽到 96px（72 图 + 左右各 12 内边距），不再挤压。
+                onCell: (record: { __index: number }) => ({
+                  className: isBadRow(record.__index) ? "publish-sku-cell-blocked" : undefined,
+                  style: {
+                    overflow: "hidden",
+                    paddingLeft: 12,
+                    paddingRight: 8,
+                  },
+                }),
                 render: (_: unknown, record: { __index: number }) => {
                   //: ⚠️ **值从 `rows` 取**（用户口径 2026-10-15：「把第一列**放入 rows**，
                   //: 它是**固定列**」）。
@@ -5909,6 +6712,15 @@ function TablesPanel(props: {
                         table={table}
                         tableIndex={tIndex}
                         pickedRows={pickedRows}
+                        //: ⚠️⚠️ 用户口径 2026-10-21（真机截图为证：「只勾选了 24 行
+                        //: 但执行了全部行」，toast 写着「勾选的 456 行」）——
+                        //: 上一版判据是 `picked[tIndex] !== undefined`（「有没有初始化过」），
+                        //: 但**初始状态本身就是 `undefined` = 默认全选**：
+                        //: 用户看到的「勾了 24 行」在状态里是 `undefined`（默认全 true）
+                        //: 加上「只看不通过」把它过滤成 24 行 ⇒ 内部判成「没选择 ⇒ 全表」。
+                        //: ⇒ 判据回归**真实勾选行**：`pickedRows` 是什么就执行什么，
+                        //: **空数组 = 一行都不改**（绝不回落全表）。
+                        hasRowSelection
                         initialColumn={colIndex}
                         //: ⚠️ **只要图标**（用户口径 2026-10-14：「sku 名称列的设置图标
                         //: **很大且存在正则取值文本**，应统一**只需要设置图标**即可」）。
@@ -5917,6 +6729,18 @@ function TablesPanel(props: {
                         //: 用户不再被允许在弹窗里换列（换了就与「贴着这枚图标」矛盾）。
                         onApply={(col, pattern, rows) => applyColumnPattern(tIndex, col, pattern, rows)}
                         onApplyValues={(col, changed) => applyColumnValues(tIndex, col, changed)}
+                        //: 规则算不出来的行 ⇒ 红框 + 取消勾选（用户口径 2026-10-21）。
+                        onMarkBadRows={(rows) => {
+                          setBadRuleRows((prev) =>
+                            new Set([...prev, ...rows.map((i) => `${tIndex}:${i}`)]),
+                          );
+                          setPicked((prev) => {
+                            const cur = prev[tIndex] ?? tables[tIndex].rows.map(() => true);
+                            const patched = cur.slice();
+                            for (const i of rows) if (i < patched.length) patched[i] = false;
+                            return { ...prev, [tIndex]: patched };
+                          });
+                        }}
                         onRestore={(col) => restoreColumn(tIndex, col)}
                         //: ⚠️ **按列**判有没有可还原的快照（用户口径 2026-10-15：
                         //: 「恢复数据应只恢复当前列而不是全表」）—— 该列没改过
@@ -5928,6 +6752,30 @@ function TablesPanel(props: {
                 ),
                 dataIndex: ["row", colIndex],
                 width: 160,
+                //: ⚠️ 用户口径 2026-10-21：「红框中**非数值且小于等于 0，则无法计算
+                //: 应红框提示**」—— 单元格级标红（只红那一格，不红整行：
+                //: 整行还有其他正常列，全红会让用户找不到问题在哪）。
+                onCell: (record: { __index: number; row: (string | null)[] }) => {
+                  //: ⚠️ 整行标红（预检未通过 / 规则无法处理）优先 —— 用户口径
+                  //: 2026-10-21：「规则无法处理的行数据**红色标记**并取消勾选」。
+                  //: 走 `onCell` 而不是 `rowClassName`：antd 6 虚拟表格里 `<td>`
+                  //: 不是 `<tr>` 的直接子级，`> td` 选择器匹配不到（实测一格都没红）。
+                  if (isBadRow(record.__index)) {
+                    return { className: "publish-sku-cell-blocked" };
+                  }
+                  const issue = numericCellIssue(record.row[colIndex]);
+                  return {
+                    //: 只对**数值列**标（`column_kinds` 由预检算出）——
+                    //: 文本列（颜色分类 / 尺寸）本来就不是数字，不该标红。
+                    ...((table.column_kinds ?? [])[colIndex] === "numeric" && issue
+                      ? {
+                          //: 红框用内阴影（不改尺寸）—— 见 `.publish-sku-cell-bad` 的说明。
+                          className: "publish-sku-cell-bad",
+                          title: issue,
+                        }
+                      : {}),
+                  };
+                },
                 render: (_: unknown, record: { __index: number; row: (string | null)[] }) => {
                   const raw = record.row[colIndex];
                   //: ⚠️ **读到什么就展示什么**（用户口径 2026-10-14）：
@@ -5970,10 +6818,30 @@ function TablesPanel(props: {
                 title: "预检",
                 key: "__verdict",
                 width: 200,
+                //: 整行标红时这一列也红（与数据列同判据）。
+                onCell: (record: { __index: number }) =>
+                  isBadRow(record.__index)
+                    ? { className: "publish-sku-cell-blocked" }
+                    : {},
                 render: (_: unknown, record: { __index: number }) => {
                   const info = rowInfos.find((r) => r.rowIndex === record.__index);
                   if (!info) return null;
-                  if (info.passed) {
+                  //: ⚠️ 用户口径 2026-10-21：「预检不通过的数据包括**规则执行失败**、
+                  //:   **图片未匹配成功**」——
+                  //: 这里必须按 `failureOf` 分档说清**为什么**不通过。
+                  //: 原先只按 `info.passed` 判（图片一档），规则失败的行会显示
+                  //: 「通过：本地图已对齐」而整行是红的 —— 自相矛盾，用户没法判断该改什么。
+                  const fail = failureOf(record.__index);
+                  if (fail === "rule") {
+                    return (
+                      <Tooltip title={failReasonText("rule")}>
+                        <Tag color="warning" style={{ fontSize: 11 }}>
+                          规则执行失败
+                        </Tag>
+                      </Tooltip>
+                    );
+                  }
+                  if (!fail) {
                     return (
                       <Tag color="success" style={{ fontSize: 11 }}>
                         通过：本地图已对齐
@@ -5990,9 +6858,11 @@ function TablesPanel(props: {
                   //: 引导语不放在这里（第一列那枚图标本身就有 Tooltip「切换 SKU 图」）。
                   //: 状态提示**保留**（它是有用的判据），只去掉后面那段括注。
                   return (
-                    <Tag color="error" style={{ fontSize: 11 }}>
-                      未匹配到本地图
-                    </Tag>
+                    <Tooltip title={failReasonText("image")}>
+                      <Tag color="error" style={{ fontSize: 11 }}>
+                        未匹配到本地图
+                      </Tag>
+                    </Tooltip>
                   );
                 },
               },
@@ -6042,6 +6912,10 @@ function TablesPanel(props: {
         //: ⚠️ 「执行匹配」= 用户**真的跑了规则** ⇒ 置 `skuMatchRan`（进第二步的关卡）。
         //: 弹窗内部每次改规则都会实时重算 `matchRows`，所以这里只需标记「跑过」。
         onRun={onSkuMatchRun}
+        //: 计算由父级做（它持有表格与候选图），结果回写父级 state；
+        //: 弹窗只负责「公共等待组件」的前后两帧（用户口径 2026-10-21）。
+        onMatch={computeMatchRows}
+        onMatched={setMatchRows}
         rows={matchRows}
         //: ⚠️ 用户口径 2026-10-14：「SKU 图底部的点击确认匹配结果**优化为应用匹配结果**，
         //: 点击应用在**商品 sku 表格 tab 下的列表中更新相关数据**，**第一列展示匹配到的图片预览图**」。

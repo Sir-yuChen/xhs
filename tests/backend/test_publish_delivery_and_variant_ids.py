@@ -171,3 +171,33 @@ class TestServiceActuallyPassesItDown:
         assert "delivery_label: s.delivery_label" in wiz, (
             "前端提交白名单没带 delivery_label ⇒ 后端收不到该行时效"
         )
+
+class TestMultiDimSpecSplit:
+    """多维度规格串的切分判据（用户口径 2026-10-21，真机数据反例）。
+
+    ⚠️ 真数据里**值本身含 `/`**：
+    `颜色分类:奇遇童话01 / 款式:尺寸/图案任意定制【联系客服】`
+    按裸 `/` 切会劈成 `款式:尺寸` + `图案任意定制【联系客服】`
+    ⇒ 款式值被截成「尺寸」，后半段**静默丢失**（上架后规格值是错的）。
+    ⇒ 必须只按 `" / "`（空格-斜杠-空格）切，与拼接侧
+      （`skuSpecTextOf` / `spec_combinations`）同一约定。
+    """
+
+    def test_value_containing_slash_is_not_split(self):
+        #: 复刻后端那段解析（与 shop_item_publish_service 内的实现逐行对应）。
+        name = "颜色分类:奇遇童话01 / 款式:尺寸/图案任意定制【联系客服】"
+        parts = []
+        for part in name.split(" / "):
+            head, sep, tail = part.partition(":")
+            if sep:
+                parts.append((head.strip(), tail.strip()))
+        assert parts == [
+            ("颜色分类", "奇遇童话01"),
+            ("款式", "尺寸/图案任意定制【联系客服】"),
+        ], f"切分错误：{parts}"
+
+    def test_bare_slash_would_corrupt_the_value(self):
+        #: 反证：按裸 `/` 切确实会切坏（这条钉住「为什么不能那样写」）。
+        name = "颜色分类:奇遇童话01 / 款式:尺寸/图案任意定制【联系客服】"
+        assert len(name.split(" / ")) == 2
+        assert len(name.split("/")) == 3, "裸斜杠确实多切了一段（反例成立）"

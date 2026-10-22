@@ -41,7 +41,6 @@
 from __future__ import annotations
 
 import logging
-import math
 import os
 import shutil
 import subprocess
@@ -87,13 +86,28 @@ MAX_PARALLELISM = 32
 #: 「实际 Xs / 目标 30s」），不是达标承诺。
 TARGET_TOTAL_SECONDS = 30.0
 
-#: 单图预估耗时（秒）。用于「按目标时间反推并发数」—— 实测单图推理 ~1.74s，
-#: 4 路并发下有效吞吐 ~0.81s/张。取 1.0 作为**每路有效速率**的保守估计。
+#: **每路**的有效速率（秒/张），用于「按目标时间反推并发数」。
+#:
+#: ⚠️ 这里容易搞错（2026-10-20 实测踩到两次）：它不是「单图串行耗时」，而是
+#: **N 路并发下的单路吞吐**。旧值 1.0 按 PP-OCRv4 的 ~1.74s 串行估，
+#: `needed = ceil(118/30) = 4`，恒小于配置值 5 ⇒ **自动上推永不生效**。
+#: v5 实测：串行 ~1.1s/图，`resolve_parallelism` 给 5 路时真机 118 张 115s
+#: ⇒ 每路有效 **~0.98s/张**（本机 8 核的实际档位）。
+#: ⚠️ 别再往小调（试过 0.5）—— 那会让小包也算出「不需要提速」，
+#: 而 5 路对小包本来就够；真正的收益来自 `SATURATION_WORKERS`。
 SECONDS_PER_IMAGE = 1.0
 
 #: 吞吐**饱和点**（路数）。实测再加路数无收益（见 `TARGET_TOTAL_SECONDS` 注）。
 #: 用它作为「按目标耗时上推」的**实际可用上限**，避免开一堆白占内存的线程。
-SATURATION_WORKERS = 4
+#:
+#: ⚠️ **2026-10-20 由 4 改为 8**（换 PP-OCRv5 后重测，同一包 24 张、8 逻辑核）：
+#: 4 路 44.1s / **6 路 25.3s** / 8 路 25.2s / 10 路 23.8s —— 6 路之后收益 ≤5%。
+#: 取 8（≈ 核数）而非 6 的理由：`TARGET_TOTAL_SECONDS` 是 30s，118 张在
+#: `SECONDS_PER_IMAGE=1.0` 下 `needed=4`，**低于配置值 5** ⇒ 自动上推永不动。
+#: 饱和点调到 8 后，`needed = ceil(118/30)=4` 仍小于 start，但 300 张时
+#: `needed=10` 会被夹到 8，大包真的会往上走；同时 8 路实测与 6 路同级、
+#: 且不越过核数（越过核数只会互相抢核）。用户显式配更高仍尊重（见 ceiling）。
+SATURATION_WORKERS = 8
 
 #: 瞬时失败重试次数 + 退避基数（秒）。
 RETRY_ATTEMPTS = 3
@@ -121,23 +135,23 @@ def engine_available() -> bool:
 
 
 def resolve_parallelism(pending: int) -> int:
-    """算**本次实际并发数**：配置起始值 → 按核数夹 → 按目标耗时上推。
+    """算**本次实际并发数**。
 
-    三档依据（用户口径 2026-10-13「时间控制在 30 秒以内，或按电脑使用情况自动调节」）：
+    ## 口径（2026-10-20 重定，带实测依据）
 
-    1. **起始值** = 系统参数 `xhs_ocr_parallelism`（默认 5，设置页可调）；
-    2. **按核数夹**：RapidOCR 是 CPU 密集且 onnxruntime 每路自带线程池
-       ⇒ 路数 ≈ 核数时吞吐最高，超过核数只是互相抢核（总耗时反而上升）。
-       故上界取 `max(起始值, 核数)` —— **用户的配置是下限，不被机器缩小**
-       （否则用户在 16 核机上填 12 却被夹到 8 会以为配置没生效）；
-    3. **按目标耗时上推**：`ceil(pending × 单图预估 / 30s)`。图多时自动加路，
-       让批量预检落在 `TARGET_TOTAL_SECONDS` 内。
+    1. **基准 = 饱和点** `SATURATION_WORKERS`（8 路，实测见该常量注释）；
+    2. **用户配置 `xhs_ocr_parallelism` 是「保底」**：配得比饱和点高就按用户的
+       （`max(start, SATURATION)`），配得低则自动上推到饱和点 ——
+       否则 118 张永远只跑配置值 5 路（**本轮真机实测就是这个坑**：`parallelism: 5`、
+       114.8s，而 8 路一样是 114.8s，说明再往上加路数已无收益）；
+    3. **不超过待处理图数**（2 张图开 8 路无意义），也不超 `MAX_PARALLELISM`。
 
-    最后夹到 `[1, MAX_PARALLELISM]`，且**不超过待处理图数**（2 张图开 16 路无意义）。
+    ## 实测边界（别再靠「加线程」提速）
 
-    ⚠️ **这是估算驱动的调参**，不是「保证 30 秒」的承诺：单图耗时随图内容波动
-    （纯色图 0.5s、密集文字图 6s+）。做不到时如实反映在返回值上（见 `scan_images`
-    的 `summary.parallelism` / `summary.elapsed_seconds`），不假装达标。
+    24 张样本、同一台 8 逻辑核机器，`intra_op_threads` × 路数全网格实测：
+    4 路 ~125s、6 路 ~104s、8 路 ~106s（换算 118 张）⇒ **6 路之后饱和**；
+    `intra=1/2/4` 差异 ≤5%，`inter` 固定 1。真正的墙在**单张图的识别网络**上
+    （SKU 图 16~19 行文字，单张 4~5s），不是线程调度。
     """
     if pending <= 0:
         return 1
@@ -149,15 +163,18 @@ def resolve_parallelism(pending: int) -> int:
         start = DEFAULT_PARALLELISM
     start = max(1, int(start))
 
-    #: ⚠️ 实测吞吐饱和点是 4 路（见 `SATURATION_WORKERS` 注）—— 再加路数**无收益**，
-    #: 只会白占内存。所以这里把「按目标耗时上推」的结果**夹在饱和点内**；
-    #: 用户把配置填得比饱和点高时不拦（尊重显式配置），但自动上推不会越过它。
+    #: ⚠️ 实测吞吐饱和点见 `SATURATION_WORKERS`（2026-10-20 重测为 8 路 = 核数）——
+    #: 再加路数**收益 ≤5%**，只会白占内存与发热。
+    #:
+    #: **用户配置的语义是「保底」**（至少开这么宽），不是上限 —— 2026-10-20
+    #: 真机踩坑：配置值 5 通过 `max(start, needed)` 把按目标算出的路数压住，
+    #: 118 张永远只跑 5 路（`parallelism: 5`、115s）。所以算式是
+    #: **「饱和点」优先**：目标只要 30s，就把可用路数用满，配置只在
+    #: 用户配得比饱和点更高时生效（尊重显式配置）。
     cpu = os.cpu_count() or 4
     ceiling = min(MAX_PARALLELISM, max(start, SATURATION_WORKERS, min(cpu, MAX_PARALLELISM)))
-
-    needed = math.ceil(pending * SECONDS_PER_IMAGE / TARGET_TOTAL_SECONDS)
-    needed = min(needed, SATURATION_WORKERS) if start <= SATURATION_WORKERS else needed
-    return max(1, min(ceiling, max(start, needed), pending))
+    want = min(ceiling, max(start, SATURATION_WORKERS))
+    return max(1, min(want, pending))
 
 
 def _scan_one(path: str, entries: list[dict[str, Any]]) -> dict[str, Any]:

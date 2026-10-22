@@ -26,13 +26,13 @@
 | op 家族 | 缺值 / 认不出的值 | 为什么 |
 |---|---|---|
 | `extract_*` | **提不出 ⇒ 留空**（`None`） | 规则**不适用**。把原值留在格子里，用户会以为规则生效了、拿着旧值发布 —— 最坏的一类静默错（硬约束 5）。 |
-| `math_scale` | **空值按 0 参与计算**（用户口径 2026-10-15：「计算时为空的行默认为 0」） | 这是**运算**：整列都要有一个数；空单元格在表里就是「没有数量 / 没有价格」，按 0 算才是用户要的整列结果。留空会让半列结果空洞，用户还得自己填。 |
+| `math_scale` | **空 / 非数值 ⇒ 留空**（用户口径 2026-10-21，推翻 2026-10-15 的「空值按 0」） | 按 0 算会**凭空造出一个 0 价格**（真机：456 行里 24 行原值是 `-`，×1.8 后写成 `0.00`），用户无法与「真的 0 元」区分。留空 + 页面标红 + 取消勾选，用户一眼知道哪些行没算出来。 |
 
 ⇒ 方向相反是**刻意的**：前者怕「假值冒充真值」，后者是「整列参与运算」（设计 40 §9.5）。
 落地方式：`apply_rule` 开头的「空串 ⇒ `None`」早退**只服务 `extract_*`**，
 `fixed_text` / `math_scale` 走各自的辅助函数、绕过它（见 `apply_math_scale`）。
 
-⚠️ **认不出数也按 0**（`"abc"` ⇒ `0`，不是留空）：与用户口径「为空的行默认为 0」同向
+⚠️ **认不出数 ⇒ 留空**（`"abc"` ⇒ `None`，不按 0）：与「空 / 非数值留空」同向（2026-10-21）
 （他在表里看到的就是「这格没数」）。但**要记原因行** —— `execute_for_column` 数出
 多少个认不出的格子并写进 `reason`，用户据此知道「有几行不是算出来的」。
 """
@@ -526,23 +526,23 @@ def parse_math_steps(params: dict[str, Any]) -> list[dict[str, Any]]:
 def apply_math_scale(value: object, params: dict[str, Any]) -> str:
     """批量运算：**按 `steps` 的顺序依次执行**，加 / 减 / 乘随意搭配、不限步数。
 
-    ⚠️ **空值按 0 参与计算**（用户口径 2026-10-15：「计算时为空的行默认为 0」）——
-    这是**运算**：整列都要有一个数。与 `extract_*` 的「提不出 ⇒ 留空」**方向相反**，
-    是刻意的（见模块 docstring 那张表）。
+    ⚠️ **用户口径 2026-10-21（推翻 2026-10-15 的「空值按 0 参与计算」）**：
 
-    ⚠️ **认不出的内容也按 0**（`"abc"` ⇒ 0，不是留空）：与用户口径同向
-    （他在表里看到的就是「这格没数」），但要**记原因行**告诉他有几行不是算出来的
-    —— 那一行由 `count_unrecognized` 数，**本函数不管计数**
-    （此前它返回 `(结果, 是否认不出)` 的元组，但**没有任何调用方读第二项**
-    ⇒ 死代码 + 与 `count_unrecognized` 构成两份实现，DEF-044 ⇒ 已收敛为单实现）。
+    > 「不应该再默认为 0 进行计算，应**红框提示，并取消勾选**」
+
+    空值 / 非数值（`""` / `"abc"` / `"-"`）⇒ **返回 `None`（留空）**，不参与运算：
+      · 按 0 算会**凭空造出一个 0 价格**（真机：456 行里 24 行原值是 `-`，
+        ×1.8 后写成 `0.00`）—— 用户无法把它和「真的 0 元」区分开（硬约束 5）。
+      · 留空后前端能一眼看出「这些行没算出来」，并由页面标红 + 取消勾选。
+
+    与 `extract_*` 的「提不出 ⇒ 留空」现在是**同一方向**（此前刻意相反，已统一）。
     """
     steps = parse_math_steps(params)
 
-    #: 认不出 ⇒ 按 0（口径见 docstring）。判据与 `count_unrecognized` **同一份**
-    #: （都用 `_as_number_or_none`），不另立一套。
+    #: 认不出 / 空 ⇒ **留空**（不按 0，用户口径 2026-10-21）。
     result = _as_number_or_none(value)
     if result is None:
-        result = 0.0
+        return None
 
     #: ⚠️ **严格按顺序执行** —— 用户口径「加减乘可随意搭配」，
     #: 顺序是规则语义的一部分（`+10` 后 `×2` ≠ `×2` 后 `+10`），不许排序/归并。
@@ -577,7 +577,8 @@ def apply_rule(value: object, op: str, params: dict[str, Any]) -> Optional[str]:
         #: ⚠️ **在「空值早退」之前**：固定文本是「无条件设为」，原值为空的行也要写。
         return apply_fixed_text(params)
     if op == OP_MATH_SCALE:
-        #: ⚠️ 同理绕过早退：空值按 0 参与运算（口径见模块 docstring）。
+        #: ⚠️ 同理绕过早退：空 / 非数值 ⇒ **留空**（用户口径 2026-10-21，
+        #: 不再按 0 参与运算；口径见模块 docstring）。
         return apply_math_scale(value, params)
     if op == OP_COPY_COLUMN:
         #: 「照搬整格」—— 在早退之前（空值也要照搬，见 `apply_copy_column`）。
@@ -599,16 +600,6 @@ def apply_rule(value: object, op: str, params: dict[str, Any]) -> Optional[str]:
     if op == OP_EXTRACT_STRIP:
         return apply_extract_strip(text, params)
     raise DataPackageRuleError("DP_RULE_BAD_OP", f"不认识的操作类型「{op}」")
-
-
-def count_unrecognized(values: Iterable[object], op: str, params: dict[str, Any]) -> int:
-    """`math_scale` 里**原值认不出数**的行数（按 0 算了，要告诉用户有几行）。
-
-    非 `math_scale` 一律 0 —— 那些 op 的缺值语义是「留空」，由 `missed` 表达。
-    """
-    if op != OP_MATH_SCALE:
-        return 0
-    return sum(1 for v in values if _as_number_or_none(v) is None)
 
 
 def apply_rule_to_column(
@@ -974,6 +965,7 @@ def execute_for_column(
     rule_id: int,
     values: list[object],
     source_column: Optional[int] = None,
+    params_override: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """**执行一条规则**（后端算，前端不重复实现 —— DEF-044 单一实现）。
 
@@ -995,22 +987,43 @@ def execute_for_column(
             "DP_RULE_NOT_FOUND", "该规则不属于这个规则包", status_code=404
         )
     params = parse_params(rule.params_json)
+    #: ⚠️ 用户口径 2026-10-21：「固定数值或文本时应支持用户在 **tip 窗口输入自定义文本**，
+    #: **新建规则输入的文本作为兜底**」——
+    #: ⇒ 现场传的 `params_override` **优先**（用户在列头 popover 里当场敲的），
+    #: 没传才用规则自身存的参数（那是新建规则时填的兜底值）。
+    #: ⚠️ 只覆盖**键**、不清空其它键（`text` 之外的参数照旧），
+    #: 并且**必须重新校验** —— 覆盖可能把参数改成非法值（超长 / 空串）。
+    if params_override:
+        #: ⚠️ **现场覆盖值不许是空白**：规则里的空 `text` 是用户**故意**要清空整列
+        #: （见 `validate_params` 的注释），但前端那次覆盖是「用户敲了东西才传」——
+        #: 传上来一个空白串只可能是误触/粘贴空内容，照它执行会把整列写成空白
+        #: （用户看到的是「整列没了」，而且这次不写库、事后也查不出原因）。
+        if rule.op == OP_FIXED_TEXT:
+            raw = _as_text(params_override.get("text"))
+            if raw is not None and not raw.strip():
+                raise DataPackageRuleError(
+                    "DP_RULE_BAD_PARAM", "「固定文本」不能是空白（留空请直接不填）"
+                )
+        params = {**(params or {}), **params_override}
     validate_params(rule.op, params)
     out = apply_rule_to_column(values, rule.op, params)
     missed = sum(1 for v in out if v is None)
     reason = ""
     if missed:
-        reason = f"{missed} 行的内容不符合规则（{make_summary(rule.op, params)}），已留空"
-    if not reason:
-        #: ⚠️ 运算类**不会**留空（空值按 0 算）⇒ 缺值原因行改说「有几行不是算出来的」：
-        #: 用户口径是「为空的行默认为 0」，但「本来写着 abc」的行也是按 0 算的，
-        #: 不说就是「悄悄把一列里的文字当成 0 做了乘法」（硬约束 5 的同型静默错）。
-        unrecognized = count_unrecognized(values, rule.op, params)
-        if unrecognized:
-            reason = f"{unrecognized} 行的原值不是数字，已按 0 参与计算"
+        #: ⚠️ 用户口径 2026-10-21：运算类遇到空 / 非数值也**留空**了，
+        #: 文案不能再说「已留空」这种笼统话 —— 要说清「这几行没算出来」，
+        #: 前端据此标红 + 取消勾选。
+        reason = (
+            f"{missed} 行原值为空或不是数字，未参与计算（已留空并取消勾选）"
+            if rule.op == OP_MATH_SCALE
+            else f"{missed} 行的内容不符合规则（{make_summary(rule.op, params)}），已留空"
+        )
     return {
         "values": out,
         "missed": missed,
+        #: **算不出来（留空）的行下标** —— 前端按它画红框 + 取消勾选
+        #: （用户口径 2026-10-21：「应红框提示，并取消勾选」）。
+        "missed_indexes": [i for i, v in enumerate(out) if v is None],
         "total": len(out),
         "summary": make_summary(rule.op, params),
         "reason": reason,
@@ -1134,7 +1147,6 @@ __all__ = [
     "apply_rule",
     "apply_rule_to_column",
     "apply_copy_column",
-    "count_unrecognized",
     "create_rule",
     "create_set",
     "delete_rule",

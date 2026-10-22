@@ -68,7 +68,17 @@
       "value_type": "int",
       "category": "publish",
       "label": "违规词检测（OCR）起始并发数",
-      "description": "违规词检测识图的起始并发数，默认 5。这是起步值，不是固定值：实际并发会按待处理图片数量、CPU 核数与「目标总耗时 30 秒」自动上调（配置值是下限，不会被机器缩小，上限 32）。引擎为 RapidOCR（纯 CPU，实测单图约 3.3 秒）。调大 = 大批量更快，但会同时占用更多 CPU 与内存；核数不足时反而更慢。改完立即生效，无需重启。",
+      "description": "违规词检测识图的**保底**并发数，默认 5。实际并发取「本机饱和点」（当前 8 路，实测 6 路以上再加无收益）与该值中的较大者，且不超过待处理图片数量。引擎为 PP-OCRv5（纯 CPU，实测单图 0.8~1.1 秒，118 张约 115 秒）。调大 = 只有在你确信本机核数更多时才有效；核数不足时反而更慢。改完立即生效，无需重启。",
+      "requires_restart": false,
+      "is_dangerous": false
+    },
+    {
+      "key": "xhs_sku_name_max_chars",
+      "value": 60,
+      "value_type": "int",
+      "category": "publish",
+      "label": "SKU 名称压缩的默认字数上限",
+      "description": "批量压缩 SKU 规格名时的默认上限（字符数），端点不传 max_chars 时用它。真机实测：平台规格名过长会在发布时被截断，60 字符可覆盖常见「分类:名称」形态。改完立即生效。",
       "requires_restart": false,
       "is_dangerous": false
     }

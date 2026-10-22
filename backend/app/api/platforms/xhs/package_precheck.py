@@ -24,6 +24,7 @@ import logging
 import mimetypes
 import os
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 #: ⚠️ `Any` 是**真缺陷修复**（2026-10-11，未定义名字守卫抓到）：
@@ -335,6 +336,9 @@ def _run_precheck(
         _set_progress(progress_token, "检测违规词", 0, total_media)
     scan = ocr.scan_images(image_paths, entries, on_one_done=_bump)
     by_path = {r["path"]: r for r in scan["results"]}
+    #: ⚠️ 视频这一段单独计时（用户口径 2026-10-20「每次测试均需要定位优化后的效果」）：
+    #: 图片与视频是**串行两段**，总时长里哪一段占大头必须能分开看，否则调优没判据。
+    video_started = time.monotonic()
     #: ⚠️ 视频抽帧**并发**（用户口径 2026-10-09：并发处理 OCR）。
     #: 并发数走 `ocr.resolve_parallelism()` —— 与图片同一套自适应（配置起始值 +
     #: 核数 + 目标耗时），不另立一个固定值（两个固定值迟早会不一致）。
@@ -354,6 +358,9 @@ def _run_precheck(
             for res in pool.map(_scan_video_one, video_paths):
                 by_path[res["path"]] = res
                 _bump()
+    else:
+        video_paths = []
+    video_elapsed = time.monotonic() - video_started
     for item in payload["media"]:
         #: **每个**媒体都先落这几个键 —— 视频与属性图不进 OCR（`by_path` 取不到），
         #: 但前端要按同一套键渲染（否则 `m.ocr_ok` 在视频行上是 `undefined`，
@@ -402,6 +409,20 @@ def _run_precheck(
         payload["warnings"].append(
             f"图片超过单次上限 {ocr.MAX_IMAGES} 张，仅检测了前 {ocr.MAX_IMAGES} 张"
         )
+    #: **真机耗时分段上报**（用户口径 2026-10-20「每次测试均需要定位优化后的效果」）。
+    #:
+    #: ⚠️ 为什么要把图片与视频两段分开报：整条预检的墙钟时间还会算上「解析数据包」，
+    #: 只看总时长**分不清是图片慢还是视频慢** ⇒ 调优就没有判据
+    #: （2026-10-20 实测：本地基准 ~95s，真机总时长却到 119~480s，差额在哪个环节
+    #: 一直说不清）。这两个数字是**实测**，不是估算。
+    summary = scan["summary"]
+    payload["timing"] = {
+        "images": summary.get("elapsed_seconds", 0.0),
+        "image_count": summary.get("total", 0),
+        "parallelism": summary.get("parallelism", 0),
+        "videos": round(video_elapsed, 2),
+        "video_count": len(video_items),
+    }
     payload["inspected"] = True
     return payload
 

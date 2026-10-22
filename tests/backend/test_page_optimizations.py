@@ -6268,20 +6268,471 @@ def test_forbidden_words_remark_column_is_180px_with_a_tooltip():
     assert "ellipsis" in remark, "备注列没有省略号截断"
 
 
-def test_media_hitting_forbidden_words_is_disabled_and_greyed():
-    """用户口径 2026-10-08：「预检时命中违规词的**不允许勾选至灰**」。
+def test_fixed_text_has_no_source_column_and_scope_needs_explicit_selection():
+    """用户口径 2026-10-21（两条，都是真机报出来的）：
 
-    ⚠️ 关键差别：**不只是默认不勾**（那样用户能手点回来），而是 `disabled`
-    —— 结构上选不了。且批量按钮（全选/反选）也必须认这份禁选名单，
-    否则点一下「全选」就绕过去了。
+    ① 「**设置固定文本时不需要数据源下拉**」—— 固定文本是「整列无条件写成
+       同一个值」，后端 `apply_fixed_text` 连 `values` 都不看 ⇒ 给它数据源下拉
+       纯属误导（选了也没作用）。
+    ② 「这个规则将当前列**所有数据均改成了**兜底文案，我本是**只想改勾选的数据**」
+       —— 根因是老判据 `pickedRows.length > 0 ? scope : null`：用户把勾选**全部取消**
+       时 `pickedRows` 是空数组 ⇒ 回落成「全表」⇒ 恰好改掉他刚取消的行。
+       ⇒ 判据必须是「**有没有做过选择**」（`hasRowSelection`），不是「选了几行」。
+    """
+    src = (ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx").read_text(
+        encoding="utf-8"
+    )
+
+    #: ① 固定文本不给数据源下拉
+    k = src.index("const needsSourceColumn =")
+    line = src[k : k + 120]
+    assert 'pickedRule?.op !== "fixed_text"' in line, (
+        f"固定文本仍然显示数据源列下拉：{line}"
+    )
+
+    #: ② 作用域**永远是当前勾选行**，没有任何「回落全表」分支
+    #:    （用户 2026-10-21 真机：「只勾选了 24 行但执行了全部行」，toast 写「勾选的 456 行」）。
+    assert "const scope: Set<number> = new Set(pickedRows ?? []);" in src, (
+        "作用域不是「当前勾选行」（还在做某种回落）"
+    )
+    #: ⚠️ 三条老写法都要反向排除 —— 它们每一个都会让「空/未初始化」退化成整表：
+    for stale in (
+        "pickedRows && pickedRows.length > 0 ? new Set(pickedRows) : null",
+        "const scope: Set<number> | null = hasRowSelection",
+        "const targetRows = scope ? [...scope] : table.rows.map",
+    ):
+        assert stale not in src, f"仍有「回落全表」的老判据：{stale}"
+    #: 空勾选必须**中止**（一行都不改），不许换一种方式改整表。
+    assert "if (scope.size === 0) {" in src, "空勾选没有中止"
+    assert "当前没有勾选任何行" in src, "空勾选没有给用户提示"
+
+def test_only_failed_toggle_materializes_full_selection_array():
+    """用户报 2026-10-21（第 4 次，同一现象）：「还是会处理所有行，全部被覆盖成了 20，
+    我只勾选了 24 行」。
+
+    **真根因（前三次都没修到）**：`picked[tIndex]` 是「补丁式」状态 —— 只存用户
+    显式改过的位，未覆盖的位一律回落 `true`（全选）。于是用户开着「只看不通过」
+    看到的 24 个勾，在状态里**等价于 456 行全勾**，屏幕上其实一行都没勾过。
+    只要默认值是 `true`，改默认值 / 改判据都救不了。
+
+    ⇒ 判据：切「只看不通过」这个动作必须**显式落成完整数组**
+    （打开 ⇒ 可见行 = 原勾选值、其余 false；关闭 ⇒ 整表 true），
+    并且 `pickedRows` 的默认值回到「未定义 = 整表全选」（不再按可见行补）。
+    """
+    src = (ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx").read_text(
+        encoding="utf-8"
+    )
+
+    #: ① 切筛选必须落全量数组（两个方向都要）
+    k = src.index("let turningOn = false;")
+    seg = src[k : k + 1400]
+    assert "const next = table.rows.map(() => false);" in seg, (
+        "打开筛选时没有落成完整数组（还是补丁式 ⇒ 未写过的行仍算已勾）"
+    )
+    assert "for (const i of scopeRows) next[i] = cur[i];" in seg, (
+        "打开筛选时没有保留原勾选值"
+    )
+    assert "table.rows.map(() => true)" in seg, "关闭筛选时没有回到整表全选"
+
+    #: ② `pickedRows` 默认值 = 整表全选（未定义时），不许再按可见行补
+    assert "const pickedRows = (picked[tIndex] ?? table.rows.map(() => true))" in src, (
+        "pickedRows 的默认值又被改成了「按可见行补」"
+    )
+    assert "table.rows.map((_, i) => scopeRows.includes(i))" not in src, (
+        "pickedRows 仍在按可见行生成默认值"
+    )
+
+def test_runtime_input_reaches_execute_callback():
+    """用户报 2026-10-21：「tip 中输入的是 20，但执行时覆盖的是兜底文案」。
+
+    ⚠️ 根因：`runPickedRule` 是 `useCallback`，**依赖数组漏了 `runtimeText`**
+    （也漏了 `isFixedValueRule`）⇒ 回调一直是**首次渲染的闭包**，
+    里面 `runtimeText` 恒为 `""` ⇒ `override` 恒 `undefined`
+    ⇒ 后端只能取规则里的兜底文案。界面输入框看起来正常，值根本没用上。
+
+    这是同一文件里**第二次**踩这个坑（`sourceColumn` 那次是第一次）。
+
+    ⚠️ 判据必须**先剥注释**：注释里会引用 `runtimeText` 这个名字来解释坑，
+    直接全文找会得到**假绿**（本守卫第一版就 ESCAPED，实测证实）。
+    """
+    src = (ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx").read_text(
+        encoding="utf-8"
+    )
+
+    def strip_comments(text: str) -> str:
+        text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+        return re.sub(r"//[^\n]*", "", text)
+
+    k = src.index("const runPickedRule = useCallback(")
+    seg = strip_comments(src[k : k + 6000])
+    deps_start = seg.index("}, [")
+    deps = seg[deps_start : seg.index("]);", deps_start)]
+    for must in ("runtimeText", "isFixedValueRule"):
+        assert must in deps, (
+            f"runPickedRule 的依赖数组漏了 `{must}` —— 回调会捕获首次渲染的旧值"
+        )
+
+def test_price_mapping_targets_equal_qianfan_fixed_columns():
+    """用户口径 2026-10-21（截图为证）：
+
+    > 「**下拉框不是全部列**，价格及库存**非动态列**均需要用户配置映射，
+    >   且**售价、当前库存、改后库存、市场价均必须配置**，下拉框不修改；
+    >   **售价列表头星号移除**；**缺少规格ID、条形码、商家编码**，
+    >   你去看千帆后台，**价格及库存固定列必须保持一致**」
+
+    千帆价格及库存表的**非动态列**（真机 CDP 实读，设计 24 §23）：
+      售价 / 当前库存 / 改后库存 / 市场价 / 规格ID / 条形码 / 商家编码
+    ⇒ 下拉候选必须**恰好是这 7 个**，不多（不许混 SKU名称/规格图/回落列/规格分类）
+      不少（规格ID 曾在候选和表头里都缺）。
+    """
+    lib = (ROOT / "frontend/src/lib/precheck-publish.ts").read_text(encoding="utf-8")
+
+    #: ① 候选恰好是千帆那 7 个固定列
+    k = lib.index("export const PRICE_TARGET_OPTIONS: PriceTargetKey[] = [")
+    block = lib[k : lib.index("];", k)]
+    for must in (
+        '"price"', '"current_stock"', '"stock"', '"market_price"',
+        '"spec_id"', '"barcode"', '"seller_code"',
+    ):
+        assert must in block, f"下拉候选缺 {must}（千帆固定列）"
+    for banned in ('"sku_name"', '"spec_image"', '"price_fallback"', '"spec_category"'):
+        assert banned not in block, f"下拉候选混进了非固定列 {banned}"
+
+    #: ② 四个必配（售价/当前库存/改后库存/市场价）
+    k2 = lib.index("export const REQUIRED_PRICE_TARGETS: readonly PriceTargetKey[] = [")
+    req = lib[k2 : lib.index("];", k2)]
+    for must in ('"price"', '"current_stock"', '"stock"', '"market_price"'):
+        assert must in req, f"必配清单缺 {must}"
+
+    #: ③ 表头：售价**没有**星号；规格ID/条形码/商家编码都在
+    page = (ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx").read_text(
+        encoding="utf-8"
+    )
+    assert 'title: "售价 *"' not in page, "售价表头仍有星号（用户要求移除）"
+    assert 'title: "售价"' in page, "售价表头丢了"
+    for must in ('title: "规格ID"', 'title: "条形码"', 'title: "商家编码"',
+                 'title: "当前库存"', 'title: "改后库存"'):
+        assert must in page, f"价格表缺列 {must}"
+
+def test_price_table_first_dim_is_main_second_is_sub():
+    """用户口径 2026-10-21：「导入多个商品 sku 规格后需与千帆商品的价格及库存一致，
+    **第一组规格为主----分第二组规格**」。
+
+    千帆真机（CDP 实读，设计 24 §23）是**单层表头 + 第一列 rowspan 合并**：
+    第一维度值 `rowspan=8`（一组一行），第二维度逐行展开，规格图一组一张。
+    ⇒ 我方判据：
+      ① 第一维度列有 `onCell`（合并），第二维度**没有**（逐行）；
+      ② 同组非首行返回 `rowSpan: 0`（被上面那格吃掉）；
+      ③ 规格图只在组首行渲染。
+    """
+    src = (ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx").read_text(
+        encoding="utf-8"
+    )
+    #: ① 只有第一维度挂合并判据
+    assert "di === 0" in src, "第一维度的合并判据（di === 0）丢了"
+    #: ② 非组首行 rowSpan: 0
+    assert "return { rowSpan: 0 }" in src, "非组首行没有 rowSpan:0（会重复显示主维度值）"
+    #: ③ 组内 span 计算
+    assert "span += 1" in src, "组内行数累加逻辑丢了"
+    #: ④ 规格图只在组首行
+    assert "if (prevSame) return null;" in src, "规格图没有按「组首才画」去重"
+
+def test_price_table_fixed_columns_follow_the_mapping():
+    """用户口径 2026-10-21：「**固定列预设需要用户配置映射关系**」。
+
+    即价格及库存表的**价格块列**不是写死全显示，而是「用户在导入弹窗里配了
+    哪几个映射，表里就出现哪几列」。没配的列不显示（配了才有意义）。
+    ⚠️ 但**一个都没配时要显示全部** —— 否则初次进来表格只剩行号/规格图，
+    用户会以为坏了，而映射入口又在这张表之后。
+    """
+    src = (ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx").read_text(
+        encoding="utf-8"
+    )
+    assert "const mappedTargets = new Set(" in src, "缺「按映射过滤」的判据"
+    assert 'const mappedCols = ["price", "market_price", "stock", "barcode", "seller_code"];' in src, (
+        "可映射列清单变了（须与 PriceTargetKey 的价格块子集一致）"
+    )
+    #: 空映射兜底
+    assert "mappedTargets.size === 0" in src, "缺「没配映射时显示全部」的兜底"
+    assert "? base" in src, "兜底分支没返回全部列"
+    #: 平台自身字段不参与映射、恒显示
+    assert '"rowNo", "specImage", "current_stock"' in src, "平台生成列的只读清单变了"
+
+def test_row_selection_defaults_to_visible_rows_and_fixed_text_needs_runtime_value():
+    """用户口径 2026-10-21（同一现象第 2、3 次报，根因是两处不同的事）：
+
+    ① 「选了 24 行，固定文本规则**依旧执行了全部 456 行**」——
+       根因：`picked[tIndex]` 未定义时用 `?? 整表全 true` 补成「456 行全勾」，
+       而「只看不通过」只收窄**渲染**，不改勾选状态 ⇒ 屏幕 24 个勾、状态 456 全勾。
+       ⇒ 默认值必须取**当前可见行**（`scopeRows`），且 `scopePicked` 从
+       `pickedRows` **派生**（不许再按 `picked[tIndex]` 算一遍）。
+    ⚠️ 曾经把「请输入固定文本」误判成规则里的提示语（它其实**是用户输入的值**），
+    并据此加了「固定文本必须现场输入」的限制 —— 已在用户澄清后撤销。
+    这里只钉真正的根因：勾选默认值必须是**可见行**。
+    """
+    src = (ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx").read_text(
+        encoding="utf-8"
+    )
+
+    #: ① 勾选默认值 = **整表全选**（未定义时）—— 这是老行为，保持不变；
+    #:    「只看不通过」的落值是**显式**的（见下面 ②），不再靠默认值猜。
+    assert "const pickedRows = (picked[tIndex] ?? table.rows.map(() => true))" in src, (
+        "pickedRows 的默认值语义变了（未定义应为整表全选）"
+    )
+    #: ② 「只看不通过」必须**显式落全量数组**（不能再靠默认值猜作用域）。
+    #:    ⚠️ 默认值 `?? 整表全 true` 本身是**老行为**（进页面默认全选），保留；
+    #:    问题在切筛选时没有把「可见 24 行」落进状态，导致执行时仍是整表。
+    #: ③ `scopePicked` 从 pickedRows 派生
+    assert "const pickedSet = new Set(pickedRows);" in src, (
+        "scopePicked 没有从 pickedRows 派生（两份实现）"
+    )
+    #: ③ 现场输入优先、留空用规则里的值（⚠️ 「请输入固定文本」**是用户输入的真值**，
+    #:    不是提示语 —— 曾经误判成兜底文案而加了「必须现场输入」的限制，已撤销）。
+    assert "isFixedValueRule && runtimeText.trim() ? { text: runtimeText.trim() } : undefined" in src, (
+        "固定文本的「现场值优先 / 留空用规则值」判据变了"
+    )
+
+def test_precheck_failure_has_one_judgment_with_two_tiers():
+    """用户口径 2026-10-21：「预检不通过的数据包括，**规则执行失败**、
+    **图片未匹配成功**」。
+
+    两条硬判据：
+    ① **唯一判据**：`failureOf(rowIndex)` 一处算，标红 / 置灰 / 提示 / 统计 /
+       筛选全部读它 —— 不许任何一处另写 `blockedRows.has(...) || badRuleRows.has(...)`
+       （本仓反复踩「同一判据两份实现」的坑，DEF-044）。
+    ② **两档分开表达**：图片未匹配是**结构性**不可发布（禁勾选），
+       规则失败是**数据**问题（可勾选接管）。合并成一句「不通过」用户不知道
+       该补图还是该改数据 —— 上一版就是只按图片判，规则失败的行
+       显示「通过：本地图已对齐」而整行发红，自相矛盾。
+    """
+    src = (ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx").read_text(
+        encoding="utf-8"
+    )
+
+    #: ① 唯一判据存在，且按两档返回原因（不是布尔）。
+    assert "const failureOf = (rowIndex: number): FailReason =>" in src, "缺统一判据 failureOf"
+    body_start = src.index("const failureOf = (rowIndex: number): FailReason =>")
+    body = src[body_start : body_start + 400]
+    assert '"image"' in body and '"rule"' in body, f"判据没分两档：{body[:300]}"
+    #: ⚠️ 图片档必须优先（勾了也发不出去 ⇒ 原因更硬）。
+    assert body.index('"image"') < body.index('"rule"'), "图片档应在规则档之前判"
+
+    #: ② `isBadRow` 必须**从判据派生**，不许自己再写一遍两个集合。
+    k = src.index("const isBadRow = (rowIndex: number) =>")
+    line = src[k : k + 120]
+    assert "failureOf(rowIndex) !== null" in line, (
+        f"isBadRow 没有从 failureOf 派生（两份判据）：{line}"
+    )
+
+    #: ③ 预检列必须分档显示（规则失败不许显示成「通过」）。
+    v = src.index("const fail = failureOf(record.__index);")
+    seg = src[v : v + 700]
+    assert 'fail === "rule"' in seg and "规则执行失败" in seg, "预检列没分「规则执行失败」档"
+    assert "通过：本地图已对齐" in src, "「通过」文案丢失"
+
+    #: ④ 顶部统计两档都在。
+    assert "图片未匹配 {imageFailCount} 行" in src, "顶部缺「图片未匹配」计数"
+    assert "规则失败 {ruleFailCount} 行" in src, "顶部缺「规则失败」计数"
+
+def test_select_all_follows_the_visible_filter_not_the_whole_table():
+    """用户口径 2026-10-21：「只看不通过数据时，那么复选框勾选的应该是检测不通过的，
+    **原理是全选反选**」。
+
+    ⚠️ 根因：筛选原先**只收窄渲染集** —— 表头全选与「已选 N 行」仍按**整表**算。
+    于是「只看不通过」里点全选，实际把 456 行全勾上（含屏幕上看不见的通过行），
+    用户看到的是「我只勾了十几行，怎么全被勾了」。这条口径要求
+    全选 / 反选 / 计数 全部以**可见集合**为准。
+
+    判据（源码级，页面 tsx 不被 vitest 覆盖）：
+    ① 存在统一的「可见行」判据 `scopeRows` / `scopeSelectable` / `scopePicked`；
+    ② 表头全选的 checked / indeterminate 用 `scopeSelectable`，**不再**用整表的
+       `selectableCount`（该变量必须已删除，否则下次改的人又会拿它算）；
+    ③ 全选写入只遍历 `scopeSelectable`（不许遍历 `table.rows`）；
+    ④ 「已选 N 行」用 `scopePicked`。
+    """
+    src = (ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx").read_text(
+        encoding="utf-8"
+    )
+
+    #: ① 统一判据
+    for name in ("scopeRows", "scopeSelectable", "scopePicked", "viewingFailedOnly"):
+        assert f"const {name}" in src, f"缺可见行判据 {name}"
+
+    #: ② 整表可选数必须删除（留着就会被再次误用）
+    assert "const selectableCount" not in src, (
+        "整表 selectableCount 仍在 —— 表头全选又会按整表算"
+    )
+
+    #: ③ 表头全选的判据指向可见集合
+    k = src.index("scopeSelectable.length > 0")
+    head = src[k : k + 900]
+    assert "scopeSelectable.length" in head and "scopePicked.length" in head, (
+        f"表头全选判据没走可见集合：{head[:300]}"
+    )
+
+    #: ④ 全选写入只动可见行
+    assert "for (const i of scopeSelectable) next[i] = on;" in src, (
+        "全选写入没有只作用于可见行（会对整表 table.rows 写）"
+    )
+
+    #: ⑤ 「已选」按可见集合
+    assert "已选 {scopePicked.length} 行" in src, "「已选 N 行」没按可见集合算"
+
+def test_bad_rows_are_painted_at_cell_level_not_row_level():
+    """用户报 2026-10-21：「规则无法处理时**依旧未红框提示**，只取消了勾选」。
+
+    根因：CSS 用 `.publish-sku-row-blocked > td`（`<tr>` 的**直接子级**），
+    而 antd 6 虚拟表格里 `<td>` 被包在虚拟容器中 ⇒ 选择器匹配不到，
+    红框**一格都没画出来**（预检未通过的行其实也一直没红，只是没人报）。
+
+    ⇒ 判据：标红必须走**单元格**（各列 `onCell`），并且 CSS 不许再依赖 `> td`。
+    """
+    src = (ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx").read_text(
+        encoding="utf-8"
+    )
+    css = (
+        ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.css"
+    ).read_text(encoding="utf-8")
+
+    #: ① 统一判据存在（预检未通过 + 规则失败同一套）。
+    assert "const isBadRow = " in src, "没有统一的「要标红吗」判据"
+    #: ② 至少 4 列走单元格级标红（勾选 / SKU 图 / 数据列 / 预检）。
+    assert src.count("publish-sku-cell-blocked") >= 4, (
+        "单元格级标红覆盖不足（应 ≥4 列）"
+    )
+    #: ③ CSS 里必须有该类的样式，且**不许**再靠 `> td` 画红框。
+    assert ".publish-sku-cell-blocked" in css, "缺单元格标红样式"
+    assert ".publish-sku-row-blocked > td {" not in css, (
+        "仍在用 `> td` 选择器画红框 —— 虚拟表格下匹配不到，等于没画"
+    )
+
+def test_bad_row_marks_never_touch_values_and_clear_on_user_check():
+    """用户口径 2026-10-21（两条，同一处）：
+
+    ① 「红框标记，**原值不要改变**」—— 标红是提示，不是改数据。
+    ② 「**用户主动勾选该行时取消红框提示**」—— 用户接管这一行，红框就该消失
+       （红框的语义是「请我确认」，勾选 = 已确认）。
+
+    ⚠️ ② 的**前提**是勾选框**不能被禁用** —— 之前规则失败的行 `disabled`，
+    用户根本点不了，这条口径物理上无法满足。故判据里同时钉住「不再禁用」。
+    """
+    src = (ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx").read_text(
+        encoding="utf-8"
+    )
+
+    #: ① 值不变：两条规则路径的失败分支都必须 `return cell` / `return row`（原样）。
+    rules = (ROOT / "frontend/src/lib/precheck-publish.ts").read_text(encoding="utf-8")
+    k = rules.index("if (next === null) {")
+    seg = rules[k : k + 160]
+    assert "badRows.add(rowIndex)" in seg and "return cell;" in seg, (
+        f"运算类规则失败时没有保持原值：{seg}"
+    )
+    pat = (ROOT / "frontend/src/lib/table-pattern.ts").read_text(encoding="utf-8")
+    k2 = pat.index("if (value === null) {")
+    seg2 = pat[k2 : k2 + 160]
+    assert "failed.push(rowIndex)" in seg2 and "return row;" in seg2, (
+        f"正则规则失败时没有保持原值：{seg2}"
+    )
+
+    #: ② 勾选框不得对「规则失败行」禁用；勾上后必须清掉 badRuleRows。
+    k3 = src.index("render: (_: unknown, record: { __index: number }) => (")
+    #: ⚠️ 不能用固定窗口（1400 字）—— 注释一多窗口就截断，断言变成假红/假绿。
+    #: 按**结构**取：从勾选列 render 起，到下一个列的 key（SKU 图列）为止。
+    #: 勾选列的结束边界 = 下一列（SKU 图）的声明行 `key: "__matched_image"`。
+    end = src.find('key: "__matched_image"', k3)
+    assert end > k3, "找不到勾选列的结束边界（页面结构变了，更新本守卫）"
+    chk = src[k3:end]
+    #: ⚠️ 2026-10-21 判据升级：禁选条件从「在 blockedRows 里」改为
+    #: `failureOf(...) === "image"`（只有**图片未匹配**档禁用；规则失败档可勾）。
+    #: 语义不变（都只挡结构性不可发布），但写法换了 ⇒ 这里钉**新写法**，
+    #: 并**反向排除**旧写法，防止有人改回去把规则失败档一起禁掉。
+    assert 'disabled={failureOf(record.__index) === "image"}' in chk, (
+        f"禁选判据没走 failureOf 的 image 档：{chk[:400]}"
+    )
+    assert "disabled={blockedRows.has(record.__index)}" not in chk, (
+        "禁选仍按整块 blockedRows 判 —— 规则失败行也会被禁掉（用户无法接管）"
+    )
+    assert "badRuleRows.has(`${tIndex}:${record.__index}`)" not in chk.split("onChange")[0], (
+        "disabled 判断里仍含规则失败 —— 用户点不了，无法取消红框"
+    )
+    assert "setBadRuleRows" in chk and "if (on)" in chk, (
+        "勾上时没有清除红框标记（用户口径：主动勾选即取消红框）"
+    )
+
+def test_every_rule_path_marks_unprocessable_rows():
+    """用户口径 2026-10-21：「**规则处理异常，无法处理的行数据红色标记并取消勾选**」
+    +「无法计算的列应红框展示，**适用于所有规则**，规则无法处理的数据，
+    该行红框展示取消勾选，**需用户手动处理**」。
+
+    ⚠️ 这条钉的是**覆盖面**：三条规则路径 + 手动改值都必须走同一个收口函数。
+    只接一条（曾经只接了数据包规则）时，另外两条改坏了数据也不标红 ——
+    用户看到的「执行成功」是假的。
+    """
+    src = (ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx").read_text(
+        encoding="utf-8"
+    )
+
+    #: ① 统一收口函数存在，且**标红 + 取消勾选**两件事都做。
+    assert "const markRuleFailures = " in src, "没有统一收口函数"
+    at = src.index("const markRuleFailures = ")
+    body = src[at : src.index("\n  };", at)]
+    assert "setBadRuleRows" in body, "收口函数没有标红"
+    assert "setPicked" in body, "收口函数没有取消勾选"
+
+    #: ② 四条路径都调它（批量修改 / 正则取值 / 数据包规则 / 手动改值）。
+    calls = src.count("markRuleFailures(")
+    assert calls >= 4, f"只有 {calls} 处调用（应 ≥4：三条规则路径 + 定义）"
+
+    #: ③ 手动改值也要按判据收口（且改好要**清掉**标记）。
+    cell = src[src.index("const setCell = ") :]
+    cell = cell[: cell.index("\n  };")]
+    assert "numericCellIssue" in cell, "手动改值没按规则判据判"
+    assert "next.delete(key)" in cell, "手动改好后没清掉红框标记"
+
+    #: ④ 判据来源必须包含「规则自报的失败行」，不能只看值。
+    fn = src[src.index("const failedRowsOfColumn = ") :]
+    fn = fn[: fn.index("\n  };")]
+    assert "ruleFailedRows" in fn, "没读规则自报的失败行（文本列不命中会被漏掉）"
+    assert "batchRuleBadRows" in fn, "没读批量规则的失败行"
+
+
+def test_forbidden_media_is_selectable_but_unchecked_by_default():
+    """用户口径 **2026-10-21（取代 2026-10-08 的「不允许勾选至灰」）**：
+
+    > 「检测到违规词的媒体资源放开也可选择，检查完默认是不选择的，
+    >   不再固定为不可选，决策权交给用户」
+
+    三条判据（缺一条都会让用户「勾不上」或「勾了没用」）：
+      ① **默认可勾**：违规项**不**进禁选名单（`locked` 只收格式不支持 / 超限）；
+      ② **默认不勾**：`applyDefaults` 里仍按 `!has_forbidden` 给初始值；
+      ③ **提醒仍在**：红框 + 角标 + 文案（风险提示不能随「放开选择」一起消失）。
     """
     src = _src(PUBLISH_MODAL)
-    assert "locked" in src, "没有禁选名单"
-    assert "disabled={isLocked}" in src, "命中项没有 disabled（只是默认不勾）"
-    assert "置灰" in src or "opacity" in src, "命中项没有置灰"
-    #: 批量按钮必须传 locked（否则全选能绕过禁选）
+
+    #: ① 禁选名单的 filter **不能**再含 `has_forbidden`
+    at = src.index("const locked = new Set(")
+    block = src[at : src.index(");", at) + 2]
+    assert "has_forbidden" not in block, (
+        f"违规项仍在禁选名单里（应把决策权交给用户）：{block}"
+    )
+    #: 结构性原因必须仍在名单里（否则会让人勾了发不出去的图）
+    assert "unsupported" in block, "平台不收的格式丢了禁选"
+    assert "oversized" in block, "超 5M 上限丢了禁选"
+
+    #: ② 默认不勾（唯一保留 has_forbidden 的那处赋值）
+    assert "!item.has_forbidden && item.ocr_ok === true" in src, (
+        "违规项不再默认不勾了（用户口径要求「检查完默认是不选择的」）"
+    )
+
+    #: ③ 提示仍在（**违规词角标**，不是卡片底部那行文字 ——
+    #:    用户口径 2026-10-21：「命中违规词（默认未勾选）」文本移除）
+    assert "命中违规词（默认未勾选）" not in src, "卡片底部那行说明文案仍存在（用户要求移除）"
+    assert "h.word" in src or "item.hits" in src, "违规词角标没了（命中提示必须有）"
+    #: 且**不许**再说「不可选」（与放开选择的决策冲突）
+    assert "命中违规词，不可选" not in src, "文案仍说「不可选」，与放开选择的决策矛盾"
+
+    #: 批量按钮仍走 locked（规范不变，只是名单内容变了）
     assert "setZone(keys, true, locked)" in src, "全选没遵守禁选名单"
-    assert "setZone(keys, false, locked)" in src, "全不选没遵守禁选名单"
     assert "locked.has" in src, "setZone 里没判禁选"
 
 
@@ -6610,9 +7061,17 @@ def test_config_step1_only_offers_passed_and_checked_images():
     sel = wizard[j : j + 400]
     assert "passedMedia" in sel, f"没有先过预检判据：\n{sel}"
     k = wizard.index("const passedMedia = useMemo(")
-    passed = wizard[k : k + 300]
+    passed = wizard[k : k + 400]
     assert "ocr_ok === true" in passed, f"预检判据缺 ocr_ok：\n{passed}"
-    assert "!m.has_forbidden" in passed, f"预检判据缺违规词：\n{passed}"
+    #: ⚠️ 用户口径 2026-10-21：违规词**不再**是发布侧的排除条件（决策权交用户）——
+    #: 用户勾了违规图就该发出去，这里再按 `!has_forbidden` 过滤会变成
+    #: 「勾了但静默丢掉」。保留的只有「未检测不许当合规」与结构性不可发布。
+    assert "!m.has_forbidden" not in passed, (
+        f"passedMedia 仍在按违规词排除（用户勾了会被静默丢弃）：\n{passed}"
+    )
+    assert "!m.unsupported" in passed and "!m.oversized" in passed, (
+        f"结构性不可发布（格式/超限）没排除 —— 选了也发不出去：\n{passed}"
+    )
 
 def test_config_step1_images_can_be_previewed():
     """第二步的商品图片**可点开预览**（用户口径 2026-10-08）。
@@ -10072,10 +10531,26 @@ def test_sku_match_uses_the_complete_sku_text():
     #: ③ **包含**判据（不是相等）—— 这是「样式不固定但一定包含」的落点。
     assert ".includes(" in fn, "没有用包含判据（图片名样式不固定，相等会全废）"
 
-    #: ④ 消歧两道必须都在（包含判据的副作用：短值 ⊂ 长值）。
+    #: ④ 消歧现状（⚠️ 判据随实现换了形态，见下）。
+    #:
+    #: 历史：2026-10-14 是「按值长度降序的命中对列表 + 一图一用」；
+    #: 2026-10-21 用户口径「SKU 图**支持重复匹配**」⇒ 一图一用退场，
+    #: 实现改成**每行独立挑「文件名最短的够用图」**（短值 ⊂ 长图名时
+    #: 不会把长图抢走）—— 排序概念随之消失，所以这里不再查 `b.len - a.len`，
+    #: 而是查「逐行挑最优」这个新判据。
     rows_fn = code[code.index("export function matchSkuRows"):]
-    assert "b.len - a.len" in rows_fn, "没有「最长优先」排序"
-    assert "usedCand" in rows_fn, "没有「一图一用」"
+    assert "bestLen" in rows_fn, "没有「每行挑最贴切图」的判据（短值会抢长值的图）"
+    assert "cand.fileName.length" in rows_fn, "挑图没按文件名长度比较"
+    #: ⚠️ 判据必须是**占用集合本身**，不是子串 `usedCand` ——
+    #: 参数名 `usedCandidates` 里就含这几个字符（实测假红）。
+    assert "usedCand.add(" not in rows_fn and "usedCand.has(" not in rows_fn, (
+        "仍在做「一图一用」（占用去重）—— 同名规格只会第一行匹配上，其余全「未匹配」"
+    )
+    #: ⚠️ 判据 = 「每行独立挑一张」（`best` 变量 + 赋值一次）——
+    #: 原实现用 `usedRow` 集合，随「按行独立挑图」重写后变量名没了。
+    assert "let best" in rows_fn and "out[row] = {" in rows_fn, (
+        "没有「一行只取一张图」的判据（每行仍应只有一个结果）"
+    )
 
 
 def test_sku_match_has_no_mode_type():
@@ -10568,13 +11043,28 @@ def test_price_mapping_presets_four_required_rows_with_empty_sources():
     """
     lib = PRECHECK_MAP.read_text(encoding="utf-8")
     #: ① 四项必修清单齐全（顺序按用户列举）。
-    i = lib.find("REQUIRED_PRICE_TARGETS")
-    block = lib[i : i + 400]
-    #: ⚠️ **五项**（用户口径 2026-10-15：「把『SKU 名称』也加入预置的必修行（变成 5 行）
-    #: —— 它确实是导入必须的」）。缺 `sku_name` ⇒ 一行都读不出来 ⇒
-    #: 报「没有『预检通过且已勾选』的 SKU 行」（用户实测：映射全配对却报这个）。
-    for t in ("sku_name", "spec_image", "price", "market_price", "stock"):
-        assert f'"{t}"' in block, f"必修清单缺 {t}"
+    #: ⚠️ 取**代码体**而不是「从现在往后 400 字」—— 注释里也有方括号 /
+    #: 目标名（如「推翻 2026-10-15 的『五项必配』」），切片会切到注释里，
+    #: 让「缺 price」这类假红（实测踩过）。
+    i = lib.index("export const REQUIRED_PRICE_TARGETS")
+    #: ⚠️ 从 `= [` 之后开始切（类型标注 `readonly PriceTargetKey[]` 里也有 `[]`，
+    #: 从声明处切会在那里被截断 —— 实测切出空串，导致「缺 price」假红）。
+    eq = lib.index("= [", i) + 3
+    block = lib[eq : lib.index("];", eq)]
+    #: ⚠️ **用户口径 2026-10-21 推翻 2026-10-15 的「五项必配」**：
+    #: > 「规格图不应在价格库存映射关系表中再次进行配置，应为在预检步骤中 SKU 图是
+    #: >   固定列……SKU 名称也应无需再让用户配置映射关系，当用户配置完商品 SKU 映射
+    #: >   关系指定的列去重后就是对该组的 sku 规格」
+    #: ⇒ 必配只剩三项（售价 / 市场价 / 库存）；`sku_name` 与 `spec_image`
+    #: **不许**再出现在预置行里（配两遍 = 两份真相源，必然漂移）。
+    #: `block` 已经是 `= [` 与 `];` 之间（见上）⇒ 直接用，别再找方括号。
+    items = block
+    for required in ("price", "market_price", "stock"):
+        assert f'"{required}"' in items, f"必修清单缺 {required}"
+    for gone in ("sku_name", "spec_image"):
+        assert f'"{gone}"' not in items, (
+            f"{gone} 仍在必配行里 —— 它已由商品 SKU 映射 / 固定「SKU 图」列自动决定"
+        )
     #: ② 预置行**只带目标、来源全空**。
     j = lib.find("export function defaultPriceMappingRows")
     body = lib[j : j + 300]

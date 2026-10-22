@@ -2544,6 +2544,8 @@ export interface DataPackageRuleResult {
   /** 逐行结果；`null` = 该行提不出（前端**留空**，不是填原值）。 */
   values: (string | null)[];
   missed: number;
+  /** **算不出来（留空）的行下标**（用户口径 2026-10-21：红框 + 取消勾选）。 */
+  missed_indexes?: number[];
   total: number;
   summary: string;
   /** 有缺值时的原因行（25–30 字）。 */
@@ -2659,6 +2661,13 @@ export async function executeDataPackageRule(payload: {
   values: (string | null)[];
   /** 计算基础列下标（用户口径 2026-10-15）。缺省 = 落值那一列。 */
   source_column?: number;
+  /** **现场覆盖**的规则参数（用户口径 2026-10-21）。
+   *
+   *  「固定数值或文本时应支持用户在 tip 窗口输入自定义文本，
+   *   新建规则输入的文本**作为兜底**」—— 这里传的值**优先**于规则自身参数，
+   *   且只作用于本次执行（不写规则定义）。目前只有 `fixed_text` 用得上 `{text}`。
+   */
+  params_override?: Record<string, unknown>;
 }): Promise<DataPackageRuleResult> {
   const response = await http.post<DataPackageRuleResult>(
     "/xhs/data-package-rules/execute",

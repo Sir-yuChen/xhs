@@ -305,3 +305,40 @@ export function lookup_spec_image<T>(
   }
   return null;
 }
+
+
+/** **把「带维度名」的规格串剥成「纯值序列」**（用户报 2026-10-21）。
+ *
+ *  > 「导入 sku 数据的价格及库存，映射关系配置了，但**数据未填充**」
+ *
+ *  ⚠️ 真根因：两侧 `spec` 格式不同 ——
+ *  · `buildSkuFillPlan` 的 spec = **行级拼接原文**（`skuSpecTextOf`，只拼值）
+ *  · `spec_combinations` 的 spec = **带维度名前缀**（`颜色分类:X / 款式:Y`）
+ *  ⇒ 原串直接比对**一条都匹配不上**，价格库存全空，而界面看起来"导入成功"。
+ *
+ *  ⚠️ 只切**第一个冒号**：值本身可能含冒号（`尺寸/图案任意定制【联系客服】`）。
+ */
+export function stripDimPrefix(spec: string): string {
+  return String(spec ?? "")
+    .split(" / ")
+    .map((part) => {
+      const at = part.indexOf(":");
+      return (at >= 0 ? part.slice(at + 1) : part).trim();
+    })
+    .join(" / ");
+}
+
+/** **按 spec 取填充值**：先原串精确命中，再按剥前缀的值序列命中。
+ *
+ *  两条路都留着：将来两侧格式若统一，快路径仍然先命中；
+ *  现在（格式不同）走第二条 —— 这是"价格库存能填上"的唯一依据。
+ */
+export function lookupSpecFill<T extends { spec: string }>(
+  fills: readonly T[],
+  comboSpec: string,
+): T | undefined {
+  const exact = fills.find((f) => f.spec === comboSpec);
+  if (exact) return exact;
+  const want = stripDimPrefix(comboSpec);
+  return fills.find((f) => stripDimPrefix(f.spec) === want);
+}

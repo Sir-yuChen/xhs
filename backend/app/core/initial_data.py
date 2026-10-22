@@ -47,6 +47,12 @@ PROMPT_TEMPLATES_FILENAME = "prompt_templates.json"
 #: LLM 网关服务商种子初始化数据文件名（2026-10-13 用户口径「国内常见 6 个服务商作为种子」）
 GATEWAY_PROVIDERS_FILENAME = "llm_gateway_providers.json"
 
+#: 违规词内置种子文件名（2026-10-21 用户口径「把当前违规词作为新的种子数据」）
+#:
+#: ⚠️ 违规词是**用户资产**：播种只在「该用户该分组一条都没有」时发生，
+#: 用户改过 / 删过的不重建、不覆盖（同 `data_package_rules.json` 的纪律）。
+FORBIDDEN_WORDS_FILENAME = "forbidden_words.json"
+
 
 def _project_root() -> Path:
     """与 `core/config.py::_load_yaml_config()` 同一口径（frozen 下 = `_internal/`）。"""
@@ -532,4 +538,71 @@ def load_initial_gateway_providers() -> list[dict[str, Any]]:
         if item is not None:
             normalized.append(item)
     logger.info("initial_data: 载入 %s 个服务商种子初始化数据", len(normalized))
+    return normalized
+
+
+def _normalize_forbidden_word(raw: Any) -> dict[str, Any] | None:
+    """单条违规词种子 → 规范 dict；字段非法 ⇒ `None`（丢弃该条 + warning）。
+
+    白名单一律从 `models/forbidden_word.py` 的常量取 —— **不在这里重抄一份**
+    （匹配模式枚举漂移即缺陷，同 `_normalize_scheduled_job` 的纪律）。
+    词本身不做归一化：存/显示用用户原文，比较时才归一化（`forbidden_word_service`）。
+    """
+    from backend.app.models.forbidden_word import DEFAULT_GROUP, MATCH_MODES
+
+    if not isinstance(raw, dict):
+        logger.warning("initial_data: 违规词条目不是对象（%r），已跳过", type(raw).__name__)
+        return None
+
+    word = raw.get("word")
+    if not isinstance(word, str) or not word.strip():
+        logger.warning("initial_data: 违规词条目缺少 word，已跳过")
+        return None
+
+    try:
+        mode = int(raw.get("match_mode") or 2)
+    except (TypeError, ValueError):
+        mode = -1
+    if mode not in MATCH_MODES:
+        logger.warning(
+            "initial_data: 违规词 %r 的 match_mode=%r 不在白名单 %s，已跳过该条",
+            word, raw.get("match_mode"), list(MATCH_MODES),
+        )
+        return None
+
+    group = str(raw.get("group_name") or DEFAULT_GROUP).strip() or DEFAULT_GROUP
+    return {
+        "word": word.strip(),
+        "match_mode": mode,
+        "group_name": group,
+        "remark": str(raw.get("remark") or "").strip(),
+        "enabled": bool(raw.get("enabled", True)),
+    }
+
+
+def load_initial_forbidden_words() -> list[dict[str, Any]]:
+    """违规词内置种子（规范化后的列表；任何问题 ⇒ warning + 可用部分）。
+
+    ⚠️ 这里只描述「种子是什么」；**播不播、播给谁**由
+    `forbidden_word_service.seed_builtin_words` 判（用户资产，不可覆盖）。
+    """
+    payload = _load_payload(FORBIDDEN_WORDS_FILENAME)
+    if payload is None:
+        return []
+    if not isinstance(payload, dict):
+        logger.warning("initial_data: %s 顶层不是对象，已忽略", FORBIDDEN_WORDS_FILENAME)
+        return []
+    rows = payload.get("forbidden_words")
+    if not isinstance(rows, list):
+        logger.warning(
+            "initial_data: %s 缺少 forbidden_words 数组，已忽略", FORBIDDEN_WORDS_FILENAME
+        )
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    for raw in rows:
+        item = _normalize_forbidden_word(raw)
+        if item is not None:
+            normalized.append(item)
+    logger.info("initial_data: 载入 %s 条违规词种子初始化数据", len(normalized))
     return normalized

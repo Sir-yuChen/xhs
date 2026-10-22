@@ -212,6 +212,10 @@ class Settings(BaseSettings):
     # ⚠️ 运行期可在设置页改（`system_settings` 行优先于本值，见 services/settings_service.py）。
     xhs_ocr_parallelism: int = 5
 
+    # SKU 规格名称字数上限（用户口径：30 字 = 60 字符，汉字计 2、ASCII 计 1）。
+    # ⚠️ 第 3 层兜底：正常安装路径读随包种子铺设的 `system_settings` 行。
+    xhs_sku_name_max_chars: int = 60
+
     # 商品笔记重复发布开关（设计 13 §31.5.2，2026-09-28 用户口径）。
     # 默认 **False** = 同一商品已有笔记（已发布 / 正在发布）时，再点发布 / 批量发布
     # **不再发布**，该笔记落 `publish_status=failed` + 原因「挂载的商品已经发布过笔记」。

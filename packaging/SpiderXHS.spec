@@ -60,19 +60,28 @@ datas = [
 ]
 
 #: ⚠️⚠️ **RapidOCR 必须显式收进包**（2026-10-20 实测漏了）
-#: 违规词检测的**主引擎**是 RapidOCR（PP-OCRv4 ONNX，纯 CPU）；
-#: PyInstaller **不会**自动收集它的 3 个 `.onnx` 模型（它们是包内数据文件，
-#: 不是被 import 进来的），也不一定跟到 `rapidocr_onnxruntime` 的隐式导入。
+#: 违规词检测的**主引擎**是 RapidOCR（现为 `rapidocr` 3.x / PP-OCRv5 ONNX，纯 CPU）；
+#: PyInstaller **不会**自动收集它的 `.onnx` 模型（它们是包内数据文件，
+#: 不是被 import 进来的），也不一定跟到 `rapidocr` 的隐式导入。
 #: 漏了的后果：本地开发环境一切正常（模型在 site-packages 里），
 #: 而**装好的客户端**一点「预检」就 500 —— 现场报「检查违规词异常 预检失败」。
-#: ⇒ 把整个包目录（含 `models/*.onnx`）按原相对路径拷进 `_internal`，
-#: 让 `rapidocr_onnxruntime` 在 frozen 下能按 `__file__` 找到模型。
+#: ⇒ 把整个包目录（含 `models/*.onnx`、`config.yaml`、`default_models.yaml`）按原
+#: 相对路径拷进 `_internal`，让 `rapidocr` 在 frozen 下能按 `__file__` 找到模型。
+#:
+#: ⚠️ **3.x 的模型是首次使用时自动下载到 `models/` 的**。构建机（本机）跑过一次
+#: 预检后 `models/` 里就有 3 个 onnx；若构建机上没有，`_rapidocr_data` 只会收到
+#: 空目录 ⇒ 装包版第一次预检要联网下载（离线机器直接失败）。构建自检
+#: （`build.ps1` / 测试）要断言模型文件确实进了包。
+
+_OCR_PKG_NAME = "rapidocr"
 
 
 def _rapidocr_data():
-    """把已安装的 `rapidocr_onnxruntime` 整包收进 `_internal`（含 onnx 模型）。"""
+    """把已安装的 `rapidocr` 整包收进 `_internal`（含 onnx 模型与 yaml 配置）。"""
     try:
-        import rapidocr_onnxruntime as _rapid  # noqa: PLC0415 - 构建期探测
+        import importlib
+
+        _rapid = importlib.import_module(_OCR_PKG_NAME)  # noqa: PLC0415 - 构建期探测
     except ImportError:
         return []
     pkg_dir = os.path.dirname(_rapid.__file__)
@@ -81,7 +90,14 @@ def _rapidocr_data():
         for name in files:
             src = os.path.join(root, name)
             rel = os.path.relpath(src, pkg_dir)
-            out.append((src, os.path.join("rapidocr_onnxruntime", os.path.dirname(rel)) if os.path.dirname(rel) else "rapidocr_onnxruntime"))
+            out.append(
+                (
+                    src,
+                    os.path.join(_OCR_PKG_NAME, os.path.dirname(rel))
+                    if os.path.dirname(rel)
+                    else _OCR_PKG_NAME,
+                )
+            )
     return out
 
 
@@ -127,17 +143,21 @@ a = Analysis(
         #: ⚠️ 以下全是**函数内延迟 import** 的第三方包 —— PyInstaller 的静态分析
         #: 只看模块顶层，写进 try/函数体的导入**跟不到**，于是包里没有它们，
         #: 而开发环境一切正常（site-packages 里有）。2026-10-20 体检逐个发现：
-        #:   · rapidocr_onnxruntime —— 违规词检测主引擎（装包版点预检 500）
+        #:   · rapidocr            —— 违规词检测主引擎（装包版点预检 500）
         #:   · openpyxl             —— 数据包 xlsx 导入（缺则「缺少 openpyxl 依赖」）
         #:   · alembic              —— 启动时跑迁移（缺则静默退化成 create_all，
         #:                             老库不升级表结构 / 迁移里的数据修正不执行）
         #:   · psutil               —— 多实例租约的 PID 存活探测（缺则走兜底）
         #:   · send2trash           —— 素材文件删除进回收站（缺则抛错不删）
-        + _safe_submodules("rapidocr_onnxruntime")
+        #:   · xlrd                —— 老式 .xls 数据包（2026-10-21「常用表格格式」）
+        #:   · pyxlsb              —— .xlsb 数据包（同为延迟 import）
+        + _safe_submodules(_OCR_PKG_NAME)
         + _safe_submodules("openpyxl")
         + _safe_submodules("alembic")
         + _safe_submodules("send2trash")
         + _safe_submodules("psutil")
+        + _safe_submodules("xlrd")
+        + _safe_submodules("pyxlsb")
     ),
     hookspath=[],
     hooksconfig={},

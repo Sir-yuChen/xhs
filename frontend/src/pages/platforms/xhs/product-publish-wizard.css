@@ -84,19 +84,55 @@
  *   ③ 置灰（opacity，与命中违规词的卡片同口径）。
  * 勾选框的 `disabled` 由 `getCheckboxProps` 控制（结构上点不了，不是靠样式）。
  * ------------------------------------------------------------------ */
-.publish-sku-row-blocked > td {
+/*: ⚠️ 旧的行级红框规则（`.publish-sku-row-blocked > td`）**已删除** ——
+ * 在 antd 6 虚拟表格下 `<td>` 不是 `<tr>` 的直接子级，选择器匹配不到，
+ * 等于一格都没画（用户连报两轮「没有红框」的真根因）。
+ * 现在统一用下面的 `.publish-sku-cell-blocked`（单元格级）。 */
+
+/* ---- 整行标红：**单元格级**（用户口径 2026-10-21） ----
+ *
+ * ⚠️ 原来的 `.publish-sku-row-blocked > td` **在 antd 6 虚拟表格下匹配不到**：
+ * `<td>` 不是 `<tr>` 的直接子级（行被包在虚拟滚动容器里）⇒ 红框一格都没画出来。
+ * 用户连报两轮「规则无法处理时没有红框」，根因就是这条选择器根本命中不了。
+ *
+ * ⇒ 改为给**单元格自己**加类（各列的 `onCell`），不依赖 DOM 结构。
+ * ⚠️ 用 `box-shadow: inset` 而不是 `border`：`border` 会改变单元格尺寸，
+ * 在 `max-content` 宽 + 虚拟滚动下让行与表头错位（尺寸一变就抖）。
+ */
+/*: ⚠️ 每格只画**上下边 + 首格左边 + 末格右边**，而不是每格画一圈内阴影：
+ * 每格一圈会让相邻两格的框线**双倍粗细**、且行与行之间出现断口（视觉上不是「一行红框」，
+ * 而是一排小格子各画了个框）。用户要的是「**对应的行的数据一行红框展示**」。
+ * 判据：`th/td` 之间的分隔线由 antd 自己画，我们只补「整行四周」那一圈。
+ */
+.publish-sku-cell-blocked {
   background: #fff1f0 !important;
   border-top: 1px solid #ff4d4f !important;
   border-bottom: 1px solid #ff4d4f !important;
-  opacity: 0.72;
 }
 
-.publish-sku-row-blocked > td:first-child {
+/*: 行首 / 行尾补左右两边 ⇒ 合起来才是完整一圈。
+ * ⚠️ 用 `:first-child` / `:last-child` 而不是在 JSX 里判断「哪一列是第一个」：
+ * 列是动态的（SKU 图固定列 + 所有数据列 + 预检列），在 JS 里算边界会把
+ * 「第一个可见列」硬编码进组件，用户删列 / 加列后又算错。
+ * ⚠️ 需要 `td` 前缀提高优先级（`td:first-child` 的权重高于单类名）。 */
+td.publish-sku-cell-blocked:first-child {
   border-left: 1px solid #ff4d4f !important;
 }
 
-.publish-sku-row-blocked > td:last-child {
+td.publish-sku-cell-blocked:last-child {
   border-right: 1px solid #ff4d4f !important;
+}
+
+/* ---- 数值不可计算的格子：红框（用户口径 2026-10-21） ----
+ *
+ * > 「红框中**非数值且小于等于 0**，则无法计算应红框提示」
+ *
+ * ⚠️ 只标**那一格**（不标整行）：整行全红会让用户找不到到底哪一格有问题。
+ * ⚠️ 用 `box-shadow inset` 而不是 `border`：`border` 会改变单元格尺寸，
+ * 让这一行的列宽与表头错位（表格是 `max-content` 宽 + 虚拟滚动，尺寸一变就抖）。
+ */
+td.publish-sku-cell-bad {
+  box-shadow: inset 0 0 0 1px #ff4d4f;
 }
 
 

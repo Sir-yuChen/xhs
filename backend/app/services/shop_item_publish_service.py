@@ -176,7 +176,14 @@ def build_item_from_request(
         #: SKU 名形如 `颜色分类:白 / 尺寸:1.2m`（多维度用 `/` 分隔）⇒ **逐维度**取 id。
         #: 只认第一个冒号、所有行共用同一个 id 的旧写法，会把多维规格塌成一维
         #: ⇒ 真机报「variants - 当前商品存在重复的规格，请删除重复规格后重试」。
-        for part in str(row.get("name") or "").split("/"):
+        #: ⚠️⚠️ **只按 `" / "`（空格-斜杠-空格）切维度**，不按裸 `/` 切。
+        #: 真机数据反例：`颜色分类:奇遇童话01 / 款式:尺寸/图案任意定制【联系客服】`
+        #: —— 值本身**含 `/`**（「尺寸/图案任意定制」）。按裸 `/` 切会把它劈成
+        #: `款式:尺寸` + `图案任意定制【联系客服】` 两段 ⇒ **款式值被截成「尺寸」**，
+        #: 后半段丢失且不报错（上架后规格值就是错的，属于最坏的静默错）。
+        #: 拼接侧（`precheck-publish.skuSpecTextOf` / `spec_combinations`）用的是
+        #: `" / "`，两侧必须**同一约定**。
+        for part in str(row.get("name") or "").split(" / "):
             head, sep, tail = part.partition(":")
             if not sep:
                 head, sep, tail = part.partition("：")
@@ -254,13 +261,25 @@ def build_item_from_request(
             ),
         ))
 
-    #: ⚠️ 2026-10-10：发货模式「中文 → 数字」映射。真机只抓到「现货模式=1」，
-    #: 其余三种（全款预售/现货+预售/按规格设置）的数字值**未真机确认** ⇒
-    #: 先只接现货=1，其它留 None（用骨架旧值），绝不猜数字污染提交体。
-    _delivery_mode: int | None = None
-    _dm = str(cfg.get("deliveryMode") or "")
-    if _dm == "现货模式":
-        _delivery_mode = 1
+    #: ⚠️⚠️ **`deliveryMode` 是「物流类型」的字段，不是「发货模式」**。
+    #:
+    #: 真机实测（CDP 直读千帆商品编辑页，2026-10-21）：
+    #:   · 「物流配送」的 radio `value = "0"`；
+    #:   · 「无物流发货或物流配送」只在类目支持时才出现（另有一档值）。
+    #: 而「物流配送」一直是唯一/默认选项，**提交体必须发 0**。
+    #:
+    #: 旧实现把它当发货模式、填 `1`（骨架默认），平台收到 1 判成
+    #: 「无物流发货」⇒ 用户实测报错
+    #: **「发布未通过（1 条原因）：deliveryMode — 商品不支持设置无物流发货」**。
+    #:
+    #: 发货模式的真身是 **SKU 级 `skuData[].deliveryTime`**（见 `build_delivery_time`），
+    #: 与 `deliveryMode` 无关 —— 两者此前被混成同一个字段。
+    _delivery_mode: int | None = pub.LOGISTICS_TYPE_LOGISTICS
+    _logistics = str(cfg.get("logisticsType") or "").strip()
+    if _logistics == "无物流发货或物流配送":
+        #: 只有该类目**确实支持**「无物流发货」时用户才可能选到它
+        #: （前端按类目下发候选），此时才发对应的数字值。
+        _delivery_mode = pub.LOGISTICS_TYPE_NOT_LOGISTICS_VALUE
 
     return pub.build_item_body(
         skeleton=skeleton,

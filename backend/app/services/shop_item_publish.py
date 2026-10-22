@@ -61,6 +61,20 @@ _DROP_FROM_SKELETON: frozenset[str] = frozenset({
     "enableAIOptimizeImage",
 })
 
+#: 物流类型数字口径 —— **唯一定义在 `core/qianfan_item_enums.py`**（带真机取证）。
+#: 这里保留别名只为兼容既有引用；新代码直接用 `LogisticsType`。
+from backend.app.core.qianfan_item_enums import (  # noqa: E402  (常量区紧随 import)
+    DeliveryTimeType,
+    FreeReturn,
+    LogisticsType,
+    PlaybackWidget,
+    SPOT_SHIP_TIME_H48,
+    StockType,
+)
+
+LOGISTICS_TYPE_LOGISTICS: int = LogisticsType.LOGISTICS
+LOGISTICS_TYPE_NOT_LOGISTICS_VALUE: int = LogisticsType.NOT_LOGISTICS
+
 #: `itemData[]` 里我们**自己填**的顶层键；其余从 `publish_render` 骨架继承。
 #: 平台强制的默认值（真机取证）—— 这些键不填平台会报缺字段或取错默认。
 _PLATFORM_DEFAULTS: dict[str, Any] = {
@@ -68,10 +82,14 @@ _PLATFORM_DEFAULTS: dict[str, Any] = {
     #: 但发布体**必须有它** —— 真机抓包实值 `"-999"`（= 无品牌，与页面「商品品牌：无品牌」一致）。
     #: 2026-10-10 真机体逐字段 diff 实测：缺它是我方唯一「真机有我无」的**顶层**键。
     "brandId": "-999",
-    "stockType": 1,
-    "deliveryMode": 1,          # 现货模式
-    "freeReturn": 1,            # 支持七天无理由
-    "usePlayback": 1,
+    "stockType": int(StockType.SPOT),
+    #: ⚠️⚠️ **是「物流类型」，不是「发货模式」**（原注释写「现货模式」是错的）。
+    #: 真机 CDP 直读（2026-10-21）：「物流配送」radio `value = "0"`。
+    #: 填 1 会被平台判成「无物流发货」⇒ 报
+    #: 「deliveryMode — 商品不支持设置无物流发货」（用户实测）。
+    "deliveryMode": int(LogisticsType.LOGISTICS),
+    "freeReturn": int(FreeReturn.SUPPORTED),
+    "usePlayback": int(PlaybackWidget.SHOWN),
     "enableMultiWarehouse": False,
     "source": 2,                # 真机抓包值
     "qualifications": [],
@@ -249,7 +267,11 @@ def build_publish_sku(
     #: mainSpecEnable=1 时每个 SKU 都要规格图（真机：缺 ⇒ 「请上传规格图」）。
     if spec_image:
         entry["specImage"] = spec_image
-    entry["deliveryTime"] = delivery_time or {"type": 4, "time": "48"}
+    #: 兜底 = 现货 48 小时（平台默认「推荐」档）。
+    entry["deliveryTime"] = delivery_time or {
+        "type": int(DeliveryTimeType.HOURS),
+        "time": SPOT_SHIP_TIME_H48,
+    }
     #: ⚠️ 2026-10-10 对齐真机（bundle 权威字段名）：条形码 / 商家编码是 SKU 合法字段，
     #: 用户填了才带（空 = 省略，真机不填时 `skuData[]` 无这两个键）。
     if barcode:
@@ -326,9 +348,9 @@ def build_delivery_time(
         if hours is None:
             hours = SPOT_SHIP_TIME_HOURS.get(norm)
         if hours == 0:
-            return {"type": 3}
+            return {"type": int(DeliveryTimeType.SAME_DAY)}
         if hours:
-            return {"type": 4, "time": str(hours)}
+            return {"type": int(DeliveryTimeType.HOURS), "time": str(hours)}
 
     if mode in (MODE_PRESALE, MODE_SPOT_PLUS, MODE_BY_SPEC):
         #: 「按规格设置发货时间」时**每行各自有** `rowShipAging`（前端那列「发货时间」），
@@ -337,10 +359,10 @@ def build_delivery_time(
         if kind == "定时预售" or aging.startswith("定时预售"):
             date = str(sale_time or "").strip()
             if date:
-                return {"type": 5, "time": date}
+                return {"type": int(DeliveryTimeType.DATE), "time": date}
         #: 时段预售：付款后 N 天 ⇒ **小时数**（真机 15天 ⇒ 360）。
         if presale_days:
-            return {"type": 4, "time": str(int(presale_days) * 24)}
+            return {"type": int(DeliveryTimeType.HOURS), "time": str(int(presale_days) * 24)}
         #: ⚠️ **「现货 / 48小时」必须先判**（2026-10-15 实测咬到）：
         #: 「按规格」模式下该行文案形如 `「现货 / 48小时」` —— 若先走下面的
         #: 「取数字 × 24」分支，会把 **48 小时当成 48 天** ⇒ `1152`（差 24 倍）。
@@ -348,17 +370,21 @@ def build_delivery_time(
         tail = aging.split("/")[-1].strip() if "/" in aging else aging
         tail_hours = SPOT_SHIP_TIME_HOURS.get(tail)
         if tail_hours is not None:
-            return {"type": 3} if tail_hours == 0 else {"type": 4, "time": str(tail_hours)}
+            return (
+                {"type": int(DeliveryTimeType.SAME_DAY)}
+                if tail_hours == 0
+                else {"type": int(DeliveryTimeType.HOURS), "time": str(tail_hours)}
+            )
         #: 现货+预售 / 按规格：把「15天」这类文案转成小时。
         if "天" in tail:
             digits = "".join(ch for ch in tail if ch.isdigit())
             if digits:
-                return {"type": 4, "time": str(int(digits) * 24)}
+                return {"type": int(DeliveryTimeType.HOURS), "time": str(int(digits) * 24)}
         #: 「24小时」「48小时」这类（不带「/」的形态）。
         if "小时" in tail:
             digits = "".join(ch for ch in tail if ch.isdigit())
             if digits:
-                return {"type": 4, "time": digits}
+                return {"type": int(DeliveryTimeType.HOURS), "time": digits}
     return None
 
 

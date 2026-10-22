@@ -306,19 +306,29 @@ export function matchesSkuName(
 
 /** 逐行匹配（**唯一实现**：弹窗预览与上抛都用它）。
  *
- *  ## 消歧：全局最长优先 + 一图一用
+ *  ## 消歧：全局最长优先 + **一图可复用**
  *
  *  包含判据下，短规格名会命中长规格名的图
  *  （值 `伸缩桌+三斗柜梳妆台` ⊂ 图名 `…伸缩桌+三斗柜梳妆台+云朵妆镜.jpg`）。
- *  两道消歧（真包 26 条实测 **26/26 全对、零错配**）：
  *
  *  1. **最长优先**：把所有 (行, 图) 命中对按**值长度降序**分配 ——
  *     长值先挑，短值不会把长值该拿的图抢走；
- *  2. **一图一用**：一张图只能被一行占用（「一个规格一行、一行一张图」的
- *     自然语义，也避免了多行指向同一张图时无法判断谁对）。
+ *  2. ⚠️ **同一张图可以被多行匹配**（用户口径 2026-10-21：见下）。
  *
- *  `usedCandidates` 里的图**不参与**（供调用方让位给手选 —— 用户判断优先）。
- *  仅说「哪些图已经名花有主」，本函数**自己不看**手选结果。
+ *  ## ⚠️ 2026-10-21 推翻「一图一用」（用户口径）
+ *
+ *  > 「SKU 图自动匹配中 SKU 图**支持重复匹配**」
+ *
+ *  原实现「一图一用」在真实包上暴露成**大面积未匹配**：24 张 SKU 图对 456 行，
+ *  同名规格（`奇遇童话 01` 出现多次）只有第一行能拿到图，其余全部「未匹配」。
+ *  而业务上「一张图对应多个同规格的 SKU」是完全正常的。
+ *
+ *  ⇒ 现在**只做最长优先、不做占用去重**：每一行各自挑「名字包含自己 SKU 名的
+ *  最长那个候选」。最长优先仍在，只是不再有「被谁占了」的概念 ——
+ *  否则取消复用后，短值行会抢走长值行该有的图。
+ *
+ *  ⚠️ `usedCandidates` 参数**保留但语义收窄**：它仍表示「这些图不参与」
+ *  （调用方给手选让位），只是不再随着分配过程增长 —— 它**不是**占用集合。
  */
 export function matchSkuRows(
   rows: readonly { skuName: string }[],
@@ -326,35 +336,46 @@ export function matchSkuRows(
   skuPattern: string,
   usedCandidates: ReadonlySet<string> = new Set(),
 ): { relPath: string | null; fileName: string }[] {
-  //: 值长度是消歧的第一判据。
   const keys = rows.map((r) => applyExtract(String(r.skuName ?? ""), skuPattern).trim());
-
-  const hits: { row: number; cand: number; len: number }[] = [];
-  rows.forEach((_, row) => {
-    const key = keys[row];
-    if (!key) return;
-    candidates.forEach((cand, ci) => {
-      if (!cand.relPath || usedCandidates.has(cand.relPath)) return;
-      if (imageBaseName(cand.fileName).includes(key)) {
-        hits.push({ row, cand: ci, len: key.length });
-      }
-    });
-  });
-  //: 值越长越先分配（长度相同则按原有先后，稳定排序）。
-  hits.sort((a, b) => b.len - a.len);
-
-  const out = rows.map(() => ({ relPath: null as string | null, fileName: "" }));
-  const usedRow = new Set<number>();
-  const usedCand = new Set<number>();
-  for (const h of hits) {
-    if (usedRow.has(h.row) || usedCand.has(h.cand)) continue;
-    usedRow.add(h.row);
-    usedCand.add(h.cand);
-    out[h.row] = { relPath: candidates[h.cand].relPath, fileName: candidates[h.cand].fileName };
-  }
-  return out;
+  return keys.map((key) => pickSkuImageFor(key, candidates, usedCandidates));
 }
 
+/** **给一个 SKU 名挑一张图**（匹配的**唯一判据实现**）。
+ *
+ *  判据 = 候选里「文件名（去目录去扩展名）**包含**该 SKU 名」的那几张里，
+ *  取**文件名最短**的（最贴合该规格；长名字的图往往是多规格合在一起的图）。
+ *
+ *  ⚠️ 同一张图允许被**多个 SKU 名复用**（用户口径 2026-10-21：
+ *  「SKU 图自动匹配中 SKU 图**支持重复匹配**」）—— 参数 `usedCandidates`
+ *  只表示「这些图不参与」（调用方给手选让位），**不是**占用集合。
+ *
+ *  ⚠️ 抽成独立函数是为了**能 await 一帧**：调用方（弹窗的「执行匹配」）
+ *  需要先让等待蒙版落屏再跑计算，所以按行逐个 `await` 一帧即可让出主线程，
+ *  而不是把整段 456 行的计算塞进一次同步调用（那时蒙版永远画不出来）。
+ */
+export function pickSkuImageFor(
+  /** **已提取好的** SKU 名（调用方先过 `applyExtract`；这里不再二次提取，
+   *  否则调用方传进来的正则会被丢掉，长值/短值的消歧判据全失效）。 */
+  key: string,
+  candidates: readonly { fileName: string; relPath: string }[],
+  usedCandidates: ReadonlySet<string> = new Set(),
+): { relPath: string | null; fileName: string } {
+  const normalized = String(key ?? "").trim();
+  if (!normalized) return { relPath: null, fileName: "" };
+  let best = -1;
+  let bestLen = Number.POSITIVE_INFINITY;
+  candidates.forEach((cand, ci) => {
+    if (!cand.relPath || usedCandidates.has(cand.relPath)) return;
+    if (!imageBaseName(cand.fileName).includes(normalized)) return;
+    const len = cand.fileName.length;
+    if (len < bestLen) {
+      best = ci;
+      bestLen = len;
+    }
+  });
+  if (best < 0) return { relPath: null, fileName: "" };
+  return { relPath: candidates[best].relPath, fileName: candidates[best].fileName };
+}
 
 /** 编译匹配正则（不抛错）。 */
 export function compileMatchPattern(pattern: string): { re: RegExp | null; error: string } {

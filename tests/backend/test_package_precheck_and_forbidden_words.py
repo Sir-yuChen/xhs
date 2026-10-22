@@ -188,13 +188,28 @@ class TestLocateHits:
 
 @pytest.fixture()
 def auth(api_client):
-    """注册并返回鉴权头（复用公共夹具，不自己建 engine）。"""
+    """注册并返回鉴权头（复用公共夹具，不自己建 engine）。
+
+    ⚠️ **2026-10-21 起注册会播种内置违规词**（7 条「小红书」组种子，用户口径
+    「把当前违规词作为新的种子数据」）。本文件大量用例断言的是「**我**建的词」，
+    所以这里注册后先把种子清空 —— 种子本身的行为由
+    `test_forbidden_word_seed.py` 单独钉，两者互不干扰。
+    """
     r = api_client.post(
         "/api/auth/register", json={"username": "fwuser", "password": "Passw0rd!"}
     )
     assert r.status_code in (200, 201), r.text
     token = r.json()["access_token"]
-    return {"Authorization": f"Bearer {token}"}
+    headers = {"Authorization": f"Bearer {token}"}
+    _clear_seeded_words(api_client, headers)
+    return headers
+
+
+def _clear_seeded_words(api_client, headers) -> None:
+    """删掉注册时播种的内置违规词（只影响本用例的用户）。"""
+    listing = api_client.get("/api/xhs/forbidden-words", headers=headers).json()
+    for row in listing or []:
+        api_client.delete(f"/api/xhs/forbidden-words/{row['id']}", headers=headers)
 
 
 class TestForbiddenWordCrud:
@@ -288,6 +303,8 @@ class TestForbiddenWordCrud:
 
         r = api_client.post("/api/auth/register", json={"username": "other", "password": "Passw0rd!"})
         other = {"Authorization": f"Bearer {r.json()['access_token']}"}
+        #: 对方注册时也会有内置种子 ⇒ 先清掉，才谈「他的列表为空」。
+        _clear_seeded_words(api_client, other)
         assert api_client.get("/api/xhs/forbidden-words", headers=other).json() == []
         # 别人的词也改不了（404 而不是 403：存在性本身不泄露）
         listing = api_client.get("/api/xhs/forbidden-words", headers=auth).json()
@@ -1397,14 +1414,22 @@ class TestForbiddenWordGroups:
         assert resp.status_code == 409, resp.text
 
     def test_cross_user_groups_are_isolated(self, api_client, auth):
-        """数据隔离：另一个用户的列表 / 分组清单都是空的。"""
+        """数据隔离：另一个用户看不到 A 的组（他自己的种子除外）。
+
+        ⚠️ 2026-10-21 起注册会播种内置违规词（7 条「小红书」组种子，用户口径
+        「把当前违规词作为新的种子数据」）⇒ 新用户的分组清单**不再是空的**，
+        而是恰好只有种子那一个组。断言从「空」改成「只有种子组、且看不到别人的组」，
+        这才是真正要保的性质（隔离），而不是「空」这个易变的表象。
+        """
         self._make(api_client, auth, "a", "A的组")
         r = api_client.post(
             "/api/auth/register", json={"username": "fw_other", "password": "Passw0rd!"}
         )
         other = {"Authorization": f"Bearer {r.json()['access_token']}"}
-        assert api_client.get("/api/xhs/forbidden-words", headers=other).json() == []
-        assert api_client.get("/api/xhs/forbidden-words/groups", headers=other).json() == []
+        words = api_client.get("/api/xhs/forbidden-words", headers=other).json()
+        groups = api_client.get("/api/xhs/forbidden-words/groups", headers=other).json()
+        assert {w["group_name"] for w in words} == {"小红书"}, "别人的词泄漏到新用户了"
+        assert {g["name"] for g in groups} == {"小红书"}, f"分组泄漏：{groups}"
 
     def test_default_match_mode_is_exact(self, api_client, auth):
         """用户口径 2026-10-08：「违规词的匹配方式**默认精确**」。
