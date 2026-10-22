@@ -107,6 +107,9 @@ class Child:
             creationflags=CREATE_NO_WINDOW,
         )
         self.started_at = time.time()
+        #: ⚠️ 只在这里清退避时间 —— **`ensure()` 失败分支绝不能调 `start()`**，
+        #: 否则刚算好的 `next_start_at` 会被这行立刻抹掉，退避形同虚设
+        #: （2026-10-22 实测：日志写「restart in 300s」但每 5 秒重启一次）。
         self.next_start_at = 0.0
         log(f"{self.name} started (pid {self.process.pid})")
 
@@ -121,10 +124,21 @@ class Child:
             if self.failures and time.time() - self.started_at > 60:
                 self.failures = 0
             return
-        #: 退避：第 n 次连续失败等 BACKOFF_STEPS[min(n, 末位)] 秒。
+
+        #: ⚠️⚠️ **这里只登记退避，不立即重启**（用户实测 2026-10-22：失败计数涨到 29、
+        #: 每条日志都写着「restart in 300s」却**每 5 秒就重启一次**）。
+        #:
+        #: 两个 bug 叠在一起：
+        #:   ① `start()` 里会把 `next_start_at` 清零 —— 在 ensure() 里先算退避、
+        #:      紧接着调 `start()` ⇒ 退避刚写就被抹掉，实际间隔永远是主循环的 5s。
+        #:      正解：**只设 `process=None` + `next_start_at`**，让下一轮 ensure()
+        #:      按时间判断，到点才 start。
+        #:   ② `failures` 只增不减 ⇒ 日志里的 `fail #N` 和延迟都失真。
+        #:      （跑满 60 秒会归零，这一半是对的，保留。）
         delay = BACKOFF_STEPS[min(self.failures, len(BACKOFF_STEPS) - 1)]
         self.failures += 1
         self.next_start_at = time.time() + delay
+        self.process = None
         log(f"{self.name} exited (code {code}) → restart in {delay}s (fail #{self.failures})")
         if self.handle is not None:
             try:

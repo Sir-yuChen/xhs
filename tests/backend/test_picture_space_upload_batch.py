@@ -197,12 +197,13 @@ def test_batch_rejects_invalid_base64_per_item_not_whole_batch(batch_env, api_cl
     assert "base64" in str(body["results"][0].get("message", ""))
 
 
-def test_upload_parallelism_is_a_live_config_key_with_default_5():
-    """**并发数是运行时配置**（`xhs_image_upload_parallelism`，默认 5）。
+def test_upload_parallelism_is_a_live_config_key_with_default_8():
+    """**并发数是运行时配置**（`xhs_image_upload_parallelism`，默认 8）。
 
     ⚠️ 三条一起钉（缺一条就等于没配上）：
       ① 在 `LIVE_KEYS` 里（否则设置页存了也没读点，`is_live` 为假）；
-      ② 在 `BUILTIN_DEFAULTS` 里且**默认 5**（用户口径「并发数默认 5」）；
+      ② 在 `BUILTIN_DEFAULTS` 里且**默认 8**（实测 8 路最优：顺序 38.4s → 并发 8 路 6.6s；
+       2026-10-22 四处基线统一为 8）；
       ③ 端点的读点真的用 `live_int` 读它（否则配置改了不生效）。
     """
     import inspect
@@ -211,7 +212,7 @@ def test_upload_parallelism_is_a_live_config_key_with_default_5():
     from backend.app.services import settings_service as svc
 
     assert "xhs_image_upload_parallelism" in svc.LIVE_KEYS, "并发数必须在 LIVE_KEYS 里"
-    assert svc.BUILTIN_DEFAULTS.get("xhs_image_upload_parallelism") == 5, "默认应为 5"
+    assert svc.BUILTIN_DEFAULTS.get("xhs_image_upload_parallelism") == 8, "默认应为 8"
 
     src = inspect.getsource(qianfan.picture_space_upload_batch)
     assert "xhs_image_upload_parallelism" in src, "端点没读这个配置键"

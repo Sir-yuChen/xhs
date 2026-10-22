@@ -634,9 +634,26 @@ def video_upload(
     file_name = f"{hashlib.md5(raw).hexdigest()}{ext.lower()}"
 
     adapter = _ark_adapter_for(db, account, adapter_factory)
-    # 1) 申请凭证 —— 视频场景是 `common_file`（bundle 逆出），并把扩展名带上。
+    #: ⚠️⚠️ **`scene` 必须是 `goods_video`**（真机 2026-10-22 抓包坐实）：
+    #:
+    #:    POST /api/edith/upload/web/permit?biz_name=ark&scene=goods_video&file_count=1&version=1
+    #:    POST https://ros-upload.xiaohongshu.com/?uploads&prefix=arkgoods%2F<id>
+    #:    POST …/arkgoods/<id>?partNumber=1|2|3&uploadId=…
+    #:    POST /api/edith/product/material_space/batch_add_directory_manageable
+    #:
+    #: 旧实现用 `common_file`（2026-10-09 从 bundle 里读到的一句，误判成商品视频场景），
+    #: 结果是文件落进 **`ark-common/` 桶**；而图片空间登记只认 `arkgoods/` 桶里的文件 ⇒
+    #: 登记必然回「获取上传文件[xxx.mp4]信息失败」⇒ `materialId` 为空 ⇒
+    #: 提交体 `videos[]` 的引用无效 ⇒ **商品发布后主图视频是一个空白框、播不了**。
+    #: （用户报障原文：「商品发布提交后视频就无法播放」；上传、预览都正常，只有发布后不行。）
     ok, msg, permit_raw = adapter.upload_web_permit(
-        1, biz_name="ark", scene="common_file", referer="/app-item/good/create", file_format=ext
+        1,
+        biz_name="ark",
+        scene="goods_video",
+        referer="/app-item/good/create",
+        file_format=ext,
+        #: ⚠️ 实测该场景偶发 >15s（默认读超时）⇒ 按写链路给足 60s。
+        timeout=60,
     )
     if not ok or not isinstance(permit_raw, dict):
         raise HTTPException(
@@ -698,15 +715,34 @@ def video_upload(
             detail={"code": "VIDEO_UPLOAD_FAILED", "message": msg},
         )
     preview_url = (put_meta or {}).get("preview_url", "") if isinstance(put_meta, dict) else ""
+    #: ⚠️⚠️ **视频没有永久 CDN，只有签名预览地址**（真机实测 2026-10-22）。
+    #:
+    #: 我一度照抄图片侧的 `https://qimg.xiaohongshu.com/<path>` 兜底 —— **那是错的**，
+    #: 视频走这条 404：
+    #:
+    #:     GET https://qimg.xiaohongshu.com/arkgoods/<id>   → 404（qimg 只服务图片）
+    #:     GET https://ros-preview.xhscdn.com/arkgoods/<id>?sign=…&t=…  → 200 video/mp4
+    #:
+    #: 平台自己（抓包）也是用 `ros-preview` 的签名地址播放视频。而且登记响应里
+    #: `additionalData` 对视频**是空的**（`path` / `link` 都是 None，实测），
+    #: 拿不到任何永久地址。
+    #:
+    #: ⇒ 视频的 `url` / `link` 只能是 PUT 响应头给的 `preview_url`。
+    #:   它是**带签名、会过期**的 —— 这是平台的约束，不是我方能绕开的：
+    #:   · **页面预览**（缩略图 / 大图弹窗）用它，当时有效；
+    #:   · **发布提交体**用它，平台会立刻抓取（真机发布链路验证通过）；
+    #:   · 过期后重进页面看不到旧视频缩略图，属已知限制（重传即可）。
+    #: 用 `qimg` 拼「永久地址」会让视频**必然**打不开（404），比签名过期更糟。
 
     #: ⚠️ 2026-10-11 真机抓包修正：视频**也要登记**，只是走 `type:3` + `scene=goods_video`
     #: （不是图片的 `type:2 / goods_image`）。之前（2026-10-09）误判「视频不登记」⇒ 拿不到
     #: `materialId`，导致提交体 `videos[]` 缺登记记录 id。
     material_id = ""
     path_value = file_id
+    #: 视频只能用签名预览地址（qimg 对视频 404，见上）。
     link_value = preview_url
     try:
-        from app.services import picture_space_service as ps
+        from backend.app.services import picture_space_service as ps
 
         seller_id = str(account.seller_id or "")
         if seller_id:
@@ -724,7 +760,24 @@ def video_upload(
                 keep_name=True,
             )
             ok_r, _msg_r, raw_resp = adapter.register_material_files(seller_id, [item])
-            if ok_r and isinstance(raw_resp, dict):
+            if not ok_r:
+                #: ⚠️⚠️ **登记失败必须报出来，不许静默跳过**（用户口径 2026-10-22）。
+                #:
+                #: 旧实现只 `logger.warning` 然后继续返回 `success: true` —— 于是：
+                #:   · 用户看到「上传成功」；
+                #:   · 提交体里 `materialId` 是空串 ⇒ `videos[]` 引用无效；
+                #:   · 平台发布后拉不到视频 ⇒ **主图视频变成空白框、播不了**。
+                #: 而且这个 warning 埋在 8 万行日志里，症状(opan)与原因隔了十几层，
+                #: 排查要从「上传」一路找到「登记」才发现 —— 正是本缺陷潜伏的原因。
+                #: ⇒ 宁可在上传这一步就失败（用户能重试），也不留下一个必然播不了的视频。
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail={
+                        "code": "VIDEO_REGISTER_FAILED",
+                        "message": f"视频登记失败（发布后将无法播放）：{_msg_r}",
+                    },
+                )
+            if isinstance(raw_resp, dict):
                 data = raw_resp.get("data")
                 if isinstance(data, dict):
                     items = data.get("directoryManageables") or []
@@ -733,9 +786,29 @@ def video_upload(
                         #: 视频登记时 path 用上传凭证 fileId 原样（真机 `videos[0].path` 与
                         #: `uploaderInfoModel.fileId` 同值），不换 CDN id。
                         path_value = str(items[0].get("additionalData", {}).get("path") or file_id)
-                        link_value = str(items[0].get("additionalData", {}).get("link") or preview_url)
-    except Exception as exc:  # noqa: BLE001 - 登记失败不阻断上传，materialId 留空
-        logger.warning("视频登记失败（materialId 留空）：%s", exc)
+                        link_value = str(
+                            (items[0].get("additionalData", {}) or {}).get("link")
+                            or preview_url
+                        )
+            if not material_id:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail={
+                        "code": "VIDEO_REGISTER_NO_ID",
+                        "message": "视频登记成功但平台没有返回素材 ID（发布后将无法播放）",
+                    },
+                )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        #: 同上：异常也要报出来，不再吞成 warning。
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={
+                "code": "VIDEO_REGISTER_FAILED",
+                "message": f"视频登记异常（发布后将无法播放）：{exc}",
+            },
+        ) from exc
 
     return {
         "platform_account_id": account.id,

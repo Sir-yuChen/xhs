@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import pathlib
 import sqlite3
 
 import pytest
@@ -802,3 +803,104 @@ class TestWriteItemShape:
             ps.validate_batch([{"name": "no-id"}])
         with pytest.raises(ValueError, match="MATERIAL_BATCH_TOO_LARGE"):
             ps.validate_batch([{"id": str(i)} for i in range(ps.MATERIAL_BATCH_LIMIT + 1)])
+
+
+class TestGoodsVideoUploadContract:
+    """商品主图视频上传契约（真机 2026-10-22 抓包坐实，修正 10-09 的误判）。
+
+    用户报障：「商品发布提交后视频**无法播放**」—— 上传成功、页面预览也正常，
+    只有发布后在千帆后台是一个**空白占位框**。
+
+    ## 真机抓包（平台自己怎么传的）
+
+        GET  /api/edith/upload/web/permit?biz_name=ark&scene=goods_video&file_count=1&version=1
+        POST https://ros-upload.xiaohongshu.com/?uploads&prefix=arkgoods/<id>
+        POST …/arkgoods/<id>?partNumber=1|2|3&uploadId=…
+        POST …/arkgoods/<id>?uploadId=…
+        POST /api/edith/product/material_space/batch_add_directory_manageable
+
+    ## 我方的三处错
+
+      ① `scene="common_file"`（依据 `9515.*.js` 里一句无关的 scene，判错）
+         ⇒ 文件落 `ark-common/` 桶；图片空间登记只认 `arkgoods/`
+         ⇒ 登记恒答「获取上传文件[xxx.mp4]信息失败」⇒ `materialId` 为空
+         ⇒ 提交体 `videos[]` 引用无效 ⇒ 平台拉不到视频 ⇒ **空白框**。
+      ② 登记失败被 `logger.warning` 吞掉，仍返回 `success: true` ⇒ 用户看到「上传成功」，
+         缺陷因此在 8 万行日志里潜伏了十几天。
+      ③ `link` 兜底用带签名的 `preview_url`（会过期），图片侧早有永久 CDN 兜底。
+    """
+
+    def test_permit_uses_goods_video_scene(self):
+        """① 申请凭证必须是 `goods_video` —— 决定文件进哪个桶。"""
+        src = pathlib.Path("backend/app/api/platforms/xhs/qianfan/picture_space.py").read_text(encoding="utf-8")
+        i = src.index("def video_upload(")
+        seg = src[i : src.index("\n@router.", i)]
+        assert 'scene="goods_video"' in seg, "视频上传申请凭证的 scene 不是 goods_video"
+        assert 'scene="common_file"' not in seg, (
+            "视频上传仍在用 common_file —— 文件会落 ark-common 桶，登记必然失败"
+        )
+
+    def test_register_failure_is_not_swallowed(self):
+        """② 登记失败必须报错，不许吞成 warning 后返回 success。"""
+        src = pathlib.Path("backend/app/api/platforms/xhs/qianfan/picture_space.py").read_text(encoding="utf-8")
+        i = src.index("def video_upload(")
+        seg = src[i : src.index("\n@router.", i)]
+        #: ⚠️ 判据必须落在**条件本身**，不能只查错误码字符串 ——
+        #: 变异「`if not ok_r` → `if False`」时错误码还在，字符串断言照样绿
+        #: （首轮 W2/W3 实测 ESCAPED）。而且必须确认 raise 在条件体**内部**。
+        assert "if not ok_r:" in seg, "登记失败的分支条件被改掉（不再拦截失败）"
+        assert "if not material_id:" in seg, "materialId 为空的分支条件被改掉"
+        #: raise 必须位于这两个 if 之后、且缩进更深（在分支体里）
+        for cond in ("if not ok_r:", "if not material_id:"):
+            at = seg.index(cond)
+            after = seg[at : at + 700]
+            assert "raise HTTPException" in after, f"`{cond}` 分支里没有 raise —— 失败被吞"
+        assert "视频登记失败（materialId 留空）" not in seg, (
+            "仍在用「留空继续」的旧行为 —— 会产出必然播不了的商品"
+        )
+
+    def test_link_uses_signed_preview_not_qimg(self):
+        """③ **视频不能用 `qimg` 拼永久地址** —— 那条对视频是 404。
+
+        真机实测（2026-10-22）：
+
+            GET https://qimg.xiaohongshu.com/arkgoods/<id>              -> 404
+            GET https://ros-preview.xhscdn.com/arkgoods/<id>?sign=..&t=.. -> 200 video/mp4
+
+        `qimg` 只服务**图片**（图片侧用它兜底是对的）。视频唯一可用地址是 PUT 响应头
+        `X-Ros-Preview-Url` 给的签名预览地址；且登记响应里 `additionalData` 对视频
+        是**空的**（`path`/`link` 均 None，实测），拿不到任何永久地址。
+
+        ⚠️ 教训：我一度照抄图片侧的 `qimg` 兜底 => 视频预览从「签名地址可用」
+        退化成「必然 404 空白」。**两个媒体类型的 CDN 域不同，不能互相照抄。**
+        """
+        src = pathlib.Path("backend/app/api/platforms/xhs/qianfan/picture_space.py").read_text(encoding="utf-8")
+        i = src.index("def video_upload(")
+        seg = src[i : src.index("\n@router.", i)]
+
+        assert 'permanent_link = f"https://qimg.xiaohongshu.com/{file_id}"' not in seg, (
+            "视频仍在用 qimg 兜底（只对图片有效，视频 404）"
+        )
+        assert "link_value = preview_url" in seg, (
+            "视频 link 没有用 PUT 响应头给的签名预览地址"
+        )
+
+
+    def test_publish_body_bucket_matches_upload_bucket(self):
+        """提交体 `bucket` 必须与视频实际所在桶一致（arkgoods）。"""
+        from backend.app.services.shop_item_publish import build_publish_video
+
+        body = build_publish_video(
+            {
+                "path": "arkgoods/abc",
+                "link": "https://qimg.xiaohongshu.com/arkgoods/abc",
+                "extension": ".mp4",
+                "duration": 13,
+                "materialId": "m1",
+            }
+        )
+        assert body["bucket"] == "arkgoods", (
+            f"提交体 bucket={body['bucket']} 与视频实际所在桶不符（应为 arkgoods）"
+        )
+        assert body["uploaderInfoModel"]["scene"] == "goods_video"
+        assert body["materialId"] == "m1"

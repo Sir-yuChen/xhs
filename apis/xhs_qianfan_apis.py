@@ -182,7 +182,9 @@ class XHS_Qianfan_Apis:
             "Origin": self.base_url,
         }
 
-    def _get(self, api: str, params: dict | None, referer: str) -> tuple[bool, str, dict | None]:
+    def _get(
+        self, api: str, params: dict | None, referer: str, *, timeout: float | None = None,
+    ) -> tuple[bool, str, dict | None]:
         try:
             response = _session_request(
                 "GET",
@@ -190,7 +192,7 @@ class XHS_Qianfan_Apis:
                 params=params,
                 headers=self._headers(referer),
                 cookies=self._cookie_dict(),
-                timeout=REQUEST_TIMEOUT,
+                timeout=timeout or REQUEST_TIMEOUT,
             )
             payload = response.json()
         except Exception as error:  # noqa: BLE001 - 网络/解析失败都要变成可读原因
@@ -1771,6 +1773,7 @@ class XHS_Qianfan_Apis:
     def upload_web_permit(
         self, file_count: int = 1, *, biz_name: str = "spectrum", scene: str = "image",
         referer: str = "/app-note/publish", file_format: str = "",
+        timeout: float | None = None,
     ) -> tuple[bool, str, dict | None]:
         """申请上传凭证（`GET /api/edith/upload/web/permit`）。
 
@@ -1781,10 +1784,18 @@ class XHS_Qianfan_Apis:
         发布链路（`/app-note/publish`）才是 `spectrum/image`（落 `spectrum/<id>`）。
         用错 scene ⇒ 文件 PUT 到 `spectrum/` 桶而图片空间按 `arkgoods/` 取 ⇒ **裂图**。
 
-        ⚠️ **视频走独立场景 `common_file`**（2026-10-09 bundle 逆出，`9515.*.js`）：
-        该上传器构造的是 `new Uploader({bizName:"ark", scene:"common_file"})`，
-        预分配落 **`ark-common/<id>`**。图片空间（`goods_image`）是**图片库**，
-        视频登记会答「获取上传文件[v]信息失败」（实测）⇒ 视频别走图片空间登记。
+        ⚠️⚠️ **视频也是 `goods_video`，不是 `common_file`**（真机 2026-10-22 抓包坐实，
+        此前依据 `9515.*.js` 里的一句 `scene:"common_file"` 判错，已推翻）：
+
+            申请凭证  GET  /api/edith/upload/web/permit?biz_name=ark&scene=goods_video&file_count=1&version=1
+            上传      POST https://ros-upload.xiaohongshu.com/?uploads&prefix=arkgoods/<id>
+            分片      POST …/arkgoods/<id>?partNumber=1|2|3&uploadId=…
+            完成      POST …/arkgoods/<id>?uploadId=…
+            登记      POST /api/edith/product/material_space/batch_add_directory_manageable
+
+        ⇒ 视频与图片**同桶**（`arkgoods/`），所以**必须**走图片空间登记拿 `materialId`；
+        用 `common_file` 会落进 `ark-common/`，登记恒答「获取上传文件[v]信息失败」
+        ⇒ `materialId` 空 ⇒ 商品发布后主图视频是空白框、播不了。
 
         ⚠️ **`file_format`**：9515 上传器把扩展名作为 query 参数传给本接口
         （`params:{…, fileFormat: e.fileFormat}`）—— 视频要传（如 `.mp4`）。
@@ -1800,10 +1811,13 @@ class XHS_Qianfan_Apis:
         }
         if file_format:
             params["fileFormat"] = str(file_format)
+        #: ⚠️ 视频场景（`goods_video`）实测偶发 >15s（默认 `REQUEST_TIMEOUT`）⇒ 超时。
+        #: 申请凭证是**写链路的前置**，按 `WRITE_TIMEOUT` 给足。
         return self._get(
             "/api/edith/upload/web/permit",
             params,
             referer,
+            timeout=timeout,
         )
 
     def upload_file(self, *, upload_addr: str, file_id: str, token: str, file_path: str) -> tuple[bool, str, dict | None]:

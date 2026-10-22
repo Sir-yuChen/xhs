@@ -200,7 +200,11 @@ def build_publish_video(material: dict[str, Any]) -> dict[str, Any]:
     path = str(material.get("path") or "").strip()
     entry: dict[str, Any] = {
         "extension": str(material.get("extension") or "").strip(),
-        "bucket": "sale-item",
+        #: ⚠️ `bucket` 必须与**视频实际所在桶**一致。
+        #: 真机 2026-10-22 抓包：商品主图视频走 `scene=goods_video` 上传到 `arkgoods/`，
+        #: 提交体 `videos[]` 指向的也是 `arkgoods/<id>`。旧值写死 `"sale-item"`
+        #: （全仓库仅此一处出现、无任何抓包依据）与文件真实位置不符。
+        "bucket": "arkgoods",
         "path": path,
         "link": link,
         "uploaderInfoModel": {
