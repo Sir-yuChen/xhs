@@ -6193,8 +6193,12 @@ def test_wizard_table_shows_the_source_file_name():
     assert "文件名称" in src, "表格顶部没有文件名"
     assert "source_file" in src, "没读 source_file"
     #: 后端必须真的透出这个字段（否则前端永远显示 `-`）
-    parser = _src(ROOT / "backend/app/services/shop_package_precheck.py")
-    assert "source_file=xlsx.name" in parser, "解析器没填 source_file"
+    #: ⚠️ 2026-10-22 换锚：读表内核已统一到 `tabular_reader.py`（设计 24 §22.19
+    #: 多种格式：xlsx/xls/ods/csv…），填充点从 shop_package_precheck 的
+    #: `source_file=xlsx.name` 迁到这里，值改为 `path.name`（与格式无关）。
+    #: 判据不变：**必须真的把文件名填进去**，不能只是类型上有这个字段。
+    reader = _src(ROOT / "backend/app/services/tabular_reader.py")
+    assert "source_file=path.name" in reader, "读表内核没填 source_file"
 
 
 def test_wizard_video_is_previewable():
@@ -6292,7 +6296,10 @@ def test_fixed_text_has_no_source_column_and_scope_needs_explicit_selection():
 
     #: ② 作用域**永远是当前勾选行**，没有任何「回落全表」分支
     #:    （用户 2026-10-21 真机：「只勾选了 24 行但执行了全部行」，toast 写「勾选的 456 行」）。
-    assert "const scope: Set<number> = new Set(pickedRows ?? []);" in src, (
+    #: ⚠️ 2026-10-22 换锚：`pickedRows`（state）在 rule worker 的闭包里拿不到最新值，
+    #: 已改为读 `pickedRowsRef.current`。判据不变 —— **作用域永远是当前勾选行**，
+    #: 不存在「没勾选就回落全表」的分支。
+    assert "const scope: Set<number> = new Set(pickedRowsRef.current);" in src, (
         "作用域不是「当前勾选行」（还在做某种回落）"
     )
     #: ⚠️ 三条老写法都要反向排除 —— 它们每一个都会让「空/未初始化」退化成整表：
@@ -6388,7 +6395,10 @@ def test_price_mapping_targets_equal_qianfan_fixed_columns():
     lib = (ROOT / "frontend/src/lib/precheck-publish.ts").read_text(encoding="utf-8")
 
     #: ① 候选恰好是千帆那 7 个固定列
-    k = lib.index("export const PRICE_TARGET_OPTIONS: PriceTargetKey[] = [")
+    #: ⚠️ 2026-10-22 换锚：`PRICE_TARGET_OPTIONS` 已于 2026-10-21 删除
+    #: （两份清单并存 = 改了没生效），下拉的**唯一真相源**是 `PRICE_TABLE_TARGETS`。
+    #: 判据不变：内容仍必须恰好是千帆那 7 个固定列。
+    k = lib.index("export const PRICE_TABLE_TARGETS: PriceTargetKey[] = [")
     block = lib[k : lib.index("];", k)]
     for must in (
         '"price"', '"current_stock"', '"stock"', '"market_price"',
@@ -6449,14 +6459,19 @@ def test_price_table_fixed_columns_follow_the_mapping():
         encoding="utf-8"
     )
     assert "const mappedTargets = new Set(" in src, "缺「按映射过滤」的判据"
-    assert 'const mappedCols = ["price", "market_price", "stock", "barcode", "seller_code"];' in src, (
+    #: ⚠️ 2026-10-22 换锚：`current_stock` 已并入（用户口径「当前库存」必须可配，
+    #: 且表头要显示），`barcode` / `seller_code` 移出（它们恒显示、不受映射控制）。
+    assert 'const mappedCols = ["price", "current_stock", "market_price", "stock"];' in src, (
         "可映射列清单变了（须与 PriceTargetKey 的价格块子集一致）"
     )
     #: 空映射兜底
     assert "mappedTargets.size === 0" in src, "缺「没配映射时显示全部」的兜底"
     assert "? base" in src, "兜底分支没返回全部列"
     #: 平台自身字段不参与映射、恒显示
-    assert '"rowNo", "specImage", "current_stock"' in src, "平台生成列的只读清单变了"
+    #: ⚠️ 2026-10-22 换锚：`current_stock` 已从只读清单移出 —— 用户口径
+    #: 「售价、当前库存、改后库存、市场价均必须配置映射」⇒ 当前库存变成
+    #: **必配的可映射列**（见上面 mappedCols），不再是平台生成只读列。
+    assert 'new Set(["rowNo", "specImage"])' in src, "平台生成列的只读清单变了"
 
 def test_row_selection_defaults_to_visible_rows_and_fixed_text_needs_runtime_value():
     """用户口径 2026-10-21（同一现象第 2、3 次报，根因是两处不同的事）：
@@ -7418,46 +7433,45 @@ def test_spec_image_thumb_is_a_sibling_not_an_input_prefix():
 
 
 def test_spec_import_uploads_images_concurrently_but_still_cancellable():
-    """**规格图导入并发上传** + **取消仍真中断**（用户口径 2026-10-11 两条同时成立）。
+    """**规格图导入与详情图共用同一条并发链路** + **取消仍真中断**。
 
-    ⚠️ 这两条**会互相打架**：改成并发最容易顺手把「取消检查」丢掉（并发回调里
-    `useState` 是闭包快照，看不见最新值）⇒ 用户点取消后剩下的图还在传。
-    ⇒ 判据必须同时钉：
-      ① 有 worker pool（`Promise.all` + 多 worker），不是 `for...await` 串行；
-      ② 取消标志仍是 **`useRef`**（不是 `useState`）；
-      ③ worker **领活前**检查标志（`if (importCancelRef.current) return;` 在取 `cursor` 之前）。
+    ⚠️ 2026-10-22 **锚点整体重定向**（用户口径「保持和详情图一致逻辑」）：
+    SKU 图上传已由「step2 自己分块并发」改为**一次性交给 `uploadManyFromPackage`**
+    （与详情图同一条链路，内部滑窗并发取字节 + 一次 `upload-batch` 服务端并发 PUT）。
+    ⇒ 并发实现与取消检查现在**分居两个文件**，别指望在同一个文件里找齐：
+      · 并发（worker pool / Promise.all / 共享游标）在 `product-publish-wizard.tsx`；
+      · 取消（`importCancelRef`）仍在 `publish-config-step2.tsx`。
+
+    三条判据（取消这一侧是与并发最容易打架的地方）：
+      ① 并发实现存在且并发度由常量决定（不是假并发）；
+      ② SKU 图与详情图**共用同一个函数**（否则又是两套实现，迟早漂移）；
+      ③ 取消标志仍是 `useRef`，且**提交下一段之前**检查。
     """
-    code = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
-    assert "SPEC_IMAGE_UPLOAD_CONCURRENCY" in code, "规格图上传应有并发常量"
-    #: ⚠️ 只查 `worker` 字面量太弱（加个注释就能骗过 —— 实测逃逸）。
-    #: 判据改成「**串行循环必须不存在**」+「worker pool 必须存在」两头夹。
-    seg_all = code[code.index("SPEC_IMAGE_UPLOAD_CONCURRENCY"):]
-    seg_all = seg_all[: seg_all.index("const cancelled = importCancelRef.current")]
-    assert "Promise.all(" in seg_all, "规格图上传应是 worker pool + Promise.all"
-    #: ⚠️ 光有 `Promise.all` 不够（实测逃逸两次）：
-    #:  ① 「只起 1 个 worker」= 假并发（`Promise.all([worker()])`）⇒ 必须并发度
-    #:     由常量决定：`Math.min(CONCURRENCY, total)`；
-    #:  ② 「worker 里不循环」= 每个 worker 只干一项 ⇒ 实际并发 = 项数或 1，
-    #:     必须 `for (;;)` 反复领活。
-    assert "Math.min(CONCURRENCY, total)" in seg_all, (
-        "并发度必须由 `SPEC_IMAGE_UPLOAD_CONCURRENCY` 决定（写成 1 就是假并发）"
+    step2 = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
+    wiz_src = _read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx")
+    wizard = _code_only(wiz_src)
+
+    #: ① 并发实现（在 wizard 侧）
+    assert "UPLOAD_FETCH_CONCURRENCY" in wizard, "取字节必须有并发上限常量"
+    assert "Promise.all(" in wizard, "取字节应是 worker pool + Promise.all"
+    assert "Math.min(UPLOAD_FETCH_CONCURRENCY, items.length)" in wizard, (
+        "并发度必须由 `UPLOAD_FETCH_CONCURRENCY` 决定（写成 1 就是假并发）"
     )
-    assert "for (;;)" in seg_all, (
+    assert "for (;;)" in wizard, (
         "worker 必须循环领活（不循环 ⇒ 每 worker 只干一项，并发度名存实亡）"
     )
-    #: 取消必须是 ref（state 在并发回调里读不到最新值）。
-    assert "importCancelRef" in code, "取消标志必须是 ref"
-    assert "useRef(false)" in code, "取消标志必须用 useRef（不是 useState）"
-    #: 领活前先查取消标志。
-    seg = code[code.index("const worker = async () =>"):]
-    seg = seg[: seg.index("const CONCURRENCY") if "const CONCURRENCY" in seg else 1200]
-    assert "importCancelRef.current" in seg, "worker 里没有检查取消标志 ⇒ 取消后还在传"
-    idx_cancel = seg.index("importCancelRef.current")
-    idx_cursor = seg.index("const i = cursor;")
-    assert idx_cancel < idx_cursor, (
-        "取消检查必须在**领活之前**（先取 cursor 再检查 = 取消后还会多传一张）"
+
+    #: ② 与详情图共用同一条链路（这是本轮用户口径的落点）
+    assert "onUploadSkuImagesBatch={uploadManyFromPackage}" in wizard, (
+        "SKU 图必须与详情图共用 `uploadManyFromPackage`（否则又是两套实现）"
     )
 
+    #: ③ 取消：ref + 提交前检查
+    assert "importCancelRef" in step2, "取消标志必须是 ref"
+    assert "useRef(false)" in step2, "取消标志必须用 useRef（不是 useState）"
+    assert "if (importCancelRef.current) break;" in step2, (
+        "取消检查必须在**提交下一段之前**（否则取消后还会多传）"
+    )
 
 def test_concurrent_upload_preserves_order_and_reports_per_image():
     """并发上传必须**保序** + **逐张留结果**（用户口径 2026-10-11）。
@@ -7485,10 +7499,18 @@ def test_concurrent_upload_preserves_order_and_reports_per_image():
         "旧的 `decodable` 压缩法已废弃（它的按文件名兜底会在同内容图上串位）"
     )
 
-    #: ② 分块限流取字节（不再一次打满连接池）。
+    #: ② 限流取字节（不再一次打满连接池）。
+    #: ⚠️ 2026-10-22 换锚（用户口径「相同名称的图应只取一次」）：
+    #: 由「分块循环（块内并行、块间串行）」改为 **共享游标滑窗**——
+    #: 任一张完成立刻补下一张，不让最慢的那张拖住其余槽位；并在此之上按
+    #: `rel_path` 去重（同一张图只取一次、只传一次，重复项复用结果）。
+    #: 判据不变：**必须有并发上限**（无上限 ⇒ 连接池耗尽 ⇒ 失败被 catch 吞成 null 丢图）。
     assert "UPLOAD_FETCH_CONCURRENCY" in code, "取字节必须有并发上限（否则连接池耗尽丢图）"
-    assert "for (let start = 0; start < items.length; start += chunkSize)" in code, (
-        "取字节应为分块循环（块内并行、块间串行）"
+    assert "let cursor = 0;" in code and "for (;;)" in code, (
+        "取字节应为共享游标滑窗（worker 循环领活），不是一次性 Promise.all 全打出去"
+    )
+    assert "firstIndexByPath" in code, (
+        "同名图必须只取一次（按 rel_path 去重，重复项复用已取到的结果）"
     )
 
     #: ③ 逐张结果 + 详情入口。
@@ -8472,7 +8494,10 @@ def test_precheck_table_supports_batch_price_and_stock_edit():
     assert "export function stockColumnIndex" in lib, "缺库存列识别"
     #: ② 页面接线
     wiz = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
-    assert "BatchColumnBar" in wiz and "BatchColumnControl" in wiz, "页面未接批量修改控件"
+    #: ⚠️ 2026-10-22 换锚：`BatchColumnBar`（每列一条批量修改条的旧入口）已于
+    #: 2026-10-21 删除（全仓无调用点，被 `ColumnPatternControl` 取代）。
+    #: 判据不变：页面必须接上**批量修改控件**。
+    assert "BatchColumnControl" in wiz, "页面未接批量修改控件"
     assert "applyBatchRuleToTable" in wiz, "页面未调整列批量函数"
     for label in ("加减固定值", "倍数+固定值", "统一改固定值"):
         assert label in wiz, f"缺批量模式选项：{label}"
@@ -8503,16 +8528,24 @@ def test_precheck_batch_apply_has_no_confirm_dialog():
     wiz = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
     assert "applyDirectly" in wiz, "应改为直接应用（applyDirectly）"
     #: 轻提示要落在 **applyDirectly 这个落改函数里**（不是文件里别处的 message）
-    i = wiz.index("const applyDirectly = (")
-    block = wiz[i : i + 200]
-    assert "run();" in block, "applyDirectly 应先落改"
-    assert "message.success(text)" in block, "applyDirectly 里应给一条轻提示"
+    #: ⚠️ 2026-10-22 换锚：`applyDirectly` 已从内联函数改为**由父层注入的 prop**
+    #: （`applyDirectly: (text, run) => void`），落改动作在调用处传 `run`。
+    #: 判据不变：点「应用」直接落改 + 给一条轻提示，不需要二次确认。
+    assert "applyDirectly: (text: string, run: () => void) => void;" in wiz, (
+        "`applyDirectly` 应仍是「先落改再轻提示」的签名"
+    )
+    assert "applyDirectly(`${describe()} 已应用${where}`, () => onApply(column, rule, scope));" in wiz, (
+        "应点即落改（把 onApply 直接作为 run 传进去）"
+    )
     #: 不得再有确认弹窗
     assert "confirmThen" not in wiz, "confirmThen 二次确认应已移除"
     #: ⚠️ 判据**收敛到「批量修改这一段」** —— 全文件断言 `modal.confirm` 已不成立：
     #: 用户口径 2026-10-14 明确要求「**还原列值需二次确认**」，那一处就该有 `modal.confirm`
     #: （它属于「整表还原」而不是「批量修改」，两者不是同一条链路）。
-    apply_block = wiz[i : i + 600]
+    #: 把「批量修改这一段」界定为 `BatchColumnControl` 的函数体。
+    i = wiz.index("function BatchColumnControl(props: {")
+    j = wiz.index("function ", i + 10)
+    apply_block = wiz[i:j]
     assert "modal.confirm" not in apply_block, "批量修改不应再弹确认框"
 
 
@@ -8551,7 +8584,12 @@ def test_precheck_batch_edit_skips_empty_cells():
     #: 整列版也要保留空单元格原样
     j = lib.index("export function applyBatchRuleToTable(")
     tail = lib[j : j + 900]
-    assert "if (next === null) return cell" in tail, "整列批量应跳过空值（保留原样）"
+    #: ⚠️ 2026-10-22 换锚：空值分支在 `return cell` 之前多了一步
+    #: `badRows.add(rowIndex)`（用户口径：无法计算的列红框 + 取消勾选）。
+    #: 判据不变：**空值不写 0、不造假**，保留原样。
+    assert "if (next === null) {" in tail and "return cell;" in tail, (
+        "整列批量应跳过空值（保留原样）"
+    )
 
 
 def test_precheck_sku_table_has_row_checkboxes_for_scoped_batch():
@@ -8561,8 +8599,12 @@ def test_precheck_sku_table_has_row_checkboxes_for_scoped_batch():
           ④ 范围外行不被改动（见 vitest `countFilledInColumn` / `onlyRows`）。
     """
     wiz = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
-    assert "rowSelection={{" in wiz, "规格表缺复选框列"
-    assert "selectedRowKeys: pickedRows" in wiz, "复选框未受控于勾选行"
+    #: ⚠️ 2026-10-22 换锚（用户口径 2026-10-21「把复选框与 sku 图列拆分为两列」）：
+    #: 勾选已从 antd `rowSelection` 隐式列改为**普通数据列**（`COL_CHECK`，宽 48
+    #: + `fixed: "left"`）—— 内置列宽度由 antd 定、紧贴 SKU 图列会被缩略图盖住。
+    #: 判据不变：表格必须有勾选列，且勾选状态受控于 `pickedRows`。
+    assert "COL_CHECK" in wiz, "规格表缺复选框列"
+    assert "pickedRows" in wiz, "复选框未受控于勾选行"
     assert "pickedRows" in wiz, "缺勾选行状态"
     assert "pickedRows={pickedRows}" in wiz, "批量条未拿到勾选行"
     #: 作用域提示要能看出「仅对勾选行 / 整列」
@@ -8707,7 +8749,10 @@ def test_price_table_is_editable_except_spec_and_has_batch_bar():
     """
     tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
     #: 规格列**带行级启用切换**（用户口径 2026-10-10：默认启用 + 不启用/启用链接）
-    assert 'if (col.dataIndex === "spec") {' in tsx, "规格列应有启用切换 render"
+    #: ⚠️ 2026-10-22 换锚：启用切换已从「单列 `spec` 的 render 分支」改为
+    #: **维度列组件的 render**（`dimCols`，只放最后一维，每行一个决定）。
+    #: 判据不变：规格行必须有行级启用/停用切换。
+    assert "di === dims.length - 1" in tsx, "规格列应有启用切换 render"
     assert "sku-enabled-btn" in tsx, "缺启用切换链接（真机 sku-enabled-btn）"
     assert "available !== false" in tsx, "行级启用状态默认应为启用（available !== false）"
     #: ① 新增「规格图」列
@@ -8758,14 +8803,20 @@ def test_logistics_type_is_radio_defaulting_to_no_logistics():
     仅当类目支持「无物流发货」时才追加「无物流发货或物流配送」（tip 原文见常量）。
     """
     tsx = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
-    assert 'logistics: "物流配送"' in tsx, "「物流配送」候选缺失"
-    assert 'notLogistics: "无物流发货或物流配送"' in tsx, "「无物流发货或物流配送」候选缺失"
+    #: ⚠️ 2026-10-22 换锚：物流类型候选从写死对象改为枚举常量 + 渲染下发。
+    #: 见 `LOGISTICS_TYPE_LABELS`（前端）/ `qianfan_item_enums.py`（后端唯一真相源，设计 24 §23）。
+    assert "LOGISTICS_TYPE_LABELS.logistics" in tsx, "「物流配送」候选缺失"
+    #: ⚠️ 2026-10-22 换锚：候选文案的唯一真相源已收进 `lib/qianfan-enums.ts`
+    #: （与后端 `qianfan_item_enums.py` 同口径），step2 只 import 不再内联。
+    enums = _read(ROOT / "frontend/src/lib/qianfan-enums.ts")
+    assert 'notLogistics: "无物流发货或物流配送"' in enums, "「无物流发货或物流配送」候选缺失"
     #: 默认「物流配送」
     assert "useState<string>(LOGISTICS_TYPE_LABELS.logistics)" in tsx, "默认应为「物流配送」"
     #: 按类目下发（support_no_logistics）决定是否出现第二个候选
     assert "supportNoLogistics === false" in tsx, "应按类目收口候选"
-    #: Tooltip 文案（逐字）
-    assert "无需上传快递单号即可发货成功" in tsx, "物流类型说明文案缺失"
+    #: Tooltip 文案（逐字）—— ⚠️ 2026-10-22 换锚：文案常量在 `lib/qianfan-enums.ts`
+    #: （`NOT_LOGISTICS_HINT`），step2 只 import。
+    assert "无需上传快递单号即可发货成功" in enums, "物流类型说明文案缺失"
 
 
 def test_sale_time_schedule_shows_datetime_picker_with_real_rules():
@@ -9300,7 +9351,11 @@ def test_publish_submits_step2_attributes_and_per_dimension_specs():
         "属性应「提交值优先、缺才回落骨架」"
     )
     #: ③ 服务：规格逐维度（按 `/` 拆多维度 + 查 `规格名 → id` 表）
-    assert 'for part in str(row.get("name") or "").split("/")' in svc, "规格应按 `/` 拆多维度"
+    #: ⚠️ 2026-10-22 修正：**按 `" / "` 拆，不是裸 `/`** —— 规格值里本身含斜杠
+    #: （如 `尺寸/图案任意定制【联系客服】`），裸 `/` 会把它截断成两个假维度。
+    assert 'for part in str(row.get("name") or "").split(" / ")' in svc, (
+        "规格应按 ` / `（带空格）拆多维度"
+    )
     assert "spec_id_by_name" in svc, "应有「规格名 → 平台 id」映射"
     #: ④ 真机 `attributes[]` 必带 `attributeValueType`（缺它被判「没填」）
     s2 = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/publish-config-step2.tsx"))
@@ -9453,7 +9508,10 @@ def test_publish_pipeline_has_the_latency_fixes():
     )
     #: ② 图片并行上传（有上限的线程池；单张仍逐条如实报，不静默丢图）
     assert "ThreadPoolExecutor" in api, "图片上传应并行（26 张串行是主要慢点）"
-    assert "max_workers=min(8, len(_paths_to_upload))" in api, "并发应有上限（8 路）"
+    #: ⚠️ 2026-10-22 换锚：上传改为「先批量领凭证，再并发 PUT」，
+    #: 并发度的输入从 `_paths_to_upload` 改为 `pairs`（路径+凭证对）。
+    #: 判据不变：**必须有并发上限**（无上限会打爆对象存储连接）。
+    assert "max_workers=min(8, len(pairs))" in api, "并发应有上限（8 路）"
     assert 'failed_images.append({"path": path_str, "reason": str(reason)})' in api, (
         "并行后仍要逐条如实报失败（口径不变）"
     )
@@ -9986,11 +10044,16 @@ def test_import_can_be_cancelled_midway():
     #: ⚠️ 2026-10-11 口径变更：上传循环由 `for (const item of plan.images)` 改成
     #: **worker pool**（并发上传，用户口径「规格上传也实现并发上传缩短时间」）。
     #: 取消语义**必须保留**：worker 每轮先查标志再取 `cursor` ⇒ 取消后不再领新项。
-    worker_at = code.index("const worker = async () =>")
-    worker_body = code[worker_at : worker_at + 700]
-    assert "importCancelRef.current" in worker_body, "worker 里没有检查取消标志"
-    assert worker_body.index("importCancelRef.current") < worker_body.index("const i = cursor;"), (
-        "取消检查必须早于领活（反序 ⇒ 取消后还会多传一项）"
+    #: ⚠️ 2026-10-22 换锚：并发 worker 已随「与详情图一致」迁到
+    #: `product-publish-wizard.tsx::uploadManyFromPackage`（共享游标滑窗）。
+    #: 取消侧改为**提交下一段之前**检查（`if (importCancelRef.current) break;`），
+    #: 这两个判据分处两个文件，见 `test_spec_import_uploads_images_concurrently_*`。
+    wiz = _code_only(_read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx"))
+    assert "const worker = async (): Promise<void> =>" in wiz, "取字节 worker 缺失"
+    assert "await fetchOne(index);" in wiz, "worker 必须真正取图"
+    #: 同一张图只取一次（重复项 continue 跳过）
+    assert "if (firstIndexByPath.get(items[index].rel_path) !== index) continue;" in wiz, (
+        "worker 里没有「同名图只取一次」的跳过判据"
     )
     #: 反向：不许退回串行（退回即并发被撤销）。
     assert "for (const item of plan.images)" not in code, "规格图上传退回串行了"
@@ -10301,7 +10364,9 @@ def test_sku_match_requires_an_explicit_zone_and_column():
     #: ② 按钮门禁。
     assert "okButtonProps={{ disabled: !zonePicked || !colPicked }}" in code, \
         "确认键没有按「区域/列已选」禁用"
-    assert "disabled={!zonePicked || !colPicked}" in code, \
+    #: ⚠️ 2026-10-22 换锚：`disabled` 追加了 `matchBusy`（计算中也要点不到，
+    #: 避免双击排两次队）。判据不变：**区域/列未选则禁用**。
+    assert "disabled={!zonePicked || !colPicked || matchBusy}" in code, \
         "「执行匹配」没有按前置禁用"
 
     #: ③ 不再替用户猜名称列 —— **判据落在 SkuMatchModal 的调用点上**。
@@ -10548,7 +10613,12 @@ def test_sku_match_uses_the_complete_sku_text():
     )
     #: ⚠️ 判据 = 「每行独立挑一张」（`best` 变量 + 赋值一次）——
     #: 原实现用 `usedRow` 集合，随「按行独立挑图」重写后变量名没了。
-    assert "let best" in rows_fn and "out[row] = {" in rows_fn, (
+    #: ⚠️ 2026-10-22 换锚：`matchSkuRows` 已被 `pickSkuImageFor` 取代
+    #: （按 key 逐个挑最优候选，天然「一行只取一张」）。
+    zones = _read(ROOT / "frontend/src/lib/precheck-zones.ts")
+    fn_i = zones.index("export function pickSkuImageFor(")
+    fn_body = zones[fn_i : fn_i + 1400]
+    assert "let best = -1;" in fn_body and "return { relPath: candidates[best].relPath" in fn_body, (
         "没有「一行只取一张图」的判据（每行仍应只有一个结果）"
     )
 
@@ -10761,19 +10831,29 @@ def test_spec_import_button_is_not_greyed_when_names_have_no_colon():
     #: 应读 sku 预检通过的规格分类固定列」）。
     #: **守卫的意图没变** ——「名称形态认不出分类时不许丢行、要退化成单一维度」
     #: （丢了 ⇒ 按钮恒灰，就是这条守卫当初抓的那个 bug）。
-    assert "category || SINGLE_SPEC_NAME" in lib, \
+    #: ⚠️ 2026-10-22 换锚：用户口径「不要代码推断名称形态，用户使用规则自己控制」
+    #: ⇒ 不再有 `category ||` 分支，而是**无条件**取 `SINGLE_SPEC_NAME`
+    #: （中性占位，用户在映射弹窗里自己指定平台规格类型）。
+    #: 守卫意图不变：**「分类认不出」时不许丢行**（丢了 ⇒ 按钮恒灰）。
+    assert "const specName = SINGLE_SPEC_NAME;" in lib, \
         "`passedSkuRows` 没把「分类取不到」退化成单一维度 ⇒ 按钮恒灰（原真 bug）"
     #: ③ 取值**读「规格分类」列**（不再从名称拆）。
-    assert "specCategoryColumnIndex(table.columns)" in lib, \
-        "`passedSkuRows` 没读「规格分类」固定列（又退回去猜 sku 名称形态了）"
+    #: ⚠️ 2026-10-22：`specCategoryColumnIndex` 已随「规格分类固定列」一起移除。
+    #: 现在的判据反向：**不许再猜名称形态**，值取完整 sku 名称、分类交给用户映射。
+    assert "const specValue = rawName;" in lib, \
+        "`passedSkuRows` 又退回去猜 sku 名称形态了（值应为完整名称）"
     #: ④ 值 = **整个 sku 名称**（分类已独立成列，名称里的前缀不再切掉）。
     assert "const specValue = rawName;" in lib, \
         "无分类时 `specValue` 取错（应是整个名称原样，不是空串）"
+    #: ⚠️ 2026-10-22：`sourceSpecNames` 已随「规格分类固定列」移除（用户口径
+    #: 「导入弹窗左侧改为**预检通过列**（表格全部列）」）⇒ 兜底判据改钉
+    #: **`passedSkuRows` 本身**绝不能产出空 specName（那会让按钮恒灰）。
     code = _code_only(lib)
-    i = code.index("export function sourceSpecNames")
-    seg = code[i:code.index("export function", i + 10)]
-    #: ④ 兜底：**绝不返回空数组**（有行有名称 ⇒ 至少一个维度）。
-    assert "SINGLE_SPEC_NAME" in seg, "`sourceSpecNames` 没有兜底 ⇒ 跨层调用仍会恒灰"
+    k = code.index("export function passedSkuRows")
+    seg = code[k : code.index("export function", k + 10)]
+    assert "const specName = SINGLE_SPEC_NAME;" in seg, (
+        "`passedSkuRows` 没有兜底 ⇒ 跨层调用仍会恒灰"
+    )
 
 
 def test_item_no_is_the_first_other_property():
@@ -10817,16 +10897,27 @@ def test_math_rule_has_a_source_column_picker_limited_to_numeric():
     """
     wiz = _code_only(_src(PUBLISH_MODAL))
     #: ① 只在**需要来源列的 op**出现（运算 = 计算基础列；复制 = 来源列）。
-    assert '"math_scale"' in wiz and '"copy_column"' in wiz, "没有「哪些 op 要选来源列」的判据"
+    #: ⚠️ 2026-10-22 换锚：判据从「枚举两个 op 字面量」改为**按 op 求
+    #: `needsSourceColumn`**（现在覆盖 math_scale / copy_column / copy_extract）。
+    assert 'pickedRule?.op === "copy_column"' in wiz and 'pickedRule?.op === "copy_extract"' in wiz, (
+        "没有「哪些 op 要选来源列」的判据"
+    )
     assert "{needsSourceColumn && (" in wiz, \
         "来源列下拉没有按 `needsSourceColumn` 包起来（提取类也会看到）"
     #: ② 默认当前列。
     assert "sourceColumn ?? column" in wiz, "基础列没有默认到当前列"
     #: ③ **运算类只列数值列**（判据是后端 `"numeric"`，写 `number` 会恒空且不报错）；
     #:    复制类列全部列；且**当前列必在选项里**（它是默认值）。
-    assert 'it.kind === "numeric"' in wiz, "数值列筛选用错枚举（后端是 numeric，不是 number）"
-    assert "it.i === column" in wiz, "当前列没被钉进选项（默认值不在选项里 ⇒ 下拉显示裸下标）"
-    assert "isCopyRule ? true :" in wiz, "复制类没有放开成「全部列」"
+    #: ⚠️ 2026-10-22 换锚（用户口径 2026-10-20「**所有规则均支持选择数据源列**」）：
+    #: 数据源列不再按 op 过滤成「只数值列」，`it.kind === "numeric"` / `isCopyRule`
+    #: 两个分支**整体退场** ⇒ 选项 = 全部列。
+    #: 判据改为：选项必须覆盖**全部列**且显示**中文表头名**（不是裸下标）。
+    assert "const columnOptions = table.columns.map((name, i) => ({" in wiz, (
+        "数据源列选项不是「全部列」（用户口径：所有规则都支持选数据源列）"
+    )
+    assert "label: name || `第 ${i + 1} 列`" in wiz, (
+        "选项没显示表头名（会渲染成裸下标）"
+    )
     #: ④ 读基础列、写当前列（「A 列 ×1.7 写到 B 列」靠这两处不同）。
     assert "needsSourceColumn ? (sourceColumn ?? column) : column" in wiz, \
         "执行时没有「读来源列」的分支 ⇒ 换列无效"
@@ -10893,6 +10984,7 @@ def test_sku_image_import_uses_the_match_result_not_the_dead_regex_path():
     assert "wizardLocalImages" in src[j : j + 400], "passedSkuRows 没接上 SKU 图候选"
 
 
+@pytest.mark.skip(reason="已退役（2026-10-22 清理）：被测能力「规格分类固定列」于 2026-10-20 由用户口径整体移除（SPEC_CATEGORY_COL / withSpecCategoryColumn / specCategoriesFromColumn 全删，无兼容层；AGENTS.md §5 页面条目有记载）。替代口径 = 导入弹窗「商品 SKU 映射关系」左侧改为「预检通过列」（表格全部列）。")
 def test_spec_category_column_is_added_to_the_sku_table():
     """第一步 SKU 表要**新增「规格分类」列**（固定第 2 位/数据列第 0 位，默认空）。
 
@@ -10916,6 +11008,7 @@ def test_spec_category_column_is_added_to_the_sku_table():
     assert "withDerivedColumns(" in src, "向导层没真的调用插列"
 
 
+@pytest.mark.skip(reason="已退役（2026-10-22 清理）：被测能力「规格分类固定列」于 2026-10-20 由用户口径整体移除（SPEC_CATEGORY_COL / withSpecCategoryColumn / specCategoriesFromColumn 全删，无兼容层；AGENTS.md §5 页面条目有记载）。替代口径 = 导入弹窗「商品 SKU 映射关系」左侧改为「预检通过列」（表格全部列）。")
 def test_next_step_blocks_on_empty_spec_category_for_picked_rows():
     """点「下一步」要**校验「规格分类」列非空**（用户口径：只查勾选行）。"""
     src = PUBLISH_MODAL.read_text(encoding="utf-8")
@@ -10927,6 +11020,7 @@ def test_next_step_blocks_on_empty_spec_category_for_picked_rows():
     assert "message.warning" in block, "校验不过要提示（不是静默 return）"
 
 
+@pytest.mark.skip(reason="已退役（2026-10-22 清理）：被测能力「规格分类固定列」于 2026-10-20 由用户口径整体移除（SPEC_CATEGORY_COL / withSpecCategoryColumn / specCategoriesFromColumn 全删，无兼容层；AGENTS.md §5 页面条目有记载）。替代口径 = 导入弹窗「商品 SKU 映射关系」左侧改为「预检通过列」（表格全部列）。")
 def test_mapping_sources_come_from_the_spec_category_column():
     """映射弹窗左候选 = **第一步「规格分类」列去重后的值**（不是从 sku 名称拆前缀）。"""
     lib = PRECHECK_MAP.read_text(encoding="utf-8")
@@ -11011,7 +11105,9 @@ def test_spec_mapping_is_a_table_with_two_rows_max_and_no_duplicates():
     #: ① 布局 = Table（与同弹窗的价格库存映射表同款）。
     assert "<Table" in block, "商品 SKU 映射关系不是表格布局（用户口径：参考同弹窗其它部分）"
     #: ② 两列 + 操作列。
-    assert '"规格分类"' in block, "缺少「规格分类」列"
+    #: ⚠️ 2026-10-22 换锚（用户口径「导入弹窗左侧改为**预检通过列**」）：
+    #: 左列不再是「规格分类」（那个固定列已整体移除），而是预检表格的全部列。
+    assert '"预检通过列"' in block, "缺少「预检通过列」列"
     assert '"平台规格类型"' in block, "缺少「平台规格类型」列"
     #: ③ **最多两个映射关系**（用常量，不硬编码 2）。
     assert "MAX_SPEC_MAPPING_ROWS" in block, "没有条数上限（用户口径：最多两个）"
@@ -11242,8 +11338,12 @@ def test_derived_fixed_columns_are_not_rendered_twice():
     #: ② 第一列必须**读 rows**（不是只读渲染层状态 —— 那样它就不在表格数据里）。
     j = src.find('key: "__matched_image"')
     assert j > 0
-    blk = src[j : j + 1400]
+    #: ⚠️ 2026-10-22：列定义块变长（自建勾选列 + 红框 onCell），窗口从 1400 放到 3000。
+    blk = src[j : j + 3000]
     assert "skuImageColOf(table)" in blk, "第一列没从 rows 取「SKU 图」列"
+    #: ⚠️ 2026-10-22 换锚：取行值改为经 `const rel = skuImageColOf(table);` 再读
+    #: `table.rows[record.__index]?.[rel.index]`（多了可选链）。
+    #: 判据不变：**必须读 rows**（不是只读渲染层状态，否则它不在表格数据里）。
     assert "table.rows[record.__index]" in blk, "第一列没读 rows（还是两处真相源）"
     #: ③ 预检列里的「选择本地图」**按钮**已移除（第一列那枚图标是唯一入口）。
     #: ⚠️ 判据用**按钮的调用形态**而不是裸词 —— 说明注释里会提到这个按钮名
@@ -11400,9 +11500,15 @@ def test_reload_and_full_unspec_and_target_list_consistency():
     #: ⚠️ 两条负向：规则参数类 target **不许**混进这张表的下拉。
     assert '"price_fallback"' not in block, "售价回落列不该出现在价格库存列下拉里"
     assert '"spec_category"' not in block, "规格分类不该出现在价格库存列下拉里"
-    #: ⚠️ 两条正向：表列 + 导入必需来源**必须**在。
-    for t in ("price", "stock", "market_price", "barcode", "seller_code", "sku_name", "spec_image"):
+    #: ⚠️ 2026-10-22 **口径修订**（用户原话 2026-10-21）：
+    #: 「**移除下拉中的 SKU 图和 SKU 名称**」+「价格库存列的下拉框中应包含
+    #:   **当前 价格及库存全部固定列**」。
+    #: ⇒ `sku_name` / `spec_image` 从「必须存在」改为**必须不存在**
+    #:   （它们在预检阶段就是固定列，再配一遍 = 两份真相源）。
+    for t in ("price", "current_stock", "stock", "market_price", "spec_id", "barcode", "seller_code"):
         assert f'"{t}"' in block, f"价格库存列下拉漏了 {t}"
+    for banned in ("sku_name", "spec_image"):
+        assert f'"{banned}"' not in block, f"下拉里不该有 {banned}（用户口径：移除 SKU 图和 SKU 名称）"
 
 
 def test_reload_clears_step2_without_remounting_step1():

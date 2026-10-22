@@ -25,7 +25,7 @@
  *    （否则用户以为「取消 = 先放着」，实际已经放弃本次导入）。
  */
 import { useEffect, useMemo, useState } from "react";
-import { Alert, Button, Input, Modal, Space, Table, Tag, Tooltip, Typography, message } from "antd";
+import { App, Alert, Button, Input, Modal, Space, Table, Tag, Tooltip, Typography } from "antd";
 import { ReloadOutlined } from "@ant-design/icons";
 
 import { displayWidth } from "../../../lib/sku-name-width";
@@ -58,6 +58,10 @@ function isNameOk(name: string, maxChars: number): boolean {
 }
 
 export function SkuNameOptimizeModal(props: SkuNameOptimizeModalProps) {
+  //: ⚠️ 用 `App.useApp()` 拿 message（用户口径：全站消息统一走 antd message 组件，
+  //: 且静态方法不吃 ConfigProvider 主题 —— 项目守卫 `test_static_antd_message_import_*`
+  //: 明令禁止页面静态 `import { message } from "antd"`）。
+  const { message } = App.useApp();
   const { open, maxChars, items, imageByValue, onConfirm, onClose } = props;
   const [rows, setRows] = useState<Row[]>([]);
   const [regenKey, setRegenKey] = useState<string | null>(null);

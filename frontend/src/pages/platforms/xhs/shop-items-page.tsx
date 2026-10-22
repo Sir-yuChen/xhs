@@ -4040,9 +4040,12 @@ export function XhsShopItemsPage() {
     </div>
       {/* 页面级等待蒙版：与全站同一套视觉（fixed 铺满 + 白卡居中 + 已耗时）。 */}
       {/* 用户口径 2026-10-20：「可以不要蒙版只要居中的弹窗提示」
-          ⇒ `mask={false}`：不画半透明底（页面不被"洗白"两层），只显示居中白卡片 + 耗时。 */}
+          ⇒ `mask={false}`：不画半透明底（页面不被"洗白"两层），只显示居中白卡片 + 耗时。
+          ⚠️ 2026-10-22 补：`WaitMaskProps.mask` 默认是 **true**（`mask: withMask = true`），
+          注释写着 `mask={false}` 但代码里一直没传 ⇒ 用户口径其实没落地（守卫红了才发现）。 */}
       <WaitMask
         open={waitRunning}
+        mask={false}
         title={waitLabel ?? ""}
         elapsed={waitElapsedSec}
       />
