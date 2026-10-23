@@ -36,11 +36,16 @@ class _FakeRun:
         self.barrier = threading.Barrier(2, timeout=10)
 
     def __call__(self, cmd, **kwargs):
-        #: cmd = ["node", "sign.js", "@.sign_input_xxx.json"]（相对名，cwd=_JS_DIR）
+        #: cmd = [<node 可执行文件>, "sign.js", "@.sign_input_xxx.json"]（相对名，cwd=_JS_DIR）
         from xhs_utils.xhs_core.runtime import _JS_DIR
         import os
 
-        assert cmd[0] == "node" and cmd[1] == "sign.js", cmd
+        #: ⚠️ `cmd[0]` 现在是**定位后的 node 路径**（2026-10-23 统一出入口：
+        #: deps/node/node.exe，装包版与开发机一致），不再是裸 `"node"`。
+        #: 判据改为「这一格确实是 node 可执行文件」，而不是写死字符串 ——
+        #: 写死会让「依赖统一出入口」这类正确改动被判红（本用例真踩到过）。
+        assert os.path.basename(str(cmd[0])).lower().startswith("node"), cmd
+        assert cmd[1] == "sign.js", cmd
         ref = cmd[2]
         assert ref.startswith("@"), ref
         #: 真实 `subprocess.run(cwd=_JS_DIR)` 下 `@<相对名>` 按 _JS_DIR 解析。

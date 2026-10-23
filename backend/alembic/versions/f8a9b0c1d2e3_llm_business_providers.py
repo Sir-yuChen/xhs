@@ -298,5 +298,11 @@ def downgrade() -> None:
         op.drop_index(_INDEX_BUSINESS_UNIQUE, table_name=_TABLE_BUSINESS)
 
     if _table_exists(conn, _TABLE_BUSINESS):
-        op.drop_index(f"ix_{_TABLE_BUSINESS}_user_id", table_name=_TABLE_BUSINESS)
+        #: ⚠️ **索引也要判存在再删**（2026-10-23）：SQLite 的
+        #: `DROP INDEX` 对不存在的索引直接报 `no such index`，整条 downgrade 中断。
+        #: 索引「不存在」是合法状态 —— 例如最小夹具只建了表、或历史库里该索引
+        #: 曾被手工删掉。downgrade 的语义是「回到旧形态」，不该因缺一个可重建的
+        #: 索引而失败。
+        if _index_exists(conn, f"ix_{_TABLE_BUSINESS}_user_id"):
+            op.drop_index(f"ix_{_TABLE_BUSINESS}_user_id", table_name=_TABLE_BUSINESS)
         op.drop_table(_TABLE_BUSINESS)

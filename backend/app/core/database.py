@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
@@ -116,11 +118,17 @@ def init_db(bind=engine) -> None:
 
 
 def _run_alembic_migrations() -> None:
+    #: ⚠️ **测试环境跳过迁移链**（2026-10-23）：测试库每次都是空库，跑 95 个迁移
+    #: 做的工作就是「建表」，`create_all` 建出相同结构快 20 倍以上（实测单条用例
+    #: 16.6s → 0.76s）。迁移能否执行由 `run_alembic()` 的专门守卫测，不靠这里顺路测。
+    #: 开关由 `tests/backend/conftest.py` 模块级设置，生产环境永远不设。
+    if os.environ.get("HERMES_SKIP_ALEMBIC_IN_TESTS") == "1":
+        Base.metadata.create_all(bind=engine)
+        return
+
     try:
         from alembic import command
         from alembic.config import Config
-
-        import os
 
         ini_path = os.path.join(os.path.dirname(__file__), "..", "..", "alembic.ini")
         ini_path = os.path.normpath(ini_path)

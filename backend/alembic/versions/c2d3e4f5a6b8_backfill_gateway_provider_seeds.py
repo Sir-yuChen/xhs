@@ -84,6 +84,24 @@ def upgrade() -> None:
         )
         return
 
+    #: ⚠️ **`llm_business_providers.kind` 也要判**（2026-10-23 修，真库全链实测）：
+    #: 本迁移会调应用层 ORM（`seed_default_business_map_for_user`），而那个模型
+    #: **今天**带 `kind` 列 —— 库里的表若还没加 `kind`（`f9a0b1c2d3e4` 尚未执行，
+    #: 或最小夹具只建了省略版），INSERT 会直接
+    #: `table llm_business_providers has no column named kind`
+    #: ⇒ `upgrade head` 整条链失败。迁移**必须自带列形状守卫**，
+    #: 不能假设「今天的 ORM 模型与历史上的表结构一致」。
+    if "llm_business_providers" in tables:
+        biz_cols = {
+            col["name"] for col in inspect(bind).get_columns("llm_business_providers")
+        }
+        if "kind" not in biz_cols:
+            logger.info(
+                "gateway provider seed backfill: llm_business_providers 缺 kind 列，"
+                "跳过业务点映射补种（等 f9a0b1c2d3e4 加列后由启动播种补）"
+            )
+            return
+
     # 用**应用自己的 Session**（与服务层同库、同 ORM 映射）——迁移自带 bind 是
     # alembic 的裸连接，服务层函数要 ORM Session。
     from backend.app.core.database import SessionLocal

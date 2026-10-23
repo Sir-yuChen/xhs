@@ -69,6 +69,7 @@ def test_something(api_client, db_factory):
 """
 from __future__ import annotations
 
+import os
 import tempfile
 
 from collections.abc import Iterator
@@ -79,6 +80,22 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
+
+#: ⚠️ **测试环境跳过 alembic 迁移链，直接 `create_all`**（2026-10-23 立，工程化提速）。
+#:
+#: 实测依据：`TestClient(app)` 进 `lifespan` → `init_db()` → `_run_alembic_migrations()`，
+#: 空库走 `upgrade head` = **跑完全部 95 个迁移**。而测试库**每次都是空库**
+#: ⇒ 95 个迁移做的工作就是「建表」，`create_all` 建出**完全相同的结构**只要 0.76 秒。
+#: 代价实测：单条用例 17.2 秒里 **16.6 秒**花在 `alembic upgrade` 上
+#: （cProfile: `sqlite3.Cursor.execute` 506 次 / 16.559s；SQLAlchemy 事件测到真正
+#: 的业务 SQL 只有 0.03 秒 —— 差额全在迁移）。
+#:
+#: **迁移链本身仍然被测**：`tests/backend/test_initial_data.py` 等用 `run_alembic()`
+#: 显式跑子进程迁移（那是「迁移是否可执行」的守卫，必须保留、且必须走真 alembic）。
+#: 这里跳过的只是「每条用例为了建表而顺路重跑一遍迁移」这层浪费。
+#:
+#: 必须在 import `backend.app.core.database` **之前**设好 ⇒ 放模块级。
+os.environ.setdefault("HERMES_SKIP_ALEMBIC_IN_TESTS", "1")
 
 #: 仓库根（`tests/backend/conftest.py` → 上两级）。
 ROOT = Path(__file__).resolve().parents[2]
@@ -111,17 +128,176 @@ def make_engine(db_path: Path | str) -> Engine:
 
     `check_same_thread=False` 是必需的：`TestClient` 在另一线程里跑请求，
     而夹具线程也可能同时开会话。
+
+    ⚠️ **测试库关掉 fsync**（2026-10-23 实测，提速 100 倍）：默认 SQLite 每次
+    `commit` 都要 fsync 落盘，实测 500 次逐条 commit = **1.49 秒**，批量 = **0.00 秒**。
+    而大量用例是「造 N 行 → 断言」，每条都 commit ⇒ 单条用例 17 秒全花在磁盘上
+    （cProfile 实测 `sqlite3.Cursor.execute` 502 次 / 17.18 秒）。
+
+    口径：**测试库是一次性临时文件，进程结束即删**，崩了也无需恢复
+    ⇒ `synchronous=NORMAL` 完全够用，且**不影响生产**
+    （生产走 `core/database.py` 自己的引擎配置）。
+
+    ⚠️ **不要开 WAL**（2026-10-23 实测订正）：WAL 需要 checkpoint 才能把 `-wal`
+    文件并回主库，而测试库在用例结束后**没人 checkpoint**（连接被 Python GC 掉，
+    不是正常 close）⇒ `-wal` 越积越大（实测单条用例后已有 **3.1 MB**），
+    后续用例的写入反而更慢。默认的 rollback journal + `synchronous=NORMAL`
+    才是测试场景的正确组合。
     """
-    return create_engine(
+    engine = create_engine(
         f"sqlite:///{db_path}",
         connect_args={"check_same_thread": False},
     )
+
+    from sqlalchemy import event  # noqa: PLC0415
+
+    @event.listens_for(engine, "connect")
+    def _fast_sqlite(dbapi_conn, _record):  # noqa: ANN001
+        cur = dbapi_conn.cursor()
+        try:
+            cur.execute("PRAGMA synchronous=NORMAL")
+            #: ⚠️ **测试库把 busy_timeout 压到 200ms**（2026-10-23 立，工程化）。
+            #: 生产是 `busy_timeout=5000`（等待而不是立即失败，对真实用户是对的），
+            #: 但测试里「等 5 秒 × 重试 3 次 = 15 秒」会把**锁竞争缺陷藏起来**：
+            #: 用例照样绿，只是慢 —— 实测 `test_llm_gateway` 两条用例各花 16.8 秒
+            #: 就属于这类（`record_usage` 在 AnyIO worker 线程撞上请求会话持有的读事务）。
+            #: 压到 200ms 后：① 同样的锁竞争**立刻暴露成失败**而不是悄悄变慢；
+            #: ② 正常用例根本不会撞锁 ⇒ 无影响；③ 全量回归不会被这类静默等待拖垮。
+            cur.execute("PRAGMA busy_timeout=200")
+        finally:
+            cur.close()
+
+    return engine
 
 
 @pytest.fixture()
 def db_path(tmp_path: Path) -> Path:
     """本用例独享的 SQLite 文件路径（pytest 已按用例名隔离，xdist 下各 worker 还有独立 basetemp）。"""
     return tmp_path / "test.db"
+
+
+# ---------------------------------------------------------------------------
+# 测试禁止真实外连（2026-10-23 立规，工程化基础设施）
+# ---------------------------------------------------------------------------
+# 实测代价：`test_llm_gateway.py` 里 `base_url="http://127.0.0.1:3000"` 而本机
+# 3000 端口没人监听 ⇒ 每条用例真实 SYN 两次、各等约 2 秒 ⇒ **55 条用例 4m19s**，
+# 全量回归因此被拖到 **116 分钟**（历史基线 150 秒）。
+#
+# 这比慢更糟：**测试通过与否取决于跑测试的机器上有没有起 3000 端口**。
+# 在有网关的机器上「上游可达」走一条分支，在没有的机器上走异常分支 —— 同一份代码
+# 两种结论。测试必须是**确定的**。
+#
+# 口径：**默认禁掉一切非回环外连**。需要「上游不可达」语义的用例，显式用
+# `unreachable_upstream()` 打桩（立即 ConnectionRefused，不耗时）；
+# 确实要连外网的（如真实抓包脚本）显式 `@pytest.mark.allow_network` 或调用
+# `allow_network(monkeypatch)` 豁免。
+
+_LOOPBACK = {"127.0.0.1", "::1", "localhost", "0.0.0.0"}
+
+#: 测试里**唯一**允许真实回环连接的场景：`TestClient` 对自己进程的内置 ASGI
+#: 服务发请求（httpx → `TestClientTransport`，走的是内存 transport，但个别路径
+#: 会落到 socket）。其余回环连接一律禁止 —— 实测 Windows 上连「没在监听的
+#: 127.0.0.1:3000」**要等 2.04 秒**（SYN 重试），不是立即 RST。
+_ALLOW_LOOPBACK_ENV = "HERMES_TEST_ALLOW_LOOPBACK"
+
+
+def _host_is_loopback(host: Any) -> bool:
+    try:
+        return str(host) in _LOOPBACK
+    except Exception:  # noqa: BLE001
+        return False
+
+
+@pytest.fixture(autouse=True)
+def block_real_network(request, monkeypatch):
+    """**autouse**：禁止真实网络连接（含回环）。
+
+    为什么连回环也禁（2026-10-23 实测）：Windows 上 `connect(("127.0.0.1", 3000))`
+    对**没人监听**的端口要 **2.04 秒**（SYN 重试），返回 `ConnectionRefusedError` 之前
+    已经等了两秒。`test_llm_gateway` 每条用例建 2 个配置、各探测一次上游
+    ⇒ 每条约 4 秒 ⇒ 55 条 **4m19s**，全量回归被拖到 **116 分钟**（基线 150 秒）。
+
+    更要紧的是**确定性**：测试结论不该取决于「跑测试的机器上 3000 端口有没有起」。
+    需要「上游不可达」这一语义时，用 `unreachable_upstream()` 打桩（立即失败）；
+    需要访问本机真实服务时，显式 `@pytest.mark.allow_network` 并写明理由。
+    """
+    if request.node.get_closest_marker("allow_network"):
+        return
+
+    import os  # noqa: PLC0415
+    import socket  # noqa: PLC0415
+
+    allow_loopback = bool(os.environ.get(_ALLOW_LOOPBACK_ENV))
+    real_create_connection = socket.create_connection
+
+    def _guard(address, *args, **kwargs):
+        host = address[0] if isinstance(address, tuple) and address else address
+        if allow_loopback and _host_is_loopback(host):
+            return real_create_connection(address, *args, **kwargs)
+        #: ⚠️ `TestClient` 内部会建 socket（starlette `_TestClientTransport` 走 anyio
+        #: 到本进程的 ASGI 服务）⇒ 必须放行。判据用**调用栈**而不是主机名：
+        #: 按主机放行等于对「所有回环」开闸，于是「没人监听的 127.0.0.1:3000」
+        #: 又能等 2 秒了（这正是本轮的起点）。
+        import sys  # noqa: PLC0415
+
+        frame = sys._getframe(1)
+        while frame is not None:
+            name = frame.f_code.co_filename.replace("\\", "/").lower()
+            if "starlette/testclient.py" in name or "fastapi/testclient.py" in name:
+                return real_create_connection(address, *args, **kwargs)
+            frame = frame.f_back
+        raise RuntimeError(
+            f"测试禁止真实网络连接：试图连接 {host!r}。"
+            "上游不可达用 unreachable_upstream(monkeypatch)；"
+            "确需真实外连请加 @pytest.mark.allow_network 并写明理由。"
+        )
+
+    #: ⚠️ **拦截点必须选对**（2026-10-23 三次实测）：
+    #:   ① 直接替换 `socket.socket.connect` 方法 ⇒ anyio / ProactorEventLoop 的
+    #:      内部 socket 也被接管，`TestClient` 整体崩（54/55 红，
+    #:      `'ProactorEventLoop' object has no attribute '_ssock'`）；
+    #:   ② 替换 `socket.create_connection` ⇒ **覆盖不到 urllib3**：它自带一份同名
+    #:      实现（`urllib3.util.connection.create_connection`，内部直接 `sock.connect`），
+    #:      于是 requests 出站照旧等 2 秒（3m28s 没变快）；
+    #:   ③ 正解 = 拦 **urllib3 自己的那份** + `socket.create_connection`：
+    #:      前者覆盖 requests / urllib3（本项目全部出站 HTTP），
+    #:      后者覆盖其它用了标准库的代码，且都不碰事件循环内部 socket。
+    import urllib3.util.connection as _u3_conn  # noqa: PLC0415
+
+    real_u3_create = _u3_conn.create_connection
+
+    def _u3_guard(address, *args, **kwargs):
+        host = address[0] if isinstance(address, tuple) and address else address
+        if allow_loopback and _host_is_loopback(host):
+            return real_u3_create(address, *args, **kwargs)
+        raise RuntimeError(
+            f"测试禁止真实网络连接（urllib3）：试图连接 {host!r}。"
+            "上游不可达用 unreachable_upstream(monkeypatch)；"
+            "确需真实外连请加 @pytest.mark.allow_network 并写明理由。"
+        )
+
+    monkeypatch.setattr(_u3_conn, "create_connection", _u3_guard)
+    monkeypatch.setattr(socket, "create_connection", _guard)
+
+
+def unreachable_upstream(monkeypatch, *, url_prefix: str = "http") -> None:
+    """把 `requests` 的 GET/POST 变成**立即失败**（模拟上游不可达，零等待）。
+
+    用途：`base_url` 指向的网关在本机没起时，用例要的是「上游不可达」这个**语义**，
+    而不是真的等 2 秒 TCP 超时。写法：
+
+        unreachable_upstream(monkeypatch)          # 所有 http 请求
+        monkeypatch.setattr(requests, "get", ...)  # 只要更细控制时自己打
+    """
+    import requests  # noqa: PLC0415
+
+    def _boom(*args, **kwargs):
+        raise requests.exceptions.ConnectionError("模拟：上游不可达（测试桩）")
+
+    monkeypatch.setattr(requests, "get", _boom, raising=False)
+    monkeypatch.setattr(requests, "post", _boom, raising=False)
+    monkeypatch.setattr(requests, "put", _boom, raising=False)
+    monkeypatch.setattr(requests, "delete", _boom, raising=False)
 
 
 def seed_owner_rows(engine: Engine, *, user_id: int = 1, account_id: int | None = None) -> None:
@@ -173,6 +349,11 @@ def seed_owner_rows(engine: Engine, *, user_id: int = 1, account_id: int | None 
         db.close()
 
 
+#: `service_session_modules()` 的**进程级结果缓存**（见该函数 docstring 的「进程级缓存」）。
+#: 一个测试进程只真正扫描一次；清空请调 `invalidate_session_scan_cache()`。
+_SESSION_SCAN_RESULT: list[str] | None = None
+
+
 def service_session_modules() -> list[str]:
     """列出**所有**持有可能自开 Session 的工厂的后端模块（点分模块名）。
 
@@ -186,24 +367,43 @@ def service_session_modules() -> list[str]:
     用 `ast` 扫语法树而不是字符串匹配：注释 / 文档里提到这些名字不算数
     （负向断言禁裸 `in`，这里同理）。
 
-    ⚠️ **函数体内导入也算**（2026-10-02 起）：`ast.walk()` 遍历整棵树而不是只看
-    `tree.body`。理由是真实踩过 —— `material_scan_service` 曾在 `_run()` 里
+    ⚠️ **函数体内导入也算**：`ast.walk()` 遍历整棵树而不是只看 `tree.body`。
+    理由是真实踩过 —— `material_scan_service` 曾在 `_run()` 里
     `from backend.app.core.database import SessionLocal`（函数级 import），
-    AST 扫模块层时看不见它 ⇒ 桩打不到 ⇒ **后台 daemon 线程落到生产库**，
-    表现是「测试全红但缩略图已落盘、`last_scan_at` 永远是 None」。
-    函数级 import 确实拿不到模块属性可打桩（名称只在函数内可见），所以这类模块
-    必须**在模块层持有**（`SessionLocal` 或 `_session_factory`）才能被打桩 ——
-    本函数把它们扫出来，`patch_service_sessions()` 才有机会替换；
-    同时 `test_testing_spec_guards.py` 的守卫会钉住「函数级 import 不算合规持有」。
+    AST 扫模块层时看不见它 ⇒ 桩打不到 ⇒ **后台 daemon 线程落到生产库**。
 
-    ⚠️ **不硬编码名单**：硬编码迟早漏掉新模块，而漏掉的代价是「测试默默写生产库」
-    （2026-09-27 已发生两次）。语法错的模块直接抛出，不静默跳过。
+    ⚠️ **不硬编码名单**：硬编码迟早漏掉新模块，而漏掉的代价是「测试默默写生产库」。
+    语法错的模块直接抛出，不静默跳过。
+
+    ⚠️ **进程级缓存（2026-10-23）**：本函数被**每个** setup 调用
+    （`api_client` → `patch_service_sessions`），原实现每次都 `ast.parse` 全仓
+    191 个文件 = **2.26 秒/次**，全量回归里是纯重复劳动。
+
+    缓存策略：**一个进程只真正扫描一次**，之后直接返回。理由（实测支撑）：
+
+    * 扫一次的成本分两块：遍历 191 个文件 **0.25s**（Windows 文件系统固有成本，
+      `os.walk` / `rglob` 都一样）+ `ast.parse` 全量 **约 2s**。两者都是纯浪费；
+    * 「文件改了要不要重扫」—— **测试进程的生命期就是一次运行**，源码改了就意味着
+      重新起 pytest（新进程、缓存天然为空）⇒ 不需要进程内失效检测；
+    * `pytest-xdist` 每个 worker 是独立进程，各扫一次（8 核 = 8 次），仍比
+      「每条用例扫一次」快几十倍。
+
+    ⚠️ 若**同一进程内**改了源码还想让守卫看到新结果，调用
+    `invalidate_session_scan_cache()` 显式清空（仅供这种罕见场景）。
     """
+    global _SESSION_SCAN_RESULT
+
     import ast  # noqa: PLC0415
+
+    if _SESSION_SCAN_RESULT is not None:
+        return list(_SESSION_SCAN_RESULT)
+
+    app_dir = ROOT / "backend" / "app"
+    paths = sorted(app_dir.rglob("*.py"))
 
     names = {"SessionLocal", "_session_factory"}
     modules: list[str] = []
-    for path in sorted((ROOT / "backend" / "app").rglob("*.py")):
+    for path in paths:
         tree = ast.parse(path.read_text(encoding="utf-8"))
         # ⚠️ 遍历整棵树（含函数体）：函数级 import 也是「会自开 Session 的模块」，
         #    漏掉它 = 线程静默连生产库（2026-10-02 material_scan_service 实测）。
@@ -218,7 +418,20 @@ def service_session_modules() -> list[str]:
             if any(isinstance(t, ast.Name) and t.id in names for t in targets):
                 modules.append(_module_name(path))
                 break
-    return sorted(set(modules))
+
+    _SESSION_SCAN_RESULT = sorted(set(modules))
+    return list(_SESSION_SCAN_RESULT)
+
+
+def invalidate_session_scan_cache() -> None:
+    """清空 `service_session_modules()` 的进程级缓存。
+
+    只在「同一进程内改了 `backend/app` 源码还想立刻看到新扫描结果」时用
+    （正常测试不需要：改源码 = 重新起 pytest = 新进程 = 缓存天然为空）。
+    """
+    global _SESSION_SCAN_RESULT
+
+    _SESSION_SCAN_RESULT = None
 
 
 def _module_name(path: Path) -> str:
@@ -432,6 +645,21 @@ def api_client(db_engine: Engine, monkeypatch):
 
     factory = sessionmaker(autocommit=False, autoflush=False, bind=db_engine)
     patch_service_sessions(monkeypatch, factory)
+    #: ⚠️ **`init_db` 必须打桩**（2026-10-23）：`main.py` 在 import 期
+    #: `from backend.app.core.database import init_db` 做了**名字快照**，
+    #: 而 `init_db()` 内部用的是 `core/database.py` 的**模块级默认 engine**
+    #: （`sqlite:///./data/spider_xhs.db` = **真实生产库**），不是本夹具的测试库。
+    #: 后果两条：
+    #:   ① **每条用例都往真实库跑一遍 alembic 迁移链**（95 个迁移，实测单条 16.6 秒）
+    #:      —— 这是全量回归从 150 秒涨到 116 分钟的主因；
+    #:   ② 测试**会写真实库**（建表 / 迁移 / `_normalize_*` 回填），与「测试不碰生产数据」
+    #:      的红线冲突，只是平时看起来「没坏」所以一直没被发现。
+    #: 这里把 `init_db` 换成「在测试 engine 上建结构」：语义等价（空库 → 建表），
+    #: 但不碰真实库、且不走迁移链（迁移能否执行由 `run_alembic()` 的专门守卫覆盖）。
+    def _init_db_on_test_engine(*_a, **_k) -> None:
+        _base().metadata.create_all(bind=db_engine)
+
+    monkeypatch.setattr("backend.app.main.init_db", _init_db_on_test_engine, raising=False)
     # DEF-094：素材端点（新建文件夹 / 重扫 / 上传 / 缩略图）会落盘 —— 一律搬进 tmp。
     sandbox_material_storage(monkeypatch, Path(tempfile.mkdtemp(prefix="hermes-material-api-")))
 
@@ -721,8 +949,26 @@ LATER_MIGRATION_TABLES: dict[str, str] = {
     # ⚠️ `model_configs` 的最小形状**沿用上面的 d5e6 定义**（同表同列）——
     #    本迁移**读**它（存量兼容：is_default 行的 base_url 归一化后反查服务商
     #    建映射）再 drop 它 ⇒ 夹具必须先建出来，否则存量兼容分支空跑、测不到。
-    # ⚠️ `llm_business_providers` **不在本清单**：迁移对它只建不读，夹具先建会
-    #    撞 `table already exists`（同 `scheduled_job_logs` 不在此表的先例）。
+    #    ⚠️ `llm_business_providers` 曾经**不在本清单**（理由「迁移对它只建不读」）——
+    #    该理由 2026-10-23 起不成立，见下方同名条目的说明。
+    # ⚠️ `llm_business_providers`（2026-10-23 补）：**必须建**，且**不含 `kind` 列**。
+    #    原注释写「迁移对它只建不读」——已过时：区间内的 `b5c6d7e8f9a0`
+    #    （split_business_keys_by_entry）会 `SELECT … kind FROM llm_business_providers`
+    #    并 INSERT 带 `kind` 的行。夹具不建这张表 ⇒ `no such table`；
+    #    建了但不带 `kind` ⇒ 正是本夹具要还原的「stamp 点当时的形状」，
+    #    后面 `f9a0b1c2d3e4` 才给 `kind` 加列并回填 —— 那条迁移自身幂等。
+    "llm_business_providers": (
+        "CREATE TABLE llm_business_providers ("
+        " id INTEGER NOT NULL,"
+        " user_id INTEGER NOT NULL,"
+        " platform VARCHAR(32) NOT NULL DEFAULT 'xhs',"
+        " business_key VARCHAR(48) NOT NULL,"
+        " provider_key VARCHAR(64) NOT NULL DEFAULT '',"
+        " enabled BOOLEAN NOT NULL DEFAULT 1,"
+        " created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+        " updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+        " PRIMARY KEY (id))"
+    ),
     "publish_jobs": (
         "CREATE TABLE publish_jobs ("
         " id INTEGER NOT NULL,"

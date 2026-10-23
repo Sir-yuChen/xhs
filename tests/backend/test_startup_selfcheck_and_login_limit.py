@@ -28,15 +28,21 @@ class TestNodeStartupSelfCheck:
 
     def test_missing_node_gives_actionable_advice(self, monkeypatch):
         from backend.app.core import selfcheck
+        from xhs_utils.xhs_core import runtime as core_runtime
 
+        #: ⚠️ 桩要打在**真正的来源**上（2026-10-23）：自检先问统一出入口
+        #: `node_executable_or_none()`（deps/node → 包内 → PATH），只拦
+        #: `shutil.which` 在本机 deps 里真有 node 时桩不起作用（假红）。
+        monkeypatch.setattr(core_runtime, "node_executable_or_none", lambda: None)
         monkeypatch.setattr(selfcheck.shutil, "which", lambda _name: None)
         ok, detail = check_node_runtime = selfcheck.check_node_runtime()
 
         assert ok is False
-        # 结论要能指导行动：说清「装 Node」+「重启应用」+「影响范围」
+        # 结论要能指导行动：说清「怎么装」+「影响范围」+「下载后无需重启」
         assert "Node" in detail
-        assert "PATH" in detail
-        assert "重启" in detail
+        assert "deps/node" in detail or "PATH" in detail
+        assert "检查运行依赖" in detail
+        assert "无需重启" in detail
 
     def test_node_that_exists_but_cannot_run_is_reported(self, monkeypatch):
         """PATH 里有不代表能执行（权限 / 损坏 / shim 失效）—— 必须真跑一次。"""
@@ -69,7 +75,11 @@ class TestNodeStartupSelfCheck:
     def test_selfcheck_never_blocks_startup_even_when_unavailable(self, monkeypatch):
         """口径：缺失**只 WARN 不阻断** —— 看本地已同步数据不需要签名。"""
         from backend.app.core import selfcheck
+        from xhs_utils.xhs_core import runtime as core_runtime
 
+        #: 同 `test_missing_node_gives_actionable_advice`：桩打在统一出入口上，
+        #: 否则本机 deps 里有 node 时桩不生效（假红，2026-10-23）。
+        monkeypatch.setattr(core_runtime, "node_executable_or_none", lambda: None)
         monkeypatch.setattr(selfcheck.shutil, "which", lambda _name: None)
         # 不抛 = 通过
         result = selfcheck.log_startup_selfcheck()
