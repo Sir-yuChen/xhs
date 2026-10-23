@@ -272,6 +272,21 @@ def _bindable(port: int) -> bool:
             return False
 
 
+def _port_bind_conflict(port: int) -> bool:
+    """端口上现在是否**确有服务在监听**（用来区分「被抢占」与「启动报错」）。
+
+    ⚠️ 判据是「连接得上」而不是「bind 得开」：`_bindable()` 此刻必然返回 False
+    （端口被占），无法区分是谁占的；能连上说明确实有东西在监听，属于竞态被抢。
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.5)
+        try:
+            sock.connect(("127.0.0.1", port))
+            return True
+        except OSError:
+            return False
+
+
 def start_server(root: Path, port: int, console: bool):
     """在端口起 uvicorn；成功返回 ``(server, thread)``，失败返回 None。"""
     import uvicorn
@@ -298,6 +313,14 @@ def start_server(root: Path, port: int, console: bool):
         if _healthy(port):
             return server, thread
         if not thread.is_alive():
+            #: ⚠️ **线程已退出要分两种**（2026-10-23 真机实测 `[Errno 10048]`）：
+            #:   a) 端口在「探测可用」到「真正 bind」之间被别人抢走（TOCTOU 竞态，
+            #:      `_bindable()` 已经放行，uvicorn 自己 bind 时撞上）⇒ **换端口重试**；
+            #:   b) 其它启动错误 ⇒ 交给调用方换端口并报错。
+            #: 原来一律 `return None`，导致 uvicorn 日志里明明「startup complete」了，
+            #: 启动器却认为启动失败 ⇒ 用户拿到一个连不上后端的窗口（真机 bug）。
+            if _port_bind_conflict(port):
+                log.warning("端口 %d 在启动瞬间被占用（TOCTOU），换下一个端口", port)
             return None
         time.sleep(0.25)
 
