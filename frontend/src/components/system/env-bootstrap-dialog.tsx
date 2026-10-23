@@ -338,7 +338,19 @@ export function EnvBootstrapDialog({
   );
 }
 
-/** 启动入口：挂在 `WorkspaceShell`，**打开软件即探测一次**（不自动下载）。 */
+/**
+ * 启动入口：挂在 `WorkspaceShell`，**打开软件即探测并自动开始下载**。
+ *
+ * ⚠️ 2026-10-23 用户口径「安装时自动下载」「使用自己下的内核」：
+ * 原来这里是**只弹窗、不自动下载**（注释原文：「一进软件就闷头拉 83 MB 不好」）。
+ * 但真机反馈是「安装选好文件夹，没有自动下内核，也没有使用下载的自带内核」——
+ * 用户不会去点那个按钮，于是内核永远不下载，界面也就永远打不开。
+ * ⇒ 现在缺什么就**立即自动开下**（`autoStart`），弹窗负责展示实时进度
+ * （「第 N/3 次 + 已下载 x/总 y MB」）。下载在后台跑，不阻塞界面。
+ *
+ * 注：必装依赖（node）未就绪时 `EnvBootstrapDialog` 内部会禁止关闭窗口；
+ * 可选依赖（ffmpeg / OCR / 内核）下载失败不阻断使用。
+ */
 export function EnvBootstrapGate() {
   const [open, setOpen] = useState(false);
 
@@ -347,7 +359,7 @@ export function EnvBootstrapGate() {
     void fetchDepsStatus()
       .then((data: Awaited<ReturnType<typeof fetchDepsStatus>>) => {
         if (cancelled) return;
-        //: 有任何一个缺失就弹（哪怕是可选依赖 —— 缺 ffmpeg 会让视频无法检测）
+        //: 有任何一个缺失就弹窗**并自动开下**
         if ((data.deps.missing ?? []).length > 0) setOpen(true);
       })
       .catch(() => undefined);
@@ -357,7 +369,7 @@ export function EnvBootstrapGate() {
   }, []);
 
   if (!open) return null;
-  return <EnvBootstrapDialog onDone={() => setOpen(false)} />;
+  return <EnvBootstrapDialog autoStart onDone={() => setOpen(false)} />;
 }
 
 export default EnvBootstrapGate;

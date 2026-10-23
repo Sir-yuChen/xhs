@@ -35,7 +35,6 @@ import tempfile
 import threading
 import time
 import urllib.request
-import webbrowser
 from pathlib import Path
 
 APP_NAME = "SpiderXHS"
@@ -378,129 +377,6 @@ _APP_WINDOW_SETTLE_SECONDS = 2.0
 #: 而屏幕上那个窗口属于上一个进程（它的 pid 已经没人记着了）。
 _app_window_procs: list[subprocess.Popen] = []
 
-_BROWSER_CANDIDATES = (
-    (
-        "Microsoft Edge",
-        (
-            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-        ),
-    ),
-    (
-        "Google Chrome",
-        (
-            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-        ),
-    ),
-)
-
-#: ⚠️ **优先级固定为三档，不枚举品牌**（用户口径 2026-10-23）：
-#:
-#:   ① **Edge** ② **Chrome** ③ **电脑默认浏览器**
-#:
-#: 原实现在 ①② 都没找到时直接 `webbrowser.open()` —— 于是「默认浏览器是 360」的
-#: 机器上就变成在 360 的**标签页**里打开，用户看到的是「无法打开单独的窗口」。
-#: 这不是缺陷，是**第 ③ 档的设计行为**；真正要修的是 ①② 的查找方式：
-#:
-#:   * 硬编码两条路径**不够**（Store 版 / 精简版 Edge 落在 WindowsApps，
-#:     Chrome 装在非默认盘、或只有 Beta/Dev 通道）；
-#:   * ⇒ 先用**注册表 `App Paths`**（浏览器安装时自己写的，权威且不枚举品牌），
-#:     再兜底硬编码路径，都找不到才走 ③。
-#:
-#: 明确**不**在这里加 360 / QQ / 搜狗 / 夸克 之类的品牌清单 —— 那是把「某一台机器的
-#: 环境」写进代码，换台机器又要加一条（同一类坑）。要独立窗口，要么机器上有
-#: Edge/Chrome，要么用 ③ 并在托盘里明确告诉用户当前是标签页模式。
-
-
-def _candidate_browsers() -> list[tuple[str, Path]]:
-    """按**固定优先级**列出可用于独立窗口的浏览器：**先 Edge，再 Chrome**。
-
-    ⚠️ 排序规则（用户口径 2026-10-23「不要硬编码，默认优先级时，Edge，谷歌，
-    最后是电脑默认浏览器」）：本函数**只输出 Edge / Chrome 两个品牌**，第 ③ 档
-    （电脑默认浏览器）由 `open_app_window()` 在本函数全部落空后走
-    `_open_default_browser()` —— 这里不枚举它们，也不枚举 360 / QQ / 搜狗。
-
-    每个品牌内部的查找顺序（**先权威、后常见路径**）：
-      1. 注册表 `App Paths`（浏览器安装时自己写的；Store 版 / 非默认盘 / Beta 通道都在）
-      2. 程序目录硬编码路径
-      3. `%LOCALAPPDATA%` 用户级安装路径
-
-    去重按**大小写不敏感的完整路径**做 —— 同一 exe 被上面几条各命中一次时，
-    重复会让 `open_app_window` 对同一个 exe 白试两遍（第二次必然被单例转交）。
-    """
-    out: list[tuple[str, Path]] = []
-    local = os.environ.get("LOCALAPPDATA") or ""
-
-    def add(label: str, path: Path | None) -> None:
-        if path is not None:
-            out.append((label, path))
-
-    for label, exe_name, hardcoded, user_relative in (
-        (
-            "Microsoft Edge",
-            "msedge.exe",
-            (
-                r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-                r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-            ),
-            "Microsoft/Edge/Application/msedge.exe",
-        ),
-        (
-            "Google Chrome",
-            "chrome.exe",
-            (
-                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-            ),
-            "Google/Chrome/Application/chrome.exe",
-        ),
-    ):
-        add(label, _app_paths_from_registry(exe_name))
-        for p in hardcoded:
-            add(label, Path(p))
-        if local:
-            add(label, Path(local) / user_relative)
-
-    seen: set[str] = set()
-    uniq: list[tuple[str, Path]] = []
-    for label, path in out:
-        key = _win_path_key(path)
-        if key in seen:
-            continue
-        seen.add(key)
-        uniq.append((label, path))
-    return uniq
-
-
-def _win_path_key(path: Path) -> str:
-    """Windows 路径比较键（大小写不敏感；非 Windows 原样）。"""
-    text = str(path)
-    return text.lower() if sys.platform == "win32" else text
-
-
-def _app_paths_from_registry(exe_name: str) -> Path | None:
-    """读 `HKLM/HKCU\\...\\App Paths\\<exe>` 拿真实安装路径（读不到返回 None）。"""
-    if sys.platform != "win32":
-        return None
-    try:
-        import winreg  # noqa: PLC0415 - 仅 Windows 存在
-    except Exception:  # pragma: no cover - 非 Windows
-        return None
-    sub = rf"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{exe_name}"
-    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
-        try:
-            with winreg.OpenKey(hive, sub) as key:
-                value, _ = winreg.QueryValueEx(key, "")
-        except OSError:
-            continue
-        #: 注册表里常带引号（`"C:\...\msedge.exe"`）
-        text = str(value or "").strip().strip('"')
-        if text:
-            return Path(text)
-    return None
-
-
 def _app_profile_dir() -> Path:
     """窗口宿主的 profile 目录（**必须可写**，否则内核起来就崩）。
 
@@ -512,12 +388,12 @@ def _app_profile_dir() -> Path:
     现在的顺序：`%LOCALAPPDATA%` → 安装目录 → 系统临时目录，**逐个实测可写**，
     取第一个真的能写进去的；全都不行才退回安装目录（让上层报错可诊断）。
     """
-    candidates: list[Path] = []
-    base = os.environ.get("LOCALAPPDATA")
-    if base:
-        candidates.append(Path(base) / APP_NAME / "app-profile")
-    candidates.append(app_root() / "runtime" / "app-profile")
-    candidates.append(Path(tempfile.gettempdir()) / APP_NAME / "app-profile")
+    #: ⚠️ **只认安装目录**（用户口径 2026-10-23「彻底隔绝电脑环境的影响」）：
+    #: 原来优先 `%LOCALAPPDATA%` —— 那个变量可能被组策略重定向、被安全软件锁住、
+    #: 或在精简系统上不存在，**同一份程序在不同电脑上状态会落在不同地方**，
+    #: 出现「这台能用那台不能」而无法复现。现在内核状态（登录态、缓存）跟安装
+    #: 目录走：用户卸载/迁移时整个目录一起动，环境之间零串扰。
+    candidates: list[Path] = [app_root() / "runtime" / "app-profile"]
 
     for path in candidates:
         try:
@@ -532,6 +408,34 @@ def _app_profile_dir() -> Path:
     return candidates[0]
 
 
+def _window_host_candidates() -> list[Path]:
+    """窗口内核的**全部**候选路径。
+
+    ⚠️ **路径来源只有一个**：`env_bootstrap_service.deps_root()`（DEF-044 口径：
+    同一语义不留两份实现）。它内部已经区分安装态（`<安装目录>/deps/`）与开发态
+    （`<仓库>/.hermes/deps/`）—— launcher 若自己再拼一次 `app_root()/"deps"`，
+    开发态就会「下载到 .hermes/deps 却在 deps 找」，表现为**下载成功但找不到内核**
+    （2026-10-23 实机弹窗「下载已完成但未找到内核文件」正是这个）。
+
+    ⚠️ **不包含任何 `%LOCALAPPDATA%` 回退**（用户口径「彻底隔绝电脑环境的影响」）：
+    按环境变量找 = 同一份程序在不同电脑上找不同地方，正是要根除的不确定性。
+    """
+    candidates: list[Path] = []
+    try:
+        from backend.app.services import env_bootstrap_service as env  # noqa: PLC0415
+
+        spec = env.spec_by_key("window_host")
+        dir_name = spec.dir_name if spec is not None else "window-host"
+        candidates.append(env.deps_root() / dir_name / WINDOW_HOST_EXE)
+    except Exception as exc:  # noqa: BLE001 - 拿不到就退回安装目录判据
+        log.warning("无法从依赖服务取内核路径（%s），退回安装目录判据", exc)
+        candidates.append(app_root() / "deps" / "window-host" / WINDOW_HOST_EXE)
+
+    #: 旧版曾把内核放 runtime/ 下，保留一处**只读**兼容
+    candidates.append(app_root() / "runtime" / "window-host" / WINDOW_HOST_EXE)
+    return candidates
+
+
 def _window_host_exe() -> Path | None:
     """内置窗口宿主的可执行文件路径（**零环境依赖**的独立窗口）。
 
@@ -542,23 +446,13 @@ def _window_host_exe() -> Path | None:
 
     ⚠️ **必须逐个实测**「文件存在 **且** 体积像样」：解压中断会留下一个能启动但
     没有 app 代码的 Electron，它起来闪一下就退 —— 真机上正是这样表现为「点了没反应」。
-    找不到才返回 None，由调用方降级到浏览器。
-    """
-    #: ⚠️ **唯一落点是 `deps/`**（2026-10-23 用户口径「下载到用户选择的安装目录」）：
-    #: `env_bootstrap_service.deps_root()` = `<安装目录>/deps/`，四个可下载依赖
-    #: （node / ffmpeg / OCR / 窗口内核）全在那里 —— 用户能看见、能删，
-    #: 升级安装覆盖 `_internal` 时也不会丢。launcher 必须问同一个位置，
-    #: 否则会出现「下载成功但找不到」（本条注释即为此而写）。
-    candidates = [
-        app_root() / "deps" / "window-host" / WINDOW_HOST_EXE,
-        #: 旧版曾用 runtime/ 作落点，保留一处兼容（只读，不写入）
-        app_root() / "runtime" / "window-host" / WINDOW_HOST_EXE,
-    ]
-    local = os.environ.get("LOCALAPPDATA")
-    if local:
-        candidates.append(Path(local) / APP_NAME / "window-host" / WINDOW_HOST_EXE)
 
-    for exe in candidates:
+    ⚠️ **候选列表只在 `_window_host_candidates()` 里定义一次**。本函数原来另抄了
+    一份（写死 `app_root()/"deps"`），于是开发态「下载到 `.hermes/deps`、却去 `deps`
+    找」⇒ 实机弹窗「下载已完成但未找到内核文件」（2026-10-23 真机截图）。
+    同一语义两份实现，改一处漏一处。
+    """
+    for exe in _window_host_candidates():
         try:
             if exe.is_file() and exe.stat().st_size > 20 * 1024 * 1024:
                 return exe
@@ -568,129 +462,215 @@ def _window_host_exe() -> Path | None:
 
 
 def open_app_window(url: str) -> bool:
-    """以独立应用窗口打开 UI。
+    """以**内置内核**的独立窗口打开 UI（**唯一方式，无浏览器降级**）。
 
-    **优先级（2026-10-23 起）**：
-      ① **内置窗口宿主**（自带 Chromium，不读用户任何浏览器）—— 首选，
-         见 `packaging/window-host/main.js`；
-      ② Edge → ③ Chrome（``--app=``，只是兜底）；
-      ④ 电脑默认浏览器（标签页）。
+    用户口径（2026-10-23）：「使用自己下的内核，不再依靠电脑环境中的浏览器」
+    「彻底隔绝电脑环境的影响」。
 
-    为什么把内置宿主放第一（用户口径「不再依赖不同电脑的不同环境，无法确认」）：
-    真机实测过三种失败 —— 用户没装 Chrome；Edge 在已有 app-profile 会话时打印
-    「正在现有浏览器会话中打开」并**立即退出（code 0）**，窗口确实开了却被误判成
-    失败；360/QQ 等浏览器会吞掉 ``--app=`` 变普通标签页。只有自带内核能让所有
-    电脑的行为一致。
+    历史（为什么最终砍掉浏览器方案）：真机实测过三种失败 ——
+      * 用户电脑只装了 360，没有 Chrome；
+      * Edge 在已有 app-profile 会话时打印「正在现有浏览器会话中打开」并
+        **立即退出（code 0）**，窗口其实开了却被当成失败；
+      * 360 / QQ 等会吞掉 ``--app=``，退化成普通标签页。
+    三者都源于「行为取决于那台电脑装了什么」。内置内核把这件事变成常量。
+
+    现在查不到内核就**明确报错并弹窗**告诉用户去下载，绝不静默换浏览器 ——
+    静默降级会让用户以为「软件坏了」，而日志里却是「已用 XXX 打开」。
     """
 
     profile = _app_profile_dir()
 
-    #: ① **内置窗口宿主**（自带 Chromium）—— 与用户装了什么都无关。
+    #: **只用内置内核，不做任何浏览器降级**（用户口径 2026-10-23：
+    #: 「使用自己下的内核不再依靠电脑环境中的浏览器」）。
+    #:
+    #: 这里刻意**没有**"找不到就换 Edge / Chrome / 默认浏览器"的分支 —— 那正是
+    #: 之前真机出问题的根源：换到哪个浏览器、是否支持 --app、是否被单例转交，
+    #: 全部取决于那台电脑装了什么，行为无法预期。查不到内核时**明确报错**，
+    #: 让用户看到「去下载内核」的可操作提示，而不是静默降级成一个随机的观感。
     host = _window_host_exe()
-    if host is not None:
-        try:
-            proc = subprocess.Popen(
-                [str(host), f"--url={url}", f"--profile={profile}"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL,
-            )
-        except Exception as exc:
-            log.warning("内置窗口宿主启动失败（%s），降级到浏览器候选", exc)
-        else:
-            time.sleep(_APP_WINDOW_SETTLE_SECONDS)
-            if proc.poll() is None:
-                _app_window_procs.append(proc)
-                log.info("已用内置窗口宿主打开（零环境依赖）：%s（pid=%d）", url, proc.pid)
-                return True
-            log.warning(
-                "内置窗口宿主启动后 %.1fs 内已退出（code=%s），降级到浏览器候选",
-                _APP_WINDOW_SETTLE_SECONDS, proc.returncode,
-            )
-    else:
-        log.warning(
-            "未找到内置窗口宿主（%s）—— 说明安装时依赖未下载成功，"
-            "将降级到 Edge/Chrome/默认浏览器。请在「检查运行依赖」里重新下载。",
-            app_root() / "runtime" / "window-host" / WINDOW_HOST_EXE,
+    if host is None:
+        searched = "\n  ".join(str(p) for p in _window_host_candidates())
+        log.error(
+            "未找到内置窗口内核（已查找：\n  %s\n）—— 请在软件里点「检查运行依赖」下载，"
+            "下载到安装目录的 deps/window-host/ 下。",
+            searched,
         )
-
-    args = [
-        f"--app={url}",
-        f"--user-data-dir={profile}",
-        f"--window-size={APP_WINDOW_SIZE}",
-        "--no-first-run",
-        "--no-default-browser-check",
-    ]
-    tried: list[str] = []
-    for label, exe in _candidate_browsers():
-        if not exe.is_file():
-            continue
-        tried.append(f"{label}={exe}")
-        try:
-            proc = subprocess.Popen(
-                [str(exe), *args],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL,
-            )
-        except Exception as exc:
-            log.warning("%s 启动失败（%s），尝试下一个候选", label, exc)
-            continue
-        time.sleep(_APP_WINDOW_SETTLE_SECONDS)
-        if proc.poll() is not None:
-            #: 单例转交 / 参数被吞 / 进程直接崩 —— 三种都在这里落网
-            log.warning(
-                "%s 启动后 %.1fs 内已退出（code=%s），继续下一个候选",
-                label, _APP_WINDOW_SETTLE_SECONDS, proc.returncode,
-            )
-            continue
-        _app_window_procs.append(proc)
-        log.info(
-            "已用 %s 打开独立应用窗口：%s（profile=%s，pid=%d）",
-            label, url, profile, proc.pid,
+        _notify_user(
+            "缺少独立窗口内核",
+            "软件需要下载内置窗口内核（约 220 MB）才能显示界面。\n\n"
+            "请在软件窗口里点击「检查运行依赖」→「开始下载」，"
+            "完成后无需重启即可打开。",
         )
-        return True
-    log.warning(
-        "第①②档均不可用（候选=%s），改用**电脑默认浏览器**打开 %s（标签页模式，不是独立窗口）",
-        tried or "无", url,
-    )
-    return _open_default_browser(url)
-
-
-def _open_default_browser(url: str) -> bool:
-    """**最后兜底**：把 URL 交给系统 shell（等价于用户在「运行」里粘贴它）。
-
-    ⚠️ 与 `webbrowser.open()` 的区别（2026-10-23，用户口径「不依赖电脑本地环境」）：
-    `webbrowser` 模块会按自己的探测顺序挑选浏览器（读 `BROWSER` 环境变量、
-    查注册表、甚至尝试 Lynx 之类的文本浏览器），**选择结果随机器而异** ——
-    这正是最早「在 360 里以标签页打开」的来源之一。
-    `ShellExecuteW("open")` 则是 Windows 的官方协议：交给用户的默认处理程序，
-    行为与「双击链接」完全一致。两者都不改用户的默认设置，但后者的语义是
-    「系统的标准打开方式」，而不是 Python 自己再猜一遍。
-    """
-    if sys.platform == "win32":
-        try:
-            import ctypes  # noqa: PLC0415
-
-            result = ctypes.windll.shell32.ShellExecuteW(None, "open", url, None, None, 1)
-            #: ShellExecuteW 返回 >32 才算成功（微软文档口径）
-            if int(result) > 32:
-                log.info("已用系统默认处理程序打开 %s", url)
-                return True
-            log.warning("ShellExecuteW 返回 %s，改用 webbrowser 兜底", result)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("ShellExecuteW 失败（%s），改用 webbrowser 兜底", exc)
+        return False
 
     try:
-        ok = bool(webbrowser.open(url))
-        if ok:
-            log.info("已用 webbrowser 打开 %s", url)
-        else:
-            log.warning("打开浏览器失败，请手动访问 %s", url)
-        return ok
-    except Exception as exc:
-        log.warning("打开浏览器失败（%s），请手动访问 %s", exc, url)
+        proc = subprocess.Popen(
+            [str(host), f"--url={url}", f"--profile={profile}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+        )
+    except Exception as exc:  # noqa: BLE001 - 失败要报出来，不静默
+        log.error("内置窗口内核启动失败：%s", exc)
+        _notify_user("窗口内核启动失败", f"无法启动内置窗口内核：\n{exc}")
         return False
+
+    time.sleep(_APP_WINDOW_SETTLE_SECONDS)
+    if proc.poll() is not None:
+        log.error(
+            "内置窗口内核启动后 %.1fs 内已退出（code=%s）—— 内核文件可能不完整，"
+            "请在「检查运行依赖」里「清空本地重新下载」",
+            _APP_WINDOW_SETTLE_SECONDS, proc.returncode,
+        )
+        _notify_user(
+            "窗口内核异常退出",
+            f"内置窗口内核启动后立即退出（code={proc.returncode}）。\n\n"
+            "可能是下载不完整，请在「检查运行依赖」里点「清空本地重新下载」。",
+        )
+        return False
+
+    _app_window_procs.append(proc)
+    log.info("已用内置窗口内核打开：%s（profile=%s，pid=%d）", url, profile, proc.pid)
+    return True
+
+
+def _ensure_window_host_ready() -> bool:
+    """启动时确保内置窗口内核就绪（**首次运行会下载**，带进度提示）。
+
+    为什么要在这一层下（而不是只靠网页弹窗）：**界面本身要靠内核打开** ——
+    把下载放在界面里就形成死锁（用户要点下载，但界面打不开）。真机反馈的
+    「安装选好文件夹，没有自动下内核，也没有使用下载的自带内核」正是这个死锁。
+    启动器在开窗前同步取到手，是唯一能保证「装完就能用」的位置。
+
+    进度用 tkinter 显示（**仅本函数**，失败静默回退到无进度窗口）：
+    下载 220 MB 期间若没有任何反馈，用户会以为程序卡死而强杀。
+    """
+    if _window_host_exe() is not None:
+        return True
+
+    log.info("内置窗口内核未就绪，开始下载（首次运行需要）")
+    progress = _WindowHostProgressDialog()
+    try:
+        #: 复用后端依赖服务的实现（下载/重试/探测只有一份，DEF-044 口径）
+        from backend.app.services import env_bootstrap_service as env  # noqa: PLC0415
+
+        spec = env.spec_by_key("window_host")
+        if spec is None:
+            log.error("依赖注册表里没有 window_host —— 打包不完整")
+            _notify_user("安装不完整", "程序缺少窗口内核的下载配置，请重新安装。")
+            return False
+
+        target = env.deps_root() / spec.dir_name
+        progress.show()
+
+        def _sink(label: str, done: int, total: int) -> None:
+            progress.update(label, done, total)
+
+        env.set_progress_sink(_sink)
+        try:
+            env._with_retries(spec.fetch, target, spec.name)
+        finally:
+            env.set_progress_sink(None)
+    except Exception as exc:  # noqa: BLE001 - 失败要明确告诉用户怎么办
+        log.error("窗口内核下载失败：%s", exc, exc_info=True)
+        progress.close()
+        _notify_user(
+            "窗口内核下载失败",
+            f"无法下载界面内核：\n{exc}\n\n"
+            "请检查网络后重新启动软件。\n"
+            f"日志：{app_root() / 'logs' / 'launcher.log'}",
+        )
+        return False
+    progress.close()
+
+    if _window_host_exe() is None:
+        log.error("下载流程结束但仍未找到内核（%s）", _window_host_candidates())
+        _notify_user("窗口内核不可用", "下载已完成但未找到内核文件，请重新安装软件。")
+        return False
+    log.info("内置窗口内核已就绪：%s", _window_host_exe())
+    return True
+
+
+class _WindowHostProgressDialog:
+    """下载进度窗口（tkinter；**任何**异常都降级为无窗口，不阻断下载）。
+
+    ⚠️ tkinter 只在**启动器进程**里用（`SpiderXHS.spec` 未排除它 —— 它由
+    launcher 直接使用；排除列表针对的是后端业务代码）。
+    """
+
+    def __init__(self) -> None:
+        self._root = None
+        self._label = None
+        self._bar = None
+        self._closed = False
+
+    def show(self) -> None:
+        try:
+            import tkinter as tk  # noqa: PLC0415
+            from tkinter import ttk  # noqa: PLC0415
+
+            root = tk.Tk()
+            root.title("SpiderXHS 首次准备")
+            root.geometry("460x150")
+            root.resizable(False, False)
+            root.attributes("-topmost", True)
+            tk.Label(
+                root,
+                text="正在准备界面内核（首次运行，约 220 MB）",
+                font=("Microsoft YaHei", 11),
+            ).pack(pady=(22, 8))
+            self._label = tk.Label(root, text="连接下载源…", font=("Microsoft YaHei", 9))
+            self._label.pack()
+            self._bar = ttk.Progressbar(root, length=380, mode="determinate", maximum=100)
+            self._bar.pack(pady=12)
+            root.protocol("WM_DELETE_WINDOW", lambda: None)  # 下载中不许关
+            root.update()
+            self._root = root
+        except Exception as exc:  # noqa: BLE001 - 无 GUI 也能继续下载
+            log.warning("进度窗口不可用（%s），继续无界面下载", exc)
+            self._root = None
+
+    def update(self, label: str, done: int, total: int) -> None:
+        if self._root is None or self._closed:
+            return
+        try:
+            if total > 0:
+                percent = min(100, int(done * 100 / total))
+                self._bar["value"] = percent
+                self._label.config(
+                    text=f"{done / 1048576:.1f} / {total / 1048576:.1f} MB（{percent}%）"
+                )
+            else:
+                self._label.config(text=label)
+            self._root.update()
+        except Exception:  # noqa: BLE001 - 进度刷新失败不影响下载
+            pass
+
+    def close(self) -> None:
+        self._closed = True
+        if self._root is None:
+            return
+        try:
+            self._root.destroy()
+        except Exception:  # noqa: BLE001
+            pass
+        self._root = None
+
+
+def _notify_user(title: str, message: str) -> None:
+    """弹一个**原生**消息框（窗口没起来时，用户没有别的途径知道发生了什么）。
+
+    ⚠️ 不用 `tkinter`（打包时被排除，导入即失败），也不依赖 Web 界面
+    （界面正是打不开的那个东西）。Win32 `MessageBoxW` 零依赖、必然可见。
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes  # noqa: PLC0415
+
+        ctypes.windll.user32.MessageBoxW(0, message, title, 0x30)  # MB_ICONWARNING
+    except Exception:  # noqa: BLE001 - 弹窗失败不影响主流程
+        pass
 
 
 def _taskkill_tree(pid: int) -> None:
@@ -709,40 +689,6 @@ def _taskkill_tree(pid: int) -> None:
         log.warning("taskkill pid=%d 失败：%s", pid, exc)
 
 
-def _kill_browsers_using_profile(profile: Path) -> None:
-    """兜底：**按命令行里的 profile 路径**收掉所有还开着的窗口进程。
-
-    为什么 pid 之外还要这一刀（2026-09-26 用户实测：托盘退出后窗口还在）：
-
-    Chromium 的单例机制会把「用同一个 user-data-dir 再开一次」变成
-    **转交给已有实例**，新进程随即退出 —— 我们手里的 pid 于是指向一个空壳，
-    而屏幕上的窗口属于更早的那个进程。只按 pid 杀必然漏。
-
-    **为什么不会误伤用户自己的浏览器**：`--user-data-dir` 是**我们独占**的
-    专用目录（`%LOCALAPPDATA%\\SpiderXHS\\app-profile`），用户日常浏览器绝不会
-    带这个参数。命令行里带它的进程，按定义就是本应用开的窗口。
-    """
-    if sys.platform != "win32":
-        return
-    needle = str(profile).replace("'", "''")
-    script = (
-        "$ErrorActionPreference='SilentlyContinue'; "
-        f"$needle = '{needle}'; "
-        "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe' or Name='msedge.exe'\" | "
-        "Where-Object { $_.CommandLine -like ('*' + $needle + '*') } | "
-        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
-    )
-    try:
-        subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-            capture_output=True,
-            timeout=20,
-        )
-        log.info("已按 profile 兜底清理窗口进程（profile=%s）", profile)
-    except Exception as exc:
-        log.warning("按 profile 清理窗口进程失败（%s）", exc)
-
-
 def _close_app_window() -> None:
     """关掉我们起的独立窗口（独占 profile ⇒ 独立进程树，不影响用户自己的浏览器）。
 
@@ -758,8 +704,6 @@ def _close_app_window() -> None:
     for proc in procs:
         log.info("关闭独立应用窗口（pid=%d，poll=%s）", proc.pid, proc.poll())
         _taskkill_tree(proc.pid)
-    # 兜底：浏览器单例转交会让上面那几刀落到空壳上（见 `_app_window_procs`）
-    _kill_browsers_using_profile(_app_profile_dir())
 
 
 # ---------------------------------------------------------------------------
@@ -824,13 +768,11 @@ def run_tray(server, thread: threading.Thread, port: int) -> bool:
         _close_app_window()
         icon.stop()
 
+    #: ⚠️ **不再有「用默认浏览器打开」**（用户口径 2026-10-23「使用自己下的内核，
+    #: 不再依靠电脑环境中的浏览器」）：那个入口点下去会用**用户电脑上那个浏览器**
+    #: 打开，行为随机器而异 —— 正是要根除的东西。界面统一走内置内核。
     icon = pystray.Icon(APP_NAME, image, f"{APP_NAME} :{port}", pystray.Menu(
         pystray.MenuItem("打开界面", open_ui),
-        #: ⚠️ 兜底入口（用户口径 2026-10-23：「默认被浏览器打开，无法打开单独的窗口」）：
-        #: 有些机器装的是精简版 / 商店版 Edge、或浏览器装在非常规路径，`--app=` 起不来，
-        #: 于是退回系统默认浏览器（标签页）。给一个**明确**的兜底入口，用户不必去翻
-        #: 开始菜单找 exe。默认浏览器打开的是同一个页面，功能完全一致。
-        pystray.MenuItem("用默认浏览器打开", lambda: _open_default_browser(f"http://127.0.0.1:{port}")),
         pystray.MenuItem("退出", quit_app),
     ))
 
@@ -961,7 +903,17 @@ def main(argv=None) -> int:
     ensure_file_logging(root, console)
     url = f"http://127.0.0.1:{port}"
     log.info("服务就绪：%s", url)
+
+    #: ⚠️ **开窗前必须先把内核准备好**（2026-10-23 用户口径「安装时自动下载」
+    #: 「使用自己下的内核」）。这里有个死锁必须破掉：
+    #:   用户要在**界面里**点「检查运行依赖」下载内核，可**界面本身要靠内核打开**
+    #:   ⇒ 没人点，内核永远没有，界面永远打不开（真机反馈的正是这个）。
+    #: 所以在启动器这一层先同步把内核取到手（带进度提示 + 3 次重试），
+    #: 拿到才开窗；拿不到就弹原生窗说明原因（那种情况下 W eb 界面根本不存在）。
     if not args.no_browser:
+        if not _ensure_window_host_ready():
+            log.error("内置窗口内核不可用，无法打开界面")
+            return 1
         open_app_window(url)
 
     if run_tray(server, thread, port):
