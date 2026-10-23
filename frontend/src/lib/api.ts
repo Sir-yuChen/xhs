@@ -6237,3 +6237,30 @@ export async function fetchSystemAppLogs(params?: {
   return response.data;
 }
 
+/** 改自己的密码（**所有人可用**，不需要权限码）。改完旧令牌失效，需重新登录。 */
+export async function changeMyPassword(
+  oldPassword: string,
+  newPassword: string
+): Promise<{ ok: boolean; id: number; re_login_required: boolean }> {
+  const response = await http.post<{ ok: boolean; id: number; re_login_required: boolean }>(
+    "/auth/change-password",
+    { old_password: oldPassword, new_password: newPassword }
+  );
+  return response.data;
+}
+
+/** 把当前用户名下的配置值复制给所有用户（**仅 admin**，设计 48 §M8）。 */
+export async function applySettingsToAllUsers(keys: string[]): Promise<{
+  ok: boolean;
+  updated: number;
+  created: number;
+  details: { key: string; value: unknown; updated: number; created: number }[];
+}> {
+  const response = await http.post<{
+    ok: boolean;
+    updated: number;
+    created: number;
+    details: { key: string; value: unknown; updated: number; created: number }[];
+  }>("/settings/apply-to-all", { keys });
+  return response.data;
+}

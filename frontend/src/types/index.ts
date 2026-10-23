@@ -45,6 +45,14 @@ export type DashboardOverview = {
 export type PlatformUser = {
   id: number;
   username: string;
+  /** 角色 code（`admin` / `user` / 自建）。**提示性**，判据在后端。 */
+  role?: string;
+  real_name?: string;
+  email?: string;
+  /** `normal` / `pending`（注册待审）/ `disabled`（停用）。 */
+  status?: string;
+  /** 下次登录必须改密（出厂 admin 为 true）。 */
+  must_change_password?: boolean;
 };
 
 export type AuthTokens = {

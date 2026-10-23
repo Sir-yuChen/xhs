@@ -1,8 +1,11 @@
+import { usePermission } from "../../hooks/use-permission";
+import { applySettingsToAllUsers } from "../../lib/api";
 import { WaitMask } from "../../components/ui/wait-mask";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   App,
   Button,
+  Alert,
   Card,
   Col,
   Form,
@@ -21,7 +24,7 @@ import {
   Typography,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { PlusOutlined, ReloadOutlined, SettingOutlined } from "@ant-design/icons";
+import { PlusOutlined, ReloadOutlined, SettingOutlined, TeamOutlined } from "@ant-design/icons";
 
 import {
   createSystemSetting,
@@ -53,6 +56,10 @@ const CATEGORY_OPTIONS = Object.entries(CATEGORY_LABELS).map(([value, label]) =>
 type FormValues = SettingFormValues;
 
 export function SettingsPage() {
+  //: 「应用到所有用户」是**仅 admin** 的操作（设计 48 §M8）——
+  //: 后端也没有权限码可用（配置是 per-user 的），它判角色，这里同一判据。
+  const { isAdmin } = usePermission();
+  const [applyOpen, setApplyOpen] = useState(false);
   // 消息提醒一律走 `App.useApp()` 的实例（项目口径：禁静态 `import { message }`）。
   const { message } = App.useApp();
   const [form] = Form.useForm<FormValues>();
@@ -287,6 +294,19 @@ export function SettingsPage() {
                 <Button size="small" type="primary" icon={<PlusOutlined />} onClick={openCreate}>
                   新增
                 </Button>
+                {/* 应用到所有用户（v1.1.0 / 设计 48 §M8）：**仅 admin 可见**。
+                    后端没有权限码可用（`system:setting:edit` 是 per-user 的），
+                    它判的是角色 —— 所以这里也用 isAdmin，两处同一判据。 */}
+                {isAdmin && (
+                  <Button
+                    size="small"
+                    icon={<TeamOutlined />}
+                    onClick={() => setApplyOpen(true)}
+                    title="把当前值复制给所有用户（只覆盖指定键，不删任何行）"
+                  >
+                    应用到所有用户
+                  </Button>
+                )}
               </Space>
             }
           >
@@ -425,6 +445,61 @@ export function SettingsPage() {
               </Form.Item>
             </Col>
           </Row>
+        </Form>
+      </Modal>
+
+      {/* 应用到所有用户（仅 admin）：选键 → 把这几个键的当前值复制给所有人 */}
+      <Modal
+        centered
+        open={applyOpen}
+        title="应用到所有用户"
+        onCancel={() => setApplyOpen(false)}
+        footer={null}
+        width="46vw"
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="只覆盖 / 补建你选中的键，不动其他配置，也不删除任何行"
+          description="它的用途是「统一某个开关的值」，不是「重置所有人的配置」。"
+        />
+        <Form
+          layout="vertical"
+          onFinish={async (values: { keys: string[] }) => {
+            if (!values.keys?.length) {
+              message.warning("请至少选一个键");
+              return;
+            }
+            try {
+              const res = await applySettingsToAllUsers(values.keys);
+              message.success(
+                `已应用到所有用户：更新 ${res.updated} 行 / 新建 ${res.created} 行`
+              );
+              setApplyOpen(false);
+              void load();
+            } catch (error) {
+              const detail = (
+                error as { response?: { data?: { detail?: { message?: string } } } }
+              ).response?.data?.detail;
+              message.error(detail?.message ?? "应用失败");
+            }
+          }}
+        >
+          <Form.Item
+            name="keys"
+            label="要推广的配置键"
+            rules={[{ required: true, message: "请选择配置键" }]}
+          >
+            <Select
+              mode="multiple"
+              placeholder="选择配置键（当前值取自你自己名下的配置）"
+              options={rows.map((r) => ({ value: r.key, label: `${r.label || r.key}（${r.key}）` }))}
+            />
+          </Form.Item>
+          <Button type="primary" htmlType="submit">
+            确认应用
+          </Button>
         </Form>
       </Modal>
     </div>

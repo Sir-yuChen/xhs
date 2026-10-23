@@ -205,3 +205,127 @@ def delete_setting(
         "effective_value": outcome["effective_value"],
         "is_live": settings_service.is_live(outcome["key"]),
     }
+
+# --------------------------------------------------------------------------- #
+# 应用到所有用户（设计 48 §M8 定稿方案）
+# --------------------------------------------------------------------------- #
+class ApplyToAllRequest(BaseModel):
+    """把当前用户的某个键值复制到**所有用户**。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    keys: list[str] = Field(default_factory=list, max_length=64)
+
+
+@router.post("/apply-to-all")
+def apply_to_all(
+    payload: ApplyToAllRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """把当前用户名下的配置值复制给所有用户（**仅 admin**）。
+
+    ## 为什么是「复制一份行」而不是「加一个 scope 列」
+
+    `system_settings` 的归属已经由 `user_id NOT NULL` 表达；再加 `scope` 会产生
+    `scope='global'` 且 `user_id` 有值这种自相矛盾的行（设计 48 §M8 的三条判据）。
+    全站基线用**随包种子**（`config/initial_data/system_settings.json`）表达，
+    而「一键把这个值推广给所有人」是一次**显式**的管理动作 —— 落成每用户一行，
+    语义清楚且有审计痕迹（哪一行是谁改的、什么时候改的）。
+
+    ## 为什么不做「清掉别人的行」
+
+    只**覆盖**已存在的键、**补建**缺失的行，不删除任何人的其他配置
+    —— 管理员的职责是「统一这个值」，不是「清空别人的配置」。
+
+    ## 与「种子只补缺不覆盖」的区别
+
+    种子纪律管的是**升级**（用户改过的不能被系统悄悄打回）；
+    这里是**管理员主动点按钮**，明确要求覆盖。两者不冲突：
+    一个是系统行为（保守），一个是人的决策（显式）。
+    """
+    from backend.app.core.roles import ROLE_ADMIN, normalize_role
+    from backend.app.models import SystemSetting
+    from sqlalchemy import select
+
+    if normalize_role(current_user.role) != ROLE_ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "SETTING_APPLY_ALL_FORBIDDEN",
+                "message": "只有超级管理员能把配置应用到所有用户",
+            },
+        )
+
+    #: 取当前用户在这些键上的**有效行**（没有行就用内置默认 —— 那样推广的
+    #: 是「我实际生效的值」，而不是「我没有配」）
+    updated = created = 0
+    details: list[dict[str, Any]] = []
+
+    for key in payload.keys:
+        source = db.execute(
+            select(SystemSetting).where(
+                SystemSetting.user_id == current_user.id, SystemSetting.key == key
+            )
+        ).scalar_one_or_none()
+        value = (
+            source.value
+            if source is not None
+            else settings_service.effective_value(db, current_user.id, key)
+        )
+
+        users = db.execute(select(User.id).where(User.deleted_at.is_(None))).scalars().all()
+        per_key_updated = per_key_created = 0
+        for uid in users:
+            if uid == current_user.id:
+                continue
+            row = db.execute(
+                select(SystemSetting).where(
+                    SystemSetting.user_id == uid, SystemSetting.key == key
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                if source is not None:
+                    db.add(
+                        SystemSetting(
+                            user_id=uid,
+                            key=key,
+                            value=value,
+                            value_type=source.value_type,
+                            category=source.category,
+                            label=source.label,
+                            description=source.description,
+                            requires_restart=source.requires_restart,
+                            is_dangerous=source.is_dangerous,
+                        )
+                    )
+                    per_key_created += 1
+                #: 源也没有行 ⇒ 推广的是「内置默认」，那种情况**不必建行**
+                #: （不建 = 该用户自然读到同一个默认值，少一堆等价行）
+            else:
+                row.value = value
+                if source is not None:
+                    row.value_type = source.value_type
+                per_key_updated += 1
+
+        updated += per_key_updated
+        created += per_key_created
+        details.append(
+            {
+                "key": key,
+                "value": value,
+                "updated": per_key_updated,
+                "created": per_key_created,
+            }
+        )
+
+    db.commit()
+    settings_service.invalidate()
+    return {
+        "ok": True,
+        "updated": updated,
+        "created": created,
+        "details": details,
+        "note": "只覆盖 / 补建指定键，不动其他配置，也不删除任何行",
+    }
+

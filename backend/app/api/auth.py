@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -31,9 +31,23 @@ def _serialize_user(user: User) -> dict:
     """用户对象的响应形状（注册 / 登录 / 刷新三处共用）。
 
     T-104：`role` 供前端决定是否显示/启用「全局系统设置」入口。注意这是
-    **提示性**信息，真正的权限判定一律在后端 `require_admin` 处。
+    **提示性**信息，真正的权限判定一律在后端 `require_perm` 处。
+
+    v1.1.0 追加三个字段（设计 55 §1.2）：
+    * `must_change_password` —— 前端登录后**必须**拦到改密页（出厂 admin 是
+      `admin/admin123`，不改密等于公开口令）；
+    * `status` —— `pending`（待审）/ `disabled`（停用）让前端能显示原因；
+    * `real_name` —— 顶栏 / 个人资料页显示。
     """
-    return {"id": user.id, "username": user.username, "role": normalize_role(user.role)}
+    return {
+        "id": user.id,
+        "username": user.username,
+        "role": normalize_role(user.role),
+        "real_name": getattr(user, "real_name", "") or "",
+        "email": getattr(user, "email", "") or "",
+        "status": getattr(user, "status", "normal") or "normal",
+        "must_change_password": bool(getattr(user, "must_change_password", False)),
+    }
 
 
 def _token_response(user: User) -> dict:
@@ -279,3 +293,70 @@ def revoke_all_sessions(
 @router.get("/me")
 def me(current_user: User = Depends(get_current_user)):
     return _serialize_user(current_user)
+
+
+class ChangePasswordRequest(BaseModel):
+    """改密请求（设计 55 §1.4）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    old_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=6, max_length=128)
+
+
+@router.post("/change-password")
+def change_password(
+    payload: ChangePasswordRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """自己改自己的密码（**所有人可用**，不需要权限码）。
+
+    ## 三条判据
+
+    1. **必须验旧密码**：否则拿到令牌的人（哪怕只有 5 分钟）就能永久改密，
+       等于令牌泄漏后无法自救；
+    2. **新旧不能相同**：出厂 admin 是 `admin/admin123`，「改成原密码」会让
+       `must_change_password` 变成一句空话；
+    3. **改完抬 `token_version`**：旧令牌立即失效，用新令牌重新登录。
+       ⇒ 前端拿到响应后要**主动跳登录页**（而不是继续用旧令牌发请求等 401）。
+
+    ## 为什么单独一个端点而不是放进用户管理
+
+    用户管理那个是**管理员重置别人的密码**（要 `system:user:resetPassword` 码）。
+    这里是**用户改自己的**，不该要任何码 —— 否则「没有管理权限的人永远改不了
+    自己的密码」，而 `must_change_password=true` 时他会被永久锁在改密页。
+    """
+    from backend.app.core.security import hash_password, verify_password
+    from backend.app.services import permission_cache, presence_service
+
+    if not verify_password(payload.old_password, current_user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "OLD_PASSWORD_WRONG", "message": "原密码不正确"},
+        )
+    if payload.old_password == payload.new_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "PASSWORD_UNCHANGED",
+                "message": "新密码不能与原密码相同",
+            },
+        )
+
+    current_user.password_hash = hash_password(payload.new_password)
+    if hasattr(current_user, "must_change_password"):
+        current_user.must_change_password = False
+    #: 密码变了 ⇒ 所有已签发令牌立即失效（被盗令牌不能继续用）
+    current_user.token_version = int(current_user.token_version or 0) + 1
+    permission_cache.clear(user_id=current_user.id)
+    presence_service.forget(current_user.id)
+    db.commit()
+
+    return {
+        "ok": True,
+        "id": current_user.id,
+        #: 前端据此跳登录页（旧令牌已失效）
+        "re_login_required": True,
+    }
+

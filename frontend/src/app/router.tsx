@@ -30,6 +30,8 @@ import { ViolationManagePage } from "../pages/platforms/xhs/violation-manage-pag
 import { XhsPublishPage } from "../pages/platforms/xhs/publish-page";
 import { XhsSectionPage } from "../pages/platforms/xhs/xhs-section-page";
 import { SystemPage } from "../pages/system/system-page";
+import { ForbiddenPage } from "../pages/system/forbidden-page";
+import { ProfilePage } from "../pages/system/profile-page";
 
 export function AppRouter() {
   return (
@@ -98,6 +100,10 @@ export function AppRouter() {
           <Route path="/system/dicts" element={<SystemPage />} />
           <Route path="/system/settings" element={<SystemPage />} />
           <Route path="/system/logs" element={<SystemPage />} />
+          {/* 个人资料：**所有人可用**（不需要权限码）—— 改自己的密码 / 看自己的角色 */}
+          <Route path="/profile" element={<ProfilePage />} />
+          {/* 403：直敲未授权 URL 时可达（设计 49 §模块八） */}
+          <Route path="/403" element={<ForbiddenPage />} />
           <Route path="/platforms/xhs/dashboard" element={<XhsDashboard />} />
           <Route path="/platforms/xhs/accounts" element={<XhsAccountsPage />} />
           <Route path="/platforms/xhs/analytics" element={<XhsAnalyticsPage />} />
