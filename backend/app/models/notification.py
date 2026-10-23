@@ -21,5 +21,9 @@ class Notification(Base):
     source_task_id: Mapped[Optional[int]] = mapped_column(ForeignKey("tasks.id"), nullable=True)
     source_type: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     source_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    #: 点击跳转路径（v1.1.0 / 设计 48 R4，迁移 `b2c3d4e5f6a0`）。
+    #: 历史行**留空**（不造假：4 条存量里 3 条 `source_id` 为 NULL，本来就没有
+    #: 可靠跳转目标）；前端 `lib/notification-routes.ts` 的映射表保留作兜底。
+    link: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     read: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now)

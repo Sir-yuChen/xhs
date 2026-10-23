@@ -19,4 +19,9 @@ class ApiLog(Base):
     endpoint: Mapped[str] = mapped_column(String(256))
     status: Mapped[str] = mapped_column(String(32), default="success")
     meta: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    #: HTTP 状态码（v1.1.0 / 设计 48 R3，迁移 `b2c3d4e5f6a0`）。
+    #: 从 `meta['status_code']` 提成真列 —— 日志页要按「200 / 403 / 500」筛选，
+    #: 塞在 JSON 里既**无法建索引**也**无法 SQL 筛**。
+    #: 可空：历史行里确实可能没有这个键（缺值口径：不造假）。
+    status_code: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now)

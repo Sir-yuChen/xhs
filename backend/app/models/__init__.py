@@ -49,6 +49,10 @@ from backend.app.models.order import (
 from backend.app.models.platform_account import AccountCookieVersion, PlatformAccount
 #: ⚠️ `ProductGroup` 已随「彻底移除商品分组」退场（2026-10-05）—— 不再注册该 ORM 类，
 #: 否则 `create_all()` 会把迁移已 drop 的 `product_groups` 表建回来。
+from backend.app.models.dict import DictItem, DictType
+from backend.app.models.menu import Menu
+from backend.app.models.role import Role
+from backend.app.models.role_menu import RoleMenu
 from backend.app.models.data_package_rule import DataPackageRule, DataPackageRuleSet
 from backend.app.models.prompt import PromptModule, PromptTemplate
 from backend.app.models.publish import PublishAsset, PublishJob
@@ -70,6 +74,8 @@ __all__ = [
     "DEFAULT_TEXT_MODEL_NAME",
     "DraftAsset",
     "DEFAULT_GROUP",
+    "DictItem",
+    "DictType",
     "ForbiddenWord",
     "ForbiddenWordGroupRow",
     "GenerationRecord",
@@ -81,6 +87,9 @@ __all__ = [
     "LlmGatewayAlert",
     "LlmGatewayUsageLog",
     "LoginSession",
+    "Menu",
+    "Role",
+    "RoleMenu",
     "MATCH_MODES",
     "MATCH_MODE_CONTAINS",
     "MATCH_MODE_EXACT",
