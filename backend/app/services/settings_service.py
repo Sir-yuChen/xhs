@@ -71,6 +71,7 @@ LIVE_KEYS: dict[str, str] = {
     "xhs_ocr_parallelism": "image_ocr_service 违规词检测（OCR）的**起始**并发数；实际并发按 CPU 核数与目标耗时自动上调（设计 24 §22.9）",
     "xhs_note_image_total_limit": "笔记图片总数上限（生成链路组合总闸；平台硬顶 18，设计 41 §17）",
     "xhs_sku_name_max_chars": "SKU 规格名称最大显示长度（用户口径：30 字 = 60 字符，汉字计 2、ASCII 计 1）",
+    "register.enabled": "登录页「注册」入口 + POST /api/auth/register 开关（设计 46 P11；默认 false）",
 }
 
 #: 内置兜底默认值（第 3 层）。**只放 `LIVE_KEYS` 里的键** —— 给没有读点的键编一个默认值
@@ -106,6 +107,11 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     #: 计量口径：**汉字计 2、ASCII 计 1** ⇒ 60 字符 == 30 个汉字。
     #: ⚠️ 口径是「**达到**即优化」：`display_len(name) >= 该值` 就交给大模型压到该值以内。
     "xhs_sku_name_max_chars": 60,
+    #: 开放注册（v1.1.0 / 设计 46 §388 + 设计 50 §261，S1）。
+    #: **默认 false**：出厂管理员是 `admin/admin123` + `must_change_password=True`，
+    #: 若同时开放注册，「弱口令 + 任何人可注册」两条就同时成立。用户在设置页可打开。
+    #: 读点：`POST /api/auth/register`（关闭时 403 `REGISTER_DISABLED`，S3 落地）。
+    "register.enabled": False,
 }
 
 #: 宽松布尔文本（`coerce_value` 与 `live_bool` **共用同一份**）——

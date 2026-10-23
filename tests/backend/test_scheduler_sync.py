@@ -259,7 +259,9 @@ def test_scheduler_is_not_started_when_master_switch_is_off(monkeypatch):
         main_module, "seed_gateway_providers_for_all_users", lambda *a, **k: 0
     )
     monkeypatch.setattr(main_module, "recover_account_tasks", lambda *a, **k: 0)
-    monkeypatch.setattr(main_module, "ensure_account_task_worker", lambda: None)
+    #: v1.1.0 S1 系统管理域种子（角色 / 菜单 / 字典 / 出厂 admin / 授权）：
+    #: **自开 Session 写库** ⇒ 与上面几条同一条理由，不桩就会拿真实运行库播种。
+    monkeypatch.setattr(main_module, "seed_system_domain", lambda *a, **k: {})
     monkeypatch.setattr(main_module, "start_account_task_watchdog", lambda *a, **k: None)
     monkeypatch.setattr(main_module, "stop_account_task_watchdog", lambda: None)
     monkeypatch.setattr(main_module, "start_scheduler_watchdog", lambda *a, **k: None)

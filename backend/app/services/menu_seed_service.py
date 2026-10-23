@@ -1,0 +1,469 @@
+"""种子播种（v1.1.0 系统管理域）—— **唯一实现**，迁移与启动期都调它。
+
+## 三份种子（设计 47 §6）
+
+| 种子 | 行数 | 来源 | 判重键 |
+|---|---|---|---|
+| `roles` | 2（`admin` / `user`） | 本文件 `ROLE_SEEDS` | `code` |
+| `menus` | 174（M 12 / C 29 / F 133） | `config/initial_data/menus.seed.json`（**生成物**） | `perms` 非空按 `perms`；`path` 非空按 `path`；两者都空（M 行）按 `(parent_id, name)` |
+| `dict_types` / `dict_items` | 12 组 / 57 项 | `config/initial_data/dict_seed.json` | `code` / `(type_id, value)` |
+| `role_menus` | admin = 全量；user = 只读集合 | 由前两者派生 | `(role_id, menu_id)` |
+| `users` | 1（`admin` / `admin123`） | 本文件 `ADMIN_SEED` | 仅当**系统中没有任何可用 admin** |
+
+## 纪律：**只补缺不覆盖**
+
+每一行都是「已存在 ⇒ `continue`」，绝不 `UPDATE`。理由是这些表在装好之后
+是**用户的数据**：
+
+* 在「菜单管理」里把「抖音」改成启用 ⇒ 下次升级不能被打回 `disabled`；
+* 在「角色管理」里给 `user` 角色加授权 ⇒ 下次升级不能把它清回种子集合；
+* 在「用户管理」里改了某个用户名 ⇒ 升级不能覆盖。
+
+代价要说明白：**种子的后续改动不会重新同步到已播种的库**（新装 / 空库才有）。
+这是刻意的取舍（同 `forbidden_words` / `data_package_rules` 的既有纪律）。
+
+⚠️ admin 种子的额外两条判据：
+* 它只在 `admin` 行**不存在**时插入 —— 用户删掉了 admin（或改名）就**不重建**，
+  否则「删了又回来」比没有更难理解；
+* `must_change_password=True` + `register.enabled=false`（防「默认口令 + 开放注册」
+  同时成立，设计 46 §395 / 设计 50 §261 的口径）。
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from pathlib import Path
+from typing import Any
+
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+from backend.app.core.roles import ROLE_ADMIN, ROLE_USER
+from backend.app.core.time import shanghai_now
+from backend.app.models.dict import DICT_STATUS_NORMAL, DictItem, DictType
+from backend.app.models.menu import MENU_STATUS_NORMAL, Menu
+from backend.app.models.role import ROLE_STATUS_NORMAL, Role
+from backend.app.models.role_menu import RoleMenu
+from backend.app.models.user import USER_STATUS_NORMAL, User
+
+logger = logging.getLogger(__name__)
+
+#: 内置角色（设计 47 §2.2）。`is_system=True` ⇒ 禁删 / 禁停 / 禁改 code / 禁改授权。
+ROLE_SEEDS: tuple[dict[str, Any], ...] = (
+    {
+        "code": ROLE_ADMIN,
+        "name": "超级管理员",
+        "description": "全部权限（代码派生全量，见 core/perms.role_perms）",
+        "is_system": True,
+        "sort_order": 0,
+    },
+    {
+        "code": ROLE_USER,
+        "name": "普通用户",
+        "description": "默认角色，按授权行取权限",
+        "is_system": True,
+        "sort_order": 10,
+    },
+)
+
+#: admin 种子（设计 47 §6）。⚠️ 用户名 / 口令是**出厂基线**，不是「安全配置」：
+#: 配合 `must_change_password=True`（首登强制改密）+ `register.enabled=false`。
+ADMIN_SEED: dict[str, Any] = {
+    "username": "admin",
+    "password": "admin123",
+    "real_name": "超级管理员",
+    "role": ROLE_ADMIN,
+}
+
+#: 种子文件名（`config/initial_data/` 下）
+MENUS_SEED_FILENAME = "menus.seed.json"
+DICT_SEED_FILENAME = "dict_seed.json"
+
+
+def _seed_dir() -> Path:
+    """`config/initial_data/` —— 与 `core/initial_data.py` 同口径（`app_root()`）。
+
+    ⚠️ 不用 CWD 相对路径：服务器 / 安装版的 CWD 不是仓库根
+    （`core/paths.py` 模块 docstring 记着这个坑）。
+    """
+    from backend.app.core.paths import app_root
+
+    return app_root() / "config" / "initial_data"
+
+
+def _load_json(filename: str) -> dict[str, Any] | None:
+    path = _seed_dir() / filename
+    if not path.is_file():
+        logger.warning("seed: %s 不存在（%s）—— 本次不播种", filename, path)
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:  # noqa: BLE001 —— 坏数据不该让启动失败
+        logger.warning("seed: %s 解析失败（%s: %s）", path, type(exc).__name__, exc)
+        return None
+
+
+# --------------------------------------------------------------------------- #
+# 一、角色
+# --------------------------------------------------------------------------- #
+def seed_roles(db: Session) -> list[Role]:
+    """补种内置角色（按 `code` 判重）。返回**本次新建**的行。"""
+    created: list[Role] = []
+    existing = {code for (code,) in db.execute(select(Role.code)).all()}
+    for item in ROLE_SEEDS:
+        if item["code"] in existing:
+            continue
+        row = Role(
+            code=item["code"],
+            name=item["name"],
+            description=item["description"],
+            is_system=item["is_system"],
+            status=ROLE_STATUS_NORMAL,
+            sort_order=item["sort_order"],
+        )
+        db.add(row)
+        created.append(row)
+    if created:
+        db.flush()
+    return created
+
+
+# --------------------------------------------------------------------------- #
+# 二、菜单
+# --------------------------------------------------------------------------- #
+def _identity_of(row: Menu) -> tuple:
+    """菜单行的判重键（见模块 docstring 的表格）。
+
+    ⚠️ **顺序要紧**：`perms` 优先于 `path`。F 行的 `path` 是空串（不参与部分唯一），
+    M 行两者都空 ⇒ 只能按 `(parent_id, name)` 判 —— 而 name 是用户在菜单管理里
+    唯一可能改的展示字段，所以这道判重的副作用是「改了名的 M 行升级后会被再种一行」。
+    取舍：M 行只有 12 条，且改名远比「菜单凭空消失」少见；改成按 id 判重会把
+    `seed id` 变成第二份 id 真相源（更糟）。
+    """
+    if row.perms:
+        return ("perms", row.perms)
+    if row.path:
+        return ("path", row.path)
+    return ("name", row.parent_id, row.name)
+
+
+def seed_menus(db: Session) -> list[Menu]:
+    """补种菜单树（设计 47 §6 / 57 S1 迁移 3）。
+
+    ⚠️ **种子里没有数据库主键**。`menus.seed.json` 的每行带 `_seq`（生成器分配的
+    临时序号）与 `parent_seq`（父的临时序号）。理由：把种子 `id` 当主键用就是
+    **第二份 id 真相源** —— 它会与既有库的自增序列打架（`INSERT id=1` 撞已有行，
+    或把序列推后 174）。种子只负责**结构**，主键由 DB 分配。
+
+    ⇒ 播种流程：按 `parent_seq` 分层插父 → `flush()` 取回真实 id → 解析子行。
+    判重仍按 `perms` / `path` / `(parent_real, name)`（见模块 docstring）。
+    """
+    payload = _load_json(MENUS_SEED_FILENAME)
+    if not payload:
+        return []
+    rows: list[dict[str, Any]] = [dict(item) for item in (payload.get("menus") or [])]
+    if not rows:
+        return []
+
+    # 0) 种子自检：`_seq` 唯一、`parent_seq` 都指向存在的行
+    #    （生成器坏了就到这里炸，而不是建出一棵少了几支的树）
+    seqs = [int(item.get("_seq") or 0) for item in rows]
+    if len(set(seqs)) != len(seqs) or 0 in seqs:
+        raise RuntimeError("menus.seed.json 的 `_seq` 必须唯一且非 0")
+    known = set(seqs)
+    for item in rows:
+        pid = int(item.get("parent_seq") or 0)
+        if pid and pid not in known:
+            raise RuntimeError(f"menus.seed.json 里 parent_seq={pid} 不存在（孤儿行）")
+
+    # 1) 现有行建索引（三种判重键）
+    by_perms: dict[str, Menu] = {}
+    by_path: dict[str, Menu] = {}
+    by_name: dict[tuple[int, str], Menu] = {}
+    for row in db.scalars(select(Menu)).all():
+        if row.perms:
+            by_perms[row.perms] = row
+        if row.path:
+            by_path[row.path] = row
+        by_name[(row.parent_id, row.name)] = row
+
+    created: list[Menu] = []
+    seq_to_real: dict[int, int] = {}
+
+    # 2) **显式分轮**（父 → 子 → 孙）：不依赖种子里的行序。
+    #    依赖顺序是隐式契约 —— 改一次生成脚本的排序就会静默建错树。
+    remaining = list(rows)
+    while remaining:
+        progressed = False
+        deferred: list[dict[str, Any]] = []
+        for item in remaining:
+            parent_seq = int(item.get("parent_seq") or 0)
+            if parent_seq and parent_seq not in seq_to_real:
+                deferred.append(item)
+                continue
+            parent_real = seq_to_real[parent_seq] if parent_seq else 0
+
+            perms = str(item.get("perms") or "")
+            path = str(item.get("path") or "")
+            name = str(item.get("name") or "")
+
+            candidate: Menu | None = None
+            if perms and perms in by_perms:
+                candidate = by_perms[perms]
+            elif path and path in by_path:
+                candidate = by_path[path]
+            elif not perms and not path and (parent_real, name) in by_name:
+                candidate = by_name[(parent_real, name)]
+
+            if candidate is not None:
+                # **只补缺不覆盖**：存在就什么都不改（用户可能改过 name / status / 排序）
+                seq_to_real[int(item["_seq"])] = candidate.id
+                progressed = True
+                continue
+
+            row = Menu(
+                parent_id=parent_real,
+                name=name,
+                menu_type=str(item.get("menu_type") or "C"),
+                path=path,
+                component=str(item.get("component") or ""),
+                perms=perms,
+                icon=str(item.get("icon") or ""),
+                workspace=str(item.get("workspace") or ""),
+                sort_order=int(item.get("sort_order") or 0),
+                is_visible=bool(item.get("is_visible", True)),
+                status=str(item.get("status") or MENU_STATUS_NORMAL),
+            )
+            db.add(row)
+            db.flush()  # 立刻拿真实 id：子行要引用
+            seq_to_real[int(item["_seq"])] = row.id
+            created.append(row)
+            if row.perms:
+                by_perms[row.perms] = row
+            if row.path:
+                by_path[row.path] = row
+            by_name[(row.parent_id, row.name)] = row
+            progressed = True
+        if not progressed:
+            stuck = sorted(int(item.get("_seq") or 0) for item in deferred)
+            raise RuntimeError(
+                f"menus.seed.json 有环或父链断开（无法解析的行 _seq={stuck}）"
+            )
+        remaining = deferred
+
+    return created
+
+
+# --------------------------------------------------------------------------- #
+# 三、字典
+# --------------------------------------------------------------------------- #
+def seed_dicts(db: Session) -> tuple[list[DictType], list[DictItem]]:
+    """补种字典（按 `code` / `(type_id, value)` 判重）。"""
+    payload = _load_json(DICT_SEED_FILENAME)
+    if not payload:
+        return [], []
+
+    types_by_code: dict[str, DictType] = {t.code: t for t in db.scalars(select(DictType)).all()}
+    created_types: list[DictType] = []
+    created_items: list[DictItem] = []
+
+    for item in payload.get("types") or []:
+        code = str(item.get("code") or "")
+        if not code:
+            continue
+        type_row = types_by_code.get(code)
+        if type_row is None:
+            type_row = DictType(
+                code=code,
+                name=str(item.get("name") or code),
+                remark=str(item.get("remark") or ""),
+                status=DICT_STATUS_NORMAL,
+            )
+            db.add(type_row)
+            db.flush()
+            types_by_code[code] = type_row
+            created_types.append(type_row)
+
+        existing_values = {
+            value
+            for (value,) in db.execute(
+                select(DictItem.value).where(DictItem.type_id == type_row.id)
+            ).all()
+        }
+        for order, entry in enumerate(item.get("items") or []):
+            value = str(entry.get("value") or "")
+            if not value or value in existing_values:
+                continue
+            row = DictItem(
+                type_id=type_row.id,
+                #: 冗余列**由 type_id 派生**，不接受种子里的值（防两份真相）
+                type_code=type_row.code,
+                label=str(entry.get("label") or value),
+                value=value,
+                list_class=str(entry.get("list_class") or "default"),
+                sort_order=int(entry.get("sort_order", order * 10)),
+                status=DICT_STATUS_NORMAL,
+                remark=str(entry.get("remark") or ""),
+            )
+            db.add(row)
+            created_items.append(row)
+            existing_values.add(value)
+
+    return created_types, created_items
+
+
+# --------------------------------------------------------------------------- #
+# 四、授权（role_menus）
+# --------------------------------------------------------------------------- #
+def seed_role_menus(db: Session) -> list[RoleMenu]:
+    """给两个内置角色补授权行 —— **只补缺不覆盖**。
+
+    | 角色 | 授权范围 |
+    |---|---|
+    | `admin` | **全量**菜单行（`core/perms.role_perms("admin")` 虽然直接返回
+      `ALL_PERMS`，但授权表仍要全量：菜单树是 `role_menus` 驱动的，
+      少了行 ⇒ 超级管理员在「分配菜单」页看到自己是空前授权，会误以为自己没权限） |
+    | `user` | **只读集合**：所有 `menu_type="C"` 且 `perms` 以 `:view` 结尾的行，
+      加上它们的祖先 M 行。即「进得去所有页、看不到任何按钮」—— 最小权限，
+      与 `core/roles.DEFAULT_ROLE` 的注释「新的权限默认不开放」一致 |
+
+    每条授权行的 `user_id` = 持有该角色的用户（`users.role == code`，且未软删）。
+    没有任何用户持有该角色时**不产生授权行**（授权属于用户，见 `role_menus` docstring）。
+    """
+    roles = {r.code: r for r in db.scalars(select(Role)).all()}
+    if not roles:
+        return []
+
+    menus = db.scalars(select(Menu)).all()
+    if not menus:
+        return []
+    menu_by_id = {m.id: m for m in menus}
+
+    def ancestors_of(row: Menu) -> set[int]:
+        """自己 + M 祖先链（祖先链断了 ⇒ 侧栏不显示 ⇒ 授权行必须一起给）。"""
+        chain = {row.id}
+        cursor = row
+        while cursor.parent_id and cursor.parent_id in menu_by_id:
+            chain.add(cursor.parent_id)
+            cursor = menu_by_id[cursor.parent_id]
+        return chain
+
+    admin_menu_ids: set[int] = set(menu_by_id)
+    user_menu_ids: set[int] = set()
+    for row in menus:
+        if row.menu_type == "C":
+            user_menu_ids |= ancestors_of(row)
+
+    created: list[RoleMenu] = []
+    holders: dict[str, list[int]] = {code: [] for code in roles}
+    for user_id, role in db.execute(
+        select(User.id, User.role).where(User.deleted_at.is_(None))
+    ).all():
+        holders.setdefault(str(role or ""), []).append(user_id)
+
+    #: ⚠️ **先把前几轮（角色 / admin / 菜单 / 字典）的待插入行 flush 下去**。
+    #: 不 flush 的话，下面第一轮里的 `db.execute(select(RoleMenu...))` 会触发
+    #: **autoflush**，把这批 `RoleMenu` 插进库；第二轮再按用户查出来时它们已在库里，
+    #: 但 `admin` 与 `user` 两个角色的行被**同一个 user_id** 覆盖时会撞
+    #: `UNIQUE(role_id, menu_id)` —— 实测就是这个 `IntegrityError`。
+    db.flush()
+
+    #: 本次已排队的授权行（用户, 角色, 菜单）—— 内存里也判重，不只依赖查库：
+    #: `db.add` 之后同一事务内 SELECT 看不到未 flush 的行，只查库会把同一行加两遍。
+    queued: set[tuple[int, int, int]] = set()
+
+    for code, menu_ids in (("admin", admin_menu_ids), ("user", user_menu_ids)):
+        if code not in roles:
+            continue
+        role_id = roles[code].id
+        for user_id in holders.get(code, []):
+            existing = {
+                mid
+                for (mid,) in db.execute(
+                    select(RoleMenu.menu_id).where(
+                        RoleMenu.user_id == user_id, RoleMenu.role_id == role_id
+                    )
+                ).all()
+            }
+            for menu_id in sorted(menu_ids - existing):
+                key = (user_id, role_id, menu_id)
+                if key in queued:
+                    continue
+                queued.add(key)
+                db.add(RoleMenu(user_id=user_id, role_id=role_id, menu_id=menu_id))
+                created.append(RoleMenu(user_id=user_id, role_id=role_id, menu_id=menu_id))
+    return created
+
+
+# --------------------------------------------------------------------------- #
+# 五、admin 种子
+# --------------------------------------------------------------------------- #
+def seed_admin_user(db: Session) -> User | None:
+    """当系统里**没有任何可用 admin** 时插入出厂管理员。
+
+    判据 = `role='admin' AND deleted_at IS NULL` 的行数为 0。
+    ⚠️ **不看 `status`**：被停用的 admin 也算「存在」—— 那是一个需要人去处理的
+    状态（管理员自己停用自己），自动补一个新 admin 会让「谁把这个号停了」
+    永远查不清。种子只在**真正没有 admin 行**时兜底启动能力。
+    """
+    from backend.app.core.security import hash_password
+
+    count = db.scalar(
+        select(func.count()).select_from(User).where(
+            User.role == ROLE_ADMIN, User.deleted_at.is_(None)
+        )
+    )
+    if count:
+        return None
+
+    username = ADMIN_SEED["username"]
+    if db.scalar(select(User.id).where(User.username == username)) is not None:
+        # 用户名被一个**非 admin** 行占了（用户改过角色）：不抢、不改它，
+        # 只记日志 —— 静默改别人的账号角色比「没有 admin」更难排查。
+        logger.warning(
+            "seed: 用户 %r 已存在但不是 admin，跳过出厂管理员种子（请手工分配 admin 角色）",
+            username,
+        )
+        return None
+
+    row = User(
+        username=username,
+        password_hash=hash_password(ADMIN_SEED["password"]),
+        real_name=ADMIN_SEED["real_name"],
+        role=ADMIN_SEED["role"],
+        status=USER_STATUS_NORMAL,
+        must_change_password=True,
+        token_version=0,
+        created_at=shanghai_now(),
+    )
+    db.add(row)
+    db.flush()
+    return row
+
+
+# --------------------------------------------------------------------------- #
+# 入口
+# --------------------------------------------------------------------------- #
+def seed_system_domain(db: Session) -> dict[str, int]:
+    """一次播完（角色 → admin → 菜单 → 字典 → 授权），返回本次新建计数。
+
+    顺序是**判据**：
+    1. 角色先有（授权行要 `role_id`）；
+    2. admin 用户先有（`role_menus.user_id` 要指向它）；
+    3. 菜单先有（授权行的 `menu_id`）；
+    4. 授权最后（前四者都可能新增行）。
+    """
+    roles = seed_roles(db)
+    admin = seed_admin_user(db)
+    menus = seed_menus(db)
+    types, items = seed_dicts(db)
+    grants = seed_role_menus(db)
+    return {
+        "roles": len(roles),
+        "admin_users": 1 if admin is not None else 0,
+        "menus": len(menus),
+        "dict_types": len(types),
+        "dict_items": len(items),
+        "role_menus": len(grants),
+    }

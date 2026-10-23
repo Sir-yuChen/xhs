@@ -40,9 +40,14 @@ class Role(Base):
         CheckConstraint("status IN ('normal', 'disabled')", name="ck_roles_status"),
         #: 内置角色**必须启用** —— 停用一个内置角色等于把一整类用户锁在门外，
         #: 而且唯一能改回来的入口（角色管理）本身需要权限。
-        #: 用 `= 0` 的不可满足分支表达蕴含关系（两边方言都支持，不用原生 ENUM / 触发器）。
+        #: 用 `NOT is_system OR ...` 表达蕴含关系（`is_system=false ⇒ 不约束`）。
+        #: ⚠️ **2026-10-23 实测踩坑**：初版写 `is_system = 0 OR status = 'normal'`，
+        #: SQLite 能跑（布尔就是 0/1），**PG 上直接失败**：
+        #: `psycopg.errors.UndefinedFunction: 操作符不存在: boolean = integer`
+        #: ⇒ 建表语句整体失败 ⇒ `roles` 表根本建不出来。
+        #: 布尔列在 CHECK 里必须用**布尔字面量语义**（`NOT is_system`），不能跟 0/1 比。
         CheckConstraint(
-            "is_system = 0 OR status = 'normal'", name="ck_roles_system_stays_enabled"
+            "NOT is_system OR status = 'normal'", name="ck_roles_system_stays_enabled"
         ),
     )
 

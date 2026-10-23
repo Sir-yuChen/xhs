@@ -20,6 +20,13 @@
 不带 `user_id` 的话，`A` 删自己的角色会级联删掉 `B` 的授权行，
 而且**谁都能改别人的授权**。隔离键放在授权行上是 DEF-066「所有数据按用户隔离」
 的直接推论，且不改 `roles` / `menus` 的全局性（它们仍然不带 `user_id`）。
+
+⚠️ **但要注意「自建角色」不等于「同名角色」**：`roles.code` 是**全局唯一**的
+（`Role.code` 上 `unique=True`），所以 A 和 B 不可能各有一个 `code='ops'` 的角色。
+⇒ 「带 `user_id`」的**真实收益**是：① 删角色时级联删的是**归属者**的授权行；
+② 授权变更的审计能追到「谁改的」；③ 不会出现「B 的授权被 A 的删除动作带走」。
+唯一键因此必须是 `(user_id, role_id, menu_id)` —— 只约束 `(role_id, menu_id)`
+会让同一角色在同一菜单上出现「同 role 同 menu 不同 user」的语义重复行。
 """
 
 from __future__ import annotations
@@ -35,7 +42,14 @@ class RoleMenu(Base):
 
     __tablename__ = "role_menus"
     __table_args__ = (
-        UniqueConstraint("role_id", "menu_id", name="uq_role_menus_role_menu"),
+        #: ⚠️ **唯一键必须含 `user_id`**（2026-10-23 修正）：本表带 `user_id` 就说明
+        #: 授权行是**按用户隔离**的（见下方「为什么本表带 user_id」）。只约束
+        #: `(role_id, menu_id)` 会造成两种错误：
+        #: ① 若角色真能按用户重名 ⇒ A 给角色授菜单 X，B 也授 ⇒ **唯一键冲突，B 保存失败**；
+        #: ② 若角色全局唯一（当前 `roles.code` 是 unique 的）⇒ 两行同菜单的授权必然
+        #:    「同 role + 同 menu + 不同 user」，那是**语义重复的脏行**，不应当能插进去。
+        #: 两种情形都指向同一结论：唯一键 = `(user_id, role_id, menu_id)`。
+        UniqueConstraint("user_id", "role_id", "menu_id", name="uq_role_menus_user_role_menu"),
         #: 反查「哪些角色引用了这个菜单」（删菜单前置检查 P8 `MENU_IN_USE`）
         Index("ix_role_menus_menu", "menu_id"),
         Index("ix_role_menus_user", "user_id"),

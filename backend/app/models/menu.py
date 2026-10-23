@@ -34,7 +34,16 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, Index, Integer, String, text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.app.core.database import Base
@@ -80,6 +89,13 @@ class Menu(Base):
         ),
         Index("ix_menus_parent", "parent_id"),
         Index("ix_menus_workspace", "workspace"),
+        #: ⚠️ **`(parent_id, name)` 唯一**（2026-10-23 实测补）：`perms` / `path` 的部分唯一
+        #: 索引只能管住 C 行与 F 行 —— **M 行（目录）两列都为空**，于是同一个目录会被
+        #: 种子重复插入（实测灌 3 次得到「系统管理」×6、「小红书」×3，共 198 行 vs 应 174）。
+        #: 「同父下不允许同名子节点」本来就是树的自然不变量，且它是**跨方言无歧义**的
+        #: （不含空值语义）。种子判重顺序因此变为：先按 `perms`/`path`（C/F），
+        #: 再按 `(parent_id, name)`（M；以及防御同父同名 C/F）。
+        UniqueConstraint("parent_id", "name", name="uq_menus_parent_name"),
         CheckConstraint(
             "menu_type IN ('M', 'C', 'F')", name="ck_menus_menu_type"
         ),

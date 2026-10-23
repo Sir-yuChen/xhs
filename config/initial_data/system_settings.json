@@ -81,6 +81,16 @@
       "description": "批量压缩 SKU 规格名时的默认上限（字符数），端点不传 max_chars 时用它。真机实测：平台规格名过长会在发布时被截断，60 字符可覆盖常见「分类:名称」形态。改完立即生效。",
       "requires_restart": false,
       "is_dangerous": false
+    },
+    {
+      "key": "register.enabled",
+      "value": false,
+      "value_type": "bool",
+      "category": "feature",
+      "label": "开放注册",
+      "description": "登录页据此决定是否显示「注册」入口；关闭时 POST /auth/register 返回 403 REGISTER_DISABLED。基线默认 false（v1.1.0 用户口径：防「默认口令 + 开放注册」同时成立）。改完立即生效。",
+      "requires_restart": false,
+      "is_dangerous": true
     }
   ]
 }

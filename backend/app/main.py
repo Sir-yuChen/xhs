@@ -78,6 +78,7 @@ from backend.app.services.data_package_rule_service import seed_builtin_rules_fo
 #: 违规词内置种子（2026-10-21）。同样**模块级导入** —— `lifespan` 里那套打桩
 #: 与「每一步都打桩」的守卫都读模块属性，函数体内导入会让桩打不上（见上注）。
 from backend.app.services.forbidden_word_service import seed_builtin_words_for_all_users
+from backend.app.services.menu_seed_service import seed_system_domain
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +120,19 @@ async def lifespan(app: FastAPI):
     # 2026-10-21：违规词内置种子**补存量**（用户口径「把当前违规词作为新的种子数据」）。
     # 与上面同语义：只往**空分组**里追加，用户改过 / 删过的不重建、不覆盖。
     seed_builtin_words_for_all_users()
+    # 系统管理域（v1.1.0 / 设计 47 §6，S1）：角色 / 菜单 / 字典 / 出厂 admin / 授权。
+    # 与上面几项同一语义 —— **只补缺不覆盖**：用户在「菜单管理」「角色管理」里改过的
+    # 行不会被下次启动打回。放在这里是**判据**：`create_all` 建库（测试库 / PG 基线）
+    # 不经过迁移链，只有启动期会播种；而「刚 upgrade 完的库」由迁移 3 播一次。
+    try:
+        _db = SessionLocal()
+        try:
+            seed_system_domain(_db)
+            _db.commit()
+        finally:
+            _db.close()
+    except Exception as exc:  # noqa: BLE001 - 播种失败不该让整个应用起不来
+        logger.warning("lifespan: seed system domain failed: %s", exc)
     settings = get_settings()
     # 多实例闸（T-108 / DEF-003）：`BackgroundScheduler` 与 FastAPI 同进程，
     # `max_instances=1` 只约束单进程内 ⇒ 误开第二个后端会让**同一批定时任务跑两遍**

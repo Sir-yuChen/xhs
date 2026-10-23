@@ -1,0 +1,130 @@
+{
+  "_comment": "字典种子（设计 47 §6 的 12 组）。**字典是镜像，不是权威**：sys_task_status / sys_job_status / sys_job_log_status / sys_publish_status / sys_note_form / sys_notify_level / sys_notify_source 的取值必须与对应 Python 常量逐个一致（守卫 test_dict_mirrors_python_constants）；sys_user_status / sys_role_status / sys_menu_type 是本轮新建的枚举，字典即权威。播种语义：按 code 判重 —— 已存在的类型与项一律不覆盖（用户改过的 label / list_class 不被升级打回）。改基线改本文件，不要改迁移。",
+  "version": 1,
+  "types": [
+    {
+      "code": "sys_user_status",
+      "name": "用户状态",
+      "remark": "users.status（设计 47 §2.6）",
+      "items": [
+        { "value": "normal", "label": "正常", "list_class": "success" },
+        { "value": "pending", "label": "待审核", "list_class": "warning" },
+        { "value": "disabled", "label": "停用", "list_class": "danger" }
+      ]
+    },
+    {
+      "code": "sys_role_status",
+      "name": "角色状态",
+      "remark": "roles.status（设计 47 §2.2）",
+      "items": [
+        { "value": "normal", "label": "启用", "list_class": "success" },
+        { "value": "disabled", "label": "停用", "list_class": "danger" }
+      ]
+    },
+    {
+      "code": "sys_menu_type",
+      "name": "菜单类型",
+      "remark": "menus.menu_type（设计 47 §2.1）",
+      "items": [
+        { "value": "M", "label": "目录", "list_class": "default" },
+        { "value": "C", "label": "菜单", "list_class": "success" },
+        { "value": "F", "label": "按钮", "list_class": "info" }
+      ]
+    },
+    {
+      "code": "sys_common_status",
+      "name": "通用状态",
+      "remark": "各表 status 列的 normal / disabled",
+      "items": [
+        { "value": "normal", "label": "正常", "list_class": "success" },
+        { "value": "disabled", "label": "停用", "list_class": "danger" }
+      ]
+    },
+    {
+      "code": "sys_yes_no",
+      "name": "是与否",
+      "remark": "布尔列的展示映射（值永远是字符串）",
+      "items": [
+        { "value": "true", "label": "是", "list_class": "success" },
+        { "value": "false", "label": "否", "list_class": "default" }
+      ]
+    },
+    {
+      "code": "sys_task_status",
+      "name": "任务状态",
+      "remark": "note_queue_service 队列项状态（6 值）",
+      "items": [
+        { "value": "pending", "label": "待执行", "list_class": "default" },
+        { "value": "running", "label": "执行中", "list_class": "info" },
+        { "value": "done", "label": "已完成", "list_class": "success" },
+        { "value": "failed", "label": "失败", "list_class": "danger" },
+        { "value": "cancelled", "label": "已取消", "list_class": "default" },
+        { "value": "exhausted", "label": "重试用尽", "list_class": "warning" }
+      ]
+    },
+    {
+      "code": "sys_job_status",
+      "name": "定时任务状态",
+      "remark": "scheduled_job.JOB_STATUSES",
+      "items": [
+        { "value": "active", "label": "启用", "list_class": "success" },
+        { "value": "paused", "label": "已暂停", "list_class": "warning" },
+        { "value": "completed", "label": "已完成", "list_class": "default" }
+      ]
+    },
+    {
+      "code": "sys_job_log_status",
+      "name": "任务日志状态",
+      "remark": "scheduled_job.LOG_STATUSES",
+      "items": [
+        { "value": "running", "label": "执行中", "list_class": "info" },
+        { "value": "success", "label": "成功", "list_class": "success" },
+        { "value": "failed", "label": "失败", "list_class": "danger" },
+        { "value": "skipped", "label": "跳过", "list_class": "default" }
+      ]
+    },
+    {
+      "code": "sys_publish_status",
+      "name": "发布状态",
+      "remark": "note.PUBLISH_STATUSES",
+      "items": [
+        { "value": "pending", "label": "待发布", "list_class": "default" },
+        { "value": "publishing", "label": "发布中", "list_class": "info" },
+        { "value": "published", "label": "已发布", "list_class": "success" },
+        { "value": "failed", "label": "发布失败", "list_class": "danger" }
+      ]
+    },
+    {
+      "code": "sys_note_form",
+      "name": "笔记形态",
+      "remark": "notes.note_form（image / video）",
+      "items": [
+        { "value": "image", "label": "图文", "list_class": "info" },
+        { "value": "video", "label": "视频", "list_class": "warning" }
+      ]
+    },
+    {
+      "code": "sys_notify_level",
+      "name": "通知级别",
+      "remark": "notifications.level",
+      "items": [
+        { "value": "info", "label": "提示", "list_class": "info" },
+        { "value": "warning", "label": "警告", "list_class": "warning" },
+        { "value": "error", "label": "错误", "list_class": "danger" }
+      ]
+    },
+    {
+      "code": "sys_notify_source",
+      "name": "通知来源",
+      "remark": "notifications.source_type（实测在用的 6 种）",
+      "items": [
+        { "value": "task", "label": "任务", "list_class": "info" },
+        { "value": "account", "label": "账号", "list_class": "info" },
+        { "value": "target", "label": "监控目标", "list_class": "info" },
+        { "value": "llm_gateway_alert", "label": "大模型网关预警", "list_class": "warning" },
+        { "value": "note_data_sync", "label": "笔记数据同步", "list_class": "info" },
+        { "value": "note_data_import", "label": "笔记数据导入", "list_class": "info" }
+      ]
+    }
+  ]
+}
