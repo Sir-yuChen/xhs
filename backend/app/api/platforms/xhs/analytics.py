@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.core.config import get_settings
 from backend.app.core.database import get_db
+from backend.app.core.perm_deps import require_perm
 from backend.app.core.deps import get_current_user
 from backend.app.core.time import shanghai_now
 from backend.app.services.note_metrics_service import note_metrics
@@ -371,6 +372,7 @@ def _write_report_file(current_user: User, payload: dict[str, Any]) -> tuple[str
 
 @router.get("/overview")
 def overview(
+    _perm: None = Depends(require_perm("xhs:insights:view")),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -415,6 +417,7 @@ def overview(
 @router.get("/top-content")
 def top_content(
     limit: int = Query(20, ge=1, le=100),
+    _perm: None = Depends(require_perm("xhs:insights:view")),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -424,6 +427,7 @@ def top_content(
 
 @router.get("/hot-topics")
 def hot_topics(
+    _perm: None = Depends(require_perm("xhs:insights:view")),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -432,6 +436,7 @@ def hot_topics(
 
 @router.get("/engagement")
 def engagement(
+    _perm: None = Depends(require_perm("xhs:insights:view")),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -457,6 +462,7 @@ def engagement(
 
 @router.get("/keyword-trends")
 def keyword_trends(
+    _perm: None = Depends(require_perm("xhs:insights:view")),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -465,6 +471,7 @@ def keyword_trends(
 
 @router.get("/comment-insights")
 def comment_insights(
+    _perm: None = Depends(require_perm("xhs:insights:view")),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -660,6 +667,7 @@ def generate_from_platform_hot_topic(
 @router.get("/platform-hot-topics")
 def list_platform_hot_topics(
     item_id: Optional[str] = None,
+    _perm: None = Depends(require_perm("xhs:insights:view")),
     limit: int = Query(100, ge=1, le=500),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -674,6 +682,7 @@ def list_platform_hot_topics(
 @router.get("/platform-hot-topics/matches")
 def list_platform_hot_topic_matches(
     item_id: Optional[str] = None,
+    _perm: None = Depends(require_perm("xhs:insights:view")),
     limit: int = Query(100, ge=1, le=500),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),

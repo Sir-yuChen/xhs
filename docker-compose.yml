@@ -1,60 +1,106 @@
-version: "3.8"
+# Spider XHS —— 服务器多用户部署（v1.1.0 / 设计 52）
+#
+# ## 与旧版的区别（这一版推翻了「桌面 + 可选 MySQL」的形态）
+#
+# | 项 | 旧 | 新 |
+# |---|---|---|
+# | 数据库 | SQLite 文件 / 可选 MySQL | **PostgreSQL 主库**（`db` 服务） |
+# | 用户模型 | 单机单用户 | **多用户 + RBAC**（admin / user / 自建角色） |
+# | 密钥 | 默认值能起 | `SECRET_KEY` **必填**，默认值拒启（`core/config.py` 安全自检） |
+# | 前端 | 桌面窗口 / Vite dev | Nginx 托管构建产物 + 反代 `/api` |
+#
+# ## 三条硬要求
+#
+# 1. **`SECRET_KEY` 必须给**：`docker compose up` 时若没设，应用会
+#    `RuntimeError: secret_key 仍是默认值` 直接退出 —— 这是设计 53 C1 的守卫，
+#    不是故障。生成：`python -c "import secrets;print(secrets.token_urlsafe(48))"`。
+# 2. **`db` 必须先健康**：`depends_on: condition: service_healthy`
+#    + `pg_isready` 探针。没有这一条，app 会在 PG 还没接受连接时启动、
+#    在 lifespan 里跑迁移然后崩溃（`connection refused`），并**无限重启**。
+# 3. **单副本**：调度靠文件租约（`core/singleton.py`），`app` 服务
+#    **不能 `deploy.replicas > 1`**。要扩副本必须先换掉调度层的租约实现
+#    （设计 52 §4）。
 
 services:
-  # --------------------------------------------------------------------------
-  # Spider_XHS Application
-  # --------------------------------------------------------------------------
-  app:
-    build: .
-    container_name: spider-xhs
-    ports:
-      - "8000:8000"
+  db:
+    image: postgres:16-alpine
+    container_name: spider-xhs-db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-spider_xhs}
+      POSTGRES_USER: ${POSTGRES_USER:-spider_xhs}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 必须设置}
+      #: 时区固定东八区：本项目所有时间戳按上海时区生成（`core/time.py`），
+      #: 容器默认 UTC 会让「今天」的边界差 8 小时。
+      TZ: Asia/Shanghai
+      PGTZ: Asia/Shanghai
     volumes:
+      - pg_data:/var/lib/postgresql/data
+    #: **不映射 5432 到宿主机**：数据库只需被 app 访问，暴露到公网是常见的
+    #: 事故来源。需要本机 psql 调试时用 `docker compose exec db psql -U ...`。
+    expose:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-spider_xhs} -d ${POSTGRES_DB:-spider_xhs}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: spider-xhs
+    environment:
+      CONFIG_FILE: /app/config/default.yaml
+      DATABASE_TYPE: postgres
+      DATABASE_POSTGRES_HOST: db
+      DATABASE_POSTGRES_PORT: "5432"
+      DATABASE_POSTGRES_DB: ${POSTGRES_DB:-spider_xhs}
+      DATABASE_POSTGRES_USER: ${POSTGRES_USER:-spider_xhs}
+      DATABASE_POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 必须设置}
+      #: ⚠️ **必填**。留空或保持 `dev-only-change-me` ⇒ 应用拒绝启动
+      #: （`core/config.py` 的启动安全自检，设计 53 C1）。
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY 必须设置（生成：python -c "import secrets;print(secrets.token_urlsafe(48))")}
+      TZ: Asia/Shanghai
+      #: 只监听容器内网卡，由 nginx 反代；不要让 uvicorn 直接对外。
+      HOST: 0.0.0.0
+      PORT: "8000"
+    volumes:
+      #: 数据（媒体 / 导出 / 上传的安装包）必须落在宿主机卷上，
+      #: 否则 `docker compose down` 时整个业务数据没了。
       - ./data:/app/data
       - ./config:/app/config
       - ./backend/app/storage/media:/app/backend/app/storage/media
       - ./backend/app/storage/exports:/app/backend/app/storage/exports
-    environment:
-      - CONFIG_FILE=/app/config/default.yaml
-      # Override sensitive values via env vars in production:
-      # - SECRET_KEY=your-production-secret-key
-      # - FERNET_KEY=your-fernet-key
-      # - DATABASE_TYPE=mysql
-      # - DATABASE_MYSQL_HOST=mysql
-      # - DATABASE_MYSQL_PASSWORD=your-mysql-password
-    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    expose:
+      - "8000"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 30s
+    restart: unless-stopped
 
-  # --------------------------------------------------------------------------
-  # MySQL (optional, for production deployments)
-  # Uncomment this section and the volumes block below to use MySQL.
-  # Also set DATABASE_TYPE=mysql in the app environment.
-  # --------------------------------------------------------------------------
-  # mysql:
-  #   image: mysql:8.0
-  #   container_name: spider-xhs-mysql
-  #   environment:
-  #     MYSQL_ROOT_PASSWORD: rootpass
-  #     MYSQL_DATABASE: spider_xhs
-  #     MYSQL_USER: spider_xhs
-  #     MYSQL_PASSWORD: change_me
-  #   ports:
-  #     - "3306:3306"
-  #   volumes:
-  #     - mysql_data:/var/lib/mysql
-  #   command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
-  #   restart: unless-stopped
-  #   healthcheck:
-  #     test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
-  #     interval: 10s
-  #     timeout: 5s
-  #     retries: 5
-  #     start_period: 30s
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: spider-xhs-nginx
+    ports:
+      - "${HTTP_PORT:-80}:80"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      #: 前端构建产物由**宿主机**构建后挂进来（不在镜像里装 node）：
+      #: `cd frontend && npm run build` ⇒ `frontend/dist`。
+      - ./frontend/dist:/usr/share/nginx/html:ro
+    depends_on:
+      app:
+        condition: service_started
+    restart: unless-stopped
 
-# volumes:
-#   mysql_data:
+volumes:
+  pg_data:

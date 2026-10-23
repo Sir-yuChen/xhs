@@ -4,7 +4,7 @@ import logging
 
 from pydantic import BaseModel, ConfigDict, Field
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from backend.app.core.database import get_db
@@ -16,6 +16,28 @@ from backend.app.models import User
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+class EmailCodeRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+    email: str = Field(min_length=3, max_length=254)
+
+
+class EmailCodeVerifyRequest(EmailCodeRequest):
+    code: str = Field(min_length=4, max_length=10)
+
+
+class RegisterRequest(EmailCodeRequest):
+    """注册（v1.1.0：邮箱验证码 + 用户名 + 密码）。
+
+    `email` 是**登录凭证**（对齐 dataPanel 的 `t_user.email`），`username` 只是
+    展示名 —— 两者都要，但唯一性判在 email 上（同名不同人时用 email 区分登录）。
+    """
+
+    username: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=6, max_length=128)
+    code: str = Field(min_length=4, max_length=10)
+    real_name: str = Field(default="", max_length=80)
 
 
 class AuthCredentials(BaseModel):
@@ -61,9 +83,126 @@ def _token_response(user: User) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# 邮箱验证码（v1.1.0 / 设计 55 §1.2，用户「注册改为邮箱验证与 dataPanel 一致」）
+# ---------------------------------------------------------------------------
+
+
+@router.post("/send-register-code")
+def send_register_code(payload: EmailCodeRequest, db: Session = Depends(get_db)):
+    """发注册验证码。**注册关闭时不发**（否则等于给未授权者留了个发信通道）。
+
+    返回体只给 `sent` / `cooldown` / `delivered` 三个事实：
+    * `sent=true` 表示码已登记；`delivered=false` 表示 SMTP 未配置（降级为日志）；
+    * **绝不回显验证码**（哪怕在开发环境 —— 那会让「邮箱验证」形同虚设）。
+    """
+    from backend.app.services import email_service
+    from backend.app.services.settings_service import live_global_bool
+
+    if not live_global_bool(db, "register.enabled", default=False):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="REGISTER_DISABLED")
+
+    if not email_service.is_valid_email(payload.email):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="EMAIL_INVALID")
+
+    ok, wait = email_service.can_send("register", payload.email)
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=f"CODE_COOLDOWN:{wait}"
+        )
+
+    #: 已注册的邮箱不再发码 —— 但**用同一句 200 回复**，不暴露「这个邮箱注册过没有」。
+    existing = db.scalar(
+        select(User).where(func.lower(User.email) == email_service.normalize_email(payload.email))
+    )
+    if existing is not None:
+        return {"sent": True, "cooldown": email_service.RESEND_COOLDOWN_SECONDS, "delivered": True}
+
+    code = email_service.issue_code("register", payload.email)
+    try:
+        delivered = email_service.send_code_email(payload.email, code, "register")
+    except RuntimeError as exc:
+        #: 配了 SMTP 但发不出去 ⇒ 明确报错（不能回「发送成功」让用户白等）。
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"MAIL_SEND_FAILED:{exc}") from exc
+    return {"sent": True, "cooldown": email_service.RESEND_COOLDOWN_SECONDS, "delivered": delivered}
+
+
+@router.post("/send-profile-code")
+def send_profile_code(
+    payload: EmailCodeRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """已登录用户给自己的**新邮箱**发验证码（改资料前先验邮箱归属）。
+
+    `EXEMPT`（不挂权限码）的理由：它改的是**自己**的资料。任何人登录后
+    都可能需要补邮箱 —— 若挂 `system:user:edit`，普通用户就永远补不了，
+    那会让「邮箱是登录凭证」这件事变成只有管理员能修。
+    """
+    from backend.app.services import email_service
+
+    if not email_service.is_valid_email(payload.email):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="EMAIL_INVALID")
+
+    ok, wait = email_service.can_send("profile", payload.email)
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=f"CODE_COOLDOWN:{wait}"
+        )
+
+    taken = db.scalar(
+        select(User).where(
+            func.lower(User.email) == email_service.normalize_email(payload.email),
+            User.id != current_user.id,
+        )
+    )
+    if taken is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="EMAIL_TAKEN")
+
+    code = email_service.issue_code("profile", payload.email)
+    try:
+        delivered = email_service.send_code_email(payload.email, code, "profile")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"MAIL_SEND_FAILED:{exc}") from exc
+    return {"sent": True, "cooldown": email_service.RESEND_COOLDOWN_SECONDS, "delivered": delivered}
+
+
+@router.post("/verify-profile-code")
+def verify_profile_code(
+    payload: EmailCodeVerifyRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """校验改资料时的邮箱验证码；通过则**直接写入** `users.email`。
+
+    为什么校验和写入是同一个端点：分两步（先 verify 拿 ticket、再 PATCH 改邮箱）
+    会在两步之间留下「码已验证但邮箱还没写」的窗口，而那个窗口里用户可以把
+    任一邮箱填进 `users.email`（绕过验证）。合并后不存在这个窗口。
+    """
+    from backend.app.services import email_service
+
+    ok, reason = email_service.verify_code("profile", payload.email, payload.code)
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=reason)
+
+    taken = db.scalar(
+        select(User).where(
+            func.lower(User.email) == email_service.normalize_email(payload.email),
+            User.id != current_user.id,
+        )
+    )
+    if taken is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="EMAIL_TAKEN")
+
+    current_user.email = email_service.normalize_email(payload.email)
+    db.commit()
+    email_service.clear("profile", payload.email)
+    return {"ok": True, "email": current_user.email}
+
+
 @router.post("/register")
 def register(
-    credentials: AuthCredentials,
+    payload: RegisterRequest,
     request: Request,
     db: Session = Depends(get_db),
 ):
@@ -73,22 +212,48 @@ def register(
     # ⚠️ 读的是**当前用户**的配置行；未登录时 `user_id=None` ⇒ 落 `BUILTIN_DEFAULTS`
     #    （= false）。这是「全局开关按每用户一份配置行表达」的既有口径
     #    （`system_settings` 不加 `scope` 列，见设计 48 §M8）。
-    from backend.app.services.settings_service import live_bool
+    from backend.app.services.settings_service import live_global_bool
 
-    if not live_bool(db, None, "register.enabled", default=False):
+    if not live_global_bool(db, "register.enabled", default=False):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="REGISTER_DISABLED"
         )
 
-    username = credentials.username.strip()
-    existing_user = db.scalar(select(User).where(User.username == username))
-    if existing_user is not None:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Username already exists")
+    from backend.app.services import email_service
 
-    user = User(username=username, password_hash=hash_password(credentials.password))
+    #: ① 验证码先校验（**在任何写库动作之前**）—— 顺序反了的话，一个错误的码
+    #:    也会先建出 `users` 行，然后回滚不掉（下面的播种各自 commit）。
+    ok, reason = email_service.verify_code("register", payload.email, payload.code)
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=reason)
+
+    email = email_service.normalize_email(payload.email)
+    username = payload.username.strip()
+
+    existing_user = db.scalar(select(User).where(func.lower(User.email) == email))
+    if existing_user is not None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="EMAIL_TAKEN")
+
+    #: 用户名仍要求唯一 —— 它是侧栏与日志里的展示名，重名会让人分不清谁是谁。
+    #: （与 dataPanel 的差异：dataPanel 用邮箱登录，我们把 email 当凭证、username
+    #:  当展示名，两个都要唯一。判重用 `lower()` —— `Admin` 与 `admin` 算重名。）
+    if db.scalar(select(User).where(func.lower(User.username) == username.lower())) is not None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="USERNAME_TAKEN")
+
+    #: 新注册用户走**待审**（设计 46 §2，对齐 dataPanel：`status=pending`）。
+    #: 待审账号能登录但侧栏为空（没有任何授权），由管理员在用户管理里批准。
+    user = User(
+        username=username,
+        email=email,
+        password_hash=hash_password(payload.password),
+        real_name=payload.real_name or username,
+        role="user",
+        status="pending",
+    )
     db.add(user)
     db.commit()
     db.refresh(user)
+    email_service.clear("register", email)
 
     # DEF-066 / 设计 15 §4.5：内置任务行**按用户各持一份** ⇒ 新用户注册即播种
     # （启动播种只覆盖「启动时已存在的用户」）。注册完打开任务中心就有这 7 条。
@@ -226,12 +391,30 @@ def login(credentials: AuthCredentials, db: Session = Depends(get_db)):
             detail=f"登录失败次数过多，请 {int(wait) + 1} 秒后再试。",
             headers={"Retry-After": str(int(wait) + 1)},
         )
-    user = db.scalar(select(User).where(User.username == username))
+    #: 登录标识**用户名或邮箱都可**（v1.1.0）：邮箱是注册凭证，用户很自然会用它登；
+    #: 只认用户名会让「刚注册完却登不上」。邮箱按 `lower()` 匹配（注册时已归一）。
+    identifier = username
+    user = db.scalar(select(User).where(func.lower(User.username) == identifier.lower()))
+    if user is None and "@" in identifier:
+        user = db.scalar(select(User).where(func.lower(User.email) == identifier.lower()))
     if user is None or not verify_password(credentials.password, user.password_hash):
-        _record_login_failure(username, now)
+        _record_login_failure(identifier, now)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
-    # 成功 ⇒ 清掉该用户名的失败计数（不让「之前失败过」影响下次）
-    _clear_login_failures(username)
+
+    #: 账号状态门禁（设计 55 §1.4）。**口令正确才判状态** —— 顺序反了的话，
+    #: 不知道密码的人也能通过「disabled / pending」的差异探出账号是否存在。
+    status_value = (getattr(user, "status", None) or "normal").strip() or "normal"
+    if status_value == "disabled":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="ACCOUNT_DISABLED")
+    if status_value == "pending":
+        #: 待审账号**可以登录**（否则用户看不到「等待审核」的说明），
+        #: 但没有任何授权 ⇒ 侧栏为空。这条提示让用户知道该找管理员。
+        logger.info("login: pending user %s signed in (awaiting approval)", user.id)
+    if getattr(user, "deleted_at", None) is not None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="ACCOUNT_DELETED")
+
+    # 成功 ⇒ 清掉该标识的失败计数（不让「之前失败过」影响下次）
+    _clear_login_failures(identifier)
     return _token_response(user)
 
 

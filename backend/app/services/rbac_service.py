@@ -92,8 +92,17 @@ def perms_for_role(db: Session, role_code: str | None) -> frozenset[str]:
 
 
 def perms_for_user(db: Session, user: User | None) -> frozenset[str]:
-    """某用户的**有效**权限码（模板行 ∪ 他自己的授权行）。"""
+    """某用户的**有效**权限码（模板行 ∪ 他自己的授权行）。
+
+    ⚠️ **待审账号（`status='pending'`）返回空集**（v1.1.0 / S3 实测修正）。
+
+    `user` 角色的授权走模板行（`role_menus.user_id IS NULL`），对所有持该角色
+    的人生效 ⇒ 不拦的话「刚注册未批准」的人立刻拿到 28 个 view 码，
+    等于注册即授权（`/system/menus/mine` 那边同时收敛了菜单）。
+    """
     if user is None:
+        return frozenset()
+    if (getattr(user, "status", None) or "normal") == "pending":
         return frozenset()
     normalized = normalize_role(getattr(user, "role", None))
     if normalized == ROLE_ADMIN:

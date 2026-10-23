@@ -23,6 +23,7 @@ from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from backend.app.core.database import get_db
+from backend.app.core.perm_deps import require_perm
 from backend.app.core.deps import get_current_user
 from backend.app.core.time import shanghai_now
 from backend.app.models import LlmGatewayAlert, LlmGatewayConfig, LlmGatewayUsageLog, User
@@ -336,6 +337,7 @@ def usage_overview(
     platform: Optional[str] = None,
     function: Optional[str] = None,
     model_name: Optional[str] = None,
+    _perm: None = Depends(require_perm("ai:usage:view")),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -371,6 +373,7 @@ def usage_daily(
     model_name: Optional[str] = None,
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
+    _perm: None = Depends(require_perm("ai:usage:view")),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -426,6 +429,7 @@ def usage_breakdown(
     model_name: Optional[str] = None,
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
+    _perm: None = Depends(require_perm("ai:usage:view")),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):

@@ -358,6 +358,23 @@ def delete_user(
 
     user.deleted_at = shanghai_now()
     _bump_token_version(db, user)
+
+    #: ⚠️ **软删必须释放唯一键**（v1.1.0 / S3 实测踩坑）。
+    #:
+    #: `users.email` / `users.username` 都有部分唯一索引
+    #: （`WHERE email IS NOT NULL` / `WHERE email <> ''`）。软删只写
+    #: `deleted_at` 的话，那个邮箱与用户名**永远占着** —— 用户被删后
+    #: 想用同一邮箱重新注册会撞唯一约束，而界面上看不出「是谁占的」
+    #: （被删的人已经在列表里隐藏了）。实测：E2E 用例清残留时撞
+    #: `ForeignKeyViolation`（物理删不行），改软删后又撞邮箱唯一。
+    #:
+    #: 改名规则：`deleted_<id>_<原名>`。用 id 前缀保证「同一原名的多个已删
+    #: 用户」不会互相撞；保留原名尾巴是为了排查时还能认出这是谁。
+    stamp = f"deleted_{user.id}_"
+    if user.email:
+        user.email = (stamp + user.email)[:254]
+    user.username = (stamp + user.username)[:80]
+
     db.commit()
     return {"ok": True, "id": user.id, "deleted": True}
 

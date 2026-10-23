@@ -295,39 +295,178 @@ def test_register_switch_baseline_is_off():
     assert get_settings().register_enabled is False, "config/default.yaml 必须关着"
 
 
-def test_register_is_rejected_when_the_switch_is_off(api_client, monkeypatch):
-    """关着时 `POST /auth/register` ⇒ **403 `REGISTER_DISABLED`**（不是 401/500）。"""
+def _set_register_switch(api_client, value: bool) -> None:
+    """把注册开关写到**管理员配置行**（v1.1.0 / S3：全局开关以管理员行为准）。
+
+    ⚠️ 不能再靠改 `BUILTIN_DEFAULTS`：`live_global_bool` 读的是
+    `system_settings` 里**管理员那一行**（实测踩坑：先写「任一为真即真」，
+    导致管理员关不掉；改成「管理员行为准」后，测试必须写行而不是改默认值）。
+    没有管理员行时回落到 `default`，所以这里显式造一行。
+    """
+    from sqlalchemy import select
+
+    from backend.app.core.roles import ROLE_ADMIN
+    from backend.app.models.system_setting import SystemSetting
+    from backend.app.models.user import User
+    from backend.app.services import settings_service
+    from backend.app.core.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        admin = db.scalar(select(User).where(User.role == ROLE_ADMIN, User.deleted_at.is_(None)))
+        if admin is None:
+            #: 夹具不一定造管理员（很多用例只用普通用户）⇒ 这里补一个，
+            #: 否则「全局开关」这条链路根本无法被验证。
+            from backend.app.core.security import hash_password
+
+            admin = User(
+                username="switch-admin",
+                email="switch-admin@example.com",
+                password_hash=hash_password("admin12345"),
+                role=ROLE_ADMIN,
+                status="normal",
+            )
+            db.add(admin)
+            db.commit()
+            db.refresh(admin)
+        row = db.scalar(
+            select(SystemSetting).where(
+                SystemSetting.user_id == admin.id, SystemSetting.key == "register.enabled"
+            )
+        )
+        if row is None:
+            row = SystemSetting(
+                user_id=admin.id, key="register.enabled", value="", value_type="bool"
+            )
+            db.add(row)
+        row.value = "true" if value else "false"
+        db.commit()
+    finally:
+        db.close()
+    settings_service.invalidate(key="register.enabled")
+
+
+@pytest.fixture()
+def register_switch(api_client):
+    """用完把开关关回去（不让用例之间的状态互相影响）。"""
+    yield _set_register_switch
+    _set_register_switch(api_client, False)
+
+
+def test_register_is_rejected_when_the_switch_is_off(api_client, register_switch):
+    """关着时 `POST /auth/register` ⇒ **403 `REGISTER_DISABLED`**（不是 401/500）。
+
+    v1.1.0 起注册契约变了（邮箱验证码 + 待审，对齐 dataPanel），所以这里
+    按**新契约**发请求：`{email, username, password, code}`。
+    """
+    body = {
+        "email": "switch-probe@example.com",
+        "username": "switch-probe",
+        "password": "secret123",
+        "code": "123456",
+    }
+
+    register_switch(api_client, False)
+    resp = api_client.post("/api/auth/register", json=body)
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["detail"] == "REGISTER_DISABLED"
+
+    #: 反向：**显式**打开就不是 403（证伪「永远 403」）。
+    #: 断言的是「开关分支已放行」而不是「注册成功」—— 没有验证码，
+    #: 正确的下一个失败点是 400 `CODE_EXPIRED`。
+    register_switch(api_client, True)
+    ok = api_client.post("/api/auth/register", json=body)
+    assert ok.status_code != 403, ok.text
+    assert ok.json().get("detail") in {"CODE_EXPIRED", "CODE_INVALID"}, ok.text
+
+
+def test_global_switch_follows_the_admin_row_not_any_user_row(api_client, register_switch):
+    """**全局开关以管理员行为准**：普通用户行里的 true 不得让开关变开。
+
+    这条守的是一个实测踩过的真缺陷：最初实现「有任一行 true 就算开」，于是
+    管理员**关不掉**开关（只要某个普通用户的行里还留着 true）——
+    「关」失效比「开不了」危险得多。
+    """
+    from sqlalchemy import select
+
+    from backend.app.core.database import SessionLocal
+    from backend.app.models.system_setting import SystemSetting
+    from backend.app.models.user import User
     from backend.app.services import settings_service
 
-    #: ⚠️ 会话级夹具（`tests/conftest.py`）把 `BUILTIN_DEFAULTS["register.enabled"]`
-    #: 改成了 True 并**在会话期间保持**。`monkeypatch.setitem` 记下的「旧值」是那个
-    #: True ⇒ 即便用 `raising=False` 之后回滚，也回不到 False。
-    #: 本用例要的是「关」这个**分支**，所以直接写字典并自行复原（见 finally）。
-    original = settings_service.BUILTIN_DEFAULTS["register.enabled"]
-    settings_service.BUILTIN_DEFAULTS["register.enabled"] = False
-    #: `live_value` 有 60 秒进程内缓存，键是 `(user_id, key)` —— 不清缓存的话，
-    #: 第二次读到的还是上一次的值（实测：「打开就能注册」那半段被缓存的 False 挡住）。
-    settings_service.invalidate(key="register.enabled")
+    register_switch(api_client, False)  # 管理员行 = false
+
+    db = SessionLocal()
     try:
-        resp = api_client.post(
-            "/api/auth/register", json={"username": "switch-off-user", "password": "secret123"}
-        )
-        assert resp.status_code == 403, resp.text
-        assert resp.json()["detail"] == "REGISTER_DISABLED"
+        plain = db.scalar(select(User).where(User.role != "admin", User.deleted_at.is_(None)))
+        if plain is None:
+            from backend.app.core.security import hash_password
 
-        #: 反向：**显式**打开就能注册（证伪「永远 403」）
-        settings_service.BUILTIN_DEFAULTS["register.enabled"] = True
-        settings_service.invalidate(key="register.enabled")
-        ok = api_client.post(
-            "/api/auth/register", json={"username": "switch-on-user", "password": "secret123"}
+            plain = User(
+                username="switch-plain",
+                email="switch-plain@example.com",
+                password_hash=hash_password("plain12345"),
+                role="user",
+                status="normal",
+            )
+            db.add(plain)
+            db.commit()
+            db.refresh(plain)
+        row = db.scalar(
+            select(SystemSetting).where(
+                SystemSetting.user_id == plain.id, SystemSetting.key == "register.enabled"
+            )
         )
-        assert ok.status_code == 200, ok.text
+        if row is None:
+            row = SystemSetting(
+                user_id=plain.id, key="register.enabled", value="", value_type="bool"
+            )
+            db.add(row)
+        row.value = "true"  # 普通用户行 = true
+        db.commit()
     finally:
-        settings_service.BUILTIN_DEFAULTS["register.enabled"] = original
+        db.close()
+    settings_service.invalidate(key="register.enabled")
+
+    #: 用真实会话读（`db=None` 会直接回落 `default`，那个分支不在这里断言）
+    db2 = SessionLocal()
+    try:
+        assert settings_service.live_global_bool(db2, "register.enabled", default=False) is False, (
+            "普通用户行里的 true 让全局开关变开了 —— 管理员将永远关不掉注册"
+        )
+    finally:
+        db2.close()
         settings_service.invalidate(key="register.enabled")
 
 
+def test_register_requires_email_and_code(api_client):
+    """注册**不再**接受「只有用户名+密码」的旧请求体（v1.1.0 契约变更）。
 
+    这条守的是「旧客户端 / 旧前端忘改」的情形：少了 `email` 必须是 422，
+    而不是「静默建一个没有邮箱的账号」—— 后者会让那个账号永远无法
+    用邮箱找回 / 登录。
+    """
+    resp = api_client.post(
+        "/api/auth/register", json={"username": "no-email-user", "password": "secret123"}
+    )
+    assert resp.status_code == 422, resp.text
+    detail = resp.json().get("detail")
+    locs = [tuple(item.get("loc") or ()) for item in detail] if isinstance(detail, list) else []
+    assert any("email" in loc for loc in locs), detail
+def test_register_requires_email_and_code(api_client):
+    """注册**不再**接受「只有用户名+密码」的旧请求体（v1.1.0 契约变更）。
+
+    这条守的是「旧客户端 / 旧前端忘改」的情形：少了 `email` 必须是 422，
+    而不是「静默建一个没有邮箱的账号」——后者会让那个账号永远无法
+    用邮箱找回 / 登录。
+    """
+    resp = api_client.post(
+        "/api/auth/register", json={"username": "no-email-user", "password": "secret123"}
+    )
+    assert resp.status_code == 422, resp.text
+    detail = resp.json().get("detail")
+    locs = [tuple(item.get("loc") or ()) for item in detail] if isinstance(detail, list) else []
+    assert any("email" in loc for loc in locs), detail
 def test_menu_seed_is_derived_from_the_perms_registry():
     """`menus.seed.json` 的**每一条 F 行**都必须能对上登记表里的一条 `PermSpec`。
 

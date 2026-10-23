@@ -25,6 +25,7 @@ from backend.app.api.platforms.xhs import (
     qianfan,
 )
 from backend.app.core.api_audit import ApiAuditMiddleware
+from backend.app.core.route_guard import assert_every_route_guarded
 from backend.app.core.config import get_settings
 from backend.app.core.database import SessionLocal, init_db
 from backend.app.core.selfcheck import log_startup_selfcheck
@@ -94,6 +95,14 @@ async def lifespan(app: FastAPI):
     # 仍是出厂默认值 ⇒ **拒绝启动**。放在最前面 —— 后面每件事都会写库 / 起线程，
     # 「先干活再报错」等于让一个可伪造 JWT 的进程先对外服务了几秒。
     get_settings().assert_production_ready()
+    # 路由权限守卫（设计 50 §2.4，S3）：**每条写路由必须挂权限码**，缺一条拒绝启动。
+    #
+    # ⚠️ 这道守卫 S0 就写好了，但**没接在这里** —— 那时 `ROUTE_PERMS` 是空字典，
+    # 接上就会拒启；而「守卫存在但没人调用」和「没有守卫」是一回事。
+    # 2026-10-24 补全 270 条映射后才接上，两道一起才真的生效。
+    #
+    # 放的位置：`init_db()` **之前** —— 映射与库无关，早点失败少写一次盘。
+    assert_every_route_guarded(app)
     # 启动自检（DEF-028）：Node 签名运行时缺失时**全系统的平台调用都会失败**，
     # 而失败形态是每个请求各报一次看不懂的错。这里一次性说清（只 WARN 不阻断 ——
     # 看本地已同步数据不需要签名）。

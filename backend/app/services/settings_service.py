@@ -37,6 +37,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.core.database import SessionLocal
+from backend.app.core.roles import ROLE_ADMIN
+from backend.app.models.user import User
 from backend.app.models.system_setting import (
     CATEGORY_FEATURE,
     VALUE_TYPE_BOOL,
@@ -355,6 +357,56 @@ def effective_value(
     if key in BUILTIN_DEFAULTS:
         return BUILTIN_DEFAULTS[key]
     return default
+
+
+def live_global_bool(db: Optional[Session], key: str, *, default: bool) -> bool:
+    """**全局开关**读取：以**管理员**那一行为准（v1.1.0 / S3）。
+
+    ## 为什么不能直接用 `live_bool(db, None, ...)`
+
+    `live_bool(db, None, key)` 在 `user_id=None` 时会**跳过 DB 层**（见
+    `effective_value` docstring），只剩 `settings` / `BUILTIN_DEFAULTS`。
+    于是「管理员在设置页把注册打开」这件事**在未登录的注册请求里读不到** ——
+    表现是「管理员开了、注册仍回 403」。
+
+    `register.enabled` 是**全站开关**（注册发生在登录之前，那时没有 user 可归属），
+    必须按全局语义读。
+
+    ## 为什么是「管理员那一行」而不是「任一行为 true」
+
+    先写过一版「有任一行 true 就算开」，实测立刻出问题：管理员把开关**关掉**后，
+    只要任何一个普通用户的行里还留着 `true`（他以前开过 / 默认种子是 true），
+    开关就关不掉 —— **「关」这个动作失效**比「开不了」危险得多。
+
+    取管理员行：管理员是唯一有权改这个开关的人，他的行就是权威值。
+    没有管理员行时（极端情况）回落到 `default`。
+
+    ⚠️ 这不是把 per-user 配置变成全局配置 —— 只影响**这一个键**的读取语义。
+    """
+    if not key or key not in LIVE_KEYS or db is None:
+        return default
+
+    row = db.execute(
+        select(SystemSetting.value, SystemSetting.value_type)
+        .join(User, User.id == SystemSetting.user_id)
+        .where(
+            SystemSetting.key == key,
+            User.role == ROLE_ADMIN,
+            User.deleted_at.is_(None),
+            SystemSetting.value.is_not(None),
+        )
+        .order_by(SystemSetting.id.desc())
+        .limit(1)
+    ).first()
+    if row is None:
+        return default
+
+    value = decode_value(row[0], row[1])
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in ("true", "1", "yes", "on")
 
 
 def live_value(db: Optional[Session], user_id: Optional[int], key: str, *, default: Any = None) -> Any:

@@ -183,6 +183,23 @@ class Settings(BaseSettings):
     #: 这里的值只是「没有配置行时的最后兜底」。
     register_enabled: bool = False
 
+    #: ── SMTP（v1.1.0 / 邮箱验证码注册与登录，设计 55 §1.2）──────────────
+    #: 口径对齐 dataPanel（用户「注册改为邮箱验证与 dataPanel 一致」）。
+    #:
+    #: ⚠️ **未配置时验证码降级为只写日志**（`email_service.send_code_email` 返回
+    #: False 而不抛异常），这样本地开发 / 首装能跑通注册流程。生产必须配。
+    #:
+    #: 配法（二选一）：`config/default.yaml` 的 `email:` 段，或环境变量
+    #: `EMAIL_HOST` / `EMAIL_PORT` / `EMAIL_USERNAME` / `EMAIL_PASSWORD`。
+    email_host: str = ""
+    email_port: int = 0
+    email_username: str = ""
+    email_password: str = ""
+    #: 发件人地址（缺省用 `email_username`）
+    email_from_addr: str = ""
+    #: `true` = 直连 SSL（465）；`false` = 明文 25 / STARTTLS 587
+    email_use_ssl: bool = False
+
     # Server
     server_host: str = "0.0.0.0"
     server_port: int = 8000

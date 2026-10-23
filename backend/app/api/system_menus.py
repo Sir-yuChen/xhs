@@ -202,7 +202,19 @@ def _assert_perms_ok(perms: str, *, exclude_id: int | None = None) -> None:
 # 当前用户的菜单与权限（登录即可，无权限码）
 # --------------------------------------------------------------------------- #
 def _visible_menus_for(db: Session, user: User) -> list[Menu]:
-    """该用户可见的菜单行（已排除停用 / 隐藏 / 未授权）。"""
+    """该用户可见的菜单行（已排除停用 / 隐藏 / 未授权 / 待审）。
+
+    ⚠️ **待审账号（`status='pending'`）返回空菜单**（v1.1.0 / S3 实测修正）。
+
+    原因：`user` 角色的授权用的是**模板行**（`role_menus.user_id IS NULL`），
+    它对所有持 `user` 角色的人生效。于是「刚注册、还没被批准」的人会立刻
+    看到 41 个菜单 —— 那等于注册即授权，待审机制形同虚设。
+
+    待审的正确语义是「能登录、能看『等待审核』、不能看任何业务页」。
+    """
+    if (getattr(user, "status", None) or "normal") == "pending":
+        return []
+
     rows = list(db.scalars(select(Menu).where(Menu.status == "normal")).all())
     if normalize_role(getattr(user, "role", None)) == ROLE_ADMIN:
         # admin 是代码事实：不查授权表（防锁死，见 rbac_service docstring）

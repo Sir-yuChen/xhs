@@ -50,6 +50,48 @@ def _iter_operations(app: FastAPI):
             yield method.upper(), path
 
 
+def _iter_routes(app: FastAPI):
+    """产出 `(path, methods, dependant)`，**覆盖 include_router 进来的路由**。
+
+    ⚠️ FastAPI 0.141 把 `include_router` 改成了延迟展开：`app.routes` 里只有
+    42 个 `_IncludedRouter` 包装对象，真实路由在 `effective_route_contexts()`
+    里。所以「遍历 app.routes 找 path」在 0.141 上**一条都找不到** —— 直接后果是
+    下面那个「登记了但没挂码」的检查会静默地永远通过（因为找不到路由就 continue）。
+    这是实测踩到的：守卫报 8 条「只登记未挂码」，而代码里明明挂了 `Depends`。
+    """
+    from fastapi.routing import _IncludedRouter
+
+    for route in app.routes:
+        if isinstance(route, _IncludedRouter):
+            for ctx in route.effective_route_contexts():
+                yield getattr(ctx, "path", None), getattr(ctx, "methods", set()) or set(), getattr(ctx, "dependant", None)
+        else:
+            yield (
+                getattr(route, "path", None),
+                getattr(route, "methods", set()) or set(),
+                getattr(route, "dependant", None),
+            )
+
+
+def _route_has_perm_dependency(app: FastAPI, path: str, method: str) -> bool:
+    """该路由的依赖链里是否有 `require_perm(...)`（= 真的挂了码）。
+
+    只在 `READONLY_ROUTES` 的逐条校验里用：**登记了不等于挂上了**，
+    不查这一步，守卫会给出「已登记」的假结论。
+    """
+    for rpath, rmethods, dependant in _iter_routes(app):
+        if rpath != path or method.upper() not in rmethods:
+            continue
+        if dependant is None:
+            continue
+        for dep in dependant.dependencies:
+            #: `require_perm` 返回的是闭包，`__qualname__` 恒为
+            #: `require_perm.<locals>.dependency` ⇒ 用它在**构造时**打上的标记判断。
+            if getattr(dep.call, "__perm_code__", None):
+                return True
+    return False
+
+
 def collect_violations(app: FastAPI) -> list[str]:
     """返回违规清单（空 = 通过）。**不抛**，方便测试逐条断言。"""
     problems: list[str] = []
@@ -59,19 +101,46 @@ def collect_violations(app: FastAPI) -> list[str]:
     except ValueError as exc:  # 登记表本身有问题
         problems.append(f"[登记表] {exc}")
 
-    registered = set(ROUTE_PERMS.values()) | set(READONLY_PAGE_GUARDS.values())
+    #: `EXEMPT_SELF` / `EXEMPT_ADMIN` 不是权限码而是**标记**（见 route_perms.py）。
+    #: 前者 = 本人操作（改自己密码/配置），后者 = 影响全站但无对应码（端点内判 admin）。
+    #: 判定时排除它们，但**仍要求它们出现在映射里** —— 「豁免」必须显式写出来，
+    #: 不能靠「忘了挂码」。这正是本守卫存在的目的。
+    _MARKERS = {"EXEMPT_SELF", "EXEMPT_ADMIN"}
+    from backend.app.core.route_perms import READONLY_ROUTES
+
+    registered = (
+        {c for c in ROUTE_PERMS.values() if c not in _MARKERS}
+        | set(READONLY_PAGE_GUARDS.values())
+        | set(READONLY_ROUTES.values())
+    )
     unknown = sorted(code for code in registered if code not in ALL_PERMS)
     if unknown:
         problems.append(f"[未登记的码] {unknown} —— 写错字母或漏进 perms_registry")
 
-    seen_paths: set[str] = set()
+    #: ⚠️ `ROUTE_PERMS` 的键是 **`METHOD path`** 而不是裸 path（2026-10-24）：
+    #: 同一 path 上可以有多个写方法（`POST /materials/files` 与
+    #: `DELETE /materials/files`），裸 path 做键会让后写的覆盖前一条，
+    #: 于是「一个方法挂了码、另一个没挂」这种情况**查不出来**。
+    seen_keys: set[str] = set()
     for method, path in _iter_operations(app):
-        seen_paths.add(path)
+        key = f"{method} {path}"
+        seen_keys.add(key)
         if method in WRITE_METHODS:
             if path in EXEMPT:
                 continue
-            if path not in ROUTE_PERMS:
+            if key not in ROUTE_PERMS:
                 problems.append(f"[漏挂码] {method} {path}")
+
+    #: 逐条登记的只读路由（`READONLY_ROUTES`）：**每条都必须真的挂上**。
+    #: 光登记不挂 = 数据能被看到但守卫说「已登记」—— 那是假守卫。
+    for key, code in READONLY_ROUTES.items():
+        method, path = key.split(" ", 1)
+        if key not in seen_keys:
+            problems.append(f"[只读路由不存在] {key} —— 端点被改名或删除后没同步守卫表")
+        elif ROUTE_PERMS.get(key) != code:
+            problems.append(f"[只读页缺码] {key} 应为 {code}，实际 {ROUTE_PERMS.get(key) or '未登记'}")
+        elif not _route_has_perm_dependency(app, path, method):
+            problems.append(f"[只读页只登记未挂码] {key} —— ROUTE_PERMS 有、路由上没有 Depends(require_perm)")
 
     for prefix, code in READONLY_PAGE_GUARDS.items():
         hit = False
@@ -79,17 +148,17 @@ def collect_violations(app: FastAPI) -> list[str]:
             if not path.startswith(prefix):
                 continue
             hit = True
-            if ROUTE_PERMS.get(path) != code:
-                problems.append(
-                    f"[只读页缺码] {method} {path} 应为 {code}，实际 {ROUTE_PERMS.get(path) or '未登记'}"
-                )
+            actual = ROUTE_PERMS.get(f"{method} {path}") or ROUTE_PERMS.get(path)
+            if actual != code:
+                problems.append(f"[只读页缺码] {method} {path} 应为 {code}，实际 {actual or '未登记'}")
         if not hit:
             problems.append(f"[只读页前缀不存在] {prefix} —— 端点被改名或删除后没同步守卫表")
 
-    stale = sorted(path for path in ROUTE_PERMS if path not in seen_paths)
+    stale = sorted(key for key in ROUTE_PERMS if key not in seen_keys)
     if stale:
         problems.append(f"[码指向不存在的路由] {stale}")
 
+    seen_paths = {k.split(" ", 1)[-1] for k in seen_keys}
     exempt_stale = sorted(path for path in EXEMPT if path not in seen_paths)
     if exempt_stale:
         problems.append(f"[豁免了不存在的路由] {exempt_stale}")

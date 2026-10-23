@@ -1,0 +1,89 @@
+# systemd 单元 —— 不用 Docker 时的裸机部署（v1.1.0 / 设计 52 §5）
+#
+# ## 装法
+#
+# ```bash
+# sudo cp deploy/spider-xhs.service /etc/systemd/system/
+# sudo systemctl daemon-reload
+# sudo systemctl enable --now spider-xhs
+# journalctl -u spider-xhs -f      # 看日志
+# ```
+#
+# ## 三条必须改的占位
+#
+# | 占位 | 说明 |
+# |---|---|
+# | `/opt/spider-xhs` | 代码目录（本项目**不建议**放家目录：服务账户读不到） |
+# | `User=spider` | 专用服务账户，**不要用 root**（上传的图片/导出文件会被 root 拥有） |
+# | `Environment=SECRET_KEY=...` | 从 `/etc/spider-xhs/env` 读（见下），不要写在这个文件里 |
+#
+# `/etc/spider-xhs/env`（`chmod 600`，属主 `root:spider`）：
+#
+# ```
+# SECRET_KEY=<python -c "import secrets;print(secrets.token_urlsafe(48))">
+# DATABASE_TYPE=postgres
+# DATABASE_POSTGRES_PASSWORD=<...>
+# ```
+#
+# ## 为什么 `Restart=always` + `RestartSec=5`
+#
+# 与本项目桌面态 launcher 同款：进程崩了 5 秒后自愈。但注意
+# **`StartLimitBurst`**：配置错（如 secret_key 仍是默认值）会让应用启动即退出，
+# 无限重启只会刷满日志 —— 给 5 次机会后停下，让 `systemctl status` 能看出「起不来」
+# 而不是「一直在重启」。
+
+[Unit]
+Description=Spider XHS (server mode)
+Documentation=https://gitee.com/Sir-yuChen/xhs
+After=network-online.target postgresql.service
+Wants=network-online.target
+#: PG 若是独立服务，等它就绪；用外部 PG 时这行无害（只是多等一秒）。
+#: 若 PG 在另一台机器上，把 postgresql.service 去掉。
+Requires=postgresql.service
+
+[Service]
+Type=simple
+User=spider
+Group=spider
+WorkingDirectory=/opt/spider-xhs
+
+#: 环境变量单独放文件（密钥不进单元文件，避免 `systemctl cat` 泄漏）
+EnvironmentFile=/etc/spider-xhs/env
+Environment=CONFIG_FILE=/opt/spider-xhs/config/default.yaml
+Environment=TZ=Asia/Shanghai
+Environment=PYTHONUNBUFFERED=1
+
+#: ⚠️ **不要**用 `main.py --with-frontend`（那是一次性阻塞、无监督循环的形态，
+#: 父进程一退 uvicorn 就变孤儿）。服务器态直接跑 uvicorn；
+#: 前端产物由 nginx 直出（见 deploy/nginx.conf）。
+ExecStart=/opt/spider-xhs/.venv/bin/python -m uvicorn backend.app.main:app \
+    --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips='*'
+
+Restart=always
+RestartSec=5
+#: 5 次内起不来就别无限重试了 —— 让状态里留下「failed」而不是刷日志
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+#: 优雅停止：给在跑的同步 / 发布任务 30 秒收尾（它们会在 finally 里复位中断行）
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+#: ── 安全加固（最小权限）─────────────────────────────────────────
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+#: 唯一需要写的地方：data（DB 不用，它在 PG 里；这里放媒体 / 导出 / 依赖）
+ReadWritePaths=/opt/spider-xhs/data
+
+#: ── 资源上限（按机器调整）───────────────────────────────────────
+#: 商品同步并发 3 + 图片 OCR 8 线程，内存峰值实测约 3G；
+#: 给 4G 上限，让 OOM 时是「这个服务被杀」而不是「整机失联」。
+MemoryMax=4G
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
