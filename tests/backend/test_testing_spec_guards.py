@@ -421,9 +421,12 @@ def test_acceptance_link_manual_is_self_consistent():
         ("readme_unregistered", "README"),
         ("agents_unregistered", "AGENTS"),
         ("chain_number_gap", "编号不连续"),
+        #: ⚠️ 期望值必须是**守卫真实输出的子串**（2026-10-23 按实际输出订正）：
+        #: 复制功能点标题 ⇒ 守卫报「不是 1:1」+**编号重复挂载**，
+        #: **不报「覆盖列」**（同编号的点不算 extra）—— 旧期望值是猜的，属哑弹。
         ("drop_functional_point", "覆盖列声明的功能点缺失"),
         ("drop_point_marker", "不是 1:1"),
-        ("duplicate_functional_point", "覆盖列"),
+        ("duplicate_functional_point", "编号重复挂载"),
     ],
 )
 def test_acceptance_link_guard_is_load_bearing(mutate: str, expected: str):
@@ -551,3 +554,38 @@ def test_every_test_file_declares_a_layer_marker():
         "新文件请运行 `python .hermes/scripts/classify_tests.py` 机械打标。"
     )
     assert not unknown, f"以下文件的分层标记不在允许集合 {sorted(allowed)} 内：{unknown}"
+
+
+def test_no_test_file_is_collected_as_zero_tests():
+    """test_*.py 里**必须**有可被 pytest 收集的用例（2026-10-23 立）。
+
+    起因：`test_pc_qrcode_device_state.py` 曾是 `main()` + `__main__` 形态的独立脚本，
+    133 行、完整断言，但 **pytest 一条都收集不到** ⇒ 全量回归里它从未执行过。
+    这类「写了但没跑」的死测试比没有测试更糟：文档里会把它算成「已覆盖」，
+    而它守护的缺陷（ISS-002 / DEF-025）实际上没有任何回归保护。
+
+    判据：文件里至少有一个 `def test_*`（模块级或类内），且不被整文件 skip。
+    """
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent
+    offenders: list[str] = []
+
+    for path in sorted(root.glob("test_*.py")):
+        text = path.read_text(encoding="utf-8")
+        tree = ast.parse(text)
+        has_test = False
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith(
+                "test_"
+            ):
+                has_test = True
+                break
+        if not has_test:
+            offenders.append(path.name)
+
+    assert not offenders, (
+        f"以下测试文件里没有任何 `def test_*`，pytest 收集不到 ⇒ 等于没测：{offenders}\n"
+        "若是独立验证脚本，请改成 pytest 用例；若是历史一次性脚本，删掉。"
+    )

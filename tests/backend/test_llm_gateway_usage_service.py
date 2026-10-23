@@ -620,21 +620,7 @@ def test_record_usage_does_not_retry_non_lock_errors(monkeypatch):
     assert attempts["n"] == 1, "非锁类错误必须一次即止（不得空转重试）"
 
 
-@pytest.mark.parametrize(
-    "message, expected",
-    [
-        ("database is locked", True),
-        ("sqlite3.OperationalError: database is locked", True),
-        ("no such table: foo", False),
-        ("UNIQUE constraint failed: x.y", False),
-        ("disk I/O error", False),
-    ],
-)
-def test_is_lock_error_only_matches_lock_contention(message, expected):
-    """判据必须**只认锁竞争**：把 `no such table` 也当锁 ⇒ 确定性错误被无谓重试。"""
-    assert sqlite_retry.is_lock_error(_operational_error(message)) is expected
-
-
-def test_is_lock_error_rejects_non_operational_errors():
-    """非 SQLAlchemy 异常一律不重试（例如业务层 ValueError）。"""
-    assert sqlite_retry.is_lock_error(ValueError("database is locked")) is False
+#: ⚠️ `is_lock_error()` 的判据本身在 `test_sqlite_retry.py` 里有**完整且带变异守护**的覆盖
+#: （`test_is_lock_error_only_matches_lock_contention` / `_rejects_non_operational_errors`）。
+#: 这里曾有一份逐字重复的副本（2026-10-23 清理删除）—— 同一个纯函数两处断言，
+#: 改实现时要改两遍，漏一处就得到「一处红一处绿」的假象。
