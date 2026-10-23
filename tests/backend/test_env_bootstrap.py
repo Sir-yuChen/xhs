@@ -295,3 +295,52 @@ def test_refresh_button_uses_shared_wait_mask_and_reports_result():
     #: ④ 刷新走独立函数（不是裸 refresh）
     assert "const manualRefresh = useCallback(" in src
     assert "onClick={() => void manualRefresh()}" in src, "按钮仍直接调 refresh（无反馈）"
+
+
+def test_packaging_excludes_downloadable_resources():
+    """打包**不再包含** node.exe 与 OCR 模型（用户口径 2026-10-23 减体积）。
+
+    ⚠️ 这两项一旦被重新打进包，安装包会涨 110+ MB，且与「首次启动下载」形成
+    两份真相源（本地下载的版本和包内的版本可能不一致）。
+
+    同时**必须保留** `node_modules/crypto-js` —— 它是签名脚本的依赖，不是运行时，
+    且只有几百 KB；少了它 node 起来也算不了签名。
+    """
+    import pathlib as _p
+
+    spec = _p.Path("packaging/SpiderXHS.spec").read_text(encoding="utf-8")
+    #: ① spec 里跳过 .onnx
+    assert "_MODEL_EXT = \".onnx\"" in spec, "spec 没有定义要跳过的模型后缀"
+    assert "if name.endswith(_MODEL_EXT):" in spec, "spec 没在收集时跳过 .onnx"
+
+    #: ⓪ spec 里**不许再收 ffmpeg** —— full build 的 ffmpeg+ffprobe 各 222 MB，
+    #: 收进去装包会从 126 MB 涨到 400+ MB，与减体积口径直接冲突（2026-10-23 实测踩到：
+    #: 打包日志出现「[spec] 收 ffmpeg: ...ffmpeg-9.0.1-full_build...」）。
+    assert "datas.extend(_ffmpeg_data())" not in spec, (
+        "spec 又在把 ffmpeg 打进包（444 MB），与「首次启动下载」冲突"
+    )
+    assert "def _ffmpeg_data():" not in spec, "spec 里还留着 _ffmpeg_data 函数"
+
+    build = _p.Path("packaging/build.ps1").read_text(encoding="utf-8-sig")
+    #: ② build.ps1 不再复制 node.exe（注释里说明「不再进包」）
+    assert "# ⚠️ **node.exe 不再进包**" in build or "node.exe 不再进包" in build, (
+        "build.ps1 没有标注 node.exe 外置"
+    )
+    #: 断言真的没有 Copy-Item $NodeExe $BundleNode
+    assert "Copy-Item $NodeExe $BundleNode -Force" not in build, (
+        "build.ps1 仍在把 node.exe 复制进包（83 MB 又回来了）"
+    )
+    #: ③ node_modules 仍要进包
+    assert 'Copy-Item (Join-Path $NodeRuntimeDir "node_modules")' in build, (
+        "node_modules 没进包 —— 签名 JS 的 crypto-js 依赖会缺"
+    )
+
+    smoke = _p.Path("packaging/smoke-test.ps1").read_text(encoding="utf-8-sig")
+    #: ④ 冒烟不再断言包内有 node.exe，但要有 crypto-js
+    assert '"runtime\node\node.exe"' not in smoke, (
+        "冒烟仍在断言包内有 node.exe（已外置，必然失败）"
+    )
+    assert '"node_modules\crypto-js"' in smoke, "冒烟没校验 crypto-js 在包内"
+    assert "(Get-Command node -ErrorAction SilentlyContinue).Source" in smoke, (
+        "冒烟没改用系统 node 验证签名解析路径"
+    )

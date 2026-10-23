@@ -46,7 +46,7 @@ if ($proc.ExitCode -ne 0) { Fail "安装器退出码 $($proc.ExitCode)，见 $in
 # --- 2. 文件齐全性 -----------------------------------------------------------
 Write-Step "校验安装产物"
 foreach ($rel in @(
-    "SpiderXHS.exe", "_internal", "runtime\node\node.exe",
+    "SpiderXHS.exe", "_internal", "node_modules\crypto-js",
     "frontend\dist\index.html", "config\default.yaml",
     # 应用初始化数据（设计 15 §4.5 / 设计 10 §7.3）：缺了 = 装完任务中心 / 设置页是空的
     "config\initial_data\scheduled_jobs.json",
@@ -56,7 +56,7 @@ foreach ($rel in @(
     $p = Join-Path $InstallDir $rel
     if (-not (Test-Path $p)) { Fail "缺少 $rel" }
 }
-Write-Host "  文件齐全（exe / _internal / runtime/node / frontend/dist / config / initial_data）"
+Write-Host "  文件齐全（exe / _internal / node_modules/crypto-js / frontend/dist / config / initial_data）"
 
 # 测试代码不得进包（2026-09-24 用户口径）
 foreach ($rel in @("_internal\tests", "_internal\pytest", "_internal\_pytest")) {
@@ -305,7 +305,10 @@ Start-Sleep -Seconds 2
 
 # --- 6. bundled node 本地签名栈 ----------------------------------------------
 Write-Step "bundled node 本地签名栈自检"
-$nodeExe = Join-Path $InstallDir "runtime\node\node.exe"
+# node.exe 已外置（首次启动下载到 deps/node/）=> 用系统 node 验证解析路径；
+# 装包版运行时用用户下载的那份，模块解析规则与系统 node 同构。
+$nodeExe = (Get-Command node -ErrorAction SilentlyContinue).Source
+if (-not $nodeExe) { Fail "构建机没有 node，无法验证 crypto-js 解析" }
 $signJs = Join-Path $InstallDir "_internal\xhs_utils\xhs_core\js\sign.js"
 $sigJs = Join-Path $InstallDir "_internal\xhs_utils\xhs_creator\js\xhs_creator_signature.js"
 if (-not (Test-Path $signJs)) { Fail "签名 JS 未打包：$signJs" }

@@ -135,22 +135,19 @@ datas.extend(_rapidocr_data())
 #:   必须 `os.path.realpath` 解到实体，否则 PyInstaller 收进去的是个 0 字节链接）。
 #: 目标目录 `bin/` —— `image_ocr_service._bundled_bin_dir()` 在 frozen 下按
 #:   `sys._MEIPASS/bin` 找，与这里一致。
-def _ffmpeg_data():
-    import shutil as _shutil
-
-    out = []
-    for _name in ("ffmpeg", "ffprobe"):
-        _found = _shutil.which(_name)
-        if not _found:
-            print(f"[spec][WARN] PATH 里找不到 {_name} —— 装包版视频抽帧会失败（视频默认不勾选）")
-            continue
-        _real = os.path.realpath(_found)
-        out.append((_real, "bin"))
-        print(f"[spec] 收 {_name}: {_real}")
-    return out
-
-
-datas.extend(_ffmpeg_data())
+#: ⚠️⚠️ **ffmpeg 不进包**（2026-10-23 用户口径：能下载的三方依赖改为首次启动下载）。
+#:
+#: 曾经这里有一段 `_ffmpeg_data()` 把构建机 PATH 里的 ffmpeg/ffprobe 收进 `bin/`，
+#: 那是「先让装包版能用视频抽帧」的临时做法。实测 full build 的
+#: **ffmpeg.exe 222 MB + ffprobe.exe 222 MB = 444 MB** —— 装包会从 126 MB 涨到 400+ MB，
+#: 与「减小安装包体积」的口径直接冲突。
+#:
+#: 现行做法：`env_bootstrap_service` 在首次启动时从 npmmirror 下载
+#: 静态构建（约 28 MB）到 `deps/ffmpeg/`，`image_ocr_service._bundled_bin_dir()`
+#: 优先读那里。ffprobe 缺失时 `probe_duration` 回落估算，不影响抽帧。
+#:
+#: ⇒ 这段**刻意留空**而不是删掉整段：留着注释是为了让「这里曾有个函数、为什么没了」
+#:   可追溯（同 `precheck-zones.ts` 里被删的默认映射函数的处理方式）。
 
 #: ⚠️ **第三方包的数据文件也要收**（模块在 ≠ 数据在）：
 #:   · openpyxl：模板/样式等随包数据（缺了读某些 xlsx 会莫名失败）

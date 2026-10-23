@@ -1,4 +1,4 @@
-# UTF-8
+﻿# UTF-8
 # 由 packaging/build.ps1 生成，请勿手改。
 VSVersionInfo(
   ffi=FixedFileInfo(
