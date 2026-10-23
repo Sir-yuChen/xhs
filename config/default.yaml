@@ -31,10 +31,17 @@ server:
   cors_origins: "http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173"
 
 database:
-  # "sqlite" for local development, "mysql" for production
-  type: "sqlite"
-  # SQLite database path (relative to project root)
+  # "sqlite" = 单机/离线/测试形态；"postgres" = 正式主库形态（2026-10-23 起）
+  # 用户口径：「切换到本地 pg 数据库」+「以 pg 为主，sqlite 为辅」
+  type: "postgres"
+  # SQLite database path (relative to project root) —— 仅 type=sqlite 时使用
   sqlite_path: "./data/spider_xhs.db"
+  # PostgreSQL（本地实例：D:\work\PostgreSQL，密码与 dataPanel 共用）
+  postgres_host: "127.0.0.1"
+  postgres_port: 5432
+  postgres_user: "postgres"
+  postgres_password: "123456"
+  postgres_database: "spider_xhs"
   # MySQL connection settings (used when type=mysql)
   mysql_host: "localhost"
   mysql_port: 3306
@@ -98,8 +105,11 @@ xhs:
 frontend:
   # Set to true to serve pre-built frontend from backend (Docker/production)
   serve_static: false
-  # Path to the built frontend assets
-  build_dir: "./frontend/dist"
+  # Path to the built frontend assets.
+  # ⚠️ 留空 = 由 `backend/app/core/paths.frontend_dist()` 兜底（按**文件位置**推目录，
+  #    与 CWD 无关 —— 设计 53 的 A2）。写相对路径时**按仓库根解析**，不再按 CWD：
+  #    systemd / Docker / 换目录起 uvicorn 的 CWD 各不相同，相对 CWD 会让整个前端 404。
+  build_dir: ""
 
 # 系统更新（设计 36，2026-10-13 用户口径「更新地址为当前项目的远程仓库」）。
 # ⚠️ **两项都留空时更新检查静默跳过**（不打扰用户）：仓库私有时不放令牌进包（= 泄露）。

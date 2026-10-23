@@ -18,6 +18,10 @@ except ImportError:  # pragma: no cover - handled by dependency installation
 
 _HAS_PYDANTIC_SETTINGS = PydanticBaseSettingsSource is not None
 
+#: `secret_key` 的**出厂默认值** —— 唯一常量（启动自检与字段默认值同源，
+#: 两处各写一遍字符串，将来改了一处就有一个守卫失效）。见 `assert_production_ready`。
+DEFAULT_SECRET_KEY = "dev-only-change-me"
+
 
 def _load_yaml_config() -> Dict[str, Any]:
     """Load YAML configuration files and flatten into env-var-style keys.
@@ -49,6 +53,12 @@ def _load_yaml_config() -> Dict[str, Any]:
         "database.mysql_user": "database_mysql_user",
         "database.mysql_password": "database_mysql_password",
         "database.mysql_database": "database_mysql_database",
+        #: PostgreSQL 主库（2026-10-23，设计 51/58）
+        "database.postgres_host": "database_postgres_host",
+        "database.postgres_port": "database_postgres_port",
+        "database.postgres_user": "database_postgres_user",
+        "database.postgres_password": "database_postgres_password",
+        "database.postgres_database": "database_postgres_database",
         "security.secret_key": "secret_key",
         "security.fernet_key": "fernet_key",
         "scheduler.enabled": "scheduler_enabled",
@@ -147,9 +157,17 @@ class Settings(BaseSettings):
     database_mysql_user: str = "spider_xhs"
     database_mysql_password: str = "change_me"
     database_mysql_database: str = "spider_xhs"
+    #: PostgreSQL（**生产主库形态**，设计 51/58）。本机实例见 `D:\work\PostgreSQL`，
+    #: 密码与 dataPanel 共用（`dataPanel/backendServer/config.yaml` 为准）。
+    #: `sqlite` = 单机/离线/测试形态，`postgres` = 正式部署形态。
+    database_postgres_host: str = "127.0.0.1"
+    database_postgres_port: int = 5432
+    database_postgres_user: str = "postgres"
+    database_postgres_password: str = "123456"
+    database_postgres_database: str = "spider_xhs"
 
     # Security
-    secret_key: str = "dev-only-change-me"
+    secret_key: str = DEFAULT_SECRET_KEY
     fernet_key: str = ""
 
     # Server
@@ -245,7 +263,11 @@ class Settings(BaseSettings):
 
     # Frontend static serving
     frontend_serve_static: bool = False
-    frontend_build_dir: str = "./frontend/dist"
+    #: 前端构建产物目录。**空串 = 由 `core/paths.frontend_dist()` 兜底**（设计 53 的 A2）：
+    #: 原来默认 `"./frontend/dist"` 是相对 CWD 的，systemd / Docker / 换目录起 uvicorn
+    #: 任一处 CWD 不同 ⇒ 整个前端 404。留空让路径按**文件位置**推出仓库根。
+    #: 部署时若把 dist 放到别处（如 `/srv/spider-xhs/web`），在这里写绝对路径即可。
+    frontend_build_dir: str = ""
 
     if hasattr(BaseSettings, "model_config"):
         model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
@@ -288,6 +310,15 @@ class Settings(BaseSettings):
                     f"@{self.database_mysql_host}:{self.database_mysql_port}/{self.database_mysql_database}"
                     "?charset=utf8mb4",
                 )
+            elif self.database_type == "postgres":
+                #: PostgreSQL 主库（设计 51/58）。驱动用 **psycopg3**
+                #: （`psycopg[binary]`，有 Windows 预编译 wheel，免本地编译）。
+                object.__setattr__(
+                    self,
+                    "database_url",
+                    f"postgresql+psycopg://{self.database_postgres_user}:{self.database_postgres_password}"
+                    f"@{self.database_postgres_host}:{self.database_postgres_port}/{self.database_postgres_database}",
+                )
             else:
                 # Backward compatibility: if the old default DB path exists but the
                 # new YAML-configured path does not, use the old path so existing
@@ -307,7 +338,53 @@ class Settings(BaseSettings):
 
     @property
     def storage_dir(self) -> Path:
-        return Path("backend/app/storage")
+        """媒体 / 导出 / 暂存的根目录 —— **绝对路径**（修设计 53 的 A2）。
+
+        委托 :func:`backend.app.core.paths.storage_dir`（按文件位置推仓库根），
+        不再写死相对 CWD 的 `"backend/app/storage"`。11 个消费方一行都不用改
+        （S4 再把它们逐个改成直接调 `paths.storage_dir()`，那时本属性退为别名）。
+        """
+        from backend.app.core.paths import storage_dir as _storage_dir
+
+        return _storage_dir()
+
+    @property
+    def frontend_build_dir_resolved(self) -> Path:
+        """`frontend_build_dir` 的绝对形态：空 ⇒ `paths.frontend_dist()`。
+
+        绝对路径原样尊重（部署时指向 `/srv/spider-xhs/web` 是正常用法）；
+        相对路径按仓库根解析（**不按 CWD**）—— 这是 A2 的判据。
+        """
+        from backend.app.core.paths import frontend_dist, resolve_from_root
+
+        if not self.frontend_build_dir.strip():
+            return frontend_dist()
+        return resolve_from_root(self.frontend_build_dir)
+
+    def assert_production_ready(self) -> None:
+        """启动安全自检（设计 53 的 C1）—— **不满足就拒绝启动**。
+
+        判据只有一条，但它是真事故：非 SQLite（= 服务器可能对外）时
+        `secret_key` 仍是随仓库发布的默认值 `dev-only-change-me` ⇒
+        **任何人都能伪造任意用户的 JWT，包括 admin**。
+
+        为什么只在非 SQLite 才拦：桌面端（SQLite）跑在用户自己的机器上、
+        只监听本机，拦了会让所有**已有安装**升级后起不来 —— 那是把安全问题
+        换成可用性事故。`database_type != sqlite` 是本项目已有的「服务器化」信号。
+
+        抛 `RuntimeError` 而不是 warning：warning 在 systemd / Docker 的日志里
+        没人看，而伪造 JWT 是不可事后发现的那种事故。
+        """
+        from backend.app.core.db_dialect import is_sqlite
+
+        if is_sqlite(self.database_url):
+            return
+        if self.secret_key.strip() == DEFAULT_SECRET_KEY:
+            raise RuntimeError(
+                "拒绝启动：数据库不是 SQLite（服务器部署形态）时 secret_key 必须改掉，"
+                f"当前仍是默认值 {DEFAULT_SECRET_KEY!r} —— 任何人都能用它伪造任意用户的令牌。"
+                "请设置环境变量 SECRET_KEY（或 config/default.yaml 的 security.secret_key）。"
+            )
 
 
 @lru_cache

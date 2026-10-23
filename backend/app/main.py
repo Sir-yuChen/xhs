@@ -89,6 +89,10 @@ def _data_dir_for_lease(settings) -> Path:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 安全自检（设计 53 的 C1，S0）：服务器形态（非 SQLite）下 `secret_key`
+    # 仍是出厂默认值 ⇒ **拒绝启动**。放在最前面 —— 后面每件事都会写库 / 起线程，
+    # 「先干活再报错」等于让一个可伪造 JWT 的进程先对外服务了几秒。
+    get_settings().assert_production_ready()
     # 启动自检（DEF-028）：Node 签名运行时缺失时**全系统的平台调用都会失败**，
     # 而失败形态是每个请求各报一次看不懂的错。这里一次性说清（只 WARN 不阻断 ——
     # 看本地已同步数据不需要签名）。
@@ -270,7 +274,10 @@ def create_app() -> FastAPI:
 
     # Serve pre-built frontend in production / Docker
     if settings.frontend_serve_static:
-        frontend_dist = Path(settings.frontend_build_dir)
+        # `frontend_build_dir` 空 ⇒ 由 `core/paths.frontend_dist()` 兜底（设计 53 A2）：
+        # 原来直接 `Path(settings.frontend_build_dir)` 是**相对 CWD** 的，
+        # systemd / Docker / 换目录起 uvicorn 任一处 ⇒ 整个前端 404。
+        frontend_dist = settings.frontend_build_dir_resolved
         if frontend_dist.is_dir():
             from starlette.responses import FileResponse
 

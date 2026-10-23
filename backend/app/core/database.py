@@ -5,6 +5,7 @@ import os
 from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
+from backend.app.core import db_dialect
 from backend.app.core.config import get_settings
 
 
@@ -41,20 +42,42 @@ settings = get_settings()
 # `VACUUM INTO`。项目「迁移前先备份」纪律已按此更新。
 # ---------------------------------------------------------------------------
 _connect_args: dict[str, object] = {}
-if settings.database_url.startswith("sqlite"):
+#: 方言判定**只走 `db_dialect`**（设计 51）：原来这里 4 处各写一遍
+#: `settings.database_url.startswith("sqlite")`，换 PG 时漏改一处，那一段就静默失效。
+_IS_SQLITE = db_dialect.is_sqlite(settings.database_url)
+if _IS_SQLITE:
     _connect_args["check_same_thread"] = False
     import os
     db_path = settings.database_url.replace("sqlite:///", "")
     os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
 
-engine = create_engine(settings.database_url, connect_args=_connect_args)
+#: PostgreSQL 连接池（设计 53 A3，2026-10-23 切主库后必须配置）。
+#:
+#: 三个参数都不是「调优」，是**正确性**：
+#: * `pool_pre_ping=True` —— PG 重启 / 网络闪断后池里的死连接会被取出来用，
+#:   不探活就是 `server closed the connection unexpectedly`（SQLite 下不会发生，
+#:   因为文件连接不存在「远端断开」）。
+#: * `pool_recycle=1800` —— 避开 PG 侧 idle 超时与防火墙断连。30 分钟回收一次。
+#: * `pool_size` / `max_overflow` —— 与 PG `max_connections`（本机实测 **100**）对账：
+#:   10 + 20 = 30 上限，为调度器 / worker 线程池留足余量。
+_PG_POOL: dict[str, object] = {}
+if db_dialect.is_postgres(settings.database_url):
+    _PG_POOL = {
+        "pool_size": 10,
+        "max_overflow": 20,
+        "pool_pre_ping": True,
+        "pool_recycle": 1800,
+        "pool_timeout": 30,
+    }
+
+engine = create_engine(settings.database_url, connect_args=_connect_args, **_PG_POOL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
 @event.listens_for(engine, "connect")
 def _configure_sqlite_connection(dbapi_connection, connection_record) -> None:
     """每个连接上线时的**逐连接** PRAGMA（都不需要拿锁，可安全重复执行）。"""
-    if not settings.database_url.startswith("sqlite"):
+    if not _IS_SQLITE:
         return
 
     cursor = dbapi_connection.cursor()
@@ -100,7 +123,7 @@ def _enable_wal(bind=engine) -> None:
     只在 `init_db()`（启动期、单线程）调用：切模式需要短暂排他锁，
     放在连接上线路径上做，可能撞上并发事务而失败。
     """
-    if not settings.database_url.startswith("sqlite"):
+    if not db_dialect.is_sqlite(settings.database_url):
         return
     with bind.begin() as connection:
         connection.execute(text("PRAGMA journal_mode=WAL"))
@@ -181,7 +204,7 @@ def _normalize_model_config_names(bind) -> None:
 
 
 def _normalize_sqlite_datetime_storage(bind) -> None:
-    if not settings.database_url.startswith("sqlite"):
+    if not db_dialect.is_sqlite(settings.database_url):
         return
 
     datetime_columns = {
