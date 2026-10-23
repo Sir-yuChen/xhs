@@ -1490,7 +1490,7 @@ class XHS_Qianfan_Apis:
 
         try:
             proc = subprocess.run(
-                ["node", "sign.js", "@" + os.path.basename(sign_input)],
+                [_node_exe(), "sign.js", "@" + os.path.basename(sign_input)],
                 capture_output=True,
                 text=True,
                 timeout=60,
@@ -2425,3 +2425,33 @@ __all__ = [
     "AIGC_TASK_STATUS_RUNNING",
     "AIGC_TASK_STATUS_COMPLETED",
 ]
+
+
+
+def _node_exe() -> str:
+    """定位 node 可执行文件：**下载目录 → 包内 → PATH**（2026-10-23）。
+
+    用户口径「用户安装时自动下载，减少打包后的体积」⇒ `node.exe`（83 MB）
+    改为初始化环境时下载到 `deps/node/`。
+
+    但**开发机**上一直是 PATH 里的 node（原先直接调 `["node", ...]`），
+    所以必须保留 PATH 回落 —— 否则改完之后本地签名会全挂。
+    """
+    import sys
+
+    try:
+        from backend.app.services.env_bootstrap_service import deps_root
+
+        exe = deps_root() / "node" / ("node.exe" if os.name == "nt" else "node")
+        if exe.is_file():
+            return str(exe)
+    except Exception:  # noqa: BLE001 - 依赖服务不可用则回落 PATH
+        pass
+
+    if getattr(sys, "frozen", False):
+        base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+        for cand in (base / "runtime" / "node", base.parent / "runtime" / "node"):
+            exe = cand / "node.exe"
+            if exe.is_file():
+                return str(exe)
+    return "node"

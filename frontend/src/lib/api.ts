@@ -5687,3 +5687,79 @@ export async function fetchViolationExemptionItems(
   );
   return response.data;
 }
+
+/* ---------------------------------------------------------------------------
+ * 初始化环境依赖（设计 24 §27；用户口径 2026-10-23）
+ *
+ * 背景：1.0.5 装包版缺 ffmpeg ⇒ 视频抽帧失败 ⇒ 视频被过滤掉 ⇒ 用户勾了也传不上去。
+ * 修法：node / OCR 模型 / ffmpeg 改为**首次启动下载**（约 119 MB 从安装包里移出）。
+ * ------------------------------------------------------------------------- */
+
+/** 一个依赖的当前状态。 */
+export type DepItem = {
+  key: string;
+  name: string;
+  size_hint: string;
+  detail: string;
+  dir: string;
+  /** 本地**可用**（不只是「文件在」—— 半截文件判为不可用）。 */
+  ready: boolean;
+  status: "ready" | "missing";
+  error: string;
+  /** 失败后可点「清空本地重新下载」。 */
+  resettable: boolean;
+  /** 必装项（下不成功软件不可用）。 */
+  required: boolean;
+};
+
+/** 单个依赖的下载进度。 */
+export type DepProgress = {
+  key: string;
+  status: "idle" | "running" | "done" | "failed";
+  percent: number;
+  error: string;
+};
+
+export type DepsStatus = {
+  items: DepItem[];
+  missing: string[];
+  required_missing: string[];
+  ready: boolean;
+  root: string;
+  /** 哪些是编译进程序、不可下载的（OpenCV / onnxruntime / numpy）。 */
+  bundled_note: string;
+};
+
+/** 依赖状态 + 进度（**只探测，不下载**）。 */
+export async function fetchDepsStatus(): Promise<{
+  progress: Record<string, DepProgress>;
+  deps: DepsStatus;
+}> {
+  const response = await http.get<{
+    progress: Record<string, DepProgress>;
+    deps: DepsStatus;
+  }>("/system/deps/progress");
+  return response.data;
+}
+
+/** 开始下载一个依赖（**异步**，进度走 `fetchDepsStatus` 轮询）。 */
+export async function startDepDownload(
+  key: string
+): Promise<{ ok: boolean; key: string; already_running?: boolean }> {
+  const response = await http.post<{ ok: boolean; key: string; already_running?: boolean }>(
+    "/system/deps/download",
+    { key }
+  );
+  return response.data;
+}
+
+/** **清空本地**该依赖（删目录），用于「下载失败 → 清空重新下载」。 */
+export async function resetDep(
+  key: string
+): Promise<{ ok: boolean; key: string; removed: boolean; dir: string }> {
+  const response = await http.post<{ ok: boolean; key: string; removed: boolean; dir: string }>(
+    "/system/deps/reset",
+    { key }
+  );
+  return response.data;
+}

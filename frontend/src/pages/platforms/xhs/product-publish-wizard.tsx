@@ -717,11 +717,6 @@ export function ProductPublishWizard({
     return zoneNamesOf(precheck?.media ?? []).map((name) => ({ name, kind: "other" as const }));
   }, [precheck]);
 
-  /** 某区域下的媒体数（区域映射下拉里显示「区域名（N）」。 */
-  const zoneCount = useCallback(
-    (name: string) => mediaOfZone(precheck?.media ?? [], name).length,
-    [precheck],
-  );
 
   /** 加载完数据包 ⇒ 按区域类别给一版**默认映射**（用户可改；必填位为空则进不去）。 */
 
@@ -1052,6 +1047,35 @@ export function ProductPublishWizard({
       passedMedia.filter((m) => checked[`${m.group}/${m.rel_path}`]),
     [passedMedia, checked],
   );
+
+  /** 某区域下**已勾选**的媒体数（区域映射下拉里显示「区域名（N）」）。
+   *
+   *  ⚠️⚠️ 用户口径 2026-10-23：「下拉框选择的统计的数值**应是被勾选选中的数值**」。
+   *
+   *  旧实现统计的是**该区域全部媒体**（`mediaOfZone(...).length`）⇒ 下拉里
+   *  「SKU图（52）」而实际只勾了 50 张，用户按这个数做决策会被误导。
+   *  现在就统计 `selectedMedia`（= 预检通过 + 第一步勾选）里落在该区域的条目数，
+   *  与「进入第二步后真正会上传的媒体」**同一个集合**。
+   */
+  const zoneCount = useCallback(
+    (name: string) =>
+      selectedMedia.filter((m) => m.group === name).length,
+    [selectedMedia],
+  );
+
+  /** 区域映射下拉的**候选区域 = 只保留「有已勾选媒体」的区域**。
+   *
+   *  ⚠️ 用户口径 2026-10-23：「如果一个区域下**没有被勾选的媒体资源**，那么在
+   *  指定媒体资源区域下拉框中**就不应该展示**」。
+   *
+   *  旧实现把数据包里所有区域都列出来（哪怕 0 张勾选）⇒ 用户能选到一个空区域，
+   *  选完 `mediaByZones` 返回空数组 ⇒ 该发布位实际没有内容，却显示"已选"。
+   *  ⇒ 候选集直接取「已勾选媒体所在区域」，天然排除空区域，且顺序沿用数据包分区顺序。
+   */
+  const selectableZones = useMemo(() => {
+    const withChecked = new Set(selectedMedia.map((m) => m.group));
+    return mediaZones.filter((z) => withChecked.has(z.name));
+  }, [mediaZones, selectedMedia]);
 
   //: 第二步「商品图片」的候选 = **预检通过且被选中**、且落在**用户为该位选中的区域**里的媒体。
   //:
@@ -1852,7 +1876,28 @@ export function ProductPublishWizard({
           setStage(4, { status: "failed", detail: res?.reason ?? "视频上传失败（已用尽重试）" });
         }
       } else {
-        setStage(4, { status: "skipped", detail: "数据包内无商品视频" });
+        //: ⚠️⚠️ **三种原因必须分开报**（用户报障 2026-10-23：「勾选之后，使用自动上传
+        //: 但是还是提示数据包中没有视频」—— 数据包里明明有视频，只是**区域映射没选**）。
+        //:
+        //: 旧实现不管什么原因都写「数据包内无商品视频」⇒ 用户被引到完全错误的方向
+        //: （去数据包目录里翻视频文件），而真正要改的是**区域映射弹窗里「商品视频」那栏**。
+        //:
+        //: 判据顺序（从最外层原因往里）：
+        //:   ① `zoneMap.video` 为空 ⇒ 用户压根没指定视频区域（最常见，且文案必须点名）；
+        //:   ② 数据包里**勾选**的视频为 0 ⇒ 真是没视频（或没勾）；
+        //:   ③ 其余 ⇒ 兜底。
+        const checkedVideos = selectedMedia.filter(
+          (m) => m.kind === "video" || /\.(mp4|mov|m4v|webm)$/i.test(m.rel_path),
+        ).length;
+        const noVideoZone = (zoneMap.video?.length ?? 0) === 0;
+        setStage(4, {
+          status: "skipped",
+          detail: noVideoZone
+            ? checkedVideos > 0
+              ? `未指定「商品视频」区域（数据包内已勾选 ${checkedVideos} 个视频）—— 请在区域映射里选择`
+              : "未指定「商品视频」区域"
+            : "数据包内无已勾选的商品视频",
+        });
       }
 
       // 6) 导购短标题（⚠️ 入参是 title + categoryId —— 缺类目平台回空值）
@@ -2322,14 +2367,19 @@ export function ProductPublishWizard({
 
   /** 区域映射弹窗确认 ⇒ **真正**进第二步。 */
   const confirmZoneMap = useCallback(() => {
-    const errors = validateZoneMap(zoneMap);
+    //: ⚠️ 数据包里有**已勾选视频** ⇒ 「商品视频」区域转为必填（用户报障 2026-10-23）。
+    //: 否则勾了视频却没指定区域 ⇒ 视频永远不上传，且旧文案还误导成「数据包内没有视频」。
+    const hasCheckedVideo = selectedMedia.some(
+      (m) => m.kind === "video" || /\.(mp4|mov|m4v|webm)$/i.test(m.rel_path),
+    );
+    const errors = validateZoneMap(zoneMap, { hasVideo: hasCheckedVideo });
     if (errors.length > 0) {
       void message.warning(errors.join("；"));
       return;
     }
     setZoneMapOpen(false);
     setStep(1);
-  }, [message, zoneMap]);
+  }, [message, selectedMedia, zoneMap]);
 
   /** **保存草稿**（用户口径 2026-10-10：千帆发布页底部有「保存草稿」次按钮，
    *  与「提交商品」主按钮并列 —— 本弹窗补上，走后端 `create_draft` 只到草稿箱不上架）。
@@ -2647,8 +2697,10 @@ export function ProductPublishWizard({
       {/* **区域映射弹窗**（用户口径 2026-10-13）：进入第二步的**第二个关卡**。 */}
       <ZoneMapModal
         open={zoneMapOpen}
-        zones={mediaZones}
-        counts={Object.fromEntries(mediaZones.map((z) => [z.name, zoneCount(z.name)]))}
+        //: ⚠️ 只传**有已勾选媒体**的区域（用户口径 2026-10-23）——
+        //: 空区域不该出现在下拉里，否则能选到「选了但没内容」的区域。
+        zones={selectableZones}
+        counts={Object.fromEntries(selectableZones.map((z) => [z.name, zoneCount(z.name)]))}
         value={zoneMap}
         onChange={setZoneMap}
         onOk={confirmZoneMap}

@@ -391,7 +391,14 @@ def _run_precheck(
         item["hits"] = found["hits"]
         item["has_forbidden"] = bool(found["hits"])
         #: 视频才有这两个键 —— 图片保持 None（形状统一，前端不必判 undefined）。
-        if item["group"] == "video":
+        #: ⚠️⚠️ **判据必须是 `kind` / 后缀，不能是 `group`**（2026-10-23 实测踩到）：
+        #: `group` 现在是**真实目录名**（`主图视频` / `1比1主图` / `详情图` / `SKU图`），
+        #: 拿它跟字面量 `"video"` 比**恒不成立** ⇒ 视频的 `frame_count` / `frames`
+        #: 永远不回填（实测 `ocr_ok=true` 但 `frame_count=null`）。
+        #: 本文件上方 `_is_video()` 的注释已经警告过这个坑，这一行自己又犯了 ——
+        #: 所以这里直接复用 `_is_video(item)` 的同一套判据（`kind == "video"`
+        #: 或后缀 ∈ `VIDEO_EXTS`），不再手写第二份。
+        if item.get("kind") == "video" or Path(str(item.get("rel_path") or "")).suffix.lower() in VIDEO_EXTS:
             item["frame_count"] = found.get("frame_count")
             item["frames_failed"] = found.get("frames_failed")
             item["frames"] = found.get("frames") or []

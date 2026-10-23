@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from backend.app.api import accounts, ai, auth, auto_tasks, drafts, files, keyword_groups, llm_gateway, llm_gateway_monitor, llm_prompts, login_sessions, model_configs, notes, notifications, publish, schedule, settings as settings_api, system, tasks, topics
+from backend.app.api import accounts, ai, auth, auto_tasks, drafts, files, keyword_groups, llm_gateway, llm_gateway_monitor, llm_prompts, login_sessions, model_configs, notes, notifications, publish, schedule, settings as settings_api, system, system_deps, tasks, topics
 from backend.app.api.platforms import registry
 from backend.app.api.platforms.xhs import (
     analytics,
@@ -265,6 +265,8 @@ def create_app() -> FastAPI:
     app.include_router(settings_api.router, prefix="/api")
     # 系统更新（设计 36，2026-10-13）：版本查询 + 检查更新 + 下载 + 静默安装
     app.include_router(system.router, prefix="/api")
+    # 初始化环境依赖（设计 24 §27，2026-10-23）：状态 / 下载 / 清空重下 / 进度
+    app.include_router(system_deps.router, prefix="/api")
 
     # Serve pre-built frontend in production / Docker
     if settings.frontend_serve_static:

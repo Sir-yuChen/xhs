@@ -76,8 +76,19 @@ datas = [
 _OCR_PKG_NAME = "rapidocr"
 
 
+#: ⚠️⚠️ **onnx 模型不再进包**（用户口径 2026-10-23）：
+#:
+#: 「用户不安装 py 环境，只下载能下载的三方依赖，减少打包后的体积」。
+#: 三个模型实测 30.4 MB（`PP-OCRv6_rec_small` 20.3 + `det_small` 9.5 + `cls` 0.6），
+#: 改为**首次启动下载**到 `deps/ocr_models/`（见 `env_bootstrap_service`）。
+#:
+#: ⚠️ 只排除 `.onnx`，**rapidocr 的 python 代码与 yaml 配置仍然进包** ——
+#: 那是程序逻辑不是资源，外置会让「用户要装 py 环境」这个前提成立。
+_MODEL_EXT = ".onnx"
+
+
 def _rapidocr_data():
-    """把已安装的 `rapidocr` 整包收进 `_internal`（含 onnx 模型与 yaml 配置）。"""
+    """把已安装的 `rapidocr` 整包收进 `_internal`（**不含 onnx 模型**，见上方说明）。"""
     try:
         import importlib
 
@@ -88,6 +99,9 @@ def _rapidocr_data():
     out = []
     for root, _dirs, files in os.walk(pkg_dir):
         for name in files:
+            #: 模型外置（用户安装时下载）——只跳过 .onnx，代码与 yaml 照收
+            if name.endswith(_MODEL_EXT):
+                continue
             src = os.path.join(root, name)
             rel = os.path.relpath(src, pkg_dir)
             out.append(
@@ -102,6 +116,41 @@ def _rapidocr_data():
 
 
 datas.extend(_rapidocr_data())
+
+
+#: ⚠️⚠️ **ffmpeg / ffprobe 必须进包**（2026-10-23 实测踩到）：
+#:
+#: 现象：1.0.5 安装版「点击预检后视频**没有勾选**」+「勾选后自动上传仍提示
+#:   『数据包中没有视频』」，而开发机（源码 + 5173）完全正常。
+#:
+#: 根因：`image_ocr_service.scan_video()` 抽帧依赖 `shutil.which("ffmpeg")`。
+#:   开发机上 ffmpeg 装在 **PATH**（winget），抽帧成功 ⇒ `ocr_ok=True` ⇒ 默认勾选；
+#:   但**安装包进程不继承开发者的 PATH** ⇒ `which()` 返回 None
+#:   ⇒ `ocr_ok=None` + `unverified_reason="本机没有可用的 ffmpeg"`
+#:   ⇒ `passedMedia` 按 `ocr_ok === true` 过滤 ⇒ **视频被整个剔除**
+#:   ⇒ `videoPaths` 恒空 ⇒ 自动加载跳过视频、提交体不带 `videos[]`。
+#:   用户手动勾选也救不回来（勾选状态不参与 `passedMedia` 的过滤）。
+#:
+#: 做法：构建期从 PATH 找到真实文件（`which()` 给的是 WinGet 的 **符号链接**，
+#:   必须 `os.path.realpath` 解到实体，否则 PyInstaller 收进去的是个 0 字节链接）。
+#: 目标目录 `bin/` —— `image_ocr_service._bundled_bin_dir()` 在 frozen 下按
+#:   `sys._MEIPASS/bin` 找，与这里一致。
+def _ffmpeg_data():
+    import shutil as _shutil
+
+    out = []
+    for _name in ("ffmpeg", "ffprobe"):
+        _found = _shutil.which(_name)
+        if not _found:
+            print(f"[spec][WARN] PATH 里找不到 {_name} —— 装包版视频抽帧会失败（视频默认不勾选）")
+            continue
+        _real = os.path.realpath(_found)
+        out.append((_real, "bin"))
+        print(f"[spec] 收 {_name}: {_real}")
+    return out
+
+
+datas.extend(_ffmpeg_data())
 
 #: ⚠️ **第三方包的数据文件也要收**（模块在 ≠ 数据在）：
 #:   · openpyxl：模板/样式等随包数据（缺了读某些 xlsx 会莫名失败）

@@ -12343,3 +12343,104 @@ def test_spec_value_duplicates_are_rejected_at_every_entry():
     assert "if (clashes.length > 0) {" in c_seg and "return;" in c_seg, (
         "优化覆盖没有拦截重名 —— 会把两个值压成同名，价格库存行整体错位"
     )
+
+
+def test_zone_map_lists_only_checked_zones_with_checked_counts():
+    """区域映射下拉：**只列有勾选资源的区域**，**数字 = 已勾选数**（用户口径 2026-10-23）。
+
+    原文：「如果一个区域下**没有被勾选的媒体资源**，那么在指定媒体资源区域下拉框中
+    就**不应该展示**，且下拉框选择的统计的数值**应是被勾选选中的数值**」。
+
+    旧实现两个都不对：
+      · `zoneCount` = `mediaOfZone(precheck.media, name).length`（**该区域全部媒体**）
+        ⇒ 下拉显示「SKU图（52）」而实际只勾了 50 张，用户按这个数会被误导；
+      · `zones={mediaZones}`（**数据包里所有区域**）⇒ 能选到一个 0 张勾选的空区域，
+        选完 `mediaByZones` 返回空数组 ⇒ 该发布位"已选"但实际没有内容。
+    """
+    src = _code_only(
+        _read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx")
+    )
+
+    #: ① 计数 = 已勾选（基于 `selectedMedia`），不是区域全部媒体
+    assert "const zoneCount = useCallback(" in src, "缺 zoneCount"
+    i = src.index("const zoneCount = useCallback(")
+    seg = src[i : i + 400]
+    assert "selectedMedia.filter((m) => m.group === name).length" in seg, (
+        "zoneCount 没按「已勾选」统计（应基于 selectedMedia）"
+    )
+    assert "mediaOfZone(precheck?.media ?? [], name).length" not in seg, (
+        "zoneCount 仍在统计区域全部媒体 —— 下拉数字会与实际勾选数不符"
+    )
+
+    #: ② 候选区域 = 只含有已勾选媒体的区域
+    assert "const selectableZones = useMemo(" in src, "缺 selectableZones"
+    j = src.index("const selectableZones = useMemo(")
+    seg2 = src[j : j + 400]
+    assert "const withChecked = new Set(selectedMedia.map((m) => m.group));" in seg2, (
+        "selectableZones 没按「有已勾选媒体」过滤"
+    )
+    assert "return mediaZones.filter((z) => withChecked.has(z.name));" in seg2
+
+    #: ③ 弹窗必须收到过滤后的集合（不许再传全量 mediaZones）
+    assert "zones={selectableZones}" in src, "弹窗没传过滤后的区域集合"
+    assert "zones={mediaZones}" not in src, (
+        "弹窗仍在传全部区域 —— 空区域会出现在下拉里"
+    )
+    assert "counts={Object.fromEntries(selectableZones.map((z) => [z.name, zoneCount(z.name)]))}" in src, (
+        "counts 不是按过滤后的区域算的"
+    )
+
+
+def test_zone_map_requires_video_zone_when_video_is_checked():
+    """勾了视频却设空视频区域 ⇒ 映射弹窗**必须拦住**（用户报障 2026-10-23）。
+
+    原文：「勾选之后，使用自动上传但是还是提示数据包中没有视频」。
+    真因：视频位 `PUBLISH_SLOT_REQUIRED.video = false`（用户口径 2026-10-13「视频可留空」）
+    ⇒ 用户能带着「勾了视频 + 视频区域留空」进第二步 ⇒ `zoneMap.video = []`
+    ⇒ `videoPaths = []` ⇒ 自动加载跳过视频，且旧文案写成「数据包内无商品视频」误导。
+
+    修法：**按上下文动态必填** —— 数据包里有已勾选视频时，视频位转必填。
+    ⚠️ 不能直接把常量改成 true：数据包**没有**视频时不该制造进不去的关卡。
+    """
+    lib = _read(ROOT / "frontend/src/lib/precheck-zones.ts")
+
+    #: ① 常量保持 false（2026-10-13 口径仍成立）
+    assert "video: false," in lib, "PUBLISH_SLOT_REQUIRED.video 被改成 true 了 —— 无视频的数据包会进不去"
+
+    #: ② 校验函数接收 hasVideo 上下文
+    assert "ctx?: { hasVideo?: boolean }" in lib, "validateZoneMap 没有 hasVideo 上下文"
+    assert 'slot === "video" && ctx?.hasVideo ? true : PUBLISH_SLOT_REQUIRED[slot]' in lib, (
+        "视频位没有按 hasVideo 动态必填"
+    )
+    assert "数据包内有已勾选的视频，请选择「商品视频」区域" in lib, "缺针对性的报错文案"
+
+    #: ③ 页面把「有已勾选视频」传进去
+    src = _code_only(
+        _read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx")
+    )
+    i = src.index("const confirmZoneMap = useCallback(")
+    seg = src[i : i + 700]
+    assert "const hasCheckedVideo = selectedMedia.some(" in seg, "没统计已勾选视频"
+    assert "validateZoneMap(zoneMap, { hasVideo: hasCheckedVideo })" in seg, (
+        "没把 hasVideo 传给 validateZoneMap"
+    )
+    assert "selectedMedia" in seg.split("}, [")[1] if "}, [" in seg else True
+
+
+def test_skipped_video_reason_distinguishes_missing_zone_from_missing_video():
+    """自动加载「跳过视频」的文案必须**区分原因**（用户报障 2026-10-23）。
+
+    旧实现三种原因都写「数据包内无商品视频」⇒ 用户被引去翻数据包目录，
+    而真正要改的是**区域映射弹窗里「商品视频」那栏**。
+    """
+    src = _code_only(
+        _read(ROOT / "frontend/src/pages/platforms/xhs/product-publish-wizard.tsx")
+    )
+    #: 旧的无条件文案必须消失（它只在真正「没有已勾选视频」时才该出现，且措辞也变了）
+    assert 'setStage(4, { status: "skipped", detail: "数据包内无商品视频" });' not in src, (
+        "仍是无条件写「数据包内无商品视频」—— 三种原因混为一谈"
+    )
+    #: 新的三分支判据存在
+    assert "const noVideoZone = (zoneMap.video?.length ?? 0) === 0;" in src, "没判「视频区域为空」"
+    assert "未指定「商品视频」区域（数据包内已勾选" in src, "缺「没指定区域」的文案"
+    assert '"数据包内无已勾选的商品视频"' in src, "缺「真没有视频」的文案"

@@ -383,7 +383,11 @@ if (Test-Path $cv2Data) {
 
 $BundleNode = Join-Path $Bundle "runtime\node"
 New-Item -ItemType Directory -Force -Path $BundleNode | Out-Null
-Copy-Item $NodeExe $BundleNode -Force
+# ⚠️ **node.exe 不再进包**（用户口径 2026-10-23：「用户不安装 py 环境，只下载能下载
+# 的三方依赖，减少打包后的体积」）。实测 node.exe 83 MB，占安装包近 1/3。
+# 改为**首次启动时下载**到 deps/node/ —— 见 env_bootstrap_service 的 node 依赖项。
+# ⚠️ node_modules/crypto-js 照旧进包：它只有几百 KB，且是**脚本**不是运行时。
+
 # node_modules 放【安装根】（与开发仓仓库根 node_modules 同构）——node 的
 # require 解析有两条路，放这里两条都覆盖：
 #   ① 文件式（subprocess 调 node <js>）：从 _internal/xhs_utils/.../js 逐级向上，
@@ -391,8 +395,11 @@ Copy-Item $NodeExe $BundleNode -Force
 #   ② PyExecJS 管道式（源码走 stdin，cwd = 安装根）：直接从安装根解析。
 # 放 runtime/node/ 下两条路都够不着（开发机正常是因为仓库根有 node_modules）。
 Copy-Item (Join-Path $NodeRuntimeDir "node_modules") (Join-Path $Bundle "node_modules") -Recurse -Force
-& (Join-Path $BundleNode "node.exe") -e "require('crypto-js'); console.log('  node smoke: crypto-js OK, node ' + process.version)"
-if ($LASTEXITCODE -ne 0) { Fail "bundled node / crypto-js 自检失败" }
+# node.exe 已外置 ⇒ 用**构建机的 node** 校验 crypto-js 能被 require
+# （装包版运行时用的是用户下载下来的 node，模块解析路径同构）。
+& $NodeExe -e "require('crypto-js'); console.log('  node smoke: crypto-js OK, node ' + process.version)"
+if ($LASTEXITCODE -ne 0) { Fail "node / crypto-js 自检失败" }
+Write-Host "  node.exe 已外置（首次启动下载，约 83 MB）"
 
 $bundleSize = (Get-ChildItem $Bundle -Recurse -File | Measure-Object -Property Length -Sum).Sum / 1MB
 Write-Host ("  bundle 大小: {0:N1} MB" -f $bundleSize)

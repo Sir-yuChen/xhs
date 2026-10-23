@@ -189,12 +189,34 @@ export function isZoneMapReady(map: ZoneMap): boolean {
   );
 }
 
-/** 校验映射，返回**逐位**的问题（空数组 = 全部合法）。 */
-export function validateZoneMap(map: ZoneMap): string[] {
+/** 校验映射，返回**逐位**的问题（空数组 = 全部合法）。
+ *
+ *  `ctx.hasVideo`（2026-10-23 新增）：数据包里**已勾选视频**时，`video` 位**转为必填**。
+ *
+ *  ⚠️ 为什么不能把 `PUBLISH_SLOT_REQUIRED.video` 直接改成 `true`：
+ *    用户口径 2026-10-13「**商品视频可留空**」仍然成立 —— 数据包里**没有**视频时，
+ *    不该逼用户去选一个不存在的区域（那是凭空制造一个进不去的关卡）。
+ *
+ *  ⚠️ 为什么必须加这条：用户报障 2026-10-23「**勾选之后，使用自动上传但是还是提示
+ *    数据包中没有视频**」—— 勾了视频、但区域映射里「商品视频」那栏留空
+ *    ⇒ `zoneMap.video = []` ⇒ `videoPaths = []` ⇒ 自动加载跳过视频 + 文案误导。
+ *    ⇒ **有视频就必须指定区域**，在弹窗点确认那一刻就拦住，而不是等自动加载时才发现。
+ */
+export function validateZoneMap(
+  map: ZoneMap,
+  ctx?: { hasVideo?: boolean },
+): string[] {
   const errors: string[] = [];
   for (const slot of ["main", "detail", "video"] as PublishSlotKey[]) {
-    if (PUBLISH_SLOT_REQUIRED[slot] && (map[slot]?.length ?? 0) === 0) {
-      errors.push(`请选择${PUBLISH_SLOT_LABELS[slot]}`);
+    //: 视频位：`hasVideo` 为真时转为必填（否则沿用 `PUBLISH_SLOT_REQUIRED`）
+    const required =
+      slot === "video" && ctx?.hasVideo ? true : PUBLISH_SLOT_REQUIRED[slot];
+    if (required && (map[slot]?.length ?? 0) === 0) {
+      errors.push(
+        slot === "video" && ctx?.hasVideo
+          ? "数据包内有已勾选的视频，请选择「商品视频」区域（或取消勾选该视频）"
+          : `请选择${PUBLISH_SLOT_LABELS[slot]}`,
+      );
     }
   }
   return errors;

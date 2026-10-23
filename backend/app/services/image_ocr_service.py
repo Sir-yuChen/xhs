@@ -41,6 +41,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -358,9 +359,22 @@ def locate_hits(
 #: ⚠️ 现在有了抽帧（见下方 `scan_video`），这条只在**抽帧失败**时用。
 VIDEO_UNVERIFIED_REASON = "视频未能抽帧检测，请人工确认画面是否有违规词"
 
-#: 抽帧数（等间隔）。真机实测 40.8s / 1224 帧的视频抽 6 帧 ≈ 18s（含 ffmpeg 启动），
-#: 6 帧已能覆盖「片头标注 + 中段卖点 + 片尾促销」这类常见文字出现位置。
-VIDEO_FRAMES = 6
+#: **抽帧间隔（秒）**：每 `VIDEO_FRAME_INTERVAL_S` 秒抽 1 帧（用户口径 2026-10-23
+#: 「优化为 10 抽一帧」）。
+#:
+#: 演化（原句保留，不静默删除）：
+#:   · 旧口径是「固定抽 6 帧、等间隔取每段中点」—— 短视频浪费（8 秒也抽 6 帧），
+#:     长视频覆盖不足（40 秒只有 6 个采样点，中间 7 秒盲区）。
+#:   · 现口径「按时长分段，每 10 秒一帧」：采样点密度与视频长度成正比，
+#:     9 秒视频抽 1 帧、30 秒抽 3 帧、41 秒抽 5 帧 —— 既不浪费也漏不掉。
+#:   · `VIDEO_FRAMES_MAX` 是**兜底上限**：极长视频（如 10 分钟）不抽上百帧，
+#:     否则 OCR 时间失控（每帧 ffmpeg ~0.5s + OCR ~0.2s）。
+VIDEO_FRAME_INTERVAL_S = 10
+VIDEO_FRAMES_MAX = 20
+
+#: 兼容旧引用（`scan_video` 的默认值、既有测试都在用这个名字）。
+#: ⚠️ 语义已从「固定帧数」变为「上限」，见上方说明。
+VIDEO_FRAMES = VIDEO_FRAMES_MAX
 
 #: 单帧抽取消耗超时（秒）。ffmpeg 抽一帧实测亚秒级，留足余量给大视频首帧解码。
 FRAME_TIMEOUT_S = 60
@@ -392,13 +406,58 @@ def note_unverified_videos(video_paths: list[str]) -> dict[str, dict[str, Any]]:
     }
 
 
+def _bundled_bin_dir() -> Path | None:
+    """**初始化环境下载下来的 ffmpeg 目录**（`deps/ffmpeg/`）。
+
+    决策链（2026-10-23 用户口径「用户安装时自动下载」）：
+      ① **下载目录**（`env_bootstrap_service.deps_root()/ffmpeg`）—— 主路径；
+      ② 安装包内 `_internal/bin` —— 兼容「构建期把 ffmpeg 打进包」的老形态；
+      ③ PATH —— 开发机（winget 装过 ffmpeg）。
+    """
+    import sys
+
+    try:
+        from backend.app.services.env_bootstrap_service import deps_root
+
+        cand = deps_root() / "ffmpeg"
+        if (cand / "ffmpeg.exe").is_file():
+            return cand
+    except Exception:  # noqa: BLE001 - 依赖服务不可用不该让抽帧崩
+        pass
+
+    if not getattr(sys, "frozen", False):
+        return None
+    base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+    for cand in (base / "bin", base.parent / "bin"):
+        if (cand / "ffmpeg.exe").is_file():
+            return cand
+    return None
+
+
+def _ffmpeg_exe(name: str) -> str | None:
+    """定位可执行文件：**优先包内**，再回落 PATH。"""
+    bundled = _bundled_bin_dir()
+    if bundled is not None:
+        exe = bundled / f"{name}.exe"
+        if exe.is_file():
+            return str(exe)
+    return shutil.which(name)
+
+
 def ffmpeg_available() -> bool:
     """ffmpeg 是否可用（抽帧的硬依赖）。
 
-    ⚠️ 实测本机 `ffmpeg 9.0.1`（gyan.dev full build）在 PATH 里。
+    ⚠️⚠️ **安装版必须靠包内自带**（2026-10-23 实测踩到）：
+    开发机上 `ffmpeg 9.0.1`（gyan.dev full build）装在 PATH 里，抽帧一直正常；
+    但**安装包进程不继承开发者的 PATH** ⇒ `shutil.which("ffmpeg")` 返回 None
+    ⇒ `scan_video` 直接回 `ocr_ok=None` + `unverified_reason="本机没有可用的 ffmpeg"`
+    ⇒ 视频**默认不勾选** ⇒ 用户以为预检没跑视频，实际是**装包缺 ffmpeg**
+    （同类先例：`win_ocr_*.ps1` 也是因为 `Path(__file__)` 在 frozen 下取不到才被显式收进包）。
+
+    ⇒ 判据顺序：**先包内 `_internal/bin`，再 PATH**。构建脚本负责把 ffmpeg 拷进去。
     不可用时**不静默降级**：视频回到「未验证」而不是被当成合规。
     """
-    return shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
+    return _ffmpeg_exe("ffmpeg") is not None and _ffmpeg_exe("ffprobe") is not None
 
 
 def probe_duration(video: Path) -> float:
@@ -429,6 +488,14 @@ def extract_frames(video: Path, count: int = VIDEO_FRAMES) -> list[tuple[float, 
     duration = probe_duration(video)
     if duration <= 0:
         return []
+    #: **按「每 10 秒一帧」算实际抽帧数**（用户口径 2026-10-23），并用 `count` 封顶。
+    #:
+    #: `count` 现在的语义是**上限**（默认 `VIDEO_FRAMES_MAX`）：
+    #:   · 8 秒视频 → ceil(8/10) = 1 帧（旧实现固定抽 6 帧，纯浪费）；
+    #:   · 41 秒视频 → ceil(41/10) = 5 帧；
+    #:   · 10 分钟视频 → 60 帧会被 `count` 夹到 20 帧（防 OCR 时间失控）。
+    wanted = max(1, math.ceil(duration / VIDEO_FRAME_INTERVAL_S))
+    count = max(1, min(int(count), wanted))
     workdir = Path(tempfile.mkdtemp(prefix="video_frames_"))
     out: list[tuple[float, str]] = []
     #: 取每段的中点，避开首尾的黑场/转场（首帧常是纯色 logo）。

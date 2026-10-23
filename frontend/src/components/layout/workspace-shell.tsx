@@ -1,6 +1,7 @@
 import {
   BellOutlined,
   CloudDownloadOutlined,
+  ToolOutlined,
   LogoutOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
@@ -38,6 +39,7 @@ import {
 import type { AppNotification } from "../../types";
 import { notificationTargetPath } from "../../lib/notification-routes";
 import { UpdateDialog, ManualUpdateDialog } from "../system/update-dialog";
+import { EnvBootstrapDialog, EnvBootstrapGate } from "../system/env-bootstrap-dialog";
 
 const { Sider, Header, Content } = Layout;
 const { Text } = Typography;
@@ -201,6 +203,9 @@ export function WorkspaceShell({
   const [notifyFilter, setNotifyFilter] = useState<"all" | "unread">("all");
   // 手动「检查版本更新」弹窗（2026-10-13 用户口径）：顶栏图标点开，**不强制**。
   const [manualUpdateOpen, setManualUpdateOpen] = useState(false);
+  //: 依赖检查弹窗（用户口径 2026-10-23：「在页面顶部的版本更新图标旁新增一个
+  //: 依赖检查，点击弹窗展示检查本地依赖是否完整，不完整则自动触发下载」）。
+  const [depCheckOpen, setDepCheckOpen] = useState(false);
 
   const c = useShellPalette();
   const isDark = c.isDark;
@@ -394,6 +399,16 @@ export function WorkspaceShell({
               title="检查版本更新"
               style={{ display: "flex", alignItems: "center", justifyContent: "center" }}
             />
+            {/* 依赖检查（用户口径 2026-10-23）：与版本更新图标并排的手动入口。
+                点击 ⇒ 弹窗列出本地依赖（node / ffmpeg / OCR 模型）是否完整，
+                **不完整则自动触发下载**（不是只报状态）。 */}
+            <Button
+              type="text"
+              icon={<ToolOutlined style={{ fontSize: 16 }} />}
+              onClick={() => setDepCheckOpen(true)}
+              title="检查运行依赖"
+              style={{ display: "flex", alignItems: "center", justifyContent: "center" }}
+            />
             <Dropdown dropdownRender={() => notificationDropdownContent} trigger={["click"]} placement="bottomRight">
               <Badge count={unreadCount} size="small" offset={[-2, 2]}>
                 <Button type="text" icon={<BellOutlined style={{ fontSize: 16 }} />} style={{ display: "flex", alignItems: "center", justifyContent: "center" }} />
@@ -414,6 +429,11 @@ export function WorkspaceShell({
         </Content>
       </Layout>
       {/* 系统更新弹窗（设计 36，2026-10-13）：打开软件即检查；有新版本**强制**弹窗 */}
+      {/* 初始化环境（设计 24 §27，2026-10-23）：缺依赖时弹窗，展示下载进度 */}
+      <EnvBootstrapGate />
+      {depCheckOpen ? (
+        <EnvBootstrapDialog autoStart onDone={() => setDepCheckOpen(false)} />
+      ) : null}
       <UpdateDialog />
       {/* 手动检查更新弹窗（2026-10-13 用户口径）：顶栏图标点开，**可关闭 / 可暂不更新** */}
       <ManualUpdateDialog open={manualUpdateOpen} onClose={() => setManualUpdateOpen(false)} />

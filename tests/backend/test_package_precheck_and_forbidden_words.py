@@ -1301,8 +1301,19 @@ class TestVideoFrameOcr:
         )
         assert 'item["frames_failed"] = found.get("frames_failed")' in api_src
         assert 'item["frames"] = found.get("frames") or []' in api_src
-        #: 且只对视频设值（图片保持 None，形状统一）
-        assert 'if item["group"] == "video":' in api_src
+        #: 且只对视频设值（图片保持 None，形状统一）。
+        #:
+        #: ⚠️⚠️ 原断言写的是 `if item["group"] == "video":` —— 那正是**被修掉的 bug**
+        #: 本身（`group` 是真实目录名「主图视频」，跟字面量 "video" 比**恒不成立**）。
+        #: 它当时能过，是因为它只检查「这行文字在不在」，**不检查判据对不对**。
+        #: 2026-10-23 实测：`ocr_ok=true` 但 `frame_count=null` —— 就是这行造成的。
+        #: ⇒ 改成断言**正确判据**：kind / 后缀，且禁止退回 group 比较。
+        assert 'if item["group"] == "video":' not in api_src, (
+            "判据退回了 `group == \"video\"` —— group 是真实目录名（主图视频），恒不成立"
+        )
+        assert 'if item.get("kind") == "video" or Path(' in api_src, (
+            "视频字段透传的判据不是 kind/后缀"
+        )
 
     def test_uninspected_media_also_carries_the_frame_keys(self):
         """只读取模式下，视频条目也得有这三个键（形状统一，前端不判 undefined）。"""
@@ -1773,3 +1784,69 @@ def test_attribute_image_is_no_longer_ocr_ed_into_a_table(tmp_path: Path, monkey
 
 
 
+
+
+def test_video_frame_info_is_filled_by_kind_not_group_name():
+    """视频抽帧信息按 **`kind` / 后缀** 判据回填，**不能按 `group` 目录名**（2026-10-23）。
+
+    实测：真实数据包目录叫「主图视频」，而 `group` 现在是**真实目录名**
+    ⇒ 旧判据 `if item["group"] == "video"` **恒不成立**
+    ⇒ 视频的 `frame_count` / `frames_failed` / `frames` 永远不回填
+    （实测 `ocr_ok=true` 但 `frame_count=null`）。
+
+    ⚠️ 讽刺的是：同一文件上方 `_is_video()` 的注释已经**明确警告过**这个坑
+    （「判据必须用 `kind` 而不是 `group`」），回填那段自己又犯了一次。
+    ⇒ 本守卫钉两点：① 判据不含 `group == "video"`；② 用的是 `kind` / `VIDEO_EXTS`。
+    """
+    import pathlib
+
+    src = pathlib.Path("backend/app/api/platforms/xhs/package_precheck.py").read_text(encoding="utf-8")
+    #: 反向断言：不许再出现「拿 group 跟字面量 video 比」
+    assert 'item["group"] == "video"' not in src, (
+        "仍在用 `group == \"video\"` 判断视频 —— `group` 是真实目录名（主图视频/详情图…），恒不成立"
+    )
+    #: 正向断言：回填处的判据是 kind 或后缀
+    anchor = '        if item.get("kind") == "video" or Path(str(item.get("rel_path") or "")).suffix.lower() in VIDEO_EXTS:'
+    assert anchor in src, (
+        "视频抽帧回填的判据不是 `kind` / `VIDEO_EXTS`"
+    )
+
+
+def test_video_frames_use_ten_second_interval_with_cap():
+    """视频抽帧 = **每 10 秒 1 帧**，并有上限兜底（用户口径 2026-10-23）。
+
+    演化（原句保留）：
+      · 旧口径「固定抽 6 帧、等间隔取每段中点」（`VIDEO_FRAMES = 6`）——
+        短视频浪费（8 秒也抽 6 帧）、长视频覆盖不足（41 秒只有 6 个采样点）。
+      · 用户口径：「优化为 **10 抽一帧**」⇒ 采样密度与时长成正比。
+
+    判据三条：
+      ① `VIDEO_FRAME_INTERVAL_S == 10`；
+      ② `extract_frames` 按 `ceil(duration / 10)` 算帧数（不是固定常量）；
+      ③ 有 `VIDEO_FRAMES_MAX` 上限（极长视频不抽上百帧，否则 OCR 时间失控）。
+    """
+    import math
+
+    from backend.app.services import image_ocr_service as ocr
+
+    assert ocr.VIDEO_FRAME_INTERVAL_S == 10, "抽帧间隔不是 10 秒"
+    assert ocr.VIDEO_FRAMES_MAX >= 1, "缺抽帧上限"
+
+    #: ② 按 `ceil(duration / 10)` 且被上限夹住 —— 与 `extract_frames` 内同一算式
+    def expected(duration: float) -> int:
+        n = max(1, math.ceil(duration / ocr.VIDEO_FRAME_INTERVAL_S))
+        return max(1, min(ocr.VIDEO_FRAMES_MAX, n))
+
+    cases = {5: 1, 8: 1, 13: 2, 30: 3, 41: 5, 65: 7}
+    for duration, want in cases.items():
+        assert expected(duration) == want, f"{duration}s 应抽 {want} 帧，实得 {expected(duration)}"
+    #: 超长视频被上限夹
+    assert expected(3600) == ocr.VIDEO_FRAMES_MAX, "超长视频没有被上限夹住"
+
+    #: ③ 源码判据：`extract_frames` 里必须是「按时长算」而不是「直接用固定 count」
+    import pathlib
+
+    src = pathlib.Path("backend/app/services/image_ocr_service.py").read_text(encoding="utf-8")
+    assert "wanted = max(1, math.ceil(duration / VIDEO_FRAME_INTERVAL_S))" in src, (
+        "`extract_frames` 没按 10 秒间隔算帧数（仍是固定帧数）"
+    )
