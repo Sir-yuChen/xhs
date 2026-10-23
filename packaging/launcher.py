@@ -657,6 +657,68 @@ class _WindowHostProgressDialog:
         self._root = None
 
 
+#: 主窗口标题（**必须与 `packaging/window-host/main.js` 的 `title` 逐字一致**）。
+#: 2026-10-23 实测：实际标题是 `Spider_XHS Operations`（**带下划线**）——
+#: 我第一版写成 `SpiderXHS Operations`，导致 EnumWindows 一个都匹配不到，
+#: 表现为「第二次启动找不到已有窗口」。改标题要同时改这三处：
+#:   main.js 的 BrowserWindow.title / 本常量 / 测试脚本。
+WINDOW_TITLE = "Spider_XHS Operations"
+
+
+def _focus_existing_window() -> bool:
+    """把**已存在**的主窗口还原并置前（第二次启动时调用，不开新窗口）。
+
+    为什么用 Win32 枚举而不是记住 pid：上次那个窗口可能是上一个 launcher 进程
+    开的（eg. 用户关了托盘图标但窗口留着、或启动器崩溃后重启），pid 早失效。
+    按**窗口标题**枚举是所有情况都成立的判据。
+
+    找不到返回 False（调用方只记日志）——「窗口被最小化到托盘」时本来就没有
+    顶层窗口，那不是错误。
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+    except Exception:  # noqa: BLE001
+        return False
+
+    SW_RESTORE = 9
+    found = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def _enum(hwnd, _lparam):  # noqa: ANN001
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return True
+        buf = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buf, length + 1)
+        if buf.value.strip() == WINDOW_TITLE:
+            found.append(hwnd)
+            return False  # 找到就停
+        return True
+
+    user32.EnumWindows(_enum, 0)
+    if not found:
+        log.info("没找到标题为「%s」的窗口（可能已最小化到托盘）", WINDOW_TITLE)
+        return False
+
+    hwnd = found[0]
+    try:
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, SW_RESTORE)
+        user32.SetForegroundWindow(hwnd)
+        log.info("已把已有窗口带到前台（hwnd=%s）", hwnd)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("置前已有窗口失败（%s）", exc)
+        return False
+
+
 def _notify_user(title: str, message: str) -> None:
     """弹一个**原生**消息框（窗口没起来时，用户没有别的途径知道发生了什么）。
 
@@ -854,11 +916,20 @@ def main(argv=None) -> int:
                 break
             time.sleep(0.5)
         if target_port is None:
-            log.error("已有实例在运行，但 %ss 内没找到它的健康端口（%d-%d）", STARTUP_TIMEOUT_SECONDS, args.port, args.port + MAX_PORT_OFFSET)
+            log.error(
+                "已有实例在运行，但 %ss 内没找到它的健康端口（%d-%d）",
+                STARTUP_TIMEOUT_SECONDS, args.port, args.port + MAX_PORT_OFFSET,
+            )
             return 1
-        log.info("已有实例在端口 %d 运行 ⇒ 只打开应用窗口", target_port)
-        if not args.no_browser:
-            open_app_window(f"http://127.0.0.1:{target_port}")
+
+        #: ⚠️ **只把已有窗口带到前台，绝不再开一个**（用户口径 2026-10-23：
+        #: 「应用安装后不支持重复启动多个窗口」）。
+        #: 原实现在这里又调了一次 `open_app_window()` —— 于是每双击一次图标就
+        #: 多一个主窗口（还各自占着同一个 profile，互相抢锁）。
+        #: 正确语义是「单实例 = 单窗口」：第二次启动 = 「请把那个窗口显示出来」。
+        log.info("已有实例在端口 %d 运行 ⇒ 把它的窗口带到前台（不新开窗口）", target_port)
+        if not _focus_existing_window():
+            log.info("未能定位已有窗口（可能被最小化到托盘），仅保留现有实例")
         return 0
 
     #: ⚠️ **端口改为「让系统分配」**（2026-10-23，用户口径「不依赖电脑本地环境」）：

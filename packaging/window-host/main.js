@@ -139,11 +139,16 @@ function createWindow() {
 }
 
 //: 第二次启动：把已有窗口带到前台（单实例语义里最容易被忘的一步）。
+//: ⚠️ 用户口径 2026-10-23「应用安装后不支持重复启动多个窗口」——
+//: 这里必须 `show()`：窗口可能被用户手动关闭（`hide` 语义）或从未显示
+//: （`show: false` + ready-to-show 还没到），只 `focus()` 在那些情况下
+//: 用户点第二下**看起来毫无反应**。
 app.on('second-instance', () => {
-  if (mainWindow) {
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.focus();
-  }
+  if (!mainWindow) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  if (!mainWindow.isVisible()) mainWindow.show();
+  mainWindow.moveTop();
+  mainWindow.focus();
 });
 
 app.whenReady().then(() => {
