@@ -1,0 +1,1115 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>v1.1.0 系统管理工作区 · 设计预览</title>
+<style>
+  :root{
+    --bg:#141414; --panel:#1a1a1a; --panel2:#1f1f1f; --line:#303030; --line2:#262626;
+    --tx:rgba(255,255,255,.88); --tx2:rgba(255,255,255,.65); --tx3:rgba(255,255,255,.4);
+    --pri:#1668dc; --ok:#52c41a; --warn:#faad14; --err:#ff4d4f;
+    --sider:220px; --header:48px;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--tx);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    font-size:13px;-webkit-font-smoothing:antialiased}
+  ::-webkit-scrollbar{width:8px;height:8px}
+  ::-webkit-scrollbar-thumb{background:#333;border-radius:4px}
+  a{color:var(--pri);text-decoration:none;cursor:pointer}
+
+  /* ── 顶栏 ── */
+  .topbar{height:56px;display:flex;align-items:center;gap:20px;padding:0 20px;
+    background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:50}
+  .brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:14px;white-space:nowrap}
+  .brand .dot{width:22px;height:22px;border-radius:6px;background:linear-gradient(135deg,#1668dc,#52c41a);
+    display:flex;align-items:center;justify-content:center;font-size:11px;color:#fff}
+  .wstabs{display:flex;gap:4px;flex:1;min-width:0;overflow:auto}
+  .wstab{padding:6px 14px;border-radius:6px;color:var(--tx2);white-space:nowrap;cursor:pointer;
+    border:1px solid transparent;transition:.15s}
+  .wstab:hover{background:rgba(255,255,255,.05);color:var(--tx)}
+  .wstab.on{background:rgba(22,104,220,.14);color:var(--pri);border-color:rgba(22,104,220,.35)}
+  .wstab .lock{opacity:.4;font-size:10px;margin-left:6px}
+  .rightbar{display:flex;align-items:center;gap:12px;flex-shrink:0;font-size:12px;color:var(--tx2)}
+  .avatar{width:26px;height:26px;border-radius:50%;background:var(--pri);color:#fff;
+    display:flex;align-items:center;justify-content:center;font-size:11px}
+
+  /* ── 布局 ── */
+  .app{display:flex;min-height:calc(100vh - 56px)}
+  .sider{width:var(--sider);flex-shrink:0;background:var(--panel);border-right:1px solid var(--line);
+    padding:10px 0;display:flex;flex-direction:column;gap:2px}
+  .sider .grp{padding:10px 16px 6px;font-size:11px;color:var(--tx3);letter-spacing:.5px}
+  .nav{padding:8px 16px;display:flex;align-items:center;gap:8px;color:var(--tx2);cursor:pointer;
+    border-left:2px solid transparent;transition:.12s}
+  .nav:hover{background:rgba(255,255,255,.04);color:var(--tx)}
+  .nav.on{background:rgba(22,104,220,.12);color:var(--pri);border-left-color:var(--pri)}
+  .nav .ic{width:14px;text-align:center;opacity:.85}
+  .nav .badge{margin-left:auto;font-size:10px;background:var(--err);color:#fff;border-radius:8px;padding:0 5px}
+  .main{flex:1;min-width:0;display:flex;flex-direction:column}
+  .crumb{padding:10px 20px;border-bottom:1px solid var(--line2);color:var(--tx3);font-size:12px}
+  .content{padding:16px 20px 32px;flex:1}
+
+  /* ── 通用块 ── */
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;margin-bottom:14px}
+  .card-h{padding:10px 14px;border-bottom:1px solid var(--line2);display:flex;align-items:center;
+    justify-content:space-between;gap:10px;font-weight:600;font-size:13px}
+  .card-b{padding:14px}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .btn{padding:4px 12px;border-radius:6px;border:1px solid var(--line);background:var(--panel2);
+    color:var(--tx);cursor:pointer;font-size:12px;display:inline-flex;align-items:center;gap:5px}
+  .btn:hover{border-color:#4a4a4a}
+  .btn.pri{background:var(--pri);border-color:var(--pri);color:#fff}
+  .btn.dgr{color:var(--err);border-color:rgba(255,77,79,.4)}
+  .btn.link{background:none;border:none;color:var(--pri);padding:2px 6px}
+  .btn.link.dgr{color:var(--err)}
+  .btn[disabled]{opacity:.35;cursor:not-allowed}
+  .tag{display:inline-block;padding:0 6px;border-radius:4px;font-size:11px;line-height:18px;
+    border:1px solid transparent;white-space:nowrap}
+  .tag.ok{color:var(--ok);background:rgba(82,196,26,.12);border-color:rgba(82,196,26,.35)}
+  .tag.warn{color:var(--warn);background:rgba(250,173,20,.12);border-color:rgba(250,173,20,.35)}
+  .tag.err{color:var(--err);background:rgba(255,77,79,.12);border-color:rgba(255,77,79,.35)}
+  .tag.info{color:#4ea1ff;background:rgba(22,104,220,.14);border-color:rgba(22,104,220,.35)}
+  .tag.dft{color:var(--tx2);background:rgba(255,255,255,.06);border-color:var(--line)}
+  .inp{padding:4px 9px;border-radius:6px;border:1px solid var(--line);background:var(--panel2);
+    color:var(--tx);font-size:12px;min-width:140px;outline:none}
+  .inp:focus{border-color:var(--pri)}
+  .muted{color:var(--tx3);font-size:11px}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  th{text-align:left;padding:8px 10px;background:var(--panel2);color:var(--tx2);font-weight:500;
+    border-bottom:1px solid var(--line);white-space:nowrap}
+  td{padding:8px 10px;border-bottom:1px solid var(--line2);vertical-align:middle}
+  tr:hover td{background:rgba(255,255,255,.02)}
+  .mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px}
+  code{background:rgba(255,255,255,.07);padding:1px 5px;border-radius:3px;font-size:11px;
+    font-family:ui-monospace,Menlo,Consolas,monospace;color:#7dd3fc}
+
+  /* ── 权限矩阵特殊 ── */
+  .perm{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;color:#7dd3fc}
+  .perm.off{color:#555;text-decoration:line-through}
+  .switch{width:30px;height:16px;border-radius:9px;background:#3a3a3a;position:relative;
+    display:inline-block;vertical-align:middle;cursor:pointer}
+  .switch::after{content:"";position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;
+    background:#888;transition:.15s}
+  .switch.on{background:rgba(22,104,220,.5)}
+  .switch.on::after{left:16px;background:var(--pri)}
+  .swrap{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+  .stxt{font-size:11px;color:var(--tx2)}
+
+  .grid2{display:grid;grid-template-columns:1.15fr .85fr;gap:14px}
+  .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+  .kpi{background:var(--panel2);border:1px solid var(--line2);border-radius:8px;padding:12px 14px}
+  .kpi .v{font-size:20px;font-weight:600;margin:2px 0}
+  .kpi .l{font-size:11px;color:var(--tx3)}
+  .note{border-left:3px solid var(--pri);background:rgba(22,104,220,.07);padding:9px 12px;
+    border-radius:0 6px 6px 0;font-size:12px;color:var(--tx2);margin:10px 0;line-height:1.65}
+  .note.warn{border-left-color:var(--warn);background:rgba(250,173,20,.07)}
+  .note.err{border-left-color:var(--err);background:rgba(255,77,79,.07)}
+  .sec-title{font-size:15px;font-weight:600;margin:22px 0 10px;display:flex;align-items:center;gap:8px}
+  .sec-title .n{width:20px;height:20px;border-radius:5px;background:var(--pri);color:#fff;
+    font-size:11px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+  .tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);margin-bottom:12px;overflow:auto}
+  .tab{padding:7px 14px;color:var(--tx2);cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap}
+  .tab:hover{color:var(--tx)}
+  .tab.on{color:var(--pri);border-bottom-color:var(--pri)}
+  .hide{display:none!important}
+  .modal{position:fixed;inset:0;background:rgba(0,0,0,.65);display:flex;align-items:center;
+    justify-content:center;z-index:200;padding:20px}
+  .modal .box{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    width:min(720px,92vw);max-height:82vh;display:flex;flex-direction:column}
+  .modal .box .h{padding:13px 16px;border-bottom:1px solid var(--line2);font-weight:600;
+    display:flex;justify-content:space-between;align-items:center}
+  .modal .box .b{padding:16px;overflow:auto;flex:1}
+  .modal .box .f{padding:11px 16px;border-top:1px solid var(--line2);display:flex;
+    justify-content:flex-end;gap:8px}
+  .tree{font-size:12px;line-height:2}
+  .tree .lv2{padding-left:22px}
+  .tree .lv3{padding-left:44px}
+  .chk{width:13px;height:13px;border:1px solid #555;border-radius:3px;display:inline-block;
+    vertical-align:-2px;margin-right:6px;position:relative}
+  .chk.ck{background:var(--pri);border-color:var(--pri)}
+  .chk.ck::after{content:"✓";position:absolute;top:-4px;left:2px;font-size:11px;color:#fff}
+  .chk.half{background:transparent;border-color:var(--pri)}
+  .chk.half::after{content:"‑";position:absolute;top:-6px;left:3px;font-size:12px;color:var(--pri)}
+  .fgrid{display:grid;grid-template-columns:110px 1fr;gap:12px 14px;align-items:start}
+  .fgrid.fgrid1{grid-template-columns:110px 1fr}
+  .fgrid label{padding-top:5px;color:var(--tx2);text-align:right;font-size:12px}
+  .w100{width:100%!important;min-width:0}
+  .req{color:var(--err)}
+  .fhint{font-size:11px;color:var(--tx3);margin-top:3px;line-height:1.6}
+  .fhint.err{color:var(--err)}
+  .cbox{padding:7px 10px;border:1px solid var(--line2);border-radius:6px;margin-bottom:6px;font-size:12px}
+  #toast{position:fixed;left:50%;bottom:32px;transform:translateX(-50%) translateY(20px);
+    background:#262626;border:1px solid var(--line);border-radius:8px;padding:9px 16px;
+    font-size:12px;color:var(--tx);opacity:0;pointer-events:none;transition:.22s;z-index:400;
+    max-width:70vw;box-shadow:0 6px 20px rgba(0,0,0,.5)}
+  #toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
+  table.kv th{width:100px;background:var(--panel2);font-weight:400;color:var(--tx2)}
+  table.kv td{padding:7px 10px}
+</style>
+</head>
+<body>
+
+<!-- ══════════ 顶栏 ══════════ -->
+<div class="topbar">
+  <div class="brand"><span class="dot">SX</span> Spider XHS <span class="muted" style="font-weight:400">v1.1.0</span></div>
+  <div class="wstabs">
+    <div class="wstab" data-ws="ws-xhs" onclick="go('ws-xhs')">小红书</div>
+    <div class="wstab" data-ws="none-douyin" onclick="toast('抖音：菜单已写入种子（status=disabled）—— 到「菜单管理」打开该行的启停开关即接入')">抖音<span class="lock">🔒</span></div>
+    <div class="wstab" data-ws="none-xianyu" onclick="toast('闲鱼：同上，打开菜单启停开关即接入')">闲鱼<span class="lock">🔒</span></div>
+    <div class="wstab" data-ws="ws-ai" onclick="go('ws-ai')">大模型网关</div>
+    <div class="wstab on" data-ws="ws-system" onclick="go('ws-system')">系统管理</div>
+  </div>
+  <div class="rightbar">
+    <span class="tag info">admin</span>
+    <span>admin</span>
+    <div class="avatar">A</div>
+  </div>
+</div>
+
+<!-- ══════════ 系统管理 ══════════ -->
+<div class="app" id="ws-system">
+  <div class="sider">
+    <div class="grp">系统管理</div>
+    <div class="nav on" data-p="users" onclick="page('users')"><span class="ic">👤</span>用户管理<span class="badge">1</span></div>
+    <div class="nav" data-p="roles" onclick="page('roles')"><span class="ic">👥</span>角色管理</div>
+    <div class="nav" data-p="menus" onclick="page('menus')"><span class="ic">≡</span>菜单管理</div>
+    <div class="nav" data-p="dicts" onclick="page('dicts')"><span class="ic">📖</span>字典管理</div>
+    <div class="nav" data-p="settings" onclick="page('settings')"><span class="ic">⚙</span>配置管理</div>
+    <div class="nav" data-p="logs" onclick="page('logs')"><span class="ic">🗒</span>日志查看</div>
+  </div>
+  <div class="main">
+    <div class="crumb" id="crumb">系统管理 / 用户管理</div>
+    <div class="content">
+
+      <div class="card" style="margin-bottom:14px">
+        <div class="card-h"><span>本预览覆盖的 dataPanel 交互（逐条可点开核对）</span>
+          <span class="muted">点右侧按钮直接打开对应弹窗</span></div>
+        <div class="card-b">
+          <div class="grid3" style="gap:8px">
+            <div class="kpi" style="cursor:pointer" onclick="page('users');openUserEdit(2)">
+              <div class="l">用户 · 编辑（禁改 用户名/邮箱/身份类型）</div><div style="font-size:12px;margin-top:4px">点我 →</div></div>
+            <div class="kpi" style="cursor:pointer" onclick="page('users');openUserEdit(0)">
+              <div class="l">用户 · 新建（出现密码框）</div><div style="font-size:12px;margin-top:4px">点我 →</div></div>
+            <div class="kpi" style="cursor:pointer" onclick="page('users');openModal('roleAssignModal')">
+              <div class="l">用户 · 分配角色（Checkbox，停用角色不显示）</div><div style="font-size:12px;margin-top:4px">点我 →</div></div>
+            <div class="kpi" style="cursor:pointer" onclick="page('users');openModal('resetPwdModal')">
+              <div class="l">用户 · 重置密码（min6 + 两次一致，全员掉线）</div><div style="font-size:12px;margin-top:4px">点我 →</div></div>
+            <div class="kpi" style="cursor:pointer" onclick="page('roles');openRoleEdit(3)">
+              <div class="l">角色 · 编辑（code 禁改）</div><div style="font-size:12px;margin-top:4px">点我 →</div></div>
+            <div class="kpi" style="cursor:pointer" onclick="page('roles');openMenuTree()">
+              <div class="l">角色 · 分配菜单（Tree，回填含半选）</div><div style="font-size:12px;margin-top:4px">点我 →</div></div>
+            <div class="kpi" style="cursor:pointer" onclick="page('roles');openModal('roleUsersModal')">
+              <div class="l">角色 · 管理用户（全量覆盖保存）</div><div style="font-size:12px;margin-top:4px">点我 →</div></div>
+            <div class="kpi" style="cursor:pointer" onclick="page('menus');openMenuEdit(1)">
+              <div class="l">菜单 · 编辑（M/C/F 联动提示）</div><div style="font-size:12px;margin-top:4px">点我 →</div></div>
+            <div class="kpi" style="cursor:pointer" onclick="page('menus');openModal('menuDeleteModal')">
+              <div class="l">菜单 · 删除（必须输入名称；XHS 改为有依赖即拒）</div><div style="font-size:12px;margin-top:4px">点我 →</div></div>
+            <div class="kpi" style="cursor:pointer" onclick="page('dicts');openModal('dictItemModal')">
+              <div class="l">字典 · 字典项（value 唯一 + listClass 样例）</div><div style="font-size:12px;margin-top:4px">点我 →</div></div>
+            <div class="kpi" style="cursor:pointer" onclick="page('settings');openModal('cfgEditModal')">
+              <div class="l">配置 · 编辑（值类型决定控件；scope 说明）</div><div style="font-size:12px;margin-top:4px">点我 →</div></div>
+            <div class="kpi" style="cursor:pointer" onclick="page('menus');document.querySelector('.switch[data-platform-row=\'1\']').click()">
+              <div class="l">菜单启停 · 抖音一行（打开即接入）</div><div style="font-size:12px;margin-top:4px">点我 →</div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ───── 用户管理 ───── -->
+      <div id="p-users">
+        <div class="card">
+          <div class="card-h"><span>用户管理</span>
+            <span class="row">
+              <input class="inp" placeholder="用户名">
+              <input class="inp" placeholder="邮箱">
+              <select class="inp" style="min-width:110px"><option>全部状态</option><option>正常</option><option>待审核</option><option>已停用</option></select>
+              <button class="btn">重置</button><button class="btn pri">查询</button>
+            </span>
+          </div>
+        </div>
+
+        <div class="note">
+          <b>按钮级权限</b>：下面每个「操作」列按钮都对应一个独立权限码。右侧开关可切换「当前账号是否拥有该码」，<b>所见即 user 账号能看到的样子</b>。
+          <div class="row" style="margin-top:8px">
+            <span class="muted">模拟身份</span>
+            <button class="btn" id="asAdmin" onclick="setRole('admin')">admin（全部权限）</button>
+            <button class="btn" id="asUser" onclick="setRole('user')">user（仅只读 + 审核）</button>
+            <span class="muted" style="margin-left:8px">← 切到 user：6 页只剩「通过审核」，其余变更按钮整块消失、菜单启停开关拒绝操作</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-h">
+            <span>用户列表 <span class="muted" id="permCount">权限 7/7</span></span>
+            <button class="btn pri" data-perm="system:user:create" onclick="openUserEdit(0)">＋ 新建用户</button>
+          </div>
+          <div style="overflow:auto">
+          <table>
+            <thead><tr>
+              <th style="width:48px">ID</th><th style="width:110px">用户名</th><th style="width:100px">姓名</th>
+              <th style="width:80px">角色</th><th style="width:150px">邮箱</th><th style="width:140px">最后登录</th>
+              <th style="width:90px">状态</th><th>操作</th>
+            </tr></thead>
+            <tbody>
+              <tr>
+                <td>1</td><td><b>admin</b> <span class="tag warn">默认口令</span></td><td>管理员</td>
+                <td><span class="tag info">admin</span></td><td class="mono">—</td>
+                <td class="mono" style="color:#666">从未登录</td>
+                <td><span class="tag ok">正常</span></td>
+                <td>
+                  <span class="btn link" data-perm="system:user:edit" onclick="openUserEdit(1)">编辑</span>
+                  <span class="btn link" data-perm="system:user:resetPassword" onclick="openModal('resetPwdModal')">重置密码</span>
+                  <span class="btn link dgr" data-perm="system:user:forceLogout">强制下线</span>
+                  <span class="btn link dgr" data-perm="system:user:delete" disabled title="至少保留一个可用管理员">删除</span>
+                </td>
+              </tr>
+              <tr>
+                <td>2</td><td>运营小明</td><td>王小明</td>
+                <td><span class="tag dft">user</span></td><td class="mono">ops@corp.com</td>
+                <td class="mono">2026-10-23 21:04</td>
+                <td><span class="tag ok">正常</span> <span class="tag info">在线</span></td>
+                <td>
+                  <span class="btn link" data-perm="system:user:edit" onclick="openUserEdit(2)">编辑</span>
+                  <span class="btn link" data-perm="system:user:resetPassword" onclick="openModal('resetPwdModal')">重置密码</span>
+                  <span class="btn link" data-perm="system:user:forceLogout">强制下线</span>
+                  <span class="btn link dgr" data-perm="system:user:delete">删除</span>
+                </td>
+              </tr>
+              <tr>
+                <td>3</td><td>新人小李</td><td>李四</td>
+                <td><span class="tag dft">user</span></td><td class="mono">li@corp.com</td>
+                <td class="mono" style="color:#666">—</td>
+                <td><span class="tag warn">待审核</span></td>
+                <td>
+                  <span class="btn link" data-perm="system:user:approve" style="color:var(--ok)">通过审核</span>
+                  <span class="btn link" data-perm="system:user:edit">编辑</span>
+                  <span class="btn link dgr" data-perm="system:user:delete">拒绝</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          </div>
+          <div class="card-b" style="border-top:1px solid var(--line2);padding:9px 14px;display:flex;justify-content:flex-end;gap:10px">
+            <span class="muted">共 3 条</span>
+            <span class="muted">‹ 1 ›</span><span class="muted">20 条/页</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- ══ 用户：编辑弹窗（对齐 dataPanel：编辑态禁改 用户名/邮箱/身份类型）══ -->
+      <div class="modal hide" id="userEditModal">
+        <div class="box" style="width:min(560px,92vw)">
+          <div class="h"><span id="userEditTitle">编辑用户</span><span class="btn link" onclick="closeModal('userEditModal')">✕</span></div>
+          <div class="b">
+            <div class="fgrid">
+              <label>用户名 <span class="req">*</span></label>
+              <div><input class="inp w100" id="ue-username" value="运营小明"><div class="fhint">创建后不可修改（登录凭据）</div></div>
+              <label>密码</label>
+              <div><input class="inp w100" id="ue-password" placeholder="仅新建时填写，至少 6 位"><div class="fhint">编辑态隐藏 —— 改密码走「重置密码」独立入口</div></div>
+              <label>姓名</label><div><input class="inp w100" id="ue-realname" value="王小明"></div>
+              <label>邮箱</label>
+              <div><input class="inp w100" id="ue-email" value="ops@corp.com"><div class="fhint">创建后不可修改（唯一登录标识）</div></div>
+              <label>手机号</label><div><input class="inp w100" id="ue-phone" placeholder="可空"></div>
+              <label>身份类型</label>
+              <div>
+                <select class="inp w100" id="ue-identity">
+                  <option value="admin">管理员</option><option value="user" selected>普通用户</option>
+                </select>
+                <div class="fhint">仅新建时可选；编辑态只读 —— 改身份请走「分配角色」</div>
+              </div>
+              <label>状态</label>
+              <div><select class="inp w100" id="ue-status"><option value="normal" selected>正常</option><option value="pending">待审核</option><option value="disabled">已停用</option></select></div>
+            </div>
+            <div class="note" style="margin:14px 0 0">
+              <b>与 dataPanel 的 1:1 对齐点</b>：编辑时 <code>ProFormText disabled</code> 的三个字段 = 用户名 / 邮箱 / 身份类型；
+              <code>password</code> 只在新建态出现（<code>{!editingUser && …}</code>）。
+            </div>
+          </div>
+          <div class="f"><button class="btn" onclick="closeModal('userEditModal')">取消</button><button class="btn pri" onclick="closeModal('userEditModal')">保存</button></div>
+        </div>
+      </div>
+
+      <!-- ══ 用户：分配角色（dataPanel 是 Checkbox.Group，不是 Tree）══ -->
+      <div class="modal hide" id="roleAssignModal">
+        <div class="box" style="width:min(520px,92vw)">
+          <div class="h"><span>分配角色 · 运营小明</span><span class="btn link" onclick="closeModal('roleAssignModal')">✕</span></div>
+          <div class="b">
+            <div class="cbox"><span class="chk"></span>超级管理员 <span class="perm">admin</span></div>
+            <div class="cbox"><span class="chk ck"></span>普通用户 <span class="perm">user</span></div>
+            <div class="cbox"><span class="chk"></span>运营专员 <span class="perm">operator</span></div>
+            <div class="cbox" style="opacity:.45"><span class="chk"></span>财务人员 <span class="perm">finance</span>
+              <span class="tag dft" style="margin-left:6px">已停用，不可分配</span></div>
+            <div class="note" style="margin:12px 0 0">
+              过滤规则（dataPanel <code>user/index.tsx:288-295</code>）：① <code>role.status !== 'normal'</code> 不显示；
+              ② <code>super_admin</code> 角色只对 <code>identityType === 'super_admin'</code> 的用户显示。
+            </div>
+          </div>
+          <div class="f"><button class="btn" onclick="closeModal('roleAssignModal')">取消</button><button class="btn pri" onclick="closeModal('roleAssignModal')">保存</button></div>
+        </div>
+      </div>
+
+      <!-- ══ 用户：重置密码（新密码 + 确认密码，两次一致校验）══ -->
+      <div class="modal hide" id="resetPwdModal">
+        <div class="box" style="width:min(460px,92vw)">
+          <div class="h"><span>重置密码 · 运营小明</span><span class="btn link" onclick="closeModal('resetPwdModal')">✕</span></div>
+          <div class="b">
+            <div class="fgrid fgrid1">
+              <label>新密码 <span class="req">*</span></label>
+              <div><input class="inp w100" type="password" id="rp-new" placeholder="至少 6 位">
+                <div class="fhint err" id="rp-err1"></div></div>
+              <label>确认密码 <span class="req">*</span></label>
+              <div><input class="inp w100" type="password" id="rp-confirm" placeholder="再输一次" oninput="checkPwd()">
+                <div class="fhint err" id="rp-err2"></div></div>
+            </div>
+            <div class="note" style="margin:12px 0 0">
+              校验：<code>min 6</code> + 两次一致。保存后该用户 <code>token_version + 1</code> ⇒ <b>所有设备立即掉线</b>。
+            </div>
+          </div>
+          <div class="f"><button class="btn" onclick="closeModal('resetPwdModal')">取消</button><button class="btn pri" onclick="checkPwd(true)">确定</button></div>
+        </div>
+      </div>
+
+      <!-- ───── 角色管理 ───── -->
+      <div id="p-roles" class="hide">
+        <div class="card">
+          <div class="card-h"><span>角色管理</span>
+            <button class="btn pri" data-perm="system:role:create" onclick="openRoleEdit(0)">＋ 新建角色</button></div>
+          <table>
+            <thead><tr><th style="width:48px">ID</th><th style="width:130px">角色名称</th><th style="width:110px">编码</th>
+              <th>描述</th><th style="width:80px">类型</th><th style="width:90px">用户数</th><th style="width:150px">操作</th></tr></thead>
+            <tbody>
+              <tr><td>1</td><td>超级管理员</td><td class="mono">admin</td><td>全部权限（代码派生全量，不依赖授权行）</td>
+                <td><span class="tag info">内置</span></td><td>1</td>
+                <td><span class="btn link" disabled title="内置角色不可编辑授权">分配菜单</span></td></tr>
+              <tr><td>2</td><td>普通用户</td><td class="mono">user</td><td>默认角色，按授权行取权限</td>
+                <td><span class="tag info">内置</span></td><td>2</td>
+                <td><span class="btn link" data-perm="system:role:assignMenu" onclick="openMenuTree()">分配菜单</span></td></tr>
+              <tr><td>3</td><td>运营专员</td><td class="mono">operator</td><td>内容线全量，店铺线只读</td>
+                <td><span class="tag dft">自定义</span></td><td>0</td>
+                <td><span class="btn link" data-perm="system:role:edit" onclick="openRoleEdit(3)">编辑</span>
+                    <span class="btn link" data-perm="system:role:assignMenu" onclick="openMenuTree()">分配菜单</span>
+                    <span class="btn link" data-perm="system:role:assignMenu" onclick="openModal('roleUsersModal')">管理用户</span>
+                    <span class="btn link dgr" data-perm="system:role:delete">删除</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="note">
+          <b>授权是逐菜单行（含按钮行）</b>：给某人「抖音-笔记发布」而不给「小红书-笔记发布」是天然支持的 ——
+          因为权限码带平台命名空间 <code>douyin:note:publish</code> / <code>xhs:note:publish</code>。
+        </div>
+      </div>
+
+      <!-- ══ 角色：新建/编辑（code 编辑态禁改）══ -->
+      <div class="modal hide" id="roleEditModal">
+        <div class="box" style="width:min(560px,92vw)">
+          <div class="h"><span id="roleEditTitle">新建角色</span><span class="btn link" onclick="closeModal('roleEditModal')">✕</span></div>
+          <div class="b">
+            <div class="fgrid">
+              <label>角色名称 <span class="req">*</span></label><div><input class="inp w100" id="re-name" placeholder="如：运营专员"></div>
+              <label>角色编码 <span class="req">*</span></label>
+              <div><input class="inp w100" id="re-code" placeholder="小写字母数字下划线，如 operator">
+                <div class="fhint">创建后不可修改（<code>disabled={!!editingRole}</code>，与 dataPanel 一致）</div></div>
+              <label>描述</label><div><input class="inp w100" id="re-desc" placeholder="可选"></div>
+              <label>排序</label><div><input class="inp w100" id="re-sort" value="0" type="number"></div>
+            </div>
+          </div>
+          <div class="f"><button class="btn" onclick="closeModal('roleEditModal')">取消</button><button class="btn pri" onclick="closeModal('roleEditModal')">保存</button></div>
+        </div>
+      </div>
+
+      <!-- ══ 角色：管理用户（dataPanel 是「添加用户」弹窗 + 已分配列表，不是勾选树）══ -->
+      <div class="modal hide" id="roleUsersModal">
+        <div class="box" style="width:min(760px,94vw)">
+          <div class="h"><span>管理用户 · 运营专员</span><span class="btn link" onclick="closeModal('roleUsersModal')">✕</span></div>
+          <div class="b">
+            <div class="row" style="margin-bottom:10px">
+              <input class="inp" placeholder="用户名（模糊）"><input class="inp" placeholder="姓名（模糊）">
+              <input class="inp" placeholder="邮箱（精确）"><button class="btn pri" onclick="toast('打开「选择用户」弹窗：邮箱精确搜索 + 勾选')">＋ 添加用户</button>
+            </div>
+            <table>
+              <thead><tr><th style="width:120px">用户名</th><th style="width:120px">姓名</th><th>邮箱</th><th style="width:80px">操作</th></tr></thead>
+              <tbody>
+                <tr><td>运营小明</td><td>王小明</td><td class="mono">ops@corp.com</td>
+                  <td><span class="btn link dgr" data-perm="system:role:assignMenu">移除</span></td></tr>
+                <tr><td>新人小李</td><td>李四</td><td class="mono">li@corp.com</td>
+                  <td><span class="btn link dgr" data-perm="system:role:assignMenu">移除</span></td></tr>
+              </tbody>
+            </table>
+            <div class="note" style="margin:12px 0 0">
+              <b>保存是"全量覆盖"</b>：把当前列表的 userUuids 整体 <code>POST /role/{id}/users</code>，
+              后端对比差异后逐个增删并清各自会话缓存（dataPanel <code>AssignRoleUsers</code> 同语义）。
+            </div>
+          </div>
+          <div class="f"><button class="btn" onclick="closeModal('roleUsersModal')">取消</button><button class="btn pri" onclick="closeModal('roleUsersModal')">保存</button></div>
+        </div>
+      </div>
+
+      <!-- ───── 菜单管理 ───── -->
+      <div id="p-menus" class="hide">
+        <div class="card">
+          <div class="card-h"><span>菜单管理</span>
+            <span class="row"><input class="inp" placeholder="搜索名称/权限/路径">
+            <button class="btn pri" data-perm="system:menu:create" onclick="openMenuEdit(0)">＋ 新增菜单</button></span></div>
+          <div style="overflow:auto">
+          <table>
+            <thead><tr><th style="width:210px">菜单名称</th><th style="width:64px">类型</th>
+              <th style="width:180px">权限标识</th><th style="width:200px">路由</th>
+              <th style="width:70px">工作区</th><th style="width:96px">状态</th><th style="width:56px">排序</th><th style="width:130px">操作</th></tr></thead>
+            <tbody>
+              <tr><td>▾ ⚙ 系统管理</td><td><span class="tag dft">目录</span></td><td class="perm">—</td><td class="mono">/system</td><td><span class="tag info">system</span></td><td><span class="swrap"><span class="switch on" data-menu="sys.m"></span> <span class="stxt">启用</span></span></td><td>90</td>
+                <td><span class="btn link" data-perm="system:menu:view" onclick="openModal('menuPreviewModal')">预览</span><span class="btn link" data-perm="system:menu:edit" onclick="openMenuEdit(1)">编辑</span></td></tr>
+              <tr><td style="padding-left:34px">👤 用户管理</td><td><span class="tag info">菜单</span></td><td class="perm">system:user:view</td><td class="mono">/system/users</td><td>system</td><td><span class="swrap"><span class="switch on" data-menu="sys.users"></span> <span class="stxt">启用</span></span></td><td>1</td>
+                <td><span class="btn link" data-perm="system:menu:view" onclick="openModal('menuPreviewModal')">预览</span><span class="btn link" data-perm="system:menu:edit" onclick="openMenuEdit(1)">编辑</span><span class="btn link dgr" data-perm="system:menu:delete" onclick="openModal('menuDeleteModal')">删除</span></td></tr>
+              <tr><td style="padding-left:56px">　新建用户</td><td><span class="tag ok">按钮</span></td><td class="perm">system:user:create</td><td class="muted">—</td><td>system</td><td><span class="swrap"><span class="switch on" data-menu="sys.user.create"></span> <span class="stxt">启用</span></span></td><td>1</td>
+                <td><span class="btn link" data-perm="system:menu:view" onclick="openModal('menuPreviewModal')">预览</span><span class="btn link" data-perm="system:menu:edit" onclick="openMenuEdit(1)">编辑</span></td></tr>
+              <tr><td style="padding-left:56px">　删除用户</td><td><span class="tag ok">按钮</span></td><td class="perm">system:user:delete</td><td class="muted">—</td><td>system</td><td><span class="swrap"><span class="switch on" data-menu="sys.user.delete"></span> <span class="stxt">启用</span></span></td><td>2</td>
+                <td><span class="btn link" data-perm="system:menu:view" onclick="openModal('menuPreviewModal')">预览</span><span class="btn link" data-perm="system:menu:edit" onclick="openMenuEdit(1)">编辑</span></td></tr>
+              <tr><td style="padding-left:34px">👥 角色管理</td><td><span class="tag info">菜单</span></td><td class="perm">system:role:view</td><td class="mono">/system/roles</td><td>system</td><td><span class="swrap"><span class="switch on" data-menu="sys.roles"></span> <span class="stxt">启用</span></span></td><td>2</td>
+                <td><span class="btn link" data-perm="system:menu:view" onclick="openModal('menuPreviewModal')">预览</span><span class="btn link" data-perm="system:menu:edit" onclick="openMenuEdit(1)">编辑</span><span class="btn link dgr" data-perm="system:menu:delete" onclick="openModal('menuDeleteModal')">删除</span></td></tr>
+              <tr><td>▾ 📕 小红书</td><td><span class="tag dft">目录</span></td><td class="perm">—</td><td class="mono">/platforms/xhs</td><td><span class="tag info">xhs</span></td><td><span class="swrap"><span class="switch on" data-menu="xhs.m"></span> <span class="stxt">启用</span></span></td><td>10</td>
+                <td><span class="btn link" data-perm="system:menu:view" onclick="openModal('menuPreviewModal')">预览</span><span class="btn link" data-perm="system:menu:edit" onclick="openMenuEdit(1)">编辑</span></td></tr>
+              <tr><td style="padding-left:34px">📦 商品列表</td><td><span class="tag info">菜单</span></td><td class="perm">xhs:item:view</td><td class="mono">/platforms/xhs/shop-items</td><td>xhs</td><td><span class="swrap"><span class="switch on" data-menu="xhs.item"></span> <span class="stxt">启用</span></span></td><td>1</td>
+                <td><span class="btn link" data-perm="system:menu:view" onclick="openModal('menuPreviewModal')">预览</span><span class="btn link" data-perm="system:menu:edit" onclick="openMenuEdit(1)">编辑</span></td></tr>
+              <tr><td style="padding-left:56px">　商品上架</td><td><span class="tag ok">按钮</span></td><td class="perm">xhs:item:onShelf</td><td class="muted">—</td><td>xhs</td><td><span class="swrap"><span class="switch on" data-menu="xhs.item.onshelf"></span> <span class="stxt">启用</span></span></td><td>1</td>
+                <td><span class="btn link" data-perm="system:menu:view" onclick="openModal('menuPreviewModal')">预览</span><span class="btn link" data-perm="system:menu:edit" onclick="openMenuEdit(1)">编辑</span></td></tr>
+              <tr id="row-douyin" style="opacity:.5"><td>▾ 🎵 抖音</td><td><span class="tag dft">目录</span></td><td class="perm">—</td><td class="mono">/platforms/douyin</td><td>douyin</td>
+                <td><span class="swrap"><span class="switch" data-menu="douyin.m" data-platform-row="1"></span> <span class="stxt" style="color:var(--tx3)">停用</span></span></td><td>20</td>
+                <td><span class="btn link" data-perm="system:menu:view" onclick="openModal('menuPreviewModal')">预览</span><span class="btn link" data-perm="system:menu:edit" onclick="openMenuEdit(1)">编辑</span></td></tr>
+              <tr id="row-douyin-hint" style="opacity:.5"><td colspan="8" style="padding-left:34px;color:var(--tx3);font-size:11.5px">
+                　　平台未接入 ⇒ 菜单停用（种子写入即 disabled）。<b>接入后打开这个开关即可</b>：菜单、权限码、工作区卡片同时出现，不改代码。</td></tr>
+            </tbody>
+          </table>
+          </div>
+        </div>
+        <div class="note warn">
+          <b>菜单启停 = 状态字段 + 保存后清受影响用户会话</b>（与 dataPanel 的 <code>UpdateMenu</code> + <code>ClearMenuUserSessions</code> 同构）。
+          停用 C 行 ⇒ 该页对目标用户不可见且直链 403；停用 M 行 ⇒ 其下全部 C 行不可见，但<b>不静默改子行状态</b>（重启父级即恢复）。
+        </div>
+        <div class="note">
+          <b>试一下抖音这一行</b>：打开开关 ⇒ 顶栏「抖音」工作区卡片出现（当前预览会弹提示模拟）。<br>
+          实现前提是种子「<b>只补缺不覆盖</b>」：用户手工启用的菜单，升级时不会被 <code>menus.seed.json</code> 打回 disabled。
+        </div>
+      </div>
+
+      <!-- ══ 菜单：新增/编辑（12 字段，与 dataPanel MenuForm 对齐）══ -->
+      <div class="modal hide" id="menuEditModal">
+        <div class="box" style="width:min(680px,94vw)">
+          <div class="h"><span id="menuEditTitle">编辑菜单</span><span class="btn link" onclick="closeModal('menuEditModal')">✕</span></div>
+          <div class="b">
+            <div class="fgrid">
+              <label>上级菜单</label><div><select class="inp w100"><option>顶级菜单</option><option>系统管理</option><option>用户管理</option><option>小红书</option></select></div>
+              <label>菜单类型 <span class="req">*</span></label>
+              <div><select class="inp w100" id="me-type" onchange="menuTypeHint()">
+                <option value="M">目录 (M)</option><option value="C" selected>菜单 (C)</option><option value="F">按钮 (F)</option></select>
+                <div class="fhint" id="me-type-hint">C 行必填路由；F 行必须挂在 C 行下，只填权限标识</div></div>
+              <label>菜单名称 <span class="req">*</span></label><div><input class="inp w100" value="用户管理"></div>
+              <label>权限标识</label><div><input class="inp w100 mono" value="system:user:view" placeholder="system:user:view">
+                <div class="fhint">全局唯一（DB 唯一索引）</div></div>
+              <label>路由地址</label><div><input class="inp w100 mono" value="/system/users" placeholder="/system/users">
+                <div class="fhint">仅 C 行；必须与 <code>router.tsx</code> 登记一致</div></div>
+              <label>组件路径</label><div><input class="inp w100 mono" placeholder="预留字段，XHS 不参与动态 import"></div>
+              <label>图标</label><div><input class="inp w100" placeholder="antd 图标名，如 UserOutlined"></div>
+              <label>排序号</label><div><input class="inp w100" type="number" value="1"></div>
+              <label>是否可见</label><div><select class="inp w100"><option>显示</option><option>隐藏</option></select>
+                <div class="fhint">隐藏 = 不进菜单，但仍有权限码（可从页面内跳转）</div></div>
+              <label>状态</label><div><select class="inp w100"><option>正常</option><option>停用</option></select>
+                <div class="fhint">停用 = 整行不下发（含其下 C 行对普通用户不可见）</div></div>
+            </div>
+          </div>
+          <div class="f"><button class="btn" onclick="closeModal('menuEditModal')">取消</button><button class="btn pri" onclick="closeModal('menuEditModal')">保存</button></div>
+        </div>
+      </div>
+
+      <!-- ══ 菜单：预览详情（只读 Descriptions）══ -->
+      <div class="modal hide" id="menuPreviewModal">
+        <div class="box" style="width:min(640px,94vw)">
+          <div class="h"><span>菜单预览 · 用户管理</span><span class="btn link" onclick="closeModal('menuPreviewModal')">✕</span></div>
+          <div class="b">
+            <table class="kv">
+              <tr><th>ID</th><td>12</td><th>父级ID</th><td>11</td></tr>
+              <tr><th>菜单名称</th><td>用户管理</td><th>菜单类型</th><td><span class="tag info">菜单 (C)</span></td></tr>
+              <tr><th>权限标识</th><td colspan="3" class="perm">system:user:view</td></tr>
+              <tr><th>路由地址</th><td colspan="3" class="mono">/system/users</td></tr>
+              <tr><th>图标</th><td>UserOutlined</td><th>排序号</th><td>1</td></tr>
+              <tr><th>是否可见</th><td>显示</td><th>状态</th><td><span class="tag ok">正常</span></td></tr>
+              <tr><th>创建时间</th><td>2026-10-23 22:00</td><th>更新时间</th><td>2026-10-23 22:00</td></tr>
+              <tr><th>创建人</th><td>admin</td><th>修改人</th><td>admin</td></tr>
+            </table>
+          </div>
+          <div class="f"><button class="btn" onclick="closeModal('menuPreviewModal')">关闭</button></div>
+        </div>
+      </div>
+
+      <!-- ══ 菜单：删除二次确认（必须输入名称，dataPanel 同款）══ -->
+      <div class="modal hide" id="menuDeleteModal">
+        <div class="box" style="width:min(480px,92vw)">
+          <div class="h"><span>确认删除</span><span class="btn link" onclick="closeModal('menuDeleteModal')">✕</span></div>
+          <div class="b">
+            <p style="margin:0 0 8px">此操作将删除菜单 <b>用户管理</b>，<b>且其下所有子项一并删除</b>、不可恢复。</p>
+            <p style="margin:0 0 6px;font-size:12px;color:var(--tx2)">请输入菜单名称 <b>用户管理</b> 以确认：</p>
+            <input class="inp w100" id="md-confirm" placeholder="请输入菜单名称"
+                   oninput="document.getElementById('md-ok').disabled = this.value !== '用户管理'">
+            <div class="note warn" style="margin:12px 0 0">
+              ⚠️ <b>XHS 改为"有依赖即拒"</b>（设计 §3.4 P8）：有子节点 ⇒ 409 <code>MENU_HAS_CHILDREN</code>；
+              已被角色引用 ⇒ 409 <code>MENU_IN_USE</code>。不静默级联删 —— dataPanel 那版是级联，删父级会连带清掉别人的授权。
+            </div>
+          </div>
+          <div class="f"><button class="btn" onclick="closeModal('menuDeleteModal')">取消</button>
+            <button class="btn dgr" id="md-ok" disabled onclick="closeModal('menuDeleteModal')">确认删除</button></div>
+        </div>
+      </div>
+
+      <!-- ───── 字典管理 ───── -->
+      <div id="p-dicts" class="hide">
+        <div class="grid2">
+          <div class="card">
+            <div class="card-h"><span>字典类型</span><button class="btn pri" data-perm="system:dict:create" onclick="openModal('dictTypeModal')">＋ 新建</button></div>
+            <table>
+              <thead><tr><th style="width:46px">ID</th><th>类型名称</th><th style="width:150px">编码</th><th style="width:60px">项数</th><th style="width:100px">操作</th></tr></thead>
+              <tbody id="dictTypes">
+                <tr class="on" onclick="pickType(this,'sys_user_status','用户状态')" style="background:rgba(22,104,220,.1)"><td>1</td><td>用户状态</td><td class="mono">sys_user_status</td><td>3</td>
+                  <td><span class="btn link" data-perm="system:dict:edit" onclick="openModal('dictTypeModal')">编辑</span></td></tr>
+                <tr onclick="pickType(this,'sys_role','角色')"><td>2</td><td>角色</td><td class="mono">sys_role</td><td>2</td>
+                  <td><span class="btn link" data-perm="system:dict:edit" onclick="openModal('dictTypeModal')">编辑</span></td></tr>
+                <tr onclick="pickType(this,'sys_menu_type','菜单类型')"><td>3</td><td>菜单类型</td><td class="mono">sys_menu_type</td><td>3</td>
+                  <td><span class="btn link" data-perm="system:dict:edit" onclick="openModal('dictTypeModal')">编辑</span></td></tr>
+                <tr onclick="pickType(this,'xhs_note_form','笔记形态')"><td>4</td><td>笔记形态</td><td class="mono">xhs_note_form</td><td>2</td>
+                  <td><span class="btn link" data-perm="system:dict:edit" onclick="openModal('dictTypeModal')">编辑</span></td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="card">
+            <div class="card-h"><span>字典项 · <span id="curType">sys_user_status</span></span>
+              <button class="btn pri" data-perm="system:dict:create" onclick="openModal('dictItemModal')">＋ 新建项</button></div>
+            <table>
+              <thead><tr><th style="width:90px">标签</th><th style="width:110px">值</th><th style="width:90px">样式</th><th style="width:56px">排序</th><th style="width:96px">操作</th></tr></thead>
+              <tbody>
+                <tr><td>正常</td><td class="mono">normal</td><td><span class="tag ok">success</span></td><td>1</td>
+                  <td><span class="btn link" data-perm="system:dict:edit">编辑</span><span class="btn link dgr" data-perm="system:dict:delete">删</span></td></tr>
+                <tr><td>待审核</td><td class="mono">pending</td><td><span class="tag warn">warning</span></td><td>2</td>
+                  <td><span class="btn link" data-perm="system:dict:edit">编辑</span><span class="btn link dgr" data-perm="system:dict:delete">删</span></td></tr>
+                <tr><td>已停用</td><td class="mono">disabled</td><td><span class="tag dft">default</span></td><td>3</td>
+                  <td><span class="btn link" data-perm="system:dict:edit">编辑</span><span class="btn link dgr" data-perm="system:dict:delete">删</span></td></tr>
+              </tbody>
+            </table>
+            <div class="card-b" style="border-top:1px solid var(--line2)">
+              <span class="muted">业务页所有枚举下拉都从这里取（<code>useDict(code)</code>），页面里不再写死枚举数组。</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ══ 字典：类型新建/编辑（code 可改，但会清缓存）══ -->
+      <div class="modal hide" id="dictTypeModal">
+        <div class="box" style="width:min(520px,92vw)">
+          <div class="h"><span id="dtTitle">编辑字典类型</span><span class="btn link" onclick="closeModal('dictTypeModal')">✕</span></div>
+          <div class="b">
+            <div class="fgrid fgrid1">
+              <label>字典名称 <span class="req">*</span></label><div><input class="inp w100" value="用户状态"></div>
+              <label>字典类型编码 <span class="req">*</span></label>
+              <div><input class="inp w100 mono" value="sys_user_status">
+                <div class="fhint">改编码会清该字典缓存（dataPanel <code>ClearDictCache(oldType)</code>）</div></div>
+              <label>状态</label>
+              <div><select class="inp w100"><option>正常</option><option>停用</option></select>
+                <div class="fhint">停用 ⇒ 清缓存（前端下拉立即空）；重新启用 ⇒ 刷新缓存</div></div>
+              <label>备注</label><div><input class="inp w100" placeholder="可选"></div>
+            </div>
+          </div>
+          <div class="f"><button class="btn" onclick="closeModal('dictTypeModal')">取消</button><button class="btn pri" onclick="closeModal('dictTypeModal')">保存</button></div>
+        </div>
+      </div>
+
+      <!-- ══ 字典：值新建/编辑（label / value / listClass / sort / status）══ -->
+      <div class="modal hide" id="dictItemModal">
+        <div class="box" style="width:min(560px,92vw)">
+          <div class="h"><span id="diTitle">新建字典项</span><span class="btn link" onclick="closeModal('dictItemModal')">✕</span></div>
+          <div class="b">
+            <div class="fgrid">
+              <label>标签 <span class="req">*</span></label><div><input class="inp w100" placeholder="如：正常"></div>
+              <label>值 <span class="req">*</span></label>
+              <div><input class="inp w100 mono" placeholder="如：normal">
+                <div class="fhint">同类型下唯一（唯一键 <code>(type_id, value)</code>）</div></div>
+              <label>标签样式</label>
+              <div><select class="inp w100">
+                <option>default（默认）</option><option>primary（主色蓝）</option><option>success（成功绿）</option>
+                <option>info（信息灰蓝）</option><option>warning（警告黄）</option><option>danger（危险红）</option>
+              </select><div class="fhint">前端 <code>DictTag</code> 直接映射 antd Tag 颜色</div></div>
+              <label>排序</label><div><input class="inp w100" type="number" value="1"></div>
+              <label>状态</label><div><select class="inp w100"><option>正常</option><option>停用</option></select></div>
+              <label>备注</label><div><input class="inp w100" placeholder="可选"></div>
+            </div>
+            <div class="note" style="margin:12px 0 0">
+              <b>XHS 不搬 <code>belong</code></b>：dataPanel 那个字段是给「同一字典按平台不同值」用的（如 <code>freight_valuation_type@wechat_shop</code>）。
+              XHS 只有小红书一条线，多一列就是没人用的维度 —— 二期接抖音时若真出现「同字典不同平台值」，再按 <code>{prefix}_{platform}</code> 另开一组字典，
+              而不是加列（这是 AGENTS 里「枚举禁写死、平台差异用字典」的既定做法）。
+            </div>
+          </div>
+          <div class="f"><button class="btn" onclick="closeModal('dictItemModal')">取消</button><button class="btn pri" onclick="closeModal('dictItemModal')">保存</button></div>
+        </div>
+      </div>
+
+      <!-- ───── 配置管理 ───── -->
+      <div id="p-settings" class="hide">
+        <div class="card">
+          <div class="card-h"><span>配置管理</span>
+            <span class="row">
+              <span class="btn" style="background:rgba(22,104,220,.15);color:var(--pri)">全部</span>
+              <span class="btn">同步与限流</span><span class="btn">调度</span><span class="btn">发布与风控</span>
+              <span class="btn">AI 能力</span><span class="btn">全局</span>
+              <button class="btn pri" data-perm="system:setting:create" onclick="openModal('cfgEditModal')">＋ 新增</button>
+              <button class="btn" data-perm="system:setting:edit" onclick="toast('POST /system/config/clear-cache ⇒ 全部配置缓存清空')">清除缓存</button>
+            </span></div>
+          <table>
+            <thead><tr><th style="width:230px">配置键</th><th style="width:110px">值</th><th style="width:90px">归属</th>
+              <th>说明</th><th style="width:110px">生效性</th><th style="width:110px">操作</th></tr></thead>
+            <tbody>
+              <tr><td class="mono">crawl_rate_limit_per_minute</td><td>8</td>
+                <td><span class="tag dft">用户</span></td><td>平台请求限流额度（次/分钟），等待式</td>
+                <td><span class="tag ok">实时生效</span></td>
+                <td><span class="btn link" data-perm="system:setting:edit" onclick="openModal('cfgEditModal')">编辑</span></td></tr>
+              <tr><td class="mono">xhs_sync_account_parallelism</td><td>3</td>
+                <td><span class="tag dft">用户</span></td><td>同步 worker 池大小</td>
+                <td><span class="tag ok">实时生效</span></td>
+                <td><span class="btn link" data-perm="system:setting:edit" onclick="openModal('cfgEditModal')">编辑</span></td></tr>
+              <tr><td class="mono">register.enabled</td><td>关</td>
+                <td><span class="tag info">全局</span></td><td>开放注册（全局，仅管理员可改）</td>
+                <td><span class="tag ok">实时生效</span></td>
+                <td><span class="btn link" data-perm="system:setting:edit" data-admin-only="1" onclick="openModal('cfgEditModal')">编辑</span></td></tr>
+              <tr><td class="mono">mail.enabled</td><td>关</td>
+                <td><span class="tag info">全局</span></td><td>邮件服务（验证码注册/改邮箱依赖它）</td>
+                <td><span class="tag ok">实时生效</span></td>
+                <td><span class="btn link" data-perm="system:setting:edit" data-admin-only="1" onclick="openModal('cfgEditModal')">编辑</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="note">
+          <b>归属两档</b>：<span class="tag dft">用户</span> = 每个用户各一份（现有语义，不改成全局表 —— 否则多用户各自调过的限流值要做合并策略）；
+          <span class="tag info">全局</span> = 影响所有用户，<b>非 admin 只读</b>（403 <code>SETTING_GLOBAL_READONLY</code>）。
+        </div>
+      </div>
+
+      <!-- ══ 配置：编辑/新增（值类型决定控件形态）══ -->
+      <div class="modal hide" id="cfgEditModal">
+        <div class="box" style="width:min(640px,94vw)">
+          <div class="h"><span id="cfgTitle">编辑配置 · crawl_rate_limit_per_minute</span><span class="btn link" onclick="closeModal('cfgEditModal')">✕</span></div>
+          <div class="b">
+            <div class="fgrid">
+              <label>配置键 <span class="req">*</span></label>
+              <div><input class="inp w100 mono" id="cfg-key" value="crawl_rate_limit_per_minute">
+                <div class="fhint">编辑态不可改（改键 = 删旧建新）</div></div>
+              <label>值类型</label>
+              <div><select class="inp w100" id="cfg-type" onchange="cfgValueCtl()">
+                <option>整数</option><option>小数</option><option>开关</option><option>文本</option><option>JSON</option></select></div>
+              <label>值 <span class="req">*</span></label>
+              <div id="cfg-value-ctl"><input class="inp w100" type="number" value="8"></div>
+              <label>分组</label><div><select class="inp w100"><option>同步与限流</option><option>调度</option><option>发布与风控</option><option>AI 能力</option><option>实验特性</option></select></div>
+              <label>归属</label>
+              <div><select class="inp w100" id="cfg-scope" onchange="cfgScopeHint()">
+                <option value="user">用户（每用户一份）</option><option value="global">全局（仅管理员可改）</option></select>
+                <div class="fhint" id="cfg-scope-hint">按 user_id 隔离，用户自己调自己的</div></div>
+              <label>说明</label><div><input class="inp w100" placeholder="用户可见的一句解释"></div>
+            </div>
+            <div class="row" style="margin-top:10px;gap:16px">
+              <label style="display:flex;align-items:center;gap:6px"><input type="checkbox"> 需重启生效</label>
+              <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" checked> 危险操作（二次确认）</label>
+            </div>
+            <div class="note" style="margin:12px 0 0">
+              <code>is_live</code> <b>不在这里配</b> —— 它由后端 <code>settings_service.LIVE_KEYS</code> 白名单<b>派生</b>：
+              有运行时读点 ⇒「实时生效」，否则「仅存档」。给没有读点的键配"实时生效"就是造假。
+            </div>
+          </div>
+          <div class="f"><button class="btn" onclick="closeModal('cfgEditModal')">取消</button><button class="btn pri" onclick="closeModal('cfgEditModal')">保存</button></div>
+        </div>
+      </div>
+
+      <!-- ───── 日志 ───── -->
+      <div id="p-logs" class="hide">
+        <div class="tabs">
+          <div class="tab on" onclick="logTab(this,'app')">应用日志</div>
+          <div class="tab" onclick="logTab(this,'audit')">审计日志</div>
+        </div>
+        <div id="log-app">
+          <div class="card">
+            <div class="card-h"><span>应用日志</span>
+              <span class="row"><input class="inp" style="min-width:130px" value="2026-10-23" type="date">
+              <select class="inp" style="min-width:100px"><option>30 行</option><option>50 行</option><option>100 行</option></select>
+              <button class="btn">刷新</button></span></div>
+            <div class="card-b" style="font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11.5px;line-height:1.9;color:var(--tx2);max-height:420px;overflow:auto">
+              <div>2026-10-23 22:14:03 INFO  [scheduler] watchdog tick · alive=True</div>
+              <div>2026-10-23 22:14:01 INFO  [note_sync] account=1 page=2 processed=4</div>
+              <div style="color:var(--warn)">2026-10-23 22:13:58 WARN  [platform_first] local missing ⇒ platform_only account=1</div>
+              <div>2026-10-23 22:13:44 INFO  [perms] reload user=2 perms=41</div>
+              <div style="color:var(--err)">2026-10-23 22:13:40 ERROR [crawl] www detail 429 · wait 12s</div>
+            </div>
+          </div>
+        </div>
+        <div id="log-audit" class="hide">
+          <div class="card">
+            <div class="card-h"><span>审计日志</span>
+              <span class="row"><select class="inp" style="min-width:110px"><option>全部结果</option><option>成功</option><option>无权限</option><option>服务端错误</option></select>
+              <input class="inp" placeholder="/api/system/users">
+              <button class="btn">查询</button></span></div>
+            <table>
+              <thead><tr><th style="width:70px">ID</th><th style="width:110px">用户</th><th style="width:230px">端点</th>
+                <th style="width:70px">方法</th><th style="width:90px">结果</th><th style="width:80px">耗时</th><th style="width:150px">时间</th></tr></thead>
+              <tbody>
+                <tr><td>1024</td><td>admin</td><td class="mono">/api/system/users/3/approve</td><td>POST</td>
+                  <td><span class="tag ok">success</span></td><td>23ms</td><td class="mono">10-23 22:13:02</td></tr>
+                <tr><td>1023</td><td>运营小明</td><td class="mono">/api/system/users/2</td><td>DELETE</td>
+                  <td><span class="tag err">client_error</span></td><td>4ms</td><td class="mono">10-23 22:12:51</td></tr>
+                <tr><td>1022</td><td>admin</td><td class="mono">/api/system/roles/2/menus</td><td>PUT</td>
+                  <td><span class="tag ok">success</span></td><td>31ms</td><td class="mono">10-23 22:11:40</td></tr>
+              </tbody>
+            </table>
+            <div class="card-b" style="border-top:1px solid var(--line2)"><span class="muted">审计<b>只读、不可删</b>（无任何删除端点）。</span></div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<!-- ══════════ 小红书工作区（示意侧栏来自后端菜单）══════════ -->
+<div class="app hide" id="ws-xhs">
+  <div class="sider">
+    <div class="grp">总览</div>
+    <div class="nav on"><span class="ic">▦</span>总览</div>
+    <div class="grp">平台</div>
+    <div class="nav"><span class="ic">🛡</span>账号矩阵</div>
+    <div class="nav"><span class="ic">◎</span>监控中心</div>
+    <div class="nav"><span class="ic">⚡</span>自动运营</div>
+    <div class="grp">内容线</div>
+    <div class="nav"><span class="ic">🔍</span>笔记发现</div>
+    <div class="nav"><span class="ic">📄</span>我的笔记</div>
+    <div class="nav"><span class="ic">🗄</span>内容库</div>
+    <div class="nav"><span class="ic">🛠</span>笔记工坊</div>
+    <div class="grp">店铺线</div>
+    <div class="nav"><span class="ic">📦</span>商品列表</div>
+    <div class="nav"><span class="ic">⚠</span>违规管理</div>
+    <div class="nav"><span class="ic">🖼</span>图片空间</div>
+    <div class="nav"><span class="ic">🛒</span>订单管理</div>
+  </div>
+  <div class="main">
+    <div class="crumb">小红书 / 商品列表</div>
+    <div class="content">
+      <div class="note">
+        <b>本页侧栏 100% 来自 <code>/api/auth/me</code> 的 <code>menus.xhs</code></b> —— 源码里不再有 29 个硬编码菜单 key。
+        <br>页面内「生成笔记 / 上架 / 下架 / 删除 / 同步」等按钮各挂一个权限码（<code>xhs:item:*</code>）。
+      </div>
+      <div class="card">
+        <div class="card-h"><span>商品列表</span>
+          <span class="row">
+            <button class="btn" data-perm="xhs:item:sync">同步商品</button>
+            <button class="btn" data-perm="xhs:item:export">导出</button>
+            <button class="btn dgr" data-perm="xhs:item:delete">批量删除</button>
+          </span></div>
+        <table>
+          <thead><tr><th style="width:60px">勾选</th><th>商品信息</th><th style="width:90px">价格</th>
+            <th style="width:80px">库存</th><th style="width:100px">状态</th><th style="width:250px">操作</th></tr></thead>
+          <tbody>
+            <tr><td><input type="checkbox"></td>
+              <td><div class="row" style="gap:8px"><span style="width:34px;height:34px;background:#2a2a2a;border-radius:4px;display:inline-block"></span>
+              <span>中古风三斗柜 · 胡桃色<br><span class="mono muted">6a5021ab82e31900154f4458</span></span></div></td>
+              <td>￥899</td><td>12</td><td><span class="tag ok">售卖中</span></td>
+              <td>
+                <span class="btn link" data-perm="xhs:item:generateNote">生成笔记</span>
+                <span class="btn link" data-perm="xhs:item:edit">编辑</span>
+                <span class="btn link" data-perm="xhs:item:offShelf">下架</span>
+                <span class="btn link dgr" data-perm="xhs:item:delete">删除</span>
+              </td></tr>
+            <tr><td><input type="checkbox"></td>
+              <td><div class="row" style="gap:8px"><span style="width:34px;height:34px;background:#2a2a2a;border-radius:4px;display:inline-block"></span>
+              <span>北欧原木边几<br><span class="mono muted">6a5021ab82e31900154f4459</span></span></div></td>
+              <td>￥329</td><td>0</td><td><span class="tag dft">已下架</span> <span class="tag warn">库存风险</span></td>
+              <td>
+                <span class="btn link" data-perm="xhs:item:generateNote">生成笔记</span>
+                <span class="btn link" data-perm="xhs:item:edit">编辑</span>
+                <span class="btn link" data-perm="xhs:item:onShelf">上架</span>
+                <span class="btn link dgr" data-perm="xhs:item:delete">删除</span>
+              </td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════ 大模型网关 ══════════ -->
+<div class="app hide" id="ws-ai">
+  <div class="sider">
+    <div class="grp">大模型网关</div>
+    <div class="nav on"><span class="ic">📊</span>用量看板</div>
+    <div class="nav"><span class="ic">🔌</span>服务商</div>
+    <div class="nav"><span class="ic">🔔</span>预警规则</div>
+    <div class="grp">模型</div>
+    <div class="nav"><span class="ic">🤖</span>模型配置</div>
+  </div>
+  <div class="main">
+    <div class="crumb">大模型网关 / 用量看板</div>
+    <div class="content">
+      <div class="note">工作区与平台同源（G4）：<code>platforms.enabled</code> 决定卡片，<code>me.workspaces</code> 决定可见。</div>
+      <div class="grid3">
+        <div class="kpi"><div class="l">今日调用</div><div class="v">1,284</div><div class="muted">成功 1,271</div></div>
+        <div class="kpi"><div class="l">今日 Tokens</div><div class="v">3.2M</div><div class="muted">均耗 1.4s</div></div>
+        <div class="kpi"><div class="l">预警</div><div class="v" style="color:var(--warn)">2</div><div class="muted">额度 1 / 失败率 1</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════ 角色授权弹窗 ══════════ -->
+<div class="modal hide" id="menuModal">
+  <div class="box">
+    <div class="h"><span>分配菜单权限 · 运营专员</span><span class="btn link" onclick="closeMenuTree()">✕</span></div>
+    <div class="b">
+      <div class="note" style="margin-top:0">
+        <b>按钮行也要勾</b>：父级半选时保存会把父级一起写进去（回填取 <code>checked ∪ halfChecked</code>），
+        否则保存后再打开父级全空 —— 这是 dataPanel 那版的已知坑。
+      </div>
+      <div class="tree">
+        <div><span class="chk ck"></span>📕 小红书</div>
+        <div class="lv2"><span class="chk ck"></span>📄 我的笔记</div>
+        <div class="lv3"><span class="chk ck"></span>同步 <span class="perm">xhs:note:sync</span></div>
+        <div class="lv3"><span class="chk ck"></span>发布 <span class="perm">xhs:note:publish</span></div>
+        <div class="lv3"><span class="chk"></span>删除 <span class="perm">xhs:note:delete</span></div>
+        <div class="lv2"><span class="chk half"></span>📦 商品列表</div>
+        <div class="lv3"><span class="chk ck"></span>查看 <span class="perm">xhs:item:view</span></div>
+        <div class="lv3"><span class="chk"></span>上架 <span class="perm">xhs:item:onShelf</span></div>
+        <div class="lv3"><span class="chk"></span>删除 <span class="perm">xhs:item:delete</span></div>
+        <div style="opacity:.4"><span class="chk"></span>🎵 抖音 <span class="tag warn">未启用</span></div>
+        <div><span class="chk"></span>⚙ 系统管理</div>
+        <div class="lv2"><span class="chk ck"></span>用户管理 <span class="perm">system:user:view</span></div>
+      </div>
+    </div>
+    <div class="f"><button class="btn" onclick="closeMenuTree()">取消</button><button class="btn pri" onclick="closeMenuTree()">保存</button></div>
+  </div>
+</div>
+
+<script>
+  // ── 工作区切换 ──
+  function go(id){
+    document.querySelectorAll('.app').forEach(e=>e.classList.add('hide'));
+    document.getElementById(id).classList.remove('hide');
+    document.querySelectorAll('.wstab').forEach(t=>t.classList.toggle('on', t.dataset.ws===id));
+    window.scrollTo(0,0);
+  }
+  // ── 系统管理内页切换 ──
+  function page(p){
+    document.querySelectorAll('#ws-system .nav').forEach(n=>n.classList.toggle('on',n.dataset.p===p));
+    ['users','roles','menus','dicts','settings','logs'].forEach(k=>{
+      document.getElementById('p-'+k).classList.toggle('hide',k!==p);
+    });
+    const names={users:'用户管理',roles:'角色管理',menus:'菜单管理',dicts:'字典管理',settings:'配置管理',logs:'日志查看'};
+    document.getElementById('crumb').textContent='系统管理 / '+names[p];
+    window.scrollTo(0,0);
+  }
+  // ── 字典选中 ──
+  function pickType(tr,code,name){
+    document.querySelectorAll('#dictTypes tr').forEach(r=>r.style.background='');
+    tr.style.background='rgba(22,104,220,.1)';
+    document.getElementById('curType').textContent=code;
+  }
+  // ── 日志 Tab ──
+  function logTab(el,k){
+    el.parentNode.querySelectorAll('.tab').forEach(t=>t.classList.remove('on'));
+    el.classList.add('on');
+    document.getElementById('log-app').classList.toggle('hide',k!=='app');
+    document.getElementById('log-audit').classList.toggle('hide',k!=='audit');
+  }
+  // ── 授权树弹窗 ──
+  function openMenuTree(){document.getElementById('menuModal').classList.remove('hide');}
+  function closeMenuTree(){document.getElementById('menuModal').classList.add('hide');}
+
+  // ── 权限模拟（这是本预览的核心：验证按钮级粒度）──
+  const ALL_ADMIN = { 'system:user:create':1,'system:user:edit':1,'system:user:delete':1,
+    'system:user:resetPassword':1,'system:user:forceLogout':1,'system:user:approve':1,
+    'system:role:create':1,'system:role:edit':1,'system:role:delete':1,'system:role:assignMenu':1,
+    'system:menu:create':1,'system:menu:edit':1,'system:menu:delete':1,
+    'system:dict:create':1,'system:dict:edit':1,'system:dict:delete':1,
+    'system:setting:create':1,'system:setting:edit':1,
+    'xhs:item:sync':1,'xhs:item:export':1,'xhs:item:delete':1,'xhs:item:edit':1,
+    'xhs:item:onShelf':1,'xhs:item:offShelf':1,'xhs:item:generateNote':1 };
+  // user 角色：只读 + 审核 + 同步商品（其余变更全不可见）
+  const USER_PERMS = { 'system:user:approve':1, 'xhs:item:sync':1 };
+  let role='admin';
+  function setRole(r){
+    role=r;
+    document.querySelectorAll('[data-perm]').forEach(el=>{
+      const code=el.dataset.perm;
+      const has = (r==='admin') || !!USER_PERMS[code];
+      // 全局设置项：非 admin 一律不可改（SETTING_GLOBAL_READONLY）
+      const adminOnly = el.dataset.adminOnly==='1' && r!=='admin';
+      const ok = has && !adminOnly;
+      if(el.classList.contains('btn') && el.classList.contains('link')){
+        el.style.display = ok ? '' : 'none';
+      }else{
+        el.style.display = ok ? '' : 'none';
+      }
+    });
+    document.getElementById('asAdmin').classList.toggle('pri', r==='admin');
+    document.getElementById('asUser').classList.toggle('pri', r==='user');
+    const total=document.querySelectorAll('[data-perm]').length;
+    const vis=[...document.querySelectorAll('[data-perm]')].filter(e=>e.style.display!=='none').length;
+    document.getElementById('permCount').textContent =
+      r==='admin' ? `权限 ${total}/${total}（admin 派生全量）` : `可见变更按钮 ${vis}/${total}（user 只读 + 审核）`;
+  }
+  // ── 非阻塞提示（替代 alert：alert 会冻结 JS 线程，预览里会卡死）──
+  let toastTimer = null;
+  function toast(msg){
+    const el = document.getElementById('toast');
+    el.textContent = msg;
+    el.classList.add('on');
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove('on'), 2600);
+  }
+
+  // ── 通用弹窗 ──
+  function openModal(id){
+    // 弹窗内的变更操作同样受权限码约束：这里统一兜一层
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.classList.remove('hide');
+  }
+  function closeModal(id){ document.getElementById(id).classList.add('hide'); }
+
+  // ── 用户：编辑 / 新建（dataPanel 同款：编辑态禁改 username / email / identityType）──
+  function openUserEdit(uid){
+    const isNew = uid === 0;
+    document.getElementById('userEditTitle').textContent = isNew ? '新建用户' : '编辑用户';
+    const u = document.getElementById('ue-username');
+    const em = document.getElementById('ue-email');
+    const idn = document.getElementById('ue-identity');
+    const pwd = document.getElementById('ue-password');
+    if (isNew){
+      u.value = ''; em.value = ''; pwd.value = '';
+      document.getElementById('ue-realname').value = '';
+      document.getElementById('ue-phone').value = '';
+      idn.value = 'user';
+      u.disabled = false; em.disabled = false; idn.disabled = false; pwd.parentElement.style.display = '';
+    } else {
+      u.value = uid === 1 ? 'admin' : (uid === 2 ? '运营小明' : '新人小李');
+      em.value = uid === 1 ? '' : (uid === 2 ? 'ops@corp.com' : 'li@corp.com');
+      document.getElementById('ue-realname').value = uid === 1 ? '管理员' : (uid === 2 ? '王小明' : '李四');
+      document.getElementById('ue-phone').value = '';
+      idn.value = uid === 1 ? 'admin' : 'user';
+      // 三个字段编辑态只读（dataPanel disabled={!!editingUser}）
+      u.disabled = true; em.disabled = true; idn.disabled = true;
+      pwd.parentElement.style.display = 'none';   // 编辑态不显示密码框
+    }
+    // style 上的 disabled 对 select 生效，但 input 需同步视觉（灰化）
+    [u, em, idn].forEach(el2 => { el2.style.opacity = el2.disabled ? .55 : 1; el2.style.cursor = el2.disabled ? 'not-allowed' : ''; });
+    openModal('userEditModal');
+  }
+
+  // 重置密码：min6 + 两次一致
+  function checkPwd(submit){
+    const a = document.getElementById('rp-new').value;
+    const b = document.getElementById('rp-confirm').value;
+    const e1 = document.getElementById('rp-err1');
+    const e2 = document.getElementById('rp-err2');
+    e1.textContent = (a && a.length < 6) ? '密码至少 6 位' : '';
+    e2.textContent = (b && a !== b) ? '两次输入的密码不一致' : '';
+    const ok = a.length >= 6 && a === b;
+    if (submit){
+      if (!ok){ if (!e1.textContent && !e2.textContent) e1.textContent = '请完整填写'; return; }
+      closeModal('resetPwdModal');
+      toast('已重置：该用户 token_version + 1 ⇒ 所有设备立即掉线');
+    }
+    return ok;
+  }
+
+  // ── 角色：新建 / 编辑（code 编辑态禁改）──
+  function openRoleEdit(rid){
+    const isNew = rid === 0;
+    document.getElementById('roleEditTitle').textContent = isNew ? '新建角色' : '编辑角色';
+    const name = document.getElementById('re-name');
+    const code = document.getElementById('re-code');
+    const desc = document.getElementById('re-desc');
+    if (isNew){ name.value=''; code.value=''; desc.value=''; code.disabled=false; code.style.opacity=1; }
+    else {
+      name.value = rid === 3 ? '运营专员' : (rid === 2 ? '普通用户' : '超级管理员');
+      code.value = rid === 3 ? 'operator' : (rid === 2 ? 'user' : 'admin');
+      desc.value = rid === 3 ? '内容线全量，店铺线只读' : '';
+      code.disabled = true; code.style.opacity = .55;
+    }
+    openModal('roleEditModal');
+  }
+
+  // ── 菜单：新增 / 编辑 ──
+  function openMenuEdit(mid){
+    document.getElementById('menuEditTitle').textContent = mid === 0 ? '新增菜单' : '编辑菜单';
+    openModal('menuEditModal');
+    menuTypeHint();
+  }
+  function menuTypeHint(){
+    const v = document.getElementById('me-type').value;
+    const h = document.getElementById('me-type-hint');
+    h.textContent = v === 'F'
+      ? 'F 行：只填权限标识，必须挂在 C 行下（否则 422）'
+      : (v === 'M' ? 'M 行：只作分组，不绑路由、不绑权限码' : 'C 行：必填路由 + 权限标识');
+  }
+
+  // ── 配置：值类型决定控件 / 归属说明 ──
+  function cfgValueCtl(){
+    const t = document.getElementById('cfg-type').value;
+    const box = document.getElementById('cfg-value-ctl');
+    if (t === '开关') box.innerHTML = '<span class="switch on"></span> <span class="stxt">开</span>';
+    else if (t === '整数') box.innerHTML = '<input class="inp w100" type="number" value="8">';
+    else if (t === '小数') box.innerHTML = '<input class="inp w100" type="number" step="0.01" value="0.5">';
+    else if (t === 'JSON') box.innerHTML = '<input class="inp w100 mono" value="{}">';
+    else box.innerHTML = '<input class="inp w100" value="">';
+  }
+  function cfgScopeHint(){
+    const v = document.getElementById('cfg-scope').value;
+    const h = document.getElementById('cfg-scope-hint');
+    h.textContent = v === 'global'
+      ? '全局一份，影响所有用户 ⇒ 仅 admin 可写（否则 403 SETTING_GLOBAL_READONLY）'
+      : '按 user_id 隔离，用户自己调自己的';
+  }
+
+  setRole('admin');
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') document.querySelectorAll('.modal:not(.hide)').forEach(m => m.classList.add('hide'));
+  });
+
+  // ── 菜单启停演示（真机是 PUT /system/menus/{id} {status}）──
+  let douyinEnabled = false;
+  document.querySelectorAll('.switch[data-menu]').forEach(sw => {
+    const on = sw.classList.contains('on');
+    const txt = sw.parentElement.querySelector('.stxt');
+    sw.dataset.on = on ? '1' : '0';
+    sw.addEventListener('click', () => {
+      // 停用是变更操作：需要 system:menu:edit
+      if (role !== 'admin') { toast('没有 system:menu:edit 权限 —— 该开关不可操作'); return; }
+      const cur = sw.dataset.on === '1';
+      const next = !cur;
+      sw.dataset.on = next ? '1' : '0';
+      sw.classList.toggle('on', next);
+      if (txt) { txt.textContent = next ? '启用' : '停用'; txt.style.color = next ? 'var(--tx2)' : 'var(--tx3)'; }
+      const row = sw.closest('tr');
+      if (row) row.style.opacity = next ? '' : '.5';
+      if (sw.dataset.platformRow === '1') {
+        douyinEnabled = next;
+        const hint = document.getElementById('row-douyin-hint');
+        if (hint) hint.querySelector('td').innerHTML = next
+          ? '　　平台已接入 ⇒ 菜单启用：工作区卡片「抖音」已出现（顶栏）。<b>不需要改代码</b>。'
+          : '　　平台未接入 ⇒ 菜单停用（种子写入即 disabled）。<b>接入后打开这个开关即可</b>：菜单、权限码、工作区卡片同时出现，不改代码。';
+        const tab = document.querySelector('[data-ws="none-douyin"]');
+        if (tab) {
+          tab.style.opacity = next ? '' : '.45';
+          if (next && !tab.dataset.bound) {
+            tab.dataset.bound = '1';
+            tab.dataset.ws = 'none-douyin';
+            tab.onclick = () => toast('抖音工作区（模拟）：真实实现会进入 /platforms/douyin/*，侧栏菜单来自 /auth/me.menus.douyin');
+          }
+          tab.querySelector('.lock').textContent = next ? '' : '🔒';
+        }
+      }
+    });
+  });
+</script>
+<div id="toast"></div>
+</body>
+</html>

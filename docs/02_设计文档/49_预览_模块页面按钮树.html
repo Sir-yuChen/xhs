@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>v1.1.0 模块 · 页面 · 按钮 全量树</title>
+<style>
+  :root{--bg:#141414;--panel:#1a1a1a;--panel2:#1f1f1f;--line:#303030;--line2:#262626;
+    --tx:rgba(255,255,255,.88);--tx2:rgba(255,255,255,.6);--tx3:rgba(255,255,255,.38);
+    --pri:#1668dc;--ok:#52c41a;--warn:#faad14;--err:#ff4d4f;--new:#a855f7;--code:#7dd3fc}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--tx);font-size:13px;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+  ::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-thumb{background:#333;border-radius:4px}
+  .wrap{padding:14px 18px 40px}
+  h1{font-size:15px;margin:0 0 3px}
+  .sub{color:var(--tx3);font-size:11.5px;margin-bottom:12px}
+  .bar{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+  .btn{padding:3px 10px;border-radius:6px;border:1px solid var(--line);background:var(--panel2);
+    color:var(--tx);cursor:pointer;font-size:11.5px}
+  .btn.on{background:rgba(22,104,220,.16);border-color:rgba(22,104,220,.5);color:#4ea1ff}
+  .stats{display:flex;gap:8px;margin-left:auto;font-size:11px;color:var(--tx2)}
+  .stats b{color:var(--tx);font-size:13px}
+  code{background:rgba(255,255,255,.07);padding:1px 4px;border-radius:3px;font-size:10.5px;
+    font-family:ui-monospace,Menlo,Consolas,monospace;color:var(--code)}
+
+  /* 树 */
+  .tree{font-size:12.5px}
+  .mod{margin-bottom:6px;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--panel)}
+  .mh{padding:8px 12px;display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;
+    background:rgba(255,255,255,.02)}
+  .mh:hover{background:rgba(255,255,255,.045)}
+  .mh .tw{color:var(--tx3);font-size:10px;width:10px;transition:.12s}
+  .mod.open .mh .tw{transform:rotate(90deg)}
+  .mh .nm{font-weight:600}
+  .mh .path{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:10.5px;color:var(--tx3)}
+  .mh .cnt{margin-left:auto;font-size:10px;color:var(--tx3)}
+  .mb{padding:0 12px 10px;display:none}
+  .mod.open .mb{display:block}
+
+  .page{margin-top:8px;border-left:2px solid var(--line);padding-left:10px}
+  .ph{display:flex;align-items:center;gap:8px;padding:5px 0}
+  .ph .nm{font-weight:500}
+  .ph .cnt{font-size:10px;color:var(--tx3)}
+  .badge{font-size:9.5px;padding:0 5px;border-radius:3px;line-height:15px;border:1px solid transparent}
+  .b-new{background:rgba(168,85,247,.18);color:#c4a5ff;border-color:rgba(168,85,247,.45)}
+  .b-mod{background:rgba(250,173,20,.14);color:#ffd479;border-color:rgba(250,173,20,.4)}
+  .b-ro{background:rgba(255,255,255,.06);color:var(--tx3);border-color:var(--line)}
+
+  table{width:100%;border-collapse:collapse;margin:4px 0 2px;font-size:11.5px}
+  th{text-align:left;padding:5px 8px;color:var(--tx3);font-weight:400;border-bottom:1px solid var(--line2);font-size:10.5px}
+  td{padding:5px 8px;border-bottom:1px solid var(--line2);vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  tr:hover td{background:rgba(255,255,255,.02)}
+  td.c{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:10.5px;color:var(--code);white-space:nowrap}
+  td.ep{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:10.5px;color:var(--tx2)}
+  td.lg{color:var(--tx2);line-height:1.6;font-size:11px}
+  .mth{color:var(--pri);font-weight:600;font-size:10px}
+  .blank{color:var(--tx3)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>v1.1.0 模块 · 页面 · 按钮 全量树</h1>
+  <div class="sub">点模块展开 → 每页一张按钮表（按钮 / 权限码 / 端点 / 按钮逻辑）｜ <b style="color:#ffd479">每个页面都有一条查看码，纯只读页也不例外</b></div>
+
+  <div class="bar">
+    <button class="btn on" data-f="all">全部</button>
+    <button class="btn" data-f="new">仅新增模块</button>
+    <button class="btn" data-f="mod">仅改造业务页</button>
+    <button class="btn" onclick="document.querySelectorAll('.mod').forEach(m=>m.classList.add('open'))">全部展开</button>
+    <button class="btn" onclick="document.querySelectorAll('.mod').forEach(m=>m.classList.remove('open'))">全部收起</button>
+    <div class="stats">
+      <span>模块 <b>9</b></span><span>页面 <b>30</b></span><span>权限码 <b>161</b></span><span>端点 <b>+37</b></span>
+    </div>
+  </div>
+
+  <div class="tree" id="tree">
+
+    <!-- ══════════ 模块一 用户管理 ══════════ -->
+    <div class="mod open" data-g="new">
+      <div class="mh" onclick="this.parentElement.classList.toggle('open')">
+        <span class="tw">▶</span><span class="nm">① 用户管理</span>
+        <span class="path">/system/users</span>
+        <span class="cnt">10 码 · 14 按钮</span>
+      </div>
+      <div class="mb">
+        <table>
+          <tr><th style="width:130px">按钮</th><th style="width:170px">权限码</th><th style="width:200px">端点</th><th>按钮逻辑</th></tr>
+          <tr><td>进页 / 查询 / 翻页</td><td class="c">system:user:view</td><td class="ep">GET /api/system/users</td>
+            <td class="lg">无码 ⇒ 跳 /403。加载走 WaitMask，13 列含「默认口令」Tag 与「在线」Tag</td></tr>
+          <tr><td>＋新建用户</td><td class="c">system:user:create</td><td class="ep">POST /api/system/users</td>
+            <td class="lg">唯一性 username/email；建号 status=normal + must_change_password=1；409 ⇒ 字段级红字</td></tr>
+          <tr><td>编辑</td><td class="c">system:user:edit</td><td class="ep">PUT /users/{id}</td>
+            <td class="lg"><b>禁改</b> 用户名/邮箱/角色（等同换账号）；改 status=disabled ⇒ token_version+1 立即踢</td></tr>
+          <tr><td>分配角色</td><td class="c">system:user:edit</td><td class="ep">PUT /users/{id}</td>
+            <td class="lg">单角色（Radio，非 Checkbox）；停用角色不显示；改完 token_version+1；P6/P7 保护</td></tr>
+          <tr><td>启用/停用 Switch</td><td class="c">system:user:edit</td><td class="ep">PUT /users/{id}</td>
+            <td class="lg">改自己 ⇒ disabled；最后一个 admin ⇒ disabled + title 原因</td></tr>
+          <tr><td>重置密码</td><td class="c">system:user:resetPassword</td><td class="ep">POST /{id}/reset-password</td>
+            <td class="lg">min6 + 两次一致；写 hash + token_version+1 + must_change_password=1 ⇒ 全设备下线</td></tr>
+          <tr><td>强制下线</td><td class="c">system:user:forceLogout</td><td class="ep">POST /{id}/force-logout</td>
+            <td class="lg">仅 online 行显示；token_version+1；该用户下次请求即 401</td></tr>
+          <tr><td>通过审核</td><td class="c">system:user:approve</td><td class="ep">POST /{id}/approve</td>
+            <td class="lg">仅 pending 行显示；pending→normal</td></tr>
+          <tr><td>删除</td><td class="c">system:user:delete</td><td class="ep">DELETE /users/{id}</td>
+            <td class="lg">不能删自己；最后一个 admin ⇒ 409；⚠️ <b>软删 or 物理删待定</b>（见文档 §1.2 B9）</td></tr>
+          <tr><td>导出 CSV / 列设置 / 刷新</td><td class="c">system:user:view</td><td class="ep">GET ?export=csv</td>
+            <td class="lg">导出不带密码 hash；列设置按 user+page 持久化</td></tr>
+        </table>
+      </div>
+    </div>
+
+    <!-- ══════════ 模块二 角色管理 ══════════ -->
+    <div class="mod" data-g="new">
+      <div class="mh" onclick="this.parentElement.classList.toggle('open')">
+        <span class="tw">▶</span><span class="nm">② 角色管理</span>
+        <span class="path">/system/roles</span><span class="cnt">5 码 · 9 按钮</span>
+      </div>
+      <div class="mb">
+        <table>
+          <tr><th style="width:130px">按钮</th><th style="width:170px">权限码</th><th style="width:200px">端点</th><th>按钮逻辑</th></tr>
+          <tr><td>列表 / 看已授权</td><td class="c">system:role:view</td><td class="ep">GET /system/roles</td>
+            <td class="lg">2 内置（is_system=1）+ 自定义；显示 user_count 供删除预判</td></tr>
+          <tr><td>＋新建角色</td><td class="c">system:role:create</td><td class="ep">POST /system/roles</td>
+            <td class="lg">code 小写字母数字下划线 + 唯一；编辑态 code 禁改</td></tr>
+          <tr><td>编辑</td><td class="c">system:role:edit</td><td class="ep">PUT /roles/{id}</td>
+            <td class="lg">内置角色：可改名称/描述/排序，<b>禁改 code、禁停用</b>（dataPanel 漏了这个拦截）</td></tr>
+          <tr><td>启用/停用</td><td class="c">system:role:edit</td><td class="ep">PUT /roles/{id}</td>
+            <td class="lg">内置恒 normal；停用后该角色下用户无法分配</td></tr>
+          <tr><td>删除</td><td class="c">system:role:delete</td><td class="ep">DELETE /roles/{id}</td>
+            <td class="lg">is_system ⇒ 409；有用户占用 ⇒ 409 ROLE_IN_USE</td></tr>
+          <tr><td>分配菜单「打开」</td><td class="c">system:role:view</td><td class="ep">GET /roles/{id}/menus</td>
+            <td class="lg">Tree checkable；回填 = checked ∪ halfChecked</td></tr>
+          <tr><td><b>分配菜单「保存」</b></td><td class="c">system:role:assignMenu</td><td class="ep">PUT /roles/{id}/menus</td>
+            <td class="lg">事务先删后插；admin 角色禁改（403）；<b>受影响用户 token_version+1</b></td></tr>
+          <tr><td>管理用户「查看」</td><td class="c">system:role:view</td><td class="ep">GET /roles/{id}/users</td>
+            <td class="lg">表格 + 移除；「＋添加用户」子弹窗按邮箱精确搜</td></tr>
+          <tr><td>管理用户「保存」</td><td class="c">system:role:assignMenu</td><td class="ep">PUT /roles/{id}/users</td>
+            <td class="lg">对比差异增删；P6 保护 admin</td></tr>
+        </table>
+      </div>
+    </div>
+
+    <!-- ══════════ 模块三 菜单管理 ══════════ -->
+    <div class="mod" data-g="new">
+      <div class="mh" onclick="this.parentElement.classList.toggle('open')">
+        <span class="tw">▶</span><span class="nm">③ 菜单管理</span>
+        <span class="path">/system/menus</span><span class="cnt">4 码 · 11 按钮</span>
+      </div>
+      <div class="mb">
+        <table>
+          <tr><th style="width:130px">按钮</th><th style="width:170px">权限码</th><th style="width:200px">端点</th><th>按钮逻辑</th></tr>
+          <tr><td>树表 / 搜索 / 预览</td><td class="c">system:menu:view</td><td class="ep">GET /menus/tree</td>
+            <td class="lg">M/C/F 三级；搜索保父子链；预览是只读 Descriptions</td></tr>
+          <tr><td>＋新增菜单</td><td class="c">system:menu:create</td><td class="ep">POST /menus</td>
+            <td class="lg">12 字段；F 行必须挂 C 行下；perms/path 各自全局唯一</td></tr>
+          <tr><td>编辑</td><td class="c">system:menu:edit</td><td class="ep">PUT /menus/{id}</td>
+            <td class="lg">M/C/F 联动：M 不填 path/perms，C 必填 path+perms，F 只填 perms</td></tr>
+          <tr><td><b>启用/停用 Switch</b></td><td class="c">system:menu:edit</td><td class="ep">PUT /menus/{id}</td>
+            <td class="lg">★ 抖音/闲鱼接入开关。<b>不静默级联</b>（停 C 不改 F）；停用只清缓存<b>不踢人</b></td></tr>
+          <tr><td>拖拽排序</td><td class="c">system:menu:edit</td><td class="ep">POST /menus/reorder</td>
+            <td class="lg">只改 sort_order，不跨父移动（避免成环）</td></tr>
+          <tr><td>删除</td><td class="c">system:menu:delete</td><td class="ep">DELETE /menus/{id}</td>
+            <td class="lg">必须输入菜单名；有子节点 ⇒ 409；被引用 ⇒ 409（<b>不级联</b>）</td></tr>
+          <tr><td colspan="4" class="lg" style="color:var(--tx3)">（同一套 6 个入口在行内与顶部各渲染，故实例 11 个，码仍 4 个）</td></tr>
+        </table>
+      </div>
+    </div>
+
+    <!-- ══════════ 模块四 字典管理 ══════════ -->
+    <div class="mod" data-g="new">
+      <div class="mh" onclick="this.parentElement.classList.toggle('open')">
+        <span class="tw">▶</span><span class="nm">④ 字典管理</span>
+        <span class="path">/system/dicts</span><span class="cnt">4 码 · 12 按钮</span>
+      </div>
+      <div class="mb">
+        <table>
+          <tr><th style="width:130px">按钮</th><th style="width:170px">权限码</th><th style="width:200px">端点</th><th>按钮逻辑</th></tr>
+          <tr><td>类型列表 / 项列表 / 业务页下拉</td><td class="c">system:dict:view</td><td class="ep">GET /dict/types · /dict/items</td>
+            <td class="lg">业务页 <code>useDict(code)</code> 是唯一读点；停用项不返回</td></tr>
+          <tr><td>＋新建类型</td><td class="c">system:dict:create</td><td class="ep">POST /dict/types</td>
+            <td class="lg">code 唯一；12 组内置禁改 code、禁删</td></tr>
+          <tr><td>＋新建项</td><td class="c">system:dict:create</td><td class="ep">POST /dict/items</td>
+            <td class="lg">UNIQUE(type_id,value)；list_class 颜色下拉带预览</td></tr>
+          <tr><td>编辑类型</td><td class="c">system:dict:edit</td><td class="ep">PUT /dict/types/{id}</td>
+            <td class="lg">改 code ⇒ 清旧 code 缓存；停用 ⇒ 清缓存（前端下拉立即空）</td></tr>
+          <tr><td>编辑项</td><td class="c">system:dict:edit</td><td class="ep">PUT /dict/items/{id}</td>
+            <td class="lg">改完清该 type_code 缓存</td></tr>
+          <tr><td>删除类型</td><td class="c">system:dict:delete</td><td class="ep">DELETE /dict/types/{id}</td>
+            <td class="lg">确认弹窗显示「将一并删除 N 项」；内置 ⇒ 409</td></tr>
+          <tr><td>删除项</td><td class="c">system:dict:delete</td><td class="ep">DELETE /dict/items/{id}</td>
+            <td class="lg">清缓存</td></tr>
+        </table>
+      </div>
+    </div>
+
+    <!-- ══════════ 模块五 配置管理 ══════════ -->
+    <div class="mod" data-g="new">
+      <div class="mh" onclick="this.parentElement.classList.toggle('open')">
+        <span class="tw">▶</span><span class="nm">⑤ 配置管理</span>
+        <span class="path">/system/settings</span><span class="cnt">4 码 · 7 按钮</span>
+      </div>
+      <div class="mb">
+        <table>
+          <tr><th style="width:130px">按钮</th><th style="width:170px">权限码</th><th style="width:200px">端点</th><th>按钮逻辑</th></tr>
+          <tr><td>列表 / 分组 Tab / 刷新</td><td class="c">system:setting:view</td><td class="ep">GET /api/settings</td>
+            <td class="lg">209 行 = 9 键 × 26 用户；<code>is_live</code> 由 LIVE_KEYS 派生，不可配</td></tr>
+          <tr><td>＋新增配置项</td><td class="c">system:setting:create</td><td class="ep">POST /api/settings</td>
+            <td class="lg">自定义键允许；scope 默认 user</td></tr>
+          <tr><td>编辑</td><td class="c">system:setting:edit</td><td class="ep">PUT /settings/{key}</td>
+            <td class="lg">值类型决定控件；<code>scope=global</code> 且非 admin ⇒ disabled + 403</td></tr>
+          <tr><td>删除（回落默认）</td><td class="c">system:setting:delete</td><td class="ep">DELETE /settings/{key}</td>
+            <td class="lg">响应带 <code>effective_value</code>，页面立刻显示恢复成什么</td></tr>
+          <tr><td>清除缓存</td><td class="c">system:setting:edit</td><td class="ep">POST /settings/clear-cache</td>
+            <td class="lg">新增端点（对应 dataPanel 的 config/clear-cache）</td></tr>
+        </table>
+      </div>
+    </div>
+
+    <!-- ══════════ 模块六 日志查看 ══════════ -->
+    <div class="mod" data-g="new">
+      <div class="mh" onclick="this.parentElement.classList.toggle('open')">
+        <span class="tw">▶</span><span class="nm">⑥ 日志查看</span>
+        <span class="path">/system/logs</span><span class="cnt">1 码 · 4 按钮（全只读）</span>
+      </div>
+      <div class="mb">
+        <table>
+          <tr><th style="width:130px">按钮</th><th style="width:170px">权限码</th><th style="width:200px">端点</th><th>按钮逻辑</th></tr>
+          <tr><td>应用日志 Tab</td><td class="c">system:log:view</td><td class="ep">GET /logs/app</td>
+            <td class="lg">读 logs/*.log 尾巴；无文件 ⇒ 空列表 + 原因（不 500）</td></tr>
+          <tr><td>审计日志 Tab</td><td class="c">system:log:view</td><td class="ep">GET /logs/audit</td>
+            <td class="lg">查 api_logs 70,325 行；<code>status_code</code> 走新列（可筛可索引）</td></tr>
+          <tr><td>审计详情</td><td class="c">system:log:view</td><td class="ep">GET /logs/audit/{id}</td>
+            <td class="lg">含 meta JSON（method/status_code/elapsed_ms）</td></tr>
+          <tr><td>日期/行数/自动刷新/筛选</td><td class="c">system:log:view</td><td class="ep">同上</td>
+            <td class="lg">自动刷新 1~10s 默认关；<b>无任何删除按钮</b>（P19 审计不可删）</td></tr>
+        </table>
+      </div>
+    </div>
+
+    <!-- ══════════ 模块七 个人资料 ══════════ -->
+    <div class="mod" data-g="new">
+      <div class="mh" onclick="this.parentElement.classList.toggle('open')">
+        <span class="tw">▶</span><span class="nm">⑦ 个人资料</span>
+        <span class="path">/profile</span><span class="cnt">0 码 · 5 按钮</span>
+      </div>
+      <div class="mb">
+        <table>
+          <tr><th style="width:130px">按钮</th><th style="width:170px">前置条件</th><th style="width:200px">端点</th><th>按钮逻辑</th></tr>
+          <tr><td>改姓名 / 手机号</td><td class="c">登录</td><td class="ep">PUT /auth/me</td><td class="lg">任何登录用户可改自己的</td></tr>
+          <tr><td>改头像</td><td class="c">登录</td><td class="ep">PUT /auth/me</td><td class="lg">base64 存储（与 dataPanel 一致）</td></tr>
+          <tr><td>改邮箱</td><td class="c">须验证码 ticket</td><td class="ep">POST /send-profile-code → /verify-profile-code → PUT /me</td>
+            <td class="lg">ticket 5 分钟一次性；无 ticket ⇒ 400</td></tr>
+          <tr><td>改密码</td><td class="c">旧密码</td><td class="ep">POST /auth/change-password</td>
+            <td class="lg">成功后 token_version+1 ⇒ 强制重新登录</td></tr>
+          <tr><td>首登强制改密弹窗</td><td class="c">must_change_password=1</td><td class="ep">同上</td>
+            <td class="lg"><b>不可跳过</b>（admin/admin123 种子的配套约束）</td></tr>
+        </table>
+      </div>
+    </div>
+
+    <!-- ══════════ 模块八 登录注册 ══════════ -->
+    <div class="mod" data-g="new">
+      <div class="mh" onclick="this.parentElement.classList.toggle('open')">
+        <span class="tw">▶</span><span class="nm">⑧ 登录 / 注册</span>
+        <span class="path">/login</span><span class="cnt">0 码 · 4 按钮</span>
+      </div>
+      <div class="mb">
+        <table>
+          <tr><th style="width:130px">按钮</th><th style="width:170px">前置条件</th><th style="width:200px">端点</th><th>按钮逻辑</th></tr>
+          <tr><td>登录</td><td class="c">—</td><td class="ep">POST /auth/login</td>
+            <td class="lg">pending ⇒ 403 USER_PENDING（<b>不是 401</b>）；disabled ⇒ 403；5 次失败 ⇒ 429</td></tr>
+          <tr><td>发送验证码</td><td class="c">register_enabled=true</td><td class="ep">POST /auth/send-register-code</td>
+            <td class="lg">6 位数字 / 5 分钟 / 60s 限频；邮箱已注册 ⇒ 409</td></tr>
+          <tr><td>提交注册</td><td class="c">同上</td><td class="ep">POST /auth/register</td>
+            <td class="lg">校验验证码（用后即毁）→ 落 status=pending → 等审核</td></tr>
+          <tr><td>去注册 / 回登录</td><td class="c">—</td><td class="ep">—</td>
+            <td class="lg">register_enabled=false ⇒ 不显示入口；直接访问 /register ⇒ 提示 + 回登录</td></tr>
+        </table>
+      </div>
+    </div>
+
+    <!-- ══════════ 模块九 业务页挂码 ══════════ -->
+    <div class="mod" data-g="mod">
+      <div class="mh" onclick="this.parentElement.classList.toggle('open')">
+        <span class="tw">▶</span><span class="nm">⑨ 业务页按钮挂码（改造）</span>
+        <span class="path">/platforms/xhs/* · /llm-gateway/* · /models</span>
+        <span class="cnt">22 页 · 114 码</span>
+      </div>
+      <div class="mb">
+        <div class="page">
+          <div class="ph"><span class="nm">账号矩阵</span><span class="path">/platforms/xhs/accounts</span>
+            <span class="cnt">9 码 · <span class="badge b-mod">改造</span></span></div>
+          <table>
+            <tr><th style="width:150px">按钮</th><th style="width:170px">权限码</th><th>按钮逻辑要点</th></tr>
+            <tr><td>新增账号</td><td class="c">xhs:account:create</td><td class="lg">导入 Cookie 或扫码；账号唯一键 (user,platform,external_id)</td></tr>
+            <tr><td>编辑 / 删除</td><td class="c">xhs:account:edit / :delete</td><td class="lg">软删（deleted_at）；删后其账号 cookies 保留可复活</td></tr>
+            <tr><td>导入 Cookie</td><td class="c">xhs:account:importCookie</td><td class="lg">写 account_cookie_versions（历史版本保留）</td></tr>
+            <tr><td>重新登录</td><td class="c">xhs:account:relogin</td><td class="lg">弹二维码；走 login_sessions</td></tr>
+            <tr><td>探活</td><td class="c">xhs:account:probe</td><td class="lg"><b>只读</b>探活（www 两跳）</td></tr>
+            <tr><td>同步笔记 / 商品笔记 / 店铺商品</td><td class="c">xhs:account:syncNotes · syncGoodsNotes · syncShopGoods</td>
+              <td class="lg">三个独立后台任务（源不同，不可合并）</td></tr>
+          </table>
+        </div>
+
+        <div class="page">
+          <div class="ph"><span class="nm">我的笔记</span><span class="path">/platforms/xhs/my-notes</span>
+            <span class="cnt">10 码 · <span class="badge b-mod">改造</span></span></div>
+          <table>
+            <tr><th style="width:150px">按钮</th><th style="width:170px">权限码</th><th>按钮逻辑要点</th></tr>
+            <tr><td>同步 / 批量同步</td><td class="c">xhs:note:sync · batchSync</td><td class="lg"><b>同码</b>（后端接口唯一）；入队即返回</td></tr>
+            <tr><td>新建 / 编辑</td><td class="c">xhs:note:create · edit</td><td class="lg">—</td></tr>
+            <tr><td>删除 / 批量删除</td><td class="c">xhs:note:delete · batchDelete</td><td class="lg">先平台后本地（平台失败本地不动）</td></tr>
+            <tr><td>发布 / 批量发布</td><td class="c">xhs:note:publish · batchPublish</td><td class="lg">走发布队列</td></tr>
+            <tr><td>打标签 / 导出</td><td class="c">xhs:note:tag · export</td><td class="lg">—</td></tr>
+          </table>
+        </div>
+
+        <div class="page">
+          <div class="ph"><span class="nm">商品列表</span><span class="path">/platforms/xhs/shop-items</span>
+            <span class="cnt">10 码 · <span class="badge b-mod">改造</span></span></div>
+          <table>
+            <tr><th style="width:150px">按钮</th><th style="width:170px">权限码</th><th>按钮逻辑要点</th></tr>
+            <tr><td>上架 / 下架</td><td class="c">xhs:item:onShelf · offShelf</td>
+              <td class="lg"><b>一个按钮按状态切两码</b>；不可执行时置灰 + 后端原因</td></tr>
+            <tr><td>编辑 / 润色 / 导出</td><td class="c">xhs:item:edit · polish · export</td><td class="lg">—</td></tr>
+            <tr><td>删除</td><td class="c">xhs:item:delete</td><td class="lg">先平台后本地（四态回执）</td></tr>
+            <tr><td>同步商品</td><td class="c">xhs:item:sync</td><td class="lg">整店 / 按 ID 两条路共用</td></tr>
+            <tr><td>生成笔记 / 生成商品图</td><td class="c">xhs:item:generateNote · generateImage</td><td class="lg">走队列，入队即返回</td></tr>
+            <tr><td>存草稿</td><td class="c">xhs:item:draft</td><td class="lg">商品草稿箱</td></tr>
+          </table>
+        </div>
+
+        <div class="page">
+          <div class="ph"><span class="nm">订单管理</span><span class="path">/platforms/xhs/orders</span>
+            <span class="cnt">6 码 · <span class="badge b-mod">改造</span></span></div>
+          <table>
+            <tr><th style="width:150px">按钮</th><th style="width:170px">权限码</th><th>按钮逻辑要点</th></tr>
+            <tr><td>同步订单</td><td class="c">xhs:order:sync</td><td class="lg">只读拉取</td></tr>
+            <tr><td>发货 / 批量发货</td><td class="c">xhs:order:ship · shipBatch</td><td class="lg">批量是独立能力（不是循环调用单条）</td></tr>
+            <tr><td>备注（本地）</td><td class="c">xhs:order:remark</td><td class="lg"><b>不碰平台</b></td></tr>
+            <tr><td>导出 / 售后处理</td><td class="c">xhs:order:export · afterSaleHandle</td><td class="lg">—</td></tr>
+          </table>
+        </div>
+
+        <div class="page">
+          <div class="ph"><span class="nm">违规管理</span><span class="path">/platforms/xhs/violation-manage</span>
+            <span class="cnt">1 码 · <span class="badge b-mod">改造</span></span></div>
+          <table>
+            <tr><th style="width:150px">按钮</th><th style="width:170px">权限码</th><th>按钮逻辑要点</th></tr>
+            <tr><td>删除关联内容</td><td class="c">xhs:violation:relatedDelete</td>
+              <td class="lg"><b>全页唯一写操作</b>；四态回执 deleted/platform_only/failed/skipped；以 <code>absent</code> 表示平台已无</td></tr>
+            <tr><td>（其余全部只读）</td><td class="c"><span class="blank">—</span></td>
+              <td class="lg">列表/详情/申诉记录/证据/体检风险/预警/赔付/仲裁/抽检/免罚 —— 18 个只读端点</td></tr>
+          </table>
+        </div>
+
+        <div class="page">
+          <div class="ph"><span class="nm">图片空间</span><span class="path">/platforms/xhs/picture-space</span>
+            <span class="cnt">7 码 · <span class="badge b-mod">改造</span></span></div>
+          <table>
+            <tr><th style="width:150px">按钮</th><th style="width:170px">权限码</th><th>按钮逻辑要点</th></tr>
+            <tr><td>上传</td><td class="c">xhs:picture:upload</td><td class="lg">两段式（permit 打小红书 / PUT 打对象存储）</td></tr>
+            <tr><td>删除 / 彻底删除</td><td class="c">xhs:picture:delete · permanentDelete</td>
+              <td class="lg">彻底删除 = 红色 + 输入名称确认</td></tr>
+            <tr><td>移动 / 缩放 / 恢复</td><td class="c">xhs:picture:move · resize · restore</td><td class="lg">恢复 = 从回收站</td></tr>
+            <tr><td>下载</td><td class="c">xhs:picture:view</td><td class="lg">只读，归 view 不单列码</td></tr>
+          </table>
+        </div>
+
+        <div class="page">
+          <div class="ph"><span class="nm">任务中心 / 队列记录</span>
+            <span class="path">/tasks · /task-records</span><span class="cnt">10 码 · <span class="badge b-mod">改造</span></span></div>
+          <table>
+            <tr><th style="width:150px">按钮</th><th style="width:170px">权限码</th><th>按钮逻辑要点</th></tr>
+            <tr><td>新建 / 编辑 / 删除任务</td><td class="c">xhs:job:create · edit · delete</td><td class="lg">内置任务禁删，只能停用</td></tr>
+            <tr><td>立即执行 / 启停</td><td class="c">xhs:job:run · pause · resume</td><td class="lg">run = 立刻跑一次（不影响 cron）</td></tr>
+            <tr><td>取消 / 重试</td><td class="c">xhs:record:cancel · retry</td><td class="lg">批次行不可取消（400 BATCH_ROW_NOT_OPERABLE）</td></tr>
+            <tr><td>清理 / 清理全部</td><td class="c">xhs:record:clean · cleanAll</td><td class="lg">两维度：批次（原子）/ 批次内单条</td></tr>
+          </table>
+        </div>
+
+        <div class="page">
+          <div class="ph"><span class="nm">大模型网关 / 模型配置</span>
+            <span class="path">/llm-gateway/* · /models</span><span class="cnt">10 码 · <span class="badge b-mod">改造</span></span></div>
+          <table>
+            <tr><th style="width:150px">按钮</th><th style="width:170px">权限码</th><th>按钮逻辑要点</th></tr>
+            <tr><td>服务商 CRUD</td><td class="c">ai:gateway:create · edit · delete</td><td class="lg">—</td></tr>
+            <tr><td>连通测试</td><td class="c">ai:gateway:test</td><td class="lg"><b>有副作用</b>（消耗真实额度）⇒ 单列码</td></tr>
+            <tr><td>同步模型 / 启用模型</td><td class="c">ai:gateway:syncModels · enableModel</td><td class="lg">—</td></tr>
+            <tr><td>模型配置 CRUD</td><td class="c">ai:model:create · edit · delete</td><td class="lg">—</td></tr>
+            <tr><td>设业务点映射</td><td class="c">ai:model:setBusiness</td><td class="lg">改「业务点 → 服务商」映射</td></tr>
+            <tr><td>生成 / 批量生成 / 重试</td><td class="c">ai:generate:generate · batchGenerate · retry</td><td class="lg">走 LLM 生成队列</td></tr>
+          </table>
+        </div>
+
+        <div class="page">
+          <div class="ph"><span class="nm">其余 12 页（同样式挂码）</span><span class="cnt"><span class="badge b-mod">改造</span></span></div>
+          <table>
+            <tr><th style="width:150px">页面</th><th style="width:210px">权限码（下方写码 + 页级 view 码）</th><th>按钮逻辑要点</th></tr>
+            <tr><td colspan="3" class="lg" style="color:#ffd479">每页另有一条 <code>&lt;域&gt;:&lt;资源&gt;:view</code> 管「进不进得去」——只读页只有它，但依然需要授权</td></tr>
+            <tr><td>内容库</td><td class="c">xhs:library:save/delete/batchCreateDrafts/importData/syncData</td><td class="lg">importData 支持 8 种表格格式</td></tr>
+            <tr><td>笔记工坊</td><td class="c">xhs:workshop:generate/regenerate/adopt/uploadAsset/deleteAsset/saveDraft</td><td class="lg">regenerate 只重生成正文或图片（版本历史）</td></tr>
+            <tr><td>商品发布</td><td class="c">xhs:publish:submit/retry/cancel/precheck/rule</td><td class="lg">precheck 是独立操作（不是只看）</td></tr>
+            <tr><td>监控中心</td><td class="c">xhs:monitor:create/edit/delete/refresh/enable</td><td class="lg">refresh = 立即刷新一次</td></tr>
+            <tr><td>自动运营</td><td class="c">xhs:autoops:create/edit/delete/run/enable</td><td class="lg">run = 立即执行工作流</td></tr>
+            <tr><td>笔记发现（批量抓取）</td><td class="c">xhs:crawl:submit</td><td class="lg">只 1 个按钮</td></tr>
+            <tr><td>关键词组</td><td class="c">xhs:keyword:create/edit/delete</td><td class="lg">—</td></tr>
+            <tr><td>话题</td><td class="c">xhs:topic:create/edit/delete</td><td class="lg">—</td></tr>
+            <tr><td>数据包规则</td><td class="c">xhs:rule:create/edit/delete/execute</td><td class="lg">execute = 试跑（不落库）</td></tr>
+            <tr><td>违规词</td><td class="c">xhs:forbiddenWord:create/edit/delete/import</td><td class="lg">import = 批量导入</td></tr>
+            <tr><td>素材库</td><td class="c">xhs:material:createFolder/editFolder/deleteFolder/scan</td><td class="lg">scan = 扫描磁盘</td></tr>
+            <tr><td>提示词模板</td><td class="c">ai:prompt:create/edit/delete</td><td class="lg">—</td></tr>
+            <tr><td><b>数据中心 / 内容洞察 / 商品洞察 / 用量看板</b></td>
+              <td class="c">xhs:datacenter:view<br>xhs:insights:view<br>ai:usage:view</td>
+              <td class="lg"><b>纯只读，但同样要授权</b>：未授 ⇒ 侧栏不出现 + 敲 URL 得 /403。含营收 / 曝光 / token 花费，不许默认全员可见</td></tr>
+          </table>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+  document.querySelectorAll('.bar .btn[data-f]').forEach(b => {
+    b.addEventListener('click', () => {
+      document.querySelectorAll('.bar .btn[data-f]').forEach(x => x.classList.remove('on'));
+      b.classList.add('on');
+      const f = b.dataset.f;
+      document.querySelectorAll('.mod').forEach(m => {
+        const show = f === 'all' || m.dataset.g === f;
+        m.style.display = show ? '' : 'none';
+        if (show) m.classList.add('open');
+      });
+    });
+  });
+</script>
+</body>
+</html>

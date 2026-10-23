@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>v1.1.0 技术方案 · 架构分层与实施路径</title>
+<style>
+  :root{--bg:#141414;--panel:#1a1a1a;--panel2:#1f1f1f;--line:#303030;--line2:#262626;
+    --tx:rgba(255,255,255,.88);--tx2:rgba(255,255,255,.6);--tx3:rgba(255,255,255,.38);
+    --pri:#1668dc;--ok:#52c41a;--warn:#faad14;--err:#ff4d4f;--purple:#a855f7;--code:#7dd3fc}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--tx);font-size:13px;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+  ::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-thumb{background:#333;border-radius:4px}
+  .wrap{padding:14px 18px 40px}
+  h1{font-size:15px;margin:0 0 3px}
+  .sub{color:var(--tx3);font-size:11.5px;margin-bottom:12px}
+  code{background:rgba(255,255,255,.07);padding:1px 4px;border-radius:3px;font-size:10.5px;
+    font-family:ui-monospace,Menlo,Consolas,monospace;color:var(--code)}
+
+  .tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:14px}
+  .tab{padding:6px 14px;cursor:pointer;font-size:12px;color:var(--tx2);border-bottom:2px solid transparent;user-select:none}
+  .tab:hover{color:var(--tx)}
+  .tab.on{color:#4ea1ff;border-bottom-color:var(--pri)}
+  .pane{display:none}.pane.on{display:block}
+
+  /* 分层 */
+  .layers{display:flex;flex-direction:column;gap:5px}
+  .ly{display:flex;align-items:stretch;border:1px solid var(--line);border-radius:7px;overflow:hidden;background:var(--panel)}
+  .ly .tag{width:52px;flex:0 0 52px;display:flex;align-items:center;justify-content:center;
+    font-size:10.5px;font-weight:700;background:rgba(255,255,255,.04);color:var(--tx2);letter-spacing:.5px}
+  .ly .body{padding:8px 12px;flex:1}
+  .ly .nm{font-weight:600;font-size:12.5px;margin-bottom:3px}
+  .ly .fs{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:10.5px;color:var(--code);line-height:1.75}
+  .ly.l0 .tag{background:rgba(255,77,79,.15);color:#ff8f8f}
+  .ly.l1 .tag{background:rgba(250,173,20,.14);color:#ffd479}
+  .ly.l2 .tag{background:rgba(22,104,220,.16);color:#6fb0ff}
+  .ly.l3 .tag{background:rgba(168,85,247,.15);color:#c4a5ff}
+  .ly.l4 .tag{background:rgba(82,196,26,.14);color:#8fdc60}
+  .ly.l5 .tag{background:rgba(255,255,255,.07);color:var(--tx2)}
+  .ly.new{border-color:rgba(168,85,247,.4)}
+  .pill{font-size:9.5px;padding:0 5px;border-radius:3px;margin-left:5px;vertical-align:1px}
+  .p-new{background:rgba(168,85,247,.2);color:#c4a5ff}
+  .p-mod{background:rgba(250,173,20,.16);color:#ffd479}
+
+  table{width:100%;border-collapse:collapse;margin:6px 0;font-size:11.5px}
+  th{text-align:left;padding:6px 9px;color:var(--tx3);font-weight:400;
+    border-bottom:1px solid var(--line);font-size:10.5px;background:rgba(255,255,255,.02)}
+  td{padding:6px 9px;border-bottom:1px solid var(--line2);vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  tr:hover td{background:rgba(255,255,255,.02)}
+  td.mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:10.5px;color:var(--code)}
+  td.dim{color:var(--tx2);line-height:1.65;font-size:11px}
+  .ok{color:var(--ok)}.warn{color:var(--warn)}.err{color:var(--err)}
+
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px;margin-top:8px}
+  .card{border:1px solid var(--line);border-radius:8px;padding:10px 12px;background:var(--panel)}
+  .card h4{margin:0 0 6px;font-size:12px;font-weight:600;display:flex;align-items:center;gap:6px}
+  .card p{margin:0;font-size:11px;color:var(--tx2);line-height:1.7}
+  .card .num{font-size:22px;font-weight:700;color:#4ea1ff;line-height:1.1}
+  .card .lbl{font-size:10.5px;color:var(--tx3);margin-top:2px}
+
+  /* 迁移链 */
+  .chain{display:flex;align-items:center;gap:0;flex-wrap:wrap;margin:10px 0 16px}
+  .rev{border:1px solid var(--line);border-radius:6px;padding:7px 11px;background:var(--panel);font-size:11px}
+  .rev .id{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:10px;color:var(--code)}
+  .rev .nm{font-weight:600;margin-top:2px}
+  .rev .dsc{color:var(--tx3);font-size:10px;margin-top:2px}
+  .rev.cur{border-color:rgba(250,173,20,.5);background:rgba(250,173,20,.07)}
+  .rev.new{border-color:rgba(168,85,247,.5);background:rgba(168,85,247,.08)}
+  .arw{color:var(--tx3);padding:0 7px;font-size:14px}
+
+  /* 守卫网格 */
+  .guards{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:8px}
+  .g{border:1px solid var(--line);border-left:3px solid var(--pri);border-radius:6px;
+     padding:7px 10px;background:var(--panel);font-size:11px}
+  .g .id{font-size:10px;color:#4ea1ff;font-weight:700}
+  .g .nm{font-weight:600;margin:1px 0 3px;font-size:11.5px}
+  .g .f{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:10px;color:var(--tx3)}
+  .g .c{color:var(--tx2);font-size:10.5px;margin-top:3px;line-height:1.55}
+  .g.crit{border-left-color:var(--err)}
+  .g.crit .id{color:#ff8f8f}
+
+  /* 步骤 */
+  .steps{display:flex;flex-direction:column;gap:0}
+  .st{display:flex;gap:0;align-items:stretch}
+  .st .no{width:46px;flex:0 0 46px;display:flex;align-items:center;justify-content:center;position:relative}
+  .st .no span{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+    font-size:11px;font-weight:700;background:rgba(255,255,255,.06);color:var(--tx2);border:1px solid var(--line);z-index:1}
+  .st.done .no span{background:rgba(82,196,26,.16);color:#8fdc60;border-color:rgba(82,196,26,.4)}
+  .st:not(:last-child) .no::after{content:'';position:absolute;top:50%;left:50%;width:1px;height:calc(100% - 13px);
+    background:var(--line);transform:translateX(-50%)}
+  .st .bd{flex:1;padding:0 0 13px 6px}
+  .st .hd{font-weight:600;font-size:12px;margin-bottom:2px}
+  .st .tx{font-size:10.5px;color:var(--tx2);line-height:1.6}
+  .st .chk{font-size:10px;color:var(--tx3);margin-top:3px}
+  .st .chk b{color:var(--warn);font-weight:400}
+
+  .note{border:1px solid rgba(250,173,20,.3);background:rgba(250,173,20,.06);border-radius:6px;
+    padding:8px 11px;font-size:11px;color:#ffd479;line-height:1.7;margin:10px 0}
+  .note b{color:#ffe4a3}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>v1.1.0 技术方案 · 权限骨架实现</h1>
+  <div class="sub">设计 50 · FastAPI + SQLAlchemy 2.0 + Alembic + SQLite ／ React 18 + antd 5 + Vite ｜ 不引入 MobX / ProTable / Redis</div>
+
+  <div class="tabs">
+    <div class="tab on" data-p="arch">架构分层</div>
+    <div class="tab" data-p="data">数据层与迁移</div>
+    <div class="tab" data-p="api">接口与服务</div>
+    <div class="tab" data-p="fe">前端组件</div>
+    <div class="tab" data-p="guard">守卫与判据</div>
+    <div class="tab" data-p="step">实施步骤</div>
+  </div>
+
+  <!-- ═════════ 架构分层 ═════════ -->
+  <div class="pane on" id="p-arch">
+    <div class="layers">
+      <div class="ly l5">
+        <div class="tag">L5</div>
+        <div class="body">
+          <div class="nm">前端页面<span class="pill p-new">8 新建</span><span class="pill p-mod">22 改造</span></div>
+          <div class="fs">pages/system/{users,roles,menus,dicts,settings,logs}-page.tsx · pages/profile/ · pages/errors/403</div>
+        </div>
+      </div>
+      <div class="ly l4">
+        <div class="tag">L4</div>
+        <div class="body">
+          <div class="nm">前端公共组件<span class="pill p-new">8 件</span></div>
+          <div class="fs">usePermission · RequirePerm · PermissionButton · useDict · DictTag · DataTable · MenuTreeSelect · ConfirmDelete</div>
+        </div>
+      </div>
+      <div class="ly l3">
+        <div class="tag">L3</div>
+        <div class="body">
+          <div class="nm">前端接缝<span class="pill p-mod">+41 端点</span></div>
+          <div class="fs">lib/api.ts（新增请求函数）· types/index.ts（+User/Role/Menu/Dict 类型）</div>
+        </div>
+      </div>
+      <div class="ly l2">
+        <div class="tag">L2</div>
+        <div class="body">
+          <div class="nm">API 层<span class="pill p-new">5 新文件</span></div>
+          <div class="fs">api/system/{users,roles,menus,dicts,logs}.py · api/auth.py（改）· api/settings.py（改）<br>
+              api/analytics.py · api/insights.py · api/llm.py · api/dashboard.py（只读页挂 view 码）</div>
+        </div>
+      </div>
+      <div class="ly l1">
+        <div class="tag">L1</div>
+        <div class="body">
+          <div class="nm">服务层<span class="pill p-new">4 新文件</span></div>
+          <div class="fs">rbac_service.py · dict_service.py · menu_seed_service.py · permission_cache.py</div>
+        </div>
+      </div>
+      <div class="ly l0 new">
+        <div class="tag">L0</div>
+        <div class="body">
+          <div class="nm">地基（零依赖，不许 import L1/L2）<span class="pill p-new">核心</span></div>
+          <div class="fs">core/perms.py（判据唯一真相源）· core/perms_registry.py（<b>161 条权限码</b>）· core/route_guard.py（启动扫描）<br>
+              models/{menu,role,role_menu,dict}.py · alembic/versions/*（3 个迁移）</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid" style="margin-top:14px">
+      <div class="card"><h4>🔑 权限码总量</h4><div class="num">161</div>
+        <div class="lbl">系统 25 + 业务写码 114 + 页级查看码 22</div></div>
+      <div class="card"><h4>🔒 写路由必须挂码</h4><div class="num">251</div>
+        <div class="lbl">漏一条 ⇒ 应用起不来（实测 openapi 251 条写接口）</div></div>
+      <div class="card"><h4>📦 新增表</h4><div class="num">5</div>
+        <div class="lbl">menus / roles / role_menus / dict_types / dict_items（57→62）</div></div>
+      <div class="card"><h4>📊 端点增量</h4><div class="num">+41</div>
+        <div class="lbl">350/303 → 391 ops / 320 paths</div></div>
+    </div>
+
+    <div class="note"><b>依赖铁律</b>：L0 不 import L1/L2；L1 不 import L2。反向依赖一律禁止 —— 守卫 <code>test_layer_direction</code>。</div>
+  </div>
+
+  <!-- ═════════ 数据层与迁移 ═════════ -->
+  <div class="pane" id="p-data">
+    <h3 style="font-size:12.5px;margin:0 0 8px">迁移链（head <code>c1d2e3f4a5b8</code> → 3 个新迁移）</h3>
+    <div class="chain">
+      <div class="rev cur">
+        <div class="id">c1d2e3f4a5b8</div><div class="nm">当前 head</div>
+        <div class="dsc">57 表 / 26 用户</div>
+      </div>
+      <div class="arw">→</div>
+      <div class="rev new">
+        <div class="id">a1b2c3d4e5f9</div><div class="nm">建 3 表 + users +6 列</div>
+        <div class="dsc">roles / menus / role_menus<br>风险：低</div>
+      </div>
+      <div class="arw">→</div>
+      <div class="rev new">
+        <div class="id">b2c3d4e5f6a0</div><div class="nm">建 2 表 + 回填</div>
+        <div class="dsc">dict_types / dict_items<br>api_logs +status_code（70,325 行）<br>风险：中</div>
+      </div>
+      <div class="arw">→</div>
+      <div class="rev new">
+        <div class="id">c3d4e5f6a1b2</div><div class="nm">灌种子</div>
+        <div class="dsc">roles 2 行 + menus ≈214 行<br>+ admin 种子用户<br>风险：中</div>
+      </div>
+    </div>
+
+    <h3 style="font-size:12.5px;margin:14px 0 8px">5 张新表（刻意都不带 <code>user_id</code>）</h3>
+    <table>
+      <tr><th style="width:150px">表</th><th style="width:230px">关键约束</th><th>为什么不能带 user_id</th></tr>
+      <tr><td class="mono">menus</td><td class="dim">perms 部分唯一索引（非空时）<br>path 部分唯一索引<br>parent_id 无 FK（应用层树）</td>
+        <td class="dim">它是「权限的定义」不是「某用户的数据」。带 user_id = 每用户一套菜单 = 权限体系立刻失效</td></tr>
+      <tr><td class="mono">roles</td><td class="dim">code 唯一；is_system=1 禁删/禁停/禁改 code</td>
+        <td class="dim">角色是全局定义</td></tr>
+      <tr><td class="mono">role_menus</td><td class="dim">UNIQUE(role_id, menu_id)<br>role_id CASCADE / menu_id <b class="warn">RESTRICT</b></td>
+        <td class="dim">授权是「角色↔菜单」的事实，不带归属</td></tr>
+      <tr><td class="mono">dict_types</td><td class="dim">code 唯一</td><td class="dim">全局共享枚举</td></tr>
+      <tr><td class="mono">dict_items</td><td class="dim">UNIQUE(type_id, value)<br>type_id CASCADE</td><td class="dim">同上；不搬 dataPanel 的 belong 多平台列</td></tr>
+    </table>
+
+    <h3 style="font-size:12.5px;margin:14px 0 8px">既有表改动（只动 3 张）</h3>
+    <table>
+      <tr><th style="width:140px">表</th><th style="width:200px">改什么</th><th>依据</th></tr>
+      <tr><td class="mono">users</td><td class="dim"><b>+6 列</b>：status / real_name / last_login_ip / last_login_at / must_change_password / deleted_at</td>
+        <td class="dim">现在连姓名、最后登录时间都没有。deleted_at = B9 软删定稿</td></tr>
+      <tr><td class="mono">api_logs</td><td class="dim">+<code>status_code</code> 并从 meta JSON 回填 70,325 行</td>
+        <td class="dim">实测 2000 条采样 100% 有 meta.status_code ⇒ 可全量回填</td></tr>
+      <tr><td class="mono">notifications</td><td class="dim">+<code>link</code></td>
+        <td class="dim">4 条里 3 条 source_id 是 NULL ⇒ 历史通知原本没有跳转目标</td></tr>
+      <tr><td class="mono" style="color:#ff8f8f">system_settings</td><td class="dim"><b class="ok">零变化</b> —— 不加 scope</td>
+        <td class="dim">该列 2026-09-27 被刻意删除过（设计 10 §7.1 D1）；管理员诉求改走 <code>apply-to-all</code> 端点</td></tr>
+    </table>
+
+    <div class="note"><b>回填写法</b>：不逐行 UPDATE（70k 行会卡死），用 SQLite <code>json_extract</code> 一条 SQL。
+      回填前记 <code>COUNT(*)</code>，回填率 &lt; 99% ⇒ 迁移里 <code>raise</code> 而不是静默跳过。</div>
+
+    <div class="note"><b>种子纪律「只补缺不覆盖」</b>：<code>if exists: continue</code> —— 用户改过的 status / name 不被下次升级打回。
+      与 <code>forbidden_words.json</code> 同一口径。</div>
+
+    <div class="note" style="border-color:rgba(255,77,79,.35);background:rgba(255,77,79,.06);color:#ff9c9c">
+      <b>admin 种子三条配套（缺一不可）</b>：① <code>must_change_password=True</code> 首登强制改密（前端无法跳过）② 用户列表打「默认口令」Tag ③ <code>register.enabled</code> 基线默认 <code>false</code>（防「弱口令 + 开放注册」同时成立）
+    </div>
+  </div>
+
+  <!-- ═════════ 接口与服务 ═════════ -->
+  <div class="pane" id="p-api">
+    <h3 style="font-size:12.5px;margin:0 0 8px">新增端点 +41（逐个挂码）</h3>
+    <table>
+      <tr><th style="width:110px">模块</th><th style="width:70px">端点数</th><th style="width:250px">权限码前缀</th><th>备注</th></tr>
+      <tr><td>用户</td><td class="mono">9</td><td class="mono">system:user:{view,create,edit,delete,resetPassword,forceLogout,approve}</td>
+        <td class="dim">P6 末尾管理员 / P7 不能改自己</td></tr>
+      <tr><td>角色</td><td class="mono">8</td><td class="mono">system:role:{view,create,edit,delete,assignMenu}</td>
+        <td class="dim">admin 角色禁改授权</td></tr>
+      <tr><td>菜单</td><td class="mono">6</td><td class="mono">system:menu:{view,create,edit,delete}</td>
+        <td class="dim">启停 = 抖音/闲鱼接入开关</td></tr>
+      <tr><td>字典</td><td class="mono">8</td><td class="mono">system:dict:{view,create,edit,delete}</td>
+        <td class="dim">12 组内置禁改 code/禁删</td></tr>
+      <tr><td>日志</td><td class="mono">3</td><td class="mono">system:log:view</td><td class="dim">全只读，无删除端点</td></tr>
+      <tr><td>认证（改）</td><td class="mono">+5</td><td class="dim">登录域，不挂权限码</td>
+        <td class="dim">pending ⇒ <b class="warn">403 不是 401</b></td></tr>
+      <tr><td>配置（改）</td><td class="mono">+2</td><td class="mono">system:setting:edit / applyAll</td>
+        <td class="dim">clear-cache + apply-to-all</td></tr>
+    </table>
+
+    <h3 style="font-size:12.5px;margin:14px 0 8px">只读页挂 view 码（用户 2026-10-23 口径）</h3>
+    <table>
+      <tr><th style="width:200px">页面</th><th style="width:200px">码</th><th>不挂会怎样</th></tr>
+      <tr><td>数据中心</td><td class="mono">xhs:datacenter:view</td><td class="dim err">任何登录用户能看全站营收 / 订单量</td></tr>
+      <tr><td>内容洞察 / 商品洞察</td><td class="mono">xhs:insights:view（共用）</td><td class="dim err">能看到别人的互动数据与全店 GMV</td></tr>
+      <tr><td>用量看板</td><td class="mono">ai:usage:view</td><td class="dim err">任何用户能看全站 token 花费</td></tr>
+      <tr><td>总览</td><td class="mono">xhs:dashboard:view</td><td class="dim">—</td></tr>
+    </table>
+
+    <h3 style="font-size:12.5px;margin:14px 0 8px">L1 服务层函数清单</h3>
+    <table>
+      <tr><th style="width:200px">文件</th><th>关键函数</th></tr>
+      <tr><td class="mono">rbac_service.py</td>
+        <td class="dim">list/create/update/delete_user · reset_password · force_logout · approve · 角色 4 件 · set_role_menus · set_role_users · 菜单 4 件 · toggle_menu_status</td></tr>
+      <tr><td class="mono">permission_cache.py</td>
+        <td class="dim">get/put · invalidate_user / invalidate_role / invalidate_workspace<br>
+          <b>key 含 token_version</b> ⇒ 抬版本时旧缓存自动失效，不用逐个 del</td></tr>
+      <tr><td class="mono">dict_service.py</td><td class="dim">list_items（useDict 唯一读点）· CRUD · PROTECTED_DICT_CODES · ensure_seed_types</td></tr>
+      <tr><td class="mono">menu_seed_service.py</td><td class="dim">build_user_menus —— 三层过滤：① status='normal' ② perms ∈ user_perms ③ <b>祖先链裁剪</b></td></tr>
+    </table>
+
+    <div class="note"><b>为什么 admin 权限用代码派生，不查 role_menus</b>：若 admin 靠授权表那 161 行才算有权限，一次误点「分配菜单」把行取消，超级管理员就把自己锁在门外 —— 且<b>再也改不回来</b>（改权限的入口本身需要权限）。<code>ALL_PERMS</code> 只增不减。</div>
+  </div>
+
+  <!-- ═════════ 前端组件 ═════════ -->
+  <div class="pane" id="p-fe">
+    <h3 style="font-size:12.5px;margin:0 0 8px">8 个公共组件</h3>
+    <table>
+      <tr><th style="width:170px">组件</th><th style="width:200px">文件</th><th>判据</th></tr>
+      <tr><td class="mono">usePermission</td><td class="dim">hooks/use-permission.ts</td>
+        <td class="dim">码来自 <code>/auth/me</code> 的 permissions，<b>前端不硬编码任何码</b>（守卫 G12）</td></tr>
+      <tr><td class="mono">RequirePerm</td><td class="dim">components/ui/require-perm.tsx</td>
+        <td class="dim">无码 ⇒ <code>&lt;Navigate to="/403"&gt;</code>；与侧栏过滤用同一份 permissions</td></tr>
+      <tr><td class="mono">PermissionButton</td><td class="dim">components/ui/permission-button.tsx</td>
+        <td class="dim">无码时<b>不渲染</b>（不是 disabled）—— 危险操作「看不见」比「灰着」安全</td></tr>
+      <tr><td class="mono">useDict</td><td class="dim">hooks/use-dict.ts</td>
+        <td class="dim">进程内 Map 缓存 + 飞行中请求复用同一 Promise</td></tr>
+      <tr><td class="mono">DictTag</td><td class="dim">components/ui/dict-tag.tsx</td>
+        <td class="dim">找不到值 ⇒ <b>原样显示</b>（缺值口径：不造假）</td></tr>
+      <tr><td class="mono">DataTable</td><td class="dim">components/ui/data-table.tsx</td>
+        <td class="dim">固定头尾 + 表体内滚 + 列设置持久化（复用 antd-fixed-layout-page 范式）</td></tr>
+      <tr><td class="mono">MenuTreeSelect</td><td class="dim">components/ui/menu-tree-select.tsx</td>
+        <td class="dim">禁用自己及其子孙（防成环）</td></tr>
+      <tr><td class="mono">ConfirmDelete</td><td class="dim">components/ui/confirm-delete.tsx</td>
+        <td class="dim">requireText 可要求输入名称（菜单/图片空间必用）</td></tr>
+    </table>
+
+    <h3 style="font-size:12.5px;margin:14px 0 8px">app-shell 改造</h3>
+    <table>
+      <tr><th style="width:120px">改前</th><th style="width:120px">改后</th><th>说明</th></tr>
+      <tr><td class="dim">29 个硬编码 key</td><td class="dim">从 <code>/auth/me</code> 的 menus 渲染</td>
+        <td class="dim">硬编码降级为「加载失败兜底」；开发期断言 FALLBACK key 集合 == 种子里该工作区的 C 行集合</td></tr>
+    </table>
+
+    <div class="note"><b>路由参数化 G3</b>：<code>/platforms/:platformId/*</code>。但现有页面内部 21 处 <code>navigate("/platforms/xhs/...")</code> <b>本轮不动</b> —— 参数化后它们仍然成立（平台段是变量），改动收益为零、回归风险高。</div>
+
+    <div class="note" style="border-color:rgba(82,196,26,.3);background:rgba(82,196,26,.06);color:#a8e08a">
+      <b>中间态不会死锁</b>：S0–S4 后端一次性上（前端仍在旧菜单下可用）。因为 <code>/auth/me</code> 新增字段是<b>增量</b>，旧前端忽略它照常工作 —— 不存在「后端要权限、前端没菜单」的空窗。
+    </div>
+  </div>
+
+  <!-- ═════════ 守卫与判据 ═════════ -->
+  <div class="pane" id="p-guard">
+    <div class="guards">
+      <div class="g crit"><div class="id">G1 ★</div><div class="nm">写路由必挂码</div>
+        <div class="f">test_route_guard.py</div>
+        <div class="c">251 条写路由逐条有码；删任一 <code>require_perm</code> ⇒ 应用启动崩</div></div>
+      <div class="g"><div class="id">G2</div><div class="nm">三处码一致</div>
+        <div class="f">test_perms_consistency.py</div>
+        <div class="c">种子 ∪ 后端 require_perm ∪ 前端 = 三集合相等</div></div>
+      <div class="g"><div class="id">G3</div><div class="nm">只读页有 view 码</div>
+        <div class="f">test_readonly_pages_require_view_perm.py</div>
+        <div class="c">4 组只读路由缺码 ⇒ 红</div></div>
+      <div class="g"><div class="id">G4</div><div class="nm">admin 不依赖 role_menus</div>
+        <div class="f">test_admin_perms_derived.py</div>
+        <div class="c">清空 role_menus 后 admin 仍有全码</div></div>
+      <div class="g"><div class="id">G5</div><div class="nm">末尾管理员保护</div>
+        <div class="f">test_last_admin_protected.py</div>
+        <div class="c">去掉 P6 ⇒ 红（判据：role=admin AND status=normal AND deleted_at IS NULL）</div></div>
+      <div class="g"><div class="id">G6</div><div class="nm">软删后不能登录</div>
+        <div class="f">test_soft_deleted_user.py</div>
+        <div class="c">去掉 deleted_at 闸 ⇒ 红</div></div>
+      <div class="g crit"><div class="id">G7</div><div class="nm">停菜单不踢人</div>
+        <div class="f">test_menu_toggle_no_kick.py</div>
+        <div class="c">改成 token_version+1 ⇒ 红（否则平台接入时全站莫名掉线）</div></div>
+      <div class="g"><div class="id">G8</div><div class="nm">授权变更踢人</div>
+        <div class="f">test_role_assign_kicks.py</div>
+        <div class="c">去掉 invalidate_role ⇒ 红</div></div>
+      <div class="g"><div class="id">G9</div><div class="nm">祖先链裁剪</div>
+        <div class="f">test_menu_ancestor_prune.py</div>
+        <div class="c">停 M 行后子 C 行仍出现 ⇒ 红</div></div>
+      <div class="g"><div class="id">G10</div><div class="nm">种子只补缺</div>
+        <div class="f">test_seed_no_overwrite.py</div>
+        <div class="c">用户改 status 后被覆盖 ⇒ 红</div></div>
+      <div class="g"><div class="id">G11</div><div class="nm">分层依赖方向</div>
+        <div class="f">test_layer_direction.py</div>
+        <div class="c">L0 import L2 ⇒ 红</div></div>
+      <div class="g"><div class="id">G12</div><div class="nm">前端码不硬编码</div>
+        <div class="f">test_frontend_perms_from_me.py</div>
+        <div class="c">前端出现 <code>"system:user:edit"</code> 字面量 ⇒ 红（除测试）</div></div>
+    </div>
+
+    <div class="note" style="margin-top:14px"><b>每条守卫都必须能变红</b>：按本项目纪律，守卫要过<b>变异验证</b>（把被测代码改坏，确认测试真的报红）。
+      只有绿过的测试不算数 —— 历史上有过「守卫恒真、从未真正执行」的假防线（DEF-070~074 同期发现两条）。</div>
+  </div>
+
+  <!-- ═════════ 实施步骤 ═════════ -->
+  <div class="pane" id="p-step">
+    <div class="steps">
+      <div class="st"><div class="no"><span>S0</span></div><div class="bd">
+        <div class="hd">地基：perms.py + registry + 守卫骨架</div>
+        <div class="tx">判据唯一真相源 + 161 条码登记表 + 启动扫描骨架</div>
+        <div class="chk">验收：<b>ALL_PERMS 恰好 161 条</b>；test_perms_core.py 绿</div></div></div>
+
+      <div class="st"><div class="no"><span>S1</span></div><div class="bd">
+        <div class="hd">5 模型 + 3 迁移 + admin 种子</div>
+        <div class="tx">在建库副本上跑 upgrade head；存量 26 用户回填 server_default</div>
+        <div class="chk">验收：<b>真库副本表数 57→62</b>；admin 可登录且 must_change_password=1</div></div></div>
+
+      <div class="st"><div class="no"><span>S2</span></div><div class="bd">
+        <div class="hd">缓存 + rbac_service + require_perm + route_guard</div>
+        <div class="tx">251 条写路由批量挂码；启动自检接入 main.py</div>
+        <div class="chk">验收：<b>启动自检通过（251 全挂码）</b>；故意删一条 ⇒ 启动失败</div></div></div>
+
+      <div class="st"><div class="no"><span>S3</span></div><div class="bd">
+        <div class="hd">6 个 API 文件 + auth 改造</div>
+        <div class="tx">system/{users,roles,menus,dicts,logs} + auth 的注册/改密/改邮箱</div>
+        <div class="chk">验收：<b>+41 端点出现在 /openapi.json</b>；391/320</div></div></div>
+
+      <div class="st"><div class="no"><span>S4</span></div><div class="bd">
+        <div class="hd">种子生成 + 只补缺</div>
+        <div class="tx">gen_menu_seed.py 从 registry 生成；--check 模式防手改</div>
+        <div class="chk">验收：<b>重跑种子 0 新增</b>；手改的 status 不被覆盖</div></div></div>
+
+      <div class="st"><div class="no"><span>S5</span></div><div class="bd">
+        <div class="hd">8 个前端公共组件</div>
+        <div class="tx">usePermission / RequirePerm / PermissionButton / useDict / DictTag / DataTable / MenuTreeSelect / ConfirmDelete</div>
+        <div class="chk">验收：<b>tsc --noEmit 0 error</b>；vitest 绿</div></div></div>
+
+      <div class="st"><div class="no"><span>S6</span></div><div class="bd">
+        <div class="hd">8 个新页面</div>
+        <div class="tx">用户 / 角色 / 菜单 / 字典 / 配置 / 日志 / 个人资料 / 403</div>
+        <div class="chk">验收：<b>admin 可用、user 无码不可见</b>（逐页双身份核对）</div></div></div>
+
+      <div class="st"><div class="no"><span>S7</span></div><div class="bd">
+        <div class="hd">22 个业务页挂码</div>
+        <div class="tx">只包 hasPermission + 后端 require_perm，<b>不改业务逻辑</b></div>
+        <div class="chk">验收：<b>assert_every_route_guarded 通过</b>（一条不漏）</div></div></div>
+
+      <div class="st"><div class="no"><span>S8</span></div><div class="bd">
+        <div class="hd">动态菜单 + 路由参数化</div>
+        <div class="tx">app-shell 从 /auth/me 渲染；/platforms/:platformId/*</div>
+        <div class="chk">验收：<b>FALLBACK key 集合 == 种子 C 行集合</b>；切工作区菜单正确</div></div></div>
+
+      <div class="st"><div class="no"><span>S9</span></div><div class="bd">
+        <div class="hd">数字口径回写 + 三校验 + 变异</div>
+        <div class="tx">AGENTS §5 / 46-50 / README 逐处回数</div>
+        <div class="chk">验收：<b>三脚本 PASS</b>；12 条守卫变异全部 CAUGHT</div></div></div>
+    </div>
+
+    <div class="note" style="margin-top:8px"><b>每段收尾必跑</b>：<code>pytest &lt;本段测试文件&gt; -q</code> → <code>tsc --noEmit</code>（动前端时）→ 相关文档回写。不许攒批。</div>
+  </div>
+</div>
+
+<script>
+  document.querySelectorAll('.tab').forEach(t => {
+    t.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach(x => x.classList.remove('on'));
+      document.querySelectorAll('.pane').forEach(p => p.classList.remove('on'));
+      t.classList.add('on');
+      document.getElementById('p-' + t.dataset.p).classList.add('on');
+    });
+  });
+</script>
+</body>
+</html>

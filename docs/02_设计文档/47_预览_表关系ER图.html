@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>v1.1.0 表关系 ER 图</title>
+<style>
+  :root{--bg:#141414;--panel:#1a1a1a;--panel2:#1f1f1f;--line:#303030;--line2:#262626;
+    --tx:rgba(255,255,255,.88);--tx2:rgba(255,255,255,.6);--tx3:rgba(255,255,255,.38);
+    --pri:#1668dc;--ok:#52c41a;--warn:#faad14;--err:#ff4d4f;--new:#a855f7;--auth:#0ea5e9}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--tx);font-size:13px;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+  ::-webkit-scrollbar{width:8px;height:8px}
+  ::-webkit-scrollbar-thumb{background:#333;border-radius:4px}
+  .wrap{padding:16px 20px 40px}
+  h1{font-size:16px;margin:0 0 4px}
+  .sub{color:var(--tx3);font-size:12px;margin-bottom:14px}
+  .bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
+  .btn{padding:4px 12px;border-radius:6px;border:1px solid var(--line);background:var(--panel2);
+    color:var(--tx);cursor:pointer;font-size:12px}
+  .btn.on{background:rgba(22,104,220,.16);border-color:rgba(22,104,220,.5);color:#4ea1ff}
+  .legend{display:flex;gap:14px;font-size:11px;color:var(--tx2);margin-left:auto}
+  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px;vertical-align:1px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden;
+    transition:.15s;position:relative}
+  .card.dim{opacity:.25;filter:grayscale(.6)}
+  .card.hi{border-color:var(--pri);box-shadow:0 0 0 2px rgba(22,104,220,.25)}
+  .card.new{border-color:rgba(168,85,247,.45)}
+  .card.new .hd{background:rgba(168,85,247,.1)}
+  .hd{padding:8px 12px;border-bottom:1px solid var(--line2);display:flex;align-items:center;gap:8px}
+  .hd .nm{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;font-weight:600}
+  .hd .cls{font-size:10px;color:var(--tx3);margin-left:auto}
+  .badge{font-size:9.5px;padding:0 5px;border-radius:3px;line-height:15px}
+  .badge.n{background:rgba(168,85,247,.2);color:#c4a5ff;border:1px solid rgba(168,85,247,.45)}
+  .badge.plus{background:rgba(82,196,26,.16);color:#8ee06a;border:1px solid rgba(82,196,26,.4)}
+  .bd{padding:6px 12px 8px}
+  .col{display:flex;gap:8px;font-size:11.5px;line-height:1.85;font-family:ui-monospace,Menlo,Consolas,monospace}
+  .col .k{color:var(--tx);min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .col .k.pk{color:#ffd24d}
+  .col .k.fk{color:#7dd3fc}
+  .col .k.ad{color:#8ee06a}
+  .col .t{color:var(--tx3);font-size:10px;flex-shrink:0}
+  .rel{padding:5px 12px 9px;border-top:1px dashed var(--line2);font-size:10.5px;color:var(--tx2);line-height:1.7}
+  .rel b{color:var(--auth)}
+  .note{border-left:3px solid var(--pri);background:rgba(22,104,220,.07);padding:9px 12px;
+    border-radius:0 6px 6px 0;font-size:12px;color:var(--tx2);line-height:1.7;margin:12px 0}
+  .note.w{border-left-color:var(--warn);background:rgba(250,173,20,.07)}
+  .note.n{border-left-color:var(--new);background:rgba(168,85,247,.07)}
+  code{background:rgba(255,255,255,.07);padding:1px 5px;border-radius:3px;font-size:11px;
+    font-family:ui-monospace,Menlo,Consolas,monospace;color:#7dd3fc}
+  .stat{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:14px}
+  .kpi{background:var(--panel2);border:1px solid var(--line2);border-radius:8px;padding:10px 12px}
+  .kpi .v{font-size:19px;font-weight:600;margin:2px 0}
+  .kpi .l{font-size:11px;color:var(--tx3)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>v1.1.0 系统管理域 · 表关系 ER 图</h1>
+  <div class="sub">当前 57 表 → 改造后 62 表（+5）｜ <code>users</code> +5 列 ｜ <code>system_settings</code> +1 列 ｜ 零删列、零改类型、零数据搬迁</div>
+
+  <div class="stat">
+    <div class="kpi"><div class="l">现有表</div><div class="v">57</div><div class="l">backend/app/models 实测</div></div>
+    <div class="kpi"><div class="l">新增表</div><div class="v" style="color:var(--new)">+5</div><div class="l">menus / roles / role_menus / dict_types / dict_items</div></div>
+    <div class="kpi"><div class="l">改造后</div><div class="v">62</div><div class="l">2 张既有表共 +6 列</div></div>
+    <div class="kpi"><div class="l">按 user_id 隔离</div><div class="v">49</div><div class="l">新增 5 表刻意不带 user_id</div></div>
+    <div class="kpi"><div class="l">迁移</div><div class="v">3</div><div class="l">链式 revises，可 downgrade</div></div>
+  </div>
+
+  <div class="bar">
+    <button class="btn on" data-f="all">全部</button>
+    <button class="btn" data-f="new">仅新增 5 表</button>
+    <button class="btn" data-f="auth">身份与授权链</button>
+    <button class="btn" data-f="dict">字典</button>
+    <button class="btn" data-f="core">核心业务表</button>
+    <div class="legend">
+      <span><i class="dot" style="background:#ffd24d"></i>主键</span>
+      <span><i class="dot" style="background:#7dd3fc"></i>外键</span>
+      <span><i class="dot" style="background:#8ee06a"></i>本轮新增列</span>
+      <span><i class="dot" style="background:var(--new)"></i>新增表</span>
+    </div>
+  </div>
+
+  <div class="note n">
+    <b>新增 5 张表全部不带 user_id</b> —— 它们是「权限的定义」，不是「某用户的数据」。
+    若给它们加 user_id，就等于「每用户一套菜单/角色」，那正是菜单权限失效的开始。
+    写入由 <code>system:menu:*</code> / <code>system:role:*</code> / <code>system:dict:*</code> 收口。
+  </div>
+
+  <div class="grid" id="grid">
+
+    <!-- ═══ 新增 5 表 ═══ -->
+    <div class="card new" data-g="new auth">
+      <div class="hd"><span class="badge n">新增</span><span class="nm">menus</span><span class="cls">Menu</span></div>
+      <div class="bd">
+        <div class="col"><span class="k pk">id</span><span class="t">INTEGER PK</span></div>
+        <div class="col"><span class="k">parent_id</span><span class="t">INT · 0=根 · 无FK</span></div>
+        <div class="col"><span class="k">name</span><span class="t">VARCHAR(100)</span></div>
+        <div class="col"><span class="k">menu_type</span><span class="t">M / C / F</span></div>
+        <div class="col"><span class="k">path</span><span class="t">VARCHAR(200)</span></div>
+        <div class="col"><span class="k">component</span><span class="t">预留</span></div>
+        <div class="col"><span class="k">perms</span><span class="t">唯一(非空)</span></div>
+        <div class="col"><span class="k">icon</span><span class="t">VARCHAR(64)</span></div>
+        <div class="col"><span class="k">workspace</span><span class="t">仅根C 有值</span></div>
+        <div class="col"><span class="k">sort_order · is_visible</span><span class="t"></span></div>
+        <div class="col"><span class="k">status</span><span class="t">启停开关</span></div>
+      </div>
+      <div class="rel">
+        被 <b>role_menus.menu_id</b> 引用（RESTRICT）<br>
+        <b>parent_id</b> 自引用 → 应用层树（有子节点即拒删）
+      </div>
+    </div>
+
+    <div class="card new" data-g="new auth">
+      <div class="hd"><span class="badge n">新增</span><span class="nm">roles</span><span class="cls">Role</span></div>
+      <div class="bd">
+        <div class="col"><span class="k pk">id</span><span class="t">INTEGER PK</span></div>
+        <div class="col"><span class="k">name</span><span class="t">VARCHAR(64)</span></div>
+        <div class="col"><span class="k">code</span><span class="t">UNIQUE</span></div>
+        <div class="col"><span class="k">description</span><span class="t">VARCHAR(255)</span></div>
+        <div class="col"><span class="k">is_system</span><span class="t">禁删禁停</span></div>
+        <div class="col"><span class="k">status · sort_order</span><span class="t"></span></div>
+      </div>
+      <div class="rel">
+        被 <b>role_menus.role_id</b> 引用（CASCADE）<br>
+        被 <b>users.role</b> 值域引用（逻辑外键，无 DDL FK）<br>
+        种子仅 2 行：<code>admin</code> / <code>user</code>
+      </div>
+    </div>
+
+    <div class="card new" data-g="new auth">
+      <div class="hd"><span class="badge n">新增</span><span class="nm">role_menus</span><span class="cls">RoleMenu</span></div>
+      <div class="bd">
+        <div class="col"><span class="k pk">id</span><span class="t">INTEGER PK</span></div>
+        <div class="col"><span class="k fk">role_id</span><span class="t">FK → roles (CASCADE)</span></div>
+        <div class="col"><span class="k fk">menu_id</span><span class="t">FK → menus (RESTRICT)</span></div>
+      </div>
+      <div class="rel">
+        UNIQUE(role_id, menu_id) · INDEX(menu_id)<br>
+        <b>逐菜单行授权</b> —— F 行也单独授权 ⇒ 能给「查看」不给「删除」
+      </div>
+    </div>
+
+    <div class="card new" data-g="new dict">
+      <div class="hd"><span class="badge n">新增</span><span class="nm">dict_types</span><span class="cls">DictType</span></div>
+      <div class="bd">
+        <div class="col"><span class="k pk">id</span><span class="t">INTEGER PK</span></div>
+        <div class="col"><span class="k">name</span><span class="t">VARCHAR(64)</span></div>
+        <div class="col"><span class="k">code</span><span class="t">UNIQUE</span></div>
+        <div class="col"><span class="k">remark · status</span><span class="t"></span></div>
+      </div>
+      <div class="rel">
+        被 <b>dict_items.type_id</b> 引用（CASCADE）<br>
+        <code>code</code> 是前端 <code>useDict(code)</code> 的键
+      </div>
+    </div>
+
+    <div class="card new" data-g="new dict">
+      <div class="hd"><span class="badge n">新增</span><span class="nm">dict_items</span><span class="cls">DictItem</span></div>
+      <div class="bd">
+        <div class="col"><span class="k pk">id</span><span class="t">INTEGER PK</span></div>
+        <div class="col"><span class="k fk">type_id</span><span class="t">FK → dict_types</span></div>
+        <div class="col"><span class="k ad">type_code</span><span class="t">冗余(免join)</span></div>
+        <div class="col"><span class="k">label · value</span><span class="t">UNIQUE(type_id,value)</span></div>
+        <div class="col"><span class="k">list_class</span><span class="t">antd Tag 色</span></div>
+        <div class="col"><span class="k">sort_order · status · remark</span><span class="t"></span></div>
+      </div>
+      <div class="rel">
+        <b>不搬 dataPanel 的 belong</b>（多平台维度）<br>
+        value 永远字符串，不做 int
+      </div>
+    </div>
+
+    <!-- ═══ 身份域既有表（本轮改造）═══ -->
+    <div class="card" data-g="auth core">
+      <div class="hd"><span class="badge plus">+5 列</span><span class="nm">users</span><span class="cls">User</span></div>
+      <div class="bd">
+        <div class="col"><span class="k pk">id</span><span class="t">INTEGER PK</span></div>
+        <div class="col"><span class="k">username</span><span class="t">UNIQUE</span></div>
+        <div class="col"><span class="k">password_hash</span><span class="t">PBKDF2</span></div>
+        <div class="col"><span class="k">role</span><span class="t">快照 → roles.code</span></div>
+        <div class="col"><span class="k">token_version</span><span class="t">撤令牌</span></div>
+        <div class="col"><span class="k ad">status</span><span class="t">normal/pending/disabled</span></div>
+        <div class="col"><span class="k ad">real_name</span><span class="t">VARCHAR(64)</span></div>
+        <div class="col"><span class="k ad">last_login_ip</span><span class="t">VARCHAR(64)</span></div>
+        <div class="col"><span class="k ad">last_login_at</span><span class="t">NULL=从未登录</span></div>
+        <div class="col"><span class="k ad">must_change_password</span><span class="t">默认口令强制改密</span></div>
+      </div>
+      <div class="rel">
+        被 <b>49 张业务表</b> 按 <code>user_id</code> 引用<br>
+        <b>role</b> → <code>roles.code</code>（值域外键，应用层校验）
+      </div>
+    </div>
+
+    <div class="card" data-g="auth">
+      <div class="hd"><span class="badge plus">+1 列</span><span class="nm">system_settings</span><span class="cls">SystemSetting</span></div>
+      <div class="bd">
+        <div class="col"><span class="k pk">id</span><span class="t">INTEGER PK</span></div>
+        <div class="col"><span class="k fk">user_id</span><span class="t">FK → users</span></div>
+        <div class="col"><span class="k">key · value · value_type</span><span class="t">UNIQUE(user_id,key)</span></div>
+        <div class="col"><span class="k">category · label · description</span><span class="t"></span></div>
+        <div class="col"><span class="k">requires_restart · is_dangerous</span><span class="t"></span></div>
+        <div class="col"><span class="k fk">updated_by</span><span class="t">FK → users</span></div>
+        <div class="col"><span class="k ad">scope</span><span class="t">user / global</span></div>
+      </div>
+      <div class="rel">
+        <code>scope=global</code> ⇒ 仅 admin 可写（403）<br>
+        <b>不改成全局表</b>：多用户各自调过的限流值需要合并策略
+      </div>
+    </div>
+
+    <!-- ═══ 核心业务表（抽样，代表 49 张）═══ -->
+    <div class="card" data-g="core">
+      <div class="hd"><span class="nm">platform_accounts</span><span class="cls">PlatformAccount</span></div>
+      <div class="bd">
+        <div class="col"><span class="k pk">id</span><span class="t">INTEGER PK</span></div>
+        <div class="col"><span class="k fk">user_id</span><span class="t">FK → users</span></div>
+        <div class="col"><span class="k">platform</span><span class="t">xhs/douyin/xianyu</span></div>
+        <div class="col"><span class="k">sub_type · external_user_id</span><span class="t">UNIQUE(user,platform,ext)</span></div>
+        <div class="col"><span class="k">seller_id · shop_state</span><span class="t"></span></div>
+        <div class="col"><span class="k">deleted_at</span><span class="t">软删</span></div>
+      </div>
+      <div class="rel">被 <b>12 张表</b> 按 <code>platform_account_id</code> 引用</div>
+    </div>
+
+    <div class="card" data-g="core">
+      <div class="hd"><span class="nm">notes</span><span class="cls">Note</span></div>
+      <div class="bd">
+        <div class="col"><span class="k pk">id</span><span class="t">INTEGER PK</span></div>
+        <div class="col"><span class="k fk">user_id</span><span class="t">FK → users</span></div>
+        <div class="col"><span class="k fk">platform_account_id</span><span class="t">FK → platform_accounts</span></div>
+        <div class="col"><span class="k">platform · note_id</span><span class="t">UNIQUE(user,note_id)</span></div>
+        <div class="col"><span class="k">publish_status · note_form</span><span class="t">→ 字典镜像</span></div>
+      </div>
+      <div class="rel">被 <code>note_topics</code>/<code>note_assets</code>/<code>note_comments</code>/<code>note_metric_snapshots</code> 引用</div>
+    </div>
+
+    <div class="card" data-g="core">
+      <div class="hd"><span class="nm">tasks</span><span class="cls">Task</span></div>
+      <div class="bd">
+        <div class="col"><span class="k pk">id</span><span class="t">INTEGER PK</span></div>
+        <div class="col"><span class="k fk">user_id</span><span class="t">FK → users</span></div>
+        <div class="col"><span class="k">platform · task_type · status</span><span class="t">→ 字典镜像</span></div>
+        <div class="col"><span class="k fk">parent_task_id</span><span class="t">自引用</span></div>
+        <div class="col"><span class="k">batch_no</span><span class="t">UNIQUE(非空)</span></div>
+      </div>
+      <div class="rel">被 <code>notifications</code>/<code>no_traffic_cleanup_*</code>/<code>generation_records</code> 引用</div>
+    </div>
+
+    <div class="card" data-g="core">
+      <div class="hd"><span class="nm">notifications</span><span class="cls">Notification</span></div>
+      <div class="bd">
+        <div class="col"><span class="k pk">id</span><span class="t">INTEGER PK</span></div>
+        <div class="col"><span class="k fk">user_id</span><span class="t">FK → users</span></div>
+        <div class="col"><span class="k fk">source_task_id</span><span class="t">FK → tasks</span></div>
+        <div class="col"><span class="k">source_type · level</span><span class="t">→ 字典镜像</span></div>
+        <div class="col"><span class="k">read</span><span class="t">BOOLEAN</span></div>
+      </div>
+      <div class="rel">顶栏铃铛读这张表；<code>level</code>/<code>source_type</code> 进字典</div>
+    </div>
+
+    <div class="card" data-g="core">
+      <div class="hd"><span class="nm">api_logs</span><span class="cls">ApiLog</span></div>
+      <div class="bd">
+        <div class="col"><span class="k pk">id</span><span class="t">INTEGER PK</span></div>
+        <div class="col"><span class="k">user_id</span><span class="t">NULL 允许</span></div>
+        <div class="col"><span class="k">platform · endpoint</span><span class="t">只落路径</span></div>
+        <div class="col"><span class="k">status</span><span class="t">success/client_error/server_error</span></div>
+        <div class="col"><span class="k">meta</span><span class="t">JSON(状态码/耗时)</span></div>
+      </div>
+      <div class="rel">
+        <b>审计日志页的数据源</b>（本轮补查询端点，不新建表）<br>
+        ⚠️ 不落 query / body（刻意）
+      </div>
+    </div>
+
+  </div>
+
+  <div class="note w" style="margin-top:18px">
+    <b>删除策略总表</b>（这三条是本轮唯一新增的级联语义，其余全表不动）：
+    <table style="width:100%;margin-top:8px;border-collapse:collapse;font-size:11.5px">
+      <tr style="color:var(--tx3)"><th style="text-align:left;padding:4px 8px">从</th><th style="text-align:left;padding:4px 8px">到</th><th style="text-align:left;padding:4px 8px">策略</th><th style="text-align:left;padding:4px 8px">为什么</th></tr>
+      <tr><td style="padding:4px 8px" class="col"><span class="k fk">role_menus.role_id</span></td><td style="padding:4px 8px">roles</td><td style="padding:4px 8px;color:var(--ok)">CASCADE</td><td style="padding:4px 8px">删角色 ⇒ 授权行必然失去意义</td></tr>
+      <tr><td style="padding:4px 8px" class="col"><span class="k fk">role_menus.menu_id</span></td><td style="padding:4px 8px">menus</td><td style="padding:4px 8px;color:var(--warn)">RESTRICT</td><td style="padding:4px 8px">CASCADE 会静默收回别人的权限 ⇒ 改为有引用即拒（409）</td></tr>
+      <tr><td style="padding:4px 8px" class="col"><span class="k fk">dict_items.type_id</span></td><td style="padding:4px 8px">dict_types</td><td style="padding:4px 8px;color:var(--ok)">CASCADE</td><td style="padding:4px 8px">删类型时页面会告知「将删 N 项」，属明确同意</td></tr>
+    </table>
+  </div>
+
+  <div class="note">
+    <b>迁移链</b>：<code>c1d2e3f4a5b8</code>（现 head）
+    → <code>d1a2b3c4d5e6</code>（3 表 + users 5 列 + 2 内置角色）
+    → <code>e2b3c4d5e6f7</code>（2 字典表 + 播种）
+    → <code>f3c4d5e6f7a8</code>（menus 种子 + settings.scope）。
+    库副本四步实测：upgrade → 重跑幂等 → downgrade → upgrade。
+  </div>
+</div>
+
+<script>
+  document.querySelectorAll('.bar .btn').forEach(b => {
+    b.addEventListener('click', () => {
+      document.querySelectorAll('.bar .btn').forEach(x => x.classList.remove('on'));
+      b.classList.add('on');
+      const f = b.dataset.f;
+      document.querySelectorAll('.card').forEach(c => {
+        const g = (c.dataset.g || '').split(' ');
+        const show = f === 'all' || g.includes(f);
+        c.classList.toggle('dim', !show);
+        c.style.display = '';   // 保留占位感（dim 而非 display:none）
+      });
+    });
+  });
+</script>
+</body>
+</html>
