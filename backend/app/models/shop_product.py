@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.app.core.database import Base
@@ -93,11 +93,15 @@ class ShopProduct(Base):
     price_min_fen: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     price_max_fen: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     #: 创建时间（平台原文是**毫秒**，原样存；筛选 + 默认排序）。
-    create_time_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    #: 上架 / 下架 / 审核时间（毫秒；排序字段，平台没给就留 NULL）。
-    on_shelf_time_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    off_shelf_time_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    last_audit_time_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    #: ⚠️ 2026-10-23：`Integer` → **`BigInteger`**。Epoch 毫秒是 13 位
+    #: （实测 max `1792735709000`），**超出 int32 上限 2147483647** ⇒ PG 上
+    #: `NumericValueOutOfRange: 整数超出范围`。SQLite 的 INTEGER 是 64 位所以一直没暴露。
+    #: 切 PG 必炸，故统一改 BIGINT（SQLite 侧无行为差异）。
+    create_time_ms: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    #: 上架 / 下架 / 审核时间（毫秒；排序字段，平台没给就留 NULL）。同上，必须 BIGINT。
+    on_shelf_time_ms: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    off_shelf_time_ms: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    last_audit_time_ms: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     #: 近 30 天销量（`item_sale_qty_30` 排序；`sales` 列是累计，不混用）。
     sales_30d: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     # ------------------------------------------------------------------ #

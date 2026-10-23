@@ -48,6 +48,11 @@ class PlatformAccount(Base):
             "external_user_id",
             unique=True,
             sqlite_where=text("external_user_id IS NOT NULL AND external_user_id <> ''"),
+            #: ⚠️ 2026-10-23 补：**此前只有 `sqlite_where`，PG 上这个索引根本不存在**
+            #: （实测 `pg_indexes ... indexdef ilike '%WHERE%'` 返回 0 条）⇒
+            #: 「同一小红书 ID 不能绑定两次」在 PG 上**失效**且不报错。
+            #: 两个方言的部分索引条件必须**同时声明**（`<> ''` 在 PG 同样成立）。
+            postgresql_where=text("external_user_id IS NOT NULL AND external_user_id <> ''"),
         ),
         #: ⚠️ **`uq_platform_accounts_shop_id_fk` 已退场**（ADR-021 / 设计 18，
         #: 迁移 `a1b2c3d4e5f6`）：**店铺不再是实体**，`shops` 表与

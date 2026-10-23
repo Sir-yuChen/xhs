@@ -50,8 +50,10 @@ database:
   mysql_database: "spider_xhs"
 
 security:
-  # JWT signing key - MUST be changed in production
-  secret_key: "dev-only-change-me"
+  # JWT 签名密钥 —— 生产/服务器形态必须改（启动自检会拒绝以默认值启动）。
+  # 2026-10-23 切 PG 主库时生成（secrets.token_urlsafe(48)，64 字符）。
+  # ⚠️ 该值泄露 = 任何人可伪造任意用户令牌 ⇒ 不要提交到公开仓库。
+  secret_key: "IGy3soGGmfdQQHnmlUITxF_RawDA5d9U1vFRjP1gtyw4A5HDmwnE0eN5N9YP-YZu"
   # Fernet key for encrypting cookies and API keys
   # If empty, auto-derived from secret_key via SHA-256 + base64
   fernet_key: ""

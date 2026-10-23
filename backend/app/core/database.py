@@ -62,6 +62,12 @@ if _IS_SQLITE:
 #:   10 + 20 = 30 上限，为调度器 / worker 线程池留足余量。
 _PG_POOL: dict[str, object] = {}
 if db_dialect.is_postgres(settings.database_url):
+    #: ⚠️ 这里只能放 **SQLAlchemy 池参数**，不能放数据库连接参数。
+    #: 连接参数（如 connect_timeout / statement_timeout）要走 `connect_args`，
+    #: 且 **psycopg3 的参数名是 `connect_timeout`**（不是 psycopg2 的 `connect_timeout` 也不是 `timeout`）。
+    #: 2026-10-23 实测踩坑：把 `pool_timeout` 误写成连接参数会得到
+    #: `psycopg.ProgrammingError: invalid connection option "timeout"`，
+    #: 表现为**服务启动后无报错、无监听、进程静默退出**（uvicorn 把这个异常吞在 lifespan 里）。
     _PG_POOL = {
         "pool_size": 10,
         "max_overflow": 20,
@@ -69,6 +75,7 @@ if db_dialect.is_postgres(settings.database_url):
         "pool_recycle": 1800,
         "pool_timeout": 30,
     }
+    _connect_args["connect_timeout"] = 10
 
 engine = create_engine(settings.database_url, connect_args=_connect_args, **_PG_POOL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

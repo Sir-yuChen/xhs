@@ -7,10 +7,12 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -122,6 +124,26 @@ class GenerationRecord(Base):
     """
 
     __tablename__ = "generation_records"
+    #: ⚠️ 2026-10-23 补：这两个索引此前**只写在迁移 `c1d2e3f4a5b7` 里，模型层没声明**。
+    #: 后果：用 `create_all` 建出的库（测试库 / PG 基线）会**静默丢掉它们** ——
+    #: `uq_generation_records_adopted` 是**唯一约束**（同商品只能有一条采用版），
+    #: 丢了 = 「采用版」可以出现两条，业务判据失效且不报错。
+    __table_args__ = (
+        Index(
+            "uq_generation_records_adopted",
+            "user_id",
+            "shop_product_id",
+            unique=True,
+            sqlite_where=text("is_adopted = 1"),
+            postgresql_where=text("is_adopted = true"),
+        ),
+        Index(
+            "ix_generation_records_product_version",
+            "user_id",
+            "shop_product_id",
+            "version_no",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     #: 归属（DEF-066）。

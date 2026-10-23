@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.app.core.database import Base
@@ -174,6 +174,12 @@ class Note(Base):
         #: 不会被打断；命中既有行时同时刷新 `platform_account_id`，账号换行后笔记能
         #: 重新挂回（旧实现漏了这一步，导致账号删除后笔记永久悬空）。
         UniqueConstraint("user_id", "note_id", name="uq_notes_user_note"),
+        #: ⚠️ 2026-10-23 补：以下两个索引此前**只写在迁移里，模型层没声明** ⇒
+        #: `create_all` 建的库（测试库 / PG 基线）会丢掉它们。这里不带报错，
+        #: 只是「列表按用户+创建时间排序」与「待补正文扫描」变慢 —— 属于**静默退化**。
+        #: `ix_notes_form` 已由 `note_form` 列的 `index=True` 覆盖，无需重复声明。
+        Index("ix_notes_user_created", "user_id", "created_at"),
+        Index("ix_notes_hydrated_at", "hydrated_at"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

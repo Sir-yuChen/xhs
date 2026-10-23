@@ -18,6 +18,9 @@ fastapi
 uvicorn
 sqlalchemy>=2.0
 alembic
+# PostgreSQL 驱动（psycopg3）。2026-10-23 起 PG 为**主库**（设计 51/58）：
+# 用 `[binary]` 变体 —— 有 Windows/linux 预编译 wheel，装包无需本地编译工具链。
+psycopg[binary]>=3.2
 pydantic
 pydantic-settings
 cryptography

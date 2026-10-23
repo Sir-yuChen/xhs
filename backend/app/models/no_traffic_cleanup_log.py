@@ -47,7 +47,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.app.core.database import Base
@@ -83,6 +83,11 @@ class NoTrafficCleanupLog(Base):
     """一次无流量清理 = 一行（**批次层**）。"""
 
     __tablename__ = "no_traffic_cleanup_logs"
+    #: ⚠️ 2026-10-23 补：`ix_no_traffic_cleanup_logs_batch_no` 此前只写在迁移
+    #: `c0ffee000002` 里，模型层没声明 ⇒ `create_all` 建的库会丢（查询变慢，不报错）。
+    __table_args__ = (
+        Index("ix_no_traffic_cleanup_logs_batch_no", "batch_no"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     #: 操作者（发起清理的登录用户）。快照，不带外键。
@@ -221,7 +226,8 @@ class NoTrafficCleanupItem(Base):
     reason: Mapped[str] = mapped_column(Text, default="", server_default="")
 
     #: 笔记发布时间快照（毫秒时间戳；缺则 NULL，不补 0）。
-    published_at: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    #: ⚠️ Epoch 毫秒（实测 max 1782271294000，超 int32）⇒ **必须 BIGINT**（2026-10-23）。
+    published_at: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     #: **操作时间**（用户口径「操作时间」）。
     operated_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now, index=True)
     #: 入库时间。

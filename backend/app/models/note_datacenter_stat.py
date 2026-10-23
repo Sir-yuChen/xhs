@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import (
+    BigInteger,
     DateTime,
     Float,
     ForeignKey,
@@ -93,7 +94,8 @@ class NoteDatacenterStat(Base):
     item_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     item_title: Mapped[str] = mapped_column(String(256), nullable=False, default="")
     variant_desc: Mapped[str] = mapped_column(String(255), nullable=False, default="")
-    publish_time: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    #: ⚠️ Epoch 毫秒（实测 max 1791383619000，超 int32）⇒ **必须 BIGINT**（2026-10-23）。
+    publish_time: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
 
     # ---- 互动指标（真实列，可筛选排序；**可空** = 缺值，无流量判定时 null 不参与）----
     read_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
