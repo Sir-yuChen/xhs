@@ -111,8 +111,33 @@ def start_download(
                     "percent": 20,
                     "error": "",
                 }
-            #: 失败**自动重试 3 次**（用户口径 2026-10-23）；仍失败才抛给前端。
-            env._with_retries(spec.fetch, target, spec.name)
+            #: **真实下载进度上报**（2026-10-23，用户口径「下载进度需要反馈给用户」）。
+            #: 原来这里是硬编码的 5 / 20 / 95 / 100 假进度，220 MB 的内核下载期间
+            #: 界面只会「卡在 20%」然后突然 100%，用户以为死机。
+            #: 现在 `_download_first_ok` 每读一块就回调，这里换算成百分比写进 _PROGRESS。
+            def _sink(label: str, done: int, total: int) -> None:
+                if total > 0:
+                    #: 留 5%~95% 给下载本身（0-5% 是启动、95-100% 是解包+探测）
+                    percent = 5 + int(done * 90 / total)
+                    note = f"{label}：{done / 1048576:.1f} / {total / 1048576:.1f} MB"
+                else:
+                    percent = 20
+                    note = label
+                with _LOCK:
+                    _PROGRESS[payload.key] = {
+                        "key": payload.key,
+                        "status": "running",
+                        "percent": min(percent, 95),
+                        "error": "",
+                        "note": note,
+                    }
+
+            env.set_progress_sink(_sink)
+            try:
+                #: 失败**自动重试 3 次**（用户口径 2026-10-23）；仍失败才抛给前端。
+                env._with_retries(spec.fetch, target, spec.name)
+            finally:
+                env.set_progress_sink(None)
             with _LOCK:
                 _PROGRESS[payload.key] = {
                     "key": payload.key,

@@ -145,6 +145,34 @@ OCR_MODEL_SOURCES: tuple[tuple[str, tuple[str, ...]], ...] = (
 #: 分钟级；而且「重试」属于下载语义，不该由 UI 承担。
 DOWNLOAD_RETRIES = 3
 
+#: 流式下载的读取块大小（用于上报进度；64 KB 是速度与回调频率的折中）。
+_PROGRESS_CHUNK_BYTES = 64 * 1024
+
+#: 当前下载的**进度上报钩子**（2026-10-23，用户口径「下载进度需要反馈给用户」）。
+#:
+#: 为什么用模块级变量而不是给每个 `fetch()` 加参数：`DependencySpec.fetch` 的签名是
+#: 统一的 `Callable[[Path], None]`，四个依赖（node / ffmpeg / ocr / 窗口内核）各写一遍
+#: 进度参数会立刻长出四份重复实现。这里由下载入口在开始时挂上、结束时摘掉，
+#: `_download_first_ok` 每读一块就调一次 —— **只有一处实现**。
+_progress_sink: "Callable[[str, int, int], None] | None" = None
+
+
+def set_progress_sink(sink: "Callable[[str, int, int], None] | None") -> None:
+    """挂/摘下载进度钩子。`sink(label, 已下载字节, 总字节)`；总字节未知时为 0。"""
+    global _progress_sink
+
+    _progress_sink = sink
+
+
+def _emit_progress(label: str, done: int, total: int) -> None:
+    sink = _progress_sink
+    if sink is None:
+        return
+    try:
+        sink(label, done, total)
+    except Exception:  # noqa: BLE001 - 进度上报永不影响下载
+        pass
+
 #: 每次重试前的等待基数（秒）；第 n 次等 `RETRY_BACKOFF_S * n`（2s / 4s）。
 RETRY_BACKOFF_S = 2
 
@@ -303,20 +331,43 @@ class DependencySpec:
 
 
 
-def _download_first_ok(urls: tuple[str, ...], label: str) -> bytes:
+def _download_first_ok(
+    urls: tuple[str, ...],
+    label: str,
+    *,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> bytes:
     """**依次尝试多个公共源**，返回第一个成功且体积合理的响应体。
 
     用户口径 2026-10-23：「准备两套」—— 主源挂了自动切备源，用户不必手动换。
+    「国内源优先」：各依赖的 URL 元组里国内镜像排在前面（npmmirror → 华为云）。
 
     * 判据：HTTP 成功 **且** 体积 ≥ 1KB（0 字节/半截都算失败，继续试下一个）；
     * 全部失败 ⇒ 抛 `RuntimeError`，列出每个源的实际错误（前端要能看出是网络问题）。
+
+    `on_progress(已下载字节, 总字节)`（2026-10-23 新增，用户口径「下载进度需要
+    反馈给用户」）：**流式**分块读取并回调 —— 原来用 `resp.read()` 一次性读进内存，
+    期间没有任何中间状态可上报，220 MB 的内核下载在界面上是「卡住不动」。
+    总字节取自 `Content-Length`，拿不到时回传 0（调用方据此显示已下载量而非百分比）。
     """
     errors: list[str] = []
     for url in urls:
         host = url.split("/")[2] if url.count("/") >= 2 else url
         try:
             with urllib.request.urlopen(url, timeout=DOWNLOAD_TIMEOUT_S) as resp:
-                data = resp.read()
+                total = int(resp.headers.get("Content-Length") or 0)
+                chunks: list[bytes] = []
+                done = 0
+                while True:
+                    chunk = resp.read(_PROGRESS_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    done += len(chunk)
+                    if on_progress is not None:
+                        on_progress(done, total)
+                    _emit_progress(label, done, total)
+                data = b"".join(chunks)
             if len(data) < 1024:
                 errors.append(f"{host}: 内容过小 {len(data)}B")
                 logger.warning("%s 源 %s 返回过小（%s 字节）", label, host, len(data))
@@ -552,6 +603,118 @@ def fetch_node(target: Path) -> None:
         staged.unlink(missing_ok=True)
 
 
+#: 窗口宿主（自带 Chromium 的独立窗口）下载源。
+#: 用 Electron 官方发布包 + npmmirror 镜像（项目口径：只用 npmmirror / ModelScope）。
+#: ⚠️ 这不是「打包进安装包」的依赖（+220 MB），而是**安装/首次启动时下载**
+#: （用户口径 2026-10-23「安装时自动下载」）。
+WINDOW_HOST_VERSION = "33.2.0"
+#: ⚠️ **国内源优先，且配两套**（用户口径 2026-10-23）：
+#:   ① `cdn.npmmirror.com`（CDN 加速，实测 206 / 114,923,352 B）
+#:   ② `mirrors.huaweicloud.com`（备用，实测同样可用）
+#: 实测过 `mirrors.cloud.tencent.com` 下没有 electron 目录（404），不要加回来。
+def _window_host_urls(arch: str) -> tuple[str, ...]:
+    ver = WINDOW_HOST_VERSION
+    tail = f"electron-v{ver}-win32-{arch}.zip"
+    return (
+        f"https://cdn.npmmirror.com/binaries/electron/v{ver}/{tail}",
+        f"https://mirrors.huaweicloud.com/electron/v{ver}/{tail}",
+    )
+
+
+WINDOW_HOST_URLS: dict[str, tuple[str, ...]] = {
+    "x64": _window_host_urls("x64"),
+    "ia32": _window_host_urls("ia32"),
+}
+#: 下载后必须存在的可执行文件名（打包时把 electron.exe 改名）。
+WINDOW_HOST_EXE = "SpiderXHSWindow.exe"
+#: 只保留这两个语言包（locales 原始 41 MB / 55 个）。
+WINDOW_HOST_LOCALES = ("zh-CN.pak", "en-US.pak")
+#: 裁剪后仍应大于这个体积，否则视为解包失败（防止半截产物被判「可用」）。
+WINDOW_HOST_MIN_BYTES = 150 * 1024 * 1024
+
+
+def probe_window_host(target: Path) -> bool:
+    """窗口宿主是否可用：`SpiderXHSWindow.exe` 在，且 resources/app/main.js 在。
+
+    只检查 exe 存在是不够的 —— 解压中断会留下一个能启动但**没有 app 代码**的
+    Electron，它起来后闪一下就退（真机上会被当成「点了没反应」）。
+    """
+    exe = target / WINDOW_HOST_EXE
+    main_js = target / "resources" / "app" / "main.js"
+    return exe.is_file() and main_js.is_file()
+
+
+def fetch_window_host(target: Path) -> None:
+    """下载 Electron → 解包 → 裁掉多余语言包 → 改名为 `SpiderXHSWindow.exe`。
+
+    为什么自带内核（用户口径「不再依赖不同电脑的不同环境」）：
+    真机实测过三种失败 —— 用户没装 Chrome；Edge 在已有会话时打印
+    「正在现有浏览器会话中打开」并立即退出（code 0），窗口开了却被误判为失败；
+    360/QQ 等吞掉 `--app=` 变普通标签页。内置内核让所有电脑行为一致。
+    """
+    import zipfile
+
+    target.mkdir(parents=True, exist_ok=True)
+    part = target / "electron.zip.part"
+    staged = target / ".staged_window_host"
+    try:
+        part.write_bytes(_download_first_ok(WINDOW_HOST_URLS.get(_node_arch(), WINDOW_HOST_URLS["x64"]), "window-host"))
+        if staged.exists():
+            import shutil
+
+            shutil.rmtree(staged, ignore_errors=True)
+        with zipfile.ZipFile(part) as zf:
+            zf.extractall(staged)
+
+        #: 裁剪：locales 只留中文/英文（41 MB → 约 0.5 MB）
+        locales = staged / "locales"
+        if locales.is_dir():
+            for pak in locales.iterdir():
+                if pak.name not in WINDOW_HOST_LOCALES:
+                    pak.unlink(missing_ok=True)
+
+        exe_src = staged / "electron.exe"
+        if not exe_src.is_file():
+            raise RuntimeError("压缩包里没有 electron.exe")
+        exe_src.replace(staged / WINDOW_HOST_EXE)
+
+        #: 宿主代码来源**两处**（按存在性取，不猜环境）：
+        #:   ① 安装态：`<安装目录>/runtime/window-host-src/`（打包时由 build.ps1 拷进去）
+        #:   ② 开发态：`<仓库根>/packaging/window-host/`
+        #: 这样「开发机点一下下载」与「装好的用户点一下下载」走同一条代码路径。
+        app_dir = staged / "resources" / "app"
+        app_dir.mkdir(parents=True, exist_ok=True)
+        candidates = (
+            install_root() / "runtime" / "window-host-src",
+            Path(__file__).resolve().parents[3] / "packaging" / "window-host",
+        )
+        src_dir = next((c for c in candidates if (c / "main.js").is_file()), candidates[0])
+        for name in ("main.js", "package.json"):
+            src = src_dir / name
+            if not src.is_file():
+                raise RuntimeError(f"缺少窗口宿主代码 {src}（安装包不完整）")
+            (app_dir / name).write_bytes(src.read_bytes())
+
+        total = sum(f.stat().st_size for f in staged.rglob("*") if f.is_file())
+        if total < WINDOW_HOST_MIN_BYTES:
+            raise RuntimeError(f"解出的窗口宿主体积异常（{total} 字节）")
+
+        #: 整体替换（先删旧目录，避免旧版残留文件混在里面）
+        import shutil
+
+        for old in target.iterdir():
+            if old.name == part.name or old == staged:
+                continue
+            shutil.rmtree(old, ignore_errors=True) if old.is_dir() else old.unlink(missing_ok=True)
+        for item in staged.iterdir():
+            item.replace(target / item.name)
+    finally:
+        part.unlink(missing_ok=True)
+        import shutil
+
+        shutil.rmtree(staged, ignore_errors=True)
+
+
 # ---------------------------------------------------------------------------
 # 注册表
 # ---------------------------------------------------------------------------
@@ -577,6 +740,20 @@ DEPENDENCIES: tuple[DependencySpec, ...] = (
         detail="用于商品视频抽帧检测违规词；缺失时视频无法自动检测，会默认不勾选。",
     ),
     DependencySpec(
+        key="window_host",
+        name="独立窗口内核（内置 Chromium）",
+        size_hint="≈220 MB",
+        dir_name="window-host",
+        probe=probe_window_host,
+        fetch=fetch_window_host,
+        detail=(
+            "让界面以**独立窗口**打开，不依赖电脑上装了什么浏览器。"
+            "缺失时会退回用 Edge/Chrome/默认浏览器打开（行为因电脑而异，"
+            "真机上出现过「点了没反应」）。"
+        ),
+        #: 不设 required：`window_host` 沿用 DependencySpec 其它字段默认值。
+    ),
+    DependencySpec(
         key="ocr_models",
         name="OCR 模型（PP-OCRv6 tiny）",
         size_hint="≈7 MB",
@@ -600,6 +777,9 @@ def _with_retries(fetch: Callable[[Path], None], target: Path, label: str) -> No
     last: Exception | None = None
     for attempt in range(1, DOWNLOAD_RETRIES + 1):
         try:
+            #: 每次尝试前把「第 N/3 次」报到进度里 —— 用户口径「下载进度需要反馈给用户」：
+            #: 220 MB 的内核第一次失败后要等 2 秒再试，界面若一片安静，用户会以为卡死。
+            _emit_progress(f"{label}（第 {attempt}/{DOWNLOAD_RETRIES} 次）", 0, 0)
             fetch(target)
             return
         except Exception as exc:  # noqa: BLE001 - 重试后仍失败才抛

@@ -1,0 +1,9 @@
+{
+  "name": "spider-xhs-window",
+  "productName": "SpiderXHS Window",
+  "version": "1.0.0",
+  "description": "SpiderXHS 独立窗口宿主（自带 Chromium，不依赖用户安装的浏览器）",
+  "main": "main.js",
+  "private": true,
+  "author": "SpiderXHS"
+}

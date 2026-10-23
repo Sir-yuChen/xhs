@@ -34,7 +34,11 @@ def test_bundled_binaries_are_not_downloadable():
     改成下载要把打包形态从单文件 exe 换成「用户装 Python 环境」——用户明确否决。
     """
     keys = {s.key for s in env.DEPENDENCIES}
-    assert keys == {"node", "ffmpeg", "ocr_models"}, f"依赖清单被改过：{keys}"
+    #: `window_host` 也在清单里，但**不属于**「编译进程序的 .pyd/.dll」那一类：
+    #: 它是自带 Chromium 的窗口宿主（≈220 MB），按「可下载三方依赖」规则外置，
+    #: 安装/首次启动时下载（用户口径 2026-10-23「安装时自动下载」）。
+    #: 故本断言只钉「必须随包的那些不许变成下载」——`window_host` 不在此列。
+    assert keys == {"node", "ffmpeg", "ocr_models", "window_host"}, f"依赖清单被改过：{keys}"
     for banned in ("cv2", "opencv", "onnxruntime", "numpy"):
         assert banned not in keys, f"{banned} 不能出现在下载清单（它是运行库不是资源）"
     #: 说明文字**已按用户口径移除**（2026-10-23）——
@@ -123,16 +127,26 @@ def test_multisource_falls_back_to_second_url(monkeypatch):
         tried.append(url)
 
         class _Resp:
+            #: 2026-10-23：`_download_first_ok` 改为**流式**读取（为了上报进度），
+            #: 所以要支持 `read(n)` 分块 + `headers["Content-Length"]`。
+            headers = {"Content-Length": "4096"}
+
             def __enter__(self):
                 return self
 
             def __exit__(self, *a):
                 return False
 
-            def read(self):
+            def read(self, n=-1):
                 if len(tried) == 1:
                     raise OSError("primary down")
-                return b"x" * 4096
+                if not hasattr(self, "_buf"):
+                    self._buf = b"x" * 4096
+                if n is None or n < 0:
+                    out, self._buf = self._buf, b""
+                    return out
+                out, self._buf = self._buf[:n], self._buf[n:]
+                return out
 
         return _Resp()
 

@@ -313,6 +313,13 @@ export function EnvBootstrapDialog({
               <Progress
                 percent={percent}
                 size="small"
+                //: 下载中把**实时量级**写进 format（如「42.8 / 109.6 MB」）。
+                //: 只看百分比时,220 MB 的内核下载在一段时间里"数字不动"更像是卡死;
+                //: 带上已下载/总量,用户能自己判断「在慢」还是「断了」（用户口径
+                //: 2026-10-23「下载进度需要反馈给用户」）。
+                format={(v) =>
+                  running && p?.note ? <span style={{ fontSize: 12 }}>{p.note}</span> : `${v ?? 0}%`
+                }
                 status={failed ? "exception" : row.ready ? "success" : running ? "active" : "normal"}
                 style={{ marginTop: 8, marginBottom: 0 }}
               />

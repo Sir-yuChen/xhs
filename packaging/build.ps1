@@ -211,7 +211,13 @@ if (-not (Test-Path (Join-Path $Bundle "SpiderXHS.exe"))) {
 }
 
 # --- 7. 组装 bundle --------------------------------------------------------
-Write-Step "组装 bundle（frontend/dist + config + runtime/node）"
+Write-Step "组装 bundle（frontend/dist + config + runtime/node + window-host-src）"
+#: 独立窗口宿主的**源码**（main.js + package.json）随包走，Electron 本体不随包：
+#:   * 本体 220 MB，进包会让安装包从 80 MB 涨到 ~300 MB；
+#:   * 但源码只有 6 KB，且**下载时必须能读到它** —— `fetch_window_host()` 要把
+#:     `runtime/window-host-src/` 里的 app 代码塞进 Electron 的 resources/app/。
+#: 用户口径 2026-10-23：「安装时自动下载」（下载/重试/进度由
+#: `backend/app/services/env_bootstrap_service.py` 的 window_host 依赖负责）。
 # ⚠️ 目标必须写到 frontend\dist 这一层：Copy-Item 在目标不存在时会把「源目录本身」
 # 当成目标名拷贝（少一层 dist ⇒ 启动器的 FRONTEND_BUILD_DIR 指空）。
 New-Item -ItemType Directory -Force -Path (Join-Path $Bundle "frontend") | Out-Null
@@ -222,6 +228,16 @@ Copy-Item (Join-Path $Root "config\default.yaml") (Join-Path $Bundle "config\def
 # ⚠️ 目标是**已存在**的 config\ 目录 ⇒ 源目录被复制到其下，落点 config\initial_data\（正确）；
 #    与上面 frontend\dist 那条同源坑（目标不存在时源目录会被当成目标名）。
 Copy-Item (Join-Path $Root "config\initial_data") (Join-Path $Bundle "config") -Recurse -Force
+
+# 独立窗口宿主源码（见上方 Write-Step 的说明）。少了它 = 用户点「下载内核」
+# 会在解包后报「缺少窗口宿主代码（安装包不完整）」。
+$WindowHostSrc = Join-Path $ScriptDir "window-host"
+if (-not (Test-Path $WindowHostSrc)) { Fail "缺少 window-host 源码目录：$WindowHostSrc" }
+$WindowHostDst = Join-Path $Bundle "runtime\window-host-src"
+New-Item -ItemType Directory -Force -Path $WindowHostDst | Out-Null
+Copy-Item (Join-Path $WindowHostSrc "main.js") $WindowHostDst -Force
+Copy-Item (Join-Path $WindowHostSrc "package.json") $WindowHostDst -Force
+if (-not (Test-Path (Join-Path $WindowHostDst "main.js"))) { Fail "window-host-src 拷贝失败" }
 
 # 应用版本（设计 36 §5.1，2026-10-13）：运行时**唯一**版本真相源，随包分发。
 # ⚠️ 后端 `core/version.py` 与前端经 `GET /api/system/version` 都读它 ——

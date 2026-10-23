@@ -211,11 +211,56 @@ def ensure_file_logging(root: Path, console: bool) -> None:
 # ---------------------------------------------------------------------------
 
 def _healthy(port: int) -> bool:
+    """端口上跑的是**本项目的后端**吗（不只是「端口有响应」）。
+
+    ⚠️ **2026-10-23 实测事故**：旧实现只看 `status == 200`，把**任何**占用
+    8000 端口的 HTTP 服务都当成「自己的后端已就绪」。真机表现：启动器打印
+    「端口 8000 已有健康实例 ⇒ 只打开应用窗口」，实际那个端口上是个**空壳**
+    （bind 成功但不返回页面），用户看到的就是「页面打不开」。
+    ⇒ 必须核对响应体里的**项目标识**，认不出来一律当「不是我的后端」。
+    """
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}{HEALTH_PATH}", timeout=1.5) as resp:
-            return resp.status == 200
+            if resp.status != 200:
+                return False
+            body = resp.read(4096).decode("utf-8", errors="replace")
     except Exception:
         return False
+    #: 健康端点必须自报项目名（见 `backend/app/main.py` 的 /api/health）。
+    #: 拿不到标识就认为不是本项目 ⇒ 让调用方换端口，而不是盲目复用。
+    return HEALTH_MARKER in body
+
+
+#: 单实例锁（进程持有文件句柄，进程退出即释放）。
+#: ⚠️ **为什么不用「端口健康」当单实例判据**（2026-10-23 实测）：
+#: 启动顺序是「先查健康 → 再起后端」，而**后端已经在起**的两个瞬间之间
+#: （或本进程上一轮遗留的 uvicorn 还没退干净时）健康检查就会返回 True ⇒
+#: 误判成「已有实例在跑」而**跳过自己的启动**，用户拿到一个连不上后端的窗口。
+#: 文件锁的语义是「有没有**另一个 launcher 进程**」，与端口无关，不会误判。
+_SINGLE_INSTANCE_LOCK: list = []
+
+
+def _acquire_single_instance() -> bool:
+    """尝试取得单实例锁。True = 我是第一个实例；False = 已有实例在跑。"""
+    if sys.platform != "win32":
+        return True
+    try:
+        import msvcrt  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        return True
+    lock_path = app_root() / "runtime" / ".launcher.lock"
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(lock_path, "a+")  # noqa: SIM115 - 生命周期覆盖整个进程
+    except OSError:
+        return True
+    try:
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError:
+        handle.close()
+        return False
+    _SINGLE_INSTANCE_LOCK.append(handle)
+    return True
 
 
 def _bindable(port: int) -> bool:
@@ -270,7 +315,14 @@ def start_server(root: Path, port: int, console: bool):
 # 浏览器实例影响（共用 profile 时 --app 参数可能被已有进程吞掉，窗口不开）；
 # ②不共享用户的插件 / 历史 / 登录态。两者都找不到才退回系统默认浏览器。
 
+#: 健康响应里必须出现的**项目标识**（区分「本项目的后端」与「别的程序占了端口」）。
+#: 与 `backend/app/api/health.py`（或 main.py 的健康端点）的返回体保持一致。
+HEALTH_MARKER = "spider-xhs"
+
 APP_WINDOW_SIZE = "1440,900"
+
+#: 内置窗口宿主的可执行文件名（安装时下载到 `<安装目录>/runtime/window-host/`）。
+WINDOW_HOST_EXE = "SpiderXHSWindow.exe"
 
 #: 判定「窗口真的起来了」的观察窗口（秒）。
 #: Chromium 单例转交 / `--app` 被吞时，进程会在 1 秒内退出 ⇒ 这个值只要能盖住
@@ -418,20 +470,63 @@ def _app_profile_dir() -> Path:
     return app_root() / "runtime" / "app-profile"
 
 
-def open_app_window(url: str) -> bool:
-    """以独立应用窗口打开 UI；三档优先级 **Edge → Chrome → 电脑默认浏览器**。
+def _window_host_exe() -> Path | None:
+    """内置窗口宿主的可执行文件路径（**零环境依赖**的独立窗口）。
 
-    浏览器进程句柄记录到 ``_app_window_procs``，托盘退出时由 :func:`_close_app_window`
-    连窗口一起收掉 —— 窗口是独立 profile 的浏览器进程，launcher 只停后端是关不掉它的。
-
-    ⚠️ **成功判据是「窗口真的在」，不是「Popen 没抛异常」**（2026-10-23）：
-    Chromium 的单例机制会让新进程把 URL 转交给已有实例后**立刻退出**，此时
-    `Popen` 完全成功、`returncode` 迟早是 0，但屏幕上可能什么也没有；而
-    `--app=` 参数被不认识的浏览器吞掉时，也会变成**普通标签页**。
-    ⇒ 启动后观察 `_APP_WINDOW_SETTLE_SECONDS`，进程**仍然存活**才认为窗口起来了；
-    已退出就换下一个候选，全都不行才走第 ③ 档（电脑默认浏览器）。
+    安装时下载到 ``<安装目录>/runtime/window-host/``（打包时不进安装包，
+    见 `packaging/INSTALL_DEPS.md`）。找不到就返回 None，由调用方降级到浏览器。
     """
+    exe = app_root() / "runtime" / "window-host" / WINDOW_HOST_EXE
+    return exe if exe.is_file() else None
+
+
+def open_app_window(url: str) -> bool:
+    """以独立应用窗口打开 UI。
+
+    **优先级（2026-10-23 起）**：
+      ① **内置窗口宿主**（自带 Chromium，不读用户任何浏览器）—— 首选，
+         见 `packaging/window-host/main.js`；
+      ② Edge → ③ Chrome（``--app=``，只是兜底）；
+      ④ 电脑默认浏览器（标签页）。
+
+    为什么把内置宿主放第一（用户口径「不再依赖不同电脑的不同环境，无法确认」）：
+    真机实测过三种失败 —— 用户没装 Chrome；Edge 在已有 app-profile 会话时打印
+    「正在现有浏览器会话中打开」并**立即退出（code 0）**，窗口确实开了却被误判成
+    失败；360/QQ 等浏览器会吞掉 ``--app=`` 变普通标签页。只有自带内核能让所有
+    电脑的行为一致。
+    """
+
     profile = _app_profile_dir()
+
+    #: ① **内置窗口宿主**（自带 Chromium）—— 与用户装了什么都无关。
+    host = _window_host_exe()
+    if host is not None:
+        try:
+            proc = subprocess.Popen(
+                [str(host), f"--url={url}", f"--profile={profile}"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+            )
+        except Exception as exc:
+            log.warning("内置窗口宿主启动失败（%s），降级到浏览器候选", exc)
+        else:
+            time.sleep(_APP_WINDOW_SETTLE_SECONDS)
+            if proc.poll() is None:
+                _app_window_procs.append(proc)
+                log.info("已用内置窗口宿主打开（零环境依赖）：%s（pid=%d）", url, proc.pid)
+                return True
+            log.warning(
+                "内置窗口宿主启动后 %.1fs 内已退出（code=%s），降级到浏览器候选",
+                _APP_WINDOW_SETTLE_SECONDS, proc.returncode,
+            )
+    else:
+        log.warning(
+            "未找到内置窗口宿主（%s）—— 说明安装时依赖未下载成功，"
+            "将降级到 Edge/Chrome/默认浏览器。请在「检查运行依赖」里重新下载。",
+            app_root() / "runtime" / "window-host" / WINDOW_HOST_EXE,
+        )
+
     args = [
         f"--app={url}",
         f"--user-data-dir={profile}",
@@ -631,10 +726,28 @@ def run_tray(server, thread: threading.Thread, port: int) -> bool:
     ))
 
     def watchdog() -> None:
-        """uvicorn 非预期退出时收起托盘，让进程跟着退。"""
+        """uvicorn 非预期退出时**先告诉用户去哪看日志**，再收起托盘退出。
+
+        ⚠️ 2026-10-23：原实现只写一行日志就静默退出 —— 真机上用户看到的是
+        「程序自己没了」，无从下手。现在必须给出可操作的信息（日志路径）。
+        """
         thread.join()
         if not server.should_exit:
+            log_path = app_root() / "logs" / "launcher.log"
             log.error("uvicorn 线程已退出（非用户请求），启动器随之退出")
+            try:
+                import ctypes  # noqa: PLC0415
+
+                ctypes.windll.user32.MessageBoxW(
+                    0,
+                    f"后端服务意外退出，程序无法继续。\n\n"
+                    f"日志：{log_path}\n"
+                    f"请把该文件发给技术支持。",
+                    "SpiderXHS",
+                    0x10,  # MB_ICONERROR
+                )
+            except Exception:  # noqa: BLE001 - 弹窗失败不影响退出
+                pass
             icon.stop()
 
     threading.Thread(target=watchdog, name="tray-watchdog", daemon=True).start()
@@ -674,10 +787,27 @@ def main(argv=None) -> int:
         frozen, root, sys.version.split()[0], args.port,
     )
 
-    if _healthy(args.port):
-        log.info("端口 %d 已有健康实例 ⇒ 只打开应用窗口", args.port)
+    #: 单实例判据用**文件锁**，不用端口健康（见 `_acquire_single_instance` 的注释）。
+    if not _acquire_single_instance():
+        #: 已有实例：找出它在哪个端口上（从 8000 起逐个探，且必须**认出是本项目**），
+        #: 找到就只是把自己的窗口并过去；找不到说明那个实例还没就绪 ⇒ 等它。
+        target_port = None
+        deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            for offset in range(MAX_PORT_OFFSET + 1):
+                port = args.port + offset
+                if _healthy(port):
+                    target_port = port
+                    break
+            if target_port is not None:
+                break
+            time.sleep(0.5)
+        if target_port is None:
+            log.error("已有实例在运行，但 %ss 内没找到它的健康端口（%d-%d）", STARTUP_TIMEOUT_SECONDS, args.port, args.port + MAX_PORT_OFFSET)
+            return 1
+        log.info("已有实例在端口 %d 运行 ⇒ 只打开应用窗口", target_port)
         if not args.no_browser:
-            open_app_window(f"http://127.0.0.1:{args.port}")
+            open_app_window(f"http://127.0.0.1:{target_port}")
         return 0
 
     started = None

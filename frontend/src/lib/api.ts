@@ -5718,6 +5718,12 @@ export type DepProgress = {
   status: "idle" | "running" | "done" | "failed";
   percent: number;
   error: string;
+  /**
+   * 实时进度文案（2026-10-23，用户口径「下载进度需要反馈给用户」）。
+   * 形如「独立窗口内核（第 1/3 次）：42.8 / 109.6 MB」—— 百分比之外的
+   * 具体量级，让用户能判断「是在慢还是在卡」。
+   */
+  note?: string;
 };
 
 export type DepsStatus = {
