@@ -133,18 +133,29 @@ def seed_roles(db: Session) -> list[Role]:
 # 二、菜单
 # --------------------------------------------------------------------------- #
 def _identity_of(row: Menu) -> tuple:
-    """菜单行的判重键（见模块 docstring 的表格）。
+    """菜单行的判重键。
 
-    ⚠️ **顺序要紧**：`perms` 优先于 `path`。F 行的 `path` 是空串（不参与部分唯一），
-    M 行两者都空 ⇒ 只能按 `(parent_id, name)` 判 —— 而 name 是用户在菜单管理里
-    唯一可能改的展示字段，所以这道判重的副作用是「改了名的 M 行升级后会被再种一行」。
-    取舍：M 行只有 12 条，且改名远比「菜单凭空消失」少见；改成按 id 判重会把
-    `seed id` 变成第二份 id 真相源（更糟）。
+    ⚠️ **2026-10-24 修订：`path` 优先于 `perms`**（原来反了）。
+
+    原顺序（`perms` 优先）的理由是「F 行没有 path，只能按 perms 判」。但那个理由
+    只说明 **F 行**需要按 perms 判，不能推出「C 行也要先看 perms」。反例是真实存在的：
+    **页内页签**（`/platforms/xhs/note-workshop?tab=images` 等 6 行）与宿主
+    `/platforms/xhs/note-workshop` **共用同一个查看码** `xhs:workshop:view`
+    （页签是同一页面的不同视图，不该各自要一个码）—— 按 perms 判重会把 6 个页签
+    全当成宿主的重复而**跳过不播**（实测：种子 179 行，库里只落 173 行，侧栏丢掉
+    图片/视频/草稿工坊等 6 个入口，由守卫 `test_three_workshops_merge_into_one_page_with_tabs` 抓到）。
+
+    新顺序：
+    1. **C 行有 path** ⇒ 按 path（path 有非空部分唯一索引，且它是「这一行是哪一页」的唯一标识）；
+    2. F 行（无 path、有 perms）⇒ 按 perms；
+    3. M 行（两者都空）⇒ 按 `(parent_id, name)`。
+
+    副作用不变：改过名字的 M 行升级后会再种一行（M 行只有 11 条，改名远比「菜单凭空消失」少见）。
     """
-    if row.perms:
-        return ("perms", row.perms)
     if row.path:
         return ("path", row.path)
+    if row.perms:
+        return ("perms", row.perms)
     return ("name", row.parent_id, row.name)
 
 
@@ -211,7 +222,10 @@ def seed_menus(db: Session) -> list[Menu]:
     #: 撤它的授权（409 `MENU_IN_USE`），代价比补一条菜单高得多 ⇒ 那种情况**允许补回**。
     #: 整目录清空才是强信号。
     seeded_c_by_parent: dict[int, set[str]] = {}
+    #: `_seq` → 种子行（`skip_parent` 要判断「父是不是 M 行」）
+    seed_by_seq: dict[int, dict[str, Any]] = {}
     for item in rows:
+        seed_by_seq[int(item.get("_seq") or 0)] = item
         if str(item.get("menu_type") or "") == "C":
             seeded_c_by_parent.setdefault(int(item.get("parent_seq") or 0), set()).add(
                 str(item.get("path") or "")
@@ -223,8 +237,22 @@ def seed_menus(db: Session) -> list[Menu]:
     tree_already_seeded = bool(existing_c_by_parent)
 
     def skip_parent(seq: int) -> bool:
-        """该 M 行下**一条种子 C 行都没了**（且树已种过）⇒ 用户清空过。"""
+        """该 **M 行（目录）** 下**一条种子 C 行都没了**（且树已种过）⇒ 用户清空过。
+
+        ⚠️ **只对 M 行生效**（2026-10-24 修订）。原来不判类型，于是
+        「C 行作为父」也会走这条路径 —— 而**页内页签**的父正是 C 行
+        （`/platforms/xhs/note-workshop?tab=images` 的父是笔记工坊这个 C 行）：
+        该父名下**全部**种子 C 行就是 6 个页签，库里却是 0 个
+        ⇒ 判定「整目录被清空」⇒ 6 个页签全不播（实测：种子 179、库里 173，
+        侧栏丢掉图片/视频/草稿工坊等入口）。
+
+        「整目录被清空就不复活」这条纪律本来只针对**用户删掉了整个目录下的页面**，
+        页签不是目录下的独立页面，它没有「用户清空」这个语义。
+        """
         if not seq or not tree_already_seeded:
+            return False
+        parent_seed_row = seed_by_seq.get(seq)
+        if parent_seed_row is None or parent_seed_row.get("menu_type") != "M":
             return False
         real = seq_to_real.get(seq)
         if real is None:
@@ -275,10 +303,14 @@ def seed_menus(db: Session) -> list[Menu]:
                 continue
 
             candidate: Menu | None = None
-            if perms and perms in by_perms:
-                candidate = by_perms[perms]
-            elif path and path in by_path:
+            #: ⚠️ **判重顺序必须与 `_identity_of` 一致：path 优先于 perms**
+            #: （2026-10-24）。这里曾是独立的一份实现，改了 `_identity_of` 却没改它
+            #: ⇒ 页签（与宿主共用 `xhs:workshop:view`）仍被当成宿主的重复而跳过。
+            #: 同一件事两份实现必然漂移（DEF-044）—— 两处都按 path → perms → name。
+            if path and path in by_path:
                 candidate = by_path[path]
+            elif perms and perms in by_perms:
+                candidate = by_perms[perms]
             elif not perms and not path and (parent_real, name) in by_name:
                 candidate = by_name[(parent_real, name)]
 

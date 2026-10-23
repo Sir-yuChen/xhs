@@ -67,10 +67,23 @@ def _code_only(path: Path) -> str:
 # --------------------------------------------------------------------------- #
 class TestPictureSpaceMenu:
     def test_menu_has_picture_space_entry(self):
-        """主菜单有「图片空间」项，且指向正确路由。"""
-        shell = _code_only(SHELL)
-        assert "/platforms/xhs/picture-space" in shell
-        assert '"图片空间"' in shell
+        """主菜单有「图片空间」项，且指向正确路由。
+
+        ⚠️ v1.1.0 起侧栏**由后端下发**（`GET /api/system/menus/mine`），
+        源码里不再有菜单常量 ⇒ 判据改看**菜单种子**（出厂信息架构的真相源）。
+        原来断言 `"/platforms/xhs/picture-space" in app_shell` 实测直接红。
+        """
+        import json
+
+        seed = ROOT / "config/initial_data/menus.seed.json"
+        rows = json.loads(seed.read_text(encoding="utf-8"))["menus"]
+        entry = next(
+            (r for r in rows if r.get("path") == "/platforms/xhs/picture-space"), None
+        )
+        assert entry is not None, "菜单种子里没有「图片空间」这一项"
+        assert entry["name"] == "图片空间"
+        assert entry["menu_type"] == "C", "图片空间是页面（C 行）"
+        assert entry.get("perms"), "页面行必须带查看权限码"
 
     def test_route_is_wired(self):
         router = _read(ROUTER)

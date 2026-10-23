@@ -2154,20 +2154,51 @@ def test_three_workshops_merge_into_one_page_with_tabs():
         assert f'to="/platforms/xhs/note-workshop?tab={tab}"' in router, f"{old} 应重定向到 tab={tab}"
     assert "<Navigate" in router, "旧路由应走 Navigate 重定向"
 
-    # ② 菜单一项 + 三个工程作为**它的子项**（⚠️ 2026-10-11 第三次修订，见 docstring）
-    assert 'key: "/platforms/xhs/note-workshop"' in shell and "笔记工坊" in shell
-    shop_items = ("图片工坊", "视频工坊", "草稿工坊")
-    for label in shop_items:
-        assert f'label: "{label}"' in shell, f"「{label}」应作为笔记工坊的子项出现在菜单里"
-    for key in ('"/platforms/xhs/image-studio"', '"/platforms/xhs/video-studio"', '"/platforms/xhs/drafts"'):
-        assert key not in shell, f"菜单旧 key {key} 未移除"
-    # ⚠️ 反向（这一条才是「还是合并的、没拆回独立页」的判据）：三个工程**只能**
-    #    以 `?tab=` 子项形态出现 —— 出现独立路由就等于拆回了三张页面。
-    #: 计数：1 个宿主 key + **6** 个 `?tab=` 子项（图片/视频/草稿 + 发布中心/素材库/提示词模板），
-    #: 不是 `1 + len(shop_items)`（那 3 个只是标签元组）。
-    assert shell.count('"/platforms/xhs/note-workshop') == 7, (
-        "笔记工坊应恰好出现 7 次：1 个宿主 key + 6 个 `?tab=` 子项 key"
+    # ② 菜单一项 + 三个工坊作为**它的子项**
+    #    ⚠️ **2026-10-24 判据载体变更**（v1.1.0）：侧栏改为由后端下发
+    #    （`GET /api/system/menus/mine`），`app-shell.tsx` 里**不再有菜单常量**
+    #    ⇒ 原来断言 `'key: "/platforms/xhs/note-workshop"' in shell`、以及
+    #    `shell.count(...) == 7` 实测直接红。规则没变（一页 + 6 个 ?tab= 子项），
+    #    载体从「React 源码」换成「菜单种子」（出厂信息架构的真相源）。
+    import json
+
+    seed_rows = json.loads(
+        (ROOT / "config/initial_data/menus.seed.json").read_text(encoding="utf-8")
+    )["menus"]
+    by_path = {r.get("path"): r for r in seed_rows if r.get("path")}
+
+    assert "/platforms/xhs/note-workshop" in by_path, "菜单种子里没有笔记工坊"
+    assert by_path["/platforms/xhs/note-workshop"]["name"] == "笔记工坊"
+
+    #: 6 个 `?tab=` 子项（图片/视频/草稿 + 发布中心/素材库/提示词模板）
+    tab_paths = {
+        path: row for path, row in by_path.items()
+        if path.startswith("/platforms/xhs/note-workshop?tab=")
+    }
+    assert len(tab_paths) == 6, (
+        f"笔记工坊应有 6 个 `?tab=` 子项，实际 {sorted(tab_paths)}"
     )
+    host_seq = by_path["/platforms/xhs/note-workshop"]["_seq"]
+    for path, row in tab_paths.items():
+        assert row["parent_seq"] == host_seq, f"{path} 必须挂在笔记工坊下面"
+
+    label_to_path = {r["name"]: r.get("path") for r in seed_rows}
+    for label, tab in (
+        ("图片工坊", "images"),
+        ("视频工坊", "videos"),
+        ("草稿工坊", "drafts"),
+    ):
+        assert label_to_path.get(label) == f"/platforms/xhs/note-workshop?tab={tab}", (
+            f"「{label}」应作为笔记工坊的 `?tab={tab}` 子项"
+        )
+
+    #: 反向：三个工坊**只能**以 `?tab=` 形态出现（出现独立路由 = 拆回三张页面）
+    for legacy in (
+        "/platforms/xhs/image-studio",
+        "/platforms/xhs/video-studio",
+        "/platforms/xhs/drafts",
+    ):
+        assert legacy not in by_path, f"菜单里不该再有独立入口 {legacy}"
 
     # ③ Tabs 页签 + 面板（2026-10-02 T9 追加 materials / prompts 两个页签）
     for key in ('key: "images"', 'key: "videos"', 'key: "drafts"'):
@@ -5429,11 +5460,21 @@ def test_consolidated_routes_redirect_old_paths():
 
 
 def test_menu_no_longer_has_duplicate_entries():
-    """菜单「监管中心」存在，且不再有「竞品监控」「数据抓取」两个重复入口。"""
-    code = _code_only(_read(APP_SHELL))
-    assert 'label: "监控中心"' in code
-    assert 'label: "竞品监控"' not in code, "重复入口「竞品监控」复活"
-    assert 'label: "数据抓取"' not in code, "重复入口「数据抓取」复活"
+    """菜单「监控中心」存在，且不再有「竞品监控」「数据抓取」两个重复入口。
+
+    ⚠️ v1.1.0 起侧栏由后端下发（`GET /api/system/menus/mine`），源码里不再有
+    菜单常量 ⇒ 判据改看**菜单种子**。原来断言 `'label: "监控中心"' in app_shell`
+    实测直接红（侧栏已改成数据驱动）。
+    """
+    import json
+
+    root = Path(__file__).resolve().parents[2]
+    seed = root / "config/initial_data/menus.seed.json"
+    rows = json.loads(seed.read_text(encoding="utf-8"))["menus"]
+    names = {r.get("name") for r in rows}
+    assert "监控中心" in names, "菜单种子里没有「监控中心」"
+    assert "竞品监控" not in names, "重复入口「竞品监控」复活"
+    assert "数据抓取" not in names, "重复入口「数据抓取」复活"
 
 
 def test_discovery_page_is_a_two_tab_container():

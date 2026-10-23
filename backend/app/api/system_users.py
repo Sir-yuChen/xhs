@@ -45,13 +45,13 @@ from datetime import datetime
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
-from sqlalchemy import func, or_, select
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user
-from backend.app.core.perms import ALL_PERMS, ROLE_ADMIN, normalize_role
+from backend.app.core.perms import ROLE_ADMIN, normalize_role
 from backend.app.core.perm_deps import require_perm
 from backend.app.core.security import hash_password
 from backend.app.core.time import shanghai_now

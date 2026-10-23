@@ -29,6 +29,7 @@ import { XhsShopItemsPage } from "../pages/platforms/xhs/shop-items-page";
 import { ViolationManagePage } from "../pages/platforms/xhs/violation-manage-page";
 import { XhsPublishPage } from "../pages/platforms/xhs/publish-page";
 import { XhsSectionPage } from "../pages/platforms/xhs/xhs-section-page";
+import { SystemPage } from "../pages/system/system-page";
 
 export function AppRouter() {
   return (
@@ -82,6 +83,21 @@ export function AppRouter() {
             </ProtectedRoute>
           }
         >
+          {/* 系统管理工作区（v1.1.0 / 设计 46 §4）：
+              6 条 path 共用**一个组件**，Tab 由 `?tab=` 决定（页面内 `SystemPage` 负责）。
+              为什么拆成 6 条 path 而不是一条 `/system?tab=`：
+                · 种子里的菜单 C 行 `path` 就是这 6 个（`/system/users` 等），
+                  侧栏点进来要能直接落到对应 Tab；
+                · 每条 path 各自可被收藏 / 分享，刷新后停在同一栏。
+              ⚠️ 权限不在这里判：能不能看见这些菜单由后端 `menus/mine` 决定，
+                 每个接口再由 `require_perm` 拦 —— 前端路由守卫会多套一层错误提示。 */}
+          <Route path="/system" element={<Navigate to="/system/users" replace />} />
+          <Route path="/system/users" element={<SystemPage />} />
+          <Route path="/system/roles" element={<SystemPage />} />
+          <Route path="/system/menus" element={<SystemPage />} />
+          <Route path="/system/dicts" element={<SystemPage />} />
+          <Route path="/system/settings" element={<SystemPage />} />
+          <Route path="/system/logs" element={<SystemPage />} />
           <Route path="/platforms/xhs/dashboard" element={<XhsDashboard />} />
           <Route path="/platforms/xhs/accounts" element={<XhsAccountsPage />} />
           <Route path="/platforms/xhs/analytics" element={<XhsAnalyticsPage />} />

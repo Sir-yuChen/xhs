@@ -5791,6 +5791,8 @@ export interface SystemMenuNode {
   sort_order: number;
   is_visible: boolean;
   status: "normal" | "disabled";
+  /** 子节点数（后端下发；`children` 为空时也能知道「有没有子」）。 */
+  child_count?: number;
   children: SystemMenuNode[];
 }
 

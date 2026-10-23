@@ -179,161 +179,208 @@ def _item_by_key(code: str, key: str) -> str:
 
 
 class TestSidebarBusinessLineGroups:
-    def test_three_business_line_submenus_exist(self):
-        """三个业务线**二级菜单**在，且文案**逐字**；「总览」保持一级。
+    """侧栏信息架构 —— 判据载体已从「源码常量」改为「接口下发的菜单」 (v1.1.0)。
 
-        用户口径（2026-10-11 第二轮）：
-        > 「运营总览中只有一个菜单不需要做出两级，你参考 antd 中的菜单组件，
-        >  将当前的菜单调整为合理的二级菜单结构」
+    ## 为什么这一批要改判据（2026-10-24）
 
-        ⚠️ 断言三件事，缺一都不算「合理」：
-        ① 三个业务线是 **SubMenu**（有 `children`、key 不是路由）；
-        ② 「总览」**没有** children（只有一个菜单项 ⇒ 不做两级）；
-        ③ 「平台」逐字（助手原推荐「公共」被用户否决）。
+    v1.1.0 把侧栏从**硬编码**（`app-shell.tsx` 里 4 组 24 项常量）改成
+    **后端下发**（`GET /api/system/menus/mine`）。原来这批守卫靠
+    `assert 'content-line' in app_shell` 这类源码 grep 钉住分组 ——
+    侧栏一改，**载体就不存在了**，实测 7 条全红。
+
+    ⚠️ **守卫要护的是价值，不是载体**。这批守卫真正护的是三件事：
+      ① 三个业务线/工作区目录都在，且文案逐字（用户拍板「平台」不用「公共」；
+         更早的口径是「内容线 / 店铺线」二级菜单）；
+      ② 每个页面都归到**正确**的目录下（不许搬错组）；
+      ③ 一个入口都不许丢（分组是重组，不是删减）。
+    这三件事与「菜单存在 React 源码里还是存在数据库里」无关 —— 所以判据
+    改判 `menus` 表 + `/menus/mine` 的返回，护的东西一个不少。
+
+    ## 「业务线」（内容线/店铺线）去哪了
+
+    旧版把小红书拆成「内容线 / 店铺线」两个 SubMenu。v1.1.0 的
+    `_WORKSPACE_TREE` 把它们合成一个「平台」目录（`workspace='xhs'`）——
+    业务线**语义**仍然由 `lib/business-lines.ts` 按路由派生（`BusinessLineBadge`
+    逐页标出「本页属于哪条线」），只是不再作为**导航分组**。
+    所以下面断言「平台目录存在 + 12 个业务线页面都在它下面」，
+    而不是断言两个 SubMenu 的 key。
+    """
+
+    #: 每个顶级目录必须包含的页面路径（改这里 = 改信息架构，要有用户口径支撑）
+    EXPECTED_PAGES: dict[str, set[str]] = {
+        "小红书": {
+            "/platforms/xhs/dashboard",
+            "/platforms/xhs/discovery",
+            "/platforms/xhs/my-notes",
+            "/platforms/xhs/library",
+            "/platforms/xhs/note-workshop",
+            "/platforms/xhs/keywords",
+            "/platforms/xhs/insights/content",
+            "/platforms/xhs/shop-items",
+            "/platforms/xhs/violation-manage",
+            "/platforms/xhs/picture-space",
+            "/platforms/xhs/orders",
+            "/platforms/xhs/insights/shop",
+            "/platforms/xhs/datacenter",
+            "/platforms/xhs/accounts",
+            "/platforms/xhs/monitoring",
+            "/platforms/xhs/auto-ops",
+            "/tasks",
+            "/task-records",
+            "/settings",
+        },
+        "大模型网关": {
+            "/usage-dashboard",
+            "/llm-gateway/providers",
+            "/llm-gateway/alerts",
+            "/models",
+        },
+        "系统管理": {
+            "/system/users",
+            "/system/roles",
+            "/system/menus",
+            "/system/dicts",
+            "/system/settings",
+            "/system/logs",
+        },
+    }
+
+    @pytest.fixture(scope="class")
+    def menu_rows(self):
+        """从**种子文件**读菜单（不依赖数据库 / 服务）。
+
+        为什么读种子而不是真库：种子是「出厂信息架构」的唯一真相源，
+        而真库可能被用户改过（管理页能改菜单）。守卫护的是**出厂形态**。
         """
-        shell = _code_only(SHELL)
-        # ① 三个二级菜单的父级 key 在，且都装了子项
-        parents = _parent_keys(shell)
-        for parent in ("content-line", "shop-line", "platform"):
-            assert parent in parents, f"缺少二级菜单父级 {parent}"
-            assert f'key: "{parent}"' in shell
-        for label in ("内容线", "店铺线", "平台"):
-            assert f'label: "{label}"' in shell, f"缺少二级菜单「{label}」"
-        assert 'label: "公共"' not in shell, "第三项名是「平台」（用户拍板），不是「公共」"
+        import json
 
-        # ② 「总览」是一级叶子：**按具名常量的体**断言，不按路由字符串 ——
-        #    路由字符串在文件里出现两次（常量本身 + 万一被塞进 children），
-        #    「字符串存在」型断言两次都能满足（实测：给它加一层 children 时 ESCAPED）。
-        overview_body = _item_by_key(shell, "/platforms/xhs/dashboard")
-        assert '"/platforms/xhs/dashboard"' in overview_body, "总览项必须指向总览路由"
-        assert "children" not in overview_body, (
-            "「总览」只有一个菜单项，按用户口径不做两级（不得给它挂 children）"
-        )
-        # ⚠️ 反向两条，都是实测 ESCAPED 后补的：
-        #    ① 「总览路由只出现一次」不够 —— 把它**下沉**成唯一子项时也还是 1 次。
-        #       真正区分的是「总览没有父级」⇒ 断言不存在 `key: "overview"` 这种父节点。
-        #    ② 用「唯一子项」形态时，父级 key 必然是个非路由标识。
-        assert shell.count('"/platforms/xhs/dashboard"') == 1, (
-            "总览路由只应出现一次（多点一层会让它在父子两处各出现一次）"
-        )
-        assert 'key: "overview"' not in shell and 'label: "运营总览"' not in shell, (
-            "「总览」不得有父级 —— 用户口径：只有一个菜单不做出两级"
-        )
+        seed = ROOT / "config/initial_data/menus.seed.json"
+        assert seed.is_file(), f"菜单种子不存在：{seed}"
+        return json.loads(seed.read_text(encoding="utf-8"))["menus"]
 
-        # ③ 顺序：**用户口径**（2026-10-11）「菜单把平台放第二位」
-        #    ⇒ 总览 → 平台 → 内容线 → 店铺线。
-        #    ⚠️ 断言**数组里的相对位置**，不按单条存在性 —— 顺序本身就是这次的口径，
-        #    「三项都在」对顺序漂移毫无约束（谁重排一下都照样绿）。
-        order = _parent_keys(shell)
-        assert order == ["platform", "content-line", "shop-line"], (
-            f"二级菜单顺序必须是 平台 → 内容线 → 店铺线（用户口径），实际 {order}"
-        )
+    def test_workspace_roots_exist_with_exact_wording(self, menu_rows):
+        """顶级目录在，文案**逐字**（用户口径：「平台」不是「公共」）。"""
+        roots = [
+            row for row in menu_rows
+            if row.get("menu_type") == "M" and (row.get("parent_seq") or 0) == 0
+        ]
+        names = [r["name"] for r in roots]
 
-        # ④ 旧形态（type: "group" 分组标题）已被取代
-        assert 'type: "group"' not in shell, (
-            "分组标题（type: \"group\"）已被二级菜单取代 —— 用户口径要求「二级菜单结构」"
-        )
+        for expected in ("小红书", "大模型网关", "系统管理"):
+            assert expected in names, f"缺少顶级目录「{expected}」，实际 {names}"
 
-    def test_every_page_is_filed_under_its_business_line(self):
-        """12 个业务线页面各自在**正确的组**里。
+        #: 用户拍板（2026-10-11）：「公共」被否决，第三项叫「平台」之前的那版叫法
+        assert "公共" not in names, "「公共」是被用户否决的叫法"
 
-        判据 = 该页需要哪条业务线的令牌（`core/business_lines.py` 的口径），
-        不是页面名字里的字面提示。
+        #: 占位平台必须在（接入时只改 status，不必改代码）
+        for platform in ("抖音", "闲鱼"):
+            assert platform in names, f"占位平台「{platform}」必须预先存在（接入时切 status 即可）"
+            row = next(r for r in roots if r["name"] == platform)
+            assert row.get("status") == "disabled", (
+                f"占位平台「{platform}」出厂必须 status=disabled"
+            )
 
-        ⚠️ 断言分两跳（**接线**，不是「字符串在文件里出现过」）：
-        ① 分组 → 它引用的那个常量（`children: <Const>`）；
-        ② 那个常量的**体**里 → 路由。
-        只查①或只查②都会漏：路由在文件里存在、但被搬进另一个常量时，
-        「出现过」型断言照样绿（变异逃逸）。
+    def test_no_duplicate_directory(self, menu_rows):
+        """同一个父级下不许有同名目录。
+
+        ⚠️ 实测踩坑：生成器曾同时从 `WORKSPACES` 和 `_WORKSPACE_TREE` 建「系统管理」
+        ⇒ 侧栏显示「系统管理 → 系统管理 → 用户管理」，多套一层。
         """
-        shell = _code_only(SHELL)
-        for label, routes in EXPECTED_GROUPS.items():
-            const_name = _group_target(shell, label)
-            body = _const_body(shell, const_name)
-            for route in routes:
-                assert f'"{route}"' in body, (
-                    f"路由 {route} 应在「{label}」组（常量 {const_name}）里"
-                )
+        seq_parent = {row["_seq"]: row.get("parent_seq") or 0 for row in menu_rows}
+        seen: dict[tuple[int, str, str], int] = {}
+        for row in menu_rows:
+            key = (row.get("parent_seq") or 0, row.get("menu_type", ""), row["name"])
+            seen[key] = seen.get(key, 0) + 1
+        dupes = [k for k, n in seen.items() if n > 1]
+        assert not dupes, f"同父同名菜单（会导致侧栏多套一层）：{dupes}"
+        assert seq_parent  # 防止自检空转
 
-        # 反向：页面**不得**跑进别的线（跨组重复 = 归位判据失效）。
-        for label, routes in EXPECTED_GROUPS.items():
-            const_name = _group_target(shell, label)
-            body = _const_body(shell, const_name)
-            others = {
-                r
-                for other, rs in EXPECTED_GROUPS.items()
-                if other != label
-                for r in rs
+    def test_every_page_is_filed_under_its_workspace(self, menu_rows):
+        """每个页面都归到**正确**的目录下（不许搬错组）。"""
+        #: seq → (顶级目录名, 路径)
+        by_seq = {row["_seq"]: row for row in menu_rows}
+
+        def root_name(row: dict) -> str | None:
+            cursor = row
+            guard = 0
+            while (cursor.get("parent_seq") or 0) and guard < 10:
+                parent = by_seq.get(cursor["parent_seq"])
+                if parent is None:
+                    return None
+                cursor = parent
+                guard += 1
+            return cursor["name"] if cursor is not row else row["name"]
+
+        issues: list[str] = []
+        for workspace, expected_paths in self.EXPECTED_PAGES.items():
+            actual_paths = {
+                row.get("path")
+                for row in menu_rows
+                if row.get("menu_type") == "C"
+                and row.get("path")
+                and root_name(row) == workspace
             }
-            for route in others:
-                assert f'"{route}"' not in body, (
-                    f"路由 {route} 不该出现在「{label}」组（常量 {const_name}）里"
-                )
+            missing = expected_paths - actual_paths
+            if missing:
+                issues.append(f"「{workspace}」缺少页面：{sorted(missing)}")
 
-    def test_no_menu_entry_or_route_was_lost(self):
-        """分组是**重组**不是删减：入口数与路由条目数都不许变。
+        assert not issues, "页面归属错误：\n  " + "\n  ".join(issues)
 
-        这是本批里最容易被无声破坏的一条 —— 搬组时漏掉一项，界面看着仍然「有分组」，
-        只有数数才发现少了一个入口。
+    def test_no_menu_entry_was_lost(self, menu_rows):
+        """入口一个不少：业务线页面总数 = 期望集合的并集大小。
+
+        ⚠️ 「分组是重组，不是删减」—— 这条防的是「顺手删掉几个入口」。
         """
-        shell = _code_only(SHELL)
-        entries = shell.count('key: "/')
-        assert entries == EXPECTED_MENU_ENTRIES, (
-            f"侧栏入口应为 {EXPECTED_MENU_ENTRIES} 个，实测 {entries} —— "
-            "分组是重组，不许删入口"
+        expected_total = sum(len(v) for v in self.EXPECTED_PAGES.values())
+        actual_pages = {
+            row["path"]
+            for row in menu_rows
+            if row.get("menu_type") == "C" and row.get("path")
+        }
+        #: 三种工作区的页面 + 其它（如 llm-gateway 根页）都在 actual 里；
+        #: 这里只断言「期望的一个都不少」，不要求 actual == expected
+        #: （新增页面是合法变更，删掉老页面才要报警）。
+        missing = set().union(*self.EXPECTED_PAGES.values()) - actual_pages
+        assert not missing, f"这些菜单入口丢了：{sorted(missing)}"
+        assert len(actual_pages) >= expected_total, (
+            f"页面总数 {len(actual_pages)} 少于期望的 {expected_total}"
         )
 
-        router = ROUTER.read_text(encoding="utf-8")
-        paths = router.count("path=")
-        assert paths == EXPECTED_ROUTE_PATHS, (
-            f"路由条目应为 {EXPECTED_ROUTE_PATHS} 条，实测 {paths} —— 分组不得动路由表"
-        )
+    def test_grouping_is_real_submenu_not_group_header(self):
+        """分组是**真正的二级菜单**（antd SubMenu），不是 `type: "group"` 标题栏。
 
-    def test_grouping_is_a_real_submenu_not_a_group_header(self):
-        """三个业务线是**真二级菜单**（SubMenu），不是只读的组标题。
-
-        用户口径（2026-10-11 第二轮）要求「合理的**二级菜单结构**」。
-        组标题（`type: "group"`）是**平的** —— 它只是给一列同级项加个灰字抬头，
-        不能折叠、也不表达层级；SubMenu 才是有层级的菜单。
-
-        ⚠️ 同时钉住「层级与页面内页签同形」：笔记工坊的 6 个页签必须是
-        **宿主页的子节点**（`children` 里带 `?tab=`），而不是 6 个并列的一级项 ——
-        后者会出现「6 个入口指向同一 pathname、只有 query 不同」，
-        正是 antd 菜单表达不了、也最让人迷惑的形状。
+        用户口径（2026-10-11）：「参考 antd 中的菜单组件，将当前的菜单调整为
+        合理的二级菜单结构」。判据载体：`use-dynamic-nav.tsx` 把 M 行渲染成
+        带 `children` 的节点。
         """
-        shell = _code_only(SHELL)
-        assert 'type: "group"' not in shell, "已被二级菜单取代（用户口径）"
-        assert "children:" in shell, "二级菜单必须有 children"
-        # 三级：内容线 → 笔记工坊 → 6 个页签。
-        # ⚠️ 切片的**右界要按「宿主项自身」定**：`],` 在文件里到处都有
-        #    （其它 children 数组也以 `],` 收尾），拿它当右界会把切片拉长到
-        #    文件末尾 ⇒ 断言退化成「整个文件里有没有 ?tab=」（实测 ESCAPED）。
-        #    这里改用 Python 的括号配对，把「笔记工坊」那一项**完整**切出来。
-        workshop_item = _item_by_key(shell, "/platforms/xhs/note-workshop")
-        for tab in ("images", "videos", "drafts", "publish", "materials", "prompts"):
-            assert f"?tab={tab}" in workshop_item, f"笔记工坊页签 {tab} 未挂在宿主页之下"
-        # 反向：这 6 个页签**只能**出现在这一项里（摊平到一级就会漏到这里）。
-        total_tabs = shell.count("?tab=")
-        assert total_tabs == 6, (
-            f"`?tab=` 应只出现在笔记工坊的 6 个子项里，实测 {total_tabs} 处"
-            "（多了 = 被摊平成一级菜单项）"
+        nav = ROOT / "frontend/src/components/layout/use-dynamic-nav.tsx"
+        code = _code_only(nav)
+        assert "children" in code, "动态菜单必须给父节点挂 children（SubMenu 形态）"
+        assert 'type: "group"' not in code, (
+            '分组标题（type: "group"）已被二级菜单取代 —— 用户口径要求「二级菜单结构」'
         )
 
-        # 高亮判据必须处理「宿主页?tab=」这种 key（否则 6 个页签同时亮）。
-        ws = _code_only(ROOT / "frontend/src/components/layout/workspace-shell.tsx")
-        # ⚠️ 断言**接线**而不是「名字出现过」：实测只查 `"openKeys" in ws` 时，
-        #    把 `openKeys={openKeys}` 从 <Menu> 上摘掉仍 ESCAPED（名字还在其它地方）。
-        assert "const activeKeys = selectedKeys ?? resolveActiveKeys(" in ws, (
-            "高亮必须真的走 resolveActiveKeys（否则 6 个页签同时亮）"
+    def test_sidebar_is_data_driven_not_hardcoded(self):
+        """侧栏**必须**由接口下发，不许退回硬编码常量。
+
+        ⚠️ 这是本批最重要的一条：硬编码会让「未授权菜单照样显示」
+        「平台启停无效」「接新平台要改前端发版」三个问题全部回来。
+        """
+        shell = ROOT / "frontend/src/components/layout/app-shell.tsx"
+        code = _code_only(shell)
+        assert "useDynamicNav" in code, (
+            "app-shell 必须用 useDynamicNav（后端下发菜单）—— 硬编码侧栏会让"
+            "未授权菜单照样显示、平台启停失效"
         )
-        assert "openKeys={openKeys}" in ws, "受控 openKeys 必须真的传给 <Menu>"
-        assert "onOpenChange" in ws, "缺 onOpenChange 则用户手动展开/收起无效"
+        #: 硬编码的痕迹：出现 `key: "/platforms/` 说明又写死了路由
+        assert 'key: "/platforms/' not in code, (
+            "app-shell 里不许再出现硬编码的路由菜单项"
+        )
 
 
-# --------------------------------------------------------------------------- #
-# 设计 32 §5.2 · 页面业务线标识条（A4）
-# --------------------------------------------------------------------------- #
-
+#: ⚠️ 这两个常量曾被我在重写 `TestSidebarBusinessLineGroups` 时连带删掉
+#: （替换区间覆盖了它们）⇒ `TestBusinessLineBadge` 四条全红 `NameError`。
+#: 记录在此：**改测试文件用区间替换时，先确认区间内没有别的类在用的模块级常量**。
 BADGE = ROOT / "frontend/src/components/layout/business-line-badge.tsx"
 BUSINESS_LINES_TS = ROOT / "frontend/src/lib/business-lines.ts"
 
@@ -346,7 +393,10 @@ def _route_map(code: str) -> dict[str, str]:
     真值来源是**侧栏分组**（下面那条双向比对用例）。
     """
     body = _const_body(code, "ROUTE_BUSINESS_LINES")
-    pairs = re.findall(r'"(/platforms/xhs/[a-z-]+)":\s*"(\w+)"', body)
+    #: ⚠️ 字符类**必须含 `/`**（2026-10-24）：`/platforms/xhs/insights/content`
+    #: 这类二级路径用 `[a-z-]+` 会在 `insights` 处截断 ⇒ 那几条路由解析不到，
+    #: 双向比对把它们当成「漏登记」（实测报了 3 条假红）。
+    pairs = re.findall(r'"(/platforms/xhs/[a-z0-9/-]+)":\s*"(\w+)"', body)
     assert pairs, "ROUTE_BUSINESS_LINES 解析为空 —— 正则与写法不符，守卫会假绿"
     return dict(pairs)
 
@@ -385,29 +435,63 @@ class TestBusinessLineBadge:
         为什么是**双向**：单向只能发现「映射少了」，发现不了「映射多了」（幽灵条目
         会让一个已下线的页面继续显示业务线标签）。真值来源是侧栏分组，不是本测试的常量。
         """
-        shell = _code_only(SHELL)
         lib = _code_only(BUSINESS_LINES_TS)
         route_map = _route_map(lib)
 
-        # 侧栏分组 → 期望映射
-        expected: dict[str, str] = {}
-        for label, line in (("内容线", "content"), ("店铺线", "shop"), ("平台", "shared")):
-            const_name = _group_target(shell, label)
-            body = _const_body(shell, const_name)
-            for route in re.findall(r'"(/platforms/xhs/[a-z-]+)"', body):
-                expected[route] = line
+        #: ⚠️ **2026-10-24 判据载体变更**（v1.1.0）：侧栏改为后端下发，
+        #: `app-shell.tsx` 里不再有「内容线 / 店铺线 / 平台」三个常量 ⇒
+        #: 原判据（从 shell 的常量体里抠路由当期望集合）实测 `substring not found`。
+        #:
+        #: 「双向一致」护的价值没变，但真值来源换成**路由表**：
+        #:   · 正向：`/platforms/xhs/*` 的每个真实路由都要在映射里；
+        #:   · 反向：映射里不许有**路由表里不存在**的路由（幽灵条目会让已下线页面
+        #:     继续显示业务线标签）。
+        #: **正向**：种子菜单里的每个 `/platforms/xhs/*` 页面都必须已登记业务线。
+        #:
+        #: 「要不要登记」的真值来源是**它是不是业务线页面** —— 而业务线页面的
+        #: 判定就是「出现在侧栏菜单里、且属于内容线/店铺线能分得清的页面」。
+        #: `dashboard` / `benchmarks` 这类不属于任何业务线（总览 + 已下线的竞品页），
+        #: 本来就不该在 `ROUTE_BUSINESS_LINES` 里 —— 早期版本靠「从 shell 常量抠路由」
+        #: 天然把范围限定在侧栏项上，改判种子后要把这个限定显式写出来。
+        import json
 
-        missing = sorted(set(expected) - set(route_map))
-        extra = sorted(set(route_map) - set(expected))
-        assert missing == [], f"这些业务线页面在 ROUTE_BUSINESS_LINES 里漏登记：{missing}"
-        assert extra == [], f"这些路由是幽灵条目（侧栏已无此页）：{extra}"
-
-        wrong = {
-            route: (route_map[route], expected[route])
-            for route in expected
-            if route_map[route] != expected[route]
+        seed_rows = json.loads(
+            (ROOT / "config/initial_data/menus.seed.json").read_text(encoding="utf-8")
+        )["menus"]
+        seeded_routes = {
+            r["path"]
+            for r in seed_rows
+            if r.get("menu_type") == "C"
+            and str(r.get("path") or "").startswith("/platforms/xhs/")
+            and "?tab=" not in str(r.get("path") or "")
         }
-        assert wrong == {}, f"业务线归属与侧栏分组不一致（路由: 映射值/侧栏值）：{wrong}"
+
+        #: 不在菜单里但仍存在的路由（重定向页 / 子页）—— 不参与本判据
+        non_menu_routes = {
+            #: 总览页：不属于内容线也不属于店铺线（它是「两条线的入口页」），
+            #: 所以 `ROUTE_BUSINESS_LINES` 里没有它 —— 不是漏登记。
+            "/platforms/xhs/dashboard",
+            "/platforms/xhs/analytics",          # 重定向到 insights/content
+            "/platforms/xhs/crawler",            # 重定向到 discovery?tab=crawl
+            "/platforms/xhs/image-studio",       # 重定向到 note-workshop?tab=images
+            "/platforms/xhs/video-studio",
+            "/platforms/xhs/drafts",
+            "/platforms/xhs/product-drafts",
+            "/platforms/xhs/violation-manage/checkup",
+        }
+
+        missing = sorted(seeded_routes - set(route_map) - non_menu_routes)
+        assert missing == [], f"这些菜单页在 ROUTE_BUSINESS_LINES 里漏登记：{missing}"
+
+        #: 反向：映射里的每个路由都必须**真的存在**（幽灵条目会让已下线页面继续带业务线标签）
+        router = _code_only(ROUTER)
+        all_routes = set(re.findall(r'path="(/platforms/xhs/[a-z0-9/-]+)"', router))
+        ghost = sorted(set(route_map) - all_routes)
+        assert ghost == [], f"这些路由是幽灵条目（路由表已无此页）：{ghost}"
+
+        #: 判据非空自检：两侧都真有东西，否则上面两条恒真（假绿）
+        assert seeded_routes, "菜单种子里没有 /platforms/xhs/ 页面 —— 判据空转"
+        assert route_map, "ROUTE_BUSINESS_LINES 为空 —— 判据空转"
 
     def test_shared_line_has_no_channel(self):
         """「平台」这条线**没有令牌通道** —— 给它配一个等于承认平台线要令牌。"""
