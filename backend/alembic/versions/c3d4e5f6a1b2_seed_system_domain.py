@@ -32,7 +32,7 @@ from alembic import op
 from sqlalchemy.orm import Session
 
 revision = "c3d4e5f6a1b2"
-down_revision = "b2c3d4e5f6a0"
+down_revision = "d4e5f6a1b2c3"
 branch_labels = None
 depends_on = None
 

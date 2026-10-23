@@ -5769,3 +5769,469 @@ export async function resetDep(
   );
   return response.data;
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * 系统管理域（v1.1.0 / 设计 55 / 56 §3）
+ *
+ * 分五组：菜单与权限（mine）、用户、角色、菜单、字典、日志。
+ * 路径前缀全部 `/system/**`（非平台前缀 —— 与 `/llm` 同属公共维度）。
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/** 菜单树节点（M 目录 / C 页面 / F 按钮）。 */
+export interface SystemMenuNode {
+  id: number;
+  parent_id: number;
+  name: string;
+  menu_type: "M" | "C" | "F";
+  perms: string;
+  path: string;
+  component: string;
+  icon: string;
+  workspace: string;
+  sort_order: number;
+  is_visible: boolean;
+  status: "normal" | "disabled";
+  children: SystemMenuNode[];
+}
+
+/** 当前用户的权限码（按钮可见性数据源）。 */
+export async function fetchMyPermissions(): Promise<{
+  role: string;
+  is_admin: boolean;
+  permissions: string[];
+  total: number;
+}> {
+  const response = await http.get<{
+    role: string;
+    is_admin: boolean;
+    permissions: string[];
+    total: number;
+  }>("/system/permissions/mine");
+  return response.data;
+}
+
+/** 当前用户可见的菜单树（侧栏数据源）。**登录即可**，无权限码。 */
+export async function fetchMyMenus(
+  workspace?: string
+): Promise<{ items: SystemMenuNode[]; total: number }> {
+  const response = await http.get<{ items: SystemMenuNode[]; total: number }>(
+    "/system/menus/mine",
+    { params: workspace ? { workspace } : undefined }
+  );
+  return response.data;
+}
+
+/** 系统用户列表项。 */
+export interface SystemUser {
+  id: number;
+  username: string;
+  real_name: string;
+  email: string;
+  phone: string;
+  role: string;
+  role_name: string;
+  status: "normal" | "pending" | "disabled";
+  online: boolean;
+  must_change_password: boolean;
+  last_login_at: string | null;
+  last_login_ip: string;
+  created_at: string | null;
+  deleted_at: string | null;
+}
+
+export interface SystemUserListParams {
+  page?: number;
+  page_size?: number;
+  username?: string;
+  email?: string;
+  status?: string;
+  role?: string;
+  include_deleted?: boolean;
+}
+
+export async function fetchSystemUsers(
+  params: SystemUserListParams = {}
+): Promise<{ items: SystemUser[]; total: number; page: number; page_size: number }> {
+  const response = await http.get<{
+    items: SystemUser[];
+    total: number;
+    page: number;
+    page_size: number;
+  }>("/system/users", { params });
+  return response.data;
+}
+
+export async function fetchSystemUser(userId: number): Promise<SystemUser> {
+  const response = await http.get<SystemUser>(`/system/users/${userId}`);
+  return response.data;
+}
+
+export interface SystemUserPayload {
+  username?: string;
+  password?: string;
+  real_name?: string;
+  email?: string;
+  phone?: string;
+  role?: string;
+  status?: string;
+}
+
+export async function createSystemUser(payload: SystemUserPayload): Promise<SystemUser> {
+  const response = await http.post<SystemUser>("/system/users", payload);
+  return response.data;
+}
+
+export async function updateSystemUser(
+  userId: number,
+  payload: Omit<SystemUserPayload, "username" | "password">
+): Promise<SystemUser> {
+  const response = await http.put<SystemUser>(`/system/users/${userId}`, payload);
+  return response.data;
+}
+
+export async function deleteSystemUser(
+  userId: number
+): Promise<{ ok: boolean; id: number; deleted: boolean }> {
+  const response = await http.delete<{ ok: boolean; id: number; deleted: boolean }>(
+    `/system/users/${userId}`
+  );
+  return response.data;
+}
+
+export async function resetSystemUserPassword(
+  userId: number,
+  password: string,
+  mustChange = true
+): Promise<{ ok: boolean; id: number; must_change_password: boolean }> {
+  const response = await http.post<{
+    ok: boolean;
+    id: number;
+    must_change_password: boolean;
+  }>(`/system/users/${userId}/reset-password`, { password, must_change: mustChange });
+  return response.data;
+}
+
+export async function forceLogoutSystemUser(
+  userId: number
+): Promise<{ ok: boolean; id: number; token_version: number }> {
+  const response = await http.post<{ ok: boolean; id: number; token_version: number }>(
+    `/system/users/${userId}/force-logout`
+  );
+  return response.data;
+}
+
+export async function approveSystemUser(userId: number): Promise<SystemUser> {
+  const response = await http.post<SystemUser>(`/system/users/${userId}/approve`);
+  return response.data;
+}
+
+/** 系统角色。 */
+export interface SystemRole {
+  id: number;
+  name: string;
+  code: string;
+  description: string;
+  is_system: boolean;
+  status: "normal" | "disabled";
+  sort_order: number;
+  user_count: number;
+  menu_count: number;
+  created_at: string | null;
+}
+
+export async function fetchSystemRoles(): Promise<{ items: SystemRole[] }> {
+  const response = await http.get<{ items: SystemRole[] }>("/system/roles");
+  return response.data;
+}
+
+export async function createSystemRole(payload: {
+  name: string;
+  code: string;
+  description?: string;
+  sort_order?: number;
+}): Promise<SystemRole> {
+  const response = await http.post<SystemRole>("/system/roles", payload);
+  return response.data;
+}
+
+export async function updateSystemRole(
+  roleId: number,
+  payload: { name?: string; description?: string; status?: string; sort_order?: number }
+): Promise<SystemRole> {
+  const response = await http.put<SystemRole>(`/system/roles/${roleId}`, payload);
+  return response.data;
+}
+
+export async function deleteSystemRole(
+  roleId: number
+): Promise<{ ok: boolean; id: number; deleted: boolean }> {
+  const response = await http.delete<{ ok: boolean; id: number; deleted: boolean }>(
+    `/system/roles/${roleId}`
+  );
+  return response.data;
+}
+
+export async function fetchRoleMenus(
+  roleId: number
+): Promise<{ role_id: number; role_code: string; menu_ids: number[] }> {
+  const response = await http.get<{
+    role_id: number;
+    role_code: string;
+    menu_ids: number[];
+  }>(`/system/roles/${roleId}/menus`);
+  return response.data;
+}
+
+export async function setRoleMenus(
+  roleId: number,
+  menuIds: number[]
+): Promise<{ ok: boolean; role_id: number; granted: number; kicked_users: number }> {
+  const response = await http.put<{
+    ok: boolean;
+    role_id: number;
+    granted: number;
+    kicked_users: number;
+  }>(`/system/roles/${roleId}/menus`, { menu_ids: menuIds });
+  return response.data;
+}
+
+export async function fetchRoleUsers(roleId: number): Promise<{
+  role_id: number;
+  role_code: string;
+  items: { id: number; username: string; real_name: string; status: string }[];
+}> {
+  const response = await http.get<{
+    role_id: number;
+    role_code: string;
+    items: { id: number; username: string; real_name: string; status: string }[];
+  }>(`/system/roles/${roleId}/users`);
+  return response.data;
+}
+
+export async function setRoleUsers(
+  roleId: number,
+  userIds: number[]
+): Promise<{ ok: boolean; role_id: number; assigned: number; kicked_users: number }> {
+  const response = await http.put<{
+    ok: boolean;
+    role_id: number;
+    assigned: number;
+    kicked_users: number;
+  }>(`/system/roles/${roleId}/users`, { user_ids: userIds });
+  return response.data;
+}
+
+/** 菜单管理（全量树，管理页用）。 */
+export async function fetchSystemMenuTree(
+  workspace?: string
+): Promise<{ items: SystemMenuNode[]; total: number }> {
+  const response = await http.get<{ items: SystemMenuNode[]; total: number }>(
+    "/system/menus/tree",
+    { params: workspace ? { workspace } : undefined }
+  );
+  return response.data;
+}
+
+export async function fetchSystemMenu(menuId: number): Promise<SystemMenuNode> {
+  const response = await http.get<SystemMenuNode>(`/system/menus/${menuId}`);
+  return response.data;
+}
+
+export interface SystemMenuPayload {
+  parent_id?: number;
+  name?: string;
+  menu_type?: "M" | "C" | "F";
+  perms?: string;
+  path?: string;
+  component?: string;
+  icon?: string;
+  workspace?: string;
+  sort_order?: number;
+  is_visible?: boolean;
+  status?: string;
+}
+
+export async function createSystemMenu(payload: SystemMenuPayload): Promise<SystemMenuNode> {
+  const response = await http.post<SystemMenuNode>("/system/menus", payload);
+  return response.data;
+}
+
+export async function updateSystemMenu(
+  menuId: number,
+  payload: SystemMenuPayload
+): Promise<SystemMenuNode> {
+  const response = await http.put<SystemMenuNode>(`/system/menus/${menuId}`, payload);
+  return response.data;
+}
+
+export async function deleteSystemMenu(
+  menuId: number
+): Promise<{ ok: boolean; id: number; deleted: boolean }> {
+  const response = await http.delete<{ ok: boolean; id: number; deleted: boolean }>(
+    `/system/menus/${menuId}`
+  );
+  return response.data;
+}
+
+/** 字典类型 / 项。 */
+export interface SystemDictType {
+  id: number;
+  code: string;
+  name: string;
+  status: "normal" | "disabled";
+  remark: string;
+  is_system: boolean;
+  item_count: number;
+  created_at: string | null;
+}
+
+export interface SystemDictItem {
+  id: number;
+  type_id: number;
+  type_code: string;
+  label: string;
+  value: string;
+  sort_order: number;
+  list_class: string;
+  status: "normal" | "disabled";
+  remark: string;
+}
+
+export async function fetchSystemDictTypes(params?: {
+  name?: string;
+  code?: string;
+}): Promise<{ items: SystemDictType[]; total: number }> {
+  const response = await http.get<{ items: SystemDictType[]; total: number }>(
+    "/system/dict/types",
+    { params }
+  );
+  return response.data;
+}
+
+export async function createSystemDictType(payload: {
+  code: string;
+  name: string;
+  status?: string;
+  remark?: string;
+}): Promise<SystemDictType> {
+  const response = await http.post<SystemDictType>("/system/dict/types", payload);
+  return response.data;
+}
+
+export async function updateSystemDictType(
+  typeId: number,
+  payload: { code?: string; name?: string; status?: string; remark?: string }
+): Promise<SystemDictType> {
+  const response = await http.put<SystemDictType>(`/system/dict/types/${typeId}`, payload);
+  return response.data;
+}
+
+export async function deleteSystemDictType(typeId: number): Promise<{
+  ok: boolean;
+  id: number;
+  deleted: boolean;
+  deleted_items: number;
+}> {
+  const response = await http.delete<{
+    ok: boolean;
+    id: number;
+    deleted: boolean;
+    deleted_items: number;
+  }>(`/system/dict/types/${typeId}`);
+  return response.data;
+}
+
+export async function fetchSystemDictItems(params?: {
+  type_id?: number;
+  type_code?: string;
+  label?: string;
+  include_disabled?: boolean;
+}): Promise<{ items: SystemDictItem[]; total: number }> {
+  const response = await http.get<{ items: SystemDictItem[]; total: number }>(
+    "/system/dict/items",
+    { params }
+  );
+  return response.data;
+}
+
+export async function createSystemDictItem(payload: {
+  type_id: number;
+  label: string;
+  value: string;
+  sort_order?: number;
+  list_class?: string;
+  status?: string;
+  remark?: string;
+}): Promise<SystemDictItem> {
+  const response = await http.post<SystemDictItem>("/system/dict/items", payload);
+  return response.data;
+}
+
+export async function updateSystemDictItem(
+  itemId: number,
+  payload: {
+    label?: string;
+    value?: string;
+    sort_order?: number;
+    list_class?: string;
+    status?: string;
+    remark?: string;
+  }
+): Promise<SystemDictItem> {
+  const response = await http.put<SystemDictItem>(`/system/dict/items/${itemId}`, payload);
+  return response.data;
+}
+
+export async function deleteSystemDictItem(
+  itemId: number
+): Promise<{ ok: boolean; id: number; deleted: boolean }> {
+  const response = await http.delete<{ ok: boolean; id: number; deleted: boolean }>(
+    `/system/dict/items/${itemId}`
+  );
+  return response.data;
+}
+
+/** 审计日志（`api_logs` 表）。 */
+export interface SystemAuditLog {
+  id: number;
+  user_id: number | null;
+  endpoint: string;
+  platform: string | null;
+  status: string | null;
+  status_code: number | null;
+  created_at: string | null;
+}
+
+export async function fetchSystemAuditLogs(params?: {
+  page?: number;
+  page_size?: number;
+  endpoint?: string;
+  status_code?: number;
+}): Promise<{ items: SystemAuditLog[]; total: number; page: number; page_size: number }> {
+  const response = await http.get<{
+    items: SystemAuditLog[];
+    total: number;
+    page: number;
+    page_size: number;
+  }>("/system/logs/audit", { params });
+  return response.data;
+}
+
+export async function fetchSystemAppLogs(params?: {
+  page?: number;
+  page_size?: number;
+}): Promise<{
+  items: { line_no: number; text: string }[];
+  total: number;
+  file?: string;
+  note?: string;
+}> {
+  const response = await http.get<{
+    items: { line_no: number; text: string }[];
+    total: number;
+    file?: string;
+    note?: string;
+  }>("/system/logs/app", { params });
+  return response.data;
+}
+

@@ -36,7 +36,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, inspect as _sa_inspect, select, text
 from sqlalchemy.orm import Session
 
 from backend.app.core.roles import ROLE_ADMIN, ROLE_USER
@@ -576,19 +576,71 @@ def seed_admin_user(db: Session) -> User | None:
         )
         return None
 
-    row = User(
-        username=username,
-        password_hash=hash_password(ADMIN_SEED["password"]),
-        real_name=ADMIN_SEED["real_name"],
-        role=ADMIN_SEED["role"],
-        status=USER_STATUS_NORMAL,
-        must_change_password=True,
-        token_version=0,
-        created_at=shanghai_now(),
-    )
-    db.add(row)
-    db.flush()
-    return row
+    #: ⚠️ **不用 `db.add(User(...))`，改表级 INSERT**(2026-10-24 实测踩坑)：
+    #: `User` 模型带 `email` / `phone`（迁移 `e5f6a1b2c3d4` 才加），而本函数会被
+    #: 迁移 `c3d4e5f6a1b2`（播种）调用 —— 那一刻表**还没有这两列**。两者都是
+    #: `nullable=False` 且带 Python default，所以 ORM 一定会把它们写进 SQL 的列清单
+    #: ⇒ `table users has no column named email`，整个 upgrade 失败。
+    #:
+    #: 试过两条错路（都实测失败）：
+    #:   ① `state.dict.pop("email")` ⇒ 绑定参数里没了，但 SQL 的列清单里还在；
+    #:   ② `column.default = None` ⇒ 能过，但**永久改了全局 mapper**，
+    #:      之后同进程所有 `User` 插入都不带这两个默认值（污染面太大）。
+    #:
+    #: 正解 = `insert(User.__table__)` + 只传**库里实际存在**的列。
+    #: ⚠️ 必须传 `__table__` 而不是 `User`：`insert(User)` 仍会展开完整列清单。
+    #:
+    #: 与「模板行」是同一类错误：**播种代码用到了比它自己更新的 schema**。
+    values = {
+        "username": username,
+        "password_hash": hash_password(ADMIN_SEED["password"]),
+        "real_name": ADMIN_SEED["real_name"],
+        "role": ADMIN_SEED["role"],
+        "status": USER_STATUS_NORMAL,
+        "must_change_password": True,
+        "token_version": 0,
+        "created_at": shanghai_now(),
+    }
+    #: ⚠️ **用 `text()` 手写 INSERT**（2026-10-24 实测，第三次才对）：
+    #:
+    #: 试过三条路，前两条都失败（都有实测证据）：
+    #:   ① `db.add(User(...))`            ⇒ ORM 按**模型**列清单拼 SQL（含 email）；
+    #:   ② `insert(User.__table__).values({Column: v})` ⇒ **表级 insert 仍会补全
+    #:      表上所有带 Python default 的列**（`email`/`phone`/`last_login_ip`），
+    #:      即使只传了两个列对象 —— 最小复现脚本 `.hermes/tmp/insrep.py` 证明了这点；
+    #:   ③ `text()` 显式写列名 ⇒ 只有写到的列进 SQL。✔
+    #:
+    #: 这不是「绕过框架」，而是**表结构比模型少列**这个事实的必然结果：
+    #: 播种迁移 `c3d4e5f6a1b2` 跑在 `e5f6a1b2c3d4`（加 email/phone）之前。
+    #:
+    #: 与「模板行」是同一类错误：**播种代码用到了比它自己更新的 schema**。
+    values = {
+        "username": username,
+        "password_hash": hash_password(ADMIN_SEED["password"]),
+        "real_name": ADMIN_SEED["real_name"],
+        "role": ADMIN_SEED["role"],
+        "status": USER_STATUS_NORMAL,
+        "must_change_password": True,
+        "token_version": 0,
+        "created_at": shanghai_now(),
+    }
+    actual = {c["name"] for c in _sa_inspect(db.get_bind()).get_columns("users")}
+    payload = {k: v for k, v in values.items() if k in actual}
+    columns = ", ".join(payload)
+    placeholders = ", ".join(f":{name}" for name in payload)
+    statement = f"INSERT INTO users ({columns}) VALUES ({placeholders})"
+
+    #: ⚠️ **按方言选 RETURNING，绝不用「先插再看 lastrowid」的写法**：
+    #: 那样在 PG 上会**插两次**（第一次成没成功不知道，第二次必然撞唯一键）。
+    #: PG 原生支持 `RETURNING id`；SQLite 3.35+ 也支持，但为兼容起见走
+    #: `lastrowid`（两个分支**只有一条**会执行）。
+    dialect = db.get_bind().dialect.name
+    if dialect == "postgresql":
+        new_id = db.execute(text(f"{statement} RETURNING id"), payload).scalar()
+    else:
+        result = db.execute(text(statement), payload)
+        new_id = getattr(result, "lastrowid", None)
+    return db.get(User, new_id) if new_id is not None else None
 
 
 # --------------------------------------------------------------------------- #

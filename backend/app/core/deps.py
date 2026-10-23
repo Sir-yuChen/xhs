@@ -74,6 +74,27 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
             detail="Token has been revoked",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+    # 软删的用户当作不存在（设计 55 §2.4：删除是软删，但删掉的账号不能继续用旧令牌）。
+    # 判据放在令牌校验**之后**：先确认令牌有效再判状态，错误码才不会把
+    # 「令牌过期」说成「账号已删」（那会让用户去问管理员而不是重新登录）。
+    if getattr(user, "deleted_at", None) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if getattr(user, "status", "normal") == "disabled":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "USER_DISABLED", "message": "账号已被停用"},
+        )
+
+    # 在线状态（设计 55 §2.1 方案 A）：所有已登录请求的**唯一**写入点。
+    # 放在这里而不是中间件 —— 用户已解析好，不必再解一次令牌。
+    from backend.app.services import presence_service
+
+    presence_service.touch(user.id)
     return user
 
 

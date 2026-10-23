@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from backend.app.api import accounts, ai, auth, auto_tasks, drafts, files, keyword_groups, llm_gateway, llm_gateway_monitor, llm_prompts, login_sessions, model_configs, notes, notifications, publish, schedule, settings as settings_api, system, system_deps, tasks, topics
+from backend.app.api import accounts, ai, auth, auto_tasks, drafts, files, keyword_groups, llm_gateway, llm_gateway_monitor, llm_prompts, login_sessions, model_configs, notes, notifications, publish, schedule, settings as settings_api, system, system_deps, system_dict, system_logs, system_menus, system_permissions, system_roles, system_users, tasks, topics
 from backend.app.api.platforms import registry
 from backend.app.api.platforms.xhs import (
     analytics,
@@ -283,6 +283,13 @@ def create_app() -> FastAPI:
     app.include_router(settings_api.router, prefix="/api")
     # 系统更新（设计 36，2026-10-13）：版本查询 + 检查更新 + 下载 + 静默安装
     app.include_router(system.router, prefix="/api")
+    # v1.1.0 系统管理域（设计 49 / 55）：用户 / 角色 / 菜单 / 字典 / 日志
+    app.include_router(system_users.router, prefix="/api")
+    app.include_router(system_roles.router, prefix="/api")
+    app.include_router(system_menus.router, prefix="/api")
+    app.include_router(system_dict.router, prefix="/api")
+    app.include_router(system_permissions.router, prefix="/api")
+    app.include_router(system_logs.router, prefix="/api")
     # 初始化环境依赖（设计 24 §27，2026-10-23）：状态 / 下载 / 清空重下 / 进度
     app.include_router(system_deps.router, prefix="/api")
 

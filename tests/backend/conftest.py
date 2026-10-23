@@ -208,6 +208,46 @@ def _host_is_loopback(host: Any) -> bool:
         return False
 
 
+@pytest.fixture(scope="session", autouse=True)
+def register_switch_open_for_tests():
+    """**session 级 autouse**：测试进程内始终允许注册（v1.1.0 S1 起）。
+
+    ## 为什么必须是全局而不是只在 `api_client` 里
+
+    产品基线是 `register.enabled=false`（防「出厂弱口令 + 任何人可注册」，设计 46 P11）。
+    但全仓有 **十几个测试文件**在模块级建 `client = TestClient(app)`（`test_api.py` /
+    `test_login_state.py` / `test_note_sync.py` …），它们**不走 `api_client` 夹具**，
+    而几十处用例都靠 `POST /auth/register` 造用户。开关关着 ⇒ 那一步全 403。
+
+    实测：先只 patch 在 `api_client` 里 ⇒ 全量回归 **107 条失败**，错误清一色
+    `assert 403 == 200`（`REGISTER_DISABLED`），看着像权限骨架把业务打挂了，
+    实际是「测试造不出用户」。所以必须提到 session 级。
+
+    ## 为什么 patch `BUILTIN_DEFAULTS` 而不是 `effective_value`
+
+    `live_bool` → `live_value` → `effective_value`：先查 `system_settings` 行，
+    查不到才回落 `BUILTIN_DEFAULTS`。测试库是空的 ⇒ 回落分支即生效，不必再 patch
+    更深一层的函数（patch 越深越容易在重构时失锚）。
+
+    ⚠️ 这条 fixture **不影响**「基线是否关着」的守卫：那些守卫（如
+    `test_register_switch_baseline_is_off`）读的是源码 / 随包种子字面值，
+    不是运行时的 `BUILTIN_DEFAULTS`。
+    """
+    from backend.app.services import settings_service as _settings
+
+    original = _settings.BUILTIN_DEFAULTS.get("register.enabled")
+    _settings.BUILTIN_DEFAULTS["register.enabled"] = True
+    _settings.invalidate(key="register.enabled")
+    try:
+        yield
+    finally:
+        if original is None:
+            _settings.BUILTIN_DEFAULTS.pop("register.enabled", None)
+        else:
+            _settings.BUILTIN_DEFAULTS["register.enabled"] = original
+        _settings.invalidate(key="register.enabled")
+
+
 @pytest.fixture(autouse=True)
 def block_real_network(request, monkeypatch):
     """**autouse**：禁止真实网络连接（含回环）。

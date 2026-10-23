@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, Integer, String, text
+from sqlalchemy import Boolean, CheckConstraint, DateTime, Index, Integer, String, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.app.core.database import Base
@@ -25,6 +25,29 @@ class User(Base):
         #: 原生 ENUM 要额外 `CREATE TYPE`，迁移回退麻烦，SQLite 根本没有。
         CheckConstraint(
             "status IN ('normal', 'pending', 'disabled')", name="ck_users_status"
+        ),
+        #: 邮箱 / 手机的非空值唯一（2026-10-24 / 设计 57 S3，迁移 `e5f6a1b2c3d4`）。
+        #:
+        #: 用**部分唯一索引**而不是 `UniqueConstraint`：存量用户的 `email` 是空串，
+        #: 普通唯一约束会让第二个空邮箱的用户插不进去（`'' == ''`）。
+        #: `WHERE col <> ''` 表达「填了的才要求唯一」。
+        #:
+        #: ⚠️ **两边方言都要写**（`sqlite_where` + `postgresql_where`）：只写一边
+        #: 会让另一边**静默不建索引且不报错**（设计 58 §2.3 在 `platform_accounts`
+        #: 上实测过这个坑）。
+        Index(
+            "uq_users_email_nonempty",
+            "email",
+            unique=True,
+            sqlite_where=text("email <> ''"),
+            postgresql_where=text("email <> ''"),
+        ),
+        Index(
+            "uq_users_phone_nonempty",
+            "phone",
+            unique=True,
+            sqlite_where=text("phone <> ''"),
+            postgresql_where=text("phone <> ''"),
         ),
     )
 
@@ -69,3 +92,23 @@ class User(Base):
     #: `platform_accounts.deleted_at` 同口径：49 张表按 `user_id` 关联，
     #: 物理删会留下孤儿行或撞 FK，且答不了「这人是被删了还是改过名」。
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    # ------------------------------------------------------------------ #
+    # 邮箱 / 手机（v1.1.0 / 设计 57 S3，迁移 `e5f6a1b2c3d4`）
+    #
+    # ⚠️ 设计 47 曾写「`users` 已有 `uq_users_email`（既有）」—— **实测证伪**：
+    #    两库（SQLite 主库 / PG）当时都没有 `email` 列。而「注册改邮箱验证码
+    #    + 待审，与 dataPanel 一致」是用户明确口径，没有邮箱这一列就发不了码。
+    #
+    # 两列都 `nullable=False + server_default=""`：存量 27 个用户没有邮箱，
+    # 要求必填会让迁移失败；用空串表示「没填」。
+    # 唯一性用**部分唯一索引**（`WHERE col <> ''`）—— 见模型 `__table_args__`。
+    # ------------------------------------------------------------------ #
+    #: 邮箱（登录凭证之一 + 注册验证码的接收方）
+    email: Mapped[str] = mapped_column(
+        String(255), default="", server_default="", nullable=False
+    )
+    #: 手机号（用户管理页展示；列表接口**脱敏**，详情给全）
+    phone: Mapped[str] = mapped_column(
+        String(32), default="", server_default="", nullable=False
+    )

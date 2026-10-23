@@ -3,6 +3,7 @@ import { useEffect, useSyncExternalStore } from "react";
 
 import * as api from "../lib/api";
 import type { PlatformUser } from "../types";
+import { permissionStore } from "./use-permission";
 
 type AuthStatus = "checking" | "authenticated" | "anonymous";
 
@@ -67,8 +68,14 @@ async function bootstrap(): Promise<void> {
   try {
     const user = await api.bootstrapAuth();
     emit(user ? { status: "authenticated", user, error: null } : { status: "anonymous", user: null, error: null });
+    // 权限码与身份**同时就绪**：侧栏与按钮都依赖它，晚加载会让首屏闪一下「全部隐藏」。
+    // 刻意不 await（不阻塞进站）—— `hasPermission` 在未 ready 时恒 false，
+    // 加载完会触发重渲染，行为是「按钮稍后出现」而不是「点了才 403」。
+    if (user) void permissionStore.load();
+    else permissionStore.reset();
   } catch {
     api.clearAuthTokens();
+    permissionStore.reset();
     emit({ status: "anonymous", user: null, error: "登录已过期，请重新登录。" });
   }
 }
@@ -78,6 +85,7 @@ async function login(credentials: api.AuthCredentials): Promise<void> {
   try {
     const payload = await api.login(credentials);
     emit({ status: "authenticated", user: payload.user, error: null });
+    void permissionStore.load();
   } catch (error) {
     const message = authErrorMessage(error, "账号不存在或密码错误，请检查后重试。");
     emit({ status: "anonymous", user: null, error: message });
@@ -90,6 +98,7 @@ async function register(credentials: api.AuthCredentials): Promise<void> {
   try {
     const payload = await api.register(credentials);
     emit({ status: "authenticated", user: payload.user, error: null });
+    void permissionStore.load();
   } catch (error) {
     const message = authErrorMessage(error, "注册失败，该平台账号可能已存在。");
     emit({ status: "anonymous", user: null, error: message });
@@ -99,6 +108,8 @@ async function register(credentials: api.AuthCredentials): Promise<void> {
 
 async function logout(): Promise<void> {
   await api.logout();
+  // ⚠️ 必须清：不清的话下一个登录的人会短暂拿到上一个人的权限码（同 SPA 会话内）。
+  permissionStore.reset();
   emit({ status: "anonymous", user: null, error: null });
 }
 

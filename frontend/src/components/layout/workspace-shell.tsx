@@ -19,6 +19,7 @@ import {
   List,
   Menu,
   Segmented,
+  Skeleton,
   Space,
   Tag,
   Typography,
@@ -68,6 +69,17 @@ export interface WorkspaceShellProps {
   selectedKeys?: string[];
   /** 点击菜单项：默认 `navigate(key)`；子路由页（如网关）需自定义映射时传入。 */
   onNavigate?: (key: string) => void;
+  /**
+   * 菜单是否加载中（v1.1.0 动态菜单）。
+   *
+   * 为 `true` 时侧栏显示加载态而**不是空菜单** —— 空菜单会被用户理解成
+   * 「我没有权限」，那是最容易导致误报「管理员把我权限删了」的形状。
+   */
+  menuLoading?: boolean;
+  /** 菜单加载失败的原因（有值 ⇒ 显示错误提示 + 重试入口）。 */
+  menuError?: string | null;
+  /** 点「重试」时的回调（重新拉一次菜单）。 */
+  onReloadMenu?: () => void;
   /** 页面内容（顶栏 + Content 之下） */
   children: ReactNode;
 }
@@ -189,6 +201,9 @@ export function WorkspaceShell({
   footerItems,
   selectedKeys,
   onNavigate,
+  menuLoading = false,
+  menuError = null,
+  onReloadMenu,
   children,
 }: WorkspaceShellProps) {
   const auth = useAuth();
@@ -349,16 +364,48 @@ export function WorkspaceShell({
 
           {/* Main nav — scrollable */}
           <div style={{ flex: 1, overflowY: "auto", overflowX: "hidden" }}>
-            <Menu
-              theme={isDark ? "dark" : "light"}
-              mode="inline"
-              selectedKeys={activeKeys}
-              openKeys={openKeys}
-              onOpenChange={(keys) => setOpenKeys(keys as string[])}
-              onClick={handleMenuClick}
-              items={mainItems}
-              style={{ borderRight: 0 }}
-            />
+            {/* 菜单加载态（v1.1.0 动态菜单）：**不渲染空菜单** ——
+                空菜单会被理解成「我没有权限」，进而误报「管理员把我权限删了」。
+                加载中给骨架，失败给原因 + 重试。 */}
+            {menuLoading && (
+              <div style={{ padding: collapsed ? "12px 8px" : "12px 16px" }}>
+                <Skeleton
+                  active
+                  title={false}
+                  paragraph={{ rows: 6, width: "100%" }}
+                />
+              </div>
+            )}
+            {!menuLoading && menuError && (
+              <div style={{ padding: "12px 16px" }}>
+                <Empty
+                  image={Empty.PRESENTED_IMAGE_SIMPLE}
+                  description={
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      菜单加载失败：{menuError}
+                    </Text>
+                  }
+                >
+                  {onReloadMenu && (
+                    <Button size="small" onClick={onReloadMenu}>
+                      重试
+                    </Button>
+                  )}
+                </Empty>
+              </div>
+            )}
+            {!menuLoading && !menuError && (
+              <Menu
+                theme={isDark ? "dark" : "light"}
+                mode="inline"
+                selectedKeys={activeKeys}
+                openKeys={openKeys}
+                onOpenChange={(keys) => setOpenKeys(keys as string[])}
+                onClick={handleMenuClick}
+                items={mainItems}
+                style={{ borderRight: 0 }}
+              />
+            )}
           </div>
 
           {/* Footer — pinned to bottom */}
