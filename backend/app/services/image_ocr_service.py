@@ -420,42 +420,23 @@ def note_unverified_videos(video_paths: list[str]) -> dict[str, dict[str, Any]]:
 
 
 def _ffmpeg_exe(name: str) -> str | None:
-    """定位可执行文件：**deps/ → 包内 bin/ → PATH**，逐级回落。
+    """定位 `ffmpeg` / `ffprobe` —— **转发统一出入口** `env_bootstrap_service.dep_binary`。
 
-    ⚠️ 2026-10-23 修：原实现是「`_bundled_bin_dir()` 一旦有目录就**只**在该目录找」，
-    而 `_bundled_bin_dir()` 判断的是 `ffmpeg.exe` 在不在 —— 于是 `deps/ffmpeg/`
-    里只下了 ffmpeg、没下 ffprobe 时，`_ffmpeg_exe("ffprobe")` 返回 None
-    且**不会回落到 PATH**（开发机 PATH 里有 ffprobe 却被忽略）。
-    ⇒ 改成**按 name 逐个候选路径独立判断**，任一命中即用。
+    ⚠️ 2026-10-23 两次修法：
+      ① 原实现是「`_bundled_bin_dir()` 一旦有目录就**只在**该目录找」——
+         `deps/ffmpeg/` 里只下了 ffmpeg 没下 ffprobe 时，`_ffmpeg_exe("ffprobe")`
+         返回 None 且**不回落 PATH**（开发机 PATH 里有 ffprobe 却被忽略）；
+      ② 更根本的是：这里曾经自己维护一张候选目录表，与 `env_bootstrap_service`
+         各写一套。用户口径「全部统一出入口」⇒ 现在**只有 `dep_binary` 一份**实现
+         （`deps/ffmpeg/` → 冻结态包内 `bin/` → PATH），且每次调用都重新判定
+         ⇒ 用户下载完 ffmpeg **无需重启**即可抽帧。
     """
-    exe_name = f"{name}.exe" if os.name == "nt" else name
-    for cand in _candidate_bin_dirs():
-        exe = cand / exe_name
-        if exe.is_file():
-            return str(exe)
-    return shutil.which(name)
-
-
-def _candidate_bin_dirs() -> list[Path]:
-    """**按优先级**列出可能放着 ffmpeg/ffprobe 的目录（不判断里面有什么）。
-
-    ① `deps/<dir>`（初始化环境下载的，用户可删）
-    ② 包内 `_MEIPASS/bin` 与 `<exe>/bin`（兼容「构建期打进包」的老形态）
-    """
-    import sys
-
-    dirs: list[Path] = []
     try:
-        from backend.app.services.env_bootstrap_service import deps_root
+        from backend.app.services.env_bootstrap_service import dep_binary
 
-        dirs.append(deps_root() / "ffmpeg")
+        return dep_binary("ffmpeg", f"{name}.exe" if os.name == "nt" else name)
     except Exception:  # noqa: BLE001 - 依赖服务不可用不该让抽帧崩
-        pass
-
-    if getattr(sys, "frozen", False):
-        base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
-        dirs.extend([base / "bin", base.parent / "bin"])
-    return dirs
+        return shutil.which(name)
 
 
 def ffmpeg_available() -> bool:
@@ -537,6 +518,14 @@ def extract_frames(video: Path, count: int = VIDEO_FRAMES) -> list[tuple[float, 
     duration = probe_duration(video)
     if duration <= 0:
         return []
+    #: ⚠️ **先拿定位后的 ffmpeg**（2026-10-23 用户口径「全部统一出入口」）：
+    #: 原来写 `_ffmpeg_exe("ffmpeg") or "ffmpeg"` —— 找不到时仍然裸名交给 PATH 猜，
+    #: 而 `ffmpeg_available()` 用的是定位后的路径 ⇒ 「探测说有、执行找不到」
+    #: ⇒ `FileNotFoundError` 被 `except` 吞掉 ⇒ 一帧不抽且**没有任何提示**。
+    #: 现在找不到就是找不到，直接返回空并由调用方报「本机没有可用的 ffmpeg」。
+    ffmpeg = _ffmpeg_exe("ffmpeg")
+    if not ffmpeg:
+        return []
     #: **按「每 10 秒一帧」算实际抽帧数**（用户口径 2026-10-23），并用 `count` 封顶。
     #:
     #: `count` 现在的语义是**上限**（默认 `VIDEO_FRAMES_MAX`）：
@@ -587,7 +576,7 @@ def extract_frames(video: Path, count: int = VIDEO_FRAMES) -> list[tuple[float, 
                     #: ⇒ `FileNotFoundError` 被 `except` 吞掉 ⇒ `pairs` 为空
                     #: ⇒ `ocr_ok=None` ⇒ **视频不勾选且没有任何提示**。
                     #: 这就是「本地正常、打包版视频不勾选」的直接原因。
-                    _ffmpeg_exe("ffmpeg") or "ffmpeg", "-v", "error",
+                    _ffmpeg_exe("ffmpeg") or ffmpeg, "-v", "error",
                     "-ss", f"{at:.3f}",
                     "-i", str(video),
                     "-frames:v", "1",

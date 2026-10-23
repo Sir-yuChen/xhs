@@ -13,6 +13,38 @@ _JS_DIR = os.path.join(os.path.dirname(__file__), 'js')
 _WEBSECTIGA_CLI = os.path.join(_JS_DIR, 'websectiga_cli.js')
 _WEBSECTIGA_RE = re.compile(r'^[0-9a-f]{64}$', re.I)
 
+def node_exe() -> str:
+    """**唯一**的 node 定位出口 → 转发 `env_bootstrap_service.dep_binary('node')`。
+
+    用户口径 2026-10-23：「下载好依赖，应实时生效」+「全部统一出入口」。
+    1.0.6 把 node.exe 外置成首次启动下载后，出现过致命的时效漏洞：launcher 只在
+    **启动那一刻**前插一次 PATH，用户在应用里**下完** node 之后，同一进程里的签名
+    请求**依旧找不到 node**（必须重开软件），而报出来的却是「JS mnsv2 签名失败或未
+    达到硬门禁」—— 与门禁问题共用同一句文案，现场根本分不清。
+
+    ⇒ 定位逻辑**只有一份**（`dep_binary`），这里每次调用都重新问一遍
+    （一次 `os.path.isfile`）。PATH 仍作最后兜底（开发机 / 用户自己装了 Node.js）。
+    """
+    try:
+        from backend.app.services.env_bootstrap_service import dep_binary
+
+        found = dep_binary('node')
+        if found:
+            return found
+    except Exception:  # noqa: BLE001 - 依赖服务不可用则回落 PATH
+        pass
+    return 'node'
+
+
+def node_executable_or_none() -> str | None:
+    """同 `node_exe()`，但**找不到就是 None**（供需要「明确告知没装」的调用方）。"""
+    try:
+        from backend.app.services.env_bootstrap_service import dep_binary
+
+        return dep_binary('node')
+    except Exception:  # noqa: BLE001
+        return None
+
 
 def run_node_json(
     argv: list[str],
@@ -66,7 +98,7 @@ def generate_websectiga(
         raise RuntimeError(f'websectiga runtime missing: {_WEBSECTIGA_CLI}')
     config = dict(profile or {})
     result = run_node_json(
-        ['node', _WEBSECTIGA_CLI],
+        [node_exe(), _WEBSECTIGA_CLI],
         stdin_payload={
             'code': str(scripting_code or ''),
             'userAgent': str(config.get('userAgent') or ''),
@@ -84,4 +116,4 @@ def generate_websectiga(
     return token.lower()
 
 
-__all__ = ['run_node_json', 'generate_websectiga']
+__all__ = ['node_exe', 'node_executable_or_none', 'run_node_json', 'generate_websectiga']

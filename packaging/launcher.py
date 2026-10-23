@@ -51,10 +51,21 @@ log = logging.getLogger("launcher")
 # ---------------------------------------------------------------------------
 
 def app_root() -> Path:
-    """安装目录：frozen 时是 exe 所在目录（``_internal`` 的上级）。"""
-    if getattr(sys, "frozen", False):
-        return Path(sys._MEIPASS).resolve().parent
-    return Path(__file__).resolve().parents[1]
+    """安装目录（**用户选择的那个**）。
+
+    ⚠️ 唯一判据在 `backend.app.services.env_bootstrap_service.install_root()`：
+    依赖下载目录（`deps/`）、`data/`、`logs/` 与这里的 `root` 必须**同源**，
+    否则会出现「依赖下到了别处、程序找不到」这类环境相关故障（2026-10-23）。
+    后端不可导入时（极端情况下）才退回本地推算。
+    """
+    try:
+        from backend.app.services.env_bootstrap_service import install_root
+
+        return install_root()
+    except Exception:  # noqa: BLE001 - 后端不可导入则退回本地推算
+        if getattr(sys, "frozen", False):
+            return Path(sys._MEIPASS).resolve().parent
+        return Path(__file__).resolve().parents[1]
 
 
 def asset_path(name: str) -> Path:
@@ -103,7 +114,20 @@ def prepare_environment(root: Path) -> None:
         os.environ["PATH"] = f"{node_dir.as_posix()}{os.pathsep}{os.environ.get('PATH', '')}"
         log.info("node runtime 已前插 PATH：%s", node_dir)
     else:
-        log.warning("未找到 bundled node（%s），签名链路依赖系统 PATH 上的 node", node_dir)
+        log.info("包内无 runtime/node（1.0.6 起 node.exe 外置），按 deps/node 解析")
+    #: ⚠️ **用户下载的那份 node 也要前插**（2026-10-23 实机报障）：
+    #: node.exe 已外置为「首次启动下载」，落在 `<安装根>/deps/node/`；而签名链路是
+    #: 裸 `subprocess.run(['node', ...])`（按 PATH 解析）⇒ 不前插就等于没下载，
+    #: 绑定账号会报「JS mnsv2 签名失败或未达到硬门禁（mns0201_）」。
+    #: 注意顺序：deps/node（用户下到的，版本可控）优先于包内 runtime/node。
+    try:
+        from backend.app.services.env_bootstrap_service import refresh_runtime_paths
+
+        refreshed = refresh_runtime_paths()
+        if refreshed.get("node"):
+            log.info("deps node 已前插 PATH：%s", refreshed["node"])
+    except Exception as exc:  # noqa: BLE001 - 依赖服务不可用不该拦住启动
+        log.warning("前插 deps node 失败（%s），签名链路依赖其它 node", exc)
 
 
 def ensure_directories(root: Path) -> None:
@@ -248,6 +272,11 @@ def start_server(root: Path, port: int, console: bool):
 
 APP_WINDOW_SIZE = "1440,900"
 
+#: 判定「窗口真的起来了」的观察窗口（秒）。
+#: Chromium 单例转交 / `--app` 被吞时，进程会在 1 秒内退出 ⇒ 这个值只要能盖住
+#: 那个退出延迟即可；给 2.0 秒留余量（启窗本身就是异步的，不宜更长，否则拖慢启动）。
+_APP_WINDOW_SETTLE_SECONDS = 2.0
+
 #: 起过的**每一个**应用窗口进程；托盘退出时逐个收掉。
 #:
 #: ⚠️ 必须是**列表**（2026-09-26 用户实测「托盘退出后应用窗口依旧未关闭」）：
@@ -275,19 +304,110 @@ _BROWSER_CANDIDATES = (
     ),
 )
 
+#: ⚠️ **优先级固定为三档，不枚举品牌**（用户口径 2026-10-23）：
+#:
+#:   ① **Edge** ② **Chrome** ③ **电脑默认浏览器**
+#:
+#: 原实现在 ①② 都没找到时直接 `webbrowser.open()` —— 于是「默认浏览器是 360」的
+#: 机器上就变成在 360 的**标签页**里打开，用户看到的是「无法打开单独的窗口」。
+#: 这不是缺陷，是**第 ③ 档的设计行为**；真正要修的是 ①② 的查找方式：
+#:
+#:   * 硬编码两条路径**不够**（Store 版 / 精简版 Edge 落在 WindowsApps，
+#:     Chrome 装在非默认盘、或只有 Beta/Dev 通道）；
+#:   * ⇒ 先用**注册表 `App Paths`**（浏览器安装时自己写的，权威且不枚举品牌），
+#:     再兜底硬编码路径，都找不到才走 ③。
+#:
+#: 明确**不**在这里加 360 / QQ / 搜狗 / 夸克 之类的品牌清单 —— 那是把「某一台机器的
+#: 环境」写进代码，换台机器又要加一条（同一类坑）。要独立窗口，要么机器上有
+#: Edge/Chrome，要么用 ③ 并在托盘里明确告诉用户当前是标签页模式。
+
 
 def _candidate_browsers() -> list[tuple[str, Path]]:
-    """机器上可能存在的 Edge / Chrome 可执行文件（先系统级，后用户级）。"""
+    """按**固定优先级**列出可用于独立窗口的浏览器：**先 Edge，再 Chrome**。
+
+    ⚠️ 排序规则（用户口径 2026-10-23「不要硬编码，默认优先级时，Edge，谷歌，
+    最后是电脑默认浏览器」）：本函数**只输出 Edge / Chrome 两个品牌**，第 ③ 档
+    （电脑默认浏览器）由 `open_app_window()` 在本函数全部落空后走
+    `_open_default_browser()` —— 这里不枚举它们，也不枚举 360 / QQ / 搜狗。
+
+    每个品牌内部的查找顺序（**先权威、后常见路径**）：
+      1. 注册表 `App Paths`（浏览器安装时自己写的；Store 版 / 非默认盘 / Beta 通道都在）
+      2. 程序目录硬编码路径
+      3. `%LOCALAPPDATA%` 用户级安装路径
+
+    去重按**大小写不敏感的完整路径**做 —— 同一 exe 被上面几条各命中一次时，
+    重复会让 `open_app_window` 对同一个 exe 白试两遍（第二次必然被单例转交）。
+    """
     out: list[tuple[str, Path]] = []
-    for label, paths in _BROWSER_CANDIDATES:
-        for p in paths:
-            out.append((label, Path(p)))
-    local = os.environ.get("LOCALAPPDATA")
-    if local:
-        base = Path(local) / "Google" / "Chrome" / "Application" / "chrome.exe"
-        out.append(("Google Chrome", base))
-        out.append(("Microsoft Edge", Path(local) / "Microsoft" / "Edge" / "Application" / "msedge.exe"))
-    return out
+    local = os.environ.get("LOCALAPPDATA") or ""
+
+    def add(label: str, path: Path | None) -> None:
+        if path is not None:
+            out.append((label, path))
+
+    for label, exe_name, hardcoded, user_relative in (
+        (
+            "Microsoft Edge",
+            "msedge.exe",
+            (
+                r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+            ),
+            "Microsoft/Edge/Application/msedge.exe",
+        ),
+        (
+            "Google Chrome",
+            "chrome.exe",
+            (
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            ),
+            "Google/Chrome/Application/chrome.exe",
+        ),
+    ):
+        add(label, _app_paths_from_registry(exe_name))
+        for p in hardcoded:
+            add(label, Path(p))
+        if local:
+            add(label, Path(local) / user_relative)
+
+    seen: set[str] = set()
+    uniq: list[tuple[str, Path]] = []
+    for label, path in out:
+        key = _win_path_key(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append((label, path))
+    return uniq
+
+
+def _win_path_key(path: Path) -> str:
+    """Windows 路径比较键（大小写不敏感；非 Windows 原样）。"""
+    text = str(path)
+    return text.lower() if sys.platform == "win32" else text
+
+
+def _app_paths_from_registry(exe_name: str) -> Path | None:
+    """读 `HKLM/HKCU\\...\\App Paths\\<exe>` 拿真实安装路径（读不到返回 None）。"""
+    if sys.platform != "win32":
+        return None
+    try:
+        import winreg  # noqa: PLC0415 - 仅 Windows 存在
+    except Exception:  # pragma: no cover - 非 Windows
+        return None
+    sub = rf"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{exe_name}"
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        try:
+            with winreg.OpenKey(hive, sub) as key:
+                value, _ = winreg.QueryValueEx(key, "")
+        except OSError:
+            continue
+        #: 注册表里常带引号（`"C:\...\msedge.exe"`）
+        text = str(value or "").strip().strip('"')
+        if text:
+            return Path(text)
+    return None
 
 
 def _app_profile_dir() -> Path:
@@ -299,10 +419,17 @@ def _app_profile_dir() -> Path:
 
 
 def open_app_window(url: str) -> bool:
-    """以独立应用窗口打开 UI；Edge/Chrome 都不可用时退回默认浏览器。
+    """以独立应用窗口打开 UI；三档优先级 **Edge → Chrome → 电脑默认浏览器**。
 
     浏览器进程句柄记录到 ``_app_window_procs``，托盘退出时由 :func:`_close_app_window`
     连窗口一起收掉 —— 窗口是独立 profile 的浏览器进程，launcher 只停后端是关不掉它的。
+
+    ⚠️ **成功判据是「窗口真的在」，不是「Popen 没抛异常」**（2026-10-23）：
+    Chromium 的单例机制会让新进程把 URL 转交给已有实例后**立刻退出**，此时
+    `Popen` 完全成功、`returncode` 迟早是 0，但屏幕上可能什么也没有；而
+    `--app=` 参数被不认识的浏览器吞掉时，也会变成**普通标签页**。
+    ⇒ 启动后观察 `_APP_WINDOW_SETTLE_SECONDS`，进程**仍然存活**才认为窗口起来了；
+    已退出就换下一个候选，全都不行才走第 ③ 档（电脑默认浏览器）。
     """
     profile = _app_profile_dir()
     args = [
@@ -312,9 +439,11 @@ def open_app_window(url: str) -> bool:
         "--no-first-run",
         "--no-default-browser-check",
     ]
+    tried: list[str] = []
     for label, exe in _candidate_browsers():
         if not exe.is_file():
             continue
+        tried.append(f"{label}={exe}")
         try:
             proc = subprocess.Popen(
                 [str(exe), *args],
@@ -322,15 +451,39 @@ def open_app_window(url: str) -> bool:
                 stderr=subprocess.DEVNULL,
                 stdin=subprocess.DEVNULL,
             )
-            _app_window_procs.append(proc)
-            log.info("已用 %s 打开独立应用窗口：%s（profile=%s，pid=%d）",
-                     label, url, profile, proc.pid)
-            return True
         except Exception as exc:
             log.warning("%s 启动失败（%s），尝试下一个候选", label, exc)
-    log.warning("未找到 Edge / Chrome，退回系统默认浏览器打开 %s", url)
+            continue
+        time.sleep(_APP_WINDOW_SETTLE_SECONDS)
+        if proc.poll() is not None:
+            #: 单例转交 / 参数被吞 / 进程直接崩 —— 三种都在这里落网
+            log.warning(
+                "%s 启动后 %.1fs 内已退出（code=%s），继续下一个候选",
+                label, _APP_WINDOW_SETTLE_SECONDS, proc.returncode,
+            )
+            continue
+        _app_window_procs.append(proc)
+        log.info(
+            "已用 %s 打开独立应用窗口：%s（profile=%s，pid=%d）",
+            label, url, profile, proc.pid,
+        )
+        return True
+    log.warning(
+        "第①②档均不可用（候选=%s），改用**电脑默认浏览器**打开 %s（标签页模式，不是独立窗口）",
+        tried or "无", url,
+    )
+    return _open_default_browser(url)
+
+
+def _open_default_browser(url: str) -> bool:
+    """用**系统默认浏览器**打开（独立窗口不可用时的兜底；托盘菜单也调它）。"""
     try:
-        return bool(webbrowser.open(url))
+        ok = bool(webbrowser.open(url))
+        if ok:
+            log.info("已用系统默认浏览器打开 %s", url)
+        else:
+            log.warning("系统默认浏览器打开失败，请手动访问 %s", url)
+        return ok
     except Exception as exc:
         log.warning("打开浏览器失败（%s），请手动访问 %s", exc, url)
         return False
@@ -469,6 +622,11 @@ def run_tray(server, thread: threading.Thread, port: int) -> bool:
 
     icon = pystray.Icon(APP_NAME, image, f"{APP_NAME} :{port}", pystray.Menu(
         pystray.MenuItem("打开界面", open_ui),
+        #: ⚠️ 兜底入口（用户口径 2026-10-23：「默认被浏览器打开，无法打开单独的窗口」）：
+        #: 有些机器装的是精简版 / 商店版 Edge、或浏览器装在非常规路径，`--app=` 起不来，
+        #: 于是退回系统默认浏览器（标签页）。给一个**明确**的兜底入口，用户不必去翻
+        #: 开始菜单找 exe。默认浏览器打开的是同一个页面，功能完全一致。
+        pystray.MenuItem("用默认浏览器打开", lambda: _open_default_browser(f"http://127.0.0.1:{port}")),
         pystray.MenuItem("退出", quit_app),
     ))
 

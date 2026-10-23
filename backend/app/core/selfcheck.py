@@ -31,13 +31,24 @@ def check_node_runtime() -> tuple[bool, str]:
 
     ⚠️ 结论串**两种情况下都要能读**：可用时给版本（排查「是不是版本太老」要看它），
     不可用时给**怎么办**（装 Node / 修 PATH），不是只丢一个 `False`。
+
+    ⚠️ 查的是**统一出入口**（`deps/node` → 包内 → PATH），不是裸 `shutil.which`：
+    1.0.6 起 node.exe 外置为「首次启动下载」，只查 PATH 会把「已经下载好但 PATH
+    没刷新」误报成「未安装 Node.js」（2026-10-23 实机报障的排查噪声之一）。
     """
-    exe = shutil.which("node")
+    exe = None
+    try:
+        from xhs_utils.xhs_core.runtime import node_executable_or_none
+
+        exe = node_executable_or_none()
+    except Exception:  # noqa: BLE001 - 依赖服务不可用则退回 PATH
+        exe = shutil.which("node")
     if not exe:
         return False, (
-            "未找到 Node.js（PATH 里没有 `node`）⇒ 平台签名无法生成，"
-            "**所有小红书平台调用都会失败**（浏览本地已同步数据不受影响）。"
-            "请安装 Node.js 并确保它在 PATH 中，然后重启本应用。"
+            "未找到 Node.js（deps/node、包内 runtime/node 与 PATH 都没有 `node`）"
+            "⇒ 平台签名无法生成，**所有小红书平台调用都会失败**"
+            "（浏览本地已同步数据不受影响）。"
+            "请在「检查运行依赖」里下载 Node 运行时（或自行安装 Node.js），无需重启。"
         )
     try:
         proc = subprocess.run(
@@ -70,6 +81,20 @@ def log_startup_selfcheck() -> dict[str, object]:
     if node_ok:
         logger.info("启动自检 · %s", node_detail)
     else:
+        #: ⚠️ 先试一次「用户已下载的 node」再报警（2026-10-23 实机报障）：
+        #: launcher 只在**启动那一刻**前插过 PATH，而用户可能上次是「先启动、
+        #: 后下载 node」⇒ 这次启动 deps/node 已经在了，但不前插就永远找不到。
+        try:
+            from backend.app.services.env_bootstrap_service import refresh_runtime_paths
+
+            refreshed = refresh_runtime_paths()
+        except Exception:  # noqa: BLE001 - 依赖服务不可用不该让自检崩
+            refreshed = {}
+        if refreshed.get("node"):
+            node_ok, node_detail = check_node_runtime()
+            if node_ok:
+                logger.info("启动自检 · %s（已前插 %s）", node_detail, refreshed["node"])
+                return {"node_ok": node_ok, "node_detail": node_detail}
         # ⚠️ 用 warning 而不是 error：不阻断启动（见模块 docstring 的口径）。
         logger.warning("启动自检 · %s", node_detail)
     return {"node_ok": node_ok, "node_detail": node_detail}

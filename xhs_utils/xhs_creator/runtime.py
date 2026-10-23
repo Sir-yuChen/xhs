@@ -14,6 +14,7 @@ import tempfile
 from typing import Any, Mapping, Optional
 
 from xhs_utils.xhs_core.runtime import generate_websectiga
+from xhs_utils.xhs_core.runtime import node_exe as _node_exe
 
 
 _ROOT = os.path.dirname(os.path.dirname(__file__))
@@ -24,11 +25,14 @@ _SIGN_JS = os.path.join(_CORE_JS_DIR, 'sign.js')
 _PROFILE_JS = os.path.join(_CREATOR_JS_DIR, 'profile.js')
 
 _TIER_GATE = {
-    '0201': ('mns0201_', (200,)),
-    # 0101 uses custom Base58. Its text length varies with leading magnitude
-    # and the explicit deviceTag/a1 field lengths. Browser fixtures are
-    # 196/197; sanitized long-a1 fixtures can reach 198.
-    '0101': ('mns0101_', (196, 197, 198)),
+    #: ⚠️⚠️ **同样的坑：长度不能用等值**（2026-10-23 与 `xhs_pc/runtime.py` 同批修）。
+    #: `x3` 长度随 `a1` 长度浮动，实测 52 位 a1 ⇒ 0201 是 208 / 0101 是 205，
+    #: 但 a1=10 时分别是 152 / 148。原来这里 0201 写 `(200,)`、0101 写
+    #: `(196,197,198)`，**只有部分 a1 长度能过**；`0301` 干脆没登记（直接 ValueError）。
+    #: 换成区间 + 前缀，真约束是「是 mns 前缀」+「长度在实测跨度内」。
+    '0101': ('mns0101_', (140, 260)),
+    '0201': ('mns0201_', (140, 260)),
+    '0301': ('mns0301_', (130, 260)),
 }
 _PROFILE_DATA_RE = re.compile(r'^[0-9a-f]{5000,20000}$', re.I)
 
@@ -53,7 +57,7 @@ def generate_b1(
     timeout: float = 10.0,
 ) -> str:
     payload = json.dumps(dict(options or {}), ensure_ascii=False, separators=(',', ':'))
-    proc = _run_node(['node', _B1_JS, '--generate', payload], timeout=timeout)
+    proc = _run_node([_node_exe(), _B1_JS, '--generate', payload], timeout=timeout)
     if proc.returncode != 0:
         raise RuntimeError(f'Creator b1 runtime failed: {(proc.stderr or proc.stdout)[:500]}')
     try:
@@ -126,7 +130,7 @@ def run_signer(
         ) as handle:
             json.dump(payload, handle, ensure_ascii=False, separators=(',', ':'))
             temp_path = handle.name
-        proc = _run_node(['node', _SIGN_JS, f'@{temp_path}'], timeout=timeout)
+        proc = _run_node([_node_exe(), _SIGN_JS, f'@{temp_path}'], timeout=timeout)
     finally:
         if temp_path and os.path.exists(temp_path):
             os.remove(temp_path)
@@ -144,10 +148,11 @@ def run_signer(
         not result.get('xs')
         or not result.get('xs_common')
         or not x3.startswith(required_prefix)
-        or len(x3) not in allowed_lengths
+        or not (allowed_lengths[0] <= len(x3) <= allowed_lengths[1])
     ):
         raise RuntimeError(
-            f'Creator signer gate failed: tier={tier}, prefix={x3[:12]}, len={len(x3)}'
+            f'Creator signer gate failed: tier={tier}, prefix={x3[:12]}, len={len(x3)}, '
+            f'要求={required_prefix!r}+{allowed_lengths[0]}~{allowed_lengths[1]}'
         )
     return result
 
@@ -157,7 +162,7 @@ def generate_profile_data(
     timeout: float = 10.0,
 ) -> str:
     payload = json.dumps(dict(options), ensure_ascii=False, separators=(',', ':'))
-    proc = _run_node(['node', _PROFILE_JS, payload], timeout=timeout)
+    proc = _run_node([_node_exe(), _PROFILE_JS, payload], timeout=timeout)
     if proc.returncode != 0:
         message = (proc.stderr or proc.stdout or '').strip()
         raise RuntimeError(f'Creator profileData runtime failed: {message[:500]}')

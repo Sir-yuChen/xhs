@@ -13,7 +13,10 @@ import json
 import os
 import re
 import subprocess
+import threading
 from typing import Any, Mapping, Optional
+
+from xhs_utils.xhs_core.runtime import node_exe as _node_exe
 
 
 _JS_DIR = os.path.join(os.path.dirname(__file__), 'js')
@@ -26,12 +29,44 @@ _WEBSECTIGA_CLI = os.path.join(_CORE_JS_DIR, 'websectiga_cli.js')
 _PROFILE_JS = os.path.join(_JS_DIR, 'profile.js')
 
 _TIER_GATE = {
-    '0101': ('mns0101_', 205),
-    '0201': ('mns0201_', 208),
-    '0301': ('mns0301_', 200),
+    #: ⚠️⚠️ **判据必须是区间，不能是等值**（2026-10-23 实机报障，用户口径
+    #: 「换台电脑就报 JS mnsv2 签名失败或未达到硬门禁（档位 mns0201_，无短签/静态兜底）」
+    #: 「重新打开软件依旧」）：
+    #:
+    #: `x3` 的长度**随 a1 长度线性浮动**，实测（同一份 sign.js、同一段 cookie 结构）：
+    #:
+    #: | a1 长度 | 0101 | 0201 | 0301 |
+    #: |---|---|---|---|
+    #: | 10 | 148 | 152 | 144 |
+    #: | 20 | 161 | 164 | 160 |
+    #: | 30 | 175 | 180 | 172 |
+    #: | 52 | 205 | 208 | 200 |
+    #:
+    #: 原来这里写死 `205 / 208 / 200` —— **那是 a1 恰好 52 字符时的长度**。
+    #: 于是本机（a1 是 52 位）一直正常，换台电脑新生成的 a1 长度不同 ⇒ 门禁恒假
+    #: ⇒ `run_signer` 返回 None ⇒ `params.py` 抛「签名失败或未达到硬门禁」。
+    #: 与「重开软件」无关（比的是常量），也与 node 在不在 PATH 无关。
+    #:
+    #: 换成区间 + 前缀：真约束是「是 mns 前缀」和「长度落在实测跨度内」，不是某一串定值。
+    '0101': ('mns0101_', (140, 260)),
+    '0201': ('mns0201_', (140, 260)),
+    '0301': ('mns0301_', (130, 260)),
 }
 _WEBSECTIGA_RE = re.compile(r'^[0-9a-f]{64}$', re.I)
 _PROFILE_DATA_RE = re.compile(r'^[0-9a-f]{10000,20000}$', re.I)
+
+#: 最近一次门禁失败的**真实原因**（线程局部：签名会并发跑，全局变量会互相覆盖）。
+#: 只用于把原因拼进上层错误信息，不参与任何业务判断。
+_gate_failure = threading.local()
+
+
+def _record_gate_failure(detail: str) -> None:
+    _gate_failure.detail = detail
+
+
+def last_gate_failure() -> str:
+    """最近一次 `run_signer` 失败的原因（无则空串）。"""
+    return str(getattr(_gate_failure, 'detail', '') or '')
 
 
 def generate_b1(
@@ -44,7 +79,7 @@ def generate_b1(
     payload = json.dumps(dict(options or {}), ensure_ascii=False, separators=(',', ':'))
     try:
         proc = subprocess.run(
-            ['node', _B1_JS, '--generate', payload],
+            [_node_exe(), _B1_JS, '--generate', payload],
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -107,7 +142,7 @@ def run_signer(
 
     try:
         proc = subprocess.run(
-            ['node', _SIGN_JS, json.dumps(payload, ensure_ascii=False)],
+            [_node_exe(), _SIGN_JS, json.dumps(payload, ensure_ascii=False)],
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -115,12 +150,29 @@ def run_signer(
             encoding='utf-8',
             errors='replace',
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except FileNotFoundError:
+        #: ⚠️ 「找不到 node」与「门禁不过」原来共用同一句上层报错（2026-10-23 实机排查
+        #: 花了几轮才分清）。这里保留现场：FileNotFoundError = PATH 里没有 node（装包版
+        #: 未下载 / 下载后未刷新 PATH）；TimeoutExpired = node 卡死。
+        _record_gate_failure(
+            '找不到可执行的 node（PATH 里没有 node.exe）：1.0.6 起 node 需在'
+            '「检查运行依赖」里下载，或见 deps/node/'
+        )
+        return None
+    except subprocess.TimeoutExpired:
+        _record_gate_failure(f'node 签名超时（>{timeout}s）')
+        return None
+    except OSError as exc:
+        _record_gate_failure(f'node 启动失败：{exc}')
         return None
     if proc.returncode != 0:
+        _record_gate_failure(
+            f'node 退出码 {proc.returncode}：'
+            f'{(proc.stderr or proc.stdout or "").strip()[:300]}'
+        )
         return None
 
-    required_prefix, required_length = _TIER_GATE[tier]
+    required_prefix, allowed_lengths = _TIER_GATE[tier]
     for line in reversed([
         item.strip() for item in (proc.stdout or '').splitlines() if item.strip()
     ]):
@@ -134,12 +186,24 @@ def run_signer(
         if (
             result.get('xs')
             and x3.startswith(required_prefix)
-            and len(x3) == required_length
+            and allowed_lengths[0] <= len(x3) <= allowed_lengths[1]
         ):
             result['len'] = len(x3)
             result['prefix'] = x3[:12]
             return result
+        #: ⚠️ 把**真实原因**带出去（2026-10-23）：原来一律 return None，上层只能报
+        #: 「签名失败或未达到硬门禁」，看不出是「前缀不对」「长度越界」还是「没有 xs」，
+        #: 现场排查全靠猜。这里写进 last_gate_failure 供上层拼进错误信息。
+        _record_gate_failure(
+            f'tier={tier} prefix={x3[:12] or "<空>"} len={len(x3)} '
+            f'要求={required_prefix!r}+{allowed_lengths[0]}~{allowed_lengths[1]} '
+            f'xs={"有" if result.get("xs") else "无"}'
+        )
         return None
+    _record_gate_failure(
+        f'tier={tier} 输出里没有含 x3 的 JSON 行（stdout 前 200 字：'
+        f'{(proc.stdout or "")[:200]!r} stderr：{(proc.stderr or "")[:200]!r}）'
+    )
     return None
 
 
@@ -169,7 +233,7 @@ def generate_websectiga(
     }
     try:
         proc = subprocess.run(
-            ['node', _WEBSECTIGA_CLI],
+            [_node_exe(), _WEBSECTIGA_CLI],
             input=json.dumps(payload, ensure_ascii=False, separators=(',', ':')),
             capture_output=True,
             text=True,
@@ -233,7 +297,7 @@ def generate_profile_data(
     try:
         proc = subprocess.run(
             [
-                'node',
+                _node_exe(),
                 _PROFILE_JS,
                 json.dumps(payload, ensure_ascii=False, separators=(',', ':')),
             ],

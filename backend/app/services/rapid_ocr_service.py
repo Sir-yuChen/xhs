@@ -52,9 +52,27 @@ logger = logging.getLogger(__name__)
 #: 模型目录。固定到仓库内 `.hermes/tmp/ocr_models` 之外的地方会污染用户盘，
 #: 所以放在**用户缓存目录**，两边都能读写。
 def _model_dir() -> Path:
-    base = Path.home() / ".cache" / "xhs" / "ocr_models"
-    base.mkdir(parents=True, exist_ok=True)
-    return base
+    """OCR 模型目录 —— **转发统一出入口** `env_bootstrap_service.dep_model_dir()`。
+
+    ⚠️ 2026-10-23 修（用户口径「全部统一出入口」+「下载好依赖，应实时生效」）：
+    原来这里写死 `~/.cache/xhs/ocr_models`，而「初始化环境」下载器把模型放在
+    `<exe同级>/deps/ocr_models/`（装包态）或 `.hermes/deps/ocr_models/`（开发态）
+    ⇒ **两处路径不是同一个地方** ⇒ 用户看到「下载完成、可预检仍报模型缺失」，
+    而且必须重启才能看到目录变化。
+    ⇒ 现在只有 `dep_model_dir()` 一处定义，两侧共用，每次调用重新取。
+
+    （历史说明保留：为什么当初要显式指定 —— 默认目录是
+    `site-packages/rapidocr/models`，而 `rapidocr` 可能是 `pip install --user`
+    装在用户级 site-packages，构建机与运行机看到的不是同一份。）
+    """
+    try:
+        from backend.app.services.env_bootstrap_service import dep_model_dir
+
+        return dep_model_dir("ocr_models")
+    except Exception:  # noqa: BLE001 - 依赖服务不可用时退回用户缓存目录
+        base = Path.home() / ".cache" / "xhs" / "ocr_models"
+        base.mkdir(parents=True, exist_ok=True)
+        return base
 
 #: 识别前的最长边。与 `image_ocr_service.MAX_DIM` 同值。
 #:

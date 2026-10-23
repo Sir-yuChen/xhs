@@ -123,6 +123,13 @@ def start_download(
             #: 下完必须**真探测一次**：下载成功 ≠ 可用（半截/损坏都要判出来）
             if not spec.probe(target):
                 raise RuntimeError("下载完成但本地探测不可用（文件可能损坏）")
+            #: ⚠️ **下完必须立刻把搜索路径刷新出去**（2026-10-23 实机报障）：
+            #: 裸 `subprocess.run(['node', ...])` 按 PATH 解析，而 PATH 只在进程启动
+            #: 时前插过一次 ⇒ 先启动后下载的 node 整个进程生命周期内都「不存在」
+            #: ⇒ 绑定账号报「JS mnsv2 签名失败或未达到硬门禁（mns0201_）」，重开才好。
+            refreshed = env.refresh_runtime_paths() if payload.key == "node" else None
+            if refreshed and refreshed.get("changed"):
+                logger.info("node 依赖就绪，已前插搜索路径：%s", refreshed.get("node"))
             with _LOCK:
                 _PROGRESS[payload.key] = {
                     "key": payload.key,

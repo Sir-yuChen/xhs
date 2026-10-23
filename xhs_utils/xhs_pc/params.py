@@ -8,6 +8,7 @@ from urllib.parse import urlencode
 
 from xhs_utils.cookie_util import trans_cookies
 from xhs_utils.xhs_core.http import ordered_wire_headers
+from xhs_utils.xhs_core.runtime import node_exe as _node_exe
 
 
 PC_LOGIN_ACCEPT_LANGUAGE = 'zh-CN,zh;q=0.9'
@@ -186,8 +187,15 @@ def generate_xs_xs_common(
         sign_context=sign_context,
     )
     if not node_ret or not node_ret.get('xs'):
+        #: ⚠️ 把 `run_signer` 记下的**真实原因**拼进来（2026-10-23）：原来只有
+        #: 「签名失败或未达到硬门禁」一句，现场分不清是「没装 node」「门禁长度不符」
+        #: 还是「JS 抛错」，实机排查为此多耗了几轮。
+        from .runtime import last_gate_failure
+
+        detail = last_gate_failure()
         raise RuntimeError(
             f'JS mnsv2 签名失败或未达到硬门禁（档位 mns{tier}_，无短签/静态兜底）'
+            + (f'；真实原因：{detail}' if detail else '')
         )
     xs = node_ret['xs']
     xt = node_ret.get('xt') or str(int(time.time() * 1000))
@@ -224,7 +232,7 @@ def generate_x_rap_param(api, data, app_id=None, fingerprint_hex: str = ''):
     import subprocess as _sp
     import json as _json
     body = data if isinstance(data, str) else _json.dumps(data or {}, ensure_ascii=False)
-    argv = ['node', _RAP_CLI, api, body]
+    argv = [_node_exe(), _RAP_CLI, api, body]
     if app_id:
         argv.append(app_id)
     elif fingerprint_hex:
