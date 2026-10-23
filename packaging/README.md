@@ -99,17 +99,72 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging\release.ps1 -Versi
 | crypto-js 以外的 node 依赖 | 签名运行时只需要 crypto-js | 构建自检：安装根 `node_modules` 只允许 crypto-js |
 | cv2 的 `data/`（haarcascade 等模型，约 10MB） | 本仓 cv2 只用 `imdecode` / `imencode` / `VideoCapture`，无级联分类器用法 | `build.ps1` 第 7a 步直接删 |
 | 旧安装包 `spider-xhs-setup-*.exe` | 上一版产物（约 90MB），不是输入 | 安装脚本 Source 只指向 `dist\SpiderXHS\*` |
+| **ffmpeg / ffprobe** | full build 各 **222MB**，两者 444MB —— 与「减体积」直接冲突 | `SpiderXHS.spec` 不收（原 `_ffmpeg_data()` 已删）；走运行时下载 |
+| **OCR 模型 `.onnx`**（3 个，30MB） | 纯数据文件，可下载 | spec 的 `_rapidocr_data()` 跳过 `.onnx`（代码与 yaml 照收） |
+| **`runtime
+ode
+ode.exe`**（84MB） | 单文件可执行，可下载 | `build.ps1` 不再复制；冒烟改断言 `node_modules\crypto-js` 在包内 |
 
 **哪些看着大却不能动**：
 
 | 依赖 | 体积 | 为什么必须带 |
 |---|---|---|
 | `cv2` | **112MB** | 发布链路要用：`apis/xhs_creator_apis.py` 用 `imdecode` 取图片宽高、`VideoCapture` 取视频时长与封面帧（`upload_media` → 发布/自动运营都走它） |
-| `runtime/node/node.exe` | 84MB | 签名 JS 的唯一执行器（`xhs_utils/**/js`） |
+| ~~`runtime/node/node.exe`~~ | ~~84MB~~ | **已改为安装后下载**（2026-10-23）：签名 JS 的唯一执行器，但从包内移出，首次启动下到 `deps/node/`。见下方「可下载三方依赖规则」 |
 | `PIL` / `numpy` / `cryptography` / `curl_cffi` | 13M / 27M / 9.5M / 3.8M | 图片处理（`image_util`） / cv2 依赖 / Fernet 加密 Cookie 与 Key / HTTP 指纹请求 |
 
 > 每次构建尾部会自动打印 `_internal` 体积 **top 15** 并跑一遍禁止项自检 ——
 > 有新东西混进包，看那张表和 `[LEAK]` 行就够了，不用人肉翻目录。
+
+## 可下载三方依赖规则（2026-10-23 立，**后续新依赖一律照此**）
+
+> 起因：1.0.5 装包版实测「视频没勾选 / 自动上传提示数据包无视频」，根因是
+> **ffmpeg 没随包**（开发机 PATH 里有、装包进程没有）⇒ 抽帧失败 ⇒ 视频被过滤掉。
+> 同一轮确立：能下载的资源**一律不进包**，改首次启动下载。安装包 **126MB → 80MB**。
+
+### 三条判据（决定一个依赖该不该外置）
+
+| # | 判据 | 处置 |
+|---|---|---|
+| ① | **纯数据 / 独立可执行文件**（`.onnx` 模型、`.exe`、`.gz`） | ✅ **外置**，运行时下载 |
+| ② | **编译进程序的二进制扩展**（`.pyd` / `.dll`，如 `cv2` / `onnxruntime` / `numpy`） | ❌ **必须随包** —— 外置等于让用户装 Python 环境 |
+| ③ | 外置后**软件不可用**（如签名用的 node） | ⚠️ 可以外置，但必须标 `required=True`：下载成功前弹窗不许关 |
+
+### 落地六条（新依赖照着做）
+
+1. **登记**：在 `backend/app/services/env_bootstrap_service.py` 的 `DEPENDENCIES` 加一条
+   `DependencySpec`（`key` / `name` / `size_hint` / `dir_name` / `probe` / `fetch` / `required`）。
+2. **双源**：每项至少**两套公共地址**，`_download_first_ok` 依次回退。已验证国内可达的只有
+   **npmmirror**（`cdn.npmmirror.com`）与 **ModelScope**（`modelscope.cn`）；
+   `github.com` / `huggingface.co` / `hf-mirror.com` **实测不可达，禁止使用**。
+3. **入口只写一处**：`fetch` 内部用 `_download_first_ok`，重试（3 次）由 `_with_retries` 统一包，
+   **不要**在 `fetch` 里自己写重试。
+4. **判据优先于「文件存在」**：`probe()` 必须能识别**半截文件**——
+   - 可执行文件：真跑一次 `--version` / `-version`，退出码 0 才算可用；
+   - 数据文件：检查体积下限（**用实测值，不要估**；本次估大了导致「下对了却判不可用」）。
+5. **落盘位置**：`deps_root()/<dir_name>/`（装包态 = exe 同级 `deps/`，开发态 `.hermes/deps/`）。
+   **不要**放 `_internal`（升级安装会被整体覆盖，下载的东西会丢）。
+6. **打包侧同步**：从 `SpiderXHS.spec` / `build.ps1` 移出该资源，并在
+   `tests/backend/test_env_bootstrap.py::test_packaging_excludes_downloadable_resources`
+   补一条断言 —— **没有守卫的「移出」下次会被悄悄加回来**。
+
+### 前端/接口契约（已就绪，新依赖无需改前端）
+
+- `GET  /api/system/deps/progress` — 全部依赖状态 + 进度（弹窗数据源）
+- `POST /api/system/deps/download` — 异步下载单个依赖
+- `POST /api/system/deps/reset`    — **清空本地重新下载**（真删目录）
+- 弹窗 `frontend/src/components/system/env-bootstrap-dialog.tsx` 按 `DEPENDENCIES` **动态渲染**，
+  新增依赖自动出现；顶栏「依赖检查」入口已接。
+
+### 已知坑（都踩过）
+
+| 坑 | 现象 | 正确做法 |
+|---|---|---|
+| 用 `shutil.which()` 判断可用 | 开发机正常、装包版必然失败 | 先查 `deps/`，再查包内 `bin/`，最后才 PATH |
+| 只写一套下载源 | 镜像临时故障 ⇒ 用户卡死 | 至少两套，且各自不同 CDN 路径形态 |
+| `probe` 的阈值估算 | 「下载成功但不可用」死循环 | 阈值取实测量的 ~90% |
+| 外置后漏改冒烟断言 | 冒烟报「缺少 runtime/node/node.exe」，打包 FAIL | 同步改 `smoke-test.ps1` 的文件清单与自检方式 |
+| 只 `setOpen(false)` 不通知父级 | 条件挂载的弹窗关掉后再点没反应 | `onDone?.()` 让父级卸载组件 |
 
 ## 安装后布局（全部在用户选择的安装目录）
 
@@ -125,7 +180,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging\release.ps1 -Versi
   data\                spider_xhs.db、secret.key
   backend\app\storage\ media、exports、tmp_note_publish
   logs\launcher.log    启动器 + uvicorn 日志
+  deps\               【运行时下载】node.exe / ffmpeg.exe / OCR 模型（首次启动拉取）
 ```
+
+> `deps\` **不在安装包内**，由「初始化环境」弹窗首次启动时下载。见下节规则。
 
 ## 卸载语义
 
