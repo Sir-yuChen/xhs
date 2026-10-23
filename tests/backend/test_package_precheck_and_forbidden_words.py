@@ -1856,6 +1856,34 @@ def test_video_frames_use_ten_second_interval_with_cap():
     )
 
 
+def _code_only(source: str) -> str:
+    """只剩**代码**（剥掉所有 docstring/字符串之外的文本与注释）。
+
+    ⚠️ 为什么需要（2026-10-23 实测）：按行剥 `#` 的写法剥不掉**文档字符串**，
+    源码文档里引用 `("ffmpeg", "-v", …)` 这类示例就会被当成「裸写命令」判红 ——
+    守卫判的是**代码形态**，不能被人写的说明文字影响。
+    实现用 `tokenize`：直接丢掉 COMMENT 与整个 STRING 文档串，只保留其余 token。
+    """
+    import io as _io
+    import tokenize as _tok
+
+    kept: list[str] = []
+    prev_type: int | None = None
+    for tok in _tok.generate_tokens(_io.StringIO(source).readline):
+        if tok.type in (_tok.COMMENT, _tok.NL, _tok.ENCODING, _tok.ENDMARKER):
+            prev_type = tok.type
+            continue
+        if tok.type == _tok.STRING:
+            #: 语句**开头**的字符串 = docstring（单独成句，前后是 NEWLINE/缩进）
+            standalone = prev_type in (None, _tok.NEWLINE, _tok.INDENT, _tok.DEDENT)
+            if standalone:
+                prev_type = tok.type
+                continue
+        kept.append(tok.string)
+        prev_type = tok.type
+    return " ".join(kept)
+
+
 def test_ffmpeg_is_located_not_assumed_and_duration_has_fallback():
     """ffmpeg/ffprobe 必须**走定位函数**，且时长探测要有 ffmpeg 兜底（2026-10-23）。
 
@@ -1877,41 +1905,36 @@ def test_ffmpeg_is_located_not_assumed_and_duration_has_fallback():
 
     #: ① 不许裸写命令名（先剥注释，否则注释里提到这些词会假红）
     #: 剥注释行 + **行内注释**，否则文档注释里引用 "ffmpeg", "-v" 这类原文会假红
-    code_lines = []
-    for ln in src.splitlines():
-        if ln.lstrip().startswith("#"):
-            continue
-        cut = None
-        in_str = False
-        quote = ""
-        for idx, ch in enumerate(ln):
-            if in_str:
-                if ch == quote:
-                    in_str = False
-            elif ch in "\"'":
-                in_str = True
-                quote = ch
-            elif ch == "#":
-                cut = idx
-                break
-        code_lines.append(ln[:cut] if cut is not None else ln)
-    code = NL.join(code_lines)
     #: ⚠️ 判据要**精确到「作为命令列表首元素裸写」**，不能只搜子串：
     #: `_ffmpeg_exe("ffmpeg") or "ffmpeg"` 里的 `or "ffmpeg"` 是兜底，
     #: 子串匹配会把它误判成「裸写」（2026-10-23 首轮踩到）。
     #: 裸写的形态是 `[` 或 `,` 后**直接**跟 `"ffmpeg"` / `"ffprobe"`（前面不是 `or `）。
+    #:
+    #: ⚠️ 再补一刀（2026-10-23 第二轮）：上面按行剥 `#` 的写法**剥不掉文档字符串** ——
+    #:   `_ffmpeg_exe` 的 docstring 里写着 `（`deps/ffmpeg/` → … ）`、别处又写着
+    #:   `("ffmpeg", "-v", …)` 这类**说明性示例**，于是守卫把注释当代码判红。
+    #:   ⇒ 认代码不认文本：先剥掉全部 docstring 与注释（`_code_only`），再匹配。
+    #:
+    #: ⚠️ 第三刀（同日）：`dep_binary("ffmpeg", "ffmpeg.exe")` 也是 `( "ffmpeg" ,` 形态，
+    #:   但它是**定位函数的参数**、不是要执行的命令。裸写的本质是「首元素就是命令名」，
+    #:   所以要求**括号前紧挨着 `[` 或 `subprocess.run(` 这类调用**，且该字符串后面
+    #:   紧跟的是 `,` + 参数（`-`/`--`）而不是另一个可执行名。
+    code = _code_only(src)
     import re as _re
 
-    bare_ffmpeg = _re.search(r'[\[,(]\s*"ffmpeg"\s*,', code)
-    bare_ffprobe = _re.search(r'[\[,(]\s*"ffprobe"\s*,', code)
+    bare_ffmpeg = _re.search(r'\[\s*"ffmpeg"\s*,\s*"-', code)
+    bare_ffprobe = _re.search(r'\[\s*"ffprobe"\s*,\s*"-', code)
     assert not bare_ffmpeg, (
         'extract_frames 仍把 "ffmpeg" 作为命令首元素裸写 —— 装包版 PATH 没有它，执行必失败'
     )
     assert not bare_ffprobe, (
         'probe_duration 仍把 "ffprobe" 作为命令首元素裸写 —— 下载包里没有它'
     )
-    assert '_ffmpeg_exe("ffmpeg") or "ffmpeg"' in code, "extract_frames 没走定位函数"
-    assert '_ffmpeg_exe("ffprobe")' in code, "probe_duration 没走定位函数"
+    #: 反向：定位函数必须仍然被调用（否则「删掉裸写」也能让上面两条绿）。
+    #: ⚠️ `_code_only` 用空格连接 token ⇒ `_ffmpeg_exe("ffmpeg")` 会变成
+    #:   `_ffmpeg_exe ( "ffmpeg" )`，所以匹配要容忍 token 间空格（同日第三坑）。
+    assert _re.search(r'_ffmpeg_exe\s*\(\s*"ffmpeg"\s*\)', code), "extract_frames 没走定位函数"
+    assert _re.search(r'_ffmpeg_exe\s*\(\s*"ffprobe"\s*\)', code), "probe_duration 没走定位函数"
 
     #: ② 时长探测必须有 ffmpeg 兜底（解析 Duration:）
     i = src.index("def probe_duration(")
@@ -1930,11 +1953,17 @@ def test_ffmpeg_is_located_not_assumed_and_duration_has_fallback():
         "ffmpeg_available 仍要求 ffprobe —— 只有 ffmpeg 的合法环境会被判不可用"
     )
 
-    #: ④ 逐 name 回落 PATH（deps 里缺 ffprobe 时不能连 PATH 都不看）
+    #: ④ 定位**只有一个出入口**（2026-10-23 用户口径「全部统一出入口」）：
+    #:    `_ffmpeg_exe` 必须转发 `env_bootstrap_service.dep_binary`，不许自己再维护
+    #:    一张候选目录表（曾经各写一套：deps 里缺 ffprobe 时连 PATH 都不看）。
+    #:    `dep_binary` 内部就是「deps → 冻结态包内 bin → PATH」逐级回落。
     k = src.index("def _ffmpeg_exe(")
-    locator = src[k : k + 900]
-    assert "_candidate_bin_dirs()" in locator, "定位函数没有逐候选目录回退"
-    assert "return shutil.which(name)" in locator, "定位函数没有回落 PATH"
+    locator = src[k : k + 1200]
+    assert "dep_binary(" in locator, "ffmpeg 定位没有走统一出入口 dep_binary"
+    assert "shutil.which(name)" in locator, "统一出入口不可用时没有回落 PATH"
+    assert "_candidate_bin_dirs" not in src, (
+        "又出现第二份候选目录表（统一出入口之后不许再有）"
+    )
 
 
 def test_video_frame_sampling_covers_head_and_tail(monkeypatch, tmp_path):

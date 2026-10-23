@@ -306,7 +306,14 @@ function mountRenewModal(target) {
   render(target);
   return { el, root, closed };
 }
-const maskEl = () => document.querySelector('[data-testid="login-submit-mask"]');
+//: ⚠️ **判「蒙版是否真的显示」，不能查外层 wrapper**（2026-10-23 修）：
+//: login-submit-mask.tsx 的外层 span[data-testid=login-submit-mask] 是**常驻**的
+//: （display: contents），真正显示与否由里面的 WaitMask 决定（visible 为假就 return null）。
+//: 原来按 wrapper 查 ⇒ maskEl() 恒真 ⇒ A10「出现」与「消失」两段永远同值，
+//: MASK_MUTATE=nomask 因此**变成哑弹（改了不红）**。
+//: 现在按 WaitMask 真正渲染出来的 div[role=status][aria-busy=true] 判断。
+// 只认 WaitMask 自己的根节点：div[role=status] 且内部带 WaitMask 独有的 keyframes。不能用 [data-testid]（外层 span 常驻，恒真），也不能只靠 aria-busy（antd Spin 也有 aria-busy）。
+const maskEl = () => Array.from(document.querySelectorAll('div[role="status"]')).find((el) => (el.textContent || "").length >= 0 && el.querySelector("style") && (el.innerHTML || "").includes("wait-mask-spin"));
 
 /* A1 — 绑定弹窗是 50vw × 75vh 的 Modal（不是右侧 420 Drawer）。 */
 async function scenarioA1() {
@@ -827,12 +834,17 @@ async function scenarioA11() {
   await waitFor(() => findButton("确认并更新令牌"));
   const confirmBtn11 = findButton("确认并更新令牌");
   if (confirmBtn11) confirmBtn11.click();
-  // 等到请求真的回来（桩里记了 confirm 那次调用）再判「关没关」
+  // 等到请求真的回来（桩里记了 confirm 那次调用）再判「关没关」。
+  // ⚠️ 必须先等到**蒙版消失**再看窗口（2026-10-23 修）：isConfirming 在 finally
+  // 里复位，蒙版消失与「是否关窗」是两个不同的时间点。原断言写
+  // !!maskEl() === false 却只在 300ms 后看一次，时序稍慢就判红 ——
+  // 而它要验的是**关窗判据**（后端回 pending ⇒ 不关窗），不是蒙版快慢。
+  // 实测：git stash 掉全部业务改动后这条**同样稳定失败**，属既有缺陷。
   await waitFor(() => (G.__MODAL_LOG__.phone || []).length >= 2, { timeout: 3000 });
-  await waitFor(() => false, { timeout: 300 });
+  await waitFor(() => !maskEl(), { timeout: 3000 });
   check("A11 手机验证码：后端回 pending 时不关窗",
-    h.closed.length === 0 && !!maskEl() === false && !!modalEl(),
-    "onClose=" + h.closed.length + " modal=" + !!modalEl());
+    h.closed.length === 0 && !!modalEl(),
+    "onClose=" + h.closed.length + " modal=" + !!modalEl() + " mask=" + !!maskEl());
   h.root.unmount();
   h.el.remove();
   await waitFor(() => document.querySelectorAll('.ant-modal').length === 0, { timeout: 500 });
@@ -1013,19 +1025,26 @@ async function runOnce(modalMutate, renewMutate, maskMutate, loginMutate) {
         }
       },
       {
-        // A10 的承重变异：让共享蒙版永远返回 null —— 三种登录方式都该因此变红。
-        // 锚点住在 login-submit-mask.tsx（共享件），改的是内存里的 bundle，不落盘。
+        // A10 的承重变异：让蒙版**永不显示** —— 三种登录方式都该因此变红。
+        // ⚠️ 锚点必须落在**真正进 bundle 的模块**上（2026-10-23 实测纠正）：
+        //    原来锚 login-submit-mask.tsx，但该文件**从未被 ENTRY import**
+        //    （ENTRY 只 import add-account-drawer / renew-login-modal / qr-login-panel，
+        //    蒙版由它们各自再 import）⇒ esbuild 根本不加载它、onLoad 永不触发，
+        //    MASK_MUTATE 是哑弹（改多少次结果都恒 53/53）。
+        // ⇒ 改为锚 wait-mask.tsx 的实际渲染开关（那个模块确实在 bundle 里）。
         name: "mutate-mask",
         setup(build) {
-          build.onLoad({ filter: /login-submit-mask\.tsx$/ }, async (args) => {
+          build.onLoad({ filter: /ui[\/\\]wait-mask\.tsx$/ }, async (args) => {
             const fs = require("fs");
+            // 行尾归一化：源码可能是 CRLF，锚点失配会让变异静默不生效。
             let contents = fs.readFileSync(args.path, "utf8").replace(/\r\n/g, "\n");
             if (maskMutate === "nomask") {
-              const needle = "  if (!active) {";
+              const needle = "  if (!visible) return null;";
               if (!contents.includes(needle)) {
                 throw new Error("蒙版变异锚点未命中（实现已改？）：" + needle);
               }
-              contents = contents.replace(needle, "  if (true) {");
+              // 恒不渲染 = 蒙版永远不出现 ⇒ A10 三条「出现蒙版」必须变红。
+              contents = contents.replace(needle, "  if (true) return null;");
             }
             return { contents, loader: "tsx" };
           });
