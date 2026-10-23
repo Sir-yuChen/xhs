@@ -45,6 +45,17 @@ from backend.app.services.account_service import (  # noqa: E402
 from backend.app.services.rate_limiter import get_rate_limiter  # noqa: E402
 from tests.backend.cookie_fixtures import cookie_version, cookie_version_multi  # noqa: E402
 
+import pytest
+
+
+
+
+#: 测试分层标记（2026-10-23 立，见 `docs/04_测试文档/01_测试体系与流程规范.md` §15.2）。
+#: 分类判据由 `.hermes/scripts/classify_tests.py` 机械生成，不靠人工印象：
+#:   redline     = 挂了代表「数据会被写坏 / 凭据会泄漏 / 平台会被封 / 迁移不可执行」
+#:   contract    = 端点 / 字段 / 行为与文档一致
+#:   integration = 真跑迁移 / 子进程（慢且重，收尾跑）
+pytestmark = pytest.mark.contract
 #: 测试**统一使用的账号**：真机那个「观隅好物」（小红书号 293066917）。
 GUANYU_NICKNAME = "观隅好物"
 GUANYU_PROFILE = json.dumps({"red_id": "293066917"})

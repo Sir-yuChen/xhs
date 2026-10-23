@@ -7,6 +7,7 @@ from typing import Any, Protocol
 
 import requests
 
+from backend.app.core.database import SessionLocal
 from backend.app.services.llm_gateway_usage_service import (
     STATUS_FAILED,
     STATUS_SUCCESS,
@@ -716,7 +717,6 @@ class OpenAICompatibleImageClient:
             from pathlib import Path
             from backend.app.core.config import get_settings
             from backend.app.models.material import MaterialFile
-            from backend.app.core.database import SessionLocal
 
             parts = url.split("/")
             try:

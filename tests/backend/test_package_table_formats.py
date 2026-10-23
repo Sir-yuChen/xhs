@@ -32,6 +32,15 @@ import pytest
 
 from backend.app.services import shop_draft_package, shop_package_precheck
 
+
+
+#: 测试分层标记（2026-10-23 立，见 `docs/04_测试文档/01_测试体系与流程规范.md` §15.2）。
+#: 分类判据由 `.hermes/scripts/classify_tests.py` 机械生成，不靠人工印象：
+#:   redline     = 挂了代表「数据会被写坏 / 凭据会泄漏 / 平台会被封 / 迁移不可执行」
+#:   contract    = 端点 / 字段 / 行为与文档一致
+#:   integration = 真跑迁移 / 子进程（慢且重，收尾跑）
+pytestmark = pytest.mark.contract
+
 HEADER = ["sku名称", "原价", "库存"]
 ROWS = [["颜色分类:甲", "99", "10"], ["颜色分类:乙", "88", "5"]]
 

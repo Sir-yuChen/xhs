@@ -21,6 +21,15 @@ from pathlib import Path
 
 import pytest
 
+
+
+#: 测试分层标记（2026-10-23 立，见 `docs/04_测试文档/01_测试体系与流程规范.md` §15.2）。
+#: 分类判据由 `.hermes/scripts/classify_tests.py` 机械生成，不靠人工印象：
+#:   redline     = 挂了代表「数据会被写坏 / 凭据会泄漏 / 平台会被封 / 迁移不可执行」
+#:   contract    = 端点 / 字段 / 行为与文档一致
+#:   integration = 真跑迁移 / 子进程（慢且重，收尾跑）
+pytestmark = pytest.mark.redline
+
 ROOT = Path(__file__).resolve().parents[2]
 BACKEND_DIR = ROOT / "tests" / "backend"
 FRONTEND_DIR = ROOT / "tests" / "frontend"
@@ -505,3 +514,40 @@ def test_terminal_statuses_agree():
         f"{sorted(sync_task_service.TERMINAL_STATUSES)} vs "
         f"{sorted(note_queue_service.TERMINAL_STATUSES)}"
     )
+
+
+def test_every_test_file_declares_a_layer_marker():
+    """每个测试文件**必须**声明分层标记（2026-10-23 立，§15.5 准入清单第 1 条）。
+
+    为什么要有这条守卫：分层标记如果只靠「这次批量打过一遍」，新增文件必然漏
+    ⇒ 漏掉的文件在 `-m redline` / `-m contract` 里**永远不跑**，
+    而它自己也不会报错 —— 这是典型的「静默失效」，比没有分层更糟。
+
+    对应 Java 生态的「文件名即分类」（`*Test` / `*IT` 由构建工具强制）。
+    这里是 Python 的等价物：`pytestmark` 由本守卫强制。
+
+    允许的标记：`redline` / `contract` / `integration`（含义见 `pytest.ini` 与
+    `docs/04_测试文档/01` §15.2）。
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent
+    allowed = {"redline", "contract", "integration"}
+    pattern = re.compile(r"^pytestmark\s*=\s*pytest\.mark\.(\w+)", re.M)
+
+    missing: list[str] = []
+    unknown: list[str] = []
+    for path in sorted(root.glob("test_*.py")):
+        match = pattern.search(path.read_text(encoding="utf-8"))
+        if match is None:
+            missing.append(path.name)
+        elif match.group(1) not in allowed:
+            unknown.append(f"{path.name}: {match.group(1)}")
+
+    assert not missing, (
+        "以下测试文件没有声明分层标记（`pytestmark = pytest.mark.<redline|contract|integration>`）"
+        f"：{missing}\n按 §15.5 准入清单，缺标记的文件永远不会被分层命令选中。"
+        "新文件请运行 `python .hermes/scripts/classify_tests.py` 机械打标。"
+    )
+    assert not unknown, f"以下文件的分层标记不在允许集合 {sorted(allowed)} 内：{unknown}"

@@ -20,6 +20,15 @@ import pytest
 from backend.app.services import material_save_service as mss
 
 
+
+#: 测试分层标记（2026-10-23 立，见 `docs/04_测试文档/01_测试体系与流程规范.md` §15.2）。
+#: 分类判据由 `.hermes/scripts/classify_tests.py` 机械生成，不靠人工印象：
+#:   redline     = 挂了代表「数据会被写坏 / 凭据会泄漏 / 平台会被封 / 迁移不可执行」
+#:   contract    = 端点 / 字段 / 行为与文档一致
+#:   integration = 真跑迁移 / 子进程（慢且重，收尾跑）
+pytestmark = pytest.mark.contract
+
+
 #: 1×1 PNG（真图，能被 Pillow 打开；避免依赖网络与磁盘上的既有文件）。
 TINY_PNG = bytes.fromhex(
     "89504e470d0a1a0a0000000d4948445200000001000000010806000000"

@@ -45,7 +45,7 @@ from backend.app.adapters.xhs.qianfan_api_adapter import get_qianfan_api_adapter
 from backend.app.api.ai import _business_model_context, get_text_ai_client
 from backend.app.api.platforms.xhs.qianfan import _owned_account
 from backend.app.services.business_provider_keys import BUSINESS_KEY_LLM_NOTE_TEXT
-from backend.app.core.database import get_db
+from backend.app.core.database import SessionLocal, get_db
 from backend.app.core.deps import get_current_user
 
 #: **同步发布最长等待**（秒）——发布链路上传 + 预审核 + 平台调用，实测单篇 20~90 秒；
@@ -874,8 +874,9 @@ def publish_note_version(
     #: （identity map）会一直读到 `publishing`；`expire_all()` 虽能绕过，但它同时
     #: 让**本 Session 未提交的改动失效**（这里的 `note.raw_json` 刚改过）。
     #: 独立 Session 读到的就是库里真值，且不干扰本请求的事务。
-    from backend.app.core.database import SessionLocal
-
+    #: ⚠️ `SessionLocal` 必须**模块级持有**（2026-10-23）：函数级 import 拿不到模块属性，
+    #: `patch_service_sessions()` 打桩不到它 ⇒ 测试里这条探测会落到**真实生产库**
+    #: （守卫 `test_service_session_registry_covers_every_session_owner` 抓到的正是这个）。
     while time.monotonic() < deadline:
         with SessionLocal() as probe:
             current = probe.get(Note, int(note.id))

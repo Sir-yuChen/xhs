@@ -29,6 +29,8 @@ import logging
 from typing import Any, Iterable
 
 from sqlalchemy import delete, func, select
+
+from backend.app.core.database import SessionLocal
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -591,7 +593,6 @@ def seed_builtin_words_for_all_users() -> int:
 
     ⚠️ 与 `seed_builtin_rules_for_all_users` 同型：单用户失败不影响其它人。
     """
-    from backend.app.core.database import SessionLocal
     from backend.app.models import User
 
     total = 0

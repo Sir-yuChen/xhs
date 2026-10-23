@@ -39,6 +39,15 @@ from backend.app.services import account_task_service as ats
 from backend.app.services import sync_task_service as sts
 from backend.app.services import task_cancel
 
+
+
+#: 测试分层标记（2026-10-23 立，见 `docs/04_测试文档/01_测试体系与流程规范.md` §15.2）。
+#: 分类判据由 `.hermes/scripts/classify_tests.py` 机械生成，不靠人工印象：
+#:   redline     = 挂了代表「数据会被写坏 / 凭据会泄漏 / 平台会被封 / 迁移不可执行」
+#:   contract    = 端点 / 字段 / 行为与文档一致
+#:   integration = 真跑迁移 / 子进程（慢且重，收尾跑）
+pytestmark = pytest.mark.contract
+
 client = TestClient(app)
 
 # 真实登录的 www jar 一定同时带 `web_session` 与 `id_token`（DEF-051）：

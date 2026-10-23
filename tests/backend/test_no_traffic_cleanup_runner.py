@@ -43,6 +43,17 @@ from backend.app.services.account_service import CHANNEL_ARK, CHANNEL_CREATOR
 from backend.app.services.shop_binding_service import set_shop_state
 from tests.backend.cookie_fixtures import cookie_version
 
+import pytest
+
+
+
+
+#: 测试分层标记（2026-10-23 立，见 `docs/04_测试文档/01_测试体系与流程规范.md` §15.2）。
+#: 分类判据由 `.hermes/scripts/classify_tests.py` 机械生成，不靠人工印象：
+#:   redline     = 挂了代表「数据会被写坏 / 凭据会泄漏 / 平台会被封 / 迁移不可执行」
+#:   contract    = 端点 / 字段 / 行为与文档一致
+#:   integration = 真跑迁移 / 子进程（慢且重，收尾跑）
+pytestmark = pytest.mark.redline
 
 #: 夹具里第二个用户的 id（`_setup` 填；跨租户用例用）。
 _OTHER_USER_ID: dict = {"id": None}

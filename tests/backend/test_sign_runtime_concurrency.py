@@ -24,6 +24,15 @@ import pytest
 from apis.xhs_qianfan_apis import XHS_Qianfan_Apis
 
 
+
+#: 测试分层标记（2026-10-23 立，见 `docs/04_测试文档/01_测试体系与流程规范.md` §15.2）。
+#: 分类判据由 `.hermes/scripts/classify_tests.py` 机械生成，不靠人工印象：
+#:   redline     = 挂了代表「数据会被写坏 / 凭据会泄漏 / 平台会被封 / 迁移不可执行」
+#:   contract    = 端点 / 字段 / 行为与文档一致
+#:   integration = 真跑迁移 / 子进程（慢且重，收尾跑）
+pytestmark = pytest.mark.redline
+
+
 class _FakeRun:
     """`subprocess.run` 替身：读 `@file` 里的入参，按 `data.tag` 回一个签名。
 
