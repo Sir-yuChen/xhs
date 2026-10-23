@@ -68,9 +68,19 @@ def _snapshot(db: Session) -> dict:
     """种子相关的全部行（逐字段），用于「幂等 / 不覆盖」的比对。"""
 
     def rows(model, cols):
+        #: ⚠️ 排序键必须能容纳 **None**（`role_menus.user_id` 自 d4e5f6a1b2c3 起可空，
+        #: 模板行是 NULL）。直接 `sorted(tuple(...))` 会在 `None < int` 上抛
+        #: `TypeError: '<' not supported`。这里把每个值转成
+        #: `(是否为空, 类型名, 字符串形)` —— 全类型可比较，且**不改变集合语义**
+        #: （本函数只用于「前后两次快照是否逐字段相同」，顺序无关紧要）。
+        def key(row: tuple) -> tuple:
+            return tuple(
+                (v is None, type(v).__name__, str(v)) for v in row
+            )
+
         return sorted(
-            tuple(getattr(r, c) for c in cols)
-            for r in db.scalars(select(model)).all()
+            (tuple(getattr(r, c) for c in cols) for r in db.scalars(select(model)).all()),
+            key=key,
         )
 
     return {

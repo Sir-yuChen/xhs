@@ -56,9 +56,21 @@ class RoleMenu(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    #: 授权行的归属用户（归属**角色**，不是归属菜单 —— 见模块 docstring）
-    user_id: Mapped[int] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    #: 授权行的归属用户。**可空**（2026-10-24 修订）：
+    #:
+    #: | 值 | 含义 |
+    #: |---|---|
+    #: | `NULL` | **模板行** —— 「持有该角色的人默认看得见什么」。新用户注册即继承 |
+    #: | 具体 id | **用户增量** —— 该用户被单独加授/取消的差异 |
+    #:
+    #: ⚠️ 初版是 `nullable=False`（只有用户行），实测后果：模板行插不进去，
+    #: `perms_for_role("user")` 恒 0 码 ⇒ **新注册用户登录后侧栏空白**。
+    #: 「默认可见」必须能表达成一条不属于任何人的数据，否则每来一个新用户
+    #: 都要补一次播种，而那一步永远会被忘掉。
+    #:
+    #: 归属**角色**而不是菜单（见模块 docstring）。
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=True
     )
     role_id: Mapped[int] = mapped_column(
         ForeignKey("roles.id", ondelete="CASCADE"), nullable=False

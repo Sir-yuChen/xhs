@@ -394,8 +394,17 @@ def seed_role_menus(db: Session) -> list[RoleMenu]:
       加上它们的祖先 M 行。即「进得去所有页、看不到任何按钮」—— 最小权限，
       与 `core/roles.DEFAULT_ROLE` 的注释「新的权限默认不开放」一致 |
 
-    每条授权行的 `user_id` = 持有该角色的用户（`users.role == code`，且未软删）。
-    没有任何用户持有该角色时**不产生授权行**（授权属于用户，见 `role_menus` docstring）。
+    每条授权行分两层（2026-10-24 修订，设计 57 S1 实测反馈）：
+
+    | 层 | `user_id` | 语义 |
+    |---|---|---|
+    | **模板行** | `NULL` | 「持有该角色的人**默认**看得见什么」。新用户注册即继承，无需逐个播种 |
+    | **用户行** | 具体 id | 该用户的**增量**（显式加授 / 显式取消的差异） |
+
+    ⚠️ **初版只播用户行、不播模板行**（`user_id IS NULL` 为 0 行），实测后果：
+    新注册用户 `perms_for_role("user")` 返回 0 码 ⇒ 登录后**看不到任何页面**
+    （侧栏空白、直输 URL 403）。「新用户默认可见」必须落成模板行，
+    否则每来一个新用户都要补一次播种，而那一步永远会被忘掉。
     """
     roles = {r.code: r for r in db.scalars(select(Role)).all()}
     if not roles:
@@ -422,17 +431,6 @@ def seed_role_menus(db: Session) -> list[RoleMenu]:
             user_menu_ids |= ancestors_of(row)
 
     created: list[RoleMenu] = []
-    holders: dict[str, list[int]] = {}
-    if _users_have_seed_columns(db):
-        for user_id, role in db.execute(
-            select(User.id, User.role).where(User.deleted_at.is_(None))
-        ).all():
-            holders.setdefault(str(role or ""), []).append(user_id)
-    else:
-        logger.warning(
-            "seed: users 缺 role / deleted_at 列（手写最小夹具，如 test_initial_data 的 "
-            "users 夹具）⇒ 本次不播授权行"
-        )
 
     #: ⚠️ **先把前几轮（角色 / admin / 菜单 / 字典）的待插入行 flush 下去**。
     #: 不 flush 的话，下面第一轮里的 `db.execute(select(RoleMenu...))` 会触发
@@ -443,28 +441,64 @@ def seed_role_menus(db: Session) -> list[RoleMenu]:
 
     #: 本次已排队的授权行（用户, 角色, 菜单）—— 内存里也判重，不只依赖查库：
     #: `db.add` 之后同一事务内 SELECT 看不到未 flush 的行，只查库会把同一行加两遍。
-    queued: set[tuple[int, int, int]] = set()
+    queued: set[tuple[int | None, int, int]] = set()
+
+    def ensure(owner: int | None, role_id: int, menu_ids: set[int]) -> None:
+        """给 `owner`（`None` = 模板行）补齐 `menu_ids`，只补缺不覆盖。"""
+        existing = {
+            mid
+            for (mid,) in db.execute(
+                select(RoleMenu.menu_id).where(
+                    RoleMenu.role_id == role_id,
+                    RoleMenu.user_id.is_(None) if owner is None else RoleMenu.user_id == owner,
+                )
+            ).all()
+        }
+        for menu_id in sorted(menu_ids - existing, key=lambda v: (v is None, v or 0)):
+            key = (owner, role_id, menu_id)
+            if key in queued:
+                continue
+            queued.add(key)
+            db.add(RoleMenu(user_id=owner, role_id=role_id, menu_id=menu_id))
+            created.append(RoleMenu(user_id=owner, role_id=role_id, menu_id=menu_id))
+
+    # ① **模板行**（无论有没有用户持有，都要播 —— 这是「新用户默认可见」的来源）
+    #    ⚠️ 只有 `role_menus.user_id` 可空时才播：迁移 `c3d4e5f6a1b2`（播种）跑在
+    #    `d4e5f6a1b2c3`（改可空）**之前**，那一刻列还是 NOT NULL ⇒ 硬插模板行会
+    #    让整个 upgrade 炸掉。所以这里按**结构判据**退化：不可空就只播用户行
+    #    （旧行为），等 `d4e5f6a1b2c3` 跑完 + 下次启动播种时再补模板行。
+    template_ok = _role_menus_user_id_nullable(db)
+    if template_ok:
+        for code, menu_ids in (("admin", admin_menu_ids), ("user", user_menu_ids)):
+            if code in roles:
+                ensure(None, roles[code].id, menu_ids)
+    else:
+        logger.info(
+            "seed: role_menus.user_id 仍是 NOT NULL（迁移 d4e5f6a1b2c3 之前）"
+            "⇒ 本次不播模板行，只播用户行"
+        )
+
+    # ② 现有用户的**增量**：模板行已给了默认集合，这里只补模板覆盖不到的部分。
+    #    当前两个内置角色的模板已覆盖全部应授菜单，所以这一步通常 0 条；
+    #    留着是为了「某用户被单独加授过菜单」时能把缺的补上（幂等）。
+    holders: dict[str, list[int]] = {}
+    if _users_have_seed_columns(db):
+        for user_id, role in db.execute(
+            select(User.id, User.role).where(User.deleted_at.is_(None))
+        ).all():
+            holders.setdefault(str(role or ""), []).append(user_id)
+    else:
+        logger.warning(
+            "seed: users 缺 role / deleted_at 列（手写最小夹具，如 test_initial_data 的 "
+            "users 夹具）⇒ 本次不播用户级授权行（模板行照播）"
+        )
 
     for code, menu_ids in (("admin", admin_menu_ids), ("user", user_menu_ids)):
         if code not in roles:
             continue
-        role_id = roles[code].id
         for user_id in holders.get(code, []):
-            existing = {
-                mid
-                for (mid,) in db.execute(
-                    select(RoleMenu.menu_id).where(
-                        RoleMenu.user_id == user_id, RoleMenu.role_id == role_id
-                    )
-                ).all()
-            }
-            for menu_id in sorted(menu_ids - existing):
-                key = (user_id, role_id, menu_id)
-                if key in queued:
-                    continue
-                queued.add(key)
-                db.add(RoleMenu(user_id=user_id, role_id=role_id, menu_id=menu_id))
-                created.append(RoleMenu(user_id=user_id, role_id=role_id, menu_id=menu_id))
+            ensure(user_id, roles[code].id, menu_ids)
+
     return created
 
 
@@ -487,6 +521,25 @@ def _users_have_seed_columns(db: Session) -> bool:
         return False
     cols = {c["name"] for c in _inspect(bind).get_columns("users")}
     return {"role", "deleted_at"} <= cols
+
+
+def _role_menus_user_id_nullable(db: Session) -> bool:
+    """`role_menus.user_id` 是否允许 NULL（= 能否承载「模板行」）。
+
+    ⚠️ **结构判据**：迁移 `c3d4e5f6a1b2` 播种时表刚由 `a1b2c3d4e5f9` 建出，
+    那一刻 `user_id` 仍 NOT NULL；`d4e5f6a1b2c3` 才把它改成可空。
+    种子按此判据决定「播不播模板行」，而不是无条件插 —— 否则 upgrade 会炸。
+    """
+    from sqlalchemy import inspect as _inspect
+
+    bind = db.get_bind()
+    inspector = _inspect(bind)
+    if not inspector.has_table("role_menus"):
+        return False
+    for column in inspector.get_columns("role_menus"):
+        if column["name"] == "user_id":
+            return bool(column.get("nullable"))
+    return False
 
 
 def seed_admin_user(db: Session) -> User | None:
