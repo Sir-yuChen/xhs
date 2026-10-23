@@ -31,6 +31,7 @@ import secrets
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.request
@@ -272,6 +273,21 @@ def _bindable(port: int) -> bool:
             return False
 
 
+def _pick_free_port() -> int | None:
+    """让**操作系统**分配一个当前空闲的端口（`bind(port=0)`）。
+
+    ⚠️ 取到后立刻关闭 socket 再交给 uvicorn —— 中间仍有一个极短的竞态窗口，
+    但由内核分配的端口被抢的概率远低于「遍历固定区间」。真正的兜底是
+    `start_server` 里的重试（见 `_port_bind_conflict`）。
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind(("127.0.0.1", 0))
+            return int(sock.getsockname()[1])
+        except OSError:
+            return None
+
+
 def _port_bind_conflict(port: int) -> bool:
     """端口上现在是否**确有服务在监听**（用来区分「被抢占」与「启动报错」）。
 
@@ -486,21 +502,69 @@ def _app_paths_from_registry(exe_name: str) -> Path | None:
 
 
 def _app_profile_dir() -> Path:
-    """独立窗口专属 profile：``%LOCALAPPDATA%\\SpiderXHS\\app-profile``。"""
+    """窗口宿主的 profile 目录（**必须可写**，否则内核起来就崩）。
+
+    ⚠️ **不再假定 `%LOCALAPPDATA%` 存在**（2026-10-23，用户口径「不依赖电脑本地
+    环境」）：原实现只要环境变量非空就直接用它，若该目录被组策略重定向、被安全
+    软件锁住、或干脆不可写，Chromium 会在启动瞬间失败，而**用户看到的只是
+    「窗口没出来」**（函数返回的路径没人校验过）。
+
+    现在的顺序：`%LOCALAPPDATA%` → 安装目录 → 系统临时目录，**逐个实测可写**，
+    取第一个真的能写进去的；全都不行才退回安装目录（让上层报错可诊断）。
+    """
+    candidates: list[Path] = []
     base = os.environ.get("LOCALAPPDATA")
     if base:
-        return Path(base) / APP_NAME / "app-profile"
-    return app_root() / "runtime" / "app-profile"
+        candidates.append(Path(base) / APP_NAME / "app-profile")
+    candidates.append(app_root() / "runtime" / "app-profile")
+    candidates.append(Path(tempfile.gettempdir()) / APP_NAME / "app-profile")
+
+    for path in candidates:
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            probe = path / ".write_probe"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink(missing_ok=True)
+            return path
+        except OSError as exc:
+            log.warning("profile 目录不可写（%s）：%s，改用下一个候选", path, exc)
+    #: 全不可写：仍返回首个候选，让 Chromium 的报错进入日志（而不是这里静默返回空）
+    return candidates[0]
 
 
 def _window_host_exe() -> Path | None:
     """内置窗口宿主的可执行文件路径（**零环境依赖**的独立窗口）。
 
-    安装时下载到 ``<安装目录>/runtime/window-host/``（打包时不进安装包，
-    见 `packaging/INSTALL_DEPS.md`）。找不到就返回 None，由调用方降级到浏览器。
+    下载落点与查找顺序（候选逐个试，取第一个真的存在且够大的）：
+      ① ``<安装目录>/runtime/window-host/`` —— 常规位置（安装时下载到这里）；
+      ② ``<安装目录>/deps/window-host/`` —— 依赖服务统一的下载根（两种形态并存）；
+      ③ ``%LOCALAPPDATA%/SpiderXHS/window-host/`` —— 安装目录不可写时的回退。
+
+    ⚠️ **必须逐个实测**「文件存在 **且** 体积像样」：解压中断会留下一个能启动但
+    没有 app 代码的 Electron，它起来闪一下就退 —— 真机上正是这样表现为「点了没反应」。
+    找不到才返回 None，由调用方降级到浏览器。
     """
-    exe = app_root() / "runtime" / "window-host" / WINDOW_HOST_EXE
-    return exe if exe.is_file() else None
+    #: ⚠️ **唯一落点是 `deps/`**（2026-10-23 用户口径「下载到用户选择的安装目录」）：
+    #: `env_bootstrap_service.deps_root()` = `<安装目录>/deps/`，四个可下载依赖
+    #: （node / ffmpeg / OCR / 窗口内核）全在那里 —— 用户能看见、能删，
+    #: 升级安装覆盖 `_internal` 时也不会丢。launcher 必须问同一个位置，
+    #: 否则会出现「下载成功但找不到」（本条注释即为此而写）。
+    candidates = [
+        app_root() / "deps" / "window-host" / WINDOW_HOST_EXE,
+        #: 旧版曾用 runtime/ 作落点，保留一处兼容（只读，不写入）
+        app_root() / "runtime" / "window-host" / WINDOW_HOST_EXE,
+    ]
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        candidates.append(Path(local) / APP_NAME / "window-host" / WINDOW_HOST_EXE)
+
+    for exe in candidates:
+        try:
+            if exe.is_file() and exe.stat().st_size > 20 * 1024 * 1024:
+                return exe
+        except OSError:
+            continue
+    return None
 
 
 def open_app_window(url: str) -> bool:
@@ -594,13 +658,35 @@ def open_app_window(url: str) -> bool:
 
 
 def _open_default_browser(url: str) -> bool:
-    """用**系统默认浏览器**打开（独立窗口不可用时的兜底；托盘菜单也调它）。"""
+    """**最后兜底**：把 URL 交给系统 shell（等价于用户在「运行」里粘贴它）。
+
+    ⚠️ 与 `webbrowser.open()` 的区别（2026-10-23，用户口径「不依赖电脑本地环境」）：
+    `webbrowser` 模块会按自己的探测顺序挑选浏览器（读 `BROWSER` 环境变量、
+    查注册表、甚至尝试 Lynx 之类的文本浏览器），**选择结果随机器而异** ——
+    这正是最早「在 360 里以标签页打开」的来源之一。
+    `ShellExecuteW("open")` 则是 Windows 的官方协议：交给用户的默认处理程序，
+    行为与「双击链接」完全一致。两者都不改用户的默认设置，但后者的语义是
+    「系统的标准打开方式」，而不是 Python 自己再猜一遍。
+    """
+    if sys.platform == "win32":
+        try:
+            import ctypes  # noqa: PLC0415
+
+            result = ctypes.windll.shell32.ShellExecuteW(None, "open", url, None, None, 1)
+            #: ShellExecuteW 返回 >32 才算成功（微软文档口径）
+            if int(result) > 32:
+                log.info("已用系统默认处理程序打开 %s", url)
+                return True
+            log.warning("ShellExecuteW 返回 %s，改用 webbrowser 兜底", result)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ShellExecuteW 失败（%s），改用 webbrowser 兜底", exc)
+
     try:
         ok = bool(webbrowser.open(url))
         if ok:
-            log.info("已用系统默认浏览器打开 %s", url)
+            log.info("已用 webbrowser 打开 %s", url)
         else:
-            log.warning("系统默认浏览器打开失败，请手动访问 %s", url)
+            log.warning("打开浏览器失败，请手动访问 %s", url)
         return ok
     except Exception as exc:
         log.warning("打开浏览器失败（%s），请手动访问 %s", exc, url)
@@ -833,19 +919,40 @@ def main(argv=None) -> int:
             open_app_window(f"http://127.0.0.1:{target_port}")
         return 0
 
+    #: ⚠️ **端口改为「让系统分配」**（2026-10-23，用户口径「不依赖电脑本地环境」）：
+    #: 原来是从 8000 起、最多回退到 8010 的**固定区间** —— 这就是环境依赖：
+    #: 用户电脑上这 11 个端口若全被别的程序占着（开发机常见：本地起了别的服务），
+    #: 程序直接 `return 1` 退出，而用户只看到「点了没反应」。
+    #: 真机日志实证过一次：`[Errno 10048] bind 8000 失败`。
+    #:
+    #: 现在：**先试用户指定端口（默认 8000，保持「固定地址」的便利），失败就让
+    #: 操作系统分配一个确定空闲的端口**（`bind(port=0)` 由内核挑）。这样
+    #:   * 任何电脑上都能起来（不赌端口是否空闲）；
+    #:   * 前端用相对路径 `/api`，端口变化对界面透明；
+    #:   * 老用户的书签/固定端口习惯在「8000 可用」时依然成立。
     started = None
-    for offset in range(MAX_PORT_OFFSET + 1):
-        port = args.port + offset
-        if not _bindable(port):
+    attempts: list[int] = [args.port]
+    for offset in range(1, MAX_PORT_OFFSET + 1):
+        attempts.append(args.port + offset)
+    #: `0` 放最后 = 「让系统挑」，它几乎不可能失败。
+    attempts.append(0)
+
+    for candidate in attempts:
+        port = candidate or _pick_free_port()
+        if port is None:
+            continue
+        if candidate and not _bindable(port):
             log.info("端口 %d 不可绑定，跳过", port)
             continue
         started = start_server(root, port, console)
         if started is not None:
+            if candidate == 0:
+                log.info("固定端口均不可用 ⇒ 已由系统分配端口 %d", port)
             break
         log.warning("端口 %d 启动失败，尝试下一个", port)
 
     if started is None:
-        log.error("所有候选端口均不可用（%d-%d）", args.port, args.port + MAX_PORT_OFFSET)
+        log.error("无可用端口（已尝试固定区间 %d-%d 与系统分配）", args.port, args.port + MAX_PORT_OFFSET)
         return 1
 
     server, thread = started

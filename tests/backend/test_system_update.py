@@ -500,7 +500,23 @@ def test_update_check_requires_auth(api_client):
     assert resp.status_code == 401
 
 
-def test_update_check_ok_when_authed(api_client):
+def test_update_check_ok_when_authed(api_client, monkeypatch):
+    """认证后查更新**必须有结果结构**。
+
+    ⚠️ **必须打桩**（2026-10-23 禁网守卫抓到）：`check_for_update()` 会去请求
+    `api.github.com`。原来这条用例**真发网络请求**，于是
+      * 在能上网的机器上要等十几秒（实测 15s 超时），
+      * 在墙内/断网的机器上得另一个结论 —— **测试结果取决于跑测试的机器**，
+        这本身就是缺陷（而不是「网络不稳」）。
+    现在把服务层打桩，只验证端点契约（鉴权通过 + 响应含 `has_update`）。
+    """
+    from backend.app.services import system_update_service
+
+    monkeypatch.setattr(
+        system_update_service,
+        "check_for_update",
+        lambda: {"has_update": False, "latest": "", "notes": "", "download_url": ""},
+    )
     headers = _auth(api_client, "updater-check")
     resp = api_client.get("/api/system/update/check", headers=headers)
     assert resp.status_code == 200

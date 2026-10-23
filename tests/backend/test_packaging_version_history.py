@@ -278,8 +278,14 @@ class PipingEndToEnd(unittest.TestCase):
             v = run_py(VERIFY_PY, str(SRC_VERSION_JSON), str(dst))
             self.assertEqual(v.returncode, 0, v.stderr)
             out = json.loads(dst.read_text(encoding="utf-8"))
-            self.assertEqual(out["versions"][0]["built_at"], "2026-10-15T19:16:38+08:00")
-            self.assertTrue(out["versions"][0]["summary"])
+            #: ⚠️ **按版本号查，不假定它在 `versions[0]`**（2026-10-23 订正）。
+            #: 原断言写死 `versions[0]`，隐含「1.0.3 恰好在首位」这个**数据前提** ——
+            #: 而 merge 脚本命中已有版本时只更新字段、**不移动位置**（那是它的正确
+            #: 行为：乱序会打乱历史）。随着版本不断增加，1.0.3 早已排到第 5 位，
+            #: 于是这条用例变成「测试与数据耦合」的假红。
+            target = next(v for v in out["versions"] if v["version"] == "1.0.3")
+            self.assertEqual(target["built_at"], "2026-10-15T19:16:38+08:00")
+            self.assertTrue(target["summary"])
 
 
 class SmokeTestGuardStatic(unittest.TestCase):
