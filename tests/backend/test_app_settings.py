@@ -439,6 +439,13 @@ def test_live_keys_are_real_read_points():
             "backend.app.services.media_plan",
             "resolve_note_image_limit",
         ),
+        #: 开放注册开关（v1.1.0 / 设计 46 P11，S1）。
+        #: 读点在 `api/auth.py::register()` 的函数体里（`live_bool(db, None, "register.enabled", ...)`）
+        #: —— 未登录时读的是 `BUILTIN_DEFAULTS`，即「全局开关」的既有表达方式。
+        "register.enabled": (
+            "backend.app.api.auth",
+            "register",
+        ),
         }
     assert set(read_points) == set(settings_service.LIVE_KEYS), (
         "LIVE_KEYS 与测试里的读点映射必须一一对应：新增读点要两边一起加"

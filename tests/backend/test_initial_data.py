@@ -278,7 +278,14 @@ def test_settings_baseline_is_one_number_everywhere():
     settings_obj = get_settings()
     for key, value in baseline.items():
         assert settings_service.BUILTIN_DEFAULTS[key] == value, f"{key}：内置兜底与随包种子不同值"
-        assert getattr(settings_obj, key) == value, f"{key}：config/default.yaml 与随包种子不同值"
+        #: 配置键带点（`register.enabled`）不能直接 `getattr` —— 那是 YAML 路径名，
+        #: 对应的 `Settings` 字段是下划线形态（`register_enabled`）。转换在这里做一次，
+        #: 而不是给每个带点的键写特例（`system_settings` 里将来还会有别的带点键）。
+        attr = key.replace(".", "_")
+        assert hasattr(settings_obj, attr), (
+            f"{key}：`Settings` 没有对应字段 `{attr}` —— 随包种子里的键没有配置基线"
+        )
+        assert getattr(settings_obj, attr) == value, f"{key}：config/default.yaml 与随包种子不同值"
 
 
 def test_initial_data_files_ship_without_bom_and_loader_tolerates_one(tmp_path, monkeypatch):

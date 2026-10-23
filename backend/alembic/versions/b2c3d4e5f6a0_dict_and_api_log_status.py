@@ -52,6 +52,9 @@ MIN_BACKFILL_RATIO = 0.99
 
 def _columns(table: str) -> set[str]:
     inspector = sa.inspect(op.get_bind())
+    #: 表不存在 ⇒ 空集（同迁移 1 的说明：结构存在性判据，不是数据判据）
+    if not inspector.has_table(table):
+        return set()
     return {column["name"] for column in inspector.get_columns(table)}
 
 
@@ -68,6 +71,19 @@ def _enable_foreign_keys() -> None:
 
 def _create_dict_tables() -> None:
     tables = set(sa.inspect(op.get_bind()).get_table_names())
+    #: ⚠️ **残留清理**（与迁移 1 的头部同型）：若迁移 2 已回滚过（`dict_items` 被删、
+    #: `dict_types` 因 FK 未删成）而迁移 1 后来又回滚并重建，则可能留下一个**没有外键**
+    #: 的旧 `dict_items`。此时 `CREATE TABLE dict_items` 会被跳过、`type_id` 外键根本
+    #: 不存在 ⇒ 字典表失去引用完整性且**没有任何报错**（这正是 SQLite 最常见的静默退化）。
+    #: 判据：`dict_items` 存在但**没有指向 `dict_types` 的外键** ⇒ 视为残留，删掉重建。
+    if "dict_items" in tables:
+        fks = sa.inspect(op.get_bind()).get_foreign_keys("dict_items")
+        has_type_fk = any(
+            str(fk.get("referred_table")) == "dict_types" for fk in fks
+        )
+        if not has_type_fk:
+            op.drop_table("dict_items")
+            tables.discard("dict_items")
     if "dict_types" not in tables:
         op.create_table(
             "dict_types",
@@ -142,6 +158,11 @@ def _backfill_status_codes() -> None:
     """回填 + 判回填率。⚠️ 只写 `status_code IS NULL` 的行（幂等）。"""
     bind = op.get_bind()
     meta = sa.MetaData()
+    #: ⚠️ 表不存在 ⇒ 直接返回（手写最小夹具只建它关心的表；真库上恒为存在）。
+    #: 与「表在但没数据」区分开：后者走下面的 `total == 0` 分支并**记日志**。
+    if not sa.inspect(bind).has_table("api_logs"):
+        logger.info("api_logs 表不存在（最小夹具），跳过 status_code 回填")
+        return
     api_logs = sa.Table("api_logs", meta, autoload_with=bind)
 
     total = bind.execute(
@@ -218,14 +239,20 @@ def upgrade() -> None:
     _create_dict_tables()
 
     # ---------------- api_logs.status_code ----------------
-    if "status_code" not in _columns("api_logs"):
-        op.add_column("api_logs", sa.Column("status_code", sa.Integer(), nullable=True))
-    if "ix_api_logs_status_code" not in _indexes("api_logs"):
-        op.create_index("ix_api_logs_status_code", "api_logs", ["status_code"], unique=False)
-    _backfill_status_codes()
+    #: ⚠️ 表不存在时**不改列**（`op.add_column` 会抛 `no such table`）。
+    #: 手写最小夹具只建它关心的表 ⇒ 这里按结构存在性跳过；真库上恒为存在，
+    #: 因此不会「静默不干活」（DEF-048 形态是**有表却跳过数据**）。
+    if sa.inspect(op.get_bind()).has_table("api_logs"):
+        if "status_code" not in _columns("api_logs"):
+            op.add_column("api_logs", sa.Column("status_code", sa.Integer(), nullable=True))
+        if "ix_api_logs_status_code" not in _indexes("api_logs"):
+            op.create_index("ix_api_logs_status_code", "api_logs", ["status_code"], unique=False)
+        _backfill_status_codes()
 
     # ---------------- notifications.link ----------------
-    if "link" not in _columns("notifications"):
+    if sa.inspect(op.get_bind()).has_table("notifications") and "link" not in _columns(
+        "notifications"
+    ):
         op.add_column("notifications", sa.Column("link", sa.String(length=255), nullable=True))
     #: ⚠️ `link` **不回填**：存量的 4 条通知里 3 条 `source_id` 为 NULL，历史上
     #: 本来就没有可靠跳转目标 —— 补一个按 `source_type` 猜的路径是造假。

@@ -191,6 +191,57 @@ def seed_menus(db: Session) -> list[Menu]:
     created: list[Menu] = []
     seq_to_real: dict[int, int] = {}
 
+    #: **用户删过 ⇒ 不复活**（设计 49「删了又回来」的落地判据）。
+    #:
+    #: 种子只负责「建出初始的树」，它不能区分「这一行还没建过」和「用户删掉了它」——
+    #: 而「下次播种把删掉的菜单加回来」正是设计要避免的那类行为（同
+    #: `forbidden_words` 的「删了不复活」纪律）。
+    #:
+    #: ⚠️ 判据**必须有「树已经种过」这个前置**：全新库上「父 M 行下面一条 C 行都没有」
+    #: 同样成立 —— 若只看这一点，空库播种会把**所有 C 行**都跳过（实测：0 条 C 行，
+    #: 菜单树只剩目录壳）。所以前置 = 已存在**任何** C 行（树种过）。
+    #:
+    #: 判据（三者同时成立才算「用户清空了这个目录」）：
+    #: ① 库里已有若干 C 行（树种过，不是空库）；
+    #: ② 该父 M 行还在；
+    #: ③ 种子给该父 M 行安排的 C 行里，**一条都不在库里**。
+    #:
+    #: 为什么不逐行判断：单条 C 行被删、同目录其它 C 行还在，是合法状态（用户只是
+    #: 不要那一页），但种子无从区分「删了」与「从没建过」；而删一条 C 行之前必须先
+    #: 撤它的授权（409 `MENU_IN_USE`），代价比补一条菜单高得多 ⇒ 那种情况**允许补回**。
+    #: 整目录清空才是强信号。
+    seeded_c_by_parent: dict[int, set[str]] = {}
+    for item in rows:
+        if str(item.get("menu_type") or "") == "C":
+            seeded_c_by_parent.setdefault(int(item.get("parent_seq") or 0), set()).add(
+                str(item.get("path") or "")
+            )
+    existing_c_by_parent: dict[int, set[str]] = {}
+    for row in db.scalars(select(Menu)).all():
+        if row.menu_type == "C":
+            existing_c_by_parent.setdefault(row.parent_id, set()).add(row.path)
+    tree_already_seeded = bool(existing_c_by_parent)
+
+    def skip_parent(seq: int) -> bool:
+        """该 M 行下**一条种子 C 行都没了**（且树已种过）⇒ 用户清空过。"""
+        if not seq or not tree_already_seeded:
+            return False
+        real = seq_to_real.get(seq)
+        if real is None:
+            return False
+        seeded = seeded_c_by_parent.get(seq) or set()
+        if not seeded:
+            return False
+        existing = existing_c_by_parent.get(real) or set()
+        #: 注意用 `&`：用户可能自建了别的 C 行挂在这里，那不算「清空」
+        return not (seeded & existing)
+
+    #: 被跳过的种子行 _seq 集合 —— 它们的**子行也要跟着跳过**。
+    #: ⚠️ 少了这一层，被跳过的 C 行下面的 F 行（按钮）会以 `parent_real` = 父 id 落地，
+    #: 变成挂在 M 行（目录）下的孤儿按钮（实测：清空「内容线」后重播，38 条按钮
+    #: 挂到了目录节点上）。「父被跳过 ⇒ 整棵子树都不建」必须顺着链传下去。
+    skipped_seqs: set[int] = set()
+
     # 2) **显式分轮**（父 → 子 → 孙）：不依赖种子里的行序。
     #    依赖顺序是隐式契约 —— 改一次生成脚本的排序就会静默建错树。
     remaining = list(rows)
@@ -207,6 +258,21 @@ def seed_menus(db: Session) -> list[Menu]:
             perms = str(item.get("perms") or "")
             path = str(item.get("path") or "")
             name = str(item.get("name") or "")
+
+            #: 父被跳过 ⇒ 整棵子树都不建（自己也不是例外），由父行「登记成不存在」表达
+            if parent_seq and parent_seq in skipped_seqs:
+                skipped_seqs.add(int(item["_seq"]))
+                progressed = True
+                continue
+
+            #: 父目录被用户清空过 ⇒ 其下全部 C/F 不再重建。
+            #: ⚠️ 这里也要登记 `seq_to_real`：否则子行会**永远**进 `deferred`
+            #: （父链「断开」的假象，实测报 `有环或父链断开`）。
+            if str(item.get("menu_type") or "") in ("C", "F") and skip_parent(parent_seq):
+                seq_to_real[int(item["_seq"])] = parent_real
+                skipped_seqs.add(int(item["_seq"]))
+                progressed = True
+                continue
 
             candidate: Menu | None = None
             if perms and perms in by_perms:
@@ -356,11 +422,17 @@ def seed_role_menus(db: Session) -> list[RoleMenu]:
             user_menu_ids |= ancestors_of(row)
 
     created: list[RoleMenu] = []
-    holders: dict[str, list[int]] = {code: [] for code in roles}
-    for user_id, role in db.execute(
-        select(User.id, User.role).where(User.deleted_at.is_(None))
-    ).all():
-        holders.setdefault(str(role or ""), []).append(user_id)
+    holders: dict[str, list[int]] = {}
+    if _users_have_seed_columns(db):
+        for user_id, role in db.execute(
+            select(User.id, User.role).where(User.deleted_at.is_(None))
+        ).all():
+            holders.setdefault(str(role or ""), []).append(user_id)
+    else:
+        logger.warning(
+            "seed: users 缺 role / deleted_at 列（手写最小夹具，如 test_initial_data 的 "
+            "users 夹具）⇒ 本次不播授权行"
+        )
 
     #: ⚠️ **先把前几轮（角色 / admin / 菜单 / 字典）的待插入行 flush 下去**。
     #: 不 flush 的话，下面第一轮里的 `db.execute(select(RoleMenu...))` 会触发
@@ -399,6 +471,24 @@ def seed_role_menus(db: Session) -> list[RoleMenu]:
 # --------------------------------------------------------------------------- #
 # 五、admin 种子
 # --------------------------------------------------------------------------- #
+def _users_have_seed_columns(db: Session) -> bool:
+    """`users` 是否带齐种子判据需要的列（`role` / `deleted_at`）。
+
+    ⚠️ **这是结构判据，不是数据判据**：真实库上这两列永远在（`deleted_at` 由迁移
+    `a1b2c3d4e5f9` 加，`role` 是一期就有的），只有**手写最小夹具**会缺
+    （`test_initial_data` 的 `users` 只有 id/username/password_hash/created_at）。
+    缺列时种子退化为「不播 admin / 授权」，并在日志里说明 —— 而不是让整个迁移报
+    `no such column`（那会让一个与夹具无关的迁移看起来像写坏了）。
+    """
+    from sqlalchemy import inspect as _inspect
+
+    bind = db.get_bind()
+    if not _inspect(bind).has_table("users"):
+        return False
+    cols = {c["name"] for c in _inspect(bind).get_columns("users")}
+    return {"role", "deleted_at"} <= cols
+
+
 def seed_admin_user(db: Session) -> User | None:
     """当系统里**没有任何可用 admin** 时插入出厂管理员。
 
@@ -407,6 +497,12 @@ def seed_admin_user(db: Session) -> User | None:
     状态（管理员自己停用自己），自动补一个新 admin 会让「谁把这个号停了」
     永远查不清。种子只在**真正没有 admin 行**时兜底启动能力。
     """
+    if not _users_have_seed_columns(db):
+        #: 手写最小夹具（`test_initial_data` 的 `users` 只有 id/username/…）：
+        #: 判据列不存在 ⇒ 不播（真库上这两列都在，不会走到这里）。
+        logger.warning("seed: users 缺 role / deleted_at 列 ⇒ 跳过出厂 admin 种子")
+        return None
+
     from backend.app.core.security import hash_password
 
     count = db.scalar(

@@ -61,6 +61,13 @@ def _load_yaml_config() -> Dict[str, Any]:
         "database.postgres_database": "database_postgres_database",
         "security.secret_key": "secret_key",
         "security.fernet_key": "fernet_key",
+        #: 开放注册基线（v1.1.0 / 设计 46 §388）。第三个真值点：
+        #: `config/default.yaml` = 随包种子 `system_settings.json` =
+        #: `settings_service.BUILTIN_DEFAULTS`，三处同值（守卫
+        #: `test_settings_baseline_is_one_number_everywhere`）。
+        #: **yaml 平铺后的键名带点**（`feature.register.enabled`）—— 这不是 bug：
+        #: `_flatten` 只按已登记的路径展开，登记的键就是「用点连起来的原文」。
+        "feature.register.enabled": "register_enabled",
         "scheduler.enabled": "scheduler_enabled",
         "scheduler.interval_seconds": "scheduler_interval_seconds",
         "qianfan.health_check_enabled": "qianfan_health_check_enabled",
@@ -169,6 +176,12 @@ class Settings(BaseSettings):
     # Security
     secret_key: str = DEFAULT_SECRET_KEY
     fernet_key: str = ""
+
+    #: 开放注册（v1.1.0 / 设计 46 §388 + 设计 50 §261）。**默认 false**。
+    #: 三处同值：`config/default.yaml` / 随包种子 `system_settings.json` /
+    #: `settings_service.BUILTIN_DEFAULTS`。运行期真值走设置页（`register.enabled`），
+    #: 这里的值只是「没有配置行时的最后兜底」。
+    register_enabled: bool = False
 
     # Server
     server_host: str = "0.0.0.0"

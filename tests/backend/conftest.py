@@ -660,6 +660,21 @@ def api_client(db_engine: Engine, monkeypatch):
         _base().metadata.create_all(bind=db_engine)
 
     monkeypatch.setattr("backend.app.main.init_db", _init_db_on_test_engine, raising=False)
+    #: **注册开关按夹具打开**（v1.1.0 S1）：产品基线是 `register.enabled=false`
+    #: （防「出厂弱口令 + 任何人可注册」），但全仓几十处 `POST /auth/register`
+    #: 是「造一个用户」的夹具手段、不是被测量对象 —— 关着它们会让所有用例在建用户
+    #: 那步 403（实测：不打开时全量红 400+ 条，错误全是 `assert 403 == 200`）。
+    #:
+    #: ⚠️ 为什么在**夹具**里而不是 `tests/conftest.py` 做成会话级 autouse：
+    #: 那会让「读产品基线字面值」的守卫（`test_register_switch_baseline_is_off`
+    #: / `test_settings_baseline_is_one_number_everywhere`）读到打过补丁的值，
+    #: 把「基线是否关着」变成永真断言。夹具级只在**用了 `api_client`** 的用例里生效，
+    #: 而那些用例本来就是在测端点行为（不是测基线）。
+    #: 用 `monkeypatch.setitem` ⇒ 用例结束自动复原。
+    from backend.app.services import settings_service as _settings_service  # noqa: PLC0415
+
+    monkeypatch.setitem(_settings_service.BUILTIN_DEFAULTS, "register.enabled", True)
+    _settings_service.invalidate(key="register.enabled")
     # DEF-094：素材端点（新建文件夹 / 重扫 / 上传 / 缩略图）会落盘 —— 一律搬进 tmp。
     sandbox_material_storage(monkeypatch, Path(tempfile.mkdtemp(prefix="hermes-material-api-")))
 

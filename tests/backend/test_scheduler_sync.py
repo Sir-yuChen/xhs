@@ -259,6 +259,13 @@ def test_scheduler_is_not_started_when_master_switch_is_off(monkeypatch):
         main_module, "seed_gateway_providers_for_all_users", lambda *a, **k: 0
     )
     monkeypatch.setattr(main_module, "recover_account_tasks", lambda *a, **k: 0)
+    #: 违规词种子（2026-10-21 加进 lifespan）：**自开 Session 逐用户写库** ⇒ 同一条理由。
+    #: ⚠️ 它此前一直漏桩（守卫在 2026-10-24 S1 轮才报出来）—— 漏桩的表现是**测试全绿**
+    #: 而副作用落在真实库上，正是 `test_lifespan_steps_are_all_stubbed_by_this_module`
+    #: 存在的理由。
+    monkeypatch.setattr(
+        main_module, "seed_builtin_words_for_all_users", lambda *a, **k: 0
+    )
     #: v1.1.0 S1 系统管理域种子（角色 / 菜单 / 字典 / 出厂 admin / 授权）：
     #: **自开 Session 写库** ⇒ 与上面几条同一条理由，不桩就会拿真实运行库播种。
     monkeypatch.setattr(main_module, "seed_system_domain", lambda *a, **k: {})

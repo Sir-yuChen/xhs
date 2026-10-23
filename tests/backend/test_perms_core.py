@@ -22,6 +22,10 @@ import pytest
 from backend.app.core import db_dialect, paths, perms
 from backend.app.core import perms_registry as reg
 
+#: 分层标记（测试规范 §15.5 准入清单）：本文件是纯函数 + 源码文本守卫，
+#: 不建库、不打端点 ⇒ redline（最快一层）。
+pytestmark = pytest.mark.redline
+
 APP_DIR = Path(__file__).resolve().parents[2] / "backend" / "app"
 
 

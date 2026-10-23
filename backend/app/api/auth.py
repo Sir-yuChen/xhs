@@ -53,6 +53,19 @@ def register(
     request: Request,
     db: Session = Depends(get_db),
 ):
+    # 注册开关（v1.1.0 / 设计 46 P11 + 设计 50 §261，S1）：基线默认 **false**。
+    # 出厂管理员是 `admin/admin123` + `must_change_password=True`，若同时开放注册，
+    # 「弱口令 + 任何人可注册」两条就同时成立。
+    # ⚠️ 读的是**当前用户**的配置行；未登录时 `user_id=None` ⇒ 落 `BUILTIN_DEFAULTS`
+    #    （= false）。这是「全局开关按每用户一份配置行表达」的既有口径
+    #    （`system_settings` 不加 `scope` 列，见设计 48 §M8）。
+    from backend.app.services.settings_service import live_bool
+
+    if not live_bool(db, None, "register.enabled", default=False):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="REGISTER_DISABLED"
+        )
+
     username = credentials.username.strip()
     existing_user = db.scalar(select(User).where(User.username == username))
     if existing_user is not None:

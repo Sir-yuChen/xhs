@@ -70,11 +70,36 @@ _USER_COLUMNS: tuple[tuple[str, sa.Column], ...] = (
 
 def _columns(table: str) -> set[str]:
     inspector = sa.inspect(op.get_bind())
+    #: ⚠️ 表不存在时 `get_columns` 抛 `NoSuchTableError`（不是返回空集）。
+    #: 本迁移的清理段会探测 `api_logs` / `notifications` 的列，而测试里的**手写最小夹具**
+    #: 只建了它自己关心的几张表（`test_initial_data` 的夹具只有 `users` + `auto_tasks`）。
+    #: ⇒ 表不存在按「没有这些列」处理：那是**结构存在性**判据，不是「跳过数据」判据
+    #: （DEF-048 形态是后者），在真库上恒为「表在」，不会静默不干活。
+    if not inspector.has_table(table):
+        return set()
     return {column["name"] for column in inspector.get_columns(table)}
+
+
+def sqlite_users_rebuild_is_safe() -> bool:
+    """`users` 能不能走 `batch_alter_table` 重建。
+
+    ⚠️ batch 重建 = 「按**反射出的旧表**形状建新表 + 拷数据 → 换名」。**反射不到的列会永久
+    丢失**。测试里的手写最小夹具常常只建 `users(id, username, …)` 几列
+    （`test_initial_data` 的夹具甚至没有 `role`），一旦重建，后面的迁移读 `users.role`
+    就 `no such column`（实测）。
+
+    ⇒ 前置判据：`users` 必须带齐**后续迁移会读的列**。缺列说明这是**夹具**
+    （真库上这些列一个不少）⇒ 跳过重建，只逐列 ADD COLUMN。
+    这是**结构**判据（不是「有没有数据」判据）：真库上恒为真，不会静默不干活。
+    """
+    required = {"id", "username", "password_hash", "role", "token_version", "created_at"}
+    return required <= _columns("users")
 
 
 def _indexes(table: str) -> set[str]:
     inspector = sa.inspect(op.get_bind())
+    if not inspector.has_table(table):
+        return set()
     return {index["name"] for index in inspector.get_indexes(table)}
 
 
@@ -126,6 +151,40 @@ def upgrade() -> None:
     _enable_foreign_keys()
     bind = op.get_bind()
     existing_tables = set(sa.inspect(bind).get_table_names())
+
+    #: ⚠️ **先清掉「上游迁移已回滚、但本迁移的表还在」的残留**。
+    #: 场景：`downgrade` 到 `c1d2e3f4a5b8`（迁移 1 回滚 = 删 roles/menus/role_menus）
+    #: 之后**再 `upgrade`**：迁移 3 / 2 回滚时没删表（它们只删种子行 / 由自己的
+    #: downgrade 删），所以 `dict_types` / `dict_items` / `api_logs.status_code` 还在。
+    #: 不清掉就会撞两个错（实测）：
+    #: ① `dict_items` 的外键 → `dict_types`，而 `dict_types` 已被迁移 1 的
+    #:    `drop_table("roles")` 之前**不在**本迁移范围内（它属于迁移 2）——
+    #:    真实报错是 `no such table: roles`（迁移 2 的 FK 解析）；
+    #: ② `create_table` 遇到同名残留表。
+    #: 判据只看**结构是否存在**（不是「有没有数据」），不属 DEF-048 形态。
+    for stale in ("role_menus", "menus", "roles"):
+        if stale in existing_tables:
+            #: 表在 = 上一次回滚没清干净，先删掉再按本迁移的形状重建
+            op.drop_table(stale)
+    existing_tables -= {"role_menus", "menus", "roles"}
+
+    #: ⚠️ 同型残留：迁移 2 的表 / 列。`downgrade` 到 `c1d2e3f4a5b8` 后**再 upgrade**
+    #: 时它们还在（迁移 2 的 downgrade 只在回退到它时才跑）。而 `dict_items` 的外键
+    #: 指向 `dict_types` —— 若先重建 `roles` 再被 `dict_*` 的 FK 解析牵连，
+    #: 报的是 `no such table: roles`（实测）。⇒ **按反向依赖序**先清 `dict_items`。
+    #: 这是「结构存在性」判据，不是「有没有数据」判据。
+    for stale in ("dict_items", "dict_types"):
+        if stale in existing_tables:
+            op.drop_table(stale)
+            existing_tables.discard(stale)
+    if "status_code" in _columns("api_logs"):
+        if "ix_api_logs_status_code" in _indexes("api_logs"):
+            op.drop_index("ix_api_logs_status_code", table_name="api_logs")
+        with op.batch_alter_table("api_logs") as batch:
+            batch.drop_column("status_code")
+    if "link" in _columns("notifications"):
+        with op.batch_alter_table("notifications") as batch:
+            batch.drop_column("link")
 
     # ---------------- roles ----------------
     if "roles" not in existing_tables:
@@ -248,10 +307,16 @@ def upgrade() -> None:
     if pending:
         #: ⚠️ 必须关外键检查（见 `sqlite_fk_off`）——`users` 是被约 50 张表引用的父表，
         #: batch 重建里的 `DROP TABLE users` 会在检查打开时直接失败。
-        with sqlite_fk_off():
-            with op.batch_alter_table("users") as batch:
-                for _name, column in pending:
-                    batch.add_column(column)
+        #: 夹具缺列时改为逐列 `ADD COLUMN`（见 `sqlite_users_rebuild_is_safe`）：
+        #: 重建会让反射不到的列永久消失，后面的迁移就读不到 `users.role` 了。
+        if sqlite_users_rebuild_is_safe():
+            with sqlite_fk_off():
+                with op.batch_alter_table("users") as batch:
+                    for _name, column in pending:
+                        batch.add_column(column)
+        else:
+            for _name, column in pending:
+                op.add_column("users", column)
     if "ix_users_status" not in _indexes("users"):
         op.create_index("ix_users_status", "users", ["status"], unique=False)
     #: 重建后核对：`users.id` 未被重排 ⇒ 引用它的行依然有效。
@@ -261,7 +326,7 @@ def upgrade() -> None:
     #: 与本次迁移无关），那属于独立的数据整洁问题，不能让它挡住结构迁移。
     if pending:
         bind = op.get_bind()
-        if bind.dialect.name == "sqlite":
+        if bind.dialect.name == "sqlite" and sqlite_users_rebuild_is_safe():
             orphans = [
                 row
                 for row in bind.exec_driver_sql("PRAGMA foreign_key_check").fetchall()

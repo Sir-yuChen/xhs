@@ -49,6 +49,15 @@ database:
   mysql_password: "change_me"
   mysql_database: "spider_xhs"
 
+feature:
+  # 开放注册（v1.1.0 / 设计 46 §388 + 设计 50 §261）。
+  # **默认 false**：出厂管理员是 `admin/admin123` + 首次登录强制改密，若同时开放注册，
+  # 「弱口令 + 任何人可注册」两条就同时成立。
+  # 三处同值（本文件 = 随包种子 `config/initial_data/system_settings.json` =
+  # `services/settings_service.BUILTIN_DEFAULTS`），改一处要三处一起改。
+  register:
+    enabled: false
+
 security:
   # JWT 签名密钥 —— 生产/服务器形态必须改（启动自检会拒绝以默认值启动）。
   # 2026-10-23 切 PG 主库时生成（secrets.token_urlsafe(48)，64 字符）。

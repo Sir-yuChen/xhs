@@ -83,6 +83,7 @@ def downgrade() -> None:
 
     if "role_menus" in tables:
         bind.execute(sa.text("DELETE FROM role_menus"))
+    #: ⚠️ `roles` 可能已被迁移 1 的 downgrade 删掉（见下方 dict 段的同型说明）。
     if "roles" in tables:
         bind.execute(sa.text("DELETE FROM roles WHERE is_system = 1"))
 
@@ -112,6 +113,11 @@ def downgrade() -> None:
             bind.execute(sa.text(sql), params)
 
     dict_seed = _seed_payload("dict_seed.json")
+    #: ⚠️ 表可能已经不在了：`downgrade(-1)` 走的是迁移 3 → 2 → 1，
+    #: 迁移 2 的 downgrade 会 `drop_table("dict_items")`；而本函数是在**迁移 3 的
+    #: downgrade 里**执行的（先于迁移 2），所以顺序上表还在 —— 但如果有人手工
+    #: `downgrade 2 次` 后重跑，或者表被外部删掉，DELETE 会 `no such table` 直接炸。
+    #: 判据：表存在才删（这是**结构存在性**判据，不是「有没有数据」判据，不属 DEF-048 形态）。
     if dict_seed:
         if "dict_items" in tables:
             for item in dict_seed.get("types") or []:
