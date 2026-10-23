@@ -36,13 +36,12 @@ from backend.app.services import shop_item_operate_service as operate
 from backend.app.services.shop_products_service import load_product_dict_from_ledger
 
 
-
 #: 测试分层标记（2026-10-23 立，见 `docs/04_测试文档/01_测试体系与流程规范.md` §15.2）。
-#: 分类判据由 `.hermes/scripts/classify_tests.py` 机械生成，不靠人工印象：
-#:   redline     = 挂了代表「数据会被写坏 / 凭据会泄漏 / 平台会被封 / 迁移不可执行」
-#:   contract    = 端点 / 字段 / 行为与文档一致
-#:   integration = 真跑迁移 / 子进程（慢且重，收尾跑）
-pytestmark = pytest.mark.contract
+#: 分层按**实测耗时 + 语义**判定（`python .hermes/scripts/classify_tests.py --apply`）：
+#:   redline     = 内循环必跑：整文件实测 <= 10s 且守护「不可接受后果」
+#:   contract    = 契约层：端点 / 字段 / 行为与文档一致
+#:   integration = 慢且重：整文件实测 > 30s，或真跑迁移 / 子进程
+pytestmark = pytest.mark.integration
 
 ARK_COOKIES = "access-token-ark.xiaohongshu.com=abc123"
 
