@@ -1813,7 +1813,10 @@ def test_video_frame_info_is_filled_by_kind_not_group_name():
 
 
 def test_video_frames_use_ten_second_interval_with_cap():
-    """视频抽帧 = **每 10 秒 1 帧**，并有上限兜底（用户口径 2026-10-23）。
+    """视频抽帧 = **每 5 秒 1 帧**，并有上限兜底（用户口径 2026-10-23）。
+
+    ⚠️ 口径演化：先定 10 秒一帧，同日用户调整为 **5 秒一帧** ——
+    10 秒间隔在 13 秒视频上只抽 2 帧，首尾各留 5 秒盲区，漏检风险偏高。
 
     演化（原句保留）：
       · 旧口径「固定抽 6 帧、等间隔取每段中点」（`VIDEO_FRAMES = 6`）——
@@ -1829,7 +1832,7 @@ def test_video_frames_use_ten_second_interval_with_cap():
 
     from backend.app.services import image_ocr_service as ocr
 
-    assert ocr.VIDEO_FRAME_INTERVAL_S == 10, "抽帧间隔不是 10 秒"
+    assert ocr.VIDEO_FRAME_INTERVAL_S == 5, "抽帧间隔不是 5 秒"
     assert ocr.VIDEO_FRAMES_MAX >= 1, "缺抽帧上限"
 
     #: ② 按 `ceil(duration / 10)` 且被上限夹住 —— 与 `extract_frames` 内同一算式
@@ -1837,7 +1840,8 @@ def test_video_frames_use_ten_second_interval_with_cap():
         n = max(1, math.ceil(duration / ocr.VIDEO_FRAME_INTERVAL_S))
         return max(1, min(ocr.VIDEO_FRAMES_MAX, n))
 
-    cases = {5: 1, 8: 1, 13: 2, 30: 3, 41: 5, 65: 7}
+    #: 5 秒间隔下的实测帧数（13s 视频抽 3 帧，1.09s/帧）
+    cases = {5: 1, 8: 2, 13: 3, 30: 6, 41: 9, 65: 13}
     for duration, want in cases.items():
         assert expected(duration) == want, f"{duration}s 应抽 {want} 帧，实得 {expected(duration)}"
     #: 超长视频被上限夹
@@ -1850,3 +1854,266 @@ def test_video_frames_use_ten_second_interval_with_cap():
     assert "wanted = max(1, math.ceil(duration / VIDEO_FRAME_INTERVAL_S))" in src, (
         "`extract_frames` 没按 10 秒间隔算帧数（仍是固定帧数）"
     )
+
+
+def test_ffmpeg_is_located_not_assumed_and_duration_has_fallback():
+    """ffmpeg/ffprobe 必须**走定位函数**，且时长探测要有 ffmpeg 兜底（2026-10-23）。
+
+    装包版实测根因（三缺陷叠加，症状「视频不勾选且无任何提示」）：
+
+    ① `extract_frames` 里裸写 `"ffmpeg"`，靠 PATH 解析；而 `ffmpeg_available()`
+       用的是**定位后的路径** ⇒ 探测说「有」、执行时找不到 ⇒ `FileNotFoundError`
+       被 `except` 吞掉 ⇒ `pairs` 为空 ⇒ `ocr_ok=None`。
+    ② `probe_duration` 只调 ffprobe，**而公共镜像的 ffmpeg-static 包不含 ffprobe**
+       ⇒ 时长 0 ⇒ `extract_frames` 直接 `return []`（一帧都不抽）。
+    ③ `ffmpeg_available()` 要求 ffmpeg **和** ffprobe 都有 ⇒ 能抽帧却被判不可用。
+
+    本地正常、装包版必现：本地 PATH 有 ffmpeg+ffprobe，装包版 `deps/` 只有 ffmpeg。
+    """
+    NL = chr(10)  # 换行符，避免转义序列被提前解析
+    import pathlib as _p
+
+    src = _p.Path("backend/app/services/image_ocr_service.py").read_text(encoding="utf-8")
+
+    #: ① 不许裸写命令名（先剥注释，否则注释里提到这些词会假红）
+    #: 剥注释行 + **行内注释**，否则文档注释里引用 "ffmpeg", "-v" 这类原文会假红
+    code_lines = []
+    for ln in src.splitlines():
+        if ln.lstrip().startswith("#"):
+            continue
+        cut = None
+        in_str = False
+        quote = ""
+        for idx, ch in enumerate(ln):
+            if in_str:
+                if ch == quote:
+                    in_str = False
+            elif ch in "\"'":
+                in_str = True
+                quote = ch
+            elif ch == "#":
+                cut = idx
+                break
+        code_lines.append(ln[:cut] if cut is not None else ln)
+    code = NL.join(code_lines)
+    #: ⚠️ 判据要**精确到「作为命令列表首元素裸写」**，不能只搜子串：
+    #: `_ffmpeg_exe("ffmpeg") or "ffmpeg"` 里的 `or "ffmpeg"` 是兜底，
+    #: 子串匹配会把它误判成「裸写」（2026-10-23 首轮踩到）。
+    #: 裸写的形态是 `[` 或 `,` 后**直接**跟 `"ffmpeg"` / `"ffprobe"`（前面不是 `or `）。
+    import re as _re
+
+    bare_ffmpeg = _re.search(r'[\[,(]\s*"ffmpeg"\s*,', code)
+    bare_ffprobe = _re.search(r'[\[,(]\s*"ffprobe"\s*,', code)
+    assert not bare_ffmpeg, (
+        'extract_frames 仍把 "ffmpeg" 作为命令首元素裸写 —— 装包版 PATH 没有它，执行必失败'
+    )
+    assert not bare_ffprobe, (
+        'probe_duration 仍把 "ffprobe" 作为命令首元素裸写 —— 下载包里没有它'
+    )
+    assert '_ffmpeg_exe("ffmpeg") or "ffmpeg"' in code, "extract_frames 没走定位函数"
+    assert '_ffmpeg_exe("ffprobe")' in code, "probe_duration 没走定位函数"
+
+    #: ② 时长探测必须有 ffmpeg 兜底（解析 Duration:）
+    i = src.index("def probe_duration(")
+    body = src[i : i + 2000]
+    assert "Duration:" in body or r"Duration:\s*" in body, (
+        "probe_duration 没有 ffmpeg -i 兜底 —— ffprobe 缺失时时长恒 0"
+    )
+    assert "这里**不看 returncode**" in body or "不看 returncode" in body, (
+        "兜底分支要注明不能看 returncode（ffmpeg -i 必然回 1）"
+    )
+
+    #: ③ ffmpeg_available 只要求 ffmpeg
+    j = src.index("def ffmpeg_available()")
+    avail = src[j : j + 800]
+    assert 'return _ffmpeg_exe("ffmpeg") is not None' in avail, (
+        "ffmpeg_available 仍要求 ffprobe —— 只有 ffmpeg 的合法环境会被判不可用"
+    )
+
+    #: ④ 逐 name 回落 PATH（deps 里缺 ffprobe 时不能连 PATH 都不看）
+    k = src.index("def _ffmpeg_exe(")
+    locator = src[k : k + 900]
+    assert "_candidate_bin_dirs()" in locator, "定位函数没有逐候选目录回退"
+    assert "return shutil.which(name)" in locator, "定位函数没有回落 PATH"
+
+
+def test_video_frame_sampling_covers_head_and_tail(monkeypatch, tmp_path):
+    """抽帧**首尾各固定一帧**，中间均匀（用户口径 2026-10-23「收尾各一帧固定」）。
+
+    ⚠️ 为什么必须**跑行为**而不是只查源码（2026-10-23 变异 M7/M8 双双 ESCAPED）：
+       只断言「源码里有 `times.append(min(0.1, ...))` 这一行」抓不住「把它改成 pass」——
+       变异后源码里仍有别的 append，子串断言照样通过。
+       ⇒ 这里打桩 `probe_duration` 与 `subprocess.run`，**直接读采样时刻列表**。
+    """
+    import pathlib
+
+    from backend.app.services import image_ocr_service as ocr
+
+    captured: list[str] = []
+
+    def fake_run(cmd, **kwargs):  # noqa: ANN001, ANN003
+        #: cmd 形如 [exe, "-v", "error", "-ss", "<秒>", "-i", ...]
+        for i, part in enumerate(cmd):
+            if part == "-ss":
+                captured.append(cmd[i + 1])
+                break
+
+        class _R:
+            returncode = 1  # 故意失败：只要采样时刻，不落盘
+
+        return _R()
+
+    monkeypatch.setattr(ocr, "probe_duration", lambda _p: 100.0)
+    monkeypatch.setattr(ocr.subprocess, "run", fake_run)
+    monkeypatch.setattr(ocr, "_ffmpeg_exe", lambda name: f"C:/fake/{name}.exe")
+    monkeypatch.setattr(ocr.tempfile, "mkdtemp", lambda **k: str(tmp_path))
+
+    ocr.extract_frames(pathlib.Path("x.mp4"), count=6)
+    times = [float(t) for t in captured]
+    assert len(times) == 6, f"应抽 6 帧，实抽 {len(times)}：{times}"
+    #: ① 首帧必须在最开头（<= 1s），不是从 1/6 处才开始
+    assert times[0] <= 1.0, f"首帧不在片头（{times[0]}s）—— 片头违规词会漏检"
+    #: ② 尾帧必须接近末尾（>= duration - 1s）
+    assert times[-1] >= 99.0, f"尾帧不在片尾（{times[-1]}s）—— 片尾促销标注会漏检"
+    #: ③ 中间有序且均匀
+    assert times == sorted(times), f"采样时刻乱序：{times}"
+
+
+def test_video_frame_cap_uses_even_split_not_truncation(monkeypatch, tmp_path):
+    """超过上限时**平分全片**，不是只抽前一段（用户口径「最高 50 帧，平分」）。
+
+    ⚠️ 变异 M2（上限 50→20）之所以 ESCAPED，是因为旧断言只读常量值，
+    没验证「上限变小后采样是否仍覆盖到片尾」。
+    这里跑行为：10 分钟视频在上限 20 时，尾帧仍应接近 600s。
+    """
+    import pathlib
+
+    from backend.app.services import image_ocr_service as ocr
+
+    captured: list[str] = []
+
+    def fake_run(cmd, **kwargs):  # noqa: ANN001, ANN003
+        for i, part in enumerate(cmd):
+            if part == "-ss":
+                captured.append(cmd[i + 1])
+                break
+
+        class _R:
+            returncode = 1
+
+        return _R()
+
+    monkeypatch.setattr(ocr, "probe_duration", lambda _p: 600.0)
+    monkeypatch.setattr(ocr.subprocess, "run", fake_run)
+    monkeypatch.setattr(ocr, "_ffmpeg_exe", lambda name: f"C:/fake/{name}.exe")
+    monkeypatch.setattr(ocr.tempfile, "mkdtemp", lambda **k: str(tmp_path))
+
+    #: ⚠️ 传 `count=VIDEO_FRAMES_MAX`（而不是硬编码 20）——
+    #:   变异 M2 把常量改成 20 时，若这里写死 20，两者「正好相等」⇒ 尾帧仍覆盖全片
+    #:   ⇒ 变异逃逸（2026-10-23 实测 ESCAPED）。必须让断言跟随常量走。
+    cap = ocr.VIDEO_FRAMES_MAX
+    ocr.extract_frames(pathlib.Path("x.mp4"), count=cap)
+    times = [float(t) for t in captured]
+    assert len(times) == cap, f"上限 {cap} 应抽 {cap} 帧，实抽 {len(times)}"
+    assert times[-1] >= 595.0, (
+        f"尾帧 {times[-1]}s 不在片尾 —— 上限触发时退化成「只抽前一段」，后半段完全不检测"
+    )
+    #: ⚠️ **还必须是「平分」**（2026-10-23 M2a ESCAPED 暴露）：
+    #: 只断言「尾帧在片尾」抓不住「上限被调小」—— 上限 20 时尾帧照样在 600s 附近，
+    #: 因为平分算法本身与上限值无关。真正该守的是**上限必须足够密**：
+    #: 600 秒视频按 5 秒间隔本应抽 120 帧，上限 50 意味着覆盖率 ≈ 50/120；
+    #: 若上限被改小到 20，覆盖率掉到 1/6，漏检风险陡增。
+    expected_by_interval = 600.0 / ocr.VIDEO_FRAME_INTERVAL_S   # = 120
+    coverage = len(times) / expected_by_interval
+    assert coverage >= 0.4, (
+        f"上限 {cap} 使 600s 视频只覆盖 {coverage:.0%} 的采样点"
+        f"（按 {ocr.VIDEO_FRAME_INTERVAL_S}s 间隔本应有 {expected_by_interval:.0f} 个）"
+        " —— 上限被调小会显著降低检测密度"
+    )
+    #: 间隔必须均匀（平分，不是前密后疏）
+    gaps = [times[i + 1] - times[i] for i in range(len(times) - 1)]
+    assert max(gaps) - min(gaps) < 1.0, f"采样间隔不均匀：{gaps[:3]}...{gaps[-3:]}"
+
+
+def test_duration_falls_back_to_ffmpeg_when_ffprobe_missing(monkeypatch):
+    """**ffprobe 缺失时必须用 `ffmpeg -i` 兜底**读时长（2026-10-23 装包版根因）。
+
+    ⚠️ 变异 M5（去掉兜底直接 return 0.0）ESCAPED，因为旧断言只查源码字符串。
+    这里打桩：让 `_ffmpeg_exe("ffprobe")` 返回 None，看还能不能读出时长。
+    """
+    import pathlib
+
+    from backend.app.services import image_ocr_service as ocr
+
+    real = pathlib.Path(
+        r"C:\Users\admin\Desktop\斗柜梳妆台一体卧室法式中古实木化妆桌床尾收纳柜化妆台转角书桌"
+        r"\主图视频\主图视频_1.mp4"
+    )
+    #: 没装包的环境没有这个文件 ⇒ 直接构造一个假的 ffmpeg 输出
+    def fake_run(cmd, **kwargs):  # noqa: ANN001, ANN003
+        class _R:
+            returncode = 1
+            stdout = ""
+            stderr = "  Duration: 00:00:12.73, start: 0.000000, bitrate: 728 kb/s"
+
+        return _R()
+
+    def fake_exe(name: str):
+        #: ⚠️ 关键：ffprobe **不存在**
+        return None if name == "ffprobe" else "C:/fake/ffmpeg.exe"
+
+    monkeypatch.setattr(ocr, "_ffmpeg_exe", fake_exe)
+    monkeypatch.setattr(ocr.subprocess, "run", fake_run)
+    value = ocr.probe_duration(real)
+    assert abs(value - 12.73) < 0.05, (
+        f"ffprobe 缺失时时长应为 12.73s（ffmpeg 兜底），实得 {value} "
+        "—— 退化成 0 会导致一帧都不抽"
+    )
+
+
+def test_ffmpeg_availability_does_not_require_ffprobe(monkeypatch):
+    """`ffmpeg_available()` **只看 ffmpeg**（2026-10-23 修）。
+
+    ⚠️ 变异 M6（加回 `and ffprobe`）ESCAPED，因为旧断言仍是子串匹配。
+    这里打桩验行为：只有 ffmpeg、没有 ffprobe 时也必须判「可用」。
+    """
+    import pathlib
+
+    from backend.app.services import image_ocr_service as ocr
+
+    monkeypatch.setattr(
+        ocr, "_ffmpeg_exe", lambda name: "C:/fake/ffmpeg.exe" if name == "ffmpeg" else None
+    )
+    assert ocr.ffmpeg_available() is True, (
+        "只有 ffmpeg 没有 ffprobe 时被判不可用 —— 公共镜像里根本没有 ffprobe，"
+        "这会直接导致视频不检测"
+    )
+    monkeypatch.setattr(ocr, "_ffmpeg_exe", lambda name: None)
+    assert ocr.ffmpeg_available() is False, "完全没 ffmpeg 时应判不可用"
+
+
+def test_ffprobe_call_also_uses_locator(monkeypatch):
+    """`probe_duration` 里的 ffprobe **也必须走定位函数**（变异 M4 补洞）。"""
+    import pathlib
+
+    from backend.app.services import image_ocr_service as ocr
+
+    seen: list[list] = []
+
+    def fake_run(cmd, **kwargs):  # noqa: ANN001, ANN003
+        seen.append(list(cmd))
+
+        class _R:
+            returncode = 0
+            stdout = "10.5"
+            stderr = ""
+
+        return _R()
+
+    monkeypatch.setattr(ocr, "_ffmpeg_exe", lambda name: f"C:/located/{name}.exe")
+    monkeypatch.setattr(ocr.subprocess, "run", fake_run)
+    assert abs(ocr.probe_duration(pathlib.Path("x.mp4")) - 10.5) < 0.01
+    assert seen and seen[0][0] == "C:/located/ffprobe.exe", (
+        f"ffprobe 没走定位函数，用的是 {seen[0][0] if seen else 'N/A'} —— 装包版必失败"
+    )
+

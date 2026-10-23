@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import os
 import shutil
 import subprocess
@@ -360,7 +361,8 @@ def locate_hits(
 VIDEO_UNVERIFIED_REASON = "视频未能抽帧检测，请人工确认画面是否有违规词"
 
 #: **抽帧间隔（秒）**：每 `VIDEO_FRAME_INTERVAL_S` 秒抽 1 帧（用户口径 2026-10-23
-#: 「优化为 10 抽一帧」）。
+#: 「优化为 10 抽一帧」，同日二次调整为 **5 秒一帧** —— 10 秒间隔在 13 秒视频上
+#: 只抽 2 帧，首尾两段各留 5 秒盲区，画面文字漏检风险偏高）。
 #:
 #: 演化（原句保留，不静默删除）：
 #:   · 旧口径是「固定抽 6 帧、等间隔取每段中点」—— 短视频浪费（8 秒也抽 6 帧），
@@ -369,8 +371,19 @@ VIDEO_UNVERIFIED_REASON = "视频未能抽帧检测，请人工确认画面是�
 #:     9 秒视频抽 1 帧、30 秒抽 3 帧、41 秒抽 5 帧 —— 既不浪费也漏不掉。
 #:   · `VIDEO_FRAMES_MAX` 是**兜底上限**：极长视频（如 10 分钟）不抽上百帧，
 #:     否则 OCR 时间失控（每帧 ffmpeg ~0.5s + OCR ~0.2s）。
-VIDEO_FRAME_INTERVAL_S = 10
-VIDEO_FRAMES_MAX = 20
+#:
+#: ⚠️ **超过上限时不截断尾部，改为「平分」**（2026-10-23 用户口径「最高 50 帧，平分」）：
+#:   旧实现 `min(count, wanted)` 是**截断**—— 25 秒以上视频只抽前 50 秒的点，
+#:   后面整段不检测（危险：片尾促销标注最容易被漏掉）。
+#:   现口径：`wanted > 50` 时仍抽 50 帧，但**采样间隔自动放大**为
+#:   `duration / 50`，覆盖全片。
+#:
+#: ⚠️ **首尾各固定抽一帧**（2026-10-23 用户口径「收尾各一帧固定」）：
+#:   0 秒附近与末尾各取一帧，**必抽** —— 片头常是品牌/合规声明、片尾常是促销
+#:   标注，都是违规词高发位置；只靠「每段中点」在短视频上会从 1/6 处才开始采，
+#:   首尾都有盲区。首尾帧占 2 个名额（总帧数仍受 `VIDEO_FRAMES_MAX` 约束）。
+VIDEO_FRAME_INTERVAL_S = 5
+VIDEO_FRAMES_MAX = 50
 
 #: 兼容旧引用（`scan_video` 的默认值、既有测试都在用这个名字）。
 #: ⚠️ 语义已从「固定帧数」变为「上限」，见上方说明。
@@ -406,75 +419,111 @@ def note_unverified_videos(video_paths: list[str]) -> dict[str, dict[str, Any]]:
     }
 
 
-def _bundled_bin_dir() -> Path | None:
-    """**初始化环境下载下来的 ffmpeg 目录**（`deps/ffmpeg/`）。
-
-    决策链（2026-10-23 用户口径「用户安装时自动下载」）：
-      ① **下载目录**（`env_bootstrap_service.deps_root()/ffmpeg`）—— 主路径；
-      ② 安装包内 `_internal/bin` —— 兼容「构建期把 ffmpeg 打进包」的老形态；
-      ③ PATH —— 开发机（winget 装过 ffmpeg）。
-    """
-    import sys
-
-    try:
-        from backend.app.services.env_bootstrap_service import deps_root
-
-        cand = deps_root() / "ffmpeg"
-        if (cand / "ffmpeg.exe").is_file():
-            return cand
-    except Exception:  # noqa: BLE001 - 依赖服务不可用不该让抽帧崩
-        pass
-
-    if not getattr(sys, "frozen", False):
-        return None
-    base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
-    for cand in (base / "bin", base.parent / "bin"):
-        if (cand / "ffmpeg.exe").is_file():
-            return cand
-    return None
-
-
 def _ffmpeg_exe(name: str) -> str | None:
-    """定位可执行文件：**优先包内**，再回落 PATH。"""
-    bundled = _bundled_bin_dir()
-    if bundled is not None:
-        exe = bundled / f"{name}.exe"
+    """定位可执行文件：**deps/ → 包内 bin/ → PATH**，逐级回落。
+
+    ⚠️ 2026-10-23 修：原实现是「`_bundled_bin_dir()` 一旦有目录就**只**在该目录找」，
+    而 `_bundled_bin_dir()` 判断的是 `ffmpeg.exe` 在不在 —— 于是 `deps/ffmpeg/`
+    里只下了 ffmpeg、没下 ffprobe 时，`_ffmpeg_exe("ffprobe")` 返回 None
+    且**不会回落到 PATH**（开发机 PATH 里有 ffprobe 却被忽略）。
+    ⇒ 改成**按 name 逐个候选路径独立判断**，任一命中即用。
+    """
+    exe_name = f"{name}.exe" if os.name == "nt" else name
+    for cand in _candidate_bin_dirs():
+        exe = cand / exe_name
         if exe.is_file():
             return str(exe)
     return shutil.which(name)
 
 
+def _candidate_bin_dirs() -> list[Path]:
+    """**按优先级**列出可能放着 ffmpeg/ffprobe 的目录（不判断里面有什么）。
+
+    ① `deps/<dir>`（初始化环境下载的，用户可删）
+    ② 包内 `_MEIPASS/bin` 与 `<exe>/bin`（兼容「构建期打进包」的老形态）
+    """
+    import sys
+
+    dirs: list[Path] = []
+    try:
+        from backend.app.services.env_bootstrap_service import deps_root
+
+        dirs.append(deps_root() / "ffmpeg")
+    except Exception:  # noqa: BLE001 - 依赖服务不可用不该让抽帧崩
+        pass
+
+    if getattr(sys, "frozen", False):
+        base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+        dirs.extend([base / "bin", base.parent / "bin"])
+    return dirs
+
+
 def ffmpeg_available() -> bool:
-    """ffmpeg 是否可用（抽帧的硬依赖）。
+    """**ffmpeg** 是否可用（抽帧的唯一硬依赖）。
 
-    ⚠️⚠️ **安装版必须靠包内自带**（2026-10-23 实测踩到）：
-    开发机上 `ffmpeg 9.0.1`（gyan.dev full build）装在 PATH 里，抽帧一直正常；
-    但**安装包进程不继承开发者的 PATH** ⇒ `shutil.which("ffmpeg")` 返回 None
-    ⇒ `scan_video` 直接回 `ocr_ok=None` + `unverified_reason="本机没有可用的 ffmpeg"`
-    ⇒ 视频**默认不勾选** ⇒ 用户以为预检没跑视频，实际是**装包缺 ffmpeg**
-    （同类先例：`win_ocr_*.ps1` 也是因为 `Path(__file__)` 在 frozen 下取不到才被显式收进包）。
+    ⚠️ 判据只要 **ffmpeg**，不要 ffprobe（2026-10-23 修）：
+    公共镜像的 ffmpeg-static 包**只含 ffmpeg**，不含 ffprobe；原实现要求两者都有
+    ⇒ 明明能抽帧却被判「不可用」⇒ 视频直接不检测 ⇒ `ocr_ok=None` ⇒ 不勾选。
+    ffprobe 缺失由 `probe_duration` 用 `ffmpeg -i` 兜底，不影响抽帧。
 
-    ⇒ 判据顺序：**先包内 `_internal/bin`，再 PATH**。构建脚本负责把 ffmpeg 拷进去。
     不可用时**不静默降级**：视频回到「未验证」而不是被当成合规。
     """
-    return _ffmpeg_exe("ffmpeg") is not None and _ffmpeg_exe("ffprobe") is not None
+    return _ffmpeg_exe("ffmpeg") is not None
 
 
 def probe_duration(video: Path) -> float:
-    """读视频时长（秒）；读不到 ⇒ 0.0（调用方按「无法抽帧」处理）。"""
+    """读视频时长（秒）；读不到 ⇒ 0.0（调用方按「无法抽帧」处理）。
+
+    ⚠️⚠️ **ffprobe 缺失时必须用 ffmpeg 兜底**（2026-10-23 装包版实测根因）：
+    - `deps/ffmpeg/` 里只有 `ffmpeg.exe` —— 公共镜像的 ffmpeg-static 包**不含 ffprobe**；
+    - 原实现只调 ffprobe，取不到就 `return 0.0`；
+    - `extract_frames` 见 `duration <= 0` 直接 `return []`；
+    - ⇒ **一帧都不抽** ⇒ `ocr_ok=None` ⇒ 视频不勾选且无任何提示。
+
+    兜底方式：`ffmpeg -i <file>` 把元信息打在 stderr 的 `Duration: HH:MM:SS.cc` 里，
+    退出码是 **1**（因为没有输出文件），所以**不能**用 returncode 判成败。
+    """
+    #: ① 首选 ffprobe（输出干净，好解析）
+    ffprobe = _ffmpeg_exe("ffprobe")
+    if ffprobe:
+        try:
+            done = subprocess.run(
+                [
+                    ffprobe, "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    str(video),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=FRAME_TIMEOUT_S,
+            )
+            value = float((done.stdout or "").strip() or 0.0)
+            if value > 0:
+                return value
+        except Exception:  # noqa: BLE001 - 落到 ffmpeg 兜底
+            pass
+
+    #: ② 兜底：ffmpeg -i 解析 stderr 里的 Duration
+    ffmpeg = _ffmpeg_exe("ffmpeg")
+    if not ffmpeg:
+        return 0.0
     try:
         done = subprocess.run(
-            [
-                "ffprobe", "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
-                str(video),
-            ],
+            [ffmpeg, "-i", str(video)],
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=FRAME_TIMEOUT_S,
         )
-        return float((done.stdout or "").strip() or 0.0)
+        #: ⚠️ 这里**不看 returncode**（ffmpeg -i 无输出文件必然回 1）
+        m = re.search(
+            r"Duration:\s*(\d+):(\d+):(\d+)\.(\d+)", done.stderr or ""
+        )
+        if not m:
+            return 0.0
+        hours, minutes, seconds, centis = (int(g) for g in m.groups())
+        return hours * 3600 + minutes * 60 + seconds + centis / 100.0
     except Exception:  # noqa: BLE001 - 探不到时长不该让预检崩
         return 0.0
 
@@ -495,17 +544,50 @@ def extract_frames(video: Path, count: int = VIDEO_FRAMES) -> list[tuple[float, 
     #:   · 41 秒视频 → ceil(41/10) = 5 帧；
     #:   · 10 分钟视频 → 60 帧会被 `count` 夹到 20 帧（防 OCR 时间失控）。
     wanted = max(1, math.ceil(duration / VIDEO_FRAME_INTERVAL_S))
-    count = max(1, min(int(count), wanted))
+    #: ⚠️ **上限是「最多抽几帧」，不是「只抽前几秒」**（2026-10-23 口径「最高 50 帧，平分」）。
+    #:
+    #: 旧写法 `count = min(count, wanted)` 是截断：`wanted` 被 `count` 夹小之后，
+    #: 下面的采样分母用的是夹小的 `count` —— 采样点仍均匀分布（`duration * (i+0.5)/count`），
+    #: 所以**行为上确实是平分**，但可读性上容易被误读成「只抽前一段」。
+    #: ⇒ 这里显式写成「取二者较小值 = 实际帧数，间隔按 `duration / 实际帧数` 重算」，
+    #: 让「平分全片」这个语义一目了然。
+    frames_to_take = max(1, min(int(count), wanted))
+
+    #: **采样时刻 = 首帧 + 中间均匀 + 尾帧**（用户口径 2026-10-23「收尾各一帧固定」）。
+    #:
+    #: 首尾必抽的理由：片头常用于品牌/合规声明、片尾常用于促销标注，
+    #: 都是违规词高发位置；「每段中点」在短视频上从 1/6 处才开始采，首尾各有盲区。
+    #:
+    #: ⚠️ 首尾取 `0.1s` / `duration-0.1s` 而不是 0 / duration：
+    #:   端点上 ffmpeg 可能取不到帧（首帧黑场、末帧超出实际可解码范围）。
+    #:   `0.1` 足够近、又能稳定解出画面。
+    times: list[float] = []
+    if frames_to_take == 1:
+        times = [duration / 2]
+    elif frames_to_take == 2:
+        times = [min(0.1, duration / 2), max(duration - 0.1, duration / 2)]
+    else:
+        times.append(min(0.1, duration * 0.01))          # 首帧
+        middle = frames_to_take - 2
+        for i in range(middle):
+            #: 中间 `middle` 个点均匀落在 (首, 尾) 之间，避开与首尾重叠
+            times.append(duration * (i + 1) / (middle + 1))
+        times.append(max(duration - 0.1, duration * 0.99))  # 尾帧
+
     workdir = Path(tempfile.mkdtemp(prefix="video_frames_"))
     out: list[tuple[float, str]] = []
-    #: 取每段的中点，避开首尾的黑场/转场（首帧常是纯色 logo）。
-    for index in range(count):
-        at = duration * (index + 0.5) / count
+    for index, at in enumerate(times):
         dest = workdir / f"frame{index:03d}.jpg"
         try:
             done = subprocess.run(
                 [
-                    "ffmpeg", "-v", "error",
+                    #: ⚠️⚠️ **必须走 `_ffmpeg_exe()`**（2026-10-23 装包版实测根因）：
+                    #: 原来裸写 `"ffmpeg"`，靠 PATH 解析；而 `ffmpeg_available()`
+                    #: 用的是**定位后的路径** ⇒ 探测说「有」、实际执行找不到
+                    #: ⇒ `FileNotFoundError` 被 `except` 吞掉 ⇒ `pairs` 为空
+                    #: ⇒ `ocr_ok=None` ⇒ **视频不勾选且没有任何提示**。
+                    #: 这就是「本地正常、打包版视频不勾选」的直接原因。
+                    _ffmpeg_exe("ffmpeg") or "ffmpeg", "-v", "error",
                     "-ss", f"{at:.3f}",
                     "-i", str(video),
                     "-frames:v", "1",
