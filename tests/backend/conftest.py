@@ -72,6 +72,11 @@ from __future__ import annotations
 import os
 import tempfile
 
+#: ⚠️ v1.1.0（2026-10-24）用户口径「完全放弃 SQLite」：原来这里有个
+#: `HERMES_ALLOW_SQLITE_FOR_TESTS=1` 逃逸口，让 conftest 的 SQLite 临时库能跑。
+#: **已删除** —— 测试库也必须是 PG（见 `make_engine` 的说明）。
+
+
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Callable
@@ -90,9 +95,9 @@ from sqlalchemy.orm import Session, sessionmaker
 #: （cProfile: `sqlite3.Cursor.execute` 506 次 / 16.559s；SQLAlchemy 事件测到真正
 #: 的业务 SQL 只有 0.03 秒 —— 差额全在迁移）。
 #:
-#: **迁移链本身仍然被测**：`tests/backend/test_initial_data.py` 等用 `run_alembic()`
-#: 显式跑子进程迁移（那是「迁移是否可执行」的守卫，必须保留、且必须走真 alembic）。
-#: 这里跳过的只是「每条用例为了建表而顺路重跑一遍迁移」这层浪费。
+#: 迁移链的执行正确性属一次性验收（2026-10-24 用户口径），已用空库全链探针
+#: 验证并移除迁移执行类测试（见台账 59 §十）。这里跳过的只是
+#: 「每条用例为了建表而顺路重跑一遍迁移」这层浪费。
 #:
 #: 必须在 import `backend.app.core.database` **之前**设好 ⇒ 放模块级。
 os.environ.setdefault("HERMES_SKIP_ALEMBIC_IN_TESTS", "1")
@@ -123,57 +128,156 @@ def _base():
     return Base
 
 
-def make_engine(db_path: Path | str) -> Engine:
-    """建一个「与生产同形」的 SQLite engine。
+#: 测试库的连接串（**PostgreSQL**，v1.1.0 / 2026-10-24 用户口径「完全放弃 SQLite」）。
+#:
+#: 复用一个**独立测试库**，靠「每用例一个 schema」做隔离：
+#: * 原 SQLite 方案是「每用例一个 `.db` 文件」，天然隔离；
+#: * PG 没有「文件」概念 ⇒ 等价物是 `CREATE SCHEMA test_xxx` + `search_path`
+#:   指向它，用例结束 `DROP SCHEMA ... CASCADE`。
+#:
+#: ⚠️ 为什么不用 transaction-rollback 隔离（更快）：项目里有大量「服务函数自开
+#: Session」（`from ...database import SessionLocal`，见本文件顶部的打桩说明），
+#: 它们在**另一个连接**上 commit，回滚外层事务看不到也管不住 ⇒ 脏数据会漏到
+#: 下一条用例。schema 隔离对「多连接」也成立，这才是与 SQLite 文件等价的语义。
+TEST_PG_ADMIN_URL = os.environ.get(
+    "TEST_DATABASE_URL",
+    "postgresql+psycopg://postgres:123456@127.0.0.1:5432/spider_xhs_test",
+)
+#: 若测试库不存在，用生产库的凭据建出来（首次跑测试时自动建，省一次手工操作）。
+#: ⚠️ 只建库，不建表 —— 表由每条用例的 `Base.metadata.create_all` 在**自己的 schema** 里建。
+TEST_PG_SERVER_URL = os.environ.get(
+    "TEST_DATABASE_SERVER_URL",
+    "postgresql+psycopg://postgres:123456@127.0.0.1:5432/postgres",
+)
 
-    `check_same_thread=False` 是必需的：`TestClient` 在另一线程里跑请求，
-    而夹具线程也可能同时开会话。
+_SCHEMA_COUNTER = {"n": 0}
+#: `id(engine) -> schema`。⚠️ 不能用 `engine.info` —— SQLAlchemy 的 `Engine` 没有
+#: 这个属性（那是 `Connection` 的）。也不用 `id()` 直接判等：engine 被 GC 后
+#: id 可能被复用 ⇒ 用 `weakref` 让条目随 engine 一起消失。
+_SCHEMA_BY_ENGINE: "weakref.WeakKeyDictionary[Any, str]" = __import__("weakref").WeakKeyDictionary()
 
-    ⚠️ **测试库关掉 fsync**（2026-10-23 实测，提速 100 倍）：默认 SQLite 每次
-    `commit` 都要 fsync 落盘，实测 500 次逐条 commit = **1.49 秒**，批量 = **0.00 秒**。
-    而大量用例是「造 N 行 → 断言」，每条都 commit ⇒ 单条用例 17 秒全花在磁盘上
-    （cProfile 实测 `sqlite3.Cursor.execute` 502 次 / 17.18 秒）。
 
-    口径：**测试库是一次性临时文件，进程结束即删**，崩了也无需恢复
-    ⇒ `synchronous=NORMAL` 完全够用，且**不影响生产**
-    （生产走 `core/database.py` 自己的引擎配置）。
+def ensure_test_database() -> None:
+    """确保 `spider_xhs_test` 库存在（不存在就建一个空的）。
 
-    ⚠️ **不要开 WAL**（2026-10-23 实测订正）：WAL 需要 checkpoint 才能把 `-wal`
-    文件并回主库，而测试库在用例结束后**没人 checkpoint**（连接被 Python GC 掉，
-    不是正常 close）⇒ `-wal` 越积越大（实测单条用例后已有 **3.1 MB**），
-    后续用例的写入反而更慢。默认的 rollback journal + `synchronous=NORMAL`
-    才是测试场景的正确组合。
+    ⚠️ 连 `postgres` 库来建，不能连目标库自己。`CREATE DATABASE` 不能进事务块
+    ⇒ 必须用 AUTOCOMMIT 隔离级别，否则 PG 报
+    `CREATE DATABASE cannot run inside a transaction block`。
     """
-    engine = create_engine(
-        f"sqlite:///{db_path}",
-        connect_args={"check_same_thread": False},
-    )
+    from sqlalchemy import create_engine, text  # noqa: PLC0415
 
-    from sqlalchemy import event  # noqa: PLC0415
-
-    @event.listens_for(engine, "connect")
-    def _fast_sqlite(dbapi_conn, _record):  # noqa: ANN001
-        cur = dbapi_conn.cursor()
-        try:
-            cur.execute("PRAGMA synchronous=NORMAL")
-            #: ⚠️ **测试库把 busy_timeout 压到 200ms**（2026-10-23 立，工程化）。
-            #: 生产是 `busy_timeout=5000`（等待而不是立即失败，对真实用户是对的），
-            #: 但测试里「等 5 秒 × 重试 3 次 = 15 秒」会把**锁竞争缺陷藏起来**：
-            #: 用例照样绿，只是慢 —— 实测 `test_llm_gateway` 两条用例各花 16.8 秒
-            #: 就属于这类（`record_usage` 在 AnyIO worker 线程撞上请求会话持有的读事务）。
-            #: 压到 200ms 后：① 同样的锁竞争**立刻暴露成失败**而不是悄悄变慢；
-            #: ② 正常用例根本不会撞锁 ⇒ 无影响；③ 全量回归不会被这类静默等待拖垮。
-            cur.execute("PRAGMA busy_timeout=200")
-        finally:
-            cur.close()
-
-    return engine
+    admin = create_engine(TEST_PG_SERVER_URL, isolation_level="AUTOCOMMIT")
+    try:
+        with admin.connect() as conn:
+            exists = conn.execute(
+                text("SELECT 1 FROM pg_database WHERE datname = 'spider_xhs_test'")
+            ).first()
+            if not exists:
+                try:
+                    conn.execute(text("CREATE DATABASE spider_xhs_test"))
+                except Exception:  # noqa: BLE001 - `pytest -n auto` 下多 worker 并发首跑
+                    #: 两个 worker 同时发现库不存在、同时 CREATE ⇒ 后到的撞
+                    #: duplicate database。库已经在了就是目的达成，吞掉。
+                    if conn.execute(
+                        text("SELECT 1 FROM pg_database WHERE datname = 'spider_xhs_test'")
+                    ).first() is None:
+                        raise
+    finally:
+        admin.dispose()
 
 
 @pytest.fixture()
 def db_path(tmp_path: Path) -> Path:
-    """本用例独享的 SQLite 文件路径（pytest 已按用例名隔离，xdist 下各 worker 还有独立 basetemp）。"""
+    """占位路径 —— **PG 下无实际用途**（v1.1.0 SQLite 退役）。
+
+    原来返回「本用例独享的 SQLite 文件路径」。现在 `make_engine` 用 **schema 隔离**，
+    不需要文件；保留这个夹具只为 `db_engine` 的签名不变
+    （避免改动 200+ 条用例的签名）。
+    """
     return tmp_path / "test.db"
+
+
+def make_engine(db_path: Path | str | None = None) -> Engine:
+    """建一个「**每用例独享 schema**」的 PostgreSQL engine。
+
+    ## 为什么参数还叫 `db_path`
+
+    历史遗留：原实现是 SQLite 文件路径。现在参数**被忽略**（PG 没有文件），
+    保留它只为不破坏既有调用方（`db_engine` 夹具仍传 `tmp_path`）。
+    ⚠️ 新代码别依赖它 —— 想换库用 `TEST_DATABASE_URL` 环境变量。
+
+    ## 隔离方式
+
+    `CREATE SCHEMA <唯一名>` + `connect_args={"options": "-csearch_path=<名>"}`
+    ⇒ 这个 engine 上的一切 `CREATE TABLE` / `INSERT` 都落在该 schema 里，
+    与其它用例、与真实库的 `public` schema **完全隔离**。
+    用例结束由 `drop_schema()` 清理（`CASCADE` 连表带数据一起删）。
+
+    ## 为什么 schema 名要带进程号 + 自增
+
+    `pytest -n auto` 下多个 worker 并发跑，`tmp_path` 已按 worker 隔离；
+    schema 名额外带 PID 前缀，避免「上一轮异常退出残留同名 schema」撞车。
+    """
+    from sqlalchemy import create_engine, text  # noqa: PLC0415
+
+    ensure_test_database()
+
+    _SCHEMA_COUNTER["n"] += 1
+    schema = f"t_{os.getpid()}_{_SCHEMA_COUNTER['n']}"
+
+    engine = create_engine(
+        TEST_PG_ADMIN_URL,
+        #: `search_path` 只设这个 engine 的连接 ⇒ 不影响同进程里别的 engine。
+        connect_args={"options": f"-csearch_path={schema},public"},
+        pool_pre_ping=True,
+    )
+    with engine.begin() as conn:
+        conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
+
+    #: 登记到模块级表，供 `drop_schema()` 回收（fixture teardown 用）。
+    _SCHEMA_BY_ENGINE[engine] = schema
+    return engine
+
+
+def drop_schema(bind: Engine) -> None:
+    """删掉本用例的 schema（`CASCADE`：表、序列、索引一起走）。"""
+    from sqlalchemy import text  # noqa: PLC0415
+
+    schema = _SCHEMA_BY_ENGINE.get(bind)
+    if not schema:
+        return
+    try:
+        with bind.begin() as conn:
+            conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+    except Exception:  # noqa: BLE001 - 清理失败不该让用例失败
+        pass
+    finally:
+        _SCHEMA_BY_ENGINE.pop(bind, None)
+
+
+# ---------------------------------------------------------------------------
+# 迁移测试基建已移除（2026-10-24 用户口径）
+# ---------------------------------------------------------------------------
+# 「迁移等一次性的工作，只需要保持迁移当前的正确即可，测试验收通过后，测试移除，
+#  无需保留，也就无需全量回归。」—— 迁移链 PG 兼容的一次性验收 =
+# 空库 `alembic upgrade head` 全链探针（11 轮收敛到 head，证据见台账 59 §十.2）；
+# 九个迁移执行类测试与 `run_alembic` / `migration_db` / `LATER_MIGRATION_TABLES`
+# 等专属基建已随验收通过一并删除。`core/migration_introspect.py` 是**运行时**
+# 迁移代码的公共助手，保留（迁移本体仍在用它）。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -816,7 +920,7 @@ LATER_MIGRATION_TABLES: dict[str, str] = {
         " user_id INTEGER,"
         " note_id VARCHAR(64),"
         " platform_account_id INTEGER,"
-        " created_at DATETIME NOT NULL,"
+        " created_at TIMESTAMP NOT NULL,"
         " PRIMARY KEY (id))"
     ),
     # `m4n5o6p7q8r9`（2026-09-29，设计 17 §3.8/§3.9）：llm 网关两张新表。
@@ -842,11 +946,11 @@ LATER_MIGRATION_TABLES: dict[str, str] = {
         " local_db_path VARCHAR(512) NOT NULL DEFAULT '',"
         " default_model VARCHAR(128) NOT NULL DEFAULT '',"
         " models_json TEXT NOT NULL DEFAULT '[]',"
-        " enabled BOOLEAN NOT NULL DEFAULT 1,"
-        " healthy BOOLEAN NOT NULL DEFAULT 0,"
-        " last_health_at DATETIME,"
-        " created_at DATETIME NOT NULL,"
-        " updated_at DATETIME NOT NULL,"
+        " enabled BOOLEAN NOT NULL DEFAULT TRUE,"
+        " healthy BOOLEAN NOT NULL DEFAULT FALSE,"
+        " last_health_at TIMESTAMP,"
+        " created_at TIMESTAMP NOT NULL,"
+        " updated_at TIMESTAMP NOT NULL,"
         " PRIMARY KEY (id))"
     ),
     "llm_gateway_snapshots": (
@@ -863,8 +967,8 @@ LATER_MIGRATION_TABLES: dict[str, str] = {
         " avg_latency_ms INTEGER,"
         " source VARCHAR(16) NOT NULL DEFAULT 'newapi',"
         " raw_json TEXT NOT NULL DEFAULT '{}',"
-        " created_at DATETIME NOT NULL,"
-        " updated_at DATETIME NOT NULL,"
+        " created_at TIMESTAMP NOT NULL,"
+        " updated_at TIMESTAMP NOT NULL,"
         " PRIMARY KEY (id))"
     ),
     # `d5e6f7a8b9c0`（2026-10-01，设计 17 §13.1 v1.9）：服务商化 ——
@@ -895,9 +999,9 @@ LATER_MIGRATION_TABLES: dict[str, str] = {
         " platform VARCHAR(32) NOT NULL,"
         " function VARCHAR(32) NOT NULL,"
         " token_name VARCHAR(128) NOT NULL,"
-        " enabled BOOLEAN NOT NULL DEFAULT 1,"
-        " created_at DATETIME NOT NULL,"
-        " updated_at DATETIME NOT NULL,"
+        " enabled BOOLEAN NOT NULL DEFAULT TRUE,"
+        " created_at TIMESTAMP NOT NULL,"
+        " updated_at TIMESTAMP NOT NULL,"
         " PRIMARY KEY (id))"
     ),
     # ⚠️ `b2c3d4e5f6a7`（2026-10-02，设计 17 §4.5 v2.3）：预警规则三级作用域 ——
@@ -920,10 +1024,10 @@ LATER_MIGRATION_TABLES: dict[str, str] = {
         " threshold FLOAT NOT NULL,"
         " window_seconds INTEGER NOT NULL DEFAULT 86400,"
         " level VARCHAR(16) NOT NULL DEFAULT 'warning',"
-        " enabled BOOLEAN NOT NULL DEFAULT 1,"
-        " last_fired_at DATETIME,"
-        " created_at DATETIME NOT NULL,"
-        " updated_at DATETIME NOT NULL,"
+        " enabled BOOLEAN NOT NULL DEFAULT TRUE,"
+        " last_fired_at TIMESTAMP,"
+        " created_at TIMESTAMP NOT NULL,"
+        " updated_at TIMESTAMP NOT NULL,"
         " PRIMARY KEY (id))"
     ),
     # `b3c4d5e6f7a8`（2026-09-30，设计 18 / ADR-021）：隔离键从店铺收敛到平台账号 ——
@@ -948,7 +1052,7 @@ LATER_MIGRATION_TABLES: dict[str, str] = {
         " sub_type VARCHAR(32),"
         " nickname VARCHAR(128),"
         " external_user_id VARCHAR(128),"
-        " deleted_at DATETIME,"
+        " deleted_at TIMESTAMP,"
         " shop_id_fk INTEGER,"
         " shop_state TEXT NOT NULL DEFAULT '{}',"
         " PRIMARY KEY (id))"
@@ -980,12 +1084,12 @@ LATER_MIGRATION_TABLES: dict[str, str] = {
         " category VARCHAR(128),"
         " images_json TEXT,"
         " status VARCHAR(32),"
-        " synced_at DATETIME,"
+        " synced_at TIMESTAMP,"
         " raw_json TEXT NOT NULL DEFAULT '{}',"
         " detail_json TEXT DEFAULT '{}',"
         " sku_count INTEGER,"
-        " detail_synced_at DATETIME,"
-        " platform_missing_at DATETIME,"
+        " detail_synced_at TIMESTAMP,"
+        " platform_missing_at TIMESTAMP,"
         " article_no VARCHAR(64),"
         " card_type INTEGER,"
         " price_min_fen INTEGER,"
@@ -1000,7 +1104,11 @@ LATER_MIGRATION_TABLES: dict[str, str] = {
     "note_comments": (
         "CREATE TABLE note_comments ("
         " id INTEGER NOT NULL,"
-        " note_id VARCHAR(64),"
+        # ⚠️ `note_id` 是指向 notes.id 的**整型外键**（模型 NoteComment）——
+        #    曾误写成 VARCHAR(64)（与 notes.note_id 平台字符串 ID 混淆），
+        #    b3c4d5e6f7a8 的回填 JOIN（`n.id = note_comments.note_id`）在 PG 上
+        #    会撞 `integer = character varying`。列类型必须与真实库一致。
+        " note_id INTEGER,"
         " comment_id VARCHAR(64),"
         " content TEXT,"
         " PRIMARY KEY (id))"
@@ -1034,9 +1142,9 @@ LATER_MIGRATION_TABLES: dict[str, str] = {
         " platform VARCHAR(32) NOT NULL DEFAULT 'xhs',"
         " business_key VARCHAR(48) NOT NULL,"
         " provider_key VARCHAR(64) NOT NULL DEFAULT '',"
-        " enabled BOOLEAN NOT NULL DEFAULT 1,"
-        " created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,"
-        " updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+        " enabled BOOLEAN NOT NULL DEFAULT TRUE,"
+        " created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+        " updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
         " PRIMARY KEY (id))"
     ),
     "publish_jobs": (
@@ -1062,72 +1170,16 @@ LATER_MIGRATION_TABLES: dict[str, str] = {
         " username VARCHAR(64),"
         " email VARCHAR(128),"
         " hashed_password VARCHAR(256),"
-        " is_active BOOLEAN NOT NULL DEFAULT 1,"
-        " created_at DATETIME,"
-        " updated_at DATETIME,"
+        " is_active BOOLEAN NOT NULL DEFAULT TRUE,"
+        " created_at TIMESTAMP,"
+        " updated_at TIMESTAMP,"
         " PRIMARY KEY (id))"
     ),
 }
 
 
-def create_later_migration_tables(conn: Any) -> None:
-    """给最小夹具补上「迁移链后半段要碰的表」（幂等；清单见 `LATER_MIGRATION_TABLES`）。
-
-    调用点：四个迁移用例各自建完**自己的**遗留表之后、`conn.commit()` 之前。
-    已存在的表**跳过**（夹具将来自己建同名表时不冲突）。
-    """
-    existing = {
-        row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-    }
-    for name, ddl in LATER_MIGRATION_TABLES.items():
-        if name not in existing:
-            conn.execute(ddl)
 
 
-def run_alembic(db_path: Path, *args: str) -> None:
-    """在夹具库上跑 alembic 子命令（`stamp <rev>` / `upgrade <rev>`）。
-
-    四个迁移用例（`test_scheduled_jobs.py` × 3、`test_initial_data.py` × 1）原来各抄一遍
-    「`DATABASE_URL` + `subprocess.run([sys.executable, -m, alembic, ...])`」样板 ——
-    收在一处（DEF-044 同型：同一语义不留两份实现）。
-
-    ⚠️ **失败时把 alembic 的输出原样带出来**（2026-09-28 实测教训）：原实现用
-    `check=True` + `capture_output=True`，而 `CalledProcessError.__str__()` **只有**
-    「returned non-zero exit status 1」—— alembic 的真实报错（`no such table: main.notes`
-    这种）被吞在 `result.stderr` 里，pytest 只给你一个 `CalledProcessError`。
-    后果：四个迁移用例同时红，却分不清是「夹具缺表」还是「迁移写坏了」，只能手工复现。
-    现在改成显式判 rc + `AssertionError`（附 stdout/stderr 尾部），一眼能看出根因。
-    失败**依然直接炸**，不静默跳过（迁移没跑成功而断言空摆，比红更危险）。
-    """
-    import os  # noqa: PLC0415
-    import subprocess  # noqa: PLC0415
-    import sys  # noqa: PLC0415
-
-    env = dict(os.environ)
-    env["DATABASE_URL"] = f"sqlite:///{db_path.as_posix()}"
-    result = subprocess.run(
-        [sys.executable, "-m", "alembic", "-c", "backend/alembic.ini", *args],
-        cwd=os.getcwd(),
-        env=env,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    if result.returncode != 0:
-        # ⚠️ **头尾都给**（2026-10-11 实测教训）：此前只给 `[-2000:]`，而 alembic 的
-        #    revision 序列（`Running upgrade abc -> def, …`）在 stderr **开头**，
-        #    尾部只有那段 SQLAlchemy 调用栈 ⇒ 「跑到哪一步炸的」被截掉，
-        #    看着像迁移写坏了，实际是夹具缺表/多表。头尾都留才能一眼看出失败点。
-        head = result.stderr[:2000]
-        tail = result.stderr[-2000:]
-        raise AssertionError(
-            f"alembic {' '.join(args)} 失败（rc={result.returncode}，库={db_path.name}）—— "
-            "迁移没跑成功，后面的断言全是空摆。真实报错：\n"
-            f"--- stdout ---\n{result.stdout[-2000:]}\n"
-            f"--- stderr 开头（revision 序列在这里） ---\n{head}\n"
-            f"--- stderr 结尾（调用栈在这里） ---\n{tail}"
-        )
 
 # --------------------------------------------------------------------------- #
 # 千帆源码读取（2026-10-11 拆包后）

@@ -85,13 +85,23 @@ logger = logging.getLogger(__name__)
 
 
 def _data_dir_for_lease(settings) -> Path:
-    """运行库所在目录 —— 租约与 DB 同进同出（部署时一起搬家）。"""
-    return Path(settings.database_sqlite_path).resolve().parent
+    """租约文件所在目录（单副本调度锁，`core/singleton.py`）。
+
+    ⚠️ v1.1.0（2026-10-24）：原来返回 `database_sqlite_path` 的父目录（即 `data/`），
+    理由是「租约与 DB 文件同进同出」。**SQLite 退役后没有 DB 文件了**，
+    那个字段也已删除 ⇒ 改为直接用 `paths.data_dir()`（同一个 `data/`，
+    由 `core/paths.py` 按文件位置推出绝对路径，不依赖 CWD）。
+    """
+    from backend.app.core import paths
+
+    #: `app_root()` 是按**文件位置**推仓库根（不依赖 CWD，见 `core/paths.py`），
+    #: 所以 systemd / Docker / 换目录起 uvicorn 都指向同一个 `data/`。
+    return paths.app_root() / "data"
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 安全自检（设计 53 的 C1，S0）：服务器形态（非 SQLite）下 `secret_key`
+    # 安全自检（设计 53 的 C1，S0）：`secret_key`
     # 仍是出厂默认值 ⇒ **拒绝启动**。放在最前面 —— 后面每件事都会写库 / 起线程，
     # 「先干活再报错」等于让一个可伪造 JWT 的进程先对外服务了几秒。
     get_settings().assert_production_ready()

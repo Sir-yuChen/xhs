@@ -74,17 +74,17 @@ def downgrade() -> None:
                 status VARCHAR(16) NOT NULL,
                 trigger_type VARCHAR(16) NOT NULL,
                 cron_expression VARCHAR(64) NOT NULL,
-                run_at DATETIME,
+                run_at TIMESTAMP,
                 misfire_policy VARCHAR(16) NOT NULL,
                 graph JSON NOT NULL,
                 global_params JSON NOT NULL,
                 remark VARCHAR(500) NOT NULL,
-                last_run_at DATETIME,
-                next_run_at DATETIME,
+                last_run_at TIMESTAMP,
+                next_run_at TIMESTAMP,
                 run_count INTEGER NOT NULL,
                 fail_count INTEGER NOT NULL,
-                created_at DATETIME NOT NULL,
-                updated_at DATETIME,
+                created_at TIMESTAMP NOT NULL,
+                updated_at TIMESTAMP,
                 FOREIGN KEY(user_id) REFERENCES users (id)
             )
             """

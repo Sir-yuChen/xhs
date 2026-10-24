@@ -33,6 +33,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
+from backend.app.core.migration_introspect import table_exists
+
 revision: str = "e4f5a6b7c8d9"
 down_revision: Union[str, None] = "d3e4f5a6b7c8"
 branch_labels: Union[str, Sequence[str], None] = None
@@ -50,12 +52,8 @@ _TYPES_SQL = ", ".join(f"'{t}'" for t in _BATCH_TASK_TYPES)
 
 def _has_tasks_table(conn) -> bool:
     """表存在性守卫：迁移测试的夹具库是「链中 stamp + 手建部分表」，缺表不该让迁移炸。"""
-    return (
-        conn.execute(
-            sa.text("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'tasks'")
-        ).first()
-        is not None
-    )
+    #: v1.1.0 PG 化：原为 `sqlite_master` 查询（SQLite 专属），统一走内省助手。
+    return table_exists(conn, "tasks")
 
 
 def upgrade() -> None:

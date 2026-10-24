@@ -33,7 +33,6 @@
 from __future__ import annotations
 
 import ast
-import sqlite3
 import threading
 import time
 import types
@@ -148,29 +147,41 @@ def _start_dying_scheduler(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
-def test_jobstore_engine_waits_much_longer_than_the_pysqlite_default(monkeypatch, tmp_path):
-    """job store 自建引擎必须带足 `timeout`（默认 5 秒 ⇒ 争用即抛 ⇒ 主循环死）。"""
-    from backend.app.core.config import Settings
+def test_jobstore_engine_uses_postgres_safe_connect_options(monkeypatch):
+    """job store 自建引擎必须带 PG 侧的连接参数（2026-10-24 随 SQLite 退役改写）。
 
-    settings = Settings()
-    settings.database_url = f"sqlite:///{str(tmp_path / 'jobstore.db')}"
-    monkeypatch.setattr(svc, "get_settings", lambda: settings)
+    ⚠️ 历史坑（2026-10-23 实测）：job store **自建引擎**、不走 `core/database.py`
+    的事件监听 —— 曾把 SQLite 专用的 `timeout` / `check_same_thread` 传给
+    psycopg3 ⇒ `ProgrammingError: invalid connection option "timeout"`，
+    异常在 jobstore 内部抛出、被 uvicorn 吞在 lifespan 里 ⇒
+    **应用启动后无报错、无监听、进程静默退出**。
+
+    本用例钉住四件事（原用例钉的「等锁时长」在 PG 上没有对应物 ——
+    PG 行锁等待由 lock_timeout 表达，默认无限等）：
+    ① URL 方言 = postgresql（不许再出现 sqlite 分支）；
+    ② `connect_args` 带 `connect_timeout` ≥ 5（连接建立等待，不是 SQLite 的锁等待）；
+    ③ `pool_pre_ping` 开（PG 重启后池里的死连接可自愈）；
+    ④ `connect_args` 里**不许**再出现 SQLite 专用参数。
+    """
+    import apscheduler.jobstores.sqlalchemy as _js
 
     seen: dict = {}
-    real_connect = sqlite3.dbapi2.connect
+    real_init = _js.SQLAlchemyJobStore.__init__
 
-    def spy(*args, **kwargs):
+    def spy(self, *args, **kwargs):
         seen.update(kwargs)
-        return real_connect(*args, **kwargs)
+        return real_init(self, *args, **kwargs)
 
-    monkeypatch.setattr(sqlite3.dbapi2, "connect", spy)
+    monkeypatch.setattr(_js.SQLAlchemyJobStore, "__init__", spy)
 
-    store = svc._persistent_jobstores()["default"]
-    with store.engine.connect():
-        pass
+    svc._persistent_jobstores()
 
-    assert seen.get("timeout") == svc.JOBSTORE_BUSY_TIMEOUT_SECONDS
-    assert svc.JOBSTORE_BUSY_TIMEOUT_SECONDS > 5, "必须显著长于 pysqlite 默认的 5 秒"
+    assert str(seen["url"]).startswith("postgresql"), f"job store 必须用 PG：{seen['url']!r}"
+    connect_args = seen["engine_options"]["connect_args"]
+    assert connect_args.get("connect_timeout", 0) >= 5, "连接建立必须给足等待时间"
+    assert seen["engine_options"]["pool_pre_ping"] is True, "必须开 pre_ping 自愈死连接"
+    sqlite_only = {"timeout", "check_same_thread"} & set(connect_args)
+    assert not sqlite_only, f"connect_args 里不许再出现 SQLite 专用参数：{sqlite_only}"
 
 
 # --------------------------------------------------------------------------- #

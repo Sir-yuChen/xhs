@@ -44,6 +44,8 @@ SQLite 的 DDL 不在事务里（同 `d4e5f6a7b8c9` 踩过的坑）：中途失�
 from alembic import op
 import sqlalchemy as sa
 
+from backend.app.core.migration_introspect import table_exists
+
 revision = "g6h7i8j9k0l1"
 down_revision = "f5a6b7c8d9e0"
 branch_labels = None
@@ -77,9 +79,8 @@ def _has_table(conn, name: str) -> bool:
     等被那条迁移用到的表）。少了它，本迁移会因为「`platform_accounts` 不存在」
     直接炸，而那与账号身份这件事本身毫无关系。
     """
-    return bool(
-        _rows(conn, "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = :n", n=name)
-    )
+    #: v1.1.0 PG 化：原为经 `_rows` 的 `sqlite_master` 查询（SQLite 专属），统一走内省助手。
+    return table_exists(conn, name)
 
 
 def _reassign(conn, table: str, column: str, survivor: int, loser: int) -> None:

@@ -60,6 +60,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
+from backend.app.core.migration_introspect import column_names, table_exists
+
 logger = logging.getLogger("alembic.migration")
 
 revision = "m5n6o7p8q9r0"
@@ -83,15 +85,13 @@ _DEPENDENT_COLUMNS: tuple[tuple[str, str], ...] = (
 
 
 def _table_exists(conn, table: str) -> bool:
-    rows = conn.exec_driver_sql(
-        "select name from sqlite_master where type='table' and name = ?", (table,)
-    ).fetchall()
-    return bool(rows)
+    #: v1.1.0 PG 化：原为 `sqlite_master` + `?` 占位符（SQLite 专属）。
+    return table_exists(conn, table)
 
 
 def _has_column(conn, table: str, column: str) -> bool:
-    rows = conn.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()
-    return any(row[1] == column for row in rows)
+    #: v1.1.0 PG 化：原为 `PRAGMA table_info` 取 `row[1]` 比较（SQLite 专属）。
+    return column in column_names(conn, table)
 
 
 def _iso(value) -> str:
@@ -149,10 +149,14 @@ def _account_channels(conn, account_id: int) -> dict[str, str]:
     from backend.app.services.account_service import parse_channel_envelope
 
     merged: dict[str, str] = {}
-    rows = conn.exec_driver_sql(
-        "select encrypted_cookies from account_cookie_versions "
-        "where platform_account_id = ? order by created_at desc, id desc",
-        (account_id,),
+    #: v1.1.0 PG 化：原为 exec_driver_sql + `?` 占位符（pysqlite paramstyle），
+    #: psycopg3 走 sa.text + `:name`。
+    rows = conn.execute(
+        sa.text(
+            "select encrypted_cookies from account_cookie_versions "
+            "where platform_account_id = :account_id order by created_at desc, id desc"
+        ),
+        {"account_id": account_id},
     ).fetchall()
     for (encrypted,) in rows:
         for channel, jar in parse_channel_envelope(decrypt_text(encrypted)).items():
@@ -227,8 +231,9 @@ def _move_relations(conn, bindings: list[dict]) -> dict[int, int]:
     mapping: dict[int, int] = {}
     for binding in bindings:
         account_id = binding["platform_account_id"]
-        row = conn.exec_driver_sql(
-            "select id, deleted_at from platform_accounts where id = ?", (account_id,)
+        row = conn.execute(
+            sa.text("select id, deleted_at from platform_accounts where id = :aid"),
+            {"aid": account_id},
         ).fetchone()
         if row is None:
             logger.warning(
@@ -336,7 +341,7 @@ def _rebuild_shop_note_goods(conn, mapping: dict[int, int]) -> int:
             variant_desc VARCHAR(255) NOT NULL,
             goods_json TEXT NOT NULL,
             entry_json TEXT NOT NULL,
-            synced_at DATETIME NOT NULL,
+            synced_at TIMESTAMP NOT NULL,
             PRIMARY KEY (id),
             FOREIGN KEY(user_id) REFERENCES users (id),
             FOREIGN KEY(platform_account_id) REFERENCES platform_accounts (id),
@@ -420,7 +425,6 @@ def _purge_redundant_accounts(conn) -> dict[str, int]:
 
 def upgrade() -> None:
     conn = op.get_bind()
-    is_sqlite = conn.dialect.name == "sqlite"
 
     # ① 先加两列（后面所有回填都依赖它们存在）。
     _add_account_columns(conn)
@@ -442,11 +446,11 @@ def upgrade() -> None:
         logger.info("[m5n6o7p8q9r0] shop_account_bindings 不存在，跳过搬家")
 
     # ④ 映射表换列。
-    if is_sqlite:
-        kept = _rebuild_shop_note_goods(conn, mapping)
-        logger.info("[m5n6o7p8q9r0] shop_note_goods 保留 %d 行（binding_id → platform_account_id）", kept)
-    else:  # pragma: no cover - 本项目只跑 SQLite；别家库按同语义手工处理
-        raise RuntimeError("本迁移按 SQLite 显式重建编写，其它方言请另行处理")
+    # v1.1.0 PG 化（2026-10-24）：原来非 SQLite 直接 raise（「按 SQLite 显式重建
+    # 编写」）。SQLite 退役后全新安装恰恰是 PG 跑到这里 —— 重建的 DDL / 数据搬移
+    # 本身就是方言无关的（`?` 占位符早已换成 sa.text），没有任何 SQLite 前提。
+    kept = _rebuild_shop_note_goods(conn, mapping)
+    logger.info("[m5n6o7p8q9r0] shop_note_goods 保留 %d 行（binding_id → platform_account_id）", kept)
 
     # ⑤ 删表。
     if _table_exists(conn, "shop_account_bindings"):
@@ -481,10 +485,10 @@ def downgrade() -> None:
             status VARCHAR(32) NOT NULL,
             status_message TEXT NOT NULL,
             goods_note_total INTEGER NOT NULL,
-            goods_synced_at DATETIME,
-            created_at DATETIME NOT NULL,
-            updated_at DATETIME NOT NULL,
-            health_checked_at DATETIME,
+            goods_synced_at TIMESTAMP,
+            created_at TIMESTAMP NOT NULL,
+            updated_at TIMESTAMP NOT NULL,
+            health_checked_at TIMESTAMP,
             goods_cursor_ms INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (id),
             FOREIGN KEY(platform_account_id) REFERENCES platform_accounts (id),
@@ -521,7 +525,7 @@ def downgrade() -> None:
                 " goods_synced_at, created_at, updated_at, health_checked_at, goods_cursor_ms) "
                 "values (:user_id, :account_id, :shop_pk, :seller_id, :shop_name, :cookies, "
                 " :status, :status_message, :total, :synced_at, CURRENT_TIMESTAMP, "
-                " CURRENT_TIMESTAMP, :health, :cursor)"
+                " CURRENT_TIMESTAMP, :health, :cursor) RETURNING id"
             ),
             {
                 "user_id": user_id,
@@ -537,8 +541,10 @@ def downgrade() -> None:
                 "health": state.get("health_checked_at") or None,
                 "cursor": int(state.get("goods_cursor_ms") or 0),
             },
-        )
-        mapping[account_id] = result.lastrowid
+        ).scalar_one()
+        #: v1.1.0 PG 化：id 取自 `RETURNING id`（`lastrowid` 是 SQLite 驱动的产物，
+        #: psycopg 上恒为 None）。
+        mapping[account_id] = int(result)
 
     # ③ 映射表换回 binding_id（值 = 该账号新绑定行的 id）。
     if _has_column(conn, "shop_note_goods", "platform_account_id"):
@@ -555,7 +561,7 @@ def downgrade() -> None:
                 variant_desc VARCHAR(255) NOT NULL,
                 goods_json TEXT NOT NULL,
                 entry_json TEXT NOT NULL,
-                synced_at DATETIME NOT NULL,
+                synced_at TIMESTAMP NOT NULL,
                 PRIMARY KEY (id),
                 FOREIGN KEY(user_id) REFERENCES users (id),
                 FOREIGN KEY(binding_id) REFERENCES shop_account_bindings (id),

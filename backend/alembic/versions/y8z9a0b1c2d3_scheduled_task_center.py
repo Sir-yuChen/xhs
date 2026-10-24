@@ -81,13 +81,6 @@ def _shanghai_now() -> datetime:
     return datetime.now(timezone(timedelta(hours=8))).replace(tzinfo=None)
 
 
-def _last_insert_id(bind) -> int:
-    """刚插入行的自增 id（按方言取，SQLite / MySQL 都覆盖）。"""
-    if bind.dialect.name == "sqlite":
-        return int(bind.execute(sa.text("SELECT last_insert_rowid()")).scalar())
-    return int(bind.execute(sa.text("SELECT LAST_INSERT_ID()")).scalar())
-
-
 def _parse_hhmm(value: Union[str, None]) -> tuple[int, int]:
     text = (value or "09:00").strip()
     parts = text.split(":")
@@ -242,7 +235,7 @@ def upgrade() -> None:
                     " is_builtin, created_at) "
                     "VALUES (:user_id, :name, :job_group, :job_key, :trigger_type, :cron_expression, "
                     " :interval_seconds, :misfire_policy, :concurrent, :params, :status, :remark, "
-                    " :is_builtin, :created_at)"
+                    " :is_builtin, :created_at) RETURNING id"
                 ),
                 {
                     "user_id": row["user_id"],
@@ -260,8 +253,11 @@ def upgrade() -> None:
                     "is_builtin": False,
                     "created_at": now,
                 },
-            )
-            job_id = _last_insert_id(bind)
+            ).scalar()
+            #: v1.1.0 PG 化（2026-10-24）：id 直接取自 INSERT 的 `RETURNING id`。
+            #: 原 `_last_insert_id()` 按方言取 `last_insert_rowid()`（SQLite）/
+            #: `LAST_INSERT_ID()`（MySQL）—— 两个方言都随 SQLite 退役退场了，
+            #: PG 的等价物就是 RETURNING（连接级会话状态在池化下也不可靠）。
             bind.execute(
                 sa.text("UPDATE auto_tasks SET schedule_job_id = :job_id WHERE id = :task_id"),
                 {"job_id": job_id, "task_id": row["id"]},

@@ -582,9 +582,6 @@ def check_all_account_cookies_once(user_id: int, account_ids: Optional[Sequence[
         db.close()
 
 
-#: job store 引擎等写锁的上限（秒，DEF-067）。默认只有 pysqlite 的 5 秒。
-JOBSTORE_BUSY_TIMEOUT_SECONDS = 30
-
 #: APScheduler 后台主循环的线程名（3.11 `BackgroundScheduler.start` 里写死）。
 SCHEDULER_THREAD_NAME = "APScheduler"
 
@@ -618,25 +615,19 @@ def _persistent_jobstores() -> dict[str, Any]:
     """
     from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 
-    from backend.app.core.db_dialect import is_postgres, is_sqlite
-
     url = get_settings().database_url
-    #: ⚠️ **`connect_args` 必须按方言分支**（2026-10-23 切 PG 时实测踩坑）：
-    #: `timeout` 与 `check_same_thread` 都是 **SQLite/pysqlite 专用**参数 ——
-    #: psycopg3 收到会直接抛 `ProgrammingError: invalid connection option "timeout"`，
-    #: 而该异常发生在 `SQLAlchemyJobStore` **自建引擎**里 ⇒ 整个应用启动失败
-    #: （且 uvicorn 把异常吞在 lifespan 里 ⇒ 表现为**无报错、无监听、进程静默退出**）。
-    engine_options: dict[str, Any] = {}
-    if is_sqlite(url):
-        engine_options["connect_args"] = {
-            "timeout": JOBSTORE_BUSY_TIMEOUT_SECONDS,
-            "check_same_thread": False,
-        }
-    elif is_postgres(url):
-        #: PG 侧的等价物：拿不到锁时等待（`busy_timeout` 在 PG 没有对应物，
-        #: 行锁等待由 `lock_timeout` 表达；这里给连接超时即可）。
-        engine_options["connect_args"] = {"connect_timeout": 10}
-        engine_options["pool_pre_ping"] = True
+    #: v1.1.0（2026-10-24，SQLite 退役）：不再按方言分支 —— 只可能是 PG。
+    #:
+    #: ⚠️ 历史坑（保留说明，因为它是「静默退出」的经典形态）：
+    #: `SQLAlchemyJobStore` **自建引擎**，原来传过 `timeout` / `check_same_thread`
+    #: 这类 SQLite 专用参数给 psycopg3 ⇒ `ProgrammingError: invalid connection
+    #: option "timeout"` ⇒ 异常在 jobstore 内部抛出、被 uvicorn 吞在 lifespan 里
+    #: ⇒ 表现为**无报错、无监听、进程静默退出**。改成 PG 参数即可，但真正
+    #: 该做的是**根本不要有方言分支**（分支本身就是漏改的来源）。
+    engine_options: dict[str, Any] = {
+        "connect_args": {"connect_timeout": 10},
+        "pool_pre_ping": True,
+    }
 
     return {
         "default": SQLAlchemyJobStore(

@@ -23,6 +23,8 @@ from __future__ import annotations
 from alembic import op
 import sqlalchemy as sa
 
+from backend.app.core.migration_introspect import table_exists
+
 # revision identifiers, used by Alembic.
 revision = "f2a3b4c5d6e7"
 down_revision = "e1f2a3b4c5d6"
@@ -34,11 +36,8 @@ _MATCH = "topic_goods_match"
 
 
 def _table_exists(conn, table: str) -> bool:
-    row = conn.execute(
-        sa.text("SELECT name FROM sqlite_master WHERE type='table' AND name=:n"),
-        {"n": table},
-    ).fetchone()
-    return row is not None
+    #: v1.1.0 PG 化：原为 `sqlite_master` 查询（SQLite 专属），统一走内省助手。
+    return table_exists(conn, table)
 
 
 def upgrade() -> None:

@@ -44,6 +44,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
+from backend.app.core.migration_introspect import index_exists
+
 revision = "l3m4n5o6p7q8"
 down_revision = "k2l3m4n5o6p7"
 branch_labels = None
@@ -55,11 +57,8 @@ _COLUMNS = ["user_id", "created_at"]
 
 
 def _has_index(conn, index: str) -> bool:
-    rows = conn.execute(
-        sa.text("SELECT name FROM sqlite_master WHERE type='index' AND name=:name"),
-        {"name": index},
-    ).fetchall()
-    return bool(rows)
+    #: v1.1.0 PG 化：原为 `sqlite_master` 查询（SQLite 专属），统一走内省助手。
+    return index_exists(conn, index)
 
 
 def upgrade() -> None:

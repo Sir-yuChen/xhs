@@ -44,6 +44,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
+from backend.app.core.migration_introspect import column_names, index_exists
+
 revision = "n6o7p8q9r0s1"
 down_revision = "m5n6o7p8q9r0"
 branch_labels = None
@@ -55,16 +57,13 @@ _INDEX = "ix_notes_published"
 
 
 def _has_column(conn, table: str, column: str) -> bool:
-    rows = conn.execute(sa.text(f"PRAGMA table_info({table})")).fetchall()
-    return any(row[1] == column for row in rows)
+    #: v1.1.0 PG 化：原为 `PRAGMA table_info`（SQLite 专属），统一走内省助手。
+    return column in column_names(conn, table)
 
 
 def _has_index(conn, index: str) -> bool:
-    rows = conn.execute(
-        sa.text("SELECT name FROM sqlite_master WHERE type='index' AND name=:name"),
-        {"name": index},
-    ).fetchall()
-    return bool(rows)
+    #: v1.1.0 PG 化：原为 `sqlite_master` 查询（SQLite 专属），统一走内省助手。
+    return index_exists(conn, index)
 
 
 def upgrade() -> None:
@@ -78,7 +77,8 @@ def upgrade() -> None:
                 sa.Column(_COLUMN, sa.Boolean(), server_default=sa.false(), nullable=False)
             )
         # 存量行置 True：依据见模块 docstring（本机实测 101/101 来自同步链路）。
-        conn.execute(sa.text(f"UPDATE {_TABLE} SET {_COLUMN} = 1"))
+        # v1.1.0 PG 化：布尔列写 TRUE（`= 1` 是 SQLite 无类型时代的写法，PG 报错）。
+        conn.execute(sa.text(f"UPDATE {_TABLE} SET {_COLUMN} = TRUE"))
     if not _has_index(conn, _INDEX):
         with op.batch_alter_table(_TABLE) as batch:
             batch.create_index(_INDEX, [_COLUMN])

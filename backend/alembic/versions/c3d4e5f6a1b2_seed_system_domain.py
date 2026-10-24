@@ -85,7 +85,8 @@ def downgrade() -> None:
         bind.execute(sa.text("DELETE FROM role_menus"))
     #: ⚠️ `roles` 可能已被迁移 1 的 downgrade 删掉（见下方 dict 段的同型说明）。
     if "roles" in tables:
-        bind.execute(sa.text("DELETE FROM roles WHERE is_system = 1"))
+        # v1.1.0 PG 化：`is_system` 是布尔列，比较写 TRUE（原 `= 1` 是 SQLite 写法）。
+        bind.execute(sa.text("DELETE FROM roles WHERE is_system = TRUE"))
 
     menus_seed = _seed_payload("menus.seed.json")
     if menus_seed and "menus" in tables:

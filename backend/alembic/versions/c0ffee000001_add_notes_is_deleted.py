@@ -19,9 +19,11 @@ depends_on = None
 
 def upgrade() -> None:
     #: SQLite 加列带非空 + 默认值时直接 ALTER 即可（默认值用于回填存量行）。
+    # v1.1.0 PG 化：布尔列的默认值必须写 sa.false()（原 `"0"` 是 SQLite 写法，
+    # PG 渲染 DEFAULT 0 对 boolean 列报 DatatypeMismatch）。
     op.add_column(
         "notes",
-        sa.Column("is_deleted", sa.Boolean(), nullable=False, server_default="0"),
+        sa.Column("is_deleted", sa.Boolean(), nullable=False, server_default=sa.false()),
     )
     #: 与模型 `index=True` 对齐，软删过滤走索引。
     op.create_index("ix_notes_is_deleted", "notes", ["is_deleted"])

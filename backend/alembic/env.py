@@ -32,23 +32,11 @@ def run_migrations_online() -> None:
     configuration = config.get_section(config.config_ini_section, {})
     configuration["sqlalchemy.url"] = url
 
-    connect_args = {}
-    if url.startswith("sqlite"):
-        connect_args["check_same_thread"] = False
-
-    connectable = engine_from_config(configuration, prefix="sqlalchemy.", poolclass=pool.NullPool, connect_args=connect_args)
-
-    if url.startswith("sqlite"):
-
-        @event.listens_for(connectable, "connect")
-        def _set_sqlite_pragma(dbapi_connection, _connection_record):
-            cursor = dbapi_connection.cursor()
-            # WAL：与 `core/database.py` 同口径（2026-09-22）。旧值 MEMORY 会在
-            # 迁移后把库踢回「读者挡写者」的旧模式，且进程猝死时有损坏风险。
-            # busy_timeout：迁移是长事务，排队等锁而不是立即失败。
-            cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.execute("PRAGMA busy_timeout=5000")
-            cursor.close()
+    # v1.1.0 (2026-10-24): SQLite retired -- the WAL / busy_timeout PRAGMA block
+    # that used to live here is gone with it. PostgreSQL only.
+    connectable = engine_from_config(
+        configuration, prefix="sqlalchemy.", poolclass=pool.NullPool
+    )
 
     with connectable.connect() as connection:
         context.configure(connection=connection, target_metadata=target_metadata, render_as_batch=True)

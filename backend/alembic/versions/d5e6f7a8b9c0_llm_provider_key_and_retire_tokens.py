@@ -42,6 +42,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
+from backend.app.core.migration_introspect import column_names, index_exists, table_exists
+
 revision = "d5e6f7a8b9c0"
 down_revision = "c4d5e6f7a8b9"
 branch_labels = None
@@ -68,24 +70,18 @@ _DEFAULT_MODEL_PLACEHOLDER = "未指定-请在页面补填"
 
 def _columns(conn, table: str) -> set[str]:
     """表的列名集合（表不存在 ⇒ 空集）。"""
-    rows = conn.execute(sa.text(f"PRAGMA table_info({table})")).fetchall()
-    return {str(row[1]) for row in rows}
+    #: v1.1.0 PG 化：原为 `PRAGMA table_info`（SQLite 专属），统一走内省助手。
+    return column_names(conn, table)
 
 
 def _table_exists(conn, table: str) -> bool:
-    row = conn.execute(
-        sa.text("SELECT name FROM sqlite_master WHERE type='table' AND name=:n"),
-        {"n": table},
-    ).fetchone()
-    return row is not None
+    #: v1.1.0 PG 化：原为 `sqlite_master` 查询（SQLite 专属），统一走内省助手。
+    return table_exists(conn, table)
 
 
 def _index_exists(conn, index: str) -> bool:
-    row = conn.execute(
-        sa.text("SELECT name FROM sqlite_master WHERE type='index' AND name=:n"),
-        {"n": index},
-    ).fetchone()
-    return row is not None
+    #: v1.1.0 PG 化：原为 `sqlite_master` 查询（SQLite 专属），统一走内省助手。
+    return index_exists(conn, index)
 
 
 def _slug(name: str) -> str:

@@ -46,13 +46,9 @@ def _load_yaml_config() -> Dict[str, Any]:
         "server.host": "server_host",
         "server.port": "server_port",
         "server.cors_origins": "backend_cors_origins",
-        "database.type": "database_type",
-        "database.sqlite_path": "database_sqlite_path",
-        "database.mysql_host": "database_mysql_host",
-        "database.mysql_port": "database_mysql_port",
-        "database.mysql_user": "database_mysql_user",
-        "database.mysql_password": "database_mysql_password",
-        "database.mysql_database": "database_mysql_database",
+        #: PostgreSQL —— **唯一**支持的数据库（v1.1.0 / 2026-10-24）。
+        #: 原 `database.type` / `database.sqlite_path` / `database.mysql_*` 六条映射
+        #: 已随对应 Settings 字段一起删除 —— 字段没了，映射留着就是死键。
         #: PostgreSQL 主库（2026-10-23，设计 51/58）
         "database.postgres_host": "database_postgres_host",
         "database.postgres_port": "database_postgres_port",
@@ -155,18 +151,15 @@ class Settings(BaseSettings):
     api_title: str = "Spider_XHS Operations Platform"
     environment: str = "development"
 
-    # Database
+    # Database —— **只有 PostgreSQL**（v1.1.0 / 2026-10-24 用户口径「完全放弃 SQLite」）
+    #:
+    #: ⚠️ 删掉的三类字段（不要加回来）：
+    #:   * `database_type`（原 `"sqlite"` 默认值）—— 只有一个选项的开关等于没有开关，
+    #:     留着会让人以为能切回去；
+    #:   * `database_sqlite_path` —— SQLite 已彻底退役；
+    #:   * `database_mysql_*` —— 从未真正支持过（只在 `model_post_init` 里拼过串）。
     database_url: str = ""
-    database_type: str = "sqlite"
-    database_sqlite_path: str = "./data/spider_xhs.db"
-    database_mysql_host: str = "localhost"
-    database_mysql_port: int = 3306
-    database_mysql_user: str = "spider_xhs"
-    database_mysql_password: str = "change_me"
-    database_mysql_database: str = "spider_xhs"
-    #: PostgreSQL（**生产主库形态**，设计 51/58）。本机实例见 `D:\work\PostgreSQL`，
-    #: 密码与 dataPanel 共用（`dataPanel/backendServer/config.yaml` 为准）。
-    #: `sqlite` = 单机/离线/测试形态，`postgres` = 正式部署形态。
+    #: PostgreSQL 分量（设计 51/58）。本机实例见 `D:\work\PostgreSQL`。
     database_postgres_host: str = "127.0.0.1"
     database_postgres_port: int = 5432
     database_postgres_user: str = "postgres"
@@ -330,41 +323,24 @@ class Settings(BaseSettings):
             )
 
     def model_post_init(self, __context: Any) -> None:
-        # Build database_url from component fields if not explicitly set
-        if not self.database_url:
-            if self.database_type == "mysql":
-                object.__setattr__(
-                    self,
-                    "database_url",
-                    f"mysql+pymysql://{self.database_mysql_user}:{self.database_mysql_password}"
-                    f"@{self.database_mysql_host}:{self.database_mysql_port}/{self.database_mysql_database}"
-                    "?charset=utf8mb4",
-                )
-            elif self.database_type == "postgres":
-                #: PostgreSQL 主库（设计 51/58）。驱动用 **psycopg3**
-                #: （`psycopg[binary]`，有 Windows 预编译 wheel，免本地编译）。
-                object.__setattr__(
-                    self,
-                    "database_url",
-                    f"postgresql+psycopg://{self.database_postgres_user}:{self.database_postgres_password}"
-                    f"@{self.database_postgres_host}:{self.database_postgres_port}/{self.database_postgres_database}",
-                )
-            else:
-                # Backward compatibility: if the old default DB path exists but the
-                # new YAML-configured path does not, use the old path so existing
-                # installations keep their data without manual migration.
-                sqlite_path = self.database_sqlite_path
-                old_default = "./backend/app/storage/spider_xhs.db"
-                if sqlite_path != old_default:
-                    new_db = Path(sqlite_path)
-                    old_db = Path(old_default)
-                    if not new_db.exists() and old_db.exists():
-                        sqlite_path = old_default
-                object.__setattr__(
-                    self,
-                    "database_url",
-                    f"sqlite:///{sqlite_path}",
-                )
+        """没显式给 `database_url` ⇒ 用分量字段拼出 **PostgreSQL** 连接串。
+
+        ⚠️ v1.1.0（2026-10-24，用户口径「完全放弃 SQLite，全部迁移到 PG」）：
+        **删掉了 MySQL 与 SQLite 两个分支**，也删掉了 SQLite 时代的
+        「旧默认路径存在就用旧路径」兼容补丁（那段逻辑是为了让老桌面安装
+        升级后自动接上老库 —— 桌面端退役后没有「老安装」这回事了）。
+
+        现在只剩一种结果：`postgresql+psycopg://...`（驱动 psycopg3，
+        有 Windows 预编译 wheel，免本地编译）。
+        """
+        if self.database_url:
+            return
+        object.__setattr__(
+            self,
+            "database_url",
+            f"postgresql+psycopg://{self.database_postgres_user}:{self.database_postgres_password}"
+            f"@{self.database_postgres_host}:{self.database_postgres_port}/{self.database_postgres_database}",
+        )
 
     @property
     def storage_dir(self) -> Path:
@@ -394,24 +370,20 @@ class Settings(BaseSettings):
     def assert_production_ready(self) -> None:
         """启动安全自检（设计 53 的 C1）—— **不满足就拒绝启动**。
 
-        判据只有一条，但它是真事故：非 SQLite（= 服务器可能对外）时
-        `secret_key` 仍是随仓库发布的默认值 `dev-only-change-me` ⇒
+        判据：`secret_key` 仍是随仓库发布的默认值 `dev-only-change-me` ⇒
         **任何人都能伪造任意用户的 JWT，包括 admin**。
 
-        为什么只在非 SQLite 才拦：桌面端（SQLite）跑在用户自己的机器上、
-        只监听本机，拦了会让所有**已有安装**升级后起不来 —— 那是把安全问题
-        换成可用性事故。`database_type != sqlite` 是本项目已有的「服务器化」信号。
+        ⚠️ v1.1.0（2026-10-24）：**去掉了「SQLite 就放过」的例外**。
+        原设计说「桌面端跑在用户自己机器上、只监听本机，拦了会让已有安装升级后
+        起不来」—— 那个前提随「桌面端退役 + SQLite 完全退役」一起消失了：
+        现在只有服务器形态，**一律要求真密钥**。原来是 if 分支，现在无条件执行。
 
         抛 `RuntimeError` 而不是 warning：warning 在 systemd / Docker 的日志里
         没人看，而伪造 JWT 是不可事后发现的那种事故。
         """
-        from backend.app.core.db_dialect import is_sqlite
-
-        if is_sqlite(self.database_url):
-            return
         if self.secret_key.strip() == DEFAULT_SECRET_KEY:
             raise RuntimeError(
-                "拒绝启动：数据库不是 SQLite（服务器部署形态）时 secret_key 必须改掉，"
+                "拒绝启动：secret_key 必须改掉（当前仍是随仓库发布的默认值），"
                 f"当前仍是默认值 {DEFAULT_SECRET_KEY!r} —— 任何人都能用它伪造任意用户的令牌。"
                 "请设置环境变量 SECRET_KEY（或 config/default.yaml 的 security.secret_key）。"
             )

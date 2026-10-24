@@ -47,6 +47,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
+from backend.app.core.migration_introspect import column_names, table_exists
+
 revision = "g0a1b2c3d4e5"
 down_revision = "f2a3b4c5d6e7"
 
@@ -61,17 +63,13 @@ _COLUMNS = (
 
 
 def _table_exists(conn: object) -> bool:
-    row = conn.execute(
-        sa.text(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=:name"
-        ),
-        {"name": _TABLE},
-    ).fetchone()
-    return row is not None
+    #: v1.1.0 PG 化：原为 `sqlite_master` 查询（SQLite 专属），统一走内省助手。
+    return table_exists(conn, _TABLE)
 
 
 def _existing_columns(conn: object) -> set[str]:
-    return {row[1] for row in conn.execute(sa.text(f"PRAGMA table_info({_TARGET})"))}
+    #: v1.1.0 PG 化：原为 `PRAGMA table_info`（SQLite 专属），统一走内省助手。
+    return column_names(conn, _TARGET)
 
 
 def upgrade() -> None:

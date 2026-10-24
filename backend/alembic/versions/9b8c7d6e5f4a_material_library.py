@@ -39,6 +39,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
+from backend.app.core.migration_introspect import index_exists, table_exists
+
 revision = "9b8c7d6e5f4a"
 down_revision = "f8a9b0c1d2e3"
 branch_labels = None
@@ -52,19 +54,13 @@ _INDEX_FILES_UNIQUE = "uq_material_files_folder_relpath"
 
 
 def _table_exists(conn, table: str) -> bool:
-    row = conn.execute(
-        sa.text("SELECT name FROM sqlite_master WHERE type='table' AND name=:n"),
-        {"n": table},
-    ).fetchone()
-    return row is not None
+    #: v1.1.0 PG 化：原为 `sqlite_master` 查询（SQLite 专属），统一走内省助手。
+    return table_exists(conn, table)
 
 
 def _index_exists(conn, index: str) -> bool:
-    row = conn.execute(
-        sa.text("SELECT name FROM sqlite_master WHERE type='index' AND name=:n"),
-        {"n": index},
-    ).fetchone()
-    return row is not None
+    #: v1.1.0 PG 化：原为 `sqlite_master` 查询（SQLite 专属），统一走内省助手。
+    return index_exists(conn, index)
 
 
 def upgrade() -> None:

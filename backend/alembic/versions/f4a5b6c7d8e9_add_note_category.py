@@ -27,6 +27,8 @@ from typing import Sequence, Union
 import sqlalchemy as sa
 from alembic import op
 
+from backend.app.core.migration_introspect import column_names
+
 revision: str = "f4a5b6c7d8e9"
 down_revision: Union[str, Sequence[str], None] = "e3f4a5b6c7d8"
 branch_labels: Union[str, Sequence[str], None] = None
@@ -34,7 +36,8 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def _columns(conn, table: str) -> set[str]:
-    return {row[1] for row in conn.execute(sa.text(f"PRAGMA table_info({table})"))}
+    #: v1.1.0 PG 化：原为 `PRAGMA table_info`（SQLite 专属），统一走内省助手。
+    return column_names(conn, table)
 
 
 def upgrade() -> None:

@@ -25,9 +25,9 @@ from __future__ import annotations
 
 import logging
 
-import sqlalchemy as sa
-
 from alembic import op
+
+from backend.app.core.migration_introspect import column_names
 
 logger = logging.getLogger("alembic.migration")
 
@@ -38,8 +38,8 @@ depends_on = None
 
 
 def _has_column(conn, table: str, column: str) -> bool:
-    rows = conn.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()
-    return any(row[1] == column for row in rows)
+    #: v1.1.0 PG 化：原为 `exec_driver_sql("PRAGMA table_info(...)")`（SQLite 专属），统一走内省助手。
+    return column in column_names(conn, table)
 
 
 def _convert_rows_to_envelopes(conn) -> int:

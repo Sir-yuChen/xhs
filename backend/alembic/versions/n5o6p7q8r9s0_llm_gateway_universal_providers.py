@@ -28,6 +28,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
+from backend.app.core.migration_introspect import column_names
+
 revision = "n5o6p7q8r9s0"
 down_revision = "m4n5o6p7q8r9"
 branch_labels = None
@@ -41,13 +43,23 @@ _TABLE_USAGE = "llm_gateway_usage_logs"
 
 def _columns(conn, table: str) -> set[str]:
     """表的列名集合（表不存在 ⇒ 空集）。"""
-    rows = conn.execute(sa.text(f"PRAGMA table_info({table})")).fetchall()
-    return {str(row[1]) for row in rows}
+    #: v1.1.0 PG 化：原为 `PRAGMA table_info`（SQLite 专属），统一走内省助手。
+    return column_names(conn, table)
 
 
 def _tables(conn) -> set[str]:
-    rows = conn.execute(sa.text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
-    return {str(row[0]) for row in rows}
+    #: v1.1.0 PG 化：原为 `sqlite_master` 全表名查询（SQLite 专属）。助手模块只有
+    #: 单表 `table_exists` 探针、没有「全部表名」探针，调用点是 `_X in _tables(conn)`
+    #: 形态，故此处直接查 information_schema（等价语义：当前 schema 全部表名）。
+    return {
+        str(row[0])
+        for row in conn.execute(
+            sa.text(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = current_schema()"
+            )
+        )
+    }
 
 
 def upgrade() -> None:

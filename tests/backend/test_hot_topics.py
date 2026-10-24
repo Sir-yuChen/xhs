@@ -10,12 +10,12 @@
 
 from __future__ import annotations
 
-from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from backend.app.core.database import Base
 from backend.app.models import HotTopic, ShopProduct, TopicGoodsMatch
 from backend.app.services import hot_topic_service as svc
+from tests.backend.conftest import make_engine
 
 import pytest
 
@@ -30,17 +30,19 @@ import pytest
 pytestmark = pytest.mark.contract
 
 def _session(tmp_path, name="hot_topic.db"):
-    engine = create_engine(f"sqlite:///{tmp_path / name}")
-    # ⚠️ 生产库在连接级打开 `PRAGMA foreign_keys=ON`（`core/database.py`），
-    # 测试夹具自己 create_engine 不走那条监听，必须**显式**打开同一个 PRAGMA ——
-    # 否则外键在测试里是关着的，`platform_account_id=1` 这种引用一个不存在的
-    # 账号行也能写进去，与生产行为不一致（打开后这些用例必须先建账号行）。
-    from sqlalchemy import event
+    """v1.1.0 PG 化（2026-10-24）：每用例一个 PG schema（`make_engine`）。
 
-    @event.listens_for(engine, "connect")
-    def _enable_fk(dbapi_connection, connection_record):
-        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+    ⚠️ 旧版自建 SQLite engine 还要手动开 `PRAGMA foreign_keys=ON` —— PG 的外键
+    恒开，「引用不存在的账号行写不进去」这层一致性现在天然成立，无须（也无法）
+    再挂任何监听。schema 由 `weakref.finalize` 在 engine 回收时顺带删掉，
+    用例自身不用管清理。
+    """
+    import weakref
 
+    from tests.backend.conftest import drop_schema
+
+    engine = make_engine(tmp_path / name)
+    weakref.finalize(engine, drop_schema, engine)
     Base.metadata.create_all(engine)
     return sessionmaker(bind=engine)()
 

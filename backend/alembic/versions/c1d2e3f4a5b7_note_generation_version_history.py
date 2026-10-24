@@ -124,15 +124,18 @@ def upgrade() -> None:
         unique=False,
         if_not_exists=True,
     )
-    #: 采用版唯一（**部分唯一索引**：只约束 is_adopted=1 的行）
-    #: ⇒ 同商品最多一条「采用版」，其余版本可以都是 0。
+    #: 采用版唯一（**部分唯一索引**：只约束 is_adopted=TRUE 的行）
+    #: ⇒ 同商品最多一条「采用版」，其余版本可以都是 FALSE。
     op.create_index(
         "uq_generation_records_adopted",
         "generation_records",
         ["user_id", "shop_product_id"],
         unique=True,
         sqlite_where=sa.text("is_adopted = 1"),
-        postgresql_where=sa.text("is_adopted = 1"),
+        # v1.1.0 PG 化：布尔列的部分索引谓词写 TRUE（原 `= 1` 在 PG 报
+        # `boolean = integer` 类型错）。sqlite_where 保留 1 —— SQLite 侧的
+        # 历史写法，本项目已不再执行它，留着只为不删字段。
+        postgresql_where=sa.text("is_adopted = TRUE"),
         if_not_exists=True,
     )
 

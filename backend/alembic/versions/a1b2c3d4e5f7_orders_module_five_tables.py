@@ -21,6 +21,8 @@ from typing import Sequence, Union
 from alembic import op
 import sqlalchemy as sa
 
+from backend.app.core.migration_introspect import table_exists
+
 
 revision: str = "a1b2c3d4e5f7"
 # ⚠️ 双父（merge）：本迁移同时挂在两条已存在的链上 ——
@@ -45,11 +47,8 @@ def _table_exists(conn, table: str) -> bool:
     （2026-10-04 实测：M6 的 `test_dedupe_seeded_scheduled_jobs_migration` 就红在这里，
     而报错被 alembic/fixture 包装吞掉，只看到「upgrade head 失败」）。
     """
-    row = conn.execute(
-        sa.text("SELECT name FROM sqlite_master WHERE type='table' AND name=:n"),
-        {"n": table},
-    ).fetchone()
-    return row is not None
+    #: v1.1.0 PG 化：原为 `sqlite_master` 查询（SQLite 专属），统一走内省助手。
+    return table_exists(conn, table)
 
 
 def _orders() -> None:

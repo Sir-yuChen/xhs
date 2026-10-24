@@ -145,16 +145,18 @@ def upgrade() -> None:
             job_columns = _columns(bind, "scheduled_jobs")
             insert_columns = [name for name in values if name in job_columns]
             placeholders = ", ".join(f":{name}" for name in insert_columns)
-            bind.execute(
+            #: v1.1.0 PG 化（2026-10-24）：id 直接取自 INSERT 的 `RETURNING id`。
+            #: 原来插完再 `SELECT last_insert_rowid()` —— 那是 SQLite 连接级
+            #: 会话状态，PG 没有；RETURNING 是唯一可靠的等价物。
+            result = bind.execute(
                 sa.text(
                     f"INSERT INTO scheduled_jobs ({', '.join(insert_columns)}) "
-                    f"VALUES ({placeholders})"
+                    f"VALUES ({placeholders}) RETURNING id"
                 ),
                 {name: values[name] for name in insert_columns},
             )
             if user_id == first_user:
-                clone_id = bind.execute(sa.text("SELECT last_insert_rowid()")).scalar()
-                first_user_clone[row["job_key"]] = int(clone_id)
+                first_user_clone[row["job_key"]] = int(result.scalar_one())
             owned_keys.setdefault(user_id, set()).add(row["job_key"])
 
     # 4. 全局行日志收尾 + 删除全局行 ------------------------------------- #

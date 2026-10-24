@@ -58,6 +58,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
+from backend.app.core.migration_introspect import column_names, index_exists, table_exists
+
 revision = "e5f6a7b8c9d0"
 down_revision = "b2c3d4e5f6a7"
 branch_labels = None
@@ -86,24 +88,18 @@ _KIND_BY_BUSINESS_KEY: dict[str, str] = {
 
 
 def _table_exists(conn, table: str) -> bool:
-    row = conn.execute(
-        sa.text("SELECT name FROM sqlite_master WHERE type='table' AND name=:n"),
-        {"n": table},
-    ).fetchone()
-    return row is not None
+    #: v1.1.0 PG 化：原为 `sqlite_master` 查询（SQLite 专属），统一走内省助手。
+    return table_exists(conn, table)
 
 
 def _column_exists(conn, table: str, column: str) -> bool:
-    rows = conn.execute(sa.text(f"PRAGMA table_info({table})")).fetchall()
-    return any(r[1] == column for r in rows)
+    #: v1.1.0 PG 化：原为 `PRAGMA table_info`（SQLite 专属），统一走内省助手。
+    return column in column_names(conn, table)
 
 
 def _index_exists(conn, index: str) -> bool:
-    row = conn.execute(
-        sa.text("SELECT name FROM sqlite_master WHERE type='index' AND name=:n"),
-        {"n": index},
-    ).fetchone()
-    return row is not None
+    #: v1.1.0 PG 化：原为 `sqlite_master` 查询（SQLite 专属），统一走内省助手。
+    return index_exists(conn, index)
 
 
 def upgrade() -> None:
@@ -119,7 +115,8 @@ def upgrade() -> None:
             sa.Column("model_name", sa.String(length=128), nullable=False, server_default=""),
             sa.Column("model_type", sa.String(length=16), nullable=False, server_default="text"),
             sa.Column("platform", sa.String(length=32), nullable=False, server_default="xhs"),
-            sa.Column("enabled", sa.Boolean(), nullable=False, server_default=sa.text("1")),
+            # v1.1.0 PG 化：布尔列默认值写 sa.true()（原 sa.text("1") PG 报 DatatypeMismatch）。
+            sa.Column("enabled", sa.Boolean(), nullable=False, server_default=sa.true()),
             sa.Column("remark", sa.String(length=255), nullable=False, server_default=""),
             sa.Column("created_at", sa.DateTime(), nullable=False),
             sa.Column("updated_at", sa.DateTime(), nullable=False),
@@ -144,7 +141,7 @@ def upgrade() -> None:
                      enabled, remark, created_at, updated_at)
                 SELECT
                     b.user_id, b.provider_key, b.model_name, :kind, b.platform,
-                    1, '', datetime('now'), datetime('now')
+                    TRUE, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                 FROM {_TABLE_BUSINESS} AS b
                 WHERE b.business_key = :bkey
                   AND b.provider_key <> ''
@@ -179,7 +176,7 @@ def upgrade() -> None:
                      enabled, remark, created_at, updated_at)
                 SELECT
                     c.user_id, c.provider_key, c.default_model, c.model_type, c.platform,
-                    1, '', datetime('now'), datetime('now')
+                    TRUE, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                 FROM {_TABLE_CONFIGS} AS c
                 WHERE c.default_model <> ''
                   AND c.provider_key <> ''
@@ -200,13 +197,15 @@ def upgrade() -> None:
         sa.text(
             f"""
             SELECT m.provider_key, m.model_name,
-                   GROUP_CONCAT(DISTINCT m.model_type) AS types
+                   string_agg(DISTINCT m.model_type, ',') AS types
             FROM {_TABLE_MODELS} AS m
             GROUP BY m.provider_key, m.model_name
             HAVING COUNT(DISTINCT m.model_type) > 1
             """
         )
     ).fetchall()
+    #: ⚠️ v1.1.0 PG 化：原为 SQLite 的 GROUP_CONCAT，PG 等价物是
+    #: `string_agg(col, ',')`（SQLite 默认分隔符就是逗号，语义一致）。
     for r in rows:
         print(
             f"[mig e5f6a7b8c9d0] WARN 模型类型冲突："

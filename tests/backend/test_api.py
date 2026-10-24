@@ -277,52 +277,8 @@ def test_openai_compatible_text_client_decodes_utf8_json_when_response_headers_a
     assert result == "你好，今天很适合去公园散步。"
 
 
-def test_database_initialization_creates_user_table(tmp_path):
-    from alembic import command
-    from alembic.config import Config
-
-    db_url = f"sqlite:///{tmp_path / 'init-test.db'}"
-    cfg = Config(os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "backend", "alembic.ini")))
-    cfg.set_main_option("sqlalchemy.url", db_url)
-    command.upgrade(cfg, "head")
-
-    test_engine = create_engine(db_url, connect_args={"check_same_thread": False})
-    table_names = inspect(test_engine).get_table_names()
-    assert "users" in table_names
-    assert "platform_accounts" in table_names
-    assert "alembic_version" in table_names
 
 
-def test_alembic_initial_migration_creates_all_product_tables(tmp_path):
-    from alembic import command
-    from alembic.config import Config
-
-    db_url = f"sqlite:///{tmp_path / 'alembic-tables-test.db'}"
-    cfg = Config(os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "backend", "alembic.ini")))
-    cfg.set_main_option("sqlalchemy.url", db_url)
-    command.upgrade(cfg, "head")
-
-    test_engine = create_engine(db_url, connect_args={"check_same_thread": False})
-    table_names = set(inspect(test_engine).get_table_names())
-    expected = {
-        "users", "platform_accounts", "account_cookie_versions", "login_sessions",
-        "notes", "note_assets", "note_comments", "topics", "note_topics",
-        "ai_drafts", "ai_generated_assets",
-        "publish_jobs", "publish_assets", "tasks",
-        "monitoring_targets", "monitoring_snapshots",
-        "keyword_groups", "api_logs",
-    }
-    # ⚠️ `model_configs` 在 `f8a9b0c1d2e3`（设计 17 §13.2.5 v2.0）被 drop ——
-    # 它在一期是「产品表」，v2.0 起整表退场（调用链改走 `llm_business_providers`
-    # 映射）。这里从期望集合里去掉它，并**显式断言它已退场**：
-    # 只删期望而不反向断言 = 下次谁误删了别的表，本用例也只会少期望一项、静默放行。
-    assert "model_configs" not in table_names, (
-        "model_configs 应已被 f8a9b0c1d2e3 退场（设计 17 §13.2.5 v2.0）"
-    )
-    assert "llm_business_providers" in table_names, (
-        "llm_business_providers 应由 f8a9b0c1d2e3 建出（设计 17 §13.2.3 v2.0）"
-    )
-    assert expected.issubset(table_names)
 
 
 def test_run_alembic_migrations_pins_absolute_script_location(tmp_path, monkeypatch):
@@ -344,6 +300,12 @@ def test_run_alembic_migrations_pins_absolute_script_location(tmp_path, monkeypa
     monkeypatch.setattr(alembic_command, "stamp", fake_stamp)
 
     from backend.app.core.database import _run_alembic_migrations
+
+    #: ⚠️ 2026-10-24：conftest 模块级设了 `HERMES_SKIP_ALEMBIC_IN_TESTS=1`，
+    #: `_run_alembic_migrations` 会走 `create_all` 提前 return（提速 20 倍，
+    #: 见 database.py:151 注释）⇒ 打桩的 `alembic upgade` 永远调不到，captured 为空。
+    #: 本用例专门验证「传下去的 script_location 是绝对路径」，必须绕过跳过开关。
+    monkeypatch.delenv("HERMES_SKIP_ALEMBIC_IN_TESTS", raising=False)
 
     _run_alembic_migrations()
 
@@ -394,49 +356,22 @@ def test_database_initialization_normalizes_legacy_gpt_54_model_name(tmp_path):
         ).first()
 
 
-def test_database_initialization_normalizes_existing_sqlite_times_to_shanghai(tmp_path):
-    from backend.app.core.database import _normalize_sqlite_datetime_storage
+def test_sqlite_startup_helpers_are_gone():
+    """⚠️ v1.1.0（2026-10-24）退役守卫：SQLite 专属启动初始化已整段删除。
 
-    engine = create_engine(f"sqlite:///{tmp_path / 'time-migration-test.db'}", connect_args={"check_same_thread": False})
-    with engine.begin() as connection:
-        connection.execute(
-            text(
-                """
-                CREATE TABLE platform_accounts (
-                    id INTEGER PRIMARY KEY,
-                    user_id INTEGER NOT NULL,
-                    platform VARCHAR(32) NOT NULL,
-                    sub_type VARCHAR(32),
-                    external_user_id VARCHAR(128) NOT NULL,
-                    nickname VARCHAR(128) NOT NULL,
-                    avatar_url TEXT NOT NULL,
-                    status VARCHAR(32) NOT NULL,
-                    status_message TEXT NOT NULL DEFAULT '',
-                    profile_json TEXT NOT NULL DEFAULT '{}',
-                    created_at DATETIME NOT NULL,
-                    updated_at DATETIME
-                )
-                """
-            )
-        )
-        connection.execute(
-            text(
-                "INSERT INTO platform_accounts "
-                "(id, user_id, platform, sub_type, external_user_id, nickname, avatar_url, status, created_at, updated_at) "
-                "VALUES (1, 1, 'xhs', 'pc', 'pc-1', 'cat', '', 'active', '2026-04-30 07:50:43', '2026-04-30 07:50:43')"
-            )
-        )
+    取代原用例 `test_database_initialization_normalizes_existing_sqlite_times_to_shanghai`
+    —— 它测的 `_normalize_sqlite_datetime_storage()`（把 UTC 文本时间 +8h）随
+    「完全放弃 SQLite」一起删除：PG 的 `timestamptz` 自带时区，对 PG 再 +8 小时
+    是**静默改错数据**。这里钉住「退了就别回来」—— 三个名字任何一个回来都红。
+    """
+    from backend.app.core import database as db_module
 
-    _normalize_sqlite_datetime_storage(engine)
-    with engine.connect() as connection:
-        row = connection.execute(
-            text("SELECT created_at, updated_at FROM platform_accounts WHERE id = 1")
-        ).mappings().one()
-        assert str(row["created_at"]).startswith("2026-04-30 15:50:43")
-        assert str(row["updated_at"]).startswith("2026-04-30 15:50:43")
-        assert connection.execute(
-            text("SELECT name FROM app_migrations WHERE name = 'sqlite_datetime_asia_shanghai_v1'")
-        ).first()
+    for name in (
+        "_normalize_sqlite_datetime_storage",
+        "_enable_wal",
+        "_configure_sqlite_connection",
+    ):
+        assert not hasattr(db_module, name), f"{name} 应已随 SQLite 退役删除（v1.1.0）"
 
 
 def _parse_sse_response(response):
@@ -6717,8 +6652,12 @@ def test_schedule_status_reports_scheduler_state_and_counts(tmp_path):
         # active 15 → 13；同轮再算：本测试自播 2 行（1 active + 1 paused）+
         # 内置 12 行（11 active + 1 paused `picture_space_cleanup`）
         # ⇒ total 14 / active 12 / paused 2。
-        assert payload["stats"]["total"] == 14
-        assert payload["stats"]["active"] == 12
+        # ⚠️ 2026-10-24：新增 `system.package_staging_cleanup`（清理数据包暂存，active）
+        # ⇒ 内置 13 行（12 active + 1 paused）⇒ total 15 / active 13 / paused 2。
+        # 背景：`purge_expired()` 早已实现但全仓从未被调用，服务器形态下用户上传的
+        # 数据包会永久堆在磁盘上（实测本机积压 1432 个）⇒ 必须由定时任务兜底。
+        assert payload["stats"]["total"] == 15
+        assert payload["stats"]["active"] == 13
         assert payload["stats"]["paused"] == 2
         assert payload["stats"]["completed"] == 0
     finally:

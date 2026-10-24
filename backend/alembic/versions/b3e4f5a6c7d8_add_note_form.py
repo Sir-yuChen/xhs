@@ -23,6 +23,8 @@ Revises: a1d2p3r4u5l6
 from alembic import op
 import sqlalchemy as sa
 
+from backend.app.core.migration_introspect import column_names
+
 revision = "b3e4f5a6c7d8"
 down_revision = "a1d2p3r4u5l6"
 branch_labels = None
@@ -33,9 +35,8 @@ DEFAULT_FORM = "image"
 
 
 def _columns(table: str) -> set[str]:
-    bind = op.get_bind()
-    rows = bind.execute(sa.text(f"PRAGMA table_info({table})")).fetchall()
-    return {row[1] for row in rows}
+    #: v1.1.0 PG 化：原为 `PRAGMA table_info`（SQLite 专属），统一走内省助手。
+    return column_names(op.get_bind(), table)
 
 
 def upgrade() -> None:

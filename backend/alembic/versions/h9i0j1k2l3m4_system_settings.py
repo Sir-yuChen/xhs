@@ -42,6 +42,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
+from backend.app.core.migration_introspect import column_names
+
 revision = "h9i0j1k2l3m4"
 down_revision = "f7a8b9c0d1e2"
 branch_labels = None
@@ -52,8 +54,8 @@ _TABLE = "system_settings"
 
 def _columns(conn, table: str) -> set[str]:
     """表的列名集合（表不存在 ⇒ 空集）。"""
-    rows = conn.execute(sa.text(f"PRAGMA table_info({table})")).fetchall()
-    return {str(row[1]) for row in rows}
+    #: v1.1.0 PG 化：原为 `PRAGMA table_info`（SQLite 专属），统一走内省助手。
+    return column_names(conn, table)
 
 
 def upgrade() -> None:

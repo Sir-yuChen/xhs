@@ -49,6 +49,8 @@ from typing import Sequence, Union
 import sqlalchemy as sa
 from alembic import op
 
+from backend.app.core.migration_introspect import column_names, table_exists
+
 
 revision: str = "b2c3d4e5f6g7"
 down_revision: Union[str, None] = "a0b1c2d3e4f5"
@@ -57,16 +59,13 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def _has_table(conn, table: str) -> bool:
-    row = conn.execute(
-        sa.text("SELECT name FROM sqlite_master WHERE type='table' AND name=:name"),
-        {"name": table},
-    ).first()
-    return row is not None
+    #: v1.1.0 PG 化：原为 `sqlite_master` 查询（SQLite 专属），统一走内省助手。
+    return table_exists(conn, table)
 
 
 def _has_column(conn, table: str, column: str) -> bool:
-    rows = conn.execute(sa.text(f"PRAGMA table_info({table})")).fetchall()
-    return any(row[1] == column for row in rows)
+    #: v1.1.0 PG 化：原为 `PRAGMA table_info` 取 `row[1]` 比较（SQLite 专属）。
+    return column in column_names(conn, table)
 
 
 def _create_topic_tables(conn) -> None:
@@ -80,7 +79,7 @@ def _create_topic_tables(conn) -> None:
                     name VARCHAR(64) NOT NULL,
                     color VARCHAR(24) NOT NULL DEFAULT '#1677ff',
                     platform_id VARCHAR(64) NOT NULL DEFAULT '',
-                    created_at DATETIME,
+                    created_at TIMESTAMP,
                     CONSTRAINT uq_topics_user_name UNIQUE (user_id, name)
                 )
                 """
@@ -96,7 +95,7 @@ def _create_topic_tables(conn) -> None:
                     id INTEGER NOT NULL PRIMARY KEY,
                     note_id INTEGER NOT NULL,
                     topic_id INTEGER NOT NULL,
-                    created_at DATETIME,
+                    created_at TIMESTAMP,
                     CONSTRAINT uq_note_topics_note_topic UNIQUE (note_id, topic_id)
                 )
                 """
@@ -122,10 +121,12 @@ def _find_or_create_topic(conn, user_id: int, name: str, *, color: str = "", pla
                 {"pid": platform_id, "id": topic_id},
             )
         return topic_id
+    #: v1.1.0 PG 化：id 取自 `RETURNING id`（原 `result.lastrowid` 是 SQLite
+    #: 驱动的产物，psycopg 上恒为 None）。
     result = conn.execute(
         sa.text(
             "INSERT INTO topics (user_id, name, color, platform_id, created_at) "
-            "VALUES (:uid, :name, :color, :pid, :now)"
+            "VALUES (:uid, :name, :color, :pid, :now) RETURNING id"
         ),
         {
             "uid": user_id,
@@ -135,15 +136,20 @@ def _find_or_create_topic(conn, user_id: int, name: str, *, color: str = "", pla
             "now": "2026-09-25 00:00:00",
         },
     )
-    return int(result.lastrowid)
+    return int(result.scalar_one())
 
 
 def _link(conn, note_pk: int, topic_id: int) -> None:
-    """补关系行（幂等：唯一键冲突即已存在，跳过）。"""
+    """补关系行（幂等：唯一键冲突即已存在，跳过）。
+
+    ⚠️ v1.1.0 PG 化：原为 `INSERT OR IGNORE`（SQLite 专属）；
+    PG 等价物 = `ON CONFLICT DO NOTHING`（不指定冲突目标 = 任何唯一约束冲突都跳过，
+    与 OR IGNORE 语义一致）。
+    """
     conn.execute(
         sa.text(
-            "INSERT OR IGNORE INTO note_topics (note_id, topic_id, created_at) "
-            "VALUES (:nid, :tid, :now)"
+            "INSERT INTO note_topics (note_id, topic_id, created_at) "
+            "VALUES (:nid, :tid, :now) ON CONFLICT DO NOTHING"
         ),
         {"nid": note_pk, "tid": topic_id, "now": "2026-09-25 00:00:00"},
     )
@@ -297,7 +303,10 @@ def downgrade() -> None:
             if new_tag_id is None:
                 continue
             conn.execute(
-                sa.text("INSERT OR IGNORE INTO note_tags (note_id, tag_id) VALUES (:nid, :tid)"),
+                sa.text(
+                    "INSERT INTO note_tags (note_id, tag_id) VALUES (:nid, :tid) "
+                    "ON CONFLICT DO NOTHING"
+                ),
                 {"nid": int(note_id), "tid": new_tag_id},
             )
 

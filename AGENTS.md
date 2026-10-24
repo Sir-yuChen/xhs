@@ -6,8 +6,10 @@
 ## 1. 一句话
 
 小红书运营自动化平台（一期：账号矩阵 + 采集 + 内容库 + 草稿 AI + 发布 + 监控；
-二开：商品笔记自动化 + 「我的笔记与互动数据」）。桌面端跑 `backend`(FastAPI) + `frontend`(React/Vite)，
-数据在 SQLite `data/spider_xhs.db`。
+二开：商品笔记自动化 + 「我的笔记与互动数据」）。**web 分支 v1.1.0 = 服务器/web 形态**：
+`backend`(FastAPI) + `frontend`(React/Vite)，数据库 **PostgreSQL**（本机 `D:\work\PostgreSQL`；
+2026-10-24 用户口径「完全放弃 SQLite」—— `core/database.py` 非 PG 直接拒绝启动，
+桌面端冻结在 `desktop-1.0.7` 分支）。
 
 | 目录 | 作用 |
 |---|---|

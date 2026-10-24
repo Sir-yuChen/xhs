@@ -45,6 +45,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
+from backend.app.core.migration_introspect import column_names
+
 revision = "b2c3d4e5f6a7"
 down_revision = "9b8c7d6e5f4a"
 branch_labels = None
@@ -56,17 +58,26 @@ _TABLE_CONFIGS = "llm_gateway_configs"
 
 
 def _column_exists(conn, table: str, column: str) -> bool:
-    rows = conn.execute(sa.text(f"PRAGMA table_info({table})")).fetchall()
-    return any(r[1] == column for r in rows)
+    #: v1.1.0 PG 化：原为 `PRAGMA table_info`（SQLite 专属），统一走内省助手。
+    return column in column_names(conn, table)
 
 
 def _column_notnull(conn, table: str, column: str) -> bool | None:
     """返回该列的 NOT NULL 标志（1/0）；列不存在 ⇒ None。"""
-    rows = conn.execute(sa.text(f"PRAGMA table_info({table})")).fetchall()
-    for r in rows:
-        if r[1] == column:
-            return bool(r[3])
-    return None
+    #: v1.1.0 PG 化：原为 `PRAGMA table_info` 的 notnull 标志位（r[3]，SQLite 专属）。
+    #: 助手模块只有列名集合、没有 NOT NULL 探针，故此处直接查 information_schema
+    #: （语义等价：notnull=1 ⇔ is_nullable='NO'；列不存在 ⇒ None）。
+    row = conn.execute(
+        sa.text(
+            "SELECT is_nullable FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = :t "
+            "AND column_name = :c"
+        ),
+        {"t": table, "c": column},
+    ).first()
+    if row is None:
+        return None
+    return row[0] == "NO"
 
 
 def upgrade() -> None:

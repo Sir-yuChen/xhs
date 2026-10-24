@@ -32,6 +32,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
+from backend.app.core.migration_introspect import column_names, index_names
+
 revision = "u4v5w6x7y8z9"
 down_revision = "t3u4v5w6x7y8"
 branch_labels = None
@@ -45,8 +47,8 @@ _COLUMNS = (
 
 
 def _has_column(conn, table: str, column: str) -> bool:
-    rows = conn.execute(sa.text(f"PRAGMA table_info({table})")).fetchall()
-    return any(row[1] == column for row in rows)
+    #: v1.1.0 PG 化：原为 `PRAGMA table_info` 取 `row[1]` 比较（SQLite 专属）。
+    return column in column_names(conn, table)
 
 
 def upgrade() -> None:
@@ -72,8 +74,8 @@ def upgrade() -> None:
         with op.batch_alter_table(_TABLE) as batch:
             batch.add_column(sa.Column("published_at", sa.DateTime(), nullable=True))
     # `publish_status` 建索引：内容库「待发布 / 发布失败」筛选与批量发布候选集都按它查。
-    indexes = {row[1] for row in conn.execute(sa.text("PRAGMA index_list(notes)")).fetchall()}
-    if "ix_notes_publish_status" not in indexes:
+    # v1.1.0 PG 化：原为 `PRAGMA index_list(notes)` 取 `row[1]`（SQLite 专属）。
+    if "ix_notes_publish_status" not in index_names(conn, "notes"):
         conn.execute(sa.text("CREATE INDEX IF NOT EXISTS ix_notes_publish_status ON notes (publish_status)"))
 
 

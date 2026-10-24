@@ -34,7 +34,7 @@ import logging
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from backend.app.core.time import shanghai_now
@@ -197,7 +197,7 @@ def collect_topics_for_item(
 
     written = 0
     for row in rows:
-        statement = sqlite_insert(HotTopic).values(
+        statement = pg_insert(HotTopic).values(
             user_id=user_id,
             item_id=item_id,
             item_title=title,
@@ -254,7 +254,7 @@ def match_topics_to_goods(
         score, reason = relevance_for(
             row["topic"], product, hot_value=row["hot_value"], seller_points=seller_points
         )
-        statement = sqlite_insert(TopicGoodsMatch).values(
+        statement = pg_insert(TopicGoodsMatch).values(
             user_id=user_id,
             item_id=item_id,
             product_pk=product.id,

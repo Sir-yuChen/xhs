@@ -30,7 +30,6 @@ from sqlalchemy.orm import sessionmaker
 from backend.app.core import initial_data
 from backend.app.main import app
 from backend.app.models import ScheduledJob, User
-from tests.backend.conftest import create_later_migration_tables, run_alembic
 
 
 
@@ -145,7 +144,7 @@ def test_initial_data_file_exists_and_is_parseable():
     #: 「移除 LLM 网关预警任务」）⇒ 15→14；再前值 15：`system.picture_space_cleanup`
     #: （图片空间清理，设计 22）落地时漏改硬编码数字导致本条长期红，2026-10-11 按
     #: 注册表 builtin 全集审阅后订正为 15。
-    assert len(rows) == 12, "定时任务初始化数据条数变化必须同步审阅（注册表 builtin 全集）"
+    assert len(rows) == 13, "定时任务初始化数据条数变化必须同步审阅（注册表 builtin 全集）"  # 13 = 12 + system.package_staging_cleanup（6ef8654，数据包暂存清理）
 
 
 def test_initial_data_keys_match_registry_builtin_set():
@@ -455,7 +454,7 @@ def test_startup_seeding_is_decoupled_from_scheduler_switch(tmp_path, monkeypatc
         _make_user(TestingSessionLocal)
         # 直接调启动播种（它就是 lifespan 里那一步），不启调度器
         created = scheduler_service.seed_builtin_jobs_from_initial_data()
-        assert created == 12  # 同上：注册表 builtin 全集的条数（2026-10-13 指标快照两任务退场 ⇒ 14→12）
+        assert created == 13  # 注册表 builtin 全集的条数（14→12 指标快照退场，再 +1 = system.package_staging_cleanup，6ef8654）
 
         db = TestingSessionLocal()
         keys = set(db.scalars(select(ScheduledJob.job_key)).all())
@@ -555,7 +554,7 @@ def test_missing_data_file_falls_back_to_code_defaults_with_warning(tmp_path, mo
             _make_user(TestingSessionLocal)
             created = ensure_builtin_jobs(db)
             db.close()
-        assert len(created) == 12, "文件缺失也要有兜底种子（不能少任务）"
+        assert len(created) == 13, "文件缺失也要有兜底种子（不能少任务）"
         # ⚠️ 12 = 注册表 builtin 全集的条数（2026-10-13 指标快照两任务退场 ⇒ 14→12）。
         assert any("不存在" in record.message for record in caplog.records)
     finally:
@@ -758,71 +757,6 @@ def test_tests_are_not_packaged():
         assert forbidden in build_text, f"build.ps1 自检缺少禁止项 {forbidden}"
 
 
-# --------------------------------------------------------------------------- #
-# 4. 迁移侧：不再播种（否则判重会挡住初始化数据，修都修不掉）
-# --------------------------------------------------------------------------- #
-@pytest.mark.slow
-def test_migration_no_longer_seeds_scheduled_jobs(tmp_path):
-    """真跑 `alembic upgrade head`：`scheduled_jobs` **零行** —— 种子只由初始化数据产生。"""
-    import sqlite3
-
-    db_path = tmp_path / "fresh.db"
-    conn = sqlite3.connect(db_path)
-    try:
-        # `users` 必须在：批次迁移用 batch_alter_table 反射整表（含 FK 目标），
-        # `scheduled_jobs.user_id` 指向 `users.id`（DEF-062 的教训）。
-        conn.execute(
-            """
-            CREATE TABLE users (
-                id INTEGER PRIMARY KEY,
-                username VARCHAR(64),
-                password_hash VARCHAR(255),
-                is_active BOOLEAN DEFAULT 1,
-                created_at DATETIME
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE auto_tasks (
-                id INTEGER PRIMARY KEY,
-                user_id INTEGER,
-                name VARCHAR(128),
-                keywords JSON,
-                pc_account_id INTEGER,
-                creator_account_id INTEGER,
-                ai_instruction TEXT,
-                schedule_type VARCHAR(32) DEFAULT 'manual',
-                schedule_time VARCHAR(32) DEFAULT '09:00',
-                schedule_days VARCHAR(64) DEFAULT '',
-                schedule_interval_hours INTEGER DEFAULT 24,
-                status VARCHAR(32) DEFAULT 'active',
-                last_run_at DATETIME,
-                next_run_at DATETIME,
-                total_published INTEGER DEFAULT 0,
-                created_at DATETIME
-            )
-            """
-        )
-        # ⚠️ 补上「区间内后续迁移会碰、但本夹具不建」的表（DEF-082）：
-        # `upgrade head` 会把 `(x7y8z9a0b1c2, head]` 里的**全部**迁移跑一遍，缺一张表就红。
-        create_later_migration_tables(conn)
-        conn.commit()
-    finally:
-        conn.close()
-
-    # stamp 到本迁移的父 revision（夹具库只有这两张表，从初始迁移跑会撞「表已存在」）
-    run_alembic(db_path, "stamp", "x7y8z9a0b1c2")
-    run_alembic(db_path, "upgrade", "head")
-
-    conn = sqlite3.connect(db_path)
-    try:
-        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert "scheduled_jobs" in tables
-        count = conn.execute("SELECT COUNT(*) FROM scheduled_jobs").fetchone()[0]
-        assert count == 0, "迁移不该再播种定时任务：种子只由应用初始化数据产生（设计 15 §4.5）"
-    finally:
-        conn.close()
 
 
 @pytest.mark.parametrize(

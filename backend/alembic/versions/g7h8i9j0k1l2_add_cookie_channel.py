@@ -14,9 +14,9 @@
 """
 from __future__ import annotations
 
-import sqlalchemy as sa
-
 from alembic import op
+
+from backend.app.core.migration_introspect import column_names
 
 revision = "g7h8i9j0k1l2"
 down_revision = "d4e5f6a7b8c9"
@@ -28,8 +28,8 @@ ARK_MARKERS = ("customer-sso-sid", "access-token-ark", "galaxy_creator_session_i
 
 
 def _has_column(conn, table: str, column: str) -> bool:
-    rows = conn.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()
-    return any(row[1] == column for row in rows)
+    #: v1.1.0 PG 化：原为 `exec_driver_sql("PRAGMA table_info(...)")`（SQLite 专属），统一走内省助手。
+    return column in column_names(conn, table)
 
 
 def upgrade() -> None:
@@ -65,7 +65,7 @@ def downgrade() -> None:
                 "id INTEGER NOT NULL PRIMARY KEY, "
                 "platform_account_id INTEGER NOT NULL REFERENCES platform_accounts(id), "
                 "encrypted_cookies TEXT NOT NULL, "
-                "created_at DATETIME)"
+                "created_at TIMESTAMP)"
             )
             conn.exec_driver_sql(
                 "INSERT INTO account_cookie_versions "

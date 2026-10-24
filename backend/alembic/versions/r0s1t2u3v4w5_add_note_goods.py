@@ -38,6 +38,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
+from backend.app.core.migration_introspect import table_exists
+
 revision = "r0s1t2u3v4w5"
 down_revision = "q9r0s1t2u3v4"
 branch_labels = None
@@ -47,11 +49,8 @@ _TABLE = "note_goods"
 
 
 def _has_table(conn, table: str) -> bool:
-    rows = conn.execute(
-        sa.text("SELECT name FROM sqlite_master WHERE type='table' AND name=:name"),
-        {"name": table},
-    ).fetchall()
-    return bool(rows)
+    #: v1.1.0 PG 化：原为 `sqlite_master` 查询（SQLite 专属），统一走内省助手。
+    return table_exists(conn, table)
 
 
 def upgrade() -> None:

@@ -33,6 +33,8 @@ from typing import Sequence, Union
 import sqlalchemy as sa
 from alembic import op
 
+from backend.app.core.migration_introspect import column_names, table_exists
+
 revision: str = "d2e3f4a5b6c7"
 down_revision: Union[str, Sequence[str], None] = "c1d2e3f4a5b6"
 branch_labels: Union[str, Sequence[str], None] = None
@@ -43,16 +45,13 @@ TABLE = "no_traffic_cleanup_logs"
 
 def _columns(conn, table: str) -> set[str]:
     """列清单（最小夹具库上 `params` 可能不存在 —— 见下）。"""
-    return {row[1] for row in conn.execute(sa.text(f"PRAGMA table_info({table})"))}
+    #: v1.1.0 PG 化：原为 `PRAGMA table_info`（SQLite 专属），统一走内省助手。
+    return column_names(conn, table)
 
 
 def _has_table(conn, name: str) -> bool:
-    return bool(
-        conn.execute(
-            sa.text("select name from sqlite_master where type='table' and name=:n"),
-            {"n": name},
-        ).first()
-    )
+    #: v1.1.0 PG 化：原为 `sqlite_master` 查询（SQLite 专属），统一走内省助手。
+    return table_exists(conn, name)
 
 
 def upgrade() -> None:

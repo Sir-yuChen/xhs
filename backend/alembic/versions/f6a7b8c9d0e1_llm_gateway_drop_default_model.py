@@ -55,6 +55,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
+from backend.app.core.migration_introspect import column_names, table_exists
+
 revision = "f6a7b8c9d0e1"
 down_revision = "e5f6a7b8c9d0"
 branch_labels = None
@@ -65,16 +67,13 @@ _TABLE_CONFIGS = "llm_gateway_configs"
 
 
 def _table_exists(conn, table: str) -> bool:
-    row = conn.execute(
-        sa.text("SELECT name FROM sqlite_master WHERE type='table' AND name=:n"),
-        {"n": table},
-    ).fetchone()
-    return row is not None
+    #: v1.1.0 PG 化：原为 `sqlite_master` 查询（SQLite 专属），统一走内省助手。
+    return table_exists(conn, table)
 
 
 def _column_exists(conn, table: str, column: str) -> bool:
-    rows = conn.execute(sa.text(f"PRAGMA table_info({table})")).fetchall()
-    return any(r[1] == column for r in rows)
+    #: v1.1.0 PG 化：原为 `PRAGMA table_info`（SQLite 专属），统一走内省助手。
+    return column in column_names(conn, table)
 
 
 def upgrade() -> None:
@@ -119,7 +118,7 @@ def upgrade() -> None:
                         ),
                         'xhs'
                     ),
-                    1, '', datetime('now'), datetime('now')
+                    TRUE, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                 FROM {_TABLE_CONFIGS} AS c
                 WHERE c.default_model IS NOT NULL
                   AND TRIM(c.default_model) <> ''

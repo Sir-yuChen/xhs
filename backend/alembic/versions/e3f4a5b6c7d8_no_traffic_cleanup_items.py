@@ -43,6 +43,8 @@ from typing import Sequence, Union
 import sqlalchemy as sa
 from alembic import op
 
+from backend.app.core.migration_introspect import column_names, table_exists
+
 revision: str = "e3f4a5b6c7d8"
 down_revision: Union[str, Sequence[str], None] = "h1i2j3k4l5m6"
 branch_labels: Union[str, Sequence[str], None] = None
@@ -54,16 +56,13 @@ ITEM_TABLE = "no_traffic_cleanup_items"
 
 def _columns(conn, table: str) -> set[str]:
     """列清单（最小夹具库上列可能不全 —— 同 `d2e3f4a5b6c7` 的教训）。"""
-    return {row[1] for row in conn.execute(sa.text(f"PRAGMA table_info({table})"))}
+    #: v1.1.0 PG 化：原为 `PRAGMA table_info`（SQLite 专属），统一走内省助手。
+    return column_names(conn, table)
 
 
 def _has_table(conn, name: str) -> bool:
-    return bool(
-        conn.execute(
-            sa.text("select name from sqlite_master where type='table' and name=:n"),
-            {"n": name},
-        ).first()
-    )
+    #: v1.1.0 PG 化：原为 `sqlite_master` 查询（SQLite 专属），统一走内省助手。
+    return table_exists(conn, name)
 
 
 def upgrade() -> None:
@@ -80,7 +79,8 @@ def upgrade() -> None:
         if "aborted" not in cols:
             op.add_column(
                 BATCH_TABLE,
-                sa.Column("aborted", sa.Boolean(), nullable=True, server_default="0"),
+                # v1.1.0 PG 化：布尔列默认值写 sa.false()（原 `"0"` 是 SQLite 写法）。
+                sa.Column("aborted", sa.Boolean(), nullable=True, server_default=sa.false()),
             )
         if "abort_reason" not in cols:
             op.add_column(

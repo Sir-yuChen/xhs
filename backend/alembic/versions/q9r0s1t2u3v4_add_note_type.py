@@ -42,6 +42,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
+from backend.app.core.migration_introspect import column_names
+
 revision = "q9r0s1t2u3v4"
 down_revision = "p8q9r0s1t2u3"
 branch_labels = None
@@ -52,8 +54,8 @@ _COLUMN = "note_type"
 
 
 def _has_column(conn, table: str, column: str) -> bool:
-    rows = conn.execute(sa.text(f"PRAGMA table_info({table})")).fetchall()
-    return any(row[1] == column for row in rows)
+    #: v1.1.0 PG 化：原为 `PRAGMA table_info`（SQLite 专属），统一走内省助手。
+    return column in column_names(conn, table)
 
 
 def upgrade() -> None:
@@ -68,7 +70,8 @@ def upgrade() -> None:
             )
     # 存量回填：`published=1` 的行 = 同步链路落库（§19.12 不变量，见模块 docstring）。
     # 幂等 —— 重复执行写入同一个值。
-    conn.execute(sa.text(f"UPDATE {_TABLE} SET {_COLUMN} = 'synced' WHERE published = 1"))
+    # v1.1.0 PG 化：`published` 是布尔列，比较写 TRUE（`= 1` 是 SQLite 写法，PG 报错）。
+    conn.execute(sa.text(f"UPDATE {_TABLE} SET {_COLUMN} = 'synced' WHERE published = TRUE"))
 
 
 def downgrade() -> None:

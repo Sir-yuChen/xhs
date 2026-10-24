@@ -203,8 +203,12 @@ def upgrade() -> None:
             sa.Column("updated_at", sa.DateTime(), nullable=False),
             sa.CheckConstraint("status IN ('normal', 'disabled')", name="ck_roles_status"),
             #: 内置角色必须启用（停用内置角色 = 把一整类用户锁在门外）
+            #: ⚠️ 与模型 `models/role.py` 同一处坑（2026-10-23 D1）：布尔列在 CHECK 里
+            #: 必须用布尔语义（`NOT is_system`），原 `is_system = 0` 是 SQLite 写法，
+            #: PG 报 `boolean = integer` ⇒ 建表整体失败。真实库走 create_all 绕过了
+            #: 这句 DDL，全新安装（PG 空库跑全链）必踩 —— 已对齐模型的修法。
             sa.CheckConstraint(
-                "is_system = 0 OR status = 'normal'", name="ck_roles_system_stays_enabled"
+                "NOT is_system OR status = 'normal'", name="ck_roles_system_stays_enabled"
             ),
         )
     if "ix_roles_code" not in _indexes("roles"):

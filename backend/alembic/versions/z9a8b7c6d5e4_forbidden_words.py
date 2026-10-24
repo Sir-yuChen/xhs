@@ -59,11 +59,12 @@ def upgrade() -> None:
             server_default=str(MATCH_MODE_CONTAINS),
         ),
         #: 停用/启用。**软开关**：停用不删行（历史命中可追溯）。
+        #: v1.1.0 PG 化：布尔列默认值写 sa.true()（原 sa.text("1") PG 报 DatatypeMismatch）。
         sa.Column(
             "enabled",
             sa.Boolean(),
             nullable=False,
-            server_default=sa.text("1"),
+            server_default=sa.true(),
         ),
         sa.Column("remark", sa.String(length=255), nullable=False, server_default=""),
         #: ADR-021 账号维度隔离：词库按登录用户各持一份。

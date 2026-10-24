@@ -45,6 +45,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
+from backend.app.core.migration_introspect import table_exists
+
 revision = "c9d0e1f2a3b4"
 down_revision = "b8c9d0e1f2a3"
 branch_labels = None
@@ -54,11 +56,8 @@ _TABLE = "note_metric_snapshots"
 
 
 def _table_exists(conn, table: str) -> bool:
-    row = conn.execute(
-        sa.text("SELECT name FROM sqlite_master WHERE type='table' AND name=:n"),
-        {"n": table},
-    ).fetchone()
-    return row is not None
+    #: v1.1.0 PG 化：原为 `sqlite_master` 查询（SQLite 专属），统一走内省助手。
+    return table_exists(conn, table)
 
 
 def upgrade() -> None:

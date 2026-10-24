@@ -38,6 +38,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
+from backend.app.core.migration_introspect import table_exists
+
 revision: str = "d3e4f5a6b7c8"
 down_revision: Union[str, None] = "c2d3e4f5a6b7"
 branch_labels: Union[str, Sequence[str], None] = None
@@ -62,32 +64,35 @@ def upgrade() -> None:
     # ⚠️ 表存在性守卫：迁移测试的夹具库是「链中 stamp + 手建部分表」（缺 `tasks`
     # 也不稀奇），真实库则一定有。没有这张表 = 没有可回填的行，安静跳过即可 ——
     # 数据迁移不该因为「没数据可搬」而炸。
-    has_tasks = conn.execute(
-        sa.text("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'tasks'")
-    ).first()
+    #: v1.1.0 PG 化：原为内联 `sqlite_master` 查询（SQLite 专属），统一走内省助手。
+    has_tasks = table_exists(conn, "tasks")
     if not has_tasks:
         return
     # 只补缺 source 的行；payload 为 NULL 的（不该有，防御性）落一个最小 JSON。
+    # v1.1.0 PG 化（2026-10-24）：原为 SQLite JSON1 的 json_set / json_extract。
+    # PG 等价物是 jsonb 函数族 —— `payload` 列是 sa.JSON（PG 渲染为 json 类型），
+    # jsonb 函数要求 jsonb 入参 ⇒ 显式 `::jsonb` 进、`::json` 出。
+    # 「键缺失」判据：json_extract(...) IS NULL ⇔ `payload::jsonb ->> 'source' IS NULL`。
     conn.execute(
         sa.text(
-            f"UPDATE tasks SET payload = json_set("
-            f"COALESCE(payload, '{{}}'), '$.source', 'manual') "
+            f"UPDATE tasks SET payload = jsonb_set("
+            f"COALESCE(payload::jsonb, '{{}}'::jsonb), '{{source}}', '\"manual\"'::jsonb)::json "
             f"WHERE task_type IN ({_TYPES_SQL}) "
-            f"AND (payload IS NULL OR json_extract(payload, '$.source') IS NULL)"
+            f"AND (payload IS NULL OR payload::jsonb ->> 'source' IS NULL)"
         )
     )
 
 
 def downgrade() -> None:
     conn = op.get_bind()
-    has_tasks = conn.execute(
-        sa.text("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'tasks'")
-    ).first()
+    #: v1.1.0 PG 化：原为内联 `sqlite_master` 查询（SQLite 专属），统一走内省助手。
+    has_tasks = table_exists(conn, "tasks")
     if not has_tasks:
         return
+    #: v1.1.0 PG 化：json_remove ⇔ jsonb 的 `-` 删除键操作符。
     conn.execute(
         sa.text(
-            f"UPDATE tasks SET payload = json_remove(payload, '$.source') "
+            f"UPDATE tasks SET payload = (payload::jsonb - 'source')::json "
             f"WHERE task_type IN ({_TYPES_SQL})"
         )
     )

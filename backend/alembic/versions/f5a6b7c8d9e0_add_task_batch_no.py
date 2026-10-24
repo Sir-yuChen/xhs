@@ -35,6 +35,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
+from backend.app.core.migration_introspect import column_names, table_exists
+
 revision: str = "f5a6b7c8d9e0"
 down_revision: Union[str, None] = "e4f5a6b7c8d9"
 branch_labels: Union[str, Sequence[str], None] = None
@@ -46,18 +48,14 @@ _INDEX_NAME = "ux_tasks_batch_no"
 
 def _has_tasks_table(conn) -> bool:
     """表存在性守卫：迁移测试的夹具库是「链中 stamp + 手建部分表」，缺表不该让迁移炸。"""
-    return (
-        conn.execute(
-            sa.text("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'tasks'")
-        ).first()
-        is not None
-    )
+    #: v1.1.0 PG 化：原为 `sqlite_master` 查询（SQLite 专属），统一走内省助手。
+    return table_exists(conn, "tasks")
 
 
 def _has_batch_no_column(conn) -> bool:
     """列存在性守卫：新库由 `create_all` 直接建全列，迁移不该再 add 一次（会报重复列）。"""
-    rows = conn.execute(sa.text("PRAGMA table_info(tasks)")).fetchall()
-    return any(str(row[1]) == "batch_no" for row in rows)
+    #: v1.1.0 PG 化：原为 `PRAGMA table_info`（SQLite 专属），统一走内省助手。
+    return "batch_no" in column_names(conn, "tasks")
 
 
 def upgrade() -> None:

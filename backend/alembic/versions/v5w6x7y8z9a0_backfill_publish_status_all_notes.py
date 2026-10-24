@@ -53,7 +53,8 @@ def upgrade() -> None:
     conn.execute(
         sa.text(
             f"UPDATE {_TABLE} SET publish_status = 'published' "
-            "WHERE (publish_status IS NULL OR publish_status = '') AND published = 1"
+            # v1.1.0 PG 化：布尔列比较写 TRUE（原 `= 1` 是 SQLite 写法，PG 报错）。
+            "WHERE (publish_status IS NULL OR publish_status = '') AND published = TRUE"
         )
     )
     # 2) 其余（采集 / 本地保存，未发布）→ pending
@@ -61,7 +62,8 @@ def upgrade() -> None:
         sa.text(
             f"UPDATE {_TABLE} SET publish_status = 'pending' "
             "WHERE (publish_status IS NULL OR publish_status = '') "
-            "AND (published = 0 OR published IS NULL)"
+            # v1.1.0 PG 化：布尔列比较写 FALSE（原 `= 0` 是 SQLite 写法，PG 报错）。
+            "AND (published = FALSE OR published IS NULL)"
         )
     )
     # 3) 卡在「发布中」的僵尸行 → failed（进程重启后它不会再自己往前走）

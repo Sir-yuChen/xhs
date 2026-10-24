@@ -56,6 +56,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
+from backend.app.core.migration_introspect import column_names, index_exists, table_exists
+
 revision = "f8a9b0c1d2e3"
 down_revision = "d5e6f7a8b9c0"
 branch_labels = None
@@ -86,24 +88,18 @@ _TEXT_BUSINESS_KEYS = (
 
 def _columns(conn, table: str) -> set[str]:
     """表的列名集合（表不存在 ⇒ 空集）。"""
-    rows = conn.execute(sa.text(f"PRAGMA table_info({table})")).fetchall()
-    return {str(row[1]) for row in rows}
+    #: v1.1.0 PG 化：原为 `PRAGMA table_info`（SQLite 专属），统一走内省助手。
+    return column_names(conn, table)
 
 
 def _table_exists(conn, table: str) -> bool:
-    row = conn.execute(
-        sa.text("SELECT name FROM sqlite_master WHERE type='table' AND name=:n"),
-        {"n": table},
-    ).fetchone()
-    return row is not None
+    #: v1.1.0 PG 化：原为 `sqlite_master` 查询（SQLite 专属），统一走内省助手。
+    return table_exists(conn, table)
 
 
 def _index_exists(conn, index: str) -> bool:
-    row = conn.execute(
-        sa.text("SELECT name FROM sqlite_master WHERE type='index' AND name=:n"),
-        {"n": index},
-    ).fetchone()
-    return row is not None
+    #: v1.1.0 PG 化：原为 `sqlite_master` 查询（SQLite 专属），统一走内省助手。
+    return index_exists(conn, index)
 
 
 def _normalize_base_url(base_url) -> str:
@@ -136,7 +132,8 @@ def _migrate_model_configs_defaults(conn) -> None:
     defaults = conn.execute(
         sa.text(
             f"SELECT id, user_id, base_url FROM {_TABLE_MODEL_CONFIGS} "
-            f"WHERE is_default = 1 ORDER BY id"
+            # v1.1.0 PG 化：`is_default` 是布尔列，比较写 TRUE（原 `= 1` 是 SQLite 写法）。
+            f"WHERE is_default = TRUE ORDER BY id"
         )
     ).fetchall()
     if not defaults:

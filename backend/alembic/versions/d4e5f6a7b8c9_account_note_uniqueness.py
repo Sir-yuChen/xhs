@@ -30,6 +30,8 @@ SQLite 的 DDL **不在事务里**（alembic 自己会打印 `Will assume non-tr
 from alembic import op
 import sqlalchemy as sa
 
+from backend.app.core.migration_introspect import column_names, index_exists
+
 revision = "d4e5f6a7b8c9"
 down_revision = "c3d4e5f6a7b8"
 branch_labels = None
@@ -50,17 +52,13 @@ def _run(conn, sql, **params):
 
 
 def _has_column(conn, table: str, column: str) -> bool:
-    return any(row[1] == column for row in conn.execute(sa.text(f"PRAGMA table_info({table})")))
+    #: v1.1.0 PG 化：原为 `PRAGMA table_info`（SQLite 专属），统一走内省助手。
+    return column in column_names(conn, table)
 
 
 def _has_index(conn, name: str) -> bool:
-    return (
-        conn.execute(
-            sa.text("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = :n"),
-            {"n": name},
-        ).fetchone()
-        is not None
-    )
+    #: v1.1.0 PG 化：原为 `sqlite_master` 查询（SQLite 专属），统一走内省助手。
+    return index_exists(conn, name)
 
 
 # ---------------------------------------------------------------------------

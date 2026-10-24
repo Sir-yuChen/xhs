@@ -1,13 +1,17 @@
-"""数据库方言判定的唯一实现（修设计 51 的方言散落问题）。
+"""数据库方言判定（v1.1.0 / 2026-10-24 起：**只可能是 PostgreSQL**）。
 
-改造前 `core/database.py` 有 4 处各写一遍「URL 前缀是不是 sqlite」的字符串判断
-（:44 `connect_args` / :57 PRAGMA / :103 WAL / :184 时区归一），
-散落写法的问题是：**换成 PostgreSQL 时漏改一处，那一段就静默不生效**
-（最坏的是 :184 —— 会把 PG 的 `timestamptz` 当 SQLite 文本再 +8 小时）。
+## 历史与现状
 
-判据：`backend/app` 里除本文件外，任何位置再写「URL 前缀含 sqlite 的字符串判断」即红
-（守卫 `test_perms_core.py::test_no_raw_sqlite_sniffing_outside_the_dialect_module`）。
-**方言判断只许调本模块**。
+本模块原本是「方言判定的唯一实现」，目的是修 `core/database.py` 里 4 处各写一遍
+「URL 前缀是不是 sqlite」的问题 —— 那时项目同时支持 SQLite（桌面）与 PG（服务器），
+散落判断的代价是「换库时漏改一处，那一段就静默失效」（最坏的是时区归一：
+把 PG 的 `timestamptz` 当 SQLite 文本再 +8 小时，静默改错数据）。
+
+用户 2026-10-24 口径「**完全放弃 SQLite，全部迁移到 PG**」⇒ 现在只剩一种方言。
+⚠️ 但**本模块不删除**：`is_postgres()` / `dialect_of()` 仍在 `database.py` 的
+启动守卫里用（给错方言时给出**看得懂的报错**，而不是让 SQLAlchemy 抛
+`NoSuchModuleError`）。`is_sqlite()` 保留是因为它是一句便宜的自省，
+且守卫报错文案要用；**没有任何生产路径会走 SQLite 分支**。
 
 ## 为什么按 URL 前缀判而不是 `engine.dialect.name`
 
@@ -54,7 +58,12 @@ def current_dialect() -> str:
 
 
 def is_sqlite(url: str | None = None) -> bool:
-    """真 ⇒ 需要 SQLite 专属处理（`check_same_thread` / PRAGMA / WAL / 文本时间）。"""
+    """真 ⇒ 配置成了 SQLite。
+
+    ⚠️ v1.1.0 起 SQLite 已退役：**生产路径不会走到 True 分支**，
+    唯一用途是启动守卫给出一句准确的报错（「当前方言 = sqlite」）。
+    """
+
     return dialect_of(url) == SQLITE if url is not None else current_dialect() == SQLITE
 
 

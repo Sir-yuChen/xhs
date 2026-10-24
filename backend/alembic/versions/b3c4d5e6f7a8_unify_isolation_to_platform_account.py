@@ -30,6 +30,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
+from backend.app.core.migration_introspect import column_names, table_exists
+
 # revision identifiers, used by Alembic.
 revision = "b3c4d5e6f7a8"
 down_revision = "n5o6p7q8r9s0"
@@ -38,15 +40,13 @@ depends_on = None
 
 
 def _columns(conn, table: str) -> set[str]:
-    rows = conn.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()
-    return {r[1] for r in rows}
+    #: v1.1.0 PG 化：原为 `exec_driver_sql("PRAGMA table_info(...)")`（SQLite 专属）。
+    return column_names(conn, table)
 
 
 def _table_exists(conn, table: str) -> bool:
-    row = conn.exec_driver_sql(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
-    ).fetchone()
-    return row is not None
+    #: v1.1.0 PG 化：原为 `sqlite_master` + `?` 占位符（SQLite 专属）。
+    return table_exists(conn, table)
 
 
 def upgrade() -> None:
@@ -98,12 +98,12 @@ def upgrade() -> None:
                 category VARCHAR(128) NOT NULL,
                 images_json TEXT NOT NULL,
                 status VARCHAR(32) NOT NULL,
-                synced_at DATETIME,
+                synced_at TIMESTAMP,
                 raw_json TEXT NOT NULL,
                 detail_json TEXT NOT NULL,
                 sku_count INTEGER,
-                detail_synced_at DATETIME,
-                platform_missing_at DATETIME,
+                detail_synced_at TIMESTAMP,
+                platform_missing_at TIMESTAMP,
                 article_no VARCHAR(64) NOT NULL,
                 card_type INTEGER,
                 price_min_fen INTEGER,
@@ -169,11 +169,17 @@ def upgrade() -> None:
             UPDATE note_comments
                SET platform_account_id = (
                    SELECT n.platform_account_id FROM notes n
-                    WHERE n.note_id = note_comments.note_id
+                    WHERE n.id = note_comments.note_id
                )
              WHERE platform_account_id IS NULL
             """
         )
+        #: ⚠️ v1.1.0 PG 化（2026-10-24）顺手修一个**语义 bug**：原 SQL 是
+        #: `n.note_id = note_comments.note_id` —— 但 `note_comments.note_id` 是指向
+        #: `notes.id` 的整型外键（模型 `NoteComment.note_id = ForeignKey("notes.id")`），
+        #: 拿它对 `notes.note_id`（平台字符串 ID）永远对不上：SQLite 靠类型亲和把整数
+        #: 转成文本再比较，实际**静默匹配 0 行**（回填空跑）；PG 直接报
+        #: `character varying = integer` 类型错。按外键语义改为 `n.id =`。
 
     # ------------------------------------------------------------------ #
     # 4. scheduled_job_logs.account_id → platform_account_id（值不变）
@@ -212,10 +218,10 @@ def upgrade() -> None:
     ):
         conn.exec_driver_sql("DROP INDEX IF EXISTS uq_platform_accounts_shop_id_fk")
         conn.exec_driver_sql("DROP INDEX IF EXISTS ix_platform_accounts_shop_id_fk")
-        # SQLite 3.35+ 支持 DROP COLUMN；带外键的列需要先关外键检查。
-        conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        # v1.1.0 PG 化：原为 PRAGMA foreign_keys=OFF/ON 包住 DROP COLUMN ——
+        # 那是 SQLite「带外键的列不让删」的开关，PG 删带外键的列本来就行
+        # （列上外键约束随列一起消失），无需任何开关。
         conn.exec_driver_sql("ALTER TABLE platform_accounts DROP COLUMN shop_id_fk")
-        conn.exec_driver_sql("PRAGMA foreign_keys=ON")
 
     # ------------------------------------------------------------------ #
     # 7. drop platform_accounts.shop_state（千帆状态已迁到账号维度上的
@@ -296,7 +302,7 @@ def downgrade() -> None:
             "RENAME COLUMN platform_account_id TO account_id"
         )
 
-    if "note_comments" in {r[0] for r in conn.exec_driver_sql(
-        "SELECT name FROM sqlite_master WHERE type='table'"
-    ).fetchall()} and "platform_account_id" in _columns(conn, "note_comments"):
+    if table_exists(conn, "note_comments") and "platform_account_id" in _columns(
+        conn, "note_comments"
+    ):
         conn.exec_driver_sql("ALTER TABLE note_comments DROP COLUMN platform_account_id")

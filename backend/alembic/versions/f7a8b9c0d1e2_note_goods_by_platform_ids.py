@@ -54,6 +54,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
+from backend.app.core.migration_introspect import column_names
+
 revision = "f7a8b9c0d1e2"
 down_revision = "g6h7i8j9k0l1"
 branch_labels = None
@@ -65,8 +67,8 @@ _TMP = "note_goods_new"
 
 def _columns(conn, table: str) -> set[str]:
     """表的列名集合（表不存在 ⇒ 空集）。"""
-    rows = conn.execute(sa.text(f"PRAGMA table_info({table})")).fetchall()
-    return {str(row[1]) for row in rows}
+    #: v1.1.0 PG 化：原为 `PRAGMA table_info`（SQLite 专属），统一走内省助手。
+    return column_names(conn, table)
 
 
 def _create_indexes(conn, *, user_id: bool, item_id: bool) -> None:
@@ -100,7 +102,7 @@ def upgrade() -> None:
             user_id INTEGER NOT NULL,
             note_id VARCHAR(128) NOT NULL,
             item_id VARCHAR(64) NOT NULL,
-            created_at DATETIME NOT NULL,
+            created_at TIMESTAMP NOT NULL,
             PRIMARY KEY (id),
             CONSTRAINT uq_note_goods_user_note_item UNIQUE (user_id, note_id, item_id),
             FOREIGN KEY(user_id) REFERENCES users (id)
@@ -137,7 +139,7 @@ def downgrade() -> None:
             id INTEGER NOT NULL,
             note_id INTEGER NOT NULL,
             product_id INTEGER NOT NULL,
-            created_at DATETIME NOT NULL,
+            created_at TIMESTAMP NOT NULL,
             PRIMARY KEY (id),
             CONSTRAINT uq_note_goods_note_product UNIQUE (note_id, product_id),
             FOREIGN KEY(note_id) REFERENCES notes (id),

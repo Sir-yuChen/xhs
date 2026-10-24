@@ -31,23 +31,19 @@ server:
   cors_origins: "http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173"
 
 database:
-  # "sqlite" = 单机/离线/测试形态；"postgres" = 正式主库形态（2026-10-23 起）
-  # 用户口径：「切换到本地 pg 数据库」+「以 pg 为主，sqlite 为辅」
-  type: "postgres"
-  # SQLite database path (relative to project root) —— 仅 type=sqlite 时使用
-  sqlite_path: "./data/spider_xhs.db"
-  # PostgreSQL（本地实例：D:\work\PostgreSQL，密码与 dataPanel 共用）
+  # PostgreSQL —— **唯一**支持的数据库（v1.1.0 / 2026-10-24）
+  # 用户口径：「完全放弃 SQLite，全部迁移到 PG」「部署远程不在考虑 sqlite 数据库」
+  # ⚠️ 原来这里有 type / sqlite_path / mysql_* 三组配置，已全部删除：
+  #    type 只剩一个取值等于没有开关；sqlite_path 随 SQLite 退役失效；
+  #    mysql_* 从未真正支持过（只在 model_post_init 里拼过串）。
+  # 驱动 psycopg3；也可用环境变量覆盖（优先级更高）：
+  #   DATABASE_POSTGRES_HOST / _PORT / _USER / _PASSWORD / _DATABASE
+  #   或直接给整条 DATABASE_URL
   postgres_host: "127.0.0.1"
   postgres_port: 5432
   postgres_user: "postgres"
   postgres_password: "123456"
   postgres_database: "spider_xhs"
-  # MySQL connection settings (used when type=mysql)
-  mysql_host: "localhost"
-  mysql_port: 3306
-  mysql_user: "spider_xhs"
-  mysql_password: "change_me"
-  mysql_database: "spider_xhs"
 
 feature:
   # 开放注册（v1.1.0 / 设计 46 §388 + 设计 50 §261）。

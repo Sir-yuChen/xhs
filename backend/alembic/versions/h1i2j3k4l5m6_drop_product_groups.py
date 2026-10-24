@@ -39,20 +39,15 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
+from backend.app.core.migration_introspect import column_names, table_exists
+
 revision = "h1i2j3k4l5m6"
 down_revision = "d2e3f4a5b6c7"
 
 
 def _table_exists(conn: object, name: str) -> bool:
-    return bool(
-        conn.execute(  # type: ignore[attr-defined]
-            sa.text(
-                "SELECT name FROM sqlite_master "
-                "WHERE type='table' AND name=:name"
-            ),
-            {"name": name},
-        ).fetchone()
-    )
+    #: v1.1.0 PG 化：原为 `sqlite_master` 查询（SQLite 专属），统一走内省助手。
+    return table_exists(conn, name)
 
 
 def _existing_columns(conn: object, table: str) -> set[str]:
@@ -61,10 +56,8 @@ def _existing_columns(conn: object, table: str) -> set[str]:
     ⚠️ 这个区分是必需的：`_existing_columns` 对不存在的表返回空集，调用方若
     拿它当「列都没有」就会去 `ADD COLUMN` 到一张不存在的表上（DEF 同款坑）。
     """
-    if not _table_exists(conn, table):
-        return set()
-    rows = conn.execute(sa.text(f"PRAGMA table_info({table})")).fetchall()  # type: ignore[attr-defined]
-    return {str(row[1]) for row in rows}
+    #: v1.1.0 PG 化：原为 `PRAGMA table_info`（SQLite 专属），统一走内省助手。
+    return column_names(conn, table)
 
 
 def upgrade() -> None:

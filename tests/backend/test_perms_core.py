@@ -368,21 +368,25 @@ def test_no_cwd_relative_storage_paths_outside_paths_module():
 
 
 def test_startup_refuses_default_secret_key_on_postgres():
-    """非 SQLite + 默认 secret_key ⇒ RuntimeError（伪造任意用户 JWT 的那种事故）。"""
+    """默认 secret_key + PG ⇒ RuntimeError（伪造任意用户 JWT 的那种事故）。"""
     from backend.app.core.config import DEFAULT_SECRET_KEY, Settings
 
-    settings = Settings(database_type="postgresql", database_url="", database_mysql_password="x")
-    # `database_type` 只有 sqlite/mysql 分支；直接给 url 更贴近真实部署
     settings = Settings(database_url="postgresql://u:p@h/db", secret_key=DEFAULT_SECRET_KEY)
     with pytest.raises(RuntimeError, match="secret_key"):
         settings.assert_production_ready()
 
 
-def test_startup_allows_default_secret_key_on_sqlite():
-    """桌面端（SQLite）不拦 —— 拦了会让所有已有安装升级后起不来。"""
+def test_startup_refuses_default_secret_key_even_on_sqlite_url():
+    """⚠️ v1.1.0（2026-10-24）退役守卫：SQLite 豁免已随桌面端一起退场。
+
+    原判据「SQLite 不拦 —— 拦了会让已有安装升级后起不来」的前提是「桌面端还在」；
+    桌面端退役后只有服务器形态，**任何方言**都必须真密钥（实现里连 if 都没了）。
+    这里钉住「豁免退了就别回来」。
+    """
     from backend.app.core.config import DEFAULT_SECRET_KEY, Settings
 
-    Settings(database_url="sqlite:///./data/x.db", secret_key=DEFAULT_SECRET_KEY).assert_production_ready()
+    with pytest.raises(RuntimeError, match="secret_key"):
+        Settings(database_url="sqlite:///./data/x.db", secret_key=DEFAULT_SECRET_KEY).assert_production_ready()
 
 
 def test_startup_allows_custom_secret_key_on_postgres():
