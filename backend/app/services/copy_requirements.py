@@ -23,7 +23,7 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Optional
 
 #: 平台硬约束（小红书）：标题 ≤20 字 / 正文 ≤1000 字。

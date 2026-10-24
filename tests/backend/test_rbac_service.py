@@ -22,6 +22,8 @@ S1 的守卫守的是数据形状（种子不覆盖、两张链不漂移）。S2
 from __future__ import annotations
 
 import pytest
+
+pytestmark = pytest.mark.redline
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 

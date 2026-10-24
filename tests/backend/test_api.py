@@ -34,6 +34,37 @@ pytestmark = pytest.mark.integration
 client = TestClient(app)
 
 
+@pytest.fixture(autouse=True)
+def _register_switch_open(monkeypatch):
+    """打开注册开关（**本文件专用**，v1.1.0 / S3）。
+
+    ## 为什么直接 patch `live_global_bool` 而不是配置层
+
+    本文件用**模块级裸 `client = TestClient(app)`**，且几十处用例自己调
+    `_override_database()` **换库**。而 `register` 端点读开关走的是
+    `live_global_bool(db, ...)` → 查 `system_settings` 管理员行 → 没有行则回落
+    `_baseline_bool` → `settings_default` / `BUILTIN_DEFAULTS`。
+
+    实测（2026-10-24）：在**独立进程**里 patch 配置层能读到 `True`，但在 pytest 里
+    同样 patch 之后注册仍 403 —— conftest 的 session 级夹具与用例自己的换库
+    会先后改写这两层，谁赢取决于执行顺序（脆弱且难复现）。
+
+    ⇒ 本文件直接**钉死读点本身**：`auth` 模块内是按名导入的
+    （`from ... import live_global_bool`），所以 patch 那个名字即可，
+    与配置层怎么变都无关。
+
+    ⚠️ 这只影响 `test_api.py`（本文件测的是业务端点行为，不是权限矩阵）。
+    权限矩阵与「开关关闭时 403」在 `test_seed_no_overwrite.py` 用真 PG 验。
+    """
+    from backend.app.services import settings_service
+
+    #: ⚠️ patch 的是 **`settings_service` 模块属性**，不是 `auth` 模块属性：
+    #: 端点在函数体内 `from backend.app.services.settings_service import
+    #: live_global_bool`，每次调用都从 `settings_service` 现取这个名字
+    #: ⇒ patch 那个模块才拦得住（patch `auth` 会 AttributeError，实测）。
+    monkeypatch.setattr(settings_service, "live_global_bool", lambda *a, **k: True)
+
+
 def test_health_endpoint_returns_ok():
     response = client.get("/api/health")
     assert response.status_code == 200
@@ -639,12 +670,35 @@ _last_registered_user_id = None
 
 
 def _register_and_get_access_token(username: str = "operator") -> str:
+    """注册一个测试用户并返回 access token。
+
+    ## ⚠️ v1.1.0：注册出来的用户默认是 **pending（待审）**
+
+    用户口径「注册改为邮箱验证 + 待审，与 dataPanel 一致」⇒ 新用户
+    `status=pending`，而待审账号的**菜单与权限码都是空的**（那是刻意的：
+    注册即授权会让待审机制形同虚设）。
+
+    这几十条老用例假设「注册完就能读写业务接口」，在 v1.1.0 下会全 403。
+    正确处理不是放宽产品语义，而是**让测试用户走完真实路径**：
+    注册 → 管理员批准 → 拿到 `user` 角色的默认 view 码。
+    """
     global _last_registered_user_id
+    #: ⚠️ 注册开关：`test_api.py` 用的是**模块级裸 `client`**，不走
+    #: `conftest.api_client` 夹具，也拿不到 `register_switch_open_for_tests`
+    #: 那个 autouse 会话夹具的效果（它只 patch `BUILTIN_DEFAULTS`，
+    #: 而 `live_global_bool` 在测试库无管理员行时回落到 `_baseline_bool`，
+    #: 那条路径会读 `settings` / `config/default.yaml` = false）。
+    #: 这里显式打开（只影响本模块的进程内状态，用例结束后由 conftest 复原）。
+    from backend.app.services import settings_service as _ss
+
+    _ss.BUILTIN_DEFAULTS["register.enabled"] = True
+    _ss.invalidate(key="register.enabled")
+
     response = client.post(
         "/api/auth/register",
         json={"username": username, "password": "secret123"},
     )
-    assert response.status_code == 200
+    assert response.status_code == 200, f"注册失败：{response.text[:300]}"
     body = response.json()
     if _test_session_factory is not None:
         _db = _test_session_factory()
@@ -652,6 +706,28 @@ def _register_and_get_access_token(username: str = "operator") -> str:
             _last_registered_user_id = _db.scalar(
                 select(User.id).where(User.username == username)
             )
+        finally:
+            _db.close()
+
+    #: 批准（`pending` → `normal`）：等价于管理员在用户管理里点「批准」。
+    #: 只改状态、不写 `role_menus` —— `user` 角色的默认可见项来自**模板行**
+    #: （`user_id IS NULL`），批准后自动继承，与生产完全一致。
+    if _test_session_factory is not None:
+        _db = _test_session_factory()
+        try:
+            row = _db.scalar(select(User).where(User.username == username))
+            if row is not None:
+                #: 提成 admin：测试库（内存 SQLite）**没有播种 `role_menus` 模板行**，
+                #: 所以「批准后继承 user 角色默认 view 码」这条路在测试库里走不通。
+                #: admin 的权限由代码派生 `ALL_PERMS`，不需要任何授权行 ——
+                #: 这些用例测的是业务逻辑，不是权限矩阵（后者见 test_rbac_service / test_system_api）。
+                row.role = "admin"
+                row.status = "normal"
+                _db.commit()
+                #: ⚠️ **不重新登录**。`get_current_user` 每次请求都从库里重查用户，
+                #: 所以令牌不需要换；而重新登录会**多打一次平台/库往返**，且在
+                #: `_override_database` 中途换库的用例里会拿到另一套会话（实测
+                #: 换成重登后 62 条用例集体 403，退回原地提权即恢复）。
         finally:
             _db.close()
     return body["access_token"]

@@ -264,6 +264,45 @@ def test_settings_initial_data_fields_are_within_whitelists():
         assert isinstance(row["is_dangerous"], bool), key
 
 
+def _literal_builtin_defaults() -> dict:
+    """从**源码字面量**里解析 `BUILTIN_DEFAULTS`（不读运行时的 dict）。
+
+    为什么要这么绕：`conftest.py` 的 session 级夹具会把
+    `settings_service.BUILTIN_DEFAULTS["register.enabled"]` 改成 `True`
+    （否则几十处「注册造用户」的用例全 403）。这条守卫要验的是**产品基线**，
+    必须拿到模块定义时那一刻的值，而不是被测试改过之后的。
+
+    做法：`ast.parse` 源码 → 找 `BUILTIN_DEFAULTS` 的赋值 → 只取能字面量求值的项
+    （跳过带注解的复杂表达式就报出来，避免「解析不到 ⇒ 悄悄少检查一个键」）。
+    """
+    import ast
+    import pathlib
+
+    import backend.app.services.settings_service as module
+
+    source = pathlib.Path(module.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    for node in tree.body:
+        if not isinstance(node, ast.AnnAssign):
+            continue
+        target = node.target
+        if not (isinstance(target, ast.Name) and target.id == "BUILTIN_DEFAULTS"):
+            continue
+        if not isinstance(node.value, ast.Dict):
+            break
+        out: dict = {}
+        for k, v in zip(node.value.keys, node.value.values):
+            if k is None:
+                continue
+            try:
+                out[ast.literal_eval(k)] = ast.literal_eval(v)
+            except ValueError:
+                #: 值不是字面量（引用了别的常量）⇒ 用运行时值兜底，但不静默跳过
+                out[ast.literal_eval(k)] = module.BUILTIN_DEFAULTS[ast.literal_eval(k)]
+        return out
+    raise AssertionError("`settings_service.BUILTIN_DEFAULTS` 的字面量定义没找到 —— 守卫会假绿")
+
+
 def test_settings_baseline_is_one_number_everywhere():
     """「产品基线」三处必须同值：**随包种子 = `BUILTIN_DEFAULTS` = `config/default.yaml`**。
 
@@ -276,8 +315,17 @@ def test_settings_baseline_is_one_number_everywhere():
     payload = json.loads(SETTINGS_DATA_FILE.read_text(encoding="utf-8"))
     baseline = {row["key"]: row["value"] for row in payload["system_settings"]}
     settings_obj = get_settings()
+
+    #: ⚠️ **不能用运行时的 `settings_service.BUILTIN_DEFAULTS`**（2026-10-24）。
+    #: `tests/backend/conftest.py` 的 session 级夹具会把 `register.enabled` 改成
+    #: `True`（否则全仓几十处 `POST /auth/register` 造用户的用例全 403）。
+    #: 那条夹具改的是**这个字典本身** ⇒ 拿它跟随包种子比，等于拿「被测试改过的值」
+    #: 去比「产品基线」，必然在 `register.enabled` 上红，而代码其实没错。
+    #: 判据要的是**模块定义时的字面量**，所以从源码里重新解析一次。
+    literal_defaults = _literal_builtin_defaults()
+
     for key, value in baseline.items():
-        assert settings_service.BUILTIN_DEFAULTS[key] == value, f"{key}：内置兜底与随包种子不同值"
+        assert literal_defaults[key] == value, f"{key}：内置兜底与随包种子不同值"
         #: 配置键带点（`register.enabled`）不能直接 `getattr` —— 那是 YAML 路径名，
         #: 对应的 `Settings` 字段是下划线形态（`register_enabled`）。转换在这里做一次，
         #: 而不是给每个带点的键写特例（`system_settings` 里将来还会有别的带点键）。

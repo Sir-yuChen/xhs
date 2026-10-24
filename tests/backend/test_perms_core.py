@@ -414,22 +414,48 @@ def test_route_guard_collects_unregistered_perm_codes():
         route_perms.ROUTE_PERMS.update(original)
 
 
-def test_route_guard_reports_every_unguarded_write_route():
-    """S0 阶段 `ROUTE_PERMS` 为空 ⇒ 每条写路由都要被报出来（S3 逐条消掉）。"""
-    from backend.app.core import route_guard
+def test_route_guard_is_clean_after_s3_and_reports_when_emptied():
+    """守卫的两个方向都要验（2026-10-24 改写，原判据基于 S0 空表已失效）。
+
+    原句：*「S0 阶段 `ROUTE_PERMS` 为空 ⇒ 每条写路由都要被报出来」*，
+    断言 `len(unguarded) > 200`。S3 补全 **278 条**映射后这句必然为红 ——
+    但它守的意图（「守卫真的会检查写路由」）仍然成立，只是**判据反过来了**：
+
+    | 方向 | 断言 |
+    |---|---|
+    | 现在（已补全） | `collect_violations` **0 条**「漏挂码」 |
+    | 清空 `ROUTE_PERMS` 后 | 每条写路由都要被报出来（证明它不是恒真） |
+
+    第二个方向是关键：只断言「0 违规」的话，一个**永远返回空**的守卫也会通过。
+    """
+    from backend.app.core import route_guard, route_perms
     from backend.app.main import create_app
 
     app = create_app()
-    problems = route_guard.collect_violations(app)
-    unguarded = [p for p in problems if p.startswith("[漏挂码]")]
     write_ops = sum(
         1
         for operations in app.openapi()["paths"].values()
         for method in operations
         if method.upper() in {"POST", "PUT", "PATCH", "DELETE"}
     )
-    assert len(unguarded) > 200, "写路由数量异常（口径应为 251 量级）"
-    assert len(unguarded) <= write_ops
+    assert write_ops > 200, f"写路由数量异常（{write_ops} 条，口径应为 270 量级）"
+
+    # ① 现状：0 条漏挂码
+    problems = route_guard.collect_violations(app)
+    unguarded = [p for p in problems if p.startswith("[漏挂码]")]
+    assert unguarded == [], f"S3 后仍有写路由漏挂码：{unguarded[:5]}"
+
+    # ② 清空后必须全报出来（证明守卫不是恒真）
+    original = dict(route_perms.ROUTE_PERMS)
+    try:
+        route_perms.ROUTE_PERMS.clear()
+        emptied = [p for p in route_guard.collect_violations(app) if p.startswith("[漏挂码]")]
+        assert len(emptied) > 200, (
+            f"清空 ROUTE_PERMS 后只报出 {len(emptied)} 条漏挂码 —— 守卫是恒真的"
+        )
+        assert len(emptied) <= write_ops
+    finally:
+        route_perms.ROUTE_PERMS.update(original)
 
 
 def test_assert_every_route_guarded_raises_route_guard_error():

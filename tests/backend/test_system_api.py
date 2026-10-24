@@ -26,6 +26,8 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 import pytest
 
+pytestmark = pytest.mark.contract
+
 from backend.app.services import menu_seed_service, permission_cache, presence_service
 
 

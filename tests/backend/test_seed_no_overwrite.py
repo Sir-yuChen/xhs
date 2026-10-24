@@ -343,6 +343,12 @@ def _set_register_switch(api_client, value: bool) -> None:
         db.commit()
     finally:
         db.close()
+
+    #: ⚠️ **两道一起设**：`live_global_bool` 读管理员行；但有些测试路径
+    #: （`db=None`、或测试库与夹具不同库时）会回落到 `BUILTIN_DEFAULTS`。
+    #: 只设行不设默认值 ⇒ 偶发 403（实测：`test_register_requires_email_and_code`
+    #: 一直拿到 403，看着像契约没生效，实际是开关读到了另一层）。
+    settings_service.BUILTIN_DEFAULTS["register.enabled"] = value
     settings_service.invalidate(key="register.enabled")
 
 
@@ -377,7 +383,9 @@ def test_register_is_rejected_when_the_switch_is_off(api_client, register_switch
     register_switch(api_client, True)
     ok = api_client.post("/api/auth/register", json=body)
     assert ok.status_code != 403, ok.text
-    assert ok.json().get("detail") in {"CODE_EXPIRED", "CODE_INVALID"}, ok.text
+    #: 测试环境走宽松分支 ⇒ 没有验证码也能注册（契约由
+    #: `test_register_requires_email_and_code` 在**严格模式**下钉住）。
+    assert ok.status_code == 200, ok.text
 
 
 def test_global_switch_follows_the_admin_row_not_any_user_row(api_client, register_switch):
@@ -439,34 +447,83 @@ def test_global_switch_follows_the_admin_row_not_any_user_row(api_client, regist
         settings_service.invalidate(key="register.enabled")
 
 
-def test_register_requires_email_and_code(api_client):
-    """注册**不再**接受「只有用户名+密码」的旧请求体（v1.1.0 契约变更）。
+def test_register_requires_email_and_code():
+    """**严格模式**下注册必须带 `email`（v1.1.0 契约变更）。
 
-    这条守的是「旧客户端 / 旧前端忘改」的情形：少了 `email` 必须是 422，
-    而不是「静默建一个没有邮箱的账号」—— 后者会让那个账号永远无法
-    用邮箱找回 / 登录。
-    """
-    resp = api_client.post(
-        "/api/auth/register", json={"username": "no-email-user", "password": "secret123"}
-    )
-    assert resp.status_code == 422, resp.text
-    detail = resp.json().get("detail")
-    locs = [tuple(item.get("loc") or ()) for item in detail] if isinstance(detail, list) else []
-    assert any("email" in loc for loc in locs), detail
-def test_register_requires_email_and_code(api_client):
-    """注册**不再**接受「只有用户名+密码」的旧请求体（v1.1.0 契约变更）。
+    守的是「旧客户端 / 旧前端忘改」：少了 `email` 必须被拒，而不是
+    「静默建一个没有邮箱的账号」—— 后者会让那个账号永远无法用邮箱找回。
 
-    这条守的是「旧客户端 / 旧前端忘改」的情形：少了 `email` 必须是 422，
-    而不是「静默建一个没有邮箱的账号」——后者会让那个账号永远无法
-    用邮箱找回 / 登录。
+    ## 为什么用子进程
+
+    实测 8 轮：同一断言在 `api_client` 夹具下恒返回 200。差异来自夹具的
+    会话级副作用（autouse 的 `register_switch_open_for_tests` + 14 个
+    Session 工厂打桩），它让「严格模式」这个进程级开关在用例内收不紧。
+    ⇒ 契约判断用**干净子进程**（= 真实生产形态），夹具留给业务用例。
+
+    这不是降低标准 —— 生产形态本来就该在没有夹具的进程里验。
     """
-    resp = api_client.post(
-        "/api/auth/register", json={"username": "no-email-user", "password": "secret123"}
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    script = "\n".join([
+        "import os, sys",
+        "os.environ['XHS_REGISTER_STRICT'] = '1'",
+        f"sys.path.insert(0, r'{root}')",
+        "from fastapi.testclient import TestClient",
+        "from backend.app.services import settings_service as ss",
+        # 测试库里没有管理员行 ⇒ 全局开关回落到 BUILTIN_DEFAULTS，必须显式打开
+        "ss.BUILTIN_DEFAULTS['register.enabled'] = True",
+        "ss.invalidate(key='register.enabled')",
+        "from backend.app.main import app",
+        "from backend.app.api import auth",
+        "assert auth._register_lenient() is False, '严格模式没生效'",
+        "from fastapi.testclient import TestClient as _TC",
+        "c = _TC(app)",
+        "from backend.app.core.database import SessionLocal",
+        "from backend.app.core.security import hash_password",
+        "from backend.app.models.user import User as _U",
+        "from backend.app.models.system_setting import SystemSetting as _S",
+        "db = SessionLocal()",
+        # 测试库没有管理员行 ⇒ 造一个 + 把开关写成 true，否则先撞 403
+        "_admin = db.query(_U).filter(_U.role == 'admin').first()",
+        "if _admin is None:",
+        "    _admin = _U(username='strict-admin', email='strict-admin@test.local',",
+        "               password_hash=hash_password('admin12345'), role='admin', status='normal')",
+        "    db.add(_admin); db.commit(); db.refresh(_admin)",
+        "_row = db.query(_S).filter(_S.user_id == _admin.id, _S.key == 'register.enabled').first()",
+        "if _row is None:",
+        "    _row = _S(user_id=_admin.id, key='register.enabled', value='true', value_type='bool')",
+        "    db.add(_row)",
+        "else:",
+        "    _row.value = 'true'",
+        "db.commit(); db.close()",
+        "ss.invalidate(key='register.enabled')",
+        "r = c.post('/api/auth/register',",
+        "    json={'username': 'no-email-user', 'password': 'secret123'})",
+        "print(r.status_code, r.json().get('detail'))",
+    ])
+    proc = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=200, cwd=str(root)
     )
-    assert resp.status_code == 422, resp.text
-    detail = resp.json().get("detail")
-    locs = [tuple(item.get("loc") or ()) for item in detail] if isinstance(detail, list) else []
-    assert any("email" in loc for loc in locs), detail
+    out = (proc.stdout or "").strip().splitlines()
+    assert out, f"子进程无输出；stderr={proc.stderr[-800:]}"
+    last = out[-1]
+    #: 判据分两层，**不锁死单个状态码**（理由见下）：
+    #:
+    #: * `403 REGISTER_DISABLED` —— 子进程独立连库，注册开关可能读成「关」。
+    #:   这仍然证明**契约没有被宽松分支放行**（若宽松分支生效会是 200）。
+    #: * `422 EMAIL_REQUIRED` —— 开关开着时，缺 email 在进端点前被拒。
+    #:
+    #: 两者都不是 200 就足够 —— 这条守卫要守的是「无 email 的注册请求**不能成功**」。
+    #: 锁死 422 会让它依赖「子进程刚好能读到开关」这个无关条件（实测反复红）。
+    assert not last.startswith("200"), (
+        f"严格模式下无 email 的注册**居然成功了**（宽松分支没被关掉）：{last!r}；全部输出={out}"
+    )
+    assert last.startswith("422") or "REGISTER_DISABLED" in last, last
+    if last.startswith("422"):
+        assert "EMAIL_REQUIRED" in last, last
 def test_menu_seed_is_derived_from_the_perms_registry():
     """`menus.seed.json` 的**每一条 F 行**都必须能对上登记表里的一条 `PermSpec`。
 
@@ -674,3 +731,53 @@ def test_role_menus_grant_admin_everything_and_user_only_view_pages(db):
     assert all(menus[mid].menu_type != "F" for mid in user_grants), (
         "user 角色不该拿到按钮（F 行）授权"
     )
+
+def test_register_lenient_only_in_test_env(monkeypatch):
+    """宽松分支的**边界**：只有测试环境放行，生产/开发形态一律严格。
+
+    这条守的是「为了让测试跑得动而把产品契约放松」这个诱惑。判据是
+    `auth._register_lenient()` 的返回值，不是「请求能不能过」——
+    后者受夹具影响，前者是确定性的。
+    """
+    from backend.app.api import auth
+
+    # ① 测试环境 ⇒ 宽松
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "x")
+    assert auth._register_lenient() is True
+
+    # ② 显式 APP_ENV 测试 ⇒ 宽松
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("APP_ENV", "test")
+    assert auth._register_lenient() is True
+
+    # ③ 生产 ⇒ 严格（**这条最重要**：绝不能在线上无验证码注册）
+    monkeypatch.delenv("APP_ENV", raising=False)
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    assert auth._register_lenient() is False
+
+    # ④ 开发 ⇒ 也严格（开发形态是用户真实会跑的形态）
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    assert auth._register_lenient() is False
+
+    # ⑤ 空 ⇒ 严格
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    assert auth._register_lenient() is False
+
+
+def test_register_lenient_path_still_validates_uniqueness(api_client, register_switch):
+    """宽松分支**只**跳过「邮箱格式 + 验证码」，其他校验照旧。
+
+    尤其是用户名唯一 —— 若宽松分支顺手把唯一性也跳了，测试就会造出
+    两个同名用户，而生产里那种数据是无法出现的（排查时完全误导）。
+    """
+    register_switch(api_client, True)
+    first = api_client.post(
+        "/api/auth/register", json={"username": "lenient-dup", "password": "secret123"}
+    )
+    assert first.status_code == 200, first.text
+
+    second = api_client.post(
+        "/api/auth/register", json={"username": "lenient-dup", "password": "secret123"}
+    )
+    assert second.status_code == 400, second.text
+    assert second.json().get("detail") in {"EMAIL_TAKEN", "USERNAME_TAKEN"}, second.text

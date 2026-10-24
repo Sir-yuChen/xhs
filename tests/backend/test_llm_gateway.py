@@ -33,11 +33,39 @@ pytestmark = pytest.mark.integration
 
 
 def _auth_header(api_client) -> dict:
-    """注册 + 登录拿 bearer token。"""
+    """注册 + 登录拿 bearer token。
+
+    ⚠️ **v1.1.0**：新注册用户是 `status=pending`（待审）且没有任何权限码。
+    这些用例被测的是网关/用量业务逻辑，不是权限，所以直接把测试用户提成
+    **admin**（admin 的权限由代码派生 `ALL_PERMS`，不查 `role_menus`）——
+    否则每条都要先造模板行授权，跑题且脆弱。
+
+    权限本身的验证在 `test_system_api.py` / `test_rbac_service.py`，那里用
+    真实的 pending → 批准 → 继承模板行路径。
+    """
     api_client.post("/api/auth/register", json={"username": "llm_tester", "password": "testpass123"})
+    _promote_to_admin(api_client, "llm_tester")
     resp = api_client.post("/api/auth/login", json={"username": "llm_tester", "password": "testpass123"})
     assert resp.status_code == 200, resp.text
     return {"Authorization": f"Bearer {resp.json()['access_token']}"}
+
+
+def _promote_to_admin(api_client, username: str) -> None:
+    """把测试用户提成 admin 并置 `normal`（测试库没有播种 `user` 模板行）。"""
+    from sqlalchemy import select
+
+    from backend.app.core.database import SessionLocal
+    from backend.app.models.user import User
+
+    db = SessionLocal()
+    try:
+        row = db.scalar(select(User).where(User.username == username))
+        if row is not None:
+            row.role = "admin"
+            row.status = "normal"
+            db.commit()
+    finally:
+        db.close()
 
 
 def _other_auth(api_client) -> dict:

@@ -35,6 +35,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.redline
+
 VERSIONS_DIR = Path(__file__).resolve().parents[2] / "backend" / "alembic" / "versions"
 
 #: 播种迁移：文件名 → 它依赖的表列（人工登记，改动这里必须同时改迁移）。

@@ -359,6 +359,29 @@ def effective_value(
     return default
 
 
+def _baseline_bool(key: str, default: bool) -> bool:
+    """`settings` / `BUILTIN_DEFAULTS` 里的布尔基线（不含 DB 行）。
+
+    只给 `live_global_bool` 的「没有管理员行」分支用 —— 与
+    `effective_value(user_id=None)` 同口径，但不带 `default` 短路。
+    """
+    #: ⚠️ 顺序 = `effective_value` 的**同一顺序**（settings 优先于 BUILTIN）。
+    #:
+    #: `settings` 层是 `config/default.yaml` 的值 —— 用户可编辑的部署配置，
+    #: 优先级必须高于代码里的兜底常量。这也解释了一个曾经困惑的现象：
+    #: 只改 `BUILTIN_DEFAULTS` 打不开注册（yaml 里是 `false`）—— 那是**设计如此**，
+    #: 不是 bug。测试要打开注册必须改设置行或改 yaml。
+    from_settings = settings_default(key)
+    value = from_settings if from_settings is not UNSET else BUILTIN_DEFAULTS.get(key, UNSET)
+    if value is UNSET or value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in ("true", "1", "yes", "on")
+
+
 def live_global_bool(db: Optional[Session], key: str, *, default: bool) -> bool:
     """**全局开关**读取：以**管理员**那一行为准（v1.1.0 / S3）。
 
@@ -399,7 +422,14 @@ def live_global_bool(db: Optional[Session], key: str, *, default: bool) -> bool:
         .limit(1)
     ).first()
     if row is None:
-        return default
+        #: ⚠️ 没有管理员行时**回落到配置基线**（`settings` / `BUILTIN_DEFAULTS`），
+        #: 而不是直接给 `default`。
+        #:
+        #: 实测踩坑：`return default` 会让「改 `BUILTIN_DEFAULTS` 打开注册」的
+        #: 测试路径失效（读到的永远是 `default=False`），而测试库不一定有管理员行
+        #: ⇒ 表现为「开关明明设了 true，注册仍 403」。生产语义也更顺：
+        #: 没配就是「按基线」，基线本来就该是随包种子的值。
+        return _baseline_bool(key, default)
 
     value = decode_value(row[0], row[1])
     if isinstance(value, bool):

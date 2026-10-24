@@ -235,12 +235,27 @@ def register_switch_open_for_tests():
     """
     from backend.app.services import settings_service as _settings
 
+    #: ⚠️ **同时改两层**（2026-10-24 实测）：
+    #: `live_global_bool` 的回落顺序是 `settings`（= `config/default.yaml`）
+    #: → `BUILTIN_DEFAULTS`，**settings 优先**。只改 `BUILTIN_DEFAULTS` 时，
+    #: yaml 里的 `false` 仍然胜出 ⇒ 注册仍 403（实测踩了 3 轮）。
+    #: 这里把 settings 那一层也 patch 成 True。
     original = _settings.BUILTIN_DEFAULTS.get("register.enabled")
     _settings.BUILTIN_DEFAULTS["register.enabled"] = True
     _settings.invalidate(key="register.enabled")
+
+    original_settings_default = _settings.settings_default
+
+    def _patched_settings_default(key: str):
+        if key == "register.enabled":
+            return True
+        return original_settings_default(key)
+
+    _settings.settings_default = _patched_settings_default  # type: ignore[assignment]
     try:
         yield
     finally:
+        _settings.settings_default = original_settings_default  # type: ignore[assignment]
         if original is None:
             _settings.BUILTIN_DEFAULTS.pop("register.enabled", None)
         else:

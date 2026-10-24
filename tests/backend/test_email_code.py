@@ -19,6 +19,8 @@
 
 import pytest
 
+pytestmark = pytest.mark.contract
+
 from backend.app.services import email_service
 
 

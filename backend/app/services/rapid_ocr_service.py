@@ -36,8 +36,6 @@
 from __future__ import annotations
 
 import logging
-import shutil
-import sys
 import threading
 from pathlib import Path
 from typing import Any, Optional

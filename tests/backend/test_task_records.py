@@ -42,6 +42,7 @@
 from __future__ import annotations
 
 import os
+import pathlib
 import subprocess
 
 import pytest
@@ -208,10 +209,24 @@ def test_task_records_page_is_wired_not_reinvented():
     )
     # ⚠️ 菜单名是「**队列记录**」不是「任务记录」（2026-09-25 用户口径「菜单名称重新队列记录」）：
     # 与「任务中心 · 任务日志」只差一个字，用户根本分不清进哪页。
-    assert 'key: "/task-records"' in shell and 'label: "队列记录"' in shell, (
-        "侧边菜单入口必须叫「队列记录」（与「任务中心」消歧）"
+    #
+    # ⚠️ 判据载体在 v1.1.0 变了（**测量口径随实现搬家，不是放宽**）：
+    # 侧边菜单曾硬编码在 `app-shell.tsx` 里（`key: "/task-records"` + `label: "队列记录"`），
+    # 现在侧栏全部由后端 `/system/menus/mine` 下发 ⇒ 源码里已经没有这两个字面量。
+    # 菜单名的唯一真相源搬到**随包种子** `config/initial_data/menus.seed.json`，
+    # 所以这里改查种子；`app-shell.tsx` 那边改守「不再硬编码菜单」（见
+    # `test_sidebar_business_lines.py::TestSidebarBusinessLineGroups`）。
+    import json
+
+    seed = json.loads(
+        (pathlib.Path(__file__).resolve().parents[2] / "config/initial_data/menus.seed.json")
+        .read_text(encoding="utf-8")
+    )["menus"]
+    by_path = {row.get("path") or "": row.get("name") or "" for row in seed}
+    assert by_path.get("/task-records") == "队列记录", (
+        f"菜单名的权威来源（随包种子）里必须叫「队列记录」，实际 {by_path.get('/task-records')!r}"
     )
-    assert 'label: "任务记录"' not in shell, "菜单名不该再叫「任务记录」（已按口径改「队列记录」）"
+    assert "任务记录" not in set(by_path.values()), "菜单名不该再叫「任务记录」（已按口径改「队列记录」）"
     # ② 与「任务中心」并存且不混淆（两条路由、两个页面文件）
     assert 'path="/tasks"' in router and "TaskCenterPage" in router, (
         "「任务中心」（定时任务）路由必须仍在 —— 任务记录不是它的替代品"
