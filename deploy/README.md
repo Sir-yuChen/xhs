@@ -53,10 +53,12 @@ docker compose ps      # 三个都该是 healthy / running
 | 2 | `secret_key` 守卫生效 | 清空 `SECRET_KEY` 再 `up` ⇒ 日志里 `RuntimeError` 且容器退出 |
 | 3 | 连上 PG | `docker compose exec app python -c "from backend.app.core.database import engine;print(engine.url.database)"` |
 | 4 | 迁移跑过 | `docker compose exec app python -m alembic -c backend/alembic.ini current` ⇒ 显示 head |
-| 5 | admin 首登改密 | 登录 ⇒ 只看到改密页；改完跳登录 |
+| 5 | 拿到出厂口令 | 首次启动日志里找 `出厂管理员口令` 那一行（**随机生成，不再固定 `admin123`**，2026-10-24）。拿不到就查 `docker compose logs app \| grep 出厂管理员` |
+| 5b | admin 首登改密 | 用上一步的口令登录 ⇒ 只看到改密页；改完跳登录 |
 | 6 | 权限闭环 | 建一个 `user` 用户 ⇒ 侧栏无「系统管理」⇒ 直敲 `/system/users` 显示 403 |
 | 7 | 数据包上传 | 上传一个 xlsx + 图片的包 ⇒ 预检通过（不被 413 拦住） |
 | 8 | 调度单实例 | `docker compose logs app \| grep 租约` ⇒ 只有一个实例拿到锁 |
+| 9 | 数据包暂存会自清 | 上传一个包后等 2 小时以上（或把目录 mtime 拨老）⇒ 每小时整点的 `system.package_staging_cleanup` 应删掉它。手动验证：`docker compose exec app python -c "from backend.app.services.package_staging_cleanup_service import run_package_staging_cleanup as f;print(f())"` ⇒ `{'removed': n}`。⚠️ 不加这条，用户上传的包会永久堆在服务器磁盘上（`purge_expired()` 原本从未被调用过） |
 
 ## 5. 裸机部署（systemd）
 

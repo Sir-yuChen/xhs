@@ -160,11 +160,14 @@ def test_registry_has_exactly_sixteen_entries():
 
     ⚠️ 2026-10-13（第二轮用户口径）：**移除** `system.note_metrics_collect` /
     `system.shop_metrics_collect`（指标快照子系统整块移除，后续专项）⇒ 15 → 13。
+    ⚠️ 2026-10-24：新增 `system.package_staging_cleanup`（清理数据包暂存，每小时）
+    —— 用户口径「后续部署在服务器，web 用户在浏览器操作」后，用户上传的数据包
+    会堆在服务器磁盘上（`purge_expired()` 早已实现但**从未被调用**，实测积压 1432 个）⇒ 13 → 14。
     """
     from backend.app.services.job_registry import job_registry
 
     registry = job_registry()
-    assert len(registry) == 13
+    assert len(registry) == 14
     assert set(registry) == {
         "system.due_publish",
         "system.monitoring_refresh",
@@ -178,6 +181,7 @@ def test_registry_has_exactly_sixteen_entries():
         "system.queue_record_cleanup",
         "system.order_sync",
         "system.picture_space_cleanup",
+        "system.package_staging_cleanup",
         "auto_ops.keyword_pipeline",
     }
 

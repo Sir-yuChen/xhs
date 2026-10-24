@@ -52,6 +52,7 @@ JOB_KEY_BUSINESS_NOTE_AUTO_PUBLISH = "system.business_note_auto_publish"
 #: 图片空间「清理未引用图片」（2026-10-11 用户需求）：每周一清一次
 #: 未引用（平台 `productCount == 0`）的图片，可选「进回收站 / 彻底删除」。
 JOB_KEY_PICTURE_SPACE_CLEANUP = "system.picture_space_cleanup"
+JOB_KEY_PACKAGE_STAGING_CLEANUP = "system.package_staging_cleanup"
 
 
 @dataclass(frozen=True)
@@ -137,6 +138,9 @@ def _build_registry() -> dict[str, JobSpec]:
     from backend.app.services.picture_space_cleanup_service import (
         run_picture_space_cleanup,
         validate_cleanup_params,
+    )
+    from backend.app.services.package_staging_cleanup_service import (
+        run_package_staging_cleanup,
     )
     from backend.app.services.record_cleanup_service import (
         run_record_cleanup,
@@ -323,6 +327,24 @@ def _build_registry() -> dict[str, JobSpec]:
             #: ⚠️ **用 `MON` 不用数字 `1`** —— APScheduler 的 cron 周字段同样认 0-6（0=周一），
             #: 写数字会和「周日=0 还是周一=0」的习惯打架，英文缩写无歧义。
             default_cron="0 0 0 * * MON",
+        ),
+        JobSpec(
+            key=JOB_KEY_PACKAGE_STAGING_CLEANUP,
+            # 2026-10-24（用户口径「后续部署在服务器，web 用户在浏览器操作」）。
+            # `package_staging_service.purge_expired()` 早已实现、`STAGING_TTL=2h`
+            # 也早已定义，**但全仓没有一处调用** —— docstring 写的「过期由清理任务删」
+            # 那个任务从来不存在。桌面单机不致命（重启即空），服务器形态会让磁盘
+            # 被用户上传的数据包永久撑涨（几百 MB/包，用户关浏览器就走）。
+            #: 每小时一次，清扫频率跟着 2 小时 TTL 走 ⇒ 峰值占盘 ≈ 2~3 小时上传量。
+            #: ⚠️ 六位 cron：`0 0 * * * *` = 每小时整点第 0 分。
+            name="清理数据包暂存",
+            func=run_package_staging_cleanup,
+            builtin=True,
+            #: 不按用户跑：删的是过期临时文件，不做任何用户数据的读或改
+            #: （与 DEF-066 数据隔离不冲突，理由见 service 模块 docstring）。
+            user_scoped=False,
+            default_trigger_type="cron",
+            default_cron="0 0 * * * *",
         ),
         JobSpec(
             key="auto_ops.keyword_pipeline",
