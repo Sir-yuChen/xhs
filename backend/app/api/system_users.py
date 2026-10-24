@@ -58,6 +58,11 @@ from backend.app.core.time import shanghai_now
 from backend.app.models.role import Role
 from backend.app.models.user import User
 from backend.app.core import permission_cache, presence, rbac_service
+from backend.app.schemas.system import (
+    SystemUserListOut,
+    SystemUserOnlineOut,
+    SystemUserOut,
+)
 
 router = APIRouter(prefix="/system/users", tags=["system"])
 
@@ -188,7 +193,7 @@ class ResetPasswordRequest(BaseModel):
 # --------------------------------------------------------------------------- #
 # 端点
 # --------------------------------------------------------------------------- #
-@router.get("")
+@router.get("", response_model=SystemUserListOut)
 def list_users(
     *,
     db: Session = Depends(get_db),
@@ -276,7 +281,7 @@ def create_user(
     )
 
 
-@router.get("/{user_id}")
+@router.get("/{user_id}", response_model=SystemUserOut)
 def get_user(
     user_id: int,
     *,
@@ -445,7 +450,7 @@ def approve_user(
     )
 
 
-@router.get("/{user_id}/online")
+@router.get("/{user_id}/online", response_model=SystemUserOnlineOut)
 def get_user_online(
     user_id: int,
     *,

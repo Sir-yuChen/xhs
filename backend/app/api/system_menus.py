@@ -57,6 +57,11 @@ from backend.app.models.menu import Menu
 from backend.app.models.role_menu import RoleMenu
 from backend.app.models.user import User
 from backend.app.core import permission_cache, rbac_service
+from backend.app.schemas.system import (
+    MenuDetailOut,
+    MenuMineListOut,
+    MenuTreeListOut,
+)
 
 router = APIRouter(prefix="/system/menus", tags=["system"])
 
@@ -271,7 +276,7 @@ def _to_tree(rows: list[Menu]) -> list[dict]:
     return build(0)
 
 
-@router.get("/mine")
+@router.get("/mine", response_model=MenuMineListOut)
 def my_menus(
     *,
     db: Session = Depends(get_db),
@@ -302,7 +307,7 @@ def my_menus(
 
 
 
-@router.get("/tree")
+@router.get("/tree", response_model=MenuTreeListOut)
 def get_menu_tree(
     *,
     db: Session = Depends(get_db),
@@ -324,7 +329,7 @@ def get_menu_tree(
     return {"items": _build_tree(list(rows)), "total": len(rows)}
 
 
-@router.get("/{menu_id}")
+@router.get("/{menu_id}", response_model=MenuDetailOut)
 def get_menu(
     menu_id: int,
     *,

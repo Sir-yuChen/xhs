@@ -54,6 +54,11 @@ from backend.app.models.menu import Menu
 from backend.app.models.role import Role
 from backend.app.models.user import User
 from backend.app.core import permission_cache, rbac_service, presence
+from backend.app.schemas.system import (
+    SystemRoleListOut,
+    SystemRoleMenusOut,
+    SystemRoleUsersOut,
+)
 
 router = APIRouter(prefix="/system/roles", tags=["system"])
 
@@ -182,7 +187,7 @@ def _kick_role_holders(db: Session, role_code: str) -> int:
 # --------------------------------------------------------------------------- #
 # 端点
 # --------------------------------------------------------------------------- #
-@router.get("")
+@router.get("", response_model=SystemRoleListOut)
 def list_roles(
     *, db: Session = Depends(get_db), _: User = Depends(require_perm("system:role:view"))
 ) -> dict:
@@ -302,7 +307,7 @@ def delete_role(
     return {"ok": True, "id": role_id, "deleted": True}
 
 
-@router.get("/{role_id}/menus")
+@router.get("/{role_id}/menus", response_model=SystemRoleMenusOut)
 def get_role_menus(
     role_id: int,
     *,
@@ -353,7 +358,7 @@ def set_role_menus(
     }
 
 
-@router.get("/{role_id}/users")
+@router.get("/{role_id}/users", response_model=SystemRoleUsersOut)
 def get_role_users(
     role_id: int,
     *,

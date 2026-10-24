@@ -53,6 +53,7 @@ from backend.app.core.perm_deps import require_perm
 from backend.app.core.time import shanghai_now
 from backend.app.models.dict import DictItem, DictType
 from backend.app.models.user import User
+from backend.app.schemas.system import DictItemListOut, DictTypeListOut
 
 router = APIRouter(prefix="/system/dict", tags=["system"])
 
@@ -158,7 +159,7 @@ def _get_type_or_404(db: Session, type_id: int) -> DictType:
 # --------------------------------------------------------------------------- #
 # 类型
 # --------------------------------------------------------------------------- #
-@router.get("/types")
+@router.get("/types", response_model=DictTypeListOut)
 def list_dict_types(
     *,
     db: Session = Depends(get_db),
@@ -294,7 +295,7 @@ def delete_dict_type(
 # --------------------------------------------------------------------------- #
 # 项
 # --------------------------------------------------------------------------- #
-@router.get("/items")
+@router.get("/items", response_model=DictItemListOut)
 def list_dict_items(
     *,
     db: Session = Depends(get_db),

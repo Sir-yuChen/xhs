@@ -309,8 +309,9 @@ def test_scanner_sees_function_level_and_relative_imports():
 # response_model 覆盖率基线（设计 61 §四 A1 第二条守卫，A6 逐域抬升）
 # ---------------------------------------------------------------------------
 
-#: 当前基线（2026-10-24 实测 = 0）。A6 每补齐一个域就把本数字抬上去，只许升不许降。
-RESPONSE_MODEL_BASELINE = 0
+#: 当前基线（2026-10-24 A6 第一批：system 域 15 个 GET 接线后实测 = 15）。
+#: 后续每补齐一个域（settings / system_deps / notes …）就把本数字抬上去，只许升不许降。
+RESPONSE_MODEL_BASELINE = 15
 
 _HTTP_VERBS = {"get", "post", "put", "patch", "delete"}
 

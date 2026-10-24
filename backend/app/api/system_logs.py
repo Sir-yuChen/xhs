@@ -47,6 +47,11 @@ from sqlalchemy.orm import Session
 from backend.app.core.database import get_db
 from backend.app.core.perm_deps import require_perm
 from backend.app.models.user import User
+from backend.app.schemas.system import (
+    AppLogListOut,
+    AuditLogDetailOut,
+    AuditLogListOut,
+)
 
 router = APIRouter(prefix="/system", tags=["system"])
 
@@ -54,7 +59,7 @@ router = APIRouter(prefix="/system", tags=["system"])
 # --------------------------------------------------------------------------- #
 # 日志（需要 system:log:view）
 # --------------------------------------------------------------------------- #
-@router.get("/logs/app")
+@router.get("/logs/app", response_model=AppLogListOut)
 def list_app_logs(
     *,
     db: Session = Depends(get_db),
@@ -108,7 +113,7 @@ def list_app_logs(
     }
 
 
-@router.get("/logs/audit")
+@router.get("/logs/audit", response_model=AuditLogListOut)
 def list_audit_logs(
     *,
     db: Session = Depends(get_db),
@@ -157,7 +162,7 @@ def list_audit_logs(
     }
 
 
-@router.get("/logs/audit/{log_id}")
+@router.get("/logs/audit/{log_id}", response_model=AuditLogDetailOut)
 def get_audit_log(
     log_id: int,
     *,
