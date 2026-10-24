@@ -37,6 +37,7 @@ import {
 } from "@ant-design/icons";
 import {
   App,
+  AutoComplete,
   Button,
   Card,
   Col,
@@ -57,6 +58,7 @@ import {
 import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useState } from "react";
 
+import { menuIcon, menuIconNames } from "../../lib/menu-icon";
 import { useCan } from "../../hooks/use-can";
 import {
   createSystemMenu,
@@ -169,6 +171,12 @@ export function SystemMenusPanel() {
       title: "名称",
       dataIndex: "name",
       width: 260,
+      render: (v: string, row) => (
+        <Space size={8}>
+          {menuIcon(row.icon)}
+          <span>{v}</span>
+        </Space>
+      ),
     },
     {
       title: "类型",
@@ -512,8 +520,23 @@ function MenuFormModal({
             </Form.Item>
           </Col>
           <Col span={12}>
-            <Form.Item name="icon" label="图标（antd 组件名）">
-              <Input placeholder="例如 UserOutlined" />
+            <Form.Item
+              name="icon"
+              label="图标"
+              dependencies={["menu_type"]}
+              rules={[
+                ({ getFieldValue }) => ({
+                  validator(_, value) {
+                    // 按钮可以有图标也可以没有；工作区/目录/页面必须有（2026-10-25 用户口径）
+                    if (getFieldValue("menu_type") === "F" || (value ?? "").trim()) {
+                      return Promise.resolve();
+                    }
+                    return Promise.reject(new Error("工作区 / 目录 / 页面必须配图标"));
+                  },
+                }),
+              ]}
+            >
+              <IconPicker />
             </Form.Item>
           </Col>
         </Row>
@@ -545,5 +568,49 @@ function MenuFormModal({
         </Form.Item>
       </Form>
     </Modal>
+  );
+}
+
+/** 图标选择器（2026-10-25 用户口径「支持外部图标地址等多样化，图标使用支持下拉选择」）：
+ *  下拉 = antd 白名单全清单（每项带渲染预览）；也允许**自由输入** ——
+ *  粘贴外部图片地址（https://… / /icon.png / data:）即可用图片当图标。
+ *  输入框右侧始终实时预览当前值渲染效果。 */
+function IconPicker({ value, onChange }: { value?: string; onChange?: (v: string) => void }) {
+  const options = menuIconNames().map((name) => ({
+    value: name,
+    label: (
+      <Space size={8}>
+        {menuIcon(name)}
+        <span style={{ fontSize: 12 }}>{name}</span>
+      </Space>
+    ),
+  }));
+  return (
+    <Space.Compact style={{ width: "100%" }}>
+      <AutoComplete
+        style={{ width: "calc(100% - 34px)" }}
+        value={value}
+        onChange={(v) => onChange?.(v)}
+        options={options}
+        placeholder="下拉选 antd 图标，或粘贴图片地址"
+        filterOption={(input, option) =>
+          String(option?.value ?? "").toLowerCase().includes(input.toLowerCase())
+        }
+      />
+      <span
+        style={{
+          width: 34,
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          border: "1px solid #d9d9d9",
+          borderRadius: 6,
+          height: 32,
+          background: "#fafafa",
+        }}
+      >
+        {menuIcon(value)}
+      </span>
+    </Space.Compact>
   );
 }

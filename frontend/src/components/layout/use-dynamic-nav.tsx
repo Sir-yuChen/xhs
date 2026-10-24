@@ -32,142 +32,11 @@
  * `WorkspaceShell` 的 `activeKeys` 已按「含 query 的键比对 pathname+search」处理。
  */
 
-import {
-  AlertOutlined,
-  AimOutlined,
-  ApiOutlined,
-  AppstoreOutlined,
-  BarChartOutlined,
-  BellOutlined,
-  BookOutlined,
-  CloudServerOutlined,
-  ClusterOutlined,
-  DashboardOutlined,
-  DatabaseOutlined,
-  FileTextOutlined,
-  FolderOpenOutlined,
-  FundOutlined,
-  GlobalOutlined,
-  HighlightOutlined,
-  HistoryOutlined,
-  KeyOutlined,
-  LineChartOutlined,
-  MenuOutlined,
-  MessageOutlined,
-  PictureOutlined,
-  ProfileOutlined,
-  RobotOutlined,
-  SafetyCertificateOutlined,
-  ScheduleOutlined,
-  SearchOutlined,
-  SendOutlined,
-  SettingOutlined,
-  ShopOutlined,
-  ShoppingCartOutlined,
-  ShoppingOutlined,
-  TagsOutlined,
-  TeamOutlined,
-  ThunderboltOutlined,
-  ToolOutlined,
-  UserOutlined,
-  VideoCameraOutlined,
-  WarningOutlined,
-} from "@ant-design/icons";
 import type { MenuProps } from "antd";
 import { useEffect, useMemo, useState } from "react";
 
 import { fetchMyMenus, type SystemMenuNode } from "../../lib/api";
-
-/** 后端 `menus.icon` → antd 图标组件（**白名单**，见文件头注释）。 */
-const ICONS: Record<string, React.ReactNode> = {
-  AimOutlined: <AimOutlined />,
-  ApiOutlined: <ApiOutlined />,
-  AlertOutlined: <AlertOutlined />, AppstoreOutlined: <AppstoreOutlined />,
-  BarChartOutlined: <BarChartOutlined />,
-  BellOutlined: <BellOutlined />,
-  BookOutlined: <BookOutlined />,
-  CloudServerOutlined: <CloudServerOutlined />,
-  ClusterOutlined: <ClusterOutlined />,
-  DashboardOutlined: <DashboardOutlined />,
-  DatabaseOutlined: <DatabaseOutlined />,
-  FileTextOutlined: <FileTextOutlined />,
-  FolderOpenOutlined: <FolderOpenOutlined />,
-  FundOutlined: <FundOutlined />, GlobalOutlined: <GlobalOutlined />,
-  HighlightOutlined: <HighlightOutlined />,
-  HistoryOutlined: <HistoryOutlined />,
-  KeyOutlined: <KeyOutlined />,
-  LineChartOutlined: <LineChartOutlined />,
-  MenuOutlined: <MenuOutlined />,
-  MessageOutlined: <MessageOutlined />,
-  PictureOutlined: <PictureOutlined />,
-  ProfileOutlined: <ProfileOutlined />,
-  RobotOutlined: <RobotOutlined />,
-  SafetyCertificateOutlined: <SafetyCertificateOutlined />,
-  ScheduleOutlined: <ScheduleOutlined />,
-  SearchOutlined: <SearchOutlined />,
-  SendOutlined: <SendOutlined />,
-  SettingOutlined: <SettingOutlined />,
-  ShopOutlined: <ShopOutlined />,
-  ShoppingCartOutlined: <ShoppingCartOutlined />,
-  ShoppingOutlined: <ShoppingOutlined />,
-  TagsOutlined: <TagsOutlined />,
-  TeamOutlined: <TeamOutlined />,
-  ThunderboltOutlined: <ThunderboltOutlined />,
-  ToolOutlined: <ToolOutlined />,
-  UserOutlined: <UserOutlined />,
-  VideoCameraOutlined: <VideoCameraOutlined />,
-  WarningOutlined: <WarningOutlined />,
-};
-
-/** 平台品牌图标（antd 没有平台 logo）：色块 + 首字，与工作区卡片同款视觉。 */
-const BRAND_ICONS: Record<string, { color: string; label: string }> = {
-  xiaohongshu: { color: "#ff2442", label: "小" },
-  douyin: { color: "#111111", label: "抖" },
-  kuaishou: { color: "#ff7900", label: "快" },
-  weibo: { color: "#e6162d", label: "微" },
-  xianyu: { color: "#ffe600", label: "闲" },
-  taobao: { color: "#ff5200", label: "淘" },
-};
-
-/** 种子图标名是 kebab 短名（`safety-certificate`）→ antd 组件名（`SafetyCertificateOutlined`）。 */
-function pascalOutlined(kebab: string): string {
-  return (
-    kebab
-      .split("-")
-      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-      .join("") + "Outlined"
-  );
-}
-
-function iconOf(name: string): React.ReactNode {
-  if (!name) return null;
-  // 平台品牌名（xiaohongshu / douyin …）antd 没有 ⇒ 色块首字兜底（不抛错）。
-  const brand = BRAND_ICONS[name];
-  if (brand) {
-    return (
-      <span
-        style={{
-          display: "inline-flex",
-          alignItems: "center",
-          justifyContent: "center",
-          width: 18,
-          height: 18,
-          borderRadius: 4,
-          background: brand.color,
-          color: "#fff",
-          fontSize: 11,
-          lineHeight: 1,
-          flexShrink: 0,
-        }}
-      >
-        {brand.label}
-      </span>
-    );
-  }
-  // 种子图标名是 kebab 短名；白名单键是 antd 全名 —— 先翻译再查。
-  // 两级都未命中 ⇒ 不渲染图标（**不抛错**，见文件头注释）。
-  return ICONS[pascalOutlined(name)] ?? ICONS[name] ?? null;
-}
+import { menuIcon } from "../../lib/menu-icon";
 
 /** 后端树 → antd Menu items。F 行（按钮权限）不进侧栏。 */
 function toMenuItems(nodes: SystemMenuNode[]): MenuProps["items"] {
@@ -178,7 +47,7 @@ function toMenuItems(nodes: SystemMenuNode[]): MenuProps["items"] {
     if (children && children.length > 0) {
       items.push({
         key: `m-${node.id}`, // 父级 key 不是路由（antd 父级不可选中）
-        icon: iconOf(node.icon),
+        icon: menuIcon(node.icon),
         label: node.name,
         children,
       });
@@ -188,7 +57,7 @@ function toMenuItems(nodes: SystemMenuNode[]): MenuProps["items"] {
     if (!node.path) continue; // 没有 path 的空目录不渲染（点不进去）
     items.push({
       key: node.path,
-      icon: iconOf(node.icon),
+      icon: menuIcon(node.icon),
       label: node.name,
     });
   }
@@ -204,20 +73,12 @@ export interface DynamicNav {
 }
 
 /**
- * 动态侧栏。
- *
  * 分组判据（后端 `menus.workspace`）：
  *  - 工作区（`xhs` / `ai` / `system`）与平台（`douyin` / `xianyu` …）→ **主导航**
- *  - 公共工具（`/tasks`、`/task-records`、`/settings`、`/models`）→ **底部**（footer）
+ *  - 公共工具（`/tasks`、`/task-records`、`/models`、`/settings`）→ **底部**（footer）
  *
  * 底部那几项的 `workspace` 在种子里是空串或 `common`，按「是否在 footer 白名单路由里」
  * 判定更稳（路由是唯一标识，`workspace` 只是分类标签）。
- *
- * ## `workspace` 形参（设计 62 §2.1 平台隔离）
- *
- * 传入时透传给 `fetchMyMenus(workspace)` —— 后端只回该工作区的菜单切片
- * （含祖先保链）。侧栏因此按工作区隔离：小红书工作区不再把系统管理 /
- * 大模型网关混进来。不传（undefined）= 老的全量行为。
  */
 const FOOTER_PATHS = new Set(["/tasks", "/task-records", "/models", "/settings"]);
 
