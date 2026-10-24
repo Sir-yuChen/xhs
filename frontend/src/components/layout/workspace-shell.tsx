@@ -14,6 +14,7 @@ import {
   Badge,
   Button,
   Dropdown,
+  Modal,
   Empty,
   Layout,
   List,
@@ -28,6 +29,8 @@ import type { MenuProps } from "antd";
 import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+
+import { ProfilePage } from "../../pages/system/profile-page";
 
 import { useAuth } from "../../hooks/use-auth";
 import { useThemeMode } from "../../app/providers";
@@ -218,6 +221,8 @@ export function WorkspaceShell({
   const [notifyFilter, setNotifyFilter] = useState<"all" | "unread">("all");
   // 手动「检查版本更新」弹窗（2026-10-13 用户口径）：顶栏图标点开，**不强制**。
   const [manualUpdateOpen, setManualUpdateOpen] = useState(false);
+  //: 个人资料弹窗（设计 62 §2.3 / 2026-10-25 用户口径：弹窗展示，不用单独页）
+  const [profileOpen, setProfileOpen] = useState(false);
   //: 依赖检查弹窗（用户口径 2026-10-23：「在页面顶部的版本更新图标旁新增一个
   //: 依赖检查，点击弹窗展示检查本地依赖是否完整，不完整则自动触发下载」）。
   const [depCheckOpen, setDepCheckOpen] = useState(false);
@@ -461,8 +466,9 @@ export function WorkspaceShell({
                 <Button type="text" icon={<BellOutlined style={{ fontSize: 16 }} />} style={{ display: "flex", alignItems: "center", justifyContent: "center" }} />
               </Badge>
             </Dropdown>
-            {/* 头像下拉（设计 62 §2.3）：个人资料从侧栏 C 行改为头像下拉直达
-                —— 与用户惯例一致；退出登录保留在菜单里（左下角用户条的退出不受影响）。 */}
+            {/* 头像下拉（设计 62 §2.3 / 2026-10-25 用户口径「个人资料使用弹窗展示，
+                不使用单独页面」）：个人资料点开 Modal（复用 ProfilePage 内容组件），
+                退出登录保留在菜单里（左下角用户条的退出不受影响）。 */}
             <Dropdown
               trigger={["click"]}
               placement="bottomRight"
@@ -472,7 +478,7 @@ export function WorkspaceShell({
                   { key: "logout", icon: <LogoutOutlined />, label: "退出登录" },
                 ],
                 onClick: ({ key }) => {
-                  if (key === "profile") navigate("/profile");
+                  if (key === "profile") setProfileOpen(true);
                   else if (key === "logout") void auth.logout();
                 },
               }}
@@ -501,6 +507,19 @@ export function WorkspaceShell({
       <UpdateDialog />
       {/* 手动检查更新弹窗（2026-10-13 用户口径）：顶栏图标点开，**可关闭 / 可暂不更新** */}
       <ManualUpdateDialog open={manualUpdateOpen} onClose={() => setManualUpdateOpen(false)} />
+      {/* 个人资料弹窗（设计 62 §2.3）：内容复用 ProfilePage（账号信息 + 改密码）。
+          改密成功 = window.location.href="/login" 整页跳走，无需额外关闭接线。 */}
+      <Modal
+        open={profileOpen}
+        title="个人资料"
+        width={920}
+        centered
+        footer={null}
+        onCancel={() => setProfileOpen(false)}
+        destroyOnHidden
+      >
+        <ProfilePage />
+      </Modal>
     </Layout>
   );
 }

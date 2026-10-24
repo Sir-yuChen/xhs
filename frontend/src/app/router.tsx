@@ -31,7 +31,6 @@ import { XhsPublishPage } from "../pages/platforms/xhs/publish-page";
 import { XhsSectionPage } from "../pages/platforms/xhs/xhs-section-page";
 import { SystemPage } from "../pages/system/system-page";
 import { ForbiddenPage } from "../pages/system/forbidden-page";
-import { ProfileStandalonePage } from "../pages/system/profile-page";
 
 /*
  * `/platforms/:platformId` 顶层分发（设计 62 §2.4）：
@@ -91,17 +90,6 @@ export function AppRouter() {
               各自的 index 重定向、旧 ?tab= 兼容、未知段回落都在 LlmGatewayPage 内部。 */}
           <Route path="*" element={null} />
         </Route>
-        {/* 个人资料（设计 62 §2.3）：独立全屏页（同 /llm-gateway 的壳模式）——
-            顶部窄 header（返回工作区 / 标题 / 退出登录）+ ProfilePage 原内容。
-            **所有人可用**（不需要权限码）；不再挂任何工作区侧栏。 */}
-        <Route
-          path="/profile"
-          element={
-            <ProtectedRoute>
-              <ProfileStandalonePage />
-            </ProtectedRoute>
-          }
-        />
         <Route
           element={
             <ProtectedRoute>
@@ -124,8 +112,6 @@ export function AppRouter() {
           <Route path="/system/dicts" element={<SystemPage />} />
           <Route path="/system/settings" element={<SystemPage />} />
           <Route path="/system/logs" element={<SystemPage />} />
-          {/* 个人资料（设计 62 §2.3）：已移出 AppShell —— 独立全屏页
-              `ProfileStandalonePage`，见路由表顶层的 /profile 声明。 */}
           {/* 403：直敲未授权 URL 时可达（设计 49 §模块八） */}
           <Route path="/403" element={<ForbiddenPage />} />
           {/* 平台工作区顶层（设计 62 §2.4）：在 AppShell 布局**之内** ——
