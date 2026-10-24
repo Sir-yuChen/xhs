@@ -360,13 +360,19 @@ def list_workspaces(
         status = (m.status or "normal").strip() or "normal"
         if status != "normal":
             continue
+        enterable = (m.workspace or "") in visible_workspaces
+        if not enterable:
+            # ⚠️ 「用户存在什么菜单就展示什么」：没有该工作区任何可见行的用户
+            # （含「启用中但一行菜单都没有」的空壳平台，2026-10-25 实测淘宝）
+            # 不下发卡片 —— 工作区页不给「看得见摸不着」的入口。
+            continue
         items.append(
             {
                 "workspace": m.workspace or "",
                 "name": m.name,
                 "icon": m.icon or "",
                 "status": status,
-                "enterable": (m.workspace or "") in visible_workspaces,
+                "enterable": True,
             }
         )
     return {"items": items, "total": len(items)}
