@@ -32,6 +32,7 @@ import {
   BookOutlined,
   FileSearchOutlined,
   SafetyCertificateOutlined,
+  SettingOutlined,
   TeamOutlined,
 } from "@ant-design/icons";
 import { Card, Tabs, Typography } from "antd";
@@ -56,9 +57,22 @@ const TABS = [
   { key: "roles", path: "/system/roles", label: "角色管理", icon: <SafetyCertificateOutlined />, perm: "system:role:view" },
   { key: "menus", path: "/system/menus", label: "菜单管理", icon: <AppstoreOutlined />, perm: "system:menu:view" },
   { key: "dicts", path: "/system/dicts", label: "字典管理", icon: <BookOutlined />, perm: "system:dict:view" },
-  //: ⚠️ `/system/settings` 也落到本页：配置管理在 v1.1.0 里**复用现有的设置页**
-  //: （`/settings`，已有 9 个 LIVE_KEYS 与「应用到所有用户」），不在系统管理里重做一套。
-  //: 所以这一栏指向 `/settings`，见下面的 `externalPath`。
+  //: ⚠️ 「配置管理」在 v1.1.0 里**复用现有的设置页**（`/settings`，已有 9 个
+  //: LIVE_KEYS 与「应用到所有用户」），不在系统管理里重做一套。
+  //:
+  //: **2026-10-24 梳理补齐**：这一栏原来缺失 —— 种子菜单里有 `/system/settings`
+  //: 且权限码 `system:setting:view` 已登记，但本页 TABS 里没有对应项 ⇒
+  //: 用户点侧栏「配置管理」会落到本页却**看不到任何对应页签**（只有其它 5 个），
+  //: 而 `system:setting:view` 也成了**永远没有读者的死码**。
+  //: `externalPath` 让该页签点击后跳到 `/settings`（不复制一套设置 UI）。
+  {
+    key: "settings",
+    path: "/system/settings",
+    label: "配置管理",
+    icon: <SettingOutlined />,
+    perm: "system:setting:view",
+    externalPath: "/settings",
+  },
   { key: "logs", path: "/system/logs", label: "日志查看", icon: <FileSearchOutlined />, perm: "system:log:view" },
 ] as const;
 
@@ -106,7 +120,10 @@ export function SystemPage() {
       //: 且 URL 与侧栏菜单项一致（面包屑 / 收藏 / 分享都对）。
       onChange={(key) => {
         const target = TABS.find((tab) => tab.key === key);
-        if (target) navigate(target.path);
+        if (!target) return;
+        //: `externalPath` 的页签（配置管理 ⇒ `/settings`）**整页跳出去**：
+        //: 它是复用既有设置页，不是本页内的 panel —— 硬留在这里会渲染空内容。
+        navigate(("externalPath" in target && target.externalPath) || target.path);
       }}
       items={visibleTabs.map((tab) => ({
         key: tab.key,
@@ -134,6 +151,17 @@ function renderPanel(key: TabKey) {
       return <SystemDictPanel />;
     case "logs":
       return <SystemLogsPanel />;
+    case "settings":
+      //: 「配置管理」复用 `/settings`（`externalPath` 已在 onChange 里整页跳出去）。
+      //: 这里给一个兜底提示，覆盖「用户直接落在 /system/settings 而没有触发 onChange」
+      //: 的情形（深链 / 刷新）—— 空内容会让人以为页面坏了。
+      return (
+        <Card>
+          <Text type="secondary">
+            配置管理复用「设置」页（每用户一份配置）。点击上方页签或访问 /settings 查看。
+          </Text>
+        </Card>
+      );
     default:
       return null;
   }

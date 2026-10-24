@@ -3,9 +3,9 @@
   "version": 2,
   "counts": {
     "M": 11,
-    "C": 35,
+    "C": 36,
     "F": 133,
-    "total": 179
+    "total": 180
   },
   "menus": [
     {
@@ -2331,6 +2331,19 @@
       "icon": "setting",
       "workspace": "xhs",
       "sort_order": 107,
+      "is_visible": true,
+      "status": "normal",
+      "parent_seq": 1
+    },
+    {
+      "_seq": 180,
+      "name": "个人资料",
+      "menu_type": "C",
+      "path": "/profile",
+      "perms": "xhs:profile:view",
+      "icon": "user",
+      "workspace": "xhs",
+      "sort_order": 108,
       "is_visible": true,
       "status": "normal",
       "parent_seq": 1

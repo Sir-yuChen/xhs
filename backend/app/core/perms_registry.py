@@ -275,9 +275,18 @@ PAGE_VIEW_PERMS: tuple[PermSpec, ...] = (
     PermSpec("ai:usage:view", "用量看板", "C", "/usage-dashboard", _A, _A),
     PermSpec("ai:gateway:view", "服务商", "C", "/llm-gateway/providers", _A, _A),
     PermSpec("ai:model:view", "模型配置", "C", "/models", _A, _A),
-    # 任务中心 / 队列记录 / 个人资料 3（个人资料不挂码，故不计；见下）
+    # 任务中心 / 队列记录 / 个人资料 3
     PermSpec("xhs:job:view", "任务中心", "C", "/tasks", _X, _X),
     PermSpec("xhs:record:view", "队列记录", "C", "/task-records", _X, _X),
+    #: ⚠️ **v1.1.0 梳理补登（2026-10-24）**：原注释写「个人资料不挂码，故不计」，
+    #: 那是把两件事混了 ——
+    #:   * 「**端点**不挂码」是对的（每个人都要能改自己的密码，挂码会把人锁死，
+    #:     见 `GET/POST /auth/*` 的 EXEMPT 说明）；
+    #:   * 「**页面菜单**不挂码」是错的：v1.1.0 侧栏由 `menus` 表下发，而菜单行
+    #:     必须带内码才能被 `role_menus` 授权、才能出现在侧栏。没有码 ⇒ 这个页面
+    #:     在侧栏里**根本不存在**，用户只能手敲 `/profile`（实测：改了密码都没入口）。
+    #: ⇒ 补一条页面级 view 码；它**不保护端点**，只决定「侧栏里有没有这个入口」。
+    PermSpec("xhs:profile:view", "个人资料", "C", "/profile", _X, _X),
     # ⚠️ 第 22 条：预警规则页（大模型网关工作区，`/llm-gateway/alerts`）
     PermSpec("ai:alert:view", "预警规则", "C", "/llm-gateway/alerts", _A, _A),
 )
