@@ -304,9 +304,26 @@ def latest_cookies_for_channels(
         )
     ).all()
     latest: dict[tuple[int, str], str] = {}
+    undecryptable = 0
     for row in rows:
-        for channel, jar in parse_channel_envelope(decrypt_text(row.encrypted_cookies)).items():
+        # ⚠️ 逐行兜底（2026-10-25 实测教训）：一行的密文解不开（密钥轮换残留 /
+        #    损坏）不该让**整个账号列表** 500 —— 那一行按「无 Cookie」处理
+        #    （缺值口径：解析不到就留空，不造假、不拖垮别人）。
+        try:
+            envelope = parse_channel_envelope(decrypt_text(row.encrypted_cookies))
+        except Exception:  # noqa: BLE001 - InvalidToken 等解密失败 = 该行视为无 Cookie
+            undecryptable += 1
+            continue
+        for channel, jar in envelope.items():
             latest.setdefault((row.platform_account_id, channel), _cookies_to_string(jar))
+    if undecryptable:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "latest_cookies_for_channels: %d 行 Cookie 解密失败，已按无 Cookie 处理"
+            "（若非个别行，检查 security.secret_key / fernet_key 是否轮换过）",
+            undecryptable,
+        )
     return latest
 
 
