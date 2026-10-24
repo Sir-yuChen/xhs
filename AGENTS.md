@@ -29,7 +29,8 @@
 #      ⛔ **不要用 `main.py --with-frontend` 当常驻服务**（2026-10-01 实测 4 次「跑一会儿就退」）：
 #         它是一次性阻塞、无监督循环 ⇒ launcher 一退，uvicorn/vite 立刻变**孤儿**（父进程消失但端口仍持着），
 #         且被杀时只留空壳端口（netstat LISTENING + HTTP 502）。它是「手工临时起一次」用的。
-#      停服务走 `.hermes/tmp_stop_app.py`（杀 api/web + 复核端口释放）；⚠️ 该脚本**认不出 `main.py --with-frontend`**
+#      启停走 `.hermes/scripts/stop-app.ps1`（杀计划任务 + 复核端口释放）与
+#      `.hermes/scripts/start_app_detached.ps1`（分离启动）；⚠️ 二者都**认不出 `main.py --with-frontend`**
 #         形态的进程（只匹配固定路径模式）⇒ 停不干净时用 `Win32_Process` 按命令行匹配补杀。
 #   :8000 → 后端直出 frontend/dist 构建产物 + API ；:5173 → Vite dev（热更新，/api 反代 8000）
 
