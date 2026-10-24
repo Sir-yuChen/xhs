@@ -78,13 +78,12 @@ def test_workspaces_lists_roots_with_enterable_flags(seeded_client):
     token = _login(client, "admin", seeded_client.admin_password)
     cards = _workspaces(client, token)
 
-    assert set(cards) == {"xhs", "ai", "system", "douyin", "kuaishou", "weibo", "xianyu", "taobao"}
+    # 2026-10-25 用户口径「停用的就不应该再返回给前端展示」：
+    # 占位平台（disabled）不再下发 —— 工作区页只有启用中的工作区。
+    assert set(cards) == {"xhs", "ai", "system"}
     for ws in ("xhs", "ai", "system"):
         assert cards[ws]["enterable"] is True, f"{ws} 对 admin 应可进入"
         assert cards[ws]["status"] == "normal"
-    for ws in ("douyin", "kuaishou", "weibo", "xianyu", "taobao"):
-        assert cards[ws]["enterable"] is False, f"{ws} 是占位平台（disabled）"
-        assert cards[ws]["status"] == "disabled"
     assert cards["xhs"]["name"] == "小红书"
     assert cards["system"]["name"] == "系统管理"
 

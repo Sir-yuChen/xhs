@@ -33,6 +33,7 @@
  */
 
 import {
+  AlertOutlined,
   AimOutlined,
   ApiOutlined,
   AppstoreOutlined,
@@ -45,6 +46,7 @@ import {
   DatabaseOutlined,
   FileTextOutlined,
   FolderOpenOutlined,
+  FundOutlined,
   GlobalOutlined,
   HighlightOutlined,
   HistoryOutlined,
@@ -80,7 +82,7 @@ import { fetchMyMenus, type SystemMenuNode } from "../../lib/api";
 const ICONS: Record<string, React.ReactNode> = {
   AimOutlined: <AimOutlined />,
   ApiOutlined: <ApiOutlined />,
-  AppstoreOutlined: <AppstoreOutlined />,
+  AlertOutlined: <AlertOutlined />, AppstoreOutlined: <AppstoreOutlined />,
   BarChartOutlined: <BarChartOutlined />,
   BellOutlined: <BellOutlined />,
   BookOutlined: <BookOutlined />,
@@ -90,7 +92,7 @@ const ICONS: Record<string, React.ReactNode> = {
   DatabaseOutlined: <DatabaseOutlined />,
   FileTextOutlined: <FileTextOutlined />,
   FolderOpenOutlined: <FolderOpenOutlined />,
-  GlobalOutlined: <GlobalOutlined />,
+  FundOutlined: <FundOutlined />, GlobalOutlined: <GlobalOutlined />,
   HighlightOutlined: <HighlightOutlined />,
   HistoryOutlined: <HistoryOutlined />,
   KeyOutlined: <KeyOutlined />,
@@ -117,9 +119,54 @@ const ICONS: Record<string, React.ReactNode> = {
   WarningOutlined: <WarningOutlined />,
 };
 
+/** 平台品牌图标（antd 没有平台 logo）：色块 + 首字，与工作区卡片同款视觉。 */
+const BRAND_ICONS: Record<string, { color: string; label: string }> = {
+  xiaohongshu: { color: "#ff2442", label: "小" },
+  douyin: { color: "#111111", label: "抖" },
+  kuaishou: { color: "#ff7900", label: "快" },
+  weibo: { color: "#e6162d", label: "微" },
+  xianyu: { color: "#ffe600", label: "闲" },
+  taobao: { color: "#ff5200", label: "淘" },
+};
+
+/** 种子图标名是 kebab 短名（`safety-certificate`）→ antd 组件名（`SafetyCertificateOutlined`）。 */
+function pascalOutlined(kebab: string): string {
+  return (
+    kebab
+      .split("-")
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+      .join("") + "Outlined"
+  );
+}
+
 function iconOf(name: string): React.ReactNode {
-  // 白名单未命中 ⇒ 不渲染图标（**不抛错**，见文件头注释）
-  return ICONS[name] ?? null;
+  if (!name) return null;
+  // 平台品牌名（xiaohongshu / douyin …）antd 没有 ⇒ 色块首字兜底（不抛错）。
+  const brand = BRAND_ICONS[name];
+  if (brand) {
+    return (
+      <span
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          width: 18,
+          height: 18,
+          borderRadius: 4,
+          background: brand.color,
+          color: "#fff",
+          fontSize: 11,
+          lineHeight: 1,
+          flexShrink: 0,
+        }}
+      >
+        {brand.label}
+      </span>
+    );
+  }
+  // 种子图标名是 kebab 短名；白名单键是 antd 全名 —— 先翻译再查。
+  // 两级都未命中 ⇒ 不渲染图标（**不抛错**，见文件头注释）。
+  return ICONS[pascalOutlined(name)] ?? ICONS[name] ?? null;
 }
 
 /** 后端树 → antd Menu items。F 行（按钮权限）不进侧栏。 */

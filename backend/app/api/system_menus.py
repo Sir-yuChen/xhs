@@ -351,16 +351,22 @@ def list_workspaces(
         .order_by(Menu.sort_order.asc(), Menu.id.asc())
         .all()
     )
+    #: ⚠️ 2026-10-25 用户口径「停用的就不应该再返回给前端展示」：
+    #: `status=disabled` 的占位平台（抖音 / 闲鱼 …）**不再下发** ——
+    #: 工作区页只出现启用中的工作区。占位平台仍在「菜单管理」页可见
+    #: （/tree?include_disabled=true），接入时把 status 切 normal 即可。
     items = []
     for m in roots:
         status = (m.status or "normal").strip() or "normal"
+        if status != "normal":
+            continue
         items.append(
             {
                 "workspace": m.workspace or "",
                 "name": m.name,
                 "icon": m.icon or "",
                 "status": status,
-                "enterable": status == "normal" and (m.workspace or "") in visible_workspaces,
+                "enterable": (m.workspace or "") in visible_workspaces,
             }
         )
     return {"items": items, "total": len(items)}
