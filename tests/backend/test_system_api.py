@@ -70,19 +70,50 @@ def _auth(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
-@pytest.fixture()
-def admin_token(client: TestClient) -> str:
-    """种子 admin（`admin/admin123`）。"""
-    return _login(client, "admin", "admin123")
+#: 测试里用的固定 admin 口令。
+#:
+#: ⚠️ **v1.1.0（2026-10-24）起出厂口令是随机的**，不再是 `admin123`
+#: （公开在文档里的弱口令 + 服务器多用户形态 = 不可接受，见
+#: `menu_seed_service.generate_admin_password` 的 docstring）。
+#: 所以夹具不能假设口令，而是**自己把种子 admin 的口令重置成这个常量**：
+#: 这既是稳定做法，也更贴近真实运维路径（首登强制改密后就是这个状态）。
+TEST_ADMIN_PASSWORD = "test-admin-pass-123"
 
 
 @pytest.fixture()
-def normal_token(client: TestClient) -> str:
+def _seed_admin_password(db_factory) -> str:
+    """把种子 admin 的口令重置为 `TEST_ADMIN_PASSWORD`（幂等）。"""
+    from sqlalchemy import select
+
+    from backend.app.core.security import hash_password
+    from backend.app.models.user import User
+
+    db = db_factory()
+    try:
+        admin = db.scalar(select(User).where(User.username == "admin"))
+        assert admin is not None, "夹具里没有种子 admin —— 播种没跑？"
+        admin.password_hash = hash_password(TEST_ADMIN_PASSWORD)
+        #: 出厂 `must_change_password=True` 会挡住测试里的后续请求（前端会跳改密页），
+        #: 但 API 层不拦；这里保持 True 更贴近真实，登录本身不受影响。
+        db.commit()
+    finally:
+        db.close()
+    return TEST_ADMIN_PASSWORD
+
+
+@pytest.fixture()
+def admin_token(client: TestClient, _seed_admin_password: str) -> str:
+    """种子 admin 的访问令牌（口令由夹具重置为测试常量）。"""
+    return _login(client, "admin", _seed_admin_password)
+
+
+@pytest.fixture()
+def normal_token(client: TestClient, _seed_admin_password: str) -> str:
     """建一个普通用户并登录。"""
     resp = client.post(
         "/api/system/users",
         json={"username": "probe_user", "password": "probe123456", "role": "user"},
-        headers=_auth(_login(client, "admin", "admin123")),
+        headers=_auth(_login(client, "admin", _seed_admin_password)),
     )
     assert resp.status_code == 201, resp.text
     return _login(client, "probe_user", "probe123456")

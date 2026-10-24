@@ -654,7 +654,21 @@ def test_admin_seed_sets_must_change_password(db):
     assert admin.role == "admin"
     assert admin.status == "normal"
     assert admin.must_change_password is True, "出厂口令必须强制改密"
-    assert verify_password("admin123", admin.password_hash), "出厂口令应当可登录"
+
+    #: ⚠️ **v1.1.0（2026-10-24）：出厂口令不再是固定的 `admin123`**，改为播种时随机
+    #: 生成（只写日志，不进库明文 / 不进文档）。理由见
+    #: `menu_seed_service.generate_admin_password` 的 docstring：
+    #: 公开的弱口令 + 服务器多用户形态 = 首登强制改密之前就已被人登进来。
+    #:
+    #: 判据相应改成两条：
+    #:   ① **不能**用公开弱口令登录（证伪回归）；
+    #:   ② hash 是**非空且格式正确**的（真的是 hash_password 产的，不是空串/占位）。
+    assert not verify_password("admin123", admin.password_hash), (
+        "出厂口令不得是公开弱口令 admin123"
+    )
+    assert admin.password_hash and admin.password_hash.startswith("pbkdf2_sha256$"), (
+        f"出厂口令必须是 hash_password 生成的强 hash，实际={admin.password_hash[:40]!r}"
+    )
 
 
 def test_admin_seed_does_not_duplicate_or_rewrite(db):

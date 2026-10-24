@@ -67,14 +67,62 @@ ROLE_SEEDS: tuple[dict[str, Any], ...] = (
     },
 )
 
-#: admin 种子（设计 47 §6）。⚠️ 用户名 / 口令是**出厂基线**，不是「安全配置」：
-#: 配合 `must_change_password=True`（首登强制改密）+ `register.enabled=false`。
+#: admin 种子（设计 47 §6）。
+#:
+#: ## ⚠️ 2026-10-24：口令从**固定 `admin123`** 改为**每次随机生成**
+#:
+#: 原设计是「固定弱口令 + `must_change_password=True` 首登强制改密」。实际风险：
+#:
+#: * `admin123` 写在设计文档、部署 README、种子代码里 ⇒ **等于公开**；
+#: * 「首登强制改密」只发生在**第一次登录之后** —— 在那之前任何人扫到端口
+#:   就能用公开口令登录，而首装环境通常还绑着 `0.0.0.0`；
+#: * 桌面版退役后是**服务器多用户**形态，攻击面比单机大得多。
+#:
+#: 改法：口令在**播种那一刻**随机生成（16 位，含大小写数字符号），只输出到
+#: 安装日志 / stdout（**不进数据库明文、不进文档、不回显到任何 API**）。
+#: 运维在首装时从日志里取一次，登录后 `must_change_password` 仍要求改密。
+#:
+#: ⚠️ 为什么不直接「首装不建账号 + 走注册审批」：注册默认关闭（同一条安全基线），
+#: 那会导致**全新安装没有任何人能登录**，自己把自己锁死。随机口令是两难中的解。
 ADMIN_SEED: dict[str, Any] = {
     "username": "admin",
-    "password": "admin123",
+    #: 空串 = 「播种时随机生成」。**不要**在这里写固定口令。
+    "password": "",
     "real_name": "超级管理员",
     "role": ROLE_ADMIN,
 }
+
+def generate_admin_password(length: int = 16) -> str:
+    """生成出厂管理员口令（播种时调用一次）。
+
+    ## 为什么随机而不是固定
+
+    固定口令（原为 `admin123`）写在**设计文档、部署 README、本文件**里 ⇒
+    等于公开。配合「首登强制改密」看似安全，但那道闸只在**第一次登录之后**生效 ——
+    在它之前，任何扫到端口的人都能用公开口令登进来，而首装环境通常还绑着 `0.0.0.0`。
+
+    桌面版退役后是**服务器多用户**形态，这个风险比单机大得多。
+
+    ## 为什么不用「首装不建账号」
+
+    注册默认关闭（同一条安全基线），那会让全新安装**没有任何人能登录** ——
+    自己把自己锁死。随机口令是这两难之间的解。
+
+    ## 口令去向
+
+    只写进**安装日志 / stdout**（`logger.warning` 一行），供运维首装时取一次。
+    ⚠️ 不进数据库明文（存的是 hash）、不进文档、不回显到任何 API。
+    `must_change_password=True` 仍要求登录后立刻改密。
+
+    字符集刻意去掉了 `0/O/1/l/I` —— 运维要从日志里**手抄**这串字，
+    形近字符是实际会抄错的地方。
+    """
+    alphabet = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#%^*-_+="
+    import secrets
+
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
 
 #: 种子文件名（`config/initial_data/` 下）
 MENUS_SEED_FILENAME = "menus.seed.json"
@@ -599,6 +647,9 @@ def seed_admin_user(db: Session) -> User | None:
         return None
 
     username = ADMIN_SEED["username"]
+    #: 出厂口令**在这里生成一次**（两个分支共用同一串），并且只写进日志。
+    #: ⚠️ 不要把它写回数据库明文 / 文档 / 任何响应体（见 `generate_admin_password`）。
+    _admin_password = ADMIN_SEED.get("password") or generate_admin_password()
     if db.scalar(select(User.id).where(User.username == username)) is not None:
         # 用户名被一个**非 admin** 行占了（用户改过角色）：不抢、不改它，
         # 只记日志 —— 静默改别人的账号角色比「没有 admin」更难排查。
@@ -625,7 +676,7 @@ def seed_admin_user(db: Session) -> User | None:
     #: 与「模板行」是同一类错误：**播种代码用到了比它自己更新的 schema**。
     values = {
         "username": username,
-        "password_hash": hash_password(ADMIN_SEED["password"]),
+        "password_hash": hash_password(_admin_password),
         "real_name": ADMIN_SEED["real_name"],
         "role": ADMIN_SEED["role"],
         "status": USER_STATUS_NORMAL,
@@ -648,7 +699,7 @@ def seed_admin_user(db: Session) -> User | None:
     #: 与「模板行」是同一类错误：**播种代码用到了比它自己更新的 schema**。
     values = {
         "username": username,
-        "password_hash": hash_password(ADMIN_SEED["password"]),
+        "password_hash": hash_password(_admin_password),
         "real_name": ADMIN_SEED["real_name"],
         "role": ADMIN_SEED["role"],
         "status": USER_STATUS_NORMAL,
@@ -672,6 +723,17 @@ def seed_admin_user(db: Session) -> User | None:
     else:
         result = db.execute(text(statement), payload)
         new_id = getattr(result, "lastrowid", None)
+
+    if new_id is not None:
+        #: 出厂口令**只在这里出现一次** —— 运维首装时从日志里取。
+        #: ⚠️ 不要改成 `logger.info`（默认级别看不到 ⇒ 运维拿不到口令 ⇒
+        #: 新装系统无人能登录），`warning` 是刻意的：它必须显眼。
+        logger.warning(
+            "seed: 已创建出厂管理员 username=%s password=%s  —— "
+            "请立即用它登录并按提示改密；本行只出现一次，不会写进数据库明文。",
+            username,
+            _admin_password,
+        )
     return db.get(User, new_id) if new_id is not None else None
 
 

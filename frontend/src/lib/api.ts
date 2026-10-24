@@ -3022,25 +3022,17 @@ export async function precheckLocalPackage(params: {
   return response.data;
 }
 
-/**
- * **弹出系统「选择文件夹」对话框**，返回用户选中的绝对路径。
+/*
+ * ⚠️ `pickPackageFolder()` 已于 v1.1.0（2026-10-24）删除（桌面端退役）。
  *
- * 用户 2026-10-08 口径：「点击加载数据包选择本地文件夹，获得本地夹地址后，
- * 直接读取该数据包内的商品数据」。
+ * 它请求 `POST /xhs/package-precheck/pick-folder`，让**服务器进程**弹 Windows
+ * 文件夹选择框并返回服务器本地路径 —— 服务器形态下不可用：
+ * 没有桌面会话（弹不出）/ 弹的是机房那台机器的框（用户看不到）/
+ * 返回的路径是服务器的（用户的数据包在他自己电脑上）。
  *
- * ⚠️ 由**后端**弹框：浏览器拿不到 `File` 的真实路径（`<input webkitdirectory>`
- * 只给文件名），所以只有与用户同机的后端进程能拿到 `D:\\...`。
- * ⚠️ 用户取消 ⇒ `cancelled=true`（不是错误，前端别弹红条）。
+ * 替代：`lib/folder-picker.ts` 的 `collectFolder()` 收集浏览器选中的目录，
+ * 再用 `precheckPackage()` 上传。见 `product-publish-wizard.tsx::onFolderChosen`。
  */
-export async function pickPackageFolder(): Promise<{ package_path: string; cancelled: boolean }> {
-  const response = await http.post<{ package_path: string; cancelled: boolean }>(
-    "/xhs/package-precheck/pick-folder",
-    undefined,
-    //: 用户挑目录可以很久（在资源管理器里翻），超时给足 5 分钟。
-    { timeout: 300000 },
-  );
-  return response.data;
-}
 
 /** 改了违规词库后，对已加载的包重跑一次预检。 */
 export async function rescanPackagePrecheck(

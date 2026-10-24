@@ -28,6 +28,7 @@
  * ⚠️ 弹窗宽度 80vw / 高 90%；文案禁 Markdown `**`。
  */
 
+import { collectFolder } from "../../../lib/folder-picker";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
@@ -78,7 +79,7 @@ import {
   fetchCategoryProperties,
   fetchForbiddenWordGroups,
   fetchPrecheckImage,
-  pickPackageFolder,
+  precheckPackage,
   precheckLocalPackage,
   publishShopItem,
   rescanPackagePrecheck,
@@ -330,6 +331,10 @@ export function ProductPublishWizard({
   // ---- 第一步：预检 ----
   const [packagePath, setPackagePath] = useState("");
   const [picking, setPicking] = useState(false);
+  /** 上传进度（0–100，null = 未在上传）。用户口径：上百 MB 的包必须看得见进度。 */
+  const [uploadPercent, setUploadPercent] = useState<number | null>(null);
+  /** 隐藏的 `<input webkitdirectory>`（由「选择文件夹」按钮触发）。 */
+  const folderInputRef = useRef<HTMLInputElement | null>(null);
   const [loading, setLoading] = useState(false);
   //: 无图形界面（后端 `NO_DESKTOP`）时，允许手填路径（否则地址栏 readOnly 死锁）。
   const [manualPathFallback, setManualPathFallback] = useState(false);
@@ -999,26 +1004,71 @@ export function ProductPublishWizard({
     return precheck.media.every((m) => m.ocr_ok !== false);
   }, [inspected, precheck]);
 
-  /** 选择文件夹 → 直接读取（用户口径：「获得本地夹地址后，直接读取」）。 */
+  /**
+   * 选文件夹 → **上传并预检**（v1.1.0 改造，2026-10-24）。
+   *
+   * ## 为什么从「后端弹框」改成「浏览器选目录」
+   *
+   * 原实现让**服务器进程**弹 Windows 文件夹选择框、把 `D:\...` 返回前端。
+   * 那在桌面单机成立，在服务器形态必然坏：服务器没有桌面会话（弹不出 /
+   * 卡满 180s 超时），就算弹出也是**机房那台机器**的对话框，用户看不到；
+   * 返回的路径还是服务器本地路径，而用户的数据包在他自己电脑上。
+   *
+   * 用户口径「桌面端不再使用 / 部署到服务器」⇒ 改成浏览器 `webkitdirectory`
+   * 选目录 + 上传（`precheckPackage` 端点早已存在，只是向导没接）。
+   *
+   * ## 路径语义变了
+   *
+   * `packagePath` 不再是「服务器绝对路径」，而是**选中的文件夹名**（仅用于展示
+   * 与提交时的 `package_path` 字段）。真实文件经上传落到服务端暂存目录。
+   */
   const pickAndLoad = useCallback(async () => {
-    setPicking(true);
-    try {
-      const picked = await pickPackageFolder();
-      if (picked.cancelled || !picked.package_path) return;
-      setPackagePath(picked.package_path);
-      await loadWithPath(picked.package_path);
-    } catch (error) {
-      //: 无图形界面（后端弹不出系统选择框）⇒ 解锁地址栏让用户手填，而不是死路。
-      if (readCode(error) === "NO_DESKTOP") {
-        setManualPathFallback(true);
-        void message.info("无法弹出文件夹选择框，请在地址栏填写绝对路径");
-        return;
+    //: 由隐藏 `<input webkitdirectory>` 触发（必须发生在用户手势的同步栈里，
+    //: 否则 Chrome 拦掉「非用户手势的 click」⇒ 表现是点了没反应）。
+    folderInputRef.current?.click();
+  }, []);
+
+  /** `<input>` 变更回调：收集相对路径 → 上传 → 预检。 */
+  const onFolderChosen = useCallback(
+    async (event: React.ChangeEvent<HTMLInputElement>) => {
+      const picked = collectFolder(event.target.files);
+      //: 清空 value 允许「同一个文件夹再选一次」（否则 change 不触发）。
+      event.target.value = "";
+      if (!picked) return;
+
+      setPicking(true);
+      setLoading(true);
+      beginWait("上传并读取数据包");
+      try {
+        setPackagePath(picked.folderName);
+        const response = await precheckPackage({
+          packageName: picked.folderName,
+          files: picked.files,
+          onProgress: (percent) => setUploadPercent(percent),
+        });
+        setToken(response.token);
+        setPrecheck(response.precheck);
+        applyDefaults(response.precheck);
+        setInspected(false);
+        setStep2ResetToken((n) => n + 1);
+        setPriceRows([
+          { key: "default", spec: "-", price: null, stock: null, market_price: null, barcode: "", seller_code: "" },
+        ]);
+        void message.success(
+          `数据包「${response.precheck.package_name}」已读取：` +
+            `${response.precheck.media.length} 个媒体文件、${response.precheck.tables.length} 张表格`,
+        );
+      } catch (error) {
+        void message.error(`读取数据包失败：${readReason(error, "读取失败")}`);
+      } finally {
+        setPicking(false);
+        setLoading(false);
+        setUploadPercent(null);
+        endWait();
       }
-      void message.error(`选择文件夹失败：${readReason(error, "选择失败")}`);
-    } finally {
-      setPicking(false);
-    }
-  }, [loadWithPath, message]);
+    },
+    [applyDefaults, beginWait, endWait, message],
+  );
 
   //: 「可发布 且 被选中」的媒体。
   //:
@@ -2653,6 +2703,9 @@ export function ProductPublishWizard({
         <PrecheckStep
           packagePath={packagePath}
           onPick={() => void pickAndLoad()}
+          folderInputRef={folderInputRef}
+          onFolderChosen={(e) => void onFolderChosen(e)}
+          uploadPercent={uploadPercent}
           picking={picking}
           loading={loading}
           manualPathFallback={manualPathFallback}
@@ -3194,6 +3247,12 @@ export function ProductPublishWizard({
 function PrecheckStep(props: {
   packagePath: string;
   onPick: () => void;
+  /** v1.1.0：隐藏目录选择器的 ref（`<input webkitdirectory>`）。 */
+  folderInputRef: React.RefObject<HTMLInputElement | null>;
+  /** 目录选中回调（上传 + 预检）。 */
+  onFolderChosen: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  /** 上传进度（0–100，null = 未上传）。 */
+  uploadPercent: number | null;
   picking: boolean;
   loading: boolean;
   /** 无图形界面时允许手填路径（后端 `NO_DESKTOP`）。 */
@@ -3247,7 +3306,8 @@ function PrecheckStep(props: {
   onOpenRules?: () => void;
 }) {
   const {
-    packagePath, onPick, picking, loading, onLoad, manualPathFallback, onPackagePathChange,
+    packagePath, onPick, picking, loading, onPackagePathChange,
+    folderInputRef, onFolderChosen, uploadPercent,
     onPrecheck, inspected, precheckPassed, onPreview, onSkuMatchRun, mappingDraft,
     precheckGroups, onOpenGroupPicker, groupOptions,
     token, precheck, checked, onCheckedChange, tables, onTablesChange,
@@ -3293,31 +3353,42 @@ function PrecheckStep(props: {
     //: 只应盖住面板，不该盖住整个弹窗）。
     <div style={{ position: "relative" }}>
       <Space.Compact style={{ width: "100%", marginBottom: 12 }}>
-        {/* ⚠️ 用户口径 2026-10-08：「地址栏**不允许输入**，只能预览」——
-            路径唯一来源是「选择文件夹」（后端弹系统选择器）。
-            ⚠️ 例外（2026-10-12）：后端 `NO_DESKTOP`（无图形界面弹不出框）时，
-            解锁成本可手填 —— 否则既不让弹框又不让输 = 死路。
-            用 `readOnly` 而非 `disabled`：内容仍可选中复制（预览要能看全）。 */}
+        {/* ⚠️ v1.1.0（2026-10-24）：地址栏**只是展示**，不再是输入框。
+            原因：原实现让后端弹系统对话框拿到**服务器路径**，服务器形态下不可用
+            （见 `pickAndLoad` 的 docstring）。现在改为浏览器选目录 + 上传，
+            这里显示选中的**文件夹名**（不是路径）。
+            ⚠️ 同时删掉了「手填绝对路径」的 `NO_DESKTOP` 回退 —— 那是给
+            「后端弹不出框」准备的逃生口，上传形态下那个场景不存在了，
+            留着反而会让用户在服务器上填一个服务器没有的路径。 */}
         <Input
           prefix={<FolderOpenOutlined />}
           placeholder={
-            manualPathFallback
-              ? "填写数据包目录的绝对路径（如 D:\\商品数据包\\商品ID_123）"
+            picking
+              ? `正在上传…${uploadPercent === null ? "" : ` ${uploadPercent}%`}`
               : "请点击右侧「选择文件夹」"
           }
           value={packagePath}
-          readOnly={!manualPathFallback}
-          onChange={(e) => onPackagePathChange(e.target.value)}
-          //: readOnly 下仍允许聚焦选中，便于用户复制路径核对；手填模式放开输入。
-          onKeyDown={manualPathFallback ? undefined : (e) => e.preventDefault()}
-          style={{ cursor: manualPathFallback ? "text" : "default" }}
+          readOnly
+          style={{ cursor: "default" }}
         />
-        <Button icon={<FolderOpenOutlined />} onClick={onPick} loading={picking} disabled={loading}>
+        <Button
+          icon={<FolderOpenOutlined />}
+          onClick={onPick}
+          loading={picking}
+          disabled={loading}
+        >
           选择文件夹
         </Button>
-        <Button onClick={onLoad} loading={loading} disabled={!packagePath.trim()}>
-          加载数据包
-        </Button>
+        {/* 隐藏的目录选择器（`webkitdirectory` 让选整个文件夹并带相对路径）。
+            ⚠️ React/TS：`webkitdirectory` 不是标准 JSX 属性，必须用展开写法。 */}
+        <input
+          ref={folderInputRef}
+          type="file"
+          multiple
+          style={{ display: "none" }}
+          {...{ webkitdirectory: "", directory: "" }}
+          onChange={(e) => void onFolderChosen(e)}
+        />
         {/* ⚠️ 分组选择走**弹窗**（用户口径 2026-10-08：「点击预检发布商品将违规词
             分组选择使用**弹窗**展示」）—— 内联多选框在工具栏里太挤，分组多了
             也没法好好列。空 = 全部分组。 */}

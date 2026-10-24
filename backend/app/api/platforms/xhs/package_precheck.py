@@ -93,166 +93,17 @@ def _err(code: str, message: str, http_status: int) -> HTTPException:
     return HTTPException(status_code=http_status, detail={"code": code, "message": message})
 
 
-def _ask_directory_windows() -> str:
-    """用 **Windows 原生**文件夹选择器弹框（不依赖 tkinter / 桌面会话）。
-
-    实现：`powershell.exe -NoProfile -STA` 跑一段 `System.Windows.Forms.FolderBrowserDialog`
-    （.NET 自带的「选择文件夹」对话框，Windows 资源管理器同款），stdout 打印选中路径。
-
-    ⚠️ 为什么不用 tkinter：tkinter 的 `Tk()` 需要能连上桌面会话的窗口系统，
-    在 `run-app.py` 用 `pythonw.exe` 无控制台跑的 uvicorn 工作线程里**弹不出来**
-    （`TclError: no display name`）⇒ 落到 `NO_DESKTOP`。PowerShell 的 .NET 对话框
-    走的是 Windows 原生 shell，同一台机器的桌面会话能正常弹。
-
-    ⚠️ `-STA`（单线程单元）是必须的：`FolderBrowserDialog` 是 COM 组件，需要 STA；
-    缺了它会抛「当前线程不是单线程单元」。
-    """
-    import subprocess
-
-    #: 让对话框顶到最前 + 只读目录 + 允许新建；结果用明确分隔符包住，避免路径含换行。
-    ps_script = (
-        "Add-Type -AssemblyName System.Windows.Forms;"
-        "$d = New-Object System.Windows.Forms.FolderBrowserDialog;"
-        "$d.Description = '选择商品数据包文件夹';"
-        "$d.ShowNewFolderButton = $true;"
-        "$r = $d.ShowDialog();"
-        "if ($r -eq [System.Windows.Forms.DialogResult]::OK) {"
-        "  Write-Output ('__XHS_PICKED__' + $d.SelectedPath);"
-        "} else {"
-        "  Write-Output '__XHS_CANCELLED__';"
-        "}"
-    )
-    try:
-        proc = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-STA", "-Command", ps_script],
-            capture_output=True,
-            text=True,
-            timeout=5,  # 用户口径「5 秒内必须拉起」：回退路径 5 秒内出结果
-        )
-        out = (proc.stdout or "").strip()
-        if out.startswith("__XHS_PICKED__"):
-            path = out[len("__XHS_PICKED__"):].strip()
-            if path:
-                return path
-        #: 取消 / 空路径都当「取消」处理（返回空串，端点会映射成 cancelled=True）。
-        return ""
-    except Exception:  # noqa: BLE001 - 非 Windows / PowerShell 缺失 ⇒ 退回 tkinter
-        return None
-
-
-def _has_interactive_desktop() -> bool:
-    """当前进程是否身处**交互式桌面会话**（能弹窗口）。
-
-    为什么需要它：`tkinter` 缺失 / PowerShell 返回空，**既可能是「用户点了取消」，
-    也可能是「根本没有桌面」**。两者对前端的含义不同 —— 取消要静默，没桌面要提示
-    手填路径。判据取 Windows 的窗口站：交互式会话的窗口站名为 `WinSta0`
-    （服务进程跑在 `Service-0x…` 之类的非交互窗口站）。
-
-    非 Windows 一律视为**有**桌面（本项目的桌面端只在 Windows 出包）；
-    探测失败也返回 True（宁可当「取消」静默，也不要误报「没有图形界面」）。
-    """
-    if os.name != "nt":
-        return True
-    try:
-        import ctypes
-
-        #: `GetProcessWindowStation` 返回当前进程的窗口站句柄；
-        #: `GetUserObjectInformationW` 的 `UOI_NAME`(=2) 取名字。
-        ctypes.windll.user32.GetProcessWindowStation.restype = ctypes.c_void_p
-        handle = ctypes.windll.user32.GetProcessWindowStation()
-        if not handle:
-            return False
-        buf = ctypes.create_unicode_buffer(256)
-        need = ctypes.c_ulong(0)
-        ok = ctypes.windll.user32.GetUserObjectInformationW(
-            ctypes.c_void_p(handle), 2, buf, ctypes.sizeof(buf), ctypes.byref(need)
-        )
-        if not ok:
-            return True
-        return buf.value.strip().lower() == "winsta0"
-    except Exception:  # noqa: BLE001 - 探测不可用时不阻断，按「有桌面」处理
-        return True
-
-
-def _ask_directory() -> str:
-    """弹系统「选择文件夹」对话框，返回选中路径（取消 ⇒ 空串）。
-
-    优先级（2026-10-13 改，修「3 分钟才弹窗」）：
-    1. **tkinter** —— 同一桌面会话里秒弹（本后端 `python.exe` 跑在交互会话，tkinter
-       的 `filedialog.askdirectory` 是 Windows 原生对话框，立即弹出）；
-    2. PowerShell `FolderBrowserDialog` —— tkinter 弹不出（无桌面/无控制台）时的回退；
-    3. 都弹不出 ⇒ 抛 `NO_DESKTOP`，前端据此解锁地址栏允许手填。
-
-    ⚠️ 为什么 tkinter 优先而不是 PowerShell：PowerShell 的 `FolderBrowserDialog` 在
-    无交互窗口站 / 无控制台时 `ShowDialog()` 会**静默返回 Cancel 或卡很久**（实测
-    3 分钟才弹），而 tkinter 的 `askdirectory` 在同一桌面会话秒弹。
-
-    ⚠️ tkinter 只能在**主线程**跑，而 FastAPI 的同步端点跑在 anyio 工作线程
-    （实测 `is_main=False`）。两条路：
-    1. **主线程有活的 Tk 主循环**（GUI 宿主进程）⇒ 用 `after(0, …)` 把活排进去；
-    2. 没有主循环 ⇒ 退一步在**当前线程**临时开一个 Tk。
-
-    两种情况都给「弹不出来」留明确出口（`_err`），**不静默失败**。
-    """
-
-    def _dialog() -> str:
-        import tkinter as tk
-        from tkinter import filedialog
-
-        root = tk.Tk()
-        root.withdraw()
-        try:
-            root.attributes("-topmost", True)  # 免得被浏览器盖住找不着
-        except Exception:  # noqa: BLE001 - 某些 WM 不支持，不是错误
-            pass
-        try:
-            return filedialog.askdirectory(title="选择商品数据包文件夹") or ""
-        finally:
-            root.destroy()
-
-    #: ① 能联系上主线程正在跑的主循环 ⇒ 交给它弹（最稳，GUI 宿主进程走这条）
-    loop_ref = _MAIN_LOOP.get("root")
-    if loop_ref is not None:
-        box: dict[str, str] = {}
-        done = threading.Event()
-
-        def _on_main() -> None:
-            try:
-                box["path"] = _dialog()
-            except Exception:  # noqa: BLE001
-                box["path"] = ""
-            finally:
-                done.set()
-
-        try:
-            loop_ref.after(0, _on_main)
-            if done.wait(timeout=300):
-                return box.get("path", "")
-        except Exception:  # noqa: BLE001 - 主循环没了，走 ②
-            pass
-
-    #: ② 当前线程自己开 tkinter（uvicorn 裸进程的常态，同一桌面会话秒弹）
-    try:
-        return _dialog()
-    except Exception:  # noqa: BLE001 - tkinter 弹不出 ⇒ 退回 PowerShell 原生
-        pass
-
-    #: ③ tkinter 失败 ⇒ PowerShell `FolderBrowserDialog` 回退（无桌面/无控制台环境）。
-    if os.name == "nt":
-        chosen = _ask_directory_windows()
-        if chosen:
-            return chosen
-
-    #: ④ 都弹不出 ⇒ 明确报 `NO_DESKTOP`，前端解锁地址栏允许手填。
-    raise _err(
-        "NO_DESKTOP",
-        "当前运行环境无法弹出文件夹选择框，请直接填写数据包目录的绝对路径",
-        status.HTTP_400_BAD_REQUEST,
-    )
-
-
-#: GUI 宿主进程注册自己主循环的地方（没有就是 `None`）。本项目常态为 `None`。
-_MAIN_LOOP: dict[str, object] = {}
+#: ⚠️ 三个桌面文件夹选择函数已于 v1.1.0（2026-10-24）**整段删除**：
+#: `_ask_directory_windows()`（PowerShell `FolderBrowserDialog`）、
+#: `_has_interactive_desktop()`、`_ask_directory()`（tkinter `askdirectory`），
+#: 以及模块级 `_MAIN_LOOP`（GUI 宿主注册主循环用）。
+#:
+#: 它们**只为 `POST /pick-folder` 而存在**，而那个端点的前提是「后端与用户同一台机器、
+#: 且有桌面会话」—— 服务器形态下三条全不成立（见下方该端点的墓碑说明）。
+#:
+#: 替代路径：前端 `<input webkitdirectory>` → `POST /api/xhs/package-precheck`
+#: 上传 → `staging.stage_package` 落盘 → `_run_precheck()`。
+#: 也就是说 **`_run_precheck()` 本身完全没动** —— 变的只是「包怎么进来」。
 
 
 def _run_precheck(
@@ -434,67 +285,36 @@ def _run_precheck(
     return payload
 
 
-@router.post("/pick-folder", status_code=status.HTTP_200_OK)
-def pick_folder(current_user: User = Depends(get_current_user)) -> dict:
-    """**弹出系统原生「选择文件夹」对话框**，返回用户选中的绝对路径。
-
-    用户 2026-10-08 口径：「点击加载数据包**选择本地文件夹**，获得本地夹地址后，
-    直接读取该数据包内的商品数据」。
-
-    ## 为什么必须由**后端**弹这个框
-
-    浏览器（含 Electron 渲染进程）出于安全**拿不到 `File` 的真实路径**：
-    `<input webkitdirectory>` 只给文件名和浏览器内的相对路径，`file.path`
-    早已被移除。所以「点开系统选择器、拿到 `D:\\...` 这样的绝对路径」这件事
-    在桌面端只能由**后端进程**做（本项目后端与用户在同一台机器上）。
-
-    ⚠️ 线程问题：tkinter 必须在**主线程**跑，而 FastAPI 的同步端点跑在线程池里。
-    若当前不是主线程，就切到主线程执行（`_run_on_main_thread`）；拿不到主线程
-    （比如某些无 GUI 环境）就明确报错，**不静默失败**。
-
-    ⚠️ 无头环境（服务端部署）没有桌面 ⇒ 会报 `NO_DESKTOP`，前端应回落到手填路径。
-    """
-    #: ⚠️ **`tkinter` 缺失不等于「没有图形界面」**（2026-10-20 实测）
-    #: 打包版 `SpiderXHS.spec` 明确 `excludes=["tkinter"]` ⇒ 装好的客户端里
-    #: **一定**没有这个模块。原实现 `import tkinter` 失败就直接抛 `NO_DESKTOP`，
-    #: 于是**每个装包用户**点「选择文件夹」都只看到「没有可用的图形界面」，
-    #: 从没走到过下面那条 PowerShell 原生对话框（它有桌面就一定能弹）。
-    #: ⇒ 这里改为**记下缺失、继续往下试**，只有所有弹窗方式都失败才报无桌面。
-    tk_missing = False
-    try:
-        import tkinter  # noqa: F401
-    except ImportError:
-        tk_missing = True
-
-    if not tk_missing:
-        chosen = _ask_directory()
-        if not chosen:
-            #: 用户点了取消 —— 不是错误（前端静默处理，不弹红条）。
-            return {"package_path": "", "cancelled": True}
-        return {"package_path": str(Path(chosen).resolve()), "cancelled": False}
-
-    #: 没有 tkinter ⇒ 直接走 PowerShell 的 Windows 原生选目录对话框。
-    #: ⚠️ 返回值有三态：`None` = **弹不出**（PowerShell 缺失/无桌面），
-    #: `""` = 用户取消，非空串 = 选中路径。三者不能混。
-    if os.name == "nt":
-        chosen = _ask_directory_windows()
-        if chosen:
-            return {"package_path": str(Path(chosen).resolve()), "cancelled": False}
-        if chosen == "" and _has_interactive_desktop():
-            #: 弹得出、用户点了取消 ⇒ 静默。
-            return {"package_path": "", "cancelled": True}
-
-    raise _err(
-        "NO_DESKTOP",
-        "当前环境没有可用的图形界面，请直接填写数据包目录的绝对路径",
-        status.HTTP_400_BAD_REQUEST,
-    )
+#: ⚠️ **`POST /pick-folder` 已于 v1.1.0（2026-10-24）退场**（桌面端退役）。
+#:
+#: 它让**服务器进程**弹 Windows 文件夹选择框，把 `D:\...` 返回给前端 ——
+#: 那在桌面单机成立，服务器形态必然坏：
+#:   ① 服务器没有桌面会话 ⇒ 对话框弹不出（或卡满 180s 超时）；
+#:   ② 就算弹出，那是**机房那台机器**的对话框，用户看不到；
+#:   ③ 返回的路径是服务器本地路径，而用户的数据包在他自己电脑上。
+#:
+#: 替代：前端 `<input webkitdirectory>` 选目录 → `POST /api/xhs/package-precheck`
+#: （multipart 上传，见下方 `upload_and_precheck`）→ 复用同一套 `_run_precheck`。
+#: 前端入口：`product-publish-wizard.tsx` 的「选择文件夹」按钮。
+#:
+#: 一并删掉的还有它依赖的三个桌面函数（原 96–257 行）：
+#: `_ask_directory_windows()` / `_has_interactive_desktop()` / `_ask_directory()`
+#: 与模块级 `_MAIN_LOOP`，合计约 160 行 —— 它们全部只为这个端点存在。
 
 
 class LocalPackageRequest(BaseModel):
-    """按**本地绝对路径**预检（用户 2026-10-08 口径：「不要上传」）。"""
+    """按**服务器可访问的路径**预检。
 
-    #: 数据包目录绝对路径，例如 `C:/Users/xxx/Desktop/商品ID_935947169189`。
+    ⚠️ v1.1.0（2026-10-24）语义收窄：原注释写「本地绝对路径（用户不要上传）」，
+    那是**桌面形态**的口径（后端与用户同机）。服务器形态下这条路径必须是
+    **服务器自己能看到**的路径（例如运维手动放到 `storage_dir` 下的包），
+    而不是用户电脑上的 `D:\\...`。
+
+    浏览器选目录的场景请用 `POST /api/xhs/package-precheck`（multipart 上传），
+    不要走本端点 —— 用户电脑的路径服务器看不到。
+    """
+
+    #: 数据包目录路径（服务器可访问）。桌面形态常为 `C:/Users/xxx/Desktop/商品ID_xxx`。
     package_path: str = Field(min_length=1, max_length=1024)
     #: 展示名；空 ⇒ 取目录名。
     package_name: str = Field(default="", max_length=128)

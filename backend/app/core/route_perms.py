@@ -228,7 +228,6 @@ ROUTE_PERMS: Final[dict[str, str]] = {
     "POST /api/xhs/monitoring/targets/{target_id}/refresh": "xhs:monitor:create",
     "POST /api/xhs/package-precheck": "xhs:publish:precheck",
     "POST /api/xhs/package-precheck/local": "xhs:publish:precheck",
-    "POST /api/xhs/package-precheck/pick-folder": "xhs:publish:precheck",
     "POST /api/xhs/package-precheck/sku-name-optimize": "xhs:item:polish",
     "POST /api/xhs/package-precheck/sku-name-regenerate": "xhs:item:polish",
     "POST /api/xhs/package-precheck/{token}/scan": "xhs:publish:precheck",
