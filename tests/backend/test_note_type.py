@@ -34,7 +34,7 @@ from backend.app.main import app
 from backend.app.models import Note, NoteGoods, PlatformAccount, ShopProduct, User
 from backend.app.models.note import set_note_publish_status
 from backend.app.services import note_sync_service as nss
-from backend.app.services.rate_limiter import get_rate_limiter
+from backend.app.core.rate_limiter import get_rate_limiter
 from tests.backend import test_note_sync as nsync
 from tests.backend.cookie_fixtures import cookie_version
 

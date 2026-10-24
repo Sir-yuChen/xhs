@@ -4458,7 +4458,7 @@ def test_monitoring_targets_refresh_creates_owned_task(tmp_path):
 
 
 def test_crawl_rate_limiter_blocks_after_max_requests():
-    from backend.app.services.rate_limiter import CrawlRateLimiter
+    from backend.app.core.rate_limiter import CrawlRateLimiter
 
     limiter = CrawlRateLimiter(max_per_minute=3)
     assert limiter.allow(1) is True

@@ -52,7 +52,7 @@ from backend.app.services.no_traffic_service import (
     candidates_by_note_ids,
     list_no_traffic_candidates,
 )
-from backend.app.services.rate_limiter import CrawlRateLimiter
+from backend.app.core.rate_limiter import CrawlRateLimiter
 
 logger = logging.getLogger(__name__)
 

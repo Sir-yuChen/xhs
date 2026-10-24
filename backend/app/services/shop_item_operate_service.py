@@ -53,7 +53,7 @@ from backend.app.models.platform_account import PlatformAccount
 from backend.app.models.shop_product import ShopProduct
 from backend.app.models.task import Task
 from backend.app.services import shop_item_operate_gates as gates
-from backend.app.services.rate_limiter import get_rate_limiter
+from backend.app.core.rate_limiter import get_rate_limiter
 from backend.app.services.shop_products_service import load_product_dict_from_ledger
 
 logger = logging.getLogger(__name__)

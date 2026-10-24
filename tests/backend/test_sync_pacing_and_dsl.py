@@ -47,26 +47,26 @@ pytestmark = pytest.mark.contract
 # --------------------------------------------------------------------------- #
 def test_rate_limit_quota_prefers_explicit_argument_over_settings(monkeypatch):
     """额度优先级：构造参数 > settings > 5（显式意图不许被产品配置覆盖）。"""
-    from backend.app.services.rate_limiter import CrawlRateLimiter
+    from backend.app.core.rate_limiter import CrawlRateLimiter
 
     class _Settings:
         crawl_rate_limit_per_minute = 60
 
-    monkeypatch.setattr("backend.app.services.rate_limiter.get_settings", lambda: _Settings())
+    monkeypatch.setattr("backend.app.core.rate_limiter.get_settings", lambda: _Settings())
     assert CrawlRateLimiter(max_per_minute=3).max_per_minute == 3, "显式传入优先"
     assert CrawlRateLimiter().max_per_minute == 60, "不传则读 settings"
 
     class _Empty:
         crawl_rate_limit_per_minute = 0
 
-    monkeypatch.setattr("backend.app.services.rate_limiter.get_settings", lambda: _Empty())
+    monkeypatch.setattr("backend.app.core.rate_limiter.get_settings", lambda: _Empty())
     assert CrawlRateLimiter().max_per_minute == 5, "settings 缺省兜底 5"
 
 
 def test_default_quota_comes_from_settings(monkeypatch):
     """生产默认额度 = `settings.crawl_rate_limit_per_minute`（2026-09-27 起 **8**，设计 13 §38.8）。"""
     from backend.app.core.config import get_settings
-    from backend.app.services.rate_limiter import CrawlRateLimiter
+    from backend.app.core.rate_limiter import CrawlRateLimiter
 
     assert getattr(get_settings(), "crawl_rate_limit_per_minute", 0) == 8
     assert CrawlRateLimiter().max_per_minute == 8

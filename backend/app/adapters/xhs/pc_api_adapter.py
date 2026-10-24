@@ -68,7 +68,7 @@ class XhsPcApiAdapter:
 
         ⚠️ 单页 by design（同 `search_note`）：翻页由调用方决定，不在这里 `while True`。
         """
-        from backend.app.services.rate_limiter import get_rate_limiter
+        from backend.app.core.rate_limiter import get_rate_limiter
 
         get_rate_limiter().wait_allow(f"search_user:{self.user_id or 'anon'}")
         with direct_xhs_request_env():
@@ -76,7 +76,7 @@ class XhsPcApiAdapter:
 
     def get_homefeed_channels(self) -> Any:
         """主页频道列表（T-107：`GET /homefeed/channels` 的真实现）。"""
-        from backend.app.services.rate_limiter import get_rate_limiter
+        from backend.app.core.rate_limiter import get_rate_limiter
 
         get_rate_limiter().wait_allow(f"homefeed:{self.user_id or 'anon'}")
         with direct_xhs_request_env():
@@ -97,7 +97,7 @@ class XhsPcApiAdapter:
         —— 后者按 `require_num` 循环请求，属硬约束 C5 禁止的无插槽全量方法。
         调用方要更多内容自己带 `cursor_score` 再来一次。
         """
-        from backend.app.services.rate_limiter import get_rate_limiter
+        from backend.app.core.rate_limiter import get_rate_limiter
 
         get_rate_limiter().wait_allow(f"homefeed:{self.user_id or 'anon'}")
         with direct_xhs_request_env():
@@ -135,7 +135,7 @@ class XhsPcApiAdapter:
         """
         import urllib.parse
 
-        from backend.app.services.rate_limiter import get_rate_limiter
+        from backend.app.core.rate_limiter import get_rate_limiter
 
         parsed = urllib.parse.urlparse(note_url or "")
         note_id = parsed.path.split("/")[-1]
@@ -196,7 +196,7 @@ class XhsPcApiAdapter:
         """
         import urllib.parse
 
-        from backend.app.services.rate_limiter import get_rate_limiter
+        from backend.app.core.rate_limiter import get_rate_limiter
 
         parsed = urllib.parse.urlparse(user_url or "")
         user_id = parsed.path.split("/")[-1]

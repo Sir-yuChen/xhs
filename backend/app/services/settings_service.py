@@ -877,3 +877,15 @@ def reset_cache_for_tests() -> None:
 def live_keys() -> Iterable[str]:
     """已接入运行时读点的键（升序，供守卫与 UI 参考）。"""
     return sorted(LIVE_KEYS)
+
+
+# ---------------------------------------------------------------------------
+# 限流额度的真相源注册（设计 61 A7 依赖反转）
+# ---------------------------------------------------------------------------
+# `core/rate_limiter` 的第 2 层额度（运行时配置）由本模块提供 —— core 不许反向
+# import services，所以由**拥有真相源的一方**在加载时注册读取函数（注册表式注入）。
+# 本模块被应用启动链必然加载（`main.lifespan` 播种 / 各服务读配置），接线不会漏；
+# 测试里单独 import `core.rate_limiter` 而未加载本模块时，退到 settings YAML 额度。
+from backend.app.core import rate_limiter as _core_rate_limiter  # noqa: E402
+
+_core_rate_limiter.QUOTA_PROVIDER = rate_limit_per_minute_for_key

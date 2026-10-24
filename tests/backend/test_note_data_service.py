@@ -321,7 +321,7 @@ class TestHydrateOfflineNotes:
             def wait_allow(self, key):
                 return True
         monkeypatch.setattr(
-            "backend.app.services.rate_limiter.get_rate_limiter",
+            "backend.app.core.rate_limiter.get_rate_limiter",
             lambda: _FakeLimiter(),
         )
 

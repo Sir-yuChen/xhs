@@ -35,6 +35,14 @@ from pathlib import Path
 
 import pytest
 
+
+#: 测试分层标记（2026-10-23 立，见 `docs/04_测试文档/01_测试体系与流程规范.md` §15.2）。
+#: 分层按**实测耗时 + 语义**判定（`python .hermes/scripts/classify_tests.py --apply`）：
+#:   redline     = 内循环必跑：整文件实测 <= 10s 且守护「不可接受后果」
+#:   contract    = 契约层：端点 / 字段 / 行为与文档一致
+#:   integration = 慢且重：整文件实测 > 30s，或真跑迁移 / 子进程
+pytestmark = pytest.mark.integration
+
 pytestmark = pytest.mark.redline
 
 VERSIONS_DIR = Path(__file__).resolve().parents[2] / "backend" / "alembic" / "versions"

@@ -189,7 +189,7 @@ def execute_monitoring_refresh(
         return {"target": _serialize_target(target), "task": serialize_task(parent_task), "snapshot": _serialize_snapshot(snapshot)}
 
     if check_rate_limit:
-        from backend.app.services.rate_limiter import get_rate_limiter
+        from backend.app.core.rate_limiter import get_rate_limiter
 
         if not get_rate_limiter().allow(account.id):
             parent_task.status = "completed"

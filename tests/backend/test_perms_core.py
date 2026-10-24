@@ -22,6 +22,14 @@ import pytest
 from backend.app.core import db_dialect, paths, perms
 from backend.app.core import perms_registry as reg
 
+
+#: 测试分层标记（2026-10-23 立，见 `docs/04_测试文档/01_测试体系与流程规范.md` §15.2）。
+#: 分层按**实测耗时 + 语义**判定（`python .hermes/scripts/classify_tests.py --apply`）：
+#:   redline     = 内循环必跑：整文件实测 <= 10s 且守护「不可接受后果」
+#:   contract    = 契约层：端点 / 字段 / 行为与文档一致
+#:   integration = 慢且重：整文件实测 > 30s，或真跑迁移 / 子进程
+pytestmark = pytest.mark.contract
+
 #: 分层标记（测试规范 §15.5 准入清单）：本文件是纯函数 + 源码文本守卫，
 #: 不建库、不打端点 ⇒ redline（最快一层）。
 pytestmark = pytest.mark.redline

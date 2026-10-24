@@ -1095,7 +1095,7 @@ def test_rate_limit_key_is_per_source():
 
     这条钉的是修复本身：改回 `allow(account.id)` 单键，本测试必红。
     """
-    from backend.app.services.rate_limiter import CrawlRateLimiter
+    from backend.app.core.rate_limiter import CrawlRateLimiter
 
     limiter = CrawlRateLimiter(max_per_minute=3)
     assert all(limiter.allow(42) for _ in range(3))
@@ -1516,7 +1516,7 @@ def test_absolute_cap_stops_a_platform_that_never_says_done(creator_env, monkeyp
 
 def test_wait_allow_returns_false_on_timeout_without_hanging():
     """`wait_allow`：额度够就立即放行；超时窗口内等不到就返回 False（不挂死）。"""
-    from backend.app.services.rate_limiter import CrawlRateLimiter
+    from backend.app.core.rate_limiter import CrawlRateLimiter
 
     fresh = CrawlRateLimiter(max_per_minute=2)
     assert fresh.wait_allow("9:creator", timeout=0) is True

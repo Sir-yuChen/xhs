@@ -258,7 +258,7 @@ def test_rate_limiter_reads_the_configured_quota(api_client, db_factory):
     from sqlalchemy import select
 
     from backend.app.models import PlatformAccount, User
-    from backend.app.services.rate_limiter import CrawlRateLimiter
+    from backend.app.core.rate_limiter import CrawlRateLimiter
 
     headers = _register(api_client, "settings-quota")
     db = db_factory()
@@ -285,7 +285,7 @@ def test_rate_limiter_reads_the_configured_quota(api_client, db_factory):
 
 def test_explicit_constructor_argument_still_wins(api_client):
     """显式构造参数**仍**高于运行时配置（§35.8 的老契约不许被新一层破掉）。"""
-    from backend.app.services.rate_limiter import CrawlRateLimiter
+    from backend.app.core.rate_limiter import CrawlRateLimiter
 
     headers = _register(api_client, "settings-explicit")
     api_client.put("/api/settings/crawl_rate_limit_per_minute", json={"value": 60}, headers=headers)

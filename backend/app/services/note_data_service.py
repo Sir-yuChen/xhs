@@ -755,7 +755,7 @@ def hydrate_offline_notes(
     返回 `{attempted, filled, failed, no_url, skipped_by_limit}`。失败不向上抛
     （单篇失败不影响其余），也不写 `hydrated_at`（下次同步重试）。
     """
-    from backend.app.services.rate_limiter import get_rate_limiter
+    from backend.app.core.rate_limiter import get_rate_limiter
 
     if fetch_payload is None:
         from backend.app.adapters.xhs.note_detail_ssr import fetch_note_detail_payload

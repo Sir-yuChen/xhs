@@ -47,7 +47,7 @@ from sqlalchemy import select
 from backend.app.core.database import SessionLocal
 from backend.app.models.platform_account import PlatformAccount
 from backend.app.services import picture_space_service as ps
-from backend.app.services.rate_limiter import get_rate_limiter
+from backend.app.core.rate_limiter import get_rate_limiter
 
 logger = logging.getLogger(__name__)
 

@@ -1279,7 +1279,7 @@ def hydrate_offline_note_detail(
     `raw_json.metrics` 指标）。幂等：已有正文+媒体则跳过（`hydrate_offline_note`）。
     """
     from backend.app.services.note_data_service import hydrate_offline_note
-    from backend.app.services.rate_limiter import get_rate_limiter
+    from backend.app.core.rate_limiter import get_rate_limiter
     from backend.app.adapters.xhs.note_detail_ssr import fetch_note_detail_payload
 
     # 离线笔记判定：`note_datacenter_stats` 统计表有行（2026-10-12 设计 35，

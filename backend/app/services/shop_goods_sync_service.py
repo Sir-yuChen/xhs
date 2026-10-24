@@ -53,7 +53,7 @@ from backend.app.models.task import Task
 from backend.app.services import sync_task_service as sts
 from backend.app.services import task_cancel
 from backend.app.adapters.xhs.qianfan_api_adapter import get_qianfan_api_adapter_factory
-from backend.app.services.rate_limiter import get_rate_limiter
+from backend.app.core.rate_limiter import get_rate_limiter
 
 logger = logging.getLogger(__name__)
 

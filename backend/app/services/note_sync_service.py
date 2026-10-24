@@ -95,7 +95,7 @@ from backend.app.services.account_service import (
 )
 from backend.app.services import note_queue_service
 from backend.app.services.note_topic_service import apply_sync_topics
-from backend.app.services.rate_limiter import get_rate_limiter
+from backend.app.core.rate_limiter import get_rate_limiter
 from backend.app.services import task_cancel
 
 logger = logging.getLogger(__name__)

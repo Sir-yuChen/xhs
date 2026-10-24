@@ -5,26 +5,10 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 
-from backend.app.api import accounts, ai, auth, auto_tasks, drafts, files, keyword_groups, llm_gateway, llm_gateway_monitor, llm_prompts, login_sessions, model_configs, notes, notifications, publish, schedule, settings as settings_api, system, system_deps, system_dict, system_logs, system_menus, system_permissions, system_roles, system_users, tasks, topics
-from backend.app.api.platforms import registry
-from backend.app.api.platforms.xhs import (
-    analytics,
-    crawl,
-    creator,
-    data_package_rules,
-    forbidden_words,
-    material_files,
-    materials,
-    monitoring,
-    package_precheck,
-    pc,
-    product_notes,
-    qianfan,
-)
-from backend.app.core.api_audit import ApiAuditMiddleware
+from backend.app.api.routing import include_all_routers
+from backend.app.core.errors import register_error_handlers
+from backend.app.core.middleware import setup_middleware
 from backend.app.core.route_guard import assert_every_route_guarded
 from backend.app.core.config import get_settings
 from backend.app.core.database import SessionLocal, init_db
@@ -240,118 +224,21 @@ def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title=settings.api_title, lifespan=lifespan)
 
-    origins = [origin.strip() for origin in settings.backend_cors_origins.split(",") if origin.strip()]
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-    # API 审计（DEF-019 / T-18）：`api_logs` 自建表起零写入点。
-    # 只记「审计前缀下的写 + 任何失败」，不落 query/body（敏感值不进表）。
-    app.add_middleware(ApiAuditMiddleware)
+    #: 横切件集中装配（设计 61 §三 A3）：CORS / 审计 / SPA 回退 / 缓存头
+    #: —— 注册顺序与原内联版本逐项一致（洋葱模型，后注册者在外层）。
+    setup_middleware(app)
 
     @app.get("/api/health", tags=["health"])
     def health() -> dict:
         return {"status": "ok", "service": "spider-xhs"}
 
-    app.include_router(registry.router, prefix="/api")
-    app.include_router(auth.router, prefix="/api")
-    app.include_router(accounts.router, prefix="/api")
-    app.include_router(login_sessions.router, prefix="/api")
-    app.include_router(notes.router, prefix="/api")
-    app.include_router(files.router, prefix="/api")
-    app.include_router(drafts.router, prefix="/api")
-    app.include_router(ai.router, prefix="/api")
-    app.include_router(tasks.router, prefix="/api")
-    app.include_router(model_configs.router, prefix="/api")
-    # LLM 网关配置（设计 17 §7.1，T1）：上游连接配置 CRUD + 健康探测（v1.7 纯 OpenAI 兼容，无外挂进程）
-    app.include_router(llm_gateway.router, prefix="/api")
-    # v1.9：使用平台枚举下发（§7.1：`GET /api/llm/providers/platforms`，独立前缀）
-    app.include_router(llm_gateway.providers_router, prefix="/api")
-    # v2.0（设计 17 §13.2.6）：「平台 × 业务点 → 服务商」映射端点
-    app.include_router(llm_gateway.business_router, prefix="/api")
-    # LLM 网关令牌映射 + 预警规则 + 用量展示（设计 17 §7.1a/§7.1b/§7.5，v1.6）
-    app.include_router(llm_gateway_monitor.router, prefix="/api")
-    # 提示词模块 / 模板（设计 17 §7.2，T2）：两表 CRUD + 渲染预览
-    app.include_router(llm_prompts.router, prefix="/api")
-    app.include_router(topics.router, prefix="/api")
-    app.include_router(notifications.router, prefix="/api")
-    app.include_router(keyword_groups.router, prefix="/api")
-    app.include_router(publish.router, prefix="/api")
-    app.include_router(analytics.router, prefix="/api")
-    app.include_router(pc.router, prefix="/api")
-    app.include_router(creator.router, prefix="/api")
-    app.include_router(qianfan.router, prefix="/api")
-    app.include_router(product_notes.router, prefix="/api")
-    app.include_router(materials.router, prefix="/api")
-    # v2.50：违规词库（本地自维护词表，供数据包图片 OCR 精确过滤；设计 25 §2）
-    app.include_router(forbidden_words.router, prefix="/api")
-    # 设计 40（2026-10-14）：数据包列规则（提取/运算规则可配置；父子表 CRUD + 执行）
-    app.include_router(data_package_rules.router, prefix="/api")
-    # v2.50：数据包预检（上传 → 解析 → OCR 红框；设计 25 §4）
-    app.include_router(package_precheck.router, prefix="/api")
-    # v2.31：素材**文件**的增删（会动用户磁盘 ⇒ 另一套语义，单独成模块）
-    app.include_router(material_files.router, prefix="/api")
-    app.include_router(crawl.router, prefix="/api")
-    app.include_router(monitoring.router, prefix="/api")
-    app.include_router(auto_tasks.router, prefix="/api")
-    app.include_router(schedule.router, prefix="/api")
-    # 运行时配置中心（设计 10 §7）：设置页的列表 / 增删改查
-    app.include_router(settings_api.router, prefix="/api")
-    # 系统更新（设计 36，2026-10-13）：版本查询 + 检查更新 + 下载 + 静默安装
-    app.include_router(system.router, prefix="/api")
-    # v1.1.0 系统管理域（设计 49 / 55）：用户 / 角色 / 菜单 / 字典 / 日志
-    app.include_router(system_users.router, prefix="/api")
-    app.include_router(system_roles.router, prefix="/api")
-    app.include_router(system_menus.router, prefix="/api")
-    app.include_router(system_dict.router, prefix="/api")
-    app.include_router(system_permissions.router, prefix="/api")
-    app.include_router(system_logs.router, prefix="/api")
-    # 初始化环境依赖（设计 24 §27，2026-10-23）：状态 / 下载 / 清空重下 / 进度
-    app.include_router(system_deps.router, prefix="/api")
+    #: 路由统一注册表（设计 61 §三 A4）：40+ 条 include_router 收口到一处，
+    #: 顺序逐条原样搬移 —— 路由匹配与 OpenAPI 集合不变。
+    include_all_routers(app)
 
-    # Serve pre-built frontend in production / Docker
-    if settings.frontend_serve_static:
-        # `frontend_build_dir` 空 ⇒ 由 `core/paths.frontend_dist()` 兜底（设计 53 A2）：
-        # 原来直接 `Path(settings.frontend_build_dir)` 是**相对 CWD** 的，
-        # systemd / Docker / 换目录起 uvicorn 任一处 ⇒ 整个前端 404。
-        frontend_dist = settings.frontend_build_dir_resolved
-        if frontend_dist.is_dir():
-            from starlette.responses import FileResponse
-
-            # Serve index.html for SPA client-side routing (non-API, non-file paths)
-            @app.middleware("http")
-            async def _spa_fallback(request, call_next):
-                response = await call_next(request)
-                path = request.url.path
-                if (
-                    response.status_code == 404
-                    and not path.startswith("/api")
-                    and "." not in path.split("/")[-1]
-                ):
-                    return FileResponse(str(frontend_dist / "index.html"))
-                return response
-
-            app.mount("/", StaticFiles(directory=str(frontend_dist), html=True), name="frontend")
-
-            #: ⚠️ 缓存头（2026-10-10 实测补）：Starlette 的 StaticFiles **不发 Cache-Control**
-            #: ⇒ 浏览器走**启发式缓存**，`index.html` 被缓存后不再回源校验，于是长期指向
-            #: **旧的** `index-<hash>.js`（用户多轮报「依旧」的真根因 —— 服务端已是新包，
-            #: 但页面加载的是旧 hash）。
-            #: 口径：`index.html` **必须回源校验**（`no-cache`），带 hash 的 `assets/*`
-            #: **可长缓存**（内容变了 hash 必变，天然免冲突）。
-            @app.middleware("http")
-            async def _static_cache_headers(request, call_next):
-                response = await call_next(request)
-                path = request.url.path
-                if path.startswith("/assets/"):
-                    response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
-                elif "." not in path.split("/")[-1]:
-                    #: SPA 入口（及客户端路由）—— 一律回源。
-                    response.headers["Cache-Control"] = "no-cache"
-                return response
+    #: 统一业务错误 handler（设计 61 §三 A2）：BizError → detail 对象包络；
+    #: HTTPException / 422 照走 FastAPI 默认（前端三分支解析零改动）。
+    register_error_handlers(app)
 
     return app
 

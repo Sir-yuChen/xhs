@@ -66,6 +66,19 @@ from sqlalchemy.orm import Session
 
 from backend.app.models.note import Note, NoteTopic, Topic
 
+# ---------------------------------------------------------------------------
+# 平台话题形态原语（设计 61 A7 下沉）：`strip_topic_marker` / `topic_token` 及其
+# 专属常量已搬到 `adapters/xhs/topic_format.py`（平台形态属适配器层，创作者端发布
+# 适配器与业务层共用同一段实现）。本模块 re-export 保持既有 import 路径不变
+# （api / services 多处从本模块导入；DEF-044：实现只有一份，别名不是第二份）。
+# ---------------------------------------------------------------------------
+from backend.app.adapters.xhs.topic_format import (  # noqa: E402,F401
+    _TOPIC_NOISE,
+    _TRIM_CHARS,
+    strip_topic_marker,
+    topic_token,
+)
+
 #: 话题归一化上限（设计 13 §29.3）：展示字段，超限**静默截断**不报错。
 NOTE_TOPICS_MAX_ITEMS = 20
 NOTE_TOPICS_MAX_LEN = 50
@@ -73,31 +86,14 @@ NOTE_TOPICS_MAX_LEN = 50
 #: 正文里 `#话题` 的形态：`#` + 非空白非 `#` 字符（≤50 字）。
 _TOKEN_RE = re.compile(r"#([^\s#]{1,50})")
 
-#: 平台话题形态的尾部标记：`[话题]`，可能带一个收尾 `#`（`#名字[话题]#`）；
-#: **未闭合的 `[话题` 也要吃** —— 库里 118 行脏话题名（`拼车[话题`）就是这么来的。
-_TOPIC_MARKER_RE = re.compile(r"\[话题\]?#?$")
-
-#: 平台排版噪声（BOM / 零宽空格 / 零宽连接符 / 不换行空格）—— 平台正文里就夹在
-#: 话题标记前后（`#A[话题]#\ufeff\ufeff\xa0#B[话题]#`）。它既是**分隔**也是**边界**：
-#: 不认它，摘除的「整词」断言会被挡下（91 篇正文残留 `[话题]#` 的真凶之一），
-#: 摘完还会留下孤立的 `#`。
-_TOPIC_NOISE = "\ufeff\u200b\u200c\u200d\xa0"
-
-#: 零宽类噪声（**删除**；`\xa0` 另按空格处理，见 :func:`_normalize_noise`）。
-_ZERO_WIDTH_RE = re.compile(r"[\ufeff\u200b\u200c\u200d]+")
-
-#: 话题标记前面可以吃掉的排版字符（空格 + 噪声）。
-_TOPIC_LEAD = r"[ \t" + re.escape(_TOPIC_NOISE) + r"]*"
-
-#: 「整词」的后随边界：后面不能是真正的内容字符（可以空白 / `#` / 噪声）。
-_TOPIC_TAIL = r"(?![^#\s" + re.escape(_TOPIC_NOISE) + r"])"
-
-#: 解析出的 token 首尾要修剪的标点（中文/英文常见标点，不含 `#` 与空白；含噪声）。
-_TRIM_CHARS = "，。！？、；：""''（）()【】[]{}!?.,;:%~…—·\t\r\n " + _TOPIC_NOISE
-
 #: 「这像个话题」的判据：≥2 字，且含中文或英文字母（滤掉 `#1` / `#2026` 序号）。
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 _LETTER_RE = re.compile(r"[A-Za-z]")
+
+_ZERO_WIDTH_RE = re.compile(r"[\ufeff\u200b\u200c\u200d]+")
+_TOPIC_LEAD = r"[ \t" + re.escape(_TOPIC_NOISE) + r"]*"
+_TOPIC_TAIL = r"(?![^#\s" + re.escape(_TOPIC_NOISE) + r"])"
+
 
 
 def _normalize_noise(text: str) -> str:
@@ -106,33 +102,6 @@ def _normalize_noise(text: str) -> str:
     只在**确有摘除**的正文上调用（没拆过话题的正文一字节不动，§34.3 最小改动）。
     """
     return _ZERO_WIDTH_RE.sub("", str(text or "").replace("\u00a0", " "))
-
-
-def strip_topic_marker(name: str) -> str:
-    """剥掉话题的**平台形态标记**：`#名字[话题]#` → `名字`（唯一实现）。
-
-    平台把正文里的话题存成 `#名字[话题]#`（富文本标记）。历史解析器只认 `#名字`
-    ⇒ 标记被当成名字的一部分（库里 118 行 `拼车[话题`）。本函数是**唯一**的剥
-    标记入口：解析（:func:`parse_topic_tokens`）、归一
-    （:func:`normalize_topic_names`）、落库（:func:`link_note_topics`）全走它 ——
-    各写一份必然漂移。
-    """
-    text = str(name or "").strip()
-    for _ in range(2):  # 两轮：先剥标记，strip 掉残留标点后再确认一次
-        text = text.lstrip("#").strip()
-        text = _TOPIC_MARKER_RE.sub("", text)
-        text = text.strip(_TRIM_CHARS).strip()
-    return text
-
-
-def topic_token(name: str) -> str:
-    """话题的**平台正文形态**：`#名字[话题]#`（发布回填的唯一实现）。
-
-    实证两条：① 平台同步回来的正文就是这个形态（`#拼车[话题]#`）；② 项目既有的
-    创作者端发布实现 `adapters/xhs/creator_api_adapter.py` 用同一形态回填。
-    发布侧写 `#名字` 平台不认（当普通文本）—— 发布的笔记会一个话题都没有。
-    """
-    return f"#{strip_topic_marker(name)}[话题]#"
 
 
 def _looks_like_topic(name: str) -> bool:

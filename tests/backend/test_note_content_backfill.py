@@ -42,7 +42,7 @@ from backend.app.services.account_service import (  # noqa: E402
     CHANNEL_CREATOR,
     CHANNEL_WWW,
 )
-from backend.app.services.rate_limiter import get_rate_limiter  # noqa: E402
+from backend.app.core.rate_limiter import get_rate_limiter  # noqa: E402
 from tests.backend.cookie_fixtures import cookie_version, cookie_version_multi  # noqa: E402
 
 import pytest

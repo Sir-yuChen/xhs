@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+#: ⚠️ 本模块自 v1.1.0（2026-10-24，设计 61 A7）起位于 **core**：限流是平台调用的
+#: 基础设施横切件，adapters / services / api 三层都要用，依赖方向只能向下。
+#: 原 `services/rate_limiter.py` 已删除（DEF-044：同一语义不留两份实现）。
+
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from threading import Lock
 
 from backend.app.core.config import get_settings
@@ -15,6 +20,17 @@ WAIT_TIMEOUT_SECONDS = 120.0
 
 #: `wait_allow()` 的轮询间隔（秒）。测试把它置 0 以免真等待。
 WAIT_POLL_SECONDS = 1.0
+
+
+#: 第 2 层额度（运行时配置）的**注入点**（依赖反转，设计 61 §三 A7）。
+#:
+#: core 不许 import services（依赖方向合同 C1），而「按账号归属用户读运行时配置」
+#: 的真相源在 `settings_service` —— 由它在自己模块加载时把读取函数注册进来
+#: （见 settings_service 末尾的接线），契约 = `provider(key, *, fallback) -> int`。
+#: 未注册时（极早启动 / 独立脚本）退到
+#: settings YAML 的额度值，行为与「没有配置行」一致。
+QUOTA_PROVIDER: "Callable[..., int] | None" = None  # (key, *, fallback) -> int
+
 
 #: 第 3/4 层额度（settings → 内置兜底 5）的唯一实现。
 #:
@@ -70,12 +86,16 @@ class CrawlRateLimiter:
         """
         if self._override:
             return int(self._override)
-        try:
-            from backend.app.services.settings_service import rate_limit_per_minute_for_key
-
-            return int(rate_limit_per_minute_for_key(str(account_id), fallback=_settings_quota_fallback()))
-        except Exception:  # noqa: BLE001 - 读配置失败退 settings 值，绝不打断平台请求
-            return _settings_quota_fallback()
+        if QUOTA_PROVIDER is not None:
+            try:
+                #: ⚠️ `fallback` 必须走**关键字**实参 —— 真相源函数
+                #: （`settings_service.rate_limit_per_minute_for_key`）的签名是
+                #: `(rate_key, *, fallback)`，按位置传会 TypeError 且被下方
+                #: except 吞成兜底值（实测踩坑：表现为「运行时配置永远读不到」）。
+                return int(QUOTA_PROVIDER(str(account_id), fallback=_settings_quota_fallback()))
+            except Exception:  # noqa: BLE001 - 读配置失败退 settings 值，绝不打断平台请求
+                return _settings_quota_fallback()
+        return _settings_quota_fallback()
 
     def allow(self, account_id: int | str) -> bool:
         """按**限流键**放行。键可以是账号 id，或 ``"<账号>:<源>"``。
