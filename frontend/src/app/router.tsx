@@ -35,13 +35,17 @@ import { ProfileStandalonePage } from "../pages/system/profile-page";
 
 /*
  * `/platforms/:platformId` 顶层分发（设计 62 §2.4）：
- * `system` → 本条在 AppShell 布局路由**之内** ⇒ 壳层即 AppShell，内容区 Navigate
- * 到 `/system/users`（系统管理独立工作区，侧栏只剩系统管理自己的组）；
+ * `xhs` → Navigate 到总览（工作区落点 = 侧栏第一项；xhs 的真实页面路由都在
+ *   本布局路由内，缺这条分发会让「工作区卡片点进来」落在 ComingSoon —— 2026-10-25 实测）；
+ * `system` → Navigate 到 `/system/users`（系统管理独立工作区，侧栏只剩系统管理自己的组）；
  * 其余未知平台维持 ComingSoonPage（现在渲染在壳内，侧栏由该平台的菜单切片决定 ——
  * 无授权即空侧栏，不再出现「看得见摸不着」的跨平台菜单）。
  */
 function PlatformRootRoute() {
   const { platformId } = useParams();
+  if (platformId === "xhs") {
+    return <Navigate to="/platforms/xhs/dashboard" replace />;
+  }
   if (platformId === "system") {
     return <Navigate to="/system/users" replace />;
   }
@@ -53,6 +57,14 @@ export function AppRouter() {
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<Navigate to="/platform-select" replace />} />
+        <Route
+          path="/platform-select"
+          element={
+            <ProtectedRoute>
+              <PlatformSelectPage />
+            </ProtectedRoute>
+          }
+        />
         <Route
           path="/login"
           element={

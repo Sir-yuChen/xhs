@@ -302,6 +302,19 @@ def my_menus(
                 keep.add(parent.id)
                 cursor = parent
         rows = [r for r in rows if r.id in keep]
+        #: 设计 62 §2.5（2026-10-25 用户口径）：工作区根行（平台名）**不下发** ——
+        #: 侧栏层级 = 平台（工作区卡片）→ 目录 → 页面 → 按钮，平台名由壳层品牌位
+        #: 与工作区卡片表达，不在侧栏里再重复一层。根行摘除后，其子行由
+        #: `_to_tree` 的孤儿归根逻辑顶到一级（目录组与顶级页并列）。
+        rows = [
+            r
+            for r in rows
+            if not (
+                r.menu_type == "M"
+                and (r.workspace or "") == workspace
+                and r.parent_id == ROOT_PARENT_ID
+            )
+        ]
 
     return {"items": _to_tree(rows), "total": len(rows)}
 

@@ -56,3 +56,24 @@ describe("workspaceEntryPath", () => {
     expect(workspaceEntryPath("douyin")).toBe("/platforms/douyin");
   });
 });
+
+// 设计 62 回归守卫（2026-10-25 实测两个断点）：
+// ① agent 重写 router 时丢了 /platform-select 路由声明（React Router 匹配不到
+//    ⇒ 渲染空白 = 用户看到的「黑屏」）；② PlatformRootRoute 只特判了 system，
+//    xhs 工作区卡片点进来落在 ComingSoon。两条都钉在路由源码上（vitest 是
+//    node 环境，不引整个 router 组件树）。
+// ⚠️ 前端 tsconfig 没有 @types/node —— 读源码用 Vite 的 `?raw` 导入（vitest 同样支持）。
+import routerSrc from "../app/router.tsx?raw";
+
+const ROUTER_SRC = routerSrc;
+
+describe("router 平台分发回归守卫（设计 62）", () => {
+  it("必须声明 /platform-select 路由（丢了 = 登录后全屏空白）", () => {
+    expect(ROUTER_SRC).toContain('path="/platform-select"');
+  });
+
+  it("PlatformRootRoute 必须分发 xhs（丢了 = 工作区卡片点进来落在 ComingSoon）", () => {
+    const body = ROUTER_SRC.split("function PlatformRootRoute", 2)[1] ?? "";
+    expect(body).toContain('"xhs"');
+  });
+});

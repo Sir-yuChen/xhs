@@ -117,7 +117,9 @@ def test_mine_workspace_filter_isolates_platforms(seeded_client):
     assert resp.status_code == 200, resp.text
     xhs_items = resp.json()["items"]
     names = {n["name"] for n in xhs_items}
-    assert "小红书" in names
+    # 设计 62 §2.5：工作区根行（平台名）不下发 —— 侧栏直接从目录/页面层开始
+    assert "小红书" not in names, "工作区内不再重复展示平台名（根行已摘除）"
+    assert {"平台", "内容线", "店铺线", "总览"} <= names, "目录组与顶级页应顶到一级"
     assert "系统管理" not in names, "xhs 工作区不得混入系统管理（设计 62 隔离）"
     assert "大模型网关" not in names, "xhs 工作区不得混入大模型网关"
     paths = set()
@@ -133,7 +135,8 @@ def test_mine_workspace_filter_isolates_platforms(seeded_client):
     assert resp.status_code == 200, resp.text
     sys_items = resp.json()["items"]
     sys_names = {n["name"] for n in sys_items}
-    assert "系统管理" in sys_names
+    assert "系统管理" not in sys_names, "system 工作区根行同样不下发"
+    assert {"用户管理", "角色管理"} <= sys_names, "系统域页面应顶到一级"
     assert "小红书" not in sys_names, "system 工作区不得混入小红书"
 
 
