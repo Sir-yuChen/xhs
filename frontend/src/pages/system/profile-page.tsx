@@ -18,12 +18,14 @@
  * 手机号 / 邮箱是**自己的**，全量显示（列表接口才脱敏 —— 那个是给别人看的）。
  */
 
-import { IdcardOutlined, LockOutlined, UserOutlined } from "@ant-design/icons";
+import { ArrowLeftOutlined, IdcardOutlined, LockOutlined, LogoutOutlined, UserOutlined } from "@ant-design/icons";
 import { App, Button, Card, Col, Descriptions, Form, Input, Row, Space, Tag, Typography } from "antd";
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 
 import { useAuth } from "../../hooks/use-auth";
 import { usePermission } from "../../hooks/use-permission";
+import { useThemePalette } from "../../app/providers";
 import { changeMyPassword } from "../../lib/api";
 
 const { Text } = Typography;
@@ -145,5 +147,55 @@ export function ProfilePage() {
         </Card>
       </Col>
     </Row>
+  );
+}
+
+/*
+ * 独立全屏壳（设计 62 §2.3）：`/profile` 从 AppShell 布局路由**移出**——
+ * 个人资料不再挂任何工作区侧栏（侧栏无个人资料入口，改由头像下拉直达）。
+ * 壳只做三件事：顶部窄 header（左：返回工作区 /platform-select；中：标题；右：退出登录）
+ * + 正文渲染 `ProfilePage` 原内容。不依赖 AppShell 的布局上下文
+ * （ProfilePage 只用 useAuth / usePermission / antd App，无壳层耦合，零适配）。
+ */
+export function ProfileStandalonePage() {
+  const auth = useAuth();
+  const navigate = useNavigate();
+  const p = useThemePalette();
+
+  return (
+    <div style={{ minHeight: "100vh", background: p.pageBg }}>
+      <header
+        style={{
+          height: 48,
+          padding: "0 24px",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          borderBottom: `1px solid ${p.border}`,
+          background: p.cardBg,
+        }}
+      >
+        <Button
+          type="text"
+          icon={<ArrowLeftOutlined />}
+          onClick={() => navigate("/platform-select")}
+        >
+          返回工作区
+        </Button>
+        <Text strong style={{ fontSize: 14 }}>
+          个人资料
+        </Text>
+        <Button
+          type="text"
+          icon={<LogoutOutlined />}
+          onClick={() => void auth.logout()}
+        >
+          退出登录
+        </Button>
+      </header>
+      <div style={{ padding: "16px 24px 24px" }}>
+        <ProfilePage />
+      </div>
+    </div>
   );
 }

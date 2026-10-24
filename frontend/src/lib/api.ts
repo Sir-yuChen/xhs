@@ -5815,6 +5815,30 @@ export async function fetchMyMenus(
   return response.data;
 }
 
+/**
+ * 工作区选择页卡片（设计 62 §2.2，`GET /system/menus/workspaces` 下发）。
+ *
+ * 徽标规则在前端（`platform-select-page.tsx`）：
+ * `workspace ∈ {ai, system}` → 公共；`enterable=true` → Active；
+ * `status=disabled` → Coming Soon；`normal ∧ !enterable` → **卡片不渲染**
+ * （用户在该工作区没有任何授权可见菜单 —— 动态控制的落点）。
+ */
+export interface WorkspaceCard {
+  workspace: string;
+  name: string;
+  icon: string;
+  status: "normal" | "disabled";
+  enterable: boolean;
+}
+
+/** 当前用户可选的工作区卡片清单（**登录即可**，无权限码；卡片由后端按授权动态下发）。 */
+export async function fetchMyWorkspaces(): Promise<WorkspaceCard[]> {
+  const response = await http.get<{ items: WorkspaceCard[] }>(
+    "/system/menus/workspaces"
+  );
+  return response.data.items ?? [];
+}
+
 /** 系统用户列表项。 */
 export interface SystemUser {
   id: number;

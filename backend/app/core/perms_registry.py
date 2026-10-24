@@ -44,6 +44,10 @@ SEP = ":"
 WORKSPACE_SYSTEM = "system"
 WORKSPACE_XHS = "xhs"
 WORKSPACE_AI = "ai"
+#: **不属于任何平台工作区**的行（v1.1.0 / 设计 62，2026-10-25）：个人资料等
+#: 「用户级功能」—— 由壳层的头像下拉直达，不进任何工作区侧栏
+#: （工作区过滤按行 workspace 精确匹配 ⇒ common 行天然从所有侧栏消失）。
+WORKSPACE_COMMON = "common"
 
 
 @dataclass(frozen=True)
@@ -286,7 +290,9 @@ PAGE_VIEW_PERMS: tuple[PermSpec, ...] = (
     #:     必须带内码才能被 `role_menus` 授权、才能出现在侧栏。没有码 ⇒ 这个页面
     #:     在侧栏里**根本不存在**，用户只能手敲 `/profile`（实测：改了密码都没入口）。
     #: ⇒ 补一条页面级 view 码；它**不保护端点**，只决定「侧栏里有没有这个入口」。
-    PermSpec("xhs:profile:view", "个人资料", "C", "/profile", _X, _X),
+    # workspace=common（设计 62）：个人资料是用户级功能，入口在头像下拉，
+    # 不进任何平台侧栏 —— 工作区过滤（menus/mine?workspace=）天然排除 common 行。
+    PermSpec("xhs:profile:view", "个人资料", "C", "/profile", WORKSPACE_COMMON, _X),
     # ⚠️ 第 22 条：预警规则页（大模型网关工作区，`/llm-gateway/alerts`）
     PermSpec("ai:alert:view", "预警规则", "C", "/llm-gateway/alerts", _A, _A),
 )

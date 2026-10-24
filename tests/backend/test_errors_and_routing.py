@@ -123,8 +123,10 @@ def test_openapi_inventory_is_unchanged_by_the_registry():
         for method in item
         if method in {"get", "post", "put", "patch", "delete"}
     )
-    assert (len(paths), ops) == (330, 390), (
-        "OpenAPI 集合漂移 —— routing.py 的 include 顺序/条目与重构前不一致"
+    # 基线（2026-10-25 设计 62）：+1 端点 / +1 path = GET /system/menus/workspaces
+    # （工作区选择页动态卡片）⇒ 330/390 → 331/391。
+    assert (len(paths), ops) == (331, 391), (
+        "OpenAPI 集合漂移 —— routing.py 的 include 顺序/条目与基线不一致"
     )
 
 

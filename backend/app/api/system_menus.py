@@ -53,7 +53,7 @@ from backend.app.core.deps import get_current_user
 from backend.app.core.perm_deps import require_perm
 from backend.app.core.perms import ALL_PERMS, ROLE_ADMIN, normalize_role
 from backend.app.core.time import shanghai_now
-from backend.app.models.menu import Menu
+from backend.app.models.menu import ROOT_PARENT_ID, Menu
 from backend.app.models.role_menu import RoleMenu
 from backend.app.models.user import User
 from backend.app.core import permission_cache, rbac_service
@@ -304,6 +304,53 @@ def my_menus(
         rows = [r for r in rows if r.id in keep]
 
     return {"items": _to_tree(rows), "total": len(rows)}
+
+
+@router.get("/workspaces")
+def list_workspaces(
+    *,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """工作区选择页的卡片清单（设计 62 §2.2）。**登录即可**，无需权限码。
+
+    **动态控制**（用户口径「用户存在什么菜单就展示什么」）：
+    * 卡片 = 顶级 M 行（`is_visible=true`），含 `status=disabled` 的占位平台
+      （它们是「预留扩展入口」，显示 Coming Soon）；
+    * `enterable` = `status=normal` **且** 该用户在这个工作区有 ≥1 条授权可见行
+      （`_visible_menus_for` 已按「normal ∧ 授权 ∧ is_visible」过滤）；
+    * `status=normal` 但用户**无任何授权** ⇒ 该卡片不出现（不是灰着）。
+    """
+    visible = _visible_menus_for(db, current_user)
+    #: common 行（个人资料等用户级功能，设计 62）不属于任何工作区，不参与判卡。
+    visible_workspaces = {
+        (r.workspace or "")
+        for r in visible
+        if (r.workspace or "") not in ("", "common")
+    }
+    roots = (
+        db.query(Menu)
+        .filter(
+            Menu.menu_type == "M",
+            Menu.parent_id == ROOT_PARENT_ID,
+            Menu.is_visible.is_(True),
+        )
+        .order_by(Menu.sort_order.asc(), Menu.id.asc())
+        .all()
+    )
+    items = []
+    for m in roots:
+        status = (m.status or "normal").strip() or "normal"
+        items.append(
+            {
+                "workspace": m.workspace or "",
+                "name": m.name,
+                "icon": m.icon or "",
+                "status": status,
+                "enterable": status == "normal" and (m.workspace or "") in visible_workspaces,
+            }
+        )
+    return {"items": items, "total": len(items)}
 
 
 

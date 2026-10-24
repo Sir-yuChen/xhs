@@ -1,8 +1,10 @@
 import KeepAliveRouteOutlet from "keepalive-for-react-router";
+import { useLocation } from "react-router-dom";
 
 import { BusinessLineBadge } from "./business-line-badge";
 import { WorkspaceShell } from "./workspace-shell";
 import { useDynamicNav } from "./use-dynamic-nav";
+import { workspaceOf } from "../../lib/workspaces";
 
 /*
  * ─────────────────────────────────────────────────────────────
@@ -36,7 +38,13 @@ import { useDynamicNav } from "./use-dynamic-nav";
  */
 
 export function AppShell() {
-  const nav = useDynamicNav();
+  // 平台工作区隔离（设计 62 §2.1）：当前 workspace 由**路由**派生
+  // （`/system/*`→system；`/platforms/:id/*`→id；footer 工具页与兜底 → xhs），
+  // 传给 useDynamicNav ⇒ 后端只回该工作区的菜单切片。
+  // 映射是纯函数（`lib/workspaces.ts`），vitest 直接测分支。
+  const location = useLocation();
+  const workspace = workspaceOf(location.pathname);
+  const nav = useDynamicNav(workspace);
 
   return (
     <WorkspaceShell

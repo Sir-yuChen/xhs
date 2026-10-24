@@ -461,7 +461,24 @@ export function WorkspaceShell({
                 <Button type="text" icon={<BellOutlined style={{ fontSize: 16 }} />} style={{ display: "flex", alignItems: "center", justifyContent: "center" }} />
               </Badge>
             </Dropdown>
-            <Avatar size={28} style={{ background: "#1668dc", fontSize: 12, cursor: "default" }}>{(auth.user?.username ?? "U")[0].toUpperCase()}</Avatar>
+            {/* 头像下拉（设计 62 §2.3）：个人资料从侧栏 C 行改为头像下拉直达
+                —— 与用户惯例一致；退出登录保留在菜单里（左下角用户条的退出不受影响）。 */}
+            <Dropdown
+              trigger={["click"]}
+              placement="bottomRight"
+              menu={{
+                items: [
+                  { key: "profile", icon: <UserOutlined />, label: "个人资料" },
+                  { key: "logout", icon: <LogoutOutlined />, label: "退出登录" },
+                ],
+                onClick: ({ key }) => {
+                  if (key === "profile") navigate("/profile");
+                  else if (key === "logout") void auth.logout();
+                },
+              }}
+            >
+              <Avatar size={28} style={{ background: "#1668dc", fontSize: 12, cursor: "pointer" }}>{(auth.user?.username ?? "U")[0].toUpperCase()}</Avatar>
+            </Dropdown>
           </Space>
         </Header>
         {/*

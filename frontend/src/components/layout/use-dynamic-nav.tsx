@@ -165,6 +165,12 @@ export interface DynamicNav {
  *
  * 底部那几项的 `workspace` 在种子里是空串或 `common`，按「是否在 footer 白名单路由里」
  * 判定更稳（路由是唯一标识，`workspace` 只是分类标签）。
+ *
+ * ## `workspace` 形参（设计 62 §2.1 平台隔离）
+ *
+ * 传入时透传给 `fetchMyMenus(workspace)` —— 后端只回该工作区的菜单切片
+ * （含祖先保链）。侧栏因此按工作区隔离：小红书工作区不再把系统管理 /
+ * 大模型网关混进来。不传（undefined）= 老的全量行为。
  */
 const FOOTER_PATHS = new Set(["/tasks", "/task-records", "/models", "/settings"]);
 
@@ -185,7 +191,7 @@ function splitFooter(nodes: SystemMenuNode[]): {
   return { main, footer };
 }
 
-export function useDynamicNav(): DynamicNav {
+export function useDynamicNav(workspace?: string): DynamicNav {
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [nodes, setNodes] = useState<SystemMenuNode[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -194,7 +200,7 @@ export function useDynamicNav(): DynamicNav {
   useEffect(() => {
     let cancelled = false;
     setStatus("loading");
-    fetchMyMenus()
+    fetchMyMenus(workspace)
       .then((payload: { items?: SystemMenuNode[]; total?: number }) => {
         if (cancelled) return;
         setNodes(payload.items ?? []);
@@ -210,7 +216,7 @@ export function useDynamicNav(): DynamicNav {
     return () => {
       cancelled = true;
     };
-  }, [tick]);
+  }, [tick, workspace]); // ⚠️ workspace 变化 ⇒ 重新拉取（AppShell 按路由派生，设计 62）
 
   const { mainItems, footerItems } = useMemo(() => {
     const { main, footer } = splitFooter(nodes);

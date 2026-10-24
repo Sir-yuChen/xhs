@@ -1,4 +1,4 @@
-import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes, useParams } from "react-router-dom";
 
 import { AppShell } from "../components/layout/app-shell";
 import { ComingSoonPage } from "../components/platforms/coming-soon";
@@ -31,7 +31,22 @@ import { XhsPublishPage } from "../pages/platforms/xhs/publish-page";
 import { XhsSectionPage } from "../pages/platforms/xhs/xhs-section-page";
 import { SystemPage } from "../pages/system/system-page";
 import { ForbiddenPage } from "../pages/system/forbidden-page";
-import { ProfilePage } from "../pages/system/profile-page";
+import { ProfileStandalonePage } from "../pages/system/profile-page";
+
+/*
+ * `/platforms/:platformId` 顶层分发（设计 62 §2.4）：
+ * `system` → 本条在 AppShell 布局路由**之内** ⇒ 壳层即 AppShell，内容区 Navigate
+ * 到 `/system/users`（系统管理独立工作区，侧栏只剩系统管理自己的组）；
+ * 其余未知平台维持 ComingSoonPage（现在渲染在壳内，侧栏由该平台的菜单切片决定 ——
+ * 无授权即空侧栏，不再出现「看得见摸不着」的跨平台菜单）。
+ */
+function PlatformRootRoute() {
+  const { platformId } = useParams();
+  if (platformId === "system") {
+    return <Navigate to="/system/users" replace />;
+  }
+  return <ComingSoonPage />;
+}
 
 export function AppRouter() {
   return (
@@ -46,22 +61,8 @@ export function AppRouter() {
             </PublicOnlyRoute>
           }
         />
-        <Route
-          path="/platform-select"
-          element={
-            <ProtectedRoute>
-              <PlatformSelectPage />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/platforms/:platformId"
-          element={
-            <ProtectedRoute>
-              <ComingSoonPage />
-            </ProtectedRoute>
-          }
-        />
+        {/* `/platforms/:platformId` 已移入下方 AppShell 布局路由（设计 62 §2.4
+            —— system 工作区要套壳层；原先的独立 ProtectedRoute 声明删除） */}
         {/* 2026-09-29 设计 17 §7.1 v1.5：大模型网关 = 独立公共模块，有自己的工作区壳（不进 AppShell 平台工作区），
             与 /platform-select 同层的独立全屏页；旧路由（平台内 / 工作区内）重定向。
             2026-10-01 §11.3（第 3 次修订）：网关内 4 个菜单改为**独立页面**（子路由）——
@@ -78,6 +79,17 @@ export function AppRouter() {
               各自的 index 重定向、旧 ?tab= 兼容、未知段回落都在 LlmGatewayPage 内部。 */}
           <Route path="*" element={null} />
         </Route>
+        {/* 个人资料（设计 62 §2.3）：独立全屏页（同 /llm-gateway 的壳模式）——
+            顶部窄 header（返回工作区 / 标题 / 退出登录）+ ProfilePage 原内容。
+            **所有人可用**（不需要权限码）；不再挂任何工作区侧栏。 */}
+        <Route
+          path="/profile"
+          element={
+            <ProtectedRoute>
+              <ProfileStandalonePage />
+            </ProtectedRoute>
+          }
+        />
         <Route
           element={
             <ProtectedRoute>
@@ -100,10 +112,14 @@ export function AppRouter() {
           <Route path="/system/dicts" element={<SystemPage />} />
           <Route path="/system/settings" element={<SystemPage />} />
           <Route path="/system/logs" element={<SystemPage />} />
-          {/* 个人资料：**所有人可用**（不需要权限码）—— 改自己的密码 / 看自己的角色 */}
-          <Route path="/profile" element={<ProfilePage />} />
+          {/* 个人资料（设计 62 §2.3）：已移出 AppShell —— 独立全屏页
+              `ProfileStandalonePage`，见路由表顶层的 /profile 声明。 */}
           {/* 403：直敲未授权 URL 时可达（设计 49 §模块八） */}
           <Route path="/403" element={<ForbiddenPage />} />
+          {/* 平台工作区顶层（设计 62 §2.4）：在 AppShell 布局**之内** ——
+              `/platforms/system` 套壳后 Navigate 到 /system/users；未知平台 ComingSoon。
+              ⚠️ react-router 按静态段优先排序，/platforms/xhs/* 的具体路由不受影响。 */}
+          <Route path="/platforms/:platformId" element={<PlatformRootRoute />} />
           <Route path="/platforms/xhs/dashboard" element={<XhsDashboard />} />
           <Route path="/platforms/xhs/accounts" element={<XhsAccountsPage />} />
           <Route path="/platforms/xhs/analytics" element={<XhsAnalyticsPage />} />
