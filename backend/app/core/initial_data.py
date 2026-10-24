@@ -29,6 +29,10 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# v1.1.0 A5 下沉：预警规则值域常量（api 层 re-export 保持兼容，实现单份）。
+from backend.app.core.llm_gateway_alert_rules import ALERT_METRICS, ALERT_OPERATORS  # noqa: E402
+
+
 #: 数据目录名（与 `config/` 同级）
 INITIAL_DATA_DIRNAME = "initial_data"
 
@@ -283,8 +287,8 @@ def _normalize_gateway_alert(raw: Any) -> dict[str, Any] | None:
     `gateway_id` **不在种子里**：它由播种方按「刚创建的网关 / 用户已有网关」填，
     种子只描述**规则本身**（一条规则可套用到任何网关）。
     """
-    # 惰性 import：`core` 层不在模块级依赖 `api`（避免 core ↔ api 的导入环）。
-    from backend.app.api.llm_gateway_monitor import ALERT_METRICS, ALERT_OPERATORS
+    # v1.1.0 A5：常量已下沉 `core/llm_gateway_alert_rules.py`（值域定义属 core，
+    # api 层 re-export 保持兼容）—— core 不再上探 api（依赖方向合同 C1）。
 
     if not isinstance(raw, dict):
         logger.warning("initial_data: 预警规则条目不是对象（%r），已跳过", type(raw).__name__)
@@ -469,7 +473,7 @@ def _normalize_gateway_provider(raw: Any) -> dict[str, Any] | None:
     未知类型的模型**丢弃该模型行**（不猜类型，同 §13.2.9.4）、服务商本身仍保留。
     """
     # 惰性 import：`core` 层不在模块级依赖 `services`（避免 core ↔ services 导入环）。
-    from backend.app.services.business_provider_keys import MODEL_TYPES
+    from backend.app.core.business_provider_keys import MODEL_TYPES
 
     if not isinstance(raw, dict):
         logger.warning("initial_data: 服务商种子条目不是对象（%r），已跳过", type(raw).__name__)

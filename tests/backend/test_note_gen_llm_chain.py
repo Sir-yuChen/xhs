@@ -71,7 +71,7 @@ from backend.app.models.generation import (
 from backend.app.models.note import NoteTopic
 from backend.app.services import note_gen_llm_worker as gw
 from backend.app.services import note_queue_service as nqs
-from backend.app.services.business_provider_keys import BUSINESS_KEY_LLM_NOTE_TEXT
+from backend.app.core.business_provider_keys import BUSINESS_KEY_LLM_NOTE_TEXT
 from tests.backend.conftest import upsert_business_mapping
 
 

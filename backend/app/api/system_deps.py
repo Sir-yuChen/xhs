@@ -22,7 +22,7 @@ from pydantic import BaseModel
 
 from backend.app.core.deps import get_current_user
 from backend.app.models import User
-from backend.app.services import env_bootstrap_service as env
+from backend.app.core import env_bootstrap as env
 
 logger = logging.getLogger(__name__)
 

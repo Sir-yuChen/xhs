@@ -56,17 +56,14 @@ _FORBIDDEN: dict[str, set[str]] = {
 # 因为同一调用点可能两种 import 形态并存，按最粗前缀记一笔账。
 # ---------------------------------------------------------------------------
 _EXEMPT: dict[tuple[str, str], str] = {
-    # --- C2 adapters -> services：**已清零（A7，2026-10-24）** ——
+    # --- C1 core -> services|api：**已清零（A5，2026-10-24）** ——
+    # permission_cache / presence / business_provider_keys / env_bootstrap 四模块下沉 core
+    # （它们本就是基础设施：仅依赖 core+models，被三层共用），预警值域常量下沉
+    # core/llm_gateway_alert_rules，core/business_lines.py（零生产消费方的死码，
+    # 唯一引用方是它自己的测试）整文件删除。此处不再有条目 = 合同 C1 满额生效。
+    # --- C2 adapters -> services：**已清零（A7，2026-10-24）** ---
     # 限流器下沉 core/rate_limiter（provider 注册反转）、topic_token 下沉
-    # adapters/xhs/topic_format。此处不再有豁免条目 = 合同 C2 满额生效。
-    # --- C1 core -> services（A5 下沉时清） ---
-    ("backend/app/core/business_lines.py", "backend.app.services"): "CHANNEL_CREATOR / latest_cookies_for_channel / has_ark_session",
-    ("backend/app/core/deps.py", "backend.app.services"): "presence_service 在线状态（判据=5 分钟内有无请求）",
-    ("backend/app/core/perm_deps.py", "backend.app.services"): "permission_cache 权限缓存读取（S2 设计如此，A5 决定下沉方向）",
-    ("backend/app/core/initial_data.py", "backend.app.services"): "business_provider_keys.MODEL_TYPES 常量；常量应下沉 core（A5）",
-    ("backend/app/core/selfcheck.py", "backend.app.services"): "env_bootstrap_service.refresh_runtime_paths 启动自检回调",
-    # --- C1 core -> api（A5 清：常量下沉） ---
-    ("backend/app/core/initial_data.py", "backend.app.api"): "llm_gateway_monitor 的 ALERT_METRICS / ALERT_OPERATORS 常量被播种引用",
+    # adapters/xhs/topic_format。
     # --- C3 api 跨域（域 = 目录子树；根层互引合法故不记账，见 scan_source 的 C3 注释） ---
     ("backend/app/api/platforms/xhs/crawl.py", "backend.app.api.tasks"): "serialize_task",
     ("backend/app/api/platforms/xhs/creator.py", "backend.app.api.tasks"): "serialize_task",
@@ -272,7 +269,7 @@ def test_scanner_sees_function_level_and_relative_imports():
     hits = scan_source(
         textwrap.dedent(
             """
-            from ...services import presence_service
+            from ...services import presence
             """
         ),
         "backend.app.core.subpkg.mod",

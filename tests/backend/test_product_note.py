@@ -47,7 +47,7 @@ class _ModelConfigStub:
             setattr(self, k, v)
 
 
-from backend.app.services.business_provider_keys import BUSINESS_KEY_LLM_NOTE_TEXT
+from backend.app.core.business_provider_keys import BUSINESS_KEY_LLM_NOTE_TEXT
 from backend.app.services.product_note_service import (
     ABSOLUTE_TERMS,
     BANNED_TERMS,

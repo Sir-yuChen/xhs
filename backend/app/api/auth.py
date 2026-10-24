@@ -587,7 +587,7 @@ def change_password(
     自己的密码」，而 `must_change_password=true` 时他会被永久锁在改密页。
     """
     from backend.app.core.security import hash_password, verify_password
-    from backend.app.services import permission_cache, presence_service
+    from backend.app.core import permission_cache, presence
 
     if not verify_password(payload.old_password, current_user.password_hash):
         raise HTTPException(
@@ -609,7 +609,7 @@ def change_password(
     #: 密码变了 ⇒ 所有已签发令牌立即失效（被盗令牌不能继续用）
     current_user.token_version = int(current_user.token_version or 0) + 1
     permission_cache.clear(user_id=current_user.id)
-    presence_service.forget(current_user.id)
+    presence.forget(current_user.id)
     db.commit()
 
     return {

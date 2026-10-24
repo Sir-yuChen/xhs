@@ -188,6 +188,6 @@ def set_role_menus(
 
 def clear_permission_cache() -> None:
     """清权限缓存 —— 委托给 `permission_cache`（避免两处各写一份失效逻辑）。"""
-    from backend.app.services import permission_cache
+    from backend.app.core import permission_cache
 
     permission_cache.clear()

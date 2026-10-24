@@ -64,7 +64,7 @@ def _model_dir() -> Path:
     装在用户级 site-packages，构建机与运行机看到的不是同一份。）
     """
     try:
-        from backend.app.services.env_bootstrap_service import dep_model_dir
+        from backend.app.core.env_bootstrap import dep_model_dir
 
         return dep_model_dir("ocr_models")
     except Exception:  # noqa: BLE001 - 依赖服务不可用时退回用户缓存目录

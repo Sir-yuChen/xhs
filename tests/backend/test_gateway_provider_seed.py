@@ -31,7 +31,7 @@ from backend.app.services.llm_gateway_seed_service import (
     seed_default_business_map_for_user,
     seed_gateway_providers_for_user,
 )
-from backend.app.services.business_provider_keys import MODEL_TYPES
+from backend.app.core.business_provider_keys import MODEL_TYPES
 
 
 #: 测试分层标记（2026-10-23 立，见 `docs/04_测试文档/01_测试体系与流程规范.md` §15.2）。

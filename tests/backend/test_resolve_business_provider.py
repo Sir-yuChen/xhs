@@ -30,7 +30,7 @@ from backend.app.models import LlmGatewayConfig, User
 from tests.backend.conftest import upsert_business_mapping
 from backend.app.models.llm_gateway import LlmGatewayModel
 from backend.app.services import llm_gateway_client
-from backend.app.services.business_provider_keys import (
+from backend.app.core.business_provider_keys import (
     BUSINESS_KEY_GENERATE_COVER,
     BUSINESS_KEY_LLM_NOTE_TEXT,
 )

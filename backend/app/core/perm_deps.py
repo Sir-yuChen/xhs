@@ -63,7 +63,7 @@ def require_perm(code: str) -> Callable[..., User]:
         current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db),
     ) -> User:
-        from backend.app.services import permission_cache
+        from backend.app.core import permission_cache
 
         role = normalize_role(getattr(current_user, "role", None))
         if role == ROLE_ADMIN:
@@ -89,7 +89,7 @@ def require_any_perm(*codes: str) -> Callable[..., User]:
         current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db),
     ) -> User:
-        from backend.app.services import permission_cache
+        from backend.app.core import permission_cache
 
         role = normalize_role(getattr(current_user, "role", None))
         if role == ROLE_ADMIN:

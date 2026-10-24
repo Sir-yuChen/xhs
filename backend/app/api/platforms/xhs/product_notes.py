@@ -44,7 +44,7 @@ from sqlalchemy.orm import Session
 from backend.app.adapters.xhs.qianfan_api_adapter import get_qianfan_api_adapter_factory
 from backend.app.api.ai import _business_model_context, get_text_ai_client
 from backend.app.api.platforms.xhs.qianfan import _owned_account
-from backend.app.services.business_provider_keys import BUSINESS_KEY_LLM_NOTE_TEXT
+from backend.app.core.business_provider_keys import BUSINESS_KEY_LLM_NOTE_TEXT
 from backend.app.core.database import SessionLocal, get_db
 from backend.app.core.deps import get_current_user
 

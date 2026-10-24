@@ -35,7 +35,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.models.prompt import PromptTemplate
 from backend.app.models.user import User
-from backend.app.services.business_provider_keys import (
+from backend.app.core.business_provider_keys import (
     BUSINESS_KEY_PRODUCT_SELLING_POINT,
     BUSINESS_KEY_PRODUCT_TITLE_POLISH,
 )

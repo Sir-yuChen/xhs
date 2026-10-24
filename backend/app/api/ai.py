@@ -14,7 +14,7 @@ from backend.app.models import AiDraft, AiGeneratedAsset, Task, User
 from backend.app.schemas.common import paginated
 from backend.app.services import llm_gateway_client
 from backend.app.services.ai_service import ImageAiClient, OpenAICompatibleImageClient, OpenAICompatibleTextClient, TextAiClient
-from backend.app.services.business_provider_keys import (
+from backend.app.core.business_provider_keys import (
     BUSINESS_KEY_GENERATE_TAGS,
     BUSINESS_KEY_WORKSHOP_DRAFT_TEXT,
     BUSINESS_KEY_WORKSHOP_IMAGE,

@@ -92,9 +92,9 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
 
     # 在线状态（设计 55 §2.1 方案 A）：所有已登录请求的**唯一**写入点。
     # 放在这里而不是中间件 —— 用户已解析好，不必再解一次令牌。
-    from backend.app.services import presence_service
+    from backend.app.core import presence
 
-    presence_service.touch(user.id)
+    presence.touch(user.id)
     return user
 
 

@@ -432,7 +432,7 @@ def _ffmpeg_exe(name: str) -> str | None:
          ⇒ 用户下载完 ffmpeg **无需重启**即可抽帧。
     """
     try:
-        from backend.app.services.env_bootstrap_service import dep_binary
+        from backend.app.core.env_bootstrap import dep_binary
 
         return dep_binary("ffmpeg", f"{name}.exe" if os.name == "nt" else name)
     except Exception:  # noqa: BLE001 - 依赖服务不可用不该让抽帧崩

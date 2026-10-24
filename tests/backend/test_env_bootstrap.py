@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pathlib
 
-from backend.app.services import env_bootstrap_service as env
+from backend.app.core import env_bootstrap as env
 
 import pytest
 
@@ -217,7 +217,7 @@ def test_probe_rejects_half_downloaded_files(tmp_path):
     #: ② **体积判据必须独立生效**：源码里要有体积门槛（不是只判 is_file）
     import pathlib as _p
 
-    src = _p.Path("backend/app/services/env_bootstrap_service.py").read_text(encoding="utf-8")
+    src = _p.Path("backend/app/core/env_bootstrap.py").read_text(encoding="utf-8")
     i = src.index("def probe_ffmpeg(")
     body = src[i : i + 900]
     assert "exe.stat().st_size < 1_000_000" in body, (

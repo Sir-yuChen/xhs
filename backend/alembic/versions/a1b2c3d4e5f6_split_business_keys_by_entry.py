@@ -61,7 +61,7 @@ def upgrade() -> None:
     if not _table_exists("llm_business_providers"):
         return
 
-    from backend.app.services.business_provider_keys import (
+    from backend.app.core.business_provider_keys import (
         LEGACY_KEY_ALIASES,
         get_business_key,
     )
@@ -122,7 +122,7 @@ def downgrade() -> None:
     if not _table_exists("llm_business_providers"):
         return
     #: **有损回退**：新 key 行删掉，旧 key 行原样还在（升级时没删它们）⇒ 回到改造前。
-    from backend.app.services.business_provider_keys import LEGACY_KEY_ALIASES
+    from backend.app.core.business_provider_keys import LEGACY_KEY_ALIASES
 
     new_keys = set()
     for targets in LEGACY_KEY_ALIASES.values():

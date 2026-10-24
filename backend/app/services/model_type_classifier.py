@@ -27,7 +27,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 
-from backend.app.services.business_provider_keys import (
+from backend.app.core.business_provider_keys import (
     MODEL_TYPE_LABELS,
     MODEL_TYPE_TEXT,
     MODEL_TYPES,

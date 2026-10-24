@@ -196,7 +196,7 @@ def optimize_names(
 
     try:
         from backend.app.models.user import User
-        from backend.app.services.business_provider_keys import (
+        from backend.app.core.business_provider_keys import (
             BUSINESS_KEY_PRODUCT_SKU_NAME_OPTIMIZE,
         )
         from backend.app.services.llm_gateway_client import (

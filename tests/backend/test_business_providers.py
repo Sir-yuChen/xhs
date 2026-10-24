@@ -30,7 +30,7 @@ from backend.app.api.llm_gateway import (
     _dump_platforms,
     _parse_platforms,
 )
-from backend.app.services.business_provider_keys import (
+from backend.app.core.business_provider_keys import (
     BUSINESS_KEYS,
     BUSINESS_KEY_GENERATE_TAGS,
     BUSINESS_KEY_LLM_NOTE_TEXT,
@@ -428,7 +428,7 @@ def test_upsert_rejects_type_mismatch_400(api_client):
 
     #: 必须用**图片类型**的业务点做「指向 text 服务商」的反例
     #: （`generate_tags` 是 text 类型，用它测不出不匹配）。
-    from backend.app.services.business_provider_keys import BUSINESS_KEY_LLM_NOTE_IMAGE
+    from backend.app.core.business_provider_keys import BUSINESS_KEY_LLM_NOTE_IMAGE
 
     resp = _upsert(
         api_client, headers, BUSINESS_KEY_LLM_NOTE_IMAGE.key, text_provider["provider_key"]
@@ -958,7 +958,7 @@ class TestEntryGrouping:
 
     def test_llm_note_entry_has_three_kinds(self):
         """「LLM 生成笔记」这条功能线 = 文本 + 图片 + 视频 **三个独立 key**。"""
-        from backend.app.services.business_provider_keys import (
+        from backend.app.core.business_provider_keys import (
             BUSINESS_KEY_LLM_NOTE_IMAGE,
             BUSINESS_KEY_LLM_NOTE_TEXT,
             BUSINESS_KEY_LLM_NOTE_VIDEO,
@@ -979,7 +979,7 @@ class TestEntryGrouping:
 
     def test_entries_do_not_share_keys(self):
         """**各功能不共用**：同一个 key 不能出现在两个入口里。"""
-        from backend.app.services.business_provider_keys import BUSINESS_KEYS
+        from backend.app.core.business_provider_keys import BUSINESS_KEYS
 
         owner: dict[str, str] = {}
         for spec in BUSINESS_KEYS:

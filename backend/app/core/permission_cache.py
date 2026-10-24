@@ -84,7 +84,7 @@ def perms_of(db: Session, user: User | None) -> frozenset[str]:
             return entry[1]
 
     # 未命中：在锁外查库（查库可能慢，不能占着锁）
-    from backend.app.services import rbac_service
+    from backend.app.core import rbac_service
 
     value = rbac_service.perms_for_user(db, user)
 

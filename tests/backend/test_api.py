@@ -9,7 +9,7 @@ from sqlalchemy.orm import sessionmaker
 from backend.app.main import app
 from backend.app.models.user import User
 from backend.app.models.llm_gateway import LlmBusinessProvider, LlmGatewayConfig, LlmGatewayModel
-from backend.app.services.business_provider_keys import BUSINESS_KEYS
+from backend.app.core.business_provider_keys import BUSINESS_KEYS
 from backend.app.services.account_service import (
     CHANNEL_ARK,
     CHANNEL_CREATOR,
@@ -632,7 +632,7 @@ def _seed_ai_provider_mappings(db, user_id: int) -> None:
     那条断言仍然成立。
     """
     from backend.app.models.llm_gateway import LlmBusinessProvider, LlmGatewayConfig
-    from backend.app.services.business_provider_keys import BUSINESS_KEYS
+    from backend.app.core.business_provider_keys import BUSINESS_KEYS
 
     from backend.app.models.llm_gateway import LlmGatewayModel
 
@@ -5620,7 +5620,7 @@ def test_generate_detail_image_uses_own_business_point_and_persists_asset(tmp_pa
     """
     from backend.app.api.ai import get_image_ai_client
     from backend.app.models.generation import AigcMediaAsset
-    from backend.app.services.business_provider_keys import (
+    from backend.app.core.business_provider_keys import (
         BUSINESS_KEY_PRODUCT_DETAIL_IMAGE,
     )
     from backend.app.models.generation import AigcMediaAsset as _Asset  # noqa: F401
@@ -5759,7 +5759,7 @@ def test_generate_detail_image_supports_count_and_reports_partial_failure(tmp_pa
     """
     from backend.app.api.ai import get_image_ai_client
     from backend.app.models.generation import AigcMediaAsset
-    from backend.app.services.business_provider_keys import (
+    from backend.app.core.business_provider_keys import (
         BUSINESS_KEY_PRODUCT_DETAIL_IMAGE,
     )
 
@@ -5916,7 +5916,7 @@ def test_generate_detail_image_result_is_grouped(tmp_path):
     ④ 只勾一组时，结果里**只有那一组**（不凭空造另一组）。
     """
     from backend.app.api.ai import get_image_ai_client
-    from backend.app.services.business_provider_keys import (
+    from backend.app.core.business_provider_keys import (
         BUSINESS_KEY_PRODUCT_DETAIL_IMAGE,
     )
 
@@ -6065,7 +6065,7 @@ def test_generate_detail_image_regenerates_single_image(tmp_path):
        **不静默退化成整组重跑**（那会烧掉用户没打算动的图）。
     """
     from backend.app.api.ai import get_image_ai_client
-    from backend.app.services.business_provider_keys import (
+    from backend.app.core.business_provider_keys import (
         BUSINESS_KEY_PRODUCT_DETAIL_IMAGE,
     )
 
@@ -6351,7 +6351,7 @@ def test_detail_image_reference_images_must_come_from_the_product(tmp_path):
     from backend.app.api.ai import get_image_ai_client
     from backend.app.core.security import encrypt_text
     from backend.app.models import LlmBusinessProvider, LlmGatewayConfig, LlmGatewayModel
-    from backend.app.services.business_provider_keys import (
+    from backend.app.core.business_provider_keys import (
         BUSINESS_KEY_PRODUCT_DETAIL_IMAGE,
     )
 

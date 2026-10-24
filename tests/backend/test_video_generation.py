@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 
 from backend.app.services import video_generation as vg
-from backend.app.services.business_provider_keys import (
+from backend.app.core.business_provider_keys import (
     BUSINESS_KEY_LLM_NOTE_VIDEO,
     BUSINESS_KEYS,
     MODEL_TYPE_VIDEO,

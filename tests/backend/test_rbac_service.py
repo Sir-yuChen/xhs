@@ -30,7 +30,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from backend.app.core import perm_deps
 from backend.app.core.perms import ALL_PERMS
 from backend.app.models.user import User as _UserRow
-from backend.app.services import permission_cache, rbac_service
+from backend.app.core import permission_cache, rbac_service
 
 
 #: 测试分层标记（2026-10-23 立，见 `docs/04_测试文档/01_测试体系与流程规范.md` §15.2）。

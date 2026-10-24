@@ -155,12 +155,12 @@ class TestSettingsWiring:
 
 class TestBusinessKey:
     def test_business_key_exists(self):
-        from backend.app.services import business_provider_keys as keys
+        from backend.app.core import business_provider_keys as keys
 
         assert keys.BUSINESS_KEY_PRODUCT_SKU_NAME_OPTIMIZE.key == "product_sku_name_optimize"
 
     def test_business_key_registered(self):
-        from backend.app.services import business_provider_keys as keys
+        from backend.app.core import business_provider_keys as keys
 
         assert keys.BUSINESS_KEY_PRODUCT_SKU_NAME_OPTIMIZE in keys.BUSINESS_KEYS
 

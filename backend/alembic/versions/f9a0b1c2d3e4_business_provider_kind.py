@@ -60,7 +60,7 @@ def upgrade() -> None:
             batch.add_column(sa.Column("kind", sa.String(16), nullable=True))
 
     #: **按业务点自身 kind 回填**（真相源 = 代码常量，不在迁移里抄映射）
-    from backend.app.services.business_provider_keys import BUSINESS_KEYS
+    from backend.app.core.business_provider_keys import BUSINESS_KEYS
 
     conn = op.get_bind()
     for spec in BUSINESS_KEYS:
@@ -105,7 +105,7 @@ def downgrade() -> None:
     #: 回退要注意：多行（同业务点不同类型）在旧唯一键下会冲突。
     #: 只保留「业务点自身 kind」那一行，其余删除 —— 这是有损回退，
     #: 但旧结构**物理上**无法表达多行，删是最小代价（并在日志里说明）。
-    from backend.app.services.business_provider_keys import BUSINESS_KEYS
+    from backend.app.core.business_provider_keys import BUSINESS_KEYS
 
     conn = op.get_bind()
     own = {spec.key: spec.kind for spec in BUSINESS_KEYS}

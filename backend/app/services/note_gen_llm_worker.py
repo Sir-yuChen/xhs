@@ -81,7 +81,7 @@ from backend.app.services import (
     note_queue_service,
     note_version_service,
 )
-from backend.app.services.business_provider_keys import BUSINESS_KEY_LLM_NOTE_TEXT
+from backend.app.core.business_provider_keys import BUSINESS_KEY_LLM_NOTE_TEXT
 from backend.app.services.llm_gateway_client import LLMGatewayError
 from backend.app.services.media_generation import (
     MediaGenerationError,
@@ -1246,7 +1246,7 @@ def _persist_generated_note(
         #: **按入口取媒体模型**（用户口径 2026-10-18「各个功能单独配置」）：
         #: 这里是「LLM 生成笔记」入口，配图/视频走它自己的 key —— 与笔记工坊的
         #: 配图模型**互不影响**（改一处不会串到另一处）。
-        from backend.app.services.business_provider_keys import (
+        from backend.app.core.business_provider_keys import (
             BUSINESS_KEY_LLM_NOTE_IMAGE,
         )
 

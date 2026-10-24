@@ -28,7 +28,8 @@ import pytest
 
 pytestmark = pytest.mark.contract
 
-from backend.app.services import menu_seed_service, permission_cache, presence_service
+from backend.app.services import menu_seed_service
+from backend.app.core import permission_cache, presence
 
 
 @pytest.fixture()
@@ -52,12 +53,12 @@ def client(api_client, db_engine):
         db.commit()
 
     permission_cache.clear()
-    presence_service.clear()
+    presence.clear()
     try:
         yield api_client
     finally:
         permission_cache.clear()
-        presence_service.clear()
+        presence.clear()
 
 
 def _login(client: TestClient, username: str, password: str) -> str:

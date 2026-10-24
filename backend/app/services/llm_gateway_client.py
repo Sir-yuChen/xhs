@@ -156,7 +156,7 @@ def _kind_label(kind: str) -> str:
     渲染成英文原值（不报错但文案退化，DEF-044 同型）。
     未知值原样返回，**不造名** —— DEF-057。
     """
-    from backend.app.services.business_provider_keys import MODEL_TYPE_LABELS
+    from backend.app.core.business_provider_keys import MODEL_TYPE_LABELS
 
     return MODEL_TYPE_LABELS.get(kind or "", kind or "")
 
@@ -381,7 +381,7 @@ def resolve_business_provider(
     ⚠️ **跨用户隔离**：映射与凭据都带 `user_id` 约束（DEF-066 / §13.2.4）。
     """
     from backend.app.models.llm_gateway import LlmBusinessProvider
-    from backend.app.services.business_provider_keys import BUSINESS_KEYS, BusinessKey
+    from backend.app.core.business_provider_keys import BUSINESS_KEYS, BusinessKey
 
     # 接受 `BusinessKey` 常量或裸字符串：调用点直接传常量（拼错就 ImportError，
     # 比手写字面量可靠）；也容忍字符串，方便测试与将来的外部调用。

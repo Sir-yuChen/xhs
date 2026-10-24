@@ -57,7 +57,7 @@ from backend.app.core.security import hash_password
 from backend.app.core.time import shanghai_now
 from backend.app.models.role import Role
 from backend.app.models.user import User
-from backend.app.services import permission_cache, presence_service, rbac_service
+from backend.app.core import permission_cache, presence, rbac_service
 
 router = APIRouter(prefix="/system/users", tags=["system"])
 
@@ -95,8 +95,8 @@ def _serialize(
         # 角色名 join 不到 ⇒ 回落 code 原值（不造假，硬约束 C5）
         "role_name": role_names.get(role, role),
         "status": getattr(user, "status", "normal") or "normal",
-        # online 是**近似值**：判据 = 「5 分钟内有没有请求」（见 presence_service）
-        "online": (user.id in online_ids) if online_ids is not None else presence_service.is_online(user.id),
+        # online 是**近似值**：判据 = 「5 分钟内有没有请求」（见 presence）
+        "online": (user.id in online_ids) if online_ids is not None else presence.is_online(user.id),
         "must_change_password": bool(getattr(user, "must_change_password", False)),
         "last_login_at": _iso(getattr(user, "last_login_at", None)),
         "last_login_ip": getattr(user, "last_login_ip", "") or "",
@@ -144,7 +144,7 @@ def _bump_token_version(db: Session, user: User) -> None:
     """让该用户的旧令牌立即失效（改角色 / 改状态 / 重置密码时调用）。"""
     user.token_version = int(user.token_version or 0) + 1
     permission_cache.clear(user_id=user.id)
-    presence_service.forget(user.id)
+    presence.forget(user.id)
 
 
 # --------------------------------------------------------------------------- #
@@ -220,7 +220,7 @@ def list_users(
     ).all()
 
     role_names = _role_name_map(db)
-    online_ids = presence_service.online_user_ids()
+    online_ids = presence.online_user_ids()
     return {
         "items": [
             _serialize(u, role_names=role_names, online_ids=online_ids, full=False)
@@ -456,7 +456,7 @@ def get_user_online(
     _get_or_404(db, user_id)
     return {
         "user_id": user_id,
-        "online": presence_service.is_online(user_id),
-        "window_seconds": presence_service.ONLINE_WINDOW_SECONDS,
+        "online": presence.is_online(user_id),
+        "window_seconds": presence.ONLINE_WINDOW_SECONDS,
         "note": "判据为「窗口内是否有请求」，不是浏览器是否开着",
     }

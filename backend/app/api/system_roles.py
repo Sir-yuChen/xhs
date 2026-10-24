@@ -53,7 +53,7 @@ from backend.app.core.time import shanghai_now
 from backend.app.models.menu import Menu
 from backend.app.models.role import Role
 from backend.app.models.user import User
-from backend.app.services import permission_cache, rbac_service, presence_service
+from backend.app.core import permission_cache, rbac_service, presence
 
 router = APIRouter(prefix="/system/roles", tags=["system"])
 
@@ -175,7 +175,7 @@ def _kick_role_holders(db: Session, role_code: str) -> int:
     for user in affected:
         user.token_version = int(user.token_version or 0) + 1
         permission_cache.clear(user_id=user.id)
-        presence_service.forget(user.id)
+        presence.forget(user.id)
     return len(affected)
 
 
@@ -434,7 +434,7 @@ def set_role_users(
             user.role = role.code
             user.token_version = int(user.token_version or 0) + 1
             permission_cache.clear(user_id=user.id)
-            presence_service.forget(user.id)
+            presence.forget(user.id)
             kicked += 1
     db.commit()
     return {"ok": True, "role_id": role.id, "assigned": len(users), "kicked_users": kicked}

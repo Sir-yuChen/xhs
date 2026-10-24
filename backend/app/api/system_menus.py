@@ -56,7 +56,7 @@ from backend.app.core.time import shanghai_now
 from backend.app.models.menu import Menu
 from backend.app.models.role_menu import RoleMenu
 from backend.app.models.user import User
-from backend.app.services import permission_cache, rbac_service
+from backend.app.core import permission_cache, rbac_service
 
 router = APIRouter(prefix="/system/menus", tags=["system"])
 

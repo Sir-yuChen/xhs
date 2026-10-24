@@ -214,7 +214,7 @@ def _seed_image_provider() -> None:
     from backend.app.api.ai import get_image_ai_client
     from backend.app.core.security import encrypt_text
     from backend.app.models import LlmBusinessProvider, LlmGatewayConfig, LlmGatewayModel
-    from backend.app.services.business_provider_keys import (
+    from backend.app.core.business_provider_keys import (
         BUSINESS_KEY_PRODUCT_DETAIL_IMAGE,
     )
 

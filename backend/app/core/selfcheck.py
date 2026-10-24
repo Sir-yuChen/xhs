@@ -85,7 +85,7 @@ def log_startup_selfcheck() -> dict[str, object]:
         #: launcher 只在**启动那一刻**前插过 PATH，而用户可能上次是「先启动、
         #: 后下载 node」⇒ 这次启动 deps/node 已经在了，但不前插就永远找不到。
         try:
-            from backend.app.services.env_bootstrap_service import refresh_runtime_paths
+            from backend.app.core.env_bootstrap import refresh_runtime_paths
 
             refreshed = refresh_runtime_paths()
         except Exception:  # noqa: BLE001 - 依赖服务不可用不该让自检崩

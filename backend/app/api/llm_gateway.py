@@ -338,7 +338,7 @@ def _load_models(db: Session, user_id: int, provider_keys: list[str]) -> dict[st
         select(LlmBusinessProvider).where(LlmBusinessProvider.user_id == user_id)
     ).all()
     usage_by_model: dict[tuple[str, str], list[dict[str, str]]] = {}
-    from backend.app.services.business_provider_keys import _BUSINESS_KEY_BY_KEY as _BKEY
+    from backend.app.core.business_provider_keys import _BUSINESS_KEY_BY_KEY as _BKEY
 
     for mp in mappings:
         name = (mp.model_name or "").strip()
@@ -620,7 +620,7 @@ def _validate_model_row(item: "GatewayModelInput", *, platform_default: str = ""
     可把当前平台作为**请求未带 platform 时**的兜底 —— **仅在此显式传入时生效**，
     不在本函数内隐式取全局值（隐式会让「谁写的这行」无从追查）。
     """
-    from backend.app.services.business_provider_keys import MODEL_TYPES
+    from backend.app.core.business_provider_keys import MODEL_TYPES
 
     if not item.model_name.strip():
         raise HTTPException(
@@ -1034,7 +1034,7 @@ def _business_usages_of_model(
     ⚠️ 匹配口径 = `(provider_key, model_name)` **两者都命中**（同一模型名可能存在于
     多个服务商下，只按名字匹配会误伤）。空 `model_name` 不参与（不可能被引用）。
     """
-    from backend.app.services.business_provider_keys import _BUSINESS_KEY_BY_KEY
+    from backend.app.core.business_provider_keys import _BUSINESS_KEY_BY_KEY
 
     if not provider_key or not model_name:
         return []
@@ -1089,7 +1089,7 @@ def update_gateway_model(
     row = _get_owned_model(db, current_user, config, model_id)
 
     if payload.model_type is not None:
-        from backend.app.services.business_provider_keys import MODEL_TYPES
+        from backend.app.core.business_provider_keys import MODEL_TYPES
 
         if payload.model_type not in MODEL_TYPES:
             raise HTTPException(
@@ -1584,7 +1584,7 @@ def list_business_providers(
     前端据此渲染「未配置」空态行。**不是**只返回已配置行：只返回已配置行会让
     「还没配的业务点」在页面上消失，用户无从发现（同 §7.1 平台枚举全量下发的纪律）。
     """
-    from backend.app.services.business_provider_keys import BUSINESS_KEYS
+    from backend.app.core.business_provider_keys import BUSINESS_KEYS
 
     if platform is not None:
         _validate_platform(platform)
@@ -1660,7 +1660,7 @@ def list_business_providers(
                 "configured": bool(pk and model_name),
                 "enabled": bool(row.enabled) if row else True,
             })
-    from backend.app.services.business_provider_keys import entry_kinds
+    from backend.app.core.business_provider_keys import entry_kinds
 
     return {
         "items": items,
@@ -1693,7 +1693,7 @@ def upsert_business_provider(
          模型目录（`models_json`）里 ⇒ 否则 400 —— 用户口径「两者都应是必须选择，
          不指定具体的模型无法调用成功」。
     """
-    from backend.app.services.business_provider_keys import get_business_key
+    from backend.app.core.business_provider_keys import get_business_key
 
     _validate_platform(payload.platform)
     item = get_business_key(payload.business_key)
@@ -1890,7 +1890,7 @@ def list_business_provider_keys(
     `商品列表-商品详情-生成商品详情图`）。**只读展示**，空列表 = 只由 API 直接调用、
     界面无入口 —— **如实留空，不编入口**（同「缺值不造假」纪律）。
     """
-    from backend.app.services.business_provider_keys import (
+    from backend.app.core.business_provider_keys import (
         BUSINESS_KEYS,
         MODEL_TYPE_LABELS,
         MODEL_TYPES,

@@ -28,7 +28,7 @@ from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user
 from backend.app.core.perms import ROLE_ADMIN, normalize_role
 from backend.app.models.user import User
-from backend.app.services import permission_cache
+from backend.app.core import permission_cache
 
 router = APIRouter(prefix="/system", tags=["system"])
 

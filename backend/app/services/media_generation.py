@@ -486,7 +486,7 @@ def _assets_from_ai(
     """
     from backend.app.api.ai import _business_model_context
     from backend.app.services.ai_service import OpenAICompatibleImageClient
-    from backend.app.services.business_provider_keys import (
+    from backend.app.core.business_provider_keys import (
         BUSINESS_KEY_LLM_NOTE_IMAGE,
         BUSINESS_KEY_WORKSHOP_IMAGE_GEN,
     )
@@ -602,7 +602,7 @@ def _assets_from_video(
     只有**配置级**错误（业务点未配 / 类型不符）才抛 `MediaGenerationError`。
     """
     from backend.app.api.ai import _business_model_context
-    from backend.app.services.business_provider_keys import BUSINESS_KEY_LLM_NOTE_VIDEO
+    from backend.app.core.business_provider_keys import BUSINESS_KEY_LLM_NOTE_VIDEO
     from backend.app.services.video_generation import (
         DEFAULT_VIDEO_SIZE,
         OpenAICompatibleVideoClient,

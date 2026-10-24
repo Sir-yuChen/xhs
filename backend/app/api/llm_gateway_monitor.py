@@ -29,13 +29,12 @@ from backend.app.core.time import shanghai_now
 from backend.app.models import LlmGatewayAlert, LlmGatewayConfig, LlmGatewayUsageLog, User
 from backend.app.schemas.common import paginated
 
+#: v1.1.0 A5 下沉：常量搬进 core（种子归一化要用），此处 re-export 保持兼容。
+from backend.app.core.llm_gateway_alert_rules import ALERT_METRICS, ALERT_OPERATORS  # noqa: F401
+
 router = APIRouter(prefix="/llm", tags=["llm-gateway-monitor"])
 
 #: 指标白名单（§7.1b 契约）
-ALERT_METRICS = ("calls", "fail_rate", "health")
-#: 操作符白名单
-ALERT_OPERATORS = ("gt", "gte", "lt", "eq")
-
 
 # ───────── 令牌映射（§7.1a）—— ⚠️ v1.9 **整组退场**，保留 410 墓碑 ─────────
 #
