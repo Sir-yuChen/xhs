@@ -408,11 +408,21 @@ def test_lifespan_calls_the_self_check_first():
     source = (APP_DIR / "main.py").read_text(encoding="utf-8")
     body = source.split("async def lifespan(app: FastAPI):", 1)[1]
     body = body.split("\nyield", 1)[0]
-    code_lines = [
-        line.strip()
-        for line in body.splitlines()
-        if line.strip() and not line.strip().startswith("#")
-    ]
+    # A3b 起 lifespan 带 docstring（薄壳说明）—— 剥掉三引号块后再判「第一句」。
+    in_doc = False
+    code_lines = []
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if in_doc:
+            if '"""' in stripped:
+                in_doc = False
+            continue
+        if stripped.startswith('"""'):
+            in_doc = '"""' not in stripped[3:]
+            continue
+        code_lines.append(stripped)
     assert code_lines[0] == "get_settings().assert_production_ready()", code_lines[:3]
 
 

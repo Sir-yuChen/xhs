@@ -212,87 +212,48 @@ def test_paused_rows_are_not_registered(monkeypatch):
 def test_scheduler_is_not_started_when_master_switch_is_off(monkeypatch):
     """总开关 `scheduler_enabled=False` 时**连调度器都不启动**（结构性闸门）。
 
-    闸门在 `main.lifespan`（`if settings.scheduler_enabled:`）。⚠️ 这里把
-    `init_db` / `start_scheduler` **以及队列恢复、三个 worker 唤醒、三个看门狗**
-    全部打桩：否则进 lifespan 会拿**真实运行库**跑迁移 / 做队列恢复 / 起常驻
-    worker 去认领真实数据 —— 测试就变成了对生产库的写操作。
+    ⚠️ A3b 薄壳拆分后（设计 61）本用例改**两级打桩**：
+    * **main 层**（lifespan 裸名）：`init_db` / `seed_all_builtin_data` /
+      `start_all_watchdogs` / `shutdown_all` 整步打桩（它们没有需要观察的内部顺序）；
+    * **startup 层**（步内细节）：`acquire_lease_and_start_scheduler` 与
+      `recover_and_wake_workers` **跑真的**（闸门因果链与「先复位再唤醒」的顺序
+      断言都在这两步里），把它们的服务依赖打桩在 `backend.app.startup` 模块属性上。
 
-    顺带守住「重启续跑 + 守活确实被接线」（比 AST 断言更强：走一遍真 lifespan
-    看副作用）。顺序也是判据：**先复位再唤醒** —— 先唤醒会让 worker 去认领那些
-    本该被复位成 `pending` 的 `running` 行（认领只认 `pending`，等于什么也没捞到）。
+    闸门在 startup.acquire_lease_and_start_scheduler
+    （`if settings.scheduler_enabled:`）。不桩的话进 lifespan 会拿**真实运行库**
+    跑迁移 / 做队列恢复 / 起常驻 worker —— 测试就变成了对生产库的写操作
+    （守卫：`test_lifespan_steps_are_all_stubbed_by_this_module`，两级展开版）。
     """
     import asyncio
 
     from backend.app import main as main_module
+    from backend.app import startup as startup_module
 
     settings = get_settings()
     monkeypatch.setattr(settings, "scheduler_enabled", False, raising=False)
     monkeypatch.setattr(main_module, "init_db", lambda: None)
-
-    # ⚠️ 以下七项**同样必须桩掉**（2026-09-28 补齐，此前一直漏着）：它们要么自开 Session
-    #    写**真实运行库**、要么起常驻线程去认领真实数据 —— 与 `init_db` 同一条理由。
-    #    漏桩的实际后果（本轮实测）：新增一个运行时配置键后，
-    #    `seed_builtin_settings_from_initial_data()` 第一次真的写 ⇒ **全量回归把 6 行写进了
-    #    `data/spider_xhs.db`**（2026-09-28 18:08:47，6 个用户各一行）。更早之前
-    #    `recover_account_tasks()` 与 `ensure_account_task_worker()` 也一直在拿真库跑
-    #    （前者当时恰好是 no-op、后者起了常驻 worker 线程）—— 只是因为「没造成可见破坏」
-    #    而没被发现。守卫：`test_lifespan_steps_are_all_stubbed_by_this_module`。
-    monkeypatch.setattr(main_module, "seed_builtin_jobs_from_initial_data", lambda: 0)
-    monkeypatch.setattr(main_module, "seed_builtin_settings_from_initial_data", lambda: 0)
-    # v2.24 内置提示词模板播种：**按用户各写一行**（自开 Session）⇒ 与上面两条同一条理由，
-    # 不桩就会拿真实运行库写 `prompt_modules` / `prompt_templates`。
-    monkeypatch.setattr(
-        main_module, "seed_builtin_prompt_templates_for_all_users", lambda *a, **k: 0
-    )
-    #: ⚠️ 设计 40 数据包列规则的同型播种（2026-10-15 加）：**独立 Session + 逐用户 commit**
-    #: ⇒ 不桩的话全量回归会拿**真实运行库**播种（写库）。
-    #: 与上面几项同一语义：随安装附有 + 只补缺失不覆盖。
-    monkeypatch.setattr(
-        main_module, "seed_builtin_rules_for_all_users", lambda *a, **k: 0
-    )
-    # 设计 37 服务商种子播种：**按用户各写 6 家服务商 + N 个模型 + 11 个业务点映射**
-    # （自开 Session）⇒ 与上面两条同一条理由，不桩就会拿真实运行库写
-    # `llm_gateway_configs` / `llm_gateway_models` / `llm_business_providers`。
-    # ⚠️ 守卫 `test_lifespan_steps_are_all_stubbed_by_this_module` 就是为这条存在的 ——
-    #    它是本用例唯一被**自动发现**的漏桩（2026-10-14 实测：全量 1 failed）。
-    monkeypatch.setattr(
-        main_module, "seed_gateway_providers_for_all_users", lambda *a, **k: 0
-    )
-    monkeypatch.setattr(main_module, "recover_account_tasks", lambda *a, **k: 0)
-    #: 违规词种子（2026-10-21 加进 lifespan）：**自开 Session 逐用户写库** ⇒ 同一条理由。
-    #: ⚠️ 它此前一直漏桩（守卫在 2026-10-24 S1 轮才报出来）—— 漏桩的表现是**测试全绿**
-    #: 而副作用落在真实库上，正是 `test_lifespan_steps_are_all_stubbed_by_this_module`
-    #: 存在的理由。
-    monkeypatch.setattr(
-        main_module, "seed_builtin_words_for_all_users", lambda *a, **k: 0
-    )
-    #: v1.1.0 S1 系统管理域种子（角色 / 菜单 / 字典 / 出厂 admin / 授权）：
-    #: **自开 Session 写库** ⇒ 与上面几条同一条理由，不桩就会拿真实运行库播种。
-    monkeypatch.setattr(main_module, "seed_system_domain", lambda *a, **k: {})
-    monkeypatch.setattr(main_module, "start_account_task_watchdog", lambda *a, **k: None)
-    monkeypatch.setattr(main_module, "stop_account_task_watchdog", lambda: None)
-    monkeypatch.setattr(main_module, "start_scheduler_watchdog", lambda *a, **k: None)
-    monkeypatch.setattr(main_module, "stop_scheduler_watchdog", lambda: None)
-    monkeypatch.setattr(main_module, "shutdown_scheduler", lambda *a, **k: None)
-    # ⚠️ M9 新增两步**同样必须桩掉**：
-    #    ① `log_startup_selfcheck()` —— 真跑 `node --version`（起子进程；不写库但也
-    #       不该在单测里真的执行环境探测）；
-    #    ② `acquire_scheduler_lease()` —— 会在**真实 data/ 目录**创建租约文件
-    #       （比写库更隐蔽：它不碰 DB，但会留下一个锁文件，且抢到/抢不到会
-    #       改变 `start_scheduler` 是否被调用 —— 正是本用例要断言的因果链）。
-    #    `_data_dir_for_lease` 纯函数（只算路径）⇒ 无需桩，登记进白名单。
+    # 七组内置种子**整步打桩**（自开 Session 写真实运行库；组内无顺序断言需求）。
+    monkeypatch.setattr(main_module, "seed_all_builtin_data", lambda: None)
+    # 五条看门狗整步打桩（起常驻线程）+ 退出清理整步打桩（幂等但没必要真跑）。
+    monkeypatch.setattr(main_module, "start_all_watchdogs", lambda: None)
+    monkeypatch.setattr(main_module, "shutdown_all", lambda *a, **k: None)
+    # 启动自检真跑 `node --version`（起子进程；不写库但不该在单测里真探测环境）。
     monkeypatch.setattr(main_module, "log_startup_selfcheck", lambda *a, **k: {"node_ok": True})
-    monkeypatch.setattr(
-        main_module, "acquire_scheduler_lease", lambda *a, **k: (True, "SPY-LEASE")
-    )
-    monkeypatch.setattr(main_module, "release_scheduler_lease", lambda *a, **k: None)
 
+    # ── startup 层：acquire_lease_and_start_scheduler 的依赖（跑真的，闸门保留）──
+    # ⚠️ `acquire_scheduler_lease()` 会在**真实 data/ 目录**创建租约文件（比写库更
+    #    隐蔽：不碰 DB 但会留锁文件，且抢到/抢不到会改变 start_scheduler 是否被调）。
+    monkeypatch.setattr(
+        startup_module, "acquire_scheduler_lease", lambda *a, **k: (True, "SPY-LEASE")
+    )
     started: list[object] = []
     monkeypatch.setattr(
-        main_module, "start_scheduler",
+        startup_module, "start_scheduler",
         lambda *a, **k: started.append(True) or "SPY-SCHEDULER",
     )
+    monkeypatch.setattr(startup_module, "start_scheduler_watchdog", lambda *a, **k: None)
 
+    # ── startup 层：recover_and_wake_workers 的依赖（跑真的，顺序断言保留）──
     recoveries: list[str] = []
     woken: list[str] = []
 
@@ -309,27 +270,17 @@ def test_scheduler_is_not_started_when_master_switch_is_off(monkeypatch):
         def close(self):
             pass
 
-    monkeypatch.setattr(main_module, "note_queue_service", _StubRecovery())
-    monkeypatch.setattr(main_module, "SessionLocal", _StubSession)
-    monkeypatch.setattr(main_module, "ensure_sync_worker", lambda: woken.append("sync"))
-    monkeypatch.setattr(main_module, "ensure_publish_worker", lambda: woken.append("publish"))
-    monkeypatch.setattr(main_module, "ensure_generate_worker", lambda: woken.append("generate"))
-    monkeypatch.setattr(main_module, "ensure_llm_generate_worker", lambda: woken.append("generate_llm"))
-    # ⚠️ 这两条是**补的漏桩**（2026-10-11，A1b）：它们后来才加进 `lifespan`，
-    #    桩清单没同步 ⇒ 用例真的对**生产库**起了两条常驻线程
-    #    （`ensure_account_task_worker` / `ensure_goods_sync_worker` 都会认领真实队列项）。
-    #    表现是**全绿**、副作用落在真库上 —— 正是 `test_lifespan_steps_are_all_stubbed_by_this_module`
-    #    要防的那种事故（同 2026-09-28 写库那次的形态）。
-    monkeypatch.setattr(main_module, "ensure_goods_sync_worker", lambda: woken.append("goods_sync"))
-    monkeypatch.setattr(main_module, "ensure_account_task_worker", lambda: woken.append("account_task"))
-    monkeypatch.setattr(main_module, "start_sync_worker_watchdog", lambda **k: None)
-    monkeypatch.setattr(main_module, "stop_sync_worker_watchdog", lambda: None)
-    monkeypatch.setattr(main_module, "start_publish_worker_watchdog", lambda **k: None)
-    monkeypatch.setattr(main_module, "stop_publish_worker_watchdog", lambda: None)
-    monkeypatch.setattr(main_module, "start_generate_worker_watchdog", lambda **k: None)
-    monkeypatch.setattr(main_module, "stop_generate_worker_watchdog", lambda: None)
-    monkeypatch.setattr(main_module, "start_llm_generate_worker_watchdog", lambda **k: None)
-    monkeypatch.setattr(main_module, "stop_llm_generate_worker_watchdog", lambda: None)
+    monkeypatch.setattr(startup_module, "note_queue_service", _StubRecovery())
+    monkeypatch.setattr(startup_module, "SessionLocal", _StubSession)
+    monkeypatch.setattr(startup_module, "recover_account_tasks", lambda *a, **k: None)
+    monkeypatch.setattr(startup_module, "ensure_sync_worker", lambda: woken.append("sync"))
+    monkeypatch.setattr(startup_module, "ensure_publish_worker", lambda: woken.append("publish"))
+    monkeypatch.setattr(startup_module, "ensure_generate_worker", lambda: woken.append("generate"))
+    monkeypatch.setattr(startup_module, "ensure_llm_generate_worker", lambda: woken.append("generate_llm"))
+    # ⚠️ 这两条是**补的漏桩**（2026-10-11，A1b）：它们后来才加进 lifespan，
+    #    桩清单没同步 ⇒ 用例真的对**生产库**起了两条常驻线程 —— 正是守卫要防的事故。
+    monkeypatch.setattr(startup_module, "ensure_goods_sync_worker", lambda: woken.append("goods_sync"))
+    monkeypatch.setattr(startup_module, "ensure_account_task_worker", lambda: woken.append("account_task"))
 
     app = main_module.app
 
@@ -346,7 +297,8 @@ def test_scheduler_is_not_started_when_master_switch_is_off(monkeypatch):
         )
         assert woken == ["sync", "publish", "generate", "generate_llm", "goods_sync", "account_task"], (
             "复位完必须**立刻**唤醒**全部** worker（等看门狗 30 秒巡检 = 积压白等半分钟）。"
-            "⚠️ 名单按 `lifespan` 里的真实调用顺序：漏一个就等于漏了一条**对真库起线程**的路径。"
+            "⚠️ 名单按 startup.recover_and_wake_workers 的真实调用顺序：漏一个就等于漏了"
+            "一条**对真库起线程**的路径。"
         )
     finally:
         try:
@@ -356,10 +308,12 @@ def test_scheduler_is_not_started_when_master_switch_is_off(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# 进真 lifespan 的用例：**每个**步骤都必须打桩（防「测试写生产库」）
-# --------------------------------------------------------------------------- #
 #: `lifespan` 里**允许不打桩**的裸名调用（纯读 / 内置，无副作用）。
-LIFESPAN_STUB_FREE_CALLS = {"get_settings", "getattr", "_data_dir_for_lease"}
+#: （`_data_dir_for_lease` 已随 A3b 薄壳拆分搬进 startup.py，lifespan 不再直接调用。）
+LIFESPAN_STUB_FREE_CALLS = {"get_settings", "getattr", "assert_every_route_guarded"}
+#: startup 层（步内实现，`backend/app/startup.py`）里**允许不打桩**的裸名调用。
+#: （`_data_dir_for_lease` = startup 自己的纯路径函数，只算目录不碰任何资源。）
+LIFESPAN_L2_STUB_FREE_CALLS = {"get_settings", "getattr", "_data_dir_for_lease"}
 
 #: 上面那个「进真 lifespan」用例的函数名（桩清单从它体内取，见守卫）。
 LIFESPAN_TEST_NAME = "test_scheduler_is_not_started_when_master_switch_is_off"
@@ -400,6 +354,59 @@ def _lifespan_test_stubs() -> set[str]:
     return names
 
 
+def _startup_step_names() -> set[str]:
+    """`backend/app/startup.py` 顶层函数名集合（A3b 一级判定的「下放」名单）。"""
+    import ast
+    from pathlib import Path
+
+    from backend.app import main as main_module
+
+    startup_path = Path(main_module.__file__).parent / "startup.py"
+    return {
+        node.name
+        for node in ast.parse(startup_path.read_text(encoding="utf-8")).body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+
+#: startup 层打桩所用的模块变量名（主开关用例里 `from backend.app import startup as startup_module`）。
+_STARTUP_MODULE_VAR = "startup_module"
+
+
+def _startup_test_stubs() -> set[str]:
+    """从主开关用例体内提取 `monkeypatch.setattr(startup_module, "X", …)` 的 `X` 集合。
+
+    与 `_lifespan_test_stubs` 同款纪律（DEF-044：同一机制不留两份实现）——
+    名单真相源 = 用例源码本身，不在守卫里另抄一份。
+    """
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    owner = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == LIFESPAN_TEST_NAME
+    )
+    names: set[str] = set()
+    for node in ast.walk(owner):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Attribute) and func.attr == "setattr"):
+            continue
+        if len(node.args) < 2:
+            continue
+        target, attribute = node.args[0], node.args[1]
+        if (
+            isinstance(target, ast.Name)
+            and target.id == _STARTUP_MODULE_VAR
+            and isinstance(attribute, ast.Constant)
+        ):
+            names.add(str(attribute.value))
+    return names
+
+
 def test_lifespan_steps_are_all_stubbed_by_this_module():
     """`lifespan` 里**每个**裸名调用都必须被「进真 lifespan」那个用例桩掉（或登记为无需桩）。
 
@@ -420,6 +427,12 @@ def test_lifespan_steps_are_all_stubbed_by_this_module():
     from backend.app import main as main_module
 
     tree = ast.parse(Path(main_module.__file__).read_text(encoding="utf-8"))
+    startup_path = Path(main_module.__file__).parent / "startup.py"
+    startup_funcs = {
+        node.name: node
+        for node in ast.parse(startup_path.read_text(encoding="utf-8")).body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
     lifespan = next(
         node
         for node in ast.walk(tree)
@@ -430,12 +443,38 @@ def test_lifespan_steps_are_all_stubbed_by_this_module():
         for node in ast.walk(lifespan)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
-    missing = sorted(called - _lifespan_test_stubs() - LIFESPAN_STUB_FREE_CALLS)
+    # A3b：lifespan 里指向 startup 步函数的裸名**不在一级判** —— 它们的覆盖
+    # 由下方第二级（函数体逐裸名）判定；一级只判「main 薄壳直接承担的步骤」。
+    startup_step_names = _startup_step_names()
+    missing = sorted(
+        called - _lifespan_test_stubs() - LIFESPAN_STUB_FREE_CALLS - startup_step_names
+    )
     assert not missing, (
         f"lifespan 里有没被本文件桩掉的步骤：{missing} —— 它们会拿**真实运行库**执行"
         "（写库 / 起常驻线程）。请在本文件的桩清单里补上；确实无需桩的（纯读 / 内置）"
         "登记进 LIFESPAN_STUB_FREE_CALLS 并写明理由。"
     )
+
+    # ── 第二级（A3b 薄壳拆分，2026-10-24）：lifespan 里**跑真的** startup 步 ──
+    # 主开关用例对部分步骤选择「跑真的 + 步内依赖打在 startup 模块属性上」
+    # （闸门因果链 / 「先复位再唤醒」顺序断言都在步内）。这些步的**函数体**里
+    # 每个裸名调用也必须被 startup 层桩掉（或免桩）—— 否则副作用照样落真库。
+    # 提取口径与第一级同款：setattr(<startup 模块变量>, "X", …) 的 X 集合。
+    covered_l1 = set(_lifespan_test_stubs()) | LIFESPAN_STUB_FREE_CALLS
+    for name in sorted(called):
+        if name in covered_l1 or name not in startup_step_names:
+            continue  # 已桩 / 免桩 / 不是 startup 的步（下级链路自管）
+        body_calls = {
+            node.func.id
+            for node in ast.walk(startup_funcs[name])
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        l2_missing = sorted(body_calls - _startup_test_stubs() - LIFESPAN_L2_STUB_FREE_CALLS)
+        assert not l2_missing, (
+            f"startup.{name} 是 lifespan 里跑真的步骤，它的裸名调用 {l2_missing} "
+            "没被本文件在 **startup 模块**上桩掉（monkeypatch.setattr(startup_module, …)）"
+            "—— 它们会拿真实运行库执行。请补桩或登记进 LIFESPAN_L2_STUB_FREE_CALLS。"
+        )
 
 
 # --------------------------------------------------------------------------- #
