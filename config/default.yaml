@@ -111,7 +111,8 @@ xhs:
 
 frontend:
   # Set to true to serve pre-built frontend from backend (Docker/production)
-  serve_static: false
+  # 本机也开（设计 61 服务器/web 形态）：8000 = API + 前端产物统一入口。
+  serve_static: true
   # Path to the built frontend assets.
   # ⚠️ 留空 = 由 `backend/app/core/paths.frontend_dist()` 兜底（按**文件位置**推目录，
   #    与 CWD 无关 —— 设计 53 的 A2）。写相对路径时**按仓库根解析**，不再按 CWD：

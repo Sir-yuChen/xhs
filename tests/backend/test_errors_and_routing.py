@@ -149,3 +149,48 @@ def test_cors_middleware_is_wired_by_setup_middleware():
     resp = client.get("/api/health", headers={"Origin": "http://localhost:5173"})
     assert resp.status_code == 200
     assert resp.headers.get("access-control-allow-origin"), "CORS 未装配（setup_middleware 失效？）"
+
+
+# ---------------------------------------------------------------------------
+# A3 静态托管的注册顺序（2026-10-25 实测事故的回归守卫）
+# ---------------------------------------------------------------------------
+
+
+def test_static_serving_is_registered_after_routers():
+    """`Mount("/")` 若先于 `/api` 路由注册会把 API 全部吞成 404（实测事故）。
+
+    守卫 = 源码顺序：create_app 里 `setup_static_serving` 必须出现在
+    `include_all_routers` **之后**（机理见 core/middleware.py::setup_static_serving）。
+    """
+    import pathlib
+
+    source = (
+        pathlib.Path(__file__).resolve().parents[2] / "backend/app/main.py"
+    ).read_text(encoding="utf-8")
+    body = source.split("def create_app", 1)[1]
+    assert body.index("include_all_routers(app)") < body.index("setup_static_serving(app)"), (
+        "create_app 里 setup_static_serving 必须在 include_all_routers 之后调用 —— "
+        "Mount("/") 先注册会抢在 /api 路由前匹配，API 全线 404"
+    )
+
+
+def test_api_routes_win_over_the_static_mount_when_static_enabled(monkeypatch, tmp_path):
+    """行为级守卫：静态托管开着时，`/api/health` 仍由 API 路由应答、`/` 落前端。"""
+    from pathlib import Path as _Path
+
+    from backend.app.core.config import get_settings
+
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("<!doctype html><html><body>probe-dist</body></html>", encoding="utf-8")
+    settings = get_settings()
+    monkeypatch.setattr(settings, "frontend_serve_static", True, raising=False)
+    monkeypatch.setattr(settings, "frontend_build_dir", str(dist), raising=False)
+
+    from backend.app.main import create_app
+
+    client = TestClient(create_app())
+    assert client.get("/api/health").status_code == 200, (
+        "静态托管开着时 /api/health 竟 404 —— Mount(\"/\") 抢在 /api 路由前注册了"
+    )
+    assert "probe-dist" in client.get("/").text, "静态首页应来自 tmp dist（SPA 挂载未生效？）"

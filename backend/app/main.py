@@ -7,7 +7,7 @@ from fastapi import FastAPI
 
 from backend.app.api.routing import include_all_routers
 from backend.app.core.errors import register_error_handlers
-from backend.app.core.middleware import setup_middleware
+from backend.app.core.middleware import setup_middleware, setup_static_serving
 from backend.app.core.route_guard import assert_every_route_guarded
 from backend.app.core.config import get_settings
 from backend.app.core.database import init_db
@@ -77,8 +77,7 @@ def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title=settings.api_title, lifespan=lifespan)
 
-    #: 横切件集中装配（设计 61 §三 A3）：CORS / 审计 / SPA 回退 / 缓存头
-    #: —— 注册顺序与原内联版本逐项一致（洋葱模型，后注册者在外层）。
+    #: 横切中间件集中装配（设计 61 §三 A3）：CORS / 审计。
     setup_middleware(app)
 
     @app.get("/api/health", tags=["health"])
@@ -92,6 +91,12 @@ def create_app() -> FastAPI:
     #: 统一业务错误 handler（设计 61 §三 A2）：BizError → detail 对象包络；
     #: HTTPException / 422 照走 FastAPI 默认（前端三分支解析零改动）。
     register_error_handlers(app)
+
+    #: 前端静态托管（SPA 回退 + 缓存头 + `Mount("/")`）。
+    #: ⚠️ **必须最后调**：`Mount("/")` 若先于 `/api` 路由注册会把 API 全部吞成
+    #: 404（2026-10-25 实测事故，机理与守卫见 core/middleware.py 与
+    #: test_errors_and_routing 的注册顺序守卫）。
+    setup_static_serving(app)
 
     return app
 
