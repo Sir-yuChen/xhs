@@ -199,6 +199,8 @@ export function SystemRolesPanel() {
   return (
     <Card
       size="small"
+      style={{ height: "100%" }}
+      styles={{ body: { height: "calc(100% - 40px)", overflow: "auto" } }}
       title={`角色（共 ${rows.length}）`}
       extra={
         <Space>

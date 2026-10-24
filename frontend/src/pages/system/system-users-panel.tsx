@@ -309,6 +309,8 @@ export function SystemUsersPanel() {
   return (
     <Card
       size="small"
+      style={{ height: "100%" }}
+      styles={{ body: { height: "calc(100% - 40px)", overflow: "auto" } }}
       title={`用户（共 ${total}）`}
       extra={
         <Space>

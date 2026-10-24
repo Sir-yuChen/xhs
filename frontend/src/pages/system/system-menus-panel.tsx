@@ -1,5 +1,5 @@
 /*
- * 菜单管理页（v1.1.0 / 设计 55 §4 / 49 模块三）。
+ * 菜单管理页（v1.1.0 / 设计 55 §4 / 49 模块三；2026-10-25 用户口径重排）。
  *
  * ## 这一页管三件事，别混
  *
@@ -9,8 +9,15 @@
  * | **谁能看见**（授权） | 角色管理 → 分配菜单 | **踢人**（旧令牌失效） |
  * | **新增平台**（抖音 / 闲鱼） | 本页把 `status` 切 `normal` 即可 | 侧栏立刻出现 |
  *
- * 用户口径（设计 46 §1.5）：「抖音 / 闲鱼已写进种子但 `status=disabled`，
- * 接入平台后启动菜单即可」—— 就是这一列的开关。
+ * ## 展示形态（2026-10-25 用户口径）
+ *
+ * * **antd 父子树表格**：dataSource 直接用后端的树（`children` 交给 Table
+ *   原生展开），不再前端拍平 —— 拍平 + 展开字段残留曾是「行出现两次」的根因。
+ * * **四级类型**：工作区（顶级 M）→ 目录（M）→ 页面（C）→ 按钮（F）。
+ *   类型列与编辑表单都按四级表达；新建时**可选类型由上级菜单决定**
+ *   （工作区下 → 目录/页面；目录下 → 页面；页面下 → 按钮；根级 → 工作区）。
+ * * **编辑弹窗紧凑**（640px、短字段双列），列表卡片撑满内容区高度，
+ *   底部不再留大片空白。
  *
  * ## 为什么启停不踢人
  *
@@ -32,11 +39,13 @@ import {
   App,
   Button,
   Card,
+  Col,
   Form,
   Input,
   InputNumber,
   Modal,
   Radio,
+  Row,
   Select,
   Space,
   Switch,
@@ -59,38 +68,63 @@ import {
 
 const { Text } = Typography;
 
-const TYPE_META: Record<string, { text: string; color: string }> = {
-  M: { text: "目录", color: "purple" },
-  C: { text: "页面", color: "blue" },
-  F: { text: "按钮", color: "default" },
-};
-
-/** 扁平化（表格展示用；树形缩进靠 `depth`）。 */
-interface FlatRow extends Omit<SystemMenuNode, "child_count" | "children"> {
-  /** 子节点数（`flatten` 里已归一成必填，故此处覆盖父类型的可选声明）。 */
-  child_count: number;
-  depth: number;
+/** 四级类型（用户口径）：M 且顶级 = 工作区，其余 M = 目录，C = 页面，F = 按钮。 */
+function levelOf(node: Pick<SystemMenuNode, "menu_type" | "parent_id">): {
+  text: string;
+  color: string;
+} {
+  if (node.menu_type === "M") {
+    return node.parent_id === 0
+      ? { text: "工作区", color: "gold" }
+      : { text: "目录", color: "purple" };
+  }
+  if (node.menu_type === "C") return { text: "页面", color: "blue" };
+  return { text: "按钮", color: "default" };
 }
 
-function flatten(nodes: SystemMenuNode[], depth = 0, out: FlatRow[] = []): FlatRow[] {
+function levelLabelOf(node: Pick<SystemMenuNode, "menu_type" | "parent_id">): string {
+  return levelOf(node).text;
+}
+
+/** 树 → 上级菜单下拉的选项（带层级缩进；按钮不能当上级）。 */
+function parentOptions(
+  nodes: SystemMenuNode[],
+  depth = 0,
+  out: { value: number; label: string }[] = [],
+) {
   for (const node of nodes) {
-    //: `child_count` 后端有给（`_serialize(child_count=...)`），但树接口里
-    //: 父节点的 children 已经是完整子树 ⇒ 缺值时用 children.length 兜底，
-    //: 避免「有没有子」这个判断在某条路径上恒为 0。
-    //:
-    //: ⚠️ **必须剥掉 children**（2026-10-25 实测）：`...node` 展开会把 children
-    //    原样带进扁平行 —— antd Table 对「带 children 的行」按树渲染一遍、
-    //    递归追加的扁平行又渲染一遍 ⇒ 监控中心/自动运营等全部出现两次
-    //    （菜单管理页树形混乱的直接根因）。
-    const { children: _stripped, ...rest } = node;
-    out.push({
-      ...rest,
-      child_count: node.child_count ?? node.children?.length ?? 0,
-      depth,
-    });
-    if (node.children?.length) flatten(node.children, depth + 1, out);
+    if (node.menu_type !== "F") {
+      out.push({ value: node.id, label: `${"　".repeat(depth)}${node.name}` });
+    }
+    if (node.children?.length) parentOptions(node.children, depth + 1, out);
   }
   return out;
+}
+
+/** 按上级节点算「允许新建的类型」。上级为空（顶级）只允许工作区。 */
+function allowedTypes(parent: SystemMenuNode | null): { value: string; label: string }[] {
+  if (!parent) return [{ value: "M", label: "工作区 M" }];
+  if (parent.menu_type === "C") return [{ value: "F", label: "按钮 F" }];
+  const isWorkspaceRoot = parent.menu_type === "M" && parent.parent_id === 0;
+  return isWorkspaceRoot
+    ? [
+        { value: "M", label: "目录 M" },
+        { value: "C", label: "页面 C" },
+      ]
+    : [{ value: "C", label: "页面 C" }];
+}
+
+function countNodes(nodes: SystemMenuNode[]): number {
+  return nodes.reduce((sum, n) => sum + 1 + countNodes(n.children ?? []), 0);
+}
+
+function findNode(nodes: SystemMenuNode[], id: number): SystemMenuNode | null {
+  for (const node of nodes) {
+    if (node.id === id) return node;
+    const hit = findNode(node.children ?? [], id);
+    if (hit) return hit;
+  }
+  return null;
 }
 
 export function SystemMenusPanel() {
@@ -98,9 +132,11 @@ export function SystemMenusPanel() {
   const { message, modal } = App.useApp();
 
   const [tree, setTree] = useState<SystemMenuNode[]>([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [workspace, setWorkspace] = useState<string | undefined>(undefined);
   const [createOpen, setCreateOpen] = useState(false);
+  const [createParent, setCreateParent] = useState<SystemMenuNode | null>(null);
   const [editTarget, setEditTarget] = useState<SystemMenuNode | null>(null);
 
   const load = useCallback(async () => {
@@ -108,6 +144,7 @@ export function SystemMenusPanel() {
     try {
       const res = await fetchSystemMenuTree(workspace);
       setTree(res.items);
+      setTotal(res.total);
     } catch (error) {
       message.error(error instanceof Error ? error.message : "加载菜单失败");
     } finally {
@@ -119,27 +156,26 @@ export function SystemMenusPanel() {
     void load();
   }, [load]);
 
-  const rows = flatten(tree);
-  const workspaces = Array.from(
-    new Set(rows.map((r) => r.workspace).filter(Boolean))
-  ).sort();
+  const wsSet = new Set<string>(
+    (function collect(nodes: SystemMenuNode[]): string[] {
+      return nodes.flatMap((n) => [n.workspace, ...collect(n.children ?? [])]);
+    })(tree)
+  );
+  wsSet.delete("");
+  const workspaces = Array.from(wsSet).sort();
 
-  const columns: ColumnsType<FlatRow> = [
+  const columns: ColumnsType<SystemMenuNode> = [
     {
       title: "名称",
       dataIndex: "name",
-      width: 240,
-      render: (v: string, row) => (
-        //: 缩进表达层级：M / C / F 三级用 20px 递进，不额外画树线（表格里树线很吵）
-        <span style={{ paddingLeft: row.depth * 20 }}>{v}</span>
-      ),
+      width: 260,
     },
     {
       title: "类型",
-      dataIndex: "menu_type",
-      width: 80,
-      render: (v: string) => {
-        const meta = TYPE_META[v] ?? { text: v, color: "default" };
+      key: "level",
+      width: 90,
+      render: (_: unknown, row) => {
+        const meta = levelOf(row);
         return <Tag color={meta.color}>{meta.text}</Tag>;
       },
     },
@@ -160,7 +196,7 @@ export function SystemMenusPanel() {
     {
       title: "工作区",
       dataIndex: "workspace",
-      width: 100,
+      width: 90,
       render: (v: string) => v || "-",
     },
     {
@@ -205,7 +241,7 @@ export function SystemMenusPanel() {
     {
       title: "操作",
       key: "actions",
-      width: 180,
+      width: 220,
       fixed: "right",
       render: (_: unknown, row) => (
         <Space size={0}>
@@ -219,11 +255,24 @@ export function SystemMenusPanel() {
               编辑
             </Button>
           )}
+          {can("system:menu:create") && row.menu_type !== "F" && (
+            <Button
+              size="small"
+              type="link"
+              icon={<PlusOutlined />}
+              onClick={() => {
+                setCreateParent(row);
+                setCreateOpen(true);
+              }}
+            >
+              子菜单
+            </Button>
+          )}
           {can("system:menu:delete") && (
             <Tooltip
               title={
-                row.child_count > 0
-                  ? `还有 ${row.child_count} 个子菜单，不能删`
+                (row.children?.length ?? 0) > 0
+                  ? `还有 ${row.children?.length ?? 0} 个子菜单，不能删`
                   : "有角色授权引用时也不能删"
               }
             >
@@ -264,7 +313,9 @@ export function SystemMenusPanel() {
   return (
     <Card
       size="small"
-      title={`菜单与权限码（${rows.length} 行）`}
+      title={`菜单与权限码（${total} 行）`}
+      style={{ height: "100%" }}
+      styles={{ body: { height: "calc(100% - 40px)", overflow: "auto" } }}
       extra={
         <Space>
           <Select
@@ -272,33 +323,43 @@ export function SystemMenusPanel() {
             allowClear
             style={{ width: 160 }}
             value={workspace}
-            onChange={setWorkspace}
+            onChange={(v) => setWorkspace(v || undefined)}
             options={workspaces.map((w) => ({ value: w, label: w }))}
           />
           <Button icon={<ReloadOutlined />} onClick={() => void load()} loading={loading}>
             刷新
           </Button>
           {can("system:menu:create") && (
-            <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
+            <Button
+              type="primary"
+              icon={<PlusOutlined />}
+              onClick={() => {
+                setCreateParent(null);
+                setCreateOpen(true);
+              }}
+            >
               新建菜单
             </Button>
           )}
         </Space>
       }
     >
-      <Table<FlatRow>
+      {/* 父子树表格：dataSource 即后端树（children 交给 Table 原生展开 ——
+          不再前端拍平；拍平 + children 残留曾是「行出现两次」的根因）。 */}
+      <Table<SystemMenuNode>
         rowKey="id"
         size="small"
         loading={loading}
         columns={columns}
-        dataSource={rows}
+        dataSource={tree}
         pagination={false}
-        scroll={{ x: 1300, y: 560 }}
+        scroll={{ x: 1300 }}
       />
 
       <MenuFormModal
         open={createOpen}
-        allRows={rows}
+        parent={createParent}
+        tree={tree}
         onClose={() => setCreateOpen(false)}
         onSaved={() => {
           setCreateOpen(false);
@@ -307,8 +368,8 @@ export function SystemMenusPanel() {
       />
       <MenuFormModal
         open={Boolean(editTarget)}
-        allRows={rows}
         editing={editTarget}
+        tree={tree}
         onClose={() => setEditTarget(null)}
         onSaved={() => {
           setEditTarget(null);
@@ -322,19 +383,32 @@ export function SystemMenusPanel() {
 function MenuFormModal({
   open,
   editing,
-  allRows,
+  parent,
+  tree,
   onClose,
   onSaved,
 }: {
   open: boolean;
   editing?: SystemMenuNode | null;
-  allRows: FlatRow[];
+  /** 新建时预选的上级（行级「子菜单」入口带入；顶部按钮 = null = 顶级）。 */
+  parent?: SystemMenuNode | null;
+  tree: SystemMenuNode[];
   onClose: () => void;
   onSaved: () => void;
 }) {
   const { message } = App.useApp();
   const [form] = Form.useForm();
   const isEdit = Boolean(editing);
+
+  const parentNode = parent ?? (editing ? findNode(tree, editing.parent_id) : null);
+  const typeOptions = isEdit
+    ? [
+        {
+          value: editing?.menu_type ?? "C",
+          label: levelLabelOf(editing ?? { menu_type: "C", parent_id: 0 }),
+        },
+      ]
+    : allowedTypes(editing ? null : parentNode);
 
   useEffect(() => {
     if (!open) return;
@@ -354,17 +428,30 @@ function MenuFormModal({
       });
     } else {
       form.resetFields();
-      form.setFieldsValue({ parent_id: 0, menu_type: "C", is_visible: true, status: "normal", sort_order: 0 });
+      form.setFieldsValue({
+        parent_id: parent?.id ?? 0,
+        menu_type: allowedTypes(parent ?? null)[0]?.value ?? "C",
+        is_visible: true,
+        status: "normal",
+        sort_order: 0,
+        workspace: parent?.workspace ?? "",
+      });
     }
-  }, [open, editing, form]);
+  }, [open, editing, parent, form]);
 
   return (
     <Modal
       centered
       open={open}
-      title={isEdit ? `编辑菜单 · ${editing?.name ?? ""}` : "新建菜单"}
+      title={
+        isEdit
+          ? `编辑菜单 · ${editing?.name ?? ""}`
+          : parent
+            ? `新建子菜单 · ${parent.name}`
+            : "新建菜单（工作区）"
+      }
       onCancel={onClose}
-      width="42vw"
+      width={640}
       onOk={async () => {
         try {
           const values = await form.validateFields();
@@ -385,57 +472,67 @@ function MenuFormModal({
         }
       }}
     >
-      <Form form={form} layout="vertical">
-        <Form.Item name="parent_id" label="上级菜单">
-          <Select
-            options={[
-              { value: 0, label: "（顶级）" },
-              ...allRows
-                .filter((r) => r.menu_type !== "F" && r.id !== editing?.id)
-                .map((r) => ({
-                  value: r.id,
-                  label: `${"　".repeat(r.depth)}${r.name}`,
-                })),
-            ]}
-          />
+      <Form form={form} layout="vertical" style={{ maxHeight: "60vh", overflowY: "auto", paddingRight: 4 }}>
+        <Form.Item name="parent_id" label="上级菜单" hidden>
+          <InputNumber />
         </Form.Item>
-        <Form.Item name="name" label="名称" rules={[{ required: true, max: 64 }]}>
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          上级菜单：{parentNode ? `${parentNode.name}（${levelLabelOf(parentNode)}）` : "（顶级 = 新工作区）"}
+        </Text>
+        <Form.Item name="name" label="名称" rules={[{ required: true, max: 64 }]} style={{ marginTop: 12 }}>
           <Input />
         </Form.Item>
         <Form.Item name="menu_type" label="类型" rules={[{ required: true }]}>
-          <Radio.Group disabled={isEdit}>
-            <Radio.Button value="M">目录 M</Radio.Button>
-            <Radio.Button value="C">页面 C</Radio.Button>
-            <Radio.Button value="F">按钮 F</Radio.Button>
-          </Radio.Group>
+          <Radio.Group disabled={isEdit} options={typeOptions} optionType="button" buttonStyle="solid" />
         </Form.Item>
-        <Form.Item
-          name="perms"
-          label="权限码"
-          extra="必须已在 core/perms_registry.py 登记；页面（C）必须带 <域>:<资源>:view"
-        >
-          <Input placeholder="例如 xhs:item:edit" />
-        </Form.Item>
-        <Form.Item name="path" label="路由（页面必填）">
-          <Input placeholder="例如 /system/users" />
-        </Form.Item>
-        <Form.Item name="component" label="组件">
-          <Input />
-        </Form.Item>
-        <Form.Item name="icon" label="图标（antd 组件名）">
-          <Input placeholder="例如 UserOutlined" />
-        </Form.Item>
-        <Form.Item name="workspace" label="工作区">
-          <Input placeholder="xhs / ai / system" />
-        </Form.Item>
-        <Form.Item name="sort_order" label="排序">
-          <InputNumber style={{ width: "100%" }} />
-        </Form.Item>
-        <Form.Item name="is_visible" label="在侧栏显示" valuePropName="checked">
-          <Switch />
-        </Form.Item>
+        <Row gutter={12}>
+          <Col span={12}>
+            <Form.Item
+              name="perms"
+              label="权限码"
+              extra="必须已在 core/perms_registry.py 登记；页面（C）必须带 <域>:<资源>:view"
+            >
+              <Input placeholder="例如 xhs:item:edit" />
+            </Form.Item>
+          </Col>
+          <Col span={12}>
+            <Form.Item name="path" label="路由（页面必填）">
+              <Input placeholder="例如 /system/users" />
+            </Form.Item>
+          </Col>
+        </Row>
+        <Row gutter={12}>
+          <Col span={12}>
+            <Form.Item name="component" label="组件">
+              <Input />
+            </Form.Item>
+          </Col>
+          <Col span={12}>
+            <Form.Item name="icon" label="图标（antd 组件名）">
+              <Input placeholder="例如 UserOutlined" />
+            </Form.Item>
+          </Col>
+        </Row>
+        <Row gutter={12}>
+          <Col span={12}>
+            <Form.Item name="workspace" label="工作区">
+              <Input placeholder="xhs / ai / system" />
+            </Form.Item>
+          </Col>
+          <Col span={6}>
+            <Form.Item name="sort_order" label="排序">
+              <InputNumber style={{ width: "100%" }} />
+            </Form.Item>
+          </Col>
+          <Col span={6}>
+            <Form.Item name="is_visible" label="在侧栏显示" valuePropName="checked">
+              <Switch />
+            </Form.Item>
+          </Col>
+        </Row>
         <Form.Item name="status" label="状态">
           <Select
+            style={{ width: 160 }}
             options={[
               { value: "normal", label: "启用" },
               { value: "disabled", label: "停用" },
