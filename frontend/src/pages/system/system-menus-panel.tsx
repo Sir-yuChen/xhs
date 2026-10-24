@@ -66,7 +66,7 @@ const TYPE_META: Record<string, { text: string; color: string }> = {
 };
 
 /** 扁平化（表格展示用；树形缩进靠 `depth`）。 */
-interface FlatRow extends Omit<SystemMenuNode, "child_count"> {
+interface FlatRow extends Omit<SystemMenuNode, "child_count" | "children"> {
   /** 子节点数（`flatten` 里已归一成必填，故此处覆盖父类型的可选声明）。 */
   child_count: number;
   depth: number;
@@ -77,7 +77,17 @@ function flatten(nodes: SystemMenuNode[], depth = 0, out: FlatRow[] = []): FlatR
     //: `child_count` 后端有给（`_serialize(child_count=...)`），但树接口里
     //: 父节点的 children 已经是完整子树 ⇒ 缺值时用 children.length 兜底，
     //: 避免「有没有子」这个判断在某条路径上恒为 0。
-    out.push({ ...node, child_count: node.child_count ?? node.children?.length ?? 0, depth });
+    //:
+    //: ⚠️ **必须剥掉 children**（2026-10-25 实测）：`...node` 展开会把 children
+    //    原样带进扁平行 —— antd Table 对「带 children 的行」按树渲染一遍、
+    //    递归追加的扁平行又渲染一遍 ⇒ 监控中心/自动运营等全部出现两次
+    //    （菜单管理页树形混乱的直接根因）。
+    const { children: _stripped, ...rest } = node;
+    out.push({
+      ...rest,
+      child_count: node.child_count ?? node.children?.length ?? 0,
+      depth,
+    });
     if (node.children?.length) flatten(node.children, depth + 1, out);
   }
   return out;
@@ -204,7 +214,7 @@ export function SystemMenusPanel() {
               size="small"
               type="link"
               icon={<EditOutlined />}
-              onClick={() => setEditTarget(row)}
+              onClick={() => setEditTarget({ ...row, children: [] })}
             >
               编辑
             </Button>
