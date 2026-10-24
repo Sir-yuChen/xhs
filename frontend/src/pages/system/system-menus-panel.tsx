@@ -490,7 +490,11 @@ function MenuFormModal({
             <Form.Item
               name="perms"
               label="权限码"
-              extra="必须已在 core/perms_registry.py 登记；页面（C）必须带 <域>:<资源>:view"
+              tooltip={{
+                title:
+                  "必须已在 core/perms_registry.py 登记过，未登记的码会被启动守卫拒绝；" +
+                  "页面（C）必须带 <域>:<资源>:view 形态的查看码，按钮（F）挂操作码。悬停标签可随时查看。",
+              }}
             >
               <Input placeholder="例如 xhs:item:edit" />
             </Form.Item>
