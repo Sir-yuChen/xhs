@@ -655,19 +655,24 @@ def test_admin_seed_sets_must_change_password(db):
     assert admin.status == "normal"
     assert admin.must_change_password is True, "出厂口令必须强制改密"
 
-    #: ⚠️ **v1.1.0（2026-10-24）：出厂口令不再是固定的 `admin123`**，改为播种时随机
-    #: 生成（只写日志，不进库明文 / 不进文档）。理由见
-    #: `menu_seed_service.generate_admin_password` 的 docstring：
-    #: 公开的弱口令 + 服务器多用户形态 = 首登强制改密之前就已被人登进来。
+    #: ⚠️ **用户口径（2026-10-24 当日两次反转，最终以这条为准）**：
+    #: 出厂口令 = **固定 `admin123`**，不做随机化。用户原话：
+    #: 「用户设置一个超级管理员，用户名 admin，密码是 admin123」。
+    #:
+    #: 中间曾改成「播种时随机生成 16 位 + 只打印到日志」，用户否决 ——
+    #: 随机口令藏在安装日志里，部署者要翻日志才能登录，而这是内网自用的
+    #: 管理后台，可用性优先。**不要再改回随机。**
     #:
     #: 判据相应改成两条：
-    #:   ① **不能**用公开弱口令登录（证伪回归）；
-    #:   ② hash 是**非空且格式正确**的（真的是 hash_password 产的，不是空串/占位）。
-    assert not verify_password("admin123", admin.password_hash), (
-        "出厂口令不得是公开弱口令 admin123"
+    #:   ① 口令**确实**是 `admin123`（钉住用户指定的值，防被谁「顺手改强」）；
+    #:   ② hash 是非空且格式正确的（真的是 hash_password 产的，不是明文入库）。
+    #: ⚠️ ① 的代价必须配 ② 的补偿：`must_change_password=True`（上一行已断言）
+    #:    强制首登改密，部署时靠网络层限制（内网 / 反向代理鉴权）。
+    assert verify_password("admin123", admin.password_hash), (
+        "出厂口令必须是用户指定的 admin123（见 ADMIN_SEED 注释）"
     )
-    assert admin.password_hash and admin.password_hash.startswith("pbkdf2_sha256$"), (
-        f"出厂口令必须是 hash_password 生成的强 hash，实际={admin.password_hash[:40]!r}"
+    assert admin.password_hash.startswith("pbkdf2_sha256$") and len(admin.password_hash) > 60, (
+        f"口令必须以 hash 入库（不能明文），实际={admin.password_hash[:40]!r}"
     )
 
 
