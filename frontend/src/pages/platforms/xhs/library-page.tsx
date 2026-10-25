@@ -1,4 +1,5 @@
 import { WaitMask } from "../../../components/ui/wait-mask";
+import { hasPermission } from "../../../hooks/use-permission";
 import {
   BookOutlined,
   CheckSquareOutlined,
@@ -1703,34 +1704,38 @@ export function XhsLibraryPage() {
             <Space wrap>
               <Checkbox checked={notes.length > 0 && notes.every((n) => selectedNoteIdSet.has(n.id))} onChange={toggleVisibleSelection}>选择当前页</Checkbox>
               <Text strong>{selectedNoteIds.length} 条已选</Text>
-              <Button icon={<CheckSquareOutlined />} disabled={isBatchWorking || !selectedNoteIds.length} onClick={createBatchRewriteDrafts} size="small">批量加入草稿工坊</Button>
+              {hasPermission("xhs:library:createDraft") && (<Button icon={<CheckSquareOutlined />} disabled={isBatchWorking || !selectedNoteIds.length} onClick={createBatchRewriteDrafts} size="small">批量加入草稿工坊</Button>)}
               {/* 批量发布（设计 13 §31.5 步 8）：只发选中里可发布的（本地生成待发布/发布失败），
                   跳过的在确认框里明示；单项失败不阻断。 */}
-              <Tooltip title="把选中里待发布 / 发布失败的本地生成笔记发布到小红书">
-                <Button
-                  type="primary"
-                  icon={<SendOutlined />}
-                  disabled={isBatchWorking || isBatchPublishing || !selectedNoteIds.length}
-                  loading={isBatchPublishing}
-                  onClick={() => void batchPublishSelected()}
-                  size="small"
-                >
-                  批量发布
-                </Button>
-              </Tooltip>
+              {hasPermission("xhs:library:publish") && (
+                <Tooltip title="把选中里待发布 / 发布失败的本地生成笔记发布到小红书">
+                  <Button
+                    type="primary"
+                    icon={<SendOutlined />}
+                    disabled={isBatchWorking || isBatchPublishing || !selectedNoteIds.length}
+                    loading={isBatchPublishing}
+                    onClick={() => void batchPublishSelected()}
+                    size="small"
+                  >
+                    批量发布
+                  </Button>
+                </Tooltip>
+              )}
               {/* 批量同步（设计 13 §35）：只同步选中里**已发布**的（用户口径「只有已发布的
                   支持被选中」），跳过的在确认框里明示；入队后按顺序执行，进度见上方进度卡。 */}
-              <Tooltip title="把选中里已发布的笔记加入同步队列，拉取平台最新内容">
-                <Button
-                  icon={<CloudSyncOutlined />}
-                  disabled={isBatchWorking || isBatchSyncing || !selectedNoteIds.length}
-                  loading={isBatchSyncing}
-                  onClick={() => void batchSyncSelected()}
-                  size="small"
-                >
-                  批量同步
-                </Button>
-              </Tooltip>
+              {hasPermission("xhs:library:sync") && (
+                <Tooltip title="把选中里已发布的笔记加入同步队列，拉取平台最新内容">
+                  <Button
+                    icon={<CloudSyncOutlined />}
+                    disabled={isBatchWorking || isBatchSyncing || !selectedNoteIds.length}
+                    loading={isBatchSyncing}
+                    onClick={() => void batchSyncSelected()}
+                    size="small"
+                  >
+                    批量同步
+                  </Button>
+                </Tooltip>
+              )}
               {/* 批量打标签的**界面入口已移除**（2026-09-23 用户口径
                   「把选择当前页中的标签下拉框移除」）。
 
@@ -1746,12 +1751,14 @@ export function XhsLibraryPage() {
                   原注释（保留备查）：「批量打标签：`batchTagNotes` 早就有了、
                   `applyBatchTag` 也早就写好了，但一直没有界面入口 —— 属于
                   『写好了没接线』，本轮补上。」⇒ **那一轮补的入口，本轮按用户口径撤掉。** */}
-              <Button type="primary" icon={<DownloadOutlined />} disabled={isBatchWorking || !selectedNoteIds.length} onClick={() => exportSelectedNotes("json")} size="small">JSON</Button>
-              <Button icon={<DownloadOutlined />} disabled={isBatchWorking || !selectedNoteIds.length} onClick={() => exportSelectedNotes("csv")} size="small">CSV</Button>
+              {hasPermission("xhs:library:export") && (<Button type="primary" icon={<DownloadOutlined />} disabled={isBatchWorking || !selectedNoteIds.length} onClick={() => exportSelectedNotes("json")} size="small">JSON</Button>)}
+              {hasPermission("xhs:library:export") && (<Button icon={<DownloadOutlined />} disabled={isBatchWorking || !selectedNoteIds.length} onClick={() => exportSelectedNotes("csv")} size="small">CSV</Button>)}
               {latestExport && <Button icon={<DownloadOutlined />} disabled={isBatchWorking} onClick={downloadLatestExport} size="small">下载</Button>}
-              <Popconfirm title={`确定删除选中的 ${selectedNoteIds.length} 条笔记？`} onConfirm={batchDeleteNotes}>
-                <Button danger icon={<DeleteOutlined />} disabled={isBatchWorking || !selectedNoteIds.length} size="small">批量删除</Button>
-              </Popconfirm>
+              {hasPermission("xhs:library:delete") && (
+                <Popconfirm title={`确定删除选中的 ${selectedNoteIds.length} 条笔记？`} onConfirm={batchDeleteNotes}>
+                  <Button danger icon={<DeleteOutlined />} disabled={isBatchWorking || !selectedNoteIds.length} size="small">批量删除</Button>
+                </Popconfirm>
+              )}
               <Button disabled={!selectedNoteIds.length} onClick={clearSelection} size="small">清空选择</Button>
             </Space>
           </Col>
@@ -2324,9 +2331,15 @@ export function XhsLibraryPage() {
                 </Tooltip>
               )}
               <Button icon={<CopyOutlined />} onClick={copySelectedNote} size="small">复制内容</Button>
-              <Button icon={<FileAddOutlined />} onClick={addToDrafts} loading={isCreatingDraft} size="small">加入草稿工坊</Button>
-              <Button icon={<EditOutlined />} onClick={() => createDraft("rewrite")} loading={isCreatingDraft} size="small">AI 改写</Button>
-              <Popconfirm title="确定删除？" onConfirm={() => void handleDeleteNote(selectedNote)}><Button danger icon={<DeleteOutlined />} size="small">删除</Button></Popconfirm>
+              {hasPermission("xhs:library:createDraft") && (
+                <Button icon={<FileAddOutlined />} onClick={addToDrafts} loading={isCreatingDraft} size="small">加入草稿工坊</Button>
+              )}
+              {hasPermission("xhs:library:createDraft") && (
+                <Button icon={<EditOutlined />} onClick={() => createDraft("rewrite")} loading={isCreatingDraft} size="small">AI 改写</Button>
+              )}
+              {hasPermission("xhs:library:delete") && (
+                <Popconfirm title="确定删除？" onConfirm={() => void handleDeleteNote(selectedNote)}><Button danger icon={<DeleteOutlined />} size="small">删除</Button></Popconfirm>
+              )}
             </Space>
 
             {/*

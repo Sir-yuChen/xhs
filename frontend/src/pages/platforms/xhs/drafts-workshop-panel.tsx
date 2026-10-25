@@ -20,6 +20,7 @@ import {
   VideoCameraOutlined,
 } from "@ant-design/icons";
 import { DndContext, closestCenter, PointerSensor, useSensor, useSensors } from "@dnd-kit/core";
+import { hasPermission } from "../../../hooks/use-permission";
 import type { DragEndEvent } from "@dnd-kit/core";
 import { SortableContext, useSortable, horizontalListSortingStrategy, arrayMove } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
@@ -275,6 +276,10 @@ export function DraftsWorkshopPanel() {
     const draftId = selectedDraft?.id;
     setSourceAssets((prev) => prev.filter((a) => a.id !== assetId));
     if (draftId && assetId > 0) {
+      if (!hasPermission("xhs:draft:assets")) {
+        message.warning("没有管理草稿素材的权限");
+        return;
+      }
       void deleteDraftAsset(draftId, assetId).catch(() => {});
     }
   }
@@ -895,16 +900,18 @@ export function DraftsWorkshopPanel() {
                 placeholder="保留事实，增强种草感"
                 style={{ marginBottom: 8 }}
               />
-              <Button
-                onClick={handleRewrite}
-                loading={isRewriting}
-                disabled={!selectedDraft}
-                block
-                type="primary"
-                icon={<ExperimentOutlined />}
-              >
-                AI 改写正文
-              </Button>
+              {hasPermission("xhs:draft:rewrite") && (
+                <Button
+                  onClick={handleRewrite}
+                  loading={isRewriting}
+                  disabled={!selectedDraft}
+                  block
+                  type="primary"
+                  icon={<ExperimentOutlined />}
+                >
+                  AI 改写正文
+                </Button>
+              )}
             </div>
 
             {rewritePreview !== null && (
@@ -1092,6 +1099,10 @@ export function DraftsWorkshopPanel() {
                         icon={<HighlightOutlined />}
                         loading={isOptimizing}
                         onClick={async () => {
+                          if (!hasPermission("xhs:draft:generateImage")) {
+                            message.warning("没有生成配图的权限");
+                            return;
+                          }
                           if (!optimizePrompt.trim()) { message.warning("请输入润色提示词"); return; }
                           setIsOptimizing(true); setOptimizeResult(null);
                           try {

@@ -63,6 +63,18 @@ PERM_GATED_PAGES: dict[str, tuple[str, ...]] = {
     "pages/platforms/xhs/violation-manage-page.tsx": (
         "xhs:violation:relatedDelete",
     ),
+    "pages/platforms/xhs/library-page.tsx": (
+        "xhs:library:publish",
+        "xhs:library:sync",
+        "xhs:library:export",
+        "xhs:library:createDraft",
+        "xhs:library:delete",
+    ),
+    "pages/platforms/xhs/drafts-workshop-panel.tsx": (
+        "xhs:draft:rewrite",
+        "xhs:draft:generateImage",
+        "xhs:draft:assets",
+    ),
     "pages/platforms/xhs/picture-space-page.tsx": (
         "xhs:picture:restore",
         "xhs:picture:purge",
@@ -78,11 +90,9 @@ KNOWN_UNGATED: set[str] = {
     "pages/platforms/xhs/auto-ops-panel.tsx",
     "pages/platforms/xhs/data-package-rules-modal.tsx",
     "pages/platforms/xhs/discovery-page.tsx",
-    "pages/platforms/xhs/drafts-workshop-panel.tsx",
     "pages/platforms/xhs/forbidden-words-modal.tsx",
     "pages/platforms/xhs/image-studio-panel.tsx",
     "pages/platforms/xhs/keywords-page.tsx",
-    "pages/platforms/xhs/library-page.tsx",
     "pages/platforms/xhs/llm-generate-modal.tsx",
     "pages/platforms/xhs/material-library-panel.tsx",
     "pages/platforms/xhs/monitoring-page.tsx",

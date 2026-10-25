@@ -279,6 +279,12 @@ PAGE_VIEW_PERMS: tuple[PermSpec, ...] = (
     PermSpec("xhs:crawl:view", "笔记发现", "C", "/platforms/xhs/discovery", _X, _X),
     PermSpec("xhs:note:view", "我的笔记", "C", "/platforms/xhs/my-notes", _X, _X),
     PermSpec("xhs:library:view", "内容库", "C", "/platforms/xhs/library", _X, _X),
+    #: 内容库的写操作（2026-10-25 红线「一按钮一码」）：
+    #: 发布 / 同步 / 导出 / 建草稿四类动作互相独立（能看能导，不等于能往平台发）。
+    *_f("xhs:library", "publish", "发布笔记", "/platforms/xhs/library", "xhs"),
+    *_f("xhs:library", "sync", "同步笔记", "/platforms/xhs/library", "xhs"),
+    *_f("xhs:library", "export", "导出笔记", "/platforms/xhs/library", "xhs"),
+    *_f("xhs:library", "createDraft", "创建草稿", "/platforms/xhs/library", "xhs"),
     PermSpec("xhs:workshop:view", "笔记工坊", "C", "/platforms/xhs/note-workshop", _X, _X),
     PermSpec("xhs:keyword:view", "关键词组", "C", "/platforms/xhs/keywords", _X, _X),
     PermSpec("xhs:insights:view", "内容洞察 / 商品洞察", "C", "/platforms/xhs/insights/content", _X, _X),
@@ -340,6 +346,15 @@ SPLIT_BUTTON_PERMS: tuple[PermSpec, ...] = (
     #: 与商品的读写/上下架都不是同一个动作。
     PermSpec("xhs:item:forbiddenWords", "违禁词库", "F", "/platforms/xhs/shop-items", _X, _X),
     PermSpec("xhs:item:drafts", "查看商品草稿", "F", "/platforms/xhs/shop-items", _X, _X),
+    #: 草稿工坊的写操作（2026-10-25 红线「一按钮一码」）：
+    #: 生成（AI 出整篇）/ 改写（在已有草稿上改）/ 生图 / 素材增删排序，
+    #: 四个动作互相独立 —— 能改写不等于能整篇生成（后者更贵、更不可控）。
+    *_f("xhs:draft", "view", "查看草稿", "/platforms/xhs/library", "xhs"),
+    *_f("xhs:draft", "generate", "生成草稿", "/platforms/xhs/library", "xhs"),
+    *_f("xhs:draft", "rewrite", "改写草稿", "/platforms/xhs/library", "xhs"),
+    *_f("xhs:draft", "generateImage", "生成配图", "/platforms/xhs/library", "xhs"),
+    *_f("xhs:draft", "assets", "管理草稿素材", "/platforms/xhs/library", "xhs"),
+    *_f("xhs:draft", "save", "保存草稿", "/platforms/xhs/library", "xhs"),
     PermSpec("xhs:item:publish", "发布商品笔记", "F", "/platforms/xhs/shop-items", _X, _X),
     PermSpec("xhs:item:bind", "绑定千帆", "F", "/platforms/xhs/shop-items", _X, _X),
     PermSpec("xhs:item:healthCheck", "店铺探活", "F", "/platforms/xhs/shop-items", _X, _X),
