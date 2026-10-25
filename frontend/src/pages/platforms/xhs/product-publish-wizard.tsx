@@ -337,7 +337,6 @@ export function ProductPublishWizard({
   const folderInputRef = useRef<HTMLInputElement | null>(null);
   const [loading, setLoading] = useState(false);
   //: 无图形界面（后端 `NO_DESKTOP`）时，允许手填路径（否则地址栏 readOnly 死锁）。
-  const [manualPathFallback, setManualPathFallback] = useState(false);
   //: ⚠️ 两段分开：`loadWithPath` 只**读取展示**，`runPrecheck` 才做检测。
   //: 用户口径 2026-10-08：「先将媒体和数据包全部在弹窗展示，点击预检，
   //: 预检通过才可以进去参数配置第二步」。
@@ -2708,7 +2707,6 @@ export function ProductPublishWizard({
           uploadPercent={uploadPercent}
           picking={picking}
           loading={loading}
-          manualPathFallback={manualPathFallback}
           onPackagePathChange={setPackagePath}
           onLoad={() => void loadWithPath(packagePath)}
           onPrecheck={() => void runPrecheck()}
@@ -3256,8 +3254,6 @@ function PrecheckStep(props: {
   picking: boolean;
   loading: boolean;
   /** 无图形界面时允许手填路径（后端 `NO_DESKTOP`）。 */
-  manualPathFallback: boolean;
-  /** 手填路径时回写（仅 `manualPathFallback` 时用）。 */
   onPackagePathChange: (next: string) => void;
   onLoad: () => void;
   onPrecheck: () => void;

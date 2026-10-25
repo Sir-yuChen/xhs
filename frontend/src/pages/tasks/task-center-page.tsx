@@ -708,9 +708,10 @@ export function TaskCenterPage() {
               未运行时给一句可操作说明。 */}
           {!scheduleStatus.running && (
             <div style={{ marginTop: 12 }}>
-              <Text type="secondary">
-                调度器未运行：本地默认关闭，开启需设置 SCHEDULER_ENABLED=true；未启用时任务配置仍可维护，只是不会自动执行。
-              </Text>
+              {/* 用户口径「简要明了」：原文把环境变量名 SCHEDULER_ENABLED 与
+                  「仍可维护只是不自动执行」全写出来 —— 后者由「未运行」三字已能推知，
+                  前者是部署参数，不该出现在使用者界面。 */}
+              <Text type="secondary">调度器未运行，任务不会自动执行。</Text>
             </div>
           )}
         </Card>

@@ -51,9 +51,7 @@ export function ForbiddenPage() {
               {auth.user ? `「${auth.user.username}」` : ""}
               没有这个页面的查看权限。
             </Text>
-            <Text type="secondary">
-              侧栏里只显示你有权限的菜单；如果你是从旧链接进来的，页面已经不在你的授权范围内。
-            </Text>
+            <Text type="secondary">如需访问，请联系管理员开通权限。</Text>
           </Space>
         }
         extra={

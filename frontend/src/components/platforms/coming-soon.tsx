@@ -55,7 +55,7 @@ export function ComingSoonPage() {
         }
       >
         <Paragraph type="secondary" style={{ textAlign: "center", maxWidth: 480, margin: "0 auto" }}>
-          第一版先完整实现小红书链路，后续平台会沿用同一账号、任务、内容库和发布架构扩展。
+          该平台尚未开放。
         </Paragraph>
       </Result>
     </div>

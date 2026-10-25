@@ -130,8 +130,10 @@ export function ScheduleFields({ value, onChange, allowConcurrent = false }: Sch
         </Radio.Group>
         {triggerType === "manual" && (
           <div>
+            {/* 用户口径「简要明了」：原文末尾挂着设计文档章节号（设计 15 §3.1），
+                那是给开发看的溯源信息，不该出现在界面上。 */}
             <Text type="secondary" style={{ fontSize: 12 }}>
-              手动执行：不自动运行，只能点列表里的「执行一次」立刻触发（设计 15 §3.1）
+              不自动运行，只能点「执行一次」触发。
             </Text>
           </div>
         )}

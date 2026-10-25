@@ -273,7 +273,7 @@ export function JobLogDetailModal({
               </Descriptions>
             ) : (
               <Text type="secondary" style={{ fontSize: 12 }}>
-                该次执行发生在「配置快照」功能上线之前，没有留下当时的配置记录（不补猜）。
+                该次执行未记录配置（早于该功能上线）。
               </Text>
             )}
           </Card>

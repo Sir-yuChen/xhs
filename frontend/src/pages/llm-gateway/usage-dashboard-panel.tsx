@@ -465,7 +465,7 @@ export function UsageDashboardPanel() {
             }))}
           />
           <Text type="secondary" style={{ fontSize: 12 }}>
-            （区间作用于趋势 / 拆分 / 明细；总览卡固定为今日 · 近 7 日 · 近 30 日）
+            仅影响下方明细）
           </Text>
         </Space>
       </Card>
@@ -733,7 +733,7 @@ export function UsageDashboardPanel() {
         {!hasAnyUsage && !loading && !loadError ? (
           <div style={{ marginTop: 12 }}>
             <Text type="secondary" style={{ fontSize: 12 }}>
-              提示：还没有任何调用记录。在创作链路（提示词模板 / 商品笔记生成等）跑一次调用后，这里就会出现数据。
+              暂无调用记录。运行一次 AI 生成后这里会有数据。
             </Text>
           </div>
         ) : null}

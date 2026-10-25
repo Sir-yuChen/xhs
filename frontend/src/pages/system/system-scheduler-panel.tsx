@@ -8,12 +8,13 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { Card, Table, Tag, Typography } from "antd";
+import { QuestionCircleOutlined } from "@ant-design/icons";
+import { Card, Tooltip, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 
 import { fetchScheduleOverview, type ScheduleOverviewItem } from "../../lib/api";
 
-const { Text, Paragraph } = Typography;
+const { Text } = Typography;
 
 const WORKSPACE_LABELS: Record<string, string> = {
   system: "系统",
@@ -108,12 +109,21 @@ export function SystemSchedulerPanel() {
   ];
 
   return (
-    <Card title="定时任务（全站总览）">
-      <Paragraph type="secondary" style={{ marginBottom: 12 }}>
-        调度器是**全站公共单例**（企业级取舍见设计 64 §3：拆分每工作区独立调度器
-        会带来多实例抢行与看门狗复杂化，无收益）；本页按**工作区归属**聚合全部任务。
-        各工作区自己的任务入口仍是「任务中心」（按本人隔离）。
-      </Paragraph>
+    <Card
+      title={
+        <span>
+          定时任务（全站总览）
+          {/* 技术取舍收进说明图标：用户口径「啰嗦的说明收归到说明图标中」。
+              原为标题下一整段 3 行的论证文字（提到设计 64 §3、多实例抢行、
+              看门狗复杂化）—— 那是给开发看的，不是给用户看的。 */}
+          <Tooltip
+            title="全站共用一套调度器，按工作区归属汇总展示；各工作区自己的任务入口在「任务中心」。"
+          >
+            <QuestionCircleOutlined style={{ marginLeft: 6, color: "rgba(0,0,0,0.45)" }} />
+          </Tooltip>
+        </span>
+      }
+    >
 
       {error ? (
         <Text type="danger" style={{ display: "block", marginBottom: 12 }}>

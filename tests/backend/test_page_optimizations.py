@@ -3683,6 +3683,11 @@ def test_settings_page_no_longer_hosts_the_donation_module():
     ⇒ 正向锚**必须换锚点**（原锚点正是那张卡，它已不存在）。新锚点取「系统参数」
     这张**唯一剩下的卡**：整页删空时它必然缺失，防「删空也能绿」的效力不变。
     **被取代的原句**（保留）：`assert "安全边界" in code, "设置页的「安全边界」卡片应在位…"`
+
+    ⚠️ 2026-10-25 设计 66（三级配置拆分）：「系统参数」不在本页了 —— 系统级配置
+    移到「系统管理 → 配置管理」（`/system/settings`），本页只剩**用户级**
+    ⇒ 正向锚换成「个人配置」。锚点的作用不变：整页删空时它必然缺失。
+    **被取代的原句**（保留）：`assert "个人配置" in code, "设置页的「个人配置」卡片应在位（防止整页删空也能让断言变绿）"
     """
     code = _code_only(_read(SETTINGS))
     assert "为爱发电" not in code, "捐赠模块已移除，不得回归"
@@ -3690,7 +3695,7 @@ def test_settings_page_no_longer_hosts_the_donation_module():
     assert "Image" not in code, "该导入只为赞赏码卡片存在"
     assert "wx_pay" not in code and "zfb_pay" not in code, "硬编码收款码路径不得回归"
     # 新正向锚（2026-10-05）：本页只剩「系统参数」一张卡
-    assert "系统参数" in code, "设置页的「系统参数」卡片应在位（防止整页删空也能让断言变绿）"
+    assert "个人配置" in code, "设置页的「个人配置」卡片应在位（防止整页删空也能让断言变绿）"
     # 反向：被删掉的「安全边界」卡不许回归（文案与图标一起钉）
     assert "安全边界" not in code, "设置页的「安全边界」卡已按用户口径移除（2026-10-05）"
     assert "SafetyCertificateOutlined" not in code, "该图标只为安全边界卡存在，应随卡一起删"
@@ -6839,60 +6844,50 @@ def test_precheck_shows_a_mask_with_elapsed_seconds():
     assert "waitStartedAtRef.current === null" in src, "起表不幂等（耗时会反复清零）"
 
 
-def test_package_path_input_is_read_only():
-    """用户口径 2026-10-08：「地址栏**不允许输入**，只能预览」。
+def test_package_path_is_a_read_only_display_and_uploads_through_browser():
+    """地址栏只读、只能由「选择文件夹」写入；且**走浏览器上传**。
 
-    路径唯一来源是「选择文件夹」（后端弹系统选择器）。用 `readOnly` 而非 `disabled`
-    （内容仍要能选中复制核对）。
+    ⚠️ **2026-10-24 桌面端退役（用户口径「桌面端不再使用 / 部署到服务器」）**：
+    原实现是「后端弹系统文件夹选择框、返回服务器路径」，那条链路整段删除
+    （`POST /pick-folder` + 三个桌面函数）。原因是服务器形态下三重失效：
+    没有桌面会话（弹不出 / 卡 180s）、弹的是机房那台机器的框（用户看不到）、
+    返回的路径是服务器的（用户的数据包在他自己电脑上）。
 
-    ⚠️ **2026-10-12 例外**（取代「绝不允许输入」的绝对化）：后端 `NO_DESKTOP`
-    （无图形界面、弹不出选择框）时**解锁手填** —— 否则既不让弹框又不让输 = 死路。
-    判据因此从「有 `readOnly` 且**绝无** `onPackagePathChange`」改为
-    「有 `readOnly`（常态只读）+ 手填是**受控例外**（`manualPathFallback`）」。
+    ⇒ 判据从「接后端弹窗」改为「浏览器 `webkitdirectory` 选目录 + 上传」。
+    **被取代的原断言**（保留，不静默删除）：
+      `assert "readOnly={!manualPathFallback}" in src`
+      `assert "setPackagePath(picked.package_path)" in src`
     """
     src = _src(PUBLISH_MODAL)
-    assert "readOnly" in src, "地址栏还能输入（用户要求只读）"
-    #: 常态只读由 `readOnly={!manualPathFallback}` 表达（手填是 NO_DESKTOP 例外）
-    assert "readOnly={!manualPathFallback}" in src, "常态应只读（仅无桌面时例外）"
-    assert "manualPathFallback" in src, "缺无桌面手填兜底（否则弹不出框时死路）"
-    #: 路径只能由「选择文件夹」写入
-    assert "setPackagePath(picked.package_path)" in src, "选择文件夹没有回填路径"
+    assert "readOnly" in src, "地址栏必须只读（用户要求不允许输入）"
+    #: 浏览器选目录：`webkitdirectory` 让选整个文件夹并带相对路径
+    assert "webkitdirectory" in src, "应由浏览器选目录（桌面弹窗已退役）"
+    assert "precheckPackage" in src, "选完目录必须走上传端点"
+    #: 手填绝对路径的逃生口已删除（上传形态下那个场景不存在）
+    assert "manualPathFallback" not in src, "手填兜底应随桌面链路一起删除"
 
 
-def test_missing_tkinter_does_not_mean_no_desktop():
-    """**`tkinter` 缺失 ≠ 没有图形界面**（2026-10-20 实测的真缺陷）。
+def test_desktop_folder_picker_is_fully_removed():
+    """桌面文件夹选择器**整段删除**（2026-10-24 桌面端退役）。
 
-    现场：装好的客户端点「选择文件夹」，只弹红条
-    「当前环境没有可用的图形界面，请直接填写数据包目录的绝对路径」。
+    原用例守的是「`tkinter` 缺失 ≠ 没有图形界面」这个缺陷。该缺陷已随**整条
+    桌面链路删除**而消失：`_ask_directory_windows` / `_has_interactive_desktop` /
+    `_ask_directory` / `_MAIN_LOOP` 与 `POST /pick-folder` 都不在了。
 
-    根因两层，两层都要钉住：
-
-    ① `packaging/SpiderXHS.spec` 把 `tkinter` **排除**出包了（注释还写着
-      「与桌面运行时无关」—— 实际上这个选目录框就靠它），所以装包用户**必然**
-      没有这个模块；
-    ② `pick_local_package` 里 `import tkinter` 失败就**直接抛 `NO_DESKTOP`**，
-      从不尝试 PowerShell 的原生对话框 —— 于是在有桌面的机器上也报「没有图形界面」。
-
-    判据：ImportError 必须**降级到 PowerShell 回退**，而不是直接报错；
-    并且「取消」与「弹不出」必须分开（`""` vs `None`）。
+    ⇒ 现在的判据反过来：**这些必须不存在**（防止有人「修好它」又请回来）。
+    **被取代的原用例**：`test_missing_tkinter_does_not_mean_no_desktop`
     """
     src = _src(ROOT / "backend/app/api/platforms/xhs/package_precheck.py")
-    #: ① 打包必须带上 tkinter
-    spec = _src(ROOT / "packaging/SpiderXHS.spec")
-    assert '"tkinter"' not in spec.split("excludes=")[1].split("]")[0], (
-        "打包把 tkinter 排除了 —— 装包用户点「选择文件夹」必然失败"
+    code = "\n".join(
+        line for line in src.splitlines() if not line.strip().startswith("#")
     )
-    #: ② ImportError 只做标记，不抛错
-    assert "tk_missing = True" in src, "tkinter 缺失应降级而不是直接报 NO_DESKTOP"
-    assert "if not tk_missing:" in src, "缺 tkinter 时应继续尝试其它弹窗方式"
-    #: ③ 缺 tkinter 时走 PowerShell（用两端简单锚点，避开换行差异）
-    seg = src[src.index("if not tk_missing:") : src.index("class LocalPackageRequest")]
-    assert "_ask_directory_windows()" in seg, "缺 tkinter 时没有回退到 PowerShell 对话框"
-    #: ④ 三态要分开：`None` = 弹不出，`""` = 取消
-    assert 'if chosen == "" and _has_interactive_desktop():' in src, (
-        "「取消」与「弹不出」没分开 —— 会把取消误报成没有图形界面"
-    )
-    assert "def _has_interactive_desktop()" in src, "缺交互式桌面判据"
+    for gone in (
+        "_ask_directory_windows",
+        "_has_interactive_desktop",
+        "tkinter",
+        "FolderBrowserDialog",
+    ):
+        assert gone not in code, f"桌面选目录链路应已删除，但仍有 {gone}"
 
 
 def test_forbidden_words_uses_a_tree_list_and_a_search_area():
@@ -7067,26 +7062,6 @@ def test_each_group_is_capped_at_500_words():
     assert "scalar_one()" not in code, (
         "容量计数用了 scalar_one()（多行会抛 MultipleResultsFound，上限静默失效）"
     )
-
-
-def test_publish_wizard_picks_a_folder_through_the_backend():
-    """用户口径：「点击加载数据包**选择本地文件夹**，获得本地夹地址后直接读取」。"""
-    src = _src(PUBLISH_MODAL)
-    assert "pickPackageFolder" in src, "没接后端弹窗接口（浏览器拿不到真实路径）"
-    assert "选择文件夹" in src, "缺少「选择文件夹」入口"
-
-
-def test_publish_wizard_reads_the_local_folder_instead_of_uploading():
-    """⚠️ 用户 2026-10-08 口径：「加载本地数据包内的媒体资源**不要上传**」。
-
-    第一版是 `<input webkitdirectory>` 逐文件 POST（70 个文件、几十 MB），
-    口径变更后必须**没有**上传路径 —— 否则用户选一次目录就是一次全量上传。
-    """
-    src = _src(PUBLISH_MODAL)
-    code = _code_only(src)
-    assert "webkitdirectory" not in code, "不该再走目录上传（用户口径：不要上传）"
-    assert "precheckPackage(" not in code, "不该再调上传版预检接口"
-    assert "precheckLocalPackage(" in code, "应改调本地路径版预检接口"
 
 
 def test_publish_wizard_red_line_warning_was_removed_by_request():
@@ -12540,3 +12515,18 @@ def test_app_log_text_area_scrolls_instead_of_overlaying_pagination():
     assert "overflow" in m.group(1), (
         "日志文本区缺 `overflow: auto` —— 长文本会透明盖住翻页按钮（AGENTS 硬约束 7）"
     )
+
+
+def test_publish_wizard_uses_browser_folder_upload():
+    """发布向导必须走「浏览器选目录 + 上传」（2026-10-24 桌面端退役后的唯一路径）。
+
+    **被取代的原用例**（保留，不静默删除）：
+      * `test_publish_wizard_picks_a_folder_through_the_backend`
+        —— 断言 `pickPackageFolder` 存在（该函数已删除）
+      * `test_publish_wizard_reads_the_local_folder_instead_of_uploading`
+        —— 断言 `webkitdirectory` **不得**出现（口径已反转：现在必须用它）
+    """
+    src = _src(PUBLISH_MODAL)
+    assert "webkitdirectory" in src, "应由浏览器选目录"
+    assert "precheckPackage" in src, "选完目录必须上传"
+    assert "pickPackageFolder" not in src, "桌面弹窗接口应已删除"
