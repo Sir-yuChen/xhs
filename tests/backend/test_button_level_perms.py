@@ -42,18 +42,29 @@ MENU_SEED = ROOT / "config" / "initial_data" / "menus.seed.json"
 INTENTIONAL_ALIASES: dict[str, str] = {
     "xhs:library:delete": "删除笔记：单条与批量是同一个用户动作（批量只是选得多）",
     "xhs:publish:cancel": "取消发布：单条取消与批量取消是同一个动作",
+    #: 下面这组是「同一动作 × 不同数据对象」—— 界面上是**同一个按钮**，
+    #: 拆开会让角色配置出现「能建模块但不能建模板」这种无意义组合。
+    "ai:prompt:create": "新增提示词：模块/模板/预览渲染共用一个「新增」按钮",
+    "ai:prompt:edit": "编辑提示词：模块与模板共用一个「编辑」按钮",
+    "ai:prompt:delete": "删除提示词：模块与模板共用一个「删除」按钮",
+    "xhs:login:creator": "创作者登录：扫码/短信/确认是同一登录流程的三步，界面上是一个按钮",
+    "xhs:login:pc": "网页版登录：同创作者，三步同一流程",
+    "xhs:login:qianfan": "千帆登录：扫码与邮箱是同一登录按钮的两种方式",
+    "xhs:item:draft": "商品草稿：新建/解析/删除都是草稿这一步的操作",
+    "xhs:item:sync": "同步商品：单条同步与整店同步是同一动作",
+    "xhs:item:generateImage": "生成详情图：生成与保存是同一流程两步",
+    "xhs:item:view": "查看商品：列表/详情/生成记录/挂链笔记都是「看」",
+    "xhs:picture:view": "查看图片空间：目录/条目/预览都是「看」",
+    "xhs:item:aiAssist": "AI 商品文案：标题/类目/属性/短标题是同一组推荐按钮",
 }
 
 #: 仍是共用、但**尚未逐组确认**的存量（改一组删一组）。
 #: 每次会话只能减少，不许新增 —— 新增即红。
 KNOWN_SHARED: dict[str, int] = {
-    #: 存量共用清单（2026-10-25 盘点，共 37 组）。
-    #: 规则：**只许变短** —— 拆完一组就从这里删一行；新增共用即红。
-    #: 拆分时的判据：这几条路由是不是**同一个用户动作**（同一按钮）？
-    #: 是 ⇒ 可拆成「单条/批量」两个码或保留（登记进 INTENTIONAL_ALIASES）；
-    #: 不是 ⇒ 必须各给一个码。
-    "xhs:item:view": 29,
-    "xhs:item:edit": 23,
+    #: 存量共用清单（2026-10-25 第三轮盘点）。
+    #: 首轮 37 组 → 已拆掉 item:view(29)/item:edit(23) 两棵大树 → 现 32 组。
+    #: 组数变多是因为拆分后每个新码自己也带若干「同一动作多条路由」的组。
+    #: 规则：**只许变短**（拆完删一行）；新增共用即红。
     "xhs:insights:view": 20,
     "xhs:note:edit": 15,
     "xhs:violation:view": 15,
@@ -73,9 +84,8 @@ KNOWN_SHARED: dict[str, int] = {
     "xhs:topic:edit": 3,
     "xhs:workshop:adopt": 3,
     "xhs:topic:create": 3,
+    "xhs:item:polish": 3,
     "ai:usage:view": 3,
-    "xhs:library:delete": 2,
-    "xhs:publish:cancel": 2,
     "system:dict:delete": 2,
     "xhs:autoops:edit": 2,
     "ai:gateway:edit": 2,
@@ -85,8 +95,6 @@ KNOWN_SHARED: dict[str, int] = {
     "xhs:note:sync": 2,
     "system:dict:create": 2,
     "system:menu:edit": 2,
-    "system:scheduler:manage": 2,
-    "xhs:item:polish": 2,
     "system:dict:edit": 2,
     "system:role:assignMenu": 2,
 }

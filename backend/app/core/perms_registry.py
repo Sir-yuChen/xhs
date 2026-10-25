@@ -316,7 +316,35 @@ PAGE_VIEW_PERMS: tuple[PermSpec, ...] = (
 )
 
 #: 全量登记表。冒号分隔三元组，顺序 = 系统 → 业务写码 → 页级 view。
-PERMS: tuple[PermSpec, ...] = SYSTEM_PERMS + BUSINESS_PERMS + PAGE_VIEW_PERMS
+#: 2026-10-25 红线「一按钮一码」：从 `xhs:item:view`（曾一个码盖 29 条路由）
+#: 与 `xhs:item:edit`（盖 23 条，还混着登录会话与提示词模板）里拆出来的按钮码。
+#: 单独一个元组、追加进 `PERMS` —— 不改动既有三个元组，避免误伤。
+SPLIT_BUTTON_PERMS: tuple[PermSpec, ...] = (
+    # 商品
+    PermSpec("xhs:item:create", "新增商品", "F", "/platforms/xhs/shop-items", _X, _X),
+    PermSpec("xhs:item:operate", "上下架", "F", "/platforms/xhs/shop-items", _X, _X),
+    PermSpec("xhs:item:bind", "绑定千帆", "F", "/platforms/xhs/shop-items", _X, _X),
+    PermSpec("xhs:item:healthCheck", "店铺探活", "F", "/platforms/xhs/shop-items", _X, _X),
+    PermSpec("xhs:item:aiAssist", "AI 商品文案", "F", "/platforms/xhs/shop-items", _X, _X),
+    # 图片空间
+    PermSpec("xhs:picture:uploadBatch", "批量上传", "F", "/platforms/xhs/picture-space", _X, _X),
+    PermSpec("xhs:picture:compose", "合成图片", "F", "/platforms/xhs/picture-space", _X, _X),
+    PermSpec("xhs:files:view", "文件列表", "C", "/platforms/xhs/picture-space", _X, _X),
+    PermSpec("xhs:files:upload", "上传文件", "F", "/platforms/xhs/picture-space", _X, _X),
+    PermSpec("xhs:files:delete", "删除文件", "F", "/platforms/xhs/picture-space", _X, _X),
+    # 登录会话（原先错挂在「商品编辑」下）
+    PermSpec("xhs:login:view", "登录记录", "C", "/platforms/xhs/accounts", _X, _X),
+    PermSpec("xhs:login:creator", "创作者登录", "F", "/platforms/xhs/accounts", _X, _X),
+    PermSpec("xhs:login:pc", "网页版登录", "F", "/platforms/xhs/accounts", _X, _X),
+    PermSpec("xhs:login:qianfan", "千帆登录", "F", "/platforms/xhs/accounts", _X, _X),
+    # 提示词（原先也错挂在「商品编辑」下）
+)
+
+PERMS: tuple[PermSpec, ...] = (
+    SYSTEM_PERMS + BUSINESS_PERMS + PAGE_VIEW_PERMS + SPLIT_BUTTON_PERMS
+)
+
+
 
 #: 三组条数的**登记口径**（不要在测试里再写一遍字面量 —— 漂移时只改这一处会显得
 #: 「测试跟着代码改」，所以测试断言的是 161 这个**需求值**，这里只是分组自检用）。
