@@ -20,6 +20,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
+import { hasPermission } from "../../../hooks/use-permission";
 import {
   App,
   Alert,
@@ -311,9 +312,17 @@ export function DataPackageRulesModal({
     setBusy(true);
     try {
       if (editingSet) {
+        if (!hasPermission("xhs:rule:edit")) {
+          message.warning("没有修改规则包的权限");
+          return;
+        }
         await updateDataPackageRuleSet(editingSet.id, values);
         message.success("已保存");
       } else {
+        if (!hasPermission("xhs:rule:create")) {
+          message.warning("没有新建规则包的权限");
+          return;
+        }
         await createDataPackageRuleSet(values);
         message.success("已新建规则包");
       }
@@ -391,9 +400,17 @@ export function DataPackageRulesModal({
         enabled: values.enabled,
       };
       if (editingRule) {
+        if (!hasPermission("xhs:rule:edit")) {
+          message.warning("没有修改规则的权限");
+          return;
+        }
         await updateDataPackageRule(editingRule.id, payload);
         message.success("已保存");
       } else {
+        if (!hasPermission("xhs:rule:create")) {
+          message.warning("没有新建规则的权限");
+          return;
+        }
         await createDataPackageRule({ set_id: ruleSetId, ...payload });
         message.success("已新建规则");
       }

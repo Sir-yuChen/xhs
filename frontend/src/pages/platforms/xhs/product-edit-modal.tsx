@@ -16,6 +16,7 @@
  * ⚠️ 「分组」Tab 已随「彻底移除商品分组」退场（2026-10-05）。
  */
 import { App, Button, Empty, Input, Modal, Radio, Skeleton, Space, Tabs, Tag, Typography } from "antd";
+import { hasPermission } from "../../../hooks/use-permission";
 import { useCallback, useEffect, useState } from "react";
 
 import {
@@ -97,9 +98,13 @@ export function ProductEditModal({
 
   const runPolish = async () => {
     if (!platformAccountId || !itemId) return;
+    if (!hasPermission("xhs:item:polish")) {
+      message.warning("没有AI 润色商品的权限");
+      return;
+    }
     setPolishing(true);
     try {
-      setPolish(await polishShopItem({ platform_account_id: platformAccountId, item_id: itemId }));
+      setPolish(      await polishShopItem({ platform_account_id: platformAccountId, item_id: itemId }));
     } catch (error) {
       const detailText =
         (error as { response?: { data?: { detail?: { message?: string } } } })?.response?.data
@@ -112,9 +117,13 @@ export function ProductEditModal({
 
   const save = async () => {
     if (!platformAccountId || !itemId) return;
+    if (!hasPermission("xhs:item:edit")) {
+      message.warning("没有编辑商品的权限");
+      return;
+    }
     setSaving(true);
     try {
-      const result = await editShopItem(
+      const result =      await editShopItem(
         buildEditPayload(
           { platform_account_id: platformAccountId, item_id: itemId },
           form,

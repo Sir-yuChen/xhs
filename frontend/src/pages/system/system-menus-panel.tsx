@@ -56,6 +56,7 @@ import {
   Typography,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
+import { hasPermission } from "../../hooks/use-permission";
 import { useCallback, useEffect, useState } from "react";
 
 import { menuIcon, menuIconNames } from "../../lib/menu-icon";
@@ -231,6 +232,10 @@ export function SystemMenusPanel() {
               unCheckedChildren="停用"
               onChange={async (next) => {
                 try {
+                  if (!hasPermission("system:menu:edit")) {
+                    message.warning("没有编辑菜单的权限");
+                    return;
+                  }
                   await updateSystemMenu(row.id, { status: next ? "normal" : "disabled" });
                   message.success(next ? "已启用" : "已停用");
                   void load();
@@ -466,6 +471,10 @@ function MenuFormModal({
             const { menu_type: _ignored, ...rest } = values;
             await updateSystemMenu(editing.id, rest);
           } else {
+            if (!hasPermission("system:menu:create")) {
+              message.warning("没有新建菜单的权限");
+              return;
+            }
             await createSystemMenu(values);
           }
           message.success("已保存");

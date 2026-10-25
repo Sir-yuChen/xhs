@@ -25,6 +25,7 @@
  *    （否则用户以为「取消 = 先放着」，实际已经放弃本次导入）。
  */
 import { useEffect, useMemo, useState } from "react";
+import { hasPermission } from "../../../hooks/use-permission";
 import { App, Button, Input, Modal, Space, Table, Tag, Tooltip, Typography } from "antd";
 import { ReloadOutlined, ThunderboltOutlined, WarningOutlined } from "@ant-design/icons";
 
@@ -114,9 +115,13 @@ export function SkuNameOptimizeModal(props: SkuNameOptimizeModalProps) {
   const optimizeAll = async () => {
     const targets = visible.filter((r) => !!r.original);
     if (targets.length === 0) return;
+    if (!hasPermission("xhs:publish:precheck")) {
+      message.warning("没有优化 SKU 名称的权限");
+      return;
+    }
     setBulkOptimizing(true);
     try {
-      const result = await optimizeSkuNames({
+      const result =      await optimizeSkuNames({
         items: targets.map((r) => ({ key: r.key, name: r.original })),
       });
       //: 按 key 回填（后端保证逐条返回；失败项带 reason，新名退回原文）。

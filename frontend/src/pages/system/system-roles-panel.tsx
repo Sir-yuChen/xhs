@@ -46,6 +46,7 @@ import {
   Typography,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
+import { hasPermission } from "../../hooks/use-permission";
 import type { DataNode } from "antd/es/tree";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -274,6 +275,10 @@ function RoleCreateModal({
       onOk={async () => {
         try {
           const values = await form.validateFields();
+          if (!hasPermission("system:role:create")) {
+            message.warning("没有新建角色的权限");
+            return;
+          }
           await createSystemRole(values);
           message.success("已创建");
           form.resetFields();
@@ -342,6 +347,10 @@ function RoleEditModal({
         if (!role) return;
         try {
           const values = await form.validateFields();
+          if (!hasPermission("system:role:edit")) {
+            message.warning("没有编辑角色的权限");
+            return;
+          }
           await updateSystemRole(role.id, values);
           message.success("已保存");
           onSaved();

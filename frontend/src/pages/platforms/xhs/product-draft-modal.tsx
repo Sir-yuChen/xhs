@@ -22,6 +22,7 @@
  * ⚠️ 说明文案里**禁止 `**`**（会原样显示，守卫覆盖整个 `frontend/src`）。
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { hasPermission } from "../../../hooks/use-permission";
 import {
   Alert,
   App,
@@ -164,9 +165,13 @@ export function ProductDraftModal({
       void message.warning("请填写商品标题");
       return;
     }
+    if (!hasPermission("xhs:item:create")) {
+      message.warning("没有新建商品草稿的权限");
+      return;
+    }
     setSubmitting(true);
     try {
-      const data = await createItemDraft({
+      const data =      await createItemDraft({
         platform_account_id: platformAccountId,
         category_id: category.id,
         name: title.trim(),

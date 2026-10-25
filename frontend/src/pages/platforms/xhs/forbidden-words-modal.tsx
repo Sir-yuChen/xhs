@@ -34,6 +34,7 @@
  * ⚠️ 弹窗尺寸按**视口百分比**（用户偏好），本弹窗 **60%**（发布弹窗是 75%）。
  */
 import { WaitMask } from "../../../components/ui/wait-mask";
+import { hasPermission } from "../../../hooks/use-permission";
 import { RowActions } from "../../../components/common/row-actions";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -246,6 +247,10 @@ export function ForbiddenWordsModal({ open, onClose }: ForbiddenWordsModalProps)
 
   const save = async (values: EditFormValues) => {
     if (editing === null) {
+      if (!hasPermission("xhs:forbiddenWord:create")) {
+        message.warning("没有新增违规词的权限");
+        return;
+      }
       await createForbiddenWord({
         word: values.word,
         match_mode: values.match_mode,
@@ -254,6 +259,10 @@ export function ForbiddenWordsModal({ open, onClose }: ForbiddenWordsModalProps)
       });
       void message.success("已新增违规词");
     } else {
+      if (!hasPermission("xhs:forbiddenWord:edit")) {
+        message.warning("没有修改违规词的权限");
+        return;
+      }
       await updateForbiddenWord(editing.id, {
         word: values.word,
         match_mode: values.match_mode,

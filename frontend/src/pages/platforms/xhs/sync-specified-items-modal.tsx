@@ -41,6 +41,7 @@ import {
   Typography,
 } from "antd";
 import { SyncOutlined } from "@ant-design/icons";
+import { hasPermission } from "../../../hooks/use-permission";
 import dayjs, { type Dayjs } from "dayjs";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -207,10 +208,14 @@ export function SyncSpecifiedItemsModal({
     async (ids: string[]) => {
       if (!platformAccountId) return;
       setRunning(true);
+    if (!hasPermission("xhs:item:sync")) {
+      message.warning("没有同步商品的权限");
+      return;
+    }
       try {
         //: 2026-10-11 改**走同步商品信息队列**：`items/sync` 只入队（返回
         //: `{enqueued, already, batch_no, note}`），真实同步由 worker 异步执行。
-        const result = await syncSpecifiedShopItems(platformAccountId, ids);
+        const result =      await syncSpecifiedShopItems(platformAccountId, ids);
         const notice = enqueueNotice(result);
         //: 行上的状态只为「再打开弹窗时看得出上次提交到哪了」；提交瞬间就关窗，
         //: 不追求把逐件终态画出来（那正是本次去掉的轮询）。
@@ -353,7 +358,7 @@ export function SyncSpecifiedItemsModal({
       message.warning(`单次最多同步 ${MAX_OPERATE_ITEMS} 个商品，本次 ${targets.length} 个。`);
       return;
     }
-    await runSync(targets);
+      await runSync(targets);
   }
 
   /**

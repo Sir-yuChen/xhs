@@ -63,6 +63,29 @@ PERM_GATED_PAGES: dict[str, tuple[str, ...]] = {
     "pages/platforms/xhs/violation-manage-page.tsx": (
         "xhs:violation:relatedDelete",
     ),
+    "pages/platforms/xhs/forbidden-words-modal.tsx": (
+        "xhs:forbiddenWord:create",
+        "xhs:forbiddenWord:edit",
+    ),
+    "pages/platforms/xhs/product-edit-modal.tsx": (
+        "xhs:item:edit",
+        "xhs:item:polish",
+    ),
+    "pages/platforms/xhs/sync-specified-items-modal.tsx": ("xhs:item:sync",),
+    "pages/platforms/xhs/sku-name-optimize-modal.tsx": ("xhs:publish:precheck",),
+    "pages/platforms/xhs/data-package-rules-modal.tsx": (
+        "xhs:rule:create",
+        "xhs:rule:edit",
+    ),
+    "pages/platforms/xhs/product-draft-modal.tsx": ("xhs:item:create",),
+    "pages/system/system-roles-panel.tsx": (
+        "system:role:create",
+        "system:role:edit",
+    ),
+    "pages/system/system-menus-panel.tsx": (
+        "system:menu:create",
+        "system:menu:edit",
+    ),
     "pages/platforms/xhs/prompt-template-panel.tsx": (
         "ai:prompt:edit",
         "ai:prompt:create",
@@ -100,9 +123,7 @@ KNOWN_UNGATED: set[str] = {
     "pages/login/login-page.tsx",
     "pages/platforms/xhs/accounts-page.tsx",
     "pages/platforms/xhs/auto-ops-panel.tsx",
-    "pages/platforms/xhs/data-package-rules-modal.tsx",
     "pages/platforms/xhs/discovery-page.tsx",
-    "pages/platforms/xhs/forbidden-words-modal.tsx",
     "pages/platforms/xhs/image-studio-panel.tsx",
     "pages/platforms/xhs/keywords-page.tsx",
     "pages/platforms/xhs/llm-generate-modal.tsx",
@@ -110,16 +131,10 @@ KNOWN_UNGATED: set[str] = {
     "pages/platforms/xhs/monitoring-page.tsx",
     "pages/platforms/xhs/my-notes-page.tsx",
     "pages/platforms/xhs/orders-page.tsx",
-    "pages/platforms/xhs/product-draft-modal.tsx",
-    "pages/platforms/xhs/product-edit-modal.tsx",
     "pages/platforms/xhs/product-publish-wizard.tsx",
     "pages/platforms/xhs/publish-config-step1.tsx",
     "pages/platforms/xhs/publish-config-step2.tsx",
     "pages/platforms/xhs/publish-page.tsx",
-    "pages/platforms/xhs/sku-name-optimize-modal.tsx",
-    "pages/platforms/xhs/sync-specified-items-modal.tsx",
-    "pages/system/system-menus-panel.tsx",
-    "pages/system/system-roles-panel.tsx",
     "pages/system/system-users-panel.tsx",
 }
 
