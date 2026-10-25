@@ -347,6 +347,10 @@ SPLIT_BUTTON_PERMS: tuple[PermSpec, ...] = (
     # 图片空间
     PermSpec("xhs:picture:uploadBatch", "批量上传", "F", "/platforms/xhs/picture-space", _X, _X),
     PermSpec("xhs:picture:compose", "合成图片", "F", "/platforms/xhs/picture-space", _X, _X),
+    #: 图片空间的写操作（2026-10-25 红线「一按钮一码」，按动作分开）：
+    #: 删除/彻底删除是一对（回收站前 vs 后），移动与新建目录、复制链接各不相干。
+    PermSpec("xhs:picture:purge", "彻底删除", "F", "/platforms/xhs/picture-space", _X, _X),
+    PermSpec("xhs:picture:folder", "管理图片目录", "F", "/platforms/xhs/picture-space", _X, _X),
     PermSpec("xhs:files:view", "文件列表", "C", "/platforms/xhs/picture-space", _X, _X),
     PermSpec("xhs:files:upload", "上传文件", "F", "/platforms/xhs/picture-space", _X, _X),
     PermSpec("xhs:files:delete", "删除文件", "F", "/platforms/xhs/picture-space", _X, _X),

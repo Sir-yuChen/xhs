@@ -51,6 +51,7 @@ import {
   Typography,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
+import { hasPermission } from "../../../hooks/use-permission";
 import dayjs from "dayjs";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMatch, useNavigate, useSearchParams } from "react-router-dom";
@@ -879,15 +880,23 @@ export function ViolationManagePage() {
                     // 已读标记：**只在前端本地切换**（平台 read_mark 写接口不接）。
                     label: read ? "标为未读" : "标为已读",
                   },
-                  { type: "divider" as const },
-                  {
-                    key: "delete",
-                    // 删的是违规**关联的本地内容**（平台违规记录删不掉）。
-                    // 不可删的对象类型直接禁用 + 说明原因，不让用户点了才看到失败。
-                    label: deletable ? deleteActionLabel(row.entity_type) : deleteBlockedReason(row.entity_type),
-                    danger: deletable,
-                    disabled: !deletable,
-                  },
+                  //: 2026-10-25 红线「按权限码展示」：无 `xhs:violation:deleteRelated`
+                  //: 时这一项**整条不出现**（连分隔线也不留）。
+                  ...(hasPermission("xhs:violation:relatedDelete")
+                    ? [
+                        { type: "divider" as const },
+                        {
+                          key: "delete",
+                          // 删的是违规**关联的本地内容**（平台违规记录删不掉）。
+                          // 不可删的对象类型直接禁用 + 说明原因，不让用户点了才看到失败。
+                          label: deletable
+                            ? deleteActionLabel(row.entity_type)
+                            : deleteBlockedReason(row.entity_type),
+                          danger: deletable,
+                          disabled: !deletable,
+                        },
+                      ]
+                    : []),
                 ],
                 onClick: ({ key }) => {
                   if (key === "detail") void openDetail(row);
@@ -1237,11 +1246,15 @@ export function ViolationManagePage() {
                   { type: "divider" as const },
                   { key: "export", label: BATCH_ACTION_LABELS.export },
                   { type: "divider" as const },
-                  {
-                    key: "delete_related",
-                    label: BATCH_ACTION_LABELS.delete_related,
-                    danger: true,
-                  },
+                  ...(hasPermission("xhs:violation:relatedDelete")
+                    ? [
+                        {
+                          key: "delete_related",
+                          label: BATCH_ACTION_LABELS.delete_related,
+                          danger: true,
+                        },
+                      ]
+                    : []),
                 ],
                 onClick: ({ key }) => {
                   const action = key as BatchActionKey;

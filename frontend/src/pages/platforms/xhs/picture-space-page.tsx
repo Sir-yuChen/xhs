@@ -60,6 +60,7 @@ import {
   Typography,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
+import { hasPermission } from "../../../hooks/use-permission";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useThemePalette } from "../../../app/providers";
@@ -581,9 +582,12 @@ export function PictureSpacePage() {
       render: (_: unknown, r) =>
         scene === "recycle" ? (
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, alignItems: "center" }}>
-            <Button size="small" type="link" icon={<UndoOutlined />} onClick={() => restoreItems([r])}>
-              恢复
-            </Button>
+            {hasPermission("xhs:picture:restore") && (
+              <Button size="small" type="link" icon={<UndoOutlined />} onClick={() => restoreItems([r])}>
+                恢复
+              </Button>
+            )}
+            {hasPermission("xhs:picture:purge") && (
             <Button
               size="small"
               type="link"
@@ -593,15 +597,18 @@ export function PictureSpacePage() {
             >
               彻底删除
             </Button>
+            )}
           </div>
         ) : (
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 4, alignItems: "center" }}>
             <Button size="small" type="link" icon={<CopyOutlined />} onClick={() => void copyLink(r)}>
               复制链接
             </Button>
-            <Button size="small" type="link" icon={<FolderOpenOutlined />} onClick={() => moveItems([r])}>
-              移动到
-            </Button>
+            {hasPermission("xhs:picture:move") && (
+              <Button size="small" type="link" icon={<FolderOpenOutlined />} onClick={() => moveItems([r])}>
+                移动到
+              </Button>
+            )}
             <Dropdown menu={rowMoreMenu(r)} trigger={["click"]}>
               <Button size="small" type="link" icon={<MoreOutlined />}>
                 更多
@@ -819,23 +826,27 @@ export function PictureSpacePage() {
                 </>
               ) : (
                 <>
-                  <Button
-                    size="small"
-                    icon={<UndoOutlined />}
-                    disabled={selectedIds.length === 0}
-                    onClick={() => restoreItems(selectedItems)}
-                  >
-                    批量恢复{selectedIds.length > 0 ? `（${selectedIds.length}）` : ""}
-                  </Button>
-                  <Button
-                    size="small"
-                    danger
-                    icon={<DeleteOutlined />}
-                    disabled={selectedIds.length === 0}
-                    onClick={() => permanentDeleteItems(selectedItems)}
-                  >
-                    批量彻底删除{selectedIds.length > 0 ? `（${selectedIds.length}）` : ""}
-                  </Button>
+                  {hasPermission("xhs:picture:restore") && (
+                    <Button
+                      size="small"
+                      icon={<UndoOutlined />}
+                      disabled={selectedIds.length === 0}
+                      onClick={() => restoreItems(selectedItems)}
+                    >
+                      批量恢复{selectedIds.length > 0 ? `（${selectedIds.length}）` : ""}
+                    </Button>
+                  )}
+                  {hasPermission("xhs:picture:purge") && (
+                    <Button
+                      size="small"
+                      danger
+                      icon={<DeleteOutlined />}
+                      disabled={selectedIds.length === 0}
+                      onClick={() => permanentDeleteItems(selectedItems)}
+                    >
+                      批量彻底删除{selectedIds.length > 0 ? `（${selectedIds.length}）` : ""}
+                    </Button>
+                  )}
                 </>
               )}
               {scene === "main" ? (

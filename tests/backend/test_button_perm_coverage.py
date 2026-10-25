@@ -60,6 +60,14 @@ PERM_GATED_PAGES: dict[str, tuple[str, ...]] = {
         "xhs:item:operate",
         "xhs:item:edit",
     ),
+    "pages/platforms/xhs/violation-manage-page.tsx": (
+        "xhs:violation:relatedDelete",
+    ),
+    "pages/platforms/xhs/picture-space-page.tsx": (
+        "xhs:picture:restore",
+        "xhs:picture:purge",
+        "xhs:picture:move",
+    ),
 }
 
 #: **尚未接入**的页面清单（带写请求但零权限判断）。只许变短。
@@ -80,7 +88,6 @@ KNOWN_UNGATED: set[str] = {
     "pages/platforms/xhs/monitoring-page.tsx",
     "pages/platforms/xhs/my-notes-page.tsx",
     "pages/platforms/xhs/orders-page.tsx",
-    "pages/platforms/xhs/picture-space-page.tsx",
     "pages/platforms/xhs/product-draft-modal.tsx",
     "pages/platforms/xhs/product-edit-modal.tsx",
     "pages/platforms/xhs/product-publish-wizard.tsx",
@@ -90,7 +97,6 @@ KNOWN_UNGATED: set[str] = {
     "pages/platforms/xhs/publish-page.tsx",
     "pages/platforms/xhs/sku-name-optimize-modal.tsx",
     "pages/platforms/xhs/sync-specified-items-modal.tsx",
-    "pages/platforms/xhs/violation-manage-page.tsx",
     "pages/system/system-dict-panel.tsx",
     "pages/system/system-menus-panel.tsx",
     "pages/system/system-roles-panel.tsx",
@@ -139,7 +145,13 @@ class TestGatedPagesDoNotRegress:
         """
         for rel in PERM_GATED_PAGES:
             src = (SRC / rel).read_text(encoding="utf-8")
-            assert re.search(r'hasPermission\("[^"]+"\)\s*&&', src), (
+            #: 两种条件渲染形态：
+            #: ① `{hasPermission("X") && (<Button …/>)}`
+            #: ② 菜单项数组里 `...(hasPermission("X") ? [{…}] : [])` ——
+            #:    无权限时该项**整条不出现**，与 ① 同义（比 `[].filter()` 更直白）。
+            assert re.search(
+                r'hasPermission\("[^"]+"\)\s*&&|hasPermission\("[^"]+"\)\s*\?', src
+            ), (
                 f"{rel} 的 hasPermission 没写成条件渲染（可能是 disabled 或三元）"
             )
 
