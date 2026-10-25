@@ -22,6 +22,7 @@ import {
   Typography,
 } from "antd";
 import { useEffect, useState } from "react";
+import { hasPermission } from "../../../hooks/use-permission";
 
 import { useThemePalette } from "../../../app/providers";
 import {
@@ -116,6 +117,10 @@ export function XhsKeywordsPage() {
     setIsWorking(true);
     try {
       if (editingGroupId) {
+        if (!hasPermission("xhs:keyword:edit")) {
+          message.warning("没有编辑关键词组的权限");
+          return;
+        }
         const updated = await updateKeywordGroup(editingGroupId, {
           name: name.trim(),
           keywords: nextKeywords,
@@ -132,6 +137,10 @@ export function XhsKeywordsPage() {
         }));
         message.success("关键词组已更新。");
       } else {
+        if (!hasPermission("xhs:keyword:create")) {
+          message.warning("没有新建关键词组的权限");
+          return;
+        }
         const created = await createKeywordGroup({
           platform: "xhs",
           name: name.trim(),

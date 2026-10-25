@@ -28,6 +28,7 @@ import {
   Upload,
 } from "antd";
 import { useEffect, useState } from "react";
+import { hasPermission } from "../../../hooks/use-permission";
 
 import {
   deleteGeneratedImageAsset,
@@ -108,6 +109,10 @@ export function ImageStudioPanel() {
     setIsGenerating(true);
     setGeneratedPreview(null);
     try {
+      if (!hasPermission("xhs:picture:compose")) {
+        message.warning("没有AI 生图的权限");
+        return;
+      }
       const result = await generateImageWithAi({
         prompt: prompt.trim(),
         reference_images:
@@ -533,6 +538,10 @@ export function ImageStudioPanel() {
                             type="text" danger size="small" icon={<DeleteOutlined />}
                             onClick={async () => {
                               try {
+                                if (!hasPermission("xhs:picture:delete")) {
+                                  message.warning("没有删除生成图的权限");
+                                  return;
+                                }
                                 await deleteGeneratedImageAsset(asset.id);
                                 setAssets((prev) => prev.filter((a) => a.id !== asset.id));
                               } catch { /* global interceptor shows error */ }
@@ -620,6 +629,10 @@ export function ImageStudioPanel() {
                             type="text" danger size="small" icon={<DeleteOutlined />}
                             onClick={async () => {
                               try {
+                                if (!hasPermission("xhs:picture:delete")) {
+                                  message.warning("没有删除图片的权限");
+                                  return;
+                                }
                                 await deleteUserImage(img.file_name);
                                 setUserImages((prev) => prev.filter((i) => i.file_name !== img.file_name));
                               } catch { /* global interceptor shows error */ }

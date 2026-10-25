@@ -41,6 +41,7 @@ import {
   UploadOutlined,
 } from "@ant-design/icons";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { hasPermission } from "../../../hooks/use-permission";
 
 import {
   createMaterialFolder,
@@ -398,6 +399,10 @@ export function MaterialLibraryPanel({
       return;
     }
     try {
+      if (!hasPermission("xhs:material:createFolder")) {
+        message.warning("没有新建素材目录的权限");
+        return;
+      }
       const folder = await createMaterialFolder({ name: name || path, path });
       message.success("文件夹已添加，正在后台扫描");
       setCreating(false);
@@ -418,6 +423,10 @@ export function MaterialLibraryPanel({
       return;
     }
     try {
+      if (!hasPermission("xhs:material:editFolder")) {
+        message.warning("没有编辑素材目录的权限");
+        return;
+      }
       await updateMaterialFolder(renaming.id, { name });
       message.success("已重命名");
       setRenaming(null);
@@ -514,6 +523,10 @@ export function MaterialLibraryPanel({
       cancelText: "取消",
       onOk: async () => {
         try {
+          if (!hasPermission("xhs:material:deleteFolder")) {
+            message.warning("没有删除素材的权限");
+            return;
+          }
           await deleteMaterialFile(file.id);
           message.success(`已删除「${file.filename}」（已移入回收站）`);
           setSelectedIds((current) => current.filter((id) => id !== file.id));

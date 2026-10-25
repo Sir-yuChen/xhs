@@ -19,6 +19,7 @@
  */
 
 import { WaitMask } from "../../../components/ui/wait-mask";
+import { hasPermission } from "../../../hooks/use-permission";
 import { RowActions } from "../../../components/common/row-actions";
 import {
   DownloadOutlined,
@@ -212,6 +213,10 @@ export function OrdersPage() {
         companyCode: shipCompany,
         trackingNo: shipTracking,
       });
+      if (!hasPermission("xhs:order:ship")) {
+        message.warning("没有发货的权限");
+        return;
+      }
       const result = await shipOrder({
         platformAccountId: accountId,
         orderNo: shipTarget.order_no,
@@ -250,6 +255,10 @@ export function OrdersPage() {
         action,
         rejectReason: afterSaleReason,
       });
+      if (!hasPermission("xhs:order:afterSaleHandle")) {
+        message.warning("没有处理售后的权限");
+        return;
+      }
       await handleAfterSale({
         platformAccountId: accountId,
         afterSaleId: afterSaleTarget.afterSaleId,
@@ -276,6 +285,10 @@ const onSync = async () => {
     if (!accountId) return;
     setSyncing(true);
     try {
+      if (!hasPermission("xhs:order:sync")) {
+        message.warning("没有同步订单的权限");
+        return;
+      }
       await syncOrders(accountId);
       message.success("订单同步已入队，稍候刷新查看");
       // 同步在后台跑，立刻刷新拿到的是同步前的数据；不假装「已同步完成」
@@ -298,6 +311,10 @@ const onSync = async () => {
       cancelText: "取消",
       onOk: async () => {
         try {
+          if (!hasPermission("xhs:order:export")) {
+            message.warning("没有导出订单的权限");
+            return;
+          }
           const result = await exportOrders(accountId, { status, keyword });
           const blob = new Blob([result.csv], { type: "text/csv;charset=utf-8" });
           const url = URL.createObjectURL(blob);

@@ -30,6 +30,7 @@ import {
   Typography,
 } from "antd";
 import dayjs from "dayjs";
+import { hasPermission } from "../../../hooks/use-permission";
 import type { Dayjs } from "dayjs";
 import { useEffect, useState } from "react";
 
@@ -218,6 +219,10 @@ export function XhsPublishPage() {
     if (!selectedJob) return;
     setIsSaving(true);
     try {
+      if (!hasPermission("xhs:note:edit")) {
+        message.warning("没有编辑发布任务的权限");
+        return;
+      }
       const updated = await updatePublishJob(selectedJob.id, {
         platform_account_id: selectedAccountId,
         publish_mode: publishMode,
@@ -248,6 +253,10 @@ export function XhsPublishPage() {
         location: location.trim() || null,
         is_private: privacyChoice === "private",
       });
+      if (!hasPermission("xhs:note:publish")) {
+        message.warning("没有发布笔记的权限");
+        return;
+      }
       const updated = await publishJobToCreator(selectedJob.id);
       setJobs((current) => current.map((job) => (job.id === updated.id ? updated : job)));
       applyJob(updated);
@@ -268,6 +277,10 @@ export function XhsPublishPage() {
   async function handleDeleteJob() {
     if (!selectedJob) return;
     try {
+      if (!hasPermission("xhs:note:delete")) {
+        message.warning("没有删除发布任务的权限");
+        return;
+      }
       await deletePublishJob(selectedJob.id);
       setJobs((current) => current.filter((j) => j.id !== selectedJob.id));
       setSelectedJobId(null);

@@ -18,6 +18,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { hasPermission } from "../../../hooks/use-permission";
 
 import "./publish-config-step1.css";
 
@@ -256,6 +257,10 @@ export default function PublishConfigStep1({
       //: ⚠️ 走**真 AI**（用户口径：「应为空使用 ai 自动生成」）——
       //: 绝不能拿文件名当标题（那会生成「主图02」这种值）。
       //: 真机行为：给出候选后不自动落框，等用户点「立即使用」。
+      if (!hasPermission("xhs:item:aiAssist")) {
+        message.warning("没有AI 推荐标题的权限");
+        return;
+      }
       const res = await recommendItemTitle(
         accountId,
         images.map((img) => ({
@@ -294,6 +299,10 @@ export default function PublishConfigStep1({
     setCatRecognizing(true);
     try {
       const first = images[0];
+      if (!hasPermission("xhs:item:aiAssist")) {
+        message.warning("没有AI 推荐分类的权限");
+        return;
+      }
       const res = await recommendProductCategory(accountId, {
         name: titleSuggest,
         image_url: first?.url ?? "",

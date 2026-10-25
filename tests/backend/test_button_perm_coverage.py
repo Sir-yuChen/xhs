@@ -63,6 +63,31 @@ PERM_GATED_PAGES: dict[str, tuple[str, ...]] = {
     "pages/platforms/xhs/violation-manage-page.tsx": (
         "xhs:violation:relatedDelete",
     ),
+    "pages/platforms/xhs/auto-ops-panel.tsx": ("xhs:autoops:create", "xhs:autoops:edit", "xhs:autoops:run"),
+    "pages/platforms/xhs/keywords-page.tsx": ("xhs:keyword:create", "xhs:keyword:edit"),
+    "pages/platforms/xhs/material-library-panel.tsx": (
+        "xhs:material:createFolder",
+        "xhs:material:editFolder",
+        "xhs:material:deleteFolder",
+    ),
+    "pages/platforms/xhs/monitoring-page.tsx": (
+        "xhs:monitor:create",
+        "xhs:monitor:refresh",
+        "xhs:monitor:enable",
+    ),
+    "pages/platforms/xhs/image-studio-panel.tsx": ("xhs:picture:compose", "xhs:picture:delete"),
+    "pages/platforms/xhs/discovery-page.tsx": ("xhs:library:save",),
+    "pages/platforms/xhs/llm-generate-modal.tsx": ("xhs:draft:generate",),
+    "pages/platforms/xhs/orders-page.tsx": (
+        "xhs:order:ship",
+        "xhs:order:afterSaleHandle",
+        "xhs:order:sync",
+        "xhs:order:export",
+    ),
+    "pages/platforms/xhs/product-publish-wizard.tsx": ("xhs:item:publish", "xhs:item:create"),
+    "pages/platforms/xhs/publish-page.tsx": ("xhs:note:publish", "xhs:note:delete", "xhs:note:edit"),
+    "pages/platforms/xhs/publish-config-step1.tsx": ("xhs:item:aiAssist",),
+    "pages/platforms/xhs/accounts-page.tsx": ("xhs:account:syncShopGoods",),
     "pages/platforms/xhs/forbidden-words-modal.tsx": (
         "xhs:forbiddenWord:create",
         "xhs:forbiddenWord:edit",
@@ -118,23 +143,32 @@ PERM_GATED_PAGES: dict[str, tuple[str, ...]] = {
     ),
 }
 
+#: 用 `useCan()` 的 `can(code)` 形态接入的页面（系统管理页为主）。
+#: 与 `PERM_GATED_PAGES` 分开登记，因为防退化断言要查 `can("…")` 而不是 `hasPermission("…")`。
+CAN_GATED_PAGES: dict[str, tuple[str, ...]] = {
+    "pages/system/system-users-panel.tsx": (
+        "system:user:create",
+        "system:user:batchDelete",
+        "system:user:batchResetPassword",
+    ),
+}
+
+
+#: **不需要权限码**的页面（有写请求但性质上不该有权限码）。
+#: 登记要带理由 —— 「暂时没做」不属于这一类。
+NO_PERM_NEEDED: dict[str, str] = {
+    "pages/login/login-page.tsx": "登录 / 注册是公开页，此时还没有身份，更谈不上权限",
+    "pages/platforms/xhs/my-notes-page.tsx": (
+        "只读页：写函数名只出现在**注释**里（绑定千帆已改走弹窗），实际无写操作"
+    ),
+    "pages/platforms/xhs/publish-config-step2.tsx": (
+        "纯配置页：写函数名只出现在注释里（批量调模型的旧实现已删），实际无写操作"
+    ),
+}
+
+
 #: **尚未接入**的页面清单（带写请求但零权限判断）。只许变短。
 KNOWN_UNGATED: set[str] = {
-    "pages/login/login-page.tsx",
-    "pages/platforms/xhs/accounts-page.tsx",
-    "pages/platforms/xhs/auto-ops-panel.tsx",
-    "pages/platforms/xhs/discovery-page.tsx",
-    "pages/platforms/xhs/image-studio-panel.tsx",
-    "pages/platforms/xhs/keywords-page.tsx",
-    "pages/platforms/xhs/llm-generate-modal.tsx",
-    "pages/platforms/xhs/material-library-panel.tsx",
-    "pages/platforms/xhs/monitoring-page.tsx",
-    "pages/platforms/xhs/my-notes-page.tsx",
-    "pages/platforms/xhs/orders-page.tsx",
-    "pages/platforms/xhs/product-publish-wizard.tsx",
-    "pages/platforms/xhs/publish-config-step1.tsx",
-    "pages/platforms/xhs/publish-config-step2.tsx",
-    "pages/platforms/xhs/publish-page.tsx",
     "pages/system/system-users-panel.tsx",
 }
 
@@ -196,12 +230,29 @@ class TestGatedPagesDoNotRegress:
             )
 
 
+def _has_any_perm_check(rel: str) -> bool:
+    """页面里有没有**任何一种**权限判断。
+
+    两种机制并存（历史原因）：
+    * `hasPermission(code)` —— 全局函数，任意组件可用；
+    * `useCan()` 返回的 `can(code)` —— hook 形态，主要用在系统管理页。
+
+    两者都是「按权限码决定渲染」，认一个漏一个会让守卫长期误报
+    （`system-users-panel` 早就在用 `can()`，却被记成「零权限判断」）。
+    """
+    src = (SRC / rel).read_text(encoding="utf-8")
+    return bool(re.search(r'hasPermission\s*\(|\bcan\s*\(\s*["\']', src))
+
+
 class TestUngatedListOnlyShrinks:
     def test_no_new_ungated_pages(self):
         """新页面带写请求却没有权限判断 ⇒ 红。"""
-        gated = set(PERM_GATED_PAGES)
+        #: 源码里已经在按码判断的，也算已接入（不必登记进 PERM_GATED_PAGES）
+        gated = set(PERM_GATED_PAGES) | {
+            p for p in _pages_with_writes() if _has_any_perm_check(p)
+        }
         actual_ungated = {p for p in _pages_with_writes() if p not in gated}
-        unexpected = actual_ungated - KNOWN_UNGATED
+        unexpected = actual_ungated - KNOWN_UNGATED - set(NO_PERM_NEEDED)
         assert not unexpected, (
             "以下页面有写请求但没有 hasPermission（无权限用户也会看到按钮）：\n"
             + "\n".join(f"  {p}" for p in sorted(unexpected))
@@ -225,3 +276,12 @@ class TestMenuIsDynamic:
         """F（按钮）行不进侧栏。"""
         nav = (SRC / "components" / "layout" / "use-dynamic-nav.tsx").read_text(encoding="utf-8")
         assert '"F"' in nav or "'F'" in nav, "导航组件没排除 F 行"
+
+
+def test_can_gated_pages_keep_their_checks():
+    """用 `can()` 的页面同样不许退化（删掉码 = 按钮对无权限用户展示）。"""
+    for rel, codes in CAN_GATED_PAGES.items():
+        src = (SRC / rel).read_text(encoding="utf-8")
+        assert "useCan" in src, f"{rel} 不再用 useCan()"
+        for code in codes:
+            assert f'"{code}"' in src, f"{rel} 不再判 {code}"

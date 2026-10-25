@@ -20,6 +20,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { hasPermission } from "../../../hooks/use-permission";
 
 import {
   Alert,

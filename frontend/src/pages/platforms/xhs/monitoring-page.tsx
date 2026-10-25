@@ -25,6 +25,7 @@ import {
   Typography,
 } from "antd";
 import { useEffect, useState } from "react";
+import { hasPermission } from "../../../hooks/use-permission";
 
 import { useThemePalette } from "../../../app/providers";
 import {
@@ -146,6 +147,10 @@ export function XhsMonitoringPage() {
     }
     setIsWorking(true);
     try {
+      if (!hasPermission("xhs:monitor:create")) {
+        message.warning("没有新建监控目标的权限");
+        return;
+      }
       const created = await createMonitoringTarget({
         target_type: targetType,
         name: name.trim() || trimmedValue,
@@ -167,6 +172,10 @@ export function XhsMonitoringPage() {
   async function refreshTarget(targetId: number) {
     setIsWorking(true);
     try {
+      if (!hasPermission("xhs:monitor:refresh")) {
+        message.warning("没有刷新监控的权限");
+        return;
+      }
       const result = await refreshMonitoringTarget(targetId);
       setTargets((currentTargets) =>
         currentTargets.map((target) =>
@@ -225,6 +234,10 @@ export function XhsMonitoringPage() {
     const nextStatus = target.status === "active" ? "paused" : "active";
     setIsWorking(true);
     try {
+      if (!hasPermission("xhs:monitor:enable")) {
+        message.warning("没有启停监控的权限");
+        return;
+      }
       const updated = await setMonitoringTargetStatus(target.id, nextStatus);
       setTargets((currentTargets) =>
         currentTargets.map((item) => (item.id === updated.id ? updated : item))

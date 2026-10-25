@@ -71,6 +71,7 @@ import {
   PlusOutlined,
 } from "@ant-design/icons";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { hasPermission } from "../../../hooks/use-permission";
 
 import {
   fetchMaterialFiles,
@@ -2991,6 +2992,10 @@ export function LlmGenerateModal({
 
       //: **同步等待**（用户口径 2026-10-18：*「不要放入队列中直接同步等待」*）。
       //: 后端跑完才返回，这里直接拿到标题/正文/话题/配图 —— 不再有「入队→轮询」那一段。
+      if (!hasPermission("xhs:draft:generate")) {
+        message.warning("没有LLM 生成笔记的权限");
+        return;
+      }
       const result = await generateLlmNote({
         platformAccountId: accountId,
         itemId,

@@ -31,6 +31,7 @@ import {
   Typography,
 } from "antd";
 import { useEffect, useState } from "react";
+import { hasPermission } from "../../../hooks/use-permission";
 
 import { useThemePalette } from "../../../app/providers";
 import { ScheduleFields } from "../../../components/schedule/schedule-fields";
@@ -159,6 +160,10 @@ export function AutoOpsPanel() {
     }
     setIsCreating(true);
     try {
+      if (!hasPermission("xhs:autoops:create")) {
+        message.warning("没有新建自动化任务的权限");
+        return;
+      }
       const created = await createAutoTask({
         name: createName.trim(),
         keywords,
@@ -186,6 +191,10 @@ export function AutoOpsPanel() {
   async function handleToggleStatus(task: AutoTask) {
     const newStatus = task.status === "active" ? "paused" : "active";
     try {
+      if (!hasPermission("xhs:autoops:edit")) {
+        message.warning("没有编辑自动化任务的权限");
+        return;
+      }
       const updated = await updateAutoTask(task.id, { status: newStatus });
       setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
       message.success(`任务"${updated.name}"已${newStatus === "active" ? "恢复" : "暂停"}。`);
@@ -208,6 +217,10 @@ export function AutoOpsPanel() {
     setRunningTaskId(task.id);
     setLastRunResult(null);
     try {
+      if (!hasPermission("xhs:autoops:run")) {
+        message.warning("没有执行自动化任务的权限");
+        return;
+      }
       const result = await runAutoTask(task.id);
       setLastRunResult(result);
       setTasks((prev) => prev.map((t) => (t.id === result.auto_task.id ? result.auto_task : t)));

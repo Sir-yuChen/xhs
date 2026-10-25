@@ -29,6 +29,7 @@
  */
 
 import { collectFolder } from "../../../lib/folder-picker";
+import { hasPermission } from "../../../hooks/use-permission";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
@@ -2181,6 +2182,10 @@ export function ProductPublishWizard({
     setResult(null);
     setSubmitting(true);
     try {
+      if (!hasPermission("xhs:item:publish")) {
+        message.warning("没有发布商品的权限");
+        return;
+      }
       const data = await publishShopItem({
         platform_account_id: platformAccountId,
         category_id: configCategoryId,
@@ -2478,6 +2483,10 @@ export function ProductPublishWizard({
     setDraftElapsedSec(0);
     const startedAt = performance.now();
     try {
+      if (!hasPermission("xhs:item:create")) {
+        message.warning("没有新建商品草稿的权限");
+        return;
+      }
       const data = await createItemDraft({
         platform_account_id: platformAccountId,
         category_id: configCategoryId,

@@ -14,6 +14,7 @@ import {
   StarOutlined,
 } from "@ant-design/icons";
 import { Alert, Badge, Button, Card, Col, Descriptions, Drawer, Empty, Input, Row, Select, Space, Spin, Tabs, Tag, Typography } from "antd";
+import { hasPermission } from "../../../hooks/use-permission";
 import { FormEvent, MouseEvent, useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
@@ -142,6 +143,7 @@ function SearchPanel() {
   async function handleSaveNote(note: XhsSearchNote) {
     setError(null); if (!selectedAccountId) { setError("请先选择一个 PC 账号。"); return; }
     setSavingNoteIds((c) => [...c, note.note_id]);
+    if (!hasPermission("xhs:library:save")) { setError("没有保存到内容库的权限"); return; }
     try { const d = await ensureNoteDetail(note); await saveXhsNotesToLibrary({ account_id: selectedAccountId, notes: [d] }); setSavedNoteIds((c) => c.includes(note.note_id) ? c : [...c, note.note_id]); }
     catch { setError("保存到内容库失败。"); } finally { setSavingNoteIds((c) => c.filter((id) => id !== note.note_id)); }
   }

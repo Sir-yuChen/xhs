@@ -27,6 +27,7 @@ import {
   UserOutlined,
 } from "@ant-design/icons";
 import { useEffect, useRef, useState } from "react";
+import { hasPermission } from "../../../hooks/use-permission";
 
 import { AddAccountDrawer } from "../../../components/account/add-account-drawer";
 import { RenewLoginModal, type RenewTarget } from "../../../components/account/renew-login-modal";
@@ -451,6 +452,10 @@ export function XhsAccountsPage() {
       return;
     }
     try {
+      if (!hasPermission("xhs:account:syncShopGoods")) {
+        message.warning("没有同步店铺商品的权限");
+        return;
+      }
       const summary = await syncShopGoods({ platformAccountId: accountId, ...(options ?? {}) });
       if (summary.reused) {
         message.info("该账号已有同步任务在跑，本次未触发新执行。");
