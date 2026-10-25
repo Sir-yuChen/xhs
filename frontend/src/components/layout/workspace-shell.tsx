@@ -10,22 +10,7 @@ import {
   SunOutlined,
   UserOutlined,
 } from "@ant-design/icons";
-import {
-  Avatar,
-  Badge,
-  Button,
-  Dropdown,
-  Modal,
-  Empty,
-  Layout,
-  List,
-  Menu,
-  Segmented,
-  Skeleton,
-  Space,
-  Tag,
-  Typography,
-} from "antd";
+import { Avatar, Badge, Button, Dropdown, Modal, Empty, Layout, List, Menu, Segmented, Skeleton, Space, Tag, Typography } from "antd";
 import type { MenuProps } from "antd";
 import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
@@ -49,6 +34,7 @@ import { UpdateDialog, ManualUpdateDialog } from "../system/update-dialog";
 import { EnvBootstrapDialog, EnvBootstrapGate } from "../system/env-bootstrap-dialog";
 import { useDictVersion } from "../../lib/system-dicts";
 import { usePermission } from "../../hooks/use-permission";
+import { SettingsTable } from "../settings/settings-table";
 
 const { Sider, Header, Content } = Layout;
 const { Text } = Typography;
@@ -242,6 +228,8 @@ export function WorkspaceShell({
   const [manualUpdateOpen, setManualUpdateOpen] = useState(false);
   //: 个人资料弹窗（设计 62 §2.3 / 2026-10-25 用户口径：弹窗展示，不用单独页）
   const [profileOpen, setProfileOpen] = useState(false);
+  //: 个人配置弹窗（本人级配置，不属于任何工作区）。
+  const [userConfigOpen, setUserConfigOpen] = useState(false);
   // 设计 64 §1.6：三级配置的两处弹窗入口 —— 用户级挂头像下拉，工作区级挂顶栏齿轮。
   //: 依赖检查弹窗（用户口径 2026-10-23：「在页面顶部的版本更新图标旁新增一个
   //: 依赖检查，点击弹窗展示检查本地依赖是否完整，不完整则自动触发下载」）。
@@ -500,9 +488,9 @@ export function WorkspaceShell({
                 ],
                 onClick: ({ key }) => {
                   if (key === "profile") setProfileOpen(true);
-                  //: 个人配置只有**一份**实现（`/settings` 页）；下拉只是快捷入口，
-                  //: 不再弹第二个内容相同的弹窗（2026-10-25 用户截图指出两处内容一样）。
-                  else if (key === "user-config") navigate("/settings");
+                  //: 个人配置**在弹窗里展示**（2026-10-25 用户口径「个人配置应在弹窗中展示」）。
+                  //: 用户级 = 本人私有，与工作区无关 ⇒ 不占任何工作区页面。
+                  else if (key === "user-config") setUserConfigOpen(true);
                   else if (key === "logout") void auth.logout();
                 },
               }}
@@ -545,7 +533,19 @@ export function WorkspaceShell({
         <ProfilePage />
       </Modal>
 
-
+      {/* 个人配置弹窗（2026-10-25 用户口径「个人配置应在弹窗中展示」）：
+          用户级 = 本人私有，与工作区无关 ⇒ 不挂在任何工作区页面里。 */}
+      <Modal
+        open={userConfigOpen}
+        title="个人配置"
+        width={1080}
+        centered
+        footer={null}
+        onCancel={() => setUserConfigOpen(false)}
+        destroyOnHidden
+      >
+        <SettingsTable scope="user" title="个人配置" />
+      </Modal>
     </Layout>
   );
 }

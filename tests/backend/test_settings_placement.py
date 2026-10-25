@@ -37,11 +37,10 @@ def test_no_global_gear_button_for_workspace_config():
     assert 'scope="workspace"' not in shell, (
         "顶栏壳里又渲染了工作区级配置表 —— 全局入口不能承载单一工作区的私有配置"
     )
-    #: 也不许靠弹窗回来（`SettingsTable scope="user"` 仍合法：个人配置属本人，
-    #: 但那一份也已经收敛到 `/settings` 页，见下一条守卫）。
-    assert shell.count("scope=\"user\"") == 0, (
-        "顶栏壳里又渲染了个人配置表 —— 个人配置只有 /settings 页一份实现"
-    )
+    #: ⚠️ `scope="user"` 在顶栏壳里**是合法的**（2026-10-25 最终口径）：
+    #: 个人配置就在头像下拉的**弹窗**里 —— 用户级 = 本人私有，与工作区无关。
+    #: 曾经把它挪去 `/settings` 页，结果是「个人配置占用了小红书工作区页面、
+    #: 而小红书私有配置页没有了」：两者属于**不同归属**，不能互换位置。
 
 
 def test_workspace_settings_live_inside_their_own_workspace():
@@ -63,17 +62,13 @@ def test_workspace_settings_live_inside_their_own_workspace():
         "系统管理 → 配置管理页又出现了工作区私有配置 —— 它只在对应工作区域内展示"
     )
 
-    badge = (FRONTEND / "components" / "layout" / "business-line-badge.tsx").read_text(
-        encoding="utf-8"
-    )
-    assert 'scope="workspace"' in badge, (
+    #: 入口 = 侧栏「设置」页（`/settings`，挂在业务工作区下）⇒ 结构上就是
+    #: 「只在对应工作区内」（该路由属于 xhs 工作区，系统管理页看不到它）。
+    page = (FRONTEND / "pages" / "settings" / "settings-page.tsx").read_text(encoding="utf-8")
+    assert 'scope="workspace"' in page, (
         "工作区配置没有自己的入口 —— 用户无处可配"
     )
-    assert 'workspace="xhs"' in badge or "workspace=" in badge, "入口没指定工作区标识"
-    #: 业务线行只在业务线页面渲染 ⇒ 这是「只在对应工作区内」的结构保证。
-    assert "if (line === null) return null" in badge, (
-        "业务线行不再按页面短路 —— 工作区配置会泄漏到系统管理页"
-    )
+    assert "workspace=" in page, "入口没指定工作区标识"
 
 
 def test_scope_partition_is_fixed_in_code_not_by_data():
@@ -142,15 +137,9 @@ def test_workspace_config_is_not_shown_on_the_system_settings_page():
         "配置管理页又渲染了工作区私有配置 —— 私有配置只在对应工作区域内展示"
     )
 
-    badge = (FRONTEND / "components" / "layout" / "business-line-badge.tsx").read_text(
-        encoding="utf-8"
-    )
-    assert 'scope="workspace"' in badge, (
-        "工作区配置没有自己的入口（它必须在业务线页面里，否则用户无处可配）"
-    )
-    #: 业务线行本身只在业务线页面渲染 —— 这是「只在对应工作区内」的结构保证。
-    assert "if (line === null) return null" in badge, (
-        "业务线行不再按页面短路 —— 工作区配置会泄漏到系统管理页"
+    page = (FRONTEND / "pages" / "settings" / "settings-page.tsx").read_text(encoding="utf-8")
+    assert 'scope="workspace"' in page, (
+        "工作区配置没有自己的入口（侧栏「设置」页，挂在业务工作区下）"
     )
 
 
@@ -192,4 +181,56 @@ def test_scope_hit_reports_ownership_not_storage_location():
     body = source[start:end]
     assert "SETTING_SCOPES.get(key)" in body, (
         "effective_settings_map 没有按归属校正 scope_hit ⇒ 界面会显示「行在哪级」而非「归属哪级」"
+    )
+
+
+def test_workspace_settings_are_stored_per_workspace():
+    """工作区私有配置**按工作区各存一份**，互不影响。
+
+    用户口径（2026-10-25）：「工作区级不同的配置方对应的工作区内，
+    每个工作区内是工作区私有」。
+
+    判据 = 三件事同时成立：
+    ① 查询按 `workspace` 列过滤（不是"取任意一行"）；
+    ② 唯一约束含 workspace（否则两个工作区抢同一行）；
+    ③ 系统级种子**不种**工作区级的键（否则每次启动重建 `workspace IS NULL`
+       的孤儿行，与工作区的行并存 ⇒ 系统配置页会列出私有配置）。
+    """
+    from sqlalchemy import inspect
+
+    from backend.app.models.system_setting import SystemSetting
+
+    cols = {c.name for c in inspect(SystemSetting).columns}
+    assert "workspace" in cols, "缺少 workspace 列 ⇒ 无法按工作区隔离"
+
+    source = (ROOT / "backend" / "app" / "services" / "settings_service.py").read_text(
+        encoding="utf-8"
+    )
+    #: ③ 系统级种子必须按归属过滤（这是「私有配置错误展示在配置管理页」的直接来源）。
+    assert 'if SETTING_SCOPES.get(key, "system") != "system":' in source, (
+        "seed_system_settings 没有按归属过滤 ⇒ 启动时会给工作区级键种系统级孤儿行"
+    )
+    #: 工作区级配置有自己的一播种入口。
+    assert "def seed_workspace_settings(" in source, (
+        "缺少工作区级播种 ⇒ 各工作区的基线行只能靠合成虚拟行"
+    )
+
+
+def test_first_write_to_a_workspace_creates_its_own_row():
+    """某工作区首次配置某键时，必须**在该工作区下建行**，不能报 404。
+
+    实测（2026-10-25）：`douyin` 从未配置过 ⇒ 库里没有它的行 ⇒
+    编辑保存 404「配置项不存在」，而页面明明列出了这个键（虚拟行）。
+
+    ⚠️ 前端也有一半责任：虚拟行 `id = -1`，必须走**新建**（POST）而不是更新（PUT）。
+    两处判据同源（后端的 `_default_row` 约定 + 前端的 `id < 0` 判断）。
+    """
+    api = (ROOT / "backend" / "app" / "api" / "settings.py").read_text(encoding="utf-8")
+    assert "ensure_row" in api, "PUT 未对「该级还没有行」的已知键兜底建行 ⇒ 首次保存 404"
+
+    table = (
+        FRONTEND / "components" / "settings" / "settings-table.tsx"
+    ).read_text(encoding="utf-8")
+    assert "editing.id < 0" in table, (
+        "前端没识别虚拟行（id=-1）⇒ 会走 PUT 更新一个不存在的行"
     )

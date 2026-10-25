@@ -19,14 +19,10 @@
  * ⚠️ **零请求**：本组件不调任何接口。它的**存在**就是为了让用户知道该去哪补登，
  * 而不是替业务页面判一次可用性（前端重判必然与后端漂移，先例：设计 12 §17.8）。
  */
-import { useState } from "react";
-import { Button, Modal, Tag } from "antd";
-import { SettingOutlined } from "@ant-design/icons";
+import { Tag } from "antd";
 import { useLocation } from "react-router-dom";
 
 import { BUSINESS_LINE_VIEWS, businessLineForPath } from "../../lib/business-lines";
-import { SettingsTable } from "../settings/settings-table";
-import { usePermission } from "../../hooks/use-permission";
 
 /** 各业务线的 Tag 配色（唯一实现）。 */
 const LINE_COLORS: Record<string, string> = {
@@ -36,8 +32,6 @@ const LINE_COLORS: Record<string, string> = {
 };
 
 export function BusinessLineBadge() {
-  const [open, setOpen] = useState(false);
-  const { isAdmin } = usePermission();
   const location = useLocation();
   // 路由不在业务线映射里（如「总览」）⇒ 整条不渲染。
   // ⚠️ 不渲染 ≠ 漏登记：漏登记会让守卫红（`test_sidebar_...` 对 ROUTE_BUSINESS_LINES
@@ -68,27 +62,7 @@ export function BusinessLineBadge() {
       ) : (
         <span style={{ opacity: 0.65 }}>该能力服务于整个平台，不属于任一业务线</span>
       )}
-      {/* 工作区私有配置入口（2026-10-25 用户口径「私有配置只在对应工作区域内展示」）。
-          挂在这里的原因：本组件**只在业务线页面渲染**（`line === null` 直接返回 null），
-          天然满足「只在对应工作区内出现」；而顶栏是全局位置，挂那里必然
-          在系统管理页也出现（那正是被否掉的旧做法）。
-          ⚠️ 不叫「系统配置」也不进侧栏：它是当前工作区的私有设置，
-          文案写明是哪个工作区，免得又被当成全站设置。 */}
-      <Button type="link" size="small" style={{ padding: 0, fontSize: 12 }} onClick={() => setOpen(true)}>
-        <SettingOutlined style={{ fontSize: 12, marginRight: 2 }} />
-        小红书配置
-      </Button>
-      <Modal
-        open={open}
-        title="小红书配置"
-        width={1080}
-        centered
-        footer={null}
-        onCancel={() => setOpen(false)}
-        destroyOnHidden
-      >
-        <SettingsTable scope="workspace" workspace="xhs" title="小红书配置" canEdit={isAdmin} />
-      </Modal>
+
     </div>
   );
 }

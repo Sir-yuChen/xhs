@@ -263,7 +263,25 @@ def update_setting(
         db, scope=resolved_scope, key=key, user_id=current_user.id, workspace=clean_ws
     )
     if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="配置项不存在")
+        #: ⚠️ **内置键在该级还没有行**时不能 404。
+        #:
+        #: 列表接口会给「归属本级但还没行」的内置键**补一条虚拟默认行**下发
+        #:（`list_scoped_settings` 的 `_default_row`），用户看得到、点得到编辑 ——
+        #: 但库里没有对应行，改值就会 404「配置项不存在」：**能看能点不能存**。
+        #: 实测（2026-10-25）：工作区级 8 个键的行迁到 `workspace='xhs'` 后，
+        #: 未配置过的工作区（如未来的 douyin）必然落到这条路径。
+        #:
+        #: 判据：只有**归属本级的已知键**才允许「首次落库」；未知键仍 404 ——
+        #: 否则任何人都能用 PUT 凭空造出任意配置键。
+        if settings_service.scope_of(key) != resolved_scope:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="配置项不存在")
+        row = settings_service.ensure_row(
+            db,
+            key=key,
+            scope=resolved_scope,
+            user_id=current_user.id,
+            workspace=clean_ws,
+        )
     fields = payload.model_dump(exclude_unset=True)
     try:
         settings_service.update_setting(

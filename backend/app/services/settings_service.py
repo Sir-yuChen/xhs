@@ -1068,6 +1068,66 @@ def list_scoped_settings(
     return sorted(rows, key=lambda r: (r.category or "", r.key))
 
 
+
+def scope_of(key: str) -> Optional[str]:
+    """该键的**归属级别**（`SETTING_SCOPES`）；未登记（用户自建）⇒ None。"""
+    return SETTING_SCOPES.get(str(key or "").strip())
+
+
+def ensure_row(
+    db: Session,
+    *,
+    key: str,
+    scope: str,
+    user_id: Optional[int] = None,
+    workspace: Optional[str] = None,
+) -> SystemSetting:
+    """确保该级有对应行，没有就按**内置默认值**建一条并 flush（不 commit）。
+
+    ## 为什么需要它
+
+    列表接口会给「归属本级但还没行」的内置键补虚拟默认行下发（`_default_row`），
+    用户看得到也能点编辑；但库里没有行 ⇒ 改值接口 404「配置项不存在」，
+    **能看能点不能存**（2026-10-25 实测：未配置过的工作区必然落到这条路径）。
+
+    ## 值取哪里
+
+    优先 `BUILTIN_DEFAULTS`（与列表里那条虚拟行显示的默认值**同源**，
+    用户看到 6 就存 6，不会出现"看到 6、存下 null"）；其次 `settings_default`。
+
+    ⚠️ 只给**归属等于 `scope` 的键**用 —— 调用方先判 `scope_of(key) == scope`
+    再调它，否则会造出"归属对不上"的行。
+    """
+    clean_key = str(key or "").strip()
+    clean_scope = str(scope or "").strip()
+    if clean_scope == "system":
+        user_id = None
+        workspace = None
+    elif clean_scope == "user":
+        workspace = None
+    elif clean_scope == "workspace":
+        user_id = None
+        workspace = str(workspace or "").strip()
+
+    value = BUILTIN_DEFAULTS.get(clean_key)
+    if value is None:
+        from_settings = settings_default(clean_key)
+        value = None if from_settings is UNSET else from_settings
+
+    resolved_type = infer_value_type(value)
+    row = SystemSetting(
+        key=clean_key,
+        value=encode_value(value, resolved_type),
+        value_type=resolved_type,
+        category=_BUILTIN_CATEGORY.get(clean_key, CATEGORY_FEATURE),
+        label=_BUILTIN_LABEL.get(clean_key, clean_key),
+        user_id=None if clean_scope == "system" else user_id,
+        workspace=workspace,
+    )
+    db.add(row)
+    db.flush()
+    return row
+
 def find_setting(db: Session, user_id: int, key: str) -> Optional[SystemSetting]:
     """按 `(user_id, key)` 取行（归属校验的唯一入口）。"""
     return db.scalar(
@@ -1243,6 +1303,73 @@ def delete_setting(db: Session, row: SystemSetting) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # 种子（随安装包分发的基线，设计 10 §7.3）
 # --------------------------------------------------------------------------- #
+
+def seed_workspace_settings(db: Session, workspace: str) -> list[SystemSetting]:
+    """给指定工作区播种它的私有配置基线行（幂等：已有则跳过）。
+
+    ## 为什么需要这一步（2026-10-25 用户口径）
+
+    「工作区级不同的配置方对应的工作区内，每个工作区内是工作区私有」。
+
+    归属工作区级的键在**系统级不该有行**（`seed_system_settings` 已按归属过滤），
+    那它们的基线值从哪来？两个来源，缺一不可：
+
+    1. **列表接口合成虚拟默认行**（`_default_row`）—— 保证页面「看得到」；
+    2. **本函数播种真实行** —— 保证首次落库时有权威的值可参照，
+       也让「删除配置恢复默认」有可回落的行。
+
+    ⚠️ 只种 `SETTING_SCOPES` 里归属 `workspace` 的键；不覆盖已有值
+    （用户改过的必须保留，与系统级种子同一升级语义）。
+    """
+    from backend.app.core.initial_data import load_initial_system_settings
+
+    clean_ws = str(workspace or "").strip()
+    if not clean_ws:
+        return []
+    payload = {row["key"]: row for row in load_initial_system_settings()}
+    existing = set(
+        db.scalars(
+            select(SystemSetting.key).where(SystemSetting.workspace == clean_ws)
+        ).all()
+    )
+    created: list[SystemSetting] = []
+    for key, fallback in BUILTIN_DEFAULTS.items():
+        if SETTING_SCOPES.get(key) != "workspace" or key in existing:
+            continue
+        row = payload.get(key) or {}
+        kind = normalize_value_type(row.get("value_type") or infer_value_type(fallback))
+        value = row.get("value", fallback)
+        try:
+            coerced = coerce_value(value, kind, key=key)
+        except ValueError:
+            kind = infer_value_type(fallback)
+            coerced = coerce_value(fallback, kind, key=key)
+        from backend.app.core.time import shanghai_now
+
+        now = shanghai_now()
+        created.append(
+            SystemSetting(
+                user_id=None,
+                workspace=clean_ws,
+                key=key,
+                value=encode_value(coerced, kind),
+                value_type=kind,
+                category=str(row.get("category") or _BUILTIN_CATEGORY.get(key, CATEGORY_FEATURE)),
+                label=str(row.get("label") or _BUILTIN_LABEL.get(key, key)),
+                description=str(row.get("description") or ""),
+                requires_restart=bool(row.get("requires_restart", False)),
+                is_dangerous=bool(row.get("is_dangerous", False)),
+                updated_by=None,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    if created:
+        db.add_all(created)
+        db.flush()
+    return created
+
+
 def seed_system_settings(db: Session) -> list[SystemSetting]:
     """播种**系统级**配置行（设计 64 §1.4：三级化后每 key 一行全局行，不再每用户一份）。
 
@@ -1262,6 +1389,17 @@ def seed_system_settings(db: Session) -> list[SystemSetting]:
     )
     created: list[SystemSetting] = []
     for key, fallback in BUILTIN_DEFAULTS.items():
+        #: ⚠️ **只种系统级的键**（2026-10-25）。
+        #:
+        #: 归属工作级的键（限流、同步并发、OCR 并发…）由 `SETTING_SCOPES` 判定后
+        #: 各自落在 `workspace='<id>'` 上，系统级不该有它们的行。原实现无条件
+        #: 给 `BUILTIN_DEFAULTS` 全部键种系统级行 ⇒ 每次启动都重建一批
+        #: `workspace IS NULL` 的孤儿行，与工作区级的行**并存**：
+        #: `list_scoped_settings(scope="system")` 会把它们列进系统配置页
+        #:（"私有配置错误地展示在配置管理页面"的直接来源），
+        #: 而 `effective_value` 取哪一行取决于查序 —— 两处真相源。
+        if SETTING_SCOPES.get(key, "system") != "system":
+            continue
         if key in existing:
             continue
         row = payload.get(key) or {}
@@ -1307,9 +1445,17 @@ def seed_builtin_settings_from_initial_data() -> int:
     db = SessionLocal()
     try:
         created = seed_system_settings(db)
+        #: 工作区级配置也播种（2026-10-25）：系统级只种系统级的键后，
+        #: 工作区级的基线行需要一个落点 —— 否则每个工作区页都只能看到
+        #: 合成虚拟行，一保存才真正建行（"删除配置恢复默认"也就没有可回落的行）。
+        #: 目前只有 xhs 一个业务工作区；接新平台时在此追加。
+        for workspace in ("xhs",):
+            created += seed_workspace_settings(db, workspace)
         if created:
             db.commit()
-            logger.info("应用初始化数据：补种 %s 行系统级运行时配置", len(created))
+            logger.info(
+                "应用初始化数据：补种 %s 行运行时配置（含工作区级）", len(created)
+            )
         return len(created)
     except Exception as exc:  # noqa: BLE001 - 起服务不能被子系统问题拖死
         db.rollback()

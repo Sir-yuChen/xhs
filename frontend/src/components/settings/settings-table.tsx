@@ -142,7 +142,12 @@ export function SettingsTable({ scope, workspace, title, canEdit = true }: Setti
     const values = await form.validateFields();
     setSaving(true);
     try {
-      if (editing && !creating) {
+      //: ⚠️ **虚拟行**（`id = -1`，后端为「该级还没配过的内置键」合成的默认行）
+      //: 必须走**新建**，不能走更新 —— 库里根本没有这一行，PUT 会 404
+      //: 「配置项不存在」（实测 2026-10-25：页面能看能点，一保存就失败）。
+      //: 判据来自后端 `_default_row` 的 `id=-1` 约定，两个实现同源。
+      const isVirtualRow = editing !== null && editing.id < 0;
+      if (editing && !creating && !isVirtualRow) {
         await updateSystemSetting(editing.key, {
           ...formValuesToUpdatePayload(values),
           scope,

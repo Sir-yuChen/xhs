@@ -366,7 +366,13 @@ def test_publish_guard_switch_reads_the_configured_value(api_client, db_factory)
 # 4) 种子 + 白名单守卫
 # --------------------------------------------------------------------------- #
 def test_seeding_is_idempotent_and_never_overwrites(db_factory):
-    """系统级播种只补缺失、**不覆盖**（升级不许重置管理员调过的值，设计 64 §1.4）。"""
+    """播种只补缺失、**不覆盖**（升级不许重置管理员调过的值，设计 64 §1.4）。
+
+    ⚠️ 2026-10-25 归属拆分后：`seed_system_settings` **只种系统级的键**，
+    工作区级的键由 `seed_workspace_settings` 种到各自工作区下。
+    原用例拿 `crawl_rate_limit_per_minute` 断言系统级行 —— 那个键已归工作区级，
+    系统级不该有它的行（否则系统配置页会列出私有配置）。改用 `log_retention_days`。
+    """
     db = db_factory()
     try:
         created = settings_service.seed_system_settings(db)
@@ -374,14 +380,52 @@ def test_seeding_is_idempotent_and_never_overwrites(db_factory):
         assert created, "首次播种必须建行"
         assert settings_service.seed_system_settings(db) == [], "第二次必须零新增"
 
-        row = settings_service._system_row(db, "crawl_rate_limit_per_minute")
+        row = settings_service._system_row(db, "log_retention_days")
+        assert row is not None, "系统级键必须有行（判据前提）"
         row.value = "7"
         db.commit()
         settings_service.seed_system_settings(db)
         db.commit()
-        assert settings_service._system_row(db, "crawl_rate_limit_per_minute").value == "7", (
+        assert settings_service._system_row(db, "log_retention_days").value == "7", (
             "播种不许覆盖管理员改过的值"
         )
+    finally:
+        db.close()
+
+
+def test_system_seeding_skips_workspace_scoped_keys(db_factory):
+    """系统级播种**不得**给工作区级的键建行。
+
+    ⚠️ 这是「私有配置错误展示在配置管理页」的**直接来源**（2026-10-25 实测）：
+    原实现无条件给 `BUILTIN_DEFAULTS` 全部键种系统级行 ⇒ 每次启动重建一批
+    `workspace IS NULL` 的孤儿行，与工作区级的行并存；
+    `list_scoped_settings(scope="system")` 会把它们列进系统配置页。
+    """
+    from backend.app.services.settings_service import SETTING_SCOPES
+    from sqlalchemy import select
+
+    db = db_factory()
+    try:
+        settings_service.seed_system_settings(db)
+        db.commit()
+        from backend.app.models.system_setting import SystemSetting
+
+        system_keys = set(
+            db.scalars(
+                select(SystemSetting.key).where(
+                    SystemSetting.user_id.is_(None), SystemSetting.workspace.is_(None)
+                )
+            ).all()
+        )
+        workspace_keys = {k for k, s in SETTING_SCOPES.items() if s == "workspace"}
+        leaked = system_keys & workspace_keys
+        assert not leaked, f"系统级播种漏进了工作区级的键：{sorted(leaked)}"
+
+        #: 工作区级播种必须能把它们种到工作区下。
+        ws_created = settings_service.seed_workspace_settings(db, "xhs")
+        db.commit()
+        assert ws_created, "工作区播种没建行"
+        assert settings_service.seed_workspace_settings(db, "xhs") == [], "第二次必须零新增"
     finally:
         db.close()
 
