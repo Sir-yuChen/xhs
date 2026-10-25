@@ -310,7 +310,14 @@ def test_scheduler_is_not_started_when_master_switch_is_off(monkeypatch):
 # --------------------------------------------------------------------------- #
 #: `lifespan` 里**允许不打桩**的裸名调用（纯读 / 内置，无副作用）。
 #: （`_data_dir_for_lease` 已随 A3b 薄壳拆分搬进 startup.py，lifespan 不再直接调用。）
-LIFESPAN_STUB_FREE_CALLS = {"get_settings", "getattr", "assert_every_route_guarded"}
+LIFESPAN_STUB_FREE_CALLS = {
+    "get_settings",
+    "getattr",
+    "assert_every_route_guarded",
+    #: 业务日志写入实现注入（设计 64 §2.3）：只把一个函数挂到 core 的模块属性上，
+    #: **不读写库、不起线程** —— 跑真的没有副作用，桩它反而测不到"接线是否生效"。
+    "register_with_audit",
+}
 #: startup 层（步内实现，`backend/app/startup.py`）里**允许不打桩**的裸名调用。
 #: （`_data_dir_for_lease` = startup 自己的纯路径函数，只算目录不碰任何资源。）
 LIFESPAN_L2_STUB_FREE_CALLS = {"get_settings", "getattr", "_data_dir_for_lease"}

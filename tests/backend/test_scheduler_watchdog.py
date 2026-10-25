@@ -379,9 +379,59 @@ def _lifespan_called_names() -> set[str]:
 
 
 def test_lifespan_wires_the_watchdog_into_the_app():
-    """光有看门狗不够：lifespan 得**起它**、也**停它**。"""
+    """光有看门狗不够：启动链得**起它**、收尾得**停它**。
+
+    ⚠️ 判据从「lifespan 里直接调用」放宽为「启动链里被调用」（2026-10-25）：
+    A3b 薄壳拆分后，`lifespan` 只调 `acquire_lease_and_start_scheduler(app)`，
+    而 `start_scheduler_watchdog(app)` 在那一步**内部**执行
+    （`startup.py:163`）。按旧判据（只看 lifespan 一级裸名）会误报「没启动」，
+    而调度器其实被守活着 —— 那种假红会让人把守活拆掉去"修测试"。
+
+    判据落在**真实调用链**上：`lifespan` → `acquire_lease_and_start_scheduler`
+    → `start_scheduler_watchdog`；停止侧仍在 `shutdown_all` 里。
+    """
     calls = _lifespan_called_names()
-    assert "start_scheduler_watchdog" in calls, "lifespan 没启动看门狗 ⇒ 主循环死了没人管"
-    assert "stop_scheduler_watchdog" in calls, (
-        "lifespan 收尾没停看门狗 ⇒ app 下线后它还会复活一台指向真库的调度器"
+    #: 启动侧：lifespan 直接调用，或经由 startup 的某一步（这里只看调度那一步）。
+    startup_tree = ast.parse(
+        (ROOT / "backend/app/startup.py").read_text(encoding="utf-8")
+    )
+    lease_step = next(
+        (
+            node
+            for node in ast.walk(startup_tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "acquire_lease_and_start_scheduler"
+        ),
+        None,
+    )
+    assert lease_step is not None, "startup 里没有 acquire_lease_and_start_scheduler"
+    started_via_step = any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "start_scheduler_watchdog"
+        for node in ast.walk(lease_step)
+    )
+    assert "start_scheduler_watchdog" in calls or started_via_step, (
+        "启动链里没有启动调度器看门狗 ⇒ 主循环死了没人管"
+    )
+    #: 停止侧同理：`shutdown_all()`（startup.py）里停，lifespan 只调它。
+    assert "shutdown_all" in calls, "lifespan 收尾没调 shutdown_all ⇒ 什么都没停"
+    shutdown_step = next(
+        (
+            node
+            for node in ast.walk(startup_tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "shutdown_all"
+        ),
+        None,
+    )
+    assert shutdown_step is not None, "startup 里没有 shutdown_all"
+    stopped = any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "stop_scheduler_watchdog"
+        for node in ast.walk(shutdown_step)
+    )
+    assert stopped, (
+        "shutdown_all 没停调度器看门狗 ⇒ app 下线后它还会复活一台指向真库的调度器"
     )
