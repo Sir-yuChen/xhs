@@ -169,7 +169,6 @@ NO_PERM_NEEDED: dict[str, str] = {
 
 #: **尚未接入**的页面清单（带写请求但零权限判断）。只许变短。
 KNOWN_UNGATED: set[str] = {
-    "pages/system/system-users-panel.tsx",
 }
 
 
@@ -248,11 +247,11 @@ class TestUngatedListOnlyShrinks:
     def test_no_new_ungated_pages(self):
         """新页面带写请求却没有权限判断 ⇒ 红。"""
         #: 源码里已经在按码判断的，也算已接入（不必登记进 PERM_GATED_PAGES）
-        gated = set(PERM_GATED_PAGES) | {
+        gated = set(PERM_GATED_PAGES) | set(CAN_GATED_PAGES) | {
             p for p in _pages_with_writes() if _has_any_perm_check(p)
         }
         actual_ungated = {p for p in _pages_with_writes() if p not in gated}
-        unexpected = actual_ungated - KNOWN_UNGATED - set(NO_PERM_NEEDED)
+        unexpected = actual_ungated - set(KNOWN_UNGATED) - set(NO_PERM_NEEDED)
         assert not unexpected, (
             "以下页面有写请求但没有 hasPermission（无权限用户也会看到按钮）：\n"
             + "\n".join(f"  {p}" for p in sorted(unexpected))
@@ -260,8 +259,8 @@ class TestUngatedListOnlyShrinks:
 
     def test_fixed_pages_are_removed_from_known_list(self):
         """修好的页面要从欠账表里删掉，否则欠账表永远不缩。"""
-        gated = set(PERM_GATED_PAGES)
-        stale = KNOWN_UNGATED & gated
+        gated = set(PERM_GATED_PAGES) | set(CAN_GATED_PAGES)
+        stale = set(KNOWN_UNGATED) & gated
         assert not stale, f"这些页面已接入权限，却还留在 KNOWN_UNGATED：{stale}"
 
 
