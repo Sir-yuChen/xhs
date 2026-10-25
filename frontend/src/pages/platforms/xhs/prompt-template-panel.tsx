@@ -27,6 +27,7 @@ import {
   Tag,
   Typography, AutoComplete } from "antd";
 import type { ColumnsType } from "antd/es/table";
+import { hasPermission } from "../../../hooks/use-permission";
 import { DeleteOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons";
 import { useCallback, useEffect, useState } from "react";
 
@@ -127,10 +128,12 @@ export function PromptTemplatePanel() {
     try {
       const values = await moduleForm.validateFields();
       if (editingModule) {
-        await updatePromptModule(editingModule.id, values);
+        if (!hasPermission("ai:prompt:edit")) { message.warning("没有编辑提示词模块的权限"); return; }
+      await updatePromptModule(editingModule.id, values);
         message.success("模块已更新");
       } else {
-        await createPromptModule(values);
+        if (!hasPermission("ai:prompt:create")) { message.warning("没有新建提示词模块的权限"); return; }
+      await createPromptModule(values);
         message.success("模块已创建");
       }
       setModuleModalOpen(false);
@@ -167,10 +170,12 @@ export function PromptTemplatePanel() {
     try {
       const values = await templateForm.validateFields();
       if (editingTemplate) {
-        await updatePromptTemplate(editingTemplate.id, values);
+        if (!hasPermission("ai:prompt:edit")) { message.warning("没有编辑提示词模板的权限"); return; }
+      await updatePromptTemplate(editingTemplate.id, values);
         message.success("模板已更新");
       } else {
-        await createPromptTemplate(values);
+        if (!hasPermission("ai:prompt:create")) { message.warning("没有新建提示词模板的权限"); return; }
+      await createPromptTemplate(values);
         message.success("模板已创建");
       }
       setTemplateModalOpen(false);
@@ -238,7 +243,8 @@ export function PromptTemplatePanel() {
             cancelText="取消"
             onConfirm={async () => {
               try {
-                await deletePromptModule(row.id);
+                if (!hasPermission("ai:prompt:delete")) { message.warning("没有删除提示词模块的权限"); return; }
+              await deletePromptModule(row.id);
                 message.success("已删除");
                 await load();
               } catch (error) {
@@ -301,7 +307,8 @@ export function PromptTemplatePanel() {
             cancelText="取消"
             onConfirm={async () => {
               try {
-                await deletePromptTemplate(row.id);
+                if (!hasPermission("ai:prompt:delete")) { message.warning("没有删除提示词模板的权限"); return; }
+              await deletePromptTemplate(row.id);
                 message.success("已删除");
                 await load();
               } catch (error) {

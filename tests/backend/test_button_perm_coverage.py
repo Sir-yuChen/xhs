@@ -63,6 +63,19 @@ PERM_GATED_PAGES: dict[str, tuple[str, ...]] = {
     "pages/platforms/xhs/violation-manage-page.tsx": (
         "xhs:violation:relatedDelete",
     ),
+    "pages/platforms/xhs/prompt-template-panel.tsx": (
+        "ai:prompt:edit",
+        "ai:prompt:create",
+        "ai:prompt:delete",
+    ),
+    "pages/llm-gateway/llm-gateway-page.tsx": (
+        "ai:gateway:edit",
+        "ai:gateway:create",
+    ),
+    "pages/system/system-dict-panel.tsx": (
+        "system:dict:edit",
+        "system:dict:create",
+    ),
     "pages/platforms/xhs/library-page.tsx": (
         "xhs:library:publish",
         "xhs:library:sync",
@@ -84,7 +97,6 @@ PERM_GATED_PAGES: dict[str, tuple[str, ...]] = {
 
 #: **尚未接入**的页面清单（带写请求但零权限判断）。只许变短。
 KNOWN_UNGATED: set[str] = {
-    "pages/llm-gateway/llm-gateway-page.tsx",
     "pages/login/login-page.tsx",
     "pages/platforms/xhs/accounts-page.tsx",
     "pages/platforms/xhs/auto-ops-panel.tsx",
@@ -101,13 +113,11 @@ KNOWN_UNGATED: set[str] = {
     "pages/platforms/xhs/product-draft-modal.tsx",
     "pages/platforms/xhs/product-edit-modal.tsx",
     "pages/platforms/xhs/product-publish-wizard.tsx",
-    "pages/platforms/xhs/prompt-template-panel.tsx",
     "pages/platforms/xhs/publish-config-step1.tsx",
     "pages/platforms/xhs/publish-config-step2.tsx",
     "pages/platforms/xhs/publish-page.tsx",
     "pages/platforms/xhs/sku-name-optimize-modal.tsx",
     "pages/platforms/xhs/sync-specified-items-modal.tsx",
-    "pages/system/system-dict-panel.tsx",
     "pages/system/system-menus-panel.tsx",
     "pages/system/system-roles-panel.tsx",
     "pages/system/system-users-panel.tsx",
@@ -159,8 +169,13 @@ class TestGatedPagesDoNotRegress:
             #: ① `{hasPermission("X") && (<Button …/>)}`
             #: ② 菜单项数组里 `...(hasPermission("X") ? [{…}] : [])` ——
             #:    无权限时该项**整条不出现**，与 ① 同义（比 `[].filter()` 更直白）。
+            #: ③ 写在提交函数 / 事件处理里：`if (!hasPermission("X")) { …; return; }`
+            #:    —— 用于「嵌在复合区块里、单独删掉会让布局塌掉」的动作。
             assert re.search(
-                r'hasPermission\("[^"]+"\)\s*&&|hasPermission\("[^"]+"\)\s*\?', src
+                r'hasPermission\("[^"]+"\)\s*&&'
+                r'|hasPermission\("[^"]+"\)\s*\?'
+                #: ③ 提交/handler 里前置拦截：`if (!hasPermission("X")) { … ; return; }`
+                r'|!hasPermission\("[^"]+"\)', src
             ), (
                 f"{rel} 的 hasPermission 没写成条件渲染（可能是 disabled 或三元）"
             )

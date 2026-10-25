@@ -1,4 +1,5 @@
 import { WaitMask } from "../../components/ui/wait-mask";
+import { hasPermission } from "../../hooks/use-permission";
 import { RowActions } from "../../components/common/row-actions";
 import {
   AlertOutlined,
@@ -322,7 +323,8 @@ function GatewaysPage() {
     setSaving(true);
     try {
       if (editing) {
-        await updateGatewayConfig(editing.id, {
+        if (!hasPermission("ai:gateway:edit")) { message.warning("没有编辑网关配置的权限"); return; }
+      await updateGatewayConfig(editing.id, {
           ...(values.name ? { name: values.name } : {}),
           ...(values.base_url ? { base_url: values.base_url } : {}),
           ...(values.access_token ? { access_token: values.access_token } : {}),
@@ -336,7 +338,8 @@ function GatewaysPage() {
         // 「添加服务商时默认拉取一次」）。同步是否成功看响应上的 `sync`：
         // ⚠️ **同步失败不阻断创建**（服务商照样建成），故这里按 `sync.ok` 分开提示，
         // 失败时明确引导用户去操作列重试 —— 不静默、也不谎报成功。
-        const created = await createGatewayConfig({
+        if (!hasPermission("ai:gateway:create")) { message.warning("没有新建网关配置的权限"); return; }
+      const created = await createGatewayConfig({
           name: values.name,
           base_url: values.base_url || "http://127.0.0.1:3000",
           access_token: values.access_token || "",
@@ -413,6 +416,7 @@ function GatewaysPage() {
     setTypeSavingId(modelId);
     try {
       // 父服务商 id 直接取子节点上的 `parentId`（树构建时已带回，不必再查表）
+      if (!hasPermission("ai:gateway:edit")) { message.warning("没有修改模型的权限"); return; }
       await updateGatewayModel(row.parentId, modelId, { model_type: next });
       message.success(`已改为${modelTypeOptions.find((o) => o.value === next)?.label ?? next}`);
       await load();
@@ -435,6 +439,7 @@ function GatewaysPage() {
     if (modelId === null) return; // 无 id 发不出 PATCH
     setTogglingModelId(modelId);
     try {
+      if (!hasPermission("ai:gateway:edit")) { message.warning("没有修改模型的权限"); return; }
       await updateGatewayModel(row.parentId, modelId, { enabled: next });
       message.success(next ? `已启用 ${row.model}` : `已停用 ${row.model}`);
       await load();
@@ -972,7 +977,8 @@ function AlertsPage() {
     try {
       if (editing) {
         // 作用域不可改（同网关不可改的旧纪律）：只允许改阈值类字段
-        await updateGatewayAlert(editing.id, {
+        if (!hasPermission("ai:gateway:edit")) { message.warning("没有编辑预警规则的权限"); return; }
+      await updateGatewayAlert(editing.id, {
           threshold: values.threshold,
           operator: values.operator,
           window_seconds: values.window_seconds,
@@ -981,7 +987,8 @@ function AlertsPage() {
         });
         message.success("已更新预警规则");
       } else {
-        await createGatewayAlert({
+        if (!hasPermission("ai:gateway:create")) { message.warning("没有新建预警规则的权限"); return; }
+      await createGatewayAlert({
           gateway_id: gatewayId,
           model_name: modelName,
           platform: values.platform ?? "",

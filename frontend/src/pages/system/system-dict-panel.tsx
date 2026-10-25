@@ -39,6 +39,7 @@ import {
   Typography,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
+import { hasPermission } from "../../hooks/use-permission";
 import { useCallback, useEffect, useState } from "react";
 
 import { RowActions } from "../../components/common/row-actions";
@@ -420,8 +421,12 @@ function DictTypeModal({
       onOk={async () => {
         try {
           const values = await form.validateFields();
-          if (editing) await updateSystemDictType(editing.id, values);
-          else await createSystemDictType(values);
+          if (!hasPermission("system:dict:edit")) { message.warning("没有编辑字典类型的权限"); return; }
+      if (editing) await updateSystemDictType(editing.id, values);
+          else {
+        if (!hasPermission("system:dict:create")) { message.warning("没有新建字典类型的权限"); return; }
+        await createSystemDictType(values);
+      }
           message.success("已保存");
           onSaved();
         } catch (error) {
@@ -505,8 +510,12 @@ function DictItemModal({
       onOk={async () => {
         try {
           const values = await form.validateFields();
-          if (editing) await updateSystemDictItem(editing.id, values);
-          else if (typeId) await createSystemDictItem({ type_id: typeId, ...values });
+          if (!hasPermission("system:dict:edit")) { message.warning("没有编辑字典项的权限"); return; }
+      if (editing) await updateSystemDictItem(editing.id, values);
+          else if (typeId) {
+        if (!hasPermission("system:dict:create")) { message.warning("没有新建字典项的权限"); return; }
+        await createSystemDictItem({ type_id: typeId, ...values });
+      }
           message.success("已保存");
           onSaved();
         } catch (error) {
