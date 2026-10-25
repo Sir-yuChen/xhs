@@ -194,17 +194,44 @@ def _live_next_run_map(request: Request) -> dict[int, datetime]:
 
 
 def _get_visible_job(db: Session, current_user: User, job_id: int) -> ScheduledJob:
-    """可见即可操作：**只认本人的行**（DEF-066，设计 15 §4.1.1）。
+    """可见即可操作；越权的判据 = **任务归属的工作区 vs 调用者的权限**。
 
-    原实现放行 `user_id IS NULL` 的全局内置行（所有登录用户可见、可暂停、可删、
-    可执行）—— 那就是多用户互相操作同一份数据的入口，已随全局行退役一并删除。
-    别人的行 ⇒ 404（不区分「不存在」与「不属于你」，避免越权探测）。
+    ## 设计 69 后的两层判据
+
+    1. **系统级任务**（`workspace="system"`）：只有 admin 能碰
+       （路由层挂 `system:scheduler:manage`）。
+    2. **工作区级任务**（`workspace="xhs"` 等）：该工作区的成员能操作
+       （用户口径「工作区域任务在对应工作区内展示，以及相关的操作等」）。
+
+    ⚠️ 这里必须显式挡住「工作区成员去操作系统级任务」——
+    路由层只挂了 `system:scheduler:manage` 到写端点，而工作区成员要能执行
+    本工作区任务，就不能让他卡在路由层。所以判据下移到本函数：
+    **有 `xhs:taskcenter:manage` 的人只能动 `workspace="xhs"` 的行**。
+
+    别人的行 / 不存在 ⇒ 404（不区分，避免越权探测）。
     """
     job = db.get(ScheduledJob, job_id)
-    #: 设计 69：任务定义已收为公共（不再是"某人的任务"）⇒ 只判存在。
-    #: 越权由路由层 `system:scheduler:manage` 挡住（只有 admin 能到这个端点）。
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="JOB_NOT_FOUND")
+
+    from backend.app.core.perms import has_perm  # noqa: PLC0415
+
+    #: admin 走通（`user_perms` 对 admin 派生全部权限码，见 core/perms.py）。
+    if has_perm(current_user, "system:scheduler:manage"):
+        return job
+
+    job_workspace = (job.workspace or "").strip()
+    if job_workspace == "system":
+        #: 系统级任务只归系统管理 —— 工作区成员即使能执行本工作区任务，也碰不到这里。
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="JOB_SYSTEM_WORKSPACE_REQUIRES_ADMIN"
+        )
+
+    #: 工作区级任务：该工作区的成员可操作（只作用于本工作区数据）。
+    if not has_perm(current_user, f"{job_workspace}:taskcenter:manage"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="JOB_WORKSPACE_PERM_REQUIRED"
+        )
     return job
 
 
@@ -536,10 +563,22 @@ def create_job(
         spec = get_job_spec(payload.job_key.strip())
     except KeyError:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="JOB_KEY_UNSUPPORTED") from None
-    # R18（2026-09-24 用户口径「调用目标应支持所有的任务目标」）：内置目标**也允许
-    # 新建**。原先这里一律 400 `JOB_BUILTIN_PROTECTED`，导致下拉里只剩 1 项可选。
-    # 内置性只约束**种子行**本身（禁删 / 禁改 key/params，见 `DELETE` / `PUT`），
-    # 不约束「用户新建一条同目标、不同调度的任务行」—— 二者是并行的两条行。
+    # 设计 69（2026-10-25）：`job_key` **全表唯一** —— 一种任务只有一份定义。
+    #
+    # ⚠️ 原实现（R18「内置目标也允许新建」）允许同 key 多行，那是「每用户一份定义」
+    # 时代的形态。改成公共定义后，这里若不预检，重复建会走到 `db.commit()` 抛
+    # `IntegrityError`（唯一索引 `uq_scheduled_jobs_job_key`）—— 表现为 **500**，
+    # 用户看到「服务器内部错误」而不是「这个任务已存在」。
+    # 500 会让人以为是代码 bug，实际问题在输入 ⇒ 必须显式 409。
+    existing = db.query(ScheduledJob).filter(ScheduledJob.job_key == spec.key).first()
+    if existing is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"任务 {spec.key} 已存在（{existing.name}）—— "
+                "一种任务只有一份定义，请直接修改已有任务，不要重复创建"
+            ),
+        )
     schedule = payload.schedule or _DEFAULT_JOB_SCHEDULE
     try:
         validate_schedule(schedule, registry_allows_concurrent=spec.allow_concurrent)

@@ -59,11 +59,16 @@ def _override_database(tmp_path):
 
     ⚠️ `tmp_path` 参数保留（既有调用点都传它），实际不使用。
     """
+    global _ENGINE
     from backend.app.core.database import Base, get_db
     from tests.backend.conftest import make_engine
 
-    engine = make_engine(tmp_path)
-    Base.metadata.create_all(bind=engine)
+    #: 每个用例都调一次本函数 ⇒ 在这里重置，保证「用例独占一个 schema」。
+    #: 用具名 fixture 会更干净，但这个文件有 40+ 处 `_override_database(tmp_path)`
+    #: 调用点，逐个改成 fixture 注入是更大的改动面（且容易漏）。
+    _ENGINE = make_engine(tmp_path)
+    Base.metadata.create_all(bind=_ENGINE)
+    engine = _ENGINE
     TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
     def override_get_db():
@@ -102,18 +107,65 @@ def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+#: 本用例的 engine（`_override_database` 建的那一个）—— `_db()` 必须复用它。
+#: ⚠️ `make_engine()` 每次调用**新建一个 schema**（按 pid+计数分配），
+#: 重复调用会得到一个空库，断言永远读到 0 行。这是迁 PG 时最容易踩的坑。
+_ENGINE: Engine | None = None
+
+
 def _db(tmp_path):
-    """直接开一个指向**同一测试 schema** 的 session（断言落库用）。
+    """直接开一个指向**本用例那个 schema** 的 session（断言落库用）。
 
-    ⚠️ 用 `make_engine(tmp_path)` 会拿到**同一个** schema —— 它按 pid+计数
-    分配，同一次调用里重复建会得到新 schema。所以这里改成「连到本用例已建的
-    那个 schema」：从 `_SCHEMA_BY_ENGINE` 拿不到时退化为新 schema（旧用例的
-    `_db` 只在自己独占的库里断言，两者等价）。
+    ⚠️ 必须复用 `_ENGINE`：`make_engine()` 每次调用都新建 schema，
+    以前 SQLite 用固定文件路径，重复 `create_engine` 连的是**同一个库**，
+    迁到 PG schema 后这个前提没了 —— 不复用就会静默读到空库。
     """
-    from tests.backend.conftest import make_engine
+    global _ENGINE
+    if _ENGINE is None:
+        from backend.app.core.database import Base
+        from tests.backend.conftest import make_engine
 
-    engine = make_engine(tmp_path)
-    return sessionmaker(autocommit=False, autoflush=False, bind=engine)()
+        _ENGINE = make_engine(tmp_path)
+        Base.metadata.create_all(bind=_ENGINE)
+    return sessionmaker(autocommit=False, autoflush=False, bind=_ENGINE)()
+
+
+def _ensure_fanout_target(SessionLocal) -> int:
+    """给 fan-out 造一个目标（持平台账号的用户），返回其 user_id。
+
+    ## 为什么执行类用例都必须先调它（设计 69 §4.2）
+
+    `user_scoped=True` 的任务触发时遍历「持平台账号的用户」。测试库若是空的：
+
+    * 目标集合为空 ⇒ 任务记 `skipped`（判据：没有目标不等于出错，
+      这与「执行失败」是两回事，回执必须分开）；
+    * 于是「执行成功」类断言全部变成 `assert 'skipped' == 'success'`。
+
+    ⚠️ 幂等：已有账号就直接复用。用例体内多处调用安全。
+    """
+    from backend.app.models.platform_account import PlatformAccount
+    from backend.app.models.user import User
+
+    db = SessionLocal()
+    try:
+        existing = db.query(PlatformAccount).first()
+        if existing is not None:
+            return int(existing.user_id)
+        owner = db.query(User).order_by(User.id.asc()).first()
+        assert owner is not None, "先注册用户再调 _ensure_fanout_target"
+        db.add(
+            PlatformAccount(
+                user_id=owner.id,
+                platform="xhs",
+                sub_type="pc",
+                nickname="fanout-target",
+                status="active",
+            )
+        )
+        db.commit()
+        return int(owner.id)
+    finally:
+        db.close()
 
 
 def _make_user(SessionLocal, username: str = "job-owner") -> int:
@@ -229,11 +281,23 @@ def test_create_job_rejects_unknown_job_key(tmp_path):
         app.dependency_overrides.clear()
 
 
-def test_create_job_allows_builtin_key(tmp_path):
-    """R18：内置目标**也允许新建**（原一律 400 `JOB_BUILTIN_PROTECTED` 已废）。"""
+def test_create_job_rejects_duplicate_builtin_key(tmp_path):
+    """设计 69：`job_key` 全表唯一 ⇒ 用内置 key 新建必须 400/409，不能建第二行。
+
+    ## 这条用例反转了 R18 的旧断言（原句保留）
+
+    原 `test_create_job_allows_builtin_key`：「R18：内置目标**也允许新建**
+    （原一律 400 `JOB_BUILTIN_PROTECTED` 已废）」。
+
+    被推翻的理由：一个 `job_key` 对应**一份定义**（一行 Cron / 一套参数），
+    允许同 key 多行 ⇒ 调度器不知道该跑哪一行、日志不知道该记给哪份定义。
+    XXL-Job 的 `xxl_job_info` 也是 job 唯一。用户口径「任务收为公共」正是这个意思。
+
+    ⇒ 现在必须**明确拒绝**，且拒绝原因要能指向已存在的那一行。
+    """
     _override_database(tmp_path)
     try:
-        token = _register("job-builtin-create")
+        token = _register("job-builtin-dup")
         response = client.post(
             "/api/schedule/jobs",
             headers=_auth(token),
@@ -243,56 +307,42 @@ def test_create_job_allows_builtin_key(tmp_path):
                 "schedule": {"trigger_type": "cron", "cron_expression": "0 0 8 * * *"},
             },
         )
-        assert response.status_code == 200, response.text
-        assert response.json()["is_builtin"] is True
+        assert response.status_code in (400, 409), response.text
+        detail = str(response.json().get("detail", ""))
+        assert "cookie_health_check" in detail or "已存在" in detail or "唯一" in detail, (
+            f"拒绝原因没有指向冲突的 job_key：{detail}"
+        )
     finally:
         app.dependency_overrides.clear()
 
 
-def test_create_job_supports_same_target_multiple_times(tmp_path):
-    """R18：同一目标可建多条不同调度的任务行（已建过仍可再建，互不冲突）。
+def test_create_job_rejects_unregistered_key(tmp_path):
+    """设计 69：**不允许用户创建任务** ⇒ 注册表外的 key 一律拒。
 
-    ⚠️ DEF-066：注册即播种 ⇒ 列表里同 key 的行 = 播种 1 + 自建 2 = 3。
+    原 `test_create_job_supports_same_target_multiple_times` 断言
+    「同一目标可建多条」—— 那正是现在要禁止的形态。
+
+    现在创建端点第一句就是 `get_job_spec(payload.job_key)`：
+    不在注册表里的 key（`custom.*`）直接 400 `JOB_KEY_UNSUPPORTED`。
+    用户口径「暂时不允许用户创建任务」在这里落地 —— 能建的只有系统已注册的任务。
     """
-    SessionLocal = _override_database(tmp_path)
+    _override_database(tmp_path)
     try:
-        token = _register("job-same-target-twice")
-        first = client.post(
+        token = _register("job-custom-key")
+        response = client.post(
             "/api/schedule/jobs",
             headers=_auth(token),
             json={
-                "name": "巡检-早",
-                "job_key": "system.cookie_health_check",
-                "schedule": {"trigger_type": "cron", "cron_expression": "0 0 9 * * *"},
+                "name": "我的巡检",
+                "job_key": "custom.health_check",
+                "schedule": {"trigger_type": "cron", "cron_expression": "0 0 8 * * *"},
             },
         )
-        assert first.status_code == 200, first.text
-        second = client.post(
-            "/api/schedule/jobs",
-            headers=_auth(token),
-            json={
-                "name": "巡检-晚",
-                "job_key": "system.cookie_health_check",
-                "schedule": {"trigger_type": "cron", "cron_expression": "0 0 21 * * *"},
-            },
-        )
-        assert second.status_code == 200, second.text
-        assert first.json()["id"] != second.json()["id"]
-
-        listed = client.get("/api/schedule/jobs", headers=_auth(token)).json()
-        same_key = [
-            item for item in listed["items"]
-            if item["job_key"] == "system.cookie_health_check"
-        ]
-        # 注册播种 1 行 + 本测试自建 2 行（DEF-066 前的原断言是 2）
-        assert len(same_key) == 3
+        assert response.status_code == 400, response.text
+        assert response.json()["detail"] == "JOB_KEY_UNSUPPORTED"
     finally:
         app.dependency_overrides.clear()
 
-
-# --------------------------------------------------------------------------- #
-# DEF-066 · 账号维度隔离（2026-09-24 用户口径「所有数据按平台账号维度隔离」）
-# --------------------------------------------------------------------------- #
 def test_create_job_rejects_foreign_account_ids(tmp_path, monkeypatch):
     """建行也过 account_ids 归属校验（原只在 PUT 有 ⇒ 可建引用别人账号的任务行）。"""
     SessionLocal = _override_database(tmp_path)
@@ -379,6 +429,7 @@ def test_execute_job_refuses_row_without_owner(tmp_path, monkeypatch):
         job_id = job.id
         db.close()
 
+        _ensure_fanout_target(SessionLocal)
         outcome = execute_job(job_id, trigger_type="scheduled")
         assert outcome["status"] == "failed"
 
@@ -417,6 +468,7 @@ def test_logs_are_isolated_between_users(tmp_path, monkeypatch):
         db.refresh(job)
         job_id = job.id
         db.close()
+        _ensure_fanout_target(SessionLocal)
         execute_job(job_id, trigger_type="scheduled")
 
         # ① 主人看得见
@@ -1214,6 +1266,7 @@ def test_execute_job_success_writes_log_and_counts(tmp_path, monkeypatch):
         job_id = job.id
         db.close()
 
+        _ensure_fanout_target(SessionLocal)
         outcome = execute_job(job_id, trigger_type="scheduled")
         assert outcome["status"] == "success"
 
@@ -1283,18 +1336,21 @@ def test_execute_job_writes_progress_for_success_and_failure(tmp_path, monkeypat
         # ① 成功且任务未上报 progress ⇒ 100
         _stub_spec(lambda **kwargs: {"ok": True})
         job_id = _make_job(SessionLocal(), "进度A")
+        _ensure_fanout_target(SessionLocal)
         assert execute_job(job_id, trigger_type="scheduled")["status"] == "success"
         assert _latest_progress() == 100, "成功未上报 ⇒ 进度应为 100"
 
         # ② 成功且任务上报 42 ⇒ 尊重上报值（不覆盖为 100）
         _stub_spec(lambda **kwargs: {"ok": True, "progress": 42})
         job_id = _make_job(SessionLocal(), "进度B")
+        _ensure_fanout_target(SessionLocal)
         assert execute_job(job_id, trigger_type="scheduled")["status"] == "success"
         assert _latest_progress() == 42, "任务上报 42 ⇒ 进度应为 42"
 
         # ②b 上报越界值 ⇒ 夹回 0~100（写库不得出现 150 / -3）
         _stub_spec(lambda **kwargs: {"ok": True, "progress": 150})
         job_id = _make_job(SessionLocal(), "进度B2")
+        _ensure_fanout_target(SessionLocal)
         assert execute_job(job_id, trigger_type="scheduled")["status"] == "success"
         assert _latest_progress() == 100, "上报 150 ⇒ 应夹到 100"
 
@@ -1306,6 +1362,7 @@ def test_execute_job_writes_progress_for_success_and_failure(tmp_path, monkeypat
 
         _stub_spec(_boom)
         job_id = _make_job(SessionLocal(), "进度C")
+        _ensure_fanout_target(SessionLocal)
         assert execute_job(job_id, trigger_type="scheduled")["status"] == "failed"
         assert _latest_progress() == 0, "没上报过进度 ⇒ 保留初始 0（不是被清成 0）"
     finally:
@@ -1488,6 +1545,7 @@ def test_at_job_completes_after_success_and_never_backs_off(tmp_path, monkeypatc
         job_id = job.id
         db.close()
 
+        _ensure_fanout_target(SessionLocal)
         outcome = execute_job(job_id, trigger_type="scheduled")
         assert outcome["status"] == "success"
 
@@ -1513,6 +1571,7 @@ def test_at_job_completes_after_success_and_never_backs_off(tmp_path, monkeypatc
         failing_id = failing.id
         db.close()
 
+        _ensure_fanout_target(SessionLocal)
         assert execute_job(failing_id, trigger_type="scheduled")["status"] == "failed"
         db = SessionLocal()
         failing = db.get(ScheduledJob, failing_id)
@@ -1545,6 +1604,7 @@ def test_delete_job_keeps_logs_with_null_job_id(tmp_path, monkeypatch):
         job_id = job.id
         db.close()
 
+        _ensure_fanout_target(SessionLocal)
         execute_job(job_id, trigger_type="scheduled")
 
         response = client.delete(f"/api/schedule/jobs/{job_id}", headers=_auth(token))
@@ -1584,7 +1644,9 @@ def test_logs_batch_delete_and_clean(tmp_path, monkeypatch):
         job_id = job.id
         db.close()
 
+        _ensure_fanout_target(SessionLocal)
         execute_job(job_id)
+        _ensure_fanout_target(SessionLocal)
         execute_job(job_id)
 
         response = client.get("/api/schedule/logs", headers=_auth(token))
@@ -1646,86 +1708,64 @@ def test_legacy_auto_tasks_runner_is_gone():
     assert not hasattr(sched, "start_due_publish_scheduler")
 
 
-def test_ensure_builtin_jobs_seeds_from_application_initial_data(tmp_path, monkeypatch):
-    """运行期补种以**应用初始化数据**为权威（设计 15 §4.5，R24）。
+def test_ensure_builtin_jobs_seeds_from_application_init_data(tmp_path):
+    """设计 69：内置任务是**公共定义**，与用户数无关。
 
-    ⚠️ 本用例的前身 `test_ensure_builtin_jobs_is_idempotent_and_matches_migration_seeds`
-    （断言「运行期补种值 == 迁移 `_SYSTEM_SEEDS` 换算值」）**已被 R24 取代（2026-09-24）**：
-    迁移播种段已删，种子改由随安装包分发的 `config/initial_data/scheduled_jobs.json`
-    铺设 —— 「迁移 vs 运行期两条路径必须一致」的对照对象**不存在了**。
-    原断言的**意图保留**（值不许漂）：只是对照源从迁移常量换成数据文件。
-
-    ⚠️ **DEF-066（2026-09-24）再修订**：内置行**按用户各持一份**（原全局共享单行
-    `user_id IS NULL` 已废）⇒ 本用例钉 per-user 播种：每个用户 10 行、值逐字段
-    等于数据文件、二次调用不插行、**库里不允许再有 NULL 行**。
+    原断言「两个用户 × 13 个内置目标 = 26 行」（DEF-066 的「每用户各持一份」）。
+    现在：**13 行，不管有几个用户**。
     """
-    from backend.app.core.initial_data import load_initial_scheduled_jobs
-    from backend.app.services.scheduler_service import ensure_builtin_jobs
-
-    SessionLocal = _override_database(tmp_path)
-    _patch_service_sessions(monkeypatch, SessionLocal)
+    _override_database(tmp_path)
     try:
-        first_user = _make_user(SessionLocal, "seed-first")
-        second_user = _make_user(SessionLocal, "seed-second")
-        db = SessionLocal()
-        first = ensure_builtin_jobs(db)
-        expected_per_user = len(load_initial_scheduled_jobs())
-        assert len(first) == 2 * expected_per_user, f"两个用户 × {expected_per_user} 个内置目标"
-        second = ensure_builtin_jobs(db)
-        assert second == [], "幂等：已存在的 (user, job_key) 不插行"
-        rows = list(db.scalars(select(ScheduledJob).where(ScheduledJob.is_builtin.is_(True))))
-        db.close()
+        _register("seed-a")
+        _register("seed-b")
 
-        initial = {row["job_key"]: row for row in load_initial_scheduled_jobs()}
-        by_user: dict[int, dict[str, ScheduledJob]] = {}
-        for row in rows:
-            assert row.user_id is not None, "DEF-066：不允许再有全局行（user_id IS NULL）"
-            by_user.setdefault(row.user_id, {})[row.job_key] = row
-        assert set(by_user) == {first_user, second_user}, "每个用户各持一份"
-        for user_id, user_rows in by_user.items():
-            assert set(user_rows) == set(initial), f"user {user_id} 的 key 集合必须一一对应"
-            for key, row in user_rows.items():
-                expected = initial[key]
-                assert row.name == expected["name"], key
-                assert row.trigger_type == expected["trigger_type"], key
-                assert row.cron_expression == expected["cron_expression"], key
-                assert row.status == expected["status"], key
-                assert row.params == expected["params"], key
-                assert (row.misfire_policy, row.concurrent) == (
-                    expected["misfire_policy"],
-                    expected["concurrent"],
-                ), key
+        from backend.app.models.scheduled_job import ScheduledJob  # noqa: PLC0415
+        from backend.app.services import scheduler_service  # noqa: PLC0415
+
+        with _db(tmp_path) as db:
+            scheduler_service.ensure_builtin_jobs(db)
+            total = db.query(ScheduledJob).count()
+            keys = {row.job_key for row in db.query(ScheduledJob).all()}
+
+        #: 种子权威 = 随包初始化数据（`config/initial_data/scheduled_jobs.json`），
+        #: 不是代码里的兜底字典（那个只在文件缺该 key 时才用）。
+        import json  # noqa: PLC0415
+
+        seed = json.loads(
+            (ROOT / "config" / "initial_data" / "scheduled_jobs.json").read_text(encoding="utf-8")
+        )
+        rows_seed = seed.get("jobs") or seed.get("items") or seed
+        expected = {item["job_key"] for item in rows_seed}
+        assert keys == expected, "内置任务集合与初始化数据不一致"
+        assert total == len(expected), (
+            f"内置任务应为公共 {len(expected)} 行（与用户数无关），实际 {total} 行"
+        )
     finally:
         app.dependency_overrides.clear()
 
 
-def test_register_seeds_builtin_jobs_for_the_new_user(tmp_path, monkeypatch):
-    """DEF-066：新用户**注册即播种**（启动播种只覆盖启动时已存在的用户）。"""
-    from backend.app.core.initial_data import load_initial_scheduled_jobs
+def test_register_does_not_duplicate_builtin_jobs(tmp_path):
+    """设计 69：注册**不再播种**（播种是启动/首次访问的一次性动作）。
 
-    SessionLocal = _override_database(tmp_path)
-    _patch_service_sessions(monkeypatch, SessionLocal)
+    原 `test_register_seeds_builtin_jobs_for_the_new_user` 断言
+    「注册完打开任务中心就应有初始化数据里的全部内置任务」——
+    在公共定义下这条已由「启动播种」承担，注册再播一次只会撞唯一键。
+    """
+    _override_database(tmp_path)
     try:
-        # 先有一个老用户（启动播种的口径）
-        _make_user(SessionLocal, "seed-old")
-        token = _register("seed-new")
-        new_user = _user_of(token)
+        from backend.app.models.scheduled_job import ScheduledJob  # noqa: PLC0415
+        from backend.app.services import scheduler_service  # noqa: PLC0415
 
-        db = SessionLocal()
-        try:
-            rows = db.scalars(
-                select(ScheduledJob).where(ScheduledJob.user_id == new_user)
-            ).all()
-            assert {row.job_key for row in rows} == {
-                row["job_key"] for row in load_initial_scheduled_jobs()
-            }, "注册完打开任务中心就应有初始化数据里的全部内置任务"
-        finally:
-            db.close()
+        with _db(tmp_path) as db:
+            scheduler_service.ensure_builtin_jobs(db)
+            before = db.query(ScheduledJob).count()
 
-        # 列表端点也只返回本人的
-        listed = client.get("/api/schedule/jobs", headers=_auth(token)).json()
-        assert listed["total"] >= 7
-        assert all(item["user_id"] == new_user for item in listed["items"])
+        _register("seed-after-startup")
+
+        with _db(tmp_path) as db:
+            after = db.query(ScheduledJob).count()
+
+        assert after == before, f"注册又插了 {after - before} 行内置任务（应 0）"
     finally:
         app.dependency_overrides.clear()
 
@@ -2217,6 +2257,7 @@ class TestParamDefaults:
             job_id = job.id
             db.close()
 
+            _ensure_fanout_target(SessionLocal)
             execute_job(job_id, trigger_type="scheduled")
         finally:
             pass

@@ -1,56 +1,66 @@
 /**
- * 工作区 → 任务（`/platforms/xhs/tasks`，设计 69 §4.3 补充）。
+ * 工作区级任务中心（`/platforms/xhs/tasks`，侧栏「任务」）。
  *
- * ## 为什么要有这一页（2026-10-25 用户口径）
+ * ## 两级独立（2026-10-25 用户口径）
  *
- * 「任务中心分为两级，系统级和工作区」「工作区域为每个区域中私有」。
+ * 「任务中心分为两级，系统级和工作区域级」
+ * 「系统任务在系统管理中展示操作等，工作区域任务在对应工作区内展示，
+ *   以及相关的操作等，**相互独立展示不集中在系统管理中**」
  *
- * 两级各有**自己的入口** —— 只在系统管理里放一个带「小红书任务」页签的页面，
- * 用户在小红书工作区里就找不到「我的任务在哪」。这与配置三级的做法同源：
- * **归属哪一级，就在哪一级的页面出现**。
+ * | 级别 | 入口 | 内容 | 权限 |
+ * |---|---|---|---|
+ * | 系统级 | 系统管理 → 任务中心 | `workspace="system"`（清理本机资源）| admin |
+ * | **工作区级** | **本页** | `workspace="xhs"`（只作用于本工作区数据）| 工作区成员 |
  *
- * ## 与系统管理任务中心的区别（同一套组件，不同参数）
+ * ## 两处曾经做错的地方（记录，别再犯）
  *
- * | 项 | 系统管理 → 任务中心 | 本页 |
- * |---|---|---|
- * | 看什么 | 系统任务 + 工作区任务 + 全部执行日志 | **只本工作区**的任务与日志 |
- * | 谁能进 | 仅 admin（`system:scheduler:view`）| 有本工作区权限即可（`xhs:taskcenter:view`）|
- * | 能改吗 | admin 能改 Cron / 暂停 / 立即执行 | **只读**（用户口径「暂时不允许用户创建任务」）|
+ * ① 把工作区级做成**系统管理里的一个页签**（「小红书任务」）—— 用户截图指出
+ *    「小红书中的任务中心没有了」。与配置那次同一种错法：私有内容塞进系统级
+ *    页面 + 标注「只对该工作区生效」。**标注 ≠ 归属**。
+ * ② 改成独立页后又做成**严格只读** —— 用户第二次纠正「以及相关的操作等」。
+ *    把「暂时不允许用户创建任务」读成了「什么都不能做」：
+ *    不许**新建**（那是系统注册表的事）≠ 不许**操作已注册的任务**。
  *
- * ⚠️ 「只读」不是靠前端不给按钮 —— 写端点全部挂 `system:scheduler:manage`，
- * 普通用户即使构造请求也拿不到 200。前端不渲染只是体验层。
+ * 本页能力边界：可「立即执行 / 暂停恢复 / 看日志」，不可新建或改 key。
  *
- * ## 复用
+ * ## 与配置页同形态
  *
- * 列定义与日志表格都用公共组件（`task-columns` / `job-log-table`），
- * 本页只传参数（`workspace="xhs"`、`readOnly`）。
+ * 单卡片 + 标题「小红书任务」。说明只进问号图标（用户口径「说明简短」）。
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { QuestionCircleOutlined, ReloadOutlined } from "@ant-design/icons";
-import { Button, Card, Space, Table, Tabs, Tooltip, Typography } from "antd";
+import { App, Button, Card, Space, Table, Tabs, Tooltip, Typography } from "antd";
 
-import { fetchScheduleJobs, fetchScheduleLogs } from "../../lib/api";
+import {
+  changeScheduleJobStatus,
+  fetchScheduleJobs,
+  fetchScheduleLogs,
+  runScheduleJobOnce,
+} from "../../lib/api";
 import type { ScheduledJob, ScheduledJobLog } from "../../types";
-import { buildTaskColumns, workspaceLabel } from "../../components/schedule/task-columns";
+import { buildTaskColumns } from "../../components/schedule/task-columns";
 import { JobLogTable } from "../../components/schedule/job-log-table";
 import { JobLogDetailModal } from "../../components/schedule/job-log-detail-modal";
 
 const { Text } = Typography;
 
+/** 当前页面所属工作区（`/platforms/xhs/tasks` 挂在 xhs 工作区下）。 */
 const WORKSPACE = "xhs";
+const WORKSPACE_LABEL = "小红书";
 
-/** 本工作区的任务定义（只读）。 */
-function WorkspaceJobs() {
+/** 本工作区的任务（可操作：立即执行 / 暂停恢复）。 */
+function WorkspaceJobTable({ onShowLogs }: { onShowLogs: () => void }) {
+  const { message } = App.useApp();
   const [rows, setRows] = useState<ScheduledJob[]>([]);
   const [loading, setLoading] = useState(false);
+  const [busyId, setBusyId] = useState<number | null>(null);
   const [error, setError] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      //: 端点已支持 `workspace` 过滤（设计 69 §4.3）—— 服务端筛，
-      //: 不把别的工作区的任务传到前端再丢弃。
+      //: 服务端筛选（端点支持 `workspace`）—— 不把别的工作区的任务传到前端再丢。
       const res = await fetchScheduleJobs({ workspace: WORKSPACE, page: 1, page_size: 200 });
       setRows(res.items ?? []);
       setError("");
@@ -65,7 +75,71 @@ function WorkspaceJobs() {
     void load();
   }, [load]);
 
-  const columns = buildTaskColumns({ showTriggerDetail: true });
+  const runOnce = useCallback(
+    async (job: ScheduledJob) => {
+      setBusyId(job.id);
+      try {
+        await runScheduleJobOnce(job.id);
+        message.success(`已触发「${job.name}」`);
+        await load();
+      } catch (err) {
+        message.error(err instanceof Error ? err.message : "触发失败");
+      } finally {
+        setBusyId(null);
+      }
+    },
+    [load, message],
+  );
+
+  const toggleStatus = useCallback(
+    async (job: ScheduledJob) => {
+      const next = job.status === "active" ? "paused" : "active";
+      setBusyId(job.id);
+      try {
+        await changeScheduleJobStatus(job.id, next);
+        message.success(next === "active" ? "已恢复" : "已暂停");
+        await load();
+      } catch (err) {
+        message.error(err instanceof Error ? err.message : "操作失败");
+      } finally {
+        setBusyId(null);
+      }
+    },
+    [load, message],
+  );
+
+  //: 列由公共工厂产出（用户口径「共用的提取成公共组件，不同参数和页面调用展示对应内容」）。
+  const columns = useMemo(
+    () =>
+      buildTaskColumns({
+        showWorkspace: false,
+        showTriggerDetail: true,
+        renderActions: (job) => (
+          <Space size={0}>
+            <Button
+              size="small"
+              type="link"
+              loading={busyId === job.id}
+              onClick={() => void runOnce(job)}
+            >
+              立即执行
+            </Button>
+            <Button
+              size="small"
+              type="link"
+              loading={busyId === job.id}
+              onClick={() => void toggleStatus(job)}
+            >
+              {job.status === "active" ? "暂停" : "恢复"}
+            </Button>
+            <Button size="small" type="link" onClick={onShowLogs}>
+              日志
+            </Button>
+          </Space>
+        ),
+      }),
+    [busyId, runOnce, toggleStatus, onShowLogs],
+  );
 
   if (error) {
     return <Text type="danger">{error}</Text>;
@@ -88,7 +162,7 @@ function WorkspaceJobs() {
           loading={loading}
           columns={columns}
           dataSource={rows}
-          scroll={{ x: 1400, y: "100%" }}
+          scroll={{ x: 1500, y: "100%" }}
           pagination={false}
         />
       </div>
@@ -96,8 +170,8 @@ function WorkspaceJobs() {
   );
 }
 
-/** 本工作区的执行日志（只读）。 */
-function WorkspaceLogs({ onOpen }: { onOpen: (log: ScheduledJobLog) => void }) {
+/** 本工作区的执行日志。 */
+function WorkspaceLogTab({ onOpenLog }: { onOpenLog: (log: ScheduledJobLog) => void }) {
   const [rows, setRows] = useState<ScheduledJobLog[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -142,7 +216,7 @@ function WorkspaceLogs({ onOpen }: { onOpen: (log: ScheduledJobLog) => void }) {
           showJobKey
           showProgress
           scrollY="100%"
-          onRowClick={onOpen}
+          onRowClick={onOpenLog}
         />
       </div>
     </div>
@@ -151,6 +225,12 @@ function WorkspaceLogs({ onOpen }: { onOpen: (log: ScheduledJobLog) => void }) {
 
 export function WorkspaceTasksPage() {
   const [logOpen, setLogOpen] = useState<ScheduledJobLog | null>(null);
+  const [activeTab, setActiveTab] = useState("jobs");
+
+  /** 任务行点「日志」⇒ 切到日志页签。 */
+  const showLogs = useCallback(() => {
+    setActiveTab("logs");
+  }, []);
 
   return (
     <div style={{ height: "calc(100vh - 87px)", display: "flex", flexDirection: "column" }}>
@@ -168,8 +248,8 @@ export function WorkspaceTasksPage() {
         }}
         title={
           <span>
-            {workspaceLabel(WORKSPACE)}任务
-            <Tooltip title="本工作区的定时任务由管理员统一配置，此处只读。">
+            {WORKSPACE_LABEL}任务
+            <Tooltip title="仅作用于本工作区的数据。系统级任务在「系统管理 → 任务中心」。">
               <QuestionCircleOutlined style={{ marginLeft: 6, color: "rgba(0,0,0,0.45)" }} />
             </Tooltip>
           </span>
@@ -177,16 +257,18 @@ export function WorkspaceTasksPage() {
       >
         <Tabs
           className="fill-tabs"
+          activeKey={activeTab}
+          onChange={setActiveTab}
           items={[
             {
               key: "jobs",
               label: "任务",
-              children: <WorkspaceJobs />,
+              children: <WorkspaceJobTable onShowLogs={showLogs} />,
             },
             {
               key: "logs",
               label: "执行日志",
-              children: <WorkspaceLogs onOpen={setLogOpen} />,
+              children: <WorkspaceLogTab onOpenLog={setLogOpen} />,
             },
           ]}
         />

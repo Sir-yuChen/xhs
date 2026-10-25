@@ -33,7 +33,7 @@ import { Button, Card, Space, Table, Tabs, Tag, Tooltip, Typography } from "antd
 
 import { fetchScheduleJobs, fetchScheduleLogs } from "../../lib/api";
 import type { ScheduledJob, ScheduledJobLog } from "../../types";
-import { buildTaskColumns, workspaceLabel } from "../../components/schedule/task-columns";
+import { buildTaskColumns } from "../../components/schedule/task-columns";
 import { JobLogTable } from "../../components/schedule/job-log-table";
 import { JobLogDetailModal } from "../../components/schedule/job-log-detail-modal";
 
@@ -201,7 +201,7 @@ export function SystemSchedulerPanel() {
         title={
           <span>
             任务中心
-            <Tooltip title="全站共用一套调度器。系统任务清理本系统自己的资源；工作区任务只作用于该工作区的数据。">
+            <Tooltip title="系统级任务清理本机资源（记录表 / 暂存目录 / 图片空间），各工作区自己的任务在该工作区内查看。">
               <QuestionCircleOutlined style={{ marginLeft: 6, color: "rgba(0,0,0,0.45)" }} />
             </Tooltip>
             <Tag color="purple" style={{ marginLeft: 8, fontSize: 11 }}>
@@ -217,11 +217,6 @@ export function SystemSchedulerPanel() {
               key: "system",
               label: `系统任务`,
               children: <JobTable workspace="system" onOpenLog={setLogOpen} />,
-            },
-            {
-              key: "xhs",
-              label: `${workspaceLabel("xhs")}任务`,
-              children: <JobTable workspace="xhs" onOpenLog={setLogOpen} />,
             },
             {
               key: "logs",

@@ -102,7 +102,8 @@ ROUTE_PERMS: Final[dict[str, str]] = {
     "PATCH /api/llm/gateway-configs/{config_id}/models/{model_id}": "ai:model:edit",
     "PATCH /api/notes/{note_id}/publish-status": "xhs:note:edit",
     "PATCH /api/publish/jobs/{job_id}": "xhs:publish:submit",
-    "PATCH /api/schedule/jobs/{job_id}/status": "system:scheduler:manage",
+    #: 暂停 / 恢复：同上，按任务归属在服务内判。
+    "PATCH /api/schedule/jobs/{job_id}/status": "xhs:taskcenter:manage",
     "PATCH /api/topics/{topic_id}": "xhs:topic:edit",
     "PATCH /api/xhs/data-package-rules/rules/{rule_id}": "xhs:rule:create",
     "PATCH /api/xhs/data-package-rules/sets/{set_id}": "xhs:rule:create",
@@ -169,7 +170,10 @@ ROUTE_PERMS: Final[dict[str, str]] = {
     "GET /api/schedule/overview": "EXEMPT_ADMIN",
     "POST /api/schedule/cron/validate": "system:scheduler:view",
     "POST /api/schedule/jobs": "system:scheduler:manage",
-    "POST /api/schedule/jobs/{job_id}/run": "system:scheduler:manage",
+    #: 执行一次（设计 69 两级）：路由层只要求**工作区级的执行码**，
+    #: 「这条任务属于哪个工作区、调用者够不够」由 `_get_visible_job` 判 ——
+    #: 静态路由表表达不了「按数据归属取不同权限码」。
+    "POST /api/schedule/jobs/{job_id}/run": "xhs:taskcenter:manage",
     "POST /api/settings": "EXEMPT_SELF",
     "POST /api/system/deps/download": "system:setting:edit",
     "POST /api/system/deps/reset": "system:setting:edit",
