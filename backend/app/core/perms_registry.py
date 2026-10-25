@@ -120,7 +120,16 @@ SYSTEM_PERMS: tuple[PermSpec, ...] = (
     PermSpec("system:log:view", "日志查看", "C", "/system/logs", WORKSPACE_SYSTEM, "system"),
     # 定时任务总览（设计 64 §3.3）：跨工作区只读 + 管理动作；数据端点 admin 判角色。
     PermSpec("system:scheduler:view", "任务中心", "C", "/system/scheduler", WORKSPACE_SYSTEM, "system"),
-    PermSpec("system:scheduler:manage", "管理定时任务", "F", "/system/scheduler", WORKSPACE_SYSTEM, "system"),
+    #: 系统级任务按钮：**每个按钮一个码**（2026-10-25 红线，颗粒度到按钮）。
+    PermSpec("system:scheduler:create", "新增任务", "F", "/system/scheduler", WORKSPACE_SYSTEM, "system"),
+    PermSpec("system:scheduler:edit", "编辑任务", "F", "/system/scheduler", WORKSPACE_SYSTEM, "system"),
+    PermSpec("system:scheduler:delete", "删除任务", "F", "/system/scheduler", WORKSPACE_SYSTEM, "system"),
+    PermSpec("system:scheduler:run", "立即执行", "F", "/system/scheduler", WORKSPACE_SYSTEM, "system"),
+    PermSpec("system:scheduler:toggle", "暂停恢复", "F", "/system/scheduler", WORKSPACE_SYSTEM, "system"),
+    PermSpec("system:scheduler:deleteLogs", "删除日志", "F", "/system/scheduler", WORKSPACE_SYSTEM, "system"),
+    PermSpec("system:scheduler:cleanTasks", "清理任务记录", "F", "/system/scheduler", WORKSPACE_SYSTEM, "system"),
+    PermSpec("system:scheduler:runDue", "手动跑到期任务", "F", "/system/scheduler", WORKSPACE_SYSTEM, "system"),
+    PermSpec("system:scheduler:cleanLogs", "清理日志", "F", "/system/scheduler", WORKSPACE_SYSTEM, "system"),
 )
 
 # ---------------------------------------------------------------------------
@@ -286,7 +295,11 @@ PAGE_VIEW_PERMS: tuple[PermSpec, ...] = (
     #: 操作（只作用于本工作区数据），但**不能新建**（那是系统注册表的事，
     #: 创建端点只接受已注册的 job_key）。
     PermSpec("xhs:taskcenter:view", "任务", "C", "/platforms/xhs/tasks", _X, _X),
-    PermSpec("xhs:taskcenter:manage", "任务操作", "F", "/platforms/xhs/tasks", _X, _X),
+    #: 工作区级任务按钮：**每个按钮一个码**（2026-10-25 红线「所有按钮的权限必须独立，
+    #: 不允许合并使用同一个权限码，颗粒度达到按钮级别」）。
+    PermSpec("xhs:taskcenter:run", "立即执行", "F", "/platforms/xhs/tasks", _X, _X),
+    PermSpec("xhs:taskcenter:toggle", "暂停恢复", "F", "/platforms/xhs/tasks", _X, _X),
+    PermSpec("xhs:taskcenter:viewLogs", "查看日志", "F", "/platforms/xhs/tasks", _X, _X),
     #: ⚠️ **v1.1.0 梳理补登（2026-10-24）**：原注释写「个人资料不挂码，故不计」，
     #: 那是把两件事混了 ——
     #:   * 「**端点**不挂码」是对的（每个人都要能改自己的密码，挂码会把人锁死，

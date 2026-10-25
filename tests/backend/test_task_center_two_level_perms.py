@@ -46,11 +46,13 @@ class TestTwoLevelPermission:
     def test_workspace_perm_codes_are_registered(self):
         """两级各自的 view/manage 码都要在注册表里（漏登记 ⇒ 启动守卫拒启）。"""
         src = PERMS.read_text(encoding="utf-8")
+        #: 2026-10-25 红线：一按钮一码 ⇒ manage 已拆成 run / toggle / viewLogs。
         for code in (
             "xhs:taskcenter:view",
-            "xhs:taskcenter:manage",
+            "xhs:taskcenter:run",
+            "xhs:taskcenter:toggle",
+            "xhs:taskcenter:viewLogs",
             "system:scheduler:view",
-            "system:scheduler:manage",
         ):
             assert code in src, f"权限码 {code} 没登记"
 
@@ -63,9 +65,9 @@ class TestTwoLevelPermission:
         ):
             line = next((ln for ln in src.splitlines() if route in ln and ":" in ln), "")
             assert line, f"{route} 没登记权限码"
-            assert "xhs:taskcenter:manage" in line, (
-                f"{route} 挂的不是工作区执行码 ⇒ 工作区成员点了必然 403：{line.strip()}"
-            )
+            assert (
+                "xhs:taskcenter:run" in line or "xhs:taskcenter:toggle" in line
+            ), f"{route} 挂的不是工作区按钮码：{line.strip()}"
 
     def test_system_level_job_cannot_be_operated_by_workspace_perm(self):
         """`_get_visible_job` 必须**按任务工作区**判，不能只判存在。"""
@@ -73,10 +75,10 @@ class TestTwoLevelPermission:
         assert 'workspace == "system"' in src or "job_workspace ==" in src, (
             "_get_visible_job 没有按 job.workspace 分支 ⇒ 任何登录用户都能操作系统级任务"
         )
-        assert "system:scheduler:manage" in src, (
+        assert "system:scheduler:run" in src or "system:scheduler:toggle" in src, (
             "没有以 system:scheduler:manage 作为系统级任务的判据"
         )
-        assert "taskcenter:manage" in src, (
+        assert "taskcenter:run" in src and "taskcenter:toggle" in src, (
             "没有以 <workspace>:taskcenter:manage 作为工作区任务的判据"
         )
 
@@ -88,6 +90,6 @@ class TestTwoLevelPermission:
             "DELETE /api/schedule/jobs/{job_id}",
         ):
             line = next((ln for ln in src.splitlines() if f'"{route}"' in ln), "")
-            assert "system:scheduler:manage" in line, (
-                f"{route} 不该放开给工作区（用户口径：不允许用户创建任务）：{line.strip()}"
+            assert "system:scheduler:" in line and "xhs:" not in line, (
+                f"{route} 不该放开给工作区（红线：系统级按钮用 system 码）：{line.strip()}"
             )

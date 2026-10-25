@@ -29,11 +29,13 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { QuestionCircleOutlined, ReloadOutlined } from "@ant-design/icons";
-import { Button, Card, Space, Table, Tabs, Tag, Tooltip, Typography } from "antd";
+import { App, Button, Card, Space, Table, Tabs, Tag, Tooltip, Typography } from "antd";
 
 import { fetchScheduleJobs, fetchScheduleLogs } from "../../lib/api";
 import type { ScheduledJob, ScheduledJobLog } from "../../types";
 import { buildTaskColumns } from "../../components/schedule/task-columns";
+import { hasPermission } from "../../hooks/use-permission";
+import { changeScheduleJobStatus, runScheduleJobOnce } from "../../lib/api";
 import { JobLogTable } from "../../components/schedule/job-log-table";
 import { JobLogDetailModal } from "../../components/schedule/job-log-detail-modal";
 
@@ -73,7 +75,75 @@ function JobTable({
   }, [load]);
 
   //: 列由公共工厂产出，本页只传参数（不在这里复写列的渲染逻辑）。
-  const columns = useMemo(() => buildTaskColumns({ showWorkspace: false, showTriggerDetail: true }), []);
+  const { message } = App.useApp();
+  const [busyId, setBusyId] = useState<number | null>(null);
+
+  const runOnce = useCallback(
+    async (job: ScheduledJob) => {
+      setBusyId(job.id);
+      try {
+        await runScheduleJobOnce(job.id);
+        message.success(`已触发「${job.name}」`);
+        await load();
+      } catch (err) {
+        message.error(err instanceof Error ? err.message : "触发失败");
+      } finally {
+        setBusyId(null);
+      }
+    },
+    [load, message],
+  );
+
+  const toggleStatus = useCallback(
+    async (job: ScheduledJob) => {
+      const next = job.status === "active" ? "paused" : "active";
+      setBusyId(job.id);
+      try {
+        await changeScheduleJobStatus(job.id, next);
+        message.success(next === "active" ? "已恢复" : "已暂停");
+        await load();
+      } catch (err) {
+        message.error(err instanceof Error ? err.message : "操作失败");
+      } finally {
+        setBusyId(null);
+      }
+    },
+    [load, message],
+  );
+
+  const columns = useMemo(
+    () =>
+      buildTaskColumns({
+        showWorkspace: false,
+        showTriggerDetail: true,
+        //: 一按钮一码（2026-10-25 红线）：每个按钮各判各的权限码。
+        renderActions: (job) => (
+          <Space size={0}>
+            {hasPermission("system:scheduler:run") && (
+              <Button
+                size="small"
+                type="link"
+                loading={busyId === job.id}
+                onClick={() => void runOnce(job)}
+              >
+                立即执行
+              </Button>
+            )}
+            {hasPermission("system:scheduler:toggle") && (
+              <Button
+                size="small"
+                type="link"
+                loading={busyId === job.id}
+                onClick={() => void toggleStatus(job)}
+              >
+                {job.status === "active" ? "暂停" : "恢复"}
+              </Button>
+            )}
+          </Space>
+        ),
+      }),
+    [busyId, runOnce, toggleStatus],
+  );
 
   if (error) {
     return (

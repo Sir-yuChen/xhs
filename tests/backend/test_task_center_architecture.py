@@ -155,7 +155,15 @@ def test_job_endpoints_require_admin_codes():
     ):
         assert route in perms, f"{route} 没登记权限码"
     assert "xhs:job:" not in perms, "写端点还挂在用户级任务码上"
-    assert "system:scheduler:manage" in perms
+    #: 2026-10-25 红线「一按钮一码」⇒ `system:scheduler:manage` 这个合并码已拆成
+    #: create / edit / delete / run / toggle / cleanLogs / deleteLogs，
+    #: 各自挂在对应端点上（见 `test_button_level_perms.py`）。
+    for code in (
+        "system:scheduler:create",
+        "system:scheduler:edit",
+        "system:scheduler:delete",
+    ):
+        assert code in perms, f"按钮码 {code} 没登记"
 
 
 def test_job_list_no_longer_filters_by_user():

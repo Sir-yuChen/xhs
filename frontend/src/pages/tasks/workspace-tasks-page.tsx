@@ -42,6 +42,7 @@ import type { ScheduledJob, ScheduledJobLog } from "../../types";
 import { buildTaskColumns } from "../../components/schedule/task-columns";
 import { JobLogTable } from "../../components/schedule/job-log-table";
 import { JobLogDetailModal } from "../../components/schedule/job-log-detail-modal";
+import { hasPermission } from "../../hooks/use-permission";
 
 const { Text } = Typography;
 
@@ -116,25 +117,32 @@ function WorkspaceJobTable({ onShowLogs }: { onShowLogs: () => void }) {
         showTriggerDetail: true,
         renderActions: (job) => (
           <Space size={0}>
-            <Button
-              size="small"
-              type="link"
-              loading={busyId === job.id}
-              onClick={() => void runOnce(job)}
-            >
-              立即执行
-            </Button>
-            <Button
-              size="small"
-              type="link"
-              loading={busyId === job.id}
-              onClick={() => void toggleStatus(job)}
-            >
-              {job.status === "active" ? "暂停" : "恢复"}
-            </Button>
-            <Button size="small" type="link" onClick={onShowLogs}>
-              日志
-            </Button>
+            {/* 一按钮一码（2026-10-25 红线）：三个按钮各判各的，不共用权限码。 */}
+            {hasPermission("xhs:taskcenter:run") && (
+              <Button
+                size="small"
+                type="link"
+                loading={busyId === job.id}
+                onClick={() => void runOnce(job)}
+              >
+                立即执行
+              </Button>
+            )}
+            {hasPermission("xhs:taskcenter:toggle") && (
+              <Button
+                size="small"
+                type="link"
+                loading={busyId === job.id}
+                onClick={() => void toggleStatus(job)}
+              >
+                {job.status === "active" ? "暂停" : "恢复"}
+              </Button>
+            )}
+            {hasPermission("xhs:taskcenter:viewLogs") && (
+              <Button size="small" type="link" onClick={onShowLogs}>
+                日志
+              </Button>
+            )}
           </Space>
         ),
       }),

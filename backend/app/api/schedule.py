@@ -77,6 +77,7 @@ from backend.app.services.scheduled_job_runner import run_job_in_background
 router = APIRouter(prefix="/schedule", tags=["schedule"])
 
 
+
 # --------------------------------------------------------------------------- #
 # 序列化与查找
 # --------------------------------------------------------------------------- #
@@ -216,23 +217,27 @@ def _get_visible_job(db: Session, current_user: User, job_id: int) -> ScheduledJ
 
     from backend.app.core.perms import has_perm  # noqa: PLC0415
 
-    #: admin 走通（`user_perms` 对 admin 派生全部权限码，见 core/perms.py）。
-    if has_perm(current_user, "system:scheduler:manage"):
-        return job
-
     job_workspace = (job.workspace or "").strip()
+
+    #: 权限码**一按钮一码**（2026-10-25 红线），所以这里按「动作」分开判：
+    #: 执行看 `:run`，暂停/恢复看 `:toggle`。两者都放行才算可见。
+    #: admin 由 `user_perms()` 派生 `ALL_PERMS`，自然两条都有。
     if job_workspace == "system":
-        #: 系统级任务只归系统管理 —— 工作区成员即使能执行本工作区任务，也碰不到这里。
+        if has_perm(current_user, "system:scheduler:run") or has_perm(
+            current_user, "system:scheduler:toggle"
+        ):
+            return job
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="JOB_SYSTEM_WORKSPACE_REQUIRES_ADMIN"
         )
 
-    #: 工作区级任务：该工作区的成员可操作（只作用于本工作区数据）。
-    if not has_perm(current_user, f"{job_workspace}:taskcenter:manage"):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="JOB_WORKSPACE_PERM_REQUIRED"
-        )
-    return job
+    if has_perm(current_user, f"{job_workspace}:taskcenter:run") or has_perm(
+        current_user, f"{job_workspace}:taskcenter:toggle"
+    ):
+        return job
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN, detail="JOB_WORKSPACE_PERM_REQUIRED"
+    )
 
 
 def _validate_account_ids(db: Session, current_user: User, account_ids: object) -> list[int]:
@@ -559,6 +564,14 @@ def create_job(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    """新增任务（权限码 `system:scheduler:manage`，正常开放）。
+
+    2026-10-25 用户口径「正常开放无单独处理」—— 不加开关、不拆独立权限码，
+    与管理/执行共用 `system:scheduler:manage`。
+
+    ⚠️ `job_key` 全表唯一（设计 69）：同一 key 重复建会 409，
+    因为「一种任务只有一份定义」。
+    """
     try:
         spec = get_job_spec(payload.job_key.strip())
     except KeyError:

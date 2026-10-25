@@ -35,6 +35,7 @@ ROUTER = ROOT / "frontend" / "src" / "app" / "router.tsx"
 PERMS = ROOT / "backend" / "app" / "core" / "perms_registry.py"
 WS_PAGE = ROOT / "frontend" / "src" / "pages" / "tasks" / "workspace-tasks-page.tsx"
 SYSTEM_PANEL = ROOT / "frontend" / "src" / "pages" / "system" / "system-scheduler-panel.tsx"
+SCHEDULE_API = ROOT / "backend" / "app" / "api" / "schedule.py"
 
 
 def _seed_rows() -> list[dict]:
@@ -96,9 +97,9 @@ class TestWorkspaceCanOperate:
     def test_registry_exposes_a_manage_code_for_the_workspace(self):
         """工作区要有自己的执行码 —— 只有 view 的话按钮点了必然 403。"""
         src = PERMS.read_text(encoding="utf-8")
-        assert "xhs:taskcenter:manage" in src, (
-            "没有 xhs:taskcenter:manage ⇒ 工作区成员点「立即执行」会 403"
-        )
+        #: 一按钮一码（红线）：执行与暂停各有各的码。
+        for code in ("xhs:taskcenter:run", "xhs:taskcenter:toggle"):
+            assert code in src, f"没有 {code} ⇒ 对应按钮点了会 403"
 
     def test_workspace_page_renders_operations(self):
         """工作区页**必须**有执行/暂停操作（第二版做成只读被用户否掉）。"""
@@ -109,41 +110,55 @@ class TestWorkspaceCanOperate:
         assert "changeScheduleJobStatus" in code, "没有接暂停/恢复请求函数"
 
 
-class TestCreateStaysAdminOnly:
-    """新建 / 删除仍只归系统管理（「暂时不允许用户创建任务」）。"""
+class TestCreateIsOpen:
+    """新增任务**正常开放**（2026-10-25 用户口径「正常开放无单独处理」）。
 
-    def test_no_workspace_create_or_delete_code(self):
-        """不能给工作区开新建/删除的权限码。"""
-        src = PERMS.read_text(encoding="utf-8")
-        for forbidden in ("xhs:taskcenter:create", "xhs:taskcenter:delete", "xhs:job:create"):
-            assert forbidden not in src, (
-                f"注册表出现 {forbidden} ⇒ 用户侧能建/删任务，"
-                "违反「暂时不允许用户创建任务」"
-            )
+    ## 这条口径的来历
 
-    @pytest.mark.parametrize(
-        "route",
-        [
-            "POST /api/schedule/jobs",
-            #: 改任务只有 `/status` 这一个入口（没有裸 PATCH `/jobs/{id}`）——
-            #: 别按 REST 惯例猜，猜错等于这条守卫永远抓不到真口子。
-            "DELETE /api/schedule/jobs/{job_id}",
-        ],
-    )
-    def test_create_and_delete_require_admin_code(self, route):
-        """建/删必须 admin 专属（工作区码够不着）。"""
+    中途曾按「暂时不给权限」做成：代码开关 → 独立权限码 → admin 除外，
+    用户最终定为**不做任何单独处理**：不加开关、不拆独立码，
+    与执行/暂停共用 `system:scheduler:manage`。
+
+    ⇒ 守卫只钉两件**实质**的事：写端点有码、且 `job_key` 唯一。
+    """
+
+    def test_create_endpoint_is_guarded(self):
+        """写端点必须有权限码（漏挂 ⇒ 启动守卫拒启）。"""
         from backend.app.core import route_perms  # noqa: PLC0415
 
-        spec = route_perms.ROUTE_PERMS.get(route)
-        assert spec is not None, f"{route} 没登记权限码 ⇒ 写路由守卫会拒绝启动"
-        assert "system:scheduler:manage" in str(spec), (
-            f"{route} 的权限码是 {spec}，不是 admin 专属 ⇒ 普通用户可建/删任务"
+        spec = route_perms.ROUTE_PERMS.get("POST /api/schedule/jobs")
+        assert spec is not None, "POST /api/schedule/jobs 没登记权限码"
+        assert "system:scheduler:create" in str(spec), (
+            f"新增任务权限码是 {spec}，应为独立的 system:scheduler:create"
+            "（红线：一按钮一码，不与执行/暂停共用）"
         )
 
-    def test_workspace_page_has_no_create_or_delete(self):
-        """工作区页不许出现新建/删除入口。"""
-        code = _code_only(WS_PAGE)
-        for label in ("新建任务", "删除任务"):
-            assert label not in code, f"工作区页出现「{label}」"
-        assert "createScheduleJob" not in code, "工作区页接了创建请求函数"
-        assert "deleteScheduleJob" not in code, "工作区页接了删除请求函数"
+    def test_no_leftover_switch_or_extra_code(self):
+        """不许留开关，也不许留独立权限码 —— 口径是「无单独处理」。"""
+        assert "ALLOW_JOB_CREATE" not in SCHEDULE_API.read_text(encoding="utf-8"), (
+            "还留着 ALLOW_JOB_CREATE 开关"
+        )
+        #: 反过来：这个码**必须**存在（它现在是「新增任务」按钮的独立码）。
+        assert "system:scheduler:create" in PERMS.read_text(encoding="utf-8"), (
+            "缺少 system:scheduler:create ⇒ 新增按钮没有自己的权限码"
+        )
+
+    def test_duplicate_job_key_is_rejected(self):
+        """`job_key` 全表唯一（设计 69）—— 同 key 建第二行必须 409，不能 500。"""
+        import ast  # noqa: PLC0415
+
+        src = SCHEDULE_API.read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        body = next(
+            (
+                n
+                for n in ast.walk(tree)
+                if isinstance(n, ast.FunctionDef) and n.name == "create_job"
+            ),
+            None,
+        )
+        assert body is not None, "找不到 create_job"
+        segment = ast.get_source_segment(src, body) or ""
+        assert "409" in segment or "HTTP_409_CONFLICT" in segment, (
+            "create_job 没有唯一性预检 ⇒ 重复建会抛 IntegrityError 变 500"
+        )
