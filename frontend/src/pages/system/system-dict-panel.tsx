@@ -41,6 +41,7 @@ import {
 import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useState } from "react";
 
+import { RowActions } from "../../components/common/row-actions";
 import { useCan } from "../../hooks/use-can";
 import {
   createSystemDictItem,
@@ -227,26 +228,24 @@ export function SystemDictPanel() {
     {
       title: "操作",
       key: "ops",
-      width: 120,
+      //: 2026-10-25 用户口径「所有操作列均不允许溢出页面」：
+      //: 原 120px 手写按钮组，改用统一容器（无权限不渲染 / 超出进「更多」）。
+      width: 140,
       render: (_: unknown, row) => (
-        <Space size={0}>
-          {can("system:dict:edit") && (
-            <Button
-              size="small"
-              type="link"
-              icon={<EditOutlined />}
-              onClick={() => setItemModal({ mode: "edit", row })}
-            >
-              编辑
-            </Button>
-          )}
-          {can("system:dict:delete") && (
-            <Button
-              size="small"
-              type="link"
-              danger
-              icon={<DeleteOutlined />}
-              onClick={() => {
+        <RowActions
+          width={140}
+          maxInline={2}
+          items={[
+            {
+              label: "编辑",
+              permission: "system:dict:edit",
+              onClick: () => setItemModal({ mode: "edit", row }),
+            },
+            {
+              label: "删除",
+              permission: "system:dict:delete",
+              danger: true,
+              onClick: () => {
                 modal.confirm({
                   title: `删除字典项「${row.label}」？`,
                   okButtonProps: { danger: true },
@@ -258,12 +257,10 @@ export function SystemDictPanel() {
                     void refreshDicts();
                   },
                 });
-              }}
-            >
-              删除
-            </Button>
-          )}
-        </Space>
+              },
+            },
+          ]}
+        />
       ),
     },
   ];

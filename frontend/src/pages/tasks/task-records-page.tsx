@@ -104,6 +104,7 @@ import {
   fetchTaskDetail,
   retryTask,
 } from "../../lib/api";
+import { RowActions, type ActionItem } from "../../components/common/row-actions";
 import { hasPermission } from "../../hooks/use-permission";
 import {
   TASK_RECORD_GROUP_LABELS,
@@ -602,75 +603,56 @@ export function TaskRecordsPage() {
     {
       title: "操作",
       key: "actions",
+      //: 2026-10-25 用户口径「所有操作列均不允许溢出页面」：
+      //: 原 200px 里可能同时出现 详情/取消/重试/清理 四个按钮 ⇒ 裁切。
+      //: 改用统一容器：常用 3 个直显，其余进「更多」；禁用原因走 hint。
       width: 200,
+      fixed: "right",
       render: (_: unknown, row) => {
         // 批次行是**入队动作的记账行**，不是可执行任务：不给取消 / 重试
         // （后端同样 400 —— 只改父行会让父子树自相矛盾）。
         const batch = isBatchRow(row);
         // 清理**两个维度**（2026-09-26 用户口径「清理功能分为两个维度，批次维度和
-        // 批次内的操作」）：
-        //  * 批次行 → 「清理整批」：整批原子删除，批内有**正在执行 / 待执行**（或
-        //    待重试）的明细就**禁用 + Tooltip 说明原因**（`batchCleanBlockReason`，
-        //    与后端 `batch_clean_blockers` 同判据）—— 功能在位、条件不满足，
-        //    比按钮凭空消失更说得清；
-        //  * 明细行 → 「清理」：只删这一条，批次与同批其它明细留着。
+        // 批次内的操作」）：批次行清整批（批内有在跑/待跑的则禁用并说明原因，
+        // 判据 `batchCleanBlockReason` 与后端 `batch_clean_blockers` 同源）；
+        // 明细行只清这一条。
         const cleanBlockReason = batch ? batchCleanBlockReason(row) : null;
-        return (
-          <Space size={4}>
-            <Button type="link" size="small" style={{ padding: 0 }} onClick={() => void openDetail(row)}>
-              详情
-            </Button>
-            {!batch && canCancelTask(row.status) && hasPermission("xhs:record:cancel") && (
-              <Button
-                type="link"
-                size="small"
-                danger
-                style={{ padding: 0 }}
-                loading={actionLoading === row.id}
-                onClick={() => void onCancel(row)}
-              >
-                取消
-              </Button>
-            )}
-            {!batch && canRetryTask(row.status) && hasPermission("xhs:record:retry") && (
-              <Button
-                type="link"
-                size="small"
-                style={{ padding: 0 }}
-                loading={actionLoading === row.id}
-                onClick={() => void onRetry(row)}
-              >
-                重试
-              </Button>
-            )}
-            <Tooltip
-              title={
-                cleanBlockReason ??
-                (canCleanTask(row.status)
-                  ? undefined
-                  : "只有已完成 / 已取消的明细可以清理；待重试的先点重试，进行中的等它跑完。")
-              }
-            >
-              {/* ⚠️ disabled 的 Button 不冒泡鼠标事件 ⇒ Tooltip 必须套一层 span
-                  （否则「为什么不能清」的说明根本弹不出来）。 */}
-              hasPermission(batch ? "xhs:record:clean" : "xhs:record:clean") && (
-              <span style={{ display: "inline-flex" }}>
-                <Button
-                  type="link"
-                  size="small"
-                  danger
-                  style={{ padding: 0 }}
-                  disabled={batch ? Boolean(cleanBlockReason) : !canCleanTask(row.status)}
-                  loading={cleaning}
-                  onClick={() => (batch ? onCleanBatch(row) : onCleanItem(row))}
-                >
-                  {batch ? "清理整批" : "清理"}
-                </Button>
-              </span>
-              )
-            </Tooltip>
-          </Space>
-        );
+        const cleanDisabled = batch ? Boolean(cleanBlockReason) : !canCleanTask(row.status);
+        const items: ActionItem[] = [
+          { label: "详情", onClick: () => void openDetail(row) },
+        ];
+        if (!batch && canCancelTask(row.status)) {
+          items.push({
+            label: "取消",
+            permission: "xhs:record:cancel",
+            danger: true,
+            loading: actionLoading === row.id,
+            onClick: () => void onCancel(row),
+          });
+        }
+        if (!batch && canRetryTask(row.status)) {
+          items.push({
+            label: "重试",
+            permission: "xhs:record:retry",
+            loading: actionLoading === row.id,
+            onClick: () => void onRetry(row),
+          });
+        }
+        items.push({
+          label: batch ? "清理整批" : "清理",
+          permission: "xhs:record:clean",
+          danger: true,
+          disabled: cleanDisabled,
+          loading: cleaning,
+          //: 禁用时把「为什么不能清」放进 hint（原 Tooltip 的说明文案）
+          hint:
+            cleanBlockReason ??
+            (canCleanTask(row.status)
+              ? undefined
+              : "只有已完成 / 已取消的可清理"),
+          onClick: () => (batch ? onCleanBatch(row) : onCleanItem(row)),
+        });
+        return <RowActions width={200} maxInline={3} items={items} />;
       },
     },
   ];

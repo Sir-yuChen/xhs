@@ -59,6 +59,7 @@ import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useState } from "react";
 
 import { menuIcon, menuIconNames } from "../../lib/menu-icon";
+import { RowActions } from "../../components/common/row-actions";
 import { useCan } from "../../hooks/use-can";
 import {
   createSystemMenu,
@@ -249,47 +250,42 @@ export function SystemMenusPanel() {
     {
       title: "操作",
       key: "actions",
-      width: 220,
+      //: 2026-10-25 用户口径「所有操作列均不允许溢出页面」：
+      //: 原 220px 手写 3 个带图标按钮，改用统一容器；删除的「为什么不能删」
+      //: 从 Tooltip 改到「更多」菜单的 hint（原位 Tooltip 会把按钮撑高撑宽）。
+      width: 190,
       fixed: "right",
-      render: (_: unknown, row) => (
-        <Space size={0}>
-          {can("system:menu:edit") && (
-            <Button
-              size="small"
-              type="link"
-              icon={<EditOutlined />}
-              onClick={() => setEditTarget({ ...row, children: [] })}
-            >
-              编辑
-            </Button>
-          )}
-          {can("system:menu:create") && row.menu_type !== "F" && (
-            <Button
-              size="small"
-              type="link"
-              icon={<PlusOutlined />}
-              onClick={() => {
-                setCreateParent(row);
-                setCreateOpen(true);
-              }}
-            >
-              子菜单
-            </Button>
-          )}
-          {can("system:menu:delete") && (
-            <Tooltip
-              title={
-                (row.children?.length ?? 0) > 0
-                  ? `还有 ${row.children?.length ?? 0} 个子菜单，不能删`
-                  : "有角色授权引用时也不能删"
-              }
-            >
-              <Button
-                size="small"
-                type="link"
-                danger
-                icon={<DeleteOutlined />}
-                onClick={() => {
+      render: (_: unknown, row) => {
+        const childCount = row.children?.length ?? 0;
+        return (
+          <RowActions
+            width={190}
+            maxInline={3}
+            items={[
+              {
+                label: "编辑",
+                permission: "system:menu:edit",
+                onClick: () => setEditTarget({ ...row, children: [] }),
+              },
+              //: 按钮行（F 型）下面不能再挂子菜单 —— 业务规则，直接不给这一项
+              ...(row.menu_type === "F"
+                ? []
+                : [
+                    {
+                      label: "子菜单",
+                      permission: "system:menu:create",
+                      onClick: () => {
+                        setCreateParent(row);
+                        setCreateOpen(true);
+                      },
+                    },
+                  ]),
+              {
+                label: "删除",
+                permission: "system:menu:delete",
+                danger: true,
+                hint: childCount > 0 ? `${childCount} 个子菜单，不能删` : "被引用时不能删",
+                onClick: () => {
                   modal.confirm({
                     title: `删除菜单「${row.name}」？`,
                     content: "若有子菜单或角色授权引用，后端会拒绝并说明原因。",
@@ -307,14 +303,12 @@ export function SystemMenusPanel() {
                       }
                     },
                   });
-                }}
-              >
-                删除
-              </Button>
-            </Tooltip>
-          )}
-        </Space>
-      ),
+                },
+              },
+            ]}
+          />
+        );
+      },
     },
   ];
 

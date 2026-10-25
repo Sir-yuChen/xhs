@@ -1,4 +1,5 @@
 import { WaitMask } from "../../components/ui/wait-mask";
+import { RowActions } from "../../components/common/row-actions";
 import {
   AlertOutlined,
   ApiOutlined,
@@ -569,25 +570,31 @@ function GatewaysPage() {
       // ⇒ 两列移到子表（`modelColumns`），父表只留服务商本体字段。
       title: "操作",
       key: "actions",
-      width: 230,
+      fixed: "right",
+      //: 2026-10-25 用户口径「所有操作列均不允许溢出页面」：
+      //: 「同步服务商模型」是长文案，3 个按钮在 230px 里贴边，改用统一容器。
+      width: 220,
       render: (_v, row) => {
         const g = row.gateway;
         return (
-          <Space size="small">
-            <Button type="link" size="small" loading={testingId === g.id} onClick={() => void runTest(g)}>
-              测试
-            </Button>
-            {/* v2.9：拉目录 + AI 归纳类型 + upsert 模型行（用户口径「操作列新增同步服务商模型」） */}
-            <Button type="link" size="small" loading={syncingId === g.id} onClick={() => void runSync(g)}>
-              同步服务商模型
-            </Button>
-            <Button type="link" size="small" onClick={() => openEdit(g)}>
-              编辑
-            </Button>
-            {/* ⚠️ v1.9：「删除」按钮 + Popconfirm **整段移除**（用户口径「移除删除功能」）。
-                替代入口 = 上面的启用开关。后端 DELETE 保留为 410 墓碑，前端不再调用。 */}
-          </Space>
+          <RowActions
+            width={220}
+            maxInline={3}
+            items={[
+              { label: "测试", loading: testingId === g.id, onClick: () => void runTest(g) },
+              //: v2.9：拉目录 + AI 归纳类型 + upsert 模型行
+              {
+                label: "同步模型",
+                hint: "拉取服务商模型目录",
+                loading: syncingId === g.id,
+                onClick: () => void runSync(g),
+              },
+              { label: "编辑", onClick: () => openEdit(g) },
+            ]}
+          />
         );
+        //: ⚠️ v1.9：「删除」整段移除（用户口径「移除删除功能」）；
+        //: 后端 DELETE 保留为 410 墓碑，前端不调用。
       },
     },
   ];

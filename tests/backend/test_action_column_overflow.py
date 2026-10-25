@@ -37,17 +37,20 @@ MIGRATED = {
     "pages/tasks/workspace-tasks-page.tsx",
     "pages/system/system-roles-panel.tsx",
     "pages/platforms/xhs/orders-page.tsx",
+    "pages/tasks/task-records-page.tsx",
+    "pages/system/system-menus-panel.tsx",
+    "pages/system/system-dict-panel.tsx",
+    "pages/platforms/xhs/forbidden-words-modal.tsx",
+    "pages/llm-gateway/llm-gateway-page.tsx",
 }
 
 #: 还有操作列但尚未迁移的页面（**只许变短**：改好一个就从中删掉）
 PENDING: set[str] = {
     "components/schedule/task-columns.tsx",
     "components/settings/settings-table.tsx",
-    "pages/llm-gateway/llm-gateway-page.tsx",
     "pages/platforms/xhs/accounts-page.tsx",
     "pages/platforms/xhs/datacenter-page.tsx",
     "pages/platforms/xhs/data-package-rules-modal.tsx",
-    "pages/platforms/xhs/forbidden-words-modal.tsx",
     "pages/platforms/xhs/note-version-history.tsx",
     "pages/platforms/xhs/picture-space-page.tsx",
     "pages/platforms/xhs/product-drafts-modal.tsx",
@@ -56,9 +59,6 @@ PENDING: set[str] = {
     "pages/platforms/xhs/shop-items-page.tsx",
     "pages/platforms/xhs/sku-name-optimize-modal.tsx",
     "pages/platforms/xhs/violation-manage-page.tsx",
-    "pages/system/system-dict-panel.tsx",
-    "pages/system/system-menus-panel.tsx",
-    "pages/tasks/task-records-page.tsx",
 }
 
 
@@ -157,4 +157,48 @@ def test_batch_routes_are_declared_before_parameter_routes():
         if path.startswith("/batch/"):
             assert order.index(path) < param_at, (
                 f"{path} 声明在 /{{user_id}} 之后 ⇒ 会被它吃掉并回 422"
+            )
+
+
+def test_no_action_column_overflows_its_buttons():
+    """**真实溢出判据**：按钮总宽（按 64px/个估算）不得超过列宽。
+
+    这条比「是否用了 RowActions」更本质 —— 用户要的是「不溢出」，
+    而不是「必须用某个组件」。所以：
+    * 用了 RowActions 的页面由容器自身保证（`maxInline` + `overflow:hidden`）；
+    * **没用**的页面按这条量：按钮数 × 64 > 列宽 ⇒ 溢出 ⇒ 要么收进浮层
+      （Popover / 已有「更多」），要么改用 RowActions。
+    """
+    for rel in sorted(PENDING):
+        code = _requirement(_src(rel))
+        for m in re.finditer(r'title:\s*["\']操作["\'](.{0,1800})', code, re.S):
+            seg = m.group(1)
+            w = re.search(r"width:\s*(\d+)", seg)
+            if not w:
+                continue
+            width = int(w.group(1))
+            #: 到**本列结束**为止：从 `render:` 起算，取到第一个括号平衡处
+            r_start = seg.find("render:")
+            if r_start < 0:
+                continue
+            body = seg[r_start + len("render:"):]
+            depth, idx = 0, 0
+            for idx, ch in enumerate(body):
+                if ch in "([{":
+                    depth += 1
+                elif ch in ")]}":
+                    depth -= 1
+                    if depth <= 0:
+                        break
+            col = body[:idx]
+            btns = len(re.findall(r"<Button", col))
+            if btns == 0:
+                continue  # 渲染函数里用数组/变量，由 MIGRATED 那一侧管
+            #: 已有「更多」或 Popover 收口的不算溢出
+            if "更多" in col or "Dropdown" in col or "Popover" in col:
+                continue
+            need = btns * 64
+            assert need <= width, (
+                f"{rel} 操作列 {width}px 放 {btns} 个按钮（需约 {need}px）⇒ 会溢出。"
+                "改用 RowActions 或收进 Popover。"
             )

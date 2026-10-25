@@ -34,6 +34,7 @@
  * ⚠️ 弹窗尺寸按**视口百分比**（用户偏好），本弹窗 **60%**（发布弹窗是 75%）。
  */
 import { WaitMask } from "../../../components/ui/wait-mask";
+import { RowActions } from "../../../components/common/row-actions";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   App,
@@ -494,44 +495,40 @@ export function ForbiddenWordsModal({ open, onClose }: ForbiddenWordsModalProps)
             {
               title: "操作",
               key: "ops",
-              width: 190,
+              //: 2026-10-25 用户口径「所有操作列均不允许溢出页面」：
+              //: 原 190px 放 3 个带图标按钮 ⇒ 窄屏被裁。统一容器 + 去图标省宽度。
+              width: 150,
               render: (_: unknown, row: GroupRow | WordRow) =>
                 row.__isGroup ? (
                   //: 父行只给「整组停用/启用」—— 组级动作与词级动作分开摆。
-                  <Button
-                    size="small"
-                    icon={row.enabled ? <StopOutlined /> : <CheckCircleOutlined />}
-                    onClick={() => void toggleGroup(row)}
-                  >
-                    {row.enabled ? "停用整组" : "启用整组"}
-                  </Button>
+                  <RowActions
+                    width={150}
+                    maxInline={3}
+                    items={[
+                      {
+                        label: row.enabled ? "停用整组" : "启用整组",
+                        onClick: () => void toggleGroup(row),
+                      },
+                    ]}
+                  />
                 ) : (
-                  <Space size={4}>
-                    <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(row)}>
-                      修改
-                    </Button>
-                    <Button
-                      size="small"
-                      icon={row.enabled ? <StopOutlined /> : <CheckCircleOutlined />}
-                      onClick={() => void toggleEnabled(row)}
-                    >
-                      {row.enabled ? "停用" : "启用"}
-                    </Button>
-                    <Popconfirm
-                      title={`删除「${row.word}」？`}
-                      description="删除不可恢复"
-                      okText="删除"
-                      cancelText="取消"
-                      okButtonProps={{ danger: true }}
-                      onConfirm={() => void remove(row)}
-                    >
-                      <Tooltip title="删除（不可恢复）">
-                        <Button size="small" danger icon={<DeleteOutlined />}>
-                          删除
-                        </Button>
-                      </Tooltip>
-                    </Popconfirm>
-                  </Space>
+                  <RowActions
+                    width={150}
+                    maxInline={3}
+                    items={[
+                      { label: "修改", onClick: () => openEdit(row) },
+                      {
+                        label: row.enabled ? "停用" : "启用",
+                        onClick: () => void toggleEnabled(row),
+                      },
+                      {
+                        label: "删除",
+                        danger: true,
+                        hint: "不可恢复",
+                        onClick: () => void remove(row),
+                      },
+                    ]}
+                  />
                 ),
             },
           ]}
