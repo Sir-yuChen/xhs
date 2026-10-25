@@ -34,7 +34,10 @@ import { App, Button, Card, Space, Table, Tabs, Tag, Tooltip, Typography } from 
 import { fetchScheduleJobs, fetchScheduleLogs } from "../../lib/api";
 import type { ScheduledJob, ScheduledJobLog } from "../../types";
 import { buildTaskColumns } from "../../components/schedule/task-columns";
+import { PlusOutlined } from "@ant-design/icons";
 import { hasPermission } from "../../hooks/use-permission";
+import { JobFormModal } from "../../components/schedule/job-form-modal";
+import { RunJobModal } from "../../components/schedule/run-job-modal";
 import { changeScheduleJobStatus, runScheduleJobOnce } from "../../lib/api";
 import { JobLogTable } from "../../components/schedule/job-log-table";
 import { JobLogDetailModal } from "../../components/schedule/job-log-detail-modal";
@@ -45,9 +48,15 @@ const { Text } = Typography;
 function JobTable({
   workspace,
   onOpenLog,
+  onRun,
+  onEdit,
+  reloadKey,
 }: {
   workspace: string;
   onOpenLog: (log: ScheduledJobLog) => void;
+  onRun: (job: ScheduledJob) => void;
+  onEdit: (job: ScheduledJob) => void;
+  reloadKey: number;
 }) {
   const [rows, setRows] = useState<ScheduledJob[]>([]);
   const [loading, setLoading] = useState(false);
@@ -72,27 +81,12 @@ function JobTable({
 
   useEffect(() => {
     void load();
-  }, [load]);
+  }, [load, reloadKey]);
 
   //: 列由公共工厂产出，本页只传参数（不在这里复写列的渲染逻辑）。
   const { message } = App.useApp();
   const [busyId, setBusyId] = useState<number | null>(null);
 
-  const runOnce = useCallback(
-    async (job: ScheduledJob) => {
-      setBusyId(job.id);
-      try {
-        await runScheduleJobOnce(job.id);
-        message.success(`已触发「${job.name}」`);
-        await load();
-      } catch (err) {
-        message.error(err instanceof Error ? err.message : "触发失败");
-      } finally {
-        setBusyId(null);
-      }
-    },
-    [load, message],
-  );
 
   const toggleStatus = useCallback(
     async (job: ScheduledJob) => {
@@ -120,13 +114,13 @@ function JobTable({
         renderActions: (job) => (
           <Space size={0}>
             {hasPermission("system:scheduler:run") && (
-              <Button
-                size="small"
-                type="link"
-                loading={busyId === job.id}
-                onClick={() => void runOnce(job)}
-              >
+              <Button size="small" type="link" onClick={() => onRun(job)}>
                 立即执行
+              </Button>
+            )}
+            {hasPermission("system:scheduler:edit") && (
+              <Button size="small" type="link" onClick={() => onEdit(job)}>
+                编辑
               </Button>
             )}
             {hasPermission("system:scheduler:toggle") && (
@@ -142,7 +136,7 @@ function JobTable({
           </Space>
         ),
       }),
-    [busyId, runOnce, toggleStatus],
+    [busyId, toggleStatus, onRun, onEdit],
   );
 
   if (error) {
@@ -251,6 +245,13 @@ function LogTab({ onOpenLog }: { onOpenLog: (log: ScheduledJobLog) => void }) {
 
 export function SystemSchedulerPanel() {
   const [logOpen, setLogOpen] = useState<ScheduledJobLog | null>(null);
+  //: 新增 / 编辑（job=null 为新增态）
+  const [formOpen, setFormOpen] = useState(false);
+  const [editing, setEditing] = useState<ScheduledJob | null>(null);
+  //: 立即执行的参数确认
+  const [runJob, setRunJob] = useState<ScheduledJob | null>(null);
+  const [runSubmitting, setRunSubmitting] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
 
   return (
     <div style={{ height: "calc(100vh - 87px)", display: "flex", flexDirection: "column" }}>
@@ -277,11 +278,38 @@ export function SystemSchedulerPanel() {
       >
         <Tabs
           className="fill-tabs"
+          tabBarExtraContent={
+            //: 无权限 ⇒ 不渲染（用户口径「没有对应权限则不展示」）
+            hasPermission("system:scheduler:create") && (
+              <Button
+                size="small"
+                type="primary"
+                icon={<PlusOutlined />}
+                onClick={() => {
+                  setEditing(null);
+                  setFormOpen(true);
+                }}
+              >
+                新增任务
+              </Button>
+            )
+          }
           items={[
             {
               key: "system",
               label: `系统任务`,
-              children: <JobTable workspace="system" onOpenLog={setLogOpen} />,
+              children: (
+                <JobTable
+                  workspace="system"
+                  onOpenLog={setLogOpen}
+                  onRun={setRunJob}
+                  onEdit={(job) => {
+                    setEditing(job);
+                    setFormOpen(true);
+                  }}
+                  reloadKey={reloadKey}
+                />
+              ),
             },
             {
               key: "logs",
@@ -296,6 +324,30 @@ export function SystemSchedulerPanel() {
         open={logOpen !== null}
         log={logOpen}
         onCancel={() => setLogOpen(null)}
+      />
+
+      <JobFormModal
+        open={formOpen}
+        job={editing}
+        onCancel={() => setFormOpen(false)}
+        onSaved={() => {
+          setFormOpen(false);
+          setReloadKey((n) => n + 1);
+        }}
+      />
+
+      <RunJobModal
+        open={runJob !== null}
+        job={runJob}
+        submitting={runSubmitting}
+        onCancel={() => setRunJob(null)}
+        onSubmit={(params) => {
+          if (!runJob) return;
+          setRunSubmitting(true);
+          void runScheduleJobOnce(runJob.id, params)
+            .then(() => setRunJob(null))
+            .finally(() => setRunSubmitting(false));
+        }}
       />
     </div>
   );

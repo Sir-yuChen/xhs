@@ -197,6 +197,67 @@ def _live_next_run_map(request: Request) -> dict[int, datetime]:
     return result
 
 
+
+def _assert_can_create_in_workspace(db: Session, current_user: User, job_key: str) -> None:
+    """新增任务时：**目标工作区**的权限决定能不能建。
+
+    ## 为什么在服务层判（而不是路由表）
+
+    路由表一个端点只能挂一个码。新增端点同时服务「工作区任务」和「系统任务」：
+    * 工作区成员凭 `xhs:taskcenter:create` 进得来；
+    * 但**系统级任务**（清理记录表 / 暂存目录 / 图片空间）必须 `system:scheduler:create`。
+
+    静态表表达不了「按 `job_key` 对应的 workspace 取不同码」⇒ 判据下移到本函数。
+
+    ## 判据
+
+    | 任务归属 | 需要 |
+    |---|---|
+    | `workspace="system"` | `system:scheduler:create` |
+    | `workspace="xhs"`（等） | `<workspace>:taskcenter:create` |
+
+    ⚠️ admin 由 `user_perms()` 派生全部码，两条都过。
+    """
+    from backend.app.core.perms import has_perm  # noqa: PLC0415
+
+    job_workspace = (workspace_for_job(job_key) or "").strip() or "xhs"
+    if job_workspace == "system":
+        if not has_perm(current_user, "system:scheduler:create"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="JOB_SYSTEM_WORKSPACE_CREATE_REQUIRES_ADMIN",
+            )
+        return
+    if not has_perm(current_user, f"{job_workspace}:taskcenter:create"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="JOB_WORKSPACE_CREATE_PERM_REQUIRED",
+        )
+
+
+def _assert_can_edit(db: Session, current_user: User, job: ScheduledJob) -> None:
+    """编辑任务：同样按**这条任务**的归属判码。
+
+    工作区任务凭 `<ws>:taskcenter:edit` 可改（只作用于本工作区数据）；
+    系统级任务必须 `system:scheduler:edit`。
+    """
+    from backend.app.core.perms import has_perm  # noqa: PLC0415
+
+    job_workspace = (job.workspace or "").strip() or "xhs"
+    if job_workspace == "system":
+        if not has_perm(current_user, "system:scheduler:edit"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="JOB_SYSTEM_WORKSPACE_EDIT_REQUIRES_ADMIN",
+            )
+        return
+    if not has_perm(current_user, f"{job_workspace}:taskcenter:edit"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="JOB_WORKSPACE_EDIT_PERM_REQUIRED",
+        )
+
+
 def _get_visible_job(db: Session, current_user: User, job_id: int) -> ScheduledJob:
     """可见即可操作；越权的判据 = **任务归属的工作区 vs 调用者的权限**。
 
@@ -579,6 +640,14 @@ def create_job(
         spec = get_job_spec(payload.job_key.strip())
     except KeyError:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="JOB_KEY_UNSUPPORTED") from None
+
+    # ── 权限：新增到**哪个工作区**，就要那个工作区的权限（设计 69 + 2026-10-25 口径）──
+    #
+    # 路由层只挂 `xhs:taskcenter:create`（工作区成员够得着），
+    # 「系统级任务归系统管理」这条必须在这里判 —— 静态路由表表达不了
+    # 「按 job_key 对应的 workspace 取不同权限码」。
+    _assert_can_create_in_workspace(db, current_user, spec.key)
+
     # 设计 69（2026-10-25）：`job_key` **全表唯一** —— 一种任务只有一份定义。
     #
     # ⚠️ 原实现（R18「内置目标也允许新建」）允许同 key 多行，那是「每用户一份定义」
@@ -658,6 +727,8 @@ def update_job(
     db: Session = Depends(get_db),
 ):
     job = _get_visible_job(db, current_user, job_id)
+    #: 编辑也要按**任务归属**判码：工作区成员只能改本工作区的任务。
+    _assert_can_edit(db, current_user, job)
     if payload.schedule is not None:
         try:
             spec = get_job_spec(job.job_key)

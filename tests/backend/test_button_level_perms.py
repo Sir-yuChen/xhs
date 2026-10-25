@@ -169,9 +169,10 @@ class TestNoNewSharedPermAcrossRoutes:
         from backend.app.core.perms_registry import PERMS  # noqa: PLC0415
 
         registered = {spec.code for spec in PERMS}
+        #: 2026-10-25「入口及权限补全」：新增/编辑改为工作区码
+        #: （`xhs:taskcenter:create|edit`），系统级由服务层再判。
+        #: 删除仍是 admin 专属。
         for code in (
-            "system:scheduler:create",
-            "system:scheduler:edit",
             "system:scheduler:delete",
             "system:scheduler:run",
             "system:scheduler:toggle",
@@ -186,12 +187,17 @@ class TestNoNewSharedPermAcrossRoutes:
         #: 两级不许共用同一个执行码（否则工作区成员能操作系统级任务）。
         assert "xhs:taskcenter:run" != "system:scheduler:run"
         by_code = _route_to_code()
+        #: 2026-10-25「入口及权限补全」：新增/编辑改挂工作区码
+        #: （`xhs:taskcenter:create|edit`），系统级任务由服务层
+        #: `_assert_can_create_in_workspace` / `_assert_can_edit` 再判。
+        #: 所以 `system:scheduler:create|edit` 现在**没有直接挂路由**，
+        #: 但仍必须登记（角色配置页要能勾选）。
         for code in (
-            "system:scheduler:create",
-            "system:scheduler:edit",
             "system:scheduler:delete",
             "xhs:taskcenter:run",
             "xhs:taskcenter:toggle",
+            "xhs:taskcenter:create",
+            "xhs:taskcenter:edit",
         ):
             assert code in by_code, f"{code} 未挂任何路由"
             assert len(by_code[code]) == 1, (

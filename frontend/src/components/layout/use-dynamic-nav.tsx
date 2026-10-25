@@ -80,7 +80,17 @@ export interface DynamicNav {
  * 底部那几项的 `workspace` 在种子里是空串或 `common`，按「是否在 footer 白名单路由里」
  * 判定更稳（路由是唯一标识，`workspace` 只是分类标签）。
  */
-const FOOTER_PATHS = new Set(["/tasks", "/task-records", "/models", "/settings"]);
+const FOOTER_PATHS = new Set([
+  "/tasks",
+  "/task-records",
+  "/models",
+  "/settings",
+  //: 工作区级任务中心（设计 69）。用户口径（2026-10-25）：
+  //: 「应是任务中心放到队列记录一起」「底部菜单中」。
+  //: 它和「队列记录」是同一类东西 —— 都是「跑过什么 / 要跑什么」的运维视图，
+  //: 不参与业务线导航（内容线 / 店铺线）。
+  "/platforms/xhs/tasks",
+]);
 
 function splitFooter(nodes: SystemMenuNode[]): {
   main: SystemMenuNode[];

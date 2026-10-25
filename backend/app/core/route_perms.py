@@ -171,7 +171,10 @@ ROUTE_PERMS: Final[dict[str, str]] = {
     #: ⇒ 不再用 `EXEMPT_ADMIN`（那标记 = 端点内硬判 `role == admin`）。
     "GET /api/schedule/overview": "system:scheduler:view",
     "POST /api/schedule/cron/validate": "system:scheduler:view",
-    "POST /api/schedule/jobs": "system:scheduler:create",
+    #: 新增任务：工作区级用 `xhs:taskcenter:create`，系统级任务由服务内
+    #: `_assert_can_create_in_workspace` 再判 `system:scheduler:create`
+    #: （静态路由表表达不了「按 payload.workspace/job_key 取不同码」）。
+    "POST /api/schedule/jobs": "xhs:taskcenter:create",
     #: 执行一次（设计 69 两级）：路由层只要求**工作区级的执行码**，
     #: 「这条任务属于哪个工作区、调用者够不够」由 `_get_visible_job` 判 ——
     #: 静态路由表表达不了「按数据归属取不同权限码」。
@@ -327,7 +330,8 @@ ROUTE_PERMS: Final[dict[str, str]] = {
     "PUT /api/llm/business-providers": "ai:model:setBusiness",
     "PUT /api/notes/{note_id}/assets/reorder": "xhs:note:edit",
     "PUT /api/notes/{note_id}/topics": "xhs:topic:edit",
-    "PUT /api/schedule/jobs/{job_id}": "system:scheduler:edit",
+    #: 编辑任务：同上，按任务归属在服务内分流。
+    "PUT /api/schedule/jobs/{job_id}": "xhs:taskcenter:edit",
     "PUT /api/settings/{key}": "EXEMPT_SELF",
     "PUT /api/system/dict/items/{item_id}": "system:dict:edit",
     "PUT /api/system/dict/types/{type_id}": "system:dict:edit",

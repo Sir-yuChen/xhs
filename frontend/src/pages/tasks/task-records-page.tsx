@@ -104,6 +104,7 @@ import {
   fetchTaskDetail,
   retryTask,
 } from "../../lib/api";
+import { hasPermission } from "../../hooks/use-permission";
 import {
   TASK_RECORD_GROUP_LABELS,
   accountNameMap,
@@ -619,7 +620,7 @@ export function TaskRecordsPage() {
             <Button type="link" size="small" style={{ padding: 0 }} onClick={() => void openDetail(row)}>
               详情
             </Button>
-            {!batch && canCancelTask(row.status) && (
+            {!batch && canCancelTask(row.status) && hasPermission("xhs:record:cancel") && (
               <Button
                 type="link"
                 size="small"
@@ -631,7 +632,7 @@ export function TaskRecordsPage() {
                 取消
               </Button>
             )}
-            {!batch && canRetryTask(row.status) && (
+            {!batch && canRetryTask(row.status) && hasPermission("xhs:record:retry") && (
               <Button
                 type="link"
                 size="small"
@@ -652,6 +653,7 @@ export function TaskRecordsPage() {
             >
               {/* ⚠️ disabled 的 Button 不冒泡鼠标事件 ⇒ Tooltip 必须套一层 span
                   （否则「为什么不能清」的说明根本弹不出来）。 */}
+              hasPermission(batch ? "xhs:record:clean" : "xhs:record:clean") && (
               <span style={{ display: "inline-flex" }}>
                 <Button
                   type="link"
@@ -665,6 +667,7 @@ export function TaskRecordsPage() {
                   {batch ? "清理整批" : "清理"}
                 </Button>
               </span>
+              )
             </Tooltip>
           </Space>
         );
@@ -830,6 +833,7 @@ export function TaskRecordsPage() {
                       {/* 手动清理（2026-09-26 用户口径「新增手动批量清理」）：
                           批量清理选中的 + 一键清除全部可清的。两个都只对
                           done / cancelled 生效（待重试 / 进行中后端不碰）。 */}
+                      {hasPermission("xhs:record:cleanAll") && (
                       <Button
                         danger
                         size="small"
@@ -840,6 +844,7 @@ export function TaskRecordsPage() {
                       >
                         清理选中{selectedIds.length ? `（${selectedIds.length}）` : ""}
                       </Button>
+                      )}
                       <Button
                         danger
                         size="small"

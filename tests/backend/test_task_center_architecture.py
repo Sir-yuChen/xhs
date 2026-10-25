@@ -158,12 +158,11 @@ def test_job_endpoints_require_admin_codes():
     #: 2026-10-25 红线「一按钮一码」⇒ `system:scheduler:manage` 这个合并码已拆成
     #: create / edit / delete / run / toggle / cleanLogs / deleteLogs，
     #: 各自挂在对应端点上（见 `test_button_level_perms.py`）。
-    for code in (
-        "system:scheduler:create",
-        "system:scheduler:edit",
-        "system:scheduler:delete",
-    ):
-        assert code in perms, f"按钮码 {code} 没登记"
+    #: 2026-10-25：新增/编辑改挂工作区码，系统级由服务层 `_assert_can_create_in_workspace`
+    #: / `_assert_can_edit` 再判；删除仍是 admin 专属。
+    assert "system:scheduler:delete" in perms, "按钮码 system:scheduler:delete 没登记"
+    assert "xhs:taskcenter:create" in perms
+    assert "xhs:taskcenter:edit" in perms
 
 
 def test_job_list_no_longer_filters_by_user():

@@ -295,9 +295,13 @@ PAGE_VIEW_PERMS: tuple[PermSpec, ...] = (
     #: ⚠️ 两级的边界是**任务归属**不是**操作能力**：工作区任务可以由工作区成员
     #: 操作（只作用于本工作区数据），但**不能新建**（那是系统注册表的事，
     #: 创建端点只接受已注册的 job_key）。
-    PermSpec("xhs:taskcenter:view", "任务", "C", "/platforms/xhs/tasks", _X, _X),
+    PermSpec("xhs:taskcenter:view", "任务中心", "C", "/platforms/xhs/tasks", _X, _X),
     #: 工作区级任务按钮：**每个按钮一个码**（2026-10-25 红线「所有按钮的权限必须独立，
     #: 不允许合并使用同一个权限码，颗粒度达到按钮级别」）。
+    #: 2026-10-25 用户口径「任务中心页面没有新增和编辑入口」+「入口及权限补全」
+    #: ⇒ 新增 / 编辑各一个独立按钮码（红线：一按钮一码，不共用）。
+    PermSpec("xhs:taskcenter:create", "新增任务", "F", "/platforms/xhs/tasks", _X, _X),
+    PermSpec("xhs:taskcenter:edit", "编辑任务", "F", "/platforms/xhs/tasks", _X, _X),
     PermSpec("xhs:taskcenter:run", "立即执行", "F", "/platforms/xhs/tasks", _X, _X),
     PermSpec("xhs:taskcenter:toggle", "暂停恢复", "F", "/platforms/xhs/tasks", _X, _X),
     PermSpec("xhs:taskcenter:viewLogs", "查看日志", "F", "/platforms/xhs/tasks", _X, _X),

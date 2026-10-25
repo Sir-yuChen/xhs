@@ -90,6 +90,12 @@ class TestTwoLevelPermission:
             "DELETE /api/schedule/jobs/{job_id}",
         ):
             line = next((ln for ln in src.splitlines() if f'"{route}"' in ln), "")
-            assert "system:scheduler:" in line and "xhs:" not in line, (
-                f"{route} 不该放开给工作区（红线：系统级按钮用 system 码）：{line.strip()}"
-            )
+            #: 2026-10-25「入口及权限补全」：新增/编辑改为工作区码，
+            #: 系统级任务由服务层 `_assert_can_create_in_workspace` 再判；
+            #: 删除仍是 admin 专属。
+            if route.startswith("DELETE"):
+                assert "system:scheduler:" in line and "xhs:" not in line, (
+                    f"{route} 不该放开给工作区：{line.strip()}"
+                )
+            else:
+                assert "taskcenter:create" in line, f"{route} 应挂工作区新增码"

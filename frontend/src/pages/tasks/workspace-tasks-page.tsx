@@ -21,15 +21,24 @@
  *    把「暂时不允许用户创建任务」读成了「什么都不能做」：
  *    不许**新建**（那是系统注册表的事）≠ 不许**操作已注册的任务**。
  *
- * 本页能力边界：可「立即执行 / 暂停恢复 / 看日志」，不可新建或改 key。
+ * ## 能力边界（2026-10-25 用户第二次补充）
  *
- * ## 与配置页同形态
+ * 「任务中心页面没有新增和编辑入口，点击执行没有每次需要修改的任务参数」
  *
- * 单卡片 + 标题「小红书任务」。说明只进问号图标（用户口径「说明简短」）。
+ * | 操作 | 有没有 | 说明 |
+ * |---|---|---|
+ * | 新增任务 | ✅ | 走 `JobFormModal`；只能选**注册表里已注册**的 job_key（用户口径「暂时不允许用户创建任务」= 不能自造任务类型）|
+ * | 编辑任务 | ✅ | 同名弹窗传 `job` 即编辑态（改 Cron / 默认参数）|
+ * | 立即执行 | ✅ | **先弹参数确认**（`RunJobModal`）—— 参数只对本次生效，不写回 |
+ * | 暂停 / 恢复 | ✅ | |
+ * | 看日志 | ✅ | |
+ *
+ * ⚠️ 「立即执行」必须弹参数窗：后端 `POST /jobs/{id}/run` 的 `params`
+ * 覆盖能力一直都在，页面不接入等于把「今天只同步账号 A」这种日常操作弄丢。
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { QuestionCircleOutlined, ReloadOutlined } from "@ant-design/icons";
+import { PlusOutlined, QuestionCircleOutlined, ReloadOutlined } from "@ant-design/icons";
 import { App, Button, Card, Space, Table, Tabs, Tooltip, Typography } from "antd";
 
 import {
@@ -42,6 +51,8 @@ import type { ScheduledJob, ScheduledJobLog } from "../../types";
 import { buildTaskColumns } from "../../components/schedule/task-columns";
 import { JobLogTable } from "../../components/schedule/job-log-table";
 import { JobLogDetailModal } from "../../components/schedule/job-log-detail-modal";
+import { JobFormModal } from "../../components/schedule/job-form-modal";
+import { RunJobModal } from "../../components/schedule/run-job-modal";
 import { hasPermission } from "../../hooks/use-permission";
 
 const { Text } = Typography;
@@ -51,7 +62,19 @@ const WORKSPACE = "xhs";
 const WORKSPACE_LABEL = "小红书";
 
 /** 本工作区的任务（可操作：立即执行 / 暂停恢复）。 */
-function WorkspaceJobTable({ onShowLogs }: { onShowLogs: () => void }) {
+function WorkspaceJobTable({
+  onShowLogs,
+  onRun,
+  onEdit,
+  reloadKey,
+}: {
+  onShowLogs: () => void;
+  /** 点「立即执行」⇒ 打开参数确认弹窗（不是直接打接口）。 */
+  onRun: (job: ScheduledJob) => void;
+  onEdit: (job: ScheduledJob) => void;
+  /** 外部触发刷新（执行 / 编辑保存后）。 */
+  reloadKey: number;
+}) {
   const { message } = App.useApp();
   const [rows, setRows] = useState<ScheduledJob[]>([]);
   const [loading, setLoading] = useState(false);
@@ -74,23 +97,7 @@ function WorkspaceJobTable({ onShowLogs }: { onShowLogs: () => void }) {
 
   useEffect(() => {
     void load();
-  }, [load]);
-
-  const runOnce = useCallback(
-    async (job: ScheduledJob) => {
-      setBusyId(job.id);
-      try {
-        await runScheduleJobOnce(job.id);
-        message.success(`已触发「${job.name}」`);
-        await load();
-      } catch (err) {
-        message.error(err instanceof Error ? err.message : "触发失败");
-      } finally {
-        setBusyId(null);
-      }
-    },
-    [load, message],
-  );
+  }, [load, reloadKey]);
 
   const toggleStatus = useCallback(
     async (job: ScheduledJob) => {
@@ -119,13 +126,13 @@ function WorkspaceJobTable({ onShowLogs }: { onShowLogs: () => void }) {
           <Space size={0}>
             {/* 一按钮一码（2026-10-25 红线）：三个按钮各判各的，不共用权限码。 */}
             {hasPermission("xhs:taskcenter:run") && (
-              <Button
-                size="small"
-                type="link"
-                loading={busyId === job.id}
-                onClick={() => void runOnce(job)}
-              >
+              <Button size="small" type="link" onClick={() => onRun(job)}>
                 立即执行
+              </Button>
+            )}
+            {hasPermission("xhs:taskcenter:edit") && (
+              <Button size="small" type="link" onClick={() => onEdit(job)}>
+                编辑
               </Button>
             )}
             {hasPermission("xhs:taskcenter:toggle") && (
@@ -146,7 +153,7 @@ function WorkspaceJobTable({ onShowLogs }: { onShowLogs: () => void }) {
           </Space>
         ),
       }),
-    [busyId, runOnce, toggleStatus, onShowLogs],
+    [busyId, toggleStatus, onShowLogs, onRun, onEdit],
   );
 
   if (error) {
@@ -236,11 +243,37 @@ function WorkspaceLogTab({ onOpenLog }: { onOpenLog: (log: ScheduledJobLog) => v
 export function WorkspaceTasksPage() {
   const [logOpen, setLogOpen] = useState<ScheduledJobLog | null>(null);
   const [activeTab, setActiveTab] = useState("jobs");
+  //: 新增 / 编辑共用（`job === null` = 新增态）
+  const [formOpen, setFormOpen] = useState(false);
+  const [editing, setEditing] = useState<ScheduledJob | null>(null);
+  //: 立即执行前的参数确认
+  const [runJob, setRunJob] = useState<ScheduledJob | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [runSubmitting, setRunSubmitting] = useState(false);
 
   /** 任务行点「日志」⇒ 切到日志页签。 */
   const showLogs = useCallback(() => {
     setActiveTab("logs");
   }, []);
+
+  const openCreate = useCallback(() => {
+    setEditing(null);
+    setFormOpen(true);
+  }, []);
+
+  const openEdit = useCallback((job: ScheduledJob) => {
+    setEditing(job);
+    setFormOpen(true);
+  }, []);
+
+  /** 执行（由表格或参数弹窗触发）。 */
+  const doRun = useCallback(
+    async (job: ScheduledJob, params?: Record<string, unknown>) => {
+      await runScheduleJobOnce(job.id, params);
+      setReloadKey((n) => n + 1);
+    },
+    [],
+  );
 
   return (
     <div style={{ height: "calc(100vh - 87px)", display: "flex", flexDirection: "column" }}>
@@ -269,11 +302,26 @@ export function WorkspaceTasksPage() {
           className="fill-tabs"
           activeKey={activeTab}
           onChange={setActiveTab}
+          tabBarExtraContent={
+            //: 无权限 ⇒ 不渲染（用户口径「没有对应权限则不展示」）
+            hasPermission("xhs:taskcenter:create") && (
+              <Button size="small" type="primary" icon={<PlusOutlined />} onClick={openCreate}>
+                新增任务
+              </Button>
+            )
+          }
           items={[
             {
               key: "jobs",
               label: "任务",
-              children: <WorkspaceJobTable onShowLogs={showLogs} />,
+              children: (
+                <WorkspaceJobTable
+                  onShowLogs={showLogs}
+                  onRun={setRunJob}
+                  onEdit={openEdit}
+                  reloadKey={reloadKey}
+                />
+              ),
             },
             {
               key: "logs",
@@ -288,6 +336,32 @@ export function WorkspaceTasksPage() {
         open={logOpen !== null}
         log={logOpen}
         onCancel={() => setLogOpen(null)}
+      />
+
+      {/* 新增 / 编辑共用：`job=null` 是新增态 */}
+      <JobFormModal
+        open={formOpen}
+        job={editing}
+        onCancel={() => setFormOpen(false)}
+        onSaved={() => {
+          setFormOpen(false);
+          setReloadKey((n) => n + 1);
+        }}
+      />
+
+      {/* 立即执行：先确认参数（只对本次生效） */}
+      <RunJobModal
+        open={runJob !== null}
+        job={runJob}
+        submitting={runSubmitting}
+        onCancel={() => setRunJob(null)}
+        onSubmit={(params) => {
+          if (!runJob) return;
+          setRunSubmitting(true);
+          void doRun(runJob, params)
+            .then(() => setRunJob(null))
+            .finally(() => setRunSubmitting(false));
+        }}
       />
     </div>
   );

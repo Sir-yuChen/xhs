@@ -75,6 +75,34 @@ class TestTwoLevelEntries:
             "工作区级任务入口要用工作区自己的权限码，不能借用 system:scheduler:*"
         )
 
+    def test_workspace_entry_sits_in_the_footer_with_task_records(self):
+        """工作区任务中心必须在**底部菜单**、且紧挨「队列记录」。
+
+        用户口径（2026-10-25）：「应是任务中心放到队列记录一起」「底部菜单中」。
+
+        判据两项：
+        1. 路径在 `use-dynamic-nav.tsx` 的 `FOOTER_PATHS` 白名单里（否则会跑到主导航）；
+        2. 菜单名是「任务中心」，且 `sort_order` 紧跟 `/task-records`。
+
+        ⚠️ 白名单是**路由**判据而不是 `workspace` 判据 —— workspace 只是分类标签，
+        同一工作区的菜单也会分主/底两组。
+        """
+        nav = (ROOT / "frontend" / "src" / "components" / "layout" / "use-dynamic-nav.tsx").read_text(
+            encoding="utf-8"
+        )
+        assert '"/platforms/xhs/tasks"' in nav, (
+            "工作区任务中心没进 FOOTER_PATHS ⇒ 会显示在主导航里"
+        )
+
+        rows = _seed_rows()
+        mine = next((r for r in rows if r.get("path") == "/platforms/xhs/tasks"), None)
+        records = next((r for r in rows if r.get("path") == "/task-records"), None)
+        assert mine is not None and records is not None
+        assert mine.get("name") == "任务中心", f"菜单名应为「任务中心」，实际 {mine.get('name')!r}"
+        assert mine.get("sort_order") == records.get("sort_order", 0) + 1, (
+            "任务中心应紧挨「队列记录」之后（sort_order = 队列记录 + 1）"
+        )
+
     def test_workspace_entry_route_is_registered(self):
         """菜单加了但路由没注册 ⇒ 点进去白屏。"""
         src = ROUTER.read_text(encoding="utf-8")
@@ -128,10 +156,14 @@ class TestCreateIsOpen:
 
         spec = route_perms.ROUTE_PERMS.get("POST /api/schedule/jobs")
         assert spec is not None, "POST /api/schedule/jobs 没登记权限码"
-        assert "system:scheduler:create" in str(spec), (
-            f"新增任务权限码是 {spec}，应为独立的 system:scheduler:create"
-            "（红线：一按钮一码，不与执行/暂停共用）"
+        #: 2026-10-25「入口及权限补全」：新增/编辑改为**工作区码**，
+        #: 系统级任务由服务层 `_assert_can_create_in_workspace` 再判
+        #: （静态路由表表达不了「按 job_key 的 workspace 取不同码」）。
+        assert "xhs:taskcenter:create" in str(spec), (
+            f"新增任务权限码是 {spec}，应为 xhs:taskcenter:create"
         )
+        src = SCHEDULE_API.read_text(encoding="utf-8")
+        assert "_assert_can_create_in_workspace" in src, "服务层没有归属校验"
 
     def test_no_leftover_switch_or_extra_code(self):
         """不许留开关，也不许留独立权限码 —— 口径是「无单独处理」。"""
