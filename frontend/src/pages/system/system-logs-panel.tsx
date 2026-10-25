@@ -29,6 +29,7 @@ import {
   type SystemAuditLog,
   type SystemBusinessLog,
 } from "../../lib/api";
+import { TraceTab } from "./system-logs-trace-tab";
 
 const { Text } = Typography;
 
@@ -36,6 +37,17 @@ export function SystemLogsPanel() {
   // 设计 63 §6（2026-10-25 用户截图「应用日志页底部空白」）：Card/Tabs 进撑满
   // 高度链（`.fill-tabs`），两个 Tab 内容各自三区布局 —— 日志区内部滚动、
   // 翻页/分页钉在卡底，底部不再留白。
+  //
+  // 设计 67：点列表里的「链路」列 ⇒ 切到「链路追踪」页签并自动查该链路
+  //（用户不必手抄 ID —— 那是拿不到 ID 的主因）。
+  const [activeTab, setActiveTab] = useState("audit");
+  const [traceId, setTraceId] = useState("");
+
+  const openTrace = useCallback((id: string) => {
+    setTraceId(id);
+    setActiveTab("trace");
+  }, []);
+
   return (
     <div style={{ height: "calc(100vh - 87px)", display: "flex", flexDirection: "column" }}>
       <Card
@@ -45,9 +57,17 @@ export function SystemLogsPanel() {
       >
         <Tabs
           className="fill-tabs"
+          activeKey={activeTab}
+          onChange={setActiveTab}
           items={[
-            { key: "audit", label: "审计日志（API）", children: <AuditLogTab /> },
-            { key: "business", label: "业务日志", children: <BusinessLogTab /> },
+            { key: "audit", label: "审计日志（API）", children: <AuditLogTab onOpenTrace={openTrace} /> },
+            { key: "business", label: "业务日志", children: <BusinessLogTab onOpenTrace={openTrace} /> },
+            {
+              key: "trace",
+              label: "链路追踪",
+              // destoryInactive 未开 ⇒ 切走再切回不丢查询结果（用户从列表跳过来看的）。
+              children: <TraceTab traceId={traceId} />,
+            },
             { key: "app", label: "应用日志（文件）", children: <AppLogTab /> },
           ]}
         />
@@ -56,7 +76,7 @@ export function SystemLogsPanel() {
   );
 }
 
-function AuditLogTab() {
+function AuditLogTab({ onOpenTrace }: { onOpenTrace: (id: string) => void }) {
   const { message } = App.useApp();
   const [rows, setRows] = useState<SystemAuditLog[]>([]);
   const [total, setTotal] = useState(0);
@@ -112,6 +132,23 @@ function AuditLogTab() {
       dataIndex: "created_at",
       width: 180,
       render: (v: string | null) => (v ? v.replace("T", " ").slice(0, 19) : "-"),
+    },
+    {
+      title: "链路",
+      dataIndex: "trace_id",
+      width: 110,
+      render: (v?: string | null) =>
+        v ? (
+          <Typography.Link
+            style={{ fontSize: 12, fontFamily: "monospace" }}
+            onClick={() => onOpenTrace(v)}
+            title={v}
+          >
+            {v.slice(0, 8)}
+          </Typography.Link>
+        ) : (
+          <Text type="secondary">-</Text>
+        ),
     },
   ];
 
@@ -192,7 +229,7 @@ function AuditLogTab() {
  * 与「审计日志（API）」分工：那边记端点面（谁调了哪个端点），
  * 这边记业务面（登录/登出、系统管理增删改、配置变更、队列终态）。
  */
-function BusinessLogTab() {
+function BusinessLogTab({ onOpenTrace }: { onOpenTrace: (id: string) => void }) {
   const [rows, setRows] = useState<SystemBusinessLog[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -241,6 +278,23 @@ function BusinessLogTab() {
     { title: "操作人", dataIndex: "actor_name", width: 120 },
     { title: "对象", dataIndex: "target_id", width: 220, ellipsis: true },
     { title: "摘要", dataIndex: "summary", ellipsis: true },
+    {
+      title: "链路",
+      dataIndex: "trace_id",
+      width: 110,
+      render: (v?: string | null) =>
+        v ? (
+          <Typography.Link
+            style={{ fontSize: 12, fontFamily: "monospace" }}
+            onClick={() => onOpenTrace(v)}
+            title={v}
+          >
+            {v.slice(0, 8)}
+          </Typography.Link>
+        ) : (
+          <Text type="secondary">-</Text>
+        ),
+    },
   ];
 
   return (

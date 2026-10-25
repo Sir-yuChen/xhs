@@ -304,6 +304,7 @@ class AuditLogOut(BaseModel):
     status: str | None = None
     status_code: int | None = None
     created_at: str | None = None
+    trace_id: str | None = None
 
 
 class AuditLogListOut(BaseModel):

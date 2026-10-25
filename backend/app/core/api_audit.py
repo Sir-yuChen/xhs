@@ -60,7 +60,23 @@ def set_business_recorder(recorder: "Callable[..., None] | None") -> None:
 #: 设计 64 §2.3（2026-10-25）：系统管理域（`/api/system/**`）与配置（`/api/settings/**`）、
 #: 调度（`/api/schedule/**`）的写操作**此前不在审计面** —— 增删改查零留痕
 #: （用户口径「操作删除，修改新增等节点」）。补进审计前缀。
-AUDITED_WRITE_PREFIXES = ("/api/xhs/", "/api/llm/", "/api/system/", "/api/settings/", "/api/schedule/")
+#: 这些前缀下的读写**都进 `api_logs`**（设计 67：链路完整性）。
+#:
+#: ⚠️ 注意 `/api/settings/` 带尾斜杠 —— `GET /api/settings`（**不带斜杠**）不匹配，
+#: 于是配置页的列表请求从来没被记过（2026-10-25 实测发现）。
+#: 两个都列：`/api/settings/` 覆盖 `/api/settings/{key}`，
+#: `/api/settings` 覆盖列表端点本身。
+AUDITED_WRITE_PREFIXES = (
+    "/api/xhs/",
+    "/api/llm/",
+    "/api/system/",
+    "/api/settings",
+    "/api/schedule/",
+    "/api/accounts",
+    "/api/notes",
+    "/api/tasks",
+    "/api/notifications",
+)
 
 #: 这些路径**永不**记录：认证（含凭据 —— 它的出入口语义由
 #: `business_log_service` 的定向埋点记，见 auth.py）、健康检查（高频无价值）。
@@ -70,6 +86,14 @@ SKIP_PREFIXES = (
     "/docs",
     "/openapi.json",
 )
+
+#: 上述跳过前缀里**仍要留链路痕迹**的端点（设计 67）。
+#:
+#: 认证端点整体跳过是因为**凭据语义**由 `business_logs` 的定向埋点记
+#:（`auth.login` / `auth.login_failed`，含明文用户名）。但**链路追踪**需要
+#: 一个起点 —— 否则「用户登录后做的所有事」这条链路的开头是空的。
+#: ⇒ 只记这两条，且**不落 body / 不落 token**（只落路径 + 状态码）。
+TRACE_ALWAYS_PREFIXES = ("/api/auth/login", "/api/auth/register")
 
 #: 这些前缀下的写操作**额外**写一条业务日志（`business_logs`，设计 64 §2.3）——
 #: 与 api_logs 的分工：api_logs = 端点面留痕，business_logs = 业务语义面
@@ -83,16 +107,34 @@ _STATUS_SERVER_ERROR = "server_error"
 
 
 def _should_audit(method: str, path: str, status_code: int) -> bool:
-    """是否落审计行（口径 1）。"""
+    """是否落审计行。
+
+    ## 口径（2026-10-25 设计 67 修订：链路式日志）
+
+    ⚠️ **成功请求现在也记读操作**（不只写）。理由是用户要求「日志以链路式记录」
+    「按链路 id 查该链路请求的**所有**日志」—— 只记写的话，一条链路里
+    「用户点了什么、页面读了哪些数据」全是空白，链路**残缺**，排查时看不出
+    因果顺序（看到「改了配置」却不知道改之前读了什么）。
+
+    * 跳过：认证（凭据语义由 `business_logs` 定向埋点记）、健康检查、文档；
+    * 失败：一律留痕（含 GET）—— 500 是最先要看的东西；
+    * 成功：**审计前缀下的读与写都记**；
+    * 非审计前缀（`/api/notes`、`/api/tasks` 等业务读）：**不记**
+      —— 那样会把 `api_logs` 撑成全量访问日志（每次页面加载几十行），
+      淹没有价值的行。它们的链路信息走 `business_logs` 的显式埋点。
+
+    这个边界是刻意的：**链路要完整，但表不能被淹没**。
+    """
+    #: 认证的登录/注册：即使整体跳过，也要留一条链路起点（见 `TRACE_ALWAYS_PREFIXES`）。
+    if any(path.startswith(p) for p in TRACE_ALWAYS_PREFIXES):
+        return True
     if any(path.startswith(p) for p in SKIP_PREFIXES):
         return False
     # 失败一律留痕（含 GET）—— 排查「为什么这个请求 500」时它是最先要看的东西。
     if status_code >= 400:
         return True
-    # 成功：只记审计前缀下的写操作。
-    if method.upper() in ("POST", "PUT", "PATCH", "DELETE"):
-        return any(path.startswith(p) for p in AUDITED_WRITE_PREFIXES)
-    return False
+    # 成功：审计前缀下的**读写都记**（链路完整性，见 docstring）。
+    return any(path.startswith(p) for p in AUDITED_WRITE_PREFIXES)
 
 
 def _status_bucket(status_code: int) -> str:
@@ -159,6 +201,7 @@ class ApiAuditMiddleware(BaseHTTPMiddleware):
                 user_id=_current_user_id(request),
                 path=request.url.path,
                 status_code=status_code,
+                trace_id=_trace_id_of(request),
             )
         except Exception as exc:  # noqa: BLE001 - 业务日志失败绝不阻断请求
             logger.warning("business log write failed for %s: %s", request.url.path, exc)
@@ -169,12 +212,14 @@ class ApiAuditMiddleware(BaseHTTPMiddleware):
             from backend.app.models.api_log import ApiLog
 
             user_id = _current_user_id(request)
+            trace_id = _trace_id_of(request)
             # ⚠️ 用模块级快照（不是再 import 一次）：测试打桩才生效。
             db = _session_factory()
             try:
                 db.add(
                     ApiLog(
                         user_id=user_id,
+                        trace_id=trace_id,
                         platform=_platform_of(request.url.path),
                         # ⚠️ 只落路径，**不带 query**（口径 2：敏感值不进表）。
                         endpoint=request.url.path[:256],
@@ -191,6 +236,27 @@ class ApiAuditMiddleware(BaseHTTPMiddleware):
                 db.close()
         except Exception as exc:  # noqa: BLE001 - 审计失败绝不阻断业务（口径 3）
             logger.warning("api audit write failed for %s: %s", request.url.path, exc)
+
+
+def _trace_id_of(request: Request) -> str | None:
+    """取本请求的链路 id（设计 67）。
+
+    ## 为什么优先读 `request.state` 而不是 contextvar
+
+    `BaseHTTPMiddleware` 的 `call_next()` **返回后上下文已被恢复** —— 此时在
+    `dispatch` 里读 `contextvars` 拿到的是**恢复后的值**（可能为空），而本函数
+    的调用点正是在 `await call_next` 之后。实测：只读 contextvar 时 11081 条
+    `api_logs` 的 `trace_id` 全是 NULL。
+
+    `request.state` 是**请求对象自己的属性**，不受上下文恢复影响 ⇒ 主路径。
+    contextvar 作为兜底（若将来改为纯 ASGI 中间件、或在路由内部写日志）。
+    """
+    state_value = getattr(request.state, "trace_id", None)
+    if state_value:
+        return state_value
+    from backend.app.core import tracing
+
+    return tracing.current_trace_id()
 
 
 def _current_user_id(request: Request) -> int | None:

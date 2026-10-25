@@ -33,6 +33,16 @@ logger = logging.getLogger(BIZ_LOGGER_NAME)
 DETAIL_MAX_CHARS = 4000
 
 
+def _current_trace_id() -> str | None:
+    """当前链路 id（设计 67）。没有返回 None —— 不造值。"""
+    try:
+        from backend.app.core import tracing
+
+        return tracing.current_trace_id()
+    except Exception:  # noqa: BLE001 - 追踪不可用不该阻断业务日志
+        return None
+
+
 def record(
     event: str,
     *,
@@ -46,6 +56,9 @@ def record(
     detail: Optional[dict[str, Any]] = None,
     level: str = LEVEL_INFO,
     db: Optional[Session] = None,
+    #: 显式指定链路 id（中间件路径用 —— 见 `_current_trace_id` 的 docstring）。
+    #: 传了就优先用它，否则自动取当前上下文。
+    trace_id_override: Optional[str] = None,
 ) -> None:
     """记一条业务日志（双写；**永不抛** —— 日志失败不能打断业务）。
 
@@ -70,6 +83,9 @@ def record(
             action=str(action or ""),
             actor_id=actor_id,
             actor_name=str(actor_name or ""),
+            #: 链路 id 自动取当前上下文（设计 67）—— 调用方**不用传**，
+            #: 同一条链路上的所有业务日志自动共享同一个 id。
+            trace_id=trace_id_override or _current_trace_id(),
             workspace=workspace,
             target_type=str(target_type or ""),
             target_id=target_text[:128],
@@ -134,6 +150,7 @@ def register_with_audit() -> None:
         user_id: int | None,
         path: str,
         status_code: int,
+        trace_id: str | None = None,
     ) -> None:
         outcome = "ok" if status_code < 400 else "fail"
         record(
@@ -145,6 +162,8 @@ def register_with_audit() -> None:
             summary=f"{method} {path} → {outcome}({status_code})",
             level=LEVEL_INFO if status_code < 400 else LEVEL_WARNING,
             detail={"status_code": status_code},
+            #: 由中间件从 request.state 取（contextvar 在 call_next 后已恢复）。
+            trace_id_override=trace_id,
         )
 
     api_audit.set_business_recorder(_record)
@@ -216,4 +235,6 @@ def serialize_log(row: BusinessLog) -> dict[str, Any]:
         "target_id": row.target_id,
         "summary": row.summary,
         "detail": detail,
+        #: 链路 id（设计 67）—— 前端「链路」列据此可点开查整条。
+        "trace_id": getattr(row, "trace_id", None),
     }

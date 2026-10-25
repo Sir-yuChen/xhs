@@ -25,7 +25,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import DateTime, Index, Integer, String, Text
+from sqlalchemy import String, DateTime, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.app.core.database import Base
@@ -68,3 +68,5 @@ class BusinessLog(Base):
     summary: Mapped[str] = mapped_column(String(255), default="", nullable=False)
     #: 结构化补充（JSON 文本；含敏感值的字段在埋点侧先脱敏）。
     detail_json: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    #: 链路 id（W3C trace-id；设计 67）。同一次操作的 API 日志与业务日志共享它。
+    trace_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)

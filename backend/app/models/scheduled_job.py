@@ -149,6 +149,9 @@ class ScheduledJobLog(Base):
     #: 执行时快照：任务的**触发器类型**（manual/cron/at）—— 日志按任务类型
     #: 筛选的唯一依据（不 join scheduled_jobs：任务删了历史日志也要能筛）
     job_trigger_type: Mapped[str] = mapped_column(String(16), default="", index=True)
+    #: 链路 id（W3C trace-id；设计 67）。定时任务若由用户操作触发（立刻执行一次），
+    #: 继承那次点击的链路；纯系统定时任务为 NULL（没有发起人，不造假）。
+    trace_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)
     trigger_type: Mapped[str] = mapped_column(String(16), default="scheduled")
     status: Mapped[str] = mapped_column(String(16), default=LOG_RUNNING, index=True)
     started_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now)

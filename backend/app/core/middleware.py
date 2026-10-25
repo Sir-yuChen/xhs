@@ -32,6 +32,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.responses import FileResponse
 
 from backend.app.core.api_audit import ApiAuditMiddleware
+from backend.app.core.trace_middleware import TraceMiddleware
 from backend.app.core.config import get_settings
 
 
@@ -47,9 +48,15 @@ def setup_middleware(app: FastAPI) -> None:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    # API 审计（DEF-019 / T-18）：`api_logs` 自建表起零写入点。
-    # 只记「审计前缀下的写 + 任何失败」，不落 query/body（敏感值不进表）。
+    #: 🔴 **顺序判据（Starlette 是「后注册的先执行」= 洋葱模型）**：
+    #: 先注册的在**内层**、后注册的在**外层**。
+    #:
+    #: 链路追踪必须在**最外层**（最后 add）—— 它要在其它中间件跑之前就建好
+    #: contextvars，否则审计中间件写 `api_logs` 时拿到的 trace_id 是空的。
+    #: 反过来会得到一个**看起来有 trace、但每条都是新链路**的假象（每条日志
+    #: 各一个 id，无法串起来）。
     app.add_middleware(ApiAuditMiddleware)
+    app.add_middleware(TraceMiddleware)
 
 
 def setup_static_serving(app: FastAPI) -> None:

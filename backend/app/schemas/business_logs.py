@@ -36,6 +36,9 @@ class BusinessLogItem(BaseModel):
     #: 原样给文本（服务层口径「不造假」），所以这里只能 `Any`。
     detail: Any = None
 
+    #: 链路 id（设计 67）—— 点它可查该链路的全部日志。
+    trace_id: Optional[str] = None
+
 
 class BusinessLogListResponse(BaseModel):
     """`GET /api/system/logs/business` —— 分页（信封对齐 `paginated_with_total`）。"""

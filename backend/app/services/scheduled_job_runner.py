@@ -169,6 +169,16 @@ def _config_snapshot(job: ScheduledJob) -> dict[str, Any]:
     }
 
 
+def _current_trace() -> str | None:
+    """当前链路 id（设计 67）。没有 ⇒ None（定时任务不造假链路）。"""
+    try:
+        from backend.app.core import tracing
+
+        return tracing.current_trace_id()
+    except Exception:  # noqa: BLE001 - 追踪不可用不该阻断任务
+        return None
+
+
 def _new_log_row(
     db: Session,
     job: ScheduledJob,
@@ -193,6 +203,9 @@ def _new_log_row(
         job_key=job.job_key,
         # 类型快照：日志按任务类型筛选的唯一依据（任务删了也能筛，设计 15 §4.2）
         job_trigger_type=job.trigger_type,
+        #: 链路 id（设计 67）：用户点「立刻执行一次」时继承那次点击的链路；
+        #: 纯系统定时任务为 None（没有发起人，不造假）。
+        trace_id=_current_trace(),
         trigger_type=trigger_type,
         status=LOG_RUNNING,
         started_at=shanghai_now(),

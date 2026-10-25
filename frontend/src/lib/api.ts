@@ -6270,6 +6270,7 @@ export interface SystemAuditLog {
   status: string | null;
   status_code: number | null;
   created_at: string | null;
+  trace_id?: string | null;
 }
 
 export async function fetchSystemAuditLogs(params?: {
@@ -6301,6 +6302,7 @@ export interface SystemBusinessLog {
   target_id: string;
   summary: string;
   detail: unknown;
+  trace_id?: string | null;
 }
 
 /** 跨工作区定时任务总览（设计 64 §3.3，admin 专属）。 */
@@ -6333,6 +6335,33 @@ export async function fetchScheduleOverview(): Promise<{
     by_workspace: Record<string, number>;
   }>("/schedule/overview");
   return response.data;
+}
+
+export type TraceEvent = {
+  source: "api" | "business" | "job";
+  at: string | null;
+  level: string;
+  actor_id: number | null;
+  actor_name: string;
+  title: string;
+  summary: string;
+  detail: unknown;
+};
+
+export type TraceTimeline = {
+  trace_id: string;
+  count: number;
+  by_source: Record<string, number>;
+  events: TraceEvent[];
+  found: boolean;
+};
+
+/** 按链路 id 查该链路的全部日志（设计 67）。 */
+export async function fetchTraceTimeline(
+  traceId: string,
+  params?: { limit?: number },
+): Promise<TraceTimeline> {
+  return http.get(`/system/logs/trace/${encodeURIComponent(traceId)}`, { params });
 }
 
 export async function fetchSystemBusinessLogs(params?: {

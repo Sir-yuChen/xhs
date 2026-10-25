@@ -53,6 +53,7 @@ from backend.app.schemas.system import (
     AuditLogListOut,
 )
 from backend.app.schemas.business_logs import BusinessLogListResponse
+from backend.app.schemas.trace import TraceTimelineResponse
 
 router = APIRouter(prefix="/system", tags=["system"])
 
@@ -154,6 +155,8 @@ def list_audit_logs(
                 "status": getattr(r, "status", None),
                 "status_code": getattr(r, "status_code", None),
                 "created_at": r.created_at.isoformat() if getattr(r, "created_at", None) else None,
+                #: 链路 id（设计 67）—— 点它可查该链路的全部日志。
+                "trace_id": getattr(r, "trace_id", None),
             }
             for r in rows
         ],
@@ -190,6 +193,42 @@ def list_business_logs(
         "page": page,
         "page_size": page_size,
     }
+
+
+@router.get("/logs/trace/{trace_id}", response_model=TraceTimelineResponse)
+def get_trace_timeline(
+    trace_id: str,
+    *,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_perm("system:log:view")),
+    limit: int = Query(500, ge=1, le=2000),
+) -> dict:
+    """**按链路 id 查该链路的全部日志**（设计 67，2026-10-25 用户口径）。
+
+    把三张日志表（`api_logs` / `business_logs` / `scheduled_job_logs`）里
+    同一 `trace_id` 的记录合成一条**按时间升序的平铺时间线**。
+
+    ## 怎么拿到 trace_id
+
+    * 每个响应头都有 `X-Trace-Id` —— 用户遇到问题时把它报给运维；
+    * 或者先从「业务日志 / 审计日志」列表里看到某一行的 trace_id，再查整条。
+
+    ## 为什么非管理员只能看自己的
+
+    日志里含各用户的操作记录。管理员（`system:log:view` 的持有者）可看全部 ——
+    那正是运维排查所需（用户报一个 id，管理员要能查完整链路）。
+
+    ## 为什么是平铺而不是树
+
+    本项目只在 HTTP 入口记 span，后台任务与触发它的那次点击之间**没有可靠的
+    父子关系数据**。硬造一棵树会给出错误层级 ⇒ 先给真实时间顺序，等接
+    OpenTelemetry 有了真实 span 关系再升级（见 `trace_query_service` docstring）。
+    """
+    from backend.app.services import trace_query_service
+
+    return trace_query_service.trace_timeline(
+        db, trace_id, current_user=current_user, limit=limit
+    )
 
 
 @router.get("/logs/audit/{log_id}", response_model=AuditLogDetailOut)
