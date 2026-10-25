@@ -799,39 +799,45 @@ def seed_payloads() -> list[tuple[JobSpec, dict[str, Any]]]:
     return payloads
 
 
-def seed_builtin_jobs_for_user(db: Session, user_id: int) -> list[ScheduledJob]:
-    """给**一个用户**补种缺失的内置 job 行（幂等：同 `(user_id, job_key)` 不插、不覆盖）。
+def seed_builtin_jobs(db: Session) -> list[ScheduledJob]:
+    """补种缺失的内置 job 行（幂等：同 `job_key` 不插、不覆盖）。
 
-    DEF-066（2026-09-24，设计 15 §4.1.1）：内置行按用户各持一份 —— 原全局共享单行
-    （user_id IS NULL）是多用户互相操作同一份数据的载体，整条退役。判重从
-    「`job_key + is_builtin` 全局唯一」改为「`job_key + user_id`」。
+    ## 设计 69（2026-10-25）**取代** DEF-066「每用户各持一份」
 
-    播种值来自**应用初始化数据**（设计 15 §4.5，随安装包分发），代码默认兜底。
-    「只补缺失、不覆盖已有」是升级语义的关键：用户在任务中心调过的调度属性
-    不会因为装了个新版本被重置回初始化值。
+    用户口径：「任务中心分为系统级别和工作区域级别，工作区域为每个区域中私有」
+    「收为公共」「暂时不允许用户创建任务」。
 
-    ⚠️ 种子里的 `account_ids` 统一重置为 `[]`（= 本人全部账号）：初始化数据是随包
-    分发的**基线**，不应携带任何账号 id；即便被手改出 id，落给某个用户也是越权引用。
+    DEF-066 当时按用户各持一份，是为了避免「全局共享行被多用户互相操作」。
+    但那条整改把两件事压进同一个 `user_id`：
+
+    * **这个任务属于哪个级别** ⇒ 现在用 `workspace`（`system` / `xhs`）；
+    * **执行时跑谁的数据** ⇒ 现在由 `JobSpec.user_scoped` 在运行时 fan-out。
+
+    于是定义行**每种任务只有一行**（`job_key` 全表唯一），`user_id` 留空
+    （= 内置行，没人改过）。
+
+    ⚠️ 播种值来自**应用初始化数据**（设计 15 §4.5，随安装包分发），
+    代码默认兜底。「只补缺失、不覆盖已有」是升级语义的关键：管理员在任务中心
+    调过的调度属性不会因为装了个新版本被重置回初始化值。
+
+    ⚠️ 种子里的 `account_ids` 统一重置为 `[]`（= 该任务执行时按 fan-out 自己
+    遍历账号）：初始化数据是随包分发的**基线**，不应携带任何账号 id。
     """
     payloads = seed_payloads()
     if not payloads:
         return []
-    existing = set(
-        db.scalars(
-            select(ScheduledJob.job_key).where(ScheduledJob.user_id == user_id)
-        ).all()
-    )
+    #: 判重键 = `job_key`（全表唯一）。设计 69 后不再看 user_id。
+    existing = set(db.scalars(select(ScheduledJob.job_key)).all())
     created: list[ScheduledJob] = []
     for spec, row in payloads:
         if spec.key in existing:
             continue
         params = dict(row.get("params") or {})
-        # 只清洗**已存在**的 account_ids 键（不发明键）：非账号维度的任务
-        # （due_publish / monitoring_refresh）params 保持 `{}`，与初始化数据逐字段一致
         if "account_ids" in params:
+            #: 空列表 = 「该账号维度的任务自己遍历」—— fan-out 后不再靠行上的 id。
             params["account_ids"] = []
         job = ScheduledJob(
-            user_id=user_id,
+            user_id=None,
             name=row["name"],
             job_key=spec.key,
             workspace=workspace_for_job(spec.key),
@@ -851,17 +857,22 @@ def seed_builtin_jobs_for_user(db: Session, user_id: int) -> list[ScheduledJob]:
     return created
 
 
-def ensure_builtin_jobs(db: Session) -> list[ScheduledJob]:
-    """为**每个已存在用户**补种缺失的内置 job 行（幂等；零用户库 ⇒ 零行）。
+def seed_builtin_jobs_for_user(db: Session, user_id: int) -> list[ScheduledJob]:
+    """**已退役**（设计 69）：任务定义不再按用户播种。
 
-    新用户的首批任务行不走本函数（启动时他还不存在）—— 走注册路径
-    `POST /auth/register` → `seed_builtin_jobs_for_user`（设计 15 §4.5 播种时机②）。
+    保留这个名字只为接住旧调用点（`POST /auth/register` 等处）——
+    直接转调全局播种，返回空列表（注册一个新用户**不该**产生任何任务行）。
     """
-    users = db.scalars(select(User).order_by(User.id.asc())).all()
-    created: list[ScheduledJob] = []
-    for user in users:
-        created.extend(seed_builtin_jobs_for_user(db, user.id))
-    return created
+    seed_builtin_jobs(db)
+    return []
+
+
+def ensure_builtin_jobs(db: Session) -> list[ScheduledJob]:
+    """补种内置 job 行（设计 69 后与用户数无关：不再遍历用户）。
+
+    名字保留（旧调用点 + 测试引用了它），语义改为「全局补种一次」。
+    """
+    return seed_builtin_jobs(db)
 
 
 def seed_builtin_jobs_from_initial_data() -> int:

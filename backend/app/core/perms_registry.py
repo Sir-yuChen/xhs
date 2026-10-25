@@ -135,7 +135,6 @@ _HOST_WORKSHOP = "/platforms/xhs/note-workshop"
 _HOST_SHOP_ITEMS = "/platforms/xhs/shop-items"
 _HOST_KEYWORDS = "/platforms/xhs/keywords"
 _HOST_GATEWAY = "/llm-gateway/providers"
-_HOST_TASKS = "/tasks"
 _HOST_RECORDS = "/task-records"
 
 #: (码前缀, 动作, 中文名, 所属资源前缀) → 自动补 host_path
@@ -148,7 +147,6 @@ _LODGER_HOSTS: dict[str, str] = {
     "xhs:forbiddenWord": _HOST_SHOP_ITEMS,
     "xhs:topic": _HOST_KEYWORDS,
     "ai:alert": _HOST_GATEWAY,
-    "xhs:job": _HOST_TASKS,
     "xhs:record": _HOST_RECORDS,
 }
 
@@ -232,10 +230,6 @@ BUSINESS_PERMS: tuple[PermSpec, ...] = (
     *_f("xhs:material", "createFolder/editFolder/deleteFolder/scan",
         "新建文件夹/编辑文件夹/删除文件夹/扫描素材",
         "/platforms/xhs/note-workshop?tab=materials", _X),
-    # 任务中心 6
-    *_f("xhs:job", "create/edit/delete/run/pause/resume",
-        "新建任务/编辑任务/删除任务/立即执行/暂停任务/恢复任务",
-        "/tasks", _X),
     # 队列记录 4
     *_f("xhs:record", "cancel/retry/clean/cleanAll",
         "取消记录/重试记录/清理记录/一键清理",
@@ -283,7 +277,6 @@ PAGE_VIEW_PERMS: tuple[PermSpec, ...] = (
     PermSpec("ai:gateway:view", "服务商", "C", "/llm-gateway/providers", _A, _A),
     PermSpec("ai:model:view", "模型配置", "C", "/models", _A, _A),
     # 任务中心 / 队列记录 / 个人资料 3
-    PermSpec("xhs:job:view", "任务中心", "C", "/tasks", _X, _X),
     PermSpec("xhs:record:view", "队列记录", "C", "/task-records", _X, _X),
     #: ⚠️ **v1.1.0 梳理补登（2026-10-24）**：原注释写「个人资料不挂码，故不计」，
     #: 那是把两件事混了 ——

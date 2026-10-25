@@ -109,7 +109,10 @@ def _serialize_job(job: ScheduledJob, live_next_run_at: Optional[datetime] = Non
     params_editable = list(spec.params_editable) if spec is not None else []
     return {
         "id": job.id,
+        #: 设计 69：`user_id` 已降级为"最后修改人"（内置行 NULL）；
+        #: 归属看 `workspace`（system / xhs）。
         "user_id": job.user_id,
+        "workspace": job.workspace,
         "name": job.name,
         "job_key": job.job_key,
         "trigger_type": job.trigger_type,
@@ -144,7 +147,10 @@ def serialize_log(log: ScheduledJobLog) -> dict:
         "id": log.id,
         "job_id": log.job_id,
         # 归属快照（DEF-066）：日志按用户隔离的唯一依据（任务删了仍在）
+        #: 设计 69：`user_id` = 最后修改人快照；`executed_for_user_id` = 这次跑谁的数据。
         "user_id": log.user_id,
+        "executed_for_user_id": log.executed_for_user_id,
+        "workspace": getattr(log, "workspace", None),
         # 业务任务号（迁移 `k2l3m4n5o6p7`）：任务日志列表的「取消任务」按钮按它调
         # `POST /tasks/{id}/cancel`（2026-09-27 用户口径「任务日志列表操作列新增取消
         # 任务中断任务执行功能按钮和逻辑」）。`null` = 该日志没有对应业务任务行
@@ -195,7 +201,9 @@ def _get_visible_job(db: Session, current_user: User, job_id: int) -> ScheduledJ
     别人的行 ⇒ 404（不区分「不存在」与「不属于你」，避免越权探测）。
     """
     job = db.get(ScheduledJob, job_id)
-    if job is None or job.user_id != current_user.id:
+    #: 设计 69：任务定义已收为公共（不再是"某人的任务"）⇒ 只判存在。
+    #: 越权由路由层 `system:scheduler:manage` 挡住（只有 admin 能到这个端点）。
+    if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="JOB_NOT_FOUND")
     return job
 
@@ -432,11 +440,20 @@ def list_jobs(
     trigger_type: Optional[str] = None,
     keyword: Optional[str] = None,
     page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
+    page_size: int = Query(20, ge=1, le=200),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    statement = select(ScheduledJob).where(ScheduledJob.user_id == current_user.id)
+    #: ⚠️ **设计 69（2026-10-25）后不再按 `user_id` 过滤**。
+    #:
+    #: 任务定义已收为公共（`job_key` 全表唯一，`user_id` 只是"最后修改人"且
+    #: 内置行留空）—— 继续按 `user_id == 当前用户` 筛，admin 会一条都查不到
+    #:（实测：422/空列表）。任务中心本身已收归 admin（路由挂
+    #: `system:scheduler:view`），端点这里按工作区/状态筛即可。
+    statement = select(ScheduledJob)
+    workspace = str(request.query_params.get("workspace") or "").strip()
+    if workspace:
+        statement = statement.where(ScheduledJob.workspace == workspace)
     if job_status:
         statement = statement.where(ScheduledJob.status == job_status)
     if trigger_type:
@@ -466,9 +483,8 @@ def list_targets(
     """
     # 已建任务数按 job_key 聚合一次查完（别 N+1；行数是十位数，全量载入无压力）
     counts: dict[str, int] = {}
-    for key in db.scalars(
-        select(ScheduledJob.job_key).where(ScheduledJob.user_id == current_user.id)
-    ).all():
+    #: 设计 69：任务定义公共 ⇒ 计数按全表（不再是"我建了几个"）。
+    for key in db.scalars(select(ScheduledJob.job_key)).all():
         counts[key] = counts.get(key, 0) + 1
     return {
         "items": [
@@ -741,9 +757,10 @@ def list_logs(
     `manual`）/ 时间范围 + 分页。原「全库日志零过滤」的形态已废：调度日志含别人
     任务的 message / result / 配置快照，跨用户可见即泄漏。
     """
-    statement = select(ScheduledJobLog).where(
-        ScheduledJobLog.user_id == current_user.id
-    )
+    #: 设计 69：日志不再按 `user_id`（那是"最后修改人"）过滤 —— fail-out 后
+    #: 每行带 `executed_for_user_id` 表示"为谁跑的"。任务中心已收归 admin，
+    #: 该端点的可见性由路由权限码收口。
+    statement = select(ScheduledJobLog)
     if job_id is not None:
         statement = statement.where(ScheduledJobLog.job_id == job_id)
     if job_key:
@@ -787,10 +804,7 @@ def delete_logs(
     行整条删，不涉及孤儿（删了就没有了）。
     """
     logs = db.scalars(
-        select(ScheduledJobLog).where(
-            ScheduledJobLog.id.in_(payload.ids),
-            ScheduledJobLog.user_id == current_user.id,
-        )
+        select(ScheduledJobLog).where(ScheduledJobLog.id.in_(payload.ids))
     ).all()
     for log in logs:
         db.delete(log)
@@ -804,10 +818,8 @@ def clean_logs(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """清空调度日志（可按 job_id 收窄；DEF-066：只清**本人**的，缺省清本人全部）。"""
-    statement = select(ScheduledJobLog).where(
-        ScheduledJobLog.user_id == current_user.id
-    )
+    """清空调度日志（可按 job_id 收窄；设计 69 后为全表操作，admin 专属）。"""
+    statement = select(ScheduledJobLog)
     if job_id is not None:
         statement = statement.where(ScheduledJobLog.job_id == job_id)
     deleted = 0
@@ -920,12 +932,8 @@ def schedule_status(
 
     settings = get_settings()
     scheduler = getattr(request.app.state, "scheduler", None)
-    # 本人的行 id 集合（计数 + 活值过滤共用）
-    my_ids = set(
-        db.scalars(
-            select(ScheduledJob.id).where(ScheduledJob.user_id == current_user.id)
-        ).all()
-    )
+    #: 全表行 id 集合（设计 69：任务定义公共，总览不再只看"我的"）
+    my_ids = set(db.scalars(select(ScheduledJob.id)).all())
     jobs = []
     if scheduler is not None:
         for job in scheduler.get_jobs():
@@ -940,9 +948,7 @@ def schedule_status(
             jobs.append({"id": job.id, "next_run_time": _iso(job.next_run_time)})
     # 状态计数一次查完（别 N+1；行数是十位数，全量载入无压力）
     counts: dict[str, int] = {}
-    for job in db.scalars(
-        select(ScheduledJob).where(ScheduledJob.user_id == current_user.id)
-    ).all():
+    for job in db.scalars(select(ScheduledJob)).all():
         counts[job.status] = counts.get(job.status, 0) + 1
     return {
         "enabled": bool(settings.scheduler_enabled),

@@ -22,7 +22,11 @@ class ScheduledJobItem(BaseModel):
     """一个定时任务（`_serialize_job()` 的产物）。"""
 
     id: int
-    user_id: Optional[int] = Field(default=None, description="内置任务按用户各持一份，此处为归属者")
+    #: 设计 69（2026-10-25）：任务定义收为公共后，`user_id` 是**最后修改人**
+    #: （内置行留空），不再表达归属 —— 归属看 `workspace`。
+    user_id: Optional[int] = Field(default=None, description="最后修改人（审计用；内置行为空）")
+    #: 归属级别：`system` = 系统级（清理本系统资源）/ `xhs` = 工作区域级。
+    workspace: Optional[str] = Field(default=None, description="归属工作区（system / xhs）")
     name: str
     job_key: str
     #: `cron` / `at` / `manual`
@@ -95,7 +99,8 @@ class ScheduledJobLogItem(BaseModel):
     #: 执行时的配置快照（详情弹窗用；该列新增前的执行为 null）。
     config_snapshot: Optional[dict[str, Any]] = None
     created_at: Optional[str] = None
-
+    #: 设计 69：这次执行跑的是谁的数据（fan-out 前为 NULL；系统级任务为 NULL）。
+    executed_for_user_id: Optional[int] = None
 
 class ScheduledJobLogListResponse(BaseModel):
     """`GET /api/schedule/logs`。"""

@@ -7,7 +7,6 @@ import { LoginPage } from "../pages/login/login-page";
 import { ModelConfigPage } from "../pages/models/model-config-page";
 import { PlatformSelectPage } from "../pages/platform-select/platform-select-page";
 import { SettingsPage } from "../pages/settings/settings-page";
-import { TaskCenterPage } from "../pages/tasks/task-center-page";
 import { TaskRecordsPage } from "../pages/tasks/task-records-page";
 import { AutoOpsPage } from "../pages/platforms/xhs/auto-ops-page";
 import { OrdersPage } from "../pages/platforms/xhs/orders-page";
@@ -173,7 +172,10 @@ export function AppRouter() {
           {/* 预检表格 —— 独立新页签展示 + 编辑（用户口径 2026-10-09）。
               数据走 sessionStorage 传递（新页签没有父窗口状态）。 */}
           <Route path="/platforms/xhs/:section" element={<XhsSectionPage />} />
-          <Route path="/tasks" element={<TaskCenterPage />} />
+          {/* 用户侧任务中心已下线（设计 69：任务收为公共，暂不允许用户创建任务）。
+              旧深链重定向到系统任务中心 —— 该页仅 admin 可见，普通用户会看到
+              权限说明，而不是 404（「页面壳可见、数据按权限」的既有模式）。 */}
+          <Route path="/tasks" element={<Navigate to="/system/scheduler" replace />} />
           {/* 2026-09-25 §35.9 ⑥：任务记录（执行记录，复用 /tasks 端点）——
               与「任务中心」（定时任务 scheduled_jobs）不是一回事：那一页管「什么时候跑」，
               这一页管「跑完了什么」。 */}

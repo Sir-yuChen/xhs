@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import Index, Boolean, DateTime, ForeignKey, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.app.core.database import Base
@@ -51,19 +51,40 @@ class ScheduledJob(Base):
     调度语义的**唯一权威源**：触发器（manual/cron/at）只存在本表；
     `auto_tasks` 等业务配置通过 `params.auto_task_id` 引用本行，不存任何调度字段。
 
-    ⚠️ **2026-09-24 隔离整改（DEF-066，设计 15 §4.1.1）**：原「`user_id IS NULL` =
-    系统内置/全局任务（所有登录用户可见、可暂停；不可删除）」**整句作废** —— 全局共享行
-    就是多用户互相操作同一份数据的载体（A 改 params/暂停/删除，B 跟着变；A 配的
-    account_ids 写在共享行上，B 执行同一行跑的是 A 的账号）。现语义：
-    **所有行必归属一个用户**，内置种子行**按用户各播种一份**（判重 `job_key + user_id`）。
-    列保持 nullable 只为迁移兼容（存量 NULL 行由迁移 `a0b1c2d3e4f5` 克隆后删除），
-    应用层不再产生 NULL 行；`user_scoped` 任务的执行函数见到 NULL 用户直接失败
-    （不静默退化成「全库账号」）。
+    ## 归属语义（2026-10-25 设计 69 **取代** DEF-066「每用户各持一份」）
+
+    用户口径：「任务中心分为系统级别和工作区域级别，工作区域为每个区域中私有」
+    「暂时不允许用户创建任务」「收为公共」。
+
+    * **`job_key` 全表唯一** —— 一种任务只有一行定义，**不再按用户复制**。
+      DEF-066 当时按用户复制是为了解决「全局共享行被多用户互相操作」，但那条整改
+      把「这个任务服务于谁的数据」和「谁有权改它」压进了同一个 `user_id`，
+      结果 403 行（31 用户 × 13 任务）里同一个「清理记录表」重复 31 次，
+      改一次 Cron 要改 31 处，系统管理页看不出任务内容。
+
+      现在两条语义分开：
+      - **归属哪个级别** ⇒ `workspace`（`system` / `xhs` / 未来平台）；
+      - **执行时跑谁的数据** ⇒ 由 `JobSpec.user_scoped` 在运行时扇出（fan-out），
+        **不是存储字段**（见 `scheduled_job_runner`）。
+
+    * `user_id` 降级为**最后修改人**（审计用，可空）。它不再表达归属，
+      也不用于「我的任务」过滤 —— 用户侧任务中心已下线。
     """
 
     __tablename__ = "scheduled_jobs"
 
+    #: **一种任务只有一行定义**（设计 69 §2，2026-10-25 用户口径「收为公共」）。
+    #:
+    #: ⚠️ 这条唯一约束是本次重构的**核心不变量**：它让「按用户复制定义行」
+    #: 在数据库层就不可能（旧形态 403 行 = 31 用户 × 13 任务）。
+    #: 旧约束 `(job_key, user_id)` 已由迁移 `a9b8c7d6e5f4` 删除。
+    __table_args__ = (
+        Index("uq_scheduled_jobs_job_key", "job_key", unique=True),
+    )
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    #: **最后修改人**（设计 69：不再是归属人；归属看 `workspace`）。
+    #: 内置种子行播种时为 NULL（没有人"改过"它）。
     user_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("users.id"), nullable=True, index=True
     )
@@ -124,8 +145,20 @@ class ScheduledJobLog(Base):
     job_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("scheduled_jobs.id", ondelete="SET NULL"), nullable=True, index=True
     )
-    #: 执行时快照的任务归属者（DEF-066；迁移 `a0b1c2d3e4f5` 回填 + 索引）
+    #: 执行时快照的任务**最后修改人**（DEF-066 建列；设计 69 后语义改为审计，
+    #: 不再表达归属）。存量行的值 = 当时的归属人，保留作历史快照。
     user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id"), nullable=True, index=True
+    )
+    #: **这次执行跑的是谁的数据**（设计 69 §4.1，迁移 `f2a3b4c5d6e7`）。
+    #:
+    #: 为什么要单独一列、不复用 `user_id`：`user_scoped` 任务收成一份定义后，
+    #: 一次触发会**扇出到多个用户**（每个用户一行日志），而"谁改的任务"与
+    #: "为谁跑的"是两件事。系统级任务（清理类）没有执行主体 ⇒ NULL。
+    #:
+    #: 前端「执行日志」的「目标用户」列读这一列；账号卡「同步中」判据仍用
+    #: `platform_account_id`（不受影响）。
+    executed_for_user_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("users.id"), nullable=True, index=True
     )
     #: 执行时快照的**平台账号**（迁移 `j1k2l3m4n5o6` 建列，`b3c4d5e6f7a8` 随 ADR-021

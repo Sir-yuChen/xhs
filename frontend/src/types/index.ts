@@ -1806,6 +1806,12 @@ export type ScheduledJob = {
    */
   params_defaults: Record<string, unknown>;
   status: "active" | "paused" | "completed" | string;
+  /**
+   * 归属的工作区（设计 69，2026-10-25）：`system` = 系统级（清理本系统自己的
+   * 资源，与接哪个平台无关）；`xhs` = 工作区域级（只作用于该工作区的数据）。
+   * ⚠️ 它**不是**「哪个用户的任务」—— 任务定义按 `job_key` 全局唯一，不按用户复制。
+   */
+  workspace?: string | null;
   remark: string;
   is_builtin: boolean;
   last_run_at?: string | null;
@@ -1855,6 +1861,13 @@ export type ScheduledJobLog = {
   started_at: string;
   finished_at?: string | null;
   duration_ms?: number | null;
+  /** 任务归属的工作区快照（设计 69；`system` / `xhs`）。 */
+  workspace?: string | null;
+  /**
+   * **这次执行跑的是谁的数据**（设计 69 §4.1，与 `user_id` 不是一回事）：
+   * fan-out 后一次触发会为每个目标用户各写一行；系统级清理任务没有执行主体 ⇒ null。
+   */
+  executed_for_user_id?: number | null;
   /** 任务进度百分比 0~100（R13：日志表「任务进度 + 耗时或异常」列渲染进度条） */
   progress: number;
   message: string;

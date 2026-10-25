@@ -129,11 +129,31 @@ def _validate_auto_ops_params(params: dict, db: Any, user: Any) -> None:
 #: 工作区归属（设计 64 §3.3）：定时任务是**公共底座**（单调度器，不按工作区拆分），
 #: 每个 job 标注它服务于哪个工作区 —— 系统卫生类归 `system`，业务类归 `xhs`
 #:（现有业务任务全部服务小红书工作区；新工作区的任务在此登记）。
-SYSTEM_WORKSPACE_JOBS: frozenset[str] = frozenset({"system.queue_record_cleanup"})
+#: **系统级任务**（设计 69 §2.1）：作用于**本系统自己的资源**，与接哪个平台无关。
+#:
+#: 判据（2026-10-25 用户口径「任务中心分为系统级别和工作区域级别，
+#: 工作区域为每个区域中私有」）：**换一个平台接入，这个任务还要不要存在？**
+#: 要 ⇒ 系统级；不要（它只操作小红书数据）⇒ 工作区域级。
+#:
+#: * `queue_record_cleanup`    —— 清 `tasks` 表（本系统的队列记录表）
+#: * `package_staging_cleanup` —— 清磁盘暂存目录
+#: * `picture_space_cleanup`   —— 清本系统图片空间里未被引用的文件
+#:
+#: ⚠️ 三者都**不 import 任何平台适配器**，也不需要"某个用户的账号"。
+SYSTEM_WORKSPACE_JOBS: frozenset[str] = frozenset(
+    {
+        JOB_KEY_RECORD_CLEANUP,
+        JOB_KEY_PACKAGE_STAGING_CLEANUP,
+        JOB_KEY_PICTURE_SPACE_CLEANUP,
+    }
+)
 
 
 def workspace_for_job(key: str) -> str:
-    """job_key → 工作区（未知键兜 `xhs`：业务任务是默认形态）。"""
+    """job_key → 工作区（设计 69 §2.1）。
+
+    未知键兜 `xhs`：业务任务是默认形态（未来接新平台时由注册表显式登记）。
+    """
     return "system" if str(key or "") in SYSTEM_WORKSPACE_JOBS else "xhs"
 
 

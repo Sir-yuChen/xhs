@@ -186,11 +186,15 @@ def _new_log_row(
     trigger_type: str,
     account_id: Optional[int] = None,
     task_id: Optional[int] = None,
+    executed_for_user: Optional[int] = None,
 ) -> ScheduledJobLog:
+    """建一条 running 日志（设计 69：`executed_for_user` = 这次跑谁的数据）。"""
     log = ScheduledJobLog(
         job_id=job.id,
-        # 归属快照（DEF-066）：任务删了历史日志仍能按用户收口；不 join scheduled_jobs
+        # 最后修改人快照（DEF-066 建列；设计 69 后语义改为审计，可空）
         user_id=job.user_id,
+        #: fan-out 时 = 本次执行的目标用户；系统级任务（清理类）= None
+        executed_for_user_id=executed_for_user,
         # 账号快照（迁移 `j1k2l3m4n5o6` 建列，`b3c4d5e6f7a8` 随 ADR-021 改名
         # `platform_account_id`）：账号卡「同步中」= 该账号**最新一条**日志的
         # 状态（2026-09-27 用户口径）。非账号级任务（cron 全量、系统作业）传 None。
@@ -281,6 +285,160 @@ def _mark_success(db: Session, job: ScheduledJob, log: ScheduledJobLog, payload:
         job.status = JOB_STATUS_COMPLETED
 
 
+# --------------------------------------------------------------------------- #
+# fan-out（设计 69 §4.2）
+# --------------------------------------------------------------------------- #
+def _platform_data_owners(db: Session) -> list[int]:
+    """「持平台账号的用户」——遍历谁的数据（fan-out 的目标集合）。
+
+    ## 判据
+
+    只取**有平台账号**的用户：没接任何小红书账号的用户，同步类任务对他没有
+    任何可做的事 —— 给他跑一遍只会产生「跳过」日志，把真正的工作淹没。
+
+    ⚠️ **不过滤账号令牌是否有效**：令牌过期的用户仍要跑（任务是去**发现**
+    并标记失效，跳过他就永远不会被标出来）。这里只按"有没有账号"筛。
+
+    排序固定（`min(id)` 升序）：同一次 fan-out 的执行顺序可复现，日志好对照。
+    """
+    from backend.app.models.platform_account import PlatformAccount
+
+    rows = db.execute(
+        select(PlatformAccount.user_id)
+        .where(PlatformAccount.user_id.isnot(None), PlatformAccount.deleted_at.is_(None))
+        .distinct()
+        .order_by(PlatformAccount.user_id)
+    ).all()
+    return [int(r[0]) for r in rows if r[0] is not None]
+
+
+def _fan_out(
+    *,
+    job: ScheduledJob,
+    spec: Any,
+    log: ScheduledJobLog,
+    params: dict[str, Any],
+    targets: list[int],
+    trigger_type: str,
+    progress_probe: Optional[Callable[[], Optional[int]]],
+) -> dict[str, Any]:
+    """逐个用户执行，**每人生成一条日志**，最后汇总进批次日志（设计 69 §4.2）。
+
+    ## 为什么每用户一条日志，而不是"批次一行 + 明细表"
+
+    与市场方案同构（XXL-Job `xxl_job_log` 一次执行一行）：用户排查时看的是
+    「我这次为什么没同步成功」，按用户筛日志就要能直接命中。做成明细 JSON
+    就得在应用层再解析一遍，前端也没法按用户/状态筛。
+
+    ## 单用户失败不中断整批
+
+    与 `queue_record_cleanup` 的逐条容错同型（用户口径一直如此）：一个账号
+    令牌失效不该让其它账号的同步一起停。
+
+    ## 返回值与批次状态
+
+    批次日志（调用方那条 `log`）的 status：
+    * 全部成功 ⇒ `success`
+    * 有失败有成功 ⇒ `failed`（**故意不用 partial** —— 现有状态枚举里没有它，
+      加新枚举值会让前端筛选器/账号卡判据一起漂移；`message` 里写清
+      "12 成功 / 3 失败"，用户读得出部分失败）
+    * 全部失败 ⇒ `failed`
+    """
+    db = SessionLocal()
+    succeeded = 0
+    failed: list[int] = []
+    skipped = 0
+    try:
+        for uid in targets:
+            child = _new_log_row(
+                db, job, trigger_type=trigger_type, executed_for_user=uid
+            )
+            #: 探针按子日志 id 起泵：fan-out 时每个用户的进度各自心跳，
+            #: 互不影响（共用一条泵会让 12 个用户抢同一个 progress 字段）。
+            pump = (
+                _ProgressPump(child.id, progress_probe)
+                if progress_probe is not None
+                else None
+            )
+            try:
+                payload = spec.func(user_id=uid, **params)
+                _finish_child_log(db, child, status=LOG_SUCCESS, payload=payload)
+                succeeded += 1
+            except _SkipUser as exc:
+                #: 该用户本次无事可做（例如没有待发布内容）—— 记「跳过」而非失败。
+                _finish_child_log(db, child, status=LOG_SKIPPED, message=str(exc))
+                skipped += 1
+            except Exception as exc:  # noqa: BLE001 - 单用户失败不中断整批
+                logger.warning(
+                    "scheduled job %s (%s) user=%s failed: %s",
+                    job.id,
+                    job.job_key,
+                    uid,
+                    exc,
+                )
+                _finish_child_log(db, child, status=LOG_FAILED, message=str(exc))
+                failed.append(uid)
+            finally:
+                if pump is not None:
+                    pump.stop()
+            db.commit()
+
+        total = len(targets)
+        summary = f"{succeeded}/{total} 成功"
+        if skipped:
+            summary += f"，{skipped} 跳过"
+        if failed:
+            summary += f"，{len(failed)} 失败（用户 {', '.join(map(str, failed))}）"
+
+        now = shanghai_now()
+        log.status = LOG_SUCCESS if not failed else LOG_FAILED
+        log.finished_at = now
+        log.duration_ms = int((now - log.started_at).total_seconds() * 1000) if log.started_at else 0
+        log.progress = 100
+        log.message = summary
+        job.last_run_at = now
+        job.last_status = log.status
+        job.run_count = (job.run_count or 0) + 1
+        if failed:
+            job.consecutive_failures = (job.consecutive_failures or 0) + 1
+        else:
+            job.consecutive_failures = 0
+            job.backoff_until = None
+        db.commit()
+        return {"log_id": log.id, "status": log.status, "summary": summary}
+    finally:
+        db.close()
+
+
+def _finish_child_log(
+    db: Session,
+    log: ScheduledJobLog,
+    *,
+    status: str,
+    message: str = "",
+    payload: Any = None,
+) -> None:
+    """写 fan-out 子日志的终态（设计 69 §4.2）。
+
+    子日志**不改** `job.run_count` / `last_status` —— 那些由批次日志统一收口
+    （否则 12 个用户会把这几个计数加 12 次）。
+    """
+    now = shanghai_now()
+    log.status = status
+    log.finished_at = now
+    if log.started_at is not None:
+        log.duration_ms = int((now - log.started_at).total_seconds() * 1000)
+    if status == LOG_SUCCESS:
+        log.progress = 100
+        if isinstance(payload, dict):
+            log.result = payload
+    elif message:
+        log.message = message[:2000]
+
+
+class _SkipUser(Exception):
+    """执行函数用它表达「这个用户本次无事可做」（记 `skipped`，不算失败）。"""
+
 def execute_job(
     job_id: int,
     *,
@@ -361,18 +519,37 @@ def execute_job(
             db.commit()
             return {"log_id": active_log_id, "status": LOG_FAILED}
 
-        # 账号维度隔离门（DEF-066） --------------------------------------------- #
-        # user_scoped 任务必须知道「行归属者」才能收口账号范围；行归属为 NULL
-        # （迁移前历史行 / 脏数据）⇒ 响亮失败，不静默跑成「全库账号」。
+        # 账号维度：fan-out（设计 69 §4.2，取代 DEF-066 的「行归属者」） -------- #
+        #
+        # `user_scoped=True` 的任务执行时要跑**某个用户的数据**（查「他的小红书账号」）。
+        # 定义收成一份（`job_key` 唯一）后，行上不再有"归属者"，所以这里必须
+        # **自己遍历**「有平台账号的用户」，逐个执行、逐个记日志 —— 这就是
+        # 市场方案里的 fan-out / Dispatcher Task Pattern（设计 69 §3）。
+        #
+        # ⚠️ 不再因 `job.user_id is None` 报失败：那个判据属于"每用户一份定义"
+        # 的旧形态。现在 NULL 是**正常值**（= 内置种子行，没人改过）。
         call_kwargs: dict[str, Any] = {}
         if spec.user_scoped:
-            if job.user_id is None:
-                message = "任务行未归属用户（user_id 为空），拒绝执行（账号维度隔离）"
-                logger.warning("scheduled job %s (%s): %s", job.id, job.job_key, message)
-                _mark_failed(db, job, log, message, message=message)
+            targets = _platform_data_owners(db)
+            if not targets:
+                message = "没有持平台账号的用户，本次无事可做"
+                log.status = LOG_SKIPPED
+                log.finished_at = shanghai_now()
+                log.duration_ms = 0
+                log.message = message
+                job.last_run_at = now
+                job.last_status = LOG_SKIPPED
                 db.commit()
-                return {"log_id": active_log_id, "status": LOG_FAILED}
-            call_kwargs["user_id"] = job.user_id
+                return {"log_id": active_log_id, "status": LOG_SKIPPED}
+            return _fan_out(
+                job=job,
+                spec=spec,
+                log=log,
+                params=params,
+                targets=targets,
+                trigger_type=trigger_type,
+                progress_probe=progress_probe,
+            )
 
         # 调注册表函数 --------------------------------------------------------- #
         # 进度心跳（§35.17.3）：泵**必须在写终态之前停** —— 否则会出现
