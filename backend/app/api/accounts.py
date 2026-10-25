@@ -26,6 +26,7 @@ from backend.app.core.deps import get_current_user, get_owned_active_account
 from backend.app.core.time import shanghai_now
 from backend.app.models import AccountCookieVersion, PlatformAccount, User
 from backend.app.schemas.common import paginated
+from backend.app.schemas.accounts import AccountListResponse
 from backend.app.services.account_service import (
     CHANNEL_ARK,
     CHANNEL_CREATOR,
@@ -188,7 +189,7 @@ def _get_owned_active_account(db: Session, current_user: User, account_id: int) 
     return get_owned_active_account(db, current_user, account_id)
 
 
-@router.get("")
+@router.get("", response_model=AccountListResponse)
 def get_accounts(
     platform: Optional[str] = None,
     page: int = Query(1, ge=1),

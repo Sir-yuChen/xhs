@@ -52,6 +52,7 @@ from backend.app.schemas.system import (
     AuditLogDetailOut,
     AuditLogListOut,
 )
+from backend.app.schemas.business_logs import BusinessLogListResponse
 
 router = APIRouter(prefix="/system", tags=["system"])
 
@@ -162,7 +163,7 @@ def list_audit_logs(
     }
 
 
-@router.get("/logs/business")
+@router.get("/logs/business", response_model=BusinessLogListResponse)
 def list_business_logs(
     *,
     db: Session = Depends(get_db),

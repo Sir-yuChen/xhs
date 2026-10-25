@@ -10,6 +10,12 @@ from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user
 from backend.app.models import Notification, User
 from backend.app.schemas.common import paginated_with_total
+from backend.app.schemas.notifications import (
+    MarkAllReadResponse,
+    NotificationItem,
+    NotificationListResponse,
+    UnreadCountResponse,
+)
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
 
@@ -28,7 +34,7 @@ def serialize_notification(n: Notification) -> dict:
     }
 
 
-@router.get("")
+@router.get("", response_model=NotificationListResponse)
 def list_notifications(
     unread: Optional[bool] = None,
     source_type: Optional[str] = None,
@@ -66,7 +72,7 @@ def list_notifications(
     )
 
 
-@router.get("/unread-count")
+@router.get("/unread-count", response_model=UnreadCountResponse)
 def unread_count(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -88,7 +94,7 @@ def unread_count(
     return {"unread": count}
 
 
-@router.post("/{notification_id}/read")
+@router.post("/{notification_id}/read", response_model=NotificationItem)
 def mark_read(
     notification_id: int,
     current_user: User = Depends(get_current_user),
@@ -103,7 +109,7 @@ def mark_read(
     return serialize_notification(n)
 
 
-@router.post("/read-all")
+@router.post("/read-all", response_model=MarkAllReadResponse)
 def mark_all_read(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),

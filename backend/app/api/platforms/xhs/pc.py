@@ -42,6 +42,11 @@ from backend.app.services.shop_goods_service import (
     missing_note_ids,
     sync_note_ids,
 )
+from backend.app.schemas.xhs_pc import (
+    NoTrafficCleanupActiveResponse,
+    NoTrafficCleanupLogsResponse,
+    NoTrafficCleanupStatusResponse,
+)
 from backend.app.services.no_traffic_cleanup_service import (
     DEFAULT_DELETE_BATCH,
     running_cleanup_for_account,
@@ -2080,7 +2085,7 @@ def no_traffic_cleanup(
     return {"task_id": task_id, "status": "pending"}
 
 
-@router.get("/users/no-traffic/cleanup/active")
+@router.get("/users/no-traffic/cleanup/active", response_model=NoTrafficCleanupActiveResponse)
 def no_traffic_cleanup_active(
     account_id: int,
     current_user: User = Depends(get_current_user),
@@ -2108,7 +2113,7 @@ def no_traffic_cleanup_active(
     }
 
 
-@router.get("/users/no-traffic/cleanup/{task_id}")
+@router.get("/users/no-traffic/cleanup/{task_id}", response_model=NoTrafficCleanupStatusResponse)
 def no_traffic_cleanup_status(
     task_id: int,
     current_user: User = Depends(get_current_user),
@@ -2140,7 +2145,7 @@ def no_traffic_cleanup_status(
     }
 
 
-@router.get("/users/no-traffic/cleanup-logs")
+@router.get("/users/no-traffic/cleanup-logs", response_model=NoTrafficCleanupLogsResponse)
 def no_traffic_cleanup_logs(
     account_id: Optional[int] = None,
     page: int = 1,

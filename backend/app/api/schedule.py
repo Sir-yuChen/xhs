@@ -43,6 +43,13 @@ from backend.app.models.scheduled_job import (
 )
 from backend.app.models import PlatformAccount, User
 from backend.app.schemas.common import paginated
+from backend.app.schemas.schedule_responses import (
+    JobTargetListResponse,
+    ScheduledJobDetailResponse,
+    ScheduledJobItem,
+    ScheduledJobListResponse,
+    ScheduledJobLogListResponse,
+)
 from backend.app.schemas.schedule import (
     CronValidateRequest,
     JobStatusChangeRequest,
@@ -418,7 +425,7 @@ def _validate_create_params(
 # --------------------------------------------------------------------------- #
 # 任务管理
 # --------------------------------------------------------------------------- #
-@router.get("/jobs")
+@router.get("/jobs", response_model=ScheduledJobListResponse)
 def list_jobs(
     request: Request,
     job_status: Optional[str] = Query(default=None, alias="status"),
@@ -443,7 +450,7 @@ def list_jobs(
     return paginated([_serialize_job(job, live.get(job.id)) for job in jobs], page, page_size)
 
 
-@router.get("/targets")
+@router.get("/targets", response_model=JobTargetListResponse)
 def list_targets(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -546,7 +553,7 @@ def create_job(
     return _serialize_job(job, _live_next_run_map(request).get(job.id))
 
 
-@router.get("/jobs/{job_id}")
+@router.get("/jobs/{job_id}", response_model=ScheduledJobDetailResponse)
 def get_job(
     job_id: int,
     current_user: User = Depends(get_current_user),
@@ -715,7 +722,7 @@ def run_job_once(
 # --------------------------------------------------------------------------- #
 # 调度日志
 # --------------------------------------------------------------------------- #
-@router.get("/logs")
+@router.get("/logs", response_model=ScheduledJobLogListResponse)
 def list_logs(
     job_id: Optional[int] = None,
     job_key: Optional[str] = None,
