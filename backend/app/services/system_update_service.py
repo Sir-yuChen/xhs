@@ -223,15 +223,16 @@ def check_for_update() -> dict:
 
 
 def updates_dir() -> Path:
-    """安装包落盘目录（`data/updates/`）。"""
-    data_dir = os.environ.get("DATABASE_SQLITE_PATH")
-    if data_dir:
-        base = Path(data_dir).resolve().parent
-    else:
-        from backend.app.core.version import _project_root
+    """安装包落盘目录（`data/updates/`）。
 
-        base = _project_root() / "data"
-    target = base / UPDATES_SUBDIR
+    ⚠️ v1.1.0（2026-10-24）：原来优先读 `DATABASE_SQLITE_PATH` 环境变量、
+    取其父目录，理由是「安装包与库文件同进同出」。**SQLite 退役后那个变量
+    再也没有人设**（`Settings` 里也已删该字段）⇒ 该分支恒不命中，属于死代码。
+    现在直接用 `core/paths.app_root()/data`（按文件位置推仓库根，不依赖 CWD）。
+    """
+    from backend.app.core import paths
+
+    target = paths.app_root() / "data" / UPDATES_SUBDIR
     target.mkdir(parents=True, exist_ok=True)
     return target
 

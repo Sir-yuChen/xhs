@@ -65,6 +65,13 @@ async def lifespan(app: FastAPI):
     # 路由权限守卫（设计 50 §2.4，S3）：每条写路由必须挂权限码，缺一条拒绝启动。
     # 放在 `init_db()` 之前 —— 映射与库无关，早点失败少写一次盘。
     assert_every_route_guarded(app)
+    # 业务日志写入实现注入（设计 64 §2.3 + 合同 C1）。
+    # `core/api_audit.py` 不能 import `services/`（延迟 import 也算越层），
+    # 所以依赖方向反过来：这里把 services 的实现注册给 core。
+    # ⚠️ 不注册 ⇒ 系统域写操作**静默不记业务日志**（不报错，只是少数据）。
+    from backend.app.services.business_log_service import register_with_audit
+
+    register_with_audit()
     # 启动自检（DEF-028）：Node 签名运行时缺失时全系统的平台调用都会失败，一次性说清。
     app.state.selfcheck = log_startup_selfcheck()
     init_db()

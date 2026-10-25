@@ -26,6 +26,8 @@ uvicorn 的 stdout，而那里既没有 `user_id`、也不区分「谁在什么�
 """
 from __future__ import annotations
 
+from typing import Callable
+
 import logging
 import time
 
@@ -41,6 +43,18 @@ from backend.app.core.database import SessionLocal
 _session_factory = SessionLocal
 
 logger = logging.getLogger(__name__)
+
+#: 业务日志写入回调（由 services 层在启动时注册，见 `set_business_recorder`）。
+#:
+#: 签名：`(event, *, method, user_id, path, status_code) -> None`
+#: 这样 core 不需要认识 `business_log_service`（合同 C1）。
+_BUSINESS_RECORDER: "Callable[..., None] | None" = None
+
+
+def set_business_recorder(recorder: "Callable[..., None] | None") -> None:
+    """注册业务日志写入实现（`main.py` lifespan 调用）。传 `None` = 注销（测试用）。"""
+    global _BUSINESS_RECORDER
+    _BUSINESS_RECORDER = recorder
 
 #: 只审计这些前缀下的**写**操作（读全量记录没有审计价值且会写爆 SQLite）。
 #: 设计 64 §2.3（2026-10-25）：系统管理域（`/api/system/**`）与配置（`/api/settings/**`）、
@@ -121,23 +135,30 @@ class ApiAuditMiddleware(BaseHTTPMiddleware):
 
     @staticmethod
     def _write_business(request: Request, status_code: int) -> None:
-        """系统域写操作 → `business_logs`（设计 64 §2.3）。失败只 warning。"""
-        try:
-            from backend.app.services import business_log_service
+        """系统域写操作 → 业务日志。**失败只 warning**（绝不阻断请求）。
 
-            user_id = _current_user_id(request)
-            outcome = _status_bucket(status_code)
-            business_log_service.record(
+        ⚠️ 实现**不在本模块**：这里只调注入进来的回调（见 `set_business_recorder`）。
+
+        为什么不直接 `from backend.app.services import business_log_service`：
+        合同 C1「`core/` 不得 import `services/`」——**函数内延迟 import 同样计入**
+        （运行时不可达 ≠ 依赖不存在，见 test_arch_dependency_direction 模块头）。
+        A5 刚把 C1 清零，不能为了图省事立刻破例再加一条豁免；
+        依赖方向要单向：**services 知道 core，core 不知道 services**。
+
+        由 `main.py` 的 lifespan 在启动时把 services 的实现注册进来
+        （`business_log_service.register_with_audit()`）。没注册 ⇒ 静默跳过
+        （单元测试里不带 services 跑 audit 中间件时就是这种情形）。
+        """
+        recorder = _BUSINESS_RECORDER
+        if recorder is None:
+            return
+        try:
+            recorder(
                 "systemops.request",
-                action=request.method.lower(),
-                actor_id=user_id,
-                target_type="endpoint",
-                target_id=request.url.path[:128],
-                summary=f"{request.method} {request.url.path} → {outcome}({status_code})",
-                level=business_log_service.LEVEL_INFO
-                if status_code < 400
-                else business_log_service.LEVEL_WARNING,
-                detail={"status_code": status_code},
+                method=request.method.upper(),
+                user_id=_current_user_id(request),
+                path=request.url.path,
+                status_code=status_code,
             )
         except Exception as exc:  # noqa: BLE001 - 业务日志失败绝不阻断请求
             logger.warning("business log write failed for %s: %s", request.url.path, exc)

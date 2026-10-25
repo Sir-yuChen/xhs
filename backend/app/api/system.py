@@ -18,6 +18,12 @@ from backend.app.core.deps import get_current_user
 from backend.app.core.version import current_version, version_info
 from backend.app.models import User
 from backend.app.services import system_update_service
+from backend.app.schemas.system_ops import (
+    AppVersionResponse,
+    UpdateCheckResponse,
+    UpdateDownloadResponse,
+    UpdateInstallResponse,
+)
 
 router = APIRouter(prefix="/system", tags=["system"])
 
@@ -35,7 +41,7 @@ class UpdateInstallRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-@router.get("/version")
+@router.get("/version", response_model=AppVersionResponse)
 def get_version() -> dict:
     """当前应用版本 + 打包时间 + **版本升级历史** + 更新源配置状态（免鉴权）。"""
     source = system_update_service.load_update_source()
@@ -55,13 +61,13 @@ def get_version() -> dict:
     }
 
 
-@router.get("/update/check")
+@router.get("/update/check", response_model=UpdateCheckResponse)
 def check_update(_: User = Depends(get_current_user)) -> dict:
     """查最新版本（**绝不抛异常**：未配置更新源 ⇒ 返回 `has_update=False`）。"""
     return system_update_service.check_for_update()
 
 
-@router.post("/update/download")
+@router.post("/update/download", response_model=UpdateDownloadResponse)
 def download_update(
     payload: UpdateDownloadRequest,
     _: User = Depends(get_current_user),
@@ -76,7 +82,7 @@ def download_update(
     return result
 
 
-@router.post("/update/install")
+@router.post("/update/install", response_model=UpdateInstallResponse)
 def install_update(
     payload: UpdateInstallRequest,
     _: User = Depends(get_current_user),

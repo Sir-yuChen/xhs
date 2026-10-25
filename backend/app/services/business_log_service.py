@@ -113,6 +113,43 @@ def record(
         logging.getLogger(__name__).warning("business_log: 记录 %s 失败", event, exc_info=True)
 
 
+def register_with_audit() -> None:
+    """把「系统域写操作」的写入实现注册给 `core/api_audit.py`（启动时调一次）。
+
+    ## 为什么需要这个适配器
+
+    `core/api_audit.py` 要在系统域写操作后记一条业务日志，但**合同 C1 规定
+    `core/` 不得 import `services/`**（延迟 import 也算）。所以依赖方向必须反过来：
+    services 知道 core，core 只认一个回调。
+
+    这个函数就是那个回调的**唯一实现**：它把 audit 中间件给的原始参数
+    （method / user_id / path / status_code）翻译成 `record()` 的业务语义。
+    """
+    from backend.app.core import api_audit
+
+    def _record(
+        event: str,
+        *,
+        method: str,
+        user_id: int | None,
+        path: str,
+        status_code: int,
+    ) -> None:
+        outcome = "ok" if status_code < 400 else "fail"
+        record(
+            event,
+            action=str(method or "").lower(),
+            actor_id=user_id,
+            target_type="endpoint",
+            target_id=str(path or "")[:128],
+            summary=f"{method} {path} → {outcome}({status_code})",
+            level=LEVEL_INFO if status_code < 400 else LEVEL_WARNING,
+            detail={"status_code": status_code},
+        )
+
+    api_audit.set_business_recorder(_record)
+
+
 def _open_session():
     from backend.app.core.database import SessionLocal
 

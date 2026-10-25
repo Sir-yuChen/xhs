@@ -23,6 +23,11 @@ from backend.app.core.deps import get_current_user
 from backend.app.models import SystemSetting, User
 from backend.app.models.system_setting import VALUE_TYPES
 from backend.app.services import business_log_service
+from backend.app.schemas.settings import (
+    EffectiveSettingsResponse,
+    SettingDetailResponse,
+    SettingListResponse,
+)
 from backend.app.services import settings_service
 
 logger = logging.getLogger(__name__)
@@ -131,7 +136,7 @@ def _wake_runtime_consumers(key: str) -> None:
         logger.warning("settings: 配置 %s 已保存，但唤醒同步 worker 池失败", key, exc_info=True)
 
 
-@router.get("")
+@router.get("", response_model=SettingListResponse)
 def list_settings(
     category: Optional[str] = Query(default=None, description="按分组筛选；留空 = 全部"),
     scope: str = Query(default="user", description="user=本人 / system=全局（admin）/ workspace=工作区（admin，需 workspace）"),
@@ -157,7 +162,7 @@ def list_settings(
     }
 
 
-@router.get("/effective")
+@router.get("/effective", response_model=EffectiveSettingsResponse)
 def effective_settings(
     workspace: Optional[str] = Query(default=None, max_length=32),
     current_user: User = Depends(get_current_user),
@@ -223,7 +228,7 @@ def create_setting(
     return settings_service.serialize_setting(row, db=db)
 
 
-@router.get("/{key}")
+@router.get("/{key}", response_model=SettingDetailResponse)
 def get_setting(
     key: str,
     scope: str = Query(default="user"),

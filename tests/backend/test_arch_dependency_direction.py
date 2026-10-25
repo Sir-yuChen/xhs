@@ -309,9 +309,19 @@ def test_scanner_sees_function_level_and_relative_imports():
 # response_model 覆盖率基线（设计 61 §四 A1 第二条守卫，A6 逐域抬升）
 # ---------------------------------------------------------------------------
 
-#: 当前基线（2026-10-24 A6 第一批：system 域 15 个 GET 接线后实测 = 15）。
-#: 后续每补齐一个域（settings / system_deps / notes …）就把本数字抬上去，只许升不许降。
-RESPONSE_MODEL_BASELINE = 15
+#: 当前基线（只许升不许降）。
+#:
+#: 演进：
+#: * 2026-10-24 A6 第一批：system 域 15 个 GET 接线 ⇒ 15
+#: * 2026-10-24 A6 第二期（部分）：settings 3 GET + system_deps 2 GET +
+#:   system.py 2 GET + update/download/install 2 POST ⇒ 实测 **25**
+#:
+#: ⚠️ 口径提醒：本守卫数的是 **全部 5 种 HTTP 方法**（不只 GET），
+#: 与「读接口」的口径不同 —— 别用 GET 的统计数去对基线，会莫名对不上。
+#: 剩余待补（第三期起）：notes 27 / qianfan goods 25 / llm_gateway 18 /
+#: pc 18 / picture_space 16 / violation 16 / product_notes 14 / publish 14 /
+#: schedule 14 / analytics 13 …
+RESPONSE_MODEL_BASELINE = 25
 
 _HTTP_VERBS = {"get", "post", "put", "patch", "delete"}
 

@@ -23,6 +23,10 @@ from pydantic import BaseModel
 from backend.app.core.deps import get_current_user
 from backend.app.models import User
 from backend.app.core import env_bootstrap as env
+from backend.app.schemas.system_deps import (
+    DependencyProgressResponse,
+    DependencyStatusResponse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,13 +47,13 @@ class ResetRequest(BaseModel):
     key: str
 
 
-@router.get("/deps")
+@router.get("/deps", response_model=DependencyStatusResponse)
 def list_dependencies(_: User = Depends(get_current_user)) -> dict:
     """全部依赖状态（探测本地是否可用；**不触发下载**）。"""
     return env.all_status()
 
 
-@router.get("/deps/progress")
+@router.get("/deps/progress", response_model=DependencyProgressResponse)
 def dependency_progress(_: User = Depends(get_current_user)) -> dict:
     """下载进度快照（前端轮询）。
 
