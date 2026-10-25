@@ -53,3 +53,15 @@ export function workspaceEntryPath(workspace: string): string {
   if (workspace === "ai") return "/llm-gateway";
   return `/platforms/${workspace}`;
 }
+
+/** 工作区标识 → 界面显示名（2026-10-25）。 */
+export const WORKSPACE_LABELS: Readonly<Record<string, string>> = {
+  xhs: "小红书",
+  ai: "AI 网关",
+  system: "系统管理",
+};
+
+/** 工作区的中文显示名（未知标识原样返回 —— 不造名）。 */
+export function workspaceLabel(workspace: string): string {
+  return WORKSPACE_LABELS[workspace] ?? workspace;
+}

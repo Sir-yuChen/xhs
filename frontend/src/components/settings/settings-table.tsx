@@ -26,8 +26,7 @@ import {
   Table,
   Tag,
   Tooltip,
-  Typography,
-} from "antd";
+  Typography, AutoComplete } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { PlusOutlined, ReloadOutlined } from "@ant-design/icons";
 
@@ -56,7 +55,7 @@ import { useDictOptions } from "../../lib/system-dicts";
 
 const { Text } = Typography;
 
-const CATEGORY_OPTIONS = Object.entries(CATEGORY_LABELS).map(([value, label]) => ({
+const BASE_CATEGORY_OPTIONS = Object.entries(CATEGORY_LABELS).map(([value, label]) => ({
   value,
   label,
 }));
@@ -107,6 +106,17 @@ export function SettingsTable({ scope, workspace, title, canEdit = true }: Setti
   }, [load]);
 
   const categories = useMemo(() => categoryOptions(settings), [settings]);
+  //: 新增/编辑弹窗的分组候选 = 内置固定分组 ∪ 当前列表里出现过的分组。
+  //: 这样「自建的旧分组」也能在下次新增时直接选到，输入框还能新建更多。
+  const categorySelectOptions = useMemo(() => {
+    const merged = new Map(BASE_CATEGORY_OPTIONS.map((o) => [o.value, o.label]));
+    for (const item of settings) {
+      if (item.category && !merged.has(item.category)) {
+        merged.set(item.category, categoryLabel(item.category));
+      }
+    }
+    return [...merged].map(([value, label]) => ({ value, label }));
+  }, [settings]);
   const rows = useMemo(() => filterByCategory(settings, category), [settings, category]);
 
   const openCreate = () => {
@@ -346,8 +356,27 @@ export function SettingsTable({ scope, workspace, title, canEdit = true }: Setti
             <Form.Item name="value_type" label="值类型" rules={[{ required: true }]} style={{ flex: 1 }}>
               <Select options={valueTypeOptions} onChange={(value) => setValueType(String(value))} />
             </Form.Item>
-            <Form.Item name="category" label="分组" style={{ flex: 1 }}>
-              <Select options={CATEGORY_OPTIONS} />
+            {/* 分组：下拉选已有 / 直接输入新增（2026-10-25 用户口径「分组支持下拉加新增」）。
+                ⚠️ 与「违禁词分组」「提示词类别」保持**同一形态**：都用 AutoComplete。
+                不用 `Select mode="tags"` 的原因：那是**多值**控件，靠 getValueProps /
+                normalize 硬收敛成单值，回显、清空、粘贴都会出边界情况；
+                这里的分组本来就是单个字符串，AutoComplete 天然单值 + 可输入。 */}
+            <Form.Item
+              name="category"
+              label="分组"
+              style={{ flex: 1 }}
+              extra="可选已有分组，也可直接输入新分组"
+            >
+              <AutoComplete
+                allowClear
+                placeholder="选择或输入分组"
+                options={categorySelectOptions}
+                filterOption={(input, option) =>
+                  String(option?.label ?? option?.value ?? "")
+                    .toLowerCase()
+                    .includes(input.toLowerCase())
+                }
+              />
             </Form.Item>
           </div>
 

@@ -35,6 +35,7 @@ import { ProfilePage } from "../../pages/system/profile-page";
 import { SettingsTable } from "../settings/settings-table";
 import { workspaceOf } from "../../lib/workspaces";
 
+
 import { useAuth } from "../../hooks/use-auth";
 import { useThemeMode } from "../../app/providers";
 import {
@@ -232,7 +233,6 @@ export function WorkspaceShell({
   const [profileOpen, setProfileOpen] = useState(false);
   // 设计 64 §1.6：三级配置的两处弹窗入口 —— 用户级挂头像下拉，工作区级挂顶栏齿轮。
   const [userConfigOpen, setUserConfigOpen] = useState(false);
-  const [workspaceConfigOpen, setWorkspaceConfigOpen] = useState(false);
   //: 依赖检查弹窗（用户口径 2026-10-23：「在页面顶部的版本更新图标旁新增一个
   //: 依赖检查，点击弹窗展示检查本地依赖是否完整，不完整则自动触发下载」）。
   const [depCheckOpen, setDepCheckOpen] = useState(false);
@@ -471,15 +471,6 @@ export function WorkspaceShell({
               title="检查运行依赖"
               style={{ display: "flex", alignItems: "center", justifyContent: "center" }}
             />
-            {/* 工作区配置（设计 64 §1.6 用户口径「工作区级别在各个工作区内展示」）：
-                壳是公共组件 ⇒ 每个工作区的顶栏都自动有这个齿轮；当前工作区取自路由。 */}
-            <Button
-              type="text"
-              icon={<SettingOutlined style={{ fontSize: 16 }} />}
-              onClick={() => setWorkspaceConfigOpen(true)}
-              title="工作区配置"
-              style={{ display: "flex", alignItems: "center", justifyContent: "center" }}
-            />
             <Dropdown dropdownRender={() => notificationDropdownContent} trigger={["click"]} placement="bottomRight">
               <Badge count={unreadCount} size="small" offset={[-2, 2]}>
                 <Button type="text" icon={<BellOutlined style={{ fontSize: 16 }} />} style={{ display: "flex", alignItems: "center", justifyContent: "center" }} />
@@ -553,23 +544,6 @@ export function WorkspaceShell({
         destroyOnHidden
       >
         <SettingsTable scope="user" title="用户配置" />
-      </Modal>
-      {/* 工作区配置弹窗（设计 64 §1.6「工作区级别在各个工作区内展示」）：
-          scope=workspace —— 只对当前工作区生效；写入由后端收口（admin 专属）。 */}
-      <Modal
-        open={workspaceConfigOpen}
-        title={`工作区配置 · ${workspaceOf(location.pathname)}`}
-        width={1080}
-        centered
-        footer={null}
-        onCancel={() => setWorkspaceConfigOpen(false)}
-        destroyOnHidden
-      >
-        <SettingsTable
-          scope="workspace"
-          workspace={workspaceOf(location.pathname)}
-          title="工作区配置"
-        />
       </Modal>
     </Layout>
   );

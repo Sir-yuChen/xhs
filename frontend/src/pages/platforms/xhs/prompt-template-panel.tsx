@@ -25,8 +25,7 @@ import {
   Table,
   Tabs,
   Tag,
-  Typography,
-} from "antd";
+  Typography, AutoComplete } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { DeleteOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons";
 import { useCallback, useEffect, useState } from "react";
@@ -411,8 +410,20 @@ export function PromptTemplatePanel() {
           <Form.Item name="name" label="名称" rules={[{ required: true, message: "请填写名称" }]}>
             <Input maxLength={128} placeholder="例如：口语化语气" />
           </Form.Item>
+          {/* 类别：下拉选已有 / 直接输入新增（与系统配置、违禁词分组同一形态）。
+              ⚠️ 原来只开 `showSearch` —— 那是「搜已有项」，placeholder 却写
+              「选择或输入」，实际输入不了新值。 */}
           <Form.Item name="category" label="类别">
-            <Select options={CATEGORY_OPTIONS} showSearch placeholder="选择或输入类别" />
+            <AutoComplete
+              allowClear
+              placeholder="选择或输入类别"
+              options={CATEGORY_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
+              filterOption={(input, option) =>
+                String(option?.label ?? option?.value ?? "")
+                  .toLowerCase()
+                  .includes(input.toLowerCase())
+              }
+            />
           </Form.Item>
           <Form.Item
             name="content"

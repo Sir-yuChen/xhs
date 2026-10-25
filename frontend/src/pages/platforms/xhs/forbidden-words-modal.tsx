@@ -644,6 +644,10 @@ function WordEditor(props: {
           改用 `AutoComplete`：值本来就是字符串（与表单字段同型，无需转换），
           既能从已有分组里选，也能直接敲一个新名字。
         */}
+        {/* 分组：下拉选已有 / 直接输入新增（与系统配置弹窗同一逻辑）。
+            用 `AutoComplete` 而不是 `Select mode="tags"`：这里的分组是**单个字符串**
+            且允许留空（= 未分组），AutoComplete 天然就是单值 + 可输入，
+            不必再用数组形态收敛一遍。 */}
         <Form.Item
           name="group_name"
           label="分组"
@@ -651,7 +655,7 @@ function WordEditor(props: {
         >
           <AutoComplete
             allowClear
-            placeholder={`留空 = ${UNGROUPED_LABEL}`}
+            placeholder={`选择或输入分组（留空 = ${UNGROUPED_LABEL}）`}
             options={groupNames.map((name) => ({ value: name }))}
             filterOption={(input, option) =>
               String(option?.value ?? "").toLowerCase().includes(input.toLowerCase())
