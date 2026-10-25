@@ -2642,6 +2642,45 @@
       "is_visible": true,
       "status": "normal",
       "parent_seq": 127
+    },
+    {
+      "_seq": 209,
+      "name": "违禁词库",
+      "menu_type": "F",
+      "path": "",
+      "perms": "xhs:item:forbiddenWords",
+      "icon": "",
+      "workspace": "",
+      "sort_order": 196,
+      "is_visible": true,
+      "status": "normal",
+      "parent_seq": 84
+    },
+    {
+      "_seq": 210,
+      "name": "查看草稿箱",
+      "menu_type": "F",
+      "path": "",
+      "perms": "xhs:item:drafts",
+      "icon": "",
+      "workspace": "",
+      "sort_order": 197,
+      "is_visible": true,
+      "status": "normal",
+      "parent_seq": 84
+    },
+    {
+      "_seq": 211,
+      "name": "发布商品",
+      "menu_type": "F",
+      "path": "",
+      "perms": "xhs:item:publish",
+      "icon": "",
+      "workspace": "",
+      "sort_order": 198,
+      "is_visible": true,
+      "status": "normal",
+      "parent_seq": 84
     }
   ]
 }

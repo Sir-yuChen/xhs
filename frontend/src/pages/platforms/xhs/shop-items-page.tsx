@@ -47,6 +47,7 @@ import {
   Checkbox,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
+import { hasPermission } from "../../../hooks/use-permission";
 import dayjs from "dayjs";
 import { useAccountScope } from "../../../lib/account-scope";
 import type { CSSProperties } from "react";
@@ -2459,6 +2460,13 @@ export function XhsShopItemsPage() {
             (e) => e.supported && (e.action === "on_shelf" || e.action === "off_shelf"),
           ) || allowed.find((e) => e.action === "on_shelf" || e.action === "off_shelf");
         const deleteAction = allowed.find((e) => e.action === "delete");
+        //: 2026-10-25 红线「按权限码展示」：本页 4 类按钮各有独立码，
+        //: 一个都没有时整列渲染缺值符（不留空网格）。
+        const mayGenerate = hasPermission("xhs:item:aiAssist");
+        const mayOperate = hasPermission("xhs:item:operate");
+        if (!mayGenerate && !mayOperate) {
+          return <Text type="secondary">-</Text>;
+        }
         return (
         <div
           style={{
@@ -2893,16 +2901,18 @@ export function XhsShopItemsPage() {
               </Button>
             </Tooltip>
 
-            <Tooltip title="按当前筛选条件导出 CSV">
-              <Button
-                icon={<DownloadOutlined />}
-                loading={exporting}
-                disabled={!selectedAccountId}
-                onClick={() => void exportCsv()}
-              >
-                导出 CSV
-              </Button>
-            </Tooltip>
+            {hasPermission("xhs:item:export") && (
+              <Tooltip title="按当前筛选条件导出 CSV">
+                <Button
+                  icon={<DownloadOutlined />}
+                  loading={exporting}
+                  disabled={!selectedAccountId}
+                  onClick={() => void exportCsv()}
+                >
+                  导出 CSV
+                </Button>
+              </Tooltip>
+            )}
             {/* 2026-10-08 用户口径：「移除新增商品按钮和逻辑，保留发布商品按钮功能」。
                 ⚠️ **保留 `ProductDraftModal` 的 import 但不再挂入口** —— 草稿箱
                 里的草稿仍要能发布（`ProductDraftsModal` → 详情 → 走发布链路），
@@ -2911,52 +2921,58 @@ export function XhsShopItemsPage() {
             {/* 2026-10-08 用户口径：「商品台账新增功能按钮违规词」——
                 弹窗全屏 50%（与发布弹窗的 75% 区分开），管理本地违规词库
                 （新增 / 修改 / 停用 / 启用）。词库供数据包图片 OCR 精确过滤。 */}
-            <Tooltip title="管理违规词库（图片 OCR 过滤）">
-              <Button
-                icon={<SafetyCertificateOutlined />}
-                onClick={() => setForbiddenWordsOpen(true)}
-              >
-                违规词
-              </Button>
-            </Tooltip>
+            {hasPermission("xhs:item:forbiddenWords") && (
+              <Tooltip title="管理违规词库（图片 OCR 过滤）">
+                <Button
+                  icon={<SafetyCertificateOutlined />}
+                  onClick={() => setForbiddenWordsOpen(true)}
+                >
+                  违规词
+                </Button>
+              </Tooltip>
+            )}
             {/* 2026-10-08 用户口径：「草稿箱弹窗的形式在商品页内展示，
                 账号使用商品页选定的账号」—— 草稿箱与商品列表是同一件事的
                 两个视图（草稿 = 还没上架的商品），故做成商品页里的弹窗，
                 账号跟随本页顶部选定的店铺。 */}
-            <Tooltip
-              title={
-                selectedAccountId
-                  ? "查看本店铺的千帆草稿箱（数据实时来自平台，不落库）"
-                  : "先选择店铺账号"
-              }
-            >
-              <Button
-                icon={<ContainerOutlined />}
-                disabled={!selectedAccountId}
-                onClick={() => setDraftsModalOpen(true)}
+            {hasPermission("xhs:item:drafts") && (
+              <Tooltip
+                title={
+                  selectedAccountId
+                    ? "查看本店铺的千帆草稿箱（数据实时来自平台，不落库）"
+                    : "先选择店铺账号"
+                }
               >
-                草稿箱
-              </Button>
-            </Tooltip>
+                <Button
+                  icon={<ContainerOutlined />}
+                  disabled={!selectedAccountId}
+                  onClick={() => setDraftsModalOpen(true)}
+                >
+                  草稿箱
+                </Button>
+              </Tooltip>
+            )}
             {/* 2026-10-08 用户口径：「发布商品到线上」+ 红线「发布成功第一时间下架」。
                 ⚠️ 与「新增商品（存草稿）」是两个独立入口：这条会**真的上架**
                 （后端发布成功后自动立即下架）。弹窗里常驻红线说明 + 二次确认。 */}
-            <Tooltip
-              title={
-                selectedAccountId
-                  ? "把商品提交到线上（成功后系统自动立即下架）"
-                  : "先选择店铺账号"
-              }
-            >
-              <Button
-                danger
-                icon={<SendOutlined />}
-                disabled={!selectedAccountId}
-                onClick={() => setPublishWizardOpen(true)}
+            {hasPermission("xhs:item:publish") && (
+              <Tooltip
+                title={
+                  selectedAccountId
+                    ? "把商品提交到线上（成功后系统自动立即下架）"
+                    : "先选择店铺账号"
+                }
               >
-                发布商品
-              </Button>
-            </Tooltip>
+                <Button
+                  danger
+                  icon={<SendOutlined />}
+                  disabled={!selectedAccountId}
+                  onClick={() => setPublishWizardOpen(true)}
+                >
+                  发布商品
+                </Button>
+              </Tooltip>
+            )}
             {/* 生成队列实时态（§31.10）：有待处理时一行小字，转圈即清（无 Tip，
                 与另两张进度卡同口径）。队列空不占位。 */}
             {genQueueItemIds.size > 0 && (
@@ -2986,7 +3002,7 @@ export function XhsShopItemsPage() {
                 ⚠️ 三者走**手动触发式任务**（不是同步循环）：点完只建任务、立即返回，
                 逐条结果在「商品操作结果」弹窗里轮询展示 —— 任务中心**任务列表不展示**
                 （与「清理无流量笔记」同款）。 */}
-            {([
+            {hasPermission("xhs:item:operate") && ([
               { key: "on_shelf", label: "批量上架", danger: false },
               { key: "off_shelf", label: "批量下架", danger: false },
               { key: "delete", label: "批量删除商品", danger: true },
@@ -3016,6 +3032,7 @@ export function XhsShopItemsPage() {
                 「批量删除商品」（**删平台**）是两件完全不同的事，同名会让用户点错。
                 两个连带后果写在确认框正文里（`batchDeleteHint`），按钮上的 Tooltip
                 只说「删什么、上限多少」，不重复那两句（换成两处说同一件事）。 */}
+            {hasPermission("xhs:item:edit") && (
             <Tooltip
               title={
                 selectedItemIds.length > 0
@@ -3033,6 +3050,7 @@ export function XhsShopItemsPage() {
                 删除台账行{selectedItemIds.length > 0 ? `（${selectedItemIds.length}）` : ""}
               </Button>
             </Tooltip>
+            )}
           </Space>
         }
       >

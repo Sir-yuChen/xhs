@@ -50,6 +50,16 @@ PERM_GATED_PAGES: dict[str, tuple[str, ...]] = {
         "xhs:record:clean",
         "xhs:record:cleanAll",
     ),
+    #: 商品列表（2026-10-25）：页面上 7 个写操作入口各有独立码。
+    "pages/platforms/xhs/shop-items-page.tsx": (
+        "xhs:item:export",
+        "xhs:item:forbiddenWords",
+        "xhs:item:drafts",
+        "xhs:item:publish",
+        "xhs:item:aiAssist",
+        "xhs:item:operate",
+        "xhs:item:edit",
+    ),
 }
 
 #: **尚未接入**的页面清单（带写请求但零权限判断）。只许变短。
@@ -78,7 +88,6 @@ KNOWN_UNGATED: set[str] = {
     "pages/platforms/xhs/publish-config-step1.tsx",
     "pages/platforms/xhs/publish-config-step2.tsx",
     "pages/platforms/xhs/publish-page.tsx",
-    "pages/platforms/xhs/shop-items-page.tsx",
     "pages/platforms/xhs/sku-name-optimize-modal.tsx",
     "pages/platforms/xhs/sync-specified-items-modal.tsx",
     "pages/platforms/xhs/violation-manage-page.tsx",

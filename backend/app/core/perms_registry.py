@@ -335,6 +335,12 @@ SPLIT_BUTTON_PERMS: tuple[PermSpec, ...] = (
     # 商品
     PermSpec("xhs:item:create", "新增商品", "F", "/platforms/xhs/shop-items", _X, _X),
     PermSpec("xhs:item:operate", "上下架", "F", "/platforms/xhs/shop-items", _X, _X),
+    #: 商品列表页的四个独立入口（2026-10-25 红线「一按钮一码」）：
+    #: 导出是**只读但会拉全量**、违禁词库是配置、草稿/发布是生成链路入口 ——
+    #: 与商品的读写/上下架都不是同一个动作。
+    PermSpec("xhs:item:forbiddenWords", "违禁词库", "F", "/platforms/xhs/shop-items", _X, _X),
+    PermSpec("xhs:item:drafts", "查看商品草稿", "F", "/platforms/xhs/shop-items", _X, _X),
+    PermSpec("xhs:item:publish", "发布商品笔记", "F", "/platforms/xhs/shop-items", _X, _X),
     PermSpec("xhs:item:bind", "绑定千帆", "F", "/platforms/xhs/shop-items", _X, _X),
     PermSpec("xhs:item:healthCheck", "店铺探活", "F", "/platforms/xhs/shop-items", _X, _X),
     PermSpec("xhs:item:aiAssist", "AI 商品文案", "F", "/platforms/xhs/shop-items", _X, _X),
