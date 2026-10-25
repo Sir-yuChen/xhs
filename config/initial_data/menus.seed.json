@@ -2282,6 +2282,20 @@
    "is_visible": true,
    "status": "normal",
    "parent_seq": 181
+  },
+  {
+   "_seq": 183,
+   "name": "任务",
+   "menu_type": "C",
+   "path": "/platforms/xhs/tasks",
+   "component": "",
+   "perms": "xhs:taskcenter:view",
+   "icon": "schedule",
+   "workspace": "xhs",
+   "sort_order": 103,
+   "parent_seq": 1,
+   "is_visible": true,
+   "status": "normal"
   }
  ]
 }

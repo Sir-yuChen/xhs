@@ -278,6 +278,10 @@ PAGE_VIEW_PERMS: tuple[PermSpec, ...] = (
     PermSpec("ai:model:view", "模型配置", "C", "/models", _A, _A),
     # 任务中心 / 队列记录 / 个人资料 3
     PermSpec("xhs:record:view", "队列记录", "C", "/task-records", _X, _X),
+    #: 工作区级任务（设计 69）：两级任务中心各有入口 —— 系统级在系统管理，
+    #: 工作区级在各自工作区。**只读**：写端点全部挂 `system:scheduler:manage`，
+    #: 普通用户拿到 view 码只能看（用户口径「暂时不允许用户创建任务」）。
+    PermSpec("xhs:taskcenter:view", "任务", "C", "/platforms/xhs/tasks", _X, _X),
     #: ⚠️ **v1.1.0 梳理补登（2026-10-24）**：原注释写「个人资料不挂码，故不计」，
     #: 那是把两件事混了 ——
     #:   * 「**端点**不挂码」是对的（每个人都要能改自己的密码，挂码会把人锁死，

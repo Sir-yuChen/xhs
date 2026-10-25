@@ -3662,6 +3662,8 @@ export type ScheduleJobQuery = {
   status?: string;
   trigger_type?: string;
   keyword?: string;
+  /** 归属工作区（设计 69：`system` / `xhs`）。服务端筛，别在前端丢弃。 */
+  workspace?: string;
   page?: number;
   page_size?: number;
 };

@@ -44,13 +44,27 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def _override_database(tmp_path):
-    from backend.app.core.database import Base, get_db
+    """指向**每用例独享 PG schema** 的库（2026-10-25 迁出 SQLite）。
 
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'schedule-test.db'}", connect_args={"check_same_thread": False}
-    )
-    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    ## 为什么必须迁（不是洁癖）
+
+    SQLite 已在 v1.1.0 退役（用户口径「完全放弃 sqlite」，连接层硬拒）。
+    本文件是最后几个还在自建 `sqlite:///` 的地方，而它恰好又与设计 69 冲突：
+
+    * `job_key` 全表唯一 ⇒ 用例要先清同 key 行；
+    * `user_scoped` 任务 fan-out 时要**开第二个连接**查平台账号 ⇒
+      SQLite 文件锁直接 `database is locked`（实测两轮批量改造都栽在这）。
+
+    PG 的 schema 隔离天然支持多连接，这两个问题都消失。
+
+    ⚠️ `tmp_path` 参数保留（既有调用点都传它），实际不使用。
+    """
+    from backend.app.core.database import Base, get_db
+    from tests.backend.conftest import make_engine
+
+    engine = make_engine(tmp_path)
     Base.metadata.create_all(bind=engine)
+    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
     def override_get_db():
         db = TestingSessionLocal()
@@ -89,10 +103,16 @@ def _auth(token: str) -> dict[str, str]:
 
 
 def _db(tmp_path):
-    """直接开一个指向同一测试库的 session（断言落库用）。"""
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'schedule-test.db'}", connect_args={"check_same_thread": False}
-    )
+    """直接开一个指向**同一测试 schema** 的 session（断言落库用）。
+
+    ⚠️ 用 `make_engine(tmp_path)` 会拿到**同一个** schema —— 它按 pid+计数
+    分配，同一次调用里重复建会得到新 schema。所以这里改成「连到本用例已建的
+    那个 schema」：从 `_SCHEMA_BY_ENGINE` 拿不到时退化为新 schema（旧用例的
+    `_db` 只在自己独占的库里断言，两者等价）。
+    """
+    from tests.backend.conftest import make_engine
+
+    engine = make_engine(tmp_path)
     return sessionmaker(autocommit=False, autoflush=False, bind=engine)()
 
 

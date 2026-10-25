@@ -8,6 +8,7 @@ import { ModelConfigPage } from "../pages/models/model-config-page";
 import { PlatformSelectPage } from "../pages/platform-select/platform-select-page";
 import { SettingsPage } from "../pages/settings/settings-page";
 import { TaskRecordsPage } from "../pages/tasks/task-records-page";
+import { WorkspaceTasksPage } from "../pages/tasks/workspace-tasks-page";
 import { AutoOpsPage } from "../pages/platforms/xhs/auto-ops-page";
 import { OrdersPage } from "../pages/platforms/xhs/orders-page";
 import { XhsAccountsPage } from "../pages/platforms/xhs/accounts-page";
@@ -180,6 +181,8 @@ export function AppRouter() {
               与「任务中心」（定时任务 scheduled_jobs）不是一回事：那一页管「什么时候跑」，
               这一页管「跑完了什么」。 */}
           <Route path="/task-records" element={<TaskRecordsPage />} />
+          {/* 工作区级任务（设计 69：两级各有独立入口，只读）。 */}
+          <Route path="/platforms/xhs/tasks" element={<WorkspaceTasksPage />} />
           <Route path="/models" element={<ModelConfigPage />} />
           {/* 大模型网关已上移为独立公共模块（v1.5，见上方独立路由）；旧路由重定向保深链不死 */}
           <Route path="/platforms/xhs/llm-gateway" element={<Navigate to="/llm-gateway" replace />} />
