@@ -32,7 +32,6 @@ import type { ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { ProfilePage } from "../../pages/system/profile-page";
-import { SettingsTable } from "../settings/settings-table";
 import { workspaceOf } from "../../lib/workspaces";
 
 
@@ -49,6 +48,7 @@ import { notificationTargetPath } from "../../lib/notification-routes";
 import { UpdateDialog, ManualUpdateDialog } from "../system/update-dialog";
 import { EnvBootstrapDialog, EnvBootstrapGate } from "../system/env-bootstrap-dialog";
 import { useDictVersion } from "../../lib/system-dicts";
+import { usePermission } from "../../hooks/use-permission";
 
 const { Sider, Header, Content } = Layout;
 const { Text } = Typography;
@@ -66,6 +66,14 @@ const { Text } = Typography;
 export interface WorkspaceShellProps {
   /** 侧边栏 Logo 旁的标题文案（折叠时隐藏） */
   brand: string;
+  /**
+   * 当前工作区标识（`xhs` / `system` / `ai` / 未来平台）。
+   *
+   * 用途：**只有业务工作区**才显示「工作区配置」入口 —— 工作区私有配置
+   * 必须回它自己的工作区（2026-10-25 用户口径「私有配置只在对应工作区域内展示」）。
+   * `system` / `ai` 是管理/公共工作区，没有私有配置 ⇒ 不显示。
+   */
+  workspace?: string;
   /** 主导航菜单（Sider 中部，可滚动）。支持 `type: "group"` 与 SubMenu（`children`）。 */
   mainItems: MenuProps["items"];
   /** 底部导航菜单（Sider 下部，固定在用户行上方） */
@@ -205,6 +213,7 @@ function levelColor(level: string): string {
 
 export function WorkspaceShell({
   brand,
+  workspace,
   mainItems,
   footerItems,
   selectedKeys,
@@ -216,6 +225,8 @@ export function WorkspaceShell({
 }: WorkspaceShellProps) {
   const auth = useAuth();
   const { mode: themeMode, toggle: toggleTheme } = useThemeMode();
+  //: 工作区私有配置**写**由后端收口（admin 专属）；非管理员看得到但改不了。
+  const { isAdmin } = usePermission();
   // 字典版本订阅（设计 63 §2.2）：字典管理页改了枚举文案/颜色 ⇒ 版本递增
   // ⇒ 外壳重渲染 ⇒ 全部子页面重渲染，同步读 `dictLabel` 的表格文案即时更新。
   useDictVersion();
@@ -232,7 +243,6 @@ export function WorkspaceShell({
   //: 个人资料弹窗（设计 62 §2.3 / 2026-10-25 用户口径：弹窗展示，不用单独页）
   const [profileOpen, setProfileOpen] = useState(false);
   // 设计 64 §1.6：三级配置的两处弹窗入口 —— 用户级挂头像下拉，工作区级挂顶栏齿轮。
-  const [userConfigOpen, setUserConfigOpen] = useState(false);
   //: 依赖检查弹窗（用户口径 2026-10-23：「在页面顶部的版本更新图标旁新增一个
   //: 依赖检查，点击弹窗展示检查本地依赖是否完整，不完整则自动触发下载」）。
   const [depCheckOpen, setDepCheckOpen] = useState(false);
@@ -485,12 +495,14 @@ export function WorkspaceShell({
               menu={{
                 items: [
                   { key: "profile", icon: <UserOutlined />, label: "个人资料" },
-                  { key: "user-config", icon: <SettingOutlined />, label: "用户配置" },
+                  { key: "user-config", icon: <SettingOutlined />, label: "个人配置" },
                   { key: "logout", icon: <LogoutOutlined />, label: "退出登录" },
                 ],
                 onClick: ({ key }) => {
                   if (key === "profile") setProfileOpen(true);
-                  else if (key === "user-config") setUserConfigOpen(true);
+                  //: 个人配置只有**一份**实现（`/settings` 页）；下拉只是快捷入口，
+                  //: 不再弹第二个内容相同的弹窗（2026-10-25 用户截图指出两处内容一样）。
+                  else if (key === "user-config") navigate("/settings");
                   else if (key === "logout") void auth.logout();
                 },
               }}
@@ -532,19 +544,8 @@ export function WorkspaceShell({
       >
         <ProfilePage />
       </Modal>
-      {/* 用户配置弹窗（设计 64 §1.6 用户口径「用户级在用户头像下新增下拉选择弹窗展示」）：
-          scope=user —— 个人覆盖，对本账号优先于工作区级/系统级生效。 */}
-      <Modal
-        open={userConfigOpen}
-        title="用户配置"
-        width={1080}
-        centered
-        footer={null}
-        onCancel={() => setUserConfigOpen(false)}
-        destroyOnHidden
-      >
-        <SettingsTable scope="user" title="用户配置" />
-      </Modal>
+
+
     </Layout>
   );
 }

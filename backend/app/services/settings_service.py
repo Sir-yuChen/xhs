@@ -141,22 +141,38 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
 #: ⚠️ 新增键**必须登记到本表**，否则 `test_settings_scope_map_covers_every_key`
 #: 会红 —— 未登记的键不知道该在哪个页面出现，等于又回到「靠数据行猜」。
 SETTING_SCOPES: dict[str, str] = {
-    # ── 系统级：全站共享，改了影响所有用户 ──────────────────────────
-    "crawl_rate_limit_per_minute": "system",   # 平台请求限流额度
-    "xhs_sync_account_parallelism": "system",  # 同步 worker 池大小
-    "xhs_sync_account_gap_seconds": "system",  # 轮内账号间停顿
-    "xhs_image_upload_parallelism": "system",  # 媒体上传并发
-    "xhs_ocr_parallelism": "system",           # 违规词检测并发
-    "log_retention_days": "system",            # API/业务日志保留
-    "job_log_retention_days": "system",        # 定时任务日志保留
+    # ── 系统级：全站共享、与任何平台无关 ────────────────────────────
+    #: 日志保留期：管的是**本系统自己的**表，跟接哪个平台无关 ⇒ 系统级。
+    "log_retention_days": "system",
+    "job_log_retention_days": "system",
     #: 开放注册是**全站开关**（登录页有无「注册」入口）。
     #: ⚠️ 原实现放在用户级（26 个用户各一行、各改各的），且读取取「管理员那一行为准」
     #: —— 那是「一张表三个归属」早期没定归属时的权宜做法。现在归系统级。
     "register.enabled": "system",
     # ── 用户级：每个用户各自成立 ────────────────────────────────────
     "order_sync_cursor_ms": "user",            # 订单同步游标（每用户各自的店铺）
-    # ── 工作区级：平台工作区私有 ────────────────────────────────────
-    "xhs_allow_duplicate_goods_publish": "workspace",  # 该工作区是否允许重复发布商品笔记
+    # ── 工作区级：**平台口径**，只对某个工作区成立 ──────────────────
+    #
+    #: ⚠️ 判据（2026-10-25 用户口径「私有配置只在对应工作区域内展示」）：
+    #: **凡取值取决于「接哪个平台」的，都是工作区级** —— 即使本系统目前只有
+    #: 小红书一个工作区。判据不是"现在有几个平台"，而是"换个平台它是否照用"。
+    #:
+    #: 这 5 个键原先都放在系统级，理由是「全站唯一事实」。那个理由是错的：
+    #: 它们限制的是**对某个平台的调用节奏**，接抖音后必然要各配一份。
+    #:
+    #: 平台请求限流额度：小红书 www 详情实测 5~8 次/分钟就触发风控
+    #:（`crawl_rate_limit_per_minute` 库里值是 8，正是小红书的口径）。
+    "crawl_rate_limit_per_minute": "workspace",
+    #: 同步 worker 池大小：同时同步**小红书账号**几个。
+    "xhs_sync_account_parallelism": "workspace",
+    #: 账号间停顿：小红书风控下的账号切换节奏。
+    "xhs_sync_account_gap_seconds": "workspace",
+    #: 媒体上传并发：小红书图床上传并发。
+    "xhs_image_upload_parallelism": "workspace",
+    #: 违规词检测并发：小红书违规词 OCR 的并发。
+    "xhs_ocr_parallelism": "workspace",
+    #: 该工作区是否允许重复发布商品笔记。
+    "xhs_allow_duplicate_goods_publish": "workspace",
     #: 笔记图片数上限：**内容线的产品口径**，按工作区（xhs / 未来抖音…）各自不同。
     "xhs_note_image_total_limit": "workspace",
     #: SKU 名称压缩字数：**店铺线**的商品打磨口径，按工作区私有。
@@ -483,6 +499,39 @@ def settings_default(key: str) -> Any:
     return getattr(settings, key) if hasattr(settings, key) else UNSET
 
 
+def _workspace_row_any(db: Session, key: str) -> Optional[SystemSetting]:
+    """取该键在**任意工作区**的那一行（设计 66 归属工作区级的键专用）。
+
+    ## 为什么是「任意工作区」而不是「当前工作区」
+
+    运行时读取点（限流器 / 同步 worker / OCR 并发）**没有工作区上下文** ——
+    它们只知道自己要为哪个账号干活，而账号 → 工作区的解析要多一次查询，
+    放在每次平台请求的热路径上不划算。
+
+    本系统目前只有**一个业务工作区**（`xhs`），所以「任意」与「xhs」等价。
+    接第二个平台时，正确做法是这些读点自己带上工作区（`workspace` 参数），
+    而不是在这里猜 —— 那时 `_workspace_row_any` 应改成必须传 workspace。
+
+    优先级：先找 `workspace IS NOT NULL` 的行；没有则退到「早期的工作区级行」
+    （`user_id IS NULL ∧ workspace IS NULL` 且键归属工作区级）—— 迁移前
+    这 5 个键就存在那一层，不能因为口径改了就读不到值。
+    """
+    row = db.scalar(
+        select(SystemSetting)
+        .where(SystemSetting.key == key, SystemSetting.workspace.isnot(None))
+        .order_by(SystemSetting.workspace)
+    )
+    if row is not None:
+        return row
+    return db.scalar(
+        select(SystemSetting).where(
+            SystemSetting.key == key,
+            SystemSetting.user_id.is_(None),
+            SystemSetting.workspace.is_(None),
+        )
+    )
+
+
 def _system_row(db: Session, key: str) -> Optional[SystemSetting]:
     """系统级行（`user_id IS NULL ∧ workspace IS NULL`，设计 64 §1.2）。"""
     return db.scalar(
@@ -504,6 +553,18 @@ def effective_value(
     全站读点即变（用户级行仍是个人覆盖，优先于系统级）。
     """
     if db is not None:
+        #: ① **归属工作区级**的键（`SETTING_SCOPES[key] == "workspace"`）：
+        #: 它们的行落在工作区级（`workspace` 列有值 / 早期是 `user_id` 与 `workspace`
+        #: 都为 NULL 的那一行），**不在**用户级/系统级里。
+        #: 若不在这里先处理，重新归类后这些配置会「改了不生效」——
+        #: 页面能改、业务读的是另一层的旧值，且**零报错**（静默失效）。
+        #: ⚠️ 业务热路径没有「当前工作区」上下文（限流器只认账号），所以读
+        #: **任意工作区的那一行**：本系统目前只有一个业务工作区（xhs），
+        #: 多平台时按 `platform_account.workspace` 解析（那时才需要改这里）。
+        if SETTING_SCOPES.get(key) == "workspace":
+            ws_row = _workspace_row_any(db, key)
+            if ws_row is not None:
+                return decode_value(ws_row.value, ws_row.value_type)
         if user_id is not None:
             row = db.scalar(
                 select(SystemSetting).where(
