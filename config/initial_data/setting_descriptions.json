@@ -1,0 +1,17 @@
+{
+  "_comment": "配置说明文案（v1.1.0 / 2026-10-25 用户口径「说明简短且只说明核心问题，不必要的说明全部移除」）。原说明 50-170 字、把设计文档的依据/历史沿革/实现细节全写进界面 ⇒ 占用空间且啰嗦。此处只保留「这个开关做什么 / 改它会怎样」，上限约 20 字。技术依据留在代码注释与设计文档，不上界面。",
+  "descriptions": {
+    "crawl_rate_limit_per_minute": "每分钟最多请求平台几次，越高越易被风控",
+    "xhs_sync_account_parallelism": "同时同步几个账号",
+    "xhs_sync_account_gap_seconds": "账号之间停顿几秒，太快易触发风控",
+    "xhs_image_upload_parallelism": "同时上传几张图",
+    "xhs_ocr_parallelism": "违规词检测的起始并发数",
+    "log_retention_days": "API 与业务日志保留几天",
+    "job_log_retention_days": "定时任务日志保留几天",
+    "register.enabled": "开放注册入口（关闭后只能由管理员建号）",
+    "order_sync_cursor_ms": "订单同步进度，一般不用改",
+    "xhs_allow_duplicate_goods_publish": "允许同一商品发多条笔记",
+    "xhs_note_image_total_limit": "一条笔记最多几张图（平台上限 18）",
+    "xhs_sku_name_max_chars": "SKU 名称超过多少字就压缩（汉字计 2）"
+  }
+}

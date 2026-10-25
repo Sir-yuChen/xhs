@@ -33,7 +33,7 @@ import time
 from threading import Lock
 from typing import Any, Iterable, Optional
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from backend.app.core.database import SessionLocal
@@ -120,6 +120,135 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "log_retention_days": 90,
     "job_log_retention_days": 30,
 }
+
+#: 每个配置键的**唯一归属级别**（设计 65 §配置三级拆分，2026-10-25 用户口径）：
+#: 「系统级只展示系统管理中展示系统公共的，用户级别也是该用户下公共的配置，
+#:   工作区域级别的是指定工作区域私有的」。
+#:
+#: ## 为什么需要这张表（而不是看数据行在哪一级）
+#:
+#: 三级配置的实现是「一张表三个归属」，所以**同一个键**在三层都可以有行。
+#: 若页面靠「有行才显示」来分区，就会出现既混乱又错误的现象：
+#: * 某个键系统级有行、用户级也有行 ⇒ 两个页面都列它，用户不知道改哪个；
+#: * 某个键三层都没行（用内置默认）⇒ **哪个页面都不显示**，等于不可配置。
+#:
+#: ⇒ 归属由**代码**定死，页面按这份清单分区展示：
+#: * `system`   —— 全站唯一事实（限流额度、并发数、日志保留…）。用户/工作区层
+#:                 **不提供覆盖**（覆盖它会让「全站额度」失去意义）；
+#: * `user`     —— 只有「每个用户各自成立」的才有意义（如订单同步游标）。
+#: * `workspace`—— 某个平台工作区私有（如该工作区是否允许重复发布）。
+#:
+#: ⚠️ 新增键**必须登记到本表**，否则 `test_settings_scope_map_covers_every_key`
+#: 会红 —— 未登记的键不知道该在哪个页面出现，等于又回到「靠数据行猜」。
+SETTING_SCOPES: dict[str, str] = {
+    # ── 系统级：全站共享，改了影响所有用户 ──────────────────────────
+    "crawl_rate_limit_per_minute": "system",   # 平台请求限流额度
+    "xhs_sync_account_parallelism": "system",  # 同步 worker 池大小
+    "xhs_sync_account_gap_seconds": "system",  # 轮内账号间停顿
+    "xhs_image_upload_parallelism": "system",  # 媒体上传并发
+    "xhs_ocr_parallelism": "system",           # 违规词检测并发
+    "log_retention_days": "system",            # API/业务日志保留
+    "job_log_retention_days": "system",        # 定时任务日志保留
+    #: 开放注册是**全站开关**（登录页有无「注册」入口）。
+    #: ⚠️ 原实现放在用户级（26 个用户各一行、各改各的），且读取取「管理员那一行为准」
+    #: —— 那是「一张表三个归属」早期没定归属时的权宜做法。现在归系统级。
+    "register.enabled": "system",
+    # ── 用户级：每个用户各自成立 ────────────────────────────────────
+    "order_sync_cursor_ms": "user",            # 订单同步游标（每用户各自的店铺）
+    # ── 工作区级：平台工作区私有 ────────────────────────────────────
+    "xhs_allow_duplicate_goods_publish": "workspace",  # 该工作区是否允许重复发布商品笔记
+    #: 笔记图片数上限：**内容线的产品口径**，按工作区（xhs / 未来抖音…）各自不同。
+    "xhs_note_image_total_limit": "workspace",
+    #: SKU 名称压缩字数：**店铺线**的商品打磨口径，按工作区私有。
+    "xhs_sku_name_max_chars": "workspace",
+}
+
+#: 键 → 分组。用于「没有行时合成默认行」时的分组归属（按 category 筛选要用）。
+#: 与 `config/initial_data/system_settings.json` 的 category 保持一致；
+#: 守卫 `test_settings_scope_map_covers_every_key` 一并校验本表覆盖全部键。
+_BUILTIN_CATEGORY: dict[str, str] = {
+    "crawl_rate_limit_per_minute": "sync",
+    "xhs_sync_account_parallelism": "sync",
+    "xhs_sync_account_gap_seconds": "scheduler",
+    "xhs_image_upload_parallelism": "sync",
+    "xhs_ocr_parallelism": "publish",
+    "log_retention_days": "feature",
+    "job_log_retention_days": "scheduler",
+    "register.enabled": "feature",
+    "order_sync_cursor_ms": "feature",
+    "xhs_allow_duplicate_goods_publish": "publish",
+    "xhs_note_image_total_limit": "note",
+    "xhs_sku_name_max_chars": "publish",
+}
+
+#: 键 → 中文名（合成默认行时用；实际有行时以库里的 label 为准）。
+_BUILTIN_LABEL: dict[str, str] = {
+    "crawl_rate_limit_per_minute": "平台请求限流额度",
+    "xhs_sync_account_parallelism": "同步并行账号数",
+    "xhs_sync_account_gap_seconds": "账号间停顿",
+    "xhs_image_upload_parallelism": "媒体上传并发数",
+    "xhs_ocr_parallelism": "违规词检测并发数",
+    "log_retention_days": "API/业务日志保留天数",
+    "job_log_retention_days": "定时任务日志保留天数",
+    "register.enabled": "开放注册",
+    "order_sync_cursor_ms": "订单同步游标",
+    "xhs_allow_duplicate_goods_publish": "允许重复发布商品笔记",
+    "xhs_note_image_total_limit": "笔记图片总数上限",
+    "xhs_sku_name_max_chars": "SKU 名称字数上限",
+}
+
+
+#: 短说明（界面文案，≤20 字）。读 `config/initial_data/setting_descriptions.json`；
+#: 读不到 ⇒ 空串（页面上不显示占位文案，比显示一长段技术说明好）。
+_SHORT_DESCRIPTIONS: dict[str, str] | None = None
+
+
+def short_description(key: str) -> str:
+    """该键的**界面用**短说明（设计 65：界面只留核心一句话）。"""
+    global _SHORT_DESCRIPTIONS
+    if _SHORT_DESCRIPTIONS is None:
+        from backend.app.core.initial_data import resolve_initial_data_file
+
+        path = resolve_initial_data_file("setting_descriptions.json")
+        try:
+            _SHORT_DESCRIPTIONS = json.loads(path.read_text(encoding="utf-8")).get(
+                "descriptions", {}
+            ) if path else {}
+        except Exception:  # noqa: BLE001 - 文案读不到不该阻断页面
+            _SHORT_DESCRIPTIONS = {}
+    return _SHORT_DESCRIPTIONS.get(key, "")
+
+
+def _default_row(
+    key: str, *, scope: str, user_id: Optional[int] = None, workspace: Optional[str] = None
+) -> SystemSetting:
+    """建一条**不落库**的虚拟行（用内置默认值），用于「该级还没有这个键的行」。
+
+    ⚠️ 不 `db.add()`：它只服务 API 的展示与编辑入口 —— 用户点「保存」时才真正落行。
+    让「没配过」的键在页面上可见，是三级拆分的前提（否则它等于不可配置）。
+
+    `id` 用 -1：前端据「id 是否为正」判断该走 POST（新建）还是 PUT（更新）。
+    """
+    return SystemSetting(
+        id=-1,
+        user_id=user_id if scope == "user" else None,
+        workspace=workspace if scope == "workspace" else None,
+        key=key,
+        value=str(BUILTIN_DEFAULTS.get(key, "")).lower()
+        if isinstance(BUILTIN_DEFAULTS.get(key), bool)
+        else str(BUILTIN_DEFAULTS.get(key, "")),
+        value_type=(
+            "bool" if isinstance(BUILTIN_DEFAULTS.get(key), bool)
+            else "int" if isinstance(BUILTIN_DEFAULTS.get(key), int)
+            else "string"
+        ),
+        category=_BUILTIN_CATEGORY.get(key, "general"),
+        label=_BUILTIN_LABEL.get(key, key),
+        description=short_description(key),
+        requires_restart=False,
+        is_dangerous=False,
+    )
+
 
 #: 宽松布尔文本（`coerce_value` 与 `live_bool` **共用同一份**）——
 #: 两处各写一份就会出现「页面存得进去（`yes`），读出来却是默认值」的静默错值。
@@ -770,7 +899,10 @@ def serialize_setting(row: SystemSetting, *, db: Optional[Session] = None) -> di
         "value_type": row.value_type,
         "category": row.category,
         "label": row.label or row.key,
-        "description": row.description or "",
+        #: ⚠️ 界面只看短说明（设计 65 / 2026-10-25 用户口径「说明简短」）。
+        #: 库里的 `description` 是给开发看的（含设计依据 / 历史沿革），可能上百字 ⇒
+        #: **不直接下发**；`short_description()` 读不到时才回落到库里的值。
+        "description": short_description(row.key) or (row.description or ""),
         "requires_restart": bool(row.requires_restart),
         "is_dangerous": bool(row.is_dangerous),
         "is_live": is_live(row.key),
@@ -804,7 +936,34 @@ def list_scoped_settings(
     workspace: Optional[str] = None,
     category: Optional[str] = None,
 ) -> list[SystemSetting]:
-    """按级取行（设计 64 §1.5）：`system` = 全局行 / `user` = 本人行 / `workspace` = 指定工作区行。"""
+    """按级取行（设计 64 §1.5 + 设计 65 三级拆分）。
+
+    ## ⚠️ 关键判据（2026-10-25 用户口径「不要混乱展示」）
+
+    行**归属哪一级**由 `SETTING_SCOPES` 决定，**不由「库里哪一级有行」决定**。
+
+    旧实现只按行位置过滤（`system` = `user_id IS NULL` 等），后果是：
+    * 同一个键在三层都有行 ⇒ **两个页面都列它**，用户不知道该改哪个；
+    * 某个键三层都没行（走内置默认）⇒ **哪个页面都不显示**，等于不可配置。
+
+    现在：先按 `SETTING_SCOPES[key] == scope` 定出本页该展示的键，再取该级的行。
+    某个键在该级还没有行 ⇒ **合成一条「使用默认值」的虚拟行**下发（`to_default_row`），
+    这样三级页面各自完整、互不重复。
+    """
+    text = str(category or "").strip()
+    keys_here = [k for k, s in SETTING_SCOPES.items() if s == scope]
+    if text:
+        keys_here = [k for k in keys_here if _BUILTIN_CATEGORY.get(k) == text]
+
+    #: ⚠️ **内置键按归属过滤，用户自建的键不过滤**（2026-10-25）。
+    #:
+    #: 原因：`SETTING_SCOPES` 管的是**内置键**该出现在哪一级 —— 它解决「同一个内置键
+    #: 在三个页面都列一遍」的混乱。但用户**有权自建**任意键（如业务临时开关），
+    #: 那些键没登记归属；若一律按清单过滤，用户刚建的键**立刻从列表里消失**
+    #: （实测：`test_settings_crud_round_trip` 建完再查就找不到），比混乱更糟。
+    #:
+    #: 判据：`SETTING_SCOPES` 里有的 ⇒ 必须属于本级才显示；
+    #:       不在里面的（自建）⇒ 按「它落在哪一级」显示。
     statement = select(SystemSetting)
     if scope == "system":
         statement = statement.where(
@@ -816,14 +975,25 @@ def list_scoped_settings(
         statement = statement.where(SystemSetting.workspace == str(workspace or "").strip())
     else:
         raise ValueError(f"未知 scope：{scope}")
-    text = str(category or "").strip()
-    if text:
-        statement = statement.where(SystemSetting.category == text)
-    return list(
+    if keys_here:
+        #: 内置键（属于本级的）∪ 任何未登记的自建键。
+        custom_key = ~SystemSetting.key.in_(list(SETTING_SCOPES))
+        statement = statement.where(
+            or_(SystemSetting.key.in_(keys_here), custom_key)
+        )
+
+    rows = list(
         db.scalars(
             statement.order_by(SystemSetting.category.asc(), SystemSetting.key.asc())
         ).all()
     )
+
+    #: 缺行的键补虚拟默认行（不落库）—— 否则「没配过」的键在页面上不可见。
+    present = {row.key for row in rows}
+    for key in keys_here:
+        if key not in present:
+            rows.append(_default_row(key, scope=scope, user_id=user_id, workspace=workspace))
+    return sorted(rows, key=lambda r: (r.category or "", r.key))
 
 
 def find_setting(db: Session, user_id: int, key: str) -> Optional[SystemSetting]:

@@ -207,8 +207,8 @@ export function SettingsTable({ scope, workspace, title, canEdit = true }: Setti
     {
       title: "类型",
       dataIndex: "value_type",
-      width: 80,
-      render: (type: string) => <Text type="secondary">{type}</Text>,
+      width: 64,
+      render: (type: string) => <Text type="secondary" style={{ fontSize: 12 }}>{type}</Text>,
     },
     {
       title: "分组",
@@ -303,10 +303,6 @@ export function SettingsTable({ scope, workspace, title, canEdit = true }: Setti
         </Space>
       </div>
 
-      <Text type="secondary" style={{ display: "block", marginBottom: 12 }}>
-        {HINTS[scope]}
-      </Text>
-
       {loadError ? (
         <Text type="danger" style={{ display: "block", marginBottom: 12 }}>
           配置加载失败：{loadError}
@@ -321,7 +317,7 @@ export function SettingsTable({ scope, workspace, title, canEdit = true }: Setti
         pagination={false}
         scroll={{ x: 900, y: "100%" }}
         rootClassName="fill-table"
-        locale={{ emptyText: loadError ? "取不到配置（见上方说明）" : EMPTY_HINTS[scope] }}
+        locale={{ emptyText: loadError ? "加载失败" : EMPTY_HINTS[scope] }}
       />
 
       <Modal
@@ -425,19 +421,13 @@ const CREATE_LABELS: Record<SettingsTableProps["scope"], string> = {
 };
 
 const EMPTY_HINTS: Record<SettingsTableProps["scope"], string> = {
-  user: "还没有个人覆盖 —— 在「新增个人覆盖」里建一个键，它会对你的账号优先生效",
-  system: "还没有系统级配置 —— 新增的键对全站所有用户生效",
-  workspace: "当前工作区还没有配置 —— 新增的键在该工作区内生效（优先于用户/系统级）",
-};
-
-const HINTS: Record<SettingsTableProps["scope"], string> = {
-  user: "个人覆盖：对**你的账号**优先于工作区级与系统级生效；删除 = 回落到工作区/系统级。",
-  system: "系统级：对**全站所有用户**生效（用户级/工作区级覆盖仍可各自优先）。改完立即生效，无需重启。",
-  workspace: "工作区级：只对**当前工作区**生效，优先于用户级与系统级。改完立即生效。",
+  user: "暂无个人配置",
+  system: "暂无系统配置",
+  workspace: "当前工作区暂无配置",
 };
 
 const DELETE_HINTS: Record<SettingsTableProps["scope"], string> = {
-  user: "删除后回落到工作区级 / 系统级 / 内置默认，并立即生效。",
-  system: "删除后全站回落到配置文件 / 内置默认，立即生效。",
-  workspace: "删除后当前工作区回落到用户级 / 系统级。",
+  user: "删除后回落到默认值。",
+  system: "删除后全站回落到默认值。",
+  workspace: "删除后回落到默认值。",
 };

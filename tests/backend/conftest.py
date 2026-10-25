@@ -624,7 +624,7 @@ def patch_service_sessions(monkeypatch: Any, session_factory: Callable[[], Sessi
 
 
 @pytest.fixture()
-def db_engine(db_path: Path) -> Engine:
+def db_engine(db_path: Path, monkeypatch) -> Engine:
     """建好全部表的 engine。
 
     ⚠️ **顺带播种 `users` id=1 与 `platform_accounts` id=10**（2026-10-04 加）。
@@ -638,11 +638,39 @@ def db_engine(db_path: Path) -> Engine:
     """
     engine = make_engine(db_path)
     _base().metadata.create_all(bind=engine)
+    #: 🔴 **必须在这里也打桩**（2026-10-25 修）：`settings_service` 等多处是
+    #: 「模块级持有 `SessionLocal`，服务函数自开会话」（见本文件模块 docstring）。
+    #: 此前只有 `api_client` 打桩 ⇒ 用 `db_factory` / `db_session` 的用例里，
+    #: 服务自开的会话**连到真实库**。实测后果：真实库的 `system_settings` 与
+    #: 用例自建的 schema 结构不一致时报 `字段 xxx 不存在` —— 看起来像代码 bug。
+    #: 打桩放这里 ⇒ 所有用 engine 的夹具（含 db_factory / db_session）自动覆盖。
+    factory = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    patch_service_sessions(monkeypatch, factory)
+    #: 🔴 **清配置缓存**（2026-10-25）：`settings_service` 的进程级缓存按
+    #: `(user_id, key)` 存，**不带 schema 维度**。xdist 下同一 worker 顺序跑多个
+    #: 用例时，上一条用例读到的值会带到下一条 —— 而下一条连的是**另一个 schema**
+    #: （每用例新建）。表现是 `字段 xxx 不存在` 或「读到了上一条用例的值」。
+    #: 清缓存必须在**建表之后、用例开始之前**，所以放这里而不是 teardown。
+    try:
+        from backend.app.services import settings_service as _ss
+
+        _ss.reset_cache_for_tests()
+    except Exception:  # noqa: BLE001 - 无缓存实现时不影响夹具可用
+        pass
     # ⚠️ **刻意不播种任何行**（2026-10-04）：`test_conftest_fixtures.py` 的契约是
     # 「新库应当是空的」，而大量用例（如 `test_llm_gateway`）也依赖「库里没有东西」
     # 才断言得准。曾经在这里加过 `users`/`platform_accounts` 基线行 ⇒ 一次红 20+ 条。
     # **外键父行由需要它的文件自己造**（见 `seed_owner_rows` 的用法）。
     yield engine
+    #: 🔴 **必须 DROP 本用例的 schema**（2026-10-25 补回；此前漏掉了）。
+    #:
+    #: SQLite 时代是「每用例一个 .db 文件，进程退出就没了」；PG 的 schema 会
+    #: **一直留在库里**。漏了这一步的实测后果：测试库累积了几十个旧 schema，
+    #: 其中一批是**建表语句旧版**（没有 `system_settings.workspace` 列）⇒
+    #: 某些用例的 `search_path` 命中旧 schema，报
+    #: `字段 system_settings.workspace 不存在` —— 看起来像代码 bug，实际是
+    #: 测试环境脏了。**这类假红极难定位**，所以 teardown 不能省。
+    drop_schema(engine)
     engine.dispose()
 
 

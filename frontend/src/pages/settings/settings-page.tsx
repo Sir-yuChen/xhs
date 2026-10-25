@@ -1,18 +1,19 @@
 /**
- * 用户配置页（`/settings`，设计 64 §1.6：用户级 = 个人覆盖）。
+ * 用户配置页（`/settings`）：**只放用户级**配置（该用户下公共的）。
  *
- * 设计 64 三级化后本页职责收窄为 **`scope="user"` 的展示与编辑**（表格组件
- * `SettingsTable` 三处挂载点共用：系统管理 → 配置管理挂 system 级、头像下拉
- * 「用户配置」弹窗挂 user 级、WorkspaceShell 齿轮挂工作区级）。
- * 原「应用到所有用户」随端点退场（410，系统级取代其语义）。
+ * 设计 65 三级拆分（2026-10-25 用户口径「不要混乱展示」）：
+ * * 系统级 → 系统管理 → 配置管理（管理员维护，全站生效）
+ * * **用户级 → 本页 / 头像下拉「用户配置」**（只对本人生效）
+ * * 工作区级 → 侧栏工作区齿轮（仅该工作区生效）
+ *
+ * ⚠️ 不在页面写解释性长文案：用户口径「说明简短，不必要的说明全部移除」。
+ * 分区由后端 `SETTING_SCOPES` 定死，本页只请求 `scope="user"`。
  */
 
-import { Card, Typography } from "antd";
+import { Card } from "antd";
 import { SettingOutlined } from "@ant-design/icons";
 
 import { SettingsTable } from "../../components/settings/settings-table";
-
-const { Paragraph } = Typography;
 
 export function SettingsPage() {
   return (
@@ -20,16 +21,11 @@ export function SettingsPage() {
       title={
         <span>
           <SettingOutlined style={{ marginRight: 8 }} />
-          用户配置
+          个人配置
         </span>
       }
     >
-      <Paragraph type="secondary" style={{ marginBottom: 12 }}>
-        这里是**你的个人覆盖**：对全站生效的基线由管理员在「系统管理 → 配置管理」维护；
-        你在这里建的键只对你自己的账号优先生效（高于系统级）。
-        标记「实时生效」的参数改完立即作用于运行中的任务（无需重启）。
-      </Paragraph>
-      <SettingsTable scope="user" title="用户配置" />
+      <SettingsTable scope="user" title="个人配置" />
     </Card>
   );
 }

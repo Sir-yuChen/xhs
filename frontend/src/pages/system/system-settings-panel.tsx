@@ -1,18 +1,20 @@
 /**
- * 系统管理 → 配置管理（`/system/settings`，设计 64 §1.6）：**系统级**配置面板。
+ * 系统管理 → 配置管理（`/system/settings`）：**只放系统级**配置。
  *
- * 设计 62 之前本路由 302 到 `/settings`（当时配置只有用户级一份）；三级化后
- * 系统级有了自己的归属 —— 管理员在这里维护全站基线，用户级/工作区级覆盖仍可
- * 各自优先（`SettingsTable scope="system"`）。
+ * 设计 65 三级拆分（2026-10-25 用户口径：「系统级只展示系统管理中展示系统公共的，
+ * 用户级别也是该用户下公共的配置，工作区域级别的是指定工作区域私有的，
+ * **不要混乱展示**」）。
+ *
+ * 分区由后端 `SETTING_SCOPES` 定死，本页只请求 `scope="system"` ⇒ 不会出现
+ * 「同一个键在三个页面都列一遍」或「某键哪都不显示」。
+ * ⚠️ 不在页面上写解释性长文案：用户口径「说明简短，不必要的说明全部移除」。
  */
 
-import { Card, Typography } from "antd";
+import { Card } from "antd";
 import { SettingOutlined } from "@ant-design/icons";
 
 import { SettingsTable } from "../../components/settings/settings-table";
 import { usePermission } from "../../hooks/use-permission";
-
-const { Paragraph } = Typography;
 
 export function SystemSettingsPanel() {
   const { isAdmin } = usePermission();
@@ -22,20 +24,11 @@ export function SystemSettingsPanel() {
       title={
         <span>
           <SettingOutlined style={{ marginRight: 8 }} />
-          配置管理（系统级）
+          系统配置
         </span>
       }
     >
-      <Paragraph type="secondary" style={{ marginBottom: 12 }}>
-        系统级配置对**全站所有用户**直接生效（用户级/工作区级覆盖仍可各自优先）。
-        改完立即生效，无需重启；标记「实时生效」的键有运行时读点，
-        「仅存档」的键没有读点、只作记录。
-      </Paragraph>
-      <SettingsTable
-        scope="system"
-        title="配置管理（系统级）"
-        canEdit={isAdmin}
-      />
+      <SettingsTable scope="system" title="系统配置" canEdit={isAdmin} />
     </Card>
   );
 }
