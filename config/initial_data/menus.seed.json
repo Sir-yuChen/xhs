@@ -2347,6 +2347,32 @@
       "is_visible": true,
       "status": "normal",
       "parent_seq": 1
+    },
+    {
+      "_seq": 181,
+      "name": "任务中心",
+      "menu_type": "C",
+      "path": "/system/scheduler",
+      "perms": "system:scheduler:view",
+      "icon": "schedule",
+      "workspace": "system",
+      "sort_order": 6,
+      "is_visible": true,
+      "status": "normal",
+      "parent_seq": 3
+    },
+    {
+      "_seq": 182,
+      "name": "管理定时任务",
+      "menu_type": "F",
+      "path": "/system/scheduler",
+      "perms": "system:scheduler:manage",
+      "icon": "schedule",
+      "workspace": "system",
+      "sort_order": 1,
+      "is_visible": true,
+      "status": "normal",
+      "parent_seq": 181
     }
   ]
 }

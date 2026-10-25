@@ -42,9 +42,32 @@ VITE_LOG = LOG_DIR / "vite.log"
 #: CREATE_NO_WINDOW：即使不小心用 python.exe 启动也不会弹控制台
 CREATE_NO_WINDOW = 0x08000000
 
+#: 日志轮转阈值（设计 64 §2.4）：app.log 是 stdout 重定向（Python 侧
+#: RotatingFileHandler 管不到 fd）⇒ 在 launcher 的**每次打开句柄前**检查，
+#: 超 50MB 就改名滚动（保留 app.log.1~3，最老的丢弃）。原来追加写、无上限
+#: —— 只增不减的日志文件最终会吃满盘。
+LOG_ROTATE_BYTES = 50 * 1024 * 1024
+LOG_ROTATE_KEEP = 3
+
+
+def rotate_log_if_large(path) -> None:
+    """超阈值则把 `path` 滚动成 `path.1`（旧的依次后移，最老丢弃）。"""
+    try:
+        if not path.exists() or path.stat().st_size < LOG_ROTATE_BYTES:
+            return
+        for i in range(LOG_ROTATE_KEEP - 1, 0, -1):
+            src = path.with_suffix(path.suffix + f".{i}")
+            dst = path.with_suffix(path.suffix + f".{i + 1}")
+            if src.exists():
+                dst.replace(src)
+        path.replace(path.with_suffix(path.suffix + ".1"))
+    except OSError:
+        pass  # 轮转失败不阻塞启动（下一轮再试）
+
 
 def log(message: str) -> None:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
+    rotate_log_if_large(API_LOG)
     with API_LOG.open("a", encoding="utf-8") as handle:
         handle.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}  {message}\n")
 
@@ -96,6 +119,7 @@ class Child:
                 self.handle.close()
             except Exception:  # noqa: BLE001 - 关不掉旧句柄不该阻塞重启
                 pass
+        rotate_log_if_large(self.log_path)
         self.handle = self.log_path.open("a", encoding="utf-8")
         self.process = subprocess.Popen(
             self.command,

@@ -39,6 +39,7 @@ import {
   fetchNoteVersionsByItem,
 } from "../../../lib/api";
 import type { NoteVersionItem } from "../../../types";
+import { dictLabel } from "../../../lib/system-dicts";
 
 const { Text, Paragraph } = Typography;
 
@@ -62,27 +63,29 @@ function statusView(status: string): { label: string; color: string } {
 function scopeLabel(scope: string): string {
   //: **按块**展示（用户口径 2026-10-18「后端支持每个文案区域单独重新生成」）——
   //: 旧值 `text` 保留显示「只改文案」（历史行里有它），新值各对应一块。
-  const labels: Record<string, string> = {
+  // 设计 63：文案走字典 `sys_regenerate_scope`（与 llm-generate-modal SCOPE_CN 同域，
+  // 两份重复文案已收敛到同一字典组；本表为镜像兜底）。
+  return dictLabel("sys_regenerate_scope", scope, {
     all: "整篇生成",
     text: "只改文案",
     title: "只改标题",
     body: "只改正文",
     topics: "只改话题",
     media: "只改图片",
-  };
-  return labels[scope] || "";
+  }) || "";
 }
 
 /** 媒体来源 → 中文（`product_image` 这种代码值不上屏）。 */
 function mediaSourceLabel(source: string): string {
-  const labels: Record<string, string> = {
+  // 设计 63：媒体来源走字典 `sys_media_source`（本表为镜像兜底）。
+  if (!source) return "-";
+  return dictLabel("sys_media_source", source, {
     product_image: "商品原图",
     material: "本地素材",
     ai_generate: "AI 生成",
     reference_image: "参考图生成",
     video: "视频",
-  };
-  return labels[source] || (source ? source : "-");
+  });
 }
 
 /** 详情抽屉里的完整形态（列表接口只给摘要，正文与快照要单独取）。 */

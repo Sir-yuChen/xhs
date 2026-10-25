@@ -904,6 +904,13 @@ const SCOPE_CN: Record<string, string> = {
   all: "整篇",
 };
 
+/** 局部重生成的**短名**（提示文案里拼句子）。⚠️ 与 TRIGGER_TYPE 简写同理：
+ *  短名是排版压缩不是枚举语义 —— 字典 `sys_regenerate_scope` 存的是版本历史页
+ *  的**长名**，这里刻意不入字典（设计 63 §2.4 简写口径），只吃 SCOPE_CN。 */
+function scopeCn(scope: string): string {
+  return SCOPE_CN[scope] ?? "";
+}
+
 
 function uniqueKeepOrder(urls: string[]): string[] {
   const seen = new Set<string>();
@@ -2893,7 +2900,7 @@ export function LlmGenerateModal({
       });
       //: 版本列表也刷一次（列表里的「标题摘要 / 字数」要跟着变）。
       setVersionRefreshToken((v) => v + 1);
-      message.success(`已重新生成${SCOPE_CN[apiScope] || ""}`);
+      message.success(`已重新生成${scopeCn(apiScope)}`);
     } catch (error) {
       message.error(error instanceof Error ? error.message : "重生成失败");
     } finally {

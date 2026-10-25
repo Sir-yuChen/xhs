@@ -74,6 +74,8 @@ LIVE_KEYS: dict[str, str] = {
     "xhs_note_image_total_limit": "笔记图片总数上限（生成链路组合总闸；平台硬顶 18，设计 41 §17）",
     "xhs_sku_name_max_chars": "SKU 规格名称最大显示长度（用户口径：30 字 = 60 字符，汉字计 2、ASCII 计 1）",
     "register.enabled": "登录页「注册」入口 + POST /api/auth/register 开关（设计 46 P11；默认 false）",
+    "log_retention_days": "record_cleanup 清理 api_logs / business_logs 的保留天数（设计 64 §2.4）",
+    "job_log_retention_days": "record_cleanup 清理 scheduled_job_logs 的保留天数（设计 64 §2.4）",
 }
 
 #: 内置兜底默认值（第 3 层）。**只放 `LIVE_KEYS` 里的键** —— 给没有读点的键编一个默认值
@@ -114,6 +116,9 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     #: 若同时开放注册，「弱口令 + 任何人可注册」两条就同时成立。用户在设置页可打开。
     #: 读点：`POST /api/auth/register`（关闭时 403 `REGISTER_DISABLED`，S3 落地）。
     "register.enabled": False,
+    #: 日志保留期（设计 64 §2.4）：API 审计 + 业务日志 90 天，定时任务日志 30 天。
+    "log_retention_days": 90,
+    "job_log_retention_days": 30,
 }
 
 #: 宽松布尔文本（`coerce_value` 与 `live_bool` **共用同一份**）——
@@ -142,6 +147,8 @@ _KEY_BOUNDS: dict[str, tuple[int, int]] = {
     #: 官方 `xhs.postNote`：「图片可以多张（1-18）」；夹在这里 = 配置怎么填都不会
     #: 让生成出平台契约之外的图（下界 1：0 张图不成图文笔记）。
     "xhs_note_image_total_limit": (1, 18),
+    "log_retention_days": (1, 3650),
+    "job_log_retention_days": (1, 3650),
 }
 
 #: 进程内缓存：`(user_id, key) -> (值, 过期时刻)`。
@@ -170,6 +177,18 @@ def invalidate(*, user_id: Optional[int] = None, key: Optional[str] = None) -> N
             return
         for cache_key in [k for k in _cache if _match(k, user_id, key)]:
             _cache.pop(cache_key, None)
+
+
+def invalidate_key(key: str) -> None:
+    """按 key 清**所有用户**的缓存格（系统级/工作区级写路径专用）。
+
+    系统级行改动影响每个用户的读点 —— 只清 `(None, key)` 一格会留下其它用户
+    的陈旧缓存（TTL 3s 兜底会让「改了 3 秒后才生效」，违背「写后立即生效」判据）。
+    """
+    with _cache_lock:
+        stale = [ck for ck in _cache if ck[1] == key]
+        for ck in stale:
+            _cache.pop(ck, None)
 
 
 def _match(cache_key: tuple[Optional[int], str], user_id: Optional[int], key: Optional[str]) -> bool:
@@ -335,28 +354,133 @@ def settings_default(key: str) -> Any:
     return getattr(settings, key) if hasattr(settings, key) else UNSET
 
 
+def _system_row(db: Session, key: str) -> Optional[SystemSetting]:
+    """系统级行（`user_id IS NULL ∧ workspace IS NULL`，设计 64 §1.2）。"""
+    return db.scalar(
+        select(SystemSetting).where(
+            SystemSetting.user_id.is_(None),
+            SystemSetting.workspace.is_(None),
+            SystemSetting.key == key,
+        )
+    )
+
+
 def effective_value(
     db: Optional[Session], user_id: Optional[int], key: str, *, default: Any = UNSET
 ) -> Any:
-    """三层取值（DB 行 → settings → 内置兜底 → `default`）。
+    """生效取值（设计 64 §1.3 两级形态）：**用户级行 → 系统级行 → settings → 内置兜底 → default**。
 
-    `db=None` 时**跳过第 1 层**（用于「没有会话也不想开一个」的调用点，如限流器的
-    缓存未命中路径自己开会话）。`user_id=None` 同理跳过 DB 层（无归属可查）。
+    `db=None` 时**跳过 DB 层**（用于「没有会话也不想开一个」的调用点，如限流器的
+    缓存未命中路径自己开会话）。系统级行对所有用户生效 —— 管理员在系统管理改一次，
+    全站读点即变（用户级行仍是个人覆盖，优先于系统级）。
     """
-    if db is not None and user_id is not None:
-        row = db.scalar(
-            select(SystemSetting).where(
-                SystemSetting.user_id == user_id, SystemSetting.key == key
+    if db is not None:
+        if user_id is not None:
+            row = db.scalar(
+                select(SystemSetting).where(
+                    SystemSetting.user_id == user_id, SystemSetting.key == key
+                )
             )
-        )
-        if row is not None:
-            return decode_value(row.value, row.value_type)
+            if row is not None:
+                return decode_value(row.value, row.value_type)
+        system = _system_row(db, key)
+        if system is not None:
+            return decode_value(system.value, system.value_type)
     from_settings = settings_default(key)
     if from_settings is not UNSET:
         return from_settings
     if key in BUILTIN_DEFAULTS:
         return BUILTIN_DEFAULTS[key]
     return default
+
+
+def effective_scoped_value(
+    db: Optional[Session],
+    user_id: Optional[int],
+    workspace: Optional[str],
+    key: str,
+    *,
+    default: Any = UNSET,
+) -> Any:
+    """三级级联取值（设计 64 §1.3 完整形态）：
+
+    **工作区级 > 用户级 > 系统级 > settings > 内置兜底**（最贴近人的赢）。
+    带 workspace 上下文的读点用这个；业务热路径没 workspace 概念的继续用
+    `effective_value`（两级形态）。
+    """
+    if db is not None and workspace:
+        row = db.scalar(
+            select(SystemSetting).where(
+                SystemSetting.workspace == workspace, SystemSetting.key == key
+            )
+        )
+        if row is not None:
+            return decode_value(row.value, row.value_type)
+    return effective_value(db, user_id, key, default=default)
+
+
+def effective_settings_map(
+    db: Session, user_id: int, workspace: Optional[str] = None
+) -> dict[str, dict[str, Any]]:
+    """三级配置的**合并视图**（`GET /settings/effective` 的数据源）。
+
+    返回 `{key: {value, value_type, category, label, scope_hit, updated_at}}` ——
+    `scope_hit` ∈ workspace/user/system/builtin，前端据此展示「这一格生效的是哪级」。
+    键集合 = 三级全部行的 key ∪ LIVE_KEYS（内置默认也展示，没行就是 builtin 命中）。
+    """
+    merged: dict[str, dict[str, Any]] = {}
+    # 1) 系统级（底座）
+    for row in db.scalars(
+        select(SystemSetting).where(
+            SystemSetting.user_id.is_(None), SystemSetting.workspace.is_(None)
+        )
+    ).all():
+        merged[row.key] = {
+            "value": decode_value(row.value, row.value_type),
+            "value_type": row.value_type,
+            "category": row.category,
+            "label": row.label or row.key,
+            "scope_hit": "system",
+            "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        }
+    # 2) 用户级（个人覆盖）
+    for row in db.scalars(
+        select(SystemSetting).where(SystemSetting.user_id == user_id)
+    ).all():
+        merged[row.key] = {
+            "value": decode_value(row.value, row.value_type),
+            "value_type": row.value_type,
+            "category": row.category,
+            "label": row.label or row.key,
+            "scope_hit": "user",
+            "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        }
+    # 3) 工作区级（最具体，最后盖）
+    if workspace:
+        for row in db.scalars(
+            select(SystemSetting).where(SystemSetting.workspace == workspace)
+        ).all():
+            merged[row.key] = {
+                "value": decode_value(row.value, row.value_type),
+                "value_type": row.value_type,
+                "category": row.category,
+                "label": row.label or row.key,
+                "scope_hit": "workspace",
+                "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+            }
+    # 4) LIVE_KEYS 里没有行的键 ⇒ builtin 命中（UI 也要能看到这批基线）
+    for key, fallback in BUILTIN_DEFAULTS.items():
+        if key not in merged:
+            from_settings = settings_default(key)
+            merged[key] = {
+                "value": fallback if from_settings is UNSET else from_settings,
+                "value_type": infer_value_type(fallback),
+                "category": CATEGORY_FEATURE,
+                "label": key,
+                "scope_hit": "builtin",
+                "updated_at": None,
+            }
+    return merged
 
 
 def _baseline_bool(key: str, default: bool) -> bool:
@@ -383,33 +507,44 @@ def _baseline_bool(key: str, default: bool) -> bool:
 
 
 def live_global_bool(db: Optional[Session], key: str, *, default: bool) -> bool:
-    """**全局开关**读取：以**管理员**那一行为准（v1.1.0 / S3）。
+    """**全局开关**读取（设计 64 §1.2 三级化后）：**系统级行为准**。
 
     ## 为什么不能直接用 `live_bool(db, None, ...)`
 
-    `live_bool(db, None, key)` 在 `user_id=None` 时会**跳过 DB 层**（见
-    `effective_value` docstring），只剩 `settings` / `BUILTIN_DEFAULTS`。
-    于是「管理员在设置页把注册打开」这件事**在未登录的注册请求里读不到** ——
-    表现是「管理员开了、注册仍回 403」。
+    `live_bool(db, None, key)` 在 `user_id=None` 时（三级化之前）会跳过 DB 层 ——
+    于是「管理员把注册打开」这件事在未登录的注册请求里读不到。三级化之后
+    `register.enabled` 落在**系统级行**（`user_id IS NULL`），`effective_value`
+    对任何 `user_id`（含 None）都会读它 —— 本函数即「系统级行 → 旧管理员行 → 基线」：
 
-    `register.enabled` 是**全站开关**（注册发生在登录之前，那时没有 user 可归属），
-    必须按全局语义读。
-
-    ## 为什么是「管理员那一行」而不是「任一行为 true」
-
-    先写过一版「有任一行 true 就算开」，实测立刻出问题：管理员把开关**关掉**后，
-    只要任何一个普通用户的行里还留着 `true`（他以前开过 / 默认种子是 true），
-    开关就关不掉 —— **「关」这个动作失效**比「开不了」危险得多。
-
-    取管理员行：管理员是唯一有权改这个开关的人，他的行就是权威值。
-    没有管理员行时（极端情况）回落到 `default`。
-
-    ⚠️ 这不是把 per-user 配置变成全局配置 —— 只影响**这一个键**的读取语义。
+    * 系统级行：三级化后的唯一权威写点（系统管理配置页）；
+    * 旧管理员行：迁移 `b0c1d2e3f4a5` 只删「值==默认」的用户行，管理员真改过的
+      行会**保留为用户级** —— 兼容读它，管理员重新在系统管理保存一次即收敛；
+    * 都没有 ⇒ 配置基线（`settings` / `BUILTIN_DEFAULTS`），不直接给 `default`
+      （实测教训：`return default` 会让测试库无行时开关永远关）。
     """
     if not key or key not in LIVE_KEYS or db is None:
         return default
 
-    row = db.execute(
+    def _as_bool(raw: Any) -> Optional[bool]:
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, (int, float)):
+            return bool(raw)
+        if isinstance(raw, str):
+            lowered = raw.strip().lower()
+            if lowered in ("true", "1", "yes", "on"):
+                return True
+            if lowered in ("false", "0", "no", "off"):
+                return False
+        return None
+
+    system = _system_row(db, key)
+    if system is not None and system.value is not None:
+        resolved = _as_bool(decode_value(system.value, system.value_type))
+        if resolved is not None:
+            return resolved
+
+    legacy_admin = db.execute(
         select(SystemSetting.value, SystemSetting.value_type)
         .join(User, User.id == SystemSetting.user_id)
         .where(
@@ -421,22 +556,11 @@ def live_global_bool(db: Optional[Session], key: str, *, default: bool) -> bool:
         .order_by(SystemSetting.id.desc())
         .limit(1)
     ).first()
-    if row is None:
-        #: ⚠️ 没有管理员行时**回落到配置基线**（`settings` / `BUILTIN_DEFAULTS`），
-        #: 而不是直接给 `default`。
-        #:
-        #: 实测踩坑：`return default` 会让「改 `BUILTIN_DEFAULTS` 打开注册」的
-        #: 测试路径失效（读到的永远是 `default=False`），而测试库不一定有管理员行
-        #: ⇒ 表现为「开关明明设了 true，注册仍 403」。生产语义也更顺：
-        #: 没配就是「按基线」，基线本来就该是随包种子的值。
-        return _baseline_bool(key, default)
-
-    value = decode_value(row[0], row[1])
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    return str(value).strip().lower() in ("true", "1", "yes", "on")
+    if legacy_admin is not None:
+        resolved = _as_bool(decode_value(legacy_admin[0], legacy_admin[1]))
+        if resolved is not None:
+            return resolved
+    return _baseline_bool(key, default)
 
 
 def live_value(db: Optional[Session], user_id: Optional[int], key: str, *, default: Any = None) -> Any:
@@ -521,14 +645,9 @@ def is_live(key: str) -> bool:
 def live_int_process(key: str, *, default: int) -> int:
     """**进程级**开关的整数读（如 worker 池大小）。
 
-    与 `live_int` 的区别只在「取哪一行」：账号级开关按**账号归属用户**读（`live_int`），
-    而进程级资源（worker 池）不属于任何单个账号 ⇒ 规则是
-    **所有用户的该键行取最大值（最宽松者胜）**。
-
-    ⚠️ 为什么取 max 而不是「第一个用户」/「管理员」：进程级资源是共享的，
-    取某个特定用户的行会让**另一个用户在页面上改了却不生效** —— 那正是
-    设计 10 §1 定义的管理缺陷的翻版。取 max 保证「任何用户在页面上调大，都真的生效」；
-    代价是「调低到低于其他用户配置的值时以更宽松的那个为准」（单用户场景下不存在）。
+    三级化后（设计 64 §1.3）语义收敛：进程级资源（worker 池）不属于任何单个账号
+    ⇒ **系统级行优先**（管理员在系统管理改一次即全进程生效）；没有系统级行时
+    保留旧口径**所有用户行取最大值**（兼容迁移后幸存的用户级覆盖），再退基线。
     """
     cache_key = (None, f"process:{key}")
     cached = _cache_get(cache_key)
@@ -542,17 +661,30 @@ def live_int_process(key: str, *, default: int) -> int:
         rows = session.scalars(
             select(SystemSetting).where(SystemSetting.key == key)
         ).all()
-        values: list[int] = []
+        #: 系统级行优先（三级化后的权威写点）；没有系统行才看用户行 max。
+        system_values: list[int] = []
+        user_values: list[int] = []
         for row in rows:
-            decoded = decode_value(row.value, row.value_type)
-            if isinstance(decoded, bool):
-                continue
-            try:
-                values.append(int(decoded))
-            except (TypeError, ValueError):
-                continue
-        if values:
-            resolved = max(values)
+            if row.user_id is None and row.workspace is None:
+                decoded = decode_value(row.value, row.value_type)
+                if isinstance(decoded, bool):
+                    continue
+                try:
+                    system_values.append(int(decoded))
+                except (TypeError, ValueError):
+                    continue
+            elif row.user_id is not None:
+                decoded = decode_value(row.value, row.value_type)
+                if isinstance(decoded, bool):
+                    continue
+                try:
+                    user_values.append(int(decoded))
+                except (TypeError, ValueError):
+                    continue
+        if system_values:
+            resolved = system_values[0]
+        elif user_values:
+            resolved = max(user_values)
     except Exception:  # noqa: BLE001 - 读配置失败退兜底，绝不打断调用方
         logger.warning("settings: 读取进程级配置 %s 失败，本次用兜底值", key, exc_info=True)
     finally:
@@ -626,8 +758,12 @@ def rate_limit_per_minute_for_key(rate_key: str, *, fallback: int = 5) -> int:
 # --------------------------------------------------------------------------- #
 def serialize_setting(row: SystemSetting, *, db: Optional[Session] = None) -> dict[str, Any]:
     """一行的 API 形态。`is_live` 是**派生**字段（不落库，见 `LIVE_KEYS`）。"""
+    scope = "workspace" if row.workspace else ("system" if row.user_id is None else "user")
     return {
         "id": row.id,
+        "scope": scope,
+        "workspace": row.workspace,
+        "user_id": row.user_id,
         "key": row.key,
         "value": decode_value(row.value, row.value_type),
         "raw_value": row.value,
@@ -660,6 +796,36 @@ def list_settings(
     )
 
 
+def list_scoped_settings(
+    db: Session,
+    *,
+    scope: str,
+    user_id: Optional[int] = None,
+    workspace: Optional[str] = None,
+    category: Optional[str] = None,
+) -> list[SystemSetting]:
+    """按级取行（设计 64 §1.5）：`system` = 全局行 / `user` = 本人行 / `workspace` = 指定工作区行。"""
+    statement = select(SystemSetting)
+    if scope == "system":
+        statement = statement.where(
+            SystemSetting.user_id.is_(None), SystemSetting.workspace.is_(None)
+        )
+    elif scope == "user":
+        statement = statement.where(SystemSetting.user_id == user_id)
+    elif scope == "workspace":
+        statement = statement.where(SystemSetting.workspace == str(workspace or "").strip())
+    else:
+        raise ValueError(f"未知 scope：{scope}")
+    text = str(category or "").strip()
+    if text:
+        statement = statement.where(SystemSetting.category == text)
+    return list(
+        db.scalars(
+            statement.order_by(SystemSetting.category.asc(), SystemSetting.key.asc())
+        ).all()
+    )
+
+
 def find_setting(db: Session, user_id: int, key: str) -> Optional[SystemSetting]:
     """按 `(user_id, key)` 取行（归属校验的唯一入口）。"""
     return db.scalar(
@@ -667,6 +833,30 @@ def find_setting(db: Session, user_id: int, key: str) -> Optional[SystemSetting]
             SystemSetting.user_id == user_id, SystemSetting.key == str(key or "").strip()
         )
     )
+
+
+def find_scoped(
+    db: Session,
+    *,
+    scope: str,
+    key: str,
+    user_id: Optional[int] = None,
+    workspace: Optional[str] = None,
+) -> Optional[SystemSetting]:
+    """按级取单行（归属校验的唯一入口，设计 64 §1.5）。"""
+    clean = str(key or "").strip()
+    if scope == "system":
+        return _system_row(db, clean)
+    if scope == "user":
+        return find_setting(db, int(user_id or 0), clean)
+    if scope == "workspace":
+        return db.scalar(
+            select(SystemSetting).where(
+                SystemSetting.workspace == str(workspace or "").strip(),
+                SystemSetting.key == clean,
+            )
+        )
+    raise ValueError(f"未知 scope：{scope}")
 
 
 # --------------------------------------------------------------------------- #
@@ -684,8 +874,14 @@ def create_setting(
     description: str = "",
     requires_restart: bool = False,
     is_dangerous: bool = False,
+    scope: str = "user",
+    workspace: Optional[str] = None,
 ) -> SystemSetting:
-    """新增一行（**不 commit**：调用方提交）。key 已存在 ⇒ `ValueError`（API 转 409）。"""
+    """新增一行（**不 commit**：调用方提交）。key 已存在 ⇒ `ValueError`（API 转 409）。
+
+    `scope`（设计 64 §1.5）：`user`（缺省，本人覆盖）/ `system`（全局行，
+    user_id=NULL）/ `workspace`（工作区行，需传 `workspace`）。权限面在 API 层收口。
+    """
     from backend.app.core.time import shanghai_now
 
     clean_key = str(key or "").strip()
@@ -693,14 +889,21 @@ def create_setting(
         raise ValueError("配置键不能为空")
     if len(clean_key) > KEY_MAX_LENGTH:
         raise ValueError(f"配置键最长 {KEY_MAX_LENGTH} 字符")
-    if find_setting(db, user_id, clean_key) is not None:
-        raise ValueError(f"配置键 {clean_key} 已存在")
+    scope = str(scope or "user").strip()
+    clean_workspace = str(workspace or "").strip() or None
+    if scope == "workspace" and not clean_workspace:
+        raise ValueError("工作区级配置必须指定 workspace")
+    if clean_workspace and scope != "workspace":
+        raise ValueError("只有工作区级配置带 workspace")
+    if find_scoped(db, scope=scope, key=clean_key, user_id=user_id, workspace=clean_workspace) is not None:
+        raise ValueError(f"配置键 {clean_key} 已存在（{scope} 级）")
 
     kind = normalize_value_type(value_type) if value_type else infer_value_type(value)
     coerced = coerce_value(value, kind, key=clean_key)
     now = shanghai_now()
     row = SystemSetting(
-        user_id=user_id,
+        user_id=None if scope in ("system", "workspace") else user_id,
+        workspace=clean_workspace if scope == "workspace" else None,
         key=clean_key,
         value=encode_value(coerced, kind),
         value_type=kind,
@@ -715,7 +918,10 @@ def create_setting(
     )
     db.add(row)
     db.flush()
-    invalidate(user_id=user_id, key=clean_key)
+    if scope == "user":
+        invalidate(user_id=user_id, key=clean_key)
+    else:
+        invalidate_key(clean_key)
     return row
 
 
@@ -762,7 +968,10 @@ def update_setting(
         row.updated_by = updated_by
     row.updated_at = shanghai_now()
     db.flush()
-    invalidate(user_id=row.user_id, key=row.key)
+    if row.user_id is not None:
+        invalidate(user_id=row.user_id, key=row.key)
+    else:
+        invalidate_key(row.key)
     return row
 
 
@@ -774,28 +983,40 @@ def delete_setting(db: Session, row: SystemSetting) -> dict[str, Any]:
     """
     key = row.key
     user_id = row.user_id
+    scope = "workspace" if row.workspace else ("system" if user_id is None else "user")
     db.delete(row)
     db.flush()
-    invalidate(user_id=user_id, key=key)
-    return {"key": key, "effective_value": effective_value(db, user_id, key, default=None)}
+    if scope == "user":
+        invalidate(user_id=user_id, key=key)
+    else:
+        invalidate_key(key)
+    fallback = (
+        effective_scoped_value(db, user_id, row.workspace, key, default=None)
+        if scope == "workspace"
+        else effective_value(db, user_id, key, default=None)
+    )
+    return {"key": key, "scope": scope, "effective_value": fallback}
 
 
 # --------------------------------------------------------------------------- #
 # 种子（随安装包分发的基线，设计 10 §7.3）
 # --------------------------------------------------------------------------- #
-def seed_settings_for_user(db: Session, user_id: int) -> list[SystemSetting]:
-    """给**一个用户**补种缺失的配置行（幂等：同 `(user_id, key)` 不插、**不覆盖**）。
+def seed_system_settings(db: Session) -> list[SystemSetting]:
+    """播种**系统级**配置行（设计 64 §1.4：三级化后每 key 一行全局行，不再每用户一份）。
 
-    「只补缺失、不覆盖」是升级语义的关键：用户在设置页调过的值不会被新版本重置回基线。
-
-    ⚠️ 只种**有运行时读点**的键（`LIVE_KEYS`）：种一批没有读点的行，就是在给
-    「改了没反应」制造现场（设计 10 §1 的定义）。
+    幂等：同 key 的系统级行已存在 ⇒ 跳过（**只补缺不覆盖** —— 管理员在系统管理
+    调过的值不会被新版本重置回基线，与旧 `seed_settings_for_user` 同一升级语义）。
+    只种有运行时读点的键（`LIVE_KEYS`）：种没有读点的行 = 给「改了没反应」造现场。
     """
     from backend.app.core.initial_data import load_initial_system_settings
 
     payload = {row["key"]: row for row in load_initial_system_settings()}
     existing = set(
-        db.scalars(select(SystemSetting.key).where(SystemSetting.user_id == user_id)).all()
+        db.scalars(
+            select(SystemSetting.key).where(
+                SystemSetting.user_id.is_(None), SystemSetting.workspace.is_(None)
+            )
+        ).all()
     )
     created: list[SystemSetting] = []
     for key, fallback in BUILTIN_DEFAULTS.items():
@@ -815,7 +1036,8 @@ def seed_settings_for_user(db: Session, user_id: int) -> list[SystemSetting]:
         now = shanghai_now()
         created.append(
             SystemSetting(
-                user_id=user_id,
+                user_id=None,
+                workspace=None,
                 key=key,
                 value=encode_value(coerced, kind),
                 value_type=kind,
@@ -834,32 +1056,18 @@ def seed_settings_for_user(db: Session, user_id: int) -> list[SystemSetting]:
     return created
 
 
-def ensure_settings(db: Session) -> list[SystemSetting]:
-    """为**每个已存在用户**补种（幂等；零用户库 ⇒ 零行）。"""
-    from backend.app.models.user import User
-
-    users = db.scalars(select(User).order_by(User.id.asc())).all()
-    created: list[SystemSetting] = []
-    for user in users:
-        created.extend(seed_settings_for_user(db, user.id))
-    return created
-
-
 def seed_builtin_settings_from_initial_data() -> int:
-    """应用启动时播种配置行（设计 10 §7.3）。返回新建行数。
+    """应用启动时播种**系统级**配置行（设计 64 §1.4）。返回新建行数。
 
-    **与任何开关解耦**：设置页打开就该有那批行 —— 播种挂启动，不挂某个子系统的装配
-    （与 `scheduler_service.seed_builtin_jobs_from_initial_data` 同型）。
-
-    失败只记 warning 不抛：种子坏掉是可容忍的（用户仍能在设置页手动新建），
-    但不能静默。
+    **与任何开关解耦**：设置页打开就该有那批行 —— 播种挂启动，不挂某个子系统的装配。
+    失败只记 warning 不抛：种子坏掉是可容忍的，但不能静默。
     """
     db = SessionLocal()
     try:
-        created = ensure_settings(db)
+        created = seed_system_settings(db)
         if created:
             db.commit()
-            logger.info("应用初始化数据：补种 %s 行运行时配置", len(created))
+            logger.info("应用初始化数据：补种 %s 行系统级运行时配置", len(created))
         return len(created)
     except Exception as exc:  # noqa: BLE001 - 起服务不能被子系统问题拖死
         db.rollback()

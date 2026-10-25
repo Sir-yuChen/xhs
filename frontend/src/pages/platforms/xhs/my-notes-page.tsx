@@ -104,6 +104,7 @@ import {
   renderFailure,
 } from "../../../components/platforms/note-detail-modal";
 import type { QuietError } from "../../../components/platforms/note-detail-modal";
+import { dictLabel, useDictOptions } from "../../../lib/system-dicts";
 
 const { Text, Paragraph, Link: AntLink } = Typography;
 
@@ -496,6 +497,11 @@ export function XhsMyNotesPage() {
   });
   const [interactionKind, setInteractionKind] = usePersistedFilter<XhsInteractionKind>(
     FILTER_CACHE_KEYS.myNotes.interactionKind, "like_collect", asEnum(INTERACTION_KIND_VALUES)
+  );
+  // 设计 63：互动分类选项走字典 `xhs_interaction_kind`（镜像 interactionKinds 兜底）。
+  const interactionKindOptions = useDictOptions(
+    "xhs_interaction_kind",
+    interactionKinds.map((item) => ({ value: item.value, label: item.label }))
   );
   const [interactionPanel, setInteractionPanel] = useState<PanelState<XhsInteractionMessage>>(
     emptyPanel<XhsInteractionMessage>(),
@@ -1366,7 +1372,7 @@ export function XhsMyNotesPage() {
                     description={
                       <Space size={6} wrap>
                         <Tag color="geekblue" style={{ marginInlineEnd: 0 }}>
-                          {SCOPE_LABELS[note.scope] || note.scope}
+                          {dictLabel("sys_own_content_scope", note.scope, SCOPE_LABELS) || note.scope}
                         </Tag>
                         <Text type="secondary" style={{ fontSize: 11 }}>
                           <HeartOutlined /> {formatMetric(note.likes)}
@@ -1478,7 +1484,7 @@ export function XhsMyNotesPage() {
           style={{ marginBottom: 16 }}
           value={interactionKind}
           onChange={(value) => setInteractionKind(value as XhsInteractionKind)}
-          options={interactionKinds}
+          options={interactionKindOptions}
         />
         {renderInteractions()}
       </div>

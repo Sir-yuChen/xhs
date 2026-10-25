@@ -81,8 +81,12 @@ def test_settings_crud_round_trip(api_client):
     keys = [item["key"] for item in listed["items"]]
     assert "custom_probe_value" in keys
     assert listed["total"] == len(listed["items"])
-    # 注册即播种（设计 10 §7.3）：新用户开箱就有那几个**有读点**的键
-    assert "crawl_rate_limit_per_minute" in keys, "新用户必须已播种基线配置"
+    # 设计 64 §1.4：用户级**不再预播种**（基线收敛到系统级一行）——
+    # 新用户的用户级行只有他自己建过的；基线从 effective 视图看（builtin/system 命中）。
+    assert "crawl_rate_limit_per_minute" not in keys, "用户级不再预播种（基线走系统级）"
+    effective = api_client.get("/api/settings/effective", headers=headers).json()
+    hit = next(item for item in effective["items"] if item["key"] == "crawl_rate_limit_per_minute")
+    assert hit["scope_hit"] in ("system", "builtin"), "基线必须能从 effective 视图看到"
 
     single = api_client.get("/api/settings/custom_probe_value", headers=headers)
     assert single.status_code == 200 and single.json()["value"] == 12
@@ -109,9 +113,13 @@ def test_delete_falls_back_to_the_configured_default(api_client):
     """删掉**有读点**的键 ⇒ 回落到 settings / 内置默认，并把回落值回给前端。"""
     headers = _register(api_client, "settings-fallback")
 
-    api_client.put(
-        "/api/settings/crawl_rate_limit_per_minute", json={"value": 7}, headers=headers
+    # 设计 64：用户级行按需创建（PUT 只改已有行）——先 POST 建 7 的个人覆盖再删。
+    posted = api_client.post(
+        "/api/settings",
+        json={"key": "crawl_rate_limit_per_minute", "value": 7, "value_type": "int"},
+        headers=headers,
     )
+    assert posted.status_code == 201, posted.text
     removed = api_client.delete("/api/settings/crawl_rate_limit_per_minute", headers=headers)
     assert removed.status_code == 200
     # 回落值来自 `Settings.crawl_rate_limit_per_minute`（YAML 默认 **8**，2026-09-27 基线下调）
@@ -210,12 +218,19 @@ def test_numeric_bounds_are_clamped(api_client):
         json={"key": "crawl_rate_limit_per_minute", "value": 100000, "value_type": "int"},
         headers=headers,
     )
-    assert created.status_code == 409, "注册时已播种该键 ⇒ 应走 PUT"
+    assert created.status_code == 201, created.text
+    assert created.json()["value"] == 600, "超上界必须在入库前夹到 600（防打爆平台）"
 
 
 def test_update_clamps_out_of_range_value(api_client):
-    """PUT 超上界 ⇒ 夹到上界（不是 422，也不是照单全收）。"""
+    """超上界（走已有行 PUT）⇒ 夹到上界（不是 422，也不是照单全收）。"""
     headers = _register(api_client, "settings-clamp")
+    posted = api_client.post(
+        "/api/settings",
+        json={"key": "crawl_rate_limit_per_minute", "value": 8, "value_type": "int"},
+        headers=headers,
+    )
+    assert posted.status_code == 201, posted.text
     updated = api_client.put(
         "/api/settings/crawl_rate_limit_per_minute", json={"value": 99999}, headers=headers
     )
@@ -244,9 +259,11 @@ def test_write_is_visible_immediately(api_client, db_factory):
 
     assert (
         settings_service.live_int(None, user_id, "crawl_rate_limit_per_minute", default=0) == 8
-    ), "新注册用户的额度 = 随包种子基线（2026-09-27 由 60 下调为 8，设计 13 §38.7）"
-    api_client.put(
-        "/api/settings/crawl_rate_limit_per_minute", json={"value": 7}, headers=headers
+    ), "新用户的额度 = 基线（2026-09-27 由 60 下调为 8，设计 13 §38.7）"
+    api_client.post(
+        "/api/settings",
+        json={"key": "crawl_rate_limit_per_minute", "value": 7, "value_type": "int"},
+        headers=headers,
     )
     assert (
         settings_service.live_int(None, user_id, "crawl_rate_limit_per_minute", default=0) == 7
@@ -273,7 +290,11 @@ def test_rate_limiter_reads_the_configured_quota(api_client, db_factory):
     finally:
         db.close()
 
-    api_client.put("/api/settings/crawl_rate_limit_per_minute", json={"value": 7}, headers=headers)
+    api_client.post(
+        "/api/settings",
+        json={"key": "crawl_rate_limit_per_minute", "value": 7, "value_type": "int"},
+        headers=headers,
+    )
 
     limiter = CrawlRateLimiter()  # ⚠️ 不传构造参数 —— 传了就等于把配置压住（老缺陷）
     assert limiter.quota_for(f"{account_id}:www") == 7
@@ -288,7 +309,11 @@ def test_explicit_constructor_argument_still_wins(api_client):
     from backend.app.core.rate_limiter import CrawlRateLimiter
 
     headers = _register(api_client, "settings-explicit")
-    api_client.put("/api/settings/crawl_rate_limit_per_minute", json={"value": 60}, headers=headers)
+    api_client.post(
+        "/api/settings",
+        json={"key": "crawl_rate_limit_per_minute", "value": 60, "value_type": "int"},
+        headers=headers,
+    )
     assert CrawlRateLimiter(max_per_minute=5).quota_for("1:www") == 5
     assert CrawlRateLimiter(max_per_minute=5).max_per_minute == 5
 
@@ -318,7 +343,9 @@ def test_publish_guard_switch_reads_the_configured_value(api_client, db_factory)
         "新注册用户的开关 = 随包种子基线（默认关闭）"
     )
 
-    api_client.put(f"/api/settings/{key}", json={"value": True}, headers=headers)
+    api_client.post(
+        "/api/settings", json={"key": key, "value": True, "value_type": "bool"}, headers=headers
+    )
     assert settings_service.live_bool(None, user_id, key, default=False) is True, (
         "写完必须立即生效（缓存失效），不许等 TTL"
     )
@@ -339,29 +366,22 @@ def test_publish_guard_switch_reads_the_configured_value(api_client, db_factory)
 # 4) 种子 + 白名单守卫
 # --------------------------------------------------------------------------- #
 def test_seeding_is_idempotent_and_never_overwrites(db_factory):
-    """播种只补缺失、**不覆盖**（升级不许重置用户调过的值）。"""
-    from backend.app.models import User
-
+    """系统级播种只补缺失、**不覆盖**（升级不许重置管理员调过的值，设计 64 §1.4）。"""
     db = db_factory()
     try:
-        user = User(username="seed-user", password_hash="x")
-        db.add(user)
-        db.commit()
-        user_id = user.id
-
-        created = settings_service.seed_settings_for_user(db, user_id)
+        created = settings_service.seed_system_settings(db)
         db.commit()
         assert created, "首次播种必须建行"
-        assert settings_service.seed_settings_for_user(db, user_id) == [], "第二次必须零新增"
+        assert settings_service.seed_system_settings(db) == [], "第二次必须零新增"
 
-        row = settings_service.find_setting(db, user_id, "crawl_rate_limit_per_minute")
+        row = settings_service._system_row(db, "crawl_rate_limit_per_minute")
         row.value = "7"
         db.commit()
-        settings_service.seed_settings_for_user(db, user_id)
+        settings_service.seed_system_settings(db)
         db.commit()
-        assert (
-            settings_service.find_setting(db, user_id, "crawl_rate_limit_per_minute").value == "7"
-        ), "播种不许覆盖用户改过的值"
+        assert settings_service._system_row(db, "crawl_rate_limit_per_minute").value == "7", (
+            "播种不许覆盖管理员改过的值"
+        )
     finally:
         db.close()
 
@@ -446,6 +466,16 @@ def test_live_keys_are_real_read_points():
             "backend.app.api.auth",
             "register",
         ),
+        #: 日志保留期（设计 64 §2.4）：读点在 record_cleanup 的执行循环里
+        #:（`live_int(db, None, "log_retention_days" / "job_log_retention_days", ...)`）。
+        "log_retention_days": (
+            "backend.app.services.record_cleanup_service",
+            "run_record_cleanup",
+        ),
+        "job_log_retention_days": (
+            "backend.app.services.record_cleanup_service",
+            "run_record_cleanup",
+        ),
         }
     assert set(read_points) == set(settings_service.LIVE_KEYS), (
         "LIVE_KEYS 与测试里的读点映射必须一一对应：新增读点要两边一起加"
@@ -493,7 +523,8 @@ def test_settings_view_behaviour_script(frontend_runner):
         assert "FAIL" in mutated.stdout, mutated.stdout
 
 
-SETTINGS_PAGE = ROOT / "frontend" / "src" / "pages" / "settings" / "settings-page.tsx"
+# 设计 64 §1.6：弹窗/表格逻辑抽到共享组件（三处挂载点复用），守卫跟锚到组件文件。
+SETTINGS_PAGE = ROOT / "frontend" / "src" / "components" / "settings" / "settings-table.tsx"
 
 
 def _strip_ts_noise(source: str) -> str:
@@ -571,3 +602,153 @@ def test_settings_modal_does_not_use_preserve_false():
         "`preserve={false}` 会让字段卸载时清值 —— 与「打开后灌值」的时序叠加，"
         "属于自找的复杂度。要么删掉它，要么把这里的理由写清楚再改断言。"
     )
+
+
+# --------------------------------------------------------------------------- #
+# 5) 三级配置新契约（设计 64 §1：scope 权限 / 级联优先级 / apply-to-all 退场）
+# --------------------------------------------------------------------------- #
+def _admin_headers(api_client, db_factory) -> dict[str, str]:
+    """造一个 admin 并登录（三级配置的 system/workspace 写权限只给 admin）。"""
+    from backend.app.core.security import hash_password
+    from backend.app.models import User
+
+    db = db_factory()
+    try:
+        db.add(
+            User(
+                username="settings-admin",
+                password_hash=hash_password("admin-pass-123"),
+                role="admin",
+                status="normal",
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+    response = api_client.post(
+        "/api/auth/login",
+        json={"username": "settings-admin", "password": "admin-pass-123"},
+    )
+    assert response.status_code == 200, response.text
+    return {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+
+def test_system_scope_write_is_admin_only(api_client, db_factory):
+    """系统级/工作区级写：普通用户 403（SETTING_SCOPE_FORBIDDEN），admin 放行。"""
+    headers = _register(api_client, "scope-user")
+    denied_system = api_client.post(
+        "/api/settings",
+        json={"key": "k1", "value": 1, "scope": "system"},
+        headers=headers,
+    )
+    assert denied_system.status_code == 403
+    assert denied_system.json()["detail"]["code"] == "SETTING_SCOPE_FORBIDDEN"
+    denied_ws = api_client.post(
+        "/api/settings",
+        json={"key": "k1", "value": 1, "scope": "workspace", "workspace": "xhs"},
+        headers=headers,
+    )
+    assert denied_ws.status_code == 403
+
+    admin = _admin_headers(api_client, db_factory)
+    ok_system = api_client.post(
+        "/api/settings", json={"key": "k1", "value": 1, "scope": "system"}, headers=admin
+    )
+    assert ok_system.status_code == 201, ok_system.text
+    assert ok_system.json()["scope"] == "system"
+    ok_ws = api_client.post(
+        "/api/settings",
+        json={"key": "k2", "value": 2, "scope": "workspace", "workspace": "xhs"},
+        headers=admin,
+    )
+    assert ok_ws.status_code == 201, ok_ws.text
+    assert ok_ws.json()["workspace"] == "xhs"
+    missing_ws = api_client.post(
+        "/api/settings", json={"key": "k3", "value": 3, "scope": "workspace"}, headers=admin
+    )
+    assert missing_ws.status_code == 422, "工作区级必须带 workspace"
+
+
+def test_effective_precedence_workspace_over_user_over_system(api_client, db_factory):
+    """级联优先级（设计 64 §1.3）：工作区级 > 用户级 > 系统级（最贴近人的赢）。"""
+    from backend.app.models import User
+    from sqlalchemy import select
+
+    headers = _register(api_client, "scope-prec")
+    admin = _admin_headers(api_client, db_factory)
+    db = db_factory()
+    try:
+        uid = db.scalar(select(User.id).where(User.username == "scope-prec"))
+    finally:
+        db.close()
+
+    assert api_client.post(
+        "/api/settings", json={"key": "prec_key", "value": "sys", "value_type": "str", "scope": "system"}, headers=admin
+    ).status_code == 201
+    assert api_client.post(
+        "/api/settings", json={"key": "prec_key", "value": "usr", "value_type": "str"}, headers=headers
+    ).status_code == 201
+    assert api_client.post(
+        "/api/settings",
+        json={"key": "prec_key", "value": "ws", "value_type": "str", "scope": "workspace", "workspace": "xhs"},
+        headers=admin,
+    ).status_code == 201
+
+    merged = api_client.get("/api/settings/effective?workspace=xhs", headers=headers).json()
+    hit = next(item for item in merged["items"] if item["key"] == "prec_key")
+    assert hit["value"] == "ws" and hit["scope_hit"] == "workspace"
+
+    merged_no_ws = api_client.get("/api/settings/effective", headers=headers).json()
+    hit2 = next(item for item in merged_no_ws["items"] if item["key"] == "prec_key")
+    assert hit2["value"] == "usr" and hit2["scope_hit"] == "user"
+
+    # 服务层两级读（业务热路径）：用户覆盖赢系统级（带真会话 —— db=None 会跳过 DB 层）
+    from backend.app.services.settings_service import SessionLocal
+
+    probe = SessionLocal()
+    try:
+        assert (
+            settings_service.effective_value(probe, uid, "prec_key", default=None) == "usr"
+        ), "effective_value（无 workspace）= 用户级 > 系统级"
+        assert (
+            settings_service.effective_scoped_value(probe, uid, "xhs", "prec_key", default=None) == "ws"
+        ), "effective_scoped_value = 工作区级最高"
+        # 删掉用户级行 ⇒ effective 回落系统级
+        assert api_client.delete("/api/settings/prec_key", headers=headers).status_code == 200
+        assert (
+            settings_service.effective_value(probe, uid, "prec_key", default=None) == "sys"
+        ), "删用户级覆盖必须回落到系统级（删除=恢复默认的语义跨级成立）"
+    finally:
+        probe.close()
+
+
+def test_apply_to_all_is_retired_with_410(api_client):
+    """apply-to-all 退场（设计 64 §1.5）：显式 410 墓碑，指引到系统级配置。"""
+    headers = _register(api_client, "apply-gone")
+    response = api_client.post("/api/settings/apply-to-all", json={"keys": []}, headers=headers)
+    assert response.status_code == 410, response.text
+    assert response.json()["detail"]["code"] == "SETTING_APPLY_ALL_RETIRED"
+
+
+def test_register_switch_reads_system_row_first(api_client, db_factory):
+    """`register.enabled` 全局开关：系统级行**优先于**旧管理员行（三级化后的权威写点）。"""
+    from backend.app.core.security import hash_password
+    from backend.app.models import User
+
+    admin = _admin_headers(api_client, db_factory)
+    assert api_client.post(
+        "/api/settings",
+        json={"key": "register.enabled", "value": True, "value_type": "bool", "scope": "system"},
+        headers=admin,
+    ).status_code == 201
+
+    db = db_factory()
+    try:
+        assert (
+            settings_service.live_global_bool(db, "register.enabled", default=False) is True
+        ), "系统级行必须直接生效（未登录的注册请求也要读到）"
+        assert (
+            settings_service.live_global_bool(db, "register.enabled", default=False) is True
+        ), "第二次读必须一致（幂等，无缓存副作用）"
+    finally:
+        db.close()

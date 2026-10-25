@@ -1,5 +1,5 @@
 {
-  "_comment": "应用初始化数据 · 运行时配置（设计 10 §7.3）。随安装包分发（packaging/build.ps1 组装 + SpiderXHS.spec 兜底），应用启动时据此铺设 system_settings 行。语义：只补『缺失的行』，已存在的行一律不覆盖（升级不会重置用户在设置页调过的值）。⚠️ 只列『有运行时读点』的键（settings_service.LIVE_KEYS）—— 没有读点的键放进来就是死配置，正是设计 10 §1 要消灭的东西。改配置基线改本文件，不要改迁移、也不要写死在代码里。",
+  "_comment": "应用初始化数据 · 运行时配置（设计 10 §7.3 + 设计 64 §1.4 三级化：播种目标为系统级行）。随安装包分发（packaging/build.ps1 组装 + SpiderXHS.spec 兜底），应用启动时据此铺设 system_settings 行。语义：只补『缺失的行』，已存在的行一律不覆盖（升级不会重置用户在设置页调过的值）。⚠️ 只列『有运行时读点』的键（settings_service.LIVE_KEYS）—— 没有读点的键放进来就是死配置，正是设计 10 §1 要消灭的东西。改配置基线改本文件，不要改迁移、也不要写死在代码里。",
   "version": 1,
   "system_settings": [
     {
@@ -91,6 +91,26 @@
       "description": "登录页据此决定是否显示「注册」入口；关闭时 POST /auth/register 返回 403 REGISTER_DISABLED。基线默认 false（v1.1.0 用户口径：防「默认口令 + 开放注册」同时成立）。改完立即生效。",
       "requires_restart": false,
       "is_dangerous": true
+    },
+    {
+      "key": "log_retention_days",
+      "value": 90,
+      "value_type": "int",
+      "category": "feature",
+      "label": "日志保留天数（API/业务）",
+      "description": "record_cleanup 任务清理 api_logs / business_logs 的保留天数（设计 64 §2.4）",
+      "requires_restart": false,
+      "is_dangerous": false
+    },
+    {
+      "key": "job_log_retention_days",
+      "value": 30,
+      "value_type": "int",
+      "category": "scheduler",
+      "label": "定时任务日志保留天数",
+      "description": "record_cleanup 任务清理 scheduled_job_logs 的保留天数（设计 64 §2.4）",
+      "requires_restart": false,
+      "is_dangerous": false
     }
   ]
 }

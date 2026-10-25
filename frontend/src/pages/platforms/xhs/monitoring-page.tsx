@@ -44,6 +44,7 @@ import type {
   MonitoringTargetPayload,
 } from "../../../types";
 import { WaitMask } from "../../../components/ui/wait-mask";
+import { dictLabel } from "../../../lib/system-dicts";
 
 const { Text } = Typography;
 
@@ -324,7 +325,7 @@ export function XhsMonitoringPage() {
                 </Text>
                 <div style={{ marginBottom: 12 }}>
                   <Text type="secondary" style={{ marginRight: 16 }}>
-                    类型：{targetTypeLabels[target.target_type] ?? target.target_type}
+                    类型：{dictLabel("xhs_monitor_target_type", target.target_type, targetTypeLabels) ?? target.target_type}
                   </Text>
                   <Text type="secondary" style={{ marginRight: 16 }}>
                     最近刷新：{formatTime(target.last_refreshed_at)}

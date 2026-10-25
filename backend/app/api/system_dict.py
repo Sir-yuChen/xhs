@@ -2,6 +2,7 @@
 
 | 方法 | 路径 | 权限码 |
 |---|---|---|
+| `GET`    | `/api/system/dict/options` | **无（登录即可）** —— 前端统一读出口 |
 | `GET`    | `/api/system/dict/types` | `system:dict:view` |
 | `POST`   | `/api/system/dict/types` | `system:dict:create` |
 | `PUT`    | `/api/system/dict/types/{type_id}` | `system:dict:edit` |
@@ -49,11 +50,12 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from backend.app.core.database import get_db
+from backend.app.core.deps import get_current_user
 from backend.app.core.perm_deps import require_perm
 from backend.app.core.time import shanghai_now
-from backend.app.models.dict import DictItem, DictType
+from backend.app.models.dict import LIST_CLASS_PATTERN, DictItem, DictType
 from backend.app.models.user import User
-from backend.app.schemas.system import DictItemListOut, DictTypeListOut
+from backend.app.schemas.system import DictItemListOut, DictOptionsOut, DictTypeListOut
 
 router = APIRouter(prefix="/system/dict", tags=["system"])
 
@@ -86,12 +88,10 @@ class DictItemCreate(BaseModel):
     label: str = Field(min_length=1, max_length=64)
     value: str = Field(min_length=1, max_length=64)
     sort_order: int = 0
-    #: 值域受 `ck_dict_items_list_class` 约束（default/success/warning/danger/info）。
+    #: 值域受 `ck_dict_items_list_class` 约束（设计 63 §2.3 放宽到 antd 全量预设色）。
     #: ⚠️ 默认必须是 `"default"` 而不是 `""` —— 空串不满足 CHECK，实测建项直接
     #: `IntegrityError: CHECK constraint failed: ck_dict_items_list_class`。
-    list_class: str = Field(
-        default="default", pattern="^(default|success|warning|danger|info)$"
-    )
+    list_class: str = Field(default="default", pattern=LIST_CLASS_PATTERN)
     status: str = Field(default="normal", pattern="^(normal|disabled)$")
     remark: str = Field(default="", max_length=255)
 
@@ -103,7 +103,7 @@ class DictItemUpdate(BaseModel):
     value: Optional[str] = Field(default=None, min_length=1, max_length=64)
     sort_order: Optional[int] = None
     list_class: Optional[str] = Field(
-        default=None, pattern="^(default|success|warning|danger|info)$"
+        default=None, pattern=LIST_CLASS_PATTERN
     )
     status: Optional[str] = Field(default=None, pattern="^(normal|disabled)$")
     remark: Optional[str] = Field(default=None, max_length=255)
@@ -154,6 +154,68 @@ def _get_type_or_404(db: Session, type_id: int) -> DictType:
             404, detail={"code": "DICT_TYPE_NOT_FOUND", "message": "字典类型不存在"}
         )
     return row
+
+
+# --------------------------------------------------------------------------- #
+# 统一读出口（前端所有枚举文案/下拉的唯一取数点）
+# --------------------------------------------------------------------------- #
+@router.get("/options", response_model=DictOptionsOut)
+def list_dict_options(
+    *,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    codes: Optional[str] = None,
+) -> dict:
+    """批量取字典选项 —— **前端统一出入口**（登录即可、无权限码）。
+
+    与管理端 `GET /items`（`system:dict:view`）的差异：
+    - 权限：任何登录用户可读（枚举文案是每个页面的展示依赖，不是管理能力）；
+    - 形状：只下发消费方需要的四个字段（value/label/list_class/sort_order），
+      管理字段（status/remark/type_id）不下发；
+    - 过滤：类型与项都只出 `normal`（停用组整组不出，停用项单条不出），
+      管理端要看到停用行，这里不要。
+
+    `codes`：逗号分隔的类型 code 白名单；缺省 = 全量 normal 组
+    （表就几十行，一次全取比按页散取更省往返 —— 前端统一 store 一次灌满）。
+    每次读库、无进程内缓存（设计 59 口径）—— 字典改完即生效，「实时可变」
+    的服务端侧由这一点保证。
+    """
+    wanted: Optional[set[str]] = None
+    if codes:
+        wanted = {c.strip() for c in codes.split(",") if c.strip()}
+
+    type_rows = db.scalars(
+        select(DictType).where(DictType.status == "normal").order_by(DictType.id)
+    ).all()
+    if wanted is not None:
+        type_rows = [t for t in type_rows if t.code in wanted]
+
+    items_by_type: dict[int, list[dict]] = {}
+    if type_rows:
+        item_rows = db.scalars(
+            select(DictItem)
+            .where(
+                DictItem.type_id.in_([t.id for t in type_rows]),
+                DictItem.status == "normal",
+            )
+            .order_by(DictItem.type_id, DictItem.sort_order, DictItem.id)
+        ).all()
+        for row in item_rows:
+            items_by_type.setdefault(row.type_id, []).append(
+                {
+                    "value": row.value,
+                    "label": row.label,
+                    "list_class": getattr(row, "list_class", "") or "default",
+                    "sort_order": row.sort_order,
+                }
+            )
+
+    return {
+        "items": {
+            t.code: items_by_type.get(t.id, [])
+            for t in type_rows
+        }
+    }
 
 
 # --------------------------------------------------------------------------- #

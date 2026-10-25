@@ -196,11 +196,13 @@ export function SystemRolesPanel() {
     },
   ];
 
+  // 设计 63 §6：三区布局（同用户管理）—— 表格体内部滚动，卡底不再留白/溢出。
   return (
+    <div style={{ height: "calc(100vh - 87px)", display: "flex", flexDirection: "column" }}>
     <Card
       size="small"
-      style={{ height: "100%" }}
-      styles={{ body: { height: "calc(100% - 40px)", overflow: "auto" } }}
+      style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}
+      styles={{ body: { flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" } }}
       title={`角色（共 ${rows.length}）`}
       extra={
         <Space>
@@ -215,6 +217,7 @@ export function SystemRolesPanel() {
         </Space>
       }
     >
+      <div className="fill-table">
       <Table<SystemRole>
         rowKey="id"
         size="small"
@@ -222,8 +225,9 @@ export function SystemRolesPanel() {
         columns={columns}
         dataSource={rows}
         pagination={false}
-        scroll={{ x: 1100 }}
+        scroll={{ x: 1100, y: "100%" }}
       />
+      </div>
 
       <RoleCreateModal
         open={createOpen}
@@ -250,6 +254,7 @@ export function SystemRolesPanel() {
       />
       <RoleUsersDrawer role={usersTarget} onClose={() => setUsersTarget(null)} />
     </Card>
+    </div>
   );
 }
 

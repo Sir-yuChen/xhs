@@ -65,6 +65,7 @@ import {
   type SystemRole,
   type SystemUser,
 } from "../../lib/api";
+import { dictLabel, dictListClass } from "../../lib/system-dicts";
 
 const { Text } = Typography;
 
@@ -73,6 +74,18 @@ const STATUS_META: Record<string, { text: string; color: string }> = {
   pending: { text: "待审核", color: "warning" },
   disabled: { text: "已停用", color: "default" },
 };
+
+function userStatusTexts(): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(STATUS_META).map(([key, item]) => [key, item.text])
+  );
+}
+
+function userStatusColors(): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(STATUS_META).map(([key, item]) => [key, item.color])
+  );
+}
 
 export function SystemUsersPanel() {
   const can = useCan();
@@ -195,7 +208,11 @@ export function SystemUsersPanel() {
       dataIndex: "status",
       width: 100,
       render: (v: string) => {
-        const meta = STATUS_META[v] ?? { text: v, color: "default" };
+        // 设计 63：用户状态走字典 `sys_user_status`（STATUS_META 为镜像兜底）。
+        const meta = {
+          text: dictLabel("sys_user_status", v, userStatusTexts()),
+          color: dictListClass("sys_user_status", v, userStatusColors()),
+        };
         return <Tag color={meta.color}>{meta.text}</Tag>;
       },
     },
@@ -306,11 +323,15 @@ export function SystemUsersPanel() {
     },
   ];
 
+  // 设计 63 §6（2026-10-25 用户截图「分页未固定在底部」）：三区布局 —— 卡头/筛选
+  // 固定，表格体内部滚动，分页钉在卡底（共享类 `.fill-table`，与商品台账同一套）。
+  // 旧写法整卡 `overflow:auto` ⇒ 分页随内容滚出屏外（截图里最后一行被截断同源）。
   return (
+    <div style={{ height: "calc(100vh - 87px)", display: "flex", flexDirection: "column" }}>
     <Card
       size="small"
-      style={{ height: "100%" }}
-      styles={{ body: { height: "calc(100% - 40px)", overflow: "auto" } }}
+      style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}
+      styles={{ body: { flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" } }}
       title={`用户（共 ${total}）`}
       extra={
         <Space>
@@ -373,13 +394,14 @@ export function SystemUsersPanel() {
         </Button>
       </Space>
 
+      <div className="fill-table">
       <Table<SystemUser>
         rowKey="id"
         size="small"
         loading={loading}
         columns={columns}
         dataSource={rows}
-        scroll={{ x: 1400 }}
+        scroll={{ x: 1400, y: "100%" }}
         pagination={{
           current: page,
           pageSize,
@@ -392,6 +414,7 @@ export function SystemUsersPanel() {
           },
         }}
       />
+      </div>
 
       <UserCreateModal
         open={createOpen}
@@ -433,7 +456,7 @@ export function SystemUsersPanel() {
             <Text>
               角色：{detail.role_name || detail.role}（{detail.role}）
             </Text>
-            <Text>状态：{STATUS_META[detail.status]?.text ?? detail.status}</Text>
+            <Text>状态：{dictLabel("sys_user_status", detail.status, userStatusTexts()) || detail.status}</Text>
             <Text>最后登录：{detail.last_login_at ? detail.last_login_at.replace("T", " ").slice(0, 19) : "从未登录"}</Text>
             <Text>登录 IP：{detail.last_login_ip || "-"}</Text>
             <Text>创建时间：{detail.created_at ? detail.created_at.replace("T", " ").slice(0, 19) : "-"}</Text>
@@ -441,6 +464,7 @@ export function SystemUsersPanel() {
         )}
       </Modal>
     </Card>
+    </div>
   );
 }
 

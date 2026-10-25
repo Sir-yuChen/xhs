@@ -1,3 +1,4 @@
+import { dictLabel, dictListClass } from "./system-dicts-core";
 /**
  * 内容库的三项「枚举筛选」口径 —— **纯逻辑，唯一实现**（2026-09-23）。
  *
@@ -46,8 +47,11 @@ export const NOTE_TYPE_FILTER_OPTIONS: { value: NoteTypeFilter; label: string }[
  */
 export function noteTypeLabel(noteType: string | undefined): string {
   const key = (noteType ?? "").trim();
-  const hit = NOTE_TYPE_FILTER_OPTIONS.find((option) => option.value === key && key !== "");
-  return hit ? hit.label : key;
+  if (!key) return key;
+  // 设计 63：文案走字典 `xhs_note_type_filter`（与下拉同源，镜像常量兜底）。
+  return dictLabel("xhs_note_type_filter", key, Object.fromEntries(
+    NOTE_TYPE_FILTER_OPTIONS.filter((o) => o.value !== "").map((o) => [o.value, o.label])
+  ));
 }
 
 /**
@@ -152,14 +156,16 @@ export function accountFilterLabel(account: { nickname?: string }): string {
  * * 未知 / 缺值 → 默认灰，**不编颜色**（硬约束⑤）。
  */
 export function noteTypeTagColor(noteType: string | undefined): string {
-  switch ((noteType ?? "").trim()) {
-    case "synced":
-      return "blue";
-    case "local_generated":
-      return "purple";
-    default:
-      return "default";
+  const key = (noteType ?? "").trim();
+  if (key !== "synced" && key !== "local_generated" && key !== "local") {
+    return "default"; // 未知 / 缺值 → 默认灰，不编颜色（硬约束⑤）
   }
+  // 设计 63：颜色走字典 `xhs_note_type_filter`（下面色表为镜像兜底）。
+  return dictListClass("xhs_note_type_filter", key, {
+    synced: "blue",
+    local_generated: "purple",
+    local: "default",
+  });
 }
 
 /**

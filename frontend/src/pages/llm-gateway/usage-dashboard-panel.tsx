@@ -58,6 +58,7 @@ import type {
 } from "../../types";
 
 import { WaitMask } from "../../components/ui/wait-mask";
+import { dictLabel } from "../../lib/system-dicts";
 const { Text } = Typography;
 
 // 2026-10-01 设计 17 §11.3（第二次修订）：用量看板是**大模型网关页的第一个页签**。
@@ -106,7 +107,11 @@ const DIMENSION_VALUE_LABELS: Record<string, string> = {
 };
 
 function dimLabel(key: string): string {
-  return DIMENSION_VALUE_LABELS[key] ?? (key || "未标注");
+  // 设计 63：业务功能名走字典 `sys_llm_function`（unknown/空串是**缺值呈现**，
+  // 不入字典 —— 镜像表兜底后再落「未标注」）。
+  if (key === "" || key === "unknown") return "未标注";
+  const label = dictLabel("sys_llm_function", key, DIMENSION_VALUE_LABELS);
+  return label === key ? key : label;
 }
 
 // 数字格式化：调用量 / Token 都是大数，统一千分位；Token 再压成 k/M

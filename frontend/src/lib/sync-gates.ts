@@ -15,6 +15,7 @@ import { loginChannelRows } from "./login-state";
 import { formatDuration } from "./time";
 import type { XhsSyncLastResult, XhsSyncProgress, XhsSyncTaskStatus } from "./api";
 import type { XhsLoginChannels } from "../types";
+import { dictLabel } from "./system-dicts-core";
 
 /**
  * 平台会话「确定不可用」的三种状态（v1.31，用户 2026-09-21 口径：
@@ -205,7 +206,7 @@ export function syncResultText(result: XhsSyncLastResult | null, unit: string): 
   if (result.sources && result.sources.length > 0) {
     const summary = result.sources
       .map((entry) => {
-        const name = SOURCE_LABELS[entry.source] || entry.source;
+        const name = dictLabel("sys_login_channel", entry.source, SOURCE_LABELS);
         if (entry.error) {
           return `${name}：${entry.error}`;
         }

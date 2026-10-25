@@ -123,9 +123,9 @@ def test_openapi_inventory_is_unchanged_by_the_registry():
         for method in item
         if method in {"get", "post", "put", "patch", "delete"}
     )
-    # 基线（2026-10-25 设计 62）：+1 端点 / +1 path = GET /system/menus/workspaces
-    # （工作区选择页动态卡片）⇒ 330/390 → 331/391。
-    assert (len(paths), ops) == (331, 391), (
+    # 基线（2026-10-25 设计 64）：+effective +business 日志 +schedule/overview，
+    # −apply-to-all（include_in_schema=False 的 410 墓碑）⇒ 332/392 → 334/394。
+    assert (len(paths), ops) == (334, 394), (
         "OpenAPI 集合漂移 —— routing.py 的 include 顺序/条目与基线不一致"
     )
 

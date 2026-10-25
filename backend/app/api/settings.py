@@ -22,6 +22,7 @@ from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user
 from backend.app.models import SystemSetting, User
 from backend.app.models.system_setting import VALUE_TYPES
+from backend.app.services import business_log_service
 from backend.app.services import settings_service
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,10 @@ class SettingCreateRequest(BaseModel):
     description: str = Field(default="")
     requires_restart: bool = False
     is_dangerous: bool = False
+    #: 归属级（设计 64 §1.5）：user=本人覆盖（缺省）/ system=全局（admin）/
+    #: workspace=工作区（需带 workspace）。写权限在端点内收口。
+    scope: str = Field(default="user", pattern="^(user|system|workspace)$")
+    workspace: Optional[str] = Field(default=None, max_length=32)
 
 
 class SettingUpdateRequest(BaseModel):
@@ -60,6 +65,8 @@ class SettingUpdateRequest(BaseModel):
     description: Optional[str] = None
     requires_restart: Optional[bool] = None
     is_dangerous: Optional[bool] = None
+    scope: str = Field(default="user", pattern="^(user|system|workspace)$")
+    workspace: Optional[str] = Field(default=None, max_length=32)
 
 
 def _get_owned_setting(db: Session, current_user: User, key: str) -> SystemSetting:
@@ -67,6 +74,41 @@ def _get_owned_setting(db: Session, current_user: User, key: str) -> SystemSetti
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="配置项不存在")
     return row
+
+
+def _resolve_scope(
+    current_user: User,
+    scope: str,
+    workspace: Optional[str],
+) -> tuple[str, Optional[str]]:
+    """解析并**权限收口**归属级（设计 64 §1.5）。
+
+    * `user`（缺省）：本人，任何登录用户；
+    * `system` / `workspace`：**admin 专属**（读写都是 —— 系统级是全站基线，
+      工作区级是工作区参数，首期都归管理员管理；403 `SETTING_SCOPE_FORBIDDEN`）。
+    """
+    scope = str(scope or "user").strip()
+    if scope == "user":
+        return "user", None
+    from backend.app.core.roles import ROLE_ADMIN, normalize_role
+
+    if normalize_role(current_user.role) != ROLE_ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "SETTING_SCOPE_FORBIDDEN",
+                "message": f"只有超级管理员能管理 {scope} 级配置",
+            },
+        )
+    clean_ws = str(workspace or "").strip()
+    if scope == "workspace":
+        if not clean_ws:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="工作区级配置必须带 workspace 参数",
+            )
+        return "workspace", clean_ws
+    return "system", None
 
 
 def _wake_runtime_consumers(key: str) -> None:
@@ -92,15 +134,45 @@ def _wake_runtime_consumers(key: str) -> None:
 @router.get("")
 def list_settings(
     category: Optional[str] = Query(default=None, description="按分组筛选；留空 = 全部"),
+    scope: str = Query(default="user", description="user=本人 / system=全局（admin）/ workspace=工作区（admin，需 workspace）"),
+    workspace: Optional[str] = Query(default=None, max_length=32),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """本用户的配置列表（含 `is_live` 生效性标记）。"""
-    rows = settings_service.list_settings(db, current_user.id, category=category)
+    """配置列表（设计 64 §1.5：scope 决定读哪一级）。"""
+    resolved_scope, clean_ws = _resolve_scope(current_user, scope, workspace)
+    rows = settings_service.list_scoped_settings(
+        db,
+        scope=resolved_scope,
+        user_id=current_user.id,
+        workspace=clean_ws,
+        category=category,
+    )
     return {
+        "scope": resolved_scope,
+        "workspace": clean_ws,
         "items": [settings_service.serialize_setting(row, db=db) for row in rows],
         "total": len(rows),
         "live_keys": settings_service.live_keys(),
+    }
+
+
+@router.get("/effective")
+def effective_settings(
+    workspace: Optional[str] = Query(default=None, max_length=32),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """三级级联合并视图（设计 64 §1.3）：工作区级 > 用户级 > 系统级 > 内置默认。
+
+    登录即可（每页面的展示依赖）；`scope_hit` 告诉前端"这一格生效的是哪级"。
+    ⚠️ 路由必须注册在 `/{key}` 之前，否则 `effective` 会被当成 key。
+    """
+    merged = settings_service.effective_settings_map(db, current_user.id, workspace)
+    return {
+        "workspace": workspace,
+        "items": [dict(key=key, **row) for key, row in sorted(merged.items())],
+        "total": len(merged),
     }
 
 
@@ -111,6 +183,7 @@ def create_setting(
     db: Session = Depends(get_db),
 ):
     """新增配置项。键已存在 ⇒ 409（不静默改成「更新」—— 那会让用户以为新建成功了）。"""
+    resolved_scope, clean_ws = _resolve_scope(current_user, payload.scope, payload.workspace)
     try:
         row = settings_service.create_setting(
             db,
@@ -123,6 +196,8 @@ def create_setting(
             description=payload.description,
             requires_restart=payload.requires_restart,
             is_dangerous=payload.is_dangerous,
+            scope=resolved_scope,
+            workspace=clean_ws,
         )
     except ValueError as exc:
         message = str(exc)
@@ -134,17 +209,35 @@ def create_setting(
     db.commit()
     db.refresh(row)
     _wake_runtime_consumers(row.key)
+    business_log_service.record(
+        "settings.create",
+        action="create",
+        actor_id=current_user.id,
+        actor_name=current_user.username,
+        target_type="setting",
+        target_id=row.key,
+        summary=f"新增{resolved_scope}级配置 {row.key} = {row.value}",
+        detail={"scope": resolved_scope, "workspace": clean_ws, "value_type": row.value_type},
+        db=db,
+    )
     return settings_service.serialize_setting(row, db=db)
 
 
 @router.get("/{key}")
 def get_setting(
     key: str,
+    scope: str = Query(default="user"),
+    workspace: Optional[str] = Query(default=None, max_length=32),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """单条配置（别人的键 ⇒ 404）。"""
-    row = _get_owned_setting(db, current_user, key)
+    """单条配置（设计 64：scope 决定读哪级；越级/别人的键 ⇒ 404）。"""
+    resolved_scope, clean_ws = _resolve_scope(current_user, scope, workspace)
+    row = settings_service.find_scoped(
+        db, scope=resolved_scope, key=key, user_id=current_user.id, workspace=clean_ws
+    )
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="配置项不存在")
     return settings_service.serialize_setting(row, db=db)
 
 
@@ -160,7 +253,12 @@ def update_setting(
     `value` 用「是否显式出现在请求体里」判定要不要改 —— 只改 `label` 时不许把值冲成
     `None`（`None` 是合法配置值，不能拿它当「没传」）。
     """
-    row = _get_owned_setting(db, current_user, key)
+    resolved_scope, clean_ws = _resolve_scope(current_user, payload.scope, payload.workspace)
+    row = settings_service.find_scoped(
+        db, scope=resolved_scope, key=key, user_id=current_user.id, workspace=clean_ws
+    )
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="配置项不存在")
     fields = payload.model_dump(exclude_unset=True)
     try:
         settings_service.update_setting(
@@ -182,23 +280,53 @@ def update_setting(
     db.commit()
     db.refresh(row)
     _wake_runtime_consumers(row.key)
+    business_log_service.record(
+        "settings.update",
+        action="update",
+        actor_id=current_user.id,
+        actor_name=current_user.username,
+        target_type="setting",
+        target_id=row.key,
+        summary=f"修改{resolved_scope}级配置 {row.key} = {row.value}",
+        detail={"scope": resolved_scope, "workspace": clean_ws},
+        db=db,
+    )
     return settings_service.serialize_setting(row, db=db)
 
 
 @router.delete("/{key}")
 def delete_setting(
     key: str,
+    payload: SettingUpdateRequest | None = None,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """删除配置行 ⇒ 该键**回落到默认**（settings / 内置兜底）。
+    """删除配置行 ⇒ 该键**回落到下一级默认**（设计 64：工作区删→回落用户/系统级）。
 
     响应带 `effective_value`：删除的语义是「恢复默认」，用户必须看得见恢复成了什么。
     """
-    row = _get_owned_setting(db, current_user, key)
+    scope_in = (payload.scope if payload is not None else "user") or "user"
+    ws_in = payload.workspace if payload is not None else None
+    resolved_scope, clean_ws = _resolve_scope(current_user, scope_in, ws_in)
+    row = settings_service.find_scoped(
+        db, scope=resolved_scope, key=key, user_id=current_user.id, workspace=clean_ws
+    )
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="配置项不存在")
     outcome = settings_service.delete_setting(db, row)
     db.commit()
     _wake_runtime_consumers(outcome["key"])
+    business_log_service.record(
+        "settings.delete",
+        action="delete",
+        actor_id=current_user.id,
+        actor_name=current_user.username,
+        target_type="setting",
+        target_id=key,
+        summary=f"删除{resolved_scope}级配置 {key}（回落 {outcome.get('effective_value')}）",
+        detail={"scope": resolved_scope, "workspace": clean_ws},
+        db=db,
+    )
     return {
         "key": outcome["key"],
         "status": "deleted",
@@ -207,125 +335,16 @@ def delete_setting(
     }
 
 # --------------------------------------------------------------------------- #
-# 应用到所有用户（设计 48 §M8 定稿方案）
+# apply-to-all 退场（设计 64 §1.5）：系统级配置取代「复制给所有人」的补丁语义 ——
+# 管理员在系统管理改一次系统级行即全站生效，不需要把 26 份副本互相覆盖。
+# 显式 410 墓碑（不静默 404）：旧前端还在调用时能看到明确的迁移指引。
 # --------------------------------------------------------------------------- #
-class ApplyToAllRequest(BaseModel):
-    """把当前用户的某个键值复制到**所有用户**。"""
-
-    model_config = ConfigDict(extra="forbid")
-
-    keys: list[str] = Field(default_factory=list, max_length=64)
-
-
-@router.post("/apply-to-all")
-def apply_to_all(
-    payload: ApplyToAllRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-) -> dict:
-    """把当前用户名下的配置值复制给所有用户（**仅 admin**）。
-
-    ## 为什么是「复制一份行」而不是「加一个 scope 列」
-
-    `system_settings` 的归属已经由 `user_id NOT NULL` 表达；再加 `scope` 会产生
-    `scope='global'` 且 `user_id` 有值这种自相矛盾的行（设计 48 §M8 的三条判据）。
-    全站基线用**随包种子**（`config/initial_data/system_settings.json`）表达，
-    而「一键把这个值推广给所有人」是一次**显式**的管理动作 —— 落成每用户一行，
-    语义清楚且有审计痕迹（哪一行是谁改的、什么时候改的）。
-
-    ## 为什么不做「清掉别人的行」
-
-    只**覆盖**已存在的键、**补建**缺失的行，不删除任何人的其他配置
-    —— 管理员的职责是「统一这个值」，不是「清空别人的配置」。
-
-    ## 与「种子只补缺不覆盖」的区别
-
-    种子纪律管的是**升级**（用户改过的不能被系统悄悄打回）；
-    这里是**管理员主动点按钮**，明确要求覆盖。两者不冲突：
-    一个是系统行为（保守），一个是人的决策（显式）。
-    """
-    from backend.app.core.roles import ROLE_ADMIN, normalize_role
-    from backend.app.models import SystemSetting
-    from sqlalchemy import select
-
-    if normalize_role(current_user.role) != ROLE_ADMIN:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={
-                "code": "SETTING_APPLY_ALL_FORBIDDEN",
-                "message": "只有超级管理员能把配置应用到所有用户",
-            },
-        )
-
-    #: 取当前用户在这些键上的**有效行**（没有行就用内置默认 —— 那样推广的
-    #: 是「我实际生效的值」，而不是「我没有配」）
-    updated = created = 0
-    details: list[dict[str, Any]] = []
-
-    for key in payload.keys:
-        source = db.execute(
-            select(SystemSetting).where(
-                SystemSetting.user_id == current_user.id, SystemSetting.key == key
-            )
-        ).scalar_one_or_none()
-        value = (
-            source.value
-            if source is not None
-            else settings_service.effective_value(db, current_user.id, key)
-        )
-
-        users = db.execute(select(User.id).where(User.deleted_at.is_(None))).scalars().all()
-        per_key_updated = per_key_created = 0
-        for uid in users:
-            if uid == current_user.id:
-                continue
-            row = db.execute(
-                select(SystemSetting).where(
-                    SystemSetting.user_id == uid, SystemSetting.key == key
-                )
-            ).scalar_one_or_none()
-            if row is None:
-                if source is not None:
-                    db.add(
-                        SystemSetting(
-                            user_id=uid,
-                            key=key,
-                            value=value,
-                            value_type=source.value_type,
-                            category=source.category,
-                            label=source.label,
-                            description=source.description,
-                            requires_restart=source.requires_restart,
-                            is_dangerous=source.is_dangerous,
-                        )
-                    )
-                    per_key_created += 1
-                #: 源也没有行 ⇒ 推广的是「内置默认」，那种情况**不必建行**
-                #: （不建 = 该用户自然读到同一个默认值，少一堆等价行）
-            else:
-                row.value = value
-                if source is not None:
-                    row.value_type = source.value_type
-                per_key_updated += 1
-
-        updated += per_key_updated
-        created += per_key_created
-        details.append(
-            {
-                "key": key,
-                "value": value,
-                "updated": per_key_updated,
-                "created": per_key_created,
-            }
-        )
-
-    db.commit()
-    settings_service.invalidate()
-    return {
-        "ok": True,
-        "updated": updated,
-        "created": created,
-        "details": details,
-        "note": "只覆盖 / 补建指定键，不动其他配置，也不删除任何行",
-    }
-
+@router.post("/apply-to-all", include_in_schema=False)
+def apply_to_all_gone() -> dict:
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail={
+            "code": "SETTING_APPLY_ALL_RETIRED",
+            "message": "「应用到所有用户」已退场：请改在系统管理 → 配置管理维护系统级配置（对全站直接生效）",
+        },
+    )

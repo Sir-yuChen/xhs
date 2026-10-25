@@ -26,6 +26,15 @@ from backend.app.startup import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: 统一日志格式（设计 64 §2.1）：root + uvicorn 家族 handler 全部对齐
+#: `%(asctime)s [%(levelname)s] [%(name)s] %(message)s`。放在**模块加载时**（不在
+#: lifespan —— 格式与库无关，且早于一切业务日志输出）。幂等：重复调用不叠 handler。
+from backend.app.core.logfmt import configure_root_logger as _configure_root_logger  # noqa: E402
+
+_configure_root_logger()
+
+
 def _data_dir_for_lease(settings) -> Path:
     """租约文件所在目录（单副本调度锁，`core/singleton.py`）。
 

@@ -809,6 +809,17 @@ def enqueue_item(
         # 批次行刚多了一个子行 ⇒ 它的派生状态 / 进度跟着变（写回是冗余不是真相源，
         # 但让并发的列表读取看到一致值）
         refresh_batch_status(db, parent)
+    # 设计 64 §2.3：入队成功埋点（与业务同事务 —— 回滚则日志也回滚，不产生幽灵记录）。
+    _biz_record(
+        "queue.enqueued",
+        action="create",
+        actor_id=user_id,
+        target_type="task",
+        target_id=row.id,
+        summary=f"入队 {item_task_type}（{item_name or note_title or note_pk or ref or '-'}）",
+        detail={"source": source, "batch": (getattr(batch, "batch_no", None) or getattr(getattr(batch, "row", None), "batch_no", None))},
+        db=db,
+    )
     return row, True
 
 
@@ -933,6 +944,39 @@ def finish_item(
     # 别处的读取方（任务中心 / 导出）看到 —— 冗余写回就是为了不出现这种假象。
     _refresh_parent_batch(db, item)
     db.commit()
+    # 设计 64 §2.3：终态埋点（done / failed；cancelled 走取消端点有自己的收口）。
+    # ⚠️ `db=None`（自开短会话立即提交）：这里业务事务**已经 commit 完**，再挂到
+    #    老会话上只会 flush 出一条没人提交的孤儿行。
+    _biz_record(
+        "queue.finished" if ok else "queue.failed",
+        action="update",
+        actor_id=item.user_id,
+        target_type="task",
+        target_id=item.id,
+        summary=(
+            f"队列项{('成功' if ok else '失败')}：{item.task_type}"
+            f"{('（' + str(reason or code or '') + '）') if not ok and (reason or code) else ''}"
+        ),
+        detail={"task_type": item.task_type, "reason": reason, "code": code},
+        level="info" if ok else "warning",
+        db=None,
+    )
+
+
+def _biz_record(*args, **kwargs) -> None:
+    """业务日志便捷转发（设计 64 §2.3）。
+
+    为什么包一层：`business_log_service` 会在函数内 `import note_queue_service`
+    的若干符号吗？不会 —— 但它自开 Session 的路径与队列 worker 的会话生命周期
+    交叉时，这层延迟 import 保证**队列模块先可加载**（循环依赖防火墙，与
+    `rate_limiter.QUOTA_PROVIDER` 的注册式注入同型）。
+    """
+    try:
+        from backend.app.services import business_log_service
+
+        business_log_service.record(*args, **kwargs)
+    except Exception:  # noqa: BLE001 - 埋点失败绝不打断队列
+        pass
 
 
 def _refresh_parent_batch(db: Session, item: Task) -> None:

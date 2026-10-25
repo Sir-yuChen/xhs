@@ -28,6 +28,8 @@ import { SystemDictPanel } from "./system-dict-panel";
 import { SystemLogsPanel } from "./system-logs-panel";
 import { SystemMenusPanel } from "./system-menus-panel";
 import { SystemRolesPanel } from "./system-roles-panel";
+import { SystemSchedulerPanel } from "./system-scheduler-panel";
+import { SystemSettingsPanel } from "./system-settings-panel";
 import { SystemUsersPanel } from "./system-users-panel";
 
 const { Text } = Typography;
@@ -38,10 +40,13 @@ const PAGES = [
   { path: "/system/roles", perm: "system:role:view", render: () => <SystemRolesPanel /> },
   { path: "/system/menus", perm: "system:menu:view", render: () => <SystemMenusPanel /> },
   { path: "/system/dicts", perm: "system:dict:view", render: () => <SystemDictPanel /> },
-  //: 「配置管理」**复用现有的设置页**（`/settings`，已有 9 个 LIVE_KEYS 与
-  //: 「应用到所有用户」），不在系统管理里重做一套 ⇒ 直接重定向过去。
-  { path: "/system/settings", perm: "system:setting:view", render: () => <Navigate to="/settings" replace /> },
+  //: 设计 64 §1.6（2026-10-25 三级化）：配置管理**不再重定向** `/settings` ——
+  //: 系统级配置有了自己的归属（admin 维护全站基线；`/settings` 保留为用户级页面形态）。
+  { path: "/system/settings", perm: "system:setting:view", render: () => <SystemSettingsPanel /> },
   { path: "/system/logs", perm: "system:log:view", render: () => <SystemLogsPanel /> },
+  //: 定时任务总览（设计 64 §3.3）：数据端点 admin 专属 —— 普通用户进页面看到
+  //: 403 的安静说明（与系统域其它页同款"壳可见、数据按权限"模式）。
+  { path: "/system/scheduler", perm: "system:scheduler:view", render: () => <SystemSchedulerPanel /> },
 ] as const;
 
 export function SystemPage() {

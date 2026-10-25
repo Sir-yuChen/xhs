@@ -45,6 +45,7 @@ import {
 import type { PromptModule, PromptTemplate } from "../../../types";
 
 import { WaitMask } from "../../../components/ui/wait-mask";
+import { dictLabel } from "../../../lib/system-dicts";
 const { Text, Paragraph } = Typography;
 const { TextArea } = Input;
 
@@ -262,7 +263,7 @@ export function PromptTemplatePanel() {
       dataIndex: "task_type",
       width: 140,
       render: (value: string) => (
-        <Tag color="blue">{TASK_TYPE_LABELS[value] || value || "-"}</Tag>
+        <Tag color="blue">{dictLabel("sys_prompt_task_type", value, TASK_TYPE_LABELS) || "-"}</Tag>
       ),
     },
     {

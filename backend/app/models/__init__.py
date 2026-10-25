@@ -59,6 +59,7 @@ from backend.app.models.publish import PublishAsset, PublishJob
 from backend.app.models.scheduled_job import ScheduledJob, ScheduledJobLog
 from backend.app.models.shop import NoteGoods, ShopNoteGoods
 from backend.app.models.shop_product import ShopProduct
+from backend.app.models.business_log import BusinessLog
 from backend.app.models.system_setting import SystemSetting
 from backend.app.models.task import Task
 from backend.app.models.user import User
@@ -121,6 +122,7 @@ __all__ = [
     "ScheduledJobLog",
     "ShopNoteGoods",
     "ShopProduct",
+    "BusinessLog",
     "SystemSetting",
     "Task",
     "Topic",

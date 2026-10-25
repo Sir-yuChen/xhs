@@ -68,6 +68,7 @@ import {
   readError,
   renderFailure,
 } from "../../../components/platforms/note-detail-modal";
+import { dictLabel, dictListClass } from "../../../lib/system-dicts";
 
 const { Text, Paragraph } = Typography;
 
@@ -109,6 +110,12 @@ const CATEGORY_LABELS: Record<"goods" | "normal", string> = {
   goods: "商业笔记",
   normal: "普通笔记",
 };
+
+/** 分类中文名（设计 63：字典 `xhs_datacenter_category` 赢，上表镜像兜底）。 */
+function dcCategoryLabel(category: string): string {
+  return dictLabel("xhs_datacenter_category", category, CATEGORY_LABELS);
+}
+
 
 // 2026-10-12：清理候选完全由「指标区间」决定，不再传固定无流量阈值（三项 max=0）。
 // 全 null = 不参与判定，候选 = 指标区间（含分类/关键词）筛选结果。
@@ -160,6 +167,20 @@ const CLEANUP_RESULT_LABEL: Record<string, { text: string; color: string }> = {
   not_in_pool: { text: "不在候选池", color: "default" },
   not_attempted: { text: "未执行", color: "default" },
 };
+
+/** 清理结果标签（设计 63：字典 `xhs_cleanup_result` 赢，CLEANUP_RESULT_LABEL 兜底）。 */
+function cleanupResultTag(result: string): { text: string; color: string } {
+  const fallback = CLEANUP_RESULT_LABEL[result];
+  return {
+    text: dictLabel("xhs_cleanup_result", result, Object.fromEntries(
+      Object.entries(CLEANUP_RESULT_LABEL).map(([key, item]) => [key, item.text])
+    )),
+    color: dictListClass("xhs_cleanup_result", result, Object.fromEntries(
+      Object.entries(CLEANUP_RESULT_LABEL).map(([key, item]) => [key, item.color])
+    )),
+  };
+}
+
 
 function fmtMetric(value: number | null | undefined): string {
   const v = num(value);
@@ -1245,7 +1266,7 @@ export function XhsDatacenterPage() {
       <Modal
         centered
         open={importOpen}
-        title={`导入${CATEGORY_LABELS[importCategory]}数据`}
+        title={`导入${dcCategoryLabel(importCategory)}数据`}
         onCancel={() => setImportOpen(false)}
         onOk={() => void handleImport()}
         confirmLoading={importUploading}
@@ -1269,7 +1290,7 @@ export function XhsDatacenterPage() {
       <Modal
         centered
         open={syncOpen}
-        title={`同步${CATEGORY_LABELS[syncCategory]}数据`}
+        title={`同步${dcCategoryLabel(syncCategory)}数据`}
         onCancel={() => setSyncOpen(false)}
         onOk={() => void handleSync()}
         confirmLoading={syncingCategory === syncCategory}
@@ -1472,8 +1493,8 @@ export function XhsDatacenterPage() {
                     dataIndex: "result",
                     width: 100,
                     render: (v: string) => (
-                      <Tag color={CLEANUP_RESULT_LABEL[v]?.color ?? "default"}>
-                        {CLEANUP_RESULT_LABEL[v]?.text ?? v}
+                      <Tag color={cleanupResultTag(v)?.color ?? "default"}>
+                        {cleanupResultTag(v)?.text ?? v}
                       </Tag>
                     ),
                   },

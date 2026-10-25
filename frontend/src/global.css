@@ -346,24 +346,29 @@ body {
   flex: 0 0 320px;
 }
 
-/* ===== 商品列表 · 台账三区布局（搜索固定 / 表体滚动 / 统计+分页固定） ===== */
+/* ===== 表格三区布局 · 共享类（筛选固定 / 表体滚动 / 分页钉底） ===== */
 /*
- * 2026-10-11 用户口径：「搜索条件距顶部 10px；搜索区域固定；商品台账顶部按钮与底部
- * 分页和统计数据固定不动，只有列表内的数据支持表格列滚动」。
- *
- * 页面结构（`.shop-items-table` 是页面里那层 `flex:1; minHeight:0` 的 div）：
- *   .shop-items-table          → 纵向 flex 列
+ * 2026-10-25 抽公共类（设计 63 §6）：`.shop-items-table`（2026-10-11）与
+ * `.violation-table`（2026-10-18）是同一套高度链的逐字拷贝，系统管理五面板
+ * （users / roles / menus / dicts / logs）接入后已到第 7 份 ⇒ 按 DEF-044
+ * 收口为共享类 **`.fill-table`**；旧类名保留为别名，存量页面零改动。
+ * 页面结构（`.fill-table` 是页面里那层 `flex:1; minHeight:0` 的 div）：
+ *   .fill-table                → 纵向 flex 列
  *     .ant-spin                → flex:1  ⚠️ antd 6 的 Spin 包裹层就叫 `.ant-spin`
  *       .ant-spin-container    → flex:1  （5.x 是 `.ant-spin-nested-loading`，写错=高度链断）
  *         .ant-table-wrapper   → flex:1 纵向列（`rootClassName` 落在这层，不是 `.ant-table`）
- *           .ant-table        → flex:1（表头 + 表体滚动区）
- *           .ant-pagination   → flexShrink:0 ⇒ 钉在卡底
+ *           .ant-table         → flex:1（表头 + 表体滚动区）
+ *           .ant-pagination    → flexShrink:0 ⇒ 钉在卡底
  *
  * ⚠️ 关键：这些中间层 antd 默认 `height:auto`（且 Spin 是 `display:block`）⇒ 里层按
- *    **内容高度**撑开，把统计与分页顶出固定高度之外（表现就是「底部分页没有」）。必须
+ *    **内容高度**撑开，把分页顶出固定高度之外（表现就是「底部分页没有」）。必须
  *    逐层拉成撑满的 flex 项（与图片空间 `.ps-scroll-host` 同一套做法）。
+ * 页面根高度统一 `calc(100vh - 87px)`（= 视口 - 顶栏 48 - Content 上下内边距 15+24，
+ * 与 workspace-shell `<Content>` 的 padding 一字对齐）。
  */
-.shop-items-table {
+.shop-items-table,
+.violation-table,
+.fill-table {
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
@@ -371,18 +376,26 @@ body {
 }
 
 .shop-items-table .ant-spin,
-.shop-items-table .ant-spin-container {
+.violation-table .ant-spin,
+.fill-table .ant-spin,
+.shop-items-table .ant-spin-container,
+.violation-table .ant-spin-container,
+.fill-table .ant-spin-container {
   flex: 1 1 auto;
   min-height: 0;
   height: 100%;
 }
 
-.shop-items-table .ant-spin-container {
+.shop-items-table .ant-spin-container,
+.violation-table .ant-spin-container,
+.fill-table .ant-spin-container {
   display: flex;
   flex-direction: column;
 }
 
-.shop-items-table .ant-table-wrapper {
+.shop-items-table .ant-table-wrapper,
+.violation-table .ant-table-wrapper,
+.fill-table .ant-table-wrapper {
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
@@ -393,94 +406,40 @@ body {
    由此拿到实际高度 ⇒ 行多时在**表格体内部**滚，行少时不留空。
    ⚠️ 链条是 `spin-container > .ant-table > .ant-table-container > (header + body)`，
       每一层都得是撑满的 flex 项（只对 `> .ant-table` 写规则会被中间层吃掉）。 */
-.shop-items-table .ant-spin-container > .ant-table {
+.shop-items-table .ant-spin-container > .ant-table,
+.violation-table .ant-spin-container > .ant-table,
+.fill-table .ant-spin-container > .ant-table {
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
   flex-direction: column;
 }
 
-.shop-items-table .ant-table-container {
+.shop-items-table .ant-table-container,
+.violation-table .ant-table-container,
+.fill-table .ant-table-container {
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
   flex-direction: column;
 }
 
-.shop-items-table .ant-table-header {
+.shop-items-table .ant-table-header,
+.violation-table .ant-table-header,
+.fill-table .ant-table-header {
   flex: 0 0 auto; /* 表头固定，不参与表体高度分配 */
 }
 
-.shop-items-table .ant-table-body {
+.shop-items-table .ant-table-body,
+.violation-table .ant-table-body,
+.fill-table .ant-table-body {
   flex: 1 1 auto;
   min-height: 0;
 }
 
-.shop-items-table .ant-pagination {
-  flex: 0 0 auto;
-  margin-bottom: 0;
-}
-
-/* ===== 违规管理 · 表格三区布局（筛选固定 / 表体滚动 / 分页固定） ===== */
-/*
- * 设计 43（2026-10-18）。与上面 `.shop-items-table` **同一套高度链**，只是类名不同
- * ——照抄而非重写，避免两套布局实现漂移（先例：`.ps-scroll-host` / `.shop-items-table`
- * 已经是同一规则的第二、三份拷贝，本页是第四份；若再出现第五处就该抽公共类）。
- *
- * 链条：`.violation-table`（页面里的 `flex:1` div）
- *   → `.ant-spin` → `.ant-spin-container` → `.ant-table-wrapper`（`rootClassName` 落这层）
- *   → `.ant-table` → `.ant-table-container` → (header + body)
- */
-.violation-table {
-  flex: 1 1 auto;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.violation-table .ant-spin,
-.violation-table .ant-spin-container {
-  flex: 1 1 auto;
-  min-height: 0;
-  height: 100%;
-}
-
-.violation-table .ant-spin-container {
-  display: flex;
-  flex-direction: column;
-}
-
-.violation-table .ant-table-wrapper {
-  flex: 1 1 auto;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.violation-table .ant-spin-container > .ant-table {
-  flex: 1 1 auto;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.violation-table .ant-table-container {
-  flex: 1 1 auto;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.violation-table .ant-table-header {
-  flex: 0 0 auto;
-}
-
-.violation-table .ant-table-body {
-  flex: 1 1 auto;
-  min-height: 0;
-}
-
-.violation-table .ant-pagination {
+.shop-items-table .ant-pagination,
+.violation-table .ant-pagination,
+.fill-table .ant-pagination {
   flex: 0 0 auto;
   margin-bottom: 0;
 }
@@ -504,7 +463,40 @@ body {
   white-space: nowrap;
 }
 
+/* ===== Tabs 撑满（日志查看页双 Tab；设计 63 §6 同日追加） ===== */
+/*
+ * 链条：`.fill-tabs`（Tabs 根，位于撑满的 Card body 里）
+ *   → `.ant-tabs-nav`        固定（Tab 头）
+ *   → `.ant-tabs-content-holder` flex:1（antd 默认 height:auto ⇒ 必须拉撑）
+ *     → `.ant-tabs-content` / `.ant-tabs-tabpane`  height:100%
+ *       ⇒ Tab 内容（面板根 div）拿到确定高度，内部再走 `.fill-table` 三区布局。
+ */
+.fill-tabs {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
 
+.fill-tabs > .ant-tabs-nav {
+  flex: 0 0 auto;
+}
+
+.fill-tabs .ant-tabs-content-holder {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.fill-tabs .ant-tabs-content,
+.fill-tabs .ant-tabs-tabpane {
+  height: 100%;
+}
+
+.fill-tabs .ant-tabs-tabpane-active {
+  display: flex;
+  flex-direction: column;
+}
 
 /**
  * ⚠️ **不要用 `Spin` 自己画遮罩**（用户口径 2026-10-20「存在双层等待蒙版」）。

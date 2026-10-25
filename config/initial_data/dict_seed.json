@@ -1,5 +1,5 @@
 {
-  "_comment": "字典种子（设计 47 §6 的 12 组）。**字典是镜像，不是权威**：sys_task_status / sys_job_status / sys_job_log_status / sys_publish_status / sys_note_form / sys_notify_level / sys_notify_source 的取值必须与对应 Python 常量逐个一致（守卫 test_dict_mirrors_python_constants）；sys_user_status / sys_role_status / sys_menu_type 是本轮新建的枚举，字典即权威。播种语义：按 code 判重 —— 已存在的类型与项一律不覆盖（用户改过的 label / list_class 不被升级打回）。改基线改本文件，不要改迁移。",
+  "_comment": "字典种子（设计 47 §6 的 12 组 + 设计 63 扩到 42 组：业务前端枚举全量字典化 + 统一读出口 GET /api/system/dict/options）。**字典是镜像，不是权威**：有 Python 常量的组（sys_task_status / sys_job_status / sys_job_log_status / sys_publish_status / sys_note_form / sys_notify_level / sys_notify_source / sys_trigger_type / sys_misfire_policy / sys_concurrent_mode / sys_queue_source / sys_prompt_task_type / xhs_item_status / xhs_order_status / xhs_note_count_op / sys_regenerate_scope）取值必须与常量逐个一致（守卫 test_dict_seed_mirrors_python_constants）；纯前端呈现域（sys_task_type / sys_publish_task_status / sys_login_state_view / xhs_account_status 等）由前端 vitest 钉镜像。播种语义：按 code 判重 —— 已存在的类型与项一律不覆盖（用户改过的 label / list_class 不被升级打回）。改基线改本文件，不要改迁移。",
   "version": 1,
   "types": [
     {
@@ -124,6 +124,391 @@
         { "value": "llm_gateway_alert", "label": "大模型网关预警", "list_class": "warning" },
         { "value": "note_data_sync", "label": "笔记数据同步", "list_class": "info" },
         { "value": "note_data_import", "label": "笔记数据导入", "list_class": "info" }
+      ]
+    },
+    {
+      "code": "sys_trigger_type",
+      "name": "定时任务触发类型",
+      "remark": "",
+      "items": [
+        { "value": "manual", "label": "手动执行", "list_class": "default" },
+        { "value": "cron", "label": "Cron 周期", "list_class": "default" },
+        { "value": "at", "label": "定时一次", "list_class": "default" }
+      ]
+    },
+    {
+      "code": "sys_misfire_policy",
+      "name": "错过执行策略",
+      "remark": "",
+      "items": [
+        { "value": "fire_now", "label": "立即执行", "list_class": "default" },
+        { "value": "once", "label": "执行一次", "list_class": "default" },
+        { "value": "discard", "label": "放弃执行", "list_class": "default" }
+      ]
+    },
+    {
+      "code": "sys_concurrent_mode",
+      "name": "并发策略",
+      "remark": "",
+      "items": [
+        { "value": "forbid", "label": "禁止并发", "list_class": "default" },
+        { "value": "allow", "label": "允许并发", "list_class": "default" }
+      ]
+    },
+    {
+      "code": "sys_job_log_trigger",
+      "name": "任务日志触发方式",
+      "remark": "",
+      "items": [
+        { "value": "scheduled", "label": "调度触发", "list_class": "default" },
+        { "value": "manual", "label": "手动执行", "list_class": "default" }
+      ]
+    },
+    {
+      "code": "sys_task_type",
+      "name": "任务类型",
+      "remark": "镜像 frontend lib/task-records.ts TASK_TYPE_LABELS（vitest 钉键集合）",
+      "items": [
+        { "value": "xhs_note_sync_item", "label": "同步笔记", "list_class": "default" },
+        { "value": "xhs_note_publish_item", "label": "发布笔记", "list_class": "default" },
+        { "value": "xhs_note_gen_item", "label": "生成商品笔记", "list_class": "default" },
+        { "value": "xhs_note_sync_batch", "label": "同步批次", "list_class": "default" },
+        { "value": "xhs_note_publish_batch", "label": "发布批次", "list_class": "default" },
+        { "value": "xhs_note_gen_batch", "label": "生成批次", "list_class": "default" },
+        { "value": "xhs_note_gen_llm_batch", "label": "LLM 生成批次", "list_class": "default" },
+        { "value": "xhs_goods_sync_item", "label": "同步商品信息", "list_class": "default" },
+        { "value": "xhs_goods_sync_batch", "label": "同步商品信息批次", "list_class": "default" },
+        { "value": "xhs_note_sync", "label": "账号全量同步", "list_class": "default" },
+        { "value": "xhs_shop_goods_sync", "label": "店铺商品同步", "list_class": "default" },
+        { "value": "crawl", "label": "数据抓取", "list_class": "default" },
+        { "value": "monitoring_crawl", "label": "监控抓取", "list_class": "default" },
+        { "value": "monitoring_refresh", "label": "监控刷新", "list_class": "default" },
+        { "value": "xhs_no_traffic_cleanup", "label": "零流量清理", "list_class": "default" },
+        { "value": "creator_publish", "label": "创作者发布", "list_class": "default" },
+        { "value": "creator_publish_scheduler", "label": "定时发布", "list_class": "default" },
+        { "value": "ai_generate_note", "label": "AI 生成笔记", "list_class": "default" },
+        { "value": "ai_generate_tags", "label": "AI 生成标签", "list_class": "default" },
+        { "value": "ai_generate_title", "label": "AI 生成标题", "list_class": "default" },
+        { "value": "ai_polish_text", "label": "AI 润色正文", "list_class": "default" },
+        { "value": "ai_rewrite", "label": "AI 改写", "list_class": "default" },
+        { "value": "ai_image_describe", "label": "AI 图片描述", "list_class": "default" },
+        { "value": "ai_image_generate", "label": "AI 生成图片", "list_class": "default" },
+        { "value": "ai_image_generate_cover", "label": "AI 生成封面", "list_class": "default" }
+      ]
+    },
+    {
+      "code": "sys_queue_source",
+      "name": "任务来源",
+      "remark": "镜像 note_queue_service.QUEUE_SOURCES（pytest 镜像守卫钉）",
+      "items": [
+        { "value": "note_sync_single", "label": "内容库-同步按钮", "list_class": "default" },
+        { "value": "note_sync_batch", "label": "内容库-批量同步按钮", "list_class": "default" },
+        { "value": "note_publish_single", "label": "内容库-发布按钮", "list_class": "default" },
+        { "value": "note_publish_batch", "label": "内容库-批量发布按钮", "list_class": "default" },
+        { "value": "product_note_generate_single", "label": "商品列表-生成笔记按钮", "list_class": "default" },
+        { "value": "product_note_generate_batch", "label": "商品列表-批量生成笔记按钮", "list_class": "default" },
+        { "value": "product_note_generate_llm_single", "label": "商品列表-LLM生成笔记按钮", "list_class": "default" },
+        { "value": "product_note_generate_llm_batch", "label": "商品列表-批量LLM生成笔记按钮", "list_class": "default" },
+        { "value": "llm_generate_retry", "label": "生成记录-重试按钮", "list_class": "default" },
+        { "value": "account_card_note_sync", "label": "账号卡-同步笔记按钮", "list_class": "default" },
+        { "value": "account_card_goods_note_sync", "label": "账号卡-同步商品笔记按钮", "list_class": "default" },
+        { "value": "account_card_goods_sync", "label": "账号卡-同步商品按钮", "list_class": "default" },
+        { "value": "retry", "label": "队列记录-重试按钮", "list_class": "default" },
+        { "value": "recovery", "label": "应用重启恢复", "list_class": "default" },
+        { "value": "scheduled", "label": "定时任务", "list_class": "default" },
+        { "value": "manual", "label": "页面按钮（早期数据）", "list_class": "default" },
+        { "value": "auto_business_note_publish", "label": "每日发布商业笔记任务", "list_class": "default" }
+      ]
+    },
+    {
+      "code": "sys_publish_task_status",
+      "name": "发布任务状态",
+      "remark": "镜像 publish-page.tsx STATUS_TAG_MAP（vitest 钉）",
+      "items": [
+        { "value": "pending", "label": "待发布", "list_class": "blue" },
+        { "value": "uploading", "label": "上传中", "list_class": "processing" },
+        { "value": "publishing", "label": "发布中", "list_class": "processing" },
+        { "value": "published", "label": "已发布", "list_class": "green" },
+        { "value": "failed", "label": "失败", "list_class": "red" },
+        { "value": "cancelled", "label": "已取消", "list_class": "default" },
+        { "value": "scheduled", "label": "已定时", "list_class": "gold" }
+      ]
+    },
+    {
+      "code": "sys_login_channel",
+      "name": "平台通道",
+      "remark": "镜像 login_state_service.CHANNEL_LABELS",
+      "items": [
+        { "value": "ark", "label": "千帆商家后台", "list_class": "default" },
+        { "value": "creator", "label": "创作者平台", "list_class": "default" },
+        { "value": "www", "label": "网页版（PC）", "list_class": "default" }
+      ]
+    },
+    {
+      "code": "sys_login_state_view",
+      "name": "平台会话状态",
+      "remark": "镜像 frontend lib/login-state.ts VIEWS（vitest 钉）",
+      "items": [
+        { "value": "missing", "label": "未登录", "list_class": "default" },
+        { "value": "guest", "label": "非登录态", "list_class": "warning" },
+        { "value": "valid", "label": "可用", "list_class": "success" },
+        { "value": "expired", "label": "已失效", "list_class": "error" },
+        { "value": "unknown", "label": "未检测", "list_class": "default" }
+      ]
+    },
+    {
+      "code": "xhs_account_status",
+      "name": "账号会话状态",
+      "remark": "镜像 accounts-page.tsx statusLabelMap/statusColorMap（vitest 钉）",
+      "items": [
+        { "value": "active", "label": "正常", "list_class": "green" },
+        { "value": "healthy", "label": "正常", "list_class": "green" },
+        { "value": "expired", "label": "过期", "list_class": "red" },
+        { "value": "unknown", "label": "未知", "list_class": "default" }
+      ]
+    },
+    {
+      "code": "xhs_item_status",
+      "name": "千帆商品状态",
+      "remark": "镜像 apis.xhs_qianfan_apis.QIANFAN_ITEM_STATUSES 键集合（pytest 镜像守卫钉）",
+      "items": [
+        { "value": "on_shelf", "label": "售卖中", "list_class": "green" },
+        { "value": "off_shelf", "label": "已下架", "list_class": "default" },
+        { "value": "frozen", "label": "已冻结", "list_class": "red" },
+        { "value": "rectify", "label": "整改", "list_class": "red" },
+        { "value": "auditing", "label": "审核中", "list_class": "orange" },
+        { "value": "audit_rejected", "label": "审核驳回", "list_class": "red" },
+        { "value": "audit_passed", "label": "审核通过", "list_class": "cyan" }
+      ]
+    },
+    {
+      "code": "xhs_order_status",
+      "name": "订单状态",
+      "remark": "镜像 order.ORDER_STATUSES（中文即值；pytest 镜像守卫钉）",
+      "items": [
+        { "value": "待付款", "label": "待付款", "list_class": "gold" },
+        { "value": "待发货", "label": "待发货", "list_class": "orange" },
+        { "value": "待收货", "label": "待收货", "list_class": "blue" },
+        { "value": "已完成", "label": "已完成", "list_class": "green" },
+        { "value": "售后中", "label": "售后中", "list_class": "red" },
+        { "value": "已关闭", "label": "已关闭", "list_class": "default" }
+      ]
+    },
+    {
+      "code": "xhs_datacenter_category",
+      "name": "数据中心笔记分类",
+      "remark": "",
+      "items": [
+        { "value": "goods", "label": "商业笔记", "list_class": "default" },
+        { "value": "normal", "label": "普通笔记", "list_class": "default" }
+      ]
+    },
+    {
+      "code": "xhs_cleanup_result",
+      "name": "零流量清理结果",
+      "remark": "",
+      "items": [
+        { "value": "deleted", "label": "已删除", "list_class": "green" },
+        { "value": "skipped", "label": "跳过", "list_class": "orange" },
+        { "value": "failed", "label": "失败", "list_class": "red" },
+        { "value": "not_in_pool", "label": "不在候选池", "list_class": "default" },
+        { "value": "not_attempted", "label": "未执行", "list_class": "default" }
+      ]
+    },
+    {
+      "code": "xhs_monitor_target_type",
+      "name": "监控目标类型",
+      "remark": "",
+      "items": [
+        { "value": "keyword", "label": "关键词", "list_class": "default" },
+        { "value": "account", "label": "账号", "list_class": "default" },
+        { "value": "brand", "label": "品牌", "list_class": "default" },
+        { "value": "note_url", "label": "笔记 URL", "list_class": "default" }
+      ]
+    },
+    {
+      "code": "xhs_note_type_filter",
+      "name": "笔记类型",
+      "remark": "",
+      "items": [
+        { "value": "synced", "label": "三方同步", "list_class": "blue" },
+        { "value": "local_generated", "label": "本地生成", "list_class": "purple" },
+        { "value": "local", "label": "本地采集", "list_class": "default" }
+      ]
+    },
+    {
+      "code": "sys_prompt_task_type",
+      "name": "提示词任务类型",
+      "remark": "镜像 prompt.PROMPT_TASK_TYPES（pytest 镜像守卫钉）",
+      "items": [
+        { "value": "text", "label": "文案生成", "list_class": "default" },
+        { "value": "image", "label": "图片生成", "list_class": "default" },
+        { "value": "video", "label": "视频生成", "list_class": "default" },
+        { "value": "cover", "label": "封面生成", "list_class": "default" }
+      ]
+    },
+    {
+      "code": "sys_regenerate_scope",
+      "name": "局部重生成范围",
+      "remark": "镜像 generation.REGEN_SCOPES（含旧粒度 text 保留显示；pytest 镜像守卫钉）",
+      "items": [
+        { "value": "all", "label": "整篇生成", "list_class": "default" },
+        { "value": "text", "label": "只改文案", "list_class": "default" },
+        { "value": "title", "label": "只改标题", "list_class": "default" },
+        { "value": "body", "label": "只改正文", "list_class": "default" },
+        { "value": "topics", "label": "只改话题", "list_class": "default" },
+        { "value": "media", "label": "只改图片", "list_class": "default" }
+      ]
+    },
+    {
+      "code": "sys_media_source",
+      "name": "笔记媒体来源",
+      "remark": "",
+      "items": [
+        { "value": "product_image", "label": "商品原图", "list_class": "default" },
+        { "value": "material", "label": "本地素材", "list_class": "default" },
+        { "value": "ai_generate", "label": "AI 生成", "list_class": "default" },
+        { "value": "reference_image", "label": "参考图生成", "list_class": "default" },
+        { "value": "video", "label": "视频", "list_class": "default" }
+      ]
+    },
+    {
+      "code": "xhs_interaction_kind",
+      "name": "互动消息分类",
+      "remark": "",
+      "items": [
+        { "value": "like_collect", "label": "赞和收藏", "list_class": "default" },
+        { "value": "mention", "label": "提到我的", "list_class": "default" },
+        { "value": "connection", "label": "新增关注", "list_class": "default" }
+      ]
+    },
+    {
+      "code": "sys_own_content_scope",
+      "name": "自有内容范围",
+      "remark": "",
+      "items": [
+        { "value": "notes", "label": "我的笔记", "list_class": "default" },
+        { "value": "liked", "label": "我赞过的", "list_class": "default" },
+        { "value": "collected", "label": "我收藏的", "list_class": "default" }
+      ]
+    },
+    {
+      "code": "sys_llm_function",
+      "name": "LLM 业务功能",
+      "remark": "",
+      "items": [
+        { "value": "xhs", "label": "小红书", "list_class": "default" },
+        { "value": "product_note_generate", "label": "商品笔记生成", "list_class": "default" },
+        { "value": "note_generate", "label": "笔记生成", "list_class": "default" },
+        { "value": "title_generate", "label": "标题生成", "list_class": "default" },
+        { "value": "image_describe", "label": "图片描述", "list_class": "default" }
+      ]
+    },
+    {
+      "code": "sys_setting_category",
+      "name": "系统设置分组",
+      "remark": "",
+      "items": [
+        { "value": "sync", "label": "同步与限流", "list_class": "default" },
+        { "value": "scheduler", "label": "调度", "list_class": "default" },
+        { "value": "publish", "label": "发布与风控", "list_class": "default" },
+        { "value": "ai", "label": "AI 能力", "list_class": "default" },
+        { "value": "feature", "label": "实验特性", "list_class": "default" }
+      ]
+    },
+    {
+      "code": "sys_setting_value_type",
+      "name": "系统设置值类型",
+      "remark": "",
+      "items": [
+        { "value": "int", "label": "整数", "list_class": "default" },
+        { "value": "float", "label": "小数", "list_class": "default" },
+        { "value": "bool", "label": "开关", "list_class": "default" },
+        { "value": "str", "label": "文本", "list_class": "default" },
+        { "value": "json", "label": "JSON", "list_class": "default" }
+      ]
+    },
+    {
+      "code": "xhs_package_rule_op",
+      "name": "数据包规则操作",
+      "remark": "与后端 _IMPLEMENTED_OPS / 前端 OP_LABELS 同集合（vitest 钉）",
+      "items": [
+        { "value": "extract_segment", "label": "按分隔符取第 N 段", "list_class": "default" },
+        { "value": "extract_between", "label": "取包裹符之间的内容", "list_class": "default" },
+        { "value": "extract_strip", "label": "去前缀 / 去后缀", "list_class": "default" },
+        { "value": "fixed_text", "label": "固定数值 / 固定文本（整列设为同一个值）", "list_class": "default" },
+        { "value": "math_scale", "label": "批量运算（加减乘可随意搭配）", "list_class": "default" },
+        { "value": "copy_column", "label": "复制列值（把另一列复制到当前列）", "list_class": "default" },
+        { "value": "copy_extract", "label": "复制 + 提取（先复制某列，再按规则提取）", "list_class": "default" }
+      ]
+    },
+    {
+      "code": "xhs_goods_operate",
+      "name": "商品批量操作",
+      "remark": "",
+      "items": [
+        { "value": "on_shelf", "label": "上架", "list_class": "green" },
+        { "value": "off_shelf", "label": "下架", "list_class": "default" },
+        { "value": "delete", "label": "删除", "list_class": "red" }
+      ]
+    },
+    {
+      "code": "xhs_note_count_op",
+      "name": "挂链笔记数比较符",
+      "remark": "镜像 goods.NOTE_COUNT_OPS（pytest 镜像守卫钉）",
+      "items": [
+        { "value": "lt", "label": "小于", "list_class": "default" },
+        { "value": "lte", "label": "不大于", "list_class": "default" },
+        { "value": "eq", "label": "等于", "list_class": "default" },
+        { "value": "gte", "label": "不小于", "list_class": "default" },
+        { "value": "gt", "label": "大于", "list_class": "default" }
+      ]
+    },
+    {
+      "code": "xhs_sort_field",
+      "name": "商品排序字段",
+      "remark": "",
+      "items": [
+        { "value": "create_time", "label": "创建时间", "list_class": "default" },
+        { "value": "on_shelf_time", "label": "上架时间", "list_class": "default" },
+        { "value": "off_shelf_time", "label": "下架时间", "list_class": "default" },
+        { "value": "last_audit_time", "label": "审核时间", "list_class": "default" },
+        { "value": "price_min_fen", "label": "价格", "list_class": "default" },
+        { "value": "stock", "label": "库存", "list_class": "default" },
+        { "value": "item_sale_qty_30", "label": "近 30 天销量", "list_class": "default" }
+      ]
+    },
+    {
+      "code": "xhs_violation_punish_status",
+      "name": "违规处罚状态",
+      "remark": "",
+      "items": [
+        { "value": "0", "label": "待处罚", "list_class": "default" },
+        { "value": "1", "label": "已处罚", "list_class": "warning" },
+        { "value": "2", "label": "处罚中", "list_class": "error" },
+        { "value": "-1", "label": "已取消", "list_class": "default" }
+      ]
+    },
+    {
+      "code": "xhs_violation_appeal_status",
+      "name": "违规申诉状态",
+      "remark": "",
+      "items": [
+        { "value": "0", "label": "可申诉", "list_class": "processing" },
+        { "value": "1", "label": "申诉中", "list_class": "processing" },
+        { "value": "2", "label": "申诉成功", "list_class": "success" },
+        { "value": "3", "label": "申诉失败", "list_class": "error" },
+        { "value": "6", "label": "超时未申诉", "list_class": "default" },
+        { "value": "100", "label": "不可申诉", "list_class": "default" }
+      ]
+    },
+    {
+      "code": "xhs_product_updated_field",
+      "name": "商品更新项",
+      "remark": "镜像 product_edit_service updated[] 代码（vitest 钉）",
+      "items": [
+        { "value": "ai_title", "label": "AI 标题", "list_class": "default" },
+        { "value": "ai_selling_point", "label": "AI 卖点", "list_class": "default" }
       ]
     }
   ]

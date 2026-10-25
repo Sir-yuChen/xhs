@@ -126,6 +126,17 @@ def _validate_auto_ops_params(params: dict, db: Any, user: Any) -> None:
         raise ValueError("auto_task_id 不存在或不属于当前用户")
 
 
+#: 工作区归属（设计 64 §3.3）：定时任务是**公共底座**（单调度器，不按工作区拆分），
+#: 每个 job 标注它服务于哪个工作区 —— 系统卫生类归 `system`，业务类归 `xhs`
+#:（现有业务任务全部服务小红书工作区；新工作区的任务在此登记）。
+SYSTEM_WORKSPACE_JOBS: frozenset[str] = frozenset({"system.queue_record_cleanup"})
+
+
+def workspace_for_job(key: str) -> str:
+    """job_key → 工作区（未知键兜 `xhs`：业务任务是默认形态）。"""
+    return "system" if str(key or "") in SYSTEM_WORKSPACE_JOBS else "xhs"
+
+
 @lru_cache(maxsize=1)
 def _build_registry() -> dict[str, JobSpec]:
     # 延迟 import：拆掉 scheduler_service ↔ job_registry 的导入环（见模块 docstring）。

@@ -135,3 +135,8 @@ update:
   github_token: ""
   # 仓库是否公开（已公开 ⇒ 匿名即可查 Release）。
   github_public: true
+
+# 日志保留期（设计 64 §2.4）：record_cleanup 清理全局日志表（api_logs / business_logs /
+# scheduled_job_logs）的基线天数。运行时配置行（系统级）优先于本键。
+log_retention_days: 90
+job_log_retention_days: 30

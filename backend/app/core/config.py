@@ -211,6 +211,9 @@ class Settings(BaseSettings):
     # ⚠️ 本字段只是**第 3 层兜底**（构造参数 > 运行时配置 > 本字段 > 内置 5）：
     #    随包种子已按用户铺设 `system_settings` 行，正常安装路径下读的是那一行。
     crawl_rate_limit_per_minute: int = 8
+    #: 日志保留期（设计 64 §2.4）：record_cleanup 清理全局日志表的基线（天数）。
+    log_retention_days: int = 90
+    job_log_retention_days: int = 30
 
     # 千帆（ark）店铺绑定的登录态巡检（T-31）—— 只读探活，见 services/shop_health_service.py
     # 关闭开关 = 不注册定时任务（手动「立即巡检」按钮仍可用）。

@@ -4378,10 +4378,36 @@ export async function runAutoTask(taskId: number): Promise<AutoTaskRunResult> {
 // ---------------------------------------------------------------------------
 // ⚠️ key 一律 `encodeURIComponent`：配置键可能含 `.` / `:` 等字符，
 // 不编码会拼出会被路径解析吃掉的 URL（`/settings/a/b` 变成两段路径）。
-export async function fetchSystemSettings(category?: string): Promise<SystemSettingListResponse> {
-  const response = await http.get<SystemSettingListResponse>("/settings", {
-    params: category ? { category } : {},
-  });
+/** 三级配置读参数（设计 64 §1.5）：scope=user（缺省）/system/workspace。 */
+export type SettingsScopeParams = {
+  category?: string;
+  scope?: "user" | "system" | "workspace";
+  workspace?: string;
+};
+
+export async function fetchSystemSettings(
+  params?: SettingsScopeParams | string
+): Promise<SystemSettingListResponse> {
+  const query: Record<string, string> = {};
+  if (typeof params === "string") {
+    query.category = params;
+  } else if (params) {
+    if (params.category) query.category = params.category;
+    if (params.scope) query.scope = params.scope;
+    if (params.workspace) query.workspace = params.workspace;
+  }
+  const response = await http.get<SystemSettingListResponse>("/settings", { params: query });
+  return response.data;
+}
+
+/** 三级级联合并视图（设计 64 §1.3：workspace > user > system > builtin）。 */
+export async function fetchEffectiveSettings(
+  workspace?: string
+): Promise<{ workspace?: string; items: { key: string; value: unknown; scope_hit: string }[] }> {
+  const response = await http.get<{ workspace?: string; items: { key: string; value: unknown; scope_hit: string }[] }>(
+    "/settings/effective",
+    { params: workspace ? { workspace } : {} }
+  );
   return response.data;
 }
 
@@ -4400,9 +4426,13 @@ export async function updateSystemSetting(
   return response.data;
 }
 
-export async function deleteSystemSetting(key: string): Promise<SystemSettingDeleteResult> {
+export async function deleteSystemSetting(
+  key: string,
+  scopeParams?: { scope?: "user" | "system" | "workspace"; workspace?: string }
+): Promise<SystemSettingDeleteResult> {
   const response = await http.delete<SystemSettingDeleteResult>(
-    `/settings/${encodeURIComponent(key)}`
+    `/settings/${encodeURIComponent(key)}`,
+    scopeParams ? { data: scopeParams } : undefined
   );
   return response.data;
 }
@@ -6115,6 +6145,28 @@ export interface SystemDictItem {
   remark: string;
 }
 
+/** `GET /system/dict/options` 的单条选项（统一读出口切片，无管理字段）。 */
+export interface SystemDictOption {
+  value: string;
+  label: string;
+  list_class: string;
+  sort_order: number;
+}
+
+/**
+ * 统一字典读出口：一次批量取（多）组可用选项，登录即可、无权限码。
+ * 只下发 normal 的类型与项；`codes` 缺省 = 全量（前端统一 store 一次灌满）。
+ */
+export async function fetchSystemDictOptions(
+  codes?: string[]
+): Promise<{ items: Record<string, SystemDictOption[]> }> {
+  const query = codes?.length ? `?codes=${encodeURIComponent(codes.join(","))}` : "";
+  const response = await http.get<{ items: Record<string, SystemDictOption[]> }>(
+    `/system/dict/options${query}`
+  );
+  return response.data;
+}
+
 export async function fetchSystemDictTypes(params?: {
   name?: string;
   code?: string;
@@ -6235,6 +6287,74 @@ export async function fetchSystemAuditLogs(params?: {
   return response.data;
 }
 
+/** 业务日志（`business_logs`，设计 64 §2.2）：核心业务节点的语义审计层。 */
+export interface SystemBusinessLog {
+  id: number;
+  created_at: string | null;
+  level: "info" | "warning" | "error" | string;
+  event: string;
+  action: string;
+  actor_id: number | null;
+  actor_name: string;
+  workspace: string | null;
+  target_type: string;
+  target_id: string;
+  summary: string;
+  detail: unknown;
+}
+
+/** 跨工作区定时任务总览（设计 64 §3.3，admin 专属）。 */
+export interface ScheduleOverviewItem {
+  id: number;
+  workspace: string | null;
+  name: string;
+  job_key: string;
+  owner_id: number | null;
+  owner_name: string;
+  status: string;
+  trigger_type: string;
+  cron_expression: string;
+  is_builtin: boolean;
+  last_run_at: string | null;
+  next_run_at: string | null;
+  run_count: number;
+  fail_count: number;
+  last_status: string | null;
+}
+
+export async function fetchScheduleOverview(): Promise<{
+  items: ScheduleOverviewItem[];
+  total: number;
+  by_workspace: Record<string, number>;
+}> {
+  const response = await http.get<{
+    items: ScheduleOverviewItem[];
+    total: number;
+    by_workspace: Record<string, number>;
+  }>("/schedule/overview");
+  return response.data;
+}
+
+export async function fetchSystemBusinessLogs(params?: {
+  page?: number;
+  page_size?: number;
+  event?: string;
+  action?: string;
+}): Promise<{
+  items: SystemBusinessLog[];
+  total: number;
+  page: number;
+  page_size: number;
+}> {
+  const response = await http.get<{
+    items: SystemBusinessLog[];
+    total: number;
+    page: number;
+    page_size: number;
+  }>("/system/logs/business", { params });
+  return response.data;
+}
+
 export async function fetchSystemAppLogs(params?: {
   page?: number;
   page_size?: number;
@@ -6262,21 +6382,5 @@ export async function changeMyPassword(
     "/auth/change-password",
     { old_password: oldPassword, new_password: newPassword }
   );
-  return response.data;
-}
-
-/** 把当前用户名下的配置值复制给所有用户（**仅 admin**，设计 48 §M8）。 */
-export async function applySettingsToAllUsers(keys: string[]): Promise<{
-  ok: boolean;
-  updated: number;
-  created: number;
-  details: { key: string; value: unknown; updated: number; created: number }[];
-}> {
-  const response = await http.post<{
-    ok: boolean;
-    updated: number;
-    created: number;
-    details: { key: string; value: unknown; updated: number; created: number }[];
-  }>("/settings/apply-to-all", { keys });
   return response.data;
 }

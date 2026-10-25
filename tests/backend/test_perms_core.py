@@ -38,12 +38,12 @@ APP_DIR = Path(__file__).resolve().parents[2] / "backend" / "app"
 
 
 # ---------------------------------------------------------------------------
-# 一、162 条码
+# 一、164 条码
 # ---------------------------------------------------------------------------
 
 
 def test_all_perms_has_exactly_162_codes():
-    """需求值 **162**（原 161 + 2026-10-24 梳理补的 `xhs:profile:view`）。
+    """需求值 **164**（原 162 + 设计 64 的 system:scheduler:view / manage）。
 
     ⚠️ 补这一条的原因（设计 49 附 A 未覆盖）：「个人资料」页早就有 UI 与路由，
     但没有页面码 ⇒ v1.1.0 侧栏由 `menus` 表下发时它**进不了侧栏**
@@ -53,15 +53,15 @@ def test_all_perms_has_exactly_162_codes():
     * **端点**不挂码 —— 每个人都要能改自己的密码，挂码会把人锁死（`EXEMPT_SELF`）；
     * **菜单**必须有码 —— 否则无法被 `role_menus` 授权、不会出现在侧栏。
     """
-    assert len(perms.ALL_PERMS) == 162
+    assert len(perms.ALL_PERMS) == 164
 
 
 def test_three_groups_are_countable_separately():
-    """三组分别可数：系统 25 / 业务写码 114 / 页级 view **23**。"""
-    assert len(reg.SYSTEM_PERMS) == 25
+    """三组分别可数：系统 **27**（设计 64 +scheduler:view/manage）/ 业务写码 114 / 页级 view 23。"""
+    assert len(reg.SYSTEM_PERMS) == 27
     assert len(reg.BUSINESS_PERMS) == 114
     assert len(reg.PAGE_VIEW_PERMS) == 23
-    assert len(reg.SYSTEM_PERMS) + len(reg.BUSINESS_PERMS) + len(reg.PAGE_VIEW_PERMS) == 162
+    assert len(reg.SYSTEM_PERMS) + len(reg.BUSINESS_PERMS) + len(reg.PAGE_VIEW_PERMS) == 164
 
 
 def test_system_group_matches_design_49_table():
@@ -78,6 +78,8 @@ def test_system_group_matches_design_49_table():
         "dict": 4,
         "setting": 4,
         "log": 1,
+        # 设计 64 §3.3：任务中心总览（跨工作区只读 + 管理动作）
+        "scheduler": 2,
     }
 
 

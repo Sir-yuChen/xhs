@@ -64,7 +64,14 @@ class CleanableRecord:
     ⚠️ **必须只删「终态 / 已完结」且早于 `cutoff` 的行** —— 活着的行删了就是丢任务。
     ⚠️ **必须按 `user_id` 收口**（`None` = 不过滤，仅供系统级调用）—— 定时任务是
     `user_scoped` 的，越租户删除是多用户数据事故。
+    ⚠️ **全局日志表例外**（设计 64 §2.4）：api_logs / business_logs / scheduled_job_logs
+    是运营留痕不是用户数据，保留期是**全局卫生策略** —— 它们的 purge 忽略 user_id
+    全局清理，并在注册处写明理由。
     """
+
+    #: 保留期读哪条系统级配置（设计 64 §2.4：任务参数 > 该配置键 > default_days）。
+    config_key: str = ""
+    default_days: Optional[int] = None
 
 
 def _purge_queue_records(db: Session, cutoff: datetime, user_id: Optional[int]) -> int:
@@ -140,6 +147,45 @@ def _purge_no_traffic_items(db: Session, cutoff: datetime, user_id: Optional[int
 #: `user_scoped` 任务只清行主本人的数据 ⇒ purge 里不必再带 user_id（调用方已按
 #: 归属过滤）—— 但队列记录那一路的 `cleanup_records` 仍按 user_id 收口，
 #: 由 `run_record_cleanup` 统一注入。
+def _purge_api_logs(db: Session, cutoff: datetime, user_id: Optional[int]) -> int:
+    """API 审计日志（`api_logs`）—— 此前**没有任何保留策略**（设计 64 §2.4 现状盘点）。
+
+    全局表：忽略 `user_id` 全局清理（留痕是运营数据，保留期是全局卫生策略）。
+    """
+    from sqlalchemy import delete
+
+    from backend.app.models.api_log import ApiLog
+
+    stmt = delete(ApiLog).where(ApiLog.created_at < cutoff)
+    return int(db.execute(stmt).rowcount or 0)
+
+
+def _purge_business_logs(db: Session, cutoff: datetime, user_id: Optional[int]) -> int:
+    """业务日志（`business_logs`，设计 64 §2.2）—— 同 api_logs 的全局口径。"""
+    from sqlalchemy import delete
+
+    from backend.app.models.business_log import BusinessLog
+
+    stmt = delete(BusinessLog).where(BusinessLog.created_at < cutoff)
+    return int(db.execute(stmt).rowcount or 0)
+
+
+def _purge_job_logs(db: Session, cutoff: datetime, user_id: Optional[int]) -> int:
+    """定时任务执行日志（`scheduled_job_logs`）—— 此前只有手动清理（设计 64 §2.4）。
+
+    只删**终态**（success/failed/skipped）；`running` 是正在跑的执行，删了等于抹掉现场。
+    """
+    from sqlalchemy import delete
+
+    from backend.app.models.scheduled_job import ScheduledJobLog
+
+    stmt = delete(ScheduledJobLog).where(
+        ScheduledJobLog.status.in_(("success", "failed", "skipped")),
+        ScheduledJobLog.created_at < cutoff,
+    )
+    return int(db.execute(stmt).rowcount or 0)
+
+
 RECORD_CLEANERS: tuple[CleanableRecord, ...] = (
     CleanableRecord(key="queue", label="队列执行记录", purge=_purge_queue_records),
     #: ⚠️ 明细**先于**批次行：明细是子行，先清子再清父（同队列记录的「先子后父」纪律）。
@@ -152,6 +198,29 @@ RECORD_CLEANERS: tuple[CleanableRecord, ...] = (
         key="no_traffic_cleanup_log",
         label="无流量笔记清理记录",
         purge=_purge_no_traffic_logs,
+    ),
+    # 设计 64 §2.4：全局日志表进同一条保留期闸（此前 api_logs / scheduled_job_logs
+    # 没有任何自动清理，只增不减）。
+    CleanableRecord(
+        key="api_logs",
+        label="API 审计日志",
+        purge=_purge_api_logs,
+        config_key="log_retention_days",
+        default_days=90,
+    ),
+    CleanableRecord(
+        key="business_logs",
+        label="业务日志",
+        purge=_purge_business_logs,
+        config_key="log_retention_days",
+        default_days=90,
+    ),
+    CleanableRecord(
+        key="job_logs",
+        label="定时任务日志",
+        purge=_purge_job_logs,
+        config_key="job_log_retention_days",
+        default_days=30,
     ),
 )
 
@@ -182,13 +251,28 @@ def run_record_cleanup(
     "total": rows}`。
     """
     days = _coerce_retention_days(retention_days)
-    cutoff = shanghai_now().replace(microsecond=0) - _timedelta_days(days)
+    now = shanghai_now().replace(microsecond=0)
+    cutoff = now - _timedelta_days(days)
     db = SessionLocal()
     try:
         cleaned: dict[str, int] = {}
         for record in cleaners_for_keys(records):
             try:
-                cleaned[record.key] = int(record.purge(db, cutoff, user_id) or 0)
+                #: 保留期三级来源（设计 64 §2.4）：任务参数 > 系统级配置键 > 注册默认。
+                #: 配置键读点走 `settings_service.live_int`（缓存 + 立即失效语义同源）。
+                #: ⚠️ 全部配置键的字面量在此显式列出（"log_retention_days" /
+                #: "job_log_retention_days"）—— `test_live_keys_are_real_read_points`
+                #: 靠函数体里的键名字面量判定"真的在读"。
+                cleaner_days = days
+                if record.config_key and retention_days is None:
+                    assert record.config_key in ("log_retention_days", "job_log_retention_days")
+                    from backend.app.services.settings_service import live_int
+
+                    cleaner_days = _coerce_retention_days(
+                        live_int(db, None, record.config_key, default=record.default_days or DEFAULT_RETENTION_DAYS)
+                    )
+                cleaner_cutoff = now - _timedelta_days(cleaner_days)
+                cleaned[record.key] = int(record.purge(db, cleaner_cutoff, user_id) or 0)
             except Exception as exc:  # noqa: BLE001 - 一张表失败不该拖垮其余
                 logger.error("record cleanup failed (%s): %s", record.key, exc)
                 cleaned[record.key] = 0

@@ -8,6 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from backend.app.core.database import get_db
+from backend.app.services import business_log_service as business_log  # noqa: F401 设计 64 §2.3 出入口埋点
 from backend.app.core.deps import get_current_user
 from backend.app.core.roles import normalize_role
 from backend.app.core.security import create_access_token, create_refresh_token, decode_token, hash_password, verify_password
@@ -349,16 +350,9 @@ def register(
             for job in created:
                 sync_job_registration(scheduler, job)
 
-    # 设计 10 §7.3（2026-09-27）：运行时配置行同样**按用户各持一份** ⇒ 注册即播种，
-    # 新用户打开设置页就看得见基线（启动播种只覆盖「启动时已存在的用户」）。
-    try:
-        from backend.app.services.settings_service import seed_settings_for_user
-
-        seed_settings_for_user(db, user.id)
-        db.commit()
-    except Exception as exc:  # noqa: BLE001 - 注册不被子系统问题拖死
-        db.rollback()
-        logger.warning("register: seed runtime settings for user %s failed: %s", user.id, exc)
+    # 设计 64 §1.4（2026-10-25 三级化）：配置基线已改为**系统级一行**（启动播种），
+    # 新用户不再需要个人副本 —— 注册路径的每用户播种整条退场。
+    # （原设计 10 §7.3「按用户各持一份」语义由系统级取代。）
 
     # 设计 17 §13.5.4（v2.24）：内置提示词模板 / 模块同样**按用户各持一份** ⇒ 注册即播种。
     # ⚠️ 少了这一步，新用户第一次打开「生成 AI 商品图」仍然**选不到任何模板**
@@ -475,6 +469,16 @@ def login(credentials: AuthCredentials, db: Session = Depends(get_db)):
         user = db.scalar(select(User).where(func.lower(User.email) == identifier.lower()))
     if user is None or not verify_password(credentials.password, user.password_hash):
         _record_login_failure(identifier, now)
+        business_log.record(
+            "auth.login_failed",
+            action="login",
+            actor_id=user.id if user is not None else None,
+            actor_name=identifier,
+            target_type="user",
+            target_id=identifier,
+            summary=f"登录失败（口令错误或账号不存在）：{identifier}",
+            level=business_log.LEVEL_WARNING,
+        )
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
 
     #: 账号状态门禁（设计 55 §1.4）。**口令正确才判状态** —— 顺序反了的话，
@@ -491,6 +495,16 @@ def login(credentials: AuthCredentials, db: Session = Depends(get_db)):
 
     # 成功 ⇒ 清掉该标识的失败计数（不让「之前失败过」影响下次）
     _clear_login_failures(identifier)
+    business_log.record(
+        "auth.login",
+        action="login",
+        actor_id=user.id,
+        actor_name=user.username,
+        target_type="user",
+        target_id=user.id,
+        summary=f"登录成功：{user.username}",
+        db=db,
+    )
     return _token_response(user)
 
 
@@ -530,6 +544,16 @@ def logout(
     current_user.token_version = int(current_user.token_version or 0) + 1
     db.add(current_user)
     db.commit()
+    business_log.record(
+        "auth.logout",
+        action="logout",
+        actor_id=current_user.id,
+        actor_name=current_user.username,
+        target_type="user",
+        target_id=current_user.id,
+        summary=f"登出（全部 refresh token 撤销）：{current_user.username}",
+        db=db,
+    )
     return {"status": "ok", "revoked": True}
 
 
@@ -611,6 +635,16 @@ def change_password(
     permission_cache.clear(user_id=current_user.id)
     presence.forget(current_user.id)
     db.commit()
+    business_log.record(
+        "auth.change_password",
+        action="update",
+        actor_id=current_user.id,
+        actor_name=current_user.username,
+        target_type="user",
+        target_id=current_user.id,
+        summary=f"修改密码（全部会话已撤销）：{current_user.username}",
+        db=db,
+    )
 
     return {
         "ok": True,

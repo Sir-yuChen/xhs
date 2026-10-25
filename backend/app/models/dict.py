@@ -43,19 +43,42 @@ DICT_STATUS_NORMAL = "normal"
 DICT_STATUS_DISABLED = "disabled"
 DICT_STATUSES: tuple[str, ...] = (DICT_STATUS_NORMAL, DICT_STATUS_DISABLED)
 
-#: antd `Tag` 的颜色档（`list_class` 的取值白名单）
+#: antd `Tag` 的颜色档（`list_class` 的取值白名单）。
+#: 设计 63 §2.3：由 5 档状态色放宽到 **antd 全量预设**（5 状态色 + 13 预设色
+#: + processing/error）—— 前端既有枚举颜色用的是 green/orange/gold/cyan/purple
+#: 这类预设色，不放宽字典就表达不了真实颜色（迁移 `f8a9b0c1d2e3`）。
 LIST_CLASS_DEFAULT = "default"
 LIST_CLASS_SUCCESS = "success"
 LIST_CLASS_WARNING = "warning"
 LIST_CLASS_DANGER = "danger"
 LIST_CLASS_INFO = "info"
+LIST_CLASS_PROCESSING = "processing"
+LIST_CLASS_ERROR = "error"
 LIST_CLASSES: tuple[str, ...] = (
     LIST_CLASS_DEFAULT,
     LIST_CLASS_SUCCESS,
     LIST_CLASS_WARNING,
     LIST_CLASS_DANGER,
     LIST_CLASS_INFO,
+    LIST_CLASS_PROCESSING,
+    LIST_CLASS_ERROR,
+    # antd 预设色板（https://ant.design/docs/spec/colors-cn）
+    "red",
+    "volcano",
+    "orange",
+    "gold",
+    "yellow",
+    "lime",
+    "green",
+    "cyan",
+    "blue",
+    "geekblue",
+    "purple",
+    "magenta",
+    "pink",
 )
+#: 与 `models/dict.py` CHECK / API `Field(pattern=...)` 共用一份正则（DEF-044）。
+LIST_CLASS_PATTERN = "^(%s)$" % "|".join(LIST_CLASSES)
 
 
 class DictType(Base):
@@ -95,7 +118,9 @@ class DictItem(Base):
             "status IN ('normal', 'disabled')", name="ck_dict_items_status"
         ),
         CheckConstraint(
-            "list_class IN ('default', 'success', 'warning', 'danger', 'info')",
+            "list_class IN ('default', 'success', 'warning', 'danger', 'info', "
+            "'processing', 'error', 'red', 'volcano', 'orange', 'gold', 'yellow', "
+            "'lime', 'green', 'cyan', 'blue', 'geekblue', 'purple', 'magenta', 'pink')",
             name="ck_dict_items_list_class",
         ),
     )

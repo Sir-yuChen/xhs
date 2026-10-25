@@ -34,7 +34,12 @@ from backend.app.services.account_service import (
     AccountRejectedError,
     ensure_creator_account_for_publish,
 )
-from backend.app.services.job_registry import JobSpec, get_job_spec, job_registry
+from backend.app.services.job_registry import (
+    JobSpec,
+    get_job_spec,
+    job_registry,
+    workspace_for_job,
+)
 from backend.app.services.schedule_triggers import (
     SCHEDULER_TIMEZONE,
     build_trigger,
@@ -829,6 +834,7 @@ def seed_builtin_jobs_for_user(db: Session, user_id: int) -> list[ScheduledJob]:
             user_id=user_id,
             name=row["name"],
             job_key=spec.key,
+            workspace=workspace_for_job(spec.key),
             trigger_type=row["trigger_type"],
             cron_expression=row["cron_expression"],
             misfire_policy=row["misfire_policy"],

@@ -118,6 +118,9 @@ SYSTEM_PERMS: tuple[PermSpec, ...] = (
     PermSpec("system:setting:delete", "删除配置", "F", "/system/settings", WORKSPACE_SYSTEM, "system"),
     # 日志查看 1（只有查看码，没有按钮码 —— 审计不可删、不可改）
     PermSpec("system:log:view", "日志查看", "C", "/system/logs", WORKSPACE_SYSTEM, "system"),
+    # 定时任务总览（设计 64 §3.3）：跨工作区只读 + 管理动作；数据端点 admin 判角色。
+    PermSpec("system:scheduler:view", "任务中心", "C", "/system/scheduler", WORKSPACE_SYSTEM, "system"),
+    PermSpec("system:scheduler:manage", "管理定时任务", "F", "/system/scheduler", WORKSPACE_SYSTEM, "system"),
 )
 
 # ---------------------------------------------------------------------------

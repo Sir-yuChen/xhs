@@ -9,6 +9,7 @@
  */
 
 import { CRON_PRESETS } from "./cron-builder";
+import { dictLabel, dictListClass } from "./system-dicts-core";
 
 export type TriggerType = "manual" | "cron" | "at" | string;
 
@@ -16,6 +17,9 @@ export type TriggerType = "manual" | "cron" | "at" | string;
  * 任务类型三档（2026-09-24 用户口径 R14 + R15）：
  * 手动 / Cron / 定时（列表展示用**简写**，R15 用户口径「尽量简写」）。
  * ⚠️「间隔周期」已并入 Cron 周期（不再是一档）。
+ *
+ * ⚠️ 简写是**排版压缩**不是枚举语义，不入字典（字典 `sys_trigger_type` 存全称）；
+ * 全称走 `dictLabel("sys_trigger_type", …)`（设计 63 §2.4），这里只当地板。
  */
 export const TRIGGER_TYPE_LABELS: Record<string, string> = {
   manual: "手动",
@@ -26,6 +30,7 @@ export const TRIGGER_TYPE_LABELS: Record<string, string> = {
 /**
  * 任务类型**全称**（表单选项 / 下拉 Tooltip 用；列表列宽有限，那里用简写）。
  * 两份文案同源一表：谁都不许在自己那处拼字符串（DEF-044/047/058 纪律）。
+ * 设计 63：真相源 = 字典 `sys_trigger_type`，本表是回退镜像（pytest 守卫钉值）。
  */
 export const TRIGGER_TYPE_FULL_LABELS: Record<string, string> = {
   manual: "手动执行",
@@ -74,13 +79,13 @@ export function triggerTypeLabel(type: string): string {
   return TRIGGER_TYPE_LABELS[type] ?? type;
 }
 
-/** 类型全称：表单 / 下拉 / Tooltip 用。 */
+/** 类型全称：表单 / 下拉 / Tooltip 用（字典 `sys_trigger_type` 赢，镜像兜底）。 */
 export function triggerTypeFullLabel(type: string): string {
-  return TRIGGER_TYPE_FULL_LABELS[type] ?? triggerTypeLabel(type);
+  return dictLabel("sys_trigger_type", type, TRIGGER_TYPE_FULL_LABELS);
 }
 
 export function misfirePolicyLabel(policy: string): string {
-  return MISFIRE_POLICY_LABELS[policy] ?? policy;
+  return dictLabel("sys_misfire_policy", policy, MISFIRE_POLICY_LABELS);
 }
 
 export function misfirePolicyTip(policy: string): string {
@@ -88,19 +93,42 @@ export function misfirePolicyTip(policy: string): string {
 }
 
 export function concurrentLabel(mode: string): string {
-  return CONCURRENT_LABELS[mode] ?? mode;
+  return dictLabel("sys_concurrent_mode", mode, CONCURRENT_LABELS);
 }
 
+/** 把 `{color,label}` 表拆成 dictLabel/dictListClass 要的两份回退（设计 63 §2.2）。 */
+function splitTagFallback(map: Record<string, { color: string; label: string }>): {
+  labels: Record<string, string>;
+  colors: Record<string, string>;
+} {
+  const labels: Record<string, string> = {};
+  const colors: Record<string, string> = {};
+  for (const [key, item] of Object.entries(map)) {
+    labels[key] = item.label;
+    colors[key] = item.color;
+  }
+  return { labels, colors };
+}
+
+const JOB_STATUS_FALLBACK = splitTagFallback(JOB_STATUS_LABELS);
+const LOG_STATUS_FALLBACK = splitTagFallback(LOG_STATUS_LABELS);
+
 export function jobStatusTag(status: string): { color: string; label: string } {
-  return JOB_STATUS_LABELS[status] ?? { color: "default", label: status };
+  return {
+    color: dictListClass("sys_job_status", status, JOB_STATUS_FALLBACK.colors),
+    label: dictLabel("sys_job_status", status, JOB_STATUS_FALLBACK.labels),
+  };
 }
 
 export function logStatusTag(status: string): { color: string; label: string } {
-  return LOG_STATUS_LABELS[status] ?? { color: "default", label: status };
+  return {
+    color: dictListClass("sys_job_log_status", status, LOG_STATUS_FALLBACK.colors),
+    label: dictLabel("sys_job_log_status", status, LOG_STATUS_FALLBACK.labels),
+  };
 }
 
 export function logTriggerLabel(trigger: string): string {
-  return LOG_TRIGGER_LABELS[trigger] ?? trigger;
+  return dictLabel("sys_job_log_trigger", trigger, LOG_TRIGGER_LABELS);
 }
 
 /**

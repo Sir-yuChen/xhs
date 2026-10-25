@@ -19,6 +19,7 @@ import type {
   SystemSettingUpdatePayload,
   SystemSettingValueType,
 } from "../types";
+import { dictLabel } from "./system-dicts-core";
 
 /** 分组中文名（未知分组回落原名 —— 不猜、也不显示空白）。 */
 export const CATEGORY_LABELS: Record<string, string> = {
@@ -39,7 +40,8 @@ export const VALUE_TYPE_OPTIONS: Array<{ value: SystemSettingValueType; label: s
 
 /** 分组中文名（未知分组原样返回，不显示空白）。 */
 export function categoryLabel(category: string): string {
-  return CATEGORY_LABELS[category] ?? category;
+  // 设计 63：分组名走字典 `sys_setting_category`（未知分组仍回落原名 —— 不猜）。
+  return dictLabel("sys_setting_category", category, CATEGORY_LABELS);
 }
 
 /** 值 → 表格单元格文本。`null` / `undefined` ⇒ `-`（缺值口径，不渲染 0）。 */

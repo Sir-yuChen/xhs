@@ -162,6 +162,35 @@ def list_audit_logs(
     }
 
 
+@router.get("/logs/business")
+def list_business_logs(
+    *,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_perm("system:log:view")),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
+    event: Optional[str] = None,
+    action: Optional[str] = None,
+) -> dict:
+    """业务日志（`business_logs`，设计 64 §2.2）—— 核心业务节点的语义审计层。
+
+    与「审计日志（API）」分工：那边是端点面（谁调了哪个端点），
+    这边是业务面（登录/登出、系统管理增删改、配置变更、队列终态）。
+    保留 90 天（`log_retention_days`，`system.queue_record_cleanup` 清理）。
+    """
+    from backend.app.services import business_log_service
+
+    rows, total = business_log_service.list_logs(
+        db, event=event, action=action, page=page, page_size=page_size
+    )
+    return {
+        "items": [business_log_service.serialize_log(r) for r in rows],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
+
+
 @router.get("/logs/audit/{log_id}", response_model=AuditLogDetailOut)
 def get_audit_log(
     log_id: int,

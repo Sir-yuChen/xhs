@@ -1,6 +1,7 @@
 import {
   BellOutlined,
   CloudDownloadOutlined,
+  SettingOutlined,
   ToolOutlined,
   LogoutOutlined,
   MenuFoldOutlined,
@@ -31,6 +32,8 @@ import type { ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { ProfilePage } from "../../pages/system/profile-page";
+import { SettingsTable } from "../settings/settings-table";
+import { workspaceOf } from "../../lib/workspaces";
 
 import { useAuth } from "../../hooks/use-auth";
 import { useThemeMode } from "../../app/providers";
@@ -44,6 +47,7 @@ import type { AppNotification } from "../../types";
 import { notificationTargetPath } from "../../lib/notification-routes";
 import { UpdateDialog, ManualUpdateDialog } from "../system/update-dialog";
 import { EnvBootstrapDialog, EnvBootstrapGate } from "../system/env-bootstrap-dialog";
+import { useDictVersion } from "../../lib/system-dicts";
 
 const { Sider, Header, Content } = Layout;
 const { Text } = Typography;
@@ -211,6 +215,9 @@ export function WorkspaceShell({
 }: WorkspaceShellProps) {
   const auth = useAuth();
   const { mode: themeMode, toggle: toggleTheme } = useThemeMode();
+  // 字典版本订阅（设计 63 §2.2）：字典管理页改了枚举文案/颜色 ⇒ 版本递增
+  // ⇒ 外壳重渲染 ⇒ 全部子页面重渲染，同步读 `dictLabel` 的表格文案即时更新。
+  useDictVersion();
   const navigate = useNavigate();
   const location = useLocation();
   const [collapsed, setCollapsed] = useState(false);
@@ -223,6 +230,9 @@ export function WorkspaceShell({
   const [manualUpdateOpen, setManualUpdateOpen] = useState(false);
   //: 个人资料弹窗（设计 62 §2.3 / 2026-10-25 用户口径：弹窗展示，不用单独页）
   const [profileOpen, setProfileOpen] = useState(false);
+  // 设计 64 §1.6：三级配置的两处弹窗入口 —— 用户级挂头像下拉，工作区级挂顶栏齿轮。
+  const [userConfigOpen, setUserConfigOpen] = useState(false);
+  const [workspaceConfigOpen, setWorkspaceConfigOpen] = useState(false);
   //: 依赖检查弹窗（用户口径 2026-10-23：「在页面顶部的版本更新图标旁新增一个
   //: 依赖检查，点击弹窗展示检查本地依赖是否完整，不完整则自动触发下载」）。
   const [depCheckOpen, setDepCheckOpen] = useState(false);
@@ -461,6 +471,15 @@ export function WorkspaceShell({
               title="检查运行依赖"
               style={{ display: "flex", alignItems: "center", justifyContent: "center" }}
             />
+            {/* 工作区配置（设计 64 §1.6 用户口径「工作区级别在各个工作区内展示」）：
+                壳是公共组件 ⇒ 每个工作区的顶栏都自动有这个齿轮；当前工作区取自路由。 */}
+            <Button
+              type="text"
+              icon={<SettingOutlined style={{ fontSize: 16 }} />}
+              onClick={() => setWorkspaceConfigOpen(true)}
+              title="工作区配置"
+              style={{ display: "flex", alignItems: "center", justifyContent: "center" }}
+            />
             <Dropdown dropdownRender={() => notificationDropdownContent} trigger={["click"]} placement="bottomRight">
               <Badge count={unreadCount} size="small" offset={[-2, 2]}>
                 <Button type="text" icon={<BellOutlined style={{ fontSize: 16 }} />} style={{ display: "flex", alignItems: "center", justifyContent: "center" }} />
@@ -475,10 +494,12 @@ export function WorkspaceShell({
               menu={{
                 items: [
                   { key: "profile", icon: <UserOutlined />, label: "个人资料" },
+                  { key: "user-config", icon: <SettingOutlined />, label: "用户配置" },
                   { key: "logout", icon: <LogoutOutlined />, label: "退出登录" },
                 ],
                 onClick: ({ key }) => {
                   if (key === "profile") setProfileOpen(true);
+                  else if (key === "user-config") setUserConfigOpen(true);
                   else if (key === "logout") void auth.logout();
                 },
               }}
@@ -519,6 +540,36 @@ export function WorkspaceShell({
         destroyOnHidden
       >
         <ProfilePage />
+      </Modal>
+      {/* 用户配置弹窗（设计 64 §1.6 用户口径「用户级在用户头像下新增下拉选择弹窗展示」）：
+          scope=user —— 个人覆盖，对本账号优先于工作区级/系统级生效。 */}
+      <Modal
+        open={userConfigOpen}
+        title="用户配置"
+        width={1080}
+        centered
+        footer={null}
+        onCancel={() => setUserConfigOpen(false)}
+        destroyOnHidden
+      >
+        <SettingsTable scope="user" title="用户配置" />
+      </Modal>
+      {/* 工作区配置弹窗（设计 64 §1.6「工作区级别在各个工作区内展示」）：
+          scope=workspace —— 只对当前工作区生效；写入由后端收口（admin 专属）。 */}
+      <Modal
+        open={workspaceConfigOpen}
+        title={`工作区配置 · ${workspaceOf(location.pathname)}`}
+        width={1080}
+        centered
+        footer={null}
+        onCancel={() => setWorkspaceConfigOpen(false)}
+        destroyOnHidden
+      >
+        <SettingsTable
+          scope="workspace"
+          workspace={workspaceOf(location.pathname)}
+          title="工作区配置"
+        />
       </Modal>
     </Layout>
   );

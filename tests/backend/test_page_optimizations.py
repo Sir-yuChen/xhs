@@ -12493,3 +12493,50 @@ def test_skipped_video_reason_distinguishes_missing_zone_from_missing_video():
     assert "const noVideoZone = (zoneMap.video?.length ?? 0) === 0;" in src, "没判「视频区域为空」"
     assert "未指定「商品视频」区域（数据包内已勾选" in src, "缺「没指定区域」的文案"
     assert '"数据包内无已勾选的商品视频"' in src, "缺「真没有视频」的文案"
+
+
+# --------------------------------------------------------------------------- #
+# 撑满布局钉底守卫（设计 63 §6.1 / AGENTS 硬约束 7 —— 通病「撑满丢分页」防复发）
+# --------------------------------------------------------------------------- #
+def test_fill_table_wrappers_pin_pagination():
+    """每一处 `.fill-table`（含旧类名）包装的表格，其 scroll 必须带 `y: "100%"`。
+
+    背景：本项目三次把分页顶出屏（商品台账 / 审计日志 Tab / 应用日志文本区），
+    用户口径「这个问题每次都发生……记录下，后续不要再出现」（AGENTS §3 硬约束 7）。
+    `.fill-table` 三区布局的表体滚动全靠 `scroll.y="100%"` 从 CSS 高度链拿高度 ——
+    少了这个键，表格按内容撑开，分页立刻出屏。
+    """
+    import re
+
+    src = ROOT / "frontend/src"
+    offenders: list[str] = []
+    checked = 0
+    for path in src.rglob("*.tsx"):
+        text = path.read_text(encoding="utf-8")
+        # 只数**外层 div 包装**（`rootClassName` 与它包的是同一张表，不算第二处
+        # —— shop-items / datacenter 是「div + rootClassName」双挂载同表写法）。
+        wrappers = len(re.findall(r'className="(fill-table|shop-items-table|violation-table)"', text))
+        if wrappers == 0:
+            continue
+        checked += 1
+        pinned = len(re.findall(r'y:\s*"100%"', text))
+        assert pinned >= wrappers, (
+            f"{path.relative_to(src)} 有 {wrappers} 处 fill-table 包装，但只有 {pinned} 处 "
+            f'`y: "100%"` —— 有表格没走表体内滚动，分页会被顶出屏（AGENTS 硬约束 7）'
+        )
+        offenders.append(path.name)
+    assert checked >= 8, f"守卫只扫到 {checked} 个文件 —— fill-table 接线面缩水了？（应为空转保护）"
+
+
+def test_app_log_text_area_scrolls_instead_of_overlaying_pagination():
+    """应用日志的日志文本区：`flex:1` 的同时必须亲自给 `overflow:auto`。
+
+    2026-10-25 用户截图实测：只给 flex 不给滚动 ⇒ 长文本透明地盖在「较早/较新」
+    翻页按钮上（用户原话「透明部分影响操作按钮了」）。flex 子项不自带滚动。
+    """
+    text = (ROOT / "frontend/src/pages/system/system-logs-panel.tsx").read_text(encoding="utf-8")
+    m = re.search(r"flex: 1,\s*\n\s*minHeight: 0,(.*?)whiteSpace", text, re.S)
+    assert m, "日志文本区的样式块找不到（结构变了就换锚，别删守卫）"
+    assert "overflow" in m.group(1), (
+        "日志文本区缺 `overflow: auto` —— 长文本会透明盖住翻页按钮（AGENTS 硬约束 7）"
+    )

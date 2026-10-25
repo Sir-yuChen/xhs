@@ -1,3 +1,4 @@
+import { dictListClass } from "./system-dicts-core";
 /**
  * 订单管理的**纯逻辑**（设计 16 §7，M6 · 一期只读）。
  *
@@ -27,22 +28,13 @@ export const ORDER_STATUSES = [
 
 /** 状态 → 颜色（antd Tag 的 color 值；表外值走 `default`）。 */
 export function orderStatusColor(status?: string | null): string {
-  switch (status) {
-    case "待付款":
-      return "gold";
-    case "待发货":
-      return "orange";
-    case "待收货":
-      return "blue";
-    case "已完成":
-      return "green";
-    case "售后中":
-      return "red";
-    case "已关闭":
-      return "default";
-    default:
-      return "default";
-  }
+  // 设计 63：颜色走字典 `xhs_order_status`（value=中文状态，镜像色表兜底）。
+  return dictListClass("xhs_order_status", status ?? "", Object.fromEntries(
+    ORDER_STATUSES.map((value, index) => [
+      value,
+      ["gold", "orange", "blue", "green", "red", "default"][index] ?? "default",
+    ])
+  ));
 }
 
 /**

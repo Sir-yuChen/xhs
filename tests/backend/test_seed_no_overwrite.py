@@ -582,14 +582,26 @@ def test_dict_seed_mirrors_python_constants():
     import json
 
     from backend.app.models.dict import DICT_STATUSES, LIST_CLASSES
+    from backend.app.models.generation import REGEN_SCOPES
     from backend.app.models.menu import MENU_STATUSES, MENU_TYPES
     from backend.app.models.note import PUBLISH_STATUSES
     from backend.app.models.notification import NOTIFICATION_LEVELS, NOTIFICATION_SOURCE_TYPES
+    from backend.app.models.order import ORDER_STATUSES
+    from backend.app.models.prompt import PROMPT_TASK_TYPES
     from backend.app.models.role import ROLE_STATUSES
-    from backend.app.models.scheduled_job import JOB_STATUSES, LOG_STATUSES
+    from backend.app.models.scheduled_job import (
+        CONCURRENT_MODES,
+        JOB_STATUSES,
+        LOG_STATUSES,
+        MISFIRE_POLICIES,
+        TRIGGER_TYPES,
+    )
     from backend.app.models.user import USER_STATUSES
+    from apis.xhs_qianfan_apis import QIANFAN_ITEM_STATUSES
+    from backend.app.api.platforms.xhs.qianfan.goods import NOTE_COUNT_OPS
     from backend.app.services.note_queue_service import (
         ACTIVE_STATUSES,
+        QUEUE_SOURCES,
         RETRYABLE_STATUSES,
         TERMINAL_STATUSES,
     )
@@ -619,6 +631,20 @@ def test_dict_seed_mirrors_python_constants():
         "sys_note_form": ("image", "video"),
         "sys_notify_level": NOTIFICATION_LEVELS,
         "sys_notify_source": NOTIFICATION_SOURCE_TYPES,
+        # 设计 63 枚举全量字典化：新组里有 Python 常量的逐组钉（无常量的
+        # 纯前端呈现域由前端 vitest 钉镜像，见 frontend system-dicts 种子测试）。
+        "sys_trigger_type": TRIGGER_TYPES,
+        "sys_misfire_policy": MISFIRE_POLICIES,
+        "sys_concurrent_mode": CONCURRENT_MODES,
+        "sys_job_log_trigger": ("scheduled", "manual"),
+        "sys_queue_source": QUEUE_SOURCES,
+        "sys_prompt_task_type": PROMPT_TASK_TYPES,
+        #: 旧粒度 `text` 已不在新请求白名单（REGEN_SCOPES），但历史版本行的
+        #: `regen_scope` 列里还有它 ⇒ 字典要保留显示「只改文案」。
+        "sys_regenerate_scope": tuple(dict.fromkeys([*REGEN_SCOPES, "text"])),
+        "xhs_order_status": ORDER_STATUSES,
+        "xhs_item_status": tuple(QIANFAN_ITEM_STATUSES),
+        "xhs_note_count_op": NOTE_COUNT_OPS,
     }
 
     for code, values in expected.items():
@@ -800,3 +826,54 @@ def test_register_lenient_path_still_validates_uniqueness(api_client, register_s
     )
     assert second.status_code == 400, second.text
     assert second.json().get("detail") in {"EMAIL_TAKEN", "USERNAME_TAKEN"}, second.text
+
+
+# --------------------------------------------------------------------------- #
+# 字典镜像前端常量（设计 63：纯前端呈现域「种子即真相」由这里钉）
+# --------------------------------------------------------------------------- #
+def test_dict_seed_mirrors_frontend_constants():
+    """纯前端呈现域的字典组，键集合必须与**前端常量**逐个一致（设计 63 §2.4）。
+
+    这些组没有 Python 常量可镜像（展示层文案住在前端）—— 前端常量是回退地板，
+    字典是可配置层；两边键集合漂移 ⇒ 前端改了枚举忘加种子（或反之）⇒ 这里红。
+    读法与页面守卫同型：正则从 tsx/ts 抽 `Record` 字面量的**顶层**键（两空格缩进、
+    不进嵌套对象），不 import 前端模块。
+    """
+    import json
+    import re
+
+    frontend = ROOT / "frontend" / "src"
+
+    def record_keys(rel_path: str, const_name: str) -> set[str]:
+        text = (frontend / rel_path).read_text(encoding="utf-8")
+        pattern = re.escape(const_name) + r"[^=]*=\s*\{(.*?)\n\}"
+        m = re.search(pattern, text, re.S)
+        assert m, f"{rel_path} 里找不到 {const_name}"
+        key_pattern = r'^  ["\']?([A-Za-z0-9_.\-]+)["\']?\s*:'
+        keys = set(re.findall(key_pattern, m.group(1), re.M))
+        assert keys, f"{rel_path} {const_name} 抽不出键（正则失配）"
+        return keys
+
+    payload = json.loads((SEED_DIR / "dict_seed.json").read_text(encoding="utf-8"))
+    by_code = {
+        item["code"]: {entry["value"] for entry in item["items"]}
+        for item in payload["types"]
+    }
+
+    expected = {
+        "sys_task_type": ("lib/task-records.ts", "TASK_TYPE_LABELS"),
+        "sys_publish_task_status": ("pages/platforms/xhs/publish-page.tsx", "STATUS_TAG_MAP"),
+        "sys_login_state_view": ("lib/login-state.ts", "VIEWS"),
+        "xhs_account_status": ("pages/platforms/xhs/accounts-page.tsx", "statusLabelMap"),
+        "xhs_package_rule_op": ("pages/platforms/xhs/data-package-rules-modal.tsx", "OP_LABELS"),
+        "xhs_product_updated_field": ("lib/product-edit.ts", "UPDATED_LABELS"),
+        "sys_publish_status": ("lib/note-publish-gates.ts", "PUBLISH_STATUS_LABELS"),
+    }
+    for code, (rel, const) in expected.items():
+        keys = record_keys(rel, const)
+        assert code in by_code, f"dict_seed.json 缺 {code} 组"
+        assert by_code[code] == keys, (
+            f"{code} 与前端常量漂移：字典 {sorted(by_code[code])} vs 前端 {sorted(keys)}"
+        )
+
+

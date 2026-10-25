@@ -430,3 +430,59 @@ def test_menus_mine_not_swallowed_by_path_param(client, admin_token):
     body = resp.json()
     assert "items" in body and isinstance(body["items"], list)
     assert body["total"] > 0, "admin 应能看到菜单"
+
+
+# --------------------------------------------------------------------------- #
+# ⑪ 统一字典读出口（设计 63 §2.1）
+# --------------------------------------------------------------------------- #
+def test_dict_options_requires_no_perm_but_login(client, admin_token, normal_token):
+    """`GET /system/dict/options`：登录即可（无权限码），未登录 401。
+
+    枚举文案是每个页面的展示依赖 —— 普通用户必须能读，否则他的页面全退回
+    镜像常量（功能不坏，但「字典可改」对他不生效）。
+    """
+    assert client.get("/api/system/dict/options").status_code == 401
+    resp = client.get("/api/system/dict/options", headers=_auth(normal_token))
+    assert resp.status_code == 200, resp.text
+    resp = client.get("/api/system/dict/options", headers=_auth(admin_token))
+    assert resp.status_code == 200
+
+
+def test_dict_options_shape_and_normal_only(client, admin_token, db_factory):
+    """只下发四字段切片；停用组/停用项不出；`codes` 白名单生效。"""
+    from sqlalchemy import select
+
+    from backend.app.models.dict import DictItem, DictType
+
+    db = db_factory()
+    try:
+        # 造一组停用类型 + 一个停用项（各不污染种子组）
+        t = DictType(code="zz_test_off", name="停用组", status="disabled", created_at=__import__("datetime").datetime.now())
+        db.add(t)
+        db.flush()
+        db.add(DictItem(type_id=t.id, type_code=t.code, label="x", value="v", status="normal"))
+        seed_type = db.scalar(select(DictType).where(DictType.code == "sys_task_status"))
+        assert seed_type is not None
+        db.add(DictItem(type_id=seed_type.id, type_code=seed_type.code, label="停用项", value="zz_disabled_val", status="disabled"))
+        db.commit()
+    finally:
+        db.close()
+
+    headers = _auth(admin_token)
+    body = client.get("/api/system/dict/options", headers=headers).json()
+    items = body["items"]
+    assert "zz_test_off" not in items, "停用组整组不出"
+    assert "sys_task_status" in items
+    values = [entry["value"] for entry in items["sys_task_status"]]
+    assert "zz_disabled_val" not in values, "停用项单条不出"
+    assert "pending" in values
+
+    entry = items["sys_task_status"][0]
+    assert set(entry) == {"value", "label", "list_class", "sort_order"}, (
+        "只下发消费方四字段，管理字段（status/remark/type_id）不下发"
+    )
+
+    filtered = client.get(
+        "/api/system/dict/options", headers=headers, params={"codes": "sys_task_status,sys_yes_no"}
+    ).json()["items"]
+    assert set(filtered) == {"sys_task_status", "sys_yes_no"}

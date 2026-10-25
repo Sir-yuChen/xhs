@@ -43,15 +43,24 @@ _session_factory = SessionLocal
 logger = logging.getLogger(__name__)
 
 #: 只审计这些前缀下的**写**操作（读全量记录没有审计价值且会写爆 SQLite）。
-AUDITED_WRITE_PREFIXES = ("/api/xhs/", "/api/llm/")
+#: 设计 64 §2.3（2026-10-25）：系统管理域（`/api/system/**`）与配置（`/api/settings/**`）、
+#: 调度（`/api/schedule/**`）的写操作**此前不在审计面** —— 增删改查零留痕
+#: （用户口径「操作删除，修改新增等节点」）。补进审计前缀。
+AUDITED_WRITE_PREFIXES = ("/api/xhs/", "/api/llm/", "/api/system/", "/api/settings/", "/api/schedule/")
 
-#: 这些路径**永不**记录：认证（含凭据）、健康检查（高频无价值）。
+#: 这些路径**永不**记录：认证（含凭据 —— 它的出入口语义由
+#: `business_log_service` 的定向埋点记，见 auth.py）、健康检查（高频无价值）。
 SKIP_PREFIXES = (
     "/api/auth/",
     "/api/health",
     "/docs",
     "/openapi.json",
 )
+
+#: 这些前缀下的写操作**额外**写一条业务日志（`business_logs`，设计 64 §2.3）——
+#: 与 api_logs 的分工：api_logs = 端点面留痕，business_logs = 业务语义面
+#: （"管理员改了系统域的什么"）。同一次请求两行各司其职。
+BUSINESS_EVENT_PREFIXES = ("/api/system/", "/api/settings/", "/api/schedule/")
 
 #: 响应的业务码 → 事务结论（表里 `status` 列）。
 _STATUS_OK = "success"
@@ -98,9 +107,40 @@ class ApiAuditMiddleware(BaseHTTPMiddleware):
             self._write(request, 500, (time.perf_counter() - started) * 1000)
             raise
         elapsed_ms = (time.perf_counter() - started) * 1000
-        if _should_audit(request.method, request.url.path, response.status_code):
+        path = request.url.path
+        should = _should_audit(request.method, path, response.status_code)
+        if should:
             self._write(request, response.status_code, elapsed_ms)
+        #: 业务语义面（设计 64 §2.3）：系统域写操作进 business_logs
+        #:（成功与失败都记 —— 失败的越权尝试正是要看的）。
+        if should and request.method.upper() in ("POST", "PUT", "PATCH", "DELETE") and any(
+            path.startswith(p) for p in BUSINESS_EVENT_PREFIXES
+        ):
+            self._write_business(request, response.status_code)
         return response
+
+    @staticmethod
+    def _write_business(request: Request, status_code: int) -> None:
+        """系统域写操作 → `business_logs`（设计 64 §2.3）。失败只 warning。"""
+        try:
+            from backend.app.services import business_log_service
+
+            user_id = _current_user_id(request)
+            outcome = _status_bucket(status_code)
+            business_log_service.record(
+                "systemops.request",
+                action=request.method.lower(),
+                actor_id=user_id,
+                target_type="endpoint",
+                target_id=request.url.path[:128],
+                summary=f"{request.method} {request.url.path} → {outcome}({status_code})",
+                level=business_log_service.LEVEL_INFO
+                if status_code < 400
+                else business_log_service.LEVEL_WARNING,
+                detail={"status_code": status_code},
+            )
+        except Exception as exc:  # noqa: BLE001 - 业务日志失败绝不阻断请求
+            logger.warning("business log write failed for %s: %s", request.url.path, exc)
 
     @staticmethod
     def _write(request: Request, status_code: int, elapsed_ms: float) -> None:

@@ -1,3 +1,4 @@
+import { dictLabel } from "./system-dicts-core";
 /**
  * M4「商品编辑优化」的**纯逻辑**（设计 20）。
  *
@@ -52,7 +53,9 @@ const UPDATED_LABELS: Record<string, string> = {
  * 报「已更新商品」而其实一个字段没动，是比不提示更糟的误导。
  */
 export function updatedSummary(updated: string[] | null | undefined): string | null {
-  const names = (updated ?? []).map((key) => UPDATED_LABELS[key] ?? key);
+  const names = (updated ?? []).map(
+    (key) => dictLabel("xhs_product_updated_field", key, UPDATED_LABELS) ?? key
+  );
   if (names.length === 0) return null;
   return `已更新${names.join("、")}`;
 }

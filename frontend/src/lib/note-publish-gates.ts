@@ -1,3 +1,4 @@
+import { dictLabel, dictListClass } from "./system-dicts-core";
 /**
  * 发布门禁与发布态呈现（设计 13 §31「发布门禁」+ §32.3「发布状态唯一字段」）—— **纯逻辑，唯一实现**。
  *
@@ -64,13 +65,28 @@ export function publishStatusTag(
   publishStatus: string | undefined
 ): PublishStatusView {
   const status = (publishStatus ?? "").trim();
-  const label = PUBLISH_STATUS_LABELS[status] ?? PUBLISH_STATUS_LABELS.pending;
+  // 设计 63：文案/颜色走字典 `sys_publish_status`，镜像常量兜底（未知值落 pending
+  // 的旧口径保留：空值/表外值按「待发布」呈现）。
+  const labelKey = PUBLISH_STATUS_LABELS[status] ? status : "pending";
+  const label = PUBLISH_STATUS_LABELS[labelKey];
   return {
-    text: label.text,
-    color: label.color,
+    text: dictLabel("sys_publish_status", labelKey, publishLabelTexts()),
+    color: dictListClass("sys_publish_status", labelKey, publishLabelColors()),
     toggleable: noteType !== "local_generated",
     failed: status === "failed",
   };
+}
+
+function publishLabelTexts(): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(PUBLISH_STATUS_LABELS).map(([key, item]) => [key, item.text])
+  );
+}
+
+function publishLabelColors(): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(PUBLISH_STATUS_LABELS).map(([key, item]) => [key, item.color])
+  );
 }
 
 /**

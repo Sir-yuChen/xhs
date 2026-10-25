@@ -24,6 +24,8 @@
  * 页面 tsx 里塞逻辑就没办法在不渲染的情况下验证（DEF-044：同一语义不留两份实现）。
  */
 
+import { dictLabel, dictListClass } from "./system-dicts-core";
+
 /** 队列**项**类型（一行 = 一篇笔记 / 一个商品；worker 认领只认这三个）。 */
 export const QUEUE_ITEM_TASK_TYPES: readonly string[] = [
   "xhs_note_sync_item",
@@ -262,8 +264,8 @@ export const TASK_SOURCE_TIPS: Record<string, string> = {
  */
 export function taskSourceLabel(source?: string | null): string {
   const key = String(source ?? "").trim();
-  if (!key) return TASK_SOURCE_LABELS.manual;
-  return TASK_SOURCE_LABELS[key] || key;
+  if (!key) return dictLabel("sys_queue_source", "manual", TASK_SOURCE_LABELS);
+  return dictLabel("sys_queue_source", key, TASK_SOURCE_LABELS);
 }
 
 /** 来源说明（Tooltip 文案；表外给一句通用说明，不返回空串）。 */
@@ -376,7 +378,9 @@ export function cleanOutcomeText(result: CleanResultShape): {
  * 造一个好看的名字会让用户把没见过的类型当成已知类型排查。
  */
 export function taskTypeLabel(taskType: string): string {
-  return TASK_TYPE_LABELS[taskType] || taskType || "未知类型";
+  // 设计 63：文案走字典 `sys_task_type`（表外值原样返回的口径由 dictLabel 保证）。
+  const label = dictLabel("sys_task_type", taskType, TASK_TYPE_LABELS);
+  return taskType ? label : "未知类型";
 }
 
 /** 类型分组（筛选用）。 */
@@ -392,12 +396,12 @@ export function taskTypeGroup(taskType: string): TaskRecordGroup {
 
 /** 状态中文名（未知状态原样返回，同 `taskTypeLabel` 的口径）。 */
 export function taskStatusLabel(status: string): string {
-  return TASK_STATUS_LABELS[status] || status || "未知状态";
+  return dictLabel("sys_task_status", status, TASK_STATUS_LABELS) || "未知状态";
 }
 
 /** 状态颜色（未知状态按 default，不红也不绿）。 */
 export function taskStatusColor(status: string): string {
-  return TASK_STATUS_COLORS[status] || "default";
+  return dictListClass("sys_task_status", status, TASK_STATUS_COLORS);
 }
 
 /** 这条任务能不能取消（只有未终态能）。 */

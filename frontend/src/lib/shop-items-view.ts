@@ -22,6 +22,7 @@
 
 import { channelUnavailable } from "./sync-gates";
 import type { XhsLoginChannels } from "../types";
+import { dictLabel, dictListClass } from "./system-dicts-core";
 
 /**
  * 状态筛选键里**无法从本地台账区分**的四个审核态。
@@ -92,22 +93,18 @@ export function skuCell(value: number | null | undefined): string {
  * 取色偏「一眼可辨」而不是好看：在售绿、下架灰、异常（冻结/驳回/整改）红、待审橙。
  */
 export function statusTagColor(statusKey: string): string {
-  switch (statusKey) {
-    case "on_shelf":
-      return "green";
-    case "off_shelf":
-      return "default";
-    case "audit_passed":
-      return "cyan";
-    case "auditing":
-      return "orange";
-    case "audit_rejected":
-    case "rectify":
-    case "frozen":
-      return "red";
-    default:
-      return "default";
-  }
+  // 设计 63：颜色走字典 `xhs_item_status`（镜像色表兜底；未知键给 default 灰）。
+  return dictListClass("xhs_item_status", statusKey, {
+    "on_shelf": "green",
+    "off_shelf": "default",
+    "audit_passed": "cyan",
+    "auditing": "orange",
+    "audit_rejected": "red",
+    "rectify": "red",
+    "frozen": "red",
+  });
+  /* 旧 switch：on_shelf=green / off_shelf=default / audit_passed=cyan /
+     auditing=orange / audit_rejected·rectify·frozen=red —— 已入镜像色表 */
 }
 
 /**
@@ -138,6 +135,11 @@ export const DEFAULT_NOTE_COUNT_OP: NoteCountOp = "lt";
 export const NOTE_COUNT_OP_OPTIONS: { value: NoteCountOp; label: string }[] = NOTE_COUNT_OPS.map(
   (value) => ({ value, label: NOTE_COUNT_OP_LABELS[value] })
 );
+
+/** 比较符 → 中文（字典 `xhs_note_count_op` 赢，镜像表兜底；渲染层用）。 */
+export function noteCountOpLabel(op: string): string {
+  return dictLabel("xhs_note_count_op", op, NOTE_COUNT_OP_LABELS);
+}
 
 /**
  * 挂链笔记数 → 请求参数（v1.34）。**留空 = 不筛**，不是「小于 0」。
@@ -230,7 +232,8 @@ export const SORT_FIELD_LABELS: Record<string, string> = {
  * 箭头表达「用户点了什么」，这行表达「数据实际按什么排的」。
  */
 export function sortSummary(sortField: string, order: string): string {
-  const name = SORT_FIELD_LABELS[sortField] || sortField || SORT_FIELD_LABELS.on_shelf_time;
+  const name = dictLabel("xhs_sort_field", sortField, SORT_FIELD_LABELS)
+    || sortField || SORT_FIELD_LABELS.on_shelf_time;
   return `${name} · ${order === "asc" ? "升序" : "降序"}`;
 }
 
@@ -428,7 +431,7 @@ export function batchOperateBlock(
  * 删除额外多一句「不可恢复」—— 平台侧商品删除没有撤销入口。
  */
 export function batchOperateHint(action: string, count: number): string {
-  const label = OPERATE_LABELS[action] || action;
+  const label = dictLabel("xhs_goods_operate", action, OPERATE_LABELS) || action;
   const lines = [
     `将对 ${count} 个平台商品执行「${label}」—— 会真实修改千帆店铺，不是只改本地台账。`,
     "不支持的商品只记录、不执行；本地状态即时刷新，最终以平台为准。",

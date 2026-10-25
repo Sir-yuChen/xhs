@@ -66,6 +66,7 @@ import {
 import { formatShanghaiTime } from "../../../lib/time";
 import type { PlatformAccount, XhsLoginChannels } from "../../../types";
 import { WaitMask } from "../../../components/ui/wait-mask";
+import { dictLabel, dictListClass } from "../../../lib/system-dicts";
 
 const { Text } = Typography;
 
@@ -100,6 +101,15 @@ const statusLabelMap: Record<string, string> = {
   expired: "过期",
   unknown: "未知",
 };
+
+// 设计 63：状态文案/颜色走字典 `xhs_account_status`（上表为镜像兜底）。
+function accountStatusLabel(status: string): string {
+  return dictLabel("xhs_account_status", status, statusLabelMap);
+}
+
+function accountStatusColor(status: string): string {
+  return dictListClass("xhs_account_status", status, statusColorMap);
+}
 
 /**
  * 平台门禁判据 / 三态决策 / 结果行文案都在 `lib/sync-gates.ts`（§19）——
@@ -744,7 +754,7 @@ export function XhsAccountsPage() {
               const isGoodsSyncing = goodsSyncIds.has(account.id);
               /** 时间行文案（同一份文本既用于显示、也用于 tip，避免两处各拼一次而漂移）。 */
               const updatedText = `更新时间：${formatDate(account.updated_at || account.created_at)}`;
-              const statusColor = statusColorMap[account.status] || "default";
+              const statusColor = accountStatusColor(account.status) || "default";
               /**
                * 三个平台的登录态标签（设计 13 §18 / §18.14；2026-09-21 拆分），
                * 挂在昵称后面。
@@ -868,7 +878,7 @@ export function XhsAccountsPage() {
                         </Text>
                       </div>
                       <Tag color={statusColor} style={{ marginRight: 0, flexShrink: 0 }}>
-                        {statusLabelMap[account.status] || account.status}
+                        {accountStatusLabel(account.status) || account.status}
                       </Tag>
                     </div>
 

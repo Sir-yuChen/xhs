@@ -55,6 +55,7 @@ from backend.app.services.job_registry import (
     get_job_spec,
     job_registry,
     validate_params,
+    workspace_for_job,
 )
 from backend.app.services.schedule_triggers import (
     SCHEDULER_TIMEZONE,
@@ -529,6 +530,7 @@ def create_job(
         user_id=current_user.id,
         name=payload.name.strip(),
         job_key=spec.key,
+        workspace=workspace_for_job(spec.key),
         params=payload.params,
         remark=payload.remark.strip(),
         # 用户口径（2026-09-24）「所有任务都是内置的」⇒ 新建行一律标记 builtin。
@@ -832,6 +834,68 @@ def validate_cron(payload: CronValidateRequest, current_user: User = Depends(get
         times.append(nxt.replace(tzinfo=None).isoformat())
         previous = nxt
     return {"valid": True, "next_fire_times": times}
+
+
+@router.get("/overview")
+def schedule_overview(
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """跨工作区定时任务总览（设计 64 §3.3，**admin 专属**）。
+
+    决策背景：调度器是**公共单例**（不按工作区拆分，企业级对照见设计 64 §3.1）——
+    行级 `user_id` 隔离管「我的任务中心」，`workspace` 列管归属聚合。
+    本端点把全部 job 按工作区/归属人聚合给管理员；普通用户 403。
+    """
+    from backend.app.core.roles import ROLE_ADMIN, normalize_role
+
+    if normalize_role(current_user.role) != ROLE_ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "SCHEDULE_OVERVIEW_FORBIDDEN",
+                "message": "定时任务总览只有超级管理员可以查看",
+            },
+        )
+
+    from backend.app.models import User
+
+    rows = db.execute(
+        select(ScheduledJob, User.username)
+        .join(User, User.id == ScheduledJob.user_id, isouter=True)
+        .order_by(ScheduledJob.workspace.asc(), ScheduledJob.id.asc())
+    ).all()
+    items = []
+    for job, owner_name in rows:
+        items.append(
+            {
+                "id": job.id,
+                "workspace": job.workspace,
+                "name": job.name,
+                "job_key": job.job_key,
+                "owner_id": job.user_id,
+                "owner_name": owner_name or "-",
+                "status": job.status,
+                "trigger_type": job.trigger_type,
+                "cron_expression": job.cron_expression,
+                "is_builtin": bool(job.is_builtin),
+                "last_run_at": job.last_run_at.isoformat() if job.last_run_at else None,
+                "next_run_at": job.next_run_at.isoformat() if job.next_run_at else None,
+                "run_count": int(job.run_count or 0),
+                "fail_count": int(job.fail_count or 0),
+                "last_status": job.last_status,
+            }
+        )
+    by_workspace: dict[str, int] = {}
+    for item in items:
+        key = item["workspace"] or "-"
+        by_workspace[key] = by_workspace.get(key, 0) + 1
+    return {
+        "items": items,
+        "total": len(items),
+        "by_workspace": by_workspace,
+    }
 
 
 @router.get("/status")

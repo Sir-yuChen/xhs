@@ -15,6 +15,7 @@
  */
 
 import type { ViolationEnumOption, ViolationReasonTag } from "../types/violation";
+import { dictListClass } from "./system-dicts-core";
 
 // --------------------------------------------------------------------------- #
 // 子 Tab
@@ -466,38 +467,31 @@ export type ViolationTagColor = "default" | "success" | "processing" | "error" |
 
 /** 处罚状态 → 标签色（按 `violationStatus` 数值，不按文案 —— 文案可能变）。 */
 export function statusTagColor(status: unknown): ViolationTagColor {
-  switch (Number(status)) {
-    case 0:
-      return "default"; // 待处罚
-    case 1:
-      return "warning"; // 已处罚
-    case 2:
-      return "error"; // 处罚中
-    case -1:
-      return "default"; // 已取消
-    default:
-      return "default";
-  }
+  if (status === null || status === undefined || status === "") return "default";
+  // 设计 63：颜色走字典 `xhs_violation_punish_status`（value=数值字符串，镜像兜底；
+  // 非数值 → NaN → 字典与回退都查不到 → default，与旧 switch 的 default 分支同口径）。
+  return dictListClass("xhs_violation_punish_status", String(Number(status)), {
+    "0": "default",
+    "1": "warning",
+    "2": "error",
+    "-1": "default",
+  }) as ViolationTagColor;
 }
 
 /** 申诉状态 → 标签色（`appealStatus`：0 可申诉 / 100 不可申诉）。 */
 export function appealTagColor(appealStatus: unknown): ViolationTagColor {
-  switch (Number(appealStatus)) {
-    case 0:
-      return "processing"; // 可申诉
-    case 1:
-      return "processing"; // 申诉中
-    case 2:
-      return "success"; // 申诉成功
-    case 3:
-      return "error"; // 申诉失败
-    case 6:
-      return "default"; // 超时未申诉
-    case 100:
-      return "default"; // 不可申诉
-    default:
-      return "default";
+  if (appealStatus === null || appealStatus === undefined || appealStatus === "") {
+    return "default";
   }
+  // 设计 63：颜色走字典 `xhs_violation_appeal_status`（镜像色表兜底）。
+  return dictListClass("xhs_violation_appeal_status", String(Number(appealStatus)), {
+    "0": "processing",
+    "1": "processing",
+    "2": "success",
+    "3": "error",
+    "6": "default",
+    "100": "default",
+  }) as ViolationTagColor;
 }
 
 /** 「至 2027/1/23 结束」后缀（处罚有明确结束时间时显示；长期有效不显示）。 */

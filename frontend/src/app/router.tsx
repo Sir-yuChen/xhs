@@ -112,6 +112,7 @@ export function AppRouter() {
           <Route path="/system/dicts" element={<SystemPage />} />
           <Route path="/system/settings" element={<SystemPage />} />
           <Route path="/system/logs" element={<SystemPage />} />
+          <Route path="/system/scheduler" element={<SystemPage />} />
           {/* 403：直敲未授权 URL 时可达（设计 49 §模块八） */}
           <Route path="/403" element={<ForbiddenPage />} />
           {/* 平台工作区顶层（设计 62 §2.4）：在 AppShell 布局**之内** ——

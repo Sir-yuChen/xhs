@@ -47,6 +47,7 @@ import { formatShanghaiTime } from "../../../lib/time";
 import type { PlatformAccount, PublishAsset, PublishJob } from "../../../types";
 
 import { WaitMask } from "../../../components/ui/wait-mask";
+import { dictLabel, dictListClass } from "../../../lib/system-dicts";
 const { Title, Text, Paragraph } = Typography;
 
 const STATUS_TAG_MAP: Record<string, { color: string; label: string }> = {
@@ -59,8 +60,28 @@ const STATUS_TAG_MAP: Record<string, { color: string; label: string }> = {
   scheduled: { color: "gold", label: "已定时" },
 };
 
+// 设计 63：发布任务状态走字典 `sys_publish_task_status`（上表为镜像兜底）。
+function publishTaskStatusTag(status: string): { color: string; label: string } {
+  return {
+    color: dictListClass("sys_publish_task_status", status, statusTagColors()),
+    label: dictLabel("sys_publish_task_status", status, statusTagLabels()),
+  };
+}
+
+function statusTagLabels(): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(STATUS_TAG_MAP).map(([key, item]) => [key, item.label])
+  );
+}
+
+function statusTagColors(): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(STATUS_TAG_MAP).map(([key, item]) => [key, item.color])
+  );
+}
+
 function getStatusTag(status: string) {
-  const mapping = STATUS_TAG_MAP[status] ?? { color: "default", label: status };
+  const mapping = publishTaskStatusTag(status);
   return <Tag color={mapping.color}>{mapping.label}</Tag>;
 }
 

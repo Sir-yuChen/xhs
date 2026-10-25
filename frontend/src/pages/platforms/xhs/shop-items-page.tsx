@@ -157,6 +157,7 @@ import type {
   XhsShopItemsQuery,
   XhsShopItemsResponse,
 } from "../../../types";
+import { dictLabel, dictListClass, useDictOptions } from "../../../lib/system-dicts";
 
 const { Text, Paragraph } = Typography;
 const { RangePicker } = DatePicker;
@@ -179,6 +180,9 @@ const { RangePicker } = DatePicker;
  */
 
 /** 状态选项与后端 `QIANFAN_ITEM_STATUSES` 一一对应（顺序照千帆页面的 tab）。 */
+/** 商品状态筛选的**回退选项**（设计 63）：真值走字典 `xhs_item_status`
+ *  （`statusFilterOptions`，组件内 useDictOptions），「全部」是前端独有的
+ *  不筛档 —— 字典里没有，靠回退合并补位。 */
 const STATUS_OPTIONS: { value: XhsShopItemStatus; label: string }[] = [
   { value: "on_shelf", label: "售卖中" },
   { value: "all", label: "全部" },
@@ -604,13 +608,22 @@ function formValuesToDraft(values: QueryForm): ShopItemsFilterDraft {
 function renderItemNoteInfo(note: XhsItemNote) {
   // 全站消息提醒统一走 antd message（设计 04 §3.6）：复制反馈用继承主题的实例。
   const { message } = App.useApp();
-  const publishLabel: Record<string, { text: string; color: string }> = {
-    pending: { text: "待发布", color: "orange" },
-    publishing: { text: "发布中", color: "blue" },
-    published: { text: "已发布", color: "green" },
-    failed: { text: "发布失败", color: "red" },
+  // 设计 63：与 lib/note-publish-gates.ts 逐字重复的那份字典已收敛 ——
+  // 走统一字典 `sys_publish_status`（镜像常量在 note-publish-gates 里单点保留）。
+  const status = {
+    text: dictLabel("sys_publish_status", note.publish_status, {
+      pending: "待发布",
+      publishing: "发布中",
+      published: "已发布",
+      failed: "发布失败",
+    }),
+    color: dictListClass("sys_publish_status", note.publish_status, {
+      pending: "orange",
+      publishing: "blue",
+      published: "green",
+      failed: "red",
+    }),
   };
-  const status = publishLabel[note.publish_status];
   return (
     <Space direction="vertical" size={10} style={{ width: "100%" }}>
       <div>
@@ -784,6 +797,9 @@ function GenerationsPanel({
 
 export function XhsShopItemsPage() {
   const navigate = useNavigate();
+  // 设计 63：商品状态筛选选项走字典 `xhs_item_status`（STATUS_OPTIONS 兜底，
+  // 「全部」档由回退合并自动补位）。
+  const statusFilterOptions = useDictOptions("xhs_item_status", STATUS_OPTIONS);
   // 全站消息提醒统一走 antd message（设计 04 §3.6，2026-09-25 用户口径：
   // 「所有消息提醒参考 antd 成熟组件，不要在页面暂用空间」）—— `App.useApp()`
   // 替代静态 `message` 导入，实例继承 ConfigProvider 的主题与 locale。
@@ -1462,7 +1478,7 @@ export function XhsShopItemsPage() {
       return;
     }
     const ids = normalizeDeleteIds(selectedItemIds);
-    const label = OPERATE_LABELS[action] || action;
+    const label = dictLabel("xhs_goods_operate", action, OPERATE_LABELS) || action;
     Modal.confirm({
       centered: true,
       title: `对 ${ids.length} 个平台商品执行「${label}」？`,
@@ -1575,7 +1591,7 @@ export function XhsShopItemsPage() {
         stopOperatePolling();
         // 终态：**如实分层报账**（成功 / 未执行 / 失败三数）——
         // 只报「已完成」会把「门禁拦下的那些」藏起来。
-        const parts = [`${OPERATE_LABELS[snapshot.action] || snapshot.action}完成：成功 ${snapshot.succeeded}`];
+        const parts = [`${dictLabel("xhs_goods_operate", snapshot.action, OPERATE_LABELS) || snapshot.action}完成：成功 ${snapshot.succeeded}`];
         if (snapshot.skipped) parts.push(`未执行 ${snapshot.skipped}`);
         if (snapshot.failed) parts.push(`失败 ${snapshot.failed}`);
         const text = parts.join("，");
@@ -1753,7 +1769,7 @@ export function XhsShopItemsPage() {
    */
   async function operateOneItem(item: XhsShopItem, action: string) {
     if (!selectedAccountId || operatingAction !== null) return;
-    const label = OPERATE_LABELS[action] || action;
+    const label = dictLabel("xhs_goods_operate", action, OPERATE_LABELS) || action;
     Modal.confirm({
       centered: true,
       title: `对「${item.title || item.item_id}」执行「${label}」？`,
@@ -2723,7 +2739,7 @@ export function XhsShopItemsPage() {
           />
         </Form.Item>
         <Form.Item label="状态" name="status">
-          <Select style={{ width: 180 }} options={STATUS_OPTIONS} />
+          <Select style={{ width: 180 }} options={statusFilterOptions} />
         </Form.Item>
 
         {searchExpanded ? (

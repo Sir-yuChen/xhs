@@ -1,3 +1,4 @@
+import { dictLabel } from "./system-dicts-core";
 /**
  * 登录态的**呈现映射**（设计 13 §18.5 / §18.8；2026-09-21 三平台拆分）。
  *
@@ -96,7 +97,8 @@ export const LOGIN_CHANNEL_FALLBACK_LABELS: Record<string, string> = {
  * 断言它**等于**后端 `login_state_service.CHANNEL_LABELS`（回退副本不得与真值漂移）。
  */
 export function loginChannelLabel(channel: string): string {
-  return LOGIN_CHANNEL_FALLBACK_LABELS[channel] || channel;
+  // 设计 63：全名走字典 `sys_login_channel`（镜像=本表，后端 CHANNEL_LABELS 守卫仍钉它）。
+  return dictLabel("sys_login_channel", channel, LOGIN_CHANNEL_FALLBACK_LABELS);
 }
 
 /**

@@ -1994,6 +1994,9 @@ export type SystemSettingCreatePayload = {
   description?: string;
   requires_restart?: boolean;
   is_dangerous?: boolean;
+  /** 归属级（设计 64 §1.5）：user=本人（缺省）/ system=全局（admin）/ workspace=工作区。 */
+  scope?: "user" | "system" | "workspace";
+  workspace?: string;
 };
 
 export type SystemSettingUpdatePayload = {
@@ -2004,11 +2007,14 @@ export type SystemSettingUpdatePayload = {
   description?: string;
   requires_restart?: boolean;
   is_dangerous?: boolean;
+  scope?: "user" | "system" | "workspace";
+  workspace?: string;
 };
 
 export type SystemSettingDeleteResult = {
   key: string;
   status: string;
+  scope?: string;
   effective_value: unknown;
   is_live: boolean;
 };

@@ -42,19 +42,13 @@ import {
   runAutoTask,
   updateAutoTask,
 } from "../../../lib/api";
-import { triggerSummary } from "../../../lib/schedule";
+import { jobStatusTag, triggerSummary } from "../../../lib/schedule";
 import { formatShanghaiTime } from "../../../lib/time";
 import type { AutoTask, AutoTaskRunResult, PlatformAccount, ScheduleIn } from "../../../types";
 import { WaitMask } from "../../../components/ui/wait-mask";
 
 const { Text, Paragraph } = Typography;
 const { TextArea } = Input;
-
-const STATUS_CONFIG: Record<string, { color: string; label: string }> = {
-  active: { color: "green", label: "运行中" },
-  paused: { color: "default", label: "已暂停" },
-  completed: { color: "blue", label: "已完成" },
-};
 
 /** 默认调度：每天 9:00（与后端惰性默认同值；enabled=false = 不自动执行） */
 const DEFAULT_SCHEDULE: ScheduleIn = {
@@ -82,7 +76,9 @@ function scheduleInFromTask(task: AutoTask): ScheduleIn {
 }
 
 function getStatusTag(s: string) {
-  const cfg = STATUS_CONFIG[s] ?? { color: "default", label: s };
+  // 设计 63：定时任务状态文案/颜色走字典 `sys_job_status`（与任务中心同源，
+  // 原来这里抄了一份 JOB_STATUS_LABELS —— 逐字重复字典已收敛）。
+  const cfg = jobStatusTag(s);
   return <Tag color={cfg.color}>{cfg.label}</Tag>;
 }
 

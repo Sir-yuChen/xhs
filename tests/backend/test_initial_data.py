@@ -375,13 +375,10 @@ def test_settings_seed_value_comes_from_the_data_file(db_factory, tmp_path, monk
     )
     db = db_factory()
     try:
-        user = User(username="settings-seed-owner", password_hash="x")
-        db.add(user)
+        settings_service.seed_system_settings(db)
         db.commit()
-        settings_service.seed_settings_for_user(db, user.id)
-        db.commit()
-        row = settings_service.find_setting(db, user.id, "crawl_rate_limit_per_minute")
-        assert row is not None and row.value == "42", "播种值必须取自数据文件"
+        row = settings_service._system_row(db, "crawl_rate_limit_per_minute")
+        assert row is not None and row.value == "42", "播种值必须取自数据文件（系统级一行）"
     finally:
         db.close()
 
@@ -408,9 +405,9 @@ def test_settings_seed_falls_back_to_builtin_when_file_value_is_illegal(
         db.add(user)
         db.commit()
         with caplog.at_level("WARNING"):
-            settings_service.seed_settings_for_user(db, user.id)
+            settings_service.seed_system_settings(db)
             db.commit()
-        row = settings_service.find_setting(db, user.id, "crawl_rate_limit_per_minute")
+        row = settings_service._system_row(db, "crawl_rate_limit_per_minute")
         fallback = settings_service.BUILTIN_DEFAULTS["crawl_rate_limit_per_minute"]
         assert row.value == str(fallback)
         assert any("非法" in record.message for record in caplog.records)

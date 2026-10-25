@@ -234,6 +234,25 @@ class DictItemListOut(BaseModel):
     total: int
 
 
+class DictOptionOut(BaseModel):
+    """下拉/文案用的字典项切片（管理字段不下发 —— 选项消费方用不到）。"""
+
+    value: str
+    label: str
+    list_class: str = "default"
+    sort_order: int = 0
+
+
+class DictOptionsOut(BaseModel):
+    """`GET /system/dict/options` —— 前端统一字典读出口（登录即可、无权限码）。
+
+    `items` 键是字典类型 `code`，值是该组的可用选项（类型与项都只下发
+    `status=normal`，停用组整组不出、停用项单条不出）。
+    """
+
+    items: dict[str, list[DictOptionOut]]
+
+
 # --------------------------------------------------------------------------- #
 # system_permissions.py
 # --------------------------------------------------------------------------- #

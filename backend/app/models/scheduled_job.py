@@ -69,6 +69,11 @@ class ScheduledJob(Base):
     )
     name: Mapped[str] = mapped_column(String(128))
     job_key: Mapped[str] = mapped_column(String(128), index=True)
+    #: 工作区归属（设计 64 §3.3）：调度器是**公共单例**（不按工作区拆分），
+    #: 行级 user_id 隔离管权限面，`workspace` 管归属展示 ——
+    #: 任务中心按本人（不变），系统管理「定时任务」总览按工作区聚合（admin）。
+    #: 取值同 `menus.workspace` 词汇表；由 `job_registry.workspace_for_job` 写入。
+    workspace: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)
     trigger_type: Mapped[str] = mapped_column(String(16), default=TRIGGER_CRON)
     cron_expression: Mapped[str] = mapped_column(String(64), default="")
     #: trigger_type="at"（定时一次性）时必填：执行时刻，必须晚于当前时间

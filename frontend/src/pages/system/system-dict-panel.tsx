@@ -54,6 +54,7 @@ import {
   type SystemDictItem,
   type SystemDictType,
 } from "../../lib/api";
+import { refreshDicts } from "../../lib/system-dicts";
 
 const { Text } = Typography;
 
@@ -63,6 +64,21 @@ const LIST_CLASS_OPTIONS = [
   { value: "warning", label: "警告（橙）" },
   { value: "danger", label: "危险（红）" },
   { value: "info", label: "信息（蓝）" },
+  { value: "processing", label: "进行中（蓝）" },
+  { value: "error", label: "错误（红）" },
+  { value: "red", label: "红" },
+  { value: "volcano", label: "火红" },
+  { value: "orange", label: "橙" },
+  { value: "gold", label: "金" },
+  { value: "yellow", label: "黄" },
+  { value: "lime", label: "青柠" },
+  { value: "green", label: "绿" },
+  { value: "cyan", label: "青" },
+  { value: "blue", label: "蓝" },
+  { value: "geekblue", label: "极客蓝" },
+  { value: "purple", label: "紫" },
+  { value: "magenta", label: "洋红" },
+  { value: "pink", label: "粉" },
 ];
 
 export function SystemDictPanel() {
@@ -174,6 +190,7 @@ export function SystemDictPanel() {
                     const res = await deleteSystemDictType(row.id);
                     message.success(`已删除（连带 ${res.deleted_items} 项）`);
                     void loadTypes();
+                    void refreshDicts();
                   },
                 });
               }}
@@ -238,6 +255,7 @@ export function SystemDictPanel() {
                     message.success("已删除");
                     void loadItems(activeId);
                     void loadTypes();
+                    void refreshDicts();
                   },
                 });
               }}
@@ -250,11 +268,17 @@ export function SystemDictPanel() {
     },
   ];
 
+  // 设计 63 §6（2026-10-25 用户截图「底部空白」）：双卡撑满视口高度，两张表
+  // 都在**表体内部**滚动（`.fill-table` 共享类）—— 旧写法固定 `scroll.y=520`
+  // ⇒ 卡片到视口底之间留一大块空白。
   return (
-    <Row gutter={12}>
-      <Col span={9}>
+    <div style={{ height: "calc(100vh - 87px)", display: "flex", flexDirection: "column" }}>
+    <Row gutter={12} style={{ flex: 1, minHeight: 0 }}>
+      <Col span={9} style={{ height: "100%", display: "flex", flexDirection: "column" }}>
         <Card
           size="small"
+          style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}
+          styles={{ body: { flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" } }}
           title={`字典类型（${types.length}）`}
           extra={
             <Space>
@@ -277,6 +301,7 @@ export function SystemDictPanel() {
             </Space>
           }
         >
+          <div className="fill-table">
           <Table<SystemDictType>
             rowKey="id"
             size="small"
@@ -284,15 +309,18 @@ export function SystemDictPanel() {
             columns={typeColumns}
             dataSource={types}
             pagination={false}
-            scroll={{ y: 520 }}
+            scroll={{ y: "100%" }}
             rowClassName={(row) => (row.id === activeId ? "ant-table-row-selected" : "")}
             onRow={(row) => ({ onClick: () => setActiveId(row.id) })}
           />
+          </div>
         </Card>
       </Col>
-      <Col span={15}>
+      <Col span={15} style={{ height: "100%", display: "flex", flexDirection: "column" }}>
         <Card
           size="small"
+          style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}
+          styles={{ body: { flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" } }}
           title={
             activeType
               ? `「${activeType.name}」的字典项（${items.length}）`
@@ -319,6 +347,7 @@ export function SystemDictPanel() {
             </Space>
           }
         >
+          <div className="fill-table">
           <Table<SystemDictItem>
             rowKey="id"
             size="small"
@@ -326,8 +355,9 @@ export function SystemDictPanel() {
             columns={itemColumns}
             dataSource={items}
             pagination={false}
-            scroll={{ y: 520 }}
+            scroll={{ y: "100%" }}
           />
+          </div>
         </Card>
       </Col>
 
@@ -337,6 +367,7 @@ export function SystemDictPanel() {
         onSaved={() => {
           setTypeModal(null);
           void loadTypes();
+          void refreshDicts();
         }}
       />
       <DictItemModal
@@ -347,9 +378,11 @@ export function SystemDictPanel() {
           setItemModal(null);
           void loadItems(activeId);
           void loadTypes();
+          void refreshDicts();
         }}
       />
     </Row>
+    </div>
   );
 }
 

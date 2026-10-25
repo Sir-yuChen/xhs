@@ -319,11 +319,12 @@ export function SystemMenusPanel() {
   ];
 
   return (
+    <div style={{ height: "calc(100vh - 87px)", display: "flex", flexDirection: "column" }}>
     <Card
       size="small"
       title={`菜单与权限码（${total} 行）`}
-      style={{ height: "100%" }}
-      styles={{ body: { height: "calc(100% - 40px)", overflow: "auto" } }}
+      style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}
+      styles={{ body: { flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" } }}
       extra={
         <Space>
           <Select
@@ -354,6 +355,7 @@ export function SystemMenusPanel() {
     >
       {/* 父子树表格：dataSource 即后端树（children 交给 Table 原生展开 ——
           不再前端拍平；拍平 + children 残留曾是「行出现两次」的根因）。 */}
+      <div className="fill-table">
       <Table<SystemMenuNode>
         rowKey="id"
         size="small"
@@ -361,8 +363,9 @@ export function SystemMenusPanel() {
         columns={columns}
         dataSource={tree}
         pagination={false}
-        scroll={{ x: 1300 }}
+        scroll={{ x: 1300, y: "100%" }}
       />
+      </div>
 
       <MenuFormModal
         open={createOpen}
@@ -385,6 +388,7 @@ export function SystemMenusPanel() {
         }}
       />
     </Card>
+    </div>
   );
 }
 
