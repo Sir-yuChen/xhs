@@ -173,3 +173,23 @@ def test_workspace_scoped_keys_still_read_their_own_layer():
         "effective_value 没有为工作区级键单独取行 ⇒ 重新归类后这些配置静默失效"
     )
     assert "_workspace_row_any" in source, "缺少工作区级取行的实现"
+
+
+def test_scope_hit_reports_ownership_not_storage_location():
+    """`scope_hit` 必须报**归属**，不能报「数据行物理落在哪一级」。
+
+    ⚠️ 实测：`crawl_rate_limit_per_minute` 的行物理躺在系统级位置（早期建的行），
+    但归属是工作区级 ⇒ 界面显示「来源：系统级」会让人以为改的是全站设置。
+    页面分区按 `SETTING_SCOPES`，而 `scope_hit` 按数据行 —— 两处判据打架，
+    用户看到的就是自相矛盾的信息。
+    """
+    source = (ROOT / "backend" / "app" / "services" / "settings_service.py").read_text(
+        encoding="utf-8"
+    )
+    #: `effective_settings_map` 末尾必须有按归属校正的收尾。
+    start = source.index("def effective_settings_map(")
+    end = source.index("\ndef ", start + 10)
+    body = source[start:end]
+    assert "SETTING_SCOPES.get(key)" in body, (
+        "effective_settings_map 没有按归属校正 scope_hit ⇒ 界面会显示「行在哪级」而非「归属哪级」"
+    )

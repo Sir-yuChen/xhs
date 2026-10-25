@@ -670,6 +670,17 @@ def effective_settings_map(
                 "scope_hit": "builtin",
                 "updated_at": None,
             }
+    # 5) `scope_hit` 校正：按**代码固定的归属**（`SETTING_SCOPES`）报"这一格是哪级"。
+    #
+    # ⚠️ 前面三步按**数据行落在哪一级**填 `scope_hit`，那是归属未定死时的做法。
+    # 现在归属由 `SETTING_SCOPES` 定死，两者会打架：例如
+    # `crawl_rate_limit_per_minute` 的行物理落在「系统级」（早期建的行），
+    # 但它的归属是工作区级 ⇒ 界面显示「来源：系统级」会让人以为改的是全站设置。
+    # ⇒ 上报**归属**而不是"行在哪"，与页面分区同一口径（一处判据）。
+    for key, info in merged.items():
+        scope = SETTING_SCOPES.get(key)
+        if scope and info.get("scope_hit") != "builtin":
+            info["scope_hit"] = scope
     return merged
 
 
