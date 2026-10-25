@@ -188,7 +188,9 @@ function WorkspaceLogTab({ onOpenLog }: { onOpenLog: (log: ScheduledJobLog) => v
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetchScheduleLogs({ page: 1, page_size: 100 });
+      //: 必须带 workspace —— 服务端筛，否则系统级任务（清理记录表等）
+      //: 的执行记录会混进本工作区页面。
+      const res = await fetchScheduleLogs({ workspace: WORKSPACE, page: 1, page_size: 100 });
       setRows(res.items ?? []);
       setTotal(res.total ?? 0);
       setError("");

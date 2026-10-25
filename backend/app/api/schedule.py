@@ -151,6 +151,9 @@ def serialize_log(log: ScheduledJobLog) -> dict:
         #: 设计 69：`user_id` = 最后修改人快照；`executed_for_user_id` = 这次跑谁的数据。
         "user_id": log.user_id,
         "executed_for_user_id": log.executed_for_user_id,
+        #: 归属工作区快照（设计 69）：前端日志表的「工作区」列读它；
+        #: 工作区任务页靠它自检「拿回来的确实都是本工作区的」。
+        "workspace": getattr(log, "workspace", None),
         "workspace": getattr(log, "workspace", None),
         # 业务任务号（迁移 `k2l3m4n5o6p7`）：任务日志列表的「取消任务」按钮按它调
         # `POST /tasks/{id}/cancel`（2026-09-27 用户口径「任务日志列表操作列新增取消
@@ -794,6 +797,7 @@ def run_job_once(
 def list_logs(
     job_id: Optional[int] = None,
     job_key: Optional[str] = None,
+    workspace: Optional[str] = None,
     trigger_type: Optional[str] = None,
     log_status: Optional[str] = Query(default=None, alias="status"),
     date_from: Optional[datetime] = None,
@@ -803,20 +807,35 @@ def list_logs(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """日志列表（DEF-066：按 `user_id` 快照列收口 —— 只见本人任务的执行日志）。
+    """日志列表（设计 69：两级任务中心共用，按 `workspace` 收口）。
 
-    筛选：`job_id` / `job_key` / `status` / `trigger_type`（`cron`/`at`，R17 不含
-    `manual`）/ 时间范围 + 分页。原「全库日志零过滤」的形态已废：调度日志含别人
-    任务的 message / result / 配置快照，跨用户可见即泄漏。
+    筛选：`job_id` / `job_key` / **`workspace`** / `status` / `trigger_type`
+    （`cron`/`at`，R17 不含 `manual`）/ 时间范围 + 分页。
+
+    ## `workspace` 参数是两级任务中心的必要条件
+
+    工作区任务页（`/platforms/xhs/tasks`）必须只看到**本工作区**的执行日志 ——
+    否则小红书任务页里会混入「清理记录表」这类系统级任务的记录。
+    前端过滤不可行：日志是分页的，前端丢弃会导致「本页 20 条里 3 条是本工作区的」
+    这种页码错乱。
+
+    ## 断言行不改
+
+    原「全库日志零过滤」的形态已废：调度日志含 message / result / 配置快照，
+    跨用户可见即泄漏。可见性由路由权限码收口（admin 全量 / 工作区成员按码）。
     """
-    #: 设计 69：日志不再按 `user_id`（那是"最后修改人"）过滤 —— fail-out 后
-    #: 每行带 `executed_for_user_id` 表示"为谁跑的"。任务中心已收归 admin，
-    #: 该端点的可见性由路由权限码收口。
+    #: 设计 69：日志不再按 `user_id`（那是"最后修改人"）过滤 —— fan-out 后
+    #: 每行带 `executed_for_user_id` 表示"为谁跑的"。
     statement = select(ScheduledJobLog)
     if job_id is not None:
         statement = statement.where(ScheduledJobLog.job_id == job_id)
     if job_key:
         statement = statement.where(ScheduledJobLog.job_key == job_key)
+    if workspace:
+        #: 两层判据：日志自带 `workspace` 快照列（任务删了历史日志仍可筛）；
+        #: 旧行该列为空时退化为「按 job_key 关联当前定义」——
+        #: 但**不猜**：空快照的旧日志不进任何工作区结果（缺值口径）。
+        statement = statement.where(ScheduledJobLog.workspace == workspace.strip())
     if trigger_type:
         # 按**任务类型**筛选（快照列口径：任务删了历史日志也能筛；空快照的旧日志
         # 不进任何类型结果，缺值口径不猜）
@@ -913,20 +932,28 @@ def schedule_overview(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """跨工作区定时任务总览（设计 64 §3.3，**admin 专属**）。
+    """跨工作区定时任务总览（设计 64 §3.3）。
 
     决策背景：调度器是**公共单例**（不按工作区拆分，企业级对照见设计 64 §3.1）——
-    行级 `user_id` 隔离管「我的任务中心」，`workspace` 列管归属聚合。
-    本端点把全部 job 按工作区/归属人聚合给管理员；普通用户 403。
-    """
-    from backend.app.core.roles import ROLE_ADMIN, normalize_role
+    `workspace` 列管归属聚合。本端点把全部 job 按工作区/归属人聚合。
 
-    if normalize_role(current_user.role) != ROLE_ADMIN:
+    ## 权限：`system:scheduler:view`，不是「仅管理员」
+
+    2026-10-25 用户口径：「系统管理模块也是依靠菜单权限授权，**并不是仅管理员**」。
+
+    原实现硬判 `current_user.role == ROLE_ADMIN` —— 那与「系统管理靠菜单权限授权」
+    直接矛盾：管理员给某个角色勾了「任务中心」菜单与 `system:scheduler:view`，
+    那个人进得去页面，但这个端点照样 403，页面就只剩空壳。
+    ⇒ 判据改为**权限码**（与其它系统域端点同一把尺子）。
+    """
+    from backend.app.core.perms import has_perm  # noqa: PLC0415
+
+    if not has_perm(current_user, "system:scheduler:view"):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={
                 "code": "SCHEDULE_OVERVIEW_FORBIDDEN",
-                "message": "定时任务总览只有超级管理员可以查看",
+                "message": "缺少「任务中心」查看权限",
             },
         )
 

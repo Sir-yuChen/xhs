@@ -195,6 +195,10 @@ def _new_log_row(
         user_id=job.user_id,
         #: fan-out 时 = 本次执行的目标用户；系统级任务（清理类）= None
         executed_for_user_id=executed_for_user,
+        #: 归属工作区快照（设计 69 两级任务中心）：工作区任务页按它筛日志。
+        #: 从任务行取 —— 定义行一定带 workspace（`workspace_for_job` 写入）。
+        #: ⚠️ 漏写 ⇒ 日志「工作区」列全空，工作区页按 workspace 筛时一条都查不到。
+        workspace=getattr(job, "workspace", None),
         # 账号快照（迁移 `j1k2l3m4n5o6` 建列，`b3c4d5e6f7a8` 随 ADR-021 改名
         # `platform_account_id`）：账号卡「同步中」= 该账号**最新一条**日志的
         # 状态（2026-09-27 用户口径）。非账号级任务（cron 全量、系统作业）传 None。
@@ -314,6 +318,7 @@ def _platform_data_owners(db: Session) -> list[int]:
 
 def _fan_out(
     *,
+    db: Session,
     job: ScheduledJob,
     spec: Any,
     log: ScheduledJobLog,
@@ -344,7 +349,15 @@ def _fan_out(
       "12 成功 / 3 失败"，用户读得出部分失败）
     * 全部失败 ⇒ `failed`
     """
-    db = SessionLocal()
+    #: ⚠️ **必须用调用方传入的 `db`**（2026-10-25 实测：真 bug，静默无报错）。
+    #:
+    #: 原先这里自己 `db = SessionLocal()` 另开 Session，而 `job` / `log` 两个对象
+    #: 属于**调用方那个 Session**。后果：
+    #:   * 子日志能写（`_new_log_row` 用 job.id 新建，本 Session 提交得到）；
+    #:   * 但 `job.run_count += 1` 改的是**游离对象**（未被本 Session 跟踪）
+    #:     ⇒ commit 后库里 `run_count` 仍是 0、`last_status` 仍是 None。
+    #: 症状：日志显示 success、界面上「运行次数」永远不涨、且**零报错**。
+    #: 复现脚本 `.hermes/tmp/repro_exec.py`：outcome=success、run_count=0。
     succeeded = 0
     failed: list[int] = []
     skipped = 0
@@ -407,7 +420,11 @@ def _fan_out(
         db.commit()
         return {"log_id": log.id, "status": log.status, "summary": summary}
     finally:
-        db.close()
+        #: ⚠️ **不关 `db`** —— 它是调用方（`execute_job`）的 Session，
+        #: 由它自己的 `finally: db.close()` 收口。在这里关会把调用方
+        #: 后续要用的 Session 弄成 closed（`execute_job` 的 finally 再关一次
+        #: 会抛「Session is already closed」或被 SQLAlchemy 静默忽略）。
+        pass
 
 
 def _finish_child_log(
@@ -542,6 +559,7 @@ def execute_job(
                 db.commit()
                 return {"log_id": active_log_id, "status": LOG_SKIPPED}
             return _fan_out(
+                db=db,
                 job=job,
                 spec=spec,
                 log=log,

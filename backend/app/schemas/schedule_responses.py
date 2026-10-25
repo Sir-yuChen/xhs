@@ -101,6 +101,12 @@ class ScheduledJobLogItem(BaseModel):
     created_at: Optional[str] = None
     #: 设计 69：这次执行跑的是谁的数据（fan-out 前为 NULL；系统级任务为 NULL）。
     executed_for_user_id: Optional[int] = None
+    #: 任务归属工作区快照（设计 69 两级任务中心）：`system` / `xhs`。
+    #:
+    #: ⚠️ 漏了这个字段 ⇒ Pydantic 会把 `serialize_log()` 产出的值**静默丢掉**，
+    #: 前端日志表的「工作区」列全显示 `-`（实测：库里有值、接口 200、无任何报错）。
+    #: 这类「响应模型吃掉新字段」的退化只能靠肉眼发现，所以加字段时必须同步 schema。
+    workspace: Optional[str] = None
 
 class ScheduledJobLogListResponse(BaseModel):
     """`GET /api/schedule/logs`。"""

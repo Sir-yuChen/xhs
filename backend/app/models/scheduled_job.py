@@ -182,6 +182,15 @@ class ScheduledJobLog(Base):
     #: 执行时快照：任务的**触发器类型**（manual/cron/at）—— 日志按任务类型
     #: 筛选的唯一依据（不 join scheduled_jobs：任务删了历史日志也要能筛）
     job_trigger_type: Mapped[str] = mapped_column(String(16), default="", index=True)
+    #: 执行时快照的**任务归属工作区**（设计 69 两级任务中心；迁移 `b7c8d9e0f1a2`）。
+    #:
+    #: 为什么日志要自带这一列、不 join 定义表：工作区任务页（`/platforms/xhs/tasks`）
+    #: 必须只显示本工作区的执行记录，而日志是**分页**的 —— 前端过滤会让页码错乱
+    #: （「本页 20 条里只有 3 条属于本工作区」）。且任务被删后历史日志仍要能按工作区筛。
+    #: 存量行按当时 `job_key` 回填；查不到对应定义的留空（缺值口径：不猜）。
+    workspace: Mapped[Optional[str]] = mapped_column(
+        String(32), nullable=True, index=True
+    )
     #: 链路 id（W3C trace-id；设计 67）。定时任务若由用户操作触发（立刻执行一次），
     #: 继承那次点击的链路；纯系统定时任务为 NULL（没有发起人，不造假）。
     trace_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)

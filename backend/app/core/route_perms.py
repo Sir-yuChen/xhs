@@ -167,7 +167,9 @@ ROUTE_PERMS: Final[dict[str, str]] = {
     "POST /api/publish/jobs/{job_id}/cancel": "xhs:publish:cancel",
     "POST /api/publish/jobs/{job_id}/publish": "xhs:publish:submit",
     "POST /api/publish/jobs/{job_id}/retry": "xhs:publish:retry",
-    "GET /api/schedule/overview": "EXEMPT_ADMIN",
+    #: 2026-10-25 用户口径「系统管理模块也是依靠菜单权限授权，并不是仅管理员」
+    #: ⇒ 不再用 `EXEMPT_ADMIN`（那标记 = 端点内硬判 `role == admin`）。
+    "GET /api/schedule/overview": "system:scheduler:view",
     "POST /api/schedule/cron/validate": "system:scheduler:view",
     "POST /api/schedule/jobs": "system:scheduler:create",
     #: 执行一次（设计 69 两级）：路由层只要求**工作区级的执行码**，

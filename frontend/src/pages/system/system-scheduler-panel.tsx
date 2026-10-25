@@ -147,9 +147,7 @@ function JobTable({
 
   if (error) {
     return (
-      <Text type="danger">
-        {error}（任务中心只有超级管理员可以查看）
-      </Text>
+      <Text type="danger">{error}</Text>
     );
   }
 
@@ -274,9 +272,6 @@ export function SystemSchedulerPanel() {
             <Tooltip title="系统级任务清理本机资源（记录表 / 暂存目录 / 图片空间），各工作区自己的任务在该工作区内查看。">
               <QuestionCircleOutlined style={{ marginLeft: 6, color: "rgba(0,0,0,0.45)" }} />
             </Tooltip>
-            <Tag color="purple" style={{ marginLeft: 8, fontSize: 11 }}>
-              仅管理员
-            </Tag>
           </span>
         }
       >

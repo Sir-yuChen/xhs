@@ -89,22 +89,24 @@ def _resolve_scope(
     """解析并**权限收口**归属级（设计 64 §1.5）。
 
     * `user`（缺省）：本人，任何登录用户；
-    * `system` / `workspace`：**admin 专属**（读写都是 —— 系统级是全站基线，
-      工作区级是工作区参数，首期都归管理员管理；403 `SETTING_SCOPE_FORBIDDEN`）。
+    * `system`：需要 `system:setting:edit`（系统级是全站基线）；
+    * `workspace`：需要 `<workspace>:settings:edit`（工作区参数归该工作区管）。
+
+    ## 2026-10-25 用户口径：「系统管理模块也是依靠菜单权限授权，并不是仅管理员」
+
+    原实现一律硬判 `role == admin` —— 与「靠菜单权限授权」矛盾：
+    管理员给某角色勾了「配置管理」菜单与 `system:setting:view`，那个人进得去页面，
+    但**读写全 403**，页面成了空壳。
+
+    ⇒ 判据改为权限码。管理员把 `system:setting:edit` 勾给谁，谁就能改系统级配置
+    —— 这正是「授权」的含义；不想给就不勾，而不是代码里写死身份。
     """
     scope = str(scope or "user").strip()
     if scope == "user":
         return "user", None
-    from backend.app.core.roles import ROLE_ADMIN, normalize_role
 
-    if normalize_role(current_user.role) != ROLE_ADMIN:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={
-                "code": "SETTING_SCOPE_FORBIDDEN",
-                "message": f"只有超级管理员能管理 {scope} 级配置",
-            },
-        )
+    from backend.app.core.perms import has_perm  # noqa: PLC0415
+
     clean_ws = str(workspace or "").strip()
     if scope == "workspace":
         if not clean_ws:
@@ -112,7 +114,29 @@ def _resolve_scope(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="工作区级配置必须带 workspace 参数",
             )
+        #: 工作区级配置的写权限属于**该工作区**（`xhs:settings:edit`）。
+        #: 兼容旧口径：系统级配置编辑权限也能管工作区级（跨工作区运维）。
+        if not (
+            has_perm(current_user, f"{clean_ws}:settings:edit")
+            or has_perm(current_user, "system:setting:edit")
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "SETTING_SCOPE_FORBIDDEN",
+                    "message": "缺少该工作区的配置编辑权限",
+                },
+            )
         return "workspace", clean_ws
+
+    if not has_perm(current_user, "system:setting:edit"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "SETTING_SCOPE_FORBIDDEN",
+                "message": "缺少「配置管理」编辑权限",
+            },
+        )
     return "system", None
 
 

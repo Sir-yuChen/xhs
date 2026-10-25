@@ -281,6 +281,7 @@ PAGE_VIEW_PERMS: tuple[PermSpec, ...] = (
     PermSpec("xhs:order:view", "订单管理", "C", "/platforms/xhs/orders", _X, _X),
     PermSpec("xhs:datacenter:view", "数据中心", "C", "/platforms/xhs/datacenter", _X, _X),
     PermSpec("xhs:settings:view", "设置", "C", "/settings", _X, _X),
+    PermSpec("xhs:settings:edit", "工作区配置编辑", "F", "/settings", _X, _X),
     # 大模型网关工作区 3
     PermSpec("ai:usage:view", "用量看板", "C", "/usage-dashboard", _A, _A),
     PermSpec("ai:gateway:view", "服务商", "C", "/llm-gateway/providers", _A, _A),

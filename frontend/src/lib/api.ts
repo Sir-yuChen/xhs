@@ -3671,6 +3671,13 @@ export type ScheduleJobQuery = {
 export type ScheduleLogQuery = {
   job_id?: number;
   job_key?: string;
+  /**
+   * 归属工作区（设计 69 两级任务中心）。
+   *
+   * 工作区任务页必须传它 —— 日志是分页的，前端过滤会让页码错乱
+   * （「本页 20 条里只有 3 条属于本工作区」）。
+   */
+  workspace?: string;
   /** 按任务类型筛选（cron / interval / at；空 = 全部） */
   trigger_type?: string;
   status?: string;
