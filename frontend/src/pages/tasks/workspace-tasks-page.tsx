@@ -54,6 +54,7 @@ import { JobLogDetailModal } from "../../components/schedule/job-log-detail-moda
 import { JobFormModal } from "../../components/schedule/job-form-modal";
 import { RunJobModal } from "../../components/schedule/run-job-modal";
 import { hasPermission } from "../../hooks/use-permission";
+import { RowActions } from "../../components/common/row-actions";
 
 const { Text } = Typography;
 
@@ -123,34 +124,35 @@ function WorkspaceJobTable({
         showWorkspace: false,
         showTriggerDetail: true,
         renderActions: (job) => (
-          <Space size={0}>
-            {/* 一按钮一码（2026-10-25 红线）：三个按钮各判各的，不共用权限码。 */}
-            {hasPermission("xhs:taskcenter:run") && (
-              <Button size="small" type="link" onClick={() => onRun(job)}>
-                立即执行
-              </Button>
-            )}
-            {hasPermission("xhs:taskcenter:edit") && (
-              <Button size="small" type="link" onClick={() => onEdit(job)}>
-                编辑
-              </Button>
-            )}
-            {hasPermission("xhs:taskcenter:toggle") && (
-              <Button
-                size="small"
-                type="link"
-                loading={busyId === job.id}
-                onClick={() => void toggleStatus(job)}
-              >
-                {job.status === "active" ? "暂停" : "恢复"}
-              </Button>
-            )}
-            {hasPermission("xhs:taskcenter:viewLogs") && (
-              <Button size="small" type="link" onClick={onShowLogs}>
-                日志
-              </Button>
-            )}
-          </Space>
+          //: 一按钮一码 + 不溢出：常用 3 个直显，其余进「更多」。
+          //: 文案收窄（「立即执行」→「执行」）—— 4 个字在 240px 里放不下 3 个。
+          <RowActions
+            width={240}
+            maxInline={3}
+            items={[
+              {
+                label: "执行",
+                permission: "xhs:taskcenter:run",
+                onClick: () => onRun(job),
+              },
+              {
+                label: "编辑",
+                permission: "xhs:taskcenter:edit",
+                onClick: () => onEdit(job),
+              },
+              {
+                label: job.status === "active" ? "暂停" : "恢复",
+                permission: "xhs:taskcenter:toggle",
+                loading: busyId === job.id,
+                onClick: () => void toggleStatus(job),
+              },
+              {
+                label: "日志",
+                permission: "xhs:taskcenter:viewLogs",
+                onClick: onShowLogs,
+              },
+            ]}
+          />
         ),
       }),
     [busyId, toggleStatus, onShowLogs, onRun, onEdit],

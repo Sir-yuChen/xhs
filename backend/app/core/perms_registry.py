@@ -92,6 +92,13 @@ SYSTEM_PERMS: tuple[PermSpec, ...] = (
     PermSpec("system:user:create", "新建用户", "F", "/system/users", WORKSPACE_SYSTEM, "system"),
     PermSpec("system:user:edit", "编辑用户", "F", "/system/users", WORKSPACE_SYSTEM, "system"),
     PermSpec("system:user:delete", "删除用户", "F", "/system/users", WORKSPACE_SYSTEM, "system"),
+    #: 批量操作按钮（2026-10-25 用户口径「新增用户管理批量相关操作」）。
+    #: 一按钮一码：批量的四个动作各一个码，不与单条码共用
+    #: （有人可以单条删但不能批量删，这是有意义的授权粒度）。
+    PermSpec("system:user:batchDelete", "批量删除", "F", "/system/users", WORKSPACE_SYSTEM, "system"),
+    PermSpec("system:user:batchResetPassword", "批量重置密码", "F", "/system/users", WORKSPACE_SYSTEM, "system"),
+    PermSpec("system:user:batchForceLogout", "批量下线", "F", "/system/users", WORKSPACE_SYSTEM, "system"),
+    PermSpec("system:user:batchApprove", "批量审核", "F", "/system/users", WORKSPACE_SYSTEM, "system"),
     PermSpec("system:user:resetPassword", "重置密码", "F", "/system/users", WORKSPACE_SYSTEM, "system"),
     PermSpec("system:user:forceLogout", "强制下线", "F", "/system/users", WORKSPACE_SYSTEM, "system"),
     PermSpec("system:user:approve", "通过审核", "F", "/system/users", WORKSPACE_SYSTEM, "system"),

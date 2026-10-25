@@ -56,12 +56,12 @@ class TestEveryButtonHasItsOwnCode:
     BUTTONS = [
         (WS_PAGE, "新增任务", "xhs:taskcenter:create"),
         (WS_PAGE, "编辑", "xhs:taskcenter:edit"),
-        (WS_PAGE, "立即执行", "xhs:taskcenter:run"),
+        (WS_PAGE, "执行", "xhs:taskcenter:run"),
         (WS_PAGE, "暂停", "xhs:taskcenter:toggle"),
         (WS_PAGE, "日志", "xhs:taskcenter:viewLogs"),
         (SYS_PAGE, "新增任务", "system:scheduler:create"),
         (SYS_PAGE, "编辑", "system:scheduler:edit"),
-        (SYS_PAGE, "立即执行", "system:scheduler:run"),
+        (SYS_PAGE, "执行", "system:scheduler:run"),
         (SYS_PAGE, "暂停", "system:scheduler:toggle"),
     ]
 
@@ -75,8 +75,17 @@ class TestEveryButtonHasItsOwnCode:
         for page, label, code in self.BUTTONS:
             code_src = _code(page)
             assert label in code_src, f"{page.name} 里没有「{label}」按钮"
-            assert f'hasPermission("{code}")' in code_src, (
-                f"{page.name} 的「{label}」按钮没有用 hasPermission(\"{code}\") 守卫 "
+            #: 两种合法形态：
+            #: ① 内联 `{hasPermission("X") && <Button>}`；
+            #: ② 统一容器 `<RowActions items=[{permission: "X"}]>`（容器内部按 hasPermission 过滤）。
+            #: 两种都是「无权限 ⇒ 不渲染」。
+            gated = (
+                f'hasPermission("{code}")' in code_src
+                or f'permission: "{code}"' in code_src
+            )
+            assert gated, (
+                f"{page.name} 的「{label}」按钮没有绑定权限码 {code} "
+                "（既无 hasPermission 守卫，也无 RowActions 的 permission 声明）"
                 "⇒ 无权限用户也会看到它（点了才 403）"
             )
 
@@ -87,6 +96,10 @@ class TestEveryButtonHasItsOwnCode:
         """
         for page, label, code in self.BUTTONS:
             code_src = _code(page)
+            #: ② 形态（RowActions）的「条件渲染」由容器保证 —— 见
+            #: `test_action_column_overflow::test_row_actions_component_exists_and_filters_by_permission`。
+            if f'permission: "{code}"' in code_src:
+                continue
             pattern = re.compile(
                 rf'hasPermission\("{re.escape(code)}"\)\s*&&'
             )

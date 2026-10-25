@@ -36,6 +36,7 @@ import type { ScheduledJob, ScheduledJobLog } from "../../types";
 import { buildTaskColumns } from "../../components/schedule/task-columns";
 import { PlusOutlined } from "@ant-design/icons";
 import { hasPermission } from "../../hooks/use-permission";
+import { RowActions } from "../../components/common/row-actions";
 import { JobFormModal } from "../../components/schedule/job-form-modal";
 import { RunJobModal } from "../../components/schedule/run-job-modal";
 import { changeScheduleJobStatus, runScheduleJobOnce } from "../../lib/api";
@@ -112,28 +113,20 @@ function JobTable({
         showTriggerDetail: true,
         //: 一按钮一码（2026-10-25 红线）：每个按钮各判各的权限码。
         renderActions: (job) => (
-          <Space size={0}>
-            {hasPermission("system:scheduler:run") && (
-              <Button size="small" type="link" onClick={() => onRun(job)}>
-                立即执行
-              </Button>
-            )}
-            {hasPermission("system:scheduler:edit") && (
-              <Button size="small" type="link" onClick={() => onEdit(job)}>
-                编辑
-              </Button>
-            )}
-            {hasPermission("system:scheduler:toggle") && (
-              <Button
-                size="small"
-                type="link"
-                loading={busyId === job.id}
-                onClick={() => void toggleStatus(job)}
-              >
-                {job.status === "active" ? "暂停" : "恢复"}
-              </Button>
-            )}
-          </Space>
+          <RowActions
+            width={240}
+            maxInline={3}
+            items={[
+              { label: "执行", permission: "system:scheduler:run", onClick: () => onRun(job) },
+              { label: "编辑", permission: "system:scheduler:edit", onClick: () => onEdit(job) },
+              {
+                label: job.status === "active" ? "暂停" : "恢复",
+                permission: "system:scheduler:toggle",
+                loading: busyId === job.id,
+                onClick: () => void toggleStatus(job),
+              },
+            ]}
+          />
         ),
       }),
     [busyId, toggleStatus, onRun, onEdit],

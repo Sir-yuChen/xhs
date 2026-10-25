@@ -19,6 +19,7 @@
  */
 
 import { WaitMask } from "../../../components/ui/wait-mask";
+import { RowActions } from "../../../components/common/row-actions";
 import {
   DownloadOutlined,
   ExclamationCircleOutlined,
@@ -407,54 +408,39 @@ const onSync = async () => {
       // ⚠️ 前端不渲染 ≠ 后端放行：后端仍会再判一次（两处各自承担自己的职责）。
       title: "操作",
       key: "action",
-      width: 150,
+      //: 2026-10-25 用户口径「所有操作列均不允许溢出页面」：
+      //: 原 150px 手写 Tooltip+Button ⇒ 两按钮加提示空间被裁，改用统一容器。
+      width: 160,
+      fixed: "right",
       render: (_: unknown, row) => {
         const pendingAfterSale = (row.after_sales ?? []).find(
           (item) => item.status === "待处理",
         );
-        return (
-          <Space size={4} wrap>
-            {canShipOrder(row.status) ? (
-              <Tooltip title="对这笔真实订单发货（不可撤回）">
-                <Button
-                  type="link"
-                  size="small"
-                  style={{ padding: 0 }}
-                  onClick={() => {
-                    setShipTarget(row);
-                    setShipOpen(true);
-                  }}
-                >
-                  发货
-                </Button>
-              </Tooltip>
-            ) : null}
-            {pendingAfterSale && canHandleAfterSale(pendingAfterSale.status) ? (
-              <Tooltip title="处理这条售后（同意 / 拒绝，不可撤回）">
-                <Button
-                  type="link"
-                  size="small"
-                  style={{ padding: 0 }}
-                  onClick={() => {
-                    setAfterSaleTarget({
-                      orderNo: row.order_no,
-                      afterSaleId: String(pendingAfterSale.after_sale_id ?? ""),
-                      amount: pendingAfterSale.amount ?? null,
-                    });
-                    setAfterSaleOpen(true);
-                  }}
-                >
-                  售后
-                </Button>
-              </Tooltip>
-            ) : null}
-            {!canShipOrder(row.status) && !pendingAfterSale ? (
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                -
-              </Text>
-            ) : null}
-          </Space>
-        );
+        //: 无任何可执行动作时渲染缺值符（不显示空按钮组）
+        const items = [];
+        if (canShipOrder(row.status)) {
+          items.push({
+            label: "发货",
+            onClick: () => {
+              setShipTarget(row);
+              setShipOpen(true);
+            },
+          });
+        }
+        if (pendingAfterSale && canHandleAfterSale(pendingAfterSale.status)) {
+          items.push({
+            label: "售后",
+            onClick: () => {
+              setAfterSaleTarget({
+                orderNo: row.order_no,
+                afterSaleId: String(pendingAfterSale.after_sale_id ?? ""),
+                amount: pendingAfterSale.amount ?? null,
+              });
+              setAfterSaleOpen(true);
+            },
+          });
+        }
+        return <RowActions width={160} maxInline={3} items={items} />;
       },
     },
   ];

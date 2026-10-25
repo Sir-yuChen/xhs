@@ -144,7 +144,13 @@ SYSTEM_WORKSPACE_JOBS: frozenset[str] = frozenset(
     {
         JOB_KEY_RECORD_CLEANUP,
         JOB_KEY_PACKAGE_STAGING_CLEANUP,
-        JOB_KEY_PICTURE_SPACE_CLEANUP,
+        #: ⚠️ `JOB_KEY_PICTURE_SPACE_CLEANUP` **已移出系统级**（2026-10-25 用户口径）：
+        #: 「清理未引用图片任务应是小红书工作区域的任务」。
+        #:
+        #: 判据（设计 69 §2.1「系统级 = 与接哪个平台无关」）：
+        #: 图片空间里那批文件是**小红书笔记的配图**（上传到千帆 / 创作端的素材），
+        #: 换一个平台（抖音/闲鱼）时这套清理**不适用**，要另配一份 ⇒ 属工作区级。
+        #: 对比「清理记录表 / 数据包暂存」：那是本机数据目录下的通用资源，换平台照用。
     }
 )
 

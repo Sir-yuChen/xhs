@@ -53,8 +53,13 @@ import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { useCan } from "../../hooks/use-can";
+import { RowActions } from "../../components/common/row-actions";
 import {
   approveSystemUser,
+  batchApproveUsers,
+  batchDeleteUsers,
+  batchForceLogoutUsers,
+  batchResetUserPassword,
   createSystemUser,
   deleteSystemUser,
   fetchSystemRoles,
@@ -165,6 +170,67 @@ export function SystemUsersPanel() {
       },
     });
   };
+
+  //: 批量操作（2026-10-25 用户口径「新增用户管理批量相关操作」）：
+  //: 勾选后才出现操作条 —— 未勾选时不占任何布局，也不显示禁用按钮
+  //: （用户口径「没有对应权限则不展示」，空选择同理）。
+  const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  const [batchBusy, setBatchBusy] = useState<"" | "delete" | "reset" | "kick" | "approve">("");
+  const [batchPwdOpen, setBatchPwdOpen] = useState(false);
+  const [batchPwd, setBatchPwd] = useState("");
+
+  /** 批量操作统一出口：调后端 → 用回执报账（**不自己拼「成功 N 个」**）。 */
+  const runBatch = useCallback(
+    async (kind: "delete" | "reset" | "kick" | "approve", pwd?: string) => {
+      if (!selectedIds.length) return;
+      if (kind === "delete") {
+        const sure = await new Promise<boolean>((resolve) => {
+          modal.confirm({
+            title: `删除 ${selectedIds.length} 个用户？`,
+            content: "软删除：业务数据保留，旧登录令牌立即失效。",
+            okButtonProps: { danger: true },
+            onOk: () => resolve(true),
+            onCancel: () => resolve(false),
+          });
+        });
+        if (!sure) return;
+      }
+      setBatchBusy(kind);
+      try {
+        const res =
+          kind === "delete"
+            ? await batchDeleteUsers(selectedIds)
+            : kind === "reset"
+              ? await batchResetUserPassword(selectedIds, pwd ?? "", true)
+              : kind === "kick"
+                ? await batchForceLogoutUsers(selectedIds)
+                : await batchApproveUsers(selectedIds);
+        //: 回执四态逐条报，有跳过/失败就说清楚（缺值口径：不假装全成功）
+        const parts = [`成功 ${res.ok} 个`];
+        if (res.skipped) parts.push(`跳过 ${res.skipped} 个`);
+        if (res.failed) parts.push(`失败 ${res.failed} 个`);
+        if (res.not_found) parts.push(`不存在 ${res.not_found} 个`);
+        const text = parts.join("，");
+        if (res.failed || res.skipped) {
+          const detail = res.results
+            .filter((r) => r.status !== "ok")
+            .slice(0, 5)
+            .map((r) => `#${r.user_id} ${r.reason || r.status}`)
+            .join("；");
+          message.warning(`${text}。${detail}`);
+        } else {
+          message.success(text);
+        }
+        setSelectedIds([]);
+        void load();
+      } catch {
+        message.error("批量操作失败");
+      } finally {
+        setBatchBusy("");
+      }
+    },
+    [selectedIds, load]
+  );
 
   const columns: ColumnsType<SystemUser> = [
     {
@@ -346,6 +412,46 @@ export function SystemUsersPanel() {
         </Space>
       }
     >
+      {selectedIds.length > 0 && (
+        <div
+          style={{
+            marginBottom: 12,
+            padding: "6px 12px",
+            background: "#fafafa",
+            borderRadius: 6,
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+          }}
+        >
+          <Text>已选 {selectedIds.length} 项</Text>
+          <Space size={4} wrap>
+            {can("system:user:batchApprove") && (
+              <Button size="small" loading={batchBusy === "approve"} onClick={() => void runBatch("approve")}>
+                通过审核
+              </Button>
+            )}
+            {can("system:user:batchForceLogout") && (
+              <Button size="small" loading={batchBusy === "kick"} onClick={() => void runBatch("kick")}>
+                批量下线
+              </Button>
+            )}
+            {can("system:user:batchResetPassword") && (
+              <Button size="small" onClick={() => setBatchPwdOpen(true)}>
+                重置密码
+              </Button>
+            )}
+            {can("system:user:batchDelete") && (
+              <Button size="small" danger loading={batchBusy === "delete"} onClick={() => void runBatch("delete")}>
+                批量删除
+              </Button>
+            )}
+          </Space>
+          <Button type="link" size="small" onClick={() => setSelectedIds([])}>
+            清空选择
+          </Button>
+        </div>
+      )}
       <Space style={{ marginBottom: 12 }} wrap>
         <Input
           placeholder="用户名（模糊）"
@@ -398,6 +504,12 @@ export function SystemUsersPanel() {
       <Table<SystemUser>
         rowKey="id"
         size="small"
+        rowSelection={{
+          selectedRowKeys: selectedIds,
+          onChange: (keys) => setSelectedIds(keys as number[]),
+          //: 自己不能批量操作自己（后端也会拦，前端先不给选，避免必然失败的勾选）
+          getCheckboxProps: (row) => ({ disabled: row.username === "admin" }),
+        }}
         loading={loading}
         columns={columns}
         dataSource={rows}
@@ -462,6 +574,30 @@ export function SystemUsersPanel() {
             <Text>创建时间：{detail.created_at ? detail.created_at.replace("T", " ").slice(0, 19) : "-"}</Text>
           </Space>
         )}
+      </Modal>
+      <Modal
+        title="批量重置密码"
+        open={batchPwdOpen}
+        onCancel={() => setBatchPwdOpen(false)}
+        onOk={async () => {
+          if (!batchPwd || batchPwd.length < 6) {
+            message.warning("密码至少 6 位");
+            return;
+          }
+          setBatchPwdOpen(false);
+          await runBatch("reset", batchPwd);
+          setBatchPwd("");
+        }}
+        okText={`重置 ${selectedIds.length} 个用户`}
+      >
+        <Space direction="vertical" style={{ width: "100%" }}>
+          <Text type="secondary">所有选中用户设为同一个密码，下次登录需修改。</Text>
+          <Input.Password
+            placeholder="新密码（至少 6 位）"
+            value={batchPwd}
+            onChange={(e) => setBatchPwd(e.target.value)}
+          />
+        </Space>
       </Modal>
     </Card>
     </div>

@@ -177,7 +177,10 @@ export function buildTaskColumns(options: TaskColumnOptions = {}): ColumnsType<S
     columns.push({
       title: "操作",
       key: "actions",
-      width: 160,
+      //: 2026-10-25 用户口径「所有操作列均不允许溢出页面」：
+      //: 原 160px 放 4 个按钮必然裁切（截图里「日志」只剩半个）。
+      //: 240px 放 3 个短按钮 + 「更多」，其余收敛进下拉。
+      width: 240,
       fixed: "right",
       render: (_: unknown, job) => render(job),
     });

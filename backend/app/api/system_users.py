@@ -182,6 +182,20 @@ class UserUpdate(BaseModel):
     status: Optional[str] = Field(default=None, pattern="^(normal|pending|disabled)$")
 
 
+class BatchUserIdsRequest(BaseModel):
+    """批量操作的目标 id 列表。"""
+
+    user_ids: list[int] = Field(default_factory=list, max_length=200)
+
+
+class BatchResetPasswordRequest(BaseModel):
+    """批量重置密码（同一新密码）。"""
+
+    user_ids: list[int] = Field(default_factory=list, max_length=200)
+    password: str = Field(min_length=6, max_length=128)
+    must_change: bool = True
+
+
 class ResetPasswordRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -281,6 +295,95 @@ def create_user(
     )
 
 
+# --------------------------------------------------------------------------- #
+# 批量操作（2026-10-25 用户口径「新增用户管理批量相关操作」）
+#
+# 判据：**逐条调单条实现**，不另写规则（见 `user_batch_service` docstring）。
+# 回执四态 ok / skipped / failed / not_found，逐条说清，不合并成「已处理 N 个」。
+# 权限码各按钮独立（红线：一按钮一码）。
+# --------------------------------------------------------------------------- #
+@router.post("/batch/delete")
+def batch_delete_users(
+    payload: BatchUserIdsRequest,
+    *,
+    db: Session = Depends(get_db),
+    actor: User = Depends(require_perm("system:user:batchDelete")),
+) -> dict:
+    """批量软删。单条失败不中断整批，逐条回执。"""
+    from backend.app.services.user_batch_service import run_batch  # noqa: PLC0415
+
+    return run_batch(
+        db, actor, payload.user_ids, action=_delete_user_core, action_label="删除"
+    )
+
+
+@router.post("/batch/reset-password")
+def batch_reset_password(
+    payload: BatchResetPasswordRequest,
+    *,
+    db: Session = Depends(get_db),
+    actor: User = Depends(require_perm("system:user:batchResetPassword")),
+) -> dict:
+    """批量重置为**同一个**新密码（逐一 hash，不共享同一哈希）。"""
+    from backend.app.services.user_batch_service import run_batch  # noqa: PLC0415
+
+    def _reset(s: Session, act: User, uid: int) -> None:
+        user = _get_or_404(s, uid)
+        user.password_hash = hash_password(payload.password)
+        if hasattr(user, "must_change_password"):
+            user.must_change_password = payload.must_change
+        _bump_token_version(s, user)
+        s.commit()
+
+    return run_batch(
+        db, actor, payload.user_ids, action=_reset, action_label="重置密码"
+    )
+
+
+@router.post("/batch/force-logout")
+def batch_force_logout(
+    payload: BatchUserIdsRequest,
+    *,
+    db: Session = Depends(get_db),
+    actor: User = Depends(require_perm("system:user:batchForceLogout")),
+) -> dict:
+    """批量强制下线（只 bump token_version，不动密码）。"""
+    from backend.app.services.user_batch_service import run_batch  # noqa: PLC0415
+
+    def _kick(s: Session, act: User, uid: int) -> None:
+        user = _get_or_404(s, uid)
+        _bump_token_version(s, user)
+        s.commit()
+
+    return run_batch(
+        db, actor, payload.user_ids, action=_kick, action_label="强制下线"
+    )
+
+
+@router.post("/batch/approve")
+def batch_approve_users(
+    payload: BatchUserIdsRequest,
+    *,
+    db: Session = Depends(get_db),
+    actor: User = Depends(require_perm("system:user:batchApprove")),
+) -> dict:
+    """批量通过审核（待审 → 正常）。"""
+    from backend.app.services.user_batch_service import run_batch  # noqa: PLC0415
+
+    def _approve(s: Session, act: User, uid: int) -> None:
+        user = _get_or_404(s, uid)
+        if getattr(user, "status", "") != "pending":
+            raise HTTPException(
+                400, detail={"code": "NOT_PENDING", "message": "该用户不是待审核状态"}
+            )
+        user.status = "normal"
+        s.commit()
+
+    return run_batch(
+        db, actor, payload.user_ids, action=_approve, action_label="审核"
+    )
+
+
 @router.get("/{user_id}", response_model=SystemUserOut)
 def get_user(
     user_id: int,
@@ -334,19 +437,16 @@ def update_user(
     )
 
 
-@router.delete("/{user_id}")
-def delete_user(
-    user_id: int,
-    *,
-    db: Session = Depends(get_db),
-    actor: User = Depends(require_perm("system:user:delete")),
-) -> dict:
-    """**软删**（`deleted_at`）。业务数据不动，旧令牌立即失效。"""
+def _delete_user_core(db: Session, actor: User, user_id: int) -> User:
+    """删除单个用户的**全部规则**（单条端点与批量端点共用同一实现）。
+
+    抽出来的理由：批量若另写一遍「不能删自己 / 不能删最后一个管理员 / 软删释放唯一键」，
+    迟早与单条漂移 —— 而「批量删了唯一管理员」是不可恢复的事故。
+    """
     user = _get_or_404(db, user_id)
     _assert_not_self(actor, user, "删除")
 
     if normalize_role(user.role) == ROLE_ADMIN:
-        # 只允许存在至少一个可用管理员
         remaining = db.scalar(
             select(func.count()).select_from(User).where(
                 User.role == "admin", User.deleted_at.is_(None), User.id != user.id
@@ -355,33 +455,40 @@ def delete_user(
         if not remaining:
             raise HTTPException(
                 400,
-                detail={
-                    "code": "LAST_ADMIN_PROTECTED",
-                    "message": "不能删除唯一的超级管理员",
-                },
+                detail={"code": "LAST_ADMIN_PROTECTED", "message": "不能删除唯一的超级管理员"},
             )
 
     user.deleted_at = shanghai_now()
     _bump_token_version(db, user)
-
-    #: ⚠️ **软删必须释放唯一键**（v1.1.0 / S3 实测踩坑）。
-    #:
-    #: `users.email` / `users.username` 都有部分唯一索引
-    #: （`WHERE email IS NOT NULL` / `WHERE email <> ''`）。软删只写
-    #: `deleted_at` 的话，那个邮箱与用户名**永远占着** —— 用户被删后
-    #: 想用同一邮箱重新注册会撞唯一约束，而界面上看不出「是谁占的」
-    #: （被删的人已经在列表里隐藏了）。实测：E2E 用例清残留时撞
-    #: `ForeignKeyViolation`（物理删不行），改软删后又撞邮箱唯一。
-    #:
-    #: 改名规则：`deleted_<id>_<原名>`。用 id 前缀保证「同一原名的多个已删
-    #: 用户」不会互相撞；保留原名尾巴是为了排查时还能认出这是谁。
     stamp = f"deleted_{user.id}_"
     if user.email:
         user.email = (stamp + user.email)[:254]
     user.username = (stamp + user.username)[:80]
-
     db.commit()
+    return user
+
+
+@router.delete("/{user_id}")
+def delete_user(
+    user_id: int,
+    *,
+    db: Session = Depends(get_db),
+    actor: User = Depends(require_perm("system:user:delete")),
+) -> dict:
+    """**软删**（`deleted_at`）。业务数据不动，旧令牌立即失效。
+
+    规则全部在 `_delete_user_core`（批量端点共用同一份）。
+    """
+    user = _delete_user_core(db, actor, user_id)
     return {"ok": True, "id": user.id, "deleted": True}
+
+
+
+    user = _get_or_404(db, user_id)
+    _assert_not_self(actor, user, "强制下线")
+    _bump_token_version(db, user)
+    db.commit()
+    return {"ok": True, "id": user.id, "token_version": user.token_version}
 
 
 @router.post("/{user_id}/reset-password")
@@ -397,7 +504,7 @@ def reset_password(
     user.password_hash = hash_password(payload.password)
     if hasattr(user, "must_change_password"):
         user.must_change_password = payload.must_change
-    # 密码变了 ⇒ 旧令牌必须失效（否则被盗令牌仍有 30 分钟有效期）
+    #: 密码变了 ⇒ 旧令牌必须失效（否则被盗令牌仍有 30 分钟有效期）
     _bump_token_version(db, user)
     db.commit()
     return {"ok": True, "id": user.id, "must_change_password": payload.must_change}
@@ -408,14 +515,19 @@ def force_logout(
     user_id: int,
     *,
     db: Session = Depends(get_db),
-    actor: User = Depends(require_perm("system:user:forceLogout")),
+    _: User = Depends(require_perm("system:user:forceLogout")),
 ) -> dict:
-    """强制下线：抬 `token_version`（所有已签发令牌立即失效）。"""
+    """强制下线：bump `token_version`，该用户所有令牌立即失效。
+
+    ⚠️ 必须在 `/{user_id}/approve` 之前注册？不需要 —— FastAPI 按**路径模板**
+    匹配，`/batch/*` 与 `/{user_id}/*` 不会互相遮蔽（段数不同）。
+    但**同段数的字面量要排在变量前**才能命中（`/batch/delete` vs `/{user_id}` 是
+    两段 vs 一段，无冲突）。
+    """
     user = _get_or_404(db, user_id)
-    _assert_not_self(actor, user, "强制下线")
     _bump_token_version(db, user)
     db.commit()
-    return {"ok": True, "id": user.id, "token_version": user.token_version}
+    return {"ok": True, "id": user.id, "force_logged_out": True}
 
 
 @router.post("/{user_id}/approve")

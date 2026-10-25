@@ -50,6 +50,7 @@ import type { DataNode } from "antd/es/tree";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { useCan } from "../../hooks/use-can";
+import { RowActions } from "../../components/common/row-actions";
 import {
   createSystemRole,
   deleteSystemRole,
@@ -135,63 +136,57 @@ export function SystemRolesPanel() {
     {
       title: "操作",
       key: "actions",
-      width: 320,
+      fixed: "right",
+      //: 2026-10-25 用户口径「所有操作列均不允许溢出页面」：
+      //: 原 320px 手写 4 个带图标按钮 ⇒ 窄屏被裁。改用统一容器：
+      //: 常用 3 个直显、其余进「更多」，去掉图标省宽度（图标在 240px 里挤不下）。
+      width: 240,
       render: (_: unknown, row) => (
-        <Space size={0} wrap>
-          {can("system:role:assignMenu") && (
-            <Button
-              size="small"
-              type="link"
-              icon={<ApartmentOutlined />}
-              onClick={() => setMenusTarget(row)}
-            >
-              分配菜单
-            </Button>
-          )}
-          <Button
-            size="small"
-            type="link"
-            icon={<TeamOutlined />}
-            onClick={() => setUsersTarget(row)}
-          >
-            查看用户
-          </Button>
-          {can("system:role:edit") && (
-            <Button
-              size="small"
-              type="link"
-              icon={<EditOutlined />}
-              onClick={() => setEditTarget(row)}
-            >
-              编辑
-            </Button>
-          )}
-          {can("system:role:delete") && !row.is_system && (
-            <Button
-              size="small"
-              type="link"
-              danger
-              icon={<DeleteOutlined />}
-              onClick={() => {
-                modal.confirm({
-                  title: `删除角色「${row.name}」？`,
-                  content:
-                    row.user_count > 0
-                      ? `还有 ${row.user_count} 个用户使用该角色，需先调整他们的角色。`
-                      : "删除后该角色的所有授权一起消失。",
-                  okButtonProps: { danger: true, disabled: row.user_count > 0 },
-                  onOk: async () => {
-                    await deleteSystemRole(row.id);
-                    message.success("已删除");
-                    void load();
+        <RowActions
+          width={240}
+          maxInline={3}
+          items={[
+            {
+              label: "分配菜单",
+              permission: "system:role:assignMenu",
+              onClick: () => setMenusTarget(row),
+            },
+            {
+              label: "查看用户",
+              onClick: () => setUsersTarget(row),
+            },
+            {
+              label: "编辑",
+              permission: "system:role:edit",
+              onClick: () => setEditTarget(row),
+            },
+            //: 系统内置角色不可删 —— 业务规则而非权限：直接不给这一项
+            ...(row.is_system
+              ? []
+              : [
+                  {
+                    label: "删除",
+                    permission: "system:role:delete",
+                    danger: true,
+                    onClick: () => {
+                      modal.confirm({
+                        title: `删除角色「${row.name}」？`,
+                        content:
+                          row.user_count > 0
+                            ? `还有 ${row.user_count} 个用户使用该角色，需先调整他们的角色。`
+                            : "删除后该角色的所有授权一起消失。",
+                        okButtonProps: { danger: true, disabled: row.user_count > 0 },
+                        onOk: async () => {
+                          await deleteSystemRole(row.id);
+                          message.success("已删除");
+                          void load();
+                        },
+                      });
+                    },
                   },
-                });
-              }}
-            >
-              删除
-            </Button>
-          )}
-        </Space>
+                ]),
+          ]}
+        />
       ),
     },
   ];

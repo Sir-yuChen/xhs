@@ -6422,3 +6422,53 @@ export async function changeMyPassword(
   );
   return response.data;
 }
+
+
+/**
+ * 批量操作用户（2026-10-25 用户口径「新增用户管理批量相关操作」）。
+ *
+ * 四个动作各有独立权限码；后端逐条执行、逐条回执（`results`），
+ * 单条失败不中断整批。前端只负责展示回执，不自己拼「成功 N 个」。
+ */
+export type BatchUserResult = {
+  requested: number;
+  ok: number;
+  skipped: number;
+  failed: number;
+  not_found: number;
+  results: { user_id: number; status: string; reason: string }[];
+};
+
+export async function batchDeleteUsers(userIds: number[]): Promise<BatchUserResult> {
+  const response = await http.post<BatchUserResult>("/system/users/batch/delete", {
+    user_ids: userIds,
+  });
+  return response.data;
+}
+
+export async function batchResetUserPassword(
+  userIds: number[],
+  password: string,
+  mustChange = true
+): Promise<BatchUserResult> {
+  const response = await http.post<BatchUserResult>("/system/users/batch/reset-password", {
+    user_ids: userIds,
+    password,
+    must_change: mustChange,
+  });
+  return response.data;
+}
+
+export async function batchForceLogoutUsers(userIds: number[]): Promise<BatchUserResult> {
+  const response = await http.post<BatchUserResult>("/system/users/batch/force-logout", {
+    user_ids: userIds,
+  });
+  return response.data;
+}
+
+export async function batchApproveUsers(userIds: number[]): Promise<BatchUserResult> {
+  const response = await http.post<BatchUserResult>("/system/users/batch/approve", {
+    user_ids: userIds,
+  });
+  return response.data;
+}
