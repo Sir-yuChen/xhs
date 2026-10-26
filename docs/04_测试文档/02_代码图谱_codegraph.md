@@ -21,7 +21,7 @@
 └───────────────────────────┬─────────────────────────────────────┘
                             │ HTTP /api（Bearer）
 ┌───────────────────────────▼─────────────────────────────────────┐
-│ L4  API 路由层（42 个 router / 399 端点）                          │
+│ L4  API 路由层（42 个 router / 397 端点）                          │
 │     auth · platforms · accounts · login-sessions · notes ·        │
 │     files · drafts · ai · tasks · model-configs · tags ·          │
 │     notifications · keyword-groups · publish ·                    │
