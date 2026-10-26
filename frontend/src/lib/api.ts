@@ -5161,14 +5161,6 @@ export interface OrderAfterSaleRow {
   handle_result?: string | null;
 }
 
-export interface OrderRemarkRow {
-  id: number;
-  kind: string;
-  content: string;
-  created_at?: string | null;
-  updated_at?: string | null;
-}
-
 export interface OrderRow {
   id: number;
   order_no: string;
@@ -5176,7 +5168,7 @@ export interface OrderRow {
   platform_account_id: number;
   type_desc?: string | null;
   buyer_nick: string;
-  /** ⚠️ 默认**脱敏**（`张*` / `189****2857`）；`includeFull` 才给库里原值。 */
+  /** 平台下发即**脱敏**（`张*` / `189****3034`）；本系统无从补全（缺值口径）。 */
   receiver_name?: string | null;
   receiver_phone?: string | null;
   receiver_address?: string | null;
@@ -5203,7 +5195,7 @@ export interface OrderRow {
   items?: OrderItemRow[];
   shipments?: OrderShipmentRow[];
   after_sales?: OrderAfterSaleRow[];
-  remarks?: OrderRemarkRow[];
+  //: ⚠️ `remarks` 已移除（设计 75，2026-10-27）：订单备注功能整条退场。
 }
 
 export interface OrderListParams {
@@ -5277,32 +5269,26 @@ export interface OrderMetrics {
   by_status: Record<string, number>;
 }
 
-export async function fetchOrderMetrics(platformAccountId: number): Promise<OrderMetrics> {
-  const response = await http.get<{ metrics: OrderMetrics }>("/xhs/qianfan/orders/metrics", {
-    params: { platform_account_id: platformAccountId },
-  });
-  return response.data.metrics;
+export interface OrderMetricsResult {
+  metrics: OrderMetrics;
+  /** 统计覆盖了多少单（近 365 天，上限 3000 单）—— 「扫全没有」如实可见。 */
+  scanned: number;
+  /** 固定 `platform`（实时聚合）。 */
+  source: string;
 }
 
-/** ⚠️ **本地**备注（不碰平台）—— 空 `content` = 删除该备注。 */
-export async function saveOrderRemark(
+export async function fetchOrderMetrics(
   platformAccountId: number,
-  orderNo: string,
-  content: string,
-  kind = "订单",
-): Promise<{ ok: boolean; deleted: boolean; remark: OrderRemarkRow | null }> {
-  const response = await http.post<{
-    ok: boolean;
-    deleted: boolean;
-    remark: OrderRemarkRow | null;
-  }>("/xhs/qianfan/orders/remark", {
-    platform_account_id: platformAccountId,
-    order_no: orderNo,
-    content,
-    kind,
+): Promise<OrderMetricsResult> {
+  const response = await http.get<OrderMetricsResult>("/xhs/qianfan/orders/metrics", {
+    params: { platform_account_id: platformAccountId },
   });
   return response.data;
 }
+
+// ⚠️ `saveOrderRemark`（`POST /xhs/qianfan/orders/remark`）已随订单备注退场
+// （设计 75，2026-10-27；端点已 410 墓碑、`order_remarks` 表已 DROP）。
+
 
 export interface OrderExportResult {
   platform_account_id: number;

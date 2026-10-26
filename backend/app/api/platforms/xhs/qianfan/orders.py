@@ -37,6 +37,8 @@ from ._shared import (
 #:（路径里已含 `/picture-space` 这类段）。
 #: ⚠️ 各域**各自**一个，不能共用 —— `include_router` 把父 router 挂到
 #:    自己身上会让路由重复/错乱。
+from backend.app.core.perm_deps import require_perm  # noqa: E402
+
 router = APIRouter()
 
 #: 订单详情「订单号 → package_id」的翻页上限：一页 20 条 × 20 页 = 400 单。
@@ -288,6 +290,9 @@ def order_detail_endpoint(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
     adapter_factory=Depends(get_qianfan_api_adapter_factory),
+    #: ⚠️ 写方法（POST）**必须挂权限码** —— 启动守卫 `route_guard` 会在缺码时
+    #: 拒绝启动（「缺权限码的写接口对任何登录用户开放」）。
+    _perm: None = Depends(require_perm("xhs:order:view")),
 ):
     """订单详情（**实时查千帆**，设计 75 §4.4）。
 

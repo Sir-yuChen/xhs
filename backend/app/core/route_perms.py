@@ -264,7 +264,6 @@ ROUTE_PERMS: Final[dict[str, str]] = {
     "POST /api/xhs/product-notes/versions/regen": "xhs:workshop:regenerate",
     "POST /api/xhs/product-notes/versions/{record_id}/adopt": "xhs:workshop:adopt",
     "POST /api/xhs/product-notes/versions/{record_id}/publish": "xhs:workshop:adopt",
-    "POST /api/xhs/qianfan/after-sales/handle": "xhs:order:afterSaleHandle",
     "POST /api/xhs/qianfan/arbitration-tags": "xhs:violation:view",
     "POST /api/xhs/qianfan/arbitrations": "xhs:violation:view",
     "POST /api/xhs/qianfan/binding": "xhs:item:bind",
@@ -299,7 +298,10 @@ ROUTE_PERMS: Final[dict[str, str]] = {
     #: ⚠️ 订单列表 / 详情现在**读平台**（设计 75 §4.4），挂 `xhs:order:ship` 是历史遗留：
     #: 原码表里没有 order:view 的「读列表」档（只有 C 类菜单 view），改码会连带改前端
     #: 判权口径 ⇒ 本卡不动，登记在此待「读/写分码」专项处理。
-    "POST /api/xhs/qianfan/orders": "xhs:order:ship",
+    #: 订单列表 / 详情是**读**操作，但走 POST（带查询体）⇒ 挂 view 码，
+    #: 不是 `ship`（那是发货的码，挂在这里会让「没有发货权的人看不了订单」）。
+    "POST /api/xhs/qianfan/orders": "xhs:order:view",
+    "POST /api/xhs/qianfan/orders/detail": "xhs:order:view",
     "POST /api/xhs/qianfan/orders/export": "xhs:order:export",
     "POST /api/xhs/qianfan/orders/ship": "xhs:order:ship",
     "POST /api/xhs/qianfan/orders/ship-batch": "xhs:order:shipBatch",
@@ -328,7 +330,6 @@ ROUTE_PERMS: Final[dict[str, str]] = {
     "POST /api/xhs/qianfan/product/short-title": "xhs:item:aiAssist",
     "POST /api/xhs/qianfan/save-detail-images": "xhs:item:generateImage",
     "POST /api/xhs/qianfan/spot-checks": "xhs:violation:view",
-    "POST /api/xhs/qianfan/sync-shop-goods": "xhs:item:sync",
     "POST /api/xhs/qianfan/video/upload": "xhs:item:sync",
     "POST /api/xhs/qianfan/violation/appeal-record": "xhs:violation:view",
     "POST /api/xhs/qianfan/violation/counts": "xhs:violation:view",

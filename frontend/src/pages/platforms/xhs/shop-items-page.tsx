@@ -1245,7 +1245,7 @@ export function XhsShopItemsPage() {
    *   message.success(`已绑定千帆店铺：${bound.shop_name || "（未命名）"}`);
    */
 
-  /** 打开「这个商品挂了哪些笔记」弹窗（关系表源，零平台请求；设计 13 §31.6）。
+  /** 打开「这个商品挂了哪些笔记」弹窗（**千帆实时查询**；设计 75 §2.3）。
    *
    * 多篇笔记用 **tab 自然隔离**（一篇一个 tab），内容区复用内容库详情弹窗的
    * 同一份两栏版式（`NoteDetailBody`）—— 同一语义不留两份实现。
@@ -2395,13 +2395,15 @@ export function XhsShopItemsPage() {
       // 消费者，界面上不再解释两个口径为什么不等）。
       render: (_value, item) =>
         item.note_count > 0 ? (
-          <Tag
-            color="geekblue"
-            style={{ cursor: "pointer" }}
-            onClick={() => void openItemNotes(item)}
-          >
-            {item.note_count} 篇
-          </Tag>
+          <Tooltip title="平台侧挂链篇数；点开实时查千帆（含未同步到本地的笔记）">
+            <Tag
+              color="geekblue"
+              style={{ cursor: "pointer" }}
+              onClick={() => void openItemNotes(item)}
+            >
+              {item.note_count} 篇
+            </Tag>
+          </Tooltip>
         ) : (
           <Text type="secondary">0</Text>
         ),
@@ -3920,7 +3922,13 @@ export function XhsShopItemsPage() {
               />
             )
           ) : (
-            <Empty description="这个商品还没有挂链笔记（可能未同步，也可能确实没挂）" />
+            <Empty
+              description={
+                notesData?.source === "platform_degraded"
+                  ? `这次没问到平台，无法确认挂链情况${notesData.error ? `（${notesData.error}）` : ""}`
+                  : "平台上这个商品还没有挂链笔记"
+              }
+            />
           )}
         </div>
       </Modal>

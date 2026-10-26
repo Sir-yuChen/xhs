@@ -6,16 +6,19 @@
  * 三个区块 + 一个抽屉：
  * 1. **监控卡** —— 订单数 / GMV / 客单价 / 退款率 / 平均发货时长 + 状态分布；
  * 2. **订单表** —— 状态 / 商品 / 金额 / 收件人（脱敏）/ 物流 / 时间；
- * 3. **订单详情抽屉** —— 商品、物流、售后、备注（本地）。
+ * 3. **订单详情抽屉** —— 商品、物流、售后（**备注区已移除**，见下）。
  *
  * ## ⚠️ 三条口径（都有守卫，见 `lib/order-format.ts`）
  *
- * 1. **一期只读**：页面**没有**发货 / 改价 / 售后审核按钮 —— 平台写接口未授权。
- *    唯一的写操作是**本地备注**，页面明确标注「仅本地」。
+ * 1. **数据源 = 千帆实时**（设计 75 变更，2026-10-27）：列表 / 详情 / 监控都直接查平台，
+ *    本地零副本 ⇒ 页面**没有「同步订单」按钮**（没有要同步的东西），
+ *    也没有**订单备注**（用户口径「订单备注不保留直接移除」，表已 DROP）。
  * 2. **缺值 `-` 不补 0**（金额 / 退款率 / 平均发货时长）。
  * 3. **平台脱敏要如实说明**：真机实测千帆对部分订单**本身就只给脱敏值**
- *    （`高*` / `189***2857`）——`includeFull` 只是「不做二次脱敏」，
- *    **不等于一定有原值**。页面不许承诺「点开就有完整信息」。
+ *    （`高*` / `189****3034`）—— 改实时后本系统**不再有库内原值**，
+ *    页面不许承诺「点开就有完整信息」。
+ * 4. **查询窗口必须有界**：无界窗口平台会挂死 15 秒 ⇒ 后端默认近 365 天，
+ *    日期范围是**发给平台**的查询条件（不是本地筛选）。
  */
 
 import { WaitMask } from "../../../components/ui/wait-mask";
@@ -25,7 +28,6 @@ import {
   DownloadOutlined,
   ExclamationCircleOutlined,
   ReloadOutlined,
-  SyncOutlined,
 } from "@ant-design/icons";
 import {
   Alert,
@@ -33,6 +35,7 @@ import {
   Button,
   Card,
   Col,
+  DatePicker,
   Descriptions,
   Drawer,
   Input,
@@ -48,6 +51,8 @@ import {
   theme,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
+import dayjs from "dayjs";
+import type { Dayjs } from "dayjs";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
@@ -58,10 +63,8 @@ import {
   fetchOrders,
   handleAfterSale,
   previewOrderWrite,
-  saveOrderRemark,
   shipOrder,
   shipOrdersBatch,
-  syncOrders,
 } from "../../../lib/api";
 import type { OrderMetrics, OrderRow } from "../../../lib/api";
 import {
@@ -99,7 +102,16 @@ export function OrdersPage() {
   const [accountId, setAccountId] = useState<number | null>(null);
   const [status, setStatus] = useState<string>("");
   const [keyword, setKeyword] = useState<string>("");
-  const [includeFull, setIncludeFull] = useState(false);
+  /**
+   * 查询窗口（**发给平台**，设计 75 §4.4）。
+   *
+   * 默认近 30 天：无界窗口平台会挂死 15 秒，后端兜底 365 天；页面窄一点让首屏更快，
+   * 用户要更早的单子自己放宽。`null` = 用后端默认（近 365 天）。
+   */
+  const [range, setRange] = useState<[Dayjs, Dayjs] | null>([
+    dayjs().subtract(29, "day").startOf("day"),
+    dayjs().endOf("day"),
+  ]);
 
   const [rows, setRows] = useState<OrderRow[]>([]);
   const [total, setTotal] = useState(0);
@@ -113,12 +125,12 @@ export function OrdersPage() {
   const [shopName, setShopName] = useState("");
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
-  const [syncing, setSyncing] = useState(false);
   const [metrics, setMetrics] = useState<OrderMetrics | null>(null);
+  /** 监控统计覆盖了多少单（近 365 天、上限 3000）—— 「扫全没有」如实上屏。 */
+  const [scanned, setScanned] = useState(0);
 
   const [detail, setDetail] = useState<OrderRow | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
-  const [remarkDraft, setRemarkDraft] = useState("");
 
   /**
    * M7 发货 / 售后（**真实平台写、不可撤回**）。
@@ -173,28 +185,32 @@ export function OrdersPage() {
             keyword,
             page: targetPage,
             pageSize: 20,
-            includeFull,
+            //: 窗口**发给平台**（有界是硬要求：无界会挂死 15 秒）。
+            dateFrom: range ? range[0].startOf("day").format("YYYY-MM-DD HH:mm:ss") : undefined,
+            dateTo: range ? range[1].endOf("day").format("YYYY-MM-DD HH:mm:ss") : undefined,
           }),
           fetchOrderMetrics(accountId),
         ]);
         setRows(list.items ?? []);
+        //: `total` 可能是 `null`（平台没给总数）⇒ 分页器退到「无总数」模式，不拿本页条数冒充。
         setTotal(list.total ?? 0);
         setShopName(list.shop_name ?? "");
-        setMetrics(m);
+        setMetrics(m.metrics);
+        setScanned(m.scanned ?? 0);
       } catch (error) {
         message.error(`订单列表加载失败：${(error as Error).message}`);
       } finally {
         setLoading(false);
       }
     },
-    [accountId, includeFull, keyword, message, page, status],
+    [accountId, keyword, message, page, range, status],
   );
 
   useEffect(() => {
     void load(1);
     setPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accountId, status, includeFull]);
+  }, [accountId, status, range]);
 
     /**
    * **发货**（M7，真实写、不可撤回）。
@@ -281,25 +297,6 @@ export function OrdersPage() {
     }
   };
 
-const onSync = async () => {
-    if (!accountId) return;
-    setSyncing(true);
-    try {
-      if (!hasPermission("xhs:order:sync")) {
-        message.warning("没有同步订单的权限");
-        return;
-      }
-      await syncOrders(accountId);
-      message.success("订单同步已入队，稍候刷新查看");
-      // 同步在后台跑，立刻刷新拿到的是同步前的数据；不假装「已同步完成」
-      setTimeout(() => void load(page), 3000);
-    } catch (error) {
-      message.error(`触发同步失败：${(error as Error).message}`);
-    } finally {
-      setSyncing(false);
-    }
-  };
-
   const onExport = () => {
     if (!accountId) return;
     // ⚠️ 导出**含完整收件信息** —— 必须先告知再执行（不是「点完才知道」）
@@ -315,7 +312,12 @@ const onSync = async () => {
             message.warning("没有导出订单的权限");
             return;
           }
-          const result = await exportOrders(accountId, { status, keyword });
+          const result = await exportOrders(accountId, {
+            status,
+            keyword,
+            dateFrom: range ? range[0].startOf("day").format("YYYY-MM-DD HH:mm:ss") : undefined,
+            dateTo: range ? range[1].endOf("day").format("YYYY-MM-DD HH:mm:ss") : undefined,
+          });
           const blob = new Blob([result.csv], { type: "text/csv;charset=utf-8" });
           const url = URL.createObjectURL(blob);
           const a = document.createElement("a");
@@ -338,27 +340,20 @@ const onSync = async () => {
   const openDetail = async (row: OrderRow) => {
     if (!accountId) return;
     try {
-      const data = await fetchOrderDetail(accountId, row.order_no, includeFull);
+      //: ⚠️ 不再传 `includeFull`：实时详情由平台下发，本来就只给脱敏值（缺值口径，不猜）。
+      const data = await fetchOrderDetail(accountId, row.order_no);
       setDetail(data);
-      setRemarkDraft((data.remarks ?? [])[0]?.content ?? "");
       setDetailOpen(true);
     } catch (error) {
       message.error(`详情加载失败：${(error as Error).message}`);
     }
   };
 
-  const saveRemark = async () => {
-    if (!accountId || !detail) return;
-    try {
-      const result = await saveOrderRemark(accountId, detail.order_no, remarkDraft);
-      message.success(result.deleted ? "备注已清除" : "备注已保存（仅本地）");
-      void openDetail({ ...detail, order_no: detail.order_no });
-    } catch (error) {
-      message.error(`备注保存失败：${(error as Error).message}`);
-    }
-  };
-
   const counts = useMemo(() => statusCounts(metrics?.by_status), [metrics]);
+  /** 生效窗口文案（空 = 后端默认近 365 天）。 */
+  const windowText = range
+    ? `${range[0].format("YYYY-MM-DD")} ~ ${range[1].format("YYYY-MM-DD")}`
+    : "近 365 天（默认）";
 
   const columns: ColumnsType<OrderRow> = [
     {
@@ -470,7 +465,15 @@ const onSync = async () => {
           台账说明」三行整块移除；「同步订单 / 刷新 / 导出」收进下方「订单列表」卡右上角。 */}
 
       {/* ① 监控卡 */}
-      <Card size="small" title="订单监控">
+      <Card
+        size="small"
+        title="订单监控"
+        extra={
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            统计近 365 天，已扫描 {scanned} 单
+          </Text>
+        }
+      >
         <Row gutter={[16, 16]}>
           <Col xs={12} md={6}>
             <Statistic title="订单数" value={metrics?.order_count ?? 0} />
@@ -520,12 +523,27 @@ const onSync = async () => {
         title="订单列表"
         extra={
           <Space wrap>
-            <Button size="small" icon={<SyncOutlined />} loading={syncing} onClick={() => void onSync()}>
-              同步订单
-            </Button>
+            {/* ⚠️ 「同步订单」已移除（设计 75，2026-10-27）：列表直接查平台，没有要同步的东西。 */}
             <Button size="small" icon={<ReloadOutlined />} onClick={() => void load(page)}>
               刷新
             </Button>
+            <DatePicker.RangePicker
+              size="small"
+              allowClear={false}
+              style={{ width: 240 }}
+              value={range}
+              onChange={(value) => {
+                if (!value || !value[0] || !value[1]) return;
+                setRange([value[0], value[1]]);
+                setPage(1);
+              }}
+              presets={[
+                { label: "近 7 天", value: [dayjs().subtract(6, "day").startOf("day"), dayjs().endOf("day")] },
+                { label: "近 30 天", value: [dayjs().subtract(29, "day").startOf("day"), dayjs().endOf("day")] },
+                { label: "近 90 天", value: [dayjs().subtract(89, "day").startOf("day"), dayjs().endOf("day")] },
+                { label: "近 365 天", value: [dayjs().subtract(364, "day").startOf("day"), dayjs().endOf("day")] },
+              ]}
+            />
             <Button size="small" icon={<DownloadOutlined />} onClick={onExport}>
               导出
             </Button>
@@ -560,14 +578,8 @@ const onSync = async () => {
                 setTimeout(() => void load(1), 0);
               }}
             />
-            <Tooltip title="完整收件信息仅在发货 / 打单场景使用">
-              <Button
-                type={includeFull ? "primary" : "default"}
-                onClick={() => setIncludeFull((prev) => !prev)}
-              >
-                {includeFull ? "完整信息" : "脱敏显示"}
-              </Button>
-            </Tooltip>
+            {/* ⚠️「完整信息 / 脱敏显示」开关已移除（设计 75，2026-10-27）：
+                订单域改实时后平台只下发脱敏值，本系统无从补全 ⇒ 不做一个点了也没用的开关。 */}
           </Space>
         }
       >
@@ -577,7 +589,7 @@ const onSync = async () => {
         <Descriptions size="small" column={2} style={{ marginBottom: 8 }}>
           <Descriptions.Item label="店铺">{shopName || "-"}</Descriptions.Item>
           <Descriptions.Item label="订单来源">
-            本地台账（同步订单任务落库 · 数据归属该店铺）
+            千帆实时查询（{windowText}）
           </Descriptions.Item>
         </Descriptions>
         {/* 2026-10-20 统一：表格等待由公共 WaitMask 表达。 */}
@@ -688,24 +700,6 @@ const onSync = async () => {
                   </div>
                 ))
               )}
-            </Card>
-
-            <Card
-              size="small"
-              title="备注"
-              extra={<Text type="secondary">仅存本地，不同步到平台</Text>}
-            >
-              <Input.TextArea
-                rows={3}
-                value={remarkDraft}
-                onChange={(event) => setRemarkDraft(event.target.value)}
-                placeholder="例如：客户要求周六送（清空即删除备注）"
-              />
-              <div style={{ marginTop: 8 }}>
-                <Button type="primary" onClick={() => void saveRemark()}>
-                  保存备注
-                </Button>
-              </div>
             </Card>
 
             <Paragraph type="secondary" style={{ margin: 0, fontSize: 12 }}>

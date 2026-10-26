@@ -466,12 +466,12 @@ export type XhsShopItemsQuery = {
 export type XhsNoteCountOp = "lt" | "lte" | "eq" | "gte" | "gt";
 
 /**
- * `POST /xhs/qianfan/item-notes` 的一条挂链笔记（**关系表源**，设计 13 §31.6）。
+ * `POST /xhs/qianfan/item-notes` 的一条挂链笔记（**千帆实时查询**，设计 75 §2.3）。
  *
- * v1.33 起数据源从 `shop_note_goods` 平台证据缓存切换到 `note_goods` join `notes`
- * （本地实体关系）—— 弹窗要展示的是「本地这条笔记」的正文 / 图集 / 发布态，
- * 缓存表没有这些。互动指标只有同步链路落库的笔记带（`raw_json` 里存了平台条目），
- * 本地生成的笔记这些字段是 `null`（缺值口径：不造假）。
+ * 2026-10-27 起主数据源是平台（`goods-note/list?item_mix_search_word=<商品ID>`），
+ * 本地 `note_goods` 关系表不再是判据 —— 关系不问平台就不知道有没有漏、有没有删。
+ * 本地 `notes` 表只用来**补充**正文 / 图集 / 发布态这些平台不回的字段：
+ * 「平台有、本地没有」的行 `detail_source = "platform"`、正文为空（缺值口径：不造假）。
  */
 export type XhsItemNote = {
   note_id: string;
@@ -497,13 +497,22 @@ export type XhsItemNote = {
   /** 发布失败原因（平台原文；空 = 没失败过）。 */
   publish_error: string;
   synced_at: string;
+  /**
+   * `local` = 本地有正文 / 图集可看全；`platform` = 平台有、本地没有（正文留空）。
+   * 页面据此打「仅平台」标签 —— 不让用户以为这些笔记本地丢了。
+   */
+  detail_source?: "local" | "platform";
 };
 
 export type XhsItemNotesResponse = {
   item_id: string;
   count: number;
   notes: XhsItemNote[];
-  /** 本地已映射的笔记数 / 店铺商品笔记总数 —— 用来诚实说明「可能不全」。 */
+  /** `platform` = 实时查到了；`platform_degraded` = 平台没答上来（配合 `error` 显示原因）。 */
+  source?: "platform" | "platform_degraded" | string;
+  /** 平台查询失败原因（空 = 成功）。**不静默**：页面要能说清「这次没问到平台」。 */
+  error?: string;
+  /** 本地已映射的笔记数（覆盖率参考，不再是主数据源）。 */
   synced_notes: number;
   goods_note_total: number;
   goods_synced_at: string;
