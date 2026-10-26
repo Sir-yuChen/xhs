@@ -14,12 +14,20 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import text
 
+from tests.backend.conftest import TEST_SCHEMA
+
 
 def test_engine_points_to_test_schema(engine):
-    """① engine 的每条连接都落在 `test` schema（不是生产 `public`）。"""
+    """① engine 的每条连接都落在测试 schema（不是生产 `public`）。
+
+    ⚠️ schema 名**按 worker 派生**（`test_gw0` / `test_gw1` / 串行时 `test`），
+    所以判据是「等于 conftest 声明的那个」，不是硬编码字符串 `"test"`。
+    硬编码会在 `pytest.ini` 默认的 `-n 4` 下把正当的隔离判成失败（实测过）。
+    """
     with engine.connect() as conn:
         schema = conn.execute(text("SELECT current_schema()")).scalar()
-    assert schema == "test", f"engine 连的是 {schema}，应为 test"
+    assert schema == TEST_SCHEMA, f"engine 连的是 {schema}，应为 {TEST_SCHEMA}"
+    assert schema != "public", "测试 engine 绝不能连生产 public"
 
 
 def test_api_write_is_visible_to_case(client, db):
@@ -70,4 +78,4 @@ def test_service_sessionlocal_points_to_test_schema(service_name):
     mod = __import__(f"backend.app.services.{service_name}", fromlist=["SessionLocal"])
     with mod.SessionLocal() as s:
         schema = s.execute(text("SELECT current_schema()")).scalar()
-    assert schema == "test", f"{service_name}.SessionLocal 连的是 {schema}，应为 test"
+    assert schema == TEST_SCHEMA, f"{service_name}.SessionLocal 连的是 {schema}，应为 {TEST_SCHEMA}"
