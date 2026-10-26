@@ -556,6 +556,23 @@ def list_jobs(
         statement = statement.where(ScheduledJob.trigger_type == trigger_type)
     if keyword:
         statement = statement.where(ScheduledJob.name.like(f"%{keyword.strip()}%"))
+    #: 2026-10-26（用户口径「菜单管理中有很多缺失」）：
+    #: 这里此前只要求**登录**，任何用户都能读到全部任务（含系统级）。
+    #: 现在按归属卡：有系统任务码可看全部；只有工作区码则只看工作区级。
+    #: 两级入口（系统管理 / 工作区任务中心）共用一个接口，判据必须按归属分流。
+    from backend.app.core.perms import has_perm  # noqa: PLC0415
+
+    if not has_perm(current_user, "system:scheduler:view"):
+        if not has_perm(current_user, "xhs:taskcenter:view"):
+            raise HTTPException(
+                403,
+                detail={
+                    "code": "PERMISSION_DENIED",
+                    "message": "没有查看任务的权限",
+                },
+            )
+        statement = statement.where(ScheduledJob.workspace != "system")
+
     jobs = db.scalars(
         statement.order_by(ScheduledJob.is_builtin.desc(), ScheduledJob.id.desc())
     ).all()

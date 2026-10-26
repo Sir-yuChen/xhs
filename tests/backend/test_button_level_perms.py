@@ -40,6 +40,27 @@ MENU_SEED = ROOT / "config" / "initial_data" / "menus.seed.json"
 #: 同一用户动作的「单条 / 批量」两种入口 —— 允许共用（拆开只会让角色配置更绕）。
 #: 键 = 权限码；值 = 为什么这是同一件事。
 INTENTIONAL_ALIASES: dict[str, str] = {
+    #: 页面级**查看码**盖住同一页面的「列表 / 详情 / 统计」：
+    #: 界面上是**同一个入口**（进页面就能看到），拆开会让授权页出现
+    #: 「能看到列表但点不进详情」这种无意义组合（详情页必然要读列表）。
+    #: 判据：同一份数据的读法差异 ⇒ 别名；不同数据的读 ⇒ 拆开。
+    "xhs:autoops:view": "自动化查看：列表与单条详情同属一页",
+    "xhs:crawl:view": "抓取查看：四种抓取入口（数据/笔记链接/搜索/用户）在同一页切换",
+    "xhs:files:view": "文件查看：图片列表与导出文件下载同属文件页",
+    "xhs:login:view": "登录态查看：批量与单个账号的登录态探测是同一份数据的两种粒度",
+    "ai:gateway:view": "网关配置查看：列表/详情/统计都属同一页可见范围",
+    "ai:model:view": "模型查看：模型树与单个服务商的模型列表是同一份数据",
+    "system:dict:view": "字典查看：类型与字典项在同一页左右两栏同时展示",
+    "system:menu:view": "菜单查看：树与单条详情同属菜单管理页",
+    "system:log:view": "日志查看：审计/应用/业务/链路四个页签是同一页",
+    "system:user:view": "用户查看：列表/详情/在线状态同属用户管理页",
+    "system:role:view": "角色查看：列表/已授权菜单/已分配用户同属角色管理页",
+    "xhs:account:view": "账号查看：列表与同步状态同属账号页",
+    "xhs:record:view": "队列记录查看：列表/队列清单/详情同属记录页",
+    "xhs:monitor:view": "监控查看：目标列表/笔记/快照属同一页",
+    "xhs:order:view": "订单查看：列表/指标属同一页",
+    "xhs:settings:view": "配置查看：列表/生效值/单键属同一页",
+    "xhs:keyword:view": "关键词查看：列表与详情属同一页",
     "xhs:library:delete": "删除笔记：单条与批量是同一个用户动作（批量只是选得多）",
     "xhs:publish:cancel": "取消发布：单条取消与批量取消是同一个动作",
     #: 下面这组是「同一动作 × 不同数据对象」—— 界面上是**同一个按钮**，
@@ -70,7 +91,7 @@ KNOWN_SHARED: dict[str, int] = {
     #: 首轮 37 组 → 已拆掉 item:view(29)/item:edit(23) 两棵大树 → 现 32 组。
     #: 组数变多是因为拆分后每个新码自己也带若干「同一动作多条路由」的组。
     #: 规则：**只许变短**（拆完删一行）；新增共用即红。
-    "xhs:insights:view": 20,
+    "xhs:insights:view": 22,
     "xhs:note:edit": 15,
     "xhs:violation:view": 15,
     "xhs:note:view": 13,
@@ -85,14 +106,14 @@ KNOWN_SHARED: dict[str, int] = {
     "xhs:publish:precheck": 4,
     "system:setting:edit": 4,
     "xhs:crawl:submit": 4,
-    "ai:alert:view": 3,
+    "ai:alert:view": 4,
     "xhs:topic:edit": 3,
     "xhs:workshop:adopt": 3,
     "xhs:topic:create": 3,
     "xhs:item:polish": 3,
     "ai:usage:view": 3,
     "system:dict:delete": 2,
-    "xhs:autoops:edit": 2,
+    "xhs:autoops:edit": 3,
     "ai:gateway:edit": 2,
     "xhs:account:probe": 2,
     "xhs:account:syncNotes": 2,

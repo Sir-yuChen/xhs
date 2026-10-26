@@ -286,6 +286,12 @@ PAGE_VIEW_PERMS: tuple[PermSpec, ...] = (
     *_f("xhs:library", "export", "导出笔记", "/platforms/xhs/library", "xhs"),
     *_f("xhs:library", "createDraft", "创建草稿", "/platforms/xhs/library", "xhs"),
     PermSpec("xhs:workshop:view", "笔记工坊", "C", "/platforms/xhs/note-workshop", _X, _X),
+    #: 工坊的 6 个 Tab（2026-10-26 用户口径「菜单管理中有很多缺失」）：
+    #: 它们此前只是**同一个 URL 的 query 参数**、零权限码 ⇒ 授权页勾不了、
+    #: 后端也拦不住。按「一个功能区一个码」补齐，前端 Tab 与后端路由两侧都判。
+    #: 商品洞察与内容洞察是**两个页面**（两个路由），此前只有 insights:view 一个码
+    #: 且只挂了评论洞察一条路由 ⇒ 页面级码拦不住任何东西。
+    PermSpec("xhs:insights:shop", "商品洞察", "C", "/platforms/xhs/insights/shop", _X, _X),
     PermSpec("xhs:keyword:view", "关键词组", "C", "/platforms/xhs/keywords", _X, _X),
     PermSpec("xhs:insights:view", "内容洞察 / 商品洞察", "C", "/platforms/xhs/insights/content", _X, _X),
     PermSpec("xhs:item:view", "商品列表", "C", "/platforms/xhs/shop-items", _X, _X),
