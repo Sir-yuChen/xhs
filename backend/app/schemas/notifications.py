@@ -21,7 +21,11 @@ class NotificationItem(BaseModel):
     #: 触发的任务 id（手工产生的通知为 None）
     source_task_id: int | None = None
     #: 来源域（`sync` / `publish` / `llm_gateway` …）
-    source_type: str = ""
+    #: ⚠️ **必须可空**（2026-10-26 修）：模型侧是 `Mapped[Optional[str]]`，
+    #: 手工产生的通知（`Notification(user_id, title, level)`）不写这个字段 ⇒ 库里是 NULL。
+    #: 原写法 `str = ""` 只给**缺省值**、不接 None ⇒ 只要有 NULL 行，
+    #: `GET /api/notifications` 直接 `ResponseValidationError` 返回 500（实测）。
+    source_type: str | None = None
     source_id: int | None = None
     read: bool = False
     created_at: str = ""

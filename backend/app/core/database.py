@@ -85,7 +85,6 @@ def init_db(bind=engine) -> None:
     import backend.app.models  # noqa: F401
 
     _run_alembic_migrations()
-    _normalize_model_config_names(bind)
 
 
 def _run_alembic_migrations() -> None:
@@ -127,28 +126,6 @@ def _run_alembic_migrations() -> None:
             command.upgrade(alembic_cfg, "head")
     except ImportError:
         Base.metadata.create_all(bind=engine)
-
-
-def _normalize_model_config_names(bind) -> None:
-    inspector = inspect(bind)
-    table_names = set(inspector.get_table_names())
-    if "model_configs" not in table_names:
-        return
-
-    with bind.begin() as connection:
-        connection.execute(
-            text(
-                "CREATE TABLE IF NOT EXISTS app_migrations ("
-                "name VARCHAR(128) PRIMARY KEY, applied_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL)"
-            )
-        )
-        applied = connection.execute(
-            text("SELECT name FROM app_migrations WHERE name = 'normalize_legacy_gpt_54_model_name_v1'")
-        ).first()
-        if applied:
-            return
-        connection.execute(text("UPDATE model_configs SET model_name = 'gpt-5.4' WHERE model_name = 'gpt5.4'"))
-        connection.execute(text("INSERT INTO app_migrations (name) VALUES ('normalize_legacy_gpt_54_model_name_v1')"))
 
 
 #: ⚠️ `_normalize_sqlite_datetime_storage()` 已删除（v1.1.0 / 2026-10-24）。
