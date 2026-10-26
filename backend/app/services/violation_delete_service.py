@@ -31,15 +31,12 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.models import (
     Note,
-    NoteGoods,
     PlatformAccount,
-    ShopNoteGoods,
-    ShopProduct,
     User,
 )
 from backend.app.services.note_purge_service import purge_note
@@ -97,74 +94,21 @@ def _owned_account(db: Session, user: User, platform_account_id: int) -> Platfor
     return account
 
 
-def _fk_referencing(db: Session, table: str) -> list[tuple[str, str]]:
-    """查出**真实库**里所有外键指向 `table.id` 的 (表名, 列名)。
-
-    ⚠️ 不能写死表名单：本需求第一版按 ORM 声明手写了 4 张表，
-    而真实库里 `generation_records` 对 `shop_products` 的外键**已经不存在**
-    （改成了 `parent_record_id` 自引用）—— 写死就会「多删一张本不该删的表」
-    或「漏删一张实际存在的」（2026-10-18 实测）。
-    以 PRAGMA 的真实外键为准，表结构以后变化也不用改代码。
-    """
-    from sqlalchemy import text
-
-    refs: list[tuple[str, str]] = []
-    rows = db.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).scalars().all()
-    for other in rows:
-        if other in {"sqlite_sequence", table}:
-            continue
-        for fk in db.execute(text(f'PRAGMA foreign_key_list("{other}")')).all():
-            # PRAGMA 列序：id, seq, table, from, to, on_update, on_delete, match
-            if fk[2] == table:
-                refs.append((other, fk[3]))
-    return refs
-
-
 def purge_local_item(db: Session, user: User, account: PlatformAccount, item_id: str) -> bool:
-    """删本地商品台账行 + **全部从属行**。返回「本地到底有没有删掉」。
+    """本地**已无商品台账** ⇒ 恒返回 False（= 本地没东西可删）。
 
-    顺序：① `note_goods` 关系行（按**平台 ID**，§26.7）→ ② 按真实外键逐表清引用
-    → ③ 删 `shop_products` 本体。
+    ⚠️ 设计 75 S5（2026-10-27）：`shop_products` 表随迁移 `n8o9p0q1r2s3` 整表 DROP，
+    两张关系表（`note_goods` / `shop_note_goods`）同批退场 —— 商品域改**平台实时查询**，
+    本地不再有副本。
 
-    ⚠️ 从属表**按 PRAGMA 实测外键动态取**（见 `_fk_referencing`），不写死名单 ——
-    写死会随表结构演进而漏删/误删（本需求第一版就踩过）。
-    ⚠️ 自引用（如 `parent_record_id`）会被 PRAGMA 报成「指向自己」，
-    这里按「先清指向本体行的行」处理，删本体时已无引用。
+    语义与改造前**保持一致**（这正是「平台优先、本地跟随」的第 5 条硬约束）：
+    * 平台删成功 + 本地无对应数据 ⇒ 调用方记 `platform_only`（**不算失败**）；
+    * 返回 False 不是错误，只是如实回答「本地没有」。
+
+    保留函数（而不是删掉调用点）的理由：调用方需要**四态回执**里的
+    `platform_only`，那是给用户看的真实信息，不该因为本地没表就变成「跳过」。
     """
-    from sqlalchemy import text
-
-    product_pk = db.scalar(
-        select(ShopProduct.id).where(
-            ShopProduct.platform_account_id == account.id,
-            ShopProduct.item_id == item_id,
-        )
-    )
-    if product_pk is None:
-        return False
-
-    # ① 关系行（按**平台 item_id** 删，与 §26.7 一致）
-    #    ⚠️ 有两张「笔记↔商品」关系表，都按 item_id 挂、都**没有外键**
-    #    （PRAGMA 查不到 ⇒ `_fk_referencing` 覆盖不了）：
-    #      · `note_goods`      —— 内容库侧的笔记↔商品
-    #      · `shop_note_goods` —— 千帆商品笔记列表的本地映射（1977 行，实测）
-    #    漏掉任一张 ⇒ 商品删了、笔记页还挂着「已下架商品」（2026-10-18 实测补漏）
-    db.execute(delete(NoteGoods).where(
-        NoteGoods.user_id == user.id, NoteGoods.item_id == item_id
-    ))
-    db.execute(delete(ShopNoteGoods).where(
-        ShopNoteGoods.platform_account_id == account.id,
-        ShopNoteGoods.item_id == item_id,
-    ))
-
-    # ② 从属行：按真实外键逐表清
-    for table, column in _fk_referencing(db, "shop_products"):
-        db.execute(
-            text(f'DELETE FROM "{table}" WHERE "{column}" = :pk'), {"pk": product_pk}
-        )
-
-    # ③ 本体
-    db.execute(delete(ShopProduct).where(ShopProduct.id == product_pk))
-    return True
+    return False
 
 
 def purge_local_note(db: Session, user: User, account: PlatformAccount, note_id: str) -> bool:

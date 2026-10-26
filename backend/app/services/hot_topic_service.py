@@ -38,7 +38,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from backend.app.core.time import shanghai_now
-from backend.app.models import HotTopic, ShopProduct, TopicGoodsMatch
+from backend.app.models import HotTopic
 from backend.app.services.sqlite_retry import retry_on_lock
 
 logger = logging.getLogger(__name__)
@@ -125,7 +125,7 @@ def _as_int(value: Any) -> int:
 
 
 def relevance_for(
-    topic: str, product: ShopProduct, *, hot_value: int, seller_points: list[str]
+    topic: str, product: dict[str, Any], *, hot_value: int, seller_points: list[str]
 ) -> tuple[int, str]:
     """算一个话题对某商品的**相关度**，并给出**可解释成分**。
 
@@ -141,12 +141,13 @@ def relevance_for(
     hits: list[str] = []
     score = 0
 
-    title = (product.item_title or "")
+    #: ⚠️ 设计 75 S5：`product` 现在是**实时归一化 dict**（原为 `ShopProduct` 行）。
+    title = str(product.get("title") or "")
     if keyword in title:
         score += TITLE_WEIGHT
         hits.append("标题")
 
-    category = (product.category or "")
+    category = str(product.get("category") or "")
     if keyword in category:
         score += CATEGORY_WEIGHT
         hits.append("类目")
@@ -188,12 +189,10 @@ def collect_topics_for_item(
         return 0
 
     day = stat_date or stat_date_of(shanghai_now())
-    product = db.scalars(
-        select(ShopProduct).where(
-            ShopProduct.user_id == user_id, ShopProduct.item_id == item_id
-        )
-    ).first()
-    title = (product.item_title if product else "") or ""
+    #: ⚠️ 设计 75 S5（2026-10-27）：商品标题原来从本地台账取；台账表已 DROP。
+    #: 话题行里的标题只是**展示用附带信息**，取不到就留空（缺值口径，不造假）——
+    #: 不为一个展示字段再打一次平台（本函数在批量采集里被逐个商品调用）。
+    title = ""
 
     written = 0
     for row in rows:
@@ -232,88 +231,31 @@ def match_topics_to_goods(
     item_id: str,
     stat_date: str | None = None,
 ) -> int:
-    """把话题与**该商品**匹配并落 `topic_goods_match`，返回写入条数。"""
-    rows = parse_topics(attributes)
-    if not rows:
-        return 0
+    """⚠️ **已退场**（设计 75 S5，2026-10-27）：恒返回 0（保留签名，调用方无感）。
 
-    product = db.scalars(
-        select(ShopProduct).where(
-            ShopProduct.user_id == user_id, ShopProduct.item_id == item_id
-        )
-    ).first()
-    if product is None:
-        # 商品不在台账 ⇒ 不匹配（匹配结果没有指向对象，落库没有意义）。
-        return 0
+    原实现按本地台账行（`shop_products`）算「话题 ↔ 某商品」的可解释相关度
+    （标题 / 类目 / 卖点命中），落 `topic_goods_match`。两处前提都没了：
 
-    seller_points = _seller_point_terms(item_id, attributes)
-    day = stat_date or stat_date_of(shanghai_now())
+    * 台账表与其主键 `product_pk` 已随迁移 `n8o9p0q1r2s3` 整表 DROP；
+    * 「卖点」来自商品属性面，本地不再缓存。
 
-    written = 0
-    for row in rows:
-        score, reason = relevance_for(
-            row["topic"], product, hot_value=row["hot_value"], seller_points=seller_points
-        )
-        statement = pg_insert(TopicGoodsMatch).values(
-            user_id=user_id,
-            item_id=item_id,
-            product_pk=product.id,
-            topic=row["topic"],
-            relevance_score=score,
-            hot_value=row["hot_value"],
-            match_reason=reason,
-            stat_date=day,
-        )
-        statement = statement.on_conflict_do_update(
-            index_elements=["user_id", "topic", "item_id", "stat_date"],
-            set_={
-                "relevance_score": statement.excluded.relevance_score,
-                "hot_value": statement.excluded.hot_value,
-                "match_reason": statement.excluded.match_reason,
-                "product_pk": statement.excluded.product_pk,
-            },
-        )
-        retry_on_lock(lambda s=statement: db.execute(s), what=f"话题匹配落库（{item_id}）")
-        written += 1
+    ⚠️ 为什么不是「改成实时查商品再算」：本函数在**批量采集**里逐商品调用
+    （一次选 20 个商品 = 20 个话题集合），改成实时 = 20 次额外平台请求，
+    而结论是一张**已经在别处展示过**的排序表。用户需要的是热度词本身
+    （`collect_topics_for_item` 仍然正常工作），不是这张派生表。
+    """
 
-    retry_on_lock(db.commit, what=f"话题匹配提交（user_id={user_id}）")
-    return written
+    return 0
 
 
 def list_matches(
     db: Session, *, user_id: int, item_id: str | None = None, limit: int = 100
 ) -> list[dict[str, Any]]:
-    """列出匹配结果，**按相关度降序**。
+    """⚠️ **已退场**（设计 75 S5）：恒返回空列表（`topic_goods_match` 表已 DROP）。
 
-    ⚠️ **同分要有稳定次序**（`item_id` + `topic` 兜底）：
-    只按分数排时同分项顺序由 DB 决定 ⇒ 每次刷新列表乱跳，用户会以为数据在变。
+    保留函数与返回形状，是为了让端点 / 前端不必为一个"要下线的能力"改契约。
     """
-    statement = (
-        select(TopicGoodsMatch)
-        .where(TopicGoodsMatch.user_id == user_id)
-        .order_by(
-            TopicGoodsMatch.relevance_score.desc(),
-            TopicGoodsMatch.hot_value.desc(),
-            TopicGoodsMatch.item_id.asc(),
-            TopicGoodsMatch.topic.asc(),
-        )
-        .limit(limit)
-    )
-    if item_id:
-        statement = statement.where(TopicGoodsMatch.item_id == item_id)
-
-    return [
-        {
-            "topic": row.topic,
-            "item_id": row.item_id,
-            "product_pk": row.product_pk,
-            "relevance_score": row.relevance_score,
-            "hot_value": row.hot_value,
-            "match_reason": row.match_reason,
-            "stat_date": row.stat_date,
-        }
-        for row in db.scalars(statement).all()
-    ]
+    return []
 
 
 def list_topics(
@@ -354,6 +296,7 @@ __all__ = [
     "list_matches",
     "list_topics",
     "match_topics_to_goods",
+    "list_matches",
     "parse_topics",
     "relevance_for",
     "stat_date_of",

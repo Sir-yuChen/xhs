@@ -38,7 +38,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.core.config import get_settings
-from backend.app.models import MaterialFile, ShopProduct
+from backend.app.models import MaterialFile
 from backend.app.services import image_prompt
 from backend.app.models.generation import (
     AigcMediaAsset,
@@ -167,7 +167,7 @@ def _str_list(options: Optional[dict], key: str) -> list[str]:
     return [str(value).strip() for value in raw if isinstance(value, str) and str(value).strip()]
 
 
-def _product_image_urls(row: ShopProduct) -> list[str]:
+def _product_image_urls(row: dict[str, Any]) -> list[str]:
     """**商品原图**（用户口径 2026-10-16：*「商品原图是包括商品主图和详情图」*）。
 
     ⚠️ 顺序 = **主图在前、详情图在后** —— 这个顺序是**前后端共同的契约**：
@@ -214,35 +214,29 @@ def product_image_name(url: str) -> str:
     return text.rstrip("/").rsplit("/", 1)[-1]
 
 
-def _main_image_urls(row: ShopProduct) -> list[str]:
-    """商品**主图**（`raw_json.images`）—— 方图。"""
-    import json
+def _main_image_urls(row: dict[str, Any]) -> list[str]:
+    """商品**主图**（实时归一化 dict 的 `images[]`）—— 方图。
 
-    try:
-        urls = json.loads(row.images_json or "[]")
-    except ValueError:
-        return []
-    return [str(url) for url in urls if isinstance(url, str) and url.strip()]
+    ⚠️ 设计 75 S5（2026-10-27）：`row` 由 `ShopProduct` 行改为**实时归一化字典**
+    （`shop_products_service.normalize_item_from_raw` 的产物）⇒ 图集在 `images[]`，
+    不再是 `images_json` 文本列（那张表已 DROP）。
+    """
+    return [str(url) for url in (row.get("images") or []) if str(url or "").strip()]
 
 
-def _detail_image_urls(row: ShopProduct) -> list[str]:
-    """商品**详情图**（`raw_json.image_descriptions[].link`）—— 竖长图（v2.15）。
+def _detail_image_urls(row: dict[str, Any]) -> list[str]:
+    """商品**详情图** —— 竖长图（v2.15）。
 
     ⚠️ 与主图是**两套不同的图**（真机实测：主图 10 张方图、详情图 5 张竖长图），
-    此前被混成一个列表 ⇒ 「原详情图从未被用作参考」。这里复用
+    此前被混成一个列表 ⇒ 「原详情图从未被用作参考」。
+
+    ⚠️ 设计 75 S5：实时归一化 dict 里，详情图的来源键是 `image_descriptions`
+    （平台原文数组，`normalize_item_from_raw` 保留它）；这里仍复用
     `shop_products_service.detail_image_links`（**同一实现**，不重抄）。
     """
-    import json
-
-    try:
-        raw = json.loads(row.raw_json or "{}")
-    except ValueError:
-        return []
-    if not isinstance(raw, dict):
-        return []
     from backend.app.services.shop_products_service import detail_image_links
 
-    return detail_image_links(raw)
+    return detail_image_links(row)
 
 
 # --------------------------------------------------------------------------- #
@@ -335,7 +329,7 @@ def _note_image_limit() -> int:
     return resolve_note_image_limit()
 
 
-def _assets_from_product_image(row: ShopProduct, media_options: Optional[dict] = None) -> list[dict]:
+def _assets_from_product_image(row: dict[str, Any], media_options: Optional[dict] = None) -> list[dict]:
     """商品图直链（**不下载**）。
 
     ## `pick` 的取值 = **图片名称**（用户口径 2026-10-18）
@@ -456,14 +450,14 @@ def _assets_from_material_video(
     return videos[:1]
 
 
-def _default_image_prompt(row: ShopProduct) -> str:
+def _default_image_prompt(row: dict[str, Any]) -> str:
     """`ai_generate` 未给 prompt 时，按商品拼一个通用出图提示词（不造假、可追溯）。
 
     ⚠️ v2.21：出图约束改走**公共约束库** `services/image_prompt.py`（用途 `USE_COVER`）
     —— 此前这里自己写「干净背景的商品封面图…竖版构图，突出卖点」，与详情图那份措辞
     不一致，且**没有防漂移约束**（同一条约束在 3 处各写一遍的典型后果）。
     """
-    title = str(getattr(row, "item_title", "") or "").strip()
+    title = str(row.get("title") or "").strip()
     parts = [f"为小红书笔记生成一张干净背景的商品封面图，主体：{title or '商品'}"]
     parts.append(image_prompt.requirement_inline(image_prompt.USE_COVER))
     return "；".join(parts)
@@ -473,7 +467,7 @@ def _assets_from_ai(
     db: Session,
     *,
     user: Any,
-    row: ShopProduct,
+    row: dict[str, Any],
     media_source: str,
     media_options: Optional[dict],
     record: Any,
@@ -542,7 +536,7 @@ def _assets_from_ai(
             logger.warning(
                 "media generation degraded (source=%s, product=%s): %s",
                 media_source,
-                getattr(row, "id", None),
+                row.get("item_id") or "",
                 error,
             )
             #: ⚠️ **把真实原因带给上层**（2026-10-19 实测）：原先这里只 `continue`，
@@ -590,7 +584,7 @@ def _assets_from_video(
     db: Session,
     *,
     user: Any,
-    row: ShopProduct,
+    row: dict[str, Any],
     media_source: str,
     media_options: Optional[dict],
     record: Any,
@@ -683,7 +677,7 @@ def _assets_from_video(
         logger.warning(
             "video generation degraded (source=%s, product=%s): %s",
             media_source,
-            getattr(row, "id", None),
+            row.get("item_id") or "",
             error,
         )
         return [], []
@@ -704,7 +698,7 @@ def _assets_from_video(
     )
 
 
-def _default_video_prompt(row: ShopProduct) -> str:
+def _default_video_prompt(row: dict[str, Any]) -> str:
     """按商品信息拼默认视频提示词（用户没填 prompt 时用）。
 
     只用台账里**真实存在**的字段（同 `_default_image_prompt` 纪律：不编卖点）。
@@ -713,7 +707,7 @@ def _default_video_prompt(row: ShopProduct) -> str:
     与图片（3:4 + 静帧）**不同**，故用用途分档而不是照抄图片那份（这正是公共库
     设计成「按用途组合」而非「一个大字符串」的原因）。
     """
-    title = str(getattr(row, "title", "") or "").strip()
+    title = str(row.get("title") or "").strip()
     parts = ["电商商品展示短视频"]
     if title:
         parts.append(f"商品：{title}")
@@ -726,7 +720,7 @@ def _template_video_prompt(
     user: Any,
     *,
     template_id: int,
-    row: ShopProduct,
+    row: dict[str, Any],
     extra_prompt: str = "",
 ) -> str:
     """用公共提示词模板渲染**视频**提示词（v2.26，设计 17 §13.8）。
@@ -767,13 +761,11 @@ def _template_video_prompt(
             )
         )
 
-    # ⚠️ 商品映射**必须复用** `load_product_dict_from_ledger`（唯一实现）：
-    # ORM 列名与槽位名**不同**（`item_title` vs `title`、`sales` vs `sales_total`），
-    # 自己 `getattr(row, field)` 取会**一个都取不到**（静默少信息、不报错）——
-    # 这正是该函数 docstring 里写的那类漂移（DEF-044）。
-    from backend.app.services.shop_products_service import load_product_dict_from_ledger
-
-    product = load_product_dict_from_ledger(row)
+    # ⚠️ 设计 75 S5：`row` 是实时归一化 dict（槽位名已是 `title` / `sales_total` 这
+    # 一套），**不要再做一次列名映射** —— 多做一层就会把 `title` 映射成空
+    # （ORM 列叫 `item_title`，而 dict 里只有 `title`），静默少信息且不报错。
+    #: 设计 75 S5：`row` **就是**归一化后的商品字典，直接用（不再有台账行→dict 的翻译）。
+    product = row
 
     try:
         body = prompt_renderer.render_prompt(
@@ -802,7 +794,7 @@ def build_note_media(
     db: Session,
     *,
     user: Any,
-    row: ShopProduct,
+    row: dict[str, Any],
     media_source: str,
     media_options: Optional[dict],
     record: Any,
@@ -870,7 +862,7 @@ def build_media_plan_assets(
     db: Session,
     *,
     user: Any,
-    row: ShopProduct,
+    row: dict[str, Any],
     media_plan: list[dict],
     media_options: Optional[dict] = None,
     record: Any = None,

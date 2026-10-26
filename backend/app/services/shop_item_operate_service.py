@@ -50,11 +50,9 @@ from sqlalchemy import select
 from backend.app.core.database import SessionLocal
 from backend.app.core.time import shanghai_now
 from backend.app.models.platform_account import PlatformAccount
-from backend.app.models.shop_product import ShopProduct
 from backend.app.models.task import Task
 from backend.app.services import shop_item_operate_gates as gates
 from backend.app.core.rate_limiter import get_rate_limiter
-from backend.app.services.shop_products_service import load_product_dict_from_ledger
 
 logger = logging.getLogger(__name__)
 
@@ -192,14 +190,31 @@ def run_item_operate(
             _finish(db, task, results=[], error="账号不存在")
             return {"ok": False, "error": "账号不存在"}
 
-        # 台账行（判据的原料）—— **零平台请求**，全部本地。
-        rows = db.scalars(
-            select(ShopProduct).where(
-                ShopProduct.platform_account_id == platform_account_id,
-                ShopProduct.item_id.in_(item_ids),
+        #: **判据的原料改走实时查询**（设计 75 S5：`shop_products` 台账已退场）。
+        #: 门禁（`shop_item_operate_gates`）要的是 `normalize_item_from_raw` 的产物 ——
+        #: 实时链路复用同一份归一化，所以这里换数据源、判据不动。
+        #: ⚠️ 一次查多个（`get_skus_by_item_ids` 批量上限 10，服务层已分片）。
+        from backend.app.services import realtime_platform_query_service as rt
+
+        by_id: dict[str, dict] = {}
+        from apis.xhs_qianfan_apis import XHS_Qianfan_Apis
+        from backend.app.services.shop_binding_service import qianfan_cookies_for_account
+
+        _cookies = qianfan_cookies_for_account(db, account.id)
+        adapter = XHS_Qianfan_Apis(_cookies) if _cookies else None
+        try:
+            live = (
+                rt.list_products(adapter, status="all", page=1, page_size=100)
+                if adapter is not None
+                else {}
             )
-        ).all()
-        by_id = {str(row.item_id or ""): row for row in rows}
+            wanted = set(item_ids)
+            for item in live.get("items") or []:
+                iid = str(item.get("item_id") or "")
+                if iid in wanted:
+                    by_id[iid] = item
+        except Exception as error:  # noqa: BLE001 - 查询失败要让任务如实失败
+            logger.warning("上下架门禁取商品失败（account=%s）：%s", platform_account_id, error)
 
         limiter = get_rate_limiter()
         results: list[dict[str, Any]] = []
@@ -214,11 +229,13 @@ def run_item_operate(
                         "item_id": item_id,
                         "title": "",
                         "result": RESULT_SKIPPED,
-                        "reason": "本地台账里没有这个商品（先「同步商品」再试）",
+                        "reason": "平台查不到这个商品（可能已被删除，或商品 ID 有误）",
                     }
                 )
                 continue
-            item = load_product_dict_from_ledger(row)
+            #: 实时链路：`by_id` 里已经是 `normalize_item_from_raw` 的产物，
+            #: 与门禁要的形状一致（改造前是台账行 → `load_product_dict_from_ledger`）。
+            item = dict(row)
             item["seller_freeze"] = bool(_seller_freeze(db, account))
             reason = gates.support_reason(action, item)
             if reason:
@@ -280,7 +297,7 @@ def _apply_action(
     account: PlatformAccount,
     action: str,
     item_ids: list[str],
-    by_id: dict[str, ShopProduct],
+    by_id: dict[str, dict],
     results: list[dict[str, Any]],
     limiter: Any,
 ) -> None:
@@ -301,7 +318,7 @@ def _apply_action(
             results.append(
                 {
                     "item_id": item_id,
-                    "title": str(by_id[item_id].item_title or ""),
+                    "title": str((by_id.get(item_id) or {}).get("title") or ""),
                     "result": RESULT_FAILED,
                     "reason": "该账号缺少千帆（ark）令牌，无法执行写操作",
                 }
@@ -313,7 +330,7 @@ def _apply_action(
             results.append(
                 {
                     "item_id": item_id,
-                    "title": str(by_id[item_id].item_title or ""),
+                    "title": str((by_id.get(item_id) or {}).get("title") or ""),
                     "result": RESULT_SKIPPED,
                     "reason": "触发平台调用限流，本次未执行（稍后重试）",
                 }
@@ -339,7 +356,7 @@ def _apply_action(
             results.append(
                 {
                     "item_id": item_id,
-                    "title": str(by_id[item_id].item_title or ""),
+                    "title": str((by_id.get(item_id) or {}).get("title") or ""),
                     "result": RESULT_FAILED,
                     "reason": reason,
                 }
@@ -352,7 +369,7 @@ def _apply_action(
             results.append(
                 {
                     "item_id": item_id,
-                    "title": str(by_id[item_id].item_title or ""),
+                    "title": str((by_id.get(item_id) or {}).get("title") or ""),
                     "result": RESULT_FAILED,
                     "reason": fail,
                 }
@@ -361,7 +378,7 @@ def _apply_action(
             results.append(
                 {
                     "item_id": item_id,
-                    "title": str(by_id[item_id].item_title or ""),
+                    "title": str((by_id.get(item_id) or {}).get("title") or ""),
                     "result": RESULT_OK,
                     "reason": "",
                 }
@@ -431,7 +448,7 @@ def _note_platform_reason(db: Any, account: PlatformAccount, reason: str) -> Non
 
 
 def _refresh_local_status(
-    db: Any, *, action: str, item_ids: list[str], by_id: dict[str, ShopProduct]
+    db: Any, *, action: str, item_ids: list[str], by_id: dict[str, dict]
 ) -> None:
     """写成功后**立即刷新本地台账的上下架信号**（乐观值，下一轮同步会对账）。
 

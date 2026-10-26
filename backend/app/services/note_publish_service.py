@@ -79,7 +79,6 @@ from backend.app.models.note import (
     Topic,
     set_note_publish_status,
 )
-from backend.app.models.shop import NoteGoods
 from backend.app.services import note_queue_service
 from backend.app.services.shop_binding_service import qianfan_cookies_for_account
 
@@ -328,71 +327,51 @@ def note_form_of(note: Note) -> str:
 def _item_id_for(db: Session, note: Note) -> str:
     """商品 ID（临时文件名用，用户 2026-09-25 口径）。
 
-    `raw_json["item_id"]` 优先（生成时落库）；兜底走 `note_goods → shop_products`；
-    都取不到返空串（调用方退回纯序号命名，不造假）。
+    `raw_json["item_id"]` 是**唯一**来源（设计 75 S5：`note_goods` 关系表已 DROP）。
+    取不到返空串（调用方退回纯序号命名，不造假）。
     """
-    item_id = str((_parse_raw(note).get("item_id") or "")).strip()
-    if item_id:
-        return item_id
-    # ⚠️ 2026-09-27（§26.7）：关系行**直接就是平台商品 ID** ⇒ 不必再查商品表。
-    relation = db.scalars(
-        select(NoteGoods).where(
-            NoteGoods.user_id == note.user_id, NoteGoods.note_id == note.note_id
-        )
-    ).first()
-    if relation is not None:
-        return str(relation.item_id or "").strip()
-    return ""
+    return str((_parse_raw(note).get("item_id") or "")).strip()
 
 
 def _goods_item_ids_for(db: Session, note: Note) -> list[str]:
     """该笔记**挂载的商品 ID** 集合（平台商品 ID，设计 13 §31.5.2）。
 
-    以 `note_goods` 关系行为准（§26.7：关系表存的就是**平台商品 ID**），并把
-    `raw_json.item_id`（生成时落库的那一份）一并并入 —— 关系行尚未落库时仍认得出
-    「这篇挂的是什么商品」。都取不到 ⇒ 空列表 ⇒ 门禁放行（缺值不造假，硬约束⑤）。
+    ⚠️ 设计 75 S5（2026-10-27）：`note_goods` 关系表已 DROP ⇒ 唯一来源是
+    `raw_json.item_id`（生成链路写、发布前补齐也写它）。取不到 ⇒ 空列表 ⇒
+    门禁放行（缺值不造假，硬约束⑤）。
     """
-    ids = {
-        str(row.item_id or "").strip()
-        for row in db.scalars(
-            select(NoteGoods).where(
-                NoteGoods.user_id == note.user_id, NoteGoods.note_id == note.note_id
-            )
-        ).all()
-    }
     raw_item_id = str(_parse_raw(note).get("item_id") or "").strip()
-    if raw_item_id:
-        ids.add(raw_item_id)
-    return sorted(item_id for item_id in ids if item_id)
+    return [raw_item_id] if raw_item_id else []
 
 
 def _occupied_goods_item_ids(db: Session, note: Note, item_ids: list[str]) -> list[str]:
     """这批商品里，哪些已经被**别的**笔记占用（已发布 / 正在发布，§31.5.2）。
 
-    join 用 `(user_id, note_id)` 而不是本地主键：`note_goods` 的键就是**平台笔记 ID**
-    （§26.7，两个外键已整条去掉）⇒ 必须显式给 ON 条件。发布成功的笔记关系行已迁到平台
-    note_id（`_move_note_goods_relations`），正在发布的笔记两边都还是本地 ID ⇒ 两种
-    形态都能对上。
+    ⚠️ 设计 75 S5（2026-10-27）：`note_goods` 关系表已 DROP ⇒ 判据改成扫**笔记行的
+    `raw_json.item_id`**（JSON 列不能下推成 SQL 条件，故在 Python 里过滤）。
+    量表很小（同一用户同一商品，命中几条就够判），代价可忽略。
 
     ⚠️ 排除自己（`Note.id != note.id`）：重发场景下本篇自己可能是 `failed`，本就不是
     占用方；但**已 `published` 的自己**会先被 `_check_publishable` 拦下，不靠这里兜。
     """
     if not item_ids:
         return []
-    statement = (
-        select(NoteGoods.item_id)
-        .join(
-            Note,
-            and_(Note.user_id == NoteGoods.user_id, Note.note_id == NoteGoods.note_id),
-        )
-        .where(
-            NoteGoods.user_id == note.user_id,
-            NoteGoods.item_id.in_(item_ids),
+    #: ⚠️ 用显式 cast 而不是 `Note.publish_status.in_(...)` 之外的花活：
+    #: `raw_json` 在不同库上是 TEXT / JSONB，取回来在 Python 里解最稳（两边同语义）。
+    occupied: set[str] = set()
+    wanted = {str(item_id) for item_id in item_ids if str(item_id or "")}
+    rows = db.scalars(
+        select(Note).where(
+            Note.user_id == note.user_id,
             Note.publish_status.in_(_GOODS_OCCUPYING_STATUSES),
             Note.id != note.id,
         )
-    )
-    return sorted({str(item_id) for item_id in db.scalars(statement).all() if str(item_id or "")})
+    ).all()
+    for row in rows:
+        bound = str(_parse_raw(row).get("item_id") or "").strip()
+        if bound and bound in wanted:
+            occupied.add(bound)
+    return sorted(occupied)
 
 
 def _allow_duplicate_goods_publish(db: Session, user_id: int) -> bool:
@@ -721,6 +700,10 @@ def _build_publish_body(
             hash_tag_seen.add(key)
     desc_topic_names = list(topic_names)
     sku_id = str(aigc.get("sku_id") or "")
+    #: 这篇要挂的**平台商品 ID**（`raw_json.item_id`；生成链路写的唯一落点）。
+    #: ⚠️ 设计 75 S5：`note_goods` 关系表已 DROP，这是唯一来源。
+    _raw_note_payload = note.raw_json if isinstance(note.raw_json, dict) else {}
+    goods_item_key = str((_raw_note_payload or {}).get("item_id") or "").strip()
     #: ⚠️ **兜底取 `note_goods`**（用户口径 2026-10-19：*「实际已经发布成功了但是笔记没有
     #: 挂商品链接」* 实测根因）：`sku_id` 原先**只**来自 `aigc` 快照，而 LLM 生成的笔记
     #: （`note_type=local_generated`）根本没有 `aigc.sku_id` ⇒ 整段 `goods_info` /
@@ -728,12 +711,8 @@ def _build_publish_body(
     #: 唯独 payload 没带商品）。`note_goods` 就是「这篇挂什么商品」的唯一关系表，
     #: 生成时已写入、发布前也补齐过 ⇒ 以它为兜底来源。
     if not sku_id:
-        relation = db.scalars(
-            select(NoteGoods).where(
-                NoteGoods.user_id == note.user_id, NoteGoods.note_id == note.note_id
-            )
-        ).first()
-        if relation is not None:
+        _relation_item_id = goods_item_key
+        if _relation_item_id:
             #: ⚠️ **`biz_id` / `check_content_id` 要的是 SKU ID，不是商品 item_id**
             #: （权威依据：`docs/_history/13_功能设计_账号矩阵同步_演进链.md:3064` 的
             #: 真机抓包记录，原文「⚠️ **挂链粒度是 SKU 不是 item**」，字段写作
@@ -741,29 +720,39 @@ def _build_publish_body(
             #: 而 `extra_info.goods_id` 才是**商品 item_id**。
             #: 实测佐证：用 item_id 填 `biz_id` 时平台返回 200 但笔记**不挂商品**、
             #: 也进不了「商品笔记」列表（`publish_diag` 已落库印证 payload 正确）。
-            sku_id = str(relation.item_id or "").strip()  # 先放 item_id，下面再换成 SKU
+            sku_id = _relation_item_id  # 先放 item_id，下面再换成 SKU
     #: **`goods_name` 用商品标题**（`raw_json` 里的 `item_title`），不是笔记标题 ——
     #: 挂链描述的是「挂的哪个商品」，写成笔记标题属于数据错位（平台也可能因此判挂链无效）。
     sku_name = str(aigc.get("sku_name") or "")
     # 宽高从商品 raw_json 回填（平台 image_info 要宽高；缺失传 0，不造假）。
-    # ⚠️ 2026-09-27（§26.7）：关系行存的是**平台商品 ID** ⇒ 按 `item_id` 找本地商品行；
-    # 台账里没有这件商品 ⇒ `product=None`，宽高按缺值走（**不是**发布失败）。
-    relations = list(
-        db.scalars(
-            select(NoteGoods).where(
-                NoteGoods.user_id == note.user_id, NoteGoods.note_id == note.note_id
-            )
-        ).all()
-    )
+    #: ⚠️ 设计 75 S5（2026-10-27）：商品事实**实时查平台**（原读本地台账行）。
+    #: 判据不变：拿不到商品 ⇒ 宽高 / 商品名 / 卖家 SKU 按缺值走（**不是**发布失败）。
+    #: 两点平台事实必须记住：
+    #: * `biz_id` / `check_content_id` 要**卖家 SKU ID**（`first_sku_id`，来自
+    #:   `get_skus_by_item_ids` 的 `skuId`），不是 item_id —— 用 item_id 平台照收但不挂链；
+    #: * `goods_name` = 「商品名 + 空格 + 规格名」，商品名取平台标题。
     product = None
-    if relations:
-        from backend.app.services.shop_goods_service import products_by_item_id
+    product_skus: list[dict] = []
+    if goods_item_key and adapter is not None:
+        try:
+            from backend.app.services import realtime_platform_query_service as rt
 
-        product = products_by_item_id(db, int(note.user_id or 0), [relations[0].item_id]).get(
-            str(relations[0].item_id or "")
-        )
+            detail = rt.get_product_detail(adapter, item_ids=[goods_item_key])
+            for row in detail.get("items") or []:
+                if str(row.get("item_id") or "") == goods_item_key:
+                    product_skus = list(row.get("skus") or [])
+                    break
+            products = rt.list_products(
+                adapter, keyword=goods_item_key, status="all", page=1, page_size=20
+            )
+            for row in products.get("items") or []:
+                if str(row.get("item_id") or "") == goods_item_key:
+                    product = row
+                    break
+        except Exception as _e:  # noqa: BLE001 - 取不到就按缺值走，不阻断发布
+            logger.warning("product facts lookup failed (note_pk=%s): %s", note.id, _e)
     if not sku_name and product is not None:
-        sku_name = str(getattr(product, "item_title", "") or "")
+        sku_name = str(product.get("title") or "")
     #: `biz_id` / `check_content_id` 用 **卖家 SKU ID**；`extra_info.goods_id` 仍用商品 item_id。
     #: ⚠️ **不是 `variant_ids[0]`**：那是**规格模板 ID**（`60404e0d…`，26 个 SKU 共用），
     #: 拿它填 `biz_id` 平台照收但**不挂链**（实测 10 次）。真正的卖家 SKU 是
@@ -771,13 +760,15 @@ def _build_publish_body(
     #: 同前缀邻号）—— 平台上成功挂商品的老笔记 `aigc.sku_id` 正是这个形态。
     goods_item_id = sku_id
     sku_spec = ""
-    if product is not None:
-        product_raw = _parse_raw_product(product)
-        for key in ("first_buyable_sku_id", "first_sku_id"):
-            candidate = str(product_raw.get(key) or "").strip()
-            if candidate:
+    if product_skus:
+        #: 卖家 SKU ID：优先「可售」的那个（`buyable`），否则第一个。
+        for row_sku in product_skus:
+            candidate = str(row_sku.get("sku_id") or "").strip()
+            if candidate and row_sku.get("buyable"):
                 sku_id = candidate
                 break
+        else:
+            sku_id = str((product_skus[0] or {}).get("sku_id") or "").strip()
         #: 规格名：抓包实证 `goods_name` = 「商品名 空格 规格名」。
         #: 本地 `raw_json` 里**没有**规格名（只有 spec id / sku id），
         #: 唯一可靠来源是 `aigc-publish/attributes` 的 `sku_list[].sku_specification`
@@ -795,7 +786,7 @@ def _build_publish_body(
     if product is not None and adapter is not None and not sku_spec:
         try:
             _ok_attr, _msg_attr, _res_attr = adapter.aigc_publish_attributes(
-                str(getattr(product, "item_id", "") or "")
+                str(product.get("item_id") or "")
             )
             if _ok_attr and isinstance(_res_attr, dict):
                 _skus = ((_res_attr.get("data") or {}).get("sku_list")) or []
@@ -1010,10 +1001,9 @@ def _image_dims_for(product, image_urls: list[str]) -> list[dict]:
     入参是 URL 列表而不是「资产行 + 数量」：图片可能被 `MAX_NOTE_IMAGES` 截断、
     也可能与视频资产在同一篇里，按下标取资产行会错位（第 N 张配到别人的宽高）。
     """
-    try:
-        raw_images = json.loads(product.raw_json or "{}").get("images")
-    except ValueError:
-        raw_images = None
+    #: ⚠️ 设计 75 S5：`product` 是实时归一化 dict（原 `ShopProduct` 行）。
+    #: 宽高在 `image_descriptions` / `images` 的条目里（平台原文带 `width`/`height`）。
+    raw_images = product.get("images") if isinstance(product, dict) else None
     dims_by_url: dict[str, dict] = {}
     if isinstance(raw_images, list):
         for entry in raw_images:
@@ -1573,51 +1563,10 @@ def _backfill_detail_ref(db: Session, note: Note, adapter: Any) -> None:
     backfill_note_detail_ref(db, note, _fetch)
 
 
-def _move_note_goods_relations(
-    db: Session, note: Note, *, old_note_id: str, new_note_id: str
-) -> int:
-    """发布成功改写 `notes.note_id` 后，把 `note_goods` 关系行的笔记键一起迁到新 ID（§26.7）。
-
-    **为什么必须做**：本地生成笔记的 `note_id` 是 `local_…` 合成 ID（§31），发布成功后
-    平台才给真 ID（`_execute_publish` 里 `note.note_id = platform_note_id`）。关系表
-    以**平台笔记 ID** 为键 ⇒ 不迁 = 「笔记一发出去，挂链商品就查不到了」（关系行还在，
-    但指向一个不再存在的笔记 ID）。
-
-    幂等 / 去重：新键上可能**已经**有同 `item_id` 的关系行（同步链路按真 ID 落过）⇒
-    那种旧行**删掉**（新行已表达同一事实），不撞 `uq_note_goods_user_note_item`。
-    返回真正迁移过去的关系行数（调用方只用于日志）。
-    """
-    old = str(old_note_id or "").strip()
-    new = str(new_note_id or "").strip()
-    if not old or not new or old == new:
-        return 0
-    rows = list(
-        db.scalars(
-            select(NoteGoods).where(
-                NoteGoods.user_id == note.user_id, NoteGoods.note_id == old
-            )
-        ).all()
-    )
-    if not rows:
-        return 0
-    existing = {
-        str(row.item_id or "")
-        for row in db.scalars(
-            select(NoteGoods).where(
-                NoteGoods.user_id == note.user_id, NoteGoods.note_id == new
-            )
-        ).all()
-    }
-    moved = 0
-    for row in rows:
-        if str(row.item_id or "") in existing:
-            db.delete(row)  # 新键上已有同一关系 ⇒ 旧行多余
-            continue
-        row.note_id = new
-        existing.add(str(row.item_id or ""))
-        moved += 1
-    db.flush()
-    return moved
+#: ⚠️ `_move_note_goods_relations` 已退场（设计 75 S5，2026-10-27）：`note_goods`
+#: 关系表随迁移 `n8o9p0q1r2s3` 整表 DROP。它原来的职责是「发布成功后把关系行的
+#: 笔记键从 `local_…` 迁到平台真 ID」—— 现在挂链商品只记在 `notes.raw_json.item_id`，
+#: 而那个字段挂在**笔记行自己**上，`note_id` 改写不影响它，无需迁移。
 
 
 def _execute_publish(db: Session, note: Note, adapter) -> dict:
@@ -1754,10 +1703,8 @@ def _execute_publish(db: Session, note: Note, adapter) -> dict:
     for attempt in range(5):
         try:
             note.note_id = platform_note_id
-            # ⚠️ 2026-09-27（§26.7）：关系表以**平台笔记 ID** 为键 ⇒ `note.note_id` 一改写，
-            # 旧键（本地生成的 `local_…` 合成 ID）上的关系行就必须**跟着迁到新 ID**，
-            # 否则「笔记一发出去，挂链商品就查不到了」（关系还在，指向一个不再存在的笔记 ID）。
-            _move_note_goods_relations(db, note, old_note_id=local_note_id, new_note_id=platform_note_id)
+            #: ⚠️ 设计 75 S5：不再需要迁 `note_goods` 关系行（表已 DROP，挂链商品记在
+            #: `raw_json.item_id` 上，与 `note_id` 无关）。
             set_note_publish_status(note, PUBLISH_STATUS_PUBLISHED)
             _backfill_detail_ref(db, note, adapter)
             _clear_temp_paths(db, note)

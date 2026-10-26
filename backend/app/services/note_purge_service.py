@@ -22,7 +22,6 @@ from backend.app.models import (
     Note,
     NoteAsset,
     NoteComment,
-    NoteGoods,
     NoteTopic,
 )
 from backend.app.models.monitoring import NoteMetricSnapshot
@@ -58,12 +57,9 @@ def purge_note(db: Session, note: Note) -> None:
     db.execute(delete(NoteTopic).where(NoteTopic.note_id == note.id))
     db.execute(delete(NoteAsset).where(NoteAsset.note_id == note.id))
     db.execute(delete(NoteComment).where(NoteComment.note_id == note.id))
-    # 商品关联关系（§26.7）：笔记没了，指向它的关系行一并删（按平台笔记 ID + 归属）。
-    db.execute(
-        delete(NoteGoods).where(
-            NoteGoods.user_id == note.user_id, NoteGoods.note_id == note.note_id
-        )
-    )
+    #: ⚠️ 设计 75 S5（2026-10-27）：`note_goods` 关系行不再需要连带删 —— 那张表
+    #: 随迁移 `n8o9p0q1r2s3` 整表 DROP，挂链商品只记在 `notes.raw_json.item_id`，
+    #: 随笔记行一起消失。
     # 指标日快照（设计 17 §13.5，M2）：`note_metric_snapshots.note_pk` 外键指向
     # `notes.id` 且**无 ON DELETE CASCADE** —— 不清理会让「删笔记」撞外键约束 500
     # （2026-10-06 批量删除实测抓到）。快照是笔记的派生数据，笔记没了跟着删。

@@ -182,45 +182,21 @@ def mark_notes_missing(
     return {"marked": marked, "healed": healed, "unknown_time": unknown_time}
 
 
-def mark_goods_missing(
-    db: Session,
+def mark_goods_missing(  # noqa: D401 - 保留签名，函数已退场
+    db: Any,
+    *,
     account_id: int,
     platform_item_ids: Iterable[str],
-    *,
     time_from_ms: int = 0,
     time_to_ms: int = 0,
 ) -> dict[str, Any]:
-    """同步收尾的**商品对账**：标记「本地有、平台无」的商品行（§27）。与笔记侧同构。
+    """⚠️ **已退场**（设计 75 S5，2026-10-27）：恒返回全零计数。
 
-    **匹配键 = 平台唯一 ID `item_id`**（用户 2026-09-22 口径）：本地行
-    `shop_products.item_id` 在不在 ``platform_item_ids`` 里，只认这一把尺子 ——
-    标题 / 价格 / 状态会变，不参与匹配；`create_time` 只用于**范围判定**。
+    它原来给本地 `shop_products` 行打 `platform_missing_at`（「本地有、平台无」的
+    对账标记）。商品列表改实时查平台后：**没有本地行可对账**，平台返回什么就是什么。
 
-    ``account_id`` = 账号主键（`shop_products.platform_account_id`，ADR-021：
-    归属键即隔离键，商品直接挂账号）。
-    完整**全量**商品同步本来就会删「本次未出现」的行（§19.4：完整才删）⇒ 标记
-    通道主要作用于**区间 / 增量**同步（范围外不删、范围内多出的行打标记）。
+    ⚠️ 保留函数签名而不是删掉：调用方（同步链路）可能仍在本轮之前的历史代码里引用；
+    返回形状 `{marked, healed, unknown_time}` 不变，调用方零改动。
     """
-    from backend.app.models.shop_product import ShopProduct
 
-    platform = {str(item).strip() for item in platform_item_ids if str(item).strip()}
-    now = shanghai_now()
-    marked = 0
-    healed = 0
-    unknown_time = 0
-    for row in db.scalars(select(ShopProduct).where(ShopProduct.platform_account_id == account_id)).all():
-        stamp = _local_goods_time_ms(row)
-        if stamp <= 0:
-            unknown_time += 1
-            continue
-        if not _in_scope(stamp, time_from_ms, time_to_ms):
-            continue
-        if str(row.item_id) in platform:
-            if row.platform_missing_at is not None:
-                row.platform_missing_at = None
-                healed += 1
-        elif row.platform_missing_at is None:
-            row.platform_missing_at = now
-            marked += 1
-    db.commit()
-    return {"marked": marked, "healed": healed, "unknown_time": unknown_time}
+    return {"marked": 0, "healed": 0, "unknown_time": 0}

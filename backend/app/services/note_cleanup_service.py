@@ -1,4 +1,4 @@
-"""无流量笔记候选查询（纯本地，零平台请求）。
+"""无流量笔记候选查询（**实时查千帆**，设计 75 S5 起）。
 
 ## 判定口径（硬约束 ⑤「缺值口径」）
 
@@ -12,29 +12,34 @@
 * `note_browse_num30d`（30 日阅读）**不参与判定**，它是可选的附加筛选条件
   （`include_30d`）：开了就额外要求 30 日阅读也 ≤ 阈值，关了就完全不看它。
 
-## 候选池的已知边界（必须在响应里讲清楚）
+## 候选池来自哪里（2026-10-27 改）
 
-`shop_note_goods` 只装**绑了千帆且已同步映射**的笔记（按需补齐 / 批量同步落库的）。
-店铺里**还没同步**的笔记不在池子里 —— 这是「本地数据不全面」的已知边界，不是 Bug：
-所以响应必带 `coverage = {pool, goods_note_total}`，让调用方把「候选 N 条 / 店铺共 M 条」
-讲清楚，否则「无流量 N 条」会被误读成「店铺一共就这么多笔记」。
+原来是本地映射表 `shop_note_goods`（「同步过的笔记」才有），边界是「店铺里没同步的
+笔记不在池子里」。该表已随迁移 `n8o9p0q1r2s3` 整表 DROP ⇒ 现在**直接实时查千帆**
+（`rt.list_goods_notes` 翻页，`page_size=100`）。**边界消失了** —— 候选池就是店铺里
+真正挂过商品的笔记，不再是"本地同步过的那部分"。
 
-## 为什么不做平台请求
+所以 `coverage.pool` = 本次实际翻到的笔记数，`coverage.goods_note_total` 仍取平台
+报的店铺商品笔记总数（分母）。两者都来自平台 ⇒ 「候选 N / 总数 M」现在可以真的对上。
 
-判定所需的三项指标在本地 `entry_json` 里是**现成的**（同步时存的整条原文），
-再打一次千帆只是平添风控面，且让「候选查询」变成一个有副作用的接口。
+⚠️ 代价：本接口**会打平台**（最多 `MAX_SCAN_PAGES` 页只读请求）。判定逻辑（纯函数
+`is_zero_traffic` / `CandidateQuery.matches`）保持不变 —— 它只看一份 `entry` 字典，
+数据从哪来与它无关。
 """
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.models import PlatformAccount
-from backend.app.models.shop import ShopNoteGoods
 from backend.app.services.shop_binding_service import has_ark_session, get_shop_state
+
+#: 扫描上限（页 × 100 条）：候选查询是给人看的清单，不是全量导出。
+#: 超过这个规模说明该账号笔记太多，应改用发布时间区间收窄。
+MAX_SCAN_PAGES = 20
+SCAN_PAGE_SIZE = 100
 
 #: 三项指标在 `entry_json` 里的键名（千帆「商品笔记」列表原文）。
 METRIC_KEYS = ("browse_num", "note_pay_order_cnt", "note_pay_gmv")
@@ -65,15 +70,24 @@ def _as_number(value: Any) -> Optional[float]:
         return None
 
 
-def _parse_entry(row: ShopNoteGoods) -> dict[str, Any]:
-    """`entry_json` → dict；解析失败或不是对象 → 空 dict（指标全部按缺值处理）。"""
-    import json
+def _entry_of(note: dict[str, Any]) -> dict[str, Any]:
+    """实时归一化条目 → 判定用的 `entry` 字典（键名与平台原文**同口径**）。
 
-    try:
-        parsed = json.loads(row.entry_json or "{}")
-    except (TypeError, ValueError):
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+    ⚠️ 设计 75 S5：原来读的是 `shop_note_goods.entry_json`（平台整条原文）。
+    现在数据直接来自 `rt.list_goods_notes` 的归一化结果（`normalize_goods_note`），
+    键名是 `read_count` / `pay_order_count` / `pay_gmv` / `publish_time` —— 这里
+    翻译回判定函数认的那套键，**判定实现一行不改**（缺值仍是 `None`，不当 0）。
+    """
+    return {
+        "browse_num": note.get("read_count"),
+        "note_pay_order_cnt": note.get("pay_order_count"),
+        "note_pay_gmv": note.get("pay_gmv"),
+        "note_browse_num30d": note.get("read_count_30d"),
+        "publish_time": note.get("publish_time"),
+        "note_title": note.get("title"),
+        "note_image": note.get("cover"),
+        "note_id": note.get("note_id"),
+    }
 
 
 def _entry_metrics(entry: dict[str, Any]) -> dict[str, Optional[float]]:
@@ -154,8 +168,8 @@ class CandidateQuery:
         return True
 
 
-def _candidate_row(row: ShopNoteGoods, entry: dict[str, Any]) -> dict[str, Any]:
-    """映射行 → 前端候选清单的一格（字段全部来自本地，白名单构造）。"""
+def _candidate_row(note: dict[str, Any], entry: dict[str, Any]) -> dict[str, Any]:
+    """实时条目 → 前端候选清单的一格（白名单构造）。"""
     metrics = _entry_metrics(entry)
 
     def text(*keys: str) -> str:
@@ -170,7 +184,7 @@ def _candidate_row(row: ShopNoteGoods, entry: dict[str, Any]) -> dict[str, Any]:
 
     publish = metrics.get(KEY_PUBLISH_TIME)
     return {
-        "note_id": row.note_id,
+        "note_id": text("note_id"),
         "title": text("note_title"),
         "cover": text("note_image"),
         "publish_time": _millis_text(publish),
@@ -181,9 +195,11 @@ def _candidate_row(row: ShopNoteGoods, entry: dict[str, Any]) -> dict[str, Any]:
         #: 30 日阅读只在查询明确要求（`include_30d`）时才有值，否则恒 `None`
         #:（前端没有理由展示一个用户没勾的指标）。
         "browse_num_30d": None,
-        "item_id": row.item_id,
-        "item_title": row.item_title,
-        "synced_at": row.synced_at.strftime("%Y-%m-%d %H:%M") if row.synced_at else "",
+        #: 挂载商品（平台原文 `goods_infos[]` 的归一化结果，可能为空列表）。
+        "item_id": (note.get("goods") or [{}])[0].get("item_id", "") if note.get("goods") else "",
+        "item_title": (note.get("goods") or [{}])[0].get("title", "") if note.get("goods") else "",
+        #: 实时链路没有「同步时间」—— 留空（不谎报一个本地写入时刻）。
+        "synced_at": "",
     }
 
 
@@ -222,16 +238,40 @@ def list_candidates(
             "bound": False,
         }
 
-    rows = db.scalars(
-        select(ShopNoteGoods)
-        .where(ShopNoteGoods.platform_account_id == account_id)
-        .order_by(ShopNoteGoods.synced_at.desc())
-    ).all()
+    #: ⚠️ 实时翻页（设计 75 S5）：原来读本地映射表。每页 `SCAN_PAGE_SIZE`，
+    #: 最多 `MAX_SCAN_PAGES` 页；任一页失败**向上抛**（带平台原话）——
+    #: 少扫几页就等于「候选少了」，那是最危险的静默错误（用户会照这份清单去删笔记）。
+    from backend.app.services import realtime_platform_query_service as rt
+    from backend.app.services.shop_binding_service import qianfan_cookies_for_account
+    from backend.app.adapters.xhs.qianfan_api_adapter import get_qianfan_api_adapter_factory
+
+    cookies = qianfan_cookies_for_account(db, account_id)
+    if not cookies:
+        return {
+            "candidates": [],
+            "page": max(page, 1),
+            "page_size": page_size,
+            "total": 0,
+            "coverage": {"pool": 0, "goods_note_total": 0},
+            "bound": False,
+        }
+    adapter = get_qianfan_api_adapter_factory()(cookies)
+    notes: list[dict[str, Any]] = []
+    platform_total = 0
+    for page_no in range(1, MAX_SCAN_PAGES + 1):
+        result = rt.list_goods_notes(adapter, mix_search_word=" ", page=page_no, page_size=SCAN_PAGE_SIZE)
+        batch = result.get("items") or []
+        if platform_total == 0 and result.get("total"):
+            platform_total = int(result["total"])
+        notes.extend(batch)
+        if not batch or not result.get("has_more"):
+            break
+    rows = notes
 
     matched: list[dict[str, Any]] = []
     for row in rows:
-        entry = _parse_entry(row)
-        if not entry:
+        entry = _entry_of(row)
+        if not entry.get("note_id"):
             continue
         if query.matches(entry):
             candidate = _candidate_row(row, entry)
@@ -256,7 +296,7 @@ def list_candidates(
         "total": total,
         "coverage": {
             "pool": len(rows),
-            "goods_note_total": get_shop_state(account)["goods_note_total"],
+            "goods_note_total": platform_total or get_shop_state(account)["goods_note_total"],
         },
         "bound": True,
     }

@@ -79,43 +79,11 @@ class HotTopic(Base):
         DateTime, default=shanghai_now, onupdate=shanghai_now
     )
 
-
-class TopicGoodsMatch(Base):
-    """话题 ↔ 商品匹配（设计 17 §13.11.3）。
-
-    ## 为什么匹配分要**拆成两个成分存**
-
-    `match_reason`（可解释成分：话题词命中了标题/类目/卖点的哪一项）
-    + `hot_value`（平台热度）**都存**，`relevance_score` 只是二者的综合。
-
-    ⚠️ **只存总分答不上「为什么这个词排第一」** —— 用户会质疑排序，
-    而那时再想拆已无从还原（DEF-057 同型的「不可追溯」问题）。
-    这是本项目一贯的口径：**结论与理由一起留**。
-    """
-
-    __tablename__ = "topic_goods_match"
-    __table_args__ = (
-        UniqueConstraint(
-            "user_id", "topic", "item_id", "stat_date", name="uq_topic_goods_match"
-        ),
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
-    item_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
-    #: 指向 `shop_products.id`（本地主键 —— 平台 ID 会变，本地稳定）。
-    product_pk: Mapped[int | None] = mapped_column(
-        ForeignKey("shop_products.id"), index=True, nullable=True
-    )
-    topic: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
-    #: 综合相关度（排序用）。⚠️ 不是「概率」，是**可解释的复合分**（见 `hot_topic_service`）。
-    relevance_score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    #: 平台热度快照（当时的分量之一）。
-    hot_value: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    #: 可解释成分：命中了哪些字段（如「标题、类目」）—— 排序质疑时的唯一依据。
-    match_reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    stat_date: Mapped[str] = mapped_column(String(10), index=True, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now)
-
-
-__all__ = ["HotTopic", "TopicGoodsMatch"]
+# ⚠️ **已退场**（设计 75 S5，2026-10-27）：`TopicGoodsMatch`（`topic_goods_match`）整类删除。
+#
+# 它按 `product_pk`（FK → `shop_products.id`，nullable）记「话题 ↔ 商品」相关度；商品台账
+# 随迁移 `n8o9p0q1r2s3` 整表 DROP ⇒ 这张表连 DROP 都过不去（FK 还在）。
+#
+# 功能侧：算相关度需要商品事实（标题 / 类目 / 卖点），原是本地台账给的；商品改实时后，
+# 逐商品去查平台才能算，而它是列表页的派生排序表 —— 不值得为它打几十次平台请求。
+# 平台热度词本身仍在（`hot_topics` + `GET /platform-analytics/platform-hot-topics`）。

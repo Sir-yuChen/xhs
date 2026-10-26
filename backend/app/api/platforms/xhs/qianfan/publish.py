@@ -31,7 +31,6 @@ from ._shared import (
     get_qianfan_api_adapter_factory,
     json,
     logger,
-    shop_goods_sync_service,
     status,
 )
 
@@ -280,13 +279,21 @@ def create_item_draft(
     #: 规格字典取自**本店既有商品**（真机来源，设计 23 §4.4）。
     #: 扫不到 ⇒ 空 dict，规格留空 + warnings（**不猜 id**）。
     adapter = _ark_adapter_for(db, account, adapter_factory)
+    #: ⚠️ 设计 75 S5（2026-10-27）：原来是「从本地台账挑最近 3 件商品，扫出规格名→
+    #: 规格 ID 字典」。台账表已 DROP ⇒ 改为**从平台实时取**同一条判据（该账号最近的商品）。
+    #: 取不到 / 平台失败 ⇒ 空 dict（规格留空 + warnings，**不猜 id**，与改造前同口径）。
     ledger_variant_ids: dict[str, str] = {}
     try:
-        from backend.app.services.shop_products_service import (
-            recent_item_ids_for_account,
-        )
+        from backend.app.services import realtime_platform_query_service as rt
 
-        item_ids = recent_item_ids_for_account(db, account.id, limit=3)
+        recent = rt.list_products(
+            adapter, status="all", page=1, page_size=3, sort_field="create_time", order="desc"
+        )
+        item_ids = [
+            str(row.get("item_id") or "")
+            for row in (recent.get("items") or [])
+            if str(row.get("item_id") or "")
+        ]
         if item_ids:
             ledger_variant_ids = draft_service.collect_ledger_variant_ids(
                 api=adapter, item_ids=item_ids
@@ -877,22 +884,9 @@ def publish_item_to_online(
             },
         ) from error
 
-    #: ⚠️ 2026-10-11（用户口径「上架成功的商品同步到本地库」+「走同步商品信息队列」）：
-    #: 发布成功拿到 item_id 后，**入队**（同步商品信息队列），worker 异步拉进台账。
-    #: 尽力而为 —— 入队失败不阻断发布结果（用户可再手动「同步商品」兜底）。
-    if result.get("published") and result.get("item_id"):
-        try:
-            from backend.app.services import note_queue_service as nq
-
-            shop_goods_sync_service.enqueue_goods_sync(
-                db,
-                user_id=current_user.id,
-                account_id=account.id,
-                item_ids=[str(result["item_id"])],
-                source=nq.SOURCE_GOODS_SYNC_PUBLISHED,
-            )
-        except Exception as exc:  # noqa: BLE001 - 入队失败不阻断发布结果
-            logger.warning("发布后入队同步商品失败（item_id=%s）：%s", result.get("item_id"), exc)
+    #: ⚠️ **2026-10-27（设计 75 S5）：「发布成功后入队同步商品到本地台账」整段退场。**
+    #: 商品列表 / 详情已改实时查平台，本地 `shop_products` 表已 DROP ⇒
+    #: 这次入队既没有执行体、也没有落点。发布结果本身不受影响（发布成功即成功）。
 
     return {
         "platform_account_id": account.id,

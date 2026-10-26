@@ -51,15 +51,10 @@ from backend.app.services.account_service import (
 )
 from backend.app.services import (
     login_state_service,
-    note_sync_service,
     scheduled_job_runner,
     sync_task_service,
 )
 from backend.app.services.job_registry import JOB_KEY_GOODS_NOTE_SYNC, JOB_KEY_NOTE_SYNC
-from backend.app.services.note_queue_service import (
-    SOURCE_ACCOUNT_CARD_GOODS_NOTE_SYNC,
-    SOURCE_ACCOUNT_CARD_NOTE_SYNC,
-)
 from backend.app.services.sync_task_service import (
     ABSOLUTE_PAGE_CAP,
     DEFAULT_MAX_PAGES,
@@ -842,82 +837,44 @@ def _start_account_sync(
     return {**summary, "log_id": log_id, "scope_note": scope_note}
 
 
-@router.post("/{account_id}/notes/sync")
-def start_account_note_sync(
-    account_id: int,
-    payload: NoteSyncRequest | None = None,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """对该账号触发一次**普通笔记**同步（设计 13 §35.17 + **§44**，2026-09-27 / 09-30 用户口径）。
+_NOTE_SYNC_GONE = {
+    "code": "NOTE_SYNC_REMOVED",
+    "message": (
+        "「同步笔记」已移除：笔记改为**实时查询平台**，本地不再保存副本。"
+        "列表 / 详情直接读平台即可，不需要也不再允许先同步。"
+    ),
+}
 
-    **语义 = 手动触发定时任务 `system.note_sync` 的「执行一次」**（不是另开一条链路）。
-    建行 / 记日志 / 防重 / 响应形状的纪律见 `_start_account_sync`（两条链路共用它）。
 
-    ⚠️ **§44 起本端点只跑 creator 源（普通笔记）**：~~原来它一次跑完普通笔记 + 商品笔记
-    （混合双源）~~，商品笔记拆到 `POST /accounts/{id}/goods-notes/sync`（独立任务 + 独立日志流）。
-    防重因此也按任务类型分别成立：普通笔记在跑**不**阻塞商品笔记。
+@router.post("/{account_id}/notes/sync", include_in_schema=False)
+def start_account_note_sync(account_id: int, current_user: User = Depends(get_current_user)):
+    """**410 墓碑** —— 「同步笔记」整条链路已退场（设计 75 S4，2026-10-27）。
 
-    **防重（需求 N3）**：该账号已有未完成的**同类**任务 ⇒ 返回**同一个任务行**（`reused=True`）。
+    用户口径（2026-10-26）：「同步商品和同步笔记任务全链路移除」。
+
+    ## 为什么保留端点而不是删掉
+
+    删掉 ⇒ 客户端拿到 **404**，分不清「这个功能没有了」和「路径写错了 / 版本太旧」。
+    410 是**明确答复**：功能已移除、不要重试。前端同批已删调用点，这条留给
+    旧版页面 / 脚本一个可读的原因，而不是一个裸 404。
+
+    ## 为什么不需要读库
+
+    本端点现在**零参数校验、零数据库访问、零平台请求** —— 它只回答一件事：
+    「同步」这个概念不存在了。连账号归属都不用判（不判反而不会泄露「这个 id 存不存在」）。
     """
-    account = _get_owned_active_account(db, current_user, account_id)
-    if account.platform != "xhs":
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
-
-    return _start_account_sync(
-        account=account,
-        user_id=current_user.id,
-        payload=payload or NoteSyncRequest(),
-        task_type=NOTE_SYNC_TASK_TYPE,
-        job_key=JOB_KEY_NOTE_SYNC,
-        source=SOURCE_ACCOUNT_CARD_NOTE_SYNC,
-        starter=note_sync_service.start_note_sync,
-    )
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=_NOTE_SYNC_GONE)
 
 
-@router.post("/{account_id}/goods-notes/sync")
-def start_account_goods_note_sync(
-    account_id: int,
-    payload: NoteSyncRequest | None = None,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """对该账号触发一次**商品笔记**同步（**设计 13 §44**，2026-09-30 用户拍板拆分）。
+@router.post("/{account_id}/goods-notes/sync", include_in_schema=False)
+def start_account_goods_note_sync(account_id: int, current_user: User = Depends(get_current_user)):
+    """**410 墓碑** —— 「同步商品笔记」同批退场（设计 75 S4，2026-10-27）。
 
-    **语义 = 手动触发定时任务 `system.goods_note_sync` 的「执行一次」**（与普通笔记端点
-    **逐字同构**，见 `_start_account_sync`）。两者的差别只有：
-
-    | 维度 | 本端点（商品笔记） | `…/notes/sync`（普通笔记） |
-    |---|---|---|
-    | 源 / 硬门禁 | **ark 令牌**（千帆 `goods-note/list`） | 创作者会话（creator 列表） |
-    | 任务类型 | `xhs_goods_note_sync` | `xhs_note_sync` |
-    | 日志流 | `system.goods_note_sync` | `system.note_sync` |
-    | 来源值 | `account_card_goods_note_sync` | `account_card_note_sync` |
-
-    缺 ark 令牌时**不发任何平台请求**，任务行给结构化原因 `ARK_SESSION_REQUIRED`
-    （前端门禁 `goodsNoteSyncPlan` 会在点击时就拦住并提示补登千帆）。
-
-    ⚠️ **与「同步商品」（`POST /api/xhs/qianfan/sync-shop-goods`）不是一回事**：
-    那条同步的是**店铺商品台账**（SKU / 价格，落 `shop_products`），本条同步的是
-    **挂链笔记**（落 `notes` + `note_goods`）。
-
-    **防重（需求 N3）**：该账号已有未完成的**商品笔记**任务 ⇒ 返回同一个任务行
-    （`reused=True`），不新建、不打平台、不记日志。
+    商品笔记的**挂链关系**改为实时查（`rt.list_goods_notes`），不再落本地映射表
+    （`shop_note_goods` 已随迁移 `n8o9p0q1r2s3` DROP）⇒ 这条「先同步进来」的入口
+    失去了意义。理由与上一条完全相同。
     """
-    account = _get_owned_active_account(db, current_user, account_id)
-    if account.platform != "xhs":
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
-
-    return _start_account_sync(
-        account=account,
-        user_id=current_user.id,
-        # 请求体与普通笔记共用（`max_pages` / 时间区间 / 模式对两条链路同义）。
-        payload=payload or NoteSyncRequest(),
-        task_type=GOODS_NOTE_SYNC_TASK_TYPE,
-        job_key=JOB_KEY_GOODS_NOTE_SYNC,
-        source=SOURCE_ACCOUNT_CARD_GOODS_NOTE_SYNC,
-        starter=note_sync_service.start_goods_note_sync,
-    )
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=_NOTE_SYNC_GONE)
 
 
 @router.get("/{account_id}/notes/sync/status")

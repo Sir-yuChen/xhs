@@ -26,11 +26,10 @@ from __future__ import annotations
 import json
 
 import pytest
-from sqlalchemy import select
 
 from backend.app.adapters.xhs.qianfan_api_adapter import get_qianfan_api_adapter_factory
+from backend.app.core.database import Base
 from backend.app.models.platform_account import AccountCookieVersion, PlatformAccount
-from backend.app.models.shop_product import ShopProduct
 from backend.app.services.account_service import dump_channel_envelope
 from backend.app.core.security import encrypt_text
 
@@ -390,36 +389,33 @@ def test_repeat_calls_are_idempotent_and_write_nothing(
     assert [row["item_id"] for row in first["items"]] == [row["item_id"] for row in second["items"]]
     _detail(client, headers, account_id)
     _detail(client, headers, account_id)
-    assert db.scalars(select(ShopProduct)).all() == []
+    #: ⚠️ 设计 75 S5：`shop_products` 表已 DROP ⇒ 断言改成「**没有任何商品台账表**」
+    #: （从 metadata 取，表若被谁加回来会红）。
+    assert "shop_products" not in Base.metadata.tables
 
 
-def test_ai_text_still_comes_from_local_table(
+def test_ai_text_columns_stay_empty_without_a_local_ledger(
     client, db, make_user_and_account, fake_adapter
 ):
-    """`ai_title` / `ai_selling_point` 是**我方数据**（平台不存在）⇒ 仍从 `shop_products` 取。
+    """`ai_title` / `ai_selling_point` 在台账退场后**恒为空串**（键在、值空）。
 
-    这两个字段是列表「AI 标题」列的来源；实时化不能把它们弄丢，也不能编造。
+    ## 为什么不再断言「从本地台账取」
+
+    原用例造一行 `shop_products` 的 `ai_title="AI 采纳标题"`，断言列表能读回来。
+    ⚠️ 设计 75 S5（2026-10-27）：`shop_products` 表随迁移 `n8o9p0q1r2s3` 整表 DROP
+    —— **这两个字段没有任何落点**了。契约保留的理由见 `goods.py::_attach_local_ai_text`：
+    前端按这两列渲染「AI 标题」列，键不能消失；但值不能编造。
+
+    ⇒ 本用例测的是**缺值口径**：键存在、值是空串、不拿平台标题冒充。
     """
     headers, account_id = make_user_and_account()
-    user_id = db.scalar(select(PlatformAccount.user_id).where(PlatformAccount.id == account_id))
-    db.add(
-        ShopProduct(
-            user_id=user_id,
-            platform_account_id=account_id,
-            item_id=ITEM_ID,
-            item_title="旧标题",
-            ai_title="AI 采纳标题",
-            ai_selling_point="AI 卖点",
-        )
-    )
-    db.commit()
-
     body = _items(client, headers, account_id).json()
     item = body["items"][0]
-    #: 商品主体是**平台**的（不是台账里的「旧标题」），只有 AI 两列来自本地。
+    #: 商品主体是**平台**的。
     assert item["title"] == "美式乡村实木抽屉柜"
-    assert item["ai_title"] == "AI 采纳标题"
-    assert item["ai_selling_point"] == "AI 卖点"
+    #: 我方字段：键在、值空（**不编造**）。
+    assert item["ai_title"] == ""
+    assert item["ai_selling_point"] == ""
 
 
 # --------------------------------------------------------------------------- #

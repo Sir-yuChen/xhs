@@ -31,7 +31,7 @@ from sqlalchemy import select
 
 from backend.app.core.database import SessionLocal
 from backend.app.core.time import shanghai_now
-from backend.app.models import Note, NoteDatacenterStat, NoteGoods, PlatformAccount
+from backend.app.models import Note, NoteDatacenterStat, PlatformAccount
 from backend.app.models.note_datacenter_stat import WINDOW_RECENT_1, WINDOW_CUSTOM
 
 #: 千帆数据中心「笔记数据」两类入口（`butterfly/data` 的 blockKey 由 SDK 映射）。
@@ -363,17 +363,8 @@ def _upsert_note(db, row: NoteDataRow, *, user_id: int, account_id: int) -> Note
     existing.raw_json = raw
 
     db.flush()
-    # 挂载商品关系（只增不删，§26.7）：item_id 存在才落关系行
-    if row.item_id:
-        rel = db.scalars(
-            select(NoteGoods).where(
-                NoteGoods.user_id == user_id,
-                NoteGoods.note_id == row.note_id,
-                NoteGoods.item_id == row.item_id,
-            )
-        ).first()
-        if rel is None:
-            db.add(NoteGoods(user_id=user_id, note_id=row.note_id, item_id=row.item_id))
+    #: ⚠️ 设计 75 S5（2026-10-27）：挂链商品**不再写关系表**（`note_goods` 已 DROP）。
+    #: 上面 `raw["item_id"]` 那一行就是落点（数据中心链路早已写它，发布链路读它）。
     return existing
 
 

@@ -23,19 +23,32 @@ import json
 import logging
 from typing import Any, Callable
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.core.time import shanghai_now
+#: ⚠️ 设计 75 S5（2026-10-27）：只 import **状态常量**（纯函数侧）；`AfterSale` /
+#: `Order` / `OrderShipment` 三个 ORM 类随 `n8o9p0q1r2s3` 整表 DROP。
+#: 写链路的入参改为「订单引用」`OrderRef`（含 `order_no` / `package_id` / `status`），
+#: 由端点层从**平台实时**数据构造（见 `qianfan/_shared.py::_owned_order`）。
 from backend.app.models.order import (
     AFTERSALE_STATUS_AGREED,
     AFTERSALE_STATUS_PENDING,
     AFTERSALE_STATUS_REJECTED,
     ORDER_STATUS_PENDING_SHIP,
-    AfterSale,
-    Order,
-    OrderShipment,
 )
+from typing import Protocol
+
+
+class OrderRefLike(Protocol):
+    """写链路需要的订单字段（结构类型，不绑定任何 ORM 类）。
+
+    `order_no` / `package_id` / `status` 三个字段来自**平台实时**的订单行
+    （`rt.list_orders` 的归一化结果）。
+    """
+
+    order_no: str
+    package_id: str
+    status: str
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +107,7 @@ def require_double_confirm(payload: dict[str, Any], *, confirmed: bool, confirm_
         )
 
 
-def ship_confirm_material(order: Order, *, company_code: str, tracking_no: str) -> dict[str, Any]:
+def ship_confirm_material(order: OrderRefLike, *, company_code: str, tracking_no: str) -> dict[str, Any]:
     """**单笔发货的确认素材**（预览与写端点的 token 都基于它，**唯一实现**）。
 
     ⚠️ 预览与写**必须用同一份素材**算指纹 —— 各算各的 ⇒ 预览下发的 token
@@ -139,7 +152,7 @@ def after_sale_confirm_material(
     }
 
 
-def _ship_payload_for(order: Order, *, company_code: str, tracking_no: str) -> dict[str, Any]:
+def _ship_payload_for(order: OrderRefLike, *, company_code: str, tracking_no: str) -> dict[str, Any]:
     """发货**请求体**（⚠️ 字段名按页面推断，**首发真机核对**，见设计 16 §7.4.1）。"""
     return {
         "package_id": str(order.package_id or ""),
@@ -152,7 +165,7 @@ def ship_order(
     db: Session,
     *,
     adapter: Any,
-    order: Order,
+    order: OrderRefLike,
     company_code: str,
     tracking_no: str,
     confirmed: bool,
@@ -169,7 +182,7 @@ def ship_order(
     return _ship_one(db, adapter=adapter, order=order, payload=payload)
 
 
-def _ship_one(db: Session, *, adapter: Any, order: Order, payload: dict[str, Any]) -> dict[str, Any]:
+def _ship_one(db: Session, *, adapter: Any, order: OrderRefLike, payload: dict[str, Any]) -> dict[str, Any]:
     """发货执行体（**不含确认校验** —— 调用方已校验；批量路径共用它，DEF-044）。"""
     if order.status != ORDER_STATUS_PENDING_SHIP:
         raise OrderWriteError(
@@ -188,23 +201,10 @@ def _ship_one(db: Session, *, adapter: Any, order: Order, payload: dict[str, Any
             f"平台拒绝了这次发货：{message}", code="ORDER_SHIP_PLATFORM_REJECTED"
         )
 
-    # 状态推进交给**重新同步**（不在这里臆造平台状态码）—— 只落物流行 + 时间，
-    # 让下一次订单同步把 status 从平台读回来（避免本地与平台状态打架）。
-    row = db.scalars(
-        select(OrderShipment).where(
-            OrderShipment.order_id == order.id,
-            OrderShipment.package_id == payload["package_id"],
-        )
-    ).first()
-    if row is None:
-        row = OrderShipment(
-            order_id=order.id, user_id=order.user_id, package_id=payload["package_id"]
-        )
-        db.add(row)
-    row.logistics_company_code = payload["express_company_code"]
-    row.tracking_no = payload["express_no"]
-    row.ship_time = row.ship_time or shanghai_now()
-    db.flush()
+    #: ⚠️ 设计 75 S5（2026-10-27）：**不再落物流行** —— `order_shipments` 表已 DROP，
+    #: 订单域全实时（物流信息从平台详情的 `shipments[]` 读）。
+    #: 「状态推进交给重新同步」这条纪律也随之退场：本来就是靠同步把平台状态读回来，
+    #: 现在每次看订单都是平台当下值，不存在「本地与平台打架」。
     db.commit()
     return {
         "order_no": order.order_no,
@@ -218,8 +218,8 @@ def _ship_one(db: Session, *, adapter: Any, order: Order, payload: dict[str, Any
 def ship_orders_batch(
     db: Session,
     *,
-    adapter_for: Callable[[Order], Any],
-    orders: list[Order],
+    adapter_for: Callable[[OrderRefLike], Any],
+    orders: list[OrderRefLike],
     specs_by_order_no: dict[str, dict[str, str]],
     confirmed: bool,
     confirm_token: str,
@@ -298,7 +298,7 @@ AFTERSALE_ACTION_REJECT = "reject"
 AFTERSALE_ACTIONS = (AFTERSALE_ACTION_AGREE, AFTERSALE_ACTION_REJECT)
 
 
-def _audit_payload_for(after_sale: AfterSale, *, action: str, reject_reason: str) -> dict[str, Any]:
+def _audit_payload_for(after_sale: Any, *, action: str, reject_reason: str) -> dict[str, Any]:
     """售后审核请求体（⚠️ 字段名推断，**首发真机核对**）。"""
     return {
         "after_sale_id": str(after_sale.after_sale_id or ""),
@@ -311,7 +311,7 @@ def handle_after_sale(
     db: Session,
     *,
     adapter: Any,
-    after_sale: AfterSale,
+    after_sale: Any,
     action: str,
     reject_reason: str,
     confirmed: bool,

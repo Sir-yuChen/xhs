@@ -21,7 +21,6 @@ from backend.app.models import (
     Task,
     User,
 )
-from backend.app.models.shop import ShopNoteGoods
 from backend.app.services.account_service import (
     CHANNEL_ARK,
     CHANNEL_CREATOR,
@@ -36,11 +35,6 @@ from backend.app.services.shop_binding_service import (
     parse_state_time,
     qianfan_cookies_for_account,
     synced_note_count,
-)
-from backend.app.services.shop_goods_service import (
-    existing_rows,
-    missing_note_ids,
-    sync_note_ids,
 )
 from backend.app.schemas.xhs_pc import (
     NoTrafficCleanupActiveResponse,
@@ -829,10 +823,18 @@ def _note_shop_detail(
     note_id: str,
     qianfan_adapter_factory: Any = None,
 ) -> dict[str, Any]:
-    """单篇笔记的千帆数据（v1.18）：一次只读请求 + 本地映射互补。
+    """单篇笔记的千帆数据 —— ⚠️ 设计 75 S5 起**实时查平台**（原读本地映射表）。
 
-    返回 ``{bound, available, goods[], metrics{}, source}``；**任何失败都
-    不抛**——千帆缺，详情正文仍在。metrics 一律留空不造（缺值口径）。
+    返回 ``{bound, available, goods[], metrics{}, source}``；**任何失败都不抛** ——
+    千帆缺，详情正文仍在（详情页的主数据来自 www feed，千帆只是附加信息）。
+
+    ## 数据从哪来
+
+    平台只有一个「按**笔记 ID** 查挂链」的口子：`goods-note/list?note_ids=<逗号分隔>`
+    （参数是**复数**，单数会被忽略）。一次只读请求，命中就带回 `goods_infos[]` +
+    该笔记的全部运营指标。命中不到 ⇒ `available=False`（如实说明，不拿本地旧值顶替）。
+
+    metrics 一律留空不造（缺值口径）：平台没给的键就不出现在响应里。
     """
     info: dict[str, Any] = {
         "bound": False,
@@ -848,71 +850,66 @@ def _note_shop_detail(
     info["bound"] = True
     info["source"] = (account.nickname or "").strip()
 
-    # 先读本地映射（零请求）；没有再按需补一次（一次只读请求）。
-    rows = list(
-        db.scalars(
-            select(ShopNoteGoods).where(
-                ShopNoteGoods.platform_account_id == account.id,
-                ShopNoteGoods.note_id == note_id,
-            )
-        ).all()
+    from backend.app.services import realtime_platform_query_service as rt
+    from backend.app.services.shop_binding_service import qianfan_cookies_for_account
+
+    cookies = qianfan_cookies_for_account(db, account.id)
+    if not cookies:
+        return info
+    try:
+        factory = qianfan_adapter_factory or get_qianfan_api_adapter_factory()
+        adapter = factory(cookies)
+        result = rt.list_goods_notes(adapter, note_ids=[note_id], page=1, page_size=20)
+    except Exception as exc:  # noqa: BLE001 - 千帆缺，详情正文仍在（本函数不抛）
+        info["error"] = str(exc) or type(exc).__name__
+        return info
+
+    entry = next(
+        (row for row in (result.get("items") or []) if str(row.get("note_id") or "") == str(note_id)),
+        None,
     )
-    if not rows and qianfan_adapter_factory is not None:
-        outcome = sync_note_ids(db, account, [note_id], qianfan_adapter_factory)
-        if outcome.get("credential_invalid"):
-            info["error"] = outcome.get("error") or "千帆登录态失效"
-        rows = list(
-            db.scalars(
-                select(ShopNoteGoods).where(
-                    ShopNoteGoods.platform_account_id == account.id,
-                    ShopNoteGoods.note_id == note_id,
-                )
-            ).all()
-        )
-    if not rows:
+    if entry is None:
         return info
 
     info["available"] = True
-    for row in rows:
-        goods = json.loads(row.goods_json) if row.goods_json else []
-        if not isinstance(goods, list):
-            goods = [goods] if goods else []
-        for g in goods:
-            if isinstance(g, dict):
-                info["goods"].append(
-                    {
-                        "item_id": g.get("item_id") or row.item_id or "",
-                        "item_title": g.get("item_title") or row.item_title or "",
-                        "item_image": g.get("item_image") or row.item_image or "",
-                        "variant_desc": g.get("variant_desc") or row.variant_desc or "",
-                        "price": _price_text(g.get("min_price"), g.get("max_price")),
-                    }
-                )
-    # 千帆 entry_json 里的运营数据（30 天浏览 / GMV / 订单），平铺到 shop 顶层
-    # —— 前端 `noteForDetail.shop.<field>` 直接读（XhsNoteShopMetrics 形状）。
-    # 缺值留 None，不造 0（§18.2 缺值口径）。
-    entry = json.loads(rows[0].entry_json) if rows[0].entry_json else {}
-    if isinstance(entry, dict):
-        info.update(
+    for goods in entry.get("goods") or []:
+        if not isinstance(goods, dict):
+            continue
+        info["goods"].append(
             {
-                "note_id": note_id,
-                "title": entry.get("note_title") or "",
-                "cover": entry.get("note_image") or "",
-                "note_flag": entry.get("note_flag") or "",
-                "browse_num": entry.get("browse_num"),
-                "browse_num_30d": entry.get("note_browse_num30d"),
-                "likes": entry.get("like_num"),
-                "collects": entry.get("collect_num"),
-                "comments": entry.get("comment_num"),
-                "shares": entry.get("share_num"),
-                "pay_gmv": entry.get("note_pay_gmv"),
-                "pay_order_cnt": entry.get("note_pay_order_cnt"),
-                "status": entry.get("note_status"),
-                "note_type": entry.get("note_type"),
-                "publish_time": entry.get("publish_time"),
-                "xsec_token": entry.get("xsec_token") or "",
+                "item_id": goods.get("item_id") or "",
+                "item_title": goods.get("title") or "",
+                "item_image": goods.get("image") or "",
+                #: 规格名：平台挂链条目里带了就带（`normalize_goods_note` 的白名单里没有它，
+                #: 缺值留空 —— 不猜、不拿商品名冒充规格）。
+                "variant_desc": str(goods.get("variant_desc") or ""),
+                "price": "",
             }
         )
+    #: 运营数据（阅读 / 互动 / GMV / 状态），平铺到 shop 顶层 —— 前端
+    #: `noteForDetail.shop.<field>` 直接读（`XhsNoteShopMetrics` 形状）。
+    #: 缺值留 None，**不造 0**（§18.2 缺值口径）。
+    info.update(
+        {
+            "note_id": entry.get("note_id") or note_id,
+            "title": entry.get("title") or "",
+            "cover": entry.get("cover") or "",
+            "note_flag": entry.get("note_flag") or "",
+            "browse_num": entry.get("read_count"),
+            #: 30 日阅读：平台这条查询不给（`normalize_goods_note` 白名单外）⇒ 留空。
+            "browse_num_30d": None,
+            "likes": entry.get("like_count"),
+            "collects": entry.get("collect_count"),
+            "comments": entry.get("comment_count"),
+            "shares": entry.get("share_count"),
+            "pay_gmv": entry.get("pay_gmv"),
+            "pay_order_cnt": entry.get("pay_order_count"),
+            "status": entry.get("status"),
+            "note_type": entry.get("note_type"),
+            "publish_time": entry.get("publish_time"),
+            "xsec_token": entry.get("xsec_token") or "",
+        }
+    )
     return info
 
 
@@ -1499,76 +1496,12 @@ def _note_goods_from_parts(
     }
 
 
-def _note_goods_from_shop_row(row: ShopNoteGoods, shop_name: str) -> Optional[dict[str, Any]]:
-    """千帆映射行 → 前端 `NoteGoods` 契约。
-
-    `price` **恒为空**：千帆商品笔记列表不返回价格，而「解析不到就留空、不造假」
-    是本模块的硬口径（需求 §七 数据真实性）。价格要另取商品详情接口，属 M2 商品同步范围。
-    """
-    if not row.item_id and not row.item_title:
-        return None
-    return _note_goods_from_parts(
-        row.item_id, row.item_title, row.item_image, row.variant_desc, "", shop_name
-    )
+#: ⚠️ 设计 75 S5：`_note_goods_from_shop_row` / `_note_shop_metrics_from_row` 已删除
+#: （入参是已 DROP 的 `shop_note_goods` 行）。实时链路直接用平台的归一化条目。
 
 
-def _note_shop_metrics_from_row(row: ShopNoteGoods) -> Optional[dict[str, Any]]:
-    """千帆条目 → 该笔记的**店铺侧指标**（`shop` 字段）。
-
-    「创作者账户数据全部接入千帆」的落地：千帆为每条商品笔记给出的字段
-    （标题 / 封面 / 四项互动 / 阅读数 / 30 日阅读 / 支付金额与订单数 / 发布状态 /
-    发布时间 / xsec_token）全部透出，不再只取商品那一小块。
-
-    缺失的键**不填 0**：读不到就留 `None`，由渲染层决定不显示（§18.2 的同一口径）。
-    """
-    try:
-        entry = json.loads(row.entry_json or "{}")
-    except (TypeError, ValueError):
-        entry = {}
-    if not isinstance(entry, dict) or not entry:
-        return None
-
-    def number(*keys: str) -> Optional[float]:
-        for key in keys:
-            value = entry.get(key)
-            if isinstance(value, bool) or value is None:
-                continue
-            if isinstance(value, (int, float)):
-                return float(value)
-            try:
-                return float(str(value).strip())
-            except (TypeError, ValueError):
-                continue
-        return None
-
-    def text(*keys: str) -> str:
-        for key in keys:
-            value = entry.get(key)
-            if value is None:
-                continue
-            rendered = str(value).strip()
-            if rendered:
-                return rendered
-        return ""
-
-    return {
-        "note_id": text("note_id"),
-        "title": text("note_title"),
-        "cover": text("note_image"),
-        "note_flag": text("note_flag"),
-        "browse_num": number("browse_num"),
-        "browse_num_30d": number("note_browse_num30d"),
-        "likes": number("like_num"),
-        "collects": number("collect_num"),
-        "comments": number("comment_num"),
-        "shares": number("share_num"),
-        "pay_gmv": number("note_pay_gmv"),
-        "pay_order_cnt": number("note_pay_order_cnt"),
-        "status": number("note_status"),
-        "note_type": number("note_type"),
-        "publish_time": number("publish_time"),
-        "xsec_token": text("xsec_token"),
-    }
+#: ⚠️ 设计 75 S5：`_note_shop_metrics_from_row` 的残段一并删除（其入参是已 DROP 的
+#: `shop_note_goods` 行）。店铺侧指标现在由 `_attach_shop_goods` 从平台实时条目组装。
 
 
 def _price_text(min_fen: Any, max_fen: Any) -> str:
@@ -1636,16 +1569,21 @@ def _attach_shop_goods(
     items: list[dict[str, Any]],
     qianfan_adapter_factory: Any = None,
 ) -> dict[str, Any]:
-    """给一页笔记就地补上千帆挂载商品（**按需补齐** + 价格）；返回 `goods_source` 元信息。
+    """给一页笔记就地补上千帆挂载商品 + 店铺侧指标；返回 `goods_source` 元信息。
+
+    ⚠️ 设计 75 S5（2026-10-27）：**一次实时请求**（`goods-note/list?note_ids=…`），
+    不再读写本地映射表 `shop_note_goods`（表已 DROP）。
 
     | 数据 | 来源 | 平台请求 |
     |---|---|---|
-    | 商品（标题/主图/规格/链接） | 本页缺映射时**按 note_ids 一次补齐**（§24.2.1），已有映射则纯本地读 | **0 或 1** |
-    | **价格** | 千帆商品列表接口，按本页商品 ID 批量查一次 | **0 或 1**（仅当确有带商品但缺价的笔记） |
+    | 挂载商品（标题 / 主图 / 链接） | 平台 `goods_infos[]`（按本页 `note_ids` 一次查回） | **1** |
+    | 店铺侧指标（阅读 / 互动 / GMV / 状态） | 同一条响应的 `note_infos[]` | 0（同一次） |
 
-    「按需补齐」取代了早前的「后台全量同步」：店铺可能有近 2000 条商品笔记，而一页只有
-    10 条 —— 只补用户真正打开的这页，成本从「上百页翻取」降到「**每页 ≤1 次**只读请求」，
-    并且第一次看过的笔记会落库，第二次打开就是**零平台请求**。
+    「按页查」而不是「全量同步」的理由没变：店铺可能近 2000 条商品笔记，而一页只有
+    10–20 条 —— 只查用户真正打开的这页。
+
+    ⚠️ **失败不阻断列表**：千帆查不到就还 `goods_source.bound=True` 但 `available=False`
+    + `error` 说明，页面照常展示笔记（商品是附加信息，不是列表主体）。
     """
     info = _shop_goods_source(db, account)
     if not info["bound"] or not items:
@@ -1655,61 +1593,61 @@ def _attach_shop_goods(
     if not note_ids:
         return info
 
-    #: 取票走**唯一入口**（账号自己的 `ark` 通道）；没有就只读本地映射、不打平台。
     cookies = qianfan_cookies_for_account(db, account.id)
+    if not cookies or qianfan_adapter_factory is None:
+        info["available"] = False
+        info["error"] = "该账号没有可用的千帆（ark）令牌，无法读取挂载商品"
+        return info
 
-    # ① 按需补齐：只查本页**还没有映射**的笔记（已有映射 = 零请求）。
-    if qianfan_adapter_factory is not None and cookies:
-        rows_now = existing_rows(db, account.id)
-        missing = missing_note_ids(rows_now, note_ids)
-        if missing:
-            outcome = sync_note_ids(db, account, missing, qianfan_adapter_factory)
-            info["on_demand"] = {
-                "requested": outcome["requested"],
-                "stored": outcome["stored"],
-                "error": outcome["error"],
-            }
-            if outcome["credential_invalid"]:
-                state = get_shop_state(account)
-                info["status"] = str(state["status"])
-                info["status_message"] = str(state["status_message"])
-            if outcome["stored"]:
-                # 覆盖度是**补齐前**算的，这里按同一函数重算，避免把过期计数回给页面。
-                refresh = _shop_goods_source(db, account)
-                info["synced_notes"] = refresh["synced_notes"]
-                info["synced_at"] = refresh["synced_at"]
+    from backend.app.services import realtime_platform_query_service as rt
 
-    rows = db.scalars(
-        select(ShopNoteGoods).where(
-            ShopNoteGoods.platform_account_id == account.id,
-            ShopNoteGoods.note_id.in_(note_ids),
-        )
-    ).all()
-    mapping = {row.note_id: row for row in rows}
+    try:
+        adapter = qianfan_adapter_factory(cookies)
+        result = rt.list_goods_notes(adapter, note_ids=note_ids, page=1, page_size=len(note_ids))
+    except Exception as exc:  # noqa: BLE001 - 附加信息，失败不阻断列表
+        info["available"] = False
+        info["error"] = str(exc) or type(exc).__name__
+        return info
+
+    mapping = {str(row.get("note_id") or ""): row for row in (result.get("items") or [])}
     # ADR-021：店铺实体已退场 ⇒ 商品展示里的店铺名取账号昵称。
     shop_name = (account.nickname or "").strip()
-    pending: list[str] = []
+    info["available"] = True
+    info["matched_notes"] = len(mapping)
     for item in items:
-        row = mapping.get(str(item.get("note_id") or ""))
-        if row is None:
+        entry = mapping.get(str(item.get("note_id") or ""))
+        if entry is None:
             continue
-        goods = _note_goods_from_shop_row(row, shop_name)
-        if goods is not None:
-            item["goods"] = goods
-            if goods.get("goods_id") and not goods.get("price"):
-                pending.append(str(goods["goods_id"]))
-        metrics = _note_shop_metrics_from_row(row)
-        if metrics is not None:
-            item["shop"] = metrics
-
-    if pending and qianfan_adapter_factory is not None and cookies:
-        prices = _batch_item_prices(cookies, qianfan_adapter_factory, pending)
-        if prices:
-            for item in items:
-                goods = item.get("goods")
-                if isinstance(goods, dict) and not goods.get("price"):
-                    goods["price"] = prices.get(str(goods.get("goods_id") or ""), "")
-            info["price_source"] = "ark:items"
+        goods_list = [g for g in (entry.get("goods") or []) if isinstance(g, dict)]
+        if goods_list:
+            first = goods_list[0]
+            goods = _note_goods_from_parts(
+                str(first.get("item_id") or ""),
+                str(first.get("title") or ""),
+                str(first.get("image") or ""),
+                str(first.get("variant_desc") or ""),
+                "",
+                shop_name,
+            )
+            if goods.get("goods_id") or goods.get("title"):
+                item["goods"] = goods
+        #: 店铺侧指标（阅读 / 互动 / GMV / 发布状态）—— 同一次响应里就有，零额外请求。
+        item["shop"] = {
+            "note_id": entry.get("note_id") or "",
+            "title": entry.get("title") or "",
+            "cover": entry.get("cover") or "",
+            "note_flag": entry.get("note_flag") or "",
+            "browse_num": entry.get("read_count"),
+            "browse_num_30d": None,
+            "likes": entry.get("like_count"),
+            "collects": entry.get("collect_count"),
+            "comments": entry.get("comment_count"),
+            "shares": entry.get("share_count"),
+            "pay_gmv": entry.get("pay_gmv"),
+            "pay_order_cnt": entry.get("pay_order_count"),
+            "status": entry.get("status"),
+            "publish_time": entry.get("publish_time"),
+        }
     return info
 
 

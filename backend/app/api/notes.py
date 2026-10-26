@@ -22,7 +22,9 @@ from backend.app.core.config import get_settings
 from backend.app.core.database import SessionLocal, get_db
 from backend.app.core.deps import get_current_user, get_owned_active_account
 from backend.app.core.time import shanghai_now
-from backend.app.models import AiDraft, Note, NoteAsset, NoteComment, NoteDatacenterStat, NoteGoods, NoteTopic, Notification, PlatformAccount, Topic, User
+#: ⚠️ 设计 75 S5（2026-10-27）：`NoteGoods` / `ShopNoteGoods` 两个 ORM 类随「笔记↔商品挂链改实时」
+#: 退场（两张表已 DROP），不再 import。
+from backend.app.models import AiDraft, Note, NoteAsset, NoteComment, NoteDatacenterStat, NoteTopic, Notification, PlatformAccount, Topic, User
 from backend.app.services.note_purge_service import purge_note
 from backend.app.models.scheduled_job import (
     LOG_FAILED,
@@ -40,14 +42,10 @@ from backend.app.models.note import (
     PUBLISH_STATUS_PENDING,
     PUBLISH_STATUS_PUBLISHED,
     PUBLISH_STATUS_PUBLISHING,
-    note_supports_sync,
     set_note_publish_status,
 )
 from backend.app.schemas.common import paginated
-from backend.app.services.note_topic_service import (
-    apply_sync_topics,
-    replace_note_topics,
-)
+from backend.app.services.note_topic_service import replace_note_topics
 
 router = APIRouter(prefix="/notes", tags=["notes"])
 
@@ -127,17 +125,6 @@ class BatchPublishNotesRequest(BaseModel):
     max_items: int = Field(default=20, ge=1, le=20)
 
 
-class BatchSyncNotesRequest(BaseModel):
-    """批量同步**已发布**笔记（设计 13 §35，2026-09-25）。
-
-    门禁比单条「同步」按钮严：只收 `publish_status == "published"` 的选中篇
-    （模型层唯一判据 `note_supports_batch_sync`，与前端 `canBatchSyncNote`
-    同口径）；不达标篇不进队列、进 `results`（`ok:false, code`），不阻断其余。
-    `max_items` 与发布批次同值（默认 20，超限服务端截断并如实报 `total`）。
-    """
-
-    note_ids: list[int] = Field(min_length=1)
-    max_items: int = Field(default=20, ge=1, le=20)
 
 
 #: 话题归一化上限（NOTE_TOPICS_MAX_ITEMS / NOTE_TOPICS_MAX_LEN）：**唯一定义处**在
@@ -236,20 +223,30 @@ def _load_note_relations(db: Session, notes: Sequence[Note]) -> _NoteRelations:
 
 
 def _load_batch_goods(db: Session, notes: Sequence[Note]) -> dict[int, list[dict]]:
-    """这批笔记的挂载商品 —— ⚠️ **恒为空字典**（设计 75 S5，2026-10-27）。
+    """这批笔记的挂载商品 —— ⚠️ 设计 75 S5 起恒为空（不查库、不查平台）。
 
-    为什么改成常量而不是「读实时平台」：本函数服务的是**内容库列表的一页 20 篇**，
-    平台唯一的挂链查询是 `goods-note/list?item_mix_search_word=<商品ID>` ——
-    只能**按商品反查笔记**，不能按笔记查商品（`note_ids` 参数走的是另一条
-    「千帆商品笔记列表」，那里给的是 `goods_infos[]`，与本地笔记并非一一对应）。
-    一页 20 篇逐篇去打平台 = 20 次请求，且答案还不可靠。
+    ## 为什么不再在这里查
 
-    ⇒ 挂链商品改在**需要它的地方**实时查：
-    * 商品详情弹窗的「挂链笔记」→ `rt.list_goods_notes(item_id)`（实时，一次请求）；
-    * 单篇商品详情 → `GET /notes/goods/{item_id}`（实时，见该端点 docstring）。
+    | 原实现 | 现状 |
+    |---|---|
+    | 读 `note_goods` 关系表 | 表已 DROP（迁移 `n8o9p0q1r2s3`） |
+    | 读 `shop_note_goods` 补规格 | 同上 |
+    | 读 `shop_products` 取标题 / 价格 | 同上（商品改实时查平台） |
 
-    调用方（`_load_note_relations`）拿到空字典即渲染成「无挂载商品」—— 与改造前
-    「关系表里没有这行」**同一形状**，前端零改动。
+    ## 为什么不改成「一页 20 篇逐篇去平台查」
+
+    平台只有「按**商品**反查笔记」（`item_mix_search_word`）和「按**笔记 ID** 批量查
+    挂链」（`note_ids`）。后者其实可用 —— 但它与本函数服务的内容库列表的候选集合并
+    不完全一致（本地笔记包含**还没发布**的本地生成笔记，平台上根本不存在），为了让
+    「列表每篇都带商品」而去打一次平台，换来的是一页最多 1 次请求的固定成本 + 一处
+    失败面，而列表页的主要信息是笔记本身。
+
+    ⇒ 挂载商品在**需要它的地方**实时查：
+    * 「我的笔记」列表 / 详情 → `_attach_shop_goods`（按本页 `note_ids` 一次实时查回）；
+    * 单篇商品详情 → `GET /notes/goods/{item_id}`（实时）。
+
+    调用方拿到空字典即渲染成「无挂载商品」—— 与改造前「关系表里没有这行」**同一形状**，
+    前端零改动。
     """
     return {}
 
@@ -554,24 +551,47 @@ def get_publish_queue(
     return snapshot
 
 
-@router.get("/sync-queue")
-def get_sync_queue(
-    platform: Optional[str] = None,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """同步进度快照（内容库「同步进度卡」；2026-09-25 批量同步，设计 13 §35.3）。
+# --------------------------------------------------------------------------- #
+# 笔记同步：**整段退场**（设计 75 §4.5，2026-10-27，S4）
+#
+# 内容库改**读平台实时**后，「把平台笔记翻页落进本地 `notes` 表」不再有任何数据
+# 消费者 ⇒ 同步入口 + 进度查询 + 队列快照 4 条端点同批改 **410 墓碑**
+# （`include_in_schema=False`：不进 OpenAPI，端点计数只算真实能力 394 → 387）。
+#
+# ⚠️ **标记常量只此一处**：`NOTE_SYNC_REMOVED` 是四条墓碑共用的错误码，
+# 前端据此把「已下线」与真故障区分开（不猜 404）。
+# ⚠️ 墓碑路由**不挂权限码、也不进 `ROUTE_PERMS`** —— 登记了就是
+# 「指向不存在路由的码」，启动守卫 `[码指向不存在的路由]` 会拒绝启动。
+# --------------------------------------------------------------------------- #
+NOTE_SYNC_REMOVED = "NOTE_SYNC_REMOVED"
 
-    回**当前用户**的批量同步队列：`running` / `queued`（FIFO 序）+ 计数
-    （`synced` 已同步 / `failed` 失败 / `total` 本轮总数）+ `finished`
-    （已出结果的逐篇 `ok` 与 `reason` —— 同步失败不落库到笔记行，原因只在这里给）。
+_NOTE_SYNC_REMOVED_MESSAGES = {
+    "queue": "「同步队列」已随内容库实时查询下线：内容库直接读平台最新数据，"
+             "不再有同步任务在排队。",
+    "batch": "「批量同步」已随内容库实时查询下线：内容库直接读平台最新数据，"
+             "不需要再同步到本地。",
+    "single": "「同步笔记」已随内容库实时查询下线：内容库直接读平台最新数据，"
+              "不需要再同步到本地。",
+    "data": "「同步数据」已随内容库实时查询下线：内容库直接读平台最新数据，"
+            "不需要再同步到本地。",
+}
 
-    ⚠️ 路由必须注册在 `/{note_id}` **之前** —— 否则 "sync-queue" 会被
-    `/{note_id}` 的 int 转换先吃掉，422（`publish-queue` 的同款教训，§31.5）。
+
+def _note_sync_gone(what: str) -> None:
+    """四条墓碑共用的抛出体（同一句口径，避免四处文案分叉）。"""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail={"code": NOTE_SYNC_REMOVED, "message": _NOTE_SYNC_REMOVED_MESSAGES[what]},
+    )
+
+
+@router.get("/sync-queue", include_in_schema=False)
+def get_sync_queue_removed():
+    """**已退场**（设计 75 §4.5，2026-10-27）—— 原批量同步的进度快照。
+
+    同步链路本身已退场，队列快照自然没有意义（前端也不再轮询它）。
     """
-    from backend.app.services.note_sync_service import sync_queue_snapshot
-
-    return sync_queue_snapshot(db, current_user.id, platform=platform)
+    _note_sync_gone("queue")
 
 
 # ⚠️ **`GET /notes/hydrate-queue` 已移除**（2026-09-27 用户口径：账号卡移除「补齐详情」，
@@ -1778,72 +1798,14 @@ def update_note_publish_status(
     return _serialize_note_with_topics(db, note)
 
 
-@router.post("/{note_id}/sync")
-def sync_note(
-    note_id: int,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """内容库「同步」按钮：**入同步队列**，由队列 worker 拉平台最新内容（设计 13 §25.4 / §35.10）。
+@router.post("/{note_id}/sync", include_in_schema=False)
+def sync_note_removed(note_id: int):
+    """**已退场**（设计 75 §4.5，2026-10-27）—— 原「同步单篇笔记」。
 
-    **判据是 `note_supports_sync()`**（models/note.py，与前端 `canSyncNote` 同口径）：
-    `synced` **或** `publish_status == "published"`。
-
-    ⚠️ 2026-09-23 用户口径「**已发布的笔记也支持同步笔记最新的三方数据**」⇒ 把原来
-    只认 `synced` 的闸门放宽到「发布过也算」。漏放的实际表现（真实库 id 1966：
-    `local_generated` + `published`）：本地生成笔记发布成功后**类型不变**，旧判据
-    于是即使用户在卡片上点到了同步按钮，也会拿到 400 —— 按钮在、功能不在。
-
-    仍被拒的是**既不是 synced、也没发布过**的笔记（采集来的别人的笔记）：
-    「拉平台最新内容」对它没有意义，按钮同样不渲染。
-
-    ⚠️ **2026-09-25 用户口径「单独点击同步按钮也需要放入同步队列中执行，与批量同步
-    一致」**：本端点从**同步阻塞执行**改为**入队即返回**（与 `POST /notes/{id}/publish`
-    同形）。理由不只是形态统一 —— 顺序执行是限流的第一道保障（额度按账号读运行时
-    配置，默认 60 次/分钟，设计 13 §38.2）：
-    单条阻塞 + 批量队列并存时，两条链路各打各的请求，限流等待互相插队、叠加。
-
-    响应 `sync` 字段随之从「同步的逐项结果」变成**入队回执**
-    （`{ok, status:"queued", note_pk, note_id, already_queued?}`）。终态（成功 / 失败 +
-    真实原因）由前端轮询 `GET /notes/sync-queue` 的快照 `finished` 给一次 —— 与批量
-    同步**同一个出口**，前端不另走一套。
-
-    **门禁失败仍 400**（`NOTE_NOT_SYNCABLE`）：它是「这篇能不能同步」的确定性答案，
-    不该伪装成一次异步结果。**越权 404**（`_get_owned_note`）不变。
+    内容库改**读平台实时**后没有「本地副本需要刷新」这回事，
+    与批量同步 / 同步队列同批退场（同一个 `NOTE_SYNC_REMOVED` 错误码）。
     """
-    note = _get_owned_note(db, current_user, note_id)
-    if not note_supports_sync(note):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": "NOTE_NOT_SYNCABLE",
-                "message": "只有三方同步笔记或已发布过的笔记支持同步",
-            },
-        )
-    from backend.app.services import note_sync_service
-
-    item = note_sync_service.start_sync_note(db, current_user.id, note.id)
-    if not item.get("ok"):
-        # 服务层复核出的「不存在 / 不属于当前用户」（理论上端点层已挡）：保持结构化 400，
-        # 不让一个 ok:false 的回执被前端当成「已入队」而空等。
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": str(item.get("code") or "NOTE_NOT_SYNCABLE"),
-                "message": str(item.get("error") or "这篇笔记当前不能同步"),
-            },
-        )
-    db.refresh(note)
-    return {
-        "note": _serialize_note_with_topics(db, note),
-        "sync": {
-            "ok": True,
-            "status": "queued",
-            "note_pk": int(item["note_pk"]),
-            "note_id": note.note_id,
-            **({"already_queued": True} if item.get("already_queued") else {}),
-        },
-    }
+    _note_sync_gone("single")
 
 
 @router.post("/{note_id}/publish")
@@ -1901,23 +1863,10 @@ def batch_publish_notes_endpoint(
     )
 
 
-@router.post("/batch-sync")
-def batch_sync_notes_endpoint(
-    payload: BatchSyncNotesRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """批量同步（异步队列；设计 13 §35.2，2026-09-25）。
-
-    逐篇过门禁（同步；不达标篇立即进 `results`，不阻断），通过篇入队由**一个**
-    后台线程顺序跑完（顺序执行 = www 限流的第二道保障）。**立即返回**
-    `{total, started, failed, results}`：通过篇 `{note_pk, ok:true,
-    status:"queued", note_id}`，门禁失败篇 `{note_pk, ok:false, error, code}`。
-    终态由前端轮询 `GET /notes/sync-queue`（快照 `finished` 带逐篇结果）。
-    """
-    from backend.app.services.note_sync_service import start_batch_sync
-
-    return start_batch_sync(db, current_user.id, payload.note_ids, max_items=payload.max_items)
+@router.post("/batch-sync", include_in_schema=False)
+def batch_sync_notes_removed():
+    """**已退场**（设计 75 §4.5，2026-10-27）—— 原「批量同步选中笔记」。"""
+    _note_sync_gone("batch")
 
 
 @router.put("/{note_id}/topics")

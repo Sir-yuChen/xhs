@@ -25,7 +25,6 @@ from ._shared import (
     MAX_PAGE_SIZE,
     Note,
     NoteAsset,
-    NoteGoods,
     OpenAICompatibleTextClient,
     Optional,
     PlatformAccount,
@@ -38,7 +37,6 @@ from ._shared import (
     _epoch_millis,
     _first_text,
     _fmt_state_time,
-    _item_error_to_http,
     _owned_account,
     _price_fen,
     _render_detail_image_template,
@@ -63,7 +61,6 @@ from ._shared import (
     quote,
     select,
     shanghai_now,
-    shop_goods_sync_service,
     shop_products_service,
     status,
     synced_note_count,
@@ -613,37 +610,20 @@ def _decorate_realtime_item(item: dict) -> dict:
 
 
 def _attach_local_ai_text(db: Session, account, items: list[dict]) -> None:
-    """把**我方数据**（AI 采纳的标题 / 卖点）按 `item_id` 贴回实时行（就地修改）。
+    """把**我方数据**（AI 采纳的标题 / 卖点）贴回实时行。
 
-    设计 75 §1.1 的判据是「平台有的实时查，我方独有的才落库」。`ai_title` /
-    `ai_selling_point` 是**AI 润色后被用户采纳**的结果，平台侧不存在 ⇒ 属于我方独有，
-    仍住在 `shop_products` 的两列里（S5 随表处置）。一次 `IN` 查询、零平台请求；
-    该商品没有台账行 ⇒ 空串（不造）。
+    ⚠️ 设计 75 S5（2026-10-27）：**恒为空串**。这两列原来住在 `shop_products`
+    （`ai_title` / `ai_selling_point`），随商品台账整表 DROP 一起退场 ——
+    真机实测全库 **0 个非空值**，搬一张空表只是换个地方留死代码。
 
-    ⚠️ 这不是「商品数据的第二份真相源」：读的只是我方附加的两列，商品主体一律来自平台。
+    ⚠️ 但**函数与字段不能删**：前端按 `ai_title` / `ai_selling_point` 渲染
+    「AI 标题 / 卖点」两列（空则显示平台标题），响应形状必须保持。
+    若将来要恢复这个能力，正确的落点是**别的表**（商品无关的「用户标注」表），
+    不要再往商品数据里塞。
     """
-    ids = [str(item.get("item_id") or "") for item in items]
-    ids = [item_id for item_id in dict.fromkeys(ids) if item_id]
-    if not ids:
-        return
-    from sqlalchemy import select
-
-    from backend.app.models.shop_product import ShopProduct
-
-    rows = db.scalars(
-        select(ShopProduct).where(
-            ShopProduct.platform_account_id == account.id,
-            ShopProduct.item_id.in_(ids),
-        )
-    ).all()
-    ai_by_item = {
-        str(row.item_id or ""): (row.ai_title or "", row.ai_selling_point or "")
-        for row in rows
-    }
     for item in items:
-        ai_title, ai_selling_point = ai_by_item.get(str(item.get("item_id") or ""), ("", ""))
-        item["ai_title"] = ai_title
-        item["ai_selling_point"] = ai_selling_point
+        item["ai_title"] = ""
+        item["ai_selling_point"] = ""
 
 
 def _realtime_items_page(
@@ -878,62 +858,26 @@ def shop_items(
     return response
 
 
-@router.post("/items/delete")
-def shop_items_delete(
-    payload: ShopItemsDeleteRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-    _perm: None = Depends(require_perm("xhs:item:deleteLocal")),
-):
-    """批量删除**本地台账行**（v1.36，设计 13 §33.10；零平台请求）。
+@router.post("/items/delete", include_in_schema=False)
+def shop_items_delete_removed():
+    """**已退场**（设计 75 S5，2026-10-27）：批量删除**本地台账行**。
 
-    | 约定 | 做法 |
-    |---|---|
-    | 删什么 | 只删本账号 `shop_products` 的选中行；**平台商品不动**（SDK 无商品删除接口） |
-    | 键 | `item_id`（平台商品 ID）；归属维度由 `platform_account_id` 限定 ⇒ 传别人的 item_id 只会删 0 行 |
-    | 空 | `item_ids` 去重去空白后为空 → 400 `QIANFAN_ITEM_IDS_REQUIRED`（不静默成功） |
-    | 上限 | `> MAX_BATCH_DELETE` → 400 `QIANFAN_ITEM_IDS_TOO_MANY`（不静默截断） |
-    | 门禁 | **无门禁** —— 删的是**本地台账**行（零平台请求），未登录千帆也能删本地数据；越权 → 404 |
-    | 连带 | `note_goods` 关系行**一并删**（⚠️ 2026-09-23 用户口径「删除商品时也需要删除笔记与商品的关联关系」，**取代** v1.36 的「关系行不动」；理由：关系指向已删商品就是孤儿行，与 §26.6 同一个病） |
+    商品不再落本地（`shop_products` 已随迁移 `n8o9p0q1r2s3` 整表 DROP）⇒
+    这个动作**没有对象可删**。平台商品的删除是另一条链路（`POST /items/operate`
+    的 `delete` 动作，**写平台**），不受影响。
 
-    返回 `deleted` 是**实际**删除行数（`rowcount`），与 `requested` 对照即可看出
-    有没有传进来不存在 / 别的账号的 item_id —— 这里不假定「请求几条就删了几条」。
+    ⚠️ 为什么是 410 而不是静默 200：老前端 / 开着的页签点到它，必须拿到一句
+    读得懂的答复；静默成功会让用户以为「删掉了」，而其实什么都没发生。
     """
-    account = _owned_account(db, current_user, payload.platform_account_id)
-    # ⚠️ 无千帆登录态门禁：删的是**本地台账行**（零平台请求），与 `/items` 同口径
-    # （用户 2026-09-30：本地数据读 / 删不需要登录态）。
-
-    # 去重保序：勾选框重复给同一个 item_id（跨页勾选、手改请求）不该删两次、
-    # 也不该把「请求条数」算虚 —— `requested` 是校验过的**有效**条数。
-    seen: set[str] = set()
-    item_ids: list[str] = []
-    for raw in payload.item_ids:
-        item_id = str(raw or "").strip()
-        if item_id and item_id not in seen:
-            seen.add(item_id)
-            item_ids.append(item_id)
-    if not item_ids:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": "QIANFAN_ITEM_IDS_REQUIRED",
-                "message": "没有选择要删除的商品。",
-            },
-        )
-    if len(item_ids) > MAX_BATCH_DELETE:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": "QIANFAN_ITEM_IDS_TOO_MANY",
-                "message": f"单次最多删除 {MAX_BATCH_DELETE} 个商品，本次选了 {len(item_ids)} 个。",
-                "limit": MAX_BATCH_DELETE,
-            },
-        )
-
-    deleted = shop_products_service.delete_items(
-        db, platform_account_id=account.id, item_ids=item_ids
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail={
+            "code": "SHOP_ITEMS_LOCAL_DELETE_REMOVED",
+            "message": "「删除本地商品」已随商品实时查询下线：商品不再落本地。"
+                       "如需删除平台商品，请用「批量操作 → 删除」。",
+        },
     )
-    return {"deleted": deleted, "requested": len(item_ids), "item_ids": item_ids}
+
 
 def _find_platform_product(adapter, item_id: str) -> dict | None:
     """按商品 ID **实时**取单件商品的列表行（`search_item_v2` + 精确匹配）。
@@ -1039,8 +983,9 @@ def item_detail(
     raw_item = raw_product or {}
     product_images = shop_products_service.product_image_links(raw_item)
     detail_images = shop_products_service.detail_image_links(raw_item)
-    #: 「图集」= 主图 + 详情图合并去重（与台账 `images_json` 同一口径
-    #: `shop_goods_sync_service._image_links`）。SKU 规格图**不混进商品图集**。
+    #: 「图集」= 主图 + 详情图合并去重（两处都是
+    #: `shop_products_service` 的**纯函数**：平台原文 → 链接列表，零 DB）。
+    #: SKU 规格图**不混进商品图集**。
     images = product_images + [url for url in detail_images if url not in product_images]
 
     return {
@@ -1212,22 +1157,21 @@ def generate_detail_image(
 
     account = _owned_account(db, current_user, payload.platform_account_id)
 
-    detail = shop_products_service.item_detail(
-        db, platform_account_id=account.id, item_id=payload.item_id
-    )
-    if detail is None:
+    #: ⚠️ 设计 75 S5（2026-10-27）：商品图从**平台实时**取（原读本地台账 `detail_json`）。
+    #: 参考图白名单的判据不变：**只接受这件商品自己的图**（挡住 SSRF 与"随便传个 URL"）。
+    raw_product = _find_platform_product(_realtime_adapter(db, account, adapter_factory), payload.item_id)
+    if raw_product is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="本账号的商品台账里没有这个商品（先同步商品再试）",
+            detail="千帆上没有这个商品（可能已被删除，或商品 ID 有误）",
         )
-
-    images = [url for url in (detail.get("images") or []) if url]
-    # v2.15（§13.3.6）：参考图可选 —— 勾选的主图 / 详情图，**必须过台账白名单**。
+    product_images = shop_products_service.product_image_links(raw_product)
+    detail_images = shop_products_service.detail_image_links(raw_product)
+    images = product_images + [url for url in detail_images if url not in product_images]
+    # v2.15（§13.3.6）：参考图可选 —— 勾选的主图 / 详情图，**必须过白名单**。
     # v2.23：主图与详情图**合并为一组「可选参考图」**（用户口径）⇒ 白名单合成一个集合，
     # 不再按来源归组（分组的语义已移到「生成哪一类图」的 Tab 上）。
-    allowed: set[str] = set(detail.get("product_images") or []) | set(
-        detail.get("detail_images") or []
-    )
+    allowed: set[str] = set(product_images) | set(detail_images)
     picked: list[str] = []
     for url in payload.reference_image_urls or []:
         candidate = str(url or "").strip()
@@ -1984,79 +1928,24 @@ class ItemsSyncRequest(BaseModel):
     start_date: str = ""
     end_date: str = ""
 
-@router.post("/items/sync")
-def shop_items_sync(
-    payload: ItemsSyncRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """**按指定商品 ID 同步最新数据到本地台账**（2026-10-05 需求 6）。
+@router.post("/items/sync", include_in_schema=False)
+def shop_items_sync_removed():
+    """**已退场**（设计 75 §2.4 / S5，2026-10-27）：按商品 ID 同步到本地台账。
 
-    ## 平台侧没有「按 item_id 拉商品」的读接口 —— 这是本端点的**代价**
+    原实现把指定商品「翻页扫描 + 精确命中 + 落 `shop_products`」，并挂进
+    `xhs_shop_goods_sync` 队列。商品列表改**实时查平台**后：本地没有台账可写，
+    队列也没有执行体 ⇒ 整条链路退场（`shop_goods_sync_service` 同批删除）。
 
-    真机核对（2026-10-05）：`product/search_item_v2` 只支持分页 + 筛选；
-    `get_skus_by_item_ids` 只回规格、不回商品本体。⇒ 实现是**把指定 ID 当筛选条件
-    发出去、按页扫描，只把精确命中的那几个落库**（`whole_keywords` 是模糊匹配，
-    所以本地还要按精确 id 再筛一遍 —— 否则标题里凑巧含该串的商品也会被写进台账）。
-
-    **同步执行**（不是后台任务）：这个动作的目的是「马上看到那几个商品的最新数据」，
-    丢给后台就得再设计一套进度查询；代价是请求可能持续较久（要翻页），
-    如实写在响应 `note` 与前端弹窗里（不假装是「精准单查」）。
-
-    ⚠️ **只补不删**：命中之外的商品一行不动（与全量同步的「翻完删旧行」刻意不同 ——
-    指定同步只对「用户点名的那几个」负责）。
+    ⚠️ 商品**最新状态**现在随时可看：列表就是实时查的，不需要「同步一下再看」。
     """
-    account = _owned_account(db, current_user, payload.platform_account_id)
-
-    seen: set[str] = set()
-    item_ids: list[str] = []
-    for raw in payload.item_ids:
-        value = str(raw or "").strip()
-        if value and value not in seen:
-            seen.add(value)
-            item_ids.append(value)
-    if not item_ids:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"code": "QIANFAN_ITEM_IDS_REQUIRED", "message": "没有要同步的商品。"},
-        )
-    if len(item_ids) > MAX_OPERATE_ITEMS:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": "QIANFAN_ITEM_IDS_TOO_MANY",
-                "message": f"单次最多同步 {MAX_OPERATE_ITEMS} 个商品，本次填了 {len(item_ids)} 个。",
-                "limit": MAX_OPERATE_ITEMS,
-            },
-        )
-
-    from backend.app.services.shop_binding_service import has_ark_session
-
-    if not has_ark_session(db, account.id):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": "ARK_SESSION_REQUIRED",
-                "message": "该账号没有可用的千帆（ark）登录态，无法同步商品。"
-                           "先在账号矩阵导入其千帆登录态后再试。",
-            },
-        )
-
-    #: ⚠️ 2026-10-11（用户口径「新增一个同步商品信息队列」）：同步指定商品改**入队**，
-    #: 队列 worker 认领后异步执行，队列记录页可见执行记录详情。
-    from backend.app.services import note_queue_service as nq
-
-    result = shop_goods_sync_service.enqueue_goods_sync(
-        db,
-        user_id=current_user.id,
-        account_id=account.id,
-        item_ids=item_ids,
-        source=nq.SOURCE_GOODS_SYNC_SPECIFIED,
-        scope=payload.scope,
-        start_date=payload.start_date,
-        end_date=payload.end_date,
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail={
+            "code": "SHOP_ITEMS_SYNC_REMOVED",
+            "message": "「同步商品信息」已随商品实时查询下线：列表本身就是平台实时数据。",
+        },
     )
-    return {"platform_account_id": payload.platform_account_id, **result}
+
 
 @router.post("/items/operate")
 def shop_items_operate(
@@ -2201,53 +2090,25 @@ def shop_items_operate_status(
         )
     return snapshot
 
-@router.patch("/items/edit")
-def edit_shop_item(
-    payload: ItemEditRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """**商品本地编辑**（设计 20 §2 端点 5；**纯本地写**，零平台请求）。
+@router.patch("/items/edit", include_in_schema=False)
+def edit_shop_item_removed():
+    """**已退场**（设计 75 S5，2026-10-27）：商品**本地**编辑（AI 采纳的标题 / 卖点）。
 
-    可编辑两项（⚠️ 分组项已随分组功能退场，2026-10-05）：`ai_title`（采纳的 AI 标题）/
-    `ai_selling_point`（采纳的 AI 卖点）。
+    它改的是本地台账上的两列用户标注（`ai_title` / `ai_selling_point`），
+    表已随迁移 `n8o9p0q1r2s3` DROP；实机核对这两列**全库 0 个非空值** ⇒ 没有数据要迁。
 
-    ## 什么**不**能在这里改（边界，写清避免误解）
-
-    ⚠️ **商品真实标题 / 价格 / 库存 / 上下架状态都不改** —— 那些是平台数据。
-    本端点改的是**本地台账上的用户标注**（`ai_title` / `ai_selling_point` 是用户
-    **采纳**的 AI 草稿，平台标题仍在 `item_title`）。
-    ⚠️ 平台商品本身的上下架 / 删除走 `POST /items/operate`（**写平台**，另一条链路）。
-
-    ## PATCH 语义的两态（设计 20 §2.2 口径①）
-
-    | 请求体 | 行为 |
-    |---|---|
-    | 省略键 | 保持原值 |
-    | 显式 `null` | 清空 |
-
-    `updated[]` 只回**真正变了**的字段（新值 != 旧值）—— 前端据此提示
-    「已更新 AI 标题」而不是「已更新商品」（全字段都报「已更新」等于没说）。
+    ⚠️ 平台的商品编辑（标题 / 价格 / 库存）走千帆自己的后台，本系统不碰（只读边界）。
+    前端 `PATCH` 调用与「采纳 AI 文案」按钮同批移除。
     """
-    from backend.app.services import shop_products_service
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail={
+            "code": "SHOP_ITEM_LOCAL_EDIT_REMOVED",
+            "message": "「商品本地编辑」已下线：商品改为平台实时数据，本地不再存标注副本。"
+                       "AI 润色仍可用（结果直接用于生成笔记 / 发布）。",
+        },
+    )
 
-    account = _owned_account(db, current_user, payload.platform_account_id)
-
-    touched: dict[str, bool] = {
-        "ai_title": payload.ai_title is not _UNSET,
-        "ai_selling_point": payload.ai_selling_point is not _UNSET,
-    }
-    try:
-        return shop_products_service.edit_product(
-            db,
-            platform_account_id=account.id,
-            item_id=payload.item_id,
-            ai_title=payload.ai_title if touched["ai_title"] else None,
-            ai_selling_point=payload.ai_selling_point if touched["ai_selling_point"] else None,
-            touched=touched,
-        )
-    except Exception as exc:
-        raise _item_error_to_http(exc) from exc
 
 @router.post("/items/polish")
 def polish_shop_item(
@@ -2302,28 +2163,33 @@ def export_shop_items(
     payload: ItemsExportRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    adapter_factory=Depends(get_qianfan_api_adapter_factory),
 ):
-    """**导出商品 CSV**（设计 20 §2 端点 6；**纯本地**，零平台请求）。
+    """**导出商品 CSV**（设计 20 §2 端点 6；设计 75 S5 起**实时查平台**）。
 
-    ## 三个必须钉住的口径（设计 20 §2.2）
+    ## 与列表同一套判据（三条不能分叉）
 
-    1. **筛选 = 列表筛选**：复用 `shop_products_service.export_rows`（内部走的是
-       列表同一个 `_apply_filters`），**不重新实现一份** —— 两份筛选实现 =
-       「列表看到的」和「导出的」不是同一个集合（导出最常见的故障）。
-    2. **排序 = 列表排序**（`_apply_order`）：CSV 与屏幕顺序一致，用户对账时
-       眼睛在两处来回看，顺序不一致会误判「少了几行」。
-    3. **字段 = 列表字段**：导出列与 `normalize_item_from_raw` **同一个构造函数**。
-       `ai_title` 有值导它、没有导 `item_title`（用户要的是「能用的标题」）。
+    1. **筛选 / 排序 = 列表的**：直接复用 `POST /items` 的 `_realtime_items_page`
+       （把导出请求体转成列表请求体）—— 两份筛选实现 = 「列表看到的」和「导出的」
+       不是同一个集合，这是导出最常见的故障。
+    2. **翻页直到取够或平台没有下一页**：每页走 `rt.list_products`（只读），
+       页大小取平台上限 100。
+    3. **字段 = 列表字段**：列头由 `CSV_HEADERS` 决定（与列表响应同一套键），
+       逐字段从实时归一化 dict 取值 —— 不在本文件另写一套映射。
 
     ## 上限
 
     `> MAX_EXPORT_ROWS`（5000）⇒ 400 `QIANFAN_EXPORT_TOO_MANY`，**不静默截断**
     （截断的 CSV 是一个「看起来完整」的假全量，用户会拿它去对账）。
+
+    ⚠️ 改造前这里是**零平台请求**的本地导出；现在每页一次平台请求，
+    实时数据必然如此 —— 代价写在响应头 `X-Export-Pages` 里（可核对是否取全）。
     """
     import csv
     import io
 
     from fastapi.responses import StreamingResponse
+    from backend.app.services import realtime_platform_query_service as rt
 
     account = _owned_account(db, current_user, payload.platform_account_id)
 
@@ -2336,34 +2202,60 @@ def export_shop_items(
             detail={"code": "QIANFAN_TIME_RANGE_INVALID", "message": str(error)},
         ) from error
 
-    try:
-        rows = shop_products_service.export_rows(
-            db,
-            payload,
-            platform_account_id=account.id,
-            from_ms=time_from,
-            to_ms=time_to,
-            price_from_fen=_price_fen(payload.price_from),
-            price_to_fen=_price_fen(payload.price_to),
-            max_rows=MAX_EXPORT_ROWS,
+    adapter = _realtime_adapter(db, account, adapter_factory)
+    page_size = 100
+    rows: list[list[str]] = []
+    total = 0
+    pages = 0
+    while True:
+        pages += 1
+        if pages > MAX_EXPORT_PAGES:
+            #: ⚠️ 翻页上限不是「取够就算了」：超过就说明命中量远超可导出的上限，
+            #: 直接 400（下面的行数检查也会拦，这里先兜住「无限翻页」）。
+            break
+        result = rt.list_products(
+            adapter,
+            keyword=payload.keyword or None,
+            status=payload.status or "all",
+            page=pages,
+            page_size=page_size,
+            price_min_fen=_price_fen(payload.price_from),
+            price_max_fen=_price_fen(payload.price_to),
+            stock_min=payload.stock_from,
+            stock_max=payload.stock_to,
+            sales_min=payload.sales_from,
+            sales_max=payload.sales_to,
+            create_from=time_from,
+            create_to=time_to,
+            sort_field=payload.sort_field,
+            order=payload.order,
         )
-    except shop_products_service.ExportTooManyError as error:
-        # ⚠️ 不静默截断：截断的 CSV 是「看起来完整」的假全量，用户会拿它对账。
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": "QIANFAN_EXPORT_TOO_MANY",
-                "message": str(error),
-                "limit": error.limit,
-                "actual": error.actual,
-            },
-        ) from error
+        items = result.get("items") or []
+        if not items:
+            break
+        for item in items:
+            rows.append(_csv_row(item))
+        total = int(result.get("total") or 0)
+        if len(rows) > MAX_EXPORT_ROWS:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "QIANFAN_EXPORT_TOO_MANY",
+                    "message": f"导出上限 {MAX_EXPORT_ROWS} 行，当前条件命中超过该上限，请收窄筛选。",
+                    "limit": MAX_EXPORT_ROWS,
+                    "actual": len(rows),
+                },
+            )
+        if total and len(rows) >= total:
+            break
+        if len(items) < page_size:
+            break
 
     buffer = io.StringIO()
     # ⚠️ BOM（UTF-8 BOM）：Excel 中文不乱码（国产办公场景的硬需求）。
     buffer.write("﻿")
     writer = csv.writer(buffer)
-    writer.writerow(shop_products_service.CSV_HEADERS)
+    writer.writerow(CSV_HEADERS)
     for row in rows:
         writer.writerow(row)
 
@@ -2373,14 +2265,69 @@ def export_shop_items(
     # 并**同时给一个纯 ASCII 的 `filename=` 回退**（老客户端认它）。
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     ascii_name = f"shop-items-{stamp}.csv"
-    utf8_name = quote(f"商品台账-{stamp}.csv", safe="")
+    utf8_name = quote(f"商品列表-{stamp}.csv", safe="")
     return StreamingResponse(
         iter([buffer.getvalue()]),
         media_type="text/csv; charset=utf-8",
         headers={
             "Content-Disposition": (
-                f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{utf8_name}'
+                f'attachment; filename="{ascii_name}"; filename*=UTF-8''{utf8_name}'
             ),
             "X-Export-Rows": str(len(rows)),
+            "X-Export-Pages": str(pages),
         },
     )
+
+
+#: CSV 列头（与列表响应**同一套键**，顺序即导出顺序）。
+#: ⚠️ 改这里 = 改导出契约；列值由 `_csv_row` 从实时归一化 dict 取，两处必须同步。
+CSV_HEADERS: list[str] = [
+    "商品ID",
+    "商品名称",
+    "货号",
+    "价格区间(分)",
+    "库存",
+    "销量",
+    "近30天销量",
+    "SKU数",
+    "可售SKU数",
+    "分类",
+    "状态",
+    "创建时间",
+    "上架时间",
+]
+
+#: 导出翻页硬上限（100 页 × 100 条 = 1 万，已高于 `MAX_EXPORT_ROWS` 的 5000）。
+MAX_EXPORT_PAGES: int = 100
+
+
+def _csv_row(item: dict) -> list[str]:
+    """实时归一化商品 → CSV 一行（**唯一实现**：键名与 `CSV_HEADERS` 一一对应）。"""
+
+    def text(value: object) -> str:
+        return "" if value is None else str(value)
+
+    price_min = item.get("price_min_fen")
+    price_max = item.get("price_max_fen")
+    if price_min is None and price_max is None:
+        price = ""
+    elif price_max is None or price_max == price_min:
+        price = text(price_min)
+    else:
+        price = f"{price_min}~{price_max}"
+    return [
+        text(item.get("item_id")),
+        text(item.get("title")),
+        text(item.get("article_no")),
+        price,
+        text(item.get("stock")),
+        text(item.get("sales_total")),
+        text(item.get("sales_30d")),
+        text(item.get("sku_count")),
+        text(item.get("on_sale_sku_count")),
+        text(item.get("category")),
+        text(item.get("status_label")),
+        text(item.get("create_time")),
+        text(item.get("on_shelf_time")),
+    ]
+

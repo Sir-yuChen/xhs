@@ -65,7 +65,6 @@ from backend.app.models.generation import (
     REGEN_SCOPE_TOPICS,
     REGEN_TEXT_FIELD_SCOPES,
 )
-from backend.app.models.shop import NoteGoods
 from backend.app.models.note import (
     NOTE_TYPE_LOCAL_GENERATED,
     PUBLISH_STATUS_PENDING,
@@ -73,7 +72,6 @@ from backend.app.models.note import (
     NoteAsset,
     set_note_publish_status,
 )
-from backend.app.models.shop_product import ShopProduct
 from backend.app.models.user import User
 from backend.app.services import (
     copy_requirements,
@@ -101,7 +99,6 @@ from backend.app.services.note_gen_llm_service import (
     generate_full_note,
 )
 from backend.app.services.note_topic_service import apply_sync_topics
-from backend.app.services.shop_products_service import load_product_dict_from_ledger
 
 logger = logging.getLogger(__name__)
 
@@ -178,26 +175,79 @@ def _load_template_modules(db: Session, user_id: int, template: Optional[PromptT
     return sorted(rows, key=lambda row: order.get(int(row.id), len(order)))
 
 
-def _product_row_for_gate(db: Session, user_id: int, shop_product_id: int) -> ShopProduct:
-    """取台账商品行（**归属校验**），不存在 ⇒ `NoteGenerationError`。
+def _product_dict_for_gate(
+    db: Session, user_id: int, *, account_id: Optional[int], item_id: str
+) -> dict[str, Any]:
+    """按**平台商品 ID** 取商品事实（**实时查千帆**），取不到 ⇒ `NoteGenerationError`。
 
-    ⚠️ 与一期生成（`product_note_gen_service._product_row`）的差别：一期按
-    `item_id` + 账号查（要打平台取实时价），本期按**本地主键** + 用户查
-    —— LLM 生成的事实来源是**本地台账**（§5.1「商品白名单字段注入」的输入），
-    **零平台请求**（生成链路完全不碰小红书 / 千帆，设计 17 §1 定位）。
+    ⚠️ 设计 75 S5（2026-10-27）：原来的 `_product_row_for_gate` 按**本地台账主键**
+    查 `shop_products`（表已 DROP）。改为 `rt.list_products(keyword=<平台ID>)` 实时取，
+    与商品列表 / 详情**同一个归一化函数**（`normalize_item_from_raw`）—— 两个入口
+    显示不同字段是 DEF-044 的同型病。
+
+    **归属**由账号保证：调用方给的 `account_id` 必须属于本用户（端点侧已校验），
+    实时查询按该账号的 ark 令牌发出。查不到 ⇒ `LLM_PRODUCT_NOT_FOUND`（语义与
+    改造前「台账里没有这个商品」一致，文案改成「平台上找不到」）。
+
+    ⚠️ **失败原因分三档**（不能都报「商品不存在」，那会让凭据失效看起来像商品被删）：
+    没账号 / 没 ark 令牌 ⇒ `LLM_PRODUCT_GATE_BLOCKED`；平台报错 ⇒ 带平台原话；
+    平台正常但没这件商品 ⇒ `LLM_PRODUCT_NOT_FOUND`。
     """
-    row = db.get(ShopProduct, int(shop_product_id))
-    if row is None or int(row.user_id) != int(user_id):
+    from backend.app.services import realtime_platform_query_service as rt
+    from backend.app.services.shop_binding_service import (
+        has_ark_session,
+        qianfan_cookies_for_account,
+    )
+    from backend.app.models import PlatformAccount
+
+    account = db.get(PlatformAccount, int(account_id or 0))
+    if account is None or int(account.user_id) != int(user_id):
         raise NoteGenerationError(
-            f"台账里找不到商品记录（id={shop_product_id}）",
-            code="LLM_PRODUCT_NOT_FOUND",
+            "生成笔记需要指定一个本账号矩阵里的平台账号（商品信息从平台实时取）。",
+            code="LLM_PRODUCT_GATE_BLOCKED",
         )
-    return row
+    if not has_ark_session(db, account.id):
+        raise NoteGenerationError(
+            f"账号 {account.nickname or account.id} 没有千帆（ark）登录态，无法读取商品信息。",
+            code="LLM_PRODUCT_GATE_BLOCKED",
+        )
+    cookies = qianfan_cookies_for_account(db, account.id)
+    if not cookies:
+        raise NoteGenerationError(
+            "千帆登录令牌读取失败，请重新登录千帆后重试。", code="LLM_PRODUCT_GATE_BLOCKED"
+        )
+    from backend.app.adapters.xhs.qianfan_api_adapter import get_qianfan_api_adapter_factory
+
+    adapter = get_qianfan_api_adapter_factory()(cookies)
+    try:
+        result = rt.list_products(
+            adapter, keyword=str(item_id or "").strip(), status="all", page=1, page_size=20
+        )
+    except rt.RealtimeQueryError as error:
+        raise NoteGenerationError(
+            f"读取商品信息失败：{getattr(error, 'message', str(error))}",
+            code="LLM_PRODUCT_QUERY_FAILED",
+        ) from error
+    for row in result.get("items") or []:
+        if str(row.get("item_id") or "") == str(item_id or "").strip():
+            #: 归一化契约与商品列表同一份实现（`normalize_item_from_raw` 的产物形状）。
+            from backend.app.services.shop_products_service import normalize_item_from_raw
+
+            return normalize_item_from_raw(row)
+    raise NoteGenerationError(
+        f"平台上找不到商品 {item_id}（可能已被删除，或不属于该账号）。",
+        code="LLM_PRODUCT_NOT_FOUND",
+    )
 
 
 def gate_for_llm_generation(
-    db: Session, user_id: int, *, shop_product_id: int, template_id: Optional[int] = None
-) -> tuple[ShopProduct, Optional[PromptTemplate], list[PromptModule]]:
+    db: Session,
+    user_id: int,
+    *,
+    account_id: Optional[int],
+    item_id: str,
+    template_id: Optional[int] = None,
+) -> tuple[dict[str, Any], Optional[PromptTemplate], list[PromptModule]]:
     """LLM 生成门禁：**商品行 → 模板 → 模块**（顺序即失败优先级）。
 
     三项都是**确定性答案**（本地库可判）⇒ 不过即抛，同步段 400/404 结构化，
@@ -213,7 +263,9 @@ def gate_for_llm_generation(
     有没有配服务商映射」上（`gate_llm_gateway_ready()` 调 `resolve_business_provider`，
     与 worker 实际调用**同一入口**）。
     """
-    row = _product_row_for_gate(db, user_id, shop_product_id)
+    product = _product_dict_for_gate(
+        db, user_id, account_id=account_id, item_id=item_id
+    )
     template = _resolve_template(db, user_id, template_id)
     if template_id and template is None:
         raise NoteGenerationError(
@@ -221,7 +273,7 @@ def gate_for_llm_generation(
             code="LLM_TEMPLATE_NOT_FOUND",
         )
     modules = _load_template_modules(db, user_id, template)
-    return row, template, modules
+    return product, template, modules
 
 
 def gate_llm_gateway_ready(db: Session, user_id: int) -> User:
@@ -255,7 +307,8 @@ def gate_llm_gateway_ready(db: Session, user_id: int) -> User:
 #: 落进队列项 `payload`，供 worker 与重试读取。
 def _llm_payload(
     *,
-    shop_product_id: int,
+    product_pk: int,
+    item_id: str,
     account_id: Optional[int],
     source: str,
     template_id: Optional[int] = None,
@@ -272,16 +325,21 @@ def _llm_payload(
 ) -> dict:
     """队列项行体（**入队即完整落库**：展示与执行所需的全在这里，不回头补查）。
 
-    ⚠️ `item_id` 用**台账主键的字符串形态**：`enqueue_item` 的幂等判据在
-    非笔记绑定队列上按 `item_id` 去重（`item_ref_of`），而本队列的商品主键是
-    本地 `shop_products.id` —— 直接用它，不再塞平台 `item_id`（那需要多查一次
-    台账，且平台 ID 可能为空）。
+    ⚠️ **两把 ID 各司其职，别无脑合并**（设计 75 S5，2026-10-27）：
+
+    * `item_id`（行体键）= **队列幂等键** ⇒ 用本地台账主键的字符串形态
+      （`enqueue_item.item_ref_of` 按它去重）。台账表删了，但这个编号仍是
+      「本次生成意图」的稳定锚点 —— 它来自 `shop_products.id` 的历史值，
+      不会因为换平台而漂移；
+    * `product_item_id`（行体键）= **平台商品 ID** ⇒ 生成链路查商品、落
+      `generation_records.item_id` 用它。
     """
     payload: dict[str, Any] = {
         "account_id": int(account_id) if account_id is not None else None,
         "source": str(source),
-        "shop_product_id": int(shop_product_id),
-        "item_id": str(int(shop_product_id)),
+        "shop_product_id": int(product_pk),  # 队列幂等锚点（历史台账主键值）
+        "item_id": str(int(product_pk)),
+        "product_item_id": str(item_id or ""),
     }
     if item_name:
         payload["item_name"] = str(item_name).strip()
@@ -314,11 +372,39 @@ def _llm_payload(
     return payload
 
 
+def _queue_anchor(product: dict[str, Any]) -> int:
+    """队列幂等锚点（`enqueue_item.item_ref_of` 的去重键）。
+
+    ⚠️ 为什么需要一个「编号」而不是直接用平台商品 ID：
+    `enqueue_item` 的 `item_id` 字段历史上是**台账主键的字符串形态**，队列记录页
+    与重试链路都按它判「同一次生成意图」。平台 ID 是 24 位十六进制串，直接塞进
+    这个字段会让同一件商品在「重新上架后 ID 变化」时被判成两次生成。
+
+    取值顺序：① 商品字典里带的台账主键（`product_pk`，实时链路的响应里有就沿用）；
+    ② 否则用**平台 ID 的稳定数字摘要**（`crc32`，9 位以内，碰撞概率可忽略且在
+    同一用户 + 同一商品的粒度上无实际意义）。两条都缺 ⇒ 0（调用方会先被门禁拦住）。
+    """
+    legacy = product.get("product_pk")
+    try:
+        value = int(legacy or 0)
+    except (TypeError, ValueError):
+        value = 0
+    if value:
+        return value
+    item_id = str(product.get("item_id") or "").strip()
+    if not item_id:
+        return 0
+    import zlib
+
+    return int(zlib.crc32(item_id.encode("utf-8")) % 2_000_000_000)
+
+
 def _enqueue_llm_item(
     db: Session,
     *,
     user_id: int,
-    row: ShopProduct,
+    product: dict[str, Any],
+    product_pk: int,
     account_id: Optional[int],
     source: str,
     batch: Optional[note_queue_service.BatchRequest],
@@ -342,7 +428,8 @@ def _enqueue_llm_item(
     实现**），只在入队后补写额外行体字段 —— 补写在 `flush` 之前，同一次事务。
     """
     payload_extra = _llm_payload(
-        shop_product_id=int(row.id),
+        product_pk=int(product_pk),
+        item_id=str(product.get("item_id") or ""),
         account_id=account_id,
         source=source,
         template_id=template_id,
@@ -351,7 +438,7 @@ def _enqueue_llm_item(
         media_source=media_source,
         media_options=media_options,
         media_plan=media_plan,
-        item_name=str(getattr(row, "item_title", "") or ""),
+        item_name=str(product.get("title") or ""),
         copy_requirements=copy_requirements,
         regen_scope=regen_scope,
         target_record_id=target_record_id,
@@ -393,8 +480,8 @@ def generate_llm_note_sync(
     db: Session,
     user_id: int,
     *,
-    shop_product_id: int,
-    account_id: Optional[int] = None,
+    account_id: int,
+    item_id: str,
     template_id: Optional[int] = None,
     gateway_config_id: Optional[int] = None,
     model_name: str = "",
@@ -429,8 +516,8 @@ def generate_llm_note_sync(
     receipt = start_llm_generate_note(
         db,
         user_id,
-        shop_product_id=shop_product_id,
         account_id=account_id,
+        item_id=item_id,
         template_id=template_id,
         gateway_config_id=gateway_config_id,
         model_name=model_name,
@@ -453,7 +540,8 @@ def regen_llm_note_sync(
     db: Session,
     user_id: int,
     *,
-    shop_product_id: int,
+    account_id: int,
+    item_id: str,
     regen_scope: str,
     target_record_id: int,
     template_id: Optional[int] = None,
@@ -479,8 +567,8 @@ def regen_llm_note_sync(
     receipt = start_llm_generate_note(
         db,
         user_id,
-        shop_product_id=shop_product_id,
-        account_id=None,
+        account_id=account_id,
+        item_id=item_id,
         template_id=template_id,
         media_source=media_source,
         media_plan=media_plan or None,
@@ -550,8 +638,8 @@ def start_llm_generate_note(
     db: Session,
     user_id: int,
     *,
-    shop_product_id: int,
-    account_id: Optional[int] = None,
+    account_id: int,
+    item_id: str,
     template_id: Optional[int] = None,
     template_name: str = "",
     gateway_config_id: Optional[int] = None,
@@ -576,9 +664,13 @@ def start_llm_generate_note(
     **不新建审计行**（新建会造出「两条 queued 记录对一条队列项」的假审计）。
     """
     gate_llm_gateway_ready(db, user_id)
-    row, template, _modules = gate_for_llm_generation(
-        db, user_id, shop_product_id=shop_product_id, template_id=template_id
+    product, template, _modules = gate_for_llm_generation(
+        db, user_id, account_id=account_id, item_id=item_id, template_id=template_id
     )
+    #: 队列幂等锚点：沿用「商品」的稳定编号（`enqueue_item` 用它去重）。
+    #: ⚠️ 平台商品 ID 不能直接当锚点：同一件商品在重新上架后 ID 会变，
+    #: 拿它去重会把「同一件商品的一次生成意图」判成两次。
+    product_pk = _queue_anchor(product)
     batch = note_queue_service.BatchRequest(
         user_id=user_id,
         item_task_type=note_queue_service.TASK_TYPE_GEN_LLM_ITEM,
@@ -587,7 +679,8 @@ def start_llm_generate_note(
     task_row, created = _enqueue_llm_item(
         db,
         user_id=user_id,
-        row=row,
+        product=product,
+        product_pk=product_pk,
         account_id=account_id,
         source=source,
         batch=batch,
@@ -659,14 +752,14 @@ def start_llm_generate_note(
         record = GenerationRecord(
             user_id=user_id,
             task_id=int(task_row.id),
-            shop_product_id=int(row.id),
+            item_id=str(product.get("item_id") or ""),
             template_id=(int(template.id) if template is not None else None),
             gateway_config_id=(int(gateway_config_id) if gateway_config_id else None),
             model_name=str(model_name or ""),
             media_source=str(media_source or MEDIA_SOURCE_PRODUCT_IMAGE),
             status=GEN_STATUS_QUEUED,
             version_no=note_version_service.next_version_no(
-                db, user_id=int(user_id), shop_product_id=int(row.id)
+                db, user_id=int(user_id), item_id=str(product.get("item_id") or "")
             ),
             parent_record_id=(int(target_record_id) if target_record_id else None),
             regen_scope=str(regen_scope or "all"),
@@ -691,18 +784,19 @@ def start_llm_generate_note(
     ensure_llm_generate_worker()
     logger.info(
         "llm note generate enqueued (product=%s, template=%s, created=%s)",
-        shop_product_id,
+        item_id,
         template_id,
         created,
     )
     return {
         "ok": True,
         "status": "queued",
-        "shop_product_id": int(shop_product_id),
-        "record_id": record_id,
-        #: **队列项主键**（同步路径靠它去消费这一条并回读终态）。
-        #: ⚠️ 曾经没返回 ⇒ `generate_llm_note_sync` 拿到 0 就报「缺少队列项主键」。
+        #: ⚠️ **这个键是队列项主键，不是商品 ID**（历史命名，前端有依赖，不改名）。
+        #: 同步路径靠它去消费这一条并回读终态；商品平台 ID 见 `product_item_id`。
+        #: 曾经没返回 ⇒ `generate_llm_note_sync` 拿到 0 就报「缺少队列项主键」。
         "item_id": int(task_row.id),
+        "queue_item_id": int(task_row.id),
+        "product_item_id": str(product.get("item_id") or ""),
         **({} if created else {"already_queued": True}),
     }
 
@@ -711,8 +805,8 @@ def start_llm_batch_generate(
     db: Session,
     user_id: int,
     *,
-    shop_product_ids: list[int],
-    account_id: Optional[int] = None,
+    account_id: int,
+    item_ids: list[str],
     template_id: Optional[int] = None,
     template_name: str = "",
     gateway_config_id: Optional[int] = None,
@@ -724,20 +818,23 @@ def start_llm_batch_generate(
     """批量 LLM 生成入队（设计 17 §7.4）：逐项过门禁，通过项按序入队。
 
     **单项失败不阻断**（门禁失败项也回执，不抛）—— 与一期批量生成同语义。
-    返回 `{total, started, failed, results:[{shop_product_id, ok, error?, code?}]}`。
+    返回 `{total, started, failed, results:[{item_id, ok, error?, code?}]}`。
     一次批量 = 一个批次（懒创建：全部门禁不过 ⇒ 不留空批次行）。
+
+    ⚠️ 设计 75 S5（2026-10-27）：入参由「台账主键列表」改为**平台商品 ID 列表**
+    （台账表已 DROP）；回执里的 `shop_product_id` 换成 `item_id`（平台 ID）——
+    前端按它显示「哪几件失败」比一个已不存在的本地编号有用。
     """
     # ⚠️ 网关门禁在**循环外**判一次并直接抛出：网关可用性是**账号级**属性，
     # 不是商品级 —— 逐项判会重复查表，且失败时给 20 条一模一样的 `results` 回执，
     # 用户看到的是「20 个商品都不行」而不是「网关没配」。批量入口与单篇入口在
     # 「网关没配」这件事上给同一种答案（400 + `LLM_GATEWAY_NOT_CONFIGURED`）。
     gate_llm_gateway_ready(db, user_id)
-    cleaned: list[int] = []
-    for value in shop_product_ids:
-        try:
-            cleaned.append(int(value))
-        except (TypeError, ValueError):
-            continue
+    cleaned: list[str] = []
+    for value in item_ids:
+        text = str(value or "").strip()
+        if text:
+            cleaned.append(text)
     distinct = list(dict.fromkeys(cleaned))[: max(1, int(max_items))]
 
     batch = note_queue_service.BatchRequest(
@@ -746,11 +843,12 @@ def start_llm_batch_generate(
         source=note_queue_service.SOURCE_PRODUCT_NOTE_GENERATE_LLM_BATCH,
     )
     results: list[dict] = []
-    for product_pk in distinct:
+    for item_id in distinct:
         try:
-            row, template, _modules = gate_for_llm_generation(
-                db, user_id, shop_product_id=product_pk, template_id=template_id
+            product, template, _modules = gate_for_llm_generation(
+                db, user_id, account_id=account_id, item_id=item_id, template_id=template_id
             )
+            product_pk = _queue_anchor(product)
         except NoteGenerationError as error:
             results.append(
                 {
@@ -765,7 +863,8 @@ def start_llm_batch_generate(
             task_row, created = _enqueue_llm_item(
                 db,
                 user_id=user_id,
-                row=row,
+                product=product,
+                product_pk=product_pk,
                 account_id=account_id,
                 source=note_queue_service.SOURCE_PRODUCT_NOTE_GENERATE_LLM_BATCH,
                 batch=batch,
@@ -777,7 +876,7 @@ def start_llm_batch_generate(
             )
         except BaseException as error:  # noqa: BLE001 - 单项失败不阻断（一口锅不能被一颗坏豆子毁掉）
             db.rollback()
-            logger.exception("llm batch generate enqueue failed (product=%s)", product_pk)
+            logger.exception("llm batch generate enqueue failed (product=%s)", item_id)
             results.append(
                 {
                     "shop_product_id": product_pk,
@@ -791,7 +890,7 @@ def start_llm_batch_generate(
             record = GenerationRecord(
                 user_id=user_id,
                 task_id=int(task_row.id),
-                shop_product_id=int(row.id),
+                item_id=str(product.get("item_id") or ""),
                 template_id=(int(template.id) if template is not None else None),
                 gateway_config_id=(int(gateway_config_id) if gateway_config_id else None),
                 model_name=str(model_name or ""),
@@ -826,6 +925,29 @@ def start_llm_batch_generate(
     }
 
 
+def _first_usable_account_id(db: Session, user_id: int) -> int:
+    """该用户第一个有千帆（ark）令牌的账号主键；没有 ⇒ 0。
+
+    ⚠️ 只是「挑一个能查商品的账号」，**不是权限判据**（归属校验由端点做）。
+    实时查询必须落在某个账号上（平台按账号鉴权），而重试入口手里只有记录行。
+    """
+    from backend.app.models import PlatformAccount
+    from backend.app.services.shop_binding_service import has_ark_session
+
+    rows = db.scalars(
+        select(PlatformAccount)
+        .where(PlatformAccount.user_id == int(user_id), PlatformAccount.deleted_at.is_(None))
+        .order_by(PlatformAccount.id.asc())
+    ).all()
+    for account in rows:
+        try:
+            if has_ark_session(db, account.id):
+                return int(account.id)
+        except Exception:  # noqa: BLE001 - 状态读不到就换下一个
+            continue
+    return 0
+
+
 def start_llm_retry(
     db: Session,
     user_id: int,
@@ -851,12 +973,22 @@ def start_llm_retry(
             code="LLM_RECORD_NOT_RETRYABLE",
         )
     gate_llm_gateway_ready(db, user_id)
-    row, template, _modules = gate_for_llm_generation(
+    #: 重试要重新过门禁（排队期间商品可能被下架 / 账号令牌可能过期）——
+    #: 平台商品 ID 从**记录行**取（`generation_records.item_id`），不回头查台账。
+    #: 账号：调用方没给 ⇒ 取该用户第一个可用账号（实时查询必须带账号）。
+    resolved_account_id = int(account_id or 0) or _first_usable_account_id(db, user_id)
+    if not resolved_account_id:
+        raise NoteGenerationError(
+            "该用户没有可用的平台账号，无法读取商品信息。", code="LLM_PRODUCT_GATE_BLOCKED"
+        )
+    product, template, _modules = gate_for_llm_generation(
         db,
         user_id,
-        shop_product_id=int(record.shop_product_id or 0),
+        account_id=resolved_account_id,
+        item_id=str(record.item_id or ""),
         template_id=record.template_id,
     )
+    account_id = resolved_account_id
     batch = note_queue_service.BatchRequest(
         user_id=user_id,
         item_task_type=note_queue_service.TASK_TYPE_GEN_LLM_ITEM,
@@ -865,7 +997,8 @@ def start_llm_retry(
     task_row, created = _enqueue_llm_item(
         db,
         user_id=user_id,
-        row=row,
+        product=product,
+        product_pk=_queue_anchor(product),
         account_id=account_id,
         source=note_queue_service.SOURCE_LLM_GENERATE_RETRY,
         batch=batch,
@@ -901,7 +1034,7 @@ def _local_note_id() -> str:
     return f"{_LOCAL_NOTE_PREFIX}{uuid.uuid4().hex[:12]}"
 
 
-def _media_assets_for(row: ShopProduct, media_source: str) -> list[dict]:
+def _media_assets_for(product: dict[str, Any], media_source: str) -> list[dict]:
     """**同步兜底**媒体清单（只处理商品图直链；其余来源走 `build_note_media`）。
 
     ⚠️ **T7 已落地**（设计 17 §13.4）：真媒体产出走
@@ -912,11 +1045,9 @@ def _media_assets_for(row: ShopProduct, media_source: str) -> list[dict]:
     """
     if media_source != MEDIA_SOURCE_PRODUCT_IMAGE:
         return []
-    try:
-        urls = json.loads(row.images_json or "[]")
-    except ValueError:
-        urls = []
-    urls = [str(url) for url in urls if isinstance(url, str) and url.strip()][:6]
+    #: 设计 75 S5：商品事实是实时归一化 dict（`normalize_item_from_raw`），
+    #: 图集在 `images[]`（原台账是 `images_json` 文本列，已随表退场）。
+    urls = [str(url) for url in (product.get("images") or []) if str(url or "").strip()][:6]
     return [
         {"asset_type": "image", "url": url, "local_path": "", "sort_order": index}
         for index, url in enumerate(urls)
@@ -1187,7 +1318,7 @@ def _persist_generated_note(
     db: Session,
     *,
     user: User,
-    row: ShopProduct,
+    product: dict[str, Any],
     account_id: Optional[int],
     generated: GeneratedNote,
     record: GenerationRecord,
@@ -1332,7 +1463,9 @@ def _persist_generated_note(
                 "media_plan_summary": plan_summary(plan),
                 "media_segments": media_segments,
             },
-            "shop_product_id": int(row.id),
+            #: 平台商品 ID（溯源与发布都用它）；原 `shop_product_id`（本地台账主键）
+            #: 随台账表 DROP 一起退场（设计 75 S5）。
+            "item_id": str(product.get("item_id") or ""),
         },
     )
     # 状态与 `published` 投影**一次写入**（唯一入口）：生成 ⇒ 待发布。
@@ -1380,7 +1513,7 @@ def _persist_generated_note(
         NoteGenerationLink(
             user_id=note.user_id,
             note_pk=int(note.id),
-            shop_product_id=int(row.id),
+            item_id=str(product.get("item_id") or ""),
             #: **哪次生成产出了这篇**（版本历史 ↔ 笔记的桥）。
             #: ⚠️ 必须写：否则「基于这版只重写文案」时反查不到它产出的笔记
             #: （实测 0 行 = 溯源断了，媒体沿用也就拿不到）。
@@ -1388,32 +1521,13 @@ def _persist_generated_note(
         )
     )
 
-    #: ⚠️ **平台 ID 级的商品关系必须写**（用户口径 2026-10-19：*「注意笔记发布均需要
-    #: 挂当前商品的链接」*）：发布链路 `_goods_item_ids_for()` 读的是
-    #: `note_goods`（平台 `item_id` 级）+ `raw_json.item_id`，**不读**下面那张
-    #: `NoteGenerationLink`（本地主键级）。只写本地主键级 ⇒ 发布时找不到商品 ⇒
-    #: 笔记发出去是「裸笔记」，不挂任何商品链接（实测 note 3886 两张表都空）。
-    #: 两套关系维度不同、各司其职，缺一不可（§26.7 / §3.7）。
-    #: ⚠️ 覆盖同一篇笔记时先清旧行（`UNIQUE(user_id, note_id, item_id)`）
-    for stale_goods in db.scalars(
-        select(NoteGoods).where(
-            NoteGoods.user_id == note.user_id, NoteGoods.note_id == str(note.note_id or "")
-        )
-    ).all():
-        db.delete(stale_goods)
-    db.flush()
-    db.add(
-        NoteGoods(
-            user_id=note.user_id,
-            note_id=str(note.note_id or ""),
-            item_id=str(row.item_id or ""),
-        )
-    )
-    #: 同一事实写进 `raw_json.item_id`（发布链路的第一优先读点）—— 关系行还没
-    #: 落库/被清理时仍认得出「这篇挂的是什么商品」。
+    #: ⚠️ **挂链商品写在 `raw_json.item_id`**（设计 75 S5，2026-10-27）。
+    #: 原来还往 `note_goods`（平台 ID 级关系表）写一行，那张表已随迁移
+    #: `n8o9p0q1r2s3` 整表 DROP ⇒ 只有一个落点。
+    #: 发布链路 `_goods_item_ids_for()` 读 `raw_json.item_id`，判据不变。
     _raw = note.raw_json if isinstance(note.raw_json, dict) else {}
     _raw = dict(_raw or {})
-    _raw["item_id"] = str(row.item_id or "")
+    _raw["item_id"] = str(product.get("item_id") or "")
     note.raw_json = _raw
 
     record.status = GEN_STATUS_SUCCESS
@@ -1421,7 +1535,7 @@ def _persist_generated_note(
     #: ⚠️ **局部重生成不动采用状态**（用户口径 2026-10-18：*「只是在历史版本进行更新
     #: 生成记录」*）—— 他只是改了这一版的某一块，**没有**说「改用这一版」；
     #: 强行标采用会撞部分唯一索引（实测 `UNIQUE constraint failed:
-    #: generation_records.user_id, generation_records.shop_product_id`）。
+    #: generation_records.user_id, generation_records.item_id`）。
     #: 采用与否由用户点「采用此版」显式决定（`adopt` 端点）。
     if regen_scope in ("all", "text"):
         #: 整篇 / 旧的「重写文案」= 产出一篇可用的新笔记 ⇒ 顺手标采用。
@@ -1555,6 +1669,9 @@ def _run_one_llm_generate(item_id: int) -> None:
             shop_product_id = int(payload.get("shop_product_id") or 0)
         except (TypeError, ValueError):
             shop_product_id = 0
+        #: 平台商品 ID（设计 75 S5：门禁按它实时查商品）。老行体只有 `shop_product_id`
+        #: ⇒ 取不到就当「缺商品」失败，**不拿历史编号去猜平台 ID**。
+        product_item_id = str(payload.get("product_item_id") or "").strip()
         template_id = payload.get("template_id")
         media_source = str(payload.get("media_source") or MEDIA_SOURCE_PRODUCT_IMAGE)
         media_options = payload.get("media_options")
@@ -1573,7 +1690,7 @@ def _run_one_llm_generate(item_id: int) -> None:
         copy_req = copy_requirements.normalize(payload.get("copy_requirements") or {})
         account_id = note_queue_service.account_id_of(item)
         user_id = int(item.user_id)
-        if not shop_product_id:
+        if not shop_product_id and not product_item_id:
             _mark_record_failed(
                 db, item=item, user_id=user_id, code="LLM_ITEM_INVALID", message="队列项缺少商品信息"
             )
@@ -1584,8 +1701,12 @@ def _run_one_llm_generate(item_id: int) -> None:
 
         # ---- ① 门禁（现取现判：模板 / 商品可能已被删） ----
         try:
-            row, template, modules = gate_for_llm_generation(
-                db, user_id, shop_product_id=shop_product_id, template_id=template_id
+            product, template, modules = gate_for_llm_generation(
+                db,
+                user_id,
+                account_id=account_id,
+                item_id=product_item_id,
+                template_id=template_id,
             )
         except NoteGenerationError as error:
             _mark_record_failed(
@@ -1651,7 +1772,7 @@ def _run_one_llm_generate(item_id: int) -> None:
                 generated = generate_full_note(
                     db=db,
                     user_id=user_id,
-                    product=load_product_dict_from_ledger(row),
+                    product=product,
                     model_config=context,
                     api_key=context.api_key,
                     skeleton=skeleton,
@@ -1718,7 +1839,7 @@ def _run_one_llm_generate(item_id: int) -> None:
             record = GenerationRecord(
                 user_id=user_id,
                 task_id=int(item.id),
-                shop_product_id=int(row.id),
+                item_id=str(product.get("item_id") or ""),
                 template_id=(int(template.id) if template is not None else None),
                 model_name=used_model,
                 media_source=media_source,
@@ -1731,7 +1852,7 @@ def _run_one_llm_generate(item_id: int) -> None:
         # ⚠️ `notes.platform_account_id` 是 **NOT NULL**：以**台账行**为权威归属
         # （ADR-021：商品行必属某平台账号），行体 `account_id` 只作兜底 ——
         # 早期/脏行体可能是 `None`，直接透传会撞 NOT NULL 约束（实测踩过一次）。
-        owner_account_id = int(row.platform_account_id or account_id or 0) or None
+        owner_account_id = int(account_id or 0) or None
         if not owner_account_id:
             _mark_record_failed(
                 db,
@@ -1752,7 +1873,7 @@ def _run_one_llm_generate(item_id: int) -> None:
             outcome = _persist_generated_note(
                 db,
                 user=user,
-                row=row,
+                product=product,
                 account_id=owner_account_id,
                 generated=generated,
                 record=record,
@@ -2021,38 +2142,38 @@ def llm_generate_queue_snapshot(
         item_task_type=note_queue_service.TASK_TYPE_GEN_LLM_ITEM,
         platform=platform,
     )
-    # 补审计字段：一次查回本用户近期生成记录，按 `shop_product_id` 索引。
-    product_ids: list[int] = []
+# 补审计字段：一次查回本用户近期生成记录，按**平台商品 ID**索引。
+    #: ⚠️ 设计 75 S5（2026-10-27）：审计行上存的是**平台商品 ID**（字符串），
+    #: 队列行体里同时有 `product_item_id`（平台 ID）与 `item_id`（数字锚点）——
+    #: 必须按 `product_item_id` 匹配，拿数字锚点去比会一条都对不上（静默显示
+    #: 「没有模型名 / 没有失败原因」，不报错）。
+    product_ids: list[str] = []
     for entry in raw.get("finished", []):
         if not isinstance(entry, dict):
             continue
-        try:
-            product_ids.append(int(entry.get("item_id") or 0))
-        except (TypeError, ValueError):
-            continue
-    record_by_product: dict[int, GenerationRecord] = {}
+        item_key = str(entry.get("product_item_id") or "").strip()
+        if item_key:
+            product_ids.append(item_key)
+    record_by_product: dict[str, GenerationRecord] = {}
     if product_ids:
         rows = db.scalars(
             select(GenerationRecord)
             .where(
                 GenerationRecord.user_id == user_id,
-                GenerationRecord.shop_product_id.in_(product_ids),
+                GenerationRecord.item_id.in_(product_ids),
             )
             # 同一商品可能有多条历史记录（重试会复用行，但早期版本可能新建过）
             # ⇒ 取最新一条（id 倒序）作为展示依据。
             .order_by(GenerationRecord.id.desc())
         ).all()
         for row in rows:
-            record_by_product.setdefault(int(row.shop_product_id or 0), row)
+            record_by_product.setdefault(str(row.item_id or ""), row)
     finished: list[dict] = []
     for entry in raw.get("finished", []):
         if not isinstance(entry, dict):
             continue
         merged = dict(entry)
-        try:
-            key = int(merged.get("item_id") or 0)
-        except (TypeError, ValueError):
-            key = 0
+        key = str(merged.get("product_item_id") or "").strip()
         record = record_by_product.get(key)
         if record is not None:
             merged["record_id"] = int(record.id)

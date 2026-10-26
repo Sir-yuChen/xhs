@@ -1,165 +1,146 @@
-"""设计 75 S5 收尾：丢弃三域本地台账（商品 / 订单 / 笔记↔商品关系 + 两张残留快照表）
+"""drop local ledgers for goods / orders / note-goods links（设计 75 §2.4，去本地化实时查询 S5）
 
-用户口径（2026-10-26）：「不再同步这些数据到本地，转变为展示线上数据，实时查询线上
-数据……避免数据不一致问题」「同步商品和同步笔记任务全链路移除」。
+三个域（商品 / 订单 / 笔记↔商品关系）改**平台实时查询**后，本地副本没有任何数据消费者 ——
+反而只会在两边不同步时骗人（用户口径 2026-10-26：「不再同步这些数据到本地，转变为展示
+线上数据，实时查询线上数据……避免数据不一致问题」）。
 
-## 为什么是这一批表
+## 本迁移 DROP 的 9 张表
 
-| 表 | 依据（设计 75 §2.4） |
-|---|---|
-| `shop_products` | 商品列表 / 详情改实时 `search_items` / `get_skus_by_item_ids` |
-| `orders` / `order_items` / `order_shipments` / `after_sales` | 订单改实时 `get_order_page` / `get_order_detail` |
-| `note_goods` / `shop_note_goods` | 笔记↔商品挂链改实时 `goods-note/list?item_mix_search_word=` |
+| 表 | 原用途 | 现在的数据源 |
+|---|---|---|
+| `shop_products` | 商品台账 | `rt.list_products` / `rt.get_product_detail` |
+| `note_goods` | 笔记↔商品（内容库侧） | `rt.list_goods_notes(note_ids=…)` |
+| `shop_note_goods` | 笔记↔商品（千帆侧映射） | 同上 |
+| `orders` | 订单 | `rt.list_orders` |
+| `order_items` | 订单商品行 | 同上（`skus[]` 内嵌） |
+| `order_shipments` | 物流行 | `rt.get_order_detail` 的 `shipments[]` |
+| `after_sales` | 售后单 | 同上 `after_sale_list[]` |
+| `shop_metric_snapshots` | 商品指标日快照 | 平台实时计数 |
+| `topic_goods_match` | 热点↔商品匹配 | 实时匹配（`hot_topic_service`） |
 
-⚠️ **顺带两张**（不是遗漏，是必须同批，否则 `shop_products` 删不掉）：
+## 保留的表里指向 `shop_products` 的外键
 
-* `shop_metric_snapshots`：`product_pk` **NOT NULL** FK → `shop_products.id`；
-* `topic_goods_match`：`product_pk` NULL FK → `shop_products.id`。
+`generation_records` 与 `note_generation_links` 原用 `shop_product_id`（本地主键）。
+台账没了这个外键必然悬空 ⇒ 同批改成**平台 `item_id`**（普通列，无外键），
+并重建两个带 `shop_product_id` 的索引 / 唯一约束。
 
-两张表的采集子系统已在 2026-10-13「指标快照子系统整块移除」轮退场
-（端点 / 定时任务 / 服务都删了），只剩表在库里 —— 它们是**已经死掉的表的残留**，
-FK 会把 `DROP TABLE shop_products` 卡死。
+⚠️ **不改这两张表的话 metadata 直接 `NoReferencedTableError`**（应用起不来），
+所以「DROP 表」与「拆外键」必须在同一个迁移里、且**先拆后删**。
 
-## 外键反查（2026-10-27 真机库实测，**5 张**引用表，不是历史记的 4 张）
+⚠️ **DROP 顺序**：先子表后父表。`after_sales` / `order_items` / `order_shipments`
+都引用 `orders` ⇒ 三个子表先删。
 
-```
-generation_records.shop_product_id      NO ACTION   → 保留表，本迁移**删外键 + 删列**
-note_generation_links.shop_product_id   NO ACTION   → 保留表，本迁移**删外键 + 删列**
-order_items.shop_product_id             NO ACTION   → 整表 DROP
-shop_metric_snapshots.product_pk        NO ACTION   → 整表 DROP
-topic_goods_match.product_pk            NO ACTION   → 整表 DROP
-```
-
-⚠️ **保留的两张表必须删列而不是留着列**：留着 `shop_product_id` 指向一张已删的表，
-`create_all()` 与 alembic autogenerate 都会各说一套（模型说没有、库说有），
-下次任何一次迁移都会莫名爆 FK 错。
-
-⚠️ **数据影响（真机实测行数）**：`shop_products` 2020 / `note_goods` 2142 /
-`shop_note_goods` 1977 / `orders` 3 / `order_items` 3 / `order_shipments` 3 /
-`after_sales` 0 / `shop_metric_snapshots` 3972 / `topic_goods_match` 33；
-两张保留表的 `shop_product_id` 非空行 = 47 / 44 —— **这些值随列一起删**
-（它们只是本地自增主键，平台商品 ID 在 `generation_records.input_json`
-与队列 payload 里另有留存，可人工追查，故不迁移到新列）。
-
-⚠️ **本迁移不新建表**：`ai_title` / `ai_selling_point` 是全库 0 个非空值
-（实测），随 `shop_products` 一起退场，不搬到别处 —— 搬一张空表只是换个地方留死代码。
-
-## 为什么 downgrade 只建空表
-
-原表数据已按用户口径丢弃（本地不再维护这些数据），回滚能恢复的是**结构**而非数据；
-写「回填数据」在这里是做不到的（源就是被删的那张表）。⚠️ 因此本迁移的 downgrade
-只保证 `alembic downgrade` 不报错、`upgrade` 可重跑幂等。
+Revision ID: n8o9p0q1r2s3
+Revises: m7n8o9p0q1r2
+Create Date: 2026-10-27
 """
-
-from __future__ import annotations
-
-import sqlalchemy as sa
 from alembic import op
+import sqlalchemy as sa
 
 revision = "n8o9p0q1r2s3"
 down_revision = "m7n8o9p0q1r2"
 branch_labels = None
 depends_on = None
 
-#: 整表 DROP（**按外键从属顺序**：先删引用方，再删被引用方）。
-DROP_TABLES = (
+
+#: 按依赖顺序排列（子表在前）。**DROP TABLE IF EXISTS** —— 存量库可能早已手工清过。
+_DROP_ORDER = (
+    "topic_goods_match",
+    "shop_metric_snapshots",
     "after_sales",
     "order_shipments",
     "order_items",
     "orders",
-    "shop_metric_snapshots",
-    "topic_goods_match",
     "note_goods",
     "shop_note_goods",
     "shop_products",
 )
 
-#: 保留表上要拆掉的「指向 shop_products」外键列。
-#: 顺序无依赖（都指同一个父表），但**必须在 `shop_products` 之前**处理。
-DETACH_COLUMNS = (
-    ("note_generation_links", "shop_product_id"),
-    ("generation_records", "shop_product_id"),
-)
+
+def _tables() -> set[str]:
+    return set(sa.inspect(op.get_bind()).get_table_names())
 
 
-def _table_exists(conn, table: str) -> bool:
-    return bool(
-        conn.execute(sa.text("SELECT to_regclass(:t)"), {"t": table}).scalar()
-    )
+def _columns(table: str) -> set[str]:
+    """表的现有列名（**先看表在不在** —— 存量库可能早已手工删过列）。"""
+    inspector = sa.inspect(op.get_bind())
+    if table not in inspector.get_table_names():
+        return set()
+    return {column["name"] for column in inspector.get_columns(table)}
 
 
-def _columns(conn, table: str) -> set[str]:
-    rows = conn.execute(
-        sa.text(
-            "SELECT column_name FROM information_schema.columns "
-            "WHERE table_schema = current_schema() AND table_name = :t"
-        ),
-        {"t": table},
-    ).all()
-    return {row[0] for row in rows}
+def _index_names(table: str) -> set[str]:
+    inspector = sa.inspect(op.get_bind())
+    if table not in inspector.get_table_names():
+        return set()
+    return {index["name"] for index in inspector.get_indexes(table)}
 
 
 def upgrade() -> None:
-    conn = op.get_bind()
+    # ------------------------------------------------------------------ #
+    # ① 保留表：`shop_product_id` → `item_id`（必须先松外键，否则删父表会失败）
+    # ------------------------------------------------------------------ #
+    generation_columns = _columns("generation_records")
+    if "shop_product_id" in generation_columns and "item_id" not in generation_columns:
+        op.add_column("generation_records", sa.Column("item_id", sa.String(length=64), nullable=True))
+        #: 存量回填：台账表此时**还在**（本函数末尾才删），能 join 回填。
+        #: 台账里没有对应行（商品早被删）⇒ 留 NULL，**不造值**（缺值口径）。
+        if "shop_products" in _tables():
+            op.execute(
+                sa.text(
+                    """
+                    UPDATE generation_records AS g
+                       SET item_id = p.item_id
+                      FROM shop_products AS p
+                     WHERE p.id = g.shop_product_id
+                    """
+                )
+            )
+    #: 带 `shop_product_id` 的两个索引 / 唯一约束改成 `item_id` 版本。
+    #: `batch_alter_table` 保证 SQLite 也能重建（它不支持裸 ALTER + 约束）。
+    generation_indexes = _index_names("generation_records")
+    with op.batch_alter_table("generation_records") as batch:
+        for name in ("uq_generation_records_adopted", "ix_generation_records_product_version"):
+            if name in generation_indexes:
+                batch.drop_index(name)
+        if "shop_product_id" in _columns("generation_records"):
+            batch.drop_column("shop_product_id")
+        if "ix_generation_records_item_version" not in generation_indexes:
+            batch.create_index("ix_generation_records_item_version", ["item_id"], unique=False)
+        if "uq_generation_records_adopted" not in generation_indexes:
+            batch.create_index(
+                "uq_generation_records_adopted",
+                ["item_id", "is_adopted"],
+                unique=True,
+                postgresql_where=sa.text("is_adopted = true"),
+            )
 
-    # ① 拆掉两张**保留表**上指向 `shop_products` 的外键列。
-    #    ⚠️ `batch_alter_table`：SQLite 不支持 DROP COLUMN 带外键（桌面冻结分支仍可能
-    #    跑 SQLite），batch 形态两边都成立。
-    for table, column in DETACH_COLUMNS:
-        if not _table_exists(conn, table):
-            continue
-        if column not in _columns(conn, table):
-            continue
-        with op.batch_alter_table(table) as batch:
-            batch.drop_column(column)
+    link_columns = _columns("note_generation_links")
+    if "shop_product_id" in link_columns:
+        with op.batch_alter_table("note_generation_links") as batch:
+            if "item_id" not in link_columns:
+                batch.add_column(sa.Column("item_id", sa.String(length=64), nullable=True))
+            batch.drop_column("shop_product_id")
 
-    # ② 整表 DROP（已按从属顺序排好；缺表跳过 —— 幂等）。
-    for table in DROP_TABLES:
-        if _table_exists(conn, table):
-            op.drop_table(table)
+    # ------------------------------------------------------------------ #
+    # ② 9 张台账表整表 DROP（子表在前）
+    # ------------------------------------------------------------------ #
+    for table in _DROP_ORDER:
+        op.execute(sa.text(f'DROP TABLE IF EXISTS "{table}"'))
 
 
 def downgrade() -> None:
-    """**只恢复结构**，不恢复数据（数据源就是被删的表，无法凭空还原）。"""
-    conn = op.get_bind()
+    """**表不重建**（数据源已是平台，重建出来的空表只会更难点查）。
 
-    if not _table_exists(conn, "shop_products"):
-        op.create_table(
-            "shop_products",
-            sa.Column("id", sa.Integer(), primary_key=True),
-            sa.Column("user_id", sa.Integer(), nullable=False),
-            sa.Column("platform_account_id", sa.Integer(), nullable=False),
-            sa.Column("item_id", sa.String(64)),
-            sa.Column("item_title", sa.String(512)),
-            sa.Column("price", sa.String(32)),
-            sa.Column("stock", sa.Integer()),
-            sa.Column("sales", sa.Integer()),
-            sa.Column("category", sa.String(128)),
-            sa.Column("images_json", sa.Text()),
-            sa.Column("status", sa.String(32)),
-            sa.Column("synced_at", sa.DateTime()),
-            sa.Column("platform_missing_at", sa.DateTime()),
-            sa.Column("raw_json", sa.Text()),
-            sa.Column("detail_json", sa.Text()),
-            sa.Column("sku_count", sa.Integer()),
-            sa.Column("detail_synced_at", sa.DateTime()),
-            sa.Column("article_no", sa.String(64)),
-            sa.Column("card_type", sa.Integer()),
-            sa.Column("price_min_fen", sa.Integer()),
-            sa.Column("price_max_fen", sa.Integer()),
-            sa.Column("create_time_ms", sa.BigInteger()),
-            sa.Column("on_shelf_time_ms", sa.BigInteger()),
-            sa.Column("off_shelf_time_ms", sa.BigInteger()),
-            sa.Column("last_audit_time_ms", sa.BigInteger()),
-            sa.Column("sales_30d", sa.Integer()),
-        )
-
-    for table, column in reversed(DETACH_COLUMNS):
-        if not _table_exists(conn, table):
-            continue
-        if column in _columns(conn, table):
-            continue
-        #: ⚠️ **不加回外键**：`shop_products` 是空表（downgrade 刚建），加 FK 只会让下次
-        #: `upgrade` 再撞一次；老值本来也没了。
-        with op.batch_alter_table(table) as batch:
-            batch.add_column(sa.Column(column, sa.Integer(), nullable=True))
+    只把两张保留表的列名改回去，好让 `alembic downgrade` 不至于在 `ALTER` 上炸。
+    """
+    generation_columns = _columns("generation_records")
+    if "item_id" in generation_columns and "shop_product_id" not in generation_columns:
+        with op.batch_alter_table("generation_records") as batch:
+            batch.add_column(sa.Column("shop_product_id", sa.Integer(), nullable=True))
+            batch.drop_column("item_id")
+    link_columns = _columns("note_generation_links")
+    if "item_id" in link_columns and "shop_product_id" not in link_columns:
+        with op.batch_alter_table("note_generation_links") as batch:
+            batch.add_column(sa.Column("shop_product_id", sa.Integer(), nullable=True))
+            batch.drop_column("item_id")

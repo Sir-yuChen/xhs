@@ -33,7 +33,6 @@ from backend.app.models import (
     GenerationRecord,
     PromptModule,
     PromptTemplate,
-    ShopProduct,
     User,
 )
 from backend.app.models.prompt import PROMPT_TASK_TYPES
@@ -91,7 +90,9 @@ class PromptTemplateUpdateRequest(BaseModel):
 
 class RenderPreviewRequest(BaseModel):
     template_id: int
-    shop_product_id: int
+    #: ⚠️ 设计 75 S5（2026-10-27）：商品台账表（`shop_products`）已 DROP，本地不再有
+    #: 「按主键取商品」这条路 ⇒ 该字段退场。前端实测**从未传过它**（只传 `template_id`），
+    #: 所以删除不影响任何入口；保留 `extra="forbid"`，老客户端传了会得到 422 而不是被静默忽略。
 
     model_config = ConfigDict(extra="forbid")
 
@@ -443,6 +444,36 @@ def delete_prompt_template(
     return {"id": template_id, "status": "deleted"}
 
 
+def preview_product_facts() -> dict[str, Any]:
+    """渲染预览用的**商品插槽示例值**（**唯一构造点**）。
+
+    为什么是示例值而不是真实商品：预览回答的是「插槽名写对了吗 / 拼出来的提示词长什么样」，
+    不是「这件商品的真实提示词」（那由生成链路负责，且它按平台**当下**数据渲染）。
+    真商品在改造后需要账号 + 一次平台请求，会让预览多出网络失败面 —— 不值。
+
+    ⚠️ 键集合必须与 `product_note_service.PRODUCT_FIELDS` 一致：渲染器按它报缺槽，
+    这里少一个键就会把「模板写错」误报成「模板缺插槽」。
+    """
+    from backend.app.services.product_note_service import PRODUCT_FIELDS
+
+    labels = {
+        "item_id": "0000000000000000000000",
+        "title": "（示例）商品标题",
+        "article_no": "SKU-DEMO",
+        "price_min_fen": "9900",
+        "price_max_fen": "9900",
+        "stock": "100",
+        "sku_count": "1",
+        "on_sale_sku_count": "1",
+        "category": "（示例）分类",
+        "sales_total": "10",
+    }
+    #: 缺键不猜：`PRODUCT_FIELDS` 新增而这里忘补时，值退化成占位串（渲染照常，
+    #: 但一眼能看出「这是没配的示例值」），不会静默渲染成空 —— 空值会让
+    #: `product_payload` 把它过滤掉，表现为「插槽没填」而非「示例值缺定义」。
+    return {key: labels.get(key, f"（示例）{key}") for key in PRODUCT_FIELDS}
+
+
 @router.post("/prompt-templates/render-preview")
 def render_template_preview(
     payload: RenderPreviewRequest,
@@ -454,27 +485,16 @@ def render_template_preview(
     商品字段走 `product_payload` 白名单提取（与生成链路同口径，只有一处实现）；
     未选到此商品 / 不是本用户的 ⇒ 404。
     """
-    from backend.app.services.product_note_service import product_payload
-    from backend.app.services.shop_products_service import (
-        load_product_dict_from_ledger,
-    )
-
     template = _get_owned_template(db, current_user, payload.template_id)
-
-    product = db.get(ShopProduct, payload.shop_product_id)
-    if product is None or product.user_id != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={"code": "LLM_PRODUCT_NOT_FOUND", "message": "商品不存在"},
-        )
 
     modules = _load_modules_by_ids(db, current_user.id, list(template.module_ids or []))
     active_modules = [m for m in modules if m.enabled]
-    # 台账行 → 商品字典**唯一构造实现**（`shop_products_service`）：
-    # 预览是纯本地渲染，只能用台账副本（生成链路才要求平台当下数据）。
-    # ⚠️ 禁在本文件手写字段映射 —— 键名要与 `PRODUCT_FIELDS` 严格一致，
-    # 抄第二份必然漂移（DEF-044）。
-    facts = product_payload(load_product_dict_from_ledger(product))
+    #: ⚠️ 设计 75 S5：商品插槽**用示例值渲染**，不再取真实商品。
+    #: 原实现要 `shop_products` 台账行（表已 DROP），而平台实时查商品需要账号 +
+    #: 一次平台请求 —— 预览是「保存模板前看插槽写没写错」，不该因此产生网络依赖与
+    #: 失败面（没绑千帆的用户也要能预览）。插槽键名仍由 `PRODUCT_FIELDS` 决定，
+    #: 渲染器据此报缺槽，判据不受影响。
+    facts = preview_product_facts()
 
     try:
         prompt = render_prompt(

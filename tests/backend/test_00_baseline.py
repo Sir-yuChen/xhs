@@ -67,7 +67,9 @@ def test_same_username_can_register_again(client, db):
 
 
 @pytest.mark.parametrize(
-    "service_name", ["scheduler_service", "scheduled_job_runner", "note_sync_service"]
+    #: ⚠️ 设计 75 S4（2026-10-27）：`note_sync_service` 已退场（同步笔记任务全链路移除，
+    #: 笔记改实时查询）⇒ 不再有模块级 `SessionLocal` 可打桩，从清单移除。
+    "service_name", ["scheduler_service", "scheduled_job_runner"]
 )
 def test_service_sessionlocal_points_to_test_schema(service_name):
     """⑤ 服务层模块级 `SessionLocal` 也落在 `test` schema。

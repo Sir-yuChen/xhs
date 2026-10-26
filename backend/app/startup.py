@@ -61,19 +61,15 @@ from backend.app.services.note_publish_service import (
     start_publish_worker_watchdog,
     stop_publish_worker_watchdog,
 )
-from backend.app.services.note_sync_service import (
-    ensure_sync_worker,
-    start_sync_worker_watchdog,
-    stop_sync_worker_watchdog,
-)
+#: ⚠️ 设计 75 S4/S5（2026-10-27）：`note_sync_service` 的同步 worker 已整条退场
+#: （用户口径「同步笔记任务全链路移除」，笔记改实时查询）—— 不再 ensure / 不再起看门狗。
 from backend.app.services.product_note_gen_service import (
     ensure_generate_worker,
     start_generate_worker_watchdog,
     stop_generate_worker_watchdog,
 )
-from backend.app.services.shop_goods_sync_service import (
-    ensure_goods_sync_worker,
-)
+#: ⚠️ 设计 75 S5（2026-10-27）：`shop_goods_sync_service` 整模块删除（同步商品任务
+#: 全链路退场，商品改实时查询）—— 不再 ensure 商品同步 worker。
 from backend.app.services.scheduler_service import (
     seed_builtin_jobs_from_initial_data,
     shutdown_scheduler,
@@ -200,11 +196,9 @@ def recover_and_wake_workers() -> None:
     recover_account_tasks()
     # 复位完**立刻**唤醒六个 worker：积压的 `pending` 项不该等看门狗 30 秒巡检
     # 才被发现（唤醒带兜底超时的长等待，无活可干时它们自动回去睡）。
-    ensure_sync_worker()
     ensure_publish_worker()
     ensure_generate_worker()
     ensure_llm_generate_worker()
-    ensure_goods_sync_worker()
     ensure_account_task_worker()
 
 

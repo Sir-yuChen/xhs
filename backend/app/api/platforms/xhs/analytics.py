@@ -23,7 +23,6 @@ from backend.app.services.hot_topic_service import (
     collect_topics_for_item,
     list_matches as list_topic_matches,
     list_topics as list_hot_topics,
-    match_topics_to_goods,
     stat_date_of as hot_topic_stat_date_of,
 )
 from backend.app.adapters.xhs.qianfan_api_adapter import get_qianfan_api_adapter_factory
@@ -38,9 +37,30 @@ from backend.app.api.platforms.xhs.product_notes import (
     _llm_generation_error,
     _owned_account,
 )
-from backend.app.models import AiDraft, HotTopic, KeywordGroup, MonitoringTarget, Note, NoteComment, NoteTopic, PlatformAccount, PublishJob, ShopProduct, Topic, User
+from backend.app.models import AiDraft, HotTopic, KeywordGroup, MonitoringTarget, Note, NoteComment, NoteTopic, PlatformAccount, PublishJob, Topic, User
 
 router = APIRouter(prefix="/xhs/analytics", tags=["xhs-analytics"])
+
+
+def _first_ark_account(db: Session, user_id: int) -> Optional[PlatformAccount]:
+    """该用户第一个有千帆（ark）令牌的账号（实时查询必须落在某个账号上）。
+
+    ⚠️ 不是权限判据（归属由 `_owned_account` 做），只是「用哪个账号去问平台」。
+    """
+    from backend.app.services.shop_binding_service import has_ark_session
+
+    rows = db.scalars(
+        select(PlatformAccount)
+        .where(PlatformAccount.user_id == int(user_id), PlatformAccount.deleted_at.is_(None))
+        .order_by(PlatformAccount.id.asc())
+    ).all()
+    for account in rows:
+        try:
+            if has_ark_session(db, account.id):
+                return account
+        except Exception:  # noqa: BLE001 - 状态读不到就换下一个
+            continue
+    return None
 
 
 class PlatformHotTopicRefresh(BaseModel):
@@ -540,21 +560,37 @@ def refresh_platform_hot_topics(
             detail={"code": "ITEM_IDS_REQUIRED", "message": "请至少选择一个商品"},
         )
 
-    owned = {
-        row.item_id: row
-        for row in db.scalars(
-            select(ShopProduct).where(
-                ShopProduct.user_id == current_user.id, ShopProduct.item_id.in_(item_ids)
+    #: ⚠️ 设计 75 S5（2026-10-27）：原来按本地台账校验「商品是否属于本用户」。
+    #: 台账表已 DROP ⇒ 改为**按账号实时查**：对每个候选账号查一次该商品
+    #: （`rt.list_products(keyword=…)` + 精确匹配），命中即视为本用户持有。
+    #: 一个都没命中 ⇒ 404（与改造前同码同文案，只是文案里的「台账」改成「账号」）。
+    owned: dict[str, int] = {}
+    for item_id in item_ids:
+        account = _first_ark_account(db, current_user.id)
+        if account is None:
+            break
+        from backend.app.services import realtime_platform_query_service as rt
+
+        cookies = qianfan_cookies_for_account(db, account.id)
+        if not cookies:
+            break
+        try:
+            result = rt.list_products(
+                adapter_factory(cookies), keyword=item_id, status="all", page=1, page_size=20
             )
-        ).all()
-    }
+        except Exception:  # noqa: BLE001 - 查不到就当作"不是该用户的商品"
+            continue
+        for row in result.get("items") or []:
+            if str(row.get("item_id") or "") == item_id:
+                owned[item_id] = int(account.id)
+                break
     unknown = [i for i in item_ids if i not in owned]
     if unknown:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={
                 "code": "PRODUCT_NOT_FOUND",
-                "message": "商品不在本账号台账：%s" % ", ".join(unknown[:3]),
+                "message": "该账号下找不到商品：%s" % ", ".join(unknown[:3]),
             },
         )
 
@@ -564,8 +600,7 @@ def refresh_platform_hot_topics(
     failed = []
 
     for item_id in item_ids:
-        product = owned[item_id]
-        account_id = product.platform_account_id
+        account_id = owned[item_id]
         if account_id not in account_cookies:
             account_cookies[account_id] = qianfan_cookies_for_account(db, account_id)
         cookies = account_cookies[account_id]
@@ -591,9 +626,6 @@ def refresh_platform_hot_topics(
             item_id=item_id,
             attributes=data,
             platform_account_id=account_id,
-        )
-        matches_written += match_topics_to_goods(
-            db, user_id=current_user.id, attributes=data, item_id=item_id
         )
 
     return {
@@ -638,15 +670,16 @@ def generate_from_platform_hot_topic(
         )
 
     account = _owned_account(db, current_user, payload.platform_account_id)
-    row = _ledger_product(db, current_user, account, payload.item_id)
+    #: 商品存在性校验（实时）：取不到 ⇒ 404，语义与改造前的「台账里没有」一致。
+    _ledger_product(db, current_user, account, payload.item_id)
 
     tag = topic_token(topic)
     try:
         receipt = start_llm_generate_note(
             db,
             current_user.id,
-            shop_product_id=int(row.id),
             account_id=int(account.id),
+            item_id=str(payload.item_id),
             template_id=payload.template_id,
             media_source=payload.media_source or "goods",
             hot_topic=topic,
@@ -687,8 +720,23 @@ def list_platform_hot_topic_matches(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """话题↔商品匹配结果（按相关度降序，附可解释成分 match_reason）。"""
-    return {"items": list_topic_matches(db, user_id=current_user.id, item_id=item_id, limit=limit)}
+    """话题↔商品匹配结果 —— ⚠️ 设计 75 S5 起**恒为空**（附说明，不静默）。
+
+    原数据源 `topic_goods_match` 按 `shop_products` 本地主键关联，表与主键都已退场
+    （迁移 `n8o9p0q1r2s3`）。匹配本身仍可用 —— 但它需要**商品事实**
+    （标题 / 类目 / 卖点），原来是本地台账给的；商品改实时后逐商品去查平台
+    才能算，这个端点是列表页（可能是 100 条），不值得为它打 100 次平台请求。
+
+    ⇒ 保留端点与响应形状（前端不炸），`items` 恒空 + 明确说明"为什么空"。
+    """
+    return {
+        "items": [],
+        "total": 0,
+        "source_note": (
+            "话题↔商品相关度已下线：它依赖本地商品台账（已随实时查询改造退场）。"
+            "平台热度词本身仍在（`GET /platform-hot-topics`）。"
+        ),
+    }
 
 
 @router.get("/benchmarks")

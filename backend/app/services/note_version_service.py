@@ -54,7 +54,7 @@ class VersionError(ValueError):
         self.code = code
 
 
-def next_version_no(db: Session, *, user_id: int, shop_product_id: int) -> int:
+def next_version_no(db: Session, *, user_id: int, item_id: str) -> int:
     """同商品的下一个版本序号（现有最大 + 1；无历史 ⇒ 1）。
 
     ⚠️ **按 `max+1` 而不是 `count+1`**：删掉中间某一版后，`count+1` 会与已有序号撞车
@@ -63,7 +63,9 @@ def next_version_no(db: Session, *, user_id: int, shop_product_id: int) -> int:
     current = db.scalar(
         select(func.max(GenerationRecord.version_no)).where(
             GenerationRecord.user_id == int(user_id),
-            GenerationRecord.shop_product_id == int(shop_product_id),
+            #: ⚠️ 设计 75 S5：版本分组键由本地台账主键改为**平台商品 ID**
+            #: （台账表已 DROP）。语义「同商品」不变。
+            GenerationRecord.item_id == str(item_id or ""),
         )
     )
     return int(current or 0) + 1
@@ -139,7 +141,7 @@ def mark_adopted(db: Session, *, record: GenerationRecord) -> None:
     siblings = db.scalars(
         select(GenerationRecord).where(
             GenerationRecord.user_id == int(record.user_id),
-            GenerationRecord.shop_product_id == record.shop_product_id,
+            GenerationRecord.item_id == record.item_id,
             GenerationRecord.is_adopted.is_(True),
         )
     ).all()
@@ -147,7 +149,7 @@ def mark_adopted(db: Session, *, record: GenerationRecord) -> None:
         if int(sibling.id) != int(record.id):
             sibling.is_adopted = False
     #: ⚠️ **必须先 flush 清空再设 TRUE**（2026-10-19 实测 500：
-    #: `UNIQUE constraint failed: generation_records.user_id, generation_records.shop_product_id`）。
+    #: `UNIQUE constraint failed: generation_records.user_id, generation_records.item_id`）。
     #: 原因：SQLAlchemy 在同一次 flush 里不保证 UPDATE 顺序，把「新采用版置 1」
     #: 排在「旧采用版置 0」之前 ⇒ 瞬时出现两条 `is_adopted=1`
     #: ⇒ 撞部分唯一索引 `uq_generation_records_adopted`。
@@ -165,7 +167,7 @@ def serialize_copy_requirements(payload: Any) -> str:
 
 
 def list_versions(
-    db: Session, *, user_id: int, shop_product_id: int, limit: int = 50
+    db: Session, *, user_id: int, item_id: str, limit: int = 50
 ) -> list[GenerationRecord]:
     """同商品的版本历史（**新→旧**）。
 
@@ -178,7 +180,7 @@ def list_versions(
             select(GenerationRecord)
             .where(
                 GenerationRecord.user_id == int(user_id),
-                GenerationRecord.shop_product_id == int(shop_product_id),
+                GenerationRecord.item_id == str(item_id or ""),
             )
             .order_by(GenerationRecord.version_no.desc(), GenerationRecord.id.desc())
             .limit(int(limit))

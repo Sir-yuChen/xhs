@@ -44,13 +44,12 @@ import logging
 import time
 from typing import Any, Optional, Sequence
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.core.database import SessionLocal
-from backend.app.models import PlatformAccount, ShopProduct, Task
+from backend.app.models import PlatformAccount, Task
 from backend.app.models.note import Note
-from backend.app.models.shop import NoteGoods
 from backend.app.services import note_queue_service
 
 logger = logging.getLogger(__name__)
@@ -292,27 +291,61 @@ def validate_business_publish_params(params: dict[str, Any] | None, db: Any, use
 # --------------------------------------------------------------------------- #
 # 取「挂链笔记数为 0」的商品
 # --------------------------------------------------------------------------- #
-def select_business_items(db: Session, *, account_id: int, limit: int) -> list[ShopProduct]:
-    """该账号下**挂链笔记数 == 0** 的商品，最多 `limit` 件（按创建时间倒序）。
+def select_business_items(
+    db: Session, account: PlatformAccount, *, limit: int
+) -> list[dict[str, Any]]:
+    """该账号下**还没挂过商品笔记**的商品，最多 `limit` 件（**平台实时 + 本地比对**）。
 
-    口径与商品列表页的「挂链笔记数」筛选**同一个数**（设计 13 §33.8）：
-    `note_goods` 关系表按 `item_id` 的相关子查询计数 —— 不读平台原文
-    `product_note_num`（那个数与界面显示的数会不一致）。
+    ⚠️ 设计 75 S5（2026-10-27）：原来是一条 SQL（`shop_products` LEFT JOIN
+    `note_goods` 计数为 0）。两张表都已 DROP ⇒ 口径改成两步：
+
+    1. **平台实时**取该账号最近创建的一批商品（`rt.list_products`，按创建时间倒序）；
+    2. **本地判重**：这批商品里，`generation_records` 已有成功记录（`item_id` 命中）
+       的跳过 —— 那就是「已经生成过笔记」的，不再重复生成。
+
+    为什么用 `generation_records` 而不是"挂链笔记数"：挂链数现在只能**逐个商品**
+    实时查（一页 20 条 = 20 次请求），自动发布是后台任务，不该为判重打几十次平台。
+    生成记录是**本系统**「我是否已经为它做过笔记」的权威记载，正是这个判据要的。
+
+    取数上限取 `limit * 4`（预取一批，判重后从中取够 `limit` 件）——
+    全部已生成过时宁可返回不足也不再去打平台（后台任务不该无界翻页）。
     """
-    relation_count = (
-        select(func.count())
-        .select_from(NoteGoods)
-        .where(NoteGoods.item_id == ShopProduct.item_id)
-        .scalar_subquery()
+    from backend.app.models.generation import GenerationRecord
+    from backend.app.services import realtime_platform_query_service as rt
+    from backend.app.services.shop_binding_service import qianfan_cookies_for_account
+    from backend.app.adapters.xhs.qianfan_api_adapter import get_qianfan_api_adapter_factory
+
+    wanted = max(1, int(limit))
+    cookies = qianfan_cookies_for_account(db, account.id)
+    if not cookies:
+        return []
+    adapter = get_qianfan_api_adapter_factory()(cookies)
+    result = rt.list_products(
+        adapter, status="all", page=1, page_size=min(max(wanted * 4, 20), 100),
+        sort_field="create_time", order="desc",
     )
-    stmt = (
-        select(ShopProduct)
-        .where(ShopProduct.platform_account_id == int(account_id))
-        .where(relation_count == 0)
-        .order_by(ShopProduct.create_time_ms.is_(None).asc(), ShopProduct.create_time_ms.desc(), ShopProduct.id.desc())
-        .limit(max(1, int(limit)))
-    )
-    return list(db.scalars(stmt).all())
+    candidates = [row for row in (result.get("items") or []) if str(row.get("item_id") or "")]
+
+    done: set[str] = set()
+    ids = [str(row["item_id"]) for row in candidates]
+    if ids:
+        for value in db.scalars(
+            select(GenerationRecord.item_id).where(
+                GenerationRecord.user_id == int(account.user_id),
+                GenerationRecord.item_id.in_(ids),
+                GenerationRecord.status == "success",
+            )
+        ).all():
+            done.add(str(value or ""))
+
+    picked: list[dict[str, Any]] = []
+    for row in candidates:
+        if str(row["item_id"]) in done:
+            continue
+        picked.append(row)
+        if len(picked) >= wanted:
+            break
+    return picked
 
 
 # --------------------------------------------------------------------------- #
@@ -346,7 +379,9 @@ def _open_item_note_pk(db: Session, *, user_id: int, item_task_type: str) -> dic
     return out
 
 
-def _generate_with_qianfan(db: Session, *, account: PlatformAccount, product: ShopProduct) -> Optional[int]:
+def _generate_with_qianfan(
+    db: Session, *, account: PlatformAccount, product: dict[str, Any]
+) -> Optional[int]:
     """千帆智能笔记：入队 + 等终态，返回生成的笔记主键（失败 / 超时 ⇒ `None`）。"""
     from backend.app.services import product_note_gen_service
 
@@ -354,18 +389,20 @@ def _generate_with_qianfan(db: Session, *, account: PlatformAccount, product: Sh
         # ⚠️ 形参顺序是 `(db, user_id, account, item_id)`（位置参数），不是关键字 ——
         #    写错会 `TypeError` 被下面的 except 吞成「生成失败」，静默跑空整轮。
         product_note_gen_service.start_generate_note(
-            db, int(account.user_id), account, str(product.item_id)
+            db, int(account.user_id), account, str(product.get("item_id") or "")
         )
     except Exception as exc:  # noqa: BLE001 - 门禁失败 = 这件商品跳过，不拖垮整轮
-        logger.warning("auto-publish: qianfan generate gate failed item=%s: %s", product.item_id, exc)
+        logger.warning("auto-publish: qianfan generate gate failed item=%s: %s", product.get("item_id"), exc)
         return None
     if not product_note_gen_service.wait_generate_done(timeout=_GENERATE_WAIT_SECONDS):
-        logger.warning("auto-publish: qianfan generate timed out item=%s", product.item_id)
+        logger.warning("auto-publish: qianfan generate timed out item=%s", product.get("item_id"))
         return None
-    return _note_pk_for_item(db, user_id=int(account.user_id), item_id=str(product.item_id))
+    return _note_pk_for_item(db, user_id=int(account.user_id), item_id=str(product.get("item_id") or ""))
 
 
-def _generate_with_llm(db: Session, *, account: PlatformAccount, product: ShopProduct) -> Optional[int]:
+def _generate_with_llm(
+    db: Session, *, account: PlatformAccount, product: dict[str, Any]
+) -> Optional[int]:
     """LLM 生成：入队 + 等终态，返回生成的笔记主键（失败 / 超时 ⇒ `None`）。"""
     from backend.app.services import note_gen_llm_worker
 
@@ -373,17 +410,19 @@ def _generate_with_llm(db: Session, *, account: PlatformAccount, product: ShopPr
         note_gen_llm_worker.start_llm_generate_note(
             db,
             int(account.user_id),
-            shop_product_id=int(product.id),
             account_id=int(account.id),
+            item_id=str(product.get("item_id") or ""),
             source=note_queue_service.SOURCE_AUTO_BUSINESS_PUBLISH,
         )
     except Exception as exc:  # noqa: BLE001 - 门禁失败（未配网关 / 模板缺）= 这件商品跳过
-        logger.warning("auto-publish: llm generate gate failed item=%s: %s", product.item_id, exc)
+        logger.warning("auto-publish: llm generate gate failed item=%s: %s", product.get("item_id"), exc)
         return None
     if not note_gen_llm_worker.wait_llm_generate_done(timeout=_LLM_GENERATE_WAIT_SECONDS):
-        logger.warning("auto-publish: llm generate timed out item=%s", product.item_id)
+        logger.warning("auto-publish: llm generate timed out item=%s", product.get("item_id"))
         return None
-    return _note_pk_for_item(db, user_id=int(account.user_id), item_id=str(product.item_id))
+    return _note_pk_for_item(
+        db, user_id=int(account.user_id), item_id=str(product.get("item_id") or "")
+    )
 
 
 #: 生成等待上限（秒）。千帆三步链路真机 ~6–21s，120s 是平台卡死线；LLM 上游更慢，给 240s。
@@ -432,18 +471,23 @@ def _note_pk_for_item(db: Session, *, user_id: int, item_id: str) -> Optional[in
         if pk:
             return int(pk)
 
-    # ③ 关系表兜底（商品 → 最新一篇本地生成笔记）
+    # ③ 兜底（商品 → 最新一篇本地生成笔记）
+    #    ⚠️ 设计 75 S5（2026-10-27）：原来第三跳 join `note_goods` 关系表，该表已随迁移
+    #    `n8o9p0q1r2s3` DROP ⇒ 改读**笔记自己的** `raw_json.item_id`（生成链路落库时
+    #    就写进去的字段，比关系表更靠近真相：关系表是派生物，raw_json 是当时的事实）。
     stmt = (
         select(Note.id)
-        .join(NoteGoods, NoteGoods.note_id == Note.note_id)
         .where(Note.user_id == int(user_id))
         .where(Note.note_type == NOTE_TYPE_LOCAL_GENERATED)
-        .where(NoteGoods.item_id == str(item_id))
         .order_by(Note.id.desc())
-        .limit(1)
+        .limit(50)
     )
-    pk = db.scalar(stmt)
-    return int(pk) if pk else None
+    for note_id_value in db.scalars(stmt).all():
+        note = db.get(Note, int(note_id_value))
+        raw = note.raw_json if note is not None and isinstance(note.raw_json, dict) else {}
+        if str(raw.get("item_id") or "") == str(item_id):
+            return int(note_id_value)
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -533,7 +577,12 @@ def run_business_note_auto_publish(
                 continue
 
             # ---- ② 取「挂链笔记数为 0」的商品 ----
-            products = select_business_items(db, account_id=int(account.id), limit=limit)
+            try:
+                products = select_business_items(db, account, limit=limit)
+            except Exception as exc:  # noqa: BLE001 - 平台查不到 ⇒ 本轮该账号跳过（不拖垮其它账号）
+                logger.warning("auto-publish: 取商品失败 account=%s: %s", account.id, exc)
+                results.append({"account_id": account.id, "skipped": True, "reason": str(exc)})
+                continue
             published = 0
             failed = 0
             retried = 0

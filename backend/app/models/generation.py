@@ -129,18 +129,23 @@ class GenerationRecord(Base):
     #: `uq_generation_records_adopted` 是**唯一约束**（同商品只能有一条采用版），
     #: 丢了 = 「采用版」可以出现两条，业务判据失效且不报错。
     __table_args__ = (
+        #: ⚠️ 设计 75 S5（2026-10-27）：原判据「同商品只能有一条采用版」的键是
+        #: `(user_id, shop_product_id)`。`shop_products` 整表 DROP 后本地不再有台账主键
+        #: ⇒ 商品维度改用**平台 `item_id`**（迁移 `n8o9p0q1r2s3` 已按 `shop_products`
+        #: 把 47 行本地主键翻译成平台 ID 回填，无损失）。
         Index(
             "uq_generation_records_adopted",
             "user_id",
-            "shop_product_id",
+            "item_id",
             unique=True,
             sqlite_where=text("is_adopted = 1"),
             postgresql_where=text("is_adopted = true"),
         ),
+        #: 同上：版本序号按「某用户 × 某商品」分组，商品维度即平台 ID。
         Index(
-            "ix_generation_records_product_version",
+            "ix_generation_records_item_version",
             "user_id",
-            "shop_product_id",
+            "item_id",
             "version_no",
         ),
     )
@@ -152,10 +157,12 @@ class GenerationRecord(Base):
     task_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("tasks.id"), index=True, nullable=True
     )
-    #: 源商品（本地台账行）。
-    shop_product_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("shop_products.id"), index=True, nullable=True
-    )
+    #: 源商品**平台 ID**（千帆 `item_id`）。
+    #: ⚠️ 设计 75 S5（2026-10-27）：原来是本地台账主键 `shop_product_id`（FK →
+    #: `shop_products.id`），表已 DROP ⇒ 换平台 ID。改换**不丢溯源能力**：
+    #: 平台 ID 才是跨端稳定的那个，本地自增主键删表后本来就无从解释。
+    #: 空串 = 历史上没记商品的记录（缺值不造假，不拿 0 顶替）。
+    item_id: Mapped[str] = mapped_column(String(64), default="", index=True)
     #: 所用模板（`null` = 未用模板）。
     template_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("prompt_templates.id"), nullable=True
@@ -288,7 +295,7 @@ class NoteGenerationLink(Base):
     __tablename__ = "note_generation_links"
     __table_args__ = (
         UniqueConstraint(
-            "note_pk", "shop_product_id", name="uq_note_generation_links_note_product"
+            "note_pk", "item_id", name="uq_note_generation_links_note_item"
         ),
     )
 
@@ -296,10 +303,9 @@ class NoteGenerationLink(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     #: 本地笔记主键。
     note_pk: Mapped[int] = mapped_column(ForeignKey("notes.id"), index=True)
-    #: 本地台账商品主键。
-    shop_product_id: Mapped[int] = mapped_column(
-        ForeignKey("shop_products.id"), index=True
-    )
+    #: 商品**平台 ID**。⚠️ 设计 75 S5（2026-10-27）：原 `shop_product_id`（本地台账
+    #: 主键，FK → `shop_products`）随表删，换平台 ID（理由同 `GenerationRecord.item_id`）。
+    item_id: Mapped[str] = mapped_column(String(64), default="", index=True)
     #: **是哪次生成产出这篇笔记**（版本历史 ↔ 笔记的唯一桥）。
     #: ⚠️ 2026-10-17 新增：此前本表只有「笔记 ↔ 商品」，**没有指向生成记录** ⇒
     #: 「基于第 2 版只重写文案」时需要从当前版本记录反查它产出的笔记（沿用其媒体），

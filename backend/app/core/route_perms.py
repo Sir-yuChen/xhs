@@ -117,12 +117,9 @@ ROUTE_PERMS: Final[dict[str, str]] = {
     "PATCH /api/xhs/materials/folders/{folder_id}": "xhs:material:editFolder",
     "PATCH /api/xhs/monitoring/targets/{target_id}": "xhs:monitor:edit",
     "PATCH /api/xhs/product-notes/versions/{record_id}": "xhs:workshop:adopt",
-    "PATCH /api/xhs/qianfan/items/edit": "xhs:item:edit",
     "POST /api/accounts/import-cookie": "xhs:account:importCookie",
     "POST /api/accounts/{account_id}/check": "xhs:account:probe",
-    "POST /api/accounts/{account_id}/goods-notes/sync": "xhs:account:syncGoodsNotes",
     "POST /api/accounts/{account_id}/metrics": "xhs:account:probe",
-    "POST /api/accounts/{account_id}/notes/sync": "xhs:account:syncNotes",
     "POST /api/accounts/{account_id}/qianfan-cookie": "xhs:account:edit",
     "POST /api/ai/generate-note": "ai:generate:generate",
     "POST /api/ai/generate-tags": "ai:generate:generate",
@@ -154,7 +151,6 @@ ROUTE_PERMS: Final[dict[str, str]] = {
     "POST /api/notes/batch-delete": "xhs:library:delete",
     "POST /api/notes/batch-publish": "xhs:publish:submit",
     "POST /api/notes/batch-save": "xhs:library:save",
-    "POST /api/notes/batch-sync": "xhs:note:batchSync",
     "POST /api/notes/batch-tag": "xhs:topic:edit",
     "POST /api/notes/export": "xhs:library:export",
     "POST /api/notes/import-data": "xhs:library:importData",
@@ -162,7 +158,6 @@ ROUTE_PERMS: Final[dict[str, str]] = {
     "POST /api/notes/{note_id}/assets": "xhs:note:edit",
     "POST /api/notes/{note_id}/hydrate": "xhs:note:sync",
     "POST /api/notes/{note_id}/publish": "xhs:publish:submit",
-    "POST /api/notes/{note_id}/sync": "xhs:note:sync",
     "POST /api/notifications/read-all": "xhs:note:edit",
     "POST /api/notifications/{notification_id}/read": "xhs:note:edit",
     "POST /api/publish/assets/{asset_id}/upload": "xhs:note:edit",
@@ -282,7 +277,6 @@ ROUTE_PERMS: Final[dict[str, str]] = {
     "POST /api/xhs/qianfan/item-generations": "xhs:item:view",
     "POST /api/xhs/qianfan/item-notes": "xhs:item:view",
     "POST /api/xhs/qianfan/items": "xhs:item:create",
-    "POST /api/xhs/qianfan/items/delete": "xhs:item:deleteLocal",
     "POST /api/xhs/qianfan/items/export": "xhs:item:export",
     #: ⚠️ 一个端点担**三个动作**（上架 / 下架 / 删除平台商品 —— 平台只给一个批量动作接口）。
     #: 路由表只能挂一个码 ⇒ 这里挂 `onShelf` 作静态声明，
@@ -293,7 +287,6 @@ ROUTE_PERMS: Final[dict[str, str]] = {
     "POST /api/xhs/qianfan/items/operate": "xhs:item:onShelf",
     "POST /api/xhs/qianfan/items/polish": "xhs:item:polish",
     "POST /api/xhs/qianfan/items/publish": "xhs:publish:submit",
-    "POST /api/xhs/qianfan/items/sync": "xhs:item:sync",
     "POST /api/xhs/qianfan/note-cleanup/candidates": "xhs:item:view",
     #: ⚠️ 订单列表 / 详情现在**读平台**（设计 75 §4.4），挂 `xhs:order:ship` 是历史遗留：
     #: 原码表里没有 order:view 的「读列表」档（只有 C 类菜单 view），改码会连带改前端

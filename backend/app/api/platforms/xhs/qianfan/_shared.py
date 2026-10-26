@@ -83,9 +83,7 @@ from backend.app.models.platform_account import PlatformAccount  # noqa: F401  #
 
 from backend.app.models.note import Note, NoteAsset  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from backend.app.models.order import AfterSale, Order  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from backend.app.models.shop import NoteGoods  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
 from backend.app.models.task import Task  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
@@ -95,7 +93,6 @@ from backend.app.services import scheduled_job_runner, sync_task_service  # noqa
 
 from backend.app.services import order_sync_service  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from backend.app.services import shop_goods_sync_service  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
 from backend.app.services import shop_products_service  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
@@ -136,6 +133,9 @@ from backend.app.services.shop_binding_service import (
 )  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
 from backend.app.models.user import User  # noqa: F401  # 转发面：本文件不直接用，子模块用
+
+#: 售后写链路扫订单的上限（平台没有「按售后单查」的口子，只能顺着最近订单找）。
+SCAN_ORDERS = 50
 
 logger = logging.getLogger(__name__)
 
@@ -569,11 +569,26 @@ def _text_model_context(
     )
     return OpenAICompatibleTextClient(), config, ctx.api_key
 
-def _item_error_to_http(error: Exception) -> HTTPException:
-    """商品本地编辑类错误 → HTTPException（code → 状态码，唯一映射点）。
+#: ⚠️ `_item_error_to_http` 已退场（设计 75 S5，2026-10-27）：它把
+#: `shop_products_service.ProductEditError` 翻成 HTTP —— 商品本地编辑端点
+#: （`PATCH /items/edit`）同批退场，`ProductEditError` 类也随服务层收窄删除。
+#: 现在**没有调用方**（`__init__.py` 的转发面也已摘掉），留着就是一个恒抛的壳。
 
-    ⚠️ 宿主原为 `product_groups_service.ProductGroupError`；2026-10-05 分组退场后
-    改为 `shop_products_service.ProductEditError`（同一语义、同一映射规则）。
+_DRAFT_MAX_IMAGES = draft_service.MAX_DRAFT_IMAGES
+
+_DRAFT_MAX_SKUS = draft_service.MAX_DRAFT_SKUS
+
+_DRAFT_LIMIT_PER_MINUTE = draft_service.DRAFT_LIMIT_PER_MINUTE
+
+def payload_metrics_account_id(account: PlatformAccount) -> int:
+    return account.id
+
+def _item_error_to_http(error: Exception) -> HTTPException:
+    """商品编辑类错误 → HTTPException（code → 状态码，唯一映射点）。
+
+    ⚠️ 宿主为 `shop_products_service.ProductEditError`（2026-10-05 分组退场后）；
+    设计 75 S5 后商品域改实时查询，但**编辑是平台写接口**、错误分类不变 ⇒ 本函数保留
+    （`items/edit` 已退场，`items/polish` 等仍走它）。
     """
     from backend.app.services.shop_products_service import ProductEditError
 
@@ -586,14 +601,6 @@ def _item_error_to_http(error: Exception) -> HTTPException:
         status_code = status.HTTP_400_BAD_REQUEST
     return HTTPException(status_code=status_code, detail={"code": code, "message": str(error)})
 
-_DRAFT_MAX_IMAGES = draft_service.MAX_DRAFT_IMAGES
-
-_DRAFT_MAX_SKUS = draft_service.MAX_DRAFT_SKUS
-
-_DRAFT_LIMIT_PER_MINUTE = draft_service.DRAFT_LIMIT_PER_MINUTE
-
-def payload_metrics_account_id(account: PlatformAccount) -> int:
-    return account.id
 
 def _order_write_error_to_http(error: Any) -> HTTPException:
     """`OrderWriteError` → HTTP（结构化）。门禁类 400，找不到类 404。"""
@@ -605,39 +612,111 @@ def _order_write_error_to_http(error: Any) -> HTTPException:
     code = status.HTTP_404_NOT_FOUND if error.code in not_found else status.HTTP_400_BAD_REQUEST
     return HTTPException(status_code=code, detail={"code": error.code, "message": str(error), **error.extra})
 
-def _owned_order(db: Session, current_user: User, account_id: int, order_no: str) -> Order:
-    """取本账号的一笔订单（越权 / 不存在 ⇒ 404，不区分二者）。"""
+class OrderRef:
+    """订单的**最小引用**（发货链路只需要这两个字段，见 `ship_confirm_material`）。
+
+    ⚠️ 设计 75 S5（2026-10-27）：原来 `_owned_order` 返回 `orders` 表的一整行。订单域
+    改**平台实时查询**后本地没有行了 —— 而发货 / 售后的 payload 只需要
+    `order_no` + `package_id`，用一个两字段的小对象代替整行，调用方 `.order_no` /
+    `.package_id` 的写法零改动。
+    """
+
+    __slots__ = ("order_no", "package_id")
+
+    def __init__(self, order_no: str, package_id: str) -> None:
+        self.order_no = order_no
+        self.package_id = package_id
+
+    def __repr__(self) -> str:  # pragma: no cover - 排障用
+        return f"OrderRef(order_no={self.order_no!r}, package_id={self.package_id!r})"
+
+
+def _owned_order(db: Session, current_user: User, account_id: int, order_no: str) -> "OrderRef":
+    """按订单号取**本账号**的一笔订单（越权 / 不存在 ⇒ 404，不区分二者）。
+
+    ⚠️ 设计 75 S5：改为**实时查平台**（`get_order_page` 按订单号定位 `package_id`）。
+    「归属」由账号保证：只在该账号自己的千帆令牌下查询，查不到就是查不到。
+    """
+    from backend.app.services import realtime_platform_query_service as rt
     from backend.app.services.order_write_service import OrderWriteError
 
-    order = db.scalars(
-        select(Order).where(
-            Order.user_id == current_user.id,
-            Order.platform_account_id == account_id,
-            Order.order_no == str(order_no or "").strip(),
-        )
-    ).first()
-    if order is None:
-        raise OrderWriteError(f"订单不存在或不属于当前账号：{order_no}", code="ORDER_NOT_FOUND")
-    return order
+    wanted = str(order_no or "").strip()
+    if not wanted:
+        raise OrderWriteError("缺少订单号", code="ORDER_NOT_FOUND")
+    account = db.get(PlatformAccount, int(account_id))
+    if account is None:
+        raise OrderWriteError(f"订单不存在或不属于当前账号：{wanted}", code="ORDER_NOT_FOUND")
+    try:
+        from backend.app.services.shop_binding_service import qianfan_cookies_for_account
 
-def _owned_after_sale(db: Session, current_user: User, account_id: int, after_sale_id: str) -> Any:
-    """取本账号的一条售后单（越权 / 不存在 ⇒ 404）。"""
-    from backend.app.services.order_write_service import OrderWriteError
-
-    row = db.scalars(
-        select(AfterSale)
-        .join(Order, Order.id == AfterSale.order_id)
-        .where(
-            AfterSale.user_id == current_user.id,
-            AfterSale.after_sale_id == str(after_sale_id or "").strip(),
-            Order.platform_account_id == account_id,
-        )
-    ).first()
-    if row is None:
+        cookies = qianfan_cookies_for_account(db, account.id)
+        if not cookies:
+            raise OrderWriteError(
+                "该账号没有可用的千帆（ark）登录态，无法读取订单。", code="ARK_SESSION_REQUIRED"
+            )
+        adapter = get_qianfan_api_adapter_factory()(cookies)
+        #: 平台必须给**有界**时间窗口（无界会挂 15 秒）⇒ `list_orders` 自己兜底
+        #: 「今天往前 365 天 ~ 现在」，这里显式不传窗口就是调它的兜底路径。
+        page = rt.list_orders(adapter, page=1, page_size=50)
+    except OrderWriteError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 平台失败统一成结构化错误
         raise OrderWriteError(
-            f"售后单不存在或不属于当前账号：{after_sale_id}", code="ORDER_AFTERSALE_NOT_FOUND"
+            f"读取订单失败：{exc}", code="ORDER_QUERY_FAILED"
+        ) from exc
+    for row in page.get("orders") or []:
+        if str(row.get("order_no") or "") == wanted:
+            return OrderRef(wanted, str(row.get("package_id") or ""))
+    raise OrderWriteError(f"订单不存在或不属于当前账号：{wanted}", code="ORDER_NOT_FOUND")
+
+
+def _owned_after_sale(db: Session, current_user: User, account_id: int, after_sale_id: str) -> dict:
+    """按售后单 ID 取**本账号**的售后单（越权 / 不存在 ⇒ 404）。
+
+    ⚠️ 设计 75 S5：改为**实时查平台**（订单详情里的 `after_sale_list`）。
+    平台没有「按售后单 ID 直接查」的口子 ⇒ 必须扫最近的订单详情找它。
+    ⚠️ 因此本函数只用于**售后处理**这种低频写动作（一次扫 `SCAN_ORDERS` 笔），
+    不要放进列表链路。
+    """
+    from backend.app.services import realtime_platform_query_service as rt
+    from backend.app.services.order_write_service import OrderWriteError
+
+    wanted = str(after_sale_id or "").strip()
+    if not wanted:
+        raise OrderWriteError("缺少售后单号", code="ORDER_AFTERSALE_NOT_FOUND")
+    account = db.get(PlatformAccount, int(account_id))
+    if account is None:
+        raise OrderWriteError(
+            f"售后单不存在或不属于当前账号：{wanted}", code="ORDER_AFTERSALE_NOT_FOUND"
         )
-    return row
+    try:
+        from backend.app.services.shop_binding_service import qianfan_cookies_for_account
+
+        cookies = qianfan_cookies_for_account(db, account.id)
+        if not cookies:
+            raise OrderWriteError(
+                "该账号没有可用的千帆（ark）登录态，无法读取售后单。", code="ARK_SESSION_REQUIRED"
+            )
+        adapter = get_qianfan_api_adapter_factory()(cookies)
+        page = rt.list_orders(adapter, page=1, page_size=SCAN_ORDERS)
+        for row in page.get("orders") or []:
+            package_id = str(row.get("package_id") or "")
+            if not package_id:
+                continue
+            detail = rt.get_order_detail(adapter, package_id=package_id)
+            for after_sale in (detail.get("item") or {}).get("after_sales") or []:
+                if str(after_sale.get("after_sale_id") or "") == wanted:
+                    return dict(after_sale)
+    except OrderWriteError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 平台失败统一成结构化错误
+        raise OrderWriteError(
+            f"读取售后单失败：{exc}", code="ORDER_QUERY_FAILED"
+        ) from exc
+    raise OrderWriteError(
+        f"售后单不存在或不属于当前账号：{wanted}", code="ORDER_AFTERSALE_NOT_FOUND"
+    )
+
 
 def realtime_query_error_to_http(error: Any, *, fallback_status: int = 502):
     """`RealtimeQueryError` → `HTTPException`（**结构化原因，不猜**）。

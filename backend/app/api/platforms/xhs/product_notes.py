@@ -56,7 +56,6 @@ PUBLISH_WAIT_SECONDS = 180
 PUBLISH_WAIT_POLL_SECONDS = 1.0
 from backend.app.models.generation import MEDIA_SOURCES, MEDIA_SOURCE_PRODUCT_IMAGE
 from backend.app.models.platform_account import PlatformAccount
-from backend.app.models.shop_product import ShopProduct
 from backend.app.models.user import User
 from backend.app.services import copy_requirements, note_version_service
 from backend.app.services.note_gen_llm_service import NoteGenerationError
@@ -451,30 +450,70 @@ def _llm_generation_error(error: NoteGenerationError) -> HTTPException:
     return HTTPException(http_status, detail={"code": error.code, "message": error.message})
 
 
-def _ledger_product(db: Session, current_user: User, account: PlatformAccount, item_id: str) -> ShopProduct:
-    """`(账号, item_id)` → 台账行（**零平台请求**，缺值不造假）。
+def _ledger_product(
+    db: Session, current_user: User, account: PlatformAccount, item_id: str
+) -> dict[str, Any]:
+    """`(账号, item_id)` → 商品事实字典（**实时查千帆**，缺值不造假）。
 
-    ⚠️ 与一期 `_fetch_product` 的关键差别：一期打千帆取**当下**商品（生成要写价格，
-    必须最新）；本期事实来源是**本地台账**（§5.1 商品白名单字段注入的输入），
-    设计 17 §1 把「生成链路完全不碰平台」定为定位 —— 即列表页同步过的商品才能生成，
-    与「商品台账」页同一个数据源。
+    ⚠️ 设计 75 S5（2026-10-27）：原来是「查本地台账行（零平台请求）」。台账表
+    （`shop_products`）已随迁移 `n8o9p0q1r2s3` 整表 DROP，用户口径也明确
+    「展示线上数据，实时查询线上数据」⇒ 生成链路取商品的**平台当下值**
+    （价格会变，这也正是生成要写进笔记的内容，用历史副本反而是错的）。
+
+    归一化与商品列表**同一份实现**（`normalize_item_from_raw`）——
+    两个入口显示不同字段是 DEF-044 的同型病。
+
+    失败分三档（不把凭据问题报成「商品不存在」）：
+    平台正常但没这件商品 ⇒ 404 `LLM_PRODUCT_NOT_FOUND`；
+    平台报错 ⇒ 502 带平台原话；其它 ⇒ 原样抛。
     """
-    row = db.scalar(
-        select(ShopProduct).where(
-            ShopProduct.user_id == current_user.id,
-            ShopProduct.platform_account_id == account.id,
-            ShopProduct.item_id == item_id,
+    from backend.app.services import realtime_platform_query_service as rt
+    from backend.app.services.shop_products_service import normalize_item_from_raw
+
+    adapter = _ark_adapter(db, account)
+    try:
+        result = rt.list_products(
+            adapter, keyword=str(item_id or "").strip(), status="all", page=1, page_size=20
         )
-    )
-    if row is None:
+    except rt.RealtimeQueryError as error:
+        code = getattr(error, "code", "QIANFAN_QUERY_FAILED")
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
+            status_code=(
+                status.HTTP_400_BAD_REQUEST
+                if code == "QIANFAN_CREDENTIAL_EXPIRED"
+                else status.HTTP_502_BAD_GATEWAY
+            ),
             detail={
-                "code": "LLM_PRODUCT_NOT_FOUND",
-                "message": f"本账号的台账里找不到商品 {item_id}。请先在「商品台账」同步该商品。",
+                "code": code,
+                "message": getattr(error, "message", str(error)),
+            },
+        ) from error
+    for row in result.get("items") or []:
+        if str(row.get("item_id") or "") == str(item_id or "").strip():
+            return normalize_item_from_raw(row)
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail={
+            "code": "LLM_PRODUCT_NOT_FOUND",
+            "message": f"平台上找不到商品 {item_id}（可能已被删除，或不属于该账号）。",
+        },
+    )
+
+
+def _ark_adapter(db: Session, account: PlatformAccount):
+    """按账号取千帆适配器（**实时查询的唯一取法**，不借任何别的凭据）。"""
+    cookies = qianfan_cookies_for_account(db, account.id)
+    if not cookies:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "ARK_SESSION_REQUIRED",
+                "message": "该账号没有可用的千帆（ark）登录态，无法读取商品信息。",
             },
         )
-    return row
+    from backend.app.adapters.xhs.qianfan_api_adapter import get_qianfan_api_adapter_factory
+
+    return get_qianfan_api_adapter_factory()(cookies)
 
 
 def _check_media_source(value: str) -> str:
@@ -595,8 +634,8 @@ def generate_llm_note(
         result = generate_llm_note_sync(
             db,
             current_user.id,
-            shop_product_id=int(row.id),
             account_id=int(account.id),
+            item_id=str(row.get("item_id") or payload.item_id),
             template_id=payload.template_id,
             gateway_config_id=payload.gateway_config_id,
             model_name=payload.model_name,
@@ -675,7 +714,7 @@ def retry_llm_generate(
     「这次生成再试一次」，不是两次生成）。只有 `status=failed` 可重试：
     `success` 重试会覆盖已完成产物，`running` 正在跑 ⇒ 一律 400 `LLM_RECORD_NOT_RETRYABLE`。
 
-    重试**不需要**再传商品 / 模板：取原记录上的 `shop_product_id` / `template_id`
+    重试**不需要**再传商品 / 模板：取原记录上的 `item_id` / `template_id`
     （连同 `gateway_config_id` / `model_name` / `media_source` 一起在新队列项里留痕）。
     """
     try:
@@ -778,10 +817,11 @@ def publish_note_version(
         )
     ).all()
     #: ⚠️ **同一 `record_id` 可能对应多篇笔记**（局部重生成覆盖同一版时会另起一行，
-    #: 历史上也留下过重复）⇒ 不能「取第一条」：实测拿到的是**没有商品关系**的旧篇
-    #: （`note_goods` 空）⇒ 发布出去照样是裸笔记，用户看到「依旧没挂商品」。
+    #: 历史上也留下过重复）⇒ 不能「取第一条」：实测拿到的是**没有挂商品**的旧篇
+    #: ⇒ 发布出去照样是裸笔记，用户看到「依旧没挂商品」。
     #: 排序判据（按优先级）：
-    #:   ① **有商品关系**的优先（否则这次必挂不上）；
+    #:   ① **挂了商品**的优先（否则这次必挂不上）—— 判据 = `raw_json.item_id`
+    #:      （设计 75 S5：`note_goods` 关系表已 DROP，`raw_json.item_id` 成为唯一落点）；
     #:   ② **未发布**的优先（避免重复发同一篇，也避免撞平台重复内容限制）；
     #:   ③ 最新的优先（`id` 倒序，最接近用户当前看到的那一版）。
     matched: list[Note] = []
@@ -803,47 +843,22 @@ def publish_note_version(
             },
         )
 
-    from backend.app.models.shop import NoteGoods
-
     def _rank(note_row: Note) -> tuple[int, int, int]:
-        has_goods = (
-            db.scalar(
-                select(NoteGoods.id).where(
-                    NoteGoods.user_id == int(note_row.user_id),
-                    NoteGoods.note_id == str(note_row.note_id or ""),
-                )
-            )
-            is not None
-        )
+        raw_payload = note_row.raw_json if isinstance(note_row.raw_json, dict) else {}
+        has_goods = bool(str((raw_payload or {}).get("item_id") or "").strip())
         not_published = note_row.publish_status != "published"
         return (1 if has_goods else 0, 1 if not_published else 0, int(note_row.id))
 
     note = max(matched, key=_rank)
     #: ⚠️ **发布前确保商品关系存在**（用户口径 2026-10-19：*「笔记发布均需要挂当前商品的
-    #: 链接」*）—— 发布链路 `_goods_item_ids_for()` 只认 `note_goods` / `raw_json.item_id`。
-    #: 本端点手里有 `record.shop_product_id`（本地台账主键）⇒ 直接补齐，
-    #: 不依赖生成侧是否写过（历史笔记就是这样缺的，实测 note 3886 两张表都空）。
-    from backend.app.models.shop import NoteGoods
-    from backend.app.models.shop_product import ShopProduct
-
-    product = db.get(ShopProduct, int(record.shop_product_id or 0))
-    if product is not None and str(product.item_id or "").strip():
-        item_id = str(product.item_id).strip()
-        exists = db.scalar(
-            select(NoteGoods).where(
-                NoteGoods.user_id == int(current_user.id),
-                NoteGoods.note_id == str(note.note_id or ""),
-                NoteGoods.item_id == item_id,
-            )
-        )
-        if exists is None:
-            db.add(
-                NoteGoods(
-                    user_id=int(current_user.id),
-                    note_id=str(note.note_id or ""),
-                    item_id=item_id,
-                )
-            )
+    #: 链接」*）—— 发布链路 `_goods_item_ids_for()` 认 `raw_json.item_id`。
+    #: 本端点手里有 `record.item_id`（平台商品 ID）⇒ 直接补齐，
+    #: 不依赖生成侧是否写过（历史笔记就是这样缺的，实测 note 3886 两处都空）。
+    #: ⚠️ 设计 75 S5（2026-10-27）：`note_goods` 关系表已 DROP ⇒ **唯一落点**是
+    #: `raw_json.item_id`（发布链路 `_goods_item_ids_for()` 读它）。商品 ID 直接取
+    #: 记录行上的平台 ID（`generation_records.item_id`），不再回查台账主键。
+    item_id = str(record.item_id or "").strip()
+    if item_id:
         raw = note.raw_json if isinstance(note.raw_json, dict) else {}
         raw = dict(raw or {})
         raw["item_id"] = item_id
@@ -924,7 +939,6 @@ def publish_note_version(
 
 @router.get("/versions")
 def list_note_versions(
-    shop_product_id: int | None = None,
     platform_account_id: int | None = None,
     item_id: str | None = None,
     limit: int = 50,
@@ -936,21 +950,18 @@ def list_note_versions(
     ⚠️ 失败版本也在列表里：用户要看到「第 3 次生成了但失败了」，
     否则会以为点了没反应。
 
-    ⚠️ **两种定位方式**（二选一）：
-      - `shop_product_id` —— 本地台账主键（已知时最直接）；
-      - `platform_account_id` + `item_id` —— **平台标识**。
-        弹窗手里只有平台 `item_id`（列表载荷里没有本地主键），
-        让前端自己查一次台账是多余的往返 ⇒ 后端按同一判据解析
-        （`uq_shop_products_account_item`：`item_id` 只在账号内唯一）。
+    ⚠️ **只按平台标识定位**（设计 75 S5，2026-10-27）：`platform_account_id` + `item_id`。
+    原 `shop_product_id`（本地台账主键）参数随台账表 DROP 退场 —— 版本行的分组键
+    也换成了平台 `item_id`（`generation_records.item_id`）。
     """
-    resolved_id = shop_product_id
-    if resolved_id is None:
-        if not platform_account_id or not item_id:
+    resolved_id = str(item_id or "").strip()
+    if not resolved_id:
+        if True:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={
                     "code": "LLM_VERSION_QUERY_INVALID",
-                    "message": "需要 shop_product_id，或 platform_account_id + item_id",
+                    "message": "需要 item_id（平台商品 ID，可配 platform_account_id 指定账号）",
                 },
             )
         account = db.get(PlatformAccount, int(platform_account_id))
@@ -959,18 +970,16 @@ def list_note_versions(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={"code": "LLM_ACCOUNT_NOT_FOUND", "message": "账号不存在或不属于当前用户"},
             )
-        row = _ledger_product(db, current_user, account, item_id)
-        resolved_id = int(row.id)
 
     rows = note_version_service.list_versions(
         db,
         user_id=int(current_user.id),
-        shop_product_id=int(resolved_id),
+        item_id=resolved_id,
         limit=max(1, min(int(limit), 200)),
     )
     return {
         "ok": True,
-        "shop_product_id": int(resolved_id),
+        "item_id": resolved_id,
         "total": len(rows),
         "items": [note_version_service.version_summary(row) for row in rows],
     }
@@ -1054,8 +1063,8 @@ def regen_from_version(
         ) from error
     assert target is not None  # scope != all ⇒ validate_target_version 保证非 None
 
-    shop_product_id = int(target.shop_product_id or 0)
-    if not shop_product_id:
+    target_item_id = str(target.item_id or "").strip()
+    if not target_item_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
@@ -1063,11 +1072,19 @@ def regen_from_version(
                 "message": "这一版没有关联商品，无法重生成",
             },
         )
-    row = db.get(ShopProduct, shop_product_id)
-    if row is None:
+    #: 商品归属账号：取该版本记录所属的账号（`note_generation_links.account` 不可用时
+    #: 退回请求方最近的账号）。⚠️ **不猜平台 ID** —— 记录行的 `item_id` 就是平台 ID。
+    from backend.app.models.platform_account import PlatformAccount as _PA
+
+    account = db.scalar(
+        select(_PA)
+        .where(_PA.user_id == int(current_user.id), _PA.deleted_at.is_(None))
+        .order_by(_PA.id.asc())
+    )
+    if account is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail={"code": "LLM_ITEM_INVALID", "message": "这一版关联的商品已不在台账"},
+            detail={"code": "LLM_ACCOUNT_NOT_FOUND", "message": "当前账号下没有平台账号"},
         )
 
     #: 文案要求：给了就用新的，没给就**沿用当前版本的快照**（保持「只改图」时文案参数不变）。
@@ -1087,7 +1104,8 @@ def regen_from_version(
         result = regen_llm_note_sync(
             db,
             int(current_user.id),
-            shop_product_id=shop_product_id,
+            account_id=int(account.id),
+            item_id=target_item_id,
             regen_scope=scope,
             target_record_id=int(target.id),
             template_id=payload.template_id or target.template_id,

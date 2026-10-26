@@ -43,11 +43,9 @@ import json
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.models import PlatformAccount
-from backend.app.models.shop import ShopNoteGoods
 
 #: `shop_state` 的键与默认值。**缺键必须读成这个**（而不是 `None`）：
 #: 未同步过 = 游标 0 = 下一轮走全量；计数缺值渲染 0（与卡片口径同源）。
@@ -185,9 +183,10 @@ def qianfan_cookies_for_account(db: Session, account_id: int) -> str:
 
 
 def synced_note_count(db: Session, account_id: int) -> int:
-    """该账号已落库的商品笔记映射条数。"""
-    return len(
-        db.scalars(
-            select(ShopNoteGoods.id).where(ShopNoteGoods.platform_account_id == account_id)
-        ).all()
-    )
+    """该账号已落库的**商品笔记映射**条数 —— ⚠️ 设计 75 S5 起恒为 0。
+
+    原来数的是 `shop_note_goods`（千帆商品笔记列表的本地映射），该表已随迁移
+    `n8o9p0q1r2s3` 整表 DROP（挂链改实时查询）。函数保留是为了不改调用方签名；
+    **不要**拿它当「有没有数据」的判据 —— 现在永远是 0，看 `rt.list_goods_notes`。
+    """
+    return 0

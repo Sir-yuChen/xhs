@@ -43,7 +43,6 @@ import time
 import uuid
 from typing import Any, Optional
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from apis.xhs_qianfan_apis import (
@@ -59,8 +58,6 @@ from backend.app.models.note import (
     set_note_publish_status,
 )
 from backend.app.models.platform_account import PlatformAccount
-from backend.app.models.shop import NoteGoods
-from backend.app.models.shop_product import ShopProduct
 from backend.app.services import note_queue_service
 from backend.app.services.product_note_service import run_guardrails
 from backend.app.services.note_topic_service import apply_sync_topics
@@ -142,58 +139,64 @@ def _first_list(value: Any) -> list:
     return value if isinstance(value, list) else []
 
 
-def _product_row(db: Session, account, item_id: str) -> ShopProduct:
-    """本地台账取商品行（同一份真相源：生成 / 挂链 / 媒体都指它）。
+def _product_row(db: Session, account, item_id: str, *, adapter: Any = None) -> dict:
+    """**实时**取商品（不再是本地台账行）—— 返回平台归一化 dict。
 
-    **归属键 = `platform_account_id`**（ADR-021）：商品直接挂账号，不再经店铺实体。
+    ⚠️ 设计 75 S5（2026-10-27）：`shop_products` 表已 DROP，商品域全实时。
+    本函数保留原名（调用方 3 处：生成 / 单条入队 / 批量入队门禁），只换实现：
+
+    | 字段 | 从哪取 |
+    |---|---|
+    | `title` / `price_min_fen` / `price_max_fen` / `images` | `rt.list_products(keyword=item_id)` 命中那一行 |
+    | `item_id` | 入参 |
+
+    `keyword` 搜索是平台唯一按 ID 精确定位的口子（`search_item_v2` 的 `keyword`
+    同时匹配商品 ID 与标题）⇒ 命中后**必须再按 `item_id` 严格比对一次**，
+    否则关键词命中的同名商品会被当成目标商品（会拿错价格 / 拿错图）。
+
+    **归属**由账号保证：只在该账号自己的千帆令牌下查询。
+    取不到 ⇒ `QIANFAN_ITEM_NOT_FOUND`（不再提「请先同步商品」—— 没有同步这个概念了）。
     """
     if not has_ark_session(db, account.id):
         raise ProductNoteGenerationError(
             "ARK_SESSION_REQUIRED", "本账号没有可用的千帆登录态，无法生成商品笔记。请先登录该账号的千帆。"
         )
-    row = db.scalars(
-        select(ShopProduct).where(
-            ShopProduct.platform_account_id == account.id, ShopProduct.item_id == item_id
-        )
-    ).first()
-    if row is None:
+    if adapter is None:
         raise ProductNoteGenerationError(
-            "QIANFAN_ITEM_NOT_FOUND",
-            f"本地台账里找不到商品 {item_id}（可能还没同步商品，或已被删除）。请先执行「同步商品」。",
+            "QIANFAN_CREDENTIAL_MISSING", "该账号还没有千帆（ark）令牌，请先在浏览器登录千帆后导入。"
         )
-    return row
+    from backend.app.services import realtime_platform_query_service as rt
+
+    try:
+        page = rt.list_products(adapter, keyword=item_id, page=1, page_size=20)
+    except Exception as exc:  # noqa: BLE001 - 平台失败统一成结构化错误
+        raise ProductNoteGenerationError(
+            "QIANFAN_ITEM_QUERY_FAILED", f"读取商品 {item_id} 失败：{exc}"
+        ) from exc
+    for row in page.get("items") or []:
+        if isinstance(row, dict) and str(row.get("item_id") or "") == str(item_id):
+            return row
+    raise ProductNoteGenerationError(
+        "QIANFAN_ITEM_NOT_FOUND",
+        f"平台上找不到商品 {item_id}（可能已删除，或不属于当前账号）。",
+    )
 
 
-def _product_images(row: ShopProduct) -> list[dict]:
+def _product_images(row: dict) -> list[dict]:
     """商品图（URL + 宽高），**最多 `MAX_NOTE_IMAGES` 张**（§32.2.1）。
 
-    宽高取 `raw_json.images[]`（发布 `images_list` 要用）；缺失留空不造假。
+    ⚠️ 设计 75 S5：入参是**平台实时**归一化条目（`rt.normalize_product`），
+    不再是台账行 —— `images` 是 URL 列表（宽高平台列表接口不给 ⇒ 留 0，不造假）。
+    发布 `images_list` 只需要 URL；宽高缺值不影响发布。
     """
-    try:
-        urls = json.loads(row.images_json or "[]")
-    except ValueError:
-        urls = []
-    urls = [str(u) for u in urls if isinstance(u, str) and u.strip()][:MAX_NOTE_IMAGES]
-    dims: dict[str, dict] = {}
-    try:
-        raw_images = json.loads(row.raw_json or "{}").get("images")
-    except ValueError:
-        raw_images = None
-    if isinstance(raw_images, list):
-        for entry in raw_images:
-            if isinstance(entry, dict) and entry.get("link"):
-                dims[str(entry["link"])] = {
-                    "width": entry.get("width") or 0,
-                    "height": entry.get("height") or 0,
-                }
-    out: list[dict] = []
-    for url in urls:
-        dim = dims.get(url, {})
-        out.append({"url": url, "width": int(dim.get("width") or 0), "height": int(dim.get("height") or 0)})
-    return out
+    urls = [str(u) for u in (row.get("images") or []) if isinstance(u, str) and u.strip()]
+    return [
+        {"url": url, "width": 0, "height": 0}
+        for url in urls[:MAX_NOTE_IMAGES]
+    ]
 
 
-def _product_video(row: ShopProduct) -> dict:
+def _product_video(row: dict) -> dict:
     """商品视频（§31.1.3 + §32.2.1 的「视频优先」取舍点）。
 
     ⚠️ **当前数据源不可得**：`search_item_v2` 响应不含商品视频（真机 1974 条遍历
@@ -202,10 +205,17 @@ def _product_video(row: ShopProduct) -> dict:
     命中即返回 `{url,width,height}`，否则空 dict —— 不猜 URL、不造占位。
     生成结果里 `video_count` 如实报告，别把「没有视频」渲染成「有 0 个」。
     """
-    try:
-        raw = json.loads(row.raw_json or "{}")
-    except ValueError:
-        raw = {}
+    #: ⚠️ 设计 75 S5：入参改平台实时条目（dict）。平台的列表 / 详情接口都**不给商品视频**
+    #: （见 docstring 的「数据源不可得」）⇒ `row.get("video")` 恒空，函数保持取舍规则的
+    #: 落点而不假装有数据。
+    raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
+    video_hint = row.get("video")
+    if isinstance(video_hint, dict) and video_hint.get("url"):
+        return {
+            "url": str(video_hint.get("url") or ""),
+            "width": int(video_hint.get("width") or 0),
+            "height": int(video_hint.get("height") or 0),
+        }
     if not isinstance(raw, dict):
         return {}
     for key in _VIDEO_KEYS:
@@ -376,8 +386,8 @@ def _run_aigc(adapter, item_id: str) -> dict:
     )
 
 
-def _gate_for_generation(db: Session, account, item_id: str) -> tuple[ShopProduct, str]:
-    """生成门禁（§31.4 步 1-2）：ark 令牌 → 台账商品行。
+def _gate_for_generation(db: Session, account, item_id: str, *, adapter: Any = None) -> tuple[dict, str]:
+    """生成门禁（§31.4 步 1-2）：ark 令牌 → **实时**商品存在性。
 
     **单 / 批量入队与 worker 重跑共用这一把尺子**（DEF-044）：两项都是**确定性
     答案**（本地库可判），不过 ⇒ 抛 :class:`ProductNoteGenerationError`，调用方
@@ -388,8 +398,12 @@ def _gate_for_generation(db: Session, account, item_id: str) -> tuple[ShopProduc
     归属判据已随店铺实体退场）。取票即门禁 —— 先判 `has_ark_session` 拿到统一
     的 `ARK_SESSION_REQUIRED` 解释，再取 cookies 供调用方造 adapter。
 
-    返回 `(台账商品行, ark 令牌)`：调用方直接用这份令牌造 adapter，不在门禁里
-    构造 adapter（门禁失败时一次平台对象都不该造）。
+    ⚠️ 设计 75 S5（2026-10-27）：第二道从「本地台账有这行」改成「**平台上查得到
+    这件商品**」—— 台账表已 DROP。`adapter` 由调用方传入（它已经要先造 adapter
+    才能查）；不传 ⇒ 只做到 ark 门禁为止，商品由调用方自己查。
+
+    返回 `(商品 dict, ark 令牌)`：**商品 dict 是平台实时归一化条目**（字段与
+    `rt.normalize_product` 一致），调用方按 dict 取值。
     """
     if not has_ark_session(db, account.id):
         raise ProductNoteGenerationError(
@@ -400,7 +414,7 @@ def _gate_for_generation(db: Session, account, item_id: str) -> tuple[ShopProduc
         raise ProductNoteGenerationError(
             "QIANFAN_CREDENTIAL_MISSING", "该账号还没有千帆（ark）令牌，请先在浏览器登录千帆后导入。"
         )
-    return _product_row(db, account, item_id), cookies
+    return _product_row(db, account, item_id, adapter=adapter), cookies
 
 
 def generate_note_for_item(
@@ -418,16 +432,17 @@ def generate_note_for_item(
     门禁顺序（设计 13 §31.4 步 1）：**绑店 → ark 令牌 → 台账商品**
     （唯一实现 :func:`_gate_for_generation`，队列入口与 worker 共用）。
     """
-    row, cookies = _gate_for_generation(db, account, item_id)
+    _pre, cookies = _gate_for_generation(db, account, item_id)
     adapter = adapter_factory(cookies)
+    row = _product_row(db, account, item_id, adapter=adapter)
     generated = _run_aigc(adapter, item_id)
     if not generated["title"] and not generated["content"]:
         raise ProductNoteGenerationError("AI_GENERATION_FAILED", "平台返回了空的标题与正文。")
 
     # 护栏：记录不拦截（设计 13 §31.4 步 4）—— 内容出自平台官方 AI。
     product_for_check = {
-        "price_min_fen": row.price_min_fen,
-        "price_max_fen": row.price_max_fen,
+        "price_min_fen": row.get("price_min_fen"),
+        "price_max_fen": row.get("price_max_fen"),
     }
     guardrails = run_guardrails(generated["title"], generated["content"], product_for_check)
 
@@ -499,15 +514,10 @@ def generate_note_for_item(
                 sort_order=entry["sort_order"],
             )
         )
-    # ⚠️ 2026-09-27（§26.7）：关系行按**平台 ID** 落（`note.note_id` 是本地生成的
-    # `local_…` 合成 ID，发布成功后由 `_move_note_goods_relations` 迁到平台真 ID）。
-    db.add(
-        NoteGoods(
-            user_id=note.user_id,
-            note_id=note.note_id,
-            item_id=str(row.item_id or ""),
-        )
-    )
+    #: ⚠️ 设计 75 S5（2026-10-27）：**不再落「笔记↔商品」关系行** ——
+    #: `note_goods` 表已随迁移 `n8o9p0q1r2s3` DROP。生成记录本身（`generation_records`）
+    #: 保留 `item_id`，商品侧任何时候都能实时查回；关系由平台在发布成功后真实建立
+    #: （挂链 = 平台事实，本地副本只会在两边不同步时骗人）。
     db.commit()
 
     return {
@@ -540,7 +550,8 @@ def start_generate_note(
 
     幂等：同用户未终态队列里已有同 `item_id` ⇒ `already_queued: true`（不重复生成）。
     """
-    row, _cookies = _gate_for_generation(db, account, item_id)
+    _pre, cookies = _gate_for_generation(db, account, item_id)
+    row = _product_row(db, account, item_id, adapter=adapter_factory(cookies))
     # 一次动作 = 一个批次（2026-09-26 用户口径「批次逻辑不再移除，生成唯一批次号」）：
     # 单商品点击也开新批次号（一条明细），不复用已有批次。
     generate_batch = note_queue_service.BatchRequest(
@@ -554,7 +565,7 @@ def start_generate_note(
         item_task_type=note_queue_service.TASK_TYPE_GEN_ITEM,
         account_id=account.id,
         item_id=item_id,
-        item_name=str(getattr(row, "item_title", "") or ""),
+        item_name=str(row.get("title") or ""),
         source=note_queue_service.SOURCE_PRODUCT_NOTE_GENERATE_SINGLE,
         batch=generate_batch,
     )
@@ -603,7 +614,8 @@ def start_batch_generate(
     results: list[dict] = []
     for item_id in distinct:
         try:
-            row, _cookies = _gate_for_generation(db, account, item_id)
+            _pre, cookies = _gate_for_generation(db, account, item_id)
+            row = _product_row(db, account, item_id, adapter=adapter_factory(cookies))
         except ProductNoteGenerationError as error:
             results.append({"item_id": item_id, "ok": False, "error": error.message, "code": error.code})
             continue
@@ -613,7 +625,7 @@ def start_batch_generate(
             item_task_type=note_queue_service.TASK_TYPE_GEN_ITEM,
             account_id=account.id,
             item_id=item_id,
-            item_name=str(getattr(row, "item_title", "") or ""),
+            item_name=str(row.get("title") or ""),
             source=note_queue_service.SOURCE_PRODUCT_NOTE_GENERATE_BATCH,
             batch=generate_batch,
         )
