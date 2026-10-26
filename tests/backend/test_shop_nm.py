@@ -46,6 +46,13 @@ from tests.backend.cookie_fixtures import ARK_COOKIES, give_ark_cookies
 
 import pytest
 
+from tests.backend.conftest import (  # noqa: PLC0415 - schema 复用助手
+    _BUILT_SCHEMAS,
+    _SCHEMA_BY_ENGINE,
+    make_engine,
+    reset_test_data,
+)
+
 
 
 
@@ -87,10 +94,15 @@ class FakeArkAdapter:
 
 
 def _setup(tmp_path, accounts: int = 2):
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'account-ark.db'}", connect_args={"check_same_thread": False}
-    )
-    Base.metadata.create_all(bind=engine)
+    engine = make_engine(tmp_path / 'account-ark.db')
+    #: 2026-10-26：同进程复用 schema ⇒ 表只建一次，之后只清数据。
+    _schema = _SCHEMA_BY_ENGINE.get(engine)
+    if _schema is not None and _BUILT_SCHEMAS.get(_schema):
+        reset_test_data(engine)
+    else:
+        Base.metadata.create_all(bind=engine)
+        if _schema is not None:
+            _BUILT_SCHEMAS[_schema] = True
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
     def override_get_db():
@@ -412,8 +424,15 @@ def test_shops_table_is_gone_from_the_schema():
     表没了 ⇒ 那种残留**在新模型下根本造不出来**（这本身就是 ADR-021 想要的结果）。
     现在直接钉 schema：两张「表 / 列不存在」的判据。
     """
-    engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(bind=engine)
+    engine = make_engine()
+    #: 2026-10-26：同进程复用 schema ⇒ 表只建一次，之后只清数据。
+    _schema = _SCHEMA_BY_ENGINE.get(engine)
+    if _schema is not None and _BUILT_SCHEMAS.get(_schema):
+        reset_test_data(engine)
+    else:
+        Base.metadata.create_all(bind=engine)
+        if _schema is not None:
+            _BUILT_SCHEMAS[_schema] = True
     with engine.connect() as conn:
         tables = {row[0] for row in conn.execute(text("select name from sqlite_master where type='table'"))}
         assert "shops" not in tables, f"`shops` 表该已随 ADR-021 退场：{sorted(tables)}"

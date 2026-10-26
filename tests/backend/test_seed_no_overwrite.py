@@ -48,13 +48,15 @@ SEED_DIR = ROOT / "config" / "initial_data"
 #: 属于 integration（不是纯函数 redline）。
 pytestmark = pytest.mark.integration
 
+from tests.backend.conftest import make_engine  # noqa: E402 - 夹具助手，测试期导入
+
 
 @pytest.fixture()
 def db(tmp_path):
     """独立的空库（create_all），不打任何桩 —— 种子只碰这一个文件。"""
     from backend.app import models  # noqa: F401
 
-    engine = create_engine(f"sqlite:///{tmp_path / 'seed.db'}")
+    engine = make_engine(tmp_path / 'seed.db')
     Base.metadata.create_all(engine)
     session = Session(bind=engine)
     try:
@@ -106,7 +108,9 @@ def test_seed_is_idempotent(db):
     before = _snapshot(db)
 
     assert first["menus"] > 0, "首次播种应当建出菜单"
-    assert first["roles"] == 2
+    #: 内置角色 3 个：`admin` / `manager` / `user`（设计 57 三内置角色）。
+    #: 旧值 2 是「只有 admin + user」时期的写死值，未随 `core/roles.py` 扩张回写。
+    assert first["roles"] == 3
 
     second = seed_system_domain(db)
     db.commit()

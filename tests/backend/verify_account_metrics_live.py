@@ -31,6 +31,8 @@ from sqlalchemy.orm import sessionmaker  # noqa: E402
 from backend.app.core.database import get_db  # noqa: E402
 from backend.app.main import app  # noqa: E402
 
+from tests.backend.conftest import make_engine  # noqa: PLC0415
+
 RESULTS: list[tuple[str, bool, str]] = []
 
 
@@ -45,7 +47,7 @@ def main() -> int:
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(source, target)
 
-    engine = create_engine(f"sqlite:///{target.as_posix()}", connect_args={"check_same_thread": False})
+    engine = make_engine(target.as_posix())
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
     def override_get_db():

@@ -36,6 +36,13 @@ from backend.app.services import sync_task_service as sts
 from backend.app.services import task_cancel
 from tests.backend.cookie_fixtures import bind_shop_account
 
+from tests.backend.conftest import (  # noqa: PLC0415 - schema 复用助手
+    _BUILT_SCHEMAS,
+    _SCHEMA_BY_ENGINE,
+    make_engine,
+    reset_test_data,
+)
+
 
 #: 测试分层标记（2026-10-23 立，见 `docs/04_测试文档/01_测试体系与流程规范.md` §15.2）。
 #: 分层按**实测耗时 + 语义**判定（`python .hermes/scripts/classify_tests.py --apply`）：
@@ -136,10 +143,15 @@ def _goods_item(item_id: str) -> dict:
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'cancel.db'}", connect_args={"check_same_thread": False}
-    )
-    Base.metadata.create_all(bind=engine)
+    engine = make_engine(tmp_path / 'cancel.db')
+    #: 2026-10-26：同进程复用 schema ⇒ 表只建一次，之后只清数据。
+    _schema = _SCHEMA_BY_ENGINE.get(engine)
+    if _schema is not None and _BUILT_SCHEMAS.get(_schema):
+        reset_test_data(engine)
+    else:
+        Base.metadata.create_all(bind=engine)
+        if _schema is not None:
+            _BUILT_SCHEMAS[_schema] = True
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
     def override_get_db():

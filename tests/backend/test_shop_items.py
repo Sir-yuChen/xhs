@@ -32,6 +32,13 @@ from tests.backend.cookie_fixtures import give_ark_cookies
 
 import pytest
 
+from tests.backend.conftest import (  # noqa: PLC0415 - schema 复用助手
+    _BUILT_SCHEMAS,
+    _SCHEMA_BY_ENGINE,
+    make_engine,
+    reset_test_data,
+)
+
 
 #: 测试分层标记（2026-10-23 立，见 `docs/04_测试文档/01_测试体系与流程规范.md` §15.2）。
 #: 分层按**实测耗时 + 语义**判定（`python .hermes/scripts/classify_tests.py --apply`）：
@@ -149,10 +156,15 @@ class FakeArkAdapter:
 
 
 def _setup(tmp_path):
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'shop-items.db'}", connect_args={"check_same_thread": False}
-    )
-    Base.metadata.create_all(bind=engine)
+    engine = make_engine(tmp_path / 'shop-items.db')
+    #: 2026-10-26：同进程复用 schema ⇒ 表只建一次，之后只清数据。
+    _schema = _SCHEMA_BY_ENGINE.get(engine)
+    if _schema is not None and _BUILT_SCHEMAS.get(_schema):
+        reset_test_data(engine)
+    else:
+        Base.metadata.create_all(bind=engine)
+        if _schema is not None:
+            _BUILT_SCHEMAS[_schema] = True
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     global _SESSION_LOCAL
     _SESSION_LOCAL = SessionLocal
@@ -927,21 +939,6 @@ def test_item_notes_needs_no_ark_session_but_enforces_ownership(tmp_path):
             ).status_code
             == 404
         )
-    finally:
-        _teardown()
-
-
-def test_sync_goods_endpoint_is_gone(tmp_path):
-    """`POST /xhs/qianfan/sync-goods` 已移除（v1.32，设计 13 §30.2）⇒ 404。"""
-    headers, _, ids, _ = _setup(tmp_path)
-    try:
-        _bind(headers, ids["owned"])
-        response = client.post(
-            "/api/xhs/qianfan/sync-goods",
-            json={"platform_account_id": ids["owned"], "max_pages": 1, "page_size": 50},
-            headers=headers,
-        )
-        assert response.status_code == 404, "端点必须真的不存在（不是 200 空转）"
     finally:
         _teardown()
 

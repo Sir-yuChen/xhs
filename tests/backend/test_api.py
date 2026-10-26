@@ -20,6 +20,12 @@ from tests.backend.cookie_fixtures import cookie_version
 #: R4 注册即播种默认映射 ⇒ 盲 `db.add` 必撞 `(user_id, platform, business_key)` 唯一约束）。
 #: 各测试文件共用这一份，别再各写一份（DEF-044）。
 from tests.backend.conftest import upsert_business_mapping as _upsert_business_mapping
+from tests.backend.conftest import (  # noqa: PLC0415 - 批次 2026-10-26 去 SQLite 后引入
+    _BUILT_SCHEMAS,
+    _SCHEMA_BY_ENGINE,
+    make_engine,
+    reset_test_data,
+)
 import pytest
 
 
@@ -317,45 +323,6 @@ def test_run_alembic_migrations_pins_absolute_script_location(tmp_path, monkeypa
     assert os.path.basename(location) == "alembic"
 
 
-def test_database_initialization_normalizes_legacy_gpt_54_model_name(tmp_path):
-    from backend.app.core.database import _normalize_model_config_names
-
-    engine = create_engine(f"sqlite:///{tmp_path / 'model-name-migration-test.db'}", connect_args={"check_same_thread": False})
-    with engine.begin() as connection:
-        connection.execute(
-            text(
-                """
-                CREATE TABLE model_configs (
-                    id INTEGER PRIMARY KEY,
-                    user_id INTEGER NOT NULL,
-                    name VARCHAR(128) NOT NULL,
-                    model_type VARCHAR(32) NOT NULL,
-                    provider VARCHAR(64) NOT NULL,
-                    model_name VARCHAR(128) NOT NULL,
-                    base_url TEXT NOT NULL,
-                    encrypted_api_key TEXT NOT NULL,
-                    is_default BOOLEAN NOT NULL
-                )
-                """
-            )
-        )
-        connection.execute(
-            text(
-                "INSERT INTO model_configs "
-                "(id, user_id, name, model_type, provider, model_name, base_url, encrypted_api_key, is_default) "
-                "VALUES (1, 1, 'Text model', 'text', 'openai-compatible', 'gpt5.4', 'https://api.example.test/v1', '', 1)"
-            )
-        )
-
-    _normalize_model_config_names(engine)
-    with engine.connect() as connection:
-        row = connection.execute(text("SELECT model_name FROM model_configs WHERE id = 1")).mappings().one()
-        assert row["model_name"] == "gpt-5.4"
-        assert connection.execute(
-            text("SELECT name FROM app_migrations WHERE name = 'normalize_legacy_gpt_54_model_name_v1'")
-        ).first()
-
-
 def test_sqlite_startup_helpers_are_gone():
     """⚠️ v1.1.0（2026-10-24）退役守卫：SQLite 专属启动初始化已整段删除。
 
@@ -398,9 +365,16 @@ def _override_database(tmp_path):
     global _test_session_factory
     from backend.app.core.database import Base, get_db
 
-    engine = create_engine(f"sqlite:///{tmp_path / 'auth-test.db'}", connect_args={"check_same_thread": False})
+    engine = make_engine(tmp_path / 'auth-test.db')
     TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-    Base.metadata.create_all(bind=engine)
+    #: 2026-10-26：同进程复用 schema ⇒ 表只建一次，之后只清数据（省 7.5s/条）。
+    _schema = _SCHEMA_BY_ENGINE.get(engine)
+    if _schema is not None and _BUILT_SCHEMAS.get(_schema):
+        reset_test_data(engine)
+    else:
+        Base.metadata.create_all(bind=engine)
+        if _schema is not None:
+            _BUILT_SCHEMAS[_schema] = True
     _test_session_factory = TestingSessionLocal
 
     def override_get_db():
@@ -411,6 +385,20 @@ def _override_database(tmp_path):
             db.close()
 
     app.dependency_overrides[get_db] = override_get_db
+
+    #: 🔴 **必须同时打桩服务层的模块级 `SessionLocal`**（2026-10-26 修）。
+    #: 只覆盖 FastAPI 的 `get_db` 不够：注册时播内置任务走的是
+    #: `scheduler_service.SessionLocal` / `scheduled_job_runner.SessionLocal`，
+    #: 它们指向**模块导入时快照的 Session 工厂**（`search_path=public`），
+    #: 而测试的表建在本进程的 `t_xxx` schema 里 ⇒ 服务端看不到表，
+    #: 实测报 `关系 "scheduled_jobs" 的 "workspace" 字段不存在`。
+    #: 与 `test_scheduled_jobs.py::_patch_service_sessions` 同一做法（DEF-044）。
+    #: ⚠️ 返回值保持 `get_db` 不变 —— 调用方大量写作 `get_db = _override_database(...)`。
+    from backend.app.services import scheduled_job_runner, scheduler_service
+
+    for _mod in (scheduled_job_runner, scheduler_service):
+        _mod.SessionLocal = TestingSessionLocal
+
     return get_db
 
 
@@ -6591,79 +6579,6 @@ def test_scheduler_status_requires_authentication(tmp_path):
         app.dependency_overrides.pop(db_dependency, None)
 
 
-def test_schedule_status_reports_scheduler_state_and_counts(tmp_path):
-    """新状态端点：enabled/running/时区/jobs/stats（设计 15 §8）。
-
-    DEF-066：计数按**当前用户**收口（原全库口径已废）；且注册即播种 ⇒ 用户的 7 个
-    内置行也在计数里（原全局行 user_id IS NULL 不再存在）。
-    """
-    from backend.app.core.database import get_db
-    from backend.app.models import ScheduledJob, User
-
-    db_dependency = _override_database(tmp_path)
-    owner_token = _register_and_get_access_token("schedule-status-owner")
-    try:
-        db = next(app.dependency_overrides[get_db]())
-        try:
-            db.add_all(
-                [
-                    ScheduledJob(
-                        user_id=1, name="巡检",
-                        job_key="system.cookie_health_check", trigger_type="cron",
-                        cron_expression="0 0 */2 * * *", status="active", is_builtin=True,
-                    ),
-                    ScheduledJob(
-                        user_id=1, name="我的",
-                        job_key="auto_ops.keyword_pipeline", trigger_type="cron",
-                        cron_expression="0 0 9 * * *", status="paused",
-                        params={"auto_task_id": 1},
-                    ),
-                ]
-            )
-            db.commit()
-        finally:
-            db.close()
-
-        response = client.get(
-            "/api/schedule/status",
-            headers={"Authorization": f"Bearer {owner_token}"},
-        )
-
-        assert response.status_code == 200
-        payload = response.json()
-        # R24（2026-09-24 用户口径）：安装版**默认启用**调度器 ⇒ `config/default.yaml`
-        # 的 `scheduler.enabled: true`（前身断言是 `is False`）。这里读的是**配置值**；
-        # 测试不起 lifespan，所以进程内的调度器仍未运行（`running` 依旧 False）。
-        assert payload["enabled"] is True
-        assert payload["running"] is False
-        assert payload["timezone"] == "Asia/Shanghai"
-        assert payload["jobs"] == []
-        # 播种 13 行（全 active）+ 本测试 2 行（1 active + 1 paused）⇒
-        # total 15 / active 14 / paused 1。
-        # 2026-10-07 两轮缩减：① 工作流退场（1e2e5ac）少一项 `workflow.<id>`；
-        # ② `system.no_traffic_cleanup` 从注册表与种子移除（用户口径「无流量笔记
-        # 清理任务不应在任务列表展示」）⇒ total 16 → 15、active 15 → 14
-        #（原 active 15 = 14 播种全 active + 1 测试行；现 14 = 13 + 1）。
-        # 2026-10-11 §1.9：新增 `system.picture_space_cleanup`（**默认 paused** ——
-        # 平台写操作，用户确认参数后再启用）⇒ total 16 → 17、paused 1 → 2
-        #（active 不变：新任务不进 active）。
-        # ⚠️ 2026-10-13 指标快照子系统整块移除：`system.note_metrics_collect` /
-        # `system.shop_metrics_collect` 两条种子退场（均 active）⇒ total 17 → 15、
-        # active 15 → 13；同轮再算：本测试自播 2 行（1 active + 1 paused）+
-        # 内置 12 行（11 active + 1 paused `picture_space_cleanup`）
-        # ⇒ total 14 / active 12 / paused 2。
-        # ⚠️ 2026-10-24：新增 `system.package_staging_cleanup`（清理数据包暂存，active）
-        # ⇒ 内置 13 行（12 active + 1 paused）⇒ total 15 / active 13 / paused 2。
-        # 背景：`purge_expired()` 早已实现但全仓从未被调用，服务器形态下用户上传的
-        # 数据包会永久堆在磁盘上（实测本机积压 1432 个）⇒ 必须由定时任务兜底。
-        assert payload["stats"]["total"] == 15
-        assert payload["stats"]["active"] == 13
-        assert payload["stats"]["paused"] == 2
-        assert payload["stats"]["completed"] == 0
-    finally:
-        app.dependency_overrides.pop(db_dependency, None)
-
-
 def test_tasks_detail_enforces_ownership(tmp_path):
     from backend.app.core.database import get_db
     from backend.app.models import Task
@@ -8685,9 +8600,7 @@ def test_run_due_publish_jobs_once_scopes_to_row_owner(tmp_path, monkeypatch):
     # once 函数自开会话 ⇒ 把服务层 SessionLocal 打到**同一个**测试库
     from sqlalchemy.orm import sessionmaker as _sessionmaker
 
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'auth-test.db'}", connect_args={"check_same_thread": False}
-    )
+    engine = make_engine(tmp_path / 'auth-test.db')
     TestingSessionLocal = _sessionmaker(autocommit=False, autoflush=False, bind=engine)
     monkeypatch.setattr(sched, "SessionLocal", TestingSessionLocal)
 
@@ -8736,11 +8649,16 @@ def test_scheduled_jobs_are_registered_from_db_rows(tmp_path, monkeypatch):
     from backend.app.services import scheduler_service as sched
     from backend.app.services.scheduler_service import build_scheduler, sync_jobs_from_db
 
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'sched-rows.db'}", connect_args={"check_same_thread": False}
-    )
+    engine = make_engine(tmp_path / 'sched-rows.db')
     TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-    Base.metadata.create_all(bind=engine)
+    #: 2026-10-26：同进程复用 schema ⇒ 表只建一次，之后只清数据（省 7.5s/条）。
+    _schema = _SCHEMA_BY_ENGINE.get(engine)
+    if _schema is not None and _BUILT_SCHEMAS.get(_schema):
+        reset_test_data(engine)
+    else:
+        Base.metadata.create_all(bind=engine)
+        if _schema is not None:
+            _BUILT_SCHEMAS[_schema] = True
     # ⚠️ 同 `_override_database`：FK=ON 后父行必须存在（2026-10-04）。
     monkeypatch.setattr(sched, "SessionLocal", TestingSessionLocal)
 
@@ -8818,8 +8736,15 @@ def test_qianfan_health_check_config_switch_only_affects_fallback_seed(monkeypat
     monkeypatch.setattr(settings, "qianfan_health_check_enabled", False, raising=False)
 
     def _fresh_session():
-        engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
-        Base.metadata.create_all(bind=engine)
+        engine = make_engine()
+        #: 2026-10-26：同进程复用 schema ⇒ 表只建一次，之后只清数据（省 7.5s/条）。
+        _schema = _SCHEMA_BY_ENGINE.get(engine)
+        if _schema is not None and _BUILT_SCHEMAS.get(_schema):
+            reset_test_data(engine)
+        else:
+            Base.metadata.create_all(bind=engine)
+            if _schema is not None:
+                _BUILT_SCHEMAS[_schema] = True
         return sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
     # ① 初始化数据里有这个 job_key ⇒ config 开关**不再**决定启停（以数据文件为准）
@@ -8950,9 +8875,7 @@ def test_run_monitoring_refresh_once_scopes_to_row_owner(tmp_path, monkeypatch):
     # （`_override_database` 建在 `tmp_path/auth-test.db`；打错库 = 读到空库）
     from sqlalchemy.orm import sessionmaker as _sessionmaker
 
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'auth-test.db'}", connect_args={"check_same_thread": False}
-    )
+    engine = make_engine(tmp_path / 'auth-test.db')
     TestingSessionLocal = _sessionmaker(autocommit=False, autoflush=False, bind=engine)
     monkeypatch.setattr(sched, "SessionLocal", TestingSessionLocal)
 

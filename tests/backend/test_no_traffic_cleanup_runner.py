@@ -45,6 +45,13 @@ from tests.backend.cookie_fixtures import cookie_version
 
 import pytest
 
+from tests.backend.conftest import (  # noqa: PLC0415 - schema 复用助手
+    _BUILT_SCHEMAS,
+    _SCHEMA_BY_ENGINE,
+    make_engine,
+    reset_test_data,
+)
+
 
 #: 测试分层标记（2026-10-23 立，见 `docs/04_测试文档/01_测试体系与流程规范.md` §15.2）。
 #: 分层按**实测耗时 + 语义**判定（`python .hermes/scripts/classify_tests.py --apply`）：
@@ -140,10 +147,15 @@ def _stat(note_id: str, *, account_id: int, user_id: int, browse: int = 0,
 
 
 def _setup(tmp_path, monkeypatch):
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'cleanup-runner.db'}", connect_args={"check_same_thread": False}
-    )
-    Base.metadata.create_all(bind=engine)
+    engine = make_engine(tmp_path / 'cleanup-runner.db')
+    #: 2026-10-26：同进程复用 schema ⇒ 表只建一次，之后只清数据。
+    _schema = _SCHEMA_BY_ENGINE.get(engine)
+    if _schema is not None and _BUILT_SCHEMAS.get(_schema):
+        reset_test_data(engine)
+    else:
+        Base.metadata.create_all(bind=engine)
+        if _schema is not None:
+            _BUILT_SCHEMAS[_schema] = True
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
     monkeypatch.setattr(ncs, "SessionLocal", SessionLocal)
@@ -1224,10 +1236,15 @@ def test_goods_notes_delete_via_qianfan_and_normal_via_creator(tmp_path, monkeyp
 
     2026-10-06 需求「清理无流量商业笔记走千帆平台的笔记删除」。
     """
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'split.db'}", connect_args={"check_same_thread": False}
-    )
-    Base.metadata.create_all(bind=engine)
+    engine = make_engine(tmp_path / 'split.db')
+    #: 2026-10-26：同进程复用 schema ⇒ 表只建一次，之后只清数据。
+    _schema = _SCHEMA_BY_ENGINE.get(engine)
+    if _schema is not None and _BUILT_SCHEMAS.get(_schema):
+        reset_test_data(engine)
+    else:
+        Base.metadata.create_all(bind=engine)
+        if _schema is not None:
+            _BUILT_SCHEMAS[_schema] = True
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
     monkeypatch.setattr(ncs, "SessionLocal", SessionLocal)
@@ -1280,10 +1297,15 @@ def test_goods_notes_delete_via_qianfan_and_normal_via_creator(tmp_path, monkeyp
 
 def test_goods_note_falls_back_to_creator_when_no_ark_cookies(tmp_path, monkeypatch):
     """无 ark cookies 时，商业笔记退回 creator 链路（不因缺令牌而漏删/误判）。"""
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'fallback.db'}", connect_args={"check_same_thread": False}
-    )
-    Base.metadata.create_all(bind=engine)
+    engine = make_engine(tmp_path / 'fallback.db')
+    #: 2026-10-26：同进程复用 schema ⇒ 表只建一次，之后只清数据。
+    _schema = _SCHEMA_BY_ENGINE.get(engine)
+    if _schema is not None and _BUILT_SCHEMAS.get(_schema):
+        reset_test_data(engine)
+    else:
+        Base.metadata.create_all(bind=engine)
+        if _schema is not None:
+            _BUILT_SCHEMAS[_schema] = True
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
     monkeypatch.setattr(ncs, "SessionLocal", SessionLocal)
@@ -1330,10 +1352,15 @@ def test_goods_batch_capped_at_50_and_normal_at_20(tmp_path, monkeypatch):
     """商业笔记单批 ≤50（千帆一次批量删），普通笔记单批 ≤20（creator 逐篇，历史不变）。"""
     from backend.app.services.no_traffic_service import CleanupQuery
 
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'cap.db'}", connect_args={"check_same_thread": False}
-    )
-    Base.metadata.create_all(bind=engine)
+    engine = make_engine(tmp_path / 'cap.db')
+    #: 2026-10-26：同进程复用 schema ⇒ 表只建一次，之后只清数据。
+    _schema = _SCHEMA_BY_ENGINE.get(engine)
+    if _schema is not None and _BUILT_SCHEMAS.get(_schema):
+        reset_test_data(engine)
+    else:
+        Base.metadata.create_all(bind=engine)
+        if _schema is not None:
+            _BUILT_SCHEMAS[_schema] = True
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
     monkeypatch.setattr(ncs, "SessionLocal", SessionLocal)

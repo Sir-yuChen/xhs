@@ -171,9 +171,29 @@ def test_normal_user_can_read_with_view_perm(client, normal_token):
 
 
 def test_normal_user_has_zero_write_codes(client, normal_token):
-    """`user` 角色的模板授权必须只有 view 码（最小权限）。"""
+    """`user` 角色的模板授权必须只有**页面/查看**码（最小权限）。
+
+    ⚠️ 判据不能用「码是否以 `:view` 结尾」—— 页面级查看码不一定带那个后缀
+    （`xhs:insights:shop`「商品洞察」是 C 行，与 `xhs:insights:view` 并列区分两个
+    页面），按后缀判会把**只读页**误判成写码。改成查登记表的 `menu_type`：
+    C 行 = 页面（只读入口）；F 行 = 按钮，其中 `*:view` 类（如 `system:log:view`）
+    也是只读，其余才算写权限。
+    """
+    from backend.app.core import perms_registry as reg
+
     body = client.get("/api/system/permissions/mine", headers=_auth(normal_token)).json()
-    write_codes = [c for c in body["permissions"] if not c.endswith(":view")]
+    granted = body["permissions"]
+    by_code = {s.code: s for s in reg.PERMS}
+
+    def is_read_only(code: str) -> bool:
+        spec = by_code.get(code)
+        if spec is None:
+            return False
+        if spec.menu_type == "C":
+            return True          # 页面级码 = 侧栏入口可见性
+        return code.endswith(":view")  # 按钮级的「查看」也属只读
+
+    write_codes = [c for c in granted if not is_read_only(c)]
     assert write_codes == [], f"普通用户拿到了写码：{write_codes}"
 
 

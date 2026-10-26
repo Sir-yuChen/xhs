@@ -225,7 +225,10 @@ class TestSidebarBusinessLineGroups:
             "/platforms/xhs/accounts",
             "/platforms/xhs/monitoring",
             "/platforms/xhs/auto-ops",
-            "/tasks",
+            #: 2026-10-25 设计 69 任务中心两级重构：工作区任务页路由由
+            #: `/tasks` 迁到 `/platforms/xhs/tasks`（`app/router.tsx:185`）；
+            #: 旧 `/tasks` 重定向到系统管理的任务中心。种子与前端已同步，此处跟上。
+            "/platforms/xhs/tasks",
             "/task-records",
             "/settings",
         },

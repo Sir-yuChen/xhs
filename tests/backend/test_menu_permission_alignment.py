@@ -72,11 +72,23 @@ def test_every_permission_code_has_a_menu_row():
 
 
 def test_every_page_menu_row_has_a_permission_code():
-    """② 页面行必须有权限码（否则勾了页面也是空壳）。"""
+    """② 页面行必须有权限码（否则勾了页面也是空壳）。
+
+    例外：**页内页签**（`path` 形如 `…?tab=xxx`）。它们是同一页面的不同视图，
+    `perms` 由生成器**留空**并复用宿主页的查看码（设计 57 / `_TAB_CHILDREN`）：
+    给页签单独编一个码，等于要求用户为「同一页的第二个 Tab」再授权一次，
+    与「页签不是独立页面」的设计冲突。
+
+    2026-10-26：生成器修复后重新生成了 6 个页签行（图片工坊 / 视频工坊 / 草稿工坊 /
+    发布中心 / 素材库 / 提示词模板），本断言原先把它们全报成「没权限码」。
+    """
     bad = sorted(
         (r["_seq"], r["name"], r.get("path", ""))
         for r in _seed_rows()
-        if r["menu_type"] in ("C", "M") and not r.get("perms") and r.get("path")
+        if r["menu_type"] in ("C", "M")
+        and not r.get("perms")
+        and r.get("path")
+        and "?tab=" not in r.get("path", "")   # ← 页签豁免（复用宿主页码）
     )
     assert not bad, (
         "以下带路径的页面菜单没有权限码 ⇒ 勾选后后端仍会 403：\n  "
@@ -93,6 +105,15 @@ PURE_FRONTEND_PAGE_CODES: dict[str, str] = {
     "xhs:insights:shop": "商品洞察页，读 analytics 域接口",
     "xhs:profile:view": "个人资料页，读 auth 接口",
     "system:setting:view": "配置管理页，实际读写 /api/settings（挂 xhs:settings:view）",
+    #: 2026-10-26：`/xhs/crawl/*` 四个端点**全是提交抓取**（写平台 + 建任务），
+    #: 没有独立的读端点 —— 页面数据来自 tasks / notes 域。
+    #: 那 4 条已改挂 `xhs:crawl:submit`（它们是动作，不是「看」），
+    #: 于是这条页面码只用于**前端入口可见性**，后端无对应路由。
+    "xhs:crawl:view": "笔记发现页，抓取出去的 4 个端点全是写动作（已归 crawl:submit）；本码只管侧栏入口",
+    #: 2026-10-26（G7）：内容库页的列表读 `GET /api/notes`，而 ROUTE_PERMS **只登记写路由**，
+    #: 于是本码在写路由表里找不到对应行 —— 与 `xhs:crawl:view` 同形态：只管侧栏入口可见性，
+    #: 页面的写动作各自挂在 `xhs:library:save/delete/batchCreateDrafts/export/importData/syncData` 上。
+    "xhs:library:view": "内容库页，列表读 GET /api/notes（读接口不在写路由表里）；本码只管侧栏入口",
 }
 
 #: 「一个接口按归属双码」：静态路由表只能挂一个码，另一个在**服务层**按归属判。

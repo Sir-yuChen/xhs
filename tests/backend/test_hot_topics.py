@@ -39,11 +39,20 @@ def _session(tmp_path, name="hot_topic.db"):
     """
     import weakref
 
-    from tests.backend.conftest import drop_schema
+    from tests.backend.conftest import _BUILT_SCHEMAS, _SCHEMA_BY_ENGINE, reset_test_data
 
     engine = make_engine(tmp_path / name)
-    weakref.finalize(engine, drop_schema, engine)
-    Base.metadata.create_all(engine)
+    #: 2026-10-26：**表只建一次**（同进程复用 schema），之后只清数据。
+    #: ⚠️ 原实现用 `weakref.finalize(engine, drop_schema, engine)` 在 engine 销毁时
+    #: 删 schema —— 那与「每进程复用」直接冲突（engine 一换，schema 就没了，
+    #: 下一条用例又得重建 63 张表）。改用全局钩子 `pytest_runtest_setup` 清数据。
+    _schema = _SCHEMA_BY_ENGINE.get(engine)
+    if _schema is not None and _BUILT_SCHEMAS.get(_schema):
+        reset_test_data(engine)
+    else:
+        Base.metadata.create_all(bind=engine)
+        if _schema is not None:
+            _BUILT_SCHEMAS[_schema] = True
     return sessionmaker(bind=engine)()
 
 

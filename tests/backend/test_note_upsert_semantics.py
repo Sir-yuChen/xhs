@@ -24,6 +24,7 @@ from backend.app.models import Note, NoteAsset, PlatformAccount, User
 
 
 
+
 #: 测试分层标记（2026-10-23 立，见 `docs/04_测试文档/01_测试体系与流程规范.md` §15.2）。
 #: 分类判据由 `.hermes/scripts/classify_tests.py` 机械生成，不靠人工印象：
 #:   redline     = 挂了代表「数据会被写坏 / 凭据会泄漏 / 平台会被封 / 迁移不可执行」
@@ -32,10 +33,9 @@ from backend.app.models import Note, NoteAsset, PlatformAccount, User
 pytestmark = pytest.mark.contract
 
 
-def _db(tmp_path):
-    engine = create_engine(f"sqlite:///{tmp_path / 'upsert.db'}")
-    Base.metadata.create_all(engine)
-    return sessionmaker(bind=engine)()
+def _db(db):
+    """2026-10-26 重构：直接用 `db` 夹具的会话（事务回滚隔离），不再自建库。"""
+    return db
 
 
 def _account(db) -> PlatformAccount:
@@ -65,9 +65,9 @@ def _list_item(note_id: str, *, images: int = 1) -> dict:
 class TestExistingNoteIsUpdatedNotDestroyed:
     """重同步同一批 note_id ⇒ 更新，不摧毁详情补齐过的数据。"""
 
-    def test_resync_keeps_the_hydrated_body(self, tmp_path):
+    def test_resync_keeps_the_hydrated_body(self, db):
         """详情补到的正文**不被重同步抹掉**（列表源没有正文，不是「平台删了正文」）。"""
-        db = _db(tmp_path)
+        db = _db(db)
         try:
             account = _account(db)
             _save_normalized_notes(db, account, [_list_item("N1")], published=True)
@@ -91,9 +91,9 @@ class TestExistingNoteIsUpdatedNotDestroyed:
         finally:
             db.close()
 
-    def test_resync_never_shrinks_the_image_set(self, tmp_path):
+    def test_resync_never_shrinks_the_image_set(self, db):
         """重同步**只增不删**图片：详情补到的 4 张不能被列表的 1 张封面挤掉。"""
-        db = _db(tmp_path)
+        db = _db(db)
         try:
             account = _account(db)
             _save_normalized_notes(db, account, [_list_item("N1", images=1)], published=True)
@@ -113,9 +113,9 @@ class TestExistingNoteIsUpdatedNotDestroyed:
         finally:
             db.close()
 
-    def test_resync_still_refreshes_the_platform_fields(self, tmp_path):
+    def test_resync_still_refreshes_the_platform_fields(self, db):
         """「不摧毁」不等于「不更新」：标题等平台字段必须照最新值刷新。"""
-        db = _db(tmp_path)
+        db = _db(db)
         try:
             account = _account(db)
             _save_normalized_notes(db, account, [_list_item("N1")], published=True)
@@ -133,9 +133,9 @@ class TestExistingNoteIsUpdatedNotDestroyed:
         finally:
             db.close()
 
-    def test_published_flag_still_only_goes_up(self, tmp_path):
+    def test_published_flag_still_only_goes_up(self, db):
         """§19.12 的单调性不因本次修改失效：采集（published=False）不降级。"""
-        db = _db(tmp_path)
+        db = _db(db)
         try:
             account = _account(db)
             _save_normalized_notes(db, account, [_list_item("N1")], published=True)

@@ -29,6 +29,13 @@ from backend.app.services import note_sync_service, scheduler_service as sched
 from backend.app.services.account_service import CHANNEL_CREATOR, CHANNEL_WWW
 from tests.backend.cookie_fixtures import bind_shop_account
 
+from tests.backend.conftest import (  # noqa: PLC0415 - schema 复用助手
+    _BUILT_SCHEMAS,
+    _SCHEMA_BY_ENGINE,
+    make_engine,
+    reset_test_data,
+)
+
 
 #: 测试分层标记（2026-10-23 立，见 `docs/04_测试文档/01_测试体系与流程规范.md` §15.2）。
 #: 分层按**实测耗时 + 语义**判定（`python .hermes/scripts/classify_tests.py --apply`）：
@@ -51,10 +58,15 @@ _ARK_COOKIES = "a1=x; access-token-ark.xiaohongshu.com=y"
 
 
 def _setup(tmp_path, monkeypatch):
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'sched-sync.db'}", connect_args={"check_same_thread": False}
-    )
-    Base.metadata.create_all(bind=engine)
+    engine = make_engine(tmp_path / 'sched-sync.db')
+    #: 2026-10-26：同进程复用 schema ⇒ 表只建一次，之后只清数据。
+    _schema = _SCHEMA_BY_ENGINE.get(engine)
+    if _schema is not None and _BUILT_SCHEMAS.get(_schema):
+        reset_test_data(engine)
+    else:
+        Base.metadata.create_all(bind=engine)
+        if _schema is not None:
+            _BUILT_SCHEMAS[_schema] = True
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     monkeypatch.setattr(sched, "SessionLocal", SessionLocal)
 
@@ -143,10 +155,15 @@ def test_enabled_switches_register_single_instance_jobs(monkeypatch):
     monkeypatch.setattr(settings, "xhs_shop_goods_sync_enabled", True, raising=False)
     monkeypatch.setattr(settings, "xhs_shop_goods_sync_interval_hours", 6, raising=False)
 
-    engine = create_engine(
-        "sqlite:///:memory:", connect_args={"check_same_thread": False}
-    )
-    Base.metadata.create_all(bind=engine)
+    engine = make_engine()
+    #: 2026-10-26：同进程复用 schema ⇒ 表只建一次，之后只清数据。
+    _schema = _SCHEMA_BY_ENGINE.get(engine)
+    if _schema is not None and _BUILT_SCHEMAS.get(_schema):
+        reset_test_data(engine)
+    else:
+        Base.metadata.create_all(bind=engine)
+        if _schema is not None:
+            _BUILT_SCHEMAS[_schema] = True
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     monkeypatch.setattr(sched, "SessionLocal", SessionLocal)
 
@@ -178,10 +195,15 @@ def test_paused_rows_are_not_registered(monkeypatch):
     """paused 行不进调度器（同步侧只注册 active 行，设计 15 §6.1）。"""
     from backend.app.services.scheduler_service import build_scheduler, sync_jobs_from_db
 
-    engine = create_engine(
-        "sqlite:///:memory:", connect_args={"check_same_thread": False}
-    )
-    Base.metadata.create_all(bind=engine)
+    engine = make_engine()
+    #: 2026-10-26：同进程复用 schema ⇒ 表只建一次，之后只清数据。
+    _schema = _SCHEMA_BY_ENGINE.get(engine)
+    if _schema is not None and _BUILT_SCHEMAS.get(_schema):
+        reset_test_data(engine)
+    else:
+        Base.metadata.create_all(bind=engine)
+        if _schema is not None:
+            _BUILT_SCHEMAS[_schema] = True
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     monkeypatch.setattr(sched, "SessionLocal", SessionLocal)
 

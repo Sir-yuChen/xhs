@@ -499,8 +499,16 @@ def test_backfill_is_idempotent(db_factory, monkeypatch):
 
 
 def test_lifespan_calls_backfill():
-    """启动接线守卫：`lifespan` 必须真的调用补种（否则「防以后再漂」落空）。"""
-    src = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
-    assert "seed_gateway_providers_for_all_users" in src, (
-        "lifespan 没接线服务商补种 —— 存量用户/新加种子又会拿不到"
+    """启动接线守卫：`lifespan` 必须真的调用补种（否则「防以后再漂」落空）。
+
+    ⚠️ 锚点是 `startup.py` 而不是 `main.py`（设计 61 A3b 启动编排薄壳化后，
+    补种实现搬进组合根）；查 `main.py` 会在**实现正确时**变红。
+    """
+    startup = (ROOT / "backend" / "app" / "startup.py").read_text(encoding="utf-8")
+    assert "seed_gateway_providers_for_all_users()" in startup, (
+        "启动编排里没接线服务商补种 —— 存量用户/新加种子又会拿不到"
+    )
+    main_src = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
+    assert "seed_all_builtin_data()" in main_src, (
+        "lifespan 没调 seed_all_builtin_data —— 搬到 startup.py 后忘了接线"
     )

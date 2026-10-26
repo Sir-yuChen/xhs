@@ -33,7 +33,12 @@ from backend.app.main import app
 from backend.app.models import Note, NoteAsset, NoteDatacenterStat, PlatformAccount, Task, User
 from backend.app.models.shop import ShopNoteGoods
 from tests.backend.cookie_fixtures import bind_shop_account
-from tests.backend.conftest import patch_service_sessions
+from tests.backend.conftest import (  # noqa: PLC0415 - schema 复用助手
+    _BUILT_SCHEMAS,
+    _SCHEMA_BY_ENGINE,
+    make_engine,
+    reset_test_data,
+)
 from backend.app.services import note_sync_service as nss
 from backend.app.services import account_task_service as ats
 from backend.app.services import sync_task_service as sts
@@ -294,10 +299,15 @@ def _reset_fakes() -> None:
 
 
 def _setup(tmp_path, monkeypatch, *, sub_type: str = "creator", with_binding: bool = True):
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'note-sync.db'}", connect_args={"check_same_thread": False}
-    )
-    Base.metadata.create_all(bind=engine)
+    engine = make_engine(tmp_path / 'note-sync.db')
+    #: 2026-10-26：同进程复用 schema ⇒ 表只建一次，之后只清数据。
+    _schema = _SCHEMA_BY_ENGINE.get(engine)
+    if _schema is not None and _BUILT_SCHEMAS.get(_schema):
+        reset_test_data(engine)
+    else:
+        Base.metadata.create_all(bind=engine)
+        if _schema is not None:
+            _BUILT_SCHEMAS[_schema] = True
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
     def override_get_db():

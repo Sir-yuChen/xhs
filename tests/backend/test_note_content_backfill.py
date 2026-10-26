@@ -35,7 +35,12 @@ from sqlalchemy import create_engine, select  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
 
 from backend.app.core.database import Base, get_db
-from tests.backend.conftest import seed_owner_rows  # noqa: E402
+from tests.backend.conftest import (  # noqa: PLC0415 - schema 复用助手
+    _BUILT_SCHEMAS,
+    _SCHEMA_BY_ENGINE,
+    make_engine,
+    reset_test_data,
+)
 from backend.app.core.time import shanghai_now  # noqa: E402
 from backend.app.models import Note, NoteAsset, PlatformAccount, User  # noqa: E402
 from backend.app.services.account_service import (  # noqa: E402
@@ -72,11 +77,16 @@ def _override_database(tmp_path: Path) -> Any:
     """隔离的 SQLite（与 ``tests/backend/test_api.py`` 同款的自包含实现）。"""
     from backend.app.main import app
 
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'hydrate-test.db'}", connect_args={"check_same_thread": False}
-    )
+    engine = make_engine(tmp_path / 'hydrate-test.db')
     testing_session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-    Base.metadata.create_all(bind=engine)
+    #: 2026-10-26：同进程复用 schema ⇒ 表只建一次，之后只清数据。
+    _schema = _SCHEMA_BY_ENGINE.get(engine)
+    if _schema is not None and _BUILT_SCHEMAS.get(_schema):
+        reset_test_data(engine)
+    else:
+        Base.metadata.create_all(bind=engine)
+        if _schema is not None:
+            _BUILT_SCHEMAS[_schema] = True
     # ⚠️ 全局 FK=ON（core/database.py，M5 引入）后必须播种父行：本文件大量插
     # platform_accounts / notes，(user_id, platform_account_id) 指向 users /
     # platform_accounts，而这两个父表此前没人建行（2026-10-04 实测 21 条红）。
@@ -814,10 +824,15 @@ class TestDetailRefBackfill:
 
 
 def _session(tmp_path: Path, name: str) -> Any:
-    engine = create_engine(
-        f"sqlite:///{tmp_path / name}", connect_args={"check_same_thread": False}
-    )
-    Base.metadata.create_all(bind=engine)
+    engine = make_engine(tmp_path / name)
+    #: 2026-10-26：同进程复用 schema ⇒ 表只建一次，之后只清数据。
+    _schema = _SCHEMA_BY_ENGINE.get(engine)
+    if _schema is not None and _BUILT_SCHEMAS.get(_schema):
+        reset_test_data(engine)
+    else:
+        Base.metadata.create_all(bind=engine)
+        if _schema is not None:
+            _BUILT_SCHEMAS[_schema] = True
     # ⚠️ 全局 FK=ON 后必须播种父行（同 `_override_database`，2026-10-04）。
     seed_owner_rows(engine, user_id=1, account_id=1)
     return sessionmaker(autocommit=False, autoflush=False, bind=engine)

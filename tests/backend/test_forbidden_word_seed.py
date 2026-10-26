@@ -34,6 +34,8 @@ SEED = ROOT / "config/initial_data/forbidden_words.json"
 SERVICE = ROOT / "backend/app/services/forbidden_word_service.py"
 AUTH = ROOT / "backend/app/api/auth.py"
 MAIN = ROOT / "backend/app/main.py"
+#: 启动编排的实现在组合根里（设计 61 A3b：`main.lifespan` 只是薄壳）。
+STARTUP = ROOT / "backend/app/startup.py"
 
 #: 真机核对过的种子内容（用户 2026-10-21 截图确认的「小红书」组 7 条）。
 EXPECTED_WORDS = ["淘宝", "天猫", "超级88", "88VIP", "政府补贴", "好评", "补贴"]
@@ -106,15 +108,27 @@ def test_seed_group_and_modes_come_from_the_model_not_a_copy():
 
 
 def _session(tmp_path):
-    from sqlalchemy import create_engine
+    """连到**PG 测试库**的 session（2026-10-26 去 SQLite）。
+
+    ⚠️ 原实现 `create_engine("sqlite:///…")` —— 生产已完全放弃 SQLite
+    （`core/database.py` 非 PG 直接拒绝启动），在 SQLite 上验证种子行为
+    全绿也不能说明线上可用。
+    """
     from sqlalchemy.orm import sessionmaker
 
     import backend.app.models  # noqa: F401 - 注册全部模型
     from backend.app.core.database import Base
     from backend.app.models.user import User
+    from tests.backend.conftest import _BUILT_SCHEMAS, _SCHEMA_BY_ENGINE, make_engine, reset_test_data
 
-    engine = create_engine("sqlite:///" + str(tmp_path / "seed.db").replace("\\", "/"))
-    Base.metadata.create_all(engine)
+    engine = make_engine(tmp_path / "seed.db")
+    _schema = _SCHEMA_BY_ENGINE.get(engine)
+    if _schema is not None and _BUILT_SCHEMAS.get(_schema):
+        reset_test_data(engine)
+    else:
+        Base.metadata.create_all(bind=engine)
+        if _schema is not None:
+            _BUILT_SCHEMAS[_schema] = True
     db = sessionmaker(bind=engine)()
     db.add(User(id=7, username="seed_probe", password_hash="x"))
     db.commit()
@@ -190,14 +204,20 @@ def test_seed_does_not_touch_another_users_words(tmp_path):
 
 
 def test_seed_is_wired_into_register_and_startup():
-    """注册即播种 + 启动补存量；两处都必须调用，且启动侧是**模块级导入**。"""
+    """注册即播种 + 启动补存量；两处都必须调用，且启动侧是**模块级导入**。
+
+    ⚠️ 启动侧的锚点已从 `main.py` 迁到 `backend/app/startup.py`（设计 61 A3b
+    「启动编排薄壳化」）：`lifespan` 只留裸名调用，实现全部搬进组合根
+    `startup.py`。因此「补种有没有接线」必须查 `startup.py`，
+    查 `main.py` 会在**实现正确时**变红（本轮实测 1 条）。
+    """
     auth_src = AUTH.read_text(encoding="utf-8")
     assert "seed_builtin_words(db, user_id=user.id)" in auth_src, (
         "注册流程没播种违规词 —— 新用户第一次打开弹窗是空的"
     )
 
-    main_src = MAIN.read_text(encoding="utf-8")
-    tree = ast.parse(main_src)
+    startup_src = STARTUP.read_text(encoding="utf-8")
+    tree = ast.parse(startup_src)
     module_imports = {
         alias.name
         for node in tree.body
@@ -205,6 +225,12 @@ def test_seed_is_wired_into_register_and_startup():
         for alias in node.names
     }
     assert "seed_builtin_words_for_all_users" in module_imports, (
-        "启动播种必须模块级导入（函数体内导入 ⇒ lifespan 的打桩打不上）"
+        "启动播种必须模块级导入（函数体内导入 ⇒ 测试打桩打不上）"
     )
-    assert "seed_builtin_words_for_all_users()" in main_src, "lifespan 里没调用"
+    assert "seed_builtin_words_for_all_users()" in startup_src, "启动编排里没调用"
+
+    #: 还要确认 `main.lifespan` 真的调了那个编排入口（否则实现搬走了但没接线）。
+    main_src = MAIN.read_text(encoding="utf-8")
+    assert "seed_all_builtin_data()" in main_src, (
+        "lifespan 没调 seed_all_builtin_data —— 搬到 startup.py 后忘了接线"
+    )

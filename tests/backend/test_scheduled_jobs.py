@@ -78,10 +78,17 @@ def _fresh_job_definitions():
 
     旧用例大量「自己建一行同 key 的内置任务」，而播种会先占住那 13 个 key
     ⇒ 必然撞 `uq_scheduled_jobs_job_key`。清表让每个用例从零开始决定库里有什么。
+
+    ⚠️ **2026-10-26 改**：本夹具在 **setup 阶段**跑，那时 `_ENGINE` 还是 None
+    （用例在函数体里才调 `_override_database`）⇒ `_clear_job_definitions()`
+    直接 return，等于没清。
+    原来「看起来没事」是因为每条用例换一个新 schema（天然干净）；
+    现在 schema 复用，这条就暴露了。
+    ⇒ 真正的清表移到 `_override_database()` 里（engine 建好之后立刻清）。
+    本夹具只重置 `_CLEARED` 标志，供 `_register` 用。
     """
     global _CLEARED
     _CLEARED = False
-    _clear_job_definitions()
     yield
 
 
@@ -103,13 +110,28 @@ def _override_database(tmp_path):
     """
     global _ENGINE
     from backend.app.core.database import Base, get_db
-    from tests.backend.conftest import make_engine
+    from tests.backend.conftest import _BUILT_SCHEMAS, _SCHEMA_BY_ENGINE, make_engine, reset_test_data
 
-    #: 每个用例都调一次本函数 ⇒ 在这里重置，保证「用例独占一个 schema」。
+    #: 每个用例都调一次本函数 ⇒ 在这里清数据，保证「用例独占干净数据」。
     #: 用具名 fixture 会更干净，但这个文件有 40+ 处 `_override_database(tmp_path)`
     #: 调用点，逐个改成 fixture 注入是更大的改动面（且容易漏）。
+    #:
+    #: ⚠️ **2026-10-26 改**：schema 每进程复用（`make_engine` 不再每条新建）⇒
+    #: 建表只在**首次**做，之后必须 `reset_test_data` 清数据，否则上一条用例的
+    #: 行会漏到下一条（实测：`test_update_auto_task_schedule_rewrites_job_row`
+    #: 单独跑绿、串行跑报 `KeyError: 'id'`，就是上一条残留的 job/user 撞唯一键）。
     _ENGINE = make_engine(tmp_path)
-    Base.metadata.create_all(bind=_ENGINE)
+    schema = _SCHEMA_BY_ENGINE.get(_ENGINE)
+    if schema is not None and _BUILT_SCHEMAS.get(schema):
+        reset_test_data(_ENGINE)
+    else:
+        Base.metadata.create_all(bind=_ENGINE)
+        if schema is not None:
+            _BUILT_SCHEMAS[schema] = True
+    #: 建好 engine 之后立刻清 `scheduled_jobs`（2026-10-26）——
+    #: `_fresh_job_definitions` 夹具在 setup 阶段跑时 `_ENGINE` 还是 None，
+    #: 那时清不了。清表必须发生在 `_ENGINE` 有值之后、用例体之前。
+    _clear_job_definitions()
     engine = _ENGINE
     TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 

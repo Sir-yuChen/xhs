@@ -243,9 +243,35 @@ def env(api_client, db_factory, monkeypatch) -> Env:
         #: ADR-021：开通千帆能力 = 给账号导入 `ark` 登录态（不再有「绑店」动作）。
         bind_shop_account(db, account, cookies_text=ARK_COOKIES, shop_name="观隅好物的店")
         db.commit()
+        #: 2026-10-26：`/items/operate` 现在**真的判权**（一码一动作）。
+        #: 新注册用户只有页面级 view 码 ⇒ 必须显式授予本文件用到的三个按钮码，
+        #: 否则每条用例都在权限层 403，测不到「门禁 / 记账」这些真正要守的东西。
+        #: ⚠️ 测试库**不播菜单种子**（`role_menus` 是空的）⇒ 只能在
+        #: `permission_cache.perms_of` 这一层补码（那是 `require_perm` / `has_perm`
+        #: 的唯一取数口）。不要改成直接改缓存 dict —— 那条路绕过了本用例要证明的东西。
+        _grant(monkeypatch, ["xhs:item:onShelf", "xhs:item:offShelf", "xhs:item:delete"])
         return Env(headers=headers, account_id=account.id, user_id=user_id, db_factory=db_factory)
     finally:
         db.close()
+
+
+def _grant(monkeypatch, codes: list[str]) -> None:
+    """把 `codes` 追加到「当前用户已有权限」里（只增不减，按用户无关地放行）。
+
+    为什么打 `permission_cache.perms_of` 而不是塞 `role_menus`：
+    测试库不播菜单种子，没有菜单行可挂授权；而 `perms_of` 正是
+    `require_perm` / `has_perm` 的唯一取数口 —— 打这里等价于「这个用户被授了这些码」，
+    且不会顺手放宽任何别的东西。
+    """
+    from backend.app.core import permission_cache
+    from backend.app.core.perms import has_perm as _real_has_perm  # noqa: F401
+
+    original = permission_cache.perms_of
+
+    def patched(db, user):  # noqa: ANN001, ANN202
+        return frozenset(original(db, user)) | frozenset(codes)
+
+    monkeypatch.setattr(permission_cache, "perms_of", patched)
 
 
 @pytest.fixture()

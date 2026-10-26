@@ -51,14 +51,23 @@ PERM_GATED_PAGES: dict[str, tuple[str, ...]] = {
         "xhs:record:cleanAll",
     ),
     #: 商品列表（2026-10-25）：页面上 7 个写操作入口各有独立码。
+    #: 2026-10-26「生成笔记与上下架拆成三个码」：`operate`（合并码）退场，
+    #: 改由 `onShelf` / `offShelf` / `delete` 各判各的；生成笔记从 `aiAssist`
+    #: 换成自己的 `generateNote`；删台账行独立成 `deleteLocal`。
+    #: ⚠️ 这份清单是**防退化**用的（码被删即红），所以要含本页真的用到的每一个码。
     "pages/platforms/xhs/shop-items-page.tsx": (
         "xhs:item:export",
         "xhs:item:forbiddenWords",
         "xhs:item:drafts",
         "xhs:item:publish",
-        "xhs:item:aiAssist",
-        "xhs:item:operate",
+        "xhs:item:generateNote",
+        "xhs:item:onShelf",
+        "xhs:item:offShelf",
+        "xhs:item:delete",
+        "xhs:item:deleteLocal",
         "xhs:item:edit",
+        "xhs:item:generateImage",
+        "xhs:item:sync",
     ),
     "pages/platforms/xhs/violation-manage-page.tsx": (
         "xhs:violation:relatedDelete",
@@ -75,9 +84,18 @@ PERM_GATED_PAGES: dict[str, tuple[str, ...]] = {
         "xhs:monitor:refresh",
         "xhs:monitor:enable",
     ),
-    "pages/platforms/xhs/image-studio-panel.tsx": ("xhs:picture:compose", "xhs:picture:delete"),
+    #: 2026-10-26（G7）：本面板的动作是「AI 生图」（`POST /api/ai/images/generate`，
+    #: 挂 `ai:generate:generate`）与「删除生成图」（`xhs:picture:delete`）。
+    #: `xhs:picture:compose` 是**图片空间页**的「合成图片」（`POST /api/files/images/compose`），
+    #: 不在本面板 —— 判错码 = 授权页勾了也不放行（= 没有判权）。
+    "pages/platforms/xhs/image-studio-panel.tsx": (
+        "ai:generate:generate",
+        "xhs:picture:delete",
+    ),
     "pages/platforms/xhs/discovery-page.tsx": ("xhs:library:save",),
-    "pages/platforms/xhs/llm-generate-modal.tsx": ("xhs:draft:generate",),
+    #: 2026-10-26（G7）：后端 `POST /api/xhs/product-notes/generate-llm` 挂
+    #: `xhs:item:generateNote`（用户口径「生成笔记 / 上架 / 下架拆三个码」）；`xhs:draft:generate` 已退场。
+    "pages/platforms/xhs/llm-generate-modal.tsx": ("xhs:item:generateNote",),
     "pages/platforms/xhs/orders-page.tsx": (
         "xhs:order:ship",
         "xhs:order:afterSaleHandle",
@@ -85,9 +103,17 @@ PERM_GATED_PAGES: dict[str, tuple[str, ...]] = {
         "xhs:order:export",
     ),
     "pages/platforms/xhs/product-publish-wizard.tsx": ("xhs:item:publish", "xhs:item:create"),
-    "pages/platforms/xhs/publish-page.tsx": ("xhs:note:publish", "xhs:note:delete", "xhs:note:edit"),
+    #: 2026-10-26（G7）：发布动作的后端路由挂 `xhs:publish:submit`
+    #: （`POST /api/notes/{note_id}/publish`）；`xhs:note:publish` 已退场（孤儿码）。
+    "pages/platforms/xhs/publish-page.tsx": (
+        "xhs:publish:submit",
+        "xhs:note:delete",
+        "xhs:note:edit",
+    ),
     "pages/platforms/xhs/publish-config-step1.tsx": ("xhs:item:aiAssist",),
-    "pages/platforms/xhs/accounts-page.tsx": ("xhs:account:syncShopGoods",),
+    #: 2026-10-26（G7）：`xhs:account:syncShopGoods` 已退场（孤儿码，后端路由挂的是
+    #: `xhs:item:sync`：`POST /api/xhs/qianfan/sync-shop-goods`）。
+    "pages/platforms/xhs/accounts-page.tsx": ("xhs:item:sync",),
     "pages/platforms/xhs/forbidden-words-modal.tsx": (
         "xhs:forbiddenWord:create",
         "xhs:forbiddenWord:edit",
@@ -125,16 +151,19 @@ PERM_GATED_PAGES: dict[str, tuple[str, ...]] = {
         "system:dict:create",
     ),
     "pages/platforms/xhs/library-page.tsx": (
-        "xhs:library:publish",
-        "xhs:library:sync",
+        "xhs:library:batchCreateDrafts",
+        "xhs:publish:submit",
+        "xhs:note:batchSync",
         "xhs:library:export",
-        "xhs:library:createDraft",
         "xhs:library:delete",
+        "xhs:note:create",
     ),
+    #: 2026-10-26（G7）：`xhs:draft:rewrite/generateImage/assets` 已退场 —— 它们的
+    #: 后端路由挂的是 `xhs:note:edit`（素材增删 / AI 改写）与 `ai:generate:generate`
+    #: （生图）。前端另立一套码 ⇒ 授权页勾了也不放行，等于没有判权。
     "pages/platforms/xhs/drafts-workshop-panel.tsx": (
-        "xhs:draft:rewrite",
-        "xhs:draft:generateImage",
-        "xhs:draft:assets",
+        "xhs:note:edit",
+        "ai:generate:generate",
     ),
     "pages/platforms/xhs/picture-space-page.tsx": (
         "xhs:picture:restore",

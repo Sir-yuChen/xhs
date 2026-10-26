@@ -52,8 +52,17 @@ client = TestClient(app)
 @pytest.fixture()
 def env():
     """每用例独立 PG schema + 打桩所有模块级 SessionLocal。"""
+    from tests.backend.conftest import _BUILT_SCHEMAS, _SCHEMA_BY_ENGINE, reset_test_data
+
     engine = make_engine()
-    Base.metadata.create_all(bind=engine)
+    #: 2026-10-26：同进程复用 schema ⇒ 表只建一次，之后只清数据（省 7.5s/条）。
+    _schema = _SCHEMA_BY_ENGINE.get(engine)
+    if _schema is not None and _BUILT_SCHEMAS.get(_schema):
+        reset_test_data(engine)
+    else:
+        Base.metadata.create_all(bind=engine)
+        if _schema is not None:
+            _BUILT_SCHEMAS[_schema] = True
     SL = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
     from backend.app.core.database import get_db

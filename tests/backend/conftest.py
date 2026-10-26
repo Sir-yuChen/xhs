@@ -155,6 +155,9 @@ _SCHEMA_COUNTER = {"n": 0}
 #: 这个属性（那是 `Connection` 的）。也不用 `id()` 直接判等：engine 被 GC 后
 #: id 可能被复用 ⇒ 用 `weakref` 让条目随 engine 一起消失。
 _SCHEMA_BY_ENGINE: "weakref.WeakKeyDictionary[Any, str]" = __import__("weakref").WeakKeyDictionary()
+#: 已建好表的 schema（键 = schema 名）。同进程第二次起只 `TRUNCATE` 清数据，
+#: 不再重复 `create_all`（63 张表 ≈ 7.5s/条，这是测试慢的主因）。
+_BUILT_SCHEMAS: dict[str, bool] = {}
 
 
 def ensure_test_database() -> None:
@@ -253,6 +256,38 @@ def drop_schema(bind: Engine) -> None:
         pass
     finally:
         _SCHEMA_BY_ENGINE.pop(bind, None)
+        _BUILT_SCHEMAS.pop(schema, None)
+
+
+def reset_test_data(bind: Engine) -> None:
+    """把本进程 schema 里的**数据**清空（表结构保留）—— 用例之间的隔离靠它。
+
+    `TRUNCATE ... RESTART IDENTITY CASCADE` 一次清全部业务表：
+    * `RESTART IDENTITY` —— 自增 id 从 1 重来，用例里「假设 id=1」的老写法照旧成立；
+    * `CASCADE` —— 外键引用一并截断，不必按依赖顺序排表。
+
+    ⚠️ 只清**本 schema** 的表（`search_path` 已限定），不会碰 `public`（真实库）。
+    """
+    from sqlalchemy import text  # noqa: PLC0415
+
+    schema = _SCHEMA_BY_ENGINE.get(bind)
+    if not schema:
+        return
+    with bind.begin() as conn:
+        names = [
+            row[0]
+            for row in conn.execute(
+                text(
+                    "SELECT tablename FROM pg_tables "
+                    "WHERE schemaname = :s AND tablename <> 'alembic_version'"
+                ),
+                {"s": schema},
+            ).fetchall()
+        ]
+        if not names:
+            return
+        quoted = ", ".join(f'"{n}"' for n in names)
+        conn.execute(text(f"TRUNCATE {quoted} RESTART IDENTITY CASCADE"))
 
 
 # ---------------------------------------------------------------------------
@@ -637,7 +672,17 @@ def db_engine(db_path: Path, monkeypatch) -> Engine:
     自己造，用例不必各自重复播种（重复播种 = 20 处各写一份，迟早漏一处）。
     """
     engine = make_engine(db_path)
-    _base().metadata.create_all(bind=engine)
+    #: 🔴 **表只建一次、之后只清数据**（2026-10-26）：
+    #: 同进程的 schema 已建过表 ⇒ 再 `create_all` 是白跑（63 张表元数据遍历 ~120ms/条），
+    #: 而**真正的问题是数据不清**：上一条用例注册的用户还在 ⇒ 下一条用固定用户名
+    #: 注册撞唯一约束，报 `EMAIL_TAKEN`（实测 `test_account_card_sync_job_log` 全红）。
+    _schema = _SCHEMA_BY_ENGINE.get(engine)
+    if _schema is not None and _BUILT_SCHEMAS.get(_schema):
+        reset_test_data(engine)
+    else:
+        _base().metadata.create_all(bind=engine)
+        if _schema is not None:
+            _BUILT_SCHEMAS[_schema] = True
     #: 🔴 **必须在这里也打桩**（2026-10-25 修）：`settings_service` 等多处是
     #: 「模块级持有 `SessionLocal`，服务函数自开会话」（见本文件模块 docstring）。
     #: 此前只有 `api_client` 打桩 ⇒ 用 `db_factory` / `db_session` 的用例里，

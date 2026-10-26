@@ -35,6 +35,9 @@ from backend.app.main import app
 from backend.app.models import AccountCookieVersion, Note, PlatformAccount, User
 from backend.app.services.account_service import upsert_platform_account_from_login
 
+#: 2026-10-26 重构：数据库由 `pg_engine`（session 级唯一 engine）+ 事务回滚提供，
+#: 本文件不再建库 / 清库。
+
 
 #: 测试分层标记（2026-10-23 立，见 `docs/04_测试文档/01_测试体系与流程规范.md` §15.2）。
 #: 分层按**实测耗时 + 语义**判定（`python .hermes/scripts/classify_tests.py --apply`）：
@@ -48,17 +51,17 @@ client = TestClient(app)
 COOKIE_PAYLOAD = json.dumps({"a1": "uniq-a1", "web_session": "uniq-session"})
 
 
-def _make_db(tmp_path):
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'uniqueness.db'}", connect_args={"check_same_thread": False}
-    )
-    Base.metadata.create_all(bind=engine)
-    return sessionmaker(autocommit=False, autoflush=False, bind=engine)
+def _make_db(pg_engine):
+    """新基座（2026-10-26 重构）：不再建表、不再清数据。
+
+    用的是 session 级唯一 engine；每条用例的数据由 `_cleanup` 在结束时回滚。
+    """
+    return sessionmaker(autocommit=False, autoflush=False, bind=pg_engine)
 
 
-def _wire(tmp_path):
+def _wire(pg_engine):
     """建库 + 覆盖 `get_db` + 注册一个用户；返回 (SessionLocal, headers, user_id)。"""
-    SessionLocal = _make_db(tmp_path)
+    SessionLocal = _make_db(pg_engine)
 
     def override_get_db():
         db = SessionLocal()
@@ -86,13 +89,13 @@ def _wire(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_upsert_same_identity_twice_keeps_exactly_one_row(tmp_path):
+def test_upsert_same_identity_twice_keeps_exactly_one_row(pg_engine):
     """同一身份连续导入两次 → 仍只有一行，第二次是 `updated` 而不是 `created`。
 
     这是用户报出的原始症状的反面：修复前表上没有约束，任何绕过这段判断的路径
     （实测：7 条 `ext-incr`）都能造重复。
     """
-    SessionLocal, _headers, user_id = _wire(tmp_path)
+    SessionLocal, _headers, user_id = _wire(pg_engine)
     info = {"external_user_id": "ext-1", "nickname": "一号店", "avatar_url": "", "profile": {}}
     db = SessionLocal()
     try:
@@ -116,7 +119,7 @@ def test_upsert_same_identity_twice_keeps_exactly_one_row(tmp_path):
     assert first.id == second.id
 
 
-def test_pc_and_creator_share_one_row_and_keep_the_stronger_link(tmp_path):
+def test_pc_and_creator_share_one_row_and_keep_the_stronger_link(pg_engine):
     """同一小红书账号的 `pc` / `creator` 链路**合并成一行**，且保住更强的链路。
 
     ⚠️ 本条**取代** `test_pc_and_creator_stay_two_rows_same_identity`
@@ -130,7 +133,7 @@ def test_pc_and_creator_share_one_row_and_keep_the_stronger_link(tmp_path):
     两条链路的令牌仍各在自己的通道里（`www` / `creator`），一个都没丢 ——
     真正的能力来自**令牌通道**，不是行数。
     """
-    SessionLocal, _headers, user_id = _wire(tmp_path)
+    SessionLocal, _headers, user_id = _wire(pg_engine)
     info = {"external_user_id": "ext-same", "nickname": "双链路号", "avatar_url": "", "profile": {}}
     db = SessionLocal()
     try:
@@ -156,13 +159,13 @@ def test_pc_and_creator_share_one_row_and_keep_the_stronger_link(tmp_path):
         db.close()
 
 
-def test_empty_external_id_falls_back_to_nickname(tmp_path):
+def test_empty_external_id_falls_back_to_nickname(pg_engine):
     """`external_user_id` 为空时靠昵称兜底 —— **不无界新建**（空 id 不参与唯一索引）。
 
     这是部分唯一索引留下的口子，必须在业务层补上：没有这段兜底，每次导入都会
     新建一行，而 DB 层（正确地）拦不住它。
     """
-    SessionLocal, _headers, user_id = _wire(tmp_path)
+    SessionLocal, _headers, user_id = _wire(pg_engine)
     info = {"external_user_id": "", "nickname": "没有ID的号", "avatar_url": "", "profile": {}}
     db = SessionLocal()
     try:
@@ -179,12 +182,12 @@ def test_empty_external_id_falls_back_to_nickname(tmp_path):
     assert len(rows) == 1, f"空 external_user_id 被无界新建：{[r.id for r in rows]}"
 
 
-def test_db_rejects_duplicate_account_even_bypassing_service(tmp_path):
+def test_db_rejects_duplicate_account_even_bypassing_service(pg_engine):
     """**绕过业务层**直接插重复账号也必须被 DB 拒绝（I1 的兜底）。
 
     没有这条，就退回成「只有约定、没有约束」——而那正是 7 条重复账号落库的原因。
     """
-    SessionLocal, _headers, user_id = _wire(tmp_path)
+    SessionLocal, _headers, user_id = _wire(pg_engine)
     db = SessionLocal()
     try:
         for _ in range(2):
@@ -218,13 +221,13 @@ def _normalized(note_id: str, title: str) -> dict:
     }
 
 
-def test_note_upsert_overwrites_in_place_and_keeps_id(tmp_path):
+def test_note_upsert_overwrites_in_place_and_keeps_id(pg_engine):
     """同一 `note_id` 反复落库 → **只有一行**、`notes.id` 不变、字段被覆盖。
 
     `id` 不变是硬要求：`note_assets` / `note_tags` / 草稿都指向它，
     换 id 等于把用户的标签和草稿一起打断。
     """
-    SessionLocal, _headers, user_id = _wire(tmp_path)
+    SessionLocal, _headers, user_id = _wire(pg_engine)
     db = SessionLocal()
     try:
         account = PlatformAccount(
@@ -246,14 +249,14 @@ def test_note_upsert_overwrites_in_place_and_keeps_id(tmp_path):
     assert rows[0].title == "第二版", "覆盖更新没写进新内容"
 
 
-def test_note_upsert_repins_platform_account_id(tmp_path):
+def test_note_upsert_repins_platform_account_id(pg_engine):
     """命中既有行时必须把归属**重挂**到当前账号（台账 §4.9 / 问题 P2）。
 
     旧实现只覆盖 `title/content/raw_json`，不刷新 `platform_account_id`：
     账号删了再导入会拿到新的 id，老笔记就**永久挂在已删除的账号上**，
     页面上表现为「同步成功但一条都看不到」。
     """
-    SessionLocal, _headers, user_id = _wire(tmp_path)
+    SessionLocal, _headers, user_id = _wire(pg_engine)
     db = SessionLocal()
     try:
         old_account = PlatformAccount(
@@ -282,9 +285,9 @@ def test_note_upsert_repins_platform_account_id(tmp_path):
     )
 
 
-def test_db_rejects_duplicate_note_even_bypassing_service(tmp_path):
+def test_db_rejects_duplicate_note_even_bypassing_service(pg_engine):
     """直接插两条同 `(user_id, note_id)` 的笔记必须被 DB 拒绝。"""
-    SessionLocal, _headers, user_id = _wire(tmp_path)
+    SessionLocal, _headers, user_id = _wire(pg_engine)
     db = SessionLocal()
     try:
         account = PlatformAccount(
@@ -335,9 +338,9 @@ def _seed_account(SessionLocal, user_id: int, note_id: str | None = None) -> int
         db.close()
 
 
-def test_delete_account_is_soft_and_hides_it_from_list(tmp_path):
+def test_delete_account_is_soft_and_hides_it_from_list(pg_engine):
     """删除 → 列表看不到、Cookie 被物理清掉、**行仍在位**（`deleted_at` 非空）。"""
-    SessionLocal, headers, user_id = _wire(tmp_path)
+    SessionLocal, headers, user_id = _wire(pg_engine)
     account_id = _seed_account(SessionLocal, user_id)
 
     response = client.delete(f"/api/accounts/{account_id}", headers=headers)
@@ -364,9 +367,9 @@ def test_delete_account_is_soft_and_hides_it_from_list(tmp_path):
     assert cookies == [], "账号已删除，Cookie 版本必须清掉"
 
 
-def test_deleted_account_id_endpoints_return_404(tmp_path):
+def test_deleted_account_id_endpoints_return_404(pg_engine):
     """软删后按 id 的端点必须 404 —— 用户手里的旧页面 id 不能继续可用。"""
-    SessionLocal, headers, user_id = _wire(tmp_path)
+    SessionLocal, headers, user_id = _wire(pg_engine)
     account_id = _seed_account(SessionLocal, user_id)
     client.delete(f"/api/accounts/{account_id}", headers=headers)
 
@@ -374,13 +377,13 @@ def test_deleted_account_id_endpoints_return_404(tmp_path):
     assert client.post(f"/api/accounts/{account_id}/check", headers=headers).status_code == 404
 
 
-def test_reimport_after_delete_revives_instead_of_creating(tmp_path):
+def test_reimport_after_delete_revives_instead_of_creating(pg_engine):
     """**「删了再导入又来一条」的根治**：重新导入同一身份 → 复活同一行，行数不变。
 
     这条用例就是当初 7 条重复账号的正解：不是「删掉时记得清理干净」，
     而是「身份行根本不会被删掉」。
     """
-    SessionLocal, headers, user_id = _wire(tmp_path)
+    SessionLocal, headers, user_id = _wire(pg_engine)
     account_id = _seed_account(SessionLocal, user_id)
     client.delete(f"/api/accounts/{account_id}", headers=headers)
 
@@ -402,9 +405,9 @@ def test_reimport_after_delete_revives_instead_of_creating(tmp_path):
     assert len(rows) == 1, f"删除后重新导入又多了一行：{[r.id for r in rows]}"
 
 
-def test_notes_survive_account_deletion_without_orphan(tmp_path):
+def test_notes_survive_account_deletion_without_orphan(pg_engine):
     """删账号后它名下的笔记**不悬空**：行还在，且指向的账号行也还在（软删）。"""
-    SessionLocal, headers, user_id = _wire(tmp_path)
+    SessionLocal, headers, user_id = _wire(pg_engine)
     account_id = _seed_account(SessionLocal, user_id, note_id="note-survives")
     client.delete(f"/api/accounts/{account_id}", headers=headers)
 
@@ -419,13 +422,13 @@ def test_notes_survive_account_deletion_without_orphan(tmp_path):
     assert owner is not None, "笔记的平台账号引用变成孤儿（指向不存在的行）"
 
 
-def test_notes_come_back_after_import_of_the_same_identity(tmp_path):
+def test_notes_come_back_after_import_of_the_same_identity(pg_engine):
     """端到端：删账号 → 重新导入同一身份 → 老笔记**自动重新可见**（无需再同步一次）。
 
     这正是「重挂归属」与「复活」两条修复合起来才成立的效果：
     复活保住了 id，重挂保证新同步的笔记也落在同一个 id 上。
     """
-    SessionLocal, headers, user_id = _wire(tmp_path)
+    SessionLocal, headers, user_id = _wire(pg_engine)
     account_id = _seed_account(SessionLocal, user_id, note_id="note-relink")
     client.delete(f"/api/accounts/{account_id}", headers=headers)
 

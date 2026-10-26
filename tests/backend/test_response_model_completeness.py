@@ -144,10 +144,16 @@ class TestSystemPagesArePermAuthorized:
 
     def test_settings_scope_uses_perm_code_not_role(self):
         """配置端点解析归属级时必须判权限码。"""
+        import re as _re
+
         src = (ROOT / "backend" / "app" / "api" / "settings.py").read_text(encoding="utf-8")
-        assert 'has_perm(current_user, "system:setting:edit")' in src, (
-            "settings.py 没有用 system:setting:edit 判权限"
-        )
+        #: ⚠️ 别写成固定文本 `has_perm(current_user, "system:setting:edit")` ——
+        #: 2026-10-26 起该调用多了 `db=db` 关键字（`has_perm` 对非 admin 必须带 db，
+        #: 否则恒 False），写死文本会让守卫在**行为正确时**变红。
+        #: 判据只关心「这个码被拿去判权了」，不关心参数怎么写。
+        assert _re.search(
+            r'has_perm\(\s*current_user\s*,\s*"system:setting:edit"', src
+        ), "settings.py 没有用 system:setting:edit 判权限"
         #: 函数体内不许再出现 role 硬判（docstring 里提到不算）
         start = src.index("def _resolve_scope")
         end = src.index("def _wake_runtime_consumers")

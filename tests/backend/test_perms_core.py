@@ -38,77 +38,100 @@ APP_DIR = Path(__file__).resolve().parents[2] / "backend" / "app"
 
 
 # ---------------------------------------------------------------------------
-# 一、164 条码
+# 一、181 条码（2026-10-26 G7 实测）
 # ---------------------------------------------------------------------------
 
 
 def test_all_perms_has_exactly_162_codes():
-    """需求值 **164**（原 162 + 设计 64 的 system:scheduler:view / manage）。
+    """需求值 **178**。
 
-    ⚠️ 补这一条的原因（设计 49 附 A 未覆盖）：「个人资料」页早就有 UI 与路由，
-    但没有页面码 ⇒ v1.1.0 侧栏由 `menus` 表下发时它**进不了侧栏**
-    （用户只能手敲 `/profile`），且该页在权限体系里等于不存在。
+    ⚠️ 本轮（2026-10-26 G7）回数后钉死 —— 旧值 164 已漂移：
+    * 三码拆分 +4（`xhs:item:onShelf/offShelf/generateNote` + `xhs:item:deleteLocal`）；
+    * 删孤儿码 −22（含 G8 的 picture:permanentDelete / scheduler:cleanTasks 两个重复码）（前端另立一套、后端路由却挂另一套的空壳码 —— 前端已对齐后端真码；
+      其中 `ai:gateway:delete` 是因功能移除、端点为 410 墓碑而退场）；
+    * 恢复 `xhs:settings:edit` +1（`api/settings.py:119` 真实判权点）；
+    * 其余为此前各轮累计漂移。
 
-    区分两件事（原注释混为一谈）：
+    四组构成见 `test_three_groups_are_countable_separately`（S/B/P/SPLIT）。
+
+    ⚠️ 关于「个人资料」页（设计 49 附 A 未覆盖）：它早就有 UI 与路由，但没有页面码
+    ⇒ v1.1.0 侧栏由 `menus` 表下发时它**进不了侧栏**（用户只能手敲 `/profile`），
+    且该页在权限体系里等于不存在。区分两件事（原注释混为一谈）：
     * **端点**不挂码 —— 每个人都要能改自己的密码，挂码会把人锁死（`EXEMPT_SELF`）；
     * **菜单**必须有码 —— 否则无法被 `role_menus` 授权、不会出现在侧栏。
     """
-    assert len(perms.ALL_PERMS) == 164
+    assert len(perms.ALL_PERMS) == 178
 
 
 def test_three_groups_are_countable_separately():
-    """三组分别可数：系统 **27**（设计 64 +scheduler:view/manage）/ 业务写码 114 / 页级 view 23。"""
-    assert len(reg.SYSTEM_PERMS) == 27
-    assert len(reg.BUSINESS_PERMS) == 114
-    assert len(reg.PAGE_VIEW_PERMS) == 23
-    assert len(reg.SYSTEM_PERMS) + len(reg.BUSINESS_PERMS) + len(reg.PAGE_VIEW_PERMS) == 164
+    """四组分别可数（2026-10-26 G7 实测）：
+
+    系统 **36** / 业务写码 **93** / 页级 **31**（24 C + 7 随页面登记的按钮）/
+    拆分按钮 **18** ⇒ 合计 **178**，与 `ALL_PERMS` 一致，四组互不重叠。
+    """
+    assert len(reg.SYSTEM_PERMS) == 36
+    assert len(reg.BUSINESS_PERMS) == 93
+    assert len(reg.PAGE_VIEW_PERMS) == 31
+    assert len(reg.SPLIT_BUTTON_PERMS) == 18
+    total = (len(reg.SYSTEM_PERMS) + len(reg.BUSINESS_PERMS)
+             + len(reg.PAGE_VIEW_PERMS) + len(reg.SPLIT_BUTTON_PERMS))
+    assert total == 178
 
 
 def test_system_group_matches_design_49_table():
-    """系统域逐码核对（49 附 A.1）：user 7 / role 5 / menu 4 / dict 4 / setting 4 / log 1。"""
+    """系统域逐码核对（**2026-10-26 G7 实测**，非设计 49 附 A.1 旧值）。
+
+    旧值 27 条已漂移：`xhs:job` 6 条随设计 69 任务中心两级重构并入 `scheduler` 域、
+    `setting` 由 4 降为 2（`system:setting:create/delete` 已退场）、
+    `user` 7→11、`scheduler` 2→10。设计 49 的表已过期，这里只钉实测值。
+    """
     by_resource: dict[str, int] = {}
     for spec in reg.SYSTEM_PERMS:
         domain, resource, _action = perms.parse_perm(spec.code)
         assert domain == "system", spec.code
         by_resource[resource] = by_resource.get(resource, 0) + 1
     assert by_resource == {
-        "user": 7,
+        "user": 11,
         "role": 5,
         "menu": 4,
         "dict": 4,
-        "setting": 4,
+        "setting": 2,
         "log": 1,
-        # 设计 64 §3.3：任务中心总览（跨工作区只读 + 管理动作）
-        "scheduler": 2,
+        # 设计 69 任务中心两级重构：job 6 条归并进 scheduler 域
+        "scheduler": 9,
     }
 
 
 def test_business_group_matches_design_49_module_table():
-    """业务域逐前缀核对（49 §模块九 22 页表格）+ 末尾两行（提示词 / 生成）。"""
+    """业务域逐前缀核对（**2026-10-26 G7 实测**，非设计 49 §模块九旧值）。
+
+    旧值 114 条已漂移：`xhs:job` 6 条移入系统域、`ai:generate` 3→1（`batchGenerate/retry`
+    已退场）、`xhs:note` 10→5、`xhs:workshop` 6→3、`xhs:account` 9→7、`xhs:publish` 5→4、
+    `xhs:forbiddenWord` 4→3（`import` 已退场）。设计 49 的表已过期，这里只钉实测值。
+    """
     expected = {
-        "xhs:account": 9,
-        "xhs:note": 10,
+        "xhs:account": 7,
+        "xhs:note": 5,
         "xhs:library": 5,
-        "xhs:workshop": 6,
-        "xhs:item": 10,
-        "xhs:publish": 5,
+        "xhs:workshop": 3,
+        "xhs:item": 11,
+        "xhs:publish": 4,
         "xhs:order": 6,
         "xhs:violation": 1,
-        "xhs:picture": 7,
+        "xhs:picture": 6,
         "xhs:monitor": 5,
         "xhs:autoops": 5,
         "xhs:crawl": 1,
         "xhs:keyword": 3,
         "xhs:topic": 3,
         "xhs:rule": 4,
-        "xhs:forbiddenWord": 4,
+        "xhs:forbiddenWord": 3,
         "xhs:material": 4,
-        "xhs:job": 6,
         "xhs:record": 4,
-        "ai:gateway": 6,
+        "ai:gateway": 5,
         "ai:model": 4,
         "ai:prompt": 3,
-        "ai:generate": 3,
+        "ai:generate": 1,
     }
     actual: dict[str, int] = {}
     for spec in reg.BUSINESS_PERMS:
@@ -116,7 +139,7 @@ def test_business_group_matches_design_49_module_table():
         key = f"{domain}:{resource}"
         actual[key] = actual.get(key, 0) + 1
     assert actual == expected
-    assert sum(expected.values()) == 114
+    assert sum(expected.values()) == 93
 
 
 def test_every_code_matches_the_design_regex():
@@ -136,9 +159,24 @@ def test_codes_are_unique_and_three_segment():
 
 
 def test_page_view_codes_are_all_menu_type_c():
-    """页级 view 22 条必须是 C 行（种子里挂在自己那页上，不是按钮）。"""
-    assert {spec.menu_type for spec in reg.PAGE_VIEW_PERMS} == {"C"}
-    assert all(spec.code.endswith(":view") for spec in reg.PAGE_VIEW_PERMS)
+    """页级组 31 条：24 条 C 行 + 7 条**随页面登记的按钮码**。
+
+    后者是本仓既有的登记方式 —— 任务中心 5 个按钮、`xhs:settings:edit`、
+    `xhs:library:export` 与各自页面绑在同一处（种子里挂在同一页下）。
+    判据：**C 行必须以 `:view` 结尾**（页级入口命名约定）；
+    F 行必须是**该页自己的按钮**（parent_path 与组内某条 C 行一致）。
+    """
+    c_specs = [s for s in reg.PAGE_VIEW_PERMS if s.menu_type == "C"]
+    f_specs = [s for s in reg.PAGE_VIEW_PERMS if s.menu_type == "F"]
+    assert len(c_specs) == 24 and len(f_specs) == 7
+    #: 合法例外：`xhs:insights:shop`（商品洞察页）是独立页面，
+    #: 不沿用 `:view` 后缀约定 —— 与 `xhs:insights:view`（内容洞察）区分。
+    c_no_view = [s.code for s in c_specs if not s.code.endswith(":view")]
+    assert c_no_view == ["xhs:insights:shop"]
+    page_paths = {s.parent_path for s in c_specs}
+    assert all(s.parent_path in page_paths for s in f_specs), (
+        "随页面登记的按钮必须挂在组内某条 C 行的 parent_path 上"
+    )
 
 
 def test_view_code_numbers_match_the_frontend_menu_rows():

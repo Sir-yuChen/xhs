@@ -1293,7 +1293,7 @@ class TestSeed:
         assert again == 0, "已有规则包时不该再播种"
         assert service.list_sets(db_session, user.id)[0].name == "我自己改的名字", "改动被覆盖了"
 
-    def test_seed_skips_unimplemented_op(self, db_session, monkeypatch):
+    def test_seed_skips_unimplemented_op(self, db_session, monkeypatch, tmp_path):
         """⚠️ 种子里若混进**未实现的 op** ⇒ **跳过该条**，不把脏数据落库。
 
         ⚠️ 判据必须用一个**真的还没实现**的 op。`fixed_text` / `math_scale`
@@ -1322,9 +1322,13 @@ class TestSeed:
             ]
         }
         import json as _json
-        from pathlib import Path
 
-        tmp = Path(str(db_session.bind.url).replace("sqlite:///", "")).parent / "seed_bad.json"
+        #: ⚠️ 别从 `db_session.bind.url` 反推临时目录 —— 那个写法假设库是
+        #: SQLite 文件。指向 PostgreSQL 时 url 是
+        #: `postgresql+psycopg://user:pw@host:port/db`，`Path(...)` 会拼出
+        #: `postgresql+psycopg:\postgres:***@...` 这种非法路径（OSError errno 22，
+        #: 真机实测）。用 pytest 的 `tmp_path`，与后端方言无关。
+        tmp = tmp_path / "seed_bad.json"
         tmp.write_text(_json.dumps(bad, ensure_ascii=False), encoding="utf-8")
         monkeypatch.setattr(
             "backend.app.core.initial_data.resolve_initial_data_file",

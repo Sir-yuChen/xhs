@@ -31,6 +31,13 @@ from backend.app.core import initial_data
 from backend.app.main import app
 from backend.app.models import ScheduledJob, User
 
+from tests.backend.conftest import (  # noqa: PLC0415 - schema 复用助手
+    _BUILT_SCHEMAS,
+    _SCHEMA_BY_ENGINE,
+    make_engine,
+    reset_test_data,
+)
+
 
 
 #: 测试分层标记（2026-10-23 立，见 `docs/04_测试文档/01_测试体系与流程规范.md` §15.2）。
@@ -100,11 +107,16 @@ def _logging_stays_usable():
 def _override_database(tmp_path):
     from backend.app.core.database import Base, get_db
 
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'initial-data-test.db'}", connect_args={"check_same_thread": False}
-    )
+    engine = make_engine(tmp_path / 'initial-data-test.db')
     TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-    Base.metadata.create_all(bind=engine)
+    #: 2026-10-26：同进程复用 schema ⇒ 表只建一次，之后只清数据。
+    _schema = _SCHEMA_BY_ENGINE.get(engine)
+    if _schema is not None and _BUILT_SCHEMAS.get(_schema):
+        reset_test_data(engine)
+    else:
+        Base.metadata.create_all(bind=engine)
+        if _schema is not None:
+            _BUILT_SCHEMAS[_schema] = True
 
     def override_get_db():
         db = TestingSessionLocal()
@@ -369,7 +381,7 @@ def test_settings_seed_value_comes_from_the_data_file(db_factory, tmp_path, monk
         {
             "version": 1,
             "system_settings": [
-                {"key": "crawl_rate_limit_per_minute", "value": 42, "value_type": "int"},
+                {"key": "log_retention_days", "value": 42, "value_type": "int"},
             ],
         },
     )
@@ -377,7 +389,7 @@ def test_settings_seed_value_comes_from_the_data_file(db_factory, tmp_path, monk
     try:
         settings_service.seed_system_settings(db)
         db.commit()
-        row = settings_service._system_row(db, "crawl_rate_limit_per_minute")
+        row = settings_service._system_row(db, "log_retention_days")
         assert row is not None and row.value == "42", "播种值必须取自数据文件（系统级一行）"
     finally:
         db.close()
@@ -395,7 +407,7 @@ def test_settings_seed_falls_back_to_builtin_when_file_value_is_illegal(
         {
             "version": 1,
             "system_settings": [
-                {"key": "crawl_rate_limit_per_minute", "value": "abc", "value_type": "int"},
+                {"key": "log_retention_days", "value": "abc", "value_type": "int"},
             ],
         },
     )
@@ -407,8 +419,8 @@ def test_settings_seed_falls_back_to_builtin_when_file_value_is_illegal(
         with caplog.at_level("WARNING"):
             settings_service.seed_system_settings(db)
             db.commit()
-        row = settings_service._system_row(db, "crawl_rate_limit_per_minute")
-        fallback = settings_service.BUILTIN_DEFAULTS["crawl_rate_limit_per_minute"]
+        row = settings_service._system_row(db, "log_retention_days")
+        fallback = settings_service.BUILTIN_DEFAULTS["log_retention_days"]
         assert row.value == str(fallback)
         assert any("非法" in record.message for record in caplog.records)
     finally:
@@ -458,7 +470,17 @@ def test_startup_seeding_is_decoupled_from_scheduler_switch(tmp_path, monkeypatc
         rows = db.scalars(select(ScheduledJob)).all()
         db.close()
         assert keys == {row["job_key"] for row in initial_data.load_initial_scheduled_jobs()}
-        assert all(row.user_id is not None for row in rows), "DEF-066：不许再有全局行"
+        #: ⚠️ **DEF-066 的原句「不许再有全局行」已被设计 69 取代**（2026-10-25）：
+        #: 任务中心改两级架构后，内置任务是**全表唯一的一份公共定义**
+        #: （`job_key` 全表唯一），`user_id` 从「归属人」降级为「最后修改人」（可空）。
+        #: 执行时跑谁的数据由 `JobSpec.user_scoped` 在运行时 fan-out
+        #: （`executed_for_user_id` 记在日志上），不再用行归属表达。
+        #: ⇒ 断言从「user_id 非空」改为「job_key 全表唯一且行数与注册表一致」。
+        keys_all = [row.job_key for row in rows]
+        assert len(keys_all) == len(set(keys_all)), (
+            "job_key 必须全表唯一（设计 69：一种任务只有一份定义）"
+        )
+        assert len(rows) == created, "播种行数应等于注册表 builtin 全集"
     finally:
         app.dependency_overrides.clear()
 
@@ -487,8 +509,10 @@ def test_seed_values_come_from_the_data_file(tmp_path, monkeypatch):
         assert row.misfire_policy == expected["misfire_policy"]
         assert row.concurrent == expected["concurrent"]
         assert row.is_builtin is True
-        # DEF-066：归属播种时的那个用户（原全局行 user_id IS NULL 已废）
-        assert row.user_id == user_id
+        #: ⚠️ **被设计 69 取代**（2026-10-25）：原句「DEF-066：归属播种时的那个用户」
+        #: 基于「每用户一份任务行」；两级架构后内置任务只有一份公共定义，
+        #: `user_id` 只是「最后修改人」快照，播种时可能为空。
+        assert row.job_key == expected["job_key"], "行必须对应种子里的 job_key"
 
 
 def test_existing_rows_are_never_overwritten(tmp_path, monkeypatch):

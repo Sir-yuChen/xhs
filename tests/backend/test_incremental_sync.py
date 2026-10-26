@@ -572,7 +572,7 @@ def _make_db(tmp_path):
     from backend.app.core.database import Base
     from tests.backend.conftest import seed_owner_rows
 
-    engine = create_engine(f"sqlite:///{tmp_path / 't.db'}")
+    engine = make_engine(tmp_path / 't.db')
     Base.metadata.create_all(engine)
     # ⚠️ FK=ON 后必须播种父行：_seed_account 插 platform_accounts(user_id=1)，
     # 而 users 行没人建（2026-10-04 实测 7 条红）。

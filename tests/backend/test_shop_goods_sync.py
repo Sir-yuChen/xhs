@@ -33,7 +33,12 @@ from backend.app.services import shop_goods_sync_service as sgs
 from backend.app.services import account_task_service as ats
 from backend.app.services.shop_binding_service import get_shop_state
 from tests.backend.cookie_fixtures import bind_shop_account, give_ark_cookies
-from tests.backend.conftest import patch_service_sessions
+from tests.backend.conftest import (  # noqa: PLC0415 - schema 复用助手
+    _BUILT_SCHEMAS,
+    _SCHEMA_BY_ENGINE,
+    make_engine,
+    reset_test_data,
+)
 
 import pytest
 
@@ -179,10 +184,15 @@ def _setup(tmp_path, monkeypatch, *, with_binding: bool = True, shop_id_fk: bool
     这是旧的「有凭据但没绑店」状态在现行模型下的**唯一等价物** ——
     因为「没绑店」这个状态已不存在（凭据即能力，隔离键 ≠ 能力判据）。
     """
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'shop-goods-sync.db'}", connect_args={"check_same_thread": False}
-    )
-    Base.metadata.create_all(bind=engine)
+    engine = make_engine(tmp_path / 'shop-goods-sync.db')
+    #: 2026-10-26：同进程复用 schema ⇒ 表只建一次，之后只清数据。
+    _schema = _SCHEMA_BY_ENGINE.get(engine)
+    if _schema is not None and _BUILT_SCHEMAS.get(_schema):
+        reset_test_data(engine)
+    else:
+        Base.metadata.create_all(bind=engine)
+        if _schema is not None:
+            _BUILT_SCHEMAS[_schema] = True
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
     def override_get_db():
