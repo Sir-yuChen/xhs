@@ -222,13 +222,13 @@ def _assert_can_create_in_workspace(db: Session, current_user: User, job_key: st
 
     job_workspace = (workspace_for_job(job_key) or "").strip() or "xhs"
     if job_workspace == "system":
-        if not has_perm(current_user, "system:scheduler:create"):
+        if not has_perm(current_user, "system:scheduler:create", db=db):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="JOB_SYSTEM_WORKSPACE_CREATE_REQUIRES_ADMIN",
             )
         return
-    if not has_perm(current_user, f"{job_workspace}:taskcenter:create"):
+    if not has_perm(current_user, f"{job_workspace}:taskcenter:create", db=db):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="JOB_WORKSPACE_CREATE_PERM_REQUIRED",
@@ -245,13 +245,13 @@ def _assert_can_edit(db: Session, current_user: User, job: ScheduledJob) -> None
 
     job_workspace = (job.workspace or "").strip() or "xhs"
     if job_workspace == "system":
-        if not has_perm(current_user, "system:scheduler:edit"):
+        if not has_perm(current_user, "system:scheduler:edit", db=db):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="JOB_SYSTEM_WORKSPACE_EDIT_REQUIRES_ADMIN",
             )
         return
-    if not has_perm(current_user, f"{job_workspace}:taskcenter:edit"):
+    if not has_perm(current_user, f"{job_workspace}:taskcenter:edit", db=db):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="JOB_WORKSPACE_EDIT_PERM_REQUIRED",
@@ -265,7 +265,7 @@ def _get_visible_job(db: Session, current_user: User, job_id: int) -> ScheduledJ
 
     两级任务中心（系统级 / 工作区级）各有自己的一组码。要知道「这次该查哪个码」，
     必须先看任务属于哪一级 —— 这是**选码**，不是判权。真正放不放行，**只由
-    `has_perm()` 决定**：
+    `has_perm(..., db=db)` 决定**：
 
     | 任务归属 | 动作 → 查的码 |
     |---|---|
@@ -290,17 +290,15 @@ def _get_visible_job(db: Session, current_user: User, job_id: int) -> ScheduledJ
     #: 执行看 `:run`，暂停/恢复看 `:toggle`。两者都放行才算可见。
     #: admin 由 `user_perms()` 派生 `ALL_PERMS`，自然两条都有。
     if job_workspace == "system":
-        if has_perm(current_user, "system:scheduler:run") or has_perm(
-            current_user, "system:scheduler:toggle"
-        ):
+        if has_perm(current_user, "system:scheduler:run", db=db) or has_perm(
+            current_user, "system:scheduler:toggle", db=db):
             return job
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="JOB_SYSTEM_WORKSPACE_REQUIRES_ADMIN"
         )
 
-    if has_perm(current_user, f"{job_workspace}:taskcenter:run") or has_perm(
-        current_user, f"{job_workspace}:taskcenter:toggle"
-    ):
+    if has_perm(current_user, f"{job_workspace}:taskcenter:run", db=db) or has_perm(
+        current_user, f"{job_workspace}:taskcenter:toggle", db=db):
         return job
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN, detail="JOB_WORKSPACE_PERM_REQUIRED"
@@ -483,6 +481,27 @@ def _apply_custom_params(
     job.params = merged
 
 
+def _assert_params_keys_allowed(spec, params: dict) -> None:
+    """**纯 payload** 校验：内置任务的参数键不许越界（不查库、不看身份）。
+
+    2026-10-26：从 `_validate_create_params` 里抽出来，好让它在**判权之前**跑 ——
+    「你夹带了代码拥有的参数键」是本地确定性错误，不该被 403 掩盖。
+
+    :raises HTTPException: 400 `JOB_PARAMS_NOT_EDITABLE`
+    """
+    editable = set(spec.params_editable) | set(spec.params_required)
+    disallowed = [key for key in params if key not in editable]
+    #: 2026-10-07 用户口径：「**系统内置**任务的调用参数不可删除不可添加；**非系统内置**
+    #: 任务可删除、可添加调用参数」。⇒ 白名单**只对内置任务生效**（内置的参数集合由
+    #: 注册表 `JobSpec` 拥有，用户改不了键名）；非内置任务（用户自建的 `auto_ops` 等）
+    #: 允许自由添加键 —— 它们由用户自己创建、参数只喂给它自己的执行函数，无跨租户面。
+    if spec.builtin and disallowed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"JOB_PARAMS_NOT_EDITABLE: 参数 {sorted(disallowed)} 由代码拥有，不可写入",
+        )
+
+
 def _validate_create_params(
     db: Session,
     current_user: User,
@@ -496,18 +515,10 @@ def _validate_create_params(
     （`system.no_traffic_cleanup` 是平台删除操作 ⇒ 跨租户破坏性触发）。
     现在：键白名单（`params_editable ∪ params_required`，代码拥有的键不可写）
     + `account_ids` 归属校验 + `params_validator` 深校验，三样与 PUT 对齐。
+
+    ⚠️ 键白名单已抽到 :func:`_assert_params_keys_allowed`（判权前调用）；
+    本函数剩下的是**查库**部分，必须留在判权之后。
     """
-    editable = set(spec.params_editable) | set(spec.params_required)
-    disallowed = [key for key in params if key not in editable]
-    #: 2026-10-07 用户口径：「**系统内置**任务的调用参数不可删除不可添加；**非系统内置**
-    #: 任务可删除、可添加调用参数」。⇒ 白名单**只对内置任务生效**（内置的参数集合由
-    #: 注册表 `JobSpec` 拥有，用户改不了键名）；非内置任务（用户自建的 `auto_ops` 等）
-    #: 允许自由添加键 —— 它们由用户自己创建、参数只喂给它自己的执行函数，无跨租户面。
-    if spec.builtin and disallowed:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"JOB_PARAMS_NOT_EDITABLE: 参数 {sorted(disallowed)} 由代码拥有，不可写入",
-        )
     cleaned = dict(params)
     # 默认值兜底（2026-10-07 用户口径「调用参数……必须有默认值」）：建行时把**没写的
     # 键**按注册表默认值补齐 ⇒ 界面「显示什么」与「执行时用什么」从建行那一刻起就一致
@@ -570,8 +581,8 @@ def list_jobs(
     from backend.app.core.perms import has_perm  # noqa: PLC0415
 
     if not (
-        has_perm(current_user, "system:scheduler:view")
-        or has_perm(current_user, "xhs:taskcenter:view")
+        has_perm(current_user, "system:scheduler:view", db=db)
+        or has_perm(current_user, "xhs:taskcenter:view", db=db)
     ):
         raise HTTPException(
             403,
@@ -666,7 +677,25 @@ def create_job(
     except KeyError:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="JOB_KEY_UNSUPPORTED") from None
 
-    # ── 权限：新增到**哪个工作区**，就要那个工作区的权限（设计 69 + 2026-10-25 口径）──
+    # ── ① 纯格式校验先于判权（2026-10-26 决定）──
+    #
+    # 「cron 写错了」与「你没有建任务的权限」是两件事，前者是**本地确定性判断**
+    # （不查库、不看身份，`validate_schedule` / `validate_params` 只解析 payload）。
+    # 放在判权之前有两个好处：① 格式错的人先看到准确的 400，而不是被 403 挡住后
+    # 永远不知道自己的 cron 也不对；② 判权之前不产生任何副作用。
+    #
+    # ⚠️ `_validate_create_params`（查库、验 account_ids 归属）**必须留在判权之后**：
+    # 它会读别的账号数据，不能给无权限的人当探针。
+    schedule = payload.schedule or _DEFAULT_JOB_SCHEDULE
+    try:
+        validate_schedule(schedule, registry_allows_concurrent=spec.allow_concurrent)
+        validate_params(spec, payload.params)
+    except (ScheduleValidationError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
+    # 参数键白名单也是纯 payload 判断（内置任务的键由代码拥有）⇒ 同样前置
+    _assert_params_keys_allowed(spec, payload.params or {})
+
+    # ── ② 权限：新增到**哪个工作区**，就要那个工作区的权限（设计 69 + 2026-10-25 口径）──
     #
     # 路由层只挂 `xhs:taskcenter:create`（工作区成员够得着），
     # 「系统级任务归系统管理」这条必须在这里判 —— 静态路由表表达不了
@@ -689,11 +718,8 @@ def create_job(
                 "一种任务只有一份定义，请直接修改已有任务，不要重复创建"
             ),
         )
-    schedule = payload.schedule or _DEFAULT_JOB_SCHEDULE
+    # DEF-066：建行与改行同一把尺子 —— 键白名单 + account_ids 归属校验（查库，故在判权之后）
     try:
-        validate_schedule(schedule, registry_allows_concurrent=spec.allow_concurrent)
-        validate_params(spec, payload.params)
-        # DEF-066：建行与改行同一把尺子 —— 键白名单 + account_ids 归属校验
         payload.params = _validate_create_params(db, current_user, spec, payload.params)
     except (ScheduleValidationError, ValueError) as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
@@ -1044,7 +1070,7 @@ def schedule_overview(
     """
     from backend.app.core.perms import has_perm  # noqa: PLC0415
 
-    if not has_perm(current_user, "system:scheduler:view"):
+    if not has_perm(current_user, "system:scheduler:view", db=db):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={

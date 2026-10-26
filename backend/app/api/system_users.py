@@ -549,7 +549,22 @@ def delete_user(
     return {"ok": True, "id": user.id, "deleted": True}
 
 
+@router.post("/{user_id}/force-logout")
+def force_logout_user(
+    user_id: int,
+    *,
+    db: Session = Depends(get_db),
+    actor: User = Depends(require_perm("system:user:delete")),
+) -> dict:
+    """强制下线：抬 `token_version` ⇒ 该用户所有旧令牌立即失效，需重新登录。
 
+    ⚠️ 2026-10-26 修：本端点的 `@router.post` 装饰器与函数签名曾整块丢失
+    （只剩函数体裸挂在 `delete_user` 之后）。后果有两层：
+    * 路由不存在 ⇒ 前端「强制下线」点了没反应（404），
+    * 更要紧的是**「不许对自己做」的判据没了**：它不是被绕过，而是整个端点
+      已经不在路由表里，守卫 `test_system_api` 断言 400 时拿到的是 200
+      （实际是别的东西匹配上了），真机表现是「按钮点了没反应」。
+    """
     user = _get_or_404(db, user_id)
     _assert_not_self(actor, user, "强制下线")
     _bump_token_version(db, user)

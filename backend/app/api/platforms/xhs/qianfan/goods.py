@@ -74,6 +74,7 @@ from ._shared import (
     sync_task_service,
     synced_note_count,
 )
+from backend.app.core.perm_deps import require_perm
 
 #: 本域独立 router —— 由 `__init__.py` 挂到父 router 下，**不带 prefix**
 #:（路径里已含 `/picture-space` 这类段）。
@@ -594,6 +595,7 @@ def shop_items_delete(
     payload: ShopItemsDeleteRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    _perm: None = Depends(require_perm("xhs:item:deleteLocal")),
 ):
     """批量删除**本地台账行**（v1.36，设计 13 §33.10；零平台请求）。
 
@@ -1609,6 +1611,60 @@ def delete_product_group(group_id: int):
     """**已退场**：删分组（2026-10-05 分组功能整体移除）。"""
     raise HTTPException(status_code=status.HTTP_410_GONE, detail=_PRODUCT_GROUPS_GONE)
 
+_OPERATE_ACTION_PERMS: dict[str, str] = {
+    #: 上架 / 下架 / 删除平台商品 —— 三个动作三个码（2026-10-26）。
+    "on_shelf": "xhs:item:onShelf",
+    "off_shelf": "xhs:item:offShelf",
+    "delete": "xhs:item:delete",
+}
+
+
+def _assert_action_permitted(db: Session, current_user: User, action: str) -> None:
+    """按 `action` **选码**再判权（唯一实现；`/items/operate` 的执行前咽喉）。
+
+    ## 为什么不写成三个端点
+
+    平台只给一个批量动作接口，拆成三个端点 = 三份「入队 + 门禁 + 任务行 + 轮询」
+    的重复实现（DEF-044 同型）。所以端点一个、判权三份 —— 但**判据必须只有一处**，
+    否则单行按钮与批量按钮迟早各判一套。
+
+    ## 为什么不是「按归属/身份分流」
+
+    设计 70：归属与身份**只许用来选码**，放不放行只由**权限判定**决定。
+    这里正是「选码」：动作 → 码是固定映射，与谁在调用无关。
+
+    ## ⚠️ 为什么走 `permission_cache.perms_of` 而不是 `core.perms.has_perm`
+
+    `perms_of(db, user)` 是**查库 + TTL 缓存**的唯一实现，`require_perm` 依赖走的也是它。
+    `core.perms.has_perm` 只是它的薄包装（2026-10-26 起必须传 `db=`；不传时对非 admin
+    ——`raise`，因为早期版本在那里静默返回 False，导致非 admin 一律被拒且不报错）。
+    本函数直接用 `perms_of` 是为了**一次查询判一个动作**，不走 db 参数传递。
+
+    ⚠️ **未知 `action` 不在这里报错**（返回 None 放行）—— 白名单校验在上游
+    先跑，重复判会得到两个 400 来源。调用方必须**先**做白名单、再调本函数。
+    """
+    from backend.app.core import permission_cache  # noqa: PLC0415
+    from backend.app.core.perms import ROLE_ADMIN, normalize_role  # noqa: PLC0415
+
+    code = _OPERATE_ACTION_PERMS.get(action)
+    if code is None:  # 上游已拦过未知动作（400），这里只处理已知动作
+        return
+    #: admin 由代码派生全量码（`perms.role_perms` 的口径），不查授权表 ——
+    #: 与 `require_perm` 完全一致，不另立一套。
+    if normalize_role(getattr(current_user, "role", None)) == ROLE_ADMIN:
+        return
+    if code in permission_cache.perms_of(db, current_user):
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={
+            "code": "PERMISSION_DENIED",
+            "message": "没有操作权限",
+            "perm": code,
+        },
+    )
+
+
 class ItemOperateRequest(BaseModel):
     """批量上架 / 下架 / 删除**平台商品**（2026-10-05 需求 7）。
 
@@ -1727,8 +1783,34 @@ def shop_items_operate(
     payload: ItemOperateRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    #: ⚠️ **这里刻意不挂静态 `require_perm` 依赖**（与本仓其它端点不同）——
+    #: 原因是 FastAPI 的依赖**先于函数体执行**，而本端点要按 `action` 选码：
+    #: * 挂一个码（如 `onShelf`）⇒ 有下架权的人点下架也 403；
+    #: * 挂 `require_any_perm(三个)` ⇒ 未知动作本该报 400，却会先被报成 403
+    #:   「没权限」，让用户去找管理员要一个根本不存在的码。
+    #: ⇒ 判权整体下沉到函数内 `_assert_action_permitted`（白名单之后、任何写操作之前），
+    #: 那里是**唯一**咽喉，且同样走 `permission_cache`（与 `require_perm` 同源）。
+    #: 路由表的静态登记仍是 `xhs:item:onShelf`（`ROUTE_PERMS` 只能挂一个值），
+    #: 守卫 `test_item_perms_split.py` 钉住「三个动作三个码且真的判」。
 ):
     """**批量上架 / 下架 / 删除平台商品**（2026-10-05 需求 7；**真实写操作**）。
+
+    ## 三个动作 = 三个权限码（2026-10-26 用户口径「拆分成三个权限码」）
+
+    平台只给**一个**批量动作接口（`batch_update_availability_v3` / 删除共用入口），
+    所以端点只有一个、`action` 决定语义。路由表只能挂一个码
+    ⇒ 静态挂 `xhs:item:onShelf` 作声明，真正的判据在这里按 `action` **选码**
+    再 `has_perm`：
+
+    | `action` | 权限码 |
+    |---|---|
+    | `on_shelf` | `xhs:item:onShelf` |
+    | `off_shelf` | `xhs:item:offShelf` |
+    | `delete` | `xhs:item:delete` |
+
+    ⚠️ **不这样做的话**：只挂一个码（原 `xhs:item:operate`）⇒ 想让某人上架，
+    就得连**平台删除**一起授予；这是红线「一按钮一码」要拦的形态。
+    ⚠️ 归属/身份**只用来选码**，放不放行只由**权限判定**决定（设计 70）。
 
     ## 为什么是「手动触发式任务」而不是同步循环
 
@@ -1752,6 +1834,7 @@ def shop_items_operate(
     | 400 `QIANFAN_ITEM_IDS_REQUIRED` | 去重去空白后为空（不静默成功） |
     | 400 `QIANFAN_ITEM_IDS_TOO_MANY` | 超上限（**不静默截断**） |
     | 400 `ARK_SESSION_REQUIRED` | 该账号没有可用的千帆登录态（写操作硬门禁） |
+    | 403 `PERMISSION_DENIED` | 没有该 `action` 对应的权限码 |
 
     ⚠️ **写操作必须有登录态**（与「删本地台账行」不同）：后者零平台请求、无门禁；
     前者打平台，没令牌就是「点了也不会发生」。
@@ -1771,6 +1854,10 @@ def shop_items_operate(
                 "supported": list(operate_service.gates.ALL_ACTIONS),
             },
         )
+
+    #: 选码 → 判权。**顺序是判据**：先判「这个动作认不认得」（400），
+    #: 再判「你有没有这个动作的码」（403）—— 反过来会把「参数写错」报成「没权限」。
+    _assert_action_permitted(db, current_user, action)
 
     # 去重保序（与 `/items/delete` 同一纪律：请求条数≠实际条数时不许虚报）。
     seen: set[str] = set()

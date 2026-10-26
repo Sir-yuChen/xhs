@@ -82,6 +82,7 @@ def _get_owned_setting(db: Session, current_user: User, key: str) -> SystemSetti
 
 
 def _resolve_scope(
+    db: Session,
     current_user: User,
     scope: str,
     workspace: Optional[str],
@@ -117,8 +118,8 @@ def _resolve_scope(
         #: 工作区级配置的写权限属于**该工作区**（`xhs:settings:edit`）。
         #: 兼容旧口径：系统级配置编辑权限也能管工作区级（跨工作区运维）。
         if not (
-            has_perm(current_user, f"{clean_ws}:settings:edit")
-            or has_perm(current_user, "system:setting:edit")
+            has_perm(current_user, f"{clean_ws}:settings:edit", db=db)
+            or has_perm(current_user, "system:setting:edit", db=db)
         ):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -129,7 +130,7 @@ def _resolve_scope(
             )
         return "workspace", clean_ws
 
-    if not has_perm(current_user, "system:setting:edit"):
+    if not has_perm(current_user, "system:setting:edit", db=db):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={
@@ -169,7 +170,7 @@ def list_settings(
     db: Session = Depends(get_db),
 ):
     """配置列表（设计 64 §1.5：scope 决定读哪一级）。"""
-    resolved_scope, clean_ws = _resolve_scope(current_user, scope, workspace)
+    resolved_scope, clean_ws = _resolve_scope(db, current_user, scope, workspace)
     rows = settings_service.list_scoped_settings(
         db,
         scope=resolved_scope,
@@ -212,7 +213,7 @@ def create_setting(
     db: Session = Depends(get_db),
 ):
     """新增配置项。键已存在 ⇒ 409（不静默改成「更新」—— 那会让用户以为新建成功了）。"""
-    resolved_scope, clean_ws = _resolve_scope(current_user, payload.scope, payload.workspace)
+    resolved_scope, clean_ws = _resolve_scope(db, current_user, payload.scope, payload.workspace)
     try:
         row = settings_service.create_setting(
             db,
@@ -261,7 +262,7 @@ def get_setting(
     db: Session = Depends(get_db),
 ):
     """单条配置（设计 64：scope 决定读哪级；越级/别人的键 ⇒ 404）。"""
-    resolved_scope, clean_ws = _resolve_scope(current_user, scope, workspace)
+    resolved_scope, clean_ws = _resolve_scope(db, current_user, scope, workspace)
     row = settings_service.find_scoped(
         db, scope=resolved_scope, key=key, user_id=current_user.id, workspace=clean_ws
     )
@@ -282,7 +283,7 @@ def update_setting(
     `value` 用「是否显式出现在请求体里」判定要不要改 —— 只改 `label` 时不许把值冲成
     `None`（`None` 是合法配置值，不能拿它当「没传」）。
     """
-    resolved_scope, clean_ws = _resolve_scope(current_user, payload.scope, payload.workspace)
+    resolved_scope, clean_ws = _resolve_scope(db, current_user, payload.scope, payload.workspace)
     row = settings_service.find_scoped(
         db, scope=resolved_scope, key=key, user_id=current_user.id, workspace=clean_ws
     )
@@ -354,7 +355,7 @@ def delete_setting(
     """
     scope_in = (payload.scope if payload is not None else "user") or "user"
     ws_in = payload.workspace if payload is not None else None
-    resolved_scope, clean_ws = _resolve_scope(current_user, scope_in, ws_in)
+    resolved_scope, clean_ws = _resolve_scope(db, current_user, scope_in, ws_in)
     row = settings_service.find_scoped(
         db, scope=resolved_scope, key=key, user_id=current_user.id, workspace=clean_ws
     )

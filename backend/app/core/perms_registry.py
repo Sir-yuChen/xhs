@@ -120,9 +120,9 @@ SYSTEM_PERMS: tuple[PermSpec, ...] = (
     PermSpec("system:dict:delete", "删除字典", "F", "/system/dicts", WORKSPACE_SYSTEM, "system"),
     # 配置管理 4
     PermSpec("system:setting:view", "配置管理", "C", "/system/settings", WORKSPACE_SYSTEM, "system"),
-    PermSpec("system:setting:create", "新增配置", "F", "/system/settings", WORKSPACE_SYSTEM, "system"),
+
     PermSpec("system:setting:edit", "编辑配置", "F", "/system/settings", WORKSPACE_SYSTEM, "system"),
-    PermSpec("system:setting:delete", "删除配置", "F", "/system/settings", WORKSPACE_SYSTEM, "system"),
+
     # 日志查看 1（只有查看码，没有按钮码 —— 审计不可删、不可改）
     PermSpec("system:log:view", "日志查看", "C", "/system/logs", WORKSPACE_SYSTEM, "system"),
     # 定时任务总览（设计 64 §3.3）：跨工作区只读 + 管理动作；数据端点 admin 判角色。
@@ -134,7 +134,9 @@ SYSTEM_PERMS: tuple[PermSpec, ...] = (
     PermSpec("system:scheduler:run", "立即执行", "F", "/system/scheduler", WORKSPACE_SYSTEM, "system"),
     PermSpec("system:scheduler:toggle", "暂停恢复", "F", "/system/scheduler", WORKSPACE_SYSTEM, "system"),
     PermSpec("system:scheduler:deleteLogs", "删除日志", "F", "/system/scheduler", WORKSPACE_SYSTEM, "system"),
-    PermSpec("system:scheduler:cleanTasks", "清理任务记录", "F", "/system/scheduler", WORKSPACE_SYSTEM, "system"),
+    #: 2026-10-26（G8）：`cleanTasks` 已退场 —— 它唯一的端点
+    #: `POST /api/tasks/clean` 改挂 `xhs:record:clean`（队列记录清理归记录域，
+    #: 与「整理/清理任务定义」是两件事，不该共用一个系统级码）。
     PermSpec("system:scheduler:runDue", "手动跑到期任务", "F", "/system/scheduler", WORKSPACE_SYSTEM, "system"),
     PermSpec("system:scheduler:cleanLogs", "清理日志", "F", "/system/scheduler", WORKSPACE_SYSTEM, "system"),
 )
@@ -186,28 +188,37 @@ def _f(prefix: str, actions: str, labels: str, path: str, ws: str) -> tuple[Perm
 
 BUSINESS_PERMS: tuple[PermSpec, ...] = (
     # 账号矩阵 9
-    *_f("xhs:account", "create/edit/delete/importCookie/relogin/probe/syncNotes/syncGoodsNotes/syncShopGoods",
-        "添加账号/编辑账号/删除账号/导入Cookie/重新登录/探活检测/同步笔记/同步商品笔记/同步店铺商品",
+    *_f("xhs:account", "edit/delete/importCookie/relogin/probe/syncNotes/syncGoodsNotes",
+        "编辑账号/删除账号/导入Cookie/重新登录/探活检测/同步笔记/同步商品笔记",
         "/platforms/xhs/accounts", _X),
     # 我的笔记 10
-    *_f("xhs:note", "sync/batchSync/create/edit/delete/batchDelete/publish/batchPublish/tag/export",
-        "同步笔记/批量同步/新建笔记/编辑笔记/删除笔记/批量删除/发布笔记/批量发布/打标签/导出笔记",
+    *_f("xhs:note", "sync/batchSync/create/edit/delete",
+        "同步笔记/批量同步/新建笔记/编辑笔记/删除笔记",
         "/platforms/xhs/my-notes", _X),
     # 内容库 5
     *_f("xhs:library", "save/delete/batchCreateDrafts/importData/syncData",
         "保存/删除/批量建草稿/导入数据/同步数据",
         "/platforms/xhs/library", _X),
     # 笔记工坊 6
-    *_f("xhs:workshop", "generate/regenerate/adopt/uploadAsset/deleteAsset/saveDraft",
-        "生成笔记/重新生成/采用版本/上传素材/删除素材/保存草稿",
+    #: ⚠️ 2026-10-26：`uploadAsset` / `deleteAsset` / `saveDraft` 后端无端点
+    #: （素材写走 materials 域、草稿保存是前端状态）⇒ 已删，不留空壳码。
+    *_f("xhs:workshop", "generate/regenerate/adopt",
+        "生成笔记/重新生成/采用版本",
         "/platforms/xhs/note-workshop", _X),
     # 商品列表 10
-    *_f("xhs:item", "edit/polish/export/onShelf/offShelf/delete/sync/generateNote/generateImage/draft",
-        "编辑商品/润色/导出商品/上架/下架/删除商品/同步商品/生成商品笔记/生成商品图/存入草稿箱",
+    #: ⚠️ 2026-10-26 用户口径「商品列表的『生成笔记』与『上架下架』拆分成三个权限码」：
+    #: `operate`（上下架+删除三合一）整条退场，改由 `onShelf` / `offShelf` /
+    #: `generateNote` 各判各的（三条码此前只有菜单行、零路由零按钮，属幽灵码）。
+    #: `delete` 仍留给**平台删除**；删**本地台账行**是另一件事 ⇒ 新增 `deleteLocal`
+    #: （原来那处借用了 `edit` 的码，等于「能改就能删」）。
+    *_f("xhs:item", "edit/polish/export/onShelf/offShelf/delete/deleteLocal/sync/generateNote/generateImage/draft",
+        "编辑商品/润色/导出商品/上架/下架/删除商品/删除台账行/同步商品/生成商品笔记/生成商品图/存入草稿箱",
         "/platforms/xhs/shop-items", _X),
     # 商品发布 5
-    *_f("xhs:publish", "submit/retry/cancel/precheck/rule",
-        "提交发布/重试发布/取消发布/发布预检/数据包规则",
+    #: ⚠️ 2026-10-26：`rule`（数据包规则入口）后端无端点 —— 实际动的是
+    #: `xhs:rule:*` 那组码 ⇒ 已删，不留两套码指同一件事。
+    *_f("xhs:publish", "submit/retry/cancel/precheck",
+        "提交发布/重试发布/取消发布/发布预检",
         "/platforms/xhs/shop-items", _X),
     # 订单管理 6
     *_f("xhs:order", "sync/ship/shipBatch/remark/export/afterSaleHandle",
@@ -216,9 +227,13 @@ BUSINESS_PERMS: tuple[PermSpec, ...] = (
     # 违规管理 1（全页唯一写操作）
     *_f("xhs:violation", "relatedDelete", "删除关联内容",
         "/platforms/xhs/violation-manage", _X),
-    # 图片空间 7（`download` 归查看码，见 49 §模块九 旁注）
-    *_f("xhs:picture", "upload/delete/move/resize/restore/permanentDelete/download",
-        "上传图片/删除图片/移动图片/调整尺寸/恢复图片/永久删除/下载图片",
+    # 图片空间 6
+    #: 2026-10-26（G8）：`permanentDelete` 已退场 —— 它与 `purge`（彻底删除）
+    #: 指**同一个端点** `POST /picture-space/permanent-delete`，是重复码；
+    #: 前端只判 `purge` ⇒ 留 `purge`（它有真实消费方，登记在 `SPLIT_BUTTON_PERMS`），
+    #: 端点改挂 `purge`。这里**不能再列 purge**（否则重复登记）。
+    *_f("xhs:picture", "upload/delete/move/resize/restore/download",
+        "上传图片/删除图片/移动图片/调整尺寸/恢复图片/下载图片",
         "/platforms/xhs/picture-space", _X),
     # 监控中心 5
     *_f("xhs:monitor", "create/edit/delete/refresh/enable",
@@ -240,7 +255,7 @@ BUSINESS_PERMS: tuple[PermSpec, ...] = (
     *_f("xhs:rule", "create/edit/delete/execute", "新建规则/编辑规则/删除规则/试跑规则",
         "/platforms/xhs/shop-items", _X),
     # 违规词 4
-    *_f("xhs:forbiddenWord", "create/edit/delete/import", "新建违规词/编辑违规词/删除违规词/批量导入",
+    *_f("xhs:forbiddenWord", "create/edit/delete", "新建违规词/编辑违规词/删除违规词",
         "/platforms/xhs/shop-items", _X),
     # 素材库 4
     *_f("xhs:material", "createFolder/editFolder/deleteFolder/scan",
@@ -251,8 +266,11 @@ BUSINESS_PERMS: tuple[PermSpec, ...] = (
         "取消记录/重试记录/清理记录/一键清理",
         "/task-records", _X),
     # 大模型网关 6
-    *_f("ai:gateway", "create/edit/delete/test/syncModels/enableModel",
-        "新建服务商/编辑服务商/删除服务商/连通性测试/同步模型/启用模型",
+    #: 2026-10-26（G7）：`delete` 已退场 —— 用户口径「移除删除功能」（v1.9），
+    #: 端点 `DELETE /llm/gateway-configs/{config_id}` 是 410 墓碑（`include_in_schema=False`），
+    #: 前端 `deleteGatewayConfig` 已删、页面无判权点 ⇒ 留码就是空壳（若依纪律一）。
+    *_f("ai:gateway", "create/edit/test/syncModels/enableModel",
+        "新建服务商/编辑服务商/连通性测试/同步模型/启用模型",
         "/llm-gateway/providers", _A),
     # 模型配置 4
     *_f("ai:model", "create/edit/delete/setBusiness",
@@ -261,12 +279,12 @@ BUSINESS_PERMS: tuple[PermSpec, ...] = (
     # 提示词 3 + 生成 3
     *_f("ai:prompt", "create/edit/delete", "新建提示词/编辑提示词/删除提示词",
         "/platforms/xhs/note-workshop?tab=prompts", _A),
-    *_f("ai:generate", "generate/batchGenerate/retry", "生成/批量生成/重试生成",
+    *_f("ai:generate", "generate", "生成",
         "/platforms/xhs/note-workshop?tab=prompts", _A),
 )
 
 # ---------------------------------------------------------------------------
-# 三、页级查看码 22 条（每个 C 行一条）
+# 三、页级查看码 31 条（24 条 C 行 + 7 条**随页面登记**的按钮码）
 # ---------------------------------------------------------------------------
 #: ⚠️ 这 22 条**不含**系统域的 6 条 view（已在 `SYSTEM_PERMS` 里，49 附 A.1 明文列出）。
 #: 判据 = 前端 `app-shell.tsx` 的 C 行 ⟺ 本表（`test_perms_core.py` 比对。
@@ -281,10 +299,7 @@ PAGE_VIEW_PERMS: tuple[PermSpec, ...] = (
     PermSpec("xhs:library:view", "内容库", "C", "/platforms/xhs/library", _X, _X),
     #: 内容库的写操作（2026-10-25 红线「一按钮一码」）：
     #: 发布 / 同步 / 导出 / 建草稿四类动作互相独立（能看能导，不等于能往平台发）。
-    *_f("xhs:library", "publish", "发布笔记", "/platforms/xhs/library", "xhs"),
-    *_f("xhs:library", "sync", "同步笔记", "/platforms/xhs/library", "xhs"),
     *_f("xhs:library", "export", "导出笔记", "/platforms/xhs/library", "xhs"),
-    *_f("xhs:library", "createDraft", "创建草稿", "/platforms/xhs/library", "xhs"),
     PermSpec("xhs:workshop:view", "笔记工坊", "C", "/platforms/xhs/note-workshop", _X, _X),
     #: 工坊的 6 个 Tab（2026-10-26 用户口径「菜单管理中有很多缺失」）：
     #: 它们此前只是**同一个 URL 的 query 参数**、零权限码 ⇒ 授权页勾不了、
@@ -300,8 +315,12 @@ PAGE_VIEW_PERMS: tuple[PermSpec, ...] = (
     PermSpec("xhs:order:view", "订单管理", "C", "/platforms/xhs/orders", _X, _X),
     PermSpec("xhs:datacenter:view", "数据中心", "C", "/platforms/xhs/datacenter", _X, _X),
     PermSpec("xhs:settings:view", "设置", "C", "/settings", _X, _X),
+    #: ⚠️ 2026-10-26：`xhs:settings:edit` **不能删** —— 它在
+    #: `api/settings.py:119` 是真实判权点（工作区级配置的写权限按
+    #: `f"{workspace}:settings:edit"` 拼接判断）。它没有登记路由，是因为
+    #: 配置写端点本身是 `EXEMPT_SELF`（每用户自己的配置不许挂码），
+    #: 工作区级那一层用 `has_perm` 在函数内判 —— 属「有判权点但不占路由」。
     PermSpec("xhs:settings:edit", "工作区配置编辑", "F", "/settings", _X, _X),
-    # 大模型网关工作区 3
     PermSpec("ai:usage:view", "用量看板", "C", "/usage-dashboard", _A, _A),
     PermSpec("ai:gateway:view", "服务商", "C", "/llm-gateway/providers", _A, _A),
     PermSpec("ai:model:view", "模型配置", "C", "/models", _A, _A),
@@ -346,21 +365,26 @@ PAGE_VIEW_PERMS: tuple[PermSpec, ...] = (
 SPLIT_BUTTON_PERMS: tuple[PermSpec, ...] = (
     # 商品
     PermSpec("xhs:item:create", "新增商品", "F", "/platforms/xhs/shop-items", _X, _X),
-    PermSpec("xhs:item:operate", "上下架", "F", "/platforms/xhs/shop-items", _X, _X),
-    #: 商品列表页的四个独立入口（2026-10-25 红线「一按钮一码」）：
+    #: 2026-10-26 用户口径「商品列表的『生成笔记』与『上架下架』拆分，应拆分成三个权限码」：
+    #: 上架 / 下架 / 生成笔记**各一码**（原 `xhs:item:operate` 一个码盖三个动作，
+    #: 授权页只能整块给 —— 想让人上下架就得连平台删除一起给）。
+    #: `onShelf` / `offShelf` / `generateNote` 三条码在 `BUSINESS_PERMS` 里已登记，
+    #: 此前只有菜单行、**没有任何路由与按钮真的判它们**（幽灵码）；本轮落实。
+    #: ⚠️ 三者共用同一个端点 `POST /items/operate`（平台只给一个批量动作接口）⇒
+    #: 路由表挂 `onShelf` 作静态声明，端点内按 `action` 选码再 `has_perm`。
+    #: 平台删除走 `action="delete"` ⇒ 归 `xhs:item:delete`（不是 operate）。
+    #: 商品列表页的独立入口（2026-10-25 红线「一按钮一码」）：
     #: 导出是**只读但会拉全量**、违禁词库是配置、草稿/发布是生成链路入口 ——
     #: 与商品的读写/上下架都不是同一个动作。
     PermSpec("xhs:item:forbiddenWords", "违禁词库", "F", "/platforms/xhs/shop-items", _X, _X),
     PermSpec("xhs:item:drafts", "查看商品草稿", "F", "/platforms/xhs/shop-items", _X, _X),
-    #: 草稿工坊的写操作（2026-10-25 红线「一按钮一码」）：
-    #: 生成（AI 出整篇）/ 改写（在已有草稿上改）/ 生图 / 素材增删排序，
-    #: 四个动作互相独立 —— 能改写不等于能整篇生成（后者更贵、更不可控）。
-    *_f("xhs:draft", "view", "查看草稿", "/platforms/xhs/library", "xhs"),
-    *_f("xhs:draft", "generate", "生成草稿", "/platforms/xhs/library", "xhs"),
-    *_f("xhs:draft", "rewrite", "改写草稿", "/platforms/xhs/library", "xhs"),
-    *_f("xhs:draft", "generateImage", "生成配图", "/platforms/xhs/library", "xhs"),
-    *_f("xhs:draft", "assets", "管理草稿素材", "/platforms/xhs/library", "xhs"),
-    *_f("xhs:draft", "save", "保存草稿", "/platforms/xhs/library", "xhs"),
+    #: ⚠️ 2026-10-26：`xhs:draft:*` 四条码**整条删除**。
+    #: 它们此前只有菜单行，而前端 `hasPermission` 判的是这些码、后端路由挂的却是
+    #: **另一套**（素材增删 → `xhs:note:edit`；AI 改写 / 生图 → `ai:generate:generate`；
+    #: LLM 生成笔记 → `xhs:item:generateNote`）。前端另立一套码 ⇒ 授权页勾了
+    #: `xhs:draft:generate` 也不会让后端放行（反之亦然）—— 两边对不上，等于没有判权。
+    #: 若依的纪律是**同一个字符串只写一处**：前端判权码必须等于后端路由码。
+    #: ⇒ 前端 12 处 `hasPermission` 改成后端真码，本组码退场（不留兼容层）。
     PermSpec("xhs:item:publish", "发布商品笔记", "F", "/platforms/xhs/shop-items", _X, _X),
     PermSpec("xhs:item:bind", "绑定千帆", "F", "/platforms/xhs/shop-items", _X, _X),
     PermSpec("xhs:item:healthCheck", "店铺探活", "F", "/platforms/xhs/shop-items", _X, _X),

@@ -52,6 +52,15 @@ ALL_PERMS: frozenset[str] = CODES
 PERM_LABELS: dict[str, str] = {spec.code: spec.label for spec in PERMS}
 
 
+class PermissionResolutionError(RuntimeError):
+    """权限查询缺参数（如非 admin 调 `has_perm` 没传 `db`）—— **代码级错误**，不是权限不足。
+
+    刻意用 `RuntimeError` 而非返回 `False`：返回 False 会让「判权点其实是坏的」
+    与「用户确实没有权限」看起来一模一样，缺陷能静默存活（2026-10-26 实测 24 处
+    判权点全部因此失效）。对前端仍表现为 500，但日志里能一眼看到根因。
+    """
+
+
 def make_perm(domain: str, resource: str, action: str = "") -> str:
     """拼权限码。**唯一拼接点** —— 直接写 `f"{a}:{b}:{c}"` 会漏掉空段校验。
 
@@ -125,30 +134,64 @@ def role_perms(role_code: str | None, *, db: Any = None) -> frozenset[str]:
     return frozenset()
 
 
-def user_perms(user: Any) -> frozenset[str]:
-    """该用户的有效权限码。``None``（未登录）⇒ 空集。"""
+def user_perms(user: Any, *, db: Any = None) -> frozenset[str]:
+    """该用户的有效权限码。``None``（未登录）⇒ 空集。
+
+    :param db: **必传才能判非 admin 角色**。传 `Session` 时走
+        `permission_cache.perms_of`（查 `role_menus ⋈ menus.perms`，带 TTL 缓存）。
+        不传时只有 admin 能判 —— 见 :func:`has_perm` 的说明。
+    """
     if user is None:
         return frozenset()
-    return role_perms(getattr(user, "role", None))
+    role = normalize_role(getattr(user, "role", None))
+    if role == ROLE_ADMIN:
+        return ALL_PERMS
+    if db is None:
+        return frozenset()
+    from backend.app.core.permission_cache import perms_of
+
+    return perms_of(db, user)
 
 
-def has_perm(user: Any, code: str) -> bool:
-    """是否拥有**某一条**权限。未登记的码一律 `False`（写错字母不会意外放行）。"""
+def has_perm(user: Any, code: str, *, db: Any = None) -> bool:
+    """是否拥有**某一条**权限。未登记的码一律 `False`（写错字母不会意外放行）。
+
+    ⚠️ **非 admin 角色必须传 `db`**（2026-10-26 修）：此前的实现签名里根本没有
+    `db`，内部 `role_perms(role)` 也不带 db ⇒ `role_perms` 落到「拿不到 db 返回空集」
+    这条保守分支 ⇒ **任何非 admin 用户查任何码都恒 `False`**。
+
+    后果不是「多拦了」这么简单：`schedule.py` 的「立即执行 / 编辑任务」、
+    `settings.py` 的「工作区配置编辑」等 **24 处函数内判权点**全部失效 ——
+    普通管理员与普通用户一律被拒，且**不报错、不进日志**（返回 False 被当成
+    「确实没权限」），真机表现是「按钮点了没反应」。
+
+    现在：有 `db` ⇒ 走 `permission_cache.perms_of`（与 `require_perm` 同一份真相源）；
+    无 `db` 且非 admin ⇒ **`raise`**，不再静默返回 False（静默正是这个缺陷活下来的原因）。
+    """
     if user is None or not code:
         return False
     if code not in ALL_PERMS:
         return False
-    return code in user_perms(user)
+    role = normalize_role(getattr(user, "role", None))
+    if role == ROLE_ADMIN:
+        return True
+    if db is None:
+        raise PermissionResolutionError(
+            f"has_perm({code!r}) 对非 admin 角色必须传 db —— 否则权限查询恒为 False。"
+            " 调用处改为 `has_perm(user, code, db=db)`；"
+            " 端点里优先用 `Depends(require_perm(...))`（见 core/perm_deps.py）。"
+        )
+    return code in user_perms(user, db=db)
 
 
-def has_any(user: Any, codes: Iterable[str]) -> bool:
+def has_any(user: Any, codes: Iterable[str], *, db: Any = None) -> bool:
     """拥有其中**任意一条**即可（侧栏过滤 / `hasAnyPermission` 用）。"""
-    return any(has_perm(user, code) for code in codes)
+    return any(has_perm(user, code, db=db) for code in codes)
 
 
-def has_all(user: Any, codes: Iterable[str]) -> bool:
+def has_all(user: Any, codes: Iterable[str], *, db: Any = None) -> bool:
     """必须**全部**拥有（极少数组合操作）。"""
-    return all(has_perm(user, code) for code in codes)
+    return all(has_perm(user, code, db=db) for code in codes)
 
 
 def assert_registry_sane() -> None:

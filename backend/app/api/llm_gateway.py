@@ -1072,6 +1072,31 @@ def _get_owned_model(db: Session, current_user: User, config: LlmGatewayConfig, 
     return row
 
 
+def _assert_can_toggle_model(db: Session, current_user: User) -> None:
+    """启用/停用模型需要 `ai:gateway:enableModel`（2026-10-26 G8）。
+
+    为什么单独一个码：**「翻开关」与「改模型定义」是两件事**。只想让某人
+    启用/停用模型（比如停掉一个坏掉的模型），不该顺带给他改 `model_type` 的能力
+    —— 改类型会让已指向它的业务点映射失效（见 `update_gateway_model` 的说明）。
+
+    与 `require_perm` 同源（`permission_cache.perms_of`）。
+    """
+    from backend.app.core import permission_cache  # noqa: PLC0415
+    from backend.app.core.perms import ROLE_ADMIN, normalize_role  # noqa: PLC0415
+
+    if normalize_role(getattr(current_user, "role", None)) == ROLE_ADMIN:
+        return
+    if "ai:gateway:enableModel" in permission_cache.perms_of(db, current_user):
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={
+            "code": "LLM_MODEL_ENABLE_PERM_REQUIRED",
+            "message": "缺少「启用/停用模型」权限（ai:gateway:enableModel）",
+        },
+    )
+
+
 @router.patch("/{config_id}/models/{model_id}")
 def update_gateway_model(
     config_id: int,
@@ -1082,11 +1107,32 @@ def update_gateway_model(
 ):
     """改模型行（类型 / 平台 / 启停 / 备注）（v2.7，§13.2.9.9）。
 
+    ## 一个端点在按字段分派两个权限码（2026-10-26 G8）
+
+    静态路由表只能挂一个码，而这里有两种性质不同的写：
+    * 改 `model_type` / `platform` / `remark` ⇒ **编辑**（`ai:gateway:enableModel` 的兄弟码
+      `ai:model:edit` 语义，路由表挂的是 `xhs:model:edit` 之外的那条，见 ROUTE_PERMS）
+    * 只翻 `enabled`（启用/停用模型）⇒ **启停**（`ai:gateway:enableModel`）
+
+    实现同 `qianfan/items/operate`：路由表挂一个**下限**码，函数内按字段再判一次。
+
     ⚠️ **改 `model_type` 会让已指向该模型的业务点映射失效** —— 后端类型校验
     （`resolve_business_provider`）会拦，前端须在编辑弹窗提示这个后果（不许静默）。
     """
     config = _get_owned_config(db, current_user, config_id)
     row = _get_owned_model(db, current_user, config, model_id)
+
+    #: 只翻 enabled（且确实变了）、没带其它可改字段 ⇒ 需要「模型启停」码
+    enabled_only_change = (
+        payload.enabled is not None
+        and payload.enabled != row.enabled
+        and all(
+            getattr(payload, field) is None
+            for field in ("model_type", "platform", "remark")
+        )
+    )
+    if enabled_only_change:
+        _assert_can_toggle_model(db, current_user)
 
     if payload.model_type is not None:
         from backend.app.core.business_provider_keys import MODEL_TYPES

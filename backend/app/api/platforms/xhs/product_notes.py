@@ -47,6 +47,7 @@ from backend.app.api.platforms.xhs.qianfan import _owned_account
 from backend.app.core.business_provider_keys import BUSINESS_KEY_LLM_NOTE_TEXT
 from backend.app.core.database import SessionLocal, get_db
 from backend.app.core.deps import get_current_user
+from backend.app.core.perm_deps import require_perm
 
 #: **同步发布最长等待**（秒）——发布链路上传 + 预审核 + 平台调用，实测单篇 20~90 秒；
 #: 给 180 秒余量。超时返回 504（**不假装成功**），用户可去内容库看终态。
@@ -278,6 +279,7 @@ def generate_and_save_note(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
     adapter_factory=Depends(get_qianfan_api_adapter_factory),
+    _perm: None = Depends(require_perm("xhs:item:generateNote")),
 ):
     """**智能生成一篇商品笔记并落库为「待发布」**（设计 13 §31.4，用户需求③；§31.10 起走队列）。
 
@@ -319,6 +321,7 @@ def batch_generate_notes_endpoint(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
     adapter_factory=Depends(get_qianfan_api_adapter_factory),
+    _perm: None = Depends(require_perm("xhs:item:generateNote")),
 ):
     """批量智能生成入队（设计 13 §31.4 步 6 + §31.10；用户需求⑤）。
 
@@ -549,6 +552,7 @@ def generate_llm_note(
     payload: GenerateLlmNoteRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    _perm: None = Depends(require_perm("xhs:item:generateNote")),
 ):
     """**同步生成一篇 LLM 笔记并直接返回结果**（用户口径 2026-10-18）。
 
@@ -663,6 +667,7 @@ def retry_llm_generate(
     record_id: int,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    _perm: None = Depends(require_perm("xhs:item:generateNote")),
 ):
     """重试一条**失败**的 LLM 生成（设计 17 §7.4）。
 

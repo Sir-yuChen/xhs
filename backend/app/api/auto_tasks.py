@@ -82,6 +82,31 @@ def _get_owned_auto_task(db: Session, current_user: User, task_id: int) -> AutoT
     return auto_task
 
 
+def _assert_can_toggle_auto_task(db: Session, current_user: User) -> None:
+    """启停自动运营任务需要 `xhs:autoops:enable`（2026-10-26 G8）。
+
+    为什么单独一个码：**「启用/停用」与「改任务内容」是两件事**。
+    只想让某人按开关、不想让他改关键词与 AI 指令时，只勾 `enable` 就够 ——
+    以前两者共用一个 `xhs:autoops:edit`，想给启停权就得连改内容的权一起给。
+
+    与 `require_perm` 同源（`permission_cache.perms_of`），不另走一套查库。
+    """
+    from backend.app.core import permission_cache  # noqa: PLC0415
+    from backend.app.core.perms import ROLE_ADMIN, normalize_role  # noqa: PLC0415
+
+    if normalize_role(getattr(current_user, "role", None)) == ROLE_ADMIN:
+        return
+    if "xhs:autoops:enable" in permission_cache.perms_of(db, current_user):
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={
+            "code": "AUTO_TASK_ENABLE_PERM_REQUIRED",
+            "message": "缺少「启用/停用自动运营任务」权限（xhs:autoops:enable）",
+        },
+    )
+
+
 def _schedule_summary(job: Optional[ScheduledJob]) -> Optional[dict[str, Any]]:
     if job is None:
         return None
@@ -221,7 +246,35 @@ def update_auto_task(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    """部分更新自动运营任务。
+
+    ## 一个端点在按字段分派两个权限码（2026-10-26 G8）
+
+    静态路由表只能挂一个码，而这里有两种性质完全不同的写：
+    * 改 `name` / `keywords` / `ai_instruction` / `schedule` ⇒ **编辑**（`xhs:autoops:edit`）
+    * 只改 `status`（启用/停用）⇒ **启停**（`xhs:autoops:enable`）
+
+    路由表挂 `edit` 作为**下限**（有编辑权即可进来），`status` 单独一个码再判一次：
+    只想让人启停、不想让人改任务内容时，不勾 edit 就只有 enable —— 这是「一按钮一码」
+    在本端点的落地方式（同 `qianfan/items/operate` 的 `_assert_action_permitted`）。
+
+    ⚠️ 为什么用 `permission_cache.perms_of` 而不是 `core.perms.has_perm`：
+    与 `require_perm` 同一份真相源（查库 + TTL 缓存），且不受「非 admin 必须传 db」
+    这个约定的调用形态约束。
+    """
     auto_task = _get_owned_auto_task(db, current_user, task_id)
+
+    #: 只改 status 且确实变了 ⇒ 需要启停码。与 edit 分开判，且**只判一次**。
+    status_only_change = (
+        payload.status is not None
+        and payload.status != auto_task.status
+        and all(
+            getattr(payload, field) is None
+            for field in ("name", "keywords", "ai_instruction", "schedule")
+        )
+    )
+    if status_only_change:
+        _assert_can_toggle_auto_task(db, current_user)
 
     if payload.name is not None:
         auto_task.name = payload.name.strip()
