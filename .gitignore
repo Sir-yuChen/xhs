@@ -95,3 +95,9 @@ frontend/dev/
 #: 内容含 sellerId / 素材 id 等平台数据，且每次调用都会生成新文件
 #: ⇒ 属于运行时中间件，不进库。
 xhs_utils/xhs_core/js/.sign_input_*.json
+
+# 测试备份目录（2026-10-26 测试体系整改时的整目录备份，不入库）
+tests/backend.bak_*/
+.hermes/tmp/
+# 编辑器/工具临时文件
+docs/**/.hermes-tmp.*
