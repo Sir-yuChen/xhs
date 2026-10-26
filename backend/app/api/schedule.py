@@ -259,19 +259,22 @@ def _assert_can_edit(db: Session, current_user: User, job: ScheduledJob) -> None
 
 
 def _get_visible_job(db: Session, current_user: User, job_id: int) -> ScheduledJob:
-    """可见即可操作；越权的判据 = **任务归属的工作区 vs 调用者的权限**。
+    """越权判据 = **调用者是否持有该动作对应的权限码**（2026-10-26 用户口径）。
 
-    ## 设计 69 后的两层判据
+    ## 归属只用来「选哪个码」，不用来「判权」
 
-    1. **系统级任务**（`workspace="system"`）：只有 admin 能碰
-       （路由层挂 `system:scheduler:manage`）。
-    2. **工作区级任务**（`workspace="xhs"` 等）：该工作区的成员能操作
-       （用户口径「工作区域任务在对应工作区内展示，以及相关的操作等」）。
+    两级任务中心（系统级 / 工作区级）各有自己的一组码。要知道「这次该查哪个码」，
+    必须先看任务属于哪一级 —— 这是**选码**，不是判权。真正放不放行，**只由
+    `has_perm()` 决定**：
 
-    ⚠️ 这里必须显式挡住「工作区成员去操作系统级任务」——
-    路由层只挂了 `system:scheduler:manage` 到写端点，而工作区成员要能执行
-    本工作区任务，就不能让他卡在路由层。所以判据下移到本函数：
-    **有 `xhs:taskcenter:manage` 的人只能动 `workspace="xhs"` 的行**。
+    | 任务归属 | 动作 → 查的码 |
+    |---|---|
+    | `system` | 执行 `system:scheduler:run` / pause `:toggle` |
+    | `xhs` 等 | 执行 `xhs:taskcenter:run` / pause `:toggle` |
+
+    ⚠️ **不许写成「是 admin 就放行」**：身份不是权限。admin 之所以能进，
+    是因为 `user_perms()` 给他派生了全部码，而不是因为 `role == "admin"`。
+    这样以后出现「只给某人系统任务查看权、不给操作权」这类授权时，判据天然成立。
 
     别人的行 / 不存在 ⇒ 404（不区分，避免越权探测）。
     """
@@ -556,22 +559,27 @@ def list_jobs(
         statement = statement.where(ScheduledJob.trigger_type == trigger_type)
     if keyword:
         statement = statement.where(ScheduledJob.name.like(f"%{keyword.strip()}%"))
-    #: 2026-10-26（用户口径「菜单管理中有很多缺失」）：
-    #: 这里此前只要求**登录**，任何用户都能读到全部任务（含系统级）。
-    #: 现在按归属卡：有系统任务码可看全部；只有工作区码则只看工作区级。
-    #: 两级入口（系统管理 / 工作区任务中心）共用一个接口，判据必须按归属分流。
+    #: 2026-10-26（用户口径「项目全部应按照权限码」）：
+    #: **不做按数据归属的分流** —— 归属是「数据是谁的」，权限码是「你能不能做」，
+    #: 两件事不能混。此前写成「有系统码看全部、只有工作区码看非系统级」，
+    #: 等于让**数据性质**顶替了**权限判定**，还产生了一个用户没被授予的隐式过滤。
+    #:
+    #: 现在的判据只有一条：**有查看权限码就能看**（两级各一个码，任一即可）。
+    #: 真正要「只给某人看某工作区任务」时，那是授权侧的事（给他哪个工作区的码），
+    #: 不是接口里按 workspace 字段偷偷减量。
     from backend.app.core.perms import has_perm  # noqa: PLC0415
 
-    if not has_perm(current_user, "system:scheduler:view"):
-        if not has_perm(current_user, "xhs:taskcenter:view"):
-            raise HTTPException(
-                403,
-                detail={
-                    "code": "PERMISSION_DENIED",
-                    "message": "没有查看任务的权限",
-                },
-            )
-        statement = statement.where(ScheduledJob.workspace != "system")
+    if not (
+        has_perm(current_user, "system:scheduler:view")
+        or has_perm(current_user, "xhs:taskcenter:view")
+    ):
+        raise HTTPException(
+            403,
+            detail={
+                "code": "PERMISSION_DENIED",
+                "message": "没有查看任务的权限",
+            },
+        )
 
     jobs = db.scalars(
         statement.order_by(ScheduledJob.is_builtin.desc(), ScheduledJob.id.desc())
