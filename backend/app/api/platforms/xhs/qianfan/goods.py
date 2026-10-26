@@ -5,23 +5,23 @@
 """
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 #: 跨域共用名（`_shared` 转发）—— 由拆分脚本按**自由名分析**生成，
 #: 不手写，避免漏名。改动块归属后重跑脚本即可。
 from ._shared import (
-    ABSOLUTE_PAGE_CAP,
     APIRouter,
     Any,
     BUSINESS_KEY_PRODUCT_DETAIL_IMAGE,
     BaseModel,
     CandidateQuery,
     ConfigDict,
-    DEFAULT_MAX_PAGES,
-    DEFAULT_PAGE_SIZE,
     Depends,
     Field,
     HTTPException,
     ImageAiClient,
-    JOB_KEY_SHOP_GOODS_SYNC,
     MAX_PAGE_SIZE,
     Note,
     NoteAsset,
@@ -29,10 +29,6 @@ from ._shared import (
     OpenAICompatibleTextClient,
     Optional,
     PlatformAccount,
-    SHOP_GOODS_SYNC_TASK_TYPE,
-    SOURCE_ACCOUNT_CARD_GOODS_SYNC,
-    SYNC_MODE_AUTO,
-    SYNC_SCOPE_FULL,
     Session,
     Task,
     User,
@@ -65,13 +61,11 @@ from ._shared import (
     list_candidates,
     operate_service,
     quote,
-    scheduled_job_runner,
     select,
     shanghai_now,
     shop_goods_sync_service,
     shop_products_service,
     status,
-    sync_task_service,
     synced_note_count,
 )
 from backend.app.core.perm_deps import require_perm
@@ -479,26 +473,244 @@ def item_notes(
         "goods_synced_at": _fmt_state_time(state.get("goods_synced_at")),
     }
 
+def _realtime_adapter(db: Session, account, adapter_factory):
+    """按账号自己的 `ark` 令牌造千帆 adapter（**不借任何别的凭据**）。
+
+    与 `shop_goods_service` 同一条纪律：千帆凭据只认本账号的 `ark` 通道；
+    没有令牌 ⇒ 抛 400 `ARK_SESSION_REQUIRED`（结构化原因 + 让用户补登录），
+    而不是拿空 cookie 去调平台、再由平台回一个看不懂的 code。
+
+    ⚠️ 改造前商品列表 / 详情「读本地台账、零平台请求、无门禁」，**该口径已被
+    设计 75 §2.3 取代**：本页现在真的打千帆，登录态是硬前提。
+    """
+    from backend.app.services.shop_binding_service import qianfan_cookies_for_account
+
+    cookies = qianfan_cookies_for_account(db, account.id)
+    if not cookies:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "ARK_SESSION_REQUIRED",
+                "message": "该账号还没有千帆（ark）令牌，请先登录千帆后台。",
+            },
+        )
+    return adapter_factory(cookies)
+
+
+def _realtime_query_error_detail(error, *, fallback_status: int = status.HTTP_502_BAD_GATEWAY):
+    """`RealtimeQueryError` → `HTTPException`（**结构化原因，不猜**）。
+
+    凭据失效走 **400**（用户能自救：去重新登录千帆），其余平台失败走 **502**
+    （我们这边没错，平台没答上来）。这两个码与改造前同步链路的门禁口径一致
+    （`ARK_SESSION_REQUIRED` 400 / 平台失败 502），前端无需改分流。
+    """
+    is_credential = getattr(error, "code", "") == "QIANFAN_CREDENTIAL_EXPIRED"
+    detail = (
+        error.as_dict()
+        if hasattr(error, "as_dict")
+        else {"code": "QIANFAN_QUERY_FAILED", "message": str(error)}
+    )
+    return HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST if is_credential else fallback_status,
+        detail=detail,
+    )
+
+
+def _decorate_realtime_item(item: dict) -> dict:
+    """实时商品行 → **改造前逐字段相同**的展示契约（对齐 `normalize_item_from_raw`）。
+
+    ## 为什么补在这一层，而不是改 `rt.normalize_product`
+
+    `rt.normalize_product` 是实时链路的**数据层**（平台原文 → 白名单 dict），服务三域；
+    本函数是**商品列表 / 详情这一层**的展示契约（与台账时代的
+    `shop_products_service.normalize_item_from_raw` 对齐）。两件事混在一处 ⇒
+    订单域被迫带上商品字段。
+
+    | 补的字段 | 来源 | 说明 |
+    |---|---|---|
+    | `note_count` | `platform_note_count` | 列表页**不逐商品打平台**（一页 20 条 = 20 次请求），给平台侧原文计数 |
+    | `note_count_source` | 固定 `"platform"` | 标明口径（真实篇数在 `/item-notes` 实时查） |
+    | `category` | 平台 `categories[]` | 服务层已算好（与台账 `_category_path` 同一判据） |
+    | `ai_title` / `ai_selling_point` | 台账 `shop_products` | ⚠️ **我方数据**（AI 采纳值），平台不存在 ⇒ 由 `_attach_local_ai_text` 贴回；这里先给空串兜底 |
+    | `allowed_actions` | `shop_item_operate_gates.allowed_actions` | 判据的**唯一实现**，前端按它渲染按钮 |
+    """
+    from backend.app.services import shop_item_operate_gates
+
+    item["note_count"] = int(item.get("platform_note_count") or 0)
+    item["note_count_source"] = "platform"
+    item["category"] = item.get("category") or ""
+    item["ai_title"] = item.get("ai_title") or ""
+    item["ai_selling_point"] = item.get("ai_selling_point") or ""
+    #: ⚠️ 必须在 `seller_freeze` 之类的标记**打完之后**调用，否则按钮判据看不到它们。
+    item["allowed_actions"] = shop_item_operate_gates.allowed_actions(
+        item, status_key=str(item.get("status_key") or "")
+    )
+    return item
+
+
+def _attach_local_ai_text(db: Session, account, items: list[dict]) -> None:
+    """把**我方数据**（AI 采纳的标题 / 卖点）按 `item_id` 贴回实时行（就地修改）。
+
+    设计 75 §1.1 的判据是「平台有的实时查，我方独有的才落库」。`ai_title` /
+    `ai_selling_point` 是**AI 润色后被用户采纳**的结果，平台侧不存在 ⇒ 属于我方独有，
+    仍住在 `shop_products` 的两列里（S5 随表处置）。一次 `IN` 查询、零平台请求；
+    该商品没有台账行 ⇒ 空串（不造）。
+
+    ⚠️ 这不是「商品数据的第二份真相源」：读的只是我方附加的两列，商品主体一律来自平台。
+    """
+    ids = [str(item.get("item_id") or "") for item in items]
+    ids = [item_id for item_id in dict.fromkeys(ids) if item_id]
+    if not ids:
+        return
+    from sqlalchemy import select
+
+    from backend.app.models.shop_product import ShopProduct
+
+    rows = db.scalars(
+        select(ShopProduct).where(
+            ShopProduct.platform_account_id == account.id,
+            ShopProduct.item_id.in_(ids),
+        )
+    ).all()
+    ai_by_item = {
+        str(row.item_id or ""): (row.ai_title or "", row.ai_selling_point or "")
+        for row in rows
+    }
+    for item in items:
+        ai_title, ai_selling_point = ai_by_item.get(str(item.get("item_id") or ""), ("", ""))
+        item["ai_title"] = ai_title
+        item["ai_selling_point"] = ai_selling_point
+
+
+def _realtime_items_page(
+    db: Session,
+    account,
+    payload: ShopItemsRequest,
+    *,
+    adapter_factory,
+    time_from,
+    time_to,
+    price_from_fen: int | None,
+    price_to_fen: int | None,
+) -> dict:
+    """商品列表一页（**实时查千帆**，设计 75 §2.3 / §4.1 G6）。
+
+    取代 v1.32 起的「读本地台账 `shop_products`」。返回**改造前逐字段相同的形状**
+    （`page_no` / `page_size` / `total` / `count` / `has_more` / `sort_field` /
+    `order` / `items`），只有三处语义升级：`source` 由 `local` → `platform`、
+    `queried_at` 改为**本次查询时刻**、每行多一个 `note_count_source`。
+
+    ## 四个必须记住的口径
+
+    1. **挂链笔记数（`note_count`）逐商品实时查是禁止的** —— 平台只能按单个商品查
+       （`goods-note/list?item_mix_search_word=<itemId>`），一页 20 条 = 20 次请求
+       （外加 20 次限流等待），列表会被拖成几十秒。⇒ 列表给平台侧的
+       `product_note_num` 并标 `note_count_source="platform"`；**真实篇数在
+       `/item-notes` 里实时查**（用户点开才发生的单次请求）。
+    2. **`note_count` 筛选因此失效**：改造前按本地关系表 SQL 过滤，实时链路没这个能力
+       （同上）⇒ 带该条件时**如实回 400**，不静默忽略（「筛了没生效且不报错」是红线）。
+    3. **`status` 的合法取值由路由层白名单校验**（未知键 400）；`all` / 空串是合法的
+       「全部」口径 ⇒ SDK 收到 `"all"`（= 不发 `card_type`，与平台页面点「全部」同形）。
+    4. **平台失败 ⇒ 空页 + `error`，不抛 500 / 502**（本卡硬约束）：列表页该显示
+       空态与真实原因，而不是一个坏掉的页面。**不回退本地台账** —— 那是两份真相。
+    """
+    from backend.app.services import realtime_platform_query_service as rt
+
+    if payload.note_count is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "QIANFAN_NOTE_COUNT_FILTER_UNAVAILABLE",
+                "message": "挂链笔记数筛选已随实时查询下线（平台无批量查询口子）。请在商品详情查看真实篇数。",
+            },
+        )
+
+    page_no = max(1, int(payload.page_no))
+    page_size = max(1, min(int(payload.page_size), 100))
+    sort_field = payload.sort_field or "create_time"
+    order = payload.order or "desc"
+
+    def _page(items: list[dict], total) -> dict:
+        return {
+            "page_no": page_no,
+            "page_size": page_size,
+            "total": total,
+            "count": len(items),
+            "has_more": (
+                page_no * page_size < total if total is not None else len(items) >= page_size
+            ),
+            #: 实时链路：真的是「本次查询时刻」（改造前是台账 max(synced_at)）。
+            "queried_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "sort_field": sort_field,
+            "order": order,
+            "items": items,
+        }
+
+    try:
+        adapter = _realtime_adapter(db, account, adapter_factory)
+        result = rt.list_products(
+            adapter,
+            keyword=(payload.keyword or "").strip() or None,
+            status=(payload.status or "on_shelf").strip(),
+            page=page_no,
+            page_size=page_size,
+            price_min_fen=price_from_fen,
+            price_max_fen=price_to_fen,
+            stock_min=payload.stock_from,
+            stock_max=payload.stock_to,
+            sales_min=payload.sales_from,
+            sales_max=payload.sales_to,
+            #: ⚠️ 传**毫秒**：`rt` 内部 `_to_epoch_s` 转平台要的 Unix **秒**
+            #: （传毫秒会被平台 ES 拒成 HTTP 500，见 SDK `search_items` 的坑 3）。
+            create_from=time_from,
+            create_to=time_to,
+            sort_field=sort_field,
+            order=order,
+        )
+    except HTTPException:
+        #: 没有 ark 令牌是**确定性答案**（用户能自救），照旧 400 —— 不是平台失败。
+        raise
+    except Exception as error:  # noqa: BLE001 - 平台侧任何异常都转成空页 + error
+        logger.warning("商品列表实时查询失败（account=%s）：%s", account.id, error)
+        page = _page([], 0)
+        page["error"] = (
+            error.as_dict()
+            if hasattr(error, "as_dict")
+            else {"code": "QIANFAN_QUERY_FAILED", "message": str(error)}
+        )
+        return page
+
+    items = [_decorate_realtime_item(item) for item in (result.get("items") or [])]
+    _attach_local_ai_text(db, account, items)
+
+    #: ⚠️ 平台没给 total 时**不拿本页条数冒充分母**（缺值口径）。
+    raw_total = result.get("total")
+    total = int(raw_total) if isinstance(raw_total, int) else None
+    return _page(items, total)
+
+
 @router.post("/items")
 def shop_items(
     payload: ShopItemsRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    adapter_factory=Depends(get_qianfan_api_adapter_factory),
 ):
-    """商品列表（**v1.32 起走本地台账**，设计 13 §30.3.2；零平台请求）。
+    """商品列表（**实时查千帆**，设计 75 §2.3 / §4.1 G6）。
 
     | 约定 | 做法 |
     |---|---|
-    | 本地 | 查 `shop_products`（账号店铺的台账）；**不打千帆** —— 502 不再可能出现 |
-    | 有界 | 一次一页，`page_size` 上限 100（Pydantic 钳制）；本地分页无风控问题 |
-    | 状态白名单 | 未知 `status` → 400 `QIANFAN_STATUS_UNSUPPORTED`，不猜枚举 |
-    | 挂链笔记数（v1.34） | `note_count_op`（`lt`/`lte`/`eq`/`gte`/`gt`，**默认 `lt`**）+ `note_count`；口径 = `note_goods` 关系表（与列表该列同一个数）；未知比较符 → 400 `QIANFAN_NOTE_COUNT_OP_UNSUPPORTED`；`note_count` 为空 ⇒ 不筛 |
-    | 归属门禁 | **无门禁** —— 本页读**本地台账** `shop_products`（零平台请求），未登录千帆也能看已同步的数据；登录态只决定「能不能同步新数据」 |
+    | 数据源 | 每次请求实时 `POST /api/edith/product/search_item_v2`（只读）；**不读本地台账** |
+    | 有界 | 一次一页，`page_size` 上限 100（Pydantic 钳制）；翻页由用户驱动 |
+    | 状态白名单 | 未知 `status` → 400 `QIANFAN_STATUS_UNSUPPORTED`，不猜枚举（`all` / 空 = 不发 `card_type`） |
+    | 挂链笔记数 | ⚠️ **筛选已下线**（平台只能按单商品查，一页 20 条 = 20 次请求）⇒ 带 `note_count` 条件时 400 `QIANFAN_NOTE_COUNT_FILTER_UNAVAILABLE`；列值给平台侧计数并标 `note_count_source="platform"`，真实篇数在 `/item-notes` |
+    | 归属门禁 | 账号必须属于当前用户（否则 404）；**没有 ark 令牌 → 400 `ARK_SESSION_REQUIRED`**（本页现在真的打平台，登录态是硬前提 —— 改造前「无门禁」的口径已被取代） |
     | 金额单位 | 入参是**元**、出参是**分**，换算只发生在 `_price_fen()` |
-    | 时效诚实 | `queried_at` = 本店 `max(synced_at)`（台账同步时间，不是查询时间）；平台总数 / 同步时间另回 `products_total` / `products_synced_at` |
+    | 时效诚实 | `queried_at` = **本次查询时刻**（改造前是台账同步时间）；`products_synced_at` 恒空（实时链路没有「同步」这个概念） |
+    | 平台失败 | **200 + 空 `items` + `error`**（`code` + 人话原因），不抛 500/502、不回退本地 |
 
-    筛选 / 排序 / 分页的执行体在 `services/shop_products_service.query_items`
-    （唯一实现）；展示契约与改造前**逐字段一致**（`normalize_item_from_raw`）。
+    展示契约与改造前**逐字段一致**（对齐 `shop_products_service.normalize_item_from_raw`，
+    见 `_decorate_realtime_item`）；补齐动作在 `_realtime_items_page`（唯一实现）。
     """
     from apis.xhs_qianfan_apis import QIANFAN_ITEM_STATUS_LABELS, QIANFAN_ITEM_STATUSES
 
@@ -515,8 +727,8 @@ def shop_items(
         )
     status_label = QIANFAN_ITEM_STATUS_LABELS.get(status_key, status_key)
 
-    # 挂链笔记数的比较符同样是**白名单**（v1.34）：未知值 400 并回支持列表 ——
-    # 「不支持的取值静默退化成默认」会让用户以为筛过了（与 status 同一条纪律）。
+    #: 挂链笔记数的比较符同样是**白名单**（v1.34）：未知值 400 并回支持列表 ——
+    #: 「不支持的取值静默退化成默认」会让用户以为筛过了（与 status 同一条纪律）。
     note_count_op = (payload.note_count_op or "lt").strip().lower()
     if note_count_op not in NOTE_COUNT_OPS:
         raise HTTPException(
@@ -528,10 +740,6 @@ def shop_items(
             },
         )
 
-    # ⚠️ **本页无千帆登录态门禁**（用户 2026-09-30 明确口径）：商品列表读的是
-    # **本地台账**（`shop_products`，零平台请求），未登录千帆也能看已同步的数据。
-    # 登录态只决定「能不能从平台同步新数据」，不决定「本地已有数据能不能读」——
-    # 无登录态就拦下整页 = 把已落库的数据锁死，是错的。
     try:
         time_from = _epoch_millis(payload.create_time_from, end_of_day=False)
         time_to = _epoch_millis(payload.create_time_to, end_of_day=True)
@@ -549,33 +757,40 @@ def shop_items(
             },
         )
 
-    page = shop_products_service.query_items(
+    page = _realtime_items_page(
         db,
         account,
         payload,
-        platform_account_id=account.id,
-        from_ms=time_from,
-        to_ms=time_to,
+        adapter_factory=adapter_factory,
+        #: ⚠️ 传**毫秒**（本层契约不变）：`rt.list_products` 再经 `_to_epoch_s`
+        #: 转成平台要的**秒**。单位换算仍然只有这两处显式转换，不散落。
+        time_from=time_from,
+        time_to=time_to,
         price_from_fen=_price_fen(payload.price_from),
         price_to_fen=_price_fen(payload.price_to),
     )
-    state = get_shop_state(account)
     #: 店铺冻结标记（`seller_freeze`）：**本地无法从商品行推出**（它不随条目下发），
     #: 只能由写操作的失败回执写入 `shop_state`（见 `shop_item_operate_service`）。
-    #: 在这里注入到每一条上，供 `allowed_actions` 判「能不能改」——
+    #: 必须在 `_decorate_realtime_item` **之前**打到行上 —— `allowed_actions` 要看到它，
     #: 冻结店三个动作全不可做（千帆原文：「您的店铺被冻结，解冻后可发布、编辑商品」）。
-    if state.get("seller_freeze"):
+    if get_shop_state(account).get("seller_freeze"):
         for item in page["items"]:
             item["seller_freeze"] = True
-    return {
+            _decorate_realtime_item(item)
+
+    #: 缺值口径：平台没给总数 ⇒ `total=0` 占位 + `total_known=False`，
+    #: 让前端能说「总数未知」而不是谎报「0 件」。
+    response = {
         "platform_account_id": payload.platform_account_id,
-        "source": "local",
+        #: 实时链路：数据来自千帆，不是本地台账（改造前是 "local"）。
+        "source": "platform",
         "shop_name": _shop_display_name(db, account),
         "status": status_key,
         "status_label": status_label,
         "page_no": page["page_no"],
         "page_size": page["page_size"],
-        "total": page["total"],
+        "total": page["total"] if page["total"] is not None else 0,
+        "total_known": page["total"] is not None,
         "count": page["count"],
         "has_more": page["has_more"],
         "queried_at": page["queried_at"],
@@ -583,12 +798,21 @@ def shop_items(
         #: 显示的就是这两个值 —— 用户点箭头换了排序，勾选与展示都以此为准。
         "sort_field": page["sort_field"],
         "order": page["order"],
-        #: 平台商品总数与台账同步时间（§30.3.5）：让「本地有时效」可见。
-        #: 0 / 空 = 还没同步过（缺值口径：不是「平台 0 件」）。
-        "products_total": int(state["products_total"] or 0),
-        "products_synced_at": _fmt_state_time(state["products_synced_at"]),
+        #: 实时链路下就是本页的 `total`（改造前读台账 `shop_state`）。
+        "products_total": page["total"] if page["total"] is not None else 0,
+        #: 改造前是台账同步时间；实时链路**没有「同步时间」这个概念了** ——
+        #: 留空而不是填 `queried_at`（那会让前端误以为「数据是那时同步的」）。
+        "products_synced_at": "",
         "items": page["items"],
     }
+    #: ⚠️ 平台失败 ⇒ **200 + 空 `items` + `error`**（本卡硬约束：列表页显示空态与
+    #: 真实原因，不抛 500/502）。`error.code` 是稳定机器判据（凭据失效
+    #: `QIANFAN_CREDENTIAL_EXPIRED` / 其余 `QIANFAN_QUERY_FAILED`）⇒ 前端据此
+    #: 决定「去重新登录」还是「重试」。
+    if page.get("error"):
+        response["error"] = page["error"]
+    return response
+
 
 @router.post("/items/delete")
 def shop_items_delete(
@@ -647,189 +871,181 @@ def shop_items_delete(
     )
     return {"deleted": deleted, "requested": len(item_ids), "item_ids": item_ids}
 
+def _find_platform_product(adapter, item_id: str) -> dict | None:
+    """按商品 ID **实时**取单件商品的列表行（`search_item_v2` + 精确匹配）。
+
+    ## 为什么用「关键词搜索」而不是另找「按 ID 查商品」的接口
+
+    千帆**没有**「按商品 ID 查商品」的独立口子（`get_skus_by_item_ids` 只给 SKU 面，
+    不含名称 / 价格区间 / 分类 / 主图宽高）。而商品列表页的关键词框 `whole_keywords`
+    **认商品 ID**（SDK docstring：名称 / ID / 货号 / 商家编码）；2026-10-27 真机实测
+    传 `6adaf9dd238c6b00019c0dd7` 返回 `total=1` 且正是该商品。
+
+    ⚠️ 它仍是**搜索**（不是精确查询）⇒ 必须按 `item_id` **逐条精确匹配**再返回。
+    搜不到 / 只搜到别的商品 ⇒ `None`（调用方转 404）。**绝不拿第一条顶替** ——
+    那会把 A 商品的详情渲染成 B 的，用户看不出，是最贵的一类静默错误。
+
+    `status="all"`：详情弹窗要能打开任何状态的商品（已下架 / 审核中 / 已冻结）。
+    """
+    from backend.app.services import realtime_platform_query_service as rt
+
+    ok, message, raw = adapter.search_items(
+        page_no=1, page_size=10, keyword=item_id, status="all"
+    )
+    if not ok:
+        rt._raise_if_failed(ok, message, raw, what="商品详情获取")
+    data = (raw or {}).get("data") if isinstance(raw, dict) else {}
+    rows = [row for row in ((data or {}).get("items") or []) if isinstance(row, dict)]
+    for row in rows:
+        if str(row.get("item_id") or "").strip() == item_id:
+            return row
+    return None
+
+
 @router.post("/item-detail")
 def item_detail(
     payload: ItemDetailRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    adapter_factory=Depends(get_qianfan_api_adapter_factory),
 ):
-    """商品详情弹窗的数据（v1.32 新增，设计 13 §30.3.6；**纯本地**，零平台请求）。
+    """商品详情弹窗的数据（设计 75 §2.3 / §4.1 G6：**实时查千帆**）。
 
-    返回基本信息（与 `/items` 的 `items[]` 元素同构）+ 图集 + SKU 规格明细
-    （`detail_json`，同步任务的详情补齐落库）。`skus` 为空且
-    `detail_synced_at` 为空串 = **没补过详情**（待补队列中），由前端渲染
-    空态 + 说明，**不渲染成 0 行**（缺值口径）。
+    两条并行的平台查询（都只读、无签名）：
+
+    | 用在哪 | 平台接口 | 给什么 |
+    |---|---|---|
+    | `item`（基本信息，与 `/items` 的 `items[]` 同构） | `search_item_v2`（关键词 = 商品 ID，**精确匹配**） | 名称 / 价格区间 / 库存 / 状态 / 分类 / 主图（**含宽高**） |
+    | `skus`（SKU 规格明细） | `get_skus_by_item_ids`（单件） | SKU 名称 / 规格 / 价格 / 库存 / 规格图 |
+
+    ## 三个必须记住的口径
+
+    1. **`product_images` / `detail_images` 恢复了真正的分离**：改造前读台账
+       `raw_json`（`images` / `image_descriptions`），实时链路同样能拿这两个数组
+       （实测某商品 `images=5` / `image_descriptions=50`）⇒「生成详情图」弹窗的
+       两组参考图**完整**，不必退化成「只有几张 SKU 规格图」。
+    2. **`item.note_count` 不是实时篇数**：本端点不额外调 `goods-note/list`
+       （详情弹窗的「挂链笔记」走专门的 `/item-notes`）。这里沿用平台侧计数并标
+       `note_count_source="platform"`，与列表**同一个数**。
+    3. **平台查不到 ⇒ 404；平台请求失败 ⇒ 502（凭据失效 400）**。详情弹窗没有
+       「空态」可言 —— 拿不到就是拿不到，不能渲染成「这个商品没有 SKU」。
 
     | 错误 | 语义 |
     |---|---|
-    | 404 | 账号不存在 / 不属于当前用户，或本账号没有这个商品 |
-
-    ⚠️ **无千帆登录态门禁**：详情读本地台账（`detail_json`），零平台请求，
-    与 `/items` 同口径 —— 未登录千帆也能看已同步的商品详情。
+    | 404 | 账号不存在 / 不属于当前用户；或平台上没有这个商品（可能已删除） |
+    | 400 `ARK_SESSION_REQUIRED` | 该账号没有千帆（ark）令牌 |
+    | 400 `QIANFAN_CREDENTIAL_EXPIRED` | 令牌过期，需重新登录千帆 |
+    | 502 `QIANFAN_QUERY_FAILED` | 其余平台失败 |
     """
-    account = _owned_account(db, current_user, payload.platform_account_id)
+    from backend.app.services import realtime_platform_query_service as rt
 
-    detail = shop_products_service.item_detail(
-        db, platform_account_id=account.id, item_id=payload.item_id
-    )
-    if detail is None:
+    account = _owned_account(db, current_user, payload.platform_account_id)
+    item_id = payload.item_id.strip()
+    adapter = _realtime_adapter(db, account, adapter_factory)
+
+    try:
+        raw_product = _find_platform_product(adapter, item_id)
+        detail = rt.get_product_detail(adapter, item_ids=[item_id])
+    except HTTPException:
+        raise
+    except Exception as error:  # noqa: BLE001 - 平台侧异常统一转结构化
+        raise _realtime_query_error_detail(error) from error
+
+    rows = detail.get("items") or []
+    entry = rows[0] if rows else {}
+    skus = entry.get("skus") or []
+
+    #: **平台查不到**（搜索无精确命中 / `skusMap` 没这一项）≠ 请求失败 ⇒ 404，
+    #: 与改造前「台账里没有这个商品」同一个语义。
+    if raw_product is None and (item_id in (detail.get("missing") or []) or not skus):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="本地台账里没有这个商品（可能还没同步到它）",
+            detail="千帆上没有这个商品（可能已被删除，或商品 ID 有误）",
         )
+
+    item = rt.normalize_product(raw_product or {})
+    _attach_local_ai_text(db, account, [item])
+    #: 店铺冻结标记**本地无法从商品行推出**（不由条目下发），只能由写操作的失败回执
+    #: 写进 `shop_state`。必须在 `_decorate_realtime_item` 之前打上 —— 按钮判据要看到它
+    #: （千帆原文：「您的店铺被冻结，解冻后可发布、编辑商品」）。
+    if get_shop_state(account).get("seller_freeze"):
+        item["seller_freeze"] = True
+    item = _decorate_realtime_item(item)
+
+    raw_item = raw_product or {}
+    product_images = shop_products_service.product_image_links(raw_item)
+    detail_images = shop_products_service.detail_image_links(raw_item)
+    #: 「图集」= 主图 + 详情图合并去重（与台账 `images_json` 同一口径
+    #: `shop_goods_sync_service._image_links`）。SKU 规格图**不混进商品图集**。
+    images = product_images + [url for url in detail_images if url not in product_images]
+
     return {
         "platform_account_id": payload.platform_account_id,
-        "item_id": payload.item_id,
+        "item_id": item_id,
         "shop_name": _shop_display_name(db, account),
-        **detail,
+        "item": item,
+        "images": images,
+        #: 商品主图 —— 「生成详情图」弹窗参考图分组 ①。
+        "product_images": product_images,
+        #: 原商品详情图 —— 参考图分组 ②。
+        "detail_images": detail_images,
+        "skus": skus,
+        "sku_count": entry.get("sku_count") if entry.get("sku_count") is not None else len(skus),
+        #: 实时链路：刚刚查过，恒「有详情」。保留字段名，前端渲染逻辑零改动
+        #: （改造前的空态判据「空串 = 没补过详情」随本地化一起退场）。
+        "detail_synced_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        #: 改造前是台账 `synced_at`；实时链路没有这个概念 ⇒ 空串（不谎报同步时间）。
+        "synced_at": "",
+        #: 对账标记随本地台账一起退场（`platform_missing_at`）⇒ 恒空。
+        "platform_missing_at": "",
+        "source": "platform",
+        "queried_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
-class SyncShopGoodsRequest(BaseModel):
-    """「同步店铺商品」的触发参数。
 
-    v1.32 起 `/xhs/qianfan/items` **只读本任务落库的台账**（设计 13 §30.3）——
-    这个任务就是商品列表的**唯一数据来源**：翻页到底 + 每页商品列表数据 +
-    SKU 规格详情一次性落库（2026-09-23 重构：不再有多轮补齐队列）。
+# --------------------------------------------------------------------------- #
+# 同步店铺商品：**整段退场**（设计 75 §2.4 / §4.5，2026-10-27，S2）
+#
+# 商品列表 / 详情已改实时查平台（`/items` / `/item-detail`）⇒「把商品同步到本地
+# 台账」这个动作**没有数据消费者了**。本地 `shop_products` 只剩两列我方数据
+# （AI 采纳的标题 / 卖点）还被读到，那两列的处置归 S5（随表 DROP 一起做）。
+#
+# ⚠️ 两个端点改 `include_in_schema=False` + **410 墓碑**，而不是直接删除：
+#   ① 不进 OpenAPI ⇒ 端点计数只算真实能力（399 → 397）；
+#   ② 老前端 / 开着的页签点到它，能拿到一句读得懂的答复，而不是 404 猜半天。
+# 原执行体（`shop_goods_sync_service`）按本卡要求**保留文件并标记退场**，
+# 供 S5 统一清理 —— 这里只摘入口。
+# --------------------------------------------------------------------------- #
+@router.post("/sync-shop-goods", include_in_schema=False)
+def sync_shop_goods_removed():
+    """**已退场**（设计 75 §2.4，2026-10-27）。
+
+    原 `POST /qianfan/sync-shop-goods` 手动触发定时任务 `system.shop_goods_sync`，
+    把整店商品翻页落进本地 `shop_products`。商品列表改**实时查平台**后这个动作
+    不再有任何数据消费者 ⇒ 退场。
     """
-
-    platform_account_id: int
-    #: **不传 = 全量**（设计 13 §21，用户 2026-09-22 口径）：翻到平台没有下一页为止，
-    #: 速率由 `CrawlRateLimiter.wait_allow()` 的**运行时额度**（默认 60 次/分钟，
-    #: 设置页可改，设计 10 §7 / 设计 13 §38.2）保证。显式传数字时夹到
-    #: `[1, ABSOLUTE_PAGE_CAP]`（小批量调试用）。
-    max_pages: Optional[int] = Field(default=DEFAULT_MAX_PAGES, ge=1, le=ABSOLUTE_PAGE_CAP)
-    #: 每页条数。千帆商品列表实测上限 100。
-    page_size: int = Field(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE)
-    #: 同步模式（设计 13 §17.8 / §22）：`full` = 全量重扫；`incremental` = 只取
-    #: `create_time` 在时间窗内的新增/变更商品；`auto`（**默认**）= 按账号有没有
-    #: 同步历史自动选（没有 ⇒ 全量，有 ⇒ 从最新数据时间增量）。
-    mode: str = SYNC_MODE_AUTO
-    #: 同步范围（设计 13 §23）：`full`（默认）= 不设时间界；`range` = 只取
-    #: `[start_date, end_date]` 之间**创建**的商品。
-    scope: str = SYNC_SCOPE_FULL
-    #: 起始日期 `YYYY-MM-DD`（`scope=range` 时生效）。
-    start_date: str = ""
-    #: 结束日期 `YYYY-MM-DD`（`scope=range` 时生效，含当天一整天）。
-    end_date: str = ""
-    #: **商品状态范围**（设计 13 §30.3.2，2026-10-02 用户口径「商品同步更新需求为同步
-    #: 全部状态的商品」）：`all`（**默认**）= 平台侧全部状态；也可只同步某一个状态
-    #: （取值 = `QIANFAN_ITEM_STATUSES` 的键，与平台页面 7 个 tab 同源）。
-    #: 坏值 ⇒ `all`（退回信息最全的取值，不静默少同步）。
-    item_status: str = "all"
-
-    model_config = ConfigDict(extra="forbid")
-
-@router.post("/sync-shop-goods")
-def sync_shop_goods(
-    payload: SyncShopGoodsRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """把该店铺的商品同步到本地 `shop_products` 表（需求 R2）。
-
-    **语义 = 手动触发定时任务 `system.shop_goods_sync` 的「执行一次」**（设计 13 §35.17，
-    2026-09-27 用户口径）：日志落 `scheduled_job_logs`（`trigger_type=manual` —— 任务中心
-    「任务日志」看得到、执行期间带进度心跳），执行体是 `run_scheduled_shop_goods_syncs` 的
-    **定向模式**（只跑本账号、**不**省流跳过、**不**重入；未绑店给结构化失败），业务任务行
-    照旧落 `tasks`。同步本体在后台跑（**全量翻页** + 按账号限流**等待** + 页间停顿，§21）。
-
-    **响应**：`{log_id, status, account_id, scope_note}` —— **不再回任务摄要**；任务号与
-    进度由**首查** `GET …/sync-shop-goods/status` 给出（§35.17.4 的轮询纪律）。
-
-    **完成语义**：只有翻完最后一页（或已存够总数）才删除本次未出现的旧行；
-    半途而废**不删**（删 = 把没扫到的商品当已下架丢掉）。凭据失效（`-13000`）
-    只把绑定标 `invalid`，**已有商品一行不删**。
-
-    **内联详情**（2026-09-23 重构）：每页列表商品的 SKU 规格详情在落库前
-    拉取（`get_skus_by_item_ids`，批量 10），列表数据 + 规格详情一次性 upsert。
-    不再有独立的多轮补齐队列——列表翻完 = 详情也全了。详情失败不影响列表落库，
-    失败的商品下轮同步时重试。
-    """
-    account = _owned_account(db, current_user, payload.platform_account_id)
-    if not has_ark_session(db, account.id):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": "ARK_SESSION_REQUIRED",
-                "message": "该账号没有可用的千帆（ark）登录态，无法同步商品。"
-                           "先在账号矩阵导入其千帆登录态后再同步。",
-            },
-        )
-
-    # §23：弹窗选的「全量 / 时间区间」→ 毫秒窗口；解析不了 ⇒ (0,0) 并在任务行说明。
-    time_from_ms, time_to_ms = sync_task_service.resolve_time_window(
-        payload.scope, payload.start_date, payload.end_date
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail={
+            "code": "SHOP_GOODS_SYNC_REMOVED",
+            "message": "「同步店铺商品」已随商品实时查询下线：商品列表 / 详情现在直接查千帆，"
+                       "不再需要同步到本地。",
+        },
     )
-    scope_note = ""
-    if sync_task_service.normalize_scope(payload.scope) == sync_task_service.SYNC_SCOPE_RANGE:
-        scope_note = (
-            f"按时间区间同步：{payload.start_date} ~ {payload.end_date}"
-            if time_from_ms and time_to_ms
-            else "未识别到有效的时间区间，已按全量同步"
-        )
-    mode = sync_task_service.normalize_mode(payload.mode)
-    max_pages = sync_task_service.clamp_pages(payload.max_pages)
-    page_size = sync_task_service.clamp_page_size(payload.page_size)
-    item_status = sync_task_service.normalize_item_status(payload.item_status)
-    summary = shop_goods_sync_service.start_shop_goods_sync(
-        payload.platform_account_id,
-        user_id=current_user.id,
-        # §35.12：来源要**具体到按钮**（遗留值 `manual` 会显示成「页面按钮（早期数据）」）。
-        source=SOURCE_ACCOUNT_CARD_GOODS_SYNC,
-        # 同步语义全部传下去（漏一个 = 用户选的全量 / 时间区间静默丢失）。
-        mode=mode,
-        time_from_ms=time_from_ms,
-        time_to_ms=time_to_ms,
-        item_status=item_status,
-        max_pages=max_pages,
-        page_size=page_size,
-    )
-    task_id = summary.get("task_id")
-    log_id = None
-    if task_id and not summary.get("reused"):
-        log_id = scheduled_job_runner.run_targeted_job(
-            user_id=current_user.id,
-            job_key=JOB_KEY_SHOP_GOODS_SYNC,
-            task_id=int(task_id),
-            task_type=sync_task_service.SHOP_GOODS_SYNC_TASK_TYPE,
-            # 账号快照（迁移 `j1k2l3m4n5o6`）：账号卡「同步中」的判据 = 该账号
-            # **最新一条**同步日志的状态（2026-09-27 用户口径）⇒ 日志必须记账号。
-            account_id=payload.platform_account_id,
-            # 日志快照里留一份**本次实际生效**的语义（与任务行对得上）。
-            params_extra={
-                "account_id": payload.platform_account_id,
-                # 账号名称快照（2026-09-27 用户口径「执行账号应是当前账号信息卡的店铺」）：
-                # 「执行详情」的「执行账号」显示账号名称，与账号卡一一对应。
-                "account_name": account.nickname or "",
-                "mode": mode,
-                "time_from_ms": time_from_ms,
-                "time_to_ms": time_to_ms,
-            },
-            # §35.17.3：执行期间把该任务行的进度映到定时任务日志的 `progress` 列。
-            progress_probe=sync_task_service.task_progress_probe(int(task_id)),
-        )
-    # §23：把「实际生效的同步范围」带回前端 —— 区间没解析出来时用户必须知道
-    # 自己其实跑了全量，否则会以为只同步了一个时间段。
-    return {**summary, "log_id": log_id, "scope_note": scope_note}
 
-@router.get("/sync-shop-goods/status")
-def sync_shop_goods_status(
-    platform_account_id: int,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """商品同步的进度查询（前端轮询）。
 
-    无进行中任务时 `task_id: null, status: "idle"` —— 前端据此停轮询。
+@router.get("/sync-shop-goods/status", include_in_schema=False)
+def sync_shop_goods_status_removed():
+    """**已退场**（设计 75 §2.4，2026-10-27）—— 原商品同步的进度轮询。
+
+    同步动作本身已退场，进度自然没有意义（前端也不再轮询它）。
     """
-    _owned_account(db, current_user, platform_account_id)
-    return sync_task_service.status_payload(
-        db,
-        SHOP_GOODS_SYNC_TASK_TYPE,
-        platform_account_id,
-        # 账号卡「同步中」按**该账号最新一条同步日志**判（2026-09-27 用户口径）。
-        user_id=current_user.id,
-        job_key=JOB_KEY_SHOP_GOODS_SYNC,
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail={
+            "code": "SHOP_GOODS_SYNC_REMOVED",
+            "message": "「同步店铺商品」已随商品实时查询下线，没有同步任务可查询进度。",
+        },
     )
 
 MAX_DETAIL_IMAGE_REFERENCES: int = 6

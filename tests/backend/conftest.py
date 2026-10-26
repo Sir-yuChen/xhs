@@ -179,24 +179,43 @@ def conn(engine: Engine) -> Iterator[Connection]:
     之前就已经开始了事务（读路径落快照）；端点在**另一条连接**上 commit 之后，
     `db` 仍看到自己事务开始时的旧快照 ⇒ 计数恒 0。SQLAlchemy 的会话之间
     互不可见，这不是「同一个 engine」能解决的。
+
+    ## 用例隔离靠「外层事务 + 收尾回滚」，**不靠 TRUNCATE**（2026-10-27 修）
+
+    原实现每条用例结束时 `TRUNCATE` 60+ 张表，与端点会话争 `AccessExclusiveLock`
+    ⇒ 实测 `DeadlockDetected`，整批用例连锁失败（一个 worker 里 15 failed / 2 errors
+    全部由死锁引起，与被测逻辑无关）。
+
+    现在就一条连接、一个外层事务，结束时 `rollback()` —— 用例之间零残留，
+    且**一条 `TRUNCATE` 都不发**（DDL 锁彻底消失）。
     """
     connection = engine.connect()
+    transaction = connection.begin()
     try:
         yield connection
     finally:
-        connection.rollback()
+        transaction.rollback()
         connection.close()
 
 
 @pytest.fixture()
 def db(conn: Connection) -> Iterator[Session]:
-    """用例用的 Session（与 `client` 共用同一条连接 ⇒ 端点的提交立刻可见）。"""
-    session = Session(bind=conn, autocommit=False, autoflush=False)
+    """用例用的 Session（与 `client` 共用同一条连接 ⇒ 端点的提交立刻可见）。
+
+    ⚠️ `join_transaction_mode="create_savepoint"`：端点的 `commit()` 只提交到
+    **SAVEPOINT**，不会把外层事务一起提交掉 —— 所以 `conn` 收尾的 `rollback()`
+    仍然能把整条用例的数据全部抹掉（这正是「不用 TRUNCATE 也能隔离」的关键）。
+    """
+    session = Session(
+        bind=conn,
+        autocommit=False,
+        autoflush=False,
+        join_transaction_mode="create_savepoint",
+    )
     try:
         yield session
     finally:
         session.close()
-        _truncate_all(conn.engine)
 
 
 @pytest.fixture()
@@ -225,7 +244,16 @@ def client(conn: Connection) -> Iterator:
     from backend.app.core.database import get_db
 
     def _override():
-        endpoint_session = Session(bind=conn, autocommit=False, autoflush=False)
+        #: ⚠️ 必须 `create_savepoint` —— 端点的 `commit()` 只提交到 SAVEPOINT，
+        #: 外层事务仍由 `conn` 收尾回滚 ⇒ 用例数据不留到下一个用例。
+        #: 不加这一项，端点的 `commit()` 会把外层事务一起提交掉，`conn.rollback()`
+        #: 就回滚不了任何东西，「用例之间隔离」当场失效。
+        endpoint_session = Session(
+            bind=conn,
+            autocommit=False,
+            autoflush=False,
+            join_transaction_mode="create_savepoint",
+        )
         try:
             yield endpoint_session
         finally:

@@ -251,6 +251,7 @@ class XHS_Qianfan_Apis:
         *,
         note_ids: "list[str] | None" = None,
         mix_search_word: "str | None" = None,
+        item_mix_search_word: "str | None" = None,
     ) -> tuple[bool, str, dict | None]:
         """商品笔记列表的一页（`/api/edith/goods-note/list`）。
 
@@ -264,6 +265,16 @@ class XHS_Qianfan_Apis:
         `GET /api/edith/goods-note/list?page_num=1&page_size=20&mix_search_word=地垫`。
         实测生效：搜「地垫」返回的条目标题全部含地垫（卫生间地垫 / 马年浴室地垫…），
         是**服务端过滤**而不是本地筛选。与 `note_ids` 正交。
+
+        ## `item_mix_search_word`：按**商品 ID** 查挂载的笔记（2026-10-26 真机实测）
+
+        千帆「笔记管理」页搜索框输入商品 ID 时发的就是
+        `GET /api/edith/goods-note/list?page_num=1&page_size=20&item_mix_search_word=6a334f1e16b37a0015e3825f`，
+        返回挂载该商品的笔记列表（同一页还有「挂载商品 / 阅读数 / 支付金额」等列）。
+
+        ⚠️ 这是**本轮新增**的参数，此前整仓没有 —— 它与 `mix_search_word`（标题关键词）
+        和 `note_ids`（笔记 ID）三者**互相独立**，不要混用：
+        `item_mix_search_word` 认商品 ID，传笔记 ID 会返回空。
 
         ## `note_ids`：按笔记精确查询的口子（2026-09-19 实测）
 
@@ -292,6 +303,8 @@ class XHS_Qianfan_Apis:
             params["note_ids"] = ",".join(str(item) for item in note_ids if item)
         if mix_search_word:
             params["mix_search_word"] = str(mix_search_word).strip()
+        if item_mix_search_word:
+            params["item_mix_search_word"] = str(item_mix_search_word).strip()
         return self._get(
             "/api/edith/goods-note/list",
             params,

@@ -169,7 +169,6 @@ from .goods import (  # noqa: F401
     ShopAccountRequest,
     ShopItemsDeleteRequest,
     ShopItemsRequest,
-    SyncShopGoodsRequest,
     _PRODUCT_GROUPS_GONE,
     _UNSET,
     bind_shop_removed,
@@ -193,8 +192,8 @@ from .goods import (  # noqa: F401
     shop_items_operate,
     shop_items_operate_status,
     shop_items_sync,
-    sync_shop_goods,
-    sync_shop_goods_status,
+    sync_shop_goods_removed,
+    sync_shop_goods_status_removed,
     unbind_shop_removed,
     update_product_group,
 )

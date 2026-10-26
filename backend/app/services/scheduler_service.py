@@ -741,10 +741,10 @@ def _builtin_seed_defaults() -> dict[str, dict[str, Any]]:
                 else "paused"
             ),
         },
-        "system.shop_goods_sync": {
-            "cron": _cron_every_n_hours(hours("xhs_shop_goods_sync_interval_hours", 6)),
-            "status": "active" if bool(getattr(settings, "xhs_shop_goods_sync_enabled", False)) else "paused",
-        },
+        # 🔴 `system.shop_goods_sync` 的兜底**已删除**（2026-10-27，设计 75 §2.4）：
+        # 任务已从 `job_registry` 摘除，兜底项在这里只会变成一条永不生效的死配置。
+        # 原值（保留备查）：{"cron": _cron_every_n_hours(hours("xhs_shop_goods_sync_interval_hours", 6)),
+        #                   "status": "active" if xhs_shop_goods_sync_enabled else "paused"}
         # 2026-10-06 需求：数据中心笔记指标同步（商业+普通，默认每 6 小时一次，恒 active）。
         # ⚠️ 2026-10-13 用户口径由「离线笔记数据同步」**改名**（落 `note_datacenter_stats`，
         # 供数据中心页展示 + 无流量清理判定）。同轮**移除**指标快照采集两任务
@@ -1296,25 +1296,8 @@ def _run_targeted_note_sync(account: Any) -> dict[str, Any]:
     return _targeted_result(account.id, _await_targeted_task(task_id))
 
 
-def _run_targeted_goods_sync(account: Any) -> dict[str, Any]:
-    """定向（点名了账号）的单账号**商品**执行 —— 与笔记侧**逐字同构**（只是函数不同）。
-
-    同构是刻意的：两条链路的差别只有 `task_type` 与执行体，纪律（建行 → worker 串行 →
-    等终态 → 记真实结果）必须一致，否则又会长出两套会各自漂移的实现。
-    """
-    from backend.app.services.note_queue_service import SOURCE_SCHEDULED
-    from backend.app.services.shop_goods_sync_service import start_shop_goods_sync
-
-    summary = start_shop_goods_sync(account.id, user_id=account.user_id, source=SOURCE_SCHEDULED)
-    task_id = summary.get("task_id")
-    if summary.get("reused"):
-        return {
-            "account_id": account.id,
-            "task_id": task_id,
-            "status": summary.get("status"),
-            "note": f"该账号已有商品同步任务在跑（任务 #{task_id}），本次不重入",
-        }
-    return _targeted_result(account.id, _await_targeted_task(task_id))
+# 🔴 `_run_targeted_goods_sync` **已删除**（2026-10-27，设计 75 §2.4）：它是
+# `run_scheduled_shop_goods_syncs` 的定向执行体，两者已同批退场。
 
 
 def _await_targeted_task(task_id: Optional[int]) -> dict[str, Any]:
@@ -1582,88 +1565,17 @@ def run_scheduled_goods_note_syncs(
     return _targeted_outcome(results, what="商品笔记同步")
 
 
-def run_scheduled_shop_goods_syncs(
-    user_id: int,
-    account_ids: Optional[Sequence[int]] = None,
-) -> Optional[dict[str, Any]]:
-    """调度器入口：给每个**绑定了店铺的创作者账号**跑一次有界商品同步（限行主本人，DEF-066）。
-
-    轮内纪律与笔记同步一致（不重叠 / 不重入 / 账号间停顿 / 省流），分流规则同
-    `run_scheduled_note_syncs`（见其 docstring 的差异表，设计 13 §35.17.2）。
-    ⚠️ `user_id` 必填（行归属者，runner 注入）：账号查询恒带
-    `PlatformAccount.user_id == user_id`；`account_ids` 非空 = 只跑指定账号，
-    空 = 本人的全部账号。
-
-    **没绑店的账号**：批量模式**安静跳过**（没绑店跑商品同步是无意义的失败）；定向模式
-    **不跳过**，改为收进 `results` 当失败 —— 用户点了名，必须知道「这个账号还没绑店铺」，
-    而不是看到一条安静的「执行成功」。
-    """
-    from backend.app.models.platform_account import PlatformAccount
-    from backend.app.services import sync_task_service as sts
-    from backend.app.services.note_queue_service import SOURCE_SCHEDULED
-    from backend.app.services.shop_binding_service import has_ark_session
-    from backend.app.services.shop_goods_sync_service import run_shop_goods_sync
-
-    targeted = bool(account_ids)
-    gap = _sync_account_gap_seconds()
-    results: list[dict[str, Any]] = []
-    db = SessionLocal()
-    try:
-        statement = select(PlatformAccount).where(
-            PlatformAccount.user_id == user_id,
-            PlatformAccount.platform == "xhs",
-            PlatformAccount.deleted_at.is_(None),
-        )
-        if account_ids:
-            statement = statement.where(PlatformAccount.id.in_(list(account_ids)))
-        accounts = db.scalars(statement).all()
-        for account in accounts:
-            try:
-                if not has_ark_session(db, account.id):
-                    if targeted:
-                        results.append(
-                            {
-                                "account_id": account.id,
-                                "status": "failed",
-                                "error": "该账号没有可用的千帆登录态，无法同步商品（请先登录该账号的千帆）",
-                            }
-                        )
-                    continue
-                if sts.find_active_task(db, sts.SHOP_GOODS_SYNC_TASK_TYPE, account.id) is not None:
-                    if targeted:
-                        results.append(
-                            {
-                                "account_id": account.id,
-                                "status": "running",
-                                "note": "该账号已有商品同步任务在跑，本次不重入",
-                            }
-                        )
-                    continue
-                if targeted:
-                    # 建行 + 账号任务 worker 串行执行 + 等终态（与笔记侧同构）。
-                    results.append(_run_targeted_goods_sync(account))
-                    continue
-                run_shop_goods_sync(
-                    account.id,
-                    user_id=account.user_id,
-                    source=SOURCE_SCHEDULED,
-                    # §22：同笔记侧，auto 让「无同步历史 ⇒ 全量」也覆盖到定时任务。
-                    mode=sts.SYNC_MODE_AUTO,
-                )
-            except Exception as exc:  # noqa: BLE001 - 单个账号失败不拖垮整轮
-                logger.warning("scheduled goods sync for account %s failed: %s", account.id, exc)
-                if targeted:
-                    results.append({"account_id": account.id, "status": "failed", "error": str(exc)})
-            if gap:
-                time.sleep(gap)
-    except Exception as exc:  # noqa: BLE001 - 调度器调用，必须吞异常
-        logger.error("run_scheduled_shop_goods_syncs failed: %s", exc)
-    finally:
-        db.close()
-
-    if not targeted:
-        return None
-    return _targeted_outcome(results, what="商品同步")
+# 🔴 `run_scheduled_shop_goods_syncs`（店铺商品同步的调度入口）**已删除**
+# （2026-10-27，设计 75 §2.4 / §4.5，去本地化实时查询 S2）。
+#
+# 商品列表 / 详情改**实时查平台**后，「整店商品定时落进本地 `shop_products` 台账」
+# 不再有任何数据消费者 ⇒ 任务从 `job_registry` 摘除、存量行由迁移
+# `j0k1l2m3n4o5` 清掉、两个手动入口改 410 墓碑。
+#
+# ⚠️ **不是只删注册表**：留着执行函数 = 有人以后又把它接回注册表，而它写的那张表
+# 已经没人读了（S5 会 DROP）。删干净，让「接回来」变成一次明确的代码改动。
+# 原实现（保留备查，勿恢复）：遍历本人账号 → has_ark_session 门禁 →
+# sts.find_active_task 防重入 → run_shop_goods_sync / _run_targeted_goods_sync。
 
 
 def run_scheduled_order_syncs(

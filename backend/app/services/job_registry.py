@@ -253,17 +253,22 @@ def _build_registry() -> dict[str, JobSpec]:
             default_trigger_type="cron",
             default_cron="0 0 */6 * * *",
         ),
-        JobSpec(
-            key=JOB_KEY_SHOP_GOODS_SYNC,
-            name="店铺商品同步",
-            func=scheduler_service.run_scheduled_shop_goods_syncs,
-            builtin=True,
-            user_scoped=True,
-            params_editable=("account_ids",),
-            params_defaults={"account_ids": []},
-            default_trigger_type="cron",
-            default_cron="0 0 */6 * * *",
-        ),
+        # 🔴 `system.shop_goods_sync`（店铺商品同步）**已从注册表摘除**
+        # （2026-10-27，设计 75 §2.4 / §4.5，去本地化实时查询 S2）：
+        # 商品列表 / 详情改实时查平台后，「整店商品定时落进本地台账」不再有任何
+        # 数据消费者。同批退场的入口 = `POST /xhs/qianfan/sync-shop-goods` 与
+        # `GET …/sync-shop-goods/status`（410 墓碑）+ `run_scheduled_shop_goods_syncs`。
+        # 迁移 `j0k1l2m3n4o5` 清掉 `scheduled_jobs` 的存量行 —— 只删注册表会让那行
+        # 变成 `unknown job_key` 的僵尸（列表照显、点击报错），与
+        # `system.no_traffic_cleanup` 退场时同一个教训。
+        # 服务文件保留（写操作链路仍用 `enqueue_goods_sync` / `sync_specified_items`），
+        # 随 S5 统一清理。原声明（保留备查，勿恢复）：
+        #
+        #   JobSpec(key=JOB_KEY_SHOP_GOODS_SYNC, name="店铺商品同步",
+        #           func=scheduler_service.run_scheduled_shop_goods_syncs,
+        #           builtin=True, user_scoped=True, params_editable=("account_ids",),
+        #           params_defaults={"account_ids": []},
+        #           default_trigger_type="cron", default_cron="0 0 */6 * * *")
         JobSpec(
             # 「数据中心笔记指标同步」（2026-10-13 用户口径由「离线笔记数据同步」改名）：
             # 千帆数据中心商业 + 普通两类笔记，走 butterfly/data 列表接口（无签名直连）
