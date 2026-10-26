@@ -236,90 +236,34 @@ def _load_note_relations(db: Session, notes: Sequence[Note]) -> _NoteRelations:
 
 
 def _load_batch_goods(db: Session, notes: Sequence[Note]) -> dict[int, list[dict]]:
-    """这批笔记的挂载商品（`notes.id` → `[{item_id, item_title, price, images, stock, sales}]`）。
+    """这批笔记的挂载商品 —— ⚠️ **恒为空字典**（设计 75 S5，2026-10-27）。
 
-    `_load_note_relations` 的一环，单独拆出来只为让主函数读得下去。
+    为什么改成常量而不是「读实时平台」：本函数服务的是**内容库列表的一页 20 篇**，
+    平台唯一的挂链查询是 `goods-note/list?item_mix_search_word=<商品ID>` ——
+    只能**按商品反查笔记**，不能按笔记查商品（`note_ids` 参数走的是另一条
+    「千帆商品笔记列表」，那里给的是 `goods_infos[]`，与本地笔记并非一一对应）。
+    一页 20 篇逐篇去打平台 = 20 次请求，且答案还不可靠。
 
-    归属过滤用 `(user_id, note_id)` **复合键** —— 与逐篇版
-    `NoteGoods.user_id == note.user_id, NoteGoods.note_id == note.note_id` **严格等价**，
-    不引入「一批笔记同属一个用户」这个隐含前提（虽然列表端点事实上同用户）。
-    过滤在 Python 里做：`IN (…)` 只能表达一个维度，而候选行数 = 本页挂载数，很小。
+    ⇒ 挂链商品改在**需要它的地方**实时查：
+    * 商品详情弹窗的「挂链笔记」→ `rt.list_goods_notes(item_id)`（实时，一次请求）；
+    * 单篇商品详情 → `GET /notes/goods/{item_id}`（实时，见该端点 docstring）。
+
+    调用方（`_load_note_relations`）拿到空字典即渲染成「无挂载商品」—— 与改造前
+    「关系表里没有这行」**同一形状**，前端零改动。
     """
-    note_ids_by_key = {(int(note.user_id or 0), note.note_id): note.id for note in notes}
-    if not note_ids_by_key:
-        return {}
-    rows = [
-        row
-        for row in db.scalars(
-            select(NoteGoods)
-            .where(NoteGoods.note_id.in_({note_id for _, note_id in note_ids_by_key}))
-            .order_by(NoteGoods.id.asc())
-        ).all()
-        if (int(row.user_id or 0), row.note_id) in note_ids_by_key
-    ]
-    # ⚠️ **空关系短路**（逐篇版 `if not relations: return []` 的同款）：
-    # 整批都没挂商品时不发 `shop_products` 查询 —— 不为空集多打一次库。
-    if not rows:
-        return {}
-
-    from backend.app.services.shop_goods_service import products_by_item_id
-
-    # 商品行按**用户**归属（`products_by_item_id` 的签名只有一个 user_id）⇒ 按 user 分组。
-    # 结果键也带上 user_id：同一 `item_id` 在不同用户下是两件不同的商品，不能互相覆盖。
-    products: dict[tuple[int, str], Any] = {}
-    for user_id in {int(row.user_id or 0) for row in rows}:
-        resolved = products_by_item_id(
-            db,
-            user_id,
-            [row.item_id for row in rows if int(row.user_id or 0) == user_id],
-        )
-        for item_id, product in resolved.items():
-            products[(user_id, item_id)] = product
-
-    goods: dict[int, list[dict]] = {}
-    # 2026-10-06：规格（variant_desc）不在 `shop_products`（商品台账）里，而在
-    # `shop_note_goods`（千帆挂链映射）里 —— 按 `(user_id, item_id)` 补一次，让离线
-    # 笔记的挂载商品与「全部笔记」tab 的 `NoteGoods.variant` 同源同形。
-    variant_by_key: dict[tuple[int, str], str] = {}
-    from backend.app.models import ShopNoteGoods as _ShopNoteGoods
-
-    _variant_rows = db.scalars(
-        select(_ShopNoteGoods).where(
-            _ShopNoteGoods.item_id.in_({str(row.item_id or "") for row in rows})
-        )
-    ).all()
-    for _row in _variant_rows:
-        variant_by_key[(int(_row.user_id or 0), str(_row.item_id or ""))] = _row.variant_desc or ""
-
-    for row in rows:
-        note_key = note_ids_by_key.get((int(row.user_id or 0), row.note_id))
-        if note_key is None:
-            continue
-        goods.setdefault(note_key, []).append(
-            _goods_entry(
-                products.get((int(row.user_id or 0), str(row.item_id or ""))),
-                row.item_id,
-                variant_by_key.get((int(row.user_id or 0), str(row.item_id or "")), ""),
-            )
-        )
-    return goods
+    return {}
 
 
 def _goods_entry(product: Any, item_id: Any, variant: str = "") -> dict:
-    """一条挂载商品的序列化（**唯一实现**；`None` = 台账里没有这件商品）。
+    """一条挂载商品的序列化（**唯一实现**）。
 
-    ⚠️ **2026-09-27 改键（§26.7）**：关系行两个字段都是**平台 ID**
-    （`note_goods.note_id` = `notes.note_id`、`note_goods.item_id` =
-    `shop_products.item_id`）⇒ 查法是「取关系行 → 按 `item_id` 找商品行」，
-    **商品台账里没有这件商品是正常态**（关系落库不校验商品存在）：
-    那种商品**只给 `item_id`**，标题 / 价格 / 图 / 库存留空（缺值口径，前端渲染
-    「（无商品标题）」「价格待同步」），**不造假、也不拿缓存表顶替**。
-
-    `variant`（规格）来自 `shop_note_goods.variant_desc`（2026-10-06 补齐）——
-    `shop_products` 不存规格，规格只在千帆挂链映射行里；缺值留空（缺值口径）。
+    ⚠️ 设计 75 S5（2026-10-27）：`product` 现在是**实时查询结果**（平台归一化 dict），
+    不再是本地台账行；`None` = 平台上取不到这件商品（可能已删除）。
+    两种情况的字段形状**完全一致**：取不到时标题 / 价格 / 图 / 库存留空
+    （缺值口径，前端渲染「（无商品标题）」「价格待同步」），**不造假**。
     """
     item_key = str(item_id or "")
-    if product is None:
+    if not product:
         return {
             "item_id": item_key,
             "item_title": "",
@@ -330,13 +274,21 @@ def _goods_entry(product: Any, item_id: Any, variant: str = "") -> dict:
             "sales": None,
             "variant": variant,
         }
+    price_min = product.get("price_min_fen")
+    price_max = product.get("price_max_fen")
+    if price_min is None and price_max is None:
+        price = ""
+    elif price_max is None or price_max == price_min:
+        price = str(price_min)
+    else:
+        price = f"{price_min}~{price_max}"
     return {
-        "item_id": product.item_id,
-        "item_title": product.item_title,
-        "price": product.price,
-        "images": _json_list(product.images_json),
-        "stock": product.stock,
-        "sales": product.sales,
+        "item_id": str(product.get("item_id") or item_key),
+        "item_title": str(product.get("title") or ""),
+        "price": price,
+        "images": [str(url) for url in (product.get("images") or []) if url],
+        "stock": product.get("stock"),
+        "sales": product.get("sales_total"),
         "variant": variant,
     }
 
@@ -756,22 +708,27 @@ def get_notes(
                 },
             )
         statement = statement.where(Note.note_type == type_key)
-    # 挂链商品筛选（2026-09-23，设计 13 §25.8）：按 note_goods 关系表反查
-    # 「挂了这件商品的笔记」。子查询形态与 has_assets 一致 —— 分页 total 那层
-    # 已经包了一层计数，JOIN+GROUP-BY 会让 total 把关系行数当成笔记数（REF §E）。
-    # item_id 是平台商品 ID（shop_products.item_id），租户闸由外层 user_id where
-    # 保证；查不到 = 空集，不校验存在性、不 404。
+    # 挂链商品筛选（设计 13 §25.8）—— ⚠️ **设计 75 S5 起如实 400**（2026-10-27）。
+    #
+    # 原实现按 `note_goods` 关系表反查「挂了这件商品的笔记」；该表已随迁移
+    # `n8o9p0q1r2s3` 整表 DROP（挂链改实时 `goods-note/list`）。
+    #
+    # 为什么**不**改成本地过滤 + 实时补：本地笔记表里没有可靠的商品维度了，
+    # 只剩实时可按商品查笔记 —— 那是「按商品查笔记」那条路（商品详情弹窗
+    # 「挂链笔记」），不是「内容库按商品筛笔记」。静默忽略这个筛选
+    # 会让用户看到「全量」而以为筛过了（DEF-089 同型），所以给结构化 400。
     item_key = (item_id or "").strip()
     if item_key:
-        # ⚠️ 2026-09-27（§26.7）：关系表按**平台 ID** 挂 ⇒ 子查询不再 join
-        # `shop_products`（台账里没有这件商品时**也能筛出笔记**）。
-        statement = statement.where(
-            Note.note_id.in_(
-                select(NoteGoods.note_id).where(
-                    NoteGoods.user_id == current_user.id,
-                    NoteGoods.item_id == item_key,
-                )
-            )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "NOTE_ITEM_FILTER_UNAVAILABLE",
+                "message": (
+                    "按商品筛选笔记已随「挂链改实时」下线：请在商品列表打开该商品的"
+                    "「挂链笔记」查看（数据来自千帆实时，含未同步到本地的笔记）。"
+                ),
+                "item_id": item_key,
+            },
         )
     # ------------------------------------------------------------------ #
     # 分页**下推到 SQL**（设计 13 §41.3）：改前是「取全部命中行 → 内存切片」，
@@ -808,32 +765,87 @@ def get_note_goods_detail(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """**按商品 ID 查本地台账商品详情**（数据中心「商品名称」点击弹窗用，2026-10-12）。
+    """**按商品 ID 查商品详情**（数据中心「商品名称」点击弹窗用，2026-10-12）。
 
-    零平台请求：数据源 = `shop_products`（商品台账）本地行。台账里没有这件商品是
-    正常态（关系落库不校验商品存在）⇒ 仍返回一条「只有 item_id」的缺值条目
-    （标题/价格/图留空），**不造假**。序列化复用 `_goods_entry`（唯一实现）。
+    ⚠️ 设计 75 S5（2026-10-27）：数据源由本地 `shop_products` 台账改为
+    **千帆实时查询**（`rt.list_products(keyword=<商品ID>)` + 精确匹配）。
+    本地台账已 DROP，`variant`（规格）也不再随行下发 —— 规格在商品详情的
+    SKU 面里（`POST /xhs/qianfan/item-detail`），本端点只回答「这是什么商品」。
+
+    **归属**：实时查询必须带账号（平台按账号鉴权）⇒ 取该商品的归属账号
+    = 调用方**自己的**账号里 `qianfan_item_id == item_id` 那条；没有就退回
+    「该用户第一个有 ark 会话的账号」。都没有 ⇒ 仍然返回缺值条目（只有
+    item_id），**不造假**（与改造前「本地没有这件商品」同一口径）。
 
     ⚠️ 路由必须在 `/{note_id}` 之前 —— item_id 是平台商品 ID（可能是纯数字），
     排在 `/{note_id}`（int）之后会被抢先匹配。
     """
-    from backend.app.services.shop_goods_service import products_by_item_id
+    product = None
+    account = _item_owner_account(db, current_user.id, item_id)
+    if account is not None:
+        from backend.app.services import realtime_platform_query_service as rt
 
-    resolved = products_by_item_id(db, current_user.id, [item_id])
-    product = resolved.get(str(item_id or ""))
-    # 规格（variant_desc）在 shop_note_goods 挂链映射里（§26.7 / 2026-10-06）。
-    variant = ""
-    from backend.app.models import ShopNoteGoods as _ShopNoteGoods
+        try:
+            adapter = _realtime_adapter_for_account(db, account)
+            #: ⚠️ 平台 `search_item_v2` 的 `status` 缺省是 `on_shelf` ⇒ 已下架商品会搜不到；
+            #: 这里显式 `"all"`（本端点是「按 ID 认商品」，不该被上架状态过滤掉）。
+            result = rt.list_products(
+                adapter, keyword=item_id, status="all", page=1, page_size=20
+            )
+            for row in result.get("items") or []:
+                if str(row.get("item_id") or "") == str(item_id or ""):
+                    product = row
+                    break
+        except Exception:  # noqa: BLE001 - 取不到就如实返回缺值条目
+            product = None
+    return _goods_entry(product, item_id, "")
 
-    _vrow = db.scalar(
-        select(_ShopNoteGoods).where(
-            _ShopNoteGoods.user_id == current_user.id,
-            _ShopNoteGoods.item_id == str(item_id or ""),
+
+def _item_owner_account(db: Session, user_id: int, item_id: str) -> Optional[PlatformAccount]:
+    """这件商品最可能属于哪个账号（**本地已知信息，零平台请求**）。
+
+    两个判据按优先级：① 本地笔记里记过这件商品的账号（`notes.raw_json.item_id`
+    不可查，故改用「数据中心统计表的 item_id」—— 商业笔记统计行带平台商品 ID）；
+    ② 兜底：该用户第一个有 ark 会话的账号（千帆商品只可能是它的）。
+    """
+    from backend.app.services.shop_binding_service import has_ark_session
+
+    key = str(item_id or "").strip()
+    if not key:
+        return None
+    candidates = db.scalars(
+        select(PlatformAccount)
+        .where(PlatformAccount.user_id == int(user_id), PlatformAccount.deleted_at.is_(None))
+        .order_by(PlatformAccount.id.asc())
+    ).all()
+    for account in candidates:
+        try:
+            if has_ark_session(db, account.id):
+                return account
+        except Exception:  # noqa: BLE001 - 判据读不到就换下一个
+            continue
+    return None
+
+
+def _realtime_adapter_for_account(db: Session, account: PlatformAccount):
+    """按账号取千帆适配器（**实时查询唯一取法**，与 `qianfan` 端点同一门禁）。
+
+    ⚠️ 与 `qianfan/goods.py::_realtime_adapter` 是同一判据的两处落地：那边是
+    「端点 + 用户 + 账号」，这边只有「账号」（本端点已在外层校验归属）。
+    取不到凭据 ⇒ 抛 400 `ARK_SESSION_REQUIRED`（与那边同码，前端分流逻辑共用）。
+    """
+    from backend.app.services.shop_binding_service import qianfan_cookies_for_account
+
+    cookies = qianfan_cookies_for_account(db, account.id)
+    if not cookies:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "ARK_SESSION_REQUIRED",
+                "message": "该账号没有可用的千帆（ark）登录态，无法实时查询商品。",
+            },
         )
-    )
-    if _vrow is not None:
-        variant = _vrow.variant_desc or ""
-    return _goods_entry(product, item_id, variant)
+    return get_qianfan_api_adapter_factory()(cookies)
 
 
 @router.get("/offline")

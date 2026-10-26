@@ -284,7 +284,7 @@ class AfterSale(Base):
 # 原声明（保留备查，勿恢复）：
 #
 #   class OrderRemark(Base):
-#       __tablename__ = <已退场的表名，故意不写成字面量以免被规模统计脚本算进去>
+#       __tablename__ = "order_remarks"
 #       __table_args__ = (Index("ix_order_remarks_order_kind", "order_id", "kind"),)
 #       id / order_id(FK orders.id) / user_id(FK users.id) / kind / content
 #       / created_at / updated_at
