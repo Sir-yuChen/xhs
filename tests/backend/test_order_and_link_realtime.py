@@ -189,3 +189,104 @@ class TestSegment4_Invariants:
             line for line in src.splitlines() if not line.lstrip().startswith("#")
         )
         assert "key=JOB_KEY_ORDER_SYNC" not in code
+
+    # ---- S3 补齐（本卡交付面）--------------------------------------------- #
+    def test_order_metrics_aggregates_platform_rows(self):
+        """订单监控指标改**实时聚合**（设计 75 §4.4 O6）：口径逐条与台账时代一致。
+
+        这是最容易静默退化的一处：端点还在、状态码 200、数字却是 0 ——
+        所以直接喂两组订单行给计算函数，钉死「GMV 取实付 / 退款率分母是已完成 /
+        分母为 0 给 `None` 不是 0」。
+        """
+        rows = [
+            {  # 已完成 + 有售后单
+                "status": 7,
+                "after_sale_status": 0,
+                "paid_amount": "100.00",
+                "paid_at": "2026-10-01 10:00:00",
+                "shipped_at": "2026-10-02 10:00:00",
+                "after_sales": [{"after_sale_id": "A1"}],
+            },
+            {  # 待付款（不计 GMV、不作分母）
+                "status": 1,
+                "after_sale_status": 0,
+                "paid_amount": None,
+                "paid_at": "",
+                "shipped_at": "",
+            },
+        ]
+        metrics = rt.order_metrics(rows)
+        assert metrics["order_count"] == 2
+        assert metrics["gmv"] == 100.0
+        assert metrics["paid_count"] == 1
+        assert metrics["finished_count"] == 1
+        assert metrics["refund_count"] == 1
+        assert metrics["refund_rate"] == 1.0
+        assert metrics["avg_ship_hours"] == 24.0
+        #: 每个状态都有键（缺值 0），前端不用补样板
+        assert set(metrics["by_status"]) >= {"待付款", "已完成"}
+
+    def test_order_metrics_ratio_is_none_without_denominator(self):
+        """没有已完成订单 ⇒ 退款率 `None`（不是 0：0 会被读成「退款率 0%」）。"""
+        metrics = rt.order_metrics([{"status": 1, "after_sale_status": 0, "paid_amount": "9.00"}])
+        assert metrics["refund_rate"] is None
+        assert metrics["avg_ship_hours"] is None
+
+    def test_order_window_required_maps_to_400(self):
+        """无界 / 反向窗口 ⇒ 400 `ORDER_WINDOW_REQUIRED`，且**一个平台请求都不发**。"""
+        from backend.app.api.platforms.xhs.qianfan._shared import realtime_query_error_to_http
+
+        fake = FakeOrders()
+        with pytest.raises(rt.RealtimeQueryError) as exc:
+            rt.list_orders(fake, start_time="2026-10-10", end_time="2026-10-01")
+        assert exc.value.code == "ORDER_WINDOW_REQUIRED"
+        assert fake.calls == []
+
+        http_exc = realtime_query_error_to_http(exc.value)
+        assert http_exc.status_code == 400
+        assert http_exc.detail["code"] == "ORDER_WINDOW_REQUIRED"
+
+    def test_order_detail_scans_pages_by_order_no(self):
+        """详情端点手里只有订单号 ⇒ 先按订单号翻页找 `package_id`（翻页**有上限**）。"""
+        from backend.app.api.platforms.xhs.qianfan import orders as orders_module
+
+        fake = FakeOrders(
+            packages=[{"orderId": "O-1", "packageId": "P-1"}, {"orderId": "O-2", "packageId": "P-2"}]
+        )
+        found = orders_module._find_package_by_order_no(fake, "O-2")
+        assert found["package_id"] == "P-2"
+        assert fake.calls[0][0] == "get_order_page"
+
+        #: 找不到 ⇒ `None`（端点据此 404），且不会无限翻
+        fake2 = FakeOrders(packages=[{"orderId": "O-1", "packageId": "P-1"}])
+        assert orders_module._find_package_by_order_no(fake2, "O-404") is None
+        assert len(fake2.calls) == 1
+
+    def test_order_status_and_keyword_are_filtered_per_row(self):
+        """状态 / 关键词**按行再筛**（平台的状态过滤未取证，不臆造参数）。"""
+        from backend.app.api.platforms.xhs.qianfan.orders import _annotate_order_rows
+
+        rows = [
+            {"order_no": "O-A", "status": 2, "after_sale_status": 0, "skus": [{"skuName": "胡桃色柜"}]},
+            {"order_no": "O-B", "status": 7, "after_sale_status": 0, "skus": [{"skuName": "白色柜"}]},
+        ]
+        assert [r["order_no"] for r in _annotate_order_rows(rows, status_key="待发货")] == ["O-A"]
+        assert [r["order_no"] for r in _annotate_order_rows(rows, keyword="白色")] == ["O-B"]
+        #: `status` 归一成中文键（前端按下标取色），平台原始码留在 `platform_status`
+        annotated = _annotate_order_rows(rows)
+        assert annotated[0]["status"] == "待发货"
+        assert annotated[0]["platform_status"] == 2
+
+    def test_after_sale_handle_is_gone(self):
+        """售后审核退场（本地 `after_sales` 表随订单域实时一并停用）。
+
+        ⚠️ 这是**主动决定**不是遗漏：门禁与确认素材都依赖本地售后行，实时化后没有
+        可用的门控数据源 ⇒ 有真机取证之前不做（设计 75 §4.4 O2 同一条纪律）。
+        """
+        from backend.app.api.platforms.xhs.qianfan import orders as orders_module
+
+        assert not hasattr(orders_module, "after_sale_handle")
+        with pytest.raises(HTTPException) as exc:
+            orders_module.after_sale_handle_removed()
+        assert exc.value.status_code == 410
+        assert exc.value.detail["code"] == "ORDER_AFTER_SALE_HANDLE_REMOVED"

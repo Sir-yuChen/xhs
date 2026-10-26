@@ -251,14 +251,17 @@ def _annotate_order_rows(rows: list[dict], *, status_key: str = "", keyword: str
         item["receiver_address"] = mask_sensitive(receiver.get("address") or "")
         item["buyer_nick"] = item.get("buyer") or ""
         #: 商品行补齐前端读的键（平台 `skus[]` → `items[]` 契约）
+        #: ⚠️ 同时认驼峰原文键（`skuName` / `skuSpecification` …）：`rt.normalize_order`
+        #: 已归一成蛇形，但直接吃平台原文的路径（导出 / 详情直传）没有这一层 ——
+        #: 只读一个键会让商品列与搜索静默变空。
         item["items"] = [
             {
-                "item_id": sku.get("item_id") or "",
-                "item_name": sku.get("name") or "",
-                "sku": sku.get("spec") or "",
-                "quantity": sku.get("quantity"),
-                "unit_price": sku.get("unit_price"),
-                "amount": sku.get("amount"),
+                "item_id": sku.get("item_id") or sku.get("itemId") or "",
+                "item_name": sku.get("name") or sku.get("skuName") or "",
+                "sku": sku.get("spec") or sku.get("skuSpecification") or sku.get("specification") or "",
+                "quantity": sku.get("quantity", sku.get("skuQuantity")),
+                "unit_price": sku.get("unit_price", sku.get("skuSoldPrice")),
+                "amount": sku.get("amount", sku.get("skuTotalPaidAmount")),
                 "item_image": sku.get("image") or "",
             }
             for sku in (item.get("skus") or [])
@@ -274,8 +277,16 @@ def _annotate_order_rows(rows: list[dict], *, status_key: str = "", keyword: str
                     item.get("buyer"),
                     item.get("buyer_nick"),
                     item.get("tracking_no"),
-                    " ".join(str(sku.get("name") or "") for sku in (item.get("skus") or [])),
-                    " ".join(str(sku.get("spec") or "") for sku in (item.get("skus") or [])),
+                    #: 平台字段名是驼峰（`sku.skuName`）—— `normalize_order` 里是 `name`，
+                    #: 但直接吃平台原文的调用方（导出 / 详情）走的是原始键，两个都认。
+                    " ".join(
+                        str(sku.get("name") or sku.get("skuName") or "")
+                        for sku in (item.get("skus") or [])
+                    ),
+                    " ".join(
+                        str(sku.get("spec") or sku.get("skuSpecification") or "")
+                        for sku in (item.get("skus") or [])
+                    ),
                 )
             ).lower()
             if word not in haystack:
