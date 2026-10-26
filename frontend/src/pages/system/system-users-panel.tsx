@@ -139,10 +139,22 @@ export function SystemUsersPanel() {
       .catch(() => setRoles([]));
   }, []);
 
+  //: 2026-10-26 用户口径「超级管理员只能有一个，系统种子数据 admin 账号」：
+  //: 角色下拉**按场景给不同选项** ——
+  //:  * 建号：不提供 admin（后端也会拒）；
+  //:  * 编辑别人：不提供 admin（不能把人提升成第二个超管）；
+  //:  * 编辑种子超管本身：提供 admin（它是唯一合法的持有者）。
+  //: 后端是最后一道闸，前端这里是为了让用户根本选不到无效项。
   const roleOptions = useMemo(
     () => roles.map((r) => ({ value: r.code, label: `${r.name}（${r.code}）` })),
     [roles]
   );
+  const assignableRoleOptions = useMemo(
+    () => roleOptions.filter((o) => o.value !== "admin"),
+    [roleOptions]
+  );
+  const roleOptionsFor = (username?: string) =>
+    username === "admin" ? roleOptions : assignableRoleOptions;
 
   const handleDelete = (row: SystemUser) => {
     modal.confirm({
@@ -530,7 +542,7 @@ export function SystemUsersPanel() {
 
       <UserCreateModal
         open={createOpen}
-        roleOptions={roleOptions}
+        roleOptions={assignableRoleOptions}
         onClose={() => setCreateOpen(false)}
         onSaved={() => {
           setCreateOpen(false);
@@ -539,7 +551,7 @@ export function SystemUsersPanel() {
       />
       <UserEditModal
         user={editTarget}
-        roleOptions={roleOptions}
+        roleOptions={roleOptionsFor(editTarget?.username)}
         onClose={() => setEditTarget(null)}
         onSaved={() => {
           setEditTarget(null);

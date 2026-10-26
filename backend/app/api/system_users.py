@@ -52,6 +52,15 @@ from sqlalchemy.orm import Session
 from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user
 from backend.app.core.perms import ROLE_ADMIN, normalize_role
+
+#: 种子创建的超级管理员账号名（唯一）。
+#: 2026-10-26 用户口径：「超级管理员只能有一个，系统种子数据 admin 账号」。
+#:
+#: ⚠️ **从种子常量派生**，不在这里写字面量 —— 两处各写一份，改种子时必然漂移
+#: （改一处忘另一处 ⇒ 「建号被拒，但界面上说该用户名合法」这种自相矛盾）。
+from backend.app.services.menu_seed_service import ADMIN_SEED  # noqa: E402
+
+SEED_SUPER_ADMIN_USERNAME: str = str(ADMIN_SEED["username"])
 from backend.app.core.perm_deps import require_perm
 from backend.app.core.security import hash_password
 from backend.app.core.time import shanghai_now
@@ -143,6 +152,58 @@ def _assert_role_exists(db: Session, role_code: str) -> str:
             detail={"code": "ROLE_NOT_FOUND", "message": f"角色 {role_code} 不存在或已停用"},
         )
     return role.code
+
+
+def _assert_single_super_admin(db: Session, role_code: str, *, target: User | None = None) -> None:
+    """**超级管理员只允许一个**，且必须是种子创建的 `admin` 账号。
+
+    2026-10-26 用户口径：「超级管理员只能有一个，系统种子数据 admin 账号」。
+
+    ## 为什么要在建/改两条路都拦
+
+    `_delete_user_core` 早就有「不能删唯一管理员」，但那只防**减**不防**增**：
+    建一个 `role=admin` 的新用户、或把别人改成 admin，都会出现两个超级管理员。
+    多出来的那个不受任何约束（删不掉、也说不清谁是正式的那一个）。
+
+    ## 判据
+
+    * 想把人设成 admin ⇒ 必须**就是**种子账号（`username == "admin"`）；
+    * 种子账号本身**不许被改成别的角色**（否则系统没有超级管理员了）。
+
+    角色归属是**代码事实**（见 `roles.py`：admin 权限由 `ALL_PERMS` 派生），
+    不是可配置项，所以这里直接按用户名钉，不走配置。
+    """
+    if role_code != ROLE_ADMIN:
+        #: 不涉及 admin 角色 ⇒ 顺带防止「把种子账号降级」
+        if target is not None and normalize_role(target.role) == ROLE_ADMIN:
+            raise HTTPException(
+                400,
+                detail={
+                    "code": "SUPER_ADMIN_NOT_DEMOTABLE",
+                    "message": f"超级管理员账号「{target.username}」不能改成其他角色",
+                },
+            )
+        return
+
+    if target is None:
+        #: 新建 ⇒ 只有种子账号名可以是 admin
+        raise HTTPException(
+            400,
+            detail={
+                "code": "SUPER_ADMIN_SINGLETON",
+                "message": "系统只允许一个超级管理员（种子账号 admin），不能新建其他超级管理员",
+            },
+        )
+
+    if target.username != SEED_SUPER_ADMIN_USERNAME:
+        raise HTTPException(
+            400,
+            detail={
+                "code": "SUPER_ADMIN_SINGLETON",
+                "message": f"超级管理员只能是种子账号「{SEED_SUPER_ADMIN_USERNAME}」，"
+                f"不能把「{target.username}」提升为超级管理员",
+            },
+        )
 
 
 def _bump_token_version(db: Session, user: User) -> None:
@@ -267,6 +328,8 @@ def create_user(
             409, detail={"code": "USERNAME_TAKEN", "message": "用户名已存在"}
         )
     role_code = _assert_role_exists(db, payload.role)
+    #: 建号即限制：不允许新建第二个超级管理员（唯一的是种子 admin）
+    _assert_single_super_admin(db, role_code, target=None)
 
     user = User(
         username=payload.username,
@@ -412,7 +475,10 @@ def update_user(
     bump = False
 
     if payload.role is not None and payload.role != user.role:
-        user.role = _assert_role_exists(db, payload.role)
+        new_role = _assert_role_exists(db, payload.role)
+        #: 改角色即限制：只有种子 admin 能是超级管理员，且它不能被降级
+        _assert_single_super_admin(db, new_role, target=user)
+        user.role = new_role
         bump = True
 
     if payload.status is not None and payload.status != user.status:

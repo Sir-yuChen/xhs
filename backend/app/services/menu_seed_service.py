@@ -39,7 +39,7 @@ from typing import Any
 from sqlalchemy import func, inspect as _sa_inspect, select, text
 from sqlalchemy.orm import Session
 
-from backend.app.core.roles import ROLE_ADMIN, ROLE_USER
+from backend.app.core.roles import ROLE_ADMIN, ROLE_MANAGER, ROLE_USER
 from backend.app.core.time import shanghai_now
 from backend.app.models.dict import DICT_STATUS_NORMAL, DictItem, DictType
 from backend.app.models.menu import MENU_STATUS_NORMAL, Menu
@@ -57,6 +57,17 @@ ROLE_SEEDS: tuple[dict[str, Any], ...] = (
         "description": "全部权限（代码派生全量，见 core/perms.role_perms）",
         "is_system": True,
         "sort_order": 0,
+    },
+    {
+        #: 2026-10-26 用户口径：「超级管理员，普通管理员，普通用户 内置三个角色」。
+        #: 普通管理员 = **业务域全量 + 系统域只读**（能干活，不能改系统配置/用户/角色）。
+        #: 与超管的区别在**来源**：超管权限由代码派生（不受授权表影响，防锁死）；
+        #: 普通管理员走 role_menus，可以被授权页增删。
+        "code": ROLE_MANAGER,
+        "name": "普通管理员",
+        "description": "业务域全量 + 系统域只读，按授权行取权限",
+        "is_system": True,
+        "sort_order": 5,
     },
     {
         "code": ROLE_USER,
@@ -478,6 +489,40 @@ def seed_role_menus(db: Session) -> list[RoleMenu]:
         if row.menu_type == "C":
             user_menu_ids |= ancestors_of(row)
 
+    #: **普通管理员**（2026-10-26 用户口径「内置三个角色」）：
+    #: 业务域（workspace=xhs）**全量** + 系统域（workspace=system）**只读**。
+    #:
+    #: 为什么不是「业务全量 + 系统全量」：系统域里有「用户/角色/菜单/配置」的写操作，
+    #: 那让普通管理员等于超管的别名。只读系统域 = 能看日志、能看任务、能看配置，
+    #: 但不能改 —— 这是「管理员」和「超级管理员」唯一有意义的差别。
+    #:
+    #: 判据用 `Menu.workspace`（设计 62 的归属列），不用 path 前缀猜：
+    #: 系统域的根是「系统管理」M 行，其下全部行的 workspace 都是 system。
+    def workspace_of(row: Menu) -> str:
+        """行所属工作区 —— 沿祖先链找**根级 M 行**的 `workspace`。
+
+        ⚠️ 不能用行自己的 `workspace` 列：实测 F（按钮）行有 149 个是**空串**
+        （只有 C 行与少量 F 行带值）。按列判会把系统域的写按钮当成业务域，
+        结果是普通管理员拿到了 `system:user:delete` 这类**系统写权限** ——
+        与本角色的定义（系统域只读）直接矛盾，而且不会报错。
+        """
+        cursor: Menu | None = row
+        while cursor is not None:
+            if cursor.workspace:
+                return cursor.workspace
+            cursor = menu_by_id.get(cursor.parent_id) if cursor.parent_id else None
+        return ""
+
+    manager_menu_ids: set[int] = set()
+    for row in menus:
+        if workspace_of(row) == "system":
+            #: 系统域只给「查看类」行：C 页面 + `:view` 结尾的按钮码。
+            #: 其余（create/edit/delete/批处理）不给 —— 那是超管的领地。
+            if row.menu_type == "C" or (row.perms or "").endswith(":view"):
+                manager_menu_ids |= ancestors_of(row)
+            continue
+        manager_menu_ids |= ancestors_of(row)
+
     created: list[RoleMenu] = []
 
     #: ⚠️ **先把前几轮（角色 / admin / 菜单 / 字典）的待插入行 flush 下去**。
@@ -517,7 +562,11 @@ def seed_role_menus(db: Session) -> list[RoleMenu]:
     #    （旧行为），等 `d4e5f6a1b2c3` 跑完 + 下次启动播种时再补模板行。
     template_ok = _role_menus_user_id_nullable(db)
     if template_ok:
-        for code, menu_ids in (("admin", admin_menu_ids), ("user", user_menu_ids)):
+        for code, menu_ids in (
+            ("admin", admin_menu_ids),
+            (ROLE_MANAGER, manager_menu_ids),
+            ("user", user_menu_ids),
+        ):
             if code in roles:
                 ensure(None, roles[code].id, menu_ids)
     else:
@@ -541,7 +590,11 @@ def seed_role_menus(db: Session) -> list[RoleMenu]:
             "users 夹具）⇒ 本次不播用户级授权行（模板行照播）"
         )
 
-    for code, menu_ids in (("admin", admin_menu_ids), ("user", user_menu_ids)):
+    for code, menu_ids in (
+        ("admin", admin_menu_ids),
+        (ROLE_MANAGER, manager_menu_ids),
+        ("user", user_menu_ids),
+    ):
         if code not in roles:
             continue
         for user_id in holders.get(code, []):

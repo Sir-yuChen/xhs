@@ -29,11 +29,17 @@ from __future__ import annotations
 
 from typing import Any
 
+#: 超级管理员（唯一，种子账号 `admin`）：权限由代码派生 `ALL_PERMS`，不查授权表。
 ROLE_ADMIN = "admin"
+#: 普通管理员（2026-10-26 用户口径「超级管理员，普通管理员，普通用户 内置三个角色」）：
+#: **权限走 role_menus 授权**，默认给业务域全量（系统域管理除外）。
+#: 与超级管理员的区别：超管的权限不受授权表影响（防锁死），普通管理员可被增删。
+ROLE_MANAGER = "manager"
+#: 普通用户：默认最小权限（只读可见部分业务页面）。
 ROLE_USER = "user"
 
-#: 全部已知角色。新增角色必须在此登记，并同步检查 `is_admin` 的判定语义。
-ROLES: tuple[str, ...] = (ROLE_ADMIN, ROLE_USER)
+#: 全部已知角色（**内置三个**）。新增角色必须在此登记，并同步检查 `is_admin` 的判定语义。
+ROLES: tuple[str, ...] = (ROLE_ADMIN, ROLE_MANAGER, ROLE_USER)
 
 #: 默认角色：普通用户。**新的权限默认不开放**（最小权限原则）。
 DEFAULT_ROLE = ROLE_USER
