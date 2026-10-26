@@ -272,22 +272,19 @@ class AfterSale(Base):
     synced_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now)
 
 
-class OrderRemark(Base):
-    """订单备注（设计 16 §7.2）。本地写入（一期不同步平台备注，只做本地标记）。"""
-
-    __tablename__ = "order_remarks"
-    __table_args__ = (
-        Index("ix_order_remarks_order_kind", "order_id", "kind"),
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"), index=True, nullable=False)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
-    #: 备注类型：订单 / 包裹（设计 16 §7.2）。
-    kind: Mapped[str] = mapped_column(String(32), default=ORDER_REMARK_KIND_ORDER)
-    #: 备注内容。
-    content: Mapped[str] = mapped_column(Text, default="")
-    #: 创建时间。
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now)
-    #: 修改时间。
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now, onupdate=shanghai_now)
+# ⚠️ **已退场**（设计 75，2026-10-27）：订单备注整条移除。
+#
+# 用户口径（2026-10-26）：「订单备注不保留直接移除」。
+#
+# 为什么删得掉：备注是本方案里**唯一一处**「平台不存在但我方要留」的订单数据。
+# 用户决定不留 ⇒ 订单域变成「平台有什么就是什么」，本地零副本。
+# 迁移 `k1l2m3n4o5p6` DROP 该表；ORM 类必须一起删 —— 留着 `create_all()`
+# 会把已 drop 的表建回来（v2.0 删 `model_configs` 时踩过同一个坑）。
+#
+# 原声明（保留备查，勿恢复）：
+#
+#   class OrderRemark(Base):
+#       __tablename__ = "order_remarks"
+#       __table_args__ = (Index("ix_order_remarks_order_kind", "order_id", "kind"),)
+#       id / order_id(FK orders.id) / user_id(FK users.id) / kind / content
+#       / created_at / updated_at

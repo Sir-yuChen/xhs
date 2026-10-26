@@ -296,14 +296,14 @@ ROUTE_PERMS: Final[dict[str, str]] = {
     "POST /api/xhs/qianfan/items/publish": "xhs:publish:submit",
     "POST /api/xhs/qianfan/items/sync": "xhs:item:sync",
     "POST /api/xhs/qianfan/note-cleanup/candidates": "xhs:item:view",
+    #: ⚠️ 订单列表 / 详情现在**读平台**（设计 75 §4.4），挂 `xhs:order:ship` 是历史遗留：
+    #: 原码表里没有 order:view 的「读列表」档（只有 C 类菜单 view），改码会连带改前端
+    #: 判权口径 ⇒ 本卡不动，登记在此待「读/写分码」专项处理。
     "POST /api/xhs/qianfan/orders": "xhs:order:ship",
-    "POST /api/xhs/qianfan/orders/detail": "xhs:order:ship",
     "POST /api/xhs/qianfan/orders/export": "xhs:order:export",
-    "POST /api/xhs/qianfan/orders/remark": "xhs:order:remark",
     "POST /api/xhs/qianfan/orders/ship": "xhs:order:ship",
     "POST /api/xhs/qianfan/orders/ship-batch": "xhs:order:shipBatch",
     "POST /api/xhs/qianfan/orders/ship/preview": "xhs:order:ship",
-    "POST /api/xhs/qianfan/orders/sync": "xhs:order:sync",
     "POST /api/xhs/qianfan/picture-space/delete": "xhs:picture:delete",
     "POST /api/xhs/qianfan/picture-space/download": "xhs:picture:download",
     #: 2026-10-26（G8）：建目录是**写操作**，原挂 `picture:view` 等于只读码能建目录。

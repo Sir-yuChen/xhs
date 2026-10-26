@@ -107,7 +107,6 @@ from backend.app.services import shop_draft_service as draft_service  # noqa: F4
 
 from backend.app.services.job_registry import (
     JOB_KEY_SHOP_GOODS_SYNC,
-    JOB_KEY_ORDER_SYNC,
 )  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
 from backend.app.services.picture_space_service import (
@@ -116,7 +115,6 @@ from backend.app.services.picture_space_service import (
 
 from backend.app.services.note_queue_service import (
     SOURCE_ACCOUNT_CARD_GOODS_SYNC,
-    SOURCE_ACCOUNT_CARD_ORDER_SYNC,
 )  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
 from backend.app.services.sync_task_service import (
@@ -640,6 +638,27 @@ def _owned_after_sale(db: Session, current_user: User, account_id: int, after_sa
             f"售后单不存在或不属于当前账号：{after_sale_id}", code="ORDER_AFTERSALE_NOT_FOUND"
         )
     return row
+
+def realtime_query_error_to_http(error: Any, *, fallback_status: int = 502):
+    """`RealtimeQueryError` → `HTTPException`（**结构化原因，不猜**）。
+
+    * 凭据失效（`QIANFAN_CREDENTIAL_EXPIRED`）⇒ **400**：用户能自救（去重登千帆）；
+    * 无界 / 反向时间窗口（`ORDER_WINDOW_REQUIRED`）⇒ **400**：是调用方的入参问题，
+      **平台请求一个都没发**；
+    * 其余平台失败（网络 / 结构异常 / 服务端错）⇒ **502**（我们没错，平台没答上来）。
+
+    与商品域 `_realtime_query_error_detail` **同一判据**（那处是商品页的私有实现，
+    本函数是跨域共用面；两处都按 `code` 分流，不按文案）。
+    """
+    code = getattr(error, "code", "")
+    detail = (
+        error.as_dict()
+        if hasattr(error, "as_dict")
+        else {"code": "QIANFAN_QUERY_FAILED", "message": str(error)}
+    )
+    client_error = code in ("QIANFAN_CREDENTIAL_EXPIRED", "ORDER_WINDOW_REQUIRED")
+    return HTTPException(status_code=400 if client_error else fallback_status, detail=detail)
+
 
 def _ark_adapter_for(db: Session, account: PlatformAccount, factory: Any) -> Any:
     """按账号取 ark 适配器（**不借会话**：拿不到令牌 ⇒ 结构化 400）。

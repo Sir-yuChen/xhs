@@ -510,8 +510,10 @@ def test_retired_sync_job_is_gone_from_registry_and_seed():
 
     registry = job_registry()
     assert "system.shop_goods_sync" not in registry
-    #: 反面对照：同域的其它同步任务仍在（避免「整片删空」式假绿）
-    assert "system.goods_note_sync" in registry and "system.order_sync" in registry
+    #: 反面对照：同域**未退场**的同步任务仍在（避免「整片删空」式假绿）。
+    #: ⚠️ `system.order_sync` 也被设计 75 S3 摘除了（订单域全实时），
+    #: 所以这里只留仍在的 `goods_note_sync`（笔记同步属于 S4 范围）。
+    assert "system.goods_note_sync" in registry
 
     seed = json.loads(
         (__import__("pathlib").Path(__file__).resolve().parents[2]

@@ -825,7 +825,69 @@ def list_orders(
     }
 
 
-def get_order_detail(adapter: Any, *, package_id: Any) -> dict[str, Any]:
+def order_metrics(rows: Iterable[Any]) -> dict[str, Any]:
+    """订单行（`:func:`normalize_order` 的输出）→ 监控指标（设计 16 §7.7 口径）。
+
+    迁移前口径在本地台账里算（`order_sync_service.order_metrics`），订单域改实时后
+    唯一的数据源是平台行 ⇒ 计算逻辑搬到这里，**口径逐条不变**：
+
+    * **GMV** = `paid_amount`（实付）之和，不是 `amount`（商品总额）；
+    * **客单价** = GMV / 已支付订单数（「已支付」= 实付字段有值，分母不含待付款）；
+    * **退款率** = 有售后单的订单数 / 已完成订单数（`after_sales` 非空即算，不看金额 ——
+      迁移前的判据同样只看「有没有售后行」）；
+    * **平均发货时长** = `shipped_at - paid_at`（小时，一位小数），两端都有值才算；
+    * `by_status` 每一档都建键（缺值 0），前端不用补样板。
+
+    ⚠️ 缺值口径：分母为 0 时比率给 `None` 而不是 0（0 会被读成「退款率 0%」）。
+    """
+    from backend.app.models.order import (
+        ORDER_STATUS_FINISHED,
+        ORDER_STATUSES,
+        resolve_order_status,
+    )
+
+    orders = [row for row in rows if isinstance(row, dict)]
+    by_status: dict[str, int] = {status: 0 for status in ORDER_STATUSES}
+    paid_amounts: list[float] = []
+    finished = 0
+    refunded = 0
+    ship_hours: list[float] = []
+    for row in orders:
+        status_text = resolve_order_status(row.get("status"), row.get("after_sale_status"))
+        if status_text in by_status:
+            by_status[status_text] += 1
+        if status_text == ORDER_STATUS_FINISHED:
+            finished += 1
+        if row.get("after_sales"):
+            refunded += 1
+        paid_text = row.get("paid_amount")
+        try:
+            paid_value = float(paid_text) if paid_text not in (None, "") else None
+        except (TypeError, ValueError):
+            paid_value = None
+        if paid_value is not None:
+            paid_amounts.append(paid_value)
+        shipped = _parse_bound(row.get("shipped_at"))
+        paid_at = _parse_bound(row.get("paid_at"))
+        if shipped is not None and paid_at is not None and shipped >= paid_at:
+            ship_hours.append((shipped - paid_at).total_seconds() / 3600.0)
+    gmv = sum(paid_amounts)
+    return {
+        "order_count": len(orders),
+        "gmv": round(gmv, 2),
+        "avg_order_value": round(gmv / len(paid_amounts), 2) if paid_amounts else None,
+        "paid_count": len(paid_amounts),
+        "finished_count": finished,
+        "refund_count": refunded,
+        "refund_rate": round(refunded / finished, 4) if finished else None,
+        "avg_ship_hours": round(sum(ship_hours) / len(ship_hours), 1) if ship_hours else None,
+        "by_status": by_status,
+    }
+
+
+def get_order_detail(
+    adapter: Any, *, package_id: Any, order_no: str = ""
+) -> dict[str, Any]:
     """订单详情（`POST /api/edith/fulfillment/order/detail`，只读）。
 
     ⚠️ 平台入参是 **`package_id`**（不是订单号 / `orderId`）：传订单号平台回
@@ -847,6 +909,18 @@ def get_order_detail(adapter: Any, *, package_id: Any) -> dict[str, Any]:
     _raise_if_failed(ok, message, raw, what="订单详情获取")
 
     package = _data_of(raw).get("fulfillment_package")
+    #: ⚠️ **详情与列表的字段命名不同**（2026-10-27 真机实测）：
+    #: 列表 `packages[]` 是驼峰（`orderId` / `packageId`），详情 `fulfillment_package`
+    #: 是**下划线**（`package_id`，且**没有** `orderId`）。`normalize_order` 按驼峰判
+    #: 缺值 ⇒ 直接喂会恒得 `None`（详情页永远空白，且**不报错**）。
+    #: 这里先补一份驼峰别名，再走同一个归一化 —— 不另写第二份白名单。
+    if isinstance(package, dict):
+        package = dict(package)
+        package.setdefault("packageId", package.get("package_id") or "")
+        #: 详情响应**根本没有订单号**（只有 `package_id`）⇒ 由调用方从列表带进来。
+        #: 不传就会因缺 `orderId` 被 `normalize_order` 判为空（页面空白且不报错）。
+        package.setdefault("orderId", order_no or "")
+        package.setdefault("orderedAt", package.get("ordered_at") or "")
     detail = normalize_order(package) if isinstance(package, dict) else None
     if detail is not None:
         detail["delivery_packages"] = [

@@ -43,7 +43,6 @@ from backend.app.models.order import (
     AfterSale,
     Order,
     OrderItem,
-    OrderRemark,
     OrderShipment,
 )
 from backend.app.models.platform_account import AccountCookieVersion, PlatformAccount
@@ -109,7 +108,6 @@ __all__ = [
     "Notification",
     "Order",
     "OrderItem",
-    "OrderRemark",
     "OrderShipment",
     "PlatformAccount",
     "DataPackageRule",

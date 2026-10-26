@@ -15,10 +15,7 @@ from ._shared import (
     Depends,
     Field,
     HTTPException,
-    JOB_KEY_ORDER_SYNC,
     Optional,
-    Order,
-    SOURCE_ACCOUNT_CARD_ORDER_SYNC,
     Session,
     User,
     _ark_adapter_for,
@@ -30,13 +27,10 @@ from ._shared import (
     get_current_user,
     get_db,
     get_qianfan_api_adapter_factory,
-    has_ark_session,
     order_sync_service,
+    realtime_query_error_to_http,
     payload_metrics_account_id,
-    scheduled_job_runner,
-    select,
     status,
-    sync_task_service,
 )
 
 #: 本域独立 router —— 由 `__init__.py` 挂到父 router 下，**不带 prefix**
@@ -45,8 +39,22 @@ from ._shared import (
 #:    自己身上会让路由重复/错乱。
 router = APIRouter()
 
+#: 订单详情「订单号 → package_id」的翻页上限：一页 20 条 × 20 页 = 400 单。
+#: 超出如实 404，**不无限翻**（无刹车全量在本项目是禁止的）。
+DETAIL_LOOKUP_MAX_PAGES = 20
+DETAIL_LOOKUP_PAGE_SIZE = 20
+
+#: 监控指标最多翻多少页（100 条/页 × 30 页 = 3000 单，单账号 365 天量级足够）。
+#: 「扫不全」是**如实可见**的：响应带 `scanned`，不假装统计了全部。
+METRICS_MAX_PAGES = 30
+
 class OrderListRequest(BaseModel):
-    """订单列表入参（全部本地筛选，与 `ShopItemsRequest` 同口径）。"""
+    """订单列表入参。
+
+    ⚠️ 2026-10-27 起**不是本地筛选**了：`date_from` / `date_to` 是**发给平台的查询窗口**
+    （两端都空 ⇒ 近 365 天），`status` / `keyword` 仍是**按行再筛**（平台的状态过滤
+    走数字码，未真机取证）。原句「全部本地筛选」已被设计 75 §4.4 取代。
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -73,19 +81,10 @@ class OrderDetailRequest(BaseModel):
         False, description="True 才回完整收件人信息；默认脱敏。"
     )
 
-class OrderRemarkRequest(BaseModel):
-    """写一条**本地**订单备注（设计 16 §7.2）。
+# ⚠️ `OrderRemarkRequest` 已随订单备注退场（设计 75，2026-10-27）——
+# 用户口径「订单备注不保留直接移除」：入参模型、端点、`order_remarks` 表、前端备注区
+# 四处同批删除。原模型保留在 git 历史里，**不要恢复**。
 
-    ⚠️ **不碰平台**：千帆的卖家备注写接口未授权（硬约束②只读）。
-    这里写的备注只存在于本机台账，不同步到平台。
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    platform_account_id: int = Field(..., description="账号矩阵里的账号 id")
-    order_no: str = Field(..., min_length=1, description="平台订单号")
-    content: str = Field("", description="备注内容；空串 = 删除该备注")
-    kind: str = Field("订单", description="备注类型：订单 / 包裹（设计 16 §7.2）")
 
 class OrderExportRequest(OrderListRequest):
     """订单导出入参 —— **筛选条件与列表完全同构**（导出的就是筛出来的那批）。
@@ -99,23 +98,70 @@ class OrderExportRequest(OrderListRequest):
         1000, ge=1, le=10000, description="导出行数上限（防一次拉爆内存）"
     )
 
-class OrderSyncRequest(BaseModel):
-    """触发一次订单同步（语义 = 手动跑一次定时任务，与 `/sync-shop-goods` 同构）。"""
+# ⚠️ `OrderSyncRequest` 已随 `POST /orders/sync` 退场（设计 75，2026-10-27）——
+# 订单域全实时，没有「触发一次同步」这件事。原模型保留在 git 历史里。
 
-    model_config = ConfigDict(extra="forbid")
 
-    platform_account_id: int = Field(..., description="账号矩阵里的账号 id")
-    max_pages: Optional[int] = Field(None, ge=1, description="空 = 翻完为止")
+def _find_package_by_order_no(
+    adapter: Any, order_no: str, *, lookback_days: int = 365
+) -> dict | None:
+    """按**订单号**在平台订单列表里找到对应 package（找不到 ⇒ `None`）。
+
+    ## 为什么需要这一步
+
+    平台详情的入参是 `package_id`，而前端手里只有订单号（`orderId`）——
+    传订单号平台直接回 `code=-1, required param check: package_id`。
+
+    ## 窗口与上限
+
+    `order/page` **不给窗口就挂死 15 秒**（真机实测）⇒ 窗口默认近 `lookback_days`
+    天。翻页上限 :data:`DETAIL_LOOKUP_MAX_PAGES`（400 单），超出如实返回 `None`，
+    **不无限翻**（本项目禁止「无刹车全量」）。
+
+    平台失败照原样抛 `RealtimeQueryError`（凭据失效 / 网络），由调用方转结构化 HTTP ——
+    「查不到」与「问不到」是两件事，不能都变成 404。
+    """
+    from backend.app.services import realtime_platform_query_service as rt
+
+    wanted = str(order_no or "").strip()
+    if not wanted:
+        return None
+    for page_no in range(1, DETAIL_LOOKUP_MAX_PAGES + 1):
+        result = rt.list_orders(
+            adapter,
+            page=page_no,
+            page_size=DETAIL_LOOKUP_PAGE_SIZE,
+            lookback_days=lookback_days,
+        )
+        rows = result.get("items") or []
+        for package in rows:
+            if str(package.get("order_no") or "") == wanted:
+                return package
+        if not rows or result.get("has_more") is False:
+            break
+    return None
+
 
 @router.post("/orders")
 def order_list(
     payload: OrderListRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    adapter_factory: Any = Depends(get_qianfan_api_adapter_factory),
 ):
-    """订单列表（**本地台账**，零平台请求；未登录千帆也能看已同步的数据）。
+    """订单列表 —— **千帆实时查询**（设计 75 §4.4；零本地副本）。
 
-    收件人信息默认**脱敏**（`mask_sensitive`）；`include_full=True` 才给原值。
+    | 约定 | 做法 |
+    |---|---|
+    | 数据源 | `rt.list_orders`（`fulfillment/order/page`，只读） |
+    | 时间窗口 | `date_from` / `date_to` 给了就按给定区间；**两端都空 ⇒ 近 365 天**（平台对无界窗口挂死 15 秒） |
+    | 无界 / 反向窗口 | 400 `ORDER_WINDOW_REQUIRED`，**一个平台请求都不发**（`resolve_order_window` 在发请求前判） |
+    | 状态白名单 | 未知状态键 ⇒ 400 `QIANFAN_ORDER_STATUS_UNSUPPORTED`（与改造前同判据） |
+    | 状态 / 关键词筛选 | **按行在本地再筛**（平台的状态过滤走数字码 `status: []`，未真机取证 ⇒ 不臆造）；`total` 是平台报的总数，筛选后的条数以 `count` 为准 |
+    | 隐私 | 平台回的是**脱敏原值**（`及*` / `184***3034`）；`include_full` 保留在契约里，但平台不给原值 ⇒ 不补不猜（缺值口径） |
+
+    「无界不响应」是本端点的硬判据：给无界窗口时平台**不报错而是挂到超时**，
+    所以必须先算窗口、非法就 400 返回，不发请求。
     """
     account = _owned_account(db, current_user, payload.platform_account_id)
     status_key = (payload.status or "").strip()
@@ -128,100 +174,142 @@ def order_list(
                 "supported": ["", *order_sync_service.ORDER_STATUSES],
             },
         )
-    result = order_sync_service.list_orders(
-        db,
-        user_id=current_user.id,
-        platform_account_id=account.id,
-        status=status_key,
+    from backend.app.services import realtime_platform_query_service as rt
+
+    adapter = _ark_adapter_for(db, account, adapter_factory)
+    try:
+        live = rt.list_orders(
+            adapter,
+            start_time=payload.date_from or None,
+            end_time=payload.date_to or None,
+            page=payload.page,
+            page_size=payload.page_size,
+        )
+    except rt.RealtimeQueryError as error:
+        raise realtime_query_error_to_http(error) from error
+
+    items = _annotate_order_rows(
+        live.get("items") or [],
+        status_key=status_key,
         keyword=(payload.keyword or "").strip(),
-        date_from=payload.date_from,
-        date_to=payload.date_to,
-        page=payload.page,
-        page_size=payload.page_size,
-        include_full=bool(payload.include_full),
     )
     return {
-        "platform_account_id": payload.platform_account_id,
-        "source": "local",
-        # 店铺维度：**直接透传服务层的值**，不在这里另算一份
-        # （DEF-044：端点再拼一次 = 两份实现，且实测会漏字段 —— 上一版
-        #  这里自己拼 `shop_name` 却把 `seller_id` 丢了，返回恒 `None`）。
-        "shop_name": result["shop_name"],
-        "seller_id": result["seller_id"],
+        "platform_account_id": account.id,
+        "source": live.get("source") or "platform",
+        "shop_name": _shop_display_name(db, account),
+        "seller_id": account.seller_id or "",
         "status": status_key,
-        "page": result["page"],
-        "page_size": result["page_size"],
-        "total": result["total"],
-        "count": len(result["items"]),
-        "items": result["items"],
+        "page": live.get("page") or payload.page,
+        "page_size": live.get("page_size") or payload.page_size,
+        "total": live.get("total"),
+        #: 筛后条数（`total` 是平台的窗口总数，两者不同 —— 都下发，前端按 count 渲染分页当前页）。
+        "count": len(items),
+        "items": items,
+        "window": {
+            "start_time": live.get("start_time"),
+            "end_time": live.get("end_time"),
+        },
     }
 
-@router.post("/orders/sync")
-def order_sync_trigger(
-    payload: OrderSyncRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """触发一次订单同步（后台跑，与 `/sync-shop-goods` 同构）。
 
-    响应 `{log_id, status, account_id}` —— 任务进度走**首查**
-    `GET …/sync-shop-goods/status`（按 task_id 查，与商品同步同接口）。
+def _annotate_order_rows(rows: list[dict], *, status_key: str = "", keyword: str = "") -> list[dict]:
+    """实时订单行 → 前端契约（补 `status_key` + 按状态 / 关键词**行内再筛**）。
+
+    ## 为什么要补 `status_key`
+
+    平台给的是数字 `status`（`2` / `4` / `7`…）+ 中文 `status_desc`。改造前本地行有
+    `status` 这一列，存的是**归一化后的中文键**（`待发货` / `待收货`…）—— 前端表格与
+    标签颜色都按下标取色。实时行若直接把数字塞进 `status`，页面会渲染成裸数字且取
+    不到颜色（静默的观感退化）。所以：`status` = 归一化中文键（与改造前**同值**），
+    `platform_status` = 平台原始码。
+
+    归一的**唯一实现**是 `models.order.resolve_order_status`（售后中优先于发货态），
+    不在这里另写一份。
+
+    ## 为什么在本地再筛
+
+    `order/page` 的状态过滤走数字码数组 + `order_tag_list`，未真机取证 —— 只读边界内
+    不臆造参数。所以状态与关键词按行筛：诚实、可测，且与前端语义一致
+    （关键词匹配订单号 / 买家 / 运单号 / 商品名，与改造前 `list_orders` 同一匹配域）。
     """
-    account = _owned_account(db, current_user, payload.platform_account_id)
-    if not has_ark_session(db, account.id):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": "ARK_SESSION_REQUIRED",
-                "message": "该账号没有可用的千帆（ark）登录态，无法同步订单。"
-                           "先在账号矩阵导入其千帆登录态后再同步。",
-            },
-        )
-    max_pages = sync_task_service.clamp_pages(payload.max_pages)
-    summary = order_sync_service.start_order_sync(
-        payload.platform_account_id,
-        user_id=current_user.id,
-        source=SOURCE_ACCOUNT_CARD_ORDER_SYNC,
-        max_pages=max_pages,
-    )
-    task_id = summary.get("task_id")
-    log_id = None
-    if task_id and not summary.get("reused"):
-        log_id = scheduled_job_runner.run_targeted_job(
-            user_id=current_user.id,
-            job_key=JOB_KEY_ORDER_SYNC,
-            task_id=int(task_id),
-            task_type=order_sync_service.ORDER_SYNC_TASK_TYPE,
-            account_id=payload.platform_account_id,
-            params_extra={
-                "account_id": payload.platform_account_id,
-                "account_name": account.nickname or "",
-                "max_pages": max_pages,
-            },
-            progress_probe=sync_task_service.task_progress_probe(int(task_id)),
-        )
-    return {**summary, "log_id": log_id}
+    from backend.app.models.order import resolve_order_status
+    from backend.app.services.order_sync_service import mask_sensitive
+
+    word = keyword.lower()
+    annotated: list[dict] = []
+    for row in rows:
+        status_text = resolve_order_status(row.get("status"), row.get("after_sale_status"))
+        item = dict(row)
+        item["platform_status"] = row.get("status")
+        item["status"] = status_text
+        receiver = item.get("receiver") if isinstance(item.get("receiver"), dict) else {}
+        #: 收件人三列与改造前同形（`order_summary` 的字段名）；平台已脱敏 ⇒ 原样下发。
+        item["receiver_name"] = mask_sensitive(receiver.get("name") or "")
+        item["receiver_phone"] = mask_sensitive(receiver.get("phone") or "")
+        item["receiver_address"] = mask_sensitive(receiver.get("address") or "")
+        item["buyer_nick"] = item.get("buyer") or ""
+        #: 商品行补齐前端读的键（平台 `skus[]` → `items[]` 契约）
+        item["items"] = [
+            {
+                "item_id": sku.get("item_id") or "",
+                "item_name": sku.get("name") or "",
+                "sku": sku.get("spec") or "",
+                "quantity": sku.get("quantity"),
+                "unit_price": sku.get("unit_price"),
+                "amount": sku.get("amount"),
+                "item_image": sku.get("image") or "",
+            }
+            for sku in (item.get("skus") or [])
+            if isinstance(sku, dict)
+        ]
+        if status_key and status_text != status_key:
+            continue
+        if word:
+            haystack = " ".join(
+                str(part or "")
+                for part in (
+                    item.get("order_no"),
+                    item.get("buyer"),
+                    item.get("buyer_nick"),
+                    item.get("tracking_no"),
+                    " ".join(str(sku.get("name") or "") for sku in (item.get("skus") or [])),
+                    " ".join(str(sku.get("spec") or "") for sku in (item.get("skus") or [])),
+                )
+            ).lower()
+            if word not in haystack:
+                continue
+        annotated.append(item)
+    return annotated
+
 
 @router.post("/orders/detail")
 def order_detail_endpoint(
     payload: OrderDetailRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    adapter_factory=Depends(get_qianfan_api_adapter_factory),
 ):
-    """订单详情（**本地台账**，零平台请求；收件人默认脱敏）。
+    """订单详情（**实时查千帆**，设计 75 §4.4）。
 
-    越权 / 不存在 ⇒ 404 且**不区分**「不是你的」与「不存在」——
-    区分了就等于告诉调用方「这个订单号是别人的」。
+    | 约定 | 做法 |
+    |---|---|
+    | 数据源 | `fulfillment/order/detail`（只读），本地零副本 |
+    | 入参 | 前端给**订单号**；平台详情要 `package_id` ⇒ 先按订单号在列表里定位 |
+    | 越权 / 不存在 | 404 且**不区分**「不是你的」与「不存在」 |
+    | 收件人 | 平台可能部分脱敏（`及*` / `184***3034`）；给什么给什么，不猜不补 |
+
+    ⚠️ 两个真机坑（2026-10-27 实测）：
+    1. 详情入参是 **`package_id`** 不是订单号（传 orderId 平台回 `code=-1`）；
+    2. 详情响应**没有订单号**、且字段是**下划线**（`package_id`），与列表的驼峰不同
+       ⇒ 归一化时必须把列表里的订单号带进去，否则整页空白**且不报错**。
     """
+    from backend.app.services import realtime_platform_query_service as rt
+
     account = _owned_account(db, current_user, payload.platform_account_id)
-    order = db.scalar(
-        select(Order).where(
-            Order.user_id == current_user.id,
-            Order.platform_account_id == account.id,
-            Order.order_no == payload.order_no,
-        )
-    )
-    if order is None:
+    adapter = _ark_adapter_for(db, account, adapter_factory)
+
+    package = _find_package_by_order_no(adapter, payload.order_no)
+    if package is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={
@@ -229,79 +317,83 @@ def order_detail_endpoint(
                 "message": f"订单不存在或不属于当前账号：{payload.order_no}",
             },
         )
+
+    detail = rt.get_order_detail(
+        adapter,
+        package_id=package.get("package_id") or "",
+        order_no=str(package.get("order_no") or payload.order_no),
+    )
     shop_ctx = order_sync_service._shop_context(db, account.id)
     return {
         "platform_account_id": payload.platform_account_id,
-        "source": "local",
+        "source": "platform",
         "shop_name": shop_ctx["shop_name"],
         "seller_id": shop_ctx["seller_id"],
-        "order": order_sync_service.order_summary(
-            db,
-            order,
-            include_full=bool(payload.include_full),
-            shop_name=shop_ctx["shop_name"],
-            seller_id=shop_ctx["seller_id"],
-        ),
+        "order": detail.get("item") or {},
+        "summary": package,
+        #: ⚠️ **没有 `remark` 字段** —— 订单备注整条退场（设计 75）。
     }
 
-@router.post("/orders/remark")
-def order_remark_endpoint(
-    payload: OrderRemarkRequest,
+
+@router.get("/orders/metrics")
+def order_metrics_endpoint(
+    platform_account_id: int,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    adapter_factory: Any = Depends(get_qianfan_api_adapter_factory),
 ):
-    """写一条**本地**订单备注（设计 16 §7.2）。
+    """订单监控指标（设计 16 §7.7）—— **实时聚合**（设计 75 §4.4 O6）。
 
-    ⚠️ **这是本机台账写入，不是平台写操作**：千帆卖家备注写接口未授权
-    （硬约束②只读 + 用户 2026-09-19 授权清单仅「删除笔记」一项）。
-    页面必须如实告知用户「此备注只存本地」。
+    口径（与改造前一致，只是数据源从本地台账换成平台的同一窗口）：
+
+    * 统计对象 = 平台近 `ORDER_DEFAULT_LOOKBACK_DAYS`（365）天的订单，翻页上限
+      `METRICS_MAX_PAGES`，**与列表页默认窗口同源** —— 两处窗口不同会让
+      「列表 30 单、监控 40 单」；
+    * 平台失败 ⇒ 502 结构化原因，**不回退 0**（0 会被读成「真没订单」）；
+    * 响应带 `scanned`：统计覆盖了多少单**如实可见**，不假装扫了全部。
     """
-    account = _owned_account(db, current_user, payload.platform_account_id)
-    order = db.scalar(
-        select(Order).where(
-            Order.user_id == current_user.id,
-            Order.platform_account_id == account.id,
-            Order.order_no == payload.order_no,
-        )
-    )
-    if order is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "code": "ORDER_NOT_FOUND",
-                "message": f"订单不存在或不属于当前账号：{payload.order_no}",
-            },
-        )
-    row = order_sync_service.upsert_remark(
-        db, user_id=current_user.id, order=order, content=payload.content, kind=payload.kind
-    )
-    db.commit()
+    account = _owned_account(db, current_user, platform_account_id)
+    from backend.app.services import realtime_platform_query_service as rt
+
+    adapter = _ark_adapter_for(db, account, adapter_factory)
+    rows: list[dict] = []
+    seen: set[str] = set()
+    try:
+        for page_no in range(1, METRICS_MAX_PAGES + 1):
+            live = rt.list_orders(adapter, page=page_no, page_size=rt.MAX_PAGE_SIZE)
+            batch = live.get("items") or []
+            fresh = [row for row in batch if str(row.get("order_no")) not in seen]
+            if not fresh:
+                break
+            for row in fresh:
+                seen.add(str(row.get("order_no")))
+                rows.append(row)
+            if live.get("has_more") is False:
+                break
+    except rt.RealtimeQueryError as error:
+        raise realtime_query_error_to_http(error) from error
     return {
-        "ok": True,
-        "deleted": row is None,
-        "remark": (
-            None
-            if row is None
-            else {
-                "id": row.id,
-                "kind": row.kind,
-                "content": row.content,
-                "updated_at": row.updated_at.isoformat() if row.updated_at else None,
-            }
-        ),
+        "platform_account_id": payload_metrics_account_id(account),
+        "source": rt.SOURCE_PLATFORM,
+        "scanned": len(rows),
+        "metrics": rt.order_metrics(rows),
     }
+
 
 @router.post("/orders/export")
 def order_export_endpoint(
     payload: OrderExportRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    adapter_factory: Any = Depends(get_qianfan_api_adapter_factory),
 ):
-    """订单导出（**CSV 文本**，不落文件 —— 由前端触发下载）。
+    """订单导出（**CSV 文本**，不落文件 —— 由前端触发下载）—— 实时取数。
 
-    ⚠️ **导出走完整值**（收件人姓名 / 手机 / 地址）：设计 16 §7.2 口径 ——
-    履约数据完整落库，防护在**展示层**；打单 / 发货场景本来就需要原值。
-    页面在触发导出前必须显式提示「将包含完整收件信息」。
+    ⚠️ 导出含**平台能给的**全部收件信息（平台回的是脱敏原值，本系统无从补全）；
+    打单 / 发货场景需要原值时去千帆后台。页面在触发前仍显式提示。
+
+    翻页**有上限**：`limit`（≤10000）+ 每页 100，最多翻 `ceil(limit/100)` 页后停 ——
+    平台没有 `end_tag`，按 `has_more`（`total` 推断）与空页双判据收敛。
     """
     account = _owned_account(db, current_user, payload.platform_account_id)
     status_key = (payload.status or "").strip()
@@ -314,61 +406,42 @@ def order_export_endpoint(
                 "supported": ["", *order_sync_service.ORDER_STATUSES],
             },
         )
-    result = order_sync_service.list_orders(
-        db,
-        user_id=current_user.id,
-        platform_account_id=account.id,
-        status=status_key,
-        keyword=(payload.keyword or "").strip(),
-        date_from=payload.date_from,
-        date_to=payload.date_to,
-        page=1,
-        page_size=min(payload.limit, 100),
-        include_full=True,
-    )
-    # 上限之外再翻页捞（list_orders 单页上限 100）；`limit` 封顶 10000。
-    rows = list(result["items"])
-    page = 2
-    while len(rows) < payload.limit and len(result["items"]) == 100:
-        result = order_sync_service.list_orders(
-            db,
-            user_id=current_user.id,
-            platform_account_id=account.id,
-            status=status_key,
-            keyword=(payload.keyword or "").strip(),
-            date_from=payload.date_from,
-            date_to=payload.date_to,
-            page=page,
-            page_size=100,
-            include_full=True,
-        )
-        if not result["items"]:
-            break
-        rows.extend(result["items"])
-        page += 1
+    from backend.app.services import realtime_platform_query_service as rt
+
+    adapter = _ark_adapter_for(db, account, adapter_factory)
+    page_size = min(100, payload.limit)
+    max_pages = max(1, -(-payload.limit // page_size))
+    rows: list[dict] = []
+    try:
+        for page_no in range(1, max_pages + 1):
+            live = rt.list_orders(
+                adapter,
+                start_time=payload.date_from or None,
+                end_time=payload.date_to or None,
+                page=page_no,
+                page_size=page_size,
+            )
+            batch = _annotate_order_rows(
+                live.get("items") or [],
+                status_key=status_key,
+                keyword=(payload.keyword or "").strip(),
+            )
+            if not (live.get("items") or []):
+                break
+            rows.extend(batch)
+            if len(rows) >= payload.limit or live.get("has_more") is False:
+                break
+    except rt.RealtimeQueryError as error:
+        raise realtime_query_error_to_http(error) from error
     rows = rows[: payload.limit]
     return {
-        "platform_account_id": payload.platform_account_id,
+        "platform_account_id": account.id,
         "count": len(rows),
         "truncated": len(rows) >= payload.limit,
         "filename": order_sync_service.export_filename(),
         "csv": order_sync_service.orders_to_csv(rows),
     }
 
-@router.get("/orders/metrics")
-def order_metrics_endpoint(
-    platform_account_id: int,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """订单监控指标（设计 16 §7.7，本地聚合，零平台请求）。"""
-    account = _owned_account(db, current_user, platform_account_id)
-    return {
-        "platform_account_id": payload_metrics_account_id(account),
-        "metrics": order_sync_service.order_metrics(
-            db, user_id=current_user.id, platform_account_id=account.id
-        ),
-    }
 
 class OrderShipRequest(BaseModel):
     """**单个订单发货**（设计 16 §7.4 A；真实写、不可撤回）。"""
@@ -617,35 +690,69 @@ def order_ship_batch(
     )
     return {"platform_account_id": account.id, "source": "platform", **result}
 
-@router.post("/after-sales/handle")
-def after_sale_handle(
-    payload: AfterSaleHandleRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-    adapter_factory: Any = Depends(get_qianfan_api_adapter_factory),
-):
-    """**售后审核**（同意 / 拒绝；设计 16 §7.4 B）—— **真实平台写、不可撤回**。
+@router.post("/after-sales/handle", include_in_schema=False)
+def after_sale_handle_removed():
+    """**已退场**（设计 75，2026-10-27）：售后审核端点随 `after_sales` 表一起移除。
 
-    与发货同一把尺子：两层确认 → 门禁（必须 `待处理`）→ 打平台 → 落库。
+    ## 为什么必须退场（不是「还没做」）
+
+    本端点原本靠**本地 `after_sales` 行**做三件事：归属校验（越权 404）、状态门禁
+    （必须「待处理」）、以及 `confirm_token` 指纹。订单域改实时后本地不再有售后行 ——
+    继续留着它就是「拿一个查不到的表做门禁」，每次调用都以 404 结束，看起来像 bug。
+
+    平台侧写接口（售后同意 / 拒绝）本身仍存在，但当前**没有可用的门禁与确认数据源**：
+    订单详情实时返回的 `after_sale_list` 尚未真机对过字段（`after_sale_id` / 状态码），
+    在没有取证的前提下动平台写操作 = 拿用户真实售后单试错。
+
+    ⇒ 结论：**在有真机取证之前不做**（设计 75 §4.4 O2 的同一条纪律）。要恢复它，
+    先补「实时详情 → 售后单门禁」的取证与测试，再一次性落地；不要恢复本墓碑。
+
+    错误码：`ORDER_AFTER_SALE_HANDLE_REMOVED`。
     """
-    from backend.app.services import order_write_service as ows
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail={
+            "code": "ORDER_AFTER_SALE_HANDLE_REMOVED",
+            "message": "售后审核已退场（设计 75）：订单域改为实时查询后不再有本地售后单，"
+            "请在千帆后台处理售后。",
+        },
+    )
 
-    account = _owned_account(db, current_user, payload.platform_account_id)
-    try:
-        row = _owned_after_sale(db, current_user, account.id, payload.after_sale_id)
-    except Exception as exc:  # noqa: BLE001
-        raise _order_write_error_to_http(exc) from exc
-    adapter = _ark_adapter_for(db, account, adapter_factory)
-    try:
-        result = ows.handle_after_sale(
-            db,
-            adapter=adapter,
-            after_sale=row,
-            action=payload.action,
-            reject_reason=payload.reject_reason,
-            confirmed=payload.confirmed,
-            confirm_token=payload.confirm_token,
-        )
-    except Exception as exc:  # noqa: BLE001
-        raise _order_write_error_to_http(exc) from exc
-    return {"platform_account_id": account.id, "source": "platform", "result": result}
+
+@router.post("/orders/sync", include_in_schema=False)
+def order_sync_removed():
+    """**已退场**（设计 75，2026-10-27）：订单同步任务全链路移除。
+
+    原 `POST /qianfan/orders/sync` 把平台订单落库到 `orders` / `order_items` /
+    `order_shipments` / `after_sales`，列表再读本地 —— 这正是「本地与平台迟早
+    不一致」的根源（同步有间隔、失败会静默、平台侧改了本地不知道）。
+
+    现在订单列表与详情**直接实时查千帆**（`fulfillment/order/page` +
+    `/detail`），订单是**平台的事实**，不该有本地副本。
+    """
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail={
+            "code": "ORDER_SYNC_REMOVED",
+            "message": "订单同步已退场（设计 75）：订单列表现在实时查询千帆，不再落本地。",
+        },
+    )
+
+
+@router.post("/orders/remark", include_in_schema=False)
+def order_remark_removed():
+    """**已退场**（设计 75，2026-10-27）：订单备注功能移除。
+
+    用户口径（2026-10-26）：「订单备注不保留直接移除」。
+
+    改造前备注存在本地 `order_remarks` 表（平台没有备注字段），它是本方案里
+    唯一一处「平台不存在但我方要留」的订单数据 —— 用户决定不留，所以整条退场：
+    表 DROP、端点 410、前端备注区删除。
+    """
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail={
+            "code": "ORDER_REMARK_REMOVED",
+            "message": "订单备注功能已移除（设计 75）：订单域全实时，本地不保留订单数据。",
+        },
+    )

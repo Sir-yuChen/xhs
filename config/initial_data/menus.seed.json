@@ -1608,19 +1608,6 @@
       "parent_seq": 76
     },
     {
-      "_seq": 124,
-      "name": "同步订单",
-      "menu_type": "F",
-      "path": "",
-      "perms": "xhs:order:sync",
-      "icon": "",
-      "workspace": "",
-      "sort_order": 0,
-      "is_visible": true,
-      "status": "normal",
-      "parent_seq": 123
-    },
-    {
       "_seq": 125,
       "name": "发货",
       "menu_type": "F",
@@ -1647,19 +1634,6 @@
       "parent_seq": 123
     },
     {
-      "_seq": 127,
-      "name": "订单备注",
-      "menu_type": "F",
-      "path": "",
-      "perms": "xhs:order:remark",
-      "icon": "",
-      "workspace": "",
-      "sort_order": 3,
-      "is_visible": true,
-      "status": "normal",
-      "parent_seq": 123
-    },
-    {
       "_seq": 128,
       "name": "导出订单",
       "menu_type": "F",
@@ -1668,19 +1642,6 @@
       "icon": "",
       "workspace": "",
       "sort_order": 4,
-      "is_visible": true,
-      "status": "normal",
-      "parent_seq": 123
-    },
-    {
-      "_seq": 129,
-      "name": "售后处理",
-      "menu_type": "F",
-      "path": "",
-      "perms": "xhs:order:afterSaleHandle",
-      "icon": "",
-      "workspace": "",
-      "sort_order": 5,
       "is_visible": true,
       "status": "normal",
       "parent_seq": 123

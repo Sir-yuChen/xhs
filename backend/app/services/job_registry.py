@@ -24,7 +24,12 @@ from typing import Any, Callable, Optional
 JOB_KEY_NOTE_SYNC = "system.note_sync"
 JOB_KEY_GOODS_NOTE_SYNC = "system.goods_note_sync"
 JOB_KEY_SHOP_GOODS_SYNC = "system.shop_goods_sync"
+#: **已退场**（设计 75 S3，2026-10-27）：订单域改实时查询，不再有「同步订单」任务。
+#: 常量保留是给迁移按 key 找历史 `scheduled_jobs` 行（置 paused）与 `_shared` 转发用。
 JOB_KEY_ORDER_SYNC = "system.order_sync"
+#: ⚠️ **`system.order_sync` 已退场**（设计 75，2026-10-27）：订单域全实时，没有要同步
+#: 的数据。键名常量一并删除（留着它会引诱人把 JobSpec 加回来）。
+#: 存量行由迁移 `m7n8o9p0q1r2` 置 `paused=True` 保留（历史日志仍按 `job_key` 归属）。
 #: 2026-10-05 用户口径：队列记录清理**升级为公共「清理记录表」任务**
 #: （`system.queue_record_cleanup`）—— 定期清理项目中所有指定记录表。
 #: 键**保持不变**（存量行与历史日志快照不迁移即可继续对上），中文名改「清理记录表」。
@@ -286,19 +291,15 @@ def _build_registry() -> dict[str, JobSpec]:
             default_trigger_type="cron",
             default_cron="0 0 */6 * * *",
         ),
-        JobSpec(
-            # M6 方向 6（设计 16 §7）：订单一期只读 —— 拉 `fulfillment/order/page`
-            # 落 `orders` 等 5 张表，不触任何写操作。
-            key=JOB_KEY_ORDER_SYNC,
-            name="店铺订单同步",
-            func=scheduler_service.run_scheduled_order_syncs,
-            builtin=True,
-            user_scoped=True,
-            params_editable=("account_ids",),
-            params_defaults={"account_ids": []},
-            default_trigger_type="cron",
-            default_cron="0 30 */6 * * *",
-        ),
+        # ⚠️ **已退场**（设计 75，2026-10-27）：`system.order_sync` 订单同步任务移除。
+        # 订单列表/详情改实时查千帆，本地零副本 ⇒ 没有「同步」这个动作了。
+        # 原声明（保留备查，勿恢复）：
+        #
+        #   JobSpec(key=JOB_KEY_ORDER_SYNC, name="店铺订单同步",
+        #           func=scheduler_service.run_scheduled_order_syncs,
+        #           builtin=True, user_scoped=True, params_editable=("account_ids",),
+        #           params_defaults={"account_ids": []},
+        #           default_trigger_type="cron", default_cron="0 30 */6 * * *")
         JobSpec(
             # 2026-09-25 用户口径「笔记任务记录清理应扩展为队列详情记录清理……
             # 任务名称修改为队列记录清理」：任务键与中文名同步改（迁移

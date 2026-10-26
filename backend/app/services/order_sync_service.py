@@ -50,7 +50,6 @@ from backend.app.models.order import (
     AfterSale,
     Order,
     OrderItem,
-    OrderRemark,
     OrderShipment,
     resolve_order_status,
 )
@@ -943,14 +942,14 @@ def order_summary(
     shop_name: str = "",
     seller_id: str = "",
 ) -> dict[str, Any]:
-    """订单 → 列表/详情用的 dict。``include_full=True`` 才给完整履约值。
+    """台账行 → 列表 / 详情 dict（**发货 / 售后写链路仍在用**，读取链路已走实时）。
 
-    ## 店铺维度（2026-10-04 用户口径「订单模块也需要是店铺维度」）
+    ⚠️ 读取链路（订单列表 / 详情 / 导出）已于 2026-10-27 改实时（设计 75 §4.4），
+    不再经过本函数；但**平台写操作**（`order_write_service`：发货 / 售后审核）
+    仍按本地行做归属与状态门禁 —— 那是「我们向平台写之前先确认自己看过什么」的
+    一致性检查点，不是数据副本。
 
-    店铺实体已退场（ADR-021）⇒「账号 = 店铺」1:1，店名取账号昵称
-    （`shop_binding_service.shop_display_name` 唯一实现）。`shop_name` /
-    `seller_id` 由**调用方批量预取**后传入，不在本函数里逐行查账号
-    （列表 N 行 ⇒ N 次查库 = N+1 查询）。
+    ``include_full=True`` 才给完整履约值。
     """
     items = db.scalars(
         select(OrderItem).where(OrderItem.order_id == order.id).order_by(OrderItem.id.asc())
@@ -961,16 +960,12 @@ def order_summary(
     after_sales = db.scalars(
         select(AfterSale).where(AfterSale.order_id == order.id).order_by(AfterSale.id.asc())
     ).all()
-    remarks = db.scalars(
-        select(OrderRemark).where(OrderRemark.order_id == order.id).order_by(OrderRemark.id.asc())
-    ).all()
     full = bool(include_full)
     return {
         "id": order.id,
         "order_no": order.order_no,
         "package_id": order.package_id,
         "platform_account_id": order.platform_account_id,
-        #: 店铺维度（设计 16 §7.2；ADR-021 后账号 = 店铺）—— 商品页同口径。
         "shop_name": shop_name,
         "seller_id": seller_id,
         "type_desc": order.type_desc,
@@ -1038,168 +1033,9 @@ def order_summary(
             }
             for row in after_sales
         ],
-        "remarks": [
-            {
-                "id": row.id,
-                "kind": row.kind,
-                "content": row.content,
-                "created_at": _iso(row.created_at),
-                "updated_at": _iso(row.updated_at),
-            }
-            for row in remarks
-        ],
+        #: ⚠️ 订单备注整条退场（设计 75，2026-10-27）：`remarks` 字段**移除**而不是留空数组
+        #: —— 留空会让前端以为「有备注功能但这次没有」，删字段才是「没这个功能」。
     }
-
-
-def _money(value: Any) -> Optional[float]:
-    return None if value is None else round(float(value), 2)
-
-
-def _iso(value: Optional[datetime]) -> Optional[str]:
-    return None if value is None else value.isoformat(sep=" ")
-
-
-def list_orders(
-    db: Session,
-    *,
-    user_id: int,
-    platform_account_id: Optional[int] = None,
-    status: str = "",
-    keyword: str = "",
-    date_from: Optional[str] = None,
-    date_to: Optional[str] = None,
-    page: int = 1,
-    page_size: int = 20,
-    include_full: bool = False,
-) -> dict[str, Any]:
-    """本地台账查询（筛选 / 排序 / 分页全在本地 SQL，与商品列表同口径）。"""
-    statement = select(Order).where(Order.user_id == user_id)
-    if platform_account_id:
-        statement = statement.where(Order.platform_account_id == int(platform_account_id))
-    if status and status in ORDER_STATUSES:
-        statement = statement.where(Order.status == status)
-    if keyword:
-        like = f"%{keyword.strip()}%"
-        item_ids = [
-            row[0]
-            for row in db.execute(
-                select(OrderItem.order_id).where(
-                    (OrderItem.item_name.like(like)) | (OrderItem.sku.like(like))
-                )
-            ).all()
-        ]
-        statement = statement.where(
-            (Order.order_no.like(like))
-            | (Order.buyer_nick.like(like))
-            | (Order.tracking_no.like(like))
-            | (Order.id.in_(item_ids) if item_ids else false())
-        )
-    if date_from:
-        statement = statement.where(Order.created_at >= _parse_date(date_from))
-    if date_to:
-        statement = statement.where(Order.created_at <= _parse_date(date_to, end_of_day=True))
-
-    total = db.scalar(select(func.count()).select_from(statement.subquery())) or 0
-    # ⚠️ **先归一参数再回显**（2026-10-04 实测补）：原实现只把 `page_size` 收窄在
-    # `LIMIT` 上，返回体里回的却是**原始入参** ⇒ 前端传 100000 时页面显示
-    # 「每页 100000 条」而实际只拿到 100 条（分页器算出的总页数也是错的）。
-    # 口径：返回体回显**服务端实际采用值**，调用方据此渲染分页器。
-    page = max(int(page or 1), 1)
-    page_size = max(min(int(page_size or 20), 100), 1)
-    rows = db.scalars(
-        statement.order_by(Order.created_at.desc())
-        .offset(max((page - 1) * page_size, 0))
-        .limit(page_size)
-    ).all()
-    #: 店铺维度上下文（批量预取一次，不在 order_summary 里逐行查账号）。
-    shop_ctx = _shop_context(db, platform_account_id)
-    return {
-        "total": int(total),
-        "page": page,
-        "page_size": page_size,
-        "shop_name": shop_ctx.get("shop_name", ""),
-        "seller_id": shop_ctx.get("seller_id", ""),
-        "platform_account_id": int(platform_account_id) if platform_account_id else None,
-        "items": [
-            order_summary(
-                db,
-                row,
-                include_full=include_full,
-                shop_name=shop_ctx.get("shop_name", ""),
-                seller_id=shop_ctx.get("seller_id", ""),
-            )
-            for row in rows
-        ],
-    }
-
-
-def upsert_remark(
-    db: Session,
-    *,
-    user_id: int,
-    order: Order,
-    content: str,
-    kind: str = ORDER_REMARK_KIND_ORDER,
-) -> Optional[OrderRemark]:
-    """写一条**本地**订单备注（设计 16 §7.2）。
-
-    ⚠️ **这是本地标记，不是平台写操作** —— 平台的「卖家备注」写接口未授权
-    （硬约束②只读 + 用户 2026-09-19 授权清单里只有「删除笔记」一个写操作）。
-    用户在这里写的备注**只存在于本机台账**，不会同步到千帆。
-
-    ## 口径：一条订单 + 一种 kind ⇒ 一条备注（**覆盖，不追历史**）
-
-    设计 16 §7.2 的表形状是「订单备注」而非「备注流水」；页面也是一个
-    输入框（当前值 + 保存）。若改成 append，页面就得处理「显示哪一条」，
-    且用户改三个字会产生三条记录 —— 不是这张表要表达的东西。
-
-    `content` 为空 ⇒ 删除该备注（用户清空输入框 = 不备注，不是存一条空串；
-    空串会让页面显示一个「有备注」的空行）。
-    """
-    row = db.scalar(
-        select(OrderRemark).where(
-            OrderRemark.order_id == order.id, OrderRemark.kind == kind
-        )
-    )
-    text = (content or "").strip()
-    if not text:
-        if row is not None:
-            db.delete(row)
-            db.flush()
-        return None
-    if row is None:
-        row = OrderRemark(
-            order_id=order.id, user_id=user_id, kind=kind, content=text
-        )
-        db.add(row)
-    else:
-        row.content = text
-    db.flush()
-    return row
-
-
-#: 导出 CSV 的列（**顺序固定** —— 用户拿去做透视/对账，列序变了脚本就崩）。
-#: 收件人三列给**完整值**（设计 16 §7.2：履约场景需要原值，防护在展示层）。
-EXPORT_COLUMNS: tuple[tuple[str, str], ...] = (
-    ("订单号", "order_no"),
-    ("状态", "status"),
-    ("买家昵称", "buyer_nick"),
-    ("收件人", "receiver_name"),
-    ("手机号", "receiver_phone"),
-    ("收货地址", "receiver_address"),
-    ("商品", "_items_text"),
-    ("应付金额", "pay_amount"),
-    ("订单金额", "total_amount"),
-    ("运费", "freight"),
-    ("优惠", "discount"),
-    ("支付方式", "pay_method"),
-    ("物流公司", "logistics_company"),
-    ("快递单号", "tracking_no"),
-    ("下单时间", "created_at"),
-    ("付款时间", "pay_time"),
-    ("发货时间", "ship_time"),
-    ("完成时间", "finish_time"),
-)
 
 
 def export_filename() -> str:
@@ -1257,61 +1093,3 @@ def orders_to_csv(rows: list[dict[str, Any]]) -> str:
         writer.writerow([_csv_cell(c) for c in line])
     # BOM：Excel 认 UTF-8 BOM，否则中文列名乱码
     return "﻿" + buf.getvalue()
-
-
-def _parse_date(value: str, *, end_of_day: bool = False) -> datetime:
-    """`YYYY-MM-DD` → 当天起点 / 终点（坏值退到极值，不抛）。"""
-    from datetime import timedelta
-
-    try:
-        day = datetime.strptime(value.strip()[:10], "%Y-%m-%d")
-    except ValueError:
-        return datetime.max if end_of_day else datetime.min
-    return day + timedelta(days=1) - timedelta(seconds=1) if end_of_day else day
-
-
-def order_metrics(db: Session, *, user_id: int, platform_account_id: Optional[int] = None) -> dict[str, Any]:
-    """订单监控指标（设计 16 §7.7，全部本地聚合，零平台请求）。
-
-    口径（缺值不造 0 之外，另有两处必须写清）：
-    * **GMV** = `pay_amount` 之和（实付，不是 `total_amount` 商品总额）；
-    * **退款率** = 有 `after_sales` 且 `amount>0` 的订单数 / 已完成订单数；
-    * **客单价** = GMV / 已支付订单数（分母不含「待付款」）。
-    """
-    statement = select(Order).where(Order.user_id == user_id)
-    if platform_account_id:
-        statement = statement.where(Order.platform_account_id == int(platform_account_id))
-    orders = db.scalars(statement).all()
-
-    paid = [o for o in orders if o.pay_amount is not None]
-    gmv = sum(float(o.pay_amount) for o in paid)  # type: ignore[arg-type]
-    finished = [o for o in orders if o.status == ORDER_STATUS_MAP[7]]
-    aftersale_order_ids = {
-        row.order_id
-        for row in db.scalars(
-            select(AfterSale).where(AfterSale.user_id == user_id)
-        ).all()
-    }
-    refunded = [o for o in orders if o.id in aftersale_order_ids]
-    shipped = [o for o in orders if o.ship_time is not None and o.pay_time is not None]
-    if shipped:
-        ship_hours = [
-            (o.ship_time - o.pay_time).total_seconds() / 3600.0  # type: ignore[operator]
-            for o in shipped
-        ]
-        avg_ship_hours = round(sum(ship_hours) / len(ship_hours), 1)
-    else:
-        avg_ship_hours = None
-    return {
-        "order_count": len(orders),
-        "gmv": round(gmv, 2),
-        "avg_order_value": round(gmv / len(paid), 2) if paid else None,
-        "paid_count": len(paid),
-        "finished_count": len(finished),
-        "refund_count": len(refunded),
-        "refund_rate": round(len(refunded) / len(finished), 4) if finished else None,
-        "avg_ship_hours": avg_ship_hours,
-        "by_status": {
-            status: sum(1 for o in orders if o.status == status) for status in ORDER_STATUSES
-        },
-    }

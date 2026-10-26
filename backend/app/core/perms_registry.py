@@ -220,9 +220,12 @@ BUSINESS_PERMS: tuple[PermSpec, ...] = (
     *_f("xhs:publish", "submit/retry/cancel/precheck",
         "提交发布/重试发布/取消发布/发布预检",
         "/platforms/xhs/shop-items", _X),
-    # 订单管理 6
-    *_f("xhs:order", "sync/ship/shipBatch/remark/export/afterSaleHandle",
-        "同步订单/发货/批量发货/订单备注/导出订单/售后处理",
+    # 订单管理 4
+    #: ⚠️ 2026-10-27：`sync`（同步订单）与 `remark`（订单备注）随订单域全实时退场
+    #: （设计 75 §4.4）：订单列表直接查平台，不再有同步任务；备注功能整条移除。
+    #: 两个码在库里由迁移 `m7n8o9p0q1r2` 一并删行（不留幽灵码）。
+    *_f("xhs:order", "ship/shipBatch/export",
+        "发货/批量发货/导出订单",
         "/platforms/xhs/orders", _X),
     # 违规管理 1（全页唯一写操作）
     *_f("xhs:violation", "relatedDelete", "删除关联内容",

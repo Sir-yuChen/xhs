@@ -33,13 +33,8 @@ NOTE_SYNC_TASK_TYPE = "xhs_note_sync"
 SHOP_GOODS_SYNC_TASK_TYPE = "xhs_shop_goods_sync"
 """同步**店铺商品台账**（SKU / 价格，不是笔记）。"""
 
-ORDER_SYNC_TASK_TYPE = "xhs_order_sync"
-"""M6 方向 6（设计 16 §7）订单同步的任务类型。
-
-与 `SHOP_GOODS_SYNC_TASK_TYPE`（店铺商品台账）**不是一回事**：这里同步的是
-**订单**（`orders` / `order_items` / `order_shipments` / `after_sales`，
-全部只读落库）。任务行判重入 / 页面显示任务类型都按这个 key 分流，
-两个同步互不阻挡（各跑各的任务行）。"""
+# ⚠️ `ORDER_SYNC_TASK_TYPE`（`xhs_order_sync`）已退场（设计 75，2026-10-27）：
+# 订单域改平台实时查询，不再有「订单同步任务」这种任务行。原常量保留在 git 历史里。
 
 
 GOODS_NOTE_SYNC_TASK_TYPE = "xhs_goods_note_sync"

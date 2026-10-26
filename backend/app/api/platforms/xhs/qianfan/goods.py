@@ -374,6 +374,7 @@ def item_notes(
     payload: ItemNotesRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    adapter_factory=Depends(get_qianfan_api_adapter_factory),
 ):
     """某个商品**挂了哪些笔记**（商品列表页点「N 篇」看详情；设计 13 §31.6）。
 
@@ -395,13 +396,30 @@ def item_notes(
     state = get_shop_state(account) or {}
     # ⚠️ 2026-09-27（§26.7）：关系表按**平台 ID** 挂 ⇒ 直接按 `item_id` 查，
     # **不再先找台账行**（台账里没有这件商品时也有关系 —— 关系落库不校验商品存在）。
-    relations = db.scalars(
-        select(NoteGoods).where(
-            NoteGoods.user_id == current_user.id,
-            NoteGoods.item_id == payload.item_id,
+    #: **主数据源改为千帆实时查询**（设计 75 §4.3，2026-10-27）：
+    #: `goods-note/list?item_mix_search_word=<商品ID>` 返回该商品挂载的全部笔记，
+    #: 不再依赖本地 `note_goods` 关系表（关系不问平台就不知道有没有漏、有没有删）。
+    #: 本地 `notes` 表只用来**补充**平台没有的字段（正文 / 图集 / 发布态）。
+    from backend.app.services import realtime_platform_query_service as rt
+
+    platform_notes: list[dict] = []
+    platform_error = ""
+    try:
+        live = rt.list_goods_notes(
+            _realtime_adapter(db, account, adapter_factory),
+            item_id=payload.item_id,
+            page=1,
+            page_size=100,
         )
-    ).all()
-    note_ids = [str(relation.note_id or "") for relation in relations]
+        platform_notes = live.get("items") or []
+    except HTTPException:
+        #: 没有 ark 令牌 = 确定性答案，照旧 400 让用户补登录
+        raise
+    except Exception as error:  # noqa: BLE001 - 平台失败降级为「只回本地补充信息」
+        platform_error = str(error)
+        logger.warning("item_notes 平台查询失败（account=%s）：%s", account.id, error)
+
+    note_ids = [str(n.get("note_id") or "") for n in platform_notes]
     note_ids = [note_id for note_id in dict.fromkeys(note_ids) if note_id]
     notes: list[dict[str, Any]] = []
     if note_ids:
@@ -424,7 +442,46 @@ def item_notes(
             else:
                 images_by_note.setdefault(asset.note_id, []).append(asset.url)
 
-        for note in rows:
+        local_by_id = {note.note_id: note for note in rows}
+        for note_id in note_ids:
+            note = local_by_id.get(note_id)
+            if note is None:
+                #: **平台有、本地没有**（没同步过 / 本地已删）⇒ 用平台数据出一条，
+                #: 正文与发布态留空（缺值口径：不编造）—— 过去这类笔记直接看不见。
+                platform_row = next(
+                    (n for n in platform_notes if str(n.get("note_id")) == note_id), {}
+                )
+                notes.append(
+                    {
+                        "note_id": note_id,
+                        "title": platform_row.get("title") or "",
+                        "content": "",
+                        "cover": platform_row.get("cover") or "",
+                        "images": [platform_row["cover"]] if platform_row.get("cover") else [],
+                        "video_url": "",
+                        "publish_time": platform_row.get("publish_time") or "",
+                        "browse_num": platform_row.get("read_count"),
+                        "like_num": platform_row.get("like_count"),
+                        "collect_num": platform_row.get("collect_count"),
+                        "comment_num": platform_row.get("comment_count"),
+                        "share_num": platform_row.get("share_count"),
+                        "note_url": (
+                            f"https://www.xiaohongshu.com/explore/{note_id}"
+                            + (
+                                f"?xsec_token={platform_row['xsec_token']}&xsec_source=pc_creatormng"
+                                if platform_row.get("xsec_token")
+                                else ""
+                            )
+                        ),
+                        "note_type": "synced",
+                        "publish_status": "",
+                        "publish_error": "",
+                        "synced_at": "",
+                        #: 让前端能区分「本地有正文」与「只有平台壳子」
+                        "detail_source": "platform",
+                    }
+                )
+                continue
             entry: dict[str, Any] = {}
             raw_value = note.raw_json
             if isinstance(raw_value, dict):
@@ -460,6 +517,8 @@ def item_notes(
                     "publish_status": note.publish_status or "",
                     "publish_error": note.publish_error or "",
                     "synced_at": note.created_at.strftime("%Y-%m-%d %H:%M") if note.created_at else "",
+                    #: 本地有正文/图集（可点开看全）
+                    "detail_source": "local",
                 }
             )
     notes.sort(key=lambda note: str(note.get("publish_time") or ""), reverse=True)
@@ -468,6 +527,11 @@ def item_notes(
         "item_id": payload.item_id,
         "count": len(notes),
         "notes": notes,
+        #: 改造前这两个字段报的是**本地关系表的覆盖率**（「可能不全」）；
+        #: 现在主数据源是平台实时 ⇒ 覆盖就是全的，如实报 `platform`。
+        "source": "platform" if not platform_error else "platform_degraded",
+        #: 平台查询失败时的原因（空 = 成功）。**不静默**：前端要能显示「这次没问到平台」。
+        "error": platform_error,
         "synced_notes": synced_note_count(db, account.id),
         "goods_note_total": int(state.get("goods_note_total") or 0),
         "goods_synced_at": _fmt_state_time(state.get("goods_synced_at")),

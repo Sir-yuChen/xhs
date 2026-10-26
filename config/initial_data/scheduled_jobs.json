@@ -73,19 +73,6 @@
    "remark": "系统内置任务"
   },
   {
-   "job_key": "system.order_sync",
-   "name": "店铺订单同步",
-   "trigger_type": "cron",
-   "cron_expression": "0 30 6 * * *",
-   "misfire_policy": "once",
-   "concurrent": "forbid",
-   "params": {
-    "account_ids": []
-   },
-   "status": "active",
-   "remark": "系统内置任务"
-  },
-  {
    "job_key": "system.queue_record_cleanup",
    "name": "清理记录表",
    "trigger_type": "cron",
