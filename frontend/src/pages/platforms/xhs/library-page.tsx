@@ -1704,10 +1704,10 @@ export function XhsLibraryPage() {
             <Space wrap>
               <Checkbox checked={notes.length > 0 && notes.every((n) => selectedNoteIdSet.has(n.id))} onChange={toggleVisibleSelection}>选择当前页</Checkbox>
               <Text strong>{selectedNoteIds.length} 条已选</Text>
-              {hasPermission("xhs:library:createDraft") && (<Button icon={<CheckSquareOutlined />} disabled={isBatchWorking || !selectedNoteIds.length} onClick={createBatchRewriteDrafts} size="small">批量加入草稿工坊</Button>)}
+              {hasPermission("xhs:library:batchCreateDrafts") && (<Button icon={<CheckSquareOutlined />} disabled={isBatchWorking || !selectedNoteIds.length} onClick={createBatchRewriteDrafts} size="small">批量加入草稿工坊</Button>)}
               {/* 批量发布（设计 13 §31.5 步 8）：只发选中里可发布的（本地生成待发布/发布失败），
                   跳过的在确认框里明示；单项失败不阻断。 */}
-              {hasPermission("xhs:library:publish") && (
+              {hasPermission("xhs:publish:submit") && (
                 <Tooltip title="把选中里待发布 / 发布失败的本地生成笔记发布到小红书">
                   <Button
                     type="primary"
@@ -1723,7 +1723,7 @@ export function XhsLibraryPage() {
               )}
               {/* 批量同步（设计 13 §35）：只同步选中里**已发布**的（用户口径「只有已发布的
                   支持被选中」），跳过的在确认框里明示；入队后按顺序执行，进度见上方进度卡。 */}
-              {hasPermission("xhs:library:sync") && (
+              {hasPermission("xhs:note:batchSync") && (
                 <Tooltip title="把选中里已发布的笔记加入同步队列，拉取平台最新内容">
                   <Button
                     icon={<CloudSyncOutlined />}
@@ -2331,10 +2331,10 @@ export function XhsLibraryPage() {
                 </Tooltip>
               )}
               <Button icon={<CopyOutlined />} onClick={copySelectedNote} size="small">复制内容</Button>
-              {hasPermission("xhs:library:createDraft") && (
+              {hasPermission("xhs:note:create") && (
                 <Button icon={<FileAddOutlined />} onClick={addToDrafts} loading={isCreatingDraft} size="small">加入草稿工坊</Button>
               )}
-              {hasPermission("xhs:library:createDraft") && (
+              {hasPermission("xhs:note:create") && (
                 <Button icon={<EditOutlined />} onClick={() => createDraft("rewrite")} loading={isCreatingDraft} size="small">AI 改写</Button>
               )}
               {hasPermission("xhs:library:delete") && (

@@ -109,7 +109,7 @@ export function ImageStudioPanel() {
     setIsGenerating(true);
     setGeneratedPreview(null);
     try {
-      if (!hasPermission("xhs:picture:compose")) {
+      if (!hasPermission("ai:generate:generate")) {
         message.warning("没有AI 生图的权限");
         return;
       }

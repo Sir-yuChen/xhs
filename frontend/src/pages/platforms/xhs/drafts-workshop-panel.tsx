@@ -276,7 +276,7 @@ export function DraftsWorkshopPanel() {
     const draftId = selectedDraft?.id;
     setSourceAssets((prev) => prev.filter((a) => a.id !== assetId));
     if (draftId && assetId > 0) {
-      if (!hasPermission("xhs:draft:assets")) {
+      if (!hasPermission("xhs:note:edit")) {
         message.warning("没有管理草稿素材的权限");
         return;
       }
@@ -900,7 +900,7 @@ export function DraftsWorkshopPanel() {
                 placeholder="保留事实，增强种草感"
                 style={{ marginBottom: 8 }}
               />
-              {hasPermission("xhs:draft:rewrite") && (
+              {hasPermission("ai:generate:generate") && (
                 <Button
                   onClick={handleRewrite}
                   loading={isRewriting}
@@ -1099,7 +1099,7 @@ export function DraftsWorkshopPanel() {
                         icon={<HighlightOutlined />}
                         loading={isOptimizing}
                         onClick={async () => {
-                          if (!hasPermission("xhs:draft:generateImage")) {
+                          if (!hasPermission("ai:generate:generate")) {
                             message.warning("没有生成配图的权限");
                             return;
                           }

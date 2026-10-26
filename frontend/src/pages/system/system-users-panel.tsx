@@ -590,6 +590,7 @@ export function SystemUsersPanel() {
       <Modal
         title="批量重置密码"
         open={batchPwdOpen}
+        centered
         onCancel={() => setBatchPwdOpen(false)}
         onOk={async () => {
           if (!batchPwd || batchPwd.length < 6) {

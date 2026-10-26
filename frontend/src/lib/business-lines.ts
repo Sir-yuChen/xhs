@@ -89,6 +89,9 @@ export const ROUTE_BUSINESS_LINES: Record<string, BusinessLine> = {
   "/platforms/xhs/accounts": "shared",
   "/platforms/xhs/monitoring": "shared",
   "/platforms/xhs/auto-ops": "shared",
+  // 2026-10-25 设计 69 任务中心两级重构：工作区任务页（`/tasks` 已重定向到系统管理）。
+  // 它列的是**本工作区**的任务与日志，两条业务线的数据都会出现在这里 ⇒ `shared`。
+  "/platforms/xhs/tasks": "shared",
 };
 
 /**

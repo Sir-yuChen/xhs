@@ -2460,11 +2460,24 @@ export function XhsShopItemsPage() {
             (e) => e.supported && (e.action === "on_shelf" || e.action === "off_shelf"),
           ) || allowed.find((e) => e.action === "on_shelf" || e.action === "off_shelf");
         const deleteAction = allowed.find((e) => e.action === "delete");
-        //: 2026-10-25 红线「按权限码展示」：本页 4 类按钮各有独立码，
-        //: 一个都没有时整列渲染缺值符（不留空网格）。
-        const mayGenerate = hasPermission("xhs:item:aiAssist");
-        const mayOperate = hasPermission("xhs:item:operate");
-        if (!mayGenerate && !mayOperate) {
+        //: ⚠️ 2026-10-26 用户口径「『生成笔记』与『上架下架』拆成三个权限码」：
+        //: 本列 4 类入口**各判各的码**，不再共用一个合并码。
+        //: 上架与下架也是两个码 —— 虽然同一行的按钮由商品状态决定只出其一，
+        //: 但「能不能上架」与「能不能下架」是两件授权（授权页是两个勾）。
+        const mayGenerate = hasPermission("xhs:item:generateNote");
+        const mayOnShelf = hasPermission("xhs:item:onShelf");
+        const mayOffShelf = hasPermission("xhs:item:offShelf");
+        const mayDelete = hasPermission("xhs:item:delete");
+        const mayGenerateImage = hasPermission("xhs:item:generateImage");
+        const maySync = hasPermission("xhs:item:sync");
+        const mayEdit = hasPermission("xhs:item:edit");
+        //: 该按钮是否被授权（按 `shelfAction.action` 选码 —— 选码不是判权，
+        //: 判权就是这一次 `hasPermission` 查询）。
+        const shelfPermitted =
+          shelfAction?.action === "on_shelf" ? mayOnShelf
+            : shelfAction?.action === "off_shelf" ? mayOffShelf
+              : false;
+        if (!mayGenerate && !shelfPermitted && !mayDelete) {
           return <Text type="secondary">-</Text>;
         }
         return (
@@ -2479,7 +2492,9 @@ export function XhsShopItemsPage() {
           {/* 生成笔记（设计 13 §31.4，用户需求③；§31.10 起入队即返回）：
               调千帆后台智能生成一篇挂本商品的笔记（待发布，之后到内容库发布）。
               loading 判据 = 快照的 running + queued（队列在执行这一项），
-              不只是「本次点击在等回执」—— 回执毫秒级，执行在后台。 */}
+              不只是「本次点击在等回执」—— 回执毫秒级，执行在后台。
+              ⚠️ 权限码 = `xhs:item:generateNote`（2026-10-26 与上下架拆开）。 */}
+          {mayGenerate && (
           <Tooltip title="千帆智能生成一篇挂本商品的笔记">
             <Button
               type="link"
@@ -2496,9 +2511,12 @@ export function XhsShopItemsPage() {
               生成笔记
             </Button>
           </Tooltip>
+          )}
           {/* LLM 生成（T9，设计 17 §7.4）：走项目自己的 LLM 生成链路（与千帆后台智能生成
               是两个队列、两条链路）。开的是**生成配置弹窗** —— 弹窗内用两大 Tab
-              拆分「图文笔记 / 视频笔记」（用户口径 2026-10-16）。 */}
+              拆分「图文笔记 / 视频笔记」（用户口径 2026-10-16）。
+              ⚠️ 与「生成笔记」同属那一个按钮族 ⇒ 同一个码 `xhs:item:generateNote`。 */}
+          {mayGenerate && (
           <Tooltip title="用本项目的 LLM 链路生成笔记">
             <Button
               type="link"
@@ -2514,12 +2532,13 @@ export function XhsShopItemsPage() {
               LLM 生成
             </Button>
           </Tooltip>
+          )}
           {/* 2026-10-06 需求 8：**上架 / 下架** —— 按后端下发的 `allowed_actions` 渲染
               （可做的给按钮，不可做的给**置灰 + 原因 Tooltip**；判据不在前端复算）。
               ⚠️ 两个动作**合成一个按钮**：`on_shelf` / `off_shelf` 是同一状态位的两面
               （在架 ⇒ 只能下架；下架 ⇒ 只能上架），对任一商品不可能同时可执行 ——
               原实现两个都渲、其中一个恒置灰，既占位又让人以为「两个都能点」。 */}
-          {shelfAction ? (
+          {shelfAction && shelfPermitted ? (
             <Tooltip title={shelfAction.reason || `对平台商品执行「${shelfAction.label}」`}>
               <Button
                 type="link"
@@ -2548,7 +2567,11 @@ export function XhsShopItemsPage() {
 
               ⚠️ 用 `dropdownRender` 而不是 `menu={{items}}`：后者会把按钮从 `Button`
               变成 `MenuItem`，同一列出现两种渲染形态（可点性 / 禁用判据分叉）。
-              这里**按钮本身一个字符没改**，只是换了位置。 */}
+              这里**按钮本身一个字符没改**，只是换了位置。
+
+              ⚠️ 2026-10-26：下拉里 4 个入口各有自己的码，**一个都没授权时整个「更多」不渲染**
+              （否则点开是个空面板）。 */}
+          {(mayGenerateImage || maySync || mayEdit || (deleteAction && mayDelete)) && (
           <Dropdown
             trigger={["click"]}
             dropdownRender={() => (
@@ -2564,7 +2587,10 @@ export function XhsShopItemsPage() {
                 }}
               >
                 {/* 生成商品详情图（设计 17 §13.3.3，v2.1；v2.12 移到操作列独立弹窗）：
-                    AI 出图给**商品**用（与「生成笔记」的正文配图是两个业务点）。 */}
+                    AI 出图给**商品**用（与「生成笔记」的正文配图是两个业务点）。
+                    ⚠️ 各按钮各判各的码（2026-10-26）：AI商品图=`generateImage`、
+                    同步=`sync`、编辑=`edit`、删除=`delete` —— 不再整块共用。 */}
+                {mayGenerateImage && (
                 <Tooltip title="AI 生成该商品的详情图 / 主图">
                   <Button
                     type="link"
@@ -2576,11 +2602,13 @@ export function XhsShopItemsPage() {
                     AI商品图
                   </Button>
                 </Tooltip>
+                )}
                 {/* 2026-10-06 用户口径：「列表操作列新增**同步商品信息**按钮，将顶部的
                     同步执行商品按钮功能合并到同步商品按钮中……注意合并后两个按钮的功能
                     需全部保留」⇒ 行内这一件走**同一套**同步链路（同一个弹窗 + 同一个
                     请求函数），只是 ID 清单缩成一行；打开即同步、状态在弹窗里逐条给。
                     ⚠️ 放「更多」里：它是**单件补数据**的次级入口，与顶部「批量同步」区分。 */}
+                {maySync && (
                 <Tooltip title="同步这一件商品的最新数据">
                   <Button
                     type="link"
@@ -2596,8 +2624,10 @@ export function XhsShopItemsPage() {
                     同步商品信息
                   </Button>
                 </Tooltip>
+                )}
                 {/* M4（设计 20 §5）：**商品编辑** —— 操作列独立弹窗。
                     ⚠️ 分组 Tab 已随分组功能退场（2026-10-05）。 */}
+                {mayEdit && (
                 <Tooltip title="编辑商品（AI 润色标题 / 卖点）">
                   <Button
                     type="link"
@@ -2609,9 +2639,12 @@ export function XhsShopItemsPage() {
                     编辑
                   </Button>
                 </Tooltip>
+                )}
                 {/* 删除（需求 8）：仍是**状态驱动**的 —— `supported=false` 时置灰 + 后端原因
-                    （如推广中不可删）。`danger` 保持红色，位置在下拉最后一位。 */}
-                {deleteAction ? (
+                    （如推广中不可删）。`danger` 保持红色，位置在下拉最后一位。
+                    ⚠️ 权限码 = `xhs:item:delete`（平台删除）；删本地台账行是
+                    `xhs:item:deleteLocal`（在顶部批量区）。 */}
+                {deleteAction && mayDelete ? (
                   <Tooltip title={deleteAction.reason || `对平台商品执行「${deleteAction.label}」`}>
                     <Button
                       type="link"
@@ -2633,6 +2666,7 @@ export function XhsShopItemsPage() {
               更多
             </Button>
           </Dropdown>
+          )}
           {/* ⚠️ 「生成记录」按钮**已移除**（2026-10-05 用户口径「将商品操作列的生
               成记录合并到AI商品图弹窗内，使用tab布局」）⇒ 入口搬进「AI商品图」弹窗的
               第二个顶层 Tab（见 `detailImageTab`）。被移除的原按钮（保留备查，勿恢复）：
@@ -3001,12 +3035,14 @@ export function XhsShopItemsPage() {
             {/* 2026-10-05 需求 7：**批量上架 / 批量下架 / 批量删除（平台商品）**。
                 ⚠️ 三者走**手动触发式任务**（不是同步循环）：点完只建任务、立即返回，
                 逐条结果在「商品操作结果」弹窗里轮询展示 —— 任务中心**任务列表不展示**
-                （与「清理无流量笔记」同款）。 */}
-            {hasPermission("xhs:item:operate") && ([
-              { key: "on_shelf", label: "批量上架", danger: false },
-              { key: "off_shelf", label: "批量下架", danger: false },
-              { key: "delete", label: "批量删除商品", danger: true },
-            ] as const).map((entry) => (
+                （与「清理无流量笔记」同款）。
+                ⚠️ 2026-10-26「一按钮一码」：三个按钮**各判各的码**（原共用一个
+                原合并码 ⇒ 想让某人批量上架，就得连批量删除一起给）。 */}
+            {([
+              { key: "on_shelf", label: "批量上架", danger: false, perm: "xhs:item:onShelf" },
+              { key: "off_shelf", label: "批量下架", danger: false, perm: "xhs:item:offShelf" },
+              { key: "delete", label: "批量删除商品", danger: true, perm: "xhs:item:delete" },
+            ] as const).filter((entry) => hasPermission(entry.perm)).map((entry) => (
               <Tooltip
                 key={entry.key}
                 title={
@@ -3031,8 +3067,10 @@ export function XhsShopItemsPage() {
                 ⚠️ 2026-10-05 改名「删除台账行」并把 Tooltip 改成显式对照：它与上面新增的
                 「批量删除商品」（**删平台**）是两件完全不同的事，同名会让用户点错。
                 两个连带后果写在确认框正文里（`batchDeleteHint`），按钮上的 Tooltip
-                只说「删什么、上限多少」，不重复那两句（换成两处说同一件事）。 */}
-            {hasPermission("xhs:item:edit") && (
+                只说「删什么、上限多少」，不重复那两句（换成两处说同一件事）。
+                ⚠️ 2026-10-26：改判 `xhs:item:deleteLocal` —— 原来借的是 `edit` 的码
+                （「能改商品」就顺带「能删台账行」），与「一按钮一码」不符。 */}
+            {hasPermission("xhs:item:deleteLocal") && (
             <Tooltip
               title={
                 selectedItemIds.length > 0

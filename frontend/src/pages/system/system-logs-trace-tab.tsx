@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { Alert, Button, Empty, Input, Space, Table, Tag, Typography, message } from "antd";
+// 2026-10-26：静态导入的 message 不吃 ConfigProvider 主题（antd 官方不推荐），
+// 统一改用 App.useApp() 的实例（本仓纪律：所有消息提醒走 App.useApp）。
+import { Alert, App, Button, Empty, Input, Space, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { SearchOutlined } from "@ant-design/icons";
 import { fetchTraceTimeline, type TraceEvent } from "../../lib/api";
@@ -26,6 +28,7 @@ const LEVEL_COLOR: Record<string, string> = {
 
 /** 按链路 id 查该链路的全部日志（设计 67）。 */
 export function TraceTab({ traceId: incoming = "" }: { traceId?: string }) {
+  const { message } = App.useApp();
   const [input, setInput] = useState(incoming);
   const [traceId, setTraceId] = useState("");
   const [loading, setLoading] = useState(false);

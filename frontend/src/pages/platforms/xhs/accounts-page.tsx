@@ -452,7 +452,7 @@ export function XhsAccountsPage() {
       return;
     }
     try {
-      if (!hasPermission("xhs:account:syncShopGoods")) {
+      if (!hasPermission("xhs:item:sync")) {
         message.warning("没有同步店铺商品的权限");
         return;
       }

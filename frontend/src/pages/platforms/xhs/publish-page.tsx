@@ -253,7 +253,7 @@ export function XhsPublishPage() {
         location: location.trim() || null,
         is_private: privacyChoice === "private",
       });
-      if (!hasPermission("xhs:note:publish")) {
+      if (!hasPermission("xhs:publish:submit")) {
         message.warning("没有发布笔记的权限");
         return;
       }

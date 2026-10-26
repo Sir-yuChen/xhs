@@ -20,6 +20,7 @@ import {
   EditOutlined,
   PlusOutlined,
   ReloadOutlined,
+  SearchOutlined,
 } from "@ant-design/icons";
 import {
   App,
@@ -99,6 +100,8 @@ export function SystemDictPanel() {
   const [itemModal, setItemModal] = useState<{ mode: "create" | "edit"; row?: SystemDictItem } | null>(
     null
   );
+  //: 左栏 43 种类型只能滚动找（用户截图里已经在滚，底部类型被切掉）⇒ 加搜索。
+  const [typesFilter, setTypesFilter] = useState("");
 
   const loadTypes = useCallback(async () => {
     setLoadingTypes(true);
@@ -145,28 +148,66 @@ export function SystemDictPanel() {
 
   const activeType = types.find((t) => t.id === activeId) ?? null;
 
+  //: ⚠️ 2026-10-26 用户口径（字典布局截图）：「一些数据无法展示完成，一些没有数据
+  //: 占用大量空间」⇒ 两处根因都是**列宽写死**：
+  //:  * 左栏 `编码` 写死 170px，而真实编码（`sys_queue_source`）不需要那么宽，
+  //:    于是「项」列被挤成单字表头；
+  //:  * 右栏 `值` 写死 140px，`note_publish_single` 这类长值被折成两行（截图实证），
+  //:    而 `备注` 列吃 flex 剩余宽度、17 行全是 `-` —— 空列占走大量空间。
+  //: 判据：**内容决定宽度，空列不占位**。
+  //:  * 类型/编码/标签/值都是**定长内容** ⇒ 给足宽度且 `whiteSpace:nowrap`；
+  //:  * `备注` 几乎全空 ⇒ 没有内容时整列不渲染（不留空列）。
+  const hasAnyRemark = items.some((it) => (it.remark || "").trim() !== "");
+  const typesQ = typesFilter.trim().toLowerCase();
+  const filteredTypes = typesQ
+    ? types.filter(
+        (t) =>
+          t.name.toLowerCase().includes(typesQ) || t.code.toLowerCase().includes(typesQ)
+      )
+    : types;
+
   const typeColumns: ColumnsType<SystemDictType> = [
     {
       title: "类型",
       dataIndex: "name",
+      ellipsis: true,
       render: (v: string, row) => (
         <Space size={4}>
-          <a onClick={() => setActiveId(row.id)}>{v}</a>
-          {row.is_system && <Tag color="gold">内置</Tag>}
+          <a onClick={() => setActiveId(row.id)} title={v}>
+            {v}
+          </a>
+          {row.is_system && (
+            <Tag color="gold" style={{ marginInlineEnd: 0 }}>
+              内置
+            </Tag>
+          )}
         </Space>
       ),
     },
     {
       title: "编码",
       dataIndex: "code",
-      width: 170,
-      render: (v: string) => <Text style={{ fontSize: 12 }}>{v}</Text>,
+      //: 定长内容：按**实测最长编码**定宽（`xhs_violation_punish_status` 27 字符
+      //: ≈ 242px @12px monospace）⇒ 给 250，再长才省略号 + tooltip 兜全。
+      //: 旧值 170 是「挤走相邻列」的直接原因（截图里「项」表头被压成单字）。
+      width: 250,
+      render: (v: string) => (
+        <Text style={{ fontSize: 12, fontFamily: "monospace" }} ellipsis={{ tooltip: v }}>
+          {v}
+        </Text>
+      ),
     },
-    { title: "项", dataIndex: "item_count", width: 50, align: "right" },
+    {
+      title: "项数",
+      dataIndex: "item_count",
+      width: 64,
+      align: "right",
+    },
     {
       title: "",
       key: "ops",
-      width: 90,
+      width: 72,
+      align: "right",
       render: (_: unknown, row) => (
         <Space size={0}>
           {can("system:dict:edit") && (
@@ -174,7 +215,10 @@ export function SystemDictPanel() {
               size="small"
               type="text"
               icon={<EditOutlined />}
-              onClick={() => setTypeModal({ mode: "edit", row })}
+              onClick={(e) => {
+                e.stopPropagation();
+                setTypeModal({ mode: "edit", row });
+              }}
             />
           )}
           {can("system:dict:delete") && !row.is_system && (
@@ -183,7 +227,8 @@ export function SystemDictPanel() {
               type="text"
               danger
               icon={<DeleteOutlined />}
-              onClick={() => {
+              onClick={(e) => {
+                e.stopPropagation();
                 modal.confirm({
                   title: `删除字典类型「${row.name}」？`,
                   content: `将同时删除它的 ${row.item_count} 个字典项（不可恢复）。`,
@@ -204,20 +249,31 @@ export function SystemDictPanel() {
   ];
 
   const itemColumns: ColumnsType<SystemDictItem> = [
-    { title: "标签", dataIndex: "label", width: 160 },
+    { title: "标签", dataIndex: "label", width: 200, ellipsis: true },
     {
       title: "值",
       dataIndex: "value",
-      width: 140,
-      render: (v: string) => <Text code>{v}</Text>,
+      //: ⚠️ 截图的直接病根：140px 装不下 `note_publish_single` ⇒ 折成两行。
+      //: 宽度按**实测最长值**定：`product_note_generate_llm_single` 32 字符
+      //: ≈ 278px @12px monospace ⇒ 给 300，再长才省略号 + tooltip。
+      width: 300,
+      render: (v: string) => (
+        <Text code style={{ whiteSpace: "nowrap" }} ellipsis={{ tooltip: v }}>
+          {v}
+        </Text>
+      ),
     },
     {
       title: "样式",
       dataIndex: "list_class",
-      width: 100,
-      render: (v: string) => <Tag color={v}>{v}</Tag>,
+      width: 110,
+      render: (v: string) => (
+        <Tag color={v} style={{ marginInlineEnd: 0 }}>
+          {v}
+        </Tag>
+      ),
     },
-    { title: "排序", dataIndex: "sort_order", width: 70, align: "right" },
+    { title: "排序", dataIndex: "sort_order", width: 72, align: "right" },
     {
       title: "状态",
       dataIndex: "status",
@@ -225,7 +281,18 @@ export function SystemDictPanel() {
       render: (v: string) =>
         v === "normal" ? <Tag color="success">启用</Tag> : <Tag>停用</Tag>,
     },
-    { title: "备注", dataIndex: "remark", render: (v: string) => v || "-" },
+    //: 备注只在**这一组里有非空值**时才出现 —— 17 行全 `-` 的空列不再吃掉
+    //: 一整列横向空间（用户口径「没有数据占用大量空间」）。
+    ...(hasAnyRemark
+      ? ([
+          {
+            title: "备注",
+            dataIndex: "remark",
+            ellipsis: true,
+            render: (v: string) => v || "-",
+          },
+        ] as ColumnsType<SystemDictItem>)
+      : []),
     {
       title: "操作",
       key: "ops",
@@ -272,14 +339,23 @@ export function SystemDictPanel() {
   return (
     <div style={{ height: "calc(100vh - 87px)", display: "flex", flexDirection: "column" }}>
     <Row gutter={12} style={{ flex: 1, minHeight: 0 }}>
-      <Col span={9} style={{ height: "100%", display: "flex", flexDirection: "column" }}>
+      <Col span={8} style={{ height: "100%", display: "flex", flexDirection: "column" }}>
         <Card
           size="small"
           style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}
-          styles={{ body: { flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" } }}
-          title={`字典类型（${types.length}）`}
+          styles={{ body: { flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden", paddingBottom: 8 } }}
+          title={`字典类型（${filteredTypes.length}${typesQ ? ` / ${types.length}` : ""}）`}
           extra={
-            <Space>
+            <Space size={8}>
+              <Input
+                allowClear
+                size="small"
+                prefix={<SearchOutlined style={{ color: "#bbb" }} />}
+                placeholder="搜类型名 / 编码"
+                value={typesFilter}
+                onChange={(e) => setTypesFilter(e.target.value)}
+                style={{ width: 170 }}
+              />
               <Button
                 size="small"
                 icon={<ReloadOutlined />}
@@ -305,16 +381,18 @@ export function SystemDictPanel() {
             size="small"
             loading={loadingTypes}
             columns={typeColumns}
-            dataSource={types}
+            dataSource={filteredTypes}
             pagination={false}
-            scroll={{ y: "100%" }}
+            //: ⚠️ 横向也给 `max-content`：`编码 200 + 项数 64 + 操作 72` 在小屏
+            //: 可能超过栏宽 ⇒ 表体横向滚动，而不是把列挤成竖排文字。
+            scroll={{ x: "max-content", y: "100%" }}
             rowClassName={(row) => (row.id === activeId ? "ant-table-row-selected" : "")}
             onRow={(row) => ({ onClick: () => setActiveId(row.id) })}
           />
           </div>
         </Card>
       </Col>
-      <Col span={15} style={{ height: "100%", display: "flex", flexDirection: "column" }}>
+      <Col span={16} style={{ height: "100%", display: "flex", flexDirection: "column" }}>
         <Card
           size="small"
           style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}
@@ -353,7 +431,9 @@ export function SystemDictPanel() {
             columns={itemColumns}
             dataSource={items}
             pagination={false}
-            scroll={{ y: "100%" }}
+            //: 右栏同样给横向滚动：标签 200 + 值 260 + 样式 110 + 排序 72 +
+            //: 状态 80 + 备注(flex) + 操作 140 ⇒ 窄屏时不挤压、不折行。
+            scroll={{ x: "max-content", y: "100%" }}
           />
           </div>
         </Card>
