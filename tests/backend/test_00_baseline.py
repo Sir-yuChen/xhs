@@ -9,6 +9,8 @@
     pytest tests/backend/test_00_baseline.py -q
 """
 
+#: 用例预算：6（基座自检，不随功能点增长 —— 骨架就这几条）
+
 from __future__ import annotations
 
 import pytest
