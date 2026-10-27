@@ -514,14 +514,11 @@ export function XhsLibraryPage() {
   const [noteTypeFilter, setNoteTypeFilter] = usePersistedFilter<NoteTypeFilter>(
     FILTER_CACHE_KEYS.library.noteType, "", asEnum(NOTE_TYPE_FILTER_ALL_VALUES)
   );
-  // 挂链商品筛选（设计 13 §25.8）：平台商品 ID。**惰性从 URL 读初值** ——
-  // 挂链笔记弹窗的「在内容库中查看」跳 `/platforms/xhs/library?item_id=…`，
-  // 首屏渲染时就要带上它（放 effect 里 setState 会晚一拍，首条请求已发出）。
-  // `""` = 不筛；位置在筛选区**第二行**（第一行 span 之和已满 24，§25.7.5）。
+  // ⚠️ 挂链商品筛选**已整条移除**（2026-10-27，设计 75 S5）：
+  // 挂链关系改实时查千帆（`item_mix_search_word`），本地 `note_goods` 表已 DROP，
+  // 「内容库按商品筛笔记」没有数据源。查「某商品挂了哪些笔记」请走
+  // **商品列表 → 该商品 → 挂链笔记**（数据来自平台实时，含未同步到本地的笔记）。
   const [searchParams, setSearchParams] = useSearchParams();
-  const [itemIdFilter, setItemIdFilter] = usePersistedFilter(FILTER_CACHE_KEYS.library.itemId, () =>
-    new URLSearchParams(window.location.search).get("item_id") ?? ""
-  );
   // 账号下拉候选：**只列本平台的账号**（`fetchAccounts("xhs")`）。
   // 取不到时留空数组 + 不动筛选值 —— 下拉空是「列表没取到」，不是「筛成 0 条」。
   const [filterAccounts, setFilterAccounts] = useState<PlatformAccount[]>([]);
@@ -574,26 +571,7 @@ export function XhsLibraryPage() {
       publish_status: publishStatusFilter === "all" ? undefined : publishStatusFilter,
       platform_account_id: accountFilter ? Number(accountFilter) : undefined,
       note_type: noteTypeFilter || undefined,
-      item_id: itemIdFilter.trim() || undefined,
     };
-  }
-
-  /**
-   * 改挂链商品筛选时**同步 URL query**（§25.8）：清空 = 从 URL 删掉 `item_id`。
-   *
-   * 为什么必须同步：这个筛选的初值来自 URL（弹窗跳转），只改 state 不改 URL 的话，
-   * 用户手动清空后再刷新页面，跳转带来的 `?item_id=` 会把筛选**加回来** ——
-   * 「我明明清过了」的经典复现。用 `replace` 不留历史戳。
-   */
-  function changeItemIdFilter(value: string) {
-    setItemIdFilter(value);
-    const next = new URLSearchParams(searchParams);
-    if (value.trim()) {
-      next.set("item_id", value.trim());
-    } else {
-      next.delete("item_id");
-    }
-    setSearchParams(next, { replace: true });
   }
 
   async function loadNotes(overrideFilters?: Partial<ReturnType<typeof currentFilters>>) {
@@ -699,12 +677,8 @@ export function XhsLibraryPage() {
    */
   function clearFilters() {
     setKeywordFilter(""); setSelectedTopicFilter(""); setPublishStatusFilter("all");
-    setAccountFilter(""); setNoteTypeFilter(""); setItemIdFilter("");
+    setAccountFilter(""); setNoteTypeFilter("");
     setHasAssetsFilter(false); setHasCommentsFilter(false);
-    // URL 里的 `item_id` 一并删（§25.8）：否则刷新会把跳转来的筛选加回来。
-    const next = new URLSearchParams(searchParams);
-    next.delete("item_id");
-    setSearchParams(next, { replace: true });
     void loadNotes({
       q: undefined,
       topic_id: undefined,
@@ -1671,22 +1645,6 @@ export function XhsLibraryPage() {
             <Space size={16} wrap>
               <Checkbox checked={hasAssetsFilter} onChange={(e) => setHasAssetsFilter(e.target.checked)}>有素材</Checkbox>
               <Checkbox checked={hasCommentsFilter} onChange={(e) => setHasCommentsFilter(e.target.checked)}>有评论</Checkbox>
-              {/*
-                挂链商品筛选（设计 13 §25.8，2026-09-23）：按平台商品 ID 反查
-                「挂了这件商品的笔记」。放在**第二行**而不是第一行 —— 第一行
-                span 之和已满 24（关键词6+账号4+类型4+标签5+状态5），加一项
-                就三行（§25.7.5 两行纪律）。普通输入框而不是下拉：商品有上千个，
-                下拉没有意义；主入口是挂链弹窗的「在内容库中查看」跳转
-                （带 `?item_id=` 直达），手工输入是兜底。
-              */}
-              <Input
-                value={itemIdFilter}
-                onChange={(e) => changeItemIdFilter(e.target.value)}
-                placeholder="挂链商品 ID"
-                allowClear
-                onClear={() => changeItemIdFilter("")}
-                style={{ width: 220 }}
-              />
             </Space>
           </Col>
           <Col>
@@ -1781,15 +1739,6 @@ export function XhsLibraryPage() {
         都是 note_goods 关系表）、怎么退出。没有它，用户看到空列表时无法
         区分「这个商品真没挂笔记」和「筛选条件写错了」。
       */}
-      {itemIdFilter.trim() && (
-        <div style={{ marginBottom: 16 }}>
-          <Tag color="blue" style={{ marginRight: 8 }}>挂链商品 {itemIdFilter.trim()}</Tag>
-          <Text type="secondary" style={{ marginRight: 8 }}>共 {total} 篇</Text>
-          <Button type="link" size="small" style={{ padding: 0 }} onClick={() => changeItemIdFilter("")}>
-            清除该筛选
-          </Button>
-        </div>
-      )}
 
       {/*
         ⚠️ 2026-09-23 用户口径「内容库默认使用卡片，不再支持表格展示笔记」：
@@ -1800,9 +1749,9 @@ export function XhsLibraryPage() {
       */}
       {/* 2026-10-20 统一：等待一律走 `<WaitMask>`。 */}
       {isLoading ? <WaitMask open title="正在加载内容库" /> : notes.length === 0 ? (
-        <Empty description={itemIdFilter.trim() ? "这个商品在内容库里还没有挂链笔记（可能是未同步，也可能确实没挂）" : "内容库还是空的"}>
+        <Empty description="内容库还是空的">
           {/* 「去发现笔记」只对**真的空库**有意义；筛选无结果时它是误导入口 */}
-          {!itemIdFilter.trim() && <Link to="/platforms/xhs/discovery"><Button type="primary" icon={<BookOutlined />}>去发现笔记</Button></Link>}
+          <Link to="/platforms/xhs/discovery"><Button type="primary" icon={<BookOutlined />}>去发现笔记</Button></Link>
         </Empty>
       ) : (
         <Row gutter={[16, 16]}>

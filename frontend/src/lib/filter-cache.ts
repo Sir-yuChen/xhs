@@ -45,7 +45,6 @@ export const FILTER_CACHE_KEYS = {
     publishStatus: "xhs.filters.library.publish-status",
     accountId: "xhs.filters.library.account-id",
     noteType: "xhs.filters.library.note-type",
-    itemId: "xhs.filters.library.item-id",
     hasAssets: "xhs.filters.library.has-assets",
     hasComments: "xhs.filters.library.has-comments",
   },

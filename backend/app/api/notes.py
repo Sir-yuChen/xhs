@@ -630,7 +630,6 @@ def get_notes(
     publish_status: str = "all",
     platform_account_id: Optional[int] = None,
     note_type: Optional[str] = None,
-    item_id: Optional[str] = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     current_user: User = Depends(get_current_user),
@@ -652,12 +651,9 @@ def get_notes(
     * `note_type` ∈ `Note.note_type` 的合法取值（`synced` / `local` / `local_generated`）；
       未知值 → 400 `NOTE_TYPE_UNSUPPORTED`（与 `publish_status` 同口径：白名单 + 支持列表）。
       不传 = 不筛。
-    * `item_id` —— **挂链商品**（平台商品 ID）。走 `note_goods` 子查询
-      （与 `has_assets` 同款形态，不引入 JOIN+GROUP-BY）。**存在性不校验**：
-      `user_id` 那道 where 始终在，别人的 / 不存在的 item_id 只会得到空集，不 404
-      （与 `platform_account_id` 同一理由，设计 13 §25.8）。不传 = 不筛。
-      ⚠️ 2026-09-27（§26.7）：关系表按**平台 ID** 挂 ⇒ 子查询不再 join
-      `shop_products`（台账里没有这件商品时**也能筛出笔记**）。
+    * ~~`item_id`（挂链商品）~~ —— **2026-10-27 移除**（设计 75 S5）：
+      挂链关系改实时查千帆，本地 `note_goods` 表已 DROP，参数整条下线。
+      查「某商品挂了哪些笔记」走商品列表 → 该商品 → 挂链笔记。
 
     2026-09-25：`tag_id` ⇒ `topic_id`（§34.4，标签表并入话题表）—— 走的
     `note_topics` 关系表；归属校验照旧（404 不暴露「存在但无权」）。
@@ -728,28 +724,12 @@ def get_notes(
                 },
             )
         statement = statement.where(Note.note_type == type_key)
-    # 挂链商品筛选（设计 13 §25.8）—— ⚠️ **设计 75 S5 起如实 400**（2026-10-27）。
-    #
-    # 原实现按 `note_goods` 关系表反查「挂了这件商品的笔记」；该表已随迁移
-    # `n8o9p0q1r2s3` 整表 DROP（挂链改实时 `goods-note/list`）。
-    #
-    # 为什么**不**改成本地过滤 + 实时补：本地笔记表里没有可靠的商品维度了，
-    # 只剩实时可按商品查笔记 —— 那是「按商品查笔记」那条路（商品详情弹窗
-    # 「挂链笔记」），不是「内容库按商品筛笔记」。静默忽略这个筛选
-    # 会让用户看到「全量」而以为筛过了（DEF-089 同型），所以给结构化 400。
-    item_key = (item_id or "").strip()
-    if item_key:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": "NOTE_ITEM_FILTER_UNAVAILABLE",
-                "message": (
-                    "按商品筛选笔记已随「挂链改实时」下线：请在商品列表打开该商品的"
-                    "「挂链笔记」查看（数据来自千帆实时，含未同步到本地的笔记）。"
-                ),
-                "item_id": item_key,
-            },
-        )
+    # ⚠️ `item_id`（按商品筛笔记）**参数已整条移除**（2026-10-27，设计 75 S5）。
+    # 挂链关系改实时查千帆（`item_mix_search_word`），本地 `note_goods` /
+    # `shop_note_goods` 两表已随迁移 `n8o9p0q1r2s3` DROP ⇒ 本地没有商品维度可筛。
+    # 查「某商品挂了哪些笔记」走**商品列表 → 该商品 → 挂链笔记**。
+    # 为什么删参数而不是返回 400：参数已不存在，FastAPI 会自动忽略未知 query，
+    # 留一个恒 400 的分支只是死代码（调用点已同批删除）。
     # ------------------------------------------------------------------ #
     # 分页**下推到 SQL**（设计 13 §41.3）：改前是「取全部命中行 → 内存切片」，
     # 真库 3620 篇实测 5774 ms / 16390 条 SQL（只返回 20 条）。
@@ -873,7 +853,6 @@ def get_offline_notes(
     category: Optional[str] = None,
     platform_account_id: Optional[int] = None,
     keyword: Optional[str] = None,
-    item_id: Optional[str] = None,
     note_id: Optional[str] = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),

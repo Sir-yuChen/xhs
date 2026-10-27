@@ -161,8 +161,10 @@ def acquire_lease_and_start_scheduler(app) -> None:
 
 def start_all_watchdogs() -> None:
     """五条常驻看门狗（DEF-069 同型缺口逐一补齐，线程被带走后无人自愈）。"""
-    # 守活（DEF-069）：批量同步 worker —— 真机实测 19 篇跑到 8 篇后线程无声消失。
-    start_sync_worker_watchdog()
+    # ⚠️ 批量同步 worker 的守活**已移除**（2026-10-27，设计 75 S4）：
+    # 同步队列随「笔记改实时查询」整条退场，没有 worker 要看守。
+    # 删这个调用时必须连 `stop_sync_worker_watchdog()` 一起删 —— 只删 import
+    # 会让启动在 `start_all_watchdogs()` 处 NameError（应用起不来，上一轮踩过）。
     # 守活（DEF-069 同型缺口）：发布 worker —— 线程被 SystemExit 带走就永久停摆。
     start_publish_worker_watchdog()
     # 守活（DEF-069 同型）：商品生成 worker（§31.10）—— 一篇三步 + 轮询 ~6–21s。
@@ -205,7 +207,6 @@ def recover_and_wake_workers() -> None:
 def shutdown_all(app) -> None:
     """退出清理（幂等）：停看门狗 → 停调度器 → 释放租约。"""
     stop_publish_worker_watchdog()
-    stop_sync_worker_watchdog()
     stop_generate_worker_watchdog()
     stop_llm_generate_worker_watchdog()
     stop_account_task_watchdog()

@@ -3860,27 +3860,11 @@ export function XhsShopItemsPage() {
           {/* 2026-09-23 上机口径：顶部那条「本地已映射 1937/1960 条商品笔记 ——
               反查走笔记↔商品关系表…」说明**整块移除**（弹窗里只要笔记本体）。
               覆盖率与口径解释留在列表页「挂链笔记」列的 Tooltip 里，不在这里重复。 */}
-          {/*
-            「在内容库中查看」（设计 13 §25.8）：这个弹窗证明「该商品有 N 篇
-            挂链笔记」，但内容库 1964 条按时间倒排、老笔记排在第几百位，
-            关键词也未必对得上（用户两次报告「内容库里少一篇」都是这个原因）。
-            跳转带 `?item_id=` 直达内容库的挂链商品筛选视图 —— 从商品到
-            「该商品的笔记」不再靠碰运气。先关弹窗再跳（路由切换不会自动关它）。
-          */}
-          {!notesLoading && notesData && notesData.notes.length > 0 && notesItem && (
-            <div style={{ marginBottom: 12, textAlign: "right" }}>
-              <Button
-                size="small"
-                icon={<DatabaseOutlined />}
-                onClick={() => {
-                  setNotesOpen(false);
-                  navigate(`/platforms/xhs/library?item_id=${encodeURIComponent(notesItem.item_id)}`);
-                }}
-              >
-                在内容库中查看（{notesData.count} 篇）
-              </Button>
-            </div>
-          )}
+          {/* ⚠️「在内容库中查看」按钮**已移除**（2026-10-27，设计 75 S5）：
+              它跳的是内容库的 `?item_id=` 挂链商品筛选，而该筛选随
+              「挂链改实时」整条下线（本地 `note_goods` 表已 DROP）。
+              本弹窗自己就是「该商品的挂链笔记」的完整答案（数据来自千帆实时，
+              含未同步到本地的笔记），跳去内容库反而是降级。 */}
           {notesLoading ? (
             <div style={{ padding: "48px 0", textAlign: "center" }}>
               <Spin />
