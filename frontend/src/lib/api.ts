@@ -1,6 +1,7 @@
 import axios from "axios";
 import { message } from "antd";
 
+
 import type { CleanResultShape } from "./task-records";
 import type {
   ItemDraftCategory,
@@ -430,34 +431,11 @@ export async function fetchAccountsPage(
   return response.data;
 }
 
-/**
- * 同步范围（设计 13 §23，2026-09-22 用户口径：弹窗自选「全量 / 时间区间」）。
- * 与后端 `sync_task_service.normalize_scope` 同口径。
+/*
+ * ⚠️ **`SyncScope` / `SyncNotesOptions` 已删除**（设计 75 §4.5，2026-10-27）：
+ * 它们只服务于「同步笔记 / 同步商品笔记 / 同步商品」三个退场端点的请求体。
+ * 账号卡与商品列表都已无同步入口（后端三条端点均为 410 墓碑）。
  */
-export type SyncScope = "full" | "range";
-
-/** 同步笔记的可选参数（弹窗选择 + 调试用小批量）。 */
-export interface SyncNotesOptions {
-  /** 调试/测试用：显式限制页数。**不传 = 全量**（§21）。 */
-  maxPages?: number;
-  scope?: SyncScope;
-  /**
-   * **同步模式**（设计 13 §22 / §35.15，2026-09-27）。
-   *
-   * `full` = 真重扫整个列表（翻到平台没有下一页）；不传 = 后端 `auto`
-   * （**有同步游标即增量**）。
-   *
-   * 为什么必须能显式传：`scope` 与 `mode` 是**正交**的两件事 —— `scope=full`
-   * 只说「不设时间界」，模式仍由游标决定。用户点「全量同步」却不传 `mode=full`
-   * 时，有同步历史的账号照样走增量、第 1 页就增量早停（§35.15.1 实测：同步
-   * 「成功」但一条都没补），「全量」这个选项名不副实。
-   */
-  mode?: "full" | "incremental";
-  /** `YYYY-MM-DD`；`scope=range` 时生效。 */
-  startDate?: string;
-  /** `YYYY-MM-DD`；`scope=range` 时生效（含当天一整天）。 */
-  endDate?: string;
-}
 
 export type SavedNoteFilters = {
   platform?: string;
@@ -1336,72 +1314,6 @@ export async function bindXhsQianfanShop(
   return response.data;
 }
 
-/**
- * 触发**店铺商品本体**同步（M1.9 / §19，落 `shop_products` 表）。
- *
- * ⚠️ **v1.32 起它就是商品列表的唯一数据来源**（设计 13 §30.3）：`/items` 改读
- * 本地台账，本任务负责「翻页落库 + SKU 规格详情内联补齐 + 字段补足回填」。
- * （原 `syncXhsQianfanGoods` → `/sync-goods` 的「笔记↔商品映射」入口已移除，
- * 映射改由笔记同步 ark 源 + 我的笔记页按需补齐维护。）
- *
- * 账号未绑定千帆 → 400 `QIANFAN_BINDING_REQUIRED`（由卡片原因行展示，不弹全局提示）。
- * 完成语义：只有翻完才算完整，半途而废**一行旧数据都不删**。
- *
- * 2026-09-23 重构：每页列表商品的 SKU 规格详情在落库前拉取（批量 10），
- * 列表数据 + 规格详情一次性 upsert——列表翻完 = 详情也全了，不再有多轮补齐队列。
- *
- * **语义（§35.17）**：手动触发定时任务 `system.shop_goods_sync` 的「执行一次」——
- * 任务行给账号卡轮询，`scheduled_job_logs` 给任务中心「任务日志」；已有任务在跑时
- * `reused: true` 且 `log_id` 为 `null`。
- */
-export async function syncShopGoods(payload: {
-  platformAccountId: number;
-  maxPages?: number;
-  /** §23：同步范围（弹窗选择）。不传 = 后端默认 full。 */
-  scope?: SyncScope;
-  startDate?: string;
-  endDate?: string;
-  /**
-   * 商品状态范围（设计 13 §30.3.2，2026-10-02）。
-   *
-   * 不传 = 后端默认 `all`（**同步全部状态**：售卖中 / 已下架 / 已冻结 / 整改 /
-   * 审核中 / 审核驳回 / 审核通过）。传某个状态键则只同步那一种。
-   */
-  itemStatus?: XhsShopItemStatus;
-}): Promise<XhsSyncTriggerResult> {
-  const response = await http.post<XhsSyncTriggerResult>(
-    "/xhs/qianfan/sync-shop-goods",
-    {
-      platform_account_id: payload.platformAccountId,
-      // ⚠️ **不传 `max_pages` = 全量**（设计 13 §21）。旧的 `?? 3` 会让商品
-      // 永远只同步前 150 件；不要再写回默认值。
-      ...(payload.maxPages ? { max_pages: payload.maxPages } : {}),
-      ...(payload.scope ? { scope: payload.scope } : {}),
-      ...(payload.startDate ? { start_date: payload.startDate } : {}),
-      ...(payload.endDate ? { end_date: payload.endDate } : {}),
-      ...(payload.itemStatus ? { item_status: payload.itemStatus } : {}),
-    },
-    { _silent: true } as never
-  );
-  return response.data;
-}
-
-/**
- * ⚠️ **独立对账入口已移除**（2026-09-22，设计 13 §27，用户口径「数据对账功能融合到
- * 同步笔记和同步商品中」）：原 `reconcileAccountNotes` / `reconcileShopGoods` 与
- * `ReconcileReport`（§24 的报告/修正两段式）随端点一起拆除 —— 对账现在由每次同步
- * 在**本次同步范围内**自动完成（标记「三方不存在」+ 自愈），结果写在同步任务行的
- * `note` 里（账号卡片结果行可见）。此处仅留指针，不保留旧函数。
- */
-
-/** 店铺商品同步的进度查询。 */
-export async function syncShopGoodsStatus(platformAccountId: number): Promise<XhsSyncTaskStatus> {
-  const response = await http.get<XhsSyncTaskStatus>("/xhs/qianfan/sync-shop-goods/status", {
-    params: { platform_account_id: platformAccountId },
-    _silent: true,
-  } as never);
-  return response.data;
-}
 
 // --------------------------------------------------------------------------- #
 // 「我的笔记」离线数据（2026-10-06 需求）：商业/普通 Tab 查本地库 + 导入 xlsx。
@@ -3910,206 +3822,35 @@ export async function deleteAccount(accountId: number): Promise<{ id: number; st
   return response.data;
 }
 
-// ---------------------------------------------------------------------------
-// M1.9 账号矩阵同步：笔记同步 / 店铺商品同步（设计源：设计 13 §4 + §6.3）
-//
-// 两个同步都是**异步任务**：触发端点立即返回任务摄要，真正干活在后台线程里
-// （有界翻页 + 按账号限流 + 页间停顿）。所以每个动作都是「触发 + 轮询状态」一对。
-//
-// 字段名一律照抄后端 `services/sync_task_service.py` 的
-// `task_summary()` / `status_payload()`，前端**不另起一套命名** ——
-// 这套形状是触发端点与状态端点共用的，抄错一个字段不会报错，只会静默少显示。
-// ---------------------------------------------------------------------------
-
-/** 同步进度。`total` 是平台总数，**取不到时为 `null`**（渲染 `-`，不是 `0`）。 */
-export interface XhsSyncProgress {
-  stored: number;
-  /**
-   * 进度分母（设计 13 §35.18.6）：**只在「无界全量」时才有值** —— 增量 / 时间区间
-   * 同步会早停，`stored` 追不上账号总量，后端**不写这个键** ⇒ `null` 表示
-   * 「比例未知」，**不是**「0%」（缺值口径）。
-   */
-  total: number | null;
-  /** §35.18：收尾「账号级详情补齐」阶段的分子 / 分母（只在进入该阶段后才有值）。 */
-  detail_done?: number | null;
-  detail_total?: number | null;
-}
-
-/** 触发端点与状态端点共用的部分（后端 `task_summary`）。 */
-export interface XhsSyncTaskSummary {
-  /** 无进行中任务时为 `null`（`status: "idle"`）—— 前端据此停轮询。 */
-  task_id: number | null;
-  task_type: string | null;
-  status: string;
-  progress: XhsSyncProgress | null;
-  note: string;
-  /**
-   * §23：**实际生效的同步范围**（如「按时间区间同步：2026-09-01 ~ 2026-09-10」）。
-   * 只在用户选了时间区间时出现 —— 区间没解析出来时这里是「已按全量同步」，
-   * 用户必须知道，否则会以为只同步了一个时间段。
-   */
-  scope_note?: string;
-  /**
-   * §24.8：起止时间与耗时（后端算好，前端只格式化）。无任务时三个都是 `null`。
-   * `duration_ms` = finished_at - started_at；任一端缺值 ⇒ `null`（不造 0）。
-   */
-  started_at?: string | null;
-  finished_at?: string | null;
-  duration_ms?: number | null;
-}
-
-/** 单个笔记源的同步结果（§19.3：后端任务 payload 的 `sources[]`）。 */
-export interface XhsSyncSourceResult {
-  /** `www` / `creator` / `ark`。 */
-  source: string;
-  stored: number;
-  total: number | null;
-  /** 该源的失败原因（成功为空串）。 */
-  error: string;
-  /**
-   * 该源是否**被限流中断**（§19.11 真机教训：千帆显示「0 条」实际第 1 页前
-   * 就被挡了）。`stored: 0` + `limited: true` = 没跑完，**不是**没数据。
-   */
-  limited?: boolean;
-}
-
-/** 最近一次已完成任务的结果（后端 `last_result`）。 */
-export interface XhsSyncLastResult {
-  /** 这一条对应的任务号（§35.17.4：账号卡「同步任务」区块要显示 `任务 #N`）。 */
-  task_id?: number | null;
-  status: string;
-  progress: XhsSyncProgress | null;
-  /** 本次顺带落库的挂载商品数（只有笔记同步会填）。 */
-  goods_stored: number | null;
-  note: string;
-  error: string;
-  finished_at: string | null;
-  /** §24.8：起止时间与耗时（`latest_finished_task` 含 `cancelled` 终态）。 */
-  started_at?: string | null;
-  duration_ms?: number | null;
-  /** 笔记同步的分源明细（§19；商品同步为 `[]`）。 */
-  sources?: XhsSyncSourceResult[];
-  /** 商品同步本轮补详情的商品数（内联补齐，不再有多轮队列）。 */
-  detail_done?: number | null;
-  /** 商品同步全店还剩多少商品没详情（增量同步可能只覆盖新商品；`null` = 不知道，显示 `-`）。 */
-  detail_total?: number | null;
-}
-
-/** 状态端点响应（后端 `status_payload`）。 */
-export interface XhsSyncTaskStatus extends XhsSyncTaskSummary {
-  last_result: XhsSyncLastResult | null;
-}
-
 /**
- * 账号卡同步按钮的触发响应（设计 13 §35.17，2026-09-27 用户口径）。
+ * 启用 / 停用账号。
  *
- * = **任务摄要**（与状态端点同一形状，前端不用记两套字段）+ 本次点击在
- * `scheduled_job_logs` 留下的行号。
- *
- * `log_id` 为 `null` = **本次没有记日志**：该账号已有任务在跑（`reused`），
- * 没有新执行就没有新日志 —— 同一个任务行记两次账会让任务中心的执行次数翻倍。
+ * 停用只影响任务派发，不删数据、不吊销令牌。后端只改 `disabled`，不碰 `status`。
  */
-export interface XhsSyncTriggerResult extends XhsSyncTaskSummary {
-  log_id: number | null;
-  /** `true` = 该账号已有任务在跑，返回的是**已有任务**的摄要，本次未触发新执行。 */
-  reused?: boolean;
-}
-
-/**
- * 触发笔记同步（**所有账号**都用这个）。
- *
- * `profileUrl` 只有 **PC 账号**需要：`user_posted` 要的是 URL 级 `xsec_token`，
- * 而账号 Cookie 拿不到它（设计 13 §4.1 与 §6.1.1）—— PC 账号不传就必定
- * `XSEC_TOKEN_REQUIRED`。Creator 账号传空串即可。
- *
- * **语义（§35.17）**：手动触发定时任务 `system.note_sync` 的「执行一次」——
- * 任务行给账号卡轮询，`scheduled_job_logs` 给任务中心「任务日志」。
- *
- * **防重**：该账号已有未完成的同步任务 → 后端返回**同一个 `task_id`** 且 `reused: true`，
- * 不新建任务、不重复打平台，`log_id` 为 `null`。
- *
- * `_silent`：失败原因要显示在卡片里（`readErrorDetail`），不弹全局 toast。
- */
-export async function syncAccountNotes(
+export async function setAccountDisabled(
   accountId: number,
-  options: SyncNotesOptions = {}
-): Promise<XhsSyncTriggerResult> {
-  return postNoteSync(`${accountId}/notes/sync`, options);
-}
-
-/**
- * 触发**商品笔记**同步（**§44**，2026-09-30 用户拍板拆分）。
- *
- * **语义**：手动触发定时任务 `system.goods_note_sync` 的「执行一次」——
- * 走千帆 `goods-note/list` 的挂链笔记（落 `notes` + `note_goods`），
- * 与「同步笔记」（creator 列表）/「同步商品」（店铺商品台账）**都不是同一条链路**。
- *
- * 请求体与响应形状与 `syncAccountNotes` **逐字一致**（后端两条端点共用同一个
- * 建行 / 记日志实现）⇒ 请求体拼装走同一个 `postNoteSync`，不写第二份（DEF-044）。
- *
- * **防重**：该账号已有未完成的**商品笔记**任务 → 返回同一个 `task_id` 且
- * `reused: true`。⚠️ 与普通笔记**各自成立** —— 普通笔记在跑不阻塞本按钮。
- */
-export async function syncGoodsNotes(
-  accountId: number,
-  options: SyncNotesOptions = {}
-): Promise<XhsSyncTriggerResult> {
-  return postNoteSync(`${accountId}/goods-notes/sync`, options);
-}
-
-/**
- * 笔记同步触发请求体的**唯一实现**（普通笔记 / 商品笔记共用，§44）。
- *
- * 两条端点（`…/notes/sync` 与 `…/goods-notes/sync`）的入参语义完全相同，差别只在路径
- * ⇒ 请求体必须只拼一次：写两份必然在其中一份上漂移（§35.15 就是漏了 `mode`）。
- */
-async function postNoteSync(
-  path: string,
-  options: SyncNotesOptions
-): Promise<XhsSyncTriggerResult> {
-  const response = await http.post<XhsSyncTriggerResult>(
-    `/accounts/${path}`,
-    {
-      // ⚠️ **不传 `max_pages` = 全量**（设计 13 §21，2026-09-22 用户口径：
-      // 「不要设置翻页上限，应为全量同步」）。旧的 `?? 3` 正是「1961 条的账号
-      // 永远只同步 180 条」的直接入口 —— 不要再写回默认值。
-      // `maxPages` 只留给调试/测试显式小批量。
-      ...(options.maxPages ? { max_pages: options.maxPages } : {}),
-      // §23：用户在弹窗里选的同步范围。不传 = 后端默认 full（不设时间界）。
-      ...(options.scope ? { scope: options.scope } : {}),
-      // §35.15：**模式**要单独传 —— 弹窗选「全量同步」时必须带 `mode: "full"`，
-      // 否则后端按游标判 auto=增量，第 1 页就早停（scope=full 管不到模式）。
-      ...(options.mode ? { mode: options.mode } : {}),
-      ...(options.startDate ? { start_date: options.startDate } : {}),
-      ...(options.endDate ? { end_date: options.endDate } : {}),
-    },
-    { _silent: true } as never
+  disabled: boolean,
+): Promise<PlatformAccount & { changed: boolean }> {
+  const response = await http.post<PlatformAccount & { changed: boolean }>(
+    `/accounts/${accountId}/disabled`,
+    { disabled },
   );
   return response.data;
 }
 
-/** 笔记同步的进度查询（前端每 5 秒轮询，设计 13 §6.2）。 */
-export async function syncAccountNotesStatus(accountId: number): Promise<XhsSyncTaskStatus> {
-  const response = await http.get<XhsSyncTaskStatus>(`/accounts/${accountId}/notes/sync/status`, {
-    _silent: true,
-  } as never);
-  return response.data;
-}
-
-/**
- * **商品笔记**同步的进度查询（§44，前端每 5 秒轮询）。
- *
- * 与 `syncAccountNotesStatus` 逐字同构，只换路径。⚠️ 两条链路的状态**互相独立**
- * （后端各有一条任务类型与一条定时任务日志流）⇒ 普通笔记在跑不会影响本按钮的
- * 「同步中」态，反之亦然。
- */
-export async function syncGoodsNotesStatus(accountId: number): Promise<XhsSyncTaskStatus> {
-  const response = await http.get<XhsSyncTaskStatus>(
-    `/accounts/${accountId}/goods-notes/sync/status`,
-    { _silent: true } as never
-  );
-  return response.data;
-}
+// ---------------------------------------------------------------------------
+// M1.9 账号矩阵同步 —— **整块退场**（设计 75 §4.5，2026-10-27）
+//
+// 用户口径（2026-10-26）：「同步商品和同步笔记任务全链路移除」。账号卡的「同步笔记」
+// 「同步商品笔记」两个按钮已删，后端四条端点（触发 2 + 状态查询 2）全部 410 墓碑。
+//
+// 随之删除：`XhsSyncProgress` / `XhsSyncTaskSummary` / `XhsSyncSourceResult` /
+// `XhsSyncLastResult` / `XhsSyncTaskStatus` / `XhsSyncTriggerResult` 六个类型（只服务
+// 这一对「触发 + 轮询」端点），以及 `syncAccountNotes` / `syncGoodsNotes` /
+// `postNoteSync` / `syncAccountNotesStatus` / `syncGoodsNotesStatus` 五个函数。
+//
+// ⚠️ 笔记改为**实时查询平台**（列表 / 详情直接读），不存在「同步回本地」这个动作。
+// ---------------------------------------------------------------------------
 
 export async function createXhsPcQrLoginSession(payload?: {
   sync_creator?: boolean;

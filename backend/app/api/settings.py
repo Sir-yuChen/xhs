@@ -144,21 +144,21 @@ def _resolve_scope(
 def _wake_runtime_consumers(key: str) -> None:
     """配置改了 ⇒ 让**读点方**立刻对齐（设计 10 §7.4 的「写后立即生效」后半段）。
 
-    缓存已经在 `settings_service` 的写路径里失效了；这里补的是**结构型**读点：
-    同步 worker 池的**线程条数**是按配置起的，配置从 1 改成 3 时，
-    光失效缓存不会凭空多出两条线程 —— 得显式让它对齐一次。
+    缓存已经在 `settings_service` 的写路径里失效了；这里补的是**结构型**读点。
 
-    ⚠️ 失败只记 warning：配置**已经落库**了（用户的操作成功），唤醒失败只是「晚一点
-    由看门狗对齐」，不该把一个已成功的写操作报成失败。
+    ⚠️ **`xhs_sync_account_parallelism` 已不再是结构型读点**（设计 75 §4.5，2026-10-27）：
+    它原先把「同步 worker 池的线程条数」按配置起，配置从 1 改成 3 时要显式多起两条线程。
+    但账号笔记同步链路整块退场后**没有同步 worker 池**了 —— 现在这个键的唯一消费者是
+    登录态探活（`login_state_service._probe_parallelism`），它**每次调用现读配置**
+    （`settings_service.live_int_process`，缓存已在写路径失效）⇒ 下一次探活自动用新值，
+    不需要任何唤醒动作。
+
+    ⚠️ 所以本函数**现在是空操作**：留着它是为了不再有「改配置后还要手动点什么」的错觉，
+    也是将来真有结构型读点时唯一该改的地方。曾在这里 `from note_sync_service import
+    ensure_sync_worker` —— 那个名字随同步引擎一起删了，留着会让保存配置直接 ImportError
+    （S5 漏删的真 bug，已修）。
     """
-    if key != "xhs_sync_account_parallelism":
-        return
-    try:
-        from backend.app.services.note_sync_service import ensure_sync_worker
-
-        ensure_sync_worker()
-    except Exception:  # noqa: BLE001 - 唤醒失败不影响配置已生效这件事
-        logger.warning("settings: 配置 %s 已保存，但唤醒同步 worker 池失败", key, exc_info=True)
+    return
 
 
 @router.get("", response_model=SettingListResponse)

@@ -3,9 +3,9 @@
   "version": 2,
   "counts": {
     "M": 11,
-    "C": 39,
+    "C": 33,
     "F": 137,
-    "total": 187
+    "total": 181
   },
   "menus": [
     {
@@ -217,11 +217,37 @@
       "parent_seq": 10
     },
     {
-      "_seq": 19,
-      "name": "TMPA",
+      "_seq": 17,
+      "name": "创作者登录",
       "menu_type": "F",
       "path": "",
-      "perms": "xhs:account:TMPA",
+      "perms": "xhs:login:creator",
+      "icon": "",
+      "workspace": "",
+      "sort_order": 5,
+      "is_visible": true,
+      "status": "normal",
+      "parent_seq": 10
+    },
+    {
+      "_seq": 18,
+      "name": "网页版登录",
+      "menu_type": "F",
+      "path": "",
+      "perms": "xhs:login:pc",
+      "icon": "",
+      "workspace": "",
+      "sort_order": 6,
+      "is_visible": true,
+      "status": "normal",
+      "parent_seq": 10
+    },
+    {
+      "_seq": 19,
+      "name": "千帆登录",
+      "menu_type": "F",
+      "path": "",
+      "perms": "xhs:login:qianfan",
       "icon": "",
       "workspace": "",
       "sort_order": 7,
@@ -231,71 +257,6 @@
     },
     {
       "_seq": 20,
-      "name": "TMPB",
-      "menu_type": "F",
-      "path": "",
-      "perms": "xhs:account:TMPB",
-      "icon": "",
-      "workspace": "",
-      "sort_order": 8,
-      "is_visible": true,
-      "status": "normal",
-      "parent_seq": 10
-    },
-    {
-      "_seq": 21,
-      "name": "TMPC",
-      "menu_type": "F",
-      "path": "",
-      "perms": "xhs:account:TMPC",
-      "icon": "",
-      "workspace": "",
-      "sort_order": 9,
-      "is_visible": true,
-      "status": "normal",
-      "parent_seq": 10
-    },
-    {
-      "_seq": 22,
-      "name": "创作者登录",
-      "menu_type": "F",
-      "path": "",
-      "perms": "xhs:login:creator",
-      "icon": "",
-      "workspace": "",
-      "sort_order": 10,
-      "is_visible": true,
-      "status": "normal",
-      "parent_seq": 10
-    },
-    {
-      "_seq": 23,
-      "name": "网页版登录",
-      "menu_type": "F",
-      "path": "",
-      "perms": "xhs:login:pc",
-      "icon": "",
-      "workspace": "",
-      "sort_order": 11,
-      "is_visible": true,
-      "status": "normal",
-      "parent_seq": 10
-    },
-    {
-      "_seq": 24,
-      "name": "千帆登录",
-      "menu_type": "F",
-      "path": "",
-      "perms": "xhs:login:qianfan",
-      "icon": "",
-      "workspace": "",
-      "sort_order": 12,
-      "is_visible": true,
-      "status": "normal",
-      "parent_seq": 10
-    },
-    {
-      "_seq": 25,
       "name": "监控中心",
       "menu_type": "C",
       "path": "/platforms/xhs/monitoring",
@@ -308,7 +269,7 @@
       "parent_seq": 9
     },
     {
-      "_seq": 26,
+      "_seq": 21,
       "name": "新建监控",
       "menu_type": "F",
       "path": "",
@@ -318,10 +279,10 @@
       "sort_order": 0,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 25
+      "parent_seq": 20
     },
     {
-      "_seq": 27,
+      "_seq": 22,
       "name": "编辑监控",
       "menu_type": "F",
       "path": "",
@@ -331,10 +292,10 @@
       "sort_order": 1,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 25
+      "parent_seq": 20
     },
     {
-      "_seq": 28,
+      "_seq": 23,
       "name": "删除监控",
       "menu_type": "F",
       "path": "",
@@ -344,10 +305,10 @@
       "sort_order": 2,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 25
+      "parent_seq": 20
     },
     {
-      "_seq": 29,
+      "_seq": 24,
       "name": "立即刷新",
       "menu_type": "F",
       "path": "",
@@ -357,10 +318,10 @@
       "sort_order": 3,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 25
+      "parent_seq": 20
     },
     {
-      "_seq": 30,
+      "_seq": 25,
       "name": "启用监控",
       "menu_type": "F",
       "path": "",
@@ -370,10 +331,10 @@
       "sort_order": 4,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 25
+      "parent_seq": 20
     },
     {
-      "_seq": 31,
+      "_seq": 26,
       "name": "自动运营",
       "menu_type": "C",
       "path": "/platforms/xhs/auto-ops",
@@ -386,7 +347,7 @@
       "parent_seq": 9
     },
     {
-      "_seq": 32,
+      "_seq": 27,
       "name": "新建任务",
       "menu_type": "F",
       "path": "",
@@ -396,10 +357,10 @@
       "sort_order": 0,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 31
+      "parent_seq": 26
     },
     {
-      "_seq": 33,
+      "_seq": 28,
       "name": "编辑任务",
       "menu_type": "F",
       "path": "",
@@ -409,10 +370,10 @@
       "sort_order": 1,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 31
+      "parent_seq": 26
     },
     {
-      "_seq": 34,
+      "_seq": 29,
       "name": "删除任务",
       "menu_type": "F",
       "path": "",
@@ -422,10 +383,10 @@
       "sort_order": 2,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 31
+      "parent_seq": 26
     },
     {
-      "_seq": 35,
+      "_seq": 30,
       "name": "立即执行",
       "menu_type": "F",
       "path": "",
@@ -435,10 +396,10 @@
       "sort_order": 3,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 31
+      "parent_seq": 26
     },
     {
-      "_seq": 36,
+      "_seq": 31,
       "name": "启用任务",
       "menu_type": "F",
       "path": "",
@@ -448,10 +409,10 @@
       "sort_order": 4,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 31
+      "parent_seq": 26
     },
     {
-      "_seq": 37,
+      "_seq": 32,
       "name": "内容线",
       "menu_type": "M",
       "path": "",
@@ -464,7 +425,7 @@
       "parent_seq": 1
     },
     {
-      "_seq": 38,
+      "_seq": 33,
       "name": "笔记发现",
       "menu_type": "C",
       "path": "/platforms/xhs/discovery",
@@ -474,10 +435,10 @@
       "sort_order": 0,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 37
+      "parent_seq": 32
     },
     {
-      "_seq": 39,
+      "_seq": 34,
       "name": "提交抓取",
       "menu_type": "F",
       "path": "",
@@ -487,10 +448,10 @@
       "sort_order": 0,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 38
+      "parent_seq": 33
     },
     {
-      "_seq": 40,
+      "_seq": 35,
       "name": "我的笔记",
       "menu_type": "C",
       "path": "/platforms/xhs/my-notes",
@@ -500,10 +461,36 @@
       "sort_order": 1,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 37
+      "parent_seq": 32
     },
     {
-      "_seq": 43,
+      "_seq": 36,
+      "name": "同步笔记",
+      "menu_type": "F",
+      "path": "",
+      "perms": "xhs:note:sync",
+      "icon": "",
+      "workspace": "",
+      "sort_order": 0,
+      "is_visible": true,
+      "status": "normal",
+      "parent_seq": 35
+    },
+    {
+      "_seq": 37,
+      "name": "批量同步",
+      "menu_type": "F",
+      "path": "",
+      "perms": "xhs:note:batchSync",
+      "icon": "",
+      "workspace": "",
+      "sort_order": 1,
+      "is_visible": true,
+      "status": "normal",
+      "parent_seq": 35
+    },
+    {
+      "_seq": 38,
       "name": "新建笔记",
       "menu_type": "F",
       "path": "",
@@ -513,10 +500,10 @@
       "sort_order": 2,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 40
+      "parent_seq": 35
     },
     {
-      "_seq": 44,
+      "_seq": 39,
       "name": "编辑笔记",
       "menu_type": "F",
       "path": "",
@@ -526,10 +513,10 @@
       "sort_order": 3,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 40
+      "parent_seq": 35
     },
     {
-      "_seq": 45,
+      "_seq": 40,
       "name": "删除笔记",
       "menu_type": "F",
       "path": "",
@@ -539,10 +526,10 @@
       "sort_order": 4,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 40
+      "parent_seq": 35
     },
     {
-      "_seq": 46,
+      "_seq": 41,
       "name": "内容库",
       "menu_type": "C",
       "path": "/platforms/xhs/library",
@@ -552,10 +539,10 @@
       "sort_order": 2,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 37
+      "parent_seq": 32
     },
     {
-      "_seq": 47,
+      "_seq": 42,
       "name": "保存",
       "menu_type": "F",
       "path": "",
@@ -565,10 +552,10 @@
       "sort_order": 0,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 46
+      "parent_seq": 41
     },
     {
-      "_seq": 48,
+      "_seq": 43,
       "name": "删除",
       "menu_type": "F",
       "path": "",
@@ -578,10 +565,10 @@
       "sort_order": 1,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 46
+      "parent_seq": 41
     },
     {
-      "_seq": 49,
+      "_seq": 44,
       "name": "批量建草稿",
       "menu_type": "F",
       "path": "",
@@ -591,10 +578,10 @@
       "sort_order": 2,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 46
+      "parent_seq": 41
     },
     {
-      "_seq": 50,
+      "_seq": 45,
       "name": "导入数据",
       "menu_type": "F",
       "path": "",
@@ -604,10 +591,23 @@
       "sort_order": 3,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 46
+      "parent_seq": 41
     },
     {
-      "_seq": 52,
+      "_seq": 46,
+      "name": "同步数据",
+      "menu_type": "F",
+      "path": "",
+      "perms": "xhs:library:syncData",
+      "icon": "",
+      "workspace": "",
+      "sort_order": 4,
+      "is_visible": true,
+      "status": "normal",
+      "parent_seq": 41
+    },
+    {
+      "_seq": 47,
       "name": "导出笔记",
       "menu_type": "F",
       "path": "",
@@ -617,10 +617,10 @@
       "sort_order": 5,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 46
+      "parent_seq": 41
     },
     {
-      "_seq": 53,
+      "_seq": 48,
       "name": "笔记工坊",
       "menu_type": "C",
       "path": "/platforms/xhs/note-workshop",
@@ -630,10 +630,10 @@
       "sort_order": 3,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 37
+      "parent_seq": 32
     },
     {
-      "_seq": 54,
+      "_seq": 49,
       "name": "生成笔记",
       "menu_type": "F",
       "path": "",
@@ -643,10 +643,10 @@
       "sort_order": 0,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 53
+      "parent_seq": 48
     },
     {
-      "_seq": 55,
+      "_seq": 50,
       "name": "重新生成",
       "menu_type": "F",
       "path": "",
@@ -656,10 +656,10 @@
       "sort_order": 1,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 53
+      "parent_seq": 48
     },
     {
-      "_seq": 56,
+      "_seq": 51,
       "name": "采用版本",
       "menu_type": "F",
       "path": "",
@@ -669,10 +669,10 @@
       "sort_order": 2,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 53
+      "parent_seq": 48
     },
     {
-      "_seq": 57,
+      "_seq": 52,
       "name": "新建文件夹",
       "menu_type": "F",
       "path": "",
@@ -682,10 +682,10 @@
       "sort_order": 3,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 53
+      "parent_seq": 48
     },
     {
-      "_seq": 58,
+      "_seq": 53,
       "name": "编辑文件夹",
       "menu_type": "F",
       "path": "",
@@ -695,10 +695,10 @@
       "sort_order": 4,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 53
+      "parent_seq": 48
     },
     {
-      "_seq": 59,
+      "_seq": 54,
       "name": "删除文件夹",
       "menu_type": "F",
       "path": "",
@@ -708,10 +708,10 @@
       "sort_order": 5,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 53
+      "parent_seq": 48
     },
     {
-      "_seq": 60,
+      "_seq": 55,
       "name": "扫描素材",
       "menu_type": "F",
       "path": "",
@@ -721,10 +721,10 @@
       "sort_order": 6,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 53
+      "parent_seq": 48
     },
     {
-      "_seq": 61,
+      "_seq": 56,
       "name": "新建提示词",
       "menu_type": "F",
       "path": "",
@@ -734,10 +734,10 @@
       "sort_order": 7,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 53
+      "parent_seq": 48
     },
     {
-      "_seq": 62,
+      "_seq": 57,
       "name": "编辑提示词",
       "menu_type": "F",
       "path": "",
@@ -747,10 +747,10 @@
       "sort_order": 8,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 53
+      "parent_seq": 48
     },
     {
-      "_seq": 63,
+      "_seq": 58,
       "name": "删除提示词",
       "menu_type": "F",
       "path": "",
@@ -760,10 +760,10 @@
       "sort_order": 9,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 53
+      "parent_seq": 48
     },
     {
-      "_seq": 64,
+      "_seq": 59,
       "name": "生成",
       "menu_type": "F",
       "path": "",
@@ -773,88 +773,10 @@
       "sort_order": 10,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 53
+      "parent_seq": 48
     },
     {
-      "_seq": 65,
-      "name": "图片工坊",
-      "menu_type": "C",
-      "path": "/platforms/xhs/note-workshop?tab=images",
-      "perms": "",
-      "icon": "appstore",
-      "workspace": "xhs",
-      "sort_order": 0,
-      "is_visible": true,
-      "status": "normal",
-      "parent_seq": 53
-    },
-    {
-      "_seq": 66,
-      "name": "视频工坊",
-      "menu_type": "C",
-      "path": "/platforms/xhs/note-workshop?tab=videos",
-      "perms": "",
-      "icon": "appstore",
-      "workspace": "xhs",
-      "sort_order": 1,
-      "is_visible": true,
-      "status": "normal",
-      "parent_seq": 53
-    },
-    {
-      "_seq": 67,
-      "name": "草稿工坊",
-      "menu_type": "C",
-      "path": "/platforms/xhs/note-workshop?tab=drafts",
-      "perms": "",
-      "icon": "appstore",
-      "workspace": "xhs",
-      "sort_order": 2,
-      "is_visible": true,
-      "status": "normal",
-      "parent_seq": 53
-    },
-    {
-      "_seq": 68,
-      "name": "发布中心",
-      "menu_type": "C",
-      "path": "/platforms/xhs/note-workshop?tab=publish",
-      "perms": "",
-      "icon": "appstore",
-      "workspace": "xhs",
-      "sort_order": 3,
-      "is_visible": true,
-      "status": "normal",
-      "parent_seq": 53
-    },
-    {
-      "_seq": 69,
-      "name": "素材库",
-      "menu_type": "C",
-      "path": "/platforms/xhs/note-workshop?tab=materials",
-      "perms": "",
-      "icon": "appstore",
-      "workspace": "xhs",
-      "sort_order": 4,
-      "is_visible": true,
-      "status": "normal",
-      "parent_seq": 53
-    },
-    {
-      "_seq": 70,
-      "name": "提示词模板",
-      "menu_type": "C",
-      "path": "/platforms/xhs/note-workshop?tab=prompts",
-      "perms": "",
-      "icon": "appstore",
-      "workspace": "xhs",
-      "sort_order": 5,
-      "is_visible": true,
-      "status": "normal",
-      "parent_seq": 53
-    },
-    {
-      "_seq": 71,
+      "_seq": 60,
       "name": "关键词组",
       "menu_type": "C",
       "path": "/platforms/xhs/keywords",
@@ -864,10 +786,10 @@
       "sort_order": 4,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 37
+      "parent_seq": 32
     },
     {
-      "_seq": 72,
+      "_seq": 61,
       "name": "新建关键词组",
       "menu_type": "F",
       "path": "",
@@ -877,10 +799,10 @@
       "sort_order": 0,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 71
+      "parent_seq": 60
     },
     {
-      "_seq": 73,
+      "_seq": 62,
       "name": "编辑关键词组",
       "menu_type": "F",
       "path": "",
@@ -890,10 +812,10 @@
       "sort_order": 1,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 71
+      "parent_seq": 60
     },
     {
-      "_seq": 74,
+      "_seq": 63,
       "name": "删除关键词组",
       "menu_type": "F",
       "path": "",
@@ -903,10 +825,10 @@
       "sort_order": 2,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 71
+      "parent_seq": 60
     },
     {
-      "_seq": 75,
+      "_seq": 64,
       "name": "新建话题",
       "menu_type": "F",
       "path": "",
@@ -916,10 +838,10 @@
       "sort_order": 3,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 71
+      "parent_seq": 60
     },
     {
-      "_seq": 76,
+      "_seq": 65,
       "name": "编辑话题",
       "menu_type": "F",
       "path": "",
@@ -929,10 +851,10 @@
       "sort_order": 4,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 71
+      "parent_seq": 60
     },
     {
-      "_seq": 77,
+      "_seq": 66,
       "name": "删除话题",
       "menu_type": "F",
       "path": "",
@@ -942,10 +864,10 @@
       "sort_order": 5,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 71
+      "parent_seq": 60
     },
     {
-      "_seq": 78,
+      "_seq": 67,
       "name": "内容洞察",
       "menu_type": "C",
       "path": "/platforms/xhs/insights/content",
@@ -955,10 +877,10 @@
       "sort_order": 5,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 37
+      "parent_seq": 32
     },
     {
-      "_seq": 79,
+      "_seq": 68,
       "name": "店铺线",
       "menu_type": "M",
       "path": "",
@@ -971,7 +893,7 @@
       "parent_seq": 1
     },
     {
-      "_seq": 80,
+      "_seq": 69,
       "name": "商品列表",
       "menu_type": "C",
       "path": "/platforms/xhs/shop-items",
@@ -981,348 +903,348 @@
       "sort_order": 0,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 79
+      "parent_seq": 68
     },
     {
-      "_seq": 82,
-      "name": "SKU 名称优化",
+      "_seq": 70,
+      "name": "润色",
       "menu_type": "F",
       "path": "",
       "perms": "xhs:item:polish",
       "icon": "",
       "workspace": "",
-      "sort_order": 1,
+      "sort_order": 0,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 80
+      "parent_seq": 69
     },
     {
-      "_seq": 83,
+      "_seq": 71,
       "name": "导出商品",
       "menu_type": "F",
       "path": "",
       "perms": "xhs:item:export",
       "icon": "",
       "workspace": "",
-      "sort_order": 2,
+      "sort_order": 1,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 80
+      "parent_seq": 69
     },
     {
-      "_seq": 84,
+      "_seq": 72,
       "name": "上架",
       "menu_type": "F",
       "path": "",
       "perms": "xhs:item:onShelf",
       "icon": "",
       "workspace": "",
-      "sort_order": 3,
+      "sort_order": 2,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 80
+      "parent_seq": 69
     },
     {
-      "_seq": 85,
+      "_seq": 73,
       "name": "下架",
       "menu_type": "F",
       "path": "",
       "perms": "xhs:item:offShelf",
       "icon": "",
       "workspace": "",
-      "sort_order": 4,
+      "sort_order": 3,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 80
+      "parent_seq": 69
     },
     {
-      "_seq": 86,
+      "_seq": 74,
       "name": "删除商品",
       "menu_type": "F",
       "path": "",
       "perms": "xhs:item:delete",
       "icon": "",
       "workspace": "",
-      "sort_order": 5,
+      "sort_order": 4,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 80
+      "parent_seq": 69
     },
     {
-      "_seq": 89,
+      "_seq": 75,
       "name": "生成商品笔记",
       "menu_type": "F",
       "path": "",
       "perms": "xhs:item:generateNote",
       "icon": "",
       "workspace": "",
-      "sort_order": 8,
+      "sort_order": 5,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 80
+      "parent_seq": 69
     },
     {
-      "_seq": 90,
+      "_seq": 76,
       "name": "生成商品图",
       "menu_type": "F",
       "path": "",
       "perms": "xhs:item:generateImage",
       "icon": "",
       "workspace": "",
-      "sort_order": 9,
+      "sort_order": 6,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 80
+      "parent_seq": 69
     },
     {
-      "_seq": 91,
+      "_seq": 77,
       "name": "存入草稿箱",
       "menu_type": "F",
       "path": "",
       "perms": "xhs:item:draft",
       "icon": "",
       "workspace": "",
-      "sort_order": 10,
+      "sort_order": 7,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 80
+      "parent_seq": 69
     },
     {
-      "_seq": 92,
+      "_seq": 78,
       "name": "提交发布",
       "menu_type": "F",
       "path": "",
       "perms": "xhs:publish:submit",
       "icon": "",
       "workspace": "",
-      "sort_order": 11,
+      "sort_order": 8,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 80
+      "parent_seq": 69
     },
     {
-      "_seq": 93,
+      "_seq": 79,
       "name": "重试发布",
       "menu_type": "F",
       "path": "",
       "perms": "xhs:publish:retry",
       "icon": "",
       "workspace": "",
-      "sort_order": 12,
+      "sort_order": 9,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 80
+      "parent_seq": 69
     },
     {
-      "_seq": 94,
+      "_seq": 80,
       "name": "取消发布",
       "menu_type": "F",
       "path": "",
       "perms": "xhs:publish:cancel",
       "icon": "",
       "workspace": "",
-      "sort_order": 13,
+      "sort_order": 10,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 80
+      "parent_seq": 69
     },
     {
-      "_seq": 95,
+      "_seq": 81,
       "name": "发布预检",
       "menu_type": "F",
       "path": "",
       "perms": "xhs:publish:precheck",
       "icon": "",
       "workspace": "",
-      "sort_order": 14,
+      "sort_order": 11,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 80
+      "parent_seq": 69
     },
     {
-      "_seq": 96,
+      "_seq": 82,
       "name": "新建规则",
       "menu_type": "F",
       "path": "",
       "perms": "xhs:rule:create",
       "icon": "",
       "workspace": "",
-      "sort_order": 15,
+      "sort_order": 12,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 80
+      "parent_seq": 69
     },
     {
-      "_seq": 97,
+      "_seq": 83,
       "name": "编辑规则",
       "menu_type": "F",
       "path": "",
       "perms": "xhs:rule:edit",
       "icon": "",
       "workspace": "",
-      "sort_order": 16,
+      "sort_order": 13,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 80
+      "parent_seq": 69
     },
     {
-      "_seq": 98,
+      "_seq": 84,
       "name": "删除规则",
       "menu_type": "F",
       "path": "",
       "perms": "xhs:rule:delete",
       "icon": "",
       "workspace": "",
-      "sort_order": 17,
+      "sort_order": 14,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 80
+      "parent_seq": 69
     },
     {
-      "_seq": 99,
+      "_seq": 85,
       "name": "试跑规则",
       "menu_type": "F",
       "path": "",
       "perms": "xhs:rule:execute",
       "icon": "",
       "workspace": "",
-      "sort_order": 18,
+      "sort_order": 15,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 80
+      "parent_seq": 69
     },
     {
-      "_seq": 100,
+      "_seq": 86,
       "name": "新建违规词",
       "menu_type": "F",
       "path": "",
       "perms": "xhs:forbiddenWord:create",
       "icon": "",
       "workspace": "",
-      "sort_order": 19,
+      "sort_order": 16,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 80
+      "parent_seq": 69
     },
     {
-      "_seq": 101,
+      "_seq": 87,
       "name": "编辑违规词",
       "menu_type": "F",
       "path": "",
       "perms": "xhs:forbiddenWord:edit",
       "icon": "",
       "workspace": "",
-      "sort_order": 20,
+      "sort_order": 17,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 80
+      "parent_seq": 69
     },
     {
-      "_seq": 102,
+      "_seq": 88,
       "name": "删除违规词",
       "menu_type": "F",
       "path": "",
       "perms": "xhs:forbiddenWord:delete",
       "icon": "",
       "workspace": "",
-      "sort_order": 21,
+      "sort_order": 18,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 80
+      "parent_seq": 69
     },
     {
-      "_seq": 103,
+      "_seq": 89,
       "name": "新增商品",
       "menu_type": "F",
       "path": "",
       "perms": "xhs:item:create",
       "icon": "",
       "workspace": "",
-      "sort_order": 22,
+      "sort_order": 19,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 80
+      "parent_seq": 69
     },
     {
-      "_seq": 104,
+      "_seq": 90,
       "name": "违禁词库",
       "menu_type": "F",
       "path": "",
       "perms": "xhs:item:forbiddenWords",
       "icon": "",
       "workspace": "",
-      "sort_order": 23,
+      "sort_order": 20,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 80
+      "parent_seq": 69
     },
     {
-      "_seq": 105,
+      "_seq": 91,
       "name": "查看商品草稿",
       "menu_type": "F",
       "path": "",
       "perms": "xhs:item:drafts",
       "icon": "",
       "workspace": "",
-      "sort_order": 24,
+      "sort_order": 21,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 80
+      "parent_seq": 69
     },
     {
-      "_seq": 106,
+      "_seq": 92,
       "name": "发布商品笔记",
       "menu_type": "F",
       "path": "",
       "perms": "xhs:item:publish",
       "icon": "",
       "workspace": "",
-      "sort_order": 25,
+      "sort_order": 22,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 80
+      "parent_seq": 69
     },
     {
-      "_seq": 107,
+      "_seq": 93,
       "name": "绑定千帆",
       "menu_type": "F",
       "path": "",
       "perms": "xhs:item:bind",
       "icon": "",
       "workspace": "",
-      "sort_order": 26,
+      "sort_order": 23,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 80
+      "parent_seq": 69
     },
     {
-      "_seq": 108,
+      "_seq": 94,
       "name": "店铺探活",
       "menu_type": "F",
       "path": "",
       "perms": "xhs:item:healthCheck",
       "icon": "",
       "workspace": "",
-      "sort_order": 27,
+      "sort_order": 24,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 80
+      "parent_seq": 69
     },
     {
-      "_seq": 109,
+      "_seq": 95,
       "name": "AI 商品文案",
       "menu_type": "F",
       "path": "",
       "perms": "xhs:item:aiAssist",
       "icon": "",
       "workspace": "",
-      "sort_order": 28,
+      "sort_order": 25,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 80
+      "parent_seq": 69
     },
     {
-      "_seq": 110,
+      "_seq": 96,
       "name": "违规管理",
       "menu_type": "C",
       "path": "/platforms/xhs/violation-manage",
@@ -1332,10 +1254,10 @@
       "sort_order": 1,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 79
+      "parent_seq": 68
     },
     {
-      "_seq": 111,
+      "_seq": 97,
       "name": "删除关联内容",
       "menu_type": "F",
       "path": "",
@@ -1345,10 +1267,10 @@
       "sort_order": 0,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 110
+      "parent_seq": 96
     },
     {
-      "_seq": 112,
+      "_seq": 98,
       "name": "图片空间",
       "menu_type": "C",
       "path": "/platforms/xhs/picture-space",
@@ -1358,10 +1280,10 @@
       "sort_order": 2,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 79
+      "parent_seq": 68
     },
     {
-      "_seq": 113,
+      "_seq": 99,
       "name": "文件列表",
       "menu_type": "C",
       "path": "/platforms/xhs/picture-space",
@@ -1371,10 +1293,10 @@
       "sort_order": 102,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 79
+      "parent_seq": 68
     },
     {
-      "_seq": 114,
+      "_seq": 100,
       "name": "上传图片",
       "menu_type": "F",
       "path": "",
@@ -1384,10 +1306,10 @@
       "sort_order": 0,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 112
+      "parent_seq": 98
     },
     {
-      "_seq": 115,
+      "_seq": 101,
       "name": "删除图片",
       "menu_type": "F",
       "path": "",
@@ -1397,10 +1319,10 @@
       "sort_order": 1,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 112
+      "parent_seq": 98
     },
     {
-      "_seq": 116,
+      "_seq": 102,
       "name": "移动图片",
       "menu_type": "F",
       "path": "",
@@ -1410,10 +1332,10 @@
       "sort_order": 2,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 112
+      "parent_seq": 98
     },
     {
-      "_seq": 117,
+      "_seq": 103,
       "name": "调整尺寸",
       "menu_type": "F",
       "path": "",
@@ -1423,10 +1345,10 @@
       "sort_order": 3,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 112
+      "parent_seq": 98
     },
     {
-      "_seq": 118,
+      "_seq": 104,
       "name": "恢复图片",
       "menu_type": "F",
       "path": "",
@@ -1436,10 +1358,10 @@
       "sort_order": 4,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 112
+      "parent_seq": 98
     },
     {
-      "_seq": 119,
+      "_seq": 105,
       "name": "下载图片",
       "menu_type": "F",
       "path": "",
@@ -1449,10 +1371,10 @@
       "sort_order": 5,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 112
+      "parent_seq": 98
     },
     {
-      "_seq": 120,
+      "_seq": 106,
       "name": "批量上传",
       "menu_type": "F",
       "path": "",
@@ -1462,10 +1384,10 @@
       "sort_order": 6,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 112
+      "parent_seq": 98
     },
     {
-      "_seq": 121,
+      "_seq": 107,
       "name": "合成图片",
       "menu_type": "F",
       "path": "",
@@ -1475,10 +1397,10 @@
       "sort_order": 7,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 112
+      "parent_seq": 98
     },
     {
-      "_seq": 122,
+      "_seq": 108,
       "name": "彻底删除",
       "menu_type": "F",
       "path": "",
@@ -1488,10 +1410,10 @@
       "sort_order": 8,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 112
+      "parent_seq": 98
     },
     {
-      "_seq": 123,
+      "_seq": 109,
       "name": "管理图片目录",
       "menu_type": "F",
       "path": "",
@@ -1501,10 +1423,10 @@
       "sort_order": 9,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 112
+      "parent_seq": 98
     },
     {
-      "_seq": 124,
+      "_seq": 110,
       "name": "上传文件",
       "menu_type": "F",
       "path": "",
@@ -1514,10 +1436,10 @@
       "sort_order": 10,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 112
+      "parent_seq": 98
     },
     {
-      "_seq": 125,
+      "_seq": 111,
       "name": "删除文件",
       "menu_type": "F",
       "path": "",
@@ -1527,10 +1449,10 @@
       "sort_order": 11,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 112
+      "parent_seq": 98
     },
     {
-      "_seq": 126,
+      "_seq": 112,
       "name": "订单管理",
       "menu_type": "C",
       "path": "/platforms/xhs/orders",
@@ -1540,10 +1462,10 @@
       "sort_order": 3,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 79
+      "parent_seq": 68
     },
     {
-      "_seq": 127,
+      "_seq": 113,
       "name": "发货",
       "menu_type": "F",
       "path": "",
@@ -1553,10 +1475,10 @@
       "sort_order": 0,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 126
+      "parent_seq": 112
     },
     {
-      "_seq": 128,
+      "_seq": 114,
       "name": "批量发货",
       "menu_type": "F",
       "path": "",
@@ -1566,10 +1488,10 @@
       "sort_order": 1,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 126
+      "parent_seq": 112
     },
     {
-      "_seq": 129,
+      "_seq": 115,
       "name": "导出订单",
       "menu_type": "F",
       "path": "",
@@ -1579,10 +1501,10 @@
       "sort_order": 2,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 126
+      "parent_seq": 112
     },
     {
-      "_seq": 130,
+      "_seq": 116,
       "name": "商品洞察",
       "menu_type": "C",
       "path": "/platforms/xhs/insights/shop",
@@ -1592,10 +1514,10 @@
       "sort_order": 4,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 79
+      "parent_seq": 68
     },
     {
-      "_seq": 131,
+      "_seq": 117,
       "name": "数据中心",
       "menu_type": "C",
       "path": "/platforms/xhs/datacenter",
@@ -1605,10 +1527,10 @@
       "sort_order": 5,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 79
+      "parent_seq": 68
     },
     {
-      "_seq": 132,
+      "_seq": 118,
       "name": "用户管理",
       "menu_type": "C",
       "path": "/system/users",
@@ -1621,7 +1543,7 @@
       "parent_seq": 3
     },
     {
-      "_seq": 133,
+      "_seq": 119,
       "name": "新建用户",
       "menu_type": "F",
       "path": "",
@@ -1631,10 +1553,10 @@
       "sort_order": 0,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 132
+      "parent_seq": 118
     },
     {
-      "_seq": 134,
+      "_seq": 120,
       "name": "编辑用户",
       "menu_type": "F",
       "path": "",
@@ -1644,10 +1566,10 @@
       "sort_order": 1,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 132
+      "parent_seq": 118
     },
     {
-      "_seq": 135,
+      "_seq": 121,
       "name": "删除用户",
       "menu_type": "F",
       "path": "",
@@ -1657,10 +1579,10 @@
       "sort_order": 2,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 132
+      "parent_seq": 118
     },
     {
-      "_seq": 136,
+      "_seq": 122,
       "name": "批量删除",
       "menu_type": "F",
       "path": "",
@@ -1670,10 +1592,10 @@
       "sort_order": 3,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 132
+      "parent_seq": 118
     },
     {
-      "_seq": 137,
+      "_seq": 123,
       "name": "批量重置密码",
       "menu_type": "F",
       "path": "",
@@ -1683,10 +1605,10 @@
       "sort_order": 4,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 132
+      "parent_seq": 118
     },
     {
-      "_seq": 138,
+      "_seq": 124,
       "name": "批量下线",
       "menu_type": "F",
       "path": "",
@@ -1696,10 +1618,10 @@
       "sort_order": 5,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 132
+      "parent_seq": 118
     },
     {
-      "_seq": 139,
+      "_seq": 125,
       "name": "批量审核",
       "menu_type": "F",
       "path": "",
@@ -1709,10 +1631,10 @@
       "sort_order": 6,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 132
+      "parent_seq": 118
     },
     {
-      "_seq": 140,
+      "_seq": 126,
       "name": "重置密码",
       "menu_type": "F",
       "path": "",
@@ -1722,10 +1644,10 @@
       "sort_order": 7,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 132
+      "parent_seq": 118
     },
     {
-      "_seq": 141,
+      "_seq": 127,
       "name": "强制下线",
       "menu_type": "F",
       "path": "",
@@ -1735,10 +1657,10 @@
       "sort_order": 8,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 132
+      "parent_seq": 118
     },
     {
-      "_seq": 142,
+      "_seq": 128,
       "name": "通过审核",
       "menu_type": "F",
       "path": "",
@@ -1748,10 +1670,10 @@
       "sort_order": 9,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 132
+      "parent_seq": 118
     },
     {
-      "_seq": 143,
+      "_seq": 129,
       "name": "角色管理",
       "menu_type": "C",
       "path": "/system/roles",
@@ -1764,7 +1686,7 @@
       "parent_seq": 3
     },
     {
-      "_seq": 144,
+      "_seq": 130,
       "name": "新建角色",
       "menu_type": "F",
       "path": "",
@@ -1774,10 +1696,10 @@
       "sort_order": 0,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 143
+      "parent_seq": 129
     },
     {
-      "_seq": 145,
+      "_seq": 131,
       "name": "编辑角色",
       "menu_type": "F",
       "path": "",
@@ -1787,10 +1709,10 @@
       "sort_order": 1,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 143
+      "parent_seq": 129
     },
     {
-      "_seq": 146,
+      "_seq": 132,
       "name": "删除角色",
       "menu_type": "F",
       "path": "",
@@ -1800,10 +1722,10 @@
       "sort_order": 2,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 143
+      "parent_seq": 129
     },
     {
-      "_seq": 147,
+      "_seq": 133,
       "name": "分配菜单",
       "menu_type": "F",
       "path": "",
@@ -1813,10 +1735,10 @@
       "sort_order": 3,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 143
+      "parent_seq": 129
     },
     {
-      "_seq": 148,
+      "_seq": 134,
       "name": "菜单管理",
       "menu_type": "C",
       "path": "/system/menus",
@@ -1829,7 +1751,7 @@
       "parent_seq": 3
     },
     {
-      "_seq": 149,
+      "_seq": 135,
       "name": "新增菜单",
       "menu_type": "F",
       "path": "",
@@ -1839,10 +1761,10 @@
       "sort_order": 0,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 148
+      "parent_seq": 134
     },
     {
-      "_seq": 150,
+      "_seq": 136,
       "name": "编辑菜单",
       "menu_type": "F",
       "path": "",
@@ -1852,10 +1774,10 @@
       "sort_order": 1,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 148
+      "parent_seq": 134
     },
     {
-      "_seq": 151,
+      "_seq": 137,
       "name": "删除菜单",
       "menu_type": "F",
       "path": "",
@@ -1865,10 +1787,10 @@
       "sort_order": 2,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 148
+      "parent_seq": 134
     },
     {
-      "_seq": 152,
+      "_seq": 138,
       "name": "字典管理",
       "menu_type": "C",
       "path": "/system/dicts",
@@ -1881,7 +1803,7 @@
       "parent_seq": 3
     },
     {
-      "_seq": 153,
+      "_seq": 139,
       "name": "新增字典",
       "menu_type": "F",
       "path": "",
@@ -1891,10 +1813,10 @@
       "sort_order": 0,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 152
+      "parent_seq": 138
     },
     {
-      "_seq": 154,
+      "_seq": 140,
       "name": "编辑字典",
       "menu_type": "F",
       "path": "",
@@ -1904,10 +1826,10 @@
       "sort_order": 1,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 152
+      "parent_seq": 138
     },
     {
-      "_seq": 155,
+      "_seq": 141,
       "name": "删除字典",
       "menu_type": "F",
       "path": "",
@@ -1917,10 +1839,10 @@
       "sort_order": 2,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 152
+      "parent_seq": 138
     },
     {
-      "_seq": 156,
+      "_seq": 142,
       "name": "配置管理",
       "menu_type": "C",
       "path": "/system/settings",
@@ -1933,7 +1855,7 @@
       "parent_seq": 3
     },
     {
-      "_seq": 157,
+      "_seq": 143,
       "name": "编辑配置",
       "menu_type": "F",
       "path": "",
@@ -1943,10 +1865,10 @@
       "sort_order": 0,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 156
+      "parent_seq": 142
     },
     {
-      "_seq": 158,
+      "_seq": 144,
       "name": "任务中心",
       "menu_type": "C",
       "path": "/system/scheduler",
@@ -1959,7 +1881,7 @@
       "parent_seq": 3
     },
     {
-      "_seq": 159,
+      "_seq": 145,
       "name": "新增任务",
       "menu_type": "F",
       "path": "",
@@ -1969,10 +1891,10 @@
       "sort_order": 0,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 158
+      "parent_seq": 144
     },
     {
-      "_seq": 160,
+      "_seq": 146,
       "name": "编辑任务",
       "menu_type": "F",
       "path": "",
@@ -1982,10 +1904,10 @@
       "sort_order": 1,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 158
+      "parent_seq": 144
     },
     {
-      "_seq": 161,
+      "_seq": 147,
       "name": "删除任务",
       "menu_type": "F",
       "path": "",
@@ -1995,10 +1917,10 @@
       "sort_order": 2,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 158
+      "parent_seq": 144
     },
     {
-      "_seq": 162,
+      "_seq": 148,
       "name": "立即执行",
       "menu_type": "F",
       "path": "",
@@ -2008,10 +1930,10 @@
       "sort_order": 3,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 158
+      "parent_seq": 144
     },
     {
-      "_seq": 163,
+      "_seq": 149,
       "name": "暂停恢复",
       "menu_type": "F",
       "path": "",
@@ -2021,10 +1943,10 @@
       "sort_order": 4,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 158
+      "parent_seq": 144
     },
     {
-      "_seq": 164,
+      "_seq": 150,
       "name": "删除日志",
       "menu_type": "F",
       "path": "",
@@ -2034,10 +1956,10 @@
       "sort_order": 5,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 158
+      "parent_seq": 144
     },
     {
-      "_seq": 165,
+      "_seq": 151,
       "name": "手动跑到期任务",
       "menu_type": "F",
       "path": "",
@@ -2047,10 +1969,10 @@
       "sort_order": 6,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 158
+      "parent_seq": 144
     },
     {
-      "_seq": 166,
+      "_seq": 152,
       "name": "清理日志",
       "menu_type": "F",
       "path": "",
@@ -2060,10 +1982,10 @@
       "sort_order": 7,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 158
+      "parent_seq": 144
     },
     {
-      "_seq": 167,
+      "_seq": 153,
       "name": "日志查看",
       "menu_type": "C",
       "path": "/system/logs",
@@ -2076,7 +1998,7 @@
       "parent_seq": 3
     },
     {
-      "_seq": 168,
+      "_seq": 154,
       "name": "总览",
       "menu_type": "C",
       "path": "/platforms/xhs/dashboard",
@@ -2089,7 +2011,7 @@
       "parent_seq": 1
     },
     {
-      "_seq": 169,
+      "_seq": 155,
       "name": "任务中心",
       "menu_type": "C",
       "path": "/platforms/xhs/tasks",
@@ -2102,7 +2024,7 @@
       "parent_seq": 1
     },
     {
-      "_seq": 170,
+      "_seq": 156,
       "name": "新增任务",
       "menu_type": "F",
       "path": "",
@@ -2112,10 +2034,10 @@
       "sort_order": 0,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 169
+      "parent_seq": 155
     },
     {
-      "_seq": 171,
+      "_seq": 157,
       "name": "编辑任务",
       "menu_type": "F",
       "path": "",
@@ -2125,10 +2047,10 @@
       "sort_order": 1,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 169
+      "parent_seq": 155
     },
     {
-      "_seq": 172,
+      "_seq": 158,
       "name": "立即执行",
       "menu_type": "F",
       "path": "",
@@ -2138,10 +2060,10 @@
       "sort_order": 2,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 169
+      "parent_seq": 155
     },
     {
-      "_seq": 173,
+      "_seq": 159,
       "name": "暂停恢复",
       "menu_type": "F",
       "path": "",
@@ -2151,10 +2073,10 @@
       "sort_order": 3,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 169
+      "parent_seq": 155
     },
     {
-      "_seq": 174,
+      "_seq": 160,
       "name": "查看日志",
       "menu_type": "F",
       "path": "",
@@ -2164,10 +2086,10 @@
       "sort_order": 4,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 169
+      "parent_seq": 155
     },
     {
-      "_seq": 175,
+      "_seq": 161,
       "name": "队列记录",
       "menu_type": "C",
       "path": "/task-records",
@@ -2180,7 +2102,7 @@
       "parent_seq": 1
     },
     {
-      "_seq": 176,
+      "_seq": 162,
       "name": "取消记录",
       "menu_type": "F",
       "path": "",
@@ -2190,10 +2112,10 @@
       "sort_order": 0,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 175
+      "parent_seq": 161
     },
     {
-      "_seq": 177,
+      "_seq": 163,
       "name": "重试记录",
       "menu_type": "F",
       "path": "",
@@ -2203,10 +2125,10 @@
       "sort_order": 1,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 175
+      "parent_seq": 161
     },
     {
-      "_seq": 178,
+      "_seq": 164,
       "name": "清理记录",
       "menu_type": "F",
       "path": "",
@@ -2216,10 +2138,10 @@
       "sort_order": 2,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 175
+      "parent_seq": 161
     },
     {
-      "_seq": 179,
+      "_seq": 165,
       "name": "一键清理",
       "menu_type": "F",
       "path": "",
@@ -2229,10 +2151,10 @@
       "sort_order": 3,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 175
+      "parent_seq": 161
     },
     {
-      "_seq": 180,
+      "_seq": 166,
       "name": "用量看板",
       "menu_type": "C",
       "path": "/usage-dashboard",
@@ -2245,7 +2167,7 @@
       "parent_seq": 2
     },
     {
-      "_seq": 181,
+      "_seq": 167,
       "name": "服务商",
       "menu_type": "C",
       "path": "/llm-gateway/providers",
@@ -2258,7 +2180,7 @@
       "parent_seq": 2
     },
     {
-      "_seq": 182,
+      "_seq": 168,
       "name": "新建服务商",
       "menu_type": "F",
       "path": "",
@@ -2268,10 +2190,10 @@
       "sort_order": 0,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 181
+      "parent_seq": 167
     },
     {
-      "_seq": 183,
+      "_seq": 169,
       "name": "编辑服务商",
       "menu_type": "F",
       "path": "",
@@ -2281,10 +2203,10 @@
       "sort_order": 1,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 181
+      "parent_seq": 167
     },
     {
-      "_seq": 184,
+      "_seq": 170,
       "name": "连通性测试",
       "menu_type": "F",
       "path": "",
@@ -2294,10 +2216,10 @@
       "sort_order": 2,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 181
+      "parent_seq": 167
     },
     {
-      "_seq": 185,
+      "_seq": 171,
       "name": "同步模型",
       "menu_type": "F",
       "path": "",
@@ -2307,10 +2229,10 @@
       "sort_order": 3,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 181
+      "parent_seq": 167
     },
     {
-      "_seq": 186,
+      "_seq": 172,
       "name": "启用模型",
       "menu_type": "F",
       "path": "",
@@ -2320,10 +2242,10 @@
       "sort_order": 4,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 181
+      "parent_seq": 167
     },
     {
-      "_seq": 187,
+      "_seq": 173,
       "name": "预警规则",
       "menu_type": "C",
       "path": "/llm-gateway/alerts",
@@ -2336,7 +2258,7 @@
       "parent_seq": 2
     },
     {
-      "_seq": 188,
+      "_seq": 174,
       "name": "模型配置",
       "menu_type": "C",
       "path": "/models",
@@ -2349,7 +2271,7 @@
       "parent_seq": 2
     },
     {
-      "_seq": 189,
+      "_seq": 175,
       "name": "新建模型",
       "menu_type": "F",
       "path": "",
@@ -2359,10 +2281,10 @@
       "sort_order": 0,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 188
+      "parent_seq": 174
     },
     {
-      "_seq": 190,
+      "_seq": 176,
       "name": "编辑模型",
       "menu_type": "F",
       "path": "",
@@ -2372,10 +2294,10 @@
       "sort_order": 1,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 188
+      "parent_seq": 174
     },
     {
-      "_seq": 191,
+      "_seq": 177,
       "name": "删除模型",
       "menu_type": "F",
       "path": "",
@@ -2385,10 +2307,10 @@
       "sort_order": 2,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 188
+      "parent_seq": 174
     },
     {
-      "_seq": 192,
+      "_seq": 178,
       "name": "设置业务点",
       "menu_type": "F",
       "path": "",
@@ -2398,10 +2320,10 @@
       "sort_order": 3,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 188
+      "parent_seq": 174
     },
     {
-      "_seq": 193,
+      "_seq": 179,
       "name": "设置",
       "menu_type": "C",
       "path": "/settings",
@@ -2414,7 +2336,7 @@
       "parent_seq": 1
     },
     {
-      "_seq": 194,
+      "_seq": 180,
       "name": "工作区配置编辑",
       "menu_type": "F",
       "path": "",
@@ -2424,10 +2346,10 @@
       "sort_order": 0,
       "is_visible": true,
       "status": "normal",
-      "parent_seq": 193
+      "parent_seq": 179
     },
     {
-      "_seq": 195,
+      "_seq": 181,
       "name": "个人资料",
       "menu_type": "C",
       "path": "/profile",

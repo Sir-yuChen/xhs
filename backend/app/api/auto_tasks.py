@@ -70,6 +70,7 @@ def _verify_account_ownership(db: Session, current_user: User, account_id: int, 
         platform="xhs",
         sub_type=expected_sub_type,
         detail=f"XHS {expected_sub_type} account not found",
+
     )
 
 

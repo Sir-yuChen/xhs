@@ -106,8 +106,13 @@ export type PlatformAccount = {
   external_user_id?: string;
   nickname: string;
   avatar_url?: string;
+  /** ⚠️ **登录探活的自动结论**，不是「用不用」。页面状态列读 `disabled`。 */
   status: "active" | "healthy" | "expired" | "risk" | "unknown" | string;
   status_message?: string;
+  /**
+   * 用户停用位。只有用户操作能改，定时任务不写它；停用不删数据。
+   */
+  disabled?: boolean;
   profile?: Record<string, unknown>;
   created_at?: string;
   updated_at?: string;

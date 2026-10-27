@@ -49,21 +49,7 @@ from backend.app.services.account_service import (
     upsert_platform_account_from_login,
     XhsSelfProfileAdapter,
 )
-from backend.app.services import (
-    login_state_service,
-    scheduled_job_runner,
-    sync_task_service,
-)
-from backend.app.services.sync_task_service import (
-    ABSOLUTE_PAGE_CAP,
-    DEFAULT_MAX_PAGES,
-    DEFAULT_PAGE_SIZE,
-    MAX_PAGE_SIZE,
-    SYNC_MODE_AUTO,
-    SYNC_SCOPE_FULL,
-    GOODS_NOTE_SYNC_TASK_TYPE,
-    NOTE_SYNC_TASK_TYPE,
-)
+from backend.app.services import login_state_service
 from xhs_utils.cookie_util import trans_cookies
 
 router = APIRouter(prefix="/accounts", tags=["accounts"])
@@ -278,6 +264,12 @@ def account_login_state(
         "probe": payload.probe,
         **result,
     }
+
+
+class AccountDisabledRequest(BaseModel):
+    """启用 / 停用账号（2026-10-27）。**只有这一个字段** —— 它是用户唯一可控的开关。"""
+
+    disabled: bool
 
 
 class QianfanCookieRequest(BaseModel):
@@ -666,6 +658,31 @@ def delete_account(
     return {"id": account_id, "status": "deleted", "soft": True, "already_deleted": already_deleted}
 
 
+@router.post("/{account_id}/disabled")
+def set_account_disabled(
+    account_id: int,
+    payload: AccountDisabledRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """启用 / 停用账号。
+
+    只改 `disabled` 列，**不碰 `status`**（后者由巡检自动写，混在一起会互相覆盖）。
+    停用只影响任务派发，不删数据、不吊销令牌。幂等（设成当前值回 `changed: false`）。
+    """
+    account = _get_owned_active_account(db, current_user, account_id)
+    before = bool(account.disabled)
+    account.disabled = bool(payload.disabled)
+    if before != account.disabled:
+        account.updated_at = shanghai_now()
+        db.commit()
+        db.refresh(account)
+        logger.info(
+            "[accounts] %s account %s", "disabled" if account.disabled else "enabled", account.id
+        )
+    return {**serialize_account(account), "changed": before != account.disabled}
+
+
 @router.post("/{account_id}/metrics")
 def sync_account_metrics(
     account_id: int,
@@ -709,131 +726,6 @@ def sync_account_metrics(
         db.commit()
         db.refresh(account)
     return {**serialize_account(account), "metrics_reason": reason}
-
-
-class NoteSyncRequest(BaseModel):
-    """笔记同步的触发参数（**普通笔记与商品笔记共用**，§44）。
-
-    **全部可选**。⚠️ `max_pages` **不传 = 全量**（设计 13 §21，用户 2026-09-22 口径）：
-    翻到平台没有下一页为止，速率由限流器保证。~~旧契约「默认 3 页 / 上限 20 页」~~
-    已被取代 —— 把「不传」当「传了 3」，正是「1961 条的账号永远只同步 180 条」的入口。
-    显式传数字时夹到 `[1, ABSOLUTE_PAGE_CAP]`（小批量调试用）。
-
-    `profile_url` / `xsec_token` **当前无消费者**（保留字段以便恢复 www 源，见设计 13
-    §21.4.1）：它们**不是平台登录令牌**，是网页版主页 URL 上的查询参数；`www` 源已
-    按用户 2026-09-22 口径整体移除 ⇒ 传了也不生效。**同步普通笔记的硬门禁是创作者平台
-    登录会话**（缺则任务行 `CREATOR_SESSION_REQUIRED`）；**同步商品笔记的硬门禁是
-    ark 令牌**（缺则 `ARK_SESSION_REQUIRED`）。
-    """
-
-    max_pages: Optional[int] = Field(default=DEFAULT_MAX_PAGES, ge=1, le=ABSOLUTE_PAGE_CAP)
-    page_size: int = Field(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE)
-    profile_url: str = ""
-    xsec_token: str = ""
-    #: 同步模式（设计 13 §17.8 / §22）：`full` = 全量重扫；`incremental` = 只取比
-    #: 游标新的笔记；`auto`（**默认**）= 按账号有没有同步历史自动选 —— 没有 ⇒ 全量，
-    #: 有 ⇒ 从最新数据时间增量。调度器同样走 auto。
-    mode: str = SYNC_MODE_AUTO
-    #: 同步范围（设计 13 §23，2026-09-22 用户口径：「新增弹窗支持根据时间区间或
-    #: 全量同步，让用户自己决定同步哪些数据」）：`full`（默认）= 不设时间界；
-    #: `range` = 只取 `[start_date, end_date]` 之间**发布**的笔记。
-    scope: str = SYNC_SCOPE_FULL
-    #: 起始日期 `YYYY-MM-DD`（`scope=range` 时生效；含当日 00:00）。
-    start_date: str = ""
-    #: 结束日期 `YYYY-MM-DD`（`scope=range` 时生效；**含当日一整天**到 23:59:59）。
-    end_date: str = ""
-
-
-def _start_account_sync(
-    *,
-    account: PlatformAccount,
-    user_id: int,
-    payload: NoteSyncRequest,
-    task_type: str,
-    job_key: str,
-    source: str,
-    starter: Callable[..., dict],
-) -> dict:
-    """账号卡「同步」按钮的**唯一实现**（§35.17 + §44）：解析区间 → 建行 → 记日志。
-
-    两条链路（普通笔记 / 商品笔记）**逐字同构**，差别只有三个入参：
-    `task_type`（⇒ 源清单与硬门禁）、`job_key`（⇒ 日志归属哪条流）、`source`（按钮级来源）。
-
-    每次点击**同时**留下两处账：
-
-    * `tasks` 一行（来源 = 按钮级值，账号卡内「同步任务」区块与 `…/sync/status`
-      的数据源），执行方是账号任务 worker —— 每类任务一条 worker（§42），不与笔记级
-      队列抢平台额度；
-    * `scheduled_job_logs` 一行（`trigger_type=manual`，经
-      `scheduled_job_runner.run_targeted_job` 观测该任务）⇒ 任务中心「任务日志」看得到，
-      执行期间 `progress` 有心跳（§35.17.3），终态与任务行**一致**。
-
-    **两条纪律**（§35.17.2）：
-
-    * 任务行由**调用方**（端点）同步建好再交给 worker，日志只做**观测** —— 若让跑任务
-      的那条路再建一行，同一账号会被跑两遍；若建完就写 `success`，会得到几十毫秒的
-      **假成功**；
-    * `reused=True`（该账号已有**同类**任务在跑）⇒ **本次不记日志**：没有新执行就没有
-      新日志，否则同一个任务行被记两次账，执行次数翻倍。
-
-    **响应**：任务摄要 + `log_id`（+ 请求区间没解析出来时的 `scope_note`）。
-    """
-    # §23：把弹窗选的「全量 / 时间区间」解析成毫秒窗口。解析不了 ⇒ (0, 0) = 全量，
-    # 但**要在响应里说一句** —— 静默按全量跑会让用户以为自己在同步一个区间。
-    time_from_ms, time_to_ms = sync_task_service.resolve_time_window(
-        payload.scope, payload.start_date, payload.end_date
-    )
-    scope_note = ""
-    if sync_task_service.normalize_scope(payload.scope) == sync_task_service.SYNC_SCOPE_RANGE:
-        if time_from_ms and time_to_ms:
-            scope_note = f"按时间区间同步：{payload.start_date} ~ {payload.end_date}"
-        else:
-            scope_note = "未识别到有效的时间区间，已按全量同步"
-
-    mode = sync_task_service.normalize_mode(payload.mode)
-    max_pages = sync_task_service.clamp_pages(payload.max_pages)
-    page_size = sync_task_service.clamp_page_size(payload.page_size)
-    summary = starter(
-        account.id,
-        user_id=user_id,
-        # §35.12：来源要**具体到按钮**（遗留值 `manual` 在队列记录页显示成
-        # 「页面按钮（早期数据）」，那是假历史）。
-        source=source,
-        # 同步语义必须**全部**传下去：漏一个 = 用户选的全量 / 时间区间静默丢失
-        # （§35.16.3 同型坑）。
-        mode=mode,
-        time_from_ms=time_from_ms,
-        time_to_ms=time_to_ms,
-        max_pages=max_pages,
-        page_size=page_size,
-    )
-    task_id = summary.get("task_id")
-    log_id = None
-    if task_id and not summary.get("reused"):
-        log_id = scheduled_job_runner.run_targeted_job(
-            user_id=user_id,
-            job_key=job_key,
-            task_id=int(task_id),
-            task_type=task_type,
-            # 账号快照（迁移 `j1k2l3m4n5o6`）：账号卡「同步中」的判据 = 该账号
-            # **最新一条**同步日志的状态（2026-09-27 用户口径）⇒ 日志必须记账号。
-            account_id=account.id,
-            # 日志快照里留一份**本次实际生效**的语义：任务行与日志各一份，排查时才对得上。
-            params_extra={
-                "account_id": account.id,
-                # 账号名称快照（2026-09-27 用户口径「执行账号应是当前账号信息卡的店铺」）：
-                # 「执行详情」的「执行账号」直接显示账号名称 —— 账号改名 / 被删都不影响
-                # 历史日志（与快照块「任务行之后被改被删都不影响」同一口径）。
-                "account_name": account.nickname or "",
-                "mode": mode,
-                "time_from_ms": time_from_ms,
-                "time_to_ms": time_to_ms,
-            },
-            # §35.17.3：执行期间把该任务行的进度映到定时任务日志的 `progress` 列。
-            progress_probe=sync_task_service.task_progress_probe(int(task_id)),
-        )
-    # §23：把「实际生效的同步范围」带回前端（区间没解析出来时用户必须知道跑了全量）。
-    return {**summary, "log_id": log_id, "scope_note": scope_note}
 
 
 _NOTE_SYNC_GONE = {

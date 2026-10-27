@@ -199,6 +199,7 @@ def send_draft_to_publish(
             payload.platform_account_id,
             platform=draft.platform,
             detail="Platform account not found",
+
         )
         account_id = account.id
 

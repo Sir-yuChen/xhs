@@ -48,6 +48,9 @@ class AccountItem(BaseModel):
     #: `active` / `invalid` / `expired` …
     status: Optional[str] = None
     status_message: Optional[str] = None
+    #: 用户停用位。**必须在响应模型里声明** —— 未声明的字段会被 `response_model`
+    #: 静默剔除，接口看似成功但前端拿不到值。
+    disabled: bool = False
     #: 平台资料原始字段（粉丝数等；形状随平台变 ⇒ 宽松）
     profile: dict[str, Any] = Field(default_factory=dict)
     created_at: Optional[str] = None

@@ -80,14 +80,9 @@ import {
   type PrecheckMediaItem,
   type PrecheckTable,
 } from "../../../lib/api";
-//: ⚠️ 「同步商品」的按钮态判据与账号卡片页**共用同一个** `syncTaskPhase`（需求 5
-//: 「逻辑应与账号卡片页的商品同步UI和逻辑一致，只是多了一个入口」）——
-//: 页面里不重写一份「什么算在跑」，否则两处迟早分叉。
-import { goodsGate, syncTaskPhase } from "../../../lib/sync-gates";
 import type {
   GenerateQueueFinishedEntry,
   GenerateQueueSnapshot,
-  SyncNotesOptions,
 } from "../../../lib/api";
 import { yuan } from "../../../lib/format";
 import { exportBlockReason } from "../../../lib/product-edit";
@@ -112,7 +107,6 @@ import { ProductPublishWizard } from "./product-publish-wizard";
 import { ProductDetailModal } from "./product-detail-modal";
 //: ⚠️ 默认导出（`export default`），不是具名 —— 具名导出的 `PackagePrecheckHandle`
 //: 只是给第二步留的取值句柄类型，别误当成组件名 import。
-import { SyncOptionsModal, type SyncOptions } from "../../../components/platforms/sync-options-modal";
 import {
   accountLabel,
   batchDeleteBlock,
@@ -1170,9 +1164,6 @@ export function XhsShopItemsPage() {
   const waitStartedAtRef = useRef<number | null>(null);
   const waitTickRef = useRef<number | null>(null);
   const [waitElapsedSec, setWaitElapsedSec] = useState(0);
-  /** ark 门禁提示：千帆会话确定不可用时给一句准话（**不**打开选项弹窗）。
-   *  判据 = `goodsGate`（与账号卡片页同一把尺子，需求 5）。 */
-  const [arkPromptOpen, setArkPromptOpen] = useState(false);
   /** 该账号是否**有进行中的同步商品任务**（首查 + 5s 轮询维护）。
    *  2026-10-06 用户口径：「存在同步商品的任务时同步商品按钮不支持点击，应显示为商品同步中」。 */
   // LLM 生成（T9，设计 17 §7.4）：与一期「生成笔记」是两个队列，状态各自独立。
@@ -3916,19 +3907,6 @@ export function XhsShopItemsPage() {
           if (selectedAccountId) void load(selectedAccountId, 1, pageSize, sort);
         }}
       />
-      {/* ark 门禁提示（需求 5：与账号卡片页「同步商品」同一提示口径）。
-          ⚠️ `unknown`（未检测）**不拦**（DEF-057：没问到 ≠ 不可用）—— 只有确定不可用才提示。 */}
-      <Modal
-        centered
-        open={arkPromptOpen}
-        title="需要先登录千帆"
-        onCancel={() => setArkPromptOpen(false)}
-        onOk={() => setArkPromptOpen(false)}
-        okText="知道了"
-        cancelButtonProps={{ style: { display: "none" } }}
-      >
-        同步商品需要可用的千帆令牌，请到「账号矩阵」登录 / 重新登录千帆后再试。
-      </Modal>
     </Flex>
     </div>
       {/* 页面级等待蒙版：与全站同一套视觉（fixed 铺满 + 白卡居中 + 已耗时）。 */}

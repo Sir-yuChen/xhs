@@ -120,6 +120,8 @@ ROUTE_PERMS: Final[dict[str, str]] = {
     "POST /api/accounts/import-cookie": "xhs:account:importCookie",
     "POST /api/accounts/{account_id}/check": "xhs:account:probe",
     "POST /api/accounts/{account_id}/metrics": "xhs:account:probe",
+    #: 启用 / 停用是改账号，不是探活 —— 挂 `edit`。
+    "POST /api/accounts/{account_id}/disabled": "xhs:account:edit",
     "POST /api/accounts/{account_id}/qianfan-cookie": "xhs:account:edit",
     "POST /api/ai/generate-note": "ai:generate:generate",
     "POST /api/ai/generate-tags": "ai:generate:generate",
@@ -156,7 +158,9 @@ ROUTE_PERMS: Final[dict[str, str]] = {
     "POST /api/notes/import-data": "xhs:library:importData",
     "POST /api/notes/sync-data": "xhs:library:syncData",
     "POST /api/notes/{note_id}/assets": "xhs:note:edit",
-    "POST /api/notes/{note_id}/hydrate": "xhs:note:sync",
+    #: 「点卡片实时拉详情」= **补内容**（正文 / 媒体 / 话题），归**编辑**码。
+    #: 原本借 `xhs:note:sync`（同批退场的「同步笔记」码）⇒ 那个码没了这条路由就无码可挂。
+    "POST /api/notes/{note_id}/hydrate": "xhs:note:edit",
     "POST /api/notes/{note_id}/publish": "xhs:publish:submit",
     "POST /api/notifications/read-all": "xhs:note:edit",
     "POST /api/notifications/{notification_id}/read": "xhs:note:edit",
@@ -245,7 +249,10 @@ ROUTE_PERMS: Final[dict[str, str]] = {
     "POST /api/xhs/pc/users/liked": "xhs:note:view",
     "POST /api/xhs/pc/users/me": "xhs:note:view",
     "POST /api/xhs/pc/users/no-traffic/candidates": "xhs:note:view",
-    "POST /api/xhs/pc/users/no-traffic/cleanup": "xhs:account:syncNotes",
+    #: 清理无流量笔记 = **删平台笔记**（破坏性写操作），归 `xhs:note:delete`。
+    #: 原本借 `xhs:account:syncNotes`（同批退场的「同步笔记」码）—— 那是个**账号卡**的
+    #: 动作码，挂在「删笔记」上是错的归属，只是当时顺手借了。
+    "POST /api/xhs/pc/users/no-traffic/cleanup": "xhs:note:delete",
     "POST /api/xhs/pc/users/notes": "xhs:note:view",
     "POST /api/xhs/pc/users/search": "xhs:note:view",
     "POST /api/xhs/product-notes/batch-generate": "xhs:item:generateNote",

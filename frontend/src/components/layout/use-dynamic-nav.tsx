@@ -28,8 +28,15 @@
  * 后端 F（按钮）→ **不进侧栏**（权限码，按钮那边用 `hasPermission` 判）。
  *
  * ⚠️ 叶子 `key` 用 `path`（路由），因为 `WorkspaceShell` 用 `location.pathname`
- * 匹配高亮。带 `?tab=` 的菜单项在种子里 path 就是 `"...?tab=images"`，
- * `WorkspaceShell` 的 `activeKeys` 已按「含 query 的键比对 pathname+search」处理。
+ * 匹配高亮。
+ *
+ * 🔴 **2026-10-27：页签不再有自己的菜单项**（用户口径「tab 不应该有单独的菜单项，
+ * 应归属到同一个页中」）。此前笔记工坊的 6 个页签在种子里各占一行，path 形如
+ * `"/platforms/xhs/note-workshop?tab=images"`，`WorkspaceShell` 的 `activeKeys`
+ * 为此特判「含 query 的键比对 pathname+search」。现在菜单只有宿主页一行，
+ * 页签由页面自己的 `Tabs` 承载、`?tab=` 仍进 URL（深链可用），但**侧栏高亮
+ * 只跟 `pathname` 走** —— 切页签时侧栏「笔记工坊」保持高亮，这正是「一个页面」
+ * 该有的表现。
  */
 
 import type { MenuProps } from "antd";

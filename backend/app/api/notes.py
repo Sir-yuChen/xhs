@@ -1363,7 +1363,9 @@ async def import_note_data(
             },
         )
     # 账号归属校验（越权 404，不暴露「存在但无权」）
-    get_owned_active_account(db, current_user, account_id, platform="xhs")
+    get_owned_active_account(
+        db, current_user, account_id, platform="xhs"
+    )
 
     if not file.filename or not file.filename.lower().endswith(".xlsx"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="只支持 .xlsx 文件")
@@ -1533,7 +1535,9 @@ def sync_note_data_endpoint(
                 "supported": ["goods", "normal"],
             },
         )
-    get_owned_active_account(db, current_user, payload.account_id, platform="xhs")
+    get_owned_active_account(
+        db, current_user, payload.account_id, platform="xhs"
+    )
 
     start_date = (payload.start_date or "").strip()
     end_date = (payload.end_date or "").strip()

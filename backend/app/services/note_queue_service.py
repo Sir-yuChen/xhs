@@ -227,8 +227,6 @@ assert {spec.batch_task_type for spec in QUEUE_REGISTRY} == set(QUEUE_BATCH_TASK
 #: ⚠️ §44（2026-09-30）：`xhs_note_sync` 由「混合双源」改为**仅普通笔记**，
 #: 商品笔记拆成独立的 `xhs_goods_note_sync`（两条链路各有自己的 worker 线程 ⇒ 可并行）。
 ACCOUNT_TASK_TYPES: tuple[str, ...] = (
-    "xhs_note_sync",
-    "xhs_goods_note_sync",
     "xhs_no_traffic_cleanup",
 )
 

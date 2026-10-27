@@ -936,7 +936,10 @@ def _first_usable_account_id(db: Session, user_id: int) -> int:
 
     rows = db.scalars(
         select(PlatformAccount)
-        .where(PlatformAccount.user_id == int(user_id), PlatformAccount.deleted_at.is_(None))
+        .where(
+            PlatformAccount.user_id == int(user_id),
+            PlatformAccount.deleted_at.is_(None),
+        )
         .order_by(PlatformAccount.id.asc())
     ).all()
     for account in rows:

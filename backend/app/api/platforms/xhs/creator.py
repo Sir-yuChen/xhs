@@ -80,6 +80,7 @@ def _get_owned_creator_account(db: Session, current_user: User, account_id: int)
         platform="xhs",
         sub_type="creator",
         detail="Creator account not found",
+
     )
 
 

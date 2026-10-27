@@ -1138,82 +1138,6 @@ def _sync_account_gap_seconds() -> int:
         return 10
 
 
-def _profile_notes_count(account) -> Optional[int]:
-    """`profile_json.notes_count`（「有待同步」的分母）。取不到返回 ``None``。"""
-    try:
-        profile = json.loads(account.profile_json or "{}")
-    except (TypeError, ValueError):
-        return None
-    if not isinstance(profile, dict):
-        return None
-    value = profile.get("notes_count")
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _local_note_count(db: Any, account_id: int) -> int:
-    from sqlalchemy import func
-
-    from backend.app.models.note import Note
-
-    return int(
-        db.scalar(
-            select(func.count()).select_from(Note).where(Note.platform_account_id == account_id)
-        )
-        or 0
-    )
-
-
-def account_needs_note_sync(db: Any, account) -> bool:
-    """「有待同步」判定（设计 13 §7.2 / D9）。
-
-    平台总数（`profile_json.notes_count`）**缺值视为待同步** —— 宁可多跑一轮，
-    不可漏（本地数拿不到平台总数时无从比较）。
-    """
-    total = _profile_notes_count(account)
-    if total is None:
-        return True
-    return _local_note_count(db, account.id) < total
-
-
-def _schedulable_accounts(db: Any, accounts: list) -> list:
-    """能**无人值守**同步的账号：有创作者平台或千帆令牌的创作者链路账号。
-
-    ⚠️ 2026-09-23 删掉 `has_web_session(www jar)` 过滤（设计 13 §24.9）：
-    那是 www 源时代的残留 —— §21.4 起同步源只剩 creator + ark，**不需要**
-    URL 级 `xsec_token`，「有 www 网页会话就要留给手动」的前提已不存在。
-    留着它会把三通道齐全的账号（如观隅好物 acct 8）永久排除出定时轮。
-    源可用性的唯一判据是 `_note_sources` 的 creator 令牌检查，不在这里预判
-    （DEF-057：不用快照预判能不能取到）。
-    """
-    from backend.app.services.account_service import (
-        CHANNEL_ARK,
-        CHANNEL_CREATOR,
-        channel_jars,
-    )
-
-    schedulable = []
-    for account in accounts:
-        # 2026-09-21 拆分：按平台看信封里有没有 creator / ark 平台，不再解密
-        # 整行当 jar 用（信封被当 jar 用会产出 `v=1; channels=...` 垃圾 Cookie）。
-        platforms = channel_jars(db, account.id)
-        if not (CHANNEL_CREATOR in platforms or CHANNEL_ARK in platforms):
-            continue
-        if account.sub_type == "creator":
-            schedulable.append(account)
-    return schedulable
-
-
-#: 定向执行等待业务任务到终态的轮询间隔（秒）。
-TARGETED_AWAIT_POLL_SECONDS = 2.0
-
-#: 定向执行等待业务任务终态的上限（秒）。60 分钟 = §21.5 实测全量同步（30–48 分钟）
-#: 之上留余量；超时不「静默变成成功」，而是记失败并说明任务仍在后台跑。
-TARGETED_AWAIT_TIMEOUT_SECONDS = 60 * 60
-
-
 #: 定向执行（`account_ids` 非空）也**照旧**过省流与账号间停顿：
 #: 「用户点名了这几个账号」不等于「每一轮都无条件打平台」——省流判据是**账号级**的
 #: 保护（本地已是最新就别打），与「跑哪些账号」是两个正交的问题。真正需要「立刻、
@@ -1243,87 +1167,6 @@ def _targeted_outcome(results: list[dict[str, Any]], *, what: str) -> dict[str, 
         )
         raise RuntimeError(f"{what}失败：{detail}"[:1000])
     return {"targeted": True, "what": what, "accounts": results}
-
-
-def _targeted_result(account_id: int, terminal: dict[str, Any]) -> dict[str, Any]:
-    """把一个业务任务的终态整理成 `scheduled_job_logs.result` 里的一行（缺值给 None）。"""
-    progress = terminal.get("progress") or {}
-    return {
-        "account_id": account_id,
-        "task_id": terminal.get("task_id"),
-        "status": terminal.get("status"),
-        "stored": progress.get("stored"),
-        "total": progress.get("total"),
-        "note": terminal.get("note") or "",
-        "error": terminal.get("error") or "",
-    }
-
-
-def _run_targeted_note_sync(account: Any) -> dict[str, Any]:
-    """定向（点名了账号）的单账号执行：**建行 → 账号任务 worker 跑 → 等终态**。
-
-    为什么不在这里直接 `run_note_sync`（批量路径就是那么干的）：§35.16 确立的
-    「单 worker 串行」是用户要过的能力（不与笔记级队列抢平台额度）—— 直接同步跑就等于
-    把它绕过去了，两个账号同时点就是并排打平台。建行 + worker ⇒ 串行天然成立；
-    这里的等待只为拿到**真实终态**写日志（§35.17.2）。
-
-    ⚠️ 来源写 `scheduled`（不是 `account_card_*`）：这条路的调用方是**调度侧**
-    （cron 或任务中心的「执行一次」）。账号卡的按钮走的是另一条路
-    （端点自己建行、来源 `account_card_*`，§35.17.2）—— 两处都写同一个来源就等于
-    在数据里造假历史（§35.12「来源要具体到按钮」）。
-    """
-    from backend.app.services import sync_task_service as sts
-    from backend.app.services.note_queue_service import SOURCE_SCHEDULED
-    from backend.app.services.note_sync_service import start_note_sync
-
-    summary = start_note_sync(account.id, user_id=account.user_id, source=SOURCE_SCHEDULED)
-    task_id = summary.get("task_id")
-    if summary.get("reused"):
-        return {
-            "account_id": account.id,
-            "task_id": task_id,
-            "status": summary.get("status"),
-            "note": f"该账号已有同步任务在跑（任务 #{task_id}），本次不重入",
-        }
-    return _targeted_result(account.id, _await_targeted_task(task_id))
-
-
-# 🔴 `_run_targeted_goods_sync` **已删除**（2026-10-27，设计 75 §2.4）：它是
-# `run_scheduled_shop_goods_syncs` 的定向执行体，两者已同批退场。
-
-
-def _await_targeted_task(task_id: Optional[int]) -> dict[str, Any]:
-    """等定向建出的业务任务到终态（实现住在 `sync_task_service`，这里只给口径）。"""
-    from backend.app.services import sync_task_service as sts
-
-    if not task_id:
-        return {"task_id": None, "status": "missing", "error": "任务行未建出来（建行即失败）"}
-    return sts.await_task_terminal(
-        task_id,
-        timeout_seconds=TARGETED_AWAIT_TIMEOUT_SECONDS,
-        poll_seconds=TARGETED_AWAIT_POLL_SECONDS,
-    )
-
-
-def _run_targeted_goods_note_sync(account: Any) -> dict[str, Any]:
-    """定向（点名了账号）的单账号**商品笔记**执行 —— 与笔记侧**逐字同构**（§44）。
-
-    同构是刻意的（DEF-044）：两条链路的差别只有入口函数与 `task_type`，纪律
-    （建行 → worker 串行 → 等终态 → 记真实结果）必须一致。
-    """
-    from backend.app.services.note_queue_service import SOURCE_SCHEDULED
-    from backend.app.services.note_sync_service import start_goods_note_sync
-
-    summary = start_goods_note_sync(account.id, user_id=account.user_id, source=SOURCE_SCHEDULED)
-    task_id = summary.get("task_id")
-    if summary.get("reused"):
-        return {
-            "account_id": account.id,
-            "task_id": task_id,
-            "status": summary.get("status"),
-            "note": f"该账号已有商品笔记同步任务在跑（任务 #{task_id}），本次不重入",
-        }
-    return _targeted_result(account.id, _await_targeted_task(task_id))
 
 
 def _schedulable_goods_note_accounts(db: Any, accounts: list) -> list:
@@ -1393,6 +1236,7 @@ def run_scheduled_note_data_syncs(
             PlatformAccount.user_id == user_id,
             PlatformAccount.platform == "xhs",
             PlatformAccount.deleted_at.is_(None),
+            #: 继续拿去同步商品笔记。
         )
         if account_ids:
             statement = statement.where(PlatformAccount.id.in_(list(account_ids)))

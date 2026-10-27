@@ -73,7 +73,6 @@ from sqlalchemy.orm import Session
 
 from backend.app.core.time import shanghai_now
 from backend.app.models.platform_account import PlatformAccount
-from backend.app.services import sync_task_service as sts
 from backend.app.services.account_service import (
     CHANNEL_CREATOR,
     CHANNEL_WWW,
@@ -102,13 +101,7 @@ MAX_PAGE_GAP_SECONDS = 60.0
 SOURCE_CREATOR = "creator"
 SOURCE_ARK = "ark"
 
-#: 源取值与「源 → 任务类型」映射（住在 `sync_task_service`，§44）**必须一一对应**：
-#: 任何一边漂移（改名 / 加源）都在 import 期报错，而不是运行时静默把商品笔记
-#: 写进普通笔记的任务类型里。
-assert set(sts.SOURCE_TASK_TYPES) == {SOURCE_CREATOR, SOURCE_ARK}, (
-    "sync_task_service.SOURCE_TASK_TYPES 与 note_sync_service 的源常量不一致："
-    "新增同步源要两个模块一起改"
-)
+#: 笔记源常量（`_note_sources(only=...)` 的取值；未知取值抛 `ValueError`）。
 
 
 class SyncFailure(Exception):

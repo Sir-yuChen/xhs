@@ -309,6 +309,7 @@ def update_publish_job(
             payload.platform_account_id,
             platform=job.platform,
             detail="Platform account not found",
+
         )
         job.platform_account_id = account.id
     if payload.title is not None:

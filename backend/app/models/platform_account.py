@@ -5,6 +5,7 @@ from typing import Optional
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     DateTime,
     ForeignKey,
     Index,
@@ -70,8 +71,16 @@ class PlatformAccount(Base):
     external_user_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     nickname: Mapped[str] = mapped_column(String(128), default="")
     avatar_url: Mapped[str] = mapped_column(Text, default="")
+    #: 登录探活的最近结论（`active` / `expired` / `unknown`），由巡检与登录刷新**自动写**。
+    #: 不是「用不用」—— 那是 `disabled` 列。
     status: Mapped[str] = mapped_column(String(32), default="unknown")
     status_message: Mapped[str] = mapped_column(Text, default="")
+    #: 用户手动控制的停用位（`False` = 正常使用）。**只有用户操作能写它** ——
+    #: 巡检 / 探活 / 登录刷新一律不写（守卫 `test_account_disabled_switch.py`）。
+    #: 停用不删数据、不吊销令牌。与 `status` 分开是因为后者来源是自动的。
+    disabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false"), index=True
+    )
     profile_json: Mapped[str] = mapped_column(Text, default="{}")
     #: 增量同步游标（设计 13 §17.9 / D13）：上次**成功落库**的最大 `publish_time`（毫秒）。
     #: 只在落库成功后推进；缺值 = 0 = 未同步过 = 下一轮走全量。

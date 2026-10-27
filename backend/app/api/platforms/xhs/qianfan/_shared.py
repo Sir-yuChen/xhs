@@ -154,7 +154,9 @@ def _owned_account(db: Session, current_user: User, account_id: int) -> Platform
     （商品列表 / 商品同步 / 绑定 / 解绑 / 巡检 / item-notes / 商品挂链笔记…），
     等于把「已删除的账号仍能发起平台操作」这个口子放大了 11 倍。
     """
-    return get_owned_active_account(db, current_user, account_id, platform="xhs")
+    return get_owned_active_account(
+        db, current_user, account_id, platform="xhs"
+    )
 
 def _fmt_state_time(value: Any) -> str:
     """`shop_state` 里的 ISO 时间 → 展示用 `YYYY-MM-DD HH:MM`；空 / 坏值 → 空串。"""
@@ -197,9 +199,6 @@ def _account_shop_summary(db: Session, account: PlatformAccount) -> dict[str, An
         "status": str(state["status"]),
         "status_message": str(state["status_message"]),
         "goods_note_total": int(state["goods_note_total"] or 0),
-        #: ⛔ `synced_notes` / `goods_synced_at` **已删除**（2026-10-27）：笔记与商品
-        #: 都改平台实时查询后，「本地同步了多少条」这个概念不存在了 —— 那两个值一个
-        #: 恒 0、一个恒空串（`shop_note_goods` 已 DROP），留着只会让前端以为有覆盖率。
         #: 最近一次千帆登录态巡检时间（T-31）；空 = 从未巡检。
         "health_checked_at": _fmt_state_time(state["health_checked_at"]),
     }

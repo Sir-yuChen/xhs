@@ -26,42 +26,8 @@ from backend.app.core.database import SessionLocal
 from backend.app.core.time import shanghai_now
 from backend.app.models.task import Task
 
-#: 三类账号级同步任务的 task_type（§44：原「同步笔记」混合双源拆成两个独立任务）。
-NOTE_SYNC_TASK_TYPE = "xhs_note_sync"
-"""同步**普通笔记**（creator 源，硬门禁 = 创作者会话）。"""
-
+#: 店铺商品台账同步的任务类型。链路已退场，常量仅用于识别历史任务行。
 SHOP_GOODS_SYNC_TASK_TYPE = "xhs_shop_goods_sync"
-"""同步**店铺商品台账**（SKU / 价格，不是笔记）。"""
-
-# ⚠️ `ORDER_SYNC_TASK_TYPE`（`xhs_order_sync`）已退场（设计 75，2026-10-27）：
-# 订单域改平台实时查询，不再有「订单同步任务」这种任务行。原常量保留在 git 历史里。
-
-
-GOODS_NOTE_SYNC_TASK_TYPE = "xhs_goods_note_sync"
-"""同步**商品笔记**（千帆 `goods-note/list` 的挂链笔记，硬门禁 = ark 令牌）。
-
-⚠️ 与 `SHOP_GOODS_SYNC_TASK_TYPE`（店铺商品台账）**不是一回事**：这里同步的是
-`notes` + `note_goods`（笔记本体与挂链关系），那里同步的是 `shop_products`。
-"""
-
-#: 同步源 → 任务类型（§44，2026-09-30 用户拍板「一次任务只跑一个源」）。
-#: 取值与 `note_sync_service.SOURCE_CREATOR` / `SOURCE_ARK` **必须一致** ——
-#: 那边有导入期断言（`assert set(SOURCE_TASK_TYPES) == {SOURCE_CREATOR, SOURCE_ARK}`），
-#: 任何一边漂移都会在 import 时报错，而不是在运行时静默跑错任务类型。
-SOURCE_TASK_TYPES: dict[str, str] = {
-    "creator": NOTE_SYNC_TASK_TYPE,
-    "ark": GOODS_NOTE_SYNC_TASK_TYPE,
-}
-
-
-def task_type_for_source(only: str) -> str:
-    """同步源 → 任务类型；未知源抛 `ValueError`（不静默退化成某一种）。"""
-    task_type = SOURCE_TASK_TYPES.get(str(only or ""))
-    if task_type is None:
-        raise ValueError(
-            f"未知的同步源 only={only!r}；已知取值：{', '.join(sorted(SOURCE_TASK_TYPES))}"
-        )
-    return task_type
 
 
 #: 任务状态（设计 13 §9）：done 允许带 warning（部分完成），
@@ -518,13 +484,14 @@ def _latest_account_log(
     ).first()
 
 
-#: 定时任务 job_key → 业务任务类型（账号卡三条链路；孤儿日志收口按它找回任务行）。
+#: 定时任务 job_key → 业务任务类型（账号卡链路；孤儿日志收口按它找回任务行）。
+#:
+#: ⚠️ **2026-10-27 只剩一行**：`system.note_sync` / `system.goods_note_sync` 两个 job_key
+#: 已从任务注册表摘除（设计 75 §4.5），其任务类型也不复存在；留着映射等于「按一个
+#: 不会再出现的 job_key 去查任务行」。`system.shop_goods_sync` 同批退场，但它的任务行
+#: 仍在历史数据里，孤儿日志收口需要这条映射才能把旧日志对回任务行。
 ACCOUNT_JOB_TASK_TYPES: dict[str, str] = {
-    "system.note_sync": NOTE_SYNC_TASK_TYPE,
     "system.shop_goods_sync": SHOP_GOODS_SYNC_TASK_TYPE,
-    # §44：商品笔记同步的独立定时任务 —— 不登记的话它的 `running` 孤儿日志
-    # 没有任何路径收口（DEF-048：安全网不能条件性）。
-    "system.goods_note_sync": GOODS_NOTE_SYNC_TASK_TYPE,
 }
 
 

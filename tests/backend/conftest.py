@@ -103,14 +103,28 @@ def _get_engine() -> Engine:
         )
         with _engine.begin() as conn:
             conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{TEST_SCHEMA}"'))
-        #: 只在 schema 为空时建表（避免每次跑都 drop/create 63 张表，~7s）
+        #: 表与列都和模型一致才跳过重建（避免每次跑都 drop/create 63 张表，~7s）。
+        #: ⚠️ 不一致时必须先 **drop 整个 schema** 再建 —— `create_all` 只建**不存在**的表，
+        #: 光调它补不上缺失的列（加了列之后旧表照样"存在"，见 `_tables_exist` 的说明）。
         if not _tables_exist(_engine):
+            with _engine.begin() as conn:
+                conn.execute(text(f'DROP SCHEMA IF EXISTS "{TEST_SCHEMA}" CASCADE'))
+                conn.execute(text(f'CREATE SCHEMA "{TEST_SCHEMA}"'))
             Base.metadata.create_all(bind=_engine)
     return _engine
 
 
 def _tables_exist(engine: Engine) -> bool:
-    """`test` schema 里是否已有全部表（有就跳过建表，省掉每次 7 秒）。"""
+    """`test` schema 里的表**和列**是否都与模型一致（一致就跳过建表，省掉每次 7 秒）。
+
+    ⚠️ 只比对**表名**是不够的（2026-10-27 实测踩过）：`create_all` 只建**不存在**的表，
+    已有的表**不会补列**。于是模型加了一列之后，旧 schema 里那张表照样"存在" ⇒
+    跳过建表 ⇒ 所有用例在第一条 INSERT 上炸
+    `UndefinedColumn: 关系 "platform_accounts" 的 "disabled" 字段不存在`，
+    一看就是十几条红，而根因只是测试库的结构没跟上模型。
+
+    修法：把**列**也纳入判据。缺任何一列 ⇒ 判定「不一致」⇒ 走下面的重建分支。
+    """
     from backend.app.core.database import Base
 
     with engine.connect() as conn:
@@ -123,8 +137,31 @@ def _tables_exist(engine: Engine) -> bool:
                 {"s": TEST_SCHEMA},
             ).fetchall()
         }
-    expected = {t.name for t in Base.metadata.sorted_tables}
-    return expected.issubset(existing)
+        expected = {t.name for t in Base.metadata.sorted_tables}
+        if not expected.issubset(existing):
+            return False
+        #: 列级比对：按 (表名, 列名) 拉一次，与模型一次性对完。
+        actual_columns = {
+            (r[0], r[1])
+            for r in conn.execute(
+                text(
+                    "SELECT table_name, column_name FROM information_schema.columns "
+                    "WHERE table_schema = :s"
+                ),
+                {"s": TEST_SCHEMA},
+            ).fetchall()
+        }
+    for table in Base.metadata.sorted_tables:
+        for column in table.columns:
+            if (table.name, column.name) not in actual_columns:
+                logger_ = __import__("logging").getLogger(__name__)
+                logger_.warning(
+                    "test schema 缺列 %s.%s ⇒ 重建测试表（模型已改、库没跟上）",
+                    table.name,
+                    column.name,
+                )
+                return False
+    return True
 
 
 @pytest.fixture(scope="session")

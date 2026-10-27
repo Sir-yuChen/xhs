@@ -741,7 +741,9 @@ def _account_cookies(
     """
     #: 归属校验走 **唯一实现**（DEF-055）：这里原先是自己抄的一份（4 份拷贝之一），
     #: **漏了软删闸** —— 账号被删掉之后，旧页面留下的 id 仍能取到它的凭据去打平台。
-    account = get_owned_active_account(db, current_user, account_id, platform="xhs")
+    account = get_owned_active_account(
+        db, current_user, account_id, platform="xhs"
+    )
 
     cookies = latest_cookies_for_channel(db, account.id, channel)
     if not cookies:
@@ -1461,8 +1463,6 @@ def _shop_goods_source(db: Session, account: PlatformAccount) -> dict[str, Any]:
         "status": str(state["status"]),
         "status_message": str(state["status_message"]),
         "shop_total": int(state["goods_note_total"] or 0),
-        #: ⛔ `synced_notes` / `synced_at` 已删除（2026-10-27）—— 笔记改实时查询后
-        #: 「本地同步了多少条」不存在，恒 0 / 恒空串。
         #: 最近一次千帆登录态巡检时间（T-31）；空 = 从未巡检。
         "health_checked_at": _state_time_text(state["health_checked_at"]),
     }
@@ -1491,10 +1491,6 @@ def _note_goods_from_parts(
         "shop_name": shop_name,
         "variant": variant_desc,
     }
-
-
-#: ⚠️ 设计 75 S5：`_note_goods_from_shop_row` / `_note_shop_metrics_from_row` 已删除
-#: （入参是已 DROP 的 `shop_note_goods` 行）。实时链路直接用平台的归一化条目。
 
 
 #: ⚠️ 设计 75 S5：`_note_shop_metrics_from_row` 的残段一并删除（其入参是已 DROP 的
@@ -1763,8 +1759,6 @@ def _self_content_capabilities(
                 "reason": goods_reason,
                 "shop_name": goods_state["shop_name"],
                 "shop_total": goods_state["shop_total"],
-                #: ⛔ `synced_notes` / `synced_at` 已删除（2026-10-27）—— 「本地同步了
-                #: 多少条笔记」这个概念随实时查询退场，两个值恒 0 / 恒空串。
             },
         },
     }

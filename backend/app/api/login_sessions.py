@@ -402,7 +402,9 @@ def _renew_account_from_login(
       —— 资料刷新的写入点只有 `upsert_*` 一处，多一个地方写就会漂移。
     """
     try:
-        account = get_owned_active_account(db, current_user, target_account_id)
+        account = get_owned_active_account(
+            db, current_user, target_account_id
+        )
     except HTTPException:
         return None, "", {
             "code": RENEW_TARGET_UNAVAILABLE,
@@ -445,7 +447,9 @@ def _renew_qianfan_from_login(
     `shop_id_fk` / `shops` 表已随 2026-09-30 迁移退场）。
     """
     try:
-        account = get_owned_active_account(db, current_user, target_account_id)
+        account = get_owned_active_account(
+            db, current_user, target_account_id
+        )
     except HTTPException:
         return None, "", {
             "code": RENEW_TARGET_UNAVAILABLE,
@@ -585,7 +589,9 @@ def qianfan_qrcode(
     # 别让用户扫完码才被告知「账号不属于你」。
     # 2026-09-23（§18.15.3）：target 改可选 —— 不带 = 扫码建号（confirmed 分支建行）。
     if payload.target_account_id:
-        get_owned_active_account(db, current_user, payload.target_account_id)
+        get_owned_active_account(
+            db, current_user, payload.target_account_id
+        )
     try:
         qr_payload = adapter.create_qrcode()
     except Exception as exc:
@@ -640,7 +646,9 @@ def qianfan_email_login(
     """
     if payload.target_account_id:
         # 与扫码同一条闸：归属 / 软删先在发请求前拦掉。
-        get_owned_active_account(db, current_user, payload.target_account_id)
+        get_owned_active_account(
+            db, current_user, payload.target_account_id
+        )
     try:
         result = adapter.login_by_email_pwd(payload.email, payload.pwd)
     except Exception as exc:
@@ -862,7 +870,9 @@ def pc_phone_send_code(
     # 续期目标先校验（归属 / 软删，同 /qianfan/qrcode 的提前闸，§18.16）：
     # 不让用户等一条短信下来才被告知「账号不属于你」。
     if payload.target_account_id:
-        get_owned_active_account(db, current_user, payload.target_account_id)
+        get_owned_active_account(
+            db, current_user, payload.target_account_id
+        )
     try:
         result = adapter.create_phone_session(payload.phone)
     except Exception as exc:
@@ -910,7 +920,9 @@ def creator_phone_send_code(
 ):
     # 续期目标先校验（归属 / 软删，同 pc 分支，§18.16）。
     if payload.target_account_id:
-        get_owned_active_account(db, current_user, payload.target_account_id)
+        get_owned_active_account(
+            db, current_user, payload.target_account_id
+        )
     try:
         result = adapter.create_phone_session(payload.phone)
     except Exception as exc:

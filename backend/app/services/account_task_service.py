@@ -68,10 +68,12 @@ logger = logging.getLogger(__name__)
 ACCOUNT_WORKER_THREAD_PREFIX = "account-task-worker"
 
 #: worker **认领**的类型（§35.16.2）。**每个类型一条 worker 线程**（§42）。
-ACCOUNT_WORKER_TYPES: tuple[str, ...] = (
-    "xhs_note_sync",
-    "xhs_goods_note_sync",
-)
+#:
+#: ⚠️ **2026-10-27 起为空**（设计 75 §4.5）：原来是 `xhs_note_sync` / `xhs_goods_note_sync`
+#: 两类，账号笔记同步链路整条退场后**没有任何类型需要认领** —— 但复位 / 保留期 / 孤儿日志
+#: 收口这三件事仍要靠本模块的看门狗与启动恢复，所以模块与线程骨架保留，只是列表为空。
+#: 新增账号级任务（要认领 + 执行的那类）时往这里加一行，worker 会自动为它起一条线程。
+ACCOUNT_WORKER_TYPES: tuple[str, ...] = ()
 
 #: 空闲轮询（唤醒信号丢失时最坏晚这么久发现新任务 —— 安全网不条件性，DEF-048）。
 ACCOUNT_IDLE_POLL_SECONDS = 5.0
@@ -179,45 +181,13 @@ def _dispatch_account_task(item_id: int) -> Optional[dict]:
     if not account_id:
         return {"status": "failed", "error": "任务行缺少账号", "code": "ACCOUNT_MISSING"}
 
-    if task_type == "xhs_note_sync":
-        from backend.app.services import note_sync_service
+    # ⚠️ **两个分派分支已删除**（设计 75 §4.5，2026-10-27）：原 `xhs_note_sync` /
+    # `xhs_goods_note_sync` 都 `return note_sync_service.run_note_sync(...)`，而那个
+    # 执行体随同步引擎整段退场 ⇒ 分支留着就是「认领即 AttributeError」。
+    # 现在 `ACCOUNT_WORKER_TYPES` 为空，认领不到任何行，本函数不会被调用；
+    # 新增账号级任务时在这里补一个 `if task_type == "...": return <执行体>(...)`。
+    return None
 
-        return note_sync_service.run_note_sync(
-            account_id,
-            task_id=item_id,
-            user_id=user_id,
-            max_pages=max_pages,
-            page_size=page_size,
-            source=source,
-            # §35.16.3：www 源整体移除后这两个参数已无读取方 ⇒ 重建时传空串语义等价。
-            profile_url="",
-            xsec_token="",
-            mode=mode,
-            time_from_ms=time_from_ms,
-            time_to_ms=time_to_ms,
-            # §44：普通笔记 = creator 源（硬门禁 = 创作者会话）。
-            only=note_sync_service.SOURCE_CREATOR,
-        )
-
-    if task_type == "xhs_goods_note_sync":
-        # §44（2026-09-30）：商品笔记同步 —— 与上面**同一个执行体**，只换源（ark）。
-        # 两者由**各自的 worker 线程**认领（`ACCOUNT_WORKER_TYPES`）⇒ 可并行。
-        from backend.app.services import note_sync_service
-
-        return note_sync_service.run_note_sync(
-            account_id,
-            task_id=item_id,
-            user_id=user_id,
-            max_pages=max_pages,
-            page_size=page_size,
-            source=source,
-            profile_url="",
-            xsec_token="",
-            mode=mode,
-            time_from_ms=time_from_ms,
-            time_to_ms=time_to_ms,
-            only=note_sync_service.SOURCE_ARK,
-        )
 
 def _record_failure(item_id: int, error: BaseException) -> None:
     """执行体**崩了**（抛出）时补记一次失败；行已是终态则不动（不覆写执行体的记账）。"""

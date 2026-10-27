@@ -690,6 +690,8 @@ def serialize_account(account: PlatformAccount, action: str | None = None) -> di
         "avatar_url": account.avatar_url,
         "status": account.status,
         "status_message": account.status_message,
+        #: 用户停用位（`status` 是登录探活的自动结论，两者无关）。
+        "disabled": bool(account.disabled),
         "profile": profile,
         "created_at": account.created_at.isoformat() if account.created_at else None,
         "updated_at": (account.updated_at or account.created_at).isoformat() if (account.updated_at or account.created_at) else None,

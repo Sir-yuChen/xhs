@@ -187,9 +187,9 @@ def _f(prefix: str, actions: str, labels: str, path: str, ws: str) -> tuple[Perm
 
 
 BUSINESS_PERMS: tuple[PermSpec, ...] = (
-    # 账号矩阵 9
-    *_f("xhs:account", "edit/delete/importCookie/relogin/probe/syncNotes/syncGoodsNotes",
-        "编辑账号/删除账号/导入Cookie/重新登录/探活检测/同步笔记/同步商品笔记",
+    # 账号矩阵 7 —— 「同步笔记」「同步商品笔记」两码随同步链路退场（设计 75 §4.5）
+    *_f("xhs:account", "edit/delete/importCookie/relogin/probe",
+        "编辑账号/删除账号/导入Cookie/重新登录/探活检测",
         "/platforms/xhs/accounts", _X),
     # 我的笔记 10
     *_f("xhs:note", "sync/batchSync/create/edit/delete",
@@ -209,10 +209,15 @@ BUSINESS_PERMS: tuple[PermSpec, ...] = (
     #: ⚠️ 2026-10-26 用户口径「商品列表的『生成笔记』与『上架下架』拆分成三个权限码」：
     #: `operate`（上下架+删除三合一）整条退场，改由 `onShelf` / `offShelf` /
     #: `generateNote` 各判各的（三条码此前只有菜单行、零路由零按钮，属幽灵码）。
-    #: `delete` 仍留给**平台删除**；删**本地台账行**是另一件事 ⇒ 新增 `deleteLocal`
-    #: （原来那处借用了 `edit` 的码，等于「能改就能删」）。
-    *_f("xhs:item", "edit/polish/export/onShelf/offShelf/delete/deleteLocal/sync/generateNote/generateImage/draft",
-        "编辑商品/润色/导出商品/上架/下架/删除商品/删除台账行/同步商品/生成商品笔记/生成商品图/存入草稿箱",
+    #:
+    #: ⚠️ **2026-10-27 再退三码**（商品页全面实时化收尾 + 本卡同步退场）：
+    #: * `deleteLocal` —— 本地台账表 `shop_products` 已 DROP，「删台账行」这个动作不存在；
+    #: * `sync` —— 商品同步链路退场（后端 `items/sync` 410 墓碑，设计 75 §4.5）；
+    #: * `edit` —— 商品编辑链路整条移除（无端点、无按钮、无请求函数）。
+    #: 三码实测**零路由零按钮零请求函数**，留着只会在授权页上挂几个勾了不生效的项。
+    #: `polish` **保留**：SKU 名称优化两条端点仍在用（`package-precheck/sku-name-*`）。
+    *_f("xhs:item", "polish/export/onShelf/offShelf/delete/generateNote/generateImage/draft",
+        "润色/导出商品/上架/下架/删除商品/生成商品笔记/生成商品图/存入草稿箱",
         "/platforms/xhs/shop-items", _X),
     # 商品发布 5
     #: ⚠️ 2026-10-26：`rule`（数据包规则入口）后端无端点 —— 实际动的是
