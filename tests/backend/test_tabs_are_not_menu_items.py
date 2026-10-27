@@ -14,7 +14,8 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-GENERATOR = ROOT / ".hermes" / "scripts" / "generate_menu_seed.py"
+#: 生成器在**仓库根 `scripts/`**（进版本库）；`.hermes/scripts/` 那份是转发壳。
+GENERATOR = ROOT / "scripts" / "generate_menu_seed.py"
 SEED = ROOT / "config" / "initial_data" / "menus.seed.json"
 WORKSHOP_PAGE = ROOT / "frontend" / "src" / "pages" / "platforms" / "xhs" / "note-workshop-page.tsx"
 MIGRATION = ROOT / "backend" / "alembic" / "versions" / "r4s5t6u7v8w9_drop_tab_menu_rows.py"
