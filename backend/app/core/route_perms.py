@@ -376,8 +376,6 @@ ROUTE_PERMS: Final[dict[str, str]] = {
     "POST /api/accounts/{account_id}/login-state": "xhs:account:relogin",
     "GET /api/system/logs/trace/{trace_id}": "system:log:view",
     "GET /api/accounts": "xhs:account:view",
-    "GET /api/accounts/{account_id}/notes/sync/status": "xhs:account:view",
-    "GET /api/accounts/{account_id}/goods-notes/sync/status": "xhs:account:view",
     "GET /api/xhs/analytics/benchmarks": "xhs:insights:view",
     "GET /api/xhs/monitoring/targets": "xhs:monitor:view",
     "GET /api/xhs/monitoring/targets/{target_id}/notes": "xhs:monitor:view",

@@ -54,7 +54,6 @@ from backend.app.services import (
     scheduled_job_runner,
     sync_task_service,
 )
-from backend.app.services.job_registry import JOB_KEY_GOODS_NOTE_SYNC, JOB_KEY_NOTE_SYNC
 from backend.app.services.sync_task_service import (
     ABSOLUTE_PAGE_CAP,
     DEFAULT_MAX_PAGES,
@@ -877,56 +876,24 @@ def start_account_goods_note_sync(account_id: int, current_user: User = Depends(
     raise HTTPException(status_code=status.HTTP_410_GONE, detail=_NOTE_SYNC_GONE)
 
 
-@router.get("/{account_id}/notes/sync/status")
-def account_note_sync_status(
-    account_id: int,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """**普通笔记**同步的进度查询（前端轮询）。
+@router.get("/{account_id}/notes/sync/status", include_in_schema=False)
+def account_note_sync_status(account_id: int, current_user: User = Depends(get_current_user)):
+    """**410 墓碑** —— 同步已退场，进度查询随之失去查询对象（设计 75 S4）。
 
-    无进行中任务时 `task_id: null, status: "idle"` —— 前端据此停轮询。
-    `last_result` 是最近一次已完成任务的结果（含部分完成时的 warning 文案）。
-    `progress.total` 缺值时为 `null`（不造 0，前端显示「-」）。
+    任务本身不再存在（`system.note_sync` 已从注册表摘除），前端也不再轮询；
+    保留端点只为让旧版页面拿到「功能已移除」而不是裸 404。
     """
-    account = _get_owned_active_account(db, current_user, account_id)
-    if account.platform != "xhs":
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
-    return sync_task_service.status_payload(
-        db,
-        NOTE_SYNC_TASK_TYPE,
-        account.id,
-        # 账号卡「同步中」按**该账号最新一条同步日志**判（2026-09-27 用户口径
-        # 「账号信息卡的判断逻辑应只需要关注最新一条的同步笔记任务日志的状态即可」）。
-        user_id=current_user.id,
-        job_key=JOB_KEY_NOTE_SYNC,
-    )
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=_NOTE_SYNC_GONE)
 
 
-@router.get("/{account_id}/goods-notes/sync/status")
-def account_goods_note_sync_status(
-    account_id: int,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """**商品笔记**同步的进度查询（前端每 5 秒轮询；§44）。
+@router.get("/{account_id}/goods-notes/sync/status", include_in_schema=False)
+def account_goods_note_sync_status(account_id: int, current_user: User = Depends(get_current_user)):
+    """**410 墓碑** —— 「同步商品笔记」同批退场（设计 75 S4）。
 
-    与 `…/notes/sync/status` **逐字同构**，只换两条判据来源：任务类型
-    `xhs_goods_note_sync` + 日志流 `system.goods_note_sync`。
-
-    ⚠️ 两条日志流**互相独立** ⇒ 普通笔记在跑**不影响**商品笔记按钮的「同步中」态
-    （反之亦然）—— 这正是拆分要的行为，别再合并回一个 job_key。
+    商品笔记的挂链关系改为实时查（`rt.list_goods_notes`），本地映射表
+    `shop_note_goods` 已随迁移 `n8o9p0q1r2s3` DROP ⇒ 没有「同步进度」可查。
     """
-    account = _get_owned_active_account(db, current_user, account_id)
-    if account.platform != "xhs":
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
-    return sync_task_service.status_payload(
-        db,
-        GOODS_NOTE_SYNC_TASK_TYPE,
-        account.id,
-        user_id=current_user.id,
-        job_key=JOB_KEY_GOODS_NOTE_SYNC,
-    )
+    raise HTTPException(status_code=status.HTTP_410_GONE, detail=_NOTE_SYNC_GONE)
 
 
 # ⚠️ **`POST /accounts/{account_id}/notes/hydrate-pending` 已移除**（2026-09-27 用户口径：

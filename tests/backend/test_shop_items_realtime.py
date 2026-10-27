@@ -506,10 +506,13 @@ def test_retired_sync_job_is_gone_from_registry_and_seed():
 
     registry = job_registry()
     assert "system.shop_goods_sync" not in registry
-    #: 反面对照：同域**未退场**的同步任务仍在（避免「整片删空」式假绿）。
-    #: ⚠️ `system.order_sync` 也被设计 75 S3 摘除了（订单域全实时），
-    #: 所以这里只留仍在的 `goods_note_sync`（笔记同步属于 S4 范围）。
-    assert "system.goods_note_sync" in registry
+    #: 设计 75 S4 同批摘除的两个笔记同步任务也必须不在。
+    assert "system.note_sync" not in registry
+    assert "system.goods_note_sync" not in registry
+    #: 反面对照：**仍在使用**的同步任务必须还在（避免「整片删空」式假绿）。
+    #: `system.note_data_sync` 是**数据中心指标同步**（butterfly → note_datacenter_stats），
+    #: 与笔记同步是两件事，S4 明确保留 —— 它被误删不会报错，几周后才会发现没数据。
+    assert "system.note_data_sync" in registry
 
     seed = json.loads(
         (__import__("pathlib").Path(__file__).resolve().parents[2]
@@ -517,6 +520,9 @@ def test_retired_sync_job_is_gone_from_registry_and_seed():
     )
     keys = {row["job_key"] for row in seed["scheduled_jobs"]}
     assert "system.shop_goods_sync" not in keys
+    assert "system.note_sync" not in keys
+    assert "system.goods_note_sync" not in keys
+    assert "system.note_data_sync" in keys
 
 
 @pytest.mark.parametrize(

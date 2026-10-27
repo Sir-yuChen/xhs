@@ -21,8 +21,6 @@ from typing import Any, Callable, Optional
 #: 内置任务键（**唯一真相源**）：API 层按 key 定位任务行（账号卡定向执行，
 #: 设计 13 §35.17.2 的 `run_targeted_job`）时引用这里，**不要在别处再写一遍字面量** ——
 #: 漂移后要么 `get_job_spec` 抛 `KeyError`，要么更糟：悄悄定位到另一个任务。
-JOB_KEY_NOTE_SYNC = "system.note_sync"
-JOB_KEY_GOODS_NOTE_SYNC = "system.goods_note_sync"
 JOB_KEY_SHOP_GOODS_SYNC = "system.shop_goods_sync"
 #: **已退场**（设计 75 S3，2026-10-27）：订单域改实时查询，不再有「同步订单」任务。
 #: 常量保留是给迁移按 key 找历史 `scheduled_jobs` 行（置 paused）与 `_shared` 转发用。
@@ -224,33 +222,6 @@ def _build_registry() -> dict[str, JobSpec]:
             key="system.qianfan_health_check",
             name="千帆登录态巡检",
             func=run_shop_health_checks_once,
-            builtin=True,
-            user_scoped=True,
-            params_editable=("account_ids",),
-            params_defaults={"account_ids": []},
-            default_trigger_type="cron",
-            default_cron="0 0 */6 * * *",
-        ),
-        JobSpec(
-            key=JOB_KEY_NOTE_SYNC,
-            name="账号笔记同步",
-            func=scheduler_service.run_scheduled_note_syncs,
-            builtin=True,
-            user_scoped=True,
-            params_editable=("account_ids",),
-            params_defaults={"account_ids": []},
-            default_trigger_type="cron",
-            default_cron="0 0 */6 * * *",
-        ),
-        JobSpec(
-            key=JOB_KEY_GOODS_NOTE_SYNC,
-            # §44（2026-09-30）：商品笔记同步（千帆 goods-note/list 的挂链笔记）——
-            # 由原「账号笔记同步」的混合双源拆出的独立任务，与 JOB_KEY_NOTE_SYNC
-            # （普通笔记，creator 源）各自成行：各自 cron、各自 account_ids、各自日志流。
-            # ⚠️ 名字里必须带「商品笔记」四字 —— 它与 `JOB_KEY_SHOP_GOODS_SYNC`
-            # （**店铺商品台账**，SKU / 价格）不是一回事。
-            name="账号商品笔记同步",
-            func=scheduler_service.run_scheduled_goods_note_syncs,
             builtin=True,
             user_scoped=True,
             params_editable=("account_ids",),

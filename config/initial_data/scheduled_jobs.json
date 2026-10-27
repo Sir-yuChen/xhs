@@ -1,146 +1,120 @@
 {
- "_comment": "应用初始化数据 · 定时任务（设计 15 §4.5）。随安装包分发（packaging/build.ps1 组装 + SpiderXHS.spec 兜底），应用启动时据此铺设 scheduled_jobs 行 —— 装完打开「定时任务中心」即有此批任务。语义：只补『缺失的内置行』，已存在的行一律不覆盖（升级不会重置用户在任务中心调过的配置）。改任务清单改本文件，不要改迁移、也不要写死在代码里。",
- "version": 1,
- "scheduled_jobs": [
-  {
-   "job_key": "system.due_publish",
-   "name": "定时发布补跑",
-   "trigger_type": "cron",
-   "cron_expression": "0 * * * * *",
-   "misfire_policy": "once",
-   "concurrent": "forbid",
-   "params": {},
-   "status": "active",
-   "remark": "系统内置任务"
-  },
-  {
-   "job_key": "system.monitoring_refresh",
-   "name": "监控目标刷新",
-   "trigger_type": "cron",
-   "cron_expression": "0 */5 * * * *",
-   "misfire_policy": "once",
-   "concurrent": "forbid",
-   "params": {},
-   "status": "active",
-   "remark": "系统内置任务"
-  },
-  {
-   "job_key": "system.cookie_health_check",
-   "name": "账号 Cookie 巡检",
-   "trigger_type": "cron",
-   "cron_expression": "0 0 * * * *",
-   "misfire_policy": "once",
-   "concurrent": "forbid",
-   "params": {},
-   "status": "active",
-   "remark": "系统内置任务"
-  },
-  {
-   "job_key": "system.qianfan_health_check",
-   "name": "千帆登录态巡检",
-   "trigger_type": "cron",
-   "cron_expression": "0 0 * * * *",
-   "misfire_policy": "once",
-   "concurrent": "forbid",
-   "params": {},
-   "status": "active",
-   "remark": "系统内置任务"
-  },
-  {
-   "job_key": "system.note_sync",
-   "name": "账号笔记同步",
-   "trigger_type": "cron",
-   "cron_expression": "0 0 4 * * *",
-   "misfire_policy": "once",
-   "concurrent": "forbid",
-   "params": {
-    "account_ids": []
-   },
-   "status": "active",
-   "remark": "系统内置任务"
-  },
-  {
-   "job_key": "system.goods_note_sync",
-   "name": "账号商品笔记同步",
-   "trigger_type": "cron",
-   "cron_expression": "0 0 5 * * *",
-   "misfire_policy": "once",
-   "concurrent": "forbid",
-   "params": {
-    "account_ids": []
-   },
-   "status": "active",
-   "remark": "系统内置任务"
-  },
-  {
-   "job_key": "system.queue_record_cleanup",
-   "name": "清理记录表",
-   "trigger_type": "cron",
-   "cron_expression": "0 0 7 * * *",
-   "misfire_policy": "once",
-   "concurrent": "forbid",
-   "params": {
-    "retention_days": 15
-   },
-   "status": "active",
-   "remark": "系统内置任务"
-  },
-  {
-   "job_key": "system.note_data_sync",
-   "name": "数据中心笔记指标同步",
-   "trigger_type": "cron",
-   "cron_expression": "0 0 */6 * * *",
-   "misfire_policy": "once",
-   "concurrent": "forbid",
-   "params": {
-    "account_ids": []
-   },
-   "status": "active",
-   "remark": "系统内置任务"
-  },
-  {
-   "job_key": "system.business_note_auto_publish",
-   "name": "每日发布商业笔记",
-   "trigger_type": "cron",
-   "cron_expression": "0 0 9 * * *",
-   "misfire_policy": "once",
-   "concurrent": "forbid",
-   "params": {
-    "account_ids": [],
-    "limit": 1,
-    "interval_seconds": 30,
-    "generate_mode": "qianfan",
-    "retry_on_failure": true,
-    "max_retries": 3,
-    "retry_interval_seconds": 30
-   },
-   "status": "active",
-   "remark": "系统内置任务"
-  },
-  {
-   "job_key": "system.picture_space_cleanup",
-   "name": "清理未引用图片",
-   "trigger_type": "cron",
-   "cron_expression": "0 0 0 * * MON",
-   "misfire_policy": "once",
-   "concurrent": "forbid",
-   "params": {
-    "account_ids": [],
-    "delete_mode": "permanent"
-   },
-   "status": "paused",
-   "remark": "系统内置任务"
-  },
-  {
-   "job_key": "system.package_staging_cleanup",
-   "name": "清理数据包暂存",
-   "trigger_type": "cron",
-   "cron_expression": "0 0 * * * *",
-   "misfire_policy": "once",
-   "concurrent": "forbid",
-   "params": {},
-   "status": "active",
-   "remark": "系统内置任务：删除超过 2 小时（STAGING_TTL）的数据包暂存目录"
-  }
- ]
+  "_comment": "应用初始化数据 · 定时任务（设计 15 §4.5）。随安装包分发（packaging/build.ps1 组装 + SpiderXHS.spec 兜底），应用启动时据此铺设 scheduled_jobs 行 —— 装完打开「定时任务中心」即有此批任务。语义：只补『缺失的内置行』，已存在的行一律不覆盖（升级不会重置用户在任务中心调过的配置）。改任务清单改本文件，不要改迁移、也不要写死在代码里。",
+  "version": 1,
+  "scheduled_jobs": [
+    {
+      "job_key": "system.due_publish",
+      "name": "定时发布补跑",
+      "trigger_type": "cron",
+      "cron_expression": "0 * * * * *",
+      "misfire_policy": "once",
+      "concurrent": "forbid",
+      "params": {},
+      "status": "active",
+      "remark": "系统内置任务"
+    },
+    {
+      "job_key": "system.monitoring_refresh",
+      "name": "监控目标刷新",
+      "trigger_type": "cron",
+      "cron_expression": "0 */5 * * * *",
+      "misfire_policy": "once",
+      "concurrent": "forbid",
+      "params": {},
+      "status": "active",
+      "remark": "系统内置任务"
+    },
+    {
+      "job_key": "system.cookie_health_check",
+      "name": "账号 Cookie 巡检",
+      "trigger_type": "cron",
+      "cron_expression": "0 0 * * * *",
+      "misfire_policy": "once",
+      "concurrent": "forbid",
+      "params": {},
+      "status": "active",
+      "remark": "系统内置任务"
+    },
+    {
+      "job_key": "system.qianfan_health_check",
+      "name": "千帆登录态巡检",
+      "trigger_type": "cron",
+      "cron_expression": "0 0 * * * *",
+      "misfire_policy": "once",
+      "concurrent": "forbid",
+      "params": {},
+      "status": "active",
+      "remark": "系统内置任务"
+    },
+    {
+      "job_key": "system.queue_record_cleanup",
+      "name": "清理记录表",
+      "trigger_type": "cron",
+      "cron_expression": "0 0 7 * * *",
+      "misfire_policy": "once",
+      "concurrent": "forbid",
+      "params": {
+        "retention_days": 15
+      },
+      "status": "active",
+      "remark": "系统内置任务"
+    },
+    {
+      "job_key": "system.note_data_sync",
+      "name": "数据中心笔记指标同步",
+      "trigger_type": "cron",
+      "cron_expression": "0 0 */6 * * *",
+      "misfire_policy": "once",
+      "concurrent": "forbid",
+      "params": {
+        "account_ids": []
+      },
+      "status": "active",
+      "remark": "系统内置任务"
+    },
+    {
+      "job_key": "system.business_note_auto_publish",
+      "name": "每日发布商业笔记",
+      "trigger_type": "cron",
+      "cron_expression": "0 0 9 * * *",
+      "misfire_policy": "once",
+      "concurrent": "forbid",
+      "params": {
+        "account_ids": [],
+        "limit": 1,
+        "interval_seconds": 30,
+        "generate_mode": "qianfan",
+        "retry_on_failure": true,
+        "max_retries": 3,
+        "retry_interval_seconds": 30
+      },
+      "status": "active",
+      "remark": "系统内置任务"
+    },
+    {
+      "job_key": "system.picture_space_cleanup",
+      "name": "清理未引用图片",
+      "trigger_type": "cron",
+      "cron_expression": "0 0 0 * * MON",
+      "misfire_policy": "once",
+      "concurrent": "forbid",
+      "params": {
+        "account_ids": [],
+        "delete_mode": "permanent"
+      },
+      "status": "paused",
+      "remark": "系统内置任务"
+    },
+    {
+      "job_key": "system.package_staging_cleanup",
+      "name": "清理数据包暂存",
+      "trigger_type": "cron",
+      "cron_expression": "0 0 * * * *",
+      "misfire_policy": "once",
+      "concurrent": "forbid",
+      "params": {},
+      "status": "active",
+      "remark": "系统内置任务：删除超过 2 小时（STAGING_TTL）的数据包暂存目录"
+    }
+  ]
 }

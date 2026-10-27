@@ -503,32 +503,6 @@
       "parent_seq": 37
     },
     {
-      "_seq": 41,
-      "name": "同步笔记",
-      "menu_type": "F",
-      "path": "",
-      "perms": "xhs:note:sync",
-      "icon": "",
-      "workspace": "",
-      "sort_order": 0,
-      "is_visible": true,
-      "status": "normal",
-      "parent_seq": 40
-    },
-    {
-      "_seq": 42,
-      "name": "批量同步",
-      "menu_type": "F",
-      "path": "",
-      "perms": "xhs:note:batchSync",
-      "icon": "",
-      "workspace": "",
-      "sort_order": 1,
-      "is_visible": true,
-      "status": "normal",
-      "parent_seq": 40
-    },
-    {
       "_seq": 43,
       "name": "新建笔记",
       "menu_type": "F",
@@ -628,19 +602,6 @@
       "icon": "",
       "workspace": "",
       "sort_order": 3,
-      "is_visible": true,
-      "status": "normal",
-      "parent_seq": 46
-    },
-    {
-      "_seq": 51,
-      "name": "同步数据",
-      "menu_type": "F",
-      "path": "",
-      "perms": "xhs:library:syncData",
-      "icon": "",
-      "workspace": "",
-      "sort_order": 4,
       "is_visible": true,
       "status": "normal",
       "parent_seq": 46
