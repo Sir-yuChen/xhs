@@ -1732,13 +1732,55 @@ def _execute_publish(db: Session, note: Note, adapter) -> dict:
         )
     _cleanup_temp_dir(local_note_id)
     logger.info("note published (note_pk=%s -> %s)", note.id, platform_note_id)
+    #: ⚠️ 先把返回值要用的字段取出来 —— 下面 `_purge_published_note` 会把行删掉，
+    #: 删完再读 `note.id` / `note.published_at` 是已失效对象（DetachedInstanceError
+    #: 或拿到 None），而这两个值要随响应返回给前端。
+    published_note_pk = int(note.id)
+    published_at_text = (
+        note.published_at.strftime("%Y-%m-%d %H:%M:%S") if note.published_at else ""
+    )
+    _purge_published_note(db, note)
     return {
         "ok": True,
-        "note_pk": note.id,
+        "note_pk": published_note_pk,
         "note_id": platform_note_id,
         "platform_note_id": platform_note_id,
-        "published_at": note.published_at.strftime("%Y-%m-%d %H:%M:%S") if note.published_at else "",
+        "published_at": published_at_text,
     }
+
+
+def _purge_published_note(db: Session, note: Note) -> None:
+    """发布成功后**物理删除本地笔记行**（2026-10-27 用户口径）。
+
+    口径原文：「只显示用户本地生成未发布的笔记，已发布的笔记不展示在内容库中，
+    应到我的笔记页查看实时数据」+「物理删除，会更新」。
+
+    为什么删而不是留：发布成功 = 这条本地草稿的**使命已完成**，它的实时数据
+    （阅读 / 赞藏评 / 挂链商品）由「我的笔记」页走平台实时查询，本地无需再存
+    一份 —— 留着只会出现「库里一篇已发布笔记出现在待发布的地方」。
+
+    ⚠️ **失败不许把发布判成失败**：平台已经发出去了，那是既成事实。删本地失败
+    只能记 warning（行留下，下次由内容库的 `publish_status` 过滤兜住不展示），
+    绝不能冒泡成「发布失败」让用户重发。
+
+    ⚠️ 删除链走 :func:`purge_note`（唯一实现）—— 它负责清 6 张从属表；
+    自己写 `db.delete(note)` 会撞外键（`note_generation_links` 尤其：本地生成
+    笔记几乎都有这条）。
+
+    调用方已 commit 过成功回写，这里独立提交一次删除。
+    """
+    from backend.app.services.note_purge_service import purge_note
+
+    note_pk = int(note.id)
+    try:
+        purge_note(db, note)
+        db.commit()
+        logger.info("published note purged locally (note_pk=%s)", note_pk)
+    except Exception as error:  # noqa: BLE001 - 发布已成功，删除失败只降级记录
+        db.rollback()
+        logger.warning(
+            "note published but local purge failed (note_pk=%s): %s", note_pk, error
+        )
 
 
 def publish_queue_snapshot(db: Session, user_id: int, *, platform: Optional[str] = None) -> dict:

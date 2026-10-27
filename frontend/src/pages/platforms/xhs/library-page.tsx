@@ -3,7 +3,6 @@ import { hasPermission } from "../../../hooks/use-permission";
 import {
   BookOutlined,
   CheckSquareOutlined,
-  CloudSyncOutlined,
   CopyOutlined,
   DatabaseOutlined,
   DeleteOutlined,
@@ -23,7 +22,6 @@ import {
   ShareAltOutlined,
   ShoppingOutlined,
   StarOutlined,
-  SyncOutlined,
 } from "@ant-design/icons";
 import {
   Alert,
@@ -66,24 +64,18 @@ import { useThemePalette } from "../../../app/providers";
 import {
   batchCreateDraftsFromNotes,
   batchPublishSavedNotes,
-  batchSyncSavedNotes,
   createDraftFromNote,
   deleteSavedNote,
-  downloadExportFile,
-  exportSavedNotes,
   fetchAccounts,
   fetchPublishQueue,
   fetchSavedNote,
   fetchSavedNoteAssets,
   fetchSavedNotes,
-  fetchSyncQueue,
   fetchTopics,
   publishSavedNote,
-  syncSavedNote,
   updateSavedNotePublishStatus,
   updateSavedNoteTopics,
   EMPTY_QUEUE_TODAY_COUNTS,
-  EMPTY_SYNC_QUEUE_SNAPSHOT,
 } from "../../../lib/api";
 import { fenPriceText } from "../../../lib/format";
 import { useAccountScope } from "../../../lib/account-scope";
@@ -112,14 +104,13 @@ import { formatShanghaiTime } from "../../../lib/time";
 import {
   NOTE_TYPE_FILTER_OPTIONS,
   accountFilterLabel,
-  canSyncNote,
   noteTypeLabel,
   noteTypeTagColor,
   splitSyncTargets,
   type NoteTypeFilter,
 } from "../../../lib/note-filters";
-import type { NoteAsset, NotesExportResponse, NoteTopic, PlatformAccount, SavedNote } from "../../../types";
-import type { PublishQueueSnapshot, SyncQueueFinishedEntry, SyncQueueSnapshot } from "../../../lib/api";
+import type { NoteAsset, NoteTopic, PlatformAccount, SavedNote } from "../../../types";
+import type { PublishQueueSnapshot } from "../../../lib/api";
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -409,11 +400,9 @@ export function XhsLibraryPage() {
   // 用户既看不出原因、也没有自救线索。
   const [detailFailure, setDetailFailure] = useState<QuietError | null>(null);
   // 「同步」按钮（§25）：**笔记卡片与详情卡都渲染**（仅三方同步笔记）。
-  // `syncingNoteId` 记「哪一条在同步中」—— 卡片与详情共用同一个 loading 语义。
   // ⚠️ 2026-09-25 用户口径「页面所有提示……均实现消息提示组件，不要占用页面布局」：
   // 原 `detailSyncFailure` 承载（预期内安静一行 / 真异常红块）**已移除** —— 同步失败
   // 统一由 `message.error` 报一次（`syncSavedNote` 是 `_silent`，展示权本在调用点）。
-  const [syncingNoteId, setSyncingNoteId] = useState<number | null>(null);
   // 「发布」按钮（设计 13 §31）：**笔记卡片与详情卡都渲染**（仅本地生成且
   // 待发布/发布失败的笔记）。`publishingNoteId` 记「哪一篇在发布中」——
   // 发布是几次平台请求量级的链路，loading 语义与同步分开（互不打断）。
@@ -436,19 +425,6 @@ export function XhsLibraryPage() {
   const trackedPublishIdsRef = useRef<Set<number>>(new Set());
   // 连续「本轮无任务」的轮数（见 `QUEUE_IDLE_ROUNDS_LIMIT`）。
   const publishIdleRoundsRef = useRef(0);
-  // 同步进度卡（2026-09-25 批量同步 + 队列，设计 13 §35；2026-09-26 常驻化）。
-  // 与发布进度卡**同一套骨架**（ref 与 state 同步、tracked 集合、离开队列即拉
-  // 终态回填）—— 两张卡是两件事，但轮询纪律只有一份。卡面三数同发布卡走
-  // 快照 `today`（原 `syncRound` 已删，理由同上）。
-  const [syncQueue, setSyncQueue] = useState<SyncQueueSnapshot>(EMPTY_SYNC_QUEUE_SNAPSHOT);
-  const syncQueueRef = useRef(syncQueue);
-  const syncPollRef = useRef<number | null>(null);
-  const trackedSyncIdsRef = useRef<Set<number>>(new Set());
-  const syncIdleRoundsRef = useRef(0);
-  // 已处理过的逐篇结果（按 note_pk 累积）：快照 `finished` 只回**近期**终态项，
-  // 累积一份才能把每条的结果都报一次、且不重复报。
-  const processedSyncResultsRef = useRef<Map<number, SyncQueueFinishedEntry>>(new Map());
-  const [isBatchSyncing, setIsBatchSyncing] = useState(false);
   const [isCreatingDraft, setIsCreatingDraft] = useState(false);
   // 话题字典候选（§34.4）：详情弹窗话题区「+ 添加话题」的 AutoComplete 下拉选项
   // （选已有话题 / 输入新名字 —— 后端 find-or-create，不再需要先建标签再关联）。
@@ -542,7 +518,6 @@ export function XhsLibraryPage() {
   // 非 `_silent` 的接口失败由全局拦截器弹 message；`syncSavedNote` 这类 `_silent` 的
   // 接口由调用点自己 `message.error`（展示权归调用点，§3.1.1）。
   const [isBatchWorking, setIsBatchWorking] = useState(false);
-  const [latestExport, setLatestExport] = useState<NotesExportResponse | null>(null);
   const [togglingStatusId, setTogglingStatusId] = useState<number | null>(null);
   // 「下拉自动加载更多」（2026-09-22 用户口径）：列表按页累加，滚到底部自动取下一页。
   // `hasMore` 由「已加载条数 < total」推，不额外问接口（少一次往返，也少一个能漂移的口径）。
@@ -633,14 +608,12 @@ export function XhsLibraryPage() {
     void loadTopics();
     void loadFilterAccounts();
     void refreshPublishQueue(); // 发布进度卡：进页面先拉一次（队列可能还有在跑的生产任务）
-    void refreshSyncQueue(); // 同步进度卡：同上（批量同步队列可能还有在跑的任务）
   }, []);
 
   // 发布轮询随页面卸载停（daemon 线程在后台照跑，但前端不再拉）。
   useEffect(
     () => () => {
       if (publishPollRef.current !== null) window.clearInterval(publishPollRef.current);
-      if (syncPollRef.current !== null) window.clearInterval(syncPollRef.current);
     },
     []
   );
@@ -806,45 +779,6 @@ export function XhsLibraryPage() {
     if (!selectedNote) return;
     try { await navigator.clipboard.writeText(`${selectedNote.title}\n\n${selectedNote.content}`.trim()); message.success("已复制标题和正文。"); }
     catch { message.error("复制失败。"); }
-  }
-
-  /**
-   * 「同步」按钮（设计 13 §25.4 / §35.10）：把这**一篇**加入同步队列，
-   * 由队列 worker 拉平台最新内容并落库。**笔记卡片与详情卡共用**这一个实现
-   * （同一语义不留两份）。
-   *
-   * ⚠️ 2026-09-25 用户口径「单独点击同步按钮也需要放入同步队列中执行，与批量同步
-   * 一致」：原实现是**同步阻塞**（点下去等平台请求回来再报结果），现在与批量走
-   * **同一个队列、同一个 worker**（顺序执行 = www 限流的第一道保障，两条链路不再
-   * 各打各的请求）。前端随之只报**入队回执**，终态（同步成功 / 失败 + 真实原因）
-   * 由轮询 `GET /notes/sync-queue` 的快照 `finished` 报一次 —— 与批量同一出口、
-   * 同一个轮询器（`trackSyncNotes` / `pollSyncQueue`）。
-   *
-   * 按钮的 loading 也顺势交给队列：入队后 `syncQueueNoteIds`（快照的 running +
-   * queued）即包含这一篇，卡片与详情的 `SyncOutlined spin` 直接跟着转，直到它
-   * 离开队列。
-   */
-  
-  async function syncNote(note: SavedNote) {
-    setSyncingNoteId(note.id);
-    try {
-      const r = await syncSavedNote(note.id);
-      replaceNoteInList(r.note);
-      if (selectedNote?.id === r.note.id) setSelectedNote(r.note);
-      const name = `「${r.note.title || "未命名"}」`;
-      await refreshSyncQueue(); // 入队后的最新位置（ref 已是新值）
-      if (r.sync.already_queued) {
-        message.info(`${name}已在同步队列中，进度见上方进度卡。`);
-      } else {
-        message.success(`${name}已加入同步队列，按顺序执行中，进度见上方进度卡。`);
-      }
-      trackSyncNotes([note.id]); // 终态由轮询报（与批量同一条路径）
-    } catch (e) {
-      // 真异常（含门禁不过的结构化 400 `NOTE_NOT_SYNCABLE`）：摆真实原因，不吞。
-      // `syncSavedNote` 是 `_silent` ⇒ 展示权在调用点，这里必须自己报。
-      const { message: reason } = readError(e);
-      message.error(`同步失败：${reason}`);
-    } finally { setSyncingNoteId(null); }
   }
 
   /**
@@ -1067,166 +1001,6 @@ export function XhsLibraryPage() {
     }
   }
 
-  // --------------------------------------------------------------------- //
-  // 批量同步（设计 13 §35）：门禁 → 入队 → 轮询收尾。与发布同一套骨架，
-  // 不同的是终态不在笔记行上（同步失败不落库）⇒ 结果从快照 `finished` 取。
-  // --------------------------------------------------------------------- //
-
-  /**
-   * 批量同步（设计 13 §35.2）：只同步选中里**已发布**的，跳过的明示。
-   *
-   * 门禁判据是 `splitSyncTargets`（`canBatchSyncNote`：仅 `published`）——
-   * 比单条「同步」按钮（`canSyncNote`：synced 或 published）严，用户口径
-   * 「只有已发布的支持被选中」。跳过数在确认框里明示，不静默丢。
-   */
-  function batchSyncSelected() {
-    const { targets, skipped } = splitSyncTargets(notes, selectedNoteIds);
-    if (!targets.length) {
-      message.warning("选中的笔记里没有已发布的");
-      return;
-    }
-    // ⚠️ `centered: true` 必须**逐点显式传**：`Modal.confirm` 走的是静态方法分支
-    //（`modal/confirm.js` 自建 ConfirmDialog），`ConfigProvider modal={{centered:true}}`
-    //（`providers.tsx` 里给的是 ConfigContext）**到不了它** ⇒ 不传就还是顶部对齐。
-    Modal.confirm({
-      centered: true,
-      title: `批量同步 ${targets.length} 篇笔记？`,
-      content: `逐篇加入同步队列，由后端按顺序拉取平台最新内容（正文 / 图集 / 视频地址，单项失败不阻断）。${
-        skipped > 0 ? `另有 ${skipped} 篇选中项未发布或发布失败，将跳过。` : ""
-      }`,
-      okText: "确认同步",
-      cancelText: "取消",
-      onOk: () => {
-        void batchSyncNotes(targets);
-      },
-    });
-  }
-
-  async function batchSyncNotes(targets: SavedNote[]) {
-    setIsBatchSyncing(true);
-    try {
-      const r = await batchSyncSavedNotes(targets.map((n) => n.id));
-      const enqueuedIds: number[] = [];
-      for (const item of r.results) {
-        if (item.ok) enqueuedIds.push(item.note_pk);
-      }
-      await refreshSyncQueue(); // 入队后的最新位置（ref 已是新值）
-      const rejected = r.results.filter((item) => !item.ok);
-      const parts = [`已加入同步队列 ${r.started} 篇，按顺序执行中，进度见上方进度卡。`];
-      if (rejected.length) {
-        parts.push(
-          `${rejected.length} 篇不满足同步条件已跳过（${rejected.map((i) => i.error || "原因未知").join("；")}）。`
-        );
-      }
-      if (rejected.length) message.warning(parts.join("")); else message.success(parts.join(""));
-      if (enqueuedIds.length) trackSyncNotes(enqueuedIds);
-      else setIsBatchSyncing(false);
-    } catch {
-      // 提示归全局拦截器（`batchSyncSavedNotes` 非 `_silent`）—— 2026-09-25 修：
-      // 原来这里把原因摆成页面 inline 红块（用户看到「批量操作失败 Method Not
-      // Allowed」占版面那条），现按用户口径只留 message 一条。
-      setIsBatchSyncing(false);
-    }
-  }
-
-  /** 拉一次同步进度快照（失败安静略过 —— 下一轮轮询会重试）。 */
-  async function refreshSyncQueue() {
-    try {
-      const snapshot = await fetchSyncQueue();
-      syncQueueRef.current = snapshot;
-      setSyncQueue(snapshot);
-    } catch {
-      // 预期内失败：安静（失败三分法），不打断同步
-    }
-  }
-
-  /** 起轮询（5s 一轮，2026-09-25 用户口径「数据 5 秒更新一次」）：直到**待同步为 0**。
-   *
-   * 2026-09-26 当日口径后本页**不再有「轮次记账」**（卡面三数是快照 `today`，后端
-   * 按当日 `tasks` 行现算）—— 这里只管轮询起停与逐篇结果消息。
-   */
-  function trackSyncNotes(ids: number[]) {
-    for (const id of ids) trackedSyncIdsRef.current.add(id);
-    if (syncPollRef.current === null) {
-      syncPollRef.current = window.setInterval(() => {
-        void pollSyncQueue();
-      }, QUEUE_POLL_INTERVAL_MS);
-    }
-  }
-
-  function stopSyncPolling() {
-    if (syncPollRef.current !== null) {
-      window.clearInterval(syncPollRef.current);
-      syncPollRef.current = null;
-    }
-    trackedSyncIdsRef.current.clear();
-    processedSyncResultsRef.current.clear();
-    syncIdleRoundsRef.current = 0;
-    setIsBatchSyncing(false);
-  }
-
-  /** 轮询一轮：刷新快照 → 累积逐篇结果 → 把离开队列的笔记拉新行回填 → 待同步为 0 则收尾。 */
-  async function pollSyncQueue() {
-    let snapshot: SyncQueueSnapshot;
-    try {
-      snapshot = await fetchSyncQueue();
-    } catch {
-      return; // 安静重试（下一轮）
-    }
-    syncQueueRef.current = snapshot;
-    setSyncQueue(snapshot);
-    // 累积逐篇结果：快照 `finished` 可能被新批次清空重开而变短，累积才能每条都报一次。
-    for (const entry of snapshot.finished) {
-      processedSyncResultsRef.current.set(entry.note_pk, entry);
-    }
-    const stillActive = new Set<number>([
-      ...(snapshot.running ? [snapshot.running.note_pk] : []),
-      ...snapshot.queued.map((q) => q.note_pk),
-    ]);
-    const finishedNow = [...trackedSyncIdsRef.current].filter((id) => !stillActive.has(id));
-    if (finishedNow.length) {
-      const updated = await Promise.all(
-        finishedNow.map((id) => fetchSavedNote(id).catch(() => null))
-      );
-      const okNotes: SavedNote[] = [];
-      const failNotes: SavedNote[] = [];
-      for (const u of updated) {
-        if (!u) continue;
-        trackedSyncIdsRef.current.delete(u.id);
-        replaceNoteInList(u);
-        if (selectedNote?.id === u.id) setSelectedNote(u);
-        const result = processedSyncResultsRef.current.get(u.id);
-        if (result && !result.ok) failNotes.push(u);
-        else if (result) okNotes.push(u);
-        // 第三种：离开了队列但拿不到结果（快照被新批次清空 / 进程重启）——
-        // 只刷新行，不宣称成功也不宣称失败（缺值口径：不造假）。
-      }
-      const parts: string[] = [];
-      if (okNotes.length) parts.push(`已同步 ${okNotes.length} 篇`);
-      if (failNotes.length) {
-        const reasons = failNotes
-          .map((u) => `《${u.title || "未命名"}》：${processedSyncResultsRef.current.get(u.id)?.reason || "平台未给原因"}`)
-          .join("；");
-        parts.push(`同步失败 ${failNotes.length} 篇（${reasons}）`);
-      }
-      // 逐篇结果消息（卡面三数不在这里算 —— 是快照 `today`）。
-      if (parts.length) {
-        const text = `${parts.join("；")}。`;
-        if (failNotes.length) message.warning(text); else message.success(text);
-      }
-    }
-    // 2026-09-25 用户口径「待同步数为 0 时，不再刷新统计数据」：停止条件从
-    // 「被跟踪的笔记全部离开队列」改成**待同步数为 0** —— 这同时修掉用户报的
-    // 「同步进度未更新」（旧形态首个快照里 tracked 若无活跃项就立刻停，数字再也
-    // 不动）。`total > 0` = 本轮确实跑过；空转兜底防定时器泄漏。
-    syncIdleRoundsRef.current = snapshot.total > 0 ? 0 : syncIdleRoundsRef.current + 1;
-    const pending = (snapshot.running ? 1 : 0) + snapshot.queued.length;
-    if ((snapshot.total > 0 && pending === 0) || syncIdleRoundsRef.current >= QUEUE_IDLE_ROUNDS_LIMIT) {
-      stopSyncPolling();
-      await loadNotes(); // 刷新列表统计（stats 与进度卡三数同源）
-    }
-  }
-
   async function createDraft(intent: "rewrite" | "publish") {
     if (!selectedNote) return; setIsCreatingDraft(true);
     try {
@@ -1297,13 +1071,6 @@ export function XhsLibraryPage() {
     catch { /* 提示归全局拦截器（非 `_silent`） */ } finally { setIsBatchWorking(false); }
   }
 
-  async function exportSelectedNotes(format: "json" | "csv") {
-    if (!selectedNoteIds.length) { message.warning("请先选择笔记。"); return; }
-    setIsBatchWorking(true);
-    try { const r = await exportSavedNotes({ note_ids: selectedNoteIds, format }); setLatestExport(r); message.success(`已导出 ${r.exported_count} 条笔记。`); }
-    catch { /* 提示归全局拦截器（非 `_silent`） */ } finally { setIsBatchWorking(false); }
-  }
-
   async function batchDeleteNotes() {
     if (!selectedNoteIds.length) return;
     setIsBatchWorking(true);
@@ -1318,12 +1085,6 @@ export function XhsLibraryPage() {
       await loadNotes();
     } catch { /* 提示归全局拦截器（非 `_silent`） */ }
     finally { setIsBatchWorking(false); }
-  }
-
-  async function downloadLatestExport() {
-    if (!latestExport) return; setIsBatchWorking(true);
-    try { await downloadExportFile(latestExport.download_url, latestExport.file_name); message.success(`已下载：${latestExport.file_name}`); }
-    catch { message.error("下载失败。"); } finally { setIsBatchWorking(false); }
   }
 
   // --------------------------------------------------------------------- //
@@ -1398,32 +1159,12 @@ export function XhsLibraryPage() {
   // 原 Tooltip（悬停看「正在发布哪篇 + 后面排几篇」）**已撤**，卡上只留三个数。
   const publishQueuePending = (publishQueue.running ? 1 : 0) + publishQueue.queued.length;
 
-  // --------------------------------------------------------------------- //
-  // 同步进度卡派生值（设计 13 §35.4）
-  // * `syncQueueNoteIds`：running + queued 的 note_pk 集合 —— 卡片 / 详情的
-  //   单条「同步」按钮对队列中的笔记同样转圈（同一动作不留两种呈现）；
-  // * `syncQueuePending`：同步队列的**实时**待处理数 —— **只喂轮询停止条件**
-  //   （卡面「待同步」是快照 `today.pending`）。
-  //   2026-09-25 用户口径「同步进度统计调整为，成功同步数 / 失败同步数 / 待同步数」
-  //   +「去掉 tip」⇒ 原 `syncPercent` 与 Tooltip **已撤**，卡上只留三个数。
-  // --------------------------------------------------------------------- //
-  const syncQueueNoteIds = useMemo(
-    () =>
-      new Set<number>([
-        ...(syncQueue.running ? [syncQueue.running.note_pk] : []),
-        ...syncQueue.queued.map((q) => q.note_pk),
-      ]),
-    [syncQueue]
-  );
-  const syncQueuePending = (syncQueue.running ? 1 : 0) + syncQueue.queued.length;
-
   // 两张进度卡的**卡面三数**（当日口径，2026-09-26 用户口径）。
   // `?? EMPTY_QUEUE_TODAY_COUNTS` 是形状兜底：`today` 是 2026-09-26 才加进快照的键，
   // 前端热更新撞上**还没重启的旧后端**时读到 `undefined` —— 直接取 `.ok` 会整页白屏。
   // 缺值按缺值口径渲染 0（后端漏发该键由 `test_progress_card_snapshots_carry_today_counts`
   // 在测试里钉死，不会静默漏）。
   const publishToday = publishQueue.today ?? EMPTY_QUEUE_TODAY_COUNTS;
-  const syncToday = syncQueue.today ?? EMPTY_QUEUE_TODAY_COUNTS;
 
   return (
     <div>
@@ -1487,30 +1228,6 @@ export function XhsLibraryPage() {
                   title="待发布"
                   value={publishToday.pending}
                   valueStyle={{ fontSize: 16, color: publishToday.pending > 0 ? "#1677ff" : undefined }}
-                />
-              </Space>
-              <Text style={{ ...STAT_CARD_TODAY_NOTE, color: token.colorTextSecondary }}>{TODAY_ONLY_NOTE}</Text>
-            </div>
-          </Card>
-        </Col>
-        {/*
-          同步进度（§35.4）：**当日三数** —— 同步成功 / 失败 / 待同步
-          （卡面取 `syncToday` = 快照 `today`，与发布卡同源同口径）。
-          轮询 5 秒一轮，**待同步（实时队列）为 0 即停**（`trackSyncNotes` 起、
-          `stopSyncPolling` 停）；要重新看进度就再发起一次同步。
-          2026-09-26 用户口径：卡片**不再带「同步进度」小标题**（与发布进度卡
-          同样处理，两张卡都只剩统计项 + 右下角当日说明）。
-        */}
-        <Col flex="1 1 0%" style={{ minWidth: 0 }}>
-          <Card size="small">
-            <div style={STAT_CARD_PROGRESS_CONTENT}>
-              <Space size={8}>
-                <Statistic title="同步成功" value={syncToday.ok} valueStyle={{ fontSize: 16, color: "#52c41a" }} />
-                <Statistic title="失败" value={syncToday.failed} valueStyle={{ fontSize: 16, color: "#ff4d4f" }} />
-                <Statistic
-                  title="待同步"
-                  value={syncToday.pending}
-                  valueStyle={{ fontSize: 16, color: syncToday.pending > 0 ? "#1677ff" : undefined }}
                 />
               </Space>
               <Text style={{ ...STAT_CARD_TODAY_NOTE, color: token.colorTextSecondary }}>{TODAY_ONLY_NOTE}</Text>
@@ -1630,21 +1347,6 @@ export function XhsLibraryPage() {
                   </Button>
                 </Tooltip>
               )}
-              {/* 批量同步（设计 13 §35）：只同步选中里**已发布**的（用户口径「只有已发布的
-                  支持被选中」），跳过的在确认框里明示；入队后按顺序执行，进度见上方进度卡。 */}
-              {hasPermission("xhs:note:batchSync") && (
-                <Tooltip title="把选中里已发布的笔记加入同步队列，拉取平台最新内容">
-                  <Button
-                    icon={<CloudSyncOutlined />}
-                    disabled={isBatchWorking || isBatchSyncing || !selectedNoteIds.length}
-                    loading={isBatchSyncing}
-                    onClick={() => void batchSyncSelected()}
-                    size="small"
-                  >
-                    批量同步
-                  </Button>
-                </Tooltip>
-              )}
               {/* 批量打标签的**界面入口已移除**（2026-09-23 用户口径
                   「把选择当前页中的标签下拉框移除」）。
 
@@ -1660,9 +1362,6 @@ export function XhsLibraryPage() {
                   原注释（保留备查）：「批量打标签：`batchTagNotes` 早就有了、
                   `applyBatchTag` 也早就写好了，但一直没有界面入口 —— 属于
                   『写好了没接线』，本轮补上。」⇒ **那一轮补的入口，本轮按用户口径撤掉。** */}
-              {hasPermission("xhs:library:export") && (<Button type="primary" icon={<DownloadOutlined />} disabled={isBatchWorking || !selectedNoteIds.length} onClick={() => exportSelectedNotes("json")} size="small">JSON</Button>)}
-              {hasPermission("xhs:library:export") && (<Button icon={<DownloadOutlined />} disabled={isBatchWorking || !selectedNoteIds.length} onClick={() => exportSelectedNotes("csv")} size="small">CSV</Button>)}
-              {latestExport && <Button icon={<DownloadOutlined />} disabled={isBatchWorking} onClick={downloadLatestExport} size="small">下载</Button>}
               {hasPermission("xhs:library:delete") && (
                 <Popconfirm title={`确定删除选中的 ${selectedNoteIds.length} 条笔记？`} onConfirm={batchDeleteNotes}>
                   <Button danger icon={<DeleteOutlined />} disabled={isBatchWorking || !selectedNoteIds.length} size="small">批量删除</Button>
@@ -1755,25 +1454,6 @@ export function XhsLibraryPage() {
                           loading={togglingStatusId === note.id}
                           onToggle={(next) => void togglePublishStatus(note, next)}
                         />
-                        {canSyncNote(note) && (
-                          <Button
-                            size="small"
-                            // 红色主按钮（用户口径）：红底白字在深色封面上正是可读组合。
-                            // 与详情弹窗的同步按钮同款 —— 同一动作不留两种呈现。
-                            danger
-                            type="primary"
-                            icon={<SyncOutlined spin={syncingNoteId === note.id || syncQueueNoteIds.has(note.id)} />}
-                            loading={syncingNoteId === note.id || syncQueueNoteIds.has(note.id)}
-                            disabled={
-                              syncingNoteId === note.id
-                              || syncQueueNoteIds.has(note.id)
-                              || (syncingNoteId !== null && syncingNoteId !== note.id)
-                            }
-                            onClick={(event) => { event.stopPropagation(); void syncNote(note); }}
-                          >
-                            同步
-                          </Button>
-                        )}
                         {canPublishNote(note) && (
                           // 异步 + 队列后**去掉**「别的笔记在发布就禁用」：点击只是入队
                           // （后端 worker 顺序执行），多发几篇会排队而不是互相打断。
@@ -2060,15 +1740,10 @@ export function XhsLibraryPage() {
               <Descriptions.Item label="基础信息">
                 <Space size={6} wrap>
                   <Tag icon={<FileTextOutlined />}>{getRawNoteType(selectedNote).includes("video") ? "视频" : "图文"}</Tag>
-                  {/* 笔记类型（§25）：解释「为什么这条有同步按钮、那条没有」。
-                      ⚠️ 旧实现把 `local_generated` 也显示成「本地」（两值 else 分支）——
-                      那与内容库新增的类型筛选下拉（三档）口径不一致，用户筛「本地生成」
-                      进详情却看到「本地」。改走 `noteTypeLabel`（与下拉同一份文案）。
-                      ⚠️ 2026-09-23：**配色也收敛到 `noteTypeTagColor`** —— 原先这里是
-                      内联三元（synced→blue / local_generated→purple / 其它→default），
-                      卡片封面右下角也要同一套颜色，再抄一遍就是两份实现（DEF-061 同型）。 */}
+                  {/* 笔记来源类型（标签文案与配色各一处实现：`noteTypeLabel` /
+                      `noteTypeTagColor`）。内容库已不再收录三方同步笔记，图标只有一种。 */}
                   <Tag
-                    icon={selectedNote.note_type === "synced" ? <CloudSyncOutlined /> : <DatabaseOutlined />}
+                    icon={<DatabaseOutlined />}
                     color={noteTypeTagColor(selectedNote.note_type)}
                   >
                     {noteTypeLabel(selectedNote.note_type)}
@@ -2212,24 +1887,6 @@ export function XhsLibraryPage() {
               >
                 刷新
               </Button>
-              {/* 「同步」（§25）：判定走 `canSyncNote`（唯一实现，与卡片同一函数）——
-                  用笔记 id 拉平台最新内容更新落库，逻辑与同步任务一致。 */}
-              {canSyncNote(selectedNote) && (
-                <Tooltip title="用这条笔记的 ID 拉取平台最新内容并更新本地">
-                  <Button
-                    icon={<SyncOutlined spin={syncingNoteId === selectedNote.id || syncQueueNoteIds.has(selectedNote.id)} />}
-                    onClick={() => void syncNote(selectedNote)}
-                    loading={syncingNoteId === selectedNote.id || syncQueueNoteIds.has(selectedNote.id)}
-                    size="small"
-                    // 红色主按钮：与笔记卡片上的同步按钮同款（§29.5）——
-                    // 同一个动作不留两种呈现。
-                    danger
-                    type="primary"
-                  >
-                    同步
-                  </Button>
-                </Tooltip>
-              )}
               <Button icon={<CopyOutlined />} onClick={copySelectedNote} size="small">复制内容</Button>
               {hasPermission("xhs:note:create") && (
                 <Button icon={<FileAddOutlined />} onClick={addToDrafts} loading={isCreatingDraft} size="small">加入草稿工坊</Button>

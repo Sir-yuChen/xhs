@@ -33,7 +33,6 @@ export const NOTE_TYPE_FILTER_VALUES: readonly string[] = [
 /** 笔记类型下拉（首项是「全部类型」= 不筛）。 */
 export const NOTE_TYPE_FILTER_OPTIONS: { value: NoteTypeFilter; label: string }[] = [
   { value: "", label: "全部类型" },
-  { value: "synced", label: "三方同步" },
   { value: "local_generated", label: "本地生成" },
   { value: "local", label: "本地采集" },
 ];

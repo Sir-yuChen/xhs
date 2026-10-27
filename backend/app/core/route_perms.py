@@ -154,7 +154,6 @@ ROUTE_PERMS: Final[dict[str, str]] = {
     "POST /api/notes/batch-publish": "xhs:publish:submit",
     "POST /api/notes/batch-save": "xhs:library:save",
     "POST /api/notes/batch-tag": "xhs:topic:edit",
-    "POST /api/notes/export": "xhs:library:export",
     "POST /api/notes/import-data": "xhs:library:importData",
     "POST /api/notes/sync-data": "xhs:library:syncData",
     "POST /api/notes/{note_id}/assets": "xhs:note:edit",

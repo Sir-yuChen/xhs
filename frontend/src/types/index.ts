@@ -1327,18 +1327,6 @@ export type BatchCreateDraftsResponse = {
   items: Draft[];
 };
 
-export type NotesExportPayload = {
-  note_ids: number[];
-  format?: "json" | "csv";
-};
-
-export type NotesExportResponse = {
-  exported_count: number;
-  file_name: string;
-  file_path: string;
-  download_url: string;
-};
-
 export type AnalyticsReportPayload = {
   note_ids?: number[];
   format?: "json";

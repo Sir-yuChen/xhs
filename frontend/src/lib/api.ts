@@ -70,8 +70,6 @@ import type {
   MonitoringTargetPayload,
   NoteAsset,
   NoteComment,
-  NotesExportPayload,
-  NotesExportResponse,
   Paginated,
   PlatformAccount,
   PlatformMeta,
@@ -540,50 +538,7 @@ export async function updateSavedNotePublishStatus(
 }
 
 /** 单条同步（内容库「同步」按钮）的结果载荷（设计 13 §25.4）。 */
-/**
- * 单条同步的**入队回执**（`POST /notes/{id}/sync`，2026-09-25 队列化后）。
- *
- * ⚠️ 2026-09-25 用户口径「单独点击同步按钮也需要放入同步队列中执行，与批量同步
- * 一致」⇒ 该端点从**同步阻塞执行**改为**入队即返回**，`sync` 字段随之从「同步的
- * 逐项结果」（`{status, content_updated, images_added, …}`）变成回执。
- *
- * 终态（同步成功 / 失败 + 真实原因）由 `GET /notes/sync-queue` 的快照 `finished`
- * 给一次 —— 与批量同步**同一个出口**（`SyncQueueFinishedEntry`），不另设一套。
- */
-export interface SavedNoteSyncEnqueueResult {
-  ok: true;
-  /** 恒为 `queued`（入队成功；终态不走这个字段）。 */
-  status: "queued";
-  /** 本地笔记主键（进度卡逐篇条目用的就是它）。 */
-  note_pk: number;
-  /** 平台笔记 ID（展示用）。 */
-  note_id: string;
-  /** 该篇**已在队列里**（幂等命中，不重复请求）。 */
-  already_queued?: boolean;
-}
 
-/**
- * 内容库「同步」按钮：把这篇**加入同步队列**（设计 13 §25.4 / §35.10）。
- *
- * 与批量同步**同一个队列、同一个 worker**（顺序执行 = www 限流的第一道保障），
- * 与定时任务同步笔记逻辑**同源**（后端 worker 复用 `hydrate_note_detail` 唯一实现）。
- * ⚠️ 2026-09-23 用户口径「已发布的笔记也支持同步笔记最新的三方数据」⇒ 判据
- * **`synced` 或 `publish_status == "published"`**（与前端 `canSyncNote` 同口径）。
- * 两者都不满足的笔记后端给结构化 400 **`NOTE_NOT_SYNCABLE`**。
- *
- * `_silent`：门禁失败的 400 要由调用点报（不弹全局 toast 双份）—— 调用点按
- * `message.error(readError(e).message)` 渲染真实原因。
- */
-export async function syncSavedNote(
-  noteId: number
-): Promise<{ note: SavedNote; sync: SavedNoteSyncEnqueueResult }> {
-  const response = await http.post<{ note: SavedNote; sync: SavedNoteSyncEnqueueResult }>(
-    `/notes/${noteId}/sync`,
-    {},
-    { _silent: true } as never
-  );
-  return response.data;
-}
 
 /**
  * 话题增删的**落库入口**（设计 13 §29.3 / §34.4）：整列替换，返回更新后的整行。
@@ -939,84 +894,6 @@ export interface NoteBatchSyncResult {
   results: NoteBatchSyncItem[];
 }
 
-/**
- * 批量「同步」（内容库批量操作区；设计 13 §35.2）。
- *
- * 门禁比单条「同步」按钮严：只收**已发布**的选中篇（与后端
- * `note_supports_batch_sync` 同口径，不达标篇带 `error`/`code` 进 `results`）。
- * 逐篇入队由后台**一个**线程顺序跑完（顺序执行 = www 限流的第二道保障）。
- * **立即返回**；终态由前端轮询 `fetchSyncQueue`（快照 `finished` 带逐篇结果
- * 与原因 —— 同步失败不落库到笔记行，没有 `publish_error` 那样的持久位）。
- */
-export async function batchSyncSavedNotes(noteIds: number[]): Promise<NoteBatchSyncResult> {
-  const response = await http.post<NoteBatchSyncResult>("/notes/batch-sync", {
-    note_ids: noteIds,
-  });
-  return response.data;
-}
-
-/** 同步进度卡的单篇条目（`GET /notes/sync-queue`）。 */
-export interface SyncQueueEntry {
-  note_pk: number;
-  title: string;
-  note_id: string;
-}
-
-/** 同步进度卡的逐篇结果（快照 `finished`；同步失败的原因只在这里给一次）。 */
-export interface SyncQueueFinishedEntry extends SyncQueueEntry {
-  ok: boolean;
-  /** 与 `hydrate_note_detail` 同源的状态（`ok` / `no_token` / `no_url` / `no_session` / `failed`）。 */
-  status: string;
-  /** 失败/跳过的真实原因（成功时为空串）。 */
-  reason: string;
-  /** 机器可读原因码（`WEB_SESSION_REQUIRED` 等；成功为空串）。 */
-  code: string;
-}
-
-/** 同步进度卡数据（`GET /notes/sync-queue`，2026-09-25 批量同步）。
-
- * 2026-09-26 常驻化（用户口径「不需要队列批次，队列是常驻」）：`running` /
- * `queued` / `total`（= 两者 + 近期终态数）+ `finished`（近期终态项，含 ok 与
- * reason —— 同步失败不落库到笔记行，原因只在这里给一次）。**没有 `synced` /
- * `failed` 计数**。
- *
- * ⚠️ 2026-09-26 再改口径（用户口径「只统计当日同步的数据……统计队列记录表中的
- * 数据」）：卡面三数改读 `today`（当日 `tasks` 行现算）。
- */
-export interface SyncQueueSnapshot {
-  /** 正在同步的那条（null = 空闲）。 */
-  running: SyncQueueEntry | null;
-  /** 排队中的（FIFO 序）。 */
-  queued: SyncQueueEntry[];
-  /** 队列规模 = running + queued + 近期终态数（进度卡停止条件「>0 且待处理为 0」用）。 */
-  total: number;
-  /** 近期已出结果的逐篇（含 ok 与 reason）。 */
-  finished: SyncQueueFinishedEntry[];
-  /** 当日三数（成功 / 失败 / 待处理）—— 卡面数字的来源（2026-09-26 口径）。 */
-  today: QueueTodayCounts;
-}
-
-/** 同步进度快照的**空闲初值**（页面首屏 / 轮询停止后用）。 */
-export const EMPTY_SYNC_QUEUE_SNAPSHOT: SyncQueueSnapshot = {
-  running: null,
-  queued: [],
-  total: 0,
-  finished: [],
-  today: { ...EMPTY_QUEUE_TODAY_COUNTS },
-};
-
-/**
- * 同步进度快照（内容库「同步进度卡」轮询用；设计 13 §35.3）。
- *
- * 前端在「有同步中 / 排队」时每几秒拉一次，队列空则停（与发布进度卡同一套骨架）。
- */
-export async function fetchSyncQueue(silent = true): Promise<SyncQueueSnapshot> {
-  const response = await http.get<SyncQueueSnapshot>("/notes/sync-queue", {
-    _silent: silent,
-  } as never);
-  return response.data;
-}
-
 /*
  * ⚠️ **详情补齐队列的前端接口已删除**（2026-09-27 用户口径：账号卡移除「补齐详情」，
  * 补齐能力并入「同步笔记」任务本身，设计 13 §35.18）。同时删掉的：
@@ -1084,23 +961,6 @@ export async function batchCreateDraftsFromNotes(
   return response.data;
 }
 
-export async function exportSavedNotes(payload: NotesExportPayload): Promise<NotesExportResponse> {
-  const response = await http.post<NotesExportResponse>("/notes/export", payload);
-  return response.data;
-}
-
-export async function downloadExportFile(downloadUrl: string, fileName: string): Promise<void> {
-  const endpoint = downloadUrl.startsWith("/api") ? downloadUrl.slice(4) : downloadUrl;
-  const response = await http.get<Blob>(endpoint, { responseType: "blob" });
-  const objectUrl = window.URL.createObjectURL(response.data);
-  const link = document.createElement("a");
-  link.href = objectUrl;
-  link.download = fileName;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  window.URL.revokeObjectURL(objectUrl);
-}
 
 export type UploadedFile = {
   file_name: string;
@@ -4517,7 +4377,7 @@ export function materialThumbUrl(thumbUrl: string): string {
  * ⚠️ 这与「缩略图端点不存在」是**两个独立的 bug**：补了端点之后，
  * `<img src>` 仍然取不到图 —— 用户反馈「素材库中图依旧未展示」正是这一层。
  *
- * 范式与 `downloadExportFile` 同源：走 axios（**拦截器自动带 token**）
+ * 范式：走 axios（**拦截器自动带 token**）
  * → `responseType: "blob"` → `createObjectURL`。
  *
  * ⚠️ **调用方负责 `revokeObjectURL`**（否则 blob 常驻内存；列表翻页会累积）。

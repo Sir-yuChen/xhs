@@ -22,6 +22,7 @@ from backend.app.models import (
     Note,
     NoteAsset,
     NoteComment,
+    NoteGenerationLink,
     NoteTopic,
 )
 from backend.app.models.monitoring import NoteMetricSnapshot
@@ -64,6 +65,11 @@ def purge_note(db: Session, note: Note) -> None:
     # `notes.id` 且**无 ON DELETE CASCADE** —— 不清理会让「删笔记」撞外键约束 500
     # （2026-10-06 批量删除实测抓到）。快照是笔记的派生数据，笔记没了跟着删。
     db.execute(delete(NoteMetricSnapshot).where(NoteMetricSnapshot.note_pk == note.id))
+    #: 生成版本桥（设计 42）：`note_generation_links.note_pk` 外键指向 `notes.id`
+    #: 且无 CASCADE。**发布成功后删笔记时必踩** —— 本地生成笔记几乎都有这条
+    #: （19 篇已发布里 18 篇有），漏清 = 删笔记撞外键 500。
+    #: 只删桥行，`generation_records` 不动（那是生成历史，笔记没了仍可查）。
+    db.execute(delete(NoteGenerationLink).where(NoteGenerationLink.note_pk == note.id))
     # 草稿只解除引用、不连坐：AI 草稿是用户资产，笔记没了它还在（§12）。
     db.query(AiDraft).filter(AiDraft.source_note_id == note.id).update({"source_note_id": None})
     db.delete(note)

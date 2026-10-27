@@ -37,6 +37,8 @@ from backend.app.models.note import (
     NOTE_TYPE_LOCAL,
     NOTE_TYPE_LOCAL_GENERATED,
     NOTE_TYPE_SYNCED,
+    LIBRARY_EXCLUDED_PUBLISH_STATUSES,
+    LIBRARY_NOTE_TYPES,
     PUBLISH_STATUS_FAILED,
     PUBLISH_STATUS_FILTER_GROUPS,
     PUBLISH_STATUS_PENDING,
@@ -93,9 +95,6 @@ class BatchCreateDraftsRequest(BaseModel):
     intent: str = Field(default="rewrite", max_length=32)
 
 
-class ExportNotesRequest(BaseModel):
-    note_ids: list[int] = Field(min_length=1)
-    format: Literal["json", "csv"] = "json"
 
 
 class UpdateNotePublishStatusRequest(BaseModel):
@@ -393,30 +392,6 @@ def _serialize_note_with_topics(
     return _serialize_note(db, note, relations)
 
 
-def _build_notes_csv(db: Session, notes: list[Note]) -> str:
-    output = io.StringIO()
-    fieldnames = ["note_id", "title", "author_name", "content", "topics", "published", "created_at"]
-    writer = csv.DictWriter(output, fieldnames=fieldnames)
-    writer.writeheader()
-    # 话题一次预取（§41.4）：导出是「用户选中的 N 篇」，逐篇查就是 N 次 ——
-    # 走与列表同一个 `_load_note_relations`（同一实现，不另开读法）。
-    relations = _load_note_relations(db, notes)
-    for note in notes:
-        # 话题列（§34.4）：原 `tags` 列 —— 标签表已并入话题表，数据同一份。
-        topics = ",".join(topic["name"] for topic in relations.topics.get(note.id, []))
-        writer.writerow(
-            {
-                "note_id": note.note_id,
-                "title": note.title,
-                "author_name": note.author_name,
-                "content": note.content,
-                "topics": topics,
-                # 与 API 字段同一表示（`true` / `false`），不留第二套写法。
-                "published": "true" if note.published else "false",
-                "created_at": note.created_at.isoformat(),
-            }
-        )
-    return output.getvalue()
 
 
 def _serialize_asset(asset: NoteAsset) -> dict:
@@ -724,6 +699,18 @@ def get_notes(
                 },
             )
         statement = statement.where(Note.note_type == type_key)
+    #: 内容库 = **只放还没发布出去的本地笔记**（2026-10-27 用户口径
+    #: 「只显示用户本地生成未发布的笔记，已发布的笔记不展示在内容库中，
+    #: 应到我的笔记页查看实时数据」）。
+    #:
+    #: 为什么在端点里再兜一道、而不是只靠发布成功后删行：删行是**事后的**，
+    #: 存量与旁路（手工改状态、老数据）仍可能留下已发布的本地行；库里放着
+    #: 一条已发布笔记却出现在「待发布」的地方，用户会以为它还没发。
+    #: 三方同步（`synced`）也不进内容库 —— 那个源已整条退场。
+    statement = statement.where(
+        Note.note_type.in_(LIBRARY_NOTE_TYPES),
+        Note.publish_status.not_in_(LIBRARY_EXCLUDED_PUBLISH_STATUSES),
+    )
     # ⚠️ `item_id`（按商品筛笔记）**参数已整条移除**（2026-10-27，设计 75 S5）。
     # 挂链关系改实时查千帆（`item_mix_search_word`），本地 `note_goods` /
     # `shop_note_goods` 两表已随迁移 `n8o9p0q1r2s3` DROP ⇒ 本地没有商品维度可筛。
@@ -2121,35 +2108,4 @@ def batch_tag_notes(
     return {
         "updated_count": len(notes),
         "items": [_serialize_note_with_topics(db, note) for note in notes],
-    }
-
-
-@router.post("/export")
-def export_notes(
-    payload: ExportNotesRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    notes = _get_unique_owned_notes(db, current_user, payload.note_ids)
-    export_dir = Path(get_settings().storage_dir) / "exports"
-    export_dir.mkdir(parents=True, exist_ok=True)
-    exported_at = shanghai_now()
-    file_name = f"xhs-notes-u{current_user.id}-{exported_at.strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}.{payload.format}"
-    file_path = export_dir / file_name
-    if payload.format == "csv":
-        file_path.write_text("\ufeff" + _build_notes_csv(db, notes), encoding="utf-8")
-    else:
-        export_payload = {
-            "platform": "xhs",
-            "format": payload.format,
-            "exported_at": exported_at.isoformat(),
-            "total": len(notes),
-            "items": [_serialize_note_with_topics(db, note) for note in notes],
-        }
-        file_path.write_text(json.dumps(export_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    return {
-        "exported_count": len(notes),
-        "file_name": file_name,
-        "file_path": str(file_path.resolve()),
-        "download_url": f"/api/files/exports/{file_name}",
     }

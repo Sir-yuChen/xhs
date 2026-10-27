@@ -70,6 +70,20 @@ PUBLISH_STATUS_FILTER_GROUPS: dict[str, tuple[str, ...]] = {
     PUBLISH_STATUS_FAILED: (PUBLISH_STATUS_FAILED,),
 }
 
+#: **内容库只放这两种来源的笔记**（2026-10-27 用户口径）。
+#: `synced`（三方同步搬来的）不进内容库 —— 那个源已整条退场，内容库只装
+#: 用户自己的东西：本地采集（`local`）与本地生成（`local_generated`）。
+LIBRARY_NOTE_TYPES: tuple[str, ...] = (NOTE_TYPE_LOCAL, NOTE_TYPE_LOCAL_GENERATED)
+
+#: **内容库排除的发布状态**（2026-10-27 用户口径：「已发布的笔记不展示在内容库中，
+#: 应到我的笔记页查看实时数据」）。
+#:
+#: ⚠️ 写成「排除 published」而不是「白名单 pending」：`failed`（发布失败、可重试）
+#: 属于**未发布**，用户要能在内容库里看到它并重发 —— 白名单写法会把它一起藏掉
+#: （实测存量 1 篇 failed 会被吞）。反过来，将来新增状态默认**可见**，
+#: 漏配的后果是「多显示一条」而不是「静默丢一条」。
+LIBRARY_EXCLUDED_PUBLISH_STATUSES: tuple[str, ...] = (PUBLISH_STATUS_PUBLISHED,)
+
 
 def set_note_publish_status(note: "Note", status: str, *, error: str = "") -> None:
     """**发布状态的唯一写入入口**（设计 13 §32.3.2）—— 同步 / 采集 / 手动切换 /
