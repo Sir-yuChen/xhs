@@ -182,43 +182,6 @@ class LlmGatewayModel(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=shanghai_now, onupdate=shanghai_now)
 
 
-class LlmGatewaySnapshot(Base):
-    """New API 用量快照（设计 17 §3.9，v1.3 定稿；⚠️ v1.6 废弃写入）。
-
-    语义：~~New API 数据看板 + `/api/log/stat` 统计 API 承载实时用量；项目侧**按日快照**
-    缓存到本地，供 XHS 前端「大模型用量」页展示~~。
-    ⚠️ **v1.6 取代（用户口径「两个数据库合并」）**：用量真相源改为本地
-    `LlmGatewayUsageLog` 台账，本表**不再写入**（历史行保留，仅向前兼容）。
-
-    唯一键 `(user_id, gateway_id, stat_date)`：每网关每日一行，upsert 幂等。
-    """
-
-    __tablename__ = "llm_gateway_snapshots"
-    __table_args__ = (
-        UniqueConstraint(
-            "user_id", "gateway_id", "stat_date",
-            name="uq_llm_gateway_snapshots_user_gateway_date",
-        ),
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
-    gateway_id: Mapped[int] = mapped_column(ForeignKey("llm_gateway_configs.id"), index=True, nullable=False)
-    stat_date: Mapped[date] = mapped_column(Date, nullable=False)
-    call_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    success_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    fail_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    #: 当日配额消耗（New API quota 单位）
-    total_quota: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    total_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    avg_latency_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    source: Mapped[str] = mapped_column(String(16), nullable=False, default="newapi")
-    #: 网关统计 API 原文快照（证据链）
-    raw_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=shanghai_now)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=shanghai_now, onupdate=shanghai_now)
-
-
 class LlmGatewayAlert(Base):
     """网关用量/健康预警规则（设计 17 §3.12，v1.6 新增）。
 

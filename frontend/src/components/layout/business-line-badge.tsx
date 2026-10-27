@@ -55,13 +55,8 @@ export function BusinessLineBadge() {
       <Tag color={LINE_COLORS[line]} style={{ margin: 0, borderRadius: 4 }}>
         {view.caption}
       </Tag>
-      {view.channel ? (
-        <span style={{ opacity: 0.65 }}>
-          本页读写的是本地库与{view.channelLabel}令牌
-        </span>
-      ) : (
-        <span style={{ opacity: 0.65 }}>该能力服务于整个平台，不属于任一业务线</span>
-      )}
+      {/* ⚠️ 「本页读写的是本地库与…令牌」那行说明**已移除**（2026-10-27 用户口径）。
+          它已经过时 —— 商品/订单/挂链改实时查平台后，本页不再「读写本地库」。 */}
 
     </div>
   );

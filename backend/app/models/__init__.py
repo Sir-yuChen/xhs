@@ -21,7 +21,6 @@ from backend.app.models.llm_gateway import (
     LlmGatewayAlert,
     LlmGatewayConfig,
     LlmGatewayModel,
-    LlmGatewaySnapshot,
     LlmGatewayUsageLog,
 )
 from backend.app.models.login_session import LoginSession
@@ -80,7 +79,6 @@ __all__ = [
     "LlmBusinessProvider",
     "LlmGatewayConfig",
     "LlmGatewayModel",
-    "LlmGatewaySnapshot",
     "LlmGatewayAlert",
     "LlmGatewayUsageLog",
     "LoginSession",
