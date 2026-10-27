@@ -1,3 +1,4 @@
+import { dictLabel, dictListClass } from "../../lib/system-dicts";
 import { useCallback, useEffect, useState } from "react";
 // 2026-10-26：静态导入的 message 不吃 ConfigProvider 主题（antd 官方不推荐），
 // 统一改用 App.useApp() 的实例（本仓纪律：所有消息提醒走 App.useApp）。
@@ -8,6 +9,10 @@ import { fetchTraceTimeline, type TraceEvent } from "../../lib/api";
 
 const { Text } = Typography;
 
+/**
+ * 来源的**镜像兜底** —— 展示走字典 `sys_log_source`（设计 63：枚举全量字典化）。
+ * label 与 list_class 都从字典取，这两份只在字典未加载时生效。
+ */
 const SOURCE_LABEL: Record<string, string> = {
   api: "端点",
   business: "业务",
@@ -19,6 +24,16 @@ const SOURCE_COLOR: Record<string, string> = {
   business: "green",
   job: "purple",
 };
+
+/** 来源中文名：字典赢。 */
+function sourceLabel(source: string): string {
+  return dictLabel("sys_log_source", source, SOURCE_LABEL) || source;
+}
+
+/** 来源标签色：字典 win（`list_class`）。 */
+function sourceColor(source: string): string {
+  return dictListClass("sys_log_source", source, SOURCE_COLOR);
+}
 
 const LEVEL_COLOR: Record<string, string> = {
   info: "default",
@@ -75,7 +90,7 @@ export function TraceTab({ traceId: incoming = "" }: { traceId?: string }) {
       dataIndex: "source",
       width: 80,
       render: (v: string) => (
-        <Tag color={SOURCE_COLOR[v] ?? "default"}>{SOURCE_LABEL[v] ?? v}</Tag>
+        <Tag color={sourceColor(v)}>{sourceLabel(v)}</Tag>
       ),
     },
     {
@@ -102,7 +117,7 @@ export function TraceTab({ traceId: incoming = "" }: { traceId?: string }) {
 
   const summary = traceId
     ? Object.entries(bySource)
-        .map(([k, n]) => `${SOURCE_LABEL[k] ?? k} ${n}`)
+        .map(([k, n]) => `${sourceLabel(k)} ${n}`)
         .join(" · ")
     : "";
 

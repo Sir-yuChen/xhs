@@ -1615,7 +1615,8 @@ export function XhsMyNotesPage() {
                   {/* ADR-021：店铺不再是实体 ⇒ 展示的其实是「账号昵称（千帆卖家名）」，
                       文案改为「账号」以免读者误以为存在独立店铺对象。 */}
                   账号 {goodsInfo.shop_name || "（未命名）"}
-                  {goodsInfo.synced_at ? ` · ${goodsInfo.synced_at}` : ""}
+                  {/* ⛔ 原「 · 上次同步于 X」已移除（2026-10-27）：笔记与商品均改
+                      平台实时查询，「同步于」这个概念不存在了（该字段恒空串）。 */}
                 </Text>
                 <Text type="secondary" style={{ fontSize: 12 }}>
                   {goodsInfo.health_checked_at || qianfanBinding?.health_checked_at

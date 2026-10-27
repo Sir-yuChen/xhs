@@ -253,7 +253,11 @@ class TestSegment2_MainPaths:
         note = result["items"][0]
         assert note["note_id"] == "N1" and note["read_count"] == 40
         assert note["note_flag"] == "goods_note"
-        assert note["goods"] == [{"item_id": "A1", "title": "商品甲", "image": ""}]
+        #: 挂载商品 4 个字段全留（2026-10-27 起 `variant_desc` 也要展示，
+        #: 前端「挂载商品」区用它渲染「规格」一行）。
+        assert note["goods"] == [
+            {"item_id": "A1", "title": "商品甲", "image": "", "variant_desc": ""}
+        ]
 
         _, kwargs = fake.calls[0]
         assert kwargs["item_mix_search_word"] == "A1"

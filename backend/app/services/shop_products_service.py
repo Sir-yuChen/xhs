@@ -24,6 +24,18 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+#: 千帆商品视频的**可直接播放**域名（2026-10-27 从商品编辑页 `<video>` 元素抓包得出）。
+#: ⚠️ 平台在 `videos[]` 里只给 `path`、不给 `link`，但拼这个域名就能播（实测 206 + ftypisom）。
+#: 别换成 `ros-preview`（那是**图片**签名域名，视频走它会 403）。
+ARK_VIDEO_HOST = "https://store.xiaohongshu.com"
+
+
+def _ark_video_url(path: str) -> str:
+    """对象存储 `path` → 可直接播放的 URL。空 path 返回空串（不造地址）。"""
+    key = (path or "").strip().lstrip("/")
+    if not key:
+        return ""
+    return f"{ARK_VIDEO_HOST}/{key}"
 
 def _first_text(*values: Any) -> str:
     for value in values:
@@ -102,6 +114,53 @@ def product_image_links(item: dict[str, Any]) -> list[str]:
             if link and link not in links:
                 links.append(link)
     return links
+
+
+def product_video_links(item: dict[str, Any]) -> list[dict[str, Any]]:
+    """**商品视频**（`raw_json.videos`）—— 2026-10-27 新增。
+
+    ⚠️ 改造前整条链路**都没取过 `videos`**（本地化时代也没取），平台明明下发了
+    视频（实测某商品 `videos` 1 条 / 13 秒 / 720x960）却从未展示。
+
+    ## 播放地址：`store.xiaohongshu.com/{path}`（2026-10-27 真机抓包得出）
+
+    平台在 `videos[]` 里**只给对象存储 `path`，不给 `link`**（对比图片对象是带
+    `link` 的），所以最初误判「视频要在服务端签名才能播」。实际不是 ——
+    在千帆商品编辑页抓 `<video>` 元素拿到的就是：
+
+    ```
+    https://store.xiaohongshu.com/arkgoods/<id>
+    ```
+
+    **无签名参数**，实测 `HTTP 206` + `ftypisom`（标准 MP4 头），可直接播放。
+
+    走过的弯路（记下来免得再试）：`sns-video-bd` / `qimg` / `ci` / `fe-video-qc`
+    等域名全 404；`ros-preview`（图片签名域名）与 `sns-video-qc` 是 **403**（需 sign）。
+    只有 `store.xiaohongshu.com` 通。
+    """
+    rows: list[dict[str, Any]] = []
+    for row in item.get("videos") or []:
+        if not isinstance(row, dict):
+            continue
+        path = _first_text(row.get("path"))
+        #: ⚠️ 用**归一化后**的地址判空：`path` 为 `"/"` 时 `_ark_video_url` 会返回空串，
+        #: 若这里只判原始 path 就会产出一条 `url` 为空的视频（前端渲染出黑框）。
+        url = _ark_video_url(path)
+        if not url:
+            continue
+        rows.append(
+            {
+                "path": path,
+                #: 可直接播放的地址（见 docstring 的抓包依据）；前端 `<video src>` 用。
+                "url": url,
+                "width": _int_or_none(row.get("width")),
+                "height": _int_or_none(row.get("height")),
+                "duration": _int_or_none(row.get("duration")),
+                "size": _int_or_none(row.get("size")),
+                "extension": _first_text(row.get("extension")),
+            }
+        )
+    return rows
 
 
 def detail_image_links(item: dict[str, Any]) -> list[str]:

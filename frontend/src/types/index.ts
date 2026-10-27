@@ -335,8 +335,8 @@ export type XhsGoodsSource = {
   status: string;
   status_message: string;
   shop_total: number;
-  synced_notes: number;
-  synced_at: string;
+  /* ⛔ `synced_notes` / `synced_at` 已删除（2026-10-27）：笔记与商品改平台实时查询后
+     「本地同步了多少条 / 上次同步于」这两个值恒 0 / 恒空串。 */
   /** 最近一次千帆登录态巡检时间（T-31）。 */
   health_checked_at?: string;
   /** 按需补齐（T-30）本次的结果：请求了几条 / 补到几条 / 失败原因。 */
@@ -354,8 +354,7 @@ export type XhsQianfanBinding = {
   status: string;
   status_message: string;
   goods_note_total: number;
-  synced_notes: number;
-  goods_synced_at: string;
+  /* ⛔ `synced_notes` / `goods_synced_at` 已删除（2026-10-27）：同上，恒 0 / 恒空串。 */
   /** 最近一次千帆登录态巡检时间（T-31）；空 = 从未巡检。 */
   health_checked_at?: string;
 };
@@ -425,11 +424,9 @@ export type XhsShopItem = {
   on_shelf_time: string;
   update_time: string;
   xsec_token: string;
-  /** M4：AI 采纳的标题（空 = 未采纳；标题列 Tooltip 展示对照）。
-   *  ⚠️ `group_id` / `group_name` 已随「彻底移除商品分组」退场（2026-10-05）。 */
-  ai_title?: string;
-  /** M4：AI 采纳的卖点。 */
-  ai_selling_point?: string;
+  /* ⛔ `ai_title` / `ai_selling_point` **已删除**（2026-10-27）：它们是「AI 采纳的
+     标题/卖点」的本地标注列，随 `shop_products` 整表 DROP 一起退场 —— 库里 0 个
+     非空值，也没有任何页面在读。`group_id` / `group_name` 更早退场（2026-10-05）。 */
   /** 2026-10-05 需求 8：该商品当前**可做的动作**（后端唯一判据下发）。 */
   allowed_actions?: ShopItemAllowedAction[];
 };
@@ -459,6 +456,11 @@ export type XhsShopItemsQuery = {
   note_count?: number;
   sort_field?: string;
   order?: "asc" | "desc";
+  /**
+   * 渠道商品筛选（千帆「商品类型」）：`false` = 普通商品（平台默认），`true` = 渠道品。
+   * 平台请求里该字段**恒发**，默认 `false` 与千帆自己发的完全一致。
+   */
+  is_channel?: boolean;
   // ⚠️ 分组筛选（`group_id`）已随「彻底移除商品分组」退场（2026-10-05）。
 };
 
@@ -466,22 +468,24 @@ export type XhsShopItemsQuery = {
 export type XhsNoteCountOp = "lt" | "lte" | "eq" | "gte" | "gt";
 
 /**
- * `POST /xhs/qianfan/item-notes` 的一条挂链笔记（**千帆实时查询**，设计 75 §2.3）。
+ * `POST /xhs/qianfan/item-notes` 的一条挂链笔记（**全实时**，2026-10-27）。
  *
- * 2026-10-27 起主数据源是平台（`goods-note/list?item_mix_search_word=<商品ID>`），
- * 本地 `note_goods` 关系表不再是判据 —— 关系不问平台就不知道有没有漏、有没有删。
- * 本地 `notes` 表只用来**补充**正文 / 图集 / 发布态这些平台不回的字段：
- * 「平台有、本地没有」的行 `detail_source = "platform"`、正文为空（缺值口径：不造假）。
+ * 平台 `goods-note/list?item_mix_search_word=<商品ID>` 给「有哪些笔记 + 标题 +
+ * 发布时间 + 互动数 + 挂载商品」；正文 / 图集 / 话题**不在这里**，点开某篇时
+ * 另查 `POST /note-detail`（切到哪篇查哪篇，一次一篇）。
+ *
+ * ⚠️ 本地 `notes` / `note_assets` / `note_goods` 都不参与（后两张表已 DROP），
+ * 所以**没有** `note_type` / `publish_status` / `synced_at` 这类本地状态字段 ——
+ * 平台不提供「这条笔记从哪同步来」的概念，硬渲染就是猜的。
  */
 export type XhsItemNote = {
   note_id: string;
   title: string;
-  /** 正文（关系表源新增；本地生成笔记的内容）。 */
+  /** 正文恒空串：只随 `POST /note-detail` 到（列表不做 N 次请求）。 */
   content: string;
   cover: string;
-  /** 图集（`note_assets` 的图片 URL，按 sort_order）。 */
+  /** 图集：列表只有封面这一张，完整图集在 `/note-detail`。 */
   images: string[];
-  /** 视频地址（有则视频笔记优先展示）。 */
   video_url: string;
   publish_time: string;
   browse_num: number | null;
@@ -490,18 +494,22 @@ export type XhsItemNote = {
   comment_num: number | null;
   share_num: number | null;
   note_url: string;
-  /** `synced` / `local` / `local_generated`（设计 13 §31：本地生成待发布笔记）。 */
-  note_type: string;
-  /** 发布状态机（仅 `local_generated` 有意义）：`""` / `pending` / `publishing` / `published` / `failed`。 */
-  publish_status: string;
-  /** 发布失败原因（平台原文；空 = 没失败过）。 */
-  publish_error: string;
-  synced_at: string;
+  /** 平台自报的笔记类型：`goods_note` = 商业笔记。**唯一可信标识**。 */
+  note_flag?: string;
   /**
-   * `local` = 本地有正文 / 图集可看全；`platform` = 平台有、本地没有（正文留空）。
-   * 页面据此打「仅平台」标签 —— 不让用户以为这些笔记本地丢了。
+   * 挂载商品（平台原文 `goods_infos[]`，4 个字段全留）。
+   *
+   * ⚠️ **只有这里有商品图与规格名** —— 详情接口的 `biz_relations` 两样都不给，
+   * 而且它的 `goods_id` 是 SKU ID（≠ `item_id`），不可相互顶替。
    */
-  detail_source?: "local" | "platform";
+  goods?: {
+    item_id: string;
+    title: string;
+    image: string;
+    variant_desc: string;
+    /** 最低可售 SKU 价（**分**）；`null` = 平台没返回（前端显示「未返回」，不填 0）。 */
+    price_fen: number | null;
+  }[];
 };
 
 export type XhsItemNotesResponse = {
@@ -512,10 +520,68 @@ export type XhsItemNotesResponse = {
   source?: "platform" | "platform_degraded" | string;
   /** 平台查询失败原因（空 = 成功）。**不静默**：页面要能说清「这次没问到平台」。 */
   error?: string;
-  /** 本地已映射的笔记数（覆盖率参考，不再是主数据源）。 */
-  synced_notes: number;
+  /* ⛔ `synced_notes` / `goods_synced_at` 已删除（2026-10-27）：`/item-notes` 已改
+     纯实时、不读本地表，不再回覆盖率数字。`goods_note_total` 由平台报。 */
   goods_note_total: number;
-  goods_synced_at: string;
+};
+
+/**
+ * **单篇笔记的实时详情**（`POST /xhs/qianfan/note-detail`，2026-10-27）。
+ *
+ * 用户口径：「笔记数据不再落库，应实时查询，所有笔记全部应是实时数据」。
+ * 与 `XhsItemNote` 的区别：那是**列表行**（标题 + 互动数），这是**正文页**。
+ * 平台侧对应千帆笔记编辑页 —— 正文 / 图集 / 话题 / 挂载商品都在这里。
+ */
+export type XhsNoteDetail = {
+  note_id: string;
+  title: string;
+  /** **正文全文**（平台 `desc`，编辑页「正文内容」框里那段）。 */
+  content: string;
+  /** 图集（已拼 `ci.xiaohongshu.com` 直链）。 */
+  images: string[];
+  cover: string;
+  video_url: string;
+  /** 发布时间：平台给 **Unix 秒**（不是毫秒、也不是格式化字符串）。 */
+  publish_time: number | null;
+  /** `normal` / 其他（平台 `type`）。 */
+  note_type: string;
+  /** 话题名列表。 */
+  hash_tags: string[];
+  /**
+   * 挂载商品（来自平台 `biz_relations` 的 `extra_info`）。
+   *
+   * ⚠️ `sku_id` 是**卖家 SKU ID**，`goods_id` 才是商品 ID —— 两者不是同一个东西
+   * （见设计 20 §笔记挂商品复盘）。
+   */
+  goods: {
+    sku_id: string;
+    /**
+     * 商品 ID：**从列表行核对后回填**（详情接口的 `goods_id` 与它是同一个值，
+     * 但语义上这里要的是商品而非 SKU —— 见下方 `goods_id` 的说明）。
+     */
+    item_id: string;
+    /**
+     * ⚠️ 平台 `extra_info.goods_id` —— 实测值等于 **SKU ID**（`…0dd8`），
+     * 不是商品 `item_id`（`…0dd7`）。**不要拿它当商品 ID 匹配**。
+     */
+    goods_id: string;
+    /** 平台口径的「商品名」= 商品标题 + 空格 + 规格名。 */
+    goods_name: string;
+    goods_type: string;
+    /**
+     * 最低可售 SKU 价（**分**）。它**不在这条详情响应里**：由列表接口
+     * （`/item-notes`）按商品 ID 批量补上，页面用 `listGoods` 那边的值渲染。
+     */
+    price_fen?: number | null;
+  }[];
+  like_num: number | null;
+  collect_num: number | null;
+  comment_num: number | null;
+  share_num: number | null;
+  /** 恒为 `platform`（实时查询）。 */
+  source: string;
+  /** 平台原始 39 字段（业务侧按需取，不要整块上屏）。 */
+  raw: Record<string, unknown>;
 };
 
 export type XhsShopItemsResponse = {
@@ -545,25 +611,12 @@ export type XhsShopItemsResponse = {
   items: XhsShopItem[];
 };
 
-/**
- * `POST /xhs/qianfan/items/delete` 的响应（v1.36，批量删除；**只删本地台账行**）。
- *
- * `deleted` 与 `requested` **分开回**：后端回的是 `rowcount`（真实删掉的行数），
- * 不是「请求了几条就当删了几条」—— 传进来不存在的、或别的店的 item_id 时
- * `deleted < requested`，页面据此如实说明，不假装全删成功。
- */
-export type XhsShopItemsDeleteResult = {
-  deleted: number;
-  /** 去重、去空白后的**有效**条数（后端校验过的口径）。 */
-  requested: number;
-  item_ids: string[];
-};
 
 /**
- * `POST /xhs/qianfan/item-detail` 的响应（v1.32，商品详情弹窗数据源；**纯本地**）。
+ * `POST /xhs/qianfan/item-detail` 的响应（**实时查千帆**：`search_item_v2` +
+ * `get_skus_by_item_ids`）。
  *
- * `detail_synced_at` 为空串 = 还没补过 SKU 详情（同步商品任务多轮补足）——
- * 此时 `skus` 为 `[]`，页面渲染空态 + 说明，**不渲染成 0 行**（缺值口径）。
+ * 平台没返回 SKU 时 `skus` 为 `[]`，页面渲染空态 + 说明，**不渲染成 0 行**（缺值口径）。
  */
 export type XhsShopItemSku = {
   sku_id: string;
@@ -640,31 +693,6 @@ export type ShopItemsSyncResult = {
   /** 本次动作的批次号（前端凭它轮询批次树拿逐件结果；空 = 没有入队成功的项）。 */
   batch_no: string;
   note: string;
-};
-
-/** `PATCH /items/edit` 的执行体（**只带改过的键**；见 `lib/product-edit.ts`）。 */
-export type XhsItemEditPayload = {
-  platform_account_id: number;
-  item_id: string;
-  // ⚠️ 分组已退场（2026-10-05）；接口带 `extra="forbid"` ⇒ 再传 `group_id` 会 422。
-  ai_title?: string | null;
-  ai_selling_point?: string | null;
-};
-
-/** 编辑结果：`updated[]` 只列**真改过**的字段（空数组 = 什么都没改）。 */
-export type XhsItemEditResult = {
-  item_id: string;
-  ai_title: string | null;
-  ai_selling_point: string | null;
-  updated: string[];
-};
-
-/** AI 润色结果（**不落库** —— 采纳才走 `editShopItem`）。 */
-export type XhsItemPolishResult = {
-  title_candidates: string[];
-  selling_point_candidates: string[];
-  source_title: string;
-  model_name: string;
 };
 
 /**
@@ -857,6 +885,25 @@ export type PictureSpaceUploadBatchResult = {
   results: (PictureSpaceUploadResult & { index: number; message?: string })[];
 };
 
+/** 商品视频条目（平台 `videos[]`，2026-10-27 新增）。 */
+export type XhsShopItemVideo = {
+  /** 平台对象存储路径（`arkgoods/...`）。 */
+  path: string;
+  /**
+   * **可直接播放的地址**（`https://store.xiaohongshu.com/{path}`）。
+   * 平台在 `videos[]` 里只给 `path`，但拼该域名即可播（2026-10-27 从千帆商品
+   * 编辑页 `<video>` 元素抓包得出，实测 206 + ftypisom，无需签名）。
+   */
+  url?: string;
+  width: number | null;
+  height: number | null;
+  /** 时长（秒）。 */
+  duration: number | null;
+  /** 文件大小（字节）。 */
+  size: number | null;
+  extension: string;
+};
+
 export type XhsShopItemDetail = {
   platform_account_id: number;
   item_id: string;
@@ -879,10 +926,35 @@ export type XhsShopItemDetail = {
   skus: XhsShopItemSku[];
   /** SKU 数（详情补齐口径；没补过 = null）。 */
   sku_count: number | null;
+  /**
+   * 商品视频（平台 `videos` 数组）—— 2026-10-27 新增。
+   * 改造前整条链路没取过这个字段，平台下发了却从未展示。
+   */
+  videos?: XhsShopItemVideo[];
+  /**
+   * 平台原始行的**全部字段**（`search_item_v2` 的 `items[i]`，已剔除三个媒体数组）。
+   * 详情弹窗的「平台原始数据」表按它逐字段列出，不再由我方挑选展示哪些。
+   */
+  raw_fields?: Record<string, unknown>;
+  /**
+   * ⚠️ 设计 75 S5（2026-10-27）起**恒为空串**：商品详情改实时查千帆，
+   * 不再有「补齐详情到本地」这一步。保留字段名只为响应形状不变。
+   */
   detail_synced_at: string;
+  /** ⚠️ 恒为空串（实时链路没有「同步」概念）。 */
   synced_at: string;
-  /** 对账标记（设计 13 §27）：非空 = 最近一次同步发现「本地有、平台无」。 */
+  /**
+   * ⚠️ 恒为空串：对账标记（「本地有、平台无」）随本地台账一起退场 ——
+   * 商品查不到时端点**直接 404**，不存在这种状态。
+   */
   platform_missing_at: string;
+  /**
+   * **本次查询平台数据的时刻**（`YYYY-MM-DD HH:MM:SS`）。
+   *
+   * 数据源是平台实时接口，每次打开弹窗都会变 —— 这是「数据新鲜度」的唯一判据
+   * （取代了本地化时代的 `synced_at`）。
+   */
+  queried_at: string;
 };
 
 /** 商品详情图生成回执（`POST /xhs/qianfan/generate-detail-image`，设计 17 §13.3.3）。 */

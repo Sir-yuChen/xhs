@@ -276,6 +276,7 @@ ROUTE_PERMS: Final[dict[str, str]] = {
     "POST /api/xhs/qianfan/item-drafts/parse": "xhs:item:draft",
     "POST /api/xhs/qianfan/item-generations": "xhs:item:view",
     "POST /api/xhs/qianfan/item-notes": "xhs:item:view",
+    "POST /api/xhs/qianfan/note-detail": "xhs:item:view",
     "POST /api/xhs/qianfan/items": "xhs:item:create",
     "POST /api/xhs/qianfan/items/export": "xhs:item:export",
     #: ⚠️ 一个端点担**三个动作**（上架 / 下架 / 删除平台商品 —— 平台只给一个批量动作接口）。
@@ -285,7 +286,6 @@ ROUTE_PERMS: Final[dict[str, str]] = {
     #: off_shelf→`xhs:item:offShelf`、delete→`xhs:item:delete`。
     #: 这是设计 70 允许的「第三类：选码」，不属于按归属分流。
     "POST /api/xhs/qianfan/items/operate": "xhs:item:onShelf",
-    "POST /api/xhs/qianfan/items/polish": "xhs:item:polish",
     "POST /api/xhs/qianfan/items/publish": "xhs:publish:submit",
     "POST /api/xhs/qianfan/note-cleanup/candidates": "xhs:item:view",
     #: ⚠️ 订单列表 / 详情现在**读平台**（设计 75 §4.4），挂 `xhs:order:ship` 是历史遗留：
@@ -323,7 +323,8 @@ ROUTE_PERMS: Final[dict[str, str]] = {
     "POST /api/xhs/qianfan/product/short-title": "xhs:item:aiAssist",
     "POST /api/xhs/qianfan/save-detail-images": "xhs:item:generateImage",
     "POST /api/xhs/qianfan/spot-checks": "xhs:violation:view",
-    "POST /api/xhs/qianfan/video/upload": "xhs:item:sync",
+    #: 视频上传是**发布前准备**环节（原本借 `xhs:item:sync`，该码随同步链路退场）。
+    "POST /api/xhs/qianfan/video/upload": "xhs:publish:submit",
     "POST /api/xhs/qianfan/violation/appeal-record": "xhs:violation:view",
     "POST /api/xhs/qianfan/violation/counts": "xhs:violation:view",
     "POST /api/xhs/qianfan/violation/detail": "xhs:violation:view",

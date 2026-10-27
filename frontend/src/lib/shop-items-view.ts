@@ -176,6 +176,14 @@ export function noteCountFilter(
  */
 export const SORT_FIELD_BY_COLUMN: Record<string, string> = {
   on_shelf_time: "on_shelf_time",
+  //: 2026-10-27 对齐千帆表头（平台那三列带排序箭头）：
+  //: 列 key → 平台 `sort_field`。**两边名字不同**，所以必须有这张表：
+  //: 价格列的数据字段是 `price_min_fen`，但平台排序字段叫 `price`
+  //: （传 `price_min_fen` 平台直接 500）；销量列本地叫 `sales_30d`，
+  //: 平台叫 `item_sale_qty_30`。
+  price_min_fen: "price",
+  stock: "stock",
+  sales_30d: "item_sale_qty_30",
 };
 
 /** 排序状态：字段 + antd 的方向（`ascend` / `descend`）。 */

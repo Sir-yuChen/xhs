@@ -17,9 +17,6 @@ import type {
   SystemUpdateInfo,
   SystemUpdateInstallResult,
   SystemVersionInfo,
-  XhsItemEditPayload,
-  XhsItemEditResult,
-  XhsItemPolishResult,
 } from "../types";
 import type {
   AuthPayload,
@@ -131,7 +128,6 @@ import type {
   PictureSpaceUploadResult,
   RecommendCategoryResult,
   RecommendItemTitleResult,
-  XhsShopItemsDeleteResult,
   XhsShopItemStatus,
   MaterialFolder,
   SaveDetailImagesResult,
@@ -145,6 +141,7 @@ import type {
   NoteVersionItem,
   LlmGenerateQueueSnapshot,
   XhsItemNotesResponse,
+  XhsNoteDetail,
   XhsAccountLoginState,
   XhsQrLoginSession,
 } from "../types";
@@ -2310,32 +2307,12 @@ function fileToBase64(file: File): Promise<string> {
   });
 }
 
-/**
- * 批量删除本地台账行（v1.36，设计 13 §33.10；**零平台请求**）。
- *
- * 删的只有本店 `shop_products` 的选中行 —— 平台商品不动（千帆 SDK 无商品删除
- * 接口），`note_goods` 关系行也不动。两个连带后果写在
- * `lib/shop-items-view.ts::batchDeleteHint()` 里，确认框负责讲给用户听。
- *
- * 键用 `item_id`（表格 `rowKey`）：跨页勾选时前端手里就是它；店铺维度由后端用
- * `shop_id_fk` 限定，传别人的 item_id 只会删到 0 行。
- */
-export async function deleteXhsShopItems(
-  accountId: number,
-  itemIds: readonly string[]
-): Promise<XhsShopItemsDeleteResult> {
-  const response = await http.post<XhsShopItemsDeleteResult>("/xhs/qianfan/items/delete", {
-    platform_account_id: accountId,
-    item_ids: [...itemIds],
-  });
-  return response.data;
-}
 
 /**
  * 商品详情弹窗的数据源（v1.32 新增，设计 13 §30.3.6；**纯本地**，零平台请求）。
  *
  * 返回基本信息（与列表 `items[]` 元素同构）+ 图集 + SKU 规格明细。
- * `detail_synced_at` 为空串 = 还没补过详情（同步商品任务会多轮补足）——
+ * `detail_synced_at` 恒为空串（实时链路没有「补齐到本地」这一步）——
  * 页面渲染空态 + 说明，**不渲染成 0 行**（缺值口径）。
  */
 export async function fetchXhsShopItemDetail(
@@ -2364,38 +2341,10 @@ export async function fetchXhsShopItemDetail(
 // --------------------------------------------------------------------------- //
 // 商品操作（2026-10-05 需求 7/8，设计 20 §11）
 //
-// ⚠️ 与下面 `editShopItem`（改本地台账）**不是一回事**：
-// 这三个函数打的是**平台**（上下架 / 删除真商品），不可撤回。
+// ⚠️ 这三个函数打的是**平台**（上下架 / 删除真商品），**不可撤回**。
+// （「编辑商品」那条本地标注链路已整条移除，2026-10-27。）
 // --------------------------------------------------------------------------- //
 
-/**
- * 同步**指定商品**到本地台账（需求 6）。
- *
- * ⚠️ 平台侧**没有**「按 item_id 拉商品」的读接口（真机调研：`search_item_v2` 只支持
- * 整页 + 筛选，`get_skus_by_item_ids` 只回规格）。⇒ 后端实现是「把指定 id 作为过滤条件、
- * 整店翻页扫描后**只落命中 id**」，所以**慢**（要翻完才能确认没命中）。
- * 弹窗里如实标注这个代价，不假装是「精准单查」。
- */
-export async function syncSpecifiedShopItems(
-  platformAccountId: number,
-  itemIds: string[],
-  /**
-   * 期间条件（`{scope:"full"}` 或 `{scope:"range", startDate, endDate}`）。
-   *
-   * ⚠️ 2026-10-06 合并「批量同步商品信息」后，同一个条件弹窗的区间对**按 ID 同步**
-   * 这条路也要生效（原来只认 ID，区间无处可传）。不传 = 后端按 `full` 处理。
-   */
-  options?: SyncNotesOptions,
-): Promise<ShopItemsSyncResult> {
-  const response = await http.post<ShopItemsSyncResult>("/xhs/qianfan/items/sync", {
-    platform_account_id: platformAccountId,
-    item_ids: itemIds,
-    ...(options?.scope ? { scope: options.scope } : {}),
-    ...(options?.startDate ? { start_date: options.startDate } : {}),
-    ...(options?.endDate ? { end_date: options.endDate } : {}),
-  });
-  return response.data;
-}
 
 /**
  * 批量上架 / 下架 / 删除**平台商品**（需求 7；**真实写操作**）。
@@ -2428,23 +2377,12 @@ export async function fetchShopItemOperateResult(taskId: number): Promise<ShopIt
   return response.data;
 }
 
-/** `PATCH /items/edit` 的执行体（**只带改过的键**，见 `lib/product-edit.ts`）。 */
-/** 商品本地编辑（**纯本地写**，零平台请求；平台标题 / 价格不在这里改）。 */
-export async function editShopItem(payload: XhsItemEditPayload): Promise<XhsItemEditResult> {
-  const response = await http.patch<XhsItemEditResult>("/xhs/qianfan/items/edit", payload);
-  return response.data;
-}
-
-/** 商品标题 / 卖点 AI 润色（走两个业务点；未配服务商 ⇒ 400 结构化）。 */
-export async function polishShopItem(payload: {
-  platform_account_id: number;
-  item_id: string;
-  template_id?: number | null;
-  instruction?: string;
-}): Promise<XhsItemPolishResult> {
-  const response = await http.post<XhsItemPolishResult>("/xhs/qianfan/items/polish", payload);
-  return response.data;
-}
+// ⛔ 「商品本地编辑」与「标题/卖点 AI 润色」两个请求函数**已删除**
+// （2026-10-27 用户口径「编辑商品功能逻辑移除」）：
+//   - 本地编辑（`PATCH /items/edit`）—— 改的是本地 `ai_title` / `ai_selling_point`，
+//     那两列随台账整表 DROP，端点已删；
+//   - `AI 润色（`POST /items/polish`）—— 只为编辑弹窗存在，弹窗没了就没有调用方。
+// 留住函数 = 留住一条无处调用的死路径。
 
 /* ------------------------------------------------------------------ *
  * 违规词库（2026-10-08 用户口径；设计 25 §2）
@@ -3277,6 +3215,24 @@ export async function fetchXhsItemNotes(
   const response = await http.post<XhsItemNotesResponse>("/xhs/qianfan/item-notes", {
     platform_account_id: accountId,
     item_id: itemId,
+  });
+  return response.data;
+}
+
+/**
+ * **单篇笔记的实时详情**（2026-10-27，`POST /xhs/qianfan/note-detail`）。
+ *
+ * 用户口径：「笔记数据不再落库，应实时查询，所有笔记全部应是实时数据」。
+ * `/item-notes` 只给标题与互动数（平台列表接口没有正文），正文只能按篇取 ——
+ * 所以本函数**只在用户切到某篇时调用**，不预加载整页。
+ */
+export async function fetchQianfanNoteDetail(
+  accountId: number,
+  noteId: string
+): Promise<XhsNoteDetail> {
+  const response = await http.post<XhsNoteDetail>("/xhs/qianfan/note-detail", {
+    platform_account_id: accountId,
+    note_id: noteId,
   });
   return response.data;
 }
@@ -4657,12 +4613,11 @@ export async function deletePromptTemplate(templateId: number): Promise<void> {
  * 而不是等生成失败了才知道插槽写错了。`shopProductId` 可为空（只渲骨架）。
  */
 export async function previewPromptTemplate(
-  templateId: number,
-  shopProductId?: number
+  templateId: number
 ): Promise<{ rendered: string; missing_slots?: string[] }> {
   const response = await http.post<{ rendered: string; missing_slots?: string[] }>(
     "/xhs/llm/prompt-templates/render-preview",
-    { template_id: templateId, ...(shopProductId ? { shop_product_id: shopProductId } : {}) }
+    { template_id: templateId }
   );
   return response.data;
 }
@@ -5128,8 +5083,6 @@ export const ORDER_STATUSES: OrderStatus[] = [
 export interface OrderItemRow {
   id: number;
   item_id?: string | null;
-  /** 已匹配到的本地商品 id（千帆商品不在台账时为 null）。 */
-  shop_product_id?: number | null;
   item_name: string;
   item_image?: string | null;
   sku?: string | null;
@@ -5315,23 +5268,6 @@ export async function exportOrders(
   return response.data;
 }
 
-/**
- * 某商品的**生成版本历史**（用户口径 2026-10-17：*「页面记录在 LLM 生成笔记中实现
- * 只展示该商品对应生成的笔记」*）。
- *
- * ⚠️ **必须按商品过滤**（`shop_product_id`）：版本表是全局的，
- * 不过滤就会把别的商品的生成记录也列出来（用户看到的「记录」对不上他正在做的商品）。
- */
-export async function fetchNoteVersions(
-  shopProductId: number,
-  limit = 50
-): Promise<{ ok: boolean; total: number; items: NoteVersionItem[] }> {
-  const response = await http.get<{ ok: boolean; total: number; items: NoteVersionItem[] }>(
-    "/xhs/product-notes/versions",
-    { params: { shop_product_id: shopProductId, limit } }
-  );
-  return response.data;
-}
 
 /**
  * 同上，但按**平台标识**查（弹窗手里只有平台 `item_id`，没有本地台账主键）。
@@ -5343,11 +5279,11 @@ export async function fetchNoteVersionsByItem(
   platformAccountId: number,
   itemId: string,
   limit = 50
-): Promise<{ ok: boolean; total: number; shop_product_id: number; items: NoteVersionItem[] }> {
+): Promise<{ ok: boolean; total: number; item_id: string; items: NoteVersionItem[] }> {
   const response = await http.get<{
     ok: boolean;
     total: number;
-    shop_product_id: number;
+    item_id: string;
     items: NoteVersionItem[];
   }>("/xhs/product-notes/versions", {
     params: { platform_account_id: platformAccountId, item_id: itemId, limit },

@@ -363,7 +363,7 @@ PAGE_VIEW_PERMS: tuple[PermSpec, ...] = (
 
 #: 全量登记表。冒号分隔三元组，顺序 = 系统 → 业务写码 → 页级 view。
 #: 2026-10-25 红线「一按钮一码」：从 `xhs:item:view`（曾一个码盖 29 条路由）
-#: 与 `xhs:item:edit`（盖 23 条，还混着登录会话与提示词模板）里拆出来的按钮码。
+#: 从过粗的按钮码（曾用 `xhs:item:edit` 盖 23 条，还混着登录会话与提示词模板）里拆出来的按钮码。
 #: 单独一个元组、追加进 `PERMS` —— 不改动既有三个元组，避免误伤。
 SPLIT_BUTTON_PERMS: tuple[PermSpec, ...] = (
     # 商品

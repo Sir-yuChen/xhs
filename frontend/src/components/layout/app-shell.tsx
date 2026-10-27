@@ -1,7 +1,6 @@
 import KeepAliveRouteOutlet from "keepalive-for-react-router";
 import { useLocation } from "react-router-dom";
 
-import { BusinessLineBadge } from "./business-line-badge";
 import { WorkspaceShell } from "./workspace-shell";
 import { useDynamicNav } from "./use-dynamic-nav";
 import { workspaceOf } from "../../lib/workspaces";
@@ -28,7 +27,6 @@ import { workspaceOf } from "../../lib/workspaces";
  * ## 保留的东西
  *
  * * `WorkspaceShell` 负责布局与高亮（`activeKeys` 支持 `?tab=` 深链）；
- * * `BusinessLineBadge` 仍挂在同一个位置（按路由派生当前业务线）；
  * * `KeepAliveRouteOutlet` 仍只缓存「笔记发现」一处。
  *
  * ## 加载中 / 失败怎么显示
@@ -55,12 +53,6 @@ export function AppShell() {
       menuError={nav.status === "error" ? nav.error : null}
       onReloadMenu={nav.reload}
     >
-      {/* 业务线标识条（设计 32 §5.2）：**单一挂载点** —— 按当前路由派生，
-          业务线页面自动标出「本页属于哪条线、要哪条令牌」。
-          ⚠️ 挂在这里而不是逐页各挂一次：多份拷贝必然漂移，且漏挂一处
-          在界面上看不出来（那条页面只是「少了个标签」，不报错）。
-          路由 → 业务线的映射在 `lib/business-lines.ts`（守卫与侧栏结构双向比对）。 */}
-      <BusinessLineBadge />
       {/* 路由缓存：笔记发现（含「搜索发现 / 批量抓取」两 Tab）—— tab 是 query，
           pathname 恒为 /discovery/，故一条正则即覆盖两 Tab（设计 21 切片 B）。 */}
       <KeepAliveRouteOutlet include={[/\/platforms\/xhs\/discovery/]} />

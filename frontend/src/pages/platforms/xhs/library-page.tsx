@@ -80,7 +80,6 @@ import {
   fetchTopics,
   publishSavedNote,
   syncSavedNote,
-  syncSpecifiedShopItems,
   updateSavedNotePublishStatus,
   updateSavedNoteTopics,
   EMPTY_QUEUE_TODAY_COUNTS,
@@ -825,48 +824,7 @@ export function XhsLibraryPage() {
    * queued）即包含这一篇，卡片与详情的 `SyncOutlined spin` 直接跟着转，直到它
    * 离开队列。
    */
-  /**
-   * 同步笔记时，把**本地台账查不到信息**的挂载商品放进商品信息同步队列
-   * （2026-10-12 用户口径）。
-   *
-   * 用户原话：「项目中商业笔记同步笔记时存在商品在本地查询不到，则需要将商品 id
-   * 放入商品同步队列执行同步商品信息的逻辑」—— **单篇与批量同一个动作**，
-   * 故这里收一个列表（单篇 = 长度为 1），**不留两份实现**（DEF-044）。
-   *
-   * 判据：挂载商品**有 `item_id`、但 `item_title` 与 `price` 都空** —— 后端
-   * `_goods_entry` 的缺值口径（关系行在、`shop_products` 无行）。
-   * 失败静默：用户点的是「同步笔记」，补商品是附带动作，不该盖住主流程反馈。
-   */
-  async function enqueueMissingGoodsInfo(notes: SavedNote[]) {
-    // 同一个商品可能挂在多篇笔记上 ⇒ 按商品 ID 去重；账号按商品所属笔记取。
-    const byItemId = new Map<string, number>();
-    for (const note of notes) {
-      const accountId = note.platform_account_id;
-      if (!accountId) continue;
-      for (const g of note.goods ?? []) {
-        if (g.item_id && !g.item_title && !g.price && !byItemId.has(g.item_id)) {
-          byItemId.set(g.item_id, accountId);
-        }
-      }
-    }
-    if (byItemId.size === 0) return;
-    // 按账号分组（`syncSpecifiedShopItems` 的签名只有一个 platform_account_id）。
-    const byAccount = new Map<number, string[]>();
-    for (const [itemId, accountId] of byItemId) {
-      const list = byAccount.get(accountId) ?? [];
-      list.push(itemId);
-      byAccount.set(accountId, list);
-    }
-    for (const [accountId, itemIds] of byAccount) {
-      try {
-        const res = await syncSpecifiedShopItems(accountId, itemIds);
-        if (res?.note) message.info(res.note);
-      } catch {
-        // 静默（同上）。
-      }
-    }
-  }
-
+  
   async function syncNote(note: SavedNote) {
     setSyncingNoteId(note.id);
     try {
@@ -881,10 +839,6 @@ export function XhsLibraryPage() {
         message.success(`${name}已加入同步队列，按顺序执行中，进度见上方进度卡。`);
       }
       trackSyncNotes([note.id]); // 终态由轮询报（与批量同一条路径）
-      // 2026-10-12 用户口径：**点这篇笔记的「同步」时**，若挂载商品在本地台账查不到信息
-      // （有 item_id、但标题与价格都空 = 后端 `_goods_entry` 缺值口径），把商品 ID
-      // 放进商品信息同步队列并触发同步。⚠️ **只在这条路做** —— 批量同步笔记不做这件事。
-      void enqueueMissingGoodsInfo([note]);
     } catch (e) {
       // 真异常（含门禁不过的结构化 400 `NOTE_NOT_SYNCABLE`）：摆真实原因，不吞。
       // `syncSavedNote` 是 `_silent` ⇒ 展示权在调用点，这里必须自己报。
@@ -1167,9 +1121,6 @@ export function XhsLibraryPage() {
       if (rejected.length) message.warning(parts.join("")); else message.success(parts.join(""));
       if (enqueuedIds.length) trackSyncNotes(enqueuedIds);
       else setIsBatchSyncing(false);
-      // 2026-10-12 用户口径：**批量同步同样要补** —— 商业笔记挂的商品本地查不到时，
-      // 把商品 ID 放进商品信息同步队列（与单篇同一个 `enqueueMissingGoodsInfo`）。
-      void enqueueMissingGoodsInfo(targets);
     } catch {
       // 提示归全局拦截器（`batchSyncSavedNotes` 非 `_silent`）—— 2026-09-25 修：
       // 原来这里把原因摆成页面 inline 红块（用户看到「批量操作失败 Method Not

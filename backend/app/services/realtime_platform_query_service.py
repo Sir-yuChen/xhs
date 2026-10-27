@@ -46,6 +46,7 @@ SDK 的 `(ok, msg, payload)` 里 `payload` 是**完整响应体** `{code, succes
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Optional
@@ -426,6 +427,7 @@ def list_products(
     create_to: Any = None,
     sort_field: Any = None,
     order: Any = None,
+    is_channel: Any = None,
 ) -> dict[str, Any]:
     """商品列表一页（`POST /api/edith/product/search_item_v2`，只读）。
 
@@ -462,6 +464,10 @@ def list_products(
         create_time_to=_to_epoch_s(create_to),
         sort_field=_first_text(sort_field) or "create_time",
         order=_first_text(order) or "desc",
+        #: 渠道商品筛选（千帆「商品类型：全部 / 普通 / 渠道品」）。
+        #: 平台请求里 `is_channel` **恒发**（默认 `false` = 只看普通商品），
+        #: 这是千帆自己的默认口径（抓包：`search_filter.is_channel = false`）。
+        is_channel=bool(is_channel) if is_channel is not None else False,
     )
     _raise_if_failed(ok, message, raw, what="商品列表获取")
 
@@ -610,12 +616,15 @@ def normalize_goods_note(entry: Any) -> Optional[dict[str, Any]]:
         #: `goods_note` = 平台自报的商业笔记（平台原生判据，本层不反推）。
         "note_flag": _first_text(entry.get("note_flag")),
         "xsec_token": _first_text(entry.get("xsec_token")),
-        #: 挂载商品（平台原文 `goods_infos[]` → 只留 id / 名称 / 图）
+        #: 挂载商品（平台原文 `goods_infos[]` → 4 个字段全留）。
+        #: ⚠️ 只有这一处有**商品图**与**规格名** —— 详情接口的 `biz_relations`
+        #: 不含图片，且它的 `goods_id` 是 **SKU ID**（≠ `item_id`），不可相互顶替。
         "goods": [
             {
                 "item_id": _first_text(row.get("item_id"), row.get("itemId")),
                 "title": _first_text(row.get("item_title"), row.get("item_name")),
                 "image": _first_text(row.get("item_image")),
+                "variant_desc": _first_text(row.get("variant_desc")),
             }
             for row in (entry.get("goods_infos") or [])
             if isinstance(row, dict)
@@ -686,6 +695,117 @@ def list_goods_notes(
         #: `end_tag=True` ⇒ 没有下一页。
         "has_more": not bool(data.get("end_tag")),
         "item_id": item_text,
+    }
+
+
+def get_note_detail(adapter: Any, *, note_id: Any) -> dict[str, Any]:
+    """**单篇笔记详情**（实时，2026-10-27）。
+
+    用户口径：「笔记数据不再落库，应实时查询，所有笔记全部应是实时数据」。
+    正文不在 `goods-note/list` 里（那 23 个字段只有标题 / 图 / 互动数），
+    只能按单篇取 —— 所以**只在用户切到某篇时才调**（前端 tab 切换触发），
+    绝不预加载整页（N 篇 = N 次请求 + N 次限流等待）。
+
+    平台：`GET edith.xiaohongshu.com/web_api/sns/capa/postgw/note/detail`
+    （强签名，见 `XHS_Qianfan_Apis.get_note_detail` 的抓包与对照表）。
+
+    返回按**业务可读**口径摊平（原始 39 字段在 `raw` 里，需要时再取）：
+    `note_id` / `title` / `content` / `images` / `cover` / `video_url` /
+    `publish_time` / `note_type` / `hash_tags` / `goods` / 四个互动数。
+    """
+    note_text = _first_text(note_id)
+    if not note_text:
+        raise RealtimeQueryError("INVALID_ARGUMENT", "note_id 不能为空")
+
+    ok, message, raw = adapter.get_note_detail(note_text)
+    _raise_if_failed(ok, message, raw, what="笔记详情获取")
+    data = _data_of(raw)
+    if not isinstance(data, dict):
+        raise RealtimeQueryError("PLATFORM_EMPTY", f"平台没有返回笔记 {note_text} 的详情")
+
+    def _image_url(entry: Any) -> str:
+        """图片项 → 可显示 URL。
+
+        平台给的是对象存储标识（`trace_id` / `fileid`，形如 `spectrum/…`），
+        拼 `ci.xiaohongshu.com` 可直连（与笔记封面同域，2026-10-27 实测 200）。
+        """
+        if not isinstance(entry, dict):
+            return ""
+        key = _first_text(entry.get("trace_id")) or _first_text(entry.get("fileid"))
+        return f"https://ci.xiaohongshu.com/{key}" if key else ""
+
+    images = [
+        url
+        for url in (_image_url(item) for item in (data.get("images_list") or []))
+        if url
+    ]
+    cover = _image_url(data.get("cover")) or (images[0] if images else "")
+
+    goods: list[dict[str, Any]] = []
+    for rel in data.get("biz_relations") or []:
+        if not isinstance(rel, dict):
+            continue
+        if _first_text(rel.get("biz_type")) != "GOODS_SELLER_V2":
+            continue
+        #: `extra_info` 是 JSON **字符串**（平台原样塞进来的），里面才是商品名 / 商品 ID /
+        #: 图片类型 —— `biz_id` 只是卖家 SKU ID，单有它渲染不出任何可读信息。
+        extra: dict[str, Any] = {}
+        raw_extra = rel.get("extra_info")
+        if isinstance(raw_extra, str) and raw_extra.strip():
+            try:
+                parsed = json.loads(raw_extra)
+                if isinstance(parsed, dict):
+                    extra = parsed
+            except (ValueError, TypeError):
+                extra = {}
+        elif isinstance(raw_extra, dict):
+            extra = raw_extra
+        goods.append(
+            {
+                #: ⚠️ `biz_id` 是**卖家 SKU ID**，不是 `item_id`（见设计 20 §笔记挂商品复盘）。
+                #: `goods_id` / `goods_name` 在 `extra_info` 里，两者**不是同一个东西**。
+                "sku_id": _first_text(rel.get("biz_id")),
+                "goods_id": _first_text(extra.get("goods_id")),
+                #: 平台的「商品名」= 商品标题 + 空格 + 规格名（发布挂链时必须这个格式）。
+                "goods_name": _first_text(extra.get("goods_name")),
+                "goods_type": _first_text(extra.get("goods_type")),
+                "raw": rel,
+            }
+        )
+
+    tags: list[str] = []
+    for tag in data.get("hash_tag") or []:
+        if isinstance(tag, dict):
+            name = _first_text(tag.get("name"))
+            if name:
+                tags.append(name)
+        elif isinstance(tag, str) and tag.strip():
+            tags.append(tag.strip())
+
+    #: ⛔ **不从正文兜底提取话题**（2026-10-27 用户口径「话题没有单独返回的数组就不要
+    #: 展示了」「不用提取」）：平台给 `hash_tag` 就用，不给就不展示 —— 正文里的
+    #: `#名字[话题]#` 是富文本标记，从它反推话题属于「替平台造数据」，与「缺值不造假」
+    #: 同一条纪律。实测商业笔记 `hash_tag` 常为空数组，此时界面就不出现话题区。
+
+    post_time = data.get("post_time") or data.get("visible_time")
+    return {
+        "note_id": _first_text(data.get("id")) or note_text,
+        "title": _first_text(data.get("title")) or _first_text(data.get("name")),
+        "content": _first_text(data.get("desc")),
+        "images": images,
+        "cover": cover,
+        "video_url": _first_text(data.get("video")),
+        #: 平台给的是 Unix **秒**，这里统一成秒（调用方按需格式化）。
+        "publish_time": _int_or_none(post_time),
+        "note_type": _first_text(data.get("type")),
+        "hash_tags": tags,
+        "goods": goods,
+        "like_num": _int_or_none(data.get("likes")),
+        "collect_num": _int_or_none(data.get("fav_count")),
+        "comment_num": _int_or_none(data.get("comments")),
+        "share_num": _int_or_none(data.get("share_count")),
+        "source": SOURCE_PLATFORM,
+        "raw": data,
     }
 
 

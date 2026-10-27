@@ -22,8 +22,8 @@ import {
   PlusOutlined,
   ReloadOutlined,
   SafetyCertificateOutlined,
-  ShopOutlined,
   SyncOutlined,
+  ShopOutlined,
   UserOutlined,
 } from "@ant-design/icons";
 import { useEffect, useRef, useState } from "react";
@@ -44,8 +44,6 @@ import {
   syncGoodsNotes,
   syncGoodsNotesStatus,
   readErrorDetail,
-  syncShopGoods,
-  syncShopGoodsStatus,
 } from "../../../lib/api";
 import type {
   SyncNotesOptions,
@@ -164,7 +162,6 @@ export function XhsAccountsPage() {
    */
   const [noteSyncIds, setNoteSyncIds] = useState<Set<number>>(() => new Set());
   const [goodsNoteSyncIds, setGoodsNoteSyncIds] = useState<Set<number>>(() => new Set());
-  const [goodsSyncIds, setGoodsSyncIds] = useState<Set<number>>(() => new Set());
   /**
    * 轮询节拍。每轮结束 +1 —— 用来让下面的 effect **重新排下一次 timeout**。
    * 为什么不靠 Set 的引用变化：一轮轮询若什么都没变（状态仍是 running），
@@ -187,19 +184,11 @@ export function XhsAccountsPage() {
   const [linkAccount, setLinkAccount] = useState<PlatformAccount | null>(null);
   const [linkInput, setLinkInput] = useState("");
   /**
-   * 千帆会话不可用时要提示的账号（v1.31，用户 2026-09-21 口径）。
-   *
-   * 点「同步商品」时若 ark 状态是「确定不可用」，**不发起同步**，
-   * 先弹这个窗提示去补登千帆；弹窗内可一键打开对应账号的 ark 续期弹窗。
-   */
-  const [arkPrompt, setArkPrompt] = useState<PlatformAccount | null>(null);
-  /**
    * 「同步**商品笔记**」时千帆会话不可用要提示的账号（**§44**，2026-09-30 用户拍板拆分）。
    *
-   * 与上面的 `arkPrompt` 是**同一个门禁平台（ark）但两条不同链路**：`arkPrompt` 属于
-   * 「同步商品」（店铺商品台账，`shop_products`），本状态属于「同步商品笔记」
-   * （千帆 `goods-note/list` 的挂链笔记，`notes` + `note_goods`）。文案必须分开写 ——
-   * 用户看到「补登千帆」却不知道是为了哪件事，就等于没说清。
+   * 门禁平台是 ark，只服务于「同步商品笔记」（千帆 `goods-note/list` 的挂链笔记）。
+   * 文案里的动作名必须写全「同步商品笔记」—— 只写「同步商品」会让人去补登后
+   * 发现补错地方。
    */
   const [goodsNotePrompt, setGoodsNotePrompt] = useState<PlatformAccount | null>(null);
   /**
@@ -374,25 +363,7 @@ export function XhsAccountsPage() {
     setSyncOptions({ kind: "notes", accountId: account.id, nickname: account.nickname });
   }
 
-  /**
-   * 点「同步商品」：千帆门禁（v1.31 / §19.4）→ 通过才触发。
-   *
-   * v1.31 起该按钮**对所有账号展示**（不再仅 Creator）—— 用户口径「底部按钮
-   * 不再按照账号类型进行区分」。没有千帆会话的账号点了会被告知先补登，
-   * 不会再像旧版那样把按钮藏起来（藏起来 = 用户不知道这个能力存在）。
-   *
-   * §19.4：文案按 ark 状态区分「失效」与「未登录」—— 用户原话
-   * 「不可用失效或未登录则提示重新登录千帆后再次触发」。
-   */
-  function handleGoodsSyncClick(account: PlatformAccount) {
-    if (goodsGate(loginChannels[account.id]).blocked) {
-      setArkPrompt(account);
-      return;
-    }
-    // §23：同笔记侧，先弹选项让用户决定同步范围。
-    setSyncOptions({ kind: "goods", accountId: account.id, nickname: account.nickname });
-  }
-
+  
   /**
    * 点「同步**商品笔记**」：千帆门禁（**§44**，2026-09-30 用户拍板拆分）。
    *
@@ -446,28 +417,7 @@ export function XhsAccountsPage() {
     }
   }
 
-  /** 触发店铺商品同步（**仅 Creator**；未绑定千帆时后端 400，原因由轻提示报出）。 */
-  async function startGoodsSync(accountId: number, options?: SyncNotesOptions) {
-    if (goodsSyncIds.has(accountId)) {
-      return;
-    }
-    try {
-      if (!hasPermission("xhs:item:sync")) {
-        message.warning("没有同步店铺商品的权限");
-        return;
-      }
-      const summary = await syncShopGoods({ platformAccountId: accountId, ...(options ?? {}) });
-      if (summary.reused) {
-        message.info("该账号已有同步任务在跑，本次未触发新执行。");
-      }
-      setGoodsSyncIds((current) => new Set(current).add(accountId));
-      // 同上：本页刚触发 ⇒ 首查不许摘（笔记 / 商品共用同一份竞态防护）。
-      locallyTriggeredRef.current.add(accountId);
-    } catch (syncError) {
-      message.error(readErrorDetail(syncError));
-    }
-  }
-
+  
   /**
    * 触发**商品笔记**同步（**§44**）：与 `startNoteSync` **逐字同构**，只换请求函数与集合。
    *
@@ -530,14 +480,6 @@ export function XhsAccountsPage() {
       ids: goodsNoteSyncIds,
       unit: "条",
       formatResult: syncResultText,
-    },
-    {
-      kind: "goods",
-      fetchStatus: syncShopGoodsStatus,
-      setIds: setGoodsSyncIds,
-      ids: goodsSyncIds,
-      unit: "件",
-      formatResult: goodsResultText,
     },
   ];
 
@@ -680,7 +622,7 @@ export function XhsAccountsPage() {
    * cleanup 负责卸载时真的停掉（否则离开页面后还在打后端）。
    */
   useEffect(() => {
-    if (noteSyncIds.size === 0 && goodsNoteSyncIds.size === 0 && goodsSyncIds.size === 0) {
+    if (noteSyncIds.size === 0 && goodsNoteSyncIds.size === 0) {
       return;
     }
     const timer = setTimeout(() => {
@@ -688,7 +630,7 @@ export function XhsAccountsPage() {
     }, SYNC_POLL_INTERVAL_MS);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [noteSyncIds, goodsNoteSyncIds, goodsSyncIds, syncPollTick]);
+  }, [noteSyncIds, goodsNoteSyncIds, syncPollTick]);
 
   return (
     <div style={{ padding: "0 0 32px" }}>
@@ -756,7 +698,6 @@ export function XhsAccountsPage() {
               const isCreator = account.sub_type === "creator";
               const isNoteSyncing = noteSyncIds.has(account.id);
               const isGoodsNoteSyncing = goodsNoteSyncIds.has(account.id);
-              const isGoodsSyncing = goodsSyncIds.has(account.id);
               /** 时间行文案（同一份文本既用于显示、也用于 tip，避免两处各拼一次而漂移）。 */
               const updatedText = `更新时间：${formatDate(account.updated_at || account.created_at)}`;
               const statusColor = accountStatusColor(account.status) || "default";
@@ -1023,10 +964,6 @@ export function XhsAccountsPage() {
                           「同步**商品笔记**」—— **§44**（2026-09-30 用户拍板拆分）新增。
                           千帆 `goods-note/list` 的**挂链笔记**（落 `notes` + `note_goods`），
                           与普通笔记是两条**独立任务 + 独立日志流 + 独立防重**。
-
-                          ⚠️ **与右边那颗「同步商品」不是一回事**（文案必须带「笔记」二字）：
-                          那颗同步的是**店铺商品台账**（SKU / 价格，落 `shop_products`）。
-                          两件事的硬门禁同为千帆，但链路、落库表、任务类型全都不同。
                         */}
                         <Button
                           size="small"
@@ -1036,20 +973,6 @@ export function XhsAccountsPage() {
                           title="把该账号的商品笔记同步到本地库（需千帆会话）"
                         >
                           {isGoodsNoteSyncing ? "同步中" : "同步商品笔记"}
-                        </Button>
-                        {/*
-                          「同步商品」v1.31 起**所有账号都渲染**（旧版仅 Creator）。
-                          千帆会话不可用时点击会弹窗提示先补登（见 handleGoodsSyncClick）——
-                          按钮摆上去不再是「点了必错」：它给的是「缺什么」的可操作提示。
-                        */}
-                        <Button
-                          size="small"
-                          icon={isGoodsSyncing ? <SyncOutlined spin /> : <ShopOutlined />}
-                          onClick={() => handleGoodsSyncClick(account)}
-                          disabled={isGoodsSyncing}
-                          title="把该店铺的商品同步到本地库（需千帆商家后台会话）"
-                        >
-                          {isGoodsSyncing ? "同步中" : "同步商品"}
                         </Button>
                         {/*
                           ⚠️ 「补齐详情」按钮**已移除**（2026-09-27 用户口径：
@@ -1118,59 +1041,12 @@ export function XhsAccountsPage() {
         </Space>
       </Modal>
 
-      {/*
-        千帆会话不可用提示（v1.31 / §19.4，用户 2026-09-21 口径：
-        「千帆登录令牌必须可用，不可用失效或未登录则提示重新登录千帆后再次触发」）。
-
-        点「同步商品」时若 ark 状态是**确定不可用**
-        （missing / guest / expired），不发起同步，先弹这个窗。
-        「去补登千帆」直接打开该账号的 ark 续期弹窗（扫码为主、粘贴降级）；
-        续期成功后登录态刷新，用户再次点击即可同步 —— **不自动开始同步**：
-        扫码成功与同步意图是两件事，自动发起会在用户没预期的时候打平台。
-
-        文案按状态区分（用户原话「失效或未登录」）：expired = 登录态失效；
-        missing / guest = 还没登录过 / 只是游客态。
-
-        `unknown`（未检测 / 探活没得到结论）**不弹这个窗**：那是「没问到」而不是
-        「不可用」，放行让同步真发一次，失败原因由后端给到卡片（DEF-057 红线）。
-      */}
-      <Modal
-                centered
-                open={arkPrompt !== null}
-        title="需要千帆商家后台会话"
-        okText="去补登千帆"
-        cancelText="取消"
-        onCancel={() => setArkPrompt(null)}
-        onOk={() => {
-          const account = arkPrompt;
-          setArkPrompt(null);
-          if (account) {
-            setRenewTarget({
-              account,
-              channel: "ark",
-              state: channelState(loginChannels[account.id], "ark"),
-            });
-          }
-        }}
-      >
-        <Space direction="vertical" size={8} style={{ width: "100%" }}>
-          <Text style={{ fontSize: 13 }}>
-            {arkPrompt && channelState(loginChannels[arkPrompt.id], "ark") === "expired"
-              ? "千帆登录态已失效，同步商品需要可用的千帆令牌。请重新登录千帆后，再次触发同步商品。"
-              : "尚未登录千帆商家后台，同步商品需要千帆登录令牌。请登录千帆后，再次触发同步商品。"}
-          </Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            补登方式：扫码登录千帆，或粘贴千帆后台 Cookie。只更新本账号的千帆令牌，不影响其它平台。
-          </Text>
-        </Space>
-      </Modal>
 
       {/*
         「同步**商品笔记**」的千帆会话不可用提示（**§44**，2026-09-30 用户拍板拆分）。
 
-        与上面那个 `arkPrompt` 是**同一个门禁平台、两条不同链路**：这里说的是商品笔记
-        （千帆 `goods-note/list` 的挂链笔记），上面说的是店铺商品台账。文案里的动作名
-        必须写全「同步商品笔记」—— 只写「同步商品」会让用户去补登之后发现补错地方。
+        文案里的动作名必须写全「同步商品笔记」—— 只写「同步商品」会让人去补登之后
+        发现补错地方。
 
         `unknown` 一律不弹（DEF-057）：没问到 ≠ 不可用，放行让同步真发一次。
       */}
@@ -1343,11 +1219,9 @@ export function XhsAccountsPage() {
               : { scope: "full" };
           if (target.kind === "notes") {
             void startNoteSync(target.accountId, payload);
-          } else if (target.kind === "goods_notes") {
+          } else {
             // §44：商品笔记走独立端点（`POST /accounts/{id}/goods-notes/sync`）。
             void startGoodsNoteSync(target.accountId, payload);
-          } else {
-            void startGoodsSync(target.accountId, payload);
           }
         }}
       />

@@ -89,6 +89,7 @@ import {
   type LlmGenerateResult,
 } from "../../../lib/api";
 import { WaitMask } from "../../../components/ui/wait-mask";
+import { dictLabel } from "../../../lib/system-dicts";
 import { NoteVersionHistory } from "./note-version-history";
 import type {
   LlmCopyRequirements,
@@ -154,6 +155,15 @@ const MEDIA_SOURCE_OPTIONS: {
     form: "video",
   },
 ];
+/**
+ * 来源的中文名：**字典 `sys_media_source` 赢**（设计 63：枚举全量字典化），
+ * `MEDIA_SOURCE_OPTIONS[].label` 只作字典未加载时的兜底。
+ */
+function mediaSourceLabel(source: LlmMediaSource): string {
+  const fallback = MEDIA_SOURCE_OPTIONS.find((o) => o.value === source)?.label ?? source;
+  return dictLabel("sys_media_source", source, { [source]: fallback });
+}
+
 
 /** 每个来源的参数是否要展开（问题 3：参数**就地**展开，不再在别处冒出来）。 */
 //: ⚠️ `video_reference` 已退场（用户口径：*「视频下拉应只有本地素材和智能生成视频」*）
@@ -2612,7 +2622,12 @@ export function LlmGenerateModal({
 
   /** 当前形态可选的来源（问题 6：视频来源不出现在图文笔记里，反之亦然）。 */
   const sourceOptions = useMemo(
-    () => MEDIA_SOURCE_OPTIONS.filter((o) => o.form === noteForm),
+    () =>
+      MEDIA_SOURCE_OPTIONS.filter((o) => o.form === noteForm).map((o) => ({
+        ...o,
+        //: 文案走字典 `sys_media_source`（设计 63），`o.label` 只作兜底。
+        label: mediaSourceLabel(o.value),
+      })),
     [noteForm]
   );
 

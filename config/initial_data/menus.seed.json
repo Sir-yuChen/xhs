@@ -4,8 +4,8 @@
   "counts": {
     "M": 11,
     "C": 39,
-    "F": 145,
-    "total": 195
+    "F": 137,
+    "total": 187
   },
   "menus": [
     {
@@ -984,21 +984,8 @@
       "parent_seq": 79
     },
     {
-      "_seq": 81,
-      "name": "编辑商品",
-      "menu_type": "F",
-      "path": "",
-      "perms": "xhs:item:edit",
-      "icon": "",
-      "workspace": "",
-      "sort_order": 0,
-      "is_visible": true,
-      "status": "normal",
-      "parent_seq": 80
-    },
-    {
       "_seq": 82,
-      "name": "润色",
+      "name": "SKU 名称优化",
       "menu_type": "F",
       "path": "",
       "perms": "xhs:item:polish",
@@ -1057,32 +1044,6 @@
       "icon": "",
       "workspace": "",
       "sort_order": 5,
-      "is_visible": true,
-      "status": "normal",
-      "parent_seq": 80
-    },
-    {
-      "_seq": 87,
-      "name": "删除台账行",
-      "menu_type": "F",
-      "path": "",
-      "perms": "xhs:item:deleteLocal",
-      "icon": "",
-      "workspace": "",
-      "sort_order": 6,
-      "is_visible": true,
-      "status": "normal",
-      "parent_seq": 80
-    },
-    {
-      "_seq": 88,
-      "name": "同步商品",
-      "menu_type": "F",
-      "path": "",
-      "perms": "xhs:item:sync",
-      "icon": "",
-      "workspace": "",
-      "sort_order": 7,
       "is_visible": true,
       "status": "normal",
       "parent_seq": 80

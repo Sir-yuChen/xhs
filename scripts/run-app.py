@@ -12,10 +12,13 @@
   * 不再依赖 PowerShell 的 `Start-Process` + `cmd /c` 重定向（实测在计划任务环境里静默失败，
     子进程根本起不来，日志里连一行子进程输出都没有）。
 
-两个入口都开（覆盖两种使用习惯）：
-  * http://127.0.0.1:8000  ← 后端直出**生产构建** `frontend/dist`（本次用环境变量打开
-    `FRONTEND_SERVE_STATIC=true`，**不改仓库里的 config/default.yaml**）
-  * http://127.0.0.1:5173  ← Vite dev server（带 HMR，`/api` 反代到 8000）
+两个入口（2026-10-27 起**只保留一个前端端口**，用户口径「8000和5173只保留一个前端端口」）：
+  * http://127.0.0.1:8000  ← **纯 API**（`FRONTEND_SERVE_STATIC=false`，不再挂 `frontend/dist`）
+  * http://127.0.0.1:5173  ← **唯一前端入口**：Vite dev server（带 HMR，`/api` 反代到 8000）
+
+⚠️ 为什么砍掉 8000 的静态托管：两个前端入口 = 一个走 dist（需 `vite build`）、一个走源码
+（HMR 实时生效）⇒ 「改完前端看不到变化」变成**取决于你访问了哪个端口**。实测用户就是
+访问 8000 看到旧 dist，误判为「前端不实时」。现在只剩 5173，改完立即生效，没有第二条路。
 
 日志：`.hermes/logs/{app,vite}.log`（追加写；每次重启都留一行退出码）
 """
@@ -112,6 +115,12 @@ class Child:
         self.next_start_at = 0.0
         self.started_at = 0.0
 
+    def _listening(self) -> bool:
+        """自己声明的端口上是否真有服务在听（`port` 为空 ⇒ 不检查，返回 True）。"""
+        if not self.port:
+            return True
+        return port_listening("127.0.0.1", self.port)
+
     def start(self) -> None:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         if self.handle is not None:
@@ -147,6 +156,20 @@ class Child:
             #: 进程在跑：跑够 60 秒算「起来过」，清空退避。
             if self.failures and time.time() - self.started_at > 60:
                 self.failures = 0
+            #: ⚠️ **活着 ≠ 在正确的端口上**（2026-10-27 实测）：vite 默认「端口被占就
+            #: 换下一个」，三个实例互抢时最后一个跑到 **5224**，而 launcher / 浏览器 /
+            #: 文档全指着 5173 ⇒ 用户看到的是 8000 直出的**旧 dist 产物**，症状却是
+            #: 「改前端不生效」。这里按 `port` 复核一次监听方是不是自己，不是就杀掉重启
+            #: （vite 侧另有 `strictPort: true` 兜底，两道都留：别的进程占用时它自己起不来，
+            #: 我们这边能给出可读的原因）。
+            if self.port and time.time() - self.started_at > 25 and not self._listening():
+                log(f"{self.name} 未在 :{self.port} 监听（进程在但端口不对）→ 杀掉重启")
+                try:
+                    self.process.kill()
+                except Exception:  # noqa: BLE001 - 杀不掉也要走下面重启分支
+                    pass
+                self.process = None
+                self.next_start_at = time.time() + 2
             return
 
         #: ⚠️⚠️ **这里只登记退避，不立即重启**（用户实测 2026-10-22：失败计数涨到 29、
@@ -206,8 +229,10 @@ def main() -> int:
         return 0
 
     api_env = dict(os.environ)
-    # 后端直出前端生产构建（只影响静态托管开关；数据仍走仓库根 .env + config/default.yaml 的真实库）
-    api_env["FRONTEND_SERVE_STATIC"] = "true"
+    #: ⛔ **不再让 8000 直出前端**（2026-10-27 用户口径「8000和5173只保留一个前端端口」）。
+    #: 显式置 false 而不是「不设」：`config/default.yaml` 里 `frontend.serve_static: true`
+    #: 会生效，不显式覆盖就还是两个入口。**唯一前端入口 = 5173（Vite，HMR 实时生效）**。
+    api_env["FRONTEND_SERVE_STATIC"] = "false"
     api_env["PYTHONIOENCODING"] = "utf-8"
     # M1.9 定时同步三道闸（设计 13 §24.9，2026-09-23 用户口径「按推荐优化」）：
     # 总开关 + 两个同步开关在 launcher 用 env 打开，**不动仓库 config/default.yaml**

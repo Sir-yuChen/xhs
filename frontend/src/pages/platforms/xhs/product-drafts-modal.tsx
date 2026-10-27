@@ -28,7 +28,6 @@
 import { WaitMask } from "../../../components/ui/wait-mask";
 import { useCallback, useEffect, useState } from "react";
 import {
-  Alert,
   App,
   Button,
   Empty,
@@ -202,12 +201,10 @@ export function ProductDraftsModal({
           </Popconfirm>
         </Space>
 
-        <Alert
-          type="info"
-          showIcon
-          message="草稿箱数据实时来自千帆，本地不落库"
-          description="账号跟随商品页选定的店铺。草稿只存商品骨架，其余字段需在千帆草稿箱补齐。"
-        />
+        {/* 2026-10-27 用户口径「红框提示文本移除」：原来这里有一条蓝色 Alert
+            （「草稿箱数据实时来自千帆，本地不落库 / 账号跟随商品页选定的店铺…」），
+            整条移除。弹窗底部已有一行「店铺：xxx · 本弹窗操作直接作用于千帆草稿箱」，
+            两处说的是同一件事，留底部那行（它紧邻操作按钮，更像操作提示）。 */}
 
         {/* 2026-10-20 统一：表格等待由公共 WaitMask 表达。 */}
 

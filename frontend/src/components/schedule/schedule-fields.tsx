@@ -37,12 +37,17 @@ import {
   misfirePolicyTip,
   triggerTypeFullLabel,
 } from "../../lib/schedule";
+import { useDictOptions } from "../../lib/system-dicts";
 import type { ScheduleIn } from "../../types";
 import { CronBuilderModal } from "./cron-builder-modal";
 
 const { Text } = Typography;
 
 /** 错过策略三档（顺序即展示顺序；文案来自 lib/schedule.ts） */
+/**
+ * 错过策略的**镜像兜底** —— 实际展示走字典 `sys_misfire_policy`（设计 63：枚举全量字典化）。
+ * 保留这份只为字典未加载时下拉仍有得选；label 与字典首装值逐字相同。
+ */
 const MISFIRE_OPTIONS: Array<{ value: NonNullable<ScheduleIn["misfire_policy"]>; label: string }> = [
   { value: "fire_now", label: misfirePolicyLabel("fire_now") },
   { value: "once", label: misfirePolicyLabel("once") },
@@ -67,6 +72,8 @@ export function ScheduleFields({ value, onChange, allowConcurrent = false }: Sch
   const [cronChecking, setCronChecking] = useState(false);
   const [cronNextTimes, setCronNextTimes] = useState<string[]>([]);
   const [builderOpen, setBuilderOpen] = useState(false);
+  //: 错过策略选项走字典 `sys_misfire_policy`（镜像兜底 `MISFIRE_OPTIONS`，设计 63）。
+  const misfireOptions = useDictOptions("sys_misfire_policy", MISFIRE_OPTIONS);
 
   useEffect(() => {
     setCronDraft(value.cron_expression ?? "");
@@ -202,7 +209,7 @@ export function ScheduleFields({ value, onChange, allowConcurrent = false }: Sch
           value={value.misfire_policy ?? "once"}
           onChange={(policy) => patch({ misfire_policy: policy })}
           style={{ width: "100%" }}
-          options={MISFIRE_OPTIONS.map((option) => ({
+          options={misfireOptions.map((option) => ({
             value: option.value,
             label: <span title={misfirePolicyTip(option.value)}>{option.label}</span>,
           }))}

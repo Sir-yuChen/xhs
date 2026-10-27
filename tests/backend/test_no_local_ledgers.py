@@ -197,7 +197,14 @@ class TestSegment4_Invariants:
         assert not offenders, f"这些模块仍在读写已退场的台账：{offenders}"
 
     def test_sync_endpoints_are_tombstones(self):
-        """「同步商品 / 同步笔记」必须**显式 410**，不能悄悄变 404。"""
+        """「同步商品 / 同步笔记 / 删台账」这些**写本地台账**的端点必须不在 OpenAPI 里。
+
+        ⚠️ 2026-10-27 口径变更（用户原话「批量同步商品信息逻辑全链路彻底移除」）：
+        原来是「保留墓碑回 410」，现在**连墓碑一起删掉** —— `/items/sync` 与
+        `/items/delete` 的路由表里都不该再有这条路径。
+        理由：商品列表已是平台实时数据，不存在「同步回本地」这个动作，
+        留个 410 反而让人以为「以后会恢复」。
+        """
         from backend.app.main import app
 
         paths = app.openapi()["paths"]
@@ -226,8 +233,8 @@ class TestSegment4_Invariants:
                     yield route
 
         registered = {getattr(route, "path", "") for route in _flatten(qianfan_router.routes)}
-        assert "/items/sync" in registered, (
-            "「同步商品」墓碑不见了 —— 客户端会拿到 404 而不是可读的 410"
+        assert "/items/sync" not in registered, (
+            "「同步商品」端点又回来了 —— 商品列表是平台实时数据，不该再有同步链路"
         )
 
     def test_route_permission_guard_still_passes(self):

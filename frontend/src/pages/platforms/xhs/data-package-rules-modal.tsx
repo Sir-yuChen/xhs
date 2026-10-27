@@ -56,6 +56,7 @@ import {
   type DataPackageRuleSet,
 } from "../../../lib/api";
 
+import { dictLabel } from "../../../lib/system-dicts";
 import { WaitMask } from "../../../components/ui/wait-mask";
 const { Text } = Typography;
 
@@ -63,6 +64,10 @@ const { Text } = Typography;
 export type MathStep = { op: "mul" | "add" | "sub"; value: number };
 
 /** 操作类型的中文名（**只列本轮实现的**；其余字段已定型但后端会 400）。 */
+/**
+ * 规则类型的**镜像兜底** —— 展示走字典 `xhs_package_rule_op`（设计 63：枚举全量字典化）。
+ * 保留这份只为字典未加载时下拉仍有得选。
+ */
 const OP_LABELS: Record<string, string> = {
   extract_segment: "按分隔符取第 N 段",
   extract_between: "取包裹符之间的内容",
@@ -629,7 +634,7 @@ export function DataPackageRulesModal({
           </Form.Item>
           <Form.Item name="op" label="操作" rules={[{ required: true }]}>
             <Select
-              options={OP_IMPLEMENTED.map((op) => ({ label: OP_LABELS[op], value: op }))}
+              options={OP_IMPLEMENTED.map((op) => ({ label: dictLabel("xhs_package_rule_op", op, OP_LABELS), value: op }))}
               //: 换 op ⇒ 清掉另一套参数，免得带着脏值保存。
               onChange={() => ruleForm.setFieldsValue({} as RuleFormValues)}
               //: ⚠️ 新建时才让选 op；编辑时锁住（换 op 等于换规则语义，应新建一条）。

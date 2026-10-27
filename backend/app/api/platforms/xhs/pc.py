@@ -34,7 +34,6 @@ from backend.app.services.shop_binding_service import (
     has_ark_session,
     parse_state_time,
     qianfan_cookies_for_account,
-    synced_note_count,
 )
 from backend.app.schemas.xhs_pc import (
     NoTrafficCleanupActiveResponse,
@@ -1452,8 +1451,6 @@ def _shop_goods_source(db: Session, account: PlatformAccount) -> dict[str, Any]:
             "status": "",
             "status_message": "",
             "shop_total": 0,
-            "synced_notes": 0,
-            "synced_at": "",
             "health_checked_at": "",
         }
     state = get_shop_state(account)
@@ -1464,8 +1461,8 @@ def _shop_goods_source(db: Session, account: PlatformAccount) -> dict[str, Any]:
         "status": str(state["status"]),
         "status_message": str(state["status_message"]),
         "shop_total": int(state["goods_note_total"] or 0),
-        "synced_notes": synced_note_count(db, account.id),
-        "synced_at": _state_time_text(state["goods_synced_at"]),
+        #: ⛔ `synced_notes` / `synced_at` 已删除（2026-10-27）—— 笔记改实时查询后
+        #: 「本地同步了多少条」不存在，恒 0 / 恒空串。
         #: 最近一次千帆登录态巡检时间（T-31）；空 = 从未巡检。
         "health_checked_at": _state_time_text(state["health_checked_at"]),
     }
@@ -1766,8 +1763,8 @@ def _self_content_capabilities(
                 "reason": goods_reason,
                 "shop_name": goods_state["shop_name"],
                 "shop_total": goods_state["shop_total"],
-                "synced_notes": goods_state["synced_notes"],
-                "synced_at": goods_state["synced_at"],
+                #: ⛔ `synced_notes` / `synced_at` 已删除（2026-10-27）—— 「本地同步了
+                #: 多少条笔记」这个概念随实时查询退场，两个值恒 0 / 恒空串。
             },
         },
     }

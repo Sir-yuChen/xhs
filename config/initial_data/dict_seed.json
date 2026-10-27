@@ -282,6 +282,15 @@
       ]
     },
     {
+      "code": "xhs_item_channel_type",
+      "name": "千帆商品类型",
+      "remark": "镜像 apis.xhs_qianfan_apis 平台 search_filter.is_channel 的两个取值（true=渠道品）；「全部」是去掉字段发的，不在字典里",
+      "items": [
+        { "value": "false", "label": "普通商品", "list_class": "default" },
+        { "value": "true", "label": "渠道品", "list_class": "blue" }
+      ]
+    },
+    {
       "code": "xhs_order_status",
       "name": "订单状态",
       "remark": "镜像 order.ORDER_STATUSES（中文即值；pytest 镜像守卫钉）",
@@ -369,7 +378,9 @@
         { "value": "material", "label": "本地素材", "list_class": "default" },
         { "value": "ai_generate", "label": "AI 生成", "list_class": "default" },
         { "value": "reference_image", "label": "参考图生成", "list_class": "default" },
-        { "value": "video", "label": "视频", "list_class": "default" }
+        { "value": "video", "label": "视频", "list_class": "default" },
+        { "value": "video_material", "label": "本地素材（视频）", "list_class": "purple" },
+        { "value": "video_ai_generate", "label": "智能生成视频", "list_class": "magenta" }
       ]
     },
     {
@@ -467,13 +478,13 @@
     {
       "code": "xhs_sort_field",
       "name": "商品排序字段",
-      "remark": "",
+      "remark": "平台 search_item_v2 的 sort_field 白名单（2026-10-27 逐个实测：只认 create_time / on_shelf_time / off_shelf_time / update_time / price / stock / item_sale_qty_30；其余字段名一律 500）",
       "items": [
         { "value": "create_time", "label": "创建时间", "list_class": "default" },
         { "value": "on_shelf_time", "label": "上架时间", "list_class": "default" },
         { "value": "off_shelf_time", "label": "下架时间", "list_class": "default" },
-        { "value": "last_audit_time", "label": "审核时间", "list_class": "default" },
-        { "value": "price_min_fen", "label": "价格", "list_class": "default" },
+        { "value": "update_time", "label": "更新时间", "list_class": "default" },
+        { "value": "price", "label": "售价", "list_class": "default" },
         { "value": "stock", "label": "库存", "list_class": "default" },
         { "value": "item_sale_qty_30", "label": "近 30 天销量", "list_class": "default" }
       ]
@@ -509,6 +520,25 @@
       "items": [
         { "value": "ai_title", "label": "AI 标题", "list_class": "default" },
         { "value": "ai_selling_point", "label": "AI 卖点", "list_class": "default" }
+      ]
+    },
+    {
+      "code": "xhs_forbidden_word_match_mode",
+      "name": "违规词匹配模式",
+      "remark": "镜像 backend/app/models/forbidden_word.py 的 MATCH_MODE_EXACT=1 / MATCH_MODE_CONTAINS=2",
+      "items": [
+        { "value": "1", "label": "精确", "list_class": "default" },
+        { "value": "2", "label": "包含", "list_class": "blue" }
+      ]
+    },
+    {
+      "code": "sys_log_source",
+      "name": "日志来源",
+      "remark": "api_logs / business_logs / scheduled_job_logs 三表合并成链路时间线时的来源标记",
+      "items": [
+        { "value": "api", "label": "端点", "list_class": "blue" },
+        { "value": "business", "label": "业务", "list_class": "green" },
+        { "value": "job", "label": "任务", "list_class": "purple" }
       ]
     }
   ]

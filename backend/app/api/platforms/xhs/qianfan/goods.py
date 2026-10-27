@@ -23,8 +23,6 @@ from ._shared import (
     HTTPException,
     ImageAiClient,
     MAX_PAGE_SIZE,
-    Note,
-    NoteAsset,
     OpenAICompatibleTextClient,
     Optional,
     PlatformAccount,
@@ -36,7 +34,6 @@ from ._shared import (
     _default_detail_image_prompt,
     _epoch_millis,
     _first_text,
-    _fmt_state_time,
     _owned_account,
     _price_fen,
     _render_detail_image_template,
@@ -63,7 +60,6 @@ from ._shared import (
     shanghai_now,
     shop_products_service,
     status,
-    synced_note_count,
 )
 from backend.app.core.perm_deps import require_perm
 
@@ -93,8 +89,21 @@ class ItemNotesRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+
+class NoteDetailRequest(BaseModel):
+    """单篇笔记详情（2026-10-27，实时）。
+
+    用户口径：「笔记数据不再落库，应实时查询，所有笔记全部应是实时数据」。
+    正文只能按单篇取（列表接口 23 个字段里没有正文），所以前端**切到哪篇调哪篇**。
+    """
+
+    platform_account_id: int
+    note_id: str = Field(min_length=1, max_length=64)
+
+    model_config = ConfigDict(extra="forbid")
+
 class ItemDetailRequest(BaseModel):
-    """商品详情弹窗的数据请求（v1.32，设计 13 §30.3.6；**纯本地**）。"""
+    """商品详情弹窗的数据请求（**实时查千帆**：`search_item_v2` + `get_skus_by_item_ids`）。"""
 
     platform_account_id: int
     item_id: str = Field(min_length=1, max_length=64)
@@ -151,26 +160,11 @@ class ShopItemsRequest(BaseModel):
     create_time_to: str | int | None = None
     sort_field: str = "create_time"
     order: str = "desc"
+    #: 渠道商品筛选（千帆「商品类型」三档里的「渠道品」）。
+    #: 平台请求里这个字段**恒发**且默认 `false`（= 只看普通商品，千帆自己也是这么发的），
+    #: 所以默认值必须与平台一致，不能写成 `None` 让 SDK 省掉字段。
+    is_channel: bool = False
 
-class ShopItemsDeleteRequest(BaseModel):
-    """批量删除本地台账行（v1.36，用户口径：「商品列表新增批量删除操作」）。
-
-    删的是**本地 `shop_products` 行**，不是平台商品（千帆 SDK 无商品删除接口；
-    平台侧删除另有不可逆风险，见设计 13 §33.10 不做边界）。口径与两个连带后果
-    写在 `shop_products_service.delete_items` 的 docstring 里（唯一一份）。
-
-    入参用 **`item_id`（平台商品 ID）** 而不是本地自增主键：跨页勾选时前端手里
-    就是 `item_id`（表格 `rowKey`），且归属维度已由 `platform_account_id` 限定 ⇒
-    传别的账号的 item_id 只会删到 0 行，不会越权。
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    platform_account_id: int
-    #: 千帆商品 ID 列表。**上限 / 空值都由路由层挡成结构化 400**（不在模型层做成
-    #: 422 数组）：与 `status` / `note_count_op` 的白名单同一条纪律 —— 客户端要能
-    #: 拿到 `code` + `limit` 才能把「超了多少」讲清楚。
-    item_ids: list[str] = Field(default_factory=list)
 
 class NoteCleanupCandidatesRequest(BaseModel):
     """「无流量笔记」候选查询条件（**全部可选** —— 条件可配置，不是写死全库）。
@@ -274,19 +268,24 @@ def note_cleanup_candidates(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """「无流量笔记」候选清单（**纯本地，零平台请求**）。
+    """「无流量笔记」候选清单（**实时翻页查千帆**，2026-10-27 起）。
 
-    判定 = 千帆原文里 `browse_num`（阅读）/ `note_pay_order_cnt`（支付订单）/
+    ⚠️ 原文「**纯本地，零平台请求** / 三项指标已随 `entry_json` 落库，本地就有」
+    那套口径**已被设计 75 取代**：`shop_note_goods`（含 `entry_json`）整表 DROP，
+    指标不再有本地副本 ⇒ 只能是 `rt.list_goods_notes` 逐页拉平台数据（见
+    `note_cleanup_service.list_candidates`）。
+
+    判定 = 平台原文里 `browse_num`（阅读）/ `note_pay_order_cnt`（支付订单）/
     `note_pay_gmv`（支付金额）**三项都明确存在且都 ≤ 阈值**（默认全 0）。
 
     | 约定 | 做法 |
     |---|---|
-    | **零平台请求** | 三项指标同步时已随 `entry_json` 落库，本地就有 |
+    | **数据来源** | 千帆 `goods-note/list` 逐页扫（每页一次请求，最多 `MAX_SCAN_PAGES` 页） |
     | 缺值不是 0 | 三项任一在原文里缺失 / 非数字 → **不进候选**（「读不到」≠「读到 0」） |
     | 条件可配置 | 时间区间、30 日阅读开关与上限、三项阈值全部可选；不是写死全库 |
     | 分页 | `page` / `page_size`（上限 100），响应带 `total` |
     | 诚实边界 | `coverage.pool`（本地映射条数）/ `coverage.goods_note_total`（店铺笔记总数）必须一起暴露 |
-    | 鉴权 | 账号不属于当前用户 → 404；**无千帆登录态门禁** —— 纯本地读，未登录也能判定已同步的数据 |
+    | 鉴权 | 账号不属于当前用户 → 404；**需要 `ark` 令牌** —— 无令牌返回空池 + `bound=false`（要查平台才判得出） |
     | 只读 | 不写任何表 |
     """
     account = _owned_account(db, current_user, payload.platform_account_id)
@@ -373,33 +372,25 @@ def item_notes(
     db: Session = Depends(get_db),
     adapter_factory=Depends(get_qianfan_api_adapter_factory),
 ):
-    """某个商品**挂了哪些笔记**（商品列表页点「N 篇」看详情；设计 13 §31.6）。
+    """某个商品**挂了哪些笔记**（商品列表页点「N 篇」；设计 13 §31.6）。
 
-    | 约定 | 做法 |
+    ## 数据来源：**全实时**（2026-10-27 用户口径「本地不保存笔记数据」）
+
+    | 环节 | 来源 |
     |---|---|
-    | **关系表源**（2026-09-23 起，需求①） | 走 `note_goods` join `notes`（本地实体关系）—— **不再**读 `shop_note_goods` 平台证据缓存。理由：挂链笔记要展示的是「本地这条笔记」的正文 / 图集 / 发布态，关系表 + notes 表才有这些；缓存表只有平台条目的展示字段 |
-    | 覆盖范围 | 同步链路落库的笔记（ark 源解析挂链，§26）+ **本地生成的待发布笔记**（§31） |
-    | 诚实报覆盖率 | 关系表只覆盖「同步过 + 本地生成」的笔记，响应同时回 `synced_notes` / `goods_note_total`，前端必须把「可能不全」讲清楚 |
-    | 只读 | 不写任何表 |
+    | 有哪些笔记 / 标题 / 发布时间 / 互动数 / 挂载商品 | 千帆 `goods-note/list?item_mix_search_word=<item_id>`（GET，只读） |
+    | 正文 / 图集 / 话题 / 视频 | 点开某篇时再查 `POST /note-detail`（切到哪篇查哪篇） |
 
-    响应每篇笔记带：标题 / 正文 / 封面 / 图集 / 视频 / 发布时间 / 互动指标 /
-    链接 / **`note_type` + `publish_status` + `publish_error`**（本地生成笔记的
-    发布态，弹窗里与内容库同源展示）。
+    ⇒ 本接口**不读任何本地表**：`notes` / `note_assets` / `note_goods` 都不参与
+    （`note_goods` 已随迁移 DROP）。响应里也不再回 `synced_notes` /
+    `goods_synced_at` 这类「本地同步了多少」的覆盖率数字 —— 没有同步这回事了。
+
+    ⚠️ 平台失败时降级为 `error` + 空列表，不抛 500（列表页要能显示真实原因）。
+    ⚠️ 一次请求只打平台一次（`page_size=100` 取该商品的全部笔记）。
     """
     account = _owned_account(db, current_user, payload.platform_account_id)
-    # ⚠️ 无千帆登录态门禁：本接口**纯本地**（`note_goods` join `notes`，零平台
-    # 请求），未登录千帆也能看已落库的挂链关系（用户 2026-09-30 口径）。
-
-    state = get_shop_state(account) or {}
-    # ⚠️ 2026-09-27（§26.7）：关系表按**平台 ID** 挂 ⇒ 直接按 `item_id` 查，
-    # **不再先找台账行**（台账里没有这件商品时也有关系 —— 关系落库不校验商品存在）。
-    #: **主数据源改为千帆实时查询**（设计 75 §4.3，2026-10-27）：
-    #: `goods-note/list?item_mix_search_word=<商品ID>` 返回该商品挂载的全部笔记，
-    #: 不再依赖本地 `note_goods` 关系表（关系不问平台就不知道有没有漏、有没有删）。
-    #: 本地 `notes` 表只用来**补充**平台没有的字段（正文 / 图集 / 发布态）。
     from backend.app.services import realtime_platform_query_service as rt
 
-    platform_notes: list[dict] = []
     platform_error = ""
     try:
         live = rt.list_goods_notes(
@@ -408,131 +399,107 @@ def item_notes(
             page=1,
             page_size=100,
         )
-        platform_notes = live.get("items") or []
+        rows = live.get("items") or []
     except HTTPException:
         #: 没有 ark 令牌 = 确定性答案，照旧 400 让用户补登录
         raise
-    except Exception as error:  # noqa: BLE001 - 平台失败降级为「只回本地补充信息」
+    except Exception as error:  # noqa: BLE001 - 平台失败降级为可读原因，不抛 500
+        rows = []
         platform_error = str(error)
         logger.warning("item_notes 平台查询失败（account=%s）：%s", account.id, error)
 
-    note_ids = [str(n.get("note_id") or "") for n in platform_notes]
-    note_ids = [note_id for note_id in dict.fromkeys(note_ids) if note_id]
-    notes: list[dict[str, Any]] = []
-    if note_ids:
-        rows = db.scalars(
-            select(Note).where(Note.user_id == current_user.id, Note.note_id.in_(note_ids))
-        ).all()
-        note_pks = [note.id for note in rows]
-        asset_rows = db.scalars(
-            select(NoteAsset)
-            .where(NoteAsset.note_id.in_(note_pks))
-            .order_by(NoteAsset.sort_order, NoteAsset.id)
-        ).all()
-        images_by_note: dict[int, list[str]] = {}
-        video_by_note: dict[int, str] = {}
-        for asset in asset_rows:
-            if not asset.url:
-                continue
-            if asset.asset_type == "video":
-                video_by_note.setdefault(asset.note_id, asset.url)
-            else:
-                images_by_note.setdefault(asset.note_id, []).append(asset.url)
-
-        local_by_id = {note.note_id: note for note in rows}
-        for note_id in note_ids:
-            note = local_by_id.get(note_id)
-            if note is None:
-                #: **平台有、本地没有**（没同步过 / 本地已删）⇒ 用平台数据出一条，
-                #: 正文与发布态留空（缺值口径：不编造）—— 过去这类笔记直接看不见。
-                platform_row = next(
-                    (n for n in platform_notes if str(n.get("note_id")) == note_id), {}
-                )
-                notes.append(
-                    {
-                        "note_id": note_id,
-                        "title": platform_row.get("title") or "",
-                        "content": "",
-                        "cover": platform_row.get("cover") or "",
-                        "images": [platform_row["cover"]] if platform_row.get("cover") else [],
-                        "video_url": "",
-                        "publish_time": platform_row.get("publish_time") or "",
-                        "browse_num": platform_row.get("read_count"),
-                        "like_num": platform_row.get("like_count"),
-                        "collect_num": platform_row.get("collect_count"),
-                        "comment_num": platform_row.get("comment_count"),
-                        "share_num": platform_row.get("share_count"),
-                        "note_url": (
-                            f"https://www.xiaohongshu.com/explore/{note_id}"
-                            + (
-                                f"?xsec_token={platform_row['xsec_token']}&xsec_source=pc_creatormng"
-                                if platform_row.get("xsec_token")
-                                else ""
-                            )
-                        ),
-                        "note_type": "synced",
-                        "publish_status": "",
-                        "publish_error": "",
-                        "synced_at": "",
-                        #: 让前端能区分「本地有正文」与「只有平台壳子」
-                        "detail_source": "platform",
-                    }
-                )
-                continue
-            entry: dict[str, Any] = {}
-            raw_value = note.raw_json
-            if isinstance(raw_value, dict):
-                entry = raw_value
-            elif isinstance(raw_value, str) and raw_value.strip():
-                try:
-                    parsed = json.loads(raw_value)
-                    entry = parsed if isinstance(parsed, dict) else {}
-                except ValueError:
-                    entry = {}
-            images = images_by_note.get(note.id, [])
-            note_url = f"https://www.xiaohongshu.com/explore/{note.note_id}"
-            token = _first_text(entry.get("xsec_token"))
-            if token:
-                note_url = f"{note_url}?xsec_token={token}&xsec_source=pc_creatormng"
-            notes.append(
-                {
-                    "note_id": note.note_id,
-                    "title": note.title or "",
-                    "content": note.content or "",
-                    "cover": images[0] if images else _first_text(entry.get("cover_url")),
-                    "images": images,
-                    "video_url": video_by_note.get(note.id, ""),
-                    "publish_time": _ts_text(entry.get("publish_time"))
-                    or (note.created_at.strftime("%Y-%m-%d %H:%M") if note.created_at else ""),
-                    "browse_num": entry.get("browse_num"),
-                    "like_num": entry.get("like_num"),
-                    "collect_num": entry.get("collect_num"),
-                    "comment_num": entry.get("comment_num"),
-                    "share_num": entry.get("share_num"),
-                    "note_url": note_url,
-                    "note_type": note.note_type,
-                    "publish_status": note.publish_status or "",
-                    "publish_error": note.publish_error or "",
-                    "synced_at": note.created_at.strftime("%Y-%m-%d %H:%M") if note.created_at else "",
-                    #: 本地有正文/图集（可点开看全）
-                    "detail_source": "local",
-                }
+    #: 挂载商品的价格**只有 SKU 接口给**（`goods-note/list` 的 `goods_infos[]` 及
+    #: 详情 `biz_relations` 都不含价格）。这里按商品 ID **批量取一次**（平台上限 10
+    #: 个/批，本层自动分片）⇒ 不随笔记条数线性放大请求数。
+    #: ⚠️ 拿不到价格不算失败：`price_fen = None` ⇒ 前端显示「未返回」（缺值口径）。
+    sku_prices: dict[str, list[dict[str, Any]]] = {}
+    goods_ids = list(
+        dict.fromkeys(
+            str(g.get("item_id") or "")
+            for row in rows
+            for g in (row.get("goods") or [])
+            if str(g.get("item_id") or "").strip()
+        )
+    )
+    if goods_ids:
+        try:
+            bundle = rt.get_product_detail(
+                _realtime_adapter(db, account, adapter_factory), item_ids=goods_ids
             )
+            for entry in bundle.get("items") or []:
+                sku_prices[str(entry.get("item_id") or "")] = entry.get("skus") or []
+        except Exception as error:  # noqa: BLE001 - 价格是附加值，失败降级为空
+            logger.warning("item_notes 取 SKU 价格失败（account=%s）：%s", account.id, error)
+
+    notes: list[dict[str, Any]] = []
+    for row in rows:
+        note_id = str(row.get("note_id") or "")
+        if not note_id:
+            continue
+        token = _first_text(row.get("xsec_token"))
+        note_url = f"https://www.xiaohongshu.com/explore/{note_id}"
+        if token:
+            note_url = f"{note_url}?xsec_token={token}&xsec_source=pc_creatormng"
+        cover = row.get("cover") or ""
+        notes.append(
+            {
+                "note_id": note_id,
+                "title": row.get("title") or "",
+                #: ⚠️ 正文恒空：它只随 `POST /note-detail` 到（一次一篇），列表不做 N 次请求。
+                "content": "",
+                "cover": cover,
+                "images": [cover] if cover else [],
+                "video_url": "",
+                "publish_time": row.get("publish_time") or "",
+                "browse_num": row.get("read_count"),
+                "like_num": row.get("like_count"),
+                "collect_num": row.get("collect_count"),
+                "comment_num": row.get("comment_count"),
+                "share_num": row.get("share_count"),
+                "note_url": note_url,
+                #: 平台自报的笔记类型（`goods_note` = 商业笔记）。**唯一可信标识**：
+                #: 平台没有「这条笔记从哪同步来」的概念，本地 `note_type` / `publish_status`
+                #: 一概不展示（那两列在本地表 DROP 后恒为空，渲染出来就是猜的）。
+                "note_flag": row.get("note_flag") or "",
+                #: 挂载商品（`goods_infos[]` 的 4 个字段 + 从 SKU 接口补的**价格**）。
+                #: `price_fen` 为该商品**最低可售 SKU 价**（分）；`None` = 没查到。
+                "goods": [
+                    dict(
+                        g,
+                        price_fen=_min_sku_price(sku_prices.get(str(g.get("item_id") or "")) or []),
+                    )
+                    for g in (row.get("goods") or [])
+                ],
+            }
+        )
     notes.sort(key=lambda note: str(note.get("publish_time") or ""), reverse=True)
 
     return {
         "item_id": payload.item_id,
         "count": len(notes),
         "notes": notes,
-        #: 改造前这两个字段报的是**本地关系表的覆盖率**（「可能不全」）；
-        #: 现在主数据源是平台实时 ⇒ 覆盖就是全的，如实报 `platform`。
+        #: 恒 `platform`（平台失败时 `platform_degraded`）；不再有「本地覆盖率」概念。
         "source": "platform" if not platform_error else "platform_degraded",
         #: 平台查询失败时的原因（空 = 成功）。**不静默**：前端要能显示「这次没问到平台」。
         "error": platform_error,
-        "synced_notes": synced_note_count(db, account.id),
-        "goods_note_total": int(state.get("goods_note_total") or 0),
-        "goods_synced_at": _fmt_state_time(state.get("goods_synced_at")),
     }
+
+
+def _min_sku_price(skus: list[dict[str, Any]]) -> int | None:
+    """该商品**最低可售 SKU 价**（分）。没有可售 SKU / 没有价格 ⇒ `None`（不填 0）。
+
+    ⚠️ 用最低价而不是第一条：一个商品可能有多个规格，取最低价才是列表上「起售价」的语义。
+    ⚠️ 不取 `original_price_fen`（划线价）—— 展示真售价，划价另说。
+    """
+    prices = [
+        int(sku["price_fen"])
+        for sku in skus
+        if isinstance(sku, dict)
+        and sku.get("price_fen") is not None
+        and sku.get("buyable") is not False
+    ]
+    return min(prices) if prices else None
+
 
 def _realtime_adapter(db: Session, account, adapter_factory):
     """按账号自己的 `ark` 令牌造千帆 adapter（**不借任何别的凭据**）。
@@ -592,7 +559,6 @@ def _decorate_realtime_item(item: dict) -> dict:
     | `note_count` | `platform_note_count` | 列表页**不逐商品打平台**（一页 20 条 = 20 次请求），给平台侧原文计数 |
     | `note_count_source` | 固定 `"platform"` | 标明口径（真实篇数在 `/item-notes` 实时查） |
     | `category` | 平台 `categories[]` | 服务层已算好（与台账 `_category_path` 同一判据） |
-    | `ai_title` / `ai_selling_point` | 台账 `shop_products` | ⚠️ **我方数据**（AI 采纳值），平台不存在 ⇒ 由 `_attach_local_ai_text` 贴回；这里先给空串兜底 |
     | `allowed_actions` | `shop_item_operate_gates.allowed_actions` | 判据的**唯一实现**，前端按它渲染按钮 |
     """
     from backend.app.services import shop_item_operate_gates
@@ -607,23 +573,6 @@ def _decorate_realtime_item(item: dict) -> dict:
         item, status_key=str(item.get("status_key") or "")
     )
     return item
-
-
-def _attach_local_ai_text(db: Session, account, items: list[dict]) -> None:
-    """把**我方数据**（AI 采纳的标题 / 卖点）贴回实时行。
-
-    ⚠️ 设计 75 S5（2026-10-27）：**恒为空串**。这两列原来住在 `shop_products`
-    （`ai_title` / `ai_selling_point`），随商品台账整表 DROP 一起退场 ——
-    真机实测全库 **0 个非空值**，搬一张空表只是换个地方留死代码。
-
-    ⚠️ 但**函数与字段不能删**：前端按 `ai_title` / `ai_selling_point` 渲染
-    「AI 标题 / 卖点」两列（空则显示平台标题），响应形状必须保持。
-    若将来要恢复这个能力，正确的落点是**别的表**（商品无关的「用户标注」表），
-    不要再往商品数据里塞。
-    """
-    for item in items:
-        item["ai_title"] = ""
-        item["ai_selling_point"] = ""
 
 
 def _realtime_items_page(
@@ -710,6 +659,7 @@ def _realtime_items_page(
             create_to=time_to,
             sort_field=sort_field,
             order=order,
+            is_channel=bool(payload.is_channel),
         )
     except HTTPException:
         #: 没有 ark 令牌是**确定性答案**（用户能自救），照旧 400 —— 不是平台失败。
@@ -725,12 +675,48 @@ def _realtime_items_page(
         return page
 
     items = [_decorate_realtime_item(item) for item in (result.get("items") or [])]
-    _attach_local_ai_text(db, account, items)
 
     #: ⚠️ 平台没给 total 时**不拿本页条数冒充分母**（缺值口径）。
     raw_total = result.get("total")
     total = int(raw_total) if isinstance(raw_total, int) else None
     return _page(items, total)
+
+
+@router.post("/note-detail")
+def note_detail(
+    payload: NoteDetailRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    adapter_factory=Depends(get_qianfan_api_adapter_factory),
+):
+    """**单篇笔记详情**（实时查千帆，2026-10-27）。
+
+    用户口径：「笔记数据不再落库，应实时查询，所有笔记全部应是实时数据」。
+
+    | 项 | 说明 |
+    |---|---|
+    | 数据源 | **千帆实时**（`postgw/note/detail`，强签名）—— 本地 `notes` 表**不再参与** |
+    | 为什么按单篇 | 列表接口 `goods-note/list` 的 23 个字段**没有正文**；正文只有这条接口给 |
+    | 调用时机 | 前端**切到哪篇查哪篇**（tab 切换触发），不预加载 ⇒ 打开弹窗只打 1 次列表 |
+    | 返回 | 标题 / **正文全文** / 图片列表 / 封面 / 发布时间 / 话题 / 挂载商品 / 四个互动数 / `raw`（平台 39 字段） |
+    | 失败 | 平台失败 → 502 + `code`（前端显示真实原因，不静默给空正文） |
+
+    ⚠️ **不落库**：本接口只读，结果不写任何表 —— 「本地缓存与平台不一致」正是这轮
+    改造要消灭的问题。
+    """
+    from backend.app.services import realtime_platform_query_service as rt
+
+    account = _owned_account(db, current_user, payload.platform_account_id)
+    try:
+        return rt.get_note_detail(
+            _realtime_adapter(db, account, adapter_factory),
+            note_id=payload.note_id,
+        )
+    except HTTPException:
+        #: 没有 ark 令牌 = 确定性答案（用户能自救），照旧 400。
+        raise
+    except Exception as error:  # noqa: BLE001 - 平台侧异常统一转结构化 502
+        raise _realtime_query_error_detail(error) from error
 
 
 @router.post("/items")
@@ -756,7 +742,11 @@ def shop_items(
     展示契约与改造前**逐字段一致**（对齐 `shop_products_service.normalize_item_from_raw`，
     见 `_decorate_realtime_item`）；补齐动作在 `_realtime_items_page`（唯一实现）。
     """
-    from apis.xhs_qianfan_apis import QIANFAN_ITEM_STATUS_LABELS, QIANFAN_ITEM_STATUSES
+    from apis.xhs_qianfan_apis import (
+        QIANFAN_ITEM_STATUS_LABELS,
+        QIANFAN_ITEM_STATUSES,
+        SORTABLE_ITEM_FIELDS,
+    )
 
     account = _owned_account(db, current_user, payload.platform_account_id)
     status_key = (payload.status or "on_shelf").strip()
@@ -770,6 +760,21 @@ def shop_items(
             },
         )
     status_label = QIANFAN_ITEM_STATUS_LABELS.get(status_key, status_key)
+
+    #: 排序字段**白名单**（2026-10-27 实测）：平台 `search_item_v2` 只认这 7 个
+    #: `sort_field`，其余字段名（如 `price_min_fen` / `total_stock` / `last_audit_time`）
+    #: 一律回 `服务端处理失败` ⇒ 整页列表变红。这里提前 400 并回支持列表，
+    #: 与 `status` / `note_count_op` 同一条纪律：**不许静默退化成默认**。
+    sort_field = (payload.sort_field or "create_time").strip()
+    if sort_field not in SORTABLE_ITEM_FIELDS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "QIANFAN_SORT_FIELD_UNSUPPORTED",
+                "message": f"不支持的排序字段：{sort_field}",
+                "supported": list(SORTABLE_ITEM_FIELDS),
+            },
+        )
 
     #: 挂链笔记数的比较符同样是**白名单**（v1.34）：未知值 400 并回支持列表 ——
     #: 「不支持的取值静默退化成默认」会让用户以为筛过了（与 status 同一条纪律）。
@@ -856,27 +861,6 @@ def shop_items(
     if page.get("error"):
         response["error"] = page["error"]
     return response
-
-
-@router.post("/items/delete", include_in_schema=False)
-def shop_items_delete_removed():
-    """**已退场**（设计 75 S5，2026-10-27）：批量删除**本地台账行**。
-
-    商品不再落本地（`shop_products` 已随迁移 `n8o9p0q1r2s3` 整表 DROP）⇒
-    这个动作**没有对象可删**。平台商品的删除是另一条链路（`POST /items/operate`
-    的 `delete` 动作，**写平台**），不受影响。
-
-    ⚠️ 为什么是 410 而不是静默 200：老前端 / 开着的页签点到它，必须拿到一句
-    读得懂的答复；静默成功会让用户以为「删掉了」，而其实什么都没发生。
-    """
-    raise HTTPException(
-        status_code=status.HTTP_410_GONE,
-        detail={
-            "code": "SHOP_ITEMS_LOCAL_DELETE_REMOVED",
-            "message": "「删除本地商品」已随商品实时查询下线：商品不再落本地。"
-                       "如需删除平台商品，请用「批量操作 → 删除」。",
-        },
-    )
 
 
 def _find_platform_product(adapter, item_id: str) -> dict | None:
@@ -972,7 +956,6 @@ def item_detail(
         )
 
     item = rt.normalize_product(raw_product or {})
-    _attach_local_ai_text(db, account, [item])
     #: 店铺冻结标记**本地无法从商品行推出**（不由条目下发），只能由写操作的失败回执
     #: 写进 `shop_state`。必须在 `_decorate_realtime_item` 之前打上 —— 按钮判据要看到它
     #: （千帆原文：「您的店铺被冻结，解冻后可发布、编辑商品」）。
@@ -983,6 +966,7 @@ def item_detail(
     raw_item = raw_product or {}
     product_images = shop_products_service.product_image_links(raw_item)
     detail_images = shop_products_service.detail_image_links(raw_item)
+    videos = shop_products_service.product_video_links(raw_item)
     #: 「图集」= 主图 + 详情图合并去重（两处都是
     #: `shop_products_service` 的**纯函数**：平台原文 → 链接列表，零 DB）。
     #: SKU 规格图**不混进商品图集**。
@@ -998,7 +982,19 @@ def item_detail(
         "product_images": product_images,
         #: 原商品详情图 —— 参考图分组 ②。
         "detail_images": detail_images,
+        #: 商品视频（`raw_json.videos`）—— 2026-10-27 新增：改造前整条链路没取过。
+        "videos": videos,
         "skus": skus,
+        #: **平台原始行**（`search_item_v2` 的 `items[i]` 原样，只去掉嵌套媒体数组）。
+        #: 2026-10-27 用户口径「根据 json 自动生成一张实时表，展示接口返回的所有数据」：
+        #: 前端拿它把平台的**每一个字段**都列出来，不再由我方挑选展示哪些。
+        #: 媒体（images / image_descriptions / videos）已单独提取成上面三个键，
+        #: 这里剔除以免同一个数据在表里重复出现几十行。
+        "raw_fields": {
+            key: value
+            for key, value in raw_item.items()
+            if key not in {"images", "image_descriptions", "videos"}
+        },
         "sku_count": entry.get("sku_count") if entry.get("sku_count") is not None else len(skus),
         #: 实时链路：刚刚查过，恒「有详情」。保留字段名，前端渲染逻辑零改动
         #: （改造前的空态判据「空串 = 没补过详情」随本地化一起退场）。
@@ -1135,6 +1131,7 @@ def generate_detail_image(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
     image_ai_client: ImageAiClient = Depends(get_image_ai_client),
+    adapter_factory=Depends(get_qianfan_api_adapter_factory),
 ):
     """**生成商品详情图**（设计 17 §13.3.3，v2.1；用户口径 2026-10-01）。
 
@@ -1159,7 +1156,8 @@ def generate_detail_image(
 
     #: ⚠️ 设计 75 S5（2026-10-27）：商品图从**平台实时**取（原读本地台账 `detail_json`）。
     #: 参考图白名单的判据不变：**只接受这件商品自己的图**（挡住 SSRF 与"随便传个 URL"）。
-    raw_product = _find_platform_product(_realtime_adapter(db, account, adapter_factory), payload.item_id)
+    adapter = _realtime_adapter(db, account, adapter_factory)
+    raw_product = _find_platform_product(adapter, payload.item_id)
     if raw_product is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1168,6 +1166,15 @@ def generate_detail_image(
     product_images = shop_products_service.product_image_links(raw_product)
     detail_images = shop_products_service.detail_image_links(raw_product)
     images = product_images + [url for url in detail_images if url not in product_images]
+    #: 提示词模板 / 默认提示词要的是**归一化**的商品与 SKU（原 `detail` 来自本地台账
+    #: `detail_json`，台账退场后这条链断了 ⇒ 下面 `detail.get(...)` 恒 NameError）。
+    #: 这里有平台行就够：模板只用得上 `title` 与 `variant_name`。
+    from backend.app.services import realtime_platform_query_service as _rt
+    sku_bundle = _rt.get_product_detail(adapter, item_ids=[payload.item_id])
+    detail = {
+        "item": _rt.normalize_product(raw_product),
+        "skus": [row for row in (sku_bundle.get("items") or [{}])[0].get("skus") or [] if row],
+    }
     # v2.15（§13.3.6）：参考图可选 —— 勾选的主图 / 详情图，**必须过白名单**。
     # v2.23：主图与详情图**合并为一组「可选参考图」**（用户口径）⇒ 白名单合成一个集合，
     # 不再按来源归组（分组的语义已移到「生成哪一类图」的 Tab 上）。
@@ -1746,29 +1753,6 @@ MAX_EXPORT_ROWS: int = 5000
 
 _UNSET = object()
 
-class ItemEditRequest(BaseModel):
-    """商品本地编辑（设计 20 §2.1 端点 5）。
-
-    ⚠️ **PATCH 语义的两态**（设计 20 §2.2 口径①）：
-    * **省略键** = 保持原值（默认值是 `_UNSET` sentinel，**不是 `None`**）；
-    * **显式传 `null`** = 清空。
-
-    用 `Optional[X] = _UNSET` 而不是 `= None`：后者会把两件事混成一件
-    （用户只想改卖点，结果标题被清空了 —— PATCH 最常见的静默错值）。
-
-    ⚠️ `group_id` 已随「彻底移除商品分组」退场（2026-10-05）。它**不是**简单删字段
-    就完事：`extra="forbid"` 会让旧前端继续传 `group_id` 时拿到 422（而不是静默丢掉），
-    这正是我们要的 —— 静默丢弃会让用户以为「改了分组」。
-    """
-
-    model_config = ConfigDict(extra="forbid")
-    platform_account_id: int = Field(ge=1)
-    item_id: str = Field(min_length=1, max_length=64)
-    #: 采纳的 AI 标题；`null` = 清空；省略 = 不动。
-    ai_title: Optional[str] = Field(default=_UNSET, max_length=512)  # type: ignore[assignment]
-    #: 采纳的 AI 卖点；`null` = 清空；省略 = 不动。
-    ai_selling_point: Optional[str] = Field(default=_UNSET)  # type: ignore[assignment]
-
 class ItemsExportRequest(BaseModel):
     """CSV 导出（设计 20 §2.1 端点 6）。
 
@@ -1794,21 +1778,6 @@ class ItemsExportRequest(BaseModel):
     create_time_to: str | int | None = None
     sort_field: str = "create_time"
     order: str = "desc"
-
-class ItemPolishRequest(BaseModel):
-    """商品标题 / 卖点 AI 润色（设计 20 §3.1）。
-
-    ⚠️ **结果不落库**：润色只回**备选**（标题 3 个 + 卖点 3 个），用户**采纳**
-    才写进 `ai_title` / `ai_selling_point`（走 `PATCH /items/edit`）。
-    """
-
-    model_config = ConfigDict(extra="forbid")
-    platform_account_id: int = Field(ge=1)
-    item_id: str = Field(min_length=1, max_length=64)
-    #: 提示词模板 id（可选；`task_type=text` 的商品模板，设计 20 §3.3）。
-    template_id: Optional[int] = Field(default=None, ge=1)
-    #: 补充要求（没选模板时作为主提示词；选了模板则追加在末尾）。
-    instruction: str = Field(default="", max_length=2000)
 
 _PRODUCT_GROUPS_GONE = {
     "code": "PRODUCT_GROUPS_REMOVED",
@@ -1892,11 +1861,10 @@ def _assert_action_permitted(db: Session, current_user: User, action: str) -> No
 class ItemOperateRequest(BaseModel):
     """批量上架 / 下架 / 删除**平台商品**（2026-10-05 需求 7）。
 
-    ⚠️ 与 `ShopItemsDeleteRequest`（删**本地台账行**）是**两件不同的事**：
+    ⚠️ 与已退场的「删除本地台账行」是**两件不同的事**：
 
     | 请求 | 动谁 |
     |---|---|
-    | `POST /items/delete` | **本地台账行**（零平台请求），平台商品不动 |
     | `POST /items/operate` | **平台商品**（真实写操作），台账由下一轮同步对账 |
 
     ⚠️ 本请求是**交易侧写操作**：下架会影响在售商品、删除**不可恢复**。
@@ -1909,43 +1877,6 @@ class ItemOperateRequest(BaseModel):
     action: str = Field(min_length=1, max_length=16)
     #: 商品 ID 列表（去重保序；空 ⇒ 400；超 `MAX_ITEMS_PER_TASK` ⇒ 400）。
     item_ids: list[str] = Field(min_length=1, max_length=MAX_OPERATE_ITEMS)
-
-class ItemsSyncRequest(BaseModel):
-    """同步**指定商品**到本地台账（2026-10-05 需求 6）。
-
-    ⚠️ 与 `SyncShopGoodsRequest`（整店同步）是两件事：这里只更新**命中的那几个**
-    商品，**不删任何旧行**、不改台账范围。
-    """
-
-    model_config = ConfigDict(extra="forbid")
-    platform_account_id: int = Field(ge=1)
-    #: 要同步的商品 ID（去重保序；空 ⇒ 400；超 `MAX_SYNC_ITEMS` ⇒ 400）。
-    item_ids: list[str] = Field(min_length=1, max_length=MAX_OPERATE_ITEMS)
-    #: 2026-10-06：合并「批量同步商品信息」后，同一个条件弹窗的**时间区间**
-    #: 对按 ID 同步这条路也要生效（原来只认 ID，区间无处可传）。
-    #: `full` ⇒ 不设下界；`range` ⇒ 透给平台按**创建时间**过滤（与整店同口径）。
-    scope: str = ""
-    start_date: str = ""
-    end_date: str = ""
-
-@router.post("/items/sync", include_in_schema=False)
-def shop_items_sync_removed():
-    """**已退场**（设计 75 §2.4 / S5，2026-10-27）：按商品 ID 同步到本地台账。
-
-    原实现把指定商品「翻页扫描 + 精确命中 + 落 `shop_products`」，并挂进
-    `xhs_shop_goods_sync` 队列。商品列表改**实时查平台**后：本地没有台账可写，
-    队列也没有执行体 ⇒ 整条链路退场（`shop_goods_sync_service` 同批删除）。
-
-    ⚠️ 商品**最新状态**现在随时可看：列表就是实时查的，不需要「同步一下再看」。
-    """
-    raise HTTPException(
-        status_code=status.HTTP_410_GONE,
-        detail={
-            "code": "SHOP_ITEMS_SYNC_REMOVED",
-            "message": "「同步商品信息」已随商品实时查询下线：列表本身就是平台实时数据。",
-        },
-    )
-
 
 @router.post("/items/operate")
 def shop_items_operate(
@@ -2028,7 +1959,7 @@ def shop_items_operate(
     #: 再判「你有没有这个动作的码」（403）—— 反过来会把「参数写错」报成「没权限」。
     _assert_action_permitted(db, current_user, action)
 
-    # 去重保序（与 `/items/delete` 同一纪律：请求条数≠实际条数时不许虚报）。
+    # 去重保序（**请求条数 ≠ 实际条数时不许虚报**，与平台删除同一条纪律）。
     seen: set[str] = set()
     item_ids: list[str] = []
     for raw in payload.item_ids:
@@ -2089,74 +2020,6 @@ def shop_items_operate_status(
             detail="商品操作任务不存在。",
         )
     return snapshot
-
-@router.patch("/items/edit", include_in_schema=False)
-def edit_shop_item_removed():
-    """**已退场**（设计 75 S5，2026-10-27）：商品**本地**编辑（AI 采纳的标题 / 卖点）。
-
-    它改的是本地台账上的两列用户标注（`ai_title` / `ai_selling_point`），
-    表已随迁移 `n8o9p0q1r2s3` DROP；实机核对这两列**全库 0 个非空值** ⇒ 没有数据要迁。
-
-    ⚠️ 平台的商品编辑（标题 / 价格 / 库存）走千帆自己的后台，本系统不碰（只读边界）。
-    前端 `PATCH` 调用与「采纳 AI 文案」按钮同批移除。
-    """
-    raise HTTPException(
-        status_code=status.HTTP_410_GONE,
-        detail={
-            "code": "SHOP_ITEM_LOCAL_EDIT_REMOVED",
-            "message": "「商品本地编辑」已下线：商品改为平台实时数据，本地不再存标注副本。"
-                       "AI 润色仍可用（结果直接用于生成笔记 / 发布）。",
-        },
-    )
-
-
-@router.post("/items/polish")
-def polish_shop_item(
-    payload: ItemPolishRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-    text_ai_client: OpenAICompatibleTextClient = Depends(get_text_ai_client),
-):
-    """**商品标题 / 卖点 AI 润色**（设计 20 §3.1）。
-
-    与「生成商品详情图」是**同一条纪律**（§13.3.3）：服务商 `api_key` 在服务端、
-    绝不下发前端。本端点用**两个业务点**（`polish_product_title` /
-    `generate_selling_point`，都是 `kind=text`），与笔记侧的 `polish_text` /
-    `generate_title` **分开挂服务商** —— 商品标题有平台字数上限、不能含广告法
-    违禁词，提示词与笔记不是同一套（设计 20 §3.2）。
-
-    失败一律**结构化、不回落**（同 `_business_model_context`）。
-
-    ## 返回
-
-    ```json
-    {
-      "title_candidates": ["...", "...", "..."],
-      "selling_point_candidates": ["...", "...", "..."],
-      "source_title": "平台原标题（对照用）",
-      "model_name": "本次用的模型"
-    }
-    ```
-
-    ⚠️ **一次给 3 个备选**（市场惯例：只给一个等于没给，用户没有可比较的对象）。
-    ⚠️ **不落库**：`ai_title` / `ai_selling_point` 只在用户**采纳**后写
-    （`PATCH /items/edit`）。润色过程在 `llm_gateway_usage_logs` 有调用记录。
-    """
-    from backend.app.api.ai import _business_model_context
-    from backend.app.services import product_polish_service
-
-    _owned_account(db, current_user, payload.platform_account_id)
-
-    return product_polish_service.polish_product(
-        db,
-        current_user=current_user,
-        platform_account_id=payload.platform_account_id,
-        item_id=payload.item_id,
-        template_id=payload.template_id,
-        instruction=payload.instruction,
-        text_ai_client=text_ai_client,
-        resolve_context=lambda key: _business_model_context(db, current_user, key),
-    )
 
 @router.post("/items/export")
 def export_shop_items(

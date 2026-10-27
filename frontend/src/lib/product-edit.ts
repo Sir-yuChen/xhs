@@ -1,64 +1,15 @@
-import { dictLabel } from "./system-dicts-core";
 /**
- * M4「商品编辑优化」的**纯逻辑**（设计 20）。
+ * 商品列表的**导出前置校验**（纯逻辑，可单测）。
  *
- * 单独成文件的意义：这些判据（PATCH 语义 / `updated[]` 中文名 / 导出上限 /
- * 采纳提示）**不需要渲染就能验证** —— vitest 直接跑真断言，而不是靠页面守卫
- * 正则匹配源码。
+ * ⚠️ 本文件原为 M4「商品编辑优化」的纯逻辑集（PATCH payload 拼装 / `updated[]`
+ * 中文名 / 采纳备选），**编辑那四件已随「编辑商品功能逻辑移除」整条删除**
+ * （2026-10-27 用户口径「编辑商品功能逻辑移除」）：
+ * `EDITABLE_FIELDS` / `buildEditPayload` / `updatedSummary` / `adoptCandidate`。
+ * 原因：商品已改平台实时数据，本地台账（含 `ai_title` / `ai_selling_point`）整表 DROP，
+ * 「改本地标注」这件事的前提不存在了。
  *
- * ⚠️ 一条硬口径：**PATCH 的「不传」与「传 null」是两件事**。前端拼请求体时
- * 绝不能把没编辑的字段塞成 `null`（那等于清空）—— 本模块的
- * `buildEditPayload` 就是这条的唯一实现。
- *
- * ⚠️ `group_id` 已随「彻底移除商品分组」退场（2026-10-05）。后端模型带
- * `extra="forbid"` ⇒ 前端再拼 `group_id` 只会拿到 422，所以这里也一起删干净。
+ * 只留导出这条 —— 它与编辑无关，仍被商品列表工具栏使用。
  */
-
-/** 商品编辑可改的两个字段（设计 20 §2.1 端点 5）。 */
-export const EDITABLE_FIELDS = ["ai_title", "ai_selling_point"] as const;
-export type EditableField = (typeof EDITABLE_FIELDS)[number];
-
-/** 编辑表单的当前值（`undefined` = 用户没碰过这一项）。 */
-export type EditFormState = Partial<Record<EditableField, number | string | null>>;
-
-/**
- * 拼 `PATCH /items/edit` 的请求体 —— **只带用户真的改过的键**。
- *
- * ⚠️ **绝不能把没改的字段填 `null`**：后端把「显式 null」读成**清空**，
- * 只想改分组的用户会把标题清掉。这里用「键不存在」表达「不动」。
- */
-export function buildEditPayload(
-  base: { platform_account_id: number; item_id: string },
-  form: EditFormState,
-): Record<string, unknown> {
-  const payload: Record<string, unknown> = { ...base };
-  for (const field of EDITABLE_FIELDS) {
-    if (field in form) {
-      payload[field] = form[field];
-    }
-  }
-  return payload;
-}
-
-/** 后端 `updated[]` 的代码名 → 中文提示（后端只回代码，中文名在前端一处）。 */
-const UPDATED_LABELS: Record<string, string> = {
-  ai_title: "AI 标题",
-  ai_selling_point: "AI 卖点",
-};
-
-/**
- * `updated[]` → 用户能读的一句话。
- *
- * ⚠️ **空数组 = 什么都没改**，返回 `null`（调用方据此**不弹提示**）——
- * 报「已更新商品」而其实一个字段没动，是比不提示更糟的误导。
- */
-export function updatedSummary(updated: string[] | null | undefined): string | null {
-  const names = (updated ?? []).map(
-    (key) => dictLabel("xhs_product_updated_field", key, UPDATED_LABELS) ?? key
-  );
-  if (names.length === 0) return null;
-  return `已更新${names.join("、")}`;
-}
 
 /** 导出上限（与后端 `MAX_EXPORT_ROWS` 同值；超限前端先拦，不发请求）。 */
 export const EXPORT_MAX_ROWS = 5000;
@@ -75,13 +26,4 @@ export function exportBlockReason(total: number, maxRows: number = EXPORT_MAX_RO
     return `当前筛选条件下有 ${total} 行，超过导出上限 ${maxRows} 行。请收窄筛选条件后再导出。`;
   }
   return null;
-}
-
-/** 采纳一枚备选（设计 20 §3.1）—— 润色只回草稿，采纳才落库。 */
-export function adoptCandidate(
-  form: EditFormState,
-  field: EditableField,
-  value: string,
-): EditFormState {
-  return { ...form, [field]: value };
 }

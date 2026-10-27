@@ -81,7 +81,7 @@ def get_tasks(
     task_types: str = Query(
         "",
         description=(
-            "按任务类型筛选（**逗号分隔**，如 `xhs_note_sync,xhs_shop_goods_sync`）。"
+            "按任务类型筛选（**逗号分隔**，如 `xhs_note_sync,xhs_goods_note_sync`）。"
             "任务中心「账号级任务」页签用它筛三类账号级任务（设计 13 §35.16）。"
             "⚠️ 刻意用逗号串而不是可重复参数：axios 对数组默认序列化成 `task_types[]=`，"
             "FastAPI 不认（静默筛不到 ⇒ 页面空列表却不报错），逗号串两端都无歧义。"

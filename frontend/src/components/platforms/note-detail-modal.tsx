@@ -397,11 +397,26 @@ export function NoteDetailBody({
             </div>
           ) : mediaUrls.length > 0 ? (
             <div>
-              <div style={{ position: "relative", background: p.mediaBg, borderRadius: 8, overflow: "hidden" }}>
+              {/* ⚠️ 预览窗口**尺寸固定**（2026-10-27 用户口径「图片的预览窗口大小固定不要变化」）：
+                  原先是 `maxHeight: 58vh` + `objectFit: contain` —— 那是「随图片自适应」，
+                  于是竖图和方图之间切换时容器高度来回变（点下一张，右边正文跟着上下跳）。
+                  ⇒ 改成**固定的 58vh 高盒子**，图片在里面 `contain` 居中留白，盒子不动。 */}
+              <div
+                style={{
+                  position: "relative",
+                  background: p.mediaBg,
+                  borderRadius: 8,
+                  overflow: "hidden",
+                  height: "58vh",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+              >
                 <img
                   src={currentImage}
                   alt=""
-                  style={{ width: "100%", maxHeight: "58vh", objectFit: "contain", display: "block" }}
+                  style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", display: "block" }}
                 />
                 {mediaUrls.length > 1 && (
                   <>

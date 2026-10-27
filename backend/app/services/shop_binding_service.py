@@ -180,13 +180,3 @@ def qianfan_cookies_for_account(db: Session, account_id: int) -> str:
 # 为什么能删干净：**关系不存在了**。绑店 / 解绑 / 占用检查 / 换店作废旧数据这一整套
 # 逻辑的存在前提是「账号 → 店铺」是一条需要维护的关系；改用「能不能调千帆 = ark
 # 令牌有没有」之后，这些动作连语义都没有了。
-
-
-def synced_note_count(db: Session, account_id: int) -> int:
-    """该账号已落库的**商品笔记映射**条数 —— ⚠️ 设计 75 S5 起恒为 0。
-
-    原来数的是 `shop_note_goods`（千帆商品笔记列表的本地映射），该表已随迁移
-    `n8o9p0q1r2s3` 整表 DROP（挂链改实时查询）。函数保留是为了不改调用方签名；
-    **不要**拿它当「有没有数据」的判据 —— 现在永远是 0，看 `rt.list_goods_notes`。
-    """
-    return 0

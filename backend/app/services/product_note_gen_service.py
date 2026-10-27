@@ -162,8 +162,14 @@ def _product_row(db: Session, account, item_id: str, *, adapter: Any = None) -> 
             "ARK_SESSION_REQUIRED", "本账号没有可用的千帆登录态，无法生成商品笔记。请先登录该账号的千帆。"
         )
     if adapter is None:
+        #: ⚠️ **这里曾有本次线上缺陷**（2026-10-27）：原来报的是
+        #: `QIANFAN_CREDENTIAL_MISSING`（「该账号还没有千帆（ark）令牌…」），
+        #: 但 `adapter is None` 的真实含义是「**调用方没把 adapter 传进来**」——
+        #: 上面 `has_ark_session` 已经过了，说明该账号**是有令牌的**。
+        #: ⇒ 用凭据错误去描述一个编程错误，会让用户白跑一趟「重新登录千帆」。
         raise ProductNoteGenerationError(
-            "QIANFAN_CREDENTIAL_MISSING", "该账号还没有千帆（ark）令牌，请先在浏览器登录千帆后导入。"
+            "INTERNAL_ADAPTER_MISSING",
+            "内部错误：读取商品时没有拿到平台 adapter（本账号令牌是有的）。",
         )
     from backend.app.services import realtime_platform_query_service as rt
 
@@ -386,7 +392,7 @@ def _run_aigc(adapter, item_id: str) -> dict:
     )
 
 
-def _gate_for_generation(db: Session, account, item_id: str, *, adapter: Any = None) -> tuple[dict, str]:
+def _gate_for_generation(db: Session, account, item_id: str, *, adapter: Any) -> tuple[dict, str]:
     """生成门禁（§31.4 步 1-2）：ark 令牌 → **实时**商品存在性。
 
     **单 / 批量入队与 worker 重跑共用这一把尺子**（DEF-044）：两项都是**确定性
@@ -399,8 +405,14 @@ def _gate_for_generation(db: Session, account, item_id: str, *, adapter: Any = N
     的 `ARK_SESSION_REQUIRED` 解释，再取 cookies 供调用方造 adapter。
 
     ⚠️ 设计 75 S5（2026-10-27）：第二道从「本地台账有这行」改成「**平台上查得到
-    这件商品**」—— 台账表已 DROP。`adapter` 由调用方传入（它已经要先造 adapter
-    才能查）；不传 ⇒ 只做到 ark 门禁为止，商品由调用方自己查。
+    这件商品**」—— 台账表已 DROP。
+
+    ⚠️⚠️ **`adapter` 必须由调用方传入**（2026-10-27 线上实测的缺陷）：原签名给了
+    `adapter: Any = None`，而三处调用点都**没有传** ⇒ `_product_row` 收到 `None`，
+    它把「调用方没给 adapter」误判成「该账号没有 ark 令牌」⇒ 明明有令牌的商品页
+    却弹「该账号还没有千帆（ark）令牌」（用户截图报的就是这个）。**有 cookies 就应该
+    有 adapter**，缺 adapter 是编程错误，不是「缺令牌」。这里去掉默认值，让漏传在
+    调用点直接 TypeError 暴露，而不是伪装成凭据问题。
 
     返回 `(商品 dict, ark 令牌)`：**商品 dict 是平台实时归一化条目**（字段与
     `rt.normalize_product` 一致），调用方按 dict 取值。
@@ -413,6 +425,14 @@ def _gate_for_generation(db: Session, account, item_id: str, *, adapter: Any = N
     if not cookies:
         raise ProductNoteGenerationError(
             "QIANFAN_CREDENTIAL_MISSING", "该账号还没有千帆（ark）令牌，请先在浏览器登录千帆后导入。"
+        )
+    #: 调用方漏传 adapter 时**当场造一个**（它已经有 cookies 了，造 adapter 是纯本地操作）。
+    #: 这样即使某个入口忘了传，行为也正确 —— 但签名不再给默认值，让新写的调用点
+    #: 在静态检查/首次运行时就暴露，而不是变成一句误导性的「缺令牌」。
+    if adapter is None:
+        raise ProductNoteGenerationError(
+            "INTERNAL_ADAPTER_MISSING",
+            "内部错误：生成门禁没有拿到平台 adapter（本账号令牌是有的）。请把 adapter_factory 传进来。",
         )
     return _product_row(db, account, item_id, adapter=adapter), cookies
 
@@ -432,9 +452,11 @@ def generate_note_for_item(
     门禁顺序（设计 13 §31.4 步 1）：**绑店 → ark 令牌 → 台账商品**
     （唯一实现 :func:`_gate_for_generation`，队列入口与 worker 共用）。
     """
-    _pre, cookies = _gate_for_generation(db, account, item_id)
-    adapter = adapter_factory(cookies)
-    row = _product_row(db, account, item_id, adapter=adapter)
+    #: ⚠️ 顺序 = **先造 adapter 再进门禁**（门禁要拿它实时查商品）；门禁返回的
+    #: `_pre` 就是那件商品 —— 不要再 `_product_row` 查第二遍（那是同一次平台请求打两次）。
+    cookies = qianfan_cookies_for_account(db, account.id)
+    adapter = adapter_factory(cookies or {})
+    row, _ = _gate_for_generation(db, account, item_id, adapter=adapter)
     generated = _run_aigc(adapter, item_id)
     if not generated["title"] and not generated["content"]:
         raise ProductNoteGenerationError("AI_GENERATION_FAILED", "平台返回了空的标题与正文。")
@@ -550,8 +572,8 @@ def start_generate_note(
 
     幂等：同用户未终态队列里已有同 `item_id` ⇒ `already_queued: true`（不重复生成）。
     """
-    _pre, cookies = _gate_for_generation(db, account, item_id)
-    row = _product_row(db, account, item_id, adapter=adapter_factory(cookies))
+    cookies = qianfan_cookies_for_account(db, account.id)
+    row, _ = _gate_for_generation(db, account, item_id, adapter=adapter_factory(cookies or {}))
     # 一次动作 = 一个批次（2026-09-26 用户口径「批次逻辑不再移除，生成唯一批次号」）：
     # 单商品点击也开新批次号（一条明细），不复用已有批次。
     generate_batch = note_queue_service.BatchRequest(
@@ -614,8 +636,8 @@ def start_batch_generate(
     results: list[dict] = []
     for item_id in distinct:
         try:
-            _pre, cookies = _gate_for_generation(db, account, item_id)
-            row = _product_row(db, account, item_id, adapter=adapter_factory(cookies))
+            cookies = qianfan_cookies_for_account(db, account.id)
+            row, _ = _gate_for_generation(db, account, item_id, adapter=adapter_factory(cookies or {}))
         except ProductNoteGenerationError as error:
             results.append({"item_id": item_id, "ok": False, "error": error.message, "code": error.code})
             continue

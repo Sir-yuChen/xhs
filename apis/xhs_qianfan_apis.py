@@ -839,6 +839,92 @@ class XHS_Qianfan_Apis:
         body = {"note_ids": ids}
         return self._post("/api/edith/note/batch_delete_note", body, "/app-note/note-list")
 
+    #: 笔记详情接口的域名 —— **不是** `ark.xiaohongshu.com`，而是 `edith` 域。
+    #: 2026-10-27 真机抓包：千帆笔记编辑页 `/app-note/editor?noteId=…` 加载正文时发的
+    #: 就是这一条，与本模块其余接口的域不同 ⇒ 必须单独指定 host。
+    NOTE_DETAIL_HOST: str = "https://edith.xiaohongshu.com"
+
+    def get_note_detail(self, note_id: str) -> tuple[bool, str, dict | None]:
+        """**单篇笔记详情**（`GET /web_api/sns/capa/postgw/note/detail`，只读）。
+
+        ## 这是「笔记正文」唯一的实时来源（2026-10-27 真机打通）
+
+        千帆「笔记管理」列表（`goods-note/list`）的 23 个字段里**没有正文**，
+        只有标题 / 图 / 互动数。正文在编辑页加载时才取，走的就是本接口 ——
+        抓包依据：`/app-note/editor?noteId=6ade2fe0…` 打开时，
+        浏览器发 `GET https://edith.xiaohongshu.com/web_api/sns/capa/postgw/note/detail`
+        `?note_id=<id>&source=web&edit_mode=1`。
+
+        ## 必须签名（无签名 401）
+
+        实测同一 Cookie：
+
+        | 请求 | 结果 |
+        |---|---|
+        | 只带 Cookie | **HTTP 401** |
+        | 带 `x-s` / `x-t` / `x-s-common`（`_sign`，appId=itemark 档） | **200 + code=0** |
+
+        ⚠️ 签名材料里的 `api` 要**含 query 的完整路径**（`_signed_get` 同一条纪律）。
+
+        返回 `data` 共 **39 个字段**，与编辑页一一对应：
+
+        | 键 | 含义 |
+        |---|---|
+        | `desc` | **正文全文**（编辑页「正文内容」框里那段） |
+        | `name` / `title` | 标题 |
+        | `images_list` | 图片列表（每项含 `trace_id` / `metadata`） |
+        | `cover` | 封面（`fileid` / 宽高） |
+        | `post_time` / `visible_time` | 发布时间（**Unix 秒**） |
+        | `hash_tag` / `ats` | 话题 / @ 用户 |
+        | `biz_relations` | 挂载商品（`biz_type=GOODS_SELLER_V2`、`biz_id`=卖家 SKU ID） |
+        | `likes` / `fav_count` / `comments` / `share_count` | 互动数 |
+        | `video` | 视频（字符串，无视频为空） |
+        | `type` | `normal` / 其他 |
+        | `privacy` / `enabled` | 可见性 / 是否有效 |
+
+        ⚠️ `metadata` / `metadata_str` 里还有编辑页的更多设置（商业推广等），
+        是平台内部结构，业务侧只按需取上面那几个键。
+        """
+        note_text = str(note_id or "").strip()
+        if not note_text:
+            return False, "note_id 为空", None
+        path = (
+            f"/web_api/sns/capa/postgw/note/detail"
+            f"?note_id={note_text}&source=web&edit_mode=1"
+        )
+        headers, error, _signed = self._sign(path, None, "/")
+        if error is not None:
+            return False, error, None
+        try:
+            response = _session_request(
+                "GET",
+                self.NOTE_DETAIL_HOST + path,
+                headers=headers,
+                cookies=self._cookie_dict(),
+                timeout=WRITE_TIMEOUT,
+            )
+        except Exception as error_obj:  # noqa: BLE001
+            return False, f"笔记详情请求失败：{type(error_obj).__name__}: {error_obj}", None
+        if response.status_code == 401:
+            return (
+                False,
+                "平台拒绝了本次请求（HTTP 401）—— 笔记详情接口强制签名，"
+                "通常是 Cookie 里缺 a1 导致签名材料不完整，请重新导出完整 Cookie。",
+                None,
+            )
+        try:
+            payload = response.json()
+        except ValueError:
+            return False, f"笔记详情返回了非 JSON 响应（HTTP {response.status_code}）", None
+        if not isinstance(payload, dict):
+            return False, "笔记详情返回了非预期的响应体", None
+        code = payload.get("code")
+        if self.is_credential_error(code):
+            return False, str(payload.get("msg") or "千帆登录态失效"), payload
+        if code not in (0, 200, None) or payload.get("success") is False:
+            return False, str(payload.get("msg") or f"笔记详情返回 code={code}"), payload
+        return True, str(payload.get("msg") or "成功"), payload
+
     # ------------------------------------------------------------------ #
     # 商品**新增（存草稿）**链路（设计 23，2026-10-07 真机打通）
     #
@@ -2412,6 +2498,31 @@ QIANFAN_ITEM_STATUSES: dict[str, int] = {
     "audit_passed": 7,
     "rectify": 10,
 }
+
+#: 商品列表**可排序字段**（`search_order.sort_field`）—— 2026-10-27 逐个实测得出。
+#:
+#: 判定方法：用每个候选值各打一次 `search_item_v2`，看平台是 200 还是
+#: `服务端处理失败，请检查RPC服务端侧的异常堆栈`（= 字段名不认识）。
+#:
+#: | 平台 `sort_field` | 结果 |
+#: |---|---|
+#: | `create_time` / `on_shelf_time` / `off_shelf_time` / `update_time` | 200 |
+#: | `price` / `stock` / `item_sale_qty_30` | 200（千帆表头「售价 / 库存 / 近30天销量」就是这三个） |
+#: | `price_min_fen` / `min_price` / `total_stock` / `sale_qty30` / `acc_sale_qty` | **500** |
+#: | `last_audit_time` / `item_audit_time` / `product_note_num` / `note_count` | **500** |
+#:
+#: ⚠️ 注意 **`price` 不是 `price_min_fen`**：平台字段名是 `price`，而返回行里
+#: 价格叫 `min_price` —— 传 `price_min_fen` 会把整页列表打成 500（本项目踩过）。
+#: 本集合是**唯一判据**：路由层按它做白名单校验，前端表格的 `sorter` 也只能出这些值。
+SORTABLE_ITEM_FIELDS: tuple[str, ...] = (
+    "create_time",
+    "on_shelf_time",
+    "off_shelf_time",
+    "update_time",
+    "price",
+    "stock",
+    "item_sale_qty_30",
+)
 
 #: 状态的中文标签（前端与文档共用一份，避免各写各的）。
 QIANFAN_ITEM_STATUS_LABELS: dict[str, str] = {

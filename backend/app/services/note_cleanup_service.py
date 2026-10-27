@@ -221,11 +221,17 @@ def list_candidates(
     page: int = 1,
     page_size: int = 20,
 ) -> dict[str, Any]:
-    """候选清单（**纯本地**，不打千帆）。
+    """候选清单（**实时翻页查千帆**，设计 75 S5 / 2026-10-27）。
 
-    返回 `{candidates, page, page_size, total, coverage}`。`coverage` 是已知边界
-    的量化：`pool` = 本地映射条数（候选池大小），`goods_note_total` = 店铺商品笔记
-    总数（分母）。**没有可用的千帆登录态 → 404 由调用方给**，这里返回空池 + 分母 0。
+    ⚠️ 原文「**纯本地**，不打千帆 / `pool` = 本地映射条数」那套口径**已被设计 75 取代**：
+    `shop_note_goods` 关系表已随迁移 `n8o9p0q1r2s3` DROP，指标（阅读 / 支付订单 /
+    支付金额）不再有本地副本 ⇒ 只能是 `rt.list_goods_notes` 逐页拉平台数据。
+
+    返回 `{candidates, page, page_size, total, coverage, bound}`：
+    `coverage.pool` = **本次实时扫到的笔记条数**（候选池大小，不是本地行数）；
+    `coverage.goods_note_total` = 平台报的店铺商品笔记总数（分母）。
+
+    没有可用的千帆登录态 / 没有 `ark` 令牌 ⇒ 返回空池 + `bound=False`（404 由调用方给）。
     """
     account = db.get(PlatformAccount, account_id)
     if account is None or account.deleted_at is not None or not has_ark_session(db, account_id):

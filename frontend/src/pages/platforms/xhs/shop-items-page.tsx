@@ -13,6 +13,7 @@ import {
   SearchOutlined,
   SendOutlined,
   SyncOutlined,
+  ReloadOutlined,
   HistoryOutlined,
   ArrowUpOutlined,
   ArrowDownOutlined,
@@ -47,6 +48,7 @@ import {
   Checkbox,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
+import type { ReactNode } from "react";
 import { hasPermission } from "../../../hooks/use-permission";
 import dayjs from "dayjs";
 import { useAccountScope } from "../../../lib/account-scope";
@@ -56,26 +58,23 @@ import { useNavigate } from "react-router-dom";
 
 import {
   batchGenerateProductNotes,
-  deleteXhsShopItems,
   EMPTY_GENERATE_QUEUE_SNAPSHOT,
   exportShopItems,
   fetchAccounts,
   fetchGenerateQueue,
   fetchLlmGenerateQueue,
   fetchXhsItemNotes,
+  fetchQianfanNoteDetail,
   fetchPromptTemplates,
   fetchXhsQianfanBinding,
   fetchXhsShopItemDetail,
   fetchXhsShopItems,
   generateProductNote,
   generateProductDetailImage,
-  syncShopGoods,
   saveDetailImages,
   fetchMaterialFolders,
   fetchItemGenerations,
   readErrorDetail,
-  syncSpecifiedShopItems,
-  syncShopGoodsStatus,
   operateShopItems,
   fetchShopItemOperateResult,
   type PrecheckMediaItem,
@@ -91,7 +90,6 @@ import type {
   SyncNotesOptions,
 } from "../../../lib/api";
 import { yuan } from "../../../lib/format";
-import ProductEditModal from "./product-edit-modal";
 import { exportBlockReason } from "../../../lib/product-edit";
 import {
   EMPTY_SHOP_ITEMS_DRAFT,
@@ -108,10 +106,10 @@ import { NoteDetailBody } from "../../../components/platforms/note-detail-modal"
 import { formValuesToQuery, type QueryForm } from "../../../lib/shop-items-query";
 import { LlmGenerateModal } from "./llm-generate-modal";
 import { WaitMask } from "../../../components/ui/wait-mask";
-import { SyncSpecifiedItemsModal } from "./sync-specified-items-modal";
 import { ProductDraftsModal } from "./product-drafts-modal";
 import { ForbiddenWordsModal } from "./forbidden-words-modal";
 import { ProductPublishWizard } from "./product-publish-wizard";
+import { ProductDetailModal } from "./product-detail-modal";
 //: ⚠️ 默认导出（`export default`），不是具名 —— 具名导出的 `PackagePrecheckHandle`
 //: 只是给第二步留的取值句柄类型，别误当成组件名 import。
 import { SyncOptionsModal, type SyncOptions } from "../../../components/platforms/sync-options-modal";
@@ -147,6 +145,7 @@ import type {
   PromptTemplate,
   XhsItemNote,
   XhsItemNotesResponse,
+  XhsNoteDetail,
   XhsLoginChannels,
   XhsQianfanBinding,
   ShopItemOperateEntry,
@@ -164,17 +163,19 @@ const { Text, Paragraph } = Typography;
 const { RangePicker } = DatePicker;
 
 /**
- * 「商品列表」页：千帆店铺商品的本地台账视图。
+ * 「商品列表」页：千帆店铺商品（**实时查平台**）。
  *
- * 设计真相源 `docs/02_设计文档/12_功能设计_我的笔记与互动数据.md` §25 +
- * `docs/02_设计文档/13_功能设计_账号矩阵同步.md` §30（v1.32 本地化改造）。
+ * 设计真相源 `docs/02_设计文档/75_设计_去本地化实时查询.md` §2.3 / §4.1。
+ * ⚠️ 原文「本地台账视图 / 走本地数据 / 零平台请求 / 时效由『同步于 X』明示」那套
+ * 口径**已被设计 75 取代**（2026-10-27）：`shop_products` 台账表已 DROP，
+ * 列表与详情每次都实时查千帆（`search_item_v2` / `get_skus_by_item_ids`），
+ * 时效由响应的 `queried_at` 明示，不再有「同步」这个概念。
  *
  * 四条口径（都是实测定的，别改）：
- * 1. **走本地数据**（§30.3）：列表查 `shop_products` 台账（「同步商品」任务落库），
- *    **零平台请求**；展示契约与实时查询时代逐字段一致；时效由「同步于 X」明示；
- * 2. **账号不过滤类型、本页零门禁**（§30.1 + ADR-021，2026-09-30）：本地台账读
- *    不打平台 ⇒ 不看 ark 会话脸色，ark 失效时只加一行说明；打平台的动作用后端
- *    ark 门禁（`ARK_SESSION_REQUIRED`）把关，前端不预判；
+ * 1. **走平台实时**：`/items` 与 `/item-detail` 每次请求都打千帆，**不读本地**；
+ *    展示契约与本地化时代逐字段一致（前端渲染零改动），只多了 `source=platform`；
+ * 2. **ark 会话是硬前提**：既然真的打平台，无令牌时后端回 400 `ARK_SESSION_REQUIRED`
+ *    （原「本页零门禁」口径随本地台账一起退场）；
  * 3. **筛选参数名照抄千帆页面自己发的请求**（`whole_keywords` / `card_type` /
  *    `price_from|price_to`（分）/ `stock_from|stock_to` / `sales_from|sales_to`）；
  * 4. **金额进出都按分**（后端契约），展示层除以 100 —— 只有一处换算，不会两头乘。
@@ -193,6 +194,16 @@ const STATUS_OPTIONS: { value: XhsShopItemStatus; label: string }[] = [
   { value: "auditing", label: "审核中" },
   { value: "audit_rejected", label: "审核驳回" },
   { value: "audit_passed", label: "审核通过" },
+];
+
+/**
+ * 商品类型（千帆「商品类型」）：只映射 `is_channel` 的**两个**平台取值。
+ * ⚠️ 千帆页面上的「全部」这一档是自己**去掉 `is_channel` 字段**发的，
+ * 我方 SDK 目前恒发该字段 ⇒ 不提供「全部」选项（避免给出一个做不到的选项）。
+ */
+const ITEM_TYPE_OPTIONS: { value: boolean; label: string }[] = [
+  { value: false, label: "普通商品" },
+  { value: true, label: "渠道品" },
 ];
 
 /** 分 → 元（展示口径）。`null` 保持「取不到」，不显示成 0。 */
@@ -605,26 +616,10 @@ function formValuesToDraft(values: QueryForm): ShopItemsFilterDraft {
 }
 
 
-/** 挂链笔记弹窗右栏信息区（同步链路笔记带互动指标；本地生成笔记带发布态）。 */
+/** 挂链笔记弹窗右栏信息区（标题 + 平台标识 + 笔记 ID / 链接；正文在 `NoteLiveDetail`）。 */
 function renderItemNoteInfo(note: XhsItemNote) {
   // 全站消息提醒统一走 antd message（设计 04 §3.6）：复制反馈用继承主题的实例。
   const { message } = App.useApp();
-  // 设计 63：与 lib/note-publish-gates.ts 逐字重复的那份字典已收敛 ——
-  // 走统一字典 `sys_publish_status`（镜像常量在 note-publish-gates 里单点保留）。
-  const status = {
-    text: dictLabel("sys_publish_status", note.publish_status, {
-      pending: "待发布",
-      publishing: "发布中",
-      published: "已发布",
-      failed: "发布失败",
-    }),
-    color: dictListClass("sys_publish_status", note.publish_status, {
-      pending: "orange",
-      publishing: "blue",
-      published: "green",
-      failed: "red",
-    }),
-  };
   return (
     <Space direction="vertical" size={10} style={{ width: "100%" }}>
       <div>
@@ -632,57 +627,316 @@ function renderItemNoteInfo(note: XhsItemNote) {
           {note.title || "（无标题）"}
         </Text>
       </div>
-      <Space size={6} wrap>
-        {note.note_type === "local_generated" ? (
-          <Tag color="purple">本地生成</Tag>
-        ) : note.note_type === "synced" ? (
-          <Tag color="blue">三方同步</Tag>
-        ) : (
-          <Tag>本地</Tag>
+      {/* ⛔ 「三方同步 / 已发布 / 本地」这组标签**已移除**（2026-10-27 用户口径：
+          「tag 展示不正常，线上是否有对应标识，没有则移除相关逻辑」）。
+
+          原因有两个，都是硬伤：
+          ① `note_type`（`synced` / `local`）与 `publish_status` 是**本地库概念** ——
+             平台根本没有「这条笔记是从哪同步来的」这种标识；
+          ② 本地 `notes` / `note_goods` 两张表已 DROP，这两个字段现在恒为空，
+             渲染出来的标签永远是猜的。
+
+          ⇒ 只保留**平台自报的**标识：`note_flag === "goods_note"`（商业笔记）。
+          平台 `note_status` / `note_publish_type` 语义未证实（实测 `note_status` 恒 0），
+          按「缺值不造假」不猜、不展示。 */}
+      {/* 笔记 ID / 笔记链接 / 笔记类型 **同一行**，顺序 = ID → 复制链接 → 类型标签
+          （2026-10-27 用户口径「笔记类型 tag 放复制链接后面」）。
+
+          「笔记类型」= 平台自报的 `note_flag`：`goods_note` ⇒ 商业笔记；平台没回
+          就不画标签（缺值不造假）。发布时间与互动数**只在实时详情块**里画一次
+          （两处都画会让「发布时间」出现两遍，真机实测过）。 */}
+      <div
+        style={{
+          fontSize: 12,
+          marginTop: 4,
+          whiteSpace: "nowrap",
+          display: "flex",
+          alignItems: "center",
+          gap: 12,
+        }}
+      >
+        <Text type="secondary">笔记ID：{note.note_id}</Text>
+        <Tooltip title={note.note_url || "平台未返回链接"}>
+          <Text
+            style={{ cursor: "pointer", color: "#1677ff" }}
+            onClick={() => void copyToClipboard(note.note_url, "笔记链接已复制", message)}
+          >
+            复制链接
+          </Text>
+        </Tooltip>
+        {note.note_flag === "goods_note" && (
+          <Tag color="purple" style={{ marginInlineEnd: 0 }}>
+            商业笔记
+          </Tag>
         )}
-        {status && <Tag color={status.color}>{status.text}</Tag>}
-      </Space>
-      {note.publish_status === "failed" && note.publish_error && (
-        <Alert
-          type="error"
-          showIcon
-          message="发布失败原因"
-          description={note.publish_error}
-        />
-      )}
-      <Descriptions size="small" column={1} style={{ marginTop: 4 }}>
-        <Descriptions.Item label="笔记 ID">{note.note_id}</Descriptions.Item>
-        <Descriptions.Item label="发布时间">{note.publish_time || "-"}</Descriptions.Item>
-        {(note.browse_num != null || note.like_num != null) && (
-          <Descriptions.Item label="互动">
-            <Space size={10} wrap>
-              <Text style={{ fontSize: 12 }}>阅读 {note.browse_num ?? "-"}</Text>
-              <Text style={{ fontSize: 12 }}>赞 {note.like_num ?? "-"}</Text>
-              <Text style={{ fontSize: 12 }}>藏 {note.collect_num ?? "-"}</Text>
-              <Text style={{ fontSize: 12 }}>评 {note.comment_num ?? "-"}</Text>
-              <Text style={{ fontSize: 12 }}>分享 {note.share_num ?? "-"}</Text>
-            </Space>
-          </Descriptions.Item>
-        )}
-        <Descriptions.Item label="笔记链接">
-          <Tooltip title="点击复制">
-            <Text
-              style={{ fontSize: 12, cursor: "pointer", color: "#1677ff" }}
-              ellipsis
-              onClick={() => void copyToClipboard(note.note_url, "笔记链接已复制", message)}
-            >
-              {note.note_url}
-            </Text>
-          </Tooltip>
-        </Descriptions.Item>
-      </Descriptions>
-      {note.content && (
-        <div>
-          <Divider style={{ margin: "8px 0" }} />
-          <Paragraph style={{ fontSize: 13, whiteSpace: "pre-wrap", marginBottom: 0 }}>
-            {note.content}
-          </Paragraph>
+      </div>
+      {/* ⛔ 这里原来渲染 `note.content`（本地库正文）—— 2026-10-27 已移除：
+          正文改由 `NoteLiveDetail` 用 `/note-detail` 的实时数据渲染一次即可，
+          两处都画 ⇒ 弹窗里同一段正文出现两遍（用户截图报的就是这个）。 */}
+    </Space>
+  );
+}
+
+/**
+ * 单篇笔记的**实时详情块**（2026-10-27）。
+ *
+ * 用户口径：「笔记数据不再落库，应实时查询，所有笔记全部应是实时数据」。
+ *
+ * 数据来自 `/note-detail`（千帆 `postgw/note/detail`），对应千帆笔记**编辑页**：
+ * 正文 / 图集 / 话题 / 挂载商品。列表行（`XhsItemNote`）只有标题与互动数，**没有正文**。
+ *
+ * 三态必须分开：
+ * - 加载中 → `Spin`（不要先显示空正文，那会让人以为笔记没内容）
+ * - 失败 → 红色提示 + 重试按钮（**不静默给空正文**）
+ * - 成功 → 正文全文 + 话题 + 挂载商品
+ */
+/** 分 → `¥2304.00`；缺值显示「未返回」（**不填 0** —— 0 元是有效价格，会误导）。 */
+function formatFen(fen: number | null | undefined): string {
+  if (fen === null || fen === undefined || Number.isNaN(Number(fen))) return "未返回";
+  return `¥${(Number(fen) / 100).toFixed(2)}`;
+}
+
+/** 信息表格里的一个「标签 + 值」单元格（`nowrap` 用于「不许折行」的项）。 */
+function InfoCell({
+  label,
+  value,
+  nowrap,
+}: {
+  label: string;
+  value: ReactNode;
+  nowrap?: boolean;
+}) {
+  return (
+    <td style={{ padding: "3px 16px 3px 0", verticalAlign: "top" }}>
+      <span style={{ color: "#8c8c8c", whiteSpace: "nowrap" }}>{label}：</span>
+      <span style={nowrap ? { whiteSpace: "nowrap" } : undefined}>{value}</span>
+    </td>
+  );
+}
+
+/** 正文里的**话题标记**（小红书富文本形态）：`#名字[话题]#`。 */
+const NOTE_TOPIC_RE = /#([^#\[\]]{1,60})\[话题\]#/g;
+
+/**
+ * 正文渲染：把其中的 `#名字[话题]#` **就地**换成蓝色话题 tag，其余文字原样保留。
+ *
+ * ⚠️ 这是**替换**不是「额外展示」：话题本来就是正文的一部分（平台把它连同富文本标记
+ * 一起写进 `desc`），单独再列一行等于同一批话题画两遍（用户 2026-10-27 口径
+ * 「话题不要单独提取展示一行，直接在正文中替换成 tag 即可」）。
+ * ⚠️ 不反查接口、不用 `hash_tags` 字段 —— 只做就地替换，正文没标记就一个 tag 都没有。
+ */
+function NoteContentWithTopics({ content }: { content: string }) {
+  const parts: ReactNode[] = [];
+  let cursor = 0;
+  // 每次渲染新建正则（带 `g` 的正则有 `lastIndex` 状态，复用会漏匹配）。
+  const re = new RegExp(NOTE_TOPIC_RE.source, "g");
+  let match = re.exec(content);
+  while (match) {
+    if (match.index > cursor) parts.push(content.slice(cursor, match.index));
+    parts.push(
+      <Tag key={`${match.index}-${match[1]}`} color="blue" bordered={false}>
+        #{match[1]}
+      </Tag>,
+    );
+    cursor = match.index + match[0].length;
+    match = re.exec(content);
+  }
+  if (cursor < content.length) parts.push(content.slice(cursor));
+  return <>{parts}</>;
+}
+
+function NoteLiveDetail({
+  detail,
+  listGoods,
+  loading,
+  error,
+  onRetry,
+}: {
+  detail?: XhsNoteDetail;
+  /** 列表行的挂载商品（平台 `goods_infos[]`）—— **只有它带商品图**：
+   *  详情接口的 `biz_relations.extra_info` 不返回图片地址。 */
+  listGoods?: XhsItemNote["goods"];
+  loading: boolean;
+  error?: string;
+  onRetry: () => void;
+}) {
+  if (loading) {
+    return (
+      <div style={{ padding: "20px 0", textAlign: "center" }}>
+        <Spin size="small" />
+        <div style={{ marginTop: 8 }}>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            正在实时查询笔记详情…
+          </Text>
         </div>
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <Alert
+        type="error"
+        showIcon
+        message="笔记详情查询失败"
+        description={error}
+        action={
+          <Button size="small" onClick={onRetry}>
+            重试
+          </Button>
+        }
+      />
+    );
+  }
+  if (!detail) return null;
+  const posted = detail.publish_time
+    ? dayjs.unix(detail.publish_time).format("YYYY-MM-DD HH:mm")
+    : "-";
+  return (
+    <Space direction="vertical" size={10} style={{ width: "100%" }}>
+      {/* 发布日期与时间**不许换行**（2026-10-27 用户口径「时间布局应展示完整不换行」）：
+          `Descriptions` 的 label 与 content 各占一格，长值在窄栏里会被折成两行 ⇒
+          这里显式 `whiteSpace: nowrap`，宁可让整列更宽也不折行。 */}
+      {/* 信息区用**表格**排（2026-10-27 用户口径「布局很拥挤，重新布局使用表格方式，
+          一行两个或多个」）：`Descriptions` 的固定 3 列栅格在窄弹窗里会把长值挤到换行，
+          表格按内容自适应、每行放多组，读起来是一张清单而不是一堆散落的格子。 */}
+      <table
+        style={{
+          width: "100%",
+          borderCollapse: "collapse",
+          fontSize: 12,
+          tableLayout: "auto",
+        }}
+      >
+        <tbody>
+          <tr>
+            <InfoCell label="发布时间" value={posted} nowrap />
+            <InfoCell
+              label="笔记形态"
+              value={`${detail.video_url ? "视频" : "图文"}（${detail.images.length} 图）`}
+            />
+            <InfoCell label="数据来源" value={<Tag color="green">千帆实时</Tag>} />
+          </tr>
+          <tr>
+            <InfoCell label="点赞" value={detail.like_num ?? "-"} />
+            <InfoCell label="收藏" value={detail.collect_num ?? "-"} />
+            <InfoCell label="评论" value={detail.comment_num ?? "-"} />
+            <InfoCell label="分享" value={detail.share_num ?? "-"} />
+          </tr>
+        </tbody>
+      </table>
+      <Divider style={{ margin: "4px 0" }} />
+      {/* 正文**原样排版**，其中的 `#名字[话题]#` 就地渲染成蓝色话题 tag
+          （2026-10-27 用户口径「话题不要单独提取展示一行，直接在正文中替换成 tag 即可」）。
+
+          ⚠️ 这里**不新增数据**：话题是从平台正文自己的富文本标记里就地替换的，不另查
+          接口、不从别处拼；平台 `hash_tag` 是空数组也不影响（正文里自带标记）。
+          ⚠️ 单独的话题行**已删除** —— 同一批话题画两遍是冗余。 */}
+      <Paragraph style={{ fontSize: 13, whiteSpace: "pre-wrap", marginBottom: 0 }}>
+        {detail.content ? (
+          <NoteContentWithTopics content={detail.content} />
+        ) : (
+          "（平台没有返回正文）"
+        )}
+      </Paragraph>
+      {detail.goods.length > 0 && (
+        <Card size="small" title="挂载商品" styles={{ body: { padding: "10px 12px" } }}>
+          {/* ⛔ 不用表格（2026-10-27 用户口径「按照原来的布局方式，现在布局不合理」）：
+              表格会把 24 位商品 ID 挤进固定列里折成两行（真机截图就是这个），名称列
+              还留一大片空白。⇒ 回到**弹性布局**：左图固定 48px，右侧三行文字按内容排。
+              ① 商品名：**固定一行**，超出省略号，完整名走 Tooltip
+              ② 商品ID + 售价：**同一行**（卖家 SKU **不上屏**，用户口径）
+              ③ 规格：单独一行（保留 —— 区分同一商品的不同规格） */}
+          <Space direction="vertical" size={10} style={{ width: "100%" }}>
+            {detail.goods.map((g) => {
+              const hit =
+                (listGoods || []).find((row) => row.item_id && row.item_id === g.item_id) ||
+                (listGoods || []).find((row) => row.item_id && row.item_id === g.sku_id) ||
+                (listGoods || [])[0];
+              const image = hit?.image || "";
+              const variant = hit?.variant_desc || "";
+              //: 价格文本：缺值给**空串**（不是「未返回」）⇒ 上游据此整块不渲染。
+              const priceText =
+                hit?.price_fen === null || hit?.price_fen === undefined
+                  ? ""
+                  : formatFen(hit.price_fen);
+              const itemId = g.item_id || hit?.item_id || "";
+              const name = g.goods_name || hit?.title || "";
+              return (
+                <div
+                  key={g.sku_id || g.goods_id || itemId}
+                  style={{ display: "flex", gap: 10, alignItems: "flex-start" }}
+                >
+                  <div style={{ flexShrink: 0 }}>
+                    {image ? (
+                      <Image
+                        width={48}
+                        height={48}
+                        style={{ objectFit: "cover", borderRadius: 4 }}
+                        src={image}
+                        preview={{ mask: "预览" }}
+                      />
+                    ) : (
+                      <div
+                        style={{
+                          width: 48,
+                          height: 48,
+                          borderRadius: 4,
+                          background: "#f5f5f5",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          fontSize: 11,
+                          color: "#999",
+                        }}
+                      >
+                        无图
+                      </div>
+                    )}
+                  </div>
+                  {/* `minWidth: 0` 是 flex 子项能真正收缩的前提 —— 缺了省略号不生效。 */}
+                  <div style={{ minWidth: 0, flex: 1, lineHeight: 1.65 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600 }}>
+                      {name ? (
+                        <Tooltip title={name}>
+                          <span
+                            style={{
+                              display: "block",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            {name}
+                          </span>
+                        </Tooltip>
+                      ) : (
+                        <Text type="secondary">（平台未返回商品名）</Text>
+                      )}
+                    </div>
+                    {/* 展示口径（2026-10-27 用户口径）：
+                        ① 「只展示商品id」⇒ 卖家 SKU 不上屏（对「哪个商品」无增量信息）；
+                        ② 「价格与商品id一行展示」⇒ 售价跟在 ID 后面同一行；
+                        ③ 「规格保存」⇒ 规格名**保留**，单独一行；
+                        ④ 「售价：未返回 则不展示」⇒ 没有价格时**整个售价块不渲染**
+                           （不显示「售价：未返回」这种占位文字 —— 那一行只会让人
+                            以为「这里有价格但拿不到」）。 */}
+                    <div style={{ fontSize: 11, whiteSpace: "nowrap" }}>
+                      <Text type="secondary">商品ID：{itemId || "-"}</Text>
+                      {priceText && (
+                        <Text style={{ marginLeft: 14, color: "#fa541c" }}>
+                          售价：{priceText}
+                        </Text>
+                      )}
+                    </div>
+                    <div style={{ fontSize: 12 }}>
+                      <Text type="secondary">规格：{variant || "未返回"}</Text>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </Space>
+        </Card>
       )}
     </Space>
   );
@@ -790,10 +1044,9 @@ function GenerationsPanel({
 }
 
 /*
- * ⚠️ 「同步指定商品」弹窗**已抽到独立文件** `sync-specified-items-modal.tsx`
- * （2026-10-05）：它自带无限滚动取数与一套结果状态机，留在本文件里会让
- * 页面的 hook 依赖再长一截。这里只 import 它的组件。
- * 原内联实现（保留备查，勿恢复）：一个 `Modal` + `Input.TextArea` + 结果 Table。
+ * ⛔ 「同步指定商品」弹窗**已整块删除**（2026-10-27 用户口径：「批量同步商品信息
+ * 逻辑全链路彻底移除」）。商品列表读的是平台实时数据，没有「把平台数据同步回本地」
+ * 这个动作，弹窗连同它的请求函数 `/qianfan/items/sync` 一并退场。
  */
 
 export function XhsShopItemsPage() {
@@ -801,6 +1054,17 @@ export function XhsShopItemsPage() {
   // 设计 63：商品状态筛选选项走字典 `xhs_item_status`（STATUS_OPTIONS 兜底，
   // 「全部」档由回退合并自动补位）。
   const statusFilterOptions = useDictOptions("xhs_item_status", STATUS_OPTIONS);
+  // 挂链笔记数比较符走字典 `xhs_note_count_op`（NOTE_COUNT_OP_OPTIONS 兜底）。
+  const noteCountOpOptions = useDictOptions("xhs_note_count_op", NOTE_COUNT_OP_OPTIONS);
+  // 商品类型（`is_channel`）走字典 `xhs_item_channel_type`。
+  // ⚠️ 字典 value 是**字符串**（`"true"` / `"false"`），请求字段是 **boolean** ⇒ 映射回 boolean。
+  const itemChannelDict = useDictOptions("xhs_item_channel_type");
+  const itemTypeOptions: { value: boolean; label: string }[] = (
+    itemChannelDict.length > 0 ? itemChannelDict : ITEM_TYPE_OPTIONS
+  ).map((opt) => ({
+    value: String(opt.value) === "true",
+    label: opt.label,
+  }));
   // 全站消息提醒统一走 antd message（设计 04 §3.6，2026-09-25 用户口径：
   // 「所有消息提醒参考 antd 成熟组件，不要在页面暂用空间」）—— `App.useApp()`
   // 替代静态 `message` 导入，实例继承 ConfigProvider 的主题与 locale。
@@ -867,6 +1131,16 @@ export function XhsShopItemsPage() {
   const [notesItem, setNotesItem] = useState<XhsShopItem | null>(null);
   /** 挂链笔记弹窗当前 tab（一篇笔记一个 tab；单篇时隐藏 tab 栏）。 */
   const [notesTab, setNotesTab] = useState("0");
+  /**
+   * 单篇笔记的**实时详情**（正文 / 图集 / 话题 / 挂载商品）。
+   *
+   * 用户口径 2026-10-27：「笔记数据不再落库，应实时查询，所有笔记全部应是实时数据」
+   * ⇒ 列表（`/item-notes`）只给标题与互动数，正文**切到哪篇查哪篇**
+   * （`/note-detail`）。不预加载整页：N 篇 = N 次签名请求 + N 次限流等待。
+   */
+  const [noteDetails, setNoteDetails] = useState<Record<string, XhsNoteDetail>>({});
+  const [noteDetailLoading, setNoteDetailLoading] = useState<Record<string, boolean>>({});
+  const [noteDetailErrors, setNoteDetailErrors] = useState<Record<string, string>>({});
   // 商品笔记智能生成（设计 13 §31；§31.10 起单 / 批量都走队列）
   const [selectedItemIds, setSelectedItemIds] = useState<string[]>([]);
   const [generatingItemId, setGeneratingItemId] = useState<string | null>(null);
@@ -883,24 +1157,6 @@ export function XhsShopItemsPage() {
   const genTrackedRef = useRef<Set<string>>(new Set());
   const genResultsRef = useRef<Map<string, GenerateQueueFinishedEntry>>(new Map());
   const genIdleRoundsRef = useRef(0);
-  /** 批量删除进行中（v1.36）：只用来给按钮上 loading，判据本身在 lib（`batchDeleteBlock`）。 */
-  const [batchDeleting, setBatchDeleting] = useState(false);
-  /**
-   * 「同步商品」按钮态（v2.13，设计 13 §30.3.2；**2026-10-05 需求 5 改为**首查驱动。
-   *
-   * ⚠️ 原先是「点击时 true、触发请求返回就 false」的**一次性 loading** —— 那表达的是
-   * 「这个 HTTP 请求在途」，而同步本身是后台任务（全量翻页 + 限流等待，几十秒到几分钟）。
-   * 用户看到的是「点了转一下、然后按钮恢复」，完全不知道同步还在跑。
-   *
-   * 现在与**账号卡片页的商品同步按钮逐字同口径**（需求 5「逻辑应与账号卡片页的商品
-   * 同步UI和逻辑一致，只是多了一个入口」）：
-   * * `goodsSyncIds` —— 该账号此刻**有进行中的同步任务**（首查 + 5s 轮询维护）；
-   * * `goodsSyncing` —— **只有**触发请求在途的那一小会儿（防连点）。
-   * 按钮文案取两者：任务在跑 ⇒ 「同步中…」，否则「同步商品」。
-   */
-  const [goodsSyncIds, setGoodsSyncIds] = useState<Set<number>>(() => new Set());
-  const goodsSyncPollRef = useRef<number | null>(null);
-  const [goodsSyncing, setGoodsSyncing] = useState(false);
   /**
    * **页面级等待**（2026-10-06 用户口径：「商品列表的所有功能的等待均应在合适的时机
    * 添加页面**蒙版**和**统计耗时**，避免结果窗口关闭」）。
@@ -917,13 +1173,8 @@ export function XhsShopItemsPage() {
   /** ark 门禁提示：千帆会话确定不可用时给一句准话（**不**打开选项弹窗）。
    *  判据 = `goodsGate`（与账号卡片页同一把尺子，需求 5）。 */
   const [arkPromptOpen, setArkPromptOpen] = useState(false);
-  /** 这次「批量同步商品信息」要按 ID 同步的那批（主表勾选；空 ⇒ 走整店）。 */
-  const selectedForSync = normalizeDeleteIds(selectedItemIds);
-  /** 行内「同步商品信息」点的那一件（非空 ⇒ 弹窗只针对它，打开即同步）。 */
-  const [syncSingleTarget, setSyncSingleTarget] = useState<string | null>(null);
   /** 该账号是否**有进行中的同步商品任务**（首查 + 5s 轮询维护）。
    *  2026-10-06 用户口径：「存在同步商品的任务时同步商品按钮不支持点击，应显示为商品同步中」。 */
-  const goodsSyncRunning = selectedAccountId !== null && goodsSyncIds.has(selectedAccountId);
   // LLM 生成（T9，设计 17 §7.4）：与一期「生成笔记」是两个队列，状态各自独立。
   const [llmGenerateOpen, setLlmGenerateOpen] = useState(false);
   const [llmGenerateItem, setLlmGenerateItem] = useState<XhsShopItem | null>(null);
@@ -931,7 +1182,7 @@ export function XhsShopItemsPage() {
   const [llmQueueItemIds, setLlmQueueItemIds] = useState<Set<string>>(new Set());
   /** 正在提交 LLM 生成弹窗的商品 id（防重复点开）。 */
   const [llmGenerating, setLlmGenerating] = useState<string | null>(null);
-  // 商品详情弹窗（v1.32：点标题打开；数据来自 /item-detail，纯本地）
+  // 商品详情弹窗（点标题打开；数据来自 /item-detail，**实时查千帆**）
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detail, setDetail] = useState<XhsShopItemDetail | null>(null);
@@ -950,14 +1201,12 @@ export function XhsShopItemsPage() {
    */
   const [generationsOpen, setGenerationsOpen] = useState(false);
   const [generationsItem, setGenerationsItem] = useState<XhsShopItem | null>(null);
-  /**
-   * M4 商品编辑（设计 20 §5）：操作列独立弹窗 + 列表工具栏的**分组筛选 / 导出 CSV**。
-   *
-   * ⚠️ 编辑弹窗**不塞进详情弹窗**（§13.3.5 既定口径：操作列的独立弹窗）。
-   * `editingItem` 非空即弹窗打开 —— 「打开」与「编辑哪个商品」是同一件事，
-   * 不拆成两个 state（拆了就会出现「打开着但不指向任何商品」的中间态）。
-   */
-  const [editingItem, setEditingItem] = useState<XhsShopItem | null>(null);
+  /* ⛔ 「编辑商品」整条链路**已移除**（2026-10-27 用户口径「编辑商品功能逻辑移除」）：
+     前端入口 / 弹窗组件 / 请求函数 / 后端两端点（`/items/edit` 墓碑、`/items/polish`）
+     / 权限码 `xhs:item:edit` 与菜单行，一起删干净。
+     理由：商品已改**平台实时数据**，本地台账（含 `ai_title` / `ai_selling_point` 两列）
+     整表 DROP ⇒ 这个弹窗「改本地标注」的前提没有了；平台的商品编辑走千帆后台，本系统
+     按只读边界不碰。 */
   // ⚠️ 分组状态（`groups` / `groupFilter`）已随「彻底移除商品分组」退场（2026-10-05）。
   const [exporting, setExporting] = useState(false);
   // ------------------------------------------------------------------ #
@@ -981,10 +1230,6 @@ export function XhsShopItemsPage() {
   const operateTickRef = useRef<number | null>(null);
   const [operateElapsedSec, setOperateElapsedSec] = useState(0);
   /** 同步指定商品弹窗（需求 6）。 */
-  const [syncItemsOpen, setSyncItemsOpen] = useState(false);
-  //: 从详情弹窗发起「重抓此商品」时记下那件商品 —— 同步完成后回到它的详情
-  //: （用户口径 2026-10-09：重抓的意义就是让眼前这份数据变新）。
-  const [syncReturnItem, setSyncReturnItem] = useState<XhsShopItem | null>(null);
   //: 草稿箱弹窗（设计 24 §9.4，2026-10-08 用户口径）：与商品列表同一账号。
   const [draftsModalOpen, setDraftsModalOpen] = useState(false);
   //: 违规词库弹窗（2026-10-08 用户口径）：全屏 50%，管理本地违规词库。
@@ -1187,11 +1432,11 @@ export function XhsShopItemsPage() {
     if (selectedAccountId) void load(selectedAccountId, 1, pageSize, nextSort);
   }
 
-  /* 2026-10-05 用户口径「商品列表页移除对千帆是否有效的校验和 UI，商品查询的是本地
-     数据库，无需校验账号是否有效」：
-     ① `channelsByAccount`（账号 → 三平台登录态 map）与 `prereq`（`ledgerPrerequisite`
-        前置校验）**整块删除** —— 本页是纯本地台账读（`/items` / `/item-detail` /
-        `/item-notes` 零平台请求），千帆会话可用性既不拦请求、也不该上屏；
+  /* ⚠️ 原文「商品查询的是本地数据库…纯本地台账读 / 零平台请求」那套口径**已被设计 75
+     取代**（2026-10-27）：`/items` / `/item-detail` / `/item-notes` 现在每次都打千帆。
+     ⇒ 页面顶部**不挂**「千帆是否可用」的前置校验与告警行（用户 2026-10-05 口径）；
+        千帆不可用时由各请求自己给结构化原因，不在进页面时先判一次。
+     ① `channelsByAccount` 与 `prereq`（`ledgerPrerequisite` 前置校验）**整块删除**；
      ② `arkUnavailable`（ark 确定不可用时的告警行）随之删除；
      ③ 拉列表的 effect 不再按 `prereq.ok` 判（它恒为 true，是道假防线）。
      ⚠️ lib 里的 `ledgerPrerequisite` / `QIANFAN_PREREQUISITE_HINT` 保留但**本页不再引用**
@@ -1200,13 +1445,13 @@ export function XhsShopItemsPage() {
 
   useEffect(() => {
     if (selectedAccountId === null) return;
-    // 切账号 = 换一个台账归属：旧账号的响应**必须先清掉**（否则新账号会短暂看到
+    // 切账号 = 换一个归属：旧账号的响应**必须先清掉**（否则新账号会短暂看到
     // 上一个账号的商品行 —— 隔离键已收敛到账号，串号比串店更严重）。
     setBinding(null);
     setBindingLoaded(false);
     setData(null);
     setErrorText("");
-    // 勾选也是「上一个账号的」：删除请求按 item_id 打到**新账号的台账**只会删 0 行，
+    // 勾选也是「上一个账号的」：删除请求按 item_id 打到**新账号**只会删 0 行，
     // 但按钮上还挂着「批量删除（30）」= 界面在说一件不会发生的事。一起清掉。
     setSelectedItemIds([]);
     void loadBinding(selectedAccountId);
@@ -1257,12 +1502,44 @@ export function XhsShopItemsPage() {
     setNotesLoading(true);
     setNotesData(null);
     setNotesTab("0");
+    //: 每件商品重新开弹窗都清掉上一次的详情缓存 —— 那是别的商品的笔记。
+    setNoteDetails({});
+    setNoteDetailErrors({});
+    setNoteDetailLoading({});
     try {
-      setNotesData(await fetchXhsItemNotes(selectedAccountId, item.item_id));
+      const data = await fetchXhsItemNotes(selectedAccountId, item.item_id);
+      setNotesData(data);
+      //: 立刻拉当前这一篇的正文（列表里没有正文，只能按篇取）。
+      const first = data.notes?.[0];
+      if (first?.note_id) void loadNoteDetail(first.note_id);
     } catch (error) {
       message.error(error instanceof Error ? error.message : "挂链笔记反查失败");
     } finally {
       setNotesLoading(false);
+    }
+  }
+
+  /**
+   * 按需拉**单篇笔记的实时详情**（2026-10-27）。
+   *
+   * 调用于：① 打开弹窗后加载当前 tab；② 用户切换 tab。
+   * 已经有结果的**不重复拉**（同一篇在一次弹窗内只查一次；「刷新数据」按钮另行强制）。
+   */
+  async function loadNoteDetail(noteId: string, { force = false } = {}) {
+    if (!selectedAccountId || !noteId) return;
+    if (!force && (noteDetails[noteId] || noteDetailLoading[noteId])) return;
+    setNoteDetailLoading((prev) => ({ ...prev, [noteId]: true }));
+    setNoteDetailErrors((prev) => ({ ...prev, [noteId]: "" }));
+    try {
+      const detail = await fetchQianfanNoteDetail(selectedAccountId, noteId);
+      setNoteDetails((prev) => ({ ...prev, [noteId]: detail }));
+    } catch (error) {
+      setNoteDetailErrors((prev) => ({
+        ...prev,
+        [noteId]: error instanceof Error ? error.message : "笔记详情加载失败",
+      }));
+    } finally {
+      setNoteDetailLoading((prev) => ({ ...prev, [noteId]: false }));
     }
   }
 
@@ -1415,48 +1692,7 @@ export function XhsShopItemsPage() {
     return ids;
   }, [genQueue]);
 
-  /**
-   * 批量删除本地台账行（v1.36，用户口径「商品列表新增批量删除操作」）。
-   *
-   * 口径与两个连带后果**只在 lib 里**（`batchDeleteBlock` / `batchDeleteHint`），
-   * 这里只负责编排：拒绝 → 说明，允许 → 确认框 → 调接口 → 清勾选 → 重拉本页。
-   *
-   * 三个「不许静默」的点：
-   * 1. 拒绝原因分两种（没勾 / 超上限）给**不同**文案 —— 压成一句「无法删除」等于
-   *    让用户自己猜；
-   * 2. `deleted < requested` 时如实说（传进来不存在的 item_id 会少删），
-   *    不把「请求了几条」当「删了几条」；
-   * 3. 本页被整页删空且不在第一页 ⇒ **回退一页**再拉（否则停在一张空表上，
-   *    用户以为整个列表没了）。
-   */
-  async function batchDelete() {
-    if (!selectedAccountId) return;
-    const ids = normalizeDeleteIds(selectedItemIds);
-    setBatchDeleting(true);
-    try {
-      const result = await deleteXhsShopItems(selectedAccountId, ids);
-      setSelectedItemIds([]);
-      if (result.deleted === result.requested) {
-        message.success(`已删除本地台账 ${result.deleted} 行`);
-      } else {
-        message.warning(
-          `已删除 ${result.deleted} 行（提交 ${result.requested} 个，其余在本地台账里不存在）`
-        );
-      }
-      const removedOnPage = data
-        ? data.items.filter((item) => ids.includes(item.item_id)).length
-        : 0;
-      const nextPage =
-        data && removedOnPage >= data.items.length && pageNo > 1 ? pageNo - 1 : pageNo;
-      setPageNo(nextPage);
-      await load(selectedAccountId, nextPage, pageSize);
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : "批量删除失败");
-    } finally {
-      setBatchDeleting(false);
-    }
-  }
-
+  
   /**
    * 批量**商品操作**（上架 / 下架 / 删除平台商品；2026-10-05 需求 7/8）。
    *
@@ -1652,109 +1888,6 @@ export function XhsShopItemsPage() {
     };
   }, [llmQueueItemIds]);
 
-  /**
-   * 同步该账号的**全部状态**商品到本地台账（v2.13，设计 13 §30.3.2）。
-   *
-   * 2026-10-02 用户口径「商品同步更新需求为同步全部状态的商品」：不传 `itemStatus`
-   * ⇒ 后端用默认 `all`（平台侧不传 `card_type`，翻页拿全部状态）。台账是「商品列表
-   * 页的唯一数据源」，少了已下架 / 已冻结 / 审核态，列表的状态筛选与批量删除的
-   * 连带判断都会静默失真。
-   *
-   * 触发是**异步回执**（后台任务）：成功后只报「已开始同步」，进度看账号矩阵的
-   * 任务日志 / 台账「同步于」时间。⚠️ 不做前端乐观刷新 —— 同步没跑完就重拉列表，
-   * 只是把同一份旧数据渲染一遍（看起来像「同步没好」）。
-   */
-  async function syncAllStatusGoods(options?: SyncNotesOptions) {
-    if (!selectedAccountId) return;
-    setGoodsSyncing(true);
-    beginWait("同步商品");
-    try {
-      const result = await syncShopGoods({
-        platformAccountId: selectedAccountId,
-        ...(options ?? {}),
-      });
-      //: ⚠️ 文案与账号卡片页 `startGoodsSync` **逐字一致**（需求 5：只是多一个入口）。
-      if (result.reused) {
-        message.info("该账号已有同步任务在跑，本次未触发新执行。");
-      }
-      //: 触发响应本身就是「第一个拿到的信息」⇒ 立刻入集（按钮马上变「同步中…」），
-      //: 不用等 5 秒后的第一轮轮询；入轮询集是为了**任务结束时把按钮切回来**。
-      setGoodsSyncIds((current) => new Set(current).add(selectedAccountId));
-    } catch (error) {
-      message.error(readErrorDetail(error));
-    } finally {
-      setGoodsSyncing(false);
-      endWait();
-    }
-  }
-
-  /** 停「同步商品」的 5s 轮询（离开页面 / 任务终态时调用）。 */
-  function stopGoodsSyncPolling() {
-    if (goodsSyncPollRef.current !== null) {
-      window.clearInterval(goodsSyncPollRef.current);
-      goodsSyncPollRef.current = null;
-    }
-  }
-
-  /**
-   * 查一次同步状态：**延续**与账号卡片页同一条判据 `syncTaskPhase`。
-   *
-   * * `active` ⇒ 该账号入集（按钮显示「同步中…」+ 继续轮询）；
-   * * 其余 ⇒ 出集（没有任务 / 任务已结束都不会再变）。
-   *
-   * ⚠️ 首查与轮询共用本函数（同一份判据，两处调用才算「一致」而不是「各写一遍」）。
-   */
-  const queryGoodsSyncStatus = useCallback(async (accountId: number) => {
-    try {
-      const status = await syncShopGoodsStatus(accountId);
-      const active = syncTaskPhase(status) === "active";
-      setGoodsSyncIds((current) => {
-        if (active === current.has(accountId)) return current;
-        const next = new Set(current);
-        if (active) next.add(accountId);
-        else next.delete(accountId);
-        return next;
-      });
-      return active;
-    } catch {
-      // 状态查不到不打扰用户（下次轮询 / 下次进页面会再查）。
-      return false;
-    }
-  }, []);
-
-  /**
-   * 有账号在跑同步 ⇒ 每 5s 复查一次（与账号卡片页同节拍）。
-   *
-   * ⚠️ 轮询**只在有 active 账号时**存在：全空闲时不留定时器（否则页面开着就在
-   * 无谓地打后端）。集合变空 ⇒ 自动停。
-   */
-  useEffect(() => {
-    stopGoodsSyncPolling();
-    if (!selectedAccountId || !goodsSyncIds.has(selectedAccountId)) return;
-    goodsSyncPollRef.current = window.setInterval(() => {
-      void queryGoodsSyncStatus(selectedAccountId);
-    }, 5000);
-    return () => stopGoodsSyncPolling();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedAccountId, goodsSyncIds, queryGoodsSyncStatus]);
-
-  /** 离开页面停轮询（定时器泄漏会让返回后再也停不下来，同操作轮询的教训）。 */
-  useEffect(() => () => stopGoodsSyncPolling(), []);
-
-  /**
-   * **首查**：选中的账号变了 / 进页面时先问一次状态。
-   *
-   * 为什么必须有：没有它，换台设备 / 刷新页面 / 别人（或定时任务）触发的同步，
-   * 本页一律显示成「空闲」—— 而任务其实在跑。账号卡片页 §35.17.4 为同一个原因
-   * 加了首查，这里沿用（需求 5 的「逻辑一致」包括这一条）。
-   */
-  useEffect(() => {
-    if (!selectedAccountId) {
-      setGoodsSyncIds(new Set());
-      return;
-    }
-    void queryGoodsSyncStatus(selectedAccountId);
-  }, [selectedAccountId, queryGoodsSyncStatus]);
 
   /**
    * **单行**商品操作（操作列的按钮；2026-10-05 需求 8）。
@@ -1793,43 +1926,12 @@ export function XhsShopItemsPage() {
     });
   }
 
-  /** 删除按钮的入口：先按 lib 判据分流（拒绝就给一句准话），再弹确认框。 */
-  function handleBatchDelete() {
-    const block = batchDeleteBlock(selectedItemIds);
-    if (block === "empty") {
-      message.info("先勾选要删除的商品");
-      return;
-    }
-    if (block === "too_many") {
-      message.warning(
-        `单次最多删除 ${MAX_BATCH_DELETE} 个商品，本次选了 ${normalizeDeleteIds(selectedItemIds).length} 个，请分批删除`
-      );
-      return;
-    }
-    const count = normalizeDeleteIds(selectedItemIds).length;
-    // ⚠️ `centered: true` 必须**逐点显式传**：`Modal.confirm` 走的是静态方法分支
-    //（`modal/confirm.js` 自建 ConfirmDialog），`ConfigProvider modal={{centered:true}}`
-    //（`providers.tsx` 里给的是 ConfigContext）**到不了它** ⇒ 不传就还是顶部对齐。
-    Modal.confirm({
-      centered: true,
-      title: `删除本地台账的 ${count} 个商品？`,
-      // 确认框是**唯一**能讲清两个连带后果的地方（见 `batchDeleteHint` docstring）：
-      // 换行靠 `whiteSpace: pre-wrap`，别把 ①② 挤成一行。
-      content: (
-        <div style={{ whiteSpace: "pre-wrap" }}>{batchDeleteHint(count)}</div>
-      ),
-      okText: "删除",
-      cancelText: "取消",
-      okButtonProps: { danger: true },
-      onOk: () => batchDelete(),
-    });
-  }
-
+  
   /**
    * 打开商品详情弹窗（v1.32，设计 13 §30.3.6）。
    *
-   * 数据来自 `/item-detail`（**纯本地**：基本信息 + 图集 + SKU 规格明细）。
-   * SKU 没补过 ⇒ `skus=[]` + `detail_synced_at=""`，渲染空态 + 说明，
+   * 数据来自 `/item-detail`（**实时查千帆**：基本信息 + 图集 + SKU 规格明细 +
+   * 视频 + 平台原始字段）。平台没返回 SKU ⇒ `skus=[]`，渲染空态 + 说明，
    * **不渲染成 0 行**（缺值口径）。
    */
   async function openDetail(item: XhsShopItem) {
@@ -1857,7 +1959,7 @@ export function XhsShopItemsPage() {
    * 打开「生成商品详情图」独立弹窗（v2.12，列表操作列入口）。
    *
    * v2.15：打开时**拉一次商品详情**取两套图（主图 / 原商品详情图）供勾选 ——
-   * 图集是只读本地台账的（`/item-detail` 零平台请求），所以这个请求很轻。
+   * 与详情弹窗**同一个接口**（`/item-detail`，实时查千帆），不另开一条取数路径。
    *
    * 每次打开**重置全部状态**（各组配置 / 出图 / 报错 / 勾选）——
    * 弹窗是「一次生成动作」的载体，带着上一个商品的结果重开会把 A 的图挂在 B 名下
@@ -2224,10 +2326,12 @@ export function XhsShopItemsPage() {
   /**
    * 列定义。
    *
-   * ⚠️ **只有「上架时间」一列带 `sorter`**（用户 2026-09-23 上机口径：「商品台账的
-   * 只能根据上架时间列排序，其它列不支持排序」）。判据与 `SORT_FIELD_BY_COLUMN`
-   * 同源：那里只有一个键、这里只有一列挂箭头，**两处必须一起改**（表头箭头是
-   * 「后端真会按它排」的承诺，多一个箭头就多一份误导）。
+   * ⚠️ **可排序列 = `SORT_FIELD_BY_COLUMN` 的键，两处必须一起改**。
+   *
+   * 2026-10-27：由「只有上架时间」扩展到千帆表头那三列（售价 / 库存 / 近30天销量）——
+   * 平台只认 7 个 `sort_field`（见 `apis.SORTABLE_ITEM_FIELDS`），超出白名单的字段名
+   * 会让平台 500、整页变红，所以箭头不能随便加：每加一个都要先确认它在白名单里。
+   * 表头箭头是「后端真会按它排」的承诺，多一个箭头就多一份误导。
    *
    * v1.36：`sorter: true` 是 antd 的**服务端排序**语义（`getSortFunction` 对
    * `true` 返回 `false` ⇒ antd 不本地排序，只回调 `onChange`），配合受控 `sortOrder`
@@ -2346,12 +2450,17 @@ export function XhsShopItemsPage() {
       title: "价格",
       dataIndex: "price_min_fen",
       width: 150,
+      //: 服务端排序：平台字段名是 `price`（**不是** `price_min_fen`，传后者平台 500）。
+      sorter: true,
+      sortOrder: sortOrderFor("price"),
       render: (_value, item) => <Text strong>{priceText(item)}</Text>,
     },
     {
       title: "库存 / SKU",
       dataIndex: "stock",
       width: 130,
+      sorter: true,
+      sortOrder: sortOrderFor("stock"),
       render: (_value, item) => (
         <div>
           <div>
@@ -2374,6 +2483,9 @@ export function XhsShopItemsPage() {
       title: "销量",
       dataIndex: "sales_30d",
       width: 110,
+      //: 平台字段名是 `item_sale_qty_30`（千帆表头「近30天销量」）。
+      sorter: true,
+      sortOrder: sortOrderFor("item_sale_qty_30"),
       render: (_value, item) => (
         <div>
           <Text>近 30 天 {item.sales_30d ?? "-"}</Text>
@@ -2389,13 +2501,12 @@ export function XhsShopItemsPage() {
       title: "挂链笔记",
       dataIndex: "note_count",
       width: 100,
-      // 2026-09-23 上机口径：「查看这些笔记（关系表口径，零平台请求）。本地关系 N 篇；
-      // 平台侧记 M 篇…」这条 Tooltip 文案**移除** —— 与弹窗那条说明同一批清掉，
-      // 挂链列就只剩一个可点的篇数（`platform_note_count` 仍在响应里，留给需要对照的
-      // 消费者，界面上不再解释两个口径为什么不等）。
+      //: ⚠️ 文案里**不再提「本地」**（2026-10-27）：笔记列表与正文都实时查千帆，
+      //: 本地 `note_goods` 关系表已 DROP，「本地关系 N 篇 / 平台侧 M 篇」那种双口径
+      //: 对照已不存在（`platform_note_count` 仍在响应里，供需要对照的消费者用）。
       render: (_value, item) =>
         item.note_count > 0 ? (
-          <Tooltip title="平台侧挂链篇数；点开实时查千帆（含未同步到本地的笔记）">
+          <Tooltip title="平台侧挂链篇数；点开实时查千帆">
             <Tag
               color="geekblue"
               style={{ cursor: "pointer" }}
@@ -2471,8 +2582,6 @@ export function XhsShopItemsPage() {
         const mayOffShelf = hasPermission("xhs:item:offShelf");
         const mayDelete = hasPermission("xhs:item:delete");
         const mayGenerateImage = hasPermission("xhs:item:generateImage");
-        const maySync = hasPermission("xhs:item:sync");
-        const mayEdit = hasPermission("xhs:item:edit");
         //: 该按钮是否被授权（按 `shelfAction.action` 选码 —— 选码不是判权，
         //: 判权就是这一次 `hasPermission` 查询）。
         const shelfPermitted =
@@ -2480,13 +2589,12 @@ export function XhsShopItemsPage() {
             : shelfAction?.action === "off_shelf" ? mayOffShelf
               : false;
         //: ⚠️ 提前返回的判据必须覆盖**本列会渲染的每一个**权限码。
-        //: 原判据只看 3 个（generateNote / 上架下架 / delete），漏了
-        //: generateImage / sync / edit —— 后果是「只授了编辑权限的用户，
-        //: 操作列整列显示 `-`，按钮明明有权限却出不来」（2026-10-27 真机实测）。
-        //: 新增按钮时必须同步加进这个判据，否则同类缺陷复发。
+        //: 原判据只看 3 个（generateNote / 上架下架 / delete），漏了 generateImage
+        //: —— 后果是「只授了生成图权限的用户，操作列整列显示 `-`，按钮明明有权限
+        //: 却出不来」（2026-10-27 真机实测）。新增按钮时必须同步加进这个判据。
+        //: （`edit` 已随「编辑商品功能移除」退场，不再进判据。）
         const mayAny =
-          mayGenerate || shelfPermitted || mayDelete
-          || mayGenerateImage || maySync || mayEdit;
+          mayGenerate || shelfPermitted || mayDelete || mayGenerateImage;
         if (!mayAny) {
           return <Text type="secondary">-</Text>;
         }
@@ -2581,7 +2689,7 @@ export function XhsShopItemsPage() {
 
               ⚠️ 2026-10-26：下拉里 4 个入口各有自己的码，**一个都没授权时整个「更多」不渲染**
               （否则点开是个空面板）。 */}
-          {(mayGenerateImage || maySync || mayEdit || (deleteAction && mayDelete)) && (
+          {(mayGenerateImage || (deleteAction && mayDelete)) && (
           <Dropdown
             trigger={["click"]}
             dropdownRender={() => (
@@ -2613,47 +2721,14 @@ export function XhsShopItemsPage() {
                   </Button>
                 </Tooltip>
                 )}
-                {/* 2026-10-06 用户口径：「列表操作列新增**同步商品信息**按钮，将顶部的
-                    同步执行商品按钮功能合并到同步商品按钮中……注意合并后两个按钮的功能
-                    需全部保留」⇒ 行内这一件走**同一套**同步链路（同一个弹窗 + 同一个
-                    请求函数），只是 ID 清单缩成一行；打开即同步、状态在弹窗里逐条给。
-                    ⚠️ 放「更多」里：它是**单件补数据**的次级入口，与顶部「批量同步」区分。 */}
-                {maySync && (
-                <Tooltip title="同步这一件商品的最新数据">
-                  <Button
-                    type="link"
-                    size="small"
-                    block
-                    icon={<SyncOutlined />}
-                    onClick={() => {
-                      //: 单件不带勾选集语义 ⇒ 显式清掉勾选传递，避免误列别的行。
-                      setSyncSingleTarget(item.item_id);
-                      setSyncItemsOpen(true);
-                    }}
-                  >
-                    同步商品信息
-                  </Button>
-                </Tooltip>
-                )}
-                {/* M4（设计 20 §5）：**商品编辑** —— 操作列独立弹窗。
-                    ⚠️ 分组 Tab 已随分组功能退场（2026-10-05）。 */}
-                {mayEdit && (
-                <Tooltip title="编辑商品（AI 润色标题 / 卖点）">
-                  <Button
-                    type="link"
-                    size="small"
-                    block
-                    icon={<EditOutlined />}
-                    onClick={() => setEditingItem(item)}
-                  >
-                    编辑
-                  </Button>
-                </Tooltip>
-                )}
+                {/* ⛔ 「同步商品信息」按钮**已移除**（2026-10-27 用户口径：
+                    「同步商品信息按钮逻辑移除，批量同步商品信息逻辑全链路彻底移除」）——
+                    列表本身就是平台实时数据（`source=platform`），没有「把本地补新」这回事，
+                    再留一个同步按钮只会让人以为拿到的是缓存。 */}
                 {/* 删除（需求 8）：仍是**状态驱动**的 —— `supported=false` 时置灰 + 后端原因
                     （如推广中不可删）。`danger` 保持红色，位置在下拉最后一位。
-                    ⚠️ 权限码 = `xhs:item:delete`（平台删除）；删本地台账行是
-                    `xhs:item:deleteLocal`（在顶部批量区）。 */}
+                    ⚠️ 权限码 = `xhs:item:delete`（**删平台商品**）。「删除台账行」那条
+                    已随本地台账退场，对应的 `xhs:item:deleteLocal` 权限码与菜单行一并删除。 */}
                 {deleteAction && mayDelete ? (
                   <Tooltip title={deleteAction.reason || `对平台商品执行「${deleteAction.label}」`}>
                     <Button
@@ -2744,7 +2819,7 @@ export function XhsShopItemsPage() {
             type="warning"
             showIcon
             message="没有小红书账号可选"
-            description="商品台账按账号隔离；请先添加账号并导入千帆登录态，才能同步商品。"
+            description="商品列表按账号隔离（实时查千帆）；请先添加账号并导入千帆登录态，才能查询。"
           />
         )}
 
@@ -2829,12 +2904,25 @@ export function XhsShopItemsPage() {
             <Form.Item label="挂链笔记数">
               <Space.Compact style={{ width: 180 }}>
                 <Form.Item name="note_count_op" noStyle>
-                  <Select style={{ width: 72 }} options={NOTE_COUNT_OP_OPTIONS} />
+                  <Select style={{ width: 72 }} options={noteCountOpOptions} />
                 </Form.Item>
                 <Form.Item name="note_count" noStyle>
                   <InputNumber style={{ width: 108 }} min={0} placeholder="篇数" />
                 </Form.Item>
               </Space.Compact>
+            </Form.Item>
+            {/* 商品类型（千帆「商品类型」）：**只放折叠区**，不占第一行
+                （用户口径 2026-10-27「商品类型搜索条件隐藏不展示」——折叠在「更多筛选」里）。
+                ⚠️ 平台请求里 `is_channel` **恒发** 且默认 `false`（= 只看普通商品），
+                「全部」这一档千帆页面是**去掉字段**发的；我方走 `is_channel=false`
+                （普通商品就是全量的绝大部分，渠道品实测 0 件）。 */}
+            <Form.Item label="商品类型" name="is_channel">
+              <Select
+                style={{ width: 180 }}
+                allowClear
+                placeholder="普通商品"
+                options={itemTypeOptions}
+              />
             </Form.Item>
           </>
         ) : null}
@@ -2887,64 +2975,14 @@ export function XhsShopItemsPage() {
 
       <Card
         size="small"
-        //: 用户口径 2026-10-11「商品台账顶部按钮与底部分页和统计数据固定不动，
-        //: 只有列表内的数据支持表格列滚动」：整页是**限定高度的纵向 flex** ——
-        //:   ① 搜索条件（上一张卡）`flexShrink: 0` 内容固定；
-        //:   ② 本台账卡 `flex: 1; minHeight: 0` 吃掉剩余高度，卡内再切成
-        //:      「卡头（按钮）`flexShrink:0` / 表格体 `flex:1; overflow:auto` /
-        //:       统计 `flexShrink:0`」三段；
-        //:   ③ 分页由 `Table` 自带（`ant-table-pagination`，它是表格容器的**兄弟**、
-        //:      贴在卡体底部）⇒ 天然不随表格体滚动。
-        //: 高度 = 视口 - 顶栏(48) - 内容上下内边距(15+24) - 搜索条件卡(折叠态约 52)
-        //:        - 两卡间距(10+12)，取 `calc(100vh - 190px)`（与图片空间同一套做法）。
-        //: 用户口径 2026-10-11「搜索条件与商品台账间隔 10」「底部撑满」：
-        //: `marginTop: 0`（间距由外层 `Flex gap={10}` 统一给，两处都给会翻倍）；
-        //: `flex: 1` 吃掉剩余高度 ⇒ 卡片底边贴到视口底部。
         style={{ marginTop: 0, flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}
         styles={{ body: { padding: 12, flex: 1, minHeight: 0, display: "flex", flexDirection: "column" } }}
-        title="商品台账"
+        title="商品列表"
         extra={
           <Space size={8}>
-            {/* 2026-10-06 用户口径：「同步指定商品按钮放商品台账顶部」。
-                ⚠️ 与「同步商品」**并列在前**（同一族动作：都是把平台数据拉回本地台账，
-                区别只是「整店」还是「按 ID 点名」）—— 散在两个卡里会让人以为它们无关。
-
-                2026-10-06 二次口径：「选中商品后，点击同步指定商品按钮，后端立刻开始同步
-                拉取指定的商品信息」⇒ 本按钮把**主表勾选的 ID** 交给弹窗，弹窗打开即开跑。
-                ⚠️ 没勾选时**不打开弹窗**：空手进去只能看到一个空列表（用户的原话是
-                「选中商品后」），先给一句话让他去勾 —— 比开个空弹窗有用。 */}
-            <Tooltip
-              title={
-                normalizeDeleteIds(selectedItemIds).length > 0
-                  ? `按 ID 同步选中的 ${normalizeDeleteIds(selectedItemIds).length} 个商品`
-                  : "未勾选则同步整个店铺的商品"
-              }
-            >
-              <Button
-                icon={<SyncOutlined />}
-                disabled={!selectedAccountId || goodsSyncRunning}
-                onClick={() => {
-                  //: 2026-10-06 合并（用户口径「将顶部的同步执行商品按钮功能合并到同步商品
-                  //: 按钮中，该按钮文本优化为**批量同步商品信息**，注意合并后两个按钮的功能
-                  //: 需全部保留」）：两个平级按钮合成一个入口 —— 弹窗里用 **Tab** 分成
-                  //: 「按条件同步」（整店，后台任务）与「按 ID 同步商品信息」（前台等结果）。
-                  if (!selectedAccountId || goodsSyncRunning) return;
-                  //: 门禁与账号卡片页同一把尺子（`goodsGate`）；千帆确定不可用 ⇒ 提示补登。
-                  const gate = goodsGate(
-                    accounts.find((a) => a.id === selectedAccountId)?.login_channels,
-                  );
-                  if (gate.blocked) {
-                    setArkPromptOpen(true);
-                    return;
-                  }
-                  setSyncSingleTarget(null);
-                  setSyncItemsOpen(true);
-                }}
-              >
-                {goodsSyncRunning ? "商品同步中" : "批量同步商品信息"}
-              </Button>
-            </Tooltip>
-
+            {/* ⛔ 「批量同步商品信息」按钮**已移除**（2026-10-27 用户口径：
+                「同步商品信息按钮逻辑移除，批量同步商品信息逻辑全链路彻底移除」）——
+                列表已是平台实时数据，同步链路（含队列 / 门禁 / 弹窗）整条退场。 */}
             {hasPermission("xhs:item:export") && (
               <Tooltip title="按当前筛选条件导出 CSV">
                 <Button
@@ -3073,32 +3111,10 @@ export function XhsShopItemsPage() {
                 </Button>
               </Tooltip>
             ))}
-            {/* 批量删除**本地台账行**（v1.36）：**只删本地台账行** —— 平台商品不动、关系行不动。
-                ⚠️ 2026-10-05 改名「删除台账行」并把 Tooltip 改成显式对照：它与上面新增的
-                「批量删除商品」（**删平台**）是两件完全不同的事，同名会让用户点错。
-                两个连带后果写在确认框正文里（`batchDeleteHint`），按钮上的 Tooltip
-                只说「删什么、上限多少」，不重复那两句（换成两处说同一件事）。
-                ⚠️ 2026-10-26：改判 `xhs:item:deleteLocal` —— 原来借的是 `edit` 的码
-                （「能改商品」就顺带「能删台账行」），与「一按钮一码」不符。 */}
-            {hasPermission("xhs:item:deleteLocal") && (
-            <Tooltip
-              title={
-                selectedItemIds.length > 0
-                  ? `从本地台账删除选中的 ${selectedItemIds.length} 个商品行（≤${MAX_BATCH_DELETE} 个/次，平台商品不动）`
-                  : "先在表格里勾选商品"
-              }
-            >
-              <Button
-                danger
-                icon={<DeleteOutlined />}
-                disabled={selectedItemIds.length === 0}
-                loading={batchDeleting}
-                onClick={handleBatchDelete}
-              >
-                删除台账行{selectedItemIds.length > 0 ? `（${selectedItemIds.length}）` : ""}
-              </Button>
-            </Tooltip>
-            )}
+            {/* ⛔ 「删除台账行」按钮**已移除**（2026-10-27 用户口径：「删除台账行按钮逻辑移除」）——
+                本地台账表已 DROP，没有「台账行」可删；列表读的是平台实时数据。
+                ⚠️ 别和上面的「批量删除」（**删平台商品**，`xhs:item:delete`）搞混：
+                那个是平台写操作，仍然保留。 */}
           </Space>
         }
       >
@@ -3149,7 +3165,7 @@ export function XhsShopItemsPage() {
               showSizeChanger: true,
               pageSizeOptions: SHOP_ITEMS_PAGE_SIZES.map(String),
               //: **核心数据与分页同行**（用户口径 2026-10-11「只保留核心数据，展示一行，与分页同行」）：`showTotal` 渲染在分页行的**左侧**，与页码同一个 flex 行 ⇒ 天然「同行」；去掉原先那两行 `Descriptions`（它把分页推下去，且 7 项里大半与别处重复）。
-              //:   「商品来源」恒为本地台账（常量）、「状态口径」= 每行的状态列、
+              //:   「商品来源」恒为平台实时（常量 `source=platform`）、「状态口径」= 每行的状态列、
               //:   「当前排序」= 表头箭头、同步时间 / 平台总数属账号级信息 —— 都撤了。
               showTotal: (total) =>
                 `命中 ${total} 件商品${data.shop_name ? ` · ${data.shop_name}` : ""}`,
@@ -3166,205 +3182,37 @@ export function XhsShopItemsPage() {
         )}
       </Card>
 
-      {/* 商品详情弹窗（v1.32，设计 13 §30.3.6）：基本信息 + 图集 + 规格详情 */}
-      <Modal
-                centered
-                open={detailOpen}
-        title="商品详情"
-        width="85%"
-        //: 宽高都取视口 **85%**（用户口径 2026-10-20「太占用全屏的宽高85%」）。
-        //: ⚠️ 只给 body 定高度不够 —— 标题栏 + footer 会再叠上去，整体超过 85vh。
-        //: `styles.container` 才是 `.ant-modal-content`（含 header/body/footer 的那层），
-        //: 在它上面做 flex 列；`style` 作用在更外层 `.ant-modal`，拿它定高会把
-        //: 标题栏/按钮区一起顶出视口。`minHeight: 0` 是承重的 —— 少了它 flex 子项
-        //: 不肯收缩，滚动会跑到弹窗外面。
-        styles={{
-          container: { height: "85vh", display: "flex", flexDirection: "column" },
-          body: { flex: 1, minHeight: 0, overflowY: "auto" },
-        }}
+      {/* 商品详情弹窗（2026-10-27 重做布局：左商品卡 + 右 5 个 Tab）。
+          组件见 `product-detail-modal.tsx` —— 那里写清了为什么按「实测的 82 个字段」
+          重新分组（37 有值标量 / 8 复杂结构 / 37 空值），以及各 Tab 装什么。 */}
+      <ProductDetailModal
+        open={detailOpen}
+        loading={detailLoading}
+        error={detailError || null}
+        detail={detail}
+        onClose={() => setDetailOpen(false)}
         footer={
           <Space>
             <Button onClick={() => setDetailOpen(false)}>关闭</Button>
-            {/* 重抓单品入口（2026-10-09 用户口径「重抓单品入口」）：详情弹窗里就能
-                重新拉这一件商品的最新数据，不必关弹窗再去「更多」里找。
-
-                ⚠️ 走的是**同一条**同步链路（`POST /items/sync` + `SyncSpecifiedItemsModal`），
-                只是 ID 清单缩成 `detail.item.item_id` 一行 —— DEF-044：一个语义一份实现，
-                不为详情弹窗另写一套抓取。弹窗关掉详情再开同步弹窗（两弹窗不同时在线，
-                避免蒙版叠蒙版）。同步完成后回到详情弹窗并**重新拉一次详情**（重抓的意义
-                就是让眼前这份数据变新）。 */}
-            <Button
-              icon={<SyncOutlined />}
-              disabled={!detail}
-              onClick={() => {
-                if (!detail) return;
-                setDetailOpen(false);
-                setSyncSingleTarget(detail.item.item_id);
-                setSyncItemsOpen(true);
-                //: 记下要重开的商品 —— 同步完成后回到它的详情（`syncReturnItem`）。
-                setSyncReturnItem(detail.item);
-              }}
-            >
-              重抓此商品
-            </Button>
+            {/* 刷新接口数据（2026-10-27 用户口径）：把「重抓此商品」与「查看挂链笔记」
+                两个按钮换成这一个 —— 那两个按钮走的是**本地台账同步**与**挂链笔记弹窗**，
+                台账已 DROP，挂链笔记也已收进商品列表操作列，详情弹窗里不再重复入口。
+                这里直接重发 `/item-detail` 请求，拿到平台此刻的最新数据。 */}
             <Button
               type="primary"
+              icon={<ReloadOutlined />}
+              loading={detailLoading}
               disabled={!detail}
               onClick={() => {
                 if (!detail) return;
-                setDetailOpen(false);
-                void openItemNotes(detail.item);
+                void openDetail(detail.item);
               }}
             >
-              查看挂链笔记
+              刷新数据
             </Button>
           </Space>
         }
-        onCancel={() => setDetailOpen(false)}
-      >
-        {detailLoading ? (
-          <Spin />
-        ) : detailError ? (
-          <Alert type="error" showIcon message="商品详情加载失败" description={detailError} />
-        ) : detail ? (
-          <Space direction="vertical" size={12} style={{ width: "100%" }}>
-            {detail.platform_missing_at && (
-              <Alert
-                type="warning"
-                showIcon
-                message={`对账发现平台已没有这件商品（标记于 ${detail.platform_missing_at}）`}
-                description="本地台账仍保留此行；平台重新上架后下一轮同步会自愈清除标记。"
-              />
-            )}
-            <Descriptions size="small" column={2} bordered>
-              <Descriptions.Item label="商品名称">{detail.item.title || "（无标题）"}</Descriptions.Item>
-              <Descriptions.Item label="商品 ID">
-                <Space size={4}>
-                  {detail.item.item_id}
-                  <CopyOutlined
-                    style={{ fontSize: 11, cursor: "pointer" }}
-                    onClick={() => void copyToClipboard(detail.item.item_id, "商品 ID 已复制", message)}
-                  />
-                </Space>
-              </Descriptions.Item>
-              <Descriptions.Item label="货号">{detail.item.article_no || "-"}</Descriptions.Item>
-              <Descriptions.Item label="分类">{detail.item.category || "未分类"}</Descriptions.Item>
-              <Descriptions.Item label="价格">{priceText(detail.item)}</Descriptions.Item>
-              <Descriptions.Item label="库存">
-                {detail.item.stock ?? "-"}
-                {detail.item.sku_count != null ? `（${detail.item.sku_count} 个规格）` : ""}
-              </Descriptions.Item>
-              <Descriptions.Item label="销量">
-                近 30 天 {detail.item.sales_30d ?? "-"} · 累计 {detail.item.sales_total ?? "-"}
-              </Descriptions.Item>
-              <Descriptions.Item label="状态">
-                <Space size={4} wrap>
-                  {detail.item.status_label || "状态 -"}
-                  {detail.item.frozen && <Tag color="red">已冻结</Tag>}
-                  {detail.item.buyable ? <Tag color="green">可购买</Tag> : <Tag>不可购买</Tag>}
-                  {detail.item.stock_warning_sku_count > 0 && (
-                    <Tag color="orange">{detail.item.stock_warning_sku_count} 个规格库存告警</Tag>
-                  )}
-                </Space>
-              </Descriptions.Item>
-              <Descriptions.Item label="创建时间">{detail.item.create_time || "-"}</Descriptions.Item>
-              <Descriptions.Item label="上架时间">{detail.item.on_shelf_time || "-"}</Descriptions.Item>
-              <Descriptions.Item label="更新时间">{detail.item.update_time || "-"}</Descriptions.Item>
-              <Descriptions.Item label="挂链笔记">{detail.item.note_count} 篇</Descriptions.Item>
-              <Descriptions.Item label="台账同步于">
-                {detail.synced_at || "-"}
-              </Descriptions.Item>
-            </Descriptions>
-
-            {detail.images.length > 0 && (
-              <div>
-                <Text strong style={{ fontSize: 13 }}>
-                  商品图集（{detail.images.length} 张）
-                </Text>
-                <div style={{ marginTop: 6 }}>
-                  <Image.PreviewGroup>
-                    <Space size={8} wrap>
-                      {detail.images.map((link) => (
-                        <Image
-                          key={link}
-                          src={link}
-                          width={84}
-                          height={84}
-                          style={{ objectFit: "cover", borderRadius: 4 }}
-                        />
-                      ))}
-                    </Space>
-                  </Image.PreviewGroup>
-                </div>
-              </div>
-            )}
-
-            {/* 生成商品详情图（设计 17 §13.3.3，v2.1；**v2.12 移到列表操作列独立弹窗**）
-                —— 整段从详情弹窗移除（用户口径「不要在编辑或详情弹窗中实现」），
-                入口改到列表「操作」列的按钮（`openDetailImage`）。
-                原实现（内联区块 + 结果缩略图）保留在 git 历史与设计 17 §13.3.3 的
-                被取代记录里，不在此处留半份。 */}
-
-            <div>
-              <Text strong style={{ fontSize: 13 }}>
-                规格详情
-              </Text>
-              {detail.detail_synced_at ? (
-                <Text type="secondary" style={{ fontSize: 11, marginInlineStart: 8 }}>
-                  （补于 {detail.detail_synced_at}
-                  {detail.sku_count != null ? ` · ${detail.sku_count} 个规格` : ""}）
-                </Text>
-              ) : null}
-              {detail.skus.length > 0 ? (
-                <Table
-                  rowKey={(row) => row.sku_id || row.sku_name}
-                  size="small"
-                  style={{ marginTop: 6 }}
-                  dataSource={detail.skus}
-                  pagination={false}
-                  scroll={{ y: 240 }}
-                  columns={[
-                    { title: "规格", dataIndex: "sku_name", render: (v: string) => v || "-" },
-                    { title: "变体", dataIndex: "variant_name", render: (v: string) => v || "-" },
-                    { title: "条形码", dataIndex: "barcode", render: (v: string) => v || "-" },
-                    { title: "ERP 编码", dataIndex: "erp_code", render: (v: string) => v || "-" },
-                    {
-                      title: "价格",
-                      dataIndex: "price_fen",
-                      render: (v: number | null) => (v == null ? "-" : `¥${yuan(v)}`),
-                    },
-                    {
-                      title: "原价",
-                      dataIndex: "original_price_fen",
-                      render: (v: number | null) => (v == null ? "-" : `¥${yuan(v)}`),
-                    },
-                    { title: "库存", dataIndex: "stock", render: (v: number | null) => skuCell(v) },
-                    { title: "重量(g)", dataIndex: "weight", render: (v: number | null) => skuCell(v) },
-                    {
-                      title: "可售",
-                      key: "buyable",
-                      render: (_v, row) =>
-                        row.buyable === null ? (
-                          "-"
-                        ) : (
-                          <Tag color={row.buyable ? "green" : "default"}>
-                            {row.buyable ? "可售" : "停售"}
-                          </Tag>
-                        ),
-                    },
-                  ]}
-                />
-              ) : (
-                <Empty
-                  style={{ marginTop: 6 }}
-                  image={Empty.PRESENTED_IMAGE_SIMPLE}
-                  description="规格详情还没补齐（同步商品任务会自动补足）"
-                />
-              )}
-            </div>
-          </Space>
-        ) : null}
-      </Modal>
+      />
 
       {/* ⚠️ **独立「生成记录」弹窗已移除**（2026-10-05 用户口径：「将商品操作列的
           生成记录合并到AI商品图弹窗内，使用tab布局」）—— 它的内容搬进了
@@ -3840,9 +3688,11 @@ export function XhsShopItemsPage() {
             </Modal> */}
 
       {/*
-        商品 → 挂链笔记弹窗（设计 13 §31.6）：**关系表源**（note_goods join notes），
-        零平台请求。多篇笔记用 tab 自然隔离；内容区复用内容库详情弹窗的同一份
-        两栏版式（NoteDetailBody）—— 同一语义不留两份实现。
+        商品 → 挂链笔记弹窗（**全实时**，2026-10-27）：
+        ① 列表按商品 ID 查千帆（`item_mix_search_word`）；
+        ② 正文**切到哪篇查哪篇**（`/note-detail`，不预加载）；
+        多篇笔记用 tab 自然隔离；内容区复用内容库详情弹窗的同一份两栏版式
+        （`NoteDetailBody`）—— 同一语义不留两份实现。
       */}
       <Modal
                 open={notesOpen}
@@ -3880,17 +3730,38 @@ export function XhsShopItemsPage() {
           ) : notesData && notesData.notes.length ? (
             notesData.notes.length === 1 ? (
               <NoteDetailBody
-                mediaUrls={notesData.notes[0].images}
-                videoUrl={notesData.notes[0].video_url}
-                isVideo={Boolean(notesData.notes[0].video_url)}
+                mediaUrls={
+                  noteDetails[notesData.notes[0].note_id]?.images ?? notesData.notes[0].images
+                }
+                videoUrl={
+                  noteDetails[notesData.notes[0].note_id]?.video_url ?? notesData.notes[0].video_url
+                }
+                isVideo={Boolean(
+                  noteDetails[notesData.notes[0].note_id]?.video_url ?? notesData.notes[0].video_url
+                )}
                 mediaNamePrefix={notesData.notes[0].note_id}
               >
                 {renderItemNoteInfo(notesData.notes[0])}
+                <NoteLiveDetail
+                  detail={noteDetails[notesData.notes[0].note_id]}
+                  listGoods={notesData.notes[0].goods}
+                  loading={Boolean(noteDetailLoading[notesData.notes[0].note_id])}
+                  error={noteDetailErrors[notesData.notes[0].note_id]}
+                  onRetry={() =>
+                    void loadNoteDetail(notesData.notes[0].note_id, { force: true })
+                  }
+                />
               </NoteDetailBody>
             ) : (
               <Tabs
                 activeKey={notesTab}
-                onChange={setNotesTab}
+                onChange={(key) => {
+                  setNotesTab(key);
+                  //: ⚠️ **切到哪篇查哪篇**（用户口径 2026-10-27）：正文只能按篇实时取，
+                  //: 这里才发请求 —— 打开弹窗只打 1 次列表 + 当前这篇的详情。
+                  const target = notesData.notes[Number(key)];
+                  if (target?.note_id) void loadNoteDetail(target.note_id);
+                }}
                 items={notesData.notes.map((note, index) => ({
                   key: String(index),
                   label: (
@@ -3902,12 +3773,19 @@ export function XhsShopItemsPage() {
                   ),
                   children: (
                     <NoteDetailBody
-                      mediaUrls={note.images}
-                      videoUrl={note.video_url}
-                      isVideo={Boolean(note.video_url)}
+                      mediaUrls={noteDetails[note.note_id]?.images ?? note.images}
+                      videoUrl={noteDetails[note.note_id]?.video_url ?? note.video_url}
+                      isVideo={Boolean(noteDetails[note.note_id]?.video_url ?? note.video_url)}
                       mediaNamePrefix={note.note_id}
                     >
                       {renderItemNoteInfo(note)}
+                      <NoteLiveDetail
+                        detail={noteDetails[note.note_id]}
+                        listGoods={note.goods}
+                        loading={Boolean(noteDetailLoading[note.note_id])}
+                        error={noteDetailErrors[note.note_id]}
+                        onRetry={() => void loadNoteDetail(note.note_id, { force: true })}
+                      />
                     </NoteDetailBody>
                   ),
                 }))}
@@ -3924,17 +3802,6 @@ export function XhsShopItemsPage() {
           )}
         </div>
       </Modal>
-      {/* M4（设计 20 §5）：商品编辑弹窗 —— 操作列独立入口，不塞进详情弹窗。
-          落库成功（分组/采纳标题）后刷新列表，让「分组」列与新标题即时可见。 */}
-      <ProductEditModal
-        open={editingItem !== null}
-        platformAccountId={selectedAccountId ?? 0}
-        item={editingItem}
-        onClose={() => setEditingItem(null)}
-        onSaved={() => {
-          if (selectedAccountId) void load(selectedAccountId, pageNo, pageSize);
-        }}
-      />
       {/* 商品操作结果弹窗（2026-10-05 需求 7）：任务逐条结果，5s 轮询到全终态。
           ⚠️ 2026-10-06 用户口径：「结果等待弹窗要加**蒙版**统计**耗时**，**避免结果
           弹窗关闭**，执行结果返回后再支持弹窗关闭」—— 修正了此前的折中（那时运行中
@@ -4017,56 +3884,10 @@ export function XhsShopItemsPage() {
         ) : null}
       </Modal>
 
-      {/* 同步指定商品弹窗（2026-10-05 需求 6）：无限列表展示「要同步的商品 + 同步状态」。
-          ⚠️ 平台没有按 id 拉商品的读接口 ⇒ 后端要**整店翻页扫描**才能确认命中 / 未命中。
-          弹窗里**如实标注这个代价**（用户会等很久，不说清就是骗他）。 */}
-      <SyncSpecifiedItemsModal
-        open={syncItemsOpen}
-        platformAccountId={selectedAccountId}
-        //: 主表勾选的商品 ID（弹窗里**以列表展示**，勾选后点同步才跑 —— 2026-10-06 v2 口径）。
-        //: ⚠️ 行内「同步商品信息」也走这个弹窗，它通过 `syncSingleTarget` 注入单个 ID。
-        //: ⚠️ **必须带名称 / 缩略图**：此前只传 ID ⇒ 弹窗「商品信息」列的名称与图全空
-        //: （2026-10-06 用户实测报的 bug）。行内单件用 `syncSingleTarget` 那一行。
-        items={
-          syncSingleTarget
-            ? (data?.items ?? [])
-                .filter((row) => row.item_id === syncSingleTarget)
-                .map((row) => ({
-                  item_id: row.item_id,
-                  title: row.title || "",
-                  image: row.image || "",
-                }))
-            : (data?.items ?? [])
-                .filter((row) => selectedItemIds.includes(row.item_id))
-                .map((row) => ({
-                  item_id: row.item_id,
-                  title: row.title || "",
-                  image: row.image || "",
-                }))
-        }
-        onClose={() => {
-          setSyncItemsOpen(false);
-          //: ⚠️ 必须清：否则下一次「批量同步商品信息」进来时 `syncSingleTarget`
-          //: 还是上一件商品 ⇒ 弹窗只列那一件（静默丢批量）。
-          setSyncSingleTarget(null);
-          //: 从详情发起的「重抓此商品」：关弹窗即回到它的详情
-          //: （用户口径 2026-10-09：重抓就是为了让眼前这份数据变新）。
-          const target = syncReturnItem;
-          setSyncReturnItem(null);
-          if (target) void openDetail(target);
-        }}
-        onSynced={() => {
-          if (selectedAccountId) void load(selectedAccountId, pageNo, pageSize);
-        }}
-        //: 「按条件同步」= 整店 + **后台任务**（弹窗那边点同步即关，这里接手触发）。
-        onConditionSync={(options: SyncOptions) => {
-          const payload: SyncNotesOptions =
-            options.scope === "range"
-              ? { scope: "range", startDate: options.startDate, endDate: options.endDate }
-              : { scope: "full" };
-          void syncAllStatusGoods(payload);
-        }}
-      />
+      {/* ⛔ 同步指定商品弹窗**已整块移除**（2026-10-27 用户口径：「批量同步商品信息逻辑
+          全链路彻底移除」）—— 商品列表已是平台实时数据（`source=platform`），
+          「把平台数据拉回本地台账」这个动作本身不存在了。 */}
+
       {/* ⚠️ 2026-10-08 用户口径「移除新增商品按钮和逻辑」⇒ `ProductDraftModal`
           **整块退场**（按钮 / 状态 / import / 挂载点四件全删）。
           草稿箱里的既有草稿仍可查看与发布 —— 走下面的 `ProductDraftsModal`，

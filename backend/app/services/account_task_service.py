@@ -34,7 +34,7 @@ running / 终态（它们本来就这么做），worker 只在**执行体崩了*
 
 | 维度 | 口径 |
 |---|---|
-| 并行粒度 | **任务类型级**：`xhs_note_sync` / `xhs_goods_note_sync` / `xhs_shop_goods_sync` **各一条** worker 线程 ⇒ 同一账号的「同步笔记」「同步商品笔记」「同步商品」**真并行** |
+| 并行粒度 | **任务类型级**：`xhs_note_sync` / `xhs_goods_note_sync` **各一条** worker 线程 ⇒ 同一账号的「同步笔记」「同步商品笔记」**真并行**（「同步商品」链路 2026-10-27 已整条退场） |
 | 类内 | **仍逐个跑**（一条线程认领一个类型，FIFO）—— 同类型的两条任务不并发（风控口径，§38.3） |
 | 跨账号 | 同类型内仍**逐个跑**（与 §39 §281「每类任务一个，类内逐个跑」同口径） |
 | 额度 | 不变：限流桶按 `账号:源`（§38.3），并行不放大单账号速率，只是让**不同源**同时走 |
@@ -71,7 +71,6 @@ ACCOUNT_WORKER_THREAD_PREFIX = "account-task-worker"
 ACCOUNT_WORKER_TYPES: tuple[str, ...] = (
     "xhs_note_sync",
     "xhs_goods_note_sync",
-    "xhs_shop_goods_sync",
 )
 
 #: 空闲轮询（唤醒信号丢失时最坏晚这么久发现新任务 —— 安全网不条件性，DEF-048）。
@@ -219,26 +218,6 @@ def _dispatch_account_task(item_id: int) -> Optional[dict]:
             time_to_ms=time_to_ms,
             only=note_sync_service.SOURCE_ARK,
         )
-
-    if task_type == "xhs_shop_goods_sync":
-        from backend.app.services import shop_goods_sync_service
-
-        return shop_goods_sync_service.run_shop_goods_sync(
-            account_id,
-            task_id=item_id,
-            user_id=user_id,
-            max_pages=max_pages,
-            page_size=page_size,
-            source=source,
-            mode=mode,
-            time_from_ms=time_from_ms,
-            time_to_ms=time_to_ms,
-            item_status=item_status,
-        )
-
-    logger.warning("account task worker: 不认识的类型 %s（task=%s）", task_type, item_id)
-    return None
-
 
 def _record_failure(item_id: int, error: BaseException) -> None:
     """执行体**崩了**（抛出）时补记一次失败；行已是终态则不动（不覆写执行体的记账）。"""

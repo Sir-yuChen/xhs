@@ -40,7 +40,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import threading
 from typing import Any, Optional
@@ -384,10 +383,12 @@ def _apply_action(
                 }
             )
 
-    #: 成功执行 ⇒ 本地台账里的「上下架」信号**立即刷新**（等下一轮同步太久，
-    #: 用户会以为没生效）。⚠️ 只改本地乐观值，**不改平台事实** ——
-    #: 真正的对账仍在「同步商品」里（平台返回什么以平台为准）。
-    _refresh_local_status(db, action=action, item_ids=item_ids, by_id=by_id)
+    #: ⛔ **不再做「本地台账乐观刷新」**（2026-10-27）：`shop_products` 台账整表 DROP，
+    #: 商品列表是**平台实时查询** ⇒ 写成功后用户点刷新就是平台新状态，不需要、也没有
+    #: 地方存乐观值。原 `_refresh_local_status(db, ..., by_id=by_id)` 已删除 ——
+    #: 它当时改的是 ORM 行（`row.raw_json` / `row.card_type` / `row.status`），而
+    #: `by_id` 自设计 75 起是**实时归一化 dict**，属性访问必然 `AttributeError`
+    #: （被外层 except 兜住时会把已成功的逐条结果连带判失败）。
     #: 平台回执里出现了「店铺被冻结」⇒ 记进 `shop_state`，后续按钮直接判不可做。
     task_note = ""
     if any("冻结" in (row.get("reason") or "") for row in results[-len(item_ids):]):
@@ -445,70 +446,6 @@ def _note_platform_reason(db: Any, account: PlatformAccount, reason: str) -> Non
         db.commit()
     except Exception:  # noqa: BLE001
         db.rollback()
-
-
-def _refresh_local_status(
-    db: Any, *, action: str, item_ids: list[str], by_id: dict[str, dict]
-) -> None:
-    """写成功后**立即刷新本地台账的上下架信号**（乐观值，下一轮同步会对账）。
-
-    ⚠️ **必须同时改 `raw_json`**：门禁（`allowed_actions`）读的是台账 dict 里
-    由 `raw_json` 现场派生的 `status_key`（`status_key_from_raw` 的第一判据是
-    `off_shelf_time` / `on_shelf_time`，都在 raw 里）。只改归一化列的话，
-    用户点完下架、回到列表**按钮还是「下架」**（判据没变），下一轮同步前都这样 ——
-    那是「点了没反应」的同一种观感。
-
-    所以这里改**两处**，口径一致：
-    * `raw_json` 里的 `on_shelf_time` / `off_shelf_time`（门禁与展示的真实判据）；
-    * `card_type` + `status` 两个归一化列（筛选 / 排序 / 展示标签用）。
-
-    ⚠️ 这是**乐观更新**：平台事实仍以平台为准 —— `synced_at` 不动
-    （不伪装成「刚同步过」）。删除**什么都不改**（不擅自从台账删行：
-    平台侧删除要等下一轮「同步商品」对账后才该消失，本地先删会让
-    「同步」看起来吞了数据）。
-
-    `card_type` 的取值来自 SDK 白名单（`QIANFAN_ITEM_STATUSES`），
-    **不在这里写死数字**。
-    """
-    if action == gates.ACTION_DELETE:
-        return
-    from apis.xhs_qianfan_apis import QIANFAN_ITEM_STATUSES
-
-    wants_on_shelf = action == gates.ACTION_ON_SHELF
-    target = QIANFAN_ITEM_STATUSES["on_shelf" if wants_on_shelf else "off_shelf"]
-    now_ms = int(shanghai_now().timestamp() * 1000)
-    for item_id in item_ids:
-        row = by_id.get(item_id)
-        if row is None:
-            continue
-        try:
-            raw = json.loads(row.raw_json) if row.raw_json else {}
-        except (TypeError, ValueError):
-            raw = {}
-        if not isinstance(raw, dict):
-            raw = {}
-        if wants_on_shelf:
-            raw["on_shelf_time"] = now_ms
-            raw.pop("off_shelf_time", None)
-        else:
-            raw["off_shelf_time"] = now_ms
-        #: ⚠️ `buyable` **也要一起改**（2026-10-06 修）：它是「这件商品能否购买」的
-        #: 平台原值，与 `on_shelf_time` / `off_shelf_time` 是**同一个生命周期信号的三面**
-        #: （`status_key_from_raw` 的 docstring 记着实测口径「下架行 = `buyable=false`
-        #: + 无上架时间 + 有下架时间」）。
-        #: 漏改它 ⇒ 上架后 `status` 列与 `status_key` 都变成「售卖中」，但 `buyable`
-        #: 仍是 false：前端「可售」列显示**停售**、详情弹窗显示**不可购买**，状态 tag
-        #: 若按 `buyable` 上色还会是灰的（用户 2026-10-06 实测报告的两个症状）。
-        #: 注意 `status_key_from_raw` **不读 `buyable`**（只读时间字段与 `item_freeze`）
-        #: ⇒ 补写它**不会**影响上下架门禁。
-        raw["buyable"] = wants_on_shelf
-        raw["card_type"] = target
-        row.raw_json = json.dumps(raw, ensure_ascii=False)
-        row.card_type = target
-        #: 展示标签（`status` 列）与门禁键**不同口径**（列是中文标签），
-        #: 这里只改列；键由 `status_key_from_raw(raw)` 现算 —— 不要去写它。
-        row.status = "售卖中" if wants_on_shelf else "已下架"
-    db.commit()
 
 
 def _finish(db: Any, task: Task, *, results: list[dict[str, Any]], error: str = "") -> None:

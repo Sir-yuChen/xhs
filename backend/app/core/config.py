@@ -75,8 +75,6 @@ def _load_yaml_config() -> Dict[str, Any]:
         # §44（2026-09-30）：商品笔记同步（千帆挂链笔记）—— 与普通笔记各自开关。
         "xhs.goods_note_sync.enabled": "xhs_goods_note_sync_enabled",
         "xhs.goods_note_sync.interval_hours": "xhs_goods_note_sync_interval_hours",
-        "xhs.shop_goods_sync.enabled": "xhs_shop_goods_sync_enabled",
-        "xhs.shop_goods_sync.interval_hours": "xhs_shop_goods_sync_interval_hours",
         # 调度轮内账号之间的停顿（秒）：多账号矩阵不一窝蜂。
         "xhs.sync.account_gap_seconds": "xhs_sync_account_gap_seconds",
         # 同步并行账号数（设计 13 §38.3，2026-09-27）：同一账号始终串行（账号级互斥），
@@ -237,8 +235,6 @@ class Settings(BaseSettings):
     # 与上面的普通笔记同步各自开关 / 周期。同款语义：默认 False = 只在手动按钮触发。
     xhs_goods_note_sync_enabled: bool = False
     xhs_goods_note_sync_interval_hours: int = 6
-    xhs_shop_goods_sync_enabled: bool = False
-    xhs_shop_goods_sync_interval_hours: int = 6
     # 调度轮内**账号之间**的停顿（秒）：多账号矩阵不能一窝蜂同时打平台。
     xhs_sync_account_gap_seconds: int = 10
     # 同步**并行账号数**（设计 13 §38.3，2026-09-27 用户口径「账号之间的任务应支持并行」）。

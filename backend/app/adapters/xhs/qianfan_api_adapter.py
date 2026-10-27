@@ -30,6 +30,16 @@ class XhsQianfanApiAdapter:
         with direct_xhs_request_env():
             return self._api().get_goods_note_page(**kwargs)
 
+    def get_note_detail(self, note_id: str) -> tuple[bool, str, Any]:
+        """**单篇笔记详情**（`postgw/note/detail`，强签名，正文唯一实时来源）。
+
+        2026-10-27 新增：千帆笔记编辑页加载正文走的就是这条，**域是
+        `edith.xiaohongshu.com`**（与本适配器其余接口的 ark 域不同），
+        所以必须经 `direct_xhs_request_env()` 走直连环境。
+        """
+        with direct_xhs_request_env():
+            return self._api().get_note_detail(note_id)
+
     def get_note_data_list(
         self,
         *,

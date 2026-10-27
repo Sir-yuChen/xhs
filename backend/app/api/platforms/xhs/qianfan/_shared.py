@@ -129,7 +129,6 @@ from backend.app.services.note_cleanup_service import CandidateQuery, list_candi
 from backend.app.services.shop_binding_service import (
     get_shop_state,
     has_ark_session,
-    synced_note_count,
 )  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
 from backend.app.models.user import User  # noqa: F401  # 转发面：本文件不直接用，子模块用
@@ -198,8 +197,9 @@ def _account_shop_summary(db: Session, account: PlatformAccount) -> dict[str, An
         "status": str(state["status"]),
         "status_message": str(state["status_message"]),
         "goods_note_total": int(state["goods_note_total"] or 0),
-        "synced_notes": synced_note_count(db, account.id),
-        "goods_synced_at": _fmt_state_time(state["goods_synced_at"]),
+        #: ⛔ `synced_notes` / `goods_synced_at` **已删除**（2026-10-27）：笔记与商品
+        #: 都改平台实时查询后，「本地同步了多少条」这个概念不存在了 —— 那两个值一个
+        #: 恒 0、一个恒空串（`shop_note_goods` 已 DROP），留着只会让前端以为有覆盖率。
         #: 最近一次千帆登录态巡检时间（T-31）；空 = 从未巡检。
         "health_checked_at": _fmt_state_time(state["health_checked_at"]),
     }
@@ -569,11 +569,6 @@ def _text_model_context(
     )
     return OpenAICompatibleTextClient(), config, ctx.api_key
 
-#: ⚠️ `_item_error_to_http` 已退场（设计 75 S5，2026-10-27）：它把
-#: `shop_products_service.ProductEditError` 翻成 HTTP —— 商品本地编辑端点
-#: （`PATCH /items/edit`）同批退场，`ProductEditError` 类也随服务层收窄删除。
-#: 现在**没有调用方**（`__init__.py` 的转发面也已摘掉），留着就是一个恒抛的壳。
-
 _DRAFT_MAX_IMAGES = draft_service.MAX_DRAFT_IMAGES
 
 _DRAFT_MAX_SKUS = draft_service.MAX_DRAFT_SKUS
@@ -582,25 +577,6 @@ _DRAFT_LIMIT_PER_MINUTE = draft_service.DRAFT_LIMIT_PER_MINUTE
 
 def payload_metrics_account_id(account: PlatformAccount) -> int:
     return account.id
-
-def _item_error_to_http(error: Exception) -> HTTPException:
-    """商品编辑类错误 → HTTPException（code → 状态码，唯一映射点）。
-
-    ⚠️ 宿主为 `shop_products_service.ProductEditError`（2026-10-05 分组退场后）；
-    设计 75 S5 后商品域改实时查询，但**编辑是平台写接口**、错误分类不变 ⇒ 本函数保留
-    （`items/edit` 已退场，`items/polish` 等仍走它）。
-    """
-    from backend.app.services.shop_products_service import ProductEditError
-
-    if not isinstance(error, ProductEditError):
-        raise error
-    code = error.code or ""
-    if code.endswith("_NOT_FOUND"):
-        status_code = status.HTTP_404_NOT_FOUND
-    else:
-        status_code = status.HTTP_400_BAD_REQUEST
-    return HTTPException(status_code=status_code, detail={"code": code, "message": str(error)})
-
 
 def _order_write_error_to_http(error: Any) -> HTTPException:
     """`OrderWriteError` → HTTP（结构化）。门禁类 400，找不到类 404。"""

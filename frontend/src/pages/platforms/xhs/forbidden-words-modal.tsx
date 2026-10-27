@@ -33,6 +33,7 @@
  * ⚠️ 说明文案**禁止 `**`**（守卫覆盖整个 `frontend/src`）。
  * ⚠️ 弹窗尺寸按**视口百分比**（用户偏好），本弹窗 **60%**（发布弹窗是 75%）。
  */
+import { useDictOptions } from "../../../lib/system-dicts";
 import { WaitMask } from "../../../components/ui/wait-mask";
 import { hasPermission } from "../../../hooks/use-permission";
 import { RowActions } from "../../../components/common/row-actions";
@@ -80,6 +81,11 @@ const { Text } = Typography;
  *
  * ⚠️ 默认 **1（精确）** —— 用户口径 2026-10-08：「违规词的匹配方式默认精确」。
  * 排在第一项的是默认值（表单初值也取 1），两者必须一致。
+ */
+/**
+ * 匹配模式的**镜像兜底** —— 展示走字典 `xhs_forbidden_word_match_mode`（设计 63）。
+ * ⚠️ 字典 value 是字符串，而表单值是 number（后端 `MATCH_MODE_EXACT=1`），
+ * 所以下面 `matchModeOptions` 做了 `Number()` 回转。
  */
 const MATCH_MODE_OPTIONS = [
   { value: 1, label: "精确（默认）" },
@@ -577,6 +583,11 @@ function WordEditor(props: {
   const { message } = App.useApp();
   const [form] = Form.useForm<EditFormValues>();
   const [saving, setSaving] = useState(false);
+  //: 匹配模式下拉走字典 `xhs_forbidden_word_match_mode`（字典值 → number）。
+  const matchModeOptions = useDictOptions("xhs_forbidden_word_match_mode").map((o) => ({
+    value: Number(o.value),
+    label: o.label,
+  }));
 
   useEffect(() => {
     if (!open) return;
@@ -674,7 +685,7 @@ function WordEditor(props: {
           label="匹配方式"
           extra="精确 = 整段文字完全相同才命中；包含 = 出现该词即命中"
         >
-          <Select options={MATCH_MODE_OPTIONS} />
+          <Select options={matchModeOptions.length > 0 ? matchModeOptions : MATCH_MODE_OPTIONS} />
         </Form.Item>
 
         <Form.Item name="remark" label="备注">

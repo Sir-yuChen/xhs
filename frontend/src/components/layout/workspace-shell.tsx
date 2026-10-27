@@ -506,7 +506,9 @@ export function WorkspaceShell({
           左（与 Sider 相邻）与上（与 48px 顶栏相邻）都收到 15px；右 / 下保持 24px，
           否则页面底部最后一张卡会贴着窗口下沿、右侧表格列也会贴边裁掉滚动条。
         */}
-        <Content style={{ padding: "15px 24px 24px 15px", minHeight: "calc(100vh - 48px)", overflow: "auto" }}>
+        {/* ⚠️ `position: relative` 保留：页面内有 30+ 处 `position: absolute`
+            （卡片角标 / 轮播按钮等），需要一个稳定的定位锚。 */}
+        <Content style={{ padding: "15px 24px 24px 15px", minHeight: "calc(100vh - 48px)", overflow: "auto", position: "relative" }}>
           {children}
         </Content>
       </Layout>

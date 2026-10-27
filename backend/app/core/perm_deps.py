@@ -5,7 +5,7 @@
 中间件拿不到 FastAPI 解析后的路径参数，而本项目的权限码**与具体资源实例无关**
 （「能不能改商品」不取决于 `item_id` 是多少）。用依赖的好处：
 
-1. `Depends(require_perm("xhs:item:edit"))` 写在函数签名里 ⇒ **一眼看到这个端点要什么码**，
+1. `Depends(require_perm("xhs:item:delete"))` 写在函数签名里 ⇒ **一眼看到这个端点要什么码**，
    `route_perms.py` 也能静态扫出来做启动期守卫；
 2. 可复用 `get_current_user`（已经处理过 401 / token_version）；
 3. 不需要维护「路径 → 权限码」的正则表（第二份真相）。

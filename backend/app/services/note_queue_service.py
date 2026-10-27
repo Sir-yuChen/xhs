@@ -229,7 +229,6 @@ assert {spec.batch_task_type for spec in QUEUE_REGISTRY} == set(QUEUE_BATCH_TASK
 ACCOUNT_TASK_TYPES: tuple[str, ...] = (
     "xhs_note_sync",
     "xhs_goods_note_sync",
-    "xhs_shop_goods_sync",
     "xhs_no_traffic_cleanup",
 )
 

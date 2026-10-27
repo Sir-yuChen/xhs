@@ -53,6 +53,11 @@ export type QueryForm = {
   /** 挂链笔记数：比较符（默认「小于」）+ 指定篇数（留空 = 不筛）。v1.34 */
   note_count_op?: XhsNoteCountOp;
   note_count?: number;
+  /**
+   * 商品类型（千帆「商品类型」）：`false` = 普通商品（平台默认），`true` = 渠道品。
+   * 留空按 `false` 处理 —— 与千帆自己发的请求一致（`is_channel` 恒发）。
+   */
+  is_channel?: boolean;
 };
 
 /** `formValuesToQuery` 的上下文（表单之外的、来自页面状态的那几个维度）。 */
@@ -105,6 +110,9 @@ export function formValuesToQuery(
     create_time_from: range?.[0] ? dayjs(range[0]).format("YYYY-MM-DD") : undefined,
     create_time_to: range?.[1] ? dayjs(range[1]).format("YYYY-MM-DD") : undefined,
     ...noteCountFilter(values.note_count_op, values.note_count),
+    //: 商品类型（千帆「商品类型」三档）：平台请求里 `is_channel` **恒发**，默认 `false`
+    //: = 只看普通商品（千帆自己也是这么发的；缺这个字段平台会当成 undefined 而非 false）。
+    is_channel: values.is_channel === true,
     ...(sortArg
       ? { sort_field: sortArg.field, order: sortArg.order === "ascend" ? "asc" : "desc" }
       : {}),
