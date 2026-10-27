@@ -467,16 +467,31 @@ def _get_unique_owned_notes(db: Session, current_user: User, note_ids: list[int]
 def _publish_status_stats(db: Session, user_id: int, platform: Optional[str]) -> dict:
     """内容库「待发布 / 已发布 / 发布失败」计数（设计 05 §2.5；三档口径见设计 13 §32.3.3）。
 
-    **全库口径**：只按 `user_id`（+ `platform`）统计，**不叠加** `q` / `tag_id` /
-    `has_assets` / `has_comments` / `publish_status` 任一筛选 —— 它服务的是「内容池结构」
-    这一眼。跟着筛选走会在「只看发布失败」时把已发布显示成 0，用户读不出池子结构。
+    **口径 = 内容库可见范围**（2026-10-27 修订）：与列表同一把尺子 ——
+    `is_deleted=False` + `note_type ∈ LIBRARY_NOTE_TYPES`。**不叠加** `q` /
+    `topic_id` / `has_assets` / `has_comments` / `publish_status` 任一**用户筛选**
+    （它服务的是「内容池结构」这一眼，跟着筛选走会读不出池子结构）。
 
-    同理，**前端不得用 `items.length` 反推**（那是「本页条数」）。
+    ⚠️ 为什么必须带这两道（改前只按 `user_id`+`platform`，是**全库**口径）：
+    列表已经只放「本地 + 未发布」，软删除的行也不显示；统计卡若仍算全库，就会
+    把已发布 / 三方同步 / 软删的行都数进去 —— 三数之和 ≠ 列表能看到的总数，
+    用户会以为「卡片说有 300 篇，列表只有 48 篇」。
 
-    三数之和 = 该用户（该平台）的笔记总数（迁移 `v5w6x7y8z9a0` 之后不存在第四态；
+    ⚠️ `已发布` 在这个口径下**通常为 0**，这是**正确**的：内容库按定义不放已发布
+    笔记（它们发布成功即软删除），已发布的去「我的笔记」看实时数据。
+
+    三数之和 = 内容库可见笔记总数（迁移 `v5w6x7y8z9a0` 之后不存在第四态；
     未回填的空值 `""` 归入「待发布」档，与筛选同一份映射 `PUBLISH_STATUS_FILTER_GROUPS`）。
     """
-    base = select(Note.publish_status, func.count()).select_from(Note).where(Note.user_id == user_id)
+    base = (
+        select(Note.publish_status, func.count())
+        .select_from(Note)
+        .where(
+            Note.user_id == user_id,
+            Note.is_deleted.is_(False),
+            Note.note_type.in_(LIBRARY_NOTE_TYPES),
+        )
+    )
     if platform:
         base = base.where(Note.platform == platform)
     counts = {str(status or ""): int(total or 0) for status, total in db.execute(base.group_by(Note.publish_status)).all()}
@@ -492,9 +507,19 @@ def get_note_ids(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    """已保存笔记的平台 `note_id` 清单（笔记发现页标「已保存」用）。
+
+    ⚠️ **口径必须与内容库一致**（2026-10-27）：排除软删 + 只取内容库收录的类型。
+    否则会标「已保存」而内容库里看不到 —— 发布成功后被软删的、三方同步来的
+    都会这样，用户再点一次保存才在列表里出现，等于告诉他刚才那个标记是假的。
+    """
     statement = (
         select(Note.note_id)
-        .where(Note.user_id == current_user.id)
+        .where(
+            Note.user_id == current_user.id,
+            Note.is_deleted.is_(False),
+            Note.note_type.in_(LIBRARY_NOTE_TYPES),
+        )
     )
     if platform:
         statement = statement.where(Note.platform == platform)
@@ -898,20 +923,11 @@ def get_offline_notes(
         "share_count", "pay_gmv", "pay_order_cnt", "publish_time", "stat_date",
     }
     statement = select(NoteDatacenterStat).where(NoteDatacenterStat.user_id == current_user.id)
-    # 2026-10-12 软删除过滤：本地 notes 已软删（is_deleted=True）的笔记**不展示** ——
-    # 无流量清理软删后，统计表行仍在（无外键），但列表 / 详情 / 同步都该当它不存在。
-    # 用 EXISTS 排除（统计表 note_id 命中 notes 的软删行 ⇒ 过滤）。notes 里没有的行
-    # （纯粹只有统计快照、从未落 notes）不受影响，照常展示。
-    soft_deleted_subq = (
-        select(Note.id)
-        .where(
-            Note.user_id == current_user.id,
-            Note.is_deleted.is_(True),
-            Note.note_id == NoteDatacenterStat.note_id,
-        )
-        .exists()
-    )
-    statement = statement.where(~soft_deleted_subq)
+    #: ⚠️ **不再用 notes 的 `is_deleted` 过滤**（2026-10-27 用户口径「数据中心的逻辑
+    #: 与内容库完全拆分」）：那是一个跨表 EXISTS，把数据中心的可见性绑在内容库的
+    #: 软删状态上 —— 内容库删一条，数据中心就不显示，而它的指标快照本来是独立的
+    #: 历史事实。数据中心自己的「已删除」判据是 `platform_deleted_at`（平台侧真删，
+    #: 见下面的 `deleted` 参数），那才是它该认的。
     cat_key = (category or "").strip()
     if cat_key:
         if cat_key not in ("goods", "normal"):
@@ -932,9 +948,6 @@ def get_offline_notes(
     # 标题模糊查询（2026-10-06）：空串 / 空白不筛。
     if keyword and keyword.strip():
         statement = statement.where(NoteDatacenterStat.title.like(f"%{keyword.strip()}%"))
-    # 商品 ID 反查（2026-10-06）：统计表 item_id 列直接筛。
-    if item_id and item_id.strip():
-        statement = statement.where(NoteDatacenterStat.item_id == item_id.strip())
     # 笔记 ID 精确查询（2026-10-12）：统计表 note_id 列直接筛。
     if note_id and note_id.strip():
         statement = statement.where(NoteDatacenterStat.note_id == note_id.strip())
@@ -988,20 +1001,19 @@ def get_offline_notes(
     rows = db.scalars(
         statement.limit(page_size).offset((page - 1) * page_size)
     ).all()
-    # 取 note → notes 归属（本地主键 + 当前标题/封面，供展示）。
-    note_ids = {str(r.note_id) for r in rows if r.note_id}
-    note_by_id: dict[str, Note] = {}
-    if note_ids:
-        note_by_id = {
-            n.note_id: n
-            for n in db.scalars(select(Note).where(Note.note_id.in_(note_ids))).all()
-        }
+    #: ⚠️ **不再回查 `notes` 取标题/封面**（2026-10-27 用户口径「数据的中心逻辑与
+    #: 内容库完全拆分」）：统计表**自己就有** `title` / `cover_url` / `item_title`
+    #: 等全部展示字段，回查只会把两个功能绑在一起 —— 内容库删行（软删 / 真删 /
+    #: 存量清理）后数据中心就取不到值，甚至静默显示空标题。
+    #:
+    #: 拆分的判据：数据中心 = `note_datacenter_stats` 一张表，零 `notes` 依赖；
+    #: 内容库 = `notes` 一张表。两张表只在「同一个平台 note_id」上语义相关，
+    #: 读路径互不 join。
     items = []
     for r in rows:
-        note = note_by_id.get(r.note_id)
         items.append({
             "note_id": r.note_id,
-            "title": r.title or (note.title if note else "") or "",
+            "title": r.title or "",
             "note_flag": r.note_flag,
             "item_id": r.item_id,
             "item_title": r.item_title,
@@ -1016,7 +1028,6 @@ def get_offline_notes(
             "stat_date": r.stat_date,
             "window": r.window,
             "platform_deleted_at": r.platform_deleted_at.isoformat() if r.platform_deleted_at else None,
-            "in_library": note is not None,
         })
     return {
         "total": int(total),

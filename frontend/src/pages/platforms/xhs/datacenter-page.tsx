@@ -90,7 +90,6 @@ export type DatacenterStatItem = {
   stat_date: string;
   window: string;
   platform_deleted_at: string | null;
-  in_library: boolean;
 };
 
 type PanelState<T> = {

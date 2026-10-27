@@ -70,10 +70,15 @@ PUBLISH_STATUS_FILTER_GROUPS: dict[str, tuple[str, ...]] = {
     PUBLISH_STATUS_FAILED: (PUBLISH_STATUS_FAILED,),
 }
 
-#: **内容库只放这两种来源的笔记**（2026-10-27 用户口径）。
-#: `synced`（三方同步搬来的）不进内容库 —— 那个源已整条退场，内容库只装
-#: 用户自己的东西：本地采集（`local`）与本地生成（`local_generated`）。
-LIBRARY_NOTE_TYPES: tuple[str, ...] = (NOTE_TYPE_LOCAL, NOTE_TYPE_LOCAL_GENERATED)
+#: **内容库收录的笔记来源**（2026-10-27 最终口径）。
+#:
+#: * `local_generated` —— 用户用 AI 生成的笔记（内容库的主角）；
+#: * `local` —— **数据中心笔记指标同步**落库的笔记（`sync_account_note_data`：
+#:   千帆 butterfly 拉回基础信息落 `notes`、指标落 `note_datacenter_stats`）。
+#:   ⚠️ 别被 `local` 这个名字误导成「采集来的别人的笔记」：这条链路是
+#:   **把自己的笔记从数据中心同步回来**，与「笔记发现」的采集是两条线。
+#: * `synced` 不进 —— 三方同步源已整条退场。
+LIBRARY_NOTE_TYPES: tuple[str, ...] = (NOTE_TYPE_LOCAL_GENERATED, NOTE_TYPE_LOCAL)
 
 #: **内容库排除的发布状态**（2026-10-27 用户口径：「已发布的笔记不展示在内容库中，
 #: 应到我的笔记页查看实时数据」）。

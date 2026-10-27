@@ -81,7 +81,6 @@ import { fenPriceText } from "../../../lib/format";
 import { useAccountScope } from "../../../lib/account-scope";
 import {
   FILTER_CACHE_KEYS,
-  NOTE_TYPE_FILTER_ALL_VALUES,
   PUBLISH_STATUS_FILTER_VALUES,
   asBoolean,
   asEnum,
@@ -102,12 +101,7 @@ import {
 } from "../../../lib/topic-search";
 import { formatShanghaiTime } from "../../../lib/time";
 import {
-  NOTE_TYPE_FILTER_OPTIONS,
   accountFilterLabel,
-  noteTypeLabel,
-  noteTypeTagColor,
-  splitSyncTargets,
-  type NoteTypeFilter,
 } from "../../../lib/note-filters";
 import type { NoteAsset, NoteTopic, PlatformAccount, SavedNote } from "../../../types";
 import type { PublishQueueSnapshot } from "../../../lib/api";
@@ -486,9 +480,6 @@ export function XhsLibraryPage() {
       setContentAccountScope(parsed);
     }
   }, [accountFilter, contentAccountScope, setContentAccountScope]);
-  const [noteTypeFilter, setNoteTypeFilter] = usePersistedFilter<NoteTypeFilter>(
-    FILTER_CACHE_KEYS.library.noteType, "", asEnum(NOTE_TYPE_FILTER_ALL_VALUES)
-  );
   // ⚠️ 挂链商品筛选**已整条移除**（2026-10-27，设计 75 S5）：
   // 挂链关系改实时查千帆（`item_mix_search_word`），本地 `note_goods` 表已 DROP，
   // 「内容库按商品筛笔记」没有数据源。查「某商品挂了哪些笔记」请走
@@ -544,7 +535,6 @@ export function XhsLibraryPage() {
       has_comments: hasCommentsFilter || undefined,
       publish_status: publishStatusFilter === "all" ? undefined : publishStatusFilter,
       platform_account_id: accountFilter ? Number(accountFilter) : undefined,
-      note_type: noteTypeFilter || undefined,
     };
   }
 
@@ -649,7 +639,6 @@ export function XhsLibraryPage() {
    */
   function clearFilters() {
     setKeywordFilter(""); setSelectedTopicFilter(""); setPublishStatusFilter("all");
-    setAccountFilter(""); setNoteTypeFilter("");
     setHasAssetsFilter(false); setHasCommentsFilter(false);
     void loadNotes({
       q: undefined,
@@ -658,7 +647,6 @@ export function XhsLibraryPage() {
       has_comments: undefined,
       publish_status: undefined,
       platform_account_id: undefined,
-      note_type: undefined,
     });
   }
   function toggleNoteSelection(id: number) { setSelectedNoteIds((c) => c.includes(id) ? c.filter((i) => i !== id) : [...c, id]); }
@@ -1280,14 +1268,6 @@ export function XhsLibraryPage() {
               options={filterAccounts.map((account) => ({ value: String(account.id), label: accountFilterLabel(account) }))}
             />
           </Col>
-          <Col span={4}>
-            <Select
-              value={noteTypeFilter}
-              onChange={(v) => setNoteTypeFilter((v ?? "") as NoteTypeFilter)}
-              style={{ width: "100%" }}
-              options={NOTE_TYPE_FILTER_OPTIONS}
-            />
-          </Col>
           <Col span={5}>
             <Select
               value={selectedTopicFilter || undefined}
@@ -1475,25 +1455,6 @@ export function XhsLibraryPage() {
                             自己会变成红色「发布失败」并带完整原因的 Tooltip —— 卡片上
                             只留一个状态，避免两个标签并排说同一件事。 */}
                       </div>
-                      {/*
-                        封面**右下角**：笔记类型 Tag（2026-09-23 用户口径
-                        「三方同步/本地生成使用 tag 放图片右下角」）。
-
-                        * 走 `noteTypeLabel` + `noteTypeTagColor`（**唯一文案 / 唯一配色**，
-                          与筛选下拉、详情弹窗同一份）—— 不在这里重抄字面量（DEF-061）；
-                        * **只渲染已知类型**：`noteTypeLabel` 对空串回空串 ⇒ 缺值整项不渲染
-                          （硬约束⑤：不写「未知」充数，也不给未知类型硬安一个颜色）；
-                        * 不带 icon：封面右下角只有约 84px 宽，「图标 + 四个汉字」在窄卡
-                          （xl 下一行 6 张）会挤到换行。颜色已经足够区分三档。
-                        * ⚠️ 与左下角那排的间距靠左下角 `maxWidth` 让位（见上），
-                          不在这里加 margin —— 两块都是 absolute，加 margin 只会在
-                          某一侧生效、另一侧照旧压。
-                      */}
-                      {noteTypeLabel(note.note_type) && (
-                        <Tag color={noteTypeTagColor(note.note_type)} style={{ position: "absolute", right: 8, bottom: 8, zIndex: 2, margin: 0 }}>
-                          {noteTypeLabel(note.note_type)}
-                        </Tag>
-                      )}
                     </div>
                   }>
                   {/*
@@ -1742,14 +1703,6 @@ export function XhsLibraryPage() {
               <Descriptions.Item label="基础信息">
                 <Space size={6} wrap>
                   <Tag icon={<FileTextOutlined />}>{getRawNoteType(selectedNote).includes("video") ? "视频" : "图文"}</Tag>
-                  {/* 笔记来源类型（标签文案与配色各一处实现：`noteTypeLabel` /
-                      `noteTypeTagColor`）。内容库已不再收录三方同步笔记，图标只有一种。 */}
-                  <Tag
-                    icon={<DatabaseOutlined />}
-                    color={noteTypeTagColor(selectedNote.note_type)}
-                  >
-                    {noteTypeLabel(selectedNote.note_type)}
-                  </Tag>
                   {platformMissingHint && (
                     <Tag color="orange" icon={<ExclamationCircleOutlined />}>{platformMissingHint}</Tag>
                   )}

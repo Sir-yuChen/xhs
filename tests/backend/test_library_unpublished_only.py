@@ -126,6 +126,41 @@ class TestLibraryShowsOnlyUnpublishedLocalNotes:
         assert "Note.publish_status.not_in_(LIBRARY_EXCLUDED_PUBLISH_STATUSES)" in code
 
 
+class TestCountsMatchTheVisibleScope:
+    """统计卡与「已保存」标记必须和列表同一把尺子（2026-10-27）。
+
+    改前：`_publish_status_stats` 只按 `user_id`+`platform` 统计（**全库**），
+    `GET /notes/ids` 也只按 `user_id` —— 两者都会把内容库**看不到**的行算进去：
+    已发布（发布成功即软删）、三方同步、软删的行。后果很具体：
+    卡片说「待发布 300」，列表只有 48 条；发现页标「已保存」，内容库搜不到。
+    """
+
+    def test_stats_excludes_soft_deleted_and_non_library_types(self):
+        code = _code(NOTES_API)
+        start = code.index("def _publish_status_stats(")
+        end = code.index("\n@router.get", start)
+        body = code[start:end]
+        assert "Note.is_deleted.is_(False)" in body
+        assert "Note.note_type.in_(LIBRARY_NOTE_TYPES)" in body
+
+    def test_stats_does_not_apply_user_filters(self):
+        """口径 = 可见范围，但**不叠加**用户筛选（否则读不出池子结构）。"""
+        code = _code(NOTES_API)
+        start = code.index("def _publish_status_stats(")
+        end = code.index("\n@router.get", start)
+        body = code[start:end]
+        for forbidden in ("Note.title.ilike", "Note.platform_account_id ==", "has_assets"):
+            assert forbidden not in body, f"统计不应叠加用户筛选 {forbidden}"
+
+    def test_saved_note_ids_uses_the_same_scope(self):
+        code = _code(NOTES_API)
+        start = code.index("def get_note_ids(")
+        end = code.index("\n@router.", start)
+        body = code[start:end]
+        assert "Note.is_deleted.is_(False)" in body
+        assert "Note.note_type.in_(LIBRARY_NOTE_TYPES)" in body
+
+
 class TestPublishedNoteIsSoftDeleted:
     """发布成功 ⇒ 软删除（**不是**物理删除，2026-10-27 用户口径改口径）。"""
 

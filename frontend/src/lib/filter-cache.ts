@@ -26,7 +26,6 @@
 import { useEffect, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 
-import { NOTE_TYPE_FILTER_VALUES, type NoteTypeFilter } from "./note-filters";
 import { PUBLISH_STATUS_FILTER_OPTIONS, type PublishStatusFilter } from "./note-publish-gates";
 import { NOTE_COUNT_OPS, type NoteCountOp } from "./shop-items-view";
 
@@ -44,7 +43,6 @@ export const FILTER_CACHE_KEYS = {
     topicId: "xhs.filters.library.topic-id",
     publishStatus: "xhs.filters.library.publish-status",
     accountId: "xhs.filters.library.account-id",
-    noteType: "xhs.filters.library.note-type",
     hasAssets: "xhs.filters.library.has-assets",
     hasComments: "xhs.filters.library.has-comments",
   },
@@ -338,7 +336,3 @@ export const PUBLISH_STATUS_FILTER_VALUES = PUBLISH_STATUS_FILTER_OPTIONS.map(
 ) as readonly PublishStatusFilter[];
 
 /** 笔记类型（含 `""` = 不筛）—— 内容库下拉的合法取值。 */
-export const NOTE_TYPE_FILTER_ALL_VALUES = [
-  "",
-  ...NOTE_TYPE_FILTER_VALUES,
-] as readonly NoteTypeFilter[];
