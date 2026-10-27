@@ -923,11 +923,9 @@ def get_offline_notes(
         "share_count", "pay_gmv", "pay_order_cnt", "publish_time", "stat_date",
     }
     statement = select(NoteDatacenterStat).where(NoteDatacenterStat.user_id == current_user.id)
-    #: ⚠️ **不再用 notes 的 `is_deleted` 过滤**（2026-10-27 用户口径「数据中心的逻辑
-    #: 与内容库完全拆分」）：那是一个跨表 EXISTS，把数据中心的可见性绑在内容库的
-    #: 软删状态上 —— 内容库删一条，数据中心就不显示，而它的指标快照本来是独立的
-    #: 历史事实。数据中心自己的「已删除」判据是 `platform_deleted_at`（平台侧真删，
-    #: 见下面的 `deleted` 参数），那才是它该认的。
+    #: 数据中心与内容库**读路径完全拆分**：本端点只查统计表，不回查 `notes`、
+    #: 也不用它的 `is_deleted` 过滤。「已删除」的唯一判据是 `platform_deleted_at`
+    #: （平台侧真删），见下面的 `deleted` 参数。
     cat_key = (category or "").strip()
     if cat_key:
         if cat_key not in ("goods", "normal"):

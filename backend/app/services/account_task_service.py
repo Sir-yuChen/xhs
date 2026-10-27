@@ -181,11 +181,8 @@ def _dispatch_account_task(item_id: int) -> Optional[dict]:
     if not account_id:
         return {"status": "failed", "error": "任务行缺少账号", "code": "ACCOUNT_MISSING"}
 
-    # ⚠️ **两个分派分支已删除**（设计 75 §4.5，2026-10-27）：原 `xhs_note_sync` /
-    # `xhs_goods_note_sync` 都 `return note_sync_service.run_note_sync(...)`，而那个
-    # 执行体随同步引擎整段退场 ⇒ 分支留着就是「认领即 AttributeError」。
-    # 现在 `ACCOUNT_WORKER_TYPES` 为空，认领不到任何行，本函数不会被调用；
-    # 新增账号级任务时在这里补一个 `if task_type == "...": return <执行体>(...)`。
+    #: `ACCOUNT_WORKER_TYPES` 目前为空 ⇒ 认领不到任何行，本函数不会被调用。
+    #: 新增账号级任务时在这里补一个分支：`if task_type == "...": return <执行体>(...)`。
     return None
 
 

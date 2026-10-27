@@ -43,7 +43,7 @@ import json
 import sys
 from pathlib import Path
 
-#: `scripts/` 在仓库根下一级 ⇒ `parents[1]`。（原先在 `.hermes/scripts/` 时是 `parents[2]`。）
+#: 本文件在仓库根下一级 `scripts/` ⇒ 仓库根 = `parents[1]`。
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))

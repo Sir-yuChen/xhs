@@ -481,16 +481,8 @@ export function XhsAccountsPage() {
   return (
     <Flex vertical style={{ height: "calc(100vh - 87px)" }}>
       {/*
-        ⚠️ **页面头部整块移除**（2026-09-28 用户口径）——设计 13 §40。
-
-        ⚠️ **2026-10-27 定稿形态**（用户口径五连）：
-        「页面改为使用列表展示不在使用卡片」+「使用不分页，无限下拉」+
-        「已绑定账号名称，改为账号管理，每页默认 50 条」+
-        「使用antd的成熟组件，不要自研」+「完全拆分成tabe表，这种，tabe默认无限不使用分页」。
-
-        ⇒ **antd `Table`**（表格），`pagination={false}`（不渲染分页器），
-        表体滚到底自动追加下一页；复选框走**原生 `rowSelection`**（不自研 Checkbox）。
-        高度链用共享类 `.fill-table`（表体内部滚动、底部不留白）。
+        页面形态：antd `Table` + `pagination={false}`（表体滚到底自动追加下一页）
+        + 原生 `rowSelection`（不自研 Checkbox）；高度链用共享类 `.fill-table`。
       */}
 
       <Card
@@ -795,11 +787,8 @@ export function XhsAccountsPage() {
                           摆一个永远失败的按钮，用户只会反复点、反复失望；
                           不显示则直接对应「这个号没有网页版数据」这个事实。
 
-                          判据是**正向**的：只有网页版会话**确定可用**（`valid`）才显示。
-                          原口径写的是「不可用才隐藏」（`!channelUnavailable(...)`），
-                          但那样 `unknown`（没探过）也会显示按钮 —— 而用户 2026-10-27 明确
-                          「**网页版登录态有效则才展示**」：没确认有效就不给入口，
-                          避免用户在一个状态未知的账号上反复点。
+                          判据是**正向**的：只有网页版会话**确定可用**（`valid`）才显示 ——
+                          没确认有效就不给入口，避免用户在一个状态未知的账号上反复点。
                         */}
                         {channelState(loginChannels[account.id], "www") === "valid" && (
                           <Button

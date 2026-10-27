@@ -429,12 +429,6 @@ export async function fetchAccountsPage(
   return response.data;
 }
 
-/*
- * ⚠️ **`SyncScope` / `SyncNotesOptions` 已删除**（设计 75 §4.5，2026-10-27）：
- * 它们只服务于「同步笔记 / 同步商品笔记 / 同步商品」三个退场端点的请求体。
- * 账号卡与商品列表都已无同步入口（后端三条端点均为 410 墓碑）。
- */
-
 export type SavedNoteFilters = {
   platform?: string;
   q?: string;
@@ -893,14 +887,6 @@ export interface NoteBatchSyncResult {
   failed: number;
   results: NoteBatchSyncItem[];
 }
-
-/*
- * ⚠️ **详情补齐队列的前端接口已删除**（2026-09-27 用户口径：账号卡移除「补齐详情」，
- * 补齐能力并入「同步笔记」任务本身，设计 13 §35.18）。同时删掉的：
- * `fetchHydrateQueue` / `HydrateQueueSnapshot` / `EMPTY_HYDRATE_QUEUE_SNAPSHOT` /
- * `hydratePendingNotes` / `HydratePendingResult` —— 后端端点
- * `GET /notes/hydrate-queue` 与 `POST /accounts/{id}/notes/hydrate-pending` 一并移除。
- */
 
 /**
  * 笔记详情（内容库）。**只读本地库，零平台请求**（2026-09-22 用户口径：

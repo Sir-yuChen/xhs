@@ -250,7 +250,7 @@ ROUTE_PERMS: Final[dict[str, str]] = {
     "POST /api/xhs/pc/users/no-traffic/candidates": "xhs:note:view",
     #: 清理无流量笔记 = **删平台笔记**（破坏性写操作），归 `xhs:note:delete`。
     #: 原本借 `xhs:account:syncNotes`（同批退场的「同步笔记」码）—— 那是个**账号卡**的
-    #: 动作码，挂在「删笔记」上是错的归属，只是当时顺手借了。
+    #: 动作码：挂在「删笔记」上是权宜归属，不改（改它要重排授权行）。
     "POST /api/xhs/pc/users/no-traffic/cleanup": "xhs:note:delete",
     "POST /api/xhs/pc/users/notes": "xhs:note:view",
     "POST /api/xhs/pc/users/search": "xhs:note:view",
@@ -312,7 +312,7 @@ ROUTE_PERMS: Final[dict[str, str]] = {
     "POST /api/xhs/qianfan/picture-space/items": "xhs:picture:view",
     "POST /api/xhs/qianfan/picture-space/move": "xhs:picture:move",
     #: 2026-10-26（G8）：`permanentDelete` 与 `picture:purge` 指同一个端点（重复码），
-    #: 前端只判 `purge` ⇒ 保留 purge（它有真实消费方），`permanentDelete` 已退场。
+    #: 前端只判 `purge`（它有真实消费方）。
     "POST /api/xhs/qianfan/picture-space/permanent-delete": "xhs:picture:purge",
     "POST /api/xhs/qianfan/picture-space/preview": "xhs:picture:view",
     "POST /api/xhs/qianfan/picture-space/resize": "xhs:picture:resize",

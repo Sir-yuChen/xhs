@@ -26,7 +26,7 @@ from backend.app.core.database import SessionLocal
 from backend.app.core.time import shanghai_now
 from backend.app.models.task import Task
 
-#: 店铺商品台账同步的任务类型。链路已退场，常量仅用于识别历史任务行。
+#: 店铺商品台账同步的任务类型（仅用于识别历史任务行）。
 SHOP_GOODS_SYNC_TASK_TYPE = "xhs_shop_goods_sync"
 
 

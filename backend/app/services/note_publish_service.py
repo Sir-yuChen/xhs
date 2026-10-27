@@ -1826,11 +1826,8 @@ def publish_queue_snapshot(db: Session, user_id: int, *, platform: Optional[str]
         "running": raw["running"],
         "queued": raw["queued"],
         "total": raw["total"],
-        #: ⚠️ **刻意不下发 `finished`**（2026-10-27 复核确认）：发布失败的真实原因
-        #: 落在笔记行 `publish_error`，前端读 `GET /notes/{id}` 即可（软删除的行**仍能
-        #: 读到**，`is_deleted` 只是列表展示标记）。曾考虑下发 `finished` 是因为一度
-        #: 改成物理删除、行没了读不到 —— 口径已回退成软删除，那条路径不需要了。
-        #: 保持与改造前一致：快照只描述队列形态，不承担逐篇结果。
+        #: **刻意不下发 `finished`**：发布失败原因落在笔记行 `publish_error`，
+        #: 前端读 `GET /notes/{id}` 即可（软删除的行仍能读到）。快照只描述队列形态。
         # 进度卡的**当日三数**（2026-09-26 用户口径「只统计当日发布或同步的数据，
         # ……统计队列记录表中的数据」）：来自 `tasks` 表，不是本页累计。
         "today": note_queue_service.today_item_counts(

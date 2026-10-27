@@ -305,10 +305,7 @@ PAGE_VIEW_PERMS: tuple[PermSpec, ...] = (
     PermSpec("xhs:crawl:view", "笔记发现", "C", "/platforms/xhs/discovery", _X, _X),
     PermSpec("xhs:note:view", "我的笔记", "C", "/platforms/xhs/my-notes", _X, _X),
     PermSpec("xhs:library:view", "内容库", "C", "/platforms/xhs/library", _X, _X),
-    #: 内容库的写操作（2026-10-25 红线「一按钮一码」）：
-    #: 发布 / 建草稿两类动作互相独立（能看不等于能往平台发）。
-    #: ⚠️ 2026-10-27：`export`（导出笔记）**已退场** —— CSV/JSON 导出与下载
-    #: 功能整条移除，码不留空壳（菜单种子随之少一行）。
+    #: 内容库的写操作（红线「一按钮一码」）：发布 / 建草稿两类动作互相独立。
     PermSpec("xhs:workshop:view", "笔记工坊", "C", "/platforms/xhs/note-workshop", _X, _X),
     #: 工坊的 6 个 Tab（2026-10-26 用户口径「菜单管理中有很多缺失」）：
     #: 它们此前只是**同一个 URL 的 query 参数**、零权限码 ⇒ 授权页勾不了、
