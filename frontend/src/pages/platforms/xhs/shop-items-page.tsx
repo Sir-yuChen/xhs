@@ -2479,7 +2479,15 @@ export function XhsShopItemsPage() {
           shelfAction?.action === "on_shelf" ? mayOnShelf
             : shelfAction?.action === "off_shelf" ? mayOffShelf
               : false;
-        if (!mayGenerate && !shelfPermitted && !mayDelete) {
+        //: ⚠️ 提前返回的判据必须覆盖**本列会渲染的每一个**权限码。
+        //: 原判据只看 3 个（generateNote / 上架下架 / delete），漏了
+        //: generateImage / sync / edit —— 后果是「只授了编辑权限的用户，
+        //: 操作列整列显示 `-`，按钮明明有权限却出不来」（2026-10-27 真机实测）。
+        //: 新增按钮时必须同步加进这个判据，否则同类缺陷复发。
+        const mayAny =
+          mayGenerate || shelfPermitted || mayDelete
+          || mayGenerateImage || maySync || mayEdit;
+        if (!mayAny) {
           return <Text type="secondary">-</Text>;
         }
         return (
