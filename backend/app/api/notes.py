@@ -734,7 +734,7 @@ def get_notes(
     #: 三方同步（`synced`）也不进内容库 —— 那个源已整条退场。
     statement = statement.where(
         Note.note_type.in_(LIBRARY_NOTE_TYPES),
-        Note.publish_status.not_in_(LIBRARY_EXCLUDED_PUBLISH_STATUSES),
+        Note.publish_status.not_in(LIBRARY_EXCLUDED_PUBLISH_STATUSES),
     )
     # ⚠️ `item_id`（按商品筛笔记）**参数已整条移除**（2026-10-27，设计 75 S5）。
     # 挂链关系改实时查千帆（`item_mix_search_word`），本地 `note_goods` /

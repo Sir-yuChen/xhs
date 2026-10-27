@@ -123,7 +123,74 @@ class TestLibraryShowsOnlyUnpublishedLocalNotes:
         """两个常量都必须真的进 SQL —— 定义了不用等于没做。"""
         code = _code(NOTES_API)
         assert "Note.note_type.in_(LIBRARY_NOTE_TYPES)" in code
-        assert "Note.publish_status.not_in_(LIBRARY_EXCLUDED_PUBLISH_STATUSES)" in code
+        assert "Note.publish_status.not_in(LIBRARY_EXCLUDED_PUBLISH_STATUSES)" in code
+
+    def test_list_endpoint_actually_runs(self):
+        """⚠️ **必须真跑一次查询**（2026-10-27 线上 500 的教训）。
+
+        上一版守卫只做 `assert "<字符串>" in 源码`，而源码里写的是
+        `Note.publish_status.not_in_(...)` —— SQLAlchemy 的金标准是 `not_in(...)`，
+        带下划线的那个**不存在**（`AttributeError`）⇒ 每次调用都 500，而守卫全绿。
+        字符串断言证明不了「这段代码能执行」，只有真的调一次才行。
+        """
+        import sys
+
+        if str(ROOT) not in sys.path:
+            sys.path.insert(0, str(ROOT))
+
+        import inspect
+        from backend.app.api import notes as notes_api
+
+        #: 不连库也能构造语句：先用真实签名拼一份「全空筛选」，再交给 `db` 桩。
+        sig = inspect.signature(notes_api.get_notes)
+        assert "platform" in sig.parameters
+
+        class _ExplodingSession:
+            """任何真实查询都别执行 —— 我们只验证**语句能构造**。"""
+
+            def __init__(self):
+                self.seen: list = []
+
+            def execute(self, statement, *a, **kw):  # noqa: D401
+                self.seen.append(statement)
+                raise RuntimeError("stop-after-build")
+
+            def scalars(self, statement, *a, **kw):
+                self.seen.append(statement)
+                raise RuntimeError("stop-after-build")
+
+            def scalar(self, statement, *a, **kw):
+                self.seen.append(statement)
+                raise RuntimeError("stop-after-build")
+
+        class _User:
+            id = 1
+
+        #: 走到 `statement.where(...)` 就会抛 AttributeError（就是线上那个 500）；
+        #: 过了那一行才轮到 `_ExplodingSession` 抛「stop-after-build」。
+        try:
+            notes_api.get_notes(
+                platform="xhs",
+                q=None,
+                topic_id=None,
+                has_assets=None,
+                has_comments=None,
+                publish_status=None,
+                platform_account_id=None,
+                note_type=None,
+                page=1,
+                page_size=20,
+                current_user=_User(),
+                db=_ExplodingSession(),
+            )
+        except AttributeError as error:
+            raise AssertionError(
+                f"列表端点构造查询时抛 AttributeError（线上 500 就是它）：{error}"
+            ) from error
+        except RuntimeError as error:
+            assert "stop-after-build" in str(error), f"意外错误：{error}"
+        else:
+            raise AssertionError("桩没拦住查询 —— 这条守卫失效了")
 
 
 class TestCountsMatchTheVisibleScope:
