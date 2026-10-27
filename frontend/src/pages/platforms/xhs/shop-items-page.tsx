@@ -160,10 +160,8 @@ const { RangePicker } = DatePicker;
  * 「商品列表」页：千帆店铺商品（**实时查平台**）。
  *
  * 设计真相源 `docs/02_设计文档/75_设计_去本地化实时查询.md` §2.3 / §4.1。
- * ⚠️ 原文「本地台账视图 / 走本地数据 / 零平台请求 / 时效由『同步于 X』明示」那套
- * 口径**已被设计 75 取代**（2026-10-27）：`shop_products` 台账表已 DROP，
- * 列表与详情每次都实时查千帆（`search_item_v2` / `get_skus_by_item_ids`），
- * 时效由响应的 `queried_at` 明示，不再有「同步」这个概念。
+ * ⚠️ **实时查平台，不读本地**：列表 `/items` 打 `search_item_v2`、详情打
+ * `get_skus_by_item_ids`，时效由响应的 `queried_at` 明示 —— 本页没有「同步」概念。
  *
  * 四条口径（都是实测定的，别改）：
  * 1. **走平台实时**：`/items` 与 `/item-detail` 每次请求都打千帆，**不读本地**；
@@ -512,8 +510,7 @@ const ITEM_THUMB_SIZE = 71;
 /**
  * 「N 图」角标的样式（v1.35）：**压在缩略图左上角**。
  *
- * 原先是跟在标题后的行内 Tag —— 标题单行化后它会把标题挤掉一截，且
- * 「图片有几张」本该贴着图片说。`pointerEvents: "none"` 是为了让点击
+ * `pointerEvents: "none"` 是为了让点击
  * 穿透到图片上（角标不该吃掉「点开大图」的手感）；圆角只留左下 + 右上，
  * 与左上角贴合图片圆角（4px）。
  */
@@ -621,18 +618,8 @@ function renderItemNoteInfo(note: XhsItemNote) {
           {note.title || "（无标题）"}
         </Text>
       </div>
-      {/* ⛔ 「三方同步 / 已发布 / 本地」这组标签**已移除**（2026-10-27 用户口径：
-          「tag 展示不正常，线上是否有对应标识，没有则移除相关逻辑」）。
-
-          原因有两个，都是硬伤：
-          ① `note_type`（`synced` / `local`）与 `publish_status` 是**本地库概念** ——
-             平台根本没有「这条笔记是从哪同步来的」这种标识；
-          ② 本地 `notes` / `note_goods` 两张表已 DROP，这两个字段现在恒为空，
-             渲染出来的标签永远是猜的。
-
-          ⇒ 只保留**平台自报的**标识：`note_flag === "goods_note"`（商业笔记）。
-          平台 `note_status` / `note_publish_type` 语义未证实（实测 `note_status` 恒 0），
-          按「缺值不造假」不猜、不展示。 */}
+      {/* 只展示**平台自报**的标识：`note_flag === "goods_note"`（商业笔记）。
+          `note_status` / `note_publish_type` 语义未证实（实测恒 0）⇒ 不猜、不展示。 */}
       {/* 笔记 ID / 笔记链接 / 笔记类型 **同一行**，顺序 = ID → 复制链接 → 类型标签
           （2026-10-27 用户口径「笔记类型 tag 放复制链接后面」）。
 
@@ -664,9 +651,6 @@ function renderItemNoteInfo(note: XhsItemNote) {
           </Tag>
         )}
       </div>
-      {/* ⛔ 这里原来渲染 `note.content`（本地库正文）—— 2026-10-27 已移除：
-          正文改由 `NoteLiveDetail` 用 `/note-detail` 的实时数据渲染一次即可，
-          两处都画 ⇒ 弹窗里同一段正文出现两遍（用户截图报的就是这个）。 */}
     </Space>
   );
 }
@@ -1117,7 +1101,6 @@ export function XhsShopItemsPage() {
   useEffect(() => {
     form.setFieldsValue(formInitialValues);
   }, [form, formInitialValues]);
-  // ⚠️ `bindOpen` / `bindCookie` / `binding_` 三个绑定弹窗状态已删除（ADR-021）。
   // 商品 → 挂链笔记反查（关系表源，设计 13 §31.6；弹窗 + tabs）
   const [notesOpen, setNotesOpen] = useState(false);
   const [notesLoading, setNotesLoading] = useState(false);
@@ -1192,13 +1175,6 @@ export function XhsShopItemsPage() {
    */
   const [generationsOpen, setGenerationsOpen] = useState(false);
   const [generationsItem, setGenerationsItem] = useState<XhsShopItem | null>(null);
-  /* ⛔ 「编辑商品」整条链路**已移除**（2026-10-27 用户口径「编辑商品功能逻辑移除」）：
-     前端入口 / 弹窗组件 / 请求函数 / 后端两端点（`/items/edit` 墓碑、`/items/polish`）
-     / 权限码 `xhs:item:edit` 与菜单行，一起删干净。
-     理由：商品已改**平台实时数据**，本地台账（含 `ai_title` / `ai_selling_point` 两列）
-     整表 DROP ⇒ 这个弹窗「改本地标注」的前提没有了；平台的商品编辑走千帆后台，本系统
-     按只读边界不碰。 */
-  // ⚠️ 分组状态（`groups` / `groupFilter`）已随「彻底移除商品分组」退场（2026-10-05）。
   const [exporting, setExporting] = useState(false);
   // ------------------------------------------------------------------ #
   // 商品操作（2026-10-05 需求 7/8）：批量上架 / 下架 / 删除**平台商品**。
@@ -1451,9 +1427,7 @@ export function XhsShopItemsPage() {
   useEffect(() => {
     if (selectedAccountId === null || !bindingLoaded) return;
     void load(selectedAccountId, pageNo, pageSize);
-    // ⚠️ 依赖里**不再有 `binding?.bound`**：切账号时 `binding` 先被清成 null 再回来，
-    // 带上它会让「绑定后拉一页」的语义与实际（切账号即拉）不符。
-    // ⚠️ 2026-10-05 起也**不再有 `prereq.ok`** —— 前置校验已整块移除（本地读本就没有门禁）。
+    //: 依赖只留这两个：`binding` 会在切账号时先清 null 再回来，带上它会导致重复拉取。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedAccountId, bindingLoaded]);
 
@@ -1469,16 +1443,8 @@ export function XhsShopItemsPage() {
   );
 
   /**
-   * ⚠️ **`handleBind()` 已删除**（ADR-021 / 设计 18，2026-09-30）：
-   * `POST /xhs/qianfan/bind` 已退场（后端显式 `410 QIANFAN_BINDING_REMOVED`），
-   * 页面上的「绑定千帆（粘贴 Cookie）」按钮与那个弹窗一并移除。
-   *
-   * 千帆能力现在完全由「本账号有没有可用的 `ark` 会话」决定 —— 要开通就去
-   * **账号矩阵**给该账号导入千帆（ark）登录态，那是凭据操作，不是这里的关系操作。
-   * 被取代的原逻辑（保留备查）：
-   *
-   *   const bound = await bindXhsQianfanShop(selectedAccountId, bindCookie.trim());
-   *   message.success(`已绑定千帆店铺：${bound.shop_name || "（未命名）"}`);
+   * 千帆能力完全由「本账号有没有可用的 `ark` 会话」决定 —— 要开通就去**账号矩阵**
+   * 给该账号扫码登录千帆，那是凭据操作，不是这里的关系操作。本页没有绑定入口。
    */
 
   /** 打开「这个商品挂了哪些笔记」弹窗（**千帆实时查询**；设计 75 §2.3）。
@@ -2712,10 +2678,6 @@ export function XhsShopItemsPage() {
                   </Button>
                 </Tooltip>
                 )}
-                {/* ⛔ 「同步商品信息」按钮**已移除**（2026-10-27 用户口径：
-                    「同步商品信息按钮逻辑移除，批量同步商品信息逻辑全链路彻底移除」）——
-                    列表本身就是平台实时数据（`source=platform`），没有「把本地补新」这回事，
-                    再留一个同步按钮只会让人以为拿到的是缓存。 */}
                 {/* 删除（需求 8）：仍是**状态驱动**的 —— `supported=false` 时置灰 + 后端原因
                     （如推广中不可删）。`danger` 保持红色，位置在下拉最后一位。
                     ⚠️ 权限码 = `xhs:item:delete`（**删平台商品**）。「删除台账行」那条
@@ -2743,10 +2705,6 @@ export function XhsShopItemsPage() {
             </Button>
           </Dropdown>
           )}
-          {/* ⚠️ 「生成记录」按钮**已移除**（2026-10-05 用户口径「将商品操作列的生
-              成记录合并到AI商品图弹窗内，使用tab布局」）⇒ 入口搬进「AI商品图」弹窗的
-              第二个顶层 Tab（见 `detailImageTab`）。被移除的原按钮（保留备查，勿恢复）：
-                <Button icon={<HistoryOutlined />} onClick={() => void openGenerations(item)}>生成记录</Button> */}
         </div>
         );
       },
@@ -2781,15 +2739,6 @@ export function XhsShopItemsPage() {
       //: 「底部撑满」：算准这一格才不会在底部留一条缝）。
       style={{ height: "calc(100vh - 87px)" }}
     >
-      {/* ⚠️ **顶部「商品列表（千帆）」整卡已移除**（2026-10-05 用户口径
-          「顶部的商品列表（千帆）整块移除」）。原卡片只剩两件事：
-          ① 账号下拉（**搬到「搜索条件」卡右上角**，见下面 `搜索条件` 的 `extra`）；
-          ② 空账号时的引导 Alert —— 它的判据（`accountsLoaded && accounts.length === 0`）
-             与文案一并搬进「搜索条件」卡（账号缺失时整块表单本就没意义）。
-          被移除的原结构（保留备查，勿恢复）：
-            <Card title={<Space><ShoppingOutlined />商品列表（千帆）</Space>} extra={…账号下拉…}>
-              {accountsLoaded && accounts.length === 0 ? <Alert …去「账号矩阵」添加账号…/> : …}
-            </Card> */}
 
       {/* **搜索区**（用户口径 2026-10-11「搜索区域使用卡片」）：**只有一层卡**（不套第二层
           卡框 —— 条件与按钮直接排布在卡体里），标题「搜索条件」在卡头。
@@ -2971,9 +2920,6 @@ export function XhsShopItemsPage() {
         title="商品列表"
         extra={
           <Space size={8}>
-            {/* ⛔ 「批量同步商品信息」按钮**已移除**（2026-10-27 用户口径：
-                「同步商品信息按钮逻辑移除，批量同步商品信息逻辑全链路彻底移除」）——
-                列表已是平台实时数据，同步链路（含队列 / 门禁 / 弹窗）整条退场。 */}
             {hasPermission("xhs:item:export") && (
               <Tooltip title="按当前筛选条件导出 CSV">
                 <Button
@@ -3056,21 +3002,6 @@ export function XhsShopItemsPage() {
                   : ""}
               </Text>
             )}
-            {/* ⚠️ 「批量生成智能笔记」**已移除**（2026-10-18 用户口径：
-                *「暂时不支持批量生成，改成同步等待」*）。
-                被移除的原按钮（保留备查，勿恢复）：
-                  <Button type="primary" icon={<FileAddOutlined />}
-                          disabled={selectedItemIds.length === 0}
-                          loading={batchGenerating}
-                          onClick={() => void batchGenerate()}>批量生成智能笔记（N）</Button>
-
-                理由：生成改成**同步等待**后，单篇要点完等几十秒才出结果；
-                20 篇串行必然超过任何 HTTP 超时。用户要的是「生成完就地改」，
-                不是「批量铺开」。端点侧留了 410 墓碑（`LLM_BATCH_GENERATE_GONE`）。 */}
-            {/* ⚠️ 「批量同步商品」按钮**已移除**（2026-10-05）：它与 header 的
-                「同步商品」是同一件事（都触发整店全量同步），两个入口 = 两份说法。
-                被移除的原按钮（保留备查，勿恢复）：
-                  <Button icon={<SyncOutlined />} …>批量同步商品（N）</Button> */}
             {/* 2026-10-05 需求 7：**批量上架 / 批量下架 / 批量删除（平台商品）**。
                 ⚠️ 三者走**手动触发式任务**（不是同步循环）：点完只建任务、立即返回，
                 逐条结果在「商品操作结果」弹窗里轮询展示 —— 任务中心**任务列表不展示**
@@ -3102,22 +3033,9 @@ export function XhsShopItemsPage() {
                 </Button>
               </Tooltip>
             ))}
-            {/* ⛔ 「删除台账行」按钮**已移除**（2026-10-27 用户口径：「删除台账行按钮逻辑移除」）——
-                本地台账表已 DROP，没有「台账行」可删；列表读的是平台实时数据。
-                ⚠️ 别和上面的「批量删除」（**删平台商品**，`xhs:item:delete`）搞混：
-                那个是平台写操作，仍然保留。 */}
           </Space>
         }
       >
-        {/* ⚠️ LLM 生成进度卡**已移除**（2026-10-18 用户口径：「不展示进度表」）。
-            原挂载点（保留备查，勿恢复）：
-              <LlmGenerateProgressCard activeItemIds={llmQueueItemIds}
-                                       onFinishedEntry={handleLlmFinished} />
-            移除理由：它是「当日三数（成功/失败/待处理）+ 进度条」，而三数里的
-            `running` / `queued` 契约是**对象 / 数组**（底座 `queued` 是列表），
-            进度卡却按数字相加 ⇒ 待处理显示成 `[Object Object]`、进度条恒 0%。
-            待处理态改由**操作列的旋转图标**表达（`llmQueueItemIds` 仍驱动它），
-            失败原因在各自的操作列行内提示，不再单独占用一张卡片。 */}
         {data ? (
           //: `className="shop-items-table"` + `scroll={{ y: "100%" }}`：只有**表格内**
           //: 这一块滚动（用户口径「只有列表内的数据支持表格列滚动」）。
@@ -3205,10 +3123,6 @@ export function XhsShopItemsPage() {
         }
       />
 
-      {/* ⚠️ **独立「生成记录」弹窗已移除**（2026-10-05 用户口径：「将商品操作列的
-          生成记录合并到AI商品图弹窗内，使用tab布局」）—— 它的内容搬进了
-          `AI商品图` 弹窗的第二个顶层 Tab（组件 `GenerationsPanel`，定义在本文件上方）。
-          被移除的原弹窗（保留备查，勿恢复）：`Modal open={generationsOpen}` 那个。 */}
 
       {/* 「生成商品详情图」独立弹窗（设计 17 §13.3.3，v2.1；v2.12 从详情弹窗迁出；
           v2.16 重排为**左右两栏**）。
@@ -3670,13 +3584,6 @@ export function XhsShopItemsPage() {
         onQueued={handleLlmQueued}
       />
 
-      {/* ⚠️ 「绑定千帆商家后台」弹窗已整块移除（ADR-021，2026-09-30）：
-          `POST /xhs/qianfan/bind` 退场（后端 410 `QIANFAN_BINDING_REMOVED`），
-          千帆能力改由「该账号自己的 ark 登录态」决定 —— 入口在账号矩阵。
-          被取代的原弹窗（保留备查）：
-            <Modal centered open={bindOpen} title="绑定千帆商家后台（商品列表来源）" …>
-              … 粘贴 Cookie（须含 access-token-ark.xiaohongshu.com）…
-            </Modal> */}
 
       {/*
         商品 → 挂链笔记弹窗（**全实时**，2026-10-27）：
@@ -3709,11 +3616,6 @@ export function XhsShopItemsPage() {
           {/* 2026-09-23 上机口径：顶部那条「本地已映射 1937/1960 条商品笔记 ——
               反查走笔记↔商品关系表…」说明**整块移除**（弹窗里只要笔记本体）。
               覆盖率与口径解释留在列表页「挂链笔记」列的 Tooltip 里，不在这里重复。 */}
-          {/* ⚠️「在内容库中查看」按钮**已移除**（2026-10-27，设计 75 S5）：
-              它跳的是内容库的 `?item_id=` 挂链商品筛选，而该筛选随
-              「挂链改实时」整条下线（本地 `note_goods` 表已 DROP）。
-              本弹窗自己就是「该商品的挂链笔记」的完整答案（数据来自千帆实时，
-              含未同步到本地的笔记），跳去内容库反而是降级。 */}
           {notesLoading ? (
             <div style={{ padding: "48px 0", textAlign: "center" }}>
               <Spin />
@@ -3875,9 +3777,6 @@ export function XhsShopItemsPage() {
         ) : null}
       </Modal>
 
-      {/* ⛔ 同步指定商品弹窗**已整块移除**（2026-10-27 用户口径：「批量同步商品信息逻辑
-          全链路彻底移除」）—— 商品列表已是平台实时数据（`source=platform`），
-          「把平台数据拉回本地台账」这个动作本身不存在了。 */}
 
       {/* ⚠️ 2026-10-08 用户口径「移除新增商品按钮和逻辑」⇒ `ProductDraftModal`
           **整块退场**（按钮 / 状态 / import / 挂载点四件全删）。
