@@ -881,6 +881,8 @@ export function XhsLibraryPage() {
         else if (u.publish_status === "failed") failNotes.push(u);
       }
       // 逐篇结果消息（卡面三数不在这里算 —— 是快照 `today`，见 `refreshPublishQueue`）。
+      // ⚠️ 软删除的行**仍能**通过 `GET /notes/{id}` 读到（`is_deleted` 只是列表展示
+      // 标记，详情端点不过滤）⇒ 终态从笔记行读是可靠的，不需要走队列项。
       const parts: string[] = [];
       if (okNotes.length) parts.push(`已发布 ${okNotes.length} 篇`);
       if (failNotes.length) {

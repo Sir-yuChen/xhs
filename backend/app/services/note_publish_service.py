@@ -1370,6 +1370,13 @@ def _run_one_publish(item_id: int) -> None:
             ok=ok,
             reason="" if ok else str(outcome.get("error") or ""),
             code="" if ok else str(outcome.get("code") or "PUBLISH_FAILED"),
+            #: 把标题 / 平台笔记 ID 一起写进队列项：发布成功后本地笔记行被**物理删除**，
+            #: 快照组装（`_entry`）再查 `notes` 就查不到，只能靠这份快照显示「哪一篇
+            #: 发布了」。与商品生成队列「终态后补 note_title/note_id」同一手法。
+            extra={
+                "note_title": str(note.title or ""),
+                "note_id": str(outcome.get("note_id") or note.note_id or ""),
+            },
         )
     except BaseException as error:  # noqa: BLE001 - 兜底安全网：SystemExit 也不许把队列卡死
         logger.warning("note publish worker crashed (task=%s): %s", item_id, error)
@@ -1732,14 +1739,13 @@ def _execute_publish(db: Session, note: Note, adapter) -> dict:
         )
     _cleanup_temp_dir(local_note_id)
     logger.info("note published (note_pk=%s -> %s)", note.id, platform_note_id)
-    #: ⚠️ 先把返回值要用的字段取出来 —— 下面 `_purge_published_note` 会把行删掉，
-    #: 删完再读 `note.id` / `note.published_at` 是已失效对象（DetachedInstanceError
-    #: 或拿到 None），而这两个值要随响应返回给前端。
+    #: 平台 ID 已在上面的事务里回写（`note.note_id = platform_note_id`）并 commit 过，
+    #: 软删除只多写一个 `is_deleted` 标记，不碰那些字段。
     published_note_pk = int(note.id)
     published_at_text = (
         note.published_at.strftime("%Y-%m-%d %H:%M:%S") if note.published_at else ""
     )
-    _purge_published_note(db, note)
+    _soft_delete_published_note(db, note)
     return {
         "ok": True,
         "note_pk": published_note_pk,
@@ -1749,37 +1755,44 @@ def _execute_publish(db: Session, note: Note, adapter) -> dict:
     }
 
 
-def _purge_published_note(db: Session, note: Note) -> None:
-    """发布成功后**物理删除本地笔记行**（2026-10-27 用户口径）。
+def _soft_delete_published_note(db: Session, note: Note) -> None:
+    """发布成功后**软删除**本地笔记行（2026-10-27 用户口径改口径）。
 
-    口径原文：「只显示用户本地生成未发布的笔记，已发布的笔记不展示在内容库中，
-    应到我的笔记页查看实时数据」+「物理删除，会更新」。
+    口径演进（同一天三条）：
+    1. 「内容库只显示用户本地生成未发布的笔记，已发布的笔记不展示在内容库中，
+       应到我的笔记页查看实时数据」
+    2. 「物理删除」
+    3. **「发布笔记之后改为软删除」「不再物理删除了」+「笔记发布成功之后正常回写
+       平台笔记 ID 到笔记表」** ← 现行
 
-    为什么删而不是留：发布成功 = 这条本地草稿的**使命已完成**，它的实时数据
-    （阅读 / 赞藏评 / 挂链商品）由「我的笔记」页走平台实时查询，本地无需再存
-    一份 —— 留着只会出现「库里一篇已发布笔记出现在待发布的地方」。
+    为什么最终是软删除：物理删会**顺手删掉刚回写的平台 `note_id`**（平台成功发布
+    的唯一本地凭证），并让所有按 id 读笔记的路径（发布终态轮询、详情、队列快照）
+    一起失效 —— 代价远大于收益。软删除保留行与 ID，只把 `is_deleted` 置真，
+    所有查询已统一排除它（列表 / 详情 / 统计 / 回填四处都有过滤）。
 
-    ⚠️ **失败不许把发布判成失败**：平台已经发出去了，那是既成事实。删本地失败
-    只能记 warning（行留下，下次由内容库的 `publish_status` 过滤兜住不展示），
-    绝不能冒泡成「发布失败」让用户重发。
+    ⚠️ 平台 `note_id` 与 `is_deleted` **在同一个事务里写**：平台 ID 是既成事实，
+    必须先落库；软删标记是展示口径，落不了不该反噬 ID 的回写。
 
-    ⚠️ 删除链走 :func:`purge_note`（唯一实现）—— 它负责清 6 张从属表；
-    自己写 `db.delete(note)` 会撞外键（`note_generation_links` 尤其：本地生成
-    笔记几乎都有这条）。
-
-    调用方已 commit 过成功回写，这里独立提交一次删除。
+    ⚠️ 软删失败不判发布失败：行留着的最坏后果只是「内容库多显示一条已发布的」，
+    由列表端点的 `publish_status` 过滤兜住；而把它报成失败会让用户重发。
     """
-    from backend.app.services.note_purge_service import purge_note
-
     note_pk = int(note.id)
+    platform_note_id = str(note.note_id or "")
     try:
-        purge_note(db, note)
+        note.is_deleted = True
         db.commit()
-        logger.info("published note purged locally (note_pk=%s)", note_pk)
-    except Exception as error:  # noqa: BLE001 - 发布已成功，删除失败只降级记录
+        logger.info(
+            "published note soft deleted (note_pk=%s, platform note_id=%s)",
+            note_pk,
+            platform_note_id,
+        )
+    except Exception as error:  # noqa: BLE001 - 发布已成功，软删失败只降级记录
         db.rollback()
         logger.warning(
-            "note published but local purge failed (note_pk=%s): %s", note_pk, error
+            "note published but soft delete failed (note_pk=%s, platform note_id=%s): %s",
+            note_pk,
+            platform_note_id,
+            error,
         )
 
 
@@ -1813,6 +1826,11 @@ def publish_queue_snapshot(db: Session, user_id: int, *, platform: Optional[str]
         "running": raw["running"],
         "queued": raw["queued"],
         "total": raw["total"],
+        #: ⚠️ **刻意不下发 `finished`**（2026-10-27 复核确认）：发布失败的真实原因
+        #: 落在笔记行 `publish_error`，前端读 `GET /notes/{id}` 即可（软删除的行**仍能
+        #: 读到**，`is_deleted` 只是列表展示标记）。曾考虑下发 `finished` 是因为一度
+        #: 改成物理删除、行没了读不到 —— 口径已回退成软删除，那条路径不需要了。
+        #: 保持与改造前一致：快照只描述队列形态，不承担逐篇结果。
         # 进度卡的**当日三数**（2026-09-26 用户口径「只统计当日发布或同步的数据，
         # ……统计队列记录表中的数据」）：来自 `tasks` 表，不是本页累计。
         "today": note_queue_service.today_item_counts(

@@ -11,8 +11,8 @@
 | 事 | 落点 |
 |---|---|
 | 列表只出本地 + 未发布 | `api/notes.py::list_notes` 的两道 `where` |
-| 发布成功后物理删除该行 | `note_publish_service::_purge_published_note` |
-| 删除前清完从属行 | `note_purge_service::purge_note`（本轮补 `note_generation_links`） |
+| 发布成功后**软删除**该行 | `note_publish_service::_soft_delete_published_note` |
+| 软删不清从属行（行还在） | 物理删除链 `note_purge_service::purge_note` 仍保留给手工删除用 |
 
 ## 为什么需要这些守卫
 
@@ -35,6 +35,19 @@ NOTES_API = ROOT / "backend" / "app" / "api" / "notes.py"
 NOTE_MODEL = ROOT / "backend" / "app" / "models" / "note.py"
 PUBLISH_SERVICE = ROOT / "backend" / "app" / "services" / "note_publish_service.py"
 PURGE_SERVICE = ROOT / "backend" / "app" / "services" / "note_purge_service.py"
+
+
+def _function_body(path: Path, name: str) -> str:
+    """切出一个函数体的源码（含注释），供「这段里不许出现什么」型断言用。"""
+    source = path.read_text(encoding="utf-8")
+    start = source.index(f"def {name}(")
+    lines = source[start:].split("\n")
+    body = [lines[0]]
+    for line in lines[1:]:
+        if line and not line.startswith((" ", "\t", ")")):
+            break
+        body.append(line)
+    return "\n".join(body)
 
 
 def _code(path: Path) -> str:
@@ -113,37 +126,36 @@ class TestLibraryShowsOnlyUnpublishedLocalNotes:
         assert "Note.publish_status.not_in_(LIBRARY_EXCLUDED_PUBLISH_STATUSES)" in code
 
 
-class TestPublishedNoteIsPhysicallyPurged:
-    """发布成功 ⇒ 本地行物理删除；且删失败绝不判发布失败。"""
+class TestPublishedNoteIsSoftDeleted:
+    """发布成功 ⇒ 软删除（**不是**物理删除，2026-10-27 用户口径改口径）。"""
 
-    def test_success_path_calls_purge(self):
+    def test_success_path_calls_soft_delete(self):
         code = _code(PUBLISH_SERVICE)
-        assert "_purge_published_note(db, note)" in code
+        assert "_soft_delete_published_note(db, note)" in code
 
-    def test_purge_uses_the_single_delete_chain(self):
-        """不许自己写 `db.delete(note)` —— 那样必撞外键。"""
+    def test_soft_delete_only_flips_the_flag(self):
+        """只置 `is_deleted` —— 不清从属行、不删行（平台 note_id 要留着）。"""
+        body = _function_body(PUBLISH_SERVICE, "_soft_delete_published_note")
+        assert "note.is_deleted = True" in body
+        assert "purge_note" not in body
+        assert "db.delete(" not in body
+
+    def test_no_physical_delete_in_publish_path(self):
+        """发布链路不许再出现物理删除入口。"""
         code = _code(PUBLISH_SERVICE)
-        assert "purge_note(db, note)" in code
-        assert "db.delete(note)" not in code
+        assert "_purge_published_note" not in code
 
-    def test_purge_failure_never_becomes_publish_failure(self):
-        """删本地失败只降级记日志，绝不 return 失败。"""
-        source = PUBLISH_SERVICE.read_text(encoding="utf-8")
-        start = source.index("def _purge_published_note(")
-        end = source.index("\ndef publish_queue_snapshot(", start)
-        body = source[start:end]
-        # 只有 except 分支，没有 re-raise、没有 return False
+    def test_platform_note_id_still_written_back(self):
+        """平台笔记 ID 必须照常回写 —— 软删不碰它（用户口径「正常回写」）。"""
+        code = _code(PUBLISH_SERVICE)
+        assert "note.note_id = platform_note_id" in code
+
+    def test_soft_delete_failure_never_becomes_publish_failure(self):
+        """软删失败只降级记日志，绝不 return 失败。"""
+        body = _function_body(PUBLISH_SERVICE, "_soft_delete_published_note")
         assert "raise" not in body
         assert "return False" not in body
         assert "db.rollback()" in body
-
-    def test_return_values_are_captured_before_purge(self):
-        """删行后再读 note.id 是失效对象 ⇒ 必须先取值。"""
-        code = _code(PUBLISH_SERVICE)
-        assert "published_note_pk = int(note.id)" in code
-        assert code.index("published_note_pk = int(note.id)") < code.index(
-            "_purge_published_note(db, note)"
-        )
 
 
 class TestPurgeChainClearsEveryDependentTable:

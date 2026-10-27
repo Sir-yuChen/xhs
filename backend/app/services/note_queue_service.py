@@ -1180,18 +1180,31 @@ def snapshot(
         """一条队列项的展示体。**两种队列两种来源**：
 
         * 笔记绑定（同步 / 发布）：标题本地库取（前端直接显示），形状三键不变；
+          笔记行**已不存在时回退到 `payload` 里的快照**（见下）；
         * 商品生成（`note_pk == 0`）：生成前笔记不存在 ⇒ 取行上的 `item_id` /
           `item_name`，终态后 `payload` 里的 `note_title` / `note_id` 由
           `finish_item(extra=…)` 补。**两条路都不许返回 None 把项丢掉** ——
           进度卡少一条 = 用户看到「总数对不上」。
+
+        ⚠️ 笔记行查不到时**回退到 payload 快照**而不是丢掉这一项：行可能被别处
+        删掉了（手工删除 / 无流量清理真删），进度卡不能因此少一条 —— 少一条就是
+        「总数对不上」。软删除的行仍能查到（`is_deleted` 只是标记），不受影响。
         """
         payload = row.payload if isinstance(row.payload, dict) else {}
         note_pk = note_pk_of(row)
         if note_pk:
-            if note_pk not in titles:
-                return None
-            title, note_id = titles[note_pk]
-            return {"note_pk": note_pk, "title": title, "note_id": note_id}
+            if note_pk in titles:
+                title, note_id = titles[note_pk]
+                return {"note_pk": note_pk, "title": title, "note_id": note_id}
+            #: 行真的没了（硬删路径）⇒ 用终态时写进 payload 的快照。
+            #: 标题缺值按缺值口径渲染原始 id，不编一个名字（硬约束⑤）。
+            snapshot_title = str(payload.get("note_title") or "")
+            snapshot_note_id = str(payload.get("note_id") or "")
+            return {
+                "note_pk": note_pk,
+                "title": snapshot_title or f"#{note_pk}",
+                "note_id": snapshot_note_id,
+            }
         item_id = str(payload.get("item_id") or "")
         if not item_id:
             return None  # 既没笔记又没商品 = 脏行

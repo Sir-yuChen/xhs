@@ -494,7 +494,12 @@ def _note_pk_for_item(db: Session, *, user_id: int, item_id: str) -> Optional[in
 # 发布（等终态）
 # --------------------------------------------------------------------------- #
 def _publish_and_wait(db: Session, *, user_id: int, note_pk: int) -> dict[str, Any]:
-    """发布一篇并等终态。返回 `{ok, note_pk, error}`（**不抛**，失败即结果）。"""
+    """发布一篇并等终态。返回 `{ok, note_pk, error}`（**不抛**，失败即结果）。
+
+    ⚠️ 发布成功后笔记行**仍在**（2026-10-27 改软删除）：平台 `note_id` 回写到
+    `notes.note_id`，`is_deleted` 只置展示标记 —— 所以这里照旧读笔记行判断终态，
+    不需要额外的队列项兜底（那是物理删除时代的补丁，已随口径变更撤掉）。
+    """
     from backend.app.services import note_publish_service
 
     try:
