@@ -22,7 +22,7 @@ from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user, get_owned_active_account
 from backend.app.models import Note, NoteAsset, PlatformAccount, Task, User
 from backend.app.models.note import (
-    NOTE_TYPE_LOCAL,
+    NOTE_TYPE_COLLECTED,
     NOTE_TYPE_SYNCED,
     PUBLISH_STATUS_PENDING,
     PUBLISH_STATUS_PUBLISHED,
@@ -195,7 +195,7 @@ def _save_normalized_notes(
     normalized_items: list[dict[str, Any]],
     *,
     published: bool = False,
-    note_type: str = NOTE_TYPE_LOCAL,
+    note_type: str = NOTE_TYPE_COLLECTED,
 ) -> list[Note]:
     """归一化条目落库（按 `(user_id, note_id)` upsert）。
 
@@ -255,7 +255,7 @@ def _save_normalized_notes(
                 set_note_publish_status(note, PUBLISH_STATUS_PUBLISHED)
             if note_type == NOTE_TYPE_SYNCED:
                 # 只升不降（§25）：同步链路见过这条 ⇒ 它是三方同步笔记；
-                # 采集链路（note_type="local"）走到这里时**不碰**这一列。
+                # 采集链路（`collected`）走到这里时**不碰**这一列。
                 note.note_type = NOTE_TYPE_SYNCED
         note.title = str(normalized.get("title") or "")
         # ⚠️ **正文只在本地为空时写**（§23，2026-09-22）：三个列表源都不带正文，
@@ -586,11 +586,27 @@ def crawl_data(
 
         success_count = len([i for i in items if i["status"] == "success"])
         failed_count = len(items) - success_count
+
+        #: **采集结果落内容库**（2026-10-28 用户口径「采集的笔记放入内容库」）。
+        #: 此前这里只把 `normalized_for_save` 攒起来、从不写库 ⇒ 抓完即丢；
+        #: 现在统一走 `_save_normalized_notes`（与三个非流式端点同一个实现，
+        #: `note_type=collected` 由默认值给定）。
+        saved_count = 0
+        if normalized_for_save and not error_occurred:
+            try:
+                saved_count = len(_save_normalized_notes(db, account, normalized_for_save))
+            except Exception as exc:  # 落库失败不该让已经抓到的结果作废
+                yield _sse_event({"type": "error", "message": f"落库失败：{exc}"})
+
         try:
             if error_occurred:
                 _fail_task(db, task, "partial failure")
             else:
-                _complete_task(db, task, {"result_count": success_count, "failed_count": failed_count})
+                _complete_task(
+                    db, task,
+                    {"result_count": success_count, "failed_count": failed_count,
+                     "saved_count": saved_count},
+                )
         except Exception:
             pass
 

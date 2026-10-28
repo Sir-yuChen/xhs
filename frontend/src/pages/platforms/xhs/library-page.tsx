@@ -1418,9 +1418,8 @@ export function XhsLibraryPage() {
                       {cover ? <img src={cover} alt={note.title} referrerPolicy="no-referrer" style={{ width: "100%", aspectRatio: "1/1", objectFit: "cover", display: "block" }} /> : <div style={{ width: "100%", aspectRatio: "1/1", display: "flex", alignItems: "center", justifyContent: "center", color: p.fillIcon, fontSize: 28 }}><PictureOutlined /></div>}
                       <Tag color={kind.includes("video") ? "purple" : "blue"} style={{ position: "absolute", top: 8, right: 8 }} icon={kind.includes("video") ? <PlayCircleOutlined /> : <PictureOutlined />}>{kind.includes("video") ? "视频" : "图文"}</Tag>
                       {/*
-                        封面左下角一排（§29.5）：发布状态（可点切换）→ 同步按钮
-                        （仅 synced / 已发布）→ 发布按钮（仅本地生成待发布/发布失败，
-                        设计 13 §31）。
+                        封面左下角一排（§29.5）：发布状态（可点切换）→ 发布按钮
+                        （仅本地生成待发布/发布失败，设计 13 §31）。
 
                         2026-09-23 三轮演变后这里的**最终形态**：
                         * 类型 Tag **不在这里**（① 把它移出去了，③ 放到了右下角）；

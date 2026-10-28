@@ -11,9 +11,15 @@ from backend.app.core.time import shanghai_now
 
 #: 笔记类型取值（设计 13 §25，2026-09-22）—— **唯一定义处**，业务代码只许引用常量。
 NOTE_TYPE_SYNCED = "synced"
+#: **数据中心笔记指标同步**（`sync_account_note_data`）：千帆 butterfly 拉回基础信息落
+#: `notes`、指标落 `note_datacenter_stats`。**不进内容库** —— 它只是同步过程的副产物。
 NOTE_TYPE_LOCAL = "local"
+#: **采集**（笔记发现 / 监控抓取）：`crawl.py::_save_normalized_notes` 落库的公开笔记。
+#: 与 `local` 的区别 = **谁的数据**：`local` 是把自己店铺的笔记同步回来，本值是抓别人的。
+#: ⚠️ 2026-10-28 用户口径「采集的笔记先放内容库，标识统计优化成采集链」—— 采集过的
+#: 笔记要能被复看，所以从 `local` 里拆出来单独一值并进内容库。
+NOTE_TYPE_COLLECTED = "collected"
 #: **本地生成**（设计 13 §31，2026-09-23）：商品笔记智能生成链路落库。
-#: 与 `local` 的分工：`local` 是采集/监控/批量保存搬来的**别人**的笔记；
 #: 本值是本项目为「自己店铺的商品」AI 生成、尚未发布到平台的笔记。
 #: 判据同样是**落库链路**（只升不降）：`product_note_gen_service` 落库即本值，
 #: 同步链路命中也只升 `synced`，不回退。
@@ -70,15 +76,15 @@ PUBLISH_STATUS_FILTER_GROUPS: dict[str, tuple[str, ...]] = {
     PUBLISH_STATUS_FAILED: (PUBLISH_STATUS_FAILED,),
 }
 
-#: **内容库收录的笔记来源**（2026-10-27 最终口径）。
+#: **内容库收录的笔记来源**（2026-10-28 最终口径）。
 #:
 #: * `local_generated` —— 用户用 AI 生成的笔记（内容库的主角）；
-#: * `local` —— **数据中心笔记指标同步**落库的笔记（`sync_account_note_data`：
-#:   千帆 butterfly 拉回基础信息落 `notes`、指标落 `note_datacenter_stats`）。
-#:   ⚠️ 别被 `local` 这个名字误导成「采集来的别人的笔记」：这条链路是
-#:   **把自己的笔记从数据中心同步回来**，与「笔记发现」的采集是两条线。
+#: * `collected` —— **采集链路**抓回来的公开笔记（笔记发现 / 监控抓取）。
+#:   用户口径「采集的笔记先放内容库」，采集过的要能复看。
+#: * `local` **不进** —— 那是「数据中心笔记指标同步」的落库副产物
+#:   （`sync_account_note_data`），笔记本身属于平台，不该在内容库占一行。
 #: * `synced` 不进 —— 三方同步源已整条退场。
-LIBRARY_NOTE_TYPES: tuple[str, ...] = (NOTE_TYPE_LOCAL_GENERATED, NOTE_TYPE_LOCAL)
+LIBRARY_NOTE_TYPES: tuple[str, ...] = (NOTE_TYPE_LOCAL_GENERATED, NOTE_TYPE_COLLECTED)
 
 #: **内容库排除的发布状态**（2026-10-27 用户口径：「已发布的笔记不展示在内容库中，
 #: 应到我的笔记页查看实时数据」）。

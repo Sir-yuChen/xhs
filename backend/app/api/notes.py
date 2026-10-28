@@ -34,9 +34,8 @@ from backend.app.models.scheduled_job import (
     ScheduledJobLog,
 )
 from backend.app.models.note import (
-    NOTE_TYPE_LOCAL,
+    NOTE_TYPE_COLLECTED,
     NOTE_TYPE_LOCAL_GENERATED,
-    NOTE_TYPE_SYNCED,
     LIBRARY_EXCLUDED_PUBLISH_STATUSES,
     LIBRARY_NOTE_TYPES,
     PUBLISH_STATUS_FAILED,
@@ -57,9 +56,8 @@ router = APIRouter(prefix="/notes", tags=["notes"])
 #: 否则以后加类型时必然出现「落库链路认、筛选却不认」的两处漂移。
 #: 顺序即前端下拉顺序：三方同步 → 本地生成 → 本地。
 NOTE_TYPE_FILTER_VALUES: tuple[str, ...] = (
-    NOTE_TYPE_SYNCED,
     NOTE_TYPE_LOCAL_GENERATED,
-    NOTE_TYPE_LOCAL,
+    NOTE_TYPE_COLLECTED,
 )
 
 

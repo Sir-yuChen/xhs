@@ -318,56 +318,6 @@ def _note_row_from_xlsx(row_dict: dict[str, Any], category: str) -> NoteDataRow:
     )
 
 
-def _upsert_note(db, row: NoteDataRow, *, user_id: int, account_id: int) -> Note:
-    """一条 `NoteDataRow` 落库（覆盖更新）。返回落库后的 Note 行（未 commit）。
-
-    ⚠️ 覆盖更新时**不换 `notes.id`**（`uq_notes_user_note` 命中即复用），
-    `note_assets` / `note_topics` / 草稿引用不会被打断。
-
-    2026-10-12 设计 35 重构：本函数**只写 `notes` 基础信息**（标题 / 作者 / 来源原文），
-    指标与分类**不再落 `notes`**（`note_category` 已退役、`raw_json.metrics` 不再写）——
-    它们改落 `note_datacenter_stats` 统计表（见 :func:`_upsert_datacenter_stat`），
-    由调用方在同一次 commit 里一起写。
-    """
-    existing = db.scalars(
-        select(Note).where(Note.user_id == user_id, Note.note_id == row.note_id)
-    ).first()
-    if existing is None:
-        existing = Note(
-            user_id=user_id,
-            platform_account_id=account_id,
-            platform="xhs",
-            note_id=row.note_id,
-        )
-        db.add(existing)
-    else:
-        # 覆盖更新：归属重挂当前账号（台账 §4.9 / P2，与 `batch_save_notes` 同口径）
-        existing.platform_account_id = account_id
-
-    existing.title = row.title or existing.title
-    existing.author_name = row.author_name or existing.author_name
-    # raw_json 只保留来源原文的基础字段（指标/分类不再进 raw_json）。
-    raw = dict(existing.raw_json) if isinstance(existing.raw_json, dict) else {}
-    if row.note_url:
-        raw["note_url"] = row.note_url
-    if row.author_xhs_id:
-        raw["author_xhs_id"] = row.author_xhs_id
-    if row.note_type:
-        raw["note_type"] = row.note_type
-    if row.published_at:
-        raw["published_at"] = row.published_at
-    if row.item_id:
-        raw["item_id"] = row.item_id
-    if row.item_title:
-        raw["item_title"] = row.item_title
-    existing.raw_json = raw
-
-    db.flush()
-    #: ⚠️ 设计 75 S5（2026-10-27）：挂链商品**不再写关系表**（`note_goods` 已 DROP）。
-    #: 上面 `raw["item_id"]` 那一行就是落点（数据中心链路早已写它，发布链路读它）。
-    return existing
-
-
 def _upsert_datacenter_stat(
     db, row: NoteDataRow, *, user_id: int, account_id: int, window: str = WINDOW_RECENT_1
 ) -> None:
@@ -443,30 +393,28 @@ def upsert_note_data_rows(
     account_id: int,
     window: str = WINDOW_RECENT_1,
 ) -> dict[str, int]:
-    """一批 `NoteDataRow` 落库。返回 `{created, updated, total}` 计数。
+    """一批 `NoteDataRow` 落库 —— **只写 `note_datacenter_stats`，不碰 `notes`**。
 
-    2026-10-12 设计 35：一条 row 同时落两处 —— `notes`（基础信息）+ 统计表
-    （指标/分类）。调用方负责 commit（批量写一次提交，不逐条 commit —— SQLite 写锁）。
+    ⚠️ 2026-10-28 用户口径「数据中心数据不落内容库表」：数据中心是**平台事实的快照**，
+    内容库是**用户自己的笔记**，两者只在平台 `note_id` 上语义相关，读路径也互不 join。
+    此前这里会顺带 `_upsert_note` 建 `notes` 行（`note_type` 吃默认值 `local`），
+    结果是内容库凭空多出 20 条数据中心同步的副产物。
 
-    `window`（butterfly 的 `dateSelectType`）：默认 `recent_1`；自定义日期范围走
-    `custom`。
+    调用方负责 commit（批量写一次提交，不逐条 commit —— 写锁）。
+    `window`（butterfly 的 `dateSelectType`）：默认 `recent_1`；自定义日期范围走 `custom`。
     """
     created = updated = 0
-    skipped_deleted = 0
     for row in rows:
         if not row.note_id:
             continue
-        # 前置校验（2026-10-12）：已软删除（is_deleted=True）的笔记**跳过不落库** ——
-        # 无流量清理删掉的笔记若被下一轮同步「复活」，清理就白做了。
-        # 查询取整行（不取 `Note.id`），拿 `is_deleted` 判据。
-        existing = db.scalars(
-            select(Note).where(Note.user_id == user_id, Note.note_id == row.note_id)
-        ).first()
-        if existing is not None and existing.is_deleted:
-            skipped_deleted += 1
-            continue
-        existed = existing is not None
-        _upsert_note(db, row, user_id=user_id, account_id=account_id)
+        #: 一条统计行 = 一条笔记在统计表的落点；`existed` 按统计表判定。
+        existed = db.scalars(
+            select(NoteDatacenterStat.id).where(
+                NoteDatacenterStat.user_id == user_id,
+                NoteDatacenterStat.platform_account_id == account_id,
+                NoteDatacenterStat.note_id == row.note_id,
+            )
+        ).first() is not None
         _upsert_datacenter_stat(db, row, user_id=user_id, account_id=account_id, window=window)
         if existed:
             updated += 1
@@ -476,7 +424,7 @@ def upsert_note_data_rows(
         "created": created,
         "updated": updated,
         "total": created + updated,
-        "skipped_deleted": skipped_deleted,
+        "skipped_deleted": 0,
     }
 
 
