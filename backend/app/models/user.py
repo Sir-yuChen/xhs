@@ -19,7 +19,7 @@ USER_STATUSES: tuple[str, ...] = (USER_STATUS_NORMAL, USER_STATUS_PENDING, USER_
 
 
 class User(Base):
-    __tablename__ = "users"
+    __tablename__ = "sys_users"
     __table_args__ = (
         #: ⚠️ 用 `CheckConstraint` 而**不是** PG 原生 `ENUM`（设计 51 §3.1）：
         #: 原生 ENUM 要额外 `CREATE TYPE`，迁移回退麻烦，SQLite 根本没有。

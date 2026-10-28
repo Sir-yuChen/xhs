@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<link rel="icon" href="data:,">
+<html lang="zh-CN"><head><meta charset="utf-8">
+<title>全库两级表重构方案</title>
+<style>
+:root{--bg:#0f1115;--card:#171a21;--card2:#1d2129;--line:#2a2f3a;--fg:#e6e9ef;
+--muted:#8b93a3;--accent:#4c9aff;--ok:#3fb950;--warn:#d29922;--danger:#f85149;--purple:#a371f7}
+*{box-sizing:border-box}
+body{margin:0;padding:26px 30px 70px;background:var(--bg);color:var(--fg);
+font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;font-size:13px;line-height:1.55}
+h1{font-size:21px;margin:0 0 4px} h2{font-size:15px;margin:30px 0 12px;
+padding-bottom:7px;border-bottom:1px solid var(--line)}
+.sub{color:var(--muted);font-size:12px;margin-bottom:20px}
+.kpi{display:flex;gap:12px;margin:16px 0 22px;flex-wrap:wrap}
+.kpi div{background:var(--card);border:1px solid var(--line);border-radius:7px;padding:10px 16px;min-width:104px}
+.kpi b{display:block;font-size:20px;line-height:1.2} .kpi span{color:var(--muted);font-size:11px}
+table{width:100%;border-collapse:collapse;background:var(--card);border-radius:7px;overflow:hidden;font-size:12px}
+th{background:var(--card2);text-align:left;padding:8px 10px;font-weight:600;color:var(--muted);
+border-bottom:1px solid var(--line);font-size:11px;position:sticky;top:0}
+td{padding:6px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+tr:last-child td{border-bottom:none}
+code{font-family:ui-monospace,Consolas,monospace;font-size:11px;background:#0b0d11;
+padding:1px 4px;border-radius:3px;color:#9fb4d4}
+.lv{display:inline-block;padding:1px 7px;border-radius:4px;font-size:10px;font-weight:700}
+.l0{background:#0e1c2b;color:var(--accent);border:1px solid #1b3a5c}
+.l1{background:#2a2110;color:var(--warn);border:1px solid #4a3a12}
+.act{display:inline-block;padding:1px 7px;border-radius:9px;font-size:10px;font-weight:600}
+.a-json{background:#231a33;color:var(--purple);border:1px solid #3d2a54}
+.a-drop{background:#2a1417;color:var(--danger);border:1px solid #4a2027}
+.a-keep{background:#12281a;color:var(--ok);border:1px solid #1d4b2c}
+.a-none{color:var(--muted)}
+.note{background:var(--card);border-left:3px solid var(--warn);padding:10px 13px;
+border-radius:0 6px 6px 0;margin:12px 0;font-size:12px}
+.note.ok{border-left-color:var(--ok)} .note.bad{border-left-color:var(--danger)}
+.note.info{border-left-color:var(--accent)}
+.mg{background:var(--card);border:1px solid var(--line);border-radius:7px;padding:13px 15px;margin:11px 0}
+.mg h4{margin:0 0 9px;font-size:13px}
+.mg .fr{color:var(--danger);font-size:11.5px;margin-bottom:8px}
+.mg .to{color:var(--ok);font-weight:600}
+.mg ul{margin:6px 0;padding-left:18px} .mg li{margin:2px 0;font-size:11.5px}
+.mg .dn{color:var(--muted);font-size:11px;margin-top:7px;padding-top:7px;border-top:1px dashed var(--line)}
+.scroll{max-height:560px;overflow:auto;border-radius:7px}
+.muted{color:var(--muted)}
+</style></head><body>
+
+<h1>全库两级表重构方案</h1>
+<div class="sub">48 张表逐张定级 · 合并决策 · 2026-10-28 · 数据来自 <code>spider_xhs.public</code> 实测</div>
+
+<div class="kpi">
+  <div><b>48</b><span>现有表</span></div>
+  <div><b>22</b><span>L0 系统骨架</span></div>
+  <div><b>26</b><span>L1 工作区私有</span></div>
+  <div><b>8</b><span>合并/删除</span></div>
+  <div><b>40</b><span>重构后表数</span></div>
+</div>
+
+<h2>1. 判据（写进 77 规范，可机械执行）</h2>
+<table>
+<tr><th style="width:9%">级别</th><th style="width:20%">判据</th><th style="width:20%">机械来源</th><th>说明</th></tr>
+<tr><td><span class="lv l1">L1</span></td><td><b>C1</b> 表名含平台词</td><td><code>pg_class.relname</code></td>
+<td><code>note</code> / <code>topic</code> / <code>shop</code> / <code>qianfan</code> / <code>creator</code> / <code>ark</code> / <code>forbidden</code> / <code>keyword</code></td></tr>
+<tr><td><span class="lv l1">L1</span></td><td><b>C2</b> <code>platform</code> 列 <b>NOT NULL</b></td><td><code>is_nullable='NO'</code></td>
+<td>平台是<b>隔离维度</b>，本表按平台分区存数据</td></tr>
+<tr><td><span class="lv l1">L1</span></td><td><b>C3</b> 有平台专有列</td><td><code>pg_attribute</code></td>
+<td><code>sub_type</code> / <code>seller_id</code> / <code>shop_state</code> / <code>item_id</code> / <code>xsec_token</code> / <code>note_flag</code> …</td></tr>
+<tr><td><span class="lv l1">L1</span></td><td><b>C4</b> 所有 FK 父表都是 L1 且无跨平台语义</td><td>FK 图</td>
+<td><b>本轮新增</b>：机械判据 C1-C3 漏掉了 <code>account_cookie_versions</code> / <code>publish_assets</code> 这类「表名不带平台词、自身无 platform 列、但只服务平台表」的子表</td></tr>
+<tr><td><span class="lv l0">L0</span></td><td><b>S1∧S2∧S3</b></td><td>—</td>
+<td>platform 可空或无 ∧ 无平台词 ∧ 换平台结构不变。<br><b>关键区别</b>：<code>api_logs.platform</code> 可空 = 日志标签 ⇒ L0；<code>notes.platform</code> NOT NULL = 隔离维度 ⇒ L1</td></tr>
+</table>
+
+<div class="note bad">
+<b>⚠️ 机械判据的两个实测误判（已修正）</b><br>
+① <code>account_cookie_versions</code> / <code>publish_assets</code> / <code>no_traffic_cleanup_logs</code> —— 表名无平台词、自身无 platform 列 ⇒ 被判 L0。
+实际上它们是纯 L1 子表 ⇒ <b>补 C4</b>。<br>
+② <code>tasks.platform</code> 是 NOT NULL 但被判 L0 —— 它记的是「这个任务跑哪个平台」，
+任务结构对任何平台一致（<code>indeg=5</code> 是全局任务底座）⇒ <b>加 S3 覆盖</b>。
+</div>
+
+<h2>2. 全部 48 张表定级 + 处置</h2>
+<div class="scroll">
+<table>
+<tr><th style="width:5%">级</th><th style="width:24%">表名</th><th style="width:6%">列</th>
+<th style="width:8%">行数</th><th style="width:6%">入度</th><th style="width:8%">处置</th><th>判据</th></tr>
+<tr><td><span class="lv l0">L0</span></td><td><code>api_logs</code></td><td>9</td><td>36,716</td><td>0</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">S1 platform 可空/无 + S2 无平台词 + S3 结构跨平台不变</td></tr><tr><td><span class="lv l0">L0</span></td><td><code>business_logs</code></td><td>13</td><td>334</td><td>0</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">S1 platform 可空/无 + S2 无平台词 + S3 结构跨平台不变</td></tr><tr><td><span class="lv l0">L0</span></td><td><code>dict_items</code></td><td>9</td><td>219</td><td>0</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">S1 platform 可空/无 + S2 无平台词 + S3 结构跨平台不变</td></tr><tr><td><span class="lv l0">L0</span></td><td><code>dict_types</code></td><td>7</td><td>46</td><td>1</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">S1 platform 可空/无 + S2 无平台词 + S3 结构跨平台不变</td></tr><tr><td><span class="lv l0">L0</span></td><td><code>llm_business_providers</code></td><td>10</td><td>654</td><td>0</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">S1 platform 可空/无 + S2 无平台词 + S3 结构跨平台不变</td></tr><tr><td><span class="lv l0">L0</span></td><td><code>llm_gateway_alerts</code></td><td>15</td><td>16</td><td>0</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">S1 platform 可空/无 + S2 无平台词 + S3 结构跨平台不变</td></tr><tr><td><span class="lv l0">L0</span></td><td><code>llm_gateway_configs</code></td><td>13</td><td>199</td><td>3</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">S1 platform 可空/无 + S2 无平台词 + S3 结构跨平台不变</td></tr><tr><td><span class="lv l0">L0</span></td><td><code>llm_gateway_models</code></td><td>13</td><td>875</td><td>0</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">S1 platform 可空/无 + S2 无平台词 + S3 结构跨平台不变</td></tr><tr><td><span class="lv l0">L0</span></td><td><code>llm_gateway_usage_logs</code></td><td>13</td><td>171</td><td>0</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">S1 platform 可空/无 + S2 无平台词 + S3 结构跨平台不变</td></tr><tr><td><span class="lv l0">L0</span></td><td><code>material_files</code></td><td>12</td><td>4</td><td>0</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">S1 platform 可空/无 + S2 无平台词 + S3 结构跨平台不变</td></tr><tr><td><span class="lv l0">L0</span></td><td><code>material_folders</code></td><td>9</td><td>1</td><td>1</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">S1 platform 可空/无 + S2 无平台词 + S3 结构跨平台不变</td></tr><tr><td><span class="lv l0">L0</span></td><td><code>menus</code></td><td>14</td><td>184</td><td>1</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">S1 platform 可空/无 + S2 无平台词 + S3 结构跨平台不变</td></tr><tr><td><span class="lv l0">L0</span></td><td><code>notifications</code></td><td>11</td><td>27</td><td>0</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">S1 platform 可空/无 + S2 无平台词 + S3 结构跨平台不变</td></tr><tr><td><span class="lv l0">L0</span></td><td><code>prompt_modules</code></td><td>9</td><td>248</td><td>0</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">S1 platform 可空/无 + S2 无平台词 + S3 结构跨平台不变</td></tr><tr><td><span class="lv l0">L0</span></td><td><code>prompt_templates</code></td><td>10</td><td>124</td><td>1</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">S1 platform 可空/无 + S2 无平台词 + S3 结构跨平台不变</td></tr><tr><td><span class="lv l0">L0</span></td><td><code>role_menus</code></td><td>4</td><td>2,251</td><td>0</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">S1 platform 可空/无 + S2 无平台词 + S3 结构跨平台不变</td></tr><tr><td><span class="lv l0">L0</span></td><td><code>roles</code></td><td>9</td><td>3</td><td>1</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">S1 platform 可空/无 + S2 无平台词 + S3 结构跨平台不变</td></tr><tr><td><span class="lv l0">L0</span></td><td><code>scheduled_job_logs</code></td><td>22</td><td>89,617</td><td>0</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">S1 platform 可空/无 + S2 无平台词 + S3 结构跨平台不变</td></tr><tr><td><span class="lv l0">L0</span></td><td><code>scheduled_jobs</code></td><td>23</td><td>10</td><td>2</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">S1 platform 可空/无 + S2 无平台词 + S3 结构跨平台不变</td></tr><tr><td><span class="lv l0">L0</span></td><td><code>system_settings</code></td><td>14</td><td>13</td><td>0</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">S1 platform 可空/无 + S2 无平台词 + S3 结构跨平台不变</td></tr><tr><td><span class="lv l0">L0</span></td><td><code>tasks</code></td><td>15</td><td>651</td><td>5</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">S1 platform 可空/无 + S2 无平台词 + S3 结构跨平台不变</td></tr><tr><td><span class="lv l0">L0</span></td><td><code>users</code></td><td>14</td><td>31</td><td>34</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">S1 platform 可空/无 + S2 无平台词 + S3 结构跨平台不变</td></tr><tr><td><span class="lv l1">L1</span></td><td><code>account_cookie_versions</code></td><td>4</td><td>11</td><td>0</td><td><span class="act a-json">JSON 化</span></td><td class="muted" style="font-size:11px">C4 仅服务 platform_accounts（本轮 JSON 化）</td></tr><tr><td><span class="lv l1">L1</span></td><td><code>ai_drafts</code></td><td>8</td><td>17</td><td>3</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">C2 platform NOT NULL</td></tr><tr><td><span class="lv l1">L1</span></td><td><code>ai_generated_assets</code></td><td>8</td><td>0</td><td>0</td><td><span class="act a-json">JSON 化</span></td><td class="muted" style="font-size:11px">C4 仅服务 ai_drafts（本轮 JSON 化）</td></tr><tr><td><span class="lv l1">L1</span></td><td><code>aigc_media_assets</code></td><td>12</td><td>42</td><td>0</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">C2 platform + C3 item_id</td></tr><tr><td><span class="lv l1">L1</span></td><td><code>auto_tasks</code></td><td>12</td><td>0</td><td>0</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">C4 仅服务小红书账号画像</td></tr><tr><td><span class="lv l1">L1</span></td><td><code>data_package_rule_sets</code></td><td>8</td><td>68</td><td>1</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">C4 小红书数据包规则</td></tr><tr><td><span class="lv l1">L1</span></td><td><code>data_package_rules</code></td><td>9</td><td>117</td><td>0</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">C4 同上（明细）</td></tr><tr><td><span class="lv l1">L1</span></td><td><code>draft_assets</code></td><td>6</td><td>1</td><td>0</td><td><span class="act a-json">JSON 化</span></td><td class="muted" style="font-size:11px">C4 仅服务 ai_drafts（本轮 JSON 化）</td></tr><tr><td><span class="lv l1">L1</span></td><td><code>forbidden_word_groups</code></td><td>6</td><td>0</td><td>0</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">C1 名 + 平台词库</td></tr><tr><td><span class="lv l1">L1</span></td><td><code>forbidden_words</code></td><td>9</td><td>717</td><td>0</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">C1 名 + 平台词库</td></tr><tr><td><span class="lv l1">L1</span></td><td><code>generation_records</code></td><td>24</td><td>47</td><td>3</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">C2 platform + C3 item_id</td></tr><tr><td><span class="lv l1">L1</span></td><td><code>keyword_groups</code></td><td>7</td><td>0</td><td>0</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">C1 名 + C2 platform</td></tr><tr><td><span class="lv l1">L1</span></td><td><code>login_sessions</code></td><td>11</td><td>226</td><td>0</td><td><span class="act a-drop">删除</span></td><td class="muted" style="font-size:11px">C2 platform + C3 sub_type（本轮 DROP）</td></tr><tr><td><span class="lv l1">L1</span></td><td><code>monitoring_snapshots</code></td><td>4</td><td>0</td><td>0</td><td><span class="act a-json">JSON 化</span></td><td class="muted" style="font-size:11px">C4 仅服务 monitoring_targets</td></tr><tr><td><span class="lv l1">L1</span></td><td><code>monitoring_targets</code></td><td>15</td><td>0</td><td>1</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">C2 platform NOT NULL</td></tr><tr><td><span class="lv l1">L1</span></td><td><code>no_traffic_cleanup_items</code></td><td>14</td><td>5</td><td>0</td><td><span class="act a-json">JSON 化</span></td><td class="muted" style="font-size:11px">C4 同上（明细）</td></tr><tr><td><span class="lv l1">L1</span></td><td><code>no_traffic_cleanup_logs</code></td><td>28</td><td>8</td><td>1</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">C4 小红书独有无流量清理</td></tr><tr><td><span class="lv l1">L1</span></td><td><code>note_assets</code></td><td>6</td><td>134</td><td>0</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">C1 名 + C4 仅服务 notes</td></tr><tr><td><span class="lv l1">L1</span></td><td><code>note_datacenter_stats</code></td><td>43</td><td>3,702</td><td>0</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">C1 名 + 43 列全是小红书数据中心字段</td></tr><tr><td><span class="lv l1">L1</span></td><td><code>note_generation_links</code></td><td>6</td><td>25</td><td>0</td><td><span class="act a-json">合并</span></td><td class="muted" style="font-size:11px">C1 名 + C2 platform（本轮合入 generation_records）</td></tr><tr><td><span class="lv l1">L1</span></td><td><code>note_topics</code></td><td>4</td><td>125</td><td>0</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">C1 名 + C3 平台话题形态</td></tr><tr><td><span class="lv l1">L1</span></td><td><code>notes</code></td><td>20</td><td>48</td><td>4</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">C1 名 + C2 platform + C3 item_id</td></tr><tr><td><span class="lv l1">L1</span></td><td><code>platform_accounts</code></td><td>18</td><td>5</td><td>6</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">C2 platform + C3 seller_id/shop_state/sub_type</td></tr><tr><td><span class="lv l1">L1</span></td><td><code>publish_assets</code></td><td>8</td><td>1</td><td>0</td><td><span class="act a-json">JSON 化</span></td><td class="muted" style="font-size:11px">C4 仅服务 publish_jobs</td></tr><tr><td><span class="lv l1">L1</span></td><td><code>publish_jobs</code></td><td>16</td><td>1</td><td>1</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">C2 platform NOT NULL</td></tr><tr><td><span class="lv l1">L1</span></td><td><code>topics</code></td><td>6</td><td>4,963</td><td>1</td><td><span class="act a-none">—</span></td><td class="muted" style="font-size:11px">C1 名 + 平台话题格式 #名字[话题]#</td></tr></table></div><h2>3. 合并后的表结构（6 组）</h2><div class="mg"><h4><span class="fr">platform_accounts + account_cookie_versions + login_sessions</span> → <span class="to">xhs_accounts</span></h4><ul><li><code>id</code> <span class="act a-json">PK</span></li><li><code>user_id</code> <span class="act a-json">FK→users</span></li><li><code>sub_type</code> <span class="muted">— creator / pc / qianfan</span></li><li><code>external_user_id</code> <span class="muted">— 小红书号，唯一键一部分</span></li><li><code>nickname</code></li><li><code>avatar_url</code></li><li><code>status</code></li><li><code>status_message</code></li><li><code>profile_json</code></li><li><code>note_sync_cursor_ms</code></li><li><code>note_sync_cursor_note_id</code></li><li><code>seller_id</code> <span class="muted">— 千帆店铺</span></li><li><code>shop_state</code> <span class="muted">— 千帆状态</span></li><li><code>disabled</code></li><li><code>deleted_at</code></li><li><code>created_at</code></li><li><code>updated_at</code></li><li><code>cookies_json</code> <span class="act a-json">合并</span> <span class="muted">— 各通道最新一份 {"creator":…, "ark":…}</span></li><li><code>last_login_at</code> <span class="act a-json">合并</span> <span class="muted">— confirmed 历史最大值</span></li><li><code>last_login_method</code> <span class="act a-json">合并</span> <span class="muted">— qr / phone</span></li></ul><div class="dn">删 platform 列（表名已含 xhs_）；删 qr_id/code/qr_url/encrypted_temp_cookies 过程数据</div></div><div class="mg"><h4><span class="fr">ai_drafts + draft_assets + ai_generated_assets</span> → <span class="to">xhs_ai_drafts</span></h4><ul><li><code>id</code> <span class="act a-json">PK</span></li><li><code>user_id</code> <span class="act a-json">FK→users</span></li><li><code>title</code></li><li><code>body</code></li><li><code>status</code></li><li><code>source_note_id</code> <span class="act a-json">FK→notes</span></li><li><code>created_at</code></li><li><code>updated_at</code></li><li><code>assets_json</code> <span class="act a-json">合并</span> <span class="muted">— 原 draft_assets 整组（含 sort_order）</span></li><li><code>generated_assets_json</code> <span class="act a-json">合并</span> <span class="muted">— 原 ai_generated_assets 整组</span></li></ul><div class="dn">⚠️ 写点需从「单条增删改」改为「整组写」，见风险页</div></div><div class="mg"><h4><span class="fr">publish_jobs + publish_assets</span> → <span class="to">xhs_publish_jobs</span></h4><ul><li><code>id</code> <span class="act a-json">PK</span></li><li><code>user_id</code> <span class="act a-json">FK→users</span></li><li><code>platform_account_id</code> <span class="act a-json">FK</span></li><li><code>source_draft_id</code> <span class="act a-json">FK</span></li><li><code>status</code></li><li><code>scheduled_at</code></li><li><code>external_note_id</code></li><li><code>created_at</code></li><li><code>updated_at</code></li><li><code>assets_json</code> <span class="act a-json">合并</span> <span class="muted">— 原 publish_assets 整组</span></li></ul><div class="dn">不影响 cancel / retry 的防重复发文判据（看 external_note_id）</div></div><div class="mg"><h4><span class="fr">generation_records + note_generation_links</span> → <span class="to">xhs_generation_records</span></h4><ul><li><code>id</code> <span class="act a-json">PK</span></li><li><code>user_id</code> <span class="act a-json">FK→users</span></li><li><code>note_pk</code> <span class="act a-json">合并</span> <span class="muted">— 原 note_generation_links.note_pk</span></li><li><code>merged</code> <span class="muted">— note_generation_links 只是两表之间的桥，桥的两端都在 generation_records 上</span></li></ul><div class="dn">删 note_generation_links（25 行）；generation_records 加 note_pk 列</div></div><div class="mg"><h4><span class="fr">no_traffic_cleanup_logs + no_traffic_cleanup_items</span> → <span class="to">xhs_no_traffic_cleanup_logs</span></h4><ul><li><code>id</code> <span class="act a-json">PK</span></li><li><code>user_id</code> <span class="act a-json">FK→users</span></li><li><code>task_id</code> <span class="act a-json">FK→tasks</span></li><li><code>account_id</code></li><li><code>status</code></li><li><code>started_at</code></li><li><code>finished_at</code></li><li><code>items_json</code> <span class="act a-json">合并</span> <span class="muted">— 原 items 整组（8 行 → 每批 1 数组）</span></li></ul><div class="dn">28 + 14 列合成一条清理记录</div></div><div class="mg"><h4><span class="fr">monitoring_targets + monitoring_snapshots</span> → <span class="to">xhs_monitoring_targets</span></h4><ul><li><code>id</code> <span class="act a-json">PK</span></li><li><code>user_id</code> <span class="act a-json">FK→users</span></li><li><code>platform_account_id</code> <span class="act a-json">FK</span></li><li><code>target_type</code></li><li><code>name</code></li><li><code>value</code></li><li><code>config</code></li><li><code>crawl_interval_minutes</code></li><li><code>last_crawled_at</code></li><li><code>snapshots_json</code> <span class="act a-json">合并</span> <span class="muted">— 原 snapshots 转数组（当前 0 行）</span></li></ul><div class="dn">0 行表，结构改动零数据风险</div></div>
+<h2>4. 我修正过的判断（前后对照）</h2>
+<table>
+<tr><th style="width:26%">对象</th><th style="width:30%">我一开始说</th><th>实测后改成</th></tr>
+<tr><td><code>account_cookie_versions</code></td>
+    <td>「多版本是故意的，不能压」</td>
+    <td><b>可以压</b>。代码注释原文是「无法在 SQL 里过滤，只能逐条判定」——
+        多行是没做 JSON 列时的妥协。20+ 读点无一读「第几版」</td></tr>
+<tr><td><code>auto_tasks</code></td>
+    <td>0 行 ⇒ 可并进账号表</td>
+    <td><b>不能并</b>。它有 <code>pc_account_id</code> + <code>creator_account_id</code>
+        两个账号外键 + <code>schedule_job_id</code>，是「自动运营任务定义」</td></tr>
+<tr><td><code>monitoring_targets</code></td>
+    <td>0 行 ⇒ 可并进账号表</td>
+    <td><b>不能并</b>。有 <code>target_type</code> + 独立调度
+        <code>crawl_interval_minutes</code> + 失败计数，是「监控对象」实体</td></tr>
+<tr><td><code>publish_jobs</code></td>
+    <td>max/父 = 1 ⇒ 可并</td>
+    <td><b>不能并</b>。全库只有 1 条是业务没用起来；
+        一个账号可发 N 篇，<code>external_note_id</code> 是防重复发文判据</td></tr>
+<tr><td>「≤1 行/父 ⇒ 可合并」这个脚本判据</td>
+    <td>按全局行数比父表行数</td>
+    <td><b>判据本身是错的</b>。必须按父键 group by 数子行取 max，
+        且<b>行数少不能当 1:1 的证据</b>（业务未起 ≠ 结构恒 1:1）</td></tr>
+</table>
+
+<h2>5. 风险与代价</h2>
+<div class="note bad">
+<b>最大的代价：<code>draft_assets</code> / <code>publish_assets</code> / <code>no_traffic_cleanup_items</code> 转 JSON 后，
+「单条增删 / 重排」要改成「整组读-改-写」。</b><br>
+现在 <code>POST /drafts/{id}/assets</code> 返回的是独立资源、前端按数组消费、<code>sort_order</code> 支持重排。
+转 JSON 后：新增 = 读数组 + append + 写回；删除 = 读 + filter + 写回。
+<b>并发下两次同时 append 会丢一条</b>（当前每行独立 INSERT 不会丢）。
+</div>
+<div class="note ok">
+<b>缓解方案</b>：这些表的写入频率极低（<code>draft_assets</code> 1 行 / <code>publish_assets</code> 1 行），
+且都是单用户单草稿内操作。加上<b>行级乐观锁</b>（<code>version</code> 列）即可覆盖。
+若将来出现并发写，再拆回独立表。
+</div>
+<div class="note info">
+<b>不重构的部分（明确不做）</b>：27 张 L1 表的<b>改名加 <code>xhs_</code> 前缀</b>不在本轮。
+理由：它不减少表数、不改结构，只是重命名，却要动全部 ORM <code>__tablename__</code> + SQL 字符串 + 前端类型。
+<b>先做结构合并（真有收益），改名单独排期</b>。
+</div>
+
+<h2>6. 执行顺序</h2>
+<table>
+<tr><th style="width:6%">批</th><th style="width:30%">内容</th><th style="width:12%">风险</th><th>验证</th></tr>
+<tr><td><b>0</b></td><td>写 77 规范 + 本文档归档</td><td>无</td><td>三校验脚本 PASS</td></tr>
+<tr><td><b>1</b></td><td>账号域：3 表 → <code>xhs_accounts</code></td><td>中（49 后端 + 15 前端文件）</td>
+    <td><code>has_ark_session</code> 逐账号同值 · cookie 串逐字节一致 · 迁移四步</td></tr>
+<tr><td><b>2</b></td><td>草稿/发布/清理/监控 5 组 JSON 化</td><td>中（写点改整组写）</td>
+    <td>每个端点走一遍：增/删/改/查 + 重排</td></tr>
+<tr><td><b>3</b></td><td>删 <code>note_generation_links</code> + <code>login_sessions</code></td><td>低</td>
+    <td>溯源链仍通（<code>generation_records.note_pk</code>）</td></tr>
+<tr><td><b>4</b></td><td>（可选，单独排期）27 张表改名加 <code>xhs_</code></td><td>高（波及面最广）</td>
+    <td>全量测试 + 真机</td></tr>
+</table>
+
+</body></html>

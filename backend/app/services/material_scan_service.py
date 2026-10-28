@@ -8,7 +8,7 @@
 设计要点：
 * 扫描放**后台 daemon 线程**（§7.3：端点 202 立即返回，前端轮询 `last_scan_at`）；
 * **增量**：`mtime` 未变 ⇒ 跳过重索引；已消失的源文件 ⇒ 删索引行；
-* **缩略图**：图片用 Pillow（复用 `image_util` 同套依赖）生成 80×80 cover；
+* **缩略图**：图片用 Pillow生成 80×80 cover；
   视频**不引新依赖**（项目无 opencv）⇒ `thumb_url=""` 占位，前端显示类型图标（§6.1）。
 
 ⚠️ **本服务不校验归属**：`user_id` 由调用方（API 层）传自己，扫描/查询一律带
@@ -241,7 +241,7 @@ def scan_folder(db: Session, folder: MaterialFolder) -> dict[str, Any]:
         row.rel_path: row
         for row in db.scalars(
             select(MaterialFile).where(
-                MaterialFile.folder_id == folder.id,
+                MaterialFile.parent_id == folder.id,
                 MaterialFile.user_id == folder.user_id,
             )
         ).all()
@@ -270,7 +270,7 @@ def scan_folder(db: Session, folder: MaterialFolder) -> dict[str, Any]:
         if row is None:
             row = MaterialFile(
                 user_id=folder.user_id,
-                folder_id=folder.id,
+                parent_id=folder.id,
                 filename=abs_file.name,
                 file_type=file_type,
                 rel_path=rel,
@@ -311,7 +311,7 @@ def scan_folder(db: Session, folder: MaterialFolder) -> dict[str, Any]:
     folder.last_scan_at = now
     folder.file_count = db.scalar(
         select(func.count(MaterialFile.id)).where(
-            MaterialFile.folder_id == folder.id,
+            MaterialFile.parent_id == folder.id,
             MaterialFile.user_id == folder.user_id,
         )
     ) or 0

@@ -11,7 +11,6 @@ from pydantic import BaseModel, Field
 from backend.app.core.config import get_settings
 from backend.app.core.deps import get_current_user
 from backend.app.models import User
-from backend.app.services.image_util import compose_cover_image, resize_image_file
 
 router = APIRouter(prefix="/files", tags=["files"])
 
@@ -108,42 +107,25 @@ def delete_user_image(file_name: str, current_user: User = Depends(get_current_u
     return {"file_name": file_name, "status": "deleted"}
 
 
-@router.post("/images/compose")
-def compose_image(payload: ComposeImageRequest, current_user: User = Depends(get_current_user)):
-    file_name = f"{_owner_media_prefix(current_user)}{uuid4().hex}.png"
-    output_path = _media_dir() / file_name
-    compose_cover_image(
-        output_path=output_path,
-        title=payload.title,
-        body=payload.body,
-        width=payload.width,
-        height=payload.height,
-        background_color=payload.background_color,
-        accent_color=payload.accent_color,
+@router.post("/images/compose", include_in_schema=False)
+def compose_image_removed():
+    """已退场（2026-10-28）：前端零调用，`compose_cover_image` 唯一调用方就是本端点。
+
+    封面合成已由「LLM 生成笔记 → aigc_media_assets」链路产出。
+    """
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail={"code": "IMAGE_COMPOSE_REMOVED", "message": "图片合成已停用。"},
     )
-    return _serialize_media_file(file_name=file_name, width=payload.width, height=payload.height)
 
 
-@router.post("/images/resize")
-def resize_image(payload: ResizeImageRequest, current_user: User = Depends(get_current_user)):
-    source_file_name = _validate_owner_media_name(payload.source_file_name, current_user)
-    source_path = _media_dir() / source_file_name
-    if not source_path.is_file():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media file not found")
-
-    extension = "jpg" if payload.format == "jpeg" else "png"
-    file_name = f"{_owner_media_prefix(current_user)}{uuid4().hex}.{extension}"
-    output_path = _media_dir() / file_name
-    resize_image_file(
-        source_path=source_path,
-        output_path=output_path,
-        width=payload.width,
-        height=payload.height,
-        mode=payload.mode,
-        image_format=payload.format,
-        quality=payload.quality,
+@router.post("/images/resize", include_in_schema=False)
+def resize_image_removed():
+    """已退场（2026-10-28）：前端零调用，`resize_image_file` 唯一调用方就是本端点。"""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail={"code": "IMAGE_RESIZE_REMOVED", "message": "图片缩放已停用。"},
     )
-    return _serialize_media_file(file_name=file_name, width=payload.width, height=payload.height)
 
 
 @router.get("/media/{file_name}")

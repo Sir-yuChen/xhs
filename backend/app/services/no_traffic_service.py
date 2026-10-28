@@ -272,9 +272,6 @@ class CleanupCandidate:
     #: 分流删除通道（商业 → 千帆 batch_delete_note，普通 → 创作者 delete_note）。
     #: ⚠️ 2026-10-12 设计 35：取代已退役的 `note_category`，判据统一读统计表 `note_flag`。
     note_flag: str = ""
-    #: 本地 `notes.id`（主键）。删除执行器平台删成功后按它定位本地行做 `purge_note`
-    #: （2026-10-06：无流量清理此前只删平台、漏删本地 notes 表）。
-    local_id: int = 0
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
 
@@ -356,13 +353,11 @@ def list_no_traffic_candidates(
 ) -> dict[str, Any]:
     """列出无流量候选。
 
-    两条路径，由 ``query`` 决定：
+    **纯本地查询，零平台请求**（2026-10-28 改写：原 docstring 说「有搜索条件就调
+    千帆 mix_search_word 并落库」—— 那是旧口径，现实现已不这么做）。
 
-    * **无搜索条件**（``query`` 为空或 keyword 为空）：**纯本地查询**，零平台请求，
-      直接在已同步映射里按阈值筛。
-    * **有搜索条件**：先调千帆 ``mix_search_word`` 做**服务端标题搜索**（千帆笔记管理页
-      同款接口，2026-09-19 实测），把命中的笔记**落库**（补上指标），再在本地按阈值筛。
-      这就是「按搜索条件 + 阈值」共同决定候选池。
+    候选池 = `note_datacenter_stats` 统计表，条件全部下推 SQL：
+    账号 / 分类（`note_flag`）/ 标题模糊（`title ILIKE`）/ 指标区间，一个 WHERE 收口。
 
     返回 ``{candidates, total, thresholds, query, coverage}``：
     * ``candidates`` — **第 ``page`` 页**、每页 ``limit`` 条（从 1 起）；
@@ -400,15 +395,14 @@ def list_no_traffic_candidates(
             },
         }
 
-    # 有搜索条件：**本地标题匹配**（零平台请求）。2026-10-12 设计 35 起候选池
-    # 是 `note_datacenter_stats` 统计表（离线数据中心历史），标题优先取统计表
-    # 快照列、缺则 LEFT JOIN `notes` 取当前标题 —— 不再打千帆 `mix_search_word`。
+    # 有搜索条件：**本地标题匹配**（零平台请求）。候选池 = `note_datacenter_stats`，
+    # 标题只取统计表快照列（2026-10-28 起不再 join `notes`）。
     searched = 0
     search_error = ""
 
     # 数据源（设计 35）：`note_datacenter_stats` 统计表，按账号 + 分类过滤。
     # 取「每 note_id 最新窗口」的那一行（同 note 多窗口时只算最新 stat_date）。
-    from backend.app.models import Note, NoteDatacenterStat
+    from backend.app.models import NoteDatacenterStat
 
     stmt = select(NoteDatacenterStat).where(
         NoteDatacenterStat.platform_account_id == account_id,
@@ -448,27 +442,14 @@ def list_no_traffic_candidates(
             stmt = stmt.where(col <= hi)
     stat_rows = db.scalars(stmt.order_by(NoteDatacenterStat.stat_date.desc())).all()
 
-    # 取 note → notes 归属映射（本地主键 + 当前标题/封面，供删除执行器 purge + 展示）。
-    # 2026-10-12：排除已软删（is_deleted=True）的笔记 —— 软删笔记不该再进候选池。
-    stat_note_ids = {str(s.note_id) for s in stat_rows if s.note_id}
-    note_by_id: dict[str, Note] = {}
-    if stat_note_ids:
-        note_by_id = {
-            n.note_id: n
-            for n in db.scalars(
-                select(Note).where(Note.note_id.in_(stat_note_ids), Note.is_deleted.is_(False))
-            ).all()
-        }
-
     matched: list[CleanupCandidate] = []
     for stat in stat_rows:
         # 2026-10-12：无流量阈值判定已**下推到 SQL 层**（见上方「阈值 max → 区间上界」合并），
         # 这里不再逐行 `is_no_traffic_by_metrics` 判定 —— 否则「用户设的区间」会被「固定阈值」
         # 二次覆盖，导致弹窗查询条件失效（根因：区间筛出阅读≥100，又被阈值「阅读≤0」过滤）。
-        note = note_by_id.get(stat.note_id)
         candidate = CleanupCandidate(
             note_id=str(stat.note_id or ""),
-            title=str(stat.title or (note.title if note else "") or ""),
+            title=str(stat.title or ""),
             cover=str(stat.cover_url or ""),
             browse_num=_as_number(stat.read_count),
             browse_num_30d=stat.browse_num_30d,
@@ -481,7 +462,6 @@ def list_no_traffic_candidates(
             publish_time=stat.publish_time,
             synced_at=stat.synced_at.strftime("%Y-%m-%d %H:%M:%S") if stat.synced_at else "",
             note_flag=str(stat.note_flag or ""),
-            local_id=note.id if note else 0,
             raw={},
         )
         # 搜索条件过滤（note_type / published_before / category）。
@@ -536,9 +516,9 @@ def candidates_by_note_ids(
     （「不在候选池」⇒ 不删 ⇒ `deleted=0`，看起来像「清理按钮没触发」）。用户当场勾选的
     就是明确笔记 ID，无需二次「是否在池内」校验，直接按 ID 查。
 
-    排除已软删（is_deleted=True）的笔记；`notes` 行缺失时用统计表快照列渲染。
+    字段一律取统计表快照列（2026-10-28 起完全不读 `notes`）。
     """
-    from backend.app.models import Note, NoteDatacenterStat
+    from backend.app.models import NoteDatacenterStat
 
     wanted = [str(n) for n in note_ids if n]
     if not wanted:
@@ -560,19 +540,12 @@ def candidates_by_note_ids(
             continue
         seen.add(key)
         deduped.append(row)
-    note_by_id: dict[str, Note] = {
-        n.note_id: n
-        for n in db.scalars(
-            select(Note).where(Note.note_id.in_(wanted), Note.is_deleted.is_(False))
-        ).all()
-    }
     out: list[CleanupCandidate] = []
     for stat in deduped:
-        note = note_by_id.get(str(stat.note_id or ""))
         out.append(
             CleanupCandidate(
                 note_id=str(stat.note_id or ""),
-                title=str(stat.title or (note.title if note else "") or ""),
+                title=str(stat.title or ""),
                 cover=str(stat.cover_url or ""),
                 browse_num=_as_number(stat.read_count),
                 browse_num_30d=stat.browse_num_30d,
@@ -585,8 +558,7 @@ def candidates_by_note_ids(
                 publish_time=stat.publish_time,
                 synced_at=stat.synced_at.strftime("%Y-%m-%d %H:%M:%S") if stat.synced_at else "",
                 note_flag=str(stat.note_flag or ""),
-                local_id=note.id if note else 0,
-                raw={},
+                    raw={},
             )
         )
     return out

@@ -24,7 +24,7 @@ from backend.app.core.account_types import (
 from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user, get_owned_active_account
 from backend.app.core.time import shanghai_now
-from backend.app.models import AccountCookieVersion, PlatformAccount, User
+from backend.app.models import PlatformAccount, User
 from backend.app.schemas.common import paginated
 from backend.app.schemas.accounts import AccountListResponse
 from backend.app.services.account_service import (
@@ -646,14 +646,12 @@ def delete_account(
     account = db.get(PlatformAccount, account_id)
     if account is None or account.user_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
-    for cookie_version in db.scalars(
-        select(AccountCookieVersion).where(AccountCookieVersion.platform_account_id == account.id)
-    ).all():
-        db.delete(cookie_version)
     already_deleted = account.deleted_at is not None
     if not already_deleted:
         account.deleted_at = shanghai_now()
         account.updated_at = account.deleted_at
+        #: 软删时清空 Cookie（原 `account_cookie_versions` 那几行已并入本列）。
+        account.cookies_json = "{}"
     db.commit()
     return {"id": account_id, "status": "deleted", "soft": True, "already_deleted": already_deleted}
 

@@ -13,7 +13,7 @@ from backend.app.adapters.xhs.creator_api_adapter import XhsCreatorApiAdapter
 from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user, get_owned_active_account
 from backend.app.core.time import shanghai_now
-from backend.app.models import PlatformAccount, PublishAsset, PublishJob, Task, User
+from backend.app.models import ASSET_PUBLISH, PlatformAccount, PublishAsset, PublishJob, Task, User
 from backend.app.schemas.common import paginated
 from backend.app.services.account_service import (
     AccountRejectedError,
@@ -151,9 +151,9 @@ def serialize_publish_asset(asset: PublishAsset) -> dict:
         creator_upload_info = {}
     return {
         "id": asset.id,
-        "publish_job_id": asset.publish_job_id,
+        "publish_job_id": asset.parent_id,
         "asset_type": asset.asset_type,
-        "file_path": asset.file_path,
+        "file_path": asset.local_path,
         "upload_status": asset.upload_status,
         "creator_media_id": asset.creator_media_id,
         "upload_error": asset.upload_error,
@@ -223,9 +223,10 @@ def _get_owned_publish_job(db: Session, current_user: User, job_id: int) -> Publ
 def _get_owned_publish_asset(db: Session, current_user: User, asset_id: int) -> PublishAsset:
     asset = db.scalars(
         select(PublishAsset)
-        .join(PublishJob, PublishAsset.publish_job_id == PublishJob.id)
+        .join(PublishJob, PublishAsset.parent_id == PublishJob.id)
         .where(
             PublishAsset.id == asset_id,
+            PublishAsset.row_type == ASSET_PUBLISH,
             PublishJob.user_id == current_user.id,
         )
     ).first()
@@ -394,8 +395,8 @@ def delete_publish_job(
     if job.status in {"publishing", "uploading"}:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="正在进行中的任务无法删除")
 
-    db.execute(select(PublishAsset).where(PublishAsset.publish_job_id == job.id))
-    for asset in db.scalars(select(PublishAsset).where(PublishAsset.publish_job_id == job.id)).all():
+    db.execute(select(PublishAsset).where(PublishAsset.row_type == ASSET_PUBLISH, PublishAsset.parent_id == job.id))
+    for asset in db.scalars(select(PublishAsset).where(PublishAsset.row_type == ASSET_PUBLISH, PublishAsset.parent_id == job.id)).all():
         db.delete(asset)
     db.delete(job)
     db.commit()
@@ -412,7 +413,7 @@ def get_publish_assets(
 ):
     job = _get_owned_publish_job(db, current_user, job_id)
     assets = db.scalars(
-        select(PublishAsset).where(PublishAsset.publish_job_id == job.id).order_by(PublishAsset.id.asc())
+        select(PublishAsset).where(PublishAsset.row_type == ASSET_PUBLISH, PublishAsset.parent_id == job.id).order_by(PublishAsset.id.asc())
     ).all()
     return paginated([serialize_publish_asset(asset) for asset in assets], page, page_size)
 
@@ -425,7 +426,12 @@ def create_publish_asset(
     db: Session = Depends(get_db),
 ):
     job = _get_owned_publish_job(db, current_user, job_id)
-    asset = PublishAsset(publish_job_id=job.id, asset_type=payload.asset_type, file_path=payload.file_path)
+    asset = PublishAsset(
+        row_type=ASSET_PUBLISH,
+        parent_id=job.id,
+        asset_type=payload.asset_type,
+        local_path=payload.file_path,
+    )
     db.add(asset)
     db.commit()
     db.refresh(asset)
@@ -452,7 +458,7 @@ def upload_publish_asset(
     adapter_factory=Depends(get_creator_publish_adapter_factory),
 ):
     asset = _get_owned_publish_asset(db, current_user, asset_id)
-    job = db.get(PublishJob, asset.publish_job_id)
+    job = db.get(PublishJob, asset.parent_id)
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Publish job not found")
 
@@ -465,7 +471,7 @@ def upload_publish_asset(
     db.commit()
 
     try:
-        payload = adapter_factory(cookies).upload_media(asset.file_path, asset.asset_type)
+        payload = adapter_factory(cookies).upload_media(asset.local_path, asset.asset_type)
         asset.upload_status = "uploaded"
         asset.creator_media_id = _extract_creator_media_id(payload)
         asset.creator_upload_info = json.dumps(payload, ensure_ascii=False)
@@ -504,7 +510,7 @@ def publish_job_to_creator(
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Scheduled publish time must be in the future")
 
     assets = db.scalars(
-        select(PublishAsset).where(PublishAsset.publish_job_id == job.id).order_by(PublishAsset.id.asc())
+        select(PublishAsset).where(PublishAsset.row_type == ASSET_PUBLISH, PublishAsset.parent_id == job.id).order_by(PublishAsset.id.asc())
     ).all()
     if not assets:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="至少需要一个素材")
@@ -524,7 +530,7 @@ def publish_job_to_creator(
     for asset in assets:
         if asset.upload_status in ("pending", "failed"):
             try:
-                payload = adapter.upload_media(asset.file_path, asset.asset_type)
+                payload = adapter.upload_media(asset.local_path, asset.asset_type)
                 asset.upload_status = "uploaded"
                 asset.creator_media_id = _extract_creator_media_id(payload)
                 asset.creator_upload_info = json.dumps(payload, ensure_ascii=False)

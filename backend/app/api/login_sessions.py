@@ -16,7 +16,8 @@ from backend.app.adapters.xhs.qianfan_login_adapter import XhsQianfanLoginAdapte
 from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user, get_owned_active_account
 from backend.app.core.security import decrypt_text, encrypt_text
-from backend.app.models import LoginSession, PlatformAccount, User
+from backend.app.models import PlatformAccount, User
+from backend.app.services.login_session_store import store as login_sessions
 from backend.app.services.account_service import (
     channel_for_cookies,
     cookie_header_from_text,
@@ -64,8 +65,7 @@ class QianfanEmailLoginRequest(BaseModel):
     """千帆邮箱密码登录（2026-09-23，设计 13 §18.15.3；真机抓包 + 服务端实证）。
 
     **邮箱与密码不保留**：它们只是本次请求换令牌的输入 —— 不写库、不进
-    `LoginSession` 行、不回显、不进日志（硬约束，需求原文）。落库的只有
-    Cookie 信封（`account_cookie_versions.encrypted_cookies`，按平台标识）。
+    会话、不回显、不进日志。登录成功才落库（Cookie 信封进 `platform_accounts.cookies_json`）。
 
     `target_account_id`：带 = 续期（店铺对账，§18.14.3）；不带 = 绑定新账号
     （`sub_type="qianfan"`，昵称取店铺名，`external_user_id` 留空走兜底匹配）。
@@ -106,11 +106,7 @@ def _load_json(value: str | None) -> dict:
 
 
 class TempState(NamedTuple):
-    """一次登录会话的临时状态（加密存在 `LoginSession.encrypted_temp_cookies`）。
-
-    **用具名元组而不是 5 元组**：字段一多，位置就变成了「顺序也是语义」那类坑
-    （`{...detail, goods}` 与 `{goods, ...detail}` 行为相反，只差一行）。
-    """
+    """一次登录会话的临时状态（加密存内存会话的 encrypted_temp_cookies）。"""
 
     cookies: dict
     sync_creator: bool
@@ -502,9 +498,8 @@ def pc_qrcode(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"XHS PC QR code generation failed: {exc}",
         ) from exc
-    session = LoginSession(
+    session = login_sessions.create(
         user_id=current_user.id,
-        platform="xhs",
         sub_type="pc",
         status="pending",
         qr_id=qr_payload["qr_id"],
@@ -520,9 +515,6 @@ def pc_qrcode(
             )
         ),
     )
-    db.add(session)
-    db.commit()
-    db.refresh(session)
     return {
         "session_id": session.id,
         "status": session.status,
@@ -546,9 +538,8 @@ def creator_qrcode(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"XHS Creator QR code generation failed: {exc}",
         ) from exc
-    session = LoginSession(
+    session = login_sessions.create(
         user_id=current_user.id,
-        platform="xhs",
         sub_type="creator",
         status="pending",
         qr_id=qr_payload["qr_id"],
@@ -560,9 +551,6 @@ def creator_qrcode(
             )
         ),
     )
-    db.add(session)
-    db.commit()
-    db.refresh(session)
     return {
         "session_id": session.id,
         "status": session.status,
@@ -599,9 +587,8 @@ def qianfan_qrcode(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"XHS Qianfan QR code generation failed: {exc}",
         ) from exc
-    session = LoginSession(
+    session = login_sessions.create(
         user_id=current_user.id,
-        platform="xhs",
         sub_type="qianfan",
         status="pending",
         qr_id=qr_payload["qr_id"],
@@ -613,9 +600,6 @@ def qianfan_qrcode(
             )
         ),
     )
-    db.add(session)
-    db.commit()
-    db.refresh(session)
     return {
         "session_id": session.id,
         "status": session.status,
@@ -635,7 +619,7 @@ def qianfan_email_login(
 
     **同步端点**：邮箱密码没有「等用户扫码」的中间态，一次请求跑完
     emailPwd → ticket/route → 导航换票 → ssologin → seller/login，
-    所以**不建 `LoginSession` 行、不需要轮询**。
+    所以不建会话、不需要轮询。
 
     **邮箱与密码不保留**（需求硬约束）：只经适配器换令牌，不写库、
     不进会话行、不回显、不进日志；落库只有 Cookie 信封。
@@ -727,8 +711,8 @@ def login_session(
     The override is idempotent: the sync itself only runs on the poll that first
     observes ``confirmed``.
     """
-    session = db.get(LoginSession, session_id)
-    if session is None or session.user_id != current_user.id:
+    session = login_sessions.get_owned(session_id, current_user.id)
+    if session is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Login session not found")
     if session.status in {"confirmed", "expired"}:
         return {"session_id": session.id, "status": session.status, "qr_url": session.qr_url}
@@ -879,9 +863,8 @@ def pc_phone_send_code(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Failed to send phone code") from exc
     # ⚠️ **手机号不落库**（同 creator 分支，2026-09-23 用户口径）：连掩码一并停写，
     # 迁移 `x7y8z9a0b1c2` 移除 `login_sessions.phone_mask` 列。
-    session = LoginSession(
+    session = login_sessions.create(
         user_id=current_user.id,
-        platform="xhs",
         sub_type="pc",
         login_method="phone",
         status="pending",
@@ -894,9 +877,6 @@ def pc_phone_send_code(
             )
         ),
     )
-    db.add(session)
-    db.commit()
-    db.refresh(session)
     return {"session_id": session.id, "status": session.status, "message": result.get("message", "sent")}
 
 
@@ -933,9 +913,8 @@ def creator_phone_send_code(
     # 短信验证码同理：只随 confirm 请求透传给平台，从不落任何一行。
     # 2026-09-23（§18.16）：`_dump_json` → `_dump_temp_state` —— 临时态要能携带
     # `target_account_id`（续期目标）；两种形态 `_load_temp_state` 都认，老会话不受影响。
-    session = LoginSession(
+    session = login_sessions.create(
         user_id=current_user.id,
-        platform="xhs",
         sub_type="creator",
         login_method="phone",
         status="pending",
@@ -946,9 +925,6 @@ def creator_phone_send_code(
             )
         ),
     )
-    db.add(session)
-    db.commit()
-    db.refresh(session)
     return {"session_id": session.id, "status": session.status, "message": result.get("message", "sent")}
 
 
@@ -970,10 +946,9 @@ def _confirm_phone_login(
     sub_type: str,
     creator_adapter: XhsCreatorLoginAdapter | None,
 ):
-    session = db.get(LoginSession, payload.session_id)
+    session = login_sessions.get_owned(payload.session_id, current_user.id)
     if (
         session is None
-        or session.user_id != current_user.id
         or session.sub_type != sub_type
         or session.login_method != "phone"
     ):

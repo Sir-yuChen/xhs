@@ -10,13 +10,12 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session
 
-from backend.app.api.platforms.xhs.pc import (
-    get_xhs_pc_api_adapter_factory,
-    normalize_comment_payload,
-)
+#: ⚠️ 2026-10-28（方案 B）：`get_xhs_pc_api_adapter_factory` / `normalize_comment_payload`
+#: 两个 import 已删 —— 它们唯一的用途是「抓评论写 note_comments」，随表一起退场。
+#: 评论的实时读取仍在 `api/platforms/xhs/pc.py`（`POST /xhs/pc/notes/comments`）。
 from backend.app.adapters.xhs.qianfan_api_adapter import get_qianfan_api_adapter_factory
 from backend.app.core.config import get_settings
 from backend.app.core.database import SessionLocal, get_db
@@ -24,7 +23,7 @@ from backend.app.core.deps import get_current_user, get_owned_active_account
 from backend.app.core.time import shanghai_now
 #: ⚠️ 设计 75 S5（2026-10-27）：`NoteGoods` / `ShopNoteGoods` 两个 ORM 类随「笔记↔商品挂链改实时」
 #: 退场（两张表已 DROP），不再 import。
-from backend.app.models import AiDraft, Note, NoteAsset, NoteComment, NoteDatacenterStat, NoteTopic, Notification, PlatformAccount, Topic, User
+from backend.app.models import AiDraft, Note, PublishAsset, NoteDatacenterStat, NoteTopic, Notification, PlatformAccount, Topic, User
 from backend.app.services.note_purge_service import purge_note
 from backend.app.models.scheduled_job import (
     LOG_FAILED,
@@ -76,8 +75,12 @@ class BatchSaveNoteItem(BaseModel):
 
 class BatchSaveNotesRequest(BaseModel):
     account_id: int
-    fetch_comments: bool = False
     notes: list[BatchSaveNoteItem] = Field(min_length=1)
+    #: ⚠️ 2026-10-28（方案 B）：`fetch_comments` 字段**已移除**。它曾是
+    #: `note_comments` 的唯一写入口开关，但前端 `saveXhsNotesToLibrary` 的两个参数
+    #: 里从来没传过它 ⇒ 恒 false、那张表恒 0 行。留着这个字段＝留一个永久关闭的开关。
+    #: 想看评论去「我的笔记 / 笔记发现」页 —— 那条链路是 `POST /xhs/pc/notes/comments`
+    #: **直查平台**，不落库。
 
 
 class BatchTagNotesRequest(BaseModel):
@@ -159,7 +162,7 @@ class _NoteRelations:
     """
 
     #: `notes.id` → 该篇的素材（按 `sort_order, id`）
-    assets: dict[int, list[NoteAsset]] = field(default_factory=dict)
+    assets: dict[int, list[PublishAsset]] = field(default_factory=dict)
     #: `notes.id` → 该篇的话题（`[{id, name, color}]`，按 `NoteTopic.id`）
     topics: dict[int, list[dict]] = field(default_factory=dict)
     #: `notes.id` → 该篇的挂载商品（按 `NoteGoods.id`）
@@ -190,9 +193,9 @@ def _load_note_relations(db: Session, notes: Sequence[Note]) -> _NoteRelations:
 
     # 素材（`note_assets.note_id` 是**本地主键**）
     for asset in db.scalars(
-        select(NoteAsset)
-        .where(NoteAsset.note_id.in_(ids))
-        .order_by(NoteAsset.sort_order.asc(), NoteAsset.id.asc())
+        select(PublishAsset)
+        .where(PublishAsset.parent_id.in_(ids))
+        .order_by(PublishAsset.sort_order.asc(), PublishAsset.id.asc())
     ).all():
         relations.assets.setdefault(asset.note_id, []).append(asset)
 
@@ -205,9 +208,6 @@ def _load_note_relations(db: Session, notes: Sequence[Note]) -> _NoteRelations:
     ).all():
         relations.topics.setdefault(note_id, []).append(_serialize_topic(topic))
 
-    # 挂载商品（§26.7：关系表两侧都是**平台 ID** ⇒ 用 `note.note_id` 查）
-    relations.goods.update(_load_batch_goods(db, notes))
-
     # 来源账号（取昵称；软删账号照常回传 —— 那是这条笔记的历史归属，不是「可选账号」）
     account_ids = {note.platform_account_id for note in notes if note.platform_account_id}
     if account_ids:
@@ -217,35 +217,6 @@ def _load_note_relations(db: Session, notes: Sequence[Note]) -> _NoteRelations:
             relations.accounts[account.id] = account
 
     return relations
-
-
-def _load_batch_goods(db: Session, notes: Sequence[Note]) -> dict[int, list[dict]]:
-    """这批笔记的挂载商品 —— ⚠️ 设计 75 S5 起恒为空（不查库、不查平台）。
-
-    ## 为什么不再在这里查
-
-    | 原实现 | 现状 |
-    |---|---|
-    | 读 `note_goods` 关系表 | 表已 DROP（迁移 `n8o9p0q1r2s3`） |
-    | 读 `shop_note_goods` 补规格 | 同上 |
-    | 读 `shop_products` 取标题 / 价格 | 同上（商品改实时查平台） |
-
-    ## 为什么不改成「一页 20 篇逐篇去平台查」
-
-    平台只有「按**商品**反查笔记」（`item_mix_search_word`）和「按**笔记 ID** 批量查
-    挂链」（`note_ids`）。后者其实可用 —— 但它与本函数服务的内容库列表的候选集合并
-    不完全一致（本地笔记包含**还没发布**的本地生成笔记，平台上根本不存在），为了让
-    「列表每篇都带商品」而去打一次平台，换来的是一页最多 1 次请求的固定成本 + 一处
-    失败面，而列表页的主要信息是笔记本身。
-
-    ⇒ 挂载商品在**需要它的地方**实时查：
-    * 「我的笔记」列表 / 详情 → `_attach_shop_goods`（按本页 `note_ids` 一次实时查回）；
-    * 单篇商品详情 → `GET /notes/goods/{item_id}`（实时）。
-
-    调用方拿到空字典即渲染成「无挂载商品」—— 与改造前「关系表里没有这行」**同一形状**，
-    前端零改动。
-    """
-    return {}
 
 
 def _goods_entry(product: Any, item_id: Any, variant: str = "") -> dict:
@@ -287,17 +258,7 @@ def _goods_entry(product: Any, item_id: Any, variant: str = "") -> dict:
     }
 
 
-def _note_goods(db: Session, note: Note) -> list[dict]:
-    """（薄包装）**唯一实现见 `_load_note_relations`** —— 单篇 = 长度为 1 的批量。
-
-    保留这个函数名只为既有调用点（`tests/backend/test_note_goods.py` 直接 import 它）
-    不断裂；**函数体只有这一行转发**，不许在别处再抄一遍「`note_goods` join
-    `shop_products`」的查法（DEF-044：一个语义两份实现）。
-    """
-    return _load_note_relations(db, [note]).goods.get(note.id, [])
-
-
-def _asset_display_url(asset: NoteAsset) -> str:
+def _asset_display_url(asset: PublishAsset) -> str:
     if asset.local_path:
         return f"/api/files/media/{asset.local_path}"
     return asset.url
@@ -392,7 +353,7 @@ def _serialize_note_with_topics(
 
 
 
-def _serialize_asset(asset: NoteAsset) -> dict:
+def _serialize_asset(asset: PublishAsset) -> dict:
     return {
         "id": asset.id,
         "note_id": asset.note_id,
@@ -401,21 +362,6 @@ def _serialize_asset(asset: NoteAsset) -> dict:
         "local_path": asset.local_path,
         "download_url": f"/api/files/media/{asset.local_path}" if asset.local_path else "",
         "sort_order": asset.sort_order,
-    }
-
-
-def _serialize_comment(comment: NoteComment) -> dict:
-    return {
-        "id": comment.id,
-        "note_id": comment.note_id,
-        "comment_id": comment.comment_id,
-        "user_name": comment.user_name,
-        "user_id": comment.user_id,
-        "content": comment.content,
-        "like_count": comment.like_count,
-        "parent_comment_id": comment.parent_comment_id,
-        "created_at_remote": comment.created_at_remote,
-        "raw_json": comment.raw_json,
     }
 
 
@@ -439,16 +385,10 @@ def _get_owned_account(db: Session, current_user: User, account_id: int) -> Plat
     return get_owned_active_account(db, current_user, account_id, platform="xhs")
 
 
-def _get_latest_account_cookies(db: Session, account: PlatformAccount) -> str:
-    """抓笔记评论的令牌：**只取 www 平台**（2026-09-21 拆分，§11.5）。
-
-    评论接口（`edith`）只有网页版提供，调用方也已要求 `sub_type == "pc"`；
-    按平台取 www，不再按「最新一版」猜（拆分后最新一行信封可能只含本次登录
-    碰过的那个平台）。取不到返回空串，由调用方决定怎么报。
-    """
-    from backend.app.services.account_service import CHANNEL_WWW, latest_cookies_for_channel
-
-    return latest_cookies_for_channel(db, account.id, CHANNEL_WWW)
+#: ⚠️ 2026-10-28（方案 B）：`_get_latest_account_cookies` **已删除** —— 它唯一的调用方
+#: 是「抓笔记评论写 `note_comments`」那条分支（随表一起退场）。www 令牌的取法仍在
+#: `services/account_service.latest_cookies_for_channel(db, account_id, CHANNEL_WWW)`
+#: 一份实现里，`api/publish.py` 自己的同名私有函数还在用（发布链路取视频/图片令牌）。
 
 
 def _get_owned_note(db: Session, current_user: User, note_id: int) -> Note:
@@ -467,7 +407,7 @@ def _publish_status_stats(db: Session, user_id: int, platform: Optional[str]) ->
 
     **口径 = 内容库可见范围**（2026-10-27 修订）：与列表同一把尺子 ——
     `is_deleted=False` + `note_type ∈ LIBRARY_NOTE_TYPES`。**不叠加** `q` /
-    `topic_id` / `has_assets` / `has_comments` / `publish_status` 任一**用户筛选**
+    `topic_id` / `has_assets` / `publish_status` 任一**用户筛选**
     （它服务的是「内容池结构」这一眼，跟着筛选走会读不出池子结构）。
 
     ⚠️ 为什么必须带这两道（改前只按 `user_id`+`platform`，是**全库**口径）：
@@ -624,7 +564,6 @@ def get_notes(
     q: Optional[str] = None,
     topic_id: Optional[int] = None,
     has_assets: Optional[bool] = None,
-    has_comments: Optional[bool] = None,
     publish_status: str = "all",
     platform_account_id: Optional[int] = None,
     note_type: Optional[str] = None,
@@ -680,13 +619,12 @@ def get_notes(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Topic not found")
         statement = statement.where(Note.id.in_(select(NoteTopic.note_id).where(NoteTopic.topic_id == topic_id)))
     if has_assets is True:
-        statement = statement.where(Note.id.in_(select(NoteAsset.note_id)))
+        statement = statement.where(Note.id.in_(select(PublishAsset.parent_id)))
     elif has_assets is False:
-        statement = statement.where(Note.id.not_in(select(NoteAsset.note_id)))
-    if has_comments is True:
-        statement = statement.where(Note.id.in_(select(NoteComment.note_id)))
-    elif has_comments is False:
-        statement = statement.where(Note.id.not_in(select(NoteComment.note_id)))
+        statement = statement.where(Note.id.not_in(select(PublishAsset.parent_id)))
+    #: ⚠️ `has_comments` 筛选已退场（2026-10-28 方案 B）：它查的是 `note_comments`，
+    #: 而那张表写入口从未打通、实测恒 0 行 ⇒「有评论」筛选永远返回空集，留着比删掉更误导。
+    #: 评论本身仍在「我的笔记 / 笔记发现」页**直查平台**查看（`POST /xhs/pc/notes/comments`）。
     # 发布状态筛选（四档，设计 13 §32.3.3）：**白名单校验**，未知值 400 不静默忽略；
     # 档 → 存储值的映射只有 `PUBLISH_STATUS_FILTER_GROUPS` 一份（统计用同一份）。
     status_key = (publish_status or "all").strip()
@@ -1033,36 +971,30 @@ def get_offline_notes(
     }
 
 
-class BatchDeleteNotesRequest(BaseModel):
+class BatchDeletePlatformNotesRequest(BaseModel):
     #: 平台 note_id（字符串，不是本地主键 id）
     note_ids: list[str] = Field(min_length=1)
-    #: True = 删本地 + 平台；False = 只删本地（默认）。
-    delete_platform: bool = False
-    #: 账号（可选）。**本地没有这些笔记时必须给** —— 否则无法确定打哪个平台的令牌。
-    #: 给了就一定按它走（即使本地笔记的归属账号与它不同，也不静默改）。
-    platform_account_id: int | None = None
+    #: 账号：决定了用哪套平台令牌（ark / creator）
+    platform_account_id: int
 
 
 @router.post("/batch-delete")
-def batch_delete_notes_endpoint(
-    payload: BatchDeleteNotesRequest,
+def batch_delete_platform_notes(
+    payload: BatchDeletePlatformNotesRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """商业/普通 Tab 复选框**批量删除**（2026-10-06 需求）。
+    """**在平台删除笔记**（数据中心用）—— 只动平台，**不碰本地 `notes` 表**。
 
-    `note_ids` 是**平台 note_id**（不是本地主键）。两种方式（前端单选框）：
+    2026-10-28 用户口径：`notes` 只存「本地生成且未发布成功」的笔记；平台笔记的事实
+    只在 `note_datacenter_stats`。故删除就是删平台数据，本地无需也不该跟着删。
 
-    * `delete_platform=false`（默认）：**只删本地**（`purge_note`，连关系行一起删），不碰平台。
-    * `delete_platform=true`：**先删平台、成功后删本地** —— 商业笔记（goods_note）走千帆
-      `batch_delete_notes`（批量），普通笔记（非 goods_note）走创作者 `validate_delete_permission`
-      + `delete_note`（逐篇）。平台删除失败的笔记**本地保留**，如实返回失败原因。
+    分流（读统计表 `note_flag`，缺行按普通笔记）：
+    * 商业笔记（`goods_note`）：千帆批量 → 创作者逐篇兜底
+    * 普通笔记：创作者逐篇 → 千帆批量兜底
+    两条通道**任一成功即止**，不重复删。
 
-    返回 `{deleted: int, failed: [...], results: [...]}`。账号无对应平台 Cookie 时，
-    平台删除全部失败（本地也不删），理由如实带出。
-
-    2026-10-12 设计 35：商业/普通分流判据由 `note_category` 改 `note_flag`
-    （`note_datacenter_stats.note_flag == "goods_note"` ⇒ 商业）。
+    返回 `{deleted, failed:[{note_id, reason}], results:[{note_id, ok, reason?}]}`。
     """
     from backend.app.adapters.xhs.creator_api_adapter import XhsCreatorApiAdapter
     from backend.app.adapters.xhs.qianfan_api_adapter import XhsQianfanApiAdapter
@@ -1071,52 +1003,10 @@ def batch_delete_notes_endpoint(
         CHANNEL_CREATOR,
         latest_cookies_for_channel,
     )
-
-    wanted = [str(n).strip() for n in payload.note_ids if str(n).strip()]
-    if not wanted:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="note_ids 为空")
-
-    notes = db.scalars(
-        select(Note).where(Note.user_id == current_user.id, Note.note_id.in_(wanted))
-    ).all()
-    by_note_id = {n.note_id: n for n in notes}
-
-    results: list[dict[str, Any]] = []
-    deleted = 0
-    failed: list[dict[str, Any]] = []
-
-    if not payload.delete_platform:
-        # 只删本地：直接 purge。
-        for nid in wanted:
-            note = by_note_id.get(nid)
-            if note is None:
-                results.append({"note_id": nid, "ok": False, "reason": "本地无此笔记"})
-                failed.append({"note_id": nid, "reason": "本地无此笔记"})
-                continue
-            purge_note(db, note)
-            deleted += 1
-            results.append({"note_id": nid, "ok": True})
-        db.commit()
-        return {"deleted": deleted, "failed": failed, "results": results}
-
-    # 删本地 + 平台：**先删平台，成功后再删本地**（设计 44 用户口径）。
-    # 账号：优先用请求里给的（本地没这些笔记时只能靠它），否则取第一笔本地笔记的归属账号。
-    account_id = payload.platform_account_id
-    if account_id is None:
-        for n in notes:
-            if n.platform_account_id:
-                account_id = n.platform_account_id
-                break
-    if account_id is None:
-        db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="这批笔记本地都没有记录，需显式指定 platform_account_id 才能删除平台数据",
-        )
-
-    # 用自己的账号做归属校验（不给别人的账号当令牌用）
     from backend.app.api.platforms.xhs.qianfan._shared import _owned_account
 
+    wanted = list(dict.fromkeys(payload.note_ids))
+    account_id = payload.platform_account_id
     _owned_account(db, current_user, account_id)
 
     ark_cookies = latest_cookies_for_channel(db, account_id, CHANNEL_ARK) or ""
@@ -1124,145 +1014,102 @@ def batch_delete_notes_endpoint(
     qianfan_adapter = XhsQianfanApiAdapter(ark_cookies) if ark_cookies else None
     creator_adapter = XhsCreatorApiAdapter(creator_cookies) if creator_cookies else None
 
-    # 分组：goods_note → 千帆批量，非 goods_note → creator 逐篇。
-    # 2026-10-12 设计 35：分流判据读统计表 `note_flag`（取代已退役的 `note_category`）。
     flag_by_note_id = {
         r.note_id: r.note_flag
-        for r in db.scalars(
+        for r in db.execute(
             select(NoteDatacenterStat.note_id, NoteDatacenterStat.note_flag).where(
-                NoteDatacenterStat.note_id.in_(wanted)
+                NoteDatacenterStat.note_id.in_(wanted),
+                NoteDatacenterStat.user_id == current_user.id,
             )
         ).all()
     }
-    goods_ids: list[str] = []
-    creator_ids: list[str] = []
-    for nid in wanted:
-        note = by_note_id.get(nid)
-        # ⚠️ 2026-10-18 口径修正（设计 44）：本地没有**不再直接判失败** ——
-        #    旧写法在这里 `failed` 完就 continue，**根本不打平台**，于是「平台有、
-        #    本地没同步过」的笔记永远删不掉。新口径：先删平台，本地没有就跳过。
-        #    是否分区（商业/普通）仍看统计表；本地无统计行 ⇒ 按普通笔记处理。
-        if note is not None and flag_by_note_id.get(nid) == "goods_note":
-            goods_ids.append(nid)
-        else:
-            creator_ids.append(nid)
+    goods_ids = [n for n in wanted if flag_by_note_id.get(n) == "goods_note"]
+    creator_ids = [n for n in wanted if flag_by_note_id.get(n) != "goods_note"]
 
-    # 商业笔记：千帆批量删除（一次请求删整组）。成功后逐篇 purge 本地。
+    results: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    deleted = 0
+
+    def _qianfan(note_ids: list[str]) -> tuple[list[str], dict[str, str]]:
+        if qianfan_adapter is None:
+            return [], {n: "缺少千帆(ark)登录态" for n in note_ids}
+        try:
+            ok, msg, _ = qianfan_adapter.batch_delete_notes(note_ids)
+        except Exception as exc:  # noqa: BLE001
+            return [], {n: f"千帆异常：{type(exc).__name__}: {exc}" for n in note_ids}
+        if ok:
+            return list(note_ids), {}
+        return [], {n: str(msg) for n in note_ids}
+
+    def _creator(note_id: str) -> tuple[bool, str]:
+        if creator_adapter is None:
+            return False, "缺少创作者登录态"
+        try:
+            ok, msg, _ = creator_adapter.validate_delete_permission(note_id)
+            if ok:
+                ok, msg, _ = creator_adapter.delete_note(note_id)
+        except Exception as exc:  # noqa: BLE001
+            return False, f"创作者异常：{type(exc).__name__}: {exc}"
+        return bool(ok), str(msg or "")
+
+    # 商业笔记：千帆批量 → 创作者兜底
     if goods_ids:
-        # 商业笔记：**千帆先试 → 创作者兜底 → 任一成功即止**（用户 2026-10-18：
-        # 「均调用一次，先走普通再走千帆，其中一个成功就不再走其它的」）。
-        # ⚠️ 顺序不同不矛盾：商业笔记的**正路**本来就是千帆，普通笔记的正路是创作者；
-        #    两者都是「正路失败再兜底」，绝不是各删一次。
-        goods_ok_ids: list[str] = []
-        goods_fail: dict[str, str] = {}
-
-        if qianfan_adapter is not None:
-            try:
-                ok, msg, _ = qianfan_adapter.batch_delete_notes(goods_ids)
-            except Exception as exc:  # noqa: BLE001
-                ok, msg = False, f"千帆删除异常：{type(exc).__name__}: {exc}"
-            if ok:
-                goods_ok_ids = list(goods_ids)
-            else:
-                for nid in goods_ids:
-                    goods_fail[nid] = f"千帆通道：{msg}"
-        else:
-            for nid in goods_ids:
-                goods_fail[nid] = "千帆通道：缺少千帆(ark)登录态"
-
-        # 千帆没删掉的，创作者再试一次（有成就不再调）
-        for nid in goods_ids:
-            if nid in goods_ok_ids:
-                continue
-            if creator_adapter is None:
-                goods_fail[nid] = f"{goods_fail.get(nid, '')}；普通笔记通道：缺少创作者登录态"
-                continue
-            try:
-                ok, msg, _ = creator_adapter.validate_delete_permission(nid)
+        ok_ids, reasons = _qianfan(goods_ids)
+        for note_id in goods_ids:
+            if note_id not in ok_ids:
+                ok, msg = _creator(note_id)
                 if ok:
-                    ok, msg, _ = creator_adapter.delete_note(nid)
-            except Exception as exc:  # noqa: BLE001
-                ok, msg = False, f"创作者异常：{type(exc).__name__}: {exc}"
-            if ok:
-                goods_ok_ids.append(nid)
-                goods_fail.pop(nid, None)
-            else:
-                goods_fail[nid] = f"{goods_fail.get(nid, '')}；普通笔记通道：{msg}"
-
-        for nid in goods_ids:
-            if nid in goods_ok_ids:
-                note = by_note_id.get(nid)
-                if note is not None:
-                    purge_note(db, note)
-                    deleted += 1
-                    results.append({"note_id": nid, "ok": True, "status": "deleted"})
+                    ok_ids.append(note_id)
+                    reasons.pop(note_id, None)
                 else:
-                    # 平台删了、本地没有 ⇒ 跳过（不是失败）
-                    results.append({
-                        "note_id": nid, "ok": True, "status": "platform_only",
-                        "reason": "平台已删除；本地没有这条笔记，已跳过",
-                    })
-            else:
-                reason = goods_fail.get(nid) or "平台删除失败"
-                results.append({"note_id": nid, "ok": False, "reason": reason})
-                failed.append({"note_id": nid, "reason": reason})
-
-    # 普通笔记：**创作者通道先试 → 千帆兜底 → 任一成功即止**（用户 2026-10-18 口径：
-    # 「商业笔记和普通笔记均调用一次，先走普通再走千帆，如果其中一个成功则不再走其它的」）。
-    # 旧写法 creator 不可用就整条失败，而账号 8 实测创作者会话过期、千帆却可用 ⇒
-    # 能删的笔记被判失败。
-    for nid in creator_ids:
-        note = by_note_id.get(nid)
-        reason_parts: list[str] = []
-        platform_ok = False
-
-        if creator_adapter is not None:
-            try:
-                ok, msg, _ = creator_adapter.validate_delete_permission(nid)
-                if ok:
-                    ok, msg, _ = creator_adapter.delete_note(nid)
-            except Exception as exc:  # noqa: BLE001
-                ok, msg = False, f"创作者异常：{type(exc).__name__}: {exc}"
-            if ok:
-                platform_ok = True
-            else:
-                reason_parts.append(f"普通笔记通道：{msg}")
-        else:
-            reason_parts.append("普通笔记通道：缺少创作者登录态")
-
-        # ① 没成功 ⇒ 千帆再试一次；② 成功了就不再调另一条
-        if not platform_ok:
-            if qianfan_adapter is not None:
-                try:
-                    ok, msg, _ = qianfan_adapter.batch_delete_notes([nid])
-                except Exception as exc:  # noqa: BLE001
-                    ok, msg = False, f"千帆异常：{type(exc).__name__}: {exc}"
-                if ok:
-                    platform_ok = True
-                else:
-                    reason_parts.append(f"千帆通道：{msg}")
-            else:
-                reason_parts.append("千帆通道：缺少千帆(ark)登录态")
-
-        if platform_ok:
-            if note is not None:
-                purge_note(db, note)
+                    reasons[note_id] = f"{reasons.get(note_id, '')}；创作者通道：{msg}".strip("；")
+        for note_id in goods_ids:
+            if note_id in ok_ids:
                 deleted += 1
-                results.append({"note_id": nid, "ok": True, "status": "deleted"})
+                results.append({"note_id": note_id, "ok": True})
             else:
-                # 平台删了、本地没有 ⇒ 跳过（不是失败）
-                results.append({
-                    "note_id": nid, "ok": True, "status": "platform_only",
-                    "reason": "平台已删除；本地没有这条笔记，已跳过",
-                })
+                reason = reasons.get(note_id) or "平台删除失败"
+                results.append({"note_id": note_id, "ok": False, "reason": reason})
+                failed.append({"note_id": note_id, "reason": reason})
+
+    # 普通笔记：创作者逐篇 → 千帆兜底
+    for note_id in creator_ids:
+        parts: list[str] = []
+        ok, msg = _creator(note_id)
+        if ok:
+            deleted += 1
+            results.append({"note_id": note_id, "ok": True})
+            continue
+        parts.append(f"创作者通道：{msg}")
+        ok_ids, reasons = _qianfan([note_id])
+        if ok_ids:
+            deleted += 1
+            results.append({"note_id": note_id, "ok": True})
         else:
-            reason = "；".join(reason_parts) or "平台删除失败"
-            results.append({"note_id": nid, "ok": False, "reason": reason})
-            failed.append({"note_id": nid, "reason": reason})
+            parts.append(f"千帆通道：{reasons.get(note_id, '')}")
+            reason = "；".join(p for p in parts if p) or "平台删除失败"
+            results.append({"note_id": note_id, "ok": False, "reason": reason})
+            failed.append({"note_id": note_id, "reason": reason})
 
-    db.commit()
+    #: 平台删成功的笔记在统计行打「已删」标记（设计 35 §275）：列表默认隐藏、
+    #: `deleted=deleted` 才看得到。统计行**不删**（数据中心要留历史）。
+    ok_ids_all = [r["note_id"] for r in results if r.get("ok")]
+    if ok_ids_all:
+        try:
+            db.execute(
+                update(NoteDatacenterStat)
+                .where(
+                    NoteDatacenterStat.user_id == current_user.id,
+                    NoteDatacenterStat.note_id.in_(ok_ids_all),
+                    NoteDatacenterStat.platform_deleted_at.is_(None),
+                )
+                .values(platform_deleted_at=shanghai_now())
+            )
+            db.commit()
+        except Exception:  # noqa: BLE001 - 记账失败不反噬平台结论
+            db.rollback()
+
     return {"deleted": deleted, "failed": failed, "results": results}
-
 
 @router.post("/{note_id}/hydrate")
 def hydrate_offline_note_detail(
@@ -1270,60 +1117,38 @@ def hydrate_offline_note_detail(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """**点击笔记卡片时实时拉详情并落库**（2026-10-06 需求，取代定时任务/导入自动拉）。
+    """数据中心笔记的**实时详情**（正文 / 话题）—— 纯读，**零落库**。
 
-    对**一条**离线笔记（有数据中心统计，即 `note_datacenter_stats` 有行）实时拉
-    平台详情（正文 / 媒体图视频 / 话题），**落库**：正文 → `notes.content`、媒体 →
-    `note_assets`、话题 → `topics` + `note_topics`（拆表）。数据源是笔记原链接
-    自带的 `xsec_token`（匿名 explore SSR，无需登录）。
+    2026-10-28 用户口径「数据中心完全和笔记表拆分，不再查笔记表」：平台笔记的事实
+    只在 `note_datacenter_stats`（本表带 `note_url`，含 `xsec_token`），`notes` 只存
+    用户自己的笔记。故这里**不读也不写 `notes`**，每次点击现拉，与线上笔记
+    `POST /xhs/pc/notes/detail` 同口径。
 
-    ⚠️ 仅离线笔记支持（统计表有行）；内容库/「全部笔记」tab 的线上笔记
-    走 `POST /xhs/pc/notes/detail`（不落库）。
-
-    返回序列化后的完整笔记（含落库后的 `content` / `asset_urls` / `topics` /
-    `raw_json.metrics` 指标）。幂等：已有正文+媒体则跳过（`hydrate_offline_note`）。
+    返回 `{status, content, topics, image_urls, video_url}`；
+    `status` ∈ `ok` / `no_url`（缺 token）/ `skipped_by_limit` / `failed`。
     """
-    from backend.app.services.note_data_service import hydrate_offline_note
+    from backend.app.services.note_data_service import fetch_datacenter_note_detail
     from backend.app.core.rate_limiter import get_rate_limiter
     from backend.app.adapters.xhs.note_detail_ssr import fetch_note_detail_payload
 
-    # 离线笔记判定：`note_datacenter_stats` 统计表有行（2026-10-12 设计 35，
-    # 取代 `note_category != DEFAULT`）。
-    has_stats = db.scalar(
-        select(NoteDatacenterStat.id).where(
+    stat = db.scalars(
+        select(NoteDatacenterStat).where(
             NoteDatacenterStat.note_id == note_id,
             NoteDatacenterStat.user_id == current_user.id,
-        )
-    )
-    note = db.scalars(
-        select(Note).where(
-            Note.note_id == note_id,
-            Note.user_id == current_user.id,
-            Note.is_deleted.is_(False),
-        )
+        ).order_by(NoteDatacenterStat.stat_date.desc())
     ).first()
-    if note is None or has_stats is None:
+    if stat is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail={"code": "OFFLINE_NOTE_NOT_FOUND", "message": "该离线笔记不存在或不属于当前账号"},
+            detail={"code": "DATACENTER_NOTE_NOT_FOUND", "message": "数据中心没有这条笔记"},
         )
 
-    # 2026-10-06：详情拉取用 `raw_json.note_url` 里已有的 xsec_token。笔记在平台侧
-    # 已被删除/不可见时拉不到详情是**数据事实**（用户已确认，无需回查补救）——
-    # 这里只拉一次，失败就安静降级，不按 note_id 回查（回查也救不了已删除的笔记）。
-    outcome = hydrate_offline_note(
-        db,
-        note,
+    return fetch_datacenter_note_detail(
+        stat.note_url or "",
         fetch_payload=fetch_note_detail_payload,
         limiter=get_rate_limiter(),
+        limiter_key=f"dc:{current_user.id}:{note_id}",
     )
-    # 2026-10-06：详情拉取失败（笔记平台已删除/不可见）**不 502 报错**，而是安静降级
-    # —— 返回笔记现有的离线数据（标题/指标/商品），正文/媒体留空。前端据
-    # `hydrate_status` 显示「详情暂不可用」的安静提示，而不是红块错误。
-    db.commit()
-    serialized = _serialize_note_with_topics(db, note)
-    serialized["hydrate_status"] = outcome["status"]
-    return serialized
 
 
 @router.post("/import-data")
@@ -1690,7 +1515,7 @@ def batch_create_drafts(
             platform=note.platform,
             title=note.title,
             body=note.content,
-            source_note_id=note.id,
+            source_row_type=ASSET_NOTE, parent_id=note.id,
         )
         db.add(draft)
         drafts.append(draft)
@@ -1882,7 +1707,7 @@ def get_note_assets(
     db: Session = Depends(get_db),
 ):
     note = _get_owned_note(db, current_user, note_id)
-    assets = db.scalars(select(NoteAsset).where(NoteAsset.note_id == note.id).order_by(NoteAsset.sort_order.asc(), NoteAsset.id.asc())).all()
+    assets = db.scalars(select(PublishAsset).where(PublishAsset.parent_id == note.id).order_by(PublishAsset.sort_order.asc(), PublishAsset.id.asc())).all()
     return paginated([_serialize_asset(asset) for asset in assets], page, page_size)
 
 
@@ -1902,8 +1727,8 @@ def add_note_asset(
     note = _get_owned_note(db, current_user, note_id)
     if not payload.url and not payload.local_path:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="url or local_path is required")
-    asset = NoteAsset(
-        note_id=note.id,
+    asset = PublishAsset(
+        row_type=ASSET_NOTE, parent_id=note.id,
         asset_type=payload.asset_type,
         url=payload.url,
         local_path=payload.local_path,
@@ -1923,7 +1748,7 @@ def delete_note_asset(
 ):
     note = _get_owned_note(db, current_user, note_id)
     asset = db.scalars(
-        select(NoteAsset).where(NoteAsset.id == asset_id, NoteAsset.note_id == note.id)
+        select(PublishAsset).where(PublishAsset.id == asset_id, PublishAsset.parent_id == note.id)
     ).first()
     if asset is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
@@ -1944,7 +1769,7 @@ def reorder_note_assets(
     db: Session = Depends(get_db),
 ):
     note = _get_owned_note(db, current_user, note_id)
-    assets = db.scalars(select(NoteAsset).where(NoteAsset.note_id == note.id)).all()
+    assets = db.scalars(select(PublishAsset).where(PublishAsset.parent_id == note.id)).all()
     asset_map = {a.id: a for a in assets}
     for idx, aid in enumerate(payload.asset_ids):
         if aid in asset_map:
@@ -1953,19 +1778,16 @@ def reorder_note_assets(
     return {"ok": True}
 
 
-@router.get("/{note_id}/comments")
-def get_note_comments(
-    note_id: int,
-    page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=200),
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    note = _get_owned_note(db, current_user, note_id)
-    comments = db.scalars(
-        select(NoteComment).where(NoteComment.note_id == note.id).order_by(NoteComment.id.asc())
-    ).all()
-    return paginated([_serialize_comment(comment) for comment in comments], page, page_size)
+#: ⚠️ **`GET /notes/{note_id}/comments` 已整条退场**（2026-10-28 方案 B）。
+#: 它读的是 `note_comments`（已 DROP），且对应的前端函数 `fetchSavedNoteComments`
+#: **零调用方**（`library-page.tsx:1527` 那句「我的笔记页仍在用」是过期注释 ——
+#: 我的笔记走 `/xhs/pc/notes/comments` 直查平台）。没有入口的端点留着，
+#: 只会让人以为「本地评论镜像」这条链路还在。
+#
+# 原实现（保留形状供对照）：
+#     note = _get_owned_note(db, current_user, note_id)
+#     comments = db.scalars(select(NoteComment).where(NoteComment.note_id == note.id)).all()
+#     return paginated([_serialize_comment(c) for c in comments], page, page_size)
 
 
 def _download_asset(url: str, user_id: int, asset_type: str) -> str | None:
@@ -1978,14 +1800,15 @@ def batch_save_notes(
     payload: BatchSaveNotesRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-    adapter_factory=Depends(get_xhs_pc_api_adapter_factory),
 ):
+    """发现页「加入内容库」：把选中的笔记落成 `notes` 行 + 下载图集。
+
+    ⚠️ 2026-10-28（方案 B）：**不再有 `fetch_comments` 分支**。原实现会在
+    `fetch_comments=true` 时调 `adapter.get_note_comments()` 并写 `note_comments`，
+    但前端从未传这个参数、表实测 0 行 ⇒ 整条分支删除（表也已 DROP）。评论走
+    `POST /xhs/pc/notes/comments` 直查平台，与本端点无关。
+    """
     account = _get_owned_account(db, current_user, payload.account_id)
-    comment_adapter = None
-    if payload.fetch_comments:
-        if account.sub_type != "pc":
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="PC account is required to fetch comments")
-        comment_adapter = adapter_factory(_get_latest_account_cookies(db, account))
     saved_notes: list[Note] = []
 
     for note_payload in payload.notes:
@@ -2020,38 +1843,16 @@ def batch_save_notes(
             merged_raw["note_url"] = note_payload.note_url
         existing.raw_json = merged_raw
         db.flush()
-        db.execute(delete(NoteAsset).where(NoteAsset.note_id == existing.id))
+        db.execute(delete(PublishAsset).where(PublishAsset.parent_id == existing.id))
         image_candidates = [*note_payload.image_urls] or ([note_payload.cover_url] if note_payload.cover_url else [])
         unique_image_urls = [url for index, url in enumerate(image_candidates) if url and url not in image_candidates[:index]]
         for image_url in unique_image_urls:
             local_name = _download_asset(image_url, current_user.id, "image")
-            db.add(NoteAsset(note_id=existing.id, asset_type="image", url=image_url, local_path=local_name or ""))
+            db.add(PublishAsset(row_type=ASSET_NOTE, parent_id=existing.id, asset_type="image", url=image_url, local_path=local_name or ""))
         video_url = note_payload.video_url or note_payload.video_addr
         if video_url:
             local_name = _download_asset(video_url, current_user.id, "video")
-            db.add(NoteAsset(note_id=existing.id, asset_type="video", url=video_url, local_path=local_name or ""))
-        if payload.fetch_comments and note_payload.note_url and comment_adapter is not None:
-            success, message, raw_payload = comment_adapter.get_note_comments(note_payload.note_url)
-            if not success:
-                raise HTTPException(
-                    status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail=message or "XHS note comments failed",
-                )
-            db.execute(delete(NoteComment).where(NoteComment.note_id == existing.id))
-            for comment in normalize_comment_payload(raw_payload):
-                db.add(
-                    NoteComment(
-                        note_id=existing.id,
-                        comment_id=comment["comment_id"],
-                        user_name=comment["user_name"],
-                        user_id=comment["user_id"],
-                        content=comment["content"],
-                        like_count=comment["like_count"],
-                        parent_comment_id=comment["parent_comment_id"],
-                        created_at_remote=comment["created_at_remote"],
-                        raw_json=comment["raw_json"],
-                    )
-                )
+            db.add(PublishAsset(row_type=ASSET_NOTE, parent_id=existing.id, asset_type="video", url=video_url, local_path=local_name or ""))
         saved_notes.append(existing)
 
     db.commit()
@@ -2091,7 +1892,7 @@ def batch_tag_notes(
         if payload.mode == "replace":
             db.execute(delete(NoteTopic).where(NoteTopic.note_id == note.id))
             for topic_id in topic_ids:
-                db.add(NoteTopic(note_id=note.id, topic_id=topic_id))
+                db.add(NoteTopic(row_type=ASSET_NOTE, parent_id=note.id, topic_id=topic_id))
             continue
 
         if payload.mode == "add":
@@ -2100,7 +1901,7 @@ def batch_tag_notes(
             )
             for topic_id in topic_ids:
                 if topic_id not in existing_topic_ids:
-                    db.add(NoteTopic(note_id=note.id, topic_id=topic_id))
+                    db.add(NoteTopic(row_type=ASSET_NOTE, parent_id=note.id, topic_id=topic_id))
             continue
 
         if topic_ids:

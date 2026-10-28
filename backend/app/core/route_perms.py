@@ -63,11 +63,9 @@ EXEMPT: Final[dict[str, str]] = {
 ROUTE_PERMS: Final[dict[str, str]] = {
     "DELETE /api/accounts/{account_id}": "xhs:account:delete",
     "DELETE /api/ai/images/assets/{asset_id}": "ai:generate:generate",
-    "DELETE /api/auto-tasks/{task_id}": "xhs:autoops:delete",
     "DELETE /api/drafts/{draft_id}": "xhs:note:delete",
     "DELETE /api/drafts/{draft_id}/assets/{asset_id}": "xhs:note:edit",
     "DELETE /api/files/images/{file_name}": "xhs:files:delete",
-    "DELETE /api/keyword-groups/{group_id}": "xhs:keyword:delete",
     "DELETE /api/llm/gateway-alerts/{alert_id}": "ai:alert:view",
     "DELETE /api/llm/gateway-configs/{config_id}/models/{model_id}": "ai:model:delete",
     "DELETE /api/notes/{note_id}": "xhs:library:delete",
@@ -95,12 +93,9 @@ ROUTE_PERMS: Final[dict[str, str]] = {
     "DELETE /api/xhs/llm/prompt-templates/{template_id}": "ai:prompt:delete",
     "DELETE /api/xhs/materials/files/{file_id}": "xhs:material:deleteFolder",
     "DELETE /api/xhs/materials/folders/{folder_id}": "xhs:material:deleteFolder",
-    "DELETE /api/xhs/monitoring/targets/{target_id}": "xhs:monitor:delete",
     "DELETE /api/xhs/package-precheck/{token}": "xhs:publish:precheck",
-    "PATCH /api/auto-tasks/{task_id}": "xhs:autoops:edit",
     "PATCH /api/drafts/{draft_id}": "xhs:note:edit",
     "PATCH /api/drafts/{draft_id}/assets/{asset_id}": "xhs:note:edit",
-    "PATCH /api/keyword-groups/{group_id}": "xhs:keyword:edit",
     "PATCH /api/llm/gateway-alerts/{alert_id}": "ai:alert:view",
     "PATCH /api/llm/gateway-configs/{config_id}": "ai:gateway:edit",
     "PATCH /api/llm/gateway-configs/{config_id}/models/{model_id}": "ai:model:edit",
@@ -115,7 +110,6 @@ ROUTE_PERMS: Final[dict[str, str]] = {
     "PATCH /api/xhs/llm/prompt-modules/{module_id}": "ai:prompt:edit",
     "PATCH /api/xhs/llm/prompt-templates/{template_id}": "ai:prompt:edit",
     "PATCH /api/xhs/materials/folders/{folder_id}": "xhs:material:editFolder",
-    "PATCH /api/xhs/monitoring/targets/{target_id}": "xhs:monitor:edit",
     "PATCH /api/xhs/product-notes/versions/{record_id}": "xhs:workshop:adopt",
     "POST /api/accounts/import-cookie": "xhs:account:importCookie",
     "POST /api/accounts/{account_id}/check": "xhs:account:probe",
@@ -128,21 +122,14 @@ ROUTE_PERMS: Final[dict[str, str]] = {
     "POST /api/ai/generate-title": "ai:generate:generate",
     "POST /api/ai/images/describe": "ai:generate:generate",
     "POST /api/ai/images/generate": "ai:generate:generate",
-    "POST /api/ai/images/generate-cover": "ai:generate:generate",
-    "POST /api/ai/polish-text": "ai:generate:generate",
     "POST /api/ai/rewrite-note": "ai:generate:generate",
     "POST /api/auth/change-password": "EXEMPT_SELF",
     "POST /api/auth/revoke-all-sessions": "EXEMPT_SELF",
-    "POST /api/auto-tasks": "xhs:autoops:create",
     #: 2026-10-26（G8）：「能编辑」不该等于「能立刻执行」—— 原挂 `edit` 是合并码。
-    "POST /api/auto-tasks/{task_id}/run": "xhs:autoops:run",
     "POST /api/drafts": "xhs:note:create",
     "POST /api/drafts/{draft_id}/assets": "xhs:note:edit",
     "POST /api/drafts/{draft_id}/send-to-publish": "xhs:publish:submit",
-    "POST /api/files/images/compose": "xhs:picture:compose",
-    "POST /api/files/images/resize": "xhs:picture:resize",
     "POST /api/files/upload": "xhs:files:upload",
-    "POST /api/keyword-groups": "xhs:keyword:create",
     "POST /api/llm/gateway-alerts": "ai:alert:view",
     "POST /api/llm/gateway-configs": "ai:gateway:create",
     "POST /api/llm/gateway-configs/models-preview": "ai:gateway:edit",
@@ -200,10 +187,6 @@ ROUTE_PERMS: Final[dict[str, str]] = {
     "POST /api/tasks/{task_id}/cancel": "xhs:record:cancel",
     "POST /api/tasks/{task_id}/retry": "xhs:record:retry",
     "POST /api/topics": "xhs:topic:create",
-    "POST /api/xhs/analytics/benchmarks/{target_id}/create-drafts": "xhs:insights:view",
-    "POST /api/xhs/analytics/platform-hot-topics/generate": "xhs:insights:view",
-    "POST /api/xhs/analytics/platform-hot-topics/refresh": "xhs:insights:view",
-    "POST /api/xhs/analytics/reports": "xhs:insights:view",
     "POST /api/xhs/creator/assets/upload": "xhs:note:edit",
     "POST /api/xhs/creator/locations/search": "xhs:topic:create",
     "POST /api/xhs/creator/publish/image": "xhs:publish:submit",
@@ -213,6 +196,7 @@ ROUTE_PERMS: Final[dict[str, str]] = {
     "POST /api/xhs/data-package-rules/rules": "xhs:rule:create",
     "POST /api/xhs/data-package-rules/sets": "xhs:rule:create",
     "POST /api/xhs/forbidden-words": "xhs:forbiddenWord:create",
+    "POST /api/xhs/forbidden-words/groups": "xhs:forbiddenWord:create",
     "POST /api/xhs/forbidden-words/groups/{name}/enabled": "xhs:forbiddenWord:edit",
     "POST /api/xhs/forbidden-words/{word_id}/enabled": "xhs:forbiddenWord:edit",
     "POST /api/xhs/llm/prompt-modules": "ai:prompt:create",
@@ -230,8 +214,6 @@ ROUTE_PERMS: Final[dict[str, str]] = {
     "POST /api/xhs/materials/files/upload": "xhs:material:createFolder",
     "POST /api/xhs/materials/folders": "xhs:material:createFolder",
     "POST /api/xhs/materials/folders/{folder_id}/scan": "xhs:material:scan",
-    "POST /api/xhs/monitoring/targets": "xhs:monitor:create",
-    "POST /api/xhs/monitoring/targets/{target_id}/refresh": "xhs:monitor:refresh",
     "POST /api/xhs/package-precheck": "xhs:publish:precheck",
     "POST /api/xhs/package-precheck/local": "xhs:publish:precheck",
     "POST /api/xhs/package-precheck/sku-name-optimize": "xhs:item:polish",
@@ -353,20 +335,13 @@ ROUTE_PERMS: Final[dict[str, str]] = {
     "PUT /api/system/roles/{role_id}/users": "system:role:assignMenu",
     "PUT /api/system/users/{user_id}": "system:user:edit",
     # ── 只读页 GET（用户口径「只读，无变更码，也需要授权」）──────────
-    "GET /api/xhs/analytics/overview": "xhs:insights:view",
-    "GET /api/xhs/analytics/top-content": "xhs:insights:view",
-    "GET /api/xhs/analytics/hot-topics": "xhs:insights:view",
-    "GET /api/xhs/analytics/engagement": "xhs:insights:view",
-    "GET /api/xhs/analytics/keyword-trends": "xhs:insights:view",
-    "GET /api/xhs/analytics/comment-insights": "xhs:insights:view",
-    "GET /api/xhs/analytics/platform-hot-topics": "xhs:insights:view",
-    "GET /api/xhs/analytics/platform-hot-topics/matches": "xhs:insights:view",
+    "GET /api/xhs/analytics/overview": "xhs:dashboard:view",
+    #: ⚠️ 2026-10-28（方案 B）：`GET /api/xhs/analytics/comment-insights` **已从两处登记表删除**——
+    #: 该端点改 410 墓碑（`include_in_schema=False`），墓碑不进 OpenAPI
+    #: ⇒ 留在这里会被启动守卫判成「码指向不存在的路由」而拒绝启动。
     #: 业务域的**读**路由（2026-10-26 补齐）。与上面系统域同理：
     #: 前端按页面级码隐藏入口，后端却没拦 ⇒ 接口是敞开的。
-    "GET /api/keyword-groups": "xhs:keyword:view",
-    "GET /api/keyword-groups/{group_id}": "xhs:keyword:view",
     "GET /api/schedule/status": "system:scheduler:view",
-    "GET /api/auto-tasks": "xhs:autoops:view",
     #: ⚠️ 2026-10-26：这 4 条是**提交抓取**（打平台 + 建任务 + 吃额度），不是「看」。
     #: 原来挂 `xhs:crawl:view` ⇒ 只要进得去「笔记发现」页就能发起抓取，
     #: 而 `xhs:crawl:submit`（「提交抓取」按钮，授权页上明明有一个勾）**零路由、恒不生效**。
@@ -383,10 +358,6 @@ ROUTE_PERMS: Final[dict[str, str]] = {
     "POST /api/accounts/{account_id}/login-state": "xhs:account:relogin",
     "GET /api/system/logs/trace/{trace_id}": "system:log:view",
     "GET /api/accounts": "xhs:account:view",
-    "GET /api/xhs/analytics/benchmarks": "xhs:insights:view",
-    "GET /api/xhs/monitoring/targets": "xhs:monitor:view",
-    "GET /api/xhs/monitoring/targets/{target_id}/notes": "xhs:monitor:view",
-    "GET /api/xhs/monitoring/targets/{target_id}/snapshots": "xhs:monitor:view",
     "GET /api/schedule/jobs": "system:scheduler:view",
     "GET /api/schedule/jobs/{job_id}": "system:scheduler:view",
     "GET /api/schedule/targets": "system:scheduler:view",
@@ -432,19 +403,10 @@ ROUTE_PERMS: Final[dict[str, str]] = {
 #:
 #: ⚠️ **前缀按实测的端点族填**（`create_app().openapi()`，2026-10-23）：
 #: 设计 50 §5.3 写的是 `api/analytics.py` / `api/insights.py` / `api/llm.py` /
-#: `api/dashboard.py` 四个文件，但仓库里**前两个文件不存在** —— 数据中心页实际调的
-#: 是 `xhs/analytics/*`（总览/互动/话题/评论/离线笔记）与 `accounts/*`，
-#: 内容洞察调的是 `xhs/analytics/{overview,top-content,hot-topics,comment-insights}`，
-#: 商品洞察调的是 `xhs/analytics/{overview,keyword-trends,reports,engagement}`。
-#: ⇒ 按**端点族**登记（`xhs/analytics` 同时服务三个页，统一挂 `xhs:insights:view`；
-#: 数据中心专有的离线笔记 / 无流量清理走 `xhs:datacenter:view` 的那几条在 S3 逐条补）。
+#: 四条只读页守卫：总览 / 数据中心 / 用量 / 笔记侧聚合。
+#: 2026-10-28 起洞察两页（内容洞察 / 商品洞察）与监控中心已整体退场，
+#: `xhs/analytics` 只剩 `/overview` 被首页消费，挂 `xhs:dashboard:view`。
 READONLY_PAGE_GUARDS: Final[dict[str, str]] = {
-    #: ⚠️ **只留「整族全是只读」的前缀**。`/api/xhs/analytics` 曾被列在这里，
-    #: 但该前缀下还有 `POST /topic`（生成热度话题）—— 前缀规则要求**该前缀下
-    #: 所有 method** 都挂 view 码，于是那个 POST 也会被要求挂 `xhs:insights:view`，
-    #: 或者反过来让「只读页守卫」把写端点也当成只读页。
-    #: 2026-10-24 实测：该前缀下有 1 条写端点 ⇒ 前缀规则不适用，改为逐条登记
-    #: （见 `READONLY_ROUTES`）。
     "/api/llm/usage": "ai:usage:view",
 }
 
@@ -457,14 +419,10 @@ READONLY_PAGE_GUARDS: Final[dict[str, str]] = {
 #: 键 = `METHOD path`；值 = view 码。这些码在 `perms_registry` 里已存在。
 READONLY_ROUTES: Final[dict[str, str]] = {
     # 数据洞察（4 组只读页之一）
-    "GET /api/xhs/analytics/overview": "xhs:insights:view",
-    "GET /api/xhs/analytics/top-content": "xhs:insights:view",
-    "GET /api/xhs/analytics/hot-topics": "xhs:insights:view",
-    "GET /api/xhs/analytics/engagement": "xhs:insights:view",
-    "GET /api/xhs/analytics/keyword-trends": "xhs:insights:view",
-    "GET /api/xhs/analytics/comment-insights": "xhs:insights:view",
-    "GET /api/xhs/analytics/platform-hot-topics": "xhs:insights:view",
-    "GET /api/xhs/analytics/platform-hot-topics/matches": "xhs:insights:view",
+    "GET /api/xhs/analytics/overview": "xhs:dashboard:view",
+    #: ⚠️ 2026-10-28（方案 B）：`GET /api/xhs/analytics/comment-insights` **已从两处登记表删除**——
+    #: 该端点改 410 墓碑（`include_in_schema=False`），墓碑不进 OpenAPI
+    #: ⇒ 留在这里会被启动守卫判成「码指向不存在的路由」而拒绝启动。
 }
 
 #: 只读页前缀 → view 码（`READONLY_PAGE_GUARDS` 的历史形态，保留兼容）。

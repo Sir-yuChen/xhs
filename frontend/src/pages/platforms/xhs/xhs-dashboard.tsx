@@ -1,19 +1,15 @@
 import {
   DatabaseOutlined,
   HeartOutlined,
-  RobotOutlined,
   SafetyCertificateOutlined,
   ScheduleOutlined,
 } from "@ant-design/icons";
-import { Card, Col, Empty, List, Row, Statistic, Typography } from "antd";
+import { Card, Col, Row, Statistic } from "antd";
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
 
 import { useThemePalette } from "../../../app/providers";
 import { fetchXhsOverview } from "../../../lib/api";
 import type { DashboardOverview } from "../../../types";
-
-const { Text } = Typography;
 
 const fallbackOverview: DashboardOverview = {
   platform: "xhs",
@@ -22,8 +18,6 @@ const fallbackOverview: DashboardOverview = {
   pending_publishes: 0,
   healthy_accounts: 0,
   at_risk_accounts: 0,
-  hot_topics: [],
-  recent_activity: [],
 };
 
 export function XhsDashboard() {
@@ -44,81 +38,14 @@ export function XhsDashboard() {
   ];
 
   return (
-    <div>
-      {/* 2026-10-05 用户口径「移除所有页面页面头」：原「XHS Workspace / 小红书运营总览 /
-          一句话说明」整块移除（与侧栏「总览」菜单项重复）。本页是纯看板，
-          「开始发现」原本是页头里唯一的主操作，改由**首张指标卡**承接不成立
-          （指标卡无语义位置）⇒ 直接移除，入口在侧栏「笔记发现」逐字可达。 */}
-
-      {/*
-        2026-10-05 用户口径「开始发现按钮移除」：该按钮**整块删除**
-        （上一轮页头移除后曾临时收进首张指标卡 extra，本轮按用户口径彻底去掉）。
-        入口在侧栏「笔记发现」逐字可达，仪表盘不再承载跳转操作。
-      */}
-      <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
-        {metrics.map((metric) => (
-          <Col xs={12} sm={12} md={6} key={metric.label}>
-            <Card size="small" style={{ background: p.cardBg, borderColor: p.border }}>
-              <Statistic
-                title={metric.label}
-                value={metric.value}
-                prefix={metric.icon}
-              />
-            </Card>
-          </Col>
-        ))}
-      </Row>
-
-      <Row gutter={[16, 16]}>
-        <Col xs={24} md={16}>
-          <Card
-            title="高潜话题"
-            extra={<Link to="/platforms/xhs/analytics">查看洞察</Link>}
-            style={{ background: p.cardBg, borderColor: p.border }}
-          >
-            {overview.hot_topics.length === 0 ? (
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无话题数据" />
-            ) : (
-              <List
-                dataSource={overview.hot_topics}
-                renderItem={(topic) => (
-                  <List.Item
-                    extra={<Text strong>{topic.engagement.toLocaleString()}</Text>}
-                  >
-                    <List.Item.Meta
-                      title={topic.keyword}
-                      description={`${topic.notes} 篇笔记`}
-                    />
-                  </List.Item>
-                )}
-              />
-            )}
+    <Row gutter={[16, 16]}>
+      {metrics.map((metric) => (
+        <Col xs={12} sm={12} md={6} key={metric.label}>
+          <Card size="small" style={{ background: p.cardBg, borderColor: p.border }}>
+            <Statistic title={metric.label} value={metric.value} prefix={metric.icon} />
           </Card>
         </Col>
-        <Col xs={24} md={8}>
-          <Card
-            title="自动化结果"
-            extra={<RobotOutlined />}
-            style={{ background: p.cardBg, borderColor: p.border }}
-          >
-            {overview.recent_activity.length === 0 ? (
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无最近活动" />
-            ) : (
-              <List
-                dataSource={overview.recent_activity}
-                renderItem={(item) => (
-                  <List.Item>
-                    <List.Item.Meta
-                      title={item.title}
-                      description={item.status}
-                    />
-                  </List.Item>
-                )}
-              />
-            )}
-          </Card>
-        </Col>
-      </Row>
-    </div>
+      ))}
+    </Row>
   );
 }

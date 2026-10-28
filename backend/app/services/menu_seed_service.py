@@ -618,9 +618,9 @@ def _users_have_seed_columns(db: Session) -> bool:
     from sqlalchemy import inspect as _inspect
 
     bind = db.get_bind()
-    if not _inspect(bind).has_table("users"):
+    if not _inspect(bind).has_table("sys_users"):
         return False
-    cols = {c["name"] for c in _inspect(bind).get_columns("users")}
+    cols = {c["name"] for c in _inspect(bind).get_columns("sys_users")}
     return {"role", "deleted_at"} <= cols
 
 
@@ -729,7 +729,7 @@ def seed_admin_user(db: Session) -> User | None:
         "token_version": 0,
         "created_at": shanghai_now(),
     }
-    actual = {c["name"] for c in _sa_inspect(db.get_bind()).get_columns("users")}
+    actual = {c["name"] for c in _sa_inspect(db.get_bind()).get_columns("sys_users")}
     payload = {k: v for k, v in values.items() if k in actual}
     columns = ", ".join(payload)
     placeholders = ", ".join(f":{name}" for name in payload)

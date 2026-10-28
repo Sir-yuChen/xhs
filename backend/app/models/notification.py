@@ -42,14 +42,14 @@ NOTIFICATION_SOURCE_TYPES: tuple[str, ...] = (
 
 
 class Notification(Base):
-    __tablename__ = "notifications"
+    __tablename__ = "sys_notifications"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("sys_users.id"), index=True)
     title: Mapped[str] = mapped_column(String(256))
     body: Mapped[str] = mapped_column(Text, default="")
     level: Mapped[str] = mapped_column(String(16), default="info")
-    source_task_id: Mapped[Optional[int]] = mapped_column(ForeignKey("tasks.id"), nullable=True)
+    source_task_id: Mapped[Optional[int]] = mapped_column(ForeignKey("queue_jobs.id"), nullable=True)
     source_type: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     source_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     #: 点击跳转路径（v1.1.0 / 设计 48 R4，迁移 `b2c3d4e5f6a0`）。

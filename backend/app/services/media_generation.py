@@ -38,10 +38,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.core.config import get_settings
-from backend.app.models import MaterialFile
+from backend.app.models import ASSET_AIGC, MaterialFile, PublishAsset
 from backend.app.services import image_prompt
 from backend.app.models.generation import (
-    AigcMediaAsset,
     MEDIA_SOURCE_AI_GENERATE,
     MEDIA_SOURCE_MATERIAL,
     MEDIA_SOURCE_PRODUCT_IMAGE,
@@ -472,7 +471,7 @@ def _assets_from_ai(
     media_options: Optional[dict],
     record: Any,
     business_key: str = "",
-) -> tuple[list[dict], list[AigcMediaAsset]]:
+) -> tuple[list[dict], list[PublishAsset]]:
     """`ai_generate` / `reference_image`：调用图像模型 → 下载落盘 → 记溯源。
 
     ⚠️ **出图/下载失败 ⇒ 降级返回空媒体**（不废正文，§13.4.2）；只有**配置级**
@@ -518,7 +517,7 @@ def _assets_from_ai(
     client = OpenAICompatibleImageClient()
     assets: list[dict] = []
     last_error: Exception | None = None
-    origins: list[AigcMediaAsset] = []
+    origins: list[PublishAsset] = []
     reference_images = reference_urls[:MAX_REFERENCE_IMAGES] if reference_urls else None
     for index in range(count):
         try:
@@ -556,9 +555,10 @@ def _assets_from_ai(
             }
         )
         origins.append(
-            AigcMediaAsset(
+            PublishAsset(
+                row_type=ASSET_AIGC,
                 user_id=int(user.id),
-                generation_record_id=(int(record.id) if record is not None else None),
+                parent_id=(int(record.id) if record is not None else None),
                 asset_type="image",
                 local_path=local_path,
                 url=remote_url or None,
@@ -589,7 +589,7 @@ def _assets_from_video(
     media_options: Optional[dict],
     record: Any,
     business_key: str = "",
-) -> tuple[list[dict], list[AigcMediaAsset]]:
+) -> tuple[list[dict], list[PublishAsset]]:
     """`video_ai_generate` / `video_reference`：调视频模型 → 下载落盘 → 记溯源。
 
     ⚠️ **同一纪律**：视频失败 ⇒ 降级返回空媒体（不废正文，§13.4.2）；
@@ -685,9 +685,10 @@ def _assets_from_video(
     return (
         [{"asset_type": "video", "url": local_url, "local_path": local_path, "sort_order": 0}],
         [
-            AigcMediaAsset(
+            PublishAsset(
+                row_type=ASSET_AIGC,
                 user_id=int(user.id),
-                generation_record_id=(int(record.id) if record is not None else None),
+                parent_id=(int(record.id) if record is not None else None),
                 asset_type="video",
                 local_path=local_path,
                 url=remote_url,
@@ -799,7 +800,7 @@ def build_note_media(
     media_options: Optional[dict],
     record: Any,
     business_key: str = "",
-) -> tuple[list[dict], list[AigcMediaAsset]]:
+) -> tuple[list[dict], list[PublishAsset]]:
     """按 `media_source` 产出 `(note_assets 条目, aigc 溯源行)`（设计 17 §13.4.2）。
 
     ⚠️ 调用方持事务：本函数只 `db.add(...)`（溯源行），**不 commit**。
@@ -867,7 +868,7 @@ def build_media_plan_assets(
     media_options: Optional[dict] = None,
     record: Any = None,
     business_key: str = "",
-) -> tuple[list[dict], list[AigcMediaAsset], list[dict]]:
+) -> tuple[list[dict], list[PublishAsset], list[dict]]:
     """**组合**媒体计划 → `(note_assets 条目, aigc 溯源行, 逐段结果)`。
 
     ## 为什么不重造出图逻辑
@@ -895,7 +896,7 @@ def build_media_plan_assets(
     ```
     """
     assets: list[dict] = []
-    aigc_rows: list[AigcMediaAsset] = []
+    aigc_rows: list[PublishAsset] = []
     segments: list[dict] = []
     cover_ok = False
 

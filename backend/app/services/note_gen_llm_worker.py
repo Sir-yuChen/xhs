@@ -49,7 +49,6 @@ from backend.app.core.database import SessionLocal
 from backend.app.core.time import shanghai_now
 from backend.app.models import (
     GenerationRecord,
-    NoteGenerationLink,
     PromptModule,
     PromptTemplate,
     Task,
@@ -69,7 +68,6 @@ from backend.app.models.note import (
     NOTE_TYPE_LOCAL_GENERATED,
     PUBLISH_STATUS_PENDING,
     Note,
-    NoteAsset,
     set_note_publish_status,
 )
 from backend.app.models.user import User
@@ -1294,17 +1292,15 @@ def _target_media_entries(db: Session, *, record: GenerationRecord) -> list[dict
         return own
     if not record.parent_record_id:
         return []
-    link = db.scalar(
-        select(NoteGenerationLink).where(
-            NoteGenerationLink.generation_record_id == int(record.parent_record_id)
-        )
+    note = db.scalar(
+        select(Note).where(Note.generation_record_id == int(record.parent_record_id))
     )
-    if link is None:
+    if note is None:
         return []
     assets = db.scalars(
-        select(NoteAsset)
-        .where(NoteAsset.note_id == int(link.note_pk))
-        .order_by(NoteAsset.sort_order)
+        select(PublishAsset)
+        .where(PublishAsset.parent_id == int(note.id))
+        .order_by(PublishAsset.sort_order)
     ).all()
     return [
         {
@@ -1440,7 +1436,7 @@ def _persist_generated_note(
         note.note_form = plan_form(plan)
         #: 资产整份重建（图可能换了；不重建会留着上一次的图）
         for asset in db.scalars(
-            select(NoteAsset).where(NoteAsset.note_id == int(note.id))
+            select(PublishAsset).where(PublishAsset.parent_id == int(note.id))
         ).all():
             db.delete(asset)
         db.flush()
@@ -1490,7 +1486,7 @@ def _persist_generated_note(
     #: 重编 0..N-1，图序因此与用户在界面上看到的一致。
     for position, entry in enumerate(media_entries):
         db.add(
-            NoteAsset(
+            PublishAsset(
                 note_id=note.id,
                 asset_type=entry["asset_type"],
                 url=entry["url"],
@@ -1503,26 +1499,9 @@ def _persist_generated_note(
     for origin in aigc_origins:
         db.add(origin)
 
-    # 本地主键级「生成笔记 ↔ 商品」关系（§3.7）。与一期 `note_goods`（平台 ID 级）
-    # 并存：两者维度不同，不是两份实现（见 `NoteGenerationLink` docstring）。
-    #: ⚠️ **覆盖同一篇笔记时先清旧关联行**（`UNIQUE(note_pk, shop_product_id)`）——
-    #: 重新生成会重走这里，不清就撞唯一约束，整次生成本该成功却报 500。
-    for stale in db.scalars(
-        select(NoteGenerationLink).where(NoteGenerationLink.note_pk == int(note.id))
-    ).all():
-        db.delete(stale)
-    db.flush()
-    db.add(
-        NoteGenerationLink(
-            user_id=note.user_id,
-            note_pk=int(note.id),
-            item_id=str(product.get("item_id") or ""),
-            #: **哪次生成产出了这篇**（版本历史 ↔ 笔记的桥）。
-            #: ⚠️ 必须写：否则「基于这版只重写文案」时反查不到它产出的笔记
-            #: （实测 0 行 = 溯源断了，媒体沿用也就拿不到）。
-            generation_record_id=int(record.id),
-        )
-    )
+    #: **哪次生成产出了这篇**（版本历史 ↔ 笔记的桥，1:1）。
+    #: 原为 `note_generation_links` 一行（2026-10-28 该表已删，列合并进本表）。
+    note.generation_record_id = int(record.id)
 
     #: ⚠️ **挂链商品写在 `raw_json.item_id`**（设计 75 S5，2026-10-27）。
     #: 原来还往 `note_goods`（平台 ID 级关系表）写一行，那张表已随迁移

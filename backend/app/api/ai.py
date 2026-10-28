@@ -26,7 +26,6 @@ from backend.app.services.llm_gateway_client import LLMGatewayError, PLATFORM_XH
 from backend.app.services.llm_gateway_usage_service import (
     FUNCTION_DESCRIBE,
     FUNCTION_GENERATE,
-    FUNCTION_POLISH,
     FUNCTION_REWRITE,
     FUNCTION_TAG,
     FUNCTION_TITLE,
@@ -409,41 +408,16 @@ def generate_tags(
     return {"items": items}
 
 
-@router.post("/polish-text")
-def polish_text(
-    payload: PolishTextRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-    text_ai_client: TextAiClient = Depends(get_text_ai_client),
-):
-    #: **业务点已退场**（2026-10-18：无任何前端调用 ⇒ 移出模型配置）。
-    #: 端点保留但不再解析模型映射 —— 若外部仍在调它，这里给出明确原因，
-    #: 而不是抛一个「业务点未配置」让人以为去页面配一下就好。
+@router.post("/polish-text", include_in_schema=False)
+def polish_text_removed():
+    """已退场（2026-10-18）：前端零调用，业务点 `polish_text` 已移出模型配置。
+
+    改用笔记工坊的「改写草稿」。`include_in_schema=False` ⇒ 不进 OpenAPI/ROUTE_PERMS。
+    """
     raise HTTPException(
         status_code=status.HTTP_410_GONE,
-        detail={
-            "code": "AI_POLISH_TEXT_GONE",
-            "message": "文本润色已停用（无调用方）。改用笔记工坊的「改写草稿」。",
-        },
+        detail={"code": "AI_POLISH_TEXT_GONE", "message": "文本润色已停用（无调用方）。"},
     )
-    task, text = _recorded_text_task(
-        db=db,
-        current_user=current_user,
-        platform="xhs",
-        task_type="ai_polish_text",
-        payload={"model_config_id": model_config.id, "instruction": payload.instruction},
-        action=lambda: text_ai_client.polish_text(
-            model_config=model_config,
-            api_key=api_key,
-            text=payload.text,
-            instruction=payload.instruction,
-            platform="xhs",
-            function=FUNCTION_POLISH,
-        ),
-    )
-    task.payload = {**(task.payload or {}), "result_length": len(text)}
-    db.commit()
-    return {"text": text}
 
 
 @router.get("/images/assets")
@@ -475,53 +449,16 @@ def delete_generated_image_asset(
     return {"id": asset_id, "status": "deleted"}
 
 
-@router.post("/images/generate-cover")
-def generate_cover(
-    payload: GenerateCoverRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-    image_ai_client: ImageAiClient = Depends(get_image_ai_client),
-):
-    if payload.draft_id is not None:
-        draft = db.get(AiDraft, payload.draft_id)
-        if draft is None or draft.user_id != current_user.id:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found")
+@router.post("/images/generate-cover", include_in_schema=False)
+def generate_cover_removed():
+    """已退场：前端零调用，业务点 `generate_cover` 已移出模型配置。
 
-    #: **业务点已退场**（同 `polish_text`：前端零调用）。
+    改用「LLM 生成笔记」的配图/封面来源。`include_in_schema=False` ⇒ 不进 OpenAPI。
+    """
     raise HTTPException(
         status_code=status.HTTP_410_GONE,
-        detail={
-            "code": "AI_GENERATE_COVER_GONE",
-            "message": "生成封面已停用（无调用方）。改用「LLM 生成笔记」的配图/封面来源。",
-        },
+        detail={"code": "AI_GENERATE_COVER_GONE", "message": "生成封面已停用（无调用方）。"},
     )
-    task, result = _recorded_image_task(
-        db=db,
-        current_user=current_user,
-        task_type="ai_image_generate_cover",
-        payload={"model_config_id": model_config.id, "prompt": payload.prompt, "size": payload.size, "style": payload.style},
-        action=lambda: image_ai_client.generate_cover(
-            model_config=model_config,
-            api_key=api_key,
-            prompt=payload.prompt,
-            size=payload.size,
-            style=payload.style,
-        ),
-    )
-    asset = AiGeneratedAsset(
-        user_id=current_user.id,
-        draft_id=payload.draft_id,
-        prompt=payload.prompt,
-        model_name=model_config.model_name,
-        params={"size": payload.size, "style": payload.style, "raw": result.get("raw")},
-        file_path=result.get("url") or "",
-    )
-    db.add(asset)
-    db.flush()
-    task.payload = {**(task.payload or {}), "asset_id": asset.id}
-    db.commit()
-    db.refresh(asset)
-    return _serialize_generated_asset(asset)
 
 
 @router.post("/images/generate")

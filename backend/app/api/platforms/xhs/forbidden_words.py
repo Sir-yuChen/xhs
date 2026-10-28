@@ -1,10 +1,12 @@
 """违规词库端点（设计 25 §2；用户口径 2026-10-08）。
 
-端点表（5 个）：
+端点表（6 个）：
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/xhs/forbidden-words` | 词条列表（`enabled_only` 可筛） |
+| GET | `/xhs/forbidden-words` | 词条列表（`enabled_only` / `group_name` 可筛） |
+| GET | `/xhs/forbidden-words/groups` | 分组清单（名字 + 词条数） |
+| POST | `/xhs/forbidden-words/groups` | **新建分组**（必须先有分组才能建词） |
 | POST | `/xhs/forbidden-words` | 新增（重复 ⇒ **409**） |
 | PATCH | `/xhs/forbidden-words/{id}` | 修改（词 / 匹配模式 / 备注） |
 | POST | `/xhs/forbidden-words/{id}/enabled` | **停用 / 启用**（`enabled: bool`） |
@@ -41,8 +43,8 @@ class ForbiddenWordCreateRequest(BaseModel):
     match_mode: Optional[int] = Field(None, description="1=精确（默认） 2=包含")
     remark: str = Field("", description="备注")
     enabled: bool = Field(True, description="是否启用")
-    #: 分组名（用户自建）。空串 = 未分组（默认）。
-    group_name: str = Field("", description="分组名；空 = 未分组")
+    #: 分组名（**必填**：不允许未分组数据，须先建分组）。
+    group_name: str = Field(..., min_length=1, description="分组名（先建分组再建词）")
 
 
 class ForbiddenWordUpdateRequest(BaseModel):
@@ -50,7 +52,7 @@ class ForbiddenWordUpdateRequest(BaseModel):
     match_mode: Optional[int] = None
     remark: Optional[str] = None
     enabled: Optional[bool] = None
-    group_name: Optional[str] = Field(None, description="改分组；空串 = 移到未分组")
+    group_name: Optional[str] = Field(None, min_length=1, description="改到哪个分组（须已存在）")
 
 
 class ForbiddenWordEnabledRequest(BaseModel):
@@ -79,6 +81,29 @@ def list_forbidden_words(
             db, current_user.id, enabled_only=enabled_only, groups=groups
         )
     ]
+
+
+class ForbiddenWordGroupCreateRequest(BaseModel):
+    """新建分组。"""
+
+    name: str = Field(..., min_length=1, description="分组名（同用户下不重名）")
+    enabled: bool = Field(True, description="是否启用")
+
+
+@router.post("/groups", status_code=201)
+def create_forbidden_word_group(
+    payload: ForbiddenWordGroupCreateRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """**新建分组** —— 用户口径 2026-10-28「必须先添加分组，不允许未分组数据」。
+
+    建词前必须先有分组；重名 ⇒ 409。
+    """
+    try:
+        return service.create_group(db, current_user.id, name=payload.name, enabled=payload.enabled)
+    except service.ForbiddenWordError as error:
+        raise _fail(error) from error
 
 
 @router.get("/groups")

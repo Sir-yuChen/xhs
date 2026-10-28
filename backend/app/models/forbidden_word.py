@@ -18,9 +18,10 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.app.core.database import Base
 from backend.app.core.time import shanghai_now
@@ -50,74 +51,96 @@ MAX_WORDS_PER_GROUP = 500
 
 
 class ForbiddenWord(Base):
-    """一条违规词（按登录用户隔离 —— ADR-021）。"""
+    """违规词库 —— 一张自引用父子表（2026-10-28 合并）。
 
-    __tablename__ = "forbidden_words"
-    __table_args__ = (
-        #: ⚠️ 「不可重复」的**唯一实现**：`(user_id, group_name, word)` 复合唯一。
-        #:
-        #: 只索引 `word` 会让不同用户互相冲突（词库是各人各的）；
-        #: 不含分组则「同词进两个分组」会被拒 —— 那是正常需求，不该拦。
-        Index("ux_forbidden_words_user_group_word", "user_id", "group_name", "word", unique=True),
-        Index("ix_forbidden_words_user_enabled", "user_id", "enabled"),
-        Index("ix_forbidden_words_user_group", "user_id", "group_name"),
-    )
+    `parent_id IS NULL` = **分组**（组的启停挂在这一行）；
+    `parent_id` 非空 = **组内的一条词**。
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
-    #: 词本身。**存用户原文**（不存归一化值）—— 存归一化会让用户看不懂
-    #: 自己填了什么。匹配时再归一化（见 `forbidden_word_service.normalize`）。
-    word: Mapped[str] = mapped_column(String(120))
-    match_mode: Mapped[int] = mapped_column(Integer, default=MATCH_MODE_EXACT)
-    #: 停用/启用。**软开关**：停用不删行 —— 曾经命中过哪些图要能追溯，
-    #: 删了就查不到了（而「这个词以前拦下过什么」正是运营要问的）。
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    remark: Mapped[str] = mapped_column(String(255), default="")
-    #: 分组名（用户自建，如「极限词」「医疗词」）。空串 = 未分组。
-    #:
-    #: ⚠️ 与「词」不同：**同名词可以出现在不同分组**（「最佳」在极限词和广告词
-    #: 里各有一条是有意义的）。所以唯一键改成 `(user_id, group_name, word)`。
-    group_name: Mapped[str] = mapped_column(String(MAX_GROUP_LEN), default=DEFAULT_GROUP)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now)
+    合并前是 `forbidden_word_groups` + `forbidden_words` 两张表。合并的收益是
+    「组」有了唯一真相源：旧形态下词的 `group_name` 是字符串、分组行另存一份，
+    词表里有 `满组`/`小红书` 两个组名而分组表 0 行 —— 两边可以不一致。
 
+    **唯一性**：`(user_id, parent_id, word)` —— 同组内词不重复，**不同组可同名**
+    （「最佳」在极限词组和广告词组各一条是正常需求）。
+    未分组也算一个组（`parent_id` 指向「未分组」那一行）。
 
-class ForbiddenWordGroupRow(Base):
-    """分组本体（**让「组」成为独立实体**，用户口径 2026-10-08：「组新增启用停用功能」）。
-
-    ## 为什么不靠 `forbidden_words.group_name` 去重推出分组列表
-
-    词行上只能表达「这个组有词」，表达不了「这个组被停用了」——
-    停用后词还在（不该删，那是用户的词），但整组不参与预检匹配。
-    所以分组需要自己的行。
-
-    ## 语义
-
-    - **组被停用 ⇒ 组内所有词都不参与匹配**（不必逐条停用）；词自己的
-      `enabled` 仍然独立生效（两个开关是**与**关系）。
-    - 组名唯一：`(user_id, name)`。
-    - 删除组不在这里做（用户口径只要求启停）；词删光了组行留着也无害。
+    **生效 = 组 enabled AND 词 enabled**（组停 ⇒ 组内词全部不参与匹配）。
+    停用只置标记不删行：曾经命中过哪些图要能追溯。
     """
 
-    __tablename__ = "forbidden_word_groups"
+    __tablename__ = "xhs_forbidden_words"
     __table_args__ = (
-        Index("ux_forbidden_word_groups_user_name", "user_id", "name", unique=True),
+        #: 同用户下**组名不重名**（父行）。
+        Index(
+            "uq_xhs_fw_group_name",
+            "user_id",
+            "name",
+            unique=True,
+            postgresql_where=text("parent_id IS NULL"),
+        ),
+        #: **同组内词不重复；不同组可同名**（子行）。
+        Index(
+            "uq_xhs_fw_group_word",
+            "parent_id",
+            "word",
+            unique=True,
+            postgresql_where=text("parent_id IS NOT NULL"),
+        ),
+        Index("ix_xhs_fw_user_enabled", "user_id", "enabled"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
-    #: 分组名（空串 = 未分组；未分组也允许有独立开关）。
-    name: Mapped[str] = mapped_column(String(MAX_GROUP_LEN), default=DEFAULT_GROUP)
-    #: 整组启用/停用。停用 ⇒ 组内词全部不参与匹配。
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now)
+    #: `NULL` = 分组行；非空 = 该组下的一条词。
+    parent_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("xhs_forbidden_words.id", ondelete="CASCADE"), index=True, nullable=True
+    )
+    user_id: Mapped[int] = mapped_column(ForeignKey("sys_users.id"), index=True, nullable=False)
+    #: **每一行都存组名**（空串 = 未分组）：父行是分组的定义，子行是所属组。
+    #: 子行冗余这一份是为了让「按组过滤」不必 join 父表（旧查询直接可用）。
+    name: Mapped[str] = mapped_column(String(MAX_GROUP_LEN), default=DEFAULT_GROUP, nullable=False, index=True)
+    #: 子行 = 词本身（存用户原文，不存归一化值）；父行留空。
+    word: Mapped[str] = mapped_column(String(120), default="", nullable=False)
+    #: 1 = 精确（整段相等）、2 = 包含（子串命中）。
+    match_mode: Mapped[int] = mapped_column(Integer, default=MATCH_MODE_EXACT, nullable=False)
+    #: 停用/启用（父行管整组，子行管单条）。
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    remark: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=shanghai_now, onupdate=shanghai_now, nullable=False
+    )
+
+    #: ---- 自引用父子关系（**懒加载**：访问 .children / .parent 时才发 SQL）----
+    children: Mapped[list["ForbiddenWord"]] = relationship(
+        back_populates="parent",
+        foreign_keys=[parent_id],
+        lazy="select",
+    )
+    parent: Mapped[Optional["ForbiddenWord"]] = relationship(
+        back_populates="children",
+        foreign_keys=[parent_id],
+        remote_side=[id],
+        lazy="select",
+    )
+
+    #: ---- 旧字段名别名（合并前的 `group_name`）----
+    #: 服务层与前端按旧名读写，映射到父行的 `name`，避免改 20 多处调用点。
+    @property
+    def group_name(self) -> str:
+        return self.name
+
+    @group_name.setter
+    def group_name(self, value: str) -> None:
+        self.name = value
+
+
+#: 同表内的行类型别名（父子共用一张表，读起来更清楚）。
+ForbiddenWordRow = ForbiddenWord
 
 
 __all__ = [
     "DEFAULT_GROUP",
     "ForbiddenWord",
-    "ForbiddenWordGroupRow",
     "MAX_WORDS_PER_GROUP",
     "MATCH_MODES",
     "MATCH_MODE_CONTAINS",

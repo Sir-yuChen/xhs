@@ -185,7 +185,7 @@ def note_supports_batch_sync(note: "Note") -> bool:
 
 
 class Note(Base):
-    __tablename__ = "notes"
+    __tablename__ = "xhs_notes"
     __table_args__ = (
         #: **笔记身份唯一**（台账 §4.9 / 不变量 I2，迁移 `d4e5f6a7b8c9`）：
         #: 同一 `(user_id, note_id)` 只允许一行，落库即**覆盖更新**。
@@ -208,8 +208,8 @@ class Note(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True, default=0)
-    platform_account_id: Mapped[int] = mapped_column(ForeignKey("platform_accounts.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("sys_users.id"), index=True, default=0)
+    platform_account_id: Mapped[int] = mapped_column(ForeignKey("xhs_accounts.id"), index=True)
     platform: Mapped[str] = mapped_column(String(32), index=True)
     note_id: Mapped[str] = mapped_column(String(128), index=True)
     title: Mapped[str] = mapped_column(String(512), default="")
@@ -257,6 +257,12 @@ class Note(Base):
     #: 存量行由迁移回填 `image`（历史只成功发布过图文，见迁移 docstring）。
     note_form: Mapped[str] = mapped_column(
         String(16), default=NOTE_FORM_IMAGE, nullable=False, server_default=NOTE_FORM_IMAGE, index=True
+    )
+    #: **是哪次生成产出了这篇笔记**（版本历史 ↔ 笔记的唯一桥，1:1）。
+    #: 原在 `note_generation_links`（2026-10-28 合并进来，该表已删）：一个生成记录只
+    #: 产出一篇笔记，故无需独立关系表。非 AI 生成（采集 / 手动）为 NULL。
+    generation_record_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("xhs_generation_records.id", ondelete="SET NULL"), index=True, nullable=True
     )
     #: ⛔ **`note_category` 已退役并 DROP（2026-10-12，设计 35）**。
     #: 原「笔记分类」（商业/普通）判据收敛为 `note_datacenter_stats.note_flag`（平台原生），
@@ -354,13 +360,13 @@ class Topic(Base):
     名字）⇒ 留空，**不造假**。
     """
 
-    __tablename__ = "topics"
+    __tablename__ = "xhs_topics"
     __table_args__ = (
         UniqueConstraint("user_id", "name", name="uq_topics_user_name"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("sys_users.id"), index=True)
     #: 话题 / 标签名 —— 存**不带 `#`** 的纯名字（展示层自己拼 `#`）。
     name: Mapped[str] = mapped_column(String(64), default="")
     #: chips 配色（自 `tags` 表沿用；新话题默认蓝，与话题区 UI 一致）。
@@ -389,48 +395,50 @@ class NoteTopic(Base):
     漏一边就是孤儿数据。
     """
 
-    __tablename__ = "note_topics"
+    __tablename__ = "xhs_note_topics"
     __table_args__ = (
         UniqueConstraint("note_id", "topic_id", name="uq_note_topics_note_topic"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     #: 本地笔记行（`notes.id`）—— **本地主键，不是平台 note_id**。
-    note_id: Mapped[int] = mapped_column(ForeignKey("notes.id"), index=True)
+    note_id: Mapped[int] = mapped_column(ForeignKey("xhs_notes.id"), index=True)
     #: 话题字典行（`topics.id`）。
-    topic_id: Mapped[int] = mapped_column(ForeignKey("topics.id"), index=True)
+    topic_id: Mapped[int] = mapped_column(ForeignKey("xhs_topics.id"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now)
 
 
-class NoteAsset(Base):
-    __tablename__ = "note_assets"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    note_id: Mapped[int] = mapped_column(ForeignKey("notes.id"), index=True)
-    asset_type: Mapped[str] = mapped_column(String(32))
-    url: Mapped[str] = mapped_column(Text)
-    local_path: Mapped[str] = mapped_column(Text, default="")
-    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+#: ⚠️ `NoteAsset` 已并入 `PublishAsset`（`row_type='note'`），2026-10-28。
+#: 原表 `note_assets` 的列与 `xhs_publish_assets` 逐列对应，且建草稿时本就是
+#: 整批复制 ⇒ 合并去重，迁移 `c7d8e9f0a1b2` 负责 DROP。
 
 
-class NoteComment(Base):
-    __tablename__ = "note_comments"
+# ⚠️ **已退场**（方案 B，2026-10-28 用户拍板）：`NoteComment` 整类删除，
+# 迁移 `t6u7v8w9x0y1` 负责真库 `DROP TABLE note_comments`。
+#
+# ## 为什么退场而不是补写入口
+#
+# 本表的设计意图是「把平台评论区拉回本地做评论洞察」，挂在 3 个读点上
+# （内容库「有评论」筛选 / overview 的 comment_count / comment-insights），
+# 但**写入路径整条是断的**：
+#
+#   * 唯一写入口 `POST /notes/batch-save` 要求 `fetch_comments=true`，而前端
+#     `saveXhsNotesToLibrary` 的入参只有 `{account_id, notes}` —— 永远 false；
+#   * 采集链路 `/xhs/crawl/data` 的 `fetch_comments` **抓得到但不落库**，
+#     评论只塞进 SSE 回给前端看（`crawl.py`），`_save_normalized_notes` 不写本表。
+#
+# 实测 0 行 ⇒ 三个读点恒为空。用户口径（方案 B）：「整条退场」——
+# 表 + 3 个读点 + 1 个死端点 + 内容洞察页两个区块 + 内容库「有评论」勾选框一起删。
+#
+# ## 评论功能本身没丢
+#
+# 「我的笔记」/「笔记发现」页的评论区**一直是直查平台**（`POST /xhs/pc/notes/comments`
+# → `adapter.get_note_comments()` → `normalize_comment_payload`，**不落库、即时返回**），
+# 与本表无关。本次退场只删「本地镜像」这条从未打通的支线，**不动实时评论链路**。
+#
+# ⚠️ 留着 ORM 类的话 `create_all()` 会把已 drop 的表建回来（本仓踩过一次：
+# `ModelConfig` 没随表退场 ⇒ 迁移 drop 后又被建回）。故整类删除，不注释掉。
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    note_id: Mapped[int] = mapped_column(ForeignKey("notes.id"), index=True)
-    comment_id: Mapped[str] = mapped_column(String(128), index=True)
-    user_name: Mapped[str] = mapped_column(String(128), default="")
-    user_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
-    content: Mapped[str] = mapped_column(Text, default="")
-    like_count: Mapped[int] = mapped_column(Integer, default=0)
-    parent_comment_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
-    created_at_remote: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    raw_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
-    #: 账号归属（ADR-021 / 迁移 `b3c4d5e6f7a8`）：此前本表隔离是**隐含的**（只有
-    #: `note_id` 这一条路，离开 `notes` 就说不清是谁的数据），现按
-    #: `note_id → notes.platform_account_id` 回填成显式列。**刻意不加外键**：
-    #: 同 `notes` 的口径 —— 账号删了，历史评论仍要能回答「当时属于哪个账号」。
-    platform_account_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
 
 # ⛔ `Tag` / `note_tags`（原「用户标签」表 + 连接表）已于 2026-09-25 **整表移除**

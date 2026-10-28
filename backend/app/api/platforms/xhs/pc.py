@@ -15,8 +15,8 @@ from backend.app.adapters.xhs.qianfan_api_adapter import get_qianfan_api_adapter
 from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user, get_owned_active_account
 from backend.app.models import (
-    NoTrafficCleanupItem,
-    NoTrafficCleanupLog,
+    ROW_BATCH,
+    NoTrafficCleanupRow,
     PlatformAccount,
     Task,
     User,
@@ -2086,12 +2086,12 @@ def no_traffic_cleanup_logs(
     弹窗列表展示该日志记录」）。
 
     按**当前用户**收口（跨租户不可见）；`account_id` 给了就再收窄到一个账号。
-    时间倒序。字段见 `NoTrafficCleanupLog.to_dict()`：账号 / 阈值 / 清理前多少条 /
+    时间倒序。字段见 `NoTrafficCleanupRow.to_dict()`：账号 / 阈值 / 清理前多少条 /
     删了几篇 / 跳过 / 失败 / 失败原因 / 操作时间 / 结果时间。
 
     ⚠️ **每行内联 `items[]`（笔记维度明细，2026-10-06 用户口径）**：
     「清理无流量的主要对象是笔记，**所有主体应是笔记维度**」⇒ 逐篇处置事实（哪篇笔记 /
-    结果 / 为什么）不再挤在 `details` JSON 列里等人解析，而是落 `no_traffic_cleanup_items`
+    结果 / 为什么）不再挤在 `details` JSON 列里等人解析，而是落 `xhs_no_traffic_cleanup_rows` 的 `item` 行
     并按批次行内联下发。形状与 `GET /tasks` 的 `children` 同款（**父子两层**）。
 
     一次 20 行 × 每批上限 20 篇 = 最多 400 条明细 —— `DEFAULT_DELETE_BATCH` 是硬顶，
@@ -2099,17 +2099,22 @@ def no_traffic_cleanup_logs(
     """
     page = max(1, int(page or 1))
     limit = min(max(1, int(limit or 20)), 200)
-    where = [NoTrafficCleanupLog.user_id == current_user.id]
+    #: `row_type == batch` 是父行**唯一判据**（`parent_id IS NULL` 靠不住：
+    #: 批次行被保留期删掉后，孤儿明细的 `parent_id` 也被置空）。
+    where = [
+        NoTrafficCleanupRow.user_id == current_user.id,
+        NoTrafficCleanupRow.row_type == ROW_BATCH,
+    ]
     if account_id:
-        where.append(NoTrafficCleanupLog.account_id == int(account_id))
+        where.append(NoTrafficCleanupRow.account_id == int(account_id))
     total = int(
-        db.scalar(select(func.count()).select_from(NoTrafficCleanupLog).where(*where)) or 0
+        db.scalar(select(func.count()).select_from(NoTrafficCleanupRow).where(*where)) or 0
     )
     rows = (
         db.scalars(
-            select(NoTrafficCleanupLog)
+            select(NoTrafficCleanupRow)
             .where(*where)
-            .order_by(NoTrafficCleanupLog.id.desc())
+            .order_by(NoTrafficCleanupRow.id.desc())
             .offset((page - 1) * limit)
             .limit(limit)
         )
@@ -2121,14 +2126,17 @@ def no_traffic_cleanup_logs(
     log_ids = [row.id for row in rows]
     if log_ids:
         item_rows = db.scalars(
-            select(NoTrafficCleanupItem)
-            .where(NoTrafficCleanupItem.log_id.in_(log_ids))
-            .order_by(NoTrafficCleanupItem.operated_at.asc(), NoTrafficCleanupItem.id.asc())
+            select(NoTrafficCleanupRow)
+            .where(
+                NoTrafficCleanupRow.row_type == ROW_ITEM,
+                NoTrafficCleanupRow.parent_id.in_(log_ids),
+            )
+            .order_by(NoTrafficCleanupRow.operated_at.asc(), NoTrafficCleanupRow.id.asc())
         ).all()
         for item in item_rows:
-            if item.log_id is None:
+            if item.parent_id is None:
                 continue
-            items_by_log.setdefault(int(item.log_id), []).append(item.to_dict())
+            items_by_log.setdefault(int(item.parent_id), []).append(item.item_to_dict())
     return {
         "total": total,
         "page": page,

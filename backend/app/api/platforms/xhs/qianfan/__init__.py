@@ -63,7 +63,7 @@ from ._shared import (  # noqa: F401
     MAX_PAGE_SIZE,
     MaterialFolder,
     Note,
-    NoteAsset,
+    PublishAsset,
     OpenAICompatibleTextClient,
     Optional,
     Path,

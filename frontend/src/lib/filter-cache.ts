@@ -44,7 +44,8 @@ export const FILTER_CACHE_KEYS = {
     publishStatus: "xhs.filters.library.publish-status",
     accountId: "xhs.filters.library.account-id",
     hasAssets: "xhs.filters.library.has-assets",
-    hasComments: "xhs.filters.library.has-comments",
+    //: ⚠️ 2026-10-28（方案 B）：`hasComments` 键**已删除** —— 对应筛选控件与后端参数
+    //: 一起退场（`note_comments` 写入口从未打通、实测 0 行、表已 DROP）。
   },
   /** 我的笔记 `/platforms/xhs/my-notes`。 */
   myNotes: {

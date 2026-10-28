@@ -36,9 +36,9 @@ class NoteDatacenterStat(Base):
     * `notes` 是「笔记身份」（可能被删，`purge_note` 会真删行）；
     * 本表是「历史统计」（永在 —— 笔记删了，千帆数据中心的统计仍在）。
 
-    故本表**不设外键**指向 `notes.id`：`note_id` 是**平台 note_id 字符串**，
-    笔记删除不影响统计行。数据中心列表 `stats LEFT JOIN notes`，`notes` 缺行时
-    用本表的**快照列**（title / cover_url / item_* / publish_time）渲染。
+    故本表**不设外键**指向 `notes.id`：`note_id` 是**平台 note_id 字符串**。
+    2026-10-28 起读路径**不再 join `notes`**（用户口径「数据中心与笔记表完全拆分」），
+    标题/封面等一律用本表的**快照列**（title / cover_url / item_* / publish_time）。
 
     ## 为什么指标落真实列（非 JSON）
 
@@ -58,7 +58,7 @@ class NoteDatacenterStat(Base):
     `note_flag`（`goods_note` = 商业笔记 / 空 = 普通或未知）。
     """
 
-    __tablename__ = "note_datacenter_stats"
+    __tablename__ = "xhs_note_datacenter_stats"
     __table_args__ = (
         UniqueConstraint(
             "user_id",
@@ -75,7 +75,7 @@ class NoteDatacenterStat(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     #: 归属用户（租户隔离，与全站同一把尺子）。
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    user_id: Mapped[int] = mapped_column(ForeignKey("sys_users.id"), nullable=False)
     #: 归属账号（数据中心按账号同步）。
     platform_account_id: Mapped[int] = mapped_column(Integer, nullable=False)
     #: 平台 note_id（字符串，**非外键** —— 笔记删了统计仍在）。
@@ -88,9 +88,11 @@ class NoteDatacenterStat(Base):
     #: 平台原生分类（`goods_note` / 空）。**唯一权威**（取代 notes.note_category）。
     note_flag: Mapped[str] = mapped_column(String(24), nullable=False, default="")
 
-    # ---- 基础信息快照（notes 行不存在时渲染用）----
+    # ---- 基础信息快照（`notes` 表不存平台笔记 ⇒ 一律读本表）----
     title: Mapped[str] = mapped_column(String(512), nullable=False, default="")
     cover_url: Mapped[str] = mapped_column(String(512), nullable=False, default="")
+    #: 笔记原链接（含 `xsec_token`，详情实时拉取的唯一入口）。
+    note_url: Mapped[str] = mapped_column(String(1024), nullable=False, default="")
     item_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     item_title: Mapped[str] = mapped_column(String(256), nullable=False, default="")
     variant_desc: Mapped[str] = mapped_column(String(255), nullable=False, default="")

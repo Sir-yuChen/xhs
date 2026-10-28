@@ -35,7 +35,7 @@ ROLE_STATUSES: tuple[str, ...] = (ROLE_STATUS_NORMAL, ROLE_STATUS_DISABLED)
 class Role(Base):
     """角色行。`code` 是 `users.role` 的值域（应用层校验 + 守卫测试）。"""
 
-    __tablename__ = "roles"
+    __tablename__ = "sys_roles"
     __table_args__ = (
         CheckConstraint("status IN ('normal', 'disabled')", name="ck_roles_status"),
         #: 内置角色**必须启用** —— 停用一个内置角色等于把一整类用户锁在门外，

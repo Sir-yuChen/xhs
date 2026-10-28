@@ -66,7 +66,7 @@ class SystemSetting(Base):
     **业务策略参数 / 需热改 / 需审计 ⇒ 进本表**。
     """
 
-    __tablename__ = "system_settings"
+    __tablename__ = "sys_settings"
     __table_args__ = (
         # 三个级各一条 partial unique（DEF-044：同一语义只留一份约束表达）。
         Index(
@@ -97,7 +97,7 @@ class SystemSetting(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     #: 用户级归属；系统级/工作区级行为 NULL。
     user_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("users.id"), index=True, nullable=True
+        ForeignKey("sys_users.id"), index=True, nullable=True
     )
     #: 工作区级归属（`menus.workspace` 词汇表：xhs/douyin/…/system）；其余级为 NULL。
     workspace: Mapped[Optional[str]] = mapped_column(
@@ -117,6 +117,6 @@ class SystemSetting(Base):
     #: 危险开关（UI 二次确认）
     is_dangerous: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     #: 谁改的（审计；种子行 / 手工改库可能为空 ⇒ nullable，不造假）
-    updated_by: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"), nullable=True)
+    updated_by: Mapped[Optional[int]] = mapped_column(ForeignKey("sys_users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now, nullable=False)

@@ -217,11 +217,11 @@ def _cleanup_temp_dir(note_id: str) -> None:
 
 
 def _assets_of(db: Session, note_pk: int) -> list:
-    from backend.app.models.note import NoteAsset
+    from backend.app.models import ASSET_NOTE, PublishAsset
 
     return list(
         db.scalars(
-            select(NoteAsset).where(NoteAsset.note_id == note_pk).order_by(NoteAsset.sort_order, NoteAsset.id)
+            select(PublishAsset).where(PublishAsset.parent_id == note_pk).order_by(PublishAsset.sort_order, PublishAsset.id)
         ).all()
     )
 

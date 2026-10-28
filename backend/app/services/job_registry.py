@@ -8,7 +8,6 @@ Java 更危险（`os.system` 一行就能拼出来）。本表把"可被调度�
 ⚠️ 注册表**惰性构建**（`_build_registry` 在首次访问时才 import 各服务的
 模块级函数）：`scheduler_service` 要在模块层 import 本表做启动同步，而本表
    引用的函数又住在 `scheduler_service` / `shop_health_service` /
-   `auto_ops_service` 里 —— 模块层互相 import 会成环，惰性构建拆掉这个环。
 """
 
 from __future__ import annotations
@@ -109,24 +108,10 @@ class JobSpec:
     """True = 执行函数收 `user_id` 形参，runner 注入**行归属者**（DEF-066，
     设计 15 §4.1.1）：账号维度系统任务一律 True ⇒ 账号查询恒带
     `PlatformAccount.user_id == user_id`，「一行触发只跑行主数据」。
-    auto_ops 管线不设（其隔离由 `auto_task_id` 归属校验承担）。"""
+    （自动运营管线已于 2026-10-28 随 `auto_tasks` 表退场。）"""
     params_validator: Optional[Callable[[dict, Any, Any], None]] = None
     """深校验钩子（归属 / 引用存在性等浅校验管不了的事）：`(params, db, user) -> None`，
     不合规抛 `ValueError`（API 映射 400）。创建与更新都会过它。"""
-
-
-def _validate_auto_ops_params(params: dict, db: Any, user: Any) -> None:
-    """auto_ops 管线参数深校验：`auto_task_id` 必须属于当前用户。
-
-    浅校验（键存在性）管不了「拿别人的 auto_task_id 建调度行」—— 那条路会在
-    调度触发时用**别人的账号与关键词**跑管线（跨租户）。API 边界挡掉。
-    """
-    from backend.app.models import AutoTask
-
-    task_id = params.get("auto_task_id")
-    task = db.get(AutoTask, task_id) if isinstance(task_id, int) else None
-    if task is None or task.user_id != user.id:
-        raise ValueError("auto_task_id 不存在或不属于当前用户")
 
 
 #: 工作区归属（设计 64 §3.3）：定时任务是**公共底座**（单调度器，不按工作区拆分），
@@ -170,7 +155,6 @@ def workspace_for_job(key: str) -> str:
 def _build_registry() -> dict[str, JobSpec]:
     # 延迟 import：拆掉 scheduler_service ↔ job_registry 的导入环（见模块 docstring）。
     from backend.app.services import scheduler_service
-    from backend.app.services.auto_ops_service import run_keyword_pipeline
     from backend.app.services.business_note_publish_service import (
         run_business_note_auto_publish,
         validate_business_publish_params,
@@ -193,15 +177,6 @@ def _build_registry() -> dict[str, JobSpec]:
             key="system.due_publish",
             name="定时发布补跑",
             func=scheduler_service.run_due_publish_jobs_once,
-            builtin=True,
-            user_scoped=True,
-            default_trigger_type="cron",
-            default_cron="0 * * * * *",
-        ),
-        JobSpec(
-            key="system.monitoring_refresh",
-            name="监控目标刷新",
-            func=scheduler_service.run_monitoring_refresh_once,
             builtin=True,
             user_scoped=True,
             default_trigger_type="cron",
@@ -359,16 +334,6 @@ def _build_registry() -> dict[str, JobSpec]:
             user_scoped=False,
             default_trigger_type="cron",
             default_cron="0 0 * * * *",
-        ),
-        JobSpec(
-            key="auto_ops.keyword_pipeline",
-            name="自动运营管线",
-            func=run_keyword_pipeline,
-            builtin=False,
-            default_trigger_type="cron",
-            default_cron="0 0 9 * * *",
-            params_required=("auto_task_id",),
-            params_validator=_validate_auto_ops_params,
         ),
     ]
     return {spec.key: spec for spec in specs}

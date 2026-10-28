@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>当前全库表结构 · 32 张</title>
+<style>
+:root{--bg:#0f1115;--card:#171a21;--card2:#1d2129;--line:#2a2f3a;--fg:#e6e9ef;
+--muted:#8b93a3;--accent:#4c9aff;--ok:#3fb950;--warn:#d29922;--danger:#f85149;--purple:#a371f7}
+*{box-sizing:border-box}
+body{margin:0;padding:24px 28px 70px;background:var(--bg);color:var(--fg);
+font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;font-size:13px;line-height:1.5}
+h1{font-size:20px;margin:0 0 4px}
+h2{font-size:14.5px;margin:26px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+.sub{color:var(--muted);font-size:11.5px;margin-bottom:14px}
+.kpi{display:flex;gap:11px;margin:14px 0 18px;flex-wrap:wrap}
+.kpi div{background:var(--card);border:1px solid var(--line);border-radius:7px;padding:9px 15px;min-width:92px}
+.kpi b{display:block;font-size:19px;line-height:1.2}
+.kpi span{color:var(--muted);font-size:10.5px}
+.dom{margin:14px 0 20px}
+.dom h3{font-size:12px;margin:0 0 8px;color:var(--muted);font-weight:600}
+.dom h3 b{color:var(--fg)} .dom h3 em{font-style:normal;color:var(--accent);font-size:10px;
+background:#0e1c2b;border:1px solid #1b3a5c;padding:1px 6px;border-radius:3px;margin-left:6px}
+.dom h3 em.l1{color:var(--warn);background:#241d0e;border-color:#4a3a15}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:9px}
+.tb{background:var(--card);border:1px solid var(--line);border-radius:7px;overflow:hidden}
+.tb.l1{border-left:2px solid var(--warn)} .tb.l0{border-left:2px solid var(--accent)}
+.tb .hd{display:flex;justify-content:space-between;align-items:center;padding:7px 9px;
+background:var(--card2);border-bottom:1px solid var(--line)}
+.tb .nm{font-family:ui-monospace,Consolas,monospace;font-size:11.5px;font-weight:600;color:var(--accent)}
+.tb.l1 .nm{color:var(--warn)}
+.tb .rr{font-size:10px;color:var(--muted)}
+.tb .pz{padding:5px 9px;font-size:10px;color:var(--muted);border-bottom:1px solid var(--line);
+line-height:1.45}
+.tb .cls{padding:6px 9px 8px;font-size:10.5px;line-height:1.65}
+.tb .cls i{font-style:normal;display:block;color:var(--muted);font-family:ui-monospace,Consolas,monospace;
+white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tb .cls i b{color:var(--fg);font-weight:500}
+.tb .cls i em{color:var(--purple);font-style:normal}
+.tb .cls i.pk{color:var(--ok)}
+.tb .cls i.nn{color:var(--fg)}
+.note{background:var(--card);border:1px solid var(--line);border-left:2px solid var(--warn);
+border-radius:7px;padding:11px 14px;margin:14px 0;font-size:11.5px;line-height:1.7}
+.note b{color:var(--warn)}
+.note code{font-family:ui-monospace,Consolas,monospace;color:var(--accent);font-size:10.5px}
+table.rules{border-collapse:collapse;width:100%;font-size:11.5px;margin:10px 0 4px}
+table.rules th,table.rules td{border:1px solid var(--line);padding:6px 9px;text-align:left}
+table.rules th{background:var(--card2);color:var(--muted);font-weight:600}
+</style></head><body>
+<h1>当前全库表结构 · 32 张</h1>
+<div class="sub">由 <code>.hermes/scripts/gen_current_schema.py</code> 从 PostgreSQL 元数据直出（spider_xhs · 32 张业务表，不含 alembic_version / apscheduler_jobs）。列清单不手写，随库同步。</div>
+<div class="kpi">
+<div><b>32</b><span>业务表</span></div>
+<div><b>13</b><span>小红书私有 L1</span></div>
+<div><b>19</b><span>系统骨架 L0</span></div>
+<div><b>494</b><span>列</span></div>
+<div><b>49</b><span>外键</span></div>
+<div><b>149,566</b><span>数据行</span></div>
+</div>
+<div class="note">
+<b>两级判据</b>：<b>L0 系统骨架</b>（换平台照用）vs <b>L1 小红书私有</b>（只服务小红书）。机械判定 C1 表名含平台词 / C2 <code>platform</code> NOT NULL / C3 平台专有列 / C4 只服务 L1 父表。
+<br><b>2026-10-28 合并实绩</b>：账号域 3 表 → 1 表（<code>platform_accounts</code> 吸收 cookie 版本与登录会话）；<code>note_generation_links</code> 合并进 <code>notes.generation_record_id</code> 后删表。
+<br><b>曾评估但否决</b>：<code>draft_assets</code> / <code>publish_assets</code>（各有独立端点按 asset_id 单条操作）、<code>xhs_no_traffic_cleanup_rows</code> 的 item 行（明细是可检索答案）、<code>draft_assets</code>（时间序列形态的素材流）—— 压成 JSON 会丢能力，不做。
+</div>
+
+<div class="dom"><h3><b>系统骨架</b><em class="">L0 骨架</em> · 11 张</h3><div class="grid">
+<div class="tb l0"><div class="hd"><span class="nm">sys_users</span><span class="rr">31 行</span></div><div class="pz">系统账号与租户根，34 张表以 user_id 做租户隔离。</div><div class="cls">
+<i class="pk"><b>id</b><em> integer</em></i>
+<i class="nn"><b>username</b><em> character varying</em></i>
+<i class="nn"><b>password_hash</b><em> character varying</em></i>
+<i class="nn"><b>role</b><em> character varying</em></i>
+<i class="nn"><b>token_version</b><em> integer</em></i>
+<i class="nn"><b>created_at</b><em> timestamp without time zone</em></i>
+<i class="nn"><b>status</b><em> character varying</em></i>
+<i class="nn"><b>real_name</b><em> character varying</em></i>
+<i class="nn"><b>last_login_ip</b><em> character varying</em></i>
+<i class=""><b>last_login_at</b><em> timestamp without time zone</em></i>
+<i class="nn"><b>must_change_password</b><em> boolean</em></i>
+<i class=""><b>deleted_at</b><em> timestamp without time zone</em></i>
+<i class="nn"><b>email</b><em> character varying</em></i>
+<i class="nn"><b>phone</b><em> character varying</em></i>
+</div><div class="pz">FK → - · 被 24 张表引用</div></div>
+<div class="tb l0"><div class="hd"><span class="nm">sys_roles</span><span class="rr">3 行</span></div><div class="pz">角色定义（admin 超管 / manager / user 内置三档）。</div><div class="cls">
+<i class="pk"><b>id</b><em> integer</em></i>
+<i class="nn"><b>name</b><em> character varying</em></i>
+<i class="nn"><b>code</b><em> character varying</em></i>
+<i class="nn"><b>description</b><em> character varying</em></i>
+<i class="nn"><b>is_system</b><em> boolean</em></i>
+<i class="nn"><b>status</b><em> character varying</em></i>
+<i class="nn"><b>sort_order</b><em> integer</em></i>
+<i class="nn"><b>created_at</b><em> timestamp without time zone</em></i>
+<i class="nn"><b>updated_at</b><em> timestamp without time zone</em></i>
+</div><div class="pz">FK → - · 被 1 张表引用</div></div>
+<div class="tb l0"><div class="hd"><span class="nm">sys_role_menus</span><span class="rr">2,251 行</span></div><div class="pz">角色 ↔ 菜单授权（判权只走权限码，本表只决定菜单可见）。</div><div class="cls">
+<i class="pk"><b>id</b><em> integer</em></i>
+<i class=""><b>user_id</b><em> integer</em></i>
+<i class="nn"><b>role_id</b><em> integer</em></i>
+<i class="nn"><b>menu_id</b><em> integer</em></i>
+</div><div class="pz">FK → sys_menus, sys_roles, sys_users · 被 0 张表引用</div></div>
+<div class="tb l0"><div class="hd"><span class="nm">sys_menus</span><span class="rr">184 行</span></div><div class="pz">菜单与按钮权限树。</div><div class="cls">
+<i class="pk"><b>id</b><em> integer</em></i>
+<i class="nn"><b>parent_id</b><em> integer</em></i>
+<i class="nn"><b>name</b><em> character varying</em></i>
+<i class="nn"><b>menu_type</b><em> character varying</em></i>
+<i class="nn"><b>path</b><em> character varying</em></i>
+<i class="nn"><b>component</b><em> character varying</em></i>
+<i class="nn"><b>perms</b><em> character varying</em></i>
+<i class="nn"><b>icon</b><em> character varying</em></i>
+<i class="nn"><b>workspace</b><em> character varying</em></i>
+<i class="nn"><b>sort_order</b><em> integer</em></i>
+<i class="nn"><b>is_visible</b><em> boolean</em></i>
+<i class="nn"><b>status</b><em> character varying</em></i>
+<i class="nn"><b>created_at</b><em> timestamp without time zone</em></i>
+<i class="nn"><b>updated_at</b><em> timestamp without time zone</em></i>
+</div><div class="pz">FK → - · 被 1 张表引用</div></div>
+<div class="tb l0"><div class="hd"><span class="nm">sys_dicts</span><span class="rr">265 行</span></div><div class="pz">数据字典条目。</div><div class="cls">
+<i class="pk"><b>id</b><em> integer</em></i>
+<i class="nn"><b>row_type</b><em> character varying</em></i>
+<i class=""><b>parent_id</b><em> integer</em></i>
+<i class="nn"><b>name</b><em> character varying</em></i>
+<i class="nn"><b>code</b><em> character varying</em></i>
+<i class="nn"><b>type_code</b><em> character varying</em></i>
+<i class="nn"><b>label</b><em> character varying</em></i>
+<i class="nn"><b>value</b><em> character varying</em></i>
+<i class="nn"><b>list_class</b><em> character varying</em></i>
+<i class="nn"><b>sort_order</b><em> integer</em></i>
+<i class="nn"><b>status</b><em> character varying</em></i>
+<i class="nn"><b>remark</b><em> character varying</em></i>
+<i class="nn"><b>created_at</b><em> timestamp without time zone</em></i>
+<i class="nn"><b>updated_at</b><em> timestamp without time zone</em></i>
+</div><div class="pz">FK → sys_dicts · 被 1 张表引用</div></div>
+<div class="tb l0"><div class="hd"><span class="nm">sys_settings</span><span class="rr">13 行</span></div><div class="pz">运行时配置（三级归属：系统 / 个人 / 工作区）。</div><div class="cls">
+<i class="pk"><b>id</b><em> integer</em></i>
+<i class=""><b>user_id</b><em> integer</em></i>
+<i class="nn"><b>key</b><em> character varying</em></i>
+<i class="nn"><b>value</b><em> text</em></i>
+<i class="nn"><b>value_type</b><em> character varying</em></i>
+<i class="nn"><b>category</b><em> character varying</em></i>
+<i class="nn"><b>label</b><em> character varying</em></i>
+<i class="nn"><b>description</b><em> text</em></i>
+<i class="nn"><b>requires_restart</b><em> boolean</em></i>
+<i class="nn"><b>is_dangerous</b><em> boolean</em></i>
+<i class=""><b>updated_by</b><em> integer</em></i>
+<i class="nn"><b>created_at</b><em> timestamp without time zone</em></i>
+<i class="nn"><b>updated_at</b><em> timestamp without time zone</em></i>
+<i class=""><b>workspace</b><em> character varying</em></i>
+</div><div class="pz">FK → sys_users · 被 0 张表引用</div></div>
+<div class="tb l0"><div class="hd"><span class="nm">sys_logs</span><span class="rr">37,541 行</span></div><div class="pz">业务事件日志。</div><div class="cls">
+<i class="pk"><b>id</b><em> integer</em></i>
+<i class="nn"><b>log_type</b><em> character varying</em></i>
+<i class=""><b>trace_id</b><em> character varying</em></i>
+<i class=""><b>user_id</b><em> integer</em></i>
+<i class=""><b>platform</b><em> character varying</em></i>
+<i class=""><b>endpoint</b><em> character varying</em></i>
+<i class=""><b>status</b><em> character varying</em></i>
+<i class=""><b>status_code</b><em> integer</em></i>
+<i class=""><b>meta</b><em> json</em></i>
+<i class=""><b>level</b><em> character varying</em></i>
+<i class=""><b>event</b><em> character varying</em></i>
+<i class=""><b>action</b><em> character varying</em></i>
+<i class=""><b>actor_id</b><em> integer</em></i>
+<i class=""><b>actor_name</b><em> character varying</em></i>
+<i class=""><b>workspace</b><em> character varying</em></i>
+<i class=""><b>target_type</b><em> character varying</em></i>
+<i class=""><b>target_id</b><em> character varying</em></i>
+<i class=""><b>summary</b><em> character varying</em></i>
+<i class=""><b>detail_json</b><em> text</em></i>
+<i class="nn"><b>created_at</b><em> timestamp without time zone</em></i>
+</div><div class="pz">FK → - · 被 0 张表引用</div></div>
+<div class="tb l0"><div class="hd"><span class="nm">sys_notifications</span><span class="rr">27 行</span></div><div class="pz">站内通知。</div><div class="cls">
+<i class="pk"><b>id</b><em> integer</em></i>
+<i class="nn"><b>user_id</b><em> integer</em></i>
+<i class="nn"><b>title</b><em> character varying</em></i>
+<i class="nn"><b>body</b><em> text</em></i>
+<i class="nn"><b>level</b><em> character varying</em></i>
+<i class=""><b>source_task_id</b><em> integer</em></i>
+<i class=""><b>source_type</b><em> character varying</em></i>
+<i class=""><b>source_id</b><em> integer</em></i>
+<i class="nn"><b>read</b><em> boolean</em></i>
+<i class="nn"><b>created_at</b><em> timestamp without time zone</em></i>
+<i class=""><b>link</b><em> character varying</em></i>
+</div><div class="pz">FK → queue_jobs, sys_users · 被 0 张表引用</div></div>
+<div class="tb l0"><div class="hd"><span class="nm">sys_scheduled_jobs</span><span class="rr">10 行</span></div><div class="pz">定时任务定义（job_key 全表唯一，两级架构：系统级 / 工作区级）。</div><div class="cls">
+<i class="pk"><b>id</b><em> integer</em></i>
+<i class=""><b>user_id</b><em> integer</em></i>
+<i class="nn"><b>name</b><em> character varying</em></i>
+<i class="nn"><b>job_key</b><em> character varying</em></i>
+<i class="nn"><b>trigger_type</b><em> character varying</em></i>
+<i class="nn"><b>cron_expression</b><em> character varying</em></i>
+<i class=""><b>run_at</b><em> timestamp without time zone</em></i>
+<i class="nn"><b>misfire_policy</b><em> character varying</em></i>
+<i class="nn"><b>concurrent</b><em> character varying</em></i>
+<i class=""><b>params</b><em> json</em></i>
+<i class="nn"><b>status</b><em> character varying</em></i>
+<i class="nn"><b>remark</b><em> character varying</em></i>
+<i class="nn"><b>is_builtin</b><em> boolean</em></i>
+<i class=""><b>last_run_at</b><em> timestamp without time zone</em></i>
+<i class=""><b>next_run_at</b><em> timestamp without time zone</em></i>
+<i class="nn"><b>run_count</b><em> integer</em></i>
+<i class="nn"><b>fail_count</b><em> integer</em></i>
+<i class="nn"><b>consecutive_failures</b><em> integer</em></i>
+<i class=""><b>backoff_until</b><em> timestamp without time zone</em></i>
+<i class=""><b>last_status</b><em> character varying</em></i>
+<i class="nn"><b>created_at</b><em> timestamp without time zone</em></i>
+<i class=""><b>updated_at</b><em> timestamp without time zone</em></i>
+<i class=""><b>workspace</b><em> character varying</em></i>
+</div><div class="pz">FK → sys_users · 被 1 张表引用</div></div>
+<div class="tb l0"><div class="hd"><span class="nm">sys_scheduled_job_logs</span><span class="rr">96,265 行</span></div><div class="pz">定时任务执行日志（含 executed_for_user_id 归属快照）。</div><div class="cls">
+<i class="pk"><b>id</b><em> integer</em></i>
+<i class=""><b>job_id</b><em> integer</em></i>
+<i class=""><b>user_id</b><em> integer</em></i>
+<i class=""><b>platform_account_id</b><em> integer</em></i>
+<i class=""><b>task_id</b><em> integer</em></i>
+<i class="nn"><b>job_name</b><em> character varying</em></i>
+<i class="nn"><b>job_key</b><em> character varying</em></i>
+<i class="nn"><b>job_trigger_type</b><em> character varying</em></i>
+<i class="nn"><b>trigger_type</b><em> character varying</em></i>
+<i class="nn"><b>status</b><em> character varying</em></i>
+<i class="nn"><b>started_at</b><em> timestamp without time zone</em></i>
+<i class=""><b>finished_at</b><em> timestamp without time zone</em></i>
+<i class=""><b>duration_ms</b><em> integer</em></i>
+<i class="nn"><b>progress</b><em> integer</em></i>
+<i class="nn"><b>message</b><em> text</em></i>
+<i class="nn"><b>exception_info</b><em> text</em></i>
+<i class=""><b>result</b><em> json</em></i>
+<i class=""><b>config_snapshot</b><em> json</em></i>
+<i class="nn"><b>created_at</b><em> timestamp without time zone</em></i>
+<i class=""><b>trace_id</b><em> character varying</em></i>
+<i class=""><b>executed_for_user_id</b><em> integer</em></i>
+<i class=""><b>workspace</b><em> character varying</em></i>
+</div><div class="pz">FK → sys_scheduled_jobs, sys_users · 被 0 张表引用</div></div>
+<div class="tb l0"><div class="hd"><span class="nm">queue_jobs</span><span class="rr">651 行</span></div><div class="pz">任务底座（队列项 / 批次状态机，发布 / 同步 / 生成共用）。</div><div class="cls">
+<i class="pk"><b>id</b><em> integer</em></i>
+<i class="nn"><b>user_id</b><em> integer</em></i>
+<i class="nn"><b>platform</b><em> character varying</em></i>
+<i class="nn"><b>task_type</b><em> character varying</em></i>
+<i class="nn"><b>status</b><em> character varying</em></i>
+<i class="nn"><b>progress</b><em> integer</em></i>
+<i class=""><b>payload</b><em> json</em></i>
+<i class="nn"><b>created_at</b><em> timestamp without time zone</em></i>
+<i class=""><b>started_at</b><em> timestamp without time zone</em></i>
+<i class=""><b>finished_at</b><em> timestamp without time zone</em></i>
+<i class=""><b>error_type</b><em> character varying</em></i>
+<i class="nn"><b>retry_count</b><em> integer</em></i>
+<i class="nn"><b>max_retries</b><em> integer</em></i>
+<i class=""><b>parent_task_id</b><em> integer</em></i>
+<i class=""><b>batch_no</b><em> character varying</em></i>
+</div><div class="pz">FK → queue_jobs, sys_users · 被 4 张表引用</div></div>
+</div></div>
+<div class="dom"><h3><b>LLM 网关与提示词</b><em class="">L0 骨架</em> · 7 张</h3><div class="grid">
+<div class="tb l0"><div class="hd"><span class="nm">llm_gateway_configs</span><span class="rr">199 行</span></div><div class="pz">LLM 网关服务商配置。</div><div class="cls">
+<i class="pk"><b>id</b><em> integer</em></i>
+<i class="nn"><b>user_id</b><em> integer</em></i>
+<i class="nn"><b>provider_key</b><em> character varying</em></i>
+<i class="nn"><b>name</b><em> character varying</em></i>
+<i class="nn"><b>base_url</b><em> character varying</em></i>
+<i class="nn"><b>access_token</b><em> text</em></i>
+<i class="nn"><b>local_db_path</b><em> character varying</em></i>
+<i class="nn"><b>models_json</b><em> text</em></i>
+<i class="nn"><b>enabled</b><em> boolean</em></i>
+<i class="nn"><b>healthy</b><em> boolean</em></i>
+<i class=""><b>last_health_at</b><em> timestamp without time zone</em></i>
+<i class="nn"><b>created_at</b><em> timestamp without time zone</em></i>
+<i class="nn"><b>updated_at</b><em> timestamp without time zone</em></i>
+</div><div class="pz">FK → sys_users · 被 3 张表引用</div></div>
+<div class="tb l0"><div class="hd"><span class="nm">llm_gateway_models</span><span class="rr">875 行</span></div><div class="pz">服务商下的模型清单。</div><div class="cls">
+<i class="pk"><b>id</b><em> integer</em></i>
+<i class="nn"><b>user_id</b><em> integer</em></i>
+<i class="nn"><b>provider_key</b><em> character varying</em></i>
+<i class="nn"><b>model_key</b><em> character varying</em></i>
+<i class="nn"><b>model_name</b><em> character varying</em></i>
+<i class="nn"><b>model_type</b><em> character varying</em></i>
+<i class="nn"><b>platform</b><em> character varying</em></i>
+<i class="nn"><b>enabled</b><em> boolean</em></i>
+<i class="nn"><b>remark</b><em> character varying</em></i>
+<i class="nn"><b>healthy</b><em> boolean</em></i>
+<i class=""><b>last_health_at</b><em> timestamp without time zone</em></i>
+<i class="nn"><b>created_at</b><em> timestamp without time zone</em></i>
+<i class="nn"><b>updated_at</b><em> timestamp without time zone</em></i>
+</div><div class="pz">FK → sys_users · 被 0 张表引用</div></div>
+<div class="tb l0"><div class="hd"><span class="nm">llm_gateway_alerts</span><span class="rr">16 行</span></div><div class="pz">网关告警规则。</div><div class="cls">
+<i class="pk"><b>id</b><em> integer</em></i>
+<i class="nn"><b>user_id</b><em> integer</em></i>
+<i class=""><b>gateway_id</b><em> integer</em></i>
+<i class="nn"><b>platform</b><em> character varying</em></i>
+<i class="nn"><b>function</b><em> character varying</em></i>
+<i class="nn"><b>model_name</b><em> character varying</em></i>
+<i class="nn"><b>metric</b><em> character varying</em></i>
+<i class="nn"><b>operator</b><em> character varying</em></i>
+<i class="nn"><b>threshold</b><em> double precision</em></i>
+<i class="nn"><b>window_seconds</b><em> integer</em></i>
+<i class="nn"><b>level</b><em> character varying</em></i>
+<i class="nn"><b>enabled</b><em> boolean</em></i>
+<i class=""><b>last_fired_at</b><em> timestamp without time zone</em></i>
+<i class="nn"><b>created_at</b><em> timestamp without time zone</em></i>
+<i class="nn"><b>updated_at</b><em> timestamp without time zone</em></i>
+</div><div class="pz">FK → llm_gateway_configs, sys_users · 被 0 张表引用</div></div>
+<div class="tb l0"><div class="hd"><span class="nm">llm_gateway_usage_logs</span><span class="rr">171 行</span></div><div class="pz">网关调用用量日志。</div><div class="cls">
+<i class="pk"><b>id</b><em> integer</em></i>
+<i class="nn"><b>user_id</b><em> integer</em></i>
+<i class="nn"><b>gateway_id</b><em> integer</em></i>
+<i class="nn"><b>platform</b><em> character varying</em></i>
+<i class="nn"><b>function</b><em> character varying</em></i>
+<i class="nn"><b>token_name</b><em> character varying</em></i>
+<i class="nn"><b>model_name</b><em> character varying</em></i>
+<i class="nn"><b>prompt_tokens</b><em> integer</em></i>
+<i class="nn"><b>completion_tokens</b><em> integer</em></i>
+<i class="nn"><b>latency_ms</b><em> integer</em></i>
+<i class="nn"><b>status</b><em> character varying</em></i>
+<i class="nn"><b>error_message</b><em> text</em></i>
+<i class="nn"><b>created_at</b><em> timestamp without time zone</em></i>
+</div><div class="pz">FK → llm_gateway_configs, sys_users · 被 0 张表引用</div></div>
+<div class="tb l0"><div class="hd"><span class="nm">llm_business_providers</span><span class="rr">654 行</span></div><div class="pz">业务点 → 模型映射（生成链路按业务点取模型）。</div><div class="cls">
+<i class="pk"><b>id</b><em> integer</em></i>
+<i class="nn"><b>user_id</b><em> integer</em></i>
+<i class="nn"><b>platform</b><em> character varying</em></i>
+<i class="nn"><b>business_key</b><em> character varying</em></i>
+<i class="nn"><b>kind</b><em> character varying</em></i>
+<i class="nn"><b>provider_key</b><em> character varying</em></i>
+<i class="nn"><b>model_name</b><em> character varying</em></i>
+<i class="nn"><b>enabled</b><em> boolean</em></i>
+<i class="nn"><b>created_at</b><em> timestamp without time zone</em></i>
+<i class="nn"><b>updated_at</b><em> timestamp without time zone</em></i>
+</div><div class="pz">FK → sys_users · 被 0 张表引用</div></div>
+<div class="tb l0"><div class="hd"><span class="nm">xhs_prompt_modules</span><span class="rr">248 行</span></div><div class="pz">提示词模块（可复用片段）。</div><div class="cls">
+<i class="pk"><b>id</b><em> integer</em></i>
+<i class="nn"><b>user_id</b><em> integer</em></i>
+<i class="nn"><b>name</b><em> character varying</em></i>
+<i class="nn"><b>category</b><em> character varying</em></i>
+<i class="nn"><b>content</b><em> text</em></i>
+<i class="nn"><b>sort_order</b><em> integer</em></i>
+<i class="nn"><b>enabled</b><em> boolean</em></i>
+<i class="nn"><b>created_at</b><em> timestamp without time zone</em></i>
+<i class="nn"><b>updated_at</b><em> timestamp without time zone</em></i>
+</div><div class="pz">FK → sys_users · 被 0 张表引用</div></div>
+<div class="tb l0"><div class="hd"><span class="nm">xhs_prompt_templates</span><span class="rr">124 行</span></div><div class="pz">提示词模板（模块组合 + 变量占位）。</div><div class="cls">
+<i class="pk"><b>id</b><em> integer</em></i>
+<i class="nn"><b>user_id</b><em> integer</em></i>
+<i class="nn"><b>name</b><em> character varying</em></i>
+<i class="nn"><b>task_type</b><em> character varying</em></i>
+<i class="nn"><b>prompt_skeleton</b><em> text</em></i>
+<i class=""><b>module_ids</b><em> json</em></i>
+<i class="nn"><b>is_default</b><em> boolean</em></i>
+<i class="nn"><b>version</b><em> integer</em></i>
+<i class="nn"><b>created_at</b><em> timestamp without time zone</em></i>
+<i class="nn"><b>updated_at</b><em> timestamp without time zone</em></i>
+</div><div class="pz">FK → sys_users · 被 1 张表引用</div></div>
+</div></div>
+<div class="dom"><h3><b>素材库</b><em class="">L0 骨架</em> · 1 张</h3><div class="grid">
+<div class="tb l0"><div class="hd"><span class="nm">xhs_material_rows</span><span class="rr">5 行</span></div><div class="pz">素材库（自引用父子表：`row_type=folder` 文件夹 / `file` 文件索引）。</div><div class="cls">
+<i class="pk"><b>id</b><em> integer</em></i>
+<i class="nn"><b>row_type</b><em> character varying</em></i>
+<i class=""><b>parent_id</b><em> integer</em></i>
+<i class=""><b>user_id</b><em> integer</em></i>
+<i class="nn"><b>name</b><em> character varying</em></i>
+<i class="nn"><b>path</b><em> text</em></i>
+<i class="nn"><b>enabled</b><em> boolean</em></i>
+<i class=""><b>last_scan_at</b><em> timestamp without time zone</em></i>
+<i class="nn"><b>file_count</b><em> integer</em></i>
+<i class="nn"><b>filename</b><em> character varying</em></i>
+<i class="nn"><b>file_type</b><em> character varying</em></i>
+<i class="nn"><b>rel_path</b><em> text</em></i>
+<i class=""><b>size_bytes</b><em> bigint</em></i>
+<i class=""><b>mtime</b><em> timestamp without time zone</em></i>
+<i class=""><b>width</b><em> integer</em></i>
+<i class=""><b>height</b><em> integer</em></i>
+<i class="nn"><b>thumb_url</b><em> text</em></i>
+<i class="nn"><b>created_at</b><em> timestamp without time zone</em></i>
+<i class=""><b>updated_at</b><em> timestamp without time zone</em></i>
+</div><div class="pz">FK → xhs_material_rows · 被 1 张表引用</div></div>
+</div></div>
+<div class="dom"><h3><b>小红书 · 账号</b><em class="l1">L1 私有</em> · 1 张</h3><div class="grid">
+<div class="tb l1"><div class="hd"><span class="nm">xhs_accounts</span><span class="rr">5 行</span></div><div class="pz">小红书账号（含 cookies_json 每通道最新令牌 + 店铺状态）。</div><div class="cls">
+<i class="pk"><b>id</b><em> integer</em></i>
+<i class="nn"><b>user_id</b><em> integer</em></i>
+<i class="nn"><b>platform</b><em> character varying</em></i>
+<i class=""><b>sub_type</b><em> character varying</em></i>
+<i class=""><b>external_user_id</b><em> character varying</em></i>
+<i class="nn"><b>nickname</b><em> character varying</em></i>
+<i class="nn"><b>avatar_url</b><em> text</em></i>
+<i class="nn"><b>status</b><em> character varying</em></i>
+<i class="nn"><b>status_message</b><em> text</em></i>
+<i class="nn"><b>profile_json</b><em> text</em></i>
+<i class="nn"><b>note_sync_cursor_ms</b><em> bigint</em></i>
+<i class="nn"><b>note_sync_cursor_note_id</b><em> character varying</em></i>
+<i class=""><b>seller_id</b><em> character varying</em></i>
+<i class="nn"><b>shop_state</b><em> text</em></i>
+<i class="nn"><b>created_at</b><em> timestamp without time zone</em></i>
+<i class="nn"><b>updated_at</b><em> timestamp without time zone</em></i>
+<i class=""><b>deleted_at</b><em> timestamp without time zone</em></i>
+<i class="nn"><b>disabled</b><em> boolean</em></i>
+<i class="nn"><b>cookies_json</b><em> text</em></i>
+<i class=""><b>last_login_at</b><em> timestamp without time zone</em></i>
+<i class="nn"><b>last_login_method</b><em> character varying</em></i>
+</div><div class="pz">FK → sys_users · 被 2 张表引用</div></div>
+</div></div>
+<div class="dom"><h3><b>小红书 · 内容</b><em class="l1">L1 私有</em> · 5 张</h3><div class="grid">
+<div class="tb l1"><div class="hd"><span class="nm">xhs_notes</span><span class="rr">48 行</span></div><div class="pz">只存「属于自己的两类笔记」：local_generated（AI 生成）+ collected（采集）。</div><div class="cls">
+<i class="pk"><b>id</b><em> integer</em></i>
+<i class="nn"><b>user_id</b><em> integer</em></i>
+<i class="nn"><b>platform_account_id</b><em> integer</em></i>
+<i class="nn"><b>platform</b><em> character varying</em></i>
+<i class="nn"><b>note_id</b><em> character varying</em></i>
+<i class="nn"><b>title</b><em> character varying</em></i>
+<i class="nn"><b>content</b><em> text</em></i>
+<i class="nn"><b>author_name</b><em> character varying</em></i>
+<i class=""><b>raw_json</b><em> json</em></i>
+<i class="nn"><b>published</b><em> boolean</em></i>
+<i class="nn"><b>note_type</b><em> character varying</em></i>
+<i class="nn"><b>note_form</b><em> character varying</em></i>
+<i class=""><b>hydrated_at</b><em> timestamp without time zone</em></i>
+<i class=""><b>platform_missing_at</b><em> timestamp without time zone</em></i>
+<i class="nn"><b>publish_status</b><em> character varying</em></i>
+<i class="nn"><b>publish_error</b><em> text</em></i>
+<i class="nn"><b>is_deleted</b><em> boolean</em></i>
+<i class="nn"><b>publish_attempts</b><em> integer</em></i>
+<i class=""><b>published_at</b><em> timestamp without time zone</em></i>
+<i class="nn"><b>created_at</b><em> timestamp without time zone</em></i>
+<i class=""><b>generation_record_id</b><em> integer</em></i>
+</div><div class="pz">FK → sys_users, xhs_accounts, xhs_generation_records · 被 2 张表引用</div></div>
+<div class="tb l1"><div class="hd"><span class="nm">xhs_note_topics</span><span class="rr">125 行</span></div><div class="pz">笔记 ↔ 话题关系（多对多）。</div><div class="cls">
+<i class="pk"><b>id</b><em> integer</em></i>
+<i class="nn"><b>note_id</b><em> integer</em></i>
+<i class="nn"><b>topic_id</b><em> integer</em></i>
+<i class="nn"><b>created_at</b><em> timestamp without time zone</em></i>
+</div><div class="pz">FK → xhs_notes, xhs_topics · 被 0 张表引用</div></div>
+<div class="tb l1"><div class="hd"><span class="nm">xhs_topics</span><span class="rr">4,963 行</span></div><div class="pz">话题字典。</div><div class="cls">
+<i class="pk"><b>id</b><em> integer</em></i>
+<i class="nn"><b>user_id</b><em> integer</em></i>
+<i class="nn"><b>name</b><em> character varying</em></i>
+<i class="nn"><b>color</b><em> character varying</em></i>
+<i class="nn"><b>platform_id</b><em> character varying</em></i>
+<i class="nn"><b>created_at</b><em> timestamp without time zone</em></i>
+</div><div class="pz">FK → sys_users · 被 1 张表引用</div></div>
+<div class="tb l1"><div class="hd"><span class="nm">xhs_note_datacenter_stats</span><span class="rr">3,702 行</span></div><div class="pz">千帆数据中心统计行（平台笔记明细的唯一落地点，与 notes 无外键）。</div><div class="cls">
+<i class="pk"><b>id</b><em> integer</em></i>
+<i class="nn"><b>user_id</b><em> integer</em></i>
+<i class="nn"><b>platform_account_id</b><em> integer</em></i>
+<i class="nn"><b>note_id</b><em> character varying</em></i>
+<i class="nn"><b>stat_date</b><em> character varying</em></i>
+<i class="nn"><b>window</b><em> character varying</em></i>
+<i class="nn"><b>note_flag</b><em> character varying</em></i>
+<i class="nn"><b>title</b><em> character varying</em></i>
+<i class="nn"><b>cover_url</b><em> character varying</em></i>
+<i class="nn"><b>item_id</b><em> character varying</em></i>
+<i class="nn"><b>item_title</b><em> character varying</em></i>
+<i class="nn"><b>variant_desc</b><em> character varying</em></i>
+<i class=""><b>publish_time</b><em> bigint</em></i>
+<i class=""><b>read_count</b><em> integer</em></i>
+<i class=""><b>like_count</b><em> integer</em></i>
+<i class=""><b>collect_count</b><em> integer</em></i>
+<i class=""><b>comment_count</b><em> integer</em></i>
+<i class=""><b>share_count</b><em> integer</em></i>
+<i class=""><b>follow_count</b><em> integer</em></i>
+<i class=""><b>danmaku_count</b><em> integer</em></i>
+<i class=""><b>video_duration</b><em> double precision</em></i>
+<i class=""><b>avg_view_time</b><em> double precision</em></i>
+<i class=""><b>full_view_rate</b><em> double precision</em></i>
+<i class=""><b>pay_gmv</b><em> double precision</em></i>
+<i class=""><b>pay_order_cnt</b><em> double precision</em></i>
+<i class=""><b>pay_user_cnt</b><em> double precision</em></i>
+<i class=""><b>item_click_cnt</b><em> double precision</em></i>
+<i class=""><b>item_click_uv</b><em> double precision</em></i>
+<i class=""><b>item_click_pv_rate</b><em> double precision</em></i>
+<i class=""><b>pay_pv_rate</b><em> double precision</em></i>
+<i class=""><b>pay_uv_rate</b><em> double precision</em></i>
+<i class=""><b>refund_gmv</b><em> double precision</em></i>
+<i class=""><b>refund_order_cnt</b><em> double precision</em></i>
+<i class=""><b>refund_user_cnt</b><em> double precision</em></i>
+<i class=""><b>cart_item_cnt</b><em> double precision</em></i>
+<i class=""><b>lead_user_page_view_cnt</b><em> double precision</em></i>
+<i class=""><b>lead_user_page_pay_gmv</b><em> double precision</em></i>
+<i class=""><b>lead_live_view_cnt</b><em> double precision</em></i>
+<i class=""><b>lead_live_pay_gmv</b><em> double precision</em></i>
+<i class=""><b>browse_num_30d</b><em> integer</em></i>
+<i class=""><b>platform_deleted_at</b><em> timestamp without time zone</em></i>
+<i class="nn"><b>synced_at</b><em> timestamp without time zone</em></i>
+<i class="nn"><b>created_at</b><em> timestamp without time zone</em></i>
+<i class="nn"><b>note_url</b><em> character varying</em></i>
+</div><div class="pz">FK → sys_users · 被 0 张表引用</div></div>
+<div class="tb l1"><div class="hd"><span class="nm">xhs_generation_records</span><span class="rr">47 行</span></div><div class="pz">LLM 生成记录（版本号 / 父子版本链 / 采用标记）。</div><div class="cls">
+<i class="pk"><b>id</b><em> integer</em></i>
+<i class="nn"><b>user_id</b><em> integer</em></i>
+<i class=""><b>task_id</b><em> integer</em></i>
+<i class=""><b>template_id</b><em> integer</em></i>
+<i class=""><b>gateway_config_id</b><em> integer</em></i>
+<i class="nn"><b>model_name</b><em> character varying</em></i>
+<i class="nn"><b>media_source</b><em> character varying</em></i>
+<i class="nn"><b>note_form</b><em> character varying</em></i>
+<i class="nn"><b>status</b><em> character varying</em></i>
+<i class="nn"><b>title</b><em> text</em></i>
+<i class="nn"><b>body</b><em> text</em></i>
+<i class="nn"><b>topics_json</b><em> text</em></i>
+<i class=""><b>error_code</b><em> character varying</em></i>
+<i class=""><b>error_message</b><em> text</em></i>
+<i class=""><b>ai_generated_at</b><em> timestamp without time zone</em></i>
+<i class="nn"><b>version_no</b><em> integer</em></i>
+<i class=""><b>parent_record_id</b><em> integer</em></i>
+<i class="nn"><b>regen_scope</b><em> character varying</em></i>
+<i class="nn"><b>is_adopted</b><em> boolean</em></i>
+<i class="nn"><b>copy_requirements_json</b><em> text</em></i>
+<i class="nn"><b>media_json</b><em> text</em></i>
+<i class="nn"><b>created_at</b><em> timestamp without time zone</em></i>
+<i class="nn"><b>updated_at</b><em> timestamp without time zone</em></i>
+<i class=""><b>item_id</b><em> character varying</em></i>
+</div><div class="pz">FK → llm_gateway_configs, queue_jobs, sys_users, xhs_generation_records, xhs_prompt_templates · 被 2 张表引用</div></div>
+</div></div>
+<div class="dom"><h3><b>小红书 · 发布</b><em class="l1">L1 私有</em> · 4 张</h3><div class="grid">
+<div class="tb l1"><div class="hd"><span class="nm">xhs_ai_drafts</span><span class="rr">17 行</span></div><div class="pz">草稿主体。</div><div class="cls">
+<i class="pk"><b>id</b><em> integer</em></i>
+<i class="nn"><b>user_id</b><em> integer</em></i>
+<i class="nn"><b>platform</b><em> character varying</em></i>
+<i class="nn"><b>title</b><em> character varying</em></i>
+<i class="nn"><b>body</b><em> text</em></i>
+<i class=""><b>tags</b><em> json</em></i>
+<i class=""><b>source_note_id</b><em> integer</em></i>
+<i class="nn"><b>created_at</b><em> timestamp without time zone</em></i>
+</div><div class="pz">FK → sys_users, xhs_notes · 被 2 张表引用</div></div>
+<div class="tb l1"><div class="hd"><span class="nm">xhs_publish_assets</span><span class="rr">178 行</span></div><div class="pz">草稿素材（有独立 CRUD + reorder，故独立成表）。</div><div class="cls">
+<i class="pk"><b>id</b><em> integer</em></i>
+<i class="nn"><b>row_type</b><em> character varying</em></i>
+<i class="nn"><b>parent_id</b><em> integer</em></i>
+<i class="nn"><b>asset_type</b><em> character varying</em></i>
+<i class="nn"><b>url</b><em> text</em></i>
+<i class="nn"><b>local_path</b><em> text</em></i>
+<i class="nn"><b>sort_order</b><em> integer</em></i>
+<i class="nn"><b>upload_status</b><em> character varying</em></i>
+<i class="nn"><b>creator_media_id</b><em> character varying</em></i>
+<i class="nn"><b>upload_error</b><em> text</em></i>
+<i class="nn"><b>creator_upload_info</b><em> text</em></i>
+<i class="nn"><b>created_at</b><em> timestamp without time zone</em></i>
+<i class=""><b>user_id</b><em> integer</em></i>
+<i class=""><b>prompt</b><em> text</em></i>
+<i class=""><b>model_name</b><em> character varying</em></i>
+<i class=""><b>params</b><em> text</em></i>
+<i class=""><b>item_id</b><em> character varying</em></i>
+<i class=""><b>platform_account_id</b><em> integer</em></i>
+<i class=""><b>aigc_task_id</b><em> character varying</em></i>
+</div><div class="pz">FK → - · 被 0 张表引用</div></div>
+<div class="tb l1"><div class="hd"><span class="nm">xhs_publish_jobs</span><span class="rr">1 行</span></div><div class="pz">发布任务。</div><div class="cls">
+<i class="pk"><b>id</b><em> integer</em></i>
+<i class="nn"><b>user_id</b><em> integer</em></i>
+<i class=""><b>platform_account_id</b><em> integer</em></i>
+<i class=""><b>source_draft_id</b><em> integer</em></i>
+<i class="nn"><b>platform</b><em> character varying</em></i>
+<i class="nn"><b>title</b><em> character varying</em></i>
+<i class="nn"><b>body</b><em> text</em></i>
+<i class="nn"><b>publish_mode</b><em> character varying</em></i>
+<i class="nn"><b>publish_options</b><em> text</em></i>
+<i class="nn"><b>status</b><em> character varying</em></i>
+<i class=""><b>scheduled_at</b><em> timestamp without time zone</em></i>
+<i class="nn"><b>external_note_id</b><em> character varying</em></i>
+<i class="nn"><b>publish_error</b><em> text</em></i>
+<i class=""><b>published_at</b><em> timestamp without time zone</em></i>
+<i class=""><b>idempotency_key</b><em> character varying</em></i>
+<i class="nn"><b>created_at</b><em> timestamp without time zone</em></i>
+</div><div class="pz">FK → sys_users, xhs_accounts, xhs_ai_drafts · 被 0 张表引用</div></div>
+<div class="tb l1"><div class="hd"><span class="nm">xhs_ai_generated_assets</span><span class="rr">0 行</span></div><div class="pz">AI 生成的资产登记。</div><div class="cls">
+<i class="pk"><b>id</b><em> integer</em></i>
+<i class="nn"><b>user_id</b><em> integer</em></i>
+<i class=""><b>draft_id</b><em> integer</em></i>
+<i class="nn"><b>prompt</b><em> text</em></i>
+<i class="nn"><b>model_name</b><em> character varying</em></i>
+<i class=""><b>params</b><em> json</em></i>
+<i class="nn"><b>file_path</b><em> text</em></i>
+<i class="nn"><b>created_at</b><em> timestamp without time zone</em></i>
+</div><div class="pz">FK → sys_users, xhs_ai_drafts · 被 0 张表引用</div></div>
+</div></div>
+<div class="dom"><h3><b>小红书 · 清理与规则</b><em class="l1">L1 私有</em> · 2 张</h3><div class="grid">
+<div class="tb l1"><div class="hd"><span class="nm">xhs_no_traffic_cleanup_rows</span><span class="rr">13 行</span></div><div class="pz">无流量清理记录（自引用父子表，`row_type` 分 batch / item）。</div><div class="cls">
+<i class="pk"><b>id</b><em> integer</em></i>
+<i class="nn"><b>row_type</b><em> character varying</em></i>
+<i class=""><b>parent_id</b><em> integer</em></i>
+<i class=""><b>user_id</b><em> integer</em></i>
+<i class=""><b>account_id</b><em> integer</em></i>
+<i class="nn"><b>account_name</b><em> character varying</em></i>
+<i class=""><b>task_id</b><em> integer</em></i>
+<i class="nn"><b>trigger_type</b><em> character varying</em></i>
+<i class="nn"><b>batch_no</b><em> character varying</em></i>
+<i class=""><b>thresholds</b><em> json</em></i>
+<i class=""><b>query</b><em> json</em></i>
+<i class=""><b>note_ids</b><em> json</em></i>
+<i class="nn"><b>batch_limit</b><em> integer</em></i>
+<i class="nn"><b>before_total</b><em> integer</em></i>
+<i class="nn"><b>after_total</b><em> integer</em></i>
+<i class="nn"><b>total</b><em> integer</em></i>
+<i class="nn"><b>deleted</b><em> integer</em></i>
+<i class="nn"><b>skipped</b><em> integer</em></i>
+<i class="nn"><b>failed</b><em> integer</em></i>
+<i class="nn"><b>not_in_pool</b><em> integer</em></i>
+<i class="nn"><b>status</b><em> character varying</em></i>
+<i class="nn"><b>reason</b><em> text</em></i>
+<i class="nn"><b>coverage_note</b><em> text</em></i>
+<i class=""><b>details</b><em> json</em></i>
+<i class="nn"><b>aborted</b><em> boolean</em></i>
+<i class="nn"><b>abort_reason</b><em> text</em></i>
+<i class=""><b>started_at</b><em> timestamp without time zone</em></i>
+<i class=""><b>finished_at</b><em> timestamp without time zone</em></i>
+<i class="nn"><b>duration_ms</b><em> integer</em></i>
+<i class="nn"><b>note_id</b><em> character varying</em></i>
+<i class="nn"><b>note_title</b><em> character varying</em></i>
+<i class="nn"><b>note_cover</b><em> text</em></i>
+<i class="nn"><b>result</b><em> character varying</em></i>
+<i class=""><b>published_at</b><em> bigint</em></i>
+<i class=""><b>operated_at</b><em> timestamp without time zone</em></i>
+<i class="nn"><b>created_at</b><em> timestamp without time zone</em></i>
+</div><div class="pz">FK → queue_jobs, xhs_no_traffic_cleanup_rows · 被 1 张表引用</div></div>
+<div class="tb l1"><div class="hd"><span class="nm">xhs_forbidden_words</span><span class="rr">749 行</span></div><div class="pz">违规词条目。</div><div class="cls">
+<i class="pk"><b>id</b><em> integer</em></i>
+<i class=""><b>parent_id</b><em> integer</em></i>
+<i class="nn"><b>user_id</b><em> integer</em></i>
+<i class="nn"><b>name</b><em> character varying</em></i>
+<i class="nn"><b>word</b><em> character varying</em></i>
+<i class="nn"><b>match_mode</b><em> integer</em></i>
+<i class="nn"><b>enabled</b><em> boolean</em></i>
+<i class="nn"><b>remark</b><em> character varying</em></i>
+<i class=""><b>created_at</b><em> timestamp without time zone</em></i>
+<i class=""><b>updated_at</b><em> timestamp without time zone</em></i>
+</div><div class="pz">FK → sys_users, xhs_forbidden_words · 被 1 张表引用</div></div>
+</div></div>
+<div class="dom"><h3><b>小红书 · 商品数据包规则</b><em class="l1">L1 私有</em> · 1 张</h3><div class="grid">
+<div class="tb l1"><div class="hd"><span class="nm">xhs_data_package_rules</span><span class="rr">185 行</span></div><div class="pz">商品数据包规则（自引用父子表：`parent_id IS NULL` = 规则包，非空 = 包内规则）。</div><div class="cls">
+<i class="pk"><b>id</b><em> integer</em></i>
+<i class="nn"><b>name</b><em> character varying</em></i>
+<i class="nn"><b>op</b><em> character varying</em></i>
+<i class="nn"><b>params_json</b><em> text</em></i>
+<i class="nn"><b>enabled</b><em> boolean</em></i>
+<i class="nn"><b>sort_order</b><em> integer</em></i>
+<i class="nn"><b>created_at</b><em> timestamp without time zone</em></i>
+<i class="nn"><b>updated_at</b><em> timestamp without time zone</em></i>
+<i class=""><b>parent_id</b><em> integer</em></i>
+<i class=""><b>remark</b><em> character varying</em></i>
+<i class="nn"><b>user_id</b><em> integer</em></i>
+</div><div class="pz">FK → xhs_data_package_rules · 被 1 张表引用</div></div>
+</div></div>
+</body></html>

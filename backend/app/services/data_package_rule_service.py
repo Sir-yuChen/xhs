@@ -68,8 +68,17 @@ from backend.app.models.data_package_rule import (
     OP_MATH_SCALE,
     RULE_OPS,
     DataPackageRule,
-    DataPackageRuleSet,
 )
+
+
+#: 合并前的「规则包」概念（= 父行）。服务层沿用旧名，查询一律带 `parent_id IS NULL`。
+DataPackageRuleSet = DataPackageRule
+
+
+def _sets_filter():
+    """父行过滤（`parent_id IS NULL`）—— 所有「规则包」查询的唯一判据来源。"""
+    return DataPackageRule.parent_id.is_(None)
+
 
 logger = logging.getLogger(__name__)
 
@@ -729,19 +738,20 @@ def list_sets(
     ⚠️ **排序必须有第二键 `id`**：`sort_order` 默认全 0，只按它会得到
     SQLite 的返回顺序（用户会看到「刷新一下就换位」）。
     """
-    stmt = select(DataPackageRuleSet).where(DataPackageRuleSet.user_id == user_id)
+    stmt = select(DataPackageRule).where(DataPackageRule.user_id == user_id, _sets_filter())
     if enabled_only:
-        stmt = stmt.where(DataPackageRuleSet.enabled.is_(True))
-    stmt = stmt.order_by(DataPackageRuleSet.sort_order, DataPackageRuleSet.id)
+        stmt = stmt.where(DataPackageRule.enabled.is_(True))
+    stmt = stmt.order_by(DataPackageRule.sort_order, DataPackageRule.id)
     return list(db.execute(stmt).scalars().all())
 
 
 def get_set(db: Session, user_id: int, set_id: int) -> DataPackageRuleSet:
     """取规则包 —— **归属不符一律 404**（不 403：不泄露「这个 id 存在」）。"""
     row = db.execute(
-        select(DataPackageRuleSet).where(
-            DataPackageRuleSet.id == set_id,
-            DataPackageRuleSet.user_id == user_id,
+        select(DataPackageRule).where(
+            DataPackageRule.id == set_id,
+            DataPackageRule.user_id == user_id,
+            _sets_filter(),
         )
     ).scalar_one_or_none()
     if row is None:
@@ -753,7 +763,8 @@ def create_set(
     db: Session, user_id: int, *, name: str, remark: str = "", enabled: bool = True
 ) -> DataPackageRuleSet:
     clean = _clean_text(name, field="规则包名", max_len=MAX_NAME_LEN, allow_empty=False)
-    row = DataPackageRuleSet(
+    row = DataPackageRule(
+        parent_id=None,
         user_id=user_id,
         name=clean,
         remark=_clean_text(remark, field="备注", max_len=MAX_REMARK_LEN, allow_empty=True),
@@ -822,12 +833,12 @@ def delete_set(db: Session, user_id: int, set_id: int) -> int:
         db.execute(
             select(func.count())
             .select_from(DataPackageRule)
-            .where(DataPackageRule.set_id == row.id)
+            .where(DataPackageRule.parent_id == row.id)
         ).scalar_one()
     )
     #: ⚠️ 显式删子行：`ondelete=CASCADE` 在 SQLite 上**要开 `PRAGMA foreign_keys`**
     #: 才生效（本项目连接默认没开）⇒ 依赖它会留下孤儿规则行。
-    db.execute(delete(DataPackageRule).where(DataPackageRule.set_id == row.id))
+    db.execute(delete(DataPackageRule).where(DataPackageRule.parent_id == row.id))
     db.delete(row)
     db.commit()
     return child_count
@@ -843,7 +854,7 @@ def list_rules(
 ) -> list[DataPackageRule]:
     """某包下的规则（先校验包归属 ⇒ 不是自己的包一律 404）。"""
     get_set(db, user_id, set_id)
-    stmt = select(DataPackageRule).where(DataPackageRule.set_id == set_id)
+    stmt = select(DataPackageRule).where(DataPackageRule.parent_id == set_id)
     if enabled_only:
         stmt = stmt.where(DataPackageRule.enabled.is_(True))
     stmt = stmt.order_by(DataPackageRule.sort_order, DataPackageRule.id)
@@ -852,9 +863,7 @@ def list_rules(
 
 def get_rule(db: Session, user_id: int, rule_id: int) -> DataPackageRule:
     row = db.execute(
-        select(DataPackageRule)
-        .join(DataPackageRuleSet, DataPackageRule.set_id == DataPackageRuleSet.id)
-        .where(DataPackageRule.id == rule_id, DataPackageRuleSet.user_id == user_id)
+        select(DataPackageRule).where(DataPackageRule.id == rule_id, DataPackageRule.user_id == user_id)
     ).scalar_one_or_none()
     if row is None:
         raise DataPackageRuleError("DP_RULE_NOT_FOUND", "规则不存在", status_code=404)
@@ -879,7 +888,7 @@ def create_rule(
     params: object,
     enabled: bool = True,
 ) -> DataPackageRule:
-    get_set(db, user_id, set_id)  # 归属校验
+    parent = get_set(db, user_id, set_id)  # 归属校验 + 取 owner 写子行
     clean_name = _clean_text(
         rule_name, field="规则名称", max_len=MAX_COLUMN_LEN, allow_empty=False
     )
@@ -888,7 +897,8 @@ def create_rule(
     validate_params(op, params if isinstance(params, dict) else {})
 
     row = DataPackageRule(
-        set_id=set_id,
+        parent_id=set_id,
+        user_id=parent.user_id,
         rule_name=clean_name,
         op=op,
         params_json=_dump_params(params),
@@ -1055,8 +1065,8 @@ def seed_builtin_rules(db: Session, *, user_id: int) -> int:
 
     existing = db.execute(
         select(func.count())
-        .select_from(DataPackageRuleSet)
-        .where(DataPackageRuleSet.user_id == user_id)
+        .select_from(DataPackageRule)
+        .where(DataPackageRule.user_id == user_id, _sets_filter())
     ).scalar_one()
     if existing:
         return 0
@@ -1073,7 +1083,8 @@ def seed_builtin_rules(db: Session, *, user_id: int) -> int:
     specs = payload.get("data_package_rule_sets") or []
     created = 0
     for spec in specs:
-        st = DataPackageRuleSet(
+        st = DataPackageRule(
+            parent_id=None,
             user_id=user_id,
             name=str(spec.get("name") or "").strip() or "规则包",
             remark=str(spec.get("remark") or ""),
@@ -1093,7 +1104,8 @@ def seed_builtin_rules(db: Session, *, user_id: int) -> int:
                 continue
             db.add(
                 DataPackageRule(
-                    set_id=st.id,
+                    parent_id=st.id,
+                    user_id=user_id,
                     rule_name=str(rspec.get("rule_name") or ""),
                     op=op,
                     params_json=json.dumps(params, ensure_ascii=False),

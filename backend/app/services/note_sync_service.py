@@ -794,7 +794,7 @@ def sync_parallelism() -> int:
 
 def _pending_hydration_count(db: Session, account: PlatformAccount) -> int:
     """该账号还有多少条笔记的详情没尝试补齐过。"""
-    from backend.app.models import Note
+    from backend.app.models import ASSET_NOTE, Note
 
     return int(
         db.scalar(
@@ -856,11 +856,11 @@ def _row_is_video(row: Any) -> bool:
 
 def _has_video_asset(db: Session, note_id: int) -> bool:
     """这条笔记本地有没有视频资产。"""
-    from backend.app.models import NoteAsset
+    from backend.app.models import PublishAsset
 
     return db.scalars(
-        select(NoteAsset.id)
-        .where(NoteAsset.note_id == note_id, NoteAsset.asset_type == "video")
+        select(PublishAsset.id)
+        .where(PublishAsset.parent_id == note_id, PublishAsset.asset_type == "video")
         .limit(1)
     ).first() is not None
 

@@ -23,12 +23,10 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from backend.app.core.database import SessionLocal
 from backend.app.core.time import shanghai_now
-from backend.app.models import Note
-from backend.app.services.note_purge_service import purge_note
 from backend.app.models.no_traffic_cleanup_log import (
     CLEANUP_ITEM_RESULTS,
     RESULT_DELETED,
@@ -40,8 +38,9 @@ from backend.app.models.no_traffic_cleanup_log import (
     STATUS_FAILED,
     STATUS_PENDING,
     STATUS_RUNNING,
-    NoTrafficCleanupItem,
-    NoTrafficCleanupLog,
+    ROW_BATCH,
+    ROW_ITEM,
+    NoTrafficCleanupRow,
 )
 from backend.app.models.platform_account import PlatformAccount
 from backend.app.models.scheduled_job import LOG_FAILED, LOG_RUNNING, LOG_SUCCESS, ScheduledJobLog
@@ -109,12 +108,12 @@ def _looks_like_account_level_failure(message: str) -> bool:
     return any(marker in text for marker in ACCOUNT_LEVEL_FAILURE_MARKERS)
 
 
-#: 平台返回「笔记不存在」的特征原文（2026-10-12，无流量清理软删除）。
+#: 平台返回「笔记不存在」的特征原文（无流量清理）。
 #:
-#: 用户口径：「删平台前校验笔记是否存在 → 不存在则只删本地」。校验走**删除请求本身**：
-#: 平台回「笔记不存在」即视为已不存在（等价已删），**只软删本地**，不算失败。
+#: 校验走**删除请求本身**：
+#: 平台回「笔记不存在」即视为已不存在（等价已删），不算失败。
 #:
-#: ⚠️ 只认这几句（保守）：认不出时**照旧算失败**（宁可少软删也不误判成「已删」
+#: ⚠️ 只认这几句（保守）：认不出时**照旧算失败**（宁可少判也不误判成「已删」
 #: 而把一个实际还在平台的笔记从本地抹掉）。
 NOTE_ABSENT_MARKERS = (
     "笔记不存在",
@@ -129,7 +128,7 @@ NOTE_ABSENT_MARKERS = (
 
 
 def _looks_like_note_absent(message: str) -> bool:
-    """平台说这条笔记**已经不存在**了吗（⇒ 软删本地，不算失败）。"""
+    """平台说这条笔记**已经不存在**了吗（⇒ 等价已删，不算失败）。"""
     text = str(message or "")
     if not text:
         return False
@@ -206,7 +205,7 @@ def _open_log(
     batch_limit: int,
     note_ids: Optional[list[str]],
     batch_no: str = "",
-) -> Optional[NoTrafficCleanupLog]:
+) -> Optional[NoTrafficCleanupRow]:
     """开一条清理日志（`status=running`），返回它。
 
     为什么**先建后改**而不是跑完再插：跑的过程中进程被杀 / 线程异常退出时，
@@ -214,7 +213,8 @@ def _open_log(
     同 `ScheduledJobLog` 的纪律）。失败则返回 `None`，清理本身不受影响。
     """
     try:
-        row = NoTrafficCleanupLog(
+        row = NoTrafficCleanupRow(
+            row_type=ROW_BATCH,
             user_id=user_id,
             account_id=account_id,
             account_name=_account_name(db, account_id),
@@ -264,7 +264,7 @@ def _close_job_log(
 
 def _close_log(
     db: Any,
-    log: Optional[NoTrafficCleanupLog],
+    log: Optional[NoTrafficCleanupRow],
     *,
     status: str,
     result: Optional[dict[str, Any]] = None,
@@ -337,10 +337,44 @@ def _first_failure_reason(details: list[dict[str, Any]]) -> str:
     return ""
 
 
+def _mark_platform_deleted(
+    db: Any, account_id: int, rows: list[dict[str, Any]]
+) -> None:
+    """给**平台删除成功**的笔记统计行打 `platform_deleted_at`（失败只告警）。
+
+    ⚠️ 只标 `RESULT_DELETED`；`failed` / `skipped` / `not_attempted` 一律不动
+    —— 那些笔记在平台上还在，标了会让列表骗人。
+    ⚠️ 统计行**不删**：数据中心要留历史（表本身无外键，正是为此设计的）。
+    """
+    note_ids = [
+        str(r.get("note_id") or "")
+        for r in rows
+        if r.get("result") == RESULT_DELETED and r.get("note_id")
+    ]
+    if not note_ids:
+        return
+    try:
+        from backend.app.models import NoteDatacenterStat
+
+        db.execute(
+            update(NoteDatacenterStat)
+            .where(
+                NoteDatacenterStat.platform_account_id == int(account_id),
+                NoteDatacenterStat.note_id.in_(note_ids),
+                NoteDatacenterStat.platform_deleted_at.is_(None),
+            )
+            .values(platform_deleted_at=shanghai_now())
+        )
+        db.commit()
+    except Exception as error:  # noqa: BLE001 - 记账问题不许反噬平台结论
+        db.rollback()
+        logger.warning("标记 platform_deleted_at 失败（清理结果不受影响）：%s", error)
+
+
 def _record_items(
     db: Any,
     *,
-    log: Optional[NoTrafficCleanupLog],
+    log: Optional[NoTrafficCleanupRow],
     task_id: Optional[int],
     account_id: int,
     user_id: Optional[int],
@@ -369,11 +403,12 @@ def _record_items(
                 row = {**row, "result": RESULT_FAILED,
                        "reason": (row.get("reason") or "") or f"未知结果：{result!r}"}
             db.add(
-                NoTrafficCleanupItem(
+                NoTrafficCleanupRow(
+                    row_type=ROW_ITEM,
+                    parent_id=log.id if log is not None else None,
                     user_id=user_id,
                     account_id=account_id,
                     account_name=_account_name(db, account_id),
-                    log_id=log.id if log is not None else None,
                     task_id=task_id,
                     note_id=str(row.get("note_id") or ""),
                     note_title=str(row.get("note_title") or ""),
@@ -382,6 +417,7 @@ def _record_items(
                     reason=str(row.get("reason") or ""),
                     published_at=row.get("published_at"),
                     operated_at=shanghai_now(),
+                    created_at=shanghai_now(),
                 )
             )
         db.commit()
@@ -459,7 +495,7 @@ def run_no_traffic_cleanup(
     """
     db = SessionLocal()
     task_id: Optional[int] = None
-    log: Optional[NoTrafficCleanupLog] = None
+    log: Optional[NoTrafficCleanupRow] = None
     try:
         existing = _running_cleanup(db, account_id)
         if existing is not None:
@@ -566,7 +602,7 @@ def _cleanup_with_task(
     batch_limit: int,
     note_ids: Optional[list[str]] = None,
     *,
-    log: Optional[NoTrafficCleanupLog] = None,
+    log: Optional[NoTrafficCleanupRow] = None,
 ) -> dict[str, Any]:
     from backend.app.adapters.xhs.creator_api_adapter import XhsCreatorApiAdapter
     from backend.app.adapters.xhs.qianfan_api_adapter import XhsQianfanApiAdapter
@@ -584,7 +620,7 @@ def _cleanup_with_task(
         found = candidates_by_note_ids(db, account_id, list(note_ids))
         by_id = {c.note_id: c for c in found}
         wanted = [nid for nid in note_ids if nid in by_id]
-        # 勾了但**统计表里查不到**（数据源不在统计表 / 已软删）：**不删**并如实回 `not_in_pool`。
+        # 勾了但**统计表里查不到**：**不删**并如实回 `not_in_pool`。
         missing = [nid for nid in note_ids if nid not in by_id]
         items = [by_id[nid] for nid in wanted]
         if missing:
@@ -680,22 +716,6 @@ def _cleanup_with_task(
             }
         )
 
-    # 2026-10-12 软删除重构：平台删除成功后**本地软删除**（`is_deleted=True`），
-    # 不再 `purge_note` 硬删。软删后所有查询 / 同步都排除该行（见 `Note.is_deleted`）。
-    # 本地已无此行 ⇒ 静默跳过，不误报失败。
-    def _soft_delete_local(candidate: Any) -> None:
-        if getattr(candidate, "local_id", 0):
-            local_note = db.get(Note, candidate.local_id)
-        else:
-            local_note = db.scalars(
-                select(Note).where(
-                    Note.note_id == candidate.note_id,
-                    Note.platform_account_id == account_id,
-                )
-            ).first()
-        if local_note is not None:
-            local_note.is_deleted = True
-
     # 商业笔记：千帆 `note/batch_delete_note` **分片批量**（每片 ≤ QIANFAN_DELETE_CHUNK），
     # 减少请求次数。无「推广中」/「权限校验」前置（千帆接口没有这两步，平台侧自行
     # 拦投放中的笔记）。取不到 ark Cookie 时退回 creator 链路（见下 `creator_items`）。
@@ -715,7 +735,6 @@ def _cleanup_with_task(
             if ok:
                 deleted += len(goods_items)
                 for c in goods_items:
-                    _soft_delete_local(c)
                     details.append({"note_id": c.note_id, "ok": True})
                     _append_result(c, RESULT_DELETED)
             else:
@@ -747,11 +766,10 @@ def _cleanup_with_task(
         try:
             ok, msg, payload = adapter.validate_delete_permission(note_id)
             if not ok:
-                # 2026-10-12：「笔记不存在」= 平台侧已无此笔记 ⇒ 等价已删，只软删本地。
+                # 「笔记不存在」= 平台侧已无此笔记 ⇒ 等价已删。
                 if _looks_like_note_absent(str(msg)):
                     deleted += 1
-                    _soft_delete_local(candidate)
-                    details.append({"note_id": note_id, "ok": True, "reason": "平台已不存在该笔记，仅本地软删除"})
+                    details.append({"note_id": note_id, "ok": True, "reason": "平台已不存在该笔记"})
                     item_rows.append(
                         {
                             "note_id": note_id,
@@ -759,7 +777,7 @@ def _cleanup_with_task(
                             "note_cover": candidate.cover,
                             "published_at": candidate.publish_time,
                             "result": RESULT_DELETED,
-                            "reason": "平台已不存在该笔记，仅本地软删除",
+                            "reason": "平台已不存在该笔记",
                         }
                     )
                     continue
@@ -803,7 +821,6 @@ def _cleanup_with_task(
             ok, msg, _ = adapter.delete_note(note_id)
             if ok:
                 deleted += 1
-                _soft_delete_local(candidate)
                 details.append({"note_id": note_id, "ok": True})
                 item_rows.append(
                     {
@@ -816,11 +833,10 @@ def _cleanup_with_task(
                     }
                 )
             else:
-                # 2026-10-12：「笔记不存在」= 平台侧已无此笔记 ⇒ 等价已删，只软删本地。
+                # 「笔记不存在」= 平台侧已无此笔记 ⇒ 等价已删。
                 if _looks_like_note_absent(str(msg)):
                     deleted += 1
-                    _soft_delete_local(candidate)
-                    details.append({"note_id": note_id, "ok": True, "reason": "平台已不存在该笔记，仅本地软删除"})
+                    details.append({"note_id": note_id, "ok": True, "reason": "平台已不存在该笔记"})
                     item_rows.append(
                         {
                             "note_id": note_id,
@@ -828,7 +844,7 @@ def _cleanup_with_task(
                             "note_cover": candidate.cover,
                             "published_at": candidate.publish_time,
                             "result": RESULT_DELETED,
-                            "reason": "平台已不存在该笔记，仅本地软删除",
+                            "reason": "平台已不存在该笔记",
                         }
                     )
                     continue
@@ -895,6 +911,10 @@ def _cleanup_with_task(
         user_id=task.user_id,
         rows=item_rows,
     )
+    #: 统计行打「已删」标记（设计 35 §275）：平台删成功**保留统计行**并写
+    #: `platform_deleted_at`，列表默认隐藏、`deleted=deleted` 才看得到。
+    #: ⚠️ 2026-10-28 前这列**只有读没有写** ⇒ 删掉的笔记仍以未删状态留在列表里。
+    _mark_platform_deleted(db, account_id, item_rows)
     return {
         "total": len(items),
         "deleted": deleted,
@@ -1062,7 +1082,7 @@ def _run_in_thread(
     #    会看到这一行（status=running）而直接返回「已有任务」—— 所以必须走
     #    `_cleanup_with_task` 这条路，把 task_id 传下去。
     db = SessionLocal()
-    log: Optional[NoTrafficCleanupLog] = None
+    log: Optional[NoTrafficCleanupRow] = None
     job_log: Optional[ScheduledJobLog] = None
     try:
         task = db.get(Task, task_id)

@@ -38,7 +38,7 @@ from backend.app.core.time import shanghai_now
 from backend.app.models.forbidden_word import (
     DEFAULT_GROUP,
     ForbiddenWord,
-    ForbiddenWordGroupRow,
+
     MATCH_MODE_EXACT,
     MATCH_MODES,
     MAX_GROUP_LEN,
@@ -125,15 +125,23 @@ def validate_match_mode(raw: object) -> int:
 
 
 def validate_group(raw: object) -> str:
-    """分组名校验：去空白、限长。**空 / None ⇒ 未分组**（合法，不是错误）。"""
+    """分组名校验：去空白、限长，**且必须非空**。
+
+    2026-10-28 用户口径：「必须先添加分组，不允许未分组数据」⇒ 违规词必须归属
+    某个分组，空串不再是合法状态。
+    """
     text = str(raw or "").strip()
+    if not text:
+        raise ForbiddenWordError(
+            "FORBIDDEN_WORD_GROUP_REQUIRED",
+            "请先选择分组（不支持未分组的违规词）",
+        )
     if len(text) > MAX_GROUP_LEN:
         raise ForbiddenWordError(
             "FORBIDDEN_WORD_BAD_GROUP",
             f"分组名最长 {MAX_GROUP_LEN} 个字",
         )
     return text
-
 
 def find_hits(text: str, entries: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     """在一段文字里找出**命中的违规词**（纯函数，可单测）。
@@ -191,7 +199,11 @@ def list_words(
     `groups` 非空 ⇒ **只取这些分组**（预检时用户可指定分组，见
     `enabled_entries`）。传 `None` 或空 ⇒ 不过滤（= 全部分组）。
     """
-    stmt = select(ForbiddenWord).where(ForbiddenWord.user_id == int(user_id))
+    #: 只取**词行**（`parent_id` 非空）；分组行（`parent_id IS NULL`）不是词。
+    stmt = select(ForbiddenWord).where(
+        ForbiddenWord.user_id == int(user_id),
+        ForbiddenWord.parent_id.is_not(None),
+    )
     if enabled_only:
         stmt = stmt.where(ForbiddenWord.enabled.is_(True))
     wanted = [str(g) for g in (groups or []) if str(g) != ""]
@@ -217,8 +229,9 @@ def list_groups(db: Session, user_id: int) -> list[dict[str, Any]]:
     flags = {
         name: bool(enabled)
         for name, enabled in db.execute(
-            select(ForbiddenWordGroupRow.name, ForbiddenWordGroupRow.enabled).where(
-                ForbiddenWordGroupRow.user_id == int(user_id)
+            select(ForbiddenWord.name, ForbiddenWord.enabled).where(
+                ForbiddenWord.user_id == int(user_id),
+                ForbiddenWord.parent_id.is_(None),
             )
         ).all()
     }
@@ -243,8 +256,9 @@ def enabled_groups(db: Session, user_id: int) -> set[str]:
     一个**显式动作**，不会被存量数据误判。
     """
     rows = db.execute(
-        select(ForbiddenWordGroupRow.name, ForbiddenWordGroupRow.enabled).where(
-            ForbiddenWordGroupRow.user_id == int(user_id)
+        select(ForbiddenWord.name, ForbiddenWord.enabled).where(
+            ForbiddenWord.user_id == int(user_id),
+            ForbiddenWord.parent_id.is_(None),
         )
     ).all()
     disabled = {name for name, enabled in rows if not enabled}
@@ -300,13 +314,14 @@ def set_group_enabled(db: Session, user_id: int, name: str, enabled: bool) -> di
     """
     group = validate_group(name)
     row = db.execute(
-        select(ForbiddenWordGroupRow).where(
-            ForbiddenWordGroupRow.user_id == int(user_id),
-            ForbiddenWordGroupRow.name == group,
+        select(ForbiddenWord).where(
+            ForbiddenWord.user_id == int(user_id),
+            ForbiddenWord.name == group,
+            ForbiddenWord.parent_id.is_(None),
         )
     ).scalar_one_or_none()
     if row is None:
-        row = ForbiddenWordGroupRow(user_id=int(user_id), name=group, enabled=bool(enabled))
+        row = ForbiddenWord(user_id=int(user_id), parent_id=None, name=group, enabled=bool(enabled))
         db.add(row)
     else:
         row.enabled = bool(enabled)
@@ -329,7 +344,8 @@ def _group_word_count(db: Session, user_id: int, name: str) -> int:
         db.execute(
             select(func.count(ForbiddenWord.id)).where(
                 ForbiddenWord.user_id == int(user_id),
-                ForbiddenWord.group_name == (name or DEFAULT_GROUP),
+                ForbiddenWord.name == (name or DEFAULT_GROUP),
+                ForbiddenWord.parent_id.is_not(None),
             )
         ).scalar()
         or 0
@@ -339,7 +355,8 @@ def _group_word_count(db: Session, user_id: int, name: str) -> int:
 def get_word(db: Session, user_id: int, word_id: int) -> ForbiddenWord:
     """取一条；**不存在或不属于该用户都 404**（不泄露「存在但不是你的」）。"""
     row = db.get(ForbiddenWord, int(word_id))
-    if row is None or int(row.user_id) != int(user_id):
+    #: 分组行（`parent_id IS NULL`）不是词 ⇒ 同样按「不存在」处理。
+    if row is None or int(row.user_id) != int(user_id) or row.parent_id is None:
         raise ForbiddenWordError(
             "FORBIDDEN_WORD_NOT_FOUND", "违规词不存在", status_code=404
         )
@@ -369,7 +386,8 @@ def _assert_not_duplicate(
     stmt = select(ForbiddenWord.id).where(
         ForbiddenWord.user_id == int(user_id),
         ForbiddenWord.word == word,
-        ForbiddenWord.group_name == group,
+        ForbiddenWord.name == group,
+        ForbiddenWord.parent_id.is_not(None),
     )
     if exclude_id is not None:
         stmt = stmt.where(ForbiddenWord.id != int(exclude_id))
@@ -402,7 +420,8 @@ def _assert_group_capacity(db: Session, user_id: int, group_name: str) -> None:
     total = db.execute(
         select(func.count(ForbiddenWord.id)).where(
             ForbiddenWord.user_id == int(user_id),
-            ForbiddenWord.group_name == (group_name or DEFAULT_GROUP),
+            ForbiddenWord.name == (group_name or DEFAULT_GROUP),
+            ForbiddenWord.parent_id.is_not(None),
         )
     ).scalar()
     #: ⚠️ 用 `scalar()` 不是 `scalar_one()` —— `count()` 在**多行**时
@@ -415,6 +434,48 @@ def _assert_group_capacity(db: Session, user_id: int, group_name: str) -> None:
             f"{where}已达上限 {MAX_WORDS_PER_GROUP} 条，请分批或另建分组",
         )
 
+
+def find_group_row(db: Session, user_id: int, name: str) -> Optional[ForbiddenWord]:
+    """取该用户的**分组行**（`parent_id IS NULL`）；不存在返回 None。"""
+    return db.execute(
+        select(ForbiddenWord).where(
+            ForbiddenWord.user_id == int(user_id),
+            ForbiddenWord.name == validate_group(name),
+            ForbiddenWord.parent_id.is_(None),
+        )
+    ).scalar_one_or_none()
+
+
+def require_group_row(db: Session, user_id: int, name: str) -> ForbiddenWord:
+    """取分组行；**不存在就报错**（不自动建组 —— 用户口径「必须先添加分组」）。"""
+    row = find_group_row(db, user_id, name)
+    if row is None:
+        raise ForbiddenWordError(
+            "FORBIDDEN_WORD_GROUP_NOT_FOUND",
+            f"分组「{validate_group(name)}」不存在，请先添加分组",
+            status_code=404,
+        )
+    return row
+
+
+def create_group(db: Session, user_id: int, *, name: str, enabled: bool = True) -> dict[str, Any]:
+    """**新建分组**（不允许无分组数据 ⇒ 建词前必须先有分组）。重名 ⇒ 409。"""
+    group = validate_group(name)
+    if find_group_row(db, user_id, group) is not None:
+        raise ForbiddenWordError(
+            "FORBIDDEN_WORD_GROUP_DUPLICATE", f"分组「{group}」已存在", status_code=409
+        )
+    row = ForbiddenWord(user_id=int(user_id), parent_id=None, name=group, enabled=bool(enabled))
+    db.add(row)
+    try:
+        db.commit()
+    except IntegrityError as error:
+        db.rollback()
+        raise ForbiddenWordError(
+            "FORBIDDEN_WORD_GROUP_DUPLICATE", f"分组「{group}」已存在", status_code=409
+        ) from error
+    db.refresh(row)
+    return {"name": row.name, "enabled": bool(row.enabled), "count": 0}
 
 def create_word(
     db: Session,
@@ -437,13 +498,16 @@ def create_word(
     _assert_group_capacity(db, user_id, group)
     _assert_not_duplicate(db, user_id, value, group_name=group)
 
+    parent = require_group_row(db, user_id, group)
     row = ForbiddenWord(
         user_id=int(user_id),
+        parent_id=parent.id,
+        #: 组名冗余在子行上（按组过滤不必 join 父表）。
+        name=group,
         word=value,
         match_mode=mode,
         enabled=bool(enabled),
         remark=note,
-        group_name=group,
     )
     db.add(row)
     try:
@@ -474,7 +538,10 @@ def update_word(
     #: ⚠️ 改分组也要过重复检查，且**按新分组**判 —— 改完撞上目标分组里的同名词
     #: 就是真重复（`_assert_not_duplicate` 内已按 `group_name` 收口）。
     if group_name is not None:
-        row.group_name = validate_group(group_name)
+        target = validate_group(group_name)
+        #: 改分组 = 改「挂在哪个组行下」+ 同步冗余的组名；目标组不存在就建出来。
+        row.parent_id = require_group_row(db, user_id, target).id
+        row.name = target
     if word is not None:
         value = validate_word(word)
         _assert_not_duplicate(
@@ -572,14 +639,21 @@ def seed_builtin_words(db: Session, *, user_id: int) -> int:
             #: 该组已有词（用户资产）⇒ 整组跳过；同组多条只判一次。
             touched.add(group)
             continue
+        #: 播种是唯一的自动建组场景（内置分组是随包内容，不是用户数据）。
+        parent = find_group_row(db, user_id, group)
+        if parent is None:
+            parent = ForbiddenWord(user_id=int(user_id), parent_id=None, name=group, enabled=True)
+            db.add(parent)
+            db.flush()
         db.add(
             ForbiddenWord(
                 user_id=int(user_id),
+                parent_id=parent.id,
+                name=group,
                 word=spec["word"],
                 match_mode=spec["match_mode"],
                 enabled=spec["enabled"],
                 remark=spec["remark"],
-                group_name=group,
             )
         )
         created += 1

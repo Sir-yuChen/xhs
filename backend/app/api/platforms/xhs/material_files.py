@@ -305,7 +305,7 @@ async def upload_material_file(
     #     与扫描侧 `material_scan_service.py:261` 的写法保持一致）
     row = MaterialFile(
         user_id=current_user.id,
-        folder_id=folder.id,
+        parent_id=folder.id,
         filename=name,
         file_type=file_type,
         rel_path=name,

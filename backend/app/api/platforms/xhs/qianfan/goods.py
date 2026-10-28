@@ -1149,7 +1149,7 @@ def generate_detail_image(
     配图服务笔记正文，详情图服务商品 —— 提示词与尺寸口径都不同，可分别挂服务商）。
     失败一律**结构化、不回落**（同 `ai.py::_business_model_context`）。
     """
-    from backend.app.models.generation import AigcMediaAsset
+    from backend.app.models.generation import PublishAsset
     from backend.app.api.ai import _business_model_context
 
     account = _owned_account(db, current_user, payload.platform_account_id)
@@ -1502,7 +1502,8 @@ def generate_detail_image(
             # 单张重做时只跑一次（count=1），用**原始序号**标记结果。
             output_index = regen_index if regen_group else index + 1
             url = result.get("url") or ""
-            asset = AigcMediaAsset(
+            asset = PublishAsset(
+                row_type=ASSET_AIGC,
                 user_id=current_user.id,
                 asset_type="image",
                 # ⚠️ 缺值口径：服务商没回本地路径时留空串（**不拿 url 冒充 local_path** ——
@@ -1598,7 +1599,7 @@ class SaveDetailImagesRequest(BaseModel):
     #:
     #: ⚠️ 为什么不是后端自己查：分组事实（哪张是主图、哪张是详情图）只存在于
     #: **生成那一刻的响应**里；落库的 `Task.payload` 只有平铺的 `asset_ids` +
-    #: `group_plans`（**不含 asset 明细**），`AigcMediaAsset` 更没有 group 列。
+    #: `group_plans`（**不含 asset 明细**），`PublishAsset` 更没有 group 列。
     #: 后端反查 = 查不到还得猜（猜错比「没分组」更坏）；前端手上正好有
     #: `assets[].group` ⇒ **谁有事实谁提供**。
     #: 缺省 / 缺失项 ⇒ 文件名用 `图-NN`（如实反映「不知道分组」，不造）。
@@ -1640,7 +1641,7 @@ def save_detail_images(
 
     # 资产 → 分组：**前端传的**（它手上有生成响应的 `assets[].group`）。
     # ⚠️ 后端**不反查**：`Task.payload` 只有平铺 `asset_ids`（无 asset 明细）、
-    # `AigcMediaAsset` 无 group 列 ⇒ 反查必落空、只能猜（猜错比没分组更坏）。
+    # `PublishAsset` 无 group 列 ⇒ 反查必落空、只能猜（猜错比没分组更坏）。
     asset_groups = {
         int(key): str(value)
         for key, value in (payload.asset_groups or {}).items()
@@ -1700,11 +1701,11 @@ def item_generations(
 
     ## 已知缺口
 
-    **分组（主图 / 详情图）不在返回里** —— `AigcMediaAsset` 没有 `group` 列，
+    **分组（主图 / 详情图）不在返回里** —— `PublishAsset` 没有 `group` 列，
     分组事实只在生成当时的响应里。本版按**时间**列，不按组分块
     （按组看是独立需求，要再加列 + 迁移）。
     """
-    from backend.app.models import AigcMediaAsset
+    from backend.app.models import ASSET_AIGC, PublishAsset
 
     # 归属校验：账号必须是本人的（否则改个 id 就能看别人的生成记录）
     account = db.scalar(
@@ -1720,15 +1721,15 @@ def item_generations(
         )
 
     conditions = [
-        AigcMediaAsset.user_id == current_user.id,
-        AigcMediaAsset.platform_account_id == payload.platform_account_id,
-        AigcMediaAsset.item_id == payload.item_id,
+        PublishAsset.user_id == current_user.id,
+        PublishAsset.platform_account_id == payload.platform_account_id,
+        PublishAsset.item_id == payload.item_id,
     ]
-    total = db.scalar(select(func.count(AigcMediaAsset.id)).where(*conditions)) or 0
+    total = db.scalar(select(func.count(PublishAsset.id)).where(*conditions)) or 0
     rows = db.scalars(
-        select(AigcMediaAsset)
+        select(PublishAsset)
         .where(*conditions)
-        .order_by(AigcMediaAsset.created_at.desc(), AigcMediaAsset.id.desc())
+        .order_by(PublishAsset.created_at.desc(), PublishAsset.id.desc())
         .offset((payload.page - 1) * payload.page_size)
         .limit(payload.page_size)
     ).all()

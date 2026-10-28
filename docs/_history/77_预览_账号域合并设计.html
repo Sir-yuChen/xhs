@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<link rel="icon" href="data:,">
+<title>账号域合并设计预览 · 3 表 → 1 表</title>
+<style>
+  :root{
+    --bg:#0f1115; --card:#171a21; --card2:#1d2129; --line:#2a2f3a;
+    --fg:#e6e9ef; --muted:#8b93a3; --accent:#4c9aff; --ok:#3fb950;
+    --warn:#d29922; --danger:#f85149; --purple:#a371f7;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;padding:28px 32px 60px;background:var(--bg);color:var(--fg);
+    font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;font-size:13px;line-height:1.6}
+  h1{font-size:22px;margin:0 0 6px;font-weight:600}
+  h2{font-size:16px;margin:34px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--line);font-weight:600}
+  h3{font-size:13px;margin:0 0 10px;color:var(--muted);font-weight:600;letter-spacing:.4px}
+  .sub{color:var(--muted);font-size:12px;margin-bottom:24px}
+  .kpi{display:flex;gap:14px;margin:18px 0 26px;flex-wrap:wrap}
+  .kpi div{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 18px;min-width:130px}
+  .kpi b{display:block;font-size:22px;line-height:1.2;margin-bottom:2px}
+  .kpi span{color:var(--muted);font-size:11px}
+  .flow{display:flex;align-items:stretch;gap:16px;margin:16px 0;flex-wrap:wrap}
+  .tbl{background:var(--card);border:1px solid var(--line);border-radius:8px;overflow:hidden;flex:1;min-width:250px}
+  .tbl.gone{border-color:#4a2027;opacity:.72}
+  .tbl.new{border-color:#1d4b2c;border-width:2px}
+  .tbl .hd{display:flex;justify-content:space-between;align-items:center;
+    padding:9px 12px;background:var(--card2);border-bottom:1px solid var(--line)}
+  .tbl .hd code{font-size:12px;font-weight:600;color:var(--accent)}
+  .tbl.gone .hd code{color:var(--danger);text-decoration:line-through}
+  .tbl.new .hd code{color:var(--ok)}
+  .tbl .hd em{font-style:normal;font-size:11px;color:var(--muted)}
+  .cols{padding:8px 12px 11px;font-size:11.5px}
+  .cols i{font-style:normal;display:block;padding:1px 0;color:var(--muted);font-family:ui-monospace,Consolas,monospace}
+  .cols i b{color:var(--fg);font-weight:500}
+  .cols i u{color:var(--purple);text-decoration:none}
+  .cols i s{color:var(--danger);text-decoration:line-through}
+  .arrow{display:flex;align-items:center;color:var(--muted);font-size:22px;padding:0 2px}
+  table{width:100%;border-collapse:collapse;background:var(--card);border-radius:8px;overflow:hidden;font-size:12px}
+  th{background:var(--card2);text-align:left;padding:9px 11px;font-weight:600;color:var(--muted);
+    border-bottom:1px solid var(--line);font-size:11px;letter-spacing:.3px}
+  td{padding:8px 11px;border-bottom:1px solid var(--line);vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  code{font-family:ui-monospace,Consolas,monospace;font-size:11.5px;background:#0b0d11;
+    padding:1px 5px;border-radius:3px;color:#9fb4d4}
+  .pill{display:inline-block;padding:1px 7px;border-radius:10px;font-size:10.5px;font-weight:600}
+  .p-keep{background:#12281a;color:var(--ok);border:1px solid #1d4b2c}
+  .p-drop{background:#2a1417;color:var(--danger);border:1px solid #4a2027}
+  .p-new{background:#0e1c2b;color:var(--accent);border:1px solid #1b3a5c}
+  .p-merge{background:#231a33;color:var(--purple);border:1px solid #3d2a54}
+  .p-warn{background:#2a2110;color:var(--warn);border:1px solid #4a3a12}
+  .note{background:var(--card);border-left:3px solid var(--warn);padding:11px 14px;
+    border-radius:0 6px 6px 0;margin:14px 0;font-size:12px}
+  .note.ok{border-left-color:var(--ok)}
+  .note.bad{border-left-color:var(--danger)}
+  .note.info{border-left-color:var(--accent)}
+  .note b{color:var(--fg)}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:900px){.grid2{grid-template-columns:1fr}}
+  .lvl{display:inline-block;padding:2px 9px;border-radius:4px;font-size:10.5px;font-weight:700;margin-right:6px}
+  .l0{background:#0e1c2b;color:var(--accent);border:1px solid #1b3a5c}
+  .l1{background:#2a2110;color:var(--warn);border:1px solid #4a3a12}
+  .sec{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px 16px;margin:12px 0}
+  .sec h4{margin:0 0 8px;font-size:12.5px;color:var(--fg)}
+  ul{margin:6px 0;padding-left:20px}
+  li{margin:3px 0}
+  .muted{color:var(--muted)}
+  .tag-json{color:var(--purple)}
+</style>
+</head>
+<body>
+
+<h1>账号域合并设计预览</h1>
+<div class="sub">3 张表 → 1 张表 ｜ 2026-10-28 ｜ 数据来源：PostgreSQL spider_xhs <code>public</code> schema 实测</div>
+
+<div class="kpi">
+  <div><b>3 → 1</b><span>表数量</span></div>
+  <div><b>33 → 21</b><span>总列数</span></div>
+  <div><b>242 → 5</b><span>行数（只留实体）</span></div>
+  <div><b>2 张</b><span>待 DROP 表</span></div>
+  <div><b>17</b><span>沿用列</span></div>
+  <div><b>4</b><span>合并/新增列</span></div>
+</div>
+
+<h2>1. 为什么要合</h2>
+
+<div class="note bad">
+  <b>现状：33 列描述同一个小红书账号，却散在 3 张表里。</b><br>
+  <code>platform_accounts</code>（18 列，身份）· <code>account_cookie_versions</code>（4 列，会话，<b>11 行历史</b>）·
+  <code>login_sessions</code>（11 列，登录过程，<b>226 行里 194 条 pending 是垃圾</b>）。<br><br>
+  每条「这个账号能不能用千帆」的判定，都要跨 <b>2 张表</b> join：
+  <code>has_ark_session()</code> → <code>qianfan_cookies_for_account()</code> → 查 <code>account_cookie_versions</code>
+  按 <code>created_at desc</code> 取最新一行 → 解密 → 按通道拆信封 → 取 <code>ark</code>。
+  <b>这个「跨表取最新」在 20+ 个调用点重复出现</b>，且注释自承「无法在 SQL 里过滤，只能逐条判定」。
+</div>
+
+<h2>2. 结构对比</h2>
+
+<div class="flow">
+  <!-- 表1 -->
+  <div class="tbl gone">
+    <div class="hd"><code>platform_accounts</code><em>5 行 · 18 列</em></div>
+    <div class="cols">
+      <i><b>id</b> PK</i>
+      <i>user_id FK→users</i>
+      <i>platform <u>NOT NULL</u></i>
+      <i>sub_type <u>creator/pc/qianfan</u></i>
+      <i>external_user_id</i>
+      <i>nickname</i><i>avatar_url</i>
+      <i>status</i><i>status_message</i>
+      <i>profile_json</i>
+      <i>note_sync_cursor_ms</i>
+      <i>note_sync_cursor_note_id</i>
+      <i>seller_id <u>千帆专有</u></i>
+      <i>shop_state <u>千帆专有</u></i>
+      <i>created_at</i><i>updated_at</i>
+      <i>deleted_at</i><i>disabled</i>
+    </div>
+  </div>
+
+  <div class="arrow">＋</div>
+
+  <!-- 表2 -->
+  <div class="tbl gone">
+    <div class="hd"><code>account_cookie_versions</code><em>11 行 · 4 列</em></div>
+    <div class="cols">
+      <i><b>id</b> PK</i>
+      <i>platform_account_id FK</i>
+      <i>encrypted_cookies</i>
+      <i>created_at</i>
+      <i style="color:var(--danger);margin-top:6px">⚠️ 每次登录追加一行</i>
+      <i style="color:var(--danger)">账号 8 有 9 个历史版本</i>
+      <i style="color:var(--danger)">读点按 created_at desc 取最新</i>
+    </div>
+  </div>
+
+  <div class="arrow">＋</div>
+
+  <!-- 表3 -->
+  <div class="tbl gone">
+    <div class="hd"><code>login_sessions</code><em>226 行 · 11 列</em></div>
+    <div class="cols">
+      <i><b>id</b> PK</i>
+      <i>user_id FK→users</i>
+      <i>platform <u>NOT NULL</u></i>
+      <i>sub_type</i><i>status</i><i>login_method</i>
+      <i>qr_id</i><i>code</i><i>qr_url</i>
+      <i>encrypted_temp_cookies</i>
+      <i>created_at</i>
+      <i style="color:var(--danger);margin-top:6px">⚠️ 194 条 pending（未完成扫码）</i>
+      <i style="color:var(--danger)">6 条 expired</i>
+      <i style="color:var(--ok)">仅 21 条 confirmed 有价值</i>
+    </div>
+  </div>
+
+  <div class="arrow">→</div>
+
+  <!-- 新表 -->
+  <div class="tbl new">
+    <div class="hd"><code>xhs_accounts</code><em>5 行 · 21 列</em></div>
+    <div class="cols">
+      <i><b>id</b> PK</i>
+      <i>user_id FK→users</i>
+      <i>sub_type <u>creator/pc/qianfan</u></i>
+      <i>external_user_id</i>
+      <i>nickname</i><i>avatar_url</i>
+      <i>status</i><i>status_message</i>
+      <i>profile_json</i>
+      <i>note_sync_cursor_ms</i>
+      <i>note_sync_cursor_note_id</i>
+      <i>seller_id</i><i>shop_state</i>
+      <i>created_at</i><i>updated_at</i>
+      <i>deleted_at</i><i>disabled</i>
+      <i style="color:var(--ok);margin-top:6px"><b>cookies_json</b> ← 各通道最新一份</i>
+      <i style="color:var(--ok)"><b>last_login_at</b></i>
+      <i style="color:var(--ok)"><b>last_login_method</b></i>
+    </div>
+  </div>
+</div>
+
+<h2>3. 字段级映射</h2>
+
+<table>
+  <tr>
+    <th style="width:26%">目标列 <code>xhs_accounts</code></th>
+    <th style="width:20%">来源</th>
+    <th style="width:14%">动作</th>
+    <th>说明</th>
+  </tr>
+  <tr><td><code>id</code> · <code>user_id</code> · <code>sub_type</code> · <code>nickname</code> · <code>avatar_url</code> · <code>status</code> · <code>status_message</code> · <code>profile_json</code> · <code>note_sync_cursor_ms</code> · <code>note_sync_cursor_note_id</code> · <code>seller_id</code> · <code>shop_state</code> · <code>created_at</code> · <code>updated_at</code> · <code>deleted_at</code> · <code>disabled</code></td>
+      <td><code>platform_accounts</code></td><td><span class="pill p-keep">原样</span></td>
+      <td>16 列直接沿用</td></tr>
+  <tr><td><code>external_user_id</code></td><td><code>platform_accounts</code></td><td><span class="pill p-keep">原样</span></td>
+      <td>小红书号，唯一键 <code>(user_id, sub_type, external_user_id)</code> 的一部分</td></tr>
+  <tr><td><code>platform</code></td><td><code>platform_accounts</code></td><td><span class="pill p-drop">删除</span></td>
+      <td><b>表名已含 <code>xhs_</code>，再存一个恒为 <code>'xhs'</code> 的列是冗余</b>。这是「工作区前缀」带来的直接收益</td></tr>
+  <tr><td><code>cookies_json</code></td><td><code>account_cookie_versions</code></td><td><span class="pill p-merge">合并</span></td>
+      <td>每账号取<b>每通道最新一份</b>，存为 <code>{"creator": "...", "qianfan": "..."}</code>。<br>
+          实测：账号 7→1 版、8→9 版、9→1 版 ⇒ 合并后每通道 1 份。<br>
+          <span class="tag-json">加密信封不变</span>，解密函数零改动</td></tr>
+  <tr><td><code>last_login_at</code></td><td><code>login_sessions</code></td><td><span class="pill p-new">新增</span></td>
+      <td>取 <code>confirmed</code> 里该账号最新一条的 <code>created_at</code></td></tr>
+  <tr><td><code>last_login_method</code></td><td><code>login_sessions</code></td><td><span class="pill p-new">新增</span></td>
+      <td><code>qr</code> / <code>phone</code>。仅 2 条 phone（19 条 confirmed 里）</td></tr>
+  <tr><td colspan="2"><code>login_sessions.qr_id</code> · <code>code</code> · <code>qr_url</code> · <code>encrypted_temp_cookies</code> · <code>status</code></td>
+      <td><span class="pill p-drop">不保留</span></td>
+      <td><b>扫码过程数据</b>：<code>pending</code> 194 条 + <code>expired</code> 6 条 + <code>scanned</code> 4 条 = 204 条是「未完成的登录尝试」，<br>
+          按你的口径「临时数据只需覆盖历史即可，不需要保留每次」⇒ 改<b>内存态</b>，不落库</td></tr>
+</table>
+
+<h2>4. 等级判定（按 77 规范）</h2>
+
+<div class="sec">
+  <h4><span class="lvl l1">L1</span><code>xhs_accounts</code> = 小红书工作区私有表</h4>
+  <ul>
+    <li><b>C1</b> 表名带 <code>xhs_</code> ✅</li>
+    <li><b>C2</b> 原 <code>platform</code> 列 <code>NOT NULL</code> ✅（说明平台曾是隔离维度）</li>
+    <li><b>C3</b> 平台专有列：<code>sub_type</code> / <code>seller_id</code> / <code>shop_state</code> / <code>external_user_id</code> ✅</li>
+  </ul>
+  <p class="muted" style="margin:8px 0 0">合并后 <code>platform</code> 列删除，因为表名已表达工作区 —— <b>这正是「两级规范」的落地效果：隔离维度从「列值」上提到「表名」</b>。</p>
+</div>
+
+<h2>5. 影响面与验证判据</h2>
+
+<div class="grid2">
+  <div class="sec">
+    <h4>代码影响</h4>
+    <ul>
+      <li>后端 <b>49</b> 个文件引用 <code>PlatformAccount</code> / <code>AccountCookieVersion</code> / <code>LoginSession</code></li>
+      <li>前端 <b>15</b> 个文件</li>
+      <li>ORM 类：<code>PlatformAccount</code> → <code>XhsAccount</code>，删 <code>AccountCookieVersion</code> / <code>LoginSession</code></li>
+      <li>服务层 <code>account_service</code> 的「跨表取最新」逻辑简化为<b>单行读字段</b></li>
+    </ul>
+  </div>
+  <div class="sec">
+    <h4>迁移验证（四步）</h4>
+    <ul>
+      <li>① 副本 <code>upgrade</code>：3 表 → 1 表，数据搬对</li>
+      <li>② 重跑 <code>upgrade</code>：幂等</li>
+      <li>③ <code>downgrade</code>：还原 3 表 + 历史行</li>
+      <li>④ 再 <code>upgrade</code></li>
+    </ul>
+  </div>
+</div>
+
+<div class="note ok">
+  <b>核心判据（合并后必须逐条实测）：</b>
+  <ul style="margin:6px 0 0">
+    <li><code>has_ark_session(7/8/9)</code> 与合并前<b>逐账号同值</b> —— 这是 20+ 个调用点的唯一真值来源</li>
+    <li><code>qianfan_cookies_for_account(id)</code> 返回串与合并前<b>逐字节一致</b>（同一份加密信封解出来的）</li>
+    <li>5 个账号的 <code>external_user_id</code> / <code>sub_type</code> / <code>status</code> 全部不变</li>
+    <li>唯一键 <code>(user_id, sub_type, external_user_id)</code> 仍然拦得住重复绑定</li>
+  </ul>
+</div>
+
+<h2>6. 风险与取舍（必须说清）</h2>
+
+<div class="note bad">
+  <b>⚠️ 我原本判断「cookie 历史是故意的」，查证后修正了：</b><br>
+  代码注释写的是「<b>无法在 SQL 里过滤</b>，只能取到存活账号后逐条 <code>has_ark_session</code> 判定」——
+  这说明历史多行是<b>当时没做 JSON 列时的妥协</b>，不是功能需求。所有读点（20+ 处）最终都归到
+  「取最新、按通道拆、返回字符串」，<b>没有任何一处读「第几版」</b>。<br>
+  合并后反而<b>能在 SQL 里直接 <code>WHERE cookies_json->>'ark' IS NOT NULL</code> 过滤</b>，是净收益。
+</div>
+
+<div class="note info">
+  <b>保留的取舍：</b>cookie 历史压缩为「每通道最新一份」后，<b>放弃</b>「回溯某次登录前的令牌状态」能力。
+  当前没有任何代码用它，且令牌失效时的处理是「重新登录」而非「回滚到旧令牌」。若将来需要审计，可加
+  <code>xhs_account_cookie_log</code>（历史表，只写不读）—— 但那会重新变成两张表，建议等真需要时再加。
+</div>
+
+<h2>7. 不合并的同类（避免过度合并）</h2>
+
+<table>
+  <tr><th style="width:30%">表对</th><th style="width:12%">判断</th><th>原因</th></tr>
+  <tr><td><code>draft_assets</code>（1 行）→ <code>ai_drafts.assets_json</code></td>
+      <td><span class="pill p-warn">暂不合并</span></td>
+      <td>有独立 CRUD 端点（<code>GET/POST/DELETE</code> + 重排 <code>sort_order</code>）。压成 JSON 要把「重排/单条删/单条加」全改成读-改-写，反而引入并发覆盖</td></tr>
+  <tr><td><code>ai_generated_assets</code>（0 行）</td>
+      <td><span class="pill p-warn">暂不合并</span></td>
+      <td><code>draft_id</code> 可空 ⇒ 它是「一次 AI 生成调用」的记录，不是草稿附件。合并会丢历史</td></tr>
+  <tr><td><code>notes</code> + <code>note_topics</code></td>
+      <td><span class="pill p-keep">保留分表</span></td><td>多对多关系，一篇笔记 N 个话题</td></tr>
+  <tr><td><code>no_traffic_cleanup_logs</code> + <code>items</code></td>
+      <td><span class="pill p-keep">保留分表</span></td><td>一次清理 N 条明细（父行 8 / 子行 5，但结构是一对多）</td></tr>
+  <tr><td><code>llm_gateway_*</code>（4 张）</td>
+      <td><span class="pill p-keep">保留分表</span></td><td>配置 / 模型 / 预警 / 用量账本，四个不同概念；<code>usage_logs</code> 171 行是时序</td></tr>
+</table>
+
+<div class="note">
+  <b>判据（写进 77 规范）</b>：从属表如果「一个父行对应 N 行」且 N 可能几十上百 ⇒ <b>分表</b>；
+  如果「恒为 0 或 1 行」⇒ <b>合并成 JSON 列</b>。账号域的三张表属于后者（cookie 每通道 1 份、登录历史 1 条）。
+</div>
+
+</body>
+</html>

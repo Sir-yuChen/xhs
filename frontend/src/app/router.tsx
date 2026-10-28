@@ -9,16 +9,10 @@ import { PlatformSelectPage } from "../pages/platform-select/platform-select-pag
 import { SettingsPage } from "../pages/settings/settings-page";
 import { TaskRecordsPage } from "../pages/tasks/task-records-page";
 import { WorkspaceTasksPage } from "../pages/tasks/workspace-tasks-page";
-import { AutoOpsPage } from "../pages/platforms/xhs/auto-ops-page";
 import { OrdersPage } from "../pages/platforms/xhs/orders-page";
 import { XhsAccountsPage } from "../pages/platforms/xhs/accounts-page";
-import { XhsAnalyticsPage } from "../pages/platforms/xhs/analytics-page";
-import { InsightsContentPage } from "../pages/platforms/xhs/insights-content-page";
-import { InsightsShopPage } from "../pages/platforms/xhs/insights-shop-page";
-import { XhsMonitoringPage } from "../pages/platforms/xhs/monitoring-page";
 import { XhsDashboard } from "../pages/platforms/xhs/xhs-dashboard";
 import { XhsDiscoveryPage } from "../pages/platforms/xhs/discovery-page";
-import { XhsKeywordsPage } from "../pages/platforms/xhs/keywords-page";
 import { LlmGatewayPage } from "../pages/llm-gateway/llm-gateway-page";
 import { XhsLibraryPage } from "../pages/platforms/xhs/library-page";
 import { XhsMyNotesPage } from "../pages/platforms/xhs/my-notes-page";
@@ -121,12 +115,6 @@ export function AppRouter() {
           <Route path="/platforms/:platformId" element={<PlatformRootRoute />} />
           <Route path="/platforms/xhs/dashboard" element={<XhsDashboard />} />
           <Route path="/platforms/xhs/accounts" element={<XhsAccountsPage />} />
-          <Route path="/platforms/xhs/analytics" element={<XhsAnalyticsPage />} />
-          {/* 设计 32 §6（2026-10-11 用户拍板 D2「拆」）：原「数据洞察」一页两 Tab 拆成
-              **两条业务线各自的页面** —— 内容洞察（笔记侧）/ 商品洞察（店铺侧）。
-              旧路由 `/analytics`（含 `?tab=`）由 `XhsAnalyticsPage` 内部重定向，深链不死。 */}
-          <Route path="/platforms/xhs/insights/content" element={<InsightsContentPage />} />
-          <Route path="/platforms/xhs/insights/shop" element={<InsightsShopPage />} />
           <Route path="/platforms/xhs/discovery" element={<XhsDiscoveryPage />} />
           <Route path="/platforms/xhs/my-notes" element={<XhsMyNotesPage />} />
           <Route path="/platforms/xhs/datacenter" element={<XhsDatacenterPage />} />
@@ -152,7 +140,6 @@ export function AppRouter() {
           <Route path="/platforms/xhs/picture-space" element={<PictureSpacePage />} />
           {/* 数据抓取已并入「笔记发现」的「批量抓取」页签（设计 21 切片 B）：旧路由重定向，深链不死。 */}
           <Route path="/platforms/xhs/crawler" element={<Navigate to="/platforms/xhs/discovery?tab=crawl" replace />} />
-          <Route path="/platforms/xhs/keywords" element={<XhsKeywordsPage />} />
           <Route path="/platforms/xhs/library" element={<XhsLibraryPage />} />
           {/* 2026-09-25 §36：图片 / 视频 / 草稿三坊合并为「笔记工坊」一页（Tabs 隔离）。
               旧路由重定向到对应 tab —— 深链、书签、外部链接都不死。 */}
@@ -160,12 +147,7 @@ export function AppRouter() {
           <Route path="/platforms/xhs/image-studio" element={<Navigate to="/platforms/xhs/note-workshop?tab=images" replace />} />
           <Route path="/platforms/xhs/video-studio" element={<Navigate to="/platforms/xhs/note-workshop?tab=videos" replace />} />
           <Route path="/platforms/xhs/drafts" element={<Navigate to="/platforms/xhs/note-workshop?tab=drafts" replace />} />
-          {/* 竞品监控已并入「监控中心」（设计 21 切片 A）：旧路由重定向，深链不死。
-              monitoring-page 是 benchmarks-page 的超集（4 种目标类型 vs 仅 note_url）。 */}
-          <Route path="/platforms/xhs/benchmarks" element={<Navigate to="/platforms/xhs/monitoring" replace />} />
-          <Route path="/platforms/xhs/monitoring" element={<XhsMonitoringPage />} />
           <Route path="/platforms/xhs/publish" element={<Navigate to="/platforms/xhs/note-workshop?tab=publish" replace />} />
-          <Route path="/platforms/xhs/auto-ops" element={<AutoOpsPage />} />
           {/* 自动化工作流（设计 19 / M5）：编排 选题→生成→审核→发布→监控。
               人工审核节点默认不自动放行（§3.3 硬约束）。
               2026-10-06 设计 22 §3：并入「自动运营」宿主页作 tab ⇒ 旧路由重定向，深链不死。 */}

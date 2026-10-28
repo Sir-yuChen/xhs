@@ -15,8 +15,6 @@ const SOURCE_ROUTES: Record<string, (id: number | null) => string> = {
   llm_gateway_alert: () => "/llm-gateway",
   // 账号相关（账号被跳过 / 千帆失效等）⇒ 账号页
   account: () => "/platforms/xhs/accounts",
-  // 监控目标暂停 ⇒ 监控页
-  target: () => "/platforms/xhs/monitoring",
   // 任务失败 / 重试耗尽 ⇒ 任务中心
   task: () => "/tasks",
 };

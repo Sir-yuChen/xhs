@@ -100,14 +100,15 @@ def _purge_no_traffic_logs(db: Session, cutoff: datetime, user_id: Optional[int]
     """
     from sqlalchemy import delete
 
-    from backend.app.models.no_traffic_cleanup_log import NoTrafficCleanupLog
+    from backend.app.models.no_traffic_cleanup_log import ROW_BATCH, NoTrafficCleanupRow
 
-    stmt = delete(NoTrafficCleanupLog).where(
-        NoTrafficCleanupLog.status.in_(("done", "failed")),
-        NoTrafficCleanupLog.created_at < cutoff,
+    stmt = delete(NoTrafficCleanupRow).where(
+        NoTrafficCleanupRow.row_type == ROW_BATCH,
+        NoTrafficCleanupRow.status.in_(("done", "failed")),
+        NoTrafficCleanupRow.created_at < cutoff,
     )
     if user_id is not None:
-        stmt = stmt.where(NoTrafficCleanupLog.user_id == int(user_id))
+        stmt = stmt.where(NoTrafficCleanupRow.user_id == int(user_id))
     else:
         # 无归属不删（同队列记录那一路的理由）。
         logger.warning("no-traffic log cleanup skipped: no user scope")
@@ -128,16 +129,17 @@ def _purge_no_traffic_items(db: Session, cutoff: datetime, user_id: Optional[int
     """
     from sqlalchemy import delete
 
-    from backend.app.models.no_traffic_cleanup_log import NoTrafficCleanupItem
+    from backend.app.models.no_traffic_cleanup_log import ROW_ITEM, NoTrafficCleanupRow
 
     if user_id is None:
         logger.warning("no-traffic item cleanup skipped: no user scope")
         return 0
     stmt = (
-        delete(NoTrafficCleanupItem)
+        delete(NoTrafficCleanupRow)
         .where(
-            NoTrafficCleanupItem.user_id == int(user_id),
-            NoTrafficCleanupItem.operated_at < cutoff,
+            NoTrafficCleanupRow.row_type == ROW_ITEM,
+            NoTrafficCleanupRow.user_id == int(user_id),
+            NoTrafficCleanupRow.operated_at < cutoff,
         )
     )
     return int(db.execute(stmt).rowcount or 0)
@@ -147,26 +149,17 @@ def _purge_no_traffic_items(db: Session, cutoff: datetime, user_id: Optional[int
 #: `user_scoped` 任务只清行主本人的数据 ⇒ purge 里不必再带 user_id（调用方已按
 #: 归属过滤）—— 但队列记录那一路的 `cleanup_records` 仍按 user_id 收口，
 #: 由 `run_record_cleanup` 统一注入。
-def _purge_api_logs(db: Session, cutoff: datetime, user_id: Optional[int]) -> int:
-    """API 审计日志（`api_logs`）—— 此前**没有任何保留策略**（设计 64 §2.4 现状盘点）。
+def _purge_sys_logs(db: Session, cutoff: datetime, user_id: Optional[int]) -> int:
+    """系统日志（`sys_logs`）—— `api` 与 `business` 两型一起按保留期清。
 
     全局表：忽略 `user_id` 全局清理（留痕是运营数据，保留期是全局卫生策略）。
+    ⚠️ 两型合表后**只剩这一条清理规则**（原 `api_logs` / `business_logs` 两条）。
     """
     from sqlalchemy import delete
 
-    from backend.app.models.api_log import ApiLog
+    from backend.app.models.sys_log import SysLog
 
-    stmt = delete(ApiLog).where(ApiLog.created_at < cutoff)
-    return int(db.execute(stmt).rowcount or 0)
-
-
-def _purge_business_logs(db: Session, cutoff: datetime, user_id: Optional[int]) -> int:
-    """业务日志（`business_logs`，设计 64 §2.2）—— 同 api_logs 的全局口径。"""
-    from sqlalchemy import delete
-
-    from backend.app.models.business_log import BusinessLog
-
-    stmt = delete(BusinessLog).where(BusinessLog.created_at < cutoff)
+    stmt = delete(SysLog).where(SysLog.created_at < cutoff)
     return int(db.execute(stmt).rowcount or 0)
 
 
@@ -202,16 +195,9 @@ RECORD_CLEANERS: tuple[CleanableRecord, ...] = (
     # 设计 64 §2.4：全局日志表进同一条保留期闸（此前 api_logs / scheduled_job_logs
     # 没有任何自动清理，只增不减）。
     CleanableRecord(
-        key="api_logs",
-        label="API 审计日志",
-        purge=_purge_api_logs,
-        config_key="log_retention_days",
-        default_days=90,
-    ),
-    CleanableRecord(
-        key="business_logs",
-        label="业务日志",
-        purge=_purge_business_logs,
+        key="sys_logs",
+        label="系统日志（API 审计 + 业务）",
+        purge=_purge_sys_logs,
         config_key="log_retention_days",
         default_days=90,
     ),

@@ -1,54 +1,44 @@
-"""无流量笔记清理日志（批次一行 + 笔记明细一行，独立保留）。
+"""无流量清理记录（**一张自引用父子表**，小红书私有 L1）。
 
-**为什么单独一张表**（2026-10-05 用户口径「新增清理无流量笔记日志表……日志表独立」）：
+2026-10-28 用户口径「no_traffic_cleanup_logs 和 no_traffic_cleanup_items 是否能合并成
+一张表，父子结构，懒加载，且小红书私有」⇒ 两表合并为本表，表名加 `xhs_` 前缀（L1）。
 
-* `tasks` 行是**并发控制载体**（`_running_cleanup` 靠它防重入），会被公共
-  「清理记录表」任务按保留期删掉 ⇒ 删完就再也答不出「上个月清了多少篇」。
-* `scheduled_job_logs` 是**定时任务**日志：本清理是**手动触发**（入口只有
-  「我的笔记」页按钮），手动触发不落那张表。
-* 用户要的信息（账号 / 阈值 / 清理前多少条 / 删了几篇 / 失败原因 / 操作时间）
-  落在 `tasks.payload` 里只是「顺便」，没有索引、没有类型、还会随 tasks 行一起消失。
-
-**独立保留**：本表不被自己清理，由公共 `system.queue_record_cleanup` 任务按
-保留期处理（用户口径「日志表独立」）。
-
-**无外键的列**：`account_id` / `user_id` 是**执行时快照** —— 账号被删、用户改名
-都不影响历史日志可读（同 `ScheduledJobLog` 的口径）。`task_id` 例外，带
-`ondelete="SET NULL"`：那条 tasks 行没了不影响日志本身。
-
-## 两层主体（2026-10-06 用户口径「所有主体应是笔记维度」）
-
-用户口径原文：「清理无流量的主要对象是笔记，**所有主体应是笔记维度**，记录操作日志时
-也应该是笔记维度」。⇒ 本表是**批次层**，逐篇明细下沉到 :class:`NoTrafficCleanupItem`：
-
-| 层 | 表 | 回答的问题 |
+| 层 | `row_type` | 回答的问题 |
 |---|---|---|
-| **批次** | `no_traffic_cleanup_logs`（本表） | 这一次操作**整体**清了几篇、为什么整体失败 |
-| **笔记** | `no_traffic_cleanup_items` | **这一篇**被删了没有、没删是为什么 |
+| **批次** | `batch` | 这一次操作**整体**清了几篇、为什么整体失败 |
+| **笔记** | `item` | **这一篇**被删了没有、没删是为什么 |
 
-两层各有不可替代的问题：批次行承载「一次操作」的报账口径（`before_total` 挂在笔记行上
-没有意义），笔记行承载「这篇当初为什么没删掉」的可检索答案（JSON 列查不了）。
+`before_total` 这类报账数挂在笔记行上没有意义；「这一篇当初为什么没删掉」需要
+可检索的列（JSON 查不了）⇒ 两层不能压成一层，只能同表两型。
 
-## `reason` 的语义（DEF-095，2026-10-06 更正）
+## 为什么用 `row_type` 判父行，不用 `parent_id IS NULL`
 
-⚠️ 此前 `reason` 被错写成**候选池覆盖度文案**（`_finish(note=coverage["reason"])`）——
-那是一句**正常态**提示（「这池子只覆盖挂了千帆链的笔记」），与本次为何失败毫无关系。
-真机表现：平台风控失败时，界面「失败原因」列显示「候选池仅包含已同步千帆挂链映射的
-笔记…」，把用户指向完全错误的方向。
+`parent_id` 是 `ondelete="SET NULL"`：批次行被保留期清理掉之后，它的明细行**必须**
+还在（原意：「某篇笔记当初为什么没删掉」这个答案不该随批次记录过期而消失）。
+若用 `parent_id IS NULL` 当父行判据，那些孤儿明细会被当成批次行读出来。
 
-现在两件事分家：
+## 子行不级联删
 
-* `reason` = **本次失败原因**（首条失败笔记的平台原文；无失败则为空）；
-* `coverage_note` = 候选池覆盖度说明（信息性备注，**不显示在「失败原因」列**）。
+保持原 `log_id` 的 `SET NULL` 语义（不是 CASCADE）：批次过期只删批次行，
+明细行独立按 `operated_at` 判期（见 `record_cleanup_service`）。
 """
-
 from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import JSON, BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, String, Text
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+)
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.app.core.database import Base
 from backend.app.core.time import shanghai_now
@@ -58,6 +48,10 @@ STATUS_PENDING = "pending"
 STATUS_RUNNING = "running"
 STATUS_DONE = "done"
 STATUS_FAILED = "failed"
+
+#: 行类型（**父子唯一判据**）。
+ROW_BATCH = "batch"
+ROW_ITEM = "item"
 
 #: 笔记行的处置结果（**唯一定义处** —— 服务层与前端都引这一份）。
 #: 缺值口径：`deleted` / `skipped` / `failed` / `not_in_pool` 之外**不造名**。
@@ -79,43 +73,47 @@ CLEANUP_ITEM_RESULTS = (
 )
 
 
-class NoTrafficCleanupLog(Base):
-    """一次无流量清理 = 一行（**批次层**）。"""
+class NoTrafficCleanupRow(Base):
+    """一次清理 = 一行 `batch` + N 行 `item`。"""
 
-    __tablename__ = "no_traffic_cleanup_logs"
-    #: ⚠️ 2026-10-23 补：`ix_no_traffic_cleanup_logs_batch_no` 此前只写在迁移
-    #: `c0ffee000002` 里，模型层没声明 ⇒ `create_all` 建的库会丢（查询变慢，不报错）。
+    __tablename__ = "xhs_no_traffic_cleanup_rows"
     __table_args__ = (
-        Index("ix_no_traffic_cleanup_logs_batch_no", "batch_no"),
+        Index("ix_xhs_cleanup_rows_batch_no", "batch_no"),
+        Index("ix_xhs_cleanup_rows_parent", "parent_id"),
+        Index("ix_xhs_cleanup_rows_type_created", "row_type", "created_at"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    #: 操作者（发起清理的登录用户）。快照，不带外键。
-    user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
-    #: 被清理的**平台账号**（用户口径「账号」）。快照：账号删了历史仍可读。
-    account_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
-    #: 账号名快照（当时叫什么）—— 不 join，账号改名不篡改历史。
-    account_name: Mapped[str] = mapped_column(String(128), default="")
-    #: 关联的 tasks 行（并发控制载体）。删除时置空，不影响本日志。
-    task_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True, index=True
-    )
-    #: 触发方式 `manual` / `scheduled`（用户口径：入口只有我的笔记页按钮 ⇒ 当前恒
-    #: manual；留字段以便将来接入定时任务时不用再改表）。
-    trigger_type: Mapped[str] = mapped_column(String(16), default="manual")
-    #: **批次号**（2026-10-13）：一次清理超过 500 条时后端自动拆成多个子批次，
-    #: 每个子批次 batch_no = `{唯一批次号}-{自增序号}`（如 `20261013_0030-1` / `-2`）。
-    #: 同一批次的多个子批次共享同一「基号」（去掉 `-N` 后缀），前端树状/分组按此聚合。
-    #: 旧数据（单批不超 500）为**空串**（迁移前无此概念），渲染时回退用 log.id。
-    batch_no: Mapped[str] = mapped_column(String(64), default="", server_default="")
 
+    #: **父子唯一判据**：`batch` = 批次行，`item` = 笔记明细行。
+    row_type: Mapped[str] = mapped_column(String(8), default=ROW_BATCH, index=True)
+    #: 明细行所属批次；批次行恒 NULL。`SET NULL` 见模块 docstring。
+    parent_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("xhs_no_traffic_cleanup_rows.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    #: 操作者快照（发起清理的登录用户）。无外键：用户删了历史仍可读。
+    user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    #: 被清理的平台账号快照。账号删了/改名都不改历史。
+    account_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    account_name: Mapped[str] = mapped_column(String(128), default="")
+    #: 关联的 tasks 行（并发控制载体）。仅作追溯，删任务行置空。
+    task_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("queue_jobs.id", ondelete="SET NULL"), nullable=True
+    )
+
+    # ---- 批次行字段 ----
+    #: `manual` / `scheduled`。
+    trigger_type: Mapped[str] = mapped_column(String(16), default="manual")
+    #: 批次号：超过 500 条时拆子批次 `{基号}-{序号}`；旧数据为空串。
+    batch_no: Mapped[str] = mapped_column(String(64), default="", server_default="")
     #: 执行时的筛选条件快照（阈值 + 查询条件 + 勾选的笔记）。
     thresholds: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     query: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     note_ids: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     batch_limit: Mapped[int] = mapped_column(Integer, default=0)
-
-    #: 报账四数 + 清理前/后（用户口径「清理结果」）。
+    #: 报账四数 + 清理前/后。仅批次行。
     before_total: Mapped[int] = mapped_column(Integer, default=0)
     after_total: Mapped[int] = mapped_column(Integer, default=0)
     total: Mapped[int] = mapped_column(Integer, default=0)
@@ -123,33 +121,62 @@ class NoTrafficCleanupLog(Base):
     skipped: Mapped[int] = mapped_column(Integer, default=0)
     failed: Mapped[int] = mapped_column(Integer, default=0)
     not_in_pool: Mapped[int] = mapped_column(Integer, default=0)
-
-    #: `running` / `done` / `failed`。
-    status: Mapped[str] = mapped_column(String(16), default=STATUS_RUNNING, index=True)
-    #: **本次失败原因**（DEF-095：首条失败笔记的平台原文；无失败则为空）。
-    #: ⚠️ 此前这里存的是**候选池覆盖度文案** —— 见模块 docstring。
-    reason: Mapped[str] = mapped_column(Text, default="")
-    #: 候选池覆盖度说明（「只覆盖挂了千帆链的笔记」）。信息性备注，**不是失败原因**。
+    #: `running` / `done` / `failed`。仅批次行有意义。
+    status: Mapped[str] = mapped_column(String(16), default=STATUS_RUNNING)
+    #: 本次失败原因（DEF-095：首条失败笔记的平台原文；无失败为空）。仅批次行。
+    reason: Mapped[str] = mapped_column(Text, default="", server_default="")
+    #: 候选池覆盖度说明（信息性备注，**不是失败原因**）。仅批次行。
     coverage_note: Mapped[str] = mapped_column(Text, default="", server_default="")
-    #: 逐篇明细（`[{note_id, ok, reason}]`）。
-    #: ⚠️ 2026-10-06 起它仍是 `tasks.payload` 的**兼容快照**（前端旧渲染路径与
-    #: `GET .../cleanup/{task_id}` 状态轮询仍在读）；**权威来源**是
-    #: `no_traffic_cleanup_items`（可按笔记检索）。
+    #: 逐篇明细兼容快照（前端旧渲染路径仍在读）。权威来源是 `item` 行。
     details: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
-
-    #: **本批被中止**（DEF-097）：平台风控 / 凭据类失败 ⇒ 后续笔记**不再发请求**。
-    aborted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default="0")
-    #: 中止原因（平台原文，不猜 —— 硬约束⑤）。
+    #: 本批被中止（风控/凭据类失败 ⇒ 后续不再发请求）。仅批次行。
+    aborted: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, server_default="0"
+    )
+    #: 中止原因（平台原文，不猜）。仅批次行。
     abort_reason: Mapped[str] = mapped_column(Text, default="", server_default="")
-
-    #: 操作时间（用户口径「操作时间」）。
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now, index=True)
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    #: 清理结果时间（用户口径「清理结果时间」）。
+    #: 清理结果时间。仅批次行。
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
+    # ---- 明细行字段 ----
+    #: **笔记主体**：平台笔记 ID。仅明细行。
+    note_id: Mapped[str] = mapped_column(String(128), default="", server_default="")
+    #: 标题快照（平台侧笔记已删时仍答得出「删的是哪一篇」）。
+    note_title: Mapped[str] = mapped_column(String(512), default="", server_default="")
+    #: 封面快照（缺值留空，不造假）。
+    note_cover: Mapped[str] = mapped_column(Text, default="", server_default="")
+    #: 处置结果，取值见 `CLEANUP_ITEM_RESULTS`。仅明细行。
+    result: Mapped[str] = mapped_column(String(16), default="", server_default="")
+    #: 笔记发布时间快照（Epoch **毫秒**，超 int32 ⇒ BIGINT）。仅明细行。
+    published_at: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    #: **操作时间**（明细行判保留期用）。仅明细行。
+    operated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    #: 操作时间（批次行判保留期用；明细行同值冗余，便于排序）。
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=shanghai_now, index=True
+    )
+
+    #: 父子**懒加载**（用户口径「查询懒加载」）：查批次不自动拉明细。
+    children: Mapped[list["NoTrafficCleanupRow"]] = relationship(
+        "NoTrafficCleanupRow",
+        back_populates="parent",
+        lazy="select",
+        foreign_keys=[parent_id],
+    )
+    parent: Mapped[Optional["NoTrafficCleanupRow"]] = relationship(
+        "NoTrafficCleanupRow",
+        back_populates="children",
+        remote_side=[id],
+        lazy="select",
+        foreign_keys=[parent_id],
+    )
+
+    # ---- 读模型：两个视图各自只取自己的列（字段与合表前逐字段一致）----
     def to_dict(self) -> dict[str, Any]:
+        """批次行视图（= 合表前 `NoTrafficCleanupLog.to_dict()`）。"""
         return {
             "id": self.id,
             "account_id": self.account_id,
@@ -180,63 +207,14 @@ class NoTrafficCleanupLog(Base):
             "duration_ms": self.duration_ms,
         }
 
+    def item_to_dict(self) -> dict[str, Any]:
+        """明细行视图（= 合表前 `NoTrafficCleanupItem.to_dict()`）。
 
-class NoTrafficCleanupItem(Base):
-    """**一篇笔记一行**（2026-10-06 用户口径「所有主体应是笔记维度」）。
-
-    分工见 `NoTrafficCleanupLog` 的模块 docstring：批次行答「这次整体怎么样」，
-    本表答「**这一篇**被删了没有、为什么没删」。
-
-    * `user_id` / `account_id` 冗余存快照（同批次行口径）：批次行被保留期删掉、
-      或账号改名之后，**笔记行单独也能读懂**（不必 join 回批次表）。
-    * `log_id` 带 `ondelete="SET NULL"`：删批次行**不**连带删笔记行 ——
-      「某篇笔记当初为什么没删掉」这个问题的答案不该随批次记录过期而消失。
-    * **不存 `ok` 布尔**：`result` 是五值枚举（`deleted` / `skipped` / `failed` /
-      `not_in_pool` / `not_attempted`），布尔会把「跳过」与「没轮到」压成同一个 `false`。
-    """
-
-    __tablename__ = "no_traffic_cleanup_items"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    #: 操作者快照（与批次行同口径，不带外键）。
-    user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
-    #: 被清理的**平台账号**快照（用户口径「账号」）。
-    account_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
-    #: 账号名快照（当时叫什么）—— 不 join，账号改名不篡改历史。
-    account_name: Mapped[str] = mapped_column(String(128), default="")
-    #: 关联的**批次**日志行（删批次行置空，不影响本行。
-    log_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("no_traffic_cleanup_logs.id", ondelete="SET NULL"), nullable=True, index=True
-    )
-    #: 关联的 tasks 行（并发控制载体）。仅作追溯，删任务行置空。
-    task_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True
-    )
-
-    #: **笔记主体**：平台笔记 ID。
-    note_id: Mapped[str] = mapped_column(String(128), default="", index=True)
-    #: 标题快照（处置当时的标题）—— 平台侧笔记已被删掉时，这里仍答得出「删的是哪一篇」。
-    note_title: Mapped[str] = mapped_column(String(512), default="", server_default="")
-    #: 封面快照（缺值留空，不造假）。
-    note_cover: Mapped[str] = mapped_column(Text, default="", server_default="")
-
-    #: 处置结果，取值见 `CLEANUP_ITEM_RESULTS`。
-    result: Mapped[str] = mapped_column(String(16), default=RESULT_FAILED, index=True)
-    #: 结果原因（平台原文，不猜 —— 硬约束⑤）。成功（`deleted`）为空。
-    reason: Mapped[str] = mapped_column(Text, default="", server_default="")
-
-    #: 笔记发布时间快照（毫秒时间戳；缺则 NULL，不补 0）。
-    #: ⚠️ Epoch 毫秒（实测 max 1782271294000，超 int32）⇒ **必须 BIGINT**（2026-10-23）。
-    published_at: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
-    #: **操作时间**（用户口径「操作时间」）。
-    operated_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now, index=True)
-    #: 入库时间。
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now)
-
-    def to_dict(self) -> dict[str, Any]:
+        `log_id` 保留为 `parent_id` 的别名 —— 前端与响应模型零改动。
+        """
         return {
             "id": self.id,
-            "log_id": self.log_id,
+            "log_id": self.parent_id,
             "task_id": self.task_id,
             "account_id": self.account_id,
             "account_name": self.account_name,

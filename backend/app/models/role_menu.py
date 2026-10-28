@@ -40,7 +40,7 @@ from backend.app.core.database import Base
 class RoleMenu(Base):
     """一条授权 = 「某用户的某角色可以看 / 操作某菜单行」。"""
 
-    __tablename__ = "role_menus"
+    __tablename__ = "sys_role_menus"
     __table_args__ = (
         #: ⚠️ **唯一键必须含 `user_id`**（2026-10-23 修正）：本表带 `user_id` 就说明
         #: 授权行是**按用户隔离**的（见下方「为什么本表带 user_id」）。只约束
@@ -70,11 +70,11 @@ class RoleMenu(Base):
     #:
     #: 归属**角色**而不是菜单（见模块 docstring）。
     user_id: Mapped[int | None] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), nullable=True
+        ForeignKey("sys_users.id", ondelete="CASCADE"), nullable=True
     )
     role_id: Mapped[int] = mapped_column(
-        ForeignKey("roles.id", ondelete="CASCADE"), nullable=False
+        ForeignKey("sys_roles.id", ondelete="CASCADE"), nullable=False
     )
     menu_id: Mapped[int] = mapped_column(
-        ForeignKey("menus.id", ondelete="RESTRICT"), nullable=False
+        ForeignKey("sys_menus.id", ondelete="RESTRICT"), nullable=False
     )

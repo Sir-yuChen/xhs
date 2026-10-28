@@ -21,7 +21,9 @@ from backend.app.core.time import shanghai_now
 
 
 class PlatformAccount(Base):
-    __tablename__ = "platform_accounts"
+    """小红书账号（L1 工作区私有，设计 77）。Cookie 并入本表 cookies_json。"""
+    __tablename__ = "xhs_accounts"
+
     __table_args__ = (
         #: **账号身份唯一 —— 按小红书账号 ID**（台账 §4.9 / 不变量 I1；迁移
         #: `g6h7i8j9k0l1`，取代原 `d4e5f6a7b8c9` 的 `uq_platform_accounts_identity`）。
@@ -65,7 +67,7 @@ class PlatformAccount(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("sys_users.id"), index=True)
     platform: Mapped[str] = mapped_column(String(32), index=True)
     sub_type: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     external_user_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
@@ -130,23 +132,13 @@ class PlatformAccount(Base):
     #: upsert 会命中本行并**复活**（清空本列），而不是新建一条 —— 从根上消灭
     #: 「删了再导入又来一条」的重复源；同时它名下 `notes` / 商品台账不会变成孤儿。
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    #: 各通道最新一份 Cookie 信封（加密）。原 account_cookie_versions 表压成此列。
+    cookies_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}", server_default="{}")
+    #: 最近一次成功登录时间（原 login_sessions 的 confirmed 快照）。
+    last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    #: 最近一次登录方式（qr / phone）。
+    last_login_method: Mapped[str] = mapped_column(String(32), nullable=False, default="", server_default="")
 
 
-class AccountCookieVersion(Base):
-    __tablename__ = "account_cookie_versions"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    platform_account_id: Mapped[int] = mapped_column(ForeignKey("platform_accounts.id"), index=True)
-    #: **一个字段存信封 JSON**（用户 2026-09-21 口径：不拆多字段、不加列，
-    #: 平台信息也存进 JSON 里）：
-    #:   {"v": 1, "channels": {"www": "<jar>", "creator": "<jar>", "ark": "<jar>"}}
-    #: 同一个账号下三个平台的令牌**互不通用**（2026-09-21 拆分，用户拍板）：
-    #:
-    #: * ``www`` —— 网页版（`web_session` + `id_token`），供 `www` / `edith` / `sns/web`；
-    #: * ``creator`` —— 创作者平台（`access-token-creator.*`）；
-    #: * ``ark`` —— 千帆（`access-token-ark.*`）。
-    #:
-    #: 存到哪个平台由 `account_service.channel_for_cookies()` 按 Cookie 形态判定，
-    #: 不靠调用方传；读时按「要打哪个平台」取对应平台（`latest_cookies_for_channel`）。
-    encrypted_cookies: Mapped[str] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now)
+# AccountCookieVersion（account_cookie_versions）已退场 → 并入 cookies_json。
+# LoginSession（login_sessions）**保留**：扫码是多步流程，中间状态必须跨请求存。

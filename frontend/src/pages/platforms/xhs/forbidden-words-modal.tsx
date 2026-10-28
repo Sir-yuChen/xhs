@@ -64,6 +64,7 @@ import {
 
 import {
   createForbiddenWord,
+  createForbiddenWordGroup,
   deleteForbiddenWord,
   fetchForbiddenWordGroups,
   fetchForbiddenWords,
@@ -327,6 +328,27 @@ export function ForbiddenWordsModal({ open, onClose }: ForbiddenWordsModalProps)
     [groups],
   );
 
+  //: 「新建分组」弹窗（2026-10-28 用户口径「必须先添加分组，不允许未分组数据」）。
+  const [groupModalOpen, setGroupModalOpen] = useState(false);
+  const [newGroupName, setNewGroupName] = useState("");
+  const [groupSaving, setGroupSaving] = useState(false);
+
+  const submitGroup = async () => {
+    const name = newGroupName.trim();
+    if (!name) { void message.warning("请输入分组名"); return; }
+    setGroupSaving(true);
+    try {
+      await createForbiddenWordGroup(name);
+      void message.success(`已新建分组「${name}」`);
+      setGroupModalOpen(false);
+      await load();
+    } catch (error) {
+      void message.error(describeError(error));
+    } finally {
+      setGroupSaving(false);
+    }
+  };
+
   /** 已有分组名（供编辑弹窗手选；不含未分组）。 */
   const groupNames = useMemo(() => groups.map((g) => g.name).filter(Boolean), [groups]);
 
@@ -381,7 +403,15 @@ export function ForbiddenWordsModal({ open, onClose }: ForbiddenWordsModalProps)
           <Button icon={<ReloadOutlined />} onClick={() => void load()} loading={loading}>
             刷新
           </Button>
-          <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
+          <Button icon={<PlusOutlined />} onClick={() => { setGroupModalOpen(true); setNewGroupName(""); }}>
+            新建分组
+          </Button>
+          <Button
+            type="primary"
+            icon={<PlusOutlined />}
+            onClick={openCreate}
+            disabled={groupNames.length === 0}
+          >
             新增违规词
           </Button>
         </Space>
@@ -550,6 +580,29 @@ export function ForbiddenWordsModal({ open, onClose }: ForbiddenWordsModalProps)
         />
       </Modal>
 
+      {/* 新建分组弹窗：违规词必须先有归属分组（不允许未分组数据）。 */}
+      <Modal
+        open={groupModalOpen}
+        title="新建分组"
+        onCancel={() => setGroupModalOpen(false)}
+        onOk={() => void submitGroup()}
+        confirmLoading={groupSaving}
+        okText="创建"
+        destroyOnClose
+      >
+        <Input
+          placeholder="如：极限词 / 医疗词"
+          value={newGroupName}
+          maxLength={60}
+          showCount
+          onChange={(e) => setNewGroupName(e.target.value)}
+          onPressEnter={() => void submitGroup()}
+        />
+        <Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 8 }}>
+          分组是违规词的归属单位；同一分组内词不重复，不同分组可以有同名词。
+        </Text>
+      </Modal>
+
       {/* 新增 / 修改**各自一个弹窗**（用户口径：「添加修改使用弹窗」） */}
       <WordEditor
         open={editorOpen}
@@ -661,22 +714,21 @@ function WordEditor(props: {
           改用 `AutoComplete`：值本来就是字符串（与表单字段同型，无需转换），
           既能从已有分组里选，也能直接敲一个新名字。
         */}
-        {/* 分组：下拉选已有 / 直接输入新增（与系统配置弹窗同一逻辑）。
-            用 `AutoComplete` 而不是 `Select mode="tags"`：这里的分组是**单个字符串**
-            且允许留空（= 未分组），AutoComplete 天然就是单值 + 可输入，
-            不必再用数组形态收敛一遍。 */}
+        {/* 分组：**必须选已有分组**（2026-10-28 用户口径「必须先添加分组，
+            不允许未分组数据」）⇒ 用受控 Select 而非可输入的 AutoComplete，
+            并为空时直接拦住提交。 */}
         <Form.Item
           name="group_name"
           label="分组"
-          extra="可从已有分组里选，也可直接输入新分组名；留空 = 未分组"
+          rules={[{ required: true, message: "请先选择或新建分组" }]}
+          extra={groupNames.length ? "违规词必须归属某个分组" : "还没有分组，请先在顶部点「新建分组」"}
         >
-          <AutoComplete
-            allowClear
-            placeholder={`选择或输入分组（留空 = ${UNGROUPED_LABEL}）`}
-            options={groupNames.map((name) => ({ value: name }))}
-            filterOption={(input, option) =>
-              String(option?.value ?? "").toLowerCase().includes(input.toLowerCase())
-            }
+          <Select
+            showSearch
+            allowClear={false}
+            placeholder="选择分组"
+            options={groupNames.map((name) => ({ value: name, label: name }))}
+            notFoundContent="还没有分组，请先新建"
           />
         </Form.Item>
 

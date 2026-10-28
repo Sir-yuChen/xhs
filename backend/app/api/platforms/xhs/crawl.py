@@ -20,7 +20,7 @@ from backend.app.api.platforms.xhs.pc import (
 from backend.app.api.tasks import serialize_task
 from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user, get_owned_active_account
-from backend.app.models import Note, NoteAsset, PlatformAccount, Task, User
+from backend.app.models import ASSET_NOTE, Note, PublishAsset, PlatformAccount, Task, User
 from backend.app.models.note import (
     NOTE_TYPE_COLLECTED,
     NOTE_TYPE_SYNCED,
@@ -171,7 +171,7 @@ def _merge_note_assets(
         return 0
     existing = {
         (str(asset.url), str(asset.asset_type))
-        for asset in db.scalars(select(NoteAsset).where(NoteAsset.note_id == note.id)).all()
+        for asset in db.scalars(select(PublishAsset).where(PublishAsset.parent_id == note.id)).all()
     }
     added = 0
     for raw_url in urls:
@@ -180,7 +180,7 @@ def _merge_note_assets(
             continue
         local_name = _download_asset(url, note.user_id, asset_type)
         db.add(
-            NoteAsset(
+            PublishAsset(
                 note_id=note.id, asset_type=asset_type, url=url, local_path=local_name or ""
             )
         )
@@ -274,10 +274,10 @@ def _save_normalized_notes(
         # 不应排序等待」）：**先落笔记行（短事务），再下载素材（零锁），再落资产行**。
         # 旧实现在 flush 之后、commit 之前逐图下载 ⇒ 写锁跨网络持有数十秒~数分钟
         # （一页 50 条 × 约 4 图）⇒ 商品同步/发布/巡检等一切写者撞 busy_timeout 后
-        # `database is locked` 失败。flush 只为物化 note.id（NoteAsset 要外键）。
+        # `database is locked` 失败。flush 只为物化 note.id（PublishAsset 要外键）。
         db.flush()
         db.commit()
-        # ⚠️ 图集同样**只增不删**（§23）：旧实现先 `delete(NoteAsset)` 再按列表 URL
+        # ⚠️ 图集同样**只增不删**（§23）：旧实现先 `delete(PublishAsset)` 再按列表 URL
         # 重建，而列表常常只给 1 张封面 ⇒ 详情补到的 4 张被挤成 1 张。
         # 「平台撤掉某张图」这种真变更不在本链路处理（同步链路不做删除维度，§17.5.3）。
         _merge_note_assets(db, note, _image_urls(normalized), asset_type="image")

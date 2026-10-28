@@ -21,15 +21,6 @@ import type {
 } from "../types";
 import type {
   AuthPayload,
-  AutoTask,
-  AutoTaskCreatePayload,
-  AutoTaskRunResult,
-  AutoTaskUpdatePayload,
-  AnalyticsCommentInsight,
-  AnalyticsHotTopic,
-  AnalyticsReportPayload,
-  AnalyticsReportResponse,
-  AnalyticsTopContent,
   AppNotification,
   BatchCreateDraftsPayload,
   BatchCreateDraftsResponse,
@@ -43,9 +34,6 @@ import type {
   GeneratedImageAsset,
   GenerateTagsPayload,
   GenerateTitlePayload,
-  KeywordGroup,
-  KeywordGroupDetail,
-  KeywordGroupPayload,
   LlmGatewayConfig,
   LlmGatewayConfigPayload,
   LlmGatewayModelRow,
@@ -63,11 +51,6 @@ import type {
   BusinessProviderRow,
   BusinessProviderUpsertPayload,
   ModelType,
-  MonitoringNote,
-  MonitoringRefreshResponse,
-  MonitoringSnapshot,
-  MonitoringTarget,
-  MonitoringTargetPayload,
   NoteAsset,
   NoteComment,
   Paginated,
@@ -380,32 +363,6 @@ export async function fetchXhsOverview(): Promise<DashboardOverview> {
   return response.data;
 }
 
-export async function fetchXhsTopContent(): Promise<{ items: AnalyticsTopContent[] }> {
-  const response = await http.get<{ items: AnalyticsTopContent[] }>("/xhs/analytics/top-content");
-  return response.data;
-}
-
-export async function fetchXhsHotTopics(): Promise<{ items: AnalyticsHotTopic[] }> {
-  const response = await http.get<{ items: AnalyticsHotTopic[] }>("/xhs/analytics/hot-topics");
-  return response.data;
-}
-
-export async function fetchXhsCommentInsights(): Promise<AnalyticsCommentInsight> {
-  const response = await http.get<AnalyticsCommentInsight>("/xhs/analytics/comment-insights");
-  return response.data;
-}
-
-// ⚠️ 2026-10-13 用户口径：指标日快照子系统（采集 / 趋势）**整块移除**
-// （`MetricsCollectResult` / `NoteMetricsTrendPoint` / `ShopMetricsTrendPoint`
-// 三个类型与四个请求函数已删），后续作专项单独排期。
-
-export async function createXhsAnalyticsReport(
-  payload: AnalyticsReportPayload = { format: "json" }
-): Promise<AnalyticsReportResponse> {
-  const response = await http.post<AnalyticsReportResponse>("/xhs/analytics/reports", payload);
-  return response.data;
-}
-
 export async function fetchAccounts(platform = "xhs"): Promise<PlatformAccount[]> {
   const response = await http.get<Paginated<PlatformAccount>>("/accounts", { params: { platform } });
   return response.data.items;
@@ -439,7 +396,8 @@ export type SavedNoteFilters = {
    */
   topic_id?: number;
   has_assets?: boolean;
-  has_comments?: boolean;
+  //: ⚠️ 2026-10-28（方案 B）：`has_comments` **已移除** —— 后端同名字符串参数随之删除
+  //: （它查 `note_comments`，写入口从未打通、实测 0 行、表已 DROP）⇒ 恒返回空集。
   /**
    * 发布状态筛选（设计 13 §32.3.3，2026-09-23 收敛）。
    *
@@ -492,7 +450,6 @@ export async function fetchSavedNotes(
           q: platformOrFilters.q || undefined,
           topic_id: platformOrFilters.topic_id,
           has_assets: platformOrFilters.has_assets,
-          has_comments: platformOrFilters.has_comments,
           // `all` 不传（= 不筛）；其余四档原样透传（`"failed"` 是本轮新增的那一档）。
           publish_status:
             platformOrFilters.publish_status && platformOrFilters.publish_status !== "all"
@@ -914,12 +871,9 @@ export async function fetchSavedNoteAssets(noteId: number): Promise<Paginated<No
   return response.data;
 }
 
-export async function fetchSavedNoteComments(noteId: number, page = 1): Promise<Paginated<NoteComment>> {
-  const response = await http.get<Paginated<NoteComment>>(`/notes/${noteId}/comments`, {
-    params: { page, page_size: 50 }
-  });
-  return response.data;
-}
+//: ⚠️ 2026-10-28（方案 B）：`fetchSavedNoteComments` **已删除** —— 它调的
+//: `GET /notes/{id}/comments` 端点随 `note_comments` 表退场，且它本来就**零调用方**。
+//: 实时评论用 `fetchXhsNoteComments`（`POST /xhs/pc/notes/comments`）。
 
 export async function deleteSavedNote(noteId: number): Promise<{ id: number; status: string }> {
   const response = await http.delete<{ id: number; status: string }>(`/notes/${noteId}`);
@@ -1249,16 +1203,21 @@ export async function fetchNoteGoodsDetail(itemId: string): Promise<NoteGoodsDet
   return response.data;
 }
 
-/** 商业/普通 Tab 复选框批量删除（2026-10-06）：delete_platform=false 只删本地，true 删本地+平台。 */
+/**
+ * 在**平台**删除笔记（数据中心用）—— 只动平台，不碰本地 `notes` 表。
+ *
+ * 2026-10-28 口径：`notes` 只存「本地生成且未发布成功」的笔记，平台笔记的事实
+ * 只在 `note_datacenter_stats`，删除即删平台数据。
+ */
 export async function batchDeleteNotes(
   noteIds: string[],
-  deletePlatform: boolean
+  platformAccountId: number
 ): Promise<{ deleted: number; failed: { note_id: string; reason: string }[]; results: { note_id: string; ok: boolean; reason?: string }[] }> {
   const response = await http.post<{
     deleted: number;
     failed: { note_id: string; reason: string }[];
     results: { note_id: string; ok: boolean; reason?: string }[];
-  }>("/notes/batch-delete", { note_ids: noteIds, delete_platform: deletePlatform }, { _silent: true } as never);
+  }>("/notes/batch-delete", { note_ids: noteIds, platform_account_id: platformAccountId }, { _silent: true } as never);
   return response.data;
 }
 
@@ -1301,50 +1260,19 @@ export async function importNoteData(
 
 /** 点击离线笔记卡片时实时拉详情并落库（正文/媒体/话题拆分，2026-10-06 需求）。 */
 export async function hydrateOfflineNoteDetail(noteId: string): Promise<{
-  note_id: string;
-  title: string;
+  /** ok / no_url（缺 token）/ skipped_by_limit / failed。失败时正文为空，前端据此安静提示。 */
+  status: string;
   content: string;
-  author_name: string;
-  account_name: string;
-  cover_url: string;
-  asset_urls: string[];
+  topics: string[];
+  image_urls: string[];
   video_url: string;
-  topics: { id: number; name: string; color: string }[];
-  raw_json: Record<string, unknown>;
-  /** 详情补齐结果：ok / no_url（缺 token）/ failed（拉取失败）/ already_hydrated。失败时正文/媒体留空，前端据此刻安静提示。 */
-  hydrate_status: string;
-  /** 挂载商品（后端 `_serialize_note.goods` 形状：`{item_id, item_title, price, images, stock, sales, variant}`）。 */
-  goods: {
-    item_id: string;
-    item_title: string;
-    price: string;
-    images: string[];
-    stock: number | null;
-    sales: number | null;
-    variant: string;
-  }[];
 }> {
   const response = await http.post<{
-    note_id: string;
-    title: string;
+    status: string;
     content: string;
-    author_name: string;
-    account_name: string;
-    cover_url: string;
-    asset_urls: string[];
+    topics: string[];
+    image_urls: string[];
     video_url: string;
-    topics: { id: number; name: string; color: string }[];
-    raw_json: Record<string, unknown>;
-    hydrate_status: string;
-    goods: {
-      item_id: string;
-      item_title: string;
-      price: string;
-      images: string[];
-      stock: number | null;
-      sales: number | null;
-      variant: string;
-    }[];
   }>(`/notes/${noteId}/hydrate`);
   return response.data;
 }
@@ -2369,6 +2297,21 @@ export async function executeDataPackageRule(payload: {
     "/xhs/data-package-rules/execute",
     payload,
   );
+  return response.data;
+}
+
+/**
+ * **新建分组**（2026-10-28 用户口径「必须先添加分组，不允许未分组数据」）。
+ * 重名 ⇒ 409 `FORBIDDEN_WORD_GROUP_DUPLICATE`。
+ */
+export async function createForbiddenWordGroup(
+  name: string,
+  enabled = true,
+): Promise<ForbiddenWordGroup> {
+  const response = await http.post<ForbiddenWordGroup>("/xhs/forbidden-words/groups", {
+    name,
+    enabled,
+  });
   return response.data;
 }
 
@@ -3509,85 +3452,6 @@ export async function fetchScheduleStatus(): Promise<ScheduleStatus> {
   return response.data;
 }
 
-export async function fetchMonitoringTargets(): Promise<Paginated<MonitoringTarget>> {
-  const response = await http.get<Paginated<MonitoringTarget>>("/xhs/monitoring/targets");
-  return response.data;
-}
-
-export async function createMonitoringTarget(payload: MonitoringTargetPayload): Promise<MonitoringTarget> {
-  const response = await http.post<MonitoringTarget>("/xhs/monitoring/targets", payload);
-  return response.data;
-}
-
-/**
- * 暂停 / 恢复监控目标（DEF-012 / T-112）。
- *
- * ⚠️ 复用既有的 `PATCH /xhs/monitoring/targets/{id}`（`status: active|paused`）——
- * 后端从 2026-09-18 起就支持，缺的只是前端入口（**不给后端加重复端点**，DEF-044）。
- * 暂停 = 巡检跳过它（`monitoring_crawl_service` 只取 `status == active`）。
- */
-export async function setMonitoringTargetStatus(
-  targetId: number,
-  status: "active" | "paused"
-): Promise<MonitoringTarget> {
-  const response = await http.patch<MonitoringTarget>(`/xhs/monitoring/targets/${targetId}`, {
-    status,
-  });
-  return response.data;
-}
-
-export async function deleteMonitoringTarget(targetId: number): Promise<{ id: number; status: string }> {
-  const response = await http.delete<{ id: number; status: string }>(`/xhs/monitoring/targets/${targetId}`);
-  return response.data;
-}
-
-export async function refreshMonitoringTarget(targetId: number): Promise<MonitoringRefreshResponse> {
-  const response = await http.post<MonitoringRefreshResponse>(`/xhs/monitoring/targets/${targetId}/refresh`);
-  return response.data;
-}
-
-export async function fetchMonitoringSnapshots(targetId: number): Promise<{ target_id: number; items: MonitoringSnapshot[] }> {
-  const response = await http.get<{ target_id: number; items: MonitoringSnapshot[] }>(
-    `/xhs/monitoring/targets/${targetId}/snapshots`
-  );
-  return response.data;
-}
-
-export async function fetchMonitoringTargetNotes(targetId: number): Promise<{ target_id: number; items: MonitoringNote[] }> {
-  const response = await http.get<{ target_id: number; items: MonitoringNote[] }>(
-    `/xhs/monitoring/targets/${targetId}/notes`
-  );
-  return response.data;
-}
-
-export async function fetchKeywordGroups(platform = "xhs"): Promise<Paginated<KeywordGroup>> {
-  const response = await http.get<Paginated<KeywordGroup>>("/keyword-groups", { params: { platform } });
-  return response.data;
-}
-
-export async function createKeywordGroup(payload: KeywordGroupPayload): Promise<KeywordGroup> {
-  const response = await http.post<KeywordGroup>("/keyword-groups", payload);
-  return response.data;
-}
-
-export async function fetchKeywordGroup(groupId: number): Promise<KeywordGroupDetail> {
-  const response = await http.get<KeywordGroupDetail>(`/keyword-groups/${groupId}`);
-  return response.data;
-}
-
-export async function updateKeywordGroup(
-  groupId: number,
-  payload: Partial<KeywordGroupPayload>
-): Promise<KeywordGroup> {
-  const response = await http.patch<KeywordGroup>(`/keyword-groups/${groupId}`, payload);
-  return response.data;
-}
-
-export async function deleteKeywordGroup(groupId: number): Promise<{ id: number; status: string }> {
-  const response = await http.delete<{ id: number; status: string }>(`/keyword-groups/${groupId}`);
-  return response.data;
-}
-
 export async function fetchPublishJobs(platform = "xhs"): Promise<Paginated<PublishJob>> {
   const response = await http.get<Paginated<PublishJob>>("/publish/jobs", { params: { platform } });
   return response.data;
@@ -3895,33 +3759,6 @@ export async function markNotificationRead(id: number): Promise<AppNotification>
 
 export async function markAllNotificationsRead(): Promise<{ marked: number }> {
   const response = await http.post<{ marked: number }>("/notifications/read-all");
-  return response.data;
-}
-
-// Auto Tasks (Auto Operations)
-
-export async function fetchAutoTasks(): Promise<Paginated<AutoTask>> {
-  const response = await http.get<Paginated<AutoTask>>("/auto-tasks");
-  return response.data;
-}
-
-export async function createAutoTask(payload: AutoTaskCreatePayload): Promise<AutoTask> {
-  const response = await http.post<AutoTask>("/auto-tasks", payload);
-  return response.data;
-}
-
-export async function updateAutoTask(taskId: number, payload: AutoTaskUpdatePayload): Promise<AutoTask> {
-  const response = await http.patch<AutoTask>(`/auto-tasks/${taskId}`, payload);
-  return response.data;
-}
-
-export async function deleteAutoTask(taskId: number): Promise<{ id: number; status: string }> {
-  const response = await http.delete<{ id: number; status: string }>(`/auto-tasks/${taskId}`);
-  return response.data;
-}
-
-export async function runAutoTask(taskId: number): Promise<AutoTaskRunResult> {
-  const response = await http.post<AutoTaskRunResult>(`/auto-tasks/${taskId}/run`);
   return response.data;
 }
 

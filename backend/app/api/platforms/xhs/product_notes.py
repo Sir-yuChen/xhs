@@ -1215,7 +1215,7 @@ def update_note_version(
         #: 不是 `media_json`；只改后者 ⇒ 界面上封面已经换了、发出去的还是旧封面。
         #: 找到这一版产出的那篇笔记（`raw_json.generation.record_id` 反查），
         #: **整份重建**资产并重编 `sort_order`（0..N-1，第 1 条即封面）。
-        from backend.app.models.note import Note, NoteAsset
+        from backend.app.models.note import Note, PublishAsset
 
         for note in db.scalars(
             select(Note).where(
@@ -1228,13 +1228,13 @@ def update_note_version(
             if int(generation.get("record_id") or 0) != int(record.id):
                 continue
             for asset in db.scalars(
-                select(NoteAsset).where(NoteAsset.note_id == int(note.id))
+                select(PublishAsset).where(PublishAsset.parent_id == int(note.id))
             ).all():
                 db.delete(asset)
             db.flush()
             for position, entry in enumerate(cleaned):
                 db.add(
-                    NoteAsset(
+                    PublishAsset(
                         note_id=int(note.id),
                         asset_type=str(entry.get("asset_type") or "image"),
                         url=str(entry.get("url") or ""),

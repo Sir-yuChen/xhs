@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<link rel="icon" href="data:,">
+<html lang="zh-CN"><head><meta charset="utf-8"><title>重构后全库表结构与关系</title>
+<style>
+:root{--bg:#0f1115;--card:#171a21;--card2:#1d2129;--line:#2a2f3a;--fg:#e6e9ef;
+--muted:#8b93a3;--accent:#4c9aff;--ok:#3fb950;--warn:#d29922;--danger:#f85149;--purple:#a371f7}
+*{box-sizing:border-box}
+body{margin:0;padding:24px 28px 70px;background:var(--bg);color:var(--fg);
+font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;font-size:13px;line-height:1.5}
+h1{font-size:20px;margin:0 0 4px} h2{font-size:14.5px;margin:28px 0 11px;
+padding-bottom:6px;border-bottom:1px solid var(--line)}
+.sub{color:var(--muted);font-size:11.5px;margin-bottom:18px}
+.kpi{display:flex;gap:11px;margin:14px 0 20px;flex-wrap:wrap}
+.kpi div{background:var(--card);border:1px solid var(--line);border-radius:7px;padding:9px 15px;min-width:96px}
+.kpi b{display:block;font-size:19px;line-height:1.2} .kpi span{color:var(--muted);font-size:10.5px}
+.dom{margin:16px 0 22px}
+.dom h3{font-size:12px;margin:0 0 8px;color:var(--muted);font-weight:600;letter-spacing:.3px}
+.dom h3 b{color:var(--fg)} .dom h3 em{font-style:normal;color:var(--accent);font-size:10px;
+background:#0e1c2b;border:1px solid #1b3a5c;padding:1px 6px;border-radius:3px;margin-left:6px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(232px,1fr));gap:9px}
+.tb{background:var(--card);border:1px solid var(--line);border-radius:7px;overflow:hidden}
+.tb.l1{border-left:2px solid var(--warn)} .tb.l0{border-left:2px solid var(--accent)}
+.tb .hd{display:flex;justify-content:space-between;align-items:center;padding:7px 9px;
+background:var(--card2);border-bottom:1px solid var(--line)}
+.tb .nm{font-family:ui-monospace,Consolas,monospace;font-size:11.5px;font-weight:600;color:var(--accent)}
+.tb.l1 .nm{color:var(--warn)}
+.tb .rr{font-size:10px;color:var(--muted)}
+.tb .cls{padding:6px 9px 8px;font-size:10.5px;line-height:1.65}
+.tb .cls i{font-style:normal;display:block;color:var(--muted);font-family:ui-monospace,Consolas,monospace;
+white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tb .cls i em{font-style:normal;color:var(--accent);font-size:9.5px}
+.tb .cls i.c-del{color:#5a3a3f;text-decoration:line-through}
+.tb .cls i.c-add{color:var(--ok)}
+.tb .cls i.c-add em{color:var(--purple)}
+.chg{font-size:9.5px;padding:0 4px;border-radius:3px;margin-left:3px}
+.chg.add{background:#12281a;color:var(--ok)} .chg.del{background:#2a1417;color:var(--danger)}
+table{width:100%;border-collapse:collapse;background:var(--card);border-radius:7px;overflow:hidden;font-size:11.5px}
+th{background:var(--card2);text-align:left;padding:7px 9px;color:var(--muted);font-size:10.5px;
+border-bottom:1px solid var(--line);font-weight:600}
+td{padding:5px 9px;border-bottom:1px solid var(--line)}
+tr:last-child td{border-bottom:none}
+code{font-family:ui-monospace,Consolas,monospace;font-size:10.5px;background:#0b0d11;
+padding:1px 4px;border-radius:3px;color:#9fb4d4}
+.legend{display:flex;gap:18px;font-size:11px;color:var(--muted);margin:10px 0 16px;flex-wrap:wrap}
+.legend span i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:middle}
+.lg-l0{background:var(--accent)} .lg-l1{background:var(--warn)}
+.lg-add{background:var(--ok)} .lg-del{background:var(--danger)}
+</style></head><body>
+
+<h1>重构后全库表结构与表关系</h1>
+<div class="sub">48 张表 → <b>40 张</b> · 2026-10-28 · 列与行数为 PG 实测，合并列为设计值</div>
+
+<div class="kpi">
+  <div><b>40</b><span>表</span></div>
+  <div><b>524</b><span>列</span></div>
+  <div><b>57</b><span>外键关系</span></div>
+  <div><b>22</b><span>L0 骨架</span></div>
+  <div><b>18</b><span>L1 私有</span></div>
+</div>
+
+<div class="legend">
+  <span><i class="lg-l0"></i>L0 系统骨架（公共）</span>
+  <span><i class="lg-l1"></i>L1 小红书工作区私有</span>
+  <span><i class="lg-add"></i>合并新增列</span>
+  <span><i class="lg-del"></i>合并删除列</span>
+</div>
+<div class="dom"><h3><b>系统域 · 租户与权限</b><em>L0 骨架</em> · 7 张</h3><div class="grid"><div class="tb l0"><div class="hd"><span class="nm">users</span><span class="rr">31 行</span></div><div class="cls"><i>id PK</i>
+<i>username</i>
+<i>password_hash</i>
+<i>role</i>
+<i>token_version</i>
+<i>created_at</i>
+<i>status</i>
+<i>real_name</i>
+<i>last_login_ip</i>
+<i>last_login_at</i>
+<i>must_change_password</i>
+<i>deleted_at</i>
+<i>email</i>
+<i>phone</i></div></div><div class="tb l0"><div class="hd"><span class="nm">roles</span><span class="rr">3 行</span></div><div class="cls"><i>id PK</i>
+<i>name</i>
+<i>code</i>
+<i>description</i>
+<i>is_system</i>
+<i>status</i>
+<i>sort_order</i>
+<i>created_at</i>
+<i>updated_at</i></div></div><div class="tb l0"><div class="hd"><span class="nm">role_menus</span><span class="rr">2,251 行</span></div><div class="cls"><i>id PK</i>
+<i>user_id <em>→users</em></i>
+<i>role_id <em>→roles</em></i>
+<i>menu_id <em>→menus</em></i></div></div><div class="tb l0"><div class="hd"><span class="nm">menus</span><span class="rr">184 行</span></div><div class="cls"><i>id PK</i>
+<i>parent_id</i>
+<i>name</i>
+<i>menu_type</i>
+<i>path</i>
+<i>component</i>
+<i>perms</i>
+<i>icon</i>
+<i>workspace</i>
+<i>sort_order</i>
+<i>is_visible</i>
+<i>status</i>
+<i>created_at</i>
+<i>updated_at</i></div></div><div class="tb l0"><div class="hd"><span class="nm">dict_types</span><span class="rr">46 行</span></div><div class="cls"><i>id PK</i>
+<i>name</i>
+<i>code</i>
+<i>remark</i>
+<i>status</i>
+<i>created_at</i>
+<i>updated_at</i></div></div><div class="tb l0"><div class="hd"><span class="nm">dict_items</span><span class="rr">219 行</span></div><div class="cls"><i>id PK</i>
+<i>type_id <em>→dict_types</em></i>
+<i>type_code</i>
+<i>label</i>
+<i>value</i>
+<i>list_class</i>
+<i>sort_order</i>
+<i>status</i>
+<i>remark</i></div></div><div class="tb l0"><div class="hd"><span class="nm">system_settings</span><span class="rr">13 行</span></div><div class="cls"><i>id PK</i>
+<i>user_id <em>→users</em></i>
+<i>key</i>
+<i>value</i>
+<i>value_type</i>
+<i>category</i>
+<i>label</i>
+<i>description</i>
+<i>requires_restart</i>
+<i>is_dangerous</i>
+<i>updated_by <em>→users</em></i>
+<i>created_at</i>
+<i>updated_at</i>
+<i>workspace</i></div></div></div></div><div class="dom"><h3><b>系统域 · 日志与调度</b><em>L0 骨架</em> · 4 张</h3><div class="grid"><div class="tb l0"><div class="hd"><span class="nm">api_logs</span><span class="rr">36,748 行</span></div><div class="cls"><i>id PK</i>
+<i>user_id</i>
+<i>platform</i>
+<i>endpoint</i>
+<i>status</i>
+<i>meta</i>
+<i>created_at</i>
+<i>status_code</i>
+<i>trace_id</i></div></div><div class="tb l0"><div class="hd"><span class="nm">business_logs</span><span class="rr">334 行</span></div><div class="cls"><i>id PK</i>
+<i>created_at</i>
+<i>level</i>
+<i>event</i>
+<i>action</i>
+<i>actor_id</i>
+<i>actor_name</i>
+<i>workspace</i>
+<i>target_type</i>
+<i>target_id</i>
+<i>summary</i>
+<i>detail_json</i>
+<i>trace_id</i></div></div><div class="tb l0"><div class="hd"><span class="nm">scheduled_jobs</span><span class="rr">10 行</span></div><div class="cls"><i>id PK</i>
+<i>user_id <em>→users</em></i>
+<i>name</i>
+<i>job_key</i>
+<i>trigger_type</i>
+<i>cron_expression</i>
+<i>run_at</i>
+<i>misfire_policy</i>
+<i>concurrent</i>
+<i>params</i>
+<i>status</i>
+<i>remark</i>
+<i>is_builtin</i>
+<i>last_run_at</i>
+<i>next_run_at</i>
+<i>run_count</i>
+<i>fail_count</i>
+<i>consecutive_failures</i>
+<i>backoff_until</i>
+<i>last_status</i>
+<i>created_at</i>
+<i>updated_at</i>
+<i>workspace</i></div></div><div class="tb l0"><div class="hd"><span class="nm">scheduled_job_logs</span><span class="rr">89,671 行</span></div><div class="cls"><i>id PK</i>
+<i>job_id <em>→scheduled_jobs</em></i>
+<i>user_id <em>→users</em></i>
+<i>platform_account_id</i>
+<i>task_id</i>
+<i>job_name</i>
+<i>job_key</i>
+<i>job_trigger_type</i>
+<i>trigger_type</i>
+<i>status</i>
+<i>started_at</i>
+<i>finished_at</i>
+<i>duration_ms</i>
+<i>progress</i>
+<i>message</i>
+<i>exception_info</i>
+<i>result</i>
+<i>config_snapshot</i>
+<i>created_at</i>
+<i>trace_id</i>
+<i>executed_for_user_id</i>
+<i>workspace</i></div></div></div></div><div class="dom"><h3><b>LLM 网关（公共）</b><em>L0 骨架</em> · 5 张</h3><div class="grid"><div class="tb l0"><div class="hd"><span class="nm">llm_gateway_configs</span><span class="rr">199 行</span></div><div class="cls"><i>id PK</i>
+<i>user_id <em>→users</em></i>
+<i>provider_key</i>
+<i>name</i>
+<i>base_url</i>
+<i>access_token</i>
+<i>local_db_path</i>
+<i>models_json</i>
+<i>enabled</i>
+<i>healthy</i>
+<i>last_health_at</i>
+<i>created_at</i>
+<i>updated_at</i></div></div><div class="tb l0"><div class="hd"><span class="nm">llm_gateway_models</span><span class="rr">875 行</span></div><div class="cls"><i>id PK</i>
+<i>user_id <em>→users</em></i>
+<i>provider_key</i>
+<i>model_key</i>
+<i>model_name</i>
+<i>model_type</i>
+<i>platform</i>
+<i>enabled</i>
+<i>remark</i>
+<i>healthy</i>
+<i>last_health_at</i>
+<i>created_at</i>
+<i>updated_at</i></div></div><div class="tb l0"><div class="hd"><span class="nm">llm_gateway_alerts</span><span class="rr">16 行</span></div><div class="cls"><i>id PK</i>
+<i>user_id <em>→users</em></i>
+<i>gateway_id <em>→llm_gateway_configs</em></i>
+<i>platform</i>
+<i>function</i>
+<i>model_name</i>
+<i>metric</i>
+<i>operator</i>
+<i>threshold</i>
+<i>window_seconds</i>
+<i>level</i>
+<i>enabled</i>
+<i>last_fired_at</i>
+<i>created_at</i>
+<i>updated_at</i></div></div><div class="tb l0"><div class="hd"><span class="nm">llm_gateway_usage_logs</span><span class="rr">171 行</span></div><div class="cls"><i>id PK</i>
+<i>user_id <em>→users</em></i>
+<i>gateway_id <em>→llm_gateway_configs</em></i>
+<i>platform</i>
+<i>function</i>
+<i>token_name</i>
+<i>model_name</i>
+<i>prompt_tokens</i>
+<i>completion_tokens</i>
+<i>latency_ms</i>
+<i>status</i>
+<i>error_message</i>
+<i>created_at</i></div></div><div class="tb l0"><div class="hd"><span class="nm">llm_business_providers</span><span class="rr">654 行</span></div><div class="cls"><i>id PK</i>
+<i>user_id <em>→users</em></i>
+<i>platform</i>
+<i>business_key</i>
+<i>kind</i>
+<i>provider_key</i>
+<i>model_name</i>
+<i>enabled</i>
+<i>created_at</i>
+<i>updated_at</i></div></div></div></div><div class="dom"><h3><b>提示词与素材（公共）</b><em>L0 骨架</em> · 4 张</h3><div class="grid"><div class="tb l0"><div class="hd"><span class="nm">prompt_modules</span><span class="rr">248 行</span></div><div class="cls"><i>id PK</i>
+<i>user_id <em>→users</em></i>
+<i>name</i>
+<i>category</i>
+<i>content</i>
+<i>sort_order</i>
+<i>enabled</i>
+<i>created_at</i>
+<i>updated_at</i></div></div><div class="tb l0"><div class="hd"><span class="nm">prompt_templates</span><span class="rr">124 行</span></div><div class="cls"><i>id PK</i>
+<i>user_id <em>→users</em></i>
+<i>name</i>
+<i>task_type</i>
+<i>prompt_skeleton</i>
+<i>module_ids</i>
+<i>is_default</i>
+<i>version</i>
+<i>created_at</i>
+<i>updated_at</i></div></div><div class="tb l0"><div class="hd"><span class="nm">material_folders</span><span class="rr">1 行</span></div><div class="cls"><i>id PK</i>
+<i>user_id <em>→users</em></i>
+<i>name</i>
+<i>path</i>
+<i>enabled</i>
+<i>last_scan_at</i>
+<i>file_count</i>
+<i>created_at</i>
+<i>updated_at</i></div></div><div class="tb l0"><div class="hd"><span class="nm">material_files</span><span class="rr">4 行</span></div><div class="cls"><i>id PK</i>
+<i>user_id <em>→users</em></i>
+<i>folder_id <em>→material_folders</em></i>
+<i>filename</i>
+<i>file_type</i>
+<i>rel_path</i>
+<i>size_bytes</i>
+<i>mtime</i>
+<i>width</i>
+<i>height</i>
+<i>thumb_url</i>
+<i>created_at</i></div></div></div></div><div class="dom"><h3><b>任务底座（公共）</b><em>L0 骨架</em> · 2 张</h3><div class="grid"><div class="tb l0"><div class="hd"><span class="nm">tasks</span><span class="rr">651 行</span></div><div class="cls"><i>id PK</i>
+<i>user_id <em>→users</em></i>
+<i>platform</i>
+<i>task_type</i>
+<i>status</i>
+<i>progress</i>
+<i>payload</i>
+<i>created_at</i>
+<i>started_at</i>
+<i>finished_at</i>
+<i>error_type</i>
+<i>retry_count</i>
+<i>max_retries</i>
+<i>parent_task_id <em>→tasks</em></i>
+<i>batch_no</i></div></div><div class="tb l0"><div class="hd"><span class="nm">notifications</span><span class="rr">27 行</span></div><div class="cls"><i>id PK</i>
+<i>user_id <em>→users</em></i>
+<i>title</i>
+<i>body</i>
+<i>level</i>
+<i>source_task_id <em>→tasks</em></i>
+<i>source_type</i>
+<i>source_id</i>
+<i>read</i>
+<i>created_at</i>
+<i>link</i></div></div></div></div><div class="dom"><h3><b>小红书 · 账号</b><em>L1 私有</em> · 4 张</h3><div class="grid"><div class="tb l1"><div class="hd"><span class="nm">xhs_accounts</span><span class="rr">5 行<span class="chg add">+3</span><span class="chg del">-1</span></span></div><div class="cls"><i>id PK</i>
+<i>user_id <em>→users</em></i>
+<i class="c-del">platform</i>
+<i>sub_type</i>
+<i>external_user_id</i>
+<i>nickname</i>
+<i>avatar_url</i>
+<i>status</i>
+<i>status_message</i>
+<i>profile_json</i>
+<i>note_sync_cursor_ms</i>
+<i>note_sync_cursor_note_id</i>
+<i>seller_id</i>
+<i>shop_state</i>
+<i>created_at</i>
+<i>updated_at</i>
+<i>deleted_at</i>
+<i>disabled</i>
+<i class="c-add">cookies_json <em>json</em></i>
+<i class="c-add">last_login_at <em>timestamp</em></i>
+<i class="c-add">last_login_method <em>varchar</em></i></div></div><div class="tb l1"><div class="hd"><span class="nm">auto_tasks</span><span class="rr">0 行</span></div><div class="cls"><i>id PK</i>
+<i>user_id <em>→users</em></i>
+<i>name</i>
+<i>keywords</i>
+<i>pc_account_id <em>→xhs_accounts</em></i>
+<i>creator_account_id <em>→xhs_accounts</em></i>
+<i>ai_instruction</i>
+<i>status</i>
+<i>schedule_job_id <em>→scheduled_jobs</em></i>
+<i>last_run_at</i>
+<i>total_published</i>
+<i>created_at</i></div></div><div class="tb l1"><div class="hd"><span class="nm">xhs_monitoring_targets</span><span class="rr">0 行<span class="chg add">+1</span><span class="chg del">-1</span></span></div><div class="cls"><i>id PK</i>
+<i>user_id <em>→users</em></i>
+<i class="c-del">platform</i>
+<i>target_type</i>
+<i>name</i>
+<i>value</i>
+<i>status</i>
+<i>config</i>
+<i>last_refreshed_at</i>
+<i>created_at</i>
+<i>updated_at</i>
+<i>platform_account_id <em>→xhs_accounts</em></i>
+<i>crawl_interval_minutes</i>
+<i>consecutive_failures</i>
+<i>last_crawl_error</i>
+<i class="c-add">snapshots_json <em>json</em></i></div></div><div class="tb l1"><div class="hd"><span class="nm">keyword_groups</span><span class="rr">0 行</span></div><div class="cls"><i>id PK</i>
+<i>user_id <em>→users</em></i>
+<i>platform</i>
+<i>name</i>
+<i>keywords</i>
+<i>created_at</i>
+<i>updated_at</i></div></div></div></div><div class="dom"><h3><b>小红书 · 内容</b><em>L1 私有</em> · 7 张</h3><div class="grid"><div class="tb l1"><div class="hd"><span class="nm">notes</span><span class="rr">48 行</span></div><div class="cls"><i>id PK</i>
+<i>user_id <em>→users</em></i>
+<i>platform_account_id <em>→xhs_accounts</em></i>
+<i>platform</i>
+<i>note_id</i>
+<i>title</i>
+<i>content</i>
+<i>author_name</i>
+<i>raw_json</i>
+<i>published</i>
+<i>note_type</i>
+<i>note_form</i>
+<i>hydrated_at</i>
+<i>platform_missing_at</i>
+<i>publish_status</i>
+<i>publish_error</i>
+<i>is_deleted</i>
+<i>publish_attempts</i>
+<i>published_at</i>
+<i>created_at</i></div></div><div class="tb l1"><div class="hd"><span class="nm">note_assets</span><span class="rr">134 行</span></div><div class="cls"><i>id PK</i>
+<i>note_id <em>→notes</em></i>
+<i>asset_type</i>
+<i>url</i>
+<i>local_path</i>
+<i>sort_order</i></div></div><div class="tb l1"><div class="hd"><span class="nm">note_topics</span><span class="rr">125 行</span></div><div class="cls"><i>id PK</i>
+<i>note_id <em>→notes</em></i>
+<i>topic_id <em>→topics</em></i>
+<i>created_at</i></div></div><div class="tb l1"><div class="hd"><span class="nm">topics</span><span class="rr">4,963 行</span></div><div class="cls"><i>id PK</i>
+<i>user_id <em>→users</em></i>
+<i>name</i>
+<i>color</i>
+<i>platform_id</i>
+<i>created_at</i></div></div><div class="tb l1"><div class="hd"><span class="nm">note_datacenter_stats</span><span class="rr">3,697 行</span></div><div class="cls"><i>id PK</i>
+<i>user_id <em>→users</em></i>
+<i>platform_account_id</i>
+<i>note_id</i>
+<i>stat_date</i>
+<i>window</i>
+<i>note_flag</i>
+<i>title</i>
+<i>cover_url</i>
+<i>item_id</i>
+<i>item_title</i>
+<i>variant_desc</i>
+<i>publish_time</i>
+<i>read_count</i>
+<i>like_count</i>
+<i>collect_count</i>
+<i>comment_count</i>
+<i>share_count</i>
+<i>follow_count</i>
+<i>danmaku_count</i>
+<i>video_duration</i>
+<i>avg_view_time</i>
+<i>full_view_rate</i>
+<i>pay_gmv</i>
+<i>pay_order_cnt</i>
+<i>pay_user_cnt</i>
+<i>item_click_cnt</i>
+<i>item_click_uv</i>
+<i>item_click_pv_rate</i>
+<i>pay_pv_rate</i>
+<i>pay_uv_rate</i>
+<i>refund_gmv</i>
+<i>refund_order_cnt</i>
+<i>refund_user_cnt</i>
+<i>cart_item_cnt</i>
+<i>lead_user_page_view_cnt</i>
+<i>lead_user_page_pay_gmv</i>
+<i>lead_live_view_cnt</i>
+<i>lead_live_pay_gmv</i>
+<i>browse_num_30d</i>
+<i>platform_deleted_at</i>
+<i>synced_at</i>
+<i>created_at</i></div></div><div class="tb l1"><div class="hd"><span class="nm">forbidden_words</span><span class="rr">717 行</span></div><div class="cls"><i>id PK</i>
+<i>user_id <em>→users</em></i>
+<i>word</i>
+<i>match_mode</i>
+<i>enabled</i>
+<i>remark</i>
+<i>group_name</i>
+<i>created_at</i>
+<i>updated_at</i></div></div><div class="tb l1"><div class="hd"><span class="nm">forbidden_word_groups</span><span class="rr">0 行</span></div><div class="cls"><i>id PK</i>
+<i>user_id <em>→users</em></i>
+<i>name</i>
+<i>enabled</i>
+<i>created_at</i>
+<i>updated_at</i></div></div></div></div><div class="dom"><h3><b>小红书 · 生成与发布</b><em>L1 私有</em> · 4 张</h3><div class="grid"><div class="tb l1"><div class="hd"><span class="nm">xhs_ai_drafts</span><span class="rr">17 行<span class="chg add">+2</span><span class="chg del">-1</span></span></div><div class="cls"><i>id PK</i>
+<i>user_id <em>→users</em></i>
+<i class="c-del">platform</i>
+<i>title</i>
+<i>body</i>
+<i>tags</i>
+<i>source_note_id <em>→notes</em></i>
+<i>created_at</i>
+<i class="c-add">assets_json <em>json</em></i>
+<i class="c-add">generated_assets_json <em>json</em></i></div></div><div class="tb l1"><div class="hd"><span class="nm">xhs_generation_records</span><span class="rr">47 行<span class="chg add">+1</span></span></div><div class="cls"><i>id PK</i>
+<i>user_id <em>→users</em></i>
+<i>task_id <em>→tasks</em></i>
+<i>template_id <em>→prompt_templates</em></i>
+<i>gateway_config_id <em>→llm_gateway_configs</em></i>
+<i>model_name</i>
+<i>media_source</i>
+<i>note_form</i>
+<i>status</i>
+<i>title</i>
+<i>body</i>
+<i>topics_json</i>
+<i>error_code</i>
+<i>error_message</i>
+<i>ai_generated_at</i>
+<i>version_no</i>
+<i>parent_record_id <em>→xhs_generation_records</em></i>
+<i>regen_scope</i>
+<i>is_adopted</i>
+<i>copy_requirements_json</i>
+<i>media_json</i>
+<i>created_at</i>
+<i>updated_at</i>
+<i>item_id</i>
+<i class="c-add">note_pk <em>int</em></i></div></div><div class="tb l1"><div class="hd"><span class="nm">aigc_media_assets</span><span class="rr">42 行</span></div><div class="cls"><i>id PK</i>
+<i>user_id <em>→users</em></i>
+<i>generation_record_id <em>→xhs_generation_records</em></i>
+<i>asset_type</i>
+<i>local_path</i>
+<i>url</i>
+<i>aigc_task_id</i>
+<i>prompt</i>
+<i>model_name</i>
+<i>item_id</i>
+<i>platform_account_id</i>
+<i>created_at</i></div></div><div class="tb l1"><div class="hd"><span class="nm">xhs_publish_jobs</span><span class="rr">1 行<span class="chg add">+1</span><span class="chg del">-1</span></span></div><div class="cls"><i>id PK</i>
+<i>user_id <em>→users</em></i>
+<i>platform_account_id <em>→xhs_accounts</em></i>
+<i>source_draft_id <em>→xhs_ai_drafts</em></i>
+<i class="c-del">platform</i>
+<i>title</i>
+<i>body</i>
+<i>publish_mode</i>
+<i>publish_options</i>
+<i>status</i>
+<i>scheduled_at</i>
+<i>external_note_id</i>
+<i>publish_error</i>
+<i>published_at</i>
+<i>idempotency_key</i>
+<i>created_at</i>
+<i class="c-add">assets_json <em>json</em></i></div></div></div></div><div class="dom"><h3><b>小红书 · 清理与规则</b><em>L1 私有</em> · 3 张</h3><div class="grid"><div class="tb l1"><div class="hd"><span class="nm">xhs_no_traffic_cleanup_logs</span><span class="rr">8 行<span class="chg add">+1</span></span></div><div class="cls"><i>id PK</i>
+<i>user_id</i>
+<i>account_id</i>
+<i>account_name</i>
+<i>task_id <em>→tasks</em></i>
+<i>trigger_type</i>
+<i>batch_no</i>
+<i>thresholds</i>
+<i>query</i>
+<i>note_ids</i>
+<i>batch_limit</i>
+<i>before_total</i>
+<i>after_total</i>
+<i>total</i>
+<i>deleted</i>
+<i>skipped</i>
+<i>failed</i>
+<i>not_in_pool</i>
+<i>status</i>
+<i>reason</i>
+<i>coverage_note</i>
+<i>details</i>
+<i>aborted</i>
+<i>abort_reason</i>
+<i>created_at</i>
+<i>started_at</i>
+<i>finished_at</i>
+<i>duration_ms</i>
+<i class="c-add">items_json <em>json</em></i></div></div><div class="tb l1"><div class="hd"><span class="nm">data_package_rule_sets</span><span class="rr">68 行</span></div><div class="cls"><i>id PK</i>
+<i>user_id <em>→users</em></i>
+<i>name</i>
+<i>remark</i>
+<i>enabled</i>
+<i>sort_order</i>
+<i>created_at</i>
+<i>updated_at</i></div></div><div class="tb l1"><div class="hd"><span class="nm">data_package_rules</span><span class="rr">117 行</span></div><div class="cls"><i>id PK</i>
+<i>set_id <em>→data_package_rule_sets</em></i>
+<i>rule_name</i>
+<i>op</i>
+<i>params_json</i>
+<i>enabled</i>
+<i>sort_order</i>
+<i>created_at</i>
+<i>updated_at</i></div></div></div></div><h2>表关系（外键）</h2><table><tr><th style="width:26%">子表</th><th style="width:22%">外键列</th><th style="width:26%">父表</th><th>关系</th></tr><tr><td><code>xhs_ai_drafts</code></td><td><code>source_note_id</code></td><td><code>notes</code></td><td class="muted">N:1</td></tr><tr><td><code>xhs_ai_drafts</code></td><td><code>user_id</code></td><td><code>users</code></td><td class="muted">N:1</td></tr><tr><td><code>aigc_media_assets</code></td><td><code>generation_record_id</code></td><td><code>xhs_generation_records</code></td><td class="muted">N:1</td></tr><tr><td><code>aigc_media_assets</code></td><td><code>user_id</code></td><td><code>users</code></td><td class="muted">N:1</td></tr><tr><td><code>auto_tasks</code></td><td><code>creator_account_id</code></td><td><code>xhs_accounts</code></td><td class="muted">N:1</td></tr><tr><td><code>auto_tasks</code></td><td><code>pc_account_id</code></td><td><code>xhs_accounts</code></td><td class="muted">N:1</td></tr><tr><td><code>auto_tasks</code></td><td><code>schedule_job_id</code></td><td><code>scheduled_jobs</code></td><td class="muted">N:1</td></tr><tr><td><code>auto_tasks</code></td><td><code>user_id</code></td><td><code>users</code></td><td class="muted">N:1</td></tr><tr><td><code>data_package_rule_sets</code></td><td><code>user_id</code></td><td><code>users</code></td><td class="muted">N:1</td></tr><tr><td><code>data_package_rules</code></td><td><code>set_id</code></td><td><code>data_package_rule_sets</code></td><td class="muted">N:1</td></tr><tr><td><code>dict_items</code></td><td><code>type_id</code></td><td><code>dict_types</code></td><td class="muted">N:1</td></tr><tr><td><code>forbidden_word_groups</code></td><td><code>user_id</code></td><td><code>users</code></td><td class="muted">N:1</td></tr><tr><td><code>forbidden_words</code></td><td><code>user_id</code></td><td><code>users</code></td><td class="muted">N:1</td></tr><tr><td><code>xhs_generation_records</code></td><td><code>gateway_config_id</code></td><td><code>llm_gateway_configs</code></td><td class="muted">N:1</td></tr><tr><td><code>xhs_generation_records</code></td><td><code>parent_record_id</code></td><td><code>xhs_generation_records</code></td><td class="muted">自引用（树）</td></tr><tr><td><code>xhs_generation_records</code></td><td><code>task_id</code></td><td><code>tasks</code></td><td class="muted">N:1</td></tr><tr><td><code>xhs_generation_records</code></td><td><code>template_id</code></td><td><code>prompt_templates</code></td><td class="muted">N:1</td></tr><tr><td><code>xhs_generation_records</code></td><td><code>user_id</code></td><td><code>users</code></td><td class="muted">N:1</td></tr><tr><td><code>keyword_groups</code></td><td><code>user_id</code></td><td><code>users</code></td><td class="muted">N:1</td></tr><tr><td><code>llm_business_providers</code></td><td><code>user_id</code></td><td><code>users</code></td><td class="muted">N:1</td></tr><tr><td><code>llm_gateway_alerts</code></td><td><code>gateway_id</code></td><td><code>llm_gateway_configs</code></td><td class="muted">N:1</td></tr><tr><td><code>llm_gateway_alerts</code></td><td><code>user_id</code></td><td><code>users</code></td><td class="muted">N:1</td></tr><tr><td><code>llm_gateway_configs</code></td><td><code>user_id</code></td><td><code>users</code></td><td class="muted">N:1</td></tr><tr><td><code>llm_gateway_models</code></td><td><code>user_id</code></td><td><code>users</code></td><td class="muted">N:1</td></tr><tr><td><code>llm_gateway_usage_logs</code></td><td><code>gateway_id</code></td><td><code>llm_gateway_configs</code></td><td class="muted">N:1</td></tr><tr><td><code>llm_gateway_usage_logs</code></td><td><code>user_id</code></td><td><code>users</code></td><td class="muted">N:1</td></tr><tr><td><code>material_files</code></td><td><code>folder_id</code></td><td><code>material_folders</code></td><td class="muted">N:1</td></tr><tr><td><code>material_files</code></td><td><code>user_id</code></td><td><code>users</code></td><td class="muted">N:1</td></tr><tr><td><code>material_folders</code></td><td><code>user_id</code></td><td><code>users</code></td><td class="muted">N:1</td></tr><tr><td><code>xhs_monitoring_targets</code></td><td><code>platform_account_id</code></td><td><code>xhs_accounts</code></td><td class="muted">N:1</td></tr><tr><td><code>xhs_monitoring_targets</code></td><td><code>user_id</code></td><td><code>users</code></td><td class="muted">N:1</td></tr><tr><td><code>xhs_no_traffic_cleanup_logs</code></td><td><code>task_id</code></td><td><code>tasks</code></td><td class="muted">N:1</td></tr><tr><td><code>note_assets</code></td><td><code>note_id</code></td><td><code>notes</code></td><td class="muted">N:1</td></tr><tr><td><code>note_datacenter_stats</code></td><td><code>user_id</code></td><td><code>users</code></td><td class="muted">N:1</td></tr><tr><td><code>note_topics</code></td><td><code>note_id</code></td><td><code>notes</code></td><td class="muted">N:1</td></tr><tr><td><code>note_topics</code></td><td><code>topic_id</code></td><td><code>topics</code></td><td class="muted">N:1</td></tr><tr><td><code>notes</code></td><td><code>platform_account_id</code></td><td><code>xhs_accounts</code></td><td class="muted">N:1</td></tr><tr><td><code>notes</code></td><td><code>user_id</code></td><td><code>users</code></td><td class="muted">N:1</td></tr><tr><td><code>notifications</code></td><td><code>source_task_id</code></td><td><code>tasks</code></td><td class="muted">N:1</td></tr><tr><td><code>notifications</code></td><td><code>user_id</code></td><td><code>users</code></td><td class="muted">N:1</td></tr><tr><td><code>xhs_accounts</code></td><td><code>user_id</code></td><td><code>users</code></td><td class="muted">N:1</td></tr><tr><td><code>prompt_modules</code></td><td><code>user_id</code></td><td><code>users</code></td><td class="muted">N:1</td></tr><tr><td><code>prompt_templates</code></td><td><code>user_id</code></td><td><code>users</code></td><td class="muted">N:1</td></tr><tr><td><code>xhs_publish_jobs</code></td><td><code>platform_account_id</code></td><td><code>xhs_accounts</code></td><td class="muted">N:1</td></tr><tr><td><code>xhs_publish_jobs</code></td><td><code>source_draft_id</code></td><td><code>xhs_ai_drafts</code></td><td class="muted">N:1</td></tr><tr><td><code>xhs_publish_jobs</code></td><td><code>user_id</code></td><td><code>users</code></td><td class="muted">N:1</td></tr><tr><td><code>role_menus</code></td><td><code>menu_id</code></td><td><code>menus</code></td><td class="muted">N:1</td></tr><tr><td><code>role_menus</code></td><td><code>role_id</code></td><td><code>roles</code></td><td class="muted">N:1</td></tr><tr><td><code>role_menus</code></td><td><code>user_id</code></td><td><code>users</code></td><td class="muted">N:1</td></tr><tr><td><code>scheduled_job_logs</code></td><td><code>job_id</code></td><td><code>scheduled_jobs</code></td><td class="muted">N:1</td></tr><tr><td><code>scheduled_job_logs</code></td><td><code>user_id</code></td><td><code>users</code></td><td class="muted">N:1</td></tr><tr><td><code>scheduled_jobs</code></td><td><code>user_id</code></td><td><code>users</code></td><td class="muted">N:1</td></tr><tr><td><code>system_settings</code></td><td><code>updated_by</code></td><td><code>users</code></td><td class="muted">N:1</td></tr><tr><td><code>system_settings</code></td><td><code>user_id</code></td><td><code>users</code></td><td class="muted">N:1</td></tr><tr><td><code>tasks</code></td><td><code>parent_task_id</code></td><td><code>tasks</code></td><td class="muted">自引用（树）</td></tr><tr><td><code>tasks</code></td><td><code>user_id</code></td><td><code>users</code></td><td class="muted">N:1</td></tr><tr><td><code>topics</code></td><td><code>user_id</code></td><td><code>users</code></td><td class="muted">N:1</td></tr></table><h2>枢纽表（被引用次数）</h2><table><tr><th style="width:30%">表</th><th style="width:14%">被几处引用</th><th style="width:14%">自己引用几个</th><th>角色</th></tr><tr><td><code>users</code></td><td>30</td><td>0</td><td class="muted">全局租户根 —— 所有数据按 user_id 隔离</td></tr><tr><td><code>xhs_accounts</code></td><td>5</td><td>1</td><td class="muted">小红书账号实体 —— 数据隔离的实际维度</td></tr><tr><td><code>tasks</code></td><td>4</td><td>2</td><td class="muted">公共任务底座（所有队列/同步/发布都落这里）</td></tr><tr><td><code>notes</code></td><td>3</td><td>2</td><td class="muted">内容线核心身份</td></tr><tr><td><code>llm_gateway_configs</code></td><td>3</td><td>1</td><td class="muted">网关配置（模型/预警/用量都挂它）</td></tr><tr><td><code>xhs_generation_records</code></td><td>2</td><td>5</td><td class="muted">生成记录（含版本链 + 笔记溯源）</td></tr><tr><td><code>scheduled_jobs</code></td><td>2</td><td>1</td><td class="muted">调度定义</td></tr><tr><td><code>data_package_rule_sets</code></td><td>1</td><td>1</td><td class="muted">规则包</td></tr><tr><td><code>dict_types</code></td><td>1</td><td>0</td><td class="muted">字典类型</td></tr><tr><td><code>prompt_templates</code></td><td>1</td><td>1</td><td class="muted"></td></tr><tr><td><code>material_folders</code></td><td>1</td><td>1</td><td class="muted">素材文件夹</td></tr><tr><td><code>topics</code></td><td>1</td><td>1</td><td class="muted">话题字典</td></tr><tr><td><code>xhs_ai_drafts</code></td><td>1</td><td>2</td><td class="muted">草稿中心</td></tr><tr><td><code>menus</code></td><td>1</td><td>0</td><td class="muted">菜单</td></tr><tr><td><code>roles</code></td><td>1</td><td>0</td><td class="muted">角色</td></tr></table><h2>8 处合并明细</h2><table>
+<tr><th style="width:34%">原表</th><th style="width:22%">并入</th><th style="width:10%">行数</th><th>方式</th></tr><tr><td><code>account_cookie_versions</code></td><td><code>xhs_accounts</code></td><td>11</td><td class="muted">→ cookies_json（各通道最新一份）</td></tr><tr><td><code>login_sessions</code></td><td><code>xhs_accounts</code></td><td>226</td><td class="muted">→ last_login_at / last_login_method（只留 confirmed）</td></tr><tr><td><code>draft_assets</code></td><td><code>xhs_ai_drafts</code></td><td>1</td><td class="muted">→ assets_json</td></tr><tr><td><code>ai_generated_assets</code></td><td><code>xhs_ai_drafts</code></td><td>0</td><td class="muted">→ generated_assets_json</td></tr><tr><td><code>publish_assets</code></td><td><code>xhs_publish_jobs</code></td><td>1</td><td class="muted">→ assets_json</td></tr><tr><td><code>no_traffic_cleanup_items</code></td><td><code>xhs_no_traffic_cleanup_logs</code></td><td>5</td><td class="muted">→ items_json</td></tr><tr><td><code>monitoring_snapshots</code></td><td><code>xhs_monitoring_targets</code></td><td>0</td><td class="muted">→ snapshots_json</td></tr><tr><td><code>note_generation_links</code></td><td><code>xhs_generation_records</code></td><td>25</td><td class="muted">→ note_pk 列（桥表消失）</td></tr></table></body></html>

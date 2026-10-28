@@ -20,12 +20,9 @@ from sqlalchemy.orm import Session
 from backend.app.models import (
     AiDraft,
     Note,
-    NoteAsset,
-    NoteComment,
-    NoteGenerationLink,
+    PublishAsset,
     NoteTopic,
 )
-from backend.app.models.monitoring import NoteMetricSnapshot
 
 
 def purge_note(db: Session, note: Note) -> None:
@@ -56,20 +53,8 @@ def purge_note(db: Session, note: Note) -> None:
       这与「删话题词典项」方向不同（那边删典 ⇒ 关系行一并删，见 `api/topics.py`）。
     """
     db.execute(delete(NoteTopic).where(NoteTopic.note_id == note.id))
-    db.execute(delete(NoteAsset).where(NoteAsset.note_id == note.id))
-    db.execute(delete(NoteComment).where(NoteComment.note_id == note.id))
-    #: ⚠️ 设计 75 S5（2026-10-27）：`note_goods` 关系行不再需要连带删 —— 那张表
-    #: 随迁移 `n8o9p0q1r2s3` 整表 DROP，挂链商品只记在 `notes.raw_json.item_id`，
-    #: 随笔记行一起消失。
-    # 指标日快照（设计 17 §13.5，M2）：`note_metric_snapshots.note_pk` 外键指向
-    # `notes.id` 且**无 ON DELETE CASCADE** —— 不清理会让「删笔记」撞外键约束 500
-    # （2026-10-06 批量删除实测抓到）。快照是笔记的派生数据，笔记没了跟着删。
-    db.execute(delete(NoteMetricSnapshot).where(NoteMetricSnapshot.note_pk == note.id))
-    #: 生成版本桥（设计 42）：`note_generation_links.note_pk` 外键指向 `notes.id`
-    #: 且无 CASCADE。**发布成功后删笔记时必踩** —— 本地生成笔记几乎都有这条
-    #: （19 篇已发布里 18 篇有），漏清 = 删笔记撞外键 500。
-    #: 只删桥行，`generation_records` 不动（那是生成历史，笔记没了仍可查）。
-    db.execute(delete(NoteGenerationLink).where(NoteGenerationLink.note_pk == note.id))
+    db.execute(delete(PublishAsset).where(PublishAsset.parent_id == note.id))
+    #: 漏了删笔记必撞外键 500。只删桥行，`generation_records` 是生成历史、保留。
     # 草稿只解除引用、不连坐：AI 草稿是用户资产，笔记没了它还在（§12）。
     db.query(AiDraft).filter(AiDraft.source_note_id == note.id).update({"source_note_id": None})
     db.delete(note)

@@ -524,11 +524,11 @@ def generate_note_for_item(
         },
     )
 
-    from backend.app.models.note import NoteAsset  # 局部导入避免环
+    from backend.app.models.note import PublishAsset  # 局部导入避免环
 
     for entry in media:
         db.add(
-            NoteAsset(
+            PublishAsset(
                 note_id=note.id,
                 asset_type=entry["asset_type"],
                 url=entry["url"],

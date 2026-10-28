@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.core.security import decrypt_text, encrypt_text
 from backend.app.core.time import shanghai_now
-from backend.app.models import AccountCookieVersion, PlatformAccount
+from backend.app.models import PlatformAccount
 from xhs_utils.cookie_util import trans_cookies
 
 logger = logging.getLogger(__name__)
@@ -277,51 +277,44 @@ def parse_channel_envelope(text: str) -> dict[str, str]:
 def latest_cookies_for_channels(
     db: Session, account_ids: Sequence[int]
 ) -> dict[tuple[int, str], str]:
-    """一批账号的各平台**最新一版**令牌（`{(account_id, channel): 请求头串}`）。
+    """一批账号的各平台令牌（`{(account_id, channel): 请求头串}`）。
 
-    账号矩阵页要一次给出所有卡片的 L1/L2 判据；逐账号逐平台调
-    `latest_cookies_for_channel` 会退化成 N×M 次查询（N+1 的变体，且 SQLite
-    上每次都要解密一行）。这里一次查完、只在内存里按「最新一版优先」合并。
+    2026-10-28（设计 77 §4.2）：Cookie 已从 `account_cookie_versions` 多行表压成
+    `PlatformAccount.cookies_json` **一列**（各通道最新一份）⇒ 这里从「查 N 行再按
+    created_at desc 合并」变成「一次查账号行、逐行解信封」。签名不变，40+ 调用点零改动。
 
-    ⚠️ **「最新一版」的排序口径只有一份**：单账号版本 `latest_cookies_for_channel`
-    委托到本函数，避免两处各写一遍 `created_at desc, id desc` ——
-    那种漂移的后果是「同一行令牌，页面说有效、调用点说没有」。
-
-    ⚠️ 合并方向是 **desc + setdefault**（先出现者赢）：升序覆盖写会让「旧信封」
-    反过来顶掉新令牌。一行信封提供它包住的那几个平台；跨行按平台各取最新。
+    ⚠️ 逐账号兜底：一行的密文解不开（密钥轮换残留 / 损坏）不该让**整个账号列表** 500 ——
+    那个账号按「无 Cookie」处理（缺值口径：解析不到就留空，不造假、不拖垮别人）。
     """
     from backend.app.api.platforms.xhs.pc import _cookies_to_string
 
     ids = [int(value) for value in account_ids]
     if not ids:
         return {}
-    rows = db.scalars(
-        select(AccountCookieVersion)
-        .where(AccountCookieVersion.platform_account_id.in_(ids))
-        .order_by(
-            AccountCookieVersion.created_at.desc(),
-            AccountCookieVersion.id.desc(),
+    rows = db.execute(
+        select(PlatformAccount.id, PlatformAccount.cookies_json).where(
+            PlatformAccount.id.in_(ids)
         )
     ).all()
     latest: dict[tuple[int, str], str] = {}
     undecryptable = 0
-    for row in rows:
-        # ⚠️ 逐行兜底（2026-10-25 实测教训）：一行的密文解不开（密钥轮换残留 /
-        #    损坏）不该让**整个账号列表** 500 —— 那一行按「无 Cookie」处理
-        #    （缺值口径：解析不到就留空，不造假、不拖垮别人）。
+    for account_id, cookies_json in rows:
+        #: 空串 / "{}" = 该账号无任何通道令牌（从未登录过），不是解密失败。
+        if not cookies_json or cookies_json.strip() in ("", "{}"):
+            continue
         try:
-            envelope = parse_channel_envelope(decrypt_text(row.encrypted_cookies))
-        except Exception:  # noqa: BLE001 - InvalidToken 等解密失败 = 该行视为无 Cookie
+            envelope = parse_channel_envelope(decrypt_text(cookies_json))
+        except Exception:  # noqa: BLE001 - 解密失败 = 该账号视为无 Cookie
             undecryptable += 1
             continue
         for channel, jar in envelope.items():
-            latest.setdefault((row.platform_account_id, channel), _cookies_to_string(jar))
+            latest[(int(account_id), channel)] = _cookies_to_string(jar)
     if undecryptable:
         import logging
 
         logging.getLogger(__name__).warning(
-            "latest_cookies_for_channels: %d 行 Cookie 解密失败，已按无 Cookie 处理"
-            "（若非个别行，检查 security.secret_key / fernet_key 是否轮换过）",
+            "latest_cookies_for_channels: %d 个账号 Cookie 解密失败，已按无 Cookie 处理"
+            "（若非个别账号，检查 security.secret_key / fernet_key 是否轮换过）",
             undecryptable,
         )
     return latest
@@ -351,25 +344,40 @@ def latest_cookies_for_channel(db: Session, account_id: int, channel: str) -> st
     return latest_cookies_for_channels(db, [account_id]).get((int(account_id), channel), "")
 
 
-def store_channel_cookies(*, db: Session, account: PlatformAccount, cookies_text: str) -> None:
-    """给**已有账号**追加一版令牌（§11.5 / 2026-09-21 拆分）。
+def store_channel_cookies(
+    *,
+    db: Session,
+    account: PlatformAccount,
+    cookies_text: str,
+    login_method: str = "",
+) -> None:
+    """把一份令牌**合并进账号的 `cookies_json`**（同通道覆盖，其他通道保留）。
 
-    与 `upsert_platform_account_from_login` 的分工：那个负责「按身份找/建账号并刷新
-    资料」，这个只负责「再存一条令牌」。一次登录拿两份 Cookie（www + creator）时走这里，
-    避免为了存第二份令牌把账号资料重复写一遍、或干脆新建第二行账号。
+    2026-10-28（设计 77 §4.2）：原来是往 `account_cookie_versions` 追加一行；
+    现在账号表只有一个 `cookies_json` 列，语义变成「各通道最新一份」⇒ 读旧信封、
+    覆盖本通道、写回。**其他通道的令牌不受影响**（`www` / `creator` / `ark` 互不覆盖，
+    2026-09-21 拆分的口径不变）。
 
-    落库形态是**信封 JSON**（一个字段，平台信息也在 JSON 里）。存到哪个平台
-    **按 jar 形态判定，不靠调用方传** —— 调用方经常分不清自己手里是哪一份
-    （观隅好物的教训：创作者扫码的 jar 被当成千帆令牌存，打千帆一律
-    「缺失登录凭证」，而界面显示「千帆已失效」，令牌其实好好的）。
+    存到哪个通道**按 jar 形态判定，不靠调用方传** —— 调用方经常分不清手里是哪一份
+    （观隅好物的教训：创作者扫码的 jar 被当成千帆令牌存，打千帆一律「缺失登录凭证」）。
+
+    `login_method`（`qr` / `phone`）由调用方显式给；空串表示本次不更新该字段。
     """
     channel = channel_for_cookies(cookies_text)
-    db.add(
-        AccountCookieVersion(
-            platform_account_id=account.id,
-            encrypted_cookies=encrypt_text(dump_channel_envelope({channel: cookies_text})),
-        )
-    )
+    raw = account.cookies_json or ""
+    if raw.strip() in ("", "{}"):
+        current: dict[str, str] = {}
+    else:
+        try:
+            current = parse_channel_envelope(decrypt_text(raw))
+        except Exception:  # noqa: BLE001 - 旧值损坏 ⇒ 从空开始，不因历史坏数据挡住新登录
+            current = {}
+    current[channel] = cookies_text
+    #: ⚠️ 必须赋**新字符串**：SQLAlchemy 只在属性变更时发 UPDATE（原地改 dict 不标记脏）
+    account.cookies_json = encrypt_text(dump_channel_envelope(current))
+    account.last_login_at = shanghai_now()
+    if login_method:
+        account.last_login_method = login_method
 
 
 def clamp_reason(text: str, limit: int = METRICS_REASON_MAX_CHARS) -> str:
@@ -802,14 +810,7 @@ def upsert_platform_account_from_login(
     account.profile_json = json.dumps(account_profile_from_user_info(user_info), ensure_ascii=False, separators=(",", ":"))
     account.updated_at = now
     db.flush()
-    db.add(
-        AccountCookieVersion(
-            platform_account_id=account.id,
-            encrypted_cookies=encrypt_text(
-                dump_channel_envelope({channel_for_cookies(cookies_text): cookies_text})
-            ),
-        )
-    )
+    store_channel_cookies(db=db, account=account, cookies_text=cookies_text)
     return account, action
 
 

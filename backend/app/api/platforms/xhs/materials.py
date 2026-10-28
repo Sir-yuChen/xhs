@@ -233,7 +233,7 @@ def delete_material_folder(
 
     removed = db.execute(
         sa_delete(MaterialFile).where(
-            MaterialFile.folder_id == folder.id,
+            MaterialFile.parent_id == folder.id,
             MaterialFile.user_id == current_user.id,
         )
     ).rowcount or 0
@@ -302,7 +302,7 @@ def list_material_files(
     stmt = select(MaterialFile).where(MaterialFile.user_id == current_user.id)
 
     if folder_id is not None:
-        stmt = stmt.where(MaterialFile.folder_id == folder_id)
+        stmt = stmt.where(MaterialFile.parent_id == folder_id)
     if keyword:
         stmt = stmt.where(MaterialFile.filename.like(f"%{keyword.strip()}%"))
     if file_type:
@@ -427,7 +427,7 @@ def get_material_thumb(
     row = db.scalar(
         select(MaterialFile).where(
             MaterialFile.id == file_id,
-            MaterialFile.folder_id == folder_id,
+            MaterialFile.parent_id == folder_id,
             MaterialFile.user_id == current_user.id,
         )
     )

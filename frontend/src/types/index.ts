@@ -5,7 +5,7 @@ export type PlatformId = "xhs" | "douyin" | "kuaishou" | "weibo" | "xianyu" | "t
  *
  * * `shop`   店铺线 —— 千帆商家，判据 = `ark` 通道有令牌；
  * * `content` 内容线 —— 非店铺号，判据 = `creator` 通道有令牌；
- * * `shared` 平台级 —— 跨业务线（账号矩阵 / 数据洞察 / 监控中心 / 自动运营）。
+ * * `shared` 平台级 —— 跨业务线（账号矩阵 / 自动运营）。
  *
  * 后端唯一判据在 `backend/app/core/business_lines.py`；前端只做**呈现**。
  */
@@ -36,10 +36,7 @@ export type DashboardOverview = {
   pending_publishes: number;
   healthy_accounts: number;
   at_risk_accounts: number;
-  comment_count?: number;
   total_engagement?: number;
-  hot_topics: Array<{ keyword: string; notes: number; engagement: number }>;
-  recent_activity: Array<{ type: string; title: string; status: string }>;
 };
 
 export type PlatformUser = {
@@ -1244,40 +1241,6 @@ export type SavedNotesPage = Paginated<SavedNote> & {
   stats: { pending: number; published: number; failed: number };
 };
 
-export type AnalyticsTopContent = {
-  id: number;
-  note_id: string;
-  title: string;
-  author_name: string;
-  created_at: string;
-  likes: number;
-  collects: number;
-  comments: number;
-  shares: number;
-  engagement: number;
-};
-
-export type AnalyticsHotTopic = {
-  keyword: string;
-  notes: number;
-  engagement: number;
-};
-
-export type AnalyticsCommentInsight = {
-  total_comments: number;
-  question_count: number;
-  top_terms: Array<{ term: string; count: number }>;
-  top_comments: Array<{
-    id: number;
-    note_id: number;
-    user_name: string;
-    content: string;
-    like_count: number;
-  }>;
-};
-
-export type BenchmarkTopNote = AnalyticsTopContent;
-
 export type NoteAsset = {
   id: number;
   note_id: number;
@@ -1325,28 +1288,6 @@ export type BatchCreateDraftsPayload = {
 export type BatchCreateDraftsResponse = {
   created_count: number;
   items: Draft[];
-};
-
-export type AnalyticsReportPayload = {
-  note_ids?: number[];
-  format?: "json";
-};
-
-export type AnalyticsReportResponse = {
-  report_type: "operations";
-  generated_at: string;
-  note_count: number;
-  file_name: string;
-  file_path: string;
-  download_url: string;
-  summary: {
-    note_count: number;
-    total_engagement: number;
-    comment_count: number;
-    top_topics: AnalyticsHotTopic[];
-    top_notes: AnalyticsTopContent[];
-    benchmark_count: number;
-  };
 };
 
 export type SaveNotesResponse = {
@@ -1963,20 +1904,6 @@ export type ScheduleIn = {
   enabled?: boolean;
 };
 
-/** auto_tasks 响应里的调度摘要（来自 1:1 关联的 job 行） */
-export type AutoTaskSchedule = {
-  job_id: number;
-  trigger_type: string;
-  cron_expression: string;
-  run_at?: string | null;
-  misfire_policy: string;
-  concurrent: string;
-  status: string;
-  next_run_at?: string | null;
-  last_run_at?: string | null;
-  run_count: number;
-  last_status?: string | null;
-};
 
 export type RunDueTasksResponse = {
   executed_count: number;
@@ -1984,66 +1911,7 @@ export type RunDueTasksResponse = {
   items: PublishJob[];
 };
 
-export type MonitoringTarget = {
-  id: number;
-  platform: PlatformId;
-  target_type: "keyword" | "account" | "brand" | "note_url" | string;
-  name: string;
-  value: string;
-  status: "active" | "paused" | string;
-  config: Record<string, unknown>;
-  last_refreshed_at?: string | null;
-  created_at: string;
-  updated_at: string;
-};
 
-export type MonitoringTargetPayload = {
-  target_type: "keyword" | "account" | "brand" | "note_url";
-  name?: string;
-  value: string;
-  status?: "active" | "paused";
-  config?: Record<string, unknown>;
-};
-
-export type MonitoringSnapshot = {
-  id: number;
-  target_id: number;
-  payload: {
-    matched_count?: number;
-    total_engagement?: number;
-    top_notes?: Array<{
-      id: number;
-      note_id: string;
-      title: string;
-      author_name: string;
-      engagement: number;
-    }>;
-  };
-  created_at: string;
-};
-
-export type MonitoringNote = {
-  id: number;
-  note_id: string;
-  title: string;
-  author_name: string;
-  created_at: string;
-  likes: number;
-  collects: number;
-  comments: number;
-  shares: number;
-  engagement: number;
-};
-
-export type MonitoringRefreshResponse = {
-  target: MonitoringTarget;
-  task: TaskRecord;
-  snapshot: MonitoringSnapshot;
-};
-
-// 运行时配置中心（设计 10 §7，2026-09-27）：设置页的列表 / 增删改查。
-// `value` 已由后端按 `value_type` 解码成 JS 值（int → number、bool → boolean），
-// 页面**不要**再自己 `JSON.parse`（那是第二份解码实现，DEF-044）。
 export type SystemSettingValueType = "int" | "float" | "bool" | "str" | "json";
 
 export type SystemSetting = {
@@ -2106,37 +1974,6 @@ export type SystemSettingDeleteResult = {
   is_live: boolean;
 };
 
-export type KeywordGroup = {
-  id: number;
-  platform: PlatformId;
-  name: string;
-  keywords: string[];
-  created_at: string;
-  updated_at: string;
-};
-
-export type KeywordGroupPayload = {
-  platform?: PlatformId;
-  name: string;
-  keywords: string[];
-};
-
-export type KeywordGroupDetail = KeywordGroup & {
-  trend: {
-    total_matches: number;
-    total_engagement: number;
-    keywords: Array<{ keyword: string; notes: number; engagement: number }>;
-    matched_notes: Array<{
-      id: number;
-      note_id: string;
-      title: string;
-      author_name: string;
-      engagement: number;
-      created_at: string;
-    }>;
-  };
-};
-
 export type PublishJob = {
   id: number;
   platform_account_id: number;
@@ -2193,67 +2030,6 @@ export type PublishAsset = {
   creator_media_id: string;
   upload_error: string;
   creator_upload_info: Record<string, unknown>;
-};
-
-export type AutoTask = {
-  id: number;
-  user_id: number;
-  name: string;
-  keywords: string[];
-  pc_account_id: number;
-  creator_account_id: number;
-  ai_instruction: string;
-  status: "active" | "paused" | "completed" | string;
-  last_run_at?: string | null;
-  total_published: number;
-  created_at: string;
-  /** 1:1 关联的调度行摘要（设计 15 §7.1；调度语义的唯一权威在 job 行） */
-  schedule?: AutoTaskSchedule | null;
-};
-
-export type AutoTaskCreatePayload = {
-  name: string;
-  keywords: string[];
-  pc_account_id: number;
-  creator_account_id: number;
-  ai_instruction?: string;
-  /** 不传 = 不自动执行（建行即暂停） */
-  schedule?: ScheduleIn;
-};
-
-export type AutoTaskUpdatePayload = {
-  name?: string;
-  keywords?: string[];
-  ai_instruction?: string;
-  status?: "active" | "paused" | "completed";
-  schedule?: ScheduleIn;
-};
-
-export type AutoTaskRunResult = {
-  auto_task: AutoTask;
-  log: ScheduledJobLog;
-  detail: {
-    keyword?: string;
-    publish_mode?: string;
-    source_note?: {
-      note_id: string;
-      title: string;
-      likes: number;
-      collects: number;
-      comments: number;
-    };
-    draft?: {
-      id: number;
-      title: string;
-      body: string;
-      created_at: string;
-    };
-    publish_job?: {
-      id: number;
-      status: string;
-      platform_account_id: number;
-    };
-  };
 };
 
 export type AppNotification = {

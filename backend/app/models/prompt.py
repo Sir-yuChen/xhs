@@ -42,14 +42,14 @@ class PromptModule(Base):
     （**不级联删引用**，避免静默改坏模板）。
     """
 
-    __tablename__ = "prompt_modules"
+    __tablename__ = "xhs_prompt_modules"
     __table_args__ = (
         UniqueConstraint("user_id", "name", name="uq_prompt_modules_user_name"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     #: 归属（DEF-066 纪律：资源行必属当前用户）。
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("sys_users.id"), index=True)
     #: 模块名（user 内唯一展示名）。
     name: Mapped[str] = mapped_column(String(128))
     #: 类别（如 `style`/`tone`/`audience`）。
@@ -78,10 +78,10 @@ class PromptTemplate(Base):
     （改名 / 改 is_default 不涨版本，那不是「骨架版本」）。
     """
 
-    __tablename__ = "prompt_templates"
+    __tablename__ = "xhs_prompt_templates"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("sys_users.id"), index=True)
     name: Mapped[str] = mapped_column(String(128))
     #: `text`/`image`/`video`/`cover`（白名单 `PROMPT_TASK_TYPES`）。
     task_type: Mapped[str] = mapped_column(String(32), index=True)

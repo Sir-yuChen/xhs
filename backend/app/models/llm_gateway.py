@@ -48,7 +48,7 @@ class LlmGatewayConfig(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
+    user_id: Mapped[int] = mapped_column(ForeignKey("sys_users.id"), index=True, nullable=False)
     #: **服务商唯一 KEY**（v1.9）。⚠️ **系统生成、创建后不可编辑**（D1）：
     #: 格式 `{slug(name)}-{4位随机}`（字母表去 `0/O/1/I/L`，同 §35.13 批次号纪律）。
     #: 业务代码（`resolve_provider_context`）按它取服务商 —— 不再按 `base_url` 反查（D6）。
@@ -136,7 +136,7 @@ class LlmGatewayModel(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
+    user_id: Mapped[int] = mapped_column(ForeignKey("sys_users.id"), index=True, nullable=False)
     #: 指向 `llm_gateway_configs.provider_key`（裸列，应用层校验归属与存在性）
     provider_key: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     #: **人类可读唯一 ID**（v2.10 新增，设计 17 §13.2.12）。
@@ -208,7 +208,7 @@ class LlmGatewayAlert(Base):
     __tablename__ = "llm_gateway_alerts"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
+    user_id: Mapped[int] = mapped_column(ForeignKey("sys_users.id"), index=True, nullable=False)
     #: ⚠️ **可空**（v2.3）：`NULL` = 全网关（不绑单个服务商，遍历该用户所有服务商逐个判）。
     gateway_id: Mapped[Optional[int]] = mapped_column(ForeignKey("llm_gateway_configs.id"), index=True, nullable=True)
     platform: Mapped[str] = mapped_column(String(32), nullable=False, default="")
@@ -244,7 +244,7 @@ class LlmGatewayUsageLog(Base):
     __tablename__ = "llm_gateway_usage_logs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
+    user_id: Mapped[int] = mapped_column(ForeignKey("sys_users.id"), index=True, nullable=False)
     gateway_id: Mapped[int] = mapped_column(ForeignKey("llm_gateway_configs.id"), index=True, nullable=False)
     platform: Mapped[str] = mapped_column(String(32), nullable=False, default="")
     function: Mapped[str] = mapped_column(String(32), nullable=False, default="")
@@ -297,7 +297,7 @@ class LlmBusinessProvider(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
+    user_id: Mapped[int] = mapped_column(ForeignKey("sys_users.id"), index=True, nullable=False)
     #: 业务平台（与 `llm_gateway_configs.platform` / §3.8 的 `PLATFORM_ENUM` 同源）
     platform: Mapped[str] = mapped_column(String(32), nullable=False, default="xhs")
     #: 业务点固定 key（`BUSINESS_KEY_*` 常量之一，用户不可改）

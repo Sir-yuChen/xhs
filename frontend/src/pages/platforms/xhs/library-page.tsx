@@ -494,9 +494,9 @@ export function XhsLibraryPage() {
   const [hasAssetsFilter, setHasAssetsFilter] = usePersistedFilter(
     FILTER_CACHE_KEYS.library.hasAssets, false, asBoolean
   );
-  const [hasCommentsFilter, setHasCommentsFilter] = usePersistedFilter(
-    FILTER_CACHE_KEYS.library.hasComments, false, asBoolean
-  );
+  //: ⚠️ 2026-10-28（方案 B）：`hasCommentsFilter` **已移除** —— 后端 `has_comments`
+  //: 参数随之删除（它筛 `note_comments`，写入口从未打通、实测 0 行、表已 DROP）
+  //: ⇒ 「有评论」勾上永远是空列表。评论在「我的笔记 / 笔记发现」页直查平台看。
   // ⚠️ 2026-09-23 用户口径「内容库默认使用卡片，不再支持表格展示笔记」：
   // `viewMode` / `setViewMode` **整条移除**（不是默认改成 card 留着切换器）——
   // 视图只剩一种，「当前视图」就不再是状态，留着它就是一个永远不变的死状态。
@@ -532,7 +532,6 @@ export function XhsLibraryPage() {
       q: keywordFilter.trim() || undefined,
       topic_id: selectedTopicFilter ? Number(selectedTopicFilter) : undefined,
       has_assets: hasAssetsFilter || undefined,
-      has_comments: hasCommentsFilter || undefined,
       publish_status: publishStatusFilter === "all" ? undefined : publishStatusFilter,
       platform_account_id: accountFilter ? Number(accountFilter) : undefined,
     };
@@ -639,12 +638,11 @@ export function XhsLibraryPage() {
    */
   function clearFilters() {
     setKeywordFilter(""); setSelectedTopicFilter(""); setPublishStatusFilter("all");
-    setHasAssetsFilter(false); setHasCommentsFilter(false);
+    setHasAssetsFilter(false);
     void loadNotes({
       q: undefined,
       topic_id: undefined,
       has_assets: undefined,
-      has_comments: undefined,
       publish_status: undefined,
       platform_account_id: undefined,
     });
@@ -1238,7 +1236,7 @@ export function XhsLibraryPage() {
 
         * 第一行 = **定位条件**：关键词（宽）+ 来源账号 + 笔记类型 + 标签 + 发布状态
           ⇒ 这五项决定「我要看哪一批」；
-        * 第二行 = **附加开关 + 动作**：有素材 / 有评论｜按钮组**右对齐收尾**
+        * 第二行 = **附加开关 + 动作**：有素材｜按钮组**右对齐收尾**
           （与 §33.8 商品列表页同款：按钮永远在最后）。
           ⚠️ 原「卡片表格切换」已随表格视图一起移除（2026-09-23 用户口径
           「内容库默认使用卡片，不再支持表格展示笔记」）。
@@ -1294,7 +1292,8 @@ export function XhsLibraryPage() {
           <Col>
             <Space size={16} wrap>
               <Checkbox checked={hasAssetsFilter} onChange={(e) => setHasAssetsFilter(e.target.checked)}>有素材</Checkbox>
-              <Checkbox checked={hasCommentsFilter} onChange={(e) => setHasCommentsFilter(e.target.checked)}>有评论</Checkbox>
+              {/* ⚠️ 2026-10-28（方案 B）：「有评论」勾选框移除 —— 它筛的 `note_comments`
+                  写入口从未打通、实测 0 行（表已 DROP），勾上永远是空列表。 */}
             </Space>
           </Col>
           <Col>
@@ -1523,9 +1522,17 @@ export function XhsLibraryPage() {
         加入草稿 / AI 改写 / 复制 / 删除）。
 
         ⚠️ 2026-09-22 用户口径（设计 13 §29.1）：内容库**不展示笔记评论与原始 JSON** ——
-        评论区（`commentsSlot`）与 `raw_json` 原文块已移除；`NoteCommentList` 组件与
-        `/notes/{id}/comments` 端点保留（「我的笔记」页仍在用）。列表页「有评论」
-        筛选与互动**计数**保留：筛的是数据事实、显示的是指标，都不是评论内容。
+        评论区（`commentsSlot`）与 `raw_json` 原文块已移除。
+
+        ⚠️ 2026-10-28（方案 B 更正）：本段原写「`NoteCommentList` 组件与
+        `/notes/{id}/comments` 端点保留（我的笔记页仍在用）；列表页「有评论」筛选保留」
+        —— **全错**，三处事实：
+        · `/notes/{id}/comments` 读的是本地 `note_comments`（已 DROP），
+          前端 `fetchSavedNoteComments` **零调用方**，是死端点；
+        · 「我的笔记」页的评论一直走 `POST /xhs/pc/notes/comments`（直查平台），
+          从来不用那个端点；
+        · 「有评论」筛选筛的是同一张空表（写入口从未打通）⇒ 勾上永远空列表，已删。
+        评论内容仍在「我的笔记 / 笔记发现」页可看，功能没丢。
       */}
       <NoteDetailModal
         open={isDetailOpen}
@@ -1637,66 +1644,6 @@ export function XhsLibraryPage() {
                 </Popover>
               </Space>
             </div>
-
-            {/*
-              挂载商品（§28.3 / §29.2）：走关系表查商品表当下的真值；空则整块不渲染。
-              版式对齐「我的笔记」详情弹窗（用户 2026-09-22 口径）—— Divider 标题 +
-              计数 Tag + 每商品一张 Card（72px 封面 + 标题单行省略 + 规格/价格同行）。
-              内容库没有 variant / url / shopName（那是「我的笔记」从平台实时响应拿的），
-              按缺值口径不渲染对应行，不造假。
-            */}
-            {selectedNote.goods && selectedNote.goods.length > 0 && (
-              <div style={{ marginTop: 12 }}>
-                <Divider titlePlacement="start" style={{ margin: "8px 0" }}>
-                  <Space size={6}>
-                    <ShoppingOutlined />
-                    <Text strong style={{ fontSize: 13 }}>挂载商品</Text>
-                    <Tag>{selectedNote.goods.length}</Tag>
-                  </Space>
-                </Divider>
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  {selectedNote.goods.map((g) => (
-                    <Card key={g.item_id} size="small">
-                      <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
-                        {g.images?.[0] && (
-                          <img
-                            src={g.images[0]}
-                            alt={g.item_title || "商品"}
-                            referrerPolicy="no-referrer"
-                            style={{ width: 72, height: 72, objectFit: "cover", borderRadius: 6, flex: "0 0 auto" }}
-                          />
-                        )}
-                        <div style={{ flex: "1 1 0%", minWidth: 0 }}>
-                          {/* 标题：**永远一行**，超出 `…` 收起 + 悬浮看全文（ADR-018） */}
-                          <Text strong ellipsis={{ tooltip: g.item_title || "（无商品标题）" }} style={{ fontSize: 13, display: "block" }}>
-                            {g.item_title || "（无商品标题）"}
-                          </Text>
-                          {/* 价格与库存/销量：价格不压缩（`flex: 0 0 auto`） */}
-                          <div className="goods-meta-row">
-                            <Text strong style={{ fontSize: 14, flex: "0 0 auto", whiteSpace: "nowrap", color: "#ff4d4f" }}>
-                              {/* 分字符串（可能区间 "1999~2999"）⇒ 元：走唯一实现
-                                  `fenPriceText`。直接 Number() 会把区间算成 NaN。 */}
-                              {g.price ? `¥ ${fenPriceText(g.price) || g.price}` : "价格待同步"}
-                            </Text>
-                            {g.sales != null && <Text type="secondary" style={{ fontSize: 12 }}>已售 {g.sales}</Text>}
-                            {g.stock != null && <Text type="secondary" style={{ fontSize: 12 }}>库存 {g.stock}</Text>}
-                          </div>
-                          <Space size={8} wrap style={{ marginTop: 4 }}>
-                            <Text type="secondary" style={{ fontSize: 11 }}>ID: {g.item_id}</Text>
-                          </Space>
-                          {/* 本地查不到这件商品 ⇒ 不干放「价格待同步」，如实说明点「同步」会自动入队补 */}
-                          {!g.item_title && !g.price && g.item_id && (
-                            <Text type="warning" style={{ fontSize: 12, display: "block", marginTop: 4 }}>
-                              本地查询不到该商品信息，点「同步」会自动加入商品信息同步队列
-                            </Text>
-                          )}
-                        </div>
-                      </div>
-                    </Card>
-                  ))}
-                </div>
-              </div>
-            )}
 
             <Descriptions column={1} size="small" bordered>
               <Descriptions.Item label="基础信息">

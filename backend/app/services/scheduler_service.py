@@ -52,8 +52,6 @@ from backend.app.services.publish_service import (
     claim_publish_idempotency,
 )
 from backend.app.models import (
-    MonitoringSnapshot,
-    MonitoringTarget,
     Note,
     Notification,
     PlatformAccount,
@@ -176,7 +174,7 @@ def _run_one_due_publish_job(db: Session, current_user: User, job: PublishJob, a
 
     try:
         assets = db.scalars(
-            select(PublishAsset).where(PublishAsset.publish_job_id == job.id).order_by(PublishAsset.id.asc())
+            select(PublishAsset).where(PublishAsset.row_type == ASSET_PUBLISH, PublishAsset.parent_id == job.id).order_by(PublishAsset.id.asc())
         ).all()
         if any(asset.asset_type != "image" for asset in assets):
             raise RuntimeError("Only image publish is supported")
@@ -195,7 +193,7 @@ def _run_one_due_publish_job(db: Session, current_user: User, job: PublishJob, a
             creator_adapter = adapter_factory(creator_cookies)
             for asset in pending_assets:
                 try:
-                    upload_payload = creator_adapter.upload_media(asset.file_path, asset.asset_type)
+                    upload_payload = creator_adapter.upload_media(asset.local_path, asset.asset_type)
                 except Exception as exc:
                     asset.upload_status = "failed"
                     asset.upload_error = str(exc)[:500]
@@ -208,7 +206,7 @@ def _run_one_due_publish_job(db: Session, current_user: User, job: PublishJob, a
             db.commit()
             db.refresh(job)
             assets = db.scalars(
-                select(PublishAsset).where(PublishAsset.publish_job_id == job.id).order_by(PublishAsset.id.asc())
+                select(PublishAsset).where(PublishAsset.row_type == ASSET_PUBLISH, PublishAsset.parent_id == job.id).order_by(PublishAsset.id.asc())
             ).all()
         uploaded_assets = [asset for asset in assets if asset.upload_status == "uploaded"]
         if not uploaded_assets:
@@ -345,138 +343,6 @@ def _note_metrics(note: Note) -> dict[str, int]:
         "shares": shares,
         "engagement": likes + collects + comments + shares,
     }
-
-
-def _serialize_monitoring_note(note: Note) -> dict[str, Any]:
-    return {
-        "id": note.id,
-        "note_id": note.note_id,
-        "title": note.title,
-        "author_name": note.author_name,
-        "created_at": note.created_at.isoformat(),
-        **_note_metrics(note),
-    }
-
-
-def _note_haystack(note: Note) -> str:
-    raw_text = json.dumps(note.raw_json or {}, ensure_ascii=False)
-    return "\n".join([note.note_id, note.title, note.content, note.author_name, raw_text]).lower()
-
-
-def _note_matches_target(note: Note, target: MonitoringTarget) -> bool:
-    needle = target.value.strip().lower()
-    if not needle:
-        return False
-    return needle in _note_haystack(note)
-
-
-def _matching_notes_for_target(db: Session, target: MonitoringTarget, platform: str) -> list[Note]:
-    notes = db.scalars(
-        select(Note)
-        .where(
-            Note.user_id == target.user_id,
-            Note.platform == platform,
-            Note.is_deleted.is_(False),
-        )
-        .order_by(Note.created_at.desc(), Note.id.desc())
-    ).all()
-    matched = [note for note in notes if _note_matches_target(note, target)]
-    return sorted(matched, key=lambda note: _note_metrics(note)["engagement"], reverse=True)
-
-
-def _refresh_monitoring_target(db: Session, target: MonitoringTarget, now: datetime, platform: str) -> dict[str, Any]:
-    matched_notes = _matching_notes_for_target(db, target, platform)
-    snapshot_payload = {
-        "matched_count": len(matched_notes),
-        "total_engagement": sum(_note_metrics(note)["engagement"] for note in matched_notes),
-        "top_notes": [_serialize_monitoring_note(note) for note in matched_notes[:10]],
-    }
-    target.last_refreshed_at = now
-    target.updated_at = now
-    snapshot = MonitoringSnapshot(target_id=target.id, payload=snapshot_payload)
-    db.add(snapshot)
-    db.flush()
-
-    task = Task(
-        user_id=target.user_id,
-        platform=platform,
-        task_type="monitoring_refresh",
-        status="completed",
-        progress=100,
-        payload={
-            "target_id": target.id,
-            "target_type": target.target_type,
-            "value": target.value,
-            "snapshot_id": snapshot.id,
-            "matched_count": snapshot_payload["matched_count"],
-            "scheduler": True,
-        },
-    )
-    db.add(task)
-    db.flush()
-    return {
-        "target_id": target.id,
-        "snapshot_id": snapshot.id,
-        "matched_count": snapshot_payload["matched_count"],
-        "total_engagement": snapshot_payload["total_engagement"],
-    }
-
-
-def run_monitoring_refresh_once(user_id: int, platform: str = "xhs") -> dict[str, Any]:
-    """调度入口：刷新**指定用户**的监控目标（设计 15 §4.1.1，DEF-066）。
-
-    ⚠️ 原 `run_monitoring_refresh_for_all_users`（全库 active targets）**已被删除**：
-    内置行按用户各持一份 ⇒ 一行触发只刷行主人的 targets。匹配仍按
-    `Note.user_id == target.user_id`（target 自带归属，双保险）。
-
-    ⚠️ **T-111 / DEF-016（2026-10-04）**：`crawl_interval_minutes` 此前是**死配置**
-    （只被序列化下发、调度不读）⇒ 用户改了周期不生效，且没有任何提示。
-    现在它是**真正的节流闸**：距上次刷新不足 `crawl_interval_minutes` 的目标
-    本轮跳过（`skipped_count` 如实回报），到点的才刷。这样「周期」这个字段
-    对用户是**真的**（与限流额度去硬编码 DEF-076 同一类修复）。
-    """
-    db = SessionLocal()
-    try:
-        user = db.get(User, user_id)
-        if user is None:
-            raise RuntimeError(f"run_monitoring_refresh_once: user {user_id} not found")
-        now = shanghai_now()
-        targets = db.scalars(
-            select(MonitoringTarget)
-            .where(
-                MonitoringTarget.user_id == user.id,
-                MonitoringTarget.platform == platform,
-                MonitoringTarget.status == "active",
-            )
-            .order_by(MonitoringTarget.id.asc())
-        ).all()
-
-        items: list[dict[str, Any]] = []
-        skipped: list[dict[str, Any]] = []
-        for target in targets:
-            interval = max(int(target.crawl_interval_minutes or 60), 1)
-            last = target.last_refreshed_at
-            if last is not None and (now - last).total_seconds() < interval * 60:
-                # 未到点：跳过（带原因如实回报 —— 静默跳过正是 DEF-048 那类问题）
-                skipped.append(
-                    {
-                        "target_id": target.id,
-                        "reason": "not_due",
-                        "crawl_interval_minutes": interval,
-                        "last_refreshed_at": last.isoformat(),
-                    }
-                )
-                continue
-            items.append(_refresh_monitoring_target(db, target, now, platform))
-        db.commit()
-        return {
-            "refreshed_count": len(items),
-            "skipped_count": len(skipped),
-            "skipped": skipped,
-            "items": items,
-        }
-    finally:
-        db.close()
 
 
 def _check_single_account(db: Session, account: PlatformAccount, now: datetime) -> str:
@@ -717,7 +583,6 @@ def _builtin_seed_defaults() -> dict[str, dict[str, Any]]:
 
     return {
         "system.due_publish": {"cron": minute_cron, "status": "active"},
-        "system.monitoring_refresh": {"cron": minute_cron, "status": "active"},
         "system.cookie_health_check": {"cron": _cron_every_n_hours(2), "status": "active"},
         "system.qianfan_health_check": {
             "cron": _cron_every_n_hours(hours("qianfan_health_check_interval_hours", 6)),

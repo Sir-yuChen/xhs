@@ -81,7 +81,8 @@ from backend.app.services.media_generation import _media_dir  # noqa: F401  # �
 
 from backend.app.models.platform_account import PlatformAccount  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
-from backend.app.models.note import Note, NoteAsset  # noqa: F401  # 转发面：本文件不直接用，子模块用
+from backend.app.models import PublishAsset
+from backend.app.models.note import Note  # noqa: F401  # 转发面：本文件不直接用，子模块用
 
 
 

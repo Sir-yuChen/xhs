@@ -256,84 +256,6 @@
       "parent_seq": 10
     },
     {
-      "_seq": 20,
-      "name": "监控中心",
-      "menu_type": "C",
-      "path": "/platforms/xhs/monitoring",
-      "perms": "xhs:monitor:view",
-      "icon": "aim",
-      "workspace": "xhs",
-      "sort_order": 1,
-      "is_visible": true,
-      "status": "normal",
-      "parent_seq": 9
-    },
-    {
-      "_seq": 21,
-      "name": "新建监控",
-      "menu_type": "F",
-      "path": "",
-      "perms": "xhs:monitor:create",
-      "icon": "",
-      "workspace": "",
-      "sort_order": 0,
-      "is_visible": true,
-      "status": "normal",
-      "parent_seq": 20
-    },
-    {
-      "_seq": 22,
-      "name": "编辑监控",
-      "menu_type": "F",
-      "path": "",
-      "perms": "xhs:monitor:edit",
-      "icon": "",
-      "workspace": "",
-      "sort_order": 1,
-      "is_visible": true,
-      "status": "normal",
-      "parent_seq": 20
-    },
-    {
-      "_seq": 23,
-      "name": "删除监控",
-      "menu_type": "F",
-      "path": "",
-      "perms": "xhs:monitor:delete",
-      "icon": "",
-      "workspace": "",
-      "sort_order": 2,
-      "is_visible": true,
-      "status": "normal",
-      "parent_seq": 20
-    },
-    {
-      "_seq": 24,
-      "name": "立即刷新",
-      "menu_type": "F",
-      "path": "",
-      "perms": "xhs:monitor:refresh",
-      "icon": "",
-      "workspace": "",
-      "sort_order": 3,
-      "is_visible": true,
-      "status": "normal",
-      "parent_seq": 20
-    },
-    {
-      "_seq": 25,
-      "name": "启用监控",
-      "menu_type": "F",
-      "path": "",
-      "perms": "xhs:monitor:enable",
-      "icon": "",
-      "workspace": "",
-      "sort_order": 4,
-      "is_visible": true,
-      "status": "normal",
-      "parent_seq": 20
-    },
-    {
       "_seq": 26,
       "name": "自动运营",
       "menu_type": "C",
@@ -763,58 +685,6 @@
       "parent_seq": 47
     },
     {
-      "_seq": 59,
-      "name": "关键词组",
-      "menu_type": "C",
-      "path": "/platforms/xhs/keywords",
-      "perms": "xhs:keyword:view",
-      "icon": "key",
-      "workspace": "xhs",
-      "sort_order": 4,
-      "is_visible": true,
-      "status": "normal",
-      "parent_seq": 32
-    },
-    {
-      "_seq": 60,
-      "name": "新建关键词组",
-      "menu_type": "F",
-      "path": "",
-      "perms": "xhs:keyword:create",
-      "icon": "",
-      "workspace": "",
-      "sort_order": 0,
-      "is_visible": true,
-      "status": "normal",
-      "parent_seq": 59
-    },
-    {
-      "_seq": 61,
-      "name": "编辑关键词组",
-      "menu_type": "F",
-      "path": "",
-      "perms": "xhs:keyword:edit",
-      "icon": "",
-      "workspace": "",
-      "sort_order": 1,
-      "is_visible": true,
-      "status": "normal",
-      "parent_seq": 59
-    },
-    {
-      "_seq": 62,
-      "name": "删除关键词组",
-      "menu_type": "F",
-      "path": "",
-      "perms": "xhs:keyword:delete",
-      "icon": "",
-      "workspace": "",
-      "sort_order": 2,
-      "is_visible": true,
-      "status": "normal",
-      "parent_seq": 59
-    },
-    {
       "_seq": 63,
       "name": "新建话题",
       "menu_type": "F",
@@ -852,19 +722,6 @@
       "is_visible": true,
       "status": "normal",
       "parent_seq": 59
-    },
-    {
-      "_seq": 66,
-      "name": "内容洞察",
-      "menu_type": "C",
-      "path": "/platforms/xhs/insights/content",
-      "perms": "xhs:insights:view",
-      "icon": "bar-chart",
-      "workspace": "xhs",
-      "sort_order": 5,
-      "is_visible": true,
-      "status": "normal",
-      "parent_seq": 32
     },
     {
       "_seq": 67,
@@ -1489,19 +1346,6 @@
       "is_visible": true,
       "status": "normal",
       "parent_seq": 111
-    },
-    {
-      "_seq": 115,
-      "name": "商品洞察",
-      "menu_type": "C",
-      "path": "/platforms/xhs/insights/shop",
-      "perms": "xhs:insights:shop",
-      "icon": "line-chart",
-      "workspace": "xhs",
-      "sort_order": 4,
-      "is_visible": true,
-      "status": "normal",
-      "parent_seq": 67
     },
     {
       "_seq": 116,

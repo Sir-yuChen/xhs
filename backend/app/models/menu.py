@@ -69,7 +69,7 @@ MENU_STATUSES: tuple[str, ...] = (MENU_STATUS_NORMAL, MENU_STATUS_DISABLED)
 class Menu(Base):
     """菜单行（M / C / F 三型同表）。"""
 
-    __tablename__ = "menus"
+    __tablename__ = "sys_menus"
     __table_args__ = (
         #: 部分唯一：权限码全局唯一（M 行 `perms` 为空 ⇒ 条件不成立 ⇒ 互不冲突）。
         Index(

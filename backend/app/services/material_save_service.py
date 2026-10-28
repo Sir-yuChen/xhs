@@ -48,7 +48,7 @@ import requests
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.app.models import AigcMediaAsset, MaterialFolder
+from backend.app.models import PublishAsset, MaterialFolder
 from backend.app.services.material_storage import (
     MaterialStorageError,
     get_material_storage,
@@ -122,9 +122,9 @@ def save_assets_to_folder(
 
     assets = list(
         db.scalars(
-            select(AigcMediaAsset).where(
-                AigcMediaAsset.id.in_(asset_ids),
-                AigcMediaAsset.user_id == user_id,
+            select(PublishAsset).where(
+                PublishAsset.id.in_(asset_ids),
+                PublishAsset.user_id == user_id,
             )
         ).all()
     )
@@ -201,10 +201,10 @@ def save_assets_to_folder(
     }
 
 
-def _group_of_asset(asset: AigcMediaAsset, asset_groups: dict[int, str]) -> str:
+def _group_of_asset(asset: PublishAsset, asset_groups: dict[int, str]) -> str:
     """资产属于哪一组（`product` / `detail`）—— **由调用方从任务 payload 传进来**。
 
-    ⚠️ `AigcMediaAsset` **没有 group 列**：分组事实只在生成那一刻的任务响应里
+    ⚠️ `PublishAsset` **没有 group 列**：分组事实只在生成那一刻的任务响应里
     （`payload.groups`）。所以本函数**不自作推断** —— 调用方给什么就是什么，
     给不出就返回空串 ⇒ 文件名用 `图-NN`（**不猜**：猜错会让用户以为分组是权威的，
     那比「没分组」更坏 —— 同「缺值不造假」口径）。

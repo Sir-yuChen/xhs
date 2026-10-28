@@ -3,7 +3,7 @@
 ## 用户口径（2026-10-28）
 
 - 「采集的笔记先放内容库，标识统计优化成采集链」⇒ 采集独立标识 `collected`，进内容库；
-- 「数据中心数据不落内容库表」⇒ 数据中心链路只写 `note_datacenter_stats`。
+- 「数据中心数据不落内容库表」⇒ 数据中心链路只写 `xhs_note_datacenter_stats`。
 
 ## 为什么行为断言测不到（L2）
 
@@ -96,7 +96,7 @@ def test_second_crawl_reuses_the_row_not_duplicates(db, account) -> None:
     db.commit()
 
     count = db.scalar(
-        text("SELECT count(*) FROM notes WHERE note_id = 'test_collected_002'")
+        text("SELECT count(*) FROM xhs_notes WHERE note_id = 'test_collected_002'")
     )
     assert count == 1, f"采集同一篇落了 {count} 行（应按 (user_id, note_id) upsert）"
 
@@ -127,17 +127,17 @@ def test_datacenter_sync_does_not_create_notes_rows(db, account) -> None:
     """
     from backend.app.services import note_data_service as nds
 
-    before = db.scalar(text("SELECT count(*) FROM notes"))
+    before = db.scalar(text("SELECT count(*) FROM xhs_notes"))
 
     row = nds.NoteDataRow(note_id="test_datacenter_only_001")
     nds.upsert_note_data_rows(db, [row], user_id=account.user_id, account_id=account.id)
     db.commit()
 
-    after = db.scalar(text("SELECT count(*) FROM notes"))
+    after = db.scalar(text("SELECT count(*) FROM xhs_notes"))
     assert after == before, f"数据中心同步往 notes 写了 {after - before} 行（应只写统计表）"
 
     stat = db.scalar(
-        text("SELECT count(*) FROM note_datacenter_stats WHERE note_id = 'test_datacenter_only_001'")
+        text("SELECT count(*) FROM xhs_note_datacenter_stats WHERE note_id = 'test_datacenter_only_001'")
     )
     assert stat == 1, "数据中心同步没写统计行 —— 那是它该写的地方"
 
@@ -148,15 +148,15 @@ def test_local_notes_stay_out_of_the_library(db) -> None:
     from backend.app.models.note import LIBRARY_NOTE_TYPES
 
     lib_types = set(LIBRARY_NOTE_TYPES)
-    local_rows = db.scalar(text("SELECT count(*) FROM notes WHERE note_type = 'local'"))
+    local_rows = db.scalar(text("SELECT count(*) FROM xhs_notes WHERE note_type = 'local'"))
     visible = db.scalar(
         text(
-            "SELECT count(*) FROM notes WHERE is_deleted = false "
+            "SELECT count(*) FROM xhs_notes WHERE is_deleted = false "
             f"AND note_type IN ({','.join(repr(t) for t in lib_types)})"
         )
     )
     total_lib = db.scalar(
-        text("SELECT count(*) FROM notes WHERE is_deleted = false AND publish_status != 'published'")
+        text("SELECT count(*) FROM xhs_notes WHERE is_deleted = false AND publish_status != 'published'")
     )
     assert visible <= total_lib
     if local_rows:

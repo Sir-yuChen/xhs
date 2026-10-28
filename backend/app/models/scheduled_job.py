@@ -71,7 +71,7 @@ class ScheduledJob(Base):
       也不用于「我的任务」过滤 —— 用户侧任务中心已下线。
     """
 
-    __tablename__ = "scheduled_jobs"
+    __tablename__ = "sys_scheduled_jobs"
 
     #: **一种任务只有一行定义**（设计 69 §2，2026-10-25 用户口径「收为公共」）。
     #:
@@ -86,7 +86,7 @@ class ScheduledJob(Base):
     #: **最后修改人**（设计 69：不再是归属人；归属看 `workspace`）。
     #: 内置种子行播种时为 NULL（没有人"改过"它）。
     user_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("users.id"), nullable=True, index=True
+        ForeignKey("sys_users.id"), nullable=True, index=True
     )
     name: Mapped[str] = mapped_column(String(128))
     job_key: Mapped[str] = mapped_column(String(128), index=True)
@@ -139,16 +139,16 @@ class ScheduledJobLog(Base):
     API 的 `user_id == 当前用户` 过滤天然排除它们。
     """
 
-    __tablename__ = "scheduled_job_logs"
+    __tablename__ = "sys_scheduled_job_logs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     job_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("scheduled_jobs.id", ondelete="SET NULL"), nullable=True, index=True
+        ForeignKey("sys_scheduled_jobs.id", ondelete="SET NULL"), nullable=True, index=True
     )
     #: 执行时快照的任务**最后修改人**（DEF-066 建列；设计 69 后语义改为审计，
     #: 不再表达归属）。存量行的值 = 当时的归属人，保留作历史快照。
     user_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("users.id"), nullable=True, index=True
+        ForeignKey("sys_users.id"), nullable=True, index=True
     )
     #: **这次执行跑的是谁的数据**（设计 69 §4.1，迁移 `f2a3b4c5d6e7`）。
     #:
@@ -159,7 +159,7 @@ class ScheduledJobLog(Base):
     #: 前端「执行日志」的「目标用户」列读这一列；账号卡「同步中」判据仍用
     #: `platform_account_id`（不受影响）。
     executed_for_user_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("users.id"), nullable=True, index=True
+        ForeignKey("sys_users.id"), nullable=True, index=True
     )
     #: 执行时快照的**平台账号**（迁移 `j1k2l3m4n5o6` 建列，`b3c4d5e6f7a8` 随 ADR-021
     #: ——设计 18 §6.3「列名漂移」——改名为 `platform_account_id`，与全库隔离键命名

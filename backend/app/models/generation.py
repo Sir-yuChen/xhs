@@ -11,7 +11,6 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
-    UniqueConstraint,
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -123,7 +122,7 @@ class GenerationRecord(Base):
       快照展示从本表取（不再只靠轮询窗口，这是本表存在的核心理由）。
     """
 
-    __tablename__ = "generation_records"
+    __tablename__ = "xhs_generation_records"
     #: ⚠️ 2026-10-23 补：这两个索引此前**只写在迁移 `c1d2e3f4a5b7` 里，模型层没声明**。
     #: 后果：用 `create_all` 建出的库（测试库 / PG 基线）会**静默丢掉它们** ——
     #: `uq_generation_records_adopted` 是**唯一约束**（同商品只能有一条采用版），
@@ -152,10 +151,10 @@ class GenerationRecord(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     #: 归属（DEF-066）。
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("sys_users.id"), index=True)
     #: 对应队列项（一个生成任务一条）。重试 = 新队列项 + 新记录行。
     task_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("tasks.id"), index=True, nullable=True
+        ForeignKey("queue_jobs.id"), index=True, nullable=True
     )
     #: 源商品**平台 ID**（千帆 `item_id`）。
     #: ⚠️ 设计 75 S5（2026-10-27）：原来是本地台账主键 `shop_product_id`（FK →
@@ -165,7 +164,7 @@ class GenerationRecord(Base):
     item_id: Mapped[str] = mapped_column(String(64), default="", index=True)
     #: 所用模板（`null` = 未用模板）。
     template_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("prompt_templates.id"), nullable=True
+        ForeignKey("xhs_prompt_templates.id"), nullable=True
     )
     #: 所用上游连接配置。
     gateway_config_id: Mapped[Optional[int]] = mapped_column(
@@ -207,7 +206,7 @@ class GenerationRecord(Base):
     #: 当前版本：全量生成 ⇒ `None`；「基于第 2 版只重生成正文/图片」⇒ 指向第 2 版那条。
     #: 自引用外键（当前版本被删 ⇒ 置空，不连带删掉这条历史）。
     parent_record_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("generation_records.id", ondelete="SET NULL"), nullable=True
+        ForeignKey("xhs_generation_records.id", ondelete="SET NULL"), nullable=True
     )
     #: 这一版重做了什么：`all`（整篇新生成）/ `text`（只重写文案，图沿用当前版本）/
     #: `media`（只重配图片，文案沿用当前版本）。见 `REGEN_SCOPES`。
@@ -233,84 +232,11 @@ class GenerationRecord(Base):
     )
 
 
-class AigcMediaAsset(Base):
-    """AIGC 媒体资产溯源（设计 17 §3.6，T5）。
 
-    **为什么建独立表而不塞 `note_assets`**：`note_assets` 是「笔记媒体清单」
-    （发布要读它），溯源信息（prompt/model/aigcTaskId）不该污染笔记媒体行；
-    发布时按需 join 本表取 `aigc_task_id`（平台合规要求 `aigcTaskId`）。
-
-    ⚠️ 不含**平台发布**相关字段（发布状态在 `publish_jobs`），本表只登记「AI 生成」事实。
-    """
-
-    __tablename__ = "aigc_media_assets"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
-    #: 关联生成记录。
-    generation_record_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("generation_records.id"), index=True, nullable=True
-    )
-    #: `image` / `video`。
-    asset_type: Mapped[str] = mapped_column(String(16))
-    #: 本地落盘路径（`storage/media/` 或素材库副本）。
-    local_path: Mapped[str] = mapped_column(Text)
-    #: 供应商回传 URL（若有）。
-    url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    #: 平台 AIGC 溯源号（发布时写入 `feature.aigcTaskId`）。
-    aigc_task_id: Mapped[str] = mapped_column(Text, default="")
-    #: 本次生成所用的图片/视频 Prompt（**溯源用，必留**）。
-    prompt: Mapped[str] = mapped_column(Text, default="")
-    #: 用哪个模型生成。
-    model_name: Mapped[str] = mapped_column(String(128), default="")
-    #: v2.30（§13.3.11）：**商品关联** —— 这张图是为哪个商品生成的。
-    #:
-    #: ⚠️ 用**业务 ID**（`shop_products.item_id`）而不是台账主键：台账重同步会换
-    #: 主键，业务 ID 不会。可空 = 与商品无关的生成（如笔记配图）——**不造假**。
-    #:
-    #: ⚠️ **历史行不回填**（迁移只加列）：旧图只有任务 payload 里可能有 item_id，
-    #: 但「payload 里有」≠「这张图属于这个商品」（一次任务可能出多张不同组的图）
-    #: ⇒ 旧的保持空，如实反映「不知道」。
-    item_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
-    #: v2.30：**平台账号** —— 多账号下同一个 `item_id` 是可能的（不同店铺）
-    #: ⇒ 只按 item_id 关联会串号，必须带上账号维度。
-    platform_account_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now)
-
-
-class NoteGenerationLink(Base):
-    """生成笔记 ↔ 商品关系（设计 17 §3.7，T5）。
-
-    语义：**LLM 生成链路**的「笔记 ↔ 商品」多对多。一期 `note_goods` 是**平台 ID 级**
-    （`note_id`/`item_id`），而 LLM 生成落库时笔记是本地 `local_<uuid>`（无平台 ID）、
-    商品可能还没同步进台账 —— 需要一张**本地主键级**关系表。
-
-    **与一期 `note_goods` 的关系（不是两份实现）**：一期关系表是「**平台证据缓存**」
-    （千帆说挂什么就落什么，平台 ID），本表是「**本地生成编排**」（从台账挑商品做生成，
-    本地主键）。发布成功后两者**都保留**。
-
-    ⚠️ 前端展示挂链商品**仍读 `note_goods`**（契约不变）；本表只服务「生成链路追查」。
-    """
-
-    __tablename__ = "note_generation_links"
-    __table_args__ = (
-        UniqueConstraint(
-            "note_pk", "item_id", name="uq_note_generation_links_note_item"
-        ),
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
-    #: 本地笔记主键。
-    note_pk: Mapped[int] = mapped_column(ForeignKey("notes.id"), index=True)
-    #: 商品**平台 ID**。⚠️ 设计 75 S5（2026-10-27）：原 `shop_product_id`（本地台账
-    #: 主键，FK → `shop_products`）随表删，换平台 ID（理由同 `GenerationRecord.item_id`）。
-    item_id: Mapped[str] = mapped_column(String(64), default="", index=True)
-    #: **是哪次生成产出这篇笔记**（版本历史 ↔ 笔记的唯一桥）。
-    #: ⚠️ 2026-10-17 新增：此前本表只有「笔记 ↔ 商品」，**没有指向生成记录** ⇒
-    #: 「基于第 2 版只重写文案」时需要从当前版本记录反查它产出的笔记（沿用其媒体），
-    #: 而这条路径原本是断的（实测本表 0 行，无法溯源）。
-    generation_record_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("generation_records.id", ondelete="SET NULL"), index=True, nullable=True
-    )
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=shanghai_now)
+#: ⚠️ `AigcMediaAsset` 已并入 `PublishAsset`（`row_type='aigc'`），2026-10-28。
+#: 原表 `aigc_media_assets` 的列是 `xhs_publish_assets` 的子集 + 生成态几列
+#: （prompt / model_name / item_id / aigc_task_id），且 42 行**全部**挂在已删的
+#: 生成记录上 ⇒ 合并去重，迁移 `c7d8e9f0a1b2` 负责 DROP。
+#:
+#: 保留本名做**别名**：全部读写点改指 `PublishAsset` + `row_type=ASSET_AIGC`，
+#: 但导入名不变，避免 5 个文件散改漏改。

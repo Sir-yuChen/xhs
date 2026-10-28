@@ -22,10 +22,8 @@ from backend.app.api import (
     accounts,
     ai,
     auth,
-    auto_tasks,
     drafts,
     files,
-    keyword_groups,
     llm_gateway,
     llm_gateway_monitor,
     llm_prompts,
@@ -56,7 +54,6 @@ from backend.app.api.platforms.xhs import (
     forbidden_words,
     material_files,
     materials,
-    monitoring,
     package_precheck,
     pc,
     product_notes,
@@ -88,7 +85,6 @@ def include_all_routers(app: FastAPI) -> None:
     app.include_router(llm_prompts.router, prefix="/api")
     app.include_router(topics.router, prefix="/api")
     app.include_router(notifications.router, prefix="/api")
-    app.include_router(keyword_groups.router, prefix="/api")
     app.include_router(publish.router, prefix="/api")
     app.include_router(analytics.router, prefix="/api")
     app.include_router(pc.router, prefix="/api")
@@ -105,8 +101,6 @@ def include_all_routers(app: FastAPI) -> None:
     # v2.31：素材**文件**的增删（会动用户磁盘 ⇒ 另一套语义，单独成模块）
     app.include_router(material_files.router, prefix="/api")
     app.include_router(crawl.router, prefix="/api")
-    app.include_router(monitoring.router, prefix="/api")
-    app.include_router(auto_tasks.router, prefix="/api")
     app.include_router(schedule.router, prefix="/api")
     # 运行时配置中心（设计 10 §7）：设置页的列表 / 增删改查
     app.include_router(settings_api.router, prefix="/api")

@@ -357,6 +357,7 @@ def _upsert_datacenter_stat(
     # 覆盖更新（同 note + 同日 + 同窗口取最新值）。
     existing.note_flag = note_flag
     existing.title = row.title or existing.title
+    existing.note_url = row.note_url or existing.note_url
     existing.item_id = row.item_id
     existing.item_title = row.item_title
     # 发布时间：butterfly 的 published_at 是字符串（如 "2026-08-13 09:22"），
@@ -586,60 +587,41 @@ def import_note_data_file(
         db.close()
 
 
-def hydrate_offline_note(
-    db: Any,
-    note: Any,
+def fetch_datacenter_note_detail(
+    note_url: str,
     *,
     fetch_payload: Any,
     limiter: Any,
+    limiter_key: str = "",
 ) -> dict[str, Any]:
-    """对**一条**离线笔记实时拉详情并落库（正文 / 媒体 / 话题拆分）。
+    """数据中心笔记的**实时详情**（正文 / 话题 / 媒体）—— 纯读，**零落库**。
 
-    供两条链路共用（单一实现，DEF-044）：
-    * :func:`hydrate_offline_notes`（批量，历史遗留—— 2026-10-06 起**不再被定时
-      任务/导入调用**，仅保留给显式批量场景）；
-    * 「点击卡片实时拉详情」端点（`POST /notes/{note_id}/hydrate`，**当前主路径**）。
+    2026-10-28 用户口径「数据中心完全和笔记表拆分、不再查笔记表」：
+    `notes` 只存用户自己的笔记，平台笔记的事实只在 `note_datacenter_stats`。
+    故这里不接 ORM、不写任何表，每次点击都现拉（与线上笔记 `/xhs/pc/notes/detail` 同口径）。
 
-    落库语义与同步链路的 `hydrate_note_detail` 同口径：正文**填空**（详情正文为空
-    不抹本地）、媒体图/视频**只增不删**、话题 `apply_sync_topics` **拆表只增不删**。
-
-    返回 `{status, filled, no_url, skipped_by_limit, failed}`。``status`` ∈
-    ``ok`` / ``no_url``（缺 token）/ ``skipped_by_limit`` / ``failed``。
+    返回 ``{status, content, topics, image_urls, video_url}``；
+    ``status`` ∈ ``ok`` / ``no_url``（缺 `xsec_token`）/ ``skipped_by_limit`` / ``failed``。
     """
-    from backend.app.services.note_sync_service import (
-        _merge_note_images,
-        _needs_hydration,
-        _note_detail_url,
-    )
-    from backend.app.services.note_topic_service import apply_sync_topics
     from backend.app.api.platforms.xhs.pc import _normalize_detail_payload
-    from backend.app.api.platforms.xhs.crawl import _merge_note_assets
 
     result: dict[str, Any] = {
         "status": "failed",
-        "filled": 0,
-        "no_url": 0,
-        "skipped_by_limit": 0,
-        "failed": 0,
+        "content": "",
+        "topics": [],
+        "image_urls": [],
+        "video_url": "",
     }
-    # 幂等：已有正文 + 媒体（或非视频且已补过）跳过，不重复拉。
-    if not _needs_hydration(db, note):
-        result["status"] = "already_hydrated"
-        return result
-    url = _note_detail_url(note)
+    url = str(note_url or "")
     if not url or "xsec_token=" not in url:
         result["status"] = "no_url"
-        result["no_url"] = 1
         return result
-    if not limiter.wait_allow(str(note.id)):
+    if not limiter.wait_allow(limiter_key or url):
         result["status"] = "skipped_by_limit"
-        result["skipped_by_limit"] = 1
         return result
 
     success, _msg, raw_payload = fetch_payload(url)
     if not success:
-        result["status"] = "failed"
-        result["failed"] = 1
         return result
     detail_items = (
         (raw_payload or {}).get("data", {}).get("items")
@@ -647,113 +629,12 @@ def hydrate_offline_note(
         else None
     )
     if not detail_items:
-        result["status"] = "failed"
-        result["failed"] = 1
         return result
 
     normalized = _normalize_detail_payload(raw_payload, url)
-    content = str(normalized.get("content") or "")
-    if content and not str(note.content or "").strip():
-        note.content = content
-    detail_topics = [str(t).strip() for t in (normalized.get("tags") or []) if str(t).strip()]
-    apply_sync_topics(db, note, detail_topics)
-    _merge_note_images(db, note, normalized.get("image_urls") or [])
-    video_url = str(normalized.get("video_url") or normalized.get("video_addr") or "")
-    if video_url:
-        _merge_note_assets(db, note, [video_url], asset_type="video")
-    note.hydrated_at = shanghai_now()
     result["status"] = "ok"
-    result["filled"] = 1
+    result["content"] = str(normalized.get("content") or "")
+    result["topics"] = [str(t).strip() for t in (normalized.get("tags") or []) if str(t).strip()]
+    result["image_urls"] = list(normalized.get("image_urls") or [])
+    result["video_url"] = str(normalized.get("video_url") or normalized.get("video_addr") or "")
     return result
-
-
-def hydrate_offline_notes(
-    *,
-    account_id: int,
-    user_id: Optional[int] = None,
-    category: Optional[str] = None,
-    session_factory: Any = None,
-    fetch_payload: Any = None,
-) -> dict[str, Any]:
-    """离线笔记的**详情补齐**（2026-10-06 需求 4「根据笔记原链接获取详情媒体/正文/话题」）。
-
-    与同步链路的 :func:`note_sync_service.hydrate_note_detail` 的**关键区别**：
-
-    * **无需登录**：离线数据的 `note_url`（来自千帆 `discoveryLink`）**自带**笔记级
-      `xsec_token`，走 explore SSR（:func:`note_detail_ssr.fetch_note_detail_payload`）
-      **匿名**即可读详情 —— 不判 web_session 门禁（`hydrate_note_detail` 那条门禁是
-      给「creator 列表落库的笔记」用的，它们没有自带 token，才需要账号会话）。
-    * **幂等**：复用 `_needs_hydration`（`hydrated_at IS NULL`，或视频笔记但本地没有
-      视频资产）⇒ 已有正文 + 媒体的行**不重复拉**（www 详情额度有限，重复 = 白烧）。
-    * **限流**：每篇都过 `wait_allow`，超限等待不停（硬约束 C5 的刹车）。
-    * **话题拆表**（用户 2026-10-06 口径「笔记话题才分到对应表」）：正文里的 `#话题`
-      走 `apply_sync_topics` 拆进 `topics` 表 + `note_topics` 关系；媒体图/视频进
-      `note_assets`；正文进 `notes.content`。**只有话题这一项拆表**，媒体与正文
-      仍落在 `notes` 自己的字段 / 资产表。
-
-    返回 `{attempted, filled, failed, no_url, skipped_by_limit}`。失败不向上抛
-    （单篇失败不影响其余），也不写 `hydrated_at`（下次同步重试）。
-    """
-    from backend.app.core.rate_limiter import get_rate_limiter
-
-    if fetch_payload is None:
-        from backend.app.adapters.xhs.note_detail_ssr import fetch_note_detail_payload
-
-        fetch_payload = fetch_note_detail_payload
-    factory = session_factory or SessionLocal
-    db = factory()
-    stats: dict[str, Any] = {
-        "attempted": 0,
-        "filled": 0,
-        "failed": 0,
-        "no_url": 0,
-        "skipped_by_limit": 0,
-    }
-    try:
-        account = db.get(PlatformAccount, account_id)
-        if account is None:
-            return {**stats, "error": "ACCOUNT_NOT_FOUND"}
-        owner_id = int(user_id or account.user_id or 0)
-
-        # 候选：该账号下有数据中心统计的笔记（= 离线数据；`note_category` 已退役，
-        # 2026-10-12 设计 35 改用统计表 `note_datacenter_stats` 判定存在性）。
-        stat_note_ids = db.scalars(
-            select(NoteDatacenterStat.note_id).where(
-                NoteDatacenterStat.user_id == owner_id,
-                NoteDatacenterStat.platform_account_id == account_id,
-            )
-        ).all()
-        stmt = select(Note).where(
-            Note.user_id == owner_id,
-            Note.platform_account_id == account_id,
-            Note.note_id.in_(stat_note_ids or {""}),
-        )
-        if category in CATEGORIES:
-            flag = _CATEGORY_TO_FLAG.get(category, "")
-            stmt = stmt.where(
-                Note.note_id.in_(
-                    select(NoteDatacenterStat.note_id).where(
-                        NoteDatacenterStat.note_flag == flag,
-                        NoteDatacenterStat.user_id == owner_id,
-                        NoteDatacenterStat.platform_account_id == account_id,
-                    )
-                )
-            )
-        pending = db.scalars(stmt.order_by(Note.id)).all()
-
-        limiter = get_rate_limiter()
-        for note in pending:
-            outcome = hydrate_offline_note(db, note, fetch_payload=fetch_payload, limiter=limiter)
-            stats["no_url"] += outcome["no_url"]
-            stats["skipped_by_limit"] += outcome["skipped_by_limit"]
-            stats["failed"] += outcome["failed"]
-            if outcome["status"] == "ok":
-                stats["attempted"] += 1
-                stats["filled"] += outcome["filled"]
-                db.commit()
-        return stats
-    except Exception as exc:  # noqa: BLE001 - 详情补齐失败不拖垮同步/导入主流程
-        db.rollback()
-        return {**stats, "error": f"{type(exc).__name__}: {exc}"}
-    finally:
-        db.close()

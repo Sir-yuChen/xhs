@@ -14,19 +14,8 @@ const sectionInfo: Record<string, { title: string; description: string }> = {
     title: "内容库",
     description: "视觉笔记卡、标签、筛选、批量导出和素材下载的统一资产库。",
   },
-  analytics: {
-    title: "数据洞察",
-    description: "围绕已抓取数据生成趋势、爆款拆解、评论痛点和关键词机会。",
-  },
-  // ⚠️ 2026-10-04 设计 21 切片 A：`benchmarks` 条目改 `monitoring` —— 竞品监控已并入
-  // 「监控中心」，`/benchmarks` 是真路由（重定向），`:section` 兜底页轮不到它。
-  monitoring: {
-    title: "监控中心",
-    description: "跟踪目标账号、品牌、关键词与 URL 的最新变化和内容模式。",
-  },
-  // ⚠️ 2026-09-25 §36：`image-studio` 条目移除 —— 该 path 起有真实路由
-  // （「笔记工坊」的 tab 重定向），`:section` 兜底页永远轮不到它，是死条目。
-  // ⚠️ 2026-10-04 设计 21 切片 C：`rewrite` 条目移除（无对应路由，永不可达）。
+  // ⚠️ `analytics` / `monitoring` 条目已移除（2026-10-28：洞察两页与监控中心整体退场，
+  // 该 path 下已无路由 ⇒ 兜底页永不可达）。
   publish: {
     title: "发布中心",
     description: "草稿、素材上传、立即发布、定时发布、失败重试和历史记录。",

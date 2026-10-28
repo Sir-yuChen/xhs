@@ -151,7 +151,7 @@ _A = WORKSPACE_AI
 #: 必须在启动守卫生效前把「借宿」标出来（见 `PermSpec.host_path`）。
 _HOST_WORKSHOP = "/platforms/xhs/note-workshop"
 _HOST_SHOP_ITEMS = "/platforms/xhs/shop-items"
-_HOST_KEYWORDS = "/platforms/xhs/keywords"
+_HOST_LIBRARY = "/platforms/xhs/library"
 _HOST_GATEWAY = "/llm-gateway/providers"
 _HOST_RECORDS = "/task-records"
 
@@ -163,7 +163,7 @@ _LODGER_HOSTS: dict[str, str] = {
     "xhs:publish": _HOST_SHOP_ITEMS,
     "xhs:rule": _HOST_SHOP_ITEMS,
     "xhs:forbiddenWord": _HOST_SHOP_ITEMS,
-    "xhs:topic": _HOST_KEYWORDS,
+    "xhs:topic": _HOST_LIBRARY,
     "ai:alert": _HOST_GATEWAY,
     "xhs:record": _HOST_RECORDS,
 }
@@ -243,19 +243,9 @@ BUSINESS_PERMS: tuple[PermSpec, ...] = (
     *_f("xhs:picture", "upload/delete/move/resize/restore/download",
         "上传图片/删除图片/移动图片/调整尺寸/恢复图片/下载图片",
         "/platforms/xhs/picture-space", _X),
-    # 监控中心 5
-    *_f("xhs:monitor", "create/edit/delete/refresh/enable",
-        "新建监控/编辑监控/删除监控/立即刷新/启用监控",
-        "/platforms/xhs/monitoring", _X),
-    # 自动运营 5
-    *_f("xhs:autoops", "create/edit/delete/run/enable",
-        "新建任务/编辑任务/删除任务/立即执行/启用任务",
-        "/platforms/xhs/auto-ops", _X),
     # 数据抓取 1
     *_f("xhs:crawl", "submit", "提交抓取", "/platforms/xhs/discovery", _X),
     # 关键词组 3
-    *_f("xhs:keyword", "create/edit/delete", "新建关键词组/编辑关键词组/删除关键词组",
-        "/platforms/xhs/keywords", _X),
     # 话题 3
     *_f("xhs:topic", "create/edit/delete", "新建话题/编辑话题/删除话题",
         "/platforms/xhs/keywords", _X),
@@ -300,8 +290,6 @@ PAGE_VIEW_PERMS: tuple[PermSpec, ...] = (
     # 小红书工作区 16
     PermSpec("xhs:dashboard:view", "总览", "C", "/platforms/xhs/dashboard", _X, _X),
     PermSpec("xhs:account:view", "账号矩阵", "C", "/platforms/xhs/accounts", _X, _X),
-    PermSpec("xhs:monitor:view", "监控中心", "C", "/platforms/xhs/monitoring", _X, _X),
-    PermSpec("xhs:autoops:view", "自动运营", "C", "/platforms/xhs/auto-ops", _X, _X),
     PermSpec("xhs:crawl:view", "笔记发现", "C", "/platforms/xhs/discovery", _X, _X),
     PermSpec("xhs:note:view", "我的笔记", "C", "/platforms/xhs/my-notes", _X, _X),
     PermSpec("xhs:library:view", "内容库", "C", "/platforms/xhs/library", _X, _X),
@@ -310,11 +298,6 @@ PAGE_VIEW_PERMS: tuple[PermSpec, ...] = (
     #: 工坊的 6 个 Tab（2026-10-26 用户口径「菜单管理中有很多缺失」）：
     #: 它们此前只是**同一个 URL 的 query 参数**、零权限码 ⇒ 授权页勾不了、
     #: 后端也拦不住。按「一个功能区一个码」补齐，前端 Tab 与后端路由两侧都判。
-    #: 商品洞察与内容洞察是**两个页面**（两个路由），此前只有 insights:view 一个码
-    #: 且只挂了评论洞察一条路由 ⇒ 页面级码拦不住任何东西。
-    PermSpec("xhs:insights:shop", "商品洞察", "C", "/platforms/xhs/insights/shop", _X, _X),
-    PermSpec("xhs:keyword:view", "关键词组", "C", "/platforms/xhs/keywords", _X, _X),
-    PermSpec("xhs:insights:view", "内容洞察 / 商品洞察", "C", "/platforms/xhs/insights/content", _X, _X),
     PermSpec("xhs:item:view", "商品列表", "C", "/platforms/xhs/shop-items", _X, _X),
     PermSpec("xhs:violation:view", "违规管理", "C", "/platforms/xhs/violation-manage", _X, _X),
     PermSpec("xhs:picture:view", "图片空间", "C", "/platforms/xhs/picture-space", _X, _X),

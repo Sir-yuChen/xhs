@@ -25,7 +25,6 @@ import {
   Modal,
   Popconfirm,
   Popover,
-  Radio,
   Select,
   Space,
   Spin,
@@ -356,7 +355,6 @@ export function XhsDatacenterPage() {
   // 批量删除。
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
   const [batchDeleteCategory, setBatchDeleteCategory] = useState<"goods" | "normal">("goods");
-  const [batchDeleteMode, setBatchDeleteMode] = useState<"local" | "platform">("local");
   const [batchDeleting, setBatchDeleting] = useState(false);
   // 操作列单篇删除中（转圈用）。
   const [deletingNoteId, setDeletingNoteId] = useState<string | null>(null);
@@ -599,7 +597,8 @@ export function XhsDatacenterPage() {
     if (!ids.length) return;
     setBatchDeleting(true);
     try {
-      const result = await batchDeleteNotes(ids, batchDeleteMode === "platform");
+      if (!selectedAccountId) return;
+      const result = await batchDeleteNotes(ids, selectedAccountId);
       if (result.failed.length) {
         message.warning(`已删除 ${result.deleted} 篇，${result.failed.length} 篇失败（详见原因）`);
       } else {
@@ -616,15 +615,16 @@ export function XhsDatacenterPage() {
     }
   }
 
-  /** 操作列单篇删除：`deletePlatform` 决定「只删本地」还是「删本地 + 平台」。 */
-  async function deleteNote(note: DatacenterStatItem, category: "goods" | "normal", deletePlatform: boolean) {
+  /** 操作列单篇删除：只删平台（数据中心是平台数据，本地无对应行）。 */
+  async function deleteNote(note: DatacenterStatItem, category: "goods" | "normal") {
     setDeletingNoteId(note.note_id);
     try {
-      const result = await batchDeleteNotes([note.note_id], deletePlatform);
+      if (!selectedAccountId) return;
+      const result = await batchDeleteNotes([note.note_id], selectedAccountId);
       if (result.failed.length) {
         message.warning(`已删除 ${result.deleted} 篇，${result.failed.length} 篇失败：${result.failed[0]?.reason || ""}`);
       } else {
-        message.success(deletePlatform ? "已删除本地数据与平台笔记" : "已删除本地笔记数据");
+        message.success("已删除平台笔记");
       }
       setSelected((cur) => ({ ...cur, [category]: new Set() }));
       setPanels((cur) => ({ ...cur, [category]: emptyPanel() }));
@@ -905,26 +905,15 @@ export function XhsDatacenterPage() {
           trigger="click"
           placement="left"
           content={
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              <Button
-                type="link"
-                size="small"
-                danger
-                loading={deletingNoteId === record.note_id}
-                onClick={() => void deleteNote(record, category, false)}
-              >
-                删除本地笔记数据
-              </Button>
-              <Button
-                type="link"
-                size="small"
-                danger
-                loading={deletingNoteId === record.note_id}
-                onClick={() => void deleteNote(record, category, true)}
-              >
-                删除本地 + 平台笔记
-              </Button>
-            </div>
+            <Button
+              type="link"
+              size="small"
+              danger
+              loading={deletingNoteId === record.note_id}
+              onClick={() => void deleteNote(record, category)}
+            >
+              删除平台笔记
+            </Button>
           }
         >
           <Button
@@ -1198,7 +1187,6 @@ export function XhsDatacenterPage() {
                 disabled={selected[activeTab].size === 0}
                 onClick={() => {
                   setBatchDeleteCategory(activeTab);
-                  setBatchDeleteMode("local");
                   setBatchDeleteOpen(true);
                 }}
               >
@@ -1314,14 +1302,9 @@ export function XhsDatacenterPage() {
         okText="删除"
         okButtonProps={{ danger: true }}
       >
-        <Paragraph>已选 {selected[batchDeleteCategory].size} 篇笔记，选择删除方式：</Paragraph>
-        <Radio.Group
-          value={batchDeleteMode}
-          onChange={(e) => setBatchDeleteMode(e.target.value)}
-        >
-          <Radio value="local">只删本地</Radio>
-          <Radio value="platform">删本地 + 平台</Radio>
-        </Radio.Group>
+        <Paragraph>
+          已选 {selected[batchDeleteCategory].size} 篇笔记，将直接在小红书平台删除（不再操作本地笔记表）。
+        </Paragraph>
       </Modal>
 
       {/* 无流量清理弹窗：指标区间筛选 + 候选列表（选指定/全选）。 */}
@@ -1335,7 +1318,7 @@ export function XhsDatacenterPage() {
           <div style={{ display: "flex", justifyContent: "space-between" }}>
             <Popconfirm
               title={`确认清理全部候选笔记？`}
-              description={`将清理当前筛选条件下的全部 ${cleanupTotal} 篇笔记（含平台笔记 + 本地软删除）。`}
+              description={`将清理当前筛选条件下的全部 ${cleanupTotal} 篇笔记（仅删除小红书平台数据，不动本地笔记表）。`}
               okText="确认清理"
               cancelText="取消"
               okButtonProps={{ danger: true }}
@@ -1575,12 +1558,12 @@ export function XhsDatacenterPage() {
         title={detailNote?.title || ""}
         loading={detailLoading}
         failure={detailError}
-        mediaUrls={hydrated?.asset_urls ?? []}
+        mediaUrls={hydrated?.image_urls ?? []}
         videoUrl={hydrated?.video_url ?? ""}
         mediaNamePrefix={detailNote?.note_id}
       >
-        {hydrated && hydrated.hydrate_status !== "ok" && (
-          <Paragraph type="secondary">详情暂不可用（{hydrated.hydrate_status}）。</Paragraph>
+        {hydrated && hydrated.status !== "ok" && (
+          <Paragraph type="secondary">详情暂不可用（{hydrated.status}）。</Paragraph>
         )}
         {hydrated?.content ? (
           <Paragraph>{hydrated.content}</Paragraph>
@@ -1600,8 +1583,8 @@ export function XhsDatacenterPage() {
         )}
         {hydrated?.topics && hydrated.topics.length > 0 && (
           <div style={{ marginTop: 8 }}>
-            {hydrated.topics.map((t) => (
-              <span key={t.id} style={{ marginRight: 8, color: p.text }}>#{t.name}</span>
+            {hydrated.topics.map((name) => (
+              <span key={name} style={{ marginRight: 8, color: p.text }}>#{name}</span>
             ))}
           </div>
         )}

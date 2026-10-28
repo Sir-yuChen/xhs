@@ -12,7 +12,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user, get_owned_active_account
-from backend.app.models import AiDraft, DraftAsset, Note, NoteAsset, PublishAsset, PublishJob, User
+from backend.app.models import ASSET_DRAFT, ASSET_PUBLISH, AiDraft, Note, PublishAsset, PublishAsset, PublishJob, User
 from backend.app.schemas.common import paginated
 
 router = APIRouter(prefix="/drafts", tags=["drafts"])
@@ -162,11 +162,12 @@ def create_draft(
 
     if source_note:
         source_assets = db.scalars(
-            select(NoteAsset).where(NoteAsset.note_id == source_note.id).order_by(NoteAsset.sort_order.asc(), NoteAsset.id.asc())
+            select(PublishAsset).where(PublishAsset.parent_id == source_note.id).order_by(PublishAsset.sort_order.asc(), PublishAsset.id.asc())
         ).all()
         for idx, na in enumerate(source_assets):
-            db.add(DraftAsset(
-                draft_id=draft.id,
+            db.add(PublishAsset(
+                row_type=ASSET_DRAFT,
+                parent_id=draft.id,
                 asset_type=na.asset_type,
                 url=na.url,
                 local_path=na.local_path,
@@ -223,7 +224,7 @@ def send_draft_to_publish(
     db.flush()
 
     draft_assets = db.scalars(
-        select(DraftAsset).where(DraftAsset.draft_id == draft.id).order_by(DraftAsset.sort_order.asc(), DraftAsset.id.asc())
+        select(PublishAsset).where(PublishAsset.row_type == ASSET_DRAFT, PublishAsset.parent_id == draft.id).order_by(PublishAsset.sort_order.asc(), PublishAsset.id.asc())
     ).all()
     for da in draft_assets:
         if da.local_path:
@@ -231,9 +232,10 @@ def send_draft_to_publish(
         else:
             file_path = da.url
         pa = PublishAsset(
-            publish_job_id=job.id,
+            row_type=ASSET_PUBLISH,
+            parent_id=job.id,
             asset_type=da.asset_type,
-            file_path=file_path,
+            local_path=file_path,
             upload_status="pending",
         )
         db.add(pa)
@@ -276,8 +278,8 @@ def delete_draft(
     draft = db.get(AiDraft, draft_id)
     if draft is None or draft.user_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found")
-    db.execute(select(DraftAsset).where(DraftAsset.draft_id == draft.id))
-    for asset in db.scalars(select(DraftAsset).where(DraftAsset.draft_id == draft.id)).all():
+    db.execute(select(PublishAsset).where(PublishAsset.row_type == ASSET_DRAFT, PublishAsset.parent_id == draft.id))
+    for asset in db.scalars(select(PublishAsset).where(PublishAsset.row_type == ASSET_DRAFT, PublishAsset.parent_id == draft.id)).all():
         db.delete(asset)
     db.delete(draft)
     db.commit()
@@ -288,11 +290,11 @@ def delete_draft(
 # Draft assets
 # ---------------------------------------------------------------------------
 
-def _serialize_draft_asset(asset: DraftAsset) -> dict:
+def _serialize_draft_asset(asset: PublishAsset) -> dict:
     display_url = f"/api/files/media/{asset.local_path}" if asset.local_path else asset.url
     return {
         "id": asset.id,
-        "draft_id": asset.draft_id,
+        "draft_id": asset.parent_id,
         "asset_type": asset.asset_type,
         "url": display_url,
         "local_path": asset.local_path,
@@ -320,7 +322,7 @@ def get_draft_assets(
     if draft is None or draft.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Draft not found")
     assets = db.scalars(
-        select(DraftAsset).where(DraftAsset.draft_id == draft.id).order_by(DraftAsset.sort_order.asc(), DraftAsset.id.asc())
+        select(PublishAsset).where(PublishAsset.row_type == ASSET_DRAFT, PublishAsset.parent_id == draft.id).order_by(PublishAsset.sort_order.asc(), PublishAsset.id.asc())
     ).all()
     return {"items": [_serialize_draft_asset(a) for a in assets]}
 
@@ -335,9 +337,14 @@ def add_draft_asset(
     draft = db.get(AiDraft, draft_id)
     if draft is None or draft.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Draft not found")
-    max_order = db.scalar(select(func.max(DraftAsset.sort_order)).where(DraftAsset.draft_id == draft.id)) or 0
-    asset = DraftAsset(
-        draft_id=draft.id,
+    max_order = db.scalar(
+        select(func.max(PublishAsset.sort_order)).where(
+            PublishAsset.row_type == ASSET_DRAFT, PublishAsset.parent_id == draft.id
+        )
+    ) or 0
+    asset = PublishAsset(
+        row_type=ASSET_DRAFT,
+        parent_id=draft.id,
         asset_type=payload.asset_type,
         url=payload.url,
         local_path=payload.local_path,
@@ -359,7 +366,7 @@ def delete_draft_asset(
     draft = db.get(AiDraft, draft_id)
     if draft is None or draft.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Draft not found")
-    asset = db.scalars(select(DraftAsset).where(DraftAsset.id == asset_id, DraftAsset.draft_id == draft.id)).first()
+    asset = db.scalars(select(PublishAsset).where(PublishAsset.id == asset_id, PublishAsset.parent_id == draft.id)).first()
     if asset is None:
         raise HTTPException(status_code=404, detail="Asset not found")
     db.delete(asset)
@@ -383,7 +390,7 @@ def update_draft_asset(
     draft = db.get(AiDraft, draft_id)
     if draft is None or draft.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Draft not found")
-    asset = db.scalars(select(DraftAsset).where(DraftAsset.id == asset_id, DraftAsset.draft_id == draft.id)).first()
+    asset = db.scalars(select(PublishAsset).where(PublishAsset.id == asset_id, PublishAsset.parent_id == draft.id)).first()
     if asset is None:
         raise HTTPException(status_code=404, detail="Asset not found")
     if payload.url is not None:
@@ -405,7 +412,7 @@ def reorder_draft_assets(
     draft = db.get(AiDraft, draft_id)
     if draft is None or draft.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Draft not found")
-    assets = db.scalars(select(DraftAsset).where(DraftAsset.draft_id == draft.id)).all()
+    assets = db.scalars(select(PublishAsset).where(PublishAsset.row_type == ASSET_DRAFT, PublishAsset.parent_id == draft.id)).all()
     asset_map = {a.id: a for a in assets}
     for idx, aid in enumerate(payload.asset_ids):
         if aid in asset_map:
