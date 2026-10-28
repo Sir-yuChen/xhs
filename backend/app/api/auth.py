@@ -12,6 +12,7 @@ from backend.app.services import business_log_service as business_log  # noqa: F
 from backend.app.core.deps import get_current_user
 from backend.app.core.roles import normalize_role
 from backend.app.core.security import create_access_token, create_refresh_token, decode_token, hash_password, verify_password
+from backend.app.core.time import shanghai_now
 from backend.app.models import User
 
 logger = logging.getLogger(__name__)
@@ -448,7 +449,11 @@ def _clear_login_failures(username: str) -> None:
 
 
 @router.post("/login")
-def login(credentials: AuthCredentials, db: Session = Depends(get_db)):
+def login(
+    credentials: AuthCredentials,
+    request: Request,
+    db: Session = Depends(get_db),
+):
     import time as _time
 
     username = credentials.username.strip()
@@ -495,6 +500,20 @@ def login(credentials: AuthCredentials, db: Session = Depends(get_db)):
 
     # 成功 ⇒ 清掉该标识的失败计数（不让「之前失败过」影响下次）
     _clear_login_failures(identifier)
+    #: 记录最后登录时间与来源 IP。
+    #: ⚠️ 2026-10-28 前这两列**只有模型与页面、从无写入** —— 用户列表「最后登录」
+    #: 恒显示「从未登录」。写失败只告警：它是审计信息，不该让登录本身失败。
+    try:
+        user.last_login_at = shanghai_now()
+        user.last_login_ip = (
+            (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+            or (request.client.host if request.client else "")
+            or ""
+        )
+        db.commit()
+    except Exception as exc:  # noqa: BLE001 - 审计写失败不阻断登录
+        db.rollback()
+        logger.warning("login: 写 last_login_at 失败（登录不受影响）：%s", exc)
     business_log.record(
         "auth.login",
         action="login",
