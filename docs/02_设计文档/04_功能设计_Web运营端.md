@@ -9,28 +9,40 @@
 
 ## 1. 导航结构
 
-侧边栏分为「主导航」与「底部导航」两组（`frontend/src/components/layout/app-shell.tsx:54-74`）。
+侧边栏**全部由后端下发**（`GET /api/system/menus/mine?workspace=<ws>`，种子
+`config/initial_data/menus.seed.json` 由 `scripts/generate_menu_seed.py` 从
+`core/perms_registry.py` 派生）。改菜单 = 改登记表 + 重跑生成器，**不在前端硬编码**。
+
+小红书工作区当前形态（一级项 + 两个目录）：
 
 ```
-┌─ 主导航（12 项）────────────────────┐
+┌─ 小红书工作区 ──────────────────────┐
 │ 总览          /platforms/xhs/dashboard
-│ 账号矩阵      /platforms/xhs/accounts
-│ 笔记发现      /platforms/xhs/discovery
-│ 我的笔记      /platforms/xhs/my-notes   ← 2026-09-18 新增
-│ 数据抓取      /platforms/xhs/crawler
-│ 关键词组      /platforms/xhs/keywords
-│ 数据洞察      /platforms/xhs/analytics
-│ 竞品监控      /platforms/xhs/benchmarks
-│ 内容库        /platforms/xhs/library
-│ 笔记工坊      /platforms/xhs/note-workshop   ← 2026-09-25 合并图片 / 视频 / 草稿三坊（§2.22）
-│ 发布中心      /platforms/xhs/publish
-│ 自动运营      /platforms/xhs/auto-ops
-├─ 底部导航（3 项）───────────────────┤
-│ 任务中心      /tasks
-│ 模型配置      /models
+│ 账号管理      /platforms/xhs/accounts      ← 账号接入 / 登录态 / 同步
+│ 内容线 ▾
+│   笔记发现    /platforms/xhs/discovery
+│   我的笔记    /platforms/xhs/my-notes
+│   内容库      /platforms/xhs/library
+│   笔记工坊    /platforms/xhs/note-workshop
+│ 店铺线 ▾
+│   商品列表    /platforms/xhs/shop-items
+│   违规管理    /platforms/xhs/violation-manage
+│   图片空间    /platforms/xhs/picture-space
+│   订单管理    /platforms/xhs/orders
+│   数据中心    /platforms/xhs/datacenter
+├─ 侧栏底部 ─────────────────────────┤
+│ 队列记录      /task-records
+│ 任务中心      /platforms/xhs/tasks
 │ 设置          /settings
 └────────────────────────────────────┘
 ```
+
+> **「平台」目录已退场**（用户口径「把平台菜单移除，把账号矩阵改为账号管理，
+> 放小红书内一级类目」）：账号页从目录里提到工作区一级、改名「账号管理」，
+> 其下只保留按钮（编辑 / 删除 / 导入 Cookie / 重新登录 / 探活）与「登录记录」
+> 那一行 C 菜单。原目录下另两页（监控中心 / 自动运营）早已随页面退场删除。
+> 存量库由迁移 `n1e2x3t4m5u6` 改，新库由种子直接建对。
+
 
 > ⚠️ **2026-09-25 §36 合并**：原「图片工坊 / 视频工坊 / 草稿工坊」三个菜单项与三条路由
 > 合并为**「笔记工坊」一项一页**（页内 Tabs 隔离三个工坊）。旧路由
@@ -78,7 +90,7 @@
 | 数据 | `fetchXhsOverview` → `GET /xhs/analytics/overview` |
 | 容错 | catch 时使用全 0 / 空数组的**安全零值兜底**（`xhs-dashboard.tsx:19-28`） |
 
-### 2.4 `/platforms/xhs/accounts` 账号矩阵
+### 2.4 `/platforms/xhs/accounts` 账号管理
 
 | 项 | 内容 |
 |---|---|
@@ -459,7 +471,7 @@ PC 链路登录成功后可顺带绑定同名 Creator 账号。这个选项的�
   │
   ├─ 前置校验（v1.34 / §33.4）：**已绑店铺 ∧ 千帆令牌不是「确定不可用」**才继续
   │     ├─ 不通过 → **一个 Alert**：「请在账号信息卡片中扫码登录千帆后再来查看。」
-  │     │     + 「去『账号矩阵』扫码登录千帆」/「绑定千帆（粘贴 Cookie）」
+  │     │     + 「去『账号管理』扫码登录千帆」/「绑定千帆（粘贴 Cookie）」
   │     │     ⇒ **一个请求都不发**，搜索区与台账都不渲染（旧的三步 Cookie 长说明已移除）
   │     └─ 通过   → 状态提示行（选中「本地无法区分的审核态」时一行安静说明）
   ├─ 搜索区（**单层 Card**，`Form layout="inline"`：label 与控件同行、自动换行；**v1.11 / §33.13**）

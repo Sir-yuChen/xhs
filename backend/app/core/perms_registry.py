@@ -152,7 +152,7 @@ _A = WORKSPACE_AI
 _HOST_WORKSHOP = "/platforms/xhs/note-workshop"
 _HOST_SHOP_ITEMS = "/platforms/xhs/shop-items"
 _HOST_LIBRARY = "/platforms/xhs/library"
-_HOST_GATEWAY = "/llm-gateway/providers"
+_HOST_GATEWAY = "/llm-gateway/gateways"
 _HOST_RECORDS = "/task-records"
 
 #: (码前缀, 动作, 中文名, 所属资源前缀) → 自动补 host_path
@@ -269,7 +269,7 @@ BUSINESS_PERMS: tuple[PermSpec, ...] = (
     #: 前端 `deleteGatewayConfig` 已删、页面无判权点 ⇒ 留码就是空壳（若依纪律一）。
     *_f("ai:gateway", "create/edit/test/syncModels/enableModel",
         "新建服务商/编辑服务商/连通性测试/同步模型/启用模型",
-        "/llm-gateway/providers", _A),
+        "/llm-gateway/gateways", _A),
     # 模型配置 4
     *_f("ai:model", "create/edit/delete/setBusiness",
         "新建模型/编辑模型/删除模型/设置业务点",
@@ -289,7 +289,7 @@ BUSINESS_PERMS: tuple[PermSpec, ...] = (
 PAGE_VIEW_PERMS: tuple[PermSpec, ...] = (
     # 小红书工作区 16
     PermSpec("xhs:dashboard:view", "总览", "C", "/platforms/xhs/dashboard", _X, _X),
-    PermSpec("xhs:account:view", "账号矩阵", "C", "/platforms/xhs/accounts", _X, _X),
+    PermSpec("xhs:account:view", "账号管理", "C", "/platforms/xhs/accounts", _X, _X),
     PermSpec("xhs:crawl:view", "笔记发现", "C", "/platforms/xhs/discovery", _X, _X),
     PermSpec("xhs:note:view", "我的笔记", "C", "/platforms/xhs/my-notes", _X, _X),
     PermSpec("xhs:library:view", "内容库", "C", "/platforms/xhs/library", _X, _X),
@@ -310,8 +310,11 @@ PAGE_VIEW_PERMS: tuple[PermSpec, ...] = (
     #: 配置写端点本身是 `EXEMPT_SELF`（每用户自己的配置不许挂码），
     #: 工作区级那一层用 `has_perm` 在函数内判 —— 属「有判权点但不占路由」。
     PermSpec("xhs:settings:edit", "工作区配置编辑", "F", "/settings", _X, _X),
-    PermSpec("ai:usage:view", "用量看板", "C", "/usage-dashboard", _A, _A),
-    PermSpec("ai:gateway:view", "服务商", "C", "/llm-gateway/providers", _A, _A),
+    #: `path` 必须与前端真实路由一致：网关页是 `/llm-gateway` 的子路由，
+    #: 由 `LlmGatewayPage` 内部渲染 —— 用量看板 `/llm-gateway/usage`、
+    #: 服务商 `/llm-gateway/gateways`。写错 = 侧栏死链（点进去没有匹配路由）。
+    PermSpec("ai:usage:view", "用量看板", "C", "/llm-gateway/usage", _A, _A),
+    PermSpec("ai:gateway:view", "服务商", "C", "/llm-gateway/gateways", _A, _A),
     PermSpec("ai:model:view", "模型配置", "C", "/models", _A, _A),
     # 任务中心 / 队列记录 / 个人资料 3
     PermSpec("xhs:record:view", "队列记录", "C", "/task-records", _X, _X),

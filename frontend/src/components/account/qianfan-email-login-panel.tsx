@@ -101,7 +101,7 @@ export function QianfanEmailLoginPanel({
   if (done) {
     return (
       <Text style={{ color: "#52c41a", fontSize: 13 }}>
-        {renewing ? "千帆令牌已更新，其它平台未改动。" : "千帆账号已加入账号矩阵。"}
+        {renewing ? "千帆令牌已更新，其它平台未改动。" : "千帆账号已加入账号管理。"}
       </Text>
     );
   }

@@ -731,7 +731,7 @@ def _ark_adapter_for(db: Session, account: PlatformAccount, factory: Any) -> Any
             detail={
                 "code": "ARK_SESSION_REQUIRED",
                 "message": "该账号没有可用的千帆（ark）登录态，无法执行该操作。"
-                "先在账号矩阵导入其千帆登录态。",
+                "先在账号管理导入其千帆登录态。",
             },
         )
     return factory(cookies)

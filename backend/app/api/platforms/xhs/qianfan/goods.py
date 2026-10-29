@@ -204,7 +204,7 @@ def bind_shop_removed():
     原 `POST /qianfan/bind` 校验 Cookie 可用 → 建店铺实体 → 写 1:1 关系 → 存凭据。
     关系（`shop_id_fk`）与店铺实体一起退场后，**没有「绑定」这个动作了**：
     千帆能力现在完全由「本账号有没有可用的 `ark` 会话」决定 —— 用户要开通，就在
-    账号矩阵里给该账号**导入千帆（ark）登录态**，那是凭据操作。
+    账号管理里给该账号**导入千帆（ark）登录态**，那是凭据操作。
 
     `include_in_schema=False` + 显式 `410`：端点曾经存在但已不再是能力，所以
     ① 不再进 OpenAPI（后端端点计数只算真实能力）；② 留着老的 `POST /bind` 路径
@@ -215,7 +215,7 @@ def bind_shop_removed():
         detail={
             "code": "QIANFAN_BINDING_REMOVED",
             "message": "「绑定千帆店铺」已随店铺实体一并退场（ADR-021）。"
-                       "千帆能力现在由该账号自己的 ark 登录态决定，请在账号矩阵导入其千帆登录态。",
+                       "千帆能力现在由该账号自己的 ark 登录态决定，请在账号管理导入其千帆登录态。",
         },
     )
 
@@ -241,7 +241,7 @@ def check_shop_health(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={
                 "code": "ARK_SESSION_REQUIRED",
-                "message": "该账号没有可用的千帆（ark）登录态，先在账号矩阵导入其千帆登录态再巡检。",
+                "message": "该账号没有可用的千帆（ark）登录态，先在账号管理导入其千帆登录态再巡检。",
             },
         )
 
@@ -331,7 +331,7 @@ def unbind_shop_removed():
     """**已退场**（ADR-021 / 设计 18，2026-09-30）。
 
     原动作是「清 `shop_id_fk` + 删本账号的商品映射 + 删店铺行」。关系与店铺实体
-    都不在了 ⇒ 无「解绑」对象。停用某账号的千帆能力 = 在账号矩阵
+    都不在了 ⇒ 无「解绑」对象。停用某账号的千帆能力 = 在账号管理
     **移除该账号的 ark 登录态**（凭据操作）。
 
     与 `POST /bind` 同样保留显式 `410`（见其 docstring），不进 OpenAPI。
@@ -341,7 +341,7 @@ def unbind_shop_removed():
         detail={
             "code": "QIANFAN_BINDING_REMOVED",
             "message": "「解绑千帆店铺」已随店铺实体一并退场（ADR-021）。"
-                       "要停用千帆能力，请在账号矩阵移除该账号的千帆登录态。",
+                       "要停用千帆能力，请在账号管理移除该账号的千帆登录态。",
         },
     )
 
@@ -1990,7 +1990,7 @@ def shop_items_operate(
             detail={
                 "code": "ARK_SESSION_REQUIRED",
                 "message": "该账号没有可用的千帆（ark）登录态，无法执行商品操作。"
-                           "先在账号矩阵导入其千帆登录态后再试。",
+                           "先在账号管理导入其千帆登录态后再试。",
             },
         )
 

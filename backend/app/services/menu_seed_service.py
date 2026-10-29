@@ -5,7 +5,7 @@
 | 种子 | 行数 | 来源 | 判重键 |
 |---|---|---|---|
 | `roles` | 2（`admin` / `user`） | 本文件 `ROLE_SEEDS` | `code` |
-| `menus` | 174（M 12 / C 29 / F 133） | `config/initial_data/menus.seed.json`（**生成物**） | `perms` 非空按 `perms`；`path` 非空按 `path`；两者都空（M 行）按 `(parent_id, name)` |
+| `menus` | 160（M 10 / C 27 / F 123） | `config/initial_data/menus.seed.json`（**生成物**） | 按 `(path, perms)`（C 行）→ `path` → `perms` → `(parent_id, name)`（M 行） |
 | `dict_types` / `dict_items` | 12 组 / 57 项 | `config/initial_data/dict_seed.json` | `code` / `(type_id, value)` |
 | `role_menus` | admin = 全量；user = 只读集合 | 由前两者派生 | `(role_id, menu_id)` |
 | `users` | 1（`admin` / `admin123`） | 本文件 `ADMIN_SEED` | 仅当**系统中没有任何可用 admin** |
@@ -160,25 +160,20 @@ def seed_roles(db: Session) -> list[Role]:
 # 二、菜单
 # --------------------------------------------------------------------------- #
 def _identity_of(row: Menu) -> tuple:
-    """菜单行的判重键。
+    """菜单行的判重键（按「这一行是哪一页 **且** 要哪个码」判）。
 
-    ⚠️ **2026-10-24 修订：`path` 优先于 `perms`**（原来反了）。
+    | 行 | 键 | 理由 |
+    |---|---|---|
+    | C 行（有 path + perms） | `(path, perms)` | 同一个 path 可以有多条 C 行（账号页的「登录记录」`xhs:login:view` 与账号页本体 `xhs:account:view` 同 path）。只按 path 判会让第二条**永远跳过不播** ⇒ 新装库缺「登录记录」入口 |
+    | C 行（只有 path，无码） | `path` | 少数展示页没有查看码 |
+    | F 行（无 path、有 perms） | `perms` | 按钮没有 path，只有码 |
+    | M 行（两者都空） | `(parent_id, name)` | 目录没有码也没有路由 |
 
-    原顺序（`perms` 优先）的理由是「F 行没有 path，只能按 perms 判」。但那个理由
-    只说明 **F 行**需要按 perms 判，不能推出「C 行也要先看 perms」。反例是真实存在的：
-    **页内页签**（`/platforms/xhs/note-workshop?tab=images` 等 6 行）与宿主
-    `/platforms/xhs/note-workshop` **共用同一个查看码** `xhs:workshop:view`
-    （页签是同一页面的不同视图，不该各自要一个码）—— 按 perms 判重会把 6 个页签
-    全当成宿主的重复而**跳过不播**（实测：种子 179 行，库里只落 173 行，侧栏丢掉
-    图片/视频/草稿工坊等 6 个入口，由守卫 `test_three_workshops_merge_into_one_page_with_tabs` 抓到）。
-
-    新顺序：
-    1. **C 行有 path** ⇒ 按 path（path 有非空部分唯一索引，且它是「这一行是哪一页」的唯一标识）；
-    2. F 行（无 path、有 perms）⇒ 按 perms；
-    3. M 行（两者都空）⇒ 按 `(parent_id, name)`。
-
-    副作用不变：改过名字的 M 行升级后会再种一行（M 行只有 11 条，改名远比「菜单凭空消失」少见）。
+    ⚠️ 不能把 C 行改成**只按 perms**：页内页签与宿主页共用同一个码
+    （`xhs:workshop:view`），按 perms 判会把页签全当成宿主的重复。
     """
+    if row.path and row.perms:
+        return ("path_perms", row.path, row.perms)
     if row.path:
         return ("path", row.path)
     if row.perms:
@@ -218,12 +213,14 @@ def seed_menus(db: Session) -> list[Menu]:
     # 1) 现有行建索引（三种判重键）
     by_perms: dict[str, Menu] = {}
     by_path: dict[str, Menu] = {}
+    by_path_perms: dict[tuple[str, str], Menu] = {}
     by_name: dict[tuple[int, str], Menu] = {}
     for row in db.scalars(select(Menu)).all():
         if row.perms:
             by_perms[row.perms] = row
         if row.path:
             by_path[row.path] = row
+            by_path_perms[(row.path, row.perms or "")] = row
         by_name[(row.parent_id, row.name)] = row
 
     created: list[Menu] = []
@@ -330,15 +327,15 @@ def seed_menus(db: Session) -> list[Menu]:
                 continue
 
             candidate: Menu | None = None
-            #: ⚠️ **判重顺序必须与 `_identity_of` 一致：path 优先于 perms**
-            #: （2026-10-24）。这里曾是独立的一份实现，改了 `_identity_of` 却没改它
-            #: ⇒ 页签（与宿主共用 `xhs:workshop:view`）仍被当成宿主的重复而跳过。
-            #: 同一件事两份实现必然漂移（DEF-044）—— 两处都按 path → perms → name。
-            if path and path in by_path:
-                candidate = by_path[path]
-            elif perms and perms in by_perms:
-                candidate = by_perms[perms]
-            elif not perms and not path and (parent_real, name) in by_name:
+            #: ⚠️ **判重顺序必须与 `_identity_of` 逐项一致**（同一件事两份实现必然漂移，
+            #: 改了那边没改这边就会「静默漏播」）。
+            if path and perms:
+                candidate = by_path_perms.get((path, perms))
+            elif path:
+                candidate = by_path.get(path)
+            elif perms:
+                candidate = by_perms.get(perms)
+            elif (parent_real, name) in by_name:
                 candidate = by_name[(parent_real, name)]
 
             if candidate is not None:
@@ -368,6 +365,7 @@ def seed_menus(db: Session) -> list[Menu]:
                 by_perms[row.perms] = row
             if row.path:
                 by_path[row.path] = row
+                by_path_perms[(row.path, row.perms or "")] = row
             by_name[(row.parent_id, row.name)] = row
             progressed = True
         if not progressed:

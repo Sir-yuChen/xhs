@@ -58,7 +58,7 @@ export function AddAccountDrawer({ open, onClose, onBound }: AddAccountDrawerPro
   const { message } = App.useApp();
 
   function handleConfirmed(account: PlatformAccount) {
-    const actionText = account.action === "updated" ? "已更新到账号矩阵" : "已加入账号矩阵";
+    const actionText = account.action === "updated" ? "已更新到账号管理" : "已加入账号管理";
     message.success(`${account.nickname || "账号"} ${actionText}`);
     onBound();
     // 绑定成功即收工：**弹窗连同蒙版一起关掉**（2026-09-26 用户口径

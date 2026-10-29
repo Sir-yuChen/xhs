@@ -45,7 +45,7 @@ class ItemDraftParseRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    platform_account_id: int = Field(ge=1, description="账号矩阵里的账号 id（归属校验用）")
+    platform_account_id: int = Field(ge=1, description="账号管理里的账号 id（归属校验用）")
     package_path: str = Field(
         min_length=1, max_length=512, description="商品数据包目录的绝对路径"
     )
@@ -262,7 +262,7 @@ def create_item_draft(
             detail={
                 "code": "DRAFT_ARK_REQUIRED",
                 "message": "该账号还没有导入千帆登录态，无法保存草稿。"
-                           "请先到「账号矩阵」为该账号导入千帆登录态。",
+                           "请先到「账号管理」为该账号导入千帆登录态。",
             },
         )
 
@@ -635,7 +635,7 @@ def publish_item_to_online(
             detail={
                 "code": "PUBLISH_ARK_REQUIRED",
                 "message": "该账号还没有导入千帆登录态，无法发布商品。"
-                           "请先到「账号矩阵」为该账号导入千帆登录态。",
+                           "请先到「账号管理」为该账号导入千帆登录态。",
             },
         )
     seller_id = str(account.seller_id or "")

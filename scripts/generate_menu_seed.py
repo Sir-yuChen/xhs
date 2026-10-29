@@ -20,9 +20,9 @@
 
 | 层 | 行数 | 来源 |
 |---|---|---|
-| M 目录 | 12（3 个工作区根 + 4 个目录 + 5 个停用的占位平台） | 工作区/目录由本文件的 `_WORKSPACE_TREE`（**人工维护**：它是信息架构，不是权限码）；占位平台由 `_PLACEHOLDER_PLATFORMS` |
-| C 菜单 | 29（登记表 28 条 C 行 + 共用 `xhs:insights:view` 的商品洞察页） | `perms_registry.PERMS` 派生 |
-| F 按钮 | 133 | `perms_registry.PERMS` 派生；挂在自己所属 C 行下（借宿页按 `host_path`） |
+| M 目录 | 10（3 个工作区根 + 2 个目录 + 5 个停用的占位平台） | 工作区/目录由本文件的 `_WORKSPACE_TREE`（**人工维护**：它是信息架构，不是权限码）；占位平台由 `_PLACEHOLDER_PLATFORMS` |
+| C 菜单 | 26 | `perms_registry.PERMS` 派生 |
+| F 按钮 | 118 | `perms_registry.PERMS` 派生；挂在自己所属 C 行下（借宿页按 `host_path`） |
 
 ⚠️ **`/settings`、`/tasks`、`/task-records` 三页不属于任何目录**（它们在前端是
 侧栏底部 / 顶级入口），`parent_id` 直接指向 workpace 根 —— 与 `app-shell.tsx`
@@ -73,11 +73,8 @@ PLACEHOLDER_PLATFORMS: tuple[tuple[str, str], ...] = (
 #: 键 = `(workspace, 目录名)`，值 = 该目录下 C 行的 path（按**侧栏顺序**）。
 _WORKSPACE_TREE: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
     # (workspace, M 名, 图标, 其下 C 行 path（有序）)
-    ("xhs", "平台", "safety-certificate", (
-        "/platforms/xhs/accounts",
-        "/platforms/xhs/monitoring",
-        "/platforms/xhs/auto-ops",
-    )),
+    #: 小红书只有两个目录：内容线 / 店铺线。账号页是**一级项**（见 `_TOP_LEVEL_C`），
+    #: 不归属任何目录 —— 它管的是账号接入与登录态，不属于内容或店铺任一条业务线。
     ("xhs", "内容线", "tags", (
         "/platforms/xhs/discovery",
         "/platforms/xhs/my-notes",
@@ -100,7 +97,7 @@ _WORKSPACE_TREE: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
         "/system/menus",
         "/system/dicts",
         "/system/settings",
-        #: 2026-10-25 设计 69：系统级任务中心（系统任务 / 工作区任务 / 执行日志三页签）。
+        #: 系统级任务中心（系统任务 / 工作区任务 / 执行日志三页签）。
         #: 与工作区任务页 `/platforms/xhs/tasks` 是两个页面、两套码 —— 别合并。
         "/system/scheduler",
         "/system/logs",
@@ -110,24 +107,20 @@ _WORKSPACE_TREE: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
 #: 不属于任何目录的 C 行（前端侧栏底部 / 顶级入口）
 _TOP_LEVEL_C: tuple[str, ...] = (
     "/platforms/xhs/dashboard",
-    #: 2026-10-25 设计 69 任务中心两级重构：工作区任务页路径由 `/tasks` 迁到
-    #: `/platforms/xhs/tasks`（旧 `/tasks` 重定向到系统管理的任务中心）。
-    #: ⚠️ 这里必须跟着改 —— 生成器按 `PermSpec.parent_path` 反查 C 行，
-    #: 路径对不上会报「/tasks 在 perms_registry 里没有 C 行」并整脚本失败。
+    #: 账号页是工作区一级项，排在「总览」之后（`sort_order` -10 / 0，见 `_PAGE_META`，
+    #: 不依赖本元组的插入顺序）。
+    "/platforms/xhs/accounts",
+    #: ⚠️ 这里的 path 必须与 `perms_registry` 里该页 C 行的 `parent_path` 逐字相同 ——
+    #: 生成器按它反查 C 行，对不上整脚本失败。
     "/platforms/xhs/tasks",
     "/task-records",
-    "/usage-dashboard",
-    "/llm-gateway/providers",
+    "/llm-gateway/usage",
+    "/llm-gateway/gateways",
     "/llm-gateway/alerts",
     "/models",
     "/settings",
-    #: 个人资料（v1.1.0 新增，2026-10-24 梳理时发现漏登记）：
-    #: 页面 `/profile` 早就实现了（改自己的密码 / 邮箱），但没有菜单入口 ⇒
-    #: 用户只能手敲 URL。侧栏底部与「设置」并列放。
-    #:
-    #: ⚠️ 403 页**不进菜单**：它是错误页不是功能页，给错误页一个入口等于
-    #: 让用户以为那里有东西可做。由路由直接可达即可。
-    "/profile",
+    #: ⚠️ **不进菜单**的两类：403 页（错误页不是功能页）与个人资料 `/profile`
+    #: （入口在头像下拉，不占任何工作区侧栏）。
 )
 
 #: **页面展示元数据**（icon + 侧栏排序号）—— **人工维护**，不是权限信息。
@@ -135,9 +128,11 @@ _TOP_LEVEL_C: tuple[str, ...] = (
 #: 这两件事本来就是信息架构，与 `_WORKSPACE_TREE` 同类。新增页面时**必须**补一行，
 #: 否则生成器给 `icon=""` + 追加序号（不报错，但侧栏会少图标、位置可能靠后）。
 #: 少数页面的**菜单名**与登记表 `PermSpec.label` 不同：登记表名字要同时覆盖该码下
-#: 的所有页面（`xhs:insights:view` 管内容洞察 + 商品洞察），而菜单行只代表一个页面。
+#: 的所有页面，而菜单行只代表一个页面。
+#: 键是**权限码**而不是 path —— 同一个 path 可能有多条 C 行（账号页除
+#: `xhs:account:view` 外还有「登录记录」`xhs:login:view`），按 path 覆盖会连带改名。
 _MENU_NAME_OVERRIDE: dict[str, str] = {
-    "/platforms/xhs/insights/content": "内容洞察",
+    "xhs:insights:view": "内容洞察",
 }
 
 _PAGE_META: dict[str, tuple[str, int]] = {
@@ -167,6 +162,8 @@ _PAGE_META: dict[str, tuple[str, int]] = {
     "/platforms/xhs/tasks": ("appstore", 101),
     "/task-records": ("history", 102),
     "/usage-dashboard": ("fund", 103),
+    "/llm-gateway/usage": ("fund", 103),
+    "/llm-gateway/gateways": ("api", 104),
     "/llm-gateway/providers": ("api", 104),
     "/llm-gateway/alerts": ("alert", 105),
     "/models": ("robot", 106),
@@ -196,7 +193,7 @@ def _build_menus() -> list[dict]:
 
     ⚠️ 顺序不是「所有 M 在前、所有 C 在后」：种子是**深度优先**的 —— 目录 M 行
     紧跟它自己的 C/F 子树。照抄「M 全在前」会让「内容线 / 店铺线」跑到所有页面
-    之前（实测 171 行错位）。
+    之前。
     """
     rows: list[dict] = []
     root_seq: dict[str, int] = {}
@@ -232,8 +229,12 @@ def _build_menus() -> list[dict]:
     def emit_pages(page_paths, m_seq: int, dir_icon: str = "") -> None:
         """在一个 M 行下依次输出它的 C 行与各自的 F 子行。
 
-        同一 path 有多条 C 行时（`/accounts` → 账号矩阵 + 登录记录），它们**连续输出**，
-        而 F 子行挂在该 path **第一条** C 行下并紧跟其后。
+        同一 path 有多条 C 行时（账号页的本体 `xhs:account:view` + 「登录记录」
+        `xhs:login:view`），它们**连续输出**，F 子行挂在该 path **第一条** C 行下。
+
+        ⚠️ **只有第一条 C 行写 `path`**：`uq_menus_path` 是「非空 path 唯一」的部分索引，
+        第二条同 path 的行落库必撞唯一键（真库现状就是「登录记录」的 path 为空）。
+        第二条靠 `(parent_id, perms)` 与父行关联，不需要自己的 path。
         """
         for path in page_paths:
             specs = c_by_path.get(path)
@@ -243,8 +244,8 @@ def _build_menus() -> list[dict]:
             first_c_seq = 0
             for spec in specs:
                 rows.append({
-                    "_seq": len(rows) + 1, "name": _MENU_NAME_OVERRIDE.get(path, spec.label), "menu_type": "C",
-                    "path": path, "perms": spec.code, "icon": page_icon,
+                    "_seq": len(rows) + 1, "name": _MENU_NAME_OVERRIDE.get(spec.code, spec.label), "menu_type": "C",
+                    "path": path if not first_c_seq else "", "perms": spec.code, "icon": page_icon,
                     "workspace": spec.workspace or _workspace_of(path),
                     "sort_order": page_sort, "is_visible": True, "status": "normal",
                     "parent_seq": m_seq,
@@ -252,7 +253,7 @@ def _build_menus() -> list[dict]:
                 if not first_c_seq:
                     first_c_seq = rows[-1]["_seq"]
                 else:
-                    #: 同 path 的第二条及以后 C 行（例：`/accounts` 的「登录记录」）
+                    #: 同 path 的第二条及以后 C 行（例：账号页的「登录记录」）
                     #: 排在该页主行之后：主行序号 + 100。
                     rows[-1]["sort_order"] = page_sort + 100
             # F 子行挂「该 path 第一条 C 行」，并且插在**所有** C 行之后
@@ -283,15 +284,34 @@ def _build_menus() -> list[dict]:
     # ④ 不属于任何目录的顶级页（侧栏底部 / 独立入口）：挂各自工作区根
     _root_icon = {code: icon for code, _n, icon in WORKSPACES}
     for _p in [p for p in _TOP_LEVEL_C if p not in emitted_f]:
-        emit_pages([_p], root_seq[_workspace_of(_p)], _root_icon.get(_workspace_of(_p), "")) 
+        _ws = _top_level_workspace_of(_p)
+        emit_pages([_p], root_seq[_ws], _root_icon.get(_ws, "")) 
     return rows
 
 
 def _workspace_of(path: str) -> str:
+    """路径所属工作区。
+
+    ⚠️ 前缀要精确到 `/`：`startswith("/ai")` 会匹配 `/ai-tax` 这类同前缀路径，
+    空路径则落到默认的 `system`（页面被挂到系统管理根下）。
+    """
     for code, _name, _icon in WORKSPACES:
-        if path.startswith(f"/{code}"):
+        if path == f"/{code}" or path.startswith(f"/{code}/"):
             return code
     return "system"
+
+
+def _top_level_workspace_of(path: str) -> str:
+    """**工作区一级页**的归属工作区（不能沿用 `_workspace_of` 的路径前缀判据）。
+
+    `/platforms/xhs/accounts` 的前缀是「平台路由段」不是工作区代码，`_workspace_of`
+    对它只能返回默认的 `system` ⇒ 账号页会被挂到系统管理根下。
+    一级页的工作区只由登记表里**该页 C 行**的 `workspace` 决定。
+    """
+    for spec in R.PERMS:
+        if spec.menu_type == "C" and spec.parent_path == path and spec.workspace:
+            return spec.workspace
+    return _workspace_of(path)
 
 
 def build() -> dict:

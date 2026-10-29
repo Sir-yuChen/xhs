@@ -201,7 +201,7 @@ def _product_dict_for_gate(
     account = db.get(PlatformAccount, int(account_id or 0))
     if account is None or int(account.user_id) != int(user_id):
         raise NoteGenerationError(
-            "生成笔记需要指定一个本账号矩阵里的平台账号（商品信息从平台实时取）。",
+            "生成笔记需要指定一个本账号管理里的平台账号（商品信息从平台实时取）。",
             code="LLM_PRODUCT_GATE_BLOCKED",
         )
     if not has_ark_session(db, account.id):

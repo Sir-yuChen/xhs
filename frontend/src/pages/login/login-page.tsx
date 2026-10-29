@@ -167,7 +167,7 @@ export function LoginPage() {
             style={{ fontSize: 15, marginBottom: 40 }}
           >
             数据发现、内容库、AI
-            改写、账号矩阵和 Creator
+            改写、账号管理和 Creator
             发布统一在一个工作区里完成。
           </Paragraph>
 
